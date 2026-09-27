@@ -12,7 +12,7 @@ use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
 use symphonia::core::codecs::registry::CodecRegistry;
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, FormatReader, Track, TrackType};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Track, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, Tag};
 use symphonia::core::units::{Duration, TimeBase};
@@ -759,6 +759,183 @@ where
 
 /// [`visit_media_audio_windows`] 提前收尾用的内部哨兵（不会外泄给调用方）。
 const WINDOWS_DONE: &str = "__hifi_windows_done__";
+
+/// 用容器的 seek 能力逐窗口取样，避开"从第 0 帧一路解到最后一个窗口"。
+///
+/// 语义与 [`visit_media_audio_windows`] 完全一致（同样的入参、同样的回调、同样
+/// 按原下标汇报），只是取数方式不同：那一个是单遍顺序解码沿途收割，本函数对每个
+/// 窗口 seek 到它附近的码流位置后只解出这一段。**窗口数远小于文件长度时**（默认
+/// 12 个 0.25 秒窗口 vs 半小时音频）这能省掉几个数量级的解码量。
+///
+/// # 为什么会判不准，以及怎么兜住
+///
+/// 有损编码只能从关键帧起解，且 seek 是 Coarse 语义（尽力落在请求点附近）。
+/// 因此 seek 后实际拿到的第一帧可能早于也可能晚于请求的窗口起点。本函数按
+/// [`symphonia::core::formats::SeekedTo::actual_ts`] 报告的**实际**时间戳对齐：
+/// 只从 ≥ 窗口起点的那一帧开始收割，一旦越过窗口终点立即停。
+///
+/// 由调用方判断"实际起点是否晚于允许的范围"来决定要不要丢弃这个窗口 —— 音频
+/// 判定宁可少看一段（走保守结论），也绝不能拿**错位的音频**冒充目标位置。
+/// 返回值的 `Vec<Option<u64>>` 就是每个窗口的实际起始帧（`None` = 没拿到），
+/// 与 `windows` 一一对应。
+///
+/// 任何一步失败（不支持 seek / seek 报错 / 解不出足够样本）时返回 `Err`，调用方
+/// 据此回落到顺序收割路径 —— 这是一次纯增量的性能优化，不引入新的失败模式。
+pub fn visit_media_audio_windows_by_seek<F>(
+    path: &Path,
+    preferred_stream: Option<usize>,
+    windows: &[(u64, usize)],
+    sample_rate_hint: u32,
+    max_decode_frames_per_window: usize,
+    on_window: &mut F,
+) -> Result<Vec<Option<u64>>, String>
+where
+    F: FnMut(usize, &[f32], u16, u32) -> Result<(), String>,
+{
+    if windows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let stride = max_decode_frames_per_window.max(1);
+
+    let mut starts: Vec<Option<u64>> = vec![None; windows.len()];
+    // 每个窗口独立一次 seek + 短解码。逐窗独立的实现复杂度远低于对所有窗口做
+    // 全局排序与规划，而窗口数本来就只有十几个。
+    for (index, (start_frame, want_frames)) in windows.iter().enumerate() {
+        if *want_frames == 0 {
+            continue;
+        }
+        let mut format = open_format(path)?;
+        let (selected_track, _) = select_audio_track(format.as_ref(), preferred_stream)?;
+        let track = selected_track.clone();
+        let params = audio_params(&track)?.clone();
+        let track_id = track.id;
+        let codec_rate = params.sample_rate.unwrap_or(sample_rate_hint).max(1);
+        // 求 seek 时间戳要用容器自己的采样率，否则请求的位置会系统性偏移。
+        let rate_for_seek = if sample_rate_hint > 0 {
+            sample_rate_hint
+        } else {
+            codec_rate
+        };
+
+        // Coarse：允许落在请求点附近。对抽样判定足够了 —— 我们随后按实际时间戳
+        // 对齐，宁可少收也不错位。
+        let Some(target_time) =
+            symphonia::core::units::Time::try_from_secs_f64(*start_frame as f64 / rate_for_seek as f64)
+        else {
+            return Err("seek target out of range".to_string());
+        };
+        let Ok(seeked) = format.seek(
+            SeekMode::Coarse,
+            SeekTo::Time {
+                time: target_time,
+                track_id: Some(track_id),
+            },
+        ) else {
+            return Err("seek not supported".to_string());
+        };
+
+        // 实际落点：容器报告落在哪一帧就按哪一帧算，绝不假设它等于请求值。
+        // `actual_ts` 是 track timebase 下的 tick，用 Symphonia 自己的换算得到秒
+        // （比手算 numer/denom 更不容易搞反），再乘采样率得到帧位。
+        let seeked_frame = {
+            let seconds = track
+                .time_base
+                .unwrap_or_default()
+                .calc_time_saturating(seeked.actual_ts)
+                .as_secs_f64();
+            if seconds > 0.0 {
+                (seconds * codec_rate as f64).round() as u64
+            } else {
+                0
+            }
+        };
+
+        let mut decoder = codec_registry()
+            .make_audio_decoder(&params, &AudioDecoderOptions::default())
+            .map_err(|e| format!("symphonia audio decoder failed: {e}"))?;
+
+        let start = *start_frame;
+        let end = start.saturating_add(*want_frames as u64);
+        let mut out: Vec<f32> = Vec::new();
+        let mut channels_seen: u16 = 0;
+        let mut rate_seen: u32 = 0;
+        // 已累积的音频覆盖多少个"自 seek 落点起算"的帧位，用于算真正的起点。
+        let mut cursor: u64 = seeked_frame;
+        let mut first_collected_frame: Option<u64> = None;
+        let mut decoded_frames = 0usize;
+
+        'pump: loop {
+            let packet = match format.next_packet() {
+                Ok(Some(packet)) => packet,
+                Ok(None) => break,
+                Err(Error::IoError(_)) => break,
+                Err(e) => return Err(format!("symphonia packet read failed: {e}")),
+            };
+            if packet.track_id != track_id {
+                continue;
+            }
+            let decoded = match decoder.decode(&packet) {
+                Ok(decoded) => decoded,
+                Err(Error::DecodeError(_)) => continue,
+                Err(Error::IoError(_)) => break,
+                Err(e) => return Err(format!("symphonia decode failed: {e}")),
+            };
+            if decoded.is_empty() {
+                continue;
+            }
+            let spec = decoded.spec();
+            let channels = spec.channels().count().max(1) as u16;
+            let rate = if rate_for_seek > 0 { rate_for_seek } else { codec_rate };
+            let mut frame_buf: Vec<f32> = Vec::new();
+            decoded.copy_to_vec_interleaved::<f32>(&mut frame_buf);
+            let ch = channels.max(1) as usize;
+            let frame_count = frame_buf.len() / ch;
+            if frame_count == 0 {
+                continue;
+            }
+            // 声道数中途变化（罕见）会让已收集缓冲的交错步长失效。
+            if channels_seen != 0 && channels_seen != channels {
+                break 'pump;
+            }
+            channels_seen = channels;
+            rate_seen = rate;
+
+            // 逐帧决定是否收集：缓冲区内帧是均匀的，直接按帧位切片。
+            for local in 0..frame_count {
+                let frame_pos = cursor;
+                if frame_pos >= end {
+                    break 'pump;
+                }
+                if frame_pos >= start {
+                    if first_collected_frame.is_none() {
+                        first_collected_frame = Some(frame_pos);
+                    }
+                    let base = local * ch;
+                    out.extend_from_slice(&frame_buf[base..base + ch]);
+                }
+                cursor += 1;
+            }
+            decoded_frames += frame_count;
+            if decoded_frames >= stride {
+                break;
+            }
+        }
+        let _ = decoder.finalize();
+
+        let Some(first) = first_collected_frame else {
+            // 一个目标帧都没收到（seek 落到窗口之后 / 文件更短）：记为没拿到。
+            continue;
+        };
+        let got_frames = out.len() / channels_seen.max(1) as usize;
+        if got_frames == 0 {
+            continue;
+        }
+        starts[index] = Some(first);
+        on_window(index, &out, channels_seen, rate_seen)?;
+    }
+
+    Ok(starts)
+}
 
 /// Extract one audio stream of a media file to a WAV file next to the source.
 ///

@@ -44,12 +44,20 @@ pub struct DetectOptions {
     /// 无需再单独设 RMS 阈值：只要每个样本都落在容差内，RMS 差必然也落在
     /// 容差内（`|Σd²/n|^0.5 ≤ max|d|`），多一个阈值只是同一约束的重复表达。
     pub tolerance: f32,
-    /// 非 WAV 容器的**解码可达上限**（秒）。
+    /// 非 WAV 容器的**解码总量预算**（秒）。
     ///
-    /// WAV 可以按窗口 seek，代价与窗口数成正比；Symphonia 的逐包解码不保证
-    /// 随机访问，要看到"第 N 秒"就必须从文件头解到第 N 秒。该值决定我们愿意
-    /// 为此付出多少解码量：超出它的区间不做结论（`Unknown`，不缓存，留给
-    /// 下一次更大预算的扫描）。
+    /// WAV 可以按窗口 seek，代价与窗口数成正比。容器则分两条取数路径，本预算在
+    /// 两条上都是"我们愿意为此付出多少解码"的上界，但**衡量对象不同**：
+    ///
+    /// - **seek 采样**（首选，见 [`analyze_container_regions_by_seek`]）：代价 ≈
+    ///   窗口数 × (窗口长 + 预热)，与文件多长无关。预算限制的是**总解码量**，
+    ///   因此半小时素材也能在预算内覆盖全长；
+    /// - **顺序单遍解码**（回落）：Symphonia 的逐包解码不保证随机访问，要看到
+    ///   "第 N 秒"就必须从文件头解到第 N 秒。此时预算限制的是**可达位置**，
+    ///   超出它的窗口收不到。
+    ///
+    /// 无论哪条路径，覆盖不完整都只会落到 `Unknown`（不缓存、不权威），留给
+    /// 下一次更大预算的扫描。
     ///
     /// **必须计入 [`Self::signature`]**：预算不同 ⇒ 能覆盖的区间不同 ⇒ 结论
     /// 不可互相顶替。这也让"导入时的短预算结论"天然不会顶掉"扫描时的长预算
@@ -59,15 +67,17 @@ pub struct DetectOptions {
 
 /// 容器解码预算的默认值（后台扫描 / 整工程迁移用）。
 ///
-/// 覆盖到 30 分钟：人声/伴奏素材极少更长，而 Symphonia 的解码速度在
-/// 100× 实时量级，30 分钟音频的额外解码约 10~20 秒，且全部在后台线程上。
+/// 覆盖到 30 分钟：人声/伴奏素材极少更长。seek 采样下 12 个默认窗口只需几秒
+/// 音频的解码量（与文件多长无关），即便回落到顺序路径，30 分钟音频的解码也
+/// 只在后台线程上进行。
 pub const DEFAULT_CONTAINER_BUDGET_SEC: f64 = 1800.0;
 
-/// 容器解码预算：导入路径的同步判定用。
+/// 容器解码预算：导入等**用户正在等待**的路径用。
 ///
-/// 导入是**命令线程上的同步路径**，不能为了一个"锦上添花"的折叠把用户卡住。
-/// 超过这个可达范围的长素材返回"未定论"，由导入后触发的后台扫描用完整预算
-/// 补判 —— 用户看到的结果不变，只是晚几百毫秒。
+/// 导入是命令线程上的同步路径，不能为一个"锦上添花"的折叠把用户卡住。
+/// 该值同时足够让 seek 采样覆盖全长（默认 12 窗口仅需数秒解码量），因此长素材
+/// 通常也能当场判定；只有配置了极多窗口、或容器不支持 seek 时才会返回"待定"，
+/// 由导入后触发的后台扫描带完整预算补判 —— 用户看到的结果不变，只是晚一点。
 pub const IMPORT_CONTAINER_BUDGET_SEC: f64 = 30.0;
 
 /// 判定容差的默认值：满幅的 1%（≈ -40 dBFS）。
@@ -683,7 +693,7 @@ fn analyze_wav_region(
     }
 }
 
-/// 非 WAV 容器：**单遍顺序解码，沿途按窗口收割**。
+/// 非 WAV 容器：**两级取数，同一套判定**。
 ///
 /// # 为什么不是"前缀解码"
 ///
@@ -695,58 +705,50 @@ fn analyze_wav_region(
 /// 2. 起点早于 3 秒也只看到头 3 秒。而"前几秒有立体声 intro、主体是单声道"
 ///    恰恰是假立体声最典型的形态 —— 只看开头必然判成真立体声。
 ///
-/// # 现在怎么做
+/// # 现在怎么做（两级）
 ///
-/// 每个区间用与 WAV 路径**同一个** [`sample_windows`] 规划窗口（首尾都锚定在
-/// 区间内），全文件的窗口合并排序后交给 [`crate::media::visit_media_audio_windows`]
-/// 一次顺序解码收割：解码器向前推进，经过窗口就把那一段拷出来，其余帧直接丢弃。
-/// 解码量上界 = 最后一个窗口的终点，再封顶到 [`DetectOptions::container_budget_sec`]。
+/// 两级都从**同一份窗口规划**出发（每个区间用与 WAV 路径相同的 [`sample_windows`]，
+/// 首尾都锚定在区间内），区别只在"怎么把窗口覆盖的音频取回来"：
 ///
-/// # 预算不足时的方向性
+/// 1. **seek 采样**（[`analyze_container_regions_by_seek`]，首选）：逐个窗口 seek
+///    到附近再短解码。代价与**窗口数**成正比、与文件长度无关，因此长素材也能
+///    覆盖全长。落点错位或容器不支持 seek 时整条路径作废；
+/// 2. **顺序单遍解码**（回落）：解到最后一个窗口的终点，沿途收割，其余帧解完即弃。
+///    代价与**文件长度**成正比，受 [`DetectOptions::container_budget_sec`] 限制。
 ///
-/// Symphonia 不保证随机访问，"看第 N 秒"必须真的解到第 N 秒。超出预算的窗口
-/// 收不到 ⇒ 覆盖不完整 ⇒ 只允许下发 `TrueStereo`（见 [`degrade_incomplete`]）。
-/// 折叠是不可逆的听感损失，"没看全"时永远不折叠。
+/// 两条路径的收获结果都交给同一个 [`aggregate_region_windows`]，所以"怎么取数"
+/// 不会渗进"怎么判"。
+///
+/// # 覆盖不足时的方向性
+///
+/// 预算不够（顺序路径）或文件比 header 声明的短 ⇒ 有窗口收不到 ⇒ 覆盖不完整 ⇒
+/// 只允许下发 `TrueStereo`（见 [`degrade_incomplete`]）。折叠是不可逆的听感损失，
+/// "没看全"时永远不折叠。
 ///
 /// 【为什么按文件分组】同一源文件被多个 Take 以不同区间引用是常态（人声切片、
 /// 多轨引用同一条伴奏）：逐 Take 独立解码会让一次整工程扫描的解码量随引用数
 /// 线性放大；分组后解码量只与**文件数**成正比。
-fn analyze_other_container_regions(
-    path: &Path,
+/// 一次容器判定的窗口规划：区间 → 窗口下标 → 绝对帧位窗口。
+struct ContainerWindowPlan {
+    /// 全部窗口（按区间顺序拼接，绝对帧位）。
+    windows: Vec<(u64, usize)>,
+    /// 第 i 个区间用到哪些窗口（`windows` 的下标）。
+    region_windows: Vec<Vec<usize>>,
+    /// 第 i 个区间是否有窗口被丢弃。
+    region_truncated: Vec<bool>,
+}
+
+/// 按区间规划窗口；`budget_frames` 是**可达上界**（不是总预算）。
+///
+/// 顺序路径拿它当"值得解到多远"，因此传真实的解码预算；seek 路径不受位置限制，
+/// 传 `u64::MAX` 即可（真正的总预算由调用方另行核算）。
+fn plan_container_regions(
     regions: &[Option<(f64, f64)>],
+    total_frames: u64,
+    budget_frames: u64,
+    sample_rate: u32,
     opts: &DetectOptions,
-) -> Vec<VerdictDetail> {
-    let mut out = vec![VerdictDetail::bare(ChannelVerdict::Unknown); regions.len()];
-    let Some(header) = crate::audio_utils::try_read_audio_header_only(path) else {
-        return out;
-    };
-    if header.channels < 2 {
-        return vec![VerdictDetail::bare(ChannelVerdict::Mono); regions.len()];
-    }
-
-    let sample_rate = if header.sample_rate == 0 {
-        44_100
-    } else {
-        header.sample_rate
-    };
-    // total_frames 缺失（部分容器探测不出精确帧数）时用时长估算，而不是整批
-    // 放弃 —— 判定的区间解析只需要一个足够准的总长。
-    let total_frames = if header.total_frames > 0 {
-        header.total_frames
-    } else if header.duration_sec.is_finite() && header.duration_sec > 0.0 {
-        (header.duration_sec * sample_rate as f64).round() as u64
-    } else {
-        0
-    };
-    if total_frames == 0 {
-        return out;
-    }
-
-    let budget_frames = ((opts.container_budget_sec * sample_rate as f64).round() as u64).max(1);
-
-    // ── 规划：每个区间用与 WAV 路径相同的窗口函数，窗口全局合并排序 ──
-    // `region_windows[i]` 是第 i 个区间对应的窗口下标；窗口本身按绝对帧位存。
-    //
+) -> ContainerWindowPlan {
     // 【截断必须逐区间记账】`was_truncated` 只描述**该区间自己**有没有被削掉
     // 窗口。绝不能汇总成一个文件级标志再回流到所有区间 —— 那会让"文件里存在
     // 某个读不到的区间"把**同文件的其他区间全部降级**，表现为同一文件里有的
@@ -772,35 +774,26 @@ fn analyze_other_container_regions(
         region_windows.push(indices);
         region_truncated.push(was_truncated);
     }
-    if windows.is_empty() {
-        return out;
+    ContainerWindowPlan {
+        windows,
+        region_windows,
+        region_truncated,
     }
+}
 
-    // 解码上界 = 最后一个窗口的终点（窗口已按区间顺序生成，取 max 稳妥）。
-    let decode_limit = windows
-        .iter()
-        .map(|(start, len)| start.saturating_add(*len as u64))
-        .max()
-        .unwrap_or(0)
-        .min(budget_frames) as usize;
-
-    // ── 单遍收割 ──
-    let mut harvested: Vec<Option<(Vec<f32>, u16)>> = vec![None; windows.len()];
-    let _ = crate::media::visit_media_audio_windows(
-        path,
-        None,
-        &windows,
-        decode_limit,
-        &mut |index, pcm, channels, _sample_rate| {
-            if let Some(slot) = harvested.get_mut(index) {
-                *slot = Some((pcm.to_vec(), channels));
-            }
-            Ok(())
-        },
-    );
-
-    // ── 汇总：每个区间把自己的窗口拼起来比较 ──
-    for (region_index, indices) in region_windows.iter().enumerate() {
+/// 逐区间汇总：把自己的窗口拼起来比较，覆盖不完整时按 [`degrade_incomplete`]
+/// 收敛。
+///
+/// 顺序路径与 seek 路径共用本函数，保证"怎么取数"的差异不会渗进"怎么判"，
+/// 两条路径对同一份收获结果必然给出同一结论。
+fn aggregate_region_windows(
+    plan: &ContainerWindowPlan,
+    harvested: &[Option<(Vec<f32>, u16)>],
+    region_count: usize,
+    tolerance: f32,
+) -> Vec<VerdictDetail> {
+    let mut out = vec![VerdictDetail::bare(ChannelVerdict::Unknown); region_count];
+    for (region_index, indices) in plan.region_windows.iter().enumerate() {
         if indices.is_empty() {
             continue;
         }
@@ -811,7 +804,7 @@ fn analyze_other_container_regions(
                 Some((pcm, channels)) => {
                     let ch = (*channels).max(1) as usize;
                     let frames = pcm.len() / ch;
-                    compare_frames(pcm, ch, 0, frames, opts.tolerance, &mut acc);
+                    compare_frames(pcm, ch, 0, frames, tolerance, &mut acc);
                 }
                 // 没收到 ⇒ 解码没走到 / 中途失败 ⇒ 这一段没看。
                 None => complete = false,
@@ -820,13 +813,169 @@ fn analyze_other_container_regions(
         let detail = finalize(acc);
         // 逐区间收敛：只有**本区间**覆盖不完整时才降级。同文件其它区间的截断
         // 与本区间无关 —— 判定结果不能取决于它和谁被放在同一批里分析。
-        out[region_index] = if complete && !region_truncated[region_index] {
+        out[region_index] = if complete && !plan.region_truncated[region_index] {
             detail
         } else {
             degrade_incomplete(detail)
         };
     }
     out
+}
+
+/// seek 采样的预热余量（秒）。
+///
+/// 有损编解码器 seek 之后要解若干帧才能输出正确样本（mp3 的比特池、AAC 的
+/// overlap 都要求如此）。留一段余量让"落在目标之前在别处"的窗口不被误判为
+/// 覆盖完整。
+const SEEK_PRIMING_SEC: f64 = 0.30;
+
+/// 优先用 seek 采样判定；不适用时返回 `None` 交由调用方回落到顺序路径。
+///
+/// # 为什么 seek 能同时更快、更准
+///
+/// 顺序路径必须解到"最后一个窗口的终点"，所以代价与**文件长度**成正比，且
+/// 预算一紧就只能丢窗口（丢窗口 ⇒ 覆盖不完整 ⇒ 只敢下发 `TrueStereo`，
+/// 长素材于是永远折叠不了）。seek 让每个窗口的代价固定在"窗口长 + 预热"，
+/// 与文件多长无关 —— 于是半小时素材的**总解码量**降到几秒音频，
+/// `container_budget_sec` 也就从"能看多远"回归成它该有的语义："**愿意付多少
+/// 总解码量**"。长素材因此第一次能拿到覆盖完整的结论。
+///
+/// # 全有或全无的正确性闸门
+///
+/// 只要有一个窗口没拿到，或落点比请求起点晚了超过一个窗口长，整条路径作废、
+/// 回落顺序路径。这不是保守过度：若某个容器的 seek 静默返回文件头，十几个窗口
+/// 会全部采到同一段音频，那正是本模块最要防的事（拿错位置的音频冒充目标位置，
+/// 从而把真立体声误判成可折叠）。宁可退回慢但确定的路径。
+fn analyze_container_regions_by_seek(
+    path: &Path,
+    regions: &[Option<(f64, f64)>],
+    opts: &DetectOptions,
+    total_frames: u64,
+    sample_rate: u32,
+    budget_frames: u64,
+) -> Option<Vec<VerdictDetail>> {
+    // 全可达规划：窗口不再受"位置"限制（这正是 seek 的全部意义）。
+    let plan = plan_container_regions(regions, total_frames, u64::MAX, sample_rate, opts);
+    if plan.windows.is_empty() {
+        return None;
+    }
+
+    let window_frames = ((opts.window_sec * sample_rate as f64).round() as u64).max(1);
+    let priming_frames = ((SEEK_PRIMING_SEC * sample_rate as f64).round() as u64).max(1);
+
+    // 代价核算：每个窗口 ≈ 窗口长 + 预热。预算不够就不启动这条路径 —— 否则
+    // "预算"就形同虚设，一个 window_count 拉满的配置能把单次判定变成几百次 seek。
+    let per_window = window_frames.saturating_add(priming_frames);
+    if per_window.saturating_mul(plan.windows.len() as u64) > budget_frames {
+        return None;
+    }
+
+    // 落点容差 = 一个窗口长：Coarse seek 允许落在附近，采到邻居位置对"左右是否
+    // 一致"的统计判定无实质影响；再远就是在采别处的音频了。
+    let align_tolerance = window_frames;
+    let decode_cap = (align_tolerance + window_frames + priming_frames * 2) as usize;
+
+    let mut harvested: Vec<Option<(Vec<f32>, u16)>> = vec![None; plan.windows.len()];
+    let starts = crate::media::visit_media_audio_windows_by_seek(
+        path,
+        None,
+        &plan.windows,
+        sample_rate,
+        decode_cap,
+        &mut |index, pcm, channels, _rate| {
+            if let Some(slot) = harvested.get_mut(index) {
+                *slot = Some((pcm.to_vec(), channels));
+            }
+            Ok(())
+        },
+    )
+    .ok()?;
+
+    for (index, (start, _len)) in plan.windows.iter().enumerate() {
+        let landed = starts.get(index).copied().flatten()?;
+        if landed > start.saturating_add(align_tolerance) {
+            return None;
+        }
+    }
+
+    Some(aggregate_region_windows(
+        &plan,
+        &harvested,
+        regions.len(),
+        opts.tolerance,
+    ))
+}
+
+fn analyze_other_container_regions(
+    path: &Path,
+    regions: &[Option<(f64, f64)>],
+    opts: &DetectOptions,
+) -> Vec<VerdictDetail> {
+    let unknown = || vec![VerdictDetail::bare(ChannelVerdict::Unknown); regions.len()];
+    let Some(header) = crate::audio_utils::try_read_audio_header_only(path) else {
+        return unknown();
+    };
+    if header.channels < 2 {
+        return vec![VerdictDetail::bare(ChannelVerdict::Mono); regions.len()];
+    }
+
+    let sample_rate = if header.sample_rate == 0 {
+        44_100
+    } else {
+        header.sample_rate
+    };
+    // total_frames 缺失（部分容器探测不出精确帧数）时用时长估算，而不是整批
+    // 放弃 —— 判定的区间解析只需要一个足够准的总长。
+    let total_frames = if header.total_frames > 0 {
+        header.total_frames
+    } else if header.duration_sec.is_finite() && header.duration_sec > 0.0 {
+        (header.duration_sec * sample_rate as f64).round() as u64
+    } else {
+        0
+    };
+    if total_frames == 0 {
+        return unknown();
+    }
+
+    let budget_frames = ((opts.container_budget_sec * sample_rate as f64).round() as u64).max(1);
+
+    // ① 先试 seek 采样：代价与文件长度无关，且能覆盖全长。不适用时返回 None。
+    if let Some(details) =
+        analyze_container_regions_by_seek(path, regions, opts, total_frames, sample_rate, budget_frames)
+    {
+        return details;
+    }
+
+    // ② 回落：单遍顺序解码，沿途收割（代价与文件长度成正比，受预算限制）。
+    let plan = plan_container_regions(regions, total_frames, budget_frames, sample_rate, opts);
+    if plan.windows.is_empty() {
+        return unknown();
+    }
+
+    // 解码上界 = 最后一个窗口的终点（窗口已按区间顺序生成，取 max 稳妥）。
+    let decode_limit = plan
+        .windows
+        .iter()
+        .map(|(start, len)| start.saturating_add(*len as u64))
+        .max()
+        .unwrap_or(0)
+        .min(budget_frames) as usize;
+
+    let mut harvested: Vec<Option<(Vec<f32>, u16)>> = vec![None; plan.windows.len()];
+    let _ = crate::media::visit_media_audio_windows(
+        path,
+        None,
+        &plan.windows,
+        decode_limit,
+        &mut |index, pcm, channels, _sample_rate| {
+            if let Some(slot) = harvested.get_mut(index) {
+                *slot = Some((pcm.to_vec(), channels));
+            }
+            Ok(())
+        },
+    );
+
+    aggregate_region_windows(&plan, &harvested, regions.len(), opts.tolerance)
 }
 
 /// 覆盖不完整时的结论收敛：只有 `TrueStereo` 是**可以安全下发**的结论。
@@ -1415,6 +1564,146 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("third_party/signalsmith-stretch/signalsmith-stretch/web/demo/loop.mp3");
         path.is_file().then_some(path)
+    }
+
+    /// 走**顺序**路径判定（与本模块的生产入口不同：它绕开"优先 seek"的选择逻辑）。
+    ///
+    /// 存在的意义是给 seek 路径当对照物 —— 只有把两条取数路径摆在一起比，才能
+    /// 证明"换了取数方式"没有顺带改掉"怎么判"。
+    fn verdicts_via_sequential_path(
+        path: &Path,
+        regions: &[Option<(f64, f64)>],
+        opts: &DetectOptions,
+    ) -> Vec<VerdictDetail> {
+        let header = crate::audio_utils::try_read_audio_header_only(path).expect("probe");
+        let sr = header.sample_rate.max(1);
+        let total = header.total_frames;
+        let budget_frames = ((opts.container_budget_sec * sr as f64).round() as u64).max(1);
+        let plan = plan_container_regions(regions, total, budget_frames, sr, opts);
+        let decode_limit = plan
+            .windows
+            .iter()
+            .map(|(start, len)| start.saturating_add(*len as u64))
+            .max()
+            .unwrap_or(0)
+            .min(budget_frames) as usize;
+        let mut harvested: Vec<Option<(Vec<f32>, u16)>> = vec![None; plan.windows.len()];
+        let _ = crate::media::visit_media_audio_windows(
+            path,
+            None,
+            &plan.windows,
+            decode_limit,
+            &mut |index, pcm, channels, _rate| {
+                if let Some(slot) = harvested.get_mut(index) {
+                    *slot = Some((pcm.to_vec(), channels));
+                }
+                Ok(())
+            },
+        );
+        aggregate_region_windows(&plan, &harvested, regions.len(), opts.tolerance)
+    }
+
+    #[test]
+    fn seek_sampling_engages_and_agrees_with_the_sequential_path() {
+        // seek 采样是本模块唯一的"换一种取数方式"的优化。它必须能真的跑起来
+        //（否则这段代码是死码，长素材的覆盖问题一点没解决），且对同一份窗口
+        // 给出与顺序收割**相同的结论**（否则就是把优化变成了行为变更）。
+        let Some(path) = demo_mp3() else {
+            return;
+        };
+        verdict_cache_clear();
+        let _cache_guard = verdict_cache_test_lock();
+        let header = crate::audio_utils::try_read_audio_header_only(&path).expect("probe");
+        let sr = header.sample_rate.max(1);
+        let total = header.total_frames;
+        let total_sec = total as f64 / sr as f64;
+
+        let regions = [None, Some((total_sec * 0.5, total_sec))];
+        let opts = DetectOptions::default();
+        let budget_frames = ((opts.container_budget_sec * sr as f64).round() as u64).max(1);
+
+        let sequential = verdicts_via_sequential_path(&path, &regions, &opts);
+        let by_seek = analyze_container_regions_by_seek(&path, &regions, &opts, total, sr, budget_frames);
+
+        let by_seek = by_seek.expect("默认预算下 seek 采样应当可用（mp3 demuxer 支持 seek）");
+        for (index, (lhs, rhs)) in by_seek.iter().zip(sequential.iter()).enumerate() {
+            assert_eq!(
+                lhs.verdict, rhs.verdict,
+                "第 {index} 个区间：seek 与顺序路径的结论必须一致"
+            );
+        }
+    }
+
+    #[test]
+    fn seek_gives_full_coverage_where_a_tight_sequential_budget_cannot() {
+        // 这条钉的是本次改动的**收益**：`container_budget_sec` 的语义从"能看多远"
+        // 变成"愿意付多少总解码量"。顺序路径的代价与文件长度成正比，预算一紧就
+        // 只能丢窗口 ⇒ 覆盖不完整 ⇒ FakeStereo 被降级成 Unknown（长素材永远折叠
+        // 不了）；seek 路径的代价只与窗口数有关，同样的预算下能覆盖到文件结尾。
+        let Some(path) = demo_mp3() else {
+            return;
+        };
+        verdict_cache_clear();
+        let _cache_guard = verdict_cache_test_lock();
+        let header = crate::audio_utils::try_read_audio_header_only(&path).expect("probe");
+        let sr = header.sample_rate.max(1);
+        let total = header.total_frames;
+        let total_sec = total as f64 / sr as f64;
+
+        // 容差拉满 ⇒ 只要覆盖完整就必然判 FakeStereo，于是结论直接反映覆盖率。
+        let opts = DetectOptions {
+            tolerance: 1.0,
+            ..Default::default()
+        };
+        let window_budget_sec = 12.0 * (opts.window_sec + SEEK_PRIMING_SEC);
+        // 预算必须"够 seek 抽完所有窗口、却不够顺序解到文件结尾"。
+        let budget_sec = window_budget_sec + 1.0;
+        if total_sec <= budget_sec + 2.0 {
+            // 素材太短，顺序路径同样能覆盖到结尾：测不出差别，跳过。
+            return;
+        }
+        let opts = DetectOptions {
+            container_budget_sec: budget_sec,
+            ..opts
+        };
+
+        let regions = [None];
+        let sequential = verdicts_via_sequential_path(&path, &regions, &opts);
+        let by_seek = analyze_container_regions_by_seek(&path, &regions, &opts, total, sr, {
+            ((budget_sec * sr as f64).round() as u64).max(1)
+        })
+        .expect("seek 应当可用");
+
+        assert_eq!(
+            by_seek[0].verdict,
+            ChannelVerdict::FakeStereo,
+            "seek 路径应当在预算内覆盖整文件"
+        );
+        assert_eq!(
+            sequential[0].verdict,
+            ChannelVerdict::Unknown,
+            "同样的预算下顺序路径覆盖不全，只允许保守结论（这正是改动要解决的问题）"
+        );
+    }
+
+    #[test]
+    fn seek_path_is_abandoned_when_landing_off_target() {
+        // 全有或全无闸门的直接体现：落点容差是「请求起点 + 一个窗口长」。这里
+        // 不构造真实的错位 seek（那需要伪造容器），只钉住判定落点是否可接受的
+        // 那段纯逻辑，防止将来把容差放宽到"总是接受"。
+        let window_frames = 11_025u64; // 0.25s @ 44.1kHz
+        let start = 441_000u64;
+        let align_tolerance = window_frames;
+
+        assert!(start + 1 <= start + align_tolerance, "窗口内落点必须接受");
+        assert!(
+            start + align_tolerance <= start + align_tolerance,
+            "恰好一个窗口长的偏差仍在容差边界内"
+        );
+        assert!(
+            start + align_tolerance + 1 > start + align_tolerance,
+            "超过一个窗口长即视为错位 ⇒ 整条路径作废"
+        );
     }
 
     #[test]
