@@ -1,0 +1,47 @@
+{
+    /*
+     * 扩展 SDK 的声明文件产出配置。
+     *
+     * 【为什么需要单独一份】主 tsconfig 是 `noEmit: true`（应用只跑 `vite build`，
+     * 不需要 .d.ts）。于是第三方**今天无法对着本项目做类型检查** —— 连
+     * `import type { PanelDefinition } from "@hs/sdk"` 都无从解析。
+     *
+     * 本配置只产出 `dist/sdk/**` 的声明文件，供扩展作者编译期使用；
+     * 运行时代码仍由应用自己的 bundle 提供（扩展不重复打包 React/Radix）。
+     *
+     * 用法：`npm run build:sdk`
+     */
+    "compilerOptions": {
+        "target": "ES2022",
+        "lib": ["ES2022", "DOM", "DOM.Iterable"],
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "types": ["vite/client"],
+
+        "strict": true,
+        "skipLibCheck": true,
+        "verbatimModuleSyntax": true,
+        "moduleDetection": "force",
+        "jsx": "react-jsx",
+
+        /* 只产出声明 */
+        "noEmit": false,
+        "declaration": true,
+        "emitDeclarationOnly": true,
+        "declarationMap": true,
+        "outDir": "./dist/sdk",
+        "rootDir": "./src",
+
+        /* 声明产出不需要的严格项关掉，避免为类型而修运行时代码 */
+        "noUnusedLocals": false,
+        "noUnusedParameters": false,
+        /* 应用里有若干 `.ts` 后缀的 import（bundler 解析下合法）；声明产出也要接受 */
+        "allowImportingTsExtensions": true
+    },
+    /*
+     * 只编译 SDK 入口及其依赖闭包。测试文件与开发脚手架排除在外 ——
+     * 第三方不该看到它们，且它们的类型依赖会显著拖慢产出。
+     */
+    "include": ["src/sdk/**/*.ts", "src/ui/**/*.ts", "src/ui/**/*.tsx"],
+    "exclude": ["**/*.test.ts", "**/*.test.tsx", "**/*.bench.ts", "src/dev/**"]
+}

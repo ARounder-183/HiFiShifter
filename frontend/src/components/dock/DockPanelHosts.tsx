@@ -10,7 +10,8 @@
  * "从未被打开过"的面板不挂载 —— 避免为一个没打开的窗口白建 WebGL 上下文。
  */
 
-import { Component, type ComponentType, type ReactNode } from "react";
+import { Component, Suspense, type ComponentType, type ReactNode } from "react";
+import { useI18n } from "../../i18n/I18nProvider";
 import { createPortal } from "react-dom";
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 
@@ -58,7 +59,11 @@ function PanelMount({ form }: { form: DockForm }) {
     const content = render ? (
         render(form)
     ) : PanelComponent ? (
-        <PanelComponent formId={form.id} panelId={form.panelId} props={form.props ?? {}} />
+        // Suspense：注册表里的 component 可以是 `React.lazy(...)`（体积大的面板
+        // 按需加载，如记事本）。没有边界时 lazy 组件会直接抛错。
+        <Suspense fallback={<PanelLoading />}>
+            <PanelComponent formId={form.id} panelId={form.panelId} props={form.props ?? {}} />
+        </Suspense>
     ) : (
         <MissingPanel panelId={form.panelId} />
     );
@@ -68,6 +73,15 @@ function PanelMount({ form }: { form: DockForm }) {
             {content}
         </PanelErrorBoundary>,
         host,
+    );
+}
+
+/** lazy 面板加载中的占位（与 MissingPanel 同形，但语义是"正在来"）。 */
+function PanelLoading() {
+    return (
+        <div className="flex h-full w-full items-center justify-center bg-qt-window p-4 text-xs text-qt-text-muted">
+            …
+        </div>
     );
 }
 
@@ -81,10 +95,11 @@ function MissingPanel({ panelId }: { panelId: string }) {
 
 /** 面板未注册时的说明界面（空白槽位必须能自我解释）。 */
 function PanelUnavailable({ panelId }: { panelId: string }) {
+    const { t } = useI18n();
     return (
         <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-qt-window p-4 text-center">
             <div className="text-xs text-qt-text">{panelId}</div>
-            <div className="text-xs text-qt-text-muted">panel unavailable</div>
+            <div className="text-xs text-qt-text-muted">{t("panel_unavailable")}</div>
         </div>
     );
 }

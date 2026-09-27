@@ -21,6 +21,7 @@ import { clampFloatRect, resolveFloatNearRect, resolveFloatRect } from "./dockDr
 import { findMainTabset, normalizeDockLayout } from "./dockSchema";
 import { collectTabsets, isFormVisible } from "./dockTree";
 import { getPanel, listPanels } from "./panelRegistry";
+import type { DockForm } from "./dockTypes";
 import {
     applyDockPreset,
     closeForm,
@@ -34,6 +35,7 @@ import {
     setDockLayout,
     setFloatGeometry,
     setFormFloatMode,
+    setFormProps,
     toggleMaximizeActive,
 } from "./dockSlice";
 import {
@@ -55,7 +57,13 @@ import {
 } from "./detachedWindow";
 import type { DockFloatGeometry, DockLayout } from "./dockTypes";
 
-type GetState = () => RootState;
+/**
+ * 读取状态。
+ *
+ * 门面一律接受 `dispatch` / `getState` 而不是自己 import store（见文件头说明），
+ * 因此这两个类型也是对外契约的一部分：第三方与测试都需要构造它们。
+ */
+export type GetState = () => RootState;
 
 /**
  * 打开面板（已打开则聚焦它）。
@@ -608,4 +616,63 @@ export function listPanelEntriesFromLayout(layout: DockLayout): DockPanelEntry[]
 /** 供 UI 判断某面板是否注册过（菜单据此隐藏未注册项）。 */
 export function isRegistered(panelId: string): boolean {
     return getPanel(panelId) !== undefined;
+}
+
+/**
+ * 读取某个面板（按面板 id 找它的窗体）的持久化配置。
+ *
+ * 面板 id 可能对应多个窗体（`singleton: false` 时），此时返回第一个；
+ * 需要精确控制时用 `getFormProps`。
+ */
+export function getPanelProps(
+    getState: GetState,
+    panelId: string,
+): Record<string, unknown> | null {
+    const form = findFormByPanelId(getState(), panelId);
+    return form ? { ...(form.props ?? {}) } : null;
+}
+
+/**
+ * 写入面板的持久化配置（浅合并）。
+ *
+ * 【为什么这是扩展 API 的关键件】`DockPanelProps.props` 早已被持久化并传给
+ * 面板组件，但此前**没有写入通道** —— 面板拿到的永远是空对象。第三方面板要
+ * 记住自己的列宽、过滤条件、展开状态，必须经由这里。
+ *
+ * 写入会随布局一起进存档，因此面板不需要自己另建一套存储。
+ *
+ * @example
+ * // 面板内
+ * const { formId } = useDockSlotProps();
+ * setPanelProps(dispatch, getState, panelId, { columns: 3 });
+ */
+export function setPanelProps(
+    dispatch: AppDispatch,
+    getState: GetState,
+    panelId: string,
+    props: Record<string, unknown>,
+): void {
+    const form = findFormByPanelId(getState(), panelId);
+    if (!form) return;
+    dispatch(setFormProps({ formId: form.id, props }));
+}
+
+/** 按窗体 id 写入配置（同一面板有多个实例时用这个）。 */
+export function setFormPropsById(
+    dispatch: AppDispatch,
+    formId: string,
+    props: Record<string, unknown>,
+): void {
+    dispatch(setFormProps({ formId, props }));
+}
+
+/** 面板 id → 窗体（取第一个匹配；无则 `null`）。 */
+function findFormByPanelId(
+    state: RootState,
+    panelId: string,
+): DockForm | null {
+    for (const form of Object.values(state.dock.layout.forms)) {
+        if (form.panelId === panelId) return form;
+    }
+    return null;
 }

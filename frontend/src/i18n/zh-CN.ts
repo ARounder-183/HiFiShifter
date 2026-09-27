@@ -183,6 +183,7 @@ export const zhCN = {
     playhead: "播放头",
 
     panel_editor: "编辑器",
+    panel_unavailable: "面板不可用",
     panel_timeline: "时间轴",
     panel_io: "输入输出",
 

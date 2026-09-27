@@ -14,7 +14,13 @@ import { applyTimelinePayload, setPendingPlayheadReveal } from "../session/sessi
 
 const delay = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 
-interface RecordingSliceState {
+/**
+ * 本分片的状态类型。
+ *
+ * 导出是因为 `RootState` 由它组合而成 —— SDK 的声明产出需要能命名它
+ * （否则 `tsc --emitDeclarationOnly` 报 TS4023「cannot be named」）。
+ */
+export interface RecordingSliceState {
     settings: RecordingSettings;
     settingsLoaded: boolean;
     devices: RecordingDeviceInfo[];

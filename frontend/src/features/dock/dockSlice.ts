@@ -456,6 +456,40 @@ const dockSlice = createSlice({
                 },
             };
         },
+        /**
+         * 写入面板的自有配置。
+         *
+         * 【为什么需要它】`DockPanelProps.props` 一直被注释宣称为「未来 API
+         * 面板可直接使用」，`normalizeDockLayout` 也早已持久化它、宿主也早已
+         * 把它传给面板组件 —— 但**没有任何 action 能写入**。这条存储通道此前
+         * 只有读的一半，面板拿到的永远是空对象。
+         *
+         * 第三方面板要保存自己的配置（列宽、过滤条件、展开状态）必须走这里；
+         * 内置面板若要持久化面板级配置也应改用它，而不是往全局 settings 里塞。
+         *
+         * 浅合并：调用方传部分字段即可，未提及的键保持不变。要删除某个键，
+         * 显式传 `undefined`（JSON 序列化时会被丢弃）。
+         */
+        setFormProps(
+            state,
+            action: PayloadAction<{ formId: string; props: Record<string, unknown> }>,
+        ) {
+            const { formId, props } = action.payload;
+            const form = state.layout.forms[formId];
+            if (!form) return;
+            const merged: Record<string, unknown> = { ...form.props };
+            for (const [key, value] of Object.entries(props)) {
+                if (value === undefined) delete merged[key];
+                else merged[key] = value;
+            }
+            state.layout = {
+                ...state.layout,
+                forms: {
+                    ...state.layout.forms,
+                    [formId]: { ...form, props: merged },
+                },
+            };
+        },
         /** 把当前排布存为命名预设。 */
         saveDockPreset(state, action: PayloadAction<string>) {
             const name = action.payload.trim();
@@ -576,6 +610,7 @@ export const {
     setFormFloatMode,
     setTabPosition,
     renameForm,
+    setFormProps,
     saveDockPreset,
     applyDockPreset,
     deleteDockPreset,

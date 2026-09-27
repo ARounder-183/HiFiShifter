@@ -184,6 +184,7 @@ export const zhTW = {
     playhead: "播放頭",
 
     panel_editor: "編輯器",
+    panel_unavailable: "面板無法使用",
     panel_timeline: "時間軸",
     panel_io: "輸入輸出",
 

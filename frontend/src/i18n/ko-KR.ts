@@ -270,6 +270,7 @@ export const koKR = {
     playhead: "인디케이터",
 
     panel_editor: "에디터",
+    panel_unavailable: "패널을 사용할 수 없음",
     panel_timeline: "타임라인",
     panel_io: "입출력",
 

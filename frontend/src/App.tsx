@@ -74,6 +74,7 @@ import { FileBrowserPanel } from "./components/layout/FileBrowserPanel";
 import { UndoHistoryPanel } from "./components/layout/UndoHistoryPanel";
 import { DockRoot } from "./components/dock/DockRoot";
 import { registerBuiltinPanels } from "./components/dock/registerBuiltinPanels";
+import { attachBuiltinPanelComponents } from "./components/dock/attachBuiltinPanelComponents";
 import {
     PANEL_FILE_BROWSER,
     PANEL_NOTEBOOK,
@@ -92,6 +93,7 @@ import {
 
 // 面板注册必须在首次渲染前完成：布局归一化要按注册表判定"这个面板还在不在"。
 registerBuiltinPanels();
+attachBuiltinPanelComponents();
 
 // 记事本按需加载：TipTap/ProseMirror/Turndown 加起来几百 KB，只有真正打开
 // 记事本时才需要 —— 静态导入会把这些全塞进首屏主包。

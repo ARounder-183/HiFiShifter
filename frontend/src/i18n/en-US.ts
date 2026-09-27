@@ -333,6 +333,7 @@ export const enUS = {
     playhead: "Playhead",
 
     panel_editor: "Editor",
+    panel_unavailable: "Panel unavailable",
     panel_timeline: "Timeline",
     panel_io: "I/O",
 

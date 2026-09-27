@@ -15,9 +15,19 @@ import "./index.css";
 
 import { store } from "./app/store";
 import { DetachedRoot } from "./components/dock/DetachedRoot";
+import { registerBuiltinPanels } from "./components/dock/registerBuiltinPanels";
+import { attachBuiltinPanelComponents } from "./components/dock/attachBuiltinPanelComponents";
 import { AppTooltipProvider } from "./components/AppTooltip";
 import { I18nProvider } from "./i18n/I18nProvider";
 import { AppThemeProvider } from "./theme/AppThemeProvider";
+
+/*
+ * 独立窗口是**另一个 JS 上下文**：主窗口 `App.tsx` 里的模块级注册不会执行到这里，
+ * 因此必须自己注册一次 —— 否则 `DetachedRoot` 查注册中心查不到任何面板，
+ * 表现为"拆出去的面板是一片空白"。注册是幂等的（同 id 覆盖），两处调用无冲突。
+ */
+registerBuiltinPanels();
+attachBuiltinPanelComponents();
 
 createRoot(document.getElementById("root")!).render(
     <StrictMode>

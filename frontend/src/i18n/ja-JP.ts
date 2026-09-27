@@ -193,6 +193,7 @@ export const jaJP = {
     playhead: "再生ヘッド",
 
     panel_editor: "エディタ",
+    panel_unavailable: "パネルを利用できません",
     panel_timeline: "タイムライン",
     panel_io: "入出力",
 

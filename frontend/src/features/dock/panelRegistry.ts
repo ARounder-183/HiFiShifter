@@ -11,7 +11,7 @@
  * 开豁免，不该再开第二个）。注册发生在模块加载期，早于任何渲染，没有竞态。
  */
 
-import type { ComponentType } from "react";
+import type { ComponentType, LazyExoticComponent } from "react";
 
 import type { DockPlacement } from "./dockTypes";
 
@@ -54,7 +54,15 @@ export interface PanelDefinition {
      * 可缺省：内置面板的 props 由宿主提供（见 `panelRenderer`），注册表只登记
      * 元信息；将来的插件面板若自带全部状态，则在这里给出组件即可。
      */
-    component?: ComponentType<DockPanelProps>;
+    /**
+     * 面板组件实现。
+     *
+     * 也接受 `React.lazy(...)` 的产物：体积大的面板应当按需加载（记事本带
+     * TipTap/ProseMirror/Turndown，几百 KB），而注册表在模块级装配，静态 import
+     * 会把它们全塞进首屏。渲染侧（`DockPanelHosts` / `DetachedRoot`）已包
+     * `Suspense`，因此 lazy 组件开箱可用。
+     */
+    component?: ComponentType<DockPanelProps> | LazyExoticComponent<ComponentType<DockPanelProps>>;
     /** 浮动时的默认尺寸。 */
     defaultWidth: number;
     defaultHeight: number;
@@ -129,6 +137,32 @@ export function registerPanel(definition: PanelDefinition): void {
 /** 注册表版本号：`useSyncExternalStore` 的快照。 */
 export function getPanelRegistryVersion(): number {
     return version;
+}
+
+/**
+ * 给已注册的面板补上组件实现。
+ *
+ * 【为什么要单独一个函数，而不是在 `registerPanel` 里直接传】面板的**元数据**
+ * 与它的**组件实现**应当可以分开装配：
+ *
+ * - 元数据模块（`registerBuiltinPanels`）被 `dockSchema` 依赖，而布局函数在
+ *   node 环境的单测里也会被调用。若元数据模块直接 `import` 面板组件，就会把整条
+ *   组件依赖链（Redux slice、`localStorage`、DOM API）拖进纯布局测试 ——
+ *   实测会让 `registerBuiltinPanels.test.ts` 因 `localStorage is not defined` 失败。
+ * - 组件实现只在真正的渲染入口需要：主窗口 `App.tsx`、以及独立窗口
+ *   `detachedMain.tsx`（后者是另一个 JS 上下文，必须自己装配一次）。
+ *
+ * 第三方面板不需要本函数：直接在 `registerPanel` 的 `component` 字段里给实现即可。
+ */
+export function setPanelComponent(panelId: string, component: ComponentType<DockPanelProps>): void {
+    const current = registry.get(panelId);
+    if (!current) {
+        console.warn(`[dock] setPanelComponent: panel "${panelId}" is not registered`);
+        return;
+    }
+    registry.set(panelId, { ...current, component });
+    version += 1;
+    for (const listener of listeners) listener();
 }
 
 export function getPanel(panelId: string): PanelDefinition | undefined {
