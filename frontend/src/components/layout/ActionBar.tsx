@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     Flex,
     Select,
@@ -25,6 +25,7 @@ import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
 import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
 import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
 import { CustomScaleDialog } from "./CustomScaleDialog";
+import { AppContextMenu } from "../../ui/Menu";
 
 import {
     playOriginal,
@@ -1964,44 +1965,6 @@ function RippleModeMenu({
 }) {
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
-    const menuRef = useRef<HTMLDivElement>(null);
-    const onCloseRef = useRef(onClose);
-
-    useLayoutEffect(() => {
-        onCloseRef.current = onClose;
-    }, [onClose]);
-
-    useLayoutEffect(() => {
-        const el = menuRef.current;
-        if (!el) return;
-        const rect = el.getBoundingClientRect();
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        if (rect.right > vw) {
-            el.style.left = `${Math.max(0, vw - rect.width)}px`;
-        }
-        if (rect.bottom > vh) {
-            el.style.top = `${Math.max(0, vh - rect.height)}px`;
-        }
-
-        const onPointerDown = (e: PointerEvent) => {
-            if (el && !el.contains(e.target as Node)) {
-                onCloseRef.current();
-            }
-        };
-        const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === "Escape") {
-                e.preventDefault();
-                onCloseRef.current();
-            }
-        };
-        window.addEventListener("pointerdown", onPointerDown, true);
-        window.addEventListener("keydown", onKeyDown);
-        return () => {
-            window.removeEventListener("pointerdown", onPointerDown, true);
-            window.removeEventListener("keydown", onKeyDown);
-        };
-    }, [x, y]);
 
     const options: Array<{ value: "off" | "track" | "all"; label: string }> = [
         { value: "off", label: tAny("ripple_mode_off") as string },
@@ -2010,29 +1973,17 @@ function RippleModeMenu({
     ];
 
     return (
-        <div
-            ref={menuRef}
-            data-hs-context-menu="1"
-            className="fixed z-50 min-w-[150px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
-            style={{ left: x, top: y }}
-            onPointerDown={(e) => e.stopPropagation()}
-        >
-            {options.map((opt) => (
-                <button
-                    key={opt.value}
-                    className="px-3 py-1.5 text-left w-full text-[12px] transition-colors flex items-center justify-between gap-3 hover:bg-qt-highlight hover:text-white"
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        onChange(opt.value);
-                        onClose();
-                    }}
-                >
-                    <span>{opt.label}</span>
-                    {mode === opt.value && <span className="text-qt-accent">✓</span>}
-                </button>
-            ))}
-        </div>
+        <AppContextMenu
+            x={x}
+            y={y}
+            onClose={onClose}
+            items={options.map((opt) => ({
+                key: opt.value,
+                label: opt.label,
+                checked: mode === opt.value,
+                onSelect: () => onChange(opt.value),
+            }))}
+        />
     );
 }
 

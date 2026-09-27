@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { AppContextMenu, type AppMenuItemSpec } from "../../../ui/Menu";
 import { Box } from "@radix-ui/themes";
 import { screenXToWorldSec } from "./runtime/timelineWorld.js";
 import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
@@ -47,33 +48,6 @@ function unitLabelKey(unit: TimeUnit): string {
             return "time_unit_clock";
     }
 }
-
-function ContextMenuItem({
-    active,
-    label,
-    onSelect,
-}: {
-    active: boolean;
-    label: string;
-    onSelect: () => void;
-}) {
-    return (
-        <button
-            type="button"
-            className="px-3 py-1.5 text-left w-full text-[12px] transition-colors flex items-center justify-between gap-3 hover:bg-qt-button-hover"
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-                e.stopPropagation();
-                onSelect();
-            }}
-        >
-            <span>{label}</span>
-            {active ? <span className="text-[10px] opacity-50 shrink-0">✓</span> : null}
-        </button>
-    );
-}
-
-const ContextDivider: React.FC = () => <div className="my-1 border-t border-qt-border" />;
 
 /**
  * 标尺刻度。
@@ -388,21 +362,6 @@ function TimeRulerContextMenu({
     onClearTempoMap: () => void;
     onClose: () => void;
 }) {
-    const ref = useRef<HTMLDivElement | null>(null);
-    useLayoutEffect(() => {
-        const el = ref.current;
-        if (!el) return;
-        const rect = el.getBoundingClientRect();
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        if (rect.right > vw) {
-            el.style.left = `${Math.max(0, vw - rect.width)}px`;
-        }
-        if (rect.bottom > vh) {
-            el.style.top = `${Math.max(0, vh - rect.height)}px`;
-        }
-    }, [x, y]);
-
     // 找到点击位置命中的变化点（旗帜可视范围：点的位置向右延伸整个旗帜文本宽度）。
     const nearPoint = React.useMemo(() => {
         if (!tempoMap) return null;
@@ -412,121 +371,99 @@ function TimeRulerContextMenu({
     }, [tempoMap, clickedSec, pxPerSec]);
     const hasMap = tempoMap != null && tempoMap.points.length > 0;
 
-    return createPortal(
-        <div
-            ref={ref}
-            data-time-ruler-context-menu
-            data-hs-context-menu="1"
-            data-hs-floating-menu="1"
-            className="fixed z-qt-menu min-w-[140px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
-            style={{ left: x, top: y }}
-            onPointerDown={(e) => e.stopPropagation()}
-            onMouseDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-            }}
-            onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-            }}
-        >
-            {/* Tempo Map（位于“主时间单位”等选项之前） */}
-            <div className="px-3 py-1 text-[11px] text-qt-text/50 select-none">
-                {t("tempo_map")}
-            </div>
-            <ContextMenuItem
-                active={false}
-                label={t("tempo_map_add_point")}
-                onSelect={() => {
-                    onAddTempoPointAt(clickedSec, null);
-                    onClose();
-                }}
-            />
-            {nearPoint ? (
-                <ContextMenuItem
-                    active={false}
-                    label={t("tempo_map_edit_point")}
-                    onSelect={() => {
-                        onEditTempoPoint(nearPoint.point.id);
-                        onClose();
-                    }}
-                />
-            ) : null}
-            {nearPoint && !nearPoint.isFirst ? (
-                <ContextMenuItem
-                    active={false}
-                    label={t("tempo_map_delete_point")}
-                    onSelect={() => {
-                        onDeleteTempoPoint(nearPoint.point.id);
-                        onClose();
-                    }}
-                />
-            ) : null}
-            {hasMap ? (
-                <ContextMenuItem
-                    active={false}
-                    label={t("tempo_map_clear_all")}
-                    onSelect={() => {
-                        onClearTempoMap();
-                        onClose();
-                    }}
-                />
-            ) : null}
-            <ContextDivider />
+    // 分区标题：原语没有「非交互标签行」，用 disabled 项承载（不可选、
+    // 方向键跳过、悬停无反应），保留原有分组文字与顺序。
+    const items: AppMenuItemSpec[] = [
+        { key: "tempoMapHeader", label: t("tempo_map"), disabled: true, onSelect: () => {} },
+        {
+            key: "addTempoPoint",
+            label: t("tempo_map_add_point"),
+            onSelect: () => onAddTempoPointAt(clickedSec, null),
+        },
+        ...(nearPoint
+            ? [
+                  {
+                      key: "editTempoPoint",
+                      label: t("tempo_map_edit_point"),
+                      onSelect: () => onEditTempoPoint(nearPoint.point.id),
+                  } satisfies AppMenuItemSpec,
+              ]
+            : []),
+        ...(nearPoint && !nearPoint.isFirst
+            ? [
+                  {
+                      key: "deleteTempoPoint",
+                      label: t("tempo_map_delete_point"),
+                      onSelect: () => onDeleteTempoPoint(nearPoint.point.id),
+                  } satisfies AppMenuItemSpec,
+              ]
+            : []),
+        ...(hasMap
+            ? [
+                  {
+                      key: "clearTempoMap",
+                      label: t("tempo_map_clear_all"),
+                      onSelect: () => onClearTempoMap(),
+                  } satisfies AppMenuItemSpec,
+              ]
+            : []),
+        {
+            key: "primaryHeader",
+            label: t("time_unit_primary"),
+            disabled: true,
+            separatorBefore: true,
+            onSelect: () => {},
+        },
+        ...TIME_UNITS.map((unit) => ({
+            key: `primary-${unit}`,
+            label: t(unitLabelKey(unit)),
+            checked: primaryUnit === unit,
+            onSelect: () => onSelectPrimary(unit),
+        })),
+        {
+            key: "secondaryHeader",
+            label: t("time_unit_secondary"),
+            disabled: true,
+            separatorBefore: true,
+            onSelect: () => {},
+        },
+        ...TIME_UNIT_CHOICES.map((unit) => ({
+            key: `secondary-${unit}`,
+            label: unit === "none" ? t("time_unit_none") : t(unitLabelKey(unit as TimeUnit)),
+            checked: secondaryUnit === unit,
+            onSelect: () => onSelectSecondary(unit),
+        })),
+        ...(onCopyPlayheadTime
+            ? [
+                  {
+                      key: "copyPlayheadTime",
+                      label: t("copy_playhead_time"),
+                      separatorBefore: true,
+                      onSelect: onCopyPlayheadTime,
+                  } satisfies AppMenuItemSpec,
+              ]
+            : []),
+        ...(onOpenSettings
+            ? [
+                  {
+                      key: "openSettings",
+                      label: t("timeline_display_settings"),
+                      separatorBefore: !onCopyPlayheadTime,
+                      onSelect: onOpenSettings,
+                  } satisfies AppMenuItemSpec,
+              ]
+            : []),
+    ];
 
-            <div className="px-3 py-1 text-[11px] text-qt-text/50 select-none">
-                {t("time_unit_primary")}
-            </div>
-            {TIME_UNITS.map((unit) => (
-                <ContextMenuItem
-                    key={unit}
-                    active={primaryUnit === unit}
-                    label={t(unitLabelKey(unit))}
-                    onSelect={() => {
-                        onSelectPrimary(unit);
-                        onClose();
-                    }}
-                />
-            ))}
-            <ContextDivider />
-            <div className="px-3 py-1 text-[11px] text-qt-text/50 select-none">
-                {t("time_unit_secondary")}
-            </div>
-            {TIME_UNIT_CHOICES.map((unit) => (
-                <ContextMenuItem
-                    key={unit}
-                    active={secondaryUnit === unit}
-                    label={
-                        unit === "none" ? t("time_unit_none") : t(unitLabelKey(unit as TimeUnit))
-                    }
-                    onSelect={() => {
-                        onSelectSecondary(unit);
-                        onClose();
-                    }}
-                />
-            ))}
-            <ContextDivider />
-            {onCopyPlayheadTime ? (
-                <ContextMenuItem
-                    active={false}
-                    label={t("copy_playhead_time")}
-                    onSelect={() => {
-                        onCopyPlayheadTime();
-                        onClose();
-                    }}
-                />
-            ) : null}
-            {onOpenSettings ? (
-                <ContextMenuItem
-                    active={false}
-                    label={t("timeline_display_settings")}
-                    onSelect={() => {
-                        onOpenSettings();
-                        onClose();
-                    }}
-                />
-            ) : null}
-        </div>,
+    return createPortal(
+        <AppContextMenu
+            x={x}
+            y={y}
+            items={items}
+            onClose={onClose}
+            // 时间轴浮动菜单契约（提示气泡抑制 / 内联编辑器失焦 / 角标编辑守卫）。
+            floating
+        />,
         document.body,
     );
 }
@@ -771,24 +708,6 @@ const TimeRulerInner: React.FC<{
         projectScaleName,
         tAny,
     ]);
-
-    useEffect(() => {
-        if (!ctxMenu) return;
-        const close = (e: PointerEvent) => {
-            const target = e.target as HTMLElement | null;
-            if (target?.closest?.("[data-time-ruler-context-menu]")) return;
-            setCtxMenu(null);
-        };
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key === "Escape") setCtxMenu(null);
-        };
-        window.addEventListener("pointerdown", close, true);
-        window.addEventListener("keydown", onKey, true);
-        return () => {
-            window.removeEventListener("pointerdown", close, true);
-            window.removeEventListener("keydown", onKey, true);
-        };
-    }, [ctxMenu]);
 
     const handleMouseMove = useCallback(
         (e: React.MouseEvent<HTMLDivElement>) => {

@@ -28,6 +28,7 @@ import { computeVisibleTrackWindow } from "./runtime/timelineWindowing";
 import { resolveScrollCommitStepPx, shouldCommitScroll } from "./scrollCommit";
 import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
 import { useAppTheme } from "../../../theme/AppThemeProvider";
+import { AppContextMenu } from "../../../ui/Menu";
 
 /** Color palette options shown when creating a new track.
  * 色值选取与归一化带（s 0.30-0.46、感知亮度 0.50-0.60）对齐：暖色系
@@ -506,7 +507,6 @@ const TrackListInner: React.FC<TrackListProps> = ({
         y: number;
         trackId: string;
     } | null>(null);
-    const trackCtxMenuRef = useRef<HTMLDivElement | null>(null);
     const [listScrollTop, setListScrollTop] = useState(0);
     /**
      * 上一次真正提交给 `setListScrollTop` 的位置。
@@ -528,33 +528,6 @@ const TrackListInner: React.FC<TrackListProps> = ({
     const trackDeleteShortcut = useAppSelector((s) =>
         formatKeybinding(selectKeybinding(s, "track.delete"), ""),
     );
-
-    // 自动修正菜单溢出屏幕
-    useLayoutEffect(() => {
-        const el = trackCtxMenuRef.current;
-        if (!el || !trackCtxMenu) return;
-        const rect = el.getBoundingClientRect();
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        if (rect.right > vw) {
-            el.style.left = `${Math.max(0, vw - rect.width)}px`;
-        }
-        if (rect.bottom > vh) {
-            el.style.top = `${Math.max(0, vh - rect.height)}px`;
-        }
-    }, [trackCtxMenu]);
-
-    // 点击其他区域关闭右键菜单
-    useEffect(() => {
-        if (!trackCtxMenu) return;
-        const handler = (e: PointerEvent) => {
-            const target = e.target as HTMLElement | null;
-            if (target?.closest?.("[data-track-ctx-menu]")) return;
-            setTrackCtxMenu(null);
-        };
-        window.addEventListener("pointerdown", handler, true);
-        return () => window.removeEventListener("pointerdown", handler, true);
-    }, [trackCtxMenu]);
 
     function commitTrackName() {
         if (!editingTrackId) return;
@@ -2233,58 +2206,33 @@ const TrackListInner: React.FC<TrackListProps> = ({
 
             {/* 轨道右键菜单 */}
             {trackCtxMenu && (
-                <div
-                    ref={trackCtxMenuRef}
-                    data-track-ctx-menu
-                    data-hs-context-menu="1"
-                    className="fixed z-50 min-w-[140px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
-                    style={{ left: trackCtxMenu.x, top: trackCtxMenu.y }}
-                    onPointerDown={(e) => e.stopPropagation()}
-                >
-                    <button
-                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors flex items-center justify-between gap-3"
-                        onClick={() => {
-                            onCreateTrackBelow?.(trackCtxMenu.trackId);
-                            setTrackCtxMenu(null);
-                        }}
-                    >
-                        <span>{t("track_add")}</span>
-                        {trackAddShortcut && (
-                            <span className="text-[10px] opacity-50 shrink-0">
-                                {trackAddShortcut}
-                            </span>
-                        )}
-                    </button>
-                    <button
-                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors flex items-center justify-between gap-3"
-                        onClick={() => {
-                            onDuplicateTrack?.(trackCtxMenu.trackId);
-                            setTrackCtxMenu(null);
-                        }}
-                    >
-                        <span>{t("track_clone")}</span>
-                        {trackCloneShortcut && (
-                            <span className="text-[10px] opacity-50 shrink-0">
-                                {trackCloneShortcut}
-                            </span>
-                        )}
-                    </button>
-                    <button
-                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors text-red-400 hover:text-red-300 flex items-center justify-between gap-3"
-                        disabled={isLastRootTrack(trackCtxMenu.trackId)}
-                        onClick={() => {
-                            onRemoveTrack(trackCtxMenu.trackId);
-                            setTrackCtxMenu(null);
-                        }}
-                    >
-                        <span>{t("ctx_delete")}</span>
-                        {trackDeleteShortcut && (
-                            <span className="text-[10px] opacity-50 shrink-0">
-                                {trackDeleteShortcut}
-                            </span>
-                        )}
-                    </button>
-                </div>
+                <AppContextMenu
+                    x={trackCtxMenu.x}
+                    y={trackCtxMenu.y}
+                    onClose={() => setTrackCtxMenu(null)}
+                    items={[
+                        {
+                            key: "addTrack",
+                            label: t("track_add"),
+                            shortcut: trackAddShortcut,
+                            onSelect: () => onCreateTrackBelow?.(trackCtxMenu.trackId),
+                        },
+                        {
+                            key: "cloneTrack",
+                            label: t("track_clone"),
+                            shortcut: trackCloneShortcut,
+                            onSelect: () => onDuplicateTrack?.(trackCtxMenu.trackId),
+                        },
+                        {
+                            key: "deleteTrack",
+                            label: t("ctx_delete"),
+                            shortcut: trackDeleteShortcut,
+                            danger: true,
+                            disabled: isLastRootTrack(trackCtxMenu.trackId),
+                            onSelect: () => onRemoveTrack(trackCtxMenu.trackId),
+                        },
+                    ]}
+                />
             )}
             <AppTooltipBubble
                 text={volumeTooltipText}

@@ -52,6 +52,17 @@ export interface AppContextMenuProps {
     minWidth?: number;
     /** 无障碍名称：菜单是弹出表面，需要有可读名称。 */
     ariaLabel?: string;
+    /**
+     * 是否标记为「时间轴浮动菜单」（`data-hs-floating-menu="1"`）。
+     *
+     * 这是时间轴侧的既有契约，有三个独立读取方，缺了它会静默失去豁免：
+     *   - `AppTooltip`：悬停抑制（菜单打开时不该冒提示气泡）；
+     *   - `TimelinePanel`：内联编辑器的失焦提交判断（点菜单不应提交输入框）；
+     *   - `ClipHeader`：角标编辑的提交守卫。
+     *
+     * 因此凡是挂在时间轴/剪辑上的菜单都要显式打开它；普通面板菜单不需要。
+     */
+    floating?: boolean;
 }
 
 const ITEM_BASE =
@@ -74,7 +85,15 @@ const ITEM_BASE =
  *   />
  * ) : null}
  */
-export function AppContextMenu({ x, y, items, onClose, minWidth = 190, ariaLabel }: AppContextMenuProps) {
+export function AppContextMenu({
+    x,
+    y,
+    items,
+    onClose,
+    minWidth = 190,
+    ariaLabel,
+    floating = false,
+}: AppContextMenuProps) {
     const ref = useRef<HTMLDivElement | null>(null);
     const [position, setPosition] = useState<{ left: number; top: number; ready: boolean }>({
         left: x,
@@ -182,6 +201,7 @@ export function AppContextMenu({ x, y, items, onClose, minWidth = 190, ariaLabel
             role="menu"
             aria-label={ariaLabel}
             data-hs-context-menu="1"
+            data-hs-floating-menu={floating ? "1" : undefined}
             className={cx(
                 "fixed z-qt-menu rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg",
             )}
