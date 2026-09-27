@@ -81,14 +81,21 @@ pub struct ScanTarget {
 /// 情况在界面上长得一模一样（都是 0），用户只能看到"功能什么都不做"。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ScanEligibility {
+    /// 工程里的 Clip 总数（不受选区筛选影响）。
+    ///
+    /// 用来区分两件完全不同的事：**工程本身是空的**，还是**选区与工程对不上**。
+    /// 只看"命中 0 个"会把后者误报成前者、或反过来，并且都像是在怪用户的选区。
+    pub project_clips: usize,
     /// 命中筛选条件的 Clip 数。
     pub matched_clips: usize,
     /// 这些 Clip 里被检查的 Take 总数。
     pub takes_seen: usize,
     /// 因**没有音频源**而跳过的 Take 数。
     pub skipped_no_source: usize,
-    /// 因**可信的用户封印**而跳过的 Take 数。
+    /// 因**可信的用户封印**而跳过的 Take 数（只有自动扫描会跳过）。
     pub skipped_user_seal: usize,
+    /// 带着用户封印、但被**显式命令**纳入判定的 Take 数。
+    pub overrode_user_seal: usize,
 }
 
 /// [`collect_targets`] 的结果：候选 + 筛选统计。
@@ -137,15 +144,27 @@ fn take_audio_source(clip: &crate::state::Clip, take: &crate::state::ClipTake) -
 /// 工程。`include_settled` 为 `true` 时连"已定论"的 Take 也收（手动重新扫描：
 /// 用户显式要求重判），否则只收 [`channel_decision::needs_auto_scan`] 认可的
 /// 候选（后台扫描：只补没结论的）。
+///
+/// `respect_user_seal` 决定**用户的声道模式选择能不能否决这次扫描**：
+/// - `true`（自动扫描）：带可信封印的 Take 一律跳过 —— 后台流程绝不该悄悄
+///   推翻用户的选择；
+/// - `false`（显式命令）：封印不否决，但会被记成 [`ScanEligibility::overrode_user_seal`]
+///   以便如实汇报。用户此刻点的是"扫描假立体声并转换"，那本身就是一条更新的、
+///   更具体的指令，不该被一条旧设置挡掉（而且折叠只在 L≈R 成立时才发生，
+///   之后仍可一步撤销）。
 pub fn collect_targets(
     timeline: &crate::state::TimelineState,
     only_clip_ids: Option<&std::collections::HashSet<String>>,
     policy: &ChannelImportPolicy,
     include_settled: bool,
+    respect_user_seal: bool,
 ) -> TargetSelection {
     let policy_sig = policy.detect_options().signature();
     let mut targets = Vec::new();
-    let mut eligibility = ScanEligibility::default();
+    let mut eligibility = ScanEligibility {
+        project_clips: timeline.clips.len(),
+        ..ScanEligibility::default()
+    };
     for clip in &timeline.clips {
         if let Some(filter) = only_clip_ids {
             if !filter.contains(&clip.id) {
@@ -173,16 +192,16 @@ pub fn collect_targets(
                 eligibility.skipped_no_source += 1;
                 continue;
             };
-            // **可信**的用户封印无条件跳过：连"手动重新扫描"也不得覆盖用户的
-            // 真实选择（`include_settled` 只放宽"已定论"这一条，不是放宽用户
-            // 意图）。不可信的伪造封印（标着用户决定却没记选了什么）不算选择，
-            // 必须继续留在候选里被重新裁决 —— 否则它会让整个功能永久失效。
-            if take
+            // 用户封印：自动扫描一律让路；显式命令不否决，但如实记账。
+            let user_sealed = take
                 .channel_decision
-                .is_some_and(channel_decision::ChannelDecisionRecord::is_trusted_user_seal)
-            {
-                eligibility.skipped_user_seal += 1;
-                continue;
+                .is_some_and(channel_decision::ChannelDecisionRecord::is_trusted_user_seal);
+            if user_sealed {
+                if respect_user_seal {
+                    eligibility.skipped_user_seal += 1;
+                    continue;
+                }
+                eligibility.overrode_user_seal += 1;
             }
             let region = channel_policy::take_consumption_region(take);
             let region_q = crate::stereo_detect::quantize_region(region);
@@ -501,7 +520,7 @@ fn run_scan_pass(app: &tauri::AppHandle, generation: u64) {
 
     let targets = {
         let timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        collect_targets(&timeline, None, &policy, false)
+        collect_targets(&timeline, None, &policy, false, true)
     };
     let total = targets.targets.len();
     if total == 0 {
@@ -601,7 +620,7 @@ mod tests {
     ) -> Option<ApplyStats> {
         let targets = {
             let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-            collect_targets(&tl, None, policy, false)
+            collect_targets(&tl, None, policy, false, true)
         };
         let planned = plan(targets.targets, policy, false);
         apply_planned(state, &planned, generation, false)
@@ -628,7 +647,7 @@ mod tests {
             "前提：投影里仍有源（渲染路径看得到）"
         );
 
-        let selection = collect_targets(&tl, None, &policy, true);
+        let selection = collect_targets(&tl, None, &policy, true, true);
         assert_eq!(selection.targets.len(), 1, "投影里有源的 Take 必须仍是候选");
         assert_eq!(
             selection.targets[0].source_path.as_deref(),
@@ -654,7 +673,7 @@ mod tests {
             clip.takes.push(inactive);
             active_id
         };
-        let selection = collect_targets(&tl, None, &policy, true);
+        let selection = collect_targets(&tl, None, &policy, true, true);
         assert_eq!(selection.targets.len(), 1, "只有 active Take 是候选");
         assert_eq!(selection.targets[0].take_id, active_id);
         assert_eq!(
@@ -681,7 +700,7 @@ mod tests {
 
         let selection = {
             let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-            collect_targets(&tl, None, &policy, true)
+            collect_targets(&tl, None, &policy, true, true)
         };
         assert_eq!(selection.targets.len(), 1, "投影即唯一 Take，必须可被扫描");
 
@@ -705,7 +724,7 @@ mod tests {
         let mut tl = timeline_with_take(Some(std::path::Path::new("C:/audio/z.wav")));
         tl.clips[0].takes[0].source_path = Some("   ".into());
         tl.clips[0].source_path = None;
-        let selection = collect_targets(&tl, None, &policy, true);
+        let selection = collect_targets(&tl, None, &policy, true, true);
         assert!(selection.targets.is_empty());
         assert_eq!(selection.eligibility.skipped_no_source, 1);
     }
@@ -732,7 +751,8 @@ mod tests {
             clip.takes[0].channel_decision = Some(ChannelDecisionRecord::user(3));
         }
 
-        let selection = collect_targets(&tl, None, &policy, true);
+        let selection = collect_targets(&tl, None, &policy, true, true);
+        assert_eq!(selection.eligibility.project_clips, 3);
         assert_eq!(selection.eligibility.matched_clips, 3);
         assert_eq!(selection.eligibility.takes_seen, 3);
         assert_eq!(selection.eligibility.skipped_no_source, 1);
@@ -742,9 +762,51 @@ mod tests {
         // 选区与后端对不上时，matched_clips 为 0 —— 另一种完全不同的原因。
         let none: std::collections::HashSet<String> =
             ["does_not_exist".to_string()].into_iter().collect();
-        let unmatched = collect_targets(&tl, Some(&none), &policy, true);
+        let unmatched = collect_targets(&tl, Some(&none), &policy, true, true);
         assert_eq!(unmatched.eligibility.matched_clips, 0);
+        assert_eq!(
+            unmatched.eligibility.project_clips, 3,
+            "工程非空 ⇒ 这是'范围对不上'而不是'工程是空的'"
+        );
         assert!(unmatched.targets.is_empty());
+    }
+
+    #[test]
+    fn the_explicit_scan_overrides_a_user_seal_but_the_automatic_one_does_not() {
+        // 用户此刻点的是"扫描假立体声并转换"—— 那是一条更新的、更具体的指令，
+        // 不该被一条旧的声道模式设置挡掉（否则命令会一声不吭地什么都不做）。
+        // 而自动扫描（打开工程时的补漏）绝不该悄悄推翻用户的选择。
+        let policy = ChannelImportPolicy::default();
+        let path = write_wav("sealed_explicit.wav", true, 1);
+        let state = AppState::default();
+        {
+            let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            *tl = timeline_with_take(Some(&path));
+            crate::state::TimelineState::populate_clip_file_metadata(&mut tl.clips[0]);
+            tl.clips[0].takes[0].channel_decision = Some(ChannelDecisionRecord::user(0));
+        }
+
+        let automatic = {
+            let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            collect_targets(&tl, None, &policy, true, true)
+        };
+        assert!(automatic.targets.is_empty(), "自动扫描必须让路");
+        assert_eq!(automatic.eligibility.skipped_user_seal, 1);
+
+        let explicit = {
+            let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            collect_targets(&tl, None, &policy, true, false)
+        };
+        assert_eq!(explicit.targets.len(), 1, "显式命令不被旧设置挡掉");
+        assert_eq!(explicit.eligibility.overrode_user_seal, 1);
+        assert_eq!(explicit.eligibility.skipped_user_seal, 0);
+
+        // 而且折叠真的落地（一条撤销步可回退）。
+        let planned = plan(explicit.targets, &policy, true);
+        let stats = apply_planned(&state, &planned, None, true).expect("apply");
+        assert_eq!(stats.folded, 1);
+        assert_eq!(take0(&state).channel_mode, 2);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -752,10 +814,10 @@ mod tests {
         let policy = ChannelImportPolicy::default();
         let mut tl = timeline_with_take(Some(std::path::Path::new("C:/x.wav")));
         tl.clips[0].takes[0].channel_decision = Some(ChannelDecisionRecord::user(0));
-        let targets = collect_targets(&tl, None, &policy, false).targets;
+        let targets = collect_targets(&tl, None, &policy, false, true).targets;
         assert!(targets.is_empty(), "用户封印的 Take 不得进入候选");
         // 手动重扫（include_settled）也照样跳过。
-        assert!(collect_targets(&tl, None, &policy, true).targets.is_empty());
+        assert!(collect_targets(&tl, None, &policy, true, true).targets.is_empty());
     }
 
     #[test]
@@ -770,7 +832,7 @@ mod tests {
         };
 
         // 自动路径：off 就是不判定（符合"不自动转换"的语义）。
-        let auto = plan(collect_targets(&tl, None, &stored, false).targets, &stored, false);
+        let auto = plan(collect_targets(&tl, None, &stored, false, true).targets, &stored, false);
         assert!(
             auto.iter().all(|p| p.resolution.mode.is_none()),
             "off 时自动扫描不得折叠"
@@ -779,7 +841,7 @@ mod tests {
         // 显式命令：强制检测语义 ⇒ 假立体声必须被识别并折叠。
         let scan_policy = stored.for_explicit_scan();
         let explicit = plan(
-            collect_targets(&tl, None, &scan_policy, true).targets,
+            collect_targets(&tl, None, &scan_policy, true, true).targets,
             &scan_policy,
             false,
         );
@@ -800,7 +862,7 @@ mod tests {
         };
         let scan_policy = stored.for_explicit_scan();
         let planned = plan(
-            collect_targets(&tl, None, &scan_policy, true).targets,
+            collect_targets(&tl, None, &scan_policy, true, true).targets,
             &scan_policy,
             false,
         );
@@ -817,7 +879,7 @@ mod tests {
         let policy = ChannelImportPolicy::default();
         let tl = timeline_with_take(None);
         assert!(
-            collect_targets(&tl, None, &policy, false).targets.is_empty(),
+            collect_targets(&tl, None, &policy, false, true).targets.is_empty(),
             "无源 Take（MIDI / 空白 Clip）不属于声道折叠的适用范围"
         );
     }
@@ -843,7 +905,7 @@ mod tests {
         // 第二轮：仍然进候选（对比"已定论"的真立体声会被跳过）。
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(
-            collect_targets(&tl, None, &policy, false).targets.len(),
+            collect_targets(&tl, None, &policy, false, true).targets.len(),
             1,
             "pending 的 Take 必须保持可重试"
         );
@@ -867,7 +929,7 @@ mod tests {
 
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         assert!(
-            collect_targets(&tl, None, &policy, false).targets.is_empty(),
+            collect_targets(&tl, None, &policy, false, true).targets.is_empty(),
             "已定论的 Take 不该再进候选（否则每次打开都重解码）"
         );
         let _ = std::fs::remove_file(&path);
@@ -930,7 +992,7 @@ mod tests {
 
         {
             let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-            assert!(collect_targets(&tl, None, &policy, false).targets.is_empty());
+            assert!(collect_targets(&tl, None, &policy, false, true).targets.is_empty());
         }
         {
             let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
@@ -940,7 +1002,7 @@ mod tests {
         }
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(
-            collect_targets(&tl, None, &policy, false).targets.len(),
+            collect_targets(&tl, None, &policy, false, true).targets.len(),
             1,
             "消费区间变了 ⇒ 旧结论失效，必须重判"
         );
@@ -964,7 +1026,7 @@ mod tests {
         let targets = {
             let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
             // 手动重扫连"已定论"的 Take 也一并重判。
-            collect_targets(&tl, None, &policy, true).targets
+            collect_targets(&tl, None, &policy, true, true).targets
         };
         let planned = plan(targets, &policy, true);
         let stats = apply_planned(&state, &planned, None, true).expect("apply");
@@ -997,7 +1059,7 @@ mod tests {
 
         let targets = {
             let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-            collect_targets(&tl, None, &policy, true).targets
+            collect_targets(&tl, None, &policy, true, true).targets
         };
         let planned = plan(targets, &policy, true);
         let stats = apply_planned(&state, &planned, None, true).expect("apply");
@@ -1026,7 +1088,7 @@ mod tests {
         let only_first: std::collections::HashSet<String> =
             [tl.clips[0].id.clone()].into_iter().collect();
         assert_eq!(
-            collect_targets(&tl, Some(&only_first), &policy, false).targets.len(),
+            collect_targets(&tl, Some(&only_first), &policy, false, true).targets.len(),
             1
         );
     }

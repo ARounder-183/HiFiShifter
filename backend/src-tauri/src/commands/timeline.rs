@@ -1566,11 +1566,13 @@ pub(super) fn scan_and_convert_fake_stereo(
         let filter: Option<std::collections::HashSet<String>> = clip_ids
             .as_ref()
             .map(|ids| ids.iter().cloned().collect());
+        // 显式命令：用户的声道模式选择不否决本次扫描（见 `collect_targets`）。
         let selection = crate::commands::channel_scan::collect_targets(
             &tl,
             filter.as_ref(),
             &policy,
             true,
+            false,
         );
         (selection.targets, selection.eligibility)
     };
@@ -1636,10 +1638,12 @@ pub(super) fn scan_and_convert_fake_stereo(
                 Some(pending_files.clone())
             },
             eligibility: crate::models::FakeStereoScanEligibility {
+                project_clips: eligibility.project_clips,
                 matched_clips: eligibility.matched_clips,
                 takes_seen: eligibility.takes_seen,
                 skipped_no_source: eligibility.skipped_no_source,
                 skipped_user_seal: eligibility.skipped_user_seal,
+                overrode_user_seal: eligibility.overrode_user_seal,
             },
         }
     };

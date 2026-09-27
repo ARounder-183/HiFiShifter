@@ -5703,14 +5703,17 @@ const sessionSlice = createSlice({
                     pending?: number;
                     entries?: Array<{
                         verdict?: string;
-                        maxAbsDiff?: number;
-                        violatingRatio?: number;
+                        /** 后端 `snake_case` 序列化：字段名必须逐字一致。 */
+                        max_abs_diff?: number;
+                        violating_ratio?: number;
                     }>;
                     eligibility?: {
-                        matchedClips?: number;
-                        takesSeen?: number;
-                        skippedNoSource?: number;
-                        skippedUserSeal?: number;
+                        project_clips?: number;
+                        matched_clips?: number;
+                        takes_seen?: number;
+                        skipped_no_source?: number;
+                        skipped_user_seal?: number;
+                        overrode_user_seal?: number;
                     };
                 };
                 if (!payload.ok) {
@@ -5720,25 +5723,28 @@ const sessionSlice = createSlice({
                 const scanned = payload.scanned ?? 0;
                 const converted = payload.converted ?? 0;
                 const pending = payload.pending ?? 0;
+                const eligibility = payload.eligibility ?? {};
+                const overrode = eligibility.overrode_user_seal ?? 0;
 
-                // 一个候选都没有时，**必须说清为什么**。过去只会显示
-                // "0 take(s), 0 folded"，把三种完全不同的成因（选区与后端对不上、
-                // 音频块没有音频源、全都被用户显式设置过）糊成同一句话，用户只能
-                // 看到"这个功能什么都不做"。
+                // 一个候选都没有时，**按真实计数**说清为什么。过去这里会猜一个
+                // 原因，而计数本身因为字段名不一致恒为 0 —— 于是界面随口断言
+                // "选中的音频块在工程里找不到"，一句听起来像用户操作有误、
+                // 实际完全虚假的话。
                 if (scanned === 0) {
-                    const matchedClips = payload.eligibility?.matchedClips ?? 0;
-                    const noSource = payload.eligibility?.skippedNoSource ?? 0;
-                    const userSealed = payload.eligibility?.skippedUserSeal ?? 0;
-                    if (matchedClips === 0) {
-                        state.status = "Fake-stereo scan: selection not found";
-                    } else if (noSource > 0 && userSealed > 0) {
-                        state.status = `Fake-stereo scan: ${noSource} without a source, ${userSealed} already set by you`;
-                    } else if (userSealed > 0) {
-                        state.status = `Fake-stereo scan: ${userSealed} take(s) already set by you`;
+                    const projectClips = eligibility.project_clips ?? 0;
+                    const matched = eligibility.matched_clips ?? 0;
+                    const seen = eligibility.takes_seen ?? 0;
+                    const noSource = eligibility.skipped_no_source ?? 0;
+                    if (projectClips === 0) {
+                        state.status = "Fake-stereo scan: the project has no clips";
+                    } else if (matched === 0) {
+                        state.status = `Fake-stereo scan: range matches no clip (project has ${projectClips})`;
+                    } else if (seen === 0) {
+                        state.status = `Fake-stereo scan: ${matched} clip(s) in range have no takes`;
                     } else if (noSource > 0) {
                         state.status = `Fake-stereo scan: ${noSource} take(s) have no audio source`;
                     } else {
-                        state.status = "Fake-stereo scan: nothing to scan";
+                        state.status = "Fake-stereo scan: nothing to decide";
                     }
                     return;
                 }
@@ -5747,16 +5753,18 @@ const sessionSlice = createSlice({
                 // 正则）。"本次没读到"必须与"单声道、无事可做"区分开：前者下次
                 // 打开会自动重试，后者永远不会再判。
                 const pendingSuffix = pending > 0 ? `, ${pending} unreadable` : "";
+                const overrodeSuffix =
+                    overrode > 0 ? `, ${overrode} setting(s) overridden` : "";
                 let status = action.meta.arg.dryRun
-                    ? `Fake-stereo scan: ${scanned} take(s), ${converted} foldable${pendingSuffix}`
-                    : `Fake-stereo scan: ${scanned} take(s), ${converted} folded to mono${pendingSuffix}`;
+                    ? `Fake-stereo scan: ${scanned} take(s), ${converted} foldable${pendingSuffix}${overrodeSuffix}`
+                    : `Fake-stereo scan: ${scanned} take(s), ${converted} folded to mono${pendingSuffix}${overrodeSuffix}`;
                 // 一个都没折叠时，把"最接近假立体声"的那条素材的差异量级报出来：
                 // 用户据此判断该不该放宽容差。没有这个数字，"没折叠"和"不该折叠"
                 // 在界面上长得一模一样。
                 if (!action.meta.arg.dryRun && converted === 0) {
                     const nearest = (payload.entries ?? [])
                         .filter((entry) => entry.verdict === "trueStereo")
-                        .map((entry) => entry.maxAbsDiff)
+                        .map((entry) => entry.max_abs_diff)
                         .filter(
                             (diff): diff is number =>
                                 typeof diff === "number" && Number.isFinite(diff),

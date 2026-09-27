@@ -710,12 +710,8 @@ mod tests {
             finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 4);
 
         let policy = crate::config::channel_import_policy();
-        let targets = crate::commands::channel_scan::collect_targets(
-            &finalized,
-            None,
-            &policy,
-            false,
-        );
+        let targets =
+            crate::commands::channel_scan::collect_targets(&finalized, None, &policy, false, true);
         assert_eq!(targets.targets.len(), 1, "v4 的 Take 必须在扫描候选里");
         let planned = crate::commands::channel_scan::plan(targets.targets, &policy, false);
         assert_eq!(
@@ -790,7 +786,7 @@ mod tests {
         assert_eq!(record.chosen_mode, Some(0), "封印必须记得用户选了什么");
         let policy = crate::config::channel_import_policy();
         assert!(
-            crate::commands::channel_scan::collect_targets(&finalized, None, &policy, false)
+            crate::commands::channel_scan::collect_targets(&finalized, None, &policy, false, true)
                 .targets
                 .is_empty(),
             "用户真实选择过的 Take 不得进入自动扫描候选"
@@ -830,12 +826,8 @@ mod tests {
         // 清除之后，同一文件里的假立体声必须能被重新判定并折叠 —— 这就是
         // "右键菜单什么都没转换"的修复点。
         let policy = crate::config::channel_import_policy();
-        let targets = crate::commands::channel_scan::collect_targets(
-            &finalized,
-            None,
-            &policy,
-            true,
-        );
+        let targets =
+            crate::commands::channel_scan::collect_targets(&finalized, None, &policy, true, true);
         assert_eq!(targets.targets.len(), 1, "清掉伪造封印后 Take 必须重回候选");
         let planned = crate::commands::channel_scan::plan(targets.targets, &policy, false);
         assert_eq!(
@@ -869,7 +861,9 @@ mod tests {
         );
         let policy = crate::config::channel_import_policy();
         assert_eq!(
-            crate::commands::channel_scan::collect_targets(&finalized, None, &policy, false).targets.len(),
+            crate::commands::channel_scan::collect_targets(&finalized, None, &policy, false, true)
+                .targets
+                .len(),
             1,
             "未判定的 Take 必须在自动扫描候选里"
         );
@@ -952,8 +946,12 @@ mod tests {
             [clip.id.clone()].into_iter().collect();
         println!(
             "V4FLAT TARGETS(filtered)={} TARGETS(all)={}",
-            crate::commands::channel_scan::collect_targets(&fin, Some(&filter), &policy, true).targets.len(),
-            crate::commands::channel_scan::collect_targets(&fin, None, &policy, true).targets.len()
+            crate::commands::channel_scan::collect_targets(&fin, Some(&filter), &policy, true, true)
+            .targets
+            .len(),
+            crate::commands::channel_scan::collect_targets(&fin, None, &policy, true, true)
+            .targets
+            .len()
         );
         let _ = std::fs::remove_file(&wav);
     }

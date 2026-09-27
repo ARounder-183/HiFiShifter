@@ -1666,10 +1666,11 @@ export const jaJP = {
         "、{n} 件の素材を今回読み取れませんでした（次回起動時に再試行します）",
     status_fake_stereo_scan_nearest_hint:
         "。最も近い素材の差は {d} です（許容値を緩めることを検討してください）",
-    status_fake_stereo_scan_no_selection: "疑似ステレオのスキャン：選択したクリップがプロジェクト内に見つかりません（画面とプロジェクトが同期していない可能性があります）",
     status_fake_stereo_scan_no_source: "疑似ステレオのスキャン：{n} 件のテイクに音声ソースがありません",
-    status_fake_stereo_scan_user_sealed: "疑似ステレオのスキャン：{n} 件のテイクは設定済みのチャンネルモードを保持します",
-    status_fake_stereo_scan_no_candidates: "疑似ステレオのスキャン：{s} 件は音声ソースがなく、{u} 件は設定済みのチャンネルモードのため、判定対象がありません",
+    status_fake_stereo_scan_no_clips: "疑似ステレオのスキャン：プロジェクトにクリップがありません",
+    status_fake_stereo_scan_range_unmatched: "疑似ステレオのスキャン：スキャン範囲がプロジェクトと一致しません（プロジェクトに {p} 件）",
+    status_fake_stereo_scan_no_takes: "疑似ステレオのスキャン：範囲内の {c} 件のクリップにテイクがありません",
+    status_fake_stereo_scan_overridden_suffix: "。うち {n} 件は設定済みのチャンネルモードをスキャン結果で上書きしました（元に戻せます）",
     status_fake_stereo_scan_nothing: "疑似ステレオのスキャン：判定対象がありません",
     status_take_channel_mode_rejected: "テイクのチャンネルモード変更が拒否されました",
 

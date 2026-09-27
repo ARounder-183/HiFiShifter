@@ -23,11 +23,12 @@ const TEMPLATES: Record<string, string> = {
     status_fake_stereo_scan_folded_pending:
         "假立体声扫描：{n} 个 Take，{m} 个已折叠为单声道，{p} 个本次读不到",
     status_fake_stereo_scan_nearest_hint: "；最接近的一条差异为 {d}，可考虑放宽容差",
-    status_fake_stereo_scan_no_selection: "选中的音频块在工程里找不到",
+    status_fake_stereo_scan_no_clips: "工程里没有音频块",
+    status_fake_stereo_scan_range_unmatched: "扫描范围与工程对不上（工程共 {p} 个音频块）",
+    status_fake_stereo_scan_no_takes: "范围里的 {c} 个音频块没有 Take 记录",
     status_fake_stereo_scan_no_source: "{n} 个 Take 没有音频源",
-    status_fake_stereo_scan_user_sealed: "{n} 个 Take 已由你设置声道模式",
-    status_fake_stereo_scan_no_candidates: "{s} 个没有音频源、{u} 个已由你设置",
     status_fake_stereo_scan_nothing: "没有可判定的对象",
+    status_fake_stereo_scan_overridden_suffix: "；其中 {n} 个原本由你设置了声道模式，已覆盖",
 };
 
 const t = (key: string) => TEMPLATES[key] ?? `MISSING:${key}`;
@@ -102,46 +103,54 @@ describe("resolveStatusText", () => {
         });
 
         describe("zero candidates", () => {
-            // "0 个 Take" 必须说清原因，否则三种完全不同的成因在界面上长得一样。
-            it("explains a clip that has no audio source", () => {
+            // 这句话必须**按后端返回的真实计数**成句。过去的实现猜了一个原因，
+            // 而计数因字段名前后端不一致恒为 0 —— 于是界面随口断言
+            // "选中的音频块在工程里找不到"，一句听起来像用户操作有误、
+            // 实际完全虚假的话。
+            it("distinguishes an empty project", () => {
+                expect(resolve("Fake-stereo scan: the project has no clips")).toBe(
+                    "工程里没有音频块",
+                );
+            });
+
+            it("reports the project clip count when the range matches nothing", () => {
+                expect(resolve("Fake-stereo scan: range matches no clip (project has 42)")).toBe(
+                    "扫描范围与工程对不上（工程共 42 个音频块）",
+                );
+            });
+
+            it("reports clips that carry no takes", () => {
+                expect(resolve("Fake-stereo scan: 3 clip(s) in range have no takes")).toBe(
+                    "范围里的 3 个音频块没有 Take 记录",
+                );
+            });
+
+            it("reports takes with no audio source", () => {
                 expect(resolve("Fake-stereo scan: 4 take(s) have no audio source")).toBe(
                     "4 个 Take 没有音频源",
                 );
             });
 
-            it("explains takes the user already set", () => {
-                expect(resolve("Fake-stereo scan: 2 take(s) already set by you")).toBe(
-                    "2 个 Take 已由你设置声道模式",
-                );
-            });
-
-            it("explains a mix of both causes", () => {
-                expect(
-                    resolve("Fake-stereo scan: 4 without a source, 2 already set by you"),
-                ).toBe("4 个没有音频源、2 个已由你设置");
-            });
-
-            it("explains a selection the project does not contain", () => {
-                expect(resolve("Fake-stereo scan: selection not found")).toBe(
-                    "选中的音频块在工程里找不到",
-                );
-            });
-
-            it("falls back when there is nothing to explain", () => {
-                expect(resolve("Fake-stereo scan: nothing to scan")).toBe(
-                    "没有可判定的对象",
-                );
+            it("falls back to a neutral sentence", () => {
+                expect(resolve("Fake-stereo scan: nothing to decide")).toBe("没有可判定的对象");
             });
 
             it("leaves no placeholder unfilled", () => {
                 for (const status of [
+                    "Fake-stereo scan: range matches no clip (project has 42)",
+                    "Fake-stereo scan: 3 clip(s) in range have no takes",
                     "Fake-stereo scan: 4 take(s) have no audio source",
-                    "Fake-stereo scan: 2 take(s) already set by you",
-                    "Fake-stereo scan: 4 without a source, 2 already set by you",
                 ]) {
-                    expect(resolve(status)).not.toMatch(/\{[nsu]\}/);
+                    expect(resolve(status)).not.toMatch(/\{[npu]\}/);
                 }
             });
         });
+
+        it("reports how many user-set channel modes the scan overrode", () => {
+            expect(
+                resolve("Fake-stereo scan: 5 take(s), 3 folded to mono, 2 setting(s) overridden"),
+            ).toBe("假立体声扫描：5 个 Take，3 个已折叠为单声道；其中 2 个原本由你设置了声道模式，已覆盖");
+        });
+
     });
 });

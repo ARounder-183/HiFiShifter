@@ -672,12 +672,83 @@ pub struct FakeStereoScanPayload {
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct FakeStereoScanEligibility {
+    /// 工程里的 Clip 总数（不受选区筛选影响）。
+    pub project_clips: usize,
     /// 命中筛选条件的 Clip 数。
     pub matched_clips: usize,
     /// 这些 Clip 里被检查的 Take 总数。
     pub takes_seen: usize,
     /// 因没有音频源而跳过。
     pub skipped_no_source: usize,
-    /// 因用户已显式设置过声道模式而跳过。
+    /// 因用户已显式设置过声道模式而跳过（只有自动扫描会跳过）。
     pub skipped_user_seal: usize,
+    /// 带着用户设置、但被这次显式命令纳入判定的 Take 数。
+    pub overrode_user_seal: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 假立体声扫描载荷的**线上字段名**是前后端的硬契约，必须钉死。
+    ///
+    /// 教训：这两个结构带 `rename_all = "snake_case"`，而前端曾按 camelCase 读
+    /// （`eligibility.matchedClips`）。字段名对不上时读到的是 `undefined`，
+    /// 再被 `?? 0` 兜成 0 —— **界面会把"原因未知"显示成"选中的音频块找不到"**，
+    /// 一句听起来像用户操作有误、实际完全虚假的话。这类错误没有任何编译期
+    /// 信号，只能靠这里断言真实 JSON 键名。
+    #[test]
+    fn fake_stereo_scan_payload_wire_keys_are_pinned() {
+        let payload = FakeStereoScanPayload {
+            ok: true,
+            scanned: 3,
+            converted: 1,
+            pending: 2,
+            entries: vec![FakeStereoScanEntry {
+                clip_id: "c1".into(),
+                take_id: "t1".into(),
+                name: "V".into(),
+                verdict: "trueStereo".into(),
+                applied_mode: Some(2),
+                violating_ratio: Some(0.5),
+                max_abs_diff: Some(0.1),
+            }],
+            pending_files: Some(vec!["a.wav".into()]),
+            eligibility: FakeStereoScanEligibility {
+                project_clips: 2,
+                matched_clips: 1,
+                takes_seen: 3,
+                skipped_no_source: 1,
+                skipped_user_seal: 1,
+                overrode_user_seal: 0,
+            },
+        };
+        let value = serde_json::to_value(&payload).expect("serialize");
+
+        // 顶层：前端读 `scanned` / `converted` / `pending` / `pending_files`。
+        for key in ["ok", "scanned", "converted", "pending", "entries", "pending_files", "eligibility"] {
+            assert!(value.get(key).is_some(), "载荷必须带 `{key}` 键");
+        }
+        assert_eq!(value["scanned"], serde_json::json!(3));
+        assert_eq!(value["pending_files"], serde_json::json!(["a.wav"]));
+
+        // 逐条明细：前端读 `max_abs_diff` / `applied_mode`（snake_case！）。
+        let entry = &value["entries"][0];
+        for key in ["clip_id", "take_id", "name", "verdict", "applied_mode", "violating_ratio", "max_abs_diff"] {
+            assert!(entry.get(key).is_some(), "明细必须带 `{key}` 键");
+        }
+
+        // 去向统计：前端读 `matched_clips` / `takes_seen` / `skipped_*`。
+        let eligibility = &value["eligibility"];
+        for key in [
+            "project_clips",
+            "matched_clips",
+            "takes_seen",
+            "skipped_no_source",
+            "skipped_user_seal",
+            "overrode_user_seal",
+        ] {
+            assert!(eligibility.get(key).is_some(), "统计必须带 `{key}` 键");
+        }
+    }
 }

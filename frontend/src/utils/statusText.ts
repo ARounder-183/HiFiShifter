@@ -48,37 +48,36 @@ export function resolveStatusText(
         if (resolved !== base) return resolved + hint;
     }
 
-    // 假立体声扫描**一个候选都没有**时的原因（见 sessionSlice 的写入侧）。
-    // 这类结果过去和"扫了但没折叠"共用一句话，用户读不出真正的原因。
-    const noCandidates = status.match(
-        /^Fake-stereo scan: (?:(?:(\d+) without a source, (\d+) already set by you)|(?:(\d+) take\(s\) already set by you)|(?:(\d+) take\(s\) have no audio source))$/,
-    );
-    if (noCandidates) {
-        if (noCandidates[1] !== undefined) {
-            return t("status_fake_stereo_scan_no_candidates")
-                .replace("{s}", noCandidates[1])
-                .replace("{u}", noCandidates[2] ?? "0");
-        }
-        if (noCandidates[3] !== undefined) {
-            return t("status_fake_stereo_scan_user_sealed").replace("{n}", noCandidates[3]);
-        }
-        return t("status_fake_stereo_scan_no_source").replace("{n}", noCandidates[4] ?? "0");
+    // 假立体声扫描**一个候选都没有**时的原因。全部按后端返回的真实计数成句，
+    // 不做猜测 —— 猜出来的原因会随口断言"你的选区在工程里找不到"。
+    const noClips = status === "Fake-stereo scan: the project has no clips";
+    if (noClips) return t("status_fake_stereo_scan_no_clips");
+    const unmatched = status.match(/^Fake-stereo scan: range matches no clip \(project has (\d+)\)$/);
+    if (unmatched) {
+        return t("status_fake_stereo_scan_range_unmatched").replace("{p}", unmatched[1] ?? "0");
     }
-    if (status === "Fake-stereo scan: selection not found") {
-        return t("status_fake_stereo_scan_no_selection");
+    const noTakes = status.match(/^Fake-stereo scan: (\d+) clip\(s\) in range have no takes$/);
+    if (noTakes) {
+        return t("status_fake_stereo_scan_no_takes").replace("{c}", noTakes[1] ?? "0");
     }
-    if (status === "Fake-stereo scan: nothing to scan") {
+    const noSource = status.match(/^Fake-stereo scan: (\d+) take\(s\) have no audio source$/);
+    if (noSource) {
+        return t("status_fake_stereo_scan_no_source").replace("{n}", noSource[1] ?? "0");
+    }
+    if (status === "Fake-stereo scan: nothing to decide") {
         return t("status_fake_stereo_scan_nothing");
     }
 
-    // 假立体声扫描：两个数量 + 两种变体（试扫 / 实扫）+ 可选的"本次没读到"。
+    // 假立体声扫描：两个数量 + 两种变体（试扫 / 实扫）+ 可选的两个后缀
+    //（"本次没读到" / "覆盖了你原本设置的声道模式"）。
     // 形如 "Fake-stereo scan: 5 take(s), 3 folded to mono, 2 unreadable"。
     const scan = status.match(
-        /^Fake-stereo scan: (\d+) take\(s\), (\d+) (foldable|folded to mono)(?:, (\d+) unreadable)?$/,
+        /^Fake-stereo scan: (\d+) take\(s\), (\d+) (foldable|folded to mono)(?:, (\d+) unreadable)?(?:, (\d+) setting\(s\) overridden)?$/,
     );
     if (scan) {
         const foldable = scan[3] === "foldable";
         const unreadable = Number(scan[4] ?? 0);
+        const overridden = Number(scan[5] ?? 0);
         const key = foldable
             ? unreadable > 0
                 ? "status_fake_stereo_scan_foldable_pending"
@@ -86,10 +85,17 @@ export function resolveStatusText(
             : unreadable > 0
               ? "status_fake_stereo_scan_folded_pending"
               : "status_fake_stereo_scan_folded";
-        return t(key)
+        let text = t(key)
             .replace("{n}", scan[1] ?? "0")
             .replace("{m}", scan[2] ?? "0")
             .replace("{p}", String(unreadable));
+        if (overridden > 0) {
+            text += t("status_fake_stereo_scan_overridden_suffix").replace(
+                "{n}",
+                String(overridden),
+            );
+        }
+        return text;
     }
 
     // 带数量的状态：提取数字回填占位符模板（如 "Waveform cache cleared (3 files)"）。

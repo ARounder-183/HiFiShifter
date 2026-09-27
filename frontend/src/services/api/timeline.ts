@@ -33,10 +33,17 @@ export interface SearchSourceFileMatchesResult {
     matches: Record<string, SourceFileMatchCandidate[]>;
 }
 
-/** 假立体声扫描的逐 Take 明细（后端 `FakeStereoScanEntry`）。 */
+/**
+ * 假立体声扫描的逐 Take 明细（后端 `FakeStereoScanEntry`）。
+ *
+ * ★ 字段名必须与后端序列化**逐字一致**（`rename_all = "snake_case"`）。写成
+ * camelCase 时读到的是 `undefined`，再被 `?? 0` 兜底 —— 界面于是把"原因未知"
+ * 显示成一句具体但**虚假**的解释。这类错误没有编译期信号，后端有
+ * `models::tests::fake_stereo_scan_payload_wire_keys_are_pinned` 钉住键名。
+ */
 export interface FakeStereoScanEntry {
-    clipId: string;
-    takeId: string;
+    clip_id: string;
+    take_id: string;
     name: string;
     /**
      * 判定原因：`mono` / `fakeStereo` / `trueStereo` / `pending` /
@@ -44,34 +51,38 @@ export interface FakeStereoScanEntry {
      */
     verdict: string;
     /** 本次实际写入的声道模式（缺省 = 未改动）。 */
-    appliedMode?: number;
+    applied_mode?: number;
     /**
      * 判定为真立体声时的诊断证据：超差样本占比（0..1）。
      *
      * `0.0001` 表示万分之一的样本超差（很可能只是编解码残留，放宽容差就能
      * 折叠）；`0.4` 表示四成样本超差（确实是立体声）。
      */
-    violatingRatio?: number;
+    violating_ratio?: number;
     /** 判定为真立体声时观测到的最大绝对差（满幅为 1）。 */
-    maxAbsDiff?: number;
+    max_abs_diff?: number;
 }
 
 /**
  * 扫描候选的筛选去向（后端 `FakeStereoScanEligibility`）。
  *
- * `scanned === 0` 时用它解释**为什么**一个候选都没有：选区与后端对不上、选中的
+ * `scanned === 0` 时用它解释**为什么**一个候选都没有：选区与工程对不上、选中的
  * 音频块确实没有音频源、还是全都被用户显式设置过声道模式。没有这份统计，三种
  * 情况在界面上长得一模一样，用户只能看到"这个功能什么都不做"。
+ *
+ * 字段名与后端 `snake_case` 序列化逐字一致（见 `FakeStereoScanEntry` 的说明）。
  */
 export interface FakeStereoScanEligibility {
     /** 命中筛选条件的 Clip 数。 */
-    matchedClips: number;
+    matched_clips: number;
     /** 这些 Clip 里被检查的 Take 总数。 */
-    takesSeen: number;
+    takes_seen: number;
     /** 因没有音频源而跳过。 */
-    skippedNoSource: number;
-    /** 因用户已显式设置过声道模式而跳过。 */
-    skippedUserSeal: number;
+    skipped_no_source: number;
+    /** 因用户已显式设置过声道模式而跳过（只有自动扫描会跳过）。 */
+    skipped_user_seal: number;
+    /** 带着用户设置、但被这次显式命令纳入判定的 Take 数。 */
+    overrode_user_seal: number;
 }
 
 /** 假立体声扫描结果（后端 `FakeStereoScanPayload`）。 */
@@ -90,7 +101,7 @@ export interface FakeStereoScanResult {
     pending: number;
     entries: FakeStereoScanEntry[];
     /** 待重试的源文件路径（去重）。 */
-    pendingFiles?: string[];
+    pending_files?: string[];
     /** 候选筛选的去向统计。 */
     eligibility: FakeStereoScanEligibility;
 }
