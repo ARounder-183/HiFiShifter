@@ -668,7 +668,7 @@ export const zhTW = {
         "視窗沿素材的消費區間均勻展開，首尾皆涵蓋；0 表示不取樣、掃描整個區間。",
     clip_channel_import_tolerance: "容差",
     clip_channel_import_tolerance_hint:
-        "左右聲道的允許差異（滿幅百分比）。0 = 完全一致；0.1%（預設）≈ -60 dBFS。有損編碼解碼後左右會有微小差異，容差太嚴會漏判。可調範圍 0~100。",
+        "左右聲道的允許差異（滿幅百分比）。0 = 完全一致；0.1%（預設）≈ -60 dBFS。有損編碼解碼後左右會有微小差異，容差太嚴會漏判。可調範圍 0~100%。",
     clip_channel_import_save: "儲存",
     clip_take_remove: "刪除 Take",
     clip_take_explode: "將 Take 展開為獨立音訊塊",
@@ -1606,9 +1606,11 @@ export const zhTW = {
     status_fake_stereo_scan_rejected: "假立體聲掃描被拒絕",
     status_fake_stereo_scan_foldable: "假立體聲掃描：{n} 個 Take，{m} 個可折疊",
     status_fake_stereo_scan_folded: "假立體聲掃描：{n} 個 Take，{m} 個已折疊為單聲道",
-    status_fake_stereo_scan_foldable_pending: "假立體聲掃描：{n} 個 Take，{m} 個可折疊，{p} 個本次讀不到（下次開啟會自動重試）",
-    status_fake_stereo_scan_folded_pending: "假立體聲掃描：{n} 個 Take，{m} 個已折疊為單聲道，{p} 個本次讀不到（下次開啟會自動重試）",
-    status_channel_scan_folded: "已自動折疊 {n} 個音訊塊為單聲道（渲染耗時減半）",
+    status_fake_stereo_scan_foldable_pending:
+        "假立體聲掃描：{n} 個 Take，{m} 個可折疊，{p} 個本次讀不到（下次開啟會自動重試）",
+    status_fake_stereo_scan_folded_pending:
+        "假立體聲掃描：{n} 個 Take，{m} 個已折疊為單聲道，{p} 個本次讀不到（下次開啟會自動重試）",
+    status_channel_scan_folded: "已自動折疊 {n} 個音訊塊為單聲道",
     status_channel_scan_pending: "，{n} 個素材本次讀不到，下次開啟會自動重試",
     status_fake_stereo_scan_nearest_hint: "；最接近假立體聲的一條差異為 {d}，可考慮放寬容差",
     status_take_channel_mode_rejected: "Take 聲道模式修改被拒絕",

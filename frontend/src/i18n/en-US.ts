@@ -828,7 +828,7 @@ export const enUS = {
         "Windows spread evenly across the material's consumed range, always covering both ends. 0 scans the whole range without sampling.",
     clip_channel_import_tolerance: "Tolerance",
     clip_channel_import_tolerance_hint:
-        "Allowed difference between channels, as a percentage of full scale. 0 = sample-exact; 0.1% (default) ≈ -60 dBFS. Lossy codecs leave tiny differences after decoding, so too strict a tolerance misses folds. Adjustable range: 0-100.",
+        "Allowed difference between channels, as a percentage of full scale. 0 = sample-exact; 0.1% (default) ≈ -60 dBFS. Lossy codecs leave tiny differences after decoding, so too strict a tolerance misses folds. Adjustable range: 0-100%.",
     clip_channel_import_save: "Save",
     clip_take_remove: "Delete Take",
     clip_take_explode: "Explode Takes into Clips",
@@ -1780,11 +1780,14 @@ export const enUS = {
     status_fake_stereo_scan_rejected: "Fake-stereo scan rejected",
     status_fake_stereo_scan_foldable: "Fake-stereo scan: {n} take(s), {m} foldable",
     status_fake_stereo_scan_folded: "Fake-stereo scan: {n} take(s), {m} folded to mono",
-    status_fake_stereo_scan_foldable_pending: "Fake-stereo scan: {n} take(s), {m} foldable, {p} unreadable (retried on next open)",
-    status_fake_stereo_scan_folded_pending: "Fake-stereo scan: {n} take(s), {m} folded to mono, {p} unreadable (retried on next open)",
-    status_channel_scan_folded: "Folded {n} clip(s) to mono automatically (halves render time)",
+    status_fake_stereo_scan_foldable_pending:
+        "Fake-stereo scan: {n} take(s), {m} foldable, {p} unreadable (retried on next open)",
+    status_fake_stereo_scan_folded_pending:
+        "Fake-stereo scan: {n} take(s), {m} folded to mono, {p} unreadable (retried on next open)",
+    status_channel_scan_folded: "Folded {n} clip(s) to mono automatically",
     status_channel_scan_pending: ", {n} source(s) unreadable — retried on next open",
-    status_fake_stereo_scan_nearest_hint: "; closest match differs by {d} — consider a looser tolerance",
+    status_fake_stereo_scan_nearest_hint:
+        "; closest match differs by {d} — consider a looser tolerance",
     status_take_channel_mode_rejected: "Take channel mode rejected",
 
     // ── Benchmark ────────────────────────────────────────────────────────
