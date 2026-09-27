@@ -12,7 +12,6 @@ import {
     duplicateTrackRemote,
     refreshRuntime,
     clearWaveformCacheRemote,
-    clearRenderCacheRemote,
     persistUiSettings,
     undoRemote,
     redoRemote,
@@ -919,9 +918,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     </DropdownMenu.Item>
                     <DropdownMenu.Item onSelect={() => void dispatch(clearWaveformCacheRemote())}>
                         {t("menu_clear_waveform_cache")}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => void dispatch(clearRenderCacheRemote())}>
-                        {tAny("menu_clear_render_cache")}
                     </DropdownMenu.Item>
                 </DropdownMenu.Content>
             </DropdownMenu.Root>

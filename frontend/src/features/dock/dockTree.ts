@@ -356,16 +356,22 @@ export function findParentSplit(node: DockNode, zoneId: string): DockSplitNode |
 /**
  * 把窗体放到目标位置。
  *
- * `target` 有两种形态：并入某个标签组（可指定插入下标），或在某个标签组的
- * 某一侧拆出新组。调用方负责先把窗体从旧位置摘除（见 `moveForm`）。
+ * `target` 有三种形态：并入某个标签组（可指定插入下标）、在某个标签组的
+ * 某一侧拆出新组、或在**整个工作区**的某一侧拆出贯通全高/全宽的新组
+ * （根级落点，`{kind:"root"}` —— 拖到停靠区外缘感应带时用，见
+ * `buildRootEdgeZones`）。调用方负责先把窗体从旧位置摘除（见 `moveForm`）。
  */
 export type DockInsertTarget =
     | { kind: "tab"; tabsetId: string; index?: number }
-    | { kind: "split"; tabsetId: string; side: "left" | "right" | "top" | "bottom" };
+    | { kind: "split"; tabsetId: string; side: "left" | "right" | "top" | "bottom" }
+    | { kind: "root"; side: "left" | "right" | "top" | "bottom" };
 
 export function insertForm(tree: DockNode, formId: string, target: DockInsertTarget): DockNode {
     if (target.kind === "tab") {
         return addFormToTabset(tree, target.tabsetId, formId, target.index);
+    }
+    if (target.kind === "root") {
+        return splitRootWith(tree, formId, target.side);
     }
     return splitTabsetWith(tree, target.tabsetId, formId, target.side);
 }
@@ -390,6 +396,8 @@ export function moveForm(tree: DockNode, formId: string, target: DockInsertTarge
 
     // 无源（浮动态）：没有"摘除"这一步，直接插入。
     if (!source) {
+        // 根级落点不以任何标签组为参照，摘除与否都只对根做拆分。
+        if (target.kind === "root") return insertForm(tree, formId, target);
         if (findZone(tree, target.tabsetId)) return insertForm(tree, formId, target);
         // 目标组已不存在（浮窗被拖到刚被剪掉的区域）：退化为并入第一个标签组。
         const fallback = collectTabsets(tree)[0];
@@ -403,6 +411,9 @@ export function moveForm(tree: DockNode, formId: string, target: DockInsertTarge
 
     const pruned = removeForm(tree, formId);
     if (pruned === null) return tree;
+
+    // 根级落点：以剪枝后的根为参照拆分（它就是用户此刻看到的全部停靠区）。
+    if (target.kind === "root") return insertForm(pruned, formId, target);
 
     // 目标组可能因摘除而被剪掉（源组就是目标组的情况上面已排除）。
     if (!findZone(pruned, target.tabsetId)) {

@@ -179,10 +179,6 @@
     opacity: 0.45;
 }
 
-.hs-dock-tab[data-dock-target="true"] {
-    box-shadow: inset 2px 0 0 var(--accent-9);
-}
-
 .hs-dock-tab-label {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -435,6 +431,12 @@
    语义仍然一眼可辨，但不再以可读性为代价。 */
 .hs-dock-ghost[data-intent="float"] {
     border-style: dashed;
+    border-color: var(--qt-text-muted);
+}
+
+/* 重排（源标签条内调整顺序）：实线灰边 —— 既不像"停靠"那样强调，也不像
+   "浮动"那样虚线示警；顺序本身在标签条里实时变化，幽灵只是安静地随行。 */
+.hs-dock-ghost[data-intent="reorder"] {
     border-color: var(--qt-text-muted);
 }
 

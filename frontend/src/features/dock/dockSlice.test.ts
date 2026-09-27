@@ -1,6 +1,7 @@
 import { beforeEach, test } from "vitest";
 
 import reducer, {
+    applyDockPreset,
     closeForm,
     dockFormTo,
     floatForm,
@@ -8,6 +9,8 @@ import reducer, {
     markFormsMounted,
     mergeFormInto,
     openPanel,
+    resetDockLayout,
+    saveDockPreset,
     setDockLayout,
     setGutterSize,
     splitFormTo,
@@ -558,5 +561,32 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
             "([timeline]|[paramEditor])",
             "invalid layout rejected",
         );
+    }
+
+    // ── 重置布局：回到出厂排布，但**预设保留**（确认对话框的承诺）──
+    //
+    // 预设是用户的资产，不属于"被重置的排布"。activePreset 则必须清空：
+    // 出厂布局不属于任何预设，保留旧值会让布局菜单错误地勾选它。
+    {
+        let state = reducer(undefined, syncRegisteredPanels());
+        state = reducer(state, openPanel({ panelId: "fileBrowser" }));
+        state = reducer(state, saveDockPreset("mine"));
+        assert(state.layout.presets?.["mine"] !== undefined, "preset saved");
+        assertEqual(state.layout.activePreset, "mine", "the saved preset becomes active");
+        const presetTree = state.layout.presets!["mine"].tree;
+
+        state = reducer(state, resetDockLayout());
+        assertEqual(shape(state.layout.tree), "([timeline]|[paramEditor])", "tree back to factory");
+        assert(
+            state.layout.presets?.["mine"] !== undefined,
+            "presets survive the reset",
+        );
+        assertEqual(state.layout.activePreset, null, "no preset is active after reset");
+
+        // 重置后仍能一键回到自己的排布：树与保存时一致，窗体重新可见。
+        state = reducer(state, applyDockPreset("mine"));
+        assertEqual(shape(state.layout.tree), shape(presetTree), "preset re-applies its tree");
+        assertEqual(state.layout.activePreset, "mine", "the re-applied preset is active");
+        assert(isFormVisible(state.layout, "fileBrowser"), "the preset's forms are visible");
     }
 });

@@ -198,6 +198,8 @@ export const zhCN = {
     dock_dock_hint: "按住 {modifier} 可停靠",
     dock_dock_hint_always: "拖到目标位置即可停靠",
     dock_hint_dock: "停靠到此处",
+    dock_hint_reorder: "调整标签顺序",
+    dock_hint_root_dock: "贯通整侧停靠",
     dock_hint_float: "浮动",
     dock_hint_snapback: "松开取消",
     dock_side_left: "左侧",

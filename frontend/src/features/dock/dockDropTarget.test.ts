@@ -1,7 +1,9 @@
 import { test } from "vitest";
 
 import {
+    buildRootEdgeZones,
     clampFloatRect,
+    DOCK_ROOT_ZONE_ID,
     resolveFloatNearRect,
     resolveFloatRect,
     dropPreviewRect,
@@ -293,5 +295,51 @@ test("features/dock/dockDropTarget.test.ts scripted checks", async () => {
             { x: 100, y: 8, w: 420, h: 704 },
             "an oversized panel is shrunk and kept inside",
         );
+    }
+
+    // ── 根级边缘带（贯通整侧的合成 Zone）────────────────────────
+    {
+        const root = { x: 0, y: 0, w: 1000, h: 800 };
+        const zones = buildRootEdgeZones(root, 28);
+        assertEqual(zones.length, 4, "four edge bands");
+
+        // 细带贴根矩形外缘，左右带贯通全高、上下带让出左右两角（互不重叠）。
+        assertEqual(zones[0].rect, { x: 0, y: 0, w: 28, h: 800 }, "left band");
+        assertEqual(zones[1].rect, { x: 972, y: 0, w: 28, h: 800 }, "right band");
+        assertEqual(zones[2].rect, { x: 28, y: 0, w: 944, h: 28 }, "top band");
+        assertEqual(zones[3].rect, { x: 28, y: 772, w: 944, h: 28 }, "bottom band");
+
+        // 每条带固定自己的部位、以整个根矩形为预览/提交基准。
+        const sides = ["left", "right", "top", "bottom"] as const;
+        for (const [index, side] of sides.entries()) {
+            assertEqual(zones[index].fixedZone, side, `band ${side} has a fixed zone`);
+            assertEqual(zones[index].previewRect, root, `band ${side} previews the root rect`);
+            assertEqual(zones[index].zoneId, DOCK_ROOT_ZONE_ID, "all bands share the root id");
+        }
+
+        // 角落（两带交界）按"面积最小者优先"取更窄的那条：左上角命中左带。
+        assertEqual(
+            pickDropTarget(zones, { x: 5, y: 5 })?.fixedZone,
+            "left",
+            "corner resolves to the taller (smaller-area) band",
+        );
+
+        // 细带压过与之重叠的标签组大矩形：贴右缘的指针表达"拆整个停靠区"。
+        const withTabset = [{ zoneId: "z1", rect: { x: 0, y: 0, w: 1000, h: 400 } }, ...zones];
+        assertEqual(
+            pickDropTarget(withTabset, { x: 990, y: 200 })?.fixedZone,
+            "right",
+            "the root band wins over the tabset at the shared outer edge",
+        );
+        // 感应带之外的标签组内部仍以标签组为准（它才是面积最小者）。
+        assertEqual(
+            pickDropTarget(withTabset, { x: 900, y: 200 })?.zoneId,
+            "z1",
+            "inside the tabset the ordinary zone still wins",
+        );
+
+        // 极小停靠区：感应带收缩，中央区不会被四条带吃光。
+        const tiny = buildRootEdgeZones({ x: 0, y: 0, w: 40, h: 40 }, 28);
+        assertEqual(tiny[0].rect.w, 10, "band shrinks on a tiny root (short side / 4)");
     }
 });

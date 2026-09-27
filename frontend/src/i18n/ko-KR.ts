@@ -285,6 +285,8 @@ export const koKR = {
     dock_dock_hint: "{modifier}를 누르면 도킹",
     dock_dock_hint_always: "대상에 놓으면 도킹",
     dock_hint_dock: "여기에 도킹",
+    dock_hint_reorder: "탭 순서 변경",
+    dock_hint_root_dock: "전체 측면에 도킹",
     dock_hint_float: "플로팅",
     dock_hint_snapback: "놓으면 취소",
     dock_side_left: "왼쪽",

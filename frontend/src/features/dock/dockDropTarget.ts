@@ -10,8 +10,9 @@
  * - 否则落到**最近的那条边** → 在该边方向拆出新组；
  * - 指针不在任何 Zone 内 → 由调用方决定浮动。
  *
- * 分割产生的 Zone 矩形互不重叠（分割即划分），所以"指针落在哪个 Zone"最多
- * 只有一个答案，无需按面积排序去重。
+ * 分割产生的标签组 Zone 矩形互不重叠（分割即划分）；根级边缘带是有意叠加在
+ * 外缘之上的合成 Zone，重叠时按"面积最小者优先"取最具体的落点（见
+ * `pickDropTarget`）。
  */
 
 import type { DockDropZone, DockRect } from "./dockTypes";
@@ -53,13 +54,89 @@ export function resolveDropZone(
 export interface DockZoneRect {
     zoneId: string;
     rect: DockRect;
+    /**
+     * 预解析的落点部位。普通标签组 Zone 省略它（落点按指针在矩形内的位置
+     * 现场解析）；**合成 Zone**（根级边缘带，见 `buildRootEdgeZones`）整个
+     * 矩形只对应一个部位，必须在这里固定 —— 对着一条"右侧带"跑 `resolveDropZone`
+     * 会因为带内位置不同解析出 left/top 等错误结果。
+     */
+    fixedZone?: DockDropZone;
+    /**
+     * 提交给覆盖层/提交逻辑的矩形（缺省 = `rect`）。根级边缘带的命中矩形是
+     * 一条细带，但预览与提交语义都以**整个根矩形**为基准 —— "贯通整侧"的
+     * 半边高亮必须从根矩形算出。
+     */
+    previewRect?: DockRect;
+}
+
+/**
+ * 根级边缘带的合成 Zone id。四个方向的带共用它：提交与提示只需要知道
+ * "这是根级落点"，具体侧向从 `zone`（由 `fixedZone` 解析而来）读取。
+ */
+export const DOCK_ROOT_ZONE_ID = "__dock_root__";
+
+/**
+ * 构造根级边缘带的四个合成 Zone：贴着停靠区外缘的一圈感应带，命中即表示
+ * "把窗体拆到整个停靠区的这一侧"（贯通全高/全宽），而不是拆开指针恰好
+ * 悬停的那个最内层标签组。
+ *
+ * 【为什么需要】嵌套布局里标签组只铺满自己所在的分支。默认布局（上下分布）
+ * 拆出的"右侧新组"若以标签组为参照，只能贴着上块或下块的半高右侧；用户
+ * 想要的"两者共同的右侧"必须以**根**为参照拆分。外缘感应带就是为这个意图
+ * 预留的：贴边越狠，拆得越"外"。
+ *
+ * 【与标签组感应带的关系】两组带在"标签组边缘恰好贴着停靠区边缘"时必然
+ * 重叠，这是位置判定模型无法消除的物理歧义，此处把外侧让给根级带：贴到
+ * 应用最边缘（用户做"贯穿全高/全宽"时自然会贴边）得到根级拆分，标签组的
+ * 四边拆分在其内侧感应带照常可用。
+ *
+ * 四条带互不重叠（左右带贯通全高、上下带让出左右两角），任一指针位置最多
+ * 命中一条；`pickDropTarget` 的"面积最小者优先"规则恰好让细带压过下方
+ * 标签组的大矩形，不需要额外优先级逻辑。
+ */
+export function buildRootEdgeZones(
+    rootRect: DockRect,
+    edgeBandPx: number,
+): DockZoneRect[] {
+    if (rootRect.w <= 0 || rootRect.h <= 0) return [];
+    // 与 resolveDropZone 同样的钳制思路：停靠区极小时按短边收缩，保证中央
+    // 区域（并入标签组）永远还有立足之地。
+    const band = Math.max(8, Math.min(edgeBandPx, Math.min(rootRect.w, rootRect.h) * 0.25));
+    const innerX = rootRect.x + band;
+    const innerW = Math.max(0, rootRect.w - band * 2);
+    const left: DockZoneRect = {
+        zoneId: DOCK_ROOT_ZONE_ID,
+        fixedZone: "left",
+        previewRect: rootRect,
+        rect: { x: rootRect.x, y: rootRect.y, w: band, h: rootRect.h },
+    };
+    const right: DockZoneRect = {
+        zoneId: DOCK_ROOT_ZONE_ID,
+        fixedZone: "right",
+        previewRect: rootRect,
+        rect: { x: rootRect.x + rootRect.w - band, y: rootRect.y, w: band, h: rootRect.h },
+    };
+    const top: DockZoneRect = {
+        zoneId: DOCK_ROOT_ZONE_ID,
+        fixedZone: "top",
+        previewRect: rootRect,
+        rect: { x: innerX, y: rootRect.y, w: innerW, h: band },
+    };
+    const bottom: DockZoneRect = {
+        zoneId: DOCK_ROOT_ZONE_ID,
+        fixedZone: "bottom",
+        previewRect: rootRect,
+        rect: { x: innerX, y: rootRect.y + rootRect.h - band, w: innerW, h: band },
+    };
+    return [left, right, top, bottom];
 }
 
 /**
  * 从全部 Zone 中选出指针所在的那个。
  *
- * 矩形互不重叠，所以取首个命中即可；仍然做了"面积最小者优先"的兜底，
- * 以容忍将来引入重叠容器（如浮动 Zone 与停靠 Zone 同时参与判定）时的歧义。
+ * 标签组 Zone 互不重叠；根级边缘带（`buildRootEdgeZones`）会有意叠在标签组
+ * 的外缘之上 —— 取"面积最小者优先"：细带压过大矩形，贴边的指针表达的是
+ * "拆整个停靠区"而不是"拆这个标签组"。
  */
 export function pickDropTarget(
     zones: readonly DockZoneRect[],

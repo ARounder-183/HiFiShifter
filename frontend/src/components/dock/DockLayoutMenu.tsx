@@ -107,9 +107,7 @@ function DockWindowsMenu({ withCheck }: DockLayoutMenusProps) {
                 {entries.map((entry) => (
                     <DropdownMenu.Item
                         key={entry.panelId}
-                        onSelect={() =>
-                            togglePanelVisible(dispatch, store.getState, entry.panelId)
-                        }
+                        onSelect={() => togglePanelVisible(dispatch, store.getState, entry.panelId)}
                     >
                         {withCheck(entry.visible, tAny(entry.titleKey))}
                     </DropdownMenu.Item>
@@ -338,7 +336,7 @@ export function DockLayoutDialogs() {
                     <Flex justify="end" gap="2" mt="4">
                         <Dialog.Close>
                             <Button variant="soft" color="gray">
-                                {t("cancel")}
+                                {tAny("cancel")}
                             </Button>
                         </Dialog.Close>
                         <Button
@@ -347,7 +345,7 @@ export function DockLayoutDialogs() {
                                 closeDialog();
                             }}
                         >
-                            {"OK"}
+                            {tAny("ok")}
                         </Button>
                     </Flex>
                 </Dialog.Content>

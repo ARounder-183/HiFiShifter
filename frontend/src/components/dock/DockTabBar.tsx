@@ -8,7 +8,7 @@
  * 3. 右键标签 → 菜单（重命名 / 浮动 / 停靠 / 关闭）。
  */
 
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useState, useSyncExternalStore } from "react";
 import {
     ChevronDownIcon,
     ChevronUpIcon,
@@ -18,11 +18,7 @@ import {
 } from "@radix-ui/react-icons";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
-import {
-    getDockDragState,
-    subscribeDockDrag,
-    type DockDragState,
-} from "../../features/dock/dockDragStore";
+import { getDockDragState, subscribeDockDrag } from "../../features/dock/dockDragStore";
 import {
     closeForm,
     floatForm,
@@ -70,12 +66,11 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
     const doubleClickAction = useAppSelector((s) => s.dock.settings.doubleClickHeaderAction);
     const forms = useAppSelector((s) => s.dock.layout.forms);
 
-    // 拖拽中高亮"会插到哪个标签旁边"。只有本组自己在拖时才需要。
+    // 拖拽中的视觉反馈只有两处：被拖标签自身（`data-dragging` 置灰），以及
+    // **实时的顺序变化** —— 指针在源标签条带内每跨过一个相邻标签的中线，控制器
+    // 就提交一次顺序（见 `dockDragController.maybeLiveReorder`）。不再画"插入
+    // 位置"指示线：顺序真的在动，指示线只会成为多余的第三种反馈。
     const drag = useSyncExternalStore(subscribeDockDrag, getDockDragState, getDockDragState);
-    const dragIndex = useMemo(
-        () => resolveInsertIndex(drag, node, barElement),
-        [drag, node, barElement],
-    );
 
     /** 双击标签的行为由设置决定（默认浮动/停靠切换）。 */
     const onTabDoubleClick = useCallback(
@@ -124,7 +119,7 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                     data-collapsed={node.collapsed ? "true" : "false"}
                     role="tablist"
                 >
-                    {node.tabs.map((formId, index) => {
+                    {node.tabs.map((formId) => {
                         const form = forms[formId];
                         const definition = form ? getPanel(form.panelId) : undefined;
                         const title =
@@ -137,7 +132,6 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                                 className="hs-dock-tab"
                                 data-dock-tab={formId}
                                 data-active={active ? "true" : "false"}
-                                data-dock-target={dragIndex === index ? "true" : "false"}
                                 data-dragging={
                                     drag?.started && drag.formId === formId ? "true" : "false"
                                 }
@@ -255,36 +249,4 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
             ) : null}
         </>
     );
-}
-
-/**
- * 拖拽中"会插到第几个标签"的推算。
- *
- * 只在拖拽源与本组相同时给出提示：跨组拖拽的落点由覆盖层的半透明预览表达，
- * 两者同时高亮会让用户以为要发生两件事。
- */
-function resolveInsertIndex(
-    drag: DockDragState | null,
-    node: DockTabsetNode,
-    bar: HTMLElement | null,
-): number | null {
-    if (!drag?.started || drag.mode !== "tab" || !bar) return null;
-    if (!node.tabs.includes(drag.formId)) return null;
-
-    const rect = bar.getBoundingClientRect();
-    if (
-        drag.pointerX < rect.left - 12 ||
-        drag.pointerX > rect.right + 12 ||
-        drag.pointerY < rect.top - 12 ||
-        drag.pointerY > rect.bottom + 12
-    ) {
-        return null;
-    }
-
-    const tabs = bar.querySelectorAll<HTMLElement>("[data-dock-tab]");
-    for (let index = 0; index < tabs.length; index += 1) {
-        const tabRect = tabs[index].getBoundingClientRect();
-        if (drag.pointerX < tabRect.left + tabRect.width / 2) return index;
-    }
-    return tabs.length;
 }

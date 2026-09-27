@@ -18,7 +18,7 @@ import {
     subscribeDockDrag,
     type DockDragState,
 } from "../../features/dock/dockDragStore";
-import { dropPreviewRect } from "../../features/dock/dockDropTarget";
+import { dropPreviewRect, DOCK_ROOT_ZONE_ID } from "../../features/dock/dockDropTarget";
 import { DOCK_SPLITTER_PX, type DockDropZone } from "../../features/dock/dockTypes";
 import { getPanel } from "../../features/dock/panelRegistry";
 import { dockModifierHint } from "./dockTooltips";
@@ -70,6 +70,8 @@ function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
     const title = definition ? tAny(definition.titleKey) : drag.panelId;
 
     // 停靠预览：按住修饰键且命中某个 Zone 时，画出"新组会占哪半边"。
+    // 根级边缘带的 target.rect 就是整个停靠区矩形，预览自然是贯通全高/全宽的
+    // 半边 —— 与提交结果同源（见 `buildRootEdgeZones` 的 previewRect）。
     const dockPreview =
         showPreview && drag.dockIntent && drag.target
             ? dropPreviewRect(drag.target.rect, drag.target.zone, DOCK_SPLITTER_PX)
@@ -79,7 +81,10 @@ function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
     // 【为什么必须有】不按修饰键拖拽的语义就是浮动，而浮动同样是一个用户需要
     // 预判的结果 —— 只给一个小标签跟着鼠标，用户无从知道松手后窗体会多大、
     // 会不会盖住他要看的东西。轮廓用**记住的浮窗尺寸**，与松手后的结果一致。
-    const floatPreview = showPreview && !dockPreview ? drag.floatRect : null;
+    // 【重排带内必须压掉】指针仍在源标签条上时松手是"调整标签顺序"，此时
+    // 冒出浮窗轮廓会让用户以为要拖出去浮动（`floatRect` 在控制器里已置空，
+    // 这里再按标志挡一层，两处语义一致）。
+    const floatPreview = showPreview && !drag.reorder && !dockPreview ? drag.floatRect : null;
 
     // 拖拽幽灵的右缘钳制需要实测宽度：提示块 `max-width: 320px` 且不折行，宽度
     // 由内容决定，预留固定值会在窄内容时把幽灵整段甩离指针（与 tooltip 的修复
@@ -143,7 +148,7 @@ function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
             <div
                 ref={ghostRef}
                 className="app-tooltip hs-dock-ghost"
-                data-intent={drag.dockIntent ? "dock" : "float"}
+                data-intent={drag.reorder ? "reorder" : drag.dockIntent ? "dock" : "float"}
                 style={{
                     left: 0,
                     top: 0,
@@ -153,11 +158,17 @@ function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
                 <div className="hs-dock-ghost-line">
                     {title}
                     <span className="hs-dock-ghost-hint">
-                        {drag.dockIntent
-                            ? drag.target
-                                ? `${tAny("dock_hint_dock")} · ${describeZone(drag.target.zone, tAny)}`
-                                : tAny("dock_hint_snapback")
-                            : tAny("dock_hint_float")}
+                        {drag.reorder
+                            ? tAny("dock_hint_reorder")
+                            : drag.dockIntent
+                              ? drag.target
+                                  ? `${
+                                      drag.target.zoneId === DOCK_ROOT_ZONE_ID
+                                          ? tAny("dock_hint_root_dock")
+                                          : tAny("dock_hint_dock")
+                                  } · ${describeZone(drag.target.zone, tAny)}`
+                                  : tAny("dock_hint_snapback")
+                              : tAny("dock_hint_float")}
                     </span>
                 </div>
                 {/*

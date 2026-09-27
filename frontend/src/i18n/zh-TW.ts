@@ -199,6 +199,8 @@ export const zhTW = {
     dock_dock_hint: "按住 {modifier} 可停靠",
     dock_dock_hint_always: "拖到目標位置即可停靠",
     dock_hint_dock: "停靠到此處",
+    dock_hint_reorder: "調整標籤順序",
+    dock_hint_root_dock: "貫通整側停靠",
     dock_hint_float: "浮動",
     dock_hint_snapback: "放開取消",
     dock_side_left: "左側",

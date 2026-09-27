@@ -208,6 +208,8 @@ export const jaJP = {
     dock_dock_hint: "{modifier} を押しながらでドック",
     dock_dock_hint_always: "ドロップ先でドック",
     dock_hint_dock: "ここにドック",
+    dock_hint_reorder: "タブを並べ替え",
+    dock_hint_root_dock: "全体に渡ってドッキング",
     dock_hint_float: "フロート",
     dock_hint_snapback: "離してキャンセル",
     dock_side_left: "左端",

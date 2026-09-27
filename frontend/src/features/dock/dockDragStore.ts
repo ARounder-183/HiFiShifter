@@ -33,6 +33,14 @@ export interface DockDragState {
     dockIntent: boolean;
     /** 已解析的落点；`null` 表示不落任何 Zone（将浮动）。 */
     target: DockDropTargetState | null;
+    /**
+     * 标签拖拽：指针仍在**源标签条带**内（重排语义）。
+     *
+     * 此刻松手是"调整标签顺序"而不是浮动，也不是停靠 —— 覆盖层据此压掉浮动
+     * 幽灵与停靠预览（用户只是想交换标签位置，冒出浮窗轮廓会让他以为拖错了），
+     * 标签条则用**实时的顺序变化**作为反馈（见 `dockDragController`）。
+     */
+    reorder: boolean;
     /** 被拖浮窗的实时几何（`mode === "float"` 时非空）。 */
     floatRect: DockRect | null;
 }
@@ -60,8 +68,10 @@ export function getDockDragState(): DockDragState | null {
  * 是否渲染落点提示。（早期版本把它写成 `false` 且再无处置真，结果停靠能用、
  * 预览却从不出现：用户拖拽时完全看不到落点结果。）
  */
-export function beginDockDrag(next: Omit<DockDragState, "started" | "target">): void {
-    state = { ...next, started: true, target: null };
+export function beginDockDrag(
+    next: Omit<DockDragState, "started" | "target" | "reorder">,
+): void {
+    state = { ...next, started: true, target: null, reorder: false };
     emit();
 }
 

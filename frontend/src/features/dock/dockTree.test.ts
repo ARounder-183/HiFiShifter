@@ -489,4 +489,77 @@ test("features/dock/dockTree.test.ts scripted checks", async () => {
         });
         assertEqual(degenerate, { ratio: 0.5, fixed: null }, "no room degrades to an even split");
     }
+
+    // ── 根级落点（{kind:"root"}）：贯通全高/全宽的拆分 ────────────
+    //
+    // 拖到停靠区外缘感应带时提交的形态。嵌套布局里以标签组为参照的拆分只能
+    // 贴着某个分支的半高/半宽，用户想要"所有组共同的那一侧"必须以根为参照。
+    {
+        // 默认布局形状：上下分布（col），两块各自贯通全宽。
+        const layout = split("s1", tabset("z1", ["a"]), tabset("z2", ["c"]), { dir: "col" });
+
+        // 浮动态窗体（树上没有它）停靠到根右侧：新组贯通全高，占据根的右半。
+        {
+            const next = moveForm(layout, "f", { kind: "root", side: "right" });
+            assertEqual(shape(next), "(([a]|[c])|[f])", "full-height column on the root's right");
+            const created = findTabsetOfForm(next, "f");
+            assert(created !== null, "the form landed in a tabset");
+            const parent = findParentSplit(next, created!.id);
+            // shape() 不编码方向，"贯通全高"必须显式验证拆分方向。
+            assert(parent !== null && parent.dir === "row", "the root split is a row (side by side)");
+        }
+
+        // 已停靠窗体拖到根左侧：先摘除（源组收缩、空组被剪掉），再对剪枝后的
+        // 根拆分 —— 新组贯通全高，剩下的组保持原样。
+        {
+            const next = moveForm(layout, "a", { kind: "root", side: "left" });
+            assertEqual(shape(next), "([a]|[c])", "re-rooted to the left after pruning");
+            const created = findTabsetOfForm(next, "a");
+            assert(created !== null, "the moved form is visible");
+            const parent = findParentSplit(next, created!.id);
+            assert(parent !== null && parent.dir === "row", "re-rooting produces a row split");
+        }
+
+        // 更清楚的对照：两块都在时把 a 移到根左侧 —— 剪枝后 z2 独苗成根，
+        // 新组与它并排；z1 里剩下的 b 与 z2 仍保持上下分布。
+        {
+            const nested = split(
+                "s1",
+                split("s0", tabset("z0", ["b"]), tabset("z1", ["a"]), { dir: "col" }),
+                tabset("z2", ["c"]),
+                { dir: "col" },
+            );
+            const next = moveForm(nested, "a", { kind: "root", side: "left" });
+            assertEqual(
+                shape(next),
+                "([a]|([b]|[c]))",
+                "the remaining stack keeps its vertical arrangement",
+            );
+            const created = findTabsetOfForm(next, "a");
+            const parent = findParentSplit(next, created!.id);
+            assert(parent !== null && parent.dir === "row", "re-rooting produces a row split");
+        }
+
+        // 树里只剩它一个：摘除后根为空，原样返回（它已经是"整个区域"）。
+        {
+            const sole = tabset("z1", ["a"]);
+            assertEqual(
+                shape(moveForm(sole, "a", { kind: "root", side: "right" })),
+                "[a]",
+                "the sole form cannot be re-rooted away from itself",
+            );
+        }
+
+        // `dockForm` 包装层对根级落点同样成立：搬运 + 兜底后窗体一定可见。
+        {
+            const next = dockForm(layout, "f", { kind: "root", side: "bottom" });
+            assertEqual(shape(next), "(([a]|[c])|[f])", "dockForm lands the form at the root");
+            const created = findTabsetOfForm(next, "f");
+            const parent = findParentSplit(next, created!.id);
+            assert(
+                parent !== null && parent.dir === "col",
+                "bottom produces a col split (stacked)",
+            );
+        }
+    }
 });

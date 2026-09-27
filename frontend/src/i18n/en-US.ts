@@ -348,6 +348,8 @@ export const enUS = {
     dock_dock_hint: "Hold {modifier} to dock",
     dock_dock_hint_always: "Drop on a target to dock",
     dock_hint_dock: "Dock here",
+    dock_hint_reorder: "Reorder tab",
+    dock_hint_root_dock: "Dock across the full side",
     dock_hint_float: "Float",
     dock_hint_snapback: "Release to cancel",
     dock_side_left: "left edge",

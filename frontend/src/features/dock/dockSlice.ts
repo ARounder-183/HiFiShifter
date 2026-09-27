@@ -154,7 +154,15 @@ const dockSlice = createSlice({
             state.layout = installLayout(normalizeDockLayout(action.payload));
         },
         resetDockLayout(state) {
-            state.layout = ensureRegisteredPanels(createDefaultDockLayout());
+            // 重置 = 回到出厂排布。**预设是用户的资产，不属于"被重置的排布"**
+            // —— 确认对话框承诺"已保存的预设会保留"，重置后用户仍能一键回到
+            // 自己的排布。activePreset 同步清空：此刻是出厂布局，不属于任何
+            // 预设；保留旧值会让布局菜单的勾选错误地暗示某预设仍然生效。
+            state.layout = ensureRegisteredPanels({
+                ...createDefaultDockLayout(),
+                presets: state.layout.presets ?? {},
+                activePreset: null,
+            });
             state.activeFormId = null;
             state.maximized = null;
         },
