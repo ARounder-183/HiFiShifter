@@ -672,6 +672,109 @@ mod tests {
         take
     }
 
+    /// 仓库里现成的真实素材（与 `stereo_detect` 的测试共用同一份 fixture）。
+    fn demo_mp3_path() -> Option<std::path::PathBuf> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("third_party/signalsmith-stretch/signalsmith-stretch/web/demo/loop.mp3");
+        path.is_file().then_some(path)
+    }
+
+    #[test]
+    fn interactive_decisions_are_signed_with_the_short_container_budget() {
+        // 本次修复的核心：导入 / 粘贴 / 换源这些**用户正在等待**的路径必须默认
+        // 套用短容器预算。以前它们隐式继承长预算，于是"看第 N 秒要解到第 N 秒"
+        // 直接变成数秒的等待。
+        //
+        // 判定档案的签名含预算，所以这里用"档案签名"来断言实际生效的预算：
+        // 若交互式路径误用长预算，签名就等于后台扫描的签名，短预算结论会被当成
+        // 权威而顶掉后台重判。这条同时钉住"两者必须可区分"。
+        let policy = ChannelImportPolicy::default();
+        let short_sig = policy
+            .detect_options()
+            .with_container_budget_sec(crate::stereo_detect::IMPORT_CONTAINER_BUDGET_SEC)
+            .signature();
+        let long_sig = policy.detect_options().signature();
+        assert_ne!(short_sig, long_sig, "短预算与长预算必须产出不同签名");
+
+        // 源文件缺失时判定为 Pending，但仍会留下档案 —— 正好用来读签名。
+        let resolution = precompute_decision(
+            Some(std::path::Path::new("C:/definitely/missing.wav")),
+            Some(2),
+            None,
+            &policy,
+        );
+        let record = resolution.record.expect("Pending 也必须记账（否则无法重试）");
+        assert_eq!(
+            record.policy_sig, short_sig,
+            "交互式判定必须带短预算签名"
+        );
+    }
+
+    #[test]
+    fn grouped_decisions_match_per_item_decisions() {
+        // 分组只是 I/O 组织（同一路径少解一次），不是另一套判定语义：落点与档案
+        // 必须与逐条判定**逐字段一致**。批量新建 / 批量导入都改走分组路径了，
+        // 一旦两边漂移，同一素材会因为"和谁一起被处理"而得到不同声道模式。
+        let policy = ChannelImportPolicy::default();
+        let Some(demo) = demo_mp3_path() else {
+            return;
+        };
+        let paths: Vec<Option<std::path::PathBuf>> = vec![
+            None,
+            Some(demo.clone()),
+            Some(std::path::PathBuf::from("C:/definitely/missing.wav")),
+            Some(demo.clone()),
+            Some(std::path::PathBuf::from("C:/definitely/missing.wav")),
+        ];
+        let requests: Vec<ScanRequest<'_>> = paths
+            .iter()
+            .map(|path| ScanRequest {
+                source_path: path.as_deref(),
+                source_channels: None,
+                region: None,
+            })
+            .collect();
+
+        let grouped = precompute_decisions_grouped(&requests, &policy);
+        assert_eq!(grouped.len(), requests.len());
+
+        for (index, request) in requests.iter().enumerate() {
+            let single = precompute_decision(
+                request.source_path,
+                request.source_channels,
+                request.region,
+                &policy,
+            );
+            assert_eq!(
+                grouped[index], single,
+                "第 {index} 条的分组落点必须与逐条判定一致"
+            );
+        }
+    }
+
+    #[test]
+    fn grouped_decisions_agree_across_references_to_one_source() {
+        // 同一素材被多个模板引用是批量新建的常态。去重只能省解码，不能让某个
+        // 引用拿到与其它引用不同的落点 —— 那正是"同一文件有的折叠有的没折叠"
+        // 的历史 bug 形状。
+        let policy = ChannelImportPolicy::default();
+        let Some(demo) = demo_mp3_path() else {
+            return;
+        };
+        let requests: Vec<ScanRequest<'_>> = (0..3)
+            .map(|_| ScanRequest {
+                source_path: Some(demo.as_path()),
+                source_channels: None,
+                region: None,
+            })
+            .collect();
+
+        let grouped = precompute_decisions_grouped(&requests, &policy);
+        assert_eq!(grouped.len(), 3);
+        assert_eq!(grouped[0], grouped[1], "同一素材的引用必须得到同一落点");
+        assert_eq!(grouped[1], grouped[2], "同一素材的引用必须得到同一落点");
+    }
+
     #[test]
     fn off_mode_never_converts() {
         let mut take = take_with(Some("C:/definitely/missing.wav"), Some(2));
