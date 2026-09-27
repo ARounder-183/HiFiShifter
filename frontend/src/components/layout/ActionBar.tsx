@@ -5,7 +5,6 @@ import {
     TextField,
     Button,
     IconButton,
-    Separator,
     Text,
     Box,
 } from "@radix-ui/themes";
@@ -26,6 +25,7 @@ import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
 import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
 import { CustomScaleDialog } from "./CustomScaleDialog";
 import { AppContextMenu } from "../../ui/Menu";
+import { AppToolbarSeparator } from "../../ui/Toolbar";
 
 import {
     playOriginal,
@@ -1168,7 +1168,7 @@ export function ActionBar() {
                 </Select.Root>
             </Flex>
 
-            <Separator orientation="vertical" size="2" />
+            <AppToolbarSeparator />
 
             {/* Transport */}
             <Flex gap="1" className="shrink-0">
@@ -1480,7 +1480,7 @@ export function ActionBar() {
                 ) : null}
             </Flex>
 
-            <Separator orientation="vertical" size="2" />
+            <AppToolbarSeparator />
 
             {/* ── 撤销 / 重做 ──────────────────────────────────────────
                 独立成组、两侧以分隔线与其他按钮隔开；右键打开「操作记录」
@@ -1521,7 +1521,7 @@ export function ActionBar() {
                 </IconButton>
             </Flex>
 
-            <Separator orientation="vertical" size="2" />
+            <AppToolbarSeparator />
 
             {/* File Browser Toggle */}
             <Flex gap="1" className="shrink-0">
@@ -1554,7 +1554,7 @@ export function ActionBar() {
                 </IconButton>
             </Flex>
 
-            <Separator orientation="vertical" size="2" />
+            <AppToolbarSeparator />
 
             {/* Toolbar Toggles */}
             <Flex align="center" gap="1" className="shrink-0">
@@ -1684,7 +1684,7 @@ export function ActionBar() {
                     }}
                 />
 
-                <Separator orientation="vertical" size="2" />
+                <AppToolbarSeparator />
 
                 {/* Playhead Zoom */}
                 <IconButton
@@ -1726,7 +1726,7 @@ export function ActionBar() {
                     <DoubleArrowRightIcon width="15" height="15" />
                 </IconButton>
 
-                <Separator orientation="vertical" size="2" />
+                <AppToolbarSeparator />
 
                 <IconButton
                     size="1"
@@ -1823,7 +1823,7 @@ export function ActionBar() {
                     </svg>
                 </IconButton>
 
-                <Separator orientation="vertical" size="2" />
+                <AppToolbarSeparator />
 
                 {/* Ignore Grouping (broken chain) */}
                 <IconButton

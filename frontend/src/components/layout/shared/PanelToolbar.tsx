@@ -13,26 +13,20 @@
  */
 import type { ReactNode } from "react";
 
-/** 工具条高度（与标签行一致，避免同一窗口里出现三种不同的横条高度）。 */
-const PANEL_TOOLBAR_PX = 26;
-
+import { AppToolbar } from "../../../ui/Toolbar";
 
 /**
  * 面板工具条容器。
+ *
+ * 已改为薄封装 `AppToolbar`：高度不再由本文件写死一个魔法数字（曾经是
+ * `PANEL_TOOLBAR_PX = 26`），而是取 `--qt-bar-compact` 令牌。这样"面板条多高"
+ * 与应用其它横条一起由一处决定。
  *
  * @param leading 左侧按钮组（如记事本的模式切换）；可省略。
  * @param trailing 右侧按钮组（图标按钮为主）。
  */
 export function PanelToolbar({ leading, trailing }: { leading?: ReactNode; trailing?: ReactNode }) {
-    return (
-        <div
-            className="flex shrink-0 items-center justify-between gap-2 border-b border-qt-border px-2"
-            style={{ height: PANEL_TOOLBAR_PX, background: "var(--qt-window)" }}
-        >
-            <div className="flex min-w-0 items-center gap-1">{leading}</div>
-            <div className="flex shrink-0 items-center gap-1">{trailing}</div>
-        </div>
-    );
+    return <AppToolbar height="compact" leading={leading} trailing={trailing} />;
 }
 
 /**
@@ -65,8 +59,8 @@ export function PanelToolbarButton({
             onClick={onClick}
             className="flex items-center justify-center rounded text-qt-text-muted transition-colors hover:bg-qt-hover hover:text-qt-text disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-qt-text-muted"
             style={{
-                width: 20,
-                height: 20,
+                width: "var(--qt-ctl-sm)",
+                height: "var(--qt-ctl-sm)",
                 color: active ? "var(--qt-highlight)" : undefined,
                 background: active
                     ? "color-mix(in srgb, var(--qt-highlight) 16%, transparent)"
@@ -104,9 +98,9 @@ export function PanelToolbarTextButton({
             onClick={onClick}
             className="rounded px-1.5 text-qt-text-muted transition-colors hover:bg-qt-hover hover:text-qt-text"
             style={{
-                height: 20,
-                fontSize: 11,
-                lineHeight: "20px",
+                height: "var(--qt-ctl-sm)",
+                fontSize: "var(--qt-fs-sm)",
+                lineHeight: "var(--qt-ctl-sm)",
                 color: active ? "var(--qt-highlight)" : undefined,
                 background: active
                     ? "color-mix(in srgb, var(--qt-highlight) 16%, transparent)"
