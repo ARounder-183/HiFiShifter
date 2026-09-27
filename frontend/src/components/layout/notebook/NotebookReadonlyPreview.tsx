@@ -13,24 +13,21 @@ import { buildNotebookExtensions } from "./notebookExtensions";
 
 export interface NotebookReadonlyPreviewProps {
     markdown: string;
-    placeholder: string;
     /** 与左栏联动的滚动同步（比例同步）。 */
     scrollSyncSource?: HTMLElement | null;
 }
 
 export function NotebookReadonlyPreview({
     markdown,
-    placeholder,
     scrollSyncSource,
 }: NotebookReadonlyPreviewProps) {
     const extensions = useMemo(
         () =>
             buildNotebookExtensions({
-                placeholder,
                 markdownShortcuts: false,
                 slashCommands: false,
             }),
-        [placeholder],
+        [],
     );
 
     const editor = useEditor({

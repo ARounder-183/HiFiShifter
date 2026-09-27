@@ -18,6 +18,7 @@ import { useI18n } from "../../../i18n/I18nProvider";
 import { notebookApi } from "../../../services/api/notebook";
 import { refreshAssetIndex } from "./notebookAssetIndex";
 import {
+    clipKindLabelKey,
     defaultClipTitle,
     formatClipDuration,
     parseHifiClipFenceBody,
@@ -43,11 +44,23 @@ interface ParamPreview {
 }
 
 export function HifiClipNodeView(props: NodeViewProps) {
-    const { node, updateAttributes, deleteNode, selected } = props;
+    const { node, updateAttributes, deleteNode, selected, editor } = props;
     const { t } = useI18n();
+    /** 动态键取文案（`t` 只接受字面量键）；查不到时 i18n 会回落，故这里只放宽类型。 */
+    const tAny = t as unknown as (key: string) => string;
     const dispatch = useAppDispatch();
     const settings = useAppSelector((state) => state.notebook.settings);
     const assetIndex = useAppSelector((state) => state.notebook.assetIndex);
+
+    /**
+     * 是否可操作。
+     *
+     * 分栏模式右侧的预览栏用的是**同一个编辑器内核**（`editable: false`），
+     * 卡片本体照常渲染 —— 左右两栏本就该长得一样 —— 但改名输入、⋯ 菜单与
+     * 两个动作按钮属于"操作"，在只读栏里只会误导。因此按 `isEditable` 分派：
+     * 同一份视图，两种能力。
+     */
+    const editable = editor.isEditable;
 
     const attrs = useMemo(
         () => parseHifiClipFenceBody(String(node.attrs.body ?? "")),
@@ -63,6 +76,8 @@ export function HifiClipNodeView(props: NodeViewProps) {
     // 内嵌模型下"条目在"就等于"内容在"；只有工程被手工编辑过、
     // 登记项缺内容的极端情况才会 hasData=false。
     const missing = attrs ? entry === undefined || !entry.hasData : false;
+    /** 参数线载荷：动作与文案都要按它分派（见下方 applyLabel）。 */
+    const isParam = attrs?.kind === "param";
 
     // `meta` 来自工程文件（`serde_json::Value`）：可能是任意 JSON —— 手改过的
     // 工程、更早/更新版本的 schema 都会到这里。只认数组/对象，其余当没有，
@@ -88,7 +103,22 @@ export function HifiClipNodeView(props: NodeViewProps) {
         );
     }
 
-    const kindLabel = kindLabelOf(attrs.kind, t as unknown as (key: string) => string);
+    const kindLabel = tAny(clipKindLabelKey(attrs.kind));
+
+    /**
+     * 主操作文案随载荷种类走。
+     *
+     * 参数线载荷没有时间轴几何：它恢复后走的是参数编辑器通道（见
+     * `notebookClipboard.insertClipPayload` 里的 `resolvePasteRoute`，
+     * `kind: "param"` 固定路由到 `hifi:editOp`），语义是"把这段曲线应用到
+     * 当前参数"。写"插入到时间轴"会让用户以为它会落到轨道上去。
+     */
+    const applyLabel = isParam
+        ? t("notebook_clip_apply_to_param")
+        : t("notebook_clip_insert_timeline");
+    const appliedNotice = isParam
+        ? t("notebook_clip_applied_to_param")
+        : t("notebook_clip_inserted");
 
     async function run(
         action: () => Promise<{ ok: boolean; error?: string }>,
@@ -106,9 +136,9 @@ export function HifiClipNodeView(props: NodeViewProps) {
         }
     }
 
-    /** 设置里的"插入到"目标：选中轨道 / 新建轨道。 */
+    /** 设置里的"插入到"目标：选中轨道 / 新建轨道（只对时间轴载荷有意义）。 */
     const insertMode = settings.clipInsertMode === "newTracks" ? "newTracks" : "selected";
-    /** 设置里的"插入后保留暂存块"：关掉时插入成功即移除该块。 */
+    /** 设置里的"插入/使用后保留暂存块"：关掉时动作成功即移除该块。 */
     const removeAfterInsert = !settings.keepClipAfterInsert;
 
     const menuItems: NotebookMenuItem[] = [
@@ -122,28 +152,30 @@ export function HifiClipNodeView(props: NodeViewProps) {
         },
         {
             key: "insert",
-            label: t("notebook_clip_insert_timeline"),
+            label: applyLabel,
             disabled: missing || busy,
             onSelect: () => {
-                void run(
-                    () => insertClipPayload(attrs.id, insertMode),
-                    t("notebook_clip_inserted"),
-                    { removeOnSuccess: removeAfterInsert },
-                );
+                void run(() => insertClipPayload(attrs.id, insertMode), appliedNotice, {
+                    removeOnSuccess: removeAfterInsert,
+                });
             },
         },
-        {
-            key: "insert-new-tracks",
-            label: t("notebook_clip_insert_new_tracks"),
-            disabled: missing || busy,
-            onSelect: () => {
-                void run(
-                    () => insertClipPayload(attrs.id, "newTracks"),
-                    t("notebook_clip_inserted"),
-                    { removeOnSuccess: removeAfterInsert },
-                );
-            },
-        },
+        // 参数线载荷与轨道无关："插入为新轨道"对它没有意义（路由上 param 固定
+        // 走参数编辑器通道，这个入口只会让用户以为能把曲线变成轨道）。
+        ...(isParam
+            ? []
+            : [
+                  {
+                      key: "insert-new-tracks",
+                      label: t("notebook_clip_insert_new_tracks"),
+                      disabled: missing || busy,
+                      onSelect: () => {
+                          void run(() => insertClipPayload(attrs.id, "newTracks"), appliedNotice, {
+                              removeOnSuccess: removeAfterInsert,
+                          });
+                      },
+                  } satisfies NotebookMenuItem,
+              ]),
         {
             key: "rename",
             label: t("notebook_clip_rename"),
@@ -195,15 +227,17 @@ export function HifiClipNodeView(props: NodeViewProps) {
             <div
                 className="hs-notebook-clip-head"
                 onContextMenu={(event) => {
+                    // 只读态也照旧吞掉事件（否则会弹出 WebView 的原生菜单），
+                    // 只是不再提供任何操作。
                     event.preventDefault();
                     event.stopPropagation();
-                    setMenu({ x: event.clientX, y: event.clientY });
+                    if (editable) setMenu({ x: event.clientX, y: event.clientY });
                 }}
             >
                 <span className={`hs-notebook-clip-badge hs-notebook-clip-badge-${attrs.kind}`}>
                     {kindLabel}
                 </span>
-                {renaming ? (
+                {renaming && editable ? (
                     <input
                         autoFocus
                         className="hs-notebook-clip-title-input"
@@ -224,6 +258,7 @@ export function HifiClipNodeView(props: NodeViewProps) {
                         className="hs-notebook-clip-title"
                         data-tooltip={attrs.title}
                         onDoubleClick={() => {
+                            if (!editable) return;
                             setTitleDraft(attrs.title);
                             setRenaming(true);
                         }}
@@ -231,17 +266,21 @@ export function HifiClipNodeView(props: NodeViewProps) {
                         {attrs.title || attrs.id}
                     </span>
                 )}
-                <button
-                    type="button"
-                    className="hs-notebook-clip-more"
-                    onClick={(event) => {
-                        const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-                        setMenu({ x: rect.left, y: rect.bottom + 2 });
-                    }}
-                    data-tooltip={t("notebook_clip_actions")}
-                >
-                    ⋯
-                </button>
+                {editable ? (
+                    <button
+                        type="button"
+                        className="hs-notebook-clip-more"
+                        onClick={(event) => {
+                            const rect = (
+                                event.currentTarget as HTMLElement
+                            ).getBoundingClientRect();
+                            setMenu({ x: rect.left, y: rect.bottom + 2 });
+                        }}
+                        data-tooltip={t("notebook_clip_actions")}
+                    >
+                        ⋯
+                    </button>
+                ) : null}
             </div>
 
             <div className="hs-notebook-clip-meta">
@@ -288,31 +327,34 @@ export function HifiClipNodeView(props: NodeViewProps) {
                 <div className="hs-notebook-clip-missing">{t("notebook_clip_missing_payload")}</div>
             ) : null}
 
-            <div className="hs-notebook-clip-actions">
-                <button
-                    type="button"
-                    disabled={missing || busy}
-                    onClick={() =>
-                        void run(() => restoreClipPayload(attrs.id), t("notebook_clip_restored"))
-                    }
-                >
-                    {t("notebook_clip_restore")}
-                </button>
-                <button
-                    type="button"
-                    disabled={missing || busy}
-                    onClick={() =>
-                        void run(
-                            () => insertClipPayload(attrs.id, insertMode),
-                            t("notebook_clip_inserted"),
-                            { removeOnSuccess: removeAfterInsert },
-                        )
-                    }
-                >
-                    {t("notebook_clip_insert_timeline")}
-                </button>
-                {notice ? <span className="hs-notebook-clip-notice">{notice}</span> : null}
-            </div>
+            {editable ? (
+                <div className="hs-notebook-clip-actions">
+                    <button
+                        type="button"
+                        disabled={missing || busy}
+                        onClick={() =>
+                            void run(
+                                () => restoreClipPayload(attrs.id),
+                                t("notebook_clip_restored"),
+                            )
+                        }
+                    >
+                        {t("notebook_clip_restore")}
+                    </button>
+                    <button
+                        type="button"
+                        disabled={missing || busy}
+                        onClick={() =>
+                            void run(() => insertClipPayload(attrs.id, insertMode), appliedNotice, {
+                                removeOnSuccess: removeAfterInsert,
+                            })
+                        }
+                    >
+                        {applyLabel}
+                    </button>
+                    {notice ? <span className="hs-notebook-clip-notice">{notice}</span> : null}
+                </div>
+            ) : null}
 
             {menu ? (
                 <NotebookContextMenu
@@ -341,19 +383,6 @@ export function HifiClipNodeView(props: NodeViewProps) {
  */
 function sanitizeSuggestedFileName(name: string): string {
     return name.replace(/[\\/:*?"<>|]/g, "_").trim();
-}
-
-function kindLabelOf(kind: HifiClipBlockAttrs["kind"], t: (key: string) => string): string {
-    switch (kind) {
-        case "tracks":
-            return t("notebook_clip_kind_tracks");
-        case "project":
-            return t("notebook_clip_kind_project");
-        case "param":
-            return t("notebook_clip_kind_param");
-        default:
-            return t("notebook_clip_kind_clips");
-    }
 }
 
 /** 参数线的迷你曲线。 */

@@ -369,7 +369,10 @@ export async function restoreClipPayload(assetId: string): Promise<RestoreResult
         "HiFiShifter data restored.",
     );
     if (!written.ok) return { ok: false, error: written.error };
-    // 通知参数编辑器丢弃内部的参数线剪贴板缓存（槽位内容已变）。
+    // 槽位内容已变，通知各消费者**重新对齐剪贴板**：参数编辑器据此丢弃自己的
+    // 内部缓存并回读槽位（恢复的是参数线载荷时，剪贴板预览要立刻显示它），
+    // 而不是继续沿用"本面板上次复制了什么"。派发在写入成功之后，消费者回读
+    // 时槽位里已经是新内容。
     window.dispatchEvent(new CustomEvent("hifi:clipboardReplaced"));
     const probe = await webApi.clipboardKind();
     return { ok: true, kind: probe.kind ?? undefined };

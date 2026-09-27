@@ -73,7 +73,6 @@ export interface UseNotebookEditorArgs {
     /** 正文（Markdown）。 */
     markdown: string;
     settings: ResolvedNotebookSettings;
-    placeholder: string;
     bridge: NotebookEditorBridge;
     /** 写入 Redux（立即）。 */
     onMarkdownChange: (markdown: string) => void;
@@ -92,8 +91,7 @@ export interface UseNotebookEditorResult {
 }
 
 export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEditorResult {
-    const { markdown, settings, placeholder, bridge, onMarkdownChange, persist, onIdleSplit } =
-        args;
+    const { markdown, settings, bridge, onMarkdownChange, persist, onIdleSplit } = args;
 
     // 回调与设置在 ref 里取最新值：编辑器实例不应因为回调身份变化而重建。
     // 赋值必须放在 effect 里（而非渲染期）—— 渲染期写 ref 会破坏并发渲染的
@@ -117,12 +115,11 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
     const extensions = useMemo(
         () =>
             buildNotebookExtensions({
-                placeholder,
                 markdownShortcuts: settings.markdownShortcuts,
                 slashCommands: settings.slashCommands,
             }),
         // 只在"是否启用输入规则"这类结构性开关变化时重建扩展。
-        [placeholder, settings.markdownShortcuts, settings.slashCommands],
+        [settings.markdownShortcuts, settings.slashCommands],
     );
 
     const undoBridge = useMemo(() => createUndoBridge(bridge), [bridge]);

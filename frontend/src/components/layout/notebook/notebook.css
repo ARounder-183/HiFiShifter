@@ -9,6 +9,36 @@
  * 依赖。
  */
 
+/*
+ * 富文本视图的版面：**可编辑区撑满整块面板**，留白做在它自己内部。
+ *
+ * 【为什么不能只让编辑器"按内容高"】可编辑元素若只有内容那么高，正文下方那
+ * 片空白就不属于编辑器 —— 点它既不落光标也不能输入。记事本为空时最刺眼：
+ * 下方一大片空间全是死的。
+ *
+ * 把留白做进可编辑区内部之后，整块面板就是编辑器本身，点哪儿都由
+ * ProseMirror 按坐标落光标（点在最后一行下方 = 光标到末尾，与在任何编辑器里
+ * 点正文下方的手感一致），不需要我们自己模拟"点到空白就 focus 到末尾"。
+ *
+ * 链条：滚动容器（定高）→ EditorContent 包装层（`min-height:100%` 撑满）→
+ * 可编辑元素（flex 撑满）。包装层用 `min-height` 而不是 `height`：内容变长时
+ * 它要能继续长高，由外层容器滚动；若写成定高，长文档会被压扁或截断。
+ */
+.hs-notebook-rich {
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
+}
+
+.hs-notebook-rich > .hs-notebook-prose {
+    /* `flex: 1 1 auto` 而非 `1 1 0`：基线取内容高，短文档靠 grow 撑满、
+       长文档不被压缩。 */
+    flex: 1 1 auto;
+    /* 面板留白（原在滚动容器上）。落在可编辑区**内部**，因此这一圈也是
+       可点击的编辑器表面 —— 放在容器上就会留下一圈点不动的死边。 */
+    padding: 12px;
+}
+
 .hs-notebook-prose {
     outline: none;
     font-size: var(--hs-notebook-font-size, 13px);
@@ -172,16 +202,6 @@
 
 .hs-notebook-prose input[type="checkbox"] {
     accent-color: var(--accent-9, #4f8ef7);
-}
-
-/* 空文档占位（TipTap Placeholder 扩展挂的 data 属性）。 */
-.hs-notebook-prose p.is-editor-empty:first-child::before,
-.hs-notebook-prose .is-empty::before {
-    content: attr(data-placeholder);
-    float: left;
-    height: 0;
-    pointer-events: none;
-    color: var(--qt-text-muted);
 }
 
 /* ── 图片 ────────────────────────────────────────────────────────────── */

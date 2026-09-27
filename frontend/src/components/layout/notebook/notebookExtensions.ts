@@ -21,7 +21,7 @@
 
 import { Markdown } from "tiptap-markdown";
 import StarterKit from "@tiptap/starter-kit";
-import { CharacterCount, Placeholder } from "@tiptap/extensions";
+import { CharacterCount } from "@tiptap/extensions";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
 
@@ -171,8 +171,6 @@ function applyMarks(
 }
 
 export interface NotebookExtensionOptions {
-    /** 空文档占位文案。 */
-    placeholder: string;
     /** Markdown 输入规则（`## ` / `- ` / `> ` 即时转换）。 */
     markdownShortcuts: boolean;
     /** `/` 唤出插入菜单。 */
@@ -227,7 +225,6 @@ export function buildNotebookExtensions(options: NotebookExtensionOptions) {
         TaskList.extend({}),
         TaskItem.extend({}).configure({ nested: true }),
         HifiClipBlock.extend({}),
-        Placeholder.extend({}).configure({ placeholder: options.placeholder }),
         CharacterCount.extend({}),
         Markdown.configure({
             html: false,

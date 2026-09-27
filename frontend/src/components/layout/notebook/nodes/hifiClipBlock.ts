@@ -14,10 +14,19 @@
  *    markdown-it 的围栏渲染规则也产出同一个 div —— 因此
  *    "Markdown → HTML → ProseMirror" 与 "ProseMirror → HTML → 再解析"
  *    两条路径完全一致，不需要额外的 DOM 变换钩子。
+ *
+ * ## NodeView 是必需的，不是锦上添花
+ *
+ * `renderHTML` 只产出**一个空的 div**（正文全在 `data-hifi-clip` 属性里），
+ * 而这个节点是 `atom: true` 的叶子 —— 没有 NodeView 时，正文里明明有一块
+ * 暂存载荷，用户看到的却是一片空白。因此 `addNodeView` 是让这个节点
+ * "存在得可见"的唯一途径，见 `HifiClipNodeView`。
  */
 
 import { Node } from "@tiptap/core";
+import { ReactNodeViewRenderer } from "@tiptap/react";
 
+import { HifiClipNodeView } from "../HifiClipNodeView";
 import { HIFI_CLIP_FENCE_LANG, parseHifiClipFenceBody } from "../hifiClipBlock";
 
 export const HIFI_CLIP_ATTR = "data-hifi-clip";
@@ -83,6 +92,18 @@ export const HifiClipBlock = Node.create({
 
     renderHTML({ HTMLAttributes }) {
         return ["div", HTMLAttributes];
+    },
+
+    /**
+     * 卡片视图（见 `HifiClipNodeView`）。
+     *
+     * 刻意**不覆盖 `stopEvent`**：卡片是 `draggable` 的原子节点，一旦把卡片
+     * 内部的指针事件全部截下，ProseMirror 就收不到 `dragstart`，整块拖不动。
+     * 卡片内的输入框（改名）自己 `stopPropagation` 即可，与同级
+     * `NotebookImageNodeView` 的做法一致。
+     */
+    addNodeView() {
+        return ReactNodeViewRenderer(HifiClipNodeView);
     },
 
     addStorage() {

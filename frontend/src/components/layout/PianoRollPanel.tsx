@@ -156,6 +156,7 @@ import {
     type ParamClipboardData,
     type ParamClipboardSegment,
 } from "./pianoRoll/paramClipboardMapping";
+import { createClipboardPreviewSync } from "./pianoRoll/clipboardPreviewSync";
 import { uploadFullResCurveSegments } from "./pianoRoll/selectionEditData";
 import { planParamConversion } from "./pianoRoll/paramConversion";
 import { editablePitchValue } from "./pianoRoll/paramSmoothing";
@@ -6502,17 +6503,35 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         return () => window.removeEventListener("hifi:editOp", handler);
     }, [handleEditOp]);
 
-    // 单剪贴板纪律：时间轴复制/剪切替换整个应用剪贴板后（copyClips 成功时
-    // 派发 hifi:clipboardReplaced），参数线内部剪贴板缓存随之失效 —— 否则
-    // "复制 Clip 后在参数编辑器粘贴"会把更早复制、已被剪贴板替换掉的参数线
-    // 数据从内部缓存复活，违反"剪贴板只保留最后复制的一份"的语义。
+    // 单剪贴板纪律：槽位被别的表面整体替换后（时间轴复制/剪切，或记事本暂存块
+    // 的「恢复到剪贴板」），内部剪贴板缓存必须**重新对齐槽位** —— 否则
+    // "复制 Clip 后在参数编辑器粘贴"会把更早复制、已被替换掉的参数线数据从
+    // 内部缓存复活。
+    //
+    // 【只清不读是不够的】清空只解决了"槽位里不再是参数线数据"的一半；另一半
+    // 是"槽位里（重新）是参数线数据"：从记事本恢复一份参数线载荷时，数据明明
+    // 可粘贴，预览却始终空白 —— 而预览画的正是"粘贴会落下的数据"，它必须跟着
+    // 槽位走。因此这里清空之后立刻回读一次。
     useEffect(() => {
+        const sync = createClipboardPreviewSync(() => readSystemClipboardObject("param"));
         const handler = () => {
+            // 先清空：待读取期间也绝不展示已经过期的曲线。读取到（或读不到）
+            // 参数线数据后，结果统一由 apply 落地。
             clipboardRef.current = null;
             invalidate();
+            void sync.sync((data) => {
+                clipboardRef.current = data;
+                invalidate();
+            });
         };
         window.addEventListener("hifi:clipboardReplaced", handler);
-        return () => window.removeEventListener("hifi:clipboardReplaced", handler);
+        // 面板首次挂载时也对齐一次：槽位可能在面板被打开之前就已经恢复好了
+        // （恢复动作发生在记事本，参数编辑器当时还没有挂载）。
+        handler();
+        return () => {
+            sync.cancel();
+            window.removeEventListener("hifi:clipboardReplaced", handler);
+        };
     }, [invalidate]);
 
     // Dispatch helper: context menu dialog ops → open MenuBar dialogs

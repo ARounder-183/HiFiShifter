@@ -52,6 +52,29 @@ export interface HifiClipBlockAttrs {
 
 const KIND_VALUES: readonly HifiClipKind[] = ["clips", "tracks", "project", "param"];
 
+/**
+ * 载荷种类 → 文案键。
+ *
+ * 放在这里而不是各 UI 文件里：种类清单是本模块定义的（`HifiClipKind`），
+ * 卡片徽标与附件列表都要按同一张表取名，各自抄一份迟早会分叉 —— 附件列表
+ * 曾把参数线载荷一律标成"片段"。本模块只给键，翻译仍由调用方做，因此这里
+ * 不引入任何 i18n 依赖。
+ */
+export const HIFI_CLIP_KIND_LABEL_KEYS: Record<HifiClipKind, string> = {
+    clips: "notebook_clip_kind_clips",
+    tracks: "notebook_clip_kind_tracks",
+    project: "notebook_clip_kind_project",
+    param: "notebook_clip_kind_param",
+};
+
+/** 取载荷种类的文案键；缺失/未知一律回落"片段"（最保守的呈现）。 */
+export function clipKindLabelKey(kind: string | null | undefined): string {
+    if (kind && (KIND_VALUES as readonly string[]).includes(kind)) {
+        return HIFI_CLIP_KIND_LABEL_KEYS[kind as HifiClipKind];
+    }
+    return HIFI_CLIP_KIND_LABEL_KEYS.clips;
+}
+
 /** 解析围栏正文；`id` 缺失或非法时返回 null（视为普通代码块）。 */
 export function parseHifiClipFenceBody(body: string): HifiClipBlockAttrs | null {
     const fields = new Map<string, string>();

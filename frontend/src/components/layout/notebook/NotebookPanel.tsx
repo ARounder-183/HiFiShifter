@@ -164,7 +164,6 @@ export function NotebookPanel() {
     const { editor, flush, seal } = useNotebookEditor({
         markdown,
         settings,
-        placeholder: t("notebook_placeholder"),
         bridge,
         onMarkdownChange,
         persist,
@@ -636,7 +635,6 @@ export function NotebookPanel() {
                         }
                         value={markdown}
                         spellCheck={settings.spellCheck}
-                        placeholder={t("notebook_placeholder")}
                         onChange={(event) => {
                             dispatch(setProjectNotesMarkdown(event.target.value));
                             persist(event.target.value);
@@ -645,18 +643,18 @@ export function NotebookPanel() {
                 ) : null}
 
                 {mode !== "source" ? (
-                    <div
-                        ref={richScrollRef}
-                        className="min-w-0 flex-1 overflow-auto bg-qt-base px-3 py-3"
-                    >
-                        {editor ? <EditorContent editor={editor} /> : null}
+                    /* 内边距归可编辑区自己（见 notebook.css 的 .hs-notebook-rich）：
+                       容器留白会变成一圈点不动的死边。 */
+                    <div ref={richScrollRef} className="min-w-0 flex-1 overflow-auto bg-qt-base">
+                        {editor ? (
+                            <EditorContent editor={editor} className="hs-notebook-rich" />
+                        ) : null}
                     </div>
                 ) : null}
 
                 {mode === "split" ? (
                     <NotebookReadonlyPreview
                         markdown={markdown}
-                        placeholder={t("notebook_placeholder")}
                         scrollSyncSource={richScrollRef.current}
                     />
                 ) : null}

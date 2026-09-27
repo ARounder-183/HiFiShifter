@@ -13,6 +13,7 @@ import type { NotebookAssetSummary } from "../../../features/notebook/notebookSl
 import { useI18n } from "../../../i18n/I18nProvider";
 import { notebookApi } from "../../../services/api/notebook";
 import { formatAssetRef } from "./assetRef";
+import { clipKindLabelKey } from "./hifiClipBlock";
 import { resolveImage } from "./notebookImageCache";
 import { formatBytes, notebookErrorKey } from "./notebookInsert";
 import type { ResolvedNotebookSettings } from "./notebookSettings";
@@ -150,8 +151,10 @@ function AttachmentRow({
 
 function describeEntry(entry: NotebookAssetSummary, t: (key: string) => string): string {
     if (entry.kind === "clip_payload") {
-        const meta = entry.meta as { title?: string } | null;
-        return `${t("notebook_clip_kind_clips")} · ${meta?.title || entry.id}`;
+        const meta = entry.meta as { title?: string; clipKind?: string } | null;
+        // 种类按载荷自报的 `clipKind` 取名：此前一律写"片段"，参数线载荷会被
+        // 标成时间轴片段 —— 用户据此以为这条能插到时间轴上去。
+        return `${t(clipKindLabelKey(meta?.clipKind))} · ${meta?.title || entry.id}`;
     }
     const meta = entry.meta as { originalName?: string; width?: number; height?: number } | null;
     const name = meta?.originalName || `${entry.id}.${entry.ext}`;

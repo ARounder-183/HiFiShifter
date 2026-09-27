@@ -117,6 +117,7 @@ import {
     resolveCopyCutRoute,
     resolveEditOpRoute,
     resolvePasteRoute,
+    type EditOpChannel,
 } from "./features/keybindings/focusRouting";
 import { installFocusSurfaceTracking, getActiveSurface } from "./features/uiFocus/focusSurface";
 import type { ActionId } from "./features/keybindings/types";
@@ -2533,6 +2534,25 @@ function AppInner() {
                     // 内容路由（last-copy-wins）：探测剪贴板载荷类型后定向派发。
                     // 键盘事件已在 useKeybindings 同步消费，此处异步探测不影响
                     // 焦点语义；探测失败按外来源/空处理，回退表面裁决。
+                    //
+                    // 长按重复在这里布防，且**必须与 keydown 同步**（所以在探测
+                    // 之前）：holdRepeat 只靠 keyup / blur 终止，若等异步探测返回
+                    // 再布防，用户"快速点按"（keyup 早于探测返回）就会留下一个
+                    // 永远等不到松键的计时器 —— 一次点按变成无限粘贴。合成派发方
+                    // （菜单项、记事本暂存块）不经过这里，因此不会被误装长按。
+                    // 重复的每一拍只在通道确认为时间轴时派发，保持"参数编辑器
+                    // 粘贴不重复"的既有语义。
+                    let channel: EditOpChannel | null = null;
+                    const pasteKb = selectMergedKeybindings(store.getState())["clip.paste"];
+                    if (pasteKb) {
+                        beginHoldRepeat(pasteKb, () => {
+                            if (channel === "hifi:timelineEditOp") {
+                                window.dispatchEvent(
+                                    new CustomEvent(channel, { detail: { op: "paste" } }),
+                                );
+                            }
+                        });
+                    }
                     void (async () => {
                         let kind: string | null = null;
                         try {
@@ -2540,7 +2560,7 @@ function AppInner() {
                         } catch {
                             // 探测失败不阻塞粘贴。
                         }
-                        const channel = resolvePasteRoute(kind, getActiveSurface());
+                        channel = resolvePasteRoute(kind, getActiveSurface());
                         if (channel) {
                             window.dispatchEvent(
                                 new CustomEvent(channel, { detail: { op: "paste" } }),

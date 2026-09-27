@@ -20,7 +20,6 @@ function createEditor(content: string): Editor {
     return new Editor({
         element: document.createElement("div"),
         extensions: buildNotebookExtensions({
-            placeholder: "",
             markdownShortcuts: true,
             slashCommands: false,
         }),
