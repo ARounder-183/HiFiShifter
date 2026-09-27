@@ -88,7 +88,7 @@ export function DockTabMenu({
             ref={menuRef}
             role="menu"
             data-hs-context-menu="1"
-            className="fixed z-[9999] min-w-[190px] rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg"
+            className="fixed z-qt-menu min-w-[190px] rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg"
             style={{ left: position.x, top: position.y }}
             onPointerDown={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}

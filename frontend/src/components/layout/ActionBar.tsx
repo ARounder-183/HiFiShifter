@@ -688,7 +688,7 @@ export function ActionBar() {
                         <div
                             ref={metronomeMenuRef}
                             data-hs-context-menu
-                            className="fixed z-[600] min-w-[200px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+                            className="fixed z-qt-popover min-w-[200px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
                             style={{ left: metronomeMenuPos.x, top: metronomeMenuPos.y }}
                         >
                             <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
@@ -1238,7 +1238,7 @@ export function ActionBar() {
                         <div
                             ref={recordingMenuRef}
                             data-hs-context-menu
-                            className="fixed z-[600] min-w-[220px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+                            className="fixed z-qt-popover min-w-[220px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
                             style={{ left: recordingMenuPos.x, top: recordingMenuPos.y }}
                         >
                             <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">

@@ -1397,7 +1397,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             {/* 菜单导入模式选择（多文件） */}
             {menuImportMode && (
                 <div
-                    className="fixed inset-0 z-[9999] bg-qt-overlay flex items-center justify-center"
+                    className="fixed inset-0 z-qt-fullscreen bg-qt-overlay flex items-center justify-center"
                     onClick={() => setMenuImportMode(null)}
                 >
                     <div
@@ -1485,7 +1485,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             {/* 多音轨媒体：选择要导入的音轨 */}
             {mediaStreamImport && (
                 <div
-                    className="fixed inset-0 z-[9999] bg-qt-overlay flex items-center justify-center"
+                    className="fixed inset-0 z-qt-fullscreen bg-qt-overlay flex items-center justify-center"
                     onClick={() => setMediaStreamImport(null)}
                 >
                     <div

@@ -154,7 +154,7 @@ export function EditContextMenu({
         <div
             ref={menuRef}
             data-hs-context-menu="1"
-            className="fixed z-[9999] min-w-[180px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+            className="fixed z-qt-menu min-w-[180px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
             style={{ left: x, top: y }}
             onPointerDown={(e) => e.stopPropagation()}
         >

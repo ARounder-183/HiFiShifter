@@ -418,7 +418,7 @@ function TimeRulerContextMenu({
             data-time-ruler-context-menu
             data-hs-context-menu="1"
             data-hs-floating-menu="1"
-            className="fixed z-[999] min-w-[140px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+            className="fixed z-qt-menu min-w-[140px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
             style={{ left: x, top: y }}
             onPointerDown={(e) => e.stopPropagation()}
             onMouseDown={(e) => {

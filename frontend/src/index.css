@@ -40,6 +40,12 @@
     --qt-graph-grid-strong: rgba(255, 255, 255, 0.22);
     --qt-graph-grid-weak: rgba(255, 255, 255, 0.1);
     --qt-scrollbar-thumb: #555555;
+    /* 此前 tailwind.config.js 映射了这个 token 但 CSS 从未定义它，
+       `scrollbar-thumb-hover:` 类因此静默失效。补上定义而不是删掉映射：
+       hover 是滚动条唯一的价格反馈。 */
+    --qt-scrollbar-thumb-hover: #6b6b6b;
+    /* 强调色的语义别名。此前两处 `text-qt-accent` 因为无此 token 而取不到颜色。 */
+    --qt-accent: var(--accent-9);
     --qt-overlay: rgba(0, 0, 0, 0.35);
     --qt-divider: rgba(255, 255, 255, 0.04);
     --qt-subtle-1: rgba(255, 255, 255, 0.025);
@@ -88,6 +94,8 @@
     --qt-graph-grid-strong: rgba(74, 88, 112, 0.55);
     --qt-graph-grid-weak: rgba(74, 88, 112, 0.3);
     --qt-scrollbar-thumb: #b4bac7;
+    --qt-scrollbar-thumb-hover: #9aa1b1;
+    --qt-accent: var(--accent-9);
     --qt-overlay: rgba(20, 24, 32, 0.22);
     --qt-divider: rgba(32, 38, 52, 0.1);
     --qt-subtle-1: rgba(28, 36, 52, 0.025);
@@ -111,6 +119,90 @@
     --qt-font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     --default-font-family: var(--qt-font-family);
     font-family: var(--qt-font-family);
+}
+
+/*
+ * 度量令牌（design tokens）。
+ *
+ * 【为什么单独成层】颜色令牌（--qt-* 色值）解决主题，度量令牌解决
+ * "同一个语义在不同文件里各写各的数字"。此前 chrome 条有 6 种高度
+ * （20/24/26/28/32/48）、图标有 9 种尺寸（4/6/7/8/9/10/12/14/15）、
+ * 设置行标签宽度有 12 个魔法值 —— 全部靠作者纪律维持，不靠机制。
+ *
+ * 本层与颜色层同级（挂在 `:root`，不做主题分支：度量不分明暗），
+ * 但**优先级更高**：新增/修改的样式一律取令牌值，禁止再写裸 px。
+ * 旧代码不强制一次性迁移，被触及时就地迁移即可（避免巨型 diff）。
+ *
+ * 前缀沿用 `--qt-*`：颜色令牌名已被用户导出的自定义主题 JSON 持久化
+ * （`QT_COLOR_TOKENS`），前缀不可更换，度量令牌与它们并列最自然。
+ */
+:root {
+    /* 空间阶梯：单一 4px 栅格。避免 3/4/5px 混用时按控件开关产生的 off-by-one */
+    --qt-space-0: 0px;
+    --qt-space-1: 2px;
+    --qt-space-2: 4px;
+    --qt-space-3: 6px;
+    --qt-space-4: 8px;
+    --qt-space-5: 12px;
+    --qt-space-6: 16px;
+    --qt-space-7: 24px;
+
+    /* 控件高度：三档。桌面端 chrome 只用前两档 */
+    --qt-ctl-sm: 20px; /* 紧凑面板：文件浏览器 / Notebook 工具栏 */
+    --qt-ctl-md: 24px; /* 主工具栏按钮、对话框按钮（对齐 Radix size="1"） */
+    --qt-ctl-lg: 32px; /* 菜单栏 / ActionBar 容器高 */
+
+    /* chrome 条高度：与上面的控件高度解耦（条要容纳 1px 边框与内边距） */
+    --qt-bar-title: 28px; /* 浮动窗标题栏 */
+    --qt-bar-compact: 26px; /* PanelToolbar / dock 标签栏 */
+    --qt-bar-main: 32px; /* MenuBar / ActionBar / PianoRoll 头部 */
+    --qt-bar-status: 24px; /* 状态栏 */
+
+    /* 圆角：三档。与 Radix --radius 变量并存（后者管 Radix 控件） */
+    --qt-radius-sm: 4px;
+    --qt-radius-md: 6px;
+    --qt-radius-lg: 10px;
+
+    /* 字号：统一为 px 绝对量，终结 text-xs（0.7rem）≠ text-[11px] 的双轨 */
+    --qt-fs-micro: 9px;
+    --qt-fs-xs: 10px;
+    --qt-fs-sm: 11px;
+    --qt-fs-md: 12px;
+    --qt-fs-lg: 13px;
+
+    /* 图标尺寸：由 AppIconButton 等原语注入，禁止调用方再写 width="15" */
+    --qt-icon-sm: 12px;
+    --qt-icon-md: 14px;
+    --qt-icon-lg: 15px;
+
+    /*
+     * 层级阶梯。原来是 index.css 里一段注释约定 + 各处的 z-[999]/z-[9999]
+     * 字面量，实测已漂移（EditContextMenu / DockTabMenu 用 z-[9999]，
+     * 反而高过对话框层）。现在把约定变成可引用的量。
+     *
+     * 高 → 低：
+     *   tooltip       2147483647
+     *   全屏选择菜单    9999
+     *   模态弹窗       1000
+     *   右键/上下文菜单 999   ← 必须低于弹窗：弹窗打开时不应被菜单盖住
+     *   工具栏浮层     600
+     *   常驻面板       500   ← 「操作记录」等
+     *   时间轴瞬态     ≤60
+     */
+    --qt-z-transient: 60;
+    --qt-z-panel: 500;
+    --qt-z-popover: 600;
+    --qt-z-menu: 999;
+    --qt-z-dialog: 1000;
+    --qt-z-fullscreen: 9999;
+
+    /* 焦点环：键盘可达性的唯一视觉凭据（见下方 :focus-visible 规则） */
+    --qt-focus-ring: var(--accent-9, #3b82f6);
+    --qt-focus-ring-width: 2px;
+
+    /* 动效时长 */
+    --qt-dur-fast: 0.12s;
+    --qt-dur-mid: 0.18s;
 }
 
 :root[data-theme="dark"] {
@@ -174,15 +266,34 @@ textarea {
     font-family: inherit;
 }
 
+/*
+ * 焦点可见性。
+ *
+ * 【曾经的做法与它的问题】此前这里无条件移除 focus-visible 的 outline 与
+ * box-shadow，但没有提供任何替代品 —— 全应用只剩 4 处裸 input 有自绘焦点环，
+ * 因此 **Tab 键走遍界面，任何控件都不显示焦点**。这是桌面端应用的硬伤：
+ * 键盘用户完全失去位置感。而当时代码库普遍存在的"hover 变色"不能替代它，
+ * 因为悬停与焦点是两个独立通道。
+ *
+ * 【现在的做法】统一给一个高对比焦点环：实心按钮用 2px 外偏移避免与底色粘连，
+ * 其余控件 1px 偏移。焦点环取 `--accent-9`（跟随用户的强调色设置），
+ * 与 `.param-pill` / `.qt-range` 等既有强调色用法一致。
+ *
+ * 仅在 `:focus-visible` 触发（键盘导航），鼠标点击不会画出焦点环，
+ * 因此不影响现有的点按手感。第三方控件只要不显式移除 outline，即自动继承。
+ */
+:where(button, [role="button"], a[href], summary, input, textarea, select):focus-visible,
 .rt-BaseButton:focus-visible,
-:where(button, [role="button"]):focus-visible {
-    outline: none;
-    box-shadow: none;
+.rt-TextFieldInput:focus-visible,
+.rt-TextArea:focus-visible,
+.rt-SelectTrigger:focus-visible {
+    outline: var(--qt-focus-ring-width) solid var(--qt-focus-ring);
+    outline-offset: 1px;
 }
 
-:where(input, textarea, select, .rt-TextFieldInput, .rt-SelectTrigger):focus-visible {
-    outline: none;
-    box-shadow: none;
+/* 实心按钮底色与强调色同系，焦点环紧贴会糊成一团：外挪 2px 拉开 */
+.rt-variant-solid:focus-visible {
+    outline-offset: 2px;
 }
 
 /*
@@ -246,29 +357,26 @@ textarea {
 }
 
 /*
- * 层级约定（高 → 低）：
- *   快速搜索                99998 / 99999
- *   导入模式等全屏选择菜单     9999
- *   模态弹窗（Dialog）       1000  —— 打开时独占交互，盖过「操作记录」面板与菜单
- *   右键 / 上下文菜单等       999
- *   工具栏右键菜单            600
- *   「操作记录」面板          500   —— 高于时间轴瞬态元素（选区框 z-40、握把 z-60 之外的内容）
- *   时间轴瞬态元素            ≤ 60
+ * 层级阶梯：定义见 `:root` 的 `--qt-z-*`。此处只做落地。
  *
  * Radix 的 Dialog / 菜单 portal 本身不带 z-index（靠 DOM 顺序决定层级），
- * 而「操作记录」是常驻浮层（z-500），不显式分层就会挡住后打开的弹窗与菜单。
- * 弹层与弹窗同用 1000 时靠 DOM 顺序：后打开的（如弹窗内的下拉）在上。
+ * 而「操作记录」是常驻浮层（--qt-z-panel），不显式分层就会挡住后打开的弹窗与菜单。
+ *
+ * 【为什么弹窗与弹窗内的下拉用同一层】弹窗里可以开 Select/Dropdown（例如导出
+ * 对话框的格式选择）。两者若分到不同层，下拉会落到弹窗**底下**。Radix 把后打开
+ * 的 portal 排在后面，同一层内靠 DOM 顺序即可正确叠放 —— 所以这里必须同级。
+ * 真正需要低于弹窗的是**手写的**右键菜单（非 Radix portal，见 --qt-z-menu）。
  */
 .rt-DialogOverlay,
 .rt-DialogContent {
-    z-index: 1000 !important;
+    z-index: var(--qt-z-dialog) !important;
 }
 
 .rt-DropdownMenuContent,
 .rt-SelectContent,
 .rt-ContextMenuContent,
 .rt-PopoverContent {
-    z-index: 1000 !important;
+    z-index: var(--qt-z-dialog) !important;
 }
 
 .rt-DialogContent,

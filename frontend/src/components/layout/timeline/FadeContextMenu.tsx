@@ -334,7 +334,7 @@ export const FadeContextMenu: React.FC<{
             {...{ [FADE_CONTEXT_MENU_ATTR]: "1" }}
             data-hs-floating-menu="1"
             data-hs-context-menu="1"
-            className="fixed z-[999] min-w-[220px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+            className="fixed z-qt-menu min-w-[220px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
             style={{ left: x, top: y }}
             onContextMenu={(e) => e.preventDefault()}
             onPointerDown={(e) => e.stopPropagation()}

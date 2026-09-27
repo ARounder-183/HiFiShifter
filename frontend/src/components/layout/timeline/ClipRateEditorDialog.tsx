@@ -233,7 +233,7 @@ function ClipRateEditorFields({
             role="menu"
             data-hs-floating-menu="1"
             data-hs-context-menu="1"
-            className="fixed z-[999] w-[248px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-2 px-3 flex flex-col gap-2"
+            className="fixed z-qt-menu w-[248px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-2 px-3 flex flex-col gap-2"
             style={{ left: position.x, top: position.y }}
             onPointerDown={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}

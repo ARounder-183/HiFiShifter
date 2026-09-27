@@ -5938,7 +5938,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     {/* 导入模式选择菜单 */}
                     {importModeMenu && (
                         <div
-                            className="fixed inset-0 z-[9999]"
+                            className="fixed inset-0 z-qt-fullscreen"
                             onClick={() => setImportModeMenu(null)}
                             onContextMenu={(e) => {
                                 e.preventDefault();
@@ -6031,7 +6031,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     {/* 工程文件（hshp/hsp）拖放操作菜单：打开工程 / 导入工程 */}
                     {projectActionMenu && (
                         <div
-                            className="fixed inset-0 z-[9999]"
+                            className="fixed inset-0 z-qt-fullscreen"
                             onClick={() => setProjectActionMenu(null)}
                             onContextMenu={(e) => {
                                 e.preventDefault();

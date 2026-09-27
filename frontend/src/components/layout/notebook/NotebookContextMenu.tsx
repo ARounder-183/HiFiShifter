@@ -57,7 +57,7 @@ export function NotebookContextMenu({ x, y, items, onClose }: NotebookContextMen
             ref={ref}
             role="menu"
             data-hs-context-menu="1"
-            className="fixed z-[999] min-w-[190px] rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg"
+            className="fixed z-qt-menu min-w-[190px] rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg"
             style={{ left, top, width }}
             onPointerDown={(event) => event.stopPropagation()}
         >

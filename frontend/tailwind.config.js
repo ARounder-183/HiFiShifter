@@ -17,6 +17,7 @@ export default {
                     "button-hover": "var(--qt-button-hover)",
                     border: "var(--qt-border)",
                     hover: "var(--qt-hover)",
+                    accent: "var(--qt-accent)",
                     "danger-bg": "var(--qt-danger-bg)",
                     "danger-text": "var(--qt-danger-text)",
                     "danger-border": "var(--qt-danger-border)",
@@ -41,10 +42,58 @@ export default {
             fontFamily: {
                 sans: ["var(--qt-font-family)"],
             },
+            /*
+             * 度量令牌的工具类入口（详见 src/index.css 的「度量令牌」注释块）。
+             *
+             * `px-qt-*` / `rounded-qt-*` / `h-qt-*` / `text-qt-*` / `z-qt-*`
+             * 都取 CSS 变量，使「同一语义只有一处取值来源」。新增样式请优先用
+             * 这些，而不是 `h-[26px]` / `z-[9999]` 这类字面量。
+             *
+             * 注意 fontSize 里的 xs/sm/base 是**遗留兼容层**：它把 text-xs 映射成
+             * 非标准的 0.7rem(11.2px)，与 `text-[11px]` 长期双轨并存。
+             * 新代码请用 `text-qt-*`（像素绝对值），旧代码触及时就地迁移。
+             */
+            spacing: {
+                "qt-0": "var(--qt-space-0)",
+                "qt-1": "var(--qt-space-1)",
+                "qt-2": "var(--qt-space-2)",
+                "qt-3": "var(--qt-space-3)",
+                "qt-4": "var(--qt-space-4)",
+                "qt-5": "var(--qt-space-5)",
+                "qt-6": "var(--qt-space-6)",
+                "qt-7": "var(--qt-space-7)",
+            },
+            height: {
+                "qt-ctl-sm": "var(--qt-ctl-sm)",
+                "qt-ctl-md": "var(--qt-ctl-md)",
+                "qt-ctl-lg": "var(--qt-ctl-lg)",
+                "qt-bar-title": "var(--qt-bar-title)",
+                "qt-bar-compact": "var(--qt-bar-compact)",
+                "qt-bar-main": "var(--qt-bar-main)",
+                "qt-bar-status": "var(--qt-bar-status)",
+            },
+            borderRadius: {
+                "qt-sm": "var(--qt-radius-sm)",
+                "qt-md": "var(--qt-radius-md)",
+                "qt-lg": "var(--qt-radius-lg)",
+            },
             fontSize: {
                 xs: "0.7rem",
                 sm: "0.8rem",
                 base: "0.9rem",
+                "qt-micro": "var(--qt-fs-micro)",
+                "qt-xs": "var(--qt-fs-xs)",
+                "qt-sm": "var(--qt-fs-sm)",
+                "qt-md": "var(--qt-fs-md)",
+                "qt-lg": "var(--qt-fs-lg)",
+            },
+            zIndex: {
+                "qt-transient": "var(--qt-z-transient)",
+                "qt-panel": "var(--qt-z-panel)",
+                "qt-popover": "var(--qt-z-popover)",
+                "qt-menu": "var(--qt-z-menu)",
+                "qt-dialog": "var(--qt-z-dialog)",
+                "qt-fullscreen": "var(--qt-z-fullscreen)",
             },
         },
     },
