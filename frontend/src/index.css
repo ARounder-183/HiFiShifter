@@ -299,7 +299,7 @@ textarea {
  * 仅在 `:focus-visible` 触发（键盘导航），鼠标点击不会画出焦点环，
  * 因此不影响现有的点按手感。第三方控件只要不显式移除 outline，即自动继承。
  */
-:where(button, [role="button"], a[href], summary, input, textarea, select):focus-visible,
+:where(button, [role="button"], [role="tab"], a[href], summary, input, textarea, select):focus-visible,
 .rt-BaseButton:focus-visible,
 .rt-TextFieldInput:focus-visible,
 .rt-TextArea:focus-visible,

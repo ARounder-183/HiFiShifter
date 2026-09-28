@@ -89,6 +89,54 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
         [dispatch, doubleClickAction, node.id, onToggleFloat],
     );
 
+    /**
+     * 标签条的键盘模型。
+     *
+     * 【为什么必须有】标签条此前只有指针通道：`role="tablist"` / `role="tab"`
+     * 已声明，但没有任何标签可聚焦，也没有方向键 —— 屏幕阅读器会播报一个
+     * 永远进不去的标签组，键盘用户则完全切不了标签。声明 ARIA 角色却不实现
+     * 其键盘契约，比不声明更糟。
+     *
+     * 【模型】roving tabIndex：整条标签条只占一个 Tab 停留点（活动标签），
+     * 进入后用方向键在标签间移动，移动即激活（automatic activation）——
+     * 面板内容都是本地渲染、切换无代价，不需要"先聚焦再回车"的两段式。
+     * `Home` / `End` 到两端；`Delete` / `Backspace` 关闭当前标签（与 IDE 一致）。
+     */
+    const onTabKeyDown = useCallback(
+        (event: React.KeyboardEvent<HTMLDivElement>, formId: string) => {
+            // 关闭按钮在自己的处理器里消化键盘事件，不参与方向键移动。
+            if (event.target !== event.currentTarget) return;
+            const tabs = Array.from(
+                event.currentTarget.parentElement?.querySelectorAll<HTMLElement>('[role="tab"]') ??
+                    [],
+            );
+            const index = tabs.indexOf(event.currentTarget);
+            if (index < 0) return;
+
+            if (event.key === "Delete" || event.key === "Backspace") {
+                event.preventDefault();
+                dispatch(closeForm(formId));
+                return;
+            }
+
+            let next: number;
+            if (event.key === "ArrowRight") next = index + 1;
+            else if (event.key === "ArrowLeft") next = index - 1;
+            else if (event.key === "Home") next = 0;
+            else if (event.key === "End") next = tabs.length - 1;
+            else return;
+            // 标签行只有上/下两种位置，始终是水平排布，因此不处理上下方向键。
+            if (next < 0 || next >= tabs.length) return;
+
+            event.preventDefault();
+            const target = tabs[next];
+            const nextFormId = target.getAttribute("data-dock-tab");
+            if (nextFormId) dispatch(setActiveTabOf({ tabsetId: node.id, formId: nextFormId }));
+            target.focus();
+        },
+        [dispatch, node.id],
+    );
+
     const onTabPointerDown = useCallback(
         (event: React.PointerEvent<HTMLDivElement>, formId: string) => {
             if (event.button !== 0) return;
@@ -117,6 +165,7 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                     data-position={tabPosition}
                     data-collapsed={node.collapsed ? "true" : "false"}
                     role="tablist"
+                    aria-orientation="horizontal"
                 >
                     {node.tabs.map((formId) => {
                         const form = forms[formId];
@@ -136,7 +185,9 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                                 }
                                 role="tab"
                                 aria-selected={active}
+                                tabIndex={active ? 0 : -1}
                                 data-tooltip={title}
+                                onKeyDown={(event) => onTabKeyDown(event, formId)}
                                 onPointerDown={(event) => onTabPointerDown(event, formId)}
                                 onClick={() =>
                                     dispatch(setActiveTabOf({ tabsetId: node.id, formId }))
@@ -154,6 +205,16 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                                     data-dock-tab-close="1"
                                     role="button"
                                     aria-label={t("close")}
+                                    // 只有活动标签的关闭按钮进 Tab 停留点：一个标签
+                                    // 对应一个停留点（与 Chrome / VS Code 一致），
+                                    // 非活动标签仍可用 Delete 或右键菜单关闭。
+                                    tabIndex={active ? 0 : -1}
+                                    onKeyDown={(event) => {
+                                        if (event.key !== "Enter" && event.key !== " ") return;
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        dispatch(closeForm(formId));
+                                    }}
                                     onClick={(event) => {
                                         event.stopPropagation();
                                         dispatch(closeForm(formId));
@@ -193,6 +254,11 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                 //
                 // 【为什么不能什么都不渲染】面板需要一个可拖拽的着力点，否则
                 // 用户再也没法把它拖出去、或与别的面板合并。
+                //
+                // 【为什么这里没有 ARIA 角色】抓手只是**指针**的着力点，不是
+                // 可激活的控件：它不可聚焦、没有键盘等价操作，而紧凑形态下这个
+                // 标签组本来就只有唯一一个标签，没有"切换"可言。给它安上
+                // `role="tab"` 等于向屏幕阅读器许诺一个永远进不去的标签组。
                 <div
                     ref={setBarElement}
                     className="hs-dock-grip"
@@ -200,8 +266,6 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                     data-dock-tab={node.active}
                     data-active="true"
                     data-position={tabPosition}
-                    role="tab"
-                    aria-selected
                     data-tooltip={dragHint}
                     onPointerDown={(event) => onTabPointerDown(event, node.active)}
                     onContextMenu={(event) => {

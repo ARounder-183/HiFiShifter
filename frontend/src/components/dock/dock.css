@@ -206,6 +206,12 @@
     opacity: 1;
 }
 
+/* 键盘焦点也是"看得见"的一种。否则 Tab 到关闭按钮时它仍是 opacity: 0，
+   焦点环画在一个不可见的元素上，等于没有焦点提示。 */
+.hs-dock-tab-close:focus-visible {
+    opacity: 1;
+}
+
 .hs-dock-tabbar-spacer {
     flex: 1 1 auto;
     min-width: 8px;
