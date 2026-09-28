@@ -33,6 +33,7 @@ import {
 } from "../../../features/session/sessionSlice";
 import { selectClipRemote } from "../../../features/session/thunks/timelineThunks";
 import { seekPlayhead } from "../../../features/session/thunks/transportThunks";
+import { AppFileInput } from "../../../ui/FileInput";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { PanelToolbar, PanelToolbarButton, PanelToolbarTextButton } from "../shared/PanelToolbar";
 import { notebookApi } from "../../../services/api/notebook";
@@ -453,9 +454,7 @@ export function NotebookPanel() {
     );
 
     const onFilePicked = useCallback(
-        (event: React.ChangeEvent<HTMLInputElement>) => {
-            const files = Array.from(event.target.files ?? []);
-            event.target.value = "";
+        (files: File[]) => {
             if (!insertContext) return;
             void (async () => {
                 for (const file of files) {
@@ -673,13 +672,11 @@ export function NotebookPanel() {
                 notice={notice}
             />
 
-            <input
-                ref={fileInputRef}
-                type="file"
+            <AppFileInput
+                inputRef={fileInputRef}
                 accept="image/*"
                 multiple
-                className="hidden"
-                onChange={onFilePicked}
+                onFiles={onFilePicked}
             />
 
             {attachmentsOpen ? (

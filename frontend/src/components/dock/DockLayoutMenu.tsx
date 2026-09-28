@@ -42,6 +42,7 @@ import {
     reclaimDetachedForm,
 } from "../../features/dock/dockApi";
 import { getPanel } from "../../features/dock/panelRegistry";
+import { AppFileInput } from "../../ui/FileInput";
 import { AppDialog } from "../../ui/Dialog";
 import { AppConfirmDialog, AppNoticeDialog } from "../../ui";
 
@@ -399,17 +400,10 @@ export function DockLayoutDialogs() {
               所以走原生保存对话框 + 后端写文件（见 `services/api/dockLayout.ts`）。
               常驻渲染（不随菜单关闭卸载），保证选择完成后的 change 事件有人接。
             */}
-            <input
-                ref={(element) => {
-                    importInputRef.current = element;
-                }}
-                type="file"
+            <AppFileInput
+                inputRef={importInputRef}
                 accept="application/json,.json"
-                style={{ display: "none" }}
-                onChange={(event) => {
-                    void onImportFile(event.target.files?.[0] ?? null);
-                    event.target.value = "";
-                }}
+                onFiles={(files) => void onImportFile(files[0] ?? null)}
             />
         </>
     );

@@ -15,6 +15,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
+import { AppFileInput } from "../../ui/FileInput";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import {
@@ -822,8 +823,8 @@ export const AppearanceWindow: React.FC = () => {
     ]);
 
     const handleImportTheme = useCallback(
-        (e: React.ChangeEvent<HTMLInputElement>) => {
-            const file = e.target.files?.[0];
+        (files: File[]) => {
+            const file = files[0];
             if (!file) return;
             const reader = new FileReader();
             reader.onload = () => {
@@ -843,7 +844,6 @@ export const AppearanceWindow: React.FC = () => {
                 }
             };
             reader.readAsText(file);
-            e.target.value = "";
         },
         [customThemes, markDraftDirty],
     );
@@ -936,12 +936,10 @@ export const AppearanceWindow: React.FC = () => {
                                 >
                                     {tf("appearance_import_theme")}
                                 </button>
-                                <input
-                                    ref={fileInputRef}
-                                    type="file"
+                                <AppFileInput
+                                    inputRef={fileInputRef}
                                     accept=".json"
-                                    className="hidden"
-                                    onChange={handleImportTheme}
+                                    onFiles={handleImportTheme}
                                 />
                                 <button
                                     className={SECONDARY_BUTTON_CLASS}

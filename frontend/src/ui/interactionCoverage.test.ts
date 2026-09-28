@@ -67,6 +67,15 @@ const RULES: { rule: string; pattern: RegExp }[] = [
         rule: "已废弃的滚轮守卫：请用 useRangeWheelGuard / AppSlider",
         pattern: /useWheelScrollGuard/,
     },
+    {
+        /*
+         * 文件选择：三处（导入主题 / 导入布局 / 插入图片）曾各自手写一遍，其中一处
+         * 漏了"选完清空 `value`"，于是再次选同一个文件不再触发 `change` ——
+         * 表现为"点了没反应"。统一到 `AppFileInput` 后这条规则防止它再被手写出来。
+         */
+        rule: "裸 file 输入：请用 AppFileInput（统一处理 value 清空）",
+        pattern: /type\s*=\s*\{?\s*["'`]file["'`]/,
+    },
 ];
 
 /** 行级注释判定：行注释、块注释续行、JSX 注释续行。 */
