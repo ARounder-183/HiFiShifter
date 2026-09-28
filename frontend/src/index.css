@@ -450,6 +450,34 @@ textarea {
 }
 
 /*
+ * 对话框的滚动契约：**内容框永不滚动，只有 body 滚动**。
+ *
+ * 【为什么必须显式写】Radix 的 `.rt-BaseDialogContent` 自带 `position: relative`
+ * **且** `overflow: auto`。而 body 只写了 `overflow-y: auto`、**没有 `position`** ——
+ * 于是 body 内那些**绝对定位**的隐藏元素（`Checkbox` 的 `<input>`、`Select` 的原生
+ * `<select>`、`Slider` 的 thumb `<span>` 等，由 Radix 内部渲染）的包含块是**内容框**
+ * 而不是 body。包含块不是 body ⇒ 它们**不受 body 的 `overflow-y` 裁剪**，而是把溢出
+ * 算到内容框上 ⇒ 内容框产生可滚动溢出。
+ *
+ * 实测（吸附/网格设置，1280×720）：内容框 618/1303 渲染出 12px 滚动条，body 455/1230
+ * 渲染出 10px 滚动条 —— **两层竖直滚动条**，而内容框那条滚下去看不到任何东西（它的
+ * 子元素加起来正好等于可视高度），用户只会以为下面还有内容。
+ *
+ * 两处缺一不可：
+ * - `overflow: hidden` 让内容框**永不**滚动（兜底）；
+ * - body 的 `position: relative` 把那些隐藏元素的包含块改回 body，使它们**随内容滚动
+ *   并被 body 裁剪**。若只做前者，隐藏输入会被裁掉但不跟随内容 —— Radix 的复选框
+ *   点击转发与键盘聚焦依赖这些元素的位置，滚动后就会点不中。
+ */
+.app-dialog {
+    overflow: hidden;
+}
+
+.app-dialog__body {
+    position: relative;
+}
+
+/*
  * 对话框标题/描述：直接引用角色，不再各自写字号。
  *
  * 【回归修正】此前是 13px/600 与 12px —— 标题比正文标签（14px）还小。

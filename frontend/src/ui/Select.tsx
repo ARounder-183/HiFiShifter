@@ -18,7 +18,7 @@ import type { ReactNode } from "react";
 
 import { cx } from "./cx";
 import { useNonPassiveWheel } from "../utils/useNonPassiveWheel";
-import { applySelectWheelChange } from "../utils/selectWheel";
+import { useFrameCommitter, useWheelStepAccumulator } from "./useFrameCommit";
 
 export interface AppSelectItem {
     value: string;
@@ -69,18 +69,40 @@ export function AppSelect({
      */
     const wheelOptions = options.flatMap((entry) => (isSeparator(entry) ? [] : [entry.value]));
 
+    /*
+     * 滚轮提交走帧合并 + 手势累积（见 `useFrameCommit.ts` 的长注释）：
+     * 一次滚轮手势最多每帧提交一次，且值一次走到位。这是必须的 —— 有些下拉的
+     * `onValueChange` 会 dispatch **同步 Tauri 命令**，逐格提交会阻塞 UI 线程
+     * 直到窗口未响应。
+     */
+    const committer = useFrameCommitter(onValueChange);
+    const accumulator = useWheelStepAccumulator<string>();
+
     const setWheelTarget = useNonPassiveWheel<HTMLButtonElement>((event) => {
         if (disabled) return;
-        applySelectWheelChange({
-            event,
-            currentValue: value,
-            options: wheelOptions,
-            onChange: onValueChange,
+        if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return;
+        if (wheelOptions.length <= 1) return;
+        const at = wheelOptions.indexOf(value);
+        if (at < 0) return;
+        // 先接管这次滚轮（阻止祖先滚动），再算值 —— 算不出下一格时也不该滚动容器。
+        event.preventDefault();
+        event.stopPropagation();
+        const next = accumulator.advance(value, (base) => {
+            const from = wheelOptions.indexOf(base);
+            if (from < 0) return base;
+            const direction = event.deltaY < 0 ? -1 : 1;
+            return wheelOptions[from + direction] ?? base;
         });
+        if (next !== value) committer.schedule(next);
     });
 
     return (
-        <Select.Root value={value} onValueChange={onValueChange} disabled={disabled}>
+        <Select.Root
+            value={value}
+            // 手动选择（点菜单项）不经过滚轮，直接提交；无需节流。
+            onValueChange={onValueChange}
+            disabled={disabled}
+        >
             <Select.Trigger
                 ref={setWheelTarget}
                 aria-label={ariaLabel}

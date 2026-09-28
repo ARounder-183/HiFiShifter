@@ -24,11 +24,13 @@ import {
     moveClipStart,
     moveClipsRemote,
     persistUiSettings,
+    setGrid,
     setProjectTimelineSettingsRemote,
     setTimelineSnapSettings,
 } from "../../features/session/sessionSlice";
 import type { GridSize, TimelineSnapSettings } from "../../features/session/sessionTypes";
 import { alignClipsToSwingGrid } from "../../utils/timelineSnapping";
+import { useDebouncedCallback } from "../../utils/useDebouncedCallback";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm, AppFormSection, AppSwitchRow } from "../../ui/Field";
 import { AppNumberField } from "../../ui/NumberField";
@@ -85,6 +87,28 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
     const persist = () => {
         void dispatch(persistUiSettings());
     };
+
+    /*
+     * 工程基准网格的后端同步**去抖**。
+     *
+     * 【为什么必须去抖】`setProjectTimelineSettingsRemote` 最终打到一个**同步** Tauri
+     * 命令（`set_project_timeline_settings`）。Tauri 2.10 里只有 `async fn` 命令会进
+     * 线程池，普通 `fn` 的命令体在 **UI 线程上内联执行**；而该命令会全量重建节拍器
+     * 响点表（最多 200 万项 + 稳定排序），带 Tempo Map 时还会整份克隆时间轴并压一条
+     * 撤销记录。滚轮逐格调用它，累计约 5s 消息泵饥饿，Windows 即判定"未响应"
+     * （已实测复现）。
+     *
+     * 因此本地 `setGrid` 立即生效（廉价、界面即时响应），后端同步在操作停止后下发一次。
+     */
+    const syncProjectGrid = useDebouncedCallback((gridSize: string) => {
+        void dispatch(
+            setProjectTimelineSettingsRemote({
+                beatsPerBar: session.beats,
+                timeSignatureDenominator: session.project.timeSignatureDenominator,
+                gridSize,
+            }),
+        );
+    }, 250);
 
     /** 拖动中只更新设置值（轻量 Redux 写）。 */
     const applySwingPreview = (percent: number) => {
@@ -202,14 +226,9 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
                             ariaLabel={t("snap_grid_spacing")}
                             options={GRID_OPTIONS}
                             onValueChange={(v) => {
-                                void dispatch(
-                                    setProjectTimelineSettingsRemote({
-                                        beatsPerBar: session.beats,
-                                        timeSignatureDenominator:
-                                            session.project.timeSignatureDenominator,
-                                        gridSize: v,
-                                    }),
-                                );
+                                // 本地立即生效（廉价），后端同步去抖 —— 见 syncProjectGrid
+                                dispatch(setGrid(v as GridSize));
+                                syncProjectGrid.call(v);
                             }}
                         />
                     </AppField>

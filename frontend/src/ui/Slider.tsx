@@ -21,6 +21,7 @@ import { cx } from "./cx";
 import { stepValue, type StepUnit } from "./stepPolicy";
 import { useFineAdjustModifier } from "./useFineAdjustModifier";
 import { useNonPassiveWheel } from "../utils/useNonPassiveWheel";
+import { useFrameCommitter, useWheelStepAccumulator } from "./useFrameCommit";
 
 export interface AppSliderProps {
     value: number;
@@ -71,15 +72,26 @@ export function AppSlider({
 }: AppSliderProps) {
     const isFine = useFineAdjustModifier();
 
+    /*
+     * 滚轮走帧合并 + 手势累积（见 useFrameCommit.ts）。拖动本身由 Radix 以帧率
+     * 回调，不需要节流；滚轮是每格一个事件，必须合并。
+     */
+    const committer = useFrameCommitter<number>((next) => {
+        onChange(next);
+        onCommit?.(next);
+    });
+    const accumulator = useWheelStepAccumulator<number>();
+
     const setWheelTarget = useNonPassiveWheel<HTMLSpanElement>((event) => {
         if (disabled) return;
         if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return;
         event.preventDefault();
         const direction: 1 | -1 = event.deltaY < 0 ? 1 : -1;
-        const next = stepValue({ value, direction, unit, fine: isFine(event), min, max });
-        if (next === value) return;
-        onChange(next);
-        onCommit?.(next);
+        const fine = isFine(event);
+        const next = accumulator.advance(value, (base) =>
+            stepValue({ value: base, direction, unit, fine, min, max }),
+        );
+        if (next !== value) committer.schedule(next);
     });
 
     return (

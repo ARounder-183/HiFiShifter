@@ -22,6 +22,7 @@ import { cx } from "./cx";
 import { stepFor, stepValue, type StepUnit } from "./stepPolicy";
 import { useFineAdjustModifier } from "./useFineAdjustModifier";
 import { useNonPassiveWheel } from "../utils/useNonPassiveWheel";
+import { useFrameCommitter, useWheelStepAccumulator } from "./useFrameCommit";
 
 export interface AppNumberFieldProps {
     value: number;
@@ -110,16 +111,26 @@ export function AppNumberField({
      * 滚轮：非被动监听，因此 `preventDefault` 真正生效（React 的合成 `onWheel`
      * 是 passive，阻止不了祖先滚动）。每格立即提交。
      */
+    /*
+     * 滚轮走帧合并 + 手势累积（见 useFrameCommit.ts）：一次手势最多每帧提交一次，
+     * 值一次走到位。调用方的 onCommit 可能是昂贵的（落盘 / IPC / checkpoint）。
+     */
+    const committer = useFrameCommitter(onCommit);
+    const accumulator = useWheelStepAccumulator<number>();
+
     const setWheelTarget = useNonPassiveWheel<HTMLDivElement>((event) => {
         if (disabled) return;
         if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return;
         event.preventDefault();
         const direction: 1 | -1 = event.deltaY < 0 ? 1 : -1;
-        const next = stepValue({ value, direction, unit, fine: isFine(event), min, max });
-        if (next !== value) {
-            setDraft({ source: next, text: format(next, spec.decimals) });
-            onCommit(next);
-        }
+        const fine = isFine(event);
+        const next = accumulator.advance(value, (base) =>
+            stepValue({ value: base, direction, unit, fine, min, max }),
+        );
+        if (next === value) return;
+        // 草稿立即跟随（本地、廉价），提交按帧合并。
+        setDraft({ source: next, text: format(next, spec.decimals) });
+        committer.schedule(next);
     });
 
     return (
