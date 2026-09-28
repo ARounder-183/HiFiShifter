@@ -768,7 +768,10 @@ class WaveformMipmapStoreImpl {
 
         const batchPromise = (async () => {
             try {
-                const batchResult = await waveformApi.batchGetWaveformMipmap(registered);
+                // 只请求 L2：本路径只落地 L2（见下方"仅解码 L2"）。让后端别把
+                // L0/L1 也编码传输、再由前端丢弃 —— L0 单级就是 ≈159MB/小时素材
+                // 的 peaks，base64 后更大，长文件批量预载时纯属浪费。
+                const batchResult = await waveformApi.batchGetWaveformMipmap(registered, [2]);
 
                 for (const [sourcePath, levels] of Object.entries(batchResult)) {
                     const index = registered.indexOf(sourcePath);

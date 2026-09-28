@@ -29,6 +29,9 @@ pub struct ByteBudgetCache<K: Eq + std::hash::Hash + Clone, V> {
     inner: LruCache<K, (V, u64)>,
     total_bytes: u64,
     budget_bytes: u64,
+    /// Optional "in use" predicate: entries for which it returns true are
+    /// skipped by eviction (pinned). See [`Self::with_pin`].
+    is_pinned: Option<fn(&K, &V) -> bool>,
 }
 
 impl<K: Eq + std::hash::Hash + Clone, V> ByteBudgetCache<K, V> {
@@ -39,6 +42,7 @@ impl<K: Eq + std::hash::Hash + Clone, V> ByteBudgetCache<K, V> {
             inner: LruCache::new(cap),
             total_bytes: 0,
             budget_bytes: budget_bytes.max(1),
+            is_pinned: None,
         }
     }
 
@@ -48,6 +52,18 @@ impl<K: Eq + std::hash::Hash + Clone, V> ByteBudgetCache<K, V> {
     #[allow(dead_code)]
     pub fn from_env(capacity: usize) -> Self {
         Self::new(capacity, env_cache_budget_bytes())
+    }
+
+    /// Set the "in use" (pinned) predicate: entries it flags are never evicted.
+    ///
+    /// 【为什么需要】缓存条目与引擎快照共享同一个 `Arc`（见
+    /// `ResampledStereo::pcm`）。若把仍在播放的 PCM 逐出，缓存账面字节下降但内存
+    /// 并未释放；下一次快照重建还会**再解码一份**，同一素材两份常驻。用
+    /// `Arc::strong_count > 1` 判定"在用"即可让逐出只针对真正无人引用的条目 ——
+    /// 与 `WaveformPeakCache` 的 pin 语义一致。
+    pub fn with_pin(mut self, is_pinned: fn(&K, &V) -> bool) -> Self {
+        self.is_pinned = Some(is_pinned);
+        self
     }
 
     /// Get a reference to an entry, promoting it in LRU order.
@@ -64,7 +80,8 @@ impl<K: Eq + std::hash::Hash + Clone, V> ByteBudgetCache<K, V> {
     /// Insert an entry with its byte weight.
     ///
     /// If the entry already exists, it is updated (old weight is subtracted).
-    /// After insertion, if total bytes exceeds budget, LRU entries are evicted.
+    /// After insertion, if total bytes exceeds budget, LRU entries are evicted —
+    /// but never the entry that was just inserted, and never a pinned entry.
     pub fn insert(&mut self, key: K, value: V, weight_bytes: u64) {
         // `push`（而非 `put`）会返回被顶掉的条目：key 已存在时是旧条目，
         // 触及条目容量上限时是被 LRU 逐出的其他条目。两种情况的权重都必须
@@ -77,8 +94,30 @@ impl<K: Eq + std::hash::Hash + Clone, V> ByteBudgetCache<K, V> {
         self.total_bytes = self.total_bytes.saturating_add(weight_bytes);
 
         // Evict LRU entries until under budget.
-        while self.total_bytes > self.budget_bytes {
-            if let Some((_, (_, weight))) = self.inner.pop_lru() {
+        //
+        // 【两条必须的例外】
+        // 1. **绝不逐出刚插入的条目**：新条目是 MRU，仅当它是唯一剩余条目时才会
+        //    被 `pop_lru` 选中。若没有这道 `len() > 1` 闸门，一个比整个预算还大的
+        //    条目（超长音频的整文件 PCM，例如 1 小时立体声 ≈ 1.18GiB > 1GB 预算）
+        //    会"插入即自逐出"，永远留在不了缓存里：每次 `update_timeline` 都重新
+        //    全量解码（解码风暴，瞬时内存翻倍），快照还会因 miss 静默跳过该 clip。
+        // 2. **绝不逐出在用（pin）条目**：见 `with_pin`。没有它，仍在播放的 PCM 被
+        //    逐出后账面字节下降但内存未释放，下一次快照重建会再解码一份。
+        // 因此预算在此处是**软**上限：为保住唯一/在用的巨型条目，可以短暂超出。
+        while self.total_bytes > self.budget_bytes && self.inner.len() > 1 {
+            let victim = {
+                let pinned = &self.is_pinned;
+                self.inner
+                    .iter()
+                    .rev() // 从 LRU 端开始找
+                    .find(|(k, (v, _))| !matches!(pinned, Some(is_pinned) if is_pinned(k, v)))
+                    .map(|(k, _)| k.clone())
+            };
+            let Some(victim) = victim else {
+                // 所有条目都在用：保留，宁可超预算也不制造重复解码。
+                break;
+            };
+            if let Some((_, weight)) = self.inner.pop(&victim) {
                 self.total_bytes = self.total_bytes.saturating_sub(weight);
             } else {
                 break;
@@ -210,5 +249,34 @@ mod tests {
         // {7:100, 100:100} + overwrite 100 with weight 50 → 100 + 50.
         budgeted.insert(100, 100, 50);
         assert_eq!(budgeted.total_bytes(), 150);
+    }
+
+    #[test]
+    fn oversized_entry_survives_insert() {
+        let mut cache: ByteBudgetCache<u64, u64> = ByteBudgetCache::new(8, 250);
+        // 1000 字节远超 250 预算：旧实现会"插入即自逐出"，之后永远取不回。
+        // 超长音频的整文件 PCM 正是这种条目。
+        cache.insert(1, 1, 1000);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get(&1), Some(&1));
+        assert_eq!(cache.total_bytes(), 1000);
+    }
+
+    #[test]
+    fn pinned_entries_are_skipped_by_eviction() {
+        struct Item {
+            pinned: bool,
+        }
+        // 预算 250；条目都重 100。key=1 与 key=3 被 pin，只有 key=2 可被逐出。
+        let mut cache: ByteBudgetCache<u64, Item> =
+            ByteBudgetCache::new(8, 250).with_pin(|_, v| v.pinned);
+        cache.insert(1, Item { pinned: true }, 100);
+        cache.insert(2, Item { pinned: false }, 100);
+        cache.insert(3, Item { pinned: true }, 100); // 300 > 250 → 需要逐出
+
+        assert!(cache.get(&1).is_some(), "被 pin 的条目不得被逐出");
+        assert!(cache.get(&3).is_some(), "被 pin 的条目不得被逐出");
+        assert!(cache.get(&2).is_none(), "唯一未 pin 的条目应被逐出");
+        assert_eq!(cache.total_bytes(), 200);
     }
 }

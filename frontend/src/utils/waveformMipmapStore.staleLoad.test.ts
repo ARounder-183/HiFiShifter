@@ -166,7 +166,8 @@ describe("waveformMipmapStore 在途响应作废", () => {
 
         await waveformMipmapStore.batchPreload(["/c.wav"]);
 
-        expect(batchMock).toHaveBeenCalledWith(["/c.wav"]);
+        // batchPreload 只落地 L2，因此只请求 L2（避免后端编码传输 L0/L1 后被丢弃）。
+        expect(batchMock).toHaveBeenCalledWith(["/c.wav"], [2]);
     });
 
     it("过期响应被丢弃后会补发一次请求（丢弃不是终态）", async () => {

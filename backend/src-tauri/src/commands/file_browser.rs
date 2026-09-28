@@ -239,11 +239,11 @@ pub(crate) fn read_audio_preview(
 
     let max = max_frames.unwrap_or(480_000) as usize;
 
-    let (sample_rate, channels, samples) = if crate::media::is_video_extension(path) {
-        crate::media::decode_media_audio_prefix_f32(path, None, max)?
-    } else {
-        crate::audio_utils::decode_audio_f32_interleaved(path)?
-    };
+    // 试听只需前 `max` 帧：一律走**限界前缀解码**。视频分支一直如此，音频分支
+    // 此前是整文件解码（`decode_audio_f32_interleaved`）——一条 1 小时音轨会因此
+    // 把 1.27GB PCM 读进内存，只为取前 10 秒。
+    let (sample_rate, channels, samples) =
+        crate::media::decode_media_audio_prefix_f32(path, None, max)?;
 
     let total_frames = samples.len() / channels.max(1) as usize;
     let frames_to_use = total_frames.min(max);

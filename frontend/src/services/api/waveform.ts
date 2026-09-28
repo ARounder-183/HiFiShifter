@@ -14,13 +14,21 @@ export const waveformApi = {
         invoke<{ ok: boolean; error?: string }>("preload_waveform_mipmap", sourcePath),
 
     /**
-     * 批量获取多个文件的所有 3 级 mipmap 数据（Base64 编码）
+     * 批量获取多个文件的 mipmap 数据（Base64 编码）
      *
      * 将 N×3 次 IPC 合并为 1 次，大幅减少 IPC 往返开销。
      * 返回 Record<sourcePath, [L0_base64, L1_base64, L2_base64]>。
+     *
+     * `levels` 为需要传输的级别白名单（缺省 = 全部三级）。批量预载只落地 L2，
+     * 传 `[2]` 可避免后端把 L0（单级 ≈ 159MB/小时素材）也编码传输后前端丢弃；
+     * 未请求的级别在返回中为空字符串。
      */
-    batchGetWaveformMipmap: (sourcePaths: string[]) =>
-        invoke<Record<string, [string, string, string]>>("batch_get_waveform_mipmap", sourcePaths),
+    batchGetWaveformMipmap: (sourcePaths: string[], levels?: number[]) =>
+        invoke<Record<string, [string, string, string]>>(
+            "batch_get_waveform_mipmap",
+            sourcePaths,
+            levels,
+        ),
 
     // ============== Mix 波形 API ==============
 

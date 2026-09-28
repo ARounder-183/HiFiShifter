@@ -551,7 +551,8 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             return { sourcePath: args[0] };
 
         case "batch_get_waveform_mipmap":
-            return { sourcePaths: args[0] };
+            // levels 缺省传 null = 后端编码全部三级（旧行为）；批量预载传 [2]。
+            return { sourcePaths: args[0], levels: args[1] ?? null };
 
         case "get_root_mix_waveform_peaks_segment":
         case "get_track_mix_waveform_peaks_segment":

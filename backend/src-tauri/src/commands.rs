@@ -700,10 +700,11 @@ pub async fn preload_waveform_mipmap(
 pub async fn batch_get_waveform_mipmap(
     app: tauri::AppHandle,
     source_paths: Vec<String>,
+    levels: Option<Vec<u8>>,
 ) -> std::collections::HashMap<String, [String; 3]> {
     match tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
-        waveform::batch_get_waveform_mipmap(state, source_paths)
+        waveform::batch_get_waveform_mipmap(state, source_paths, levels)
     })
     .await
     {

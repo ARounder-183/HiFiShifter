@@ -376,20 +376,45 @@ pub(super) fn preload_waveform_mipmap(
 /// 将 N 个文件 × 3 级 = 3N 次 IPC 合并为 1 次，大幅减少 IPC 往返开销。
 /// 返回 HashMap<sourcePath, [L0_base64, L1_base64, L2_base64]>。
 /// 若某个文件计算失败，对应值为 3 个空字符串。
+///
+/// `levels` 为要**编码并传输**的级别白名单（`None` = 全部三级，与旧行为一致；
+/// 空列表同样按全部处理）。批量预载只落地 L2，却曾让后端把 L0（单级 ≈ 159MB/小时
+/// 素材、base64 后 ≈ 212MB）也编码传输后由前端丢弃——传 `[2]` 即消除这段浪费。
+/// 未被请求的级别返回空字符串，返回形状保持不变。
 pub(super) fn batch_get_waveform_mipmap(
     state: State<'_, AppState>,
     source_paths: Vec<String>,
+    levels: Option<Vec<u8>>,
 ) -> std::collections::HashMap<String, [String; 3]> {
     let encoder = base64::engine::general_purpose::STANDARD;
     let mut result = std::collections::HashMap::with_capacity(source_paths.len());
 
+    let mut selected = [false; 3];
+    match &levels {
+        Some(requested) => {
+            for &level in requested {
+                if (level as usize) < 3 {
+                    selected[level as usize] = true;
+                }
+            }
+            // 空白名单视为"全都要"，避免调用方传空数组时拿到全空结果。
+            if !selected.iter().any(|&on| on) {
+                selected = [true; 3];
+            }
+        }
+        None => selected = [true; 3],
+    }
+
     for path in source_paths {
         match state.get_or_compute_waveform_peaks_v2(&path) {
             Ok(data) => {
-                let l0 = encoder.encode(data.to_binary_level(0));
-                let l1 = encoder.encode(data.to_binary_level(1));
-                let l2 = encoder.encode(data.to_binary_level(2));
-                result.insert(path, [l0, l1, l2]);
+                let mut encoded: [String; 3] = Default::default();
+                for level in 0..3 {
+                    if selected[level] {
+                        encoded[level] = encoder.encode(data.to_binary_level(level));
+                    }
+                }
+                result.insert(path, encoded);
             }
             Err(e) => {
                 log::warn!("waveform mipmap batch compute failed for {path}: {e}");
