@@ -794,7 +794,7 @@ export const FileBrowserPanel: React.FC = () => {
                         }}
                         style={{
                             fontFamily: "monospace",
-                            fontSize: 10,
+                            fontSize: "var(--qt-fs-micro)",
                             width: 22,
                             height: 22,
                         }}
@@ -936,7 +936,7 @@ export const FileBrowserPanel: React.FC = () => {
                         color: "var(--qt-text)",
                         padding: "2px 8px",
                         borderRadius: 4,
-                        fontSize: 11,
+                        fontSize: "var(--qt-fs-xs)",
                         whiteSpace: "nowrap",
                         opacity: 0.9,
                         boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
@@ -1055,7 +1055,7 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                             size="1"
                             color="gray"
                             className="truncate leading-none"
-                            style={{ fontSize: 10 }}
+                            style={{ fontSize: "var(--qt-fs-micro)" }}
                         >
                             {pathHint}
                         </Text>
@@ -1064,7 +1064,7 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
 
                 {/* 右侧信息 */}
                 {!entry.isDir && entry.size != null && (
-                    <Text size="1" color="gray" className="shrink-0 text-[10px]">
+                    <Text size="1" color="gray" className="shrink-0 text-qt-micro">
                         {formatSize(entry.size)}
                     </Text>
                 )}

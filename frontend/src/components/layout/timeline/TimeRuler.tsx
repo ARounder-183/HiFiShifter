@@ -141,8 +141,8 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
                             <div
                                 className={
                                     tick.isBarStart
-                                        ? "text-[13px] leading-tight font-semibold text-qt-text tabular-nums whitespace-nowrap"
-                                        : "text-[13px] leading-tight text-qt-text tabular-nums whitespace-nowrap"
+                                        ? "text-qt-md leading-tight font-semibold text-qt-text tabular-nums whitespace-nowrap"
+                                        : "text-qt-md leading-tight text-qt-text tabular-nums whitespace-nowrap"
                                 }
                             >
                                 {tick.primaryLabel}
@@ -150,7 +150,7 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
                             {tick.secondaryLabel != null ? (
                                 <>
                                     <div className="w-5 border-t border-qt-border/20 my-[3px]" />
-                                    <div className="text-[10px] leading-tight text-qt-text-muted/45 tabular-nums whitespace-nowrap">
+                                    <div className="text-qt-micro leading-tight text-qt-text-muted/45 tabular-nums whitespace-nowrap">
                                         {tick.secondaryLabel}
                                     </div>
                                 </>
@@ -296,7 +296,7 @@ const TempoMapFloatingLabel = React.memo(function TempoMapFloatingLabel({
                 {/* 注意：仅在可见时接收指针事件 —— 隐藏（opacity: 0）时若仍可点击， */}
                 {/* 会挡住其下方的初始变化点旗帜（双击无法进入编辑模式）。 */}
                 <div
-                    className="px-1 rounded-[2px] text-[9px] leading-[11px] whitespace-nowrap font-medium shadow-md"
+                    className="px-1 rounded-[2px] text-qt-3xs leading-[11px] whitespace-nowrap font-medium shadow-md"
                     style={{
                         backgroundColor: "var(--qt-panel)",
                         color: "var(--qt-text)",
@@ -930,11 +930,11 @@ const TimeRulerInner: React.FC<{
                     className="absolute top-1 z-40 pointer-events-none rounded border border-qt-border bg-qt-panel px-2 py-1 shadow-lg"
                     style={{ left: hover.x + 10 }}
                 >
-                    <div className="text-[12px] leading-tight text-qt-text tabular-nums whitespace-nowrap">
+                    <div className="text-qt-sm leading-tight text-qt-text tabular-nums whitespace-nowrap">
                         {hoverTime.primaryLabel}
                     </div>
                     {hoverTime.secondaryLabel ? (
-                        <div className="text-[10px] leading-tight text-qt-text-muted/60 tabular-nums whitespace-nowrap">
+                        <div className="text-qt-micro leading-tight text-qt-text-muted/60 tabular-nums whitespace-nowrap">
                             {hoverTime.secondaryLabel}
                         </div>
                     ) : null}

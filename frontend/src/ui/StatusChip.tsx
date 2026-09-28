@@ -4,7 +4,7 @@
  * 【为什么需要它】`ParamDataLoadingChip` 当初被抽出来，注释里写明了理由
  * （避免订阅装在包裹整个应用树的大组件上）。但抽出来之后，`App.tsx` 里又
  * 原地手写了 **5 份结构完全相同**的状态片（`px-1 py-0` + `accent-3/accent-11`
- * + `fontSize: 11px`），另有一处 `green-3/green-11` 变体。
+ * + `fontSize: "var(--qt-fs-xs)"px`），另有一处 `green-3/green-11` 变体。
  *
  * 抽出来的组件没被复用，等于没抽。本原语把"状态片"这个形态固定下来，
  * 并提供 `tone` 表示语义，使 `App.tsx` 的 6 处可以收敛为同一个组件。

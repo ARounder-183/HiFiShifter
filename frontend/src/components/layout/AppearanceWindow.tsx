@@ -130,7 +130,7 @@ const PALETTE_GROUPS: Array<{ labelKey: string; tokens: QtColorToken[] }> = [
 ];
 
 const CARD_CLASS = "rounded-md border border-qt-border bg-qt-panel";
-const SECTION_LABEL_CLASS = "text-[11px] font-semibold text-qt-text";
+const SECTION_LABEL_CLASS = "text-qt-xs font-semibold text-qt-text";
 
 /** 主题模式卡片的迷你预览配色：auto = 深浅各半（示意跟随系统）。 */
 const MODE_PREVIEW: Record<
@@ -157,9 +157,9 @@ const MODE_PREVIEW: Record<
     },
 };
 const SECONDARY_BUTTON_CLASS =
-    "px-3 py-1.5 text-[11px] font-medium rounded border border-qt-border bg-qt-surface text-qt-text-muted hover:bg-qt-hover hover:text-qt-text transition-colors cursor-pointer select-none";
+    "px-3 py-1.5 text-qt-xs font-medium rounded border border-qt-border bg-qt-surface text-qt-text-muted hover:bg-qt-hover hover:text-qt-text transition-colors cursor-pointer select-none";
 const PRIMARY_BUTTON_CLASS =
-    "px-4 py-1.5 text-[11px] font-semibold rounded bg-qt-highlight text-white hover:brightness-110 transition-colors cursor-pointer select-none";
+    "px-4 py-1.5 text-qt-xs font-semibold rounded bg-qt-highlight text-white hover:brightness-110 transition-colors cursor-pointer select-none";
 const PREVIEW_SETTINGS_KEY = "hifishifter.appearance.preview";
 const PREVIEW_COLORS_KEY = "hifishifter.appearance.preview.colors";
 
@@ -423,12 +423,12 @@ const ColorTokenRow: React.FC<{
                     />
                 )}
             </label>
-            <span className="text-[10px] text-qt-text flex-1 truncate">{label}</span>
+            <span className="text-qt-micro text-qt-text flex-1 truncate">{label}</span>
             <input
                 type="text"
                 value={color}
                 onChange={(e) => onChange(e.target.value)}
-                className="w-[92px] px-2 py-1 text-[10px] bg-qt-panel text-qt-text-muted font-mono text-right rounded border border-qt-border focus:text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
+                className="w-[92px] px-2 py-1 text-qt-micro bg-qt-panel text-qt-text-muted font-mono text-right rounded border border-qt-border focus:text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
                 spellCheck={false}
             />
         </div>
@@ -907,7 +907,7 @@ export const AppearanceWindow: React.FC = () => {
                     </div>
                     <div className="flex items-center gap-2 pt-1">
                         {modifiedColorCount > 0 && (
-                            <span className="text-[10px] text-qt-highlight bg-qt-highlight/10 px-2 py-0.5 rounded font-semibold">
+                            <span className="text-qt-micro text-qt-highlight bg-qt-highlight/10 px-2 py-0.5 rounded font-semibold">
                                 {plural("appearance_modified_count", modifiedColorCount)}
                             </span>
                         )}
@@ -953,7 +953,7 @@ export const AppearanceWindow: React.FC = () => {
                                     <>
                                         <div className="flex-1" />
                                         <button
-                                            className="px-3 py-1.5 text-[11px] font-medium rounded border border-qt-danger-border/40 bg-qt-danger-bg/20 text-qt-danger-text hover:bg-qt-danger-bg/35 transition-colors cursor-pointer select-none"
+                                            className="px-3 py-1.5 text-qt-xs font-medium rounded border border-qt-danger-border/40 bg-qt-danger-bg/20 text-qt-danger-text hover:bg-qt-danger-bg/35 transition-colors cursor-pointer select-none"
                                             onClick={() => setResetColorsConfirmOpen(true)}
                                         >
                                             {tf("appearance_reset_all_colors")}
@@ -975,7 +975,7 @@ export const AppearanceWindow: React.FC = () => {
                                                 <div
                                                     key={ct.id}
                                                     className={
-                                                        "inline-flex items-center gap-1 px-2 py-1 text-[10px] rounded cursor-pointer " +
+                                                        "inline-flex items-center gap-1 px-2 py-1 text-qt-micro rounded cursor-pointer " +
                                                         "transition-all duration-100 select-none " +
                                                         (isActive
                                                             ? "bg-qt-highlight/20 text-qt-highlight font-semibold"
@@ -985,7 +985,7 @@ export const AppearanceWindow: React.FC = () => {
                                                 >
                                                     <span>{ct.name}</span>
                                                     <button
-                                                        className="text-[9px] opacity-30 hover:opacity-100 hover:text-qt-danger-text transition-opacity cursor-pointer"
+                                                        className="text-qt-3xs opacity-30 hover:opacity-100 hover:text-qt-danger-text transition-opacity cursor-pointer"
                                                         onClick={(e) => {
                                                             e.stopPropagation();
                                                             handleDeleteTheme(ct.id);
@@ -1001,7 +1001,7 @@ export const AppearanceWindow: React.FC = () => {
                                     {/* ── 主题名称（内嵌在已保存主题卡片内） ── */}
                                     {hasCustomColors && (
                                         <div className="flex items-center gap-2 pt-2 border-t border-[color:var(--qt-divider)]">
-                                            <span className="text-[11px] text-qt-text-muted shrink-0">
+                                            <span className="text-qt-xs text-qt-text-muted shrink-0">
                                                 {tf("appearance_theme_name")}
                                             </span>
                                             <input
@@ -1011,7 +1011,7 @@ export const AppearanceWindow: React.FC = () => {
                                                     markDraftDirty();
                                                     setEditThemeName(e.target.value);
                                                 }}
-                                                className="flex-1 rounded border border-qt-border bg-qt-base px-2 py-1.5 text-[11px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
+                                                className="flex-1 rounded border border-qt-border bg-qt-base px-2 py-1.5 text-qt-xs text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
                                                 placeholder={tf("appearance_custom_theme")}
                                             />
                                         </div>
@@ -1062,7 +1062,7 @@ export const AppearanceWindow: React.FC = () => {
                                                     </div>
                                                 </div>
                                                 <span
-                                                    className={`text-[10px] font-medium ${isSelected ? "text-qt-highlight" : "text-qt-text-muted"}`}
+                                                    className={`text-qt-micro font-medium ${isSelected ? "text-qt-highlight" : "text-qt-text-muted"}`}
                                                 >
                                                     {tf(`theme_${mode}`)}
                                                 </span>
@@ -1078,7 +1078,7 @@ export const AppearanceWindow: React.FC = () => {
                                     <span className={SECTION_LABEL_CLASS}>
                                         {tf("appearance_accent")}
                                     </span>
-                                    <span className="text-[9px] text-qt-text-muted/50 font-mono">
+                                    <span className="text-qt-3xs text-qt-text-muted/50 font-mono">
                                         {accentColor} {RADIX_ACCENT_HEX[accentColor]}
                                     </span>
                                 </div>
@@ -1111,7 +1111,7 @@ export const AppearanceWindow: React.FC = () => {
                                                 }}
                                             >
                                                 {isSelected && (
-                                                    <span className="absolute inset-0 flex items-center justify-center text-white text-[10px] font-bold drop-shadow-sm">
+                                                    <span className="absolute inset-0 flex items-center justify-center text-white text-qt-micro font-bold drop-shadow-sm">
                                                         ✓
                                                     </span>
                                                 )}
@@ -1174,7 +1174,7 @@ export const AppearanceWindow: React.FC = () => {
                                     <span className={SECTION_LABEL_CLASS}>
                                         {tf("appearance_tab_colors")}
                                     </span>
-                                    <span className="text-[10px] text-qt-text-muted">
+                                    <span className="text-qt-micro text-qt-text-muted">
                                         {plural("appearance_modified_count", modifiedColorCount)}
                                     </span>
                                 </div>
@@ -1186,7 +1186,7 @@ export const AppearanceWindow: React.FC = () => {
                                             <button
                                                 key={group.labelKey}
                                                 className={
-                                                    "px-2.5 py-1 text-[10px] rounded transition-colors " +
+                                                    "px-2.5 py-1 text-qt-micro rounded transition-colors " +
                                                     (active
                                                         ? "bg-qt-highlight text-white"
                                                         : "text-qt-text-muted hover:bg-qt-hover hover:text-qt-text")
@@ -1233,7 +1233,7 @@ export const AppearanceWindow: React.FC = () => {
                                             markDraftDirty();
                                             setFontFamily(e.target.value);
                                         }}
-                                        className="flex-1 rounded-xl border border-[color:var(--qt-divider)] bg-qt-surface/40 px-3 py-2 text-[11px] text-qt-text font-mono focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
+                                        className="flex-1 rounded-xl border border-[color:var(--qt-divider)] bg-qt-surface/40 px-3 py-2 text-qt-xs text-qt-text font-mono focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
                                         placeholder={DEFAULT_FONT_FAMILY}
                                         spellCheck={false}
                                     />
@@ -1269,7 +1269,7 @@ export const AppearanceWindow: React.FC = () => {
                                     <div className="text-qt-md mb-1.5 leading-relaxed">
                                         中文字体预览：你好世界 1234567890
                                     </div>
-                                    <div className="text-[10px] text-qt-text-muted">
+                                    <div className="text-qt-micro text-qt-text-muted">
                                         ABCDEFG abcdefg !@#$%^&*()
                                     </div>
                                 </div>
@@ -1283,7 +1283,7 @@ export const AppearanceWindow: React.FC = () => {
                                             {tf("appearance_font_system")}
                                         </span>
                                         {availableFonts.length > 0 && (
-                                            <span className="rounded-full bg-qt-surface/60 px-2 py-0.5 text-[10px] text-qt-text-muted">
+                                            <span className="rounded-full bg-qt-surface/60 px-2 py-0.5 text-qt-micro text-qt-text-muted">
                                                 {tf("appearance_font_count").replace(
                                                     "{count}",
                                                     String(availableFonts.length),
@@ -1303,7 +1303,7 @@ export const AppearanceWindow: React.FC = () => {
 
                                 {/* 加载中 */}
                                 {availableFonts.length === 0 && (
-                                    <div className="flex items-center gap-2 rounded-xl border border-dashed border-[color:var(--qt-divider)] bg-qt-base/35 px-3 py-3 text-[11px] text-qt-text-muted">
+                                    <div className="flex items-center gap-2 rounded-xl border border-dashed border-[color:var(--qt-divider)] bg-qt-base/35 px-3 py-3 text-qt-xs text-qt-text-muted">
                                         {systemFonts.loading ? (
                                             <>
                                                 <span className="animate-spin inline-block w-3 h-3 border-2 border-qt-text-muted/20 border-t-qt-highlight rounded-full" />
@@ -1328,7 +1328,7 @@ export const AppearanceWindow: React.FC = () => {
                                                 onChange={(e: ChangeEvent<HTMLInputElement>) =>
                                                     setFontSearch(e.target.value)
                                                 }
-                                                className="w-full rounded-xl border border-[color:var(--qt-divider)] bg-qt-surface/40 py-2 pl-8 pr-8 text-[11px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
+                                                className="w-full rounded-xl border border-[color:var(--qt-divider)] bg-qt-surface/40 py-2 pl-8 pr-8 text-qt-xs text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
                                                 placeholder={tf(
                                                     "appearance_font_search_placeholder",
                                                 )}
@@ -1336,7 +1336,7 @@ export const AppearanceWindow: React.FC = () => {
                                             />
                                             {fontSearch && (
                                                 <button
-                                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] text-qt-text-muted hover:text-qt-text cursor-pointer"
+                                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-qt-3xs text-qt-text-muted hover:text-qt-text cursor-pointer"
                                                     onClick={() => setFontSearch("")}
                                                 >
                                                     ×
@@ -1355,7 +1355,7 @@ export const AppearanceWindow: React.FC = () => {
                                                             key={f}
                                                             className={
                                                                 "w-full rounded-xl border px-3 py-2 text-left transition-colors duration-100 " +
-                                                                "cursor-pointer select-none text-[11px] flex items-center gap-3 " +
+                                                                "cursor-pointer select-none text-qt-xs flex items-center gap-3 " +
                                                                 (isActive
                                                                     ? "border-qt-highlight/25 bg-qt-highlight/12 text-qt-highlight"
                                                                     : "border-transparent text-qt-text hover:border-[color:var(--qt-divider)] hover:bg-qt-surface/40")
@@ -1378,7 +1378,7 @@ export const AppearanceWindow: React.FC = () => {
                                                                 AaBbCc 你好 123
                                                             </span>
                                                             {isActive && (
-                                                                <span className="text-qt-highlight text-[10px] shrink-0 font-bold">
+                                                                <span className="text-qt-highlight text-qt-micro shrink-0 font-bold">
                                                                     ✓
                                                                 </span>
                                                             )}
@@ -1386,7 +1386,7 @@ export const AppearanceWindow: React.FC = () => {
                                                     );
                                                 })
                                             ) : (
-                                                <div className="px-3 py-4 text-[10px] text-qt-text-muted/40 italic text-center">
+                                                <div className="px-3 py-4 text-qt-micro text-qt-text-muted/40 italic text-center">
                                                     {tf("appearance_font_no_results")}
                                                 </div>
                                             )}

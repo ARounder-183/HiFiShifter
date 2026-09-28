@@ -238,13 +238,13 @@ function ClipRateEditorFields({
             onPointerDown={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}
         >
-            <div className="text-[12px] font-medium">{tf("clip_rate_editor_title")}</div>
-            <div className="text-[10px] text-qt-text/60 leading-snug">
+            <div className="text-qt-sm font-medium">{tf("clip_rate_editor_title")}</div>
+            <div className="text-qt-micro text-qt-text/60 leading-snug">
                 {tf("clip_rate_editor_bpm_hint")}
             </div>
 
             <label className="flex flex-col gap-1">
-                <span className="text-[10px] text-qt-text/60">{tf("clip_rate_editor_rate")}</span>
+                <span className="text-qt-micro text-qt-text/60">{tf("clip_rate_editor_rate")}</span>
                 <input
                     className="w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
                     value={rateText}
@@ -283,7 +283,7 @@ function ClipRateEditorFields({
 
             <div className="flex gap-2">
                 <label className="flex-1 flex flex-col gap-1">
-                    <span className="text-[10px] text-qt-text/60">
+                    <span className="text-qt-micro text-qt-text/60">
                         {tf("clip_rate_editor_old_bpm")}
                     </span>
                     <input
@@ -309,7 +309,7 @@ function ClipRateEditorFields({
                     />
                 </label>
                 <label className="flex-1 flex flex-col gap-1">
-                    <span className="text-[10px] text-qt-text/60">
+                    <span className="text-qt-micro text-qt-text/60">
                         {tf("clip_rate_editor_new_bpm")}
                     </span>
                     <input
@@ -337,7 +337,7 @@ function ClipRateEditorFields({
             </div>
 
             <label className="flex flex-col gap-1">
-                <span className="text-[10px] text-qt-text/60">
+                <span className="text-qt-micro text-qt-text/60">
                     {tf("clip_rate_editor_duration")}
                     {": "}
                     {formatFadeLengthTooltip(Number(clip.lengthSec) || 0, formatCtx)}
@@ -383,7 +383,7 @@ function ClipRateEditorFields({
                         }
                     }}
                 />
-                <span className="text-[10px] text-qt-text/60 tabular-nums">
+                <span className="text-qt-micro text-qt-text/60 tabular-nums">
                     {formatFadeLengthTooltip(previewSec, formatCtx)}
                 </span>
             </label>
@@ -397,7 +397,7 @@ function ClipRateEditorFields({
                 />
             </AppForm>
 
-            <div className="text-[10px] text-qt-text/60">
+            <div className="text-qt-micro text-qt-text/60">
                 {tf("clip_rate_editor_result")}
                 {": "}
                 {formatFadeLengthTooltip(previewSec, formatCtx)}
@@ -405,7 +405,7 @@ function ClipRateEditorFields({
             </div>
 
             {targetCount > 1 ? (
-                <div className="text-[10px] text-qt-text/60">
+                <div className="text-qt-micro text-qt-text/60">
                     {tf("clip_rate_editor_multi").replace("{count}", String(targetCount))}
                 </div>
             ) : null}
@@ -413,7 +413,7 @@ function ClipRateEditorFields({
             <div className="flex justify-end pt-1">
                 <button
                     role="menuitem"
-                    className="px-2 py-1 text-[11px] rounded bg-qt-button-hover/60 hover:bg-qt-button-hover disabled:opacity-40"
+                    className="px-2 py-1 text-qt-xs rounded bg-qt-button-hover/60 hover:bg-qt-button-hover disabled:opacity-40"
                     disabled={!canApply}
                     onClick={() => {
                         onApply(

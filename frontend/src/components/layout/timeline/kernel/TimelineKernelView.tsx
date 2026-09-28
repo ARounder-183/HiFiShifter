@@ -951,7 +951,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                                   // 【样式必须与旧实现逐类一致】旧实现的素材拖入预览是
                                   // `rounded-sm` + **1px 虚线 `--qt-highlight`** 边框 +
                                   // `color-mix(in oklab, var(--qt-highlight) 20%, transparent)`
-                                  // 底，文件名用 `px-2 pt-1 text-[10px] text-qt-text truncate`
+                                  // 底，文件名用 `px-2 pt-1 text-qt-micro text-qt-text truncate`
                                   // 顶对齐贴在左上角。这里照搬同一组类（含 `truncate` 需要
                                   // 的块级容器，因此文件名用 div 而不是 inline 的 span）。
                                   className="absolute overflow-hidden rounded-sm border border-dashed border-qt-highlight bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]"
@@ -962,7 +962,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                                       height: Math.max(1, rowHeight - 16),
                                   }}
                               >
-                                  <div className="truncate px-2 pt-1 text-[10px] text-qt-text">
+                                  <div className="truncate px-2 pt-1 text-qt-micro text-qt-text">
                                       {dropPreview.fileName}
                                   </div>
                               </div>

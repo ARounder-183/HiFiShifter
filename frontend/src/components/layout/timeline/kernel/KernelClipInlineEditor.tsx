@@ -103,7 +103,7 @@ export const KernelClipInlineEditor = React.forwardRef<HTMLDivElement, KernelCli
                     value={value}
                     inputMode={inputMode === "decimal" ? "decimal" : "text"}
                     placeholder={placeholder}
-                    className="w-full rounded-sm border border-qt-highlight bg-qt-window px-1.5 py-0.5 text-[11px] text-qt-text outline-none"
+                    className="w-full rounded-sm border border-qt-highlight bg-qt-window px-1.5 py-0.5 text-qt-xs text-qt-text outline-none"
                     onChange={(event) => setValue(event.target.value)}
                     onPointerDown={(event) => {
                         // 输入框内的按下不得触发时间轴手势（否则会开始一次拖拽 / seek）。

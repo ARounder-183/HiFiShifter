@@ -41,7 +41,7 @@ const MenuItem: React.FC<{
     <button
         role="menuitem"
         data-tooltip={title}
-        className={`px-3 py-1.5 text-left w-full text-[12px] transition-colors flex items-center justify-between gap-3
+        className={`px-3 py-1.5 text-left w-full text-qt-sm transition-colors flex items-center justify-between gap-3
             ${
                 disabled
                     ? "opacity-40 cursor-default"
@@ -57,7 +57,7 @@ const MenuItem: React.FC<{
         }}
     >
         <span>{label}</span>
-        {shortcut && <span className="text-[10px] opacity-50 shrink-0">{shortcut}</span>}
+        {shortcut && <span className="text-qt-micro opacity-50 shrink-0">{shortcut}</span>}
     </button>
 );
 
@@ -108,7 +108,7 @@ const TakeMenuItem: React.FC<{
     <div className="flex items-center w-full gap-1 pr-1.5">
         <button
             role="menuitem"
-            className={`px-3 py-1.5 text-left flex-1 min-w-0 text-[12px] transition-colors rounded
+            className={`px-3 py-1.5 text-left flex-1 min-w-0 text-qt-sm transition-colors rounded
                 ${disabled ? "opacity-40 cursor-default" : "hover:bg-qt-button-hover"}`}
             disabled={disabled}
             onPointerDown={(e) => e.stopPropagation()}
@@ -124,7 +124,7 @@ const TakeMenuItem: React.FC<{
                 role="menuitem"
                 aria-label={`${modeTitle ?? modeLabel}: ${label}`}
                 data-tooltip={modeTitle}
-                className={`shrink-0 px-1.5 py-0.5 text-[10px] leading-none rounded border transition-colors
+                className={`shrink-0 px-1.5 py-0.5 text-qt-micro leading-none rounded border transition-colors
                     ${
                         (channelMode ?? 0) !== 0
                             ? "border-qt-highlight text-qt-highlight"
@@ -143,7 +143,7 @@ const TakeMenuItem: React.FC<{
             role="menuitem"
             aria-label={`${reverseLabel}: ${label}`}
             data-tooltip={reverseLabel}
-            className={`shrink-0 px-1.5 py-0.5 text-[10px] leading-none rounded border transition-colors
+            className={`shrink-0 px-1.5 py-0.5 text-qt-micro leading-none rounded border transition-colors
                 ${
                     reversed
                         ? "border-qt-highlight text-qt-highlight"
@@ -216,7 +216,7 @@ const SubMenu: React.FC<{
             onMouseLeave={() => setOpen(false)}
         >
             <button
-                className={`px-3 py-1.5 text-left w-full text-[12px] transition-colors flex items-center justify-between gap-3
+                className={`px-3 py-1.5 text-left w-full text-qt-sm transition-colors flex items-center justify-between gap-3
                     ${disabled ? "opacity-40 cursor-default" : "hover:bg-qt-button-hover"}`}
                 disabled={disabled}
                 onPointerDown={(e) => e.stopPropagation()}
@@ -230,7 +230,7 @@ const SubMenu: React.FC<{
                 <span className="flex items-center gap-2 min-w-0">
                     <span className="truncate">{label}</span>
                     {badge && (
-                        <span className="text-[10px] leading-none rounded bg-black/20 px-1 py-0.5 opacity-70">
+                        <span className="text-qt-micro leading-none rounded bg-black/20 px-1 py-0.5 opacity-70">
                             {badge}
                         </span>
                     )}
@@ -299,7 +299,7 @@ const FadeShapeRow: React.FC<{
     t: (key: MessageKey) => string;
 }> = ({ label, current, isOut = false, onSelect, t }) => (
     <div className="px-3 py-1.5 flex items-center gap-1 flex-wrap">
-        <span className="text-[11px] text-qt-text/60 mr-1 shrink-0">{label}</span>
+        <span className="text-qt-xs text-qt-text/60 mr-1 shrink-0">{label}</span>
         {FADE_SHAPE_OPTIONS.map((opt) => (
             <button
                 key={opt.key}
@@ -507,7 +507,7 @@ export const ClipContextMenu: React.FC<{
             onPointerDown={(e) => e.stopPropagation()}
         >
             {isMulti && (
-                <div className="px-3 py-1 text-[11px] text-qt-text/50 select-none">
+                <div className="px-3 py-1 text-qt-xs text-qt-text/50 select-none">
                     {t("ctx_selected_n").replace("{n}", String(selectedClips.length))}
                 </div>
             )}
@@ -701,7 +701,7 @@ export const ClipContextMenu: React.FC<{
                                     autoFocus
                                     role="menuitem"
                                     aria-label={t("clip_take_rename")}
-                                    className="w-full bg-qt-window text-[12px] border border-qt-border rounded px-2 py-1 outline-none focus:border-qt-highlight text-qt-text"
+                                    className="w-full bg-qt-window text-qt-sm border border-qt-border rounded px-2 py-1 outline-none focus:border-qt-highlight text-qt-text"
                                     value={takeRenameDraft.value}
                                     onChange={(e) =>
                                         setTakeRenameDraft({
@@ -1079,7 +1079,7 @@ export const ClipContextMenu: React.FC<{
                         <>
                             <Divider />
                             {showHeader && (
-                                <div className="px-3 py-1 text-[11px] text-qt-text/50 select-none">
+                                <div className="px-3 py-1 text-qt-xs text-qt-text/50 select-none">
                                     {t("overlapping_clips_header").replace(
                                         "{n}",
                                         String(fadedClips.length),
@@ -1089,7 +1089,7 @@ export const ClipContextMenu: React.FC<{
                             {fadedClips.map((fc) => (
                                 <React.Fragment key={fc.id}>
                                     {showHeader && (
-                                        <div className="px-3 pt-1 text-[10px] text-qt-text/40 truncate">
+                                        <div className="px-3 pt-1 text-qt-micro text-qt-text/40 truncate">
                                             {fc.name || fc.id}
                                         </div>
                                     )}

@@ -206,7 +206,7 @@ const CurvatureSlider: React.FC<{
                 onChange={(e) => onChange(Number(e.currentTarget.value))}
                 style={{ flex: 1 }}
             />
-            <span className="text-[11px] tabular-nums" style={{ minWidth: 44, textAlign: "right" }}>
+            <span className="text-qt-xs tabular-nums" style={{ minWidth: 44, textAlign: "right" }}>
                 {(dir >= 0 ? "+" : "") + dir.toFixed(2)}
             </span>
         </div>
@@ -344,7 +344,7 @@ export const FadeContextMenu: React.FC<{
             {secondary ? (
                 // 交叉点：双列 —— 先前者淡出、后后者淡入。
                 <>
-                    <div className="px-2 py-1 text-[10px] text-qt-text/50 select-none">
+                    <div className="px-2 py-1 text-qt-micro text-qt-text/50 select-none">
                         {labelFor(primary)}
                     </div>
                     <SideColumn
@@ -355,7 +355,7 @@ export const FadeContextMenu: React.FC<{
                         t={(key) => t(key as MessageKey)}
                     />
                     <div className="my-1 border-t border-qt-divider" />
-                    <div className="px-2 py-1 text-[10px] text-qt-text/50 select-none">
+                    <div className="px-2 py-1 text-qt-micro text-qt-text/50 select-none">
                         {labelFor(secondary)}
                     </div>
                     <SideColumn
@@ -368,7 +368,7 @@ export const FadeContextMenu: React.FC<{
                 </>
             ) : (
                 <>
-                    <div className="px-2 py-1 text-[10px] text-qt-text/50 select-none">
+                    <div className="px-2 py-1 text-qt-micro text-qt-text/50 select-none">
                         {labelFor(primary)}
                     </div>
                     <SideColumn
@@ -381,7 +381,7 @@ export const FadeContextMenu: React.FC<{
                 </>
             )}
             {/* 形状切换重置曲率的语义提示（与 Clip 菜单一致的行为说明）。 */}
-            <div className="px-2 pt-1 pb-0.5 text-[9px] text-qt-text/40 select-none">
+            <div className="px-2 pt-1 pb-0.5 text-qt-3xs text-qt-text/40 select-none">
                 {curvatureHint}
             </div>
         </div>,

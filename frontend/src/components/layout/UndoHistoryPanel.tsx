@@ -97,7 +97,7 @@ export const UndoHistoryPanel: React.FC = () => {
                         <div
                             key={row.index}
                             data-undo-history-current={isCurrent ? "1" : undefined}
-                            className={`group flex items-center gap-2 px-2 py-[3px] text-[12px] ${
+                            className={`group flex items-center gap-2 px-2 py-[3px] text-qt-sm ${
                                 isCurrent
                                     ? "bg-qt-highlight/20 font-medium"
                                     : "hover:bg-qt-button-hover"
@@ -111,7 +111,7 @@ export const UndoHistoryPanel: React.FC = () => {
                             >
                                 {labelOf(row.label)}
                             </span>
-                            <span className="shrink-0 text-[11px] tabular-nums text-qt-text-muted">
+                            <span className="shrink-0 text-qt-xs tabular-nums text-qt-text-muted">
                                 {timeFormatter.format(new Date(row.atMs))}
                             </span>
                             <button
@@ -154,7 +154,7 @@ export const UndoHistoryPanel: React.FC = () => {
                         }}
                     />
                 </AppForm>
-                <div className="text-[10px] text-qt-text-muted">{countText}</div>
+                <div className="text-qt-micro text-qt-text-muted">{countText}</div>
             </div>
         </div>
     );

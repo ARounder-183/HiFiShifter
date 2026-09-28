@@ -101,6 +101,7 @@ describe("排版角色层级", () => {
         expect(tokenPx("--qt-fs-2xl")).toBeGreaterThanOrEqual(18);
         // 阶梯必须单调递增，且每个角色都能在阶梯上找到落点
         const ladder = [
+            "--qt-fs-3xs",
             "--qt-fs-micro",
             "--qt-fs-xs",
             "--qt-fs-sm",
@@ -121,4 +122,12 @@ describe("排版角色层级", () => {
             );
         }
     });
+
+    /*
+     * 【本文件门禁的边界】上面的断言读的是 `src/index.css` 的**声明**，
+     * 不是浏览器里的层叠结果：它保证"角色存在、且彼此关系正确"，**不保证**
+     * "某处元素真的用了角色、且没被别处的 font-size 覆盖"。
+     * 后半句由 `designSystemGates.test.ts` 的采用率门禁承担（禁止裸 px 字号
+     * + 角色采用率棘轮）。两道门禁合起来才覆盖"声明正确"与"确实被用"。
+     */
 });

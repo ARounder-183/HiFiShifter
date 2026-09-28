@@ -679,7 +679,7 @@ export const ClipHeader: React.FC<{
 
                     return (
                         <button
-                            className="rounded flex items-center justify-center border transition-all text-[10px] font-bold"
+                            className="rounded flex items-center justify-center border transition-all text-qt-micro font-bold"
                             onPointerDown={(e) => {
                                 e.preventDefault();
                                 e.stopPropagation();
@@ -708,7 +708,7 @@ export const ClipHeader: React.FC<{
             {/* 静音按钮 */}
             {showMute && (
                 <button
-                    className="rounded flex items-center justify-center border transition-all text-[10px] font-bold"
+                    className="rounded flex items-center justify-center border transition-all text-qt-micro font-bold"
                     onPointerDown={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
@@ -857,7 +857,7 @@ export const ClipHeader: React.FC<{
                     {badgeEditing === "rate" ? (
                         <input
                             ref={badgeInputRef}
-                            className="text-[11px] rounded px-1 outline-none text-right"
+                            className="text-qt-xs rounded px-1 outline-none text-right"
                             style={{
                                 // 实测文本宽度：自定义字体下 ch 估算不可靠
                                 width: `${rateInputWidthPx}px`,
@@ -890,7 +890,7 @@ export const ClipHeader: React.FC<{
                         />
                     ) : showPlaybackRate ? (
                         <div
-                            className="text-[10px] tracking-wide cursor-text"
+                            className="text-qt-micro tracking-wide cursor-text"
                             style={{
                                 color: "rgba(208, 216, 223, 0.76)",
                                 opacity: hideVisuals ? 0 : 1,
@@ -992,7 +992,7 @@ function ChannelModeBadge(props: {
             : t("clip_channel_source_mono");
     return (
         <button
-            className="rounded flex items-center justify-center border transition-all text-[9px] font-bold tracking-tight"
+            className="rounded flex items-center justify-center border transition-all text-qt-3xs font-bold tracking-tight"
             onPointerDown={(e) => {
                 e.preventDefault();
                 e.stopPropagation();

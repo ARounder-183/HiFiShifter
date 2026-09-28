@@ -187,7 +187,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                 style={{
                                     width: "100%",
                                     borderCollapse: "collapse",
-                                    fontSize: 13,
+                                    fontSize: "var(--qt-fs-md)",
                                 }}
                             >
                                 <thead>

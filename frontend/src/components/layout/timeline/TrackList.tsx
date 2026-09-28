@@ -2094,7 +2094,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                         }}
                                                         style={{
                                                             fontWeight: 700,
-                                                            fontSize: 11,
+                                                            fontSize: "var(--qt-fs-xs)",
                                                             width: 20,
                                                             height: 20,
                                                         }}
@@ -2118,7 +2118,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                     }}
                                                     style={{
                                                         fontWeight: 700,
-                                                        fontSize: 11,
+                                                        fontSize: "var(--qt-fs-xs)",
                                                         width: 20,
                                                         height: 20,
                                                     }}
@@ -2137,7 +2137,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                     }}
                                                     style={{
                                                         fontWeight: 700,
-                                                        fontSize: 11,
+                                                        fontSize: "var(--qt-fs-xs)",
                                                         width: 20,
                                                         height: 20,
                                                     }}

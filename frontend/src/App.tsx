@@ -3707,11 +3707,11 @@ function AppInner() {
             >
                 <Flex justify="between" align="center" gap="2" mt="2">
                     <Flex gap="1" align="center" className="shrink-0">
-                        <span className="shrink-0 text-[10px] text-qt-text-muted">
+                        <span className="shrink-0 text-qt-micro text-qt-text-muted">
                             {t("recapture_missing_media_search_mode_label")}
                         </span>
                         <WheelSelect
-                            className="h-6 shrink-0 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-[10px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
+                            className="h-6 shrink-0 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-qt-micro text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
                             value={sourceFileSearchMode}
                             disabled={
                                 sourceFileSearchBusy ||
@@ -3843,7 +3843,7 @@ function AppInner() {
                 )}
 
                 <div className="mt-2 max-h-[320px] overflow-auto rounded border border-qt-border bg-qt-base p-1">
-                    <div className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1 text-[10px] font-semibold text-qt-text-muted">
+                    <div className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1 text-qt-micro font-semibold text-qt-text-muted">
                         <div>{t("recapture_missing_media_col_file_status")}</div>
                         <div>{t("recapture_missing_media_col_file")}</div>
                         <div>{t("recapture_missing_media_col_process_status")}</div>
@@ -3892,7 +3892,7 @@ function AppInner() {
                                 className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1.5 text-qt-xs last:border-b-0"
                             >
                                 <div
-                                    className={`shrink-0 whitespace-nowrap rounded px-1 py-0.5 text-center text-[10px] font-semibold leading-none ${
+                                    className={`shrink-0 whitespace-nowrap rounded px-1 py-0.5 text-center text-qt-micro font-semibold leading-none ${
                                         item.change === "deleted"
                                             ? "border border-red-500/25 bg-red-500/10 text-red-600"
                                             : "border border-amber-500/25 bg-amber-500/10 text-amber-600"
@@ -3909,7 +3909,7 @@ function AppInner() {
                                     </div>
                                     {item.reloadedPath && (
                                         <div
-                                            className="mt-0.5 flex items-center gap-1 truncate text-[10px] text-green-600"
+                                            className="mt-0.5 flex items-center gap-1 truncate text-qt-micro text-green-600"
                                             data-tooltip={item.reloadedPath}
                                         >
                                             <span className="shrink-0 font-semibold">
@@ -3925,7 +3925,7 @@ function AppInner() {
                                         item.candidates.length > 0 && (
                                             <div className="mt-1 flex items-center gap-1">
                                                 <WheelSelect
-                                                    className="min-w-0 flex-1 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-[10px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
+                                                    className="min-w-0 flex-1 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-qt-micro text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
                                                     value={item.selectedCandidatePath ?? ""}
                                                     disabled={isBusy}
                                                     onValueChange={(value) =>
@@ -3962,13 +3962,13 @@ function AppInner() {
                                     {!isProcessed &&
                                         item.candidates &&
                                         item.candidates.length === 0 && (
-                                            <div className="mt-1 truncate text-[10px] text-qt-text-muted">
+                                            <div className="mt-1 truncate text-qt-micro text-qt-text-muted">
                                                 {t("recapture_missing_media_search_no_matches")}
                                             </div>
                                         )}
                                 </div>
                                 <div
-                                    className={`shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-center text-[10px] font-semibold leading-none ${statusBadgeClass}`}
+                                    className={`shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-center text-qt-micro font-semibold leading-none ${statusBadgeClass}`}
                                 >
                                     {statusLabel}
                                 </div>

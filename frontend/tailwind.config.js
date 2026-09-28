@@ -75,6 +75,7 @@ export default {
                 "qt-lg": "var(--qt-radius-lg)",
             },
             fontSize: {
+                "qt-3xs": "var(--qt-fs-3xs)",
                 "qt-micro": "var(--qt-fs-micro)",
                 "qt-xs": "var(--qt-fs-xs)",
                 "qt-sm": "var(--qt-fs-sm)",

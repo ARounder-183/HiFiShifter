@@ -8,7 +8,7 @@
  * 【它解决的三个问题】
  *
  * 1. **漂移的菜单项外观**。审查发现同一个"菜单项"在 6 个文件里有 6 套
- *    class：`text-[12px]` / `text-qt-md` / `text-qt-xs`，`hover:bg-qt-button-hover` /
+ *    class：`text-qt-sm` / `text-qt-md` / `text-qt-xs`，`hover:bg-qt-button-hover` /
  *    `hover:bg-qt-hover` / `hover:bg-qt-highlight hover:text-white`，
  *    以及 `py-1` / `py-1.5` / `py-2` 三种行内边距。
  *

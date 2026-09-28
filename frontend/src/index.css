@@ -169,7 +169,14 @@
      * 【为什么上限拉到 20px】上一版阶梯最高只到 13px，容不下"标题"这个角色 ——
      * 于是对话框标题被压到 13px，反而比 14px 的正文标签还小（层级倒挂）。
      * 阶梯必须覆盖全部角色，否则作者只能拿最接近的数值凑。
+     *
+     * 【为什么下探到 9px】标尺旗帜、时间轴/钢琴卷帘角标这一档确实是 9px ——
+     * 它们此前散落成 9 处 `text-[9px]` 字面量，而 9px 与 10px 在"旗帜贴着刻度线
+     * 对齐"的语境里是两个不同的设计意图（见 TimeRuler 里"与变化点旗帜同款尺寸"
+     * 的注释），不能就近归并。把它命名出来，是为了让**这一档只在这里被决定**：
+     * 门禁禁止任何裸 `text-[Npx]`，下一档要加就得改这个文件。
      */
+    --qt-fs-3xs: 9px;
     --qt-fs-micro: 10px;
     --qt-fs-xs: 11px;
     --qt-fs-sm: 12px;
@@ -299,7 +306,16 @@ textarea {
  * 仅在 `:focus-visible` 触发（键盘导航），鼠标点击不会画出焦点环，
  * 因此不影响现有的点按手感。第三方控件只要不显式移除 outline，即自动继承。
  */
-:where(button, [role="button"], [role="tab"], a[href], summary, input, textarea, select):focus-visible,
+:where(
+    button,
+    [role="button"],
+    [role="tab"],
+    a[href],
+    summary,
+    input,
+    textarea,
+    select
+):focus-visible,
 .rt-BaseButton:focus-visible,
 .rt-TextFieldInput:focus-visible,
 .rt-TextArea:focus-visible,
@@ -746,7 +762,7 @@ textarea {
     color: var(--qt-text);
     padding: 4px 8px;
     border-radius: 6px;
-    font-size: 12px;
+    font-size: var(--qt-fs-sm);
     line-height: 16px;
     border: 1px solid var(--qt-border);
     box-shadow: 0 2px 10px var(--qt-overlay);

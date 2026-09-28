@@ -66,23 +66,23 @@ class NotebookErrorBoundaryInner extends Component<Props, State> {
         return (
             <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 bg-qt-window p-4 text-center">
                 <div className="text-qt-xs font-medium text-qt-text">{this.props.labels.title}</div>
-                <div className="max-w-[280px] text-[11px] text-qt-text-muted">
+                <div className="max-w-[280px] text-qt-xs text-qt-text-muted">
                     {this.props.labels.hint}
                 </div>
-                <div className="max-w-[280px] overflow-hidden text-ellipsis whitespace-nowrap text-[10px] text-qt-text-muted opacity-70">
+                <div className="max-w-[280px] overflow-hidden text-ellipsis whitespace-nowrap text-qt-micro text-qt-text-muted opacity-70">
                     {error.message}
                 </div>
                 <div className="flex gap-2">
                     <button
                         type="button"
-                        className="rounded border border-qt-border px-2 py-1 text-[11px] hover:bg-qt-hover"
+                        className="rounded border border-qt-border px-2 py-1 text-qt-xs hover:bg-qt-hover"
                         onClick={this.handleSourceMode}
                     >
                         {this.props.labels.source}
                     </button>
                     <button
                         type="button"
-                        className="rounded border border-qt-border px-2 py-1 text-[11px] hover:bg-qt-hover"
+                        className="rounded border border-qt-border px-2 py-1 text-qt-xs hover:bg-qt-hover"
                         onClick={this.props.onClose}
                     >
                         {this.props.labels.close}

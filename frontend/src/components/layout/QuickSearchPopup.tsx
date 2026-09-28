@@ -440,7 +440,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         }}
                         style={{
                             fontFamily: "monospace",
-                            fontSize: 10,
+                            fontSize: "var(--qt-fs-micro)",
                             width: 20,
                             height: 20,
                             flexShrink: 0,
@@ -524,7 +524,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                                 </span>
                                 {/* 预览指示 */}
                                 {previewingPath === entry.path && (
-                                    <span className="shrink-0 text-[10px] text-qt-highlight animate-pulse">
+                                    <span className="shrink-0 text-qt-micro text-qt-highlight animate-pulse">
                                         ♫
                                     </span>
                                 )}
@@ -548,7 +548,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         />
                     </AppForm>
                     {sortedResults.length > 0 && (
-                        <Text size="1" color="gray" className="text-[10px]">
+                        <Text size="1" color="gray" className="text-qt-micro">
                             {formatKeybinding(keybindings["quickSearch.navigate.up"])}/
                             {formatKeybinding(keybindings["quickSearch.navigate.down"])}{" "}
                             {tf("qs_hint_nav") || "导航"}

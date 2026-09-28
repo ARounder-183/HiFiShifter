@@ -685,7 +685,7 @@ export function ActionBar() {
                             className="fixed z-qt-popover min-w-[200px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
                             style={{ left: metronomeMenuPos.x, top: metronomeMenuPos.y }}
                         >
-                            <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
+                            <div className="px-3 py-1 text-qt-xs uppercase tracking-wide text-qt-text-muted">
                                 {t("metronome_volume")}
                             </div>
                             <div className="px-3 py-1.5 flex items-center gap-2">
@@ -720,12 +720,12 @@ export function ActionBar() {
                                     onPointerDown={(e) => e.stopPropagation()}
                                     className="qt-range flex-1"
                                 />
-                                <span className="text-[11px] tabular-nums w-8 text-right opacity-70">
+                                <span className="text-qt-xs tabular-nums w-8 text-right opacity-70">
                                     {Math.round(s.metronomeGain * 100)}
                                 </span>
                             </div>
                             <div className="my-1 border-t border-qt-border" />
-                            <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
+                            <div className="px-3 py-1 text-qt-xs uppercase tracking-wide text-qt-text-muted">
                                 {t("metronome_mode")}
                             </div>
                             {(
@@ -738,7 +738,7 @@ export function ActionBar() {
                                 <button
                                     key={mode}
                                     type="button"
-                                    className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                    className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                     onClick={() => {
                                         void dispatch(updateMetronome({ metronomeMode: mode }));
                                         setMetronomeMenuPos(null);
@@ -750,7 +750,7 @@ export function ActionBar() {
                                 </button>
                             ))}
                             <div className="my-1 border-t border-qt-border" />
-                            <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
+                            <div className="px-3 py-1 text-qt-xs uppercase tracking-wide text-qt-text-muted">
                                 {t("metronome_sound")}
                             </div>
                             {(
@@ -763,7 +763,7 @@ export function ActionBar() {
                                 <button
                                     key={sound}
                                     type="button"
-                                    className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                    className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                     onClick={() => {
                                         void dispatch(updateMetronome({ metronomeSound: sound }));
                                         setMetronomeMenuPos(null);
@@ -777,7 +777,7 @@ export function ActionBar() {
                             <div className="my-1 border-t border-qt-border" />
                             <button
                                 type="button"
-                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                 onClick={() => {
                                     void dispatch(
                                         updateMetronome({ metronomeAccent: !s.metronomeAccent }),
@@ -1235,12 +1235,12 @@ export function ActionBar() {
                             className="fixed z-qt-popover min-w-[220px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
                             style={{ left: recordingMenuPos.x, top: recordingMenuPos.y }}
                         >
-                            <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
+                            <div className="px-3 py-1 text-qt-xs uppercase tracking-wide text-qt-text-muted">
                                 {tf("recording_source_mode")}
                             </div>
                             <button
                                 type="button"
-                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                 onClick={() =>
                                     void applyRecordingSettings({ captureMode: "device" })
                                 }
@@ -1251,7 +1251,7 @@ export function ActionBar() {
                             </button>
                             <button
                                 type="button"
-                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                 onClick={() =>
                                     void applyRecordingSettings({ captureMode: "loopback" })
                                 }
@@ -1264,7 +1264,7 @@ export function ActionBar() {
                             </button>
                             <button
                                 type="button"
-                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                 onClick={() =>
                                     void applyRecordingSettings({ captureMode: "application" })
                                 }
@@ -1276,7 +1276,7 @@ export function ActionBar() {
                                 ) : null}
                             </button>
                             <div className="my-1 border-t border-qt-border" />
-                            <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
+                            <div className="px-3 py-1 text-qt-xs uppercase tracking-wide text-qt-text-muted">
                                 {tf(
                                     recording.settings.captureMode === "application"
                                         ? "recording_application"
@@ -1287,7 +1287,7 @@ export function ActionBar() {
                                 <>
                                     <button
                                         type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                         onClick={() =>
                                             void applyRecordingSettings({ sourceDevice: "default" })
                                         }
@@ -1307,7 +1307,7 @@ export function ActionBar() {
                                             <button
                                                 key={device.id}
                                                 type="button"
-                                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                                 onClick={() =>
                                                     void applyRecordingSettings({
                                                         sourceDevice: device.id,
@@ -1326,7 +1326,7 @@ export function ActionBar() {
                                 <>
                                     <button
                                         type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                         onClick={() =>
                                             void applyRecordingSettings({
                                                 loopbackDevice: "default",
@@ -1349,7 +1349,7 @@ export function ActionBar() {
                                             <button
                                                 key={device.id}
                                                 type="button"
-                                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                                 onClick={() =>
                                                     void applyRecordingSettings({
                                                         loopbackDevice: device.id,
@@ -1372,7 +1372,7 @@ export function ActionBar() {
                                     ) ? (
                                         <button
                                             type="button"
-                                            className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                            className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                             onClick={() =>
                                                 void applyRecordingSettings({
                                                     captureAppId: recording.settings.captureAppId,
@@ -1395,7 +1395,7 @@ export function ActionBar() {
                                         <button
                                             key={app.id}
                                             type="button"
-                                            className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                            className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                             onClick={() =>
                                                 void applyRecordingSettings({
                                                     captureAppId: app.id,
@@ -1416,7 +1416,7 @@ export function ActionBar() {
                             <div className="my-1 border-t border-qt-border" />
                             <button
                                 type="button"
-                                className="w-full flex items-center gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                className="w-full flex items-center gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                 onClick={() => {
                                     setRecordingMenuPos(null);
                                     setRecordingSettingsOpen(true);

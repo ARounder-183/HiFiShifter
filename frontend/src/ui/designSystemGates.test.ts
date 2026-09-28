@@ -56,12 +56,36 @@ function consumerFiles(): string[] {
 }
 
 /**
+ * 采用率门禁的扫描范围：`src/ui` 之外、非测试的全部源文件，可按扩展名筛选。
+ *
+ * 与 `consumerFiles()` 的区别只在扩展名可控 —— 采用率要连 `.css` 一起看，
+ * 因为"横条多高"这类取值在样式表里同样能被绕开。
+ */
+function sourceFiles(re: RegExp): string[] {
+    const files: string[] = [];
+    const visit = (dir: string): void => {
+        for (const entry of readdirSync(dir)) {
+            const full = join(dir, entry);
+            if (statSync(full).isDirectory()) {
+                if (entry !== "node_modules") visit(full);
+                continue;
+            }
+            if (full.startsWith(UI_DIR)) continue;
+            if (/\.(test|bench)\.tsx?$/.test(entry)) continue;
+            if (re.test(entry)) files.push(full);
+        }
+    };
+    visit("src");
+    return files;
+}
+
+/**
  * 剥离注释与字符串字面量。
  *
  * 这一步是门禁可信的前提：`// 旧写法用 window.alert(...)` 这类说明性文字
  * 不应被当成真实调用，而 `"<input type=\"checkbox\">"` 这类字符串同理。
  */
-function stripCommentsAndStrings(source: string): string {
+function stripCommentsAndStrings(source: string, keepStrings = false): string {
     let out = "";
     let i = 0;
     let state: "code" | "line" | "block" | "single" | "double" | "template" = "code";
@@ -81,16 +105,19 @@ function stripCommentsAndStrings(source: string): string {
             }
             if (ch === '"') {
                 state = "double";
+                if (keepStrings) out += ch;
                 i += 1;
                 continue;
             }
             if (ch === "'") {
                 state = "single";
+                if (keepStrings) out += ch;
                 i += 1;
                 continue;
             }
             if (ch === "`") {
                 state = "template";
+                if (keepStrings) out += ch;
                 i += 1;
                 continue;
             }
@@ -116,7 +143,24 @@ function stripCommentsAndStrings(source: string): string {
             i += 1;
             continue;
         }
-        // 字符串内：保留换行以维持行号，其余丢弃
+        // 字符串内：保留换行以维持行号；`keepStrings` 时原样保留（类名等字面量在字符串里）
+        if (keepStrings) {
+            out += ch;
+            i += 1;
+            if (ch === "\\") {
+                if (i < source.length) out += source[i];
+                i += 1;
+                continue;
+            }
+            if (
+                (state === "double" && ch === '"') ||
+                (state === "single" && ch === "'") ||
+                (state === "template" && ch === "`")
+            ) {
+                state = "code";
+            }
+            continue;
+        }
         if (ch === "\\") {
             i += 2;
             continue;
@@ -237,6 +281,123 @@ describe("原语必须有消费者（结构性检查）", () => {
         for (const [name, reason] of Object.entries(NO_CONSUMER_ALLOWED)) {
             expect(reason.length, `${name} 的豁免理由过短`).toBeGreaterThan(20);
         }
+    });
+});
+
+/*
+ * 采用率门禁（G2）。
+ *
+ * 【为什么必须有】前几轮的失败不是"没建抽象层"，而是"建了抽象层，没人用"：
+ * `--qt-bar-main` 只在一个组件的映射表里躺着，改它在 5 条横条上没有任何效果；
+ * 排版角色全应用只有个位数消费者。抽象层空转比没有抽象层更糟 —— 它让读者
+ * 以为自己改一处就能改全局，实际改不动。
+ *
+ * 【为什么用棘轮而不是一步到位的下限】`<Text size="N">` 那 130 处迁移要逐处
+ * 判断语义（标签 / 说明 / 正文）并做视觉验证，不是机械替换能完成的。因此本轮
+ * 先把**能确定的事实**钉死（字号不许再有裸值、横条令牌必须有消费者、类型旁路
+ * 归零），再给排版角色留一个只增不减的棘轮：数字写死在下面，涨上去以后就不许
+ * 跌回来。
+ */
+describe("抽象层不能空转（采用率）", () => {
+    test("每个 --qt-bar-* 档位都至少有一个真实消费者", () => {
+        const tiers = ["main", "title", "compact", "status"];
+        const files = sourceFiles(/\.(tsx?|css)$/);
+        const missing: string[] = [];
+        for (const tier of tiers) {
+            // 只认"用掉"的写法：Tailwind 高度类，或 CSS 里读该变量。
+            // `--qt-bar-x: 32px` 这种定义本身不算消费者，因此不匹配。
+            const re = new RegExp(`(?:h-qt-bar-${tier}\\b|var\\(--qt-bar-${tier}\\))`);
+            if (!files.some((file) => re.test(readFileSync(file, "utf8")))) {
+                missing.push(`--qt-bar-${tier}`);
+            }
+        }
+        expect(
+            missing.length === 0
+                ? []
+                : [
+                      "以下横条令牌没有任何消费者 —— 令牌层在空转，删掉或接上：",
+                      ...missing.map((name) => `  ${name}`),
+                  ].join("\n"),
+        ).toEqual([]);
+    });
+
+    test("字号只从阶梯取，没有裸 px 字面量", () => {
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.(tsx?|css)$/)) {
+            const source = readFileSync(file, "utf8");
+            if (file.endsWith(".css")) {
+                /*
+                 * 只查绝对 px。`font-size: 1.5em` 是记事本文档自己的比例尺
+                 * （相对用户的笔记字号设置），不是"各写各的绝对量"那类问题。
+                 */
+                const hits = source.match(/font-size:\s*[\d.]+px/g) ?? [];
+                if (hits.length > 0) offenders.push(`${file}: ${hits.length} 处`);
+                continue;
+            }
+            const stripped = stripCommentsAndStrings(source);
+            const hits = [
+                ...(stripped.match(/text-\[\d+px\]/g) ?? []),
+                ...(stripped.match(/fontSize:\s*\d+(?![\d.])/g) ?? []),
+            ];
+            if (hits.length > 0) offenders.push(`${file}: ${hits.length} 处`);
+        }
+        expect(
+            offenders,
+            "字号请取 `text-qt-*` 工具类或 `var(--qt-fs-*)`（见 src/index.css 的字号阶梯）——" +
+                "各写各的 px 会让阶梯失效，也会让 9px 与 10px 这种差异无人记录",
+        ).toEqual([]);
+    });
+
+    test("tf 有真实消费者（无类型翻译器不能是摆设）", () => {
+        const count = sourceFiles(/\.tsx?$/).reduce((total, file) => {
+            const stripped = stripCommentsAndStrings(readFileSync(file, "utf8"));
+            return total + (stripped.match(/\btf\(/g)?.length ?? 0);
+        }, 0);
+        expect(count).toBeGreaterThan(0);
+    });
+
+    test("不得再出现 `as (key: string) => string` 类型旁路（棘轮：基线 0）", () => {
+        /*
+         * 这个 cast 是在告诉编译器"别管键名"，于是一个拼错的键名会一路走到
+         * 运行时才变成界面上的原始英文键。`tf` 用键名字面量联合类型消除了它，
+         * 这里禁止它回来。
+         */
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.tsx?$/)) {
+            const stripped = stripCommentsAndStrings(readFileSync(file, "utf8"));
+            const hits = stripped.match(/as\s*\(\s*key:\s*string\s*\)\s*=>\s*string/g) ?? [];
+            if (hits.length > 0) offenders.push(`${file}: ${hits.length} 处`);
+        }
+        expect(offenders, "请改用 `tf`（键名有类型，拼错会在编译期报错）").toEqual([]);
+    });
+
+    test("排版角色在 src/ui 之外的采用率只增不减（棘轮）", () => {
+        /*
+         * 【目标与现状】目标是 ≥ 50（把 130 处 `<Text size="N">` 收敛到角色层）。
+         * 实测基线只有 **4** 处 —— 角色层目前几乎无人使用。
+         *
+         * 【为什么本轮没做那个迁移】`<Text size>` 不能一对一替换成角色类：
+         * Radix 的 `size="2"` 是 14px/24px，而设计系统的正文字号是 13px/20px；
+         * `size="1"` 是 12px/16px，而 `hs-type-label` 是 12px/18px 且**强制**
+         * `--qt-text` 颜色（Radix 默认继承 currentColor）。也就是说这 130 处
+         * 每一处都要判断"这是标签、说明还是正文"，并接受行高与颜色的变化 ——
+         * 属于一次全应用排版调整，必须逐屏截图核对。
+         *
+         * 【为什么不做一半】部分迁移会留下两套看起来都"官方"的写法，一致性净下降
+         * —— 那正是本文件开头记下的失败模式。所以这里只钉住水位：涨了不管，
+         * 跌回来就红（例如有人把角色层唯一的消费者删掉）。
+         */
+        const floor = 4;
+        const count = sourceFiles(/\.tsx?$/).reduce((total, file) => {
+            /*
+             * 这里必须**保留字符串**：`hs-type-*` 是写在 `className="..."` 里的
+             * 类名，剥掉字符串就等于把全部消费者删掉（实测会得到 0）。
+             * 注释仍然剥掉，否则文档里提一句就算采用。
+             */
+            const source = stripCommentsAndStrings(readFileSync(file, "utf8"), true);
+            return total + (source.match(/hs-type-[a-z]+/g)?.length ?? 0);
+        }, 0);
+        expect(count, "排版角色的采用率跌回了本轮基线以下").toBeGreaterThanOrEqual(floor);
     });
 });
 

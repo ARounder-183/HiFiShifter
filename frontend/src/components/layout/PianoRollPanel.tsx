@@ -7035,7 +7035,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             <button
                                                 key={item.mode}
                                                 type="button"
-                                                className={`w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover`}
+                                                className={`w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover`}
                                                 onClick={() => {
                                                     dispatch(setToolMode(item.mode));
                                                     setDrawToolMenuOpen(false);
@@ -7240,7 +7240,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 >
                                     <button
                                         type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                         onClick={() => {
                                             dispatch(setPitchSnapUnit("semitone"));
                                             if (!s.pitchSnapEnabled) {
@@ -7269,7 +7269,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     </button>
                                     <button
                                         type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                         onClick={() => {
                                             dispatch(setPitchSnapUnit("scale"));
                                             if (!s.pitchSnapEnabled) {
@@ -7299,7 +7299,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     <div className="my-1 border-t border-qt-border" />
                                     <button
                                         type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                         onClick={() => {
                                             setPitchSnapMenuOpen(false);
                                             setPitchSnapOpen(true);
@@ -8022,7 +8022,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             再挂一个会切换两次（净效果为"点了没反应"）。 */}
                         {axisUnitToggleAvailable ? (
                             <div
-                                className="absolute top-0 right-0 z-10 px-1 text-[9px] leading-[14px] text-qt-text-muted"
+                                className="absolute top-0 right-0 z-10 px-1 text-qt-3xs leading-[14px] text-qt-text-muted"
                                 aria-hidden
                             >
                                 {editParamAxisUnit === "db"
@@ -8039,7 +8039,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                   if (!rect) return null;
                                   return (
                                       <div
-                                          className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-[11px] leading-none text-qt-text"
+                                          className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-qt-xs leading-none text-qt-text"
                                           style={{
                                               left: axisValuePreview.clientX - rect.left,
                                               top: axisValuePreview.clientY - rect.top,
@@ -8230,7 +8230,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             if (!rect) return null;
                                             return (
                                                 <div
-                                                    className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-[11px] leading-none text-qt-text"
+                                                    className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-qt-xs leading-none text-qt-text"
                                                     style={{
                                                         left: paramValuePreview.clientX - rect.left,
                                                         top: paramValuePreview.clientY - rect.top,
@@ -8304,7 +8304,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 </Flex>
             </Flex>
             {paramEditorMidiDragOver ? (
-                <div className="pointer-events-none absolute left-1/2 top-10 z-40 -translate-x-1/2 rounded border border-qt-snap-source/70 bg-qt-panel/95 px-3 py-1.5 text-[12px] text-qt-text shadow-lg">
+                <div className="pointer-events-none absolute left-1/2 top-10 z-40 -translate-x-1/2 rounded border border-qt-snap-source/70 bg-qt-panel/95 px-3 py-1.5 text-qt-sm text-qt-text shadow-lg">
                     {tf("param_editor_drop_midi_hint")}
                 </div>
             ) : null}

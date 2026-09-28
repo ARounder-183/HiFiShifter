@@ -1800,7 +1800,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 openDialogFromInlineEdit();
             }}
             onDoubleClick={(e) => e.stopPropagation()}
-            className="text-[9px] leading-[11px] font-medium rounded-[2px] outline-none border-none"
+            className="text-qt-3xs leading-[11px] font-medium rounded-[2px] outline-none border-none"
             style={{
                 backgroundColor: "var(--qt-panel)",
                 color: "var(--qt-text)",
@@ -1942,7 +1942,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                                     : null}
                                 {!inlineEditing ? (
                                     <div
-                                        className="px-1 rounded-[2px] text-[9px] leading-[11px] whitespace-nowrap font-medium"
+                                        className="px-1 rounded-[2px] text-qt-3xs leading-[11px] whitespace-nowrap font-medium"
                                         style={{
                                             backgroundColor: "var(--qt-panel)",
                                             color: "var(--qt-text)",

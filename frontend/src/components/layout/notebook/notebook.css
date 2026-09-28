@@ -261,7 +261,7 @@
     bottom: 4px;
     padding: 0 4px;
     border-radius: 3px;
-    font-size: 10px;
+    font-size: var(--qt-fs-micro);
     font-variant-numeric: tabular-nums;
     background: var(--qt-overlay, rgba(0, 0, 0, 0.6));
     color: var(--qt-text);
@@ -276,14 +276,14 @@
     border-radius: 4px;
     background: var(--qt-warning-bg);
     color: var(--qt-warning-text);
-    font-size: 11px;
+    font-size: var(--qt-fs-xs);
 }
 
 .hs-notebook-image-missing-src {
     opacity: 0.75;
     word-break: break-all;
     font-family: var(--qt-font-mono, ui-monospace, monospace);
-    font-size: 10px;
+    font-size: var(--qt-fs-micro);
 }
 
 .hs-notebook-image-alt-editor {
@@ -299,7 +299,7 @@
 .hs-notebook-image-alt-editor input {
     width: 100%;
     padding: 2px 6px;
-    font-size: 11px;
+    font-size: var(--qt-fs-xs);
     border: 1px solid var(--qt-border);
     border-radius: 3px;
     background: var(--qt-base);
@@ -317,7 +317,7 @@
     background: var(--qt-panel);
     padding: 6px 8px;
     margin: 0.5em 0;
-    font-size: 12px;
+    font-size: var(--qt-fs-sm);
 }
 
 .hs-notebook-clip[data-selected="true"] {
@@ -338,7 +338,7 @@
     flex: none;
     padding: 0 5px;
     border-radius: 3px;
-    font-size: 10px;
+    font-size: var(--qt-fs-micro);
     font-weight: 600;
     letter-spacing: 0.02em;
     background: var(--qt-subtle-2);
@@ -374,7 +374,7 @@
     flex: 1;
     min-width: 0;
     padding: 1px 4px;
-    font-size: 12px;
+    font-size: var(--qt-fs-sm);
     font-weight: 600;
     border: 1px solid var(--qt-border);
     border-radius: 3px;
@@ -403,7 +403,7 @@
     gap: 8px;
     margin-top: 3px;
     color: var(--qt-text-muted);
-    font-size: 11px;
+    font-size: var(--qt-fs-xs);
     font-variant-numeric: tabular-nums;
 }
 
@@ -437,7 +437,7 @@
     border-radius: 3px;
     background: var(--qt-warning-bg);
     color: var(--qt-warning-text);
-    font-size: 11px;
+    font-size: var(--qt-fs-xs);
 }
 
 .hs-notebook-clip-actions {
@@ -453,7 +453,7 @@
     border-radius: 3px;
     background: var(--qt-subtle-1);
     color: var(--qt-text);
-    font-size: 11px;
+    font-size: var(--qt-fs-xs);
 }
 
 .hs-notebook-clip-actions button:hover:not(:disabled) {
@@ -467,7 +467,7 @@
 
 .hs-notebook-clip-notice {
     color: var(--qt-text-muted);
-    font-size: 11px;
+    font-size: var(--qt-fs-xs);
 }
 
 .hs-notebook-clip-broken {
@@ -478,7 +478,7 @@
 
 .hs-notebook-clip-broken-body {
     margin-top: 4px;
-    font-size: 10px;
+    font-size: var(--qt-fs-micro);
     white-space: pre-wrap;
     word-break: break-all;
 }
@@ -515,7 +515,7 @@
     padding: 0 4px;
     border-radius: 3px;
     color: var(--qt-text-muted);
-    font-size: 11px;
+    font-size: var(--qt-fs-xs);
     line-height: 1;
 }
 
@@ -550,7 +550,7 @@
     width: 100%;
     padding: 3px 10px;
     text-align: left;
-    font-size: 12px;
+    font-size: var(--qt-fs-sm);
     color: var(--qt-text);
 }
 
@@ -561,7 +561,7 @@
 .hs-notebook-slash-hint {
     color: var(--qt-text-muted);
     font-family: var(--qt-font-mono, ui-monospace, monospace);
-    font-size: 10px;
+    font-size: var(--qt-fs-micro);
 }
 
 /* 链接编辑浮层：替代 window.prompt（Tauri/WKWebView 下脚本对话框不可用），
@@ -590,7 +590,7 @@
     border-radius: 3px;
     background: var(--qt-base);
     color: var(--qt-text);
-    font-size: 11px;
+    font-size: var(--qt-fs-xs);
     outline: none;
 }
 
@@ -613,14 +613,14 @@
     border-radius: 3px;
     background: var(--qt-base);
     color: var(--qt-text);
-    font-size: 11px;
+    font-size: var(--qt-fs-xs);
     outline: none;
 }
 
 .hs-notebook-findbar-count {
     flex: none;
     color: var(--qt-text-muted);
-    font-size: 11px;
+    font-size: var(--qt-fs-xs);
     font-variant-numeric: tabular-nums;
 }
 
@@ -635,7 +635,7 @@
     border-top: 1px solid var(--qt-border);
     background: var(--qt-window);
     color: var(--qt-text-muted);
-    font-size: 10px;
+    font-size: var(--qt-fs-micro);
     font-variant-numeric: tabular-nums;
 }
 
@@ -654,7 +654,7 @@
     gap: 8px;
     padding: 4px 0;
     border-bottom: 1px solid var(--qt-divider);
-    font-size: 11px;
+    font-size: var(--qt-fs-xs);
 }
 
 .hs-notebook-attachment-thumb {

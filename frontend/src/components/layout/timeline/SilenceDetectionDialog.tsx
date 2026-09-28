@@ -190,7 +190,7 @@ export const SilenceDetectionDialog: React.FC<{
                 </div>
 
                 <label
-                    className="flex items-center gap-2 text-[12px]"
+                    className="flex items-center gap-2 text-qt-sm"
                     data-tooltip={resetHint}
                     onDoubleClick={() => update({ adaptive: SILENCE_DETECT_DEFAULTS.adaptive })}
                 >
@@ -256,7 +256,7 @@ export const SilenceDetectionDialog: React.FC<{
                 </div>
 
                 <label
-                    className="flex items-center gap-2 text-[12px]"
+                    className="flex items-center gap-2 text-qt-sm"
                     data-tooltip={resetHint}
                     onDoubleClick={() =>
                         update({ deleteSilentClips: SILENCE_DETECT_DEFAULTS.deleteSilentClips })
@@ -269,7 +269,7 @@ export const SilenceDetectionDialog: React.FC<{
                     {tf("silence_delete_silent_clips")}
                 </label>
                 <label
-                    className="flex items-center gap-2 text-[12px]"
+                    className="flex items-center gap-2 text-qt-sm"
                     data-tooltip={resetHint}
                     onDoubleClick={() =>
                         update({ syncAllTakes: SILENCE_DETECT_DEFAULTS.syncAllTakes })
