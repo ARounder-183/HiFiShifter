@@ -12,7 +12,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { AppButton } from "./Button";
-import { AppField, AppForm } from "./Field";
+import { AppField, AppForm, AppFormSection, AppSwitchRow } from "./Field";
 import { AppContextMenu, type AppMenuItemSpec } from "./Menu";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -220,4 +220,55 @@ test("AppContextMenu 暴露 role=menu / menuitem，供屏幕阅读器识别", as
     await render(<AppContextMenu x={10} y={10} items={ITEMS} onClose={() => {}} />);
     expect(container.querySelector('[role="menu"]')).not.toBeNull();
     expect(container.querySelectorAll('[role="menuitem"]')).toHaveLength(3);
+});
+
+test("AppFormSection 渲染 section + section 角色标题，并靠留白而非分割线分组", async () => {
+    await render(
+        <AppForm>
+            <AppFormSection title="网格">
+                <AppField label="A">
+                    <input />
+                </AppField>
+            </AppFormSection>
+            <AppFormSection title="吸附">
+                <AppField label="B">
+                    <input />
+                </AppField>
+            </AppFormSection>
+        </AppForm>,
+    );
+
+    const sections = container.querySelectorAll("section");
+    expect(sections).toHaveLength(2);
+
+    // 标题用 section 角色（13px/600），**不缩字号** —— 原实现是 12px/700 muted，
+    // 比它统领的 14px 行还小。
+    const heading = sections[0].querySelector("h3")!;
+    expect(heading.className).toContain("hs-type-section");
+
+    // 分区之间要额外上边距：本组件取代了 Radix Separator，分组由留白承担，
+    // 若节间距与行距相同就分不出组。两个分区带**同一个类**，`:not(:first-child)`
+    // 由 CSS 在运行期挑出后面的分区 —— 因此这里断言"机制存在"，
+    // 而不是断言某个分区没有这个类（那是把选择器文本当成结果读）。
+    expect(sections[0].className).toContain("[&:not(:first-child)]:mt-3");
+    expect(sections[1].className).toContain("[&:not(:first-child)]:mt-3");
+});
+
+test("AppSwitchRow 的 control 决定控件类型，两种共用同一排版", async () => {
+    await render(
+        <div>
+            <AppSwitchRow label="开关" checked onCheckedChange={() => {}} control="switch" />
+            <AppSwitchRow label="勾选" checked onCheckedChange={() => {}} control="checkbox" />
+        </div>,
+    );
+
+    // Radix 的 Switch 与 Checkbox 都渲染 button[role]
+    const controls = container.querySelectorAll("button");
+    expect(controls.length).toBeGreaterThanOrEqual(2);
+
+    // 两条标签必须同号 —— 这正是"同一表单两种标签字号"的回归点
+    const labels = [...container.querySelectorAll(".hs-type-body")].map(
+        (el) => getComputedStyle(el).fontSize,
+    );
+    expect(new Set(labels).size).toBeLessThanOrEqual(1);
 });
