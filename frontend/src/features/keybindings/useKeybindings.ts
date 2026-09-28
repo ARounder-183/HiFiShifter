@@ -47,6 +47,53 @@ function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 /**
+ * 复合控件自己拥有方向键 —— 全局快捷键必须让路。
+ *
+ * 【为什么必须有】`playback.seekLeft/Right` 默认绑定在左右方向键上、
+ * `track.selectUp/Down` 绑在上下方向键上，而本分发器运行在 **window 捕获阶段**，
+ * 命中后 `stopPropagation()`。于是凡是声明了 ARIA 键盘契约的复合控件，方向键
+ * 永远到不了控件自己：焦点停在停靠标签上按 ←/→ 会去 seek，而不是切标签。
+ * （实测确认：在标签上派发 `ArrowLeft`，事件在 window 捕获阶段就被本分发器
+ * 吞掉，标签自己的处理器收不到。）
+ *
+ * ARIA 角色是"方向键归我管"的承诺，与 `isEditableTarget` 放行输入框是同一个
+ * 道理：**先看谁拥有这组键，再谈全局绑定**。
+ *
+ * 覆盖的角色是标准里明确拥有方向键的那些。本仓库自己的停靠标签条与手写菜单
+ * 都在其中；Radix 的 Select / Slider / Menu 也各自渲染这些角色，因此一并受益。
+ */
+const ARROW_OWNING_SELECTOR = [
+    '[role="tablist"]',
+    '[role="menu"]',
+    '[role="menubar"]',
+    '[role="listbox"]',
+    '[role="radiogroup"]',
+    '[role="slider"]',
+    '[role="spinbutton"]',
+    '[role="grid"]',
+    '[role="tree"]',
+    '[role="treegrid"]',
+].join(",");
+
+/** 会被复合控件接管的按键（方向键 + 标准里同组的首尾/翻页键）。 */
+const COMPOSITE_WIDGET_KEYS = new Set([
+    "arrowup",
+    "arrowdown",
+    "arrowleft",
+    "arrowright",
+    "home",
+    "end",
+    "pageup",
+    "pagedown",
+]);
+
+function ownsArrowKeys(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    if (!el?.closest) return false;
+    return el.closest(ARROW_OWNING_SELECTOR) !== null;
+}
+
+/**
  * 计算当前焦点域：即「活动编辑表面」（focusSurface 单一事实源，由最后
  * 一次 pointerdown / focusin 落点驱动）。不读 document.activeElement ——
  * 时间轴/轨道列刻意 preventDefault 自管焦点，DOM 焦点会滞留在上一个
@@ -111,6 +158,20 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
              */
             if (isShortcutSuppressed()) return;
 
+            const key = normalizeEventKey(e);
+
+            /*
+             * 复合控件（标签条 / 菜单 / 下拉 / 滑杆…）自己处理方向键，全局绑定让路。
+             * 必须在下面的 `resolveActionByFocus` 之前返回 —— 那条路径会
+             * `stopPropagation()`，让控件再也收不到这个按键。
+             */
+            if (
+                COMPOSITE_WIDGET_KEYS.has(key) &&
+                (ownsArrowKeys(e.target) || ownsArrowKeys(document.activeElement))
+            ) {
+                return;
+            }
+
             // 直线/颤音拖拽期间，命中振幅/频率方向键时，交给参数编辑器本地监听处理。
             if (document.body.hasAttribute("data-piano-roll-vibrato-drag-active")) {
                 const fineAdjustKb = keybindingsRef.current["modifier.paramFineAdjust"];
@@ -141,7 +202,6 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
 
             const domain = computeFocusDomain();
 
-            const key = normalizeEventKey(e);
             const isArrowKey =
                 key === "arrowup" ||
                 key === "arrowdown" ||
