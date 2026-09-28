@@ -83,7 +83,7 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
                     // 异步包装：打开仓库不关闭对话框，避免页脚表单重新提交触发默认动作。
                     onClick: () => openExternal(repoUrl),
                 },
-                { id: "close", label: tf("cancel"), onClick: () => onOpenChange(false) },
+                { id: "close", label: tf("close"), onClick: () => onOpenChange(false) },
             ]}
         >
             <AppForm>

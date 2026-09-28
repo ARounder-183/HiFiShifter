@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Flex, Button, ScrollArea, Separator, Badge } from "@radix-ui/themes";
+import { Flex, Button, ScrollArea, Separator } from "@radix-ui/themes";
 import { Cross2Icon } from "@radix-ui/react-icons";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -25,7 +25,7 @@ import type { ActionId, ActionMeta, Keybinding } from "../../features/keybinding
 import { canonicalKeyFromEvent } from "../../features/keybindings/keybindingMatch";
 import { useShortcutSuppression } from "../../ui/shortcutScope";
 import { AppDialog } from "../../ui/Dialog";
-import { AppSelect } from "../../ui";
+import { AppSelect, AppStatusChip, type AppStatusTone } from "../../ui";
 import type { MessageKey } from "../../i18n/messages";
 import {
     KEYBINDING_PRESET_SELECTION_IDS,
@@ -61,15 +61,15 @@ const NONE_BINDING: Keybinding = { key: "__none__" };
 
 type ModifierToken = "control" | "shift" | "alt";
 
-/** 修饰键手势徽章的 i18n key 与配色 */
+/** 修饰键手势徽章的 i18n key 与色调（四档互不相同，仍可区分手势类型） */
 const GESTURE_BADGES: Record<
     NonNullable<ActionMeta["modifierOperationType"]>,
-    { labelKey: string; color: "blue" | "orange" | "green" | "purple" }
+    { labelKey: string; tone: AppStatusTone }
 > = {
-    drag: { labelKey: "kb_gesture_drag", color: "blue" },
-    click: { labelKey: "kb_gesture_click", color: "orange" },
-    wheel: { labelKey: "kb_gesture_wheel", color: "green" },
-    hold: { labelKey: "kb_gesture_hold", color: "purple" },
+    drag: { labelKey: "kb_gesture_drag", tone: "accent" },
+    click: { labelKey: "kb_gesture_click", tone: "warning" },
+    wheel: { labelKey: "kb_gesture_wheel", tone: "success" },
+    hold: { labelKey: "kb_gesture_hold", tone: "neutral" },
 };
 
 function isPhysicalModifierKey(key: string): boolean {
@@ -400,19 +400,17 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                                         <Flex align="center" gap="2" minWidth="0">
                                             {/* 修饰键手势徽章：区分拖拽 / 点击 / 滚轮 / 按住 */}
                                             {meta.modifierOperationType && (
-                                                <Badge
-                                                    size="1"
-                                                    variant="soft"
-                                                    color={
+                                                <AppStatusChip
+                                                    tone={
                                                         GESTURE_BADGES[meta.modifierOperationType]
-                                                            .color
+                                                            .tone
                                                     }
                                                 >
                                                     {tf(
                                                         GESTURE_BADGES[meta.modifierOperationType]
                                                             .labelKey,
                                                     )}
-                                                </Badge>
+                                                </AppStatusChip>
                                             )}
                                             <span className="hs-type-body" style={{ minWidth: 0 }}>
                                                 {tf(meta.labelKey)}

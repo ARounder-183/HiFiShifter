@@ -241,7 +241,7 @@ describe("排版角色层级", () => {
                 .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
                 .join("\n");
         // 已清零：28 个文件全部迁入角色层。新代码禁止再引入 Radix <Text>。
-        const whitelist = new Set([]);
+        const whitelist = new Set<string>([]);
         const offenders: string[] = [];
         const stack: string[] = ["src"];
         while (stack.length > 0) {

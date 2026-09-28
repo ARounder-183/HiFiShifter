@@ -527,6 +527,11 @@ function buildExportHtml(markdown: string, title: string, editorHtml: string | n
         `<title>${escapeHtml(title)}</title>`,
         "<style>",
         "body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;line-height:1.7;max-width:52rem;margin:2rem auto;padding:0 1rem}",
+        /*
+         * 【这里的颜色是**故意**写死的】这段 CSS 属于**导出物**（一份自包含的
+         * 独立 HTML 文档，用户在浏览器里打开），不是应用内预览 —— 它不该跟随
+         * 应用主题，浅色排版是对文档的正确选择。不要把它换成 --qt-* 令牌。
+         */
         "pre{background:#f5f5f5;padding:.75rem;border-radius:4px;overflow:auto}",
         "code{font-family:ui-monospace,Consolas,monospace;font-size:.92em}",
         "table{border-collapse:collapse;width:100%}th,td{border:1px solid #ddd;padding:.25rem .5rem}",

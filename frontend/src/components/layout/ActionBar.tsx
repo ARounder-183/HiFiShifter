@@ -1381,7 +1381,10 @@ export function ActionBar() {
                                 style={{
                                     width: `${Math.min(100, Math.round((recording.level || 0) * 100))}%`,
                                     height: "100%",
-                                    background: recording.level > 0.98 ? "red" : "#e5484d",
+                                    background:
+                                        recording.level > 0.98
+                                            ? "var(--qt-danger-text)"
+                                            : "var(--qt-danger-border)",
                                     transition: "width 80ms linear",
                                 }}
                             />

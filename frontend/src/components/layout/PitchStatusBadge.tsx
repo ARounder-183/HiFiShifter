@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 
-import { Badge } from "@radix-ui/themes";
+import { AppStatusChip, type AppStatusTone } from "../../ui";
 
 import { useI18n } from "../../i18n/I18nProvider";
 import { usePitchAnalysis } from "../../contexts/PitchAnalysisContext";
@@ -94,10 +94,10 @@ export function PitchStatusBadge(props: {
         return { kind: "unknown", progress: null };
     }, [hardDisableReason, status, pitchAnalysis]);
 
-    const { color, text, title } = useMemo(() => {
+    const { tone, text, title } = useMemo(() => {
         if (hardDisableReason) {
             return {
-                color: "gray" as const,
+                tone: "neutral" as const,
                 text: `${t("pitch_status_label")} ${t("pitch_status_off")}`,
                 title: hardDisableReason,
             };
@@ -110,7 +110,7 @@ export function PitchStatusBadge(props: {
                         ? Math.round(Math.max(0, Math.min(1, progress)) * 100)
                         : null;
                 return {
-                    color: "amber" as const,
+                    tone: "warning" as const,
                     text:
                         p == null
                             ? `${t("pitch_status_label")} ${t("pitch_status_pending")}`
@@ -120,32 +120,32 @@ export function PitchStatusBadge(props: {
             }
             case "unavailable":
                 return {
-                    color: "red" as const,
+                    tone: "danger" as const,
                     text: `${t("pitch_status_label")} ${t("pitch_status_unavailable")}`,
                     title: t("pitch_backend_unavailable"),
                 };
             case "no_edit":
                 return {
-                    color: "gray" as const,
+                    tone: "neutral" as const,
                     text: `${t("pitch_status_label")} ${t("pitch_status_no_edit")}`,
                     title: t("pitch_edit_not_modified_hint"),
                 };
             case "ready":
                 return {
-                    color: "green" as const,
+                    tone: "success" as const,
                     text: `${t("pitch_status_label")} ${t("pitch_status_ready")}`,
                     title: `${t("pitch_status_label")}: ${t("pitch_status_ready")}`,
                 };
             case "off":
                 return {
-                    color: "gray" as const,
+                    tone: "neutral" as const,
                     text: `${t("pitch_status_label")} ${t("pitch_status_off")}`,
                     title: t("pitch_status_off"),
                 };
             case "unknown":
             default:
                 return {
-                    color: "gray" as const,
+                    tone: "neutral" as const,
                     text: `${t("pitch_status_label")} ${t("status_na")}`,
                     title: `${t("pitch_status_label")}: ${t("status_na")}`,
                 };
@@ -153,14 +153,12 @@ export function PitchStatusBadge(props: {
     }, [hardDisableReason, kind, progress, t]);
 
     return (
-        <Badge
-            variant="soft"
-            size="1"
-            color={color}
-            data-tooltip={title}
+        <AppStatusChip
+            tone={tone as AppStatusTone}
+            title={title}
             className={"select-none " + (className ?? "")}
         >
             {text}
-        </Badge>
+        </AppStatusChip>
     );
 }
