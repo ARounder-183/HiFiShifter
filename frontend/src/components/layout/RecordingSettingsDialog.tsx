@@ -32,8 +32,7 @@ function clampGain(raw: number): number {
 
 export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSettingsDialogProps) {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const savedSettings = useAppSelector((state) => state.recording.settings);
     const devices = useAppSelector((state) => state.recording.devices);
     const apps = useAppSelector((state) => state.recording.apps);
@@ -99,7 +98,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                 dispatch(devicesLoaded(result.devices));
             }
         } catch {
-            setErrorText(tAny("recording_error_load_devices"));
+            setErrorText(tf("recording_error_load_devices"));
         }
     }
 
@@ -110,7 +109,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                 dispatch(appsLoaded(result.apps));
             }
         } catch {
-            setErrorText(tAny("recording_error_load_apps"));
+            setErrorText(tf("recording_error_load_apps"));
         }
     }
 
@@ -147,7 +146,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
             await dispatch(saveRecordingSettings(nextSettings)).unwrap();
             onOpenChange(false);
         } catch {
-            setErrorText(tAny("recording_error_save_settings"));
+            setErrorText(tf("recording_error_save_settings"));
         } finally {
             setSubmitting(false);
         }
@@ -157,14 +156,14 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("menu_recording_settings")}
-            description={tAny("recording_settings_desc")}
+            title={tf("menu_recording_settings")}
+            description={tf("recording_settings_desc")}
             size="xl"
             actions={[
-                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
                 {
                     id: "save",
-                    label: tAny("recording_save_settings"),
+                    label: tf("recording_save_settings"),
                     intent: "primary",
                     disabled: submitting,
                     onClick: handleSave,
@@ -172,7 +171,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
             ]}
         >
             <AppForm>
-                <AppField label={tAny("recording_source_mode")}>
+                <AppField label={tf("recording_source_mode")}>
                     <AppSelect
                         value={draft.captureMode}
                         onValueChange={(value) =>
@@ -182,15 +181,15 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                             }))
                         }
                         options={[
-                            { value: "device", label: tAny("recording_mode_device") },
-                            { value: "loopback", label: tAny("recording_mode_loopback") },
-                            { value: "application", label: tAny("recording_mode_application") },
+                            { value: "device", label: tf("recording_mode_device") },
+                            { value: "loopback", label: tf("recording_mode_loopback") },
+                            { value: "application", label: tf("recording_mode_application") },
                         ]}
                     />
                 </AppField>
 
                 {draft.captureMode === "device" ? (
-                    <AppField label={tAny("recording_device")}>
+                    <AppField label={tf("recording_device")}>
                         <Flex align="center" gap="2">
                             <AppSelect
                                 fullWidth={false}
@@ -201,7 +200,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                     setDraft((prev) => ({ ...prev, sourceDevice: value }))
                                 }
                                 options={[
-                                    { value: "default", label: tAny("recording_device_default") },
+                                    { value: "default", label: tf("recording_device_default") },
                                     ...inputDevices
                                         .filter((device) => !device.isDefault)
                                         .map((device) => ({
@@ -217,14 +216,14 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                 color="gray"
                                 onClick={() => void refreshDevices()}
                             >
-                                {tAny("recording_refresh_devices")}
+                                {tf("recording_refresh_devices")}
                             </Button>
                         </Flex>
                     </AppField>
                 ) : null}
 
                 {draft.captureMode === "loopback" ? (
-                    <AppField label={tAny("recording_loopback_device")}>
+                    <AppField label={tf("recording_loopback_device")}>
                         <Flex align="center" gap="2">
                             <AppSelect
                                 fullWidth={false}
@@ -237,7 +236,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                 options={[
                                     {
                                         value: "loopback:default",
-                                        label: tAny("recording_loopback_default"),
+                                        label: tf("recording_loopback_default"),
                                     },
                                     ...loopbackDevices
                                         .filter((device) => device.id !== "loopback:default")
@@ -254,7 +253,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                 color="gray"
                                 onClick={() => void refreshDevices()}
                             >
-                                {tAny("recording_refresh_devices")}
+                                {tf("recording_refresh_devices")}
                             </Button>
                         </Flex>
                     </AppField>
@@ -262,7 +261,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
 
                 {draft.captureMode === "application" ? (
                     <>
-                        <AppField label={tAny("recording_application")}>
+                        <AppField label={tf("recording_application")}>
                             <Flex align="center" gap="2">
                                 <AppSelect
                                     fullWidth={false}
@@ -300,17 +299,17 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                     color="gray"
                                     onClick={() => void refreshApps()}
                                 >
-                                    {tAny("recording_refresh_apps")}
+                                    {tf("recording_refresh_apps")}
                                 </Button>
                             </Flex>
                         </AppField>
                         <Text size="1" color="gray" style={{ paddingLeft: 20 }}>
-                            {tAny("recording_application_hint")}
+                            {tf("recording_application_hint")}
                         </Text>
                     </>
                 ) : null}
 
-                <AppField label={tAny("recording_sample_rate")}>
+                <AppField label={tf("recording_sample_rate")}>
                     <AppSelect
                         value={String(draft.sampleRate)}
                         onValueChange={(value) =>
@@ -326,7 +325,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                     />
                 </AppField>
 
-                <AppField label={tAny("recording_bit_depth")}>
+                <AppField label={tf("recording_bit_depth")}>
                     <Flex align="center" gap="2">
                         <AppSelect
                             fullWidth={false}
@@ -347,7 +346,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                         />
 
                         <Text size="2" ml="4">
-                            {tAny("recording_channels")}
+                            {tf("recording_channels")}
                         </Text>
                         <AppSelect
                             fullWidth={false}
@@ -361,14 +360,14 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                 }))
                             }
                             options={[
-                                { value: "1", label: tAny("recording_mono") },
-                                { value: "2", label: tAny("recording_stereo") },
+                                { value: "1", label: tf("recording_mono") },
+                                { value: "2", label: tf("recording_stereo") },
                             ]}
                         />
                     </Flex>
                 </AppField>
 
-                <AppField label={tAny("recording_input_gain")}>
+                <AppField label={tf("recording_input_gain")}>
                     <AppNumberField
                         value={draft.inputGainDb}
                         unit="gainDb"
@@ -376,7 +375,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                         max={24}
                         width={120}
                         suffix="dB"
-                        ariaLabel={tAny("recording_input_gain")}
+                        ariaLabel={tf("recording_input_gain")}
                         onCommit={(inputGainDb) =>
                             setDraft((prev) => ({
                                 ...prev,
@@ -386,15 +385,15 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                     />
                 </AppField>
 
-                <AppField label={tAny("recording_countdown")}>
+                <AppField label={tf("recording_countdown")}>
                     <AppNumberField
                         value={draft.countdownSec}
                         unit="integer"
                         min={0}
                         max={10}
                         width={120}
-                        suffix={tAny("recording_countdown_unit")}
-                        ariaLabel={tAny("recording_countdown")}
+                        suffix={tf("recording_countdown_unit")}
+                        ariaLabel={tf("recording_countdown")}
                         onCommit={(countdownSec) =>
                             setDraft((prev) => ({
                                 ...prev,
@@ -406,7 +405,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
 
                 <AppSwitchRow
                     control="checkbox"
-                    label={tAny("recording_monitor_enabled")}
+                    label={tf("recording_monitor_enabled")}
                     checked={draft.monitorEnabled}
                     onCheckedChange={(monitorEnabled) =>
                         setDraft((prev) => ({
@@ -417,7 +416,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                 />
 
                 {draft.monitorEnabled ? (
-                    <AppField label={tAny("recording_monitor_gain")} className="pl-6">
+                    <AppField label={tf("recording_monitor_gain")} className="pl-6">
                         <AppNumberField
                             value={draft.monitorGainDb}
                             unit="gainDb"
@@ -425,7 +424,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                             max={24}
                             width={120}
                             suffix="dB"
-                            ariaLabel={tAny("recording_monitor_gain")}
+                            ariaLabel={tf("recording_monitor_gain")}
                             onCommit={(monitorGainDb) =>
                                 setDraft((prev) => ({
                                     ...prev,
@@ -438,7 +437,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
 
                 <AppSwitchRow
                     control="checkbox"
-                    label={tAny("recording_auto_normalize")}
+                    label={tf("recording_auto_normalize")}
                     checked={draft.autoNormalize}
                     onCheckedChange={(autoNormalize) =>
                         setDraft((prev) => ({
@@ -450,7 +449,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
 
                 <AppSwitchRow
                     control="checkbox"
-                    label={tAny("recording_auto_stop_selection")}
+                    label={tf("recording_auto_stop_selection")}
                     checked={draft.autoStopAtSelectionEnd}
                     onCheckedChange={(autoStopAtSelectionEnd) =>
                         setDraft((prev) => ({
@@ -460,7 +459,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                     }
                 />
 
-                <AppField label={tAny("recording_path_template")}>
+                <AppField label={tf("recording_path_template")}>
                     <TextField.Root
                         size="2"
                         value={draft.pathTemplate}
@@ -478,7 +477,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
 
                 <Flex gap="2" wrap="wrap" align="center">
                     <Text size="1" color="gray">
-                        {tAny("auto_backup_placeholders")}
+                        {tf("auto_backup_placeholders")}
                     </Text>
                     {["<ProjectFolder>", "<ProjectName>"].map((token) => (
                         <Button
@@ -495,7 +494,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                 </Flex>
 
                 <Text size="1" color="gray">
-                    {tAny("auto_backup_time_format_hint")}
+                    {tf("auto_backup_time_format_hint")}
                 </Text>
 
                 {errorText ? (

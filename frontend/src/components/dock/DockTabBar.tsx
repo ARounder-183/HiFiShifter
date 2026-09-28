@@ -51,8 +51,7 @@ export interface DockTabBarProps {
 
 export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTabBarProps) {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { t, tf } = useI18n();
     // 元素用 state 持有而不是 ref：插入下标要在**渲染期**按标签矩形推算，
     // 而渲染期读 ref 违反 React Compiler 的引用规则。回调 ref 只在挂载/卸载
     // 时触发，不会带来额外渲染。
@@ -62,7 +61,7 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
     const dockModifier = useAppSelector((s) => s.dock.settings.dockModifier);
     // 提示里带上**当前生效的**修饰键文本（可被用户改），两行由自定义 tooltip 的
     // `white-space: pre-line` 渲染。原生 `title` 无法保证换行与主题一致。
-    const dragHint = dockDragHint(dockModifier, tAny);
+    const dragHint = dockDragHint(dockModifier, tf);
     const doubleClickAction = useAppSelector((s) => s.dock.settings.doubleClickHeaderAction);
     const forms = useAppSelector((s) => s.dock.layout.forms);
 
@@ -123,7 +122,7 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                         const form = forms[formId];
                         const definition = form ? getPanel(form.panelId) : undefined;
                         const title =
-                            form?.title ?? (definition ? tAny(definition.titleKey) : formId);
+                            form?.title ?? (definition ? tf(definition.titleKey) : formId);
                         const Icon = definition?.icon;
                         const active = node.active === formId;
                         return (
@@ -172,8 +171,8 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                         <button
                             type="button"
                             className="hs-dock-tabbar-action"
-                            data-tooltip={tAny("dock_float_active")}
-                            aria-label={tAny("dock_float_active")}
+                            data-tooltip={tf("dock_float_active")}
+                            aria-label={tf("dock_float_active")}
                             onClick={() => onToggleFloat(node.active)}
                         >
                             <ExternalLinkIcon />
@@ -181,8 +180,8 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                         <button
                             type="button"
                             className="hs-dock-tabbar-action"
-                            data-tooltip={tAny(node.collapsed ? "dock_expand" : "dock_collapse")}
-                            aria-label={tAny(node.collapsed ? "dock_expand" : "dock_collapse")}
+                            data-tooltip={tf(node.collapsed ? "dock_expand" : "dock_collapse")}
+                            aria-label={tf(node.collapsed ? "dock_expand" : "dock_collapse")}
                             onClick={() => dispatch(toggleTabsetCollapsed({ tabsetId: node.id }))}
                         >
                             {node.collapsed ? <ChevronUpIcon /> : <ChevronDownIcon />}

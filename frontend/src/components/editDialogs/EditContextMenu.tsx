@@ -73,8 +73,7 @@ export function EditContextMenu({
     onConvertVolumeToDyn,
     onConvertDynToVolume,
 }: EditContextMenuProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
 
     // 菜单项右侧的快捷键提示：从快捷键注册表读取当前生效的绑定。
     // 参数编辑器与时间轴共用 Ctrl+C/X/V（复制/剪切/粘贴按「活动编辑
@@ -100,38 +99,38 @@ export function EditContextMenu({
     const items: AppMenuItemSpec[] = [
         {
             key: "copy",
-            label: tAny("menu_copy"),
+            label: tf("menu_copy"),
             shortcut: copyShortcut,
             onSelect: () => onCopy?.(),
         },
         {
             key: "cut",
-            label: tAny("menu_cut"),
+            label: tf("menu_cut"),
             shortcut: cutShortcut,
             onSelect: () => onCut?.(),
         },
         {
             key: "paste",
-            label: tAny("menu_paste"),
+            label: tf("menu_paste"),
             shortcut: pasteShortcut,
             onSelect: () => onPaste?.(),
         },
         {
             key: "selectAll",
-            label: tAny("menu_select_all"),
+            label: tf("menu_select_all"),
             shortcut: selectAllShortcut,
             separatorBefore: true,
             onSelect: () => onSelectAll?.(),
         },
         {
             key: "deselect",
-            label: tAny("menu_deselect"),
+            label: tf("menu_deselect"),
             shortcut: deselectShortcut,
             onSelect: () => onDeselect?.(),
         },
         {
             key: "initialize",
-            label: tAny("menu_initialize"),
+            label: tf("menu_initialize"),
             shortcut: initializeShortcut,
             separatorBefore: true,
             onSelect: () => onInitialize?.(),
@@ -140,14 +139,14 @@ export function EditContextMenu({
             ? ([
                   {
                       key: "transposeCents",
-                      label: tAny("menu_transpose_cents"),
+                      label: tf("menu_transpose_cents"),
                       shortcut: transposeCentsShortcut,
                       separatorBefore: true,
                       onSelect: () => onTransposeCents?.(),
                   },
                   {
                       key: "transposeDegrees",
-                      label: tAny("menu_transpose_degrees"),
+                      label: tf("menu_transpose_degrees"),
                       shortcut: transposeDegreesShortcut,
                       onSelect: () => onTransposeDegrees?.(),
                   },
@@ -155,38 +154,38 @@ export function EditContextMenu({
             : []),
         {
             key: "setPitch",
-            label: isPitchParam ? tAny("menu_set_pitch") : tAny("menu_set_value"),
+            label: isPitchParam ? tf("menu_set_pitch") : tf("menu_set_value"),
             shortcut: setPitchShortcut,
             onSelect: () => onSetPitch?.(),
         },
         {
             key: "average",
-            label: tAny("menu_average"),
+            label: tf("menu_average"),
             shortcut: averageShortcut,
             separatorBefore: true,
             onSelect: () => onAverage?.(),
         },
         {
             key: "smooth",
-            label: tAny("menu_smooth"),
+            label: tf("menu_smooth"),
             shortcut: smoothShortcut,
             onSelect: () => onSmooth?.(),
         },
         {
             key: "addVibrato",
-            label: tAny("menu_add_vibrato"),
+            label: tf("menu_add_vibrato"),
             shortcut: addVibratoShortcut,
             onSelect: () => onAddVibrato?.(),
         },
         {
             key: "quantize",
-            label: tAny("menu_quantize"),
+            label: tf("menu_quantize"),
             shortcut: quantizeShortcut,
             onSelect: () => onQuantize?.(),
         },
         {
             key: "meanQuantize",
-            label: tAny("menu_mean_quantize"),
+            label: tf("menu_mean_quantize"),
             shortcut: meanQuantizeShortcut,
             onSelect: () => onMeanQuantize?.(),
         },
@@ -197,7 +196,7 @@ export function EditContextMenu({
             ? ([
                   {
                       key: "convertVolumeToDyn",
-                      label: tAny("menu_convert_volume_to_dyn"),
+                      label: tf("menu_convert_volume_to_dyn"),
                       separatorBefore: true,
                       onSelect: onConvertVolumeToDyn,
                   },
@@ -207,7 +206,7 @@ export function EditContextMenu({
             ? ([
                   {
                       key: "convertDynToVolume",
-                      label: tAny("menu_convert_dyn_to_volume"),
+                      label: tf("menu_convert_dyn_to_volume"),
                       separatorBefore: true,
                       onSelect: onConvertDynToVolume,
                   },
@@ -217,7 +216,7 @@ export function EditContextMenu({
             ? ([
                   {
                       key: "saveAsPitchRef",
-                      label: tAny("menu_save_as_pitch_ref"),
+                      label: tf("menu_save_as_pitch_ref"),
                       separatorBefore: true,
                       onSelect: onSaveAsPitchRef,
                   },
@@ -225,7 +224,7 @@ export function EditContextMenu({
                       ? [
                             {
                                 key: "exportMidi",
-                                label: tAny("menu_export_midi"),
+                                label: tf("menu_export_midi"),
                                 onSelect: onExportMidi,
                             } satisfies AppMenuItemSpec,
                         ]

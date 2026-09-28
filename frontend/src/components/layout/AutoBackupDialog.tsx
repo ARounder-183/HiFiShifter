@@ -33,8 +33,7 @@ export function AutoBackupDialog({
     onOpenChange,
     onSettingsSaved,
 }: AutoBackupDialogProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
 
     const [draft, setDraft] = useState<AutoBackupSettings>(settings);
     const [submitting, setSubmitting] = useState(false);
@@ -95,14 +94,14 @@ export function AutoBackupDialog({
         try {
             const result = await projectApi.saveAutoBackupSettings(nextSettings);
             if (!result?.ok) {
-                setErrorText(tAny("auto_backup_save_failed"));
+                setErrorText(tf("auto_backup_save_failed"));
                 return;
             }
             const saved = result.settings ?? nextSettings;
             onSettingsSaved(saved);
             onOpenChange(false);
         } catch {
-            setErrorText(tAny("auto_backup_save_failed"));
+            setErrorText(tf("auto_backup_save_failed"));
         } finally {
             setSubmitting(false);
         }
@@ -112,14 +111,14 @@ export function AutoBackupDialog({
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("menu_auto_backup")}
-            description={tAny("auto_backup_dialog_desc")}
+            title={tf("menu_auto_backup")}
+            description={tf("auto_backup_dialog_desc")}
             size="xl"
             actions={[
-                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
                 {
                     id: "save",
-                    label: tAny("auto_backup_save_settings"),
+                    label: tf("auto_backup_save_settings"),
                     intent: "primary",
                     disabled: submitting,
                     onClick: handleSave,
@@ -129,7 +128,7 @@ export function AutoBackupDialog({
             <AppForm labelWidth="lg">
                 <AppSwitchRow
                     control="checkbox"
-                    label={tAny("auto_backup_save_on_save")}
+                    label={tf("auto_backup_save_on_save")}
                     checked={draft.saveOnSaveEnabled}
                     onCheckedChange={(checked) =>
                         setDraft((prev) => ({
@@ -141,7 +140,7 @@ export function AutoBackupDialog({
 
                 <AppSwitchRow
                     control="checkbox"
-                    label={tAny("auto_backup_timed")}
+                    label={tf("auto_backup_timed")}
                     checked={draft.timedBackupEnabled}
                     onCheckedChange={(checked) =>
                         setDraft((prev) => ({
@@ -151,14 +150,14 @@ export function AutoBackupDialog({
                     }
                 />
 
-                <AppField label={tAny("auto_backup_interval_sec")}>
+                <AppField label={tf("auto_backup_interval_sec")}>
                     <AppNumberField
                         value={draft.timedBackupIntervalSec}
                         unit="integer"
                         min={1}
                         width={180}
                         suffix="sec"
-                        ariaLabel={tAny("auto_backup_interval_sec")}
+                        ariaLabel={tf("auto_backup_interval_sec")}
                         onCommit={(timedBackupIntervalSec) =>
                             setDraft((prev) => ({
                                 ...prev,
@@ -168,7 +167,7 @@ export function AutoBackupDialog({
                     />
                 </AppField>
 
-                <AppField label={tAny("auto_backup_path_template")}>
+                <AppField label={tf("auto_backup_path_template")}>
                     <TextField.Root
                         size="2"
                         value={draft.timedBackupPathTemplate}
@@ -186,7 +185,7 @@ export function AutoBackupDialog({
 
                 <Flex gap="2" wrap="wrap" align="center">
                     <Text size="1" color="gray">
-                        {tAny("auto_backup_placeholders")}
+                        {tf("auto_backup_placeholders")}
                     </Text>
                     {["<ProjectFolder>", "<ProjectName>"].map((token) => (
                         <Button
@@ -203,7 +202,7 @@ export function AutoBackupDialog({
                 </Flex>
 
                 <Text size="1" color="gray">
-                    {tAny("auto_backup_time_format_hint")}
+                    {tf("auto_backup_time_format_hint")}
                 </Text>
 
                 {errorText ? (

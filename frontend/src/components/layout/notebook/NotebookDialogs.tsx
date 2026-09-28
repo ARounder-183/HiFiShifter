@@ -111,12 +111,12 @@ function AttachmentRow({
     onChanged: () => void;
     notify: (message: string) => void;
 }) {
-    const { t } = useI18n();
+    const { t, tf } = useI18n();
     return (
         <div className="hs-notebook-attachment-row">
             <AttachmentThumb entry={entry} />
             <span className="hs-notebook-attachment-name" data-tooltip={entry.id}>
-                {describeEntry(entry, t as unknown as (key: string) => string)}
+                {describeEntry(entry, tf)}
             </span>
             <span className={used ? undefined : "hs-notebook-attachment-unused"}>
                 {used ? t("notebook_attachments_used") : t("notebook_attachments_unused")}
@@ -215,8 +215,7 @@ export function NotebookSettingsDialog({
     projectName,
     getHtml,
 }: NotebookSettingsDialogProps) {
-    const { t } = useI18n();
-    const tAny = t as unknown as (key: string) => string;
+    const { t, tf } = useI18n();
     const [exportNotice, setExportNotice] = useState<string | null>(null);
 
     /**
@@ -226,7 +225,7 @@ export function NotebookSettingsDialog({
      * 无法区分"没点着"和"选了路径但写失败"。
      */
     async function runExport(extension: "md" | "html", content: string) {
-        setExportNotice(tAny("notebook_export_running"));
+        setExportNotice(tf("notebook_export_running"));
         try {
             const result = await notebookApi.exportDocument(
                 projectName || "notes",
@@ -243,19 +242,19 @@ export function NotebookSettingsDialog({
                 const errorKey = notebookErrorKey(result.error);
                 setExportNotice(
                     errorKey
-                        ? tAny(errorKey)
-                        : `${tAny("notebook_export_failed")}: ${result.error ?? ""}`,
+                        ? tf(errorKey)
+                        : `${tf("notebook_export_failed")}: ${result.error ?? ""}`,
                 );
                 return;
             }
             const missing = result.missingAssets?.length ?? 0;
             setExportNotice(
                 missing > 0
-                    ? `${tAny("notebook_export_done")} (${tAny("notebook_export_missing")}: ${missing})`
-                    : tAny("notebook_export_done"),
+                    ? `${tf("notebook_export_done")} (${tf("notebook_export_missing")}: ${missing})`
+                    : tf("notebook_export_done"),
             );
         } catch {
-            setExportNotice(tAny("notebook_export_failed"));
+            setExportNotice(tf("notebook_export_failed"));
         }
     }
 
@@ -269,8 +268,8 @@ export function NotebookSettingsDialog({
         >
             {/* 混排表单：字段与开关共用标签列，因此显式声明 aligned */}
             <AppForm booleanRow="aligned">
-                <Section title={tAny("notebook_settings_group_view")}>
-                    <AppField label={tAny("notebook_setting_default_mode")}>
+                <Section title={tf("notebook_settings_group_view")}>
+                    <AppField label={tf("notebook_setting_default_mode")}>
                         <AppSelect
                             value={settings.defaultMode}
                             onValueChange={(value) => onChange({ defaultMode: value })}
@@ -282,31 +281,31 @@ export function NotebookSettingsDialog({
                         />
                     </AppField>
                     <AppSwitchRow
-                        label={tAny("notebook_setting_toolbar")}
+                        label={tf("notebook_setting_toolbar")}
                         checked={settings.showToolbar}
                         onCheckedChange={(value) => onChange({ showToolbar: value })}
                     />
                     <AppSwitchRow
-                        label={tAny("notebook_setting_markdown_shortcuts")}
+                        label={tf("notebook_setting_markdown_shortcuts")}
                         checked={settings.markdownShortcuts}
                         onCheckedChange={(value) => onChange({ markdownShortcuts: value })}
                     />
                     <AppSwitchRow
-                        label={tAny("notebook_setting_slash")}
+                        label={tf("notebook_setting_slash")}
                         checked={settings.slashCommands}
                         onCheckedChange={(value) => onChange({ slashCommands: value })}
                     />
                     <AppSwitchRow
-                        label={tAny("notebook_setting_word_wrap")}
+                        label={tf("notebook_setting_word_wrap")}
                         checked={settings.sourceWordWrap}
                         onCheckedChange={(value) => onChange({ sourceWordWrap: value })}
                     />
                     <AppSwitchRow
-                        label={tAny("notebook_setting_spellcheck")}
+                        label={tf("notebook_setting_spellcheck")}
                         checked={settings.spellCheck}
                         onCheckedChange={(value) => onChange({ spellCheck: value })}
                     />
-                    <AppField label={tAny("notebook_setting_font_size")}>
+                    <AppField label={tf("notebook_setting_font_size")}>
                         <AppSelect
                             value={String(settings.sourceFontSize)}
                             onValueChange={(value) => onChange({ sourceFontSize: Number(value) })}
@@ -319,7 +318,7 @@ export function NotebookSettingsDialog({
                             ]}
                         />
                     </AppField>
-                    <AppField label={tAny("notebook_setting_history_split")}>
+                    <AppField label={tf("notebook_setting_history_split")}>
                         <AppSelect
                             value={String(settings.historySplitIdleMs)}
                             onValueChange={(value) =>
@@ -328,7 +327,7 @@ export function NotebookSettingsDialog({
                             options={[
                                 {
                                     value: "0",
-                                    label: tAny("notebook_setting_history_split_off"),
+                                    label: tf("notebook_setting_history_split_off"),
                                 },
                                 { value: "2000", label: "2s" },
                                 { value: "5000", label: "5s" },
@@ -338,8 +337,8 @@ export function NotebookSettingsDialog({
                     </AppField>
                 </Section>
 
-                <Section title={tAny("notebook_settings_group_image")}>
-                    <AppField label={tAny("notebook_setting_image_max_dim")}>
+                <Section title={tf("notebook_settings_group_image")}>
+                    <AppField label={tf("notebook_setting_image_max_dim")}>
                         <AppSelect
                             value={String(settings.imageMaxDimensionPx)}
                             onValueChange={(value) =>
@@ -348,7 +347,7 @@ export function NotebookSettingsDialog({
                             options={[
                                 {
                                     value: "0",
-                                    label: tAny("notebook_setting_image_max_dim_original"),
+                                    label: tf("notebook_setting_image_max_dim_original"),
                                 },
                                 { value: "1280", label: "1280" },
                                 { value: "2048", label: "2048" },
@@ -357,14 +356,14 @@ export function NotebookSettingsDialog({
                             ]}
                         />
                     </AppField>
-                    <AppField label={tAny("notebook_setting_image_format")}>
+                    <AppField label={tf("notebook_setting_image_format")}>
                         <AppSelect
                             value={settings.imageFormat}
                             onValueChange={(value) => onChange({ imageFormat: value })}
                             options={[
                                 {
                                     value: "auto",
-                                    label: tAny("notebook_setting_image_format_auto"),
+                                    label: tf("notebook_setting_image_format_auto"),
                                 },
                                 { value: "webp", label: "WebP" },
                                 { value: "jpeg", label: "JPEG" },
@@ -373,103 +372,103 @@ export function NotebookSettingsDialog({
                         />
                     </AppField>
                     <AppSwitchRow
-                        label={tAny("notebook_setting_remote_images")}
+                        label={tf("notebook_setting_remote_images")}
                         checked={settings.allowRemoteImages}
                         onCheckedChange={(value) => onChange({ allowRemoteImages: value })}
                     />
                 </Section>
 
-                <Section title={tAny("notebook_settings_group_clipboard")}>
+                <Section title={tf("notebook_settings_group_clipboard")}>
                     <AppSwitchRow
-                        label={tAny("notebook_setting_smart_paste")}
+                        label={tf("notebook_setting_smart_paste")}
                         checked={settings.smartPaste}
                         onCheckedChange={(value) => onChange({ smartPaste: value })}
                     />
-                    <AppField label={tAny("notebook_setting_html_paste")}>
+                    <AppField label={tf("notebook_setting_html_paste")}>
                         <AppSelect
                             value={settings.htmlPasteMode}
                             onValueChange={(value) => onChange({ htmlPasteMode: value })}
                             options={[
                                 { value: "markdown", label: "Markdown" },
                                 { value: "html", label: "HTML" },
-                                { value: "text", label: tAny("notebook_setting_paste_text") },
+                                { value: "text", label: tf("notebook_setting_paste_text") },
                             ]}
                         />
                     </AppField>
-                    <AppField label={tAny("notebook_setting_plain_paste")}>
+                    <AppField label={tf("notebook_setting_plain_paste")}>
                         <AppSelect
                             value={settings.plainPasteMode}
                             onValueChange={(value) => onChange({ plainPasteMode: value })}
                             options={[
                                 {
                                     value: "auto",
-                                    label: tAny("notebook_setting_plain_paste_auto"),
+                                    label: tf("notebook_setting_plain_paste_auto"),
                                 },
                                 { value: "markdown", label: "Markdown" },
-                                { value: "text", label: tAny("notebook_setting_paste_text") },
+                                { value: "text", label: tf("notebook_setting_paste_text") },
                             ]}
                         />
                     </AppField>
-                    <AppField label={tAny("notebook_setting_copy_format")}>
+                    <AppField label={tf("notebook_setting_copy_format")}>
                         <AppSelect
                             value={settings.copyFormat}
                             onValueChange={(value) => onChange({ copyFormat: value })}
                             options={[
                                 {
                                     value: "markdown+html",
-                                    label: tAny("notebook_setting_copy_format_both"),
+                                    label: tf("notebook_setting_copy_format_both"),
                                 },
                                 { value: "markdown", label: "Markdown" },
                                 { value: "html", label: "HTML" },
-                                { value: "text", label: tAny("notebook_setting_paste_text") },
+                                { value: "text", label: tf("notebook_setting_paste_text") },
                             ]}
                         />
                     </AppField>
-                    <AppField label={tAny("notebook_setting_copy_plain")}>
+                    <AppField label={tf("notebook_setting_copy_plain")}>
                         <AppSelect
                             value={settings.copyPlainTextAs}
                             onValueChange={(value) => onChange({ copyPlainTextAs: value })}
                             options={[
                                 {
                                     value: "markdown",
-                                    label: tAny("notebook_setting_copy_plain_markdown"),
+                                    label: tf("notebook_setting_copy_plain_markdown"),
                                 },
-                                { value: "text", label: tAny("notebook_setting_paste_text") },
+                                { value: "text", label: tf("notebook_setting_paste_text") },
                             ]}
                         />
                     </AppField>
                 </Section>
 
-                <Section title={tAny("notebook_settings_group_clip_block")}>
-                    <AppField label={tAny("notebook_setting_clip_insert_mode")}>
+                <Section title={tf("notebook_settings_group_clip_block")}>
+                    <AppField label={tf("notebook_setting_clip_insert_mode")}>
                         <AppSelect
                             value={settings.clipInsertMode}
                             onValueChange={(value) => onChange({ clipInsertMode: value })}
                             options={[
                                 {
                                     value: "selected",
-                                    label: tAny("notebook_setting_clip_insert_selected"),
+                                    label: tf("notebook_setting_clip_insert_selected"),
                                 },
                                 {
                                     value: "newTracks",
-                                    label: tAny("notebook_setting_clip_insert_new_tracks"),
+                                    label: tf("notebook_setting_clip_insert_new_tracks"),
                                 },
                             ]}
                         />
                     </AppField>
                     <AppSwitchRow
-                        label={tAny("notebook_setting_keep_clip")}
+                        label={tf("notebook_setting_keep_clip")}
                         checked={settings.keepClipAfterInsert}
                         onCheckedChange={(value) => onChange({ keepClipAfterInsert: value })}
                     />
                     <AppSwitchRow
-                        label={tAny("notebook_setting_clip_preview")}
+                        label={tf("notebook_setting_clip_preview")}
                         checked={settings.clipShowPreview}
                         onCheckedChange={(value) => onChange({ clipShowPreview: value })}
                     />
                 </Section>
 
-                <Section title={tAny("notebook_settings_group_export")}>
+                <Section title={tf("notebook_settings_group_export")}>
                     <Flex gap="2" wrap="wrap">
                         <Button
                             type="button"
@@ -479,7 +478,7 @@ export function NotebookSettingsDialog({
                                 void runExport("md", markdown);
                             }}
                         >
-                            {tAny("notebook_export_md")}
+                            {tf("notebook_export_md")}
                         </Button>
                         <Button
                             type="button"
@@ -492,7 +491,7 @@ export function NotebookSettingsDialog({
                                 );
                             }}
                         >
-                            {tAny("notebook_export_html")}
+                            {tf("notebook_export_html")}
                         </Button>
                     </Flex>
                 </Section>

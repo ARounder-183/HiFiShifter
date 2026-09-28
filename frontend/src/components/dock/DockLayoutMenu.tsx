@@ -128,22 +128,21 @@ export function DockLayoutMenus({ withCheck }: DockLayoutMenusProps) {
 /** 「窗口」：各停靠窗体的显示开关（原「布局」菜单的「显示窗体」，随其并入视图）。 */
 function DockWindowsMenu({ withCheck }: DockLayoutMenusProps) {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
 
     const layout = useAppSelector((state) => state.dock.layout);
     const entries = useMemo(() => listPanelEntriesFromLayout(layout), [layout]);
 
     return (
         <DropdownMenu.Sub>
-            <DropdownMenu.SubTrigger>{tAny("menu_windows")}</DropdownMenu.SubTrigger>
+            <DropdownMenu.SubTrigger>{tf("menu_windows")}</DropdownMenu.SubTrigger>
             <DropdownMenu.SubContent>
                 {entries.map((entry) => (
                     <DropdownMenu.Item
                         key={entry.panelId}
                         onSelect={() => togglePanelVisible(dispatch, store.getState, entry.panelId)}
                     >
-                        {withCheck(entry.visible, tAny(entry.titleKey))}
+                        {withCheck(entry.visible, tf(entry.titleKey))}
                     </DropdownMenu.Item>
                 ))}
             </DropdownMenu.SubContent>
@@ -154,9 +153,7 @@ function DockWindowsMenu({ withCheck }: DockLayoutMenusProps) {
 /** 「布局」：预设、导入导出、重置等布局级操作（原「布局」选项卡的其余项）。 */
 function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
-
+    const { tf } = useI18n();
     const layout = useAppSelector((state) => state.dock.layout);
     const confirmReset = useAppSelector((state) => state.dock.settings.confirmResetLayout);
 
@@ -178,16 +175,16 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
         try {
             const result = await exportLayoutJson(json);
             if (!result.ok && !result.canceled) {
-                setDockNotice(result.error || tAny("layout_export_failed"));
+                setDockNotice(result.error || tf("layout_export_failed"));
             }
         } catch {
-            setDockNotice(tAny("layout_export_failed"));
+            setDockNotice(tf("layout_export_failed"));
         }
-    }, [layout, tAny]);
+    }, [layout, tf]);
 
     return (
         <DropdownMenu.Sub>
-            <DropdownMenu.SubTrigger>{tAny("menu_layout")}</DropdownMenu.SubTrigger>
+            <DropdownMenu.SubTrigger>{tf("menu_layout")}</DropdownMenu.SubTrigger>
             <DropdownMenu.SubContent>
                 {/* 独立窗口中的窗体：给出"收回主窗口"的入口。
                     没有它的话，一旦卫星窗口的关闭回收没能执行（创建/登记竞态），窗体就
@@ -195,9 +192,7 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
                     应用（下次启动会重新打开那个窗口）。这是"面板凭空消失"的唯一出路。 */}
                 {osWindowForms.length > 0 ? (
                     <DropdownMenu.Sub>
-                        <DropdownMenu.SubTrigger>
-                            {tAny("layout_os_windows")}
-                        </DropdownMenu.SubTrigger>
+                        <DropdownMenu.SubTrigger>{tf("layout_os_windows")}</DropdownMenu.SubTrigger>
                         <DropdownMenu.SubContent>
                             {osWindowForms.map((form) => (
                                 <DropdownMenu.Item
@@ -207,7 +202,7 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
                                     }
                                 >
                                     {form.title ??
-                                        tAny(getPanel(form.panelId)?.titleKey ?? form.panelId)}
+                                        tf(getPanel(form.panelId)?.titleKey ?? form.panelId)}
                                 </DropdownMenu.Item>
                             ))}
                         </DropdownMenu.SubContent>
@@ -215,11 +210,11 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
                 ) : null}
 
                 <DropdownMenu.Sub>
-                    <DropdownMenu.SubTrigger>{tAny("layout_presets")}</DropdownMenu.SubTrigger>
+                    <DropdownMenu.SubTrigger>{tf("layout_presets")}</DropdownMenu.SubTrigger>
                     <DropdownMenu.SubContent>
                         {presetNames.length === 0 ? (
                             <DropdownMenu.Item disabled>
-                                {tAny("layout_no_presets")}
+                                {tf("layout_no_presets")}
                             </DropdownMenu.Item>
                         ) : (
                             presetNames.map((name) => (
@@ -235,13 +230,13 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
                 </DropdownMenu.Sub>
 
                 <DropdownMenu.Item onSelect={() => setDockDialogKind("namePrompt")}>
-                    {tAny("layout_save_preset")}
+                    {tf("layout_save_preset")}
                 </DropdownMenu.Item>
 
                 {presetNames.length > 0 ? (
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
-                            {tAny("layout_delete_preset")}
+                            {tf("layout_delete_preset")}
                         </DropdownMenu.SubTrigger>
                         <DropdownMenu.SubContent>
                             {presetNames.map((name) => (
@@ -261,10 +256,10 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
                 <DropdownMenu.Separator />
 
                 <DropdownMenu.Item onSelect={() => void onExport()}>
-                    {tAny("layout_export")}
+                    {tf("layout_export")}
                 </DropdownMenu.Item>
                 <DropdownMenu.Item onSelect={() => importInputRef.current?.click()}>
-                    {tAny("layout_import")}
+                    {tf("layout_import")}
                 </DropdownMenu.Item>
 
                 <DropdownMenu.Separator />
@@ -276,10 +271,10 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
                         else resetLayout(dispatch);
                     }}
                 >
-                    {tAny("layout_reset")}
+                    {tf("layout_reset")}
                 </DropdownMenu.Item>
                 <DropdownMenu.Item onSelect={() => setDockDialogKind("settings")}>
-                    {tAny("layout_settings")}
+                    {tf("layout_settings")}
                 </DropdownMenu.Item>
             </DropdownMenu.SubContent>
         </DropdownMenu.Sub>
@@ -293,8 +288,7 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
  * Radix 的菜单内容在菜单关闭时卸载，打开中的对话框不能住在那里。
  */
 export function DockLayoutDialogs() {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { t, tf } = useI18n();
     const dispatch = useAppDispatch();
 
     const dialogKind = useDockDialogKind();
@@ -312,9 +306,9 @@ export function DockLayoutDialogs() {
         async (file: File | null) => {
             if (!file) return;
             const text = await file.text();
-            if (!importLayoutJson(dispatch, text)) setDockNotice(tAny("layout_import_failed"));
+            if (!importLayoutJson(dispatch, text)) setDockNotice(tf("layout_import_failed"));
         },
-        [dispatch, tAny],
+        [dispatch, tf],
     );
 
     return (
@@ -330,9 +324,9 @@ export function DockLayoutDialogs() {
                 onOpenChange={(open) => {
                     if (!open) closeDialog();
                 }}
-                title={tAny("layout_reset_confirm_title")}
-                message={tAny("layout_reset_confirm_body")}
-                confirmLabel={tAny("layout_reset")}
+                title={tf("layout_reset_confirm_title")}
+                message={tf("layout_reset_confirm_body")}
+                confirmLabel={tf("layout_reset")}
                 cancelLabel={t("cancel")}
                 intent="primary"
                 onConfirm={() => {
@@ -347,9 +341,9 @@ export function DockLayoutDialogs() {
                 onOpenChange={(open) => {
                     if (!open) closeDialog();
                 }}
-                title={tAny("layout_delete_preset")}
-                message={tAny("layout_delete_preset_confirm")}
-                confirmLabel={tAny("layout_delete_preset")}
+                title={tf("layout_delete_preset")}
+                message={tf("layout_delete_preset_confirm")}
+                confirmLabel={tf("layout_delete_preset")}
                 cancelLabel={t("cancel")}
                 intent="danger"
                 onConfirm={() => {
@@ -363,13 +357,13 @@ export function DockLayoutDialogs() {
                 onOpenChange={(open) => {
                     if (!open) closeDialog();
                 }}
-                title={tAny("layout_preset_name_prompt")}
+                title={tf("layout_preset_name_prompt")}
                 size="sm"
                 actions={[
-                    { id: "cancel", label: tAny("cancel"), onClick: () => closeDialog() },
+                    { id: "cancel", label: tf("cancel"), onClick: () => closeDialog() },
                     {
                         id: "ok",
-                        label: tAny("ok"),
+                        label: tf("ok"),
                         intent: "primary",
                         onClick: () => {
                             if (presetDraft.trim()) savePreset(dispatch, presetDraft.trim());
@@ -394,9 +388,9 @@ export function DockLayoutDialogs() {
                 onOpenChange={(open) => {
                     if (!open) closeDialog();
                 }}
-                title={tAny("status_error_prefix")}
+                title={tf("status_error_prefix")}
                 message={dockNoticeMessage ?? ""}
-                closeLabel={tAny("ok")}
+                closeLabel={tf("ok")}
             />
 
             {/*

@@ -23,8 +23,7 @@ export function ImportProjectDialog({
     onOpenChange: (open: boolean) => void;
     onConfirm: (options: ImportProjectOptions) => void;
 }) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const [placeAtPlayhead, setPlaceAtPlayhead] = useState(false);
     const [importTempoMap, setImportTempoMap] = useState(true);
 
@@ -32,14 +31,14 @@ export function ImportProjectDialog({
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("import_project_dialog_title")}
-            description={tAny("import_project_dialog_desc")}
+            title={tf("import_project_dialog_title")}
+            description={tf("import_project_dialog_desc")}
             size="lg"
             actions={[
-                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
                 {
                     id: "import",
-                    label: tAny("import_project_import"),
+                    label: tf("import_project_import"),
                     intent: "primary",
                     onClick: () =>
                         onConfirm({
@@ -51,7 +50,7 @@ export function ImportProjectDialog({
         >
             <AppForm>
                 <Text size="2" className="text-qt-text-muted break-all">
-                    {tAny("import_project_file")}: {projectPath ?? ""}
+                    {tf("import_project_file")}: {projectPath ?? ""}
                 </Text>
 
                 <label className="flex items-center gap-2 text-qt-md text-qt-text">
@@ -61,7 +60,7 @@ export function ImportProjectDialog({
                         checked={!placeAtPlayhead}
                         onChange={() => setPlaceAtPlayhead(false)}
                     />
-                    {tAny("import_project_original_position")}
+                    {tf("import_project_original_position")}
                 </label>
                 <label className="flex items-center gap-2 text-qt-md text-qt-text">
                     <input
@@ -70,19 +69,19 @@ export function ImportProjectDialog({
                         checked={placeAtPlayhead}
                         onChange={() => setPlaceAtPlayhead(true)}
                     />
-                    {tAny("import_project_playhead_position")}
+                    {tf("import_project_playhead_position")}
                 </label>
 
                 <AppSwitchRow
                     control="checkbox"
-                    label={tAny("import_project_tempo_map")}
+                    label={tf("import_project_tempo_map")}
                     checked={importTempoMap}
                     disabled={hasExistingTempoMap}
                     onCheckedChange={setImportTempoMap}
                 />
                 {hasExistingTempoMap ? (
                     <Text size="1" className="text-qt-text-muted">
-                        {tAny("import_project_tempo_map_unavailable")}
+                        {tf("import_project_tempo_map_unavailable")}
                     </Text>
                 ) : null}
             </AppForm>

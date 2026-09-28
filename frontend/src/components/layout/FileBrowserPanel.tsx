@@ -248,8 +248,7 @@ function ProjectIcon({ className }: { className?: string }) {
 
 export const FileBrowserPanel: React.FC = () => {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const fb = useAppSelector((state: RootState) => state.fileBrowser);
     const searchInputRef = useRef<HTMLInputElement>(null);
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -716,12 +715,12 @@ export const FileBrowserPanel: React.FC = () => {
                     <>
                         <PanelToolbarButton
                             icon={<FolderIcon />}
-                            tooltip={(t as (key: string) => string)("fb_open_folder")}
+                            tooltip={tf("fb_open_folder")}
                             onClick={handleOpenFolder}
                         />
                         <PanelToolbarButton
                             icon={<ReloadIcon />}
-                            tooltip={(t as (key: string) => string)("fb_refresh")}
+                            tooltip={tf("fb_refresh")}
                             onClick={handleRefresh}
                         />
                     </>
@@ -733,7 +732,7 @@ export const FileBrowserPanel: React.FC = () => {
                 <TextField.Root
                     ref={searchInputRef}
                     size="1"
-                    placeholder={(t as (key: string) => string)("fb_search_placeholder")}
+                    placeholder={tf("fb_search_placeholder")}
                     value={fb.searchQuery}
                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
                         const q = e.target.value;
@@ -775,7 +774,7 @@ export const FileBrowserPanel: React.FC = () => {
                 <Flex align="center" gap="1" mt="1">
                     <AppIconButton
                         active={fb.regexEnabled}
-                        tooltip={tAny("fb_regex")}
+                        tooltip={tf("fb_regex")}
                         onClick={() => {
                             const nextRegexEnabled = !fb.regexEnabled;
                             dispatch(toggleRegex());
@@ -803,7 +802,7 @@ export const FileBrowserPanel: React.FC = () => {
                     />
                     <AppIconButton
                         active={fb.audioOnly}
-                        tooltip={tAny("fb_audio_only")}
+                        tooltip={tf("fb_audio_only")}
                         onClick={() => dispatch(toggleAudioOnly())}
                         style={{
                             width: 22,
@@ -817,16 +816,16 @@ export const FileBrowserPanel: React.FC = () => {
                         value={fb.sortMode}
                         onValueChange={(v) => dispatch(setSortMode(v as SortMode))}
                         options={[
-                            { value: "name", label: tAny("fb_sort_name") },
-                            { value: "date", label: tAny("fb_sort_date") },
-                            { value: "size", label: tAny("fb_sort_size") },
+                            { value: "name", label: tf("fb_sort_name") },
+                            { value: "date", label: tf("fb_sort_date") },
+                            { value: "size", label: tf("fb_sort_size") },
                         ]}
                     />
                 </Flex>
 
                 {hasRegexError && (
                     <Text size="1" color="red" mt="1">
-                        {tAny("fb_regex_error")}
+                        {tf("fb_regex_error")}
                     </Text>
                 )}
             </div>
@@ -842,7 +841,7 @@ export const FileBrowserPanel: React.FC = () => {
                         size="1"
                         variant="ghost"
                         color="gray"
-                        data-tooltip={(t as (key: string) => string)("fb_parent_dir")}
+                        data-tooltip={tf("fb_parent_dir")}
                         onClick={handleParentDir}
                     >
                         <ChevronUpIcon />
@@ -863,32 +862,24 @@ export const FileBrowserPanel: React.FC = () => {
                 <div
                     className="py-1"
                     role={showEntries ? "listbox" : undefined}
-                    aria-label={showEntries ? tAny("fb_file_list") : undefined}
+                    aria-label={showEntries ? tf("fb_file_list") : undefined}
                     // 列表本就支持 Ctrl/Shift 多选，声明多选语义以免读屏按单选播报。
                     aria-multiselectable={showEntries ? true : undefined}
                     onKeyDown={showEntries ? handleListKeyDown : undefined}
                 >
                     {fb.loading ? (
-                        <AppEmptyState>
-                            {(t as (key: string) => string)("fb_loading")}
-                        </AppEmptyState>
+                        <AppEmptyState>{tf("fb_loading")}</AppEmptyState>
                     ) : fb.error ? (
                         <AppEmptyState tone="danger">
-                            {(t as (key: string) => string)("fb_error")}: {fb.error}
+                            {tf("fb_error")}: {fb.error}
                         </AppEmptyState>
                     ) : !fb.currentPath ? (
-                        <AppEmptyState>
-                            {(t as (key: string) => string)("fb_no_folder")}
-                        </AppEmptyState>
+                        <AppEmptyState>{tf("fb_no_folder")}</AppEmptyState>
                     ) : isSearchMode && fb.searchLoading ? (
-                        <AppEmptyState>
-                            {(t as (key: string) => string)("fb_searching")}
-                        </AppEmptyState>
+                        <AppEmptyState>{tf("fb_searching")}</AppEmptyState>
                     ) : displayEntries.length === 0 ? (
                         <AppEmptyState>
-                            {isSearchMode
-                                ? (t as (key: string) => string)("fb_no_results")
-                                : (t as (key: string) => string)("fb_empty_folder")}
+                            {isSearchMode ? tf("fb_no_results") : tf("fb_empty_folder")}
                         </AppEmptyState>
                     ) : (
                         displayEntries.map((entry, index) => (
@@ -923,7 +914,7 @@ export const FileBrowserPanel: React.FC = () => {
                     unit="percent"
                     min={0}
                     max={100}
-                    ariaLabel={tAny("fb_preview_volume")}
+                    ariaLabel={tf("fb_preview_volume")}
                     onChange={(next) => {
                         dispatch(setPreviewVolume(next / 100));
                     }}

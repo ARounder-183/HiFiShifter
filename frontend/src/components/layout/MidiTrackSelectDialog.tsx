@@ -155,8 +155,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
     importTempoMapKeySignature = false,
     onImportTempoMapKeySignatureChange,
 }) => {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
 
     // 导入目标（统一弹窗用）：pitchRef = 创建音高参考块，pitchParam = 导入到音高参数
     const isReplaceMode = mode === "replaceMidi";
@@ -233,7 +232,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                         // 默认全选
                         setSelectedTracks(res.tracks.map((t) => t.index));
                     } else {
-                        setError(res.error ?? tAny("midi_import_failed"));
+                        setError(res.error ?? tf("midi_import_failed"));
                         setTracks([]);
                         setInitialBpm(null);
                         setMidiHasBpm(true);
@@ -241,14 +240,14 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 })
                 .catch((err) => {
                     console.error("[midi_import_ui] load_tracks:error", err);
-                    setError(tAny("midi_import_failed"));
+                    setError(tf("midi_import_failed"));
                     setTracks([]);
                     setInitialBpm(null);
                     setMidiHasBpm(true);
                 })
                 .finally(() => setLoading(false));
         },
-        [tAny],
+        [tf],
     );
 
     // 从剪贴板 GUID 加载轨道（通过后端缓存查询，不重复读取剪贴板）
@@ -272,7 +271,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                         setMidiKeySigCount(res.key_signature_count ?? 0);
                         setSelectedTracks(res.tracks.map((t) => t.index));
                     } else {
-                        setError(res.error ?? tAny("midi_clipboard_read_failed"));
+                        setError(res.error ?? tf("midi_clipboard_read_failed"));
                         setTracks([]);
                         setInitialBpm(null);
                         setMidiHasBpm(true);
@@ -280,14 +279,14 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 })
                 .catch((err) => {
                     console.error("[midi_import_ui] loadTracksFromClipboard:error", err);
-                    setError(tAny("midi_clipboard_read_failed"));
+                    setError(tf("midi_clipboard_read_failed"));
                     setTracks([]);
                     setInitialBpm(null);
                     setMidiHasBpm(true);
                 })
                 .finally(() => setLoading(false));
         },
-        [tAny],
+        [tf],
     );
 
     // 当弹窗打开且有 effectivePath 或 effectiveClipboardGuid，加载轨道列表
@@ -403,14 +402,14 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 }
             } else {
                 const errorKey = res.error ?? "midi_clipboard_read_failed";
-                setError(tAny(errorKey));
+                setError(tf(errorKey));
             }
         } catch {
-            setError(tAny("midi_clipboard_read_failed"));
+            setError(tf("midi_clipboard_read_failed"));
         } finally {
             setReadingClipboard(false);
         }
-    }, [tAny]);
+    }, [tf]);
 
     const handleImport = useCallback(async () => {
         if ((!effectivePath && !effectiveClipboardGuid) || selectedTracks.length === 0) return;
@@ -499,18 +498,18 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 const errKey = res.error ?? "midi_import_failed";
                 // 尝试翻译已知的错误键
                 const knownErrors: Record<string, string> = {
-                    file_not_found: tAny("midi_file_not_found"),
-                    no_notes_in_track: tAny("midi_no_notes"),
-                    no_frames_touched: tAny("midi_no_frames_touched"),
-                    no_pitch_line_selected: tAny("vs_paste_no_pitch_line"),
-                    pitch_requires_compose: tAny("pitch_requires_compose"),
-                    pitch_requires_algo: tAny("pitch_requires_algo"),
+                    file_not_found: tf("midi_file_not_found"),
+                    no_notes_in_track: tf("midi_no_notes"),
+                    no_frames_touched: tf("midi_no_frames_touched"),
+                    no_pitch_line_selected: tf("vs_paste_no_pitch_line"),
+                    pitch_requires_compose: tf("pitch_requires_compose"),
+                    pitch_requires_algo: tf("pitch_requires_algo"),
                 };
                 setError(knownErrors[errKey] ?? errKey);
             }
         } catch (err) {
             console.error("[midi_import_ui] import:error", err);
-            setError(tAny("midi_import_failed"));
+            setError(tf("midi_import_failed"));
         } finally {
             setImporting(false);
         }
@@ -521,7 +520,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
         onImported,
         onImportAsClip,
         onOpenChange,
-        tAny,
+        tf,
         effectiveMode,
         tracks,
         importPosition,
@@ -579,20 +578,18 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                     onOpenChange(false);
                 } else {
                     const knownErrors: Record<string, string> = {
-                        file_not_found: tAny("midi_file_not_found"),
-                        no_notes_in_track: tAny("midi_no_notes"),
-                        no_frames_touched: tAny("midi_no_frames_touched"),
-                        no_pitch_line_selected: tAny("vs_paste_no_pitch_line"),
-                        pitch_requires_compose: tAny("pitch_requires_compose"),
-                        pitch_requires_algo: tAny("pitch_requires_algo"),
+                        file_not_found: tf("midi_file_not_found"),
+                        no_notes_in_track: tf("midi_no_notes"),
+                        no_frames_touched: tf("midi_no_frames_touched"),
+                        no_pitch_line_selected: tf("vs_paste_no_pitch_line"),
+                        pitch_requires_compose: tf("pitch_requires_compose"),
+                        pitch_requires_algo: tf("pitch_requires_algo"),
                     };
-                    setError(
-                        knownErrors[res.error ?? ""] ?? res.error ?? tAny("midi_import_failed"),
-                    );
+                    setError(knownErrors[res.error ?? ""] ?? res.error ?? tf("midi_import_failed"));
                 }
             })
             .catch(() => {
-                setError(tAny("midi_import_failed"));
+                setError(tf("midi_import_failed"));
             })
             .finally(() => {
                 setImporting(false);
@@ -612,7 +609,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
         onRequestEnableCompose,
         onImported,
         onOpenChange,
-        tAny,
+        tf,
     ]);
 
     const handleComposeDecline = useCallback(() => {
@@ -625,20 +622,20 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
     // 有轨道时给出关闭 + 导入。原实现把这两套页脚埋在正文里，现交由 AppDialog 页脚。
     const showFooter = Boolean((effectivePath || effectiveClipboardGuid) && !loading);
     const importLabel = importing
-        ? tAny("midi_importing")
+        ? tf("midi_importing")
         : effectiveMode === "replaceMidi"
-          ? tAny("midi_replace_button")
+          ? tf("midi_replace_button")
           : currentTarget === "pitchParam"
-            ? tAny("midi_import")
-            : tAny("midi_create_clip");
+            ? tf("midi_import")
+            : tf("midi_create_clip");
     const footerActions: AppDialogAction[] | undefined = !showFooter
         ? undefined
         : tracks.length === 0
-          ? [{ id: "close", label: tAny("kb_close"), onClick: () => onOpenChange(false) }]
+          ? [{ id: "close", label: tf("kb_close"), onClick: () => onOpenChange(false) }]
           : [
                 {
                     id: "close",
-                    label: tAny("kb_close"),
+                    label: tf("kb_close"),
                     disabled: importing,
                     onClick: () => onOpenChange(false),
                 },
@@ -666,17 +663,17 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 onOpenChange={onOpenChange}
                 title={
                     effectiveMode === "replaceMidi"
-                        ? tAny("midi_replace_title")
+                        ? tf("midi_replace_title")
                         : currentTarget === "pitchParam"
-                          ? tAny("midi_import_title")
-                          : tAny("midi_import_clip_title")
+                          ? tf("midi_import_title")
+                          : tf("midi_import_clip_title")
                 }
                 description={
                     effectiveMode === "replaceMidi"
-                        ? tAny("midi_replace_desc")
+                        ? tf("midi_replace_desc")
                         : currentTarget === "pitchParam"
-                          ? tAny("midi_import_desc")
-                          : tAny("midi_import_clip_desc")
+                          ? tf("midi_import_desc")
+                          : tf("midi_import_clip_desc")
                 }
                 size="md"
                 actions={footerActions}
@@ -685,7 +682,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 {!isReplaceMode && (
                     <Flex direction="column" gap="1" mt="3">
                         <Text size="1" weight="medium">
-                            {tAny("midi_import_target")}
+                            {tf("midi_import_target")}
                         </Text>
                         <RadioGroup.Root
                             value={currentTarget}
@@ -698,11 +695,11 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                             <Flex gap="3">
                                 <label className="flex items-center gap-1 cursor-pointer">
                                     <RadioGroup.Item value="pitchParam" />
-                                    <Text size="1">{tAny("midi_import_target_pitch_param")}</Text>
+                                    <Text size="1">{tf("midi_import_target_pitch_param")}</Text>
                                 </label>
                                 <label className="flex items-center gap-1 cursor-pointer">
                                     <RadioGroup.Item value="pitchRef" />
-                                    <Text size="1">{tAny("midi_import_target_pitch_block")}</Text>
+                                    <Text size="1">{tf("midi_import_target_pitch_block")}</Text>
                                 </label>
                             </Flex>
                         </RadioGroup.Root>
@@ -712,7 +709,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 {/* ── 文件选择区域（始终显示） ── */}
                 <Flex direction="column" gap="1" mt="3">
                     <Text size="1" weight="medium">
-                        {tAny("midi_file_path")}
+                        {tf("midi_file_path")}
                     </Text>
                     <Flex gap="2" align="center">
                         <input
@@ -721,12 +718,12 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                             readOnly
                             value={
                                 effectiveClipboardGuid
-                                    ? tAny("midi_clipboard_midi_prefix") +
+                                    ? tf("midi_clipboard_midi_prefix") +
                                       effectiveClipboardGuid +
                                       ".mid"
                                     : effectivePath
                                       ? effectivePath
-                                      : tAny("midi_no_file_selected")
+                                      : tf("midi_no_file_selected")
                             }
                             style={{
                                 color: effectivePath || effectiveClipboardGuid ? undefined : "#888",
@@ -735,7 +732,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                             }}
                         />
                         <Button variant="soft" size="1" onClick={handleBrowse} disabled={importing}>
-                            {tAny("midi_browse")}
+                            {tf("midi_browse")}
                         </Button>
                         <Button
                             variant="soft"
@@ -743,9 +740,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                             onClick={handleReadClipboard}
                             disabled={importing || readingClipboard}
                         >
-                            {readingClipboard
-                                ? tAny("midi_importing")
-                                : tAny("midi_read_clipboard")}
+                            {readingClipboard ? tf("midi_importing") : tf("midi_read_clipboard")}
                         </Button>
                     </Flex>
                 </Flex>
@@ -753,7 +748,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 {loading && (
                     <Flex justify="center" py="4">
                         <Text size="2" color="gray">
-                            {tAny("loading")}
+                            {tf("loading")}
                         </Text>
                     </Flex>
                 )}
@@ -769,7 +764,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 {effectivePath && !loading && !error && tracks.length === 0 && (
                     <Flex py="4" justify="center">
                         <Text size="2" color="gray">
-                            {tAny("midi_no_tracks")}
+                            {tf("midi_no_tracks")}
                         </Text>
                     </Flex>
                 )}
@@ -784,7 +779,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                 size="1"
                                 onClick={() => setSelectedTracks(tracks.map((t) => t.index))}
                             >
-                                {tAny("midi_select_all")}
+                                {tf("midi_select_all")}
                             </Button>
                             <Button
                                 variant="soft"
@@ -792,7 +787,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                 size="1"
                                 onClick={() => setSelectedTracks([])}
                             >
-                                {tAny("midi_deselect_all")}
+                                {tf("midi_deselect_all")}
                             </Button>
                             {initialBpm != null && (
                                 <Text
@@ -801,11 +796,11 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                     className="ml-auto self-center"
                                 >
                                     {midiHasBpm
-                                        ? tAny("midi_midi_bpm_label").replace(
+                                        ? tf("midi_midi_bpm_label").replace(
                                               "{bpm}",
                                               initialBpm.toFixed(2),
                                           )
-                                        : `${tAny("midi_no_bpm")}`}
+                                        : `${tf("midi_no_bpm")}`}
                                 </Text>
                             )}
                         </Flex>
@@ -848,13 +843,13 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             </Text>
                                             <Flex gap="2">
                                                 <Text size="1" color="gray">
-                                                    {tAny("midi_track_notes").replace(
+                                                    {tf("midi_track_notes").replace(
                                                         "{count}",
                                                         String(track.note_count),
                                                     )}
                                                 </Text>
                                                 <Text size="1" color="gray">
-                                                    {tAny("midi_track_range")
+                                                    {tf("midi_track_range")
                                                         .replace(
                                                             "{min}",
                                                             noteToName(track.min_note),
@@ -881,7 +876,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                         >
                             <AppSwitchRow
                                 control="checkbox"
-                                label={tAny("midi_import_bpm_as_project")}
+                                label={tf("midi_import_bpm_as_project")}
                                 checked={importBpmAsProject && !importTempoMapEnabled}
                                 disabled={!midiHasBpm || importTempoMapEnabled}
                                 onCheckedChange={(checked) => onImportBpmAsProjectChange?.(checked)}
@@ -899,7 +894,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                 <AppForm booleanRow="leading">
                                     <AppSwitchRow
                                         control="checkbox"
-                                        label={tAny("midi_import_as_tempo_map")}
+                                        label={tf("midi_import_as_tempo_map")}
                                         checked={importTempoMapEnabled}
                                         onCheckedChange={(checked) =>
                                             onImportTempoMapEnabledChange?.(checked)
@@ -917,7 +912,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             }
                                             label={
                                                 <>
-                                                    {tAny("midi_import_tempo_map_tempo")}
+                                                    {tf("midi_import_tempo_map_tempo")}
                                                     {midiTempoPointCount > 1
                                                         ? ` (${midiTempoPointCount})`
                                                         : ""}
@@ -940,7 +935,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             }
                                             label={
                                                 <>
-                                                    {tAny("midi_import_tempo_map_time_signature")}
+                                                    {tf("midi_import_tempo_map_time_signature")}
                                                     {midiTimeSigCount > 0
                                                         ? ` (${midiTimeSigCount})`
                                                         : ""}
@@ -965,7 +960,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             }
                                             label={
                                                 <>
-                                                    {tAny("midi_import_tempo_map_key_signature")}
+                                                    {tf("midi_import_tempo_map_key_signature")}
                                                     {midiKeySigCount > 0
                                                         ? ` (${midiKeySigCount})`
                                                         : ""}
@@ -982,7 +977,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                     </AppForm>
                                 </Flex>
                                 <Text size="1" color="gray" className="ml-6 mt-1">
-                                    {tAny("midi_import_as_tempo_map_hint")}
+                                    {tf("midi_import_as_tempo_map_hint")}
                                 </Text>
                             </Flex>
                         )}
@@ -990,7 +985,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                         {/* 音符 BPM 设置 */}
                         <Flex direction="column" gap="1" mt="2">
                             <Text size="2" weight="medium">
-                                {tAny("midi_note_bpm")}
+                                {tf("midi_note_bpm")}
                             </Text>
                             <RadioGroup.Root
                                 value={importTempoMapEnabled ? "midi" : displayNoteBpmMode}
@@ -1018,7 +1013,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                                     : "gray"
                                             }
                                         >
-                                            {tAny("midi_note_bpm_midi")}
+                                            {tf("midi_note_bpm_midi")}
                                         </Text>
                                     </label>
                                     <label
@@ -1034,7 +1029,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             size="1"
                                             color={importTempoMapEnabled ? "gray" : undefined}
                                         >
-                                            {tAny("midi_note_bpm_project")}
+                                            {tf("midi_note_bpm_project")}
                                             {projectBpm != null
                                                 ? ` (${projectBpm.toFixed(2)} BPM)`
                                                 : ""}
@@ -1053,7 +1048,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             size="1"
                                             color={importTempoMapEnabled ? "gray" : undefined}
                                         >
-                                            {tAny("midi_note_bpm_specified")}
+                                            {tf("midi_note_bpm_specified")}
                                         </Text>
                                     </label>
                                     {noteBpmMode === "specified" && !importTempoMapEnabled && (
@@ -1064,11 +1059,11 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                                 min={1}
                                                 max={999}
                                                 width={80}
-                                                ariaLabel={tAny("midi_note_bpm_specified")}
+                                                ariaLabel={tf("midi_note_bpm_specified")}
                                                 onCommit={(next) => onSpecifiedBpmChange?.(next)}
                                             />
                                             <Text size="1" color="gray">
-                                                {tAny("midi_specified_bpm_placeholder")}
+                                                {tf("midi_specified_bpm_placeholder")}
                                             </Text>
                                         </Flex>
                                     )}
@@ -1084,7 +1079,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                         {currentTarget === "pitchParam" && !isReplaceMode && (
                             <Flex direction="column" gap="1" mt="3">
                                 <Text size="2" weight="medium">
-                                    {tAny("midi_import_position")}
+                                    {tf("midi_import_position")}
                                 </Text>
                                 <RadioGroup.Root
                                     value={
@@ -1097,14 +1092,12 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                     <Flex gap="3">
                                         <label className="flex items-center gap-1 cursor-pointer">
                                             <RadioGroup.Item value="projectStart" />
-                                            <Text size="1">
-                                                {tAny("midi_import_position_start")}
-                                            </Text>
+                                            <Text size="1">{tf("midi_import_position_start")}</Text>
                                         </label>
                                         <label className="flex items-center gap-1 cursor-pointer">
                                             <RadioGroup.Item value="playhead" />
                                             <Text size="1">
-                                                {tAny("midi_import_position_playhead")}
+                                                {tf("midi_import_position_playhead")}
                                             </Text>
                                         </label>
                                         <label className="flex items-center gap-1 cursor-pointer">
@@ -1116,7 +1109,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                                 size="1"
                                                 color={selectionAvailable ? undefined : "gray"}
                                             >
-                                                {tAny("midi_import_position_selection")}
+                                                {tf("midi_import_position_selection")}
                                             </Text>
                                         </label>
                                     </Flex>
@@ -1134,7 +1127,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                             >
                                 <AppSwitchRow
                                     control="checkbox"
-                                    label={tAny("midi_multi_track_merge")}
+                                    label={tf("midi_multi_track_merge")}
                                     checked={
                                         currentTarget === "pitchParam"
                                             ? true
@@ -1153,7 +1146,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                         <AppForm booleanRow="leading" className="mt-3">
                             <AppSwitchRow
                                 control="checkbox"
-                                label={tAny("midi_close_leading_gap")}
+                                label={tf("midi_close_leading_gap")}
                                 checked={closeLeadingGap ?? true}
                                 onCheckedChange={(checked) => onCloseLeadingGapChange?.(checked)}
                             />
@@ -1163,7 +1156,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                         <AppForm booleanRow="leading" className="mt-3">
                             <AppSwitchRow
                                 control="checkbox"
-                                label={tAny("midi_fill_gaps")}
+                                label={tf("midi_fill_gaps")}
                                 checked={fillGaps}
                                 onCheckedChange={(checked) => onFillGapsChange?.(checked)}
                             />
@@ -1176,18 +1169,18 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
             <AppDialog
                 open={composeConfirmOpen}
                 onOpenChange={setComposeConfirmOpen}
-                title={tAny("midi_compose_required_title")}
-                description={tAny("midi_compose_required_message")}
+                title={tf("midi_compose_required_title")}
+                description={tf("midi_compose_required_message")}
                 size="sm"
                 actions={[
                     {
                         id: "cancel",
-                        label: tAny("cancel"),
+                        label: tf("cancel"),
                         onClick: handleComposeDecline,
                     },
                     {
                         id: "confirm",
-                        label: tAny("ok"),
+                        label: tf("ok"),
                         intent: "primary",
                         onClick: handleComposeConfirm,
                     },

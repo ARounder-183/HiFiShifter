@@ -202,8 +202,7 @@ export function ActionBar() {
     const paramFineAdjustKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.paramFineAdjust"),
     );
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { t, tf } = useI18n();
 
     const [pitchSnapOpen, setPitchSnapOpen] = useState(false);
     const [snapSettingsOpen, setSnapSettingsOpen] = useState(false);
@@ -314,11 +313,11 @@ export function ActionBar() {
     const recordingSourceLabel = (() => {
         switch (recording.settings.captureMode) {
             case "loopback":
-                return tAny("recording_mode_loopback");
+                return tf("recording_mode_loopback");
             case "application":
-                return tAny("recording_mode_application");
+                return tf("recording_mode_application");
             default:
-                return tAny("recording_mode_device");
+                return tf("recording_mode_device");
         }
     })();
 
@@ -327,37 +326,37 @@ export function ActionBar() {
         if (captureMode === "device") {
             // "default" 是后端枚举出的合成项（未本地化），始终显示本地化文案。
             if (recording.settings.sourceDevice === "default") {
-                return tAny("recording_device_default");
+                return tf("recording_device_default");
             }
             const device = recording.devices.find(
                 (item) => !item.isLoopback && item.id === recording.settings.sourceDevice,
             );
-            return device?.name ?? tAny("recording_device_default");
+            return device?.name ?? tf("recording_device_default");
         }
         if (captureMode === "loopback") {
             if (
                 recording.settings.loopbackDevice === "default" ||
                 recording.settings.loopbackDevice === "loopback:default"
             ) {
-                return tAny("recording_loopback_default");
+                return tf("recording_loopback_default");
             }
             const device = recording.devices.find(
                 (item) => item.isLoopback && item.id === recording.settings.loopbackDevice,
             );
-            return device?.name ?? tAny("recording_loopback_default");
+            return device?.name ?? tf("recording_loopback_default");
         }
         const app = recording.apps.find((item) => item.id === recording.settings.captureAppId);
-        return app?.name || recording.settings.captureAppName || tAny("recording_application");
+        return app?.name || recording.settings.captureAppName || tf("recording_application");
     })();
 
     const recordingTooltip = [
         recording.active
-            ? tAny("recording_tooltip_stop")
+            ? tf("recording_tooltip_stop")
             : recording.countdownRemaining > 0
-              ? tAny("recording_tooltip_cancel_countdown")
-              : tAny("recording_tooltip_start"),
-        `${tAny("recording_source_mode")}: ${recordingSourceLabel}`,
-        `${tAny("recording_device")}: ${recordingDeviceLabel}`,
+              ? tf("recording_tooltip_cancel_countdown")
+              : tf("recording_tooltip_start"),
+        `${tf("recording_source_mode")}: ${recordingSourceLabel}`,
+        `${tf("recording_device")}: ${recordingDeviceLabel}`,
     ].join("\n");
 
     async function applyRecordingSettings(patch: Partial<RecordingSettings>) {
@@ -640,9 +639,9 @@ export function ActionBar() {
         // Backend errors may carry a `:detail` suffix (e.g.
         // "recording_error_wasapi_init:0x80004005"); localize the base key.
         const baseKey = code.split(":")[0] ?? code;
-        const text = tAny(baseKey);
+        const text = tf(baseKey);
         if (text && text !== baseKey) return text;
-        return tAny(
+        return tf(
             code.startsWith("recording_error_stop")
                 ? "recording_error_stop_failed"
                 : "recording_error_start_failed",
@@ -657,7 +656,7 @@ export function ActionBar() {
         <Flex
             align="center"
             gap="3"
-            className="h-8 bg-qt-window border-b border-qt-border px-1 text-qt-text flex-nowrap overflow-x-auto overflow-y-hidden min-w-0 custom-scrollbar"
+            className="h-qt-bar-main bg-qt-window border-b border-qt-border px-1 text-qt-text flex-nowrap overflow-x-auto overflow-y-hidden min-w-0 custom-scrollbar"
         >
             {/* BPM & Time */}
             <Flex align="center" gap="2" className="shrink-0">
@@ -801,7 +800,7 @@ export function ActionBar() {
                     value={bpmText}
                     data-tooltip={
                         s.tempoMap && s.tempoMap.points.length > 0
-                            ? tAny("tempo_map_actionbar_tip")
+                            ? tf("tempo_map_actionbar_tip")
                             : undefined
                     }
                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
@@ -837,7 +836,7 @@ export function ActionBar() {
                         value={String(displayBeats)}
                         data-tooltip={
                             s.tempoMap && s.tempoMap.points.length > 0
-                                ? tAny("tempo_map_actionbar_tip")
+                                ? tf("tempo_map_actionbar_tip")
                                 : undefined
                         }
                         onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1025,7 +1024,7 @@ export function ActionBar() {
                     />
                     <Select.Content style={{ maxHeight: "none", overflow: "visible" }}>
                         <Select.Group>
-                            <Select.Label>{tAny("grid_note_normal")}</Select.Label>
+                            <Select.Label>{tf("grid_note_normal")}</Select.Label>
                             <Select.Item value="1/1">1/1</Select.Item>
                             <Select.Item value="1/2">1/2</Select.Item>
                             <Select.Item value="1/4">1/4</Select.Item>
@@ -1036,7 +1035,7 @@ export function ActionBar() {
                         </Select.Group>
                         <Select.Separator />
                         <Select.Group>
-                            <Select.Label>{tAny("grid_note_dotted")}</Select.Label>
+                            <Select.Label>{tf("grid_note_dotted")}</Select.Label>
                             <Select.Item value="1/2d">1/2.</Select.Item>
                             <Select.Item value="1/4d">1/4.</Select.Item>
                             <Select.Item value="1/8d">1/8.</Select.Item>
@@ -1046,7 +1045,7 @@ export function ActionBar() {
                         </Select.Group>
                         <Select.Separator />
                         <Select.Group>
-                            <Select.Label>{tAny("grid_note_triplet")}</Select.Label>
+                            <Select.Label>{tf("grid_note_triplet")}</Select.Label>
                             <Select.Item value="1/2t">1/2t</Select.Item>
                             <Select.Item value="1/4t">1/4t</Select.Item>
                             <Select.Item value="1/8t">1/8t</Select.Item>
@@ -1137,7 +1136,7 @@ export function ActionBar() {
                                 <Select.Separator />
                                 <Select.Group>
                                     <Select.Item value="__tempo_custom__">
-                                        {tempoCustomScaleName ?? tAny("custom_scale_short")}
+                                        {tempoCustomScaleName ?? tf("custom_scale_short")}
                                     </Select.Item>
                                 </Select.Group>
                             </>
@@ -1147,7 +1146,7 @@ export function ActionBar() {
                                 <Select.Separator />
                                 <Select.Group>
                                     <Select.Item value="__custom__">
-                                        {`${tAny("custom_scale_label")}: ${s.project.customScale.name}`}
+                                        {`${tf("custom_scale_label")}: ${s.project.customScale.name}`}
                                     </Select.Item>
                                 </Select.Group>
                             </>
@@ -1155,7 +1154,7 @@ export function ActionBar() {
                         <Select.Separator />
                         <Select.Group>
                             <Select.Item value="__custom_dialog__">
-                                {tAny("custom_scale_action")}
+                                {tf("custom_scale_action")}
                             </Select.Item>
                         </Select.Group>
                     </Select.Content>
@@ -1187,7 +1186,7 @@ export function ActionBar() {
                         }
                         dispatch(playOriginal());
                     }}
-                    data-tooltip={isPlaying ? tAny("action_pause") : t("action_play_out")}
+                    data-tooltip={isPlaying ? tf("action_pause") : t("action_play_out")}
                 >
                     {isPlaying ? <PauseIcon /> : <PlayIcon />}
                 </IconButton>
@@ -1237,7 +1236,7 @@ export function ActionBar() {
                             style={{ left: recordingMenuPos.x, top: recordingMenuPos.y }}
                         >
                             <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
-                                {tAny("recording_source_mode")}
+                                {tf("recording_source_mode")}
                             </div>
                             <button
                                 type="button"
@@ -1247,7 +1246,7 @@ export function ActionBar() {
                                 }
                                 onPointerDown={(e) => e.stopPropagation()}
                             >
-                                <span>{tAny("recording_mode_device")}</span>
+                                <span>{tf("recording_mode_device")}</span>
                                 {recording.settings.captureMode === "device" ? <CheckIcon /> : null}
                             </button>
                             <button
@@ -1258,7 +1257,7 @@ export function ActionBar() {
                                 }
                                 onPointerDown={(e) => e.stopPropagation()}
                             >
-                                <span>{tAny("recording_mode_loopback")}</span>
+                                <span>{tf("recording_mode_loopback")}</span>
                                 {recording.settings.captureMode === "loopback" ? (
                                     <CheckIcon />
                                 ) : null}
@@ -1271,14 +1270,14 @@ export function ActionBar() {
                                 }
                                 onPointerDown={(e) => e.stopPropagation()}
                             >
-                                <span>{tAny("recording_mode_application")}</span>
+                                <span>{tf("recording_mode_application")}</span>
                                 {recording.settings.captureMode === "application" ? (
                                     <CheckIcon />
                                 ) : null}
                             </button>
                             <div className="my-1 border-t border-qt-border" />
                             <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
-                                {tAny(
+                                {tf(
                                     recording.settings.captureMode === "application"
                                         ? "recording_application"
                                         : "recording_device",
@@ -1294,7 +1293,7 @@ export function ActionBar() {
                                         }
                                         onPointerDown={(e) => e.stopPropagation()}
                                     >
-                                        <span>{tAny("recording_device_default")}</span>
+                                        <span>{tf("recording_device_default")}</span>
                                         {recording.settings.sourceDevice === "default" ? (
                                             <CheckIcon />
                                         ) : null}
@@ -1335,7 +1334,7 @@ export function ActionBar() {
                                         }
                                         onPointerDown={(e) => e.stopPropagation()}
                                     >
-                                        <span>{tAny("recording_loopback_default")}</span>
+                                        <span>{tf("recording_loopback_default")}</span>
                                         {recording.settings.loopbackDevice === "default" ? (
                                             <CheckIcon />
                                         ) : null}
@@ -1424,7 +1423,7 @@ export function ActionBar() {
                                 }}
                                 onPointerDown={(e) => e.stopPropagation()}
                             >
-                                <span>{tAny("recording_context_settings")}</span>
+                                <span>{tf("recording_context_settings")}</span>
                             </button>
                         </div>
                     )}
@@ -1523,7 +1522,7 @@ export function ActionBar() {
                     active={fileBrowserVisible}
                     // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                     emphasis="accent"
-                    tooltip={tAny("fb_title")}
+                    tooltip={tf("fb_title")}
                     onClick={() => togglePanelVisible(dispatch, store.getState, PANEL_FILE_BROWSER)}
                     icon={
                         <svg
@@ -1559,7 +1558,7 @@ export function ActionBar() {
                     active={s.autoCrossfadeEnabled}
                     // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                     emphasis="accent"
-                    tooltip={tAny("auto_crossfade")}
+                    tooltip={tf("auto_crossfade")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleAutoCrossfade());
@@ -1596,7 +1595,7 @@ export function ActionBar() {
                     active={s.splitTransitionEnabled}
                     // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                     emphasis="accent"
-                    tooltip={tAny("split_transition_tooltip")}
+                    tooltip={tf("split_transition_tooltip")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleSplitTransition());
@@ -1634,9 +1633,9 @@ export function ActionBar() {
                     active={effectiveSnapVisual}
                     // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                     emphasis="accent"
-                    tooltip={`${tAny("snap")}${
+                    tooltip={`${tf("snap")}${
                         snapGestureActive && snapToggleHeld
-                            ? ` · ${tAny("snap")}: ${tAny("snap_toggle_inverted")}`
+                            ? ` · ${tf("snap")}: ${tf("snap_toggle_inverted")}`
                             : ""
                     }`}
                     tabIndex={-1}
@@ -1701,7 +1700,7 @@ export function ActionBar() {
                     active={s.playheadZoomEnabled}
                     // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                     emphasis="accent"
-                    tooltip={tAny("playhead_zoom")}
+                    tooltip={tf("playhead_zoom")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(togglePlayheadZoom());
@@ -1742,7 +1741,7 @@ export function ActionBar() {
                     active={s.autoScrollEnabled}
                     // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                     emphasis="accent"
-                    tooltip={tAny("auto_scroll")}
+                    tooltip={tf("auto_scroll")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleAutoScroll());
@@ -1757,7 +1756,7 @@ export function ActionBar() {
                     active={s.paramEditorSeekPlayheadEnabled}
                     // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                     emphasis="accent"
-                    tooltip={tAny("param_editor_seek_playhead")}
+                    tooltip={tf("param_editor_seek_playhead")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleParamEditorSeekPlayhead());
@@ -1798,7 +1797,7 @@ export function ActionBar() {
                     active={s.paramEditorTimelineClickSelectTrackEnabled}
                     // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                     emphasis="accent"
-                    tooltip={tAny("param_editor_timeline_click_select_track")}
+                    tooltip={tf("param_editor_timeline_click_select_track")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleParamEditorTimelineClickSelectTrack());
@@ -1864,7 +1863,7 @@ export function ActionBar() {
                     active={s.ignoreGrouping}
                     // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                     emphasis="accent"
-                    tooltip={tAny("ignore_grouping")}
+                    tooltip={tf("ignore_grouping")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleIgnoreGrouping());
@@ -1999,13 +1998,11 @@ function RippleModeMenu({
     onChange: (mode: "off" | "track" | "all") => void;
     onClose: () => void;
 }) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
-
+    const { tf } = useI18n();
     const options: Array<{ value: "off" | "track" | "all"; label: string }> = [
-        { value: "off", label: tAny("ripple_mode_off") as string },
-        { value: "track", label: tAny("ripple_mode_track") as string },
-        { value: "all", label: tAny("ripple_mode_all") as string },
+        { value: "off", label: tf("ripple_mode_off") as string },
+        { value: "track", label: tf("ripple_mode_track") as string },
+        { value: "all", label: tf("ripple_mode_all") as string },
     ];
 
     return (
@@ -2033,8 +2030,7 @@ function RippleModeButton({
     onCycle: () => void;
     onSelect: (mode: "off" | "track" | "all") => void;
 }) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
     return (
@@ -2043,7 +2039,7 @@ function RippleModeButton({
                 active={mode !== "off"}
                 // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                 emphasis="accent"
-                tooltip={(tAny(`ripple_tooltip_${mode}`) as string) ?? tAny("ripple")}
+                tooltip={(tf(`ripple_tooltip_${mode}`) as string) ?? tf("ripple")}
                 tabIndex={-1}
                 onClick={onCycle}
                 onContextMenu={(e) => {

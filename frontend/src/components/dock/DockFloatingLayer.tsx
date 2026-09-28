@@ -70,8 +70,7 @@ function DockFloatWindow({
     active: boolean;
 }) {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { t, tf } = useI18n();
     const slotRef = useDockSlot(form.id);
     const geometry = form.float;
     const [dragging, setDragging] = useState(false);
@@ -82,7 +81,7 @@ function DockFloatWindow({
     const liveRect = drag?.started && drag.formId === form.id ? drag.floatRect : null;
 
     const definition = getPanel(form.panelId);
-    const title = form.title ?? (definition ? tAny(definition.titleKey) : form.panelId);
+    const title = form.title ?? (definition ? tf(definition.titleKey) : form.panelId);
     /** 本面板能否拆到独立窗口（见 `PanelDefinition.detachable`）。 */
     const detachable = definition?.detachable === true;
     const doubleClickAction = useAppSelector((s) => s.dock.settings.doubleClickHeaderAction);
@@ -308,8 +307,8 @@ function DockFloatWindow({
                 <button
                     type="button"
                     className="hs-dock-tabbar-action"
-                    data-tooltip={tAny(minimized ? "dock_expand" : "dock_collapse")}
-                    aria-label={tAny(minimized ? "dock_expand" : "dock_collapse")}
+                    data-tooltip={tf(minimized ? "dock_expand" : "dock_collapse")}
+                    aria-label={tf(minimized ? "dock_expand" : "dock_collapse")}
                     onClick={() =>
                         dispatch(
                             setFloatGeometry({
@@ -325,8 +324,8 @@ function DockFloatWindow({
                     <button
                         type="button"
                         className="hs-dock-tabbar-action"
-                        data-tooltip={tAny("dock_detach_to_window")}
-                        aria-label={tAny("dock_detach_to_window")}
+                        data-tooltip={tf("dock_detach_to_window")}
+                        aria-label={tf("dock_detach_to_window")}
                         onClick={() => void detachFormToWindow(dispatch, store.getState, form.id)}
                     >
                         <ExternalLinkIcon />
@@ -337,7 +336,7 @@ function DockFloatWindow({
                     // 代价是数秒卡顿，因此不支持。
                     <span
                         className="hs-dock-tabbar-action"
-                        data-tooltip={tAny("dock_detach_unsupported")}
+                        data-tooltip={tf("dock_detach_unsupported")}
                         aria-hidden
                         style={{ opacity: 0.4, cursor: "default" }}
                     >
@@ -347,8 +346,8 @@ function DockFloatWindow({
                 <button
                     type="button"
                     className="hs-dock-tabbar-action"
-                    data-tooltip={tAny("dock_redock")}
-                    aria-label={tAny("dock_redock")}
+                    data-tooltip={tf("dock_redock")}
+                    aria-label={tf("dock_redock")}
                     onClick={() => {
                         // 现读 store 而不是把树存进 ref：渲染期写 ref 违反
                         // React Compiler 的引用规则，而 store 随时可读。

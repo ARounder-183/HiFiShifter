@@ -46,9 +46,7 @@ interface ParamPreview {
 
 export function HifiClipNodeView(props: NodeViewProps) {
     const { node, updateAttributes, deleteNode, selected, editor } = props;
-    const { t, plural } = useI18n();
-    /** 动态键取文案（`t` 只接受字面量键）；查不到时 i18n 会回落，故这里只放宽类型。 */
-    const tAny = t as unknown as (key: string) => string;
+    const { t, tf, plural } = useI18n();
     const dispatch = useAppDispatch();
     const settings = useAppSelector((state) => state.notebook.settings);
     const assetIndex = useAppSelector((state) => state.notebook.assetIndex);
@@ -109,7 +107,7 @@ export function HifiClipNodeView(props: NodeViewProps) {
         );
     }
 
-    const kindLabel = tAny(clipKindLabelKey(attrs.kind));
+    const kindLabel = tf(clipKindLabelKey(attrs.kind));
 
     /**
      * 主操作文案随载荷种类走。

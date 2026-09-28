@@ -43,8 +43,7 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
         splitTransitionCurve,
         splitTransitionOverlapCrossfade,
     } = useAppSelector((state: RootState) => state.session);
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
 
     const isPercent = splitTransitionDurationUnit === "percent";
 
@@ -52,12 +51,12 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("split_transition_settings_title")}
+            title={tf("split_transition_settings_title")}
             size="sm"
             actions={[
                 {
                     id: "ok",
-                    label: tAny("ok"),
+                    label: tf("ok"),
                     intent: "primary",
                     onClick: () => {
                         onOpenChange(false);
@@ -67,10 +66,10 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
         >
             <AppForm>
                 <Text size="1" color="gray">
-                    {tAny("split_transition_settings_desc")}
+                    {tf("split_transition_settings_desc")}
                 </Text>
 
-                <AppField label={tAny("split_transition_mode")}>
+                <AppField label={tf("split_transition_mode")}>
                     <AppSelect
                         value={splitTransitionMode}
                         onValueChange={(v) => {
@@ -78,13 +77,13 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                             void dispatch(persistUiSettings());
                         }}
                         options={[
-                            { value: "fade", label: tAny("split_transition_mode_fade") },
-                            { value: "overlap", label: tAny("split_transition_mode_overlap") },
+                            { value: "fade", label: tf("split_transition_mode_fade") },
+                            { value: "overlap", label: tf("split_transition_mode_overlap") },
                         ]}
                     />
                 </AppField>
 
-                <AppField label={tAny("split_transition_duration_unit_label")}>
+                <AppField label={tf("split_transition_duration_unit_label")}>
                     <AppSelect
                         value={splitTransitionDurationUnit}
                         onValueChange={(v) => {
@@ -95,17 +94,17 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                         options={[
                             {
                                 value: "seconds",
-                                label: tAny("split_transition_duration_unit_seconds"),
+                                label: tf("split_transition_duration_unit_seconds"),
                             },
                             {
                                 value: "percent",
-                                label: tAny("split_transition_duration_unit_percent"),
+                                label: tf("split_transition_duration_unit_percent"),
                             },
                         ]}
                     />
                 </AppField>
 
-                <AppField label={tAny("split_transition_duration")}>
+                <AppField label={tf("split_transition_duration")}>
                     <Flex align="center" gap="2">
                         <AppNumberField
                             value={
@@ -118,7 +117,7 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                             max={isPercent ? 100 : 10}
                             width={120}
                             className="flex-1"
-                            ariaLabel={tAny("split_transition_duration")}
+                            ariaLabel={tf("split_transition_duration")}
                             onCommit={(next) => {
                                 if (isPercent) {
                                     dispatch(setSplitTransitionDurationPercent(next));
@@ -129,7 +128,7 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                             }}
                         />
                         <Text size="1" color="gray">
-                            {tAny(
+                            {tf(
                                 isPercent
                                     ? "split_transition_duration_percent_unit"
                                     : "split_transition_duration_unit",
@@ -140,11 +139,11 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
 
                 {isPercent && (
                     <Text size="1" color="gray">
-                        {tAny("split_transition_duration_percent_hint")}
+                        {tf("split_transition_duration_percent_hint")}
                     </Text>
                 )}
 
-                <AppField label={tAny("split_transition_curve")}>
+                <AppField label={tf("split_transition_curve")}>
                     <AppSelect
                         value={splitTransitionCurve}
                         onValueChange={(v) => {
@@ -153,12 +152,12 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                         }}
                         options={CURVE_OPTIONS.map((opt) => ({
                             value: opt.value,
-                            label: tAny(opt.labelKey),
+                            label: tf(opt.labelKey),
                         }))}
                     />
                 </AppField>
 
-                <AppField label={tAny("split_transition_overlap_crossfade")}>
+                <AppField label={tf("split_transition_overlap_crossfade")}>
                     <AppSelect
                         value={splitTransitionOverlapCrossfade}
                         onValueChange={(v) => {
@@ -168,11 +167,11 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                         options={[
                             {
                                 value: "auto",
-                                label: tAny("split_transition_overlap_crossfade_auto"),
+                                label: tf("split_transition_overlap_crossfade_auto"),
                             },
                             {
                                 value: "always",
-                                label: tAny("split_transition_overlap_crossfade_always"),
+                                label: tf("split_transition_overlap_crossfade_always"),
                             },
                         ]}
                     />
@@ -180,7 +179,7 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
 
                 {splitTransitionMode === "overlap" && (
                     <Text size="1" color="gray">
-                        {tAny("split_transition_overlap_hint")}
+                        {tf("split_transition_overlap_hint")}
                     </Text>
                 )}
             </AppForm>

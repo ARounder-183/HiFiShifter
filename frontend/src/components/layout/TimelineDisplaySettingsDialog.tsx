@@ -36,24 +36,23 @@ interface Props {
 export function TimelineDisplaySettingsDialog({ open, onOpenChange }: Props) {
     const dispatch = useAppDispatch();
     const s = useAppSelector((state: RootState) => state.session);
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
 
     return (
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("timeline_display_settings")}
+            title={tf("timeline_display_settings")}
             description={
                 <Text size="2" color="gray">
-                    {tAny("timeline_display_settings_desc")}
+                    {tf("timeline_display_settings_desc")}
                 </Text>
             }
             size="sm"
-            actions={[{ id: "close", label: tAny("close"), onClick: () => onOpenChange(false) }]}
+            actions={[{ id: "close", label: tf("close"), onClick: () => onOpenChange(false) }]}
         >
             <AppForm>
-                <AppField label={tAny("time_unit_primary")}>
+                <AppField label={tf("time_unit_primary")}>
                     <AppSelect
                         value={s.primaryTimeUnit}
                         onValueChange={(v) => {
@@ -62,12 +61,12 @@ export function TimelineDisplaySettingsDialog({ open, onOpenChange }: Props) {
                         }}
                         options={TIME_UNITS.map((unit) => ({
                             value: unit,
-                            label: tAny(unitLabelKey(unit)),
+                            label: tf(unitLabelKey(unit)),
                         }))}
                     />
                 </AppField>
 
-                <AppField label={tAny("time_unit_secondary")}>
+                <AppField label={tf("time_unit_secondary")}>
                     <AppSelect
                         value={s.secondaryTimeUnit}
                         onValueChange={(v) => {
@@ -78,20 +77,20 @@ export function TimelineDisplaySettingsDialog({ open, onOpenChange }: Props) {
                             value: unit,
                             label:
                                 unit === "none"
-                                    ? tAny("time_unit_none")
-                                    : tAny(unitLabelKey(unit as TimeUnit)),
+                                    ? tf("time_unit_none")
+                                    : tf(unitLabelKey(unit as TimeUnit)),
                         }))}
                     />
                 </AppField>
 
-                <AppField label={tAny("ruler_label_spacing")}>
+                <AppField label={tf("ruler_label_spacing")}>
                     <Flex align="center" gap="2">
                         <AppSlider
                             value={s.rulerLabelSpacingPx}
                             unit="pixels"
                             min={40}
                             max={320}
-                            ariaLabel={tAny("ruler_label_spacing")}
+                            ariaLabel={tf("ruler_label_spacing")}
                             onChange={(next) => {
                                 dispatch(setRulerLabelSpacingPx(next));
                             }}
@@ -110,7 +109,7 @@ export function TimelineDisplaySettingsDialog({ open, onOpenChange }: Props) {
                             void dispatch(persistUiSettings());
                         }}
                     />
-                    <Text size="2">{tAny("show_playhead_time_in_track_header")}</Text>
+                    <Text size="2">{tf("show_playhead_time_in_track_header")}</Text>
                 </label>
             </AppForm>
         </AppDialog>

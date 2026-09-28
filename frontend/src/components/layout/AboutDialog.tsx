@@ -34,8 +34,7 @@ interface AboutInfo {
 }
 
 export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const [info, setInfo] = useState<AboutInfo | null>(null);
 
     useEffect(() => {
@@ -71,41 +70,41 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("menu_about")}
-            description={tAny("about_intro")}
+            title={tf("menu_about")}
+            description={tf("about_intro")}
             size="md"
             actions={[
                 {
                     id: "open-repo",
-                    label: tAny("about_open_repo"),
+                    label: tf("about_open_repo"),
                     align: "start",
                     // 迁移时丢失：悬停显示完整仓库地址（原按钮带 data-tooltip={repoUrl}）
                     tooltip: repoUrl,
                     // 异步包装：打开仓库不关闭对话框，避免页脚表单重新提交触发默认动作。
                     onClick: () => openExternal(repoUrl),
                 },
-                { id: "close", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                { id: "close", label: tf("cancel"), onClick: () => onOpenChange(false) },
             ]}
         >
             <AppForm>
                 <Flex direction="column" gap="2">
                     <Flex align="center" gap="2">
                         <Text size="2" color="gray">
-                            {tAny("about_version")}
+                            {tf("about_version")}
                         </Text>
                         <Text size="2" weight="medium">
                             {info?.version ?? "…"}
                         </Text>
                         {info?.dirty ? (
                             <Text size="1" color="orange">
-                                {tAny("about_dirty")}
+                                {tf("about_dirty")}
                             </Text>
                         ) : null}
                     </Flex>
                     {showCommit ? (
                         <Flex align="center" gap="2">
                             <Text size="2" color="gray">
-                                {tAny("about_commit")}
+                                {tf("about_commit")}
                             </Text>
                             {/* 点击跳转到该 commit 的源码快照；tooltip 展示完整链接——
                                 按自然边界拆两行，避免 320px 气泡内在连字符处断行、

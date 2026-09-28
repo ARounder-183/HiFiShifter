@@ -54,8 +54,7 @@ const TARGET_MODE_OPTIONS: ReadonlyArray<{ value: string; labelKey: string }> = 
 
 export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogProps) {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const saved = useAppSelector((state) => state.session.channelImportPolicy);
 
     const [draft, setDraft] = useState<ChannelImportPolicy>(saved);
@@ -89,9 +88,9 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
             dispatch(setChannelImportPolicy(normalized));
             await dispatch(persistUiSettings());
             setDraft(normalized);
-            setNotice(tAny("render_cache_settings_saved"));
+            setNotice(tf("render_cache_settings_saved"));
         } catch {
-            setErrorText(tAny("render_cache_settings_save_failed"));
+            setErrorText(tf("render_cache_settings_save_failed"));
         } finally {
             setSaving(false);
         }
@@ -105,14 +104,14 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("clip_channel_import_dialog_title")}
-            description={tAny("clip_channel_import_dialog_desc")}
+            title={tf("clip_channel_import_dialog_title")}
+            description={tf("clip_channel_import_dialog_desc")}
             size="md"
             actions={[
-                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
                 {
                     id: "save",
-                    label: tAny("clip_channel_import_save"),
+                    label: tf("clip_channel_import_save"),
                     intent: "primary",
                     disabled: saving,
                     onClick: handleSave,
@@ -123,31 +122,31 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                 <Separator size="4" />
 
                 {/* ── 总策略 ─────────────────────────────────────────── */}
-                <AppField label={tAny("clip_channel_import_mode")}>
+                <AppField label={tf("clip_channel_import_mode")}>
                     <AppSelect
                         value={draft.mode}
                         onValueChange={(value) => patch({ mode: value as ChannelImportMode })}
                         options={MODE_OPTIONS.map((option) => ({
                             value: option.value,
-                            label: tAny(option.labelKey),
+                            label: tf(option.labelKey),
                         }))}
                     />
                 </AppField>
                 <Text size="1" color="gray">
                     {isOff
-                        ? tAny("clip_channel_import_mode_off_hint")
-                        : tAny("clip_channel_import_mode_hint")}
+                        ? tf("clip_channel_import_mode_off_hint")
+                        : tf("clip_channel_import_mode_hint")}
                 </Text>
 
                 {/* ── 目标模式 ───────────────────────────────────────── */}
                 {!isOff && (
-                    <AppField label={tAny("clip_channel_import_target_mode")}>
+                    <AppField label={tf("clip_channel_import_target_mode")}>
                         <AppSelect
                             value={String(draft.monoTargetMode)}
                             onValueChange={(value) => patch({ monoTargetMode: Number(value) })}
                             options={TARGET_MODE_OPTIONS.map((option) => ({
                                 value: option.value,
-                                label: tAny(option.labelKey),
+                                label: tf(option.labelKey),
                             }))}
                         />
                     </AppField>
@@ -158,10 +157,10 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                     <>
                         <Separator size="4" />
                         <Text size="2" weight="medium">
-                            {tAny("clip_channel_import_advanced")}
+                            {tf("clip_channel_import_advanced")}
                         </Text>
 
-                        <AppField label={tAny("clip_channel_import_tolerance")}>
+                        <AppField label={tf("clip_channel_import_tolerance")}>
                             <Flex align="center" gap="2">
                                 <AppNumberField
                                     value={toleranceToPercent(draft.tolerance)}
@@ -170,7 +169,7 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                                     max={TOLERANCE_PERCENT_MAX}
                                     width={120}
                                     suffix="%"
-                                    ariaLabel={tAny("clip_channel_import_tolerance")}
+                                    ariaLabel={tf("clip_channel_import_tolerance")}
                                     onCommit={(next) =>
                                         patch({ tolerance: percentToTolerance(next) })
                                     }
@@ -178,34 +177,34 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                             </Flex>
                         </AppField>
                         <Text size="1" color="gray">
-                            {tAny("clip_channel_import_tolerance_hint")}
+                            {tf("clip_channel_import_tolerance_hint")}
                         </Text>
 
-                        <AppField label={tAny("clip_channel_import_window_sec")}>
+                        <AppField label={tf("clip_channel_import_window_sec")}>
                             <AppNumberField
                                 value={draft.windowSec}
                                 unit="seconds"
                                 min={0.05}
                                 max={5}
                                 width={120}
-                                ariaLabel={tAny("clip_channel_import_window_sec")}
+                                ariaLabel={tf("clip_channel_import_window_sec")}
                                 onCommit={(next) => patch({ windowSec: next })}
                             />
                         </AppField>
 
-                        <AppField label={tAny("clip_channel_import_window_count")}>
+                        <AppField label={tf("clip_channel_import_window_count")}>
                             <AppNumberField
                                 value={draft.windowCount}
                                 unit="integer"
                                 min={0}
                                 max={256}
                                 width={120}
-                                ariaLabel={tAny("clip_channel_import_window_count")}
+                                ariaLabel={tf("clip_channel_import_window_count")}
                                 onCommit={(next) => patch({ windowCount: next })}
                             />
                         </AppField>
                         <Text size="1" color="gray">
-                            {tAny("clip_channel_import_window_hint")}
+                            {tf("clip_channel_import_window_hint")}
                         </Text>
                     </>
                 )}

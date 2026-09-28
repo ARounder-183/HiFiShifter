@@ -491,8 +491,7 @@ function formatApproxDuration(ms: number): string {
 
 function AppInner() {
     const dispatch = useAppDispatch();
-    const { t, plural } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { t, tf, plural } = useI18n();
     const pitchAnalysis = usePitchAnalysis();
 
     const status = useAppSelector((state) => state.session.status);
@@ -1467,12 +1466,12 @@ function AppInner() {
                         if (!(Number.isFinite(hits) && hits > 0 && total > 0)) return;
                         // 各段都是完整分句、自身不带前导分隔符，由这里统一用
                         // " · " 连接。
-                        let hitText = tAny("status_render_cache_summary")
+                        let hitText = tf("status_render_cache_summary")
                             .replace("{hits}", String(hits))
                             .replace("{total}", String(total));
                         const savedMs = Number(payload.savedMs ?? 0);
                         if (Number.isFinite(savedMs) && savedMs >= 1000) {
-                            hitText += tAny("status_render_cache_saved_suffix").replace(
+                            hitText += tf("status_render_cache_saved_suffix").replace(
                                 "{saved}",
                                 formatApproxDuration(savedMs),
                             );
@@ -1494,7 +1493,7 @@ function AppInner() {
             disposed = true;
             if (unlisten) unlisten();
         };
-    }, [renderCacheShowHitStats, showNotice, tAny]);
+    }, [renderCacheShowHitStats, showNotice, tf]);
 
     // ── 后台声道折叠反馈 ────────────────────────────────────────────────────
     // 打开工程 / 导入 / 换源后，没有权威判定档案的 Take 会被后台扫描按策略折叠为
@@ -4090,7 +4089,7 @@ function AppInner() {
             <Flex
                 align="center"
                 justify="between"
-                className="h-6 bg-qt-window border-t border-qt-border px-1 select-none gap-2"
+                className="h-qt-bar-status bg-qt-window border-t border-qt-border px-1 select-none gap-2"
             >
                 <Flex align="center" gap="1" className="truncate min-w-0">
                     {/* 排列规则：**长时效的提示在前，短时效的进度片在后**。

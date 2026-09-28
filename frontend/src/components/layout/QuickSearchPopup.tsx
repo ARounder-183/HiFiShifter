@@ -86,8 +86,7 @@ interface QuickSearchPopupProps {
  */
 export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClose }) => {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
 
     const keybindings = useAppSelector(selectMergedKeybindings);
 
@@ -423,9 +422,8 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         onKeyDown={handleKeyDown}
                         placeholder={
                             noFolder
-                                ? (t as (key: string) => string)("qs_no_folder") || "请先选择文件夹"
-                                : (t as (key: string) => string)("qs_placeholder") ||
-                                  "搜索音频文件..."
+                                ? tf("qs_no_folder") || "请先选择文件夹"
+                                : tf("qs_placeholder") || "搜索音频文件..."
                         }
                         disabled={noFolder}
                         className="flex-1 bg-transparent border-none outline-none text-qt-text text-qt-xs placeholder:text-qt-text-muted"
@@ -435,7 +433,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                     {/* 正则切换 */}
                     <AppIconButton
                         active={regexEnabled}
-                        tooltip={tAny("fb_regex")}
+                        tooltip={tf("fb_regex")}
                         onClick={() => {
                             setRegexEnabled((v) => !v);
                             focusSearchInput();
@@ -460,9 +458,9 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                             focusSearchInput();
                         }}
                         options={[
-                            { value: "name", label: tAny("fb_sort_name") },
-                            { value: "date", label: tAny("fb_sort_date") },
-                            { value: "size", label: tAny("fb_sort_size") },
+                            { value: "name", label: tf("fb_sort_name") },
+                            { value: "date", label: tf("fb_sort_date") },
+                            { value: "size", label: tf("fb_sort_size") },
                         ]}
                     />
                     {loading && <AppBusy className="shrink-0" />}
@@ -476,22 +474,16 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                 >
                     {noFolder ? (
                         <AppEmptyState>
-                            {(t as (key: string) => string)("qs_no_folder_hint") ||
-                                "请先在文件管理器中选择目录"}
+                            {tf("qs_no_folder_hint") || "请先在文件管理器中选择目录"}
                         </AppEmptyState>
                     ) : !query.trim() ? (
                         <AppEmptyState>
-                            {(t as (key: string) => string)("qs_type_to_search") ||
-                                "输入关键词搜索音频文件"}
+                            {tf("qs_type_to_search") || "输入关键词搜索音频文件"}
                         </AppEmptyState>
                     ) : loading ? (
-                        <AppEmptyState>
-                            {(t as (key: string) => string)("fb_searching") || "搜索中..."}
-                        </AppEmptyState>
+                        <AppEmptyState>{tf("fb_searching") || "搜索中..."}</AppEmptyState>
                     ) : sortedResults.length === 0 ? (
-                        <AppEmptyState>
-                            {(t as (key: string) => string)("fb_no_results") || "无匹配文件"}
-                        </AppEmptyState>
+                        <AppEmptyState>{tf("fb_no_results") || "无匹配文件"}</AppEmptyState>
                     ) : (
                         sortedResults.map((entry, index) => (
                             <div
@@ -546,7 +538,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                     <AppForm booleanRow="leading">
                         <AppSwitchRow
                             control="checkbox"
-                            label={tAny("qs_auto_normalize")}
+                            label={tf("qs_auto_normalize")}
                             checked={quickSearchAutoNormalizeEnabled}
                             onCheckedChange={() => {
                                 dispatch(toggleQuickSearchAutoNormalize());
@@ -559,16 +551,16 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         <Text size="1" color="gray" className="text-[10px]">
                             {formatKeybinding(keybindings["quickSearch.navigate.up"])}/
                             {formatKeybinding(keybindings["quickSearch.navigate.down"])}{" "}
-                            {(t as (key: string) => string)("qs_hint_nav") || "导航"}
+                            {tf("qs_hint_nav") || "导航"}
                             {"  "}
                             {formatKeybinding(keybindings["quickSearch.preview"])}{" "}
-                            {(t as (key: string) => string)("qs_hint_preview") || "预览"}
+                            {tf("qs_hint_preview") || "预览"}
                             {"  "}
                             {formatKeybinding(keybindings["quickSearch.confirm"])}{" "}
-                            {(t as (key: string) => string)("qs_hint_place") || "放置"}
+                            {tf("qs_hint_place") || "放置"}
                             {"  "}
                             {formatKeybinding(keybindings["quickSearch.close"])}{" "}
-                            {(t as (key: string) => string)("qs_hint_close") || "关闭"}
+                            {tf("qs_hint_close") || "关闭"}
                         </Text>
                     )}
                 </div>

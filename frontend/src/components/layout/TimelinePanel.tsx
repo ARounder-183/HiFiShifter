@@ -449,8 +449,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const importTarget = midiDialogSource === "dragDrop" ? importTargetDragDrop : importTargetMenu;
     const onImportTargetChange =
         midiDialogSource === "dragDrop" ? onImportTargetDragDropChange : onImportTargetMenuChange;
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { t, tf } = useI18n();
     // 轨道头宽度是**布局状态**的一部分（用户调过的尺寸必须随布局持久化），
     // 取代了原先写死的 `w-64`。
     const trackHeaderWidthPx = useAppSelector(
@@ -5412,7 +5411,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onSecondaryUnitChange={handleSecondaryUnitChange}
             onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
             onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
-            t={t as (key: string) => string}
+            t={tf}
             tempoMap={s.tempoMap}
             tempoMapVisible={s.tempoMapVisible}
             projectSec={dynamicProjectSec}
@@ -6084,7 +6083,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                         );
                                     }}
                                 >
-                                    {tAny("import_project_dialog_title")}
+                                    {tf("import_project_dialog_title")}
                                 </button>
                             </div>
                         </div>

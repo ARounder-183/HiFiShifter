@@ -492,8 +492,7 @@ async function emitThemeReverted() {
  * ═══════════════════════════════════════════════════════════ */
 
 export const AppearanceWindow: React.FC = () => {
-    const { t, plural } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf, plural } = useI18n();
     const theme = useAppTheme();
 
     /* ── Tab ── */
@@ -691,7 +690,7 @@ export const AppearanceWindow: React.FC = () => {
             const id = existing?.id ?? crypto.randomUUID();
             const newTheme: CustomTheme = {
                 id,
-                name: editThemeName || tAny("appearance_custom_theme"),
+                name: editThemeName || tf("appearance_custom_theme"),
                 base: theme.mode,
                 colors: editColors,
                 waveformColors: editWaveform,
@@ -735,7 +734,7 @@ export const AppearanceWindow: React.FC = () => {
         activeThemeId,
         customThemes,
         theme,
-        tAny,
+        tf,
     ]);
 
     const handleClose = useCallback(() => {
@@ -884,10 +883,10 @@ export const AppearanceWindow: React.FC = () => {
 
     const tabItems = useMemo(
         () => [
-            { id: "theme", label: tAny("appearance_tab_theme") },
-            { id: "font", label: tAny("appearance_tab_font") },
+            { id: "theme", label: tf("appearance_tab_theme") },
+            { id: "font", label: tf("appearance_tab_font") },
         ],
-        [tAny],
+        [tf],
     );
 
     /* ═══════════════════════════════════════════════════════════
@@ -903,7 +902,7 @@ export const AppearanceWindow: React.FC = () => {
                 <div className="flex items-start justify-between gap-3">
                     <div className="space-y-1">
                         <h2 className="m-0 text-qt-lg font-semibold text-qt-text">
-                            {tAny("appearance_title")}
+                            {tf("appearance_title")}
                         </h2>
                     </div>
                     <div className="flex items-center gap-2 pt-1">
@@ -935,7 +934,7 @@ export const AppearanceWindow: React.FC = () => {
                                     className={SECONDARY_BUTTON_CLASS}
                                     onClick={() => fileInputRef.current?.click()}
                                 >
-                                    {tAny("appearance_import_theme")}
+                                    {tf("appearance_import_theme")}
                                 </button>
                                 <input
                                     ref={fileInputRef}
@@ -948,7 +947,7 @@ export const AppearanceWindow: React.FC = () => {
                                     className={SECONDARY_BUTTON_CLASS}
                                     onClick={handleExportTheme}
                                 >
-                                    {tAny("appearance_export_theme")}
+                                    {tf("appearance_export_theme")}
                                 </button>
                                 {hasCustomColors && (
                                     <>
@@ -957,7 +956,7 @@ export const AppearanceWindow: React.FC = () => {
                                             className="px-3 py-1.5 text-[11px] font-medium rounded border border-qt-danger-border/40 bg-qt-danger-bg/20 text-qt-danger-text hover:bg-qt-danger-bg/35 transition-colors cursor-pointer select-none"
                                             onClick={() => setResetColorsConfirmOpen(true)}
                                         >
-                                            {tAny("appearance_reset_all_colors")}
+                                            {tf("appearance_reset_all_colors")}
                                         </button>
                                     </>
                                 )}
@@ -967,7 +966,7 @@ export const AppearanceWindow: React.FC = () => {
                             {customThemes.length > 0 && (
                                 <div className={`${CARD_CLASS} p-3 space-y-2`}>
                                     <span className={SECTION_LABEL_CLASS}>
-                                        {tAny("appearance_saved_themes")}
+                                        {tf("appearance_saved_themes")}
                                     </span>
                                     <div className="flex flex-wrap gap-1.5">
                                         {customThemes.map((ct) => {
@@ -1003,7 +1002,7 @@ export const AppearanceWindow: React.FC = () => {
                                     {hasCustomColors && (
                                         <div className="flex items-center gap-2 pt-2 border-t border-[color:var(--qt-divider)]">
                                             <span className="text-[11px] text-qt-text-muted shrink-0">
-                                                {tAny("appearance_theme_name")}
+                                                {tf("appearance_theme_name")}
                                             </span>
                                             <input
                                                 type="text"
@@ -1013,7 +1012,7 @@ export const AppearanceWindow: React.FC = () => {
                                                     setEditThemeName(e.target.value);
                                                 }}
                                                 className="flex-1 rounded border border-qt-border bg-qt-base px-2 py-1.5 text-[11px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
-                                                placeholder={tAny("appearance_custom_theme")}
+                                                placeholder={tf("appearance_custom_theme")}
                                             />
                                         </div>
                                     )}
@@ -1022,9 +1021,7 @@ export const AppearanceWindow: React.FC = () => {
 
                             {/* ── 主题模式 ── */}
                             <div className={`${CARD_CLASS} p-3 space-y-2`}>
-                                <span className={SECTION_LABEL_CLASS}>
-                                    {tAny("appearance_mode")}
-                                </span>
+                                <span className={SECTION_LABEL_CLASS}>{tf("appearance_mode")}</span>
                                 <div className="grid grid-cols-3 gap-2">
                                     {(["auto", "dark", "light"] as const).map((mode) => {
                                         const isSelected = theme.modeSetting === mode;
@@ -1067,7 +1064,7 @@ export const AppearanceWindow: React.FC = () => {
                                                 <span
                                                     className={`text-[10px] font-medium ${isSelected ? "text-qt-highlight" : "text-qt-text-muted"}`}
                                                 >
-                                                    {tAny(`theme_${mode}`)}
+                                                    {tf(`theme_${mode}`)}
                                                 </span>
                                             </button>
                                         );
@@ -1079,7 +1076,7 @@ export const AppearanceWindow: React.FC = () => {
                             <div className={`${CARD_CLASS} p-3 space-y-2`}>
                                 <div className="flex items-center justify-between">
                                     <span className={SECTION_LABEL_CLASS}>
-                                        {tAny("appearance_accent")}
+                                        {tf("appearance_accent")}
                                     </span>
                                     <span className="text-[9px] text-qt-text-muted/50 font-mono">
                                         {accentColor} {RADIX_ACCENT_HEX[accentColor]}
@@ -1127,7 +1124,7 @@ export const AppearanceWindow: React.FC = () => {
                             {/* ── 圆角 ── */}
                             <div className={`${CARD_CLASS} p-3 space-y-2`}>
                                 <span className={SECTION_LABEL_CLASS}>
-                                    {tAny("appearance_radius")}
+                                    {tf("appearance_radius")}
                                 </span>
                                 <div className="flex gap-1.5">
                                     {RADIX_RADIUS_OPTIONS.map((r) => {
@@ -1175,7 +1172,7 @@ export const AppearanceWindow: React.FC = () => {
                             <div className={`${CARD_CLASS} space-y-3 p-3`}>
                                 <div className="flex items-center justify-between">
                                     <span className={SECTION_LABEL_CLASS}>
-                                        {tAny("appearance_tab_colors")}
+                                        {tf("appearance_tab_colors")}
                                     </span>
                                     <span className="text-[10px] text-qt-text-muted">
                                         {plural("appearance_modified_count", modifiedColorCount)}
@@ -1198,7 +1195,7 @@ export const AppearanceWindow: React.FC = () => {
                                                     setActivePaletteGroup(group.labelKey)
                                                 }
                                             >
-                                                {tAny(group.labelKey)}
+                                                {tf(group.labelKey)}
                                             </button>
                                         );
                                     })}
@@ -1212,7 +1209,7 @@ export const AppearanceWindow: React.FC = () => {
                                     ).map((token) => (
                                         <ColorTokenRow
                                             key={token}
-                                            label={tAny(QT_COLOR_TOKEN_LABELS[token])}
+                                            label={tf(QT_COLOR_TOKEN_LABELS[token])}
                                             color={getDisplayColor(token)}
                                             onChange={(v) => updateColorToken(token, v)}
                                         />
@@ -1227,9 +1224,7 @@ export const AppearanceWindow: React.FC = () => {
                         <div className="space-y-2">
                             {/* 字体输入 */}
                             <div className={`${CARD_CLASS} p-3 space-y-2`}>
-                                <span className={SECTION_LABEL_CLASS}>
-                                    {tAny("appearance_font")}
-                                </span>
+                                <span className={SECTION_LABEL_CLASS}>{tf("appearance_font")}</span>
                                 <div className="flex items-center gap-2">
                                     <input
                                         type="text"
@@ -1249,7 +1244,7 @@ export const AppearanceWindow: React.FC = () => {
                                             setFontFamily(DEFAULT_FONT_FAMILY);
                                         }}
                                     >
-                                        {tAny("appearance_reset")}
+                                        {tf("appearance_reset")}
                                     </button>
                                     <button
                                         className={SECONDARY_BUTTON_CLASS}
@@ -1259,7 +1254,7 @@ export const AppearanceWindow: React.FC = () => {
                                             setFontSearch("");
                                         }}
                                     >
-                                        {tAny("appearance_font_restore_default")}
+                                        {tf("appearance_font_restore_default")}
                                     </button>
                                 </div>
 
@@ -1285,11 +1280,11 @@ export const AppearanceWindow: React.FC = () => {
                                 <div className="flex items-center justify-between gap-3">
                                     <div className="flex items-center gap-2">
                                         <span className={SECTION_LABEL_CLASS}>
-                                            {tAny("appearance_font_system")}
+                                            {tf("appearance_font_system")}
                                         </span>
                                         {availableFonts.length > 0 && (
                                             <span className="rounded-full bg-qt-surface/60 px-2 py-0.5 text-[10px] text-qt-text-muted">
-                                                {tAny("appearance_font_count").replace(
+                                                {tf("appearance_font_count").replace(
                                                     "{count}",
                                                     String(availableFonts.length),
                                                 )}
@@ -1301,8 +1296,8 @@ export const AppearanceWindow: React.FC = () => {
                                         onClick={() => void systemFonts.detect(true)}
                                     >
                                         {systemFonts.loading
-                                            ? tAny("appearance_font_detecting")
-                                            : tAny("appearance_font_detect")}
+                                            ? tf("appearance_font_detecting")
+                                            : tf("appearance_font_detect")}
                                     </button>
                                 </div>
 
@@ -1312,12 +1307,12 @@ export const AppearanceWindow: React.FC = () => {
                                         {systemFonts.loading ? (
                                             <>
                                                 <span className="animate-spin inline-block w-3 h-3 border-2 border-qt-text-muted/20 border-t-qt-highlight rounded-full" />
-                                                {tAny("appearance_font_detecting")}
+                                                {tf("appearance_font_detecting")}
                                             </>
                                         ) : systemFonts.supported ? (
-                                            tAny("appearance_font_detect")
+                                            tf("appearance_font_detect")
                                         ) : (
-                                            tAny("appearance_font_not_supported")
+                                            tf("appearance_font_not_supported")
                                         )}
                                     </div>
                                 )}
@@ -1334,7 +1329,7 @@ export const AppearanceWindow: React.FC = () => {
                                                     setFontSearch(e.target.value)
                                                 }
                                                 className="w-full rounded-xl border border-[color:var(--qt-divider)] bg-qt-surface/40 py-2 pl-8 pr-8 text-[11px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
-                                                placeholder={tAny(
+                                                placeholder={tf(
                                                     "appearance_font_search_placeholder",
                                                 )}
                                                 spellCheck={false}
@@ -1392,7 +1387,7 @@ export const AppearanceWindow: React.FC = () => {
                                                 })
                                             ) : (
                                                 <div className="px-3 py-4 text-[10px] text-qt-text-muted/40 italic text-center">
-                                                    {tAny("appearance_font_no_results")}
+                                                    {tf("appearance_font_no_results")}
                                                 </div>
                                             )}
                                         </div>
@@ -1407,10 +1402,10 @@ export const AppearanceWindow: React.FC = () => {
             {/* ═══════ 底部按钮 ═══════ */}
             <div className="mx-auto mt-1 flex w-full max-w-[920px] items-center justify-end gap-2 border-t border-qt-border px-1 pt-1.5 shrink-0">
                 <button className={SECONDARY_BUTTON_CLASS} onClick={handleClose}>
-                    {tAny("close")}
+                    {tf("close")}
                 </button>
                 <button className={PRIMARY_BUTTON_CLASS} onClick={handleApply}>
-                    {tAny("appearance_apply")}
+                    {tf("appearance_apply")}
                 </button>
             </div>
 
@@ -1419,10 +1414,10 @@ export const AppearanceWindow: React.FC = () => {
             <AppConfirmDialog
                 open={resetColorsConfirmOpen}
                 onOpenChange={setResetColorsConfirmOpen}
-                title={tAny("appearance_reset_all_colors")}
-                message={tAny("appearance_reset_all_colors_confirm")}
-                confirmLabel={tAny("appearance_reset_all_colors")}
-                cancelLabel={tAny("cancel")}
+                title={tf("appearance_reset_all_colors")}
+                message={tf("appearance_reset_all_colors_confirm")}
+                confirmLabel={tf("appearance_reset_all_colors")}
+                cancelLabel={tf("cancel")}
                 intent="danger"
                 onConfirm={handleResetColors}
             />

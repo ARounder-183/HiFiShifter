@@ -28,8 +28,7 @@ import {
  * 界面零变化，不弹提示。
  */
 export const UndoHistoryPanel: React.FC = () => {
-    const { t, locale } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf, locale } = useI18n();
     const dispatch = useAppDispatch();
     const s = useAppSelector(selectHistoryPanelState, shallowEqual);
     const listRef = useRef<HTMLDivElement | null>(null);
@@ -59,10 +58,10 @@ export const UndoHistoryPanel: React.FC = () => {
     const labelOf = useCallback(
         (label: string | null): string => {
             const key = label ? `history_op_${label}` : "history_op_initial";
-            const text = tAny(key);
+            const text = tf(key);
             return typeof text === "string" && text.length > 0 ? text : (label ?? "—");
         },
-        [tAny],
+        [tf],
     );
 
     const jumpTo = useCallback(
@@ -78,8 +77,8 @@ export const UndoHistoryPanel: React.FC = () => {
         [s.records],
     );
     const countText = useMemo(
-        () => tAny("undo_history_count").replace("{count}", String(s.records.length)),
-        [s.records.length, tAny],
+        () => tf("undo_history_count").replace("{count}", String(s.records.length)),
+        [s.records.length, tf],
     );
 
     return (
@@ -103,7 +102,7 @@ export const UndoHistoryPanel: React.FC = () => {
                                     ? "bg-qt-highlight/20 font-medium"
                                     : "hover:bg-qt-button-hover"
                             } ${isFuture ? "opacity-60" : ""}`}
-                            data-tooltip={isCurrent ? tAny("undo_history_current") : undefined}
+                            data-tooltip={isCurrent ? tf("undo_history_current") : undefined}
                             onDoubleClick={() => jumpTo(row.index)}
                         >
                             <span
@@ -117,7 +116,7 @@ export const UndoHistoryPanel: React.FC = () => {
                             </span>
                             <button
                                 type="button"
-                                data-tooltip={tAny("undo_history_jump")}
+                                data-tooltip={tf("undo_history_jump")}
                                 className={`shrink-0 rounded p-0.5 text-qt-text-muted transition-colors hover:bg-qt-button-hover hover:text-qt-text ${
                                     isCurrent ? "invisible" : "opacity-0 group-hover:opacity-100"
                                 }`}
@@ -136,7 +135,7 @@ export const UndoHistoryPanel: React.FC = () => {
                 <AppForm booleanRow="leading">
                     <AppSwitchRow
                         control="checkbox"
-                        label={tAny("undo_history_save_with_project")}
+                        label={tf("undo_history_save_with_project")}
                         checked={s.saveUndoHistory}
                         onCheckedChange={(checked) => {
                             void dispatch(setProjectSaveUndoHistoryRemote(checked));
@@ -147,7 +146,7 @@ export const UndoHistoryPanel: React.FC = () => {
                 <AppForm booleanRow="leading">
                     <AppSwitchRow
                         control="checkbox"
-                        label={tAny("undo_history_save_by_default")}
+                        label={tf("undo_history_save_by_default")}
                         checked={s.saveUndoHistoryByDefault}
                         onCheckedChange={(checked) => {
                             dispatch(setSaveUndoHistoryByDefault(checked));

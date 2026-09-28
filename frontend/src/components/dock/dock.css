@@ -109,7 +109,7 @@
     display: flex;
     align-items: stretch;
     flex: 0 0 auto;
-    height: 26px;
+    height: var(--qt-bar-compact);
     background: var(--qt-panel);
     border-bottom: 1px solid var(--qt-border);
     overflow-x: auto;

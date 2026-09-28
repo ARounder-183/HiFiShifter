@@ -20,7 +20,7 @@
  *
  * 【为什么不做类型安全】第三方键在编译期不存在于 `MessageKey` 里，因此必然走
  * 字符串键。边界处用 `useExtensionTranslate()` 取一个 `(key: string) => string`，
- * 与内置的 `t()` 分开，避免像历史上 71 处 `t as (key: string) => string` 那样
+ * 与内置的 `t()` 分开，避免像历史上 71 处 `tf` 那样
  * 把内置的类型安全一起丢掉。
  */
 import type { Locale } from "./messages";

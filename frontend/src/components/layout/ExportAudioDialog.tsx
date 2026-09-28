@@ -227,8 +227,7 @@ function buildTargetGroups(
 }
 
 export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const dispatch = useAppDispatch();
     const session = useAppSelector((state) => state.session);
 
@@ -309,10 +308,10 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     trackId: clip.trackId,
                     muted: Boolean(clip.muted),
                 })),
-                tAny("export_track_label_root_suffix"),
-                tAny("export_track_label_sub_suffix"),
+                tf("export_track_label_root_suffix"),
+                tf("export_track_label_sub_suffix"),
             ),
-        [session.tracks, session.clips, tAny],
+        [session.tracks, session.clips, tf],
     );
 
     const allTargets = useMemo(
@@ -521,7 +520,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                 if (corrected != null) {
                     setSampleRate(String(corrected));
                     setSampleRateNotice(
-                        tAny("export_dialog_sample_rate_autocorrected").replace(
+                        tf("export_dialog_sample_rate_autocorrected").replace(
                             "{rate}",
                             String(corrected),
                         ),
@@ -659,10 +658,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         if (corrected != null) {
             setSampleRate(String(corrected));
             setSampleRateNotice(
-                tAny("export_dialog_sample_rate_autocorrected").replace(
-                    "{rate}",
-                    String(corrected),
-                ),
+                tf("export_dialog_sample_rate_autocorrected").replace("{rate}", String(corrected)),
             );
         } else {
             setSampleRateNotice("");
@@ -975,11 +971,11 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         const startSec = Number(customStartSec);
         const endSec = Number(customEndSec);
         if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) {
-            setErrorText(tAny("export_dialog_error_invalid_range"));
+            setErrorText(tf("export_dialog_error_invalid_range"));
             return null;
         }
         if (endSec <= startSec) {
-            setErrorText(tAny("export_dialog_error_invalid_range"));
+            setErrorText(tf("export_dialog_error_invalid_range"));
             return null;
         }
         return {
@@ -991,7 +987,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
     function parseSampleRate(): number | null {
         const value = Number(sampleRate);
         if (!Number.isFinite(value) || value <= 0) {
-            setErrorText(tAny("export_dialog_error_invalid_sample_rate"));
+            setErrorText(tf("export_dialog_error_invalid_sample_rate"));
             return null;
         }
         return Math.round(value);
@@ -1003,12 +999,12 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
             return "";
         }
         if (code === "export_invalid_time_format") {
-            return tAny("export_dialog_error_invalid_time_format");
+            return tf("export_dialog_error_invalid_time_format");
         }
         if (code === "mp3_unsupported_sample_rate") {
-            return tAny("export_dialog_error_mp3_unsupported_sample_rate");
+            return tf("export_dialog_error_mp3_unsupported_sample_rate");
         }
-        return code || tAny("status_export_failed");
+        return code || tf("status_export_failed");
     }
 
     async function handleCancel() {
@@ -1058,12 +1054,12 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
             const outputDir = projectOutputDir.trim();
             const fileName = projectFileName.trim();
             if (!outputDir) {
-                setErrorText(tAny("export_dialog_error_missing_project_output_dir"));
+                setErrorText(tf("export_dialog_error_missing_project_output_dir"));
                 setSubmitting(false);
                 return;
             }
             if (!fileName) {
-                setErrorText(tAny("export_dialog_error_missing_project_file_name"));
+                setErrorText(tf("export_dialog_error_missing_project_file_name"));
                 setSubmitting(false);
                 return;
             }
@@ -1127,7 +1123,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
         const outputDir = separatedOutputDir.trim();
         if (!outputDir) {
-            setErrorText(tAny("export_dialog_error_missing_output_dir"));
+            setErrorText(tf("export_dialog_error_missing_output_dir"));
             setSubmitting(false);
             return;
         }
@@ -1140,7 +1136,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
             }));
 
         if (selectedTargets.length === 0) {
-            setErrorText(tAny("export_dialog_error_missing_targets"));
+            setErrorText(tf("export_dialog_error_missing_targets"));
             setSubmitting(false);
             return;
         }
@@ -1208,18 +1204,18 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
     const progressLabel = exportCompleted
         ? mode === "separated"
-            ? tAny("status_export_separated_done")
-            : tAny("status_export_done")
+            ? tf("status_export_separated_done")
+            : tf("status_export_done")
         : mode === "separated"
           ? (() => {
                 const current = exportProgress.current;
                 const total = exportProgress.total;
                 if (current != null && total != null && total > 0) {
-                    return `${tAny("export_dialog_progress")}${" "}${current}/${total}`;
+                    return `${tf("export_dialog_progress")}${" "}${current}/${total}`;
                 }
-                return tAny("export_dialog_progress");
+                return tf("export_dialog_progress");
             })()
-          : tAny("export_dialog_progress");
+          : tf("export_dialog_progress");
 
     const shouldShowProgress = submitting || exportProgress.active || keepProgressVisible;
 
@@ -1228,15 +1224,15 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
             <AppDialog
                 open={open}
                 onOpenChange={onOpenChange}
-                title={tAny("menu_export_audio")}
-                description={tAny("export_dialog_desc")}
+                title={tf("menu_export_audio")}
+                description={tf("export_dialog_desc")}
                 size="xl"
                 actions={[
                     ...(!submitting && (lastOutputPaths.length > 0 || lastOutputDir)
                         ? [
                               {
                                   id: "open-folder",
-                                  label: tAny("export_dialog_open_folder"),
+                                  label: tf("export_dialog_open_folder"),
                                   autoClose: false,
                                   onClick: () => {
                                       // 优先定位并选中所有已渲染文件；没有产物路径时退化为
@@ -1254,14 +1250,14 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         : []),
                     {
                         id: "cancel",
-                        label: tAny("cancel"),
+                        label: tf("cancel"),
                         onClick: () => {
                             void handleCancel();
                         },
                     },
                     {
                         id: "export",
-                        label: tAny("export_dialog_export"),
+                        label: tf("export_dialog_export"),
                         intent: "primary",
                         disabled: session.busy || submitting,
                         autoClose: false,
@@ -1272,27 +1268,27 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                 ]}
             >
                 <AppForm labelWidth="lg">
-                    <AppField label={tAny("export_dialog_mode")}>
+                    <AppField label={tf("export_dialog_mode")}>
                         <AppSelect
                             value={mode}
                             onValueChange={(value) => setMode(value as ExportMode)}
                             options={[
-                                { value: "project", label: tAny("export_dialog_mode_project") },
+                                { value: "project", label: tf("export_dialog_mode_project") },
                                 {
                                     value: "separated",
-                                    label: tAny("export_dialog_mode_separated"),
+                                    label: tf("export_dialog_mode_separated"),
                                 },
                             ]}
                         />
                     </AppField>
 
-                    <AppField label={tAny("export_dialog_range")}>
+                    <AppField label={tf("export_dialog_range")}>
                         <AppSelect
                             value={rangeKind}
                             onValueChange={(value) => setRangeKind(value as ExportRangeKind)}
                             options={[
-                                { value: "all", label: tAny("export_dialog_range_all") },
-                                { value: "custom", label: tAny("export_dialog_range_custom") },
+                                { value: "all", label: tf("export_dialog_range_all") },
+                                { value: "custom", label: tf("export_dialog_range_custom") },
                             ]}
                         />
                     </AppField>
@@ -1300,14 +1296,14 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     {rangeKind === "custom" && (
                         <Flex gap="2" align="center">
                             <Text size="2" style={{ minWidth: 132 }}>
-                                {tAny("export_dialog_range_custom_label")}
+                                {tf("export_dialog_range_custom_label")}
                             </Text>
                             <AppNumberField
                                 value={customStartSec}
                                 unit="seconds"
                                 min={0}
                                 width={160}
-                                ariaLabel={tAny("export_dialog_range_custom_label")}
+                                ariaLabel={tf("export_dialog_range_custom_label")}
                                 onChange={(next) => setCustomStartSec(next)}
                                 onCommit={(next) => setCustomStartSec(next)}
                             />
@@ -1319,7 +1315,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                 unit="seconds"
                                 min={0}
                                 width={160}
-                                ariaLabel={tAny("export_dialog_range_custom_label")}
+                                ariaLabel={tf("export_dialog_range_custom_label")}
                                 onChange={(next) => setCustomEndSec(next)}
                                 onCommit={(next) => setCustomEndSec(next)}
                             />
@@ -1329,7 +1325,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         </Flex>
                     )}
 
-                    <AppField label={tAny("export_dialog_format")}>
+                    <AppField label={tf("export_dialog_format")}>
                         <SegmentedControl.Root
                             value={format}
                             onValueChange={(value) => handleFormatChange(value as ExportFormat)}
@@ -1340,7 +1336,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         </SegmentedControl.Root>
                     </AppField>
 
-                    <AppField label={tAny("export_dialog_sample_rate")}>
+                    <AppField label={tf("export_dialog_sample_rate")}>
                         <AppSelect
                             value={sampleRate}
                             onValueChange={(value) => {
@@ -1361,7 +1357,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     ) : null}
 
                     {format !== "mp3" ? (
-                        <AppField label={tAny("export_dialog_bit_depth")}>
+                        <AppField label={tf("export_dialog_bit_depth")}>
                             <AppSelect
                                 value={format === "wav" ? wavBitDepth : flacBitDepth}
                                 onValueChange={(value) => {
@@ -1384,7 +1380,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         </AppField>
                     ) : (
                         <Text size="1" color="gray">
-                            {tAny("export_dialog_mp3_bit_depth_note")}
+                            {tf("export_dialog_mp3_bit_depth_note")}
                         </Text>
                     )}
 
@@ -1395,7 +1391,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                             size="1"
                             onClick={() => setEncoderOpen((prev) => !prev)}
                         >
-                            {encoderOpen ? "▾" : "▸"} {tAny("export_dialog_encoder_params")}
+                            {encoderOpen ? "▾" : "▸"} {tf("export_dialog_encoder_params")}
                         </Button>
                     </Flex>
 
@@ -1403,7 +1399,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         <Flex direction="column" gap="3" pl="1">
                             {format === "mp3" && (
                                 <>
-                                    <AppField label={tAny("export_dialog_mp3_mode")}>
+                                    <AppField label={tf("export_dialog_mp3_mode")}>
                                         <AppSelect
                                             value={mp3Mode}
                                             onValueChange={(value) => {
@@ -1414,18 +1410,18 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                             options={[
                                                 {
                                                     value: "vbr",
-                                                    label: tAny("export_dialog_mp3_mode_vbr"),
+                                                    label: tf("export_dialog_mp3_mode_vbr"),
                                                 },
                                                 {
                                                     value: "cbr",
-                                                    label: tAny("export_dialog_mp3_mode_cbr"),
+                                                    label: tf("export_dialog_mp3_mode_cbr"),
                                                 },
                                             ]}
                                         />
                                     </AppField>
 
                                     {mp3Mode === "cbr" ? (
-                                        <AppField label={tAny("export_dialog_mp3_bitrate")}>
+                                        <AppField label={tf("export_dialog_mp3_bitrate")}>
                                             <AppSelect
                                                 value={String(mp3Bitrate)}
                                                 onValueChange={(value) =>
@@ -1438,7 +1434,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                             />
                                         </AppField>
                                     ) : (
-                                        <AppField label={tAny("export_dialog_mp3_quality")}>
+                                        <AppField label={tf("export_dialog_mp3_quality")}>
                                             <AppSelect
                                                 value={String(mp3Quality)}
                                                 onValueChange={(value) =>
@@ -1454,7 +1450,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
                                     <Flex direction="column" gap="2">
                                         <Text size="2" color="gray">
-                                            {tAny("export_dialog_mp3_tags")}
+                                            {tf("export_dialog_mp3_tags")}
                                         </Text>
                                         <div className="grid grid-cols-2 gap-2">
                                             {(
@@ -1470,7 +1466,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                                     className="flex flex-col gap-1 text-qt-xs text-qt-text"
                                                 >
                                                     <Text size="1" color="gray">
-                                                        {tAny(i18nKey)}
+                                                        {tf(i18nKey)}
                                                     </Text>
                                                     <TextField.Root
                                                         size="1"
@@ -1495,20 +1491,20 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                 <>
                                     <Flex align="center" gap="2">
                                         <Text size="2" style={{ minWidth: 132 }}>
-                                            {tAny("export_dialog_flac_level")}
+                                            {tf("export_dialog_flac_level")}
                                         </Text>
                                         <AppSlider
                                             value={flacLevel}
                                             unit="integer"
                                             min={FLAC_COMPRESSION_RANGE.min}
                                             max={FLAC_COMPRESSION_RANGE.max}
-                                            ariaLabel={tAny("export_dialog_flac_level")}
+                                            ariaLabel={tf("export_dialog_flac_level")}
                                             onChange={(next) => setFlacLevel(next)}
                                         />
                                         <AppSliderReadout>{flacLevel}</AppSliderReadout>
                                     </Flex>
                                     <Text size="1" color="gray">
-                                        {tAny("export_dialog_flac_level_hint")}
+                                        {tf("export_dialog_flac_level_hint")}
                                     </Text>
                                 </>
                             )}
@@ -1516,7 +1512,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                             {((format === "wav" &&
                                 (wavBitDepth === "i16" || wavBitDepth === "i24")) ||
                                 format === "flac") && (
-                                <AppField label={tAny("export_dialog_dither")}>
+                                <AppField label={tf("export_dialog_dither")}>
                                     <AppSelect
                                         value={dither}
                                         onValueChange={(value) => {
@@ -1527,18 +1523,18 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                         options={[
                                             {
                                                 value: "none",
-                                                label: tAny("export_dialog_dither_none"),
+                                                label: tf("export_dialog_dither_none"),
                                             },
                                             {
                                                 value: "tpdf",
-                                                label: tAny("export_dialog_dither_tpdf"),
+                                                label: tf("export_dialog_dither_tpdf"),
                                             },
                                         ]}
                                     />
                                 </AppField>
                             )}
 
-                            <AppField label={tAny("export_dialog_channel_mode")}>
+                            <AppField label={tf("export_dialog_channel_mode")}>
                                 <AppSelect
                                     value={channelMode}
                                     onValueChange={(value) => {
@@ -1549,11 +1545,11 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                     options={[
                                         {
                                             value: "stereo",
-                                            label: tAny("export_dialog_channel_stereo"),
+                                            label: tf("export_dialog_channel_stereo"),
                                         },
                                         {
                                             value: "mono",
-                                            label: tAny("export_dialog_channel_mono"),
+                                            label: tf("export_dialog_channel_mono"),
                                         },
                                     ]}
                                 />
@@ -1565,7 +1561,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         <>
                             <Flex align="center" gap="2">
                                 <Text size="2" style={{ minWidth: 132 }}>
-                                    {tAny("export_dialog_output_dir")}
+                                    {tf("export_dialog_output_dir")}
                                 </Text>
                                 <TextField.Root
                                     size="2"
@@ -1584,11 +1580,11 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                     color="gray"
                                     onClick={() => void browseProjectOutputDir()}
                                 >
-                                    {tAny("export_dialog_browse")}
+                                    {tf("export_dialog_browse")}
                                 </Button>
                             </Flex>
 
-                            <AppField label={tAny("export_dialog_project_file_name")}>
+                            <AppField label={tf("export_dialog_project_file_name")}>
                                 <TextField.Root
                                     size="2"
                                     value={projectFileName}
@@ -1604,7 +1600,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
                             <Flex gap="2" wrap="wrap" align="center">
                                 <Text size="1" color="gray">
-                                    {tAny("export_pattern_placeholders")}
+                                    {tf("export_pattern_placeholders")}
                                 </Text>
                                 {(["<ProjectName>", "<ProjectFolder>"] as const).map((token) => (
                                     <Button
@@ -1625,7 +1621,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                     color="gray"
                                     style={{ userSelect: "text", wordBreak: "break-all" }}
                                 >
-                                    {tAny("export_dialog_example_path").replace(
+                                    {tf("export_dialog_example_path").replace(
                                         "{path}",
                                         examplePath,
                                     )}
@@ -1636,7 +1632,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         <>
                             <Flex align="center" gap="2">
                                 <Text size="2" style={{ minWidth: 132 }}>
-                                    {tAny("export_dialog_output_dir")}
+                                    {tf("export_dialog_output_dir")}
                                 </Text>
                                 <TextField.Root
                                     size="2"
@@ -1655,11 +1651,11 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                     color="gray"
                                     onClick={() => void browseSeparatedOutputDir()}
                                 >
-                                    {tAny("export_dialog_browse")}
+                                    {tf("export_dialog_browse")}
                                 </Button>
                             </Flex>
 
-                            <AppField label={tAny("export_dialog_name_pattern")}>
+                            <AppField label={tf("export_dialog_name_pattern")}>
                                 <TextField.Root
                                     size="2"
                                     value={separatedNamePattern}
@@ -1675,7 +1671,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
                             <Flex gap="2" wrap="wrap" align="center">
                                 <Text size="1" color="gray">
-                                    {tAny("export_pattern_placeholders")}
+                                    {tf("export_pattern_placeholders")}
                                 </Text>
                                 {[
                                     "<ExportIndex>",
@@ -1704,7 +1700,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                     color="gray"
                                     style={{ userSelect: "text", wordBreak: "break-all" }}
                                 >
-                                    {tAny("export_dialog_example_path").replace(
+                                    {tf("export_dialog_example_path").replace(
                                         "{path}",
                                         examplePath,
                                     )}
@@ -1713,7 +1709,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
                             <div className="rounded border border-qt-border bg-qt-base p-2 max-h-[240px] overflow-y-auto">
                                 <Text size="2" className="font-medium">
-                                    {tAny("export_dialog_targets")}
+                                    {tf("export_dialog_targets")}
                                 </Text>
                                 <Flex gap="1" mt="2" wrap="wrap">
                                     <Button
@@ -1722,7 +1718,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                         color="gray"
                                         onClick={selectAllTargets}
                                     >
-                                        {tAny("export_dialog_select_all")}
+                                        {tf("export_dialog_select_all")}
                                     </Button>
                                     <Button
                                         size="1"
@@ -1730,7 +1726,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                         color="gray"
                                         onClick={clearSelectedTargets}
                                     >
-                                        {tAny("export_dialog_select_none")}
+                                        {tf("export_dialog_select_none")}
                                     </Button>
                                     <Button
                                         size="1"
@@ -1741,7 +1737,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                             !allTargets.some((target) => target.kind === "sub")
                                         }
                                     >
-                                        {tAny("export_dialog_select_all_subtracks")}
+                                        {tf("export_dialog_select_all_subtracks")}
                                     </Button>
                                     <Button
                                         size="1"
@@ -1749,7 +1745,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                         color="gray"
                                         onClick={selectExcludeMutedTargets}
                                     >
-                                        {tAny("export_dialog_select_exclude_muted")}
+                                        {tf("export_dialog_select_exclude_muted")}
                                     </Button>
                                 </Flex>
                                 <Flex direction="column" gap="2" mt="2">
@@ -1814,8 +1810,8 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                 }}
                 title={
                     conflictDialog.kind === "source-path"
-                        ? tAny("export_conflict_source_title")
-                        : tAny("export_conflict_exists_title")
+                        ? tf("export_conflict_source_title")
+                        : tf("export_conflict_exists_title")
                 }
                 description={
                     <span
@@ -1826,8 +1822,8 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         }}
                     >
                         {conflictDialog.kind === "source-path"
-                            ? tAny("export_conflict_source_desc")
-                            : tAny("export_conflict_exists_desc")}
+                            ? tf("export_conflict_source_desc")
+                            : tf("export_conflict_exists_desc")}
                         {"\n"}
                         {conflictDialog.path}
                     </span>
@@ -1845,7 +1841,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                 actions={[
                     {
                         id: "skip",
-                        label: tAny("export_conflict_skip"),
+                        label: tf("export_conflict_skip"),
                         intent: conflictDialog.kind === "source-path" ? "primary" : undefined,
                         autoClose: false,
                         onClick: () => {
@@ -1857,7 +1853,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     },
                     {
                         id: "cancel",
-                        label: tAny("export_conflict_cancel"),
+                        label: tf("export_conflict_cancel"),
                         intent: "danger",
                         autoClose: false,
                         onClick: () => {
@@ -1869,7 +1865,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     },
                     {
                         id: "overwrite",
-                        label: tAny("export_conflict_overwrite"),
+                        label: tf("export_conflict_overwrite"),
                         intent: conflictDialog.kind === "source-path" ? undefined : "primary",
                         autoClose: false,
                         onClick: () => {
@@ -1887,7 +1883,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                 <AppForm booleanRow="leading">
                     <AppSwitchRow
                         control="checkbox"
-                        label={tAny("export_conflict_apply_all")}
+                        label={tf("export_conflict_apply_all")}
                         checked={conflictDialog.applyAll}
                         onCheckedChange={(applyAll) =>
                             setConflictDialog((prev) => ({

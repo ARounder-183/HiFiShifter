@@ -177,8 +177,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     loopNewClips,
     onLoopNewClipsChange,
 }) => {
-    const { t, setLocale, plural } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { t, tf, setLocale, plural } = useI18n();
     const dispatch = useAppDispatch();
     // 只选取本组件实际消费的字段子集并以 shallowEqual 比较：播放期间
     // runtime.playbackPositionSec 每 ~33ms 变一次，整片 session 的对象引用
@@ -264,7 +263,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
               : s.editParam === "volume" || isDynParam(s.editParam)
                 ? 1
                 : 0;
-    const setToValueLabel = s.editParam === "pitch" ? tAny("dlg_midi_note") : tAny("dlg_value");
+    const setToValueLabel = s.editParam === "pitch" ? tf("dlg_midi_note") : tf("dlg_value");
     const quantizeDefaultUnit = (() => {
         if (isChildCentsParam) return 100;
         if (isChildDegreesParam) return 1;
@@ -288,8 +287,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     })();
     const projectScaleLabel =
         s.project.useCustomScale && s.project.customScale
-            ? `${tAny("project_scale_prefix")} (${tAny("custom_scale_short")})`
-            : `${tAny("project_scale_prefix")} (${SCALE_LABELS[s.project.baseScale]})`;
+            ? `${tf("project_scale_prefix")} (${tf("custom_scale_short")})`
+            : `${tf("project_scale_prefix")} (${SCALE_LABELS[s.project.baseScale]})`;
 
     // ── “工程音阶”选项受 Tempo Map 影响的提示 ─────────────────────────
     // 读取参数编辑器当前选区（帧范围）判断是否跨过音阶变化点；
@@ -321,9 +320,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         if (changes.every((c) => scaleLikeEquals(c.scale, projectScale))) {
             return null;
         }
-        return tAny("project_scale_tempo_map_hint");
+        return tf("project_scale_tempo_map_hint");
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [s.tempoMap, s.projectSec, s.project, tAny, selectionVersion]);
+    }, [s.tempoMap, s.projectSec, s.project, tf, selectionVersion]);
     const projectScaleLabelWithHint = tempoMapScaleHint
         ? `${projectScaleLabel} ${tempoMapScaleHint}`
         : projectScaleLabel;
@@ -335,12 +334,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const stretchAlgorithmLabel = (value: "linear" | "signalsmith" | "soundtouch") => {
         switch (value) {
             case "linear":
-                return tAny("stretch_option_linear");
+                return tf("stretch_option_linear");
             case "signalsmith":
-                return tAny("stretch_option_signalsmith");
+                return tf("stretch_option_signalsmith");
             case "soundtouch":
             default:
-                return tAny("stretch_option_soundtouch");
+                return tf("stretch_option_soundtouch");
         }
     };
 
@@ -498,16 +497,16 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             const res = await exportDiagnostics(pick.path);
             if (!res.ok) {
                 setNotice({
-                    title: tAny("status_error_prefix"),
-                    message: res.error || tAny("menu_export_diagnostics_failed"),
+                    title: tf("status_error_prefix"),
+                    message: res.error || tf("menu_export_diagnostics_failed"),
                 });
             }
         } catch (e) {
-            setNotice({ title: tAny("status_error_prefix"), message: String(e) });
+            setNotice({ title: tf("status_error_prefix"), message: String(e) });
         } finally {
             setDiagnosticsExporting(false);
         }
-    }, [tAny]);
+    }, [tf]);
 
     // 快捷键「导入媒体文件」→ 复用文件菜单的导入流程（多文件/多音轨选择）。
     useEffect(() => {
@@ -521,7 +520,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     return (
         <Flex
             align="center"
-            className="h-8 bg-qt-panel border-b border-qt-border px-1 select-none z-50 flex-nowrap gap-1 overflow-x-auto overflow-y-hidden min-w-0 custom-scrollbar"
+            className="h-qt-bar-main bg-qt-panel border-b border-qt-border px-1 select-none z-50 flex-nowrap gap-1 overflow-x-auto overflow-y-hidden min-w-0 custom-scrollbar"
         >
             {/**
              * Note: @radix-ui/themes DropdownMenu.Trigger does not support asChild.
@@ -612,7 +611,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     {/* 导入外部工程（HiFiShifter / Reaper / VocalShifter）*/}
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
-                            {tAny("menu_import_external_project")}
+                            {tf("menu_import_external_project")}
                         </DropdownMenu.SubTrigger>
                         <DropdownMenu.SubContent>
                             <DropdownMenu.Item onSelect={onImportProject}>
@@ -647,10 +646,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={() => setAutoBackupDialogOpen(true)}>
-                        {tAny("menu_auto_backup")}
+                        {tf("menu_auto_backup")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Item onSelect={() => setRecordingDialogOpen(true)}>
-                        {tAny("menu_recording_settings")}
+                        {tf("menu_recording_settings")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={onExit} color="red">
@@ -688,20 +687,20 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Separator />
                     {/* 剪贴板：剪切 / 复制 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("cut")}>
-                        {tAny("menu_cut")}{" "}
+                        {tf("menu_cut")}{" "}
                         <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("clip.cut")}
                         </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("copy")}>
-                        {tAny("menu_copy")}{" "}
+                        {tf("menu_copy")}{" "}
                         <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("pianoRoll.copy")}
                         </div>
                     </DropdownMenu.Item>
                     {/* 剪贴板：粘贴 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("paste")}>
-                        {tAny("menu_paste")}{" "}
+                        {tf("menu_paste")}{" "}
                         <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("pianoRoll.paste")}
                         </div>
@@ -723,13 +722,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Separator />
                     {/* 选择 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("selectAll")}>
-                        {tAny("menu_select_all")}{" "}
+                        {tf("menu_select_all")}{" "}
                         <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("edit.selectAll")}
                         </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("deselect")}>
-                        {tAny("menu_deselect")}{" "}
+                        {tf("menu_deselect")}{" "}
                         <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("edit.deselect")}
                         </div>
@@ -739,7 +738,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         快捷键设置里的动作名：菜单与设置面板共用同一份文案，
                         避免两处翻译漂移。 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("addClipsToParamSelection")}>
-                        {tAny("kb_edit_add_clips_to_param_selection")}{" "}
+                        {tf("kb_edit_add_clips_to_param_selection")}{" "}
                         <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("edit.addClipsToParamSelection")}
                         </div>
@@ -747,7 +746,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Item
                         onSelect={() => dispatchEditOp("removeClipsFromParamSelection")}
                     >
-                        {tAny("kb_edit_remove_clips_from_param_selection")}{" "}
+                        {tf("kb_edit_remove_clips_from_param_selection")}{" "}
                         <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("edit.removeClipsFromParamSelection")}
                         </div>
@@ -787,7 +786,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             s.selectedTrackId && dispatch(duplicateTrackRemote(s.selectedTrackId))
                         }
                     >
-                        {tAny("menu_clone_selected_track")}
+                        {tf("menu_clone_selected_track")}
                         <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("track.clone")}
                         </div>
@@ -831,7 +830,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             void dispatch(persistUiSettings());
                         }}
                     >
-                        {withCheck(s.tempoMapVisible, tAny("menu_view_tempo_map"))}
+                        {withCheck(s.tempoMapVisible, tf("menu_view_tempo_map"))}
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
                         onSelect={() => {
@@ -839,7 +838,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             void dispatch(persistUiSettings());
                         }}
                     >
-                        {withCheck(s.showAllTakes, tAny("options_show_all_takes"))}
+                        {withCheck(s.showAllTakes, tf("options_show_all_takes"))}
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
                         onSelect={() => {
@@ -862,12 +861,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     {/* 时间与外观：低频的展示设置。 */}
                     {/* Time Display */}
                     <DropdownMenu.Sub>
-                        <DropdownMenu.SubTrigger>{tAny("time_display")}</DropdownMenu.SubTrigger>
+                        <DropdownMenu.SubTrigger>{tf("time_display")}</DropdownMenu.SubTrigger>
                         <DropdownMenu.SubContent>
                             <DropdownMenu.Sub>
                                 <DropdownMenu.SubTrigger>
-                                    {tAny("time_unit_primary")}:{" "}
-                                    {tAny(timeUnitLabelKey(s.primaryTimeUnit))}
+                                    {tf("time_unit_primary")}:{" "}
+                                    {tf(timeUnitLabelKey(s.primaryTimeUnit))}
                                 </DropdownMenu.SubTrigger>
                                 <DropdownMenu.SubContent>
                                     {TIME_UNITS.map((unit) => (
@@ -880,7 +879,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                         >
                                             {withCheck(
                                                 s.primaryTimeUnit === unit,
-                                                tAny(timeUnitLabelKey(unit)),
+                                                tf(timeUnitLabelKey(unit)),
                                             )}
                                         </DropdownMenu.Item>
                                     ))}
@@ -888,10 +887,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             </DropdownMenu.Sub>
                             <DropdownMenu.Sub>
                                 <DropdownMenu.SubTrigger>
-                                    {tAny("time_unit_secondary")}:{" "}
+                                    {tf("time_unit_secondary")}:{" "}
                                     {s.secondaryTimeUnit === "none"
-                                        ? tAny("time_unit_none")
-                                        : tAny(timeUnitLabelKey(s.secondaryTimeUnit as TimeUnit))}
+                                        ? tf("time_unit_none")
+                                        : tf(timeUnitLabelKey(s.secondaryTimeUnit as TimeUnit))}
                                 </DropdownMenu.SubTrigger>
                                 <DropdownMenu.SubContent>
                                     {TIME_UNIT_CHOICES.map((unit) => (
@@ -905,8 +904,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                             {withCheck(
                                                 s.secondaryTimeUnit === unit,
                                                 unit === "none"
-                                                    ? tAny("time_unit_none")
-                                                    : tAny(timeUnitLabelKey(unit as TimeUnit)),
+                                                    ? tf("time_unit_none")
+                                                    : tf(timeUnitLabelKey(unit as TimeUnit)),
                                             )}
                                         </DropdownMenu.Item>
                                     ))}
@@ -914,13 +913,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             </DropdownMenu.Sub>
                             <DropdownMenu.Separator />
                             <DropdownMenu.Item onSelect={() => setTimeDisplaySettingsOpen(true)}>
-                                {tAny("timeline_display_settings")}
+                                {tf("timeline_display_settings")}
                             </DropdownMenu.Item>
                         </DropdownMenu.SubContent>
                     </DropdownMenu.Sub>
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
-                            {`${t("theme")}: ${tAny(`theme_${theme.modeSetting}`)}`}
+                            {`${t("theme")}: ${tf(`theme_${theme.modeSetting}`)}`}
                         </DropdownMenu.SubTrigger>
                         <DropdownMenu.SubContent>
                             {(["auto", "dark", "light"] as const).map((mode) => (
@@ -937,13 +936,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                         });
                                     }}
                                 >
-                                    {withCheck(theme.modeSetting === mode, tAny(`theme_${mode}`))}
+                                    {withCheck(theme.modeSetting === mode, tf(`theme_${mode}`))}
                                 </DropdownMenu.Item>
                             ))}
                         </DropdownMenu.SubContent>
                     </DropdownMenu.Sub>
                     <DropdownMenu.Item onSelect={() => setAppearanceDialogOpen(true)}>
-                        {tAny("menu_appearance_settings")}
+                        {tf("menu_appearance_settings")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
 
@@ -964,12 +963,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 <DropdownMenu.Content variant="soft" color="gray">
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
-                            {tAny("stretch_project_override")}
+                            {tf("stretch_project_override")}
                         </DropdownMenu.SubTrigger>
                         <DropdownMenu.SubContent>
                             <DropdownMenu.Sub>
                                 <DropdownMenu.SubTrigger>
-                                    {`${tAny("stretch_algorithm")}: ${stretchAlgorithmLabel(effectiveProjectStretchAlgorithm)}`}
+                                    {`${tf("stretch_algorithm")}: ${stretchAlgorithmLabel(effectiveProjectStretchAlgorithm)}`}
                                 </DropdownMenu.SubTrigger>
                                 <DropdownMenu.SubContent>
                                     <DropdownMenu.Item
@@ -985,7 +984,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                     >
                                         {withCheck(
                                             s.project.stretchAlgorithmOverride == null,
-                                            `${tAny("stretch_inherit_global")} (${stretchAlgorithmLabel(s.defaultStretchAlgorithm)})`,
+                                            `${tf("stretch_inherit_global")} (${stretchAlgorithmLabel(s.defaultStretchAlgorithm)})`,
                                         )}
                                     </DropdownMenu.Item>
                                     {(["linear", "signalsmith", "soundtouch"] as const).map(
@@ -1014,7 +1013,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             </DropdownMenu.Sub>
                             <DropdownMenu.Sub>
                                 <DropdownMenu.SubTrigger>
-                                    {`${tAny("stretch_hifigan_mel")}: ${effectiveProjectHifiganMelStretch ? tAny("stretch_toggle_on") : tAny("stretch_toggle_off")}`}
+                                    {`${tf("stretch_hifigan_mel")}: ${effectiveProjectHifiganMelStretch ? tf("stretch_toggle_on") : tf("stretch_toggle_off")}`}
                                 </DropdownMenu.SubTrigger>
                                 <DropdownMenu.SubContent>
                                     <DropdownMenu.Item
@@ -1030,7 +1029,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                     >
                                         {withCheck(
                                             s.project.hifiganMelStretchOverride == null,
-                                            `${tAny("stretch_inherit_global")} (${s.defaultHifiganMelStretch ? tAny("stretch_toggle_on") : tAny("stretch_toggle_off")})`,
+                                            `${tf("stretch_inherit_global")} (${s.defaultHifiganMelStretch ? tf("stretch_toggle_on") : tf("stretch_toggle_off")})`,
                                         )}
                                     </DropdownMenu.Item>
                                     <DropdownMenu.Item
@@ -1046,7 +1045,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                     >
                                         {withCheck(
                                             s.project.hifiganMelStretchOverride === true,
-                                            tAny("stretch_toggle_on"),
+                                            tf("stretch_toggle_on"),
                                         )}
                                     </DropdownMenu.Item>
                                     <DropdownMenu.Item
@@ -1062,7 +1061,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                     >
                                         {withCheck(
                                             s.project.hifiganMelStretchOverride === false,
-                                            tAny("stretch_toggle_off"),
+                                            tf("stretch_toggle_off"),
                                         )}
                                     </DropdownMenu.Item>
                                 </DropdownMenu.SubContent>
@@ -1074,12 +1073,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
-                            {tAny("stretch_global_default")}
+                            {tf("stretch_global_default")}
                         </DropdownMenu.SubTrigger>
                         <DropdownMenu.SubContent>
                             <DropdownMenu.Sub>
                                 <DropdownMenu.SubTrigger>
-                                    {`${tAny("stretch_algorithm")}: ${stretchAlgorithmLabel(s.defaultStretchAlgorithm)}`}
+                                    {`${tf("stretch_algorithm")}: ${stretchAlgorithmLabel(s.defaultStretchAlgorithm)}`}
                                 </DropdownMenu.SubTrigger>
                                 <DropdownMenu.SubContent>
                                     {(["linear", "signalsmith", "soundtouch"] as const).map(
@@ -1102,7 +1101,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             </DropdownMenu.Sub>
                             <DropdownMenu.Sub>
                                 <DropdownMenu.SubTrigger>
-                                    {`${tAny("stretch_hifigan_mel")}: ${s.defaultHifiganMelStretch ? tAny("stretch_toggle_on") : tAny("stretch_toggle_off")}`}
+                                    {`${tf("stretch_hifigan_mel")}: ${s.defaultHifiganMelStretch ? tf("stretch_toggle_on") : tf("stretch_toggle_off")}`}
                                 </DropdownMenu.SubTrigger>
                                 <DropdownMenu.SubContent>
                                     <DropdownMenu.Item
@@ -1113,7 +1112,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                     >
                                         {withCheck(
                                             s.defaultHifiganMelStretch,
-                                            tAny("stretch_toggle_on"),
+                                            tf("stretch_toggle_on"),
                                         )}
                                     </DropdownMenu.Item>
                                     <DropdownMenu.Item
@@ -1124,7 +1123,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                     >
                                         {withCheck(
                                             !s.defaultHifiganMelStretch,
-                                            tAny("stretch_toggle_off"),
+                                            tf("stretch_toggle_off"),
                                         )}
                                     </DropdownMenu.Item>
                                 </DropdownMenu.SubContent>
@@ -1169,9 +1168,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             {s.ortEp === "gpu" && dmlAdapters.length > 0 && (
                                 <>
                                     <DropdownMenu.Separator />
-                                    <DropdownMenu.Label>
-                                        {tAny("menu_gpu_device")}
-                                    </DropdownMenu.Label>
+                                    <DropdownMenu.Label>{tf("menu_gpu_device")}</DropdownMenu.Label>
                                     <DropdownMenu.Item
                                         onSelect={() => {
                                             dispatch(setOrtDeviceId(null));
@@ -1180,7 +1177,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                     >
                                         {withCheck(
                                             s.ortDeviceId == null,
-                                            tAny("menu_gpu_auto_select"),
+                                            tf("menu_gpu_auto_select"),
                                         )}
                                     </DropdownMenu.Item>
                                     {dmlAdapters.map((adapter) => (
@@ -1214,7 +1211,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             await dispatch(persistUiSettings());
                         }}
                     >
-                        {withCheck(s.autoBackgroundRender, tAny("menu_background_prerender"))}
+                        {withCheck(s.autoBackgroundRender, tf("menu_background_prerender"))}
                     </DropdownMenu.Item>
 
                     {/* Take display / editing options */}
@@ -1224,7 +1221,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             void dispatch(persistUiSettings());
                         }}
                     >
-                        {withCheck(s.syncEditsAcrossTakes, tAny("sync_edits_across_takes"))}
+                        {withCheck(s.syncEditsAcrossTakes, tf("sync_edits_across_takes"))}
                     </DropdownMenu.Item>
 
                     {/* Auto-reload modified media — same level as Background Pre-render */}
@@ -1233,32 +1230,32 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                         {withCheck(
                             autoReloadModifiedMedia,
-                            tAny("options_auto_reload_modified_media"),
+                            tf("options_auto_reload_modified_media"),
                         )}
                     </DropdownMenu.Item>
 
                     {/* Loop for new clips — 为新的音频块启用循环（默认开启） */}
                     <DropdownMenu.Item onSelect={() => onLoopNewClipsChange(!loopNewClips)}>
-                        {withCheck(loopNewClips, tAny("options_loop_new_clips"))}
+                        {withCheck(loopNewClips, tf("options_loop_new_clips"))}
                     </DropdownMenu.Item>
 
                     <DropdownMenu.Separator />
 
                     {/* Snap/Grid Settings — above Keyboard Shortcuts */}
                     <DropdownMenu.Item onSelect={() => setSnapSettingsOpen(true)}>
-                        {tAny("snap_grid_settings_title")}
+                        {tf("snap_grid_settings_title")}
                     </DropdownMenu.Item>
 
                     <DropdownMenu.Separator />
 
                     {/* Render cache manager — above Keyboard Shortcuts */}
                     <DropdownMenu.Item onSelect={() => setRenderCacheDialogOpen(true)}>
-                        {tAny("menu_render_cache_manager")}
+                        {tf("menu_render_cache_manager")}
                     </DropdownMenu.Item>
 
                     {/* Import channel policy（假立体声 → 单声道） */}
                     <DropdownMenu.Item onSelect={() => setChannelImportDialogOpen(true)}>
-                        {tAny("menu_channel_import_settings")}
+                        {tf("menu_channel_import_settings")}
                     </DropdownMenu.Item>
 
                     <DropdownMenu.Separator />
@@ -1284,25 +1281,25 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 const res = await openLogFolder();
                                 if (!res.ok) {
                                     setNotice({
-                                        title: tAny("status_error_prefix"),
-                                        message: res.error || tAny("menu_open_log_folder_failed"),
+                                        title: tf("status_error_prefix"),
+                                        message: res.error || tf("menu_open_log_folder_failed"),
                                     });
                                 }
                             } catch (e) {
                                 setNotice({
-                                    title: tAny("status_error_prefix"),
+                                    title: tf("status_error_prefix"),
                                     message: String(e),
                                 });
                             }
                         }}
                     >
-                        {tAny("menu_open_log_folder")}
+                        {tf("menu_open_log_folder")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
                         disabled={diagnosticsExporting}
                         onSelect={() => void handleExportDiagnostics()}
                     >
-                        {tAny("menu_export_diagnostics")}
+                        {tf("menu_export_diagnostics")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={() => setAboutDialogOpen(true)}>
@@ -1392,12 +1389,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             <AppDialog
                 open={diagnosticsExporting}
                 onOpenChange={setDiagnosticsExporting}
-                title={tAny("menu_export_diagnostics")}
+                title={tf("menu_export_diagnostics")}
                 size="sm"
                 dismissible={false}
             >
                 <Flex align="center" gap="3">
-                    <AppBusy size="md" label={tAny("menu_export_diagnostics_running")} />
+                    <AppBusy size="md" label={tf("menu_export_diagnostics_running")} />
                 </Flex>
             </AppDialog>
 
@@ -1405,10 +1402,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             <AppConfirmDialog
                 open={waveformCacheConfirmOpen}
                 onOpenChange={setWaveformCacheConfirmOpen}
-                title={tAny("menu_clear_waveform_cache")}
-                message={tAny("menu_clear_waveform_cache_confirm")}
-                confirmLabel={tAny("menu_clear_waveform_cache")}
-                cancelLabel={tAny("cancel")}
+                title={tf("menu_clear_waveform_cache")}
+                message={tf("menu_clear_waveform_cache_confirm")}
+                confirmLabel={tf("menu_clear_waveform_cache")}
+                cancelLabel={tf("cancel")}
                 intent="danger"
                 onConfirm={() => {
                     void dispatch(clearWaveformCacheRemote());
@@ -1442,7 +1439,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                         <div className="px-4 py-3 border-b border-qt-border">
                             <div className="text-qt-md font-medium text-qt-text">
-                                {tAny("import_dialog_title")}
+                                {tf("import_dialog_title")}
                             </div>
                             <div className="mt-1 text-qt-xs text-qt-text-muted">
                                 {plural("import_files_selected", menuImportMode.audioPaths.length)}
@@ -1508,7 +1505,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 className="px-3 py-1.5 text-qt-xs text-qt-text hover:bg-qt-hover rounded-lg"
                                 onClick={() => setMenuImportMode(null)}
                             >
-                                {tAny("cancel")}
+                                {tf("cancel")}
                             </button>
                         </div>
                     </div>
@@ -1527,13 +1524,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                         <div className="px-4 py-3 border-b border-qt-border">
                             <div className="text-qt-md font-medium text-qt-text">
-                                {tAny("media_stream_select_title")}
+                                {tf("media_stream_select_title")}
                             </div>
                             <div className="mt-1 text-qt-xs text-qt-text-muted truncate">
                                 {mediaStreamImport.path}
                             </div>
                             <div className="mt-1 text-qt-xs text-qt-text-muted">
-                                {tAny("media_stream_select_hint")}
+                                {tf("media_stream_select_hint")}
                             </div>
                         </div>
 
@@ -1566,7 +1563,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                         }}
                                     >
                                         <span className="font-medium">
-                                            {tAny("media_stream_track")} {stream.index + 1}
+                                            {tf("media_stream_track")} {stream.index + 1}
                                         </span>
                                         <span className="ml-2 text-qt-xs text-qt-text-muted">
                                             {meta.join(" · ")}
@@ -1581,7 +1578,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 className="px-3 py-1.5 text-qt-xs text-qt-text hover:bg-qt-hover rounded-lg"
                                 onClick={() => setMediaStreamImport(null)}
                             >
-                                {tAny("cancel")}
+                                {tf("cancel")}
                             </button>
                         </div>
                     </div>
@@ -1618,7 +1615,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             <SetPitchDialog
                 open={setPitchOpen}
                 onOpenChange={setSetPitchOpen}
-                titleText={isPitchParam ? tAny("menu_set_pitch") : tAny("menu_set_value")}
+                titleText={isPitchParam ? tf("menu_set_pitch") : tf("menu_set_value")}
                 valueLabelText={setToValueLabel}
                 defaultValue={setToDefaultValue}
                 defaultSmoothness={s.edgeSmoothnessPercent}

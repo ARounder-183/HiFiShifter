@@ -812,8 +812,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         rulerPlayheadHeadRef.current = element;
         if (element !== null) hostRef.current?.invalidate();
     }, []);
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { t, tf } = useI18n();
     const s = useAppSelector((state: RootState) => state.session, shallowEqual);
 
     // 工程会话切换：强制视口总线按当前工程内容重绘一次（跨工程投影保留契约
@@ -1113,7 +1112,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
 
     const currentDrawTool = s.drawToolMode === "line" ? "vibrato" : s.drawToolMode;
     const drawToolButtonTitle =
-        currentDrawTool === "vibrato" ? tAny("vibrato_draw_tool") : tAny("draw_tool");
+        currentDrawTool === "vibrato" ? tf("vibrato_draw_tool") : tf("draw_tool");
     const activeDragDirection =
         s.toolMode === "select"
             ? s.selectDragDirection
@@ -6922,15 +6921,15 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             <Flex
                 align="center"
                 justify="between"
-                className="h-8 bg-qt-base border-b border-qt-border px-2 shrink-0"
+                className="h-qt-bar-main bg-qt-base border-b border-qt-border px-2 shrink-0"
             >
                 <Flex align="center" gap="2" style={{ flex: "1 1 auto", minWidth: 0 }}>
                     <AppIconButton
                         active={s.paramEditorSyncTimeline}
                         // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                         emphasis="accent"
-                        tooltip={tAny("sync_timeline_view_tooltip")}
-                        aria-label={tAny("sync_timeline_view")}
+                        tooltip={tf("sync_timeline_view_tooltip")}
+                        aria-label={tf("sync_timeline_view")}
                         tabIndex={-1}
                         onClick={() => {
                             dispatch(setParamEditorSyncTimeline(!s.paramEditorSyncTimeline));
@@ -6939,7 +6938,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         icon={s.paramEditorSyncTimeline ? <Link2Icon /> : <LinkBreak2Icon />}
                     />
                     <Text size="1" weight="bold" color="gray">
-                        {tAny("param_editor_short")}
+                        {tf("param_editor_short")}
                     </Text>
                     {/* 工具按钮组（音高吸附等）+ 平滑度滑块。`marginLeft: 8` 是紧邻
                         `参数编辑器` 标题留出的空白。
@@ -7022,12 +7021,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     {[
                                         {
                                             mode: "draw" as const,
-                                            label: tAny("draw_tool"),
+                                            label: tf("draw_tool"),
                                             icon: <Pencil1Icon />,
                                         },
                                         {
                                             mode: "vibrato" as const,
-                                            label: tAny("vibrato_draw_tool"),
+                                            label: tf("vibrato_draw_tool"),
                                             icon: vibratoToolIcon,
                                         },
                                     ].map((item) => {
@@ -7077,7 +7076,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         {/* 拖动方向按钮 */}
                         <AppIconButton
                             active={activeDragDirection !== "free"}
-                            tooltip={`${tAny("drag_direction")}: ${tAny(activeDragDirection === "free" ? "drag_direction_free" : activeDragDirection === "x-only" ? "drag_direction_x_only" : "drag_direction_y_only")}${
+                            tooltip={`${tf("drag_direction")}: ${tf(activeDragDirection === "free" ? "drag_direction_free" : activeDragDirection === "x-only" ? "drag_direction_x_only" : "drag_direction_y_only")}${
                                 isNoneBinding(cycleDragDirectionKb)
                                     ? ""
                                     : ` (${formatKeybinding(cycleDragDirectionKb, "")})`
@@ -7147,9 +7146,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 tooltip={`${t("pitch_snap")}: ${
                                     effectivePitchSnapVisual
                                         ? s.pitchSnapUnit === "semitone"
-                                            ? tAny("quantize_semitone")
-                                            : tAny("quantize_scale")
-                                        : tAny("pitch_snap_off")
+                                            ? tf("quantize_semitone")
+                                            : tf("quantize_scale")
+                                        : tf("pitch_snap_off")
                                 }`}
                                 tabIndex={-1}
                                 onClick={() => {
@@ -7264,7 +7263,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             >
                                                 {pitchSnapSemitoneIcon}
                                             </Box>
-                                            <span>{tAny("pitch_snap_menu_semitone")}</span>
+                                            <span>{tf("pitch_snap_menu_semitone")}</span>
                                         </Flex>
                                         {s.pitchSnapUnit === "semitone" ? <CheckIcon /> : null}
                                     </button>
@@ -7293,7 +7292,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             >
                                                 {pitchSnapScaleIcon}
                                             </Box>
-                                            <span>{tAny("pitch_snap_menu_scale")}</span>
+                                            <span>{tf("pitch_snap_menu_scale")}</span>
                                         </Flex>
                                         {s.pitchSnapUnit === "scale" ? <CheckIcon /> : null}
                                     </button>
@@ -7307,7 +7306,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         }}
                                         onPointerDown={(e) => e.stopPropagation()}
                                     >
-                                        <span>{tAny("pitch_snap_settings_action")}</span>
+                                        <span>{tf("pitch_snap_settings_action")}</span>
                                     </button>
                                 </Box>
                             )}
@@ -7316,7 +7315,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             active={s.scaleHighlightMode === "always"}
                             // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                             emphasis="accent"
-                            tooltip={tAny("scale_highlight")}
+                            tooltip={tf("scale_highlight")}
                             tabIndex={-1}
                             onClick={() => {
                                 dispatch(
@@ -7424,7 +7423,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 看起来是有意的降级，而不是渲染出错的半截字。 */}
                             <Text
                                 size="1"
-                                data-tooltip={tAny("edge_smoothness")}
+                                data-tooltip={tf("edge_smoothness")}
                                 style={{
                                     minWidth: 0,
                                     whiteSpace: "nowrap",
@@ -7432,7 +7431,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     textOverflow: "ellipsis",
                                 }}
                             >
-                                {tAny("edge_smoothness_short")}:
+                                {tf("edge_smoothness_short")}:
                             </Text>
                             <input
                                 ref={attachEdgeSmoothnessWheel}
@@ -7502,7 +7501,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             style={{ cursor: "pointer" }}
                                         >
                                             {buildReferenceRootTrackTriggerElement(
-                                                `${tAny("reference_root_tracks_short")}${
+                                                `${tf("reference_root_tracks_short")}${
                                                     visibleReferenceRootTrackIds.length > 0
                                                         ? ` (${visibleReferenceRootTrackIds.length})`
                                                         : ""
@@ -7575,7 +7574,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 </DropdownMenu.Root>
                                 <span
                                     className="inline-flex"
-                                    data-tooltip={pitchHardDisableReason ?? tAny("midi_import")}
+                                    data-tooltip={pitchHardDisableReason ?? tf("midi_import")}
                                 >
                                     <Button
                                         size="1"
@@ -7585,7 +7584,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         disabled={!pitchEnabled}
                                         style={{ cursor: "pointer" }}
                                     >
-                                        {tAny("midi_import")}
+                                        {tf("midi_import")}
                                     </Button>
                                 </span>
                             </React.Fragment>
@@ -7936,8 +7935,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     </Flex>
                                 );
                             })}
-                            <Text size="1" color="gray" data-tooltip={tAny("algo_label")}>
-                                {tAny("algo_label_short")}
+                            <Text size="1" color="gray" data-tooltip={tf("algo_label")}>
+                                {tf("algo_label_short")}
                             </Text>
                             <AppSelect
                                 // 同上：头部紧凑条内的控件
@@ -7960,7 +7959,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 }}
                                 fullWidth={false}
                                 className="min-w-[140px]"
-                                ariaLabel={tAny("algo_label")}
+                                ariaLabel={tf("algo_label")}
                                 options={[
                                     { value: "nsf_hifigan_onnx", label: "nsf-hifigan" },
                                     { value: "world_dll", label: "world" },
@@ -8027,8 +8026,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 aria-hidden
                             >
                                 {editParamAxisUnit === "db"
-                                    ? tAny("param_axis_unit_db")
-                                    : tAny("param_axis_unit_ratio")}
+                                    ? tf("param_axis_unit_db")
+                                    : tf("param_axis_unit_ratio")}
                             </div>
                         ) : null}
 
@@ -8076,7 +8075,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         onSecondaryUnitChange={handleSecondaryUnitChange}
                         onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
                         onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
-                        t={t as (key: string) => string}
+                        t={tf}
                         tempoMap={s.tempoMap}
                         tempoMapVisible={s.tempoMapVisible}
                         projectSec={dynamicProjectSec}
@@ -8306,7 +8305,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             </Flex>
             {paramEditorMidiDragOver ? (
                 <div className="pointer-events-none absolute left-1/2 top-10 z-40 -translate-x-1/2 rounded border border-qt-snap-source/70 bg-qt-panel/95 px-3 py-1.5 text-[12px] text-qt-text shadow-lg">
-                    {tAny("param_editor_drop_midi_hint")}
+                    {tf("param_editor_drop_midi_hint")}
                 </div>
             ) : null}
             <MidiTrackSelectDialog

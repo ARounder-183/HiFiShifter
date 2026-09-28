@@ -82,7 +82,7 @@ interface KeybindingsDialogProps {
  */
 export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOpenChange }) => {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
+    const { tf } = useI18n();
     const keybindings = useAppSelector(selectMergedKeybindings);
     const overrides = useAppSelector((s) => s.keybindings.overrides);
 
@@ -292,19 +292,17 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
         }));
     }, []);
 
-    const tAny = t as (key: string) => string;
-
     return (
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("kb_dialog_title")}
-            description={tAny("kb_dialog_desc")}
+            title={tf("kb_dialog_title")}
+            description={tf("kb_dialog_desc")}
             size="lg"
             actions={[
                 {
                     id: "close",
-                    label: tAny("close"),
+                    label: tf("close"),
                     // 迁移时丢失的 ✕ 图标（原按钮是 <Cross2Icon /> + 文案）
                     icon: <Cross2Icon />,
                     onClick: () => onOpenChange(false),
@@ -317,12 +315,12 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
             beforeClose={() => recordingId === null}
         >
             <Text size="1" color="gray" style={{ marginBottom: 4, display: "block" }}>
-                {tAny("kb_dialog_hint_click")}
+                {tf("kb_dialog_hint_click")}
             </Text>
 
             <Flex align="center" gap="2" mt="2" mb="2">
                 <Text size="2" color="gray" style={{ whiteSpace: "nowrap" }}>
-                    {tAny("kb_preset_label")}
+                    {tf("kb_preset_label")}
                 </Text>
                 <AppSelect
                     fullWidth={false}
@@ -330,7 +328,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                     onValueChange={handleApplyPreset}
                     options={KEYBINDING_PRESET_SELECTION_IDS.map((presetId) => ({
                         value: presetId,
-                        label: tAny(`kb_preset_${presetId}`),
+                        label: tf(`kb_preset_${presetId}`),
                     }))}
                 />
             </Flex>
@@ -349,7 +347,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                                     padding: "4px 0",
                                 }}
                             >
-                                {tAny(GROUP_LABEL_KEYS[group])}
+                                {tf(GROUP_LABEL_KEYS[group])}
                             </Text>
                             <Separator size="4" />
                             {actions.map((actionId) => {
@@ -389,14 +387,14 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                                                             .color
                                                     }
                                                 >
-                                                    {tAny(
+                                                    {tf(
                                                         GESTURE_BADGES[meta.modifierOperationType]
                                                             .labelKey,
                                                     )}
                                                 </Badge>
                                             )}
                                             <Text size="2" style={{ minWidth: 0 }}>
-                                                {tAny(meta.labelKey)}
+                                                {tf(meta.labelKey)}
                                             </Text>
                                         </Flex>
                                         <Flex align="center" gap="2">
@@ -442,12 +440,12 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                                                 }}
                                             >
                                                 {isRecording
-                                                    ? tAny(
+                                                    ? tf(
                                                           defaultKb.modifierOnly
                                                               ? "kb_press_modifier"
                                                               : "kb_press_key",
                                                       )
-                                                    : formatKeybinding(currentKb, tAny("kb_none"))}
+                                                    : formatKeybinding(currentKb, tf("kb_none"))}
                                             </Button>
                                         </Flex>
                                     </Flex>
@@ -473,7 +471,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                 >
                     <Flex direction="column" gap="1" style={{ flex: 1, minWidth: 0 }}>
                         <Text size="2" color="red">
-                            {tAny("kb_conflict_msg")}
+                            {tf("kb_conflict_msg")}
                         </Text>
                         {Array.from(
                             conflict.conflictWith.reduce((map, id) => {
@@ -485,18 +483,18 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                             }, new Map<ActionMeta["group"], ActionId[]>()),
                         ).map(([group, ids]) => (
                             <Text key={group} size="2" color="red">
-                                {tAny(GROUP_LABEL_KEYS[group])}：
+                                {tf(GROUP_LABEL_KEYS[group])}：
                                 <strong>
-                                    {ids.map((id) => tAny(ACTION_META[id].labelKey)).join("、")}
+                                    {ids.map((id) => tf(ACTION_META[id].labelKey)).join("、")}
                                 </strong>
                             </Text>
                         ))}
                     </Flex>
                     <Button size="1" color="red" variant="soft" onClick={handleConfirmConflict}>
-                        {tAny("kb_conflict_override")}
+                        {tf("kb_conflict_override")}
                     </Button>
                     <Button size="1" color="gray" variant="soft" onClick={handleCancelConflict}>
-                        {tAny("kb_conflict_cancel")}
+                        {tf("kb_conflict_cancel")}
                     </Button>
                 </Flex>
             )}

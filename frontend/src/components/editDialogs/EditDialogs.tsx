@@ -21,8 +21,7 @@ export function TransposeCentsDialog({
     defaultSmoothness = 0,
     onConfirm,
 }: Props) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const [cents, setCents] = useState("0");
     const [smoothness, setSmoothness] = useDialogDraft(open, () =>
         String(Math.round(defaultSmoothness)),
@@ -32,13 +31,13 @@ export function TransposeCentsDialog({
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("menu_transpose_cents")}
+            title={tf("menu_transpose_cents")}
             size="sm"
             actions={[
-                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
                 {
                     id: "apply",
-                    label: tAny("ok"),
+                    label: tf("ok"),
                     intent: "primary",
                     onClick: () => {
                         onConfirm?.(
@@ -51,22 +50,22 @@ export function TransposeCentsDialog({
             ]}
         >
             <AppForm>
-                <AppField label={tAny("dlg_cents")}>
+                <AppField label={tf("dlg_cents")}>
                     <AppNumberField
                         value={Number(cents)}
                         unit="cents"
-                        ariaLabel={tAny("dlg_cents")}
+                        ariaLabel={tf("dlg_cents")}
                         onCommit={(next) => setCents(String(next))}
                     />
                 </AppField>
-                <AppField label={tAny("edge_smoothness")}>
+                <AppField label={tf("edge_smoothness")}>
                     <Flex align="center" gap="2">
                         <AppSlider
                             value={Math.round(Number(smoothness) || 0)}
                             unit="percent"
                             min={0}
                             max={100}
-                            ariaLabel={tAny("edge_smoothness")}
+                            ariaLabel={tf("edge_smoothness")}
                             onChange={(next) => setSmoothness(String(next))}
                         />
                         <AppSliderReadout>{Math.round(Number(smoothness) || 0)}%</AppSliderReadout>
@@ -96,8 +95,7 @@ export function TransposeDegreesDialog({
     defaultSmoothness = 0,
     onConfirm,
 }: TransposeDegreesProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const [degrees, setDegrees] = useState("3");
     const [scaleValue, setScaleValue] = useDialogDraft<string>(open, () =>
         defaultUseProjectScale ? "__project__" : defaultScale,
@@ -109,23 +107,23 @@ export function TransposeDegreesDialog({
     const scaleSelectGroups = useMemo(
         () =>
             buildScaleSelectGroups(
-                projectScaleLabel ?? tAny("project_scale_generic"),
+                projectScaleLabel ?? tf("project_scale_generic"),
                 customScalePresets,
             ),
-        [projectScaleLabel, customScalePresets, tAny],
+        [projectScaleLabel, customScalePresets, tf],
     );
 
     return (
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("menu_transpose_degrees")}
+            title={tf("menu_transpose_degrees")}
             size="sm"
             actions={[
-                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
                 {
                     id: "apply",
-                    label: tAny("ok"),
+                    label: tf("ok"),
                     intent: "primary",
                     onClick: () => {
                         onConfirm?.(
@@ -139,15 +137,15 @@ export function TransposeDegreesDialog({
             ]}
         >
             <AppForm>
-                <AppField label={tAny("transpose_degrees_amount")}>
+                <AppField label={tf("transpose_degrees_amount")}>
                     <AppNumberField
                         value={Number(degrees)}
                         unit="integer"
-                        ariaLabel={tAny("transpose_degrees_amount")}
+                        ariaLabel={tf("transpose_degrees_amount")}
                         onCommit={(next) => setDegrees(String(next))}
                     />
                 </AppField>
-                <AppField label={tAny("base_scale")}>
+                <AppField label={tf("base_scale")}>
                     <AppSelect
                         value={scaleValue}
                         onValueChange={setScaleValue}
@@ -162,14 +160,14 @@ export function TransposeDegreesDialog({
                         ]}
                     />
                 </AppField>
-                <AppField label={tAny("edge_smoothness")}>
+                <AppField label={tf("edge_smoothness")}>
                     <Flex align="center" gap="2">
                         <AppSlider
                             value={Math.round(Number(smoothness) || 0)}
                             unit="percent"
                             min={0}
                             max={100}
-                            ariaLabel={tAny("edge_smoothness")}
+                            ariaLabel={tf("edge_smoothness")}
                             onChange={(next) => setSmoothness(String(next))}
                         />
                         <AppSliderReadout>{Math.round(Number(smoothness) || 0)}%</AppSliderReadout>
@@ -199,8 +197,7 @@ export function SetPitchDialog({
     defaultSmoothness = 0,
     onConfirm,
 }: SetPitchProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const [note, setNote] = useDialogDraft(open, () => String(defaultValue));
     const [smoothness, setSmoothness] = useDialogDraft(open, () =>
         String(Math.round(defaultSmoothness)),
@@ -210,13 +207,13 @@ export function SetPitchDialog({
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={titleText ?? tAny("menu_set_pitch")}
+            title={titleText ?? tf("menu_set_pitch")}
             size="sm"
             actions={[
-                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
                 {
                     id: "apply",
-                    label: tAny("ok"),
+                    label: tf("ok"),
                     intent: "primary",
                     onClick: () => {
                         const parsedNote = Number(note);
@@ -228,22 +225,22 @@ export function SetPitchDialog({
             ]}
         >
             <AppForm>
-                <AppField label={valueLabelText ?? tAny("dlg_midi_note")}>
+                <AppField label={valueLabelText ?? tf("dlg_midi_note")}>
                     <AppNumberField
                         value={Number(note)}
                         unit="semitone"
-                        ariaLabel={valueLabelText ?? tAny("dlg_midi_note")}
+                        ariaLabel={valueLabelText ?? tf("dlg_midi_note")}
                         onCommit={(next) => setNote(String(next))}
                     />
                 </AppField>
-                <AppField label={tAny("edge_smoothness")}>
+                <AppField label={tf("edge_smoothness")}>
                     <Flex align="center" gap="2">
                         <AppSlider
                             value={Math.round(Number(smoothness) || 0)}
                             unit="percent"
                             min={0}
                             max={100}
-                            ariaLabel={tAny("edge_smoothness")}
+                            ariaLabel={tf("edge_smoothness")}
                             onChange={(next) => setSmoothness(String(next))}
                         />
                         <AppSliderReadout>{Math.round(Number(smoothness) || 0)}%</AppSliderReadout>
@@ -261,21 +258,20 @@ interface AverageProps {
 }
 
 export function AverageDialog({ open, onOpenChange, onConfirm }: AverageProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const [strength, setStrength] = useState("100");
 
     return (
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("menu_average")}
+            title={tf("menu_average")}
             size="sm"
             actions={[
-                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
                 {
                     id: "apply",
-                    label: tAny("ok"),
+                    label: tf("ok"),
                     intent: "primary",
                     onClick: () => {
                         onConfirm?.(Math.max(0, Math.min(100, Math.round(Number(strength) || 0))));
@@ -285,14 +281,14 @@ export function AverageDialog({ open, onOpenChange, onConfirm }: AverageProps) {
             ]}
         >
             <AppForm>
-                <AppField label={tAny("dlg_average_strength")}>
+                <AppField label={tf("dlg_average_strength")}>
                     <Flex align="center" gap="2">
                         <AppSlider
                             value={Math.round(Number(strength) || 0)}
                             unit="percent"
                             min={0}
                             max={100}
-                            ariaLabel={tAny("dlg_average_strength")}
+                            ariaLabel={tf("dlg_average_strength")}
                             onChange={(next) => setStrength(String(next))}
                         />
                         <AppSliderReadout>{Math.round(Number(strength) || 0)}%</AppSliderReadout>
@@ -316,8 +312,7 @@ export function SmoothDialog({
     defaultSmoothness = 50,
     onConfirm,
 }: SmoothProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const [strength, setStrength] = useDialogDraft(open, () =>
         Math.max(0, Math.min(100, Math.round(defaultSmoothness))),
     );
@@ -326,13 +321,13 @@ export function SmoothDialog({
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("menu_smooth")}
+            title={tf("menu_smooth")}
             size="sm"
             actions={[
-                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
                 {
                     id: "apply",
-                    label: tAny("ok"),
+                    label: tf("ok"),
                     intent: "primary",
                     onClick: () => {
                         onConfirm?.(Math.max(0, Math.min(100, Math.round(strength))));
@@ -342,14 +337,14 @@ export function SmoothDialog({
             ]}
         >
             <AppForm>
-                <AppField label={tAny("dlg_smoothness")}>
+                <AppField label={tf("dlg_smoothness")}>
                     <Flex align="center" gap="2">
                         <AppSlider
                             value={Math.round(strength)}
                             unit="percent"
                             min={0}
                             max={100}
-                            ariaLabel={tAny("dlg_smoothness")}
+                            ariaLabel={tf("dlg_smoothness")}
                             onChange={(next) => setStrength(next)}
                         />
                         <AppSliderReadout>{Math.round(strength)}%</AppSliderReadout>
@@ -376,9 +371,7 @@ interface VibratoProps {
 }
 
 export function VibratoDialog({ open, onOpenChange, onConfirm, editParam }: VibratoProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
-
+    const { tf } = useI18n();
     const isPitch = editParam === "pitch";
     // 气声音量（breath_gain，0..2）按原值域给小振幅；dyn 落到默认 30 ——
     // 它在 op 侧是**深度百分比**（±30% 乘性调制，静音保持静音）。
@@ -405,13 +398,13 @@ export function VibratoDialog({ open, onOpenChange, onConfirm, editParam }: Vibr
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("menu_add_vibrato")}
+            title={tf("menu_add_vibrato")}
             size="sm"
             actions={[
-                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
                 {
                     id: "apply",
-                    label: tAny("ok"),
+                    label: tf("ok"),
                     intent: "primary",
                     onClick: () => {
                         onConfirm?.(
@@ -427,43 +420,43 @@ export function VibratoDialog({ open, onOpenChange, onConfirm, editParam }: Vibr
             ]}
         >
             <AppForm>
-                <AppField label={isPitch ? tAny("dlg_amplitude_cents") : tAny("dlg_amplitude")}>
+                <AppField label={isPitch ? tf("dlg_amplitude_cents") : tf("dlg_amplitude")}>
                     <AppNumberField
                         value={Number(amplitude)}
                         unit={isPitch ? "cents" : "integer"}
-                        ariaLabel={isPitch ? tAny("dlg_amplitude_cents") : tAny("dlg_amplitude")}
+                        ariaLabel={isPitch ? tf("dlg_amplitude_cents") : tf("dlg_amplitude")}
                         onCommit={(next) => setAmplitude(String(next))}
                     />
                 </AppField>
-                <AppField label={tAny("dlg_rate_hz")}>
+                <AppField label={tf("dlg_rate_hz")}>
                     <AppNumberField
                         value={Number(rate)}
                         unit="rate"
-                        ariaLabel={tAny("dlg_rate_hz")}
+                        ariaLabel={tf("dlg_rate_hz")}
                         onCommit={(next) => setRate(String(next))}
                     />
                 </AppField>
-                <AppField label={tAny("dlg_attack_ms")}>
+                <AppField label={tf("dlg_attack_ms")}>
                     <AppNumberField
                         value={Number(attack)}
                         unit="milliseconds"
-                        ariaLabel={tAny("dlg_attack_ms")}
+                        ariaLabel={tf("dlg_attack_ms")}
                         onCommit={(next) => setAttack(String(next))}
                     />
                 </AppField>
-                <AppField label={tAny("dlg_release_ms")}>
+                <AppField label={tf("dlg_release_ms")}>
                     <AppNumberField
                         value={Number(release)}
                         unit="milliseconds"
-                        ariaLabel={tAny("dlg_release_ms")}
+                        ariaLabel={tf("dlg_release_ms")}
                         onCommit={(next) => setRelease(String(next))}
                     />
                 </AppField>
-                <AppField label={tAny("dlg_phase_deg")}>
+                <AppField label={tf("dlg_phase_deg")}>
                     <AppNumberField
                         value={Number(phase)}
                         unit="integer"
-                        ariaLabel={tAny("dlg_phase_deg")}
+                        ariaLabel={tf("dlg_phase_deg")}
                         onCommit={(next) => setPhase(String(next))}
                     />
                 </AppField>
@@ -505,8 +498,7 @@ export function QuantizeDialog({
     defaultSmoothness = 0,
     onConfirm,
 }: QuantizeProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const toleranceDefault = defaultTolerance ?? defaultToleranceCents;
     const [unit, setUnit] = useState<"semitone" | "scale">("semitone");
     const [scaleValue, setScaleValue] = useDialogDraft<string>(open, () =>
@@ -516,10 +508,10 @@ export function QuantizeDialog({
     const scaleSelectGroups = useMemo(
         () =>
             buildScaleSelectGroups(
-                projectScaleLabel ?? tAny("project_scale_generic"),
+                projectScaleLabel ?? tf("project_scale_generic"),
                 customScalePresets,
             ),
-        [projectScaleLabel, customScalePresets, tAny],
+        [projectScaleLabel, customScalePresets, tf],
     );
     const [toleranceCents, setToleranceCents] = useDialogDraft(open, () =>
         String(toleranceDefault),
@@ -533,13 +525,13 @@ export function QuantizeDialog({
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("menu_quantize")}
+            title={tf("menu_quantize")}
             size="sm"
             actions={[
-                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
                 {
                     id: "apply",
-                    label: tAny("ok"),
+                    label: tf("ok"),
                     intent: "primary",
                     onClick: () => {
                         const parsed = Math.abs(Math.round(Number(toleranceCents) || 0));
@@ -558,19 +550,19 @@ export function QuantizeDialog({
         >
             <AppForm>
                 {!valueMode && (
-                    <AppField label={tAny("quantize_unit")}>
+                    <AppField label={tf("quantize_unit")}>
                         <AppSelect
                             value={unit}
                             onValueChange={(v) => setUnit(v as "semitone" | "scale")}
                             options={[
-                                { value: "semitone", label: tAny("quantize_semitone") },
-                                { value: "scale", label: tAny("quantize_scale") },
+                                { value: "semitone", label: tf("quantize_semitone") },
+                                { value: "scale", label: tf("quantize_scale") },
                             ]}
                         />
                     </AppField>
                 )}
                 {!valueMode && unit === "scale" && (
-                    <AppField label={tAny("base_scale")}>
+                    <AppField label={tf("base_scale")}>
                         <AppSelect
                             value={scaleValue}
                             onValueChange={setScaleValue}
@@ -587,35 +579,33 @@ export function QuantizeDialog({
                     </AppField>
                 )}
                 {valueMode && (
-                    <AppField label={tAny("quantize_unit")}>
+                    <AppField label={tf("quantize_unit")}>
                         <AppNumberField
                             value={Number(quantizeUnit)}
                             unit="integer"
-                            ariaLabel={tAny("quantize_unit")}
+                            ariaLabel={tf("quantize_unit")}
                             onCommit={(next) => setQuantizeUnit(String(next))}
                         />
                     </AppField>
                 )}
-                <AppField
-                    label={valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")}
-                >
+                <AppField label={valueMode ? tf("quantize_tolerance") : tf("pitch_snap_tolerance")}>
                     <AppNumberField
                         value={Number(toleranceCents)}
                         unit="cents"
                         ariaLabel={
-                            valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")
+                            valueMode ? tf("quantize_tolerance") : tf("pitch_snap_tolerance")
                         }
                         onCommit={(next) => setToleranceCents(String(next))}
                     />
                 </AppField>
-                <AppField label={tAny("edge_smoothness")}>
+                <AppField label={tf("edge_smoothness")}>
                     <Flex align="center" gap="2">
                         <AppSlider
                             value={Math.round(Number(smoothness) || 0)}
                             unit="percent"
                             min={0}
                             max={100}
-                            ariaLabel={tAny("edge_smoothness")}
+                            ariaLabel={tf("edge_smoothness")}
                             onChange={(next) => setSmoothness(String(next))}
                         />
                         <AppSliderReadout>{Math.round(Number(smoothness) || 0)}%</AppSliderReadout>
@@ -659,8 +649,7 @@ export function MeanQuantizeDialog({
     defaultSmoothness = 0,
     onConfirm,
 }: MeanQuantizeProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const toleranceDefault = defaultTolerance ?? defaultToleranceCents;
     const [unit, setUnit] = useState<"semitone" | "scale">("semitone");
     const [scaleValue, setScaleValue] = useDialogDraft<string>(open, () =>
@@ -670,10 +659,10 @@ export function MeanQuantizeDialog({
     const scaleSelectGroups = useMemo(
         () =>
             buildScaleSelectGroups(
-                projectScaleLabel ?? tAny("project_scale_generic"),
+                projectScaleLabel ?? tf("project_scale_generic"),
                 customScalePresets,
             ),
-        [projectScaleLabel, customScalePresets, tAny],
+        [projectScaleLabel, customScalePresets, tf],
     );
     const [toleranceCents, setToleranceCents] = useDialogDraft(open, () =>
         String(toleranceDefault),
@@ -687,13 +676,13 @@ export function MeanQuantizeDialog({
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("mean_quantize_title")}
+            title={tf("mean_quantize_title")}
             size="sm"
             actions={[
-                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
                 {
                     id: "apply",
-                    label: tAny("ok"),
+                    label: tf("ok"),
                     intent: "primary",
                     onClick: () => {
                         const parsed = Math.abs(Math.round(Number(toleranceCents) || 0));
@@ -712,19 +701,19 @@ export function MeanQuantizeDialog({
         >
             <AppForm>
                 {!valueMode && (
-                    <AppField label={tAny("quantize_unit")}>
+                    <AppField label={tf("quantize_unit")}>
                         <AppSelect
                             value={unit}
                             onValueChange={(v) => setUnit(v as "semitone" | "scale")}
                             options={[
-                                { value: "semitone", label: tAny("quantize_semitone") },
-                                { value: "scale", label: tAny("quantize_scale") },
+                                { value: "semitone", label: tf("quantize_semitone") },
+                                { value: "scale", label: tf("quantize_scale") },
                             ]}
                         />
                     </AppField>
                 )}
                 {!valueMode && unit === "scale" && (
-                    <AppField label={tAny("base_scale")}>
+                    <AppField label={tf("base_scale")}>
                         <AppSelect
                             value={scaleValue}
                             onValueChange={setScaleValue}
@@ -741,35 +730,33 @@ export function MeanQuantizeDialog({
                     </AppField>
                 )}
                 {valueMode && (
-                    <AppField label={tAny("quantize_unit")}>
+                    <AppField label={tf("quantize_unit")}>
                         <AppNumberField
                             value={Number(quantizeUnit)}
                             unit="integer"
-                            ariaLabel={tAny("quantize_unit")}
+                            ariaLabel={tf("quantize_unit")}
                             onCommit={(next) => setQuantizeUnit(String(next))}
                         />
                     </AppField>
                 )}
-                <AppField
-                    label={valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")}
-                >
+                <AppField label={valueMode ? tf("quantize_tolerance") : tf("pitch_snap_tolerance")}>
                     <AppNumberField
                         value={Number(toleranceCents)}
                         unit="cents"
                         ariaLabel={
-                            valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")
+                            valueMode ? tf("quantize_tolerance") : tf("pitch_snap_tolerance")
                         }
                         onCommit={(next) => setToleranceCents(String(next))}
                     />
                 </AppField>
-                <AppField label={tAny("edge_smoothness")}>
+                <AppField label={tf("edge_smoothness")}>
                     <Flex align="center" gap="2">
                         <AppSlider
                             value={Math.round(Number(smoothness) || 0)}
                             unit="percent"
                             min={0}
                             max={100}
-                            ariaLabel={tAny("edge_smoothness")}
+                            ariaLabel={tf("edge_smoothness")}
                             onChange={(next) => setSmoothness(String(next))}
                         />
                         <AppSliderReadout>{Math.round(Number(smoothness) || 0)}%</AppSliderReadout>

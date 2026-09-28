@@ -51,8 +51,7 @@ export function DockTabMenu({
     detachAction,
 }: DockTabMenuProps) {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { t, tf } = useI18n();
     /** 本窗体所属面板：贡献项按面板作用域筛选（全局项对所有面板可见）。 */
     const panelId = useAppSelector((state) => state.dock.layout.forms[formId]?.panelId);
     const contributedItems = usePanelTabMenuItems({ panelId });
@@ -157,17 +156,17 @@ export function DockTabMenu({
                 </div>
             ) : (
                 <MenuItem
-                    label={tAny("dock_rename_tab")}
+                    label={tf("dock_rename_tab")}
                     onClick={() => {
                         setDraft("");
                         setRenaming(true);
                     }}
                 />
             )}
-            <MenuItem label={tAny("dock_float")} onClick={onFloat} />
+            <MenuItem label={tf("dock_float")} onClick={onFloat} />
             {detachAction ? (
                 <MenuItem
-                    label={tAny(detachAction.labelKey)}
+                    label={tf(detachAction.labelKey)}
                     onClick={() => {
                         detachAction.run();
                         onClose();

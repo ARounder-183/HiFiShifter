@@ -21,8 +21,7 @@ export function PitchSnapSettingsDialog({ open, onOpenChange }: Props) {
     const { pitchSnapUnit, pitchSnapToleranceCents } = useAppSelector(
         (state: RootState) => state.session,
     );
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
 
     // 容差提交：输入后按 Enter / 点遮罩关闭也应生效（与
     // SplitTransitionSettingsDialog 的 onBlur 提交一致），不能只有点 OK
@@ -36,12 +35,12 @@ export function PitchSnapSettingsDialog({ open, onOpenChange }: Props) {
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("pitch_snap_settings")}
+            title={tf("pitch_snap_settings")}
             size="sm"
             actions={[
                 {
                     id: "ok",
-                    label: tAny("ok"),
+                    label: tf("ok"),
                     intent: "primary",
                     onClick: () => {
                         onOpenChange(false);
@@ -51,7 +50,7 @@ export function PitchSnapSettingsDialog({ open, onOpenChange }: Props) {
         >
             <AppForm>
                 {/* Quantize Unit */}
-                <AppField label={tAny("quantize_unit")}>
+                <AppField label={tf("quantize_unit")}>
                     <AppSelect
                         value={pitchSnapUnit}
                         onValueChange={(v) => {
@@ -59,17 +58,17 @@ export function PitchSnapSettingsDialog({ open, onOpenChange }: Props) {
                             void dispatch(persistUiSettings());
                         }}
                         options={[
-                            { value: "semitone", label: tAny("quantize_semitone") },
-                            { value: "scale", label: tAny("quantize_scale") },
+                            { value: "semitone", label: tf("quantize_semitone") },
+                            { value: "scale", label: tf("quantize_scale") },
                         ]}
                     />
                 </AppField>
 
-                <AppField label={tAny("pitch_snap_tolerance")}>
+                <AppField label={tf("pitch_snap_tolerance")}>
                     <AppNumberField
                         value={pitchSnapToleranceCents}
                         unit="cents"
-                        ariaLabel={tAny("pitch_snap_tolerance")}
+                        ariaLabel={tf("pitch_snap_tolerance")}
                         onCommit={commitTolerance}
                     />
                 </AppField>

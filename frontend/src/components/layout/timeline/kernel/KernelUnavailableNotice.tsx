@@ -35,8 +35,7 @@ interface Props {
 }
 
 export const KernelUnavailableNotice: React.FC<Props> = ({ reason }) => {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const [copied, setCopied] = React.useState(false);
 
     /**
@@ -88,18 +87,16 @@ export const KernelUnavailableNotice: React.FC<Props> = ({ reason }) => {
             className="absolute inset-0 px-6 text-center"
         >
             <Text size="4" weight="bold">
-                {tAny("kernel_unavailable_title")}
+                {tf("kernel_unavailable_title")}
             </Text>
             <Text size="2" color="gray">
-                {tAny("kernel_unavailable_reason")}
+                {tf("kernel_unavailable_reason")}
             </Text>
             <Text size="1" color="gray" className="max-w-[620px] text-left whitespace-pre-line">
-                {tAny("kernel_unavailable_hints")}
+                {tf("kernel_unavailable_hints")}
             </Text>
             <Button size="1" variant="soft" onClick={() => void handleCopy()}>
-                {copied
-                    ? tAny("kernel_unavailable_copied")
-                    : tAny("kernel_unavailable_diagnostics")}
+                {copied ? tf("kernel_unavailable_copied") : tf("kernel_unavailable_diagnostics")}
             </Button>
         </Flex>
     );

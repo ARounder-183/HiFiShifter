@@ -32,8 +32,7 @@ const CUSTOM_TEMPLATE_PREFIX = "custom:";
 
 export function CustomScaleDialog({ open, onOpenChange }: Props) {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const s = useAppSelector((state: RootState) => state.session);
 
     const [name, setName] = useState("");
@@ -64,11 +63,11 @@ export function CustomScaleDialog({ open, onOpenChange }: Props) {
         }
 
         const fallbackScale = s.project.baseScale;
-        setName(tAny("custom_scale_default_name"));
+        setName(tf("custom_scale_default_name"));
         setNotes(resolveScaleNotes(fallbackScale));
         setEditingPresetId(null);
         setTemplateValue(`${BUILTIN_TEMPLATE_PREFIX}${fallbackScale}`);
-    }, [open, s.project.baseScale, s.project.customScale, s.project.useCustomScale, tAny]);
+    }, [open, s.project.baseScale, s.project.customScale, s.project.useCustomScale, tf]);
 
     function toggleNote(pc: number) {
         setNotes((prev) => {
@@ -128,7 +127,7 @@ export function CustomScaleDialog({ open, onOpenChange }: Props) {
         if (editingPresetId === selectedCustomPresetId) {
             const fallbackScale = s.project.baseScale;
             setEditingPresetId(null);
-            setName(tAny("custom_scale_default_name"));
+            setName(tf("custom_scale_default_name"));
             setNotes(resolveScaleNotes(fallbackScale));
             setTemplateValue(`${BUILTIN_TEMPLATE_PREFIX}${fallbackScale}`);
         }
@@ -138,12 +137,12 @@ export function CustomScaleDialog({ open, onOpenChange }: Props) {
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("custom_scale_dialog_title")}
+            title={tf("custom_scale_dialog_title")}
             size="md"
             actions={[
                 {
                     id: "delete",
-                    label: tAny("custom_scale_delete"),
+                    label: tf("custom_scale_delete"),
                     intent: "danger",
                     align: "start",
                     disabled: !selectedCustomPresetId,
@@ -152,17 +151,17 @@ export function CustomScaleDialog({ open, onOpenChange }: Props) {
                         handleDeleteSelectedPreset();
                     },
                 },
-                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
                 {
                     id: "apply",
-                    label: tAny("custom_scale_save_apply"),
+                    label: tf("custom_scale_save_apply"),
                     intent: "primary",
                     onClick: handleSave,
                 },
             ]}
         >
             <AppForm>
-                <AppField label={tAny("custom_scale_template")}>
+                <AppField label={tf("custom_scale_template")}>
                     <AppSelect
                         value={templateValue}
                         onValueChange={applyTemplate}
@@ -182,7 +181,7 @@ export function CustomScaleDialog({ open, onOpenChange }: Props) {
                     />
                 </AppField>
 
-                <AppField label={tAny("custom_scale_name")}>
+                <AppField label={tf("custom_scale_name")}>
                     <TextField.Root
                         size="2"
                         value={name}
@@ -191,7 +190,7 @@ export function CustomScaleDialog({ open, onOpenChange }: Props) {
                 </AppField>
 
                 <Flex direction="column" gap="2">
-                    <Text size="2">{tAny("custom_scale_notes")}</Text>
+                    <Text size="2">{tf("custom_scale_notes")}</Text>
                     <Flex wrap="wrap" gap="2">
                         {CHROMATIC_NOTE_LABELS.map((label, pc) => {
                             const selected = notes.includes(pc);

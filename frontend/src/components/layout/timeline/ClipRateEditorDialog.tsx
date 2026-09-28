@@ -88,8 +88,7 @@ function ClipRateEditorFields({
     onApply: (rate: number, adjustLength: boolean, durationSec: number | null) => void;
     onClose: () => void;
 }) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const menuRef = useRef<HTMLDivElement | null>(null);
     // 精细调整修饰键（与 FadeContextMenu 的滑轮步进同一来源）。
     const fineAdjustKb = useAppSelector((state) =>
@@ -239,13 +238,13 @@ function ClipRateEditorFields({
             onPointerDown={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}
         >
-            <div className="text-[12px] font-medium">{tAny("clip_rate_editor_title")}</div>
+            <div className="text-[12px] font-medium">{tf("clip_rate_editor_title")}</div>
             <div className="text-[10px] text-qt-text/60 leading-snug">
-                {tAny("clip_rate_editor_bpm_hint")}
+                {tf("clip_rate_editor_bpm_hint")}
             </div>
 
             <label className="flex flex-col gap-1">
-                <span className="text-[10px] text-qt-text/60">{tAny("clip_rate_editor_rate")}</span>
+                <span className="text-[10px] text-qt-text/60">{tf("clip_rate_editor_rate")}</span>
                 <input
                     className="w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
                     value={rateText}
@@ -285,7 +284,7 @@ function ClipRateEditorFields({
             <div className="flex gap-2">
                 <label className="flex-1 flex flex-col gap-1">
                     <span className="text-[10px] text-qt-text/60">
-                        {tAny("clip_rate_editor_old_bpm")}
+                        {tf("clip_rate_editor_old_bpm")}
                     </span>
                     <input
                         className="w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
@@ -311,7 +310,7 @@ function ClipRateEditorFields({
                 </label>
                 <label className="flex-1 flex flex-col gap-1">
                     <span className="text-[10px] text-qt-text/60">
-                        {tAny("clip_rate_editor_new_bpm")}
+                        {tf("clip_rate_editor_new_bpm")}
                     </span>
                     <input
                         className="w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
@@ -339,7 +338,7 @@ function ClipRateEditorFields({
 
             <label className="flex flex-col gap-1">
                 <span className="text-[10px] text-qt-text/60">
-                    {tAny("clip_rate_editor_duration")}
+                    {tf("clip_rate_editor_duration")}
                     {": "}
                     {formatFadeLengthTooltip(Number(clip.lengthSec) || 0, formatCtx)}
                 </span>
@@ -392,24 +391,22 @@ function ClipRateEditorFields({
             <AppForm booleanRow="leading">
                 <AppSwitchRow
                     control="checkbox"
-                    label={tAny("clip_rate_editor_auto_length")}
+                    label={tf("clip_rate_editor_auto_length")}
                     checked={autoLength}
                     onCheckedChange={setAutoLength}
                 />
             </AppForm>
 
             <div className="text-[10px] text-qt-text/60">
-                {tAny("clip_rate_editor_result")}
+                {tf("clip_rate_editor_result")}
                 {": "}
                 {formatFadeLengthTooltip(previewSec, formatCtx)}
-                {!autoLength && !durationChanged
-                    ? ` (${tAny("clip_rate_editor_keep_length")})`
-                    : ""}
+                {!autoLength && !durationChanged ? ` (${tf("clip_rate_editor_keep_length")})` : ""}
             </div>
 
             {targetCount > 1 ? (
                 <div className="text-[10px] text-qt-text/60">
-                    {tAny("clip_rate_editor_multi").replace("{count}", String(targetCount))}
+                    {tf("clip_rate_editor_multi").replace("{count}", String(targetCount))}
                 </div>
             ) : null}
 
@@ -427,7 +424,7 @@ function ClipRateEditorFields({
                         onClose();
                     }}
                 >
-                    {tAny("clip_rate_editor_apply")}
+                    {tf("clip_rate_editor_apply")}
                 </button>
             </div>
         </div>

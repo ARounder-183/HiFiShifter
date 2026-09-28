@@ -85,8 +85,7 @@ function TempoActiveIcon() {
 
 export const TempoMapCornerButton: React.FC = () => {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const s = useAppSelector((state) => state.session);
     const [dialogOpen, setDialogOpen] = useState(false);
 
@@ -96,7 +95,7 @@ export const TempoMapCornerButton: React.FC = () => {
     /** 存在 Tempo Map 且正在显示（红色提醒模式）。 */
     const active = hasMap && s.tempoMapVisible;
     /** 图标按钮的无障碍名称（与悬浮提示共用同一份文案）。 */
-    const buttonLabel = active ? tAny("tempo_map_active_tooltip") : tAny("tempo_map_show_tooltip");
+    const buttonLabel = active ? tf("tempo_map_active_tooltip") : tf("tempo_map_show_tooltip");
 
     const projectScaleLike = useMemo<ScaleLike | null>(
         () =>
@@ -194,29 +193,29 @@ export const TempoMapCornerButton: React.FC = () => {
             <AppDialog
                 open={dialogOpen}
                 onOpenChange={setDialogOpen}
-                title={tAny("tempo_map_clear_dialog_title")}
+                title={tf("tempo_map_clear_dialog_title")}
                 description={
                     <Text size="2" className="text-qt-text-muted">
-                        {tAny("tempo_map_clear_dialog_message")}
+                        {tf("tempo_map_clear_dialog_message")}
                     </Text>
                 }
                 size="sm"
                 actions={[
                     {
                         id: "clear",
-                        label: tAny("tempo_map_clear_confirm"),
+                        label: tf("tempo_map_clear_confirm"),
                         intent: "danger",
                         align: "start",
                         onClick: clearMap,
                     },
                     {
                         id: "cancel",
-                        label: tAny("cancel"),
+                        label: tf("cancel"),
                         onClick: () => setDialogOpen(false),
                     },
                     {
                         id: "hide",
-                        label: tAny("tempo_map_hide_only"),
+                        label: tf("tempo_map_hide_only"),
                         onClick: hideOnly,
                     },
                 ]}

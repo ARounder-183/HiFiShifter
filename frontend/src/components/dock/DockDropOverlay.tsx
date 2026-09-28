@@ -46,28 +46,27 @@ export function DockDropOverlay() {
 const GHOST_OFFSET_PX = 14;
 
 /** 落点方向的可读名称（让提示从"停靠到此处"变成"停靠到左侧"）。 */
-function describeZone(zone: DockDropZone, tAny: (key: string) => string): string {
+function describeZone(zone: DockDropZone, tf: (key: string) => string): string {
     switch (zone) {
         case "left":
-            return tAny("dock_side_left");
+            return tf("dock_side_left");
         case "right":
-            return tAny("dock_side_right");
+            return tf("dock_side_right");
         case "top":
-            return tAny("dock_side_top");
+            return tf("dock_side_top");
         case "bottom":
-            return tAny("dock_side_bottom");
+            return tf("dock_side_bottom");
         default:
-            return tAny("dock_side_center");
+            return tf("dock_side_center");
     }
 }
 
 function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const showPreview = useAppSelector((s) => s.dock.settings.showDropPreview);
     const dockModifier = useAppSelector((s) => s.dock.settings.dockModifier);
     const definition = getPanel(drag.panelId);
-    const title = definition ? tAny(definition.titleKey) : drag.panelId;
+    const title = definition ? tf(definition.titleKey) : drag.panelId;
 
     // 停靠预览：按住修饰键且命中某个 Zone 时，画出"新组会占哪半边"。
     // 根级边缘带的 target.rect 就是整个停靠区矩形，预览自然是贯通全高/全宽的
@@ -159,16 +158,16 @@ function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
                     {title}
                     <span className="hs-dock-ghost-hint">
                         {drag.reorder
-                            ? tAny("dock_hint_reorder")
+                            ? tf("dock_hint_reorder")
                             : drag.dockIntent
                               ? drag.target
                                   ? `${
                                         drag.target.zoneId === DOCK_ROOT_ZONE_ID
-                                            ? tAny("dock_hint_root_dock")
-                                            : tAny("dock_hint_dock")
-                                    } · ${describeZone(drag.target.zone, tAny)}`
-                                  : tAny("dock_hint_snapback")
-                              : tAny("dock_hint_float")}
+                                            ? tf("dock_hint_root_dock")
+                                            : tf("dock_hint_dock")
+                                    } · ${describeZone(drag.target.zone, tf)}`
+                                  : tf("dock_hint_snapback")
+                              : tf("dock_hint_float")}
                     </span>
                 </div>
                 {/*
@@ -176,7 +175,7 @@ function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
                   悬停提示，这里是唯一能告诉他"怎么才能停靠"的地方（用户明确要求）。
                   与抓手提示共用 `dockModifierHint`，两处不会分叉。
                 */}
-                <div className="hs-dock-ghost-modifier">{dockModifierHint(dockModifier, tAny)}</div>
+                <div className="hs-dock-ghost-modifier">{dockModifierHint(dockModifier, tf)}</div>
             </div>
         </div>
     );

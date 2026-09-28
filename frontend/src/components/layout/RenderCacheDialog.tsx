@@ -59,8 +59,7 @@ function formatBytes(bytes: number): string {
 
 export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps) {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const saved = useAppSelector((state) => state.session.renderCache);
 
     const [draft, setDraft] = useState<RenderCacheSettings>(saved);
@@ -78,11 +77,11 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
             const next = await coreApi.getRenderCacheStats();
             setStats(next);
         } catch {
-            setErrorText(tAny("render_cache_stats_failed"));
+            setErrorText(tf("render_cache_stats_failed"));
         } finally {
             setLoading(false);
         }
-    }, [tAny]);
+    }, [tf]);
 
     // 草稿只在"打开"这一时机初始化一次：保存后 Redux 中的设置会更新，若把
     // `saved` 放进依赖，effect 会立刻重跑并把"设置已保存"的提示清掉。
@@ -112,10 +111,10 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
             dispatch(setRenderCacheSettings(normalized));
             await dispatch(persistUiSettings());
             setDraft(normalized);
-            setNotice(tAny("render_cache_settings_saved"));
+            setNotice(tf("render_cache_settings_saved"));
             await refreshStats();
         } catch {
-            setErrorText(tAny("render_cache_settings_save_failed"));
+            setErrorText(tf("render_cache_settings_save_failed"));
         } finally {
             setSaving(false);
         }
@@ -129,17 +128,17 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
         try {
             const result = await coreApi.clearRenderCache(scope, days);
             if (!result?.ok) {
-                setErrorText(result?.error || tAny("render_cache_clear_failed"));
+                setErrorText(result?.error || tf("render_cache_clear_failed"));
                 return;
             }
             setNotice(
-                tAny("render_cache_cleared")
+                tf("render_cache_cleared")
                     .replace("{n}", String(result.removedFiles ?? 0))
                     .replace("{size}", formatBytes(result.removedBytes ?? 0)),
             );
             await refreshStats();
         } catch {
-            setErrorText(tAny("render_cache_clear_failed"));
+            setErrorText(tf("render_cache_clear_failed"));
         } finally {
             setBusyScope(null);
         }
@@ -149,16 +148,16 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
         try {
             const result = await coreApi.openRenderCacheDir();
             if (!result?.ok) {
-                setErrorText(result?.error || tAny("render_cache_open_dir_failed"));
+                setErrorText(result?.error || tf("render_cache_open_dir_failed"));
             }
         } catch {
-            setErrorText(tAny("render_cache_open_dir_failed"));
+            setErrorText(tf("render_cache_open_dir_failed"));
         }
     }
 
     const sessionTotal = stats ? stats.sessionHits + stats.sessionMisses : 0;
     const summaryText = stats
-        ? tAny("render_cache_summary_line")
+        ? tf("render_cache_summary_line")
               .replace("{size}", formatBytes(stats.totalBytes))
               .replace("{n}", String(stats.entries))
               .replace("{hits}", String(stats.sessionHits))
@@ -176,14 +175,14 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("render_cache_dialog_title")}
-            description={tAny("render_cache_dialog_desc")}
+            title={tf("render_cache_dialog_title")}
+            description={tf("render_cache_dialog_desc")}
             size="lg"
             actions={[
-                { id: "close", label: tAny("close"), onClick: () => onOpenChange(false) },
+                { id: "close", label: tf("close"), onClick: () => onOpenChange(false) },
                 {
                     id: "save",
-                    label: tAny("render_cache_save_settings"),
+                    label: tf("render_cache_save_settings"),
                     intent: "primary",
                     disabled: saving,
                     onClick: handleSave,
@@ -195,7 +194,7 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                 <Flex direction="column" gap="1">
                     <Text size="2">{summaryText}</Text>
                     <Text size="1" color="gray" style={{ wordBreak: "break-all" }}>
-                        {tAny("render_cache_location_label")}：{stats?.dir ?? "…"}
+                        {tf("render_cache_location_label")}：{stats?.dir ?? "…"}
                     </Text>
                     <Flex gap="2" mt="1">
                         <Button
@@ -205,7 +204,7 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                             color="gray"
                             onClick={() => void handleOpenDir()}
                         >
-                            {tAny("render_cache_open_dir")}
+                            {tf("render_cache_open_dir")}
                         </Button>
                         <Button
                             type="button"
@@ -215,17 +214,17 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                             disabled={loading}
                             onClick={() => void refreshStats()}
                         >
-                            {tAny("render_cache_refresh")}
+                            {tf("render_cache_refresh")}
                         </Button>
                     </Flex>
                     {stats && !stats.writable ? (
                         <Text size="1" color="amber">
-                            {tAny("render_cache_dir_not_writable")}
+                            {tf("render_cache_dir_not_writable")}
                         </Text>
                     ) : null}
                     {stats && stats.sessionWriteErrors > 0 ? (
                         <Text size="1" color="amber">
-                            {tAny("render_cache_write_errors").replace(
+                            {tf("render_cache_write_errors").replace(
                                 "{n}",
                                 String(stats.sessionWriteErrors),
                             )}
@@ -241,18 +240,18 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                         checked={draft.enabled}
                         onCheckedChange={(v) => patch({ enabled: Boolean(v) })}
                     />
-                    <Text size="2">{tAny("render_cache_enable")}</Text>
+                    <Text size="2">{tf("render_cache_enable")}</Text>
                 </Flex>
                 <Flex align="center" gap="2">
                     <Checkbox
                         checked={draft.showHitStats}
                         onCheckedChange={(v) => patch({ showHitStats: Boolean(v) })}
                     />
-                    <Text size="2">{tAny("render_cache_show_hit_stats")}</Text>
+                    <Text size="2">{tf("render_cache_show_hit_stats")}</Text>
                 </Flex>
 
                 {/* ── 容量 ─────────────────────────────────────────────── */}
-                <AppField label={tAny("render_cache_max_size")}>
+                <AppField label={tf("render_cache_max_size")}>
                     <Flex align="center" gap="2">
                         <AppSelect
                             fullWidth={false}
@@ -265,8 +264,7 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                             }}
                             options={SIZE_PRESETS_MB.map((mb) => ({
                                 value: String(mb),
-                                label:
-                                    mb === 0 ? tAny("render_cache_unlimited") : `${mb / 1024} GB`,
+                                label: mb === 0 ? tf("render_cache_unlimited") : `${mb / 1024} GB`,
                             }))}
                         />
                         <AppNumberField
@@ -275,13 +273,13 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                             min={0}
                             width={110}
                             suffix="MB"
-                            ariaLabel={tAny("render_cache_max_size")}
+                            ariaLabel={tf("render_cache_max_size")}
                             onCommit={(maxSizeMb) => patch({ maxSizeMb })}
                         />
                     </Flex>
                 </AppField>
 
-                <AppField label={tAny("render_cache_max_age")}>
+                <AppField label={tf("render_cache_max_age")}>
                     <Flex align="center" gap="2">
                         <AppSelect
                             fullWidth={false}
@@ -296,8 +294,8 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                                 value: String(days),
                                 label:
                                     days === 0
-                                        ? tAny("render_cache_never")
-                                        : tAny("render_cache_days").replace("{n}", String(days)),
+                                        ? tf("render_cache_never")
+                                        : tf("render_cache_days").replace("{n}", String(days)),
                             }))}
                         />
                         <AppNumberField
@@ -305,8 +303,8 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                             unit="integer"
                             min={0}
                             width={90}
-                            suffix={tAny("render_cache_days_unit")}
-                            ariaLabel={tAny("render_cache_max_age")}
+                            suffix={tf("render_cache_days_unit")}
+                            ariaLabel={tf("render_cache_max_age")}
                             onCommit={(maxAgeDays) => patch({ maxAgeDays })}
                         />
                     </Flex>
@@ -314,19 +312,19 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
 
                 <Flex align="center" gap="2" wrap="wrap">
                     <Text size="2" style={{ minWidth: 132 }}>
-                        {tAny("render_cache_min_clip")}
+                        {tf("render_cache_min_clip")}
                     </Text>
                     <AppNumberField
                         value={draft.minClipSecs}
                         unit="seconds"
                         min={0}
                         width={90}
-                        suffix={tAny("render_cache_seconds_unit")}
-                        ariaLabel={tAny("render_cache_min_clip")}
+                        suffix={tf("render_cache_seconds_unit")}
+                        ariaLabel={tf("render_cache_min_clip")}
                         onCommit={(minClipSecs) => patch({ minClipSecs })}
                     />
                     <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
-                        {tAny("render_cache_min_entry")}
+                        {tf("render_cache_min_entry")}
                     </Text>
                     <AppNumberField
                         value={draft.minEntryKb}
@@ -334,11 +332,11 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                         min={0}
                         width={90}
                         suffix="KB"
-                        ariaLabel={tAny("render_cache_min_entry")}
+                        ariaLabel={tf("render_cache_min_entry")}
                         onCommit={(minEntryKb) => patch({ minEntryKb })}
                     />
                     <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
-                        {tAny("render_cache_max_entry")}
+                        {tf("render_cache_max_entry")}
                     </Text>
                     <AppNumberField
                         value={draft.maxEntryMb}
@@ -346,11 +344,11 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                         min={0}
                         width={90}
                         suffix="MB"
-                        ariaLabel={tAny("render_cache_max_entry")}
+                        ariaLabel={tf("render_cache_max_entry")}
                         onCommit={(maxEntryMb) => patch({ maxEntryMb })}
                     />
                     <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
-                        {tAny("render_cache_min_free_disk")}
+                        {tf("render_cache_min_free_disk")}
                     </Text>
                     <AppNumberField
                         value={draft.minFreeDiskMb}
@@ -358,27 +356,27 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                         min={0}
                         width={90}
                         suffix="MB"
-                        ariaLabel={tAny("render_cache_min_free_disk")}
+                        ariaLabel={tf("render_cache_min_free_disk")}
                         onCommit={(minFreeDiskMb) => patch({ minFreeDiskMb })}
                     />
                 </Flex>
 
                 {/* ── 高级 ─────────────────────────────────────────────── */}
-                <AppField label={tAny("render_cache_write_mode")}>
+                <AppField label={tf("render_cache_write_mode")}>
                     <AppSelect
                         // 旧写法是 size="1"（24px）：对话框里也要紧凑
                         density="compact"
                         value={draft.writeMode}
                         onValueChange={(v) => patch({ writeMode: v as RenderCacheWriteMode })}
                         options={[
-                            { value: "immediate", label: tAny("render_cache_write_immediate") },
-                            { value: "onExit", label: tAny("render_cache_write_on_exit") },
-                            { value: "manual", label: tAny("render_cache_write_manual") },
+                            { value: "immediate", label: tf("render_cache_write_immediate") },
+                            { value: "onExit", label: tf("render_cache_write_on_exit") },
+                            { value: "manual", label: tf("render_cache_write_manual") },
                         ]}
                     />
                 </AppField>
 
-                <AppField label={tAny("render_cache_location_mode")}>
+                <AppField label={tf("render_cache_location_mode")}>
                     <Flex align="center" gap="2" wrap="wrap">
                         <AppSelect
                             fullWidth={false}
@@ -389,14 +387,14 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                                 patch({ location: v === "custom" ? "custom" : "system" })
                             }
                             options={[
-                                { value: "system", label: tAny("render_cache_location_system") },
-                                { value: "custom", label: tAny("render_cache_location_custom") },
+                                { value: "system", label: tf("render_cache_location_system") },
+                                { value: "custom", label: tf("render_cache_location_custom") },
                             ]}
                         />
                         {draft.location === "custom" ? (
                             <TextField.Root
                                 size="1"
-                                placeholder={tAny("render_cache_custom_dir_placeholder")}
+                                placeholder={tf("render_cache_custom_dir_placeholder")}
                                 value={draft.customDir ?? ""}
                                 onChange={(event: ChangeEvent<HTMLInputElement>) =>
                                     patch({ customDir: event.target.value })
@@ -412,7 +410,7 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                         checked={draft.verifyChecksum}
                         onCheckedChange={(v) => patch({ verifyChecksum: Boolean(v) })}
                     />
-                    <Text size="2">{tAny("render_cache_verify_checksum")}</Text>
+                    <Text size="2">{tf("render_cache_verify_checksum")}</Text>
                 </Flex>
 
                 <Separator size="4" />
@@ -422,7 +420,7 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                     {pendingClearAll ? (
                         <>
                             <Text size="2" color="red">
-                                {tAny("render_cache_confirm_clear_all")}
+                                {tf("render_cache_confirm_clear_all")}
                             </Text>
                             <Button
                                 type="button"
@@ -431,7 +429,7 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                                 disabled={busyScope !== null}
                                 onClick={() => void handleClear("all")}
                             >
-                                {tAny("render_cache_confirm_yes")}
+                                {tf("render_cache_confirm_yes")}
                             </Button>
                             <Button
                                 type="button"
@@ -440,7 +438,7 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                                 color="gray"
                                 onClick={() => setPendingClearAll(false)}
                             >
-                                {tAny("cancel")}
+                                {tf("cancel")}
                             </Button>
                         </>
                     ) : (
@@ -453,7 +451,7 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                                 disabled={busyScope !== null}
                                 onClick={() => setPendingClearAll(true)}
                             >
-                                {tAny("render_cache_clear_all")}
+                                {tf("render_cache_clear_all")}
                             </Button>
                             <Button
                                 type="button"
@@ -463,7 +461,7 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                                 disabled={busyScope !== null}
                                 onClick={() => void handleClear("currentProject")}
                             >
-                                {tAny("render_cache_clear_project")}
+                                {tf("render_cache_clear_project")}
                             </Button>
                             <Button
                                 type="button"
@@ -478,7 +476,7 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                                     )
                                 }
                             >
-                                {tAny("render_cache_clear_old")}
+                                {tf("render_cache_clear_old")}
                             </Button>
                             <Button
                                 type="button"
@@ -488,7 +486,7 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                                 disabled={busyScope !== null}
                                 onClick={() => void handleClear("otherSampleRates")}
                             >
-                                {tAny("render_cache_clear_other_rates")}
+                                {tf("render_cache_clear_other_rates")}
                             </Button>
                         </>
                     )}

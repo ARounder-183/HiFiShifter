@@ -35,8 +35,7 @@ export const SilenceDetectionDialog: React.FC<{
     onOpenChange: (open: boolean) => void;
     clipIds: string[];
 }> = ({ open, onOpenChange, clipIds }) => {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const dispatch = useAppDispatch();
     const storedOptions = useAppSelector((s) => s.session.silenceDetectOptions);
     const clips = useAppSelector((s) => s.session.clips);
@@ -124,7 +123,7 @@ export const SilenceDetectionDialog: React.FC<{
         setOptions((prev) => ({ ...prev, ...patch }));
 
     // 双击参数行 = 该参数重置回默认值（提示文案挂在行 title 上）。
-    const resetHint = tAny("silence_double_click_reset");
+    const resetHint = tf("silence_double_click_reset");
 
     return (
         <AppDialog
@@ -132,13 +131,13 @@ export const SilenceDetectionDialog: React.FC<{
             onOpenChange={(next) => {
                 if (!next) closeAndCleanup();
             }}
-            title={tAny("ctx_silence_detection")}
+            title={tf("ctx_silence_detection")}
             size="md"
             actions={[
-                { id: "cancel", label: tAny("cancel"), onClick: closeAndCleanup },
+                { id: "cancel", label: tf("cancel"), onClick: closeAndCleanup },
                 {
                     id: "apply",
-                    label: applying ? tAny("silence_applying") : tAny("silence_apply"),
+                    label: applying ? tf("silence_applying") : tf("silence_apply"),
                     intent: "primary",
                     disabled: applying || clipIds.length === 0,
                     onClick: handleApply,
@@ -150,15 +149,15 @@ export const SilenceDetectionDialog: React.FC<{
                     data-tooltip={resetHint}
                     onDoubleClick={() => update({ method: SILENCE_DETECT_DEFAULTS.method })}
                 >
-                    <AppField label={tAny("silence_method")}>
+                    <AppField label={tf("silence_method")}>
                         <AppSelect
                             // 旧写法是 size="1"（24px）：对话框里也要紧凑
                             density="compact"
                             value={options.method}
                             onValueChange={(v) => update({ method: v as "rms" | "peak" })}
                             options={[
-                                { value: "rms", label: tAny("silence_method_rms") },
-                                { value: "peak", label: tAny("silence_method_peak") },
+                                { value: "rms", label: tf("silence_method_rms") },
+                                { value: "peak", label: tf("silence_method_peak") },
                             ]}
                         />
                     </AppField>
@@ -170,7 +169,7 @@ export const SilenceDetectionDialog: React.FC<{
                         update({ thresholdDb: SILENCE_DETECT_DEFAULTS.thresholdDb })
                     }
                 >
-                    <AppField label={tAny("silence_threshold")}>
+                    <AppField label={tf("silence_threshold")}>
                         <Flex align="center" gap="2">
                             <AppSlider
                                 value={options.thresholdDb}
@@ -178,12 +177,12 @@ export const SilenceDetectionDialog: React.FC<{
                                 min={-96}
                                 max={-6}
                                 disabled={options.adaptive}
-                                ariaLabel={tAny("silence_threshold")}
+                                ariaLabel={tf("silence_threshold")}
                                 onChange={(next) => update({ thresholdDb: next })}
                             />
                             <AppSliderReadout>
                                 {options.adaptive
-                                    ? tAny("silence_adaptive_short")
+                                    ? tf("silence_adaptive_short")
                                     : `${Math.round(options.thresholdDb)} dB`}
                             </AppSliderReadout>
                         </Flex>
@@ -199,7 +198,7 @@ export const SilenceDetectionDialog: React.FC<{
                         checked={options.adaptive}
                         onCheckedChange={(v) => update({ adaptive: v === true })}
                     />
-                    {tAny("silence_adaptive")}
+                    {tf("silence_adaptive")}
                 </label>
 
                 {(
@@ -219,14 +218,14 @@ export const SilenceDetectionDialog: React.FC<{
                             } as Partial<SilenceDetectSettings>)
                         }
                     >
-                        <AppField label={tAny(labelKey)}>
+                        <AppField label={tf(labelKey)}>
                             <Flex align="center" gap="2">
                                 <AppSlider
                                     value={options[key]}
                                     unit="milliseconds"
                                     min={min}
                                     max={max}
-                                    ariaLabel={tAny(labelKey)}
+                                    ariaLabel={tf(labelKey)}
                                     onChange={(next) => update({ [key]: next })}
                                 />
                                 <AppSliderReadout>{Math.round(options[key])} ms</AppSliderReadout>
@@ -239,7 +238,7 @@ export const SilenceDetectionDialog: React.FC<{
                     data-tooltip={resetHint}
                     onDoubleClick={() => update({ action: SILENCE_DETECT_DEFAULTS.action })}
                 >
-                    <AppField label={tAny("silence_action")}>
+                    <AppField label={tf("silence_action")}>
                         <AppSelect
                             // 旧写法是 size="1"（24px）：对话框里也要紧凑
                             density="compact"
@@ -248,9 +247,9 @@ export const SilenceDetectionDialog: React.FC<{
                                 update({ action: v as SilenceDetectSettings["action"] })
                             }
                             options={[
-                                { value: "close", label: tAny("silence_action_close") },
-                                { value: "keep", label: tAny("silence_action_keep") },
-                                { value: "split", label: tAny("silence_action_split") },
+                                { value: "close", label: tf("silence_action_close") },
+                                { value: "keep", label: tf("silence_action_keep") },
+                                { value: "split", label: tf("silence_action_split") },
                             ]}
                         />
                     </AppField>
@@ -267,7 +266,7 @@ export const SilenceDetectionDialog: React.FC<{
                         checked={options.deleteSilentClips}
                         onCheckedChange={(v) => update({ deleteSilentClips: v === true })}
                     />
-                    {tAny("silence_delete_silent_clips")}
+                    {tf("silence_delete_silent_clips")}
                 </label>
                 <label
                     className="flex items-center gap-2 text-[12px]"
@@ -280,19 +279,19 @@ export const SilenceDetectionDialog: React.FC<{
                         checked={options.syncAllTakes}
                         onCheckedChange={(v) => update({ syncAllTakes: v === true })}
                     />
-                    {tAny("silence_sync_all_takes")}
+                    {tf("silence_sync_all_takes")}
                 </label>
 
                 {/* 预览摘要（与时间线上的红色覆盖层联动） */}
                 <Flex direction="column" gap="1" className="rounded border border-qt-border p-2">
                     <Text size="1" className="text-qt-text-muted">
                         {analyzing
-                            ? tAny("silence_analyzing")
+                            ? tf("silence_analyzing")
                             : totalRegions > 0
-                              ? tAny("silence_preview_summary")
+                              ? tf("silence_preview_summary")
                                     .replace("{n}", String(totalRegions))
                                     .replace("{dur}", totalSilent.toFixed(2))
-                              : tAny("silence_no_silence")}
+                              : tf("silence_no_silence")}
                     </Text>
                     {clipIds.slice(0, 6).map((id) => {
                         const clip = clips.find((c) => c.id === id);
@@ -303,22 +302,22 @@ export const SilenceDetectionDialog: React.FC<{
                             <Text key={id} size="1" className="text-qt-text-muted">
                                 {`· ${name}: `}
                                 {report && !report.ok
-                                    ? tAny("silence_skipped") +
+                                    ? tf("silence_skipped") +
                                       (report.message ? ` (${report.message})` : "")
                                     : regions > 0
-                                      ? tAny("silence_preview_clip")
+                                      ? tf("silence_preview_clip")
                                             .replace("{n}", String(regions))
                                             .replace(
                                                 "{dur}",
                                                 (report?.totalSilentSec ?? 0).toFixed(2),
                                             )
-                                      : tAny("silence_no_silence")}
+                                      : tf("silence_no_silence")}
                             </Text>
                         );
                     })}
                     {clipIds.length > 6 ? (
                         <Text size="1" className="text-qt-text-muted">
-                            {tAny("silence_more_clips").replace("{n}", String(clipIds.length - 6))}
+                            {tf("silence_more_clips").replace("{n}", String(clipIds.length - 6))}
                         </Text>
                     ) : null}
                 </Flex>
