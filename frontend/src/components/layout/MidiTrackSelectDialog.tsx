@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Flex, Text, Button, ScrollArea, RadioGroup } from "@radix-ui/themes";
+import { Flex, ScrollArea, RadioGroup } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { paramsApi } from "../../services/api/params";
-import { AppNumberField } from "../../ui";
+import { AppButton, AppNumberField } from "../../ui";
 import { AppDialog, type AppDialogAction } from "../../ui/Dialog";
 import { AppForm, AppSwitchRow } from "../../ui/Field";
 
@@ -681,9 +681,9 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 {/* ── 导入目标选择（replace 模式不显示） ── */}
                 {!isReplaceMode && (
                     <Flex direction="column" gap="1" mt="3">
-                        <Text size="1" weight="medium">
+                        <span className="hs-type-label font-medium">
                             {tf("midi_import_target")}
-                        </Text>
+                        </span>
                         <RadioGroup.Root
                             value={currentTarget}
                             onValueChange={(v) => {
@@ -695,11 +695,15 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                             <Flex gap="3">
                                 <label className="flex items-center gap-1 cursor-pointer">
                                     <RadioGroup.Item value="pitchParam" />
-                                    <Text size="1">{tf("midi_import_target_pitch_param")}</Text>
+                                    <span className="hs-type-label">
+                                        {tf("midi_import_target_pitch_param")}
+                                    </span>
                                 </label>
                                 <label className="flex items-center gap-1 cursor-pointer">
                                     <RadioGroup.Item value="pitchRef" />
-                                    <Text size="1">{tf("midi_import_target_pitch_block")}</Text>
+                                    <span className="hs-type-label">
+                                        {tf("midi_import_target_pitch_block")}
+                                    </span>
                                 </label>
                             </Flex>
                         </RadioGroup.Root>
@@ -708,9 +712,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
 
                 {/* ── 文件选择区域（始终显示） ── */}
                 <Flex direction="column" gap="1" mt="3">
-                    <Text size="1" weight="medium">
-                        {tf("midi_file_path")}
-                    </Text>
+                    <span className="hs-type-label font-medium">{tf("midi_file_path")}</span>
                     <Flex gap="2" align="center">
                         <input
                             type="text"
@@ -731,41 +733,36 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                 minWidth: 0,
                             }}
                         />
-                        <Button variant="soft" size="1" onClick={handleBrowse} disabled={importing}>
+                        <AppButton size="sm" onClick={handleBrowse} disabled={importing}>
                             {tf("midi_browse")}
-                        </Button>
-                        <Button
-                            variant="soft"
-                            size="1"
+                        </AppButton>
+                        <AppButton
+                            size="sm"
                             onClick={handleReadClipboard}
                             disabled={importing || readingClipboard}
                         >
                             {readingClipboard ? tf("midi_importing") : tf("midi_read_clipboard")}
-                        </Button>
+                        </AppButton>
                     </Flex>
                 </Flex>
 
                 {loading && (
                     <Flex justify="center" py="4">
-                        <Text size="2" color="gray">
-                            {tf("common_loading")}
-                        </Text>
+                        <span className="hs-type-muted">{tf("common_loading")}</span>
                     </Flex>
                 )}
 
                 {error && (
                     <Flex py="2">
-                        <Text size="2" color="red">
+                        <span className="hs-type-body" style={{ color: "var(--qt-danger-text)" }}>
                             {error}
-                        </Text>
+                        </span>
                     </Flex>
                 )}
 
                 {effectivePath && !loading && !error && tracks.length === 0 && (
                     <Flex py="4" justify="center">
-                        <Text size="2" color="gray">
-                            {tf("midi_no_tracks")}
-                        </Text>
+                        <span className="hs-type-muted">{tf("midi_no_tracks")}</span>
                     </Flex>
                 )}
 
@@ -773,27 +770,21 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                     <>
                         {/* 全选 / 全不选 快捷按钮 */}
                         <Flex gap="2" mt="3">
-                            <Button
-                                variant="soft"
-                                color="gray"
-                                size="1"
+                            <AppButton
+                                size="sm"
                                 onClick={() => setSelectedTracks(tracks.map((t) => t.index))}
                             >
                                 {tf("midi_select_all")}
-                            </Button>
-                            <Button
-                                variant="soft"
-                                color="gray"
-                                size="1"
-                                onClick={() => setSelectedTracks([])}
-                            >
+                            </AppButton>
+                            <AppButton size="sm" onClick={() => setSelectedTracks([])}>
                                 {tf("midi_deselect_all")}
-                            </Button>
+                            </AppButton>
                             {initialBpm != null && (
-                                <Text
-                                    size="1"
-                                    color={midiHasBpm ? "gray" : "red"}
-                                    className="ml-auto self-center"
+                                <span
+                                    className="hs-type-caption ml-auto self-center"
+                                    style={
+                                        midiHasBpm ? undefined : { color: "var(--qt-danger-text)" }
+                                    }
                                 >
                                     {midiHasBpm
                                         ? tf("midi_midi_bpm_label").replace(
@@ -801,7 +792,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                               initialBpm.toFixed(2),
                                           )
                                         : `${tf("midi_no_bpm")}`}
-                                </Text>
+                                </span>
                             )}
                         </Flex>
 
@@ -838,17 +829,17 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             />
                                         </AppForm>
                                         <Flex direction="column" gap="0" className="flex-1 min-w-0">
-                                            <Text size="2" weight="medium" className="truncate">
+                                            <span className="hs-type-label font-medium truncate">
                                                 {track.name || `Track ${track.index + 1}`}
-                                            </Text>
+                                            </span>
                                             <Flex gap="2">
-                                                <Text size="1" color="gray">
+                                                <span className="hs-type-caption">
                                                     {tf("midi_track_notes").replace(
                                                         "{count}",
                                                         String(track.note_count),
                                                     )}
-                                                </Text>
-                                                <Text size="1" color="gray">
+                                                </span>
+                                                <span className="hs-type-caption">
                                                     {tf("midi_track_range")
                                                         .replace(
                                                             "{min}",
@@ -858,7 +849,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                                             "{max}",
                                                             noteToName(track.max_note),
                                                         )}
-                                                </Text>
+                                                </span>
                                             </Flex>
                                         </Flex>
                                     </label>
@@ -976,17 +967,15 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                         />
                                     </AppForm>
                                 </Flex>
-                                <Text size="1" color="gray" className="ml-6 mt-1">
+                                <span className="hs-type-caption ml-6 mt-1">
                                     {tf("midi_import_as_tempo_map_hint")}
-                                </Text>
+                                </span>
                             </Flex>
                         )}
 
                         {/* 音符 BPM 设置 */}
                         <Flex direction="column" gap="1" mt="2">
-                            <Text size="2" weight="medium">
-                                {tf("midi_note_bpm")}
-                            </Text>
+                            <span className="hs-type-label font-medium">{tf("midi_note_bpm")}</span>
                             <RadioGroup.Root
                                 value={importTempoMapEnabled ? "midi" : displayNoteBpmMode}
                                 onValueChange={(v) => {
@@ -1005,16 +994,9 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             value="midi"
                                             disabled={!midiHasBpm || importTempoMapEnabled}
                                         />
-                                        <Text
-                                            size="1"
-                                            color={
-                                                midiHasBpm && !importTempoMapEnabled
-                                                    ? undefined
-                                                    : "gray"
-                                            }
-                                        >
+                                        <span className="hs-type-label">
                                             {tf("midi_note_bpm_midi")}
-                                        </Text>
+                                        </span>
                                     </label>
                                     <label
                                         className={`flex items-center gap-1 ${
@@ -1025,15 +1007,19 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             value="project"
                                             disabled={importTempoMapEnabled}
                                         />
-                                        <Text
-                                            size="1"
-                                            color={importTempoMapEnabled ? "gray" : undefined}
+                                        <span
+                                            className="hs-type-label"
+                                            style={
+                                                importTempoMapEnabled
+                                                    ? { color: "var(--qt-text-muted)" }
+                                                    : undefined
+                                            }
                                         >
                                             {tf("midi_note_bpm_project")}
                                             {projectBpm != null
                                                 ? ` (${projectBpm.toFixed(2)} BPM)`
                                                 : ""}
-                                        </Text>
+                                        </span>
                                     </label>
                                     <label
                                         className={`flex items-center gap-1 ${
@@ -1044,12 +1030,16 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             value="specified"
                                             disabled={importTempoMapEnabled}
                                         />
-                                        <Text
-                                            size="1"
-                                            color={importTempoMapEnabled ? "gray" : undefined}
+                                        <span
+                                            className="hs-type-label"
+                                            style={
+                                                importTempoMapEnabled
+                                                    ? { color: "var(--qt-text-muted)" }
+                                                    : undefined
+                                            }
                                         >
                                             {tf("midi_note_bpm_specified")}
-                                        </Text>
+                                        </span>
                                     </label>
                                     {noteBpmMode === "specified" && !importTempoMapEnabled && (
                                         <Flex gap="2" align="center" className="ml-5 mt-1">
@@ -1062,9 +1052,9 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                                 ariaLabel={tf("midi_note_bpm_specified")}
                                                 onCommit={(next) => onSpecifiedBpmChange?.(next)}
                                             />
-                                            <Text size="1" color="gray">
+                                            <span className="hs-type-caption">
                                                 {tf("midi_specified_bpm_placeholder")}
-                                            </Text>
+                                            </span>
                                         </Flex>
                                     )}
                                 </Flex>
@@ -1078,9 +1068,9 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                         {/* 导入位置选项（仅在 paramEditor 目标下显示） */}
                         {currentTarget === "pitchParam" && !isReplaceMode && (
                             <Flex direction="column" gap="1" mt="3">
-                                <Text size="2" weight="medium">
+                                <span className="hs-type-label font-medium">
                                     {tf("midi_import_position")}
-                                </Text>
+                                </span>
                                 <RadioGroup.Root
                                     value={
                                         importPosition === "selection" && !selectionAvailable
@@ -1092,25 +1082,31 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                     <Flex gap="3">
                                         <label className="flex items-center gap-1 cursor-pointer">
                                             <RadioGroup.Item value="projectStart" />
-                                            <Text size="1">{tf("midi_import_position_start")}</Text>
+                                            <span className="hs-type-label">
+                                                {tf("midi_import_position_start")}
+                                            </span>
                                         </label>
                                         <label className="flex items-center gap-1 cursor-pointer">
                                             <RadioGroup.Item value="playhead" />
-                                            <Text size="1">
+                                            <span className="hs-type-label">
                                                 {tf("midi_import_position_playhead")}
-                                            </Text>
+                                            </span>
                                         </label>
                                         <label className="flex items-center gap-1 cursor-pointer">
                                             <RadioGroup.Item
                                                 value="selection"
                                                 disabled={!selectionAvailable}
                                             />
-                                            <Text
-                                                size="1"
-                                                color={selectionAvailable ? undefined : "gray"}
+                                            <span
+                                                className="hs-type-label"
+                                                style={
+                                                    selectionAvailable
+                                                        ? undefined
+                                                        : { color: "var(--qt-text-muted)" }
+                                                }
                                             >
                                                 {tf("midi_import_position_selection")}
-                                            </Text>
+                                            </span>
                                         </label>
                                     </Flex>
                                 </RadioGroup.Root>

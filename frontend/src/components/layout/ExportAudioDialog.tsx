@@ -4,7 +4,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { Button, Flex, SegmentedControl, Text, TextField } from "@radix-ui/themes";
+import { Flex, TextField } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { exportAudioAdvanced } from "../../features/session/sessionSlice";
@@ -30,7 +30,14 @@ import {
 } from "../../utils/exportFormat";
 import { ProgressBar } from "../ProgressBar";
 import type { TrackInfo } from "../../features/session/sessionTypes";
-import { AppNumberField, AppSelect, AppSlider, AppSliderReadout } from "../../ui";
+import {
+    AppButton,
+    AppNumberField,
+    AppSegmentedControl,
+    AppSelect,
+    AppSlider,
+    AppSliderReadout,
+} from "../../ui";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm, AppSwitchRow } from "../../ui/Field";
 
@@ -1297,9 +1304,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
                     {rangeKind === "custom" && (
                         <Flex gap="2" align="center">
-                            <Text size="2" style={{ minWidth: 132 }}>
+                            <span className="hs-type-label shrink-0" style={{ minWidth: 132 }}>
                                 {tf("export_dialog_range_custom_label")}
-                            </Text>
+                            </span>
                             <AppNumberField
                                 value={customStartSec}
                                 unit="seconds"
@@ -1309,9 +1316,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                 onChange={(next) => setCustomStartSec(next)}
                                 onCommit={(next) => setCustomStartSec(next)}
                             />
-                            <Text size="2" color="gray">
-                                ~
-                            </Text>
+                            <span className="hs-type-muted">~</span>
                             <AppNumberField
                                 value={customEndSec}
                                 unit="seconds"
@@ -1321,21 +1326,22 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                 onChange={(next) => setCustomEndSec(next)}
                                 onCommit={(next) => setCustomEndSec(next)}
                             />
-                            <Text size="1" color="gray">
-                                sec
-                            </Text>
+                            <span className="hs-type-caption">sec</span>
                         </Flex>
                     )}
 
                     <AppField label={tf("export_dialog_format")}>
-                        <SegmentedControl.Root
+                        <AppSegmentedControl
+                            size="sm"
                             value={format}
-                            onValueChange={(value) => handleFormatChange(value as ExportFormat)}
-                        >
-                            <SegmentedControl.Item value="wav">WAV</SegmentedControl.Item>
-                            <SegmentedControl.Item value="mp3">MP3</SegmentedControl.Item>
-                            <SegmentedControl.Item value="flac">FLAC</SegmentedControl.Item>
-                        </SegmentedControl.Root>
+                            options={[
+                                { value: "wav", label: "WAV" },
+                                { value: "mp3", label: "MP3" },
+                                { value: "flac", label: "FLAC" },
+                            ]}
+                            onChange={(value) => handleFormatChange(value as ExportFormat)}
+                            ariaLabel={tf("export_dialog_format")}
+                        />
                     </AppField>
 
                     <AppField label={tf("export_dialog_sample_rate")}>
@@ -1353,9 +1359,12 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     </AppField>
 
                     {sampleRateNotice ? (
-                        <Text size="1" color="amber">
+                        <span
+                            className="hs-type-caption"
+                            style={{ color: "var(--qt-warning-text)" }}
+                        >
                             {sampleRateNotice}
-                        </Text>
+                        </span>
                     ) : null}
 
                     {format !== "mp3" ? (
@@ -1381,20 +1390,15 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                             />
                         </AppField>
                     ) : (
-                        <Text size="1" color="gray">
+                        <span className="hs-type-caption">
                             {tf("export_dialog_mp3_bit_depth_note")}
-                        </Text>
+                        </span>
                     )}
 
                     <Flex align="center" gap="2">
-                        <Button
-                            variant="ghost"
-                            color="gray"
-                            size="1"
-                            onClick={() => setEncoderOpen((prev) => !prev)}
-                        >
+                        <AppButton size="sm" onClick={() => setEncoderOpen((prev) => !prev)}>
                             {encoderOpen ? "▾" : "▸"} {tf("export_dialog_encoder_params")}
-                        </Button>
+                        </AppButton>
                     </Flex>
 
                     {encoderOpen && (
@@ -1451,9 +1455,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                     )}
 
                                     <Flex direction="column" gap="2">
-                                        <Text size="2" color="gray">
+                                        <span className="hs-type-label">
                                             {tf("export_dialog_mp3_tags")}
-                                        </Text>
+                                        </span>
                                         <div className="grid grid-cols-2 gap-2">
                                             {(
                                                 [
@@ -1467,9 +1471,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                                     key={key}
                                                     className="flex flex-col gap-1 text-qt-xs text-qt-text"
                                                 >
-                                                    <Text size="1" color="gray">
+                                                    <span className="hs-type-caption">
                                                         {tf(i18nKey)}
-                                                    </Text>
+                                                    </span>
                                                     <TextField.Root
                                                         size="1"
                                                         value={mp3Tags[key] ?? ""}
@@ -1492,9 +1496,12 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                             {format === "flac" && (
                                 <>
                                     <Flex align="center" gap="2">
-                                        <Text size="2" style={{ minWidth: 132 }}>
+                                        <span
+                                            className="hs-type-label shrink-0"
+                                            style={{ minWidth: 132 }}
+                                        >
                                             {tf("export_dialog_flac_level")}
-                                        </Text>
+                                        </span>
                                         <AppSlider
                                             value={flacLevel}
                                             unit="integer"
@@ -1505,9 +1512,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                         />
                                         <AppSliderReadout>{flacLevel}</AppSliderReadout>
                                     </Flex>
-                                    <Text size="1" color="gray">
+                                    <span className="hs-type-caption">
                                         {tf("export_dialog_flac_level_hint")}
-                                    </Text>
+                                    </span>
                                 </>
                             )}
 
@@ -1562,9 +1569,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     {mode === "project" ? (
                         <>
                             <Flex align="center" gap="2">
-                                <Text size="2" style={{ minWidth: 132 }}>
+                                <span className="hs-type-label shrink-0" style={{ minWidth: 132 }}>
                                     {tf("export_dialog_output_dir")}
-                                </Text>
+                                </span>
                                 <TextField.Root
                                     size="2"
                                     value={projectOutputDir}
@@ -1577,13 +1584,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                     }
                                     style={{ flex: 1 }}
                                 />
-                                <Button
-                                    variant="soft"
-                                    color="gray"
-                                    onClick={() => void browseProjectOutputDir()}
-                                >
+                                <AppButton size="sm" onClick={() => void browseProjectOutputDir()}>
                                     {tf("export_dialog_browse")}
-                                </Button>
+                                </AppButton>
                             </Flex>
 
                             <AppField label={tf("export_dialog_project_file_name")}>
@@ -1601,41 +1604,38 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                             </AppField>
 
                             <Flex gap="2" wrap="wrap" align="center">
-                                <Text size="1" color="gray">
+                                <span className="hs-type-caption">
                                     {tf("export_pattern_placeholders")}
-                                </Text>
+                                </span>
                                 {(["<ProjectName>", "<ProjectFolder>"] as const).map((token) => (
-                                    <Button
+                                    <AppButton
                                         key={token}
-                                        size="1"
-                                        variant="ghost"
-                                        color="gray"
+                                        size="sm"
                                         onClick={() => applyTokenToActiveInput(token)}
                                     >
                                         {token}
-                                    </Button>
+                                    </AppButton>
                                 ))}
                             </Flex>
 
                             {examplePath ? (
-                                <Text
-                                    size="1"
-                                    color="gray"
+                                <span
+                                    className="hs-type-caption"
                                     style={{ userSelect: "text", wordBreak: "break-all" }}
                                 >
                                     {tf("export_dialog_example_path").replace(
                                         "{path}",
                                         examplePath,
                                     )}
-                                </Text>
+                                </span>
                             ) : null}
                         </>
                     ) : (
                         <>
                             <Flex align="center" gap="2">
-                                <Text size="2" style={{ minWidth: 132 }}>
+                                <span className="hs-type-label shrink-0" style={{ minWidth: 132 }}>
                                     {tf("export_dialog_output_dir")}
-                                </Text>
+                                </span>
                                 <TextField.Root
                                     size="2"
                                     value={separatedOutputDir}
@@ -1648,13 +1648,12 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                     }
                                     style={{ flex: 1 }}
                                 />
-                                <Button
-                                    variant="soft"
-                                    color="gray"
+                                <AppButton
+                                    size="sm"
                                     onClick={() => void browseSeparatedOutputDir()}
                                 >
                                     {tf("export_dialog_browse")}
-                                </Button>
+                                </AppButton>
                             </Flex>
 
                             <AppField label={tf("export_dialog_name_pattern")}>
@@ -1672,9 +1671,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                             </AppField>
 
                             <Flex gap="2" wrap="wrap" align="center">
-                                <Text size="1" color="gray">
+                                <span className="hs-type-caption">
                                     {tf("export_pattern_placeholders")}
-                                </Text>
+                                </span>
                                 {[
                                     "<ExportIndex>",
                                     "<TrackIndex>",
@@ -1684,29 +1683,26 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                     "<ProjectName>",
                                     "<ProjectFolder>",
                                 ].map((token) => (
-                                    <Button
+                                    <AppButton
                                         key={token}
-                                        size="1"
-                                        variant="ghost"
-                                        color="gray"
+                                        size="sm"
                                         onClick={() => applyTokenToActiveInput(token)}
                                     >
                                         {token}
-                                    </Button>
+                                    </AppButton>
                                 ))}
                             </Flex>
 
                             {examplePath ? (
-                                <Text
-                                    size="1"
-                                    color="gray"
+                                <span
+                                    className="hs-type-caption"
                                     style={{ userSelect: "text", wordBreak: "break-all" }}
                                 >
                                     {tf("export_dialog_example_path").replace(
                                         "{path}",
                                         examplePath,
                                     )}
-                                </Text>
+                                </span>
                             ) : null}
 
                             {/*
@@ -1717,45 +1713,28 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                              * 剩余高度。
                              */}
                             <div className="min-h-0 flex-1 overflow-y-auto rounded border border-qt-border bg-qt-base p-2">
-                                <Text size="2" className="font-medium">
+                                <span className="hs-type-label font-semibold">
                                     {tf("export_dialog_targets")}
-                                </Text>
+                                </span>
                                 <Flex gap="1" mt="2" wrap="wrap">
-                                    <Button
-                                        size="1"
-                                        variant="soft"
-                                        color="gray"
-                                        onClick={selectAllTargets}
-                                    >
+                                    <AppButton size="sm" onClick={selectAllTargets}>
                                         {tf("export_dialog_select_all")}
-                                    </Button>
-                                    <Button
-                                        size="1"
-                                        variant="soft"
-                                        color="gray"
-                                        onClick={clearSelectedTargets}
-                                    >
+                                    </AppButton>
+                                    <AppButton size="sm" onClick={clearSelectedTargets}>
                                         {tf("export_dialog_select_none")}
-                                    </Button>
-                                    <Button
-                                        size="1"
-                                        variant="soft"
-                                        color="gray"
+                                    </AppButton>
+                                    <AppButton
+                                        size="sm"
                                         onClick={selectAllSubTargets}
                                         disabled={
                                             !allTargets.some((target) => target.kind === "sub")
                                         }
                                     >
                                         {tf("export_dialog_select_all_subtracks")}
-                                    </Button>
-                                    <Button
-                                        size="1"
-                                        variant="soft"
-                                        color="gray"
-                                        onClick={selectExcludeMutedTargets}
-                                    >
+                                    </AppButton>
+                                    <AppButton size="sm" onClick={selectExcludeMutedTargets}>
                                         {tf("export_dialog_select_exclude_muted")}
-                                    </Button>
+                                    </AppButton>
                                 </Flex>
                                 <Flex direction="column" gap="2" mt="2">
                                     {targetGroups.map((group) => (
@@ -1763,9 +1742,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                             key={group.id}
                                             className="rounded border border-qt-border bg-qt-window px-2 py-2"
                                         >
-                                            <Text size="1" color="gray">
-                                                {group.title}
-                                            </Text>
+                                            <span className="hs-type-caption">{group.title}</span>
                                             <AppForm booleanRow="leading">
                                                 <Flex direction="column" gap="1" mt="1">
                                                     {group.options.map((target) => (
@@ -1791,9 +1768,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     )}
 
                     {errorText ? (
-                        <Text size="2" color="red">
+                        <span className="hs-type-body" style={{ color: "var(--qt-danger-text)" }}>
                             {errorText}
-                        </Text>
+                        </span>
                     ) : null}
 
                     {shouldShowProgress ? (
