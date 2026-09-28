@@ -58,12 +58,13 @@ const ROLE_FONT = {
     section: fontSizeOf(ruleBody(".hs-type-section")),
     body: fontSizeOf(ruleBody(".hs-type-body")),
     label: fontSizeOf(ruleBody(".hs-type-label")),
+    muted: fontSizeOf(ruleBody(".hs-type-muted")),
     caption: fontSizeOf(ruleBody(".hs-type-caption")),
     mono: fontSizeOf(ruleBody(".hs-type-mono")),
 };
 
 describe("排版角色层级", () => {
-    test("六个角色都有定义", () => {
+    test("七个角色都有定义", () => {
         for (const role of Object.keys(ROLE_FONT)) {
             expect(ruleBody(`.hs-type-${role}`), `.hs-type-${role} 缺失`).toBeTruthy();
         }
@@ -80,6 +81,14 @@ describe("排版角色层级", () => {
         expect(ROLE_FONT.label).toBeGreaterThan(ROLE_FONT.caption);
     });
 
+    test("弱化正文与标签同字号，靠颜色分层", () => {
+        // `.hs-type-muted` 承载"弱化的正文句"（面板说明、空态提示）——与标签同为
+        // 12px，但用弱化色：它比 caption 大一档（11px 撑不起句子），比正文淡一档。
+        expect(ROLE_FONT.muted).toBe(ROLE_FONT.label);
+        expect(usesMuted(ruleBody(".hs-type-muted"))).toBe(true);
+        expect(ROLE_FONT.body).toBeGreaterThan(ROLE_FONT.muted);
+    });
+
     test("节标题不小于正文，靠字重分层而不是靠缩小字号", () => {
         expect(ROLE_FONT.section).toBeGreaterThanOrEqual(ROLE_FONT.body);
         const section = ruleBody(".hs-type-section");
@@ -92,8 +101,12 @@ describe("排版角色层级", () => {
         expect(usesMuted(ruleBody(".hs-type-caption"))).toBe(true);
     });
 
-    test("对话框副标题沿用角色量级，不再各自写字号", () => {
-        expect(fontSizeOf(ruleBody(".app-dialog__description"))).toBe(ROLE_FONT.label);
+    test("对话框副标题复用 .hs-type-muted，规则里不再写字号", () => {
+        const dialogSource = readFileSync(new URL("./Dialog.tsx", import.meta.url), "utf8");
+        expect(dialogSource, "副标题元素上没有挂 hs-type-muted").toContain("hs-type-muted");
+        expect(css, "副标题规则又写回了自己的排版声明 —— 字号必须只有一个来源").not.toMatch(
+            /\.app-dialog__description\s*\{[^}]*font-size/,
+        );
     });
 
     /*
@@ -212,6 +225,78 @@ describe("排版角色层级", () => {
             offenders.length === 0
                 ? []
                 : ["以下槽位里套了 <Text>，会让同一槽位出现两种字号：", ...offenders].join("\n"),
+        ).toEqual([]);
+    });
+
+    /*
+     * Radix `<Text>` 的字号取值（14px/12px）与角色层并存了多轮 —— 同一面板两种
+     * "正文"。第七轮按语义映射表全量收编，本门禁钉住清零进程：白名单只允许
+     * **变小**；自检要求清单里的文件必须仍在用 `<Text`，迁完就从清单删除，
+     * 否则清单本身就在撒谎。清单清空后此断言退化为"全仓禁用"。
+     */
+    test("src/ui 之外禁止 Radix <Text>（白名单棘轮）", () => {
+        const whitelist = new Set([
+            "src/App.tsx",
+            "src/components/dock/DockLayoutSettingsDialog.tsx",
+            "src/components/layout/AboutDialog.tsx",
+            "src/components/layout/ActionBar.tsx",
+            "src/components/layout/AutoBackupDialog.tsx",
+            "src/components/layout/BenchmarkDialog.tsx",
+            "src/components/layout/ChannelImportDialog.tsx",
+            "src/components/layout/CustomScaleDialog.tsx",
+            "src/components/layout/ExportAudioDialog.tsx",
+            "src/components/layout/FileBrowserPanel.tsx",
+            "src/components/layout/ImportProjectDialog.tsx",
+            "src/components/layout/KeybindingsDialog.tsx",
+            "src/components/layout/MidiTrackSelectDialog.tsx",
+            "src/components/layout/PianoRollPanel.tsx",
+            "src/components/layout/QuickClipExportDialog.tsx",
+            "src/components/layout/QuickSearchPopup.tsx",
+            "src/components/layout/RecordingSettingsDialog.tsx",
+            "src/components/layout/RenderCacheDialog.tsx",
+            "src/components/layout/SplitTransitionSettingsDialog.tsx",
+            "src/components/layout/TimelineDisplaySettingsDialog.tsx",
+            "src/components/layout/notebook/NotebookDialogs.tsx",
+            "src/components/layout/timeline/SilenceDetectionDialog.tsx",
+            "src/components/layout/timeline/TempoMapCornerButton.tsx",
+            "src/components/layout/timeline/TempoMapRulerRow.tsx",
+            "src/components/layout/timeline/TrackList.tsx",
+            "src/components/layout/timeline/clip/ClipFormantToolWindow.tsx",
+            "src/components/layout/timeline/kernel/KernelUnavailableNotice.tsx",
+        ]);
+        const offenders: string[] = [];
+        const stack: string[] = ["src"];
+        while (stack.length > 0) {
+            const dir = stack.pop()!;
+            for (const entry of readdirSync(dir)) {
+                const full = `${dir}/${entry}`;
+                if (statSync(full).isDirectory()) {
+                    if (entry !== "node_modules") stack.push(full);
+                    continue;
+                }
+                if (!/\.tsx$/.test(entry) || /\.test\.tsx$/.test(entry)) continue;
+                if (full.startsWith("src/ui/")) continue;
+                // 掐掉注释行：文档里提一句 `<Text` 不算采用
+                const source = readFileSync(full, "utf8")
+                    .split("\n")
+                    .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+                    .join("\n");
+                if (/<Text[\s/>]/.test(source)) offenders.push(full);
+            }
+        }
+        const outside = offenders.filter((file) => !whitelist.has(file));
+        expect(
+            outside.length === 0
+                ? []
+                : ["以下白名单之外的文件仍在使用 Radix <Text>：", ...outside].join("\n"),
+        ).toEqual([]);
+        const stale = [...whitelist].filter(
+            (file) => !/<Text[\s/>]/.test(readFileSync(file, "utf8")),
+        );
+        expect(
+            stale.length === 0
+                ? []
+                : ["白名单里的文件已不再使用 <Text>，请从清单删除：", ...stale].join("\n"),
         ).toEqual([]);
     });
 

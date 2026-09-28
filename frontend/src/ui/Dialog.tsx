@@ -369,7 +369,7 @@ export function AppDialog({
                         {title}
                     </Dialog.Title>
                     {description ? (
-                        <Dialog.Description className="app-dialog__description mt-1">
+                        <Dialog.Description className="app-dialog__description hs-type-muted mt-1">
                             {description}
                         </Dialog.Description>
                     ) : (

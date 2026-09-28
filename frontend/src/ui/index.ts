@@ -44,6 +44,12 @@ export {
 } from "./Field";
 
 export { AppChoiceList, type AppChoiceListProps, type AppChoiceOption } from "./ChoiceList";
+
+export {
+    AppSegmentedControl,
+    type AppSegmentedControlProps,
+    type AppSegmentedOption,
+} from "./SegmentedControl";
 export { AppContextMenu, type AppContextMenuProps, type AppMenuItemSpec } from "./Menu";
 
 export {

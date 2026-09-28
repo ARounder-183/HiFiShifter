@@ -426,11 +426,12 @@ textarea {
  *
  * 层级（必须保持，见 typography.test.ts）：
  *   display(20/700) > section(13/600) > body(13/400) = mono(12)
- *     > label(12/400) > caption(11/400 muted)
+ *     > label(12/400) = muted(12/400 muted) > caption(11/400 muted)
  *
- * 【为什么 section 不比 body 大，而是更粗】节标题统领的是同号正文，靠字重与
- * 留白区分比靠"更小的字"更可靠 —— 原实现把节标题做成 12px/700，比它统领的
- * 14px 行还小，视觉上成了正文的附属。
+ * 【为什么 muted 与 label 同字号】12px 的"弱化正文句"（面板说明、空态提示）
+ * 与 12px 的字段标签字号相同、**靠颜色分层**：标签用正文色（不许比自己的提示
+ * 还淡），muted 用弱化色。此前这个语义被 Radix `<Text size="2" color="gray">`
+ * 以 14px 承载，与角色层并存期间同一面板两种正文，本次收编（见第七轮方案）。
  * ======================================================================== */
 
 .hs-type-display {
@@ -462,6 +463,16 @@ textarea {
     line-height: var(--qt-lh-base);
     font-weight: 400;
     color: var(--qt-text);
+}
+
+/* 弱化正文句：比正文小一档且用弱化色，但**比 caption 大一档** —— 承载完整
+   句子（面板说明、空态提示、对话框副标题），11px 是角标量级，撑不起句子。
+   与 `.app-dialog__description` 是同一语义：那条规则已删除、元素直接挂本类。 */
+.hs-type-muted {
+    font-size: var(--qt-fs-sm);
+    line-height: var(--qt-lh-base);
+    font-weight: 400;
+    color: var(--qt-text-muted);
 }
 
 /* 说明 / 提示 / 单位 / 状态：全应用最小的正文级文字 */
@@ -544,11 +555,8 @@ textarea {
     margin: 0;
 }
 
-.app-dialog__description {
-    font-size: var(--qt-fs-sm);
-    line-height: var(--qt-lh-base);
-    color: var(--qt-text-muted);
-}
+/* 副标题的排版声明已上收为 `.hs-type-muted` 角色类（`Dialog.tsx` 挂在同一
+   元素上）—— 字号/行高/颜色只此一份，与标题复用 display 同一条原则。 */
 
 /*
  * 主消息。

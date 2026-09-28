@@ -44,7 +44,14 @@ import {
     type ThemeModeSetting,
 } from "../../theme/themeTypes";
 import { getBuiltinThemeColors } from "../../theme/defaultThemes";
-import { AppButton, AppConfirmDialog, AppField, AppFormSection, AppStatusChip } from "../../ui";
+import {
+    AppButton,
+    AppConfirmDialog,
+    AppField,
+    AppFormSection,
+    AppSegmentedControl,
+    AppStatusChip,
+} from "../../ui";
 import {
     loadCustomThemes,
     loadAppearance,
@@ -375,34 +382,6 @@ function useSystemFonts() {
 /* ═══════════════════════════════════════════════════════════
  * 小组件
  * ═══════════════════════════════════════════════════════════ */
-
-/** 顶部 Segmented Control */
-const SegmentedControl: React.FC<{
-    tabs: { id: string; label: string }[];
-    active: string;
-    onChange: (id: string) => void;
-}> = ({ tabs, active, onChange }) => (
-    <div className="flex gap-1 rounded border border-qt-border bg-qt-panel p-1">
-        {tabs.map((tab) => {
-            const isActive = active === tab.id;
-            return (
-                <button
-                    key={tab.id}
-                    className={
-                        "flex-1 px-3 py-1.5 text-qt-xs font-semibold rounded transition-colors duration-150 " +
-                        "cursor-pointer select-none " +
-                        (isActive
-                            ? "bg-qt-highlight text-white"
-                            : "text-qt-text-muted hover:bg-qt-hover hover:text-qt-text")
-                    }
-                    onClick={() => onChange(tab.id)}
-                >
-                    {tab.label}
-                </button>
-            );
-        })}
-    </div>
-);
 
 /** 单个颜色 token 行：标签列对齐 `AppField` 的表单网格，值区 = 色块 + hex 输入。 */
 const ColorTokenRow: React.FC<{
@@ -952,10 +931,12 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
         <div className="flex h-full flex-col overflow-hidden">
             {/* ═══════ 页眉行：Tab 切换 + 修改计数（唯一一处，不再在颜色节重复） ═══════ */}
             <div className="flex shrink-0 items-center justify-between gap-3 border-b border-qt-border px-3 py-2">
-                <SegmentedControl
-                    tabs={tabItems}
-                    active={activeTab}
+                <AppSegmentedControl
+                    size="md"
+                    value={activeTab}
+                    options={tabItems.map((tab) => ({ value: tab.id, label: tab.label }))}
                     onChange={(id) => setActiveTab(id as SettingsTab)}
+                    ariaLabel={tf("appearance_title")}
                 />
                 {modifiedColorCount > 0 ? (
                     <AppStatusChip tone="accent">
@@ -1213,13 +1194,16 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                     ) : undefined
                                 }
                             >
-                                <SegmentedControl
-                                    tabs={PALETTE_GROUPS.map((group) => ({
-                                        id: group.labelKey,
+                                <AppSegmentedControl
+                                    size="md"
+                                    className="w-full"
+                                    value={activePaletteGroup}
+                                    options={PALETTE_GROUPS.map((group) => ({
+                                        value: group.labelKey,
                                         label: tf(group.labelKey),
                                     }))}
-                                    active={activePaletteGroup}
                                     onChange={(id) => setActivePaletteGroup(id)}
+                                    ariaLabel={tf("appearance_tab_colors")}
                                 />
 
                                 <div className="flex flex-col gap-1">
