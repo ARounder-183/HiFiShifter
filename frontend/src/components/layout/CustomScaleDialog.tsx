@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Flex, Text, TextField } from "@radix-ui/themes";
+import { Button, Flex, TextField } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -190,7 +190,7 @@ export function CustomScaleDialog({ open, onOpenChange }: Props) {
                 </AppField>
 
                 <Flex direction="column" gap="2">
-                    <Text size="2">{tf("custom_scale_notes")}</Text>
+                    <span className="hs-type-label">{tf("custom_scale_notes")}</span>
                     <Flex wrap="wrap" gap="2">
                         {CHROMATIC_NOTE_LABELS.map((label, pc) => {
                             const selected = notes.includes(pc);

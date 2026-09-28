@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Flex, SegmentedControl, Text, TextField } from "@radix-ui/themes";
+import { Flex, TextField } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { MessageKey } from "../../i18n/messages";
 import { coreApi, type ExportFormat } from "../../services/api/core";
 import { fileBrowserApi } from "../../services/api/fileBrowser";
 import { applyExtensionToFileName } from "../../utils/exportFormat";
 import { buildQuickExportFileName } from "./timeline/quickExportSelection";
+import { AppButton, AppSegmentedControl } from "../../ui";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm } from "../../ui/Field";
 
@@ -145,14 +146,17 @@ export function QuickClipExportDialog({ open, clipIds, onOpenChange }: QuickClip
         >
             <AppForm>
                 <AppField label={t("quick_export_format")}>
-                    <SegmentedControl.Root
+                    <AppSegmentedControl
+                        size="sm"
                         value={format}
-                        onValueChange={(value) => handleFormatChange(value as ExportFormat)}
-                    >
-                        <SegmentedControl.Item value="wav">WAV</SegmentedControl.Item>
-                        <SegmentedControl.Item value="mp3">MP3</SegmentedControl.Item>
-                        <SegmentedControl.Item value="flac">FLAC</SegmentedControl.Item>
-                    </SegmentedControl.Root>
+                        options={[
+                            { value: "wav", label: "WAV" },
+                            { value: "mp3", label: "MP3" },
+                            { value: "flac", label: "FLAC" },
+                        ]}
+                        onChange={(value) => handleFormatChange(value as ExportFormat)}
+                        ariaLabel={t("quick_export_format")}
+                    />
                 </AppField>
                 <AppField label={t("quick_export_file_name")}>
                     <TextField.Root
@@ -167,15 +171,15 @@ export function QuickClipExportDialog({ open, clipIds, onOpenChange }: QuickClip
                             value={outputDir}
                             onChange={(event) => setOutputDir(event.target.value)}
                         />
-                        <Button type="button" variant="soft" onClick={() => void handleBrowse()}>
+                        <AppButton size="sm" onClick={() => void handleBrowse()}>
                             {t("quick_export_browse")}
-                        </Button>
+                        </AppButton>
                     </Flex>
                 </AppField>
                 {errorText ? (
-                    <Text size="2" color="red">
+                    <span className="hs-type-body" style={{ color: "var(--qt-danger-text)" }}>
                         {errorText}
-                    </Text>
+                    </span>
                 ) : null}
             </AppForm>
         </AppDialog>

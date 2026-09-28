@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Text } from "@radix-ui/themes";
+
 import { useI18n } from "../../i18n/I18nProvider";
 import { AppDialog } from "../../ui/Dialog";
 import { AppForm, AppSwitchRow } from "../../ui/Field";
@@ -49,9 +49,9 @@ export function ImportProjectDialog({
             ]}
         >
             <AppForm>
-                <Text size="2" className="text-qt-text-muted break-all">
+                <span className="hs-type-muted break-all">
                     {tf("import_project_file")}: {projectPath ?? ""}
-                </Text>
+                </span>
 
                 <label className="flex items-center gap-2 text-qt-md text-qt-text">
                     <input
@@ -80,9 +80,9 @@ export function ImportProjectDialog({
                     onCheckedChange={setImportTempoMap}
                 />
                 {hasExistingTempoMap ? (
-                    <Text size="1" className="text-qt-text-muted">
+                    <span className="hs-type-caption">
                         {tf("import_project_tempo_map_unavailable")}
-                    </Text>
+                    </span>
                 ) : null}
             </AppForm>
         </AppDialog>

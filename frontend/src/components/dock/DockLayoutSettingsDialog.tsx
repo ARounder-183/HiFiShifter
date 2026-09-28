@@ -10,8 +10,6 @@
  * 给它们加一层待提交状态只会制造"改了没反应"的困惑。
  */
 
-import { Text } from "@radix-ui/themes";
-
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { setDockSettings, setTabPosition } from "../../features/dock/dockSlice";
 import type { DockSettings } from "../../features/dock/dockSettings";
@@ -59,9 +57,7 @@ export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSetti
                         ]}
                     />
                 </AppField>
-                <Text size="1" color="gray">
-                    {tf("layout_setting_dock_modifier_hint")}
-                </Text>
+                <span className="hs-type-caption">{tf("layout_setting_dock_modifier_hint")}</span>
 
                 <AppField label={tf("layout_setting_edge_band")}>
                     <AppNumberField

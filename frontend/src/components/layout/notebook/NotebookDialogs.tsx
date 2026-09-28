@@ -6,13 +6,14 @@
  * （撤销要能恢复），所以"清理"必须由用户显式触发。
  */
 
-import { Button, Flex, Text } from "@radix-ui/themes";
+import { Flex } from "@radix-ui/themes";
 import { useEffect, useMemo, useState } from "react";
 
 import type { NotebookAssetSummary } from "../../../features/notebook/notebookSlice";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { notebookApi } from "../../../services/api/notebook";
 import { AppSelect } from "../../../ui";
+import { AppButton } from "../../../ui";
 import { AppDialog } from "../../../ui/Dialog";
 import { AppField, AppForm, AppSwitchRow } from "../../../ui/Field";
 import { formatAssetRef } from "./assetRef";
@@ -87,9 +88,7 @@ export function NotebookAttachmentsDialog({
             <div className="flex h-full min-h-0 flex-col pt-2">
                 <div className="min-h-0 flex-1 overflow-auto">
                     {entries.length === 0 ? (
-                        <Text size="1" color="gray">
-                            {t("notebook_attachments_empty")}
-                        </Text>
+                        <span className="hs-type-muted">{t("notebook_attachments_empty")}</span>
                     ) : (
                         entries.map((entry) => (
                             <AttachmentRow
@@ -129,22 +128,16 @@ function AttachmentRow({
                 {used ? t("notebook_attachments_used") : t("notebook_attachments_unused")}
             </span>
             <span>{formatBytes(entry.byteLen)}</span>
-            <Button
-                type="button"
-                variant="ghost"
-                color="gray"
-                size="1"
+            <AppButton
+                size="sm"
                 data-tooltip={t("notebook_attachments_save_as")}
                 disabled={!entry.hasData}
                 onClick={() => void notebookApi.saveAssetAs(entry.id).catch(() => {})}
             >
                 ⤓
-            </Button>
-            <Button
-                type="button"
-                variant="ghost"
-                color="gray"
-                size="1"
+            </AppButton>
+            <AppButton
+                size="sm"
                 data-tooltip={t("notebook_image_remove")}
                 onClick={() => {
                     void (async () => {
@@ -155,7 +148,7 @@ function AttachmentRow({
                 }}
             >
                 ✕
-            </Button>
+            </AppButton>
         </div>
     );
 }
@@ -477,20 +470,16 @@ export function NotebookSettingsDialog({
 
                 <Section title={tf("notebook_settings_group_export")}>
                     <Flex gap="2" wrap="wrap">
-                        <Button
-                            type="button"
-                            variant="soft"
-                            color="gray"
+                        <AppButton
+                            size="sm"
                             onClick={() => {
                                 void runExport("md", markdown);
                             }}
                         >
                             {tf("notebook_export_md")}
-                        </Button>
-                        <Button
-                            type="button"
-                            variant="soft"
-                            color="gray"
+                        </AppButton>
+                        <AppButton
+                            size="sm"
                             onClick={() => {
                                 void runExport(
                                     "html",
@@ -499,13 +488,11 @@ export function NotebookSettingsDialog({
                             }}
                         >
                             {tf("notebook_export_html")}
-                        </Button>
+                        </AppButton>
                     </Flex>
                 </Section>
 
-                <Text size="1" color="gray">
-                    {exportNotice ?? ""}
-                </Text>
+                <span className="hs-type-caption">{exportNotice ?? ""}</span>
             </AppForm>
         </AppDialog>
     );

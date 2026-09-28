@@ -235,17 +235,13 @@ describe("排版角色层级", () => {
      * 否则清单本身就在撒谎。清单清空后此断言退化为"全仓禁用"。
      */
     test("src/ui 之外禁止 Radix <Text>（白名单棘轮）", () => {
-        const whitelist = new Set([
-            "src/components/dock/DockLayoutSettingsDialog.tsx",
-            "src/components/layout/AboutDialog.tsx",
-            "src/components/layout/CustomScaleDialog.tsx",
-            "src/components/layout/ImportProjectDialog.tsx",
-            "src/components/layout/QuickClipExportDialog.tsx",
-            "src/components/layout/QuickSearchPopup.tsx",
-            "src/components/layout/TimelineDisplaySettingsDialog.tsx",
-            "src/components/layout/notebook/NotebookDialogs.tsx",
-            "src/components/layout/timeline/TempoMapCornerButton.tsx",
-        ]);
+        const stripCommentLines = (source: string): string =>
+            source
+                .split("\n")
+                .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+                .join("\n");
+        // 已清零：28 个文件全部迁入角色层。新代码禁止再引入 Radix <Text>。
+        const whitelist = new Set([]);
         const offenders: string[] = [];
         const stack: string[] = ["src"];
         while (stack.length > 0) {
@@ -259,10 +255,7 @@ describe("排版角色层级", () => {
                 if (!/\.tsx$/.test(entry) || /\.test\.tsx$/.test(entry)) continue;
                 if (full.startsWith("src/ui/")) continue;
                 // 掐掉注释行：文档里提一句 `<Text` 不算采用
-                const source = readFileSync(full, "utf8")
-                    .split("\n")
-                    .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
-                    .join("\n");
+                const source = stripCommentLines(readFileSync(full, "utf8"));
                 if (/<Text[\s/>]/.test(source)) offenders.push(full);
             }
         }
@@ -273,7 +266,8 @@ describe("排版角色层级", () => {
                 : ["以下白名单之外的文件仍在使用 Radix <Text>：", ...outside].join("\n"),
         ).toEqual([]);
         const stale = [...whitelist].filter(
-            (file) => !/<Text[\s/>]/.test(readFileSync(file, "utf8")),
+            // 与主扫描同一条注释剥离规则：文档里提一句不算采用
+            (file) => !/<Text[\s/>]/.test(stripCommentLines(readFileSync(file, "utf8"))),
         );
         expect(
             stale.length === 0

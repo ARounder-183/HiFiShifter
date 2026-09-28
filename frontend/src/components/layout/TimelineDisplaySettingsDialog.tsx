@@ -1,4 +1,4 @@
-import { Checkbox, Flex, Text } from "@radix-ui/themes";
+import { Checkbox, Flex } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -105,7 +105,9 @@ export function TimelineDisplaySettingsDialog({ open, onOpenChange }: Props) {
                             void dispatch(persistUiSettings());
                         }}
                     />
-                    <Text size="2">{tf("show_playhead_time_in_track_header")}</Text>
+                    <span className="hs-type-label">
+                        {tf("show_playhead_time_in_track_header")}
+                    </span>
                 </label>
             </AppForm>
         </AppDialog>

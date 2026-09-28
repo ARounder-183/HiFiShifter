@@ -11,7 +11,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { Flex, Text } from "@radix-ui/themes";
+import { Flex } from "@radix-ui/themes";
 import { coreApi } from "../../services/api/core";
 import { useI18n } from "../../i18n/I18nProvider";
 import { AppDialog } from "../../ui/Dialog";
@@ -89,23 +89,20 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
             <AppForm>
                 <Flex direction="column" gap="2">
                     <Flex align="center" gap="2">
-                        <Text size="2" color="gray">
-                            {tf("about_version")}
-                        </Text>
-                        <Text size="2" weight="medium">
-                            {info?.version ?? "…"}
-                        </Text>
+                        <span className="hs-type-muted">{tf("about_version")}</span>
+                        <span className="hs-type-body font-medium">{info?.version ?? "…"}</span>
                         {info?.dirty ? (
-                            <Text size="1" color="orange">
+                            <span
+                                className="hs-type-caption"
+                                style={{ color: "var(--qt-warning-text)" }}
+                            >
                                 {tf("about_dirty")}
-                            </Text>
+                            </span>
                         ) : null}
                     </Flex>
                     {showCommit ? (
                         <Flex align="center" gap="2">
-                            <Text size="2" color="gray">
-                                {tf("about_commit")}
-                            </Text>
+                            <span className="hs-type-muted">{tf("about_commit")}</span>
                             {/* 点击跳转到该 commit 的源码快照；tooltip 展示完整链接——
                                 按自然边界拆两行，避免 320px 气泡内在连字符处断行、
                                 哈希溢出（pre-line 保留换行）。 */}

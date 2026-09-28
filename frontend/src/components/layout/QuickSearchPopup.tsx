@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Text } from "@radix-ui/themes";
+
 import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
@@ -548,7 +548,10 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         />
                     </AppForm>
                     {sortedResults.length > 0 && (
-                        <Text size="1" color="gray" className="text-qt-micro">
+                        <span
+                            className="hs-type-caption"
+                            style={{ fontSize: "var(--qt-fs-micro)" }}
+                        >
                             {formatKeybinding(keybindings["quickSearch.navigate.up"])}/
                             {formatKeybinding(keybindings["quickSearch.navigate.down"])}{" "}
                             {tf("qs_hint_nav") || "导航"}
@@ -561,7 +564,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                             {"  "}
                             {formatKeybinding(keybindings["quickSearch.close"])}{" "}
                             {tf("qs_hint_close") || "关闭"}
-                        </Text>
+                        </span>
                     )}
                 </div>
             </div>
