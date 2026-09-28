@@ -11,7 +11,10 @@ import {
     pickDropTarget,
     pointInRect,
     resolveDropZone,
+    rootEdgeBandThickness,
     snapFloatPosition,
+    tabsetSideBands,
+    type DockZoneRect,
 } from "./dockDropTarget.ts";
 
 function assertEqual<T>(actual: T, expected: T, label: string): void {
@@ -380,5 +383,88 @@ test("features/dock/dockDropTarget.test.ts scripted checks", async () => {
         // 极小停靠区：感应带收缩，中央区不会被四条带吃光。
         const tiny = buildRootEdgeZones({ x: 0, y: 0, w: 40, h: 40 }, 28);
         assertEqual(tiny[0].rect.w, 10, "band shrinks on a tiny root (short side / 4)");
+        assertEqual(rootEdgeBandThickness(tiny[0].previewRect!, 28), 10, "thickness matches");
+    }
+
+    // ── 逐边感应带：与根缘重合的侧边向外扩展 ────────────────────
+    //
+    // 根级边缘带会赢下与标签组侧边重叠的外缘条带；不补偿的话，默认布局
+    // （上下分布）里"只拆时间轴右侧"整条感应区都被根带吃掉（用户报告）。
+    {
+        const RECT = { x: 0, y: 0, w: 1000, h: 400 };
+
+        // 右侧扩展到 56（28 根带 + 28 局部带），其余边维持 28。
+        const bands = tabsetSideBands(RECT, { x: 0, y: 0, w: 1000, h: 800 }, 28, 28);
+        assertEqual(bands.right, 56, "an edge on the root perimeter is expanded");
+        assertEqual(bands.left, 56, "so is the opposite perimeter edge");
+        assertEqual(bands.top, 56, "the top edge sits on the root's top");
+        assertEqual(bands.bottom, 28, "the interior edge keeps the plain band");
+
+        // 完全悬在内部的标签组：四边都不重合，全部维持原厚。
+        const inner = tabsetSideBands(
+            { x: 200, y: 200, w: 600, h: 400 },
+            { x: 0, y: 0, w: 1000, h: 800 },
+            28,
+            28,
+        );
+        assertEqual(
+            inner,
+            { left: 28, right: 28, top: 28, bottom: 28 },
+            "an interior tabset keeps uniform bands",
+        );
+
+        // 扩展后的右侧：距边 40px（统一 28 时是中央区）→ 局部右侧拆分。
+        assertEqual(
+            resolveDropZone(RECT, { x: 960, y: 200 }, 28, bands),
+            "right",
+            "the expanded band restores the local side split",
+        );
+        // 同一点用统一 28 厚度仍是中央 —— 扩展只发生在重合侧。
+        assertEqual(resolveDropZone(RECT, { x: 960, y: 200 }, 28), "center", "uniform stays center");
+        // 超出扩展带 → 中央并入。
+        assertEqual(resolveDropZone(RECT, { x: 900, y: 200 }, 28, bands), "center", "past the band");
+        // 左侧带没有扩展时（比如标签组只贴着根的右缘）……
+        const onlyRight = tabsetSideBands(
+            { x: 640, y: 0, w: 360, h: 400 },
+            { x: 0, y: 0, w: 1000, h: 800 },
+            28,
+            28,
+        );
+        assertEqual(onlyRight.left, 28, "a non-perimeter edge is not expanded");
+        assertEqual(onlyRight.right, 56, "the perimeter edge is");
+        assertEqual(
+            resolveDropZone({ x: 640, y: 0, w: 360, h: 400 }, { x: 680, y: 200 }, 28, onlyRight),
+            "center",
+            "40px from a plain edge is still center",
+        );
+
+        // 端到端划分：贴缘 10px → 根级贯通；28–56px → 局部拆分；更浅 → 中央。
+        const rootZones = buildRootEdgeZones({ x: 0, y: 0, w: 1000, h: 800 }, 28);
+        const timeline: DockZoneRect = {
+            zoneId: "z-timeline",
+            rect: RECT,
+            sideBands: tabsetSideBands(RECT, { x: 0, y: 0, w: 1000, h: 800 }, 28, 28),
+        };
+        const scene = [timeline, ...rootZones];
+        assertEqual(
+            pickDropTarget(scene, { x: 990, y: 200 })?.fixedZone,
+            "right",
+            "slamming the edge asks for the root split",
+        );
+        assertEqual(
+            pickDropTarget(scene, { x: 960, y: 200 })?.zoneId,
+            "z-timeline",
+            "inside the root band the tabset is the target",
+        );
+        assertEqual(
+            resolveDropZone(
+                timeline.rect,
+                { x: 960, y: 200 },
+                28,
+                pickDropTarget(scene, { x: 960, y: 200 })?.sideBands,
+            ),
+            "right",
+            "and it resolves to the local right split",
+        );
     }
 });

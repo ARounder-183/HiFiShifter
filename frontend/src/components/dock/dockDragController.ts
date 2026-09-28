@@ -43,7 +43,9 @@ import {
     dropZoneToSide,
     pickDropTarget,
     resolveDropZone,
+    rootEdgeBandThickness,
     snapFloatPosition,
+    tabsetSideBands,
     type DockZoneRect,
 } from "../../features/dock/dockDropTarget";
 import {
@@ -168,6 +170,7 @@ function discardScheduledUpdate(): void {
 
 function collectZoneRects(): DockZoneRect[] {
     const out: DockZoneRect[] = [];
+    const band = store.getState().dock.settings.edgeBandPx;
     for (const element of document.querySelectorAll<HTMLElement>("[data-dock-zone]")) {
         const zoneId = element.dataset.dockZone;
         if (!zoneId) continue;
@@ -183,13 +186,15 @@ function collectZoneRects(): DockZoneRect[] {
     if (root) {
         const rect = root.getBoundingClientRect();
         if (rect.width >= 1 && rect.height >= 1) {
-            const band = store.getState().dock.settings.edgeBandPx;
-            out.push(
-                ...buildRootEdgeZones(
-                    { x: rect.x, y: rect.y, w: rect.width, h: rect.height },
-                    band,
-                ),
-            );
+            const rootRect = { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
+            const rootBand = rootEdgeBandThickness(rootRect, band);
+            // 局部侧边带补偿：与根缘重合的侧边向外扩展（见 `tabsetSideBands`），
+            // 让"只拆这个标签组的某一侧"在根带内侧保有完整的感应宽度 —— 否则
+            // 默认布局里时间轴的右侧拆分会整个被根带遮住（用户报告）。
+            for (const zone of out) {
+                zone.sideBands = tabsetSideBands(zone.rect, rootRect, rootBand, band);
+            }
+            out.push(...buildRootEdgeZones(rootRect, band));
         }
     }
     return out;
@@ -223,10 +228,11 @@ function resolveTarget(x: number, y: number): DockDropTargetState | null {
     const hit = pickDropTarget(zoneRects, { x, y });
     if (!hit) return null;
     // 合成 Zone（根级边缘带）整条带就是一个部位，部位已在采集时固定；
-    // 普通标签组 Zone 现场按指针在矩形内的位置解析。
+    // 普通标签组 Zone 现场按指针在矩形内的位置解析 —— 感应带逐边给定，
+    // 与根缘重合的侧边用的是向外扩展过的厚度（见 `tabsetSideBands`）。
     const band = store.getState().dock.settings.edgeBandPx;
     const zone: DockDropZone =
-        hit.fixedZone ?? resolveDropZone(hit.rect, { x, y }, band) ?? "center";
+        hit.fixedZone ?? (resolveDropZone(hit.rect, { x, y }, band, hit.sideBands) ?? "center");
     // 根级带的提交/预览基准是整个停靠区矩形（"贯通整侧"），不是那条细带。
     return { zoneId: hit.zoneId, zone, rect: hit.previewRect ?? hit.rect };
 }

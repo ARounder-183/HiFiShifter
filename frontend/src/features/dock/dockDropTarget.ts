@@ -21,33 +21,66 @@ export function pointInRect(rect: DockRect, x: number, y: number): boolean {
     return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
 }
 
+/** 每条边各自的感应带厚度（像素）。缺省侧回落到统一的 `edgeBandPx`。 */
+export interface DockSideBands {
+    left: number;
+    right: number;
+    top: number;
+    bottom: number;
+}
+
 /**
  * 判定指针在给定矩形内的落点。
  *
  * 感应带会被钳制到矩形短边的 40%：窄条（比如折叠后的标签条）如果按固定
  * 像素算感应带，四条带会互相吃掉，中央区消失，用户就再也无法"并入标签组"。
+ *
+ * `sideBands` 允许四条边各用不同的厚度（缺省侧用 `edgeBandPx`）：与根级
+ * 边缘带重合的那一侧需要**向外扩展**（见 `tabsetSideBands`），把被根带
+ * 遮住的局部拆分感应区在根带内侧补回来。判定规则不变：落在某条边的带内
+ * → 该侧拆分；四条带都不在 → 中央并入；多条带同时命中取距离最近者，
+ * 同距时水平边优先（与逐维比较的历史行为一致）。
  */
 export function resolveDropZone(
     rect: DockRect,
     pointer: { x: number; y: number },
     edgeBandPx: number,
+    sideBands?: Partial<DockSideBands>,
 ): DockDropZone | null {
     if (rect.w <= 0 || rect.h <= 0) return null;
     if (!pointInRect(rect, pointer.x, pointer.y)) return null;
 
-    const band = Math.max(8, Math.min(edgeBandPx, Math.min(rect.w, rect.h) * 0.4));
+    const cap = Math.min(rect.w, rect.h) * 0.4;
+    const clampBand = (px: number) => Math.max(8, Math.min(px, cap));
+    const bands: DockSideBands = {
+        left: clampBand(sideBands?.left ?? edgeBandPx),
+        right: clampBand(sideBands?.right ?? edgeBandPx),
+        top: clampBand(sideBands?.top ?? edgeBandPx),
+        bottom: clampBand(sideBands?.bottom ?? edgeBandPx),
+    };
 
     const left = pointer.x - rect.x;
     const right = rect.x + rect.w - pointer.x;
     const top = pointer.y - rect.y;
     const bottom = rect.y + rect.h - pointer.y;
 
-    const minH = Math.min(left, right);
-    const minV = Math.min(top, bottom);
+    const candidates: Array<{ zone: DockDropZone; dist: number; horizontal: boolean }> = [];
+    if (left <= bands.left) candidates.push({ zone: "left", dist: left, horizontal: true });
+    if (right <= bands.right) candidates.push({ zone: "right", dist: right, horizontal: true });
+    if (top <= bands.top) candidates.push({ zone: "top", dist: top, horizontal: false });
+    if (bottom <= bands.bottom) {
+        candidates.push({ zone: "bottom", dist: bottom, horizontal: false });
+    }
+    if (candidates.length === 0) return "center";
 
-    if (minH > band && minV > band) return "center";
-    if (minH <= minV) return left <= right ? "left" : "right";
-    return top <= bottom ? "top" : "bottom";
+    let best = candidates[0];
+    for (const candidate of candidates.slice(1)) {
+        const closer = candidate.dist < best.dist;
+        const tieBreaksHorizontal =
+            candidate.dist === best.dist && candidate.horizontal && !best.horizontal;
+        if (closer || tieBreaksHorizontal) best = candidate;
+    }
+    return best.zone;
 }
 
 /** 一个可停靠目标：Zone 及其当前视口矩形。 */
@@ -67,6 +100,12 @@ export interface DockZoneRect {
      * 半边高亮必须从根矩形算出。
      */
     previewRect?: DockRect;
+    /**
+     * 四条边各自的感应带厚度（缺省 = 统一 `edgeBandPx`）。与根级边缘带重合
+     * 的侧边由 `tabsetSideBands` 向外扩展，保证局部拆分在根带内侧仍有完整的
+     * 感应宽度（否则默认布局里"只拆时间轴右侧"会被根带整个吃掉 —— 用户报告）。
+     */
+    sideBands?: Partial<DockSideBands>;
 }
 
 /**
@@ -74,6 +113,49 @@ export interface DockZoneRect {
  * "这是根级落点"，具体侧向从 `zone`（由 `fixedZone` 解析而来）读取。
  */
 export const DOCK_ROOT_ZONE_ID = "__dock_root__";
+
+/**
+ * 根级边缘带的实际厚度：与 `buildRootEdgeZones` 内部同一套钳制。
+ *
+ * `tabsetSideBands` 计算重合侧的扩展宽度时必须用**这**个值（而不是裸的
+ * `edgeBandPx`）—— 停靠区极小时根带会被钳短，扩展量跟着收缩，"根带占外侧、
+ * 局部带占内侧"的划分才始终严丝合缝。
+ */
+export function rootEdgeBandThickness(rootRect: DockRect, edgeBandPx: number): number {
+    if (rootRect.w <= 0 || rootRect.h <= 0) return 0;
+    return Math.max(8, Math.min(edgeBandPx, Math.min(rootRect.w, rootRect.h) * 0.25));
+}
+
+/**
+ * 计算一个标签组四条边的感应带厚度。
+ *
+ * 【为什么要扩展】根级边缘带（厚度 = `rootEdgeBandThickness`）叠在停靠区
+ * 外缘上，"面积最小者优先"会让它赢下与标签组侧边感应带重叠的部分。默认
+ * 布局（上下分布）里时间轴的右缘就是停靠区的右缘 —— 不补偿的话，"只拆
+ * 时间轴右侧"整条感应区都被根带吃掉，用户只剩"并入标签组"和"贯通整侧"
+ * 两种落点（用户报告）。
+ *
+ * 补偿规则：标签组某条边与根缘**重合**（±1px，容忍浮点取整）时，该侧的
+ * 局部感应带向外扩展 `edgeBandPx + 根带厚度`。于是沿这条边从外到内依次是：
+ * 根带 `[0, 根带]` → 局部带 `(根带, 根带 + edgeBandPx]` → 中央区。两种意图
+ * 各自保有完整的 `edgeBandPx` 感应宽度，谁也不吃掉谁；不重合的内侧边不受
+ * 影响，维持原有的单一厚度。
+ */
+export function tabsetSideBands(
+    rect: DockRect,
+    rootRect: DockRect,
+    rootBandPx: number,
+    edgeBandPx: number,
+): DockSideBands {
+    const coincident = (a: number, b: number) => Math.abs(a - b) <= 1;
+    const expanded = edgeBandPx + rootBandPx;
+    return {
+        left: coincident(rect.x, rootRect.x) ? expanded : edgeBandPx,
+        right: coincident(rect.x + rect.w, rootRect.x + rootRect.w) ? expanded : edgeBandPx,
+        top: coincident(rect.y, rootRect.y) ? expanded : edgeBandPx,
+        bottom: coincident(rect.y + rect.h, rootRect.y + rootRect.h) ? expanded : edgeBandPx,
+    };
+}
 
 /**
  * 构造根级边缘带的四个合成 Zone：贴着停靠区外缘的一圈感应带，命中即表示
@@ -86,9 +168,9 @@ export const DOCK_ROOT_ZONE_ID = "__dock_root__";
  * 预留的：贴边越狠，拆得越"外"。
  *
  * 【与标签组感应带的关系】两组带在"标签组边缘恰好贴着停靠区边缘"时必然
- * 重叠，这是位置判定模型无法消除的物理歧义，此处把外侧让给根级带：贴到
- * 应用最边缘（用户做"贯穿全高/全宽"时自然会贴边）得到根级拆分，标签组的
- * 四边拆分在其内侧感应带照常可用。
+ * 重叠，这是位置判定模型无法消除的物理歧义。划分方式：外侧让给根级带
+ * （贴到应用最边缘 = 贯通整侧），内侧还给标签组 —— 重合侧的标签组感应带由
+ * `tabsetSideBands` 向外扩展，宽度不受挤占。
  *
  * 四条带互不重叠（左右带贯通全高、上下带让出左右两角），任一指针位置最多
  * 命中一条；`pickDropTarget` 的"面积最小者优先"规则恰好让细带压过下方
@@ -98,7 +180,7 @@ export function buildRootEdgeZones(rootRect: DockRect, edgeBandPx: number): Dock
     if (rootRect.w <= 0 || rootRect.h <= 0) return [];
     // 与 resolveDropZone 同样的钳制思路：停靠区极小时按短边收缩，保证中央
     // 区域（并入标签组）永远还有立足之地。
-    const band = Math.max(8, Math.min(edgeBandPx, Math.min(rootRect.w, rootRect.h) * 0.25));
+    const band = rootEdgeBandThickness(rootRect, edgeBandPx);
     const innerX = rootRect.x + band;
     const innerW = Math.max(0, rootRect.w - band * 2);
     const left: DockZoneRect = {
