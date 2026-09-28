@@ -12,7 +12,7 @@ use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
 use symphonia::core::codecs::registry::CodecRegistry;
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, FormatReader, Track, TrackType};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Track, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, Tag};
 use symphonia::core::units::{Duration, TimeBase};
@@ -629,6 +629,314 @@ where
     ))
 }
 
+/// 单遍顺序解码，沿途把 `windows` 指定的帧区间收割出来。
+///
+/// 每个窗口以 `(start_frame, frame_count)` 给出，回调收到 `(窗口下标, 交错 PCM,
+/// 声道数, 采样率)`。窗口之间可以乱序、可以重叠、可以超出文件长度（收不到的
+/// 窗口不会被回调）；解码在最后一个窗口的终点处停止。
+///
+/// # 为什么需要它
+///
+/// Symphonia 的逐包解码不保证随机访问 —— 想比较"第 4 分钟"的左右声道，就只能
+/// 从文件头一路解到第 4 分钟。但**解码**和**保留**是两件事：本函数只保留窗口
+/// 覆盖的那几段（默认每段 0.25 秒 × 12 段），途经的其余帧解完即弃，内存占用
+/// 与文件长度无关。
+///
+/// 这是"非 WAV 素材只能看文件头 3 秒"那个缺陷的替代品：它让容器判定也能覆盖
+/// 消费区间的**首尾**，而不只是开头。
+pub fn visit_media_audio_windows<F>(
+    path: &Path,
+    preferred_stream: Option<usize>,
+    windows: &[(u64, usize)],
+    max_frames: usize,
+    on_window: &mut F,
+) -> Result<usize, String>
+where
+    F: FnMut(usize, &[f32], u16, u32) -> Result<(), String>,
+{
+    if windows.is_empty() || max_frames == 0 {
+        return Ok(0);
+    }
+
+    // 按起点排序（保留原下标，回调要按调用方的编号汇报）。乱序输入不算错误，
+    // 但顺序扫描必须有序 —— 在这里收敛掉，调用方不必操心。
+    let mut ordered: Vec<(u64, usize, usize)> = windows
+        .iter()
+        .enumerate()
+        .map(|(index, (start, len))| (*start, *len, index))
+        .collect();
+    ordered.sort_by_key(|(start, _, _)| *start);
+
+    let mut harvested = 0usize;
+    let mut cursor: u64 = 0;
+    let mut next = 0usize;
+    // 已解码但尚未被窗口消费的帧，覆盖 `[retained_start, retained_start + frames)`。
+    //
+    // 【为什么必须保留而不是只维护"当前累积器"】窗口之间**可以重叠**：同一
+    // 音频被两个 Take 以相互重叠的消费区间引用时（切片素材的常态），两个区间的
+    // 窗口可能落在同一段音频上。若只按解码游标顺序累积，走到第二个窗口时游标
+    // 已经越过它的起点，就会拿**当前位置**的音频冒充该窗口 —— 静默地比较了
+    // 错误的音频位置。保留一段已解码缓冲后，每个窗口都从自己的起点精确取数。
+    let mut retained: Vec<f32> = Vec::new();
+    let mut retained_start: u64 = 0;
+    let mut channels_seen: u16 = 0;
+
+    let result = decode_track_frames_until(
+        path,
+        preferred_stream,
+        max_frames,
+        &mut |frame: &[f32], rate: u32, channels: u16| {
+            let ch = channels.max(1) as usize;
+            let frame_count = frame.len() / ch;
+            if frame_count == 0 {
+                return Ok(());
+            }
+
+            // 声道数在同一个容器内变化（罕见）：保留缓冲的交错步长随之失效，
+            // 丢弃它并重新起算。
+            if channels_seen != channels {
+                retained.clear();
+                retained_start = cursor;
+                channels_seen = channels;
+            }
+
+            retained.extend_from_slice(&frame[..frame_count * ch]);
+            cursor += frame_count as u64;
+
+            // 顺序满足所有"终点已解码到"的窗口。
+            while next < ordered.len() {
+                let (start, len, index) = ordered[next];
+                let end = start.saturating_add(len as u64);
+                if end > cursor {
+                    break;
+                }
+                if start < retained_start {
+                    // 起点已被丢弃（声道数变化等）⇒ 该窗口无法精确取数：跳过它，
+                    // 不拿错位的音频充数。调用方会看到"没收到"并据此只允许
+                    // 下发安全结论。
+                    next += 1;
+                    continue;
+                }
+                let from = ((start - retained_start) as usize) * ch;
+                let to = from + len * ch;
+                if to > retained.len() {
+                    next += 1;
+                    continue;
+                }
+                on_window(index, &retained[from..to], channels, rate)?;
+                harvested += 1;
+                next += 1;
+            }
+
+            // 丢弃不再被任何剩余窗口需要的保留前缀，使内存与文件长度无关。
+            let keep_from = if next < ordered.len() {
+                ordered[next].0
+            } else {
+                cursor
+            };
+            let drop_frames = keep_from.saturating_sub(retained_start) as usize;
+            if drop_frames > 0 {
+                let drop_samples = (drop_frames * ch).min(retained.len());
+                retained.drain(..drop_samples);
+                retained_start += (drop_samples / ch) as u64;
+            }
+
+            if next >= ordered.len() {
+                // 全部窗口已收割：用哨兵错误让解码循环提前收尾。
+                return Err(WINDOWS_DONE.to_string());
+            }
+            Ok(())
+        },
+    );
+
+    match result {
+        Ok(_) => Ok(harvested),
+        // 提前收尾不是错误 —— 这是我们主动请求的停止。
+        Err(error) if error == WINDOWS_DONE => Ok(harvested),
+        Err(error) => Err(error),
+    }
+}
+
+/// [`visit_media_audio_windows`] 提前收尾用的内部哨兵（不会外泄给调用方）。
+const WINDOWS_DONE: &str = "__hifi_windows_done__";
+
+/// 用容器的 seek 能力逐窗口取样，避开"从第 0 帧一路解到最后一个窗口"。
+///
+/// 语义与 [`visit_media_audio_windows`] 完全一致（同样的入参、同样的回调、同样
+/// 按原下标汇报），只是取数方式不同：那一个是单遍顺序解码沿途收割，本函数对每个
+/// 窗口 seek 到它附近的码流位置后只解出这一段。**窗口数远小于文件长度时**（默认
+/// 12 个 0.25 秒窗口 vs 半小时音频）这能省掉几个数量级的解码量。
+///
+/// # 为什么会判不准，以及怎么兜住
+///
+/// 有损编码只能从关键帧起解，且 seek 是 Coarse 语义（尽力落在请求点附近）。
+/// 因此 seek 后实际拿到的第一帧可能早于也可能晚于请求的窗口起点。本函数按
+/// [`symphonia::core::formats::SeekedTo::actual_ts`] 报告的**实际**时间戳对齐：
+/// 只从 ≥ 窗口起点的那一帧开始收割，一旦越过窗口终点立即停。
+///
+/// 由调用方判断"实际起点是否晚于允许的范围"来决定要不要丢弃这个窗口 —— 音频
+/// 判定宁可少看一段（走保守结论），也绝不能拿**错位的音频**冒充目标位置。
+/// 返回值的 `Vec<Option<u64>>` 就是每个窗口的实际起始帧（`None` = 没拿到），
+/// 与 `windows` 一一对应。
+///
+/// 任何一步失败（不支持 seek / seek 报错 / 解不出足够样本）时返回 `Err`，调用方
+/// 据此回落到顺序收割路径 —— 这是一次纯增量的性能优化，不引入新的失败模式。
+pub fn visit_media_audio_windows_by_seek<F>(
+    path: &Path,
+    preferred_stream: Option<usize>,
+    windows: &[(u64, usize)],
+    sample_rate_hint: u32,
+    max_decode_frames_per_window: usize,
+    on_window: &mut F,
+) -> Result<Vec<Option<u64>>, String>
+where
+    F: FnMut(usize, &[f32], u16, u32) -> Result<(), String>,
+{
+    if windows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let stride = max_decode_frames_per_window.max(1);
+
+    let mut starts: Vec<Option<u64>> = vec![None; windows.len()];
+    // 每个窗口独立一次 seek + 短解码。逐窗独立的实现复杂度远低于对所有窗口做
+    // 全局排序与规划，而窗口数本来就只有十几个。
+    for (index, (start_frame, want_frames)) in windows.iter().enumerate() {
+        if *want_frames == 0 {
+            continue;
+        }
+        let mut format = open_format(path)?;
+        let (selected_track, _) = select_audio_track(format.as_ref(), preferred_stream)?;
+        let track = selected_track.clone();
+        let params = audio_params(&track)?.clone();
+        let track_id = track.id;
+        let codec_rate = params.sample_rate.unwrap_or(sample_rate_hint).max(1);
+        // 求 seek 时间戳要用容器自己的采样率，否则请求的位置会系统性偏移。
+        let rate_for_seek = if sample_rate_hint > 0 {
+            sample_rate_hint
+        } else {
+            codec_rate
+        };
+
+        // Coarse：允许落在请求点附近。对抽样判定足够了 —— 我们随后按实际时间戳
+        // 对齐，宁可少收也不错位。
+        let Some(target_time) =
+            symphonia::core::units::Time::try_from_secs_f64(*start_frame as f64 / rate_for_seek as f64)
+        else {
+            return Err("seek target out of range".to_string());
+        };
+        let Ok(seeked) = format.seek(
+            SeekMode::Coarse,
+            SeekTo::Time {
+                time: target_time,
+                track_id: Some(track_id),
+            },
+        ) else {
+            return Err("seek not supported".to_string());
+        };
+
+        // 实际落点：容器报告落在哪一帧就按哪一帧算，绝不假设它等于请求值。
+        // `actual_ts` 是 track timebase 下的 tick，用 Symphonia 自己的换算得到秒
+        // （比手算 numer/denom 更不容易搞反），再乘采样率得到帧位。
+        let seeked_frame = {
+            let seconds = track
+                .time_base
+                .unwrap_or_default()
+                .calc_time_saturating(seeked.actual_ts)
+                .as_secs_f64();
+            if seconds > 0.0 {
+                (seconds * codec_rate as f64).round() as u64
+            } else {
+                0
+            }
+        };
+
+        let mut decoder = codec_registry()
+            .make_audio_decoder(&params, &AudioDecoderOptions::default())
+            .map_err(|e| format!("symphonia audio decoder failed: {e}"))?;
+
+        let start = *start_frame;
+        let end = start.saturating_add(*want_frames as u64);
+        let mut out: Vec<f32> = Vec::new();
+        let mut channels_seen: u16 = 0;
+        let mut rate_seen: u32 = 0;
+        // 已累积的音频覆盖多少个"自 seek 落点起算"的帧位，用于算真正的起点。
+        let mut cursor: u64 = seeked_frame;
+        let mut first_collected_frame: Option<u64> = None;
+        let mut decoded_frames = 0usize;
+
+        'pump: loop {
+            let packet = match format.next_packet() {
+                Ok(Some(packet)) => packet,
+                Ok(None) => break,
+                Err(Error::IoError(_)) => break,
+                Err(e) => return Err(format!("symphonia packet read failed: {e}")),
+            };
+            if packet.track_id != track_id {
+                continue;
+            }
+            let decoded = match decoder.decode(&packet) {
+                Ok(decoded) => decoded,
+                Err(Error::DecodeError(_)) => continue,
+                Err(Error::IoError(_)) => break,
+                Err(e) => return Err(format!("symphonia decode failed: {e}")),
+            };
+            if decoded.is_empty() {
+                continue;
+            }
+            let spec = decoded.spec();
+            let channels = spec.channels().count().max(1) as u16;
+            let rate = if rate_for_seek > 0 { rate_for_seek } else { codec_rate };
+            let mut frame_buf: Vec<f32> = Vec::new();
+            decoded.copy_to_vec_interleaved::<f32>(&mut frame_buf);
+            let ch = channels.max(1) as usize;
+            let frame_count = frame_buf.len() / ch;
+            if frame_count == 0 {
+                continue;
+            }
+            // 声道数中途变化（罕见）会让已收集缓冲的交错步长失效。
+            if channels_seen != 0 && channels_seen != channels {
+                break 'pump;
+            }
+            channels_seen = channels;
+            rate_seen = rate;
+
+            // 逐帧决定是否收集：缓冲区内帧是均匀的，直接按帧位切片。
+            for local in 0..frame_count {
+                let frame_pos = cursor;
+                if frame_pos >= end {
+                    break 'pump;
+                }
+                if frame_pos >= start {
+                    if first_collected_frame.is_none() {
+                        first_collected_frame = Some(frame_pos);
+                    }
+                    let base = local * ch;
+                    out.extend_from_slice(&frame_buf[base..base + ch]);
+                }
+                cursor += 1;
+            }
+            decoded_frames += frame_count;
+            if decoded_frames >= stride {
+                break;
+            }
+        }
+        let _ = decoder.finalize();
+
+        let Some(first) = first_collected_frame else {
+            // 一个目标帧都没收到（seek 落到窗口之后 / 文件更短）：记为没拿到。
+            continue;
+        };
+        let got_frames = out.len() / channels_seen.max(1) as usize;
+        if got_frames == 0 {
+            continue;
+        }
+        starts[index] = Some(first);
+        on_window(index, &out, channels_seen, rate_seen)?;
+    }
+
+    Ok(starts)
+}
+
 /// Extract one audio stream of a media file to a WAV file next to the source.
 ///
 /// The cache file is named `<stem>.hifi_audio_<stream>.wav` and is overwritten
@@ -693,6 +1001,114 @@ pub fn extract_audio_stream_to_wav(path: &Path, stream_index: usize) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 仓库自带的非 WAV 夹具（mp3）。
+    ///
+    /// 相对路径在 `cargo test` 下取决于工作目录，因此从 `CARGO_MANIFEST_DIR`
+    /// 反推仓库根 —— 否则这个夹具会"永远找不到"而让测试静默变成空跑。
+    fn demo_mp3() -> Option<std::path::PathBuf> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("third_party/signalsmith-stretch/signalsmith-stretch/web/demo/loop.mp3");
+        path.is_file().then_some(path)
+    }
+
+    #[test]
+    fn window_harvest_returns_exactly_what_was_asked_for() {
+        let Some(path) = demo_mp3() else {
+            return;
+        };
+        let header = probe_media(&path, 0, None).expect("probe demo mp3");
+        let total = header.total_frames;
+        assert!(total > 200_000, "夹具太短，无法取中段窗口");
+
+        let windows = vec![(total / 4, 4_000usize), (total / 2, 6_000usize)];
+        let mut got: Vec<(usize, usize)> = Vec::new();
+        let harvested = visit_media_audio_windows(&path, None, &windows, total as usize, &mut {
+            let mut record = |index: usize, pcm: &[f32], channels: u16, _rate: u32| {
+                got.push((index, pcm.len() / channels.max(1) as usize));
+                Ok(())
+            };
+            move |index, pcm, channels, rate| record(index, pcm, channels, rate)
+        })
+        .expect("harvest");
+
+        assert_eq!(harvested, 2);
+        got.sort();
+        assert_eq!(got, vec![(0, 4_000), (1, 6_000)], "每个窗口的帧数必须精确");
+    }
+
+    #[test]
+    fn overlapping_windows_are_taken_from_their_own_starts() {
+        // 回归：窗口可以重叠（同一音频被两个消费区间重叠引用）。曾经按解码游标
+        // 顺序累积的实现，走到第二个窗口时游标已越过它的起点，于是拿**当前位置**
+        // 的音频冒充该窗口 —— 静默比较了错误的音频位置。
+        //
+        // 判据：一个窗口收到的内容，不得因为它旁边还有别的窗口而改变。
+        let Some(path) = demo_mp3() else {
+            return;
+        };
+        let header = probe_media(&path, 0, None).expect("probe demo mp3");
+        let total = header.total_frames;
+        let start = total / 2;
+        let len = 5_000usize;
+        // 第二个窗口与第一个重叠一半。
+        let a = (start, len);
+        let b = (start + len as u64 / 2, len);
+
+        let harvest = |windows: &[(u64, usize)]| -> Vec<(usize, Vec<f32>)> {
+            let mut out: Vec<(usize, Vec<f32>)> = Vec::new();
+            visit_media_audio_windows(&path, None, windows, total as usize, &mut {
+                let mut record = |index: usize, pcm: &[f32], _ch: u16, _rate: u32| {
+                    out.push((index, pcm.to_vec()));
+                    Ok(())
+                };
+                move |index, pcm, ch, rate| record(index, pcm, ch, rate)
+            })
+            .expect("harvest");
+            out.sort_by_key(|(index, _)| *index);
+            out
+        };
+
+        let together = harvest(&[a, b]);
+        assert_eq!(together.len(), 2, "两个窗口都必须收到");
+        assert_eq!(harvest(&[a]).len(), 1);
+        assert_eq!(harvest(&[b]).len(), 1);
+
+        // 单独取与一起取，内容必须逐样本一致。
+        assert_eq!(together[0].1, harvest(&[a])[0].1, "窗口 a 的内容不得受 b 影响");
+        assert_eq!(together[1].1, harvest(&[b])[0].1, "窗口 b 的内容不得受 a 影响");
+        // 重叠段确实重叠（否则上面的断言会因为两个窗口都在读同一段而失去意义）。
+        let half = len / 2;
+        let ch = header.channels.max(1) as usize;
+        assert_eq!(
+            together[0].1[half * ch..len * ch],
+            together[1].1[..half * ch],
+            "重叠段应当逐样本相同"
+        );
+    }
+
+    #[test]
+    fn windows_beyond_the_file_are_simply_not_reported() {
+        let Some(path) = demo_mp3() else {
+            return;
+        };
+        let header = probe_media(&path, 0, None).expect("probe demo mp3");
+        let total = header.total_frames;
+        // 起点在文件之外：收不到，但也不报错（调用方据此判定覆盖不完整）。
+        let windows = vec![(total + 100_000, 1_000usize)];
+        let mut count = 0usize;
+        let harvested =
+            visit_media_audio_windows(&path, None, &windows, total as usize, &mut |_i,
+                                                                                   _pcm,
+                                                                                   _ch,
+                                                                                   _rate| {
+                count += 1;
+                Ok(())
+            })
+            .expect("harvest");
+        assert_eq!(harvested, 0);
+        assert_eq!(count, 0);
+    }
 
     #[test]
     fn decodes_video_audio_when_test_file_provided() {

@@ -7,6 +7,8 @@
 
 #[path = "commands/cache.rs"]
 mod cache;
+#[path = "commands/channel_scan.rs"]
+pub(crate) mod channel_scan;
 #[path = "commands/common.rs"]
 mod common;
 #[path = "commands/core.rs"]
@@ -19,11 +21,15 @@ mod diagnostics;
 mod dialogs;
 #[path = "commands/file_browser.rs"]
 mod file_browser;
+#[path = "commands/layout_export.rs"]
+mod layout_export;
 #[path = "commands/midi.rs"]
 mod midi;
 #[path = "commands/midi_export.rs"]
 mod midi_export;
 pub(crate) use midi_export::TempoTickConverter;
+#[path = "commands/notebook.rs"]
+mod notebook;
 #[path = "commands/onnx_status.rs"]
 mod onnx_status;
 #[path = "commands/param_selection_window.rs"]
@@ -54,6 +60,8 @@ mod reaper_clipboard;
 mod recording;
 #[path = "commands/render_cancel.rs"]
 pub(crate) mod render_cancel;
+#[path = "commands/render_summary.rs"]
+pub(crate) mod render_summary;
 #[path = "commands/synth.rs"]
 mod synth;
 #[path = "commands/timeline.rs"]
@@ -177,7 +185,22 @@ pub fn set_history_position(
     state: State<'_, AppState>,
     position: usize,
 ) -> crate::models::TimelineStatePayload {
-    state.set_history_position(position)
+    state.set_history_position(position, crate::state::HistoryJumpIntent::Jump)
+}
+
+/// 登记「参数编辑器边缘拉伸」这一步带来的选区变化。
+///
+/// 前端在曲线回写成功之后调用（那一刻新步已追加、位置指向它），后端把它记在
+/// **当前那一步**上；撤销/重做该步时随载荷带回（`param_selection_restore`），
+/// 前端据此恢复选区。`ok = false` 表示当前位置不是参数曲线步（写回被抑制等），
+/// 前端忽略即可。
+#[tauri::command(rename_all = "camelCase")]
+pub fn record_param_selection_step(
+    state: State<'_, AppState>,
+    before: Vec<[f32; 2]>,
+    after: Vec<[f32; 2]>,
+) -> serde_json::Value {
+    state.record_param_selection_step(before, after)
 }
 
 /// 「操作记录」+ 撤销/重做可用性。
@@ -229,6 +252,15 @@ pub fn open_project(
     project::open_project(state, window, project_path, force)
 }
 
+/// 写入记事本内容并登记为一步可撤销操作（连续写入在后端按历史结构合并）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_project_notes(
+    state: State<'_, AppState>,
+    notes_markdown: String,
+) -> serde_json::Value {
+    project::set_project_notes(state, notes_markdown)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn save_project(
     state: State<'_, AppState>,
@@ -237,6 +269,109 @@ pub fn save_project(
 ) -> serde_json::Value {
     project::save_project(state, window, notes_markdown)
 }
+
+// ===================== 记事本（附件 / 剪贴板暂存 / 导出） =====================
+
+/// 写入一条记事本附件（图片或剪贴板载荷的字节）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_put_asset(
+    state: State<'_, AppState>,
+    asset_id: String,
+    kind: String,
+    ext: String,
+    mime: Option<String>,
+    data_base64: String,
+    meta: Option<serde_json::Value>,
+) -> serde_json::Value {
+    notebook::put_asset(state, asset_id, kind, ext, mime, data_base64, meta)
+}
+
+/// 读回一条附件的字节（图片渲染走这条）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_read_asset(state: State<'_, AppState>, asset_id: String) -> serde_json::Value {
+    notebook::read_asset(state, asset_id)
+}
+
+/// 列出全部附件（附件管理器用）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_list_assets(state: State<'_, AppState>) -> serde_json::Value {
+    notebook::list_assets(state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_remove_asset(state: State<'_, AppState>, asset_id: String) -> serde_json::Value {
+    notebook::remove_asset(state, asset_id)
+}
+
+/// 按正文引用清理孤儿附件（保存前调用）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_prune_assets(state: State<'_, AppState>) -> serde_json::Value {
+    notebook::prune_assets(state)
+}
+
+/// 把图片文件读成 base64（拖入的图片走这条）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn notebook_read_file_base64(path: String, max_bytes: Option<u64>) -> serde_json::Value {
+    // 文件读取 + base64 编码可达数十 MB：放阻塞线程池执行，避免同步命令
+    // 在主线程上冻结前端（与 import_audio_item 同模式）。
+    tauri::async_runtime::spawn_blocking(move || notebook::read_file_base64(path, max_bytes))
+        .await
+        .unwrap_or_else(|error| {
+            serde_json::json!({
+                "ok": false,
+                "error": format!("notebook_read_task_failed: {error}")
+            })
+        })
+}
+
+/// 读出系统剪贴板里的 HiFiShifter 载荷（时间轴片段 / 参数线），供暂存。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_read_clipboard_payload() -> serde_json::Value {
+    notebook::read_clipboard_payload()
+}
+
+/// 把暂存的载荷字节原样写回系统剪贴板。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_write_clipboard_payload(
+    payload_base64: String,
+    text_summary: Option<String>,
+) -> serde_json::Value {
+    notebook::write_clipboard_payload(payload_base64, text_summary)
+}
+
+/// 读系统剪贴板里的位图（截图粘贴的兜底路径）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_read_clipboard_image() -> serde_json::Value {
+    notebook::read_clipboard_image()
+}
+
+/// 关闭记事本编辑的撤销合并窗口（切模式 / 失焦 / 关面板 / 保存前调用）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn seal_project_notes_history(state: State<'_, AppState>) -> serde_json::Value {
+    notebook::seal_notes_history(state)
+}
+
+/// 导出记事本正文（.md / .html）：图片以 data URI 内嵌，产物自包含。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_export_document(
+    state: State<'_, AppState>,
+    suggested_name: String,
+    extension: String,
+    content: String,
+) -> serde_json::Value {
+    notebook::export_document(state, suggested_name, extension, content)
+}
+
+/// 把一条附件另存为独立文件。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_save_asset_as(
+    state: State<'_, AppState>,
+    asset_id: String,
+    suggested_name: Option<String>,
+) -> serde_json::Value {
+    notebook::save_asset_as(state, asset_id, suggested_name)
+}
+
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn save_project_as(
@@ -565,10 +700,11 @@ pub async fn preload_waveform_mipmap(
 pub async fn batch_get_waveform_mipmap(
     app: tauri::AppHandle,
     source_paths: Vec<String>,
+    levels: Option<Vec<u8>>,
 ) -> std::collections::HashMap<String, [String; 3]> {
     match tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
-        waveform::batch_get_waveform_mipmap(state, source_paths)
+        waveform::batch_get_waveform_mipmap(state, source_paths, levels)
     })
     .await
     {
@@ -576,34 +712,6 @@ pub async fn batch_get_waveform_mipmap(
         // 与同步实现一致：失败时对应文件返回 3 个空字符串。
         Err(_) => std::collections::HashMap::new(),
     }
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub async fn get_waveform_manifest(
-    app: tauri::AppHandle,
-    source_path: String,
-) -> Result<crate::hfspeaks_v2::WaveformManifestPayload, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state: State<'_, AppState> = app.state();
-        waveform::get_waveform_manifest(state, source_path)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub async fn get_waveform_tiles_binary(
-    app: tauri::AppHandle,
-    source_path: String,
-    revision: String,
-    requests: Vec<crate::hfspeaks_v2::WaveformTileRequest>,
-) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state: State<'_, AppState> = app.state();
-        waveform::get_waveform_tiles_binary(state, source_path, revision, requests)
-    })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 // ===================== timeline =====================
@@ -618,7 +726,8 @@ pub async fn import_audio_item(
 ) -> crate::models::TimelineStatePayload {
     // 导入大文件（大视频抽轨 / 大音频全量解码预览）耗时明显，
     // 卸载到阻塞线程池执行，避免同步命令在主线程上冻结前端。
-    tauri::async_runtime::spawn_blocking(move || {
+    let scan_handle = app.clone();
+    let payload = tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
         timeline::import_audio_item(
             state,
@@ -646,7 +755,14 @@ pub async fn import_audio_item(
         tempo_map: None,
         undo_depth: None,
         redo_depth: None,
-    })
+        notes_markdown: None,
+        param_selection_restore: None,
+    });
+    // 同步判定对**容器**素材用的是一个很短的解码预算（导入不能卡住命令线程），
+    // 长文件因此只拿到"未定论"。这里补一轮完整预算的后台扫描把它收敛掉 ——
+    // 否则那个折叠要等到下次打开工程才发生。
+    crate::commands::channel_scan::request_channel_scan(&scan_handle);
+    payload
 }
 #[tauri::command(rename_all = "camelCase")]
 pub async fn import_audio_bytes(
@@ -657,7 +773,8 @@ pub async fn import_audio_bytes(
     start_sec: Option<f64>,
 ) -> crate::models::TimelineStatePayload {
     // base64 解码 + 落盘 + 导入解析都可能较慢，同样放到阻塞线程池。
-    tauri::async_runtime::spawn_blocking(move || {
+    let scan_handle = app.clone();
+    let payload = tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
         timeline::import_audio_bytes(state, file_name, base64_data, track_id, start_sec)
     })
@@ -679,7 +796,12 @@ pub async fn import_audio_bytes(
         tempo_map: None,
         undo_depth: None,
         redo_depth: None,
-    })
+        notes_markdown: None,
+        param_selection_restore: None,
+    });
+    // 同 `import_audio_item`：把同步判定的短预算结论交给完整预算的后台扫描收敛。
+    crate::commands::channel_scan::request_channel_scan(&scan_handle);
+    payload
 }
 #[tauri::command(rename_all = "camelCase")]
 pub fn add_track(
@@ -768,23 +890,84 @@ pub fn get_track_summary(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn add_clip(
-    state: State<'_, AppState>,
+pub async fn add_clip(
+    app: tauri::AppHandle,
     track_id: Option<String>,
     name: Option<String>,
     start_sec: Option<f64>,
     length_sec: Option<f64>,
     source_path: Option<String>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::add_clip(state, track_id, name, start_sec, length_sec, source_path)
+    // 智能模式下会在**读取 timeline 锁之前**解码音频判定声道；即便是短预算，
+    // 在慢盘/网络盘上也可能耗掉数百毫秒。同步命令跑在主线程会把整个前端冻住
+    // （连加载动画都转不动），因此卸载到阻塞线程池 —— 与 import_audio_item
+    // 同一模式。
+    let scan_handle = app.clone();
+    let payload = tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::add_clip(state, track_id, name, start_sec, length_sec, source_path)
+    })
+    .await
+    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
+        ok: false,
+        tracks: Vec::new(),
+        clips: Vec::new(),
+        created_clip_ids: Some(Vec::new()),
+        created_track_ids: None,
+        selected_track_id: None,
+        selected_clip_id: None,
+        bpm: 120.0,
+        playhead_sec: 0.0,
+        project_sec: None,
+        project: None,
+        missing_files: Some(vec![format!("add clip task failed: {error}")]),
+        disabled_group_ids: Vec::new(),
+        tempo_map: None,
+        undo_depth: None,
+        redo_depth: None,
+        notes_markdown: None,
+        param_selection_restore: None,
+    });
+    // 判定用的是短容器预算，长素材只拿到"待定"：补一轮完整预算的后台扫描收敛。
+    crate::commands::channel_scan::request_channel_scan(&scan_handle);
+    payload
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn create_clips_bulk(
-    state: State<'_, AppState>,
+pub async fn create_clips_bulk(
+    app: tauri::AppHandle,
     payload: crate::state::CreateClipsBulkPayload,
 ) -> crate::models::TimelineStatePayload {
-    timeline::create_clips_bulk(state, payload)
+    // 同上：模板的声道判定要解码音频（按来源路径分组后解码量只与文件数成正比），
+    // 但这仍是锁外的磁盘 IO，不能占着主线程。
+    let scan_handle = app.clone();
+    let payload = tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::create_clips_bulk(state, payload)
+    })
+    .await
+    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
+        ok: false,
+        tracks: Vec::new(),
+        clips: Vec::new(),
+        created_clip_ids: Some(Vec::new()),
+        created_track_ids: None,
+        selected_track_id: None,
+        selected_clip_id: None,
+        bpm: 120.0,
+        playhead_sec: 0.0,
+        project_sec: None,
+        project: None,
+        missing_files: Some(vec![format!("create clips task failed: {error}")]),
+        disabled_group_ids: Vec::new(),
+        tempo_map: None,
+        undo_depth: None,
+        redo_depth: None,
+        notes_markdown: None,
+        param_selection_restore: None,
+    });
+    crate::commands::channel_scan::request_channel_scan(&scan_handle);
+    payload
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -985,24 +1168,93 @@ pub fn set_clip_take_reversed(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn add_clip_take_from_media(
+pub fn set_clip_take_channel_mode(
     state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    channel_mode: i32,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::set_clip_take_channel_mode(state, clip_id, take_id, channel_mode, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn scan_and_convert_fake_stereo(
+    app: tauri::AppHandle,
+    clip_ids: Option<Vec<String>>,
+    dry_run: Option<bool>,
+) -> crate::models::FakeStereoScanPayload {
+    // 整工程扫描会逐 take 解码音频（数十个 take × 数 MB 的解码 + 比对），
+    // 同步命令跑在主线程上会把前端整个冻住（连加载动画都转不动）。
+    // 卸载到阻塞线程池执行，与 import_audio_item 同一模式。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::scan_and_convert_fake_stereo(state, clip_ids, dry_run)
+    })
+    .await
+    .unwrap_or_else(|error| crate::models::FakeStereoScanPayload {
+        ok: false,
+        scanned: 0,
+        converted: 0,
+        pending: 0,
+        entries: Vec::new(),
+        pending_files: Some(vec![format!("scan task failed: {error}")]),
+        eligibility: crate::models::FakeStereoScanEligibility::default(),
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn add_clip_take_from_media(
+    app: tauri::AppHandle,
     clip_id: String,
     source_path: String,
     name: Option<String>,
     checkpoint: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::add_clip_take_from_media(state, clip_id, source_path, name, checkpoint)
+    // 同上：换源 / 加 take 会在锁外做声道判定（可能解码音频），卸载到阻塞线程池。
+    let scan_handle = app.clone();
+    let payload = tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::add_clip_take_from_media(state, clip_id, source_path, name, checkpoint)
+    })
+    .await
+    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
+        ok: false,
+        tracks: Vec::new(),
+        clips: Vec::new(),
+        created_clip_ids: Some(Vec::new()),
+        created_track_ids: None,
+        selected_track_id: None,
+        selected_clip_id: None,
+        bpm: 120.0,
+        playhead_sec: 0.0,
+        project_sec: None,
+        project: None,
+        missing_files: Some(vec![format!("add take task failed: {error}")]),
+        disabled_group_ids: Vec::new(),
+        tempo_map: None,
+        undo_depth: None,
+        redo_depth: None,
+        notes_markdown: None,
+        param_selection_restore: None,
+    });
+    crate::commands::channel_scan::request_channel_scan(&scan_handle);
+    payload
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn import_media_files_as_takes(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     paths: Vec<String>,
     track_id: Option<String>,
     start_sec: Option<f64>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::import_media_files_as_takes(state, paths, track_id, start_sec)
+    let payload = timeline::import_media_files_as_takes(state, paths, track_id, start_sec);
+    // 同 `import_audio_item`：容器素材的同步判定用的是短解码预算，长文件只拿到
+    // "未定论"，这里补一轮完整预算的后台扫描把它收敛掉。
+    crate::commands::channel_scan::request_channel_scan(&app);
+    payload
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1271,8 +1523,11 @@ pub fn get_param_frames(
     frame_count: u32,
     stride: Option<u32>,
     binary: Option<bool>,
+    with_sentinel: Option<bool>,
 ) -> crate::models::ParamFramesPayload {
-    params::get_param_frames(state, track_id, param, start_frame, frame_count, stride, binary)
+    params::get_param_frames(
+        state, track_id, param, start_frame, frame_count, stride, binary, with_sentinel,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1297,6 +1552,28 @@ pub fn restore_param_frames(
     checkpoint: Option<bool>,
 ) -> serde_json::Value {
     params::restore_param_frames(state, track_id, param, start_frame, frame_count, checkpoint)
+}
+
+/// 互转选区段（`startFrame` 起共 `frameCount` 帧，与前端 FrameRange 同口径）。
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConvertRange {
+    pub start_frame: u32,
+    pub frame_count: u32,
+}
+
+/// 音量 ↔ 动态 曲线互转（后端单事务：基线补偿换算 + 源归位 + 单撤销点）。
+///
+/// 语义与正确性推导见 `commands/params.rs::convert_mix_param`。前端不做任何
+/// 换算 —— 逐帧基线与曲线存在性只有后端权威。
+#[tauri::command(rename_all = "camelCase")]
+pub fn convert_mix_param(
+    state: State<'_, AppState>,
+    track_id: String,
+    from: String,
+    ranges: Vec<ConvertRange>,
+) -> serde_json::Value {
+    params::convert_mix_param(state, track_id, from, ranges)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1557,10 +1834,14 @@ pub fn pick_diagnostics_output_path() -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn export_diagnostics(app: tauri::AppHandle, output_path: String) -> serde_json::Value {
+pub async fn export_diagnostics(
+    app: tauri::AppHandle,
+    output_path: String,
+    frontend_settings: Option<serde_json::Value>,
+) -> serde_json::Value {
     match tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
-        diagnostics::export_diagnostics(state, output_path)
+        diagnostics::export_diagnostics(state, output_path, frontend_settings)
     })
     .await
     {
@@ -1570,6 +1851,13 @@ pub async fn export_diagnostics(app: tauri::AppHandle, output_path: String) -> s
             "error": format!("Failed to join export task: {error}"),
         }),
     }
+}
+
+/// 视图 → 布局 → 「导出布局...」：原生保存对话框 + 后端写文件（WebView 内
+/// 的 `<a download>` 被拦截，见 `commands/layout_export.rs` 的模块说明）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn export_layout_json(json: String) -> serde_json::Value {
+    layout_export::export_layout_json(json)
 }
 
 /// 前端把 invoke 失败 / 全局异常回传到后端统一日志（fire-and-forget）。
@@ -1753,9 +2041,46 @@ pub fn has_reaper_clipboard() -> serde_json::Value {
 
 // ===================== cache =====================
 
+/// 渲染缓存统计（占用 / 条目 / 会话命中率）。
+///
+/// 需要扫描缓存目录并读取文件头，放到阻塞线程池执行，避免冻结 UI 主线程。
 #[tauri::command(rename_all = "camelCase")]
-pub fn clear_cache(state: State<'_, AppState>) -> Result<u64, String> {
-    cache::clear_cache(state)
+pub async fn get_render_cache_stats() -> serde_json::Value {
+    match tauri::async_runtime::spawn_blocking(cache::get_render_cache_stats).await {
+        Ok(value) => value,
+        Err(e) => serde_json::json!({ "ok": false, "error": format!("{e}") }),
+    }
+}
+
+/// 清理渲染缓存（`scope`：all / currentProject / olderThan / otherSampleRates）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn clear_render_cache(
+    app: tauri::AppHandle,
+    scope: String,
+    days: Option<u32>,
+) -> serde_json::Value {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        cache::clear_render_cache(state, scope, days)
+    })
+    .await
+    {
+        Ok(Ok(value)) => value,
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": format!("{e}") }),
+    }
+}
+
+/// 在系统文件管理器中打开渲染缓存目录。
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_render_cache_dir(app: tauri::AppHandle) -> serde_json::Value {
+    cache::open_render_cache_dir(app)
+}
+
+/// 在系统文件管理器中定位导出音频的产物（选中所有已渲染文件；无文件时打开目标文件夹）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn reveal_export_paths(app: tauri::AppHandle, paths: Vec<String>) -> serde_json::Value {
+    cache::reveal_export_paths(app, paths)
 }
 
 // ===================== processor_caps =====================

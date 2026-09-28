@@ -71,11 +71,14 @@ pub(super) fn pick_diagnostics_output_path() -> serde_json::Value {
 pub(super) fn export_diagnostics(
     state: State<'_, AppState>,
     output_path: String,
+    frontend_settings: Option<serde_json::Value>,
 ) -> serde_json::Value {
     let out = PathBuf::from(&output_path);
     log::info!("[diagnostics] exporting diagnostics package to {}", out.display());
 
-    let result = write_base_zip(&out, &build_system_info(&state)).and_then(|()| append_benchmark(&out));
+    let settings = build_settings_info(&state, frontend_settings);
+    let result = write_base_zip(&out, &build_system_info(&state), &settings)
+        .and_then(|()| append_benchmark(&out));
 
     match result {
         Ok(()) => {
@@ -123,7 +126,35 @@ fn build_system_info(state: &State<'_, AppState>) -> serde_json::Value {
     })
 }
 
-fn write_base_zip(out: &Path, system_info: &serde_json::Value) -> Result<(), String> {
+/// 用户设置快照：后端持久化配置（UI / 导出 / 自动备份 / 录音 / 窗口）+
+/// 前端 `localStorage` 设置（外观 / 自定义主题 / 快捷键 / 布局偏好等，由面板侧
+/// 收集后传入）。刻意不含最近工程列表（`recent`）等工程数据，与
+/// `build_system_info` 的隐私取向保持一致。
+fn build_settings_info(
+    state: &State<'_, AppState>,
+    frontend_settings: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let backend = match state.config_dir.get() {
+        Some(dir) => serde_json::json!({
+            "ui": crate::config::load_ui_settings(dir),
+            "export": crate::config::load_export_settings(dir),
+            "autoBackup": crate::config::load_auto_backup_settings(dir),
+            "recording": crate::config::load_recording_settings(dir),
+            "window": crate::config::load_window_state(dir),
+        }),
+        None => serde_json::Value::Null,
+    };
+    serde_json::json!({
+        "backend": backend,
+        "frontend": frontend_settings.unwrap_or(serde_json::Value::Null),
+    })
+}
+
+fn write_base_zip(
+    out: &Path,
+    system_info: &serde_json::Value,
+    settings: &serde_json::Value,
+) -> Result<(), String> {
     let file = std::fs::File::create(out).map_err(|e| format!("create zip failed: {e}"))?;
     let mut zip = zip::ZipWriter::new(file);
 
@@ -133,6 +164,13 @@ fn write_base_zip(out: &Path, system_info: &serde_json::Value) -> Result<(), Str
         .map_err(|e| format!("serialize system_info failed: {e}"))?;
     zip.write_all(info.as_bytes())
         .map_err(|e| format!("write system_info failed: {e}"))?;
+
+    zip.start_file("settings.json", crate::zip_util::options_now())
+        .map_err(|e| format!("zip add settings failed: {e}"))?;
+    let settings_json = serde_json::to_string_pretty(settings)
+        .map_err(|e| format!("serialize settings failed: {e}"))?;
+    zip.write_all(settings_json.as_bytes())
+        .map_err(|e| format!("write settings failed: {e}"))?;
 
     for path in logging::log_files() {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {

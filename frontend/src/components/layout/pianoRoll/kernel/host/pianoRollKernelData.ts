@@ -46,10 +46,13 @@ export interface PianoRollGridSpec {
     /**
      * 网格种类：决定用哪套几何。
      *
-     * 特殊说明：`"pitch"` 走半音线（每个整数半音一条、pc === 0 换色），其余三种
-     * 走值域步进线（步进与强线间隔各不相同）。与 `render.ts` 的四个分支一一对应。
+     * 特殊说明：`"pitch"` 走半音线（每个整数半音一条、pc === 0 换色），其余走值域
+     * 步进线（步进与强线间隔各不相同）。与 `render.ts` 的分支一一对应；
+     * `"level"` 是动态（DYN）面板的倍率网格，`"fallback"` 是其余数值参数
+     * （volume / pan / 张力 / 气声…）的 nice-step 网格 —— **没有** fallback 时
+     * 这些参数的左轴与网格整层消失（GL 是轴的唯一绘制者）。
      */
-    readonly kind: "pitch" | "cents" | "degrees" | "formantCents";
+    readonly kind: "pitch" | "cents" | "degrees" | "formantCents" | "level" | "fallback";
     /** 当前值域视口（中心与跨度）。 */
     readonly view: { readonly center: number; readonly span: number };
     /** 绝对值域下界（pitch 为 MIDI 下界，其余为参数值下界）。 */
@@ -135,6 +138,14 @@ export interface PianoRollGridSpec {
      * 按内部值直接格式化。GL 侧据此选择刻度种类，**必须**与 Canvas2D 路径同一个值。
      */
     readonly paramName?: string;
+    /**
+     * 纵轴展示单位（音量 / 动态：倍率 ↔ dB，见 `paramAxisUnits`）。
+     *
+     * 特殊说明：只影响数值轴**标签文本**（刻度位置不变），且必须参与轴几何签名 ——
+     * 否则切单位后签名不变，轴几何不重建，标签会停在旧单位上（症状是"点了切换但
+     * 刻度纹丝不动"）。
+     */
+    readonly axisUnit?: "ratio" | "db";
     /** 字体族（与 Canvas2D 路径共用同一个，避免两种模式字形不同）。 */
     readonly fontFamily?: string;
     /** 数值轴刻度标签颜色（`colors.tensionLabel`）。 */

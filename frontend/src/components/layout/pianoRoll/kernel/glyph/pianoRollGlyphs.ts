@@ -52,6 +52,103 @@ export const PIANO_ROLL_ATLAS_PAGE_SIZE_PX = 2048;
 /** 图集最大页数。 */
 export const PIANO_ROLL_ATLAS_MAX_PAGES = 2;
 
+/**
+ * 以 `middle` 基准绘制一行文字时，字形槽位在锚点**下方**延伸的高度（CSS px）。
+ *
+ * 【推导】由文件头的换算关系：`originY = y − 字号 / 2`（槽位顶部），槽位高 =
+ * `字号 × GLYPH_LINE_HEIGHT_RATIO`，故槽位下缘 = `y − 字号/2 + 字号 × ratio`；
+ * 相对锚点向下的溢出即 `字号 × (ratio − 0.5)`。
+ *
+ * 【用途】给"锚点正好落在绘图区下边缘"的文字预留画布高度。数值轴最下方那条刻度
+ * 正是这种情况：`valueToY` 把值域下界映射到 `heightPx` 本身，于是标签的中线落在
+ * 绘图区下边缘，下半截会被画布边界裁掉（观感是"最下面的刻度值被挡住了"）。
+ *
+ * @param fontSizePx 字号（CSS px）。
+ * @returns 需要向下预留的高度（CSS px）；非法字号返回 0。
+ */
+export function glyphMiddleSlotDescentPx(fontSizePx: number): number {
+    if (!Number.isFinite(fontSizePx) || fontSizePx <= 0) return 0;
+    return Math.max(0, fontSizePx * GLYPH_LINE_HEIGHT_RATIO - fontSizePx / 2);
+}
+
+/** 数值轴刻度标签的字号（CSS px）。字形请求与画布预留高度必须同源。 */
+export const AXIS_TICK_LABEL_FONT_SIZE_PX = 10;
+
+/**
+ * 数值轴画布在**绘图区**（`viewportHeightPx`）下方额外预留的高度（CSS px）。
+ *
+ * 【为什么留下它】以 `middle` 基准落笔的文字，其**槽位下缘**在锚点下方
+ * `字号 × (1.2 − 0.5)` 处（见 `glyphMiddleSlotDescentPx`）；锚点正好压在绘图区
+ * 下边缘时，那截槽位需要这点高度才画得完。
+ *
+ * 【当前没有任何标签依赖它】数值轴刻度标签已由 {@link axisTickLabelAnchorBounds}
+ * 夹进绘图区内部；键盘音名的中线最多落在 `下边缘 − 半个键高`（键高不足 6px 时
+ * 干脆不画），墨迹同样留在绘图区内。因此这份预留现在是**保险**：文字是位图槽位，
+ * 槽位下缘一旦越出画布就会被硬裁，而"是否越界"取决于字号 / 行高比 / 字体墨迹三者
+ * 的组合，留出这段比日后再踩一次坑便宜。
+ *
+ * 【约束】必须 ≤ `PARAM_EDITOR_BOTTOM_BAR_PX`（面板为自绘水平滚动条预留的行高，
+ * 也就是纵轴列比滚动视口高出的那一条），否则画布会超出列被父层裁掉、问题复现。
+ * 该约束由 `axisLabelMetrics.test.ts` 钉住。
+ */
+export const AXIS_TICK_LABEL_DESCENT_PX = Math.ceil(
+    glyphMiddleSlotDescentPx(AXIS_TICK_LABEL_FONT_SIZE_PX),
+);
+
+/**
+ * 刻度标签在绘图区两端额外内缩的余量（CSS px）。
+ *
+ * 【为什么不止"正好放得下"】下面的区间把标签的 em 盒约束在**绘图区内部**，
+ * 而墨迹并非严格等于 em 盒（实测常见字体里，数字的墨迹比 em 盒顶低 0.4~1.6px，
+ * 个别字体如 Meiryo 会下探到 em 盒底附近）。留 1px 余量让"贴着边缘的那一行"
+ * 不至于恰好压在边界像素上；同时它也让本区间**不依赖**画布下方那点预留高度
+ * （见 `AXIS_TICK_LABEL_DESCENT_PX`）——预留高度只够容下 em 盒的一半，一旦父层
+ * 裁掉那一条（父容器 `overflow-hidden`、预留行小于常量、分数 DPR 取整），
+ * 最下方标签就会缺半截。
+ */
+export const AXIS_TICK_LABEL_EDGE_MARGIN_PX = 1;
+
+/**
+ * 数值轴刻度标签锚点 y 的**安全区间**（视口坐标，`middle` 基准）。
+ *
+ * 【要解决的问题】刻度标签锚定在 `valueToY(值)` 上，而值域的两端恰好映射到绘图区
+ * 的上下边缘（`y = 0` 与 `y = heightPx`）。以 `middle` 基准绘制的文字有一半在锚点
+ * **上/下方**，于是：
+ * - 最上面那条刻度（通常是视口上界）上半个字被画布上缘裁掉；
+ * - 最下面那条刻度（通常是 `0` / dB 的 `-∞`）下半个字压在绘图区下边缘，只能靠
+ *   `AXIS_TICK_LABEL_DESCENT_PX` 的下方预留来救 —— 一旦那条预留被裁或字体墨迹
+ *   略低，就露出"缺半截"。
+ *
+ * 【做法】把锚点夹进"em 盒（±字号/2）连同 {@link AXIS_TICK_LABEL_EDGE_MARGIN_PX}
+ * 余量都落在绘图区内"的区间。两端各最多内缩 `字号/2 + 1`（本字号 6 CSS px），
+ * 对 5~12 条刻度的密度而言远小于刻度间距，不会与其他标签重叠。
+ *
+ * 【为什么夹锚点而不是加高画布】画布下方最多只能多出 `PARAM_EDITOR_BOTTOM_BAR_PX`
+ * （8px），上方则**完全没有**可扩展空间（轴列顶端就是角框）。夹锚点是唯一在两个
+ * 方向都成立的做法，且只动文字、不动任何几何（刻度线位置保持不变）。
+ *
+ * @param fontSizePx 标签字号（CSS px）。
+ * @param viewportHeightPx 绘图区高度（CSS px）。
+ * @returns 锚点 y 的上下限（闭区间）；入参非法时返回退化区间（调用方原样使用）。
+ */
+export function axisTickLabelAnchorBounds(
+    fontSizePx: number,
+    viewportHeightPx: number,
+): { readonly minY: number; readonly maxY: number } {
+    const half = fontSizePx / 2;
+    if (!Number.isFinite(fontSizePx) || fontSizePx <= 0) {
+        return { minY: 0, maxY: Number.POSITIVE_INFINITY };
+    }
+    if (!Number.isFinite(viewportHeightPx) || viewportHeightPx <= 0) {
+        return { minY: 0, maxY: Number.POSITIVE_INFINITY };
+    }
+    const minY = half;
+    // `Math.max(minY, …)` 兜住"绘图区比一个字还矮"的退化情形：此时宁可让标签落在
+    // 顶端（仍可读），也不要让区间反转（夹取会得到不可预期的值）。
+    const maxY = Math.max(minY, viewportHeightPx - half - AXIS_TICK_LABEL_EDGE_MARGIN_PX);
+    return { minY, maxY };
+}
+
 /** 文本的水平对齐方式（对应 Canvas2D 的 `ctx.textAlign`）。 */
 export type TextAlign = "left" | "center" | "right";
 

@@ -207,7 +207,7 @@ export function useClipPitchDrag(deps: {
                     text: formatDragTooltip(cents),
                     position: { x: ev.clientX, y: ev.clientY },
                 });
-                // 拖拽发生：把参数编辑器选区定在 Clip 首尾（与双击 Clip 同一
+                // 拖拽发生：把参数编辑器选区定在 Clip 首尾（与时间轴右键手势同一
                 // 操作），交互焦点（复制/剪切路由与活动表面）随之切到参数侧。
                 if (!st.selectionApplied) {
                     st.selectionApplied = true;

@@ -183,6 +183,14 @@ export interface SceneRowBuildArgs {
     waveformHeightPx?: number;
     /** clip 的源路径；默认每个 clip 一个独立源文件。 */
     sourcePathOf?: (clip: { id: string; trackId: string }) => string;
+    /**
+     * 每侧淡变时长（秒），缺省 0（无淡变）。
+     *
+     * 【为什么要能造淡变】`buildWaveformGeometry` 的「恒定增益」快路径在段与
+     * 淡变区相交时按**逐列**退让：淡变区之外的列仍走快路径，区内的列走切片。
+     * 缺省 fixture 的淡变恒为 0，这条混合路径在基准里完全看不见。
+     */
+    fadeSec?: number;
 }
 
 /**
@@ -200,6 +208,7 @@ export function buildSceneRows(args: SceneRowBuildArgs): WaveformSceneRow[] {
     const waveformHeightPx =
         args.waveformHeightPx ?? Math.max(1, args.rowHeight - waveformTopPx - 2);
     const sourcePathOf = args.sourcePathOf ?? ((clip) => `/media/${clip.id}.wav`);
+    const fadeSec = args.fadeSec ?? 0;
 
     const byTrack = new Map<string, SceneRowClip[]>();
     for (const clip of args.clips) {
@@ -224,8 +233,8 @@ export function buildSceneRows(args: SceneRowBuildArgs): WaveformSceneRow[] {
             loopEnabled: false,
             gain: 1,
             muted: false,
-            fadeInSec: 0,
-            fadeOutSec: 0,
+            fadeInSec: fadeSec,
+            fadeOutSec: fadeSec,
             fadeInShape: 0,
             fadeInDir: 0,
             fadeOutShape: 0,

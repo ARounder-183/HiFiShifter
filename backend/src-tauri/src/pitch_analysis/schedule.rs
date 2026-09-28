@@ -370,6 +370,7 @@ pub fn maybe_schedule_pitch_orig(state: &AppState, root_track_id: &str) -> bool 
     // 避免多次 lock 之间 state.timeline 被前端命令修改导?key 不一致?
     let mut should_emit = false;
     let mut emit_root_track_id = String::new();
+    let mut should_request_bg_render = false;
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -427,6 +428,18 @@ pub fn maybe_schedule_pitch_orig(state: &AppState, root_track_id: &str) -> bool 
                     }
                     should_emit = true;
                     emit_root_track_id = job.root_track_id.clone();
+                    // 【全量命中 = 组装收敛】此时该根的 pitch_orig_key 已置位，
+                    // 渲染键不再漂移。若后台预渲染因"输入未收敛"卫兵跳过了本根
+                    // 的 clip（BG_RENDER_PITCH_PENDING 已置位），必须在这里补触发
+                    // —— 全缓存命中的收敛不会产生任何 clip 完成回调，没有这条
+                    // 补触发，卫兵跳过的 clip 永远等不到渲染（打开工程即静默
+                    // 不预渲染、播放时才按需渲染）。
+                    // 与 handle_clip_pitch_ready 的分流一致：仅自动渲染启用时
+                    // 消费并补触发；禁用时保留标志给播放中的等待路径。
+                    should_request_bg_render = crate::commands::playback::AUTO_BG_RENDER_ENABLED
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        && crate::commands::playback::BG_RENDER_PITCH_PENDING
+                            .swap(false, std::sync::atomic::Ordering::AcqRel);
                 } else {
                     // 部分命中：仅当曲线内容确实发生变化时才更新并通知前端。
                     // 否则跳过 emit，防止"fetch -> emit -> fetch"无限循环。
@@ -455,6 +468,12 @@ pub fn maybe_schedule_pitch_orig(state: &AppState, root_track_id: &str) -> bool 
                     root_track_id: emit_root_track_id,
                 },
             );
+        }
+    }
+    // 锁释放后再补触发（同上：收敛后渲染键已稳定）。
+    if should_request_bg_render {
+        if let Some(app) = state.app_handle.get() {
+            crate::commands::playback::request_background_render(app);
         }
     }
 

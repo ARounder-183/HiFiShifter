@@ -235,20 +235,48 @@ pub(crate) fn common_pan_curve_for_clip<'a>(
     extra_curve_for_clip(entry, clip, "pan")
 }
 
-/// 该合成链路是否在 processor 内部消费 volume/pan（如 vslib 控制点）。
+/// 共通动态曲线（DYN，用户绘制的**目标电平**）。
 ///
-/// 返回 true 时，音频引擎 mix 阶段不得再次应用这两个曲线，
-/// 否则会出现二次增益/声像；未开启 Compose 时按该算法约定不生效。
-pub(crate) fn processor_bakes_common_mix_curves(kind: SynthPipelineKind) -> bool {
-    #[cfg(feature = "vslib")]
-    {
-        return matches!(kind, SynthPipelineKind::VocalShifterVslib);
+/// 曲线里可能出现 `DYN_FOLLOW_ORIG`（−1）哨兵帧，表示「该帧沿用原声电平」。
+///
+/// ⚠ 这里返回的是**存储形态**（含哨兵）。**音频路径**（实时引擎 / 离线导出）
+/// 在装配 clip 时必须先经
+/// [`crate::renderer::common_params::resolve_dyn_sentinels_for_audio`] 把哨兵
+/// 解析成真实目标电平 —— 逐样本插值穿过负哨兵会掉到静音（咔哒）。
+/// 显示路径在 `get_param_frames` 出口自行解析，两者语义一致。
+pub(crate) fn common_dyn_curve_for_clip<'a>(
+    entry: &'a crate::state::TrackParamsState,
+    clip: &'a crate::state::Clip,
+) -> Option<&'a [f32]> {
+    extra_curve_for_clip(entry, clip, crate::renderer::common_params::DYN_PARAM_ID)
+}
+
+/// 原声电平基线（`dyn_orig`，轨道级派生数据，无 clip 级覆盖）。
+///
+/// 由后台响度分析写入 `TrackParamsState.dyn_orig`；分析未就绪时返回 None，
+/// 此时动态增益退化为 1.0（等效「沿用原声」）。
+pub(crate) fn dyn_orig_curve_for_clip<'a>(
+    entry: &'a crate::state::TrackParamsState,
+    _clip: &'a crate::state::Clip,
+) -> Option<&'a [f32]> {
+    if entry.dyn_orig.is_empty() {
+        return None;
     }
-    #[cfg(not(feature = "vslib"))]
-    {
-        let _ = kind;
-        false
-    }
+    Some(entry.dyn_orig.as_slice())
+}
+
+/// 该合成链路是否在 processor 内部消费 volume/pan。
+///
+/// **始终返回 false**：音量/声像/动态是算法无关的混音级参数，一律由音频引擎的
+/// mix 阶段应用（实时播放 `audio_engine/mix.rs`、离线导出 `audio/mixdown.rs`）。
+/// 任何处理器都不得再应用它们，否则会出现二次增益/声像。
+///
+/// 保留该函数（而非各处内联 `false`）是为了让「不存在 processor 烘焙」这一事实
+/// 有唯一的、可被搜索与断言的落点。
+#[allow(dead_code)]
+#[inline]
+pub(crate) fn processor_bakes_common_mix_curves(_kind: SynthPipelineKind) -> bool {
+    false
 }
 
 #[cfg(feature = "vslib")]
@@ -257,16 +285,11 @@ fn vslib_curve_active_for_clip(
     clip: &crate::state::Clip,
     clip_start_sec: f64,
 ) -> bool {
-    // (key, default)：volume/pan 现在与其它算法共用，但在 vslib 路径由
-    // processor 消费，因此任何非默认段都必须触发 vslib 预渲染。
-    let defaults: &[(&str, f32)] = &[
-        ("volume", 1.0),
-        ("pan", 0.0),
-        ("formant_shift_cents", 0.0),
-        ("breathiness", 0.0),
-        ("dyn_edit", 1.0),
-        ("dyn_orig", 1.0),
-    ];
+    // 只有 vslib **专有**的参数需要触发预渲染（它们由 processor 写进控制点）。
+    // volume / pan / dyn 是混音级参数，由音频引擎的 mix 阶段实时应用，
+    // 改动它们**不得**触发底层重合成 —— 这正是「拖动音量/动态即时生效」的基础，
+    // 也是把这三个参数从 vslib 控制点里搬出来要换取的核心收益。
+    let defaults: &[(&str, f32)] = &[("formant_shift_cents", 0.0), ("breathiness", 0.0)];
     defaults.iter().any(|&(key, default)| {
         let curve = extra_curve_for_clip(entry, clip, key);
         curve_differs_from_default_in_range(
@@ -453,6 +476,8 @@ mod tests {
             source_end_sec: 2.0,
             playback_rate: 1.0,
             reversed: false,
+            channel_mode: 0,
+            source_channels: None,
             loop_enabled: false,
             snap_offset_sec: 0.0,
             fade_in_sec: 0.0,
@@ -745,18 +770,41 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "vslib")]
     #[test]
-    fn only_vslib_bakes_common_mix_curves_into_processor_output() {
-        assert!(processor_bakes_common_mix_curves(
-            SynthPipelineKind::VocalShifterVslib
-        ));
+    fn no_algorithm_bakes_common_mix_curves_into_processor_output() {
+        // 音量/声像/动态一律由混音层应用；任何算法都不得在处理器内部再应用一次，
+        // 否则会出现二次增益/声像（vslib 曾如此，已移除）。
         assert!(!processor_bakes_common_mix_curves(
             SynthPipelineKind::NsfHifiganOnnx
         ));
         assert!(!processor_bakes_common_mix_curves(
             SynthPipelineKind::WorldVocoder
         ));
+        #[cfg(feature = "vslib")]
+        assert!(!processor_bakes_common_mix_curves(
+            SynthPipelineKind::VocalShifterVslib
+        ));
+    }
+
+    #[test]
+    fn vslib_exposes_no_common_mix_curves_as_processor_params() {
+        // 回归护栏：共通参数只能由 `renderer::all_param_descriptors` 提供。
+        // 若某个处理器的 descriptor 列表里又出现 volume/pan/dyn，
+        // 说明有人把"混音级参数"重新塞回了算法内部（正是本次改造要消除的耦合）。
+        for kind in [
+            SynthPipelineKind::WorldVocoder,
+            SynthPipelineKind::NsfHifiganOnnx,
+        ] {
+            let own = crate::renderer::get_processor(kind).param_descriptors();
+            for d in own {
+                assert!(
+                    !crate::renderer::common_params::is_common_mix_param(d.id),
+                    "{:?} 不应再声明共通参数 {}",
+                    kind,
+                    d.id
+                );
+            }
+        }
     }
 }
 
@@ -1866,127 +1914,188 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     }
     let pitch_edit_for_ctx = effective_pitch_edit.as_slice();
 
-    // stereo -> mono (we don't preserve stereo; use left channel for cheaper conversion)
+    // ── 声道扇出（channel fan-out）─────────────────────────────────────────
+    // 合成算法链（ClipProcessor）是单声道的；有效声道数 > 1（真立体声素材
+    // 的 Normal/Swap 模式）时，L/R 各自完整走一遍处理器链（音高曲线/参数
+    // 两声道相同）后交错合并 —— 双声道进、双声道出，通道差异全程保留。
+    //
+    // 等效单声道（mono 源、MonoMix/MonoLeft/MonoRight 条件化）时，两个平面
+    // 内容相同，只处理一次后复制 —— 与旧实现（取左声道再复制）逐位一致，
+    // 单声道工作流 CPU/内存零回归。
+    //
+    // source_channels 未知（旧工程 take 未记录）时按单声道处理：条件化后两
+    // 平面相同（mono 源复制），输出与旧实现一致；若源实为立体声但未记录，
+    // 退化为旧的"左声道坍缩"行为（与升级前一致，不引入新的错误）。
+    //
+    // ── 为什么扇出是串行的（不要改成 rayon 并行）──────────────────────────
+    // 曾评估把 L/R 两路并行化以缩短真立体声的渲染耗时。实测前置条件不成立：
+    // 三个 ONNX 模型的推理会话都是**单个共享 `Arc<Mutex<Session>>`**
+    // （`nsf_hifigan_onnx.rs` / `hnsep_onnx.rs` / `fcpe_onnx.rs` 的
+    // `SHARED_SESSION`），HiFiGAN 的分块缓存与 HNSEP 的分离缓存也是全局
+    // `Mutex`。而 ONNX 推理正是本链路的耗时主体，两路并行只会在同一把会话锁
+    // 上互相争用 —— 墙钟收益接近零甚至为负。
+    //
+    // 更关键的是风险不对称：WORLD 路径会进入 WORLD C 库，其重入性无法从本
+    // 工程侧证实，一旦判断错误是**静默的音频损坏**而非报错。
+    //
+    // 真立体声的提速因此走另一条路：把"内容是单声道、被混流成双声道"的假
+    // 立体声在导入时折叠为单声道（见 `crate::channel_policy`），使
+    // `fanout_channels` 恒为 1 —— 对这类素材是无损的，且不需要任何并发。
     let frames = seg_frames;
     // kind / clip_playback_rate / processor_handles_stretch / expected_out_frames 已在函数上方计算
+    let source_channels = clip.source_channels.unwrap_or(1).max(1) as usize;
+    let fanout_channels =
+        crate::channel_mode::effective_channels(source_channels as u16, clip.take_channel_mode())
+            as usize;
 
-    let processed: Option<Vec<f32>> = MONO_SCRATCH.with(|buf| -> Result<Option<Vec<f32>>, String> {
-        let mut mono = buf.borrow_mut();
-        mono.clear();
-        mono.reserve(frames); // 预分配内存
-        // 跨步读取左声道，消除 memset 和越界检查
-        mono.extend(pcm_stereo.iter().step_by(2).take(frames).copied());
+    let processed_channels: Option<Vec<Vec<f32>>> =
+        MONO_SCRATCH.with(|buf| -> Result<Option<Vec<Vec<f32>>>, String> {
+            let mut mono = buf.borrow_mut();
 
-        // 通过 ClipProcessor trait 调用，解耦合成链路（含音高合成）。
-        let processor = crate::renderer::get_processor(kind);
-        if !processor.is_available() {
-            return Ok(None);
-        }
+            // 通过 ClipProcessor trait 调用，解耦合成链路（含音高合成）。
+            let processor = crate::renderer::get_processor(kind);
+            if !processor.is_available() {
+                return Ok(None);
+            }
 
-        // 从 TrackParamsState 读取声码器专属曲线/参数（Phase 5 新增字段）
-        let extra_curves = &entry.extra_curves;
-        let extra_params = &entry.extra_params;
+            // 从 TrackParamsState 读取声码器专属曲线/参数（Phase 5 新增字段）
+            let extra_curves = &entry.extra_curves;
+            let extra_params = &entry.extra_params;
 
-        // 若 Clip 有 clip 级别覆盖，优先使用；否则 fall back 到 track 级别
-        let extra_curves: &std::collections::HashMap<String, Vec<f32>> =
-            clip.extra_curves.as_ref().unwrap_or(extra_curves);
-        let extra_params: &std::collections::HashMap<String, f64> =
-            clip.extra_params.as_ref().unwrap_or(extra_params);
+            // 若 Clip 有 clip 级别覆盖，优先使用；否则 fall back 到 track 级别
+            let extra_curves: &std::collections::HashMap<String, Vec<f32>> =
+                clip.extra_curves.as_ref().unwrap_or(extra_curves);
+            let extra_params: &std::collections::HashMap<String, f64> =
+                clip.extra_params.as_ref().unwrap_or(extra_params);
 
-        // 子轨共振峰差：把沿父轨层级累加后的生效曲线注入处理器。
-        // 仅存在 child_formant_offset 时克隆 HashMap，避免普通路径额外分配。
-        let child_formant_curve = if has_child_formant_offset {
-            build_clip_effective_formant_shift_curve(
-                timeline,
-                clip,
-                entry,
-                entry.pitch_edit.len().max(1),
-            )
-        } else {
-            None
-        };
-        let effective_extra_curves_storage;
-        let extra_curves_for_ctx: &std::collections::HashMap<String, Vec<f32>> =
-            if let Some(curve) = child_formant_curve {
-                effective_extra_curves_storage = {
-                    let mut cloned = extra_curves.clone();
-                    cloned.insert("formant_shift_cents".to_string(), curve);
-                    cloned
-                };
-                &effective_extra_curves_storage
+            // 子轨共振峰差：把沿父轨层级累加后的生效曲线注入处理器。
+            // 仅存在 child_formant_offset 时克隆 HashMap，避免普通路径额外分配。
+            let child_formant_curve = if has_child_formant_offset {
+                build_clip_effective_formant_shift_curve(
+                    timeline,
+                    clip,
+                    entry,
+                    entry.pitch_edit.len().max(1),
+                )
             } else {
-                extra_curves
+                None
             };
+            let effective_extra_curves_storage;
+            let extra_curves_for_ctx: &std::collections::HashMap<String, Vec<f32>> =
+                if let Some(curve) = child_formant_curve {
+                    effective_extra_curves_storage = {
+                        let mut cloned = extra_curves.clone();
+                        cloned.insert("formant_shift_cents".to_string(), curve);
+                        cloned
+                    };
+                    &effective_extra_curves_storage
+                } else {
+                    extra_curves
+                };
 
-        // 若处理器自己处理时间拉伸（如 vslib 使用 Timing 控制点），传递实际 playback_rate；
-        // 否则 PCM 已由外部时间拉伸预处理，rate=1.0。
-        let ctx_playback_rate = if processor_handles_stretch { clip_playback_rate } else { 1.0 };
+            // 若处理器自己处理时间拉伸（如 vslib 使用 Timing 控制点），传递实际 playback_rate；
+            // 否则 PCM 已由外部时间拉伸预处理，rate=1.0。
+            let ctx_playback_rate = if processor_handles_stretch { clip_playback_rate } else { 1.0 };
 
-        let ctx = crate::renderer::ClipProcessContext {
-            mono_pcm: mono.as_slice(),
-            sample_rate,
-            clip_start_sec,
-            seg_start_sec,
-            seg_end_sec: seg_start_sec + (expected_out_frames as f64) / (sample_rate.max(1) as f64),
-            frame_period_ms,
-            pitch_edit: pitch_edit_for_ctx,
-            clip_midi: &timeline_midi,
-            playback_rate: ctx_playback_rate,
-            out_frames: expected_out_frames,
-            clip_id: &clip.id,
-            extra_curves: extra_curves_for_ctx,
-            extra_params,
-        };
-        if is_vslib {
-            debug_eprintln!(
-                "[pitch_edit:vslib] dispatch clip_id={} processor={} available={} handles_stretch={} in_frames={} out_frames={} seg=[{:.3},{:.3}) rate={:.3}",
-                clip.id,
-                processor.id(),
-                processor.is_available(),
-                processor_handles_stretch,
-                mono.len(),
-                expected_out_frames,
-                seg_start_sec,
-                ctx.seg_end_sec,
-                ctx.playback_rate,
-            );
-        }
-        let out = processor.process(&ctx)?;
-        if is_vslib {
-            let nonzero = out.iter().filter(|&&v| v.abs() > 1e-6).count();
-            let peak = out.iter().fold(0.0f32, |acc, &v| acc.max(v.abs()));
-            debug_eprintln!(
-                "[pitch_edit:vslib] result clip_id={} out_frames={} nonzero={} peak={:.6}",
-                clip.id,
-                out.len(),
-                nonzero,
-                peak,
-            );
-        }
-        Ok(Some(out))
-    })?;
+            let mut outs: Vec<Vec<f32>> = Vec::with_capacity(fanout_channels);
+            for channel in 0..fanout_channels {
+                mono.clear();
+                mono.reserve(frames); // 预分配内存
+                // 跨步读取目标声道平面，消除 memset 和越界检查。
+                if channel == 0 {
+                    mono.extend(pcm_stereo.iter().step_by(2).take(frames).copied());
+                } else {
+                    mono.extend(pcm_stereo.iter().skip(1).step_by(2).take(frames).copied());
+                }
 
-    let Some(processed) = processed else {
+                let ctx = crate::renderer::ClipProcessContext {
+                    mono_pcm: mono.as_slice(),
+                    channel_index: channel as u16,
+                    source_fingerprint: clip.source_file_fingerprint,
+                    sample_rate,
+                    clip_start_sec,
+                    seg_start_sec,
+                    seg_end_sec: seg_start_sec
+                        + (expected_out_frames as f64) / (sample_rate.max(1) as f64),
+                    frame_period_ms,
+                    pitch_edit: pitch_edit_for_ctx,
+                    clip_midi: &timeline_midi,
+                    playback_rate: ctx_playback_rate,
+                    out_frames: expected_out_frames,
+                    clip_id: &clip.id,
+                    extra_curves: extra_curves_for_ctx,
+                    extra_params,
+                };
+                if is_vslib && channel == 0 {
+                    debug_eprintln!(
+                        "[pitch_edit:vslib] dispatch clip_id={} processor={} available={} handles_stretch={} in_frames={} out_frames={} channels={} seg=[{:.3},{:.3}) rate={:.3}",
+                        clip.id,
+                        processor.id(),
+                        processor.is_available(),
+                        processor_handles_stretch,
+                        mono.len(),
+                        expected_out_frames,
+                        fanout_channels,
+                        seg_start_sec,
+                        ctx.seg_end_sec,
+                        ctx.playback_rate,
+                    );
+                }
+                let out = processor.process(&ctx)?;
+                if is_vslib && channel == 0 {
+                    let nonzero = out.iter().filter(|&&v| v.abs() > 1e-6).count();
+                    let peak = out.iter().fold(0.0f32, |acc, &v| acc.max(v.abs()));
+                    debug_eprintln!(
+                        "[pitch_edit:vslib] result clip_id={} out_frames={} nonzero={} peak={:.6}",
+                        clip.id,
+                        out.len(),
+                        nonzero,
+                        peak,
+                    );
+                }
+                outs.push(out);
+            }
+            Ok(Some(outs))
+        })?;
+
+    let Some(processed_channels) = processed_channels else {
         return Ok(false);
     };
 
-    if processed.len() != expected_out_frames {
+    // 若输出尺寸与输入不同，调整 Vec 大小并写入（逐声道帧数取 min，防御
+    // 处理器输出不一致 —— 正常路径两声道都等于 expected_out_frames）。
+    let actual_frames = processed_channels
+        .iter()
+        .map(|c| c.len())
+        .min()
+        .unwrap_or(0);
+    if processed_channels.iter().any(|c| c.len() != expected_out_frames) {
         log_warn_limited!(
-            "pitch_edit: output length mismatch (got {}, expected {}), adjusting",
-            processed.len(),
+            "pitch_edit: output length mismatch (got {:?}, expected {}), adjusting",
+            processed_channels.iter().map(|c| c.len()).collect::<Vec<_>>(),
             expected_out_frames
         );
     }
 
-    // 若输出尺寸与输入不同，调整 Vec 大小并写入
-    let actual_frames = processed.len();
     let stereo_out = actual_frames * 2;
     pcm_stereo.clear();
     pcm_stereo.reserve(stereo_out);
-    // 消除索引越界检查，批量写入双声道
-    for &v in processed.iter().take(actual_frames) {
-        pcm_stereo.push(v);
-        pcm_stereo.push(v);
+    if processed_channels.len() <= 1 {
+        // 等效单声道：复制到双声道（消除索引越界检查，批量写入）。
+        if let Some(processed) = processed_channels.first() {
+            for &v in processed.iter().take(actual_frames) {
+                pcm_stereo.push(v);
+                pcm_stereo.push(v);
+            }
+        }
+    } else {
+        // 真立体声：L/R 交错合并。
+        let l = &processed_channels[0];
+        let r = &processed_channels[1];
+        for f in 0..actual_frames {
+            pcm_stereo.push(l[f]);
+            pcm_stereo.push(r[f]);
+        }
     }
     // Pad or trim to expected length if needed
     while pcm_stereo.len() < expected_out_frames * 2 {

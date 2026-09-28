@@ -191,13 +191,20 @@ pub(super) fn import_audio_bytes(
 
     // 与 import_audio_item 一致的可解码性校验：否则不可解码的负载会留下
     // 一个时长回退 4s、无波形的坏 clip，且其临时文件永远无人清理。
-    if crate::audio_utils::try_read_audio_header_only(&path).is_none() {
+    let Some(header) = crate::audio_utils::try_read_audio_header_only(&path) else {
         let _ = fs::remove_file(&path);
         return import_audio_bytes_error(&format!(
             "media_has_no_audio_or_unsupported_codec: {}",
             path.display()
         ));
-    }
+    };
+    // 导入声道策略判定：必须在取 timeline 锁之前完成（可能解码音频）。
+    let channel_decision = crate::channel_policy::precompute_decision(
+        Some(&path),
+        Some(header.channels),
+        None,
+        &crate::config::channel_import_policy(),
+    );
 
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::ImportMedia);
@@ -207,7 +214,12 @@ pub(super) fn import_audio_bytes(
         Some(None) => Some(tl.add_track(Some("Track".to_string()), None, None)),
     };
 
-    tl.import_audio_item(&path.display().to_string(), resolved_track_id, start_sec);
+    tl.import_audio_item(
+        &path.display().to_string(),
+        resolved_track_id,
+        start_sec,
+        channel_decision,
+    );
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
@@ -256,8 +268,12 @@ pub(super) fn import_audio_item(
     };
 
     let source_meta = std::path::Path::new(&source_path);
-    if source_meta.exists() && crate::audio_utils::try_read_audio_header_only(source_meta).is_none()
-    {
+    let header = if source_meta.exists() {
+        crate::audio_utils::try_read_audio_header_only(source_meta)
+    } else {
+        None
+    };
+    if source_meta.exists() && header.is_none() {
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         let mut payload = tl.to_payload();
         payload.project = Some(state.project_meta_payload());
@@ -269,6 +285,15 @@ pub(super) fn import_audio_item(
         )]);
         return payload;
     }
+
+    // 导入声道策略判定：必须在取 timeline 锁之前完成（可能解码音频，
+    // 而该锁是所有命令与 UI 轮询的串行点）。
+    let channel_decision = crate::channel_policy::precompute_decision(
+        Some(source_meta),
+        header.as_ref().map(|h| h.channels),
+        None,
+        &crate::config::channel_import_policy(),
+    );
 
     {
         let mut rt = state.runtime.lock().unwrap_or_else(|e| e.into_inner());
@@ -283,7 +308,7 @@ pub(super) fn import_audio_item(
         Some(None) => Some(tl.add_track(Some("Track".to_string()), None, None)),
     };
 
-    tl.import_audio_item(&source_path, resolved_track_id, start_sec);
+    tl.import_audio_item(&source_path, resolved_track_id, start_sec, channel_decision);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
@@ -449,9 +474,18 @@ pub(super) fn set_track_state(
         color,
         name,
     );
+    // 算法 / Compose 变更会改写根曲线组装键（build_root_pitch_key 的输入），
+    // 但引擎内的调度判定只覆盖"clip 参数变化"——per-clip 缓存全命中时不会有
+    // 任何分析完成回调来重组根曲线。这里在锁释放后补一次调度：未收敛则当场
+    // 重组，让本次编辑能立刻进入渲染；已收敛则是纯键比较，无副作用。
+    let root_id = tl.resolve_root_track_id(&track_id);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
+    drop(tl);
+    if let Some(root_id) = root_id {
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+    }
     payload
 }
 
@@ -488,22 +522,89 @@ pub(super) fn add_clip(
     length_sec: Option<f64>,
     source_path: Option<String>,
 ) -> crate::models::TimelineStatePayload {
+    // 导入声道策略判定：必须在取 timeline 锁之前完成（智能模式会解码音频）。
+    // 无 source_path（空白 Clip）时判定直接返回 NoSource（不写档案）。
+    let channel_decision = precompute_decision_for_source(source_path.as_deref());
+
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::AddClip);
-    tl.add_clip(track_id, name, start_sec, length_sec, source_path);
+    let clip_id = tl.add_clip(track_id, name, start_sec, length_sec, source_path);
+    tl.apply_channel_decision_to_clip(&clip_id, channel_decision);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
     payload
 }
 
+/// 锁外：为一个待导入的源路径算好声道落点。
+///
+/// 空路径一律 `NOOP`（无源 Take 不在折叠范围内）。
+///
+/// 交互式口径（`precompute_decision`）：容器解码预算收到
+/// [`crate::stereo_detect::IMPORT_CONTAINER_BUDGET_SEC`]，长素材返回"待定"，
+/// 由随后的后台扫描带完整预算补判。
+fn precompute_decision_for_source(
+    source_path: Option<&str>,
+) -> crate::channel_policy::ChannelResolution {
+    let Some(path) = source_path.map(str::trim).filter(|p| !p.is_empty()) else {
+        return crate::channel_policy::ChannelResolution::NOOP;
+    };
+    let policy = crate::config::channel_import_policy();
+    crate::channel_policy::precompute_decision(Some(Path::new(path)), None, None, &policy)
+}
+
 pub(super) fn create_clips_bulk(
     state: State<'_, AppState>,
     payload: crate::state::CreateClipsBulkPayload,
 ) -> crate::models::TimelineStatePayload {
+    // 锁外：为"从零按 source_path 新建"的模板预判定声道策略（**按路径分组**）。
+    //
+    // 带 `source_clip_id` 的模板是**复制**语义：目标会克隆源 Clip 的 Take
+    // （含用户显式设定的 channel_mode），必须原样保留，不能被策略改写。
+    //
+    // 【为什么必须是分组的】同一素材被多个模板引用时（批量新建的常见形态），
+    // 逐条判定会把解码量按引用数放大；而这条路径用户正在等待进度，是最不该
+    // 浪费解码的地方。
+    let policy = crate::config::channel_import_policy();
+    let requests: Vec<crate::channel_policy::ScanRequest<'_>> = payload
+        .templates
+        .iter()
+        .map(|template| {
+            let path = if template.source_clip_id.is_some() {
+                // 复制语义：不参与判定（占位请求，下面用 `None` 落点跳过）。
+                None
+            } else {
+                template.source_path.as_deref()
+            };
+            crate::channel_policy::ScanRequest {
+                source_path: path.map(str::trim).filter(|p| !p.is_empty()).map(Path::new),
+                source_channels: None,
+                region: None,
+            }
+        })
+        .collect();
+    let grouped = crate::channel_policy::precompute_decisions_grouped(&requests, &policy);
+    let decisions: Vec<Option<crate::channel_policy::ChannelResolution>> = payload
+        .templates
+        .iter()
+        .zip(grouped)
+        .map(|(template, resolution)| {
+            if template.source_clip_id.is_some() {
+                None
+            } else {
+                Some(resolution)
+            }
+        })
+        .collect();
+
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::AddClip);
     let created_clip_ids = tl.create_clips_bulk(&payload);
+    for (clip_id, decision) in created_clip_ids.iter().zip(decisions) {
+        if let Some(decision) = decision {
+            tl.apply_channel_decision_to_clip(clip_id, decision);
+        }
+    }
     state.audio_engine.update_timeline(tl.clone());
     let mut timeline_payload = tl.to_payload();
     timeline_payload.created_clip_ids = Some(created_clip_ids);
@@ -800,6 +901,9 @@ pub(super) fn set_clip_state(
             auto_fade_out_sec,
             color,
             formant_morph,
+            // 单 Clip 的声道模式走 `set_clip_take_channel_mode`（可靶向具体
+            // Take）；批量场景走 `set_clips_state_bulk` 的 patch 字段。
+            channel_mode: None,
         },
     );
     // 波纹编辑（自动跟进）：当起点/长度改变（右边缘位移）时，平移后续剪辑。
@@ -894,6 +998,17 @@ pub(super) fn set_clips_state_bulk(
         .collect();
 
     tl.patch_clips_state(&updates);
+
+    // 声道模式变更改变渲染输入语义（渲染哈希 / formant 键 / HNSEP 声道位），
+    // 与 `set_clip_take_channel_mode` 同口径整体失效相关缓存，并重调度分析。
+    // 其余字段（gain / fade / 位置…）不影响这些缓存，跳过以免无谓重算。
+    for update in &updates {
+        if update.patch.channel_mode.is_some() {
+            invalidate_take_related_caches(&update.clip_id);
+            maybe_schedule_formant_rebuild(&state, &tl, &update.clip_id);
+        }
+    }
+
     let mut root_track_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for update in &updates {
         if let Some(clip) = tl.clips.iter().find(|c| c.id == update.clip_id) {
@@ -969,7 +1084,7 @@ pub(super) fn set_clips_state_bulk(
     payload
 }
 
-fn invalidate_take_related_caches(clip_id: &str) {
+pub(crate) fn invalidate_take_related_caches(clip_id: &str) {
     crate::synth_clip_cache::invalidate_clip_all_caches(clip_id);
     crate::formant_cache::invalidate_formant_cache_for_clip(clip_id);
     if let Ok(mut mgr) = crate::clip_rendering_state::global_clip_rendering_state().lock() {
@@ -1014,6 +1129,8 @@ fn take_error_payload_with_missing(
         tempo_map: None,
         undo_depth: None,
         redo_depth: None,
+        notes_markdown: None,
+        param_selection_restore: None,
     };
     payload.project = Some(state.project_meta_payload());
     payload
@@ -1022,7 +1139,7 @@ fn take_error_payload_with_missing(
 /// 若 clip 启用了 formant morph，则在其内容变化（如切换 Take）后调度后台
 /// 预重建 —— 否则下一次 snapshot 构建会在渲染线程内同步执行整段 formant
 /// 计算，表现为切 take 后首次播放卡顿。
-fn maybe_schedule_formant_rebuild(
+pub(crate) fn maybe_schedule_formant_rebuild(
     state: &AppState,
     tl: &crate::state::TimelineState,
     clip_id: &str,
@@ -1393,6 +1510,208 @@ pub(super) fn set_clip_take_reversed(
     payload
 }
 
+pub(super) fn set_clip_take_channel_mode(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    channel_mode: i32,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    // 先校验、后 checkpoint：失败路径不留“空 undo 步”。
+    {
+        let Some(clip) = tl.clips.iter().find(|c| c.id == clip_id) else {
+            drop(tl);
+            return take_error_payload(&state, format!("clip not found: {clip_id}"));
+        };
+        if clip.take(&take_id).is_none() {
+            drop(tl);
+            return take_error_payload(&state, format!("take not found: {take_id}"));
+        }
+    }
+    if checkpoint.unwrap_or(true) {
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::TakeChannelMode);
+    }
+    let active_changed = tl
+        .set_clip_take_channel_mode(&clip_id, &take_id, channel_mode)
+        .unwrap_or(false);
+    // 模式改变渲染输入语义（渲染哈希/拉伸键/formant 键均含模式），
+    // 与 reversed 同口径整体失效相关缓存。
+    invalidate_take_related_caches(&clip_id);
+    let root_track_id = tl
+        .clips
+        .iter()
+        .find(|c| c.id == clip_id)
+        .map(|c| c.track_id.clone())
+        .and_then(|t| tl.resolve_root_track_id(&t));
+    // active take 的模式改变条件化后的分析输入，需要重调度分析；
+    // inactive take 不改变当前可听内容，跳过以免无谓重算。
+    if active_changed {
+        maybe_schedule_formant_rebuild(&state, &tl, &clip_id);
+    }
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    drop(tl);
+    if active_changed {
+        if let Some(root) = root_track_id {
+            crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+        }
+    }
+    payload
+}
+
+/// 扫描并（可选）把"假立体声"Take 折叠为单声道。
+///
+/// `clip_ids = None` 表示整个工程；`dry_run = true` 只报告不修改，供 UI
+/// 先展示扫描结果再让用户确认。
+///
+/// 与后台扫描共用 `channel_scan` 的三阶段内核（持锁快照 → 锁外判定 → 持锁
+/// 写回），差别只有三点：
+/// - **连已定论的 Take 也重判**（用户显式要求重新扫描，而不是补漏）；
+/// - **按检测语义执行**，不受导入策略 `off`/`alwaysMono` 影响
+///   （见 `ChannelImportPolicy::for_explicit_scan`）—— 前者会让命令静默失效，
+///   后者会无差别折叠真立体声；
+/// - **留一个撤销步**（用户的显式操作要可撤销；后台迁移不留）。
+///
+/// 带着**可信**用户封印的 Take（用户显式选过声道模式并记录了选择）在
+/// `collect_targets` 里被排除，重扫也不会覆盖用户的选择。
+pub(super) fn scan_and_convert_fake_stereo(
+    state: State<'_, AppState>,
+    clip_ids: Option<Vec<String>>,
+    dry_run: Option<bool>,
+) -> crate::models::FakeStereoScanPayload {
+    let dry_run = dry_run.unwrap_or(false);
+    // 显式命令：沿用用户调好的窗口/容差/目标模式，但强制"检测"语义。
+    let policy = crate::config::channel_import_policy().for_explicit_scan();
+
+    // ── 阶段 1（短暂持锁）：取候选快照 ──
+    let (targets, eligibility) = {
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        let filter: Option<std::collections::HashSet<String>> = clip_ids
+            .as_ref()
+            .map(|ids| ids.iter().cloned().collect());
+        // 显式命令：用户的声道模式选择不否决本次扫描（见 `collect_targets`）。
+        let selection = crate::commands::channel_scan::collect_targets(
+            &tl,
+            filter.as_ref(),
+            &policy,
+            true,
+            false,
+        );
+        (selection.targets, selection.eligibility)
+    };
+
+    // ── 阶段 2（锁外）：判定 + 收集报告 ──
+    let planned = crate::commands::channel_scan::plan(targets, &policy, true);
+    let scanned = planned.len();
+
+    // 待重试的源文件（去重）：这些不是"无事可做"，而是"这次没读到"。
+    let mut pending_files: Vec<String> = Vec::new();
+    let mut entries: Vec<crate::models::FakeStereoScanEntry> = Vec::with_capacity(scanned);
+    for item in &planned {
+        if item.outcome.is_pending() {
+            if let Some(path) = item.target.source_path.as_ref() {
+                if !pending_files.iter().any(|existing| existing == path) {
+                    pending_files.push(path.clone());
+                }
+            }
+        }
+        let detail = item.detail.filter(|detail| {
+            detail.verdict == crate::stereo_detect::ChannelVerdict::TrueStereo
+        });
+        entries.push(crate::models::FakeStereoScanEntry {
+            clip_id: item.target.clip_id.clone(),
+            take_id: item.target.take_id.clone(),
+            name: item.target.name.clone(),
+            verdict: item.outcome.as_str().to_string(),
+            applied_mode: None,
+            violating_ratio: detail.map(|detail| detail.violating_ratio()),
+            max_abs_diff: detail.map(|detail| detail.max_abs_diff),
+        });
+    }
+    let pending = planned.iter().filter(|item| item.outcome.is_pending()).count();
+    // `dry_run` 时为"将会被折叠"的数量；实际写回路径以阶段 3 的真实改动数为准。
+    let will_convert = planned
+        .iter()
+        .filter(|item| item.resolution.changes_mode())
+        .count();
+
+    // 逐条回填 `applied_mode`：判定说"该折叠"不等于"这次改了"（Take 可能已是
+    // 目标模式，写回是 no-op），报成"已应用"会误导扫描报告。
+    let fill_applied = |entries: &mut [crate::models::FakeStereoScanEntry],
+                        applied: &[(String, String, i32)]| {
+        for (clip_id, take_id, mode) in applied {
+            if let Some(entry) = entries
+                .iter_mut()
+                .find(|entry| entry.clip_id == *clip_id && entry.take_id == *take_id)
+            {
+                entry.applied_mode = Some(*mode);
+            }
+        }
+    };
+    let payload_of = |entries: Vec<crate::models::FakeStereoScanEntry>, converted: usize| {
+        crate::models::FakeStereoScanPayload {
+            ok: true,
+            scanned,
+            converted,
+            pending,
+            entries,
+            pending_files: if pending_files.is_empty() {
+                None
+            } else {
+                Some(pending_files.clone())
+            },
+            eligibility: crate::models::FakeStereoScanEligibility {
+                project_clips: eligibility.project_clips,
+                matched_clips: eligibility.matched_clips,
+                takes_seen: eligibility.takes_seen,
+                skipped_no_source: eligibility.skipped_no_source,
+                skipped_user_seal: eligibility.skipped_user_seal,
+                overrode_user_seal: eligibility.overrode_user_seal,
+            },
+        }
+    };
+
+    // `dry_run` 到此为止：只报告，不触碰时间轴（也不产生撤销步）。
+    if dry_run {
+        return payload_of(entries, will_convert);
+    }
+
+    // ── 阶段 3（短暂持锁）：一次性写回，整批一个撤销步 ──
+    let stats = crate::commands::channel_scan::apply_planned(&state, &planned, None, true);
+    let (converted_actual, applied) = match stats {
+        Some(stats) => (stats.folded, stats.applied),
+        None => (0, Vec::new()),
+    };
+    fill_applied(&mut entries, &applied);
+
+    // active take 的模式改变条件化后的分析输入 → 重调度音高分析（锁外）。
+    // 一次持锁同时算出"哪些是 active"与它们所属的根轨，避免逐条加锁。
+    let root_tracks: std::collections::HashSet<String> = {
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        applied
+            .iter()
+            .filter_map(|(clip_id, take_id, _)| {
+                let clip = tl.clips.iter().find(|c| c.id == *clip_id)?;
+                if clip.active_take_id.as_deref() != Some(take_id.as_str()) {
+                    return None;
+                }
+                tl.resolve_root_track_id(&clip.track_id)
+            })
+            .collect()
+    };
+    for root in &root_tracks {
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, root);
+    }
+
+    log::info!(
+        "[scan_fake_stereo] scanned={scanned} converted={converted_actual} pending={pending}"
+    );
+
+    payload_of(entries, converted_actual)
+}
+
 pub(super) fn add_clip_take_from_media(
     state: State<'_, AppState>,
     clip_id: String,
@@ -1408,6 +1727,14 @@ pub(super) fn add_clip_take_from_media(
     } else {
         crate::audio_utils::try_read_audio_header_only(Path::new(&trimmed_path))
     };
+
+    // 导入声道策略判定：同样在锁外完成（智能模式会解码音频）。
+    let channel_decision = crate::channel_policy::precompute_decision(
+        Some(Path::new(&trimmed_path)),
+        info.as_ref().map(|i| i.channels),
+        None,
+        &crate::config::channel_import_policy(),
+    );
 
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     let Some(_) = tl.clips.iter().find(|c| c.id == clip_id) else {
@@ -1434,7 +1761,7 @@ pub(super) fn add_clip_take_from_media(
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "Take".to_string());
-    let take = crate::state::ClipTake {
+    let mut take = crate::state::ClipTake {
         id: crate::state::new_id("take"),
         name: name.filter(|n| !n.trim().is_empty()).unwrap_or(file_name),
         gain: 1.0,
@@ -1456,11 +1783,15 @@ pub(super) fn add_clip_take_from_media(
         playback_rate: 1.0,
         reversed: false,
         loop_enabled: crate::config::loop_new_clips_default(),
+        channel_mode: 0,
+        source_channels: if info.channels > 0 { Some(info.channels) } else { None },
+        channel_decision: None,
         midi_note_data: None,
         midi_fill_gaps: false,
         stretch_markers: Vec::new(),
         envelopes: None,
     };
+    crate::channel_policy::apply_resolution(&mut take, channel_decision);
     if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
         clip.add_take(take);
     }
@@ -1501,7 +1832,7 @@ pub(super) fn import_media_files_as_takes(
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Take".to_string());
-        takes.push(crate::state::ClipTake {
+        let take = crate::state::ClipTake {
             id: crate::state::new_id("take"),
             name: file_name.clone(),
             gain: 1.0,
@@ -1523,11 +1854,35 @@ pub(super) fn import_media_files_as_takes(
             playback_rate: 1.0,
             reversed: false,
             loop_enabled: crate::config::loop_new_clips_default(),
+            channel_mode: 0,
+            source_channels: if info.channels > 0 { Some(info.channels) } else { None },
+            channel_decision: None,
             midi_note_data: None,
             midi_fill_gaps: false,
             stretch_markers: Vec::new(),
             envelopes: None,
-        });
+        };
+        // 声道判定不在本循环里逐条做：同一文件被多次拖入时那会把解码量按引用
+        // 数放大，而这条路径用户正在等进度。改为下面的**分组一次性判定**。
+        takes.push(take);
+    }
+
+    // ── 阶段 1b（锁外，按路径分组）：一次性算出所有 take 的声道落点 ──
+    // 与上面的 header 探测同理必须在锁外；分组让同一路径只解码一次。
+    if !takes.is_empty() {
+        let policy = crate::config::channel_import_policy();
+        let requests: Vec<crate::channel_policy::ScanRequest<'_>> = takes
+            .iter()
+            .map(|take| crate::channel_policy::ScanRequest {
+                source_path: take.source_path.as_deref().map(Path::new),
+                source_channels: take.source_channels,
+                region: None,
+            })
+            .collect();
+        let decisions = crate::channel_policy::precompute_decisions_grouped(&requests, &policy);
+        for (take, decision) in takes.iter_mut().zip(decisions) {
+            crate::channel_policy::apply_resolution(take, decision);
+        }
     }
 
     if takes.is_empty() {
@@ -1590,6 +1945,8 @@ pub(super) fn import_media_files_as_takes(
         playback_rate: 1.0,
         clip_playback_rate: 1.0,
         reversed: false,
+        channel_mode: 0,
+        source_channels: None,
         loop_enabled: crate::config::loop_new_clips_default(),
         snap_offset_sec: 0.0,
         fade_in_sec: 0.0,
@@ -1687,6 +2044,13 @@ pub(super) fn replace_clip_source(
 
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
+    // 重链后的 Take 判定档案已在 `replace_clip_sources` 里作废（旧结论属于旧
+    // 文件、旧声道数）。**必须在锁释放之后**才请求扫描：判定要解码音频，而
+    // 该锁是所有命令与 UI 轮询的串行点。
+    drop(tl);
+    if let Some(handle) = state.app_handle.get() {
+        crate::commands::channel_scan::request_channel_scan(handle);
+    }
     payload
 }
 

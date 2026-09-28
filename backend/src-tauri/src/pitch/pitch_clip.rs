@@ -107,7 +107,24 @@ struct ClipPitchKey {
 #[derive(Debug, Clone)]
 pub struct CachedClipPitch {
     pub key: String,
-    pub midi: Vec<f32>, // timeline frames (frame_period_ms)
+    /// 全量源音频的逐帧 MIDI 音高（0 = 无声帧）。
+    ///
+    /// **可能为空**：FCPE 不可用时仍会缓存电平（见 `level`），此时该字段为空
+    /// 向量；消费方应把空向量视同「无音高数据」。
+    pub midi: Vec<f32>,
+    /// 全量源音频的逐帧电平（f32 linear，1.0 = 数字满量程），与 `midi` 同帧率。
+    ///
+    /// 与 `midi` 同一次解码 / 重采样产出（零额外 I/O），供 DYN 参数的原声电平
+    /// 基线使用。响度分析不依赖声码器可用性，因此 FCPE 缺席时它照样产出。
+    pub level: Vec<f32>,
+}
+
+/// 单次解码产出的分析结果（音高 + 电平）。
+pub struct ClipPitchAnalysis {
+    /// 逐帧 MIDI 音高（0 = 无声帧）。FCPE 不可用或推理失败时为空。
+    pub midi: Vec<f32>,
+    /// 逐帧电平（linear）。与 `midi` 同帧率。
+    pub level: Vec<f32>,
 }
 
 static GLOBAL_CLIP_PITCH_CACHE: OnceLock<Mutex<HashMap<String, CachedClipPitch>>> = OnceLock::new();
@@ -138,6 +155,7 @@ fn global_inflight() -> &'static Mutex<HashSet<String>> {
     GLOBAL_CLIP_PITCH_INFLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+
 fn hz_to_midi(hz: f64) -> f32 {
     if !(hz.is_finite() && hz > 1e-6) {
         return 0.0;
@@ -148,6 +166,96 @@ fn hz_to_midi(hz: f64) -> f32 {
     } else {
         0.0
     }
+}
+
+/// 逐帧原声电平分析（DYN 的 `dyn_orig` 来源）。
+///
+/// 口径：`HOP = 5 ms`（与参数线 `frame_period_ms` 对齐）、`窗口 = 20 ms`、
+/// **峰值**（窗内 `max|x|`），1.0 = 数字满量程 = **0 dBFS**。
+/// 窗口以帧中心为基准、向两侧各半窗展开并在片段端点处收缩，因此
+/// 输出帧数 = `ceil(frames * 1000 / (sample_rate * fp_ms))`。
+///
+/// ## 为什么是峰值而不是 RMS
+///
+/// DYN 面板的波形画的是**峰值包络**（波形 mipmap 的 min/max 列）。基线只有与
+/// 它同口径，"虚线 = 原声"才真的贴着未编辑的波形走，用户画一笔目标电平也才
+/// 看得见波形立刻跟到那个高度 —— 这是该参数最核心的反馈回路。RMS 口径下
+/// 波形会系统性地比曲线高出一个波峰因数（稳态正弦即 3 dB），虚线与波形、
+/// 曲线与波形都永远差着一截。
+///
+/// 增益是比值（`目标 / 原声`），因此口径只决定"1.0 是多响"，不影响的增益
+/// 正确性；取峰值即把锚点定成 DAW 峰值电平表的 0 dBFS。
+///
+/// ## 时间栅格必须由实数除法定义（不能先取整 hop）
+///
+/// 帧 `h` 的中心固定在 `h × (fp/1000) × sr` 秒处。当该值不是整数样本时
+/// （44.1 kHz + 5 ms 帧 → 220.5 样本/帧），**绝不能**先把 hop 取整再累加：
+/// `round(220.5) = 221` 会让每帧多走 0.5 样本，累积成 2.27 ms/s 的漂移 ——
+/// 30 s 处已达 68 ms（≈ "检测值比真实值左偏 0.07 s"），且随时间线性增长，
+/// 与真实音频逐帧错位。取整只发生在换算**该帧的窗口边界**这一步。
+pub(crate) fn compute_frame_levels(mono: &[f32], sample_rate: u32, frame_period_ms: f64) -> Vec<f32> {
+    const WINDOW_MS: f64 = 20.0;
+    let fp = frame_period_ms.max(0.1);
+    let sr = sample_rate.max(1) as f64;
+    if mono.is_empty() {
+        return Vec::new();
+    }
+    // 实数 hop（样本/帧）：时间栅格的唯一真源，不取整。
+    let hop_samples_f = (fp / 1000.0) * sr;
+    let window_samples = (((WINDOW_MS / 1000.0) * sr).round() as usize).max(1) as usize;
+    // 帧数 = ceil(样本数 / 实数 hop)：同样不能先把 hop 取整（否则 40 s 素材会
+    // 多算 19 帧）。减一个相对 epsilon 抵消浮点余量，避免整倍数时多出一帧。
+    let total_hops = (((mono.len() as f64) / hop_samples_f) - 1e-9)
+        .ceil()
+        .max(1.0) as usize;
+
+    // 窗内 max|x|：单调队列一次线性扫描（窗口随帧单调右移），
+    // 避免每帧重扫 20 ms 窗（44.1 kHz 下 882 样本 × 上万帧）。
+    let mut abs: Vec<f64> = Vec::with_capacity(mono.len());
+    for &v in mono {
+        let a = (v as f64).abs();
+        abs.push(if a.is_finite() { a } else { 0.0 });
+    }
+
+    let mut out = Vec::with_capacity(total_hops);
+    // 单调递减队列：存索引，队首 = 当前窗内最大值的索引。
+    let mut deque: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    let mut next_push: usize = 0;
+
+    for hop in 0..total_hops {
+        // 帧中心 = hop × 实数 hop 长度：无累积取整误差（见函数头说明）。
+        let center = hop as f64 * hop_samples_f + hop_samples_f * 0.5;
+        let start = (center - window_samples as f64 * 0.5).max(0.0) as usize;
+        let end = ((center + window_samples as f64 * 0.5) as usize).min(mono.len());
+        if end <= start {
+            out.push(0.0);
+            continue;
+        }
+        // 推进队列右端到 end（保持递减）。
+        while next_push < end {
+            let v = abs[next_push];
+            while let Some(&back) = deque.back() {
+                if abs[back] <= v {
+                    deque.pop_back();
+                } else {
+                    break;
+                }
+            }
+            deque.push_back(next_push);
+            next_push += 1;
+        }
+        // 弹出已滑出窗口左端的索引。
+        while let Some(&front) = deque.front() {
+            if front < start {
+                deque.pop_front();
+            } else {
+                break;
+            }
+        }
+        let peak = deque.front().map(|&i| abs[i]).unwrap_or(0.0);
+        out.push(if peak.is_finite() { peak as f32 } else { 0.0 });
+    }
+    out
 }
 
 #[allow(dead_code)]
@@ -334,11 +442,11 @@ fn build_clip_pitch_key(
     })
 }
 
-/// 查询 clip pitch MIDI 缓存。
+/// 查询 clip 分析缓存（音高 + 电平，同一条目）。
 /// - 缓存命中：直接返回 `Some`。
 /// - 缓存未命中：**不再同步计算**，直接返回 `None`。
 ///   调用方应提前通过 `schedule_clip_pitch_jobs` 触发异步预计算。
-pub fn get_or_compute_clip_pitch_midi_global(
+pub fn get_clip_analysis_global(
     tl: &TimelineState,
     clip: &Clip,
     root_track_id: &str,
@@ -353,6 +461,18 @@ pub fn get_or_compute_clip_pitch_midi_global(
     }
     // 缓存未命中，返回 None，等待异步预计算完成后由 ClipPitchReady 触发 snapshot rebuild。
     None
+}
+
+/// 查询 clip pitch MIDI 缓存（`get_clip_analysis_global` 的音高专用视图：
+/// 缓存命中但音高缺失时返回 None）。
+pub fn get_or_compute_clip_pitch_midi_global(
+    tl: &TimelineState,
+    clip: &Clip,
+    root_track_id: &str,
+    frame_period_ms: f64,
+) -> Option<CachedClipPitch> {
+    get_clip_analysis_global(tl, clip, root_track_id, frame_period_ms)
+        .filter(|cached| !cached.midi.is_empty())
 }
 
 /// 将计算结果写入全局缓存（供异步 worker 调用）。
@@ -376,10 +496,16 @@ fn store_clip_pitch_cache(cached: CachedClipPitch) {
     }
 }
 
-/// 遍历 timeline 中所有可见 clip，对缓存未命中的 clip 异步提交 pitch MIDI 计算任务。
+/// 遍历 timeline 中所有可见 clip，对缓存未命中的 clip 异步提交分析任务
+/// （音高 + 逐帧电平，同一次解码产出）。
 /// 任务完成后通过 `engine_tx` 发送 `EngineCommand::ClipPitchReady`，触发 snapshot rebuild。
 ///
 /// 利用 `GLOBAL_CLIP_PITCH_INFLIGHT` 去重，同一 clip 不会重复提交。
+///
+/// 入选条件（任一满足）：
+/// - 所在根轨道开启了 Compose（音高曲线需要它）；
+/// - 所在根轨道**正在使用动态（DYN）**，即 dyn 曲线上存在真实目标值 ——
+///   动态是混音级参数，未开 Compose 也要生效，因此它的原声基线必须照常分析。
 ///
 /// `stretch_cache`：若 clip 已有拉伸后 PCM，优先使用它作为音高检测输入。
 pub fn schedule_clip_pitch_jobs(
@@ -394,10 +520,9 @@ pub fn schedule_clip_pitch_jobs(
         app_handle.is_some()
     );
 
-    if !crate::fcpe_onnx::is_available() {
-        debug_eprintln!("[pitch_clip] FCPE not available, skipping");
-        return;
-    }
+    // 注意：这里**不再**因 FCPE 不可用而整体早退 —— 分析同时产出 DYN 所需的
+    // 原声电平，而电平不依赖声码器（见 `analyze_clip_pitch_and_level`）。
+    let fcpe_available = crate::fcpe_onnx::is_available();
 
     use crate::pitch_analysis::PitchOrigAnalysisProgressEvent;
     use tauri::Emitter;
@@ -432,19 +557,29 @@ pub fn schedule_clip_pitch_jobs(
             continue;
         }
 
-        // 仅对 compose_enabled 的根轨道进行音高分析
+        // 入选条件（任一满足）：
+        // - 根轨道开启 Compose（音高曲线需要它）；
+        // - 该根轨道需要动态（DYN）的原声电平。
+        //
+        // 第二条**刻意不看 compose_enabled**：动态是混音级参数，与"是否合成"
+        // 无关，未开启合成的原始音频轨道同样支持。
         {
             let root_id = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
-            let compose_enabled = tl
-                .tracks
-                .iter()
-                .find(|t| t.id == root_id)
-                .map(|t| t.compose_enabled)
-                .unwrap_or(false);
-            if !compose_enabled {
+            let root_track = tl.tracks.iter().find(|t| t.id == root_id);
+            let compose_enabled = root_track.map(|t| t.compose_enabled).unwrap_or(false);
+            let dyn_needed = dyn_needs_level_analysis(tl, &root_id);
+            if !compose_enabled && !dyn_needed {
                 debug_eprintln!(
-                    "[pitch_clip] clip '{}' skipped: compose_enabled=false for root '{}'",
+                    "[pitch_clip] clip '{}' skipped: compose_enabled=false and dyn unused for root '{}'",
                     clip.id, root_id
+                );
+                continue;
+            }
+            if !fcpe_available && !dyn_needed {
+                // 音高需要 FCPE；没有 FCPE 又不需要电平时没有可产出的数据。
+                debug_eprintln!(
+                    "[pitch_clip] clip '{}' skipped: FCPE unavailable and dyn unused",
+                    clip.id
                 );
                 continue;
             }
@@ -573,16 +708,21 @@ pub fn schedule_clip_pitch_jobs(
             );
             global_batch_state().set_current(Some(job.clip.name.clone()));
 
-            let midi =
-                compute_clip_pitch_midi(&tl_clone, &job.clip, &job.root_track_id, frame_period_ms);
+            let analysis =
+                analyze_clip_pitch_and_level(&tl_clone, &job.clip, &job.root_track_id, frame_period_ms);
+            // 只要拿到电平（或音高）就值得写缓存：DYN 的原声基线独立于声码器。
+            let has_data = analysis
+                .as_ref()
+                .map(|a| !a.midi.is_empty() || !a.level.is_empty())
+                .unwrap_or(false);
 
             // 完成一个 clip，更新进度
             let completed = global_batch_state().complete_one();
             global_batch_state().set_current(None);
             log::warn!(
-                "[pitch_clip] thread: clip '{}' analysis done, midi={}, completed={}/{}",
+                "[pitch_clip] thread: clip '{}' analysis done, has_data={}, completed={}/{}",
                 job.clip.name,
-                midi.is_some(),
+                has_data,
                 completed,
                 total
             );
@@ -618,10 +758,11 @@ pub fn schedule_clip_pitch_jobs(
                 set.remove(&job.inflight_key);
             }
 
-            if let Some(midi_data) = midi {
+            if let Some(analysis) = analysis.filter(|_| has_data) {
                 let cached = CachedClipPitch {
                     key: job.ck.key.clone(),
-                    midi: midi_data,
+                    midi: analysis.midi,
+                    level: analysis.level,
                 };
                 store_clip_pitch_cache(cached);
                 // 通知引擎缓存已就绪，触发 snapshot rebuild。
@@ -661,20 +802,21 @@ pub fn schedule_clip_pitch_jobs(
     }
 }
 
-pub fn compute_clip_pitch_midi(
+/// 分析单个 clip 的源音频，产出**音高曲线 + 逐帧电平**。
+///
+/// 一次解码同时服务两个用途（零额外 I/O）：FCPE 推理得到 MIDI 音高，同一份
+/// mono PCM 上再做逐帧 RMS 得到电平。音高需要 FCPE（不可用时 `midi` 为空），
+/// 电平不需要 —— DYN 参数的原声基线在任何环境下都要能算出来。
+pub fn analyze_clip_pitch_and_level(
     tl: &TimelineState,
     clip: &Clip,
     root_track_id: &str,
     frame_period_ms: f64,
-) -> Option<Vec<f32>> {
-    if !crate::fcpe_onnx::is_available() {
-        return None;
-    }
-
+) -> Option<ClipPitchAnalysis> {
     let ck = build_clip_pitch_key(tl, clip, root_track_id, frame_period_ms)?;
 
     // ── 始终解码源音频全量 PCM 进行分析 ─────────────────────────────────────
-    // 缓存中存的是全量源音频的 MIDI 曲线，不含 trim/rate 处理。
+    // 缓存中存的是全量源音频的曲线，不含 trim/rate 处理。
     // trim 截取 + rate 拉伸在推送/组装阶段按需执行。
     let source_path = clip.source_path.as_deref()?;
     let (in_rate, in_channels, pcm) =
@@ -736,39 +878,53 @@ pub fn compute_clip_pitch_midi(
         mono.push(vv.clamp(-1.0, 1.0));
     }
 
-    // f0
-    let frame_period_tl_ms = ck.frame_period_ms.max(0.1);
-    let f0_floor = crate::fcpe_onnx::FCPE_F0_MIN_HZ;
-    let f0_ceil = crate::fcpe_onnx::FCPE_F0_MAX_HZ;
-
-    let f0_hz = match crate::fcpe_onnx::infer_f0_hz(
-        &mono,
-        analysis_rate,
-        frame_period_tl_ms,
-        f0_floor,
-        f0_ceil,
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            log::error!(
-                "[pitch_clip] FCPE inference failed for clip '{}' ({}): {}",
-                clip.name, clip.id, e
-            );
-            return None;
-        }
+    // ── 逐帧电平（DYN 的原声基线）───────────────────────────────────────
+    // 用**去直流但未归一化**的信号：归一化（scale）是为 FCPE 准备的动态范围
+    // 拉伸，若把它算进电平，响度就会随"这一片段有多响"被反复改写，
+    // DYN 的目标电平也就失去了绝对意义。
+    let level: Vec<f32> = {
+        let dc_removed: Vec<f32> = mono_raw.iter().map(|&v| (v - mean) as f32).collect();
+        compute_frame_levels(&dc_removed, analysis_rate, ck.frame_period_ms)
     };
 
-    if f0_hz.len() < 2 {
-        return None;
-    }
+    // ── 音高（FCPE）──────────────────────────────────────────────────
+    // 声码器不可用时不再整体失败：电平是有独立价值的产出（DYN 不需要声码器），
+    // 因此这里只让 midi 为空。
+    let mut midi: Vec<f32> = Vec::new();
+    if crate::fcpe_onnx::is_available() {
+        let frame_period_tl_ms = ck.frame_period_ms.max(0.1);
+        let f0_floor = crate::fcpe_onnx::FCPE_F0_MIN_HZ;
+        let f0_ceil = crate::fcpe_onnx::FCPE_F0_MAX_HZ;
 
-    let mut midi: Vec<f32> = Vec::with_capacity(f0_hz.len());
-    for hz in f0_hz {
-        midi.push(hz_to_midi(hz));
+        match crate::fcpe_onnx::infer_f0_hz(
+            &mono,
+            analysis_rate,
+            frame_period_tl_ms,
+            f0_floor,
+            f0_ceil,
+        ) {
+            Ok(f0_hz) if f0_hz.len() >= 2 => {
+                midi = Vec::with_capacity(f0_hz.len());
+                for hz in f0_hz {
+                    midi.push(hz_to_midi(hz));
+                }
+            }
+            Ok(_) => {
+                log::warn!(
+                    "[pitch_clip] FCPE returned too few frames for clip '{}'",
+                    clip.name
+                );
+            }
+            Err(e) => {
+                log::error!(
+                    "[pitch_clip] FCPE inference failed for clip '{}' ({}): {}",
+                    clip.name, clip.id, e
+                );
+            }
+        }
     }
-
     // ── 全量曲线直接返回 ──────────────────────────────────────────────
-    // 缓存中始终存全量源音频的 MIDI 曲线。
+    // 缓存中始终存全量源音频的曲线。
     // trim 截取 + rate resample 在推送（handle_clip_pitch_ready）
     // 和组装（assemble_pitch_orig_from_cache）阶段按需执行。
 
@@ -779,7 +935,7 @@ pub fn compute_clip_pitch_midi(
         .unwrap_or(0.0)
         .clamp(0.0, 200.0);
     if gap_ms > 0.0 {
-        let gap_frames = ((gap_ms / frame_period_tl_ms).round() as isize).max(1) as usize;
+        let gap_frames = ((gap_ms / ck.frame_period_ms.max(0.1)).round() as isize).max(1) as usize;
         let mut last = 0.0f32;
         let mut zeros = 0usize;
         for v in midi.iter_mut() {
@@ -795,7 +951,94 @@ pub fn compute_clip_pitch_midi(
         }
     }
 
-    Some(midi)
+    Some(ClipPitchAnalysis { midi, level })
+}
+
+/// 兼容包装：只要音高曲线。FCPE 不可用或推理失败时返回 None
+/// （与旧行为一致 —— 调用方据此判定"音高不可用"）。
+pub fn compute_clip_pitch_midi(
+    tl: &TimelineState,
+    clip: &Clip,
+    root_track_id: &str,
+    frame_period_ms: f64,
+) -> Option<Vec<f32>> {
+    let analysis = analyze_clip_pitch_and_level(tl, clip, root_track_id, frame_period_ms)?;
+    if analysis.midi.is_empty() {
+        return None;
+    }
+    Some(analysis.midi)
+}
+
+/// 该根轨道组是否需要**原声电平（DYN 基线）**分析。
+///
+/// 判定条件（任一）：
+/// - `dyn` 曲线上已有真实目标值（用户画过线）；
+/// - 参数面板正在编辑动态（前端显式登记，见 `dyn_panel_open_roots`）——
+///   用户刚切到动态面板、尚未落笔时也必须先把基线算出来，否则面板里的
+///   虚线（原声电平）与按 dB 缩放的波形都是空的。
+///
+/// 该函数**刻意不检查 `compose_enabled`**：动态是混音级参数，与"合成"无关，
+/// 未开启合成的原始音频轨道同样支持。
+pub(crate) fn dyn_needs_level_analysis(tl: &TimelineState, root_track_id: &str) -> bool {
+    if let Some(entry) = tl.params_by_root_track.get(root_track_id) {
+        let drawn = entry
+            .extra_curves
+            .get(crate::renderer::common_params::DYN_PARAM_ID)
+            .map(|curve| curve.iter().any(|&v| v >= 0.0))
+            .unwrap_or(false);
+        if drawn {
+            return true;
+        }
+    }
+    // 面板打开集合用"读取即释放"的方式查询：绝不能在持锁时再调用任何会
+    // 加同一把锁的代码（std::sync::Mutex 不可重入）。
+    let panel_open = match dyn_panel_open_roots().lock() {
+        Ok(roots) => roots.contains(root_track_id),
+        Err(e) => e.into_inner().contains(root_track_id),
+    };
+    if panel_open {
+        return true;
+    }
+    false
+}
+
+/// 前端正在编辑「动态」面板的根轨道集合（面板打开期间登记）。
+///
+/// 作用：让"打开了动态面板但还没画任何线"的状态也能触发原声电平分析，
+/// 这是虚线基线与 dB 波形能立刻显示出来的前提。面板离开时注销，
+/// 避免为一个没人看的参数持续付出分析开销。
+pub fn dyn_panel_open_roots() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static ROOTS: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    ROOTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 逐帧分析曲线（电平/音高皆可）从**全量源音频域**映射到 clip 可见区间。
+///
+/// `trim_and_resample_midi` 的数学与参数种类无关（截取窗口、Loop 回绕、倒放锚定、
+/// 前导静音、按 rate 重采样），因此这里直接委托，只提供一个语义正确的名字，
+/// 避免在电平分析处出现「midi」字样的误导。**单一实现**，不要在别处复制。
+pub fn trim_and_resample_curve(
+    full_curve: &[f32],
+    frame_period_ms: f64,
+    source_start_sec: f64,
+    source_end_sec: f64,
+    playback_rate: f64,
+    clip_timeline_len_sec: f64,
+    loop_enabled: bool,
+    media_total_sec: Option<f64>,
+    reversed: bool,
+) -> Vec<f32> {
+    trim_and_resample_midi(
+        full_curve,
+        frame_period_ms,
+        source_start_sec,
+        source_end_sec,
+        playback_rate,
+        clip_timeline_len_sec,
+        loop_enabled,
+        media_total_sec,
+        reversed,
+    )
 }
 
 /// 从全量 MIDI 曲线中截取 source range 区间并按 playback_rate 重采样。
@@ -1030,7 +1273,18 @@ pub(crate) fn assemble_nonloop_pitch_from_window(
         return out;
     }
     let win_start_frame_f = (win_start_sec * 1000.0) / fp;
-    let win_end_frame = ((win_end_sec * 1000.0) / fp).round() as i64;
+    // 【必须同时钳到曲线长度】窗口终点可以合法地越过缓存末端（编辑器允许把
+    // Clip 无界延伸出媒体之外，那段应当是静音）。此前的判定只比较
+    // `idx >= win_end_frame`，于是在"窗口越界 + 索引落在 win_end 与缓存末端
+    // 之间"时直接越界索引 —— 曲线上限必须参与判定，否则这是一个必然 panic
+    // （release 下 panic=abort，表现为整个应用崩溃）。
+    //
+    // 历史：音高路径靠调用方的 `window_crosses_media` 预判掩盖了大部分场景，
+    // 但只要窗口终点超过缓存长度且曲线比 win_end 短就会触发；DYN 的电平曲线
+    // 长度与音高帧数未必逐帧一致，因此这条路径被高频命中。
+    let win_end_frame = ((win_end_sec * 1000.0) / fp)
+        .round()
+        .clamp(0.0, full_midi.len() as f64) as i64;
     // 消费方向：时间线帧 i 直接对应源坐标 win_start + i·rate（消费自窗口
     // 起点开始）；窗口起点在媒体起点之前的部分自然落为前导静音。
     for (i, slot) in out.iter_mut().enumerate() {
@@ -1083,7 +1337,10 @@ pub fn get_clips_for_root<'a>(tl: &'a TimelineState, root_track_id: &str) -> Vec
 
 #[cfg(test)]
 mod tests {
-    use super::trim_and_resample_midi;
+    use super::{
+        assemble_nonloop_pitch_from_window, compute_frame_levels, dyn_needs_level_analysis,
+        dyn_panel_open_roots, trim_and_resample_midi,
+    };
 
     /// Loop + 媒体时长未知 + 环绕窗口（start > end，split 产生）：
     /// 不得落入"空窗口"提前返回 —— 退化为整条缓存曲线回绕，输出非空
@@ -1125,5 +1382,223 @@ mod tests {
             let idx = (anchor + i as i64).rem_euclid(100);
             assert!((v - full[idx as usize]).abs() < 1e-6, "frame {i}");
         }
+    }
+
+    /// ★ 时间栅格不得有累积漂移（"检测值比真实值左偏 0.07 s"的回归）。
+    ///
+    /// 故障形态：若把 hop 先取整再累加（`round(220.5) = 221`），每帧多走 0.5
+    /// 样本 → 2.27 ms/s 的累积漂移：30 s 处已偏 68 ms、31 s 处偏 70 ms，
+    /// 与真实音频逐帧错位，且误差随时间**线性增长**（越长的素材越明显）。
+    ///
+    /// 判据：把一个短脉冲放在已知的时间位置，检测到的能量峰值必须落在对应
+    /// 的帧上（±1 帧容差），而不是随位置越远偏得越多。
+    #[test]
+    fn frame_levels_time_grid_has_no_cumulative_drift() {
+        let sr = 44_100u32;
+        let fp = 5.0f64;
+        let total_sec = 40.0;
+        let n = (total_sec * sr as f64) as usize;
+        let mut mono = vec![0.0f32; n];
+
+        // 在 5 s / 20 s / 35 s 三处各放一个 10 ms 的满量程脉冲。
+        let pulses = [5.0f64, 20.0, 35.0];
+        for &t in &pulses {
+            let start = (t * sr as f64) as usize;
+            for s in &mut mono[start..start + 441] {
+                *s = 1.0;
+            }
+        }
+
+        let levels = compute_frame_levels(&mono, sr, fp);
+        let expect_frames = (total_sec * 1000.0 / fp) as usize;
+        assert_eq!(levels.len(), expect_frames, "帧数应等于时长/帧周期");
+
+        let mut offsets: Vec<f64> = Vec::new();
+        for &t in &pulses {
+            let expect = (t * 1000.0 / fp) as f64; // 例：5 s → 帧 1000
+            // 电平重心（在期望帧附近的窗口内按电平加权）。
+            //
+            // 不能用"取最大值的那一帧"：20 ms 的窗比 5 ms 的帧宽，脉冲会在
+            // 相邻若干帧上形成平顶，argmax 只能反映遍历顺序，不能反映栅格。
+            // 重心是对称窗口下的无偏估计，且**若栅格有累积漂移，重心偏移会
+            // 随 t 线性增长** —— 这正是要钉住的性质。
+            let lo = ((expect - 8.0).max(0.0)) as usize;
+            let hi = ((expect + 8.0) as usize).min(levels.len() - 1);
+            let mut wsum = 0.0f64;
+            let mut wacc = 0.0f64;
+            for i in lo..=hi {
+                let w = levels[i] as f64;
+                wsum += w;
+                wacc += w * i as f64;
+            }
+            assert!(wsum > 0.0, "{t}s 处未检测到能量");
+            let centroid = wacc / wsum;
+            let offset = centroid - expect;
+            offsets.push(offset);
+            // 该帧附近必须接近满量程（脉冲未落进窗缝）。
+            let peak = levels[lo..=hi].iter().cloned().fold(0.0f32, f32::max);
+            assert!(peak > 0.9, "{t}s 处脉冲被摊薄：{peak}");
+        }
+
+        // 判据：三个相距很远的时间点上，重心偏移必须**彼此一致**。
+        // 有累积漂移时（旧实现 2.27 ms/s），5 s 与 35 s 的偏移会相差约
+        // 30 s × 2.27 ms/s / 5 ms ≈ 13.6 帧 —— 远超下面的容差。
+        let min_off = offsets.iter().cloned().fold(f64::MAX, f64::min);
+        let max_off = offsets.iter().cloned().fold(f64::MIN, f64::max);
+        assert!(
+            max_off - min_off <= 1.0,
+            "栅格存在累积漂移：各处重心偏移不一致 {:?}（极差 {} 帧）",
+            offsets,
+            max_off - min_off
+        );
+        // 且偏移本身是常数级的（帧中心的半帧语义），不是随距离增长的量。
+        assert!(
+            min_off.abs() <= 2.0 && max_off.abs() <= 2.0,
+            "重心偏移过大：{:?}",
+            offsets
+        );
+    }
+
+    /// ★ 电平口径是**峰值**且锚点为满量程（0 dBFS = 1.0）。
+    ///
+    /// 与波形显示（`max|x|` 包络）同口径，虚线基线才贴着未编辑的波形走。
+    /// RMS 口径会让同样的信号只得到 1/√2 ≈ 0.707 —— 虚线与波形永远差 3 dB。
+    #[test]
+    fn frame_levels_are_full_scale_peak() {
+        let sr = 48_000u32;
+        let fp = 5.0f64;
+        // 稳态满量程正弦（±1）→ 峰值口径应读到 1.0，而非 RMS 的 0.707。
+        let n = 4800; // 0.1 s
+        let mono: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f64::consts::PI * 440.0 * i as f64 / sr as f64).sin() as f32)
+            .collect();
+        let levels = compute_frame_levels(&mono, sr, fp);
+        assert!(!levels.is_empty());
+        // 末尾帧窗口收缩，取中间帧判定。
+        let mid = levels.len() / 2;
+        assert!(
+            (levels[mid] - 1.0).abs() < 0.02,
+            "满量程正弦的峰值电平应≈1.0，实测 {}（RMS 口径会得到 0.707）",
+            levels[mid]
+        );
+
+        // 半幅（−6 dB）正弦 → 0.5。
+        let half: Vec<f32> = mono.iter().map(|v| v * 0.5).collect();
+        let levels = compute_frame_levels(&half, sr, fp);
+        let mid = levels.len() / 2;
+        assert!(
+            (levels[mid] - 0.5).abs() < 0.02,
+            "半幅应≈0.5，实测 {}",
+            levels[mid]
+        );
+
+        // 静音 → 0。
+        let silence = vec![0.0f32; n];
+        let levels = compute_frame_levels(&silence, sr, fp);
+        assert!(levels.iter().all(|&v| v == 0.0));
+    }
+
+    /// 窗口终点越过缓存末端（编辑器允许把 Clip 延伸出媒体之外）时不得越界。
+    ///
+    /// 这是 DYN 原声电平曲线路径上真实发生过的崩溃：`win_end_frame` 只按窗口
+    /// 秒数计算，一旦它大于曲线长度，`full[idx]` 就越界 panic（release 下
+    /// `panic = "abort"`，表现为整个应用崩溃）。越界部分必须是静音（0）。
+    #[test]
+    fn window_end_beyond_curve_length_is_silence_not_panic() {
+        // 曲线 400 帧（4s @10ms），窗口取到 5.2s → 越界 120 帧。
+        let full: Vec<f32> = vec![1.0f32; 400];
+        let out = assemble_nonloop_pitch_from_window(&full, 10.0, 0.0, 5.2, 1.0, 600);
+        assert_eq!(out.len(), 600);
+        for (i, v) in out.iter().enumerate() {
+            if i < 400 {
+                assert!((v - 1.0).abs() < 1e-6, "帧 {i} 应在媒体域内");
+            } else {
+                assert_eq!(*v, 0.0, "帧 {i} 越界应为静音");
+            }
+        }
+    }
+
+    /// 窗口终点甚至早于曲线末端时，也不得读取到窗口之外的部分。
+    #[test]
+    fn window_end_clamps_to_curve_length_when_window_is_shorter() {
+        let full: Vec<f32> = vec![2.0f32; 400];
+        let out = assemble_nonloop_pitch_from_window(&full, 10.0, 0.0, 1.0, 1.0, 200);
+        assert_eq!(out.len(), 200);
+        // 窗口 1s = 100 帧，其后应为静音。
+        for (i, v) in out.iter().enumerate() {
+            let expected = if i < 100 { 2.0 } else { 0.0 };
+            assert!((v - expected).abs() < 1e-6, "帧 {i}");
+        }
+    }
+
+    /// 动态（DYN）的电平分析**不得**依赖 `compose_enabled`。
+    ///
+    /// 回归护栏：动态是混音级参数，与"是否启用合成"无关。此前把分析挂在
+    /// pitch 的调度条件上（受 compose 门控），导致未开启合成的轨道永远拿不到
+    /// 原声电平 —— 虚线基线与 dB 波形都是空的。
+    #[test]
+    fn dyn_level_analysis_is_independent_of_compose_enabled() {
+        use crate::renderer::common_params::DYN_PARAM_ID;
+
+        let mut tl = crate::state::TimelineState::default();
+        let root_id = tl.add_track(Some("root".to_string()), None, None);
+        // 明确关闭合成：这条断言就是本测试的全部意义。
+        if let Some(t) = tl.tracks.iter_mut().find(|t| t.id == root_id) {
+            t.compose_enabled = false;
+        }
+
+        let mut entry = crate::state::TrackParamsState::default();
+
+        // 1) 还没画任何 dyn 线、面板也没打开 → 不需要分析。
+        tl.params_by_root_track
+            .insert("root".to_string(), entry.clone());
+        assert!(
+            !dyn_needs_level_analysis(&tl, "root"),
+            "无曲线且面板未打开时不应触发分析"
+        );
+
+        // 2) 用户画了真实目标值 → 需要分析（即便 compose 关闭）。
+        entry
+            .extra_curves
+            .insert(DYN_PARAM_ID.to_string(), vec![1.0f32, 0.5, 2.0]);
+        tl.params_by_root_track
+            .insert("root".to_string(), entry.clone());
+        assert!(
+            dyn_needs_level_analysis(&tl, "root"),
+            "compose 关闭但用户画了 dyn 时仍必须分析"
+        );
+
+        // 3) 只有哨兵帧（−1 = 沿用原声）且面板没打开 → 不需要分析
+        //    （用户既没画过线，也没在看这个面板）。
+        let sentinel_only = crate::renderer::common_params::DYN_FOLLOW_ORIG;
+        entry
+            .extra_curves
+            .insert(DYN_PARAM_ID.to_string(), vec![sentinel_only; 8]);
+        tl.params_by_root_track
+            .insert("root".to_string(), entry.clone());
+        assert!(
+            !dyn_needs_level_analysis(&tl, "root"),
+            "只有哨兵帧且面板未打开时不必分析"
+        );
+
+        // 4) 面板打开（前端登记）→ 必须分析，哪怕一个点都还没画。
+        //    这是虚线基线与 dB 波形能在切到动态面板后立刻显示的前提。
+        {
+            let mut roots = dyn_panel_open_roots().lock().unwrap_or_else(|e| e.into_inner());
+            roots.insert("root".to_string());
+        }
+        assert!(
+            dyn_needs_level_analysis(&tl, "root"),
+            "面板已打开时必须分析，否则基线/波形永远是空的"
+        );
+        // 清理，避免污染同进程内的其它测试。
+        {
+            let mut roots = dyn_panel_open_roots().lock().unwrap_or_else(|e| e.into_inner());
+            roots.remove("root");
+        }
+        assert!(
+            !dyn_needs_level_analysis(&tl, "root"),
+            "面板关闭后应停止分析"
+        );
     }
 }

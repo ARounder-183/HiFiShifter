@@ -170,7 +170,10 @@ fn fill_reaper_take(
         vec![0.0, take.gain as f64, -1.0]
     };
     dest.play_rate = vec![rate, 1.0, 0.0, -1.0, 0.0, 0.0025];
-    dest.chan_mode = 0;
+    // 声道模式回写（0..=4 与 REAPER CHANMODE 一一对应）：
+    // 导入时 ≥5 的多声道编码已降级为本工程五模式，导出无法还原原始编码，
+    // 属预期行为（见 docs/plans/2026-09-19-stereo-channel-support-design.md §5）。
+    dest.chan_mode = crate::channel_mode::TakeChannelMode::to_reaper_chanmode(take.channel_mode);
 
     if let Some(ref midi_data) = take.midi_note_data {
         if midi_data.is_empty() {

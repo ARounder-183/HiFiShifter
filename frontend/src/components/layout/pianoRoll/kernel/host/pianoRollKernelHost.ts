@@ -64,6 +64,7 @@ import {
     projectClipboardPreviewPoints,
     projectCurvePoints,
     projectDetectedCurvePoints,
+    type CurvePoint,
 } from "../scene/curvePoints";
 import { CLIP_INSTANCE_FLOATS, writeFlatInstance } from "../../../renderKernel/gl/instanceLayout";
 import { createSdfBoxProgram, type SdfBoxProgram } from "../../../renderKernel/gl/sdfBoxProgram";
@@ -71,6 +72,9 @@ import { createRenderLoop } from "../../../renderKernel/renderLoop";
 import { createScrollKernel, type TimelineViewportState } from "../../../renderKernel/scrollKernel";
 import { isBlackKey, midiToLabel } from "../../utils";
 import {
+    AXIS_TICK_LABEL_DESCENT_PX,
+    AXIS_TICK_LABEL_FONT_SIZE_PX,
+    axisTickLabelAnchorBounds,
     createPianoRollGlyphs,
     type PianoRollGlyphs,
     type TextRequest,
@@ -81,10 +85,12 @@ import { createGlyphProgram, type GlyphProgram } from "../../../renderKernel/gl/
 import type { GlyphQuad } from "../../../renderKernel/gl/glyphQuads";
 import {
     createTimelineAxis,
+    playheadLineLeftPx,
     secToViewportPx,
-    strokePx,
     type TimelineAxis,
+    rulerLayerTranslatePx,
 } from "../../../renderKernel/timelineAxis";
+import { createPlayheadElementWriter } from "../../../renderKernel/playheadElements";
 import type { FlatInstance } from "../../../renderKernel/instanceTypes";
 import { wholeDevicePxLength } from "../../../../../utils/devicePixelLine";
 import {
@@ -120,12 +126,33 @@ import type { PianoRollKernelData, PianoRollGridSpec } from "./pianoRollKernelDa
  */
 const SCROLL_COMMIT_STEP_PX = 256;
 
-/** 宿主需要跟随视口的 DOM（阶段 1：标尺内容层与背景网格）。 */
+/**
+ * 宿主需要跟随视口的 DOM（阶段 1：标尺内容层与背景网格）。
+ *
+ * 【为什么全部是 getter 而不是元素本身】这些元素可能在**宿主创建之后**才挂载
+ * （标尺随视图出现、面板被停靠重排后重建 DOM）。若在构造时按值捕获，宿主会永久
+ * 持有一个 `null` 或已脱离文档的节点，对应的写入（平移、播放头线、播放头三角）
+ * 从此静默失效 —— 表现为"播放头线跟着走、三角却停在原地"这类只差一半的症状。
+ * 与 `horizontalOffsetPx` 同一约定：运行时可能变化的东西一律经 getter 现读。
+ */
 export interface PianoRollKernelDomSync {
     /** 标尺内容层：按绘制坐标反向平移。 */
-    readonly rulerContent?: HTMLElement | null;
+    readonly rulerContent?: () => HTMLElement | null;
+    /**
+     * 标尺上的播放头竖线与三角头。
+     *
+     * 【为什么由内核写，而不是面板自己写】标尺线在**内容坐标**里，而内容坐标 ↔
+     * 屏幕坐标的换算依赖当前缩放与滚动；主体播放头由 GL 用**内核视口**绘制。
+     * 只要两者取自不同的来源（面板的 React 状态 vs 内核真值），就会出现
+     * `播放头秒数 × 缩放差` 的水平分离 —— 缩放越大、播放头越靠后越明显。
+     * 面板宽度变化（停靠、拉宽）会让内核按新视口重新钳制缩放，这正是分离最容易
+     * 被看见的时机。把这两条线收进内核的同一次帧提交，与 GL 播放头同源同帧，
+     * 分离在结构上就不可能发生。
+     */
+    readonly rulerPlayheadLine?: () => HTMLElement | null;
+    readonly rulerPlayheadHead?: () => HTMLElement | null;
     /** 背景网格层：经 `gridRedrawBridge` 重绘（自行判定是否真的重画）。 */
-    readonly gridLayer?: HTMLElement | null;
+    readonly gridLayer?: () => HTMLElement | null;
 }
 
 /** 宿主构造参数。 */
@@ -813,14 +840,20 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      * 特殊说明：含轴宽与视口高——两者都直接决定键体几何；**不含**横向滚动位置
      * （键盘不随横向滚动变化），因此横向滚动是零重建的。
      *
+     * 注意：签名在**非 pitch 参数之间也必须互不相同**（`paramName` 参与签名）。
+     * 早期版本对非 pitch 恒返回 `""`，导致 `volume → dyn` 切换时签名不变、
+     * 轴几何永不重建，上一参数的刻度被原样 repaint。
+     *
      * @param spec 当前网格输入（键盘复用它的值域信息）。
-     * @returns 内容签名；非音高参数（无键盘）时为空串。
+     * @returns 内容签名；pitch 为键盘签名，其余为数值轴签名。
      */
     function keyboardSignature(spec: PianoRollGridSpec | null | undefined): string {
         const view = liveGridView(spec);
         if (spec == null || view === null) return "";
         return keyboardGeometrySignature({
             kind: spec.kind,
+            paramName: spec.paramName,
+            axisUnit: spec.axisUnit,
             view,
             absMin: spec.absMin,
             absMax: spec.absMax,
@@ -974,34 +1007,45 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             // 三种投影的时间基准不同（见 `PianoRollCurveLayer.projection` 说明）：
             // 检测曲线自带绝对起始秒且要跳无声帧，剪贴板预览锚定选区起点，
             // 其余按 `startFrame + i × stride`。混用会造成平移或尖刺。
-            const points =
-                layer.projection === "detected"
-                    ? projectDetectedCurvePoints({
-                          midiCurve: layer.values,
-                          curveStartSec: layer.curveStartSec ?? 0,
-                          framePeriodMs: layer.framePeriodMs,
-                          axis,
-                          valueToY,
-                      })
-                    : layer.projection === "clipboard"
-                      ? projectClipboardPreviewPoints({
-                            values: layer.values,
-                            param: layer.param,
-                            framePeriodMs: layer.framePeriodMs,
-                            selStartSec: layer.clipStartSec ?? 0,
-                            selEndSec: layer.clipEndSec ?? 0,
-                            axis,
-                            valueToY,
-                        })
-                      : projectCurvePoints({
-                            values: layer.values,
-                            param: layer.param,
-                            startFrame: layer.startFrame,
-                            stride: layer.stride,
-                            framePeriodMs: layer.framePeriodMs,
-                            axis,
-                            valueToY,
-                        });
+            //
+            // 虚线相位（`dashPhasePx`）：只有 `"curve"` 投影（原始参数线是唯一
+            // 的虚线用户）由投影给出锚在**数据**上的相位 —— 相位 = 首个可见点
+            // 相对曲线起点的内容坐标距离，滚动时不变，虚线跟着内容走而不是在
+            // 屏幕上原地重排（"蠕动"）。检测/剪贴板投影的子路径起点本身就是
+            // 数据锚定的（curveStartSec / selStartSec），无需补偿。
+            let points: CurvePoint[];
+            let dashPhasePx = 0;
+            if (layer.projection === "detected") {
+                points = projectDetectedCurvePoints({
+                    midiCurve: layer.values,
+                    curveStartSec: layer.curveStartSec ?? 0,
+                    framePeriodMs: layer.framePeriodMs,
+                    axis,
+                    valueToY,
+                });
+            } else if (layer.projection === "clipboard") {
+                points = projectClipboardPreviewPoints({
+                    values: layer.values,
+                    param: layer.param,
+                    framePeriodMs: layer.framePeriodMs,
+                    selStartSec: layer.clipStartSec ?? 0,
+                    selEndSec: layer.clipEndSec ?? 0,
+                    axis,
+                    valueToY,
+                });
+            } else {
+                const projected = projectCurvePoints({
+                    values: layer.values,
+                    param: layer.param,
+                    startFrame: layer.startFrame,
+                    stride: layer.stride,
+                    framePeriodMs: layer.framePeriodMs,
+                    axis,
+                    valueToY,
+                });
+                points = projected.points;
+                dashPhasePx = projected.dashPhasePx;
+            }
             if (points.length < 2) continue;
 
             // 按设备像素列抽稀（见上方"为什么必须抽稀"）。
@@ -1029,6 +1073,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 color: layer.rgba,
                 aaWidthPx: 1 / dpr,
                 dash: layer.dash ?? null,
+                dashPhasePx,
                 clipRect: layer.clipRect ?? null,
             });
         }
@@ -1065,9 +1110,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         if (overlay?.playheadSec !== null && overlay?.playheadSec !== undefined) {
             // 与 render.ts:1148-1154 同一对齐：线宽取整物理像素，奇数宽度补半个设备像素。
             const phWidthPx = wholeDevicePxLength(1, axis.dpr);
-            const phx = strokePx(axis, secToViewportPx(axis, overlay.playheadSec), phWidthPx);
+            // 左缘取自与标尺 DOM 线**同一个函数**（`playheadLineLeftPx`）：两条线
+            // 因此逐设备像素一致，而不是"各自实现、靠巧合对齐"。
+            const phx = playheadLineLeftPx(axis, overlay.playheadSec, phWidthPx);
             items.push({
-                x: phx - phWidthPx / 2,
+                x: phx,
                 y: 0,
                 w: phWidthPx,
                 h,
@@ -1177,14 +1224,23 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             dpr: readDevicePixelRatio(),
             valueToY: spec.valueToY,
             paramName: spec.paramName,
+            axisUnit: spec.axisUnit,
         });
+        // 标签锚点的安全区间：值域两端映射到绘图区上下边缘，而 `middle` 基准的文字
+        // 有一半在锚点外侧，不夹取就会让最上/最下那条刻度各缺半截（见
+        // `axisTickLabelAnchorBounds` 的推导）。只夹**文字位置**，刻度线不动。
+        const labelAnchorBounds = axisTickLabelAnchorBounds(
+            AXIS_TICK_LABEL_FONT_SIZE_PX,
+            viewportHeightPx,
+        );
         for (const mark of marks) {
+            const anchorY = mark.line.y + mark.line.h / 2 - 0.5;
             requests.push({
                 text: mark.label,
-                fontKey: `10px ${family}`,
+                fontKey: `${AXIS_TICK_LABEL_FONT_SIZE_PX}px ${family}`,
                 // render.ts:555 的标签锚点 x=6
                 x: 6,
-                y: mark.line.y + mark.line.h / 2 - 0.5,
+                y: Math.min(Math.max(anchorY, labelAnchorBounds.minY), labelAnchorBounds.maxY),
                 align: "left",
                 baseline: "middle",
                 rgba: labelRgba,
@@ -1214,6 +1270,14 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             spec.paramName === undefined ||
             spec.tensionLineRgba === undefined
         ) {
+            // 必须与 `rebuildKeyboardGeometry` 的清空分支对称。
+            //
+            // 若这里只 `return 0` 而不复位计数，`drawGlKeyboard()` 会看到
+            // `glAxisUploadedCount > 0 && glAxisGeometryUploaded === true`，
+            // 于是把上一帧的 GPU 缓冲原样 repaint —— 表现为"切到非音高参数后
+            // 左侧纵轴仍残留钢琴键盘"。
+            glAxisUploadedCount = 0;
+            glAxisGeometryUploaded = false;
             return 0;
         }
         const marks = buildAxisMarkInstances({
@@ -1224,6 +1288,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             dpr: readDevicePixelRatio(),
             valueToY: spec.valueToY,
             paramName: spec.paramName,
+            axisUnit: spec.axisUnit,
         });
         // `lineOnly` 的项只画标签、没有配对的分隔线（见 axisMarkInstances 的说明）
         const lines = marks.filter((m) => !m.lineOnly);
@@ -1266,7 +1331,15 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      */
     function drawGlKeyboard(): void {
         if (glAxisHandle === null) return;
-        const target = glAxisHandle.resize(axisWidthPx, viewportHeightPx, readDevicePixelRatio());
+        // 画布比绘图区高 `AXIS_TICK_LABEL_DESCENT_PX`：最下方刻度标签是
+        // `middle` 基准、锚在绘图区下边缘上，需要这点高度才画得完整
+        //（见该常量的说明）。刻度/键体的投影仍按 `viewportHeightPx` 计算，
+        // 因此它们的屏幕位置逐像素不变。
+        const target = glAxisHandle.resize(
+            axisWidthPx,
+            viewportHeightPx + AXIS_TICK_LABEL_DESCENT_PX,
+            readDevicePixelRatio(),
+        );
         glAxisHandle.clear();
 
         // ① 几何层（键体 / 刻度线）
@@ -1329,6 +1402,14 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     let lastVThumbKey = "";
     /** 上一次写入标尺内容层的平移量（NaN = 从未写入）。 */
     let lastRulerTranslateX = Number.NaN;
+    /**
+     * 播放头元素（标尺竖线 + 倒三角）的写入器。
+     *
+     * 【为什么不是两个 `lastX` 变量】去重键必须是「元素身份 + 位置」：只用位置会漏掉
+     * "元素在播放头静止时被重建"，新元素停在静态位置（左缘）不动 —— 即用户报告的
+     * "倒三角停在工程起始处"。详见 `createPlayheadElementWriter`。
+     */
+    const playheadWriter = createPlayheadElementWriter();
     /** 上一次量化提交给 React 的水平滚动位置（NaN = 从未提交）。 */
     let lastCommittedScrollLeft = Number.NaN;
     /** 上一次逐帧上报给面板的竖向位置（NaN = 从未上报）。 */
@@ -1381,6 +1462,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      */
     function scrollbarGeometries(): PianoRollScrollbarGeometries {
         const view = scroll.get();
+        // 竖向值域：thumb 长度按「可见 span / 值域全长」的比例伸缩（原生滚动条
+        // 同构），缩放到最小（span 覆盖全长）时几何报告不可滚动 → 宿主隐藏
+        // thumb。滚动手感（scrollTop ↔ center 映射、滚轮步进）不受影响。
+        const domain = data().valueDomain;
         return resolvePianoRollScrollbarGeometries({
             viewportWidthPx,
             viewportHeightPx,
@@ -1388,6 +1473,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             scrollTopPx: view.scrollTop,
             maxScrollLeftPx: scroll.maxScrollLeft(),
             maxScrollTopPx: scroll.maxScrollTop(),
+            verticalValueDomain: domain,
         });
     }
 
@@ -1412,6 +1498,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 horizontal.thumbStartPx,
             )}px)`;
             hScrollbarThumb.style.display = horizontal.scrollable ? "block" : "none";
+            // 轨道交互随可滚动性启停：不可滚动时透明的轨道仍会拦截下方指针
+            // 事件（与时间轴同一问题与修法，见 timelineKernelHost 的说明）。
+            if (hScrollbarTrack) {
+                hScrollbarTrack.style.pointerEvents = horizontal.scrollable ? "auto" : "none";
+            }
         }
 
         const vertical = geometries.vertical;
@@ -1423,6 +1514,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             vScrollbarThumb.style.height = `${Math.max(0, vertical.thumbLengthPx)}px`;
             vScrollbarThumb.style.transform = `translateY(${Math.max(0, vertical.thumbStartPx)}px)`;
             vScrollbarThumb.style.display = vertical.scrollable ? "block" : "none";
+            // 同水平条：不可滚动时轨道放行指针事件。
+            if (vScrollbarTrack) {
+                vScrollbarTrack.style.pointerEvents = vertical.scrollable ? "auto" : "none";
+            }
         }
     }
 
@@ -1450,14 +1545,53 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     function syncDom(view: TimelineViewportState): void {
         // 绘制坐标：与 currentAxis / onFrame / 量化提交同一口径（见上方说明）。
         const drawingScrollLeft = view.scrollLeft - horizontalOffsetPx();
-        const ruler = sync?.rulerContent;
-        if (ruler != null && shouldWrite(drawingScrollLeft, lastRulerTranslateX)) {
-            lastRulerTranslateX = drawingScrollLeft;
-            ruler.style.transform = `translateX(${-drawingScrollLeft}px)`;
+        const ruler = sync?.rulerContent?.() ?? null;
+        // 平移量吸附到设备像素（见 `rulerLayerTranslatePx`）：本内核的帧循环用的是
+        // **未吸附**的 `scroll.get()`，若不在这里吸附，层原点的小数部分会让标尺里每
+        // 一条 1 物理像素的竖线被抗锯齿 —— 系统缩放率 > 1 时粗细不一。
+        const rulerTranslate = rulerLayerTranslatePx(drawingScrollLeft, readDevicePixelRatio());
+        if (ruler != null && shouldWrite(rulerTranslate, lastRulerTranslateX)) {
+            lastRulerTranslateX = rulerTranslate;
+            ruler.style.transform = `translateX(${-rulerTranslate}px)`;
+        }
+
+        // 标尺播放头线：与 GL 播放头**同源同帧**（见 `rulerPlayheadLine` 的说明）。
+        //
+        // 吸附方式刻意与 GL 一致：先在**视口坐标**吸附，再换算回内容坐标。标尺线
+        // 所在的层会被平移 `-drawingScrollLeft`（可能是小数），若改在内容坐标吸附，
+        // 落点会与 GL 差最多一个设备像素；先吸附再回算则两条线逐设备像素重合。
+        const playheadSec = data().overlay?.playheadSec;
+        // 元素**现读**（见 `PianoRollKernelDomSync` 的说明）：标尺可能晚于宿主挂载。
+        const rulerPlayheadLine = sync?.rulerPlayheadLine?.() ?? null;
+        const rulerPlayheadHead = sync?.rulerPlayheadHead?.() ?? null;
+        // 竖线与倒三角**任一存在**都要写：三角的写入绝不能挂在竖线的分支里
+        // （竖线被去重跳过 / 元素缺失时，三角会一起失联）。
+        if (
+            (rulerPlayheadLine != null || rulerPlayheadHead != null) &&
+            playheadSec != null &&
+            Number.isFinite(playheadSec)
+        ) {
+            // 左缘取与 GL 主体播放头**同一个函数**（`playheadLineLeftPx`），且同为
+            // **视口坐标** —— 标尺线现在位于内容平移层之外（见 `TimeRuler` 的说明），
+            // 因此不再需要加回层平移，也不再受小数平移的抗锯齿影响。
+            //
+            // 轴由**本帧传入的 `view`** 构造，而不是再调一次 `currentAxis()`：后者会
+            // 重新读一次 `scroll.get()`，多一次快照就多一个"与 GL 不同帧"的机会。
+            const axis = createTimelineAxis({
+                pxPerSec: view.pxPerSec,
+                scrollLeftPx: drawingScrollLeft,
+                viewportWidthPx,
+                dpr: readDevicePixelRatio(),
+            });
+            const viewportX = playheadLineLeftPx(axis, playheadSec);
+            // 各占一个槽位：一个元素被去重跳过不会牵连另一个。
+            playheadWriter.writeLeft("rulerLine", rulerPlayheadLine, viewportX);
+            playheadWriter.writeLeft("rulerHead", rulerPlayheadHead, viewportX);
         }
         // 网格层自带重绘节流（`BackgroundGrid` 内部判定），这里只需转交绘制坐标。
-        if (sync?.gridLayer != null) {
-            invokeGridRedrawHandler(sync.gridLayer, drawingScrollLeft);
+        const gridLayer = sync?.gridLayer?.() ?? null;
+        if (gridLayer != null) {
+            invokeGridRedrawHandler(gridLayer, drawingScrollLeft);
         }
     }
 
@@ -1687,12 +1821,14 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         return (event: PointerEvent) => {
             // 数位笔 / 触摸不触发轨道翻页（与 thumb 同一防误触约定）。
             if (isStylusLike(event)) return;
-            event.preventDefault();
-            event.stopPropagation();
             const track = event.currentTarget as HTMLElement;
             const trackRect = track.getBoundingClientRect();
             const view = scroll.get();
             const geometries = scrollbarGeometries();
+            // 先算目标再决定是否吞事件：不可滚动（几何 scrollable=false）时
+            // `scrollTargetFromTrackClick` 返回 null —— 此时**不能** preventDefault /
+            // stopPropagation，否则轨道（透明、恒挂载）会在无可滚内容时依旧
+            // 劫持贴边内容的按下事件（竖向缩到最小、thumb 隐藏后尤其实际）。
             if (axis === "x") {
                 const target = scrollTargetFromTrackClick(
                     event.clientX - trackRect.left,
@@ -1700,11 +1836,12 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                     view.scrollLeft,
                     viewportWidthPx,
                 );
-                if (target !== null) {
-                    scroll.setScrollLeft(target);
-                    // 用户手势：点轨道翻页同样需要同步共享视口 + 同任务提交。
-                    commitUserGesture("x");
-                }
+                if (target === null) return;
+                event.preventDefault();
+                event.stopPropagation();
+                scroll.setScrollLeft(target);
+                // 用户手势：点轨道翻页同样需要同步共享视口 + 同任务提交。
+                commitUserGesture("x");
                 return;
             }
             const target = scrollTargetFromTrackClick(
@@ -1713,10 +1850,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 view.scrollTop,
                 viewportHeightPx,
             );
-            if (target !== null) {
-                scroll.setScrollTop(target);
-                commitUserGesture("y");
-            }
+            if (target === null) return;
+            event.preventDefault();
+            event.stopPropagation();
+            scroll.setScrollTop(target);
+            commitUserGesture("y");
         };
     }
 

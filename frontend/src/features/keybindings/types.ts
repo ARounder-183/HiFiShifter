@@ -1,3 +1,5 @@
+import type { MessageKey } from "../../i18n/messages";
+
 /**
  * 快捷键管理系统 — 类型定义
  */
@@ -109,7 +111,7 @@ export type ActionId =
     | "modifier.pianoKeysVerticalZoom" // 钢琴键垂直缩放（按住+滚轮）
     | "modifier.paramMorph" // 参数编辑器形变模式（按住）
     | "modifier.paramMultiSelect" // 参数编辑器多选区（按住拖动追加一段；按住点击已有段取消该段）
-    | "modifier.clipRangeToParamSelection" // 按住并双击音频块：把该块范围追加/移出参数编辑器选区
+    | "modifier.clipRangeToParamSelection" // 按住并右键单击音频块：把该块范围追加/移出参数编辑器选区
     | "modifier.paramFineAdjust" // 精细调整（按住）
     | "modifier.vibratoAmplitudeAdjust" // 颤音绘制时滚轮调振幅
     | "modifier.vibratoFrequencyAdjust" // 颤音绘制时滚轮调频率
@@ -117,6 +119,11 @@ export type ActionId =
     | "quickSearch.open" // 打开快速搜索弹窗
     | "quickSearch.navigate.up" // 快速搜索：向上切换候选项
     | "quickSearch.navigate.down" // 快速搜索：向下切换候选项
+    // 布局（停靠窗体系统）
+    | "layout.toggleFloat" // 浮动 / 停靠当前窗体
+    | "layout.focusNext" // 聚焦下一个窗体
+    | "layout.focusPrev" // 聚焦上一个窗体
+    | "layout.maximize" // 最大化 / 还原当前窗体
     | "quickSearch.preview" // 快速搜索：预览/试听
     | "quickSearch.confirm" // 快速搜索：确认放置
     | "quickSearch.close"; // 快速搜索：关闭弹窗
@@ -148,7 +155,7 @@ export type ModifierConflictScene =
     | "clip.move"
     // 时间轴：音频块点击选择（多选切换 / 范围选择）
     | "clip.select"
-    // 时间轴：音频块双击 → 参数编辑器选区（替换 / 追加 / 取消该块范围）
+    // 时间轴：音频块右键手势（按住修饰键）→ 参数编辑器选区（替换 / 追加 / 取消该块范围）
     | "clip.rangeToParamSelect"
     // 时间轴：音频块边缘 trim/stretch
     | "clip.edge"
@@ -183,8 +190,13 @@ export type ModifierConflictScene =
 
 /** 操作元信息（用于 UI 显示） */
 export interface ActionMeta {
-    /** 国际化文本的 key（用于操作名称显示） */
-    labelKey: string;
+    /**
+     * 国际化文本的 key（用于操作名称显示）。
+     *
+     * 类型是 `MessageKey` 而不是 `string`：键名写错/被改名时必须在编译期报错。
+     * 与 `PanelDefinition.titleKey` 同一条约定 —— 见那里的长注释。
+     */
+    labelKey: MessageKey;
     /**
      * 分组（用于设置面板分组展示）。
      * 键盘快捷键按「全局 / 时间轴 / 钢琴卷帘」等使用场景划分；
@@ -199,6 +211,7 @@ export interface ActionMeta {
         | "pianoRoll"
         | "paramEditor"
         | "quickSearch"
+        | "layout"
         | "modClip"
         | "modFade"
         | "modParam"

@@ -87,10 +87,7 @@ test("components/layout/pianoRoll/kernel/scene/selectionBandInstances.test.ts sc
     // 断层处（200..400）不得有任何填充
     for (const inst of multi) {
         if (inst.rgba !== fill) continue;
-        assert(
-            !(inst.x >= 200 && inst.x < 400),
-            `断层处出现了填充实例（x=${inst.x}）`,
-        );
+        assert(!(inst.x >= 200 && inst.x < 400), `断层处出现了填充实例（x=${inst.x}）`);
     }
 
     // ── 起止颠倒自动归一 ─────────────────────────────────────────────

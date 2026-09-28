@@ -12,7 +12,9 @@
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useI18n } from "../../../i18n/I18nProvider";
+import { AppForm, AppSwitchRow } from "../../../ui/Field";
 import { useAppSelector } from "../../../app/hooks";
 import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
 import { tempoAtSec, clampBpm } from "../../../utils/tempoMap";
@@ -87,9 +89,9 @@ function ClipRateEditorFields({
     onApply: (rate: number, adjustLength: boolean, durationSec: number | null) => void;
     onClose: () => void;
 }) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const menuRef = useRef<HTMLDivElement | null>(null);
+    useMenuKeyboard(menuRef);
     // 精细调整修饰键（与 FadeContextMenu 的滑轮步进同一来源）。
     const fineAdjustKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.paramFineAdjust"),
@@ -233,20 +235,20 @@ function ClipRateEditorFields({
             role="menu"
             data-hs-floating-menu="1"
             data-hs-context-menu="1"
-            className="fixed z-[999] w-[248px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-2 px-3 flex flex-col gap-2"
+            className="fixed z-qt-menu w-[248px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-2 px-3 flex flex-col gap-2"
             style={{ left: position.x, top: position.y }}
             onPointerDown={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}
         >
-            <div className="text-[12px] font-medium">{tAny("clip_rate_editor_title")}</div>
-            <div className="text-[10px] text-qt-text/60 leading-snug">
-                {tAny("clip_rate_editor_bpm_hint")}
+            <div className="text-qt-sm font-medium">{tf("clip_rate_editor_title")}</div>
+            <div className="text-qt-micro text-qt-text/60 leading-snug">
+                {tf("clip_rate_editor_bpm_hint")}
             </div>
 
             <label className="flex flex-col gap-1">
-                <span className="text-[10px] text-qt-text/60">{tAny("clip_rate_editor_rate")}</span>
+                <span className="text-qt-micro text-qt-text/60">{tf("clip_rate_editor_rate")}</span>
                 <input
-                    className="w-full text-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
+                    className="w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
                     value={rateText}
                     onChange={(e) => {
                         setRateEdited(true);
@@ -283,11 +285,11 @@ function ClipRateEditorFields({
 
             <div className="flex gap-2">
                 <label className="flex-1 flex flex-col gap-1">
-                    <span className="text-[10px] text-qt-text/60">
-                        {tAny("clip_rate_editor_old_bpm")}
+                    <span className="text-qt-micro text-qt-text/60">
+                        {tf("clip_rate_editor_old_bpm")}
                     </span>
                     <input
-                        className="w-full text-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
+                        className="w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
                         value={oldBpmText}
                         onChange={(e) => {
                             setOldBpmText(e.target.value);
@@ -309,11 +311,11 @@ function ClipRateEditorFields({
                     />
                 </label>
                 <label className="flex-1 flex flex-col gap-1">
-                    <span className="text-[10px] text-qt-text/60">
-                        {tAny("clip_rate_editor_new_bpm")}
+                    <span className="text-qt-micro text-qt-text/60">
+                        {tf("clip_rate_editor_new_bpm")}
                     </span>
                     <input
-                        className="w-full text-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
+                        className="w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
                         value={newBpmText}
                         onChange={(e) => {
                             setNewBpmText(e.target.value);
@@ -337,15 +339,15 @@ function ClipRateEditorFields({
             </div>
 
             <label className="flex flex-col gap-1">
-                <span className="text-[10px] text-qt-text/60">
-                    {tAny("clip_rate_editor_duration")}
+                <span className="text-qt-micro text-qt-text/60">
+                    {tf("clip_rate_editor_duration")}
                     {": "}
                     {formatFadeLengthTooltip(Number(clip.lengthSec) || 0, formatCtx)}
                 </span>
                 <input
-                    className={`w-full text-xs rounded px-2 py-1 outline-none bg-black/20 border ${
+                    className={`w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border ${
                         durationEdited && parsedDuration == null
-                            ? "border-red-400/80"
+                            ? "border-qt-danger-border"
                             : "border-qt-border"
                     }`}
                     value={durationText}
@@ -383,40 +385,37 @@ function ClipRateEditorFields({
                         }
                     }}
                 />
-                <span className="text-[10px] text-qt-text/60 tabular-nums">
+                <span className="text-qt-micro text-qt-text/60 tabular-nums">
                     {formatFadeLengthTooltip(previewSec, formatCtx)}
                 </span>
             </label>
 
-            <label className="flex items-center gap-2 select-none">
-                <input
-                    type="checkbox"
-                    className="accent-current"
+            <AppForm booleanRow="leading">
+                <AppSwitchRow
+                    control="checkbox"
+                    label={tf("clip_rate_editor_auto_length")}
                     checked={autoLength}
-                    onChange={(e) => setAutoLength(e.target.checked)}
+                    onCheckedChange={setAutoLength}
                 />
-                <span className="text-[11px]">{tAny("clip_rate_editor_auto_length")}</span>
-            </label>
+            </AppForm>
 
-            <div className="text-[10px] text-qt-text/60">
-                {tAny("clip_rate_editor_result")}
+            <div className="text-qt-micro text-qt-text/60">
+                {tf("clip_rate_editor_result")}
                 {": "}
                 {formatFadeLengthTooltip(previewSec, formatCtx)}
-                {!autoLength && !durationChanged
-                    ? ` (${tAny("clip_rate_editor_keep_length")})`
-                    : ""}
+                {!autoLength && !durationChanged ? ` (${tf("clip_rate_editor_keep_length")})` : ""}
             </div>
 
             {targetCount > 1 ? (
-                <div className="text-[10px] text-qt-text/60">
-                    {tAny("clip_rate_editor_multi").replace("{count}", String(targetCount))}
+                <div className="text-qt-micro text-qt-text/60">
+                    {tf("clip_rate_editor_multi").replace("{count}", String(targetCount))}
                 </div>
             ) : null}
 
             <div className="flex justify-end pt-1">
                 <button
                     role="menuitem"
-                    className="px-2 py-1 text-[11px] rounded bg-qt-button-hover/60 hover:bg-qt-button-hover disabled:opacity-40"
+                    className="px-2 py-1 text-qt-xs rounded bg-qt-button-hover/60 hover:bg-qt-button-hover disabled:opacity-40"
                     disabled={!canApply}
                     onClick={() => {
                         onApply(
@@ -427,7 +426,7 @@ function ClipRateEditorFields({
                         onClose();
                     }}
                 >
-                    {tAny("clip_rate_editor_apply")}
+                    {tf("clip_rate_editor_apply")}
                 </button>
             </div>
         </div>

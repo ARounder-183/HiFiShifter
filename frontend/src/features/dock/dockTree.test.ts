@@ -1,0 +1,568 @@
+import { test } from "vitest";
+
+import {
+    addFormToTabset,
+    clampRatio,
+    collectDockedForms,
+    dockForm,
+    findZone,
+    collectTabsets,
+    collectVisibleForms,
+    findParentSplit,
+    findTabsetOfForm,
+    isFormVisible,
+    moveForm,
+    nextZoneId,
+    resolveSplitDragTarget,
+    applyLivePaneStyles,
+    paneStyle,
+    pruneTree,
+    removeForm,
+    setSplitRatio,
+    setTabsetCollapsed,
+    splitRect,
+    splitTabsetWith,
+    zoneIdAllocator,
+} from "./dockTree.ts";
+import type { DockLayout, DockSplitNode, DockTabsetNode } from "./dockTypes.ts";
+
+function assertEqual<T>(actual: T, expected: T, label: string): void {
+    const a = JSON.stringify(actual);
+    const b = JSON.stringify(expected);
+    if (a !== b) throw new Error(`${label}: expected ${b}, received ${a}`);
+}
+
+function assert(condition: boolean, label: string): void {
+    if (!condition) throw new Error(label);
+}
+
+function tabset(id: string, tabs: string[]): DockTabsetNode {
+    return { t: "tabset", id, tabs, active: tabs[0] };
+}
+
+function split(
+    id: string,
+    a: DockSplitNode["a"],
+    b: DockSplitNode["b"],
+    extra: Partial<DockSplitNode> = {},
+): DockSplitNode {
+    return { t: "split", id, dir: "row", ratio: 0.5, fixed: null, a, b, ...extra };
+}
+
+/** 便捷的树形状断言：把树压成紧凑字符串。 */
+function shape(node: DockSplitNode["a"]): string {
+    if (node.t === "tabset") return `[${node.tabs.join(",")}]`;
+    return `(${shape(node.a)}|${shape(node.b)})`;
+}
+
+test("features/dock/dockTree.test.ts scripted checks", async () => {
+    // ── zoneId 分配：连续分配不撞号 ──────────────────────────────
+    {
+        const tree = split("z1", tabset("z2", ["a"]), tabset("z5", ["b"]));
+        const alloc = zoneIdAllocator(tree);
+        assertEqual([alloc(), alloc(), alloc()], ["z6", "z7", "z8"], "allocator increments");
+        assertEqual(nextZoneId(tree), "z6", "nextZoneId takes max + 1");
+    }
+
+    // ── 比例钳制 ────────────────────────────────────────────────
+    {
+        assertEqual(clampRatio(0.5), 0.5, "ratio in range");
+        assertEqual(clampRatio(-3), 0.05, "ratio clamped low");
+        assertEqual(clampRatio(9), 0.95, "ratio clamped high");
+        assertEqual(clampRatio(Number.NaN), 0.5, "NaN ratio falls back");
+    }
+
+    // ── 摘除最后一个标签 → 组被剪掉 → 父分割塌缩 ─────────────────
+    {
+        const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
+        assertEqual(shape(removeForm(tree, "a")!), "[b]", "empty tabset pruned, split collapses");
+    }
+
+    // ── 摘除不存在的窗体：树不变（引用相等）───────────────────────
+    {
+        const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
+        assert(removeForm(tree, "zzz") === tree, "removing unknown form is a no-op");
+    }
+
+    // ── 摘到全空 ────────────────────────────────────────────────
+    {
+        assertEqual(
+            removeForm(tabset("z1", ["a"]), "a"),
+            null,
+            "removing the only form empties the tree",
+        );
+    }
+
+    // ── 并入标签组（可指定下标）──────────────────────────────────
+    {
+        const tree = split("z1", tabset("z2", ["a", "c"]), tabset("z3", ["b"]));
+        assertEqual(
+            collectTabsets(addFormToTabset(tree, "z2", "x", 1))[0].tabs,
+            ["a", "x", "c"],
+            "insert at index",
+        );
+        assertEqual(
+            collectTabsets(addFormToTabset(tree, "z2", "x"))[0].tabs,
+            ["a", "c", "x"],
+            "append when no index",
+        );
+    }
+
+    // ── 并入时 active 切到新窗体 ─────────────────────────────────
+    {
+        const tree = addFormToTabset(tabset("z1", ["a"]), "z1", "b");
+        assertEqual((tree as DockTabsetNode).active, "b", "inserted tab becomes active");
+    }
+
+    // ── 重复并入只改顺序，不产生重复标签 ──────────────────────────
+    {
+        const tree = addFormToTabset(tabset("z1", ["a", "b"]), "z1", "a");
+        assertEqual(
+            (tree as DockTabsetNode).tabs,
+            ["b", "a"],
+            "re-insert reorders, never duplicates",
+        );
+    }
+
+    // ── 在某一侧拆分 ────────────────────────────────────────────
+    {
+        const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
+        const right = splitTabsetWith(tree, "z3", "x", "right");
+        assertEqual(shape(right), "([a]|([b]|[x]))", "split right of target");
+
+        const left = splitTabsetWith(tree, "z2", "x", "left");
+        assertEqual(shape(left), "(([x]|[a])|[b])", "split left of target");
+
+        const top = splitTabsetWith(tree, "z3", "x", "top");
+        const topSplit = collectTabsets(top);
+        assertEqual(topSplit.length, 3, "split creates a third tabset");
+        assertEqual((top as DockSplitNode).dir, "row", "outer dir untouched");
+    }
+
+    // ── 同组内重排：不摘不插，避免组被剪掉的中间态 ────────────────
+    {
+        const tree = split("z1", tabset("z2", ["a", "b", "c"]), tabset("z3", ["d"]));
+        const moved = moveForm(tree, "a", { kind: "tab", tabsetId: "z2", index: 2 });
+        assertEqual(collectTabsets(moved)[0].tabs, ["b", "c", "a"], "reorder within tabset");
+        assertEqual(shape(moved), "([b,c,a]|[d])", "structure unchanged by reorder");
+    }
+
+    // ── 把源组最后一个标签移到别的组：源组被剪，目标正常 ───────────
+    {
+        const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
+        const moved = moveForm(tree, "a", { kind: "tab", tabsetId: "z3" });
+        assertEqual(shape(moved), "[b,a]", "moving the only tab collapses its group");
+    }
+
+    // ── 跨组拆分移动 ────────────────────────────────────────────
+    {
+        const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b", "c"]));
+        const moved = moveForm(tree, "b", { kind: "split", tabsetId: "z2", side: "bottom" });
+        // b 从 z3 摘出（z3 只剩 c），再在 z2 下方拆出新组：(([a]|[b])|[c])
+        assertEqual(
+            shape(moved),
+            "(([a]|[b])|[c])",
+            "moved tab gets its own group below the target",
+        );
+        assertEqual(collectTabsets(moved).length, 3, "three groups after the move");
+    }
+
+    // ── 目标组因摘除而消失 → 退化为并入第一个组，窗体不丢 ──────────
+    {
+        const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
+        const moved = moveForm(tree, "a", { kind: "tab", tabsetId: "z-missing" });
+        assertEqual(
+            collectDockedForms(moved).includes("a"),
+            true,
+            "form survives a missing target",
+        );
+    }
+
+    // ── 分割比例与固定像素 ──────────────────────────────────────
+    {
+        const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
+        const fixed = setSplitRatio(tree, "z1", 0.3, { side: "b", px: 360 });
+        assertEqual((fixed as DockSplitNode).fixed, { side: "b", px: 360 }, "fixed side stored");
+        assertEqual((fixed as DockSplitNode).ratio, 0.3, "ratio still recorded");
+    }
+
+    // ── 折叠 ────────────────────────────────────────────────────
+    {
+        const tree = setTabsetCollapsed(tabset("z1", ["a"]), "z1", true, 30);
+        assertEqual((tree as DockTabsetNode).collapsed, true, "collapsed flag");
+        assertEqual((tree as DockTabsetNode).collapsedPx, 30, "collapsed size");
+    }
+
+    // ── pruneTree：修正 active、去重、剪空 ───────────────────────
+    {
+        const dirty = {
+            t: "tabset",
+            id: "z1",
+            tabs: ["a", "a", "b"],
+            active: "gone",
+        } as DockTabsetNode;
+        const pruned = pruneTree(dirty) as DockTabsetNode;
+        assertEqual(pruned.tabs, ["a", "b"], "duplicate tabs removed");
+        assertEqual(pruned.active, "a", "stale active repaired");
+        assertEqual(pruneTree({ ...dirty, tabs: [] }), null, "empty tabset pruned to null");
+    }
+
+    // ── 单子分割塌缩 ────────────────────────────────────────────
+    {
+        const tree: DockSplitNode = split(
+            "z1",
+            { t: "tabset", id: "z2", tabs: [], active: "" },
+            tabset("z3", ["b"]),
+        );
+        assertEqual(shape(pruneTree(tree)!), "[b]", "single-child split collapses");
+    }
+
+    // ── findParentSplit ─────────────────────────────────────────
+    {
+        const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
+        assertEqual(findParentSplit(tree, "z3")?.id, "z1", "finds parent split");
+        assertEqual(findParentSplit(tree, "z1"), null, "root has no parent");
+    }
+
+    // ── splitRect：比例与固定像素两种模式 ────────────────────────
+    {
+        const rect = { x: 0, y: 0, w: 1000, h: 400 };
+        const [a1, b1] = splitRect(rect, { dir: "row", ratio: 0.6, fixed: null }, 4);
+        assertEqual(Math.round(a1.w), 598, "ratio split side A");
+        assertEqual(Math.round(b1.w), 398, "ratio split side B");
+        assertEqual(b1.x, a1.w + 4, "splitter gap honoured");
+
+        const [a2, b2] = splitRect(
+            rect,
+            { dir: "row", ratio: 0.6, fixed: { side: "b", px: 360 } },
+            4,
+        );
+        assertEqual(Math.round(b2.w), 360, "fixed side B keeps its pixels");
+        assertEqual(Math.round(a2.w), 636, "free side absorbs the remainder");
+
+        const [a3, b3] = splitRect(
+            rect,
+            { dir: "row", ratio: 0.6, fixed: { side: "a", px: 360 } },
+            4,
+        );
+        assertEqual(Math.round(a3.w), 360, "fixed side A keeps its pixels");
+        assertEqual(Math.round(b3.w), 636, "free side absorbs the remainder");
+
+        const [a4, b4] = splitRect(
+            { x: 0, y: 0, w: 400, h: 300 },
+            { dir: "col", ratio: 0.5, fixed: null },
+            4,
+        );
+        assertEqual(Math.round(a4.h), 148, "column split side A height");
+        assertEqual(Math.round(b4.h), 148, "column split side B height");
+    }
+
+    // ── 固定像素超过可用空间时被钳制，不产生负宽度 ────────────────
+    {
+        const [a, b] = splitRect(
+            { x: 0, y: 0, w: 200, h: 100 },
+            { dir: "row", ratio: 0.5, fixed: { side: "b", px: 9999 } },
+            4,
+        );
+        assertEqual(Math.round(a.w), 0, "free side collapses instead of going negative");
+        assertEqual(Math.round(b.w), 196, "fixed side clamped to available space");
+    }
+
+    // ── 可见性判定 ──────────────────────────────────────────────
+    {
+        const layout: DockLayout = {
+            schema: 1,
+            tree: split("z1", tabset("z2", ["a"]), tabset("z3", ["b"])),
+            forms: {
+                a: { id: "a", panelId: "a", float: null },
+                b: { id: "b", panelId: "b", float: { x: 0, y: 0, w: 300, h: 200 } },
+                c: { id: "c", panelId: "c", float: null },
+            },
+            order: ["a", "b", "c"],
+            floatOrder: ["b"],
+            gutters: { timelineTrackHeaderPx: 256 },
+            tabPosition: "bottom",
+        };
+        assertEqual(isFormVisible(layout, "a"), true, "docked form is visible");
+        assertEqual(isFormVisible(layout, "c"), false, "closed form is not visible");
+        assertEqual(collectVisibleForms(layout).sort(), ["a", "b"], "visible = docked + floating");
+        assertEqual(findTabsetOfForm(layout.tree, "a")?.id, "z2", "locates owning tabset");
+        assertEqual(findTabsetOfForm(layout.tree, "c"), null, "closed form has no tabset");
+    }
+
+    // ── 源不在树上（浮动态）：必须照常插入，而不是原样返回 ─────────
+    //
+    // 这是"停靠以后窗口消失"的根因：浮动窗体不占布局树，早期实现直接
+    // `return tree`，而调用方已经把 floating 清成 false 并移出 floatOrder，
+    // 于是窗体既不在树上也不再浮动 —— `isFormVisible` 为假，窗口凭空消失。
+    {
+        const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
+
+        const moved = moveForm(tree, "floating-one", { kind: "tab", tabsetId: "z3" });
+        assertEqual(
+            shape(moved),
+            "([a]|[b,floating-one])",
+            "a floating form is inserted, not dropped",
+        );
+        assertEqual(
+            findTabsetOfForm(moved, "floating-one")?.active,
+            "floating-one",
+            "and it becomes the active tab",
+        );
+
+        const splitted = moveForm(tree, "floating-one", {
+            kind: "split",
+            tabsetId: "z2",
+            side: "bottom",
+        });
+        assertEqual(shape(splitted), "(([a]|[floating-one])|[b])", "a floating form can split in");
+
+        // 源不在树上且目标已消失：退化为并入第一个组，窗体不丢。
+        const rescued = moveForm(tree, "floating-one", { kind: "tab", tabsetId: "z-gone" });
+        assertEqual(shape(rescued), "([a,floating-one]|[b])", "falls back to the first group");
+    }
+
+    // ── `moveForm` 的契约：把窗体放到目标位置（源不在树上 = 没有源可摘）──
+    //
+    // 因此"树上没有这个窗体"不再等于"无操作"，而是"直接插入"。调用方（各停靠
+    // reducer）都会先确认窗体记录存在；即便直接调用传入未知 id，归一化也会把
+    // 它当作未注册窗体剪掉。
+    {
+        const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
+        assertEqual(
+            shape(moveForm(tree, "zzz", { kind: "tab", tabsetId: "z3" })),
+            "([a]|[b,zzz])",
+            "an unplaced form is inserted rather than ignored",
+        );
+    }
+
+    // ── dockForm：不变式"停靠后必然在树上，且目标组已展开" ───────────
+    {
+        const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
+
+        // 目标失效 + 源是浮动态 → 仍必须落在树上。
+        const rescued = dockForm(tree, "floating-one", { kind: "tab", tabsetId: "z-gone" });
+        assertEqual(
+            findTabsetOfForm(rescued, "floating-one") !== null,
+            true,
+            "dockForm guarantees the form ends up in the tree",
+        );
+
+        // 往折叠的组里停靠 → 自动展开（否则"停靠成功"却仍然看不见）。
+        const collapsed = setTabsetCollapsed(tree, "z3", true);
+        const collapsedNode = findZone(collapsed, "z3") as DockTabsetNode;
+        assertEqual(collapsedNode.collapsed, true, "precondition: the group is collapsed");
+
+        const docked = dockForm(collapsed, "floating-one", { kind: "tab", tabsetId: "z3" });
+        const dockedNode = findZone(docked, "z3") as DockTabsetNode;
+        assertEqual(dockedNode.collapsed, false, "docking into a collapsed group expands it");
+        assertEqual(dockedNode.active, "floating-one", "and the docked form is shown");
+    }
+
+    // ── 分隔条拖拽的目标尺寸 ───────────────────────────────────────
+    //
+    // 用户报告："当窗口布局为左右布局时，调整中间的分界线，无法正确调节。"
+    // 换算本身有两个易错点，都在这里钉住。
+    {
+        // ① 按比例的分割：比例 = 侧 A 尺寸 / 可分配尺寸。
+        const ratioSplit = resolveSplitDragTarget({
+            fixed: null,
+            minA: 200,
+            minB: 150,
+            available: 1000,
+            pointerOffset: 400,
+        });
+        assertEqual(ratioSplit, { ratio: 0.4, fixed: null }, "proportional drag yields a ratio");
+
+        // ② **固定侧必须保持固定**：右侧固定的分割拖拽后仍固定右侧，只改它的像素值。
+        const fixedRight = resolveSplitDragTarget({
+            fixed: { side: "b", px: 360 },
+            minA: 200,
+            minB: 150,
+            available: 1000,
+            pointerOffset: 700,
+        });
+        assertEqual(
+            fixedRight.fixed,
+            { side: "b", px: 300 },
+            "dragging a right-pinned split keeps it pinned on the right",
+        );
+        assertEqual(fixedRight.ratio, 0.7, "and records the resulting ratio");
+
+        const fixedLeft = resolveSplitDragTarget({
+            fixed: { side: "a", px: 300 },
+            minA: 200,
+            minB: 150,
+            available: 1000,
+            pointerOffset: 420,
+        });
+        assertEqual(
+            fixedLeft.fixed,
+            { side: "a", px: 420 },
+            "a left-pinned split stays pinned on the left",
+        );
+
+        // ③ 两侧最小尺寸都要生效（不能把任一侧挤没）。
+        const clampedLow = resolveSplitDragTarget({
+            fixed: null,
+            minA: 320,
+            minB: 220,
+            available: 1000,
+            pointerOffset: 10,
+        });
+        assertEqual(clampedLow.ratio, 0.32, "clamped up to the minimum of side A");
+        const clampedHigh = resolveSplitDragTarget({
+            fixed: null,
+            minA: 320,
+            minB: 220,
+            available: 1000,
+            pointerOffset: 990,
+        });
+        assertEqual(clampedHigh.ratio, 0.78, "clamped down to leave side B its minimum");
+
+        // ④ **拖拽期间写入的样式必须与 React 最终写入的样式完全一致**。
+        //
+        // 这是"拖了却没正确生效"的直接防线：曾经拖拽期间写 `flex` 简写、松手时
+        // 清空行内样式，而 React 的差异更新只写变化过的属性 —— 被清掉的
+        // `flex-basis` 落回 `auto`，最终成了 `flex: <ratio> 1 auto`。
+        // 现在两边都调用 `paneStyle`，值必然相同。
+        {
+            const target = resolveSplitDragTarget({
+                fixed: { side: "b", px: 360 },
+                minA: 200,
+                minB: 150,
+                available: 1000,
+                pointerOffset: 700,
+            });
+            const committed: DockSplitNode = {
+                t: "split",
+                id: "z1",
+                dir: "row",
+                ratio: target.ratio,
+                fixed: target.fixed,
+                a: { t: "tabset", id: "z2", tabs: ["a"], active: "a" },
+                b: { t: "tabset", id: "z3", tabs: ["b"], active: "b" },
+            };
+
+            const fakeA: { style: Record<string, unknown> } = { style: {} };
+            const fakeB: { style: Record<string, unknown> } = { style: {} };
+            applyLivePaneStyles(
+                fakeA as unknown as { style: CSSStyleDeclaration },
+                fakeB as unknown as { style: CSSStyleDeclaration },
+                committed,
+            );
+
+            assertEqual(
+                fakeA.style,
+                { ...paneStyle(committed, "a") },
+                "the live drag write equals what React will render for side A",
+            );
+            assertEqual(
+                fakeB.style,
+                { ...paneStyle(committed, "b") },
+                "the live drag write equals what React will render for side B",
+            );
+
+            // 并且真的写下了 flex-basis（按比例分割时）—— 这正是曾经被清掉的那个属性。
+            const ratioNode: DockSplitNode = { ...committed, fixed: null, ratio: 0.4 };
+            const ratioFake: { style: Record<string, unknown> } = { style: {} };
+            applyLivePaneStyles(
+                ratioFake as unknown as { style: CSSStyleDeclaration },
+                null,
+                ratioNode,
+            );
+            assertEqual(
+                ratioFake.style.flexBasis,
+                0,
+                "proportional splits must write flex-basis, not leave it to the default `auto`",
+            );
+            assertEqual(ratioFake.style.flexGrow, 0.4, "and the grow factor");
+        }
+
+        // ⑤ 空间不足时不产生负值 / NaN。
+        const degenerate = resolveSplitDragTarget({
+            fixed: { side: "b", px: 360 },
+            minA: 320,
+            minB: 220,
+            available: 0,
+            pointerOffset: 100,
+        });
+        assertEqual(degenerate, { ratio: 0.5, fixed: null }, "no room degrades to an even split");
+    }
+
+    // ── 根级落点（{kind:"root"}）：贯通全高/全宽的拆分 ────────────
+    //
+    // 拖到停靠区外缘感应带时提交的形态。嵌套布局里以标签组为参照的拆分只能
+    // 贴着某个分支的半高/半宽，用户想要"所有组共同的那一侧"必须以根为参照。
+    {
+        // 默认布局形状：上下分布（col），两块各自贯通全宽。
+        const layout = split("s1", tabset("z1", ["a"]), tabset("z2", ["c"]), { dir: "col" });
+
+        // 浮动态窗体（树上没有它）停靠到根右侧：新组贯通全高，占据根的右半。
+        {
+            const next = moveForm(layout, "f", { kind: "root", side: "right" });
+            assertEqual(shape(next), "(([a]|[c])|[f])", "full-height column on the root's right");
+            const created = findTabsetOfForm(next, "f");
+            assert(created !== null, "the form landed in a tabset");
+            const parent = findParentSplit(next, created!.id);
+            // shape() 不编码方向，"贯通全高"必须显式验证拆分方向。
+            assert(
+                parent !== null && parent.dir === "row",
+                "the root split is a row (side by side)",
+            );
+        }
+
+        // 已停靠窗体拖到根左侧：先摘除（源组收缩、空组被剪掉），再对剪枝后的
+        // 根拆分 —— 新组贯通全高，剩下的组保持原样。
+        {
+            const next = moveForm(layout, "a", { kind: "root", side: "left" });
+            assertEqual(shape(next), "([a]|[c])", "re-rooted to the left after pruning");
+            const created = findTabsetOfForm(next, "a");
+            assert(created !== null, "the moved form is visible");
+            const parent = findParentSplit(next, created!.id);
+            assert(parent !== null && parent.dir === "row", "re-rooting produces a row split");
+        }
+
+        // 更清楚的对照：两块都在时把 a 移到根左侧 —— 剪枝后 z2 独苗成根，
+        // 新组与它并排；z1 里剩下的 b 与 z2 仍保持上下分布。
+        {
+            const nested = split(
+                "s1",
+                split("s0", tabset("z0", ["b"]), tabset("z1", ["a"]), { dir: "col" }),
+                tabset("z2", ["c"]),
+                { dir: "col" },
+            );
+            const next = moveForm(nested, "a", { kind: "root", side: "left" });
+            assertEqual(
+                shape(next),
+                "([a]|([b]|[c]))",
+                "the remaining stack keeps its vertical arrangement",
+            );
+            const created = findTabsetOfForm(next, "a");
+            const parent = findParentSplit(next, created!.id);
+            assert(parent !== null && parent.dir === "row", "re-rooting produces a row split");
+        }
+
+        // 树里只剩它一个：摘除后根为空，原样返回（它已经是"整个区域"）。
+        {
+            const sole = tabset("z1", ["a"]);
+            assertEqual(
+                shape(moveForm(sole, "a", { kind: "root", side: "right" })),
+                "[a]",
+                "the sole form cannot be re-rooted away from itself",
+            );
+        }
+
+        // `dockForm` 包装层对根级落点同样成立：搬运 + 兜底后窗体一定可见。
+        {
+            const next = dockForm(layout, "f", { kind: "root", side: "bottom" });
+            assertEqual(shape(next), "(([a]|[c])|[f])", "dockForm lands the form at the root");
+            const created = findTabsetOfForm(next, "f");
+            const parent = findParentSplit(next, created!.id);
+            assert(
+                parent !== null && parent.dir === "col",
+                "bottom produces a col split (stacked)",
+            );
+        }
+    }
+});

@@ -192,6 +192,51 @@ describe("buildValueGridInstances", () => {
         expect(items.filter((i) => i.rgba === WHITE).length).toBe(1);
     });
 
+    it("level 参数按步进序号判强线：0.25 步进下强线恰在 1.0（0 dB）整点", () => {
+        // 回归：此前按"值"取模，0.25 步进下 0.25/0（round 归零）误判强、
+        // 1.0（0 dB）反而不是强线 —— 与轴刻度的 stepIndex 口径一起修正。
+        const items = buildValueGridInstances({
+            kind: "level",
+            view: { center: 2, span: 4 },
+            heightPx: 100,
+            viewportWidthPx: 800,
+            dpr: 1,
+            valueToY: makeValueToY(),
+            strongRgba: WHITE,
+            weakRgba: BLACK,
+        });
+        // -0..4 步进 0.25；强线只在 0 / 1 / 2 / 3 / 4。
+        const strongValues = items
+            .filter((i) => i.rgba === WHITE)
+            .map((i) => Number(i.value.toFixed(6)))
+            .sort((a, b) => a - b);
+        expect(strongValues).toEqual([0, 1, 2, 3, 4]);
+    });
+
+    it("fallback 参数：nice step 与轴刻度同源，全弱线", () => {
+        // volume 全值域 0..4 → niceAxisStep(4, 4) = 0.5，网格线与轴刻度对齐。
+        const items = buildValueGridInstances({
+            kind: "fallback",
+            view: { center: 2, span: 4 },
+            heightPx: 100,
+            viewportWidthPx: 800,
+            dpr: 1,
+            valueToY: makeValueToY(),
+            strongRgba: WHITE,
+            weakRgba: BLACK,
+        });
+        expect(items.length).toBeGreaterThan(0);
+        // 无强线概念：全部弱色。
+        expect(items.filter((i) => i.rgba === WHITE).length).toBe(0);
+        // 步进与 niceAxisStep(span,4) 一致 → 相邻线距恒等。
+        const values = items.map((i) => i.value);
+        const gap = values[1] - values[0];
+        expect(gap).toBeGreaterThan(0);
+        for (let i = 2; i < values.length; i += 1) {
+            expect(values[i] - values[i - 1]).toBeCloseTo(gap, 9);
+        }
+    });
+
     it("线宽与落点都是**整数物理像素**（弱 1 个、强 2 个）", () => {
         // 这是**有意**的统一（不是照抄旧实现）：旧 Canvas2D 在非音高分支用字面
         // `lineWidth = 1 / 1.25` CSS px、位置 `y + 0.5`，两者都不按设备像素对齐，

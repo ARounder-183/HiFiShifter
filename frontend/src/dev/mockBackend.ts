@@ -182,6 +182,86 @@ let mockSelectedClipId: string | null = null;
 let mockSelectedTrackId: string | null = null;
 
 /**
+ * 假后端**记住的** Take 声道模式（takeId → channel_mode）。
+ *
+ * mock 的 take 集合是每次重建的静态数据；若不记住 `set_clip_take_channel_mode`
+ * 的写入，乐观更新会被**下一次权威快照打回原形**——与真实后端（快照携带刚
+ * 写入的字段）行为不一致，会让"改声道模式"在浏览器里表现为时灵时不灵。
+ */
+const mockTakeChannelModes = new Map<string, number>();
+
+/**
+ * 假 UI 设置（内存里的"配置文件"），默认值与 sessionSlice 的出厂初始值同口径。
+ *
+ * 此前兜底返回 `{ ok: true }`，所有读设置的面板（MIDI 导入对话框、参数编辑器、
+ * 记事本、停靠布局）在浏览器里永远拿到"无设置"，各自的归一化/回填分支无法
+ * 被验证。`get_ui_settings` 返回整份对象，`save_ui_settings` 合并部分字段
+ * ——与真实后端的读-改-写语义一致，保存后的重读也能观察到写入。
+ */
+const mockUiSettings: Record<string, unknown> = {
+    autoCrossfade: true,
+    showAllTakes: true,
+    syncEditsAcrossTakes: true,
+    loopNewClips: true,
+    splitTransitionEnabled: true,
+    splitTransitionMode: "overlap",
+    splitTransitionDurationUnit: "seconds",
+    splitTransitionDurationSec: 0.01,
+    splitTransitionOverlapCrossfade: "auto",
+    snapEnabled: true,
+    tempoMapVisible: true,
+    primaryTimeUnit: "seconds",
+    secondaryTimeUnit: "none",
+    pitchSnap: false,
+    pitchSnapUnit: "semitone",
+    pitchSnapScale: "C",
+    playheadZoom: false,
+    autoScroll: false,
+    showClipboardPreview: true,
+    showParamValuePopup: true,
+    lockParamLines: true,
+    paramEditorSeekPlayhead: true,
+    paramEditorSyncTimeline: true,
+    autoReloadModifiedMedia: true,
+    // MIDI 导入对话框的出厂默认（与 App.tsx 的本地初始状态一致）。
+    midiImportPosition: "selection",
+    midiFillGaps: false,
+    midiMultiTrackMerge: true,
+    midiImportBpmAsProject: false,
+    midiNoteBpmMode: "midi",
+    midiSpecifiedBpm: 120,
+    midiCloseLeadingGap: true,
+    midiImportTargetMenu: "pitchRef",
+    midiImportTargetDragDrop: "pitchRef",
+    midiImportAsTempoMap: false,
+    midiImportTempoMapTempo: true,
+    midiImportTempoMapTimeSignature: true,
+    midiImportTempoMapKeySignature: false,
+};
+
+/** 内存附件（字节以 base64 形式留在模块变量里，仅本次 dev 会话有效）。 */
+interface MockNotebookAsset {
+    kind: "image" | "clip_payload";
+    ext: string;
+    mime: string;
+    dataBase64: string;
+    meta: unknown;
+}
+
+/**
+ * 假记事本附件库。
+ *
+ * 真实后端把字节随工程文件内嵌落盘；mock 没有磁盘，但"插入图片 → 立刻读回"
+ * 是记事本的核心路径，返回空库会让该路径在浏览器里无法验证。
+ */
+const mockNotebookAssets = new Map<string, MockNotebookAsset>();
+
+/** base64 字节数的近似换算（供 byteLen 展示用，mock 不追求精确）。 */
+function base64ByteLen(dataBase64: string): number {
+    return Math.max(0, Math.floor((dataBase64.length * 3) / 4));
+}
+
+/**
  * 构造假的时间轴状态。
  *
  * 数据刻意覆盖渲染器的各条视觉分支：淡入淡出（含不同形状 / 方向）、增益与速率
@@ -309,11 +389,13 @@ function buildMockTimeline(): Record<string, unknown> {
                                   id: `${trackId}-take-1`,
                                   name: "Take 1",
                                   source_path: `/mock/audio-${trackIndex + 1}.wav`,
+                                  channel_mode: mockTakeChannelModes.get(`${trackId}-take-1`) ?? 0,
                               },
                               {
                                   id: `${trackId}-take-2`,
                                   name: "Take 2",
                                   source_path: `/mock/audio-${trackIndex + 1}-alt.wav`,
+                                  channel_mode: mockTakeChannelModes.get(`${trackId}-take-2`) ?? 0,
                               },
                           ]
                         : [],
@@ -434,7 +516,7 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
             project_sec: MOCK_PROJECT_SEC,
             duration_sec: MOCK_PROJECT_SEC,
         }),
-        get_ui_settings: () => ({ ok: true }),
+        get_ui_settings: () => ({ ...mockUiSettings }),
         get_auto_backup_settings: () => ({ ok: true, enabled: false, intervalMinutes: 10 }),
         get_recording_settings: () => ({ ok: true }),
         get_recording_state: () => ({ ok: true, isRecording: false }),
@@ -467,6 +549,13 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
          * 【为什么必须有它】`getVisibleSecondaryParamIds` 依赖后端返回的处理器参数
          * 才能列出副参数曲线。此前 mock 未实现本方法，参数编辑器里**只有主参数一条
          * 曲线**——而"未选中的其它参数线被染色"这类缺陷的前提就是**有多条曲线**。
+         *
+         * 【为什么必须含 volume / pan / dyn】混音级参数是所有算法共通的
+         * （见后端 `renderer/common_params.rs` 的 `COMMON_MIX_PARAMS`），前端据此
+         * 渲染工具栏最右侧的「音量 / 动态」药丸。mock 若只给算法专有参数，音量 /
+         * 动态面板在浏览器里**根本无法进入**，而「可听结果波形」（响度映射）正是
+         * 只在这两个面板下才挂载的路径 —— 与它相关的性能与渲染缺陷都无法验证。
+         * 这里按后端同一份值域（volume 0..2、pan −1..1、dyn 0..2）列出。
          */
         get_processor_params: () => [
             {
@@ -493,6 +582,42 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
                     max_value: 1,
                 },
             },
+            {
+                id: "volume",
+                display_name: "Volume",
+                group: "Mix",
+                kind: {
+                    type: "automation_curve",
+                    unit: "×",
+                    default_value: 1.0,
+                    min_value: 0.0,
+                    max_value: 2.0,
+                },
+            },
+            {
+                id: "pan",
+                display_name: "Pan",
+                group: "Mix",
+                kind: {
+                    type: "automation_curve",
+                    unit: "",
+                    default_value: 0.0,
+                    min_value: -1.0,
+                    max_value: 1.0,
+                },
+            },
+            {
+                id: "dyn",
+                display_name: "Dynamics",
+                group: "Mix",
+                kind: {
+                    type: "automation_curve",
+                    unit: "×",
+                    default_value: 1.0,
+                    min_value: 0.0,
+                    max_value: 2.0,
+                },
+            },
         ],
         /**
          * 参数曲线（dev-only 合成数据）。
@@ -503,6 +628,12 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
          * 存在时未选中的线被染色"）在浏览器里都无法复现，只能靠读代码推断。
          * 这里合成一条有真实形态的曲线（长趋势 + 颤音 + 跳变），使曲线层与生产
          * 环境一样被实际绘制。
+         *
+         * 【混音级参数走各自的量纲】volume / pan / dyn 的值域与语义都和音高不同
+         * （见后端 `renderer/common_params.rs`）：音量是 0..2 的乘性增益、动态是
+         * 0..2 的**目标电平**（其 `orig` 是原声基线 —— 正是响度映射用来算增益的
+         * 分母）。若沿用音高曲线，音量面板会画出 −6..+10 的越界值，且动态基线为 0
+         * 会走"真静音"分支，波形的可听结果映射形同未验证。
          */
         get_param_frames: (...args: unknown[]) => {
             const trackId = String(args[0] ?? "");
@@ -516,6 +647,21 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
             for (let i = 0; i < frameCount; i += 1) {
                 const frame = startFrame + i * stride;
                 const t = (frame * fpMs) / 1000;
+                if (param === "volume") {
+                    // 0..2 的乘性音量曲线（含缓慢起伏与一小段静音）。
+                    const v = 1 + 0.45 * Math.sin(t * 0.35) + 0.15 * Math.sin(t * 2.1);
+                    orig[i] = v;
+                    edit[i] = v;
+                    continue;
+                }
+                if (param === "dyn") {
+                    // 原声基线（0.2..0.9 缓慢起伏）+ 目标电平（基线 × 0.4..1.6）。
+                    const base = 0.5 + 0.35 * Math.sin(t * 0.21) + 0.1 * Math.sin(t * 1.3);
+                    const baseline = Math.max(0.05, base);
+                    orig[i] = baseline;
+                    edit[i] = baseline * (1 + 0.6 * Math.sin(t * 0.17));
+                    continue;
+                }
                 // 长趋势 + 颤音 + 周期性跳变：让曲线有真实的拐角与折返
                 const base =
                     MOCK_PITCH_CENTER +
@@ -538,25 +684,6 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
                 analysis_progress: 1,
                 pitch_edit_user_modified: false,
                 pitch_edit_backend_available: true,
-            };
-        },
-        get_waveform_manifest: (...args: unknown[]) => {
-            const sourcePath = String(args[0] ?? "");
-            const totalFrames = MOCK_WAVEFORM_DURATION_SEC * MOCK_WAVEFORM_SAMPLE_RATE;
-            return {
-                sourcePath,
-                revision: "mock-1",
-                sampleRate: MOCK_WAVEFORM_SAMPLE_RATE,
-                totalFrames,
-                channels: 1,
-                durationSec: MOCK_WAVEFORM_DURATION_SEC,
-                tilePeaks: 0,
-                levels: MOCK_DIVISION_FACTORS.map((divisionFactor, level) => ({
-                    level,
-                    divisionFactor,
-                    peakCount: Math.floor(totalFrames / divisionFactor),
-                    tileCount: 0,
-                })),
             };
         },
         set_transport: () => ({ ok: true }),
@@ -593,7 +720,109 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
             if (trackId !== null) mockSelectedTrackId = trackId;
             return buildMockTimeline();
         },
-        save_ui_settings: () => ({ ok: true }),
+        // 与真实后端同语义：部分字段合并进内存"配置文件"。pywebview 通道的
+        // 调用形状是 invoke("save_ui_settings", { settings })，第一参即包裹对象。
+        save_ui_settings: (...args: unknown[]) => {
+            const wrapper = (args[0] ?? {}) as { settings?: Record<string, unknown> };
+            Object.assign(mockUiSettings, wrapper.settings ?? {});
+            return { ok: true };
+        },
+        // ── 渲染缓存 ────────────────────────────────────────────────
+        // mock 没有磁盘缓存：返回全零但字段齐全的统计（enabled=true 保持面板
+        // 可见），清理/打开目录按"无事发生"成功返回。
+        get_render_cache_stats: () => ({
+            ok: true,
+            enabled: true,
+            dir: "/mock/render-cache",
+            writable: true,
+            totalBytes: 0,
+            entries: 0,
+            byKind: [],
+            sessionHits: 0,
+            sessionMisses: 0,
+            sessionStored: 0,
+            sessionWriteErrors: 0,
+            sessionAccepted: 0,
+            maxSizeBytes: 4096 * 1024 * 1024,
+            maxAgeDays: 90,
+        }),
+        clear_render_cache: () => ({ ok: true, removedFiles: 0, removedBytes: 0 }),
+        open_render_cache_dir: () => ({ ok: true, path: "/mock/render-cache" }),
+        // ── Take 声道模式 / 假立体声扫描 ────────────────────────────
+        // 与真实后端同形：返回**携带刚写入字段**的全量时间轴快照（写入由
+        // mockTakeChannelModes 记住，buildMockTimeline 写进 take 载荷）。
+        set_clip_take_channel_mode: (...args: unknown[]) => {
+            const takeId = String(args[1] ?? "");
+            if (takeId) mockTakeChannelModes.set(takeId, Number(args[2] ?? 0));
+            return buildMockTimeline();
+        },
+        scan_and_convert_fake_stereo: () => {
+            // mock 数据里没有可折叠素材：scanned 报全部 clip，converted 恒 0
+            //（真实转换在浏览器里无法复现，字段齐全即可让状态栏分支走到）。
+            const clips = (buildMockTimeline().clips ?? []) as Array<Record<string, unknown>>;
+            return { ok: true, scanned: clips.length, converted: 0 };
+        },
+        // ── 工程笔记 / 参数手势 ─────────────────────────────────────
+        set_project_notes: (...args: unknown[]) => ({
+            ok: true,
+            project: { notes_markdown: String(args[0] ?? "") },
+        }),
+        record_param_selection_step: () => ({ ok: true }),
+        // 真实转换在浏览器里无法复现：字段齐全的"零转换"结果让调用方走成功分支。
+        convert_mix_param: () => ({ ok: true, convertedFrames: 0, skippedFrames: 0 }),
+        // ── 记事本（内存附件库 / 剪贴板暂存）────────────────────────
+        notebook_put_asset: (...args: unknown[]) => {
+            const assetId = String(args[0] ?? "");
+            const dataBase64 = String(args[4] ?? "");
+            if (!assetId || !dataBase64) {
+                return { ok: false, error: "mock: assetId / dataBase64 required" };
+            }
+            mockNotebookAssets.set(assetId, {
+                kind: args[1] === "clip_payload" ? "clip_payload" : "image",
+                ext: String(args[2] ?? ""),
+                mime: args[3] == null ? "" : String(args[3]),
+                dataBase64,
+                meta: args[5] ?? null,
+            });
+            return { ok: true, assetId, byteLen: base64ByteLen(dataBase64) };
+        },
+        notebook_read_asset: (...args: unknown[]) => {
+            const asset = mockNotebookAssets.get(String(args[0] ?? ""));
+            if (!asset) return { ok: true, missing: true };
+            return { ok: true, mime: asset.mime || undefined, base64: asset.dataBase64 };
+        },
+        notebook_list_assets: () => ({
+            ok: true,
+            assets: [...mockNotebookAssets.entries()].map(([id, asset]) => ({
+                id,
+                kind: asset.kind,
+                ext: asset.ext,
+                mime: asset.mime,
+                byteLen: base64ByteLen(asset.dataBase64),
+                createdAtMs: Date.now(),
+                meta: asset.meta,
+                hasData: true,
+            })),
+        }),
+        notebook_remove_asset: (...args: unknown[]) => ({
+            ok: true,
+            removed: mockNotebookAssets.delete(String(args[0] ?? "")),
+        }),
+        notebook_prune_assets: () => {
+            const removed = mockNotebookAssets.size;
+            mockNotebookAssets.clear();
+            return { ok: true, removed };
+        },
+        // mock 里没有本地文件系统：读文件按失败返回（调用方有各自的错误兜底）。
+        notebook_read_file_base64: () => ({ ok: false, error: "mock: fs read not supported" }),
+        // 剪贴板载荷是 MessagePack 字节流，mock 无法解析出摘要；按"暂存不可读"
+        // 返回（写入成功、读取空），界面显示为空暂存而非报错。
+        notebook_write_clipboard_payload: () => ({ ok: true }),
+        notebook_read_clipboard_payload: () => ({ ok: true, available: false }),
+        notebook_read_clipboard_image: () => ({ ok: true, available: false }),
+        // 涉及系统对话框的导出 / 另存：按"用户取消"返回，调用方当作无害 no-op。
+        notebook_export_document: () => ({ ok: true, canceled: true }),
+        notebook_save_asset_as: () => ({ ok: true, canceled: true }),
         begin_undo_group: () => ({ ok: true }),
         end_undo_group: () => ({ ok: true }),
     };

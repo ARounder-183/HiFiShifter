@@ -18,6 +18,7 @@ import type { ParamFramesPayload } from "../../../types/api";
 import type { ParamName } from "./types";
 import type { FrameRange } from "./paramSelection";
 import { applyEdgeBlend, edgeHalfSpanFramesForSelection, type EdgeShape } from "./paramSmoothing";
+import { isDynParam, restoreDynSentinels } from "./paramRanges";
 
 /** 编辑延拓描述：选区外的"编辑意图"如何延展。 */
 export type SelectionEditExtension =
@@ -57,6 +58,12 @@ export type ApplySelectionEditArgs = {
      * 保证一次操作一个撤销点。
      */
     checkpoint?: boolean;
+    /**
+     * dyn 专用：写回前是否把"未画帧"（后端 `edit_sentinel` 位图）恢复成哨兵。
+     * 默认 true（变换类操作不物化未画帧）；「设置值」等显式写常量的操作传
+     * false —— 用户意图就是覆盖整个选区。
+     */
+    preserveDynSentinels?: boolean;
 };
 
 /**
@@ -77,6 +84,7 @@ export async function applySelectionEditWithEdgeSmoothing(
         extension,
         shape,
         isEditable,
+        preserveDynSentinels = true,
     } = args;
     if (frameCount <= 0) return false;
     const smoothness = Math.min(100, Math.max(0, Number(smoothnessPercent) || 0));
@@ -95,7 +103,17 @@ export async function applySelectionEditWithEdgeSmoothing(
     const extCount = frameCount + (startFrame - extStart) + extend;
     const selOffset = startFrame - extStart;
 
-    const res = await paramsApi.getParamFrames(trackId, param, extStart, extCount, 1);
+    // dyn：取数时带上"未画"位图，写回前把哨兵帧恢复成哨兵（见 restoreDynSentinels
+    // 的说明 —— 否则批量操作会把"沿用原声"物化成显式基线值）。
+    const res = await paramsApi.getParamFrames(
+        trackId,
+        param,
+        extStart,
+        extCount,
+        1,
+        true,
+        isDynParam(param),
+    );
     if (!res?.ok) return false;
 
     const payload = res as ParamFramesPayload;
@@ -135,6 +153,14 @@ export async function applySelectionEditWithEdgeSmoothing(
                     ? (idx, baseValue) => extension.deltaAt(toFrame(idx), baseValue)
                     : undefined,
         });
+    }
+
+    // 【默认保留，显式写值可豁免】变换类操作（平滑/量化/移调/±shift）对
+    // "未画帧"的语义是"没动它" → 写回哨兵；而"设置值"这类**显式写常量**的
+    // 操作，用户意图就是把整个选区写成该值（与 pitch 的 setPitch 物化 0 哨兵
+    // 之外的帧同一口径），由调用方传 `preserveDynSentinels: false` 豁免。
+    if (preserveDynSentinels && isDynParam(param)) {
+        restoreDynSentinels(editedDense, (payload as ParamFramesPayload).edit_sentinel);
     }
 
     await paramsApi.setParamFrames(trackId, param, extStart, editedDense, args.checkpoint ?? true);

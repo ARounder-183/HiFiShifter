@@ -49,6 +49,13 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // 反向操作默认不占键位（手势已覆盖单个音频块的取消场景）
     "edit.removeClipsFromParamSelection": { key: "__none__" },
 
+    // 布局（停靠窗体）
+    // Ctrl/Cmd+Shift+F 与"浮起来"语义相称，且不与编辑快捷键冲突。
+    "layout.toggleFloat": { key: "f", ctrl: true, shift: true },
+    "layout.focusNext": { key: "f6" },
+    "layout.focusPrev": { key: "f6", shift: true },
+    "layout.maximize": { key: "m", ctrl: true, shift: true },
+
     // 工程
     "project.new": { key: "n", ctrl: true },
     "project.open": { key: "o", ctrl: true, shift: true },
@@ -148,7 +155,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
         modifierOnly: true,
         ctrl: true,
     },
-    // 按住并双击音频块：把该块范围并入参数编辑器选区（再点一次取消）。
+    // 按住并右键单击音频块：把该块范围并入参数编辑器选区（再右键一次取消）。
     // 默认 Alt —— 时间轴的选择类修饰键已被占用（Ctrl=多选切换/复制拖动、
     // Shift=范围选择/临时关吸附），而 Alt 在时间轴上只有拖拽语义
     // （slip/拉伸/淡化曲率），点击层是空的（见 clipSelectionModifiers：
@@ -540,12 +547,12 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     },
     "modifier.clipRangeToParamSelection": {
         labelKey: "kb_modifier_clip_range_to_param_selection",
-        // 分组按**交互场景**划分（修饰键作用于音频块上的双击），效果落在参数
+        // 分组按**交互场景**划分（修饰键作用于音频块上的右键单击），效果落在参数
         // 编辑器选区上 —— 与「参数编辑器内的多选修饰键」是一对概念，二者在
         // 设置面板中各自处于自己表面的分组下。
         group: "modClip",
         modifierOperationType: "click",
-        // 只在「音频块双击」这一场景生效：与 clip.select（Ctrl/Shift 点击多选）
+        // 只在「音频块右键单击」这一场景生效：与 clip.select（Ctrl/Shift 点击多选）
         // 目标同名不同手势，故不列入；与时间轴 Alt 拖拽系（slip/拉伸/曲率）
         // 手势类型不同，也不构成冲突。
         conflictScenes: ["clip.rangeToParamSelect"],
@@ -643,6 +650,26 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         group: "quickSearch",
         scopedContext: "quickSearch",
     },
+
+    // ── 布局（停靠窗体系统）────────────────────────────────────────
+    // 这四个动作作用在"当前焦点窗体"上，不依赖活动编辑表面（时间轴/参数编辑器），
+    // 因此按全局作用域绑定：在哪儿按都生效。
+    "layout.toggleFloat": {
+        labelKey: "kb_layout_toggle_float",
+        group: "layout",
+    },
+    "layout.focusNext": {
+        labelKey: "kb_layout_next_panel",
+        group: "layout",
+    },
+    "layout.focusPrev": {
+        labelKey: "kb_layout_prev_panel",
+        group: "layout",
+    },
+    "layout.maximize": {
+        labelKey: "kb_layout_maximize",
+        group: "layout",
+    },
 };
 
 /**
@@ -662,6 +689,7 @@ export const GROUP_LABEL_KEYS: Record<ActionMeta["group"], string> = {
     pianoRoll: "kb_group_pianoroll",
     paramEditor: "kb_group_param_editor",
     quickSearch: "kb_group_quick_search",
+    layout: "kb_group_layout",
     modClip: "kb_group_mod_clip",
     modFade: "kb_group_mod_fade",
     modParam: "kb_group_mod_param",
@@ -683,6 +711,7 @@ export const ACTION_GROUP_ORDER: ActionMeta["group"][] = [
     "pianoRoll",
     "paramEditor",
     "quickSearch",
+    "layout",
     "modClip",
     "modFade",
     "modParam",

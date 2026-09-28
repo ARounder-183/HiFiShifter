@@ -4,11 +4,23 @@ use crate::time_stretch::{time_stretch_interleaved, StretchAlgorithm};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 // ─── 导出格式与质量预设 ────────────────────────────────────────────────────────
 
 /// 质量预设，区分实时预览和最终导出场景。
+///
+/// **当前状态：占位，尚未被消费。** 所有调用点都正确地传入了预设，但
+/// `render_mixdown_interleaved` 内部从不读取 [`MixdownOptions::quality_preset`]，
+/// 因此改变它不会改变输出。
+///
+/// 让它真正生效需要先定义"两个档位差在哪"（例如拉伸算法/质量、分析窗长），
+/// 而这会直接影响输出内容 —— 注意拉伸算法还决定**时间对齐**，预览与导出用
+/// 不同算法会让两者错位，所以不能简单地按档位切换算法。任何这类改动都必须
+/// 用真实素材做 A/B 试听验证后才可合入。
+///
+/// 在补齐语义之前，本字段保持"写入但忽略"，不要基于它做优化假设。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QualityPreset {
     /// 快速模式，用于播放预览（默认）。
@@ -29,10 +41,24 @@ pub struct MixdownOptions {
     /// 位深、编码参数等由 `crate::encode::OutputSpec` 统一描述。
     pub output: OutputSpec,
     /// 质量预设，默认 [`QualityPreset::Realtime`]。
+    ///
+    /// **尚未被消费** —— 见 [`QualityPreset`] 的说明。调用点应继续正确传入，
+    /// 以便补齐语义时无需再改一遍所有调用点；但不要据此推断行为差异。
     #[allow(dead_code)]
     pub quality_preset: QualityPreset,
     /// 可选取消标记：为 true 时中断渲染并返回 `export_cancelled`。
     pub cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// 可选进度回调：参数为**整体**进度（`0.0..=1.0`，单调不减）。
+    ///
+    /// 【语义】`render_mixdown_to_file` 的整体进度 = 混音相位 `[0, 0.92]` +
+    /// 编码相位 `(0.92, 1.0]`。节流（≥50ms）与单调由实现内部保证，回调方不必
+    /// 自己限频。直接调用 `render_mixdown_interleaved` 时参数是**混音比例**
+    /// （`0.0..=1.0`，不含编码）且**不节流**——生产路径请走 `render_mixdown_to_file`。
+    ///
+    /// 【为什么用独立通道而非复用 `renderer::progress`】后者是 `OnceLock` 进程级
+    /// 单例，与后台渲染 pass 并发会互相污染计数器/回调；导出走 `spawn_blocking`，
+    /// 必须与之隔离。
+    pub progress: Option<ProgressCallback>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +77,152 @@ fn mixdown_cancelled(opts: &MixdownOptions) -> bool {
         .as_ref()
         .map(|flag| flag.load(Ordering::Relaxed))
         .unwrap_or(false)
+}
+
+/// 导出进度回调（进度值恒在 `0.0..=1.0`）。
+///
+/// 【为什么包成 newtype 而不是裸 `Arc<dyn Fn>`】`MixdownOptions` 派生 `Debug`，
+/// 而 `Arc<dyn Fn>` 不实现 `Debug`——直接放进结构体会让整个结构体失去 `Debug`
+/// （调用点用 `{:?}` 打印过它）。包一层并手写 `Debug`（只打印占位符）即可保留
+/// 其余字段的派生。
+#[derive(Clone)]
+pub struct ProgressCallback(Arc<dyn Fn(f64) + Send + Sync>);
+
+impl ProgressCallback {
+    /// 由闭包构造。
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(f64) + Send + Sync + 'static,
+    {
+        Self(Arc::new(callback))
+    }
+
+    /// 触发回调。
+    pub fn call(&self, progress: f64) {
+        (self.0)(progress);
+    }
+}
+
+impl std::fmt::Debug for ProgressCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressCallback(..)")
+    }
+}
+
+/// 混音相位在整体进度中占到的比例；剩余 `(MIX_PHASE_END, 1.0]` 属于编码写盘相位。
+///
+/// 【为什么这样切】混音里含解码、变速/变调 DSP 与 formant 处理，是绝对大头
+/// （长 clip 的 pitch-edit 可达分钟级）；编码相对轻（WAV 增量写盘、MP3/FLAC
+/// 内存缓冲），给 8% 已足够反映等待。
+const MIX_PHASE_END: f64 = 0.92;
+
+/// 进度上报节流间隔。内核循环里每 4096 帧就有一个检查点，1 小时 44.1k 素材
+/// 约合每秒十余次，不节流会把 IPC 打爆。
+const PROGRESS_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// 进度上报节流器：限制回调频率，并保证进度**单调不减**。
+///
+/// 相位边界（起点 `0.0`、混音→编码切换、终点 `1.0`）走 [`Self::report_forced`]，
+/// 不受节流限制，避免边界值被节流吞掉。
+struct ProgressThrottle {
+    callback: Option<ProgressCallback>,
+    last_value: f64,
+    last_at: Option<Instant>,
+}
+
+impl ProgressThrottle {
+    fn new(callback: Option<ProgressCallback>) -> Self {
+        Self {
+            callback,
+            last_value: f64::NEG_INFINITY,
+            last_at: None,
+        }
+    }
+
+    /// 常规上报：受节流与单调约束。
+    fn report(&mut self, value: f64) {
+        self.emit(value, false);
+    }
+
+    /// 强制上报：跳过节流（仍保证不减）。
+    fn report_forced(&mut self, value: f64) {
+        self.emit(value, true);
+    }
+
+    fn emit(&mut self, value: f64, force: bool) {
+        let Some(callback) = &self.callback else {
+            return;
+        };
+        let value = value.clamp(0.0, 1.0);
+        if value < self.last_value {
+            return;
+        }
+        let now = Instant::now();
+        if !force {
+            if let Some(last_at) = self.last_at {
+                if now.duration_since(last_at) < PROGRESS_MIN_INTERVAL {
+                    return;
+                }
+            }
+        }
+        self.last_value = value;
+        self.last_at = Some(now);
+        callback.call(value);
+    }
+}
+
+/// 在线程间共享的节流器上报入口（导出会跨 `spawn_blocking` 边界持有它）。
+fn report_shared(throttle: &Arc<Mutex<ProgressThrottle>>, value: f64, force: bool) {
+    let mut guard = throttle.lock().unwrap_or_else(|e| e.into_inner());
+    if force {
+        guard.report_forced(value);
+    } else {
+        guard.report(value);
+    }
+}
+
+/// 混音阶段的进度上报（`0.0..=1.0` 的混音比例）。
+///
+/// 【为什么按 clip 计数而非"已混输出帧数 / 输出总帧数"】多轨素材在时间上大量
+/// 重叠，逐 clip 累加的帧数会远超输出总帧数（例如 4 条满长轨道 → 累加 4× 总帧数），
+/// 用帧数比会在中途就饱和到 1.0 之后长时间不动。改用「已完成 clip 数 + 当前 clip
+/// 内帧比例」：天然单调、不受重叠影响，且与"渲染中"（`renderer::progress`）的
+/// 两级公式同构。`begin_clip` 在每次迭代开头调用，因此即便该 clip 被 `continue`
+/// 提前跳过，进度也不会漏掉它。
+struct MixdownProgress<'a> {
+    total_clips: f64,
+    callback: Option<&'a ProgressCallback>,
+}
+
+impl<'a> MixdownProgress<'a> {
+    fn new(total_clips: usize, callback: Option<&'a ProgressCallback>) -> Self {
+        Self {
+            total_clips: total_clips.max(1) as f64,
+            callback,
+        }
+    }
+
+    /// 进入第 `index` 个 clip（= 前 `index` 个已完成）。
+    fn begin_clip(&self, index: usize) {
+        self.emit(index as f64 / self.total_clips);
+    }
+
+    /// 第 `index` 个 clip 内已混 `frames_done / frames_total` 帧。
+    fn report_intra(&self, index: usize, frames_done: usize, frames_total: usize) {
+        let intra = frames_done as f64 / frames_total.max(1) as f64;
+        self.emit((index as f64 + intra.clamp(0.0, 1.0)) / self.total_clips);
+    }
+
+    /// 全部 clip 处理完毕。
+    fn finish(&self) {
+        self.emit(1.0);
+    }
+
+    fn emit(&self, value: f64) {
+        if let Some(callback) = self.callback {
+            callback.call(value.clamp(0.0, 1.0));
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -93,6 +265,49 @@ fn sample_automation_curve_at_sec(
     let a = curve.get(i0).copied().unwrap_or(default_value);
     let b = curve.get(i1).copied().unwrap_or(a);
     a + (b - a) * frac
+}
+
+/// 采样动态（DYN）曲线在绝对秒处的增益。
+///
+/// 与实时引擎 `audio_engine::mix::dyn_gain_at` 是**同一份语义**：曲线存在性、
+/// 基线存在性与哨兵三条守卫，以及 `目标 / max(原声, 静音下限)` 的增益公式。
+/// 两侧必须同步修改 —— 导出与监听不一致是最难排查的一类问题。
+fn dyn_gain_at_sec(
+    dyn_curve: Option<&[f32]>,
+    dyn_orig_curve: Option<&[f32]>,
+    abs_sec: f64,
+    frame_period_ms: f64,
+) -> f32 {
+    // 曲线缺失 → 该轨道组没在用动态。
+    if dyn_curve.is_none_or(|c| c.is_empty()) {
+        return 1.0;
+    }
+    // 用 DYN 专用采样器（越界回落哨兵，不持有末值），与实时引擎
+    // `audio_engine::mix::dyn_gain_at` 完全同源 —— 避免导出时把最后一个
+    // 目标电平 hold 到曲线尽头而污染后续音频。
+    let target = crate::renderer::common_params::sample_dyn_curve_at_sec(
+        dyn_curve,
+        abs_sec,
+        frame_period_ms,
+    );
+    if target < 0.0 {
+        // 哨兵：沿用原声。**防御性兜底** —— 正常路径下曲线已在装配期解析
+        //（见 `resolve_dyn_sentinels_for_audio`），导出不该再看到哨兵。
+        return 1.0;
+    }
+    // 基线缺失（分析未就绪）→ 1.0，绝不凭空造增益。
+    let Some(orig_curve) = dyn_orig_curve.filter(|c| !c.is_empty()) else {
+        return 1.0;
+    };
+    let orig = sample_automation_curve_at_sec(
+        Some(orig_curve),
+        abs_sec,
+        frame_period_ms,
+        // 0.0 = "该帧无基线数据"（与实时引擎 mix.rs 同源）。不能用 DYN_SILENCE_FLOOR：
+        // 那会把无数据帧当成无内容帧，使任何超过 −60 dBFS 的目标被读成放大请求而拒绝。
+        0.0,
+    );
+    crate::renderer::common_params::compute_dyn_gain(target, orig)
 }
 
 pub(crate) fn linear_resample_interleaved(
@@ -321,12 +536,34 @@ pub fn render_mixdown_to_file(
         return Err("export_cancelled".to_string());
     }
 
+    // 相位划分：混音 0..0.92、编码 0.92..1.0。节流器在混音与编码两相位之间共享，
+    // 因此跨相位的单调性由它统一保证（回调次数少，锁开销可忽略）。
+    let throttle = Arc::new(Mutex::new(ProgressThrottle::new(opts.progress.clone())));
+    report_shared(&throttle, 0.0, true);
+
+    // 混音相位：`render_mixdown_interleaved` 上报 `0..1` 的混音比例，这里映射到
+    // `0..MIX_PHASE_END` 并交给共享节流器。
+    let mut mix_opts = opts.clone();
+    mix_opts.progress = Some(ProgressCallback::new({
+        let throttle = Arc::clone(&throttle);
+        move |mix_fraction: f64| {
+            report_shared(
+                &throttle,
+                mix_fraction.clamp(0.0, 1.0) * MIX_PHASE_END,
+                false,
+            );
+        }
+    }));
+
     let (out_rate, out_channels, duration_sec, mix) =
-        render_mixdown_interleaved(timeline, opts.clone())?;
+        render_mixdown_interleaved(timeline, mix_opts)?;
 
     if mixdown_cancelled(&opts) {
         return Err("export_cancelled".to_string());
     }
+
+    // 混音相位结束：强制上报相位边界，避免被节流吞掉。
+    report_shared(&throttle, MIX_PHASE_END, true);
 
     // Mono 下混在编码分叉点之前完成，不侵入混音核心；混音管线恒为双声道。
     let (mix, channels) = match opts.output.channel_mode {
@@ -372,6 +609,12 @@ pub fn render_mixdown_to_file(
                 break Err(e);
             }
             offset = end;
+            // 编码相位进度（节流器限频；`offset` 单调 -> 进度单调）。
+            report_shared(
+                &throttle,
+                MIX_PHASE_END + (offset as f64 / mix.len().max(1) as f64) * (1.0 - MIX_PHASE_END),
+                false,
+            );
             if offset >= mix.len() {
                 output_touched = true;
                 break encoder.finish().map(|summary| summary.bytes_written);
@@ -380,12 +623,15 @@ pub fn render_mixdown_to_file(
     };
 
     match encode_result {
-        Ok(bytes_written) => Ok(MixdownResult {
-            sample_rate: out_rate,
-            duration_sec,
-            channels,
-            bytes_written,
-        }),
+        Ok(bytes_written) => {
+            report_shared(&throttle, 1.0, true);
+            Ok(MixdownResult {
+                sample_rate: out_rate,
+                duration_sec,
+                channels,
+                bytes_written,
+            })
+        }
         Err(e) => {
             if output_touched {
                 let _ = std::fs::remove_file(output_path);
@@ -434,7 +680,14 @@ pub fn render_mixdown_interleaved(
         }
     }
 
-    for clip in &timeline.clips {
+    // 混音相位进度（`0..1` 的混音比例；映射到整体进度由调用方负责）。
+    let mix_progress = MixdownProgress::new(timeline.clips.len(), opts.progress.as_ref());
+
+    for (clip_index, clip) in timeline.clips.iter().enumerate() {
+        // 在迭代开头上报（= 前 `clip_index` 个已完成）。放在 `continue` 之前，
+        // 因此被跳过的 clip 也不会让进度漏拍。
+        mix_progress.begin_clip(clip_index);
+
         if mixdown_cancelled(&opts) {
             return Err("export_cancelled".to_string());
         }
@@ -617,27 +870,14 @@ pub fn render_mixdown_interleaved(
             reverse_interleaved_frames(&mut segment, in_channels_usize);
         }
 
-        // Convert to stereo if needed.
-        let segment = if in_channels == 1 {
-            let frames = segment.len();
-            let mut stereo = Vec::with_capacity(frames * 2);
-            for s in segment {
-                stereo.push(s);
-                stereo.push(s);
-            }
-            stereo
-        } else if in_channels >= 2 {
-            // Use first two channels.
-            let frames = segment.len() / in_channels_usize;
-            let mut stereo = Vec::with_capacity(frames * 2);
-            for f in 0..frames {
-                stereo.push(segment[f * in_channels_usize]);
-                stereo.push(segment[f * in_channels_usize + 1]);
-            }
-            stereo
-        } else {
-            continue;
-        };
+        // 声道条件化（take 级 channel_mode 的唯一语义实现，见
+        // channel_mode::condition_take_channels）：mono 源复制为双声道、
+        // stereo 源按模式取平面/交换/下混，输出固定双声道交错。
+        let segment = crate::channel_mode::condition_take_channels(
+            &segment,
+            in_channels,
+            clip.take_channel_mode(),
+        );
         let mut segment = segment;
 
         if let Some(params) = clip.formant_morph.as_ref().filter(|params| params.enabled) {
@@ -667,6 +907,10 @@ pub fn render_mixdown_interleaved(
                 key_start_sec,
                 key_end_sec,
                 clip.reversed && !loop_mode,
+                clip.channel_mode,
+                // 本域输入已在上方做过声道条件化，与实时域（原始 stereo +
+                // 混音时施加模式）必须用 preconditioned 判别隔离。
+                true,
                 // 离线 Loop 的处理对象是"回绕平铺 segment"（锚点起、长度为
                 // clip 消费量），与实时域的完整文件自然顺序内容不同 —— 必须
                 // 用 tiled_wrap 域判别隔离，避免两个域互相毒化缓存。
@@ -737,30 +981,50 @@ pub fn render_mixdown_interleaved(
             }
         }
 
-        // 提取共通 volume / pan 曲线（与 snapshot.rs 的逻辑对应）。
-        // vslib 在合成阶段通过自己的控制点消费 volume/pan，mixdown 跳过避免二次应用。
-        let (volume_curve, volume_curve_frame_period_ms, pan_curve, pan_curve_frame_period_ms) =
-            timeline
-                .resolve_root_track_id(&clip.track_id)
-                .and_then(|root| {
-                    let entry = timeline.params_by_root_track.get(&root)?;
-                    let track = timeline.tracks.iter().find(|t| t.id == root)?;
-                    let kind = crate::state::SynthPipelineKind::from_track_algo(
-                        &track.pitch_analysis_algo,
-                    );
-                    if crate::pitch_editing::processor_bakes_common_mix_curves(kind) {
-                        return None;
-                    }
-                    let volume = crate::pitch_editing::common_volume_curve_for_clip(entry, clip);
-                    let pan = crate::pitch_editing::common_pan_curve_for_clip(entry, clip);
-                    Some((
-                        volume,
-                        entry.frame_period_ms.max(0.1),
-                        pan,
-                        entry.frame_period_ms.max(0.1),
-                    ))
-                })
-                .unwrap_or((None, 5.0, None, 5.0));
+        // 提取共通 volume / pan / dyn 曲线（与 snapshot.rs 的逻辑对应）。
+        // 所有算法一律由本函数的混音阶段应用，不存在任何「处理器已烘焙」的例外。
+        let (
+            volume_curve,
+            volume_curve_frame_period_ms,
+            pan_curve,
+            pan_curve_frame_period_ms,
+            dyn_curve,
+            dyn_orig,
+            dyn_curve_frame_period_ms,
+        ) = timeline
+            .resolve_root_track_id(&clip.track_id)
+            .and_then(|root| {
+                let entry = timeline.params_by_root_track.get(&root)?;
+                let volume = crate::pitch_editing::common_volume_curve_for_clip(entry, clip);
+                let pan = crate::pitch_editing::common_pan_curve_for_clip(entry, clip);
+                let dyn_orig_source = crate::pitch_editing::dyn_orig_curve_for_clip(entry, clip);
+                // 与实时引擎同一处理：解析哨兵 + 分母同款下钳 + 末帧留一格缓冲。
+                // 详见 `resolve_dyn_curves_for_audio`；导出与监听必须同源。
+                let (dyn_curve, dyn_orig) =
+                    match crate::pitch_editing::common_dyn_curve_for_clip(entry, clip) {
+                        Some(curve) => {
+                            let resolved =
+                                crate::renderer::common_params::resolve_dyn_curves_for_audio(
+                                    curve,
+                                    dyn_orig_source,
+                                );
+                            let baseline =
+                                (!resolved.baseline.is_empty()).then_some(resolved.baseline);
+                            (Some(resolved.target), baseline)
+                        }
+                        None => (None, None),
+                    };
+                Some((
+                    volume,
+                    entry.frame_period_ms.max(0.1),
+                    pan,
+                    entry.frame_period_ms.max(0.1),
+                    dyn_curve,
+                    dyn_orig,
+                    entry.frame_period_ms.max(0.1),
+                ))
+            })
+            .unwrap_or((None, 5.0, None, 5.0, None, None, 5.0));
 
         // Apply fades and gain (timeline-referenced)。淡化按 REAPER 形状/曲率
         // 查表求值（与实时引擎、画布渲染同一公式核心）。
@@ -838,6 +1102,8 @@ pub fn render_mixdown_interleaved(
 
         let has_volume_curve = volume_curve.is_some() && !volume_curve.as_ref().unwrap().is_empty();
         let has_pan_curve = pan_curve.is_some() && !pan_curve.as_ref().unwrap().is_empty();
+        let has_dyn_curve = dyn_curve.as_ref().is_some_and(|c| !c.is_empty());
+        let has_dyn_orig_curve = dyn_orig.as_ref().is_some_and(|c| !c.is_empty());
         // 淡出（端点锁定 + 内容耗尽收缩），语义与 audio_engine/mix.rs 一致：
         // - 末帧进度恰为 1 → 增益精确 0（防 e<1 曲线末端阶跃）；
         // - segment 越界（内容不足）时淡出区间收缩为 [E-N, L]（E=内容末端），
@@ -862,8 +1128,12 @@ pub fn render_mixdown_interleaved(
         let mut last_r: f32 = 0.0;
         let mut has_last: bool = false;
         for f in 0..max_frames_to_mix {
-            if f % 4096 == 0 && mixdown_cancelled(&opts) {
-                return Err("export_cancelled".to_string());
+            if f % 4096 == 0 {
+                if mixdown_cancelled(&opts) {
+                    return Err("export_cancelled".to_string());
+                }
+                // 复用既有的 4k 帧检查点上报 clip 内进度（4096 = 0 时 intra 也为 0）。
+                mix_progress.report_intra(clip_index, f, max_frames_to_mix);
             }
             let oi = (out_offset_frames + f) * 2;
             let si = (seg_offset_frames + f) * 2;
@@ -934,6 +1204,14 @@ pub fn render_mixdown_interleaved(
                         );
                         final_g *= vol;
                     }
+                    if has_dyn_curve || has_dyn_orig_curve {
+                        final_g *= dyn_gain_at_sec(
+                            dyn_curve.as_deref(),
+                            dyn_orig.as_deref(),
+                            abs_sec,
+                            dyn_curve_frame_period_ms,
+                        );
+                    }
                     let pan = if has_pan_curve {
                         sample_automation_curve_at_sec(
                             pan_curve,
@@ -970,6 +1248,14 @@ pub fn render_mixdown_interleaved(
                     1.0,
                 );
                 final_g *= vol;
+            }
+            if has_dyn_curve || has_dyn_orig_curve {
+                final_g *= dyn_gain_at_sec(
+                    dyn_curve.as_deref(),
+                    dyn_orig.as_deref(),
+                    abs_sec,
+                    dyn_curve_frame_period_ms,
+                );
             }
 
             let pan = if has_pan_curve {
@@ -1011,6 +1297,8 @@ pub fn render_mixdown_interleaved(
         );
     }
 
+    mix_progress.finish();
+
     Ok((out_rate, out_channels, duration_sec, mix))
 }
 
@@ -1018,6 +1306,375 @@ pub fn render_mixdown_interleaved(
 mod tests {
     use super::build_loop_tiled_segment;
     use super::*;
+
+    /// 端到端：真实立体声 WAV → decode → 窗口 → 重采样 → 声道条件化 → 混音。
+    /// 锁定"切换 Take 声道模式必须改变导出渲染结果"——这是用户报告的
+    /// "只改波形不改渲染"症状的回归防线。
+    #[test]
+    fn mixdown_honors_take_channel_mode() {
+        use crate::state::{Clip, TimelineState};
+
+        // ── 1. 写一个立体声 WAV：L ≈ 0.5 恒定，R ≈ -0.25 恒定（左右可分辨）。
+        let dir = std::env::temp_dir().join(format!("hfs_mix_mode_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav_path = dir.join("stereo.wav");
+        {
+            let spec = hound::WavSpec {
+                channels: 2,
+                sample_rate: 44100,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::create(&wav_path, spec).unwrap();
+            for _ in 0..44100 {
+                writer.write_sample(16384).unwrap(); // ≈ 0.5
+                writer.write_sample(-8192).unwrap(); // ≈ -0.25
+            }
+            writer.finalize().unwrap();
+        }
+        let source_path = wav_path.to_string_lossy().to_string();
+
+        // ── 2. 组装 TimelineState：默认轨 + 单 clip，gain=1，无 fade。
+        let build_timeline = |channel_mode: i32| {
+            let mut tl = TimelineState::default();
+            let track_id = tl.tracks[0].id.clone();
+            let clip = Clip {
+                id: format!("clip_mode_{}", channel_mode),
+                group_id: None,
+                track_id,
+                name: "stereo".to_string(),
+                start_sec: 0.0,
+                length_sec: 0.5,
+                color: "#000000".to_string(),
+                takes: vec![],
+                active_take_id: None,
+                clip_playback_rate: 1.0,
+                source_path: Some(source_path.clone()),
+                source_path_relative: None,
+                duration_sec: Some(1.0),
+                duration_frames: Some(44100),
+                source_sample_rate: Some(44100),
+                source_channels: Some(2),
+                source_file_mtime: None,
+                source_file_size: None,
+                source_file_fingerprint: None,
+                waveform_preview: None,
+                pitch_range: None,
+                gain: 1.0,
+                muted: false,
+                source_start_sec: 0.0,
+                source_end_sec: 1.0,
+                playback_rate: 1.0,
+                reversed: false,
+                channel_mode,
+                loop_enabled: false,
+                snap_offset_sec: 0.0,
+                fade_in_sec: 0.0,
+                fade_out_sec: 0.0,
+                fade_in_shape: 0.0,
+                fade_out_shape: 0.0,
+                fade_in_dir: 0.0,
+                fade_out_dir: 0.0,
+                fade_in_curve: String::new(),
+                fade_out_curve: String::new(),
+                auto_fade_in_sec: 0.0,
+                auto_fade_out_sec: 0.0,
+                extra_curves: None,
+                extra_params: None,
+                formant_morph: None,
+                midi_note_data: None,
+                midi_fill_gaps: false,
+            };
+            tl.clips.push(clip);
+            tl.normalize_clip_takes();
+            tl
+        };
+
+        let render = |tl: &TimelineState| {
+            let (_rate, _ch, _dur, mix) = render_mixdown_interleaved(
+                tl,
+                MixdownOptions {
+                    sample_rate: 44100,
+                    start_sec: 0.0,
+                    end_sec: Some(0.5),
+                    stretch: crate::time_stretch::StretchAlgorithm::LinearResample,
+                    apply_pitch_edit: false,
+                    output: crate::encode::OutputSpec::wav_32f(),
+                    quality_preset: QualityPreset::Realtime,
+                    cancel_flag: None,
+                    progress: None,
+                },
+            )
+            .unwrap();
+            // 取中段一帧，避开任何边缘淡化。
+            let mid = (mix.len() / 2) & !1;
+            (mix[mid], mix[mid + 1])
+        };
+
+        let (n_l, n_r) = render(&build_timeline(0));
+        assert!(
+            (n_l - 0.5).abs() < 0.02 && (n_r - (-0.25)).abs() < 0.02,
+            "Normal 应输出原始 L/R，得到 ({n_l}, {n_r})"
+        );
+
+        let (s_l, s_r) = render(&build_timeline(1));
+        assert!(
+            (s_l - (-0.25)).abs() < 0.02 && (s_r - 0.5).abs() < 0.02,
+            "Swap 应交换 L/R，得到 ({s_l}, {s_r})"
+        );
+
+        let (ml, mr) = render(&build_timeline(3));
+        assert!(
+            (ml - 0.5).abs() < 0.02 && (mr - 0.5).abs() < 0.02,
+            "MonoLeft 应双声道输出左声道，得到 ({ml}, {mr})"
+        );
+
+        let (mml, mmr) = render(&build_timeline(2));
+        assert!(
+            (mml - 0.125).abs() < 0.02 && (mmr - 0.125).abs() < 0.02,
+            "MonoMix 应双声道输出 (L+R)/2=0.125，得到 ({mml}, {mmr})"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+
+    /// 【QualityPreset 惰性契约】`MixdownOptions::quality_preset` 目前是"写入但
+    /// 忽略"的占位（见 `QualityPreset` 的文档：让它生效必须先定义两档差异并用
+    /// 真实素材 A/B 验证）。本测试把"忽略"钉死：两档预设的渲染输出必须逐字节
+    /// 一致。若未来要消费该字段，请先完成文档要求的 A/B 验证，再**有意地**
+    /// 改写本测试（届时它守护的是"档位差异确实按预期生效"）。
+    #[test]
+    fn quality_preset_is_currently_inert() {
+        use crate::state::{Clip, TimelineState};
+
+        let dir = std::env::temp_dir().join(format!("hfs_mix_qpreset_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav_path = dir.join("stereo.wav");
+        {
+            let spec = hound::WavSpec {
+                channels: 2,
+                sample_rate: 44100,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::create(&wav_path, spec).unwrap();
+            for i in 0..44100 {
+                let v = ((i as f32) * 0.01).sin();
+                writer.write_sample((v * 16384.0) as i32).unwrap();
+                writer.write_sample((v * -8192.0) as i32).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        let source_path = wav_path.to_string_lossy().to_string();
+
+        let build_timeline = || {
+            let mut tl = TimelineState::default();
+            let track = tl.tracks[0].id.clone();
+            let clip = Clip {
+                id: "clip_qpreset".to_string(),
+                group_id: None,
+                track_id: track,
+                name: "V".to_string(),
+                start_sec: 0.0,
+                length_sec: 0.5,
+                color: "#000000".to_string(),
+                takes: vec![],
+                active_take_id: None,
+                clip_playback_rate: 1.0,
+                source_path: Some(source_path.clone()),
+                source_path_relative: None,
+                duration_sec: Some(1.0),
+                duration_frames: Some(44100),
+                source_sample_rate: Some(44100),
+                source_channels: Some(2),
+                source_file_mtime: None,
+                source_file_size: None,
+                source_file_fingerprint: None,
+                waveform_preview: None,
+                pitch_range: None,
+                gain: 1.0,
+                muted: false,
+                source_start_sec: 0.0,
+                source_end_sec: 1.0,
+                playback_rate: 1.0,
+                reversed: false,
+                channel_mode: 0,
+                loop_enabled: false,
+                snap_offset_sec: 0.0,
+                fade_in_sec: 0.0,
+                fade_out_sec: 0.0,
+                fade_in_shape: 0.0,
+                fade_out_shape: 0.0,
+                fade_in_dir: 0.0,
+                fade_out_dir: 0.0,
+                fade_in_curve: String::new(),
+                fade_out_curve: String::new(),
+                auto_fade_in_sec: 0.0,
+                auto_fade_out_sec: 0.0,
+                extra_curves: None,
+                extra_params: None,
+                formant_morph: None,
+                midi_note_data: None,
+                midi_fill_gaps: false,
+            };
+            tl.clips.push(clip);
+            tl.normalize_clip_takes();
+            tl
+        };
+
+        let render = |preset: QualityPreset| {
+            let (_rate, _ch, _dur, mix) = render_mixdown_interleaved(
+                &build_timeline(),
+                MixdownOptions {
+                    sample_rate: 44100,
+                    start_sec: 0.0,
+                    end_sec: Some(0.5),
+                    stretch: crate::time_stretch::StretchAlgorithm::LinearResample,
+                    apply_pitch_edit: false,
+                    output: crate::encode::OutputSpec::wav_32f(),
+                    quality_preset: preset,
+                    cancel_flag: None,
+                    progress: None,
+                },
+            )
+            .unwrap();
+            mix
+        };
+
+        let realtime = render(QualityPreset::Realtime);
+        let export = render(QualityPreset::Export);
+        assert_eq!(
+            realtime.len(),
+            export.len(),
+            "两档预设的输出长度必须一致（该字段当前为占位）"
+        );
+        assert!(
+            realtime == export,
+            "QualityPreset 当前必须是'写入但忽略'：两档渲染输出出现差异说明有人开始消费该字段 —— 先完成 QualityPreset 文档要求的 A/B 验证，再有意更新本测试"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 【导出进度】混音阶段的进度必须：从 0 起、单调不减、结束时到 1.0，且在
+    /// 多 clip 下按 clip 加权推进（不是一步跳到 1）。守护 `MixdownProgress` 的
+    /// 单调性与两级公式。
+    #[test]
+    fn interleaved_reports_monotonic_clip_weighted_progress() {
+        use crate::state::{Clip, TimelineState};
+        use std::sync::Mutex;
+
+        let dir = std::env::temp_dir().join(format!("hfs_mix_progress_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav_path = dir.join("tone.wav");
+        {
+            let spec = hound::WavSpec {
+                channels: 2,
+                sample_rate: 44100,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::create(&wav_path, spec).unwrap();
+            for i in 0..44100 {
+                let v = ((i as f32) * 0.01).sin();
+                writer.write_sample((v * 16384.0) as i32).unwrap();
+                writer.write_sample((v * 16384.0) as i32).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        let source_path = wav_path.to_string_lossy().to_string();
+
+        let mut tl = TimelineState::default();
+        let track = tl.tracks[0].id.clone();
+        for (index, start) in [0.0f64, 0.5].into_iter().enumerate() {
+            let clip = Clip {
+                id: format!("clip_progress_{index}"),
+                group_id: None,
+                track_id: track.clone(),
+                name: "V".to_string(),
+                start_sec: start,
+                length_sec: 0.5,
+                color: "#000000".to_string(),
+                takes: vec![],
+                active_take_id: None,
+                clip_playback_rate: 1.0,
+                source_path: Some(source_path.clone()),
+                source_path_relative: None,
+                duration_sec: Some(1.0),
+                duration_frames: Some(44100),
+                source_sample_rate: Some(44100),
+                source_channels: Some(2),
+                source_file_mtime: None,
+                source_file_size: None,
+                source_file_fingerprint: None,
+                waveform_preview: None,
+                pitch_range: None,
+                gain: 1.0,
+                muted: false,
+                source_start_sec: 0.0,
+                source_end_sec: 1.0,
+                playback_rate: 1.0,
+                reversed: false,
+                channel_mode: 0,
+                loop_enabled: false,
+                snap_offset_sec: 0.0,
+                fade_in_sec: 0.0,
+                fade_out_sec: 0.0,
+                fade_in_shape: 0.0,
+                fade_out_shape: 0.0,
+                fade_in_dir: 0.0,
+                fade_out_dir: 0.0,
+                fade_in_curve: String::new(),
+                fade_out_curve: String::new(),
+                auto_fade_in_sec: 0.0,
+                auto_fade_out_sec: 0.0,
+                extra_curves: None,
+                extra_params: None,
+                formant_morph: None,
+                midi_note_data: None,
+                midi_fill_gaps: false,
+            };
+            tl.clips.push(clip);
+        }
+        tl.normalize_clip_takes();
+
+        let recorded: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&recorded);
+        let (_rate, _ch, _dur, _mix) = render_mixdown_interleaved(
+            &tl,
+            MixdownOptions {
+                sample_rate: 44100,
+                start_sec: 0.0,
+                end_sec: Some(1.0),
+                stretch: crate::time_stretch::StretchAlgorithm::LinearResample,
+                apply_pitch_edit: false,
+                output: crate::encode::OutputSpec::wav_32f(),
+                quality_preset: QualityPreset::Export,
+                cancel_flag: None,
+                progress: Some(ProgressCallback::new(move |value: f64| {
+                    sink.lock().unwrap().push(value);
+                })),
+            },
+        )
+        .unwrap();
+
+        let values = recorded.lock().unwrap().clone();
+        assert!(!values.is_empty(), "必须至少上报一次进度");
+        assert_eq!(values[0], 0.0, "首次上报应为 0.0");
+        assert_eq!(*values.last().unwrap(), 1.0, "结束时必须到 1.0");
+        assert!(
+            values.windows(2).all(|w| w[1] >= w[0]),
+            "进度必须单调不减，实际: {values:?}"
+        );
+        assert!(
+            values.iter().any(|v| (*v - 0.5).abs() < 1e-9),
+            "两个 clip 之间应上报 0.5（clip 加权），实际: {values:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 交错 PCM：帧 i 的样本值为 [i as f32, i as f32 + 0.5]。
     fn make_pcm(frames: usize, channels: usize) -> Vec<f32> {
@@ -1177,6 +1834,7 @@ mod tests {
                     output: OutputSpec::wav_32f(),
                     quality_preset: QualityPreset::Export,
                     cancel_flag: None,
+                    progress: None,
                 };
                 let (r, ch, _dur, mix) = render_mixdown_interleaved(&tl, opts).expect("render ok");
                 let ch = ch as usize;
@@ -1283,6 +1941,7 @@ mod tests {
                 output: spec,
                 quality_preset: QualityPreset::Export,
                 cancel_flag: None,
+                progress: None,
             }
         }
 

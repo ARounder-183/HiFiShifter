@@ -7,10 +7,13 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { Button, Dialog, Flex, Text, Spinner } from "@radix-ui/themes";
+import { Flex } from "@radix-ui/themes";
 import type { BenchmarkResult } from "../../types/api";
 import { coreApi } from "../../services/api/core";
 import { useI18n } from "../../i18n/I18nProvider";
+import { AppDialog } from "../../ui/Dialog";
+import { AppBusy } from "../../ui";
+import { AppForm } from "../../ui/Field";
 
 interface BenchmarkDialogProps {
     open: boolean;
@@ -133,263 +136,253 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
     const dmlFailed = result?.dmlAvailable && result.dmlMedianMs == null;
 
     return (
-        <Dialog.Root
+        <AppDialog
             open={open}
             onOpenChange={(o) => {
                 if (!o) handleClose();
             }}
+            title={t("benchmark_title")}
+            description={t("benchmark_desc")}
+            size="md"
+            actions={[
+                { id: "close", label: t("benchmark_close"), onClick: handleClose },
+                {
+                    id: "run",
+                    label:
+                        phase === "running" ? t("benchmark_running_btn") : t("benchmark_run_btn"),
+                    intent: "primary",
+                    disabled: phase === "running",
+                    autoClose: false,
+                    onClick: () => {
+                        void handleRun();
+                    },
+                },
+            ]}
         >
-            <Dialog.Content style={{ maxWidth: 520 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{t("benchmark_title")}</Dialog.Title>
-                <Dialog.Description size="2" color="gray">
-                    {t("benchmark_desc")}
-                </Dialog.Description>
+            <AppForm>
+                {/* Running state */}
+                {phase === "running" && (
+                    <Flex align="center" gap="2">
+                        <AppBusy size="md" label={t("benchmark_running")} />
+                    </Flex>
+                )}
 
-                <Flex direction="column" gap="3" mt="4">
-                    {/* Running state */}
-                    {phase === "running" && (
-                        <Flex align="center" gap="2">
-                            <Spinner size="2" />
-                            <Text size="2" color="gray">
-                                {t("benchmark_running")}
-                            </Text>
-                        </Flex>
-                    )}
-
-                    {/* Results table */}
-                    {phase === "done" && result && rows.length > 0 && (
-                        <Flex direction="column" gap="2">
-                            <Text size="2" weight="medium">
-                                {t("benchmark_results").replace(
-                                    "{samples}",
-                                    String(result.benchmarkSamples),
-                                )}
-                            </Text>
-                            <div
+                {/* Results table */}
+                {phase === "done" && result && rows.length > 0 && (
+                    <Flex direction="column" gap="2">
+                        <span className="hs-type-label font-medium">
+                            {t("benchmark_results").replace(
+                                "{samples}",
+                                String(result.benchmarkSamples),
+                            )}
+                        </span>
+                        <div
+                            style={{
+                                borderRadius: 6,
+                                overflow: "hidden",
+                                border: "1px solid var(--qt-border)",
+                            }}
+                        >
+                            <table
                                 style={{
-                                    borderRadius: 6,
-                                    overflow: "hidden",
-                                    border: "1px solid var(--gray-5)",
+                                    width: "100%",
+                                    borderCollapse: "collapse",
+                                    fontSize: "var(--qt-fs-md)",
                                 }}
                             >
-                                <table
-                                    style={{
-                                        width: "100%",
-                                        borderCollapse: "collapse",
-                                        fontSize: 13,
-                                    }}
-                                >
-                                    <thead>
-                                        <tr
-                                            style={{
-                                                background: "var(--gray-3)",
-                                                textAlign: "left",
-                                            }}
-                                        >
-                                            <th style={{ padding: "6px 12px", fontWeight: 500 }}>
-                                                {t("benchmark_device_header")}
-                                            </th>
-                                            <th style={{ padding: "6px 12px", fontWeight: 500 }}>
-                                                {t("benchmark_latency_header")}
-                                            </th>
-                                            <th style={{ padding: "6px 12px", fontWeight: 500 }}>
-                                                {t("benchmark_rtf_header")}
-                                            </th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {rows.map((row) => {
-                                            const isFastest =
-                                                row.label === fastestRow?.label && row.available;
-                                            const isUnavailable = !row.available;
-                                            return (
-                                                <tr
-                                                    key={row.label}
+                                <thead>
+                                    <tr
+                                        style={{
+                                            background: "var(--qt-surface)",
+                                            textAlign: "left",
+                                        }}
+                                    >
+                                        <th style={{ padding: "6px 12px", fontWeight: 500 }}>
+                                            {t("benchmark_device_header")}
+                                        </th>
+                                        <th style={{ padding: "6px 12px", fontWeight: 500 }}>
+                                            {t("benchmark_latency_header")}
+                                        </th>
+                                        <th style={{ padding: "6px 12px", fontWeight: 500 }}>
+                                            {t("benchmark_rtf_header")}
+                                        </th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {rows.map((row) => {
+                                        const isFastest =
+                                            row.label === fastestRow?.label && row.available;
+                                        const isUnavailable = !row.available;
+                                        return (
+                                            <tr
+                                                key={row.label}
+                                                style={{
+                                                    background: isFastest
+                                                        ? "var(--accent-3)"
+                                                        : "transparent",
+                                                    borderTop: "1px solid var(--qt-border)",
+                                                }}
+                                            >
+                                                <td style={{ padding: "6px 12px" }}>
+                                                    <Flex align="center" gap="1">
+                                                        {isFastest && (
+                                                            <span data-tooltip="Fastest">⚡</span>
+                                                        )}
+                                                        <span
+                                                            style={{
+                                                                fontWeight: isFastest ? 600 : 400,
+                                                                color: isUnavailable
+                                                                    ? "var(--qt-text-muted)"
+                                                                    : undefined,
+                                                            }}
+                                                        >
+                                                            {row.label}
+                                                        </span>
+                                                    </Flex>
+                                                </td>
+                                                <td style={{ padding: "6px 12px" }}>
+                                                    {isUnavailable ? (
+                                                        <span
+                                                            className="hs-type-caption"
+                                                            style={{
+                                                                color: "var(--qt-danger-text)",
+                                                            }}
+                                                        >
+                                                            {t("benchmark_failed")}
+                                                        </span>
+                                                    ) : (
+                                                        formatMs(row.medianMs)
+                                                    )}
+                                                </td>
+                                                <td
                                                     style={{
-                                                        background: isFastest
-                                                            ? "var(--accent-3)"
-                                                            : "transparent",
-                                                        borderTop: "1px solid var(--gray-4)",
+                                                        padding: "6px 12px",
+                                                        color: isUnavailable
+                                                            ? "var(--qt-text-muted)"
+                                                            : row.rtf >= 1
+                                                              ? "var(--qt-success-text)"
+                                                              : "var(--qt-danger-text)",
                                                     }}
                                                 >
-                                                    <td style={{ padding: "6px 12px" }}>
-                                                        <Flex align="center" gap="1">
-                                                            {isFastest && (
-                                                                <span data-tooltip="Fastest">
-                                                                    ⚡
-                                                                </span>
-                                                            )}
-                                                            <span
-                                                                style={{
-                                                                    fontWeight: isFastest
-                                                                        ? 600
-                                                                        : 400,
-                                                                    color: isUnavailable
-                                                                        ? "var(--gray-9)"
-                                                                        : undefined,
-                                                                }}
-                                                            >
-                                                                {row.label}
-                                                            </span>
-                                                        </Flex>
-                                                    </td>
-                                                    <td style={{ padding: "6px 12px" }}>
-                                                        {isUnavailable ? (
-                                                            <Text size="1" color="red">
-                                                                {t("benchmark_failed")}
-                                                            </Text>
-                                                        ) : (
-                                                            formatMs(row.medianMs)
-                                                        )}
-                                                    </td>
-                                                    <td
-                                                        style={{
-                                                            padding: "6px 12px",
-                                                            color: isUnavailable
-                                                                ? "var(--gray-9)"
-                                                                : row.rtf >= 1
-                                                                  ? "var(--green-10)"
-                                                                  : "var(--red-10)",
-                                                        }}
-                                                    >
-                                                        {isUnavailable ? "N/A" : formatRtf(row.rtf)}
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })}
-                                    </tbody>
-                                </table>
-                            </div>
-                            <Text size="1" color="gray">
-                                {t("benchmark_rtf_hint")}
-                            </Text>
-                            {fastestRow && fastestRow.available && (
-                                <Text size="2">
-                                    {t("benchmark_recommended")} <strong>{fastestRow.label}</strong>
-                                </Text>
-                            )}
+                                                    {isUnavailable ? "N/A" : formatRtf(row.rtf)}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                        <span className="hs-type-caption">{t("benchmark_rtf_hint")}</span>
+                        {fastestRow && fastestRow.available && (
+                            <span className="hs-type-body">
+                                {t("benchmark_recommended")} <strong>{fastestRow.label}</strong>
+                            </span>
+                        )}
 
-                            {/* GPU (WebGPU) available but benchmark failed */}
-                            {gpuFailed && (
-                                <Flex
-                                    direction="column"
-                                    gap="2"
-                                    style={{
-                                        padding: "8px 12px",
-                                        borderRadius: 6,
-                                        background: "var(--red-3)",
-                                        border: "1px solid var(--red-5)",
-                                    }}
+                        {/* GPU (WebGPU) available but benchmark failed */}
+                        {gpuFailed && (
+                            <Flex
+                                direction="column"
+                                gap="2"
+                                style={{
+                                    padding: "8px 12px",
+                                    borderRadius: 6,
+                                    background: "var(--qt-danger-bg)",
+                                    border: "1px solid var(--qt-danger-border)",
+                                }}
+                            >
+                                <span
+                                    className="hs-type-label font-medium"
+                                    style={{ color: "var(--qt-danger-text)" }}
                                 >
-                                    <Text
-                                        size="2"
-                                        weight="medium"
-                                        style={{ color: "var(--red-10)" }}
-                                    >
-                                        {t("benchmark_gpu_failed_title")}
-                                    </Text>
-                                    <Text size="1" style={{ color: "var(--red-9)" }}>
-                                        {t("benchmark_gpu_failed_desc")}
-                                    </Text>
-                                    {result.gpuError && (
-                                        <Text
-                                            size="1"
-                                            style={{
-                                                color: "var(--red-9)",
-                                                fontFamily: "monospace",
-                                                whiteSpace: "pre-wrap",
-                                                wordBreak: "break-word",
-                                            }}
-                                        >
-                                            {result.gpuError}
-                                        </Text>
-                                    )}
-                                </Flex>
-                            )}
-
-                            {/* DirectML available but benchmark failed */}
-                            {dmlFailed && (
-                                <Flex
-                                    direction="column"
-                                    gap="2"
-                                    style={{
-                                        padding: "8px 12px",
-                                        borderRadius: 6,
-                                        background: "var(--red-3)",
-                                        border: "1px solid var(--red-5)",
-                                    }}
+                                    {t("benchmark_gpu_failed_title")}
+                                </span>
+                                <span
+                                    className="hs-type-caption"
+                                    style={{ color: "var(--qt-danger-text)" }}
                                 >
-                                    <Text
-                                        size="2"
-                                        weight="medium"
-                                        style={{ color: "var(--red-10)" }}
+                                    {t("benchmark_gpu_failed_desc")}
+                                </span>
+                                {result.gpuError && (
+                                    <span
+                                        className="hs-type-mono"
+                                        style={{
+                                            color: "var(--qt-danger-text)",
+                                            whiteSpace: "pre-wrap",
+                                            wordBreak: "break-word",
+                                        }}
                                     >
-                                        {t("benchmark_gpu_failed_title")}
-                                    </Text>
-                                    <Text size="1" style={{ color: "var(--red-9)" }}>
-                                        {t("benchmark_gpu_failed_desc")}
-                                    </Text>
-                                </Flex>
-                            )}
+                                        {result.gpuError}
+                                    </span>
+                                )}
+                            </Flex>
+                        )}
 
-                            {/* Available providers */}
-                            <Text size="1" style={{ color: "var(--gray-9)", marginTop: 4 }}>
-                                {t("benchmark_providers_label")}{" "}
-                                {result.availableProviders.join(", ") || "unknown"}
-                            </Text>
-                            <Text size="1" style={{ color: "var(--gray-9)" }}>
-                                {t("benchmark_ort_info_label")} {result.ortBuildInfo || "unknown"}
-                            </Text>
+                        {/* DirectML available but benchmark failed */}
+                        {dmlFailed && (
+                            <Flex
+                                direction="column"
+                                gap="2"
+                                style={{
+                                    padding: "8px 12px",
+                                    borderRadius: 6,
+                                    background: "var(--qt-danger-bg)",
+                                    border: "1px solid var(--qt-danger-border)",
+                                }}
+                            >
+                                <span
+                                    className="hs-type-label font-medium"
+                                    style={{ color: "var(--qt-danger-text)" }}
+                                >
+                                    {t("benchmark_gpu_failed_title")}
+                                </span>
+                                <span
+                                    className="hs-type-caption"
+                                    style={{ color: "var(--qt-danger-text)" }}
+                                >
+                                    {t("benchmark_gpu_failed_desc")}
+                                </span>
+                            </Flex>
+                        )}
 
-                            {/* GPU enumeration */}
-                            {result.gpuDevices && result.gpuDevices.length > 0 && (
-                                <Flex direction="column" gap="1" style={{ marginTop: 4 }}>
-                                    <Text
-                                        size="1"
-                                        weight="medium"
-                                        style={{ color: "var(--gray-9)" }}
-                                    >
-                                        {t("benchmark_gpu_label")}:
-                                    </Text>
-                                    {result.gpuDevices.map((gpu) => (
-                                        <Text
-                                            key={gpu.deviceId}
-                                            size="1"
-                                            style={{ color: "var(--gray-9)" }}
-                                        >
-                                            · {t("benchmark_gpu_device_label")} {gpu.deviceId}:{" "}
-                                            {gpu.name} ({(gpu.memoryMb / 1024).toFixed(1)} GB)
-                                        </Text>
-                                    ))}
-                                </Flex>
-                            )}
-                        </Flex>
-                    )}
+                        {/* Available providers */}
+                        <span className="hs-type-caption" style={{ marginTop: 4 }}>
+                            {t("benchmark_providers_label")}{" "}
+                            {result.availableProviders.join(", ") || "unknown"}
+                        </span>
+                        <span className="hs-type-caption">
+                            {t("benchmark_ort_info_label")} {result.ortBuildInfo || "unknown"}
+                        </span>
 
-                    {/* Error state */}
-                    {phase === "error" && (
-                        <Text size="2" color="red">
-                            {errorText || t("benchmark_error_default")}
-                        </Text>
-                    )}
+                        {/* GPU enumeration */}
+                        {result.gpuDevices && result.gpuDevices.length > 0 && (
+                            <Flex direction="column" gap="1" style={{ marginTop: 4 }}>
+                                <span className="hs-type-caption font-medium">
+                                    {t("benchmark_gpu_label")}:
+                                </span>
+                                {result.gpuDevices.map((gpu) => (
+                                    <span key={gpu.deviceId} className="hs-type-caption">
+                                        · {t("benchmark_gpu_device_label")} {gpu.deviceId}:{" "}
+                                        {gpu.name} ({(gpu.memoryMb / 1024).toFixed(1)} GB)
+                                    </span>
+                                ))}
+                            </Flex>
+                        )}
+                    </Flex>
+                )}
 
-                    {/* Idle hint */}
-                    {phase === "idle" && (
-                        <Text size="2" color="gray">
-                            {t("benchmark_idle_hint")}
-                        </Text>
-                    )}
-                </Flex>
+                {/* Error state */}
+                {phase === "error" && (
+                    <span className="hs-type-body" style={{ color: "var(--qt-danger-text)" }}>
+                        {errorText || t("benchmark_error_default")}
+                    </span>
+                )}
 
-                <Flex justify="end" gap="2" mt="4">
-                    <Button variant="soft" color="gray" onClick={handleClose}>
-                        {t("benchmark_close")}
-                    </Button>
-                    <Button onClick={() => void handleRun()} disabled={phase === "running"}>
-                        {phase === "running" ? t("benchmark_running_btn") : t("benchmark_run_btn")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                {/* Idle hint */}
+                {phase === "idle" && (
+                    <span className="hs-type-muted">{t("benchmark_idle_hint")}</span>
+                )}
+            </AppForm>
+        </AppDialog>
     );
 }

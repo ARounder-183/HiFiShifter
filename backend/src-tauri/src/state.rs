@@ -526,10 +526,26 @@ pub struct TrackParamsState {
     pub pending_pitch_offset: Option<Vec<f32>>,
 
     /// 自动化曲线（key = ParamDescriptor::id）。
-    /// 多数曲线是声码器专属的；`volume` / `pan` 是所有算法共通的混音参数，
-    /// 切换算法时保留同一条曲线。缺失 key = 使用参数默认值。
+    /// 多数曲线是声码器专属的；`volume` / `pan` / `dyn` 是所有算法共通的
+    /// 混音级参数，切换算法时保留同一条曲线。缺失 key = 使用参数默认值。
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_curves: HashMap<String, Vec<f32>>,
+
+    /// 原声电平基线（DYN 的 `*DYN`）：逐帧原声电平，**绝对倍率**
+    ///（1.0 = 数字满量程 = 0 dBFS，0.5 = −6 dBFS）。
+    ///
+    /// 与 `pitch_orig` 同性质的**派生数据**：由后台响度分析从源音频算出，
+    /// 因此不落盘（打开工程后自动重建），其失效判定复用 `dyn_orig_key`。
+    ///
+    /// 【锚点必须是绝对的】基线不做任何归一化 —— 一旦除以"本组最响段落"，
+    /// 倍率就失去了绝对意义，与 DAW 电平表的读数对不上（见
+    /// `pitch_analysis/dyn_analysis.rs` 文件头）。
+    #[serde(skip)]
+    pub dyn_orig: Vec<f32>,
+
+    /// 原声电平基线的缓存键（= `build_root_dyn_key`），分析完成后写入。
+    #[serde(skip)]
+    pub dyn_orig_key: Option<String>,
 
     /// 声码器专属静态参数（key = ParamDescriptor::id，值为枚举整数转 f64）。
     /// 例："synth_mode" = 1.0（SYNTHMODE_MF）。
@@ -759,6 +775,23 @@ pub struct ClipTake {
     #[serde(default)]
     pub loop_enabled: bool,
 
+    /// 声道模式：0..=4，数值对齐 REAPER `CHANMODE`
+    /// （0=正常 1=交换左右 2=混合单声道 3=仅左 4=仅右）。
+    /// 语义实现唯一收敛在 [`crate::channel_mode`]；越界值在加载边界规范化为 0。
+    #[serde(default)]
+    pub channel_mode: i32,
+    /// 源文件声道数（导入时由 header 探针记录；`None` = 未知，渲染期由
+    /// 峰值头/解码结果回填内存投影，不强制回写工程）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_channels: Option<u16>,
+    /// 声道判定档案（谁定的 / 定的什么 / 结论还有效吗）。
+    ///
+    /// 取代旧实现「工程版本号 < 5 ⇒ 无权威来源」的代理判据：`None` = 从未
+    /// 判定或结论已失效（可被自动扫描改写），[`crate::channel_decision::ORIGIN_USER`]
+    /// = 用户显式决定（自动扫描永不触碰）。语义见 [`crate::channel_decision`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_decision: Option<crate::channel_decision::ChannelDecisionRecord>,
+
     // ── MIDI 内容（无音频源时） ──
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
@@ -814,6 +847,11 @@ impl ClipTake {
             playback_rate,
             reversed: clip.reversed,
             loop_enabled: clip.loop_enabled,
+            channel_mode: crate::channel_mode::TakeChannelMode::normalize_raw(clip.channel_mode),
+            source_channels: clip.source_channels,
+            // 投影里没有判定档案（它是 Take 的权威数据，不是可投影的媒体字段）：
+            // 由 `sync_take_from_flat` 显式继承既有 Take 的档案，避免被抹掉。
+            channel_decision: None,
             midi_note_data: clip.midi_note_data.clone(),
             midi_fill_gaps: clip.midi_fill_gaps,
             stretch_markers: Vec::new(),
@@ -845,6 +883,8 @@ impl ClipTake {
         clip.playback_rate = clip_rate * self.playback_rate;
         clip.reversed = self.reversed;
         clip.loop_enabled = self.loop_enabled;
+        clip.channel_mode = crate::channel_mode::TakeChannelMode::normalize_raw(self.channel_mode);
+        clip.source_channels = self.source_channels;
         clip.midi_note_data = self.midi_note_data.clone();
         clip.midi_fill_gaps = self.midi_fill_gaps;
     }
@@ -1138,6 +1178,13 @@ pub struct Clip {
     pub playback_rate: f32,
     #[serde(default, skip_serializing)]
     pub reversed: bool,
+    /// 声道模式（active take 投影；0..=4 对齐 REAPER CHANMODE，
+    /// 语义见 [`crate::channel_mode`]）。
+    #[serde(default, skip_serializing)]
+    pub channel_mode: i32,
+    /// 源文件声道数（active take 投影；`None` = 导入时未记录）。
+    #[serde(default, skip_serializing)]
+    pub source_channels: Option<u16>,
     /// Loop（循环源）属性，对齐 REAPER / VEGAS 的 item LOOP 语义：
     ///
     /// 启用后对**整个原始媒体文件**做模运算回绕（"循环原始音频文件"）：
@@ -1258,6 +1305,25 @@ pub fn split_transition_curve_spec(curve: &str) -> Option<(f64, f64, f64)> {
 }
 
 impl Clip {
+
+    /// 给本 Clip 的 Take 盖"用户显式设置声道模式"的封印。
+    ///
+    /// `all_takes` 为真时覆盖全部 Take（跟随"同步编辑所有 Take"设置），否则只盖
+    /// active take。自动声道扫描会跳过带此封印的 Take。
+    ///
+    /// 每枚封印都记下**该 Take 当时的模式**（`chosen_mode`）—— 这是封印可信的
+    /// 凭据（见 `ChannelDecisionRecord::is_trusted_user_seal`）。
+    pub fn seal_user_channel_mode(&mut self, all_takes: bool) {
+        let active_id = self.active_take_id.clone();
+        for take in self.takes.iter_mut() {
+            let is_active = active_id.as_deref() == Some(take.id.as_str());
+            if all_takes || is_active {
+                take.channel_decision = Some(
+                    crate::channel_decision::ChannelDecisionRecord::user(take.channel_mode),
+                );
+            }
+        }
+    }
     /// 读取期兼容：把旧命名曲线字符串换算成 (shape, dir)。
     ///
     /// 规则：字符串为空（VocalShifter 导入等哨兵）或新字段已由工程文件显式
@@ -1337,6 +1403,10 @@ impl Clip {
         projection.name = existing.name.clone();
         projection.stretch_markers = existing.stretch_markers;
         projection.envelopes = existing.envelopes;
+        // 判定档案是 Take 的权威数据，不在投影里：必须显式继承，否则每一次
+        // `sync_clip_takes_from_flat()`（加载/编辑/保存路径上到处都是）都会把
+        // 它抹成 None，折叠结论随之丢失并反复重判。
+        projection.channel_decision = existing.channel_decision;
         if existing.source_file_mtime.is_some() {
             projection.source_file_mtime = existing.source_file_mtime;
         }
@@ -1353,6 +1423,10 @@ impl Clip {
     /// 统一规范化：旧工程（无 takes）由投影生成单 Take；新工程（有 takes）
     /// 把 active take 物化到投影。任何加载/合并/构造边界都应调用。
     pub fn normalize_takes(&mut self) {
+        // 声道模式原始值先规范化（越界 → Normal），再物化投影。
+        for take in &mut self.takes {
+            take.channel_mode = crate::channel_mode::TakeChannelMode::normalize_raw(take.channel_mode);
+        }
         if self.takes.is_empty() {
             self.sync_take_from_flat();
             return;
@@ -1361,6 +1435,16 @@ impl Clip {
         let take = self.takes[idx].clone();
         self.active_take_id = Some(take.id.clone());
         take.apply_to_clip(self);
+    }
+
+    /// 活跃 take 的声道模式（takes 为空时按 Normal；不依赖投影物化）。
+    pub fn take_channel_mode(&self) -> crate::channel_mode::TakeChannelMode {
+        crate::channel_mode::TakeChannelMode::from_raw(self.channel_mode)
+    }
+
+    /// 活跃 take 的源声道数（未记录时 `None`）。
+    pub fn take_source_channels(&self) -> Option<u16> {
+        self.source_channels
     }
 
     /// 清空波形预览缓存（active 投影 + 全部 Take）。
@@ -1500,6 +1584,12 @@ pub struct ClipStatePatch {
     pub auto_fade_out_sec: Option<f64>,
     pub color: Option<String>,
     pub formant_morph: Option<ClipFormantMorph>,
+    /// 声道模式（0..=4，对齐 REAPER CHANMODE；语义见 [`crate::channel_mode`]）。
+    ///
+    /// 与 gain / reversed / loop_enabled 同属**内容级**属性，因此也参与
+    /// "同步编辑所有 Take"（全局设置 [`crate::config::sync_edits_across_takes`]）。
+    #[serde(default)]
+    pub channel_mode: Option<i32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1652,6 +1742,7 @@ pub enum HistoryOp {
     TakeRemove,
     TakeRename,
     TakeReverse,
+    TakeChannelMode,
     TakeAddMedia,
     // ── 轨道 ──
     AddTrack,
@@ -1664,6 +1755,8 @@ pub enum HistoryOp {
     EditTempo,
     EditProjectSettings,
     ImportProject,
+    /// 编辑记事本（工程备注）。
+    EditNotes,
     // ── 参数 / MIDI ──
     ParamCurve,
     ParamRestore,
@@ -1681,6 +1774,13 @@ pub enum HistoryOp {
 
 impl HistoryOp {
     /// 语言无关的操作 key（前端按 `history_op_<key>` 本地化）。
+    ///
+    /// **新增变体时必须同步在全部五个语系补 `history_op_<key>`**
+    /// （`frontend/src/i18n/{en-US,zh-CN,zh-TW,ja-JP,ko-KR}.ts`）。
+    /// 漏补不会报错：`UndoHistoryPanel.labelOf` 查不到键时会静默回落到这个裸
+    /// key，用户在撤销列表里看到的是 `take_channel_mode` 这样的标识符。
+    /// 该缺陷已实际发生过一次（`TakeChannelMode` 上线时）。
+    /// 前端 `src/i18n/historyOpLabels.test.ts` 会扫描本函数并对缺失键报红。
     pub fn key(self) -> &'static str {
         match self {
             HistoryOp::ImportMedia => "import_media",
@@ -1707,6 +1807,7 @@ impl HistoryOp {
             HistoryOp::TakeRemove => "take_remove",
             HistoryOp::TakeRename => "take_rename",
             HistoryOp::TakeReverse => "take_reverse",
+            HistoryOp::TakeChannelMode => "take_channel_mode",
             HistoryOp::TakeAddMedia => "take_add_media",
             HistoryOp::AddTrack => "add_track",
             HistoryOp::RemoveTrack => "remove_track",
@@ -1717,6 +1818,7 @@ impl HistoryOp {
             HistoryOp::EditTempo => "edit_tempo",
             HistoryOp::EditProjectSettings => "edit_project_settings",
             HistoryOp::ImportProject => "import_project",
+            HistoryOp::EditNotes => "edit_notes",
             HistoryOp::ParamCurve => "param_curve",
             HistoryOp::ParamRestore => "param_restore",
             HistoryOp::ParamStatic => "param_static",
@@ -1728,6 +1830,73 @@ impl HistoryOp {
             HistoryOp::Recording => "recording",
             HistoryOp::Batch => "batch",
         }
+    }
+}
+
+/// 参数编辑器「边缘拉伸」手势带来的选区变化。
+///
+/// 拉伸既改曲线（产生一个 `ParamCurve` 步）又改选区范围，而选区是纯前端概念
+/// （不在 `TimelineState` 里），因此选区快照必须**随产生它的那一步**记录 ——
+/// 与 {@link HistoryRecord::notes_markdown} 同一套路（那里的注释已说明"前端拿
+/// 后端当前值覆盖"为什么不行）。
+///
+/// 【为什么不放在前端按撤销深度索引】那种记账需要前端回答"我这一步是第几步"，
+/// 而它只有一个由事件异步推进的深度镜像：镜像滞后、检查点被抑制、以及"新检查点
+/// 丢弃重做分支"时的裁剪，都会让位置对不上 —— 表现是"撤销后曲线回来了、选区却
+/// 没回到拉伸前"。记在记录上之后，撤销/重做只需无脑套用载荷带回的那一份，不再
+/// 存在任何位置推断。
+///
+/// 【单位是参数帧】每一对是 `[startFrame, frameCount]`（半开区间，与前端
+/// `ParamSelection` / `get_param_frames` 的契约同形）。帧栅格是工程级常量
+/// （`frame_period_ms` 恒为 5.0），因此快照与 BPM / Tempo Map 无关：先拉伸、
+/// 再改 BPM、然后撤销，恢复出来的仍是拉伸前的同一段帧。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParamSelectionStep {
+    /// 拉伸前的选区（撤销该步时恢复）。空向量 = 当时没有选区。
+    pub before: Vec<[f32; 2]>,
+    /// 拉伸后的选区（重做该步时恢复）。
+    pub after: Vec<[f32; 2]>,
+}
+
+/// 历史跳转的**意图**：决定带回目标步骤的哪一侧选区快照。
+///
+/// 撤销与重做看着对称，但要恢复的是**被跨越的那一步**的两端：撤销一步是回到它
+/// 之前的样子（`before`），重做是回到它之后的样子（`after`）。而任意跳转
+/// （「操作记录」窗口双击）问的是"第 N 个状态长什么样"：该位置自己记录的
+/// `after` 优先，否则看下一步的 `before`（那正是"还没做这一步"时的样子）。
+///
+/// 【为什么不能让后端自己猜】撤销/重做时"目标位置"两侧都可能带快照（连续两次
+/// 拉伸即如此），语义完全由调用意图决定 —— 交给调用方显式声明最省事也最难写错。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryJumpIntent {
+    /// 撤销：恢复被撤销那一步（`target + 1`）的 `before`。
+    Undo,
+    /// 重做：恢复被重做那一步（`target`）的 `after`。
+    Redo,
+    /// 任意跳转：优先目标位置自己的 `after`，否则下一步的 `before`。
+    Jump,
+}
+
+/// 求出"跳到 `target` 之后应当恢复的参数编辑器选区"。
+///
+/// 返回 `None` = 该步骤与选区无关（调用方/前端不得改动选区）；`Some(vec![])`
+/// = 当时确实没有选区（要清空）。这一区分是**语义必需**的：拉伸前可能本来
+/// 就没有选区。
+fn param_selection_restore_for(
+    h: &TimelineHistory,
+    target: usize,
+    intent: HistoryJumpIntent,
+) -> Option<Vec<[f32; 2]>> {
+    let step_at = |position: usize| -> Option<&ParamSelectionStep> {
+        h.records.get(position).and_then(|r| r.param_selection.as_ref())
+    };
+    match intent {
+        HistoryJumpIntent::Undo => step_at(target + 1).map(|s| s.before.clone()),
+        HistoryJumpIntent::Redo => step_at(target).map(|s| s.after.clone()),
+        HistoryJumpIntent::Jump => step_at(target)
+            .map(|s| s.after.clone())
+            .or_else(|| step_at(target + 1).map(|s| s.before.clone())),
     }
 }
 
@@ -1744,6 +1913,27 @@ pub struct HistoryRecord {
     /// 就是实时时间线本身，无需再克隆一份；离开该位置（打点 / 跳转）时用
     /// 实时时间线补齐。其余位置的记录必然持有快照。
     pub state: Option<TimelineState>,
+    /// 该状态下的记事本内容。
+    ///
+    /// 记事本不在 `TimelineState` 里（它在 `ProjectState`），因此必须随快照
+    /// 一起记录，否则撤销/重做无从恢复它 —— 早期实现正是没有这层记录，
+    /// 前端只能拿"后端当前值"覆盖，于是"记事本有内容时，为任意操作执行
+    /// 撤销都会清空它"。
+    ///
+    /// **打点时补齐**：新记录的该项为 `None`，在离开该位置（下一次打点 /
+    /// 跳转）时用**当时的**记事本补齐 —— 那一刻它就是状态 N 的记事本。
+    /// 于是每一条记录都携带自己那个状态的记事本，撤销/重做只需无脑套用。
+    pub notes_markdown: Option<String>,
+    /// 该步（若是「边缘拉伸」）带来的选区变化；其它步骤恒为 `None`。
+    ///
+    /// `None` = 这一步与选区无关 —— 撤销/重做它时**不得**动用户的选区
+    /// （前端只看载荷里有没有带回选区，见 `TimelineStatePayload`）。
+    ///
+    /// 【与 `state` 同样的惰性补齐时机】由前端在曲线回写成功后显式登记
+    /// （`record_param_selection_step`）：那一刻新步已经被追加、位置指向它，
+    /// 因此不需要任何位置推断。位置被**复用**（新检查点丢弃重做分支）时该项
+    /// 必须清空 —— 旧分支的选区快照不属于新步。
+    pub param_selection: Option<ParamSelectionStep>,
 }
 
 /// 撤销历史：一条线性的「状态链」+ 当前位置。
@@ -1787,6 +1977,14 @@ pub struct ProjectState {
     pub dirty: bool,
     pub recent: Vec<String>,
     pub notes_markdown: String,
+    /// 记事本附件登记表（图片 / 剪贴板载荷）。
+    ///
+    /// 字节以 base64 **内嵌在工程文件里**，不再有旁挂目录 —— 见
+    /// `crate::notebook_assets` 的模块注释。
+    pub notebook_assets: crate::notebook_assets::NotebookAssetMap,
+    /// 记事本编辑的撤销分节闸门：置位后，下一次「编辑记事本」写入不再并入
+    /// 前沿那一步，而是另起一步（由 `seal_project_notes_history` 触发）。
+    pub notes_history_sealed: bool,
     pub base_scale: String,
     pub use_custom_scale: bool,
     pub custom_scale: Option<CustomScale>,
@@ -1813,6 +2011,8 @@ impl Default for ProjectState {
             dirty: false,
             recent: Vec::new(),
             notes_markdown: String::new(),
+            notebook_assets: crate::notebook_assets::NotebookAssetMap::new(),
+            notes_history_sealed: false,
             base_scale: "C".to_string(),
             use_custom_scale: false,
             custom_scale: None,
@@ -2012,7 +2212,7 @@ impl TimelineState {
             .iter()
             .map(|(param, curve)| {
                 let default_value =
-                    crate::renderer::automation_curve_default_value(kind, param).unwrap_or(0.0);
+                    crate::renderer::common_params::automation_curve_pad_value(kind, param);
                 (
                     param.clone(),
                     Self::curve_slice(curve, start_frame, frame_count, default_value),
@@ -2068,7 +2268,7 @@ impl TimelineState {
             .unwrap_or_else(|| entry.extra_curves.keys().cloned().collect());
         for key in keys {
             let default_value =
-                crate::renderer::automation_curve_default_value(kind, &key).unwrap_or(0.0);
+                crate::renderer::common_params::automation_curve_pad_value(kind, &key);
             let curve = entry
                 .extra_curves
                 .entry(key)
@@ -2159,7 +2359,7 @@ impl TimelineState {
         }
         for key in &all_keys {
             let default_value =
-                crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+                crate::renderer::common_params::automation_curve_pad_value(kind, key);
             let curve = entry
                 .extra_curves
                 .entry(key.clone())
@@ -2168,7 +2368,7 @@ impl TimelineState {
         }
         for (key, values) in &linked_params.extra_curves {
             let default_value =
-                crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+                crate::renderer::common_params::automation_curve_pad_value(kind, key);
             let curve = entry
                 .extra_curves
                 .entry(key.clone())
@@ -2375,7 +2575,7 @@ impl TimelineState {
             .iter()
             .map(|key| {
                 let default_value =
-                    crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+                    crate::renderer::common_params::automation_curve_pad_value(kind, key);
                 let slices = frame_mappings
                     .iter()
                     .map(|&(old_start, old_count, _, _)| {
@@ -2650,6 +2850,14 @@ impl TimelineState {
             // 已存在共通曲线时，旧键不再参与渲染，直接移除避免缓存键重复计算。
             entry.extra_curves.remove("hifigan_volume");
         }
+        // 旧 VocalShifter 导入曾把 `dyn_orig` / `dyn_edit` 两条曲线直接写进
+        // extra_curves。现在动态由 `dyn`（目标电平）+ 后台分析出的原声基线表达，
+        // 那两个旧键已无任何消费点 —— 必须删除，否则它们会继续占着
+        // `extra_curves` 的键位（污染渲染缓存键，并让参数下拉多出两个幽灵参数）。
+        // 数值本身没有丢失：导入时已按 `volume × dyn_edit/dyn_orig` 折算进
+        // `volume` 曲线，响度不变。
+        entry.extra_curves.remove("dyn_edit");
+        entry.extra_curves.remove("dyn_orig");
     }
 
     /// 工程加载/导入时执行参数迁移：
@@ -2667,6 +2875,9 @@ impl TimelineState {
                 } else {
                     curves.remove("hifigan_volume");
                 }
+                // 与轨道级同理：clip 级覆盖里的旧 dyn 键一并清除。
+                curves.remove("dyn_edit");
+                curves.remove("dyn_orig");
             }
         }
     }
@@ -3176,8 +3387,86 @@ impl AppState {
         self.push_checkpoint(snapshot, op.key().to_string());
     }
 
-    /// 打点的公共实现（`op` 为语言无关的操作 key，见 HistoryOp）。
+    /// 当前记事本内容（`ProjectState.notes_markdown` 的读取封装）。
+    fn current_notes_markdown(&self) -> Option<String> {
+        Some(self.current_notes_value())
+    }
+
+    /// 读取当前记事本内容（空填空串）。
+    pub(crate) fn current_notes_value(&self) -> String {
+        let p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+        p.notes_markdown.clone()
+    }
+
+    /// 写入记事本内容（不触碰历史，供跳转路径恢复用）。
+    fn apply_notes_markdown(&self, markdown: String) {
+        let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+        p.notes_markdown = markdown;
+    }
+
+    // ── 记事本附件 ──────────────────────────────────────────────────────────
+
+    /// 附件登记表快照。
+    pub fn notebook_assets_snapshot(&self) -> crate::notebook_assets::NotebookAssetMap {
+        self.project
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .notebook_assets
+            .clone()
+    }
+
+    /// 仍被引用的附件 id 集合：**当前正文 ∪ 全部历史记录的正文**。
+    ///
+    /// 必须并入历史：撤销/重做会把正文换成更早的版本，若只按当前正文清理，
+    /// 撤销回去的图片就会变成空白（而撤销本应无损）。历史记录里已经存了每一步
+    /// 的记事本内容（见 `HistoryRecord.notes_markdown`），直接复用。
+    pub fn notebook_referenced_ids(&self) -> std::collections::HashSet<String> {
+        let mut ids = crate::notebook_assets::referenced_asset_ids(&self.current_notes_value());
+        {
+            let h = self
+                .timeline_history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for record in &h.records {
+                if let Some(markdown) = &record.notes_markdown {
+                    ids.extend(crate::notebook_assets::referenced_asset_ids(markdown));
+                }
+            }
+        }
+        ids
+    }
+
+    /// 保存时的附件整理：把不再被引用的条目从登记表移除，返回移除条数。
+    ///
+    /// 字节内嵌之后这里不再碰磁盘 —— 只是把没人引用的条目丢掉，工程文件随之变小。
+    pub fn prune_notebook_assets(&self) -> usize {
+        let keep = self.notebook_referenced_ids();
+        let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+        crate::notebook_assets::prune_unreferenced(&mut p.notebook_assets, &keep)
+    }
+
+    /// 清空记事本附件（新建工程时调用）。
+    pub fn reset_notebook_assets(&self) {
+        let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+        p.notebook_assets.clear();
+    }
+
+    /// 打点的公共实现：与记事本无关的改动（绝大多数操作）。
     fn push_checkpoint(&self, snapshot: &TimelineState, label: String) {
+        self.push_checkpoint_with_notes(snapshot, label, None);
+    }
+
+    /// 打点的公共实现（`op` 为语言无关的操作 key，见 HistoryOp）。
+    ///
+    /// `notes_markdown`：`Some(..)` 表示**本次操作之前的记事本内容** —— 它
+    /// 就是即将被打点的那个状态（state N）的记事本，因此记在**旧记录**上。
+    /// 传 `None` 表示"用现场值补齐"，绝大多数非记事本操作走这一条。
+    fn push_checkpoint_with_notes(
+        &self,
+        snapshot: &TimelineState,
+        label: String,
+        notes_markdown: Option<String>,
+    ) {
         // When suppress_checkpoints is active (inside an undo group),
         // skip pushing to the undo stack so multiple operations become
         // a single undo entry.
@@ -3205,6 +3494,8 @@ impl AppState {
                     label: None,
                     at_ms: started_at_ms,
                     state: Some(snapshot.clone()),
+                    notes_markdown: notes_markdown.or_else(|| self.current_notes_markdown()),
+                    param_selection: None,
                 });
                 h.position = 0;
             } else {
@@ -3213,8 +3504,22 @@ impl AppState {
                 h.records.truncate(position + 1);
                 // 当前位置的记录是占位（None）：用实时时间线补齐 —— 它此刻
                 // 正是这个状态本身，之后跳回该位置要靠这份快照。
+                //
+                // 记事本同理：本步**离开**的那个状态，其记事本内容就是即将
+                // 被这次操作改掉之前的值。显式取 `notes_markdown` 入参（记事本
+                // 编辑路径传入"编辑前"的文本）而不依赖"调用方还没写新值"的
+                // 时序 —— 后者一旦被重构打乱，撤销就会静默丢内容。
+                //
+                // 选区快照（`param_selection`）**必须清空**：位置被复用意味着
+                // 这里要放的是**新**一步，而旧分支那一步的选区快照不属于它 ——
+                // 留着会让撤销这步时把选区跳到一条已被丢弃的分支上。
                 if let Some(current) = h.records.get_mut(position) {
                     current.state = Some(snapshot.clone());
+                    if current.notes_markdown.is_none() {
+                        current.notes_markdown =
+                            notes_markdown.or_else(|| self.current_notes_markdown());
+                    }
+                    current.param_selection = None;
                 }
             }
             // 追加这一步：label/at 描述紧随其后的操作，快照留待下一次
@@ -3223,6 +3528,8 @@ impl AppState {
                 label: Some(label),
                 at_ms: now,
                 state: None,
+                notes_markdown: None,
+                param_selection: None,
             });
             h.position = h.records.len() - 1;
             // 上限：丢最旧的状态（当前位置随之左移）。
@@ -3370,16 +3677,144 @@ impl AppState {
         serde_json::json!({ "ok": true })
     }
 
+    /// 写入记事本内容，并保证撤销栈里始终只有**一步**「编辑记事本」。
+    ///
+    /// ## 合并规则（结构化，与时间无关）
+    ///
+    /// 历史最前沿一步的 key 就是「编辑记事本」时，本次写入**并入该步**：
+    /// 不打新点、只更新 `ProjectState.notes_markdown`。这条步的快照（时间线 +
+    /// 记事本）由既有的惰性补齐机制在下一次打点/跳转时用实时状态填上，撤销
+    /// 回它之前的那一步就是整段编辑开始前的样子。
+    ///
+    /// 只有**其它操作介入**（剪辑、参数、导入…任何会 `push_checkpoint` 的路径）
+    /// 或**历史跳转**离开前沿时，这一步才落定；之后的记事本输入再开新步。
+    ///
+    /// 【为什么不用时间窗口】早期实现靠前端 700ms 停手超时 + 失焦来"收尾"，
+    /// 用户只要停顿超过阈值（思考、看内容、切窗口查资料）就被切成新的一步，
+    /// 一场长编辑会话能产生几十上百条「编辑记事本」记录——既撤不回编辑前的
+    /// 状态，还会把真正的剪辑/参数历史挤出 `MAX_UNDO_HISTORY` 上限。结构化
+    /// 合并完全不看时间：连续写记事本=一步，被别的操作打断=另起一步，语义
+    /// 与「拖拽参数线」等手势类操作一致，且不需要前后端协商任何开窗/收尾
+    /// 时序（前端只管发文本）。
+    ///
+    /// 记事本不在时间线上，所以这一步**不**触发音频/合成层的任何失效。
+    pub fn set_notes_markdown(&self, markdown: String) {
+        // 判定"前沿是否已是记事本步"必须在打点之前：`push_checkpoint_*` 会
+        // 追加新记录，读时就分不清了。
+        let merged_into_existing = self.history_top_is_notes_edit();
+        if !merged_into_existing {
+            let before = self.current_notes_markdown();
+            let tl = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            self.push_checkpoint_with_notes(
+                &tl,
+                HistoryOp::EditNotes.key().to_string(),
+                before,
+            );
+        }
+        let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+        if p.notes_markdown != markdown {
+            p.notes_markdown = markdown;
+            p.dirty = true;
+        }
+        // 分节闸门是一次性的：无论本次是否真的另起了一步，都消费掉。
+        p.notes_history_sealed = false;
+        drop(p);
+        self.emit_history_state();
+    }
+
+    /// 关闭记事本编辑的"结构性合并"窗口：下一次写入必然另起一个撤销步。
+    ///
+    /// 后端默认把连续写入并入前沿那一步（无论用户打字多久），这对纯文本
+    /// 记事本足够；富文本编辑器有自己的细粒度撤销栈，但仍需要一个"这一节
+    /// 到此为止"的显式信号 —— 切换视图模式、失焦、关闭面板、保存前调用。
+    pub fn seal_notes_history(&self) {
+        {
+            let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+            p.notes_history_sealed = true;
+        }
+        self.emit_history_state();
+    }
+
+    /// 历史最前沿的一步是否是「编辑记事本」。
+    ///
+    /// 仅当该步**就是当前所处位置**（打点后位置恒指向它）且 label 匹配时为
+    /// 真。历史为空 / 前沿是初始状态行 / 已跳转离开（此时前沿 label 是其它
+    /// 操作或 None）均为假。分节闸门置位时同样为假 —— 这正是"另起一步"的
+    /// 实现方式。
+    fn history_top_is_notes_edit(&self) -> bool {
+        if self
+            .project
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .notes_history_sealed
+        {
+            return false;
+        }
+        let h = self
+            .timeline_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        h.records
+            .get(h.position)
+            .and_then(|record| record.label.as_deref())
+            == Some(HistoryOp::EditNotes.key())
+    }
+
     /// 撤销一步（跳到当前位置之前）。
     pub fn undo_timeline(&self) -> TimelineStatePayload {
         let target = self.history_position().saturating_sub(1);
-        self.set_history_position(target)
+        self.set_history_position(target, HistoryJumpIntent::Undo)
     }
 
     /// 重做一步（跳到当前位置之后）。
     pub fn redo_timeline(&self) -> TimelineStatePayload {
         let target = self.history_position().saturating_add(1);
-        self.set_history_position(target)
+        self.set_history_position(target, HistoryJumpIntent::Redo)
+    }
+
+    /// 登记「边缘拉伸」步骤带来的选区变化（作用于**当前所处的那一步**）。
+    ///
+    /// 前端在曲线回写成功之后调用：那一刻新步已追加、`position` 指向它，因此
+    /// 后端无需任何位置推断。只接受 `ParamCurve` 步 —— 写回被抑制（`suppress_
+    /// checkpoints`，例如处于撤销组内）时当前位置可能是别的操作甚至是初始状态
+    /// 行，此时**拒绝登记**而不是把选区快照挂到无关步骤上（那会让撤销那一步时
+    /// 莫名改掉用户的选区）。
+    ///
+    /// 两个入参都是**帧制**的选区：每项 `[startFrame, frameCount]`（半开区间）。
+    ///
+    /// @returns `ok = false` + `reason` 表示没有登记（步骤不匹配）；前端无需重试，
+    ///   这种情况本就意味着这次手势没有产生可撤销的步骤。
+    pub fn record_param_selection_step(
+        &self,
+        before: Vec<[f32; 2]>,
+        after: Vec<[f32; 2]>,
+    ) -> serde_json::Value {
+        let mut h = self
+            .timeline_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let position = h.position;
+        let Some(record) = h.records.get_mut(position) else {
+            return serde_json::json!({ "ok": false, "reason": "no-step" });
+        };
+        if record.label.as_deref() != Some(HistoryOp::ParamCurve.key()) {
+            return serde_json::json!({ "ok": false, "reason": "step-is-not-param-curve" });
+        }
+        // 归一：丢掉非有限值，并把帧号 / 帧数取整（选区的单位是整数帧，见
+        // `ParamSelectionStep` 的说明）。前端已经发整数，这里再取一次是为了让
+        // "整数帧"这条不变式钉在写入侧，不依赖调用方自律。
+        let filtered = |ranges: Vec<[f32; 2]>| -> Vec<[f32; 2]> {
+            ranges
+                .into_iter()
+                .filter(|r| r[0].is_finite() && r[1].is_finite())
+                .map(|r| [r[0].round(), r[1].max(0.0).round()])
+                .collect()
+        };
+        record.param_selection = Some(ParamSelectionStep {
+            before: filtered(before),
+            after: filtered(after),
+        });
+        serde_json::json!({ "ok": true })
     }
 
     /// 跳到历史中的第 `target` 个状态（「操作记录」窗口双击 / 撤销 / 重做
@@ -3388,7 +3823,13 @@ impl AppState {
     /// 越界或原地不动时返回 `ok = false`：前端不套用任何快照，界面零刷新
     /// 零变更（与空栈撤销/重做的语义一致）；载荷仍带回权威的历史状态，
     /// 前端可借机纠正可能落后的镜像。
-    pub fn set_history_position(&self, target: usize) -> TimelineStatePayload {
+    ///
+    /// `intent` 决定带回哪一侧的选区快照（见 `param_selection_restore_for`）。
+    pub fn set_history_position(
+        &self,
+        target: usize,
+        intent: HistoryJumpIntent,
+    ) -> TimelineStatePayload {
         let mut tl = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
         let mut h = self
             .timeline_history
@@ -3408,6 +3849,11 @@ impl AppState {
         let current_position = h.position;
         if let Some(current) = h.records.get_mut(current_position) {
             current.state = Some(tl.clone());
+            // 当前位置若还不知道自己的记事本内容，此刻的现场值就是它的值 ——
+            // 之后从这里再往前跳时，记事本才能正确回到这一步的样子。
+            if current.notes_markdown.is_none() {
+                current.notes_markdown = Some(self.current_notes_value());
+            }
         }
         let Some(next_state) = h.records.get(target).and_then(|r| r.state.clone()) else {
             // 目标记录尚未补齐（理论上不可达：非当前位置的记录在离开时即已
@@ -3424,6 +3870,18 @@ impl AppState {
         let scale_before = tl.render_scale_signature();
         *tl = next_state;
         h.position = target;
+        // 记事本：跳转恢复目标记录的快照时连带恢复它记录的记事本内容
+        // （HistoryRecord.notes_markdown 在离开每一步时惰性补齐，见下）。
+        // 早期实现在每次撤销都用后端"当前值"覆盖前端，于是"记事本有内容时，
+        // 为任意操作执行撤销都会清空记事本"；改为每步各自记录后，撤销/重做
+        // 跨过记事本编辑就能正确回到该步的内容。
+        let target_notes = h.records.get(target).and_then(|r| r.notes_markdown.clone());
+        if let Some(notes) = target_notes.clone() {
+            self.apply_notes_markdown(notes);
+        }
+        // 选区（「边缘拉伸」步才有）：与记事本同一套路 —— 谁记得谁负责带回，
+        // 前端只管无脑套用。`None` = 这一步与选区无关，前端不得改动选区。
+        let param_selection_restore = param_selection_restore_for(&h, target, intent);
         let (undo_depth, redo_depth) = history_depths_of(&h);
         drop(h);
         self.bump_timeline_version();
@@ -3445,6 +3903,9 @@ impl AppState {
         payload.project = Some(self.project_meta_payload());
         payload.undo_depth = Some(undo_depth);
         payload.redo_depth = Some(redo_depth);
+        // 回给前端：跨过记事本编辑则带上该步的记事本，否则留 None 让前端保留现场。
+        payload.notes_markdown = target_notes;
+        payload.param_selection_restore = param_selection_restore;
         payload
     }
 
@@ -3556,6 +4017,87 @@ mod tests {
     /// 另一个正在断言“关闭同步”行为的测试就会读到错误的值）。
     static SYNC_EDITS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// 记事本必须能被撤销/重做恢复，且**与记事本无关的撤销不得清空它**。
+    ///
+    /// 回归对象 1：早期实现里记事本只存在前端、后端只在保存时看到它，于是
+    /// 「记事本有内容时，为任意操作执行撤销都会清空记事本」。
+    ///
+    /// 回归对象 2：合并曾靠前端 700ms 停手超时，长编辑会话（停顿 > 阈值）
+    /// 会产生大量「编辑记事本」记录，既撤不回编辑前状态、还会把其它操作的
+    /// 历史挤出撤销栈上限。现在合并在后端按**历史结构**进行：前沿一步就是
+    /// 「编辑记事本」时，后续写入无限并入 —— 只有其它操作介入或跳转离开
+    /// 才落定。时间完全不参与。
+    #[test]
+    fn notes_edit_is_recorded_in_history_and_kept_across_other_undos() {
+        let state = AppState::default();
+        assert_eq!(state.current_notes_value(), "");
+
+        // 一段连续输入：任意多次调用（间隔长短无关——合并不看时间）只产生
+        // **一个**撤销步。停顿用例刻意不引入 sleep：结构化合并在逻辑上就
+        // 不可能因停顿分裂，sleep 只会拖慢测试。
+        for (index, next) in ["H", "He", "Hel", "Hello, wor", "Hello, world!"]
+            .iter()
+            .enumerate()
+        {
+            state.set_notes_markdown(next.to_string());
+            let (undo_depth, _) = state.history_depths();
+            assert_eq!(undo_depth, 1, "第 {index} 次写入后仍必须只有一步");
+        }
+        assert_eq!(state.current_notes_value(), "Hello, world!");
+
+        // 再来一个**非记事本**操作：移动 clip。它必须正常落定记事本步、
+        // 另起新步 —— 这是"合并被其它操作打断"的断言。
+        {
+            let mut tl = state.timeline.lock().unwrap();
+            let track_id = tl.tracks[0].id.clone();
+            let clip_id = tl.add_clip(Some(track_id), None, Some(0.0), Some(1.0), None);
+            drop(tl);
+            let prev_sec = find_clip_start(&state.timeline.lock().unwrap(), &clip_id);
+            let mut tl = state.timeline.lock().unwrap();
+            state.checkpoint_timeline(&tl, HistoryOp::MoveClip);
+            tl.clips
+                .iter_mut()
+                .find(|clip| clip.id == clip_id)
+                .unwrap()
+                .start_sec = prev_sec + 5.0;
+        }
+        let (undo_depth, _) = state.history_depths();
+        assert_eq!(undo_depth, 2, "其它操作必须另起一步");
+
+        // 其它操作介入后，记事本输入再开**新的一步**（前一步已落定）。
+        state.set_notes_markdown("Hello, world! -- second session".to_string());
+        let (undo_depth, _) = state.history_depths();
+        assert_eq!(undo_depth, 3);
+
+        // 撤销第二次记事本会话：回到第一会话结束时的内容。
+        let payload = state.undo_timeline();
+        assert!(payload.ok);
+        assert_eq!(payload.notes_markdown, Some("Hello, world!".to_string()));
+        assert_eq!(state.current_notes_value(), "Hello, world!");
+
+        // 撤销 clip 移动：记事本原样保留（回归对象 1 的核心断言）。
+        let payload = state.undo_timeline();
+        assert!(payload.ok);
+        assert_eq!(
+            state.current_notes_value(),
+            "Hello, world!",
+            "无关操作的撤销清空了记事本 —— 回归"
+        );
+
+        // 再撤销一步 = 跨过第一段记事本编辑：恢复到编辑**开始之前**的内容。
+        // 整段长会话（5 次写入）只占这一步 —— 撤销一次即回到编辑前状态。
+        let payload = state.undo_timeline();
+        assert!(payload.ok);
+        assert_eq!(payload.notes_markdown, Some(String::new()));
+        assert_eq!(state.current_notes_value(), "");
+
+        // 重做：记事本回到编辑后的内容。
+        let payload = state.redo_timeline();
+        assert!(payload.ok);
+        assert_eq!(payload.notes_markdown, Some("Hello, world!".to_string()));
+        assert_eq!(state.current_notes_value(), "Hello, world!");
+    }
+
     fn find_clip_start(timeline: &TimelineState, clip_id: &str) -> f64 {
         timeline
             .clips
@@ -3563,6 +4105,103 @@ mod tests {
             .find(|clip| clip.id == clip_id)
             .map(|clip| clip.start_sec)
             .unwrap_or(f64::NAN)
+    }
+
+    /// 「边缘拉伸」的选区快照：随**产生它的那一步**记录，撤销/重做/跳转由载荷带回；
+    /// 位置被复用（新检查点丢弃重做分支）时必须清空，不得继承旧分支的快照。
+    ///
+    /// 这是"撤销后曲线回来了、选区却没回到拉伸前"的根治点：前端不再按撤销深度
+    /// 推断"我这一步是第几步"，因此不存在镜像滞后 / 分支裁剪导致的位置错位。
+    #[test]
+    fn param_selection_step_rides_on_its_history_step() {
+        let state = AppState::default();
+        let before: Vec<[f32; 2]> = vec![[1.0, 2.0]];
+        let after: Vec<[f32; 2]> = vec![[1.0, 3.0]];
+
+        // 第 1 步：参数曲线（拉伸回写的首块打点），随后登记该步的选区变化。
+        {
+            let tl = state.timeline.lock().unwrap();
+            state.checkpoint_timeline(&tl, HistoryOp::ParamCurve);
+        }
+        assert_eq!(
+            state.record_param_selection_step(before.clone(), after.clone())["ok"],
+            serde_json::json!(true),
+            "当前步是参数曲线步时应登记成功",
+        );
+
+        // 撤销这一步：载荷带回拉伸**前**的选区。
+        let payload = state.undo_timeline();
+        assert!(payload.ok);
+        assert_eq!(payload.param_selection_restore, Some(before.clone()));
+
+        // 跳回该步所在状态（「操作记录」双击）：带回拉伸**后**的选区。
+        let payload = state.set_history_position(1, HistoryJumpIntent::Jump);
+        assert!(payload.ok);
+        assert_eq!(payload.param_selection_restore, Some(after.clone()));
+
+        // 再撤销一次（重做栈因此非空）—— 下一步要验证"位置被复用"。
+        let payload = state.undo_timeline();
+        assert!(payload.ok);
+        assert_eq!(payload.param_selection_restore, Some(before.clone()));
+
+        // 位置被复用：此时做一次**别的**检查点（丢弃重做分支、复用第 1 个位置），
+        // 新步不得继承旧分支的选区快照。
+        {
+            let tl = state.timeline.lock().unwrap();
+            state.checkpoint_timeline(&tl, HistoryOp::MoveClip);
+        }
+        let payload = state.undo_timeline();
+        assert!(payload.ok);
+        assert_eq!(
+            payload.param_selection_restore, None,
+            "被复用的位置必须清空旧分支的选区快照",
+        );
+
+        // 与选区无关的步骤不得触碰选区（载荷不带该字段）。
+        let payload = state.redo_timeline();
+        assert!(payload.ok);
+        assert_eq!(
+            payload.param_selection_restore, None,
+            "非拉伸步重做时不得改动选区",
+        );
+
+        // 登记接口只接受参数曲线步：当前位置是 MoveClip 时应拒绝。
+        assert_eq!(
+            state.record_param_selection_step(before, after)["ok"],
+            serde_json::json!(false),
+        );
+    }
+
+    /// 登记接口把选区归一为**整数帧**：非有限项丢弃、帧号取整、帧数下钳 0。
+    ///
+    /// 前端本来就发整数（选区内部单位即帧），这里再归一一次是为了把"整数帧"
+    /// 这条不变式钉在**写入侧** —— 不依赖调用方自律，也让磁盘上的历史文件
+    /// 永远是规整的整数。
+    #[test]
+    fn record_param_selection_step_normalizes_to_integer_frames() {
+        let state = AppState::default();
+        {
+            let tl = state.timeline.lock().unwrap();
+            state.checkpoint_timeline(&tl, HistoryOp::ParamCurve);
+        }
+        assert_eq!(
+            state.record_param_selection_step(
+                // 非有限项被丢弃；10.4 → 10、20.6 → 21。
+                vec![[10.4, 20.6], [f32::NAN, 3.0], [f32::INFINITY, 3.0]],
+                // 起点可以为负（选区被拖到 0 左侧时随数据越界），帧数不夹到负。
+                vec![[-5.0, -7.2]],
+            )["ok"],
+            serde_json::json!(true),
+        );
+
+        let h = state.timeline_history.lock().unwrap();
+        let step = h
+            .records
+            .iter()
+            .find_map(|record| record.param_selection.as_ref())
+            .expect("选区注记已登记");
+        assert_eq!(step.before, vec![[10.0, 21.0]], "取整并丢弃非有限项");
+        assert_eq!(step.after, vec![[-5.0, 0.0]], "帧数下钳 0，起点不夹");
     }
 
     #[test]
@@ -4789,6 +5428,112 @@ mod tests {
         assert_eq!(timeline.clips[1].fade_in_sec, 0.25);
     }
 
+    /// 造一个带两个 Take 的 Clip（active = 第一个），返回 (timeline, clip_id)。
+    fn timeline_with_two_takes() -> (TimelineState, String) {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("T".into()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".into()),
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.sync_take_from_flat();
+            let mut second = clip.takes[0].clone();
+            second.id = "take_b".into();
+            clip.takes.push(second);
+            clip.active_take_id = Some(clip.takes[0].id.clone());
+        }
+        (tl, clip_id)
+    }
+
+    #[test]
+    fn bulk_patch_channel_mode_follows_the_global_sync_setting() {
+        // 复用本模块既有的同步设置守卫：该全局的其它用例也持有同一把锁。
+        let _sync_guard = SYNC_EDITS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original = crate::config::sync_edits_across_takes();
+
+        let (mut tl, clip_id) = timeline_with_two_takes();
+        crate::config::set_sync_edits_across_takes(true);
+        tl.patch_clip_state(
+            &clip_id,
+            ClipStatePatch {
+                channel_mode: Some(2),
+                ..Default::default()
+            },
+        );
+        {
+            let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+            assert_eq!(clip.takes[1].channel_mode, 2, "全局开启时同步到全部 take");
+        }
+
+        let (mut tl2, clip_id2) = timeline_with_two_takes();
+        crate::config::set_sync_edits_across_takes(false);
+        tl2.patch_clip_state(
+            &clip_id2,
+            ClipStatePatch {
+                channel_mode: Some(2),
+                ..Default::default()
+            },
+        );
+        {
+            let clip = tl2.clips.iter().find(|c| c.id == clip_id2).unwrap();
+            assert_eq!(clip.channel_mode, 2, "active 投影始终同步");
+            assert_eq!(clip.takes[0].channel_mode, 2);
+            assert_eq!(clip.takes[1].channel_mode, 0, "全局关闭时只改 active take");
+        }
+
+        crate::config::set_sync_edits_across_takes(original);
+    }
+
+    #[test]
+    fn bulk_patch_normalizes_out_of_range_channel_mode() {
+        let (mut tl, clip_id) = timeline_with_two_takes();
+        tl.patch_clip_state(
+            &clip_id,
+            ClipStatePatch {
+                channel_mode: Some(42),
+                ..Default::default()
+            },
+        );
+        let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert_eq!(clip.channel_mode, 0, "越界模式回落 Normal");
+        assert_eq!(clip.takes[0].channel_mode, 0);
+        assert_eq!(clip.takes[1].channel_mode, 0);
+    }
+
+    #[test]
+    fn bulk_patch_channel_mode_applies_to_every_selected_clip() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let a = tl.add_clip(Some(track_id.clone()), Some("A".into()), Some(0.0), Some(1.0), None);
+        let b = tl.add_clip(Some(track_id), Some("B".into()), Some(2.0), Some(1.0), None);
+        tl.patch_clips_state(&[
+            BulkClipStatePatch {
+                clip_id: a.clone(),
+                patch: ClipStatePatch {
+                    channel_mode: Some(2),
+                    ..Default::default()
+                },
+            },
+            BulkClipStatePatch {
+                clip_id: b.clone(),
+                patch: ClipStatePatch {
+                    channel_mode: Some(4),
+                    ..Default::default()
+                },
+            },
+        ]);
+        let find = |id: &str| tl.clips.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(find(&a).channel_mode, 2);
+        assert_eq!(find(&b).channel_mode, 4);
+    }
+
     #[test]
     fn ripple_track_mode_moves_following_clips_on_same_track_only() {
         let mut timeline = TimelineState::default();
@@ -4919,12 +5664,12 @@ mod tests {
         let mut timeline = TimelineState::default();
         let track = timeline.add_track(Some("A".into()), None, None);
         let other = timeline.add_track(Some("B".into()), None, None);
-        let a0 = timeline.add_clip(Some(track.clone()), Some("a0".into()), Some(1.0), Some(2.0), None);
-        let a1 = timeline.add_clip(Some(track.clone()), Some("a1".into()), Some(8.0), Some(1.0), None);
-        let a2 = timeline.add_clip(Some(track.clone()), Some("a2".into()), Some(12.0), Some(2.0), None);
-        let a3 = timeline.add_clip(Some(track.clone()), Some("a3".into()), Some(14.5), Some(0.5), None);
+        let _a0 = timeline.add_clip(Some(track.clone()), Some("a0".into()), Some(1.0), Some(2.0), None);
+        let _a1 = timeline.add_clip(Some(track.clone()), Some("a1".into()), Some(8.0), Some(1.0), None);
+        let _a2 = timeline.add_clip(Some(track.clone()), Some("a2".into()), Some(12.0), Some(2.0), None);
+        let _a3 = timeline.add_clip(Some(track.clone()), Some("a3".into()), Some(14.5), Some(0.5), None);
         // 其他轨道不受影响。
-        let b0 = timeline.add_clip(Some(other.clone()), Some("b0".into()), Some(8.0), Some(1.0), None);
+        let _b0 = timeline.add_clip(Some(other.clone()), Some("b0".into()), Some(8.0), Some(1.0), None);
 
         let start_of = |tl: &TimelineState, name: &str| {
             tl.clips
@@ -6839,6 +7584,8 @@ impl TimelineState {
                 playback_rate: Some(c.playback_rate),
                 clip_playback_rate: Some(c.clip_playback_rate),
                 reversed: Some(c.reversed),
+                channel_mode: Some(c.channel_mode),
+                source_channels: c.source_channels,
                 loop_enabled: c.loop_enabled,
                 snap_offset_sec: Some(c.snap_offset_sec),
                 fade_in_sec: Some(c.fade_in_sec),
@@ -6885,6 +7632,8 @@ impl TimelineState {
             // TimelineState 本身不持有历史，通用载荷保持 None。
             undo_depth: None,
             redo_depth: None,
+            notes_markdown: None,
+            param_selection_restore: None,
         }
     }
 
@@ -6928,6 +7677,8 @@ impl TimelineState {
                 playback_rate: Some(c.playback_rate),
                 clip_playback_rate: Some(c.clip_playback_rate),
                 reversed: Some(c.reversed),
+                channel_mode: Some(c.channel_mode),
+                source_channels: c.source_channels,
                 loop_enabled: c.loop_enabled,
                 snap_offset_sec: Some(c.snap_offset_sec),
                 fade_in_sec: Some(c.fade_in_sec),
@@ -6974,6 +7725,8 @@ impl TimelineState {
             // TimelineState 本身不持有历史，通用载荷保持 None。
             undo_depth: None,
             redo_depth: None,
+            notes_markdown: None,
+            param_selection_restore: None,
         }
     }
 
@@ -7722,11 +8475,26 @@ impl TimelineState {
                     take.source_file_fingerprint = Some(fp);
                 }
             }
+            // 源声道数回填：v5 之前的工程 take 未记录该值；header 探测
+            // O(1)（WAV 走 hound 头，其余走容器探测），仅在缺失时执行。
+            if take.source_channels.is_none() {
+                if let Some(info) = crate::audio_utils::try_read_audio_header_only(p) {
+                    if info.channels > 0 {
+                        take.source_channels = Some(info.channels);
+                    }
+                }
+            }
         }
         let take: ClipTake = clip.active_take().clone();
         take.apply_to_clip(clip);
     }
 
+    /// 新建一个 Clip（空白 / 引用已有媒体）。
+    ///
+    /// **本函数不做导入声道策略判定**：它在持锁状态下运行，而策略判定在智能
+    /// 模式下需要解码音频。需要判定的调用方应在锁外用
+    /// `crate::channel_policy::precompute_decision` 算好，再在锁内调用
+    /// [`Self::apply_channel_decision_to_clip`]。
     pub fn add_clip(
         &mut self,
         track_id: Option<String>,
@@ -7772,6 +8540,7 @@ impl TimelineState {
                         c.source_sample_rate,
                         c.waveform_preview.clone(),
                         c.pitch_range.clone(),
+                        c.source_channels,
                     )
                 })
         });
@@ -7788,6 +8557,7 @@ impl TimelineState {
         let mut computed_duration_frames = inherited.as_ref().and_then(|v| v.1);
         let mut computed_source_sr = inherited.as_ref().and_then(|v| v.2);
         let mut computed_waveform = inherited.as_ref().and_then(|v| v.3.clone());
+        let mut computed_source_channels: Option<u16> = inherited.as_ref().and_then(|v| v.5);
         let mut computed_mtime: Option<u64> = None;
         let mut computed_size: Option<u64> = None;
         let mut computed_fp: Option<u64> = None;
@@ -7820,6 +8590,11 @@ impl TimelineState {
                         computed_duration_frames = Some(info.total_frames);
                         computed_source_sr = Some(info.sample_rate);
                         computed_waveform = Some(info.waveform_preview);
+                        computed_source_channels = if info.channels > 0 {
+                            Some(info.channels)
+                        } else {
+                            None
+                        };
                     }
                 }
             }
@@ -7858,6 +8633,8 @@ impl TimelineState {
             playback_rate: 1.0,
             clip_playback_rate: 1.0,
             reversed: false,
+            channel_mode: 0,
+            source_channels: computed_source_channels,
             // 新 Clip 的 Loop 属性跟随"为新的音频块启用循环"设置
             //（导入/录音/MIDI-as-clip/add_clip 等所有创建路径统一生效）。
             loop_enabled: crate::config::loop_new_clips_default(),
@@ -7887,6 +8664,69 @@ impl TimelineState {
         self.selected_clip_id = Some(id.clone());
         self.playhead_sec = ss;
         id
+    }
+
+    /// 把一个**锁外预先算好**的导入声道决定应用到指定 Clip 的活跃 Take。
+    ///
+    /// 零解码、零 IO，可安全在持锁状态下调用。返回是否发生了改变。
+    /// 决定由 `crate::channel_policy::precompute_decision` 产出 —— 该函数会
+    /// 解码音频，绝不能在持锁时调用。
+    pub fn apply_channel_decision_to_clip(
+        &mut self,
+        clip_id: &str,
+        resolution: crate::channel_policy::ChannelResolution,
+    ) -> bool {
+        let Some(clip) = self.clips.iter_mut().find(|c| c.id == clip_id) else {
+            return false;
+        };
+        if clip.takes.is_empty() {
+            clip.sync_take_from_flat();
+        }
+        let Some(take) = clip.takes.first_mut() else {
+            return false;
+        };
+        if !crate::channel_policy::apply_resolution(take, resolution).mode_changed {
+            return false;
+        }
+        // 声道模式是 active take 的内存投影，写回 Take 后必须同步投影，
+        // 否则下一次 normalize/sync 会用旧值覆盖。
+        let take = take.clone();
+        take.apply_to_clip(clip);
+        true
+    }
+
+    /// 加载边界：把**不可信的伪造用户封印**清回"未判定"。
+    ///
+    /// 曾经这里做的是反过来的事：`project_file_version >= 5` 时把**所有**没有
+    /// 档案的 Take 批量盖成"用户决定"。那条规则有两个致命问题：
+    ///
+    /// 1. **本程序写出的每一个工程都是 v5**（`CURRENT_PROJECT_FILE_VERSION`），
+    ///    所以它在任何保存过的工程上都会触发，把所有 Take 一次性封印成"用户
+    ///    决定"，让折叠功能——无论后台扫描还是右键"扫描假立体声并转换"——
+    ///    对所有工程彻底失效；
+    /// 2. 它记的是"这是用户决定的"而不是"用户选了什么"，事后既无法验证也无法
+    ///    解释，属于凭空捏造意图。
+    ///
+    /// 现在只做**清理**：`ORIGIN_USER` 但没有 `chosen_mode` 的档案就是被那条
+    /// 规则伪造出来的，一律清回 `None`（= 未判定），交回扫描重新裁决。用户的
+    /// 真实选择由 [`crate::channel_decision::ChannelDecisionRecord::user`] 记录，
+    /// 带 `chosen_mode`，不受本函数影响。
+    ///
+    /// 返回被清理的档案数。
+    pub fn clear_untrusted_channel_seals(&mut self) -> usize {
+        let mut cleared = 0usize;
+        for clip in &mut self.clips {
+            for take in &mut clip.takes {
+                if take
+                    .channel_decision
+                    .is_some_and(crate::channel_decision::ChannelDecisionRecord::is_untrusted_user_seal)
+                {
+                    take.channel_decision = None;
+                    cleared += 1;
+                }
+            }
+        }
+        cleared
     }
 
     /// 波纹编辑（自动跟进）：把“编辑点（origin）之后、且不属于被编辑集合的剪辑”
@@ -8383,6 +9223,7 @@ impl TimelineState {
                 auto_fade_out_sec: None,
                 color: None,
                 formant_morph: None,
+                channel_mode: None,
             },
         );
     }
@@ -8529,9 +9370,13 @@ impl TimelineState {
             if let Some(v) = patch.formant_morph {
                 c.formant_morph = Some(v);
             }
-            // “同步编辑所有 Take”：内容级编辑（源偏移/速率/倒放/Loop/增益）
-            // 同步到该 Clip 的全部 Take；容器级属性（位置/长度/fade/颜色等）保持
-            // Clip 级语义，不参与同步。
+            // 声道模式：先写 active 投影（与 gain/reversed 同口径，投影是
+            // active take 的权威），再在下方按"同步所有 Take"决定是否扩散。
+            if let Some(v) = patch.channel_mode {
+                c.channel_mode = crate::channel_mode::TakeChannelMode::normalize_raw(v);
+            }            // “同步编辑所有 Take”：内容级编辑（源偏移/速率/倒放/Loop/增益/
+            // 声道模式）同步到该 Clip 的全部 Take；容器级属性（位置/长度/
+            // fade/颜色等）保持 Clip 级语义，不参与同步。
             if crate::config::sync_edits_across_takes() {
                 // playback_rate 请求的是“组合有效速率”（clip 倍率 × take 速率），
                 // 写入各 Take 自身速率前必须按当前倍率反推 —— 否则 inactive take
@@ -8583,10 +9428,20 @@ impl TimelineState {
                     if let Some(v) = content_sync_patch.loop_enabled {
                         take.loop_enabled = v;
                     }
+                    if let Some(v) = content_sync_patch.channel_mode {
+                        take.channel_mode = crate::channel_mode::TakeChannelMode::normalize_raw(v);
+                    }
                 }
             }
             // active 投影已更新，写回 Take 权威数据。
             c.sync_take_from_flat();
+            // 用户显式改声道模式 ⇒ 盖"用户决定"封印，自动扫描从此不再改写它。
+            // 必须在 `sync_take_from_flat` **之后**：那一步会保留既有档案，早盖
+            // 会被随后的写回覆盖掉。
+            if patch.channel_mode.is_some() {
+                let all_takes = crate::config::sync_edits_across_takes();
+                c.seal_user_channel_mode(all_takes);
+            }
 
             end_sec = Some(c.start_sec + c.length_sec);
         }
@@ -8669,6 +9524,9 @@ impl TimelineState {
                     auto_fade_out_sec: template.auto_fade_out_sec,
                     color: None,
                     formant_morph: None,
+                    // 模板不带声道模式；导入策略由命令层在锁外判定后应用
+                    //（见 commands::timeline::create_clips_bulk）。
+                    channel_mode: None,
                 },
             );
 
@@ -8752,6 +9610,47 @@ impl TimelineState {
         }
         if is_active {
             // active take 的翻转改变可听内容：物化到内存投影。
+            let take = take.clone();
+            take.apply_to_clip(clip);
+        }
+        Ok(is_active)
+    }
+
+    /// 设置 Take 的声道模式（0..=4，对齐 REAPER CHANMODE）。
+    ///
+    /// 返回该 Take 是否为 active take（active 的模式改变可听内容与渲染缓存
+    /// 语义，调用方据此决定是否重调度分析/共振峰重建）。
+    pub fn set_clip_take_channel_mode(
+        &mut self,
+        clip_id: &str,
+        take_id: &str,
+        channel_mode: i32,
+    ) -> Result<bool, String> {
+        let mode = crate::channel_mode::TakeChannelMode::from_raw(channel_mode);
+        let clip = self
+            .clips
+            .iter_mut()
+            .find(|c| c.id == clip_id)
+            .ok_or_else(|| format!("clip not found: {clip_id}"))?;
+        let is_active = clip.active_take_id.as_deref() == Some(take_id);
+        if is_active {
+            // active take 以内存投影为消费权威：先物化，避免投影中的旧模式
+            // 在下方 apply_to_clip 时把新值覆盖回去。
+            clip.sync_take_from_flat();
+        }
+        let take = clip
+            .takes
+            .iter_mut()
+            .find(|t| t.id == take_id)
+            .ok_or_else(|| format!("take not found: {take_id}"))?;
+        take.channel_mode = mode.raw();
+        // 用户显式设置 ⇒ 盖"用户决定"封印：自动声道扫描从此永不改写这个 Take。
+        // 封印必须记下**用户选的模式**，否则它不可信、会被加载边界当作伪造档案
+        // 清掉（见 `clear_untrusted_channel_seals`）。
+        take.channel_decision = Some(crate::channel_decision::ChannelDecisionRecord::user(
+            take.channel_mode,
+        ));
+        if is_active {
             let take = take.clone();
             take.apply_to_clip(clip);
         }
@@ -8909,6 +9808,8 @@ impl TimelineState {
             source_end_sec: length,
             playback_rate: 1.0,
             reversed: false,
+            channel_mode: 0,
+            source_channels: None,
             loop_enabled: false,
             snap_offset_sec: 0.0,
             fade_in_sec: 0.0,
@@ -9898,6 +10799,7 @@ impl TimelineState {
                     output: crate::encode::OutputSpec::wav_32f(),
                     quality_preset: crate::mixdown::QualityPreset::Export,
                     cancel_flag: None,
+                    progress: None,
                 },
             );
 
@@ -10602,11 +11504,17 @@ impl TimelineState {
         }
     }
 
+    /// 导入一个媒体文件作为新 Clip。
+    ///
+    /// `channel_decision` 由调用方在**锁外**按导入声道策略预先算好
+    /// （见 `crate::channel_policy::precompute_decision`）：本函数在持锁状态
+    /// 下运行，绝不能在此解码音频。`ChannelResolution::NOOP` 表示什么都不写。
     pub fn import_audio_item(
         &mut self,
         audio_path: &str,
         track_id: Option<String>,
         start_sec: Option<f64>,
+        channel_decision: crate::channel_policy::ChannelResolution,
     ) {
         let name = Path::new(audio_path)
             .file_name()
@@ -10708,6 +11616,15 @@ impl TimelineState {
             // 旧元数据会在下次 normalize/sync 时回流覆盖这里的值（例如视频
             // header-only 探测与 add_clip 内完整解码结果存在差异时）。
             c.sync_take_from_flat();
+            // 导入声道策略（锁外已判定）：把"假立体声"折叠为单声道，使渲染
+            // 退回单声道路径；同时落下判定档案（"读不到"的记待重试，让后台
+            // 扫描下次接着补）。apply_resolution 是零成本操作，不会在锁内解码。
+            if let Some(take) = c.takes.first_mut() {
+                if crate::channel_policy::apply_resolution(take, channel_decision).mode_changed {
+                    let take = take.clone();
+                    take.apply_to_clip(c);
+                }
+            }
         }
     }
 
@@ -10737,11 +11654,33 @@ impl TimelineState {
             }
         }
 
-        let info = try_read_wav_info(Path::new(new_source_path), 4096);
-        let duration_sec = info.as_ref().map(|v| v.duration_sec);
-        let duration_frames = info.as_ref().map(|v| v.total_frames);
-        let source_sample_rate = info.as_ref().map(|v| v.sample_rate);
-        let waveform_preview = info.map(|v| v.waveform_preview);
+        // 目标文件的头信息。WAV 走 hound（顺带拿到波形预览）；非 WAV 时
+        // `try_read_wav_info` 只认 WAV、各项全为 None（Clip 会丢掉时长、渲染
+        // 按 4 秒回退），因此再补一次 O(1) 的容器探测，与导入路径同口径。
+        let wav_info = try_read_wav_info(Path::new(new_source_path), 4096);
+        let container_header = if wav_info.is_some() {
+            None
+        } else {
+            crate::audio_utils::try_read_audio_header_only(Path::new(new_source_path))
+        };
+        let duration_sec = wav_info
+            .as_ref()
+            .map(|v| v.duration_sec)
+            .or_else(|| container_header.as_ref().map(|v| v.duration_sec));
+        let duration_frames = wav_info
+            .as_ref()
+            .map(|v| v.total_frames)
+            .or_else(|| container_header.as_ref().map(|v| v.total_frames));
+        let source_sample_rate = wav_info
+            .as_ref()
+            .map(|v| v.sample_rate)
+            .or_else(|| container_header.as_ref().map(|v| v.sample_rate));
+        let new_channels = wav_info
+            .as_ref()
+            .map(|v| v.channels)
+            .or_else(|| container_header.as_ref().map(|v| v.channels))
+            .filter(|channels| *channels > 0);
+        let waveform_preview = wav_info.map(|v| v.waveform_preview);
 
         // 记录新源文件的元数据 + 内容指纹
         let new_meta = std::fs::metadata(new_source_path).ok();
@@ -10784,8 +11723,23 @@ impl TimelineState {
             if let Some(fp) = new_fp {
                 clip.source_file_fingerprint = Some(fp);
             }
+            // 声道数必须跟着换成**新文件**的：留着旧文件的声道数会经投影污染
+            // 下游的 `effective_channels`，把扇出倍数算错（单声道文件按立体声
+            // 跑两遍，或立体声文件只跑一遍）。
+            clip.source_channels = new_channels;
             clip.waveform_preview = waveform_preview.clone();
             clip.sync_take_from_flat();
+            // 判定档案必须作废：它记录的是**旧文件**的判定上下文（指纹/区间），
+            // 新文件既可能不是同一个声道数，也可能不是同一个结论。清空后由
+            // 可恢复扫描按当前策略重判 —— 这也是"重链媒体"这条路径此前完全
+            // 绕过声道判定的修复点（旧实现让重链后的 Take 永远保持旧结论，
+            // 而工程一旦存成 v5 就再没有第二次机会）。
+            for take in clip.takes.iter_mut() {
+                if take.source_path.as_deref() == Some(new_source_path) {
+                    take.source_channels = new_channels;
+                    take.channel_decision = None;
+                }
+            }
             changed += 1;
         }
 

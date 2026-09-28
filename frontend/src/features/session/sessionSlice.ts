@@ -32,6 +32,7 @@ import type {
 import { normalizeSplitTransitionCurve } from "./sessionTypes";
 import { SILENCE_DETECT_DEFAULTS } from "./sessionTypes";
 import { modEuclid, resolveLoopMediaDurationSec } from "../../utils/loopRender";
+import { normalizeChannelMode } from "../../utils/channelMode";
 
 import {
     addClipOnTrack,
@@ -55,6 +56,7 @@ import {
     removeClipTakeRemote,
     renameClipTakeRemote,
     setClipTakeReversedRemote,
+    setClipTakeChannelModeRemote,
     addClipTakeFromMediaRemote,
     ungroupClipsRemote,
     toggleGroupDisabledRemote,
@@ -71,6 +73,7 @@ import {
     selectTrackRemote,
     setClipStateRemote,
     setClipsStateBulkRemote,
+    scanAndConvertFakeStereoRemote,
     setProjectLengthRemote,
     splitClipRemote,
     splitClipsAtRemote,
@@ -109,7 +112,12 @@ import {
     updateTransportBpm,
 } from "./thunks/transportThunks";
 
-import { clearWaveformCacheRemote, loadUiSettings, refreshRuntime } from "./thunks/runtimeThunks";
+import {
+    clearRenderCacheRemote,
+    clearWaveformCacheRemote,
+    loadUiSettings,
+    refreshRuntime,
+} from "./thunks/runtimeThunks";
 
 import { loadDefaultModel, loadModel } from "./thunks/modelThunks";
 
@@ -125,14 +133,29 @@ import {
     synthesizeAudio,
 } from "./thunks/audioThunks";
 
+import {
+    DEFAULT_CHANNEL_IMPORT_POLICY,
+    DEFAULT_RENDER_CACHE_SETTINGS,
+    type ChannelImportPolicy,
+    type RenderCacheSettings,
+} from "../../services/api/settings";
+
 import { SCALE_KEYS } from "../../utils/musicalScales";
 import type { ScaleLike } from "../../utils/musicalScales";
+import {
+    nextParamAxisUnit,
+    normalizeParamAxisUnits,
+    resolveParamAxisUnit,
+    supportsParamAxisUnit,
+    type ParamAxisUnits,
+} from "../../components/layout/pianoRoll/paramAxisUnits";
 import type { CustomScalePreset } from "../../utils/customScales";
 import { sanitizeCustomScalePreset } from "../../utils/customScales";
 import type { TempoMap } from "../../utils/tempoMap";
 import {
     clampDenominator,
     fromBackendTempoMap,
+    isSameTempoMap,
     normalizeTempoMap,
     scaleLikeToScaleData,
     TEMPO_DENOMINATORS,
@@ -307,7 +330,6 @@ export type {
 };
 
 type ClipColor = ClipInfo["color"];
-type WaveformPreview = number[] | { l: number[]; r: number[] };
 type StretchAlgorithmOption = "linear" | "signalsmith" | "soundtouch";
 type ClipFormantToolWindowState = {
     open: boolean;
@@ -317,24 +339,13 @@ type ClipFormantToolWindowState = {
     hasMoved: boolean;
 };
 
-/** 参数编辑器选区快照（beat 单位；仅「边缘拉伸」手势登记，见 ParamSelectionStep）。 */
-export type ParamSelectionSnapshot = Array<{ startBeat: number; endBeat: number }>;
-
 /**
- * 「参数编辑器边缘拉伸」这一步的选区记录。
+ * 参数编辑器选区快照（**帧**单位：`[startFrame, frameCount]`）。
  *
- * 只有该手势会把选区写入撤销历史：撤销这一步时恢复 `before`，重做时恢复
- * `after`。其它任何选区变化（框选、追加/取消段、全选、双击 Clip…）都不登记，
- * 撤销/重做因此不会去动用户手动调整过的选区。
+ * 与选区的内部单位、后端 `get/set_param_frames` 的契约同形（见 `paramSelection.ts`）。
+ * 帧栅格是工程级常量，因此这份快照与 BPM 无关。
  */
-export interface ParamSelectionStep {
-    /** 步骤完成后的历史位置（= 该步落地后的撤销栈深度）。 */
-    position: number;
-    /** 拉伸前的选区（撤销该步时恢复；null = 当时无选区）。 */
-    before: ParamSelectionSnapshot | null;
-    /** 拉伸后的选区（重做该步时恢复）。 */
-    after: ParamSelectionSnapshot | null;
-}
+export type ParamSelectionSnapshot = Array<{ startFrame: number; frameCount: number }>;
 
 export interface SessionState {
     toolMode: ToolMode;
@@ -410,6 +421,14 @@ export interface SessionState {
     showClipboardPreview: boolean;
     /** 参数线附近显示参数值浮窗 */
     showParamValuePopup: boolean;
+    /**
+     * 纵轴标尺的展示单位（参数 id → `"ratio"` | `"db"`）。
+     *
+     * 只对音量 / 动态这类**线性幅值倍率**参数有意义（`1× = 0 dB`）：同一个值既能
+     * 读成倍率也能读成 dB，用户需要按习惯切换读法。缺项 = 倍率（默认）。
+     * 换算与解析见 `components/layout/pianoRoll/paramAxisUnits`。
+     */
+    paramAxisUnits: ParamAxisUnits;
     /** 参数编辑器（选择工具）拖动方向限制 */
     selectDragDirection: DragDirection;
     /** 参数编辑器（绘制工具）拖动方向限制 */
@@ -460,6 +479,18 @@ export interface SessionState {
     ortDeviceId: number | null;
     /** 后台预渲染：编辑后立即在后台渲染，无需等待播放触发 */
     autoBackgroundRender: boolean;
+    /** 渲染缓存设置：把合成结果落盘，重新打开工程时直接复用。 */
+    renderCache: RenderCacheSettings;
+    /** 导入媒体时的声道处理策略（假立体声 → 单声道）。 */
+    channelImportPolicy: ChannelImportPolicy;
+    /**
+     * 在途的导入任务数（>0 = 正在导入）。
+     *
+     * 只用于状态栏的**延迟**等待提示：导入变快之后绝大多数情况都不会亮起，
+     * 它存在的意义是慢盘 / 网络盘 / 超大文件时不至于让界面看起来毫无反应。
+     * 因此这里只记"有没有"，不记进度 —— 导入本身没有可汇报的粒度。
+     */
+    importInFlight: number;
     /**
      * 后端"播放/预渲染"状态镜像（`playback_rendering_state` 事件）——只镜像
      * 播放轮询 reducer 需要的 active/target 两个原始值字段（变化低频，且
@@ -545,7 +576,6 @@ export interface SessionState {
     selectionContext: "param" | "clips" | null;
     clipAutomation: Record<string, Record<string, AutomationPoint[]>>;
     selectedPointId: string | null;
-    clipWaveforms: Record<string, WaveformPreview>;
     clipPitchRanges: Record<string, { min: number; max: number }>;
 
     /**
@@ -669,12 +699,6 @@ export interface SessionState {
      * 可重做的部分；`records[0]` 是初始状态行。
      */
     historyRecords: HistoryRecordSummary[];
-
-    /**
-     * 「参数编辑器边缘拉伸」登记的历史步骤（仅该手势写入，见
-     * ParamSelectionStep）：撤销/重做到该步时恢复对应选区。
-     */
-    paramSelectionSteps: ParamSelectionStep[];
 
     /**
      * 待参数编辑器消费的选区恢复请求（撤销/重做命中拉伸步骤时登记）。
@@ -1108,6 +1132,8 @@ function applyOptimisticBulkClipState(
         autoFadeOutSec?: number;
         reversed?: boolean;
         loopEnabled?: boolean;
+        /** 声道模式 0..=4（对齐 REAPER CHANMODE）。 */
+        channelMode?: number;
     }>,
 ) {
     // 多选批量拖拽每帧都会带 K 个 update 进来，逐 update 全量 find 是
@@ -1211,6 +1237,9 @@ function applyOptimisticBulkClipState(
         if (update.loopEnabled !== undefined) {
             clip.loopEnabled = Boolean(update.loopEnabled);
         }
+        if (update.channelMode !== undefined) {
+            clip.channelMode = normalizeChannelMode(update.channelMode);
+        }
         updateTakesFromFlatWithSync(state, clip);
     }
 }
@@ -1253,6 +1282,11 @@ function parseTimelineClipTake(take: TimelineClipTake): ClipTakeInfo {
         playbackRate: take.playback_rate != null ? clamp(Number(take.playback_rate), 0.1, 10) : 1,
         reversed: Boolean(take.reversed),
         loopEnabled: Boolean(take.loop_enabled),
+        channelMode: normalizeChannelMode(take.channel_mode),
+        sourceChannels:
+            Number.isFinite(Number(take.source_channels)) && Number(take.source_channels) > 0
+                ? Number(take.source_channels)
+                : undefined,
         midiNoteData: take.midi_note_data?.map((n) => ({
             startSec: n.start_sec,
             endSec: n.end_sec,
@@ -1285,6 +1319,8 @@ function parseClipTakes(clip: TimelineClip, flat: ClipInfo): ClipTakeInfo[] {
             playbackRate: clamp(flat.playbackRate / clipRate, 0.1, 10),
             reversed: flat.reversed,
             loopEnabled: flat.loopEnabled,
+            channelMode: flat.channelMode,
+            sourceChannels: flat.sourceChannels,
             midiNoteData: flat.midiNoteData,
             midiFillGaps: flat.midiFillGaps ?? false,
         },
@@ -1378,6 +1414,8 @@ function updateActiveTakeFromFlat(clip: ClipInfo): void {
     take.sourceEndSec = clip.sourceEndSec;
     take.playbackRate = clamp(clip.playbackRate / getClipRateMultiplier(clip), 0.1, 10);
     take.reversed = clip.reversed;
+    take.channelMode = clip.channelMode;
+    take.sourceChannels = clip.sourceChannels;
     take.loopEnabled = clip.loopEnabled;
     take.midiNoteData = clip.midiNoteData;
     take.midiFillGaps = clip.midiFillGaps;
@@ -1385,10 +1423,11 @@ function updateActiveTakeFromFlat(clip: ClipInfo): void {
 
 /**
  * 与后端 `patch_clip_state` 的“同步编辑所有 Take”语义对齐：开启该设置时，
- * 内容级乐观编辑（增益/源窗口/速率/倒放/Loop）需要镜像到全部 Take，
+ * 内容级乐观编辑（增益/源窗口/速率/倒放/Loop/声道模式）需要镜像到全部 Take，
  * 否则多 Take 展示下 inactive lane 的拖拽预览与后端口径短暂分叉
  * （fulfilled 快照才会收敛）。`playbackRate` 平铺值是组合有效速率，
  * 写入各 Take 前按倍率反推 —— 与后端 from_clip 口径一致。
+ *
  */
 function updateTakesFromFlatWithSync(state: SessionState, clip: ClipInfo): void {
     updateActiveTakeFromFlat(clip);
@@ -1402,6 +1441,8 @@ function updateTakesFromFlatWithSync(state: SessionState, clip: ClipInfo): void 
         take.sourceEndSec = clip.sourceEndSec;
         take.playbackRate = clamp(clip.playbackRate / rateMultiplier, 0.1, 10);
         take.reversed = clip.reversed;
+        take.channelMode = clip.channelMode;
+        take.sourceChannels = clip.sourceChannels;
         take.loopEnabled = clip.loopEnabled;
     }
 }
@@ -1417,6 +1458,8 @@ function applyActiveTakeToFlat(clip: ClipInfo, take: ClipTakeInfo): void {
     clip.sourceEndSec = take.sourceEndSec;
     clip.playbackRate = getClipRateMultiplier(clip) * take.playbackRate;
     clip.reversed = take.reversed;
+    clip.channelMode = take.channelMode;
+    clip.sourceChannels = take.sourceChannels;
     clip.loopEnabled = take.loopEnabled;
     clip.midiNoteData = take.midiNoteData;
     clip.midiNoteCount = take.midiNoteData?.length;
@@ -1643,6 +1686,11 @@ function applyTimelineState(
                     : (oldClipsById.get(clip.id)?.playbackRate ?? 1),
             clipPlaybackRate: clamp(Number(clip.clip_playback_rate ?? 1) || 1, 0.1, 10),
             reversed: Boolean(clip.reversed),
+            channelMode: normalizeChannelMode(clip.channel_mode),
+            sourceChannels:
+                Number.isFinite(Number(clip.source_channels)) && Number(clip.source_channels) > 0
+                    ? Number(clip.source_channels)
+                    : undefined,
             loopEnabled: Boolean(clip.loop_enabled),
             // SnapOffset（吸附偏移）：旧工程缺失时自动补齐为 0。
             snapOffsetSec: Math.max(0, Number(clip.snap_offset_sec ?? 0) || 0),
@@ -1780,10 +1828,26 @@ function applyTimelineState(
             path: project.path === undefined ? state.project.path : (project.path ?? null),
             dirty: Boolean(project.dirty),
             recent: Array.isArray(project.recent) ? project.recent : state.project.recent,
+            // 记事本：只有**该步本身是记事本编辑**时后端才会带回文本。
+            //
+            // 早期实现在每次撤销/重做都用 `project.notes_markdown` 覆盖前端值，
+            // 而后端只在保存时才看到记事本 —— 于是"记事本有内容时为任意操作
+            // 撤销都会清空它"。现在后端在 `HistoryRecord` 上记录了每步的记事
+            // 本（`None` = 与记事本无关的一步），撤销/重做据此**只在确实跨过
+            // 记事本编辑时才改**。
+            //
+            // 不跨记事本编辑时保留前端现场值：那正是用户正在编辑的内容。
             notesMarkdown:
-                opts?.preserveProjectNotes === false
-                    ? String(project.notes_markdown ?? "")
-                    : state.project.notesMarkdown,
+                // 撤销/重做时后端在载荷顶层带回**目标那一步**的记事本内容
+                // （后端把它记在 HistoryRecord 上）。没有带回就绝不覆盖前端
+                // 现场值 —— 早期实现一律用 `project.notes_markdown` 覆盖，
+                // 而后端只在保存时看到记事本，于是"记事本有内容时为任意操作
+                // 撤销都会清空它"。
+                typeof timeline.notes_markdown === "string"
+                    ? timeline.notes_markdown
+                    : opts?.preserveProjectNotes === false
+                      ? String(project.notes_markdown ?? "")
+                      : state.project.notesMarkdown,
             baseScale: nextBaseScale,
             useCustomScale: Boolean(project.use_custom_scale),
             customScale: project.custom_scale
@@ -1853,15 +1917,12 @@ function applyTimelineState(
         );
     }
 
-    const nextWaveforms: Record<string, WaveformPreview> = {};
     const nextPitchRanges: Record<string, { min: number; max: number }> = {};
     for (const clip of timeline.clips) {
         const clipId = clip.id;
-        nextWaveforms[clipId] = (clip.waveform_preview ?? []) as WaveformPreview;
         nextPitchRanges[clipId] = clip.pitch_range ?? { min: -24, max: 24 };
         ensureClipAutomation(state, clipId);
     }
-    state.clipWaveforms = nextWaveforms;
     state.clipPitchRanges = nextPitchRanges;
 
     // Any timeline refresh may change pitch analysis inputs and therefore param curves.
@@ -1881,9 +1942,6 @@ function upsertImportedClip(
     if (existing) {
         state.selectedClipId = existing.id;
         ensureClipAutomation(state, existing.id);
-        if (meta?.waveform) {
-            state.clipWaveforms[existing.id] = meta.waveform;
-        }
         if (meta?.pitchRange) {
             state.clipPitchRanges[existing.id] = meta.pitchRange;
         }
@@ -1929,6 +1987,8 @@ function upsertImportedClip(
         // 乐观创建的导入 Clip：Loop 跟随"为新的音频块启用循环"设置
         //（默认开启；后端权威载荷返回后会覆盖该值）。
         loopEnabled: state.loopNewClipsEnabled !== false,
+        channelMode: 0,
+        sourceChannels: undefined,
         snapOffsetSec: 0,
         fadeInSec: 0,
         fadeOutSec: 0,
@@ -1942,7 +2002,6 @@ function upsertImportedClip(
     state.playheadSec = startSec;
     state.selectedPointId = null;
     ensureClipAutomation(state, newClipId);
-    state.clipWaveforms[newClipId] = meta?.waveform ?? [];
     state.clipPitchRanges[newClipId] = meta?.pitchRange ?? {
         min: -24,
         max: 24,
@@ -1998,6 +2057,8 @@ const initialState: SessionState = {
     paramEditorTimelineClickSelectTrackEnabled: true,
     showClipboardPreview: true,
     showParamValuePopup: true,
+    // 空映射 = 全部参数按倍率显示（历史行为）。
+    paramAxisUnits: {},
     selectDragDirection: "y-only" as DragDirection,
     drawDragDirection: "free" as DrawDragDirection,
     lineVibratoDragDirection: "free" as DrawDragDirection,
@@ -2020,6 +2081,9 @@ const initialState: SessionState = {
     gpuDeviceId: 0,
     ortDeviceId: null,
     autoBackgroundRender: true,
+    renderCache: { ...DEFAULT_RENDER_CACHE_SETTINGS },
+    channelImportPolicy: { ...DEFAULT_CHANNEL_IMPORT_POLICY },
+    importInFlight: 0,
     playbackRenderingActive: false,
     playbackRenderingTarget: null,
     playbackBlockingRenderActive: false,
@@ -2057,7 +2121,6 @@ const initialState: SessionState = {
     selectionContext: null,
     clipAutomation: {},
     selectedPointId: null,
-    clipWaveforms: {},
     clipPitchRanges: {},
     clipPitchCurves: {},
     clipFormantStatus: {},
@@ -2125,7 +2188,6 @@ const initialState: SessionState = {
     historyUndoDepth: 0,
     historyRedoDepth: 0,
     historyRecords: [],
-    paramSelectionSteps: [],
     pendingParamSelectionRestore: null,
     _paramSelectionRestoreSeq: 0,
     _latestEditRequestId: null,
@@ -2133,64 +2195,17 @@ const initialState: SessionState = {
     _stopInterruptedPlayback: false,
 };
 
-// ── 撤销/重做：深度镜像与「拉伸步骤」选区记录 ────────────────────────
-
-/** 归一化选区快照（深拷贝 + 丢弃非有限值；无有效段 → null）。 */
-function toParamSelectionSnapshot(
-    selection: readonly { startBeat: number; endBeat: number }[] | null | undefined,
-): ParamSelectionSnapshot | null {
-    if (!selection || selection.length === 0) return null;
-    const cleaned = selection
-        .filter((range) => Number.isFinite(range.startBeat) && Number.isFinite(range.endBeat))
-        .map((range) => ({ startBeat: range.startBeat, endBeat: range.endBeat }));
-    return cleaned.length > 0 ? cleaned : null;
-}
+// ── 撤销/重做：深度镜像与载荷驱动的选区恢复 ───────────────────────────
 
 /**
  * 同步撤销/重做栈深度镜像（后端广播 / 撤销·重做响应）。
  *
- * 同时清理被丢弃分支上的选区步骤：
- * - 重做栈被新检查点清空（深度前进且 redo 归零）= 旧分支已丢弃，位在当前
- *   位置及其后的旧步骤全部作废（除非调用方声明这是重做自身的前进，见
- *   options.preserveStepAtCurrentPosition）；
- * - 深度归零（新建 / 打开工程清空历史）= 步骤全部作废。
- * 撤销（深度回落、redo 增长）保留步骤，供重做时恢复选区。
+ * 镜像只服务于"撤销/重做是否可用"与快捷键的前置判断；**选区恢复不再依赖它**
+ * （见 `applyParamSelectionRestoreFromPayload`）。
  */
-function applyHistoryDepths(
-    state: SessionState,
-    undoDepth: number,
-    redoDepth: number,
-    options?: {
-        /**
-         * 位置前进且重做栈归零时保留「当前位置」上的步骤。
-         *
-         * 重做自身也会清空重做栈（弹出最后一步），但它是沿原分支前进、
-         * 步骤依然有效；新检查点造成的清空则是丢弃旧分支，位在其上的旧
-         * 步骤必须作废。二者只能由调用方（撤销/重做响应 vs 事件广播）区分。
-         */
-        preserveStepAtCurrentPosition?: boolean;
-    },
-): void {
-    const nextUndo = Math.max(0, Math.floor(Number(undoDepth) || 0));
-    const nextRedo = Math.max(0, Math.floor(Number(redoDepth) || 0));
-    const branchDiscarded =
-        state.historyRedoDepth > 0 &&
-        nextRedo === 0 &&
-        nextUndo > state.historyUndoDepth;
-    const historyReset = nextUndo === 0 && nextRedo === 0;
-    state.historyUndoDepth = nextUndo;
-    state.historyRedoDepth = nextRedo;
-    if (state.paramSelectionSteps.length === 0) return;
-    if (historyReset) {
-        state.paramSelectionSteps = [];
-        return;
-    }
-    if (branchDiscarded) {
-        const keepPosition = options?.preserveStepAtCurrentPosition ? nextUndo : nextUndo - 1;
-        state.paramSelectionSteps = state.paramSelectionSteps.filter(
-            (step) => step.position <= keepPosition,
-        );
-    }
+function applyHistoryDepths(state: SessionState, undoDepth: number, redoDepth: number): void {
+    state.historyUndoDepth = Math.max(0, Math.floor(Number(undoDepth) || 0));
+    state.historyRedoDepth = Math.max(0, Math.floor(Number(redoDepth) || 0));
 }
 
 /** 登记一次选区恢复请求（requestId 单调，消费方按 id 幂等应用一次）。 */
@@ -2206,36 +2221,41 @@ function requestParamSelectionRestore(
 }
 
 /**
- * 撤销「产生位置 `stepPosition` 的那一步」时恢复的选区（仅拉伸步骤登记）。
+ * 按撤销/重做/跳转载荷恢复参数编辑器选区。
  *
- * 注意必须按**步骤**匹配而不是按落点位置：撤销一个与拉伸无关的操作时，
- * 即使落点恰好是某个拉伸步骤之后的状态，也不得动用户当前的选区。
- */
-function restoreParamSelectionForUndoStep(state: SessionState, stepPosition: number): void {
-    const step = state.paramSelectionSteps.find((entry) => entry.position === stepPosition);
-    if (step) requestParamSelectionRestore(state, step.before);
-}
-
-/** 重做「产生位置 `stepPosition` 的那一步」时恢复的选区。 */
-function restoreParamSelectionForRedoStep(state: SessionState, stepPosition: number): void {
-    const step = state.paramSelectionSteps.find((entry) => entry.position === stepPosition);
-    if (step) requestParamSelectionRestore(state, step.after);
-}
-
-/**
- * 跳转到位置 `position` 时恢复的选区（「操作记录」窗口双击）。
+ * 【谁决定恢复哪一份】后端。选区快照记在**产生它的那一步**上
+ * （`HistoryRecord::param_selection`），撤销/重做/跳转时后端算出"该恢复成什么样"
+ * 并随载荷带回（`param_selection_restore`），前端无脑套用。
  *
- * 跳转语义是「回到那个状态」：该位置若有登记步骤则取其 `after`（该步完成
- * 后的样子），否则看下一步骤的 `before`（即跳到某一步之前的状态）。
+ * 【为什么前端不再自己记账】旧实现让前端按撤销深度索引步骤（"我这一步是第几步"），
+ * 而前端只有一个由事件异步推进的深度镜像：镜像滞后、写回被抑制、以及"新检查点
+ * 丢弃重做分支"时的裁剪，都会让位置对不上 —— 表现是"撤销后曲线回来了、选区却没
+ * 回到拉伸前"。现在位置推断整体消失，那条链路自然不存在。
+ *
+ * 特殊说明：`undefined`（载荷未携带）表示这一步与选区无关，**不得**改动用户当前
+ * 选区；`[]` 表示当时确实没有选区（要清空）。两者语义不同，不能合并。
+ *
+ * 【单位是帧】每一对是 `[startFrame, frameCount]`（与选区的内部单位一致，见
+ * `paramSelection.ts`）。帧与 BPM 无关，因此"拉伸 → 改 BPM → 撤销"不会再让恢复
+ * 出来的选区落到别的时间上。
+ *
+ * @param payload 撤销/重做/跳转响应载荷。
  */
-function restoreParamSelectionForPosition(state: SessionState, position: number): void {
-    const afterStep = state.paramSelectionSteps.find((step) => step.position === position);
-    if (afterStep) {
-        requestParamSelectionRestore(state, afterStep.after);
-        return;
-    }
-    const beforeStep = state.paramSelectionSteps.find((step) => step.position === position + 1);
-    if (beforeStep) requestParamSelectionRestore(state, beforeStep.before);
+function applyParamSelectionRestoreFromPayload(
+    state: SessionState,
+    payload: { param_selection_restore?: [number, number][] | null },
+): void {
+    const ranges = payload.param_selection_restore;
+    if (!Array.isArray(ranges)) return;
+    const snapshot = ranges
+        .filter(
+            (range) =>
+                Array.isArray(range) && Number.isFinite(range[0]) && Number.isFinite(range[1]),
+        )
+        .map(([startFrame, frameCount]) => ({ startFrame, frameCount }));
+    // 空数组与「无选区」是同一件事（快照类型用 null 表达），此处归一，
+    // 消费方（参数编辑器）只需要认识"要恢复成这样"。
+    requestParamSelectionRestore(state, snapshot.length > 0 ? snapshot : null);
 }
 
 export {
@@ -2300,6 +2320,8 @@ export {
     removeClipTakeRemote,
     renameClipTakeRemote,
     setClipTakeReversedRemote,
+    setClipTakeChannelModeRemote,
+    scanAndConvertFakeStereoRemote,
     addClipTakeFromMediaRemote,
     replaceClipSourceRemote,
     replaceMidiClipDataRemote,
@@ -2316,6 +2338,7 @@ export { setTrackStateRemote, removeSelectedClipRemote } from "./thunks/trackThu
 export {
     refreshRuntime,
     clearWaveformCacheRemote,
+    clearRenderCacheRemote,
     loadUiSettings,
     persistUiSettings,
 } from "./thunks/runtimeThunks";
@@ -2368,6 +2391,8 @@ const sessionSlice = createSlice({
             const track = state.tracks.find((entry) => entry.id === action.payload.trackId);
             if (track) {
                 track.name = action.payload.name;
+                // 同上：轨道名是工程数据。
+                markProjectDirty(state.project);
             }
         },
         setTrackMeters(state, action: PayloadAction<Record<string, TrackMeterInfo>>) {
@@ -2394,37 +2419,6 @@ const sessionSlice = createSlice({
             if (Array.isArray(records)) {
                 state.historyRecords = records;
             }
-        },
-        /**
-         * 登记「参数编辑器边缘拉伸」步骤的选区（撤销/重做该步时恢复）。
-         *
-         * `positionBefore` = 拉伸开始时的撤销栈深度；该手势的曲线回写固定只打
-         * 一个检查点（uploadFullResCurve 首块写入），因此步骤位置 = 起始深度 + 1。
-         * 新检查点会清空重做分支：位在其后的旧步骤在此一并清除。
-         */
-        recordParamSelectionStretchStep(
-            state,
-            action: PayloadAction<{
-                positionBefore: number;
-                before: ParamSelectionSnapshot | null;
-                after: ParamSelectionSnapshot | null;
-            }>,
-        ) {
-            const positionBefore = Math.max(
-                0,
-                Math.floor(Number(action.payload.positionBefore) || 0),
-            );
-            const step: ParamSelectionStep = {
-                position: positionBefore + 1,
-                before: toParamSelectionSnapshot(action.payload.before),
-                after: toParamSelectionSnapshot(action.payload.after),
-            };
-            const kept = state.paramSelectionSteps.filter(
-                (entry) => entry.position !== step.position && entry.position <= step.position,
-            );
-            kept.push(step);
-            kept.sort((a, b) => a.position - b.position);
-            state.paramSelectionSteps = kept;
         },
         checkpointHistory(state) {
             // 撤销/重做由后端权威管理（undo_timeline / redo_timeline 返回完整
@@ -2672,6 +2666,14 @@ const sessionSlice = createSlice({
         toggleAutoBackgroundRender(state) {
             state.autoBackgroundRender = !state.autoBackgroundRender;
         },
+        /** 覆盖整块渲染缓存设置（对话框保存时调用）。 */
+        setRenderCacheSettings(state, action: PayloadAction<Partial<RenderCacheSettings>>) {
+            state.renderCache = { ...state.renderCache, ...action.payload };
+        },
+        /** 覆盖整块导入声道策略（对话框保存时调用）。 */
+        setChannelImportPolicy(state, action: PayloadAction<Partial<ChannelImportPolicy>>) {
+            state.channelImportPolicy = { ...state.channelImportPolicy, ...action.payload };
+        },
         /** 镜像后端 `playback_rendering_state` 事件的 active/target（进度走 App 本地状态）。
          *  `blocking` 为阻塞式前台预渲染（target="original"）的独立镜像；缺省时按
          *  active+target 推导（测试夹具与旧调用方的兼容路径）。 */
@@ -2760,6 +2762,18 @@ const sessionSlice = createSlice({
         },
         toggleParamValuePopup(state) {
             state.showParamValuePopup = !state.showParamValuePopup;
+        },
+        /**
+         * 切换某参数纵轴标尺的展示单位（倍率 ↔ dB）。
+         *
+         * 只对支持切换的参数生效（音量 / 动态）；其余参数点击纵轴不应有任何反应，
+         * 因此这里静默忽略而不是写入无效键 —— 无效键会让持久化里堆出无意义配置。
+         */
+        toggleParamAxisUnit(state, action: PayloadAction<string>) {
+            const param = action.payload;
+            if (!supportsParamAxisUnit(param)) return;
+            const next = nextParamAxisUnit(resolveParamAxisUnit(state.paramAxisUnits, param));
+            state.paramAxisUnits = { ...state.paramAxisUnits, [param]: next };
         },
         cycleDragDirection(state, action: PayloadAction<"select" | "draw" | "vibrato">) {
             if (action.payload === "select") {
@@ -3096,6 +3110,8 @@ const sessionSlice = createSlice({
                 playbackRate: 1,
                 reversed: false,
                 loopEnabled: state.loopNewClipsEnabled !== false,
+                channelMode: 0,
+                sourceChannels: undefined,
                 snapOffsetSec: 0,
                 fadeInSec: 0,
                 fadeOutSec: 0,
@@ -3107,7 +3123,6 @@ const sessionSlice = createSlice({
             state.selectedClipId = newClipId;
             state.selectedTrackId = action.payload.trackId;
             ensureClipAutomation(state, newClipId);
-            state.clipWaveforms[newClipId] = [];
             state.clipPitchRanges[newClipId] = { min: -24, max: 24 };
         },
         removeSelectedClip(state) {
@@ -3118,7 +3133,6 @@ const sessionSlice = createSlice({
             markProjectDirty(state.project);
             state.clips = state.clips.filter((clip) => clip.id !== selectedId);
             delete state.clipAutomation[selectedId];
-            delete state.clipWaveforms[selectedId];
             delete state.clipPitchRanges[selectedId];
             delete state.clipPitchCurves[selectedId];
             state.selectedPointId = null;
@@ -3143,6 +3157,8 @@ const sessionSlice = createSlice({
             const track = state.tracks.find((entry) => entry.id === action.payload.trackId);
             if (track) {
                 track.volume = clamp(action.payload.volume, 0, MAX_TRACK_VOLUME);
+                // 轨道音量写进工程文件：改了不标脏，切工程时会被静默丢弃。
+                markProjectDirty(state.project);
             }
         },
         addAutomationPoint(
@@ -3356,6 +3372,25 @@ const sessionSlice = createSlice({
             })
             .addCase(clearWaveformCacheRemote.rejected, setRejected)
 
+            .addCase(clearRenderCacheRemote.pending, (state) =>
+                setPending(state, "Clearing render cache..."),
+            )
+            .addCase(clearRenderCacheRemote.fulfilled, (state, action) => {
+                state.busy = false;
+                const payload = action.payload as {
+                    ok?: boolean;
+                    removedFiles?: number;
+                    error?: string;
+                };
+                if (payload.ok) {
+                    const n = Number(payload.removedFiles ?? 0) || 0;
+                    state.status = `Render cache cleared (${n} entries)`;
+                } else {
+                    state.status = "Clear render cache failed";
+                }
+            })
+            .addCase(clearRenderCacheRemote.rejected, setRejected)
+
             .addCase(loadUiSettings.fulfilled, (state, action) => {
                 const s = action.payload;
                 state.autoCrossfadeEnabled = s.autoCrossfade;
@@ -3450,6 +3485,8 @@ const sessionSlice = createSlice({
                     state.showClipboardPreview = s.showClipboardPreview;
                 if (s.showParamValuePopup != null)
                     state.showParamValuePopup = Boolean(s.showParamValuePopup);
+                // 纵轴单位映射：手改坏配置（未知参数 / 非法取值）在这里被过滤掉。
+                state.paramAxisUnits = normalizeParamAxisUnits(s.paramAxisUnits);
                 if (s.scaleHighlightMode != null)
                     state.scaleHighlightMode = s.scaleHighlightMode === "always" ? "always" : "off";
                 if (s.ignoreGrouping != null) state.ignoreGrouping = Boolean(s.ignoreGrouping);
@@ -3518,6 +3555,18 @@ const sessionSlice = createSlice({
                 }
                 if (s.autoBackgroundRender != null) {
                     state.autoBackgroundRender = Boolean(s.autoBackgroundRender);
+                }
+                if (s.renderCache) {
+                    state.renderCache = {
+                        ...DEFAULT_RENDER_CACHE_SETTINGS,
+                        ...s.renderCache,
+                    };
+                }
+                if (s.channelImportPolicy) {
+                    state.channelImportPolicy = {
+                        ...DEFAULT_CHANNEL_IMPORT_POLICY,
+                        ...s.channelImportPolicy,
+                    };
                 }
                 const selectDir = s.selectDragDirection;
                 if (selectDir != null && ["free", "x-only", "y-only"].includes(selectDir)) {
@@ -3623,7 +3672,7 @@ const sessionSlice = createSlice({
                         applyTimelineState(state, payload.imported, { force: true });
                         if (payload.newClipIds && payload.newClipIds.length > 0) {
                             state.multiSelectedClipIds = payload.newClipIds;
-                        state.multiSelectionIntentional = false;
+                            state.multiSelectionIntentional = false;
                             state.selectedClipId = payload.newClipIds[0] ?? null;
                         }
                     }
@@ -3654,7 +3703,7 @@ const sessionSlice = createSlice({
                         applyTimelineState(state, payload.imported, { force: true });
                         if (payload.newClipIds && payload.newClipIds.length > 0) {
                             state.multiSelectedClipIds = payload.newClipIds;
-                        state.multiSelectionIntentional = false;
+                            state.multiSelectionIntentional = false;
                             state.selectedClipId = payload.newClipIds[0] ?? null;
                         }
                     }
@@ -4360,6 +4409,7 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                     undo_depth?: number;
                     redo_depth?: number;
+                    param_selection_restore?: [number, number][] | null;
                 } & TimelineState;
                 const payloadUndoDepth = Number(payload.undo_depth);
                 const payloadRedoDepth = Number(payload.redo_depth);
@@ -4383,9 +4433,9 @@ const sessionSlice = createSlice({
                         ? payloadRedoDepth
                         : state.historyRedoDepth + 1,
                 );
-                // 被撤销的正是「产生 depthBefore 的那一步」：若是拉伸步骤，
-                // 一并恢复拉伸前的选区。
-                restoreParamSelectionForUndoStep(state, depthBefore);
+                // 被撤销的那一步若登记过选区（「边缘拉伸」），载荷会带回它拉伸前的
+                // 选区，这里恢复；未携带则不动用户当前选区。
+                applyParamSelectionRestoreFromPayload(state, payload);
                 // 撤销把时间线（含 playhead_sec）整体回退到上一个检查点：快照里
                 // 的 playhead_sec 就是该状态形成时的播放光标位置，也是回退之后
                 // 一切以光标为锚点的编辑操作（粘贴/分割/录音起点等）在后端的
@@ -4431,6 +4481,7 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                     undo_depth?: number;
                     redo_depth?: number;
+                    param_selection_restore?: [number, number][] | null;
                 } & TimelineState;
                 const payloadUndoDepth = Number(payload.undo_depth);
                 const payloadRedoDepth = Number(payload.redo_depth);
@@ -4449,12 +4500,10 @@ const sessionSlice = createSlice({
                     Number.isFinite(payloadRedoDepth)
                         ? payloadRedoDepth
                         : Math.max(0, state.historyRedoDepth - 1),
-                    // 重做是沿原分支前进（不是丢弃分支）：当前位置上的步骤保留。
-                    { preserveStepAtCurrentPosition: true },
                 );
-                // 被重做的正是「产生 depthBefore + 1 的那一步」：若是拉伸步骤，
-                // 一并恢复拉伸后的选区。
-                restoreParamSelectionForRedoStep(state, depthBefore + 1);
+                // 被重做的那一步若登记过选区（「边缘拉伸」），载荷会带回它拉伸后的
+                // 选区，这里恢复；未携带则不动用户当前选区。
+                applyParamSelectionRestoreFromPayload(state, payload);
                 // 与 undoRemote.fulfilled 对称：重做恢复的时间线快照携带的
                 // playhead_sec 是该状态（被撤销暂存时）的光标位置，即重做后
                 // 后端的实际操作点 —— 采纳它，视觉光标与实际编辑点保持一致。
@@ -4491,6 +4540,7 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                     undo_depth?: number;
                     redo_depth?: number;
+                    param_selection_restore?: [number, number][] | null;
                 } & TimelineState;
                 const payloadUndoDepth = Number(payload.undo_depth);
                 const payloadRedoDepth = Number(payload.redo_depth);
@@ -4505,10 +4555,9 @@ const sessionSlice = createSlice({
                     state,
                     Number.isFinite(payloadUndoDepth) ? payloadUndoDepth : state.historyUndoDepth,
                     Number.isFinite(payloadRedoDepth) ? payloadRedoDepth : state.historyRedoDepth,
-                    // 跳转只是在既有历史里移动位置，不丢弃任何分支步骤。
-                    { preserveStepAtCurrentPosition: true },
                 );
-                restoreParamSelectionForPosition(state, state.historyUndoDepth);
+                // 跳到的那一步若登记过选区，载荷会带回该状态下的选区。
+                applyParamSelectionRestoreFromPayload(state, payload);
                 // 与撤销/重做一致：快照携带的 playhead_sec 即该状态形成时的
                 // 光标位置（该状态下的实际操作点），播放中由传输层所有。
                 const prevPlayheadSec = state.playheadSec;
@@ -5230,18 +5279,59 @@ const sessionSlice = createSlice({
             .addCase(setTempoMapRemote.fulfilled, (state, action) => {
                 const payload = action.payload as {
                     ok?: boolean;
+                    project?: { dirty?: boolean };
                 } & TimelineState;
                 if (!payload.ok || !payload.tracks || !payload.clips) {
                     return;
                 }
+                // 【迟到的回声必须整份忽略】与 BPM 路径同一类问题：拖拽 / 滚轮手势
+                // 期间请求会积压，旧地图的回声在乐观值前进之后才到达。若照单应用，
+                // 网格会被反复拽回旧锚点（`Tempo Map 变化点` 重塑网格，锚点一变整条
+                // 网格就平移），与用户报告的"抽搐"完全一致。判据：**当前地图仍等于
+                // 本次请求送出的地图**（没有被更新的写入覆盖）才采纳。
+                const requestedMap = action.meta.arg as TempoMap | null;
+                if (!isSameTempoMap(state.tempoMap, requestedMap)) {
+                    return;
+                }
                 // 后端为权威来源：应用完整快照（含 tempo_map 与工程基准值）。
+                //
+                // 【幂等回声不产生新引用】快照会用一个**新的** tempoMap 对象替换引用，
+                // 而标尺刻度的 memo 依赖该引用：滚轮 / 拖拽这类连续手势里，每一次
+                // 提交都会因此多出一次全量重算（标尺"抽搐"的放大器之一）。后端没有
+                // 改动地图时（本次提交的内容就是它已有的），保留旧引用即可 ——
+                // 其余字段照常应用，不牺牲任何同步语义。
+                const previousTempoMap = state.tempoMap;
                 applyTimelineState(state, payload, { force: true });
+                const tempoMapChanged =
+                    !previousTempoMap ||
+                    !state.tempoMap ||
+                    !isSameTempoMap(previousTempoMap, state.tempoMap);
+                if (!tempoMapChanged && previousTempoMap) {
+                    state.tempoMap = previousTempoMap;
+                }
                 // 显式触发后台预渲染：Tempo Map 音阶变化会影响子轨道“度数差”等
                 // 依赖音阶的渲染。applyTimelineState 已使 paramsEpoch 递增，
                 // App 层据此调用 startBackgroundRender（与工程音阶变更路径
                 // setProjectBaseScaleRemote.fulfilled 保持一致）；此处再显式递增，
                 // 确保该触发不依赖 applyTimelineState 的内部实现细节。
-                state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
+                //
+                // 地图未变（纯回声）时不再递增：没有任何音阶变化需要重渲染。
+                if (tempoMapChanged) {
+                    state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
+                }
+                /*
+                 * 【为什么必须在**接受分支**里标脏，而不是用 `tempoMapChanged`】
+                 * BPM / 拍号的编辑是乐观更新：提交前本地已 `setTempoMap(nextMap)`，
+                 * 后端回声与本地完全一致 —— 上面的"纯回声"判据在此恒为 false，
+                 * 拿它当脏标记条件等于永不标脏（这正是本处曾经的缺口：改 BPM 后
+                 * "新建工程"不询问、静默丢弃）。后端若在响应里回报 `project.dirty`
+                 * 就以它为准（与基础音阶/时间线设置那几条一致），否则视为已修改。
+                 */
+                if (typeof payload.project?.dirty === "boolean") {
+                    state.project.dirty = payload.project.dirty;
+                } else {
+                    markProjectDirty(state.project);
+                }
                 state.status = "Tempo map updated";
             })
             .addCase(setTempoMapRemote.rejected, setRejected)
@@ -5321,7 +5411,7 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload.timeline, { force: true });
                 if (payload.newClipIds && payload.newClipIds.length > 0) {
                     state.multiSelectedClipIds = payload.newClipIds;
-                        state.multiSelectionIntentional = false;
+                    state.multiSelectionIntentional = false;
                     state.selectedClipId = payload.newClipIds[0] ?? null;
                 }
                 // 粘贴后光标跳到所有新 Clip 中最靠右的结束位置
@@ -5632,6 +5722,65 @@ const sessionSlice = createSlice({
                 state.status = "Clip edit rejected";
             })
 
+            .addCase(scanAndConvertFakeStereoRemote.fulfilled, (state, action) => {
+                const payload = action.payload as {
+                    ok?: boolean;
+                    scanned?: number;
+                    converted?: number;
+                    pending?: number;
+                    eligibility?: {
+                        /** 后端 `snake_case` 序列化：字段名必须逐字一致。 */
+                        project_clips?: number;
+                        matched_clips?: number;
+                        takes_seen?: number;
+                        skipped_no_source?: number;
+                    };
+                };
+                if (!payload.ok) {
+                    state.status = "Fake-stereo scan rejected";
+                    return;
+                }
+                const scanned = payload.scanned ?? 0;
+                const converted = payload.converted ?? 0;
+                const pending = payload.pending ?? 0;
+
+                // 一个候选都没有时，**按真实计数**说清为什么。过去这里会猜一个
+                // 原因，而计数本身因为字段名不一致恒为 0 —— 于是界面随口断言
+                // "选中的音频块在工程里找不到"，一句听起来像用户操作有误、
+                // 实际完全虚假的话。
+                if (scanned === 0) {
+                    const eligibility = payload.eligibility ?? {};
+                    const projectClips = eligibility.project_clips ?? 0;
+                    const matched = eligibility.matched_clips ?? 0;
+                    const seen = eligibility.takes_seen ?? 0;
+                    const noSource = eligibility.skipped_no_source ?? 0;
+                    if (projectClips === 0) {
+                        state.status = "Fake-stereo scan: project has no clips";
+                    } else if (matched === 0) {
+                        state.status = `Fake-stereo scan: range matches no clip (${projectClips} in project)`;
+                    } else if (seen === 0) {
+                        state.status = `Fake-stereo scan: ${matched} clip(s) have no takes`;
+                    } else if (noSource > 0) {
+                        state.status = `Fake-stereo scan: ${noSource} take(s) have no source`;
+                    } else {
+                        state.status = "Fake-stereo scan: nothing to decide";
+                    }
+                    return;
+                }
+
+                // 后缀在 App.tsx 的 statusText 里解析（`statusKey` 映射 + 双数量
+                // 正则）。"unreadable"必须与"已折叠"区分开：前者下次打开会自动
+                // 重试，后者永远不会再判。计数一律写成 {converted}/{scanned} 分数，
+                // 比逐个念数量短一半。
+                const pendingSuffix = pending > 0 ? `, ${pending} unreadable` : "";
+                state.status = action.meta.arg.dryRun
+                    ? `Fake-stereo scan: ${converted}/${scanned} foldable${pendingSuffix}`
+                    : `Fake-stereo scan: ${converted}/${scanned} folded${pendingSuffix}`;
+            })
+            .addCase(scanAndConvertFakeStereoRemote.rejected, (state, action) => {
+                setRejected(state, action);
+            })
+
             .addCase(setClipActiveTakeRemote.pending, (state, action) => {
                 const clip = state.clips.find((entry) => entry.id === action.meta.arg.clipId);
                 if (!clip) return;
@@ -5726,6 +5875,30 @@ const sessionSlice = createSlice({
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
             .addCase(setClipTakeReversedRemote.rejected, setRejected)
+
+            .addCase(setClipTakeChannelModeRemote.pending, (state, action) => {
+                // 乐观切换单个 Take 的声道模式；active take 物化到 flat 投影，
+                // inactive take 只动自身条目（与 reversed 同模式）。
+                const clip = state.clips.find((entry) => entry.id === action.meta.arg.clipId);
+                if (!clip) return;
+                const takes = clip.takes ?? [];
+                const take = takes.find((entry) => entry.id === action.meta.arg.takeId);
+                if (!take) return;
+                take.channelMode = normalizeChannelMode(action.meta.arg.channelMode);
+                if (take.id === clip.activeTakeId) {
+                    applyActiveTakeToFlat(clip, take);
+                }
+            })
+            .addCase(setClipTakeChannelModeRemote.fulfilled, (state, action) => {
+                const payload = action.payload as { ok?: boolean } & TimelineState;
+                if (!payload.ok) {
+                    state.error = "Take channel mode rejected";
+                    state.status = "Failed";
+                    return;
+                }
+                applyTimelineStatePreservingPlayhead(state, payload);
+            })
+            .addCase(setClipTakeChannelModeRemote.rejected, setRejected)
 
             .addCase(packClipsIntoTakesRemote.rejected, setRejected)
 
@@ -5888,7 +6061,25 @@ const sessionSlice = createSlice({
                     return;
                 }
                 // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
-                state.bpm = clamp(Number(payload.bpm ?? state.bpm), 10, 960);
+                //
+                // 【必须忽略"迟到"的回声】传输命令经 `enqueueTransportCommand` 串行
+                // 执行，滚轮手势期间会积压几十个请求；每个请求的回声都在**乐观值已经
+                // 前进之后**才到达。若照单采纳，state.bpm 就会在"最新乐观值"与"若干个
+                // 旧回声值"之间反复被拽回 —— 刻度时间（`sec = beat × 60 / bpm`）与网格
+                // 因此来回平移，用户看到的就是标尺与网格"抽搐"。
+                //
+                // 判据与 `seekPlayhead.fulfilled` 完全一致（那里已经写明这条规则）：
+                // **仅当前端值仍等于本次请求值**（即没有被更新的请求覆盖）**且后端确实
+                // 修正了它**（clamp 之类）时才采纳。
+                const requestedBpm = action.meta.arg as number;
+                const echoedBpm = clamp(Number(payload.bpm ?? requestedBpm), 10, 960);
+                const EPS_BPM = 1e-9;
+                if (
+                    Math.abs(state.bpm - requestedBpm) <= EPS_BPM &&
+                    Math.abs(echoedBpm - requestedBpm) > EPS_BPM
+                ) {
+                    state.bpm = echoedBpm;
+                }
                 if (payload.tracks && payload.clips) {
                     applyTimelineState(state, payload as TimelineState, { force: true });
                 }
@@ -5937,10 +6128,14 @@ const sessionSlice = createSlice({
             .addCase(addTrackRemote.fulfilled, (state, action) => {
                 const payload = action.payload as {
                     ok?: boolean;
+                    project?: { dirty?: boolean };
                 } & TimelineState;
                 if (!payload.ok) {
                     return;
                 }
+                // 增删轨道是工程结构变更：与 clip 级 reducer 一样必须标脏，
+                // 否则"加了轨道 → 新建工程"会静默丢弃（与 Tempo Map 同款缺口）。
+                markProjectDirty(state.project);
                 // 交互锁期间（如拖拽中）仅同步轨道列表，
                 // 避免 add_track 的后端快照覆盖前端 clip 乐观位置并产生闪烁。
                 if (state._interactionLockCount > 0) {
@@ -5957,6 +6152,7 @@ const sessionSlice = createSlice({
                 if (!payload.ok) {
                     return;
                 }
+                markProjectDirty(state.project);
                 applyTimelineState(state, payload, { force: true });
             })
 
@@ -6031,6 +6227,49 @@ const sessionSlice = createSlice({
                     pitchRange: payload.pitch_range,
                 };
             });
+
+        // ── 在途导入计数 ──────────────────────────────────────────────────
+        // 【必须在所有 addCase 之后】RTK 要求 `addMatcher` 只能排在 `addCase`
+        // 之后，提前调用会直接抛错。
+        //
+        // 只统计**会去读音频文件**的导入 thunk：`busy` 是全局在途标志，被大量
+        // 无关操作置起，拿它驱动"正在导入"的提示会误报。
+        //
+        // 计数而非布尔：`importAudioFromDialog` 会转派给 `importAudioAtPosition`，
+        // 两者同时在途，用布尔会提前清零。
+        //
+        // 用 typePrefix 匹配而不是 `isAnyOf` + `isPending`：后者在本工程的 RTK
+        // 类型下推不出收窄签名（重载会退化成返回 boolean，无法当 matcher 用）。
+        // thunk 的 `typePrefix` 是稳定的公开契约（状态为 `<prefix>/pending` 等），
+        // 直接比字符串更直白，也不依赖类型体操。
+        const audioImportPrefixes = [
+            importAudioAtPosition.typePrefix,
+            importAudioFileAtPosition.typePrefix,
+            importAudioFromDialog.typePrefix,
+            importAudioFromPath.typePrefix,
+            importMultipleAudioAtPosition.typePrefix,
+            importMultipleAudioFilesAtPosition.typePrefix,
+        ];
+        const isAudioImportStep = (action: { type?: string }, step: string) =>
+            audioImportPrefixes.some((prefix) => action.type === `${prefix}/${step}`);
+        const settleImport = (state: SessionState) => {
+            state.importInFlight = Math.max(0, state.importInFlight - 1);
+        };
+        builder
+            .addMatcher(
+                (action: { type?: string }) => isAudioImportStep(action, "pending"),
+                (state: SessionState) => {
+                    state.importInFlight += 1;
+                },
+            )
+            .addMatcher(
+                (action: { type?: string }) => isAudioImportStep(action, "fulfilled"),
+                settleImport,
+            )
+            .addMatcher(
+                (action: { type?: string }) => isAudioImportStep(action, "rejected"),
+                settleImport,
+            );
     },
 });
 
@@ -6041,7 +6280,6 @@ export const {
     setTrackMeters,
     clearTrackMeters,
     setHistoryState,
-    recordParamSelectionStretchStep,
     checkpointHistory,
     applyTimelinePayload,
     setToolMode,
@@ -6081,6 +6319,7 @@ export const {
     toggleParamEditorTimelineClickSelectTrack,
     toggleClipboardPreview,
     toggleParamValuePopup,
+    toggleParamAxisUnit,
     cycleDragDirection,
     setDragDirection,
     setEdgeSmoothnessPercent,
@@ -6111,6 +6350,8 @@ export const {
     setGpuDeviceId,
     setOrtDeviceId,
     toggleAutoBackgroundRender,
+    setRenderCacheSettings,
+    setChannelImportPolicy,
     setVisibleReferenceRootTrackIds,
     toggleVisibleReferenceRootTrackId,
     setSelectedClip,

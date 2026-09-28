@@ -56,6 +56,10 @@ export interface WaveformSceneClip {
     /** REAPER 风格淡出形状 id（语义同 fadeInShape）。 */
     fadeOutShape: number;
     fadeOutDir: number;
+    /** Take 声道模式（0..=4，对齐 REAPER CHANMODE）；缺省 0（正常/按源）。 */
+    channelMode?: number;
+    /** 源文件声道数（未知时缺省 0，由峰值数据自身的 channels 兜底）。 */
+    sourceChannels?: number;
     /** 多 Take 展开：该 lane 相对行波形带（body）顶部的竖直偏移；未设置时用行波形带。 */
     laneTopPx?: number;
     /** 多 Take 展开：该 lane 的高度；未设置时用行波形带高度。 */
@@ -78,6 +82,13 @@ export interface WaveformSceneSegment {
     sourceSampleRate: number;
     sourceStartSec: number;
     sourceEndSec: number;
+    /**
+     * 该 Clip 在**时间轴**上的起点（秒）。
+     *
+     * 作用：几何层据此把像素列换算成时间轴绝对时间（`clipStartSec + clipLocal…`），
+     * `amplitudeMap` 需要它来按时间取逐帧参数（例如动态增益）。缺省 0。
+     */
+    clipStartSec?: number;
     clipLocalStartSec: number;
     clipLocalEndSec: number;
     clipTotalDurationSec: number;
@@ -92,6 +103,10 @@ export interface WaveformSceneSegment {
     fadeOutShape: number;
     fadeOutDir: number;
     alpha: number;
+    /** Take 声道模式（0..=4，对齐 REAPER CHANMODE）。 */
+    channelMode: number;
+    /** 源文件声道数（未知时 0）。 */
+    sourceChannels: number;
     /** inactive take lane：几何层据此压暗顶点颜色。 */
     inactive?: boolean;
 }
@@ -133,11 +148,35 @@ function finitePositive(value: number, fallback: number): number {
     return Number.isFinite(value) && value > 1e-6 ? value : fallback;
 }
 
+/**
+ * 时间区间复用的 scratch（模块级一次分配）。
+ *
+ * 【为什么需要】`validLocalInterval` / `sourceRangeForLocal` 每个 clip、每个
+ * tile 都要调用，若各自返回一个 `[start, end]` 元组数组，400 clip 的全览重建
+ * 会产生约 1200 次短命数组分配 —— 全部是年轻代垃圾，落在渲染关键路径上。
+ * 改为「返回布尔 / 无返回 + 把结果写进调用方给的 out」后稳态零分配，
+ * 语义逐值不变。`buildWaveformScene` 同步执行，无重入风险。
+ */
+const validIntervalScratch = new Float64Array(2);
+const sourceRangeScratch = new Float64Array(2);
+/** 段边界（最多 3 个：有效区间两端 + 可选的前导重叠点）。 */
+const boundaryScratch = new Float64Array(3);
+/** 媒体边界标记的两个位置（0 与媒体时长）。 */
+const mediaBoundaryScratch = new Float64Array(2);
+
 function effectiveFade(auto: number | undefined, manual: number): number {
     const automatic = Number(auto ?? 0);
     return automatic > 0 ? automatic : Math.max(0, Number(manual) || 0);
 }
 
+/**
+ * 求 tile 在给定本地区间内的**有效**子区间（落在源数据域内的那一段）。
+ *
+ * 结果写入 `out`（长度 ≥ 2），返回是否有效。
+ *
+ * @param out 结果写入目标：`out[0] = start`、`out[1] = end`。
+ * @returns 有效区间存在时为 true；false 时 `out` 未被写入。
+ */
 function validLocalInterval(
     tile: SourceTile,
     reversed: boolean,
@@ -145,8 +184,9 @@ function validLocalInterval(
     mediaDurationSec: number,
     localStartSec: number,
     localEndSec: number,
-): [number, number] | null {
-    if (!(mediaDurationSec > 0)) return null;
+    out: Float64Array,
+): boolean {
+    if (!(mediaDurationSec > 0)) return false;
 
     const domainStart = reversed
         ? tile.localStartSec + (tile.sourceEndSec - mediaDurationSec) / playbackRate
@@ -156,26 +196,32 @@ function validLocalInterval(
         : tile.localStartSec + (mediaDurationSec - tile.sourceStartSec) / playbackRate;
     const start = Math.max(localStartSec, Math.min(domainStart, domainEnd));
     const end = Math.min(localEndSec, Math.max(domainStart, domainEnd));
-    return end > start + 1e-9 ? [start, end] : null;
+    if (!(end > start + 1e-9)) return false;
+    out[0] = start;
+    out[1] = end;
+    return true;
 }
 
+/**
+ * 把 tile 内的本地区间投影回**源文件**区间。
+ *
+ * 结果写入 `out`（长度 ≥ 2）：`out[0] = sourceStart`、`out[1] = sourceEnd`。
+ */
 function sourceRangeForLocal(
     tile: SourceTile,
     reversed: boolean,
     playbackRate: number,
     localStartSec: number,
     localEndSec: number,
-): [number, number] {
+    out: Float64Array,
+): void {
     if (reversed) {
-        return [
-            tile.sourceEndSec - (localEndSec - tile.localStartSec) * playbackRate,
-            tile.sourceEndSec - (localStartSec - tile.localStartSec) * playbackRate,
-        ];
+        out[0] = tile.sourceEndSec - (localEndSec - tile.localStartSec) * playbackRate;
+        out[1] = tile.sourceEndSec - (localStartSec - tile.localStartSec) * playbackRate;
+        return;
     }
-    return [
-        tile.sourceStartSec + (localStartSec - tile.localStartSec) * playbackRate,
-        tile.sourceStartSec + (localEndSec - tile.localStartSec) * playbackRate,
-    ];
+    out[0] = tile.sourceStartSec + (localStartSec - tile.localStartSec) * playbackRate;
+    out[1] = tile.sourceStartSec + (localEndSec - tile.localStartSec) * playbackRate;
 }
 
 /**
@@ -343,25 +389,38 @@ export function buildWaveformScene(args: {
                 const tileEndSec = tile.localStartSec + tile.durationSec;
                 const clippedLocalStart = Math.max(tile.localStartSec, visibleLocalStartSec);
                 const clippedLocalEnd = Math.min(tileEndSec, visibleLocalEndSec);
-                const valid = validLocalInterval(
-                    tile,
-                    reversed,
-                    playbackRate,
-                    mediaDurationSec,
-                    clippedLocalStart,
-                    clippedLocalEnd,
-                );
-                if (!valid) continue;
-
-                const boundaries = [valid[0]];
-                if (leadingOverlapSec > valid[0] + 1e-9 && leadingOverlapSec < valid[1] - 1e-9) {
-                    boundaries.push(leadingOverlapSec);
+                if (
+                    !validLocalInterval(
+                        tile,
+                        reversed,
+                        playbackRate,
+                        mediaDurationSec,
+                        clippedLocalStart,
+                        clippedLocalEnd,
+                        validIntervalScratch,
+                    )
+                ) {
+                    continue;
                 }
-                boundaries.push(valid[1]);
+                const validLo = validIntervalScratch[0];
+                const validHi = validIntervalScratch[1];
 
-                for (let index = 0; index + 1 < boundaries.length; index += 1) {
-                    const localStartSec = boundaries[index];
-                    const localEndSec = boundaries[index + 1];
+                // 边界最多 3 个：有效区间左端、可选的前导重叠点、有效区间右端。
+                // 用 scratch 而非数组字面量 + push（每个 tile 一次分配）。
+                const hasLeadingOverlap =
+                    leadingOverlapSec > validLo + 1e-9 && leadingOverlapSec < validHi - 1e-9;
+                boundaryScratch[0] = validLo;
+                if (hasLeadingOverlap) {
+                    boundaryScratch[1] = leadingOverlapSec;
+                    boundaryScratch[2] = validHi;
+                } else {
+                    boundaryScratch[1] = validHi;
+                }
+                const boundaryCount = hasLeadingOverlap ? 3 : 2;
+
+                for (let index = 0; index + 1 < boundaryCount; index += 1) {
+                    const localStartSec = boundaryScratch[index];
+                    const localEndSec = boundaryScratch[index + 1];
                     const x = secToViewportPx(axis, clip.startSec + localStartSec);
                     const right = secToViewportPx(axis, clip.startSec + localEndSec);
                     const clippedX = Math.max(0, x);
@@ -385,13 +444,16 @@ export function buildWaveformScene(args: {
                         drawnLocalEndSec =
                             localEndSec - (right - clippedRight) / Math.max(1e-9, pxPerLocalSec);
                     }
-                    const [pieceSourceStartSec, pieceSourceEndSec] = sourceRangeForLocal(
+                    sourceRangeForLocal(
                         tile,
                         reversed,
                         playbackRate,
                         drawnLocalStartSec,
                         drawnLocalEndSec,
+                        sourceRangeScratch,
                     );
+                    const pieceSourceStartSec = sourceRangeScratch[0];
+                    const pieceSourceEndSec = sourceRangeScratch[1];
 
                     segments.push({
                         clipId: clip.id,
@@ -399,6 +461,9 @@ export function buildWaveformScene(args: {
                         sourceSampleRate: finitePositive(clip.sourceSampleRate ?? 44100, 44100),
                         sourceStartSec: Math.max(0, pieceSourceStartSec),
                         sourceEndSec: Math.min(mediaDurationSec, pieceSourceEndSec),
+                        // 时间轴起点：几何层据此把像素列还原成绝对时间，
+                        // 供逐帧参数（动态增益）采样使用。
+                        clipStartSec: clip.startSec,
                         clipLocalStartSec: drawnLocalStartSec,
                         clipLocalEndSec: drawnLocalEndSec,
                         clipTotalDurationSec: clip.lengthSec,
@@ -418,13 +483,21 @@ export function buildWaveformScene(args: {
                         fadeOutDir: clip.fadeOutDir ?? 0,
                         alpha:
                             localStartSec < leadingOverlapSec - 1e-9 ? baseAlpha * 0.5 : baseAlpha,
+                        channelMode: clip.channelMode ?? 0,
+                        sourceChannels: clip.sourceChannels ?? 0,
                         inactive: Boolean(clip.inactive),
                     });
                 }
             }
 
             if (!loopEnabled) {
-                for (const boundarySec of [0, mediaDurationSec]) {
+                // 媒体边界标记：源数据的起点与终点在 clip 本地时间上的位置。
+                // 位置列表用 scratch 而非数组字面量 `[0, mediaDurationSec]`
+                // ——后者每个非 loop clip 每帧分配一次。
+                mediaBoundaryScratch[0] = 0;
+                mediaBoundaryScratch[1] = mediaDurationSec;
+                for (let boundaryIndex = 0; boundaryIndex < 2; boundaryIndex += 1) {
+                    const boundarySec = mediaBoundaryScratch[boundaryIndex];
                     const localSec = reversed
                         ? (window.winEndSec - boundarySec) / playbackRate
                         : (boundarySec - window.winStartSec) / playbackRate;

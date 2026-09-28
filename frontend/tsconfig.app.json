@@ -22,7 +22,15 @@
         "noUnusedParameters": true,
         "erasableSyntaxOnly": true,
         "noFallthroughCasesInSwitch": true,
-        "noUncheckedSideEffectImports": true
+        "noUncheckedSideEffectImports": true,
+
+        /* 扩展入口别名（与 vite.config.ts 的 resolve.alias 保持一致）。
+           应用内部代码不用别名；这是给第三方扩展作者的稳定导入根。 */
+        "baseUrl": ".",
+        "paths": {
+            "@hs/sdk": ["./src/sdk/index.ts"],
+            "@hs/ui": ["./src/ui/index.ts"]
+        }
     },
     "include": ["src"]
 }

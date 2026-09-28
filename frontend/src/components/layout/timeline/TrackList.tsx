@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "re
 import { registerDragAbort } from "./gestureFocusGuard";
 import { formatEditNumber } from "./math";
 import { measureTextWidth } from "./runtime/timelineCanvasStyle";
-import { Flex, Box, Text, IconButton, Select } from "@radix-ui/themes";
+import { Flex, Box, IconButton } from "@radix-ui/themes";
 import { Cross2Icon, PlusIcon } from "@radix-ui/react-icons";
 import { shallowEqual } from "react-redux";
 import type { TrackInfo, TrackMeterInfo } from "../../../features/session/sessionTypes";
@@ -28,6 +28,8 @@ import { computeVisibleTrackWindow } from "./runtime/timelineWindowing";
 import { resolveScrollCommitStepPx, shouldCommitScroll } from "./scrollCommit";
 import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
 import { useAppTheme } from "../../../theme/AppThemeProvider";
+import { AppContextMenu } from "../../../ui/Menu";
+import { AppConfirmDialog, AppSelect } from "../../../ui";
 
 /** Color palette options shown when creating a new track.
  * 色值选取与归一化带（s 0.30-0.46、感知亮度 0.50-0.60）对齐：暖色系
@@ -44,7 +46,7 @@ const TRACK_COLOR_PALETTE_KEYS: { value: string; key: MessageKey }[] = [
     { value: "#d4bc55", key: "color_yellow" },
     { value: "#cf5252", key: "color_red" },
 ];
-const PITCH_ANALYSIS_ALGO_OPTIONS = ["world_dll", "nsf_hifigan_onnx", "vslib", "none"] as const;
+const PITCH_ANALYSIS_ALGO_OPTIONS = ["nsf_hifigan_onnx", "world_dll", "vslib", "none"] as const;
 
 function splitDigitRuns(text: string): Array<{ text: string; digits: boolean }> {
     const parts: Array<{ text: string; digits: boolean }> = [];
@@ -90,10 +92,8 @@ const SlotTimeText = React.memo(function SlotTimeText({
 }) {
     const parts = React.useMemo(() => splitDigitRuns(text), [text]);
     return (
-        <Text
-            size="2"
-            weight="medium"
-            className={selectable ? `${className ?? ""} cursor-text` : className}
+        <span
+            className={`hs-type-body font-medium ${selectable ? `${className ?? ""} cursor-text` : (className ?? "")}`}
             style={
                 selectable
                     ? {
@@ -142,7 +142,7 @@ const SlotTimeText = React.memo(function SlotTimeText({
                     <span key={index}>{part.text}</span>
                 ),
             )}
-        </Text>
+        </span>
     );
 });
 
@@ -284,15 +284,13 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
             >
                 <SlotTimeText text={maxLabel} digitWidthPx={digitWidth} className="tabular-nums" />
             </span>
-            <Text
+            <span
                 ref={digitProbeRef}
-                size="2"
-                weight="medium"
                 aria-hidden
-                className="absolute invisible whitespace-nowrap tabular-nums"
+                className="hs-type-body font-medium absolute invisible whitespace-nowrap tabular-nums"
             >
                 0
-            </Text>
+            </span>
             <SlotTimeText
                 text={formatted.combined}
                 digitWidthPx={digitWidth}
@@ -506,7 +504,13 @@ const TrackListInner: React.FC<TrackListProps> = ({
         y: number;
         trackId: string;
     } | null>(null);
-    const trackCtxMenuRef = useRef<HTMLDivElement | null>(null);
+    /**
+     * 待确认删除的轨道 id。
+     *
+     * 右键菜单关闭时卸载，确认框不能住在菜单子树里；把待删除的轨道提升到
+     * 常驻的轨道列表组件，菜单项只置位，确认后才调用 onRemoveTrack。
+     */
+    const [pendingRemoveTrackId, setPendingRemoveTrackId] = useState<string | null>(null);
     const [listScrollTop, setListScrollTop] = useState(0);
     /**
      * 上一次真正提交给 `setListScrollTop` 的位置。
@@ -528,33 +532,6 @@ const TrackListInner: React.FC<TrackListProps> = ({
     const trackDeleteShortcut = useAppSelector((s) =>
         formatKeybinding(selectKeybinding(s, "track.delete"), ""),
     );
-
-    // 自动修正菜单溢出屏幕
-    useLayoutEffect(() => {
-        const el = trackCtxMenuRef.current;
-        if (!el || !trackCtxMenu) return;
-        const rect = el.getBoundingClientRect();
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        if (rect.right > vw) {
-            el.style.left = `${Math.max(0, vw - rect.width)}px`;
-        }
-        if (rect.bottom > vh) {
-            el.style.top = `${Math.max(0, vh - rect.height)}px`;
-        }
-    }, [trackCtxMenu]);
-
-    // 点击其他区域关闭右键菜单
-    useEffect(() => {
-        if (!trackCtxMenu) return;
-        const handler = (e: PointerEvent) => {
-            const target = e.target as HTMLElement | null;
-            if (target?.closest?.("[data-track-ctx-menu]")) return;
-            setTrackCtxMenu(null);
-        };
-        window.addEventListener("pointerdown", handler, true);
-        return () => window.removeEventListener("pointerdown", handler, true);
-    }, [trackCtxMenu]);
 
     function commitTrackName() {
         if (!editingTrackId) return;
@@ -1346,16 +1323,14 @@ const TrackListInner: React.FC<TrackListProps> = ({
         // closest 就近解析优先命中，见 focusSurface.ts / data-hs-surface）。
         <Flex
             direction="column"
-            className="w-64 border-r border-qt-border bg-qt-window shrink-0"
+            className="h-full w-full border-r border-qt-border bg-qt-window"
             data-hs-surface="trackHeader"
         >
             <Box
                 className="border-b border-qt-border px-2 flex items-center justify-between gap-2 bg-qt-window shadow-sm z-10 relative"
                 style={{ height: headerHeight }}
             >
-                <Text size="2" weight="bold" color="gray" className="shrink-0">
-                    {t("tracks")}
-                </Text>
+                <span className="hs-type-muted font-semibold shrink-0">{t("common_tracks")}</span>
                 <TrackHeaderPlayheadTime />
                 {/* 速度映射小按钮（右下角）：显示/创建 或 清空/隐藏。 */}
                 <TempoMapCornerButton />
@@ -1387,7 +1362,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                         e.stopPropagation();
                     }
                 }}
-                className="flex-1 relative overflow-y-auto custom-scrollbar hide-v-scrollbar"
+                className="flex-1 relative overflow-y-auto custom-scrollbar hide-v-scrollbar no-scroll-anchor"
                 onScroll={(e) => {
                     const nextScrollTop = (e.currentTarget as HTMLDivElement).scrollTop;
                     // 【为什么这里要量化】内核模式下本容器每帧都被镜像回写，
@@ -1857,7 +1832,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                             <input
                                                                 ref={nameInputRef}
                                                                 value={editingName}
-                                                                className="bg-transparent outline outline-1 outline-qt-highlight rounded px-0.5 flex-1 min-w-0 text-qt-text text-sm font-medium pr-2"
+                                                                className="bg-transparent outline outline-1 outline-qt-highlight rounded px-0.5 flex-1 min-w-0 text-qt-text text-qt-md font-medium pr-2"
                                                                 onChange={(e) =>
                                                                     setEditingName(e.target.value)
                                                                 }
@@ -1876,10 +1851,8 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 autoFocus
                                                             />
                                                         ) : (
-                                                            <Text
-                                                                size="2"
-                                                                weight="medium"
-                                                                className={`text-qt-text truncate pr-2 ${depth > 0 ? "opacity-90" : ""} cursor-text select-none`}
+                                                            <span
+                                                                className={`hs-type-body font-medium text-qt-text truncate pr-2 ${depth > 0 ? "opacity-90" : ""} cursor-text select-none`}
                                                                 onPointerDown={(e) =>
                                                                     e.stopPropagation()
                                                                 }
@@ -1893,7 +1866,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 }}
                                                             >
                                                                 {track.name}
-                                                            </Text>
+                                                            </span>
                                                         )}
                                                     </Flex>
                                                     {isRoot && composeEnabled && onAlgoChange ? (
@@ -1903,8 +1876,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 e.stopPropagation()
                                                             }
                                                         >
-                                                            <Select.Root
-                                                                size="1"
+                                                            <AppSelect
+                                                                // 轨道头内的紧凑控件
+                                                                density="compact"
                                                                 value={
                                                                     PITCH_ANALYSIS_ALGO_OPTIONS.includes(
                                                                         track.pitchAnalysisAlgo as
@@ -1919,34 +1893,38 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 onValueChange={(v) => {
                                                                     onAlgoChange(track.id, v);
                                                                 }}
-                                                            >
-                                                                <Select.Trigger
-                                                                    style={{
-                                                                        minWidth: 80,
-                                                                    }}
-                                                                />
-                                                                <Select.Content>
-                                                                    <Select.Item value="world_dll">
-                                                                        world
-                                                                    </Select.Item>
-                                                                    <Select.Item value="nsf_hifigan_onnx">
-                                                                        nsf-hifigan
-                                                                    </Select.Item>
-                                                                    <Select.Item value="vslib">
-                                                                        vslib
-                                                                    </Select.Item>
-                                                                    <Select.Item value="none">
-                                                                        {t("none")}
-                                                                    </Select.Item>
-                                                                </Select.Content>
-                                                            </Select.Root>
+                                                                fullWidth={false}
+                                                                className="min-w-[80px]"
+                                                                ariaLabel={t("algo_label")}
+                                                                options={[
+                                                                    {
+                                                                        value: "nsf_hifigan_onnx",
+                                                                        label: "nsf-hifigan",
+                                                                    },
+                                                                    {
+                                                                        value: "world_dll",
+                                                                        label: "world",
+                                                                    },
+                                                                    {
+                                                                        value: "vslib",
+                                                                        label: "vslib",
+                                                                    },
+                                                                    {
+                                                                        value: "none",
+                                                                        label: t("common_none"),
+                                                                    },
+                                                                ]}
+                                                            />
                                                         </div>
                                                     ) : null}
                                                     <IconButton
                                                         size="1"
                                                         variant="ghost"
                                                         color="gray"
-                                                        className="opacity-0 group-hover:opacity-100"
+                                                        aria-label={t("history_op_remove_track")}
+                                                        /* 默认 `opacity-0`：Tab 到它时必须显形，
+                                                           否则焦点环画在一个透明元素上。 */
+                                                        className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
                                                         disabled={isLastRootTrack(track.id)}
                                                         onPointerDown={(e) => e.stopPropagation()}
                                                         onClick={(e) => {
@@ -2026,7 +2004,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                         {editingGainTrackId === track.id ? (
                                                             <input
                                                                 ref={editingGainInputRef}
-                                                                className="text-xs rounded px-1 outline-none text-left tabular-nums bg-qt-base text-qt-text border border-qt-border"
+                                                                className="text-qt-xs rounded px-1 outline-none text-left tabular-nums bg-qt-base text-qt-text border border-qt-border"
                                                                 style={{
                                                                     // 实测文本宽度：自定义字体下 ch 估算不可靠
                                                                     width: `${editingGainWidthPx}px`,
@@ -2059,28 +2037,24 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 }
                                                             />
                                                         ) : (
-                                                            <Text
-                                                                size="1"
-                                                                color={
-                                                                    Math.abs(gainToDb(volume)) <
-                                                                    0.05
-                                                                        ? "iris"
-                                                                        : "gray"
-                                                                }
+                                                            <span
                                                                 /* 0.0 dB 用强调色标记"默认增益"，
-                                                                   highContrast 保证小字在面板底色上可读 */
-                                                                highContrast={
-                                                                    Math.abs(gainToDb(volume)) <
-                                                                    0.05
-                                                                }
-                                                                className="leading-none tabular-nums select-none"
+                                                                   其余保持弱化色 */
+                                                                style={{
+                                                                    color:
+                                                                        Math.abs(gainToDb(volume)) <
+                                                                        0.05
+                                                                            ? "var(--qt-accent)"
+                                                                            : "var(--qt-text-muted)",
+                                                                }}
+                                                                className="hs-type-caption leading-none tabular-nums select-none"
                                                                 data-track-gain-value
                                                                 onPointerDown={(e) =>
                                                                     e.stopPropagation()
                                                                 }
                                                             >
                                                                 {formatGainLabel(volume)}
-                                                            </Text>
+                                                            </span>
                                                         )}
                                                     </Flex>
                                                 </div>
@@ -2100,7 +2074,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                             composeEnabled ? "solid" : "surface"
                                                         }
                                                         color={composeEnabled ? "iris" : "gray"}
-                                                        data-tooltip={t("compose")}
+                                                        data-tooltip={t("common_compose")}
                                                         onPointerDown={(e) => e.stopPropagation()}
                                                         onClick={(e) => {
                                                             e.stopPropagation();
@@ -2111,7 +2085,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                         }}
                                                         style={{
                                                             fontWeight: 700,
-                                                            fontSize: 11,
+                                                            fontSize: "var(--qt-fs-xs)",
                                                             width: 20,
                                                             height: 20,
                                                         }}
@@ -2135,7 +2109,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                     }}
                                                     style={{
                                                         fontWeight: 700,
-                                                        fontSize: 11,
+                                                        fontSize: "var(--qt-fs-xs)",
                                                         width: 20,
                                                         height: 20,
                                                     }}
@@ -2146,7 +2120,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                     size="1"
                                                     variant={solo ? "solid" : "surface"}
                                                     color={solo ? "amber" : "gray"}
-                                                    data-tooltip={t("solo")}
+                                                    data-tooltip={t("common_solo")}
                                                     onPointerDown={(e) => e.stopPropagation()}
                                                     onClick={(e) => {
                                                         e.stopPropagation();
@@ -2154,7 +2128,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                     }}
                                                     style={{
                                                         fontWeight: 700,
-                                                        fontSize: 11,
+                                                        fontSize: "var(--qt-fs-xs)",
                                                         width: 20,
                                                         height: 20,
                                                     }}
@@ -2175,13 +2149,16 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                     justify="between"
                                                     className="h-full pt-1 pb-0"
                                                 >
-                                                    <Text
-                                                        size="1"
-                                                        color={clipped ? "red" : "gray"}
-                                                        className="leading-none tabular-nums"
+                                                    <span
+                                                        className="hs-type-caption leading-none tabular-nums"
+                                                        style={{
+                                                            color: clipped
+                                                                ? "var(--qt-danger-text)"
+                                                                : "var(--qt-text-muted)",
+                                                        }}
                                                     >
                                                         {formatPeakLabel(maxPeakLinear, clipped)}
-                                                    </Text>
+                                                    </span>
                                                     <div
                                                         className="relative h-full w-full"
                                                         style={{
@@ -2209,14 +2186,25 @@ const TrackListInner: React.FC<TrackListProps> = ({
                     </div>
                 </div>
 
+                {/* 整行是一条"添加轨道"按钮。它是可点区域，因此必须有键盘等价操作
+                    与按钮角色 —— 一个只响应 onClick 的 `div` 对键盘用户不存在。 */}
                 <Flex
                     align="center"
                     justify="center"
+                    role="button"
+                    tabIndex={0}
+                    aria-label={t("track_add")}
                     className="h-8 border-b border-qt-border border-dashed text-qt-text-muted hover:text-qt-text hover:bg-qt-button-hover cursor-pointer transition-colors"
                     style={{ height: TRACK_ADD_ROW_HEIGHT }}
                     onClick={onAddTrack}
+                    onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        onAddTrack();
+                    }}
                 >
-                    <PlusIcon className="mr-1" /> <Text size="1">{t("track_add")}</Text>
+                    <PlusIcon className="mr-1" />{" "}
+                    <span className="hs-type-label">{t("track_add")}</span>
                 </Flex>
             </div>
 
@@ -2233,59 +2221,53 @@ const TrackListInner: React.FC<TrackListProps> = ({
 
             {/* 轨道右键菜单 */}
             {trackCtxMenu && (
-                <div
-                    ref={trackCtxMenuRef}
-                    data-track-ctx-menu
-                    data-hs-context-menu="1"
-                    className="fixed z-50 min-w-[140px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
-                    style={{ left: trackCtxMenu.x, top: trackCtxMenu.y }}
-                    onPointerDown={(e) => e.stopPropagation()}
-                >
-                    <button
-                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors flex items-center justify-between gap-3"
-                        onClick={() => {
-                            onCreateTrackBelow?.(trackCtxMenu.trackId);
-                            setTrackCtxMenu(null);
-                        }}
-                    >
-                        <span>{t("track_add")}</span>
-                        {trackAddShortcut && (
-                            <span className="text-[10px] opacity-50 shrink-0">
-                                {trackAddShortcut}
-                            </span>
-                        )}
-                    </button>
-                    <button
-                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors flex items-center justify-between gap-3"
-                        onClick={() => {
-                            onDuplicateTrack?.(trackCtxMenu.trackId);
-                            setTrackCtxMenu(null);
-                        }}
-                    >
-                        <span>{t("track_clone")}</span>
-                        {trackCloneShortcut && (
-                            <span className="text-[10px] opacity-50 shrink-0">
-                                {trackCloneShortcut}
-                            </span>
-                        )}
-                    </button>
-                    <button
-                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors text-red-400 hover:text-red-300 flex items-center justify-between gap-3"
-                        disabled={isLastRootTrack(trackCtxMenu.trackId)}
-                        onClick={() => {
-                            onRemoveTrack(trackCtxMenu.trackId);
-                            setTrackCtxMenu(null);
-                        }}
-                    >
-                        <span>{t("ctx_delete")}</span>
-                        {trackDeleteShortcut && (
-                            <span className="text-[10px] opacity-50 shrink-0">
-                                {trackDeleteShortcut}
-                            </span>
-                        )}
-                    </button>
-                </div>
+                <AppContextMenu
+                    x={trackCtxMenu.x}
+                    y={trackCtxMenu.y}
+                    onClose={() => setTrackCtxMenu(null)}
+                    items={[
+                        {
+                            key: "addTrack",
+                            label: t("track_add"),
+                            shortcut: trackAddShortcut,
+                            onSelect: () => onCreateTrackBelow?.(trackCtxMenu.trackId),
+                        },
+                        {
+                            key: "cloneTrack",
+                            label: t("track_clone"),
+                            shortcut: trackCloneShortcut,
+                            onSelect: () => onDuplicateTrack?.(trackCtxMenu.trackId),
+                        },
+                        {
+                            key: "deleteTrack",
+                            label: t("ctx_delete"),
+                            shortcut: trackDeleteShortcut,
+                            danger: true,
+                            disabled: isLastRootTrack(trackCtxMenu.trackId),
+                            // 不立即删除：先置位待确认轨道，由常驻的确认框在
+                            // 菜单卸载后询问，确认时才调用 onRemoveTrack。
+                            onSelect: () => setPendingRemoveTrackId(trackCtxMenu.trackId),
+                        },
+                    ]}
+                />
             )}
+
+            {/* 删除轨道确认框（常驻于轨道列表，不随右键菜单卸载）。 */}
+            <AppConfirmDialog
+                open={pendingRemoveTrackId !== null}
+                onOpenChange={(open) => {
+                    if (!open) setPendingRemoveTrackId(null);
+                }}
+                title={t("track_remove_selected")}
+                message={t("track_remove_confirm")}
+                confirmLabel={t("ctx_delete")}
+                cancelLabel={t("cancel")}
+                intent="danger"
+                onConfirm={() => {
+                    if (pendingRemoveTrackId !== null) onRemoveTrack(pendingRemoveTrackId);
+                    setPendingRemoveTrackId(null);
+                }}
+            />
             <AppTooltipBubble
                 text={volumeTooltipText}
                 position={showVolumeTooltip ? volumeTooltipPos : null}

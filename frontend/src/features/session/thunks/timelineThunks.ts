@@ -1,5 +1,6 @@
 import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
+import { fetchTimeline } from "./transportThunks";
 import type {
     TimelineState,
     SilenceDetectOptionsPayload,
@@ -402,6 +403,56 @@ export const setClipTakeReversedRemote = createAsyncThunk(
     },
 );
 
+export const setClipTakeChannelModeRemote = createAsyncThunk(
+    "session/setClipTakeChannelModeRemote",
+    async (
+        payload: {
+            clipId: string;
+            takeId: string;
+            channelMode: number;
+            checkpoint?: boolean;
+        },
+        { dispatch, rejectWithValue },
+    ) => {
+        let result: Awaited<ReturnType<typeof webApi.setClipTakeChannelMode>>;
+        try {
+            result = await webApi.setClipTakeChannelMode(payload);
+        } catch (err) {
+            // 自愈：IPC 断链（如命令漏映射）时乐观更新已生效，必须拉权威
+            // 时间线回滚，否则"波形变了、后端从未收到"的状态分叉会一直留存。
+            void dispatch(fetchTimeline());
+            throw err;
+        }
+        if (!result.ok) {
+            void dispatch(fetchTimeline());
+            return rejectWithValue(result);
+        }
+        return result;
+    },
+);
+
+export const scanAndConvertFakeStereoRemote = createAsyncThunk(
+    "session/scanAndConvertFakeStereoRemote",
+    async (payload: { clipIds?: string[]; dryRun?: boolean }, { dispatch, rejectWithValue }) => {
+        let result: Awaited<ReturnType<typeof webApi.scanAndConvertFakeStereo>>;
+        try {
+            result = await webApi.scanAndConvertFakeStereo(payload);
+        } catch (err) {
+            void dispatch(fetchTimeline());
+            throw err;
+        }
+        // 扫描本身只报告；只有实扫（dryRun 缺省）才改动了时间轴。后端整批只打
+        // 一个撤销步，前端因此不做逐条乐观更新，直接拉权威时间线对齐。
+        if (!payload.dryRun) {
+            void dispatch(fetchTimeline());
+        }
+        if (!result.ok) {
+            return rejectWithValue(result);
+        }
+        return result;
+    },
+);
+
 export const addClipTakeFromMediaRemote = createAsyncThunk(
     "session/addClipTakeFromMediaRemote",
     async (payload: {
@@ -437,6 +488,8 @@ export const setClipsStateBulkRemote = createAsyncThunk(
             autoFadeOutSec?: number;
             reversed?: boolean;
             loopEnabled?: boolean;
+            /** 声道模式 0..=4（对齐 REAPER CHANMODE）。 */
+            channelMode?: number;
         }>;
         checkpoint?: boolean;
     }) => {

@@ -26,8 +26,14 @@ pub(crate) struct ResourceManager {
 
 impl ResourceManager {
     pub(crate) fn new(engine_tx: mpsc::Sender<EngineCommand>) -> Self {
-        let cache: Arc<Mutex<DecodeCache>> =
-            Arc::new(Mutex::new(ByteBudgetCache::from_env(MAX_CACHE_ENTRIES)));
+        let cache: Arc<Mutex<DecodeCache>> = Arc::new(Mutex::new(
+            // 逐出时保护"在用"条目：DecodeCache 与引擎快照共享同一个
+            // `Arc<Vec<f32>>`（见 `ResampledStereo::pcm`）。`strong_count > 1`
+            // 表示仍被快照 / 拉伸任务引用——逐出它账面字节会降，但内存并未释放，
+            // 且下次快照重建还要再解码一份。详见 `ByteBudgetCache::with_pin`。
+            ByteBudgetCache::from_env(MAX_CACHE_ENTRIES)
+                .with_pin(|_, v: &ResampledStereo| Arc::strong_count(&v.pcm) > 1),
+        ));
         let inflight: Arc<Mutex<HashSet<AudioKey>>> = Arc::new(Mutex::new(HashSet::new()));
 
         let (request_tx, request_rx) = mpsc::channel::<AudioKey>();

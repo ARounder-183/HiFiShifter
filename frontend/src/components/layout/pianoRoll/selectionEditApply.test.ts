@@ -18,7 +18,10 @@ vi.mock("../../../services/api", () => ({
 
 import { paramsApi } from "../../../services/api";
 import type { ParamFramesPayload } from "../../../types/api";
-import { applySelectionEditOverRanges, applySelectionEditWithEdgeSmoothing } from "./selectionEditApply";
+import {
+    applySelectionEditOverRanges,
+    applySelectionEditWithEdgeSmoothing,
+} from "./selectionEditApply";
 
 const mockedGet = vi.mocked(paramsApi.getParamFrames);
 const mockedSet = vi.mocked(paramsApi.setParamFrames);
@@ -52,7 +55,7 @@ describe("applySelectionEditWithEdgeSmoothing", () => {
         });
         expect(ok).toBe(true);
         // 取数范围 [10−5, 10+20+5) = [5, 35)，30 帧
-        expect(mockedGet).toHaveBeenCalledWith("t1", "pitch", 5, 30, 1);
+        expect(mockedGet).toHaveBeenCalledWith("t1", "pitch", 5, 30, 1, true, false);
         expect(mockedSet).toHaveBeenCalledTimes(1);
         const [, param, writeStart, written, checkpoint] = mockedSet.mock.calls[0];
         expect(param).toBe("pitch");
@@ -123,7 +126,7 @@ describe("applySelectionEditWithEdgeSmoothing", () => {
             editSelection: (vals) => vals.map((v) => (v === 0 ? 0 : v + 2)),
             isEditable: pitchEditable,
         });
-        expect(mockedGet).toHaveBeenCalledWith("t1", "pitch", 10, 20, 1);
+        expect(mockedGet).toHaveBeenCalledWith("t1", "pitch", 10, 20, 1, true, false);
         const [, , writeStart, written] = mockedSet.mock.calls[0];
         expect(writeStart).toBe(10);
         expect(written).toEqual(new Array<number>(20).fill(62));
@@ -187,8 +190,8 @@ describe("applySelectionEditOverRanges（多选区：每段独立 + 单撤销点
             editSelection: (vals) => vals.map((v) => v + 1),
         });
         expect(ok).toBe(true);
-        expect(mockedGet).toHaveBeenCalledWith("t1", "pitch", 10, 5, 1);
-        expect(mockedGet).toHaveBeenCalledWith("t1", "pitch", 100, 5, 1);
+        expect(mockedGet).toHaveBeenCalledWith("t1", "pitch", 10, 5, 1, true, false);
+        expect(mockedGet).toHaveBeenCalledWith("t1", "pitch", 100, 5, 1, true, false);
         expect(mockedSet).toHaveBeenCalledTimes(2);
         const [, , firstStart, firstWritten, firstCheckpoint] = mockedSet.mock.calls[0];
         expect(firstStart).toBe(10);

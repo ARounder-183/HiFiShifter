@@ -27,6 +27,16 @@ export type ParamViewSegment = {
     referenceKind: ParamReferenceKind;
     orig: number[];
     edit: number[];
+    /**
+     * dyn 专用：后端 `edit_sentinel`「未画帧」位图，与 `edit` 逐帧对齐
+     * （同一次取数、同一 stride）。
+     *
+     * 【为什么进 pv 数据模型】读-变换-写回类提交（拉伸 / morph / 选区拖拽）
+     * 的数据源就是 pv；没有位图，"未画帧"在提交时会被物化成显式基线 ——
+     * 日后 clip 移动触发基线重分析时这些帧不再跟随，响度静默漂移（见
+     * `paramRanges.restoreDynSentinels`）。非 dyn 参数恒 undefined。
+     */
+    editSentinel?: boolean[];
 };
 
 export type ParamMorphPointKind = "left" | "mid1" | "mid2" | "right";

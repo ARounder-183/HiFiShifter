@@ -73,3 +73,13 @@ export function snapOffsetHandleXPx(snapOffsetSec: number | undefined, pxPerSec:
     const offset = Number(snapOffsetSec);
     return Number.isFinite(offset) && offset > 0 ? offset * pxPerSec : 0;
 }
+
+/**
+ * 滚轮缩放的每步因子（>1 放大、<1 缩小）。
+ *
+ * 只有内核的滚轮分支用它（画布与标尺走同一条路径，见宿主 `dispatchWheel`）。
+ * 放在这里而不是内核模块内部：它是**交互手感**参数，与其它时间轴常量放在一起，
+ * 便于统一调整。
+ */
+export const WHEEL_ZOOM_IN_FACTOR = 1.1;
+export const WHEEL_ZOOM_OUT_FACTOR = 0.9;

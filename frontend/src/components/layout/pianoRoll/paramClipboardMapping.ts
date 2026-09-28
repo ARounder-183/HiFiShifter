@@ -27,7 +27,12 @@
  */
 
 import type { ParamName } from "./types";
-import type { FrameRange } from "./paramSelection";
+import {
+    normalizeSelection,
+    snapFrame,
+    type FrameRange,
+    type ParamSelection,
+} from "./paramSelection";
 
 /** 剪贴板中的一段：`startFrame` 为相对复制起点的帧偏移。 */
 export interface ParamClipboardSegment {
@@ -168,7 +173,7 @@ export function parseParamClipboardPayload(value: unknown): ParamClipboardData |
 /**
  * 把剪贴板映射到目标选区的帧区间上（预览与粘贴的唯一实现）。
  *
- * @param targetRanges 目标选区的帧区间（升序、互不相交；见 beatRangesToFrameRanges）
+ * @param targetRanges 目标选区的帧区间（升序、互不相交；见 selectionToFrameRanges）
  * @returns 按起点升序的写入片段；空数组表示「按规则没有任何帧会被写入」
  *          （过去用于「不显示预览、不执行粘贴」）。
  */
@@ -194,10 +199,7 @@ export function mapClipboardToTargetRanges(args: {
             const from = Math.max(windowStart, segment.startFrame);
             const to = Math.min(windowEnd, segment.startFrame + segment.values.length);
             if (to <= from) continue;
-            const values = segment.values.slice(
-                from - segment.startFrame,
-                to - segment.startFrame,
-            );
+            const values = segment.values.slice(from - segment.startFrame, to - segment.startFrame);
             if (values.length === 0) continue;
             writes.push({ startFrame: origin + from, values });
         }
@@ -227,4 +229,43 @@ export function clipboardPreviewSpans(args: {
         framePeriodMs: fp,
         values: write.values,
     }));
+}
+
+/**
+ * **无选区粘贴**时的目标选区：把剪贴板的段布局整体平移到锚点（播放光标）。
+ *
+ * 【为什么要按剪贴板推导，而不是"全选"】粘贴的作用对象（目标选区）在有剪贴板
+ * 数据时**完全由剪贴板决定**：它决定粘贴从哪里开始、铺多宽、中间有几个断层。
+ * 无选区时若简单全选，数据会被摊到整条曲线上（起点跑到工程开头、断层也被拉长）。
+ * 因此这里以锚点为"复制起点"重建选区：
+ * - 整体起点 = 锚点帧（调用方传播放光标）；
+ * - 段数 = 剪贴板段数、每段长度 = 该段值长度、段间空洞 = 剪贴板的断层。
+ *
+ * 之后粘贴仍走同一条映射（{@link mapClipboardToTargetRanges}，以选区**整体**
+ * 起点为偏移基准），于是落点与选区逐帧对齐 —— 选区就是"粘贴会落到哪里"的可视化。
+ *
+ * 【为什么不再需要"两端各内收 1/4 帧"】选区与剪贴板现在**同为帧制**：段边界就是
+ * 整数帧切点，而帧 → 帧的换算（{@link selectionToFrameRanges} 只做夹取与钳制）
+ * 对整数是恒等的，因此推导出的选区逐帧精确，不存在"首帧/末帧被挤出选区、粘贴时
+ * 静默丢值"的窗口。旧实现里那段内收补丁是为拍 → 帧的双重取整打的，随单位改造
+ * 一并删除。
+ *
+ * @param args 剪贴板与锚点帧（播放光标所在帧）。
+ * @returns 归一化选区（升序、互不相交也不相接）；剪贴板为空时返回 `null`
+ *   （调用方按"剪贴板里没有参数线数据"处理，走 REAPER/MIDI 回退）。
+ */
+export function pasteTargetSelectionFromClipboard(args: {
+    clipboard: ParamClipboardData | null | undefined;
+    anchorFrame: number;
+}): ParamSelection | null {
+    const clipboard = normalizeClipboardData(args.clipboard);
+    if (!clipboard) return null;
+    const anchor = Math.max(0, snapFrame(args.anchorFrame));
+    // 段边界直接落在帧栅格上（normalizeClipboardData 已保证 startFrame 为非负整数）。
+    const ranges: FrameRange[] = clipboard.segments.map((segment) => ({
+        startFrame: anchor + segment.startFrame,
+        frameCount: segment.values.length,
+    }));
+    // 归一化会排序、合并相接段（剪贴板段之间有断层时自然保持分开）。
+    return normalizeSelection(ranges);
 }

@@ -20,11 +20,7 @@ import {
     importMultipleAudioAtPosition,
 } from "../../../../features/session/sessionSlice";
 import { emitExternalFileAction } from "../../../../features/session/projectOpenEvents";
-import {
-    detectExternalPathAction,
-    isAcceptedDropPath,
-    partitionDroppedPaths,
-} from "../";
+import { detectExternalPathAction, isAcceptedDropPath, partitionDroppedPaths } from "../";
 import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../../../utils/snapHighlight";
 import type { SnapTimelineFn } from "./useTimelineState";
 import type { TimelineViewportAccess } from "./timelineViewportAccess";

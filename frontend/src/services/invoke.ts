@@ -322,6 +322,22 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 checkpoint: args[3],
             };
 
+        case "set_clip_take_channel_mode":
+            return {
+                clipId: args[0],
+                takeId: args[1],
+                channelMode: args[2],
+                checkpoint: args[3],
+            };
+
+        case "scan_and_convert_fake_stereo":
+            // 两个参数都可选：缺省 = 整个工程 + 实扫。用条件展开而不是直接传
+            // undefined，与同文件的 import_audio_item 保持一致的显式风格。
+            return {
+                ...(args[0] !== undefined ? { clipIds: args[0] } : {}),
+                ...(args[1] !== undefined ? { dryRun: args[1] } : {}),
+            };
+
         case "add_clip_take_from_media":
             return {
                 clipId: args[0],
@@ -454,6 +470,9 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 hifiganMelStretchOverride: args[1],
             };
 
+        case "set_project_notes":
+            return { notesMarkdown: args[0] };
+
         case "save_project":
             return args[0] === undefined ? undefined : { notesMarkdown: args[0] };
 
@@ -532,13 +551,8 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             return { sourcePath: args[0] };
 
         case "batch_get_waveform_mipmap":
-            return { sourcePaths: args[0] };
-
-        case "get_waveform_manifest":
-            return { sourcePath: args[0] };
-
-        case "get_waveform_tiles_binary":
-            return { sourcePath: args[0], revision: args[1], requests: args[2] };
+            // levels 缺省传 null = 后端编码全部三级（旧行为）；批量预载传 [2]。
+            return { sourcePaths: args[0], levels: args[1] ?? null };
 
         case "get_root_mix_waveform_peaks_segment":
         case "get_track_mix_waveform_peaks_segment":
@@ -547,6 +561,13 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 startSec: args[1],
                 durationSec: args[2],
                 columns: args[3],
+            };
+
+        case "convert_mix_param":
+            return {
+                trackId: args[0],
+                from: args[1],
+                ranges: args[2],
             };
 
         case "get_param_frames":
@@ -692,22 +713,156 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "set_history_position":
             return { position: args[0] };
 
+        case "record_param_selection_step":
+            // 「边缘拉伸」手势的选区快照：登记到当前那一步历史记录上
+            // （撤销/重做时由后端随载荷带回，见 state.rs 的说明）。
+            return { before: args[0], after: args[1] };
+
         case "set_project_save_undo_history":
             return { enabled: args[0] };
 
         case "end_undo_group":
             return undefined;
 
+        case "clear_render_cache":
+            return {
+                scope: args[0],
+                ...(args[1] !== undefined ? { days: args[1] } : {}),
+            };
+
+        case "get_render_cache_stats":
+        case "open_render_cache_dir":
+            return {};
+
+        case "reveal_export_paths":
+            return { paths: args[0] };
+
+        // ── 记事本（附件 / 剪贴板暂存 / 导出）──
+        case "notebook_put_asset":
+            return {
+                assetId: args[0],
+                kind: args[1],
+                ext: args[2],
+                mime: args[3] ?? null,
+                dataBase64: args[4],
+                meta: args[5] ?? null,
+            };
+
+        case "notebook_read_asset":
+        case "notebook_remove_asset":
+            return { assetId: args[0] };
+
+        case "notebook_read_file_base64":
+            return {
+                path: args[0],
+                ...(args[1] !== undefined ? { maxBytes: args[1] } : {}),
+            };
+
+        case "notebook_write_clipboard_payload":
+            return {
+                payloadBase64: args[0],
+                textSummary: args[1] ?? null,
+            };
+
+        case "notebook_export_document":
+            return {
+                suggestedName: args[0],
+                extension: args[1],
+                content: args[2],
+            };
+
+        case "notebook_save_asset_as":
+            return {
+                assetId: args[0],
+                suggestedName: args[1] ?? null,
+            };
+
         case "export_diagnostics":
-            return { outputPath: args[0] };
+            return {
+                outputPath: args[0],
+                ...(args[1] !== undefined ? { frontendSettings: args[1] } : {}),
+            };
+
+        case "export_layout_json":
+            return { json: args[0] };
 
         case "log_frontend_error":
             return { message: args[0], detail: args[1] ?? null };
 
         default:
+            // 无参命令白名单：不携带参数的命令在此统一登记（invoke 时以空
+            // args 对象调用，与无 args 调用在 Tauri 侧等价）。新命令若携带
+            // 参数，必须在上方 switch 显式登记位置参数 → 命名参数的映射，
+            // 否则 buildTauriArgs 返回 __unwired、invoke 直接 throw ——
+            // 这曾三次造成"前端乐观更新生效、后端调用从未到达"的静默分叉
+            // （take 命令族、set_clip_take_reversed、set_clip_take_channel_mode）。
+            // invoke.wiring.test.ts 会扫描全部调用点做穷举防回归。
+            if (NO_ARG_COMMANDS.has(method)) return {};
             return { __unwired: true };
     }
 }
+
+/**
+ * 无参命令白名单（不携带任何位置参数的 Tauri 命令）。
+ * 新增无参命令时在此登记；新增带参命令必须在 switch 中登记映射。
+ */
+const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
+    "cancel_background_render",
+    "cancel_export_audio",
+    "check_source_files_changed",
+    "clear_waveform_cache",
+    "clipboard_kind",
+    "close_window",
+    "consume_startup_project_path",
+    "get_about_info",
+    "get_project_meta",
+    "get_auto_backup_settings",
+    "get_dml_adapters",
+    "get_export_audio_defaults",
+    "get_gpu_devices",
+    "get_history_state",
+    "get_onnx_diagnostic",
+    "get_onnx_status",
+    "get_pitch_analysis_progress",
+    "get_playback_state",
+    "get_recording_apps",
+    "get_recording_devices",
+    "get_recording_settings",
+    "get_recording_state",
+    "get_runtime_info",
+    "get_timeline_state",
+    "get_ui_settings",
+    "has_reaper_clipboard",
+    "has_timeline_clipboard",
+    "import_project_dialog",
+    "load_default_model",
+    "new_project",
+    "notebook_list_assets",
+    "notebook_prune_assets",
+    "notebook_read_clipboard_image",
+    "notebook_read_clipboard_payload",
+    "seal_project_notes_history",
+    "open_audio_dialog",
+    "open_audio_dialog_multi",
+    "open_log_folder",
+    "open_midi_dialog",
+    "pick_output_path",
+    "open_project_dialog",
+    "open_reaper_dialog",
+    "open_vocalshifter_dialog",
+    "pick_diagnostics_output_path",
+    "pick_directory",
+    "pick_midi_output_path",
+    "ping",
+    "read_system_clipboard_object",
+    "redo_timeline",
+    "run_vocoder_benchmark",
+    "start_background_render",
+    "stop_audio",
+    "stop_recording",
+    "synthesize",
+    "undo_timeline",
+]);
 
 export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> {
     const tauriInvoke = getTauriInvoke();
@@ -760,6 +915,9 @@ export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> 
         return (await api[method](...args)) as T;
     } catch (err) {
         console.error("pywebview api call failed", { method, args, err });
+        // 与 Tauri 分支同口径：失败也上报前端诊断日志（pywebview 模式下
+        // BackendInvokeError 只剩 message，原始 cause 不落盘就丢了）。
+        reportFrontendError(`Invoke failed: ${method}`, err);
         throw new BackendInvokeError({
             mode: "pywebview",
             method,

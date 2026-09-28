@@ -54,7 +54,13 @@ import { isPrimaryModifierDown } from "../../../../../utils/platform";
 import { armRightDragContextMenuGuard } from "../../../../../utils/rightDragContextMenuGuard";
 import { getTimelineWheelAction, type ScrollbarZone } from "../../../wheelGesture";
 import { buildTimelineTicks, type TimelineTick } from "../../runtime/buildTimelineTicks";
-import { createTimelineAxis, type TimelineAxis } from "../../../renderKernel/timelineAxis";
+import {
+    createTimelineAxis,
+    playheadLineLeftPx,
+    type TimelineAxis,
+    rulerLayerTranslatePx,
+} from "../../../renderKernel/timelineAxis";
+import { createPlayheadElementWriter } from "../../../renderKernel/playheadElements";
 import { buildSparseClipRenderModel } from "../../runtime/timelineCanvasModel";
 import { drawTimelineCanvas } from "../../runtime/timelineCanvasRenderer";
 import { clearCanvasPhysical, rasterize } from "../../../renderKernel/canvasRaster";
@@ -65,7 +71,7 @@ import {
     resolveThemeColor,
 } from "../../runtime/timelineCanvasStyle";
 import { hitClipHeaderControl, type ClipHeaderControl } from "../interaction/clipHeaderControls";
-import { resolveClipDoubleClickMode } from "../interaction/clipDoubleClickMode";
+import { resolveClipParamSelectionMode } from "../interaction/clipParamSelectionMode";
 import { isFadeShapeCycleModifierHeld } from "../../fadeShapeCycle";
 import { noteFadeLinePointerDown } from "../../hooks/fadeLineClickGesture";
 import { effectiveFadeSec, hitClipFadeTarget } from "../interaction/fadeTargets";
@@ -86,6 +92,8 @@ import {
     MIN_ROW_HEIGHT,
     NEW_TRACK_SENTINEL,
     TRACK_ADD_ROW_HEIGHT,
+    WHEEL_ZOOM_IN_FACTOR,
+    WHEEL_ZOOM_OUT_FACTOR,
 } from "../../constants";
 import { hitTest, type ClipHitRegion, type HitTestClip } from "../interaction/hitTest";
 import type { SeekGesturePhase } from "../interaction/seekGesture";
@@ -115,8 +123,14 @@ import {
     computeScrollbar,
     scrollDeltaFromThumbDrag,
     scrollTargetFromTrackClick,
+    scrollbarContentSizePx,
 } from "../../../renderKernel/scrollbars";
 import { normalizeWheelDelta } from "../input/normalizeWheel";
+import {
+    createVerticalZoomFlight,
+    shouldSettleVerticalZoom,
+    type VerticalZoomFlight,
+} from "../input/verticalZoomSettle";
 // 拖拽边缘自动滚屏：内核自绘滚动没有浏览器兜底，缺了它 clip 拖到视口边缘就再也
 // 无法继续右移（设计文档早已承诺、此前未实现）。
 import { resolveDragEdgeScroll, shouldAutoScrollForGesture } from "../input/dragAutoScroll";
@@ -127,6 +141,12 @@ import {
     resolveWheelZoomStep,
     type WheelZoomAccumulator,
 } from "../input/wheelZoomIntent";
+import {
+    anchoredDeltaSec,
+    deltaSecToContentPx,
+    dragDeltaSec,
+    pointerSecAt,
+} from "../../runtime/dragAnchor.js";
 import { createRenderLoop } from "../../../renderKernel/renderLoop";
 import { createClipInstanceBuilder } from "../scene/clipInstances";
 import { resolvePlayheadSec, shouldRepaintForPlayhead } from "../scene/playheadInvalidation";
@@ -204,14 +224,16 @@ export interface TimelineKernelData {
          * 音频块范围 → 参数编辑器选区（`modifier.clipRangeToParamSelection`，
          * 默认 Alt）。
          *
-         * 修饰键 + **双击** clip = 把该块范围并入参数编辑器选区；若该块范围已被
-         * 完整覆盖则挖掉（同一个块连按两次回到原状）。实际改选动作由
+         * 修饰键 + **右键单击** clip = 把该块范围并入参数编辑器选区；若该块范围已被
+         * 完整覆盖则挖掉（同一个块再右键一次回到原状）。实际改选动作由
          * `PianoRollPanel` 执行，本内核只负责判定修饰键，并把
-         * `mode: "toggle"` 随 `onDoubleClickClip` 的第二个参数传出去。
+         * `mode: "toggle"` 随 `onClipParamSelectionGesture` 的第二个参数传出去。
          *
-         * 【为什么绑双击】单击已被「替换选区」占用；Ctrl 在时间轴上属于多选切换、
-         * Shift 属于范围选择，而 Alt 在**点击**层面是空的（它的绑定都是拖拽：
-         * slip / stretch / 淡变曲率），因此不与任何既有手势冲突。
+         * 【为什么是右键单击】左键双击 clip 主体已被移除：它极易与「选中 clip」的
+         * 多次点击误触混淆，且会顺带把复制/剪切的焦点切到参数编辑器侧，干扰 clip 的
+         * 复制/剪切。Ctrl 在时间轴上属于多选切换、Shift 属于范围选择，而 Alt 在
+         * **点击**层面是空的（它的绑定都是拖拽：slip / stretch / 淡变曲率），因此
+         * 不与任何既有手势冲突。
          */
         readonly clipRangeToParamSelection: Keybinding | null;
         /**
@@ -273,15 +295,32 @@ export interface TimelineKernelData {
  * 它们**跟随内核视口**的部分收敛为「每帧一次 transform / scrollTop 写入」——一次
  * 样式写入的成本与图层数量无关，不构成滚动瓶颈，同时天然与旧实现视觉一致。
  */
+/**
+ * 宿主需要跟随视口的 DOM。
+ *
+ * 【为什么全部是 getter 而不是元素本身】这些元素可能在**宿主创建之后**才挂载或
+ * 被重建（面板停靠重排会搬动 DOM、标尺随视图出现）。按值捕获会让宿主永久持有
+ * `null` 或已脱离文档的节点，对应的写入从此**静默失效** —— 表现为"播放头线跟着走、
+ * 三角却停在原地"这类只差一半的症状。与 `PianoRollKernelDomSync` 同一约定：
+ * 运行时可能变化的东西一律经 getter 现读。
+ */
 export interface TimelineKernelDomSync {
     /** 标尺内容层：写 `translateX(-scrollLeft)` 跟随水平滚动。 */
-    readonly rulerContent?: HTMLElement | null;
+    readonly rulerContent?: () => HTMLElement | null;
     /** 轨道头滚动容器：写 `scrollTop` 跟随纵向滚动。 */
-    readonly trackListScroller?: HTMLElement | null;
+    readonly trackListScroller?: () => HTMLElement | null;
     /** 轨道区播放头竖线：写 `translateX` 跟随视口与播放位置。 */
-    readonly playheadLine?: HTMLElement | null;
+    readonly playheadLine?: () => HTMLElement | null;
     /** 标尺播放头竖线（与轨道区播放头同步）。 */
-    readonly rulerPlayheadLine?: HTMLElement | null;
+    readonly rulerPlayheadLine?: () => HTMLElement | null;
+    /**
+     * 标尺播放头**倒三角**（线与三角必须同一帧、同一视口坐标）。
+     *
+     * 【为什么必须由内核写】三角此前只在面板的挂载 layout effect 里定位过一次 ——
+     * 宿主接管后它再也不更新，于是"停在工程起始处不动"（挂载时的静态位置）。
+     * 竖线另有写者所以看起来正常，只有三角失联。
+     */
+    readonly rulerPlayheadHead?: () => HTMLElement | null;
     /**
      * 吸附高亮内容层（`SnapHighlightLayer` 的容器）：整层写
      * `translate(-scrollLeft, -scrollTop)`。
@@ -291,7 +330,7 @@ export interface TimelineKernelDomSync {
      * 靠滚动平移）。内核自绘滚动后没有内容层，这里补一个：层内布局不变，滚动只写
      * 一次 transform，因此拖拽期间每帧重渲染的高亮层不会因滚动而重排。
      */
-    readonly snapHighlightContent?: HTMLElement | null;
+    readonly snapHighlightContent?: () => HTMLElement | null;
     /**
      * copy 拖拽 ghost 的内容层：整层写 `translate(-scrollLeft, -scrollTop)`。
      *
@@ -299,21 +338,46 @@ export interface TimelineKernelDomSync {
      * 面板按内容坐标算好，滚动时只平移容器，**层内不重排**。copy 模式下原 clip
      * 不动，没有"乐观位置"可依赖，因此必须有这一层。
      */
-    readonly ghostContent?: HTMLElement | null;
+    readonly ghostContent?: () => HTMLElement | null;
     /**
      * 素材拖入预览的内容层：与 `ghostContent` 同一机制（内容坐标 + 整层平移）。
      *
      * 旧实现把它渲染在 `TrackLane` 内（内核模式下不挂载），几何用内容坐标
      * （`startSec × pxPerSec`），因此迁过来后同样需要这一层。
      */
-    readonly dropPreviewContent?: HTMLElement | null;
+    readonly dropPreviewContent?: () => HTMLElement | null;
     /**
      * 新建轨道幽灵行的内容层：与 `ghostContent` 同一机制。
      *
      * 拖到全部轨道之下时，旧实现把幽灵行画在最后一行正下方；内核同样把它放在
      * 内容坐标系的 `tracks.length × rowHeight` 处，靠这一层整层平移跟随视口。
      */
-    readonly newTrackDropContent?: HTMLElement | null;
+    readonly newTrackDropContent?: () => HTMLElement | null;
+}
+
+/** 把 `TimelineKernelDomSync` 的 getter 解析成本帧要用的元素（一次性）。 */
+function resolveDomSync(sync: TimelineKernelDomSync): {
+    rulerContent: HTMLElement | null;
+    trackListScroller: HTMLElement | null;
+    playheadLine: HTMLElement | null;
+    rulerPlayheadLine: HTMLElement | null;
+    rulerPlayheadHead: HTMLElement | null;
+    snapHighlightContent: HTMLElement | null;
+    ghostContent: HTMLElement | null;
+    dropPreviewContent: HTMLElement | null;
+    newTrackDropContent: HTMLElement | null;
+} {
+    return {
+        rulerContent: sync.rulerContent?.() ?? null,
+        trackListScroller: sync.trackListScroller?.() ?? null,
+        playheadLine: sync.playheadLine?.() ?? null,
+        rulerPlayheadLine: sync.rulerPlayheadLine?.() ?? null,
+        rulerPlayheadHead: sync.rulerPlayheadHead?.() ?? null,
+        snapHighlightContent: sync.snapHighlightContent?.() ?? null,
+        ghostContent: sync.ghostContent?.() ?? null,
+        dropPreviewContent: sync.dropPreviewContent?.() ?? null,
+        newTrackDropContent: sync.newTrackDropContent?.() ?? null,
+    };
 }
 
 /** 宿主构造参数。 */
@@ -513,19 +577,20 @@ export interface TimelineKernelInteractions {
         readonly container: HTMLElement;
     }) => boolean;
     /**
-     * 双击 clip（第二次按下命中，且两次之间未发生拖拽）。
+     * 右键手势：把音频块范围写入参数编辑器选区（按住 `modifier.clipRangeToParamSelection`，
+     * 默认 Alt，右键单击该块触发）。
      *
-     * 旧实现语义：请求参数编辑器按 clip 起止范围创建选区，并把交互焦点切到
-     * 参数编辑器（见 `ClipItem` 的 `hifi:editOp/selectClipParamRange`）。
-     * 内核只负责识别手势，事件派发与焦点切换由面板完成。
+     * 左键双击 clip 主体**不再**走这条回调——双击极易与「选中 clip」的多次点击
+     * 误触混淆，且会顺带把复制/剪切的焦点切到参数编辑器侧，干扰 clip 的
+     * 复制/剪切。因此「在参数编辑器内为 Clip 创建选区」统一收敛为右键手势。
+     * 内核只负责识别手势与修饰键，事件派发与焦点切换由面板完成。
      *
      * @param clipId 目标 clip。
-     * @param mode 选区写入方式：恒 `"replace"`（替换为本次范围，与旧行为逐字
-     *   一致）。【手势迁移（2026-09-14）】"并入 / 挖掉"（toggle）已从「按住该
-     *   修饰键左键双击」改为「按住该修饰键**右键单击**」，由右键手势 finalize
-     *   处派发（本回调不再传 `"toggle"`；参数保留以兼容既有调用方）。
+     * @param mode 选区写入方式：`"replace"`（替换为本次范围）或 `"toggle"`
+     *   （该块范围已被完整覆盖则挖掉，否则并入；按住修饰键右键单击时由
+     *   `resolveClipParamSelectionMode` 解析得出）。
      */
-    readonly onDoubleClickClip?: (clipId: string, mode?: "replace" | "toggle") => void;
+    readonly onClipParamSelectionGesture?: (clipId: string, mode?: "replace" | "toggle") => void;
     /**
      * 切换 clip 静音（单击 header 的静音徽标）。
      *
@@ -605,8 +670,8 @@ export interface TimelineKernelInteractions {
     /**
      * 请求进入 clip 重命名（**双击名称区**）。
      *
-     * 与 `onDoubleClickClip`（双击其他区域 → 参数编辑器选区）互斥：名称区优先。
-     * 旧实现里名称区的处理器会 `stopPropagation`，两者天然不会同时触发。
+     * 与 `onClipParamSelectionGesture`（右键单击其他区域 → 参数编辑器选区）互斥：
+     * 名称区优先。旧实现里名称区的处理器会 `stopPropagation`，两者天然不会同时触发。
      *
      * @param clipId 目标 clip。
      * @param screenX 输入框锚点的视口坐标。
@@ -887,7 +952,7 @@ export interface TimelineKernelInteractions {
      * `onBoxSelectPreview` / `onBoxSelectCommit`，因此框内 clip 同时也被纳入
      * clip 选择（与未按住该修饰键的普通框选完全一致）。
      *
-     * 与单个块的右键单击（`onDoubleClickClip` 的 toggle 语义）同一修饰键：
+     * 与单个块的右键单击（`onClipParamSelectionGesture` 的 toggle 语义）同一修饰键：
      * 单击 = 该块并入 / 挖掉（不改 clip 选择），拖框 = 框内全部并入 + 纳入
      * clip 多选。`cancelled`（Esc / 失焦）时调用方不写任何选区。
      */
@@ -964,6 +1029,19 @@ export interface TimelineKernelHost {
      */
     paintNow(): void;
     /**
+     * 把一条**来自容器之外**的滚轮事件交给内核按画布滚轮处理。
+     *
+     * 【为什么需要】标尺是内核容器**之外**的 DOM 条，它的滚轮进不了容器的监听。
+     * 标尺上的滚轮应当与画布内**完全同义**（同一套 keybinding 判定：自由滚动 /
+     * 横纵滚动 / 横纵缩放），所以不做任何"另一种语义"的翻译，直接把事件转交过来 ——
+     * 命中判定也天然正确：标尺在容器上方，`scrollbarZoneAt` 因指针不在容器矩形内
+     * 而返回 null，于是走的就是画布内的那一支；横向锚点 `clientX - rect.left` 与
+     * 标尺同一水平坐标系。
+     *
+     * @param event 原生滚轮事件（`clientX/clientY` 为视口坐标）。
+     */
+    dispatchWheel(event: WheelEvent): void;
+    /**
      * 请求一次**仅重绘**（不重建几何）：播放头每帧移动时调用。
      *
      * 【为什么必须与 `invalidateScene` 分开】`invalidateScene` 会置 `sceneDirty`，
@@ -1009,9 +1087,22 @@ export interface TimelineKernelHost {
      * "宿主刚写过的值"作基准才能判出来。写这个值的地方只有宿主（`syncDom`），
      * 因此只能由宿主提供。判据见 `timeline/scrollEcho`。
      *
-     * @returns 上次镜像写入值（CSS px）；从未写过时为 `NaN`。
+     * @returns 上次镜像写入后容器**实际接受**的位置（CSS px）；从未写过时为 `NaN`。
+     *   取读回值而非请求值：浏览器可能按设备像素量化，或在内容高未及时更新时钳制，
+     *   以读回值为基准才能让这类被修正的写入同样被认作回声（见 `mirrorTrackListScrollTop`）。
      */
     getMirroredTrackListScrollTop(): number;
+    /**
+     * 当前是否有画布竖直缩放在途（React 行高尚未落地）。
+     *
+     * 【为什么面板需要它】在途窗口内轨道头报来的 scroll 事件（内容高变化的钳制回弹、
+     * 浏览器滚动锚定补偿）与"上次写入值"不符，会被 `isMirrorEcho` 误判为用户输入。
+     * 面板据此把窗口内的回灌一律视为回声；位置由宿主在行高落地后补写（见宿主内
+     * `verticalZoomInFlight` 的机制说明）。
+     *
+     * @returns 有竖直缩放在途时为 true。
+     */
+    isVerticalZoomInFlight(): boolean;
     /**
      * 原子地设置缩放与横向滚动位置（键盘缩放 / 视图同步）。
      *
@@ -1130,6 +1221,15 @@ const VERTICAL_OVERSCAN_ROWS = 2;
 const SCROLLBAR_SIZE_PX = 8;
 
 /**
+ * 竖直缩放的"在途"兜底超时（毫秒）。
+ *
+ * 画布竖直缩放等待 React 行高落地后才补写轨道头位置（见 `verticalZoomInFlight`）。
+ * 正常一个提交周期内就会落地；超时仅在宿主脱离 React（测试环境）或行高被外部改成
+ * 别的值时兜底，避免镜像写入被永久跳过。
+ */
+const VERTICAL_ZOOM_SETTLE_TIMEOUT_MS = 250;
+
+/**
  * 水平滚动向 React 量化提交的步长（CSS px）。
  *
  * 与旧实现的 `REACT_SCROLL_STEP_PX` 取同一量级：步长越小，标尺越跟手，但 React
@@ -1139,10 +1239,6 @@ const SCROLL_COMMIT_STEP_PX = 256;
 
 /** 键盘单步滚动量（CSS px）。 */
 const KEYBOARD_STEP_PX = 60;
-
-/** 滚轮缩放的每步倍率（与旧实现一致：向上放大 1.1、向下缩小 0.9）。 */
-const WHEEL_ZOOM_IN_FACTOR = 1.1;
-const WHEEL_ZOOM_OUT_FACTOR = 0.9;
 
 /**
  * 细节层的 GL 块面接收器：**什么都不画**。
@@ -1868,6 +1964,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (d.rowHeight !== lastMirroredRowHeight) {
             lastMirroredRowHeight = d.rowHeight;
             scroll.setRowHeight(d.rowHeight);
+            // React 行高已落地：结算在途的竖直缩放（补写轨道头位置，见该状态的说明）。
+            settleVerticalZoom();
         }
         const needsRebuild =
             sceneDirty ||
@@ -1919,7 +2017,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     function updateScrollbars(): void {
         const view = scroll.get();
         const horizontal = computeScrollbar({
-            contentSizePx: view.pxPerSec * Math.max(0, data().projectSec),
+            contentSizePx: scrollbarContentSizePx(scroll.maxScrollLeft(), viewportWidthPx),
             viewportSizePx: viewportWidthPx,
             scrollPx: view.scrollLeft,
             maxScrollPx: scroll.maxScrollLeft(),
@@ -1932,6 +2030,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             hScrollbarThumb.style.width = `${Math.max(0, horizontal.thumbLengthPx)}px`;
             hScrollbarThumb.style.transform = `translateX(${Math.max(0, horizontal.thumbStartPx)}px)`;
             hScrollbarThumb.style.display = horizontal.scrollable ? "block" : "none";
+            // 轨道交互随可滚动性启停：不可滚动时轨道是透明的"幽灵条"，却仍会
+            // 拦截下方内容的指针事件（缩放到内容装得下时，底缘 8px 的 clip /
+            // 背景全部点不到）。可滚动时轨道承载"点空白翻页"。
+            if (hScrollbarTrack) {
+                hScrollbarTrack.style.pointerEvents = horizontal.scrollable ? "auto" : "none";
+            }
         }
 
         const vertical = computeScrollbar({
@@ -1948,6 +2052,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             vScrollbarThumb.style.height = `${Math.max(0, vertical.thumbLengthPx)}px`;
             vScrollbarThumb.style.transform = `translateY(${Math.max(0, vertical.thumbStartPx)}px)`;
             vScrollbarThumb.style.display = vertical.scrollable ? "block" : "none";
+            // 同水平条：不可滚动时轨道放行指针事件（见上）。
+            if (vScrollbarTrack) {
+                vScrollbarTrack.style.pointerEvents = vertical.scrollable ? "auto" : "none";
+            }
         }
     }
 
@@ -1956,8 +2064,31 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     // 但重复写同一个值会白白触发样式重算，因此只在跨过阈值时写。
     let lastRulerTranslateX = Number.NaN;
     let lastTrackListScrollTop = Number.NaN;
-    let lastPlayheadViewportX = Number.NaN;
-    let lastPlayheadContentX = Number.NaN;
+    /**
+     * 竖直缩放的"在途"提交；非空期间**跳过**轨道头镜像写入。
+     *
+     * 【为什么需要】画布竖直缩放由内核**当帧**原子提交（行高 + 锚点 scrollTop，
+     * 见 `onWheel` 的 vertical-zoom 分支），而 React 侧行高要等下一次提交才落地。
+     * 若此刻把新 scrollTop 同步镜像进轨道头 DOM，容器还是**旧行高**的内容高 ——
+     * 新位置一旦超过旧上限就被浏览器钳制；且该钳制/滚动锚定产生的 scroll 事件与
+     * "上次写入值"不符，会被 `isMirrorEcho` 判成用户输入反灌内核，把视口从锚点位置
+     * 拽回。每格缩放"先跳到位再被拽回"，即用户报告的竖直抽动（悬停轨道头无此问题：
+     * 那里 DOM 先行、内核跟随，方向一致无对抗）。
+     *
+     * 处置：在途期间跳过镜像写入；等 React 行高落地（`ensureScene` 里镜像到同一值，
+     * 或兜底超时）后由 `settleVerticalZoom` 补写一次。其间轨道头位置不变（配合
+     * `.no-scroll-anchor` 也不会被浏览器改写），因此不会产生误导性的 scroll 事件。
+     */
+    let verticalZoomInFlight: VerticalZoomFlight | null = null;
+    /**
+     * 播放头元素（轨道区竖线 / 标尺竖线 / 标尺倒三角）的写入器。
+     *
+     * 【为什么不是 `lastPlayheadViewportX`】去重键必须是「元素身份 + 位置」：只用位置
+     * 会漏掉"元素在播放头静止时被重建"（停靠重排搬动 DOM），新元素停在静态位置不动。
+     * 且三个元素各占槽位 —— 一个被去重跳过不会牵连另一个。详见
+     * `createPlayheadElementWriter`。
+     */
+    const playheadWriter = createPlayheadElementWriter();
     /** 吸附高亮内容层的整层变换（字符串去重：同时含两轴）。 */
     let lastSnapTransform = "";
     /** copy ghost 内容层的整层变换（去重方式同上）。 */
@@ -2097,29 +2228,39 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     function syncDom(view: TimelineViewportState): void {
         if (sync === undefined) return;
-
-        const ruler = sync.rulerContent;
+        // 本帧一次性解析（getter 现读，见 `TimelineKernelDomSync` 的说明）。
+        const dom = resolveDomSync(sync);
+        const ruler = dom.rulerContent;
         if (ruler != null) {
-            const translateX = -view.scrollLeft;
+            // 平移量吸附到设备像素（见 `rulerLayerTranslatePx`）：层原点的分数部分
+            // 会让层内每一条标尺竖线跨在两个物理像素上被抗锯齿，粗细随小数部分变化。
+            // `draw()` 传入的 view 已经过 `snapRenderView`，这里用同一助手显式表达
+            // 契约，避免以后有人把实参换成未吸附的值。
+            const translateX = -rulerLayerTranslatePx(view.scrollLeft, readDpr());
             if (shouldWrite(translateX, lastRulerTranslateX)) {
                 lastRulerTranslateX = translateX;
                 ruler.style.transform = `translateX(${translateX}px)`;
             }
         }
 
-        const trackList = sync.trackListScroller;
+        const trackList = dom.trackListScroller;
         if (trackList != null) {
-            // 容差 0.5px：与调用方的回灌判定同量级，避免「内核 → DOM → 内核」循环。
-            if (shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)) {
-                lastTrackListScrollTop = view.scrollTop;
-                trackList.scrollTop = view.scrollTop;
+            // 竖直缩放在途时**不得**写入（见 `verticalZoomInFlight`）：此刻 DOM 还是
+            // 旧行高，写入会被钳制并触发回声反灌。等 `settleVerticalZoom` 补写。
+            if (verticalZoomInFlight == null) {
+                // 容差 0.5px：与调用方的回灌判定同量级，避免「内核 → DOM → 内核」循环。
+                if (shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)) {
+                    trackList.scrollTop = view.scrollTop;
+                    // 读回值作回声基准（与 `mirrorTrackListScrollTop` 同一约定）。
+                    lastTrackListScrollTop = trackList.scrollTop;
+                }
             }
         }
 
         // 吸附高亮内容层：整层平移（内容坐标 → 视口坐标）。
         // 与细节层同一策略——层内元素全用内容坐标布局，滚动只写一次 transform。
         // 用字符串去重（同时含两轴，天然规避 NaN 初值问题）。
-        const snapContent = sync.snapHighlightContent;
+        const snapContent = dom.snapHighlightContent;
         if (snapContent != null) {
             const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
             if (transform !== lastSnapTransform) {
@@ -2129,7 +2270,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
 
         // copy ghost 内容层：与吸附高亮同一机制（内容坐标 + 整层平移）。
-        const ghostContent = sync.ghostContent;
+        const ghostContent = dom.ghostContent;
         if (ghostContent != null) {
             const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
             if (transform !== lastGhostTransform) {
@@ -2139,7 +2280,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
 
         // 拖入预览内容层：同上。
-        const dropPreviewContent = sync.dropPreviewContent;
+        const dropPreviewContent = dom.dropPreviewContent;
         if (dropPreviewContent != null) {
             const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
             if (transform !== lastDropPreviewTransform) {
@@ -2149,7 +2290,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
 
         // 新建轨道幽灵行内容层：同上。
-        const newTrackDropContent = sync.newTrackDropContent;
+        const newTrackDropContent = dom.newTrackDropContent;
         if (newTrackDropContent != null) {
             const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
             if (transform !== lastNewTrackDropTransform) {
@@ -2158,29 +2299,31 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             }
         }
 
-        // 播放头：两个元素的**定位坐标系不同**，不能共用同一个值。
-        // - 标尺播放头位于标尺内容层内 → 用内容坐标 `left`（随内容层的
-        //   translateX(-scrollLeft) 自动跟随滚动）；
-        // - 轨道区播放头位于内核视口容器内 → 用视口坐标 `translateX`
-        //   （滚动时必须重算，否则会粘在屏幕上不跟内容走）。
-        const playheadContentX = readPlayheadSec() * view.pxPerSec;
-        const playheadViewportX = playheadContentX - view.scrollLeft;
-        if (
-            shouldWrite(playheadContentX, lastPlayheadContentX) ||
-            shouldWrite(playheadViewportX, lastPlayheadViewportX)
-        ) {
-            lastPlayheadContentX = playheadContentX;
-            lastPlayheadViewportX = playheadViewportX;
-            // 设备像素吸附：分数 DPR 下不吸附会让线宽在 1↔2 物理像素间跳动。
-            const dpr = readDpr();
-            const snappedContentX = Math.round(playheadContentX * dpr) / dpr;
-            if (sync.rulerPlayheadLine != null) {
-                sync.rulerPlayheadLine.style.left = `${snappedContentX}px`;
-            }
-            if (sync.playheadLine != null) {
-                sync.playheadLine.style.transform = `translateX(${snappedContentX - view.scrollLeft}px)`;
-            }
-        }
+        // 播放头：两条线**同为视口坐标**，且由同一个函数取左缘。
+        //
+        // 【为什么不再有"内容坐标 / 视口坐标"之分】标尺播放头曾经位于标尺内容层
+        // 内部（靠内容层的 `translateX(-scrollLeft)` 跟随滚动），而轨道区播放头在
+        // 内核视口容器里。两者坐标空间不同，就必须各算一遍；而内容层带
+        // `will-change: transform` 且平移量是小数，合成层以自己的原点栅格化子元素
+        // —— 1 物理像素的竖线因此落在半个设备像素上被抗锯齿，表现为"宽度忽粗忽细、
+        // 颜色发淡"，与直接按设备像素绘制的画布线看上去不像同一条线。现在标尺线移
+        // 到内容层之外（见 `TimeRuler`），两条线共享 `playheadLineLeftPx` 与同一份
+        // 设备像素约定，逐设备像素重合。
+        const playheadSec = readPlayheadSec();
+        // 三个元素（轨道区竖线 / 标尺竖线 / 标尺倒三角）同帧、同左缘、各占一个槽位。
+        // 去重交给写入器（键 = 元素身份 + 位置），这里不再自建 `lastX` 变量。
+        const playheadLeft = playheadLineLeftPx(
+            createTimelineAxis({
+                pxPerSec: view.pxPerSec,
+                scrollLeftPx: view.scrollLeft,
+                viewportWidthPx,
+                dpr: readDpr(),
+            }),
+            playheadSec,
+        );
+        playheadWriter.writeTranslateX("body", dom.playheadLine, playheadLeft);
+        playheadWriter.writeLeft("rulerLine", dom.rulerPlayheadLine, playheadLeft);
+        playheadWriter.writeLeft("rulerHead", dom.rulerPlayheadHead, playheadLeft);
     }
 
     /**
@@ -2304,17 +2447,54 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * （见 `timeline/scrollEcho` 与 `getMirroredTrackListScrollTop`）。
      */
     function mirrorTrackListScrollTop(): void {
-        const trackList = sync?.trackListScroller;
+        // 竖直缩放在途：此刻轨道头 DOM 还是旧行高，写入会被钳制（见
+        // `verticalZoomInFlight`）。跳过，等行高落地后由 `settleVerticalZoom` 补写。
+        if (verticalZoomInFlight != null) return;
+        const trackList = sync?.trackListScroller?.() ?? null;
         if (trackList == null) return;
         const view = scroll.get();
         if (shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)) {
-            lastTrackListScrollTop = view.scrollTop;
             trackList.scrollTop = view.scrollTop;
+            // 记录**读回值**而非请求值：浏览器可能在内容高未及时更新时钳制写入
+            // （轨道头 DOM 的内容高由 React 行渲染决定，未必与内核上限逐像素相等）。
+            // 以读回值为回声基准，这次钳制就不会被误判成用户输入而把内核拽回 ——
+            // 这是"防拽回"的最后一道防线（见 `timeline/scrollEcho`）。
+            lastTrackListScrollTop = trackList.scrollTop;
         }
+    }
+
+    /**
+     * 结算在途的竖直缩放：React 行高落地（或兜底超时）后补写一次轨道头位置。
+     *
+     * 由 `ensureScene` 在检测到 React 行高变化时调用（每帧一处，且行高一变就立即结算）。
+     * 见 `verticalZoomInFlight` 的完整机制说明。
+     */
+    function settleVerticalZoom(): void {
+        const flight = verticalZoomInFlight;
+        if (flight == null) return;
+        if (
+            !shouldSettleVerticalZoom({
+                flight,
+                landedRowHeight: data().rowHeight,
+                nowMs: performance.now(),
+                timeoutMs: VERTICAL_ZOOM_SETTLE_TIMEOUT_MS,
+            })
+        ) {
+            return;
+        }
+        // 先清标志再补写：`mirrorTrackListScrollTop` 依赖它为 null 才会真正写入。
+        verticalZoomInFlight = null;
+        mirrorTrackListScrollTop();
     }
 
     const unsubscribeScroll = scroll.subscribe(() => {
         mirrorTrackListScrollTop();
+        // 【视口一变就重放拖拽预览】手势的落点是从"视口 + 指针屏幕位置"算出来的；
+        // 视口在拖拽期间被改变（滚轮滚动/缩放、键盘滚动、跨面板同步）而指针没动时，
+        // 若不重放，被拖对象会停在旧内容坐标上 —— 表现为"对象与光标脱开"，直到用户
+        // 再动一下鼠标才归位。放在视口订阅里（而不是各个滚轮分支里）是为了覆盖
+        // **所有**改变视口的路径，包括缩放落地这种异步回来的。
+        replayGesturePreviewAtLastPointer();
         loop.invalidate();
     });
 
@@ -2500,6 +2680,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // "纵向缩放会导致纵向滚动"。原子提交后两者同帧自洽。
             // React 侧的 `onRowHeightChange` 仍要发（轨道头行高与内核必须同源）；
             // 它落地时值已与内核一致，不会二次跳动。
+            //
+            // 【必须在提交**之前**标记在途】提交的订阅回调会**同步**执行轨道头镜像
+            // 写入；此刻 React 行高尚未落地，写入会被旧内容高钳制并触发回声反灌
+            // （见 `verticalZoomInFlight`）。先标记，镜像才会跳过、改由
+            // `settleVerticalZoom` 在行高落地后补写。
+            verticalZoomInFlight = createVerticalZoomFlight(nextRowHeight, performance.now());
             scroll.setRowHeightAndScrollTop(
                 nextRowHeight,
                 rowUnitAtPointer * nextRowHeight - pointerY,
@@ -2508,6 +2694,21 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             return;
         }
 
+        applyHorizontalWheelZoom(factor, event.clientX - rect.left);
+    }
+
+    /**
+     * 按滚轮因子做**水平缩放**（锚点、上下限、`pendingZoom` 累计基准都在这里）。
+     *
+     * 【为什么单独成函数】除了画布滚轮，**标尺**上的滚轮也要走同一条路径（标尺是
+     * 内核容器之外的 DOM 条，见 `TimeRuler.onRulerWheel`）。把它抽出来，面板只调用
+     * 一个入口，缩放口径不会分叉。
+     *
+     * @param factor 缩放因子（>1 放大、<1 缩小）。
+     * @param anchorScreenX 锚点相对容器左缘的视口 x（标尺与容器同一水平坐标系）。
+     */
+    function applyHorizontalWheelZoom(factor: number, anchorScreenX: number): void {
+        const d = data();
         const totalSec = Math.max(0, d.projectSec);
         const minPxPerSec = resolveTimelineMinPxPerSec({
             baseMinPxPerSec: MIN_PX_PER_SEC,
@@ -2520,7 +2721,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // React 已把上一次请求落地 → 待定基准完成使命。
             pendingZoom = null;
         }
-        const zoomBase = pendingZoom ?? { pxPerSec: view.pxPerSec, scrollLeft: view.scrollLeft };
+        const base = scroll.get();
+        const zoomBase = pendingZoom ?? { pxPerSec: base.pxPerSec, scrollLeft: base.scrollLeft };
         const zoom = resolveHorizontalWheelZoom({
             factor,
             basePxPerSec: zoomBase.pxPerSec,
@@ -2531,7 +2733,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 与 syncDom / draw 同一实时读取口径：镜像会滞后一次提交，用它当
             // 缩放锚点会让"以播放头为锚"的缩放在播放时锚在旧位置上。
             playheadSec: readPlayheadSec(),
-            anchorScreenX: event.clientX - rect.left,
+            anchorScreenX,
             minPxPerSec,
             maxPxPerSec: MAX_PX_PER_SEC,
         });
@@ -2552,7 +2754,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         pendingZoom = target;
         if (onZoomRequest === undefined) {
             // 没有 React 落地通道（老调用方）：退回内核立即生效，功能不缺失。
-            const appliedPxPerSec = scroll.setZoom(target.pxPerSec, event.clientX - rect.left);
+            const appliedPxPerSec = scroll.setZoom(target.pxPerSec, anchorScreenX);
             scroll.setScrollLeft(target.scrollLeft);
             onZoomChange?.(appliedPxPerSec);
             return;
@@ -2589,7 +2791,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               /** 命中分区：决定超过阈值后升级为拖拽（body/header）还是 trim（边缘）。 */
               region: ClipHitRegion;
               /** 按下时的内容坐标（用于换算拖拽位移）。 */
-              startContentX: number;
+              startPointerSec: number;
+              /**
+               * 按下时的水平缩放。
+               *
+               * 【为什么必须快照】抓取偏移（"按下时指针 − 对象锚点"）要按**屏幕像素**
+               * 恒定，而它只有在**按下时**的缩放下才是一个有意义的像素量；之后每次
+               * 折算都用当前缩放（见 `anchoredDeltaSec`）。缺了它就只能退回"抓取偏移
+               * 按时间恒定"，缩放中拖拽会让对象与光标越离越远。
+               */
+              startPxPerSec: number;
               startContentY: number;
               /** 按下时 clip 的几何（换算 delta 与跨轨的基准）。 */
               originStartSec: number;
@@ -2655,7 +2866,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               kind: "clip-fade";
               clipId: string;
               side: FadeSide;
-              startContentX: number;
+              startPointerSec: number;
               originFadeSec: number;
               lengthSec: number;
               lastDeltaSec: number;
@@ -2667,7 +2878,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               earlierClipId: string;
               /** 后一个 clip：左缘随拖拽移动。 */
               laterClipId: string;
-              startContentX: number;
+              startPointerSec: number;
               /** 上一次预览的位移（去重：相同位移不重复派发）。 */
               lastDeltaSec: number;
               /**
@@ -2682,7 +2893,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         | {
               kind: "snap-offset-drag";
               clipId: string;
-              startContentX: number;
+              startPointerSec: number;
               /**
                * 按下时的指针视口 x（CSS px）。
                *
@@ -2707,7 +2918,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               kind: "box-select";
               startClientX: number;
               startClientY: number;
-              startContentX: number;
+              startPointerSec: number;
               startContentY: number;
               additive: boolean;
               /** 是否已超过阈值（未超过时不显示框，避免右键单击闪一下）。 */
@@ -2719,7 +2930,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                *
                * 按住时这条右键手势**不再是 clip 多选框选**：松开（未拖动）= 把该
                * 块范围并入 / 挖掉参数编辑器选区（取代旧的双击手势，见
-               * `clipDoubleClickMode` 的说明）；拖动 = 被框选的 clip 全部**并入**
+               * `clipParamSelectionMode` 的说明）；拖动 = 被框选的 clip 全部**并入**
                * 参数选区（`onBoxSelectToParamSelection`）。按下时冻结（快照），
                * 拖拽中途松开修饰键不改变本次手势的语义。
                */
@@ -2729,7 +2940,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               kind: "clip-trim";
               clipId: string;
               edge: TrimEdge;
-              startContentX: number;
+              startPointerSec: number;
+              /** 见 `pending-select.startPxPerSec`。 */
+              startPxPerSec: number;
               originStartSec: number;
               originLengthSec: number;
               /** 最近一次派发的实际变化量（去重）。 */
@@ -2741,7 +2954,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         | {
               kind: "clip-drag";
               clipId: string;
-              startContentX: number;
+              startPointerSec: number;
+              /** 见 `pending-select.startPxPerSec`。 */
+              startPxPerSec: number;
               startContentY: number;
               /** 按下时的指针视口 x：竖直换轨锁定按**水平位移**判定（原始像素，非内容坐标）。 */
               startClientX: number;
@@ -2823,10 +3038,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     /**
      * 用最近一次指针事件重放一次手势预览。
      *
-     * 【为什么需要】自动滚屏只改 `scrollLeft`，而各预览器都是从
-     * 「`scrollLeft` + 指针相对视口的偏移」算出**内容坐标**的。滚屏后不复算，
-     * clip 会停在旧内容坐标上——表现为「视口滚了、clip 没跟上」的脱节。
-     * 复用同一个事件即得到"指针在屏幕上没动、但内容坐标前移"的正确语义。
+     * 【为什么需要】各预览器都是从「视口 + 指针相对视口的偏移」算出落点的。
+     * 视口改变（自动滚屏、滚轮滚动/缩放、键盘滚动、跨面板同步）而指针没动时，
+     * 不复算就会让被拖对象停在旧内容坐标上 —— 表现为「视口动了、对象没跟上」的脱节。
+     * 复用最近一次指针事件即得到"指针在屏幕上没动、但视口变了"的正确语义。
      */
     function replayGesturePreviewAtLastPointer(): void {
         const event = dragAutoScrollEvent;
@@ -2916,8 +3131,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * @param event 指针事件。
      */
     function noteDragAutoScrollPointer(event: PointerEvent): void {
-        if (!shouldAutoScrollForGesture(gesture.kind)) return;
+        // 先无条件记录：滚轮改变视口后要按"最后一次指针位置"重放预览（见
+        // `replayGesturePreviewAtLastPointer`），因此**每个**手势都需要它，
+        // 而不只是需要自动滚屏的那些。
         dragAutoScrollEvent = event;
+        if (!shouldAutoScrollForGesture(gesture.kind)) return;
         if (dragAutoScrollFrame !== null) return;
         dragAutoScrollLastTs = 0;
         dragAutoScrollFrame = requestAnimationFrame(tickDragAutoScroll);
@@ -3170,7 +3388,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 kind: "box-select",
                 startClientX: event.clientX,
                 startClientY: event.clientY,
-                startContentX: view.scrollLeft + (event.clientX - rect.left),
+                startPointerSec: pointerSecAt({
+                    scrollLeftPx: view.scrollLeft,
+                    pxPerSec: view.pxPerSec,
+                    clientX: event.clientX,
+                    rectLeft: rect.left,
+                }),
                 startContentY: view.scrollTop + (event.clientY - rect.top),
                 // 叠加选择用**平台主修饰键**（macOS ⌘ / 其他平台 Ctrl），与旧实现
                 // `useTimelineSelectionRect` 的 `isPrimaryModifierDown` 同源——
@@ -3249,7 +3472,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
         const box = resolveBoxBounds(
-            gesture.startContentX,
+            gesture.startPointerSec * Math.max(1e-9, view.pxPerSec),
             gesture.startContentY,
             view.scrollLeft + (event.clientX - rect.left),
             view.scrollTop + (event.clientY - rect.top),
@@ -3560,8 +3783,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
             if (isDoubleClick) {
                 // 名称区双击 → 重命名；旋钮双击 → 重置 0 dB；增益 / 速率徽标双击 →
-                // 行内编辑；其他区域双击 → 参数编辑器选区。
-                // （旧实现里名称区处理器会 stopPropagation，两者天然互斥。）
+                // 行内编辑。clip **主体**双击**不再**创建参数编辑器选区——它极易与
+                // 「选中 clip」的多次点击误触混淆，且会顺带把复制/剪切的焦点切到参数
+                // 编辑器侧，干扰 clip 自身的复制/剪切。因此主体双击降级为一次普通
+                // 点击，继续往下走选中 / 拖拽逻辑（handled = false 时不在此返回）。
+                // 「在参数编辑器内为 Clip 创建选区」统一改由按住 `modifier.clipRangeToParamSelection`
+                // （默认 Alt）的右键单击手势承担（见右键手势 finalize 处）。
                 //
                 // 阻止默认动作：否则浏览器会把焦点移到被点击的容器上，而重命名输入框
                 // 是在本次 pointerdown 内同步挂载的——刚聚焦就被夺走焦点，其 onBlur
@@ -3569,6 +3796,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 event.preventDefault();
                 const anchor = screenAnchor(event.clientX, event.clientY);
                 const control = resolveHeaderControl(hit);
+                let handled = true;
                 if (control === "name") {
                     interactions?.onRenameClipStart?.(hit.clip.id, anchor.x, anchor.y);
                 } else if (control === "gain-knob") {
@@ -3583,13 +3811,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         anchor.y,
                     );
                 } else {
-                    // 【手势迁移】「并入 / 挖掉」从左键双击改为 **右键单击**
-                    // （按住 `modifier.clipRangeToParamSelection`，默认
-                    // Alt）——见右键手势 finalize 处的说明；左键双击恢复为普通
-                    // 语义（替换参数选区，与旧实现一致），不再读该修饰键。
-                    interactions?.onDoubleClickClip?.(hit.clip.id, "replace");
+                    // clip 主体双击：不拦截，交给下方的选中 / 拖拽逻辑。
+                    handled = false;
                 }
-                return;
+                if (handled) return;
             }
 
             // ── header 控件级分派 ──
@@ -3636,7 +3861,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         region: hit.region,
                         headerControl: control,
                         cycleHeld: false,
-                        startContentX: 0,
+                        startPointerSec: 0,
+                        startPxPerSec: scroll.get().pxPerSec,
                         startContentY: 0,
                         originStartSec: hit.clip.startSec,
                         originTrackId: hit.clip.trackId,
@@ -3686,8 +3912,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     (hit.region === "fade-in-corner" ||
                         hit.region === "fade-out-corner" ||
                         hit.region === "crossfade-grip"),
-                startContentX: view.scrollLeft + (event.clientX - rect.left),
+                startPointerSec: pointerSecAt({
+                    scrollLeftPx: view.scrollLeft,
+                    pxPerSec: view.pxPerSec,
+                    clientX: event.clientX,
+                    rectLeft: rect.left,
+                }),
                 startContentY: view.scrollTop + (event.clientY - rect.top),
+                startPxPerSec: view.pxPerSec,
                 originStartSec: hit.clip.startSec,
                 originTrackId: hit.clip.trackId,
                 lengthSec: hit.clip.lengthSec,
@@ -3746,6 +3978,21 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     function updateHoverCursor(event: PointerEvent): void {
         if (gesture.kind !== "none" || panPointerId !== null) return;
+        // 【滚动条区域不是内容】轨道 / thumb 是容器子元素，指针事件会冒泡到这里；
+        // 按坐标命中测试会把滚动条底下的 clip / 淡变控件当成命中对象 —— 光标变
+        // 手势、浮标跟着弹出，而这块区域此刻只该与滚动条交互。指针落在滚动条
+        // 元素上时按"空白"处理：清悬停环与浮标、光标 default（thumb 的抓取光标
+        // 由其自身 CSS 提供）。`data-hs-scrollbar` 见 TimelineKernelView 的 JSX。
+        const eventTarget = event.target;
+        if (eventTarget instanceof Element && eventTarget.closest("[data-hs-scrollbar]")) {
+            publishFadeHover(
+                { kind: "empty", sec: 0, trackId: null, trackIndex: -1 },
+                event.clientX,
+                event.clientY,
+            );
+            if (container.style.cursor !== "default") container.style.cursor = "default";
+            return;
+        }
         const hit = hitAt(event.clientX, event.clientY);
         // 默认分区（body / header）**不设抓取光标**。
         //
@@ -3935,7 +4182,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     kind: "crossfade-grip",
                     earlierClipId: gesture.partnerClipId,
                     laterClipId: gesture.clipId,
-                    startContentX: gesture.startContentX,
+                    startPointerSec: gesture.startPointerSec,
                     lastDeltaSec: Number.NaN,
                     lastClientY: Number.NaN,
                 };
@@ -3948,7 +4195,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 gesture = {
                     kind: "snap-offset-drag",
                     clipId: gesture.clipId,
-                    startContentX: gesture.startContentX,
+                    startPointerSec: gesture.startPointerSec,
                     startClientX: gesture.startClientX,
                     originOffsetSec: gesture.originSnapOffsetSec,
                     lengthSec: gesture.lengthSec,
@@ -3965,7 +4212,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     kind: "clip-fade",
                     clipId: gesture.clipId,
                     side: gesture.region === "fade-in-corner" ? "in" : "out",
-                    startContentX: gesture.startContentX,
+                    startPointerSec: gesture.startPointerSec,
                     originFadeSec: gesture.originFadeSec,
                     lengthSec: gesture.lengthSec,
                     lastDeltaSec: Number.NaN,
@@ -3980,7 +4227,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     kind: "clip-trim",
                     clipId: gesture.clipId,
                     edge: gesture.region === "left-edge" ? "left" : "right",
-                    startContentX: gesture.startContentX,
+                    startPointerSec: gesture.startPointerSec,
+                    startPxPerSec: gesture.startPxPerSec,
                     originStartSec: gesture.originStartSec,
                     originLengthSec: gesture.lengthSec,
                     lastDeltaSec: Number.NaN,
@@ -3993,7 +4241,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             gesture = {
                 kind: "clip-drag",
                 clipId: gesture.clipId,
-                startContentX: gesture.startContentX,
+                startPointerSec: gesture.startPointerSec,
+                startPxPerSec: gesture.startPxPerSec,
                 startContentY: gesture.startContentY,
                 startClientX: gesture.startClientX,
                 originStartSec: gesture.originStartSec,
@@ -4028,10 +4277,28 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (gesture.kind !== "clip-trim") return;
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
-        const contentX = view.scrollLeft + (event.clientX - rect.left);
         const result = resolveTrimEdge({
             edge: gesture.edge,
-            deltaContentXPx: contentX - gesture.startContentX,
+            deltaContentXPx: deltaSecToContentPx(
+                anchoredDeltaSec({
+                    // 锚点 = 被拖的**那条边**：左边缘就是 clip 起点，右边缘是起点+长度。
+                    // 拖拽中被抓住的正是这条边，它必须始终贴在光标下的同一处。
+                    anchorSec:
+                        gesture.edge === "left"
+                            ? gesture.originStartSec
+                            : gesture.originStartSec + gesture.originLengthSec,
+                    startPointerSec: gesture.startPointerSec,
+                    startPxPerSec: gesture.startPxPerSec,
+                    pointerSec: pointerSecAt({
+                        scrollLeftPx: view.scrollLeft,
+                        pxPerSec: view.pxPerSec,
+                        clientX: event.clientX,
+                        rectLeft: rect.left,
+                    }),
+                    pxPerSec: view.pxPerSec,
+                }),
+                view.pxPerSec,
+            ),
             pxPerSec: view.pxPerSec,
             startSec: gesture.originStartSec,
             lengthSec: gesture.originLengthSec,
@@ -4111,8 +4378,18 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (gesture.kind !== "crossfade-grip") return;
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
-        const contentX = view.scrollLeft + (event.clientX - rect.left);
-        const deltaSec = (contentX - gesture.startContentX) / Math.max(1e-9, view.pxPerSec);
+        // 【为什么这里仍用纯时间位移】抓取点就是抓手本身（十几像素宽的小控件），
+        // 抓取偏移可忽略；而"抓手的锚点"（两段的重叠边界）没有进手势快照，
+        // 猜一个只会引入新错误。见 `anchoredDeltaSec` 的说明。
+        const deltaSec = dragDeltaSec(
+            gesture.startPointerSec,
+            pointerSecAt({
+                scrollLeftPx: view.scrollLeft,
+                pxPerSec: view.pxPerSec,
+                clientX: event.clientX,
+                rectLeft: rect.left,
+            }),
+        );
         // 【去重键必须把「曲率模式」算进来】按 `modifier.fadeCurvatureDrag`（默认 Alt）
         // 拖拽时改的是**曲率**：求解输入是指针的 **Y**，X 不参与。只按 X 去重会让纵向
         // 拖动只在 X 恰好变化的那几帧才派发预览——用户报告为"拖拽一顿一顿的"。
@@ -4136,7 +4413,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 按住 `modifier.fadeCurvatureDrag`（默认 Alt）= **曲率**模式（两侧包络线
             // 各解自己的曲率，边缘位置与长度都不动）。
             modifiers: dragModifiersOf(event),
-            curveEnv: curveEnvAt(gesture.earlierClipId, event, contentX),
+            // 曲率模式用**指针的绝对内容位置**解包络线（与滚动/缩放同源、实时换算）。
+            curveEnv: curveEnvAt(
+                gesture.earlierClipId,
+                event,
+                view.scrollLeft + (event.clientX - rect.left),
+            ),
         });
     }
 
@@ -4144,10 +4426,22 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (gesture.kind !== "clip-fade") return;
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
-        const contentX = view.scrollLeft + (event.clientX - rect.left);
         const result = resolveFadeDrag({
             side: gesture.side,
-            deltaContentXPx: contentX - gesture.startContentX,
+            // 【为什么这里仍用纯时间位移】同交叉点抓手：抓取点是十几像素宽的淡变角
+            // 控件本身，抓取偏移可忽略（见 `anchoredDeltaSec`）。
+            deltaContentXPx: deltaSecToContentPx(
+                dragDeltaSec(
+                    gesture.startPointerSec,
+                    pointerSecAt({
+                        scrollLeftPx: view.scrollLeft,
+                        pxPerSec: view.pxPerSec,
+                        clientX: event.clientX,
+                        rectLeft: rect.left,
+                    }),
+                ),
+                view.pxPerSec,
+            ),
             pxPerSec: view.pxPerSec,
             currentSec: gesture.originFadeSec,
             lengthSec: gesture.lengthSec,
@@ -4162,7 +4456,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             fadeSec: result.fadeSec,
             deltaSec: result.deltaSec,
             modifiers: dragModifiersOf(event),
-            curveEnv: curveEnvAt(fadeClipId, event, contentX),
+            // 曲率模式同上：绝对内容位置，实时换算。
+            curveEnv: curveEnvAt(fadeClipId, event, view.scrollLeft + (event.clientX - rect.left)),
         });
     }
 
@@ -4217,8 +4512,18 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
-        const contentX = view.scrollLeft + (event.clientX - rect.left);
-        const deltaSec = (contentX - gesture.startContentX) / Math.max(1e-9, view.pxPerSec);
+        // 【为什么这里仍用纯时间位移】同交叉点抓手：抓取点是 ◣ 手柄本身，抓取偏移
+        // 可忽略；且 `originOffsetSec` 是**时长**而非位置，其锚点（clip 起点 + 偏移）
+        // 未进快照（见 `anchoredDeltaSec`）。
+        const deltaSec = dragDeltaSec(
+            gesture.startPointerSec,
+            pointerSecAt({
+                scrollLeftPx: view.scrollLeft,
+                pxPerSec: view.pxPerSec,
+                clientX: event.clientX,
+                rectLeft: rect.left,
+            }),
+        );
         const rawOffsetSec = gesture.originOffsetSec + deltaSec;
         if (rawOffsetSec === gesture.lastOffsetSec) return;
         gesture.lastOffsetSec = rawOffsetSec;
@@ -4289,10 +4594,25 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
         const d = data();
-        const contentX = view.scrollLeft + (event.clientX - rect.left);
         const contentY = view.scrollTop + (event.clientY - rect.top);
         const delta = resolveDragDelta({
-            deltaContentXPx: contentX - gesture.startContentX,
+            deltaContentXPx: deltaSecToContentPx(
+                anchoredDeltaSec({
+                    // 锚点 = clip 起点：用户抓的是 clip 的**某一点**（可能离起点几百像素），
+                    // 那个点必须始终贴在光标下（见 `anchoredDeltaSec`）。
+                    anchorSec: gesture.originStartSec,
+                    startPointerSec: gesture.startPointerSec,
+                    startPxPerSec: gesture.startPxPerSec,
+                    pointerSec: pointerSecAt({
+                        scrollLeftPx: view.scrollLeft,
+                        pxPerSec: view.pxPerSec,
+                        clientX: event.clientX,
+                        rectLeft: rect.left,
+                    }),
+                    pxPerSec: view.pxPerSec,
+                }),
+                view.pxPerSec,
+            ),
             pxPerSec: view.pxPerSec,
             startSec: gesture.originStartSec,
             // 不传 projectSec / lengthSec：右移**不再**被工程末端钳制（该上界是
@@ -4477,7 +4797,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 // clip 选择上的表现完全一致（用户要求：按住修饰键只是**额外**
                 // 并入参数选区，不改变 clip 选择的行为）。
                 // 未拖动（右键单击）= 单块手势：并入 / 挖掉该块范围（取代旧的双击，
-                // 见 `onDoubleClickClip` 与 `clipDoubleClickMode` 的说明）；
+                // 见 `onClipParamSelectionGesture` 与 `clipParamSelectionMode` 的说明）；
                 // 单击是"点击语义"，不改变 clip 选择，因此只在拖动时提交。
                 if (boxActive) {
                     interactions?.onBoxSelectToParamSelection?.({
@@ -4511,9 +4831,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     suppressNextContextMenu = true;
                     const release = hitAt(event.clientX, event.clientY);
                     if (release.kind === "clip") {
-                        interactions?.onDoubleClickClip?.(
+                        interactions?.onClipParamSelectionGesture?.(
                             release.clip.id,
-                            resolveClipDoubleClickMode(
+                            resolveClipParamSelectionMode(
                                 data().keybindings.clipRangeToParamSelection,
                                 event,
                             ),
@@ -4954,10 +5274,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     /** 把拖拽位移换算为滚动位置增量并提交。 */
     function applyThumbDrag(pointerDeltaPx: number): void {
-        const view = scroll.get();
         if (dragAxis === "x") {
             const geometry = computeScrollbar({
-                contentSizePx: view.pxPerSec * Math.max(0, data().projectSec),
+                contentSizePx: scrollbarContentSizePx(scroll.maxScrollLeft(), viewportWidthPx),
                 viewportSizePx: viewportWidthPx,
                 scrollPx: dragStartScroll,
                 maxScrollPx: scroll.maxScrollLeft(),
@@ -5021,7 +5340,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const view = scroll.get();
             if (axis === "x") {
                 const geometry = computeScrollbar({
-                    contentSizePx: view.pxPerSec * Math.max(0, data().projectSec),
+                    contentSizePx: scrollbarContentSizePx(scroll.maxScrollLeft(), viewportWidthPx),
                     viewportSizePx: viewportWidthPx,
                     scrollPx: view.scrollLeft,
                     maxScrollPx: scroll.maxScrollLeft(),
@@ -5307,6 +5626,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             loop.flush();
         },
 
+        dispatchWheel(event) {
+            onWheel(event);
+        },
+
         invalidatePlayhead() {
             // 刻意不置 sceneDirty：见接口处的说明（几何重建是 60fps 不可承受的成本）。
             // 卸载后无需自查：`dispose` 会 `loop.stop()`，其后的 `invalidate()`
@@ -5339,6 +5662,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
         getMirroredTrackListScrollTop() {
             return lastTrackListScrollTop;
+        },
+
+        isVerticalZoomInFlight() {
+            return verticalZoomInFlight != null;
         },
 
         setViewport(next: { pxPerSec?: number; scrollLeft?: number }) {

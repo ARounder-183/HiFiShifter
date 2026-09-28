@@ -328,6 +328,7 @@ pub(super) fn save_synthesized(
         output: crate::encode::OutputSpec::wav_32f(),
         quality_preset: crate::mixdown::QualityPreset::Export,
         cancel_flag: None,
+        progress: None,
     };
 
     // 3. 直接调用 mixdown 模块进行高质量重新渲染并写入目标路径
@@ -467,6 +468,7 @@ pub(super) fn save_separated(state: State<'_, AppState>, output_dir: String) -> 
             output: crate::encode::OutputSpec::wav_32f(),
             quality_preset: crate::mixdown::QualityPreset::Export,
             cancel_flag: None,
+            progress: None,
         };
 
         match crate::mixdown::render_mixdown_to_file(&sub_tl, &out_path, opts) {
@@ -980,6 +982,10 @@ pub(super) fn export_audio_advanced(
                         "ok": true,
                         "mode": "project",
                         "path": out_path.display().to_string(),
+                        "output_dir": out_path
+                            .parent()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default(),
                         "skipped": true,
                     });
                 }
@@ -1004,6 +1010,7 @@ pub(super) fn export_audio_advanced(
                 },
             );
 
+            let app_handle_for_progress = state.app_handle.get().cloned();
             let opts = crate::mixdown::MixdownOptions {
                 sample_rate: requested_sample_rate,
                 start_sec,
@@ -1013,6 +1020,23 @@ pub(super) fn export_audio_advanced(
                 output: output_spec.clone(),
                 quality_preset: crate::mixdown::QualityPreset::Export,
                 cancel_flag: Some(cancel_flag.clone()),
+                // 细粒度进度：mixdown 内部按"已完成 clip + clip 内帧比例"上报，
+                // 这里转成 export_audio_progress 事件（project 模式只有一个输出，
+                // 故 current/total 恒为 1/1）。
+                progress: app_handle_for_progress.map(|handle| {
+                    crate::mixdown::ProgressCallback::new(move |progress: f64| {
+                        let _ = handle.emit(
+                            "export_audio_progress",
+                            ExportAudioProgressEvent {
+                                active: true,
+                                mode: Some(ExportAudioMode::Project),
+                                progress: Some(progress.clamp(0.0, 1.0)),
+                                current: Some(1),
+                                total: Some(1),
+                            },
+                        );
+                    })
+                }),
             };
 
             match crate::mixdown::render_mixdown_to_file(&timeline, &out_path, opts) {
@@ -1046,6 +1070,10 @@ pub(super) fn export_audio_advanced(
                         "ok": true,
                         "mode": "project",
                         "path": out_path.display().to_string(),
+                        "output_dir": out_path
+                            .parent()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default(),
                         "format": output_spec.format.as_name(),
                         "sample_rate": result.sample_rate,
                         "num_samples": num_samples,
@@ -1341,6 +1369,7 @@ pub(super) fn export_audio_advanced(
                     .clips
                     .retain(|clip| active_track_ids.contains(clip.track_id.as_str()));
 
+                let app_handle_for_progress = state.app_handle.get().cloned();
                 let opts = crate::mixdown::MixdownOptions {
                     sample_rate: requested_sample_rate,
                     start_sec,
@@ -1350,6 +1379,29 @@ pub(super) fn export_audio_advanced(
                     output: output_spec.clone(),
                     quality_preset: crate::mixdown::QualityPreset::Export,
                     cancel_flag: Some(cancel_flag.clone()),
+                    // 细粒度进度：本目标内的混音比例映射进整体进度，公式与
+                    // "渲染中"同构 —— (已完成目标数 + 目标内比例) / 目标总数。
+                    // current 取"正在处理的目标序号"，文件边界处仍由下方循环尾
+                    // 的权威 emit 收口（两者在边界处数值一致，不会跳变）。
+                    progress: app_handle_for_progress.map(|handle| {
+                        crate::mixdown::ProgressCallback::new(move |intra: f64| {
+                            let overall = if total_targets == 0 {
+                                1.0
+                            } else {
+                                (target_index as f64 + intra.clamp(0.0, 1.0)) / total_targets as f64
+                            };
+                            let _ = handle.emit(
+                                "export_audio_progress",
+                                ExportAudioProgressEvent {
+                                    active: true,
+                                    mode: Some(ExportAudioMode::Separated),
+                                    progress: Some(overall.clamp(0.0, 1.0)),
+                                    current: Some(target_index + 1),
+                                    total: Some(total_targets),
+                                },
+                            );
+                        })
+                    }),
                 };
 
                 match crate::mixdown::render_mixdown_to_file(&sub_timeline, &out_path, opts) {
@@ -1605,6 +1657,7 @@ pub(super) fn quick_export_selected_clips(
             output: output_spec.clone(),
             quality_preset: crate::mixdown::QualityPreset::Export,
             cancel_flag: None,
+            progress: None,
         },
     ) {
         Ok(result) => {
@@ -1623,6 +1676,7 @@ pub(super) fn quick_export_selected_clips(
             serde_json::json!({
                 "ok": true,
                 "path": out_path.display().to_string(),
+                "output_dir": out_path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
                 "format": output_spec.format.as_name(),
                 "sample_rate": result.sample_rate,
                 "num_samples": num_samples,
@@ -1932,19 +1986,51 @@ fn normalize_export_bit_depth(bit_depth: u32) -> u32 {
     }
 }
 
+/// 这里先把模板里「不构成完整两字符指示符的 `%`」转义成 `%%`，保证后续 `format`
+/// 永远不会 panic：合法日期通配符（如 `%Y%m%d`）保持原样，半截的 `%` 当作字面量。
+fn sanitize_time_format(template: &str) -> String {
+    // 保留的日期指示符：与 `chrono::format::strftime` 兼容的常用两字符集。
+    const SPECIFIERS: &[char] = &[
+        'a', 'A', 'b', 'B', 'c', 'C', 'd', 'D', 'e', 'f', 'F', 'g', 'G', 'h', 'H', 'I', 'j', 'k',
+        'l', 'm', 'M', 'n', 'p', 'P', 'r', 'R', 's', 'S', 't', 'T', 'u', 'U', 'V', 'w', 'W', 'x',
+        'X', 'y', 'Y', 'z', 'Z', '%',
+    ];
+    let mut out = String::with_capacity(template.len());
+    let chars: Vec<char> = template.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '%' {
+            // 末尾单独的 `%`，或 `%` 后不是已知指示符 → 转义，避免 panic。
+            let next = chars.get(i + 1).copied();
+            if next == Some('%') {
+                out.push('%');
+                out.push('%');
+                i += 2;
+                continue;
+            }
+            if next.map(|n| SPECIFIERS.contains(&n)).unwrap_or(false) {
+                out.push('%');
+                out.push(next.unwrap());
+                i += 2;
+                continue;
+            }
+            // 半截通配符：当作字面量 `%` 转义。
+            out.push_str("%%");
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 fn try_apply_time_format(template: &str, time: chrono::DateTime<Local>) -> Result<String, String> {
-    let direct = std::panic::catch_unwind(|| time.format(template).to_string());
-    if let Ok(value) = direct {
-        return Ok(value);
-    }
-
-    let escaped = template.replace('%', "%%");
-    let escaped_try = std::panic::catch_unwind(|| time.format(&escaped).to_string());
-    if let Ok(value) = escaped_try {
-        return Ok(value);
-    }
-
-    Err("export_invalid_time_format".to_string())
+    let safe = sanitize_time_format(template);
+    // 经过 sanitize 后不再 panic，直接格式化即可。
+    let value = time.format(&safe).to_string();
+    Ok(value)
 }
 
 fn resolve_project_folder(state: &AppState) -> PathBuf {

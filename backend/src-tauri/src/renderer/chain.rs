@@ -9,7 +9,6 @@
 //!
 //! 预设链构造：[`world_chain()`]、[`hifigan_chain()`]
 
-use super::common_params::{COMMON_MIX_PARAMS, PAN_PARAM, VOLUME_PARAM};
 use super::traits::{
     ClipProcessContext, ClipProcessor, ParamDescriptor, ProcessorCapabilities, RenderContext,
     Renderer,
@@ -17,7 +16,9 @@ use super::traits::{
 
 static HIFIGAN_BREATH_OPTIONS: [(&str, i32); 2] = [("Off", 0), ("On", 1)];
 
-static HIFIGAN_PARAM_DESCRIPTORS: [ParamDescriptor; 6] = [
+/// 仅 NSF-HiFiGAN 专有的参数；共通混音级参数（volume / pan / dyn）**不在此处**
+/// —— 它们由 `renderer::common_params` 统一提供，见 `renderer::all_param_descriptors`。
+static HIFIGAN_PARAM_DESCRIPTORS: [ParamDescriptor; 4] = [
     ParamDescriptor {
         id: "breath_enabled",
         display_name: "Breath",
@@ -60,8 +61,6 @@ static HIFIGAN_PARAM_DESCRIPTORS: [ParamDescriptor; 6] = [
             max_value: 500.0,
         },
     },
-    VOLUME_PARAM,
-    PAN_PARAM,
 ];
 
 // ─── StageContext ──────────────────────────────────────────────────────────────
@@ -154,7 +153,9 @@ impl ProcessingStage for WorldVocoderStage {
     }
 
     fn param_descriptors(&self) -> &'static [ParamDescriptor] {
-        &COMMON_MIX_PARAMS
+        // WORLD 没有任何专有曲线；共通混音级参数由 `renderer::all_param_descriptors`
+        // 统一追加，此处返回空切片。
+        &[]
     }
 
     fn process(&self, input_pcm: Vec<f32>, ctx: &StageContext<'_>) -> Result<Vec<f32>, String> {
@@ -164,6 +165,7 @@ impl ProcessingStage for WorldVocoderStage {
         }
         let render_ctx = RenderContext {
             mono_pcm: &input_pcm,
+            channel_index: cc.channel_index,
             sample_rate: cc.sample_rate,
             seg_start_sec: cc.seg_start_sec,
             seg_end_sec: cc.seg_end_sec,
@@ -284,6 +286,7 @@ impl ProcessingStage for HiFiGanStage {
         // ── 非 Breath 路径 ──────────────────────────────────────────────
         let render_ctx = RenderContext {
             mono_pcm: &input_pcm,
+            channel_index: cc.channel_index,
             sample_rate: cc.sample_rate,
             seg_start_sec: cc.seg_start_sec,
             seg_end_sec: cc.seg_end_sec,
@@ -328,7 +331,13 @@ impl HiFiGanStage {
         formant_curve: Option<&[f32]>,
     ) -> Result<Vec<f32>, String> {
         let (harmonic, noise) =
-            crate::hnsep_onnx::infer_harmonic_noise_mono(cc.clip_id, &input_pcm, cc.sample_rate)?;
+            crate::hnsep_onnx::infer_harmonic_noise_mono(
+                cc.clip_id,
+                &input_pcm,
+                cc.sample_rate,
+                cc.channel_index,
+                cc.source_fingerprint,
+            )?;
 
         // 谐波分支：有 F0（clip_midi）时走 HiFiGAN mel 拉伸/渲染；无 F0 时
         // 回退外部算法拉伸 —— 两种情况输出都是时间轴长度 out_frames。
@@ -347,6 +356,7 @@ impl HiFiGanStage {
         } else {
             let render_ctx = RenderContext {
                 mono_pcm: &harmonic,
+                channel_index: cc.channel_index,
                 sample_rate: cc.sample_rate,
                 seg_start_sec: cc.seg_start_sec,
                 seg_end_sec: cc.seg_end_sec,
@@ -370,9 +380,14 @@ impl HiFiGanStage {
 
         let breath_curve = cc.extra_curves.get("breath_gain").map(|v| v.as_slice());
 
-        // Fast path: if breath_gain is uniformly zero (e.g. when computing harmonic_only
-        // for BreathNoiseCache), skip noise mixing entirely and return processed_harmonic.
-        let gain_is_zero = breath_curve.map_or(true, |c| {
+        // Fast path: only when a curve is present **and** uniformly zero (e.g. when
+        // computing harmonic_only for BreathNoiseCache) can we skip noise mixing.
+        //
+        // 曲线**缺失**必须走混合路径：`breath_gain` 的描述符默认值是 1.0，未绘制
+        // 参数线即"整体使用默认增益"，而预览路径的 breath stem 也是按默认 1.0 混入
+        // 的（见 `audio_engine/mix.rs`）。此处若把缺失当成 0 直接返回谐波，导出就
+        // 会丢掉整条气声 —— 预览正常、导出无气声正是这个分支造成的。
+        let gain_is_zero = breath_curve.map_or(false, |c| {
             c.is_empty() || c.iter().all(|&v| v.abs() < f32::EPSILON)
         });
         if gain_is_zero {

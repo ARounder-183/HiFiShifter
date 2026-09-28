@@ -32,6 +32,16 @@
     --qt-warning-bg: #3d2a0a;
     --qt-warning-text: #fcd34d;
     --qt-warning-border: #f59e0b;
+    /* 成功 / 信息：与 danger/warning 同构的第三、四组语义色。
+       此前"成功"只能写死 `text-green-600`、"处理中"只能写死 `text-blue-600` ——
+       于是这两类状态在浅色主题下要么对比度不足、要么和强调色打架，而且
+       主题定制（AppearanceWindow）完全管不到它们。 */
+    --qt-success-bg: #14351f;
+    --qt-success-text: #86efac;
+    --qt-success-border: #22c55e;
+    --qt-info-bg: #10243d;
+    --qt-info-text: #93c5fd;
+    --qt-info-border: #3b82f6;
     /* 画布区（时间线轨道/参数编辑器）比 chrome 区（window/panel）深一档，
        让工具栏/标尺/画布靠明度而不是仅靠 1px 细线分区 */
     --qt-graph-bg: #1f1f1f;
@@ -40,6 +50,12 @@
     --qt-graph-grid-strong: rgba(255, 255, 255, 0.22);
     --qt-graph-grid-weak: rgba(255, 255, 255, 0.1);
     --qt-scrollbar-thumb: #555555;
+    /* 此前 tailwind.config.js 映射了这个 token 但 CSS 从未定义它，
+       `scrollbar-thumb-hover:` 类因此静默失效。补上定义而不是删掉映射：
+       hover 是滚动条唯一的价格反馈。 */
+    --qt-scrollbar-thumb-hover: #6b6b6b;
+    /* 强调色的语义别名。此前两处 `text-qt-accent` 因为无此 token 而取不到颜色。 */
+    --qt-accent: var(--accent-9);
     --qt-overlay: rgba(0, 0, 0, 0.35);
     --qt-divider: rgba(255, 255, 255, 0.04);
     --qt-subtle-1: rgba(255, 255, 255, 0.025);
@@ -82,12 +98,20 @@
     --qt-warning-bg: #fff1dc;
     --qt-warning-text: #9b5f13;
     --qt-warning-border: #d59140;
+    --qt-success-bg: #e2f7e8;
+    --qt-success-text: #1f6b3a;
+    --qt-success-border: #4aa96c;
+    --qt-info-bg: #e4eefc;
+    --qt-info-text: #2a5aa8;
+    --qt-info-border: #6d9bd8;
     --qt-graph-bg: #edf0f5;
     /* 半透明蓝灰：在泳道上与旧实色等效，在 clip 色块/波形上则化为
        同色调的细线，不再切出高对比条纹 */
     --qt-graph-grid-strong: rgba(74, 88, 112, 0.55);
     --qt-graph-grid-weak: rgba(74, 88, 112, 0.3);
     --qt-scrollbar-thumb: #b4bac7;
+    --qt-scrollbar-thumb-hover: #9aa1b1;
+    --qt-accent: var(--accent-9);
     --qt-overlay: rgba(20, 24, 32, 0.22);
     --qt-divider: rgba(32, 38, 52, 0.1);
     --qt-subtle-1: rgba(28, 36, 52, 0.025);
@@ -111,6 +135,114 @@
     --qt-font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     --default-font-family: var(--qt-font-family);
     font-family: var(--qt-font-family);
+}
+
+/*
+ * 度量令牌（design tokens）。
+ *
+ * 【为什么单独成层】颜色令牌（--qt-* 色值）解决主题，度量令牌解决
+ * "同一个语义在不同文件里各写各的数字"。此前 chrome 条有 6 种高度
+ * （20/24/26/28/32/48）、图标有 9 种尺寸（4/6/7/8/9/10/12/14/15）、
+ * 设置行标签宽度有 12 个魔法值 —— 全部靠作者纪律维持，不靠机制。
+ *
+ * 本层与颜色层同级（挂在 `:root`，不做主题分支：度量不分明暗），
+ * 但**优先级更高**：新增/修改的样式一律取令牌值，禁止再写裸 px。
+ * 旧代码不强制一次性迁移，被触及时就地迁移即可（避免巨型 diff）。
+ *
+ * 前缀沿用 `--qt-*`：颜色令牌名已被用户导出的自定义主题 JSON 持久化
+ * （`QT_COLOR_TOKENS`），前缀不可更换，度量令牌与它们并列最自然。
+ */
+:root {
+    /* 空间阶梯：单一 4px 栅格。避免 3/4/5px 混用时按控件开关产生的 off-by-one */
+    --qt-space-0: 0px;
+    --qt-space-1: 2px;
+    --qt-space-2: 4px;
+    --qt-space-3: 6px;
+    --qt-space-4: 8px;
+    --qt-space-5: 12px;
+    --qt-space-6: 16px;
+    --qt-space-7: 24px;
+
+    /* 控件高度：三档。桌面端 chrome 只用前两档 */
+    --qt-ctl-sm: 20px; /* 紧凑面板：文件浏览器 / Notebook 工具栏 */
+    --qt-ctl-md: 24px; /* 主工具栏按钮、对话框按钮（对齐 Radix size="1"） */
+    --qt-ctl-lg: 32px; /* 菜单栏 / ActionBar 容器高 */
+
+    /* chrome 条高度：与上面的控件高度解耦（条要容纳 1px 边框与内边距） */
+    --qt-bar-title: 28px; /* 浮动窗标题栏 */
+    --qt-bar-compact: 26px; /* PanelToolbar / dock 标签栏 */
+    --qt-bar-main: 32px; /* MenuBar / ActionBar / PianoRoll 头部 */
+    --qt-bar-status: 24px; /* 状态栏 */
+
+    /* 圆角：三档。与 Radix --radius 变量并存（后者管 Radix 控件） */
+    --qt-radius-sm: 4px;
+    --qt-radius-md: 6px;
+    --qt-radius-lg: 10px;
+
+    /*
+     * 字号阶梯：统一为 px 绝对量，终结 text-xs（0.7rem = 11.2px）≠ text-[11px] 的双轨。
+     *
+     * 【为什么上限拉到 20px】上一版阶梯最高只到 13px，容不下"标题"这个角色 ——
+     * 于是对话框标题被压到 13px，反而比 14px 的正文标签还小（层级倒挂）。
+     * 阶梯必须覆盖全部角色，否则作者只能拿最接近的数值凑。
+     *
+     * 【为什么下探到 9px】标尺旗帜、时间轴/钢琴卷帘角标这一档确实是 9px ——
+     * 它们此前散落成 9 处 `text-[9px]` 字面量，而 9px 与 10px 在"旗帜贴着刻度线
+     * 对齐"的语境里是两个不同的设计意图（见 TimeRuler 里"与变化点旗帜同款尺寸"
+     * 的注释），不能就近归并。把它命名出来，是为了让**这一档只在这里被决定**：
+     * 门禁禁止任何裸 `text-[Npx]`，下一档要加就得改这个文件。
+     */
+    --qt-fs-3xs: 9px;
+    --qt-fs-micro: 10px;
+    --qt-fs-xs: 11px;
+    --qt-fs-sm: 12px;
+    --qt-fs-md: 13px;
+    --qt-fs-lg: 15px;
+    --qt-fs-xl: 17px;
+    --qt-fs-2xl: 20px;
+
+    /*
+     * 行高阶梯：与字号成对使用。此前各处要么不写行高（继承，随上下文跳变），
+     * 要么写死 20px（与 11px 字搭配时过于松散）。
+     */
+    --qt-lh-tight: 16px;
+    --qt-lh-base: 18px;
+    --qt-lh-relaxed: 20px;
+    --qt-lh-display: 26px;
+
+    /* 图标尺寸：由 AppIconButton 等原语注入，禁止调用方再写 width="15" */
+    --qt-icon-sm: 12px;
+    --qt-icon-md: 14px;
+    --qt-icon-lg: 15px;
+
+    /*
+     * 层级阶梯。原来是 index.css 里一段注释约定 + 各处的 z-[999]/z-[9999]
+     * 字面量，实测已漂移（EditContextMenu / DockTabMenu 用 z-[9999]，
+     * 反而高过对话框层）。现在把约定变成可引用的量。
+     *
+     * 高 → 低：
+     *   tooltip       2147483647
+     *   全屏选择菜单    9999
+     *   模态弹窗       1000
+     *   右键/上下文菜单 999   ← 必须低于弹窗：弹窗打开时不应被菜单盖住
+     *   工具栏浮层     600
+     *   常驻面板       500   ← 「操作记录」等
+     *   时间轴瞬态     ≤60
+     */
+    --qt-z-transient: 60;
+    --qt-z-panel: 500;
+    --qt-z-popover: 600;
+    --qt-z-menu: 999;
+    --qt-z-dialog: 1000;
+    --qt-z-fullscreen: 9999;
+
+    /* 焦点环：键盘可达性的唯一视觉凭据（见下方 :focus-visible 规则） */
+    --qt-focus-ring: var(--accent-9, #3b82f6);
+    --qt-focus-ring-width: 2px;
+
+    /* 动效时长 */
+    --qt-dur-fast: 0.12s;
+    --qt-dur-mid: 0.18s;
 }
 
 :root[data-theme="dark"] {
@@ -148,6 +280,9 @@ body input,
 body textarea,
 body select,
 body [contenteditable="true"],
+/* 可编辑区域的**内容**同样要可选中：文本都在 <p>/<li>/<td> 里，只放开
+   contenteditable 根节点本身，等于让整篇可编辑文本落在 user-select:none 上。 */
+body [contenteditable="true"] *,
 body [data-hs-selectable="true"],
 body [data-hs-selectable="true"] * {
     -webkit-user-select: text;
@@ -171,15 +306,43 @@ textarea {
     font-family: inherit;
 }
 
+/*
+ * 焦点可见性。
+ *
+ * 【曾经的做法与它的问题】此前这里无条件移除 focus-visible 的 outline 与
+ * box-shadow，但没有提供任何替代品 —— 全应用只剩 4 处裸 input 有自绘焦点环，
+ * 因此 **Tab 键走遍界面，任何控件都不显示焦点**。这是桌面端应用的硬伤：
+ * 键盘用户完全失去位置感。而当时代码库普遍存在的"hover 变色"不能替代它，
+ * 因为悬停与焦点是两个独立通道。
+ *
+ * 【现在的做法】统一给一个高对比焦点环：实心按钮用 2px 外偏移避免与底色粘连，
+ * 其余控件 1px 偏移。焦点环取 `--accent-9`（跟随用户的强调色设置），
+ * 与 `.param-pill` / `.qt-range` 等既有强调色用法一致。
+ *
+ * 仅在 `:focus-visible` 触发（键盘导航），鼠标点击不会画出焦点环，
+ * 因此不影响现有的点按手感。第三方控件只要不显式移除 outline，即自动继承。
+ */
+:where(
+    button,
+    [role="button"],
+    [role="tab"],
+    a[href],
+    summary,
+    input,
+    textarea,
+    select
+):focus-visible,
 .rt-BaseButton:focus-visible,
-:where(button, [role="button"]):focus-visible {
-    outline: none;
-    box-shadow: none;
+.rt-TextFieldInput:focus-visible,
+.rt-TextArea:focus-visible,
+.rt-SelectTrigger:focus-visible {
+    outline: var(--qt-focus-ring-width) solid var(--qt-focus-ring);
+    outline-offset: 1px;
 }
 
-:where(input, textarea, select, .rt-TextFieldInput, .rt-SelectTrigger):focus-visible {
-    outline: none;
-    box-shadow: none;
+/* 实心按钮底色与强调色同系，焦点环紧贴会糊成一团：外挪 2px 拉开 */
+.rt-variant-solid:focus-visible {
+    outline-offset: 2px;
 }
 
 /*
@@ -232,6 +395,18 @@ textarea {
     scrollbar-width: none;
     -ms-overflow-style: none;
 }
+
+/* 轨道头滚动容器：禁用浏览器滚动锚定（scroll anchoring）。
+ *
+ * 内核模式下画布竖直缩放会在 React 行高落地**之前**改写视口（内核当帧原子提交行高
+ * 与锚点位置），而行高变化时 Chromium 默认会为"保持锚点行视觉稳定"自动改写容器
+ * scrollTop。该改写产生的 scroll 事件与宿主"上次写入值"不符，会被回声判定当成用户
+ * 输入反灌内核，把视口从锚点位置拽回 —— 表现为"竖直缩放后竖直方向抽动"。轨道头
+ * 自己的缩放路径本就显式计算锚点（TrackList 的 layout effect），不依赖浏览器锚定，
+ * 因此禁用无害。详见 timelineKernelHost 的 `verticalZoomInFlight`。 */
+.no-scroll-anchor {
+    overflow-anchor: none;
+}
 .hide-scrollbar::-webkit-scrollbar {
     display: none;
 }
@@ -243,29 +418,259 @@ textarea {
 }
 
 /*
- * 层级约定（高 → 低）：
- *   快速搜索                99998 / 99999
- *   导入模式等全屏选择菜单     9999
- *   模态弹窗（Dialog）       1000  —— 打开时独占交互，盖过「操作记录」面板与菜单
- *   右键 / 上下文菜单等       999
- *   工具栏右键菜单            600
- *   「操作记录」面板          500   —— 高于时间轴瞬态元素（选区框 z-40、握把 z-60 之外的内容）
- *   时间轴瞬态元素            ≤ 60
+ * 对话框排版（`AppDialog` 的结构钩子）。
+ *
+ * Radix 的 Dialog.Title 默认比本应用的正文大不少，而各对话框此前用
+ * `size="2"` / `size="1"` / 默认值三种写法互相冲突。收进令牌后，
+ * 标题/描述的层次只由这一处决定。
+ */
+/* ===========================================================================
+ * 排版角色层（type roles）
+ *
+ * 【为什么需要"角色"而不是"字号"】上一轮只补了值令牌（--qt-fs-*），结果作者
+ * 拿到一串数字仍要自己挑：标题挑到 13px（因为它就在旁边）、标签挑到 11px、
+ * 页脚按钮挑了 sm。**令牌给的是数值，不是语义** —— 没有"标题该多大"的答案，
+ * 只有"有哪些数字"，层级必然散架。
+ *
+ * 本层把「字号 + 字重 + 行高 + 颜色」四件套按角色固定下来，调用方只说
+ * "这是标题"，不说"这是 20px"。层级关系因此写死在 CSS 里，而不是靠每个作者
+ * 的自觉 —— 与 `AppButton` 用 `intent` 收掉 Radix 变体词汇表是同一个做法。
+ *
+ * 层级（必须保持，见 typography.test.ts）：
+ *   display(20/700) > section(13/600) > body(13/400) = mono(12)
+ *     > label(12/400) = muted(12/400 muted) > caption(11/400 muted)
+ *
+ * 【为什么 muted 与 label 同字号】12px 的"弱化正文句"（面板说明、空态提示）
+ * 与 12px 的字段标签字号相同、**靠颜色分层**：标签用正文色（不许比自己的提示
+ * 还淡），muted 用弱化色。此前这个语义被 Radix `<Text size="2" color="gray">`
+ * 以 14px 承载，与角色层并存期间同一面板两种正文，本次收编（见第七轮方案）。
+ * ======================================================================== */
+
+.hs-type-display {
+    font-size: var(--qt-fs-2xl);
+    line-height: var(--qt-lh-display);
+    font-weight: 700;
+    color: var(--qt-text);
+}
+
+.hs-type-section {
+    font-size: var(--qt-fs-md);
+    line-height: var(--qt-lh-base);
+    font-weight: 600;
+    color: var(--qt-text);
+}
+
+.hs-type-body {
+    font-size: var(--qt-fs-md);
+    line-height: var(--qt-lh-relaxed);
+    font-weight: 400;
+    color: var(--qt-text);
+}
+
+/* 字段标签：比正文小一档，但**用正文色**。
+   原实现是 11px + muted，于是标签比它自己的提示（12px）和取值（12px）都小、
+   还更淡 —— 主次完全反了。 */
+.hs-type-label {
+    font-size: var(--qt-fs-sm);
+    line-height: var(--qt-lh-base);
+    font-weight: 400;
+    color: var(--qt-text);
+}
+
+/* 弱化正文句：比正文小一档且用弱化色，但**比 caption 大一档** —— 承载完整
+   句子（面板说明、空态提示、对话框副标题），11px 是角标量级，撑不起句子。
+   与 `.app-dialog__description` 是同一语义：那条规则已删除、元素直接挂本类。 */
+.hs-type-muted {
+    font-size: var(--qt-fs-sm);
+    line-height: var(--qt-lh-base);
+    font-weight: 400;
+    color: var(--qt-text-muted);
+}
+
+/* 说明 / 提示 / 单位 / 状态：全应用最小的正文级文字 */
+.hs-type-caption {
+    font-size: var(--qt-fs-xs);
+    line-height: var(--qt-lh-tight);
+    font-weight: 400;
+    color: var(--qt-text-muted);
+}
+
+/* 数值读数：等宽数字，避免滚动调值时文字宽度抖动 */
+.hs-type-mono {
+    font-size: var(--qt-fs-sm);
+    line-height: var(--qt-lh-tight);
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+    color: var(--qt-text);
+}
+
+/*
+ * 对话框的滚动契约：**内容框永不滚动，只有 body 滚动**。
+ *
+ * 【为什么必须显式写】Radix 的 `.rt-BaseDialogContent` 自带 `position: relative`
+ * **且** `overflow: auto`。而 body 只写了 `overflow-y: auto`、**没有 `position`** ——
+ * 于是 body 内那些**绝对定位**的隐藏元素（`Checkbox` 的 `<input>`、`Select` 的原生
+ * `<select>`、`Slider` 的 thumb `<span>` 等，由 Radix 内部渲染）的包含块是**内容框**
+ * 而不是 body。包含块不是 body ⇒ 它们**不受 body 的 `overflow-y` 裁剪**，而是把溢出
+ * 算到内容框上 ⇒ 内容框产生可滚动溢出。
+ *
+ * 实测（吸附/网格设置，1280×720）：内容框 618/1303 渲染出 12px 滚动条，body 455/1230
+ * 渲染出 10px 滚动条 —— **两层竖直滚动条**，而内容框那条滚下去看不到任何东西（它的
+ * 子元素加起来正好等于可视高度），用户只会以为下面还有内容。
+ *
+ * 两处缺一不可：
+ * - `overflow: hidden` 让内容框**永不**滚动（兜底）；
+ * - body 的 `position: relative` 把那些隐藏元素的包含块改回 body，使它们**随内容滚动
+ *   并被 body 裁剪**。若只做前者，隐藏输入会被裁掉但不跟随内容 —— Radix 的复选框
+ *   点击转发与键盘聚焦依赖这些元素的位置，滚动后就会点不中。
+ */
+.app-dialog {
+    overflow: hidden;
+}
+
+.app-dialog__body {
+    position: relative;
+}
+
+/*
+ * 对话框的四个文字槽位。三档字号、两种颜色，职责互不重叠：
+ *
+ *   .app-dialog__title        20px  正文色  700   这是什么对话框
+ *   .app-dialog__description  12px  弱化色  400   一句补充（副标题）
+ *   .app-dialog__message      13px  正文色  400   对话框想说的那句话
+ *   .app-dialog__body         —     正文色  —     表单/列表等内容
+ *
+ * 【为什么必须有 message 这一档】此前只有 title 与 description 两档，于是
+ * 6 个"纯确认框"只好把**主消息**塞进 description —— 那是副标题的位置，11px +
+ * 弱化色。实测一个同构对话框：标题 20px/`--qt-text`，描述 11px/`--qt-text-muted`，
+ * 而描述**下方**的间距（28px）是上方（4px）的 7 倍 —— 全框最小最淡的一句话，
+ * 却被排版粘在标题上、推离页脚。字号、颜色、分组三件事同时错。
+ *
+ * 【为什么 description 从 11px 提到 12px】11px 在本应用里是"角标"量级
+ * （`--qt-fs-3xs` 9px / `--qt-fs-micro` 10px / `--qt-fs-xs` 11px 都只用于标尺
+ * 旗帜、单位后缀这类角标），用它承载一个句子是层级误用。12px 仍是明显的次要档
+ * （比正文 13px 小、比角标 11px 大），但可读。
+ *
+ * 【回归修正】更早一轮是 13px/600 与 12px —— 标题比正文标签还小。Radix 原本给的是
+ * `Heading size="5"` = 20px/700，这里保持该量级。
+ */
+/*
+ * 标题只保留"标题自己的事"（外边距），字号/字重/颜色**全部交给
+ * `.hs-type-display` 角色类**（由 `Dialog.tsx` 挂在同一个元素上）。
+ *
+ * 【为什么不再复制一遍声明】此前这里逐字写了 `.hs-type-display` 的四条声明，
+ * 只差一个 `color` —— 于是角色层最重要的那一档（display）在全应用**零消费者**，
+ * 而它的取值又存在两份。改字号要改两处，忘了一处就分叉。
+ * 现在字号只有一个来源，本规则也不再写 `font-size`（门禁会检查这一点）。
+ */
+.app-dialog__title {
+    margin: 0;
+}
+
+/* 副标题的排版声明已上收为 `.hs-type-muted` 角色类（`Dialog.tsx` 挂在同一
+   元素上）—— 字号/行高/颜色只此一份，与标题复用 display 同一条原则。 */
+
+/*
+ * 主消息。
+ *
+ * 【字号/行高/颜色不在这里写】元素同时挂了 `.hs-type-body` —— 它就是正文，
+ * 不该有第二份声明（与标题复用 `.hs-type-display` 同一条理由）。本文件只负责
+ * 严重度的呈现（下面的 `--tone` 系列）。
+ *
+ * 【间距方向（实测）】标题→消息 8px，消息→页脚 16px。消息属于标题那一组，
+ * 动作区才是另一组 —— 间距表达分组，分组不能反。此前是 4px / 28px（7 倍倒挂）。
+ *
+ * 【颜色为什么必须是正文色】主消息不许比标题淡两档。`.hs-type-body` 用的就是
+ * `--qt-text`，门禁会断言这一点。
+ */
+
+/*
+ * 严重度：只给**确实会造成数据损失/损坏**的确认框用（丢弃未保存更改、覆盖
+ * 更高版本的工程文件、清空速度映射…）。
+ *
+ * 【为什么消息本身不上色】上一轮把严重度画成"底色 + 左色条 + 彩色文字"的告警卡，
+ * 实测在一枚 400px 的确认框里占了三分之一，还与 accent 实心按钮形成两块饱和色，
+ * 用户反馈"太怪、不符合本项目的一贯风格"。桌面消息框的惯例（Qt / Win32 /
+ * macOS / Radix AlertDialog）是**消息永远是平文本正文**，严重度只住在两处：
+ * 这里的图标，以及动作按钮的 `intent` —— 严重度要落在后果上。仓库内的对照组是
+ * 「清除波形缓存」（无 tone + `intent: "danger"`），观感正确；填充告警卡是
+ * web 文档的惯例，不进本系统。
+ *
+ * 【为什么单独一档而不是让按钮变色】按钮语义由 `intent` 回答（按下去做什么），
+ * 严重度由这里回答（这事多危险）。两者互补：tone 负责图标，调用方给破坏性动作
+ * 显式挂 `intent: "danger"`。上一轮把两者合并过一次，结果是破坏性主操作失去
+ * 分量 —— 同样的错误不重复。
+ */
+.app-dialog__message--tone {
+    display: flex;
+    gap: var(--qt-space-5);
+    align-items: flex-start;
+}
+
+/*
+ * 图标着色走语义令牌（两套主题各有一份取值）；消息文字保持 `.hs-type-body`
+ * 的正文色。容器上的 `data-tone` 由 `Dialog.tsx` 写入，非 default 才存在。
+ */
+[data-tone="warning"] .app-dialog__tone-icon {
+    color: var(--qt-warning-text);
+}
+
+[data-tone="danger"] .app-dialog__tone-icon {
+    color: var(--qt-danger-text);
+}
+
+/* 图标与首行文字对齐（不随行高漂移） */
+.app-dialog__tone-icon {
+    flex: 0 0 auto;
+    margin-top: 2px;
+}
+
+/*
+ * 页脚上沿的细分割线：让"操作区"与"内容区"分开。
+ *
+ * 【为什么改成可选】上一轮无条件加线，于是"只有一个确定按钮"的短对话框
+ * （快捷键、关于、吸附…）凭空多出一条横线。默认不画，由 AppDialog 的
+ * `footerDivider` 显式打开。
+ */
+.app-dialog__footer--divided {
+    border-top: 1px solid var(--qt-divider);
+    padding-top: var(--qt-space-5);
+}
+
+/*
+ * `AppField` 的控件槽。
+ *
+ * Radix 的 `TextField.Root` / `Select.Trigger` 是 inline-flex，在纵向 flex
+ * 容器里不会自动铺满宽度（inline 级盒子不参与 cross-axis stretch）。此前每个
+ * 调用点都靠 `style={{ flex: 1 }}` 手工补偿 —— 这正是"每个对话框各写一套"
+ * 的起点。在这里一次性解决，调用方不必再想宽度。
+ */
+.app-field__control > * {
+    width: 100%;
+    min-width: 0;
+}
+
+/*
+ * 层级阶梯：定义见 `:root` 的 `--qt-z-*`。此处只做落地。
  *
  * Radix 的 Dialog / 菜单 portal 本身不带 z-index（靠 DOM 顺序决定层级），
- * 而「操作记录」是常驻浮层（z-500），不显式分层就会挡住后打开的弹窗与菜单。
- * 弹层与弹窗同用 1000 时靠 DOM 顺序：后打开的（如弹窗内的下拉）在上。
+ * 而「操作记录」是常驻浮层（--qt-z-panel），不显式分层就会挡住后打开的弹窗与菜单。
+ *
+ * 【为什么弹窗与弹窗内的下拉用同一层】弹窗里可以开 Select/Dropdown（例如导出
+ * 对话框的格式选择）。两者若分到不同层，下拉会落到弹窗**底下**。Radix 把后打开
+ * 的 portal 排在后面，同一层内靠 DOM 顺序即可正确叠放 —— 所以这里必须同级。
+ * 真正需要低于弹窗的是**手写的**右键菜单（非 Radix portal，见 --qt-z-menu）。
  */
 .rt-DialogOverlay,
 .rt-DialogContent {
-    z-index: 1000 !important;
+    z-index: var(--qt-z-dialog) !important;
 }
 
 .rt-DropdownMenuContent,
 .rt-SelectContent,
 .rt-ContextMenuContent,
 .rt-PopoverContent {
-    z-index: 1000 !important;
+    z-index: var(--qt-z-dialog) !important;
 }
 
 .rt-DialogContent,
@@ -381,6 +786,17 @@ textarea {
     min-width: 20px;
     padding-inline: 2px 4px;
 }
+/*
+ * 下拉角标点击后的默认焦点框：Radix 菜单关闭时会把焦点程序化还给触发按钮，
+ * 浏览器据此画出默认 outline（角标图标外一圈黑框，观感像"选中态"）。角标
+ * tabIndex=-1 不参与键盘导航（键盘焦点只会落在药丸的其他片段上），药丸的
+ * 选中态也已由 .param-pill[data-active] 表达 —— 这个焦点框纯属视觉噪音，
+ * 连 :focus 与 :focus-visible 一并移除。
+ */
+.param-pill__seg--chev:focus,
+.param-pill__seg--chev:focus-visible {
+    outline: none;
+}
 .param-pill__seg--breath {
     min-width: 22px;
     padding-inline: 3px;
@@ -459,13 +875,22 @@ textarea {
     color: var(--qt-text);
     padding: 4px 8px;
     border-radius: 6px;
-    font-size: 12px;
+    font-size: var(--qt-fs-sm);
     line-height: 16px;
     border: 1px solid var(--qt-border);
     box-shadow: 0 2px 10px var(--qt-overlay);
-    white-space: pre-line;
-    /* 400px：容纳关于对话框里两行展示的完整仓库链接（约 320px），其余
-       短文案不受影响（只在内容超过 320px 时才会用满更宽的气泡）。 */
-    max-width: 400px;
+    /*
+     * 【为什么不再限制 400px、也不自动折行】曾经是 `pre-line` + `max-width: 400px`：
+     * 内容一超过 400px 就被**压缩并折行**，而定位逻辑随后拿到的 `offsetWidth`
+     * 已经是折行后的宽度 —— 于是"夹紧"退化成"停在原地 + 已折行"。这不是提示气泡的
+     * 常规行为：常规行为是**整体左移**（`clampTooltipPosition` 本来就会向左收），
+     * 内容保持原样。
+     *
+     * 现在只在**超过视口**这一种退化情形下才允许折行（`pre-wrap` 保留显式换行与
+     * 空格，仅在放不下时才在空白处折），上限取视口宽减两侧留白；其余情况气泡按内容
+     * 的自然宽度渲染，定位函数据此把它整体挪进视口。
+     */
+    white-space: pre-wrap;
+    max-width: calc(100vw - 16px);
     tab-size: 4;
 }

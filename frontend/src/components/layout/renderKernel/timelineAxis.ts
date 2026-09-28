@@ -31,6 +31,8 @@
  */
 
 /** 时间轴投影：描述「一秒画多少像素」以及「视口左上角落在内容何处」。 */
+
+import { snapToDevicePx, wholeDevicePxLength } from "../../../utils/devicePixelLine";
 export interface TimelineAxis {
     /** 水平缩放：每秒对应的 CSS 像素数。必须 > 0。 */
     readonly pxPerSec: number;
@@ -241,6 +243,80 @@ export function strokePx(axis: TimelineAxis, px: number, widthPx: number): numbe
     const snapped = snapPx(axis, px);
     const oddWidth = Math.max(0, Math.round(widthPx * axis.dpr)) % 2 === 1;
     return oddWidth ? snapped + 0.5 / axis.dpr : snapped;
+}
+
+/**
+ * 播放头竖线的**左缘**在视口坐标里的位置 —— 全应用唯一的算法。
+ *
+ * 【为什么必须唯一】播放头在参数编辑器里由**两条独立的线**呈现：主体线由 GL 画
+ * （视口坐标），标尺线是 DOM 线、位于被 `translateX(-scrollLeft)` 平移的内容层里
+ * （内容坐标）。两条线只要有一处换算不同，用户就会看到它们"分离"。曾经出过两次：
+ *
+ * 1. **吸附位置不同**：标尺线在内容坐标里吸附，再被**小数级**的层平移带走，落点
+ *    与 GL 差最多一个设备像素；
+ * 2. **缩放来源不同**：标尺线用面板的 React 状态、GL 用内核真值，相差
+ *    `播放头秒数 × 缩放差`（面板宽度变化时内核会重新钳制缩放，两者随即分叉）。
+ *
+ * 本函数把"吸附 + 奇偶线宽补半像素 + 居中"这套约定收成一处：GL 几何与 DOM 线都
+ * 从它取左缘，因此**在任意 DPR 下逐设备像素一致**（此前各自实现时，偶数物理宽度
+ * 如 dpr=2 仍会差一个物理像素）。
+ *
+ * @param axis 当前投影（取 pxPerSec / scrollLeftPx / dpr）。
+ * @param sec 播放头位置（秒）。
+ * @param widthPx 线宽（CSS px）；缺省为 1 物理像素。
+ * @returns 线的左缘（视口坐标，CSS px）。
+ */
+/**
+ * 标尺**内容层**的平移量（CSS px，恒为正；写入时取负）。
+ *
+ * 【为什么必须吸附到设备像素】内容层里放着标尺刻度竖线（DOM）。层被
+ * `translateX(-小数)` 平移时，合成层以自己的原点栅格化子元素：若层原点落在分数
+ * 设备像素上，每条 1 物理像素的竖线都会跨在两个物理像素之间被抗锯齿 —— 覆盖度随
+ * 平移的小数部分变化，于是**同一排竖线粗细不一**（系统缩放率 > 1 时尤其明显）。
+ *
+ * 内核的网格线不会这样：它按 `snapRenderView` 把渲染原点吸附到设备像素再绘制。
+ * 本函数让 DOM 侧采用**同一份吸附**，两层因此落在同一个设备像素栅格上 —— 既消除
+ * 粗细不一，也让标尺与网格逐设备像素对齐。
+ *
+ * @param scrollLeftPx 绘制坐标下的水平滚动量（可含小数）。
+ * @param dpr 设备像素比。
+ * @returns 吸附后的平移量（内容层 transform 取它的相反数）。
+ */
+export function rulerLayerTranslatePx(scrollLeftPx: number, dpr: number): number {
+    return snapToDevicePx(scrollLeftPx, dpr);
+}
+
+export function playheadLineLeftPx(axis: TimelineAxis, sec: number, widthPx?: number): number {
+    return playheadLineLeftViewportPx({
+        sec,
+        pxPerSec: axis.pxPerSec,
+        scrollLeftPx: axis.scrollLeftPx,
+        dpr: axis.dpr,
+        widthPx,
+    });
+}
+
+/**
+ * `playheadLineLeftPx` 的裸数值入口 —— 给没有 `TimelineAxis` 的调用方用
+ * （React 组件按 props 计算初始位置）。
+ *
+ * @returns 线的左缘（**视口坐标**，CSS px）。
+ */
+export function playheadLineLeftViewportPx(args: {
+    sec: number;
+    pxPerSec: number;
+    scrollLeftPx: number;
+    dpr: number;
+    widthPx?: number;
+}): number {
+    const dpr = Number.isFinite(args.dpr) && args.dpr > 0 ? args.dpr : 1;
+    const width = args.widthPx ?? wholeDevicePxLength(1, dpr);
+    const viewportX = args.sec * args.pxPerSec - args.scrollLeftPx;
+    const snapped = Number.isFinite(viewportX) ? Math.round(viewportX * dpr) / dpr : 0;
+    // 奇数物理宽度的线补半个设备像素，使线体正好覆盖整数个设备像素
+    // （否则 1px 线跨在两个物理像素上，变成 2px 灰线）。
+    const oddPhysicalWidth = Math.max(0, Math.round(width * dpr)) % 2 === 1;
+    return (oddPhysicalWidth ? snapped + 0.5 / dpr : snapped) - width / 2;
 }
 
 /**

@@ -1,5 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Flex, Box, Text, Dialog, Button } from "@radix-ui/themes";
+import {
+    Suspense,
+    lazy,
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+    type ReactNode,
+} from "react";
+import { Flex, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
 import { TimelinePanel } from "./components/layout/TimelinePanel";
@@ -9,8 +18,9 @@ import { webApi } from "./services/webviewApi";
 import { settingsApi } from "./services/api/settings";
 import { fileBrowserApi } from "./services/api/fileBrowser";
 import { IS_LINUX } from "./utils/platform";
-import { shouldSuppressHoverSideEffects } from "./utils/penInput";
+import { allowsNativeTextSelection, isEditableTarget } from "./utils/nativeSelectionGuards";
 import { clipboardErrorKey } from "./utils/clipboardError";
+import { resolveStatusText } from "./utils/statusText";
 import {
     closeVocalShifterSkippedFilesDialog,
     closeReaperSkippedFilesDialog,
@@ -59,10 +69,51 @@ import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
 import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
 import { PitchAnalysisProvider, usePitchAnalysis } from "./contexts/PitchAnalysisContext";
-import { PianoRollStatusProvider, usePianoRollStatus } from "./contexts/PianoRollStatusContext";
+import { ParamDataLoadingChip } from "./components/layout/ParamDataLoadingChip";
 import { FileBrowserPanel } from "./components/layout/FileBrowserPanel";
-import { NotebookPanel } from "./components/layout/NotebookPanel";
+import { AppearanceSettingsPanel } from "./components/layout/AppearanceSettingsPanel";
+import { UndoHistoryPanel } from "./components/layout/UndoHistoryPanel";
+import { DockRoot } from "./components/dock/DockRoot";
+import { registerBuiltinPanels } from "./components/dock/registerBuiltinPanels";
+import { attachBuiltinPanelComponents } from "./components/dock/attachBuiltinPanelComponents";
+import {
+    PANEL_FILE_BROWSER,
+    PANEL_NOTEBOOK,
+    PANEL_PARAM_EDITOR,
+    PANEL_TIMELINE,
+    PANEL_UNDO_HISTORY,
+    PANEL_APPEARANCE,
+} from "./components/dock/registerBuiltinPanels";
+import { setPanelRenderer } from "./features/dock/panelRenderer";
+import { cycleFocus, maximizeActive, toggleFloatActive } from "./features/dock/dockApi";
+import { hydrateDock } from "./features/dock/dockSlice";
+import {
+    finalizeDockHydration,
+    loadDockSettings,
+    persistDockSettings,
+} from "./features/dock/dockThunks";
+
+// 面板注册必须在首次渲染前完成：布局归一化要按注册表判定"这个面板还在不在"。
+registerBuiltinPanels();
+attachBuiltinPanelComponents();
+
+// 记事本按需加载：TipTap/ProseMirror/Turndown 加起来几百 KB，只有真正打开
+// 记事本时才需要 —— 静态导入会把这些全塞进首屏主包。
+const NotebookPanel = lazy(() =>
+    import("./components/layout/notebook/NotebookPanel").then((module) => ({
+        default: module.NotebookPanel,
+    })),
+);
+// 记事本自带的错误边界与按需加载放在一起：动态 chunk 加载失败或模块求值抛错
+// 都由它兜住，不会把整个窗口打空（应用没有根级 ErrorBoundary）。
+const NotebookErrorBoundary = lazy(() =>
+    import("./components/layout/notebook/NotebookErrorBoundary").then((module) => ({
+        default: module.NotebookErrorBoundary,
+    })),
+);
 import { ImportProjectDialog } from "./components/layout/ImportProjectDialog";
+import { AppDialog } from "./ui/Dialog";
+import { AppStatusChip } from "./ui";
 import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
 import { selectMergedKeybindings } from "./features/keybindings/keybindingsSlice";
@@ -72,6 +123,7 @@ import {
     resolveCopyCutRoute,
     resolveEditOpRoute,
     resolvePasteRoute,
+    type EditOpChannel,
 } from "./features/keybindings/focusRouting";
 import { installFocusSurfaceTracking, getActiveSurface } from "./features/uiFocus/focusSurface";
 import type { ActionId } from "./features/keybindings/types";
@@ -111,6 +163,9 @@ const statusKey: Record<string, string> = {
     "Runtime updated": "status_runtime_updated",
     "Runtime update failed": "status_runtime_update_failed",
     "Clear waveform cache failed": "status_clear_waveform_cache_failed",
+    "Render cache cleared": "status_render_cache_cleared",
+    "Clear render cache failed": "status_clear_render_cache_failed",
+    "Fake-stereo scan rejected": "status_fake_stereo_scan_rejected",
     "Import canceled": "status_import_canceled",
     "Pick output canceled": "status_pick_output_canceled",
     "Output path selected": "status_output_path_selected",
@@ -162,6 +217,7 @@ const statusKey: Record<string, string> = {
     // 进行中状态（setPending）
     "Applying pitch shift...": "status_applying_pitch_shift",
     "Clearing waveform cache...": "status_clearing_waveform_cache",
+    "Clearing render cache...": "status_clearing_render_cache",
     "Exporting WAV...": "status_exporting_wav",
     "Exporting audio...": "status_exporting_audio",
     "Exporting separated tracks...": "status_exporting_separated",
@@ -205,6 +261,7 @@ const errorCodeKey: Record<string, string> = {
     "Pack into takes failed": "status_pack_takes_failed",
     "Remove take failed": "status_remove_take_failed",
     "Rename take failed": "status_rename_take_failed",
+    "Take channel mode rejected": "status_take_channel_mode_rejected",
 };
 
 // 这些状态表示工程内容刚被替换/导入，需立即执行一次缺失媒体检测，
@@ -427,17 +484,14 @@ function detectExternalActionKindFromPath(path: string): ExternalFileActionKind 
 
 function AppInner() {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
+    const { t, tf, plural } = useI18n();
     const pitchAnalysis = usePitchAnalysis();
-    const pianoRollStatus = usePianoRollStatus();
 
     const status = useAppSelector((state) => state.session.status);
     const error = useAppSelector((state) => state.session.error);
 
     const runtimeIsPlaying = useAppSelector((state) => state.session.runtime.isPlaying);
     const runtimeHasSynthesized = useAppSelector((state) => state.session.runtime.hasSynthesized);
-    const fileBrowserVisible = useAppSelector((state) => state.fileBrowser.visible);
-    const notebookVisible = useAppSelector((state) => state.notebook.visible);
     const toolMode = useAppSelector((state) => state.session.toolMode);
     const drawToolMode = useAppSelector((state) => state.session.drawToolMode);
     const projectDirty = useAppSelector((state) => state.session.project.dirty);
@@ -476,15 +530,10 @@ function AppInner() {
         (state) => state.session.saveVersionConflictDialog,
     );
 
-    const containerRef = useRef<HTMLDivElement | null>(null);
-    const dragRef = useRef<{ pointerId: number } | null>(null);
-    const [splitRatio, setSplitRatio] = useState(() => {
-        const stored = Number(localStorage.getItem("hifishifter.splitRatio"));
-        return Number.isFinite(stored) ? Math.min(0.85, Math.max(0.15, stored)) : 0.6;
-    });
-    const splitRatioRef = useRef(splitRatio);
-    const [isDragging, setIsDragging] = useState(false);
     const [quickSearchOpen, setQuickSearchOpen] = useState(false);
+    const dockLayout = useAppSelector((state) => state.dock.layout);
+    const dockSettings = useAppSelector((state) => state.dock.settings);
+    const dockHydrated = useAppSelector((state) => state.dock.hydrated);
     const [autoBackupSettings, setAutoBackupSettings] = useState<AutoBackupSettings>(
         DEFAULT_AUTO_BACKUP_SETTINGS,
     );
@@ -550,56 +599,72 @@ function AppInner() {
     // 为新的音频块启用循环（Loop / 循环源，默认开启）
     const [loopNewClips, setLoopNewClips] = useState(true);
 
-    // 加载 MIDI 相关设置
+    // 加载 UI 持久化设置，并把 MIDI 相关字段回填进本地对话框状态。
+    //
+    // 【为什么唯一一次 get_ui_settings 由这里发起】后端的 get_ui_settings 不是
+    // 纯读；启动路径此前有两轮往返（boot effect 里的 thunk + 本处的直读）。
+    // 现在这次加载由本 effect 持有：unwrap 得到的载荷喂给下面的 setState，
+    // 同时经 loadUiSettings.fulfilled 进入 sessionSlice（autoCrossfade / 吸附
+    // 等全局项的权威来源仍是那个 reducer）。
     useEffect(() => {
-        settingsApi.getUiSettings().then((s) => {
-            if (s?.midiFillGaps != null) {
-                setFillGaps(s.midiFillGaps);
-            }
-            if (s?.midiMultiTrackMerge != null) {
-                setMultiTrackMerge(s.midiMultiTrackMerge);
-            }
-            if (s?.midiImportBpmAsProject != null) {
-                setImportBpmAsProject(s.midiImportBpmAsProject);
-            }
-            if (s?.midiNoteBpmMode != null) {
-                setNoteBpmMode(s.midiNoteBpmMode);
-            }
-            if (s?.midiSpecifiedBpm != null) {
-                setSpecifiedBpm(s.midiSpecifiedBpm);
-            }
-            if (s?.midiImportPosition != null) {
-                setImportPosition(s.midiImportPosition);
-            }
-            if (s?.midiCloseLeadingGap != null) {
-                setCloseLeadingGap(s.midiCloseLeadingGap);
-            }
-            if (s?.midiImportAsTempoMap != null) {
-                setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
-            }
-            if (s?.midiImportTempoMapTempo != null) {
-                setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
-            }
-            if (s?.midiImportTempoMapTimeSignature != null) {
-                setImportTempoMapTimeSignature(Boolean(s.midiImportTempoMapTimeSignature));
-            }
-            if (s?.midiImportTempoMapKeySignature != null) {
-                setImportTempoMapKeySignature(Boolean(s.midiImportTempoMapKeySignature));
-            }
-            if (s?.midiImportTargetMenu != null) {
-                setMidiImportTargetMenu(s.midiImportTargetMenu);
-            }
-            if (s?.midiImportTargetDragDrop != null) {
-                setMidiImportTargetDragDrop(s.midiImportTargetDragDrop);
-            }
-            if (typeof s?.autoReloadModifiedMedia === "boolean") {
-                setAutoReloadModifiedMedia(s.autoReloadModifiedMedia);
-            }
-            if (typeof s?.loopNewClips === "boolean") {
-                setLoopNewClips(s.loopNewClips);
-            }
-        });
-    }, []);
+        let cancelled = false;
+        dispatch(loadUiSettings())
+            .unwrap()
+            .then((s) => {
+                if (cancelled) return;
+                if (s?.midiFillGaps != null) {
+                    setFillGaps(s.midiFillGaps);
+                }
+                if (s?.midiMultiTrackMerge != null) {
+                    setMultiTrackMerge(s.midiMultiTrackMerge);
+                }
+                if (s?.midiImportBpmAsProject != null) {
+                    setImportBpmAsProject(s.midiImportBpmAsProject);
+                }
+                if (s?.midiNoteBpmMode != null) {
+                    setNoteBpmMode(s.midiNoteBpmMode);
+                }
+                if (s?.midiSpecifiedBpm != null) {
+                    setSpecifiedBpm(s.midiSpecifiedBpm);
+                }
+                if (s?.midiImportPosition != null) {
+                    setImportPosition(s.midiImportPosition);
+                }
+                if (s?.midiCloseLeadingGap != null) {
+                    setCloseLeadingGap(s.midiCloseLeadingGap);
+                }
+                if (s?.midiImportAsTempoMap != null) {
+                    setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
+                }
+                if (s?.midiImportTempoMapTempo != null) {
+                    setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
+                }
+                if (s?.midiImportTempoMapTimeSignature != null) {
+                    setImportTempoMapTimeSignature(Boolean(s.midiImportTempoMapTimeSignature));
+                }
+                if (s?.midiImportTempoMapKeySignature != null) {
+                    setImportTempoMapKeySignature(Boolean(s.midiImportTempoMapKeySignature));
+                }
+                if (s?.midiImportTargetMenu != null) {
+                    setMidiImportTargetMenu(s.midiImportTargetMenu);
+                }
+                if (s?.midiImportTargetDragDrop != null) {
+                    setMidiImportTargetDragDrop(s.midiImportTargetDragDrop);
+                }
+                if (typeof s?.autoReloadModifiedMedia === "boolean") {
+                    setAutoReloadModifiedMedia(s.autoReloadModifiedMedia);
+                }
+                if (typeof s?.loopNewClips === "boolean") {
+                    setLoopNewClips(s.loopNewClips);
+                }
+            })
+            .catch(() => {
+                // 读不到设置时保持出厂默认；sessionSlice 的 reducer 同样不会执行。
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [dispatch]);
 
     const handleImportMidiFromMenu = useCallback(() => {
         const session = store.getState().session;
@@ -683,111 +748,15 @@ function AppInner() {
         settingsApi.saveUiSettings({ midiImportTargetDragDrop: v });
     }, []);
 
-    const splitter = useMemo(() => {
-        const minTopPx = 200;
-        const minBottomPx = 150;
-        const handlePx = 8;
-
-        function clamp(v: number, minV: number, maxV: number) {
-            return Math.min(maxV, Math.max(minV, v));
-        }
-
-        // 提取纯计算逻辑，不在此处触发 React 状态更新
-        function calculateRatio(clientY: number) {
-            const el = containerRef.current;
-            if (!el) return null;
-            const rect = el.getBoundingClientRect();
-            const total = rect.height;
-            if (!Number.isFinite(total) || total <= minTopPx + minBottomPx + handlePx) {
-                return null;
-            }
-            const y = clientY - rect.top;
-            const maxTop = total - handlePx - minBottomPx;
-            const nextTop = clamp(y, minTopPx, maxTop);
-            return clamp(nextTop / total, 0.15, 0.85);
-        }
-
-        function onPointerMove(e: PointerEvent) {
-            if (!dragRef.current) return;
-            const nextRatio = calculateRatio(e.clientY);
-            if (nextRatio === null) return;
-
-            // 拖拽时直接修改 DOM 的 flexGrow，绕过 React 重绘
-            const container = containerRef.current;
-            if (container && container.children.length >= 3) {
-                const topPanel = container.children[0] as HTMLElement;
-                const bottomPanel = container.children[2] as HTMLElement;
-                topPanel.style.flexGrow = String(nextRatio);
-                bottomPanel.style.flexGrow = String(1 - nextRatio);
-            }
-
-            splitRatioRef.current = nextRatio;
-        }
-
-        function endDrag() {
-            if (!dragRef.current) return;
-            dragRef.current = null;
-            setIsDragging(false);
-
-            // 只在松开鼠标的最后一刻，才把最终状态同步给 React 并持久化
-            setSplitRatio(splitRatioRef.current);
-            localStorage.setItem("hifishifter.splitRatio", String(splitRatioRef.current));
-
-            window.removeEventListener("pointermove", onPointerMove);
-            window.removeEventListener("pointerup", endDrag);
-            window.removeEventListener("pointercancel", endDrag);
-        }
-
-        function startDrag(e: React.PointerEvent<HTMLDivElement>) {
-            // 数位笔 / 触摸不触发分割条：8px 窄条 + 按下即生效，画线起止贴近
-            // 面板边界时极易误扫；布局调整保留给鼠标。
-            if (shouldSuppressHoverSideEffects(e.nativeEvent)) return;
-            if (e.button !== 0) return;
-            dragRef.current = { pointerId: e.pointerId };
-            setIsDragging(true);
-            (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
-
-            // 按下的瞬间也走一次 DOM 直通更新
-            const nextRatio = calculateRatio(e.clientY);
-            if (nextRatio !== null) {
-                splitRatioRef.current = nextRatio;
-                const container = containerRef.current;
-                if (container && container.children.length >= 3) {
-                    const topPanel = container.children[0] as HTMLElement;
-                    const bottomPanel = container.children[2] as HTMLElement;
-                    topPanel.style.flexGrow = String(nextRatio);
-                    bottomPanel.style.flexGrow = String(1 - nextRatio);
-                }
-            }
-
-            window.addEventListener("pointermove", onPointerMove);
-            window.addEventListener("pointerup", endDrag);
-            window.addEventListener("pointercancel", endDrag);
-        }
-
-        return { startDrag };
-    }, []);
-
-    const statusText = useMemo(() => {
-        // 精确匹配
-        if (statusKey[status]) return t(statusKey[status] as MessageKey);
-        // 带数量的状态：提取数字回填占位符模板（如 "Waveform cache cleared (3 files)"）
-        const counted = status.match(/^(.+?)\s*\((\d+)\s*\w+\)$/);
-        if (counted) {
-            const baseKey = statusKey[counted[1]];
-            if (baseKey && (t(baseKey as MessageKey) as string).includes("{n}")) {
-                return (t(baseKey as MessageKey) as string).replace("{n}", counted[2]);
-            }
-        }
-        // 前缀匹配：支持 "Export done — path" 等带后缀的状态
-        for (const key of Object.keys(statusKey)) {
-            if (status.startsWith(key) && status.length > key.length) {
-                const suffix = status.slice(key.length);
-                return t(statusKey[key] as MessageKey) + suffix;
-            }
-        }
-        return status;
-    }, [status, t]);
+    const statusText = useMemo(
+        () =>
+            resolveStatusText(status, statusKey, (key, count) =>
+                count === undefined
+                    ? (t(key as MessageKey) as string)
+                    : plural(key as MessageKey, count),
+            ),
+        [status, t, plural],
+    );
 
     // 监听后端 clip_pitch_data 事件，将 per-clip MIDI 曲线存入 store
     useClipPitchDataListener();
@@ -802,15 +771,6 @@ function AppInner() {
     const isModifierRef = useRef(false);
 
     useEffect(() => {
-        function isEditableTarget(target: EventTarget | null): boolean {
-            const el = target as HTMLElement | null;
-            if (!el) return false;
-            const tag = (el.tagName ?? "").toLowerCase();
-            if (tag === "input" || tag === "textarea" || tag === "select") return true;
-            if (el.isContentEditable) return true;
-            return el.closest?.('input,textarea,select,[contenteditable="true"]') != null;
-        }
-
         // WebKitGTK fires `contextmenu` on right-button press instead of
         // release. Track the right-button state on Linux and re-dispatch the
         // deferred event on pointerup so right-click menus (and right-drag
@@ -859,27 +819,6 @@ function AppInner() {
             if (!IS_LINUX || event.button !== 2) return;
             flushLinuxDeferredContextMenu();
         };
-
-        // 只允许可编辑控件和显式声明可选择/拖拽的区域使用 WebView 原生选择逻辑。
-        function allowsNativeTextSelection(target: EventTarget | null): boolean {
-            if (isEditableTarget(target)) return true;
-            let node = target instanceof Element ? target : null;
-            while (node) {
-                if (node.getAttribute?.("data-hs-selectable") === "true") return true;
-                try {
-                    const style = window.getComputedStyle(node) as CSSStyleDeclaration & {
-                        webkitUserSelect?: string;
-                    };
-                    const userSelect = style.userSelect || style.webkitUserSelect || "";
-                    if (userSelect === "text" || userSelect === "all") return true;
-                    if (userSelect === "none") return false;
-                } catch {
-                    // ignore
-                }
-                node = node.parentElement;
-            }
-            return false;
-        }
 
         function preventNativeTextSelection(e: Event) {
             if (allowsNativeTextSelection(e.target)) return;
@@ -1079,6 +1018,22 @@ function AppInner() {
         sourcePath: string | null;
         progress: number | null;
     }>({ active: false, sourcePath: null, progress: null });
+
+    // ── 导入等待提示（延迟点亮）────────────────────────────────────────────
+    // 导入走的是盘 IO + 容器探测 + 声道判定，正常只在毫秒级结束，因此**不能**
+    // 一发起就点亮加载态 —— 那会让每次导入都闪一下，比不提示更烦人。超过门槛
+    // 还没结束才说明这次真的慢（慢盘 / 网络盘 / 超大文件），此时才点。
+    const IMPORT_BUSY_DELAY_MS = 300;
+    const importInFlight = useAppSelector((state) => state.session.importInFlight);
+    const [importBusy, setImportBusy] = useState(false);
+    useEffect(() => {
+        if (importInFlight <= 0) {
+            setImportBusy(false);
+            return;
+        }
+        const timer = setTimeout(() => setImportBusy(true), IMPORT_BUSY_DELAY_MS);
+        return () => clearTimeout(timer);
+    }, [importInFlight]);
 
     // Listen for backend stretch progress notifications (Tauri only).
     useEffect(() => {
@@ -1394,11 +1349,18 @@ function AppInner() {
                         // 拒采窗口提前关闭，让渲染期间派发的陈旧轮询响应溜进
                         // reducer（光标跳变）。写入前先捕获该 target 的活跃值，
                         // 供下方完成跃迁判定使用。
+                        //
+                        // ★ 无 target 的事件按"后台"归属处理：这类载荷来自启动
+                        // 收集阶段（进度回调尚未挂上）等旧前端无法归属 target 的
+                        // 路径。若按"未知"跳过 ref 更新，活跃镜像（ Redux）与
+                        // ref 会分叉 —— 后台完成事件来时 wasActiveForTarget 仍
+                        // 判定 false，徽标会卡在与 ref 不一致的状态上。
+                        const targetKey = target ?? "background";
                         let wasActiveForTarget = false;
-                        if (target === "original") {
+                        if (targetKey === "original") {
                             wasActiveForTarget = originalRenderActiveRef.current;
                             originalRenderActiveRef.current = active;
-                        } else if (target === "background") {
+                        } else {
                             wasActiveForTarget = backgroundRenderActiveRef.current;
                             backgroundRenderActiveRef.current = active;
                         }
@@ -1413,7 +1375,7 @@ function AppInner() {
                         dispatch(
                             setPlaybackRenderingState({
                                 active: anyActive,
-                                target,
+                                target: targetKey,
                                 blocking: originalRenderActiveRef.current,
                             }),
                         );
@@ -1452,6 +1414,179 @@ function AppInner() {
             if (unlisten) unlisten();
         };
     }, [dispatch]);
+
+    // ── 后端一次性提示位 ────────────────────────────────────────────────────
+    // 状态栏只有一个短暂提示位：渲染缓存命中统计与自动声道折叠的结论都写这里
+    //（两者都是"后台做完了一件事，顺带告诉用户一声"，同时出现时后到的覆盖前者
+    // 即可，不值得为它们各占一行）。
+    const renderCacheShowHitStats = useAppSelector(
+        (state) => state.session.renderCache.showHitStats,
+    );
+    const [noticeText, setNoticeText] = useState("");
+    const showNotice = useCallback((text: string, holdMs = 15_000) => {
+        if (!text) return;
+        setNoticeText(text);
+        if (noticeHideTimerRef.current) clearTimeout(noticeHideTimerRef.current);
+        noticeHideTimerRef.current = setTimeout(() => setNoticeText(""), holdMs);
+    }, []);
+    const noticeHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => {
+        if (!renderCacheShowHitStats) return;
+        let disposed = false;
+        let unlisten: null | (() => void) = null;
+
+        async function setup() {
+            try {
+                const mod = await import("@tauri-apps/api/event");
+                unlisten = await mod.listen(
+                    "render_cache_summary",
+                    (event: {
+                        payload?: {
+                            diskHits?: number;
+                            total?: number;
+                        };
+                    }) => {
+                        if (disposed) return;
+                        const payload = event?.payload ?? {};
+                        // 后端保证：这些是**工程级**累计值（分子按 clip 去重、分母是
+                        // 工程需要渲染的 clip 总数），且一次工程加载只在收敛后上报
+                        // 一次。不要在这里对多次事件做累加 —— 那正是"逐轮数字"的
+                        // 老毛病（6/6 → 5/35 → 156/465）。
+                        const hits = Number(payload.diskHits ?? 0);
+                        const total = Number(payload.total ?? 0);
+                        // 没有磁盘命中就不打扰用户（首次打开工程本就无缓存）。
+                        if (!(Number.isFinite(hits) && hits > 0 && total > 0)) return;
+                        // 各段都是完整分句、自身不带前导分隔符，由这里统一用
+                        // " · " 连接。
+                        const hitText = tf("status_render_cache_summary")
+                            .replace("{hits}", String(hits))
+                            .replace("{total}", String(total));
+                        showNotice(hitText);
+                    },
+                );
+                if (disposed) {
+                    unlisten();
+                    unlisten = null;
+                }
+            } catch {
+                // 非 Tauri 环境（浏览器调试）无事件系统：静默跳过。
+            }
+        }
+
+        void setup();
+        return () => {
+            disposed = true;
+            if (unlisten) unlisten();
+        };
+    }, [renderCacheShowHitStats, showNotice, tf]);
+
+    // ── 后台声道折叠反馈 ────────────────────────────────────────────────────
+    // 打开工程 / 导入 / 换源后，没有权威判定档案的 Take 会被后台扫描按策略折叠为
+    // 单声道（渲染耗时减半）。折叠改的是 Take 的 `channel_mode`，也就是时间线的
+    // 真实状态，而前端不会轮询时间线 —— 必须让它看到，否则界面一直显示旧的
+    // 声道带数，用户会以为软件抽风。
+    //
+    // 【为什么要合并 + 延迟，而不是每批都处理】扫描按 64 个 Take 一批推进，一批
+    // 一次事件；逐批重拉时间线是拿一整份时间线换几十毫秒的收敛。但也不能只在
+    // 整轮结束才处理 —— 大工程上那会让界面长时间停在陈旧状态。
+    //
+    // 折中：**延迟一个很短的门槛再动手**。绝大多数扫描在门槛内就跑完了，于是
+    // 行为和以前完全一致（界面变化与解释同时出现，不会先变后解释）；只有真正
+    // 慢的扫描才会先渐进收敛。提示语仍只在整轮结束时给出一次，用累计计数，
+    // 保证数字是准的而不是流水账。
+    const CHANNEL_SCAN_FEEDBACK_DELAY_MS = 400;
+    const channelScanFeedbackRef = useRef<{
+        timer: ReturnType<typeof setTimeout> | null;
+        folded: number;
+        pending: number;
+        finished: boolean;
+    }>({ timer: null, folded: 0, pending: 0, finished: false });
+
+    const flushChannelScanFeedback = useCallback(() => {
+        const state = channelScanFeedbackRef.current;
+        if (state.timer != null) {
+            clearTimeout(state.timer);
+            state.timer = null;
+        }
+        const folded = state.folded;
+        const pending = state.pending;
+        // 折叠改的是时间线的真实状态，必须主动重拉一次才能收敛到界面。
+        if (folded > 0) void dispatch(fetchTimeline());
+        if (!state.finished) return;
+        if (folded <= 0 && pending <= 0) return;
+        // 各段完整成句、无前导标点，这里统一连接。
+        const parts: string[] = [];
+        if (folded > 0) {
+            parts.push(plural("status_channel_scan_folded", folded));
+        }
+        if (pending > 0) {
+            parts.push(plural("status_channel_scan_pending", pending));
+        }
+        showNotice(parts.join(" · "), 20_000);
+    }, [dispatch, showNotice, plural]);
+
+    useEffect(() => {
+        let disposed = false;
+        let unlisten: null | (() => void) = null;
+        const feedback = channelScanFeedbackRef.current;
+
+        async function setup() {
+            try {
+                const mod = await import("@tauri-apps/api/event");
+                unlisten = await mod.listen(
+                    "channel_scan_progress",
+                    (event: {
+                        payload?: {
+                            done?: number;
+                            total?: number;
+                            folded?: number;
+                            pending?: number;
+                            finished?: boolean;
+                        };
+                    }) => {
+                        if (disposed) return;
+                        const payload = event?.payload ?? {};
+                        const folded = Number(payload.folded ?? 0);
+                        const pending = Number(payload.pending ?? 0);
+                        // 计数是**整轮累计值**，取 max 只作防御（乱序事件不应让数字倒退）。
+                        feedback.folded = Math.max(feedback.folded, folded);
+                        feedback.pending = Math.max(feedback.pending, pending);
+                        if (payload.finished) {
+                            feedback.finished = true;
+                            flushChannelScanFeedback();
+                            // 整轮已结束，为下一轮复位（后台扫描会连跑多轮）。
+                            feedback.finished = false;
+                            feedback.folded = 0;
+                            feedback.pending = 0;
+                            return;
+                        }
+                        // 还没有折叠：没有任何需要让界面收敛的状态，不值得排一次重拉。
+                        if (feedback.folded <= 0 || feedback.timer != null) return;
+                        feedback.timer = setTimeout(() => {
+                            feedback.timer = null;
+                            flushChannelScanFeedback();
+                        }, CHANNEL_SCAN_FEEDBACK_DELAY_MS);
+                    },
+                );
+                if (disposed) {
+                    unlisten();
+                    unlisten = null;
+                }
+            } catch {
+                // 非 Tauri 环境（浏览器调试）无事件系统：静默跳过。
+            }
+        }
+
+        void setup();
+        return () => {
+            disposed = true;
+            if (feedback.timer != null) {
+                clearTimeout(feedback.timer);
+                feedback.timer = null;
+            }
+            if (unlisten) unlisten();
+        };
+    }, [flushChannelScanFeedback]);
 
     const runtimeRef = useRef({
         isPlaying: false,
@@ -1704,8 +1839,25 @@ function AppInner() {
     useEffect(() => {
         void dispatch(fetchTimeline());
         void dispatch(refreshRuntime());
-        void dispatch(loadUiSettings());
+        // loadUiSettings 不在这里发起：UI 设置的唯一一次加载由上方"加载 UI
+        // 持久化设置"的 effect 持有（unwrap 后回填 MIDI 字段），否则启动会有
+        // 两轮 get_ui_settings 往返（后端的 get_ui_settings 不是纯读）。
         void dispatch(loadRecordingSettings());
+        // 【必须显式 hydrate】thunk 只负责取回磁盘内容，把结果写进切片是这里的
+        // 责任。漏掉这一步的后果不是"界面不好看"，而是**布局永远不落盘**：
+        // `hydrated` 闸门始终为 false，持久化副作用永不触发（曾实际发生）。
+        void dispatch(loadDockSettings())
+            .unwrap()
+            .then((payload) => {
+                dispatch(hydrateDock(payload));
+                // 归一化与面板注册都已完成，此时才能安全处理"套用启动预设"与
+                // "把浮窗收回停靠位"这两件事（见 `finalizeDockHydration`）。
+                finalizeDockHydration(dispatch, store.getState);
+            })
+            .catch(() => {
+                // 读不到设置时保持出厂布局；`hydrated` 仍为 false，因此不会把
+                // 默认布局写回去覆盖磁盘内容。
+            });
     }, [dispatch]);
 
     useEffect(() => {
@@ -2436,6 +2588,25 @@ function AppInner() {
                     // 内容路由（last-copy-wins）：探测剪贴板载荷类型后定向派发。
                     // 键盘事件已在 useKeybindings 同步消费，此处异步探测不影响
                     // 焦点语义；探测失败按外来源/空处理，回退表面裁决。
+                    //
+                    // 长按重复在这里布防，且**必须与 keydown 同步**（所以在探测
+                    // 之前）：holdRepeat 只靠 keyup / blur 终止，若等异步探测返回
+                    // 再布防，用户"快速点按"（keyup 早于探测返回）就会留下一个
+                    // 永远等不到松键的计时器 —— 一次点按变成无限粘贴。合成派发方
+                    // （菜单项、记事本暂存块）不经过这里，因此不会被误装长按。
+                    // 重复的每一拍只在通道确认为时间轴时派发，保持"参数编辑器
+                    // 粘贴不重复"的既有语义。
+                    let channel: EditOpChannel | null = null;
+                    const pasteKb = selectMergedKeybindings(store.getState())["clip.paste"];
+                    if (pasteKb) {
+                        beginHoldRepeat(pasteKb, () => {
+                            if (channel === "hifi:timelineEditOp") {
+                                window.dispatchEvent(
+                                    new CustomEvent(channel, { detail: { op: "paste" } }),
+                                );
+                            }
+                        });
+                    }
                     void (async () => {
                         let kind: string | null = null;
                         try {
@@ -2443,7 +2614,7 @@ function AppInner() {
                         } catch {
                             // 探测失败不阻塞粘贴。
                         }
-                        const channel = resolvePasteRoute(kind, getActiveSurface());
+                        channel = resolvePasteRoute(kind, getActiveSurface());
                         if (channel) {
                             window.dispatchEvent(
                                 new CustomEvent(channel, { detail: { op: "paste" } }),
@@ -2600,6 +2771,19 @@ function AppInner() {
                 // edit.selectAll / edit.deselect 由顶部「编辑操作统一路由」按
                 // 活动编辑表面定向派发（select 工具下的参数编辑器全选走
                 // hifi:editOp，其余走 hifi:timelineEditOp），此处不再重复派发。
+                // 布局：全部走 dockApi，与「布局」菜单共用同一份行为实现。
+                case "layout.toggleFloat":
+                    toggleFloatActive(dispatch, store.getState);
+                    break;
+                case "layout.focusNext":
+                    cycleFocus(dispatch, store.getState, 1);
+                    break;
+                case "layout.focusPrev":
+                    cycleFocus(dispatch, store.getState, -1);
+                    break;
+                case "layout.maximize":
+                    maximizeActive(dispatch);
+                    break;
                 case "project.new":
                     handleNewProject();
                     break;
@@ -3176,22 +3360,6 @@ function AppInner() {
         sessionClips,
     ]);
 
-    useEffect(() => {
-        splitRatioRef.current = splitRatio;
-    }, [splitRatio]);
-
-    useEffect(() => {
-        if (!isDragging) return;
-        const prevCursor = document.body.style.cursor;
-        const prevSelect = document.body.style.userSelect;
-        document.body.style.cursor = "ns-resize";
-        document.body.style.userSelect = "none";
-        return () => {
-            document.body.style.cursor = prevCursor;
-            document.body.style.userSelect = prevSelect;
-        };
-    }, [isDragging]);
-
     const sourceFileSearchMatchTotal = sourceFileChangedDialog.changes.reduce(
         (total, item) =>
             item.action === "pending" || item.action === "failed"
@@ -3235,195 +3403,350 @@ function AppInner() {
         (item) => item.action === "processing",
     );
 
+    // ── 布局持久化 ──────────────────────────────────────────────────
+    //
+    // 去抖后写回：拖分隔条/移浮窗会在松手瞬间各触发一次布局变化，而后端
+    // `save_ui_settings` 是"读-改-写整个配置文件 + 原子替换 + 备份"（约 8 次
+    // 文件操作），不宜按次调用。
+    //
+    // 【闸门】必须等 `hydrated` 为真：切片初始状态是出厂布局，若在读到磁盘
+    // 内容之前就写回，用户的布局会被默认值覆盖 —— 也就是"打开应用发现界面
+    // 被重置"这类最恼人的故障。
+    useEffect(() => {
+        if (!dockHydrated) return;
+        const timer = window.setTimeout(() => {
+            void dispatch(persistDockSettings());
+        }, dockSettings.saveDebounceMs);
+        return () => window.clearTimeout(timer);
+    }, [dockLayout, dockSettings, dockHydrated, dispatch]);
+
+    // ── 面板渲染函数登记 ─────────────────────────────────────────────
+    //
+    // 停靠系统只负责"把面板摆在哪儿"，面板需要什么 props 仍由 App 提供 ——
+    // 这些状态（MIDI 导入对话框、文件浏览器的关闭回调等）的所有者自始至终
+    // 是 App，搬进注册表只会变成第二份拷贝。写在渲染期是安全的：写入幂等，
+    // 且读取发生在同一趟渲染里更靠后的子组件（见 `panelRenderer` 注释）。
+    setPanelRenderer(PANEL_TIMELINE, () => (
+        <TimelinePanel
+            midiClipDialogOpen={midiClipDialogOpen}
+            midiClipPath={midiClipPath}
+            midiClipStartSec={midiClipStartSec}
+            midiClipTrackId={midiClipTrackId}
+            midiClipClipboardGuid={midiClipClipboardGuid}
+            fillGaps={fillGaps}
+            multiTrackMerge={multiTrackMerge}
+            importBpmAsProject={importBpmAsProject}
+            noteBpmMode={noteBpmMode}
+            specifiedBpm={specifiedBpm}
+            importPosition={importPosition}
+            closeLeadingGap={closeLeadingGap}
+            onMidiClipDialogOpenChange={setMidiClipDialogOpen}
+            onMidiClipPathChange={setMidiClipPath}
+            onMidiClipStartSecChange={setMidiClipStartSec}
+            onMidiClipTrackIdChange={setMidiClipTrackId}
+            onFillGapsChange={handleFillGapsChange}
+            onMultiTrackMergeChange={handleMultiTrackMergeChange}
+            onImportBpmAsProjectChange={handleImportBpmAsProjectChange}
+            onNoteBpmModeChange={handleNoteBpmModeChange}
+            onSpecifiedBpmChange={handleSpecifiedBpmChange}
+            onImportPositionChange={handleImportPositionChange}
+            onCloseLeadingGapChange={handleCloseLeadingGapChange}
+            importTempoMapEnabled={importTempoMapEnabled}
+            onImportTempoMapEnabledChange={handleImportTempoMapEnabledChange}
+            importTempoMapTempo={importTempoMapTempo}
+            onImportTempoMapTempoChange={handleImportTempoMapTempoChange}
+            importTempoMapTimeSignature={importTempoMapTimeSignature}
+            onImportTempoMapTimeSignatureChange={handleImportTempoMapTimeSignatureChange}
+            importTempoMapKeySignature={importTempoMapKeySignature}
+            onImportTempoMapKeySignatureChange={handleImportTempoMapKeySignatureChange}
+            midiDialogSource={midiDialogSource}
+            onMidiDialogSourceChange={setMidiDialogSource}
+            importTargetMenu={midiImportTargetMenu}
+            onImportTargetMenuChange={handleImportTargetMenuChange}
+            importTargetDragDrop={midiImportTargetDragDrop}
+            onImportTargetDragDropChange={handleImportTargetDragDropChange}
+        />
+    ));
+    // 把窗体身份传进去：参数编辑器要判断"我是否与时间轴上下堆叠"，以决定同步
+    // 偏移怎么算（多实例时每个窗体各判各的）。
+    setPanelRenderer(PANEL_PARAM_EDITOR, (form) => <PianoRollPanel dockFormId={form.id} />);
+    setPanelRenderer(PANEL_FILE_BROWSER, () => <FileBrowserPanel />);
+    setPanelRenderer(PANEL_UNDO_HISTORY, () => <UndoHistoryPanel />);
+    // 外观设置：曾经是独立 OS 窗口（`appearance.html` + 独立 React 根），现在复用
+    // 停靠机制 —— 居中浮出、不可停靠、不进「窗口」菜单（见注册表声明）。
+    setPanelRenderer(PANEL_APPEARANCE, (form) => <AppearanceSettingsPanel formId={form.id} />);
+    // 记事本走 Suspense：TipTap 那几百 KB 只在真正打开时才拉取。
+    setPanelRenderer(PANEL_NOTEBOOK, () => (
+        <Suspense fallback={null}>
+            <NotebookErrorBoundary>
+                <NotebookPanel />
+            </NotebookErrorBoundary>
+        </Suspense>
+    ));
+
     return (
         <Flex
             direction="column"
-            className="h-screen w-screen bg-qt-window text-qt-text overflow-hidden font-sans text-sm selection:bg-qt-highlight selection:text-white"
+            className="h-screen w-screen bg-qt-window text-qt-text overflow-hidden font-sans text-qt-md selection:bg-qt-highlight selection:text-white"
         >
-            <Dialog.Root
+            <AppDialog
                 open={Boolean(vocalShifterSkippedFilesDialog?.length)}
                 onOpenChange={(open) => {
                     if (!open) {
                         dispatch(closeVocalShifterSkippedFilesDialog());
                     }
                 }}
+                title={t("status_error_prefix")}
+                description={t("vs_import_skipped_header")}
+                size="lg"
+                actions={[
+                    {
+                        id: "ok",
+                        label: t("ok"),
+                        intent: "primary",
+                        onClick: () => {
+                            dispatch(closeVocalShifterSkippedFilesDialog());
+                        },
+                    },
+                ]}
             >
-                <Dialog.Content maxWidth="620px">
-                    <Dialog.Title>{t("status_error_prefix")}</Dialog.Title>
-                    <Dialog.Description>{t("vs_import_skipped_header")}</Dialog.Description>
-                    <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-xs">
+                {/*
+                 * 外层不滚、内层滚。
+                 *
+                 * 对话框的 body 本身就是 `overflow-y-auto`（见 AppDialog）。这里再放
+                 * 一个带 `max-h-[240px]` 的滚动盒，当"描述 + 列表"超过 body 高度时就会
+                 * 出现**两条竖直滚动条**，而里面那条滚下去什么也看不到 —— 用户只会以为
+                 * 下面还有内容。
+                 *
+                 * 改法：列表参与 body 的 flex 布局（`flex-1 min-h-0`），body 因此永不
+                 * 溢出，只剩一条滚动条。间距用 `pt-2` 而不是 `mt-2`：外边距会把总高撑过
+                 * 容器的 100%，又造出溢出。
+                 */}
+                <div className="flex h-full min-h-0 flex-col pt-2">
+                    <div className="min-h-0 flex-1 overflow-auto rounded border border-qt-border bg-qt-base p-2 text-qt-xs">
                         {(vocalShifterSkippedFilesDialog ?? []).map((file) => (
                             <div key={file} className="truncate" data-tooltip={file}>
                                 • {file}
                             </div>
                         ))}
                     </div>
-                    <Flex justify="end" mt="3">
-                        <Button onClick={() => dispatch(closeVocalShifterSkippedFilesDialog())}>
-                            {"OK"}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+                </div>
+            </AppDialog>
 
-            <Dialog.Root
+            <AppDialog
                 open={Boolean(reaperSkippedFilesDialog?.length)}
                 onOpenChange={(open) => {
                     if (!open) {
                         dispatch(closeReaperSkippedFilesDialog());
                     }
                 }}
+                title={t("status_error_prefix")}
+                description={t("reaper_import_skipped_header")}
+                size="lg"
+                actions={[
+                    {
+                        id: "ok",
+                        label: t("ok"),
+                        intent: "primary",
+                        onClick: () => {
+                            dispatch(closeReaperSkippedFilesDialog());
+                        },
+                    },
+                ]}
             >
-                <Dialog.Content maxWidth="620px">
-                    <Dialog.Title>{t("status_error_prefix")}</Dialog.Title>
-                    <Dialog.Description>{t("reaper_import_skipped_header")}</Dialog.Description>
-                    <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-xs">
+                {/*
+                 * 外层不滚、内层滚。
+                 *
+                 * 对话框的 body 本身就是 `overflow-y-auto`（见 AppDialog）。这里再放
+                 * 一个带 `max-h-[240px]` 的滚动盒，当"描述 + 列表"超过 body 高度时就会
+                 * 出现**两条竖直滚动条**，而里面那条滚下去什么也看不到 —— 用户只会以为
+                 * 下面还有内容。
+                 *
+                 * 改法：列表参与 body 的 flex 布局（`flex-1 min-h-0`），body 因此永不
+                 * 溢出，只剩一条滚动条。间距用 `pt-2` 而不是 `mt-2`：外边距会把总高撑过
+                 * 容器的 100%，又造出溢出。
+                 */}
+                <div className="flex h-full min-h-0 flex-col pt-2">
+                    <div className="min-h-0 flex-1 overflow-auto rounded border border-qt-border bg-qt-base p-2 text-qt-xs">
                         {(reaperSkippedFilesDialog ?? []).map((file) => (
                             <div key={file} className="truncate" data-tooltip={file}>
                                 • {file}
                             </div>
                         ))}
                     </div>
-                    <Flex justify="end" mt="3">
-                        <Button onClick={() => dispatch(closeReaperSkippedFilesDialog())}>
-                            {"OK"}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+                </div>
+            </AppDialog>
 
-            <Dialog.Root
+            <AppDialog
                 open={unsavedDialog.open}
                 onOpenChange={(open) => {
                     if (!open) {
                         cancelUnsavedAction();
                     }
                 }}
-            >
-                <Dialog.Content maxWidth="460px">
-                    <Dialog.Title>{t("unsaved_changes_title")}</Dialog.Title>
-                    <Dialog.Description>
-                        {t(
-                            unsavedDialog.mode === "exit"
-                                ? "unsaved_changes_exit_desc"
-                                : "unsaved_changes_switch_desc",
-                        )}
-                    </Dialog.Description>
-                    <Flex justify="end" gap="2" mt="4">
-                        <Button variant="soft" color="gray" onClick={cancelUnsavedAction}>
-                            {t("progress_cancel")}
-                        </Button>
-                        <Button variant="soft" color="gray" onClick={discardUnsavedAndContinue}>
-                            {t("unsaved_changes_discard")}
-                        </Button>
-                        <Button onClick={saveUnsavedAndContinue}>{t("menu_save_project")}</Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+                title={t("unsaved_changes_title")}
+                /*
+                 * 主消息走 `message`（13px 正文色），不再借用副标题槽位
+                 * （11px 弱化色）—— 这是全应用最需要被读到的一句话之一。
+                 */
+                message={t(
+                    unsavedDialog.mode === "exit"
+                        ? "unsaved_changes_exit_desc"
+                        : "unsaved_changes_switch_desc",
+                )}
+                tone="danger"
+                size="sm"
+                actions={[
+                    {
+                        id: "cancel",
+                        label: t("progress_cancel"),
+                        onClick: cancelUnsavedAction,
+                    },
+                    {
+                        id: "discard",
+                        label: t("unsaved_changes_discard"),
+                        // 丢弃是本对话框里唯一不可逆的选择：严重度落在后果上。
+                        intent: "danger",
+                        onClick: discardUnsavedAndContinue,
+                    },
+                    {
+                        id: "save",
+                        label: t("menu_save_project"),
+                        intent: "primary",
+                        // 保存取消/失败/命中版本冲突时对话框须保持打开以便重试，
+                        // 关闭由 saveUnsavedAndContinue 内部决定，故不自动关闭。
+                        autoClose: false,
+                        onClick: saveUnsavedAndContinue,
+                    },
+                ]}
+            />
 
             {/* Project file version newer than this build — ask before attempting load */}
-            <Dialog.Root
+            <AppDialog
                 open={projectVersionDialog.open}
                 onOpenChange={(open) => {
                     if (!open) {
                         setProjectVersionDialog((current) => ({ ...current, open: false }));
                     }
                 }}
-            >
-                <Dialog.Content maxWidth="480px">
-                    <Dialog.Title>{t("project_version_too_new_title")}</Dialog.Title>
-                    <Dialog.Description>
-                        {t("project_version_too_new_desc")
-                            .replace(
-                                "{fileVersion}",
-                                String(projectVersionDialog.fileVersion || "?"),
-                            )
-                            .replace(
-                                "{currentVersion}",
-                                String(projectVersionDialog.currentVersion || "?"),
-                            )}
-                    </Dialog.Description>
-                    <Flex justify="end" gap="2" mt="4">
-                        <Button
-                            variant="soft"
-                            color="gray"
-                            onClick={cancelContinueLoadingNewerProject}
-                        >
-                            {t("progress_cancel")}
-                        </Button>
-                        <Button color="amber" onClick={confirmContinueLoadingNewerProject}>
-                            {t("project_version_too_new_continue")}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+                title={t("project_version_too_new_title")}
+                message={t("project_version_too_new_desc")
+                    .replace("{fileVersion}", String(projectVersionDialog.fileVersion || "?"))
+                    .replace(
+                        "{currentVersion}",
+                        String(projectVersionDialog.currentVersion || "?"),
+                    )}
+                tone="warning"
+                size="sm"
+                actions={[
+                    {
+                        id: "cancel",
+                        label: t("progress_cancel"),
+                        onClick: cancelContinueLoadingNewerProject,
+                    },
+                    {
+                        id: "continue",
+                        label: t("project_version_too_new_continue"),
+                        intent: "primary",
+                        onClick: confirmContinueLoadingNewerProject,
+                    },
+                ]}
+            />
 
             {/* 保存/另存为目标已存在版本不一致的工程文件 — 覆盖前询问用户 */}
-            <Dialog.Root
+            <AppDialog
                 open={Boolean(saveVersionConflictDialog)}
                 onOpenChange={(open) => {
                     if (!open) {
                         dispatch(closeSaveVersionConflictDialog());
                     }
                 }}
-            >
-                <Dialog.Content maxWidth="520px">
-                    <Dialog.Title>{t("save_version_conflict_title")}</Dialog.Title>
-                    <Dialog.Description>
-                        {saveVersionConflictDialog?.existingIsNewer
-                            ? t("save_version_conflict_desc_higher")
-                                  .replace(
-                                      "{existingVersion}",
-                                      String(saveVersionConflictDialog.existingVersion),
-                                  )
-                                  .replace(
-                                      "{currentVersion}",
-                                      String(saveVersionConflictDialog.currentVersion),
-                                  )
-                            : t("save_version_conflict_desc_lower")
-                                  .replace(
-                                      "{existingVersion}",
-                                      String(saveVersionConflictDialog?.existingVersion ?? "?"),
-                                  )
-                                  .replace(
-                                      "{currentVersion}",
-                                      String(saveVersionConflictDialog?.currentVersion ?? "?"),
-                                  )}
-                    </Dialog.Description>
-                    <Flex justify="end" gap="2" mt="4">
-                        <Button variant="soft" color="gray" onClick={cancelSaveVersionConflict}>
-                            {t("progress_cancel")}
-                        </Button>
-                        <Button variant="soft" onClick={saveAsFromVersionConflict}>
-                            {t("save_version_conflict_save_as")}
-                        </Button>
-                        <Button color="red" onClick={continueForceSave}>
-                            {t("save_version_conflict_continue")}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+                title={t("save_version_conflict_title")}
+                /*
+                 * 这是全应用最长的单条提示（343 字符），而它讲的是"覆盖会降级、
+                 * 可能丢参数"。此前它以 11px 弱化色渲染在 400px 列里 —— 约 7 行
+                 * 全应用最小最淡的字。改走 `message` 并标为 danger。
+                 */
+                message={
+                    saveVersionConflictDialog?.existingIsNewer
+                        ? t("save_version_conflict_desc_higher")
+                              .replace(
+                                  "{existingVersion}",
+                                  String(saveVersionConflictDialog.existingVersion),
+                              )
+                              .replace(
+                                  "{currentVersion}",
+                                  String(saveVersionConflictDialog.currentVersion),
+                              )
+                        : t("save_version_conflict_desc_lower")
+                              .replace(
+                                  "{existingVersion}",
+                                  String(saveVersionConflictDialog?.existingVersion ?? "?"),
+                              )
+                              .replace(
+                                  "{currentVersion}",
+                                  String(saveVersionConflictDialog?.currentVersion ?? "?"),
+                              )
+                }
+                tone="danger"
+                size="md"
+                actions={[
+                    {
+                        id: "cancel",
+                        label: t("progress_cancel"),
+                        onClick: cancelSaveVersionConflict,
+                    },
+                    {
+                        id: "save-as",
+                        label: t("save_version_conflict_save_as"),
+                        onClick: saveAsFromVersionConflict,
+                    },
+                    {
+                        id: "continue",
+                        label: t("save_version_conflict_continue"),
+                        intent: "danger",
+                        onClick: continueForceSave,
+                    },
+                ]}
+            />
 
             {/* Recapture missing media dialog — grid: file status / file / processing status / ignore / action */}
-            <Dialog.Root
+            <AppDialog
                 open={sourceFileChangedDialog.open}
                 onOpenChange={(open) => {
                     if (!open) {
                         closeSourceFileChangedDialog();
                     }
                 }}
+                title={t("recapture_missing_media_title")}
+                description={t("recapture_missing_media_desc")}
+                size="xl"
+                actions={[
+                    {
+                        id: "ok",
+                        label: t("ok"),
+                        intent: "primary",
+                        disabled:
+                            sourceFileAnyProcessing ||
+                            sourceFileChangedDialog.changes.some(
+                                (item) => item.action === "pending",
+                            ),
+                        onClick: closeSourceFileChangedDialog,
+                    },
+                ]}
             >
-                <Dialog.Content maxWidth="860px">
-                    <Dialog.Title>{t("recapture_missing_media_title")}</Dialog.Title>
-                    <Dialog.Description>{t("recapture_missing_media_desc")}</Dialog.Description>
-
+                {/*
+                 * 外层不滚、内层滚（见下面列表上的注释）：这一层只是把 body 变成
+                 * flex 列，好让列表用 `flex-1 min-h-0` 吃掉剩余高度。
+                 */}
+                <div className="flex h-full min-h-0 flex-col">
                     <Flex justify="between" align="center" gap="2" mt="2">
                         <Flex gap="1" align="center" className="shrink-0">
-                            <span className="shrink-0 text-[10px] text-qt-text-muted">
+                            <span className="shrink-0 text-qt-micro text-qt-text-muted">
                                 {t("recapture_missing_media_search_mode_label")}
                             </span>
                             <WheelSelect
-                                className="h-6 shrink-0 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-[10px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
+                                className="h-6 shrink-0 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-qt-micro text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
                                 value={sourceFileSearchMode}
                                 disabled={
                                     sourceFileSearchBusy ||
@@ -3517,12 +3840,12 @@ function AppInner() {
                             mt="1"
                             className="rounded border border-qt-border bg-qt-base px-2 py-1.5"
                         >
-                            <Text size="1" color="gray" className="min-w-0 truncate">
+                            <span className="hs-type-caption min-w-0 truncate">
                                 {t("recapture_missing_media_search_result_summary")
                                     .replace("{total}", String(sourceFileSearchMatchTotal))
                                     .replace("{exact}", String(sourceFileSearchExactTotal))
                                     .replace("{selected}", String(sourceFileSelectedApplyTotal))}
-                            </Text>
+                            </span>
                             <Flex gap="1" align="center" className="shrink-0">
                                 {(sourceFileExactApplyTotal > 0 ||
                                     sourceFileSelectedApplyTotal > 0) && (
@@ -3556,8 +3879,14 @@ function AppInner() {
                         </Flex>
                     )}
 
-                    <div className="mt-2 max-h-[320px] overflow-auto rounded border border-qt-border bg-qt-base p-1">
-                        <div className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1 text-[10px] font-semibold text-qt-text-muted">
+                    {/*
+                     * 对话框 body 已经是 `overflow-y-auto`，这里若再给一个固定的
+                     * `max-h-[320px]` 就会出现两条竖直滚动条，而里面那条滚下去什么
+                     * 也看不到。改为参与上面的 flex 列：`flex-1 min-h-0` 让列表吃
+                     * 掉剩余高度，body 因此永不溢出，只剩一条滚动条。
+                     */}
+                    <div className="mt-2 min-h-0 flex-1 overflow-auto rounded border border-qt-border bg-qt-base p-1">
+                        <div className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1 text-qt-micro font-semibold text-qt-text-muted">
                             <div>{t("recapture_missing_media_col_file_status")}</div>
                             <div>{t("recapture_missing_media_col_file")}</div>
                             <div>{t("recapture_missing_media_col_process_status")}</div>
@@ -3578,13 +3907,13 @@ function AppInner() {
                                 item.action === "replaced";
                             const statusBadgeClass =
                                 item.action === "ignored"
-                                    ? "border border-gray-500/25 bg-gray-500/10 text-gray-600"
+                                    ? "border border-qt-border bg-qt-base text-qt-text-muted"
                                     : item.action === "reloaded" || item.action === "replaced"
-                                      ? "border border-green-500/25 bg-green-500/10 text-green-600"
+                                      ? "border border-qt-success-border bg-qt-success-bg text-qt-success-text"
                                       : item.action === "failed"
-                                        ? "border border-red-500/25 bg-red-500/10 text-red-600"
+                                        ? "border border-qt-danger-border bg-qt-danger-bg text-qt-danger-text"
                                         : item.action === "processing"
-                                          ? "border border-blue-500/25 bg-blue-500/10 text-blue-600"
+                                          ? "border border-qt-info-border bg-qt-info-bg text-qt-info-text"
                                           : "border border-qt-border bg-qt-base text-qt-text-muted";
                             const statusLabel =
                                 item.action === "ignored"
@@ -3607,13 +3936,13 @@ function AppInner() {
                             return (
                                 <div
                                     key={itemKey}
-                                    className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1.5 text-xs last:border-b-0"
+                                    className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1.5 text-qt-xs last:border-b-0"
                                 >
                                     <div
-                                        className={`shrink-0 whitespace-nowrap rounded px-1 py-0.5 text-center text-[10px] font-semibold leading-none ${
+                                        className={`shrink-0 whitespace-nowrap rounded px-1 py-0.5 text-center text-qt-micro font-semibold leading-none ${
                                             item.change === "deleted"
-                                                ? "border border-red-500/25 bg-red-500/10 text-red-600"
-                                                : "border border-amber-500/25 bg-amber-500/10 text-amber-600"
+                                                ? "border border-qt-danger-border bg-qt-danger-bg text-qt-danger-text"
+                                                : "border border-qt-warning-border bg-qt-warning-bg text-qt-warning-text"
                                         }`}
                                     >
                                         {item.change === "deleted"
@@ -3623,14 +3952,14 @@ function AppInner() {
                                     <div className="min-w-0">
                                         <div className="truncate" data-tooltip={item.source_path}>
                                             <span className="font-medium">{item.clip_name}</span>
-                                            <span className="text-gray-500">
+                                            <span className="text-qt-text-muted">
                                                 {" "}
                                                 — {item.source_path}
                                             </span>
                                         </div>
                                         {item.reloadedPath && (
                                             <div
-                                                className="mt-0.5 flex items-center gap-1 truncate text-[10px] text-green-600"
+                                                className="mt-0.5 flex items-center gap-1 truncate text-qt-micro text-qt-success-text"
                                                 data-tooltip={item.reloadedPath}
                                             >
                                                 <span className="shrink-0 font-semibold">
@@ -3650,7 +3979,7 @@ function AppInner() {
                                             item.candidates.length > 0 && (
                                                 <div className="mt-1 flex items-center gap-1">
                                                     <WheelSelect
-                                                        className="min-w-0 flex-1 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-[10px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
+                                                        className="min-w-0 flex-1 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-qt-micro text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
                                                         value={item.selectedCandidatePath ?? ""}
                                                         disabled={isBusy}
                                                         onValueChange={(value) =>
@@ -3689,13 +4018,13 @@ function AppInner() {
                                         {!isProcessed &&
                                             item.candidates &&
                                             item.candidates.length === 0 && (
-                                                <div className="mt-1 truncate text-[10px] text-qt-text-muted">
+                                                <div className="mt-1 truncate text-qt-micro text-qt-text-muted">
                                                     {t("recapture_missing_media_search_no_matches")}
                                                 </div>
                                             )}
                                     </div>
                                     <div
-                                        className={`shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-center text-[10px] font-semibold leading-none ${statusBadgeClass}`}
+                                        className={`shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-center text-qt-micro font-semibold leading-none ${statusBadgeClass}`}
                                     >
                                         {statusLabel}
                                     </div>
@@ -3742,7 +4071,7 @@ function AppInner() {
                         })}
                     </div>
                     <Flex justify="between" align="center" gap="2" mt="3">
-                        <Text size="1" color="gray">
+                        <span className="hs-type-caption">
                             {t("recapture_missing_media_summary")
                                 .replace(
                                     "{ignored}",
@@ -3769,23 +4098,10 @@ function AppInner() {
                                     ),
                                 )
                                 .replace("{total}", String(sourceFileChangedDialog.changes.length))}
-                        </Text>
-                        <Flex gap="2" align="center" className="shrink-0">
-                            <Button
-                                disabled={
-                                    sourceFileAnyProcessing ||
-                                    sourceFileChangedDialog.changes.some(
-                                        (item) => item.action === "pending",
-                                    )
-                                }
-                                onClick={closeSourceFileChangedDialog}
-                            >
-                                {t("ok")}
-                            </Button>
-                        </Flex>
+                        </span>
                     </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+                </div>
+            </AppDialog>
 
             <ImportProjectDialog
                 key={projectImportPick.open ? (projectImportPick.path ?? "open") : "closed"}
@@ -3813,94 +4129,16 @@ function AppInner() {
             />
             <ActionBar />
 
-            {/* Main Content Area: Splitter + optional right-side panels */}
-            <Flex className="flex-1 min-h-0">
-                {/* Left: Timeline / PianoRoll vertical splitter */}
-                <div ref={containerRef} className="flex-1 min-w-0 min-h-0 flex flex-col">
-                    {/* Top: Timeline / Tracks */}
-                    <Box
-                        className="min-h-[200px] border-b border-qt-border relative bg-qt-base"
-                        style={{ flexGrow: splitRatio, flexBasis: 0 }}
-                    >
-                        <TimelinePanel
-                            midiClipDialogOpen={midiClipDialogOpen}
-                            midiClipPath={midiClipPath}
-                            midiClipStartSec={midiClipStartSec}
-                            midiClipTrackId={midiClipTrackId}
-                            midiClipClipboardGuid={midiClipClipboardGuid}
-                            fillGaps={fillGaps}
-                            multiTrackMerge={multiTrackMerge}
-                            importBpmAsProject={importBpmAsProject}
-                            noteBpmMode={noteBpmMode}
-                            specifiedBpm={specifiedBpm}
-                            importPosition={importPosition}
-                            closeLeadingGap={closeLeadingGap}
-                            onMidiClipDialogOpenChange={setMidiClipDialogOpen}
-                            onMidiClipPathChange={setMidiClipPath}
-                            onMidiClipStartSecChange={setMidiClipStartSec}
-                            onMidiClipTrackIdChange={setMidiClipTrackId}
-                            onFillGapsChange={handleFillGapsChange}
-                            onMultiTrackMergeChange={handleMultiTrackMergeChange}
-                            onImportBpmAsProjectChange={handleImportBpmAsProjectChange}
-                            onNoteBpmModeChange={handleNoteBpmModeChange}
-                            onSpecifiedBpmChange={handleSpecifiedBpmChange}
-                            onImportPositionChange={handleImportPositionChange}
-                            onCloseLeadingGapChange={handleCloseLeadingGapChange}
-                            importTempoMapEnabled={importTempoMapEnabled}
-                            onImportTempoMapEnabledChange={handleImportTempoMapEnabledChange}
-                            importTempoMapTempo={importTempoMapTempo}
-                            onImportTempoMapTempoChange={handleImportTempoMapTempoChange}
-                            importTempoMapTimeSignature={importTempoMapTimeSignature}
-                            onImportTempoMapTimeSignatureChange={
-                                handleImportTempoMapTimeSignatureChange
-                            }
-                            importTempoMapKeySignature={importTempoMapKeySignature}
-                            onImportTempoMapKeySignatureChange={
-                                handleImportTempoMapKeySignatureChange
-                            }
-                            midiDialogSource={midiDialogSource}
-                            onMidiDialogSourceChange={setMidiDialogSource}
-                            importTargetMenu={midiImportTargetMenu}
-                            onImportTargetMenuChange={handleImportTargetMenuChange}
-                            importTargetDragDrop={midiImportTargetDragDrop}
-                            onImportTargetDragDropChange={handleImportTargetDragDropChange}
-                        />
-                    </Box>
-
-                    {/* Splitter */}
-                    <div
-                        className="h-2 bg-qt-window border-y border-qt-border cursor-ns-resize shrink-0"
-                        onPointerDown={splitter.startDrag}
-                        role="separator"
-                        aria-orientation="horizontal"
-                        aria-label={t("aria_resize_panels")}
-                    />
-
-                    {/* Bottom: Parameter / Piano Roll */}
-                    <Box
-                        className="min-h-[150px] relative bg-qt-base"
-                        style={{ flexGrow: 1 - splitRatio, flexBasis: 0 }}
-                    >
-                        <PianoRollPanel />
-                    </Box>
-                </div>
-
-                {(fileBrowserVisible || notebookVisible) && (
-                    <Flex className="shrink-0 min-h-0 border-l border-qt-border bg-qt-window">
-                        {fileBrowserVisible ? (
-                            <div className="w-[280px] shrink-0 border-r border-qt-border bg-qt-window flex flex-col">
-                                <FileBrowserPanel />
-                            </div>
-                        ) : null}
-                        {notebookVisible ? (
-                            <div className="w-[320px] shrink-0 bg-qt-window flex flex-col">
-                                <NotebookPanel />
-                            </div>
-                        ) : null}
-                    </Flex>
-                )}
-            </Flex>
-
+            {/*
+             * 工作区：全部可停靠窗体由布局树驱动。
+             *
+             * 这里取代了原先写死的"时间轴 / 分隔条 / 参数编辑器 + 右侧固定宽度栏"
+             * 结构。每个面板的组件实例只挂载一次，靠搬 DOM 宿主换位置（见
+             * `components/dock/panelHostRegistry`），因此停靠重排不会重建
+             * WebGL 上下文、不会丢滚动位置。面板自己的 props 由
+             * `usePanelRenderers` 注入，App 仍是这些状态的唯一所有者。
+             */}
+            <DockRoot />
             {/* Quick Search Popup */}
             <QuickSearchPopup open={quickSearchOpen} onClose={() => setQuickSearchOpen(false)} />
 
@@ -3908,85 +4146,56 @@ function AppInner() {
             <Flex
                 align="center"
                 justify="between"
-                className="h-6 bg-qt-window border-t border-qt-border px-1 select-none gap-2"
+                className="h-qt-bar-status bg-qt-window border-t border-qt-border px-1 select-none gap-2"
             >
                 <Flex align="center" gap="1" className="truncate min-w-0">
+                    {/* 排列规则：**长时效的提示在前，短时效的进度片在后**。
+                        绿色提示位（后台缓存统计 / 自动声道折叠）会挂十几秒，而
+                        紫色进度片（拉伸、波形分析、渲染…）只是几百毫秒的过客。
+                        若把进度片放在前面，它每出现/消失一次，后面所有片就整体
+                        横移一次 —— 用户视线里"提示在乱动"。把长时效的钉在最左，
+                        短的插在它右侧，左侧位置就永远稳定。 */}
+                    {noticeText ? <AppStatusChip tone="success">{noticeText}</AppStatusChip> : null}
+                    {/* 导入等待提示：只在真慢时点亮（见 IMPORT_BUSY_DELAY_MS），
+                        位置紧跟长时效提示位之后、短时效进度片之前。 */}
+                    {importBusy ? (
+                        <AppStatusChip tone="accent">{t("status_importing")}</AppStatusChip>
+                    ) : null}
                     {stretching.active ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
-                            style={{
-                                background: "var(--accent-3)",
-                                color: "var(--accent-11)",
-                                fontSize: "11px",
-                                lineHeight: "16px",
-                            }}
-                        >
+                        <AppStatusChip tone="accent">
                             {t("status_stretching")}
                             {stretching.clipName ? ` "${stretching.clipName}"` : ""}
-                        </span>
+                        </AppStatusChip>
                     ) : null}
                     {waveformAnalysis.active ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
-                            style={{
-                                background: "var(--accent-3)",
-                                color: "var(--accent-11)",
-                                fontSize: "11px",
-                                lineHeight: "16px",
-                            }}
-                        >
+                        <AppStatusChip tone="accent">
                             {t("status_analyzing_waveform")}
                             {waveformAnalysis.sourcePath ? ` "${waveformAnalysis.sourcePath}"` : ""}
                             {waveformAnalysis.progress != null
                                 ? ` ${Math.round(waveformAnalysis.progress * 100)}%`
                                 : ""}
-                        </span>
+                        </AppStatusChip>
                     ) : null}
                     {pitchAnalysisText ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
-                            style={{
-                                background: "var(--accent-3)",
-                                color: "var(--accent-11)",
-                                fontSize: "11px",
-                                lineHeight: "16px",
-                            }}
-                        >
-                            {pitchAnalysisText}
-                        </span>
+                        <AppStatusChip tone="accent">{pitchAnalysisText}</AppStatusChip>
                     ) : null}
-                    {pianoRollStatus.dataLoading ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
-                            style={{
-                                background: "var(--accent-3)",
-                                color: "var(--accent-11)",
-                                fontSize: "11px",
-                                lineHeight: "16px",
-                            }}
-                        >
-                            {t("loading")}
-                        </span>
-                    ) : null}
+                    {/* 参数曲线取数提示：**独立订阅**外部 store，不参与本组件重渲染
+                        （见 ParamDataLoadingChip 的说明）。 */}
+                    <ParamDataLoadingChip />
                     {rendering.active ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
-                            style={{
-                                background: "var(--accent-3)",
-                                color: "var(--accent-11)",
-                                fontSize: "11px",
-                                lineHeight: "16px",
-                            }}
-                        >
-                            {t("rendering")}
+                        <AppStatusChip tone="accent">
+                            {t("common_rendering")}
                             {rendering.progress != null
                                 ? ` ${Math.round(rendering.progress * 100)}%`
                                 : ""}
-                        </span>
+                        </AppStatusChip>
                     ) : null}
-                    <Text size="1" color={error ? "red" : "gray"} className="truncate">
+                    <span
+                        className="hs-type-caption truncate"
+                        style={{ color: error ? "var(--qt-danger-text)" : "var(--qt-text-muted)" }}
+                    >
                         {errorText}
-                    </Text>
+                    </span>
                 </Flex>
             </Flex>
         </Flex>
@@ -3996,9 +4205,7 @@ function AppInner() {
 function App() {
     return (
         <PitchAnalysisProvider>
-            <PianoRollStatusProvider>
-                <AppInner />
-            </PianoRollStatusProvider>
+            <AppInner />
         </PitchAnalysisProvider>
     );
 }

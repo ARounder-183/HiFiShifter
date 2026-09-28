@@ -11,7 +11,6 @@
  * 因此切换 视图 → 速度映射 会自动更新本按钮。
  */
 import { useCallback, useMemo, useState } from "react";
-import { Button, Dialog, Flex, Text } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
 import { useI18n } from "../../../i18n/I18nProvider";
 import {
@@ -28,6 +27,7 @@ import {
     createTempoPointId,
     scaleLikeToScaleData,
 } from "../../../utils/tempoMap";
+import { AppDialog } from "../../../ui/Dialog";
 
 /** “显示/创建”模式图标：空心四分音符 + 右上角加号（表示“显示并创建”）。 */
 function TempoShowIcon() {
@@ -84,8 +84,7 @@ function TempoActiveIcon() {
 
 export const TempoMapCornerButton: React.FC = () => {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const s = useAppSelector((state) => state.session);
     const [dialogOpen, setDialogOpen] = useState(false);
 
@@ -95,7 +94,7 @@ export const TempoMapCornerButton: React.FC = () => {
     /** 存在 Tempo Map 且正在显示（红色提醒模式）。 */
     const active = hasMap && s.tempoMapVisible;
     /** 图标按钮的无障碍名称（与悬浮提示共用同一份文案）。 */
-    const buttonLabel = active ? tAny("tempo_map_active_tooltip") : tAny("tempo_map_show_tooltip");
+    const buttonLabel = active ? tf("tempo_map_active_tooltip") : tf("tempo_map_show_tooltip");
 
     const projectScaleLike = useMemo<ScaleLike | null>(
         () =>
@@ -190,32 +189,38 @@ export const TempoMapCornerButton: React.FC = () => {
                 {active ? <TempoActiveIcon /> : <TempoShowIcon />}
             </button>
 
-            <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
-                <Dialog.Content maxWidth="360px">
-                    <Dialog.Title>{tAny("tempo_map_clear_dialog_title")}</Dialog.Title>
-                    <Dialog.Description>
-                        <Text size="2" className="text-qt-text-muted">
-                            {tAny("tempo_map_clear_dialog_message")}
-                        </Text>
-                    </Dialog.Description>
-                    <Flex justify="end" align="center" mt="4" gap="2">
-                        <Button
-                            variant="soft"
-                            color="gray"
-                            size="1"
-                            onClick={() => setDialogOpen(false)}
-                        >
-                            {tAny("cancel")}
-                        </Button>
-                        <Button variant="soft" color="gray" size="1" onClick={hideOnly}>
-                            {tAny("tempo_map_hide_only")}
-                        </Button>
-                        <Button variant="solid" color="red" size="1" onClick={clearMap}>
-                            {tAny("tempo_map_clear_confirm")}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+            <AppDialog
+                open={dialogOpen}
+                onOpenChange={setDialogOpen}
+                title={tf("tempo_map_clear_dialog_title")}
+                /*
+                 * 此前是 `description` 套一层 `<Text size="2" color="gray">` ——
+                 * 同一个槽位因此在 11px 与 14px 之间摇摆，还叠了两层弱化色。
+                 * 主消息走 `message`，严重度交给 `tone`。
+                 */
+                message={tf("tempo_map_clear_dialog_message")}
+                tone="danger"
+                size="sm"
+                actions={[
+                    {
+                        id: "clear",
+                        label: tf("tempo_map_clear_confirm"),
+                        intent: "danger",
+                        align: "start",
+                        onClick: clearMap,
+                    },
+                    {
+                        id: "cancel",
+                        label: tf("cancel"),
+                        onClick: () => setDialogOpen(false),
+                    },
+                    {
+                        id: "hide",
+                        label: tf("tempo_map_hide_only"),
+                        onClick: hideOnly,
+                    },
+                ]}
+            />
         </>
     );
 };

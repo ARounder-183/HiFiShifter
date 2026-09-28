@@ -23,6 +23,19 @@ export const clearWaveformCacheRemote = createAsyncThunk(
     },
 );
 
+/**
+ * 清除全部渲染缓存（磁盘）。
+ *
+ * 与「清除波形缓存」不同，渲染缓存没有前端镜像需要在本地同步清理；清理只
+ * 删除磁盘文件，正在播放/等待渲染的片段仍持有内存 PCM，因此不会中断播放。
+ */
+export const clearRenderCacheRemote = createAsyncThunk(
+    "session/clearRenderCacheRemote",
+    async () => {
+        return webApi.clearRenderCache("all");
+    },
+);
+
 export const loadUiSettings = createAsyncThunk("session/loadUiSettings", async () => {
     return settingsApi.getUiSettings();
 });
@@ -65,6 +78,7 @@ export const persistUiSettings = createAsyncThunk(
             paramEditorSeekPlayhead: s.paramEditorSeekPlayheadEnabled,
             showClipboardPreview: s.showClipboardPreview,
             showParamValuePopup: s.showParamValuePopup,
+            paramAxisUnits: s.paramAxisUnits,
             lockParamLines: s.lockParamLinesEnabled,
             metronomeEnabled: s.metronomeEnabled,
             metronomeGain: s.metronomeGain,
@@ -81,6 +95,8 @@ export const persistUiSettings = createAsyncThunk(
             gpuDeviceId: s.gpuDeviceId,
             ortDeviceId: s.ortDeviceId,
             autoBackgroundRender: s.autoBackgroundRender,
+            renderCache: s.renderCache,
+            channelImportPolicy: s.channelImportPolicy,
             selectDragDirection: s.selectDragDirection,
             drawDragDirection: s.drawDragDirection,
 

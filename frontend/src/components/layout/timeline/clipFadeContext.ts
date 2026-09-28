@@ -65,3 +65,27 @@ export function sortAndFilterFadedClips(params: {
         (c) => c.fadeInSec > 0 || c.fadeOutSec > 0,
     );
 }
+
+/**
+ * 多选淡变形状行的"当前值"。
+ *
+ * 多选时形状行只给一行、选择即批量应用，因此这一行没有"自己的"形状 ——
+ * 它代表整组 Clip 的共同状态：
+ * - 所有参与 Clip 的形状一致 → 返回该形状（高亮对应按钮）；
+ * - 不一致 → 返回 `null`（**不预选任何一项**），避免把某一个 Clip 的形状
+ *   误展示成整组的状态，让用户以为点击是"保持不变"。
+ *
+ * 只统计**该方向确有淡变**的 Clip：没有淡变的一侧形状字段是默认值 0，
+ * 把它算进来会让"共同形状"被无意义地判成不一致。
+ *
+ * 小数变体（如 1.1）按基础族比较（与 `FadeShapeRow` 的高亮规则、REAPER 语义一致）。
+ */
+export function sharedFadeShape(clips: ClipInfo[], side: "in" | "out"): number | null {
+    if (clips.length === 0) return null;
+    const shapeOf = (clip: ClipInfo): number => {
+        const raw = side === "in" ? clip.fadeInShape : clip.fadeOutShape;
+        return Number.isFinite(raw) ? Math.trunc(raw as number) : 0;
+    };
+    const first = shapeOf(clips[0]);
+    return clips.every((clip) => shapeOf(clip) === first) ? first : null;
+}

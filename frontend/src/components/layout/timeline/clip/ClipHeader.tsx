@@ -19,6 +19,13 @@ import {
     parsePlaybackRateInput,
 } from "../runtime/timelineCanvasStyle";
 import { ClipFormantButton } from "./ClipFormantButton";
+import {
+    channelModeI18nKey,
+    channelModeShortLabel,
+    nextChannelMode,
+} from "../../../../utils/channelMode";
+import { useAppDispatch } from "../../../../app/hooks";
+import { setClipTakeChannelModeRemote } from "../../../../features/session/sessionSlice";
 
 export interface ClipRenameController {
     isEditing: () => boolean;
@@ -672,7 +679,7 @@ export const ClipHeader: React.FC<{
 
                     return (
                         <button
-                            className="rounded flex items-center justify-center border transition-all text-[10px] font-bold"
+                            className="rounded flex items-center justify-center border transition-all text-qt-micro font-bold"
                             onPointerDown={(e) => {
                                 e.preventDefault();
                                 e.stopPropagation();
@@ -701,7 +708,7 @@ export const ClipHeader: React.FC<{
             {/* 静音按钮 */}
             {showMute && (
                 <button
-                    className="rounded flex items-center justify-center border transition-all text-[10px] font-bold"
+                    className="rounded flex items-center justify-center border transition-all text-qt-micro font-bold"
                     onPointerDown={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
@@ -723,6 +730,12 @@ export const ClipHeader: React.FC<{
                 >
                     M
                 </button>
+            )}
+
+            {/* 声道模式徽章：非"正常"时显示（音频 take 专属），点击循环切换。
+                与 Take 子菜单的循环按钮共用同一命令 —— 后端会整体失效渲染缓存。 */}
+            {showMute && clip.sourcePath && (clip.channelMode ?? 0) !== 0 && (
+                <ChannelModeBadge clip={clip} hideVisuals={hideVisuals} visualStyle={visualStyle} />
             )}
 
             <ClipFormantButton
@@ -758,7 +771,7 @@ export const ClipHeader: React.FC<{
                     {nameEditing ? (
                         <input
                             ref={nameInputRef}
-                            className="w-full text-xs font-medium rounded px-1 outline-none"
+                            className="w-full text-qt-xs font-medium rounded px-1 outline-none"
                             style={{
                                 color: isDark ? "rgba(255,255,255,0.95)" : "rgba(0,0,0,0.88)",
                                 backgroundColor: isDark
@@ -782,7 +795,7 @@ export const ClipHeader: React.FC<{
                         />
                     ) : (
                         <div
-                            className="text-xs font-medium drop-shadow-md truncate cursor-default"
+                            className="text-qt-xs font-medium drop-shadow-md truncate cursor-default"
                             data-tooltip={clipTooltipText}
                             style={{
                                 color: visualStyle.textFill,
@@ -844,7 +857,7 @@ export const ClipHeader: React.FC<{
                     {badgeEditing === "rate" ? (
                         <input
                             ref={badgeInputRef}
-                            className="text-[11px] rounded px-1 outline-none text-right"
+                            className="text-qt-xs rounded px-1 outline-none text-right"
                             style={{
                                 // 实测文本宽度：自定义字体下 ch 估算不可靠
                                 width: `${rateInputWidthPx}px`,
@@ -877,7 +890,7 @@ export const ClipHeader: React.FC<{
                         />
                     ) : showPlaybackRate ? (
                         <div
-                            className="text-[10px] tracking-wide cursor-text"
+                            className="text-qt-micro tracking-wide cursor-text"
                             style={{
                                 color: "rgba(208, 216, 223, 0.76)",
                                 opacity: hideVisuals ? 0 : 1,
@@ -905,7 +918,7 @@ export const ClipHeader: React.FC<{
                     {badgeEditing === "gain" ? (
                         <input
                             ref={badgeInputRef}
-                            className="text-xs rounded px-1 outline-none text-right"
+                            className="text-qt-xs rounded px-1 outline-none text-right"
                             style={{
                                 // 实测文本宽度：自定义字体下 ch 估算不可靠
                                 width: `${gainInputWidthPx}px`,
@@ -930,7 +943,7 @@ export const ClipHeader: React.FC<{
                         />
                     ) : showGainVal ? (
                         <div
-                            className="text-xs drop-shadow-md cursor-text"
+                            className="text-qt-xs drop-shadow-md cursor-text"
                             style={{
                                 color: "rgba(233, 239, 244, 0.82)",
                                 opacity: hideVisuals ? 0 : 1,
@@ -956,3 +969,59 @@ export const ClipHeader: React.FC<{
         </div>
     );
 };
+
+/** 声道模式徽章：显示当前模式的紧凑缩写，点击循环切换（0→1→2→3→4→0）。 */
+function ChannelModeBadge(props: {
+    clip: ClipInfo;
+    hideVisuals: boolean;
+    visualStyle: {
+        muteBadgeWidth: number;
+        muteBadgeHeight: number;
+        muteBadgeFill: string;
+        muteBadgeStroke: string;
+        muteBadgeTextFill: string;
+    };
+}) {
+    const { clip, hideVisuals, visualStyle } = props;
+    const { t } = useI18n();
+    const dispatch = useAppDispatch();
+    const mode = clip.channelMode ?? 0;
+    const sourceLabel =
+        (clip.sourceChannels ?? 0) >= 2
+            ? t("clip_channel_source_stereo")
+            : t("clip_channel_source_mono");
+    return (
+        <button
+            className="rounded flex items-center justify-center border transition-all text-qt-3xs font-bold tracking-tight"
+            onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+            }}
+            onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const takes = clip.takes ?? [];
+                const active = takes.find((entry) => entry.id === clip.activeTakeId) ?? takes[0];
+                if (!active) return;
+                dispatch(
+                    setClipTakeChannelModeRemote({
+                        clipId: clip.id,
+                        takeId: active.id,
+                        channelMode: nextChannelMode(mode),
+                    }),
+                );
+            }}
+            data-tooltip={`${sourceLabel} \u00b7 ${t(channelModeI18nKey(mode))}`}
+            style={{
+                opacity: hideVisuals ? 0 : 1,
+                width: visualStyle.muteBadgeWidth,
+                height: visualStyle.muteBadgeHeight,
+                backgroundColor: visualStyle.muteBadgeFill,
+                borderColor: "rgba(120, 200, 255, 0.85)",
+                color: "rgba(150, 215, 255, 1)",
+            }}
+        >
+            {channelModeShortLabel(mode)}
+        </button>
+    );
+}

@@ -32,6 +32,14 @@ mod build_git;
 mod audio_engine;
 #[path = "audio/audio_utils.rs"]
 mod audio_utils;
+#[path = "audio/channel_decision.rs"]
+pub(crate) mod channel_decision;
+#[path = "audio/channel_mode.rs"]
+pub(crate) mod channel_mode;
+#[path = "audio/stereo_detect.rs"]
+pub(crate) mod stereo_detect;
+#[path = "import/channel_policy.rs"]
+pub(crate) mod channel_policy;
 #[path = "pitch/clip_pitch_cache.rs"]
 mod clip_pitch_cache;
 #[path = "pitch/clip_rendering_state.rs"]
@@ -61,6 +69,7 @@ mod pitch_editing;
 #[path = "pitch/pitch_progress.rs"]
 mod pitch_progress;
 mod recording;
+mod render_cache;
 mod renderer;
 mod synth_clip_cache;
 
@@ -122,6 +131,7 @@ mod hfspeaks_v2;
 mod linux_clipboard;
 #[path = "import/midi_import.rs"]
 mod midi_import;
+mod notebook_assets;
 mod project;
 mod project_fragment;
 #[path = "import/reaper_export.rs"]
@@ -318,6 +328,12 @@ pub fn run() {
             }
             let _ = hfspeaks_v2::ensure_cache_dir(&dir);
 
+            // 渲染缓存与波形缓存同源（同一用户缓存根），使"重新打开工程不再
+            // 重新合成"具备持久化落点；具体设置（开关/容量/自定义目录）在
+            // 应用 UI 设置时下发（见下方 load_ui_settings）。
+            let render_cache_base = base.join("hifishifter").join("render_cache");
+            crate::render_cache::init(render_cache_base);
+
             // 加载持久化的最近工程列表
             if let Ok(cfg_base) = app.path().app_config_dir() {
                 let cfg_dir = cfg_base.join("HiFiShifter");
@@ -337,6 +353,9 @@ pub fn run() {
                 let ui = crate::config::load_ui_settings(cfg_dir);
                 crate::config::set_loop_new_clips_default(ui.loop_new_clips);
                 crate::config::set_sync_edits_across_takes(ui.sync_edits_across_takes);
+                // 启动即同步渲染缓存配置：打开工程发生在 get_ui_settings 之前时
+                // （外部文件关联、命令行传工程路径），也必须按用户的开关/容量生效。
+                crate::render_cache::apply_settings(&ui.render_cache);
             }
 
             // 尝试恢复上次运行时保存的窗口状态（非强制性）
@@ -559,6 +578,7 @@ pub fn run() {
             commands::end_undo_group,
             commands::get_history_state,
             commands::set_history_position,
+            commands::record_param_selection_step,
             commands::set_project_save_undo_history,
             commands::get_project_meta,
             commands::new_project,
@@ -566,6 +586,19 @@ pub fn run() {
             commands::open_project,
             commands::import_project_dialog,
             commands::import_project,
+            commands::set_project_notes,
+            commands::seal_project_notes_history,
+            commands::notebook_put_asset,
+            commands::notebook_read_asset,
+            commands::notebook_list_assets,
+            commands::notebook_remove_asset,
+            commands::notebook_prune_assets,
+            commands::notebook_read_file_base64,
+            commands::notebook_read_clipboard_payload,
+            commands::notebook_write_clipboard_payload,
+            commands::notebook_read_clipboard_image,
+            commands::notebook_export_document,
+            commands::notebook_save_asset_as,
             commands::save_project,
             commands::save_project_as,
             commands::save_project_to_path,
@@ -597,8 +630,6 @@ pub fn run() {
             commands::get_waveform_mipmap_binary,
             commands::preload_waveform_mipmap,
             commands::batch_get_waveform_mipmap,
-            commands::get_waveform_manifest,
-            commands::get_waveform_tiles_binary,
             commands::import_audio_item,
             commands::import_audio_bytes,
             commands::add_track,
@@ -612,6 +643,7 @@ pub fn run() {
             commands::get_param_frames,
             commands::set_param_frames,
             commands::restore_param_frames,
+            commands::convert_mix_param,
             commands::stretch_track_linked_params,
             commands::add_clip,
             commands::create_clips_bulk,
@@ -633,6 +665,8 @@ pub fn run() {
             commands::remove_clip_take,
             commands::rename_clip_take,
             commands::set_clip_take_reversed,
+            commands::set_clip_take_channel_mode,
+            commands::scan_and_convert_fake_stereo,
             commands::add_clip_take_from_media,
             commands::import_media_files_as_takes,
             commands::duplicate_clips_bulk,
@@ -681,6 +715,7 @@ pub fn run() {
             commands::open_log_folder,
             commands::pick_diagnostics_output_path,
             commands::export_diagnostics,
+            commands::export_layout_json,
             commands::log_frontend_error,
             commands::get_onnx_status,
             commands::get_onnx_diagnostic,
@@ -700,7 +735,10 @@ pub fn run() {
             commands::import_reaper_project,
             commands::paste_reaper_clipboard,
             commands::has_reaper_clipboard,
-            commands::clear_cache,
+            commands::get_render_cache_stats,
+            commands::clear_render_cache,
+            commands::open_render_cache_dir,
+            commands::reveal_export_paths,
             commands::get_processor_params,
             commands::get_midi_tracks,
             commands::read_midi_clipboard_to_memory,
@@ -716,6 +754,12 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                // 退出前把渲染缓存的待写队列（`onExit` / `manual` 模式以及在途
+                // 写入）排空；带超时，磁盘异常时也不能卡住退出流程。
+                if !crate::render_cache::flush_blocking(std::time::Duration::from_secs(3)) {
+                    log::warn!("[render_cache] pending writes did not drain before exit timeout");
+                }
+
                 // Shut down audio engine: stop meter thread, send Shutdown to
                 // worker threads, and drop the channel sender so all worker
                 // threads exit their recv loops.

@@ -155,7 +155,57 @@ fn pan_gains(pan: f32) -> (f32, f32) {
     }
 }
 
-/// 对一帧 PCM 应用共通音量/声像自动化（vslib 路径的曲线为 None，由处理器内部完成）。
+/// 采样动态（DYN）曲线在绝对帧处的增益。
+///
+/// 语义：`增益 = 目标电平 / max(原声电平, 静音下限)`（两者同处倍率域），
+/// 并带三类保护 ——
+/// - **曲线不存在** → 1.0（该轨道组根本没在用动态）；
+/// - **原声基线不存在**（分析未就绪）→ 1.0，绝不凭空造增益；
+/// - 原声低于静音下限 → 分母钳到下限，增益**有界**（不放大无内容帧）；衰减/
+///   静音照常生效（见 `compute_dyn_gain`）；
+/// - 目标为 `DYN_FOLLOW_ORIG` 哨兵 → 1.0（**防御性兜底**：正常路径下曲线已在
+///   装配期解析（见 `resolve_dyn_sentinels_for_audio`），引擎不该再看到哨兵）。
+///
+/// 采样规则与 volume/pan 完全一致（`sample_automation_curve`，越界钳制到末值），
+/// 保证三者在同一时间轴上对齐。
+#[inline]
+fn dyn_gain_at(clip: &EngineClip, abs_frame: u64) -> f32 {
+    if clip.dyn_curve.as_ref().is_none_or(|c| c.is_empty()) {
+        return 1.0;
+    }
+    // 用 DYN 专用采样器：越界回落到"沿用原声"哨兵，而不是持有末值 ——
+    // 否则用户画的最后一个目标电平会被 hold 到曲线尽头，对后续所有音频
+    // 逐帧强加同一个目标电平（末点污染）。
+    let target = crate::renderer::common_params::sample_dyn_curve_at_frame(
+        clip.dyn_curve.as_deref().map(|v| v.as_slice()),
+        abs_frame,
+        clip.src.sample_rate,
+        clip.dyn_curve_frame_period_ms,
+    );
+    // 哨兵：沿用原声，不做任何改变（无需再采样原声曲线）。
+    if target < 0.0 {
+        return 1.0;
+    }
+    // 基线缺失（或空曲线）时不得推导增益：采样器的兜底默认值只是占位，
+    // 拿它去算 `目标 / 兜底` 会产生一个凭空的增益（曾表现为 max gain）。
+    let Some(orig_curve) = clip.dyn_orig_curve.as_deref().filter(|c| !c.is_empty()) else {
+        return 1.0;
+    };
+    let orig = sample_automation_curve(
+        Some(orig_curve),
+        abs_frame,
+        clip.src.sample_rate,
+        clip.dyn_curve_frame_period_ms,
+        // 0.0 = "该帧无基线数据"（与 DYN_FOLLOW_ORIG 同名不同域：这是分母侧）。
+        // 不能用 DYN_SILENCE_FLOOR：那会让"无数据帧"被当成无内容帧，于是任何
+        // 超过 −60 dBFS 的目标都被读成放大请求而被拒绝 —— 曲线在基线缺口处
+        // 会静默失效。
+        0.0,
+    );
+    crate::renderer::common_params::compute_dyn_gain(target, orig)
+}
+
+/// 对一帧 PCM 应用共通音量/声像/动态自动化。
 #[inline]
 fn apply_mix_automation(clip: &EngineClip, abs_frame: u64, l: f32, r: f32) -> (f32, f32) {
     let vol = sample_automation_curve(
@@ -172,8 +222,26 @@ fn apply_mix_automation(clip: &EngineClip, abs_frame: u64, l: f32, r: f32) -> (f
         clip.pan_curve_frame_period_ms,
         0.0,
     );
+    let dyn_gain = dyn_gain_at(clip, abs_frame);
     let (left_gain, right_gain) = pan_gains(pan);
-    (l * vol * left_gain, r * vol * right_gain)
+    let gain = vol * dyn_gain;
+    (l * gain * left_gain, r * gain * right_gain)
+}
+
+/// Take 声道模式的实时采样映射（与离线 `condition_take_channels` 语义一致）。
+/// 仅用于**源 PCM** 读取路径；Swap/MonoLeft/MonoRight 是纯平面选择，
+/// MonoMix 为每样本一次加法 —— 均为零分配。
+fn apply_take_channel_mode(left: f32, right: f32, mode: crate::channel_mode::TakeChannelMode) -> (f32, f32) {
+    match mode {
+        crate::channel_mode::TakeChannelMode::Normal => (left, right),
+        crate::channel_mode::TakeChannelMode::Swap => (right, left),
+        crate::channel_mode::TakeChannelMode::MonoMix => {
+            let v = (left + right) * 0.5;
+            (v, v)
+        }
+        crate::channel_mode::TakeChannelMode::MonoLeft => (left, left),
+        crate::channel_mode::TakeChannelMode::MonoRight => (right, right),
+    }
 }
 
 /// 采样 clip 在 local 帧处的原始 PCM（不含 gain/fade，但含 volume/pan 自动化）。
@@ -224,7 +292,11 @@ fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32
             let idx = idx_i.rem_euclid(total) as usize;
             let base = idx * 2;
             if base + 1 < clip.src.pcm.len() {
-                Some((clip.src.pcm[base], clip.src.pcm[base + 1]))
+                Some(apply_take_channel_mode(
+                    clip.src.pcm[base],
+                    clip.src.pcm[base + 1],
+                    clip.channel_mode,
+                ))
             } else {
                 None
             }
@@ -259,7 +331,11 @@ fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32
                     };
                     let idx = (looped as usize) * 2;
                     if idx + 1 < clip.src.pcm.len() {
-                        Some((clip.src.pcm[idx], clip.src.pcm[idx + 1]))
+                        Some(apply_take_channel_mode(
+                            clip.src.pcm[idx],
+                            clip.src.pcm[idx + 1],
+                            clip.channel_mode,
+                        ))
                     } else {
                         None
                     }
@@ -269,7 +345,11 @@ fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32
             } else {
                 let idx = (src_abs as usize) * 2;
                 if idx + 1 < clip.src.pcm.len() {
-                    Some((clip.src.pcm[idx], clip.src.pcm[idx + 1]))
+                    Some(apply_take_channel_mode(
+                        clip.src.pcm[idx],
+                        clip.src.pcm[idx + 1],
+                        clip.channel_mode,
+                    ))
                 } else {
                     None
                 }
@@ -870,7 +950,56 @@ mod tests {
     use crate::audio_engine::types::{EngineClip, ResampledStereo};
     use std::sync::Arc;
 
+    #[test]
+    fn sample_clip_pcm_applies_take_channel_mode() {
+        // 源 PCM：帧 i = [L=i/4, R=-i/4]（左右可分辨）。
+        let mut pcm = Vec::new();
+        for i in 0..4 {
+            let f = i as f32;
+            pcm.push(f / 4.0);
+            pcm.push(-f / 4.0);
+        }
+        let mut clip = clip_with_dyn(None, None);
+        clip.src = ResampledStereo {
+            sample_rate: 44_100,
+            frames: 4,
+            pcm: Arc::new(pcm),
+        };
+
+        // Normal：原样。
+        clip.channel_mode = crate::channel_mode::TakeChannelMode::Normal;
+        let (l, r) = super::sample_clip_pcm(&clip, 2, 2.0).unwrap();
+        assert!((l - 0.5).abs() < 1e-6 && (r - (-0.5)).abs() < 1e-6);
+
+        // Swap：平面互换。
+        clip.channel_mode = crate::channel_mode::TakeChannelMode::Swap;
+        let (l, r) = super::sample_clip_pcm(&clip, 2, 2.0).unwrap();
+        assert!((l - (-0.5)).abs() < 1e-6 && (r - 0.5).abs() < 1e-6);
+
+        // MonoLeft：左平面复制。
+        clip.channel_mode = crate::channel_mode::TakeChannelMode::MonoLeft;
+        let (l, r) = super::sample_clip_pcm(&clip, 2, 2.0).unwrap();
+        assert!((l - 0.5).abs() < 1e-6 && (r - 0.5).abs() < 1e-6);
+
+        // MonoRight：右平面复制。
+        clip.channel_mode = crate::channel_mode::TakeChannelMode::MonoRight;
+        let (l, r) = super::sample_clip_pcm(&clip, 2, 2.0).unwrap();
+        assert!((l - (-0.5)).abs() < 1e-6 && (r - (-0.5)).abs() < 1e-6);
+
+        // MonoMix：两平面均值。
+        clip.channel_mode = crate::channel_mode::TakeChannelMode::MonoMix;
+        let (l, r) = super::sample_clip_pcm(&clip, 2, 2.0).unwrap();
+        assert!(l.abs() < 1e-6 && r.abs() < 1e-6);
+    }
+
     fn clip_with_curves(volume_curve: Option<Vec<f32>>) -> EngineClip {
+        let mut clip = clip_with_dyn(None, None);
+        clip.volume_curve = volume_curve.map(Arc::new);
+        clip
+    }
+
+    /// 构造一个只关心动态曲线的 clip（其余曲线全为 None）。
+    fn clip_with_dyn(dyn_curve: Option<Vec<f32>>, dyn_orig: Option<Vec<f32>>) -> EngineClip {
         let pcm = Arc::new(vec![1.0f32; 8]);
         EngineClip {
             clip_id: "clip-a".to_string(),
@@ -885,6 +1014,7 @@ mod tests {
             src_start_frame: 0,
             src_end_frame: 4,
             reversed: false,
+        channel_mode: crate::channel_mode::TakeChannelMode::Normal,
             playback_rate: 1.0,
             local_src_offset_frames: 0,
             repeat: false,
@@ -898,10 +1028,13 @@ mod tests {
             breath_noise_pcm: None,
             breath_curve: None,
             breath_curve_frame_period_ms: 5.0,
-            volume_curve: volume_curve.map(Arc::new),
+            volume_curve: None,
             volume_curve_frame_period_ms: 5.0,
             pan_curve: None,
             pan_curve_frame_period_ms: 5.0,
+            dyn_curve: dyn_curve.map(Arc::new),
+            dyn_orig_curve: dyn_orig.map(Arc::new),
+            dyn_curve_frame_period_ms: 5.0,
             needs_synthesis: false,
         }
     }
@@ -936,5 +1069,321 @@ mod tests {
         assert!((at(220) - 1.0).abs() < 0.05, "got {}", at(220));
         // 曲线末尾之后保持末值（不回落到 default）
         assert!((at(44_100) - 4.0).abs() < 1e-6, "got {}", at(44_100));
+    }
+
+    #[test]
+    fn dyn_gain_is_target_over_original() {
+        // 目标 0.5 / 原声 1.0 → 增益 0.5。
+        let clip = clip_with_dyn(Some(vec![0.5f32]), Some(vec![1.0f32]));
+        let (l, r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
+        assert!((l - 0.5).abs() < 1e-6, "left got {l}");
+        assert!((r - 0.5).abs() < 1e-6, "right got {r}");
+    }
+
+    #[test]
+    fn dyn_gain_boosts_quiet_frames() {
+        // 原声只有 0.25、目标 1.0 → +12 dB（×4），这是"抬安静段"的核心场景。
+        let clip = clip_with_dyn(Some(vec![1.0f32]), Some(vec![0.25f32]));
+        let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
+        assert!((l - 4.0).abs() < 1e-6, "left got {l}");
+    }
+
+    /// ★ 回归：真实素材的安静段必须被提升到**用户画的目标**（门限曾是 −26 dBFS、
+    /// 上限曾仅 ×4，两者叠加使安静段"怎么编辑都提不上去"）。
+    #[test]
+    fn dyn_gain_boosts_very_quiet_content() {
+        // −40 dBFS（0.01）画目标 −4.7 dBFS（0.582）→ 需 ×58.2，必须精确兑现。
+        let clip = clip_with_dyn(Some(vec![0.582f32]), Some(vec![0.01f32]));
+        let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
+        assert!(
+            (l - 58.2).abs() < 0.1,
+            "安静段必须被精确提升到目标（×58.2），实测 {l}"
+        );
+
+        // −55 dBFS（0.00178）→ 需 ×327，同样必须兑现（上限只是数值兜底）。
+        let clip = clip_with_dyn(Some(vec![0.582f32]), Some(vec![0.00178f32]));
+        let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
+        assert!((l - 327.0).abs() < 1.0, "实测 {l}");
+
+        // 上限的确切位置：从下限兑现到值域顶端。
+        assert_eq!(
+            crate::renderer::common_params::DYN_MAX_GAIN,
+            1.0 / crate::renderer::common_params::DYN_SILENCE_FLOOR
+        );
+    }
+
+    #[test]
+    fn dyn_follow_orig_sentinel_is_unity() {
+        // 哨兵（负值）= 沿用原声 → 增益 1.0，即便原声很小。
+        let clip = clip_with_dyn(
+            Some(vec![crate::renderer::common_params::DYN_FOLLOW_ORIG]),
+            Some(vec![0.0001f32]),
+        );
+        let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
+        assert!((l - 1.0).abs() < 1e-6, "left got {l}");
+    }
+
+    /// ★ 相邻点交界咔哒声回归（三类不连续一起钉住）。
+    ///
+    /// 这是最常见的编辑形态（在一条连续曲线的**中途**画一段），因此交界在整条
+    /// 轨道上成对出现。引擎逐 PCM 样本在相邻帧之间线性插值，而存储形态的动态
+    /// 曲线对未画帧存的是 `DYN_FOLLOW_ORIG`（−1）哨兵 —— 一个**非数值**。把它
+    /// 交给插值会制造三类不连续（详见 `resolve_dyn_curves_for_audio`）：
+    ///
+    /// ① 穿过 0 → 掉到静音（0 = 画静音）；② 分子/分母下钳速率不一致 → 先冲高
+    /// 再塌陷；③ 曲线末尾之外回落哨兵 → 增益硬跳（用户报告的"前帧已编辑、后帧
+    /// 未编辑"就是它：动态数组的长度 = 最后写入帧 + 1，笔画结尾的下一帧即数组
+    /// 之外）。
+    ///
+    /// 未解析的曲线必须出现①的跌落（解析存在的理由）；解析后必须：不跌落、
+    /// 过交界**单调**（不得冲高再塌陷）、且正常基线下相邻样本变化极小。
+    #[test]
+    fn dyn_sentinel_boundary_must_stay_continuous() {
+        use crate::renderer::common_params::{resolve_dyn_curves_for_audio, DYN_FOLLOW_ORIG};
+
+        // 44.1 kHz + 5 ms 帧周期 ⇒ 一帧 ≈ 220.5 个样本。
+        let last_sample = 662u64;
+        let gain_at = |clip: &EngineClip, frame: u64| apply_mix_automation(clip, frame, 1.0, 1.0).0;
+        let gains_of = |stored: &[f32], baseline: &[f32]| -> Vec<f32> {
+            let r = resolve_dyn_curves_for_audio(stored, Some(baseline));
+            let clip = clip_with_dyn(Some(r.target), Some(r.baseline));
+            (0..=last_sample).map(|f| gain_at(&clip, f)).collect()
+        };
+
+        // ① 未解析（存储形态直接交给引擎）：出现"掉到静音"的跌落。
+        let raw = clip_with_dyn(Some(vec![0.5, DYN_FOLLOW_ORIG]), Some(vec![0.1, 0.1]));
+        let raw_min = (0..=last_sample)
+            .map(|f| gain_at(&raw, f))
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            raw_min < 0.05,
+            "未解析的哨兵曲线在交界处本应出现掉音跌落（这正是咔哒声的根因），实测最小增益 {raw_min}"
+        );
+
+        // ② 解析后，交界两侧都必须满足"不跌落 + 单调"。
+        // 覆盖：编辑→未编辑（正常基线）、编辑→未编辑（后帧静音）、
+        //       编辑延续到曲线末尾之外（③的场景）。
+        let cases: Vec<(&str, Vec<f32>, Vec<f32>, bool)> = vec![
+            (
+                "编辑→未编辑（正常基线）",
+                vec![DYN_FOLLOW_ORIG, 0.5, DYN_FOLLOW_ORIG],
+                vec![0.1, 0.1, 0.1],
+                true,
+            ),
+            (
+                "编辑→未编辑（后帧静音）",
+                vec![DYN_FOLLOW_ORIG, 0.5, DYN_FOLLOW_ORIG],
+                vec![0.1, 0.1, 0.0],
+                false,
+            ),
+            (
+                "编辑延到曲线末尾之外",
+                vec![DYN_FOLLOW_ORIG, 0.5],
+                vec![0.1, 0.1],
+                true,
+            ),
+        ];
+        for (label, stored, baseline, expect_smooth) in cases {
+            let gains = gains_of(&stored, &baseline);
+            assert!(
+                (gains[0] - 1.0).abs() < 1e-6,
+                "{label}：未画帧增益仍应为 1，实测 {}",
+                gains[0]
+            );
+            if expect_smooth {
+                // 基线有内容：交界处不得跌落。
+                let min_gain = gains.iter().cloned().fold(f32::INFINITY, f32::min);
+                assert!(min_gain > 0.5, "{label}：不得跌落，实测最小增益 {min_gain}");
+            } else {
+                // 基线是静音（无内容）：**收尾那一格**应当是单调淡出到静音 ——
+                // 而不是旧的"先掉到 0 再弹回"。逐样本单调即可区分两者。
+                // （只取收尾格：起始格是编辑的起笔，本来就应当上升。）
+                let tail: Vec<f32> = gains[220..=441].to_vec();
+                // ① 不得"冲高再塌陷"：峰值只允许比起点高一个可忽略的量
+                //    （旧实现会先多涨 ≈20% 再崩，那是下钳折点的特征）。
+                let tail_max = tail.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                assert!(
+                    tail_max <= tail[0] + 0.05,
+                    "{label}：无内容收尾不得冲高，起点 {} 峰值 {tail_max}",
+                    tail[0]
+                );
+                // ② 粗粒度上必须单调不增（真正的淡出）。取每 22 个样本一点：
+                //    分母穿过下限时增益会有一个很窄的"拐点"（母数与分母同向趋零，
+                //    见 DYN_SILENCE_FLOOR 的说明，修复前就存在），但**整体形状**
+                //    必须是单调下降 —— 旧实现的"先冲高 20% 再崩"会在这里露馅。
+                let coarse: Vec<f32> = tail.iter().step_by(22).cloned().collect();
+                for pair in coarse.windows(2) {
+                    assert!(
+                        pair[1] <= pair[0] + 0.05,
+                        "{label}：无内容收尾必须整体单调淡出，实测 {} → {}",
+                        pair[0],
+                        pair[1]
+                    );
+                }
+                // ③ 末态是静音（无内容 ⇒ 不再放大噪声底）—— 见下方统一断言。
+            }
+            if expect_smooth {
+                // 基线有内容：收尾必须回到未画帧的增益 1，且相邻样本变化极小。
+                let tail: Vec<f32> = gains[220..=441].to_vec();
+                let tail_max = tail.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                assert!(
+                    tail_max <= tail[0] + 0.1,
+                    "{label}：收尾不得冲高，起点 {} 峰值 {tail_max}",
+                    tail[0]
+                );
+                assert!(
+                    (tail[tail.len() - 1] - 1.0).abs() < 1e-3,
+                    "{label}：收尾应回到未画帧的增益 1，实测 {}",
+                    tail[tail.len() - 1]
+                );
+                let max_jump = gains
+                    .windows(2)
+                    .map(|p| (p[1] - p[0]).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    max_jump < 0.05,
+                    "{label}：解析后相邻样本增益变化应极小，实测 {max_jump}"
+                );
+            } else {
+                // 基线是静音（无内容）：收尾淡出到静音 —— 末态是 0（不再放大噪声底），
+                // 整体形状单调下降（见上面的粗粒度断言）。
+                let tail: Vec<f32> = gains[220..=441].to_vec();
+                assert!(
+                    *tail.last().unwrap() < 1e-3,
+                    "{label}：无内容收尾末态应为静音，实测 {}",
+                    tail[tail.len() - 1]
+                );
+            }
+        }
+
+        // ③ 末尾之外：留的那一格让"编辑收尾"有一格过渡，增益因此不再硬跳。
+        let with_tail = gains_of(&[DYN_FOLLOW_ORIG, 0.5], &[0.1, 0.1]);
+        let jumps_after_end: f32 = with_tail[441..]
+            .windows(2)
+            .map(|p| (p[1] - p[0]).abs())
+            .fold(0.0, f32::max);
+        assert!(
+            jumps_after_end < 0.05,
+            "曲线末尾之外不得出现增益硬跳，实测 {jumps_after_end}"
+        );
+    }
+
+    #[test]
+    fn dyn_missing_orig_curve_is_unity() {
+        // 分析未就绪（无基线）时不得放大：增益必须是 1.0，而不是 目标/兜底。
+        let clip = clip_with_dyn(Some(vec![1.0f32]), None);
+        let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
+        assert!((l - 1.0).abs() < 1e-6, "left got {l}");
+    }
+
+    /// ★★ 端到端守卫（此前缺失）：**经过装配期**（`resolve_dyn_curves_for_audio`）之后，
+    /// −90 dB 原声处拉高动态仍必须不可闻。
+    ///
+    /// 为什么必须有这一条：单测若自己构造 clip（直接给原始基线），就绕过了装配期 ——
+    /// 而"装配期把基线预先下钳到下限"正好会让 `compute_dyn_gain` 的**无内容淡出**
+    /// 失效（淡出(max(原声,下限)) 恒为 1）⇒ 音频端继续 ×1000 放大噪声底，而预览端
+    /// 用原始基线算所以看起来是对的。那种分叉只有经过装配期的测试才能拦住。
+    #[test]
+    fn dyn_gain_stays_inaudible_at_dither_level_through_assembly() {
+        use crate::renderer::common_params::{resolve_dyn_curves_for_audio, DYN_FOLLOW_ORIG};
+
+        let dither = 10f32.powf(-90.0 / 20.0);
+        for target in [0.25f32, 0.5, 1.0] {
+            // 用户把 −90 dB 处的动态拉高：存储曲线里该帧是已画值，其余未画。
+            let stored = vec![DYN_FOLLOW_ORIG, target, DYN_FOLLOW_ORIG];
+            let baseline = vec![dither, dither, dither];
+            let r = resolve_dyn_curves_for_audio(&stored, Some(&baseline));
+            let clip = clip_with_dyn(Some(r.target), Some(r.baseline));
+            // 第 1 帧（已画）与相邻帧（未画）都要检查。
+            for frame in [0u64, 220, 441] {
+                let gain = apply_mix_automation(&clip, frame, 1.0, 1.0).0;
+                let out_db = 20.0 * (dither * gain).max(1e-12).log10();
+                assert!(
+                    out_db < -60.0,
+                    "目标 {target} / 样本 {frame}：−90 dB 处输出电平 {out_db:.1} dBFS 应低于 −60 dBFS"
+                );
+            }
+        }
+    }
+
+    /// ★ 无内容帧不得把噪声底放大成可闻嘶声（用户报告：原声 ≈ −90 dB 处拉高动态）。
+    ///
+    /// 旧实现把下限之下的增益固定为 `目标/下限`（可达 ×1000）—— 分母"界定无内容"
+    /// 的初衷是**有界**，但 −90 dB 抖动 ×500 仍会把噪声底抬到 −36 dBFS（清楚可闻）。
+    /// 现行实现按 smoothstep 淡出，输出电平随原声一并下降。
+    #[test]
+    fn dyn_gain_fades_out_contentless_noise_floor() {
+        // −90 dB（16bit 抖动量级）原声，用户把目标拉高：
+        for target in [0.25f32, 0.5, 1.0] {
+            let clip = clip_with_dyn(Some(vec![target]), Some(vec![3.162_277_7e-5]));
+            let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
+            // `l` 就是该帧的"输出电平/原声"之比乘上输入 1.0，即增益；
+            // 我们真正关心的是**输出电平** = 原声 × 增益。
+            let out_db = 20.0 * (3.162_277_7e-5 * l).max(1e-12).log10();
+            assert!(
+                out_db < -60.0,
+                "目标 {target} 时 −90 dB 处的输出电平 {out_db:.1} dBFS 应低于 −60 dBFS"
+            );
+        }
+        // 有内容处不受影响：−40 dBFS 的轻声照常兑现目标（×50 → 0.5）。
+        let quiet = 10f32.powf(-40.0 / 20.0);
+        let clip = clip_with_dyn(Some(vec![0.5]), Some(vec![quiet]));
+        let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
+        assert!(
+            (l - 0.5 / quiet).abs() < 0.5,
+            "轻声处应照常放大到目标，实测增益 {l}"
+        );
+    }
+
+    #[test]
+    fn dyn_and_volume_multiply() {
+        // 两个参数是独立乘性增益：0.5（音量）× 2.0（动态）= 1.0。
+        let mut clip = clip_with_dyn(Some(vec![1.0f32]), Some(vec![0.5f32]));
+        clip.volume_curve = Some(Arc::new(vec![0.5f32]));
+        clip.volume_curve_frame_period_ms = 5.0;
+        let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
+        assert!((l - 1.0).abs() < 1e-6, "left got {l}");
+    }
+
+    /// 末点污染回归：曲线越界后必须回落到"沿用原声"，而不是持有末值。
+    ///
+    /// 用户只在开头画了一个目标电平 2.0，后续所有音频都不该被它影响。
+    /// 若采样器持有末值，越界帧会持续算 `2.0 / dyn_orig(帧)`，
+    /// 把整段后续音频强行拉到同一个目标电平 —— 这是历史上共振峰参数
+    /// 出现过的同类 bug（见 `renderer/chain.rs::sample_curve_at_abs_sec`）。
+    #[test]
+    fn dyn_curve_beyond_last_point_does_not_pollute() {
+        // 曲线只有 1 帧：第 0 帧目标 2.0。
+        let clip = clip_with_dyn(Some(vec![2.0f32]), Some(vec![1.0f32]));
+        // 第 0 帧（曲线内）：2.0 / 1.0 = ×2。
+        let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
+        assert!((l - 2.0).abs() < 1e-6, "曲线内应生效，got {l}");
+        // 越界帧：曲线只有 1 帧 = 5ms = 220.5 采样 @44.1k，
+        // 因此 >221 帧才算真正越界。
+        for frame in [221u64, 300, 1_000, 44_100] {
+            let (l, _r) = apply_mix_automation(&clip, frame, 1.0, 1.0);
+            assert!((l - 1.0).abs() < 1e-6, "帧 {frame} 被末点污染，got {l}");
+        }
+    }
+
+    /// 末元素自身的保持区间仍应生效：`[len-1, len)` 内取末值。
+    ///
+    /// 与共振峰修复的边界约定一致（chain.rs 的测试同样断言了这一点）：
+    /// 越界判定是 `idx >= len`，不是 `idx > len-1`。
+    #[test]
+    fn dyn_curve_last_element_holds_within_its_own_frame() {
+        // 曲线 4 帧，末值 2.0；帧周期 5ms → 末点覆盖 [15ms, 20ms)。
+        let clip = clip_with_dyn(Some(vec![1.0f32, 1.0, 1.0, 2.0]), Some(vec![1.0f32; 4]));
+        let sr = clip.src.sample_rate;
+        // 末点处（含插值邻域）应接近 2.0：曲线是 [1,1,1,2]，故 idx 3.0 处
+        // 恰为 2.0，而 idx 2.5~3.0 之间是 1→2 的插值过渡。
+        let (l, _r) = apply_mix_automation(&clip, (0.015 * sr as f64) as u64, 1.0, 1.0);
+        assert!((l - 2.0).abs() < 0.05, "末点处应生效，got {l}");
+        // idx 3.5 → 17.5ms（保持区间内，无下一元素可插值 → 恒为末值 2.0）
+        let (l, _r) = apply_mix_automation(&clip, (0.0175 * sr as f64) as u64, 1.0, 1.0);
+        assert!((l - 2.0).abs() < 1e-6, "末点保持区间内应生效，got {l}");
+        // idx 4.5 → 22.5ms（越界）→ no-op
+        let (l, _r) = apply_mix_automation(&clip, (0.0225 * sr as f64) as u64, 1.0, 1.0);
+        assert!((l - 1.0).abs() < 1e-6, "越界后不得污染，got {l}");
     }
 }

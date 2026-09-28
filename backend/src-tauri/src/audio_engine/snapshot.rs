@@ -247,6 +247,9 @@ pub(crate) fn build_snapshot(
     let track_gain = compute_track_gains(&timeline.tracks);
     let tracks_by_id: HashMap<&str, &Track> =
         timeline.tracks.iter().map(|t| (t.id.as_str(), t)).collect();
+    // 生效音阶签名：必须与渲染线程的按键口径一致（它遍历 Tempo Map，故在
+    // 循环外算一次），否则快照自行算出的哈希永远对不上渲染线程写入的键。
+    let scale_signature = timeline.render_scale_signature();
 
     // 预分配内存
     let mut clips_out: Vec<EngineClip> = Vec::with_capacity(timeline.clips.len());
@@ -484,6 +487,11 @@ pub(crate) fn build_snapshot(
                     crate::state::clip_playback_window_sec(clip).1
                 },
                 clip.reversed && !clip.loop_enabled,
+                clip.channel_mode,
+                // 本域喂的是**原始** stereo（模式在混音逐帧采样时才施加），
+                // 离线域则是条件化后的输入 —— MonoLeft/MonoRight 下输出不同，
+                // 而 mode 在两侧同值，必须靠 preconditioned 判别隔离。
+                false,
                 // 实时域：完整文件自然顺序 / 窗口切片，绝非离线回绕平铺域。
                 false,
                 params,
@@ -641,22 +649,57 @@ pub(crate) fn build_snapshot(
             )
             .unwrap_or((None, 5.0));
 
-        let (volume_curve, volume_curve_frame_period_ms, pan_curve, pan_curve_frame_period_ms) =
-            processor_params
-                .and_then(|(_, _, frame_period_ms, renderer_id, entry, _, _)| {
-                    // vslib 通过自己的控制点消费 volume/pan（与合成输出一起缓存），
-                    // mix 阶段跳过，避免二次应用；未开启 Compose 时按约定不生效。
-                    if renderer_id == "vslib" {
-                        return None;
-                    }
-                    let volume_curve =
-                        crate::pitch_editing::common_volume_curve_for_clip(entry, clip)
-                            .map(|curve| std::sync::Arc::new(curve.to_vec()));
-                    let pan_curve = crate::pitch_editing::common_pan_curve_for_clip(entry, clip)
-                        .map(|curve| std::sync::Arc::new(curve.to_vec()));
-                    Some((volume_curve, frame_period_ms, pan_curve, frame_period_ms))
-                })
-                .unwrap_or((None, 5.0, None, 5.0));
+        let (
+            volume_curve,
+            volume_curve_frame_period_ms,
+            pan_curve,
+            pan_curve_frame_period_ms,
+            dyn_curve,
+            dyn_orig_curve,
+            dyn_curve_frame_period_ms,
+        ) = processor_params
+            .and_then(|(_, _, frame_period_ms, _, entry, _, _)| {
+                // 所有算法一律在 mix 阶段应用共通音量/声像/动态：合成输出里不含它们，
+                // 因此这里不存在任何「按算法跳过」的分支。
+                let volume_curve = crate::pitch_editing::common_volume_curve_for_clip(entry, clip)
+                    .map(|curve| std::sync::Arc::new(curve.to_vec()));
+                let pan_curve = crate::pitch_editing::common_pan_curve_for_clip(entry, clip)
+                    .map(|curve| std::sync::Arc::new(curve.to_vec()));
+                let dyn_orig_source = crate::pitch_editing::dyn_orig_curve_for_clip(entry, clip);
+                // 动态曲线/基线必须转成**音频路径形态**再交给引擎：解析「沿用原声」
+                // 哨兵、并与分母同款下钳，否则逐样本插值会在"已画 ↔ 未画"的交界
+                // 制造掉音跌落、增益冲高塌陷与末尾硬跳（三种都表现为咔哒）。
+                // 详见 `resolve_dyn_curves_for_audio`。
+                let (dyn_curve, dyn_orig_curve) =
+                    match crate::pitch_editing::common_dyn_curve_for_clip(entry, clip) {
+                        Some(curve) => {
+                            let resolved =
+                                crate::renderer::common_params::resolve_dyn_curves_for_audio(
+                                    curve,
+                                    dyn_orig_source,
+                                );
+                            (
+                                Some(std::sync::Arc::new(resolved.target)),
+                                // 基线不为空时用装配期的下钳版本；为空表示分析未就绪，
+                                // 此时引擎自己会退回增益 1（保持既有语义）。
+                                (dyn_orig_source.is_some_and(|c| !c.is_empty())
+                                    && !resolved.baseline.is_empty())
+                                .then(|| std::sync::Arc::new(resolved.baseline)),
+                            )
+                        }
+                        None => (None, None),
+                    };
+                Some((
+                    volume_curve,
+                    frame_period_ms,
+                    pan_curve,
+                    frame_period_ms,
+                    dyn_curve,
+                    dyn_orig_curve,
+                    frame_period_ms,
+                ))
+            })
+            .unwrap_or((None, 5.0, None, 5.0, None, None, 5.0));
 
         // ── 查询整 Clip 渲染缓存 ───────────────────────────────────────────
         // 改法 C+D：优先从 pending_rendered_keys 查找渲染线程传递的 cache_key，
@@ -688,7 +731,7 @@ pub(crate) fn build_snapshot(
                 } else {
                     // 回退：自行计算 hash（兼容非预渲染路径，如 AudioReady rebuild）
                     if let Some((
-                        _,
+                        pitch_orig,
                         pitch_edit,
                         frame_period_ms,
                         renderer_id,
@@ -698,26 +741,50 @@ pub(crate) fn build_snapshot(
                     )) = processor_params
                     {
                         let end_frame = start_frame.saturating_add(length_frames);
+                        // 与渲染线程 / 收集待渲染共用同一份输入口径（见
+                        // `commands::playback::build_rendered_hash_input`）：
+                        // 任何字段缺失都会让快照无法经 pending key 命中缓存。
                         let param_hash = crate::synth_clip_cache::compute_rendered_clip_hash(
-                            &clip.id,
-                            source_path,
-                            start_frame,
-                            end_frame,
-                            out_rate,
-                            renderer_id,
-                            pitch_edit,
-                            frame_period_ms,
-                            playback_rate,
-                            extra_curves,
-                            extra_params,
-                            clip.formant_morph.as_ref().filter(|params| params.enabled),
-                            None,
-                            clip.source_file_mtime,
-                            clip.loop_enabled,
-                            (
-                                (clip.source_start_sec * 1000.0).round() as i64,
-                                (clip.source_end_sec * 1000.0).round() as i64,
-                            ),
+                            &crate::synth_clip_cache::RenderedClipHashInput {
+                                clip_id: &clip.id,
+                                source_path,
+                                source_file_mtime: clip.source_file_mtime,
+                                source_file_fingerprint: clip.source_file_fingerprint,
+                                active_take_id: clip.active_take_id.as_deref(),
+                                renderer_id,
+                                start_frame,
+                                end_frame,
+                                sample_rate: out_rate,
+                                playback_rate,
+                                reversed: clip.reversed,
+                                loop_enabled: clip.loop_enabled,
+                                channel_mode: clip.channel_mode,
+                                source_range_q: (
+                                    (clip.source_start_sec * 1000.0).round() as i64,
+                                    (clip.source_end_sec * 1000.0).round() as i64,
+                                ),
+                                pitch_edit,
+                                pitch_orig: Some(pitch_orig),
+                                frame_period_ms,
+                                extra_curves,
+                                extra_params,
+                                formant_morph: clip
+                                    .formant_morph
+                                    .as_ref()
+                                    .filter(|params| params.enabled),
+                                input_pitch_curve: None,
+                                // 与 `commands::playback::build_rendered_hash_input`
+                                // 同一口径：Compose 开关与生效音阶都会改变渲染输出。
+                                compose_enabled: root_track_id
+                                    .as_ref()
+                                    .and_then(|root| {
+                                        timeline.tracks.iter().find(|t| &t.id == root)
+                                    })
+                                    .map(|t| t.compose_enabled)
+                                    .unwrap_or(false),
+                                scale_signature: scale_signature.as_str(),
+                                source_file_size: clip.source_file_size,
+                            },
                         );
                         if debug {
                             log::warn!(
@@ -851,6 +918,7 @@ pub(crate) fn build_snapshot(
                                 fallback_pcm = crate::synth_clip_cache::get_latest_tension_rendered_pcm(
                                     &clip.id,
                                     clip.active_take_id.as_deref(),
+                                    Some(length_frames),
                                 );
                             }
 
@@ -858,6 +926,7 @@ pub(crate) fn build_snapshot(
                                 if let Some((p, b)) = crate::synth_clip_cache::get_latest_rendered_pcm(
                                     &clip.id,
                                     clip.active_take_id.as_deref(),
+                                    Some(length_frames),
                                 ) {
                                     fallback_pcm = Some(p);
                                     fallback_breath = b;
@@ -944,6 +1013,7 @@ pub(crate) fn build_snapshot(
             src: src_render,
             src_start_frame: src_start,
             src_end_frame: src_end,
+            channel_mode: clip.take_channel_mode(),
             // 非 Loop：Formant 缓冲已预反转，方向归零交给正向遍历；
             // Loop：缓冲保持自然顺序，倒放方向由 mix 的锚点回绕（anchor − f）
             // 体现 —— 此处若清零会把"倒放循环"错放成"从文件末端正向循环"。
@@ -972,6 +1042,9 @@ pub(crate) fn build_snapshot(
             volume_curve_frame_period_ms,
             pan_curve,
             pan_curve_frame_period_ms,
+            dyn_curve,
+            dyn_orig_curve,
+            dyn_curve_frame_period_ms,
             needs_synthesis,
         });
     }
@@ -1079,6 +1152,8 @@ mod tests {
             source_end_sec: 0.5,
             playback_rate: 1.0,
             reversed: false,
+            channel_mode: 0,
+            source_channels: None,
             loop_enabled: false,
             snap_offset_sec: 0.0,
             fade_in_sec: 0.0,
@@ -1352,6 +1427,7 @@ pub(crate) fn build_snapshot_for_file(
             src_start_frame: offset_frames,
             src_end_frame,
             reversed: false,
+            channel_mode: crate::channel_mode::TakeChannelMode::Normal,
             playback_rate: 1.0,
             local_src_offset_frames: 0,
             repeat: false,
@@ -1369,6 +1445,9 @@ pub(crate) fn build_snapshot_for_file(
             volume_curve_frame_period_ms: 5.0,
             pan_curve: None,
             pan_curve_frame_period_ms: 5.0,
+            dyn_curve: None,
+            dyn_orig_curve: None,
+            dyn_curve_frame_period_ms: 5.0,
             needs_synthesis: false,
         }]),
     }

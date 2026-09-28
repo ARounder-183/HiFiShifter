@@ -76,6 +76,11 @@ pub struct TimelineClipTake {
     pub playback_rate: f32,
     pub reversed: bool,
     pub loop_enabled: bool,
+    /// 声道模式：0..=4 对齐 REAPER CHANMODE（0 正常 / 1 交换 / 2 混合 / 3 仅左 / 4 仅右）。
+    pub channel_mode: i32,
+    /// 源文件声道数（未知时 None；前端波形带数/徽章兜底用）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_channels: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,6 +104,8 @@ impl TimelineClipTake {
             playback_rate: take.playback_rate,
             reversed: take.reversed,
             loop_enabled: take.loop_enabled,
+            channel_mode: crate::channel_mode::TakeChannelMode::normalize_raw(take.channel_mode),
+            source_channels: take.source_channels,
             midi_note_data: if include_midi {
                 take.midi_note_data.clone()
             } else {
@@ -153,6 +160,11 @@ pub struct TimelineClip {
     /// Clip 级播放倍率；实际速率 = clip_playback_rate × active take playback_rate。
     pub clip_playback_rate: Option<f32>,
     pub reversed: Option<bool>,
+    /// 声道模式（active take 投影）：0..=4 对齐 REAPER CHANMODE。
+    pub channel_mode: Option<i32>,
+    /// 源文件声道数（active take 投影；未知时 None）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_channels: Option<u16>,
     /// Loop（循环源）属性：超出源媒体区间时按周期回绕产生循环内容。
     #[serde(default)]
     pub loop_enabled: bool,
@@ -390,6 +402,30 @@ pub struct TimelineStatePayload {
     /// 重做栈深度（当前可重做的步数）。语义同 `undo_depth`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redo_depth: Option<usize>,
+
+    /// 撤销/重做目标那一步的记事本内容。
+    ///
+    /// 记事本不在 `TimelineState` 里（它在 `ProjectState`），所以必须单独
+    /// 带回，否则前端无从恢复它。`None`（与记事本无关的响应）表示前端沿用
+    /// 现有值。只有 `undo_timeline` / `redo_timeline` /
+    /// `set_history_position` 会填它。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_markdown: Option<String>,
+
+    /// 撤销/重做/跳转后**应当恢复的参数编辑器选区**（`[[startFrame, frameCount], …]`，
+    /// **帧**单位）。
+    ///
+    /// 来自被跨越的那一步自己记录的选区快照（`HistoryRecord::param_selection`），
+    /// 与 `notes_markdown` 同一套路：只有「边缘拉伸」这类同时改变选区的步骤才有，
+    /// 其余情况为 `None` —— 前端收到 `None` 时**不动**用户当前的选区。
+    ///
+    /// 单位是工程级帧栅格（`frame_period_ms` 常量），与 BPM / Tempo Map 无关，
+    /// 因此恢复出来的选区不会因为期间改过 BPM 而落到别的时间上。
+    ///
+    /// 【为什么不带空数组】空数组表示"当时确实没有选区"（要清空），与 `None`
+    /// （这一步与选区无关）是两种不同的语义，前端据此区分。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param_selection_restore: Option<Vec<[f32; 2]>>,
 }
 
 /// `open_project` 的返回载荷。
@@ -525,6 +561,14 @@ pub struct ParamFramesPayload {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pitch_edit_backend_available: Option<bool>,
+
+    /// 动态（DYN）的「未画」位图（仅请求带 `with_sentinel=true` 时返回）。
+    ///
+    /// `true` = 该帧没有用户数据（哨兵 / 曲线缺失），`edit` 里是解析后的基线值。
+    /// 批量操作（平滑/量化/平均/拖拽/复制粘贴）写回时据此把未画帧**原样写回
+    /// 哨兵**，避免把"沿用原声"物化成显式目标电平（基线重分析后不再跟随）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_sentinel: Option<Vec<bool>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -571,4 +615,140 @@ pub struct SynthesizePayload {
     pub sample_rate: u32,
     pub num_samples: u32,
     pub duration_sec: f64,
+}
+
+/// 假立体声扫描的逐 Take 明细。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FakeStereoScanEntry {
+    pub clip_id: String,
+    pub take_id: String,
+    pub name: String,
+    /// 判定原因：`mono` / `fakeStereo` / `trueStereo` / `pending` /
+    /// `policyOff` / `forcedMono` / `noSource`（见 `channel_policy::ChannelScanOutcome`）。
+    pub verdict: String,
+    /// 本次实际写入的声道模式（`None` = 未改动）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_mode: Option<i32>,
+    /// 判定为真立体声时的诊断证据：超差样本占比。
+    ///
+    /// 只有 `trueStereo` 才有值。`0.0001` 表示万分之一的样本超差（很可能只是
+    /// 编解码残留，放宽容差就能折叠）；`0.4` 表示四成样本超差（确实是立体声）。
+    /// 这是用户决定要不要调容差的唯一依据 —— 比一句"不是假立体声"有用得多。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub violating_ratio: Option<f64>,
+    /// 判定为真立体声时观测到的最大绝对差（满幅为 1）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_abs_diff: Option<f32>,
+}
+
+/// 假立体声扫描结果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FakeStereoScanPayload {
+    pub ok: bool,
+    /// 被检查的 Take 数。
+    pub scanned: usize,
+    /// 实际被折叠为单声道的 Take 数（`dry_run` 时为"将会被折叠"的数量）。
+    pub converted: usize,
+    /// 本次**没能得出结论**的 Take 数（源缺失 / 不可解码 / 覆盖不完整）。
+    ///
+    /// 与"单声道、无事可做"严格区分：这些 Take 记着"待重试"，下次打开工程会
+    /// 自动再判一次。
+    pub pending: usize,
+    pub entries: Vec<FakeStereoScanEntry>,
+    /// 待重试的源文件路径（去重），供 UI 提示"这些文件这次没读到"。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_files: Option<Vec<String>>,
+    /// 候选筛选的去向统计。`scanned == 0` 时用它解释**为什么**一个候选都没有。
+    pub eligibility: FakeStereoScanEligibility,
+}
+
+/// 候选筛选的去向统计（后端 `channel_scan::ScanEligibility`）。
+///
+/// "0 个 Take" 有几种完全不同的成因：选区与后端对不上、选中的 Clip 确实没有
+/// 音频源、全都已被用户显式设置过声道模式。没有这份统计，它们在界面上长得
+/// 一模一样，用户只能看到"这个功能什么都不做"。
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FakeStereoScanEligibility {
+    /// 工程里的 Clip 总数（不受选区筛选影响）。
+    pub project_clips: usize,
+    /// 命中筛选条件的 Clip 数。
+    pub matched_clips: usize,
+    /// 这些 Clip 里被检查的 Take 总数。
+    pub takes_seen: usize,
+    /// 因没有音频源而跳过。
+    pub skipped_no_source: usize,
+    /// 因用户已显式设置过声道模式而跳过（只有自动扫描会跳过）。
+    pub skipped_user_seal: usize,
+    /// 带着用户设置、但被这次显式命令纳入判定的 Take 数。
+    pub overrode_user_seal: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 假立体声扫描载荷的**线上字段名**是前后端的硬契约，必须钉死。
+    ///
+    /// 教训：这两个结构带 `rename_all = "snake_case"`，而前端曾按 camelCase 读
+    /// （`eligibility.matchedClips`）。字段名对不上时读到的是 `undefined`，
+    /// 再被 `?? 0` 兜成 0 —— **界面会把"原因未知"显示成"选中的音频块找不到"**，
+    /// 一句听起来像用户操作有误、实际完全虚假的话。这类错误没有任何编译期
+    /// 信号，只能靠这里断言真实 JSON 键名。
+    #[test]
+    fn fake_stereo_scan_payload_wire_keys_are_pinned() {
+        let payload = FakeStereoScanPayload {
+            ok: true,
+            scanned: 3,
+            converted: 1,
+            pending: 2,
+            entries: vec![FakeStereoScanEntry {
+                clip_id: "c1".into(),
+                take_id: "t1".into(),
+                name: "V".into(),
+                verdict: "trueStereo".into(),
+                applied_mode: Some(2),
+                violating_ratio: Some(0.5),
+                max_abs_diff: Some(0.1),
+            }],
+            pending_files: Some(vec!["a.wav".into()]),
+            eligibility: FakeStereoScanEligibility {
+                project_clips: 2,
+                matched_clips: 1,
+                takes_seen: 3,
+                skipped_no_source: 1,
+                skipped_user_seal: 1,
+                overrode_user_seal: 0,
+            },
+        };
+        let value = serde_json::to_value(&payload).expect("serialize");
+
+        // 顶层：前端读 `scanned` / `converted` / `pending` / `pending_files`。
+        for key in ["ok", "scanned", "converted", "pending", "entries", "pending_files", "eligibility"] {
+            assert!(value.get(key).is_some(), "载荷必须带 `{key}` 键");
+        }
+        assert_eq!(value["scanned"], serde_json::json!(3));
+        assert_eq!(value["pending_files"], serde_json::json!(["a.wav"]));
+
+        // 逐条明细：前端读 `max_abs_diff` / `applied_mode`（snake_case！）。
+        let entry = &value["entries"][0];
+        for key in ["clip_id", "take_id", "name", "verdict", "applied_mode", "violating_ratio", "max_abs_diff"] {
+            assert!(entry.get(key).is_some(), "明细必须带 `{key}` 键");
+        }
+
+        // 去向统计：前端读 `matched_clips` / `takes_seen` / `skipped_*`。
+        let eligibility = &value["eligibility"];
+        for key in [
+            "project_clips",
+            "matched_clips",
+            "takes_seen",
+            "skipped_no_source",
+            "skipped_user_seal",
+            "overrode_user_seal",
+        ] {
+            assert!(eligibility.get(key).is_some(), "统计必须带 `{key}` 键");
+        }
+    }
 }

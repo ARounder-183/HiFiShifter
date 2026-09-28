@@ -33,6 +33,11 @@ export const webApi = {
 
     clearWaveformCache: coreApi.clearWaveformCache,
 
+    // Render cache (persistent synth render cache)
+    getRenderCacheStats: coreApi.getRenderCacheStats,
+    clearRenderCache: coreApi.clearRenderCache,
+    openRenderCacheDir: coreApi.openRenderCacheDir,
+
     // Model / processing
     loadDefaultModel: coreApi.loadDefaultModel,
     loadModel: coreApi.loadModel,
@@ -69,6 +74,7 @@ export const webApi = {
     setProjectCustomScale: projectApi.setProjectCustomScale,
     setProjectStretchSettings: projectApi.setProjectStretchSettings,
     setProjectTimelineSettings: projectApi.setProjectTimelineSettings,
+    setProjectNotes: projectApi.setProjectNotes,
 
     getRecordingSettings: recordingApi.getSettings,
     saveRecordingSettings: recordingApi.saveSettings,
@@ -134,6 +140,8 @@ export const webApi = {
     removeClipTake: timelineApi.removeClipTake,
     renameClipTake: timelineApi.renameClipTake,
     setClipTakeReversed: timelineApi.setClipTakeReversed,
+    setClipTakeChannelMode: timelineApi.setClipTakeChannelMode,
+    scanAndConvertFakeStereo: timelineApi.scanAndConvertFakeStereo,
     addClipTakeFromMedia: timelineApi.addClipTakeFromMedia,
     importMediaFilesAsTakes: timelineApi.importMediaFilesAsTakes,
     duplicateClipsBulk: timelineApi.duplicateClipsBulk,

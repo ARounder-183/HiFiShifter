@@ -51,6 +51,9 @@ export interface TimelineClipTake {
     playback_rate: number;
     reversed: boolean;
     loop_enabled: boolean;
+    /** 声道模式：0..=4 对齐 REAPER CHANMODE（0 正常 / 1 交换 / 2 混合 / 3 仅左 / 4 仅右） */
+    channel_mode?: number;
+    source_channels?: number;
     midi_note_data?: Array<{
         start_sec: number;
         end_sec: number;
@@ -89,6 +92,9 @@ export interface TimelineClip {
     /** Clip 级播放倍率；实际速率 = clip_playback_rate × active take playback_rate。 */
     clip_playback_rate?: number;
     reversed?: boolean;
+    /** 声道模式（active take 投影）：0..=4 对齐 REAPER CHANMODE。 */
+    channel_mode?: number;
+    source_channels?: number;
     /** Loop（循环源）：超出源媒体区间时按周期回绕产生循环内容。 */
     loop_enabled?: boolean;
     /** 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0；旧工程缺失时补齐为 0。 */
@@ -158,6 +164,12 @@ export interface TimelineState {
     disabled_group_ids?: string[];
     /** Tempo Map 数据（null = 无 Tempo Map）。 */
     tempo_map?: TempoMapPayload;
+    /**
+     * 撤销 / 重做**跨过记事本编辑**时带回的那一步的记事本内容。
+     *
+     * 缺省 = 本次跳转与记事本无关，前端必须保留当前记事本（不得清空）。
+     */
+    notes_markdown?: string;
 }
 
 /** Tempo Map 变化点（后端 camelCase 载荷，与 `TempoPointPayload` 对应）。 */
@@ -255,6 +267,24 @@ export interface TimelineResult {
      */
     undo_depth?: number;
     redo_depth?: number;
+    /**
+     * 撤销 / 重做**跨过记事本编辑**时带回的那一步的记事本内容。
+     *
+     * 缺省（undefined）= 本次跳转与记事本无关，前端必须保留当前记事本
+     * （不得清空）；只有撤销 / 重做 / 历史跳转会带它。
+     */
+    notes_markdown?: string;
+    /**
+     * 撤销 / 重做 / 历史跳转**越过「边缘拉伸」步**时带回的、应当恢复的参数
+     * 编辑器选区（`[[startFrame, frameCount], …]`，**帧**单位）。
+     *
+     * 缺省（undefined）= 这一步与选区无关，前端**不得**改动当前选区；
+     * `[]` = 当时确实没有选区（要清空）。两者的区别是语义必需：拉伸前有可能
+     * 本来就没有选区。与 `notes_markdown` 同一套路 —— 谁记得谁负责带回。
+     *
+     * 单位与选区的内部单位一致（工程级帧栅格），因此恢复结果与 BPM 无关。
+     */
+    param_selection_restore?: [number, number][] | null;
 }
 
 /** 「操作记录」中的一条状态（`history_state` 事件 / `get_history_state`）。 */
@@ -367,20 +397,6 @@ export interface WaveformPeaksV2Payload {
     actual_duration_sec: number;
 }
 
-/** v2 波形元数据响应 */
-export interface WaveformPeaksV2MetaPayload {
-    ok: boolean;
-    sample_rate: number;
-    channels: number;
-    total_frames: number;
-    mipmap_levels: Array<{
-        level: number;
-        division_factor: number;
-        peak_count: number;
-    }>;
-    cached: boolean;
-}
-
 export type ParamReferenceKind = "source_curve" | "default_value";
 
 export interface ParamFramesPayload {
@@ -404,6 +420,15 @@ export interface ParamFramesPayload {
 
     pitch_edit_user_modified?: boolean;
     pitch_edit_backend_available?: boolean;
+
+    /**
+     * 动态（DYN）的「未画」位图（仅请求带 `withSentinel=true` 时返回）。
+     *
+     * `true` = 该帧没有用户数据（哨兵），`edit` 里是解析后的基线值。批量操作
+     * 写回时据此把未画帧**原样写回哨兵**（`DYN_FOLLOW_ORIG`），避免把"沿用
+     * 原声"物化成显式目标电平（基线重分析后不再跟随、响度漂移）。
+     */
+    edit_sentinel?: boolean[];
 }
 
 export interface PitchProgressPayload {

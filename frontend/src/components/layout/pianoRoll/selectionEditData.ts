@@ -22,12 +22,13 @@ import { paramsApi } from "../../../services/api";
 import type { ParamName, ParamViewSegment } from "./types";
 import { applyEdgeBlend, type EdgeShape } from "./paramSmoothing";
 import { mergeFrameWindows, type FrameSpan } from "./paramSelection";
+import { restoreDynSentinels } from "./paramRanges";
 
 /** 单次 IPC 收发的帧数上限。约 32k 帧 ≈ 190 ms @ fp 5.8ms，单次处理不会掉帧。 */
 const CHUNK_FRAMES = 32_768;
 
 /** 让出事件循环，使长任务期间界面仍能响应（滚动、绘制、取消操作）。 */
-function yieldToUi(): Promise<void> {
+export function yieldToUi(): Promise<void> {
     return new Promise<void>((resolve) => {
         if (typeof requestAnimationFrame === "function") {
             requestAnimationFrame(() => resolve());
@@ -84,6 +85,10 @@ export function readPvRange(pv: ParamViewSegment, startFrame: number, endFrame: 
  * - 否则分块向后端拉取，块之间让出事件循环。
  *
  * @param onProgress 可选进度回调，参数为已完成的帧数与总帧数。
+ * @param withSentinel 同时取后端 `edit_sentinel`「未画帧」位图（dyn 的读-变换-写回
+ *   提交用它把未画帧还原成哨兵，见 `paramRanges::restoreDynSentinels`）。置 true 时
+ *   **不走 pv 快路径**：pv 不携带位图，位图缺位会被误当"没有哨兵"，未画帧被静默
+ *   物化 —— 比多一次取数严重得多。返回值多带一个与 `values` 逐帧对齐的 `sentinel`。
  */
 export async function fetchFullResCurve(args: {
     trackId: string;
@@ -92,36 +97,87 @@ export async function fetchFullResCurve(args: {
     endFrame: number;
     paramView?: ParamViewSegment | null;
     onProgress?: (doneFrames: number, totalFrames: number) => void;
-}): Promise<FrameCurve> {
-    const { trackId, param, paramView, onProgress } = args;
+    withSentinel?: boolean;
+}): Promise<FrameCurve & { sentinel?: boolean[] }> {
+    const { trackId, param, paramView, onProgress, withSentinel } = args;
     const startFrame = Math.max(0, Math.floor(args.startFrame));
     const endFrame = Math.max(startFrame, Math.floor(args.endFrame));
     const totalFrames = endFrame - startFrame + 1;
 
-    // 快路径：pv 已以 stride=1 覆盖，直接切片。
+    // 快路径：pv 已以 stride=1 覆盖，直接切片。带哨兵位图时同样可走 ——
+    // pv 现在自带 edit_sentinel（见 ParamViewSegment.editSentinel），位图缺位
+    // （旧状态 / 非 dyn）才回源取数。
     const pvFastPath = paramView ?? null;
     if (pvCoversFullRes(pvFastPath, startFrame, endFrame)) {
         const pv = pvFastPath as ParamViewSegment;
         const offset = startFrame - pv.startFrame;
         onProgress?.(totalFrames, totalFrames);
-        return { startFrame, values: pv.edit.slice(offset, offset + totalFrames) };
+        const pvSentinel = pv.editSentinel;
+        const bitmapReady = withSentinel && !!pvSentinel && pvSentinel.length === pv.edit.length;
+        if (!bitmapReady) {
+            // 非 dyn（无位图需求）或位图缺位（旧状态）：照旧切片 / 回源取位图。
+            if (!withSentinel) {
+                return { startFrame, values: pv.edit.slice(offset, offset + totalFrames) };
+            }
+        } else {
+            return {
+                startFrame,
+                values: pv.edit.slice(offset, offset + totalFrames),
+                sentinel: pvSentinel.slice(offset, offset + totalFrames),
+            };
+        }
     }
 
     const values = new Array<number>(totalFrames);
+    const sentinel = withSentinel ? new Array<boolean>(totalFrames) : undefined;
     let done = 0;
     for (let chunkStart = startFrame; chunkStart <= endFrame; chunkStart += CHUNK_FRAMES) {
         const chunkEnd = Math.min(endFrame, chunkStart + CHUNK_FRAMES - 1);
         const count = chunkEnd - chunkStart + 1;
-        const res = await paramsApi.getParamFrames(trackId, param, chunkStart, count, 1);
+        const res = await paramsApi.getParamFrames(
+            trackId,
+            param,
+            chunkStart,
+            count,
+            1,
+            true,
+            withSentinel ?? false,
+        );
         const src = res?.ok ? res.edit : undefined;
+        const sent = res?.ok ? res.edit_sentinel : undefined;
         for (let i = 0; i < count; i += 1) {
-            values[chunkStart - startFrame + i] = src ? (src[i] ?? 0) : 0;
+            const k = chunkStart - startFrame + i;
+            values[k] = src ? (src[i] ?? 0) : 0;
+            if (sentinel) sentinel[k] = sent?.[i] === true;
         }
         done += count;
         onProgress?.(done, totalFrames);
         await yieldToUi();
     }
-    return { startFrame, values };
+    return { startFrame, values, sentinel };
+}
+
+/**
+ * 把「未画帧」哨兵还原到一段**逐帧**写回值上（数据源 = 参数视图自带的位图）。
+ *
+ * 这是拉伸 / morph 提交的哨兵保留入口：它们的数据源是 pv（而非独立取数），
+ * 位图随 pv 走（见 `ParamViewSegment.editSentinel`）。位图按 pv 的 stride 采样，
+ * 这里按绝对帧反解回位图下标。位图缺位（非 dyn / 旧状态）时原样返回。
+ */
+export function restoreDynSentinelsFromParamView(
+    values: number[],
+    startFrame: number,
+    pv: ParamViewSegment | null | undefined,
+): number[] {
+    const sentinels = pv?.editSentinel;
+    if (!sentinels || sentinels.length === 0 || !pv) return values;
+    const stride = Math.max(1, Math.floor(pv.stride));
+    const flags = new Array<boolean>(values.length);
+    for (let i = 0; i < values.length; i += 1) {
+        const idx = Math.round((startFrame + i - pv.startFrame) / stride);
+        flags[i] = idx >= 0 && idx < sentinels.length ? sentinels[idx] === true : false;
+    }
+    return restoreDynSentinels(values, flags);
 }
 
 /**
@@ -429,7 +485,12 @@ export function buildMultiRangeEditPlan(args: {
         for (let k = 0; k < len; k += 1) {
             values[k] = sourceAt(window.startFrame + k);
         }
-        return { startFrame: window.startFrame, endFrame: window.endFrame, values, before: values.slice() };
+        return {
+            startFrame: window.startFrame,
+            endFrame: window.endFrame,
+            values,
+            before: values.slice(),
+        };
     });
 
     // 3) 逐段写入（升序；X 位移后段重叠时后写覆盖先写，确定性可复现）。
@@ -479,4 +540,3 @@ export function buildMultiRangeEditPlan(args: {
 
     return pieces.map(({ startFrame, endFrame, values }) => ({ startFrame, endFrame, values }));
 }
-

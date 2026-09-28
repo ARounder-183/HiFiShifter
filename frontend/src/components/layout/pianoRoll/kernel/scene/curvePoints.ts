@@ -13,11 +13,20 @@
  * （见下）。
  *
  * 【为什么必须只返回**可见**点（而不是整条曲线）】
- * Canvas2D 的虚线相位从**子路径起点**开始算，而 `drawCurveTimed` 的子路径起点是
- * **首个可见采样点**（它用 `started = false; continue` 跳过视口左缘之前的点，
- * 且从不设置 `lineDashOffset`）。若这里返回整条曲线、由调用方按绝对弧长推进虚线，
- * 滚动时虚线图案会**滑动**，与 Canvas2D 不一致。因此本函数的契约是"返回会被绘制
- * 的点"，弧长从索引 0 开始累加。
+ * 采样点数可能上万（实测最小缩放下视口覆盖 466 秒），每帧把整条曲线投影成
+ * 顶点是纯粹的浪费；只投影可见段是性能契约，与虚线相位无关。
+ *
+ * 【虚线相位锚在**数据**上，不锚在视口上】
+ * 返回值额外带一个 `dashPhasePx`：曲线起点到首个可见点的**真实弧长**（相邻
+ * 采样点的欧氏距离之和，含纵向走势）。调用方把它作为弧长累加的初值，于是
+ * `mod(along + phase, period)` 的零点始终落在曲线自身起点上 —— 横向滚动时
+ * 相位与 `along` 同步变化、其和不变，虚线在屏幕上是"跟着内容移动"，而不是
+ * 原地重排。
+ *
+ * 历史契约恰好相反：早期要求"弧长从索引 0（首个可见点）开始累加"，理由是
+ * 与 Canvas2D 的 `lineDashOffset = 0` 对齐。那其实是把 Canvas2D 的缺陷当成了
+ * 目标 —— 相位从视口左缘重启，滚动时虚线就会"蠕动"。现在 GL 路径按数据锚定，
+ * Canvas2D 路径经 `lineDashOffset` 做同样的补偿，两条路径观感一致。
  *
  * 【与其他模块的关系】
  * - 上游：面板提供的曲线采样值 + `TimelineAxis` + `valueToY`。
@@ -60,6 +69,35 @@ export interface CurvePoint {
 }
 
 /**
+ * 投影结果：可见点序列 + 虚线相位的起始弧长。
+ *
+ * 【为什么要把 `dashPhasePx` 一起返回】虚线相位必须锚在**数据**上（曲线的
+ * 绝对起点），而不是锚在"当前第一个可见点"上 —— 后者会随滚动变化，于是
+ * 横向滚动时虚线的线段看起来在"蠕动"（用户看到的就是这个现象）。
+ *
+ * 见 `projectCurvePoints` 文件头的历史说明：早期的契约"只返回可见点、弧长
+ * 从 0 累加"刻意复刻了 Canvas2D 的 `lineDashOffset = 0` 行为，把"相位从视口
+ * 左缘重启"当成了要对齐的目标。那其实是 Canvas2D 路径自身的缺陷，不该被
+ * GL 路径继承。
+ */
+export interface CurvePointsResult {
+    /** 可见点序列（视口坐标）。 */
+    readonly points: CurvePoint[];
+    /**
+     * 曲线起点到**首个可见点**的弧长（CSS px，沿曲线真实长度计，含纵向
+     * 走势）。用它作为虚线相位的初值：相邻两点的弧长只依赖它们各自的
+     * 内容坐标（x 差与 scrollLeft 无关、y 差与滚动无关），因此**滚动时
+     * 本值恒定**；缩放（pxPerSec）变化时会变，那是符合预期的（曲线在屏幕
+     * 上的长度本身就变了）。
+     *
+     * 必须用弧长而不是水平距离：下游 `v_along` 是真实弧长（含纵向段），
+     * 相位补偿若只算水平分量，陡峭曲线（如音高跳音）的相位误差会随滚动
+     * 累积 —— 虚线照样蠕动。
+     */
+    readonly dashPhasePx: number;
+}
+
+/**
  * 把曲线采样值投影为**可见**点序列。
  *
  * 流程（与 `drawCurveTimed` 逐行等价）：
@@ -81,9 +119,9 @@ export interface CurvePoint {
  * @param args 投影参数。
  * @returns 可见点序列；无可见点或采样不足 2 点时为空数组。
  */
-export function projectCurvePoints(args: CurvePointsArgs): CurvePoint[] {
+export function projectCurvePoints(args: CurvePointsArgs): CurvePointsResult {
     const { values, param, startFrame, stride, framePeriodMs, axis, valueToY } = args;
-    if (values.length < 2) return [];
+    if (values.length < 2) return { points: [], dashPhasePx: 0 };
 
     const fp = Math.max(1e-6, framePeriodMs);
     const step = Math.max(1, Math.floor(stride));
@@ -92,21 +130,55 @@ export function projectCurvePoints(args: CurvePointsArgs): CurvePoint[] {
     const isPitch = param === "pitch";
 
     const out: CurvePoint[] = [];
+    /**
+     * 相位 = 曲线起点到**首个可见点**的前缀弧长。
+     *
+     * 逐点累加：相邻采样点的距离 = hypot(Δx, Δy)，其中 Δx 由两点的内容坐标
+     * 之差给出（scrollLeft 相减抵消）、Δy 只依赖采样值 —— 因此每段距离与滚动
+     * 无关，前缀和（即本相位）滚动时恒定。这正是"虚线跟着内容走"的根据。
+     *
+     * 【为什么只累加到首个可见点为止】首个可见点之后的前缀由宿主的 `along`
+     * 累加接管（`v_along + u_dashPhase` 恰好等于该点相对曲线起点的绝对弧长）。
+     * 两段用同一套"相邻采样点欧氏距离"口径，缩放/滚动下连续一致。
+     */
+    let dashPhasePx = 0;
+    let phaseComplete = false;
+    let havePrev = false;
+    let prevX = 0;
+    let prevY = 0;
     for (let i = 0; i < values.length; i += 1) {
         const frame = startFrame + i * step;
         const tSec = framesToTime(frame, fp);
         // 右缘之后：采样时间单调递增，直接结束（与 drawCurveTimed 的 break 一致）
         if (tSec > visibleEndSec) break;
-        // 左缘之前：跳过，并且不产生子路径（与 started=false; continue 一致）
-        if (tSec < visibleStartSec) continue;
 
         const x = secToViewportPx(axis, tSec);
         const rawValue = values[i] ?? 0;
         const y = valueToY(isPitch ? rawValue + 0.5 : rawValue);
-        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-        out.push({ x, y });
+        const finite = Number.isFinite(x) && Number.isFinite(y);
+
+        if (finite && !phaseComplete) {
+            // 前缀段（含首个可见点之前与它本身）：累加到首个可见点为止。
+            if (havePrev) {
+                dashPhasePx += Math.hypot(x - prevX, y - prevY);
+            }
+            if (tSec >= visibleStartSec) {
+                phaseComplete = true;
+            }
+        }
+        if (finite) {
+            prevX = x;
+            prevY = y;
+            havePrev = true;
+        }
+
+        // 左缘之前：不产出子路径（与 started=false; continue 一致）
+        if (tSec >= visibleStartSec && finite) {
+            out.push({ x, y });
+        }
     }
-    return out;
+    // 无可见点时相位无锚，按 0 返回（调用方本就不会绘制空序列）。
+    return { points: out, dashPhasePx: phaseComplete ? dashPhasePx : 0 };
 }
 
 /**

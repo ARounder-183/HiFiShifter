@@ -5,8 +5,20 @@ import { paramsApi } from "../../../services/api";
 import { clamp } from "../timeline";
 
 import type { ParamName, ParamViewSegment } from "./types";
+import { isDynParam } from "./paramRanges";
+import { createLiveEditDeferral } from "./liveEditDeferral";
+import type { LiveEditDeferral } from "./liveEditDeferral";
 import { framesToTime, timeToFrame } from "./utils";
 const paramFramePeriodCache = new Map<string, number>();
+
+/**
+ * 「参数曲线取数中」提示的静默窗口（毫秒）。
+ *
+ * 取数由水平缩放 / 滚动 / 编辑提交驱动，IPC 往返通常 1~5 ms。短于此窗口的取数
+ * 完全不让状态栏闪烁 —— 那是正常交互的一部分，不是用户需要知道的"加载"。
+ * 只有真慢到会被察觉的取数才点亮提示。
+ */
+const LOADING_INDICATOR_DELAY_MS = 150;
 
 export function usePianoRollData(args: {
     editParam: ParamName;
@@ -16,16 +28,20 @@ export function usePianoRollData(args: {
     paramsEpoch: number;
     rootTrackId: string | null;
     selectedTrackId: string | null;
-    secPerBeat: number;
     scrollLeft: number;
-    pxPerBeat: number;
+    pxPerSec: number;
     viewWidth: number;
     viewSizeRef: React.MutableRefObject<{ w: number; h: number }>;
     scrollLeftRef: React.MutableRefObject<number>;
-    pxPerBeatRef: React.MutableRefObject<number>;
+    pxPerSecRef: React.MutableRefObject<number>;
     invalidate: () => void;
-    /** 外部通知当前是否正在进行 live 编辑（pointer down 期间为 true）。
-     *  为 true 时，pitch_orig_updated 触发的曲线刷新会被推迟到 pointer-up 后执行。 */
+    /**
+     * 外部通知当前是否正在进行 live 编辑（pointer down 期间为 true）。
+     *
+     * 为 true 时，**所有后端驱动的 `paramView` 变更**（取数发起 / 落地、显式立即
+     * 取数、`paramsEpoch` 触发的重取）都被 {@link liveEditDeferral} 推迟到
+     * pointer-up 之后执行 —— 笔画期间换掉窗口会让正在画的轨迹消失。
+     */
     liveEditActiveRef?: React.MutableRefObject<boolean>;
 }) {
     const {
@@ -36,13 +52,12 @@ export function usePianoRollData(args: {
         paramsEpoch,
         rootTrackId,
         selectedTrackId,
-        secPerBeat,
         scrollLeft,
-        pxPerBeat,
+        pxPerSec,
         viewWidth,
         viewSizeRef,
         scrollLeftRef,
-        pxPerBeatRef,
+        pxPerSecRef,
         invalidate,
         liveEditActiveRef: externalLiveEditActiveRef,
     } = args;
@@ -51,8 +66,32 @@ export function usePianoRollData(args: {
     const internalLiveEditActiveRef = useRef(false);
     const liveEditActiveRef = externalLiveEditActiveRef ?? internalLiveEditActiveRef;
 
-    // pitch_orig_updated 到达时若正在编辑，将刷新推迟到 pointer-up 后执行。
-    const pendingPitchUpdatedRefreshRef = useRef(false);
+    /**
+     * 笔画期间**统一推迟** `paramView` 的后端驱动变更的台账。
+     *
+     * 【为什么必须统一】`paramView` 一旦在笔画中途被换掉，live 覆盖层要么被重锚、
+     * 要么被清空，正在画的轨迹随之消失（见
+     * docs/plans/2026-09-26-volume-dyn-drag-trail-fix.md）。此前只在取数 effect 与
+     * 部分**落地**处设了守卫，三处入口没有覆盖：
+     *
+     * 1. `refreshNow` / `refreshSecondaryNow` 的**发起**（显式立即取数）；
+     * 2. `paramsEpoch` 变化触发的窗口清空 —— 这一条最隐蔽：它把 `paramView` 置空后，
+     *    后续 pointermove 读到的 `paramViewRef.current` 变成 null，整条轨迹再也不画；
+     * 3. 取数 effect 在笔画开始**之前**就已发出的那次回包（发起时守卫拦不住）。
+     *
+     * 【为什么"发起"与"落地"都要判】"发起"挡住笔画开始之后才发出的取数；"落地"挡住
+     * 笔画开始之前就已发出、却在此刻回包的那一次。两者缺一都会漏。
+     *
+     * 【为什么只推迟、不取消】推迟的变更在 pointer-up 由 `notifyLiveEditEnded()`
+     * 统一补触发，用最新视口重算。缓存一份再落地只会多出一条陈旧路径。
+     *
+     * 台账本身（两类待办的分账与取用）收口在 `liveEditDeferral`（纯逻辑、可单测）。
+     */
+    const liveEditDeferralRef = useRef<LiveEditDeferral | null>(null);
+    if (liveEditDeferralRef.current === null) {
+        liveEditDeferralRef.current = createLiveEditDeferral(() => liveEditActiveRef.current);
+    }
+    const liveEditDeferral: LiveEditDeferral = liveEditDeferralRef.current;
     const [paramView, setParamView] = useState<ParamViewSegment | null>(null);
     // 副参数曲线（与 edit 区分，用于叠加显示）
     const [secondaryParamViews, setSecondaryParamViews] = useState<
@@ -70,15 +109,62 @@ export function usePianoRollData(args: {
     );
 
     const [isRefreshing, setIsRefreshing] = useState(false);
-    const [loadingCount, setLoadingCount] = useState(0);
-    const isLoading = loadingCount > 0;
+
+    /**
+     * 参数曲线取数中（供状态栏提示）。
+     *
+     * ★ 刻意**不**直接由计数器派生。取数极其频繁（水平缩放、滚动、每一笔编辑提交
+     * 都会触发），而 IPC 往返通常只有 1~5 ms —— 若每次取数都翻转一次这个状态，
+     * 用户看到的就是"任何操作都闪一下加载中"，且每次翻转都会惊动订阅者。
+     *
+     * 因此改为**延迟显示**：取数开始后静默 `LOADING_INDICATOR_DELAY_MS`，窗口内完成
+     * 则连一次 setState 都不发生（见 `isLoadingRef` 的等值短路）；只有真的慢到用户
+     * 会察觉的取数才点亮。这才是进度提示该有的语义。
+     */
+    const [isLoading, setIsLoading] = useState(false);
+    /** 在途取数计数。只是"要不要显示"的判定依据，不该触发渲染，故用 ref。 */
+    const loadingCountRef = useRef(0);
+    /** 延迟显示定时器。 */
+    const loadingDelayRef = useRef<number | null>(null);
+    /** `isLoading` 的镜像，用于等值短路 —— 让"快速取数"真正做到零 setState。 */
+    const isLoadingRef = useRef(false);
+
+    function applyLoadingState(next: boolean) {
+        if (isLoadingRef.current === next) return;
+        isLoadingRef.current = next;
+        setIsLoading(next);
+    }
 
     function beginLoading() {
-        setLoadingCount((c) => c + 1);
+        loadingCountRef.current += 1;
+        if (loadingCountRef.current !== 1 || loadingDelayRef.current != null) return;
+        loadingDelayRef.current = window.setTimeout(() => {
+            loadingDelayRef.current = null;
+            // 到点时若已无在途取数，说明是"刚清零又被取消"的竞态，不点亮。
+            if (loadingCountRef.current > 0) applyLoadingState(true);
+        }, LOADING_INDICATOR_DELAY_MS);
     }
+
     function endLoading() {
-        setLoadingCount((c) => Math.max(0, c - 1));
+        loadingCountRef.current = Math.max(0, loadingCountRef.current - 1);
+        if (loadingCountRef.current > 0) return;
+        if (loadingDelayRef.current != null) {
+            window.clearTimeout(loadingDelayRef.current);
+            loadingDelayRef.current = null;
+        }
+        applyLoadingState(false);
     }
+
+    // 卸载时清掉悬挂的延迟定时器（否则会在已卸载组件上 setState）。
+    useEffect(
+        () => () => {
+            if (loadingDelayRef.current != null) {
+                window.clearTimeout(loadingDelayRef.current);
+                loadingDelayRef.current = null;
+            }
+        },
+        [],
+    );
 
     const fpRetryRef = useRef<Set<string>>(new Set());
 
@@ -89,6 +175,20 @@ export function usePianoRollData(args: {
 
     const fetchDebounceRef = useRef<number | null>(null);
     const fetchReqIdRef = useRef(0);
+
+    /**
+     * 当前参数（渲染期同步刷新）。
+     *
+     * 【为什么需要它】取数响应是在**闭包里**回来的，而参数可能在请求在途时被切换：
+     * 请求 id（`fetchReqIdRef`）只能拦住"被更新的请求取代"的响应，拦不住"参数已切
+     * 换、新请求还没发出"的那一个（参数切换的去抖窗口内正是如此）。拿它比对请求
+     * 发起时的参数，就能保证**只有当前参数的曲线才允许落进 state**。
+     */
+    const currentParamRef = useRef<ParamName>(editParam);
+    currentParamRef.current = editParam;
+
+    /** 上一次取数的「轨道|参数」作用域（用于识别参数/轨道切换并立即取数）。 */
+    const lastFetchScopeRef = useRef<string | null>(null);
     const [refreshToken, setRefreshToken] = useState(0);
 
     const [forceParamFetchToken, setForceParamFetchToken] = useState(0);
@@ -96,13 +196,40 @@ export function usePianoRollData(args: {
 
     // Force parameter refresh when the session state changes meaningfully (undo/redo/timeline edits).
     // 同时清除旧曲线数据，避免旧数据在新数据到达前短暂显示（也修复初次导入后曲线不显示的问题）。
+    //
+    // 【参数 / 轨道切换为什么必须清空】左轴（刻度 / 琴键 / 标签 / 值域）是从
+    // `editParam` 与参数描述符**同步**推导的：切换后当帧就变成新参数的样子；而曲线
+    // 数据要等取数回来（还带一段去抖）。不清空的话，这段窗口里画面上就是"**新参数的
+    // 标尺 + 旧参数的曲线**"—— 旧参数的值被新参数的值域投影，画出一条完全不相干的
+    // 线，然后才被新数据替换，用户看到的就是"切参数时曲线闪一下"。
+    //
+    // 清空让这段窗口里**没有曲线**（而不是错误的曲线）：曲线数据、副参数叠加、
+    // 参考音高、以及音高编辑状态徽标的可用性标记全部属于"上一个参数"，一并丢弃。
+    //
+    // 【笔画期间为什么推迟】`paramsEpoch` 由**任何** timeline 更新递增（十余处），
+    // 因此这个 effect 会在笔画进行中重跑。置空 `paramView` 的后果不是"闪一下"而是
+    // **整条轨迹消失**：live 覆盖层随窗口键变化被撤下，后续 pointermove 读到的
+    // `paramViewRef.current` 变成 null，什么都不再画（见
+    // docs/plans/2026-09-26-volume-dyn-drag-trail-fix.md）。故与取数同一契约：
+    // 笔画期间只记待办（`force` —— 数据确实变了，补触发必须强制取数），pointer-up
+    // 由 `notifyLiveEditEnded()` 补触发。
+    //
+    // 【作用域变化是例外】切参数 / 切轨是**合法换窗口**，本就该丢弃正在画的笔画；
+    // 推迟它反而会让新参数的画面上留着旧参数的曲线。故只有作用域没变时才推迟。
+    const lastParamScopeRef = useRef<string | null>(null);
     useEffect(() => {
         if (!rootTrackId) return;
+        const scope = `${rootTrackId}|${editParam}`;
+        const scopeChanged = lastParamScopeRef.current !== scope;
+        lastParamScopeRef.current = scope;
+        if (!scopeChanged && liveEditDeferral.defer({ force: true })) return;
         setParamView(null);
         setSecondaryParamViews({});
         setReferencePitchViews({});
+        setPitchEditUserModified(null);
+        setPitchEditBackendAvailable(null);
         setForceParamFetchToken((x) => x + 1);
-    }, [paramsEpoch, rootTrackId]);
+    }, [paramsEpoch, rootTrackId, editParam, liveEditDeferral]);
 
     // 监听 pitch_orig_updated 事件，触发曲线刷新。
     // 注意：分析进度状态（started/progress）由全局 PitchAnalysisProvider 统一管理。
@@ -129,12 +256,9 @@ export function usePianoRollData(args: {
 
                         // 若用户正在绘制曲线（pointer down），推迟曲线刷新到 pointer-up 之后，
                         // 避免后端分析结果覆盖用户正在绘制的内容（liveEditOverride 机制）。
-                        if (liveEditActiveRef.current) {
-                            pendingPitchUpdatedRefreshRef.current = true;
-                        } else {
-                            setForceParamFetchToken((x) => x + 1);
-                            setRefreshToken((x) => x + 1);
-                        }
+                        if (liveEditDeferral.defer({ force: true })) return;
+                        setForceParamFetchToken((x) => x + 1);
+                        setRefreshToken((x) => x + 1);
                     },
                 );
                 // await 期间 effect 可能已被清理（快速切换参数/轨道/卸载）：
@@ -154,7 +278,48 @@ export function usePianoRollData(args: {
             disposed = true;
             if (unlistenUpdated) unlistenUpdated();
         };
-    }, [editParam, pitchEnabled, rootTrackId, liveEditActiveRef]);
+    }, [editParam, pitchEnabled, rootTrackId, liveEditDeferral]);
+
+    // 监听 dyn_orig_updated 事件（动态的原声电平基线分析完成），刷新曲线。
+    //
+    // 与 pitch_orig_updated 同构：后端把基线写进 `dyn_orig` 后推送。
+    // 【对所有参数监听】波形的「可听结果」映射在**任何**参数面板都需要 dyn
+    // 基线与 volume 曲线（useLoudnessCurves），因此不能只在 dyn 面板监听 ——
+    // 否则切到音量/音高等面板时，分析完成事件无人消费、波形一直用旧基线。
+    // 绘制中仍遵守"推迟到 pointer-up"的既有保护。
+    useEffect(() => {
+        let disposed = false;
+        let unlisten: null | (() => void) = null;
+
+        async function setup() {
+            if (!rootTrackId) return;
+            try {
+                const mod = await import("@tauri-apps/api/event");
+                type DynOrigUpdatedPayload = { rootTrackId?: string };
+                unlisten = await mod.listen<DynOrigUpdatedPayload>("dyn_orig_updated", (event) => {
+                    if (disposed) return;
+                    const payload = event.payload ?? {};
+                    if (payload?.rootTrackId && payload.rootTrackId !== rootTrackId) return;
+                    if (liveEditDeferral.defer({ force: true })) return;
+                    setForceParamFetchToken((x) => x + 1);
+                    setRefreshToken((x) => x + 1);
+                });
+                if (disposed) {
+                    unlisten();
+                    unlisten = null;
+                }
+            } catch {
+                // Safe no-op: browser/pywebview builds won't have the Tauri API.
+            }
+        }
+
+        void setup();
+
+        return () => {
+            disposed = true;
+            if (unlisten) unlisten();
+        };
+    }, [rootTrackId, liveEditDeferral]);
 
     useEffect(() => {
         if (editParam !== "pitch") return;
@@ -209,11 +374,12 @@ export function usePianoRollData(args: {
 
         const { w } = viewSizeRef.current;
         const sl = scrollLeftRef.current;
-        const ppb = pxPerBeatRef.current;
-        const startBeat = sl / Math.max(1e-9, ppb);
-        const durBeats = w / Math.max(1e-9, ppb);
-        const startSec = startBeat * secPerBeat;
-        const durSec = durBeats * secPerBeat;
+        // 可见窗口的秒范围：`pxPerSec` 是"秒 ↔ 像素"的唯一系数（轴的原生单位就是秒）。
+        // 此前绕道 `scrollLeft / pxPerBeat × secPerBeat`，两个量都与 BPM 有关、相乘
+        // 才抵消 —— 结果就是"改 BPM 触发整条曲线重取"。
+        const pps = Math.max(1e-9, pxPerSecRef.current);
+        const startSec = sl / pps;
+        const durSec = w / pps;
 
         const visibleStartSec = startSec;
         const visibleDurSec = Math.max(1e-6, durSec);
@@ -356,6 +522,8 @@ export function usePianoRollData(args: {
         return {
             debug,
             trackId,
+            /** 本次请求要取的参数（响应落地前用来比对"是否已被切换走"）。 */
+            param: editParam,
             paramCoversVisible,
             paramKey,
             startFrame,
@@ -370,6 +538,9 @@ export function usePianoRollData(args: {
     }
 
     async function refreshVisible() {
+        // 笔画期间不换窗口（统一守卫，见 liveEditDeferral）：即便调用方漏判
+        // （取数 effect 已有守卫），这里也拦住，pointer-up 会补触发。
+        if (liveEditDeferral.defer()) return;
         const req = computeVisibleRequest();
         if (!req) return;
 
@@ -435,6 +606,9 @@ export function usePianoRollData(args: {
                         }),
                     );
                     if (referenceFetchReqIdRef.current !== referenceReqId) return;
+                    // 参数已被切换：这份参考音高属于上一个参数的画面，丢弃。
+                    if (req.param !== currentParamRef.current) return;
+                    if (liveEditDeferral.defer()) return;
                     const next: Record<string, ParamViewSegment> = {};
                     for (const entry of responses) {
                         if (!entry) continue;
@@ -493,6 +667,10 @@ export function usePianoRollData(args: {
                     }),
                 );
                 if (secondaryFetchReqIdRef.current !== secReqId) return;
+                // 参数已被切换：副参数叠加同样属于上一个参数的画面，丢弃
+                // （否则它会以旧参数的值、新参数的值域画出来）。
+                if (req.param !== currentParamRef.current) return;
+                if (liveEditDeferral.defer()) return;
                 setSecondaryParamViews((prev) => {
                     const next = { ...prev };
                     for (const secondaryReq of req.secondaryRequests) {
@@ -536,7 +714,13 @@ export function usePianoRollData(args: {
                         stride,
                     );
                     if (fetchReqIdRef.current !== reqId) return;
+                    // 【参数切换的兜底】请求 id 只拦得住"被新请求取代"的响应；参数
+                    // 切换后新请求还没发出（去抖窗口）时，旧参数的响应仍是最新的那
+                    // 一个 —— 若放它落地，清空过的 state 会被旧曲线重新填满，闪动
+                    // 依旧。因此这里再比一次参数。
+                    if (req.param !== currentParamRef.current) return;
                     if (!res?.ok) {
+                        if (liveEditDeferral.defer()) return;
                         if (debug) {
                             console.debug("[PianoRollData] paramFrames not ok", {
                                 trackId,
@@ -620,6 +804,9 @@ export function usePianoRollData(args: {
     }
 
     async function refreshNow() {
+        // 【发起处守卫】这是**显式、立即**的取数（MIDI 导入完成等路径），落地处
+        // 虽已守卫，但"发起"同样会换掉 `paramView` —— 笔画期间一律推迟到 pointer-up。
+        if (liveEditDeferral.defer()) return;
         const req = computeVisibleRequest();
         if (!req) return;
 
@@ -633,7 +820,15 @@ export function usePianoRollData(args: {
             beginLoading();
             const [paramRes, secondaryResults, referenceResults] = await Promise.all([
                 shouldFetchParam
-                    ? paramsApi.getParamFrames(trackId, editParam, startFrame, frameCount, stride)
+                    ? paramsApi.getParamFrames(
+                          trackId,
+                          editParam,
+                          startFrame,
+                          frameCount,
+                          stride,
+                          true,
+                          isDynParam(editParam),
+                      )
                     : Promise.resolve(null),
                 Promise.all(
                     req.secondaryRequests.map(async (secondaryReq) => {
@@ -712,8 +907,11 @@ export function usePianoRollData(args: {
             ]);
 
             if (fetchReqIdRef.current !== reqId) return;
+            // 参数已被切换：这份曲线属于上一个参数，不得落进 state（同 refreshVisible）。
+            if (req.param !== currentParamRef.current) return;
 
             if (shouldFetchParam && paramRes?.ok) {
+                if (liveEditDeferral.defer()) return;
                 const payload = paramRes as ParamFramesPayload;
 
                 if (editParam === "pitch") {
@@ -737,6 +935,11 @@ export function usePianoRollData(args: {
                     referenceKind: payload.reference_kind ?? "source_curve",
                     orig: (payload.orig ?? []).map((v) => Number(v) || 0),
                     edit: (payload.edit ?? []).map((v) => Number(v) || 0),
+                    // dyn 的「未画」位图随同一路取数返回（见 ParamViewSegment
+                    // 的字段说明）；非 dyn 显式不携带。
+                    editSentinel: isDynParam(editParam)
+                        ? (payload.edit_sentinel ?? undefined)
+                        : undefined,
                 });
 
                 if (Math.abs(fpRes - fpMs) > 1e-3) {
@@ -782,6 +985,9 @@ export function usePianoRollData(args: {
     }
 
     async function refreshSecondaryNow() {
+        // 【发起处守卫】副参数 / 参考曲线同样会在笔画期间换掉叠加层数据
+        // （`setSecondaryParamViews` 会把整层替换掉），与主参数取数同一契约。
+        if (liveEditDeferral.defer()) return;
         const req = computeVisibleRequest();
         if (!req) return;
 
@@ -809,6 +1015,8 @@ export function usePianoRollData(args: {
                             secondaryReq.secondaryStartFrame,
                             secondaryReq.secondaryFrameCount,
                             req.stride,
+                            true,
+                            isDynParam(secondaryReq.secondaryParam),
                         );
                         if (!res?.ok) return null;
 
@@ -830,6 +1038,9 @@ export function usePianoRollData(args: {
                                 referenceKind: payload.reference_kind ?? "source_curve",
                                 orig: (payload.orig ?? []).map((v) => Number(v) || 0),
                                 edit: (payload.edit ?? []).map((v) => Number(v) || 0),
+                                editSentinel: isDynParam(secondaryReq.secondaryParam)
+                                    ? (payload.edit_sentinel ?? undefined)
+                                    : undefined,
                             } as ParamViewSegment,
                         ] as const;
                     }),
@@ -870,6 +1081,9 @@ export function usePianoRollData(args: {
                       )
                     : Promise.resolve([]),
             ]);
+            // 笔画期间的回包守卫：副参数与参考曲线同样会换掉叠加层数据，
+            // 与主参数取数同一契约（见 liveEditDeferral）。
+            if (liveEditDeferral.defer()) return;
             if (secondaryFetchReqIdRef.current === secReqId) {
                 setSecondaryParamViews((prev) => {
                     const next = { ...prev };
@@ -904,6 +1118,27 @@ export function usePianoRollData(args: {
             window.clearTimeout(fetchDebounceRef.current);
             fetchDebounceRef.current = null;
         }
+
+        // 【笔画进行中推迟取数】绘制期间换入新曲线，会让进行中的笔画以新数据重画
+        // （表现为笔画被打断 / 跳变），并与 `liveEditOverride` 的实时预览互相覆盖。
+        // 这是统一守卫 `liveEditDeferral.defer` 的入口之一（其它入口：显式取数
+        // `refreshNow` / `refreshSecondaryNow`、`paramsEpoch` 触发的重取、以及各取数
+        // 的**落地**）；只记 pending，由 pointer-up 的 `notifyLiveEditEnded()` 统一补触发。
+        //
+        // 推迟而不是取消：pointer-up 后那次提交本身也会 bump 刷新令牌，因此这里的
+        // pending 只是兜住"笔画期间发生、且提交路径没覆盖到"的变化（如缩放、滚动）。
+        if (liveEditDeferral.defer()) return;
+
+        // 【参数 / 轨道切换不走去抖】去抖是为滚动、缩放这类**连续输入**准备的；
+        // 切换参数是离散动作，吃 75ms 去抖只会白白拉长"标尺已换、曲线未到"的空窗
+        // （旧实现里那段时间还显示着旧参数的曲线）。切换时立即取数，把空窗压到
+        // 一个 IPC 往返（约一帧）。
+        const fetchScope = `${rootTrackId}|${editParam}`;
+        if (lastFetchScopeRef.current !== fetchScope) {
+            lastFetchScopeRef.current = fetchScope;
+            void refreshVisible();
+            return;
+        }
         fetchDebounceRef.current = window.setTimeout(() => {
             fetchDebounceRef.current = null;
             void refreshVisible();
@@ -924,8 +1159,7 @@ export function usePianoRollData(args: {
         referenceRootTrackIds,
         pitchEnabled,
         scrollLeft,
-        pxPerBeat,
-        secPerBeat,
+        pxPerSec,
         viewWidth,
         refreshToken,
         forceParamFetchToken,
@@ -933,14 +1167,21 @@ export function usePianoRollData(args: {
 
     /**
      * 由外部（PianoRollPanel）在 pointer-up 时调用，通知 live 编辑已经结束。
-     * 若此前有被推迟的 pitch_orig_updated 刷新，此时立即触发。
+     *
+     * 集中补触发笔画期间被 `liveEditDeferral.defer` 推迟的**全部**刷新。两类待办
+     * 的力度不同（见 `liveEditDeferral` 的文件头）：
+     * - `force`：后端数据变了（分析结果到位 / timeline 更新）→ 必须**强制**取数；
+     * - `plain`：视口 / 令牌变了 → 普通重取即可。
+     *
+     * 两者都走"bump 令牌"这一条路，让取数 effect 统一按最新视口重算。
      */
     function notifyLiveEditEnded() {
-        if (pendingPitchUpdatedRefreshRef.current) {
-            pendingPitchUpdatedRefreshRef.current = false;
-            setForceParamFetchToken((x) => x + 1);
-            setRefreshToken((x) => x + 1);
-        }
+        const pending = liveEditDeferral.take();
+        if (pending === null) return;
+        // 后端数据真的变了：覆盖检查（`paramCoversVisible`）会误判"视口已覆盖"
+        // 而跳过，故必须强制取数。
+        if (pending.force) setForceParamFetchToken((x) => x + 1);
+        setRefreshToken((x) => x + 1);
     }
 
     // 引用必须跨渲染稳定：它被下游 commitStroke / onCanvasPointerDown 等
@@ -967,5 +1208,6 @@ export function usePianoRollData(args: {
         isLoading,
         pitchEditUserModified,
         pitchEditBackendAvailable,
+        refreshToken,
     };
 }

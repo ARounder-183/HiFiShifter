@@ -3,17 +3,8 @@
  * 负责收集导出模式、时间范围、输出路径与分轨命名/目标选择，并调用后端统一导出命令。
  */
 
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import {
-    Button,
-    Dialog,
-    Flex,
-    SegmentedControl,
-    Select,
-    Slider,
-    Text,
-    TextField,
-} from "@radix-ui/themes";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { Flex, TextField } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { exportAudioAdvanced } from "../../features/session/sessionSlice";
@@ -39,7 +30,16 @@ import {
 } from "../../utils/exportFormat";
 import { ProgressBar } from "../ProgressBar";
 import type { TrackInfo } from "../../features/session/sessionTypes";
-import { applySelectWheelChange } from "../../utils/selectWheel";
+import {
+    AppButton,
+    AppNumberField,
+    AppSegmentedControl,
+    AppSelect,
+    AppSlider,
+    AppSliderReadout,
+} from "../../ui";
+import { AppDialog } from "../../ui/Dialog";
+import { AppField, AppForm, AppSwitchRow } from "../../ui/Field";
 
 interface ExportAudioDialogProps {
     open: boolean;
@@ -49,12 +49,6 @@ interface ExportAudioDialogProps {
 type ExportMode = "project" | "separated";
 type ExportRangeKind = "all" | "custom";
 type Mp3ModeKind = "cbr" | "vbr";
-
-/** FLAC 压缩级别滑条的滚轮步进选项（"0" ~ "8"，供 applySelectWheelChange 使用）。 */
-const FLAC_LEVEL_OPTIONS = Array.from(
-    { length: FLAC_COMPRESSION_RANGE.max - FLAC_COMPRESSION_RANGE.min + 1 },
-    (_, index) => String(FLAC_COMPRESSION_RANGE.min + index),
-);
 
 type TargetKind = "root" | "sub";
 
@@ -77,6 +71,32 @@ interface TargetGroup {
 
 function normalizePathKey(input: string) {
     return input.trim().replace(/\\/g, "/").replace(/\/+/g, "/").toLowerCase();
+}
+
+/** 取文件路径的父目录（兼容 Windows `\` 与 POSIX `/`）；无目录分隔符时返回空串。 */
+function parentDirOfPath(filePath: string): string {
+    const trimmed = filePath.replace(/[\\/]+$/, "");
+    const idx = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+    return idx > 0 ? trimmed.slice(0, idx) : "";
+}
+
+/** 从导出结果收集实际写出的产物路径：分轨模式为多个文件，工程模式为单个文件。 */
+function collectExportPaths(result: {
+    path?: string;
+    tracks?: Array<{ path?: string; ok?: boolean }>;
+}): string[] {
+    const paths: string[] = [];
+    if (Array.isArray(result.tracks)) {
+        for (const track of result.tracks) {
+            // 跳过被跳过 / 写入失败的目标（ok:false），它们没有可用产物。
+            if (track?.ok === false) continue;
+            if (typeof track?.path === "string" && track.path) paths.push(track.path);
+        }
+    }
+    if (typeof result.path === "string" && result.path && !paths.includes(result.path)) {
+        paths.push(result.path);
+    }
+    return paths;
 }
 
 function buildTargetGroups(
@@ -214,15 +234,14 @@ function buildTargetGroups(
 }
 
 export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const dispatch = useAppDispatch();
     const session = useAppSelector((state) => state.session);
 
     const [mode, setMode] = useState<ExportMode>("project");
     const [rangeKind, setRangeKind] = useState<ExportRangeKind>("all");
-    const [customStartSec, setCustomStartSec] = useState("0");
-    const [customEndSec, setCustomEndSec] = useState("0");
+    const [customStartSec, setCustomStartSec] = useState(0);
+    const [customEndSec, setCustomEndSec] = useState(0);
     const [projectOutputDir, setProjectOutputDir] = useState("");
     const [projectFileName, setProjectFileName] = useState("<ProjectName>.wav");
     const [separatedOutputDir, setSeparatedOutputDir] = useState("");
@@ -255,6 +274,10 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
     }>({ active: false, mode: null, progress: null, current: null, total: null });
     const [displayProgress, setDisplayProgress] = useState(0);
     const [keepProgressVisible, setKeepProgressVisible] = useState(false);
+    const [lastOutputDir, setLastOutputDir] = useState("");
+    // 上次成功导出产生的文件路径（分轨为多个）；用于「打开文件夹」时一并选中。
+    const [lastOutputPaths, setLastOutputPaths] = useState<string[]>([]);
+    const [examplePath, setExamplePath] = useState("");
     const [awaitingConflictDecision, setAwaitingConflictDecision] = useState(false);
     const [activeInputKey, setActiveInputKey] = useState<
         | "projectOutputDir"
@@ -292,10 +315,10 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     trackId: clip.trackId,
                     muted: Boolean(clip.muted),
                 })),
-                tAny("export_track_label_root_suffix"),
-                tAny("export_track_label_sub_suffix"),
+                tf("export_track_label_root_suffix"),
+                tf("export_track_label_sub_suffix"),
             ),
-        [session.tracks, session.clips, tAny],
+        [session.tracks, session.clips, tf],
     );
 
     const allTargets = useMemo(
@@ -320,8 +343,8 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
         setMode("project");
         setRangeKind("all");
-        setCustomStartSec("0");
-        setCustomEndSec(String(Math.max(0, Math.ceil(projectSecAtOpenRef.current))));
+        setCustomStartSec(0);
+        setCustomEndSec(Math.max(0, Math.ceil(projectSecAtOpenRef.current)));
         setProjectOutputDir("");
         setProjectFileName("<ProjectName>.wav");
         setSeparatedOutputDir("");
@@ -350,6 +373,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         setDisplayProgress(0);
         setKeepProgressVisible(false);
         setAwaitingConflictDecision(false);
+        setLastOutputDir("");
+        setLastOutputPaths([]);
+        setExamplePath("");
 
         const defaultSelected = targetGroups.flatMap((group) => {
             return group.options
@@ -501,7 +527,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                 if (corrected != null) {
                     setSampleRate(String(corrected));
                     setSampleRateNotice(
-                        tAny("export_dialog_sample_rate_autocorrected").replace(
+                        tf("export_dialog_sample_rate_autocorrected").replace(
                             "{rate}",
                             String(corrected),
                         ),
@@ -608,7 +634,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     const target = Math.round(
                         Math.max(0, Math.min(1, exportProgress.progress)) * 100,
                     );
-                    if (target > prev) return Math.min(target, prev + 6);
+                    // 上限 12（而非 6）：后端现在按混音帧 / clip / 编码块细粒度上报
+                    // （最快 ~50ms 一次），步进太小会让显示值追不上真实进度。
+                    if (target > prev) return Math.min(target, prev + 12);
                     if (target < prev) return prev;
                     if (target >= 100) return 100;
                 }
@@ -639,10 +667,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         if (corrected != null) {
             setSampleRate(String(corrected));
             setSampleRateNotice(
-                tAny("export_dialog_sample_rate_autocorrected").replace(
-                    "{rate}",
-                    String(corrected),
-                ),
+                tf("export_dialog_sample_rate_autocorrected").replace("{rate}", String(corrected)),
             );
         } else {
             setSampleRateNotice("");
@@ -650,7 +675,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
     }
 
     /** 组装完整编码参数包（与后端 crate::encode::OutputSpec 对应）。 */
-    function buildEncoderSpec(): ExportEncoderSpec {
+    const buildEncoderSpec = useCallback((): ExportEncoderSpec => {
         return {
             format,
             channelMode,
@@ -670,7 +695,133 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
             },
             flac: { bitDepth: flacBitDepth, compressionLevel: flacLevel },
         };
-    }
+    }, [
+        format,
+        channelMode,
+        dither,
+        wavBitDepth,
+        mp3Mode,
+        mp3Bitrate,
+        mp3Quality,
+        mp3Tags,
+        flacBitDepth,
+        flacLevel,
+    ]);
+
+    /** 组装导出请求（同时用于冲突预检与「导出路径示例」预览）。 */
+    const buildExportRequest = useCallback((): AdvancedExportRequest | null => {
+        const range =
+            rangeKind === "all"
+                ? { kind: "all" as const }
+                : (() => {
+                      const startSec = Number(customStartSec);
+                      const endSec = Number(customEndSec);
+                      if (
+                          !Number.isFinite(startSec) ||
+                          !Number.isFinite(endSec) ||
+                          endSec <= startSec
+                      ) {
+                          return null;
+                      }
+                      return {
+                          kind: "custom" as const,
+                          startSec: Math.max(0, startSec),
+                          endSec: Math.max(0, endSec),
+                      };
+                  })();
+        if (!range) return null;
+
+        const resolvedSampleRate = Number(sampleRate);
+        if (!Number.isFinite(resolvedSampleRate) || resolvedSampleRate <= 0) return null;
+
+        const encoder = buildEncoderSpec();
+
+        if (mode === "project") {
+            const outputDir = projectOutputDir.trim();
+            const fileName = projectFileName.trim();
+            if (!outputDir || !fileName) return null;
+            return {
+                mode: "project",
+                range,
+                projectOutputDir: outputDir,
+                projectFileName: fileName,
+                sampleRate: Math.round(resolvedSampleRate),
+                format,
+                encoder,
+            };
+        }
+
+        const outputDir = separatedOutputDir.trim();
+        if (!outputDir) return null;
+        const selectedTargets = allTargets
+            .filter((target) => selectedTargetIds.includes(target.id))
+            .map((target) => ({
+                kind: target.kind,
+                trackId: target.trackId,
+            }));
+        if (selectedTargets.length === 0) return null;
+        return {
+            mode: "separated",
+            range,
+            separatedOutputDir: outputDir,
+            separatedNamePattern: separatedNamePattern.trim() || "<ExportIndex>_<TrackName>.wav",
+            separatedTargets: selectedTargets,
+            sampleRate: Math.round(resolvedSampleRate),
+            format,
+            encoder,
+        };
+    }, [
+        rangeKind,
+        customStartSec,
+        customEndSec,
+        sampleRate,
+        mode,
+        projectOutputDir,
+        projectFileName,
+        separatedOutputDir,
+        separatedNamePattern,
+        selectedTargetIds,
+        allTargets,
+        format,
+        buildEncoderSpec,
+    ]);
+
+    // 「导出路径示例」：配置变化时（去抖）向后端取一次导出计划，取第一条目标
+    // 路径作为示例。分轨模式下即第一条分轨的文件路径，足以让用户看懂输出去向。
+    // 后端对日期通配符 `%` 已做安全处理：半截 / 未知的 `%` 当作字面量渲染（不会
+    // panic），因此这里不需要因为 `%` 跳过刷新——用户即使只输入单个 `%`，示例路径
+    // 里也会如实显示那个 `%`。300ms 去抖已足以避免输入日期（如 %s 秒数）时文本频繁跳动。
+    useEffect(() => {
+        if (!open) return;
+        const dir = mode === "project" ? projectOutputDir.trim() : separatedOutputDir.trim();
+        if (!dir) {
+            setExamplePath("");
+            return;
+        }
+        let disposed = false;
+        const timer = window.setTimeout(async () => {
+            const request = buildExportRequest();
+            if (disposed || !request) {
+                if (!disposed) setExamplePath("");
+                return;
+            }
+            try {
+                const plan = await coreApi.previewExportAudioPlan(request);
+                if (disposed) return;
+                if (plan?.ok && Array.isArray(plan.targets) && plan.targets.length > 0) {
+                    setExamplePath(plan.targets[0].path || "");
+                } else {
+                    setExamplePath("");
+                }
+            } catch {
+                if (!disposed) setExamplePath("");
+            }
+        }, 300);
+        return () => {
+            disposed = true;
+            window.clearTimeout(timer);
+        };
+    }, [open, mode, projectOutputDir, separatedOutputDir, buildExportRequest]);
 
     function toggleTarget(targetId: string) {
         setSelectedTargetIds((prev) => {
@@ -829,11 +980,11 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         const startSec = Number(customStartSec);
         const endSec = Number(customEndSec);
         if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) {
-            setErrorText(tAny("export_dialog_error_invalid_range"));
+            setErrorText(tf("export_dialog_error_invalid_range"));
             return null;
         }
         if (endSec <= startSec) {
-            setErrorText(tAny("export_dialog_error_invalid_range"));
+            setErrorText(tf("export_dialog_error_invalid_range"));
             return null;
         }
         return {
@@ -845,7 +996,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
     function parseSampleRate(): number | null {
         const value = Number(sampleRate);
         if (!Number.isFinite(value) || value <= 0) {
-            setErrorText(tAny("export_dialog_error_invalid_sample_rate"));
+            setErrorText(tf("export_dialog_error_invalid_sample_rate"));
             return null;
         }
         return Math.round(value);
@@ -857,12 +1008,12 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
             return "";
         }
         if (code === "export_invalid_time_format") {
-            return tAny("export_dialog_error_invalid_time_format");
+            return tf("export_dialog_error_invalid_time_format");
         }
         if (code === "mp3_unsupported_sample_rate") {
-            return tAny("export_dialog_error_mp3_unsupported_sample_rate");
+            return tf("export_dialog_error_mp3_unsupported_sample_rate");
         }
-        return code || tAny("status_export_failed");
+        return code || tf("status_export_failed");
     }
 
     async function handleCancel() {
@@ -912,12 +1063,12 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
             const outputDir = projectOutputDir.trim();
             const fileName = projectFileName.trim();
             if (!outputDir) {
-                setErrorText(tAny("export_dialog_error_missing_project_output_dir"));
+                setErrorText(tf("export_dialog_error_missing_project_output_dir"));
                 setSubmitting(false);
                 return;
             }
             if (!fileName) {
-                setErrorText(tAny("export_dialog_error_missing_project_file_name"));
+                setErrorText(tf("export_dialog_error_missing_project_file_name"));
                 setSubmitting(false);
                 return;
             }
@@ -960,6 +1111,13 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                 }
                 setDisplayProgress(100);
                 setKeepProgressVisible(true);
+                // 目标文件夹：优先用后端返回的 output_dir；缺失时从产物路径反推父目录
+                // （兼容后端旧版本 / 各返回分支），保证「打开文件夹」可用。
+                const outPaths = collectExportPaths(result);
+                setLastOutputPaths(outPaths);
+                const resultDir =
+                    result.output_dir || (outPaths[0] ? parentDirOfPath(outPaths[0]) : "");
+                if (resultDir) setLastOutputDir(resultDir);
             } catch (err) {
                 // invoke / thunk 层失败此前没有任何捕获：错误成为未处理
                 // 拒绝，进度条消失且无任何提示。取消保持静默
@@ -974,7 +1132,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
         const outputDir = separatedOutputDir.trim();
         if (!outputDir) {
-            setErrorText(tAny("export_dialog_error_missing_output_dir"));
+            setErrorText(tf("export_dialog_error_missing_output_dir"));
             setSubmitting(false);
             return;
         }
@@ -987,7 +1145,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
             }));
 
         if (selectedTargets.length === 0) {
-            setErrorText(tAny("export_dialog_error_missing_targets"));
+            setErrorText(tf("export_dialog_error_missing_targets"));
             setSubmitting(false);
             return;
         }
@@ -1036,6 +1194,11 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
             }
             setDisplayProgress(100);
             setKeepProgressVisible(true);
+            const outPaths = collectExportPaths(result);
+            setLastOutputPaths(outPaths);
+            const resultDir =
+                result.output_dir || (outPaths[0] ? parentDirOfPath(outPaths[0]) : "");
+            if (resultDir) setLastOutputDir(resultDir);
         } catch (err) {
             // 同上：invoke / thunk 层失败必须有用户可见的报错。
             const message = err instanceof Error ? err.message : String(err ?? "");
@@ -1050,788 +1213,588 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
     const progressLabel = exportCompleted
         ? mode === "separated"
-            ? tAny("status_export_separated_done")
-            : tAny("status_export_done")
+            ? tf("status_export_separated_done")
+            : tf("status_export_done")
         : mode === "separated"
           ? (() => {
                 const current = exportProgress.current;
                 const total = exportProgress.total;
                 if (current != null && total != null && total > 0) {
-                    return `${tAny("export_dialog_progress")}${" "}${current}/${total}`;
+                    return `${tf("export_dialog_progress")}${" "}${current}/${total}`;
                 }
-                return tAny("export_dialog_progress");
+                return tf("export_dialog_progress");
             })()
-          : tAny("export_dialog_progress");
+          : tf("export_dialog_progress");
 
     const shouldShowProgress = submitting || exportProgress.active || keepProgressVisible;
 
     return (
         <>
-            <Dialog.Root open={open} onOpenChange={onOpenChange}>
-                <Dialog.Content
-                    style={{ maxWidth: 760 }}
-                    onKeyDown={(event) => event.stopPropagation()}
-                >
-                    <Dialog.Title>{tAny("menu_export_audio")}</Dialog.Title>
-                    <Dialog.Description>{tAny("export_dialog_desc")}</Dialog.Description>
+            <AppDialog
+                open={open}
+                onOpenChange={onOpenChange}
+                title={tf("menu_export_audio")}
+                description={tf("export_dialog_desc")}
+                size="xl"
+                actions={[
+                    ...(!submitting && (lastOutputPaths.length > 0 || lastOutputDir)
+                        ? [
+                              {
+                                  id: "open-folder",
+                                  label: tf("export_dialog_open_folder"),
+                                  autoClose: false,
+                                  onClick: () => {
+                                      // 优先定位并选中所有已渲染文件；没有产物路径时退化为
+                                      // 打开目标文件夹（后端据路径类型自动分派）。
+                                      const targets =
+                                          lastOutputPaths.length > 0
+                                              ? lastOutputPaths
+                                              : [lastOutputDir].filter(Boolean);
+                                      void coreApi
+                                          .revealExportPaths(targets)
+                                          .catch(() => undefined);
+                                  },
+                              },
+                          ]
+                        : []),
+                    {
+                        id: "cancel",
+                        label: tf("cancel"),
+                        onClick: () => {
+                            void handleCancel();
+                        },
+                    },
+                    {
+                        id: "export",
+                        label: tf("export_dialog_export"),
+                        intent: "primary",
+                        disabled: session.busy || submitting,
+                        autoClose: false,
+                        onClick: () => {
+                            void submitExport();
+                        },
+                    },
+                ]}
+            >
+                {/* 让表单填满 body 高度，好把下面的"目标"列表变成唯一的滚动区
+                    （见该列表上的注释）。 */}
+                <AppForm labelWidth="lg" className="h-full min-h-0">
+                    <AppField label={tf("export_dialog_mode")}>
+                        <AppSelect
+                            value={mode}
+                            onValueChange={(value) => setMode(value as ExportMode)}
+                            options={[
+                                { value: "project", label: tf("export_dialog_mode_project") },
+                                {
+                                    value: "separated",
+                                    label: tf("export_dialog_mode_separated"),
+                                },
+                            ]}
+                        />
+                    </AppField>
 
-                    <Flex direction="column" gap="3" mt="3">
-                        <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 132 }}>
-                                {tAny("export_dialog_mode")}
-                            </Text>
-                            <Select.Root
-                                value={mode}
-                                onValueChange={(value) => setMode(value as ExportMode)}
-                            >
-                                <Select.Trigger
-                                    style={{ flex: 1 }}
-                                    onWheel={(event) => {
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue: mode,
-                                            options: ["project", "separated"],
-                                            onChange: (next) => setMode(next as ExportMode),
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    <Select.Item value="project">
-                                        {tAny("export_dialog_mode_project")}
-                                    </Select.Item>
-                                    <Select.Item value="separated">
-                                        {tAny("export_dialog_mode_separated")}
-                                    </Select.Item>
-                                </Select.Content>
-                            </Select.Root>
+                    <AppField label={tf("export_dialog_range")}>
+                        <AppSelect
+                            value={rangeKind}
+                            onValueChange={(value) => setRangeKind(value as ExportRangeKind)}
+                            options={[
+                                { value: "all", label: tf("export_dialog_range_all") },
+                                { value: "custom", label: tf("export_dialog_range_custom") },
+                            ]}
+                        />
+                    </AppField>
+
+                    {rangeKind === "custom" && (
+                        <Flex gap="2" align="center">
+                            <span className="hs-type-label shrink-0" style={{ minWidth: 132 }}>
+                                {tf("export_dialog_range_custom_label")}
+                            </span>
+                            <AppNumberField
+                                value={customStartSec}
+                                unit="seconds"
+                                min={0}
+                                width={160}
+                                ariaLabel={tf("export_dialog_range_custom_label")}
+                                onChange={(next) => setCustomStartSec(next)}
+                                onCommit={(next) => setCustomStartSec(next)}
+                            />
+                            <span className="hs-type-muted">~</span>
+                            <AppNumberField
+                                value={customEndSec}
+                                unit="seconds"
+                                min={0}
+                                width={160}
+                                ariaLabel={tf("export_dialog_range_custom_label")}
+                                onChange={(next) => setCustomEndSec(next)}
+                                onCommit={(next) => setCustomEndSec(next)}
+                            />
+                            <span className="hs-type-caption">sec</span>
                         </Flex>
+                    )}
 
-                        <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 132 }}>
-                                {tAny("export_dialog_range")}
-                            </Text>
-                            <Select.Root
-                                value={rangeKind}
-                                onValueChange={(value) => setRangeKind(value as ExportRangeKind)}
-                            >
-                                <Select.Trigger
-                                    style={{ flex: 1 }}
-                                    onWheel={(event) => {
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue: rangeKind,
-                                            options: ["all", "custom"],
-                                            onChange: (next) =>
-                                                setRangeKind(next as ExportRangeKind),
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    <Select.Item value="all">
-                                        {tAny("export_dialog_range_all")}
-                                    </Select.Item>
-                                    <Select.Item value="custom">
-                                        {tAny("export_dialog_range_custom")}
-                                    </Select.Item>
-                                </Select.Content>
-                            </Select.Root>
-                        </Flex>
+                    <AppField label={tf("export_dialog_format")}>
+                        <AppSegmentedControl
+                            size="sm"
+                            value={format}
+                            options={[
+                                { value: "wav", label: "WAV" },
+                                { value: "mp3", label: "MP3" },
+                                { value: "flac", label: "FLAC" },
+                            ]}
+                            onChange={(value) => handleFormatChange(value as ExportFormat)}
+                            ariaLabel={tf("export_dialog_format")}
+                        />
+                    </AppField>
 
-                        {rangeKind === "custom" && (
-                            <Flex gap="2" align="center">
-                                <Text size="2" style={{ minWidth: 132 }}>
-                                    {tAny("export_dialog_range_custom_label")}
-                                </Text>
-                                <TextField.Root
-                                    size="2"
-                                    type="number"
-                                    min={0}
-                                    step="0.001"
-                                    value={customStartSec}
-                                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                        setCustomStartSec(event.target.value)
-                                    }
-                                    style={{ width: 160 }}
-                                />
-                                <Text size="2" color="gray">
-                                    ~
-                                </Text>
-                                <TextField.Root
-                                    size="2"
-                                    type="number"
-                                    min={0}
-                                    step="0.001"
-                                    value={customEndSec}
-                                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                        setCustomEndSec(event.target.value)
-                                    }
-                                    style={{ width: 160 }}
-                                />
-                                <Text size="1" color="gray">
-                                    sec
-                                </Text>
-                            </Flex>
-                        )}
+                    <AppField label={tf("export_dialog_sample_rate")}>
+                        <AppSelect
+                            value={sampleRate}
+                            onValueChange={(value) => {
+                                setSampleRate(value);
+                                setSampleRateNotice("");
+                            }}
+                            options={sampleRateOptions(format).map((rate) => ({
+                                value: String(rate),
+                                label: `${rate} Hz`,
+                            }))}
+                        />
+                    </AppField>
 
-                        <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 132 }}>
-                                {tAny("export_dialog_format")}
-                            </Text>
-                            <SegmentedControl.Root
-                                value={format}
-                                onValueChange={(value) => handleFormatChange(value as ExportFormat)}
-                            >
-                                <SegmentedControl.Item value="wav">WAV</SegmentedControl.Item>
-                                <SegmentedControl.Item value="mp3">MP3</SegmentedControl.Item>
-                                <SegmentedControl.Item value="flac">FLAC</SegmentedControl.Item>
-                            </SegmentedControl.Root>
-                        </Flex>
+                    {sampleRateNotice ? (
+                        <span
+                            className="hs-type-caption"
+                            style={{ color: "var(--qt-warning-text)" }}
+                        >
+                            {sampleRateNotice}
+                        </span>
+                    ) : null}
 
-                        <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 132 }}>
-                                {tAny("export_dialog_sample_rate")}
-                            </Text>
-                            <Select.Root
-                                value={sampleRate}
+                    {format !== "mp3" ? (
+                        <AppField label={tf("export_dialog_bit_depth")}>
+                            <AppSelect
+                                value={format === "wav" ? wavBitDepth : flacBitDepth}
                                 onValueChange={(value) => {
-                                    setSampleRate(value);
-                                    setSampleRateNotice("");
+                                    if (format === "wav") {
+                                        if (value === "i16" || value === "i24" || value === "f32") {
+                                            setWavBitDepth(value);
+                                        }
+                                    } else if (value === "i16" || value === "i24") {
+                                        setFlacBitDepth(value);
+                                    }
                                 }}
-                            >
-                                <Select.Trigger
-                                    style={{ flex: 1 }}
-                                    onWheel={(event) => {
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue: sampleRate,
-                                            options: sampleRateOptions(format).map(String),
-                                            onChange: (next) => {
-                                                setSampleRate(next);
-                                                setSampleRateNotice("");
-                                            },
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    {sampleRateOptions(format).map((rate) => (
-                                        <Select.Item key={rate} value={String(rate)}>
-                                            {rate} Hz
-                                        </Select.Item>
-                                    ))}
-                                </Select.Content>
-                            </Select.Root>
-                        </Flex>
+                                options={[
+                                    { value: "i16", label: "16-bit" },
+                                    { value: "i24", label: "24-bit" },
+                                    ...(format === "wav"
+                                        ? [{ value: "f32", label: "32-bit float" }]
+                                        : []),
+                                ]}
+                            />
+                        </AppField>
+                    ) : (
+                        <span className="hs-type-caption">
+                            {tf("export_dialog_mp3_bit_depth_note")}
+                        </span>
+                    )}
 
-                        {sampleRateNotice ? (
-                            <Text size="1" color="amber">
-                                {sampleRateNotice}
-                            </Text>
-                        ) : null}
+                    <Flex align="center" gap="2">
+                        <AppButton size="sm" onClick={() => setEncoderOpen((prev) => !prev)}>
+                            {encoderOpen ? "▾" : "▸"} {tf("export_dialog_encoder_params")}
+                        </AppButton>
+                    </Flex>
 
-                        {format !== "mp3" ? (
-                            <Flex align="center" gap="2">
-                                <Text size="2" style={{ minWidth: 132 }}>
-                                    {tAny("export_dialog_bit_depth")}
-                                </Text>
-                                <Select.Root
-                                    value={format === "wav" ? wavBitDepth : flacBitDepth}
-                                    onValueChange={(value) => {
-                                        if (format === "wav") {
-                                            if (
-                                                value === "i16" ||
-                                                value === "i24" ||
-                                                value === "f32"
-                                            ) {
-                                                setWavBitDepth(value);
-                                            }
-                                        } else if (value === "i16" || value === "i24") {
-                                            setFlacBitDepth(value);
-                                        }
-                                    }}
-                                >
-                                    <Select.Trigger
-                                        style={{ flex: 1 }}
-                                        onWheel={(event) => {
-                                            const isWav = format === "wav";
-                                            applySelectWheelChange({
-                                                event,
-                                                currentValue: isWav ? wavBitDepth : flacBitDepth,
-                                                options: isWav
-                                                    ? ["i16", "i24", "f32"]
-                                                    : ["i16", "i24"],
-                                                onChange: (next) => {
-                                                    if (isWav) {
-                                                        if (
-                                                            next === "i16" ||
-                                                            next === "i24" ||
-                                                            next === "f32"
-                                                        ) {
-                                                            setWavBitDepth(next);
-                                                        }
-                                                    } else if (next === "i16" || next === "i24") {
-                                                        setFlacBitDepth(next);
-                                                    }
-                                                },
-                                            });
-                                        }}
-                                    />
-                                    <Select.Content>
-                                        <Select.Item value="i16">16-bit</Select.Item>
-                                        <Select.Item value="i24">24-bit</Select.Item>
-                                        {format === "wav" && (
-                                            <Select.Item value="f32">32-bit float</Select.Item>
-                                        )}
-                                    </Select.Content>
-                                </Select.Root>
-                            </Flex>
-                        ) : (
-                            <Text size="1" color="gray">
-                                {tAny("export_dialog_mp3_bit_depth_note")}
-                            </Text>
-                        )}
-
-                        <Flex align="center" gap="2">
-                            <Button
-                                variant="ghost"
-                                color="gray"
-                                size="1"
-                                onClick={() => setEncoderOpen((prev) => !prev)}
-                            >
-                                {encoderOpen ? "▾" : "▸"} {tAny("export_dialog_encoder_params")}
-                            </Button>
-                        </Flex>
-
-                        {encoderOpen && (
-                            <Flex direction="column" gap="3" pl="1">
-                                {format === "mp3" && (
-                                    <>
-                                        <Flex align="center" gap="2">
-                                            <Text size="2" style={{ minWidth: 132 }}>
-                                                {tAny("export_dialog_mp3_mode")}
-                                            </Text>
-                                            <Select.Root
-                                                value={mp3Mode}
-                                                onValueChange={(value) => {
-                                                    if (value === "cbr" || value === "vbr") {
-                                                        setMp3Mode(value);
-                                                    }
-                                                }}
-                                            >
-                                                <Select.Trigger
-                                                    style={{ flex: 1 }}
-                                                    onWheel={(event) => {
-                                                        applySelectWheelChange({
-                                                            event,
-                                                            currentValue: mp3Mode,
-                                                            options: ["vbr", "cbr"],
-                                                            onChange: (next) => {
-                                                                if (
-                                                                    next === "cbr" ||
-                                                                    next === "vbr"
-                                                                ) {
-                                                                    setMp3Mode(next);
-                                                                }
-                                                            },
-                                                        });
-                                                    }}
-                                                />
-                                                <Select.Content>
-                                                    <Select.Item value="vbr">
-                                                        {tAny("export_dialog_mp3_mode_vbr")}
-                                                    </Select.Item>
-                                                    <Select.Item value="cbr">
-                                                        {tAny("export_dialog_mp3_mode_cbr")}
-                                                    </Select.Item>
-                                                </Select.Content>
-                                            </Select.Root>
-                                        </Flex>
-
-                                        {mp3Mode === "cbr" ? (
-                                            <Flex align="center" gap="2">
-                                                <Text size="2" style={{ minWidth: 132 }}>
-                                                    {tAny("export_dialog_mp3_bitrate")}
-                                                </Text>
-                                                <Select.Root
-                                                    value={String(mp3Bitrate)}
-                                                    onValueChange={(value) =>
-                                                        setMp3Bitrate(Number(value))
-                                                    }
-                                                >
-                                                    <Select.Trigger
-                                                        style={{ flex: 1 }}
-                                                        onWheel={(event) => {
-                                                            applySelectWheelChange({
-                                                                event,
-                                                                currentValue: String(mp3Bitrate),
-                                                                options: MP3_BITRATES.map(String),
-                                                                onChange: (next) =>
-                                                                    setMp3Bitrate(Number(next)),
-                                                            });
-                                                        }}
-                                                    />
-                                                    <Select.Content>
-                                                        {MP3_BITRATES.map((rate) => (
-                                                            <Select.Item
-                                                                key={rate}
-                                                                value={String(rate)}
-                                                            >
-                                                                {rate} kbps
-                                                            </Select.Item>
-                                                        ))}
-                                                    </Select.Content>
-                                                </Select.Root>
-                                            </Flex>
-                                        ) : (
-                                            <Flex align="center" gap="2">
-                                                <Text size="2" style={{ minWidth: 132 }}>
-                                                    {tAny("export_dialog_mp3_quality")}
-                                                </Text>
-                                                <Select.Root
-                                                    value={String(mp3Quality)}
-                                                    onValueChange={(value) =>
-                                                        setMp3Quality(Number(value))
-                                                    }
-                                                >
-                                                    <Select.Trigger
-                                                        style={{ flex: 1 }}
-                                                        onWheel={(event) => {
-                                                            applySelectWheelChange({
-                                                                event,
-                                                                currentValue: String(mp3Quality),
-                                                                options: MP3_VBR_AVG_KBPS.map(
-                                                                    (_, index) => String(index),
-                                                                ),
-                                                                onChange: (next) =>
-                                                                    setMp3Quality(Number(next)),
-                                                            });
-                                                        }}
-                                                    />
-                                                    <Select.Content>
-                                                        {MP3_VBR_AVG_KBPS.map((avg, index) => (
-                                                            <Select.Item
-                                                                key={index}
-                                                                value={String(index)}
-                                                            >
-                                                                q{index} · ~{avg} kbps
-                                                            </Select.Item>
-                                                        ))}
-                                                    </Select.Content>
-                                                </Select.Root>
-                                            </Flex>
-                                        )}
-
-                                        <Flex direction="column" gap="2">
-                                            <Text size="2" color="gray">
-                                                {tAny("export_dialog_mp3_tags")}
-                                            </Text>
-                                            <div className="grid grid-cols-2 gap-2">
-                                                {(
-                                                    [
-                                                        ["title", "export_dialog_tag_title"],
-                                                        ["artist", "export_dialog_tag_artist"],
-                                                        ["album", "export_dialog_tag_album"],
-                                                        ["comment", "export_dialog_tag_comment"],
-                                                    ] as const
-                                                ).map(([key, i18nKey]) => (
-                                                    <label
-                                                        key={key}
-                                                        className="flex flex-col gap-1 text-xs text-qt-text"
-                                                    >
-                                                        <Text size="1" color="gray">
-                                                            {tAny(i18nKey)}
-                                                        </Text>
-                                                        <TextField.Root
-                                                            size="1"
-                                                            value={mp3Tags[key] ?? ""}
-                                                            onChange={(
-                                                                event: ChangeEvent<HTMLInputElement>,
-                                                            ) =>
-                                                                setMp3Tags((prev) => ({
-                                                                    ...prev,
-                                                                    [key]: event.target.value,
-                                                                }))
-                                                            }
-                                                        />
-                                                    </label>
-                                                ))}
-                                            </div>
-                                        </Flex>
-                                    </>
-                                )}
-
-                                {format === "flac" && (
-                                    <>
-                                        <Flex align="center" gap="2">
-                                            <Text size="2" style={{ minWidth: 132 }}>
-                                                {tAny("export_dialog_flac_level")}
-                                            </Text>
-                                            <Slider
-                                                min={FLAC_COMPRESSION_RANGE.min}
-                                                max={FLAC_COMPRESSION_RANGE.max}
-                                                step={1}
-                                                value={[flacLevel]}
-                                                onValueChange={(value) =>
-                                                    setFlacLevel(
-                                                        Array.isArray(value) ? value[0] : value,
-                                                    )
-                                                }
-                                                onWheel={(event) => {
-                                                    applySelectWheelChange({
-                                                        event,
-                                                        currentValue: String(flacLevel),
-                                                        options: FLAC_LEVEL_OPTIONS,
-                                                        onChange: (next) =>
-                                                            setFlacLevel(Number(next)),
-                                                    });
-                                                }}
-                                                style={{ flex: 1 }}
-                                            />
-                                            <Text
-                                                size="1"
-                                                color="gray"
-                                                style={{ minWidth: 24, textAlign: "right" }}
-                                            >
-                                                {flacLevel}
-                                            </Text>
-                                        </Flex>
-                                        <Text size="1" color="gray">
-                                            {tAny("export_dialog_flac_level_hint")}
-                                        </Text>
-                                    </>
-                                )}
-
-                                {((format === "wav" &&
-                                    (wavBitDepth === "i16" || wavBitDepth === "i24")) ||
-                                    format === "flac") && (
-                                    <Flex align="center" gap="2">
-                                        <Text size="2" style={{ minWidth: 132 }}>
-                                            {tAny("export_dialog_dither")}
-                                        </Text>
-                                        <Select.Root
-                                            value={dither}
+                    {encoderOpen && (
+                        <Flex direction="column" gap="3" pl="1">
+                            {format === "mp3" && (
+                                <>
+                                    <AppField label={tf("export_dialog_mp3_mode")}>
+                                        <AppSelect
+                                            value={mp3Mode}
                                             onValueChange={(value) => {
-                                                if (value === "none" || value === "tpdf") {
-                                                    setDither(value);
+                                                if (value === "cbr" || value === "vbr") {
+                                                    setMp3Mode(value);
                                                 }
                                             }}
-                                        >
-                                            <Select.Trigger
-                                                style={{ flex: 1 }}
-                                                onWheel={(event) => {
-                                                    applySelectWheelChange({
-                                                        event,
-                                                        currentValue: dither,
-                                                        options: ["none", "tpdf"],
-                                                        onChange: (next) => {
-                                                            if (
-                                                                next === "none" ||
-                                                                next === "tpdf"
-                                                            ) {
-                                                                setDither(next);
-                                                            }
-                                                        },
-                                                    });
-                                                }}
-                                            />
-                                            <Select.Content>
-                                                <Select.Item value="none">
-                                                    {tAny("export_dialog_dither_none")}
-                                                </Select.Item>
-                                                <Select.Item value="tpdf">
-                                                    {tAny("export_dialog_dither_tpdf")}
-                                                </Select.Item>
-                                            </Select.Content>
-                                        </Select.Root>
-                                    </Flex>
-                                )}
-
-                                <Flex align="center" gap="2">
-                                    <Text size="2" style={{ minWidth: 132 }}>
-                                        {tAny("export_dialog_channel_mode")}
-                                    </Text>
-                                    <Select.Root
-                                        value={channelMode}
-                                        onValueChange={(value) => {
-                                            if (value === "stereo" || value === "mono") {
-                                                setChannelMode(value);
-                                            }
-                                        }}
-                                    >
-                                        <Select.Trigger
-                                            style={{ flex: 1 }}
-                                            onWheel={(event) => {
-                                                applySelectWheelChange({
-                                                    event,
-                                                    currentValue: channelMode,
-                                                    options: ["stereo", "mono"],
-                                                    onChange: (next) => {
-                                                        if (next === "stereo" || next === "mono") {
-                                                            setChannelMode(next);
-                                                        }
-                                                    },
-                                                });
-                                            }}
+                                            options={[
+                                                {
+                                                    value: "vbr",
+                                                    label: tf("export_dialog_mp3_mode_vbr"),
+                                                },
+                                                {
+                                                    value: "cbr",
+                                                    label: tf("export_dialog_mp3_mode_cbr"),
+                                                },
+                                            ]}
                                         />
-                                        <Select.Content>
-                                            <Select.Item value="stereo">
-                                                {tAny("export_dialog_channel_stereo")}
-                                            </Select.Item>
-                                            <Select.Item value="mono">
-                                                {tAny("export_dialog_channel_mono")}
-                                            </Select.Item>
-                                        </Select.Content>
-                                    </Select.Root>
-                                </Flex>
-                            </Flex>
-                        )}
+                                    </AppField>
 
-                        {mode === "project" ? (
-                            <>
-                                <Flex align="center" gap="2">
-                                    <Text size="2" style={{ minWidth: 132 }}>
-                                        {tAny("export_dialog_output_dir")}
-                                    </Text>
-                                    <TextField.Root
-                                        size="2"
-                                        value={projectOutputDir}
-                                        onFocus={(event) => {
-                                            setActiveInputKey("projectOutputDir");
-                                            activeInputRef.current =
-                                                event.target as HTMLInputElement;
-                                        }}
-                                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                            setProjectOutputDir(event.target.value)
-                                        }
-                                        style={{ flex: 1 }}
-                                    />
-                                    <Button
-                                        variant="soft"
-                                        color="gray"
-                                        onClick={() => void browseProjectOutputDir()}
-                                    >
-                                        {tAny("export_dialog_browse")}
-                                    </Button>
-                                </Flex>
-
-                                <Flex align="center" gap="2">
-                                    <Text size="2" style={{ minWidth: 132 }}>
-                                        {tAny("export_dialog_project_file_name")}
-                                    </Text>
-                                    <TextField.Root
-                                        size="2"
-                                        value={projectFileName}
-                                        onFocus={(event) => {
-                                            setActiveInputKey("projectFileName");
-                                            activeInputRef.current =
-                                                event.target as HTMLInputElement;
-                                        }}
-                                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                            setProjectFileName(event.target.value)
-                                        }
-                                        style={{ flex: 1 }}
-                                    />
-                                </Flex>
-
-                                <Flex gap="2" wrap="wrap" align="center">
-                                    <Text size="1" color="gray">
-                                        {tAny("export_pattern_placeholders")}
-                                    </Text>
-                                    {(["<ProjectName>", "<ProjectFolder>"] as const).map(
-                                        (token) => (
-                                            <Button
-                                                key={token}
-                                                size="1"
-                                                variant="ghost"
-                                                color="gray"
-                                                onClick={() => applyTokenToActiveInput(token)}
-                                            >
-                                                {token}
-                                            </Button>
-                                        ),
+                                    {mp3Mode === "cbr" ? (
+                                        <AppField label={tf("export_dialog_mp3_bitrate")}>
+                                            <AppSelect
+                                                value={String(mp3Bitrate)}
+                                                onValueChange={(value) =>
+                                                    setMp3Bitrate(Number(value))
+                                                }
+                                                options={MP3_BITRATES.map((rate) => ({
+                                                    value: String(rate),
+                                                    label: `${rate} kbps`,
+                                                }))}
+                                            />
+                                        </AppField>
+                                    ) : (
+                                        <AppField label={tf("export_dialog_mp3_quality")}>
+                                            <AppSelect
+                                                value={String(mp3Quality)}
+                                                onValueChange={(value) =>
+                                                    setMp3Quality(Number(value))
+                                                }
+                                                options={MP3_VBR_AVG_KBPS.map((avg, index) => ({
+                                                    value: String(index),
+                                                    label: `q${index} · ~${avg} kbps`,
+                                                }))}
+                                            />
+                                        </AppField>
                                     )}
-                                </Flex>
-                            </>
-                        ) : (
-                            <>
-                                <Flex align="center" gap="2">
-                                    <Text size="2" style={{ minWidth: 132 }}>
-                                        {tAny("export_dialog_output_dir")}
-                                    </Text>
-                                    <TextField.Root
-                                        size="2"
-                                        value={separatedOutputDir}
-                                        onFocus={(event) => {
-                                            setActiveInputKey("separatedOutputDir");
-                                            activeInputRef.current =
-                                                event.target as HTMLInputElement;
-                                        }}
-                                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                            setSeparatedOutputDir(event.target.value)
-                                        }
-                                        style={{ flex: 1 }}
-                                    />
-                                    <Button
-                                        variant="soft"
-                                        color="gray"
-                                        onClick={() => void browseSeparatedOutputDir()}
-                                    >
-                                        {tAny("export_dialog_browse")}
-                                    </Button>
-                                </Flex>
 
-                                <Flex align="center" gap="2">
-                                    <Text size="2" style={{ minWidth: 132 }}>
-                                        {tAny("export_dialog_name_pattern")}
-                                    </Text>
-                                    <TextField.Root
-                                        size="2"
-                                        value={separatedNamePattern}
-                                        onFocus={(event) => {
-                                            setActiveInputKey("separatedNamePattern");
-                                            activeInputRef.current =
-                                                event.target as HTMLInputElement;
-                                        }}
-                                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                            setSeparatedNamePattern(event.target.value)
-                                        }
-                                        style={{ flex: 1 }}
-                                    />
-                                </Flex>
-
-                                <Flex gap="2" wrap="wrap" align="center">
-                                    <Text size="1" color="gray">
-                                        {tAny("export_pattern_placeholders")}
-                                    </Text>
-                                    {[
-                                        "<ExportIndex>",
-                                        "<TrackIndex>",
-                                        "<TrackName>",
-                                        "<TrackType>",
-                                        "<TrackId>",
-                                        "<ProjectName>",
-                                        "<ProjectFolder>",
-                                    ].map((token) => (
-                                        <Button
-                                            key={token}
-                                            size="1"
-                                            variant="ghost"
-                                            color="gray"
-                                            onClick={() => applyTokenToActiveInput(token)}
-                                        >
-                                            {token}
-                                        </Button>
-                                    ))}
-                                </Flex>
-
-                                <div className="rounded border border-qt-border bg-qt-base p-2 max-h-[240px] overflow-y-auto">
-                                    <Text size="2" className="font-medium">
-                                        {tAny("export_dialog_targets")}
-                                    </Text>
-                                    <Flex gap="1" mt="2" wrap="wrap">
-                                        <Button
-                                            size="1"
-                                            variant="soft"
-                                            color="gray"
-                                            onClick={selectAllTargets}
-                                        >
-                                            {tAny("export_dialog_select_all")}
-                                        </Button>
-                                        <Button
-                                            size="1"
-                                            variant="soft"
-                                            color="gray"
-                                            onClick={clearSelectedTargets}
-                                        >
-                                            {tAny("export_dialog_select_none")}
-                                        </Button>
-                                        <Button
-                                            size="1"
-                                            variant="soft"
-                                            color="gray"
-                                            onClick={selectAllSubTargets}
-                                            disabled={
-                                                !allTargets.some((target) => target.kind === "sub")
-                                            }
-                                        >
-                                            {tAny("export_dialog_select_all_subtracks")}
-                                        </Button>
-                                        <Button
-                                            size="1"
-                                            variant="soft"
-                                            color="gray"
-                                            onClick={selectExcludeMutedTargets}
-                                        >
-                                            {tAny("export_dialog_select_exclude_muted")}
-                                        </Button>
+                                    <Flex direction="column" gap="2">
+                                        <span className="hs-type-label">
+                                            {tf("export_dialog_mp3_tags")}
+                                        </span>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            {(
+                                                [
+                                                    ["title", "export_dialog_tag_title"],
+                                                    ["artist", "export_dialog_tag_artist"],
+                                                    ["album", "export_dialog_tag_album"],
+                                                    ["comment", "export_dialog_tag_comment"],
+                                                ] as const
+                                            ).map(([key, i18nKey]) => (
+                                                <label
+                                                    key={key}
+                                                    className="flex flex-col gap-1 text-qt-xs text-qt-text"
+                                                >
+                                                    <span className="hs-type-caption">
+                                                        {tf(i18nKey)}
+                                                    </span>
+                                                    <TextField.Root
+                                                        size="1"
+                                                        value={mp3Tags[key] ?? ""}
+                                                        onChange={(
+                                                            event: ChangeEvent<HTMLInputElement>,
+                                                        ) =>
+                                                            setMp3Tags((prev) => ({
+                                                                ...prev,
+                                                                [key]: event.target.value,
+                                                            }))
+                                                        }
+                                                    />
+                                                </label>
+                                            ))}
+                                        </div>
                                     </Flex>
-                                    <Flex direction="column" gap="2" mt="2">
-                                        {targetGroups.map((group) => (
-                                            <div
-                                                key={group.id}
-                                                className="rounded border border-qt-border bg-qt-window px-2 py-2"
-                                            >
-                                                <Text size="1" color="gray">
-                                                    {group.title}
-                                                </Text>
+                                </>
+                            )}
+
+                            {format === "flac" && (
+                                <>
+                                    <Flex align="center" gap="2">
+                                        <span
+                                            className="hs-type-label shrink-0"
+                                            style={{ minWidth: 132 }}
+                                        >
+                                            {tf("export_dialog_flac_level")}
+                                        </span>
+                                        <AppSlider
+                                            value={flacLevel}
+                                            unit="integer"
+                                            min={FLAC_COMPRESSION_RANGE.min}
+                                            max={FLAC_COMPRESSION_RANGE.max}
+                                            ariaLabel={tf("export_dialog_flac_level")}
+                                            onChange={(next) => setFlacLevel(next)}
+                                        />
+                                        <AppSliderReadout>{flacLevel}</AppSliderReadout>
+                                    </Flex>
+                                    <span className="hs-type-caption">
+                                        {tf("export_dialog_flac_level_hint")}
+                                    </span>
+                                </>
+                            )}
+
+                            {((format === "wav" &&
+                                (wavBitDepth === "i16" || wavBitDepth === "i24")) ||
+                                format === "flac") && (
+                                <AppField label={tf("export_dialog_dither")}>
+                                    <AppSelect
+                                        value={dither}
+                                        onValueChange={(value) => {
+                                            if (value === "none" || value === "tpdf") {
+                                                setDither(value);
+                                            }
+                                        }}
+                                        options={[
+                                            {
+                                                value: "none",
+                                                label: tf("export_dialog_dither_none"),
+                                            },
+                                            {
+                                                value: "tpdf",
+                                                label: tf("export_dialog_dither_tpdf"),
+                                            },
+                                        ]}
+                                    />
+                                </AppField>
+                            )}
+
+                            <AppField label={tf("export_dialog_channel_mode")}>
+                                <AppSelect
+                                    value={channelMode}
+                                    onValueChange={(value) => {
+                                        if (value === "stereo" || value === "mono") {
+                                            setChannelMode(value);
+                                        }
+                                    }}
+                                    options={[
+                                        {
+                                            value: "stereo",
+                                            label: tf("export_dialog_channel_stereo"),
+                                        },
+                                        {
+                                            value: "mono",
+                                            label: tf("export_dialog_channel_mono"),
+                                        },
+                                    ]}
+                                />
+                            </AppField>
+                        </Flex>
+                    )}
+
+                    {mode === "project" ? (
+                        <>
+                            <Flex align="center" gap="2">
+                                <span className="hs-type-label shrink-0" style={{ minWidth: 132 }}>
+                                    {tf("export_dialog_output_dir")}
+                                </span>
+                                <TextField.Root
+                                    size="2"
+                                    value={projectOutputDir}
+                                    onFocus={(event) => {
+                                        setActiveInputKey("projectOutputDir");
+                                        activeInputRef.current = event.target as HTMLInputElement;
+                                    }}
+                                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                                        setProjectOutputDir(event.target.value)
+                                    }
+                                    style={{ flex: 1 }}
+                                />
+                                <AppButton size="sm" onClick={() => void browseProjectOutputDir()}>
+                                    {tf("export_dialog_browse")}
+                                </AppButton>
+                            </Flex>
+
+                            <AppField label={tf("export_dialog_project_file_name")}>
+                                <TextField.Root
+                                    size="2"
+                                    value={projectFileName}
+                                    onFocus={(event) => {
+                                        setActiveInputKey("projectFileName");
+                                        activeInputRef.current = event.target as HTMLInputElement;
+                                    }}
+                                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                                        setProjectFileName(event.target.value)
+                                    }
+                                />
+                            </AppField>
+
+                            <Flex gap="2" wrap="wrap" align="center">
+                                <span className="hs-type-caption">
+                                    {tf("export_pattern_placeholders")}
+                                </span>
+                                {(["<ProjectName>", "<ProjectFolder>"] as const).map((token) => (
+                                    <AppButton
+                                        key={token}
+                                        size="sm"
+                                        onClick={() => applyTokenToActiveInput(token)}
+                                    >
+                                        {token}
+                                    </AppButton>
+                                ))}
+                            </Flex>
+
+                            {examplePath ? (
+                                <span
+                                    className="hs-type-caption"
+                                    style={{ userSelect: "text", wordBreak: "break-all" }}
+                                >
+                                    {tf("export_dialog_example_path").replace(
+                                        "{path}",
+                                        examplePath,
+                                    )}
+                                </span>
+                            ) : null}
+                        </>
+                    ) : (
+                        <>
+                            <Flex align="center" gap="2">
+                                <span className="hs-type-label shrink-0" style={{ minWidth: 132 }}>
+                                    {tf("export_dialog_output_dir")}
+                                </span>
+                                <TextField.Root
+                                    size="2"
+                                    value={separatedOutputDir}
+                                    onFocus={(event) => {
+                                        setActiveInputKey("separatedOutputDir");
+                                        activeInputRef.current = event.target as HTMLInputElement;
+                                    }}
+                                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                                        setSeparatedOutputDir(event.target.value)
+                                    }
+                                    style={{ flex: 1 }}
+                                />
+                                <AppButton
+                                    size="sm"
+                                    onClick={() => void browseSeparatedOutputDir()}
+                                >
+                                    {tf("export_dialog_browse")}
+                                </AppButton>
+                            </Flex>
+
+                            <AppField label={tf("export_dialog_name_pattern")}>
+                                <TextField.Root
+                                    size="2"
+                                    value={separatedNamePattern}
+                                    onFocus={(event) => {
+                                        setActiveInputKey("separatedNamePattern");
+                                        activeInputRef.current = event.target as HTMLInputElement;
+                                    }}
+                                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                                        setSeparatedNamePattern(event.target.value)
+                                    }
+                                />
+                            </AppField>
+
+                            <Flex gap="2" wrap="wrap" align="center">
+                                <span className="hs-type-caption">
+                                    {tf("export_pattern_placeholders")}
+                                </span>
+                                {[
+                                    "<ExportIndex>",
+                                    "<TrackIndex>",
+                                    "<TrackName>",
+                                    "<TrackType>",
+                                    "<TrackId>",
+                                    "<ProjectName>",
+                                    "<ProjectFolder>",
+                                ].map((token) => (
+                                    <AppButton
+                                        key={token}
+                                        size="sm"
+                                        onClick={() => applyTokenToActiveInput(token)}
+                                    >
+                                        {token}
+                                    </AppButton>
+                                ))}
+                            </Flex>
+
+                            {examplePath ? (
+                                <span
+                                    className="hs-type-caption"
+                                    style={{ userSelect: "text", wordBreak: "break-all" }}
+                                >
+                                    {tf("export_dialog_example_path").replace(
+                                        "{path}",
+                                        examplePath,
+                                    )}
+                                </span>
+                            ) : null}
+
+                            {/*
+                             * 外层不滚、内层滚：对话框 body 本身就是
+                             * `overflow-y-auto`，这里再叠一个 `max-h-[240px]` 的
+                             * 滚动盒，表单变高时就会出现两条竖直滚动条。改为参与
+                             * 表单的 flex 布局（AppForm 已是 flex 列），让它吃掉
+                             * 剩余高度。
+                             */}
+                            <div className="min-h-0 flex-1 overflow-y-auto rounded border border-qt-border bg-qt-base p-2">
+                                <span className="hs-type-label font-semibold">
+                                    {tf("export_dialog_targets")}
+                                </span>
+                                <Flex gap="1" mt="2" wrap="wrap">
+                                    <AppButton size="sm" onClick={selectAllTargets}>
+                                        {tf("export_dialog_select_all")}
+                                    </AppButton>
+                                    <AppButton size="sm" onClick={clearSelectedTargets}>
+                                        {tf("export_dialog_select_none")}
+                                    </AppButton>
+                                    <AppButton
+                                        size="sm"
+                                        onClick={selectAllSubTargets}
+                                        disabled={
+                                            !allTargets.some((target) => target.kind === "sub")
+                                        }
+                                    >
+                                        {tf("export_dialog_select_all_subtracks")}
+                                    </AppButton>
+                                    <AppButton size="sm" onClick={selectExcludeMutedTargets}>
+                                        {tf("export_dialog_select_exclude_muted")}
+                                    </AppButton>
+                                </Flex>
+                                <Flex direction="column" gap="2" mt="2">
+                                    {targetGroups.map((group) => (
+                                        <div
+                                            key={group.id}
+                                            className="rounded border border-qt-border bg-qt-window px-2 py-2"
+                                        >
+                                            <span className="hs-type-caption">{group.title}</span>
+                                            <AppForm booleanRow="leading">
                                                 <Flex direction="column" gap="1" mt="1">
                                                     {group.options.map((target) => (
-                                                        <label
+                                                        <AppSwitchRow
                                                             key={target.id}
-                                                            className="flex items-center gap-2 text-xs text-qt-text cursor-pointer"
-                                                        >
-                                                            <input
-                                                                type="checkbox"
-                                                                checked={selectedTargetIds.includes(
-                                                                    target.id,
-                                                                )}
-                                                                onChange={() =>
-                                                                    toggleTarget(target.id)
-                                                                }
-                                                            />
-                                                            <span>{target.label}</span>
-                                                        </label>
+                                                            control="checkbox"
+                                                            label={target.label}
+                                                            checked={selectedTargetIds.includes(
+                                                                target.id,
+                                                            )}
+                                                            onCheckedChange={() =>
+                                                                toggleTarget(target.id)
+                                                            }
+                                                        />
                                                     ))}
                                                 </Flex>
-                                            </div>
-                                        ))}
-                                    </Flex>
-                                </div>
-                            </>
-                        )}
-
-                        {errorText ? (
-                            <Text size="2" color="red">
-                                {errorText}
-                            </Text>
-                        ) : null}
-
-                        {shouldShowProgress ? (
-                            <div className="rounded border border-qt-border bg-qt-window p-2">
-                                <ProgressBar
-                                    percentage={displayProgress}
-                                    label={progressLabel}
-                                    completed={exportCompleted}
-                                />
+                                            </AppForm>
+                                        </div>
+                                    ))}
+                                </Flex>
                             </div>
-                        ) : null}
-                    </Flex>
+                        </>
+                    )}
 
-                    <Flex justify="end" gap="2" mt="4">
-                        <Button variant="soft" color="gray" onClick={() => void handleCancel()}>
-                            {tAny("cancel")}
-                        </Button>
-                        <Button
-                            onClick={() => {
-                                void submitExport();
-                            }}
-                            disabled={session.busy || submitting}
-                        >
-                            {tAny("export_dialog_export")}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
-            <Dialog.Root
+                    {errorText ? (
+                        <span className="hs-type-body" style={{ color: "var(--qt-danger-text)" }}>
+                            {errorText}
+                        </span>
+                    ) : null}
+
+                    {shouldShowProgress ? (
+                        <div className="rounded border border-qt-border bg-qt-window p-2">
+                            <ProgressBar
+                                percentage={displayProgress}
+                                label={progressLabel}
+                                completed={exportCompleted}
+                                /*
+                                 * 长任务必须能取消：一次多目标导出可能跑几分钟，
+                                 * 而进度区此前只有读数、没有出口。后端本来就有
+                                 * `cancel_export_audio`（页脚的取消也走它），
+                                 * 这里只是把它接到进度条上。
+                                 */
+                                showCancel={!exportCompleted && exportProgress.active}
+                                onCancel={() => void handleCancel()}
+                            />
+                        </div>
+                    ) : null}
+                </AppForm>
+            </AppDialog>
+            <AppDialog
                 open={conflictDialog.open}
                 onOpenChange={(open) => {
                     if (!open) {
@@ -1841,14 +1804,13 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         resolver?.({ choice: "cancel", applyAll: false });
                     }
                 }}
-            >
-                <Dialog.Content style={{ maxWidth: 620 }}>
-                    <Dialog.Title>
-                        {conflictDialog.kind === "source-path"
-                            ? tAny("export_conflict_source_title")
-                            : tAny("export_conflict_exists_title")}
-                    </Dialog.Title>
-                    <Dialog.Description
+                title={
+                    conflictDialog.kind === "source-path"
+                        ? tf("export_conflict_source_title")
+                        : tf("export_conflict_exists_title")
+                }
+                message={
+                    <span
                         style={{
                             userSelect: "text",
                             wordBreak: "break-all",
@@ -1856,67 +1818,84 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         }}
                     >
                         {conflictDialog.kind === "source-path"
-                            ? tAny("export_conflict_source_desc")
-                            : tAny("export_conflict_exists_desc")}
+                            ? tf("export_conflict_source_desc")
+                            : tf("export_conflict_exists_desc")}
                         {"\n"}
                         {conflictDialog.path}
-                    </Dialog.Description>
-                    <label className="flex items-center gap-2 text-sm mt-3">
-                        <input
-                            type="checkbox"
-                            checked={conflictDialog.applyAll}
-                            onChange={(event) =>
-                                setConflictDialog((prev) => ({
-                                    ...prev,
-                                    applyAll: event.target.checked,
-                                }))
-                            }
-                        />
-                        <span>{tAny("export_conflict_apply_all")}</span>
-                    </label>
-                    <Flex justify="end" gap="2" mt="4">
-                        <Button
-                            variant={conflictDialog.kind === "source-path" ? "solid" : "soft"}
-                            color={conflictDialog.kind === "source-path" ? "amber" : "gray"}
-                            onClick={() => {
-                                const resolver = conflictResolverRef.current;
-                                conflictResolverRef.current = null;
-                                setConflictDialog((prev) => ({ ...prev, open: false }));
-                                resolver?.({ choice: "skip", applyAll: conflictDialog.applyAll });
-                            }}
-                        >
-                            {tAny("export_conflict_skip")}
-                        </Button>
-                        <Button
-                            variant="soft"
-                            color="red"
-                            onClick={() => {
-                                const resolver = conflictResolverRef.current;
-                                conflictResolverRef.current = null;
-                                setConflictDialog((prev) => ({ ...prev, open: false }));
-                                resolver?.({ choice: "cancel", applyAll: false });
-                            }}
-                        >
-                            {tAny("export_conflict_cancel")}
-                        </Button>
-                        <Button
-                            variant={conflictDialog.kind === "source-path" ? "soft" : "solid"}
-                            color={conflictDialog.kind === "source-path" ? "gray" : "blue"}
-                            onClick={() => {
-                                const resolver = conflictResolverRef.current;
-                                conflictResolverRef.current = null;
-                                setConflictDialog((prev) => ({ ...prev, open: false }));
-                                resolver?.({
-                                    choice: "overwrite",
-                                    applyAll: conflictDialog.applyAll,
-                                });
-                            }}
-                        >
-                            {tAny("export_conflict_overwrite")}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+                    </span>
+                }
+                /*
+                 * 只有 source-path 那一类是**不可逆的数据丢失**（导出目标与工程
+                 * 媒体同路径，覆写不可逆），给它 danger；"目标已存在"用 skip 就能
+                 * 绕开，属于可恢复情形，保持默认样式 —— 到处报警等于没有报警。
+                 */
+                tone={conflictDialog.kind === "source-path" ? "danger" : "default"}
+                size="lg"
+                /*
+                 * Enter 的默认动作必须显式指定。
+                 *
+                 * 壳的默认规则是"最后一个非危险动作"，即 overwrite。但 source-path
+                 * 一类的文案是**数据丢失警告**（导出目标与工程媒体同路径，覆写不可
+                 * 逆）—— 那种情形下让 Enter 直接覆写是危险的默认值。这一类把默认
+                 * 动作钉在 skip 上。
+                 */
+                defaultActionId={conflictDialog.kind === "source-path" ? "skip" : "overwrite"}
+                actions={[
+                    {
+                        id: "skip",
+                        label: tf("export_conflict_skip"),
+                        intent: conflictDialog.kind === "source-path" ? "primary" : undefined,
+                        autoClose: false,
+                        onClick: () => {
+                            const resolver = conflictResolverRef.current;
+                            conflictResolverRef.current = null;
+                            setConflictDialog((prev) => ({ ...prev, open: false }));
+                            resolver?.({ choice: "skip", applyAll: conflictDialog.applyAll });
+                        },
+                    },
+                    {
+                        id: "cancel",
+                        label: tf("export_conflict_cancel"),
+                        intent: "danger",
+                        autoClose: false,
+                        onClick: () => {
+                            const resolver = conflictResolverRef.current;
+                            conflictResolverRef.current = null;
+                            setConflictDialog((prev) => ({ ...prev, open: false }));
+                            resolver?.({ choice: "cancel", applyAll: false });
+                        },
+                    },
+                    {
+                        id: "overwrite",
+                        label: tf("export_conflict_overwrite"),
+                        intent: conflictDialog.kind === "source-path" ? undefined : "primary",
+                        autoClose: false,
+                        onClick: () => {
+                            const resolver = conflictResolverRef.current;
+                            conflictResolverRef.current = null;
+                            setConflictDialog((prev) => ({ ...prev, open: false }));
+                            resolver?.({
+                                choice: "overwrite",
+                                applyAll: conflictDialog.applyAll,
+                            });
+                        },
+                    },
+                ]}
+            >
+                <AppForm booleanRow="leading">
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={tf("export_conflict_apply_all")}
+                        checked={conflictDialog.applyAll}
+                        onCheckedChange={(applyAll) =>
+                            setConflictDialog((prev) => ({
+                                ...prev,
+                                applyAll,
+                            }))
+                        }
+                    />
+                </AppForm>
+            </AppDialog>
         </>
     );
 }

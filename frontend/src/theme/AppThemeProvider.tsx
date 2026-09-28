@@ -326,6 +326,21 @@ export function AppThemeProvider({ children }: PropsWithChildren) {
                 grayColor={grayColor}
                 radius={radius}
                 className={`qt-theme ${mode}`}
+                /*
+                 * 【必须写在 wrapper 自己身上】Radix 在 `.radix-themes` 上**自定义**了
+                 * `--default-font-family`（它自己的字体栈），并只用这个变量渲染自己的
+                 * 组件。写在我们挂在 `<html>` 上的同名变量会被它遮蔽 —— 于是**任何位于
+                 * Radix 子树内的内容都用不到自定义字体**。
+                 *
+                 * 主窗口的停靠面板之所以看起来正常，是因为它们被 portal 到
+                 * `document.body`（见 `panelHostRegistry`），恰好落在 wrapper **之外**、
+                 * 继承 body 的字体；而独立窗口把面板渲染在 wrapper **内部**，于是只有它
+                 * 显示默认字体 —— 这正是"独立窗口没有继承主窗口自定义字体"的成因。
+                 *
+                 * 内联样式与 `.radix-themes` 规则作用于同一个元素、内联优先，因此这一行
+                 * 让两侧都真正用上自定义字体。
+                 */
+                style={{ "--default-font-family": fontFamily } as React.CSSProperties}
             >
                 {children}
             </Theme>

@@ -93,4 +93,78 @@ describe("resolvePianoRollScrollbarGeometries", () => {
         // 2000 < 视口 1000*2？不：内容 2000 > 视口 1000 → thumb = 1000²/2000 = 500
         expect(explicit.horizontal.thumbLengthPx).toBeCloseTo(500, 6);
     });
+
+    /**
+     * 竖向值域口径（用户报告"竖直 thumb 长度不随缩放变化、缩到最小不隐藏"）：
+     * 传入 valueDomain 后 thumb 长度 = 轨道 × span / range，与原生滚动条
+     * "可见占比决定 thumb 长度"同构；缩到最小（span ≥ range）时不可滚动。
+     */
+    describe("竖向值域口径（verticalValueDomain）", () => {
+        const base = {
+            viewportWidthPx: 1000,
+            viewportHeightPx: 600,
+            scrollLeftPx: 0,
+            maxScrollLeftPx: 5000,
+            maxScrollTopPx: 1600,
+        };
+
+        it("thumb 长度按 span/range 占比伸缩（zoom in → 变短，zoom out → 变长）", () => {
+            const range = 60;
+            const at = (span: number) =>
+                resolvePianoRollScrollbarGeometries({
+                    ...base,
+                    scrollTopPx: 0,
+                    verticalValueDomain: { min: 0, max: range, span },
+                }).vertical;
+            // 音高默认视口：span 24 / 全长 60 → thumb = 600 × 24/60 = 240。
+            expect(at(24).thumbLengthPx).toBeCloseTo(240, 6);
+            // 放大一倍（span 12）→ thumb 减半。
+            expect(at(12).thumbLengthPx).toBeCloseTo(120, 6);
+            // 缩小一倍（span 48）→ thumb 翻倍。
+            expect(at(48).thumbLengthPx).toBeCloseTo(480, 6);
+            expect(at(12).scrollable).toBe(true);
+        });
+
+        it("缩放到最小（span ≥ range）时不可滚动（宿主据此隐藏 thumb）", () => {
+            const { vertical } = resolvePianoRollScrollbarGeometries({
+                ...base,
+                scrollTopPx: 0,
+                verticalValueDomain: { min: 0, max: 60, span: 60 },
+            });
+            expect(vertical.scrollable).toBe(false);
+        });
+
+        it("thumb 起点仍按 scrollTop/maxScrollTop 在行程内线性映射（手感不变）", () => {
+            const range = 60;
+            const at = (scrollTopPx: number) =>
+                resolvePianoRollScrollbarGeometries({
+                    ...base,
+                    viewportHeightPx: 300,
+                    scrollTopPx,
+                    verticalValueDomain: { min: 0, max: range, span: 30 },
+                }).vertical;
+            // span 30/60 → thumb 150、行程 150；scrollTop=800/1600 → 起点 75。
+            expect(at(800).thumbLengthPx).toBeCloseTo(150, 6);
+            expect(at(800).thumbStartPx).toBeCloseTo(75, 6);
+            expect(at(0).thumbStartPx).toBeCloseTo(0, 6);
+            expect(at(1600).thumbStartPx).toBeCloseTo(150, 6);
+        });
+
+        it("非法值域（range ≤ 0 / span ≤ 0 / 非有限）回退旧口径，不产生 NaN", () => {
+            for (const domain of [
+                { min: 5, max: 5, span: 1 },
+                { min: 0, max: 60, span: 0 },
+                { min: Number.NaN, max: 60, span: 10 },
+            ]) {
+                const { vertical } = resolvePianoRollScrollbarGeometries({
+                    ...base,
+                    viewportHeightPx: 823,
+                    scrollTopPx: 0,
+                    verticalValueDomain: domain,
+                });
+                // 旧口径：内容 1600 + 823 = 2423 → thumb = 823² / 2423。
+                expect(vertical.thumbLengthPx).toBeCloseTo((823 * 823) / 2423, 6);
+            }
+        });
+    });
 });

@@ -185,7 +185,9 @@ export function isAcceptedDropFile(
     if (!file) return false;
     const name = String(file.name ?? "").trim();
     if (name && isAcceptedDropPath(name)) return true;
-    const mime = String(file.type ?? "").trim().toLowerCase();
+    const mime = String(file.type ?? "")
+        .trim()
+        .toLowerCase();
     if (mime.startsWith("audio/") || mime.startsWith("video/")) return true;
     return false;
 }

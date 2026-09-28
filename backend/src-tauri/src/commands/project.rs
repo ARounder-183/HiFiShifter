@@ -408,6 +408,7 @@ fn build_project_file_snapshot(
         time_signature_denominator,
         grid_size,
         notes_markdown,
+        notebook_assets,
         stretch_algorithm_override,
         hifigan_mel_stretch_override,
         save_undo_history,
@@ -425,6 +426,7 @@ fn build_project_file_snapshot(
             },
             normalize_grid_size(&p.grid_size),
             p.notes_markdown.clone(),
+            p.notebook_assets.clone(),
             p.stretch_algorithm_override,
             p.hifigan_mel_stretch_override,
             p.save_undo_history,
@@ -443,6 +445,7 @@ fn build_project_file_snapshot(
     pf.use_custom_scale = use_custom_scale && custom_scale.is_some();
     pf.custom_scale = custom_scale;
     pf.notes_markdown = notes_markdown;
+    pf.notebook_assets = notebook_assets;
     pf.synth_config.stretch_algorithm_override = stretch_algorithm_override;
     pf.synth_config.hifigan_mel_stretch_override = hifigan_mel_stretch_override;
     // 工程级开关：是否随工程保存 UNDO 数据（与全局「新建工程默认值」相互独立）。
@@ -500,6 +503,13 @@ fn save_project_archive_to_zip_inner(
     let project_entry_name = format!("{}.hshp", project_name);
     let archive_project_virtual_path = PathBuf::from(&project_entry_name);
 
+    // 归档前按正文引用清理未引用条目：附件字节内嵌在工程文件里，随内嵌的
+    // .hshp 一起进压缩包，不需要额外打包附件目录。
+    let pruned = state.prune_notebook_assets();
+    if pruned > 0 {
+        log::info!("[notebook] 归档前清理了 {pruned} 条未引用附件");
+    }
+
     let mut pf = build_project_file_snapshot(state, &archive_project_virtual_path, &project_name);
 
     let current_project_dir = {
@@ -541,11 +551,16 @@ fn save_project_archive_to_zip_inner(
 
             let abs_path = PathBuf::from(&source_path);
             if !abs_path.is_absolute() || !abs_path.exists() {
+                // 文件缺失/非绝对路径 ⇒ 无法内嵌进压缩包，跳过即可。
+                //
+                // **但绝不能把 `source_path` 置空**：这个 timeline 就是写进归档的
+                // 那份工程，置空等于把媒体引用彻底抹掉 —— 之后打开该归档时这些
+                // Take 变成"没有音频源"，用户听不见声音、扫描也永远找不到候选。
+                // 保留原路径，文件一旦回到原位即可自动恢复。
                 archive_logs.push(format!(
-                    "Skip missing or non-absolute source: {} (clip={}, take={})",
+                    "Skip missing or non-absolute source (kept as-is): {} (clip={}, take={})",
                     source_path, clip.id, take.id
                 ));
-                take.source_path = None;
                 continue;
             }
 
@@ -633,8 +648,7 @@ fn save_project_archive_to_zip_inner(
         for (source_path, zip_entry) in &source_to_entry {
             if !written_entries.insert(zip_entry.clone()) {
                 continue;
-            }
-            // 使用流式写入，避免将整个文件读入内存。
+            }            // 使用流式写入，避免将整个文件读入内存。
             let mut src_file = fs::File::open(source_path).map_err(|e| e.to_string())?;
             // 保留媒体文件的修改时间等元数据（并允许 >4GiB 的大录音走 ZIP64）。
             zip.start_file(
@@ -743,6 +757,9 @@ pub(crate) fn save_project_to_path_inner(
 ) -> Result<crate::models::TimelineStatePayload, String> {
     let path = PathBuf::from(&project_path);
     let name = project_name_from_path(&path);
+    // 记事本附件：按正文引用清理未引用条目，再构建快照 —— 顺序不能反，
+    // 否则登记表里还留着已被删掉的条目（字节内嵌在工程文件里，随之一起变大）。
+    crate::commands::notebook::prepare_assets_for_save(state);
     let pf = build_project_file_snapshot(state, &path, &name);
     let bytes = serialize_project_file_for_path(&pf, &path)?;
 
@@ -785,6 +802,12 @@ pub(crate) fn save_project_to_path_inner(
 
     // 持久化最近工程列表
     save_recent_projects(state);
+
+    // 工程身份（缓存归属）+ "仅保存工程时落盘"模式的批量提交。
+    crate::render_cache::set_current_project_id(crate::render_cache::project_id_for_path(
+        Some(&project_path),
+    ));
+    crate::render_cache::flush_pending();
 
     Ok(get_timeline_state_from_ref(state))
 }
@@ -843,6 +866,9 @@ pub(super) fn new_project(
 ) -> crate::models::TimelineStatePayload {
     // 切换/新建工程前必须中断旧工程的后台预渲染，避免旧渲染继续写入缓存。
     let _ = crate::commands::playback::cancel_background_render(state.app_handle.get());
+    // 同时作废在途的声道扫描：工程文件里 clip/take id 复用是常态，旧工程的
+    // 扫描线程若不拦下，会把结论写进新工程的同 id Take。
+    crate::commands::channel_scan::bump_generation();
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         *tl = crate::state::TimelineState::default();
@@ -856,8 +882,8 @@ pub(super) fn new_project(
         p.dirty = false;
         p.notes_markdown = String::new();
         p.base_scale = "C".to_string();
-        p.use_custom_scale = false;
         p.custom_scale = None;
+        p.use_custom_scale = false;
         p.beats_per_bar = 4;
         p.grid_size = "1/4".to_string();
         p.stretch_algorithm_override = None;
@@ -867,6 +893,9 @@ pub(super) fn new_project(
             .ui_settings_snapshot()
             .save_undo_history_by_default;
     }
+    // 记事本附件随工程一起清空：登记表归零、落点退回暂存目录、暂存目录清空。
+    // 必须在上面的锁释放之后调用（reset 内部自己加锁）。
+    state.reset_notebook_assets();
     sync_runtime_stretch_settings(state.inner());
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
@@ -874,6 +903,8 @@ pub(super) fn new_project(
         state.audio_engine.update_timeline(tl.clone());
     }
     update_window_title(&window, "Untitled", false);
+    // 新工程无路径 → 缓存归属为"未知"（0）：不会被"清理当前工程"误删其它工程。
+    crate::render_cache::set_current_project_id(0);
     get_timeline_state(state)
 }
 
@@ -900,6 +931,8 @@ pub(super) fn open_project(
     // 打开新工程前先取消旧工程的后台预渲染，防止旧渲染在替换 timeline/清缓存
     // 期间继续执行并污染新工程的缓存。
     let _ = crate::commands::playback::cancel_background_render(state.app_handle.get());
+    // 同时作废在途的声道扫描（同 new_project 的理由：clip/take id 会复用）。
+    crate::commands::channel_scan::bump_generation();
     let path = PathBuf::from(&project_path);
     // 读取字节流，自动检测 MessagePack（v3）或 JSON（v1/v2 兼容）格式。
     // 读取失败不再静默当作空文件：把 io 错误带回给前端展示。
@@ -1007,7 +1040,14 @@ pub(super) fn open_project(
     state.clear_history();
     // 无论「保存操作记录」设置是否开启都尝试读取：存在伴生文件就恢复历史
     // （后缀大小写不敏感），读不到则静默保持「无历史」。
-    let _ = crate::commands::undo_history_file::load_undo_history(state.inner(), &path);
+    // 【必须传工程自身的版本号】历史快照的版本迁移（v4→v5 的假立体声折叠）按
+    // 工程版本执行，不能一律按当前版本 —— 否则恢复出的记录跳过迁移，第一次
+    // 撤销会把未折叠的 take 写回时间线。
+    let _ = crate::commands::undo_history_file::load_undo_history(
+        state.inner(),
+        &path,
+        pf.version,
+    );
     {
         let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
         p.name = project_name_from_path(&path);
@@ -1041,6 +1081,12 @@ pub(super) fn open_project(
         }
         update_window_title(&window, &p.name, p.dirty);
     }
+    // 记事本附件：装载登记表（字节随工程文件一起读入，锁已释放）。
+    crate::commands::notebook::bind_assets_on_open(state.inner(), pf.notebook_assets.clone());
+    // 渲染缓存的工程归属：用于"仅清理当前工程的缓存"。
+    crate::render_cache::set_current_project_id(crate::render_cache::project_id_for_path(
+        Some(&project_path),
+    ));
     // 防御性修复旧版本工程文件可能存在的“工程音阶与 Tempo Map 初始点分叉”
     // （早期撤销路径不回写工程记录，保存的文件可能带有不一致的 base_scale）：
     // 初始点即工程基准记录，加载后以它为准同步工程记录（含 BPM/拍号/音阶）。
@@ -1050,8 +1096,13 @@ pub(super) fn open_project(
         state.sync_project_record_from_tempo_map(&mut tl, &mut p);
     }
     sync_runtime_stretch_settings(state.inner());
+    // 后台声道扫描：把"还没有权威判定档案"的 Take 折叠为单声道。放在这里而不是
+    // `finalize_timeline_for_session` 里同步做，是因为同步全量解码会让大工程在
+    // 打开时冻结分钟级，而任何一次读不到（文件缺失 / 网络盘未挂载）都会因为工程
+    // 随即被保存成 v5 而永久漏判。扫描完成后再请求后台预渲染（折叠会失效渲染
+    // 缓存，反过来做会让先渲染出来的结果全部白做）。
     if let Some(handle) = state.app_handle.get() {
-        crate::commands::playback::request_background_render(handle);
+        crate::commands::channel_scan::request_channel_scan(handle);
     }
 
     // 持久化最近工程列表
@@ -1207,6 +1258,20 @@ pub(super) fn save_project_to_path(
 pub(super) fn close_window(window: Window) -> serde_json::Value {
     let _ = window.close();
     ok_bool()
+}
+
+/// 写入记事本内容并登记为一步可撤销操作。
+///
+/// 连续写入在后端按**历史结构**合并（前沿已是「编辑记事本」步则并入，见
+/// `AppState::set_notes_markdown`），不依赖任何前端时序。记事本不在时间线
+/// 上，因此这里既不触碰音频引擎，也不返回时间线载荷 —— 只回工程元信息供
+/// 前端同步。
+pub(super) fn set_project_notes(state: State<'_, AppState>, notes_markdown: String) -> serde_json::Value {
+    state.set_notes_markdown(notes_markdown);
+    serde_json::json!({
+        "ok": true,
+        "project": state.project_meta_payload(),
+    })
 }
 
 pub(super) fn set_project_base_scale(

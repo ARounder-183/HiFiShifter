@@ -69,6 +69,16 @@ export interface TimelineTick {
      * Tempo Map 变化点位置的刻度强制携带标签（见 buildTimelineTicks §4）。
      */
     readonly showLabel: boolean;
+    /**
+     * 标签文本的最大宽度（px）：到**下一条带标签刻度**的间距减去留白；
+     * 没有下一条时为 `null`（不限宽）。
+     *
+     * 【为什么由生成器算】渲染层曾经在渲染期两两比较"可见切片里的相邻标签"：
+     * 切片边界随滚动移动，于是同一个标签的宽度（甚至可见性）会随滚动位置变化 ——
+     * 这正是"标尺文字时有时无"的来源之一。间距只依赖刻度序列本身，应当在生成
+     * 阶段一次算定。
+     */
+    readonly labelMaxWidth: number | null;
     /** 主单位标签文本。 */
     readonly primaryLabel: string;
     /** 副单位标签文本（未启用副单位时为 null）。 */
@@ -243,6 +253,8 @@ export function buildTimelineTicks(args: {
     }
 
     // ── 3. 标签步长与格式化 ────────────────────────────────────────
+    // 纯函数：只依赖 pxPerBeat / grid / 拍号 / 最小间距。缩放是单调的，因此档位在
+    // 一次缩放手势里也单调变化，不会来回跳 —— 不需要额外的"记忆"。
     const labelStepBeats = selectRulerStep({
         pxPerBeat,
         grid,
@@ -380,6 +392,7 @@ export function buildTimelineTicks(args: {
             isBarStart: entry.isBar,
             isStrongGridLine: entry.isBar,
             showLabel: onLabelStep,
+            labelMaxWidth: null,
             primaryLabel: hasTempoMap
                 ? formatTempoRulerTick(args.primaryUnit, entry.sec, ctx)
                 : formatRulerTick(args.primaryUnit, beat, ctx),
@@ -452,6 +465,76 @@ export function buildTimelineTicks(args: {
                     ticks[i - 1] = { ...prev, showLabel: false };
                 }
             }
+        }
+    }
+
+    // ── 5. 标签版式：间距不足者让位 + 计算最大宽度 ──────────────────
+    // 这一步曾在渲染层（TimeRulerMarks）做，判据是"**可见切片**里相邻标签的间距"。
+    // 切片边界随滚动移动 ⇒ 同一个标签的可见性会随滚动位置改变（右边缘的标签没有
+    // "下一条"，因此永不被隐藏；它一进入切片内部就可能被隐藏）—— 这正是"标尺
+    // 文字时有时无"的机制之一。间距只取决于刻度序列本身，必须一次算定。
+    //
+    // 让位规则与渲染层原语义一致：间距小于隐藏阈值时**左侧让位**（保证右侧标签
+    // 完整），并沿序列继续与下一条比较（级联）。
+    const labeledIndexes: number[] = [];
+    for (let i = 0; i < ticks.length; i += 1) if (ticks[i].showLabel) labeledIndexes.push(i);
+    // 让位：从左到右单趟推进，遇到间距不足就把**左侧**让掉（保证右侧完整），
+    // 并与新的"最近保留者"继续比较（级联收敛）。
+    const surviving: number[] = [];
+    for (const index of labeledIndexes) {
+        const previous = surviving[surviving.length - 1];
+        if (
+            previous !== undefined &&
+            ticks[index].contentPx - ticks[previous].contentPx < RULER_LABEL_HIDDEN_GAP_PX
+        ) {
+            ticks[previous] = { ...ticks[previous], showLabel: false, labelMaxWidth: 0 };
+            surviving.pop();
+        }
+        surviving.push(index);
+    }
+    // 版式：宽度取到**下一条保留标签**的间距（减去留白）；最后一条不限宽。
+    for (let k = 0; k < surviving.length; k += 1) {
+        const index = surviving[k];
+        const nextIndex = surviving[k + 1];
+        const maxWidth =
+            nextIndex === undefined
+                ? null
+                : Math.max(0, ticks[nextIndex].contentPx - ticks[index].contentPx - 6);
+        ticks[index] = { ...ticks[index], labelMaxWidth: maxWidth };
+    }
+
+    // ── 6. 兜底：绝不整片无标签 ────────────────────────────────────
+    // 上面所有规则都是"隐藏"方向的操作，极端参数下可能把所有标签都隐藏掉，用户
+    // 看到的就是"标尺文字整片消失"。恢复按最粗的粒度（小节起点）取候选，保证
+    // 任何缩放/网格组合下至少每 `minLabelSpacingPx` 有一个标签；窗口内完全没有
+    // 小节起点时（Tempo Map 段极短等）才退回全部刻度，维持"绝不整片无标签"。
+    // 恢复标签的宽度与 §5 同一约定：到下一条恢复标签的间距减去留白、最后一条
+    // 不限宽 —— 若不限宽（null），相邻两条恢复标签会互相重叠。
+    if (ticks.length > 0 && !ticks.some((tick) => tick.showLabel)) {
+        const candidates: number[] = [];
+        for (let i = 0; i < ticks.length; i += 1) if (ticks[i].isBarStart) candidates.push(i);
+        if (candidates.length === 0) {
+            for (let i = 0; i < ticks.length; i += 1) candidates.push(i);
+        }
+        const restored: number[] = [];
+        for (const index of candidates) {
+            const last = restored[restored.length - 1];
+            if (
+                last !== undefined &&
+                ticks[index].contentPx - ticks[last].contentPx < args.minLabelSpacingPx
+            ) {
+                continue;
+            }
+            restored.push(index);
+        }
+        for (let k = 0; k < restored.length; k += 1) {
+            const index = restored[k];
+            const nextIndex = restored[k + 1];
+            const maxWidth =
+                nextIndex === undefined
+                    ? null
+                    : Math.max(0, ticks[nextIndex].contentPx - ticks[index].contentPx - 6);
+            ticks[index] = { ...ticks[index], showLabel: true, labelMaxWidth: maxWidth };
         }
     }
 

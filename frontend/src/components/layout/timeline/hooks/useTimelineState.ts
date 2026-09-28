@@ -23,10 +23,11 @@ import { shallowEqual } from "react-redux";
 import { timelineViewportBus } from "../../../../utils/timelineViewportBus";
 import { timelineViewportSync } from "../../../../utils/timelineViewportSync";
 import { IS_MAC, isPrimaryModifierDown } from "../../../../utils/platform";
-import { readDevicePixelRatio, snapToDevicePx } from "../../../../utils/devicePixelLine";
 import { nativeScrollbarZoneAt } from "../../../../utils/nativeScrollbar";
 
-import { TICK_WINDOW_STEP_PX } from "../runtime/buildTimelineTicks.js";
+import { createTickAxis } from "../runtime/tickAxis.js";
+import { rulerLayerTranslatePx } from "../../renderKernel/timelineAxis.js";
+import { readDevicePixelRatio } from "../../../../utils/devicePixelLine";
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
 import { fileBrowserApi } from "../../../../services/api/fileBrowser";
 import { seekPlayhead, setplayheadSec } from "../../../../features/session/sessionSlice";
@@ -48,7 +49,6 @@ import {
 import type { TimelineTick } from "../runtime/buildTimelineTicks.js";
 import { buildTimelineTicks } from "../runtime/buildTimelineTicks.js";
 import { REACT_SCROLL_STEP_PX } from "../runtime/timelineRenderModel.js";
-import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
 import {
     snapTimelinePosition,
     snapTimelineClipMove,
@@ -522,63 +522,70 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
      * 内核模式取内核真值（位置与缩放同一次 `scroll.get()`，天然一致，且与已提交的
      * DOM 一致）；无内核（旧 DOM 分支）时才退回 ref。
      */
-    function livePxPerSec(): number {
-        const host = kernelHostRef.current;
-        if (host !== null) return host.getViewport().pxPerSec;
-        return pxPerSecRef.current;
-    }
+    // 以 useCallback 稳定引用（依赖仅含稳定 ref）：供只注册一次的订阅回调 /
+    // useCallback 化的同步入口长期持有，引用抖动会连带放大（与 `syncScrollLeft`
+    // 同一口径）。
+    const livePxPerSec = React.useCallback(
+        function livePxPerSec(): number {
+            const host = kernelHostRef.current;
+            if (host !== null) return host.getViewport().pxPerSec;
+            return pxPerSecRef.current;
+        },
+        [kernelHostRef],
+    );
 
-    const syncScrollLeft = React.useCallback(function syncScrollLeft(next: number) {
-        scrollLeftRef.current = next;
-        if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
-            timelineViewportSync.setViewport(
-                {
-                    scrollLeft: next,
-                    pxPerSec: livePxPerSec(),
-                },
-                TIMELINE_SYNC_ORIGIN,
+    const syncScrollLeft = React.useCallback(
+        function syncScrollLeft(next: number) {
+            scrollLeftRef.current = next;
+            if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
+                timelineViewportSync.setViewport(
+                    {
+                        scrollLeft: next,
+                        pxPerSec: livePxPerSec(),
+                    },
+                    TIMELINE_SYNC_ORIGIN,
+                );
+            }
+            if (rulerContentRef.current) {
+                // 平移量吸附到设备像素（见 `rulerLayerTranslatePx`）：与内核同一约定，
+                // 否则层内标尺竖线在系统缩放率 > 1 时粗细不一。
+                rulerContentRef.current.style.transform = `translateX(${-rulerLayerTranslatePx(next, readDevicePixelRatio())}px)`;
+            }
+            // 标尺播放头线**不在这里写**：它由内核在 draw() 内与轨道区播放头一起写
+            // （同一次帧提交、同一份内核视口、同一个 `playheadLineLeftPx`）。
+            //
+            // 【为什么必须收走】这里曾用 `playheadSec × pxPerSec`（**内容坐标**）写同一条
+            // 线；而线现在位于内容平移层之外（视口坐标），两者差一个 scrollLeft。同一条
+            // 线一度有四个写者、两套坐标，内核的去重逻辑还会因此跳过自己的正确写入 ——
+            // 这正是"标尺线与主体线不像同一条线"的根因之一。
+            // ★ 立即广播视口变化 → sticky 画布层同步重绘（绕过 React）
+            timelineViewportBus.emit(
+                next,
+                pxPerSecRef.current,
+                viewportWidthRef.current,
+                scrollTopPxRef.current,
+                rowHeightRef.current,
             );
-        }
-        if (rulerContentRef.current) {
-            rulerContentRef.current.style.transform = `translateX(${-next}px)`;
-        }
-        const playheadLeftPx =
-            (Number(sessionRef.current.playheadSec ?? 0) || 0) * pxPerSecRef.current;
-        // 标尺播放头写入统一设备像素吸附（readDevicePixelRatio 每次现读）：分数
-        // DPR 下不吸附的落点相位随滚动/播放变化，线宽 1↔2 物理像素交替。
-        // 与 React 渲染侧（标尺播放头 TimeRulerPlayhead）同一吸附函数。
-        // 轨道区播放头不在这里写：它由内核自绘，滚动经 scroll 订阅自行标脏。
-        const dpr = readDevicePixelRatio();
-        if (rulerPlayheadLineRef.current) {
-            rulerPlayheadLineRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
-        }
-        if (rulerPlayheadHeadRef.current) {
-            rulerPlayheadHeadRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
-        }
-        // ★ 立即广播视口变化 → sticky 画布层同步重绘（绕过 React）
-        timelineViewportBus.emit(
-            next,
-            pxPerSecRef.current,
-            viewportWidthRef.current,
-            scrollTopPxRef.current,
-            rowHeightRef.current,
-        );
-        // 背景网格无需在这里单独通知：它已注册为统一帧提交的图层，上面的
-        // emit 会由提交器按固定顺序调用（携带 scrollTop，供 sticky 网格裁剪
-        // 轨道区底边）。提交入口唯一，可避免新增视口变更路径时漏通知网格。
-        // 用 rAF 合并状态更新，保证自动滚屏可达 60Hz 且避免同步抖动
-        if (scrollStateRafRef.current == null) {
-            scrollStateRafRef.current = requestAnimationFrame(() => {
-                scrollStateRafRef.current = null;
-                const next = scrollLeftRef.current;
-                if (Math.abs(next - reactCommittedScrollLeftRef.current) < REACT_SCROLL_STEP_PX) {
-                    return;
-                }
-                reactCommittedScrollLeftRef.current = next;
-                setScrollLeft(next);
-            });
-        }
-    }, []);
+            // 背景网格无需在这里单独通知：它已注册为统一帧提交的图层，上面的
+            // emit 会由提交器按固定顺序调用（携带 scrollTop，供 sticky 网格裁剪
+            // 轨道区底边）。提交入口唯一，可避免新增视口变更路径时漏通知网格。
+            // 用 rAF 合并状态更新，保证自动滚屏可达 60Hz 且避免同步抖动
+            if (scrollStateRafRef.current == null) {
+                scrollStateRafRef.current = requestAnimationFrame(() => {
+                    scrollStateRafRef.current = null;
+                    const next = scrollLeftRef.current;
+                    if (
+                        Math.abs(next - reactCommittedScrollLeftRef.current) < REACT_SCROLL_STEP_PX
+                    ) {
+                        return;
+                    }
+                    reactCommittedScrollLeftRef.current = next;
+                    setScrollLeft(next);
+                });
+            }
+        },
+        [livePxPerSec],
+    );
 
     /**
      * 水平滚动位置的**逐帧**同步（内核模式下由宿主每帧通知）。
@@ -596,25 +603,28 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
      * 因此把两件事拆开：本函数只做"写 ref + 广播共享视口"（几个赋值 + 一次
      * emit，不进 React），可以安全逐帧调用；React 对齐仍走量化路径。
      */
-    const syncScrollLeftFrame = React.useCallback(function syncScrollLeftFrame(next: number) {
-        scrollLeftRef.current = next;
-        timelineViewportBus.emit(
-            next,
-            pxPerSecRef.current,
-            viewportWidthRef.current,
-            scrollTopPxRef.current,
-            rowHeightRef.current,
-        );
-        if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
-            timelineViewportSync.setViewport(
-                {
-                    scrollLeft: next,
-                    pxPerSec: livePxPerSec(),
-                },
-                TIMELINE_SYNC_ORIGIN,
+    const syncScrollLeftFrame = React.useCallback(
+        function syncScrollLeftFrame(next: number) {
+            scrollLeftRef.current = next;
+            timelineViewportBus.emit(
+                next,
+                pxPerSecRef.current,
+                viewportWidthRef.current,
+                scrollTopPxRef.current,
+                rowHeightRef.current,
             );
-        }
-    }, []);
+            if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
+                timelineViewportSync.setViewport(
+                    {
+                        scrollLeft: next,
+                        pxPerSec: livePxPerSec(),
+                    },
+                    TIMELINE_SYNC_ORIGIN,
+                );
+            }
+        },
+        [livePxPerSec],
+    );
 
     // ── syncScrollTop：竖直轴的同帧提交 ──────────────────────────
     // sticky 画布层（clip 体 / 波形面）不随滚动容器原生移动，竖直滚动时
@@ -739,7 +749,13 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             unsubscribe();
             pendingTimelineSyncViewportRef.current = null;
         };
-    }, [s.paramEditorSyncTimeline, syncScrollLeft]);
+    }, [
+        s.paramEditorSyncTimeline,
+        syncScrollLeft,
+        // 两者均为稳定引用（ref 对象 / useMemo 一次创建），加入不会引发重订阅。
+        kernelHostRef,
+        viewportAccess,
+    ]);
 
     // 启用同步时，立即把轨道视图当前的水平位置与缩放写入共享视口作为基准。
     // 必须用 layout effect（而非被动 effect）：挂载/切换都要在**首帧绘制前**
@@ -757,7 +773,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
                 TIMELINE_SYNC_ORIGIN,
             );
         }
-    }, [s.paramEditorSyncTimeline]);
+    }, [livePxPerSec, s.paramEditorSyncTimeline]);
 
     // 同步视口必须等内容宽度按新 pxPerSec 更新后再落到 DOM。
     // 否则设置 scroller.scrollLeft 时会被浏览器钳回旧的最大滚动位置，
@@ -944,20 +960,24 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     // 刻度窗口量化：见 `rulerScrollLeft` 的注释。
     // 步长必须**小于**下游消费者的缓冲（标尺为 max(320, viewportWidth*0.5)），
     // 这样即使按量化的位置生成刻度，视口也始终被完整覆盖。
-    const tickAnchorPx = Math.floor(scrollLeft / TICK_WINDOW_STEP_PX) * TICK_WINDOW_STEP_PX;
+    // 从量化锚点起、按「视口 + 一个步长」取刻度：锚点 ≤ scrollLeft <
+    // 锚点 + 步长，因此覆盖区间必然包含真实视口 [scrollLeft, scrollLeft +
+    // viewportWidth]，多出来的只有步长那么宽的一部分。
+    //
+    // 轴与锚点统一经 `createTickAxis` 构造（与参数编辑器同一条约定），返回的
+    // `anchorPx` 必须原样作为标尺的 `scrollLeft`，否则标尺切片的窗口与刻度生成的
+    // 窗口不一致（历史上参数编辑器就是这样漏掉宽度补偿的）。
+    const tickAxis = useMemo(
+        () =>
+            createTickAxis({ pxPerSec, scrollLeftPx: scrollLeft, viewportWidthPx: viewportWidth }),
+        [pxPerSec, scrollLeft, viewportWidth],
+    );
+    const tickAnchorPx = tickAxis.anchorPx;
 
     const timelineTicks = useMemo(() => {
         const beatsPerBar = Math.max(1, Math.round(s.beats || 4));
         return buildTimelineTicks({
-            // 从量化锚点起、按「视口 + 一个步长」取刻度：锚点 ≤ scrollLeft <
-            // 锚点 + 步长，因此覆盖区间必然包含真实视口 [scrollLeft,
-            // scrollLeft + viewportWidth]，多出来的只有步长那么宽的一部分。
-            axis: createTimelineAxis({
-                pxPerSec,
-                scrollLeftPx: tickAnchorPx,
-                viewportWidthPx:
-                    (Number.isFinite(viewportWidth) ? viewportWidth : 0) + TICK_WINDOW_STEP_PX,
-            }),
+            axis: tickAxis.axis,
             bpm: s.bpm,
             beatsPerBar,
             grid: s.grid,
@@ -977,9 +997,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         s.rulerLabelSpacingPx,
         s.timelineSnap,
         s.tempoMap,
-        viewportWidth,
-        pxPerSec,
-        tickAnchorPx,
+        tickAxis,
     ]);
 
     // ── clipsByTrackId ───────────────────────────────────────

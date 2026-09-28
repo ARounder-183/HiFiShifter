@@ -34,7 +34,6 @@ import {
     setSelectedClip,
     setSelectedClipPreservingTrack,
 } from "../../../../features/session/sessionSlice";
-import { beginHoldRepeat, selectMergedKeybindings } from "../../../../features/keybindings";
 import { getActiveSurface } from "../../../../features/uiFocus/focusSurface";
 import { resolveHorizontalWheelZoom } from "../runtime/timelineScrollRange";
 import { gridStepBeats, MIN_PX_PER_SEC, MAX_PX_PER_SEC } from "../";
@@ -203,12 +202,14 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                     return;
                 }
                 case "paste": {
+                    // 只粘一次。**长按重复不在这里布防**：holdRepeat 只靠
+                    // keyup / blur 终止，而本事件的来源不止键盘 —— 菜单里的
+                    // 「粘贴」与记事本暂存块的「插入到时间轴」都是合成派发，
+                    // 根本没有键可以松。在这里无条件布防，等于给它们装上一个
+                    // 永远停不下来的 50ms 定时器：点一次就无限插入。
+                    // 布防归派发方（App 的键盘路径，那里确实有键按着），与
+                    // edit.pasteTracks 的既有分工一致。
                     pasteClipsAtPlayhead();
-                    // 长按重复：首次立即粘贴，持续按住后按统一节奏连续重复
-                    // （holdRepeat 管理器，与「添加轨道」等共用同一套长按逻辑）。
-                    // 仅作用于时间轴粘贴路径（参数编辑器粘贴不重复）。
-                    const pasteKb = selectMergedKeybindings(store.getState())["clip.paste"];
-                    if (pasteKb) beginHoldRepeat(pasteKb, pasteClipsAtPlayhead);
                     return;
                 }
                 case "pasteTracks": {
@@ -353,7 +354,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 "hifi:selectAdjacentTrack",
                 onSelectAdjacentTrack as EventListener,
             );
-    }, [dispatch, rowHeight, scrollRef, sessionRef, trackListScrollRef]);
+    }, [dispatch, rowHeight, scrollRef, sessionRef, trackListScrollRef, viewport]);
 
     // ── hifi:nudgePlayhead ───────────────────────────────────
     useEffect(() => {

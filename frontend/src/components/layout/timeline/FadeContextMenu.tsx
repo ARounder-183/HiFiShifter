@@ -1,3 +1,4 @@
+// hs-interaction-exempt: 淡变曲率滑块位于自绘 SVG 面板内（与拖动/预览联动），已有滚轮 + 精细调整接线；原语不适用。
 /**
  * FadeContextMenu — 淡入淡出包络专属上下文菜单。
  *
@@ -16,6 +17,7 @@
 /* eslint-disable react-refresh/only-export-components -- 文件同时导出组件与 Hook/常量（刷新边界按文件粒度接受） */
 import React, { useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
+import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { registerDragAbort } from "./gestureFocusGuard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
@@ -188,6 +190,7 @@ const CurvatureSlider: React.FC<{
             </svg>
             <input
                 type="range"
+                className="qt-range"
                 min={-1}
                 max={1}
                 step={0.01}
@@ -204,7 +207,7 @@ const CurvatureSlider: React.FC<{
                 onChange={(e) => onChange(Number(e.currentTarget.value))}
                 style={{ flex: 1 }}
             />
-            <span className="text-[11px] tabular-nums" style={{ minWidth: 44, textAlign: "right" }}>
+            <span className="text-qt-xs tabular-nums" style={{ minWidth: 44, textAlign: "right" }}>
                 {(dir >= 0 ? "+" : "") + dir.toFixed(2)}
             </span>
         </div>
@@ -285,6 +288,7 @@ export const FadeContextMenu: React.FC<{
 }> = ({ x, y, primary, secondary, onClose, onShapeChange, onDirChange }) => {
     const { t } = useI18n();
     const menuRef = useRef<HTMLDivElement>(null);
+    useMenuKeyboard(menuRef);
     // 底部提示展示用户实际配置的曲率修饰键（如 "Alt"）。
     const curvatureKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.fadeCurvatureDrag"),
@@ -334,7 +338,7 @@ export const FadeContextMenu: React.FC<{
             {...{ [FADE_CONTEXT_MENU_ATTR]: "1" }}
             data-hs-floating-menu="1"
             data-hs-context-menu="1"
-            className="fixed z-[999] min-w-[220px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+            className="fixed z-qt-menu min-w-[220px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
             style={{ left: x, top: y }}
             onContextMenu={(e) => e.preventDefault()}
             onPointerDown={(e) => e.stopPropagation()}
@@ -342,7 +346,7 @@ export const FadeContextMenu: React.FC<{
             {secondary ? (
                 // 交叉点：双列 —— 先前者淡出、后后者淡入。
                 <>
-                    <div className="px-2 py-1 text-[10px] text-qt-text/50 select-none">
+                    <div className="px-2 py-1 text-qt-micro text-qt-text/50 select-none">
                         {labelFor(primary)}
                     </div>
                     <SideColumn
@@ -353,7 +357,7 @@ export const FadeContextMenu: React.FC<{
                         t={(key) => t(key as MessageKey)}
                     />
                     <div className="my-1 border-t border-qt-divider" />
-                    <div className="px-2 py-1 text-[10px] text-qt-text/50 select-none">
+                    <div className="px-2 py-1 text-qt-micro text-qt-text/50 select-none">
                         {labelFor(secondary)}
                     </div>
                     <SideColumn
@@ -366,7 +370,7 @@ export const FadeContextMenu: React.FC<{
                 </>
             ) : (
                 <>
-                    <div className="px-2 py-1 text-[10px] text-qt-text/50 select-none">
+                    <div className="px-2 py-1 text-qt-micro text-qt-text/50 select-none">
                         {labelFor(primary)}
                     </div>
                     <SideColumn
@@ -379,7 +383,7 @@ export const FadeContextMenu: React.FC<{
                 </>
             )}
             {/* 形状切换重置曲率的语义提示（与 Clip 菜单一致的行为说明）。 */}
-            <div className="px-2 pt-1 pb-0.5 text-[9px] text-qt-text/40 select-none">
+            <div className="px-2 pt-1 pb-0.5 text-qt-3xs text-qt-text/40 select-none">
                 {curvatureHint}
             </div>
         </div>,

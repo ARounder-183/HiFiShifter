@@ -11,6 +11,7 @@ import {
 } from "./focusRouting";
 import { getActiveSurface } from "../uiFocus/focusSurface";
 import { consumeHoldRepeatKeyDown } from "./holdRepeat";
+import { isShortcutSuppressed } from "../../ui/shortcutScope";
 import {
     matchesKeybinding,
     matchesKeybindingAllowingFineModifier,
@@ -43,6 +44,69 @@ function isEditableTarget(target: EventTarget | null): boolean {
     if (el.isContentEditable) return true;
     if (el.closest?.('input,textarea,select,[contenteditable="true"]')) return true;
     return false;
+}
+
+/**
+ * 弹出式复合表面：只有**打开**时才拥有方向键。
+ *
+ * 【为什么必须排除 `data-state="closed"`】Radix 的菜单内容关闭后**仍留在 DOM 里**
+ * （实测：关掉「选项」菜单后仍能查到 1 个 `role="menu"`，且焦点还停在它内部）。
+ * 若把"存在"当作"打开"，方向键的全局绑定会被永久屏蔽 —— 时间轴的 ←/→ seek
+ * 直接失效。本仓库手写的菜单不写 `data-state` 且只在打开期间挂载，因此
+ * "存在即打开"仍然成立。
+ */
+const POPUP_SURFACE_SELECTOR = [
+    '[role="menu"]:not([data-state="closed"])',
+    '[role="menubar"]:not([data-state="closed"])',
+    '[role="listbox"]:not([data-state="closed"])',
+].join(",");
+
+/** 常驻的复合表面：挂在 DOM 里就说明它在用，存在即拥有方向键。 */
+const PERSISTENT_WIDGET_SELECTOR = [
+    '[role="tablist"]',
+    '[role="radiogroup"]',
+    '[role="slider"]',
+    '[role="spinbutton"]',
+    '[role="grid"]',
+    '[role="tree"]',
+    '[role="treegrid"]',
+].join(",");
+
+/**
+ * 拥有方向键的容器。两类合起来用：焦点落在其中时由控件自己处理按键。
+ *
+ * 覆盖的角色是标准里明确拥有方向键的那些。本仓库自己的停靠标签条与手写菜单
+ * 都在其中；Radix 的 Select / Slider / Menu 也各自渲染这些角色，因此一并受益。
+ */
+const ARROW_OWNING_SELECTOR = `${POPUP_SURFACE_SELECTOR},${PERSISTENT_WIDGET_SELECTOR}`;
+
+/** 会被复合控件接管的按键（方向键 + 标准里同组的首尾/翻页键）。 */
+const COMPOSITE_WIDGET_KEYS = new Set([
+    "arrowup",
+    "arrowdown",
+    "arrowleft",
+    "arrowright",
+    "home",
+    "end",
+    "pageup",
+    "pagedown",
+]);
+
+function ownsArrowKeys(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    if (!el?.closest) return false;
+    return el.closest(ARROW_OWNING_SELECTOR) !== null;
+}
+
+/**
+ * 弹出式复合表面（菜单 / 下拉列表）当前是否**打开**。
+ *
+ * 【为什么不能只看焦点】右键菜单打开时**焦点并不在菜单里** —— 它还在被右键
+ * 的那个元素上（浏览器原生右键菜单也是这个行为）。只检查焦点归属会漏掉这一整
+ * 类：菜单开着，方向键却去 seek 了，菜单里一项都动不了（实测确认过）。
+ */
+function hasOpenPopupSurface(): boolean {
+    return document.querySelector(POPUP_SURFACE_SELECTOR) !== null;
 }
 
 /**
@@ -100,16 +164,31 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
 
             if (isEditableTarget(document.activeElement) || isEditableTarget(e.target)) return;
 
-            // 快捷键设置对话框打开时，阻塞所有快捷键
-            if (document.body.hasAttribute("data-keybindings-dialog-open")) return;
+            /*
+             * 任一模态表面打开时阻塞所有全局快捷键。
+             *
+             * 走统一的引用计数作用域（`src/ui/shortcutScope.ts`），
+             * 而不是此前三个各自为政的 body 属性：那时 42 个对话框里只有 3 个
+             * 接入了抑制，其余 39 个按空格会触发播放、按字母会触发时间轴动作。
+             * `AppDialog` 现在自动接入，新对话框默认正确。
+             */
+            if (isShortcutSuppressed()) return;
 
-            // Quick Search 打开时，交给弹窗自身输入框处理（避免 ↑/↓ 与时间轴缩放冲突）
-            if (document.body.hasAttribute("data-quick-search-open")) return;
+            const key = normalizeEventKey(e);
 
-            // 静音检测等模态对话框打开时，阻塞所有快捷键：捕获阶段的 window
-            // 监听先于对话框内部处理，箭头/空格/字母键否则会穿透到对话框背后
-            // （暗改轨道选择 / 误触播放 / 触发时间轴动作）。
-            if (document.body.hasAttribute("data-silence-dialog-open")) return;
+            /*
+             * 复合控件（标签条 / 菜单 / 下拉 / 滑杆…）自己处理方向键，全局绑定让路。
+             * 必须在下面的 `resolveActionByFocus` 之前返回 —— 那条路径会
+             * `stopPropagation()`，让控件再也收不到这个按键。
+             */
+            if (COMPOSITE_WIDGET_KEYS.has(key)) {
+                const owned =
+                    ownsArrowKeys(e.target) ||
+                    ownsArrowKeys(document.activeElement) ||
+                    // 右键菜单打开时焦点仍在触发元素上，只能靠"表面是否打开"判断。
+                    hasOpenPopupSurface();
+                if (owned) return;
+            }
 
             // 直线/颤音拖拽期间，命中振幅/频率方向键时，交给参数编辑器本地监听处理。
             if (document.body.hasAttribute("data-piano-roll-vibrato-drag-active")) {
@@ -141,7 +220,6 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
 
             const domain = computeFocusDomain();
 
-            const key = normalizeEventKey(e);
             const isArrowKey =
                 key === "arrowup" ||
                 key === "arrowdown" ||

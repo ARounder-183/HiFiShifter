@@ -1,0 +1,595 @@
+/*
+ * 停靠窗体系统样式。
+ *
+ * 全部走 qt 主题变量（`--qt-*`，见 `index.css`），因此随外观设置与明暗主题
+ * 自动变化 —— 不在组件里写死颜色。
+ *
+ * 【为什么用独立 CSS 而不是 Tailwind 工具类】布局树渲染出的层级很深，且大量
+ * 状态由 `data-*` 属性驱动（`data-active` / `data-dragging` / `data-dir`）。
+ * 用属性选择器集中表达，比在每个 JSX 节点上拼条件类名更短、更不易漂移。
+ */
+
+.hs-dock-root {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.hs-dock-split {
+    display: flex;
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.hs-dock-split[data-dir="row"] {
+    flex-direction: row;
+}
+
+.hs-dock-split[data-dir="col"] {
+    flex-direction: column;
+}
+
+/*
+ * 分割线两侧的容器。
+ *
+ * `display: flex` 是**必须**的：本元素是 `.hs-dock-split` 的 flex 项（尺寸由行内
+ * 的 flexGrow/flexBasis 决定），但它同时必须是**自己子元素的 flex 容器** ——
+ * 子元素（标签组或嵌套分割）用 `flex: 1 1 0` 撑满它。少了这一行，子元素的
+ * flex 属性无人解释，高度会塌成内容高度（表现为面板只画出一条 12px 的抓手，
+ * 内容区完全不可见）。
+ */
+.hs-dock-pane {
+    display: flex;
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* ── 分隔条 ─────────────────────────────────────────────────────── */
+
+.hs-dock-splitter {
+    flex: 0 0 auto;
+    position: relative;
+    background: var(--qt-border);
+    transition: background 90ms linear;
+}
+
+.hs-dock-splitter::after {
+    /* 热区比可见厚度宽：4px 的条直接按像素判定很难点中。 */
+    content: "";
+    position: absolute;
+    inset: 0;
+}
+
+.hs-dock-splitter[data-dir="row"] {
+    width: 4px;
+    cursor: col-resize;
+}
+
+.hs-dock-splitter[data-dir="col"] {
+    height: 4px;
+    cursor: row-resize;
+}
+
+.hs-dock-splitter[data-dir="row"]::after {
+    left: -3px;
+    right: -3px;
+}
+
+.hs-dock-splitter[data-dir="col"]::after {
+    top: -3px;
+    bottom: -3px;
+}
+
+.hs-dock-splitter:hover,
+.hs-dock-splitter[data-dragging="true"] {
+    background: var(--accent-8);
+}
+
+/* ── 标签组 ─────────────────────────────────────────────────────── */
+
+.hs-dock-tabset {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    position: relative;
+    background: var(--qt-window);
+}
+
+.hs-dock-tabbar {
+    display: flex;
+    align-items: stretch;
+    flex: 0 0 auto;
+    height: var(--qt-bar-compact);
+    background: var(--qt-panel);
+    border-bottom: 1px solid var(--qt-border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+}
+
+.hs-dock-tabbar::-webkit-scrollbar {
+    height: 0;
+}
+
+/* 标签行位置：下方（默认）。
+   `order` 让 DOM 顺序不必改变（焦点顺序仍是 DOM 顺序），只改视觉顺序：
+   槽位 1、标签行 2。 */
+.hs-dock-tabset[data-tab-position="bottom"] .hs-dock-slot {
+    order: 1;
+}
+
+.hs-dock-tabbar[data-position="bottom"] {
+    border-bottom: none;
+    border-top: 1px solid var(--qt-border);
+    order: 2;
+}
+
+/* 激活下划线跟着标签行换边：在上方时贴下缘，在下方时贴上缘。 */
+.hs-dock-tabbar[data-position="bottom"] .hs-dock-tab[data-active="true"] {
+    box-shadow: inset 0 2px 0 var(--accent-9);
+}
+
+/* 折叠态：内容槽位不渲染，标签行是唯一可见的 chrome。 */
+.hs-dock-tabbar[data-position="bottom"][data-collapsed="true"] {
+    border-top: 1px solid var(--qt-border);
+}
+
+.hs-dock-tabbar[data-collapsed="true"] {
+    border-bottom: none;
+}
+
+.hs-dock-tab {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+    max-width: 200px;
+    padding: 0 6px;
+    border-right: 1px solid var(--qt-border);
+    color: var(--qt-text-muted);
+    font-size: var(--qt-fs-xs);
+    line-height: 1;
+    white-space: nowrap;
+    user-select: none;
+    cursor: default;
+}
+
+.hs-dock-tab:hover {
+    background: var(--qt-hover);
+    color: var(--qt-text);
+}
+
+.hs-dock-tab[data-active="true"] {
+    background: var(--qt-base);
+    color: var(--qt-text);
+    box-shadow: inset 0 -2px 0 var(--accent-9);
+}
+
+.hs-dock-tab[data-dragging="true"] {
+    opacity: 0.45;
+}
+
+.hs-dock-tab-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.hs-dock-tab-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 2px;
+    opacity: 0;
+    flex: 0 0 auto;
+}
+
+.hs-dock-tab:hover .hs-dock-tab-close,
+.hs-dock-tab[data-active="true"] .hs-dock-tab-close {
+    opacity: 0.75;
+}
+
+.hs-dock-tab-close:hover {
+    background: var(--qt-danger-bg);
+    color: var(--qt-danger-text);
+    opacity: 1;
+}
+
+/* 键盘焦点也是"看得见"的一种。否则 Tab 到关闭按钮时它仍是 opacity: 0，
+   焦点环画在一个不可见的元素上，等于没有焦点提示。 */
+.hs-dock-tab-close:focus-visible {
+    opacity: 1;
+}
+
+.hs-dock-tabbar-spacer {
+    flex: 1 1 auto;
+    min-width: 8px;
+}
+
+.hs-dock-tabbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 0 3px;
+    flex: 0 0 auto;
+}
+
+.hs-dock-tabbar-action {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 3px;
+    color: var(--qt-text-muted);
+}
+
+.hs-dock-tabbar-action:hover {
+    background: var(--qt-hover);
+    color: var(--qt-text);
+}
+
+/* 折叠态：只剩标签条，内容区收起到 0。 */
+.hs-dock-tabset[data-collapsed="true"] .hs-dock-slot {
+    display: none;
+}
+
+.hs-dock-slot {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* 宿主被搬进来后填满槽位；尺寸由 `panelHostRegistry` 管理。 */
+.hs-dock-slot > [data-dock-host] {
+    width: 100%;
+    height: 100%;
+}
+
+/* ── 浮动窗体 ───────────────────────────────────────────────────── */
+
+.hs-dock-float {
+    position: fixed;
+    display: flex;
+    flex-direction: column;
+    min-width: 160px;
+    min-height: 120px;
+    background: var(--qt-window);
+    border: 1px solid var(--qt-border);
+    border-radius: 4px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+    overflow: hidden;
+}
+
+.hs-dock-float[data-active="true"] {
+    border-color: var(--accent-8);
+}
+
+.hs-dock-float[data-maximized="true"] {
+    border-radius: 0;
+}
+
+.hs-dock-float[data-minimized="true"] {
+    height: var(--qt-bar-title) !important;
+    min-height: var(--qt-bar-title);
+}
+
+.hs-dock-float-title {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+    height: var(--qt-bar-title);
+    padding: 0 4px 0 8px;
+    background: var(--qt-panel);
+    border-bottom: 1px solid var(--qt-border);
+    font-size: var(--qt-fs-xs);
+    color: var(--qt-text);
+    user-select: none;
+    cursor: default;
+}
+
+.hs-dock-float[data-minimized="true"] .hs-dock-float-body {
+    display: none;
+}
+
+.hs-dock-float-body {
+    position: relative;
+    flex: 1 1 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.hs-dock-float-handle {
+    position: absolute;
+    z-index: 2;
+}
+
+.hs-dock-float-handle[data-edge="n"] {
+    top: -3px;
+    left: 6px;
+    right: 6px;
+    height: 7px;
+    cursor: ns-resize;
+}
+.hs-dock-float-handle[data-edge="s"] {
+    bottom: -3px;
+    left: 6px;
+    right: 6px;
+    height: 7px;
+    cursor: ns-resize;
+}
+.hs-dock-float-handle[data-edge="w"] {
+    left: -3px;
+    top: 6px;
+    bottom: 6px;
+    width: 7px;
+    cursor: ew-resize;
+}
+.hs-dock-float-handle[data-edge="e"] {
+    right: -3px;
+    top: 6px;
+    bottom: 6px;
+    width: 7px;
+    cursor: ew-resize;
+}
+.hs-dock-float-handle[data-edge="nw"] {
+    top: -3px;
+    left: -3px;
+    width: 12px;
+    height: 12px;
+    cursor: nwse-resize;
+}
+.hs-dock-float-handle[data-edge="ne"] {
+    top: -3px;
+    right: -3px;
+    width: 12px;
+    height: 12px;
+    cursor: nesw-resize;
+}
+.hs-dock-float-handle[data-edge="sw"] {
+    bottom: -3px;
+    left: -3px;
+    width: 12px;
+    height: 12px;
+    cursor: nesw-resize;
+}
+.hs-dock-float-handle[data-edge="se"] {
+    bottom: -3px;
+    right: -3px;
+    width: 12px;
+    height: 12px;
+    cursor: nwse-resize;
+}
+
+/* ── 拖拽覆盖层 ─────────────────────────────────────────────────── */
+
+.hs-dock-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9000;
+    pointer-events: none;
+}
+
+.hs-dock-drop-preview {
+    position: fixed;
+    background: var(--accent-a4);
+    border: 2px solid var(--accent-9);
+    border-radius: 3px;
+    pointer-events: none;
+}
+
+/*
+ * 拖拽提示块：外观复用 `.app-tooltip`（元素同时带该类），这里只补拖拽特有的部分
+ * —— 跟随指针、按意图着色。样式与其它悬停提示同源，不会看起来像另一套 UI。
+ */
+.hs-dock-ghost {
+    /* 两行：`标题 + 意图` 与 `按住 X 可停靠`（见 `DockDropOverlay`）。 */
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    max-width: 320px;
+    white-space: nowrap;
+    /* 提升对比：拖拽提示浮在任意内容之上，底色必须与主界面有明确落差，
+       文字用主文本色（而不是 muted）—— 后者叠在接近的底色上几乎读不出来。 */
+    background: var(--qt-surface);
+    color: var(--qt-text);
+    border-color: var(--accent-9);
+    box-shadow: 0 6px 18px var(--qt-overlay);
+    font-weight: 500;
+}
+
+/* 第一行：`标题 意图` 横向排列。 */
+.hs-dock-ghost-line {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* 次要说明（"停靠 / 浮动"）只降一档不透明度，不再换成 muted 色：
+   两者叠加会把对比度压到读不清（用户报告"这个文本的对比度太不明显"）。 */
+.hs-dock-ghost > .hs-dock-ghost-line > .hs-dock-ghost-hint {
+    opacity: 0.85;
+    font-weight: 400;
+}
+
+/* 第二行（停靠方式）：比标题轻一档，但仍用主文本色保证可读。 */
+.hs-dock-ghost-modifier {
+    opacity: 0.85;
+    font-weight: 400;
+}
+
+/* 意图差异用**边框样式**表达（虚线 = 浮动），文字色保持不变：
+   语义仍然一眼可辨，但不再以可读性为代价。 */
+.hs-dock-ghost[data-intent="float"] {
+    border-style: dashed;
+    border-color: var(--qt-text-muted);
+}
+
+/* 重排（源标签条内调整顺序）：实线灰边 —— 既不像"停靠"那样强调，也不像
+   "浮动"那样虚线示警；顺序本身在标签条里实时变化，幽灵只是安静地随行。 */
+.hs-dock-ghost[data-intent="reorder"] {
+    border-color: var(--qt-text-muted);
+}
+
+/* 拖拽期间禁用全局文本选择，避免拖动时把标签文字刷成选区。 */
+body[data-dock-dragging="true"] {
+    user-select: none;
+}
+
+body[data-dock-dragging="true"] iframe {
+    pointer-events: none;
+}
+
+/* ── 沟槽分隔条（面板内部的固定宽/高分区）───────────────────────── */
+
+.hs-dock-gutter {
+    flex: 0 0 auto;
+    position: relative;
+    background: transparent;
+    transition: background 90ms linear;
+}
+
+/*
+ * 竖直沟槽（时间轴的轨道头宽度、参数编辑器的琴键轴宽度）。
+ *
+ * 【命中区必须完全落在**被调整的那一侧**】它是一条 5px 的窄条，用负外边距把自身
+ * 挪到边界上、且不占布局宽度（边界位置因此不受它影响）。此前用 `::after` 把命中区
+ * 向两侧各扩 3px（共 11px），向右扩的那部分**盖住了时间轴内容区的最左侧** ——
+ * 用户点不到工程开头的几像素，也就无法把播放头跳到 0（用户报告"完全没法跳到最
+ * 开头"）。现在命中区就是它自己那 5px，且整体落在**轨道头一侧**：时间轴从边界
+ * 像素开始完全可点。
+ */
+.hs-dock-gutter[data-dir="col"] {
+    width: 4px;
+    cursor: col-resize;
+    /* 整个条落在轨道头一侧（右侧不留任何覆盖）：`-4px` 把它挪进头部最后 4px。 */
+    margin-left: -4px;
+    margin-right: 0;
+    z-index: 5;
+}
+
+/*
+ * 悬停反馈：**一条 1px 的高亮线**，而不是把整个 4px 命中区填成强调色。
+ *
+ * 它是低频交互，填充式的色块太显眼（用户报告"根本没必要做得那么明显"）；1px 细线
+ * 是分隔条这类控件惯用的提示，看得见但不抢注意力。命中区仍为 4px，保证可抓。
+ */
+.hs-dock-gutter[data-dir="col"]::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    width: 1px;
+    background: var(--accent-9);
+    opacity: 0;
+    transition: opacity 90ms linear;
+}
+
+.hs-dock-gutter[data-dir="col"]:hover::after,
+.hs-dock-gutter[data-dir="col"][data-dragging="true"]::after {
+    opacity: 1;
+}
+
+.hs-dock-gutter[data-dir="row"] {
+    height: 5px;
+    cursor: row-resize;
+    margin-top: -2px;
+    margin-bottom: -3px;
+    z-index: 5;
+}
+
+/* 水平方向的沟槽（纵向尺寸调整）保持原来的填充式反馈：它不靠近任何"用户想点击
+   的内容"，没有遮挡问题；只有竖直方向那条需要克制（见上方 1px 细线的说明）。 */
+.hs-dock-gutter[data-dir="row"]:hover,
+.hs-dock-gutter[data-dir="row"][data-dragging="true"] {
+    background: var(--accent-8);
+}
+
+/* ── 单标签抓手 ─────────────────────────────────────────────────── */
+
+/*
+ * 单标签且不显示标签条时的抓手：给用户一个能抓住拖出去的地方。
+ *
+ * 【为什么是 6px 且默认近乎透明】它只是一次拖拽的着力点，用户并不频繁使用，却要
+ * 长期让出高度 —— 默认布局下时间轴 + 参数编辑器各 12px，合计 24px 纯属浪费。
+ * 现在减半到 6px，并且默认只留极淡的底纹，指针移到窗格上才显形（不占额外的视觉
+ * 注意力）。
+ *
+ * 【为什么不干脆做成零高度悬浮层】窗格的每一条边都属于某个面板的交互面（顶部是
+ * 标尺、底部是横向滚动条、左右是内容），悬浮层一旦按"悬停即激活"就会吃掉这些
+ * 位置上的第一次点击。零成本换来的误触风险不可接受，因此保留一个很薄的真实占位。
+ *
+ * 【为什么固定在**上方**、不跟着标签行走】拖起一个窗体时，被拖动的是它的**左上角**
+ * （浮动窗口的定位锚点）。抓手在下方会变成"用户抓的是底边、动的却是顶边"，拖拽
+ * 位置与被拖部位不一致；而且窗格底部是横向滚动条，抓手在那里会与之重合、互相抢
+ * 事件。它也不需要用 `order` 参与排序 —— 在流内、位于内容之前，天然就在最上方。
+ */
+.hs-dock-grip {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    height: 6px;
+    color: var(--qt-text-muted);
+    background: var(--qt-window);
+    opacity: 0.18;
+    user-select: none;
+    cursor: default;
+}
+
+.hs-dock-tabset:hover .hs-dock-grip {
+    opacity: 0.55;
+}
+
+.hs-dock-grip:hover {
+    opacity: 1;
+    background: var(--qt-panel);
+}
+
+/* ── 浮动落点预览 ───────────────────────────────────────────────── */
+
+/*
+ * 不按停靠修饰键拖拽时，用虚线轮廓画出"松手后浮窗会落在哪、多大"。
+ *
+ * 用**记住的浮窗尺寸**绘制，因此轮廓与松手后的结果一致 —— 用户不必先松手
+ * 再判断结果是否满意。虚线（而非实线）与停靠预览区分：实线 = 会嵌进布局，
+ * 虚线 = 会浮在上面。
+ */
+.hs-dock-float-preview {
+    position: fixed;
+    border: 2px dashed var(--accent-9);
+    border-radius: 4px;
+    background: var(--accent-a2);
+    pointer-events: none;
+}
+
+.hs-dock-float-preview-title {
+    position: absolute;
+    left: 0;
+    top: 0;
+    max-width: 100%;
+    padding: 2px 6px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    background: var(--accent-9);
+    color: var(--qt-base);
+    font-size: var(--qt-fs-xs);
+    border-radius: 2px 0 2px 0;
+}

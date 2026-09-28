@@ -101,6 +101,36 @@ export function clampBpm(bpm: number): number {
     return Math.min(TEMPO_BPM_MAX, Math.max(TEMPO_BPM_MIN, bpm));
 }
 
+/**
+ * 两份 Tempo Map 是否**语义相同**（用于回声幂等：相同则保留旧引用）。
+ *
+ * 【为什么需要】后端回声会用一个**新的** `tempoMap` 对象替换状态里的引用，而标尺
+ * 刻度的 memo 依赖该引用 —— 滚轮 / 拖拽这类连续手势里，每次提交都会因此多出一次
+ * 全量重算（标尺"抽搐"的放大器之一）。后端没有真正改动地图时，保留旧引用即可。
+ *
+ * 比较**不含 `id`**：id 是前端内部标识，跨一次后端往返可能重新生成，用它比较会让
+ * 守卫永远失效（那比没有守卫更糟：看起来有幂等，实际每次都判定为"变了"）。
+ */
+export function isSameTempoMap(a: TempoMap | null, b: TempoMap | null): boolean {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    if (a.points.length !== b.points.length) return false;
+    for (let i = 0; i < a.points.length; i += 1) {
+        const left = a.points[i];
+        const right = b.points[i];
+        if (Math.abs(left.positionSec - right.positionSec) > 1e-9) return false;
+        if (Math.abs(left.bpm - right.bpm) > 1e-9) return false;
+        const leftSig = left.timeSignature ?? null;
+        const rightSig = right.timeSignature ?? null;
+        if ((leftSig?.numerator ?? null) !== (rightSig?.numerator ?? null)) return false;
+        if ((leftSig?.denominator ?? null) !== (rightSig?.denominator ?? null)) return false;
+        if (JSON.stringify(left.scale ?? null) !== JSON.stringify(right.scale ?? null)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 export function clampNumerator(numerator: number): number {
     if (!Number.isFinite(numerator)) return 4;
     return Math.min(TEMPO_NUMERATOR_MAX, Math.max(1, Math.round(numerator)));
@@ -150,6 +180,33 @@ export function normalizeTimeSignature(
 export function formatTempoBpm(bpm: number): string {
     const rounded = Math.round(bpm * 1000) / 1000;
     return String(rounded);
+}
+
+/**
+ * 把滚轮步进应用到变化点文本的 **BPM 部分**，其余文本**原样保留**。
+ *
+ * 【为什么是"替换前导数字"而不是"解析后再序列化"】内联输入框里的文本可能包含
+ * 用户手打的、解析器无法识别的片段（音阶别名、注释性文字）。若按解析结果重建
+ * 文本，这些内容会被抹掉 —— 而用户的要求恰恰是"保留其他参数不变"。只替换开头
+ * 那个数字 token，其余部分逐字符保留，"不变"是字面成立的。
+ *
+ * @param direction +1 增大、-1 减小。
+ * @param step 步长（普通 1，精细调整修饰键下 0.1）。
+ * @returns 新文本；文本不以数字开头、或已到 BPM 边界（值不变）时返回 `null`。
+ */
+export function applyWheelToTempoText(
+    text: string,
+    direction: 1 | -1,
+    step: number,
+): string | null {
+    const match = /^(\s*)(\d+(?:\.\d+)?)([\s\S]*)$/.exec(text);
+    if (!match) return null;
+    const [, leading, numberText, rest] = match;
+    const current = Number(numberText);
+    if (!Number.isFinite(current)) return null;
+    const next = clampBpm(Math.round((current + direction * step) * 1000) / 1000);
+    if (Math.abs(next - current) < 1e-9) return null;
+    return `${leading}${formatTempoBpm(next)}${rest}`;
 }
 
 /** 拍号显示文本，如 "4/4"、"3/4"。 */

@@ -1,0 +1,232 @@
+/*
+ * 面板注册表 —— 停靠系统的唯一扩展点。
+ *
+ * 【为什么内置面板也走注册表】如果时间轴/记事本这些面板在停靠内核里被硬编码，
+ * 那么"未来开放给用户自定义面板"就必然要重写内核。让内置面板与将来的第三方
+ * 面板走完全相同的注册路径，抽象就不会被架空 —— 这是本设计对 API 化最大的
+ * 一笔投资。
+ *
+ * 【注册表为什么是模块级 Map 而不是 Redux】面板定义里含 React 组件与函数
+ * （生命周期钩子），放进 Redux 会违反可序列化约定（`app/store.ts` 已为 session
+ * 开豁免，不该再开第二个）。注册发生在模块加载期，早于任何渲染，没有竞态。
+ */
+
+import type { ComponentType, LazyExoticComponent } from "react";
+import type { MessageKey } from "../../i18n/messages";
+
+import type { DockPlacement } from "./dockTypes";
+
+/** 面板组件收到的 props。 */
+export interface DockPanelProps {
+    /** 本窗体实例 id（多实例面板据此区分自己）。 */
+    formId: string;
+    /** 本窗体所属面板 id。 */
+    panelId: string;
+    /** 面板私有状态（持久化在布局里，未来 API 面板可直接使用）。 */
+    props: Record<string, unknown>;
+}
+
+/**
+ * 面板在 DOM 搬家前后的状态保全钩子。
+ *
+ * 【为什么必须有】停靠重排是通过"把已渲染好的 DOM 宿主搬到另一个容器"实现的
+ * （见 `DockPanelHost`），React 组件不会卸载，所以绝大多数状态天然幸存。但
+ * 浏览器在 DOM 移动时**可能**重置滚动位置，且面板内部的滚动/缩放若由命令式
+ * 代码持有，就需要显式保存与恢复。这两个钩子是面板唯一需要为停靠付出的成本。
+ */
+export interface DockPanelLifecycle {
+    /** 搬家前保存状态（返回的对象会原样交给 `afterMove`）。 */
+    beforeMove?: (element: HTMLElement) => Record<string, unknown>;
+    /** 搬家后恢复状态。 */
+    afterMove?: (element: HTMLElement, saved: Record<string, unknown>) => void;
+}
+
+/** 面板定义。 */
+export interface PanelDefinition {
+    /** 唯一 id，同时是持久化 JSON 里的键 —— 一旦发布不可更改。 */
+    id: string;
+    /**
+     * 标题的 i18n key。
+     *
+     * 【为什么类型是 `MessageKey` 而不是 `string`】这里曾经是 `string`，于是
+     * 键名拼错、键被改名、键根本不存在，**编译期一律无感** —— `tf()` 查不到时
+     * 会原样返回键名（那是给扩展键设计的可诊断行为），界面上就出现一个看起来
+     * 像英文单词的"文案"。这个用户可见的 bug 已经发生过两次：
+     * `undo_history_title`，以及上一轮 i18n 改名后的 `notebook`。
+     *
+     * 收紧成 `MessageKey` 后，两个方向都被编译期守住：改名必须同步改这里，
+     * 写错直接报错。
+     */
+    titleKey: MessageKey;
+    /** 标签条上的图标。 */
+    icon?: ComponentType;
+    /**
+     * 面板组件。
+     *
+     * 可缺省：内置面板的 props 由宿主提供（见 `panelRenderer`），注册表只登记
+     * 元信息；将来的插件面板若自带全部状态，则在这里给出组件即可。
+     */
+    /**
+     * 面板组件实现。
+     *
+     * 也接受 `React.lazy(...)` 的产物：体积大的面板应当按需加载（记事本带
+     * TipTap/ProseMirror/Turndown，几百 KB），而注册表在模块级装配，静态 import
+     * 会把它们全塞进首屏。渲染侧（`DockPanelHosts` / `DetachedRoot`）已包
+     * `Suspense`，因此 lazy 组件开箱可用。
+     */
+    component?: ComponentType<DockPanelProps> | LazyExoticComponent<ComponentType<DockPanelProps>>;
+    /** 浮动时的默认尺寸。 */
+    defaultWidth: number;
+    defaultHeight: number;
+    minWidth?: number;
+    minHeight?: number;
+    /** 是否允许进入主编辑区（时间轴/参数编辑器这类"主工作区"面板）。 */
+    preferMain?: boolean;
+    /**
+     * 是否单例（默认 true）。
+     *
+     * 时间轴这类"全工程唯一"的面板开两个毫无意义且会让用户困惑；参数编辑器
+     * 这类"看不同片段"的面板则天然支持多实例。
+     */
+    singleton?: boolean;
+    /** 首次打开时的落点（缺省并入主编辑区标签组）。 */
+    defaultPlacement?: DockPlacement;
+    /**
+     * **打开**时的形态：以浮窗出现在主窗口的某个角上（而不是并入某个标签组）。
+     *
+     * 只影响"打开"这个动作，**不影响启动时的显隐** —— 未声明它的面板与声明了它的
+     * 面板一样，默认都是关闭的，等用户从"视图 → 窗口"或工具栏打开。
+     * 适用于"随手记"性质的辅助面板（如记事本）：用户需要它时希望它浮在手边，
+     * 而不是挤进布局里占一格。
+     */
+    openAsFloating?: {
+        width: number;
+        height: number;
+        /**
+         * 落在主窗口的哪里。
+         *
+         * - `"bottom-right"`：右下角（留 `marginPx` 边距）—— 辅助面板的常规落点，
+         *   "随手记"性质的窗口出现在手边而不占布局。
+         * - `"center"`：主窗口正中 —— 给"打开就是要专心改"的设置类面板用
+         *   （外观设置）。居中而不是某个角，是因为它不是"瞥一眼"的面板，
+         *   而是用户接下来一段时间的主焦点。
+         */
+        anchor: "bottom-right" | "center";
+        marginPx?: number;
+        /**
+         * 在同角落点上再叠加的偏移（px，负值向左/向上）。
+         *
+         * 多个默认浮出的面板都用同一个角时会完全重叠，用它与相邻面板**错开**
+         * （如撤销历史落在记事本左侧，见 `registerBuiltinPanels`）。
+         */
+        offsetX?: number;
+        offsetY?: number;
+    };
+    /**
+     * 是否进「视图 → 窗口」菜单（默认进）。
+     *
+     * 【为什么需要排除】该菜单列的是"用户常用的可停靠窗口"，而外观设置虽然复用
+     * 同一套停靠机制（浮窗、可拖动、可关闭），却**不属于**用户日常切换的工作面板 ——
+     * 它是低频的设置入口，出现在"窗口"子菜单里只会让常用项变稀。
+     * 排除后它仍可被程序化打开（`openPanel`），入口留在「视图 → 外观设置」。
+     */
+    excludeFromWindowMenu?: boolean;
+    /**
+     * 是否允许被**拖拽停靠**（默认允许）。`false` = 只能作为浮窗移动。
+     *
+     * 【为什么需要】停靠是"把面板编入工作布局"的承诺。外观设置是设置界面，
+     * 把它拖进主编辑区占一格既没有意义（改完就走），也会污染用户精心排好的布局。
+     * 关掉之后拖拽仍然移动窗口，只是永远不产生落点。
+     */
+    dockable?: boolean;
+    /**
+     * 是否允许被拆到**独立操作系统窗口**（主窗口之外）。
+     *
+     * 【为什么是逐面板声明】进程内浮动靠"搬 DOM"实现零重挂载（见
+     * `panelHostRegistry`），跨窗口不成立：独立窗口是另一个 JS 上下文，面板必须
+     * **重新挂载**。时间轴与参数编辑器各自带着 WebGL 上下文与波形缓存，重挂载代价
+     * 是数秒卡顿，因此不声明；文件浏览器、记事本、撤销历史这类纯 DOM + Redux 的
+     * 面板可以。
+     *
+     * 未声明的面板在浮动标题栏的提示里说明"该面板不支持移出主窗口"，而不是静默失败。
+     */
+    detachable?: boolean;
+    /** 搬家前后的状态保全钩子（见 `DockPanelLifecycle`）。 */
+    lifecycle?: DockPanelLifecycle;
+    /** "窗口"菜单里的排序权重。 */
+    order?: number;
+}
+
+const registry = new Map<string, PanelDefinition>();
+const listeners = new Set<() => void>();
+let version = 0;
+
+/** 注册一个面板。重复 id 直接覆盖并告警（热更新时会重放注册）。 */
+export function registerPanel(definition: PanelDefinition): void {
+    if (registry.has(definition.id)) {
+        console.warn(`[dock] panel "${definition.id}" registered twice; replacing`);
+    }
+    registry.set(definition.id, definition);
+    version += 1;
+    for (const listener of listeners) listener();
+}
+
+/** 注册表版本号：`useSyncExternalStore` 的快照。 */
+export function getPanelRegistryVersion(): number {
+    return version;
+}
+
+/**
+ * 给已注册的面板补上组件实现。
+ *
+ * 【为什么要单独一个函数，而不是在 `registerPanel` 里直接传】面板的**元数据**
+ * 与它的**组件实现**应当可以分开装配：
+ *
+ * - 元数据模块（`registerBuiltinPanels`）被 `dockSchema` 依赖，而布局函数在
+ *   node 环境的单测里也会被调用。若元数据模块直接 `import` 面板组件，就会把整条
+ *   组件依赖链（Redux slice、`localStorage`、DOM API）拖进纯布局测试 ——
+ *   实测会让 `registerBuiltinPanels.test.ts` 因 `localStorage is not defined` 失败。
+ * - 组件实现只在真正的渲染入口需要：主窗口 `App.tsx`、以及独立窗口
+ *   `detachedMain.tsx`（后者是另一个 JS 上下文，必须自己装配一次）。
+ *
+ * 第三方面板不需要本函数：直接在 `registerPanel` 的 `component` 字段里给实现即可。
+ */
+export function setPanelComponent(panelId: string, component: ComponentType<DockPanelProps>): void {
+    const current = registry.get(panelId);
+    if (!current) {
+        console.warn(`[dock] setPanelComponent: panel "${panelId}" is not registered`);
+        return;
+    }
+    registry.set(panelId, { ...current, component });
+    version += 1;
+    for (const listener of listeners) listener();
+}
+
+export function getPanel(panelId: string): PanelDefinition | undefined {
+    return registry.get(panelId);
+}
+
+/** 全部已注册面板，按 `order` 再按 id 排序（顺序稳定，便于菜单展示）。 */
+export function listPanels(): PanelDefinition[] {
+    return [...registry.values()].sort((a, b) => {
+        const orderDiff = (a.order ?? 100) - (b.order ?? 100);
+        return orderDiff !== 0 ? orderDiff : a.id.localeCompare(b.id);
+    });
+}
+
+export function isPanelRegistered(panelId: string): boolean {
+    return registry.has(panelId);
+}
+
+/** 订阅注册表变化（布局规范化需要在面板注册后重跑一次）。 */
+export function subscribePanels(listener: () => void): () => void {
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+}
+
+/** 仅测试用：清空注册表。 */
+export function resetPanelRegistryForTests(): void {
+    registry.clear();
+    listeners.clear();
+    version = 0;
+}

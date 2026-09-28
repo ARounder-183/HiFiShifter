@@ -19,6 +19,7 @@
  */
 
 import { waveformApi } from "../services/api/waveform";
+import { effectiveChannels, normalizeChannelMode } from "./channelMode";
 import { decodeWaveformFromBase64, type WaveformMipmapBinary } from "./waveformBinaryCodec";
 import {
     wfDiag_poolAcquire,
@@ -82,14 +83,24 @@ const MAX_CACHE_BYTES = 192 * 1024 * 1024;
 
 /** 单级 peaks 数据 */
 export interface LevelPeaks {
-    /** 最小值数组 */
+    /**
+     * 跨声道合并包络（逐峰值取各声道 min 的最小值 / max 的最大值）。
+     * 单声道文件即原始数据；立体声文件为合并视图（兼容所有单带消费者）。
+     */
     min: Float32Array;
-    /** 最大值数组 */
     max: Float32Array;
     /** 该级别的除数因子 */
     divisionFactor: number;
     /** 采样率 */
     sampleRate: number;
+    /** 声道数（v2 协议携带；v1 数据视为 1） */
+    channels: 1 | 2;
+    /** 声道 0 的 min/max 视图（零拷贝） */
+    ch0Min: Float32Array;
+    ch0Max: Float32Array;
+    /** 声道 1 的 min/max 视图（单声道时与 ch0 同引用） */
+    ch1Min: Float32Array;
+    ch1Max: Float32Array;
 }
 
 export type WaveformMipmapLevel = 0 | 1 | 2;
@@ -574,19 +585,33 @@ class WaveformMipmapStoreImpl {
     /**
      * 获取零拷贝 min/max 视图及其实际时间边界。
      *
-     * 共享 WebGL/Canvas surface 直接消费这两个 subarray，避免每帧构造
+     * 共享 WebGL/Canvas surface 直接消费这些 subarray，避免每帧构造
      * interleaved、gain 和 downsample 中间数组。
+     *
+     * 声道语义（与后端 channel_mode 条件化一致）：
+     * - 有效声道数 = 2（stereo 源 × Normal/Swap）：返回 ch0/ch1 两个平面
+     *   视图（`channels: 2` + `ch1Min/ch1Max`）；Swap 交换两个平面的角色；
+     *   此时 `min/max` 为 ch0 平面（供单带兜底消费）。
+     * - 有效声道数 = 1（mono 源，或 MonoMix/MonoLeft/MonoRight）：返回单带
+     *   视图 —— MonoLeft 取 ch0、MonoRight 取 ch1、其余取跨声道合并包络
+     *   （MonoMix 的混合显示与合并包络在视觉上等价）。
      */
     getBestSliceView(
         sourcePath: string,
         preferredLevel: WaveformMipmapLevel,
         startSec: number,
         durationSec: number,
+        channelMode?: number,
+        sourceChannels?: number,
     ): {
         min: Float32Array;
         max: Float32Array;
         dataStartSec: number;
         dataDurationSec: number;
+        /** 有效声道数：2 时 ch1Min/ch1Max 为第二声道视图 */
+        channels: 1 | 2;
+        ch1Min?: Float32Array;
+        ch1Max?: Float32Array;
     } | null {
         let peaks = this.getPeaks(sourcePath, preferredLevel);
         if (!peaks) peaks = this.getNearestLoadedLevel(sourcePath, preferredLevel);
@@ -600,11 +625,55 @@ class WaveformMipmapStoreImpl {
         );
         if (endIdx <= startIdx) return null;
 
+        const dataStartSec = (startIdx * divisionFactor) / sampleRate;
+        const dataDurationSec = ((endIdx - startIdx) * divisionFactor) / sampleRate;
+        // sourceChannels 的"缺失"在生产路径上表现为 **0** 而非 undefined：
+        // 工程加载把 `source_channels <= 0` 映射为 undefined，sceneBuilder 又
+        // 把缺失元数据强转为 0（`clip.sourceChannels ?? 0`）。于是
+        // `sourceChannels ?? peaks.channels` 拦不住 0 —— effectiveChannels 会
+        // 把 0 当成单声道，立体声 L/R 双带渲染静默退化为合并单带。因此先做
+        // 归一化：非正数一律回退峰值数据自身的 channels（v1 峰值数据报告
+        // channels: 1，下面的第二道闸仍然有效）。
+        const src = sourceChannels != null && sourceChannels > 0 ? sourceChannels : peaks.channels;
+        const effChannels = effectiveChannels(src, channelMode);
+
+        if (effChannels === 2 && peaks.channels === 2) {
+            const mode = normalizeChannelMode(channelMode);
+            // Swap 交换平面角色：主平面为右声道。
+            const [primary, secondary] =
+                mode === 1 ? [peaks.ch1Min, peaks.ch0Min] : [peaks.ch0Min, peaks.ch1Min];
+            const [primaryMax, secondaryMax] =
+                mode === 1 ? [peaks.ch1Max, peaks.ch0Max] : [peaks.ch0Max, peaks.ch1Max];
+            return {
+                min: primary.subarray(startIdx, endIdx),
+                max: primaryMax.subarray(startIdx, endIdx),
+                dataStartSec,
+                dataDurationSec,
+                channels: 2,
+                ch1Min: secondary.subarray(startIdx, endIdx),
+                ch1Max: secondaryMax.subarray(startIdx, endIdx),
+            };
+        }
+
+        // 等效单声道：按模式选择展示平面。
+        const mode = normalizeChannelMode(channelMode);
+        let min = peaks.min;
+        let max = peaks.max;
+        if (peaks.channels === 2) {
+            if (mode === 3) {
+                min = peaks.ch0Min;
+                max = peaks.ch0Max;
+            } else if (mode === 4) {
+                min = peaks.ch1Min;
+                max = peaks.ch1Max;
+            }
+        }
         return {
-            min: peaks.min.subarray(startIdx, endIdx),
-            max: peaks.max.subarray(startIdx, endIdx),
-            dataStartSec: (startIdx * divisionFactor) / sampleRate,
-            dataDurationSec: ((endIdx - startIdx) * divisionFactor) / sampleRate,
+            min: min.subarray(startIdx, endIdx),
+            max: max.subarray(startIdx, endIdx),
+            dataStartSec,
+            dataDurationSec,
+            channels: 1,
         };
     }
 
@@ -699,7 +768,10 @@ class WaveformMipmapStoreImpl {
 
         const batchPromise = (async () => {
             try {
-                const batchResult = await waveformApi.batchGetWaveformMipmap(registered);
+                // 只请求 L2：本路径只落地 L2（见下方"仅解码 L2"）。让后端别把
+                // L0/L1 也编码传输、再由前端丢弃 —— L0 单级就是 ≈159MB/小时素材
+                // 的 peaks，base64 后更大，长文件批量预载时纯属浪费。
+                const batchResult = await waveformApi.batchGetWaveformMipmap(registered, [2]);
 
                 for (const [sourcePath, levels] of Object.entries(batchResult)) {
                     const index = registered.indexOf(sourcePath);
@@ -709,31 +781,45 @@ class WaveformMipmapStoreImpl {
                         this.requeueIfMissing(sourcePath, 2);
                         continue;
                     }
-                    // 仅解码 L2（索引 2），L0/L1 丢弃
-                    const l2Base64 = levels[2];
-                    if (l2Base64) {
-                        const decoded = decodeWaveformFromBase64(l2Base64);
-                        if (decoded) {
-                            this.applyDecoded(sourcePath, 2, decoded);
-                            this.notify(sourcePath, "done");
+                    // 仅解码 L2（索引 2），L0/L1 丢弃。
+                    //
+                    // 单个坏条目必须**逐文件**兜住：这段代码原本与 IPC 调用共用
+                    // 外层 try —— 一个畸形载荷（例如非数组条目）会冲出整个循环，
+                    // finally 删掉全部共享 Promise 后对**每个**已注册文件逐个
+                    // preload 重试（几十个文件 = 重试风暴）。逐文件 try/catch
+                    // 后，坏条目只把**自己**标进 L2 负缓存并通知 error，批次里
+                    // 其余文件照常落地。
+                    try {
+                        const l2Base64 = levels[2];
+                        if (l2Base64) {
+                            const decoded = decodeWaveformFromBase64(l2Base64);
+                            if (decoded) {
+                                this.applyDecoded(sourcePath, 2, decoded);
+                                this.notify(sourcePath, "done");
+                            } else {
+                                const entry = this.cache.get(sourcePath);
+                                if (entry) entry.failedLevels.add(2);
+                                this.notify(sourcePath, "error", "batch decode L2 failure");
+                            }
                         } else {
-                            const entry = this.cache.get(sourcePath);
-                            if (entry) entry.failedLevels.add(2);
-                            this.notify(sourcePath, "error", "batch decode L2 failure");
+                            // 空串 = 后端尚未就绪（波形分析/首次计算未完成），是
+                            // **瞬时**条件：绝不能写 failedLevels——否则打开工程
+                            // 瞬间的抢先批量请求会把 L2 永久毒化，波形要等用户
+                            // 滚动/缩放才出现。进入重试冷却；与单发路径一样，
+                            // 必须自己排重试而不能只等 refresh()（见
+                            // NOT_READY_MAX_RETRY 的死锁说明）。
+                            this.retryCooldownUntil.set(
+                                `${sourcePath}|2`,
+                                Date.now() + RETRY_NOT_READY_COOLDOWN_MS,
+                            );
+                            this.notify(sourcePath, "loading");
+                            this.scheduleNotReadyRetry(sourcePath, 2);
                         }
-                    } else {
-                        // 空串 = 后端尚未就绪（波形分析/首次计算未完成），是
-                        // **瞬时**条件：绝不能写 failedLevels——否则打开工程
-                        // 瞬间的抢先批量请求会把 L2 永久毒化，波形要等用户
-                        // 滚动/缩放才出现。进入重试冷却；与单发路径一样，
-                        // 必须自己排重试而不能只等 refresh()（见
-                        // NOT_READY_MAX_RETRY 的死锁说明）。
-                        this.retryCooldownUntil.set(
-                            `${sourcePath}|2`,
-                            Date.now() + RETRY_NOT_READY_COOLDOWN_MS,
-                        );
-                        this.notify(sourcePath, "loading");
-                        this.scheduleNotReadyRetry(sourcePath, 2);
+                    } catch (err) {
+                        const entry = this.cache.get(sourcePath);
+                        if (entry) entry.failedLevels.add(2);
+                        const msg = err instanceof Error ? err.message : String(err);
+                        this.notify(sourcePath, "error", msg);
                     }
                 }
             } catch (err) {
@@ -1134,6 +1220,11 @@ class WaveformMipmapStoreImpl {
             max: decoded.max,
             divisionFactor: decoded.divisionFactor,
             sampleRate: decoded.sampleRate,
+            channels: decoded.channels,
+            ch0Min: decoded.ch0Min,
+            ch0Max: decoded.ch0Max,
+            ch1Min: decoded.ch1Min,
+            ch1Max: decoded.ch1Max,
         };
         entry.bytes += nextBytes - previousBytes;
         this.cacheBytes += nextBytes - previousBytes;

@@ -1,4 +1,3 @@
-import { Dialog, Flex, Select, Text, Button, TextField } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -8,8 +7,9 @@ import {
     persistUiSettings,
 } from "../../features/session/sessionSlice";
 import type { PitchSnapUnit } from "../../features/session/sessionTypes";
-import { useEffect, useState } from "react";
-import { applySelectWheelChange } from "../../utils/selectWheel";
+import { AppDialog } from "../../ui/Dialog";
+import { AppField, AppForm } from "../../ui/Field";
+import { AppNumberField, AppSelect } from "../../ui";
 
 interface Props {
     open: boolean;
@@ -21,96 +21,58 @@ export function PitchSnapSettingsDialog({ open, onOpenChange }: Props) {
     const { pitchSnapUnit, pitchSnapToleranceCents } = useAppSelector(
         (state: RootState) => state.session,
     );
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
-    const [toleranceInput, setToleranceInput] = useState(String(pitchSnapToleranceCents));
+    const { tf } = useI18n();
 
-    useEffect(() => {
-        if (open) {
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
-            setToleranceInput(String(pitchSnapToleranceCents));
-        }
-    }, [open, pitchSnapToleranceCents]);
-
-    // 容差提交：输入后按 Enter / Esc / 点遮罩关闭也应生效（与
+    // 容差提交：输入后按 Enter / 点遮罩关闭也应生效（与
     // SplitTransitionSettingsDialog 的 onBlur 提交一致），不能只有点 OK
     // 才提交 —— 否则数字被静默丢弃。
-    const commitTolerance = () => {
-        const parsed = Math.abs(Math.round(Number(toleranceInput) || 0));
+    const commitTolerance = (parsed: number) => {
         dispatch(setPitchSnapToleranceCents(parsed));
         void dispatch(persistUiSettings());
     };
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 360 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{tAny("pitch_snap_settings")}</Dialog.Title>
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tf("pitch_snap_settings")}
+            size="sm"
+            actions={[
+                {
+                    id: "ok",
+                    label: tf("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <AppForm>
+                {/* Quantize Unit */}
+                <AppField label={tf("quantize_unit")}>
+                    <AppSelect
+                        value={pitchSnapUnit}
+                        onValueChange={(v) => {
+                            dispatch(setPitchSnapUnit(v as PitchSnapUnit));
+                            void dispatch(persistUiSettings());
+                        }}
+                        options={[
+                            { value: "semitone", label: tf("quantize_semitone") },
+                            { value: "scale", label: tf("quantize_scale") },
+                        ]}
+                    />
+                </AppField>
 
-                <Flex direction="column" gap="3" mt="3">
-                    {/* Quantize Unit */}
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {tAny("quantize_unit")}
-                        </Text>
-                        <Select.Root
-                            value={pitchSnapUnit}
-                            size="2"
-                            onValueChange={(v) => {
-                                dispatch(setPitchSnapUnit(v as PitchSnapUnit));
-                                void dispatch(persistUiSettings());
-                            }}
-                        >
-                            <Select.Trigger
-                                style={{ flex: 1 }}
-                                onWheel={(event) => {
-                                    applySelectWheelChange({
-                                        event,
-                                        currentValue: pitchSnapUnit,
-                                        options: ["semitone", "scale"],
-                                        onChange: (next) => {
-                                            dispatch(setPitchSnapUnit(next as PitchSnapUnit));
-                                            void dispatch(persistUiSettings());
-                                        },
-                                    });
-                                }}
-                            />
-                            <Select.Content>
-                                <Select.Item value="semitone">
-                                    {tAny("quantize_semitone")}
-                                </Select.Item>
-                                <Select.Item value="scale">{tAny("quantize_scale")}</Select.Item>
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
-
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {tAny("pitch_snap_tolerance")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={toleranceInput}
-                            onChange={(e) => setToleranceInput(e.target.value)}
-                            onBlur={commitTolerance}
-                            onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                    e.currentTarget.blur();
-                                }
-                            }}
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-                </Flex>
-
-                <Flex justify="end" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray" onClick={commitTolerance}>
-                            {tAny("ok")}
-                        </Button>
-                    </Dialog.Close>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                <AppField label={tf("pitch_snap_tolerance")}>
+                    <AppNumberField
+                        value={pitchSnapToleranceCents}
+                        unit="cents"
+                        ariaLabel={tf("pitch_snap_tolerance")}
+                        onCommit={commitTolerance}
+                    />
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }

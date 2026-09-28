@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Dialog, Flex, Select, Text, TextField } from "@radix-ui/themes";
+import { Button, Flex, TextField } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -17,8 +17,10 @@ import {
     sanitizeCustomScalePreset,
 } from "../../utils/customScales";
 import { SCALE_KEYS, SCALE_LABELS, resolveScaleNotes } from "../../utils/musicalScales";
-import { applySelectWheelChange } from "../../utils/selectWheel";
 import { getSelectedCustomScaleId } from "./customScaleDialogLogic";
+import { AppSelect } from "../../ui";
+import { AppDialog } from "../../ui/Dialog";
+import { AppField, AppForm } from "../../ui/Field";
 
 interface Props {
     open: boolean;
@@ -30,8 +32,7 @@ const CUSTOM_TEMPLATE_PREFIX = "custom:";
 
 export function CustomScaleDialog({ open, onOpenChange }: Props) {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const s = useAppSelector((state: RootState) => state.session);
 
     const [name, setName] = useState("");
@@ -62,11 +63,11 @@ export function CustomScaleDialog({ open, onOpenChange }: Props) {
         }
 
         const fallbackScale = s.project.baseScale;
-        setName(tAny("custom_scale_default_name"));
+        setName(tf("custom_scale_default_name"));
         setNotes(resolveScaleNotes(fallbackScale));
         setEditingPresetId(null);
         setTemplateValue(`${BUILTIN_TEMPLATE_PREFIX}${fallbackScale}`);
-    }, [open, s.project.baseScale, s.project.customScale, s.project.useCustomScale, tAny]);
+    }, [open, s.project.baseScale, s.project.customScale, s.project.useCustomScale, tf]);
 
     function toggleNote(pc: number) {
         setNotes((prev) => {
@@ -126,123 +127,89 @@ export function CustomScaleDialog({ open, onOpenChange }: Props) {
         if (editingPresetId === selectedCustomPresetId) {
             const fallbackScale = s.project.baseScale;
             setEditingPresetId(null);
-            setName(tAny("custom_scale_default_name"));
+            setName(tf("custom_scale_default_name"));
             setNotes(resolveScaleNotes(fallbackScale));
             setTemplateValue(`${BUILTIN_TEMPLATE_PREFIX}${fallbackScale}`);
         }
     }
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 520 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{tAny("custom_scale_dialog_title")}</Dialog.Title>
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tf("custom_scale_dialog_title")}
+            size="md"
+            actions={[
+                {
+                    id: "delete",
+                    label: tf("custom_scale_delete"),
+                    intent: "danger",
+                    align: "start",
+                    disabled: !selectedCustomPresetId,
+                    // 异步包装：删除不关闭对话框，避免页脚表单重新提交触发默认动作。
+                    onClick: async () => {
+                        handleDeleteSelectedPreset();
+                    },
+                },
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tf("custom_scale_save_apply"),
+                    intent: "primary",
+                    onClick: handleSave,
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={tf("custom_scale_template")}>
+                    <AppSelect
+                        value={templateValue}
+                        onValueChange={applyTemplate}
+                        options={[
+                            ...SCALE_KEYS.map((k) => ({
+                                value: `${BUILTIN_TEMPLATE_PREFIX}${k}`,
+                                label: SCALE_LABELS[k],
+                            })),
+                            ...(customPresetOptions.length > 0
+                                ? [{ separator: true as const }]
+                                : []),
+                            ...customPresetOptions.map((preset) => ({
+                                value: `${CUSTOM_TEMPLATE_PREFIX}${preset.id}`,
+                                label: `${preset.name} (${formatScaleNotes(preset.notes)})`,
+                            })),
+                        ]}
+                    />
+                </AppField>
 
-                <Flex direction="column" gap="3" mt="3">
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 112 }}>
-                            {tAny("custom_scale_template")}
-                        </Text>
-                        <Select.Root value={templateValue} onValueChange={applyTemplate} size="2">
-                            <Select.Trigger
-                                style={{ flex: 1 }}
-                                onWheel={(event) => {
-                                    applySelectWheelChange({
-                                        event,
-                                        currentValue: templateValue,
-                                        options: [
-                                            ...SCALE_KEYS.map(
-                                                (k) => `${BUILTIN_TEMPLATE_PREFIX}${k}`,
-                                            ),
-                                            ...customPresetOptions.map(
-                                                (preset) => `${CUSTOM_TEMPLATE_PREFIX}${preset.id}`,
-                                            ),
-                                        ],
-                                        onChange: applyTemplate,
-                                    });
-                                }}
-                            />
-                            <Select.Content>
-                                <Select.Group>
-                                    {SCALE_KEYS.map((k) => (
-                                        <Select.Item
-                                            key={k}
-                                            value={`${BUILTIN_TEMPLATE_PREFIX}${k}`}
-                                        >
-                                            {SCALE_LABELS[k]}
-                                        </Select.Item>
-                                    ))}
-                                </Select.Group>
-                                {customPresetOptions.length > 0 ? (
-                                    <>
-                                        <Select.Separator />
-                                        <Select.Group>
-                                            {customPresetOptions.map((preset) => (
-                                                <Select.Item
-                                                    key={preset.id}
-                                                    value={`${CUSTOM_TEMPLATE_PREFIX}${preset.id}`}
-                                                >
-                                                    {`${preset.name} (${formatScaleNotes(preset.notes)})`}
-                                                </Select.Item>
-                                            ))}
-                                        </Select.Group>
-                                    </>
-                                ) : null}
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
+                <AppField label={tf("custom_scale_name")}>
+                    <TextField.Root
+                        size="2"
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                    />
+                </AppField>
 
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 112 }}>
-                            {tAny("custom_scale_name")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            value={name}
-                            onChange={(e) => setName(e.target.value)}
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-
-                    <Flex direction="column" gap="2">
-                        <Text size="2">{tAny("custom_scale_notes")}</Text>
-                        <Flex wrap="wrap" gap="2">
-                            {CHROMATIC_NOTE_LABELS.map((label, pc) => {
-                                const selected = notes.includes(pc);
-                                return (
-                                    <Button
-                                        key={label}
-                                        type="button"
-                                        size="1"
-                                        variant={selected ? "solid" : "soft"}
-                                        color={selected ? "amber" : "gray"}
-                                        onClick={() => toggleNote(pc)}
-                                    >
-                                        {label}
-                                    </Button>
-                                );
-                            })}
-                        </Flex>
+                <Flex direction="column" gap="2">
+                    <span className="hs-type-label">{tf("custom_scale_notes")}</span>
+                    <Flex wrap="wrap" gap="2">
+                        {CHROMATIC_NOTE_LABELS.map((label, pc) => {
+                            const selected = notes.includes(pc);
+                            return (
+                                <Button
+                                    key={label}
+                                    type="button"
+                                    size="1"
+                                    variant={selected ? "solid" : "soft"}
+                                    color={selected ? "amber" : "gray"}
+                                    onClick={() => toggleNote(pc)}
+                                >
+                                    {label}
+                                </Button>
+                            );
+                        })}
                     </Flex>
                 </Flex>
-
-                <Flex justify="end" gap="2" mt="4">
-                    <Button
-                        type="button"
-                        variant="solid"
-                        color="red"
-                        disabled={!selectedCustomPresetId}
-                        onClick={handleDeleteSelectedPreset}
-                    >
-                        {tAny("custom_scale_delete")}
-                    </Button>
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button onClick={handleSave}>{tAny("custom_scale_save_apply")}</Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+            </AppForm>
+        </AppDialog>
     );
 }

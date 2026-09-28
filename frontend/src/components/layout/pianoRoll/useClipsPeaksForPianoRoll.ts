@@ -85,6 +85,10 @@ export interface ClipPeaksEntry {
     reversed: boolean;
     /** Loop（循环源）：超出源窗口的内容按周期回绕重复 */
     loopEnabled: boolean;
+    /** Take 声道模式（0..=4，对齐 REAPER CHANMODE）。 */
+    channelMode: number;
+    /** 源文件声道数（未知时 0）。 */
+    sourceChannels: number;
 }
 
 /**
@@ -218,6 +222,8 @@ export function useClipsPeaksForPianoRoll(args: {
                 muted: clip.muted ?? false,
                 reversed: Boolean(clip.reversed),
                 loopEnabled: Boolean(clip.loopEnabled),
+                channelMode: clip.channelMode ?? 0,
+                sourceChannels: clip.sourceChannels ?? 0,
             };
         });
     }, [clips, visibleStartSec, visibleEndSec, redrawTick]);

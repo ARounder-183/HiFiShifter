@@ -68,6 +68,31 @@ type ShapeSpec =
     | { kind: "equalPower" }
     | { kind: "linearPower" };
 
+/** 形状 id 非法（NaN / Infinity）时的退化规格。 */
+const LINEAR_POWER_SPEC: ShapeSpec = { kind: "linearPower" };
+
+/**
+ * 已解析的形状规格缓存。
+ *
+ * 【为什么需要】`resolveShapeSpec` 是**纯查表**（输入只有形状 id），但此前每次
+ * 调用都构造一个新对象字面量。它在波形几何重建的热路径上按「像素列 × 列内切片
+ * × 极值」被调用——带淡变的 400 clip / 全览实测约 2.5 万次/次重建，等于每次重建
+ * 白送 2.5 万次短命对象分配，落在渲染关键路径上。
+ *
+ * 形状 id 是 REAPER 的 0..6 加少量小数变体，取值集合极小且封闭，用 Map 缓存后
+ * 命中率接近 100%，且返回的对象只被读取（`coreAscending` 不解构、不修改）。
+ */
+const shapeSpecCache = new Map<number, ShapeSpec>();
+
+/**
+ * 形状规格缓存的上限。
+ *
+ * 合法形状 id 只有 0..6 与少量小数变体，64 足够容纳全部。上限存在的意义是
+ * 兜住**畸形输入**（例如损坏工程里出现任意浮点数形状 id）——缓存一旦无界，
+ * 坏数据就能让它在渲染循环里无限增长。超出上限后只计算不缓存，行为不变。
+ */
+const SHAPE_SPEC_CACHE_MAX = 64;
+
 /**
  * 各预设的世界轴参数（待校准：与本机 REAPER 并排比对后微调 p0/z/k）。
  * k 已按"线性点 z 处 e=1"约束反解（见模块头注释）。
@@ -85,20 +110,29 @@ const S_ANCHORS: Record<number, { a0: number; ks: number }> = {
 };
 
 function resolveShapeSpec(shape: number): ShapeSpec {
-    if (!Number.isFinite(shape)) return { kind: "linearPower" };
+    if (!Number.isFinite(shape)) return LINEAR_POWER_SPEC;
+    const cached = shapeSpecCache.get(shape);
+    if (cached !== undefined) return cached;
+    const spec = computeShapeSpec(shape);
+    if (shapeSpecCache.size < SHAPE_SPEC_CACHE_MAX) shapeSpecCache.set(shape, spec);
+    return spec;
+}
+
+/** 形状 id → 规格的纯计算（结果被 `resolveShapeSpec` 缓存）。 */
+function computeShapeSpec(shape: number): ShapeSpec {
     const base = Math.trunc(shape);
     const hasFraction = Math.abs(shape - base) > Number.EPSILON;
     if (hasFraction) {
         // 官方小数变体：1.1 → 内部形状 7（等功率）；5.1/6.x → 锐利 S。
         if (base === 1) return { kind: "equalPower" };
         if (base === 5 || base === 6) return { kind: "s", ...S_ANCHORS[FADE_S_SHARP] };
-        return { kind: "linearPower" };
+        return LINEAR_POWER_SPEC;
     }
     const anchor = POWER_ANCHORS[base];
     if (anchor) return { kind: "power", ...anchor };
     const sAnchor = S_ANCHORS[base];
     if (sAnchor) return { kind: "s", ...sAnchor };
-    return { kind: "linearPower" };
+    return LINEAR_POWER_SPEC;
 }
 
 /** 上升视角核心：x ∈ (0,1) → 增益，u 为世界轴坐标。 */

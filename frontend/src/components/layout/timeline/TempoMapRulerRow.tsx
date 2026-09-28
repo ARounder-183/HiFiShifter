@@ -1,10 +1,15 @@
+// hs-interaction-exempt: 标尺行内的内联控件（尺寸与行高耦合、随标尺滚动重建），已有正确的原生非被动滚轮接线；表单尺寸的原语不适用。
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { registerDragAbort } from "./gestureFocusGuard";
-import { Button, Checkbox, Dialog, Flex, Select, Text, TextField } from "@radix-ui/themes";
+import { Checkbox, Flex, Select, TextField } from "@radix-ui/themes";
+import { shallowEqual } from "react-redux";
 import type { GridSize, TimelineSnapSettings } from "../../../features/session/sessionTypes";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import { SCALE_KEYS, SCALE_LABELS } from "../../../utils/musicalScales";
 import { shouldSuppressHoverSideEffects } from "../../../utils/penInput";
+import { resolveTempoDragOffsetPx } from "./tempoPointDragOffset";
+import { anchoredDeltaSec } from "./runtime/dragAnchor";
+import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import type { CustomScalePreset } from "../../../utils/customScales";
 import {
     clampBpm,
@@ -19,6 +24,7 @@ import {
     normalizeScaleData,
     parseTempoPointText,
     previousScaleAtSec,
+    applyWheelToTempoText,
     removeTempoPoint,
     TEMPO_DENOMINATORS,
     tempoMapSegments,
@@ -35,7 +41,9 @@ import {
     computeEffectiveSnap,
     beginSnapGesture,
     endSnapGesture,
+    type SnapCandidate,
 } from "../../../utils/timelineSnapping";
+import { publishFadeRichTooltip } from "./fadeTooltipText";
 import {
     SNAP_HIGHLIGHT_GROUP,
     buildCandidateHighlightEntry,
@@ -46,6 +54,8 @@ import {
 import { useAppSelector } from "../../../app/hooks";
 import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
 import { applySelectWheelChange } from "../../../utils/selectWheel";
+import { AppDialog } from "../../../ui/Dialog";
+import { AppField, AppForm } from "../../../ui/Field";
 
 /** Tempo Map 行高度（不含分隔线）。 */
 export const TEMPO_ROW_HEIGHT_PX = 17;
@@ -113,6 +123,21 @@ interface TempoMapRulerRowProps {
      * 双击画面内的固定标签进入编辑时为 false —— 悬浮标签保持显示。
      */
     onFloatingInlineEditChange?: (overlaying: boolean) => void;
+    /**
+     * 变化点交互（悬停或拖拽）状态通知：为 true 时时间标尺应抑制自己的悬浮时间
+     * 提示 —— 此时已经有一个内容更丰富的变化点提示，两个气泡叠在一起既看不清也
+     * 互相遮挡。
+     */
+    onTempoInteractionChange?: (active: boolean) => void;
+    /**
+     * 本面板的视口总线订阅（`timelineViewportBus` / `pianoRollViewportBus`）。
+     *
+     * 【为什么必须由面板注入而不是直接用模块单例】标尺被时间轴与参数编辑器**共用**，
+     * 而两个面板各持一条总线（互不干扰，见 `createViewportBus` 的说明）。拖拽期间的
+     * 视口重放必须跟着**本面板**的视口走（见下方 replay effect），订阅错总线等于
+     * 永远收不到通知。
+     */
+    subscribeViewport?: (listener: (scrollLeft: number, pxPerSec: number) => void) => () => void;
 }
 
 /** ScaleLike → 显示文本（键音阶显示 "C / Am"，自定义音阶显示名称）。 */
@@ -292,20 +317,39 @@ function TempoPointDialog({
     ];
 
     return (
-        <Dialog.Root open={open} onOpenChange={(next) => !next && onCancel()}>
-            <Dialog.Content maxWidth="420px">
-                <Dialog.Title>
-                    {isFirst ? t("tempo_map_dialog_title_initial") : t("tempo_map_dialog_title")}
-                </Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
+        <AppDialog
+            open={open}
+            onOpenChange={(next) => !next && onCancel()}
+            title={isFirst ? t("tempo_map_dialog_title_initial") : t("tempo_map_dialog_title")}
+            size="sm"
+            actions={[
+                {
+                    id: "delete",
+                    label: t("tempo_map_delete_point"),
+                    intent: "danger",
+                    align: "start",
+                    disabled: isFirst,
+                    autoClose: false,
+                    onClick: onDelete,
+                },
+                {
+                    id: "cancel",
+                    label: t("cancel"),
+                    autoClose: false,
+                    onClick: onCancel,
+                },
+                {
+                    id: "ok",
+                    label: t("ok"),
+                    intent: "primary",
+                    autoClose: false,
+                    onClick: commit,
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={t("common_bpm")}>
                     <Flex gap="2" align="center">
-                        <Text
-                            size="1"
-                            className="text-qt-text-muted shrink-0"
-                            style={{ width: 96 }}
-                        >
-                            {t("bpm")}
-                        </Text>
                         <TextField.Root
                             size="1"
                             ref={bpmRef}
@@ -318,18 +362,11 @@ function TempoPointDialog({
                             }}
                             style={{ width: 90 }}
                         />
-                        <Text size="1" className="text-qt-text-muted">
-                            {t("tempo_map_bpm_range")}
-                        </Text>
+                        <span className="hs-type-caption">{t("tempo_map_bpm_range")}</span>
                     </Flex>
+                </AppField>
+                <AppField label={t("tempo_map_time_signature")}>
                     <Flex gap="2" align="center">
-                        <Text
-                            size="1"
-                            className="text-qt-text-muted shrink-0"
-                            style={{ width: 96 }}
-                        >
-                            {t("tempo_map_time_signature")}
-                        </Text>
                         <TextField.Root
                             size="1"
                             ref={numRef}
@@ -344,7 +381,7 @@ function TempoPointDialog({
                             }}
                             style={{ width: 48 }}
                         />
-                        <Text size="1">/</Text>
+                        <span className="hs-type-label">/</span>
                         <Select.Root
                             size="1"
                             value={String(denominator)}
@@ -377,113 +414,84 @@ function TempoPointDialog({
                             </Select.Content>
                         </Select.Root>
                     </Flex>
-                    {!isFirst ? (
-                        <Flex gap="2" align="center" style={{ marginTop: -8 }}>
-                            <Checkbox
-                                size="1"
-                                checked={sigFollow}
-                                disabled={isFirst}
-                                onCheckedChange={(checked) => setSigFollow(checked === true)}
-                            />
-                            <Text size="1" className="text-qt-text-muted">
-                                {t("tempo_map_ts_inherit")} ({previousTimeSignatureLabel})
-                            </Text>
-                        </Flex>
-                    ) : null}
-                    <Flex gap="2" align="center">
-                        <Text
+                </AppField>
+                {!isFirst ? (
+                    <Flex gap="2" align="center" style={{ marginTop: -8 }}>
+                        <Checkbox
                             size="1"
-                            className="text-qt-text-muted shrink-0"
-                            style={{ width: 96 }}
-                        >
-                            {t("tempo_map_scale")}
-                        </Text>
-                        <Select.Root
-                            size="1"
-                            value={scaleValue}
-                            onValueChange={(v) => {
-                                if (v.startsWith("custom:")) {
-                                    const presetId = v.slice(7);
-                                    const preset = customScalePresets.find(
-                                        (p) => String(p.id) === presetId,
-                                    );
-                                    setCustomNotes(preset ? [...preset.notes] : null);
-                                    setCustomName(preset?.name ?? "");
-                                }
-                                setScaleValue(v);
+                            checked={sigFollow}
+                            disabled={isFirst}
+                            onCheckedChange={(checked) => setSigFollow(checked === true)}
+                        />
+                        <span className="hs-type-caption">
+                            {t("tempo_map_ts_inherit")} ({previousTimeSignatureLabel})
+                        </span>
+                    </Flex>
+                ) : null}
+                <AppField label={t("tempo_map_scale")}>
+                    <Select.Root
+                        size="1"
+                        value={scaleValue}
+                        onValueChange={(v) => {
+                            if (v.startsWith("custom:")) {
+                                const presetId = v.slice(7);
+                                const preset = customScalePresets.find(
+                                    (p) => String(p.id) === presetId,
+                                );
+                                setCustomNotes(preset ? [...preset.notes] : null);
+                                setCustomName(preset?.name ?? "");
+                            }
+                            setScaleValue(v);
+                        }}
+                    >
+                        <Select.Trigger
+                            style={{ minWidth: 190 }}
+                            onWheel={(event) => {
+                                applySelectWheelChange({
+                                    event,
+                                    currentValue: scaleValue,
+                                    options: scaleWheelOptions,
+                                    onChange: (v) => {
+                                        if (v.startsWith("custom:")) {
+                                            const presetId = v.slice(7);
+                                            const preset = customScalePresets.find(
+                                                (p) => String(p.id) === presetId,
+                                            );
+                                            setCustomNotes(preset ? [...preset.notes] : null);
+                                            setCustomName(preset?.name ?? "");
+                                        }
+                                        setScaleValue(v);
+                                    },
+                                });
                             }}
-                        >
-                            <Select.Trigger
-                                style={{ minWidth: 190 }}
-                                onWheel={(event) => {
-                                    applySelectWheelChange({
-                                        event,
-                                        currentValue: scaleValue,
-                                        options: scaleWheelOptions,
-                                        onChange: (v) => {
-                                            if (v.startsWith("custom:")) {
-                                                const presetId = v.slice(7);
-                                                const preset = customScalePresets.find(
-                                                    (p) => String(p.id) === presetId,
-                                                );
-                                                setCustomNotes(preset ? [...preset.notes] : null);
-                                                setCustomName(preset?.name ?? "");
-                                            }
-                                            setScaleValue(v);
-                                        },
-                                    });
-                                }}
-                            />
-                            <Select.Content>
-                                <Select.Item value="inherit">
-                                    {t("tempo_map_scale_inherit")} ({previousScaleLabel})
-                                </Select.Item>
+                        />
+                        <Select.Content>
+                            <Select.Item value="inherit">
+                                {t("tempo_map_scale_inherit")} ({previousScaleLabel})
+                            </Select.Item>
+                            <Select.Group>
+                                <Select.Label>{t("scale_builtin_group")}</Select.Label>
+                                {SCALE_KEYS.map((key) => (
+                                    <Select.Item key={key} value={`key:${key}`}>
+                                        {SCALE_LABELS[key]}
+                                    </Select.Item>
+                                ))}
+                            </Select.Group>
+                            {customScalePresets.length > 0 ? (
                                 <Select.Group>
-                                    <Select.Label>{t("scale_builtin_group")}</Select.Label>
-                                    {SCALE_KEYS.map((key) => (
-                                        <Select.Item key={key} value={`key:${key}`}>
-                                            {SCALE_LABELS[key]}
+                                    <Select.Label>{t("scale_custom_group")}</Select.Label>
+                                    {customScalePresets.map((preset) => (
+                                        <Select.Item key={preset.id} value={`custom:${preset.id}`}>
+                                            {preset.name || preset.id}
                                         </Select.Item>
                                     ))}
                                 </Select.Group>
-                                {customScalePresets.length > 0 ? (
-                                    <Select.Group>
-                                        <Select.Label>{t("scale_custom_group")}</Select.Label>
-                                        {customScalePresets.map((preset) => (
-                                            <Select.Item
-                                                key={preset.id}
-                                                value={`custom:${preset.id}`}
-                                            >
-                                                {preset.name || preset.id}
-                                            </Select.Item>
-                                        ))}
-                                    </Select.Group>
-                                ) : null}
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
-                </Flex>
-                <Flex justify="between" align="center" mt="4" gap="2">
-                    <Button
-                        variant="soft"
-                        color="red"
-                        size="1"
-                        disabled={isFirst}
-                        onClick={onDelete}
-                    >
-                        {t("tempo_map_delete_point")}
-                    </Button>
-                    <Flex gap="2">
-                        <Button variant="soft" color="gray" size="1" onClick={onCancel}>
-                            {t("cancel")}
-                        </Button>
-                        <Button size="1" onClick={commit}>
-                            {t("ok")}
-                        </Button>
-                    </Flex>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                            ) : null}
+                        </Select.Content>
+                    </Select.Root>
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }
 
@@ -516,7 +524,9 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     editRequest,
     onEditRequestHandled,
     onDialogOpenChange,
+    onTempoInteractionChange,
     onFloatingInlineEditChange,
+    subscribeViewport,
 }) => {
     const [selectedId, setSelectedId] = useState<string | null>(null);
     /** 旗帜内联编辑（双击蓝色标签 → 原地 TextBox）。 */
@@ -535,12 +545,62 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     } | null>(null);
     const dragRef = useRef<{
         pointId: string;
+        /** 按下时的指针客户端 X：拖拽启动阈值的判据（屏幕像素，与缩放无关）。 */
         startClientX: number;
+        /** 按下时变化点的时间（吸附原点、冻结候选、位移基准）。 */
         startSec: number;
+        /**
+         * 按下时**指针**的时间 + 当时的缩放。
+         *
+         * 【为什么是这两个而不是"抓取偏移"】抓取偏移必须按**屏幕像素**恒定，而它的
+         * 像素值只有在**按下时的缩放**下才有意义（见 `anchoredDeltaSec`）—— 因此这里
+         * 存的是按下时刻的两个原始量，偏移由共享纯函数每次按当前缩放折算。
+         *
+         * 为什么不能存成"时间"：变化点旗帜左缘对齐变化点的实际位置，用户抓住的是
+         * 旗帜（标签在锚点右侧），抓取点天然偏右几十像素。若把这段距离存成**时间**，
+         * 拖拽中一旦缩放，同一段时间在当前缩放下代表的**像素**会按比例变化 ——
+         * 放大 2 倍，40px 的偏移就变成 80px，光标与标签越拖越远
+         *（用户报告："水平缩放时这个偏右的距离会越来越偏"）。
+         */
+        startPointerSec: number;
+        startPxPerSec: number;
         /** 拖拽开始时的 Tempo Map 快照，用于吸附计算时固定网格，避免变化点自身移动改变网格。 */
         baseTempoMap: TempoMap;
+        /**
+         * 吸附网格专用快照：`baseTempoMap` **移除本点**后的结果。
+         *
+         * 被拖的点不参与自己要落位的网格（见 `snapTempoPosition.gridTempoMap`）。
+         */
+        snapTempoMap: TempoMap;
     } | null>(null);
     const [draggingId, setDraggingId] = useState<string | null>(null);
+    /**
+     * 行根元素（内容坐标 0 的位置）。
+     *
+     * 【为什么用它当参照】行位于被 `translateX(-scrollLeft)` 平移的内容层内，行根左缘
+     * 就是"内容时间 0"在屏幕上的位置 —— 据此换算指针时间，滚动与缩放都自动成立，
+     * 不需要额外读 scrollLeft。
+     */
+    const rowRef = useRef<HTMLDivElement | null>(null);
+    /** 最近一次拖拽指针事件（视口变化后据此重放预览）。 */
+    const lastDragPointerRef = useRef<PointerEvent | null>(null);
+    /** 当前拖拽的 move 处理器（供"视口变化即重放"的 effect 调用）。 */
+    const dragMoveHandlerRef = useRef<((event: PointerEvent) => void) | null>(null);
+    /** 指针悬停中的变化点 id（与拖拽一起构成"交互中"）。 */
+    const [hoveredFlagId, setHoveredFlagId] = useState<string | null>(null);
+    /**
+     * 变化点旗帜 DOM（按 id）。
+     *
+     * 【为什么要元素表】富提示必须挂在**收到 pointerdown 的那个元素**上：按下时
+     * AppTooltip 会把"当前元素"固定下来并跟随光标，拖拽中即使指针离开旗帜也继续
+     * 读取它的内容。此前提示字符串挂在旗帜内部的标签 `<div>` 上，指针按在外层
+     * （1px 竖线 / 内边距）时固定的就不是它，拖拽期间内容不再更新。
+     */
+    const flagElementsRef = useRef(new Map<string, HTMLElement>());
+    const setFlagElement = useCallback((id: string, element: HTMLElement | null) => {
+        if (element) flagElementsRef.current.set(id, element);
+        else flagElementsRef.current.delete(id);
+    }, []);
     const dialogStateRef = useRef(dialogState);
     useEffect(() => {
         dialogStateRef.current = dialogState;
@@ -551,15 +611,29 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     // 当前时间轴中的 Clip / 轨道 / 选区 / 播放头作为候选目标。
     const timelineClips = useAppSelector((state) => state.session.clips);
     const timelineTracks = useAppSelector((state) => state.session.tracks);
-    const selectedClipIds = useAppSelector((state) =>
-        state.session.multiSelectedClipIds.length > 0
-            ? state.session.multiSelectedClipIds
-            : state.session.selectedClipId
-              ? [state.session.selectedClipId]
-              : [],
+    // shallowEqual 阻断无关 dispatch 的重渲染：选择器每次通知都返回新数组
+    // （[selectedClipId] 或 []，引用永远不等），播放期间 30Hz 的播放头提交会以
+    // 相同元素反复触发本行重渲染。元素相等时保持旧引用。
+    const selectedClipIds = useAppSelector(
+        (state) =>
+            state.session.multiSelectedClipIds.length > 0
+                ? state.session.multiSelectedClipIds
+                : state.session.selectedClipId
+                  ? [state.session.selectedClipId]
+                  : [],
+        shallowEqual,
     );
     const playheadSec = useAppSelector((state) => state.session.playheadSec);
+    // 播放头经渲染期写入的 ref 读取（与 dragTempoMapRef 同一写法）：播放期间
+    // playheadSec 以 30Hz 提交，若作为 snapTempoPosition 的依赖，回调每帧重建，
+    // 拖拽主 effect 会随之每帧卸载/重挂 window 监听（间隙里的 move 全部丢失）。
+    const snapPlayheadSecRef = useRef(playheadSec);
+    snapPlayheadSecRef.current = playheadSec;
     const noSnapKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipNoSnap"));
+    /** 精细调整修饰键（与 BPM 输入框同一绑定：普通步进 1，按住后 0.1）。 */
+    const paramFineAdjustKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.paramFineAdjust"),
+    );
 
     // 编辑对话框打开/关闭时通知父级（用于抑制标尺悬浮时间提示）。
     useEffect(() => {
@@ -666,9 +740,29 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             enabled: boolean,
             base: TempoMap | null,
             baseBpm: number,
-            originSec?: number,
-            manageHighlight?: boolean,
+            options?: {
+                originSec?: number;
+                manageHighlight?: boolean;
+                /**
+                 * 计算**网格候选**所用的地图；缺省取 `base`。
+                 *
+                 * 【为什么与 `base` 分开】拖动一个变化点时，该点本身会重塑它之后的
+                 * 网格（段起点即网格原点）。若网格里包含"正在移动的那个点"，就会
+                 * 出现"网格跟着标签跑"：例如 0.75s 处有点、工程网格为 0.5s 时，
+                 * 段 [0, 0.75] 的候选被段末截断到只剩 {0, 0.5}，而 1.0s 落在第二段
+                 * 的栅格 0.75+k×0.5 上，**根本不在候选集里** —— 用户拖不到 1.0s，
+                 * 尽管没有这个点时 1.0s 明明是网格线。
+                 *
+                 * 正确语义：**被拖的点不参与自己要落位的网格**。因此拖拽时传
+                 * `removeTempoPoint(base, pointId)`，其余场景不传（用 `base`）。
+                 */
+                gridTempoMap?: TempoMap | null;
+                /** 冻结候选（拖拽起点等）：见 `TimelineSnapContext.extraCandidates`。 */
+                extraCandidates?: readonly SnapCandidate[];
+            },
         ) => {
+            const originSec = options?.originSec;
+            const manageHighlight = options?.manageHighlight;
             if (!enabled || !snapSettings?.enabled) {
                 if (manageHighlight) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                 return sec;
@@ -683,15 +777,16 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                     grid,
                     bpm: baseBpm,
                     beatsPerBar,
-                    tempoMap: base,
+                    tempoMap: options?.gridTempoMap === undefined ? base : options.gridTempoMap,
                     pxPerSec,
                     clips: timelineClips,
                     tracks: timelineTracks,
                     selectedClipIds,
-                    playheadSec,
+                    playheadSec: snapPlayheadSecRef.current,
                     object: "clip",
                     originSec,
                     anchorTrackId: null,
+                    extraCandidates: options?.extraCandidates,
                 },
                 sec,
             );
@@ -720,14 +815,58 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             timelineClips,
             timelineTracks,
             selectedClipIds,
-            playheadSec,
         ],
     );
 
     /** 防重复提交：Enter 提交后输入框卸载可能再次触发 blur；Esc 取消后同理。 */
     const inlineEditLockRef = useRef(false);
+    /**
+     * 内联输入框的滚轮调值（参考 BPM 输入框：普通 1、按住精细调整修饰键 0.1）。
+     *
+     * 【为什么必须是非被动监听】React 的 `onWheel` 是 passive 的，`preventDefault()`
+     * 无效：输入框在标尺里，滚轮会同时被时间轴的缩放 / 滚动逻辑吃掉。
+     *
+     * 语义：只改**文本里的 BPM 数字**，其余内容（拍号 / 音阶 / 用户手打的片段）
+     * 逐字符保留；同时把解析出的 BPM 应用到本地草稿，使标尺与提示实时跟随。
+     */
+    const inlineWheelRef = useNonPassiveWheel<HTMLInputElement>((e) => {
+        // 必须先消费事件再判定编辑状态：标尺根的非被动监听会把它收到的任何 wheel
+        // 一律 preventDefault 并转交滚动/缩放 —— 不在这里拦截的话，调整 BPM 的
+        // 同一次滚轮还会平移/缩放时间轴（与对话框 BPM 滚轮同一约束）。
+        e.preventDefault();
+        e.stopPropagation();
+        const id = editingPointId;
+        if (!id) return;
+        const direction = e.deltaY < 0 ? 1 : -1;
+        const step = isModifierActive(paramFineAdjustKb, e) ? 0.1 : 1;
+        const nextText = applyWheelToTempoText(editingText, direction, step);
+        if (nextText === null) return;
+        setEditingText(nextText);
+        if (!tempoMap || tempoMap.points.findIndex((p) => p.id === id) < 0) return;
+        const parsed = parseTempoPointText(nextText, customScalePresets);
+        if (!parsed) return;
+        onChange(updateTempoPoint(tempoMap, id, { bpm: parsed.bpm }));
+    });
+
     /** 内联输入框 DOM 引用（全局"点击外部确认并退出"判定用）。 */
     const inlineInputRef = useRef<HTMLInputElement | null>(null);
+    /**
+     * 内联输入框的挂载回调：同时登记到普通 ref 与滚轮 ref。
+     *
+     * 【为什么用稳定回调】内联函数作为 ref 会在每次渲染时先摘除再挂载
+     * （`null` → 元素），既产生无谓工作，也让"在 effect 里读取 ref"的代码有机会
+     * 读到瞬时 null。稳定回调只在真正挂载/卸载时被调用。
+     */
+    const setInlineInputElement = useCallback(
+        (element: HTMLInputElement | null) => {
+            inlineInputRef.current = element;
+            // 滚轮监听由回调 ref 直接挂/摘（见 `useNonPassiveWheel`）：这里必须
+            // 转发调用，而不是赋值 —— 内联输入框是**条件挂载**的，靠 ref 赋值
+            // 永远赶不上 effect 的时机（这正是它此前完全没反应的原因）。
+            inlineWheelRef(element);
+        },
+        [inlineWheelRef],
+    );
 
     const startInlineEdit = useCallback((point: TempoPoint) => {
         inlineEditLockRef.current = false;
@@ -908,6 +1047,34 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         }
     }, [onChange]);
 
+    /**
+     * 拖拽期间**视口变化**（滚轮滚动/缩放、键盘滚动、跨面板同步）后按最后一次指针位置
+     * 重算落点。
+     *
+     * 【为什么需要】落点 = `指针时间 − 抓取偏移 / 当前缩放`，而"指针时间"依赖
+     * 当前视口。视口变了而指针没动时若不重算，标签会停在旧落点上、与光标脱开 —— 直到
+     * 用户再动一下鼠标才归位（用户报告的"拖拽中滚动/缩放导致偏移"）。滚轮滚动本身
+     * **不产生任何 pointermove**，所以这条重放是唯一能让标签跟住光标的路径。
+     *
+     * 【为什么订阅视口总线，而不是依赖 React 的 `pxPerSec` / `scrollLeft` 属性】
+     * 那两个属性都是 rAF 量化的**提交值**：小于一个量化步长的滚动根本不会让它们变化，
+     * 于是重放不触发（标签与光标持续错开）；即便变化，也要等下一帧 React 渲染。而落点
+     * 换算读的是 `rowRef.getBoundingClientRect()`（**DOM 实时值**）—— 触发条件与真值
+     * 来源必须同源，总线在每次视口提交时**同步**广播，重放与绘制落在同一帧。
+     */
+    useEffect(() => {
+        if (!draggingId || !subscribeViewport) return;
+        return subscribeViewport((liveScrollLeft, livePxPerSec) => {
+            // 视口真值先落到 ref：紧接着的重放换算读的正是它们
+            // （见 `pointerSecAtClientX` 与 `viewportEndSec` 的钳制上限）。
+            dragPxPerSecRef.current = livePxPerSec;
+            dragScrollLeftRef.current = liveScrollLeft;
+            const event = lastDragPointerRef.current;
+            if (!event) return;
+            dragMoveHandlerRef.current?.(event);
+        });
+    }, [draggingId, subscribeViewport]);
+
     // ── 编辑中点击外部 → 确认并退出 ────────────────────────────────
     // 时间线画布/轨道/标尺等区域会在各自的 pointerdown 处理里
     // preventDefault（选中、seek、拖拽起手等），这会取消 Chromium 的默认
@@ -943,6 +1110,25 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
      */
     const inlineDragArmedRef = useRef(false);
 
+    /**
+     * 指针所在的**内容时间**（秒）。行根不可用（未挂载）时返回 NaN。
+     *
+     * 【为什么除数取 ref 而不是渲染期捕获的 `pxPerSec`】拖拽主 effect 刻意不把
+     * `pxPerSec` 放进依赖（缩放会让 effect 重挂 window 监听、中断拖拽），于是它闭包
+     * 里的 `pxPerSec` 会**永久停在拖拽开始时的缩放**上。拖拽中用滚轮缩放后，同一个
+     * 指针位置仍按旧缩放换算，结果整体偏一个缩放比 —— 这正是"拖拽中滚动 / 缩放
+     * 导致严重偏移"。行根左缘（`rowRef.getBoundingClientRect()`）本来就是 DOM
+     * 实时值，除数必须同样实时，两者才同源。
+     *
+     * 【声明位置】必须先于 `armInlineDrag` / `startFlagDrag`：它们的依赖数组在
+     * 渲染期求值，引用后置声明的 const 会命中 TDZ。
+     */
+    const pointerSecAtClientX = useCallback((clientX: number): number => {
+        const left = rowRef.current?.getBoundingClientRect().left;
+        if (left === undefined) return Number.NaN;
+        return (clientX - left) / Math.max(1e-9, dragPxPerSecRef.current);
+    }, []);
+
     /** 判定为“拖动标签”后的统一接管：确认编辑 + 从 (clientX, clientY) 开始拖动。 */
     const armInlineDrag = useCallback(
         (point: TempoPoint, clientX: number) => {
@@ -958,12 +1144,25 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             inlineEditLockRef.current = true;
             setEditingPointId(null);
             const appliedMap = applyInlineEdit(false);
-            // 从当前指针位置开始拖动（保持指针与标签的相对偏移不变）。
+            // 【拖拽起点对准光标】进入拖拽时，把变化点放到**光标当前所在的时间**上，
+            // 而不是保留"光标与标签之间的初始偏移"。
+            //
+            // 拖动是从输入框里"拖出去"发起的：指针先离开输入框边界（`margin` 之外）
+            // 才切换到拖拽，此时光标已经离标签有几十像素。若沿用初始偏移，变化点会
+            // 永远落后光标那一段距离 —— 用户看到的是"拖到哪儿都不是我指的位置"。
+            //
+            // 表达方式：锚点与指针时间都取光标当前时间（抓取偏移为 0）。
+            const secUnderCursor = pointerSecAtClientX(clientX);
+            const dragBase = appliedMap ?? tempoMap ?? { points: [point] };
             dragRef.current = {
                 pointId: point.id,
                 startClientX: clientX,
-                startSec: point.positionSec,
-                baseTempoMap: appliedMap ?? tempoMap ?? { points: [point] },
+                startSec: Number.isFinite(secUnderCursor) ? secUnderCursor : point.positionSec,
+                startPointerSec: secUnderCursor,
+                startPxPerSec: dragPxPerSecRef.current,
+                baseTempoMap: dragBase,
+                // 与 `startFlagDrag` 同一约定：吸附网格不含被拖的点。
+                snapTempoMap: removeTempoPoint(dragBase, point.id) ?? dragBase,
             };
             // 即便指针抬起时没有任何进一步移动，也要把“确认的编辑/新增”
             // 提交出去（否则仅停留在本地 Redux）。
@@ -971,7 +1170,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             setDraggingId(point.id);
             setSelectedId(point.id);
         },
-        [applyInlineEdit, tempoMap],
+        [applyInlineEdit, pointerSecAtClientX, tempoMap],
     );
 
     const startInlineDragProbe = useCallback(
@@ -1138,17 +1337,25 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             } catch {
                 // ignore
             }
+            const baseTempoMap = tempoMap ?? { points: [point] };
             dragRef.current = {
                 pointId: point.id,
                 startClientX: e.clientX,
                 startSec: point.positionSec,
-                baseTempoMap: tempoMap ?? { points: [point] },
+                startPointerSec: pointerSecAtClientX(e.clientX),
+                startPxPerSec: dragPxPerSecRef.current,
+                baseTempoMap,
+                // 吸附网格用**移除本点**后的地图（见 `snapTempoPosition.gridTempoMap`）：
+                // 被拖的点不参与自己要落位的网格，否则它会把自己的段原点带进候选集，
+                // 使"本该有的网格线"（如 1.0s）消失。快照仍在按下时固定，避免网格
+                // 随标签实时漂移。
+                snapTempoMap: removeTempoPoint(baseTempoMap, point.id) ?? baseTempoMap,
             };
             beginSnapGesture();
             setDraggingId(point.id);
             setSelectedId(point.id);
         },
-        [tempoMap],
+        [pointerSecAtClientX, tempoMap],
     );
 
     useEffect(() => {
@@ -1159,13 +1366,38 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         // 的小 effect 承担。
         if (!dragTempoMapRef.current) return;
         const handleMove = (e: PointerEvent) => {
+            // 记下最近一次指针事件：视口在拖拽期间被改变（滚轮滚动/缩放）时要按它重放
+            // （见下方"视口变化即重放"的 effect），否则标签会与光标脱开。
+            lastDragPointerRef.current = e;
             const drag = dragRef.current;
             const liveMap = dragTempoMapRef.current;
             if (!drag || !liveMap) return;
-            const dx = e.clientX - drag.startClientX;
+            // 【落点 = 锚点跟随光标，抓取偏移按**屏幕像素**恒定】见 `startPointerSec`
+            // 的说明：偏移恒定 ⇒ 标签始终贴在光标下的同一处，缩放不会把它越拉越远；
+            // 而"光标时间"读的是行根的 DOM 实时位置 ⇒ 滚动/缩放后（含重放）都成立。
+            const pointerSecNow = pointerSecAtClientX(e.clientX);
+            if (!Number.isFinite(pointerSecNow)) return;
+            // 【拖拽启动阈值】指针未越过阈值前**不改变**变化点。
+            //
+            // 双击标签进入编辑时，第一下点击的按下与抬起之间几乎总会有 1-2px 抖动；
+            // 此前任何位移都会立刻进入"拖拽"并应用吸附，于是变化点被挪到最近的吸附位
+            // —— 双击后输入框出现在**被挪动过**的位置，看起来"输入框偏移了"，而且
+            // 挪到哪里取决于相邻变化点（它们决定吸附候选集），正好对应"和前一个
+            // 变化点标签是否接近有关"。
+            //
+            // 判据用**指针的屏幕位移**（与缩放、滚动都无关），越过阈值才开闸；开闸后
+            // 落点完全由光标决定（不再累加位移），因此不存在"按旧尺子解释起点"的问题。
+            if (resolveTempoDragOffsetPx(e.clientX - drag.startClientX) === 0) return;
             const rawSec = Math.max(
                 0,
-                drag.startSec + dx / Math.max(1e-9, dragPxPerSecRef.current),
+                drag.startSec +
+                    anchoredDeltaSec({
+                        anchorSec: drag.startSec,
+                        startPointerSec: drag.startPointerSec,
+                        startPxPerSec: drag.startPxPerSec,
+                        pointerSec: pointerSecNow,
+                        pxPerSec: dragPxPerSecRef.current,
+                    }),
             );
             // 吸附网格必须使用拖拽开始时的 Tempo Map 快照：变化点自身移动会改变
             // 其后的网格原点/BPM，若用实时 tempoMap 计算吸附，会使网格跟着标签移动，
@@ -1175,14 +1407,13 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             // "拖动时切换吸附"：修饰键把吸附总开关临时取反（开→关 / 关→开）。
             const effectiveSnap = computeEffectiveSnap(snapEnabled, isModifierActive(noSnapKb, e));
             if (effectiveSnap) {
-                sec = snapTempoPosition(
-                    rawSec,
-                    effectiveSnap,
-                    drag.baseTempoMap,
-                    mapFallback.bpm,
-                    drag.startSec,
-                    true,
-                );
+                sec = snapTempoPosition(rawSec, effectiveSnap, drag.baseTempoMap, mapFallback.bpm, {
+                    originSec: drag.startSec,
+                    manageHighlight: true,
+                    gridTempoMap: drag.snapTempoMap,
+                    // 起点作为**冻结候选**：允许精确拖回原位（它已不在网格上）。
+                    extraCandidates: [{ sec: drag.startSec, kind: "grid", priority: 10 }],
+                });
             } else {
                 // 修饰键临时关闭吸附时必须显式清除高亮：否则此前帧发布的
                 // 吸附竖线会冻结在画面上，直到 mouseup 才消失。
@@ -1227,11 +1458,13 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         // 走与 handleUp 完全相同的收尾（提交已拖到的位置，防止标签卡在
         // 拖拽态 / 吸附高亮冻结）。
         const unregisterAbort = registerDragAbort(handleUp);
+        dragMoveHandlerRef.current = handleMove;
         window.addEventListener("pointermove", handleMove);
         window.addEventListener("pointerup", handleUp);
         window.addEventListener("pointercancel", handleUp);
         return () => {
             unregisterAbort();
+            dragMoveHandlerRef.current = null;
             window.removeEventListener("pointermove", handleMove);
             window.removeEventListener("pointerup", handleUp);
             window.removeEventListener("pointercancel", handleUp);
@@ -1245,6 +1478,9 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         onChange,
         commitMap,
         projectSec,
+        // 引用恒稳定（useCallback([])：pxPerSec 经 dragPxPerSecRef 读取），
+        // 加入不会引起监听重挂。
+        pointerSecAtClientX,
     ]);
 
     // 拖拽进行中 Tempo Map 被外部清空（撤销/远程同步等）的兜底：独立小
@@ -1433,10 +1669,89 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         [tempoMap, primaryUnit, secondaryUnit, timeContext, projectScale, projectScaleName, t],
     );
 
+    /**
+     * 变化点富提示内容（结构化四行）。
+     *
+     * 与 `buildFlagTooltip` 的纯文本版同源同数据；这里给 React 节点是为了在拖拽
+     * 期间**逐帧**发布（见下方 effect）—— 富内容经事件总线直接刷新气泡，不依赖
+     * 元素属性变更被观察到，因此拖动中"位置"一行会实时跟着走。
+     */
+    const buildFlagTooltipContent = useCallback(
+        (pointIndex: number): React.ReactNode => {
+            if (!tempoMap) return null;
+            const point = tempoMap.points[pointIndex];
+            if (!point) return null;
+            const cursor = formatCursorTime(
+                primaryUnit,
+                secondaryUnit,
+                point.positionSec,
+                timeContext,
+            );
+            const positionLine = cursor.secondaryLabel
+                ? `${cursor.primaryLabel} / ${cursor.secondaryLabel}`
+                : cursor.primaryLabel;
+            const sig = effectiveTimeSignatureAt(tempoMap, pointIndex);
+            const effScale = effectiveScaleAtSec(
+                tempoMap,
+                point.positionSec,
+                projectScale ?? undefined,
+            );
+            const effScaleLabel = scaleLikeLabel(effScale, projectScaleName) ?? "—";
+            const rows: Array<[string, string]> = [
+                [t("tempo_map_tooltip_position"), positionLine],
+                [t("tempo_map_tooltip_bpm"), formatTempoBpm(point.bpm)],
+                [t("tempo_map_tooltip_time_signature"), formatTimeSignature(sig)],
+                [t("tempo_map_tooltip_scale"), effScaleLabel],
+            ];
+            return (
+                <div className="flex flex-col gap-[2px]">
+                    {rows.map(([label, value]) => (
+                        <div key={label} className="flex gap-2">
+                            <span className="opacity-70">{label}</span>
+                            <span className="font-medium">{value}</span>
+                        </div>
+                    ))}
+                </div>
+            );
+        },
+        [tempoMap, primaryUnit, secondaryUnit, timeContext, projectScale, projectScaleName, t],
+    );
+
+    /**
+     * 交互中的变化点 id：拖拽优先于悬停。
+     *
+     * 它是"实时提示"与"抑制标尺提示"两条链路的共同输入。
+     */
+    const activeFlagId = draggingId ?? hoveredFlagId;
+
+    /**
+     * 逐帧发布富提示。
+     *
+     * 依赖里带 `tempoMap`：拖拽每帧都会写新地图（`onChange(draft)`），因此内容
+     * （尤其"位置"一行）逐帧刷新。发布是副作用而非渲染状态，不引起额外渲染。
+     */
+    useEffect(() => {
+        if (!activeFlagId) return;
+        const element = flagElementsRef.current.get(activeFlagId) ?? null;
+        if (!element) return;
+        const index = tempoMap?.points.findIndex((point) => point.id === activeFlagId) ?? -1;
+        if (index < 0) return;
+        publishFadeRichTooltip(element, buildFlagTooltipContent(index));
+    }, [activeFlagId, tempoMap, buildFlagTooltipContent]);
+
+    /** 交互状态上报（抑制时间标尺自己的悬浮提示）。 */
+    useEffect(() => {
+        onTempoInteractionChange?.(activeFlagId !== null);
+    }, [activeFlagId, onTempoInteractionChange]);
+    useEffect(() => {
+        // 卸载时确保标尺提示恢复（组件被移除后没有机会再上报）。
+        return () => onTempoInteractionChange?.(false);
+    }, [onTempoInteractionChange]);
+
     /** 标签的内联输入框（输入编辑状态）。 */
     const renderInlineInput = (point: TempoPoint, isFirst: boolean) => (
         <input
-            ref={inlineInputRef}
+            ref={setInlineInputElement}
             autoFocus
             value={editingText}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditingText(e.target.value)}
@@ -1483,7 +1798,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 openDialogFromInlineEdit();
             }}
             onDoubleClick={(e) => e.stopPropagation()}
-            className="text-[9px] leading-[11px] font-medium rounded-[2px] outline-none border-none"
+            className="text-qt-3xs leading-[11px] font-medium rounded-[2px] outline-none border-none"
             style={{
                 backgroundColor: "var(--qt-panel)",
                 color: "var(--qt-text)",
@@ -1529,6 +1844,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
 
     return (
         <div
+            ref={rowRef}
             className="absolute left-0 select-none"
             style={{
                 top: 48,
@@ -1580,6 +1896,24 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                                           ? "grabbing"
                                           : "grab",
                                 }}
+                                ref={(element) => setFlagElement(point.id, element)}
+                                // 提示必须挂在**收到指针的那个元素**上，且与富内容注册
+                                // （`setFlagElement`）是同一个元素：悬停时指针落在这一层，
+                                // 拖拽时 `pointerdown` 也在这一层。曾经字符串挂在内部标签、
+                                // 富内容挂在外层，于是悬停走纯文本、拖拽走富文本 —— 同一个
+                                // 提示在两种状态下排版不同（用户报告的"样式不一致"）。
+                                data-tooltip={tooltipText}
+                                onMouseEnter={() => setHoveredFlagId(point.id)}
+                                onMouseLeave={() =>
+                                    setHoveredFlagId((current) =>
+                                        current === point.id ? null : current,
+                                    )
+                                }
+                                // 指针在旗帜上移动时不再让时间标尺计算悬浮时间：
+                                // 两层提示叠在一起既看不清也互相遮挡（与
+                                // `onTempoInteractionChange` 是同一目的的两道保险，
+                                // 这一道在 React 事件层即时生效）。
+                                onMouseMove={(e) => e.stopPropagation()}
                                 onPointerDown={(e) => startFlagDrag(point, isFirst, e)}
                                 onDoubleClick={(e) => {
                                     e.stopPropagation();
@@ -1606,7 +1940,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                                     : null}
                                 {!inlineEditing ? (
                                     <div
-                                        className="px-1 rounded-[2px] text-[9px] leading-[11px] whitespace-nowrap font-medium"
+                                        className="px-1 rounded-[2px] text-qt-3xs leading-[11px] whitespace-nowrap font-medium"
                                         style={{
                                             backgroundColor: "var(--qt-panel)",
                                             color: "var(--qt-text)",
@@ -1619,7 +1953,6 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                                                     : "none",
                                             outlineOffset: 1,
                                         }}
-                                        data-tooltip={tooltipText}
                                     >
                                         {formatTempoBpm(point.bpm)}
                                         {sigText ? (

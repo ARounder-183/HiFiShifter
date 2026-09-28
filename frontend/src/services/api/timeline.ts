@@ -34,6 +34,79 @@ export interface SearchSourceFileMatchesResult {
 }
 
 /**
+ * 假立体声扫描的逐 Take 明细（后端 `FakeStereoScanEntry`）。
+ *
+ * ★ 字段名必须与后端序列化**逐字一致**（`rename_all = "snake_case"`）。写成
+ * camelCase 时读到的是 `undefined`，再被 `?? 0` 兜底 —— 界面于是把"原因未知"
+ * 显示成一句具体但**虚假**的解释。这类错误没有编译期信号，后端有
+ * `models::tests::fake_stereo_scan_payload_wire_keys_are_pinned` 钉住键名。
+ */
+export interface FakeStereoScanEntry {
+    clip_id: string;
+    take_id: string;
+    name: string;
+    /**
+     * 判定原因：`mono` / `fakeStereo` / `trueStereo` / `pending` /
+     * `policyOff` / `forcedMono` / `noSource`（后端 `ChannelScanOutcome::as_str`）。
+     */
+    verdict: string;
+    /** 本次实际写入的声道模式（缺省 = 未改动）。 */
+    applied_mode?: number;
+    /**
+     * 判定为真立体声时的诊断证据：超差样本占比（0..1）。
+     *
+     * `0.0001` 表示万分之一的样本超差（很可能只是编解码残留，放宽容差就能
+     * 折叠）；`0.4` 表示四成样本超差（确实是立体声）。
+     */
+    violating_ratio?: number;
+    /** 判定为真立体声时观测到的最大绝对差（满幅为 1）。 */
+    max_abs_diff?: number;
+}
+
+/**
+ * 扫描候选的筛选去向（后端 `FakeStereoScanEligibility`）。
+ *
+ * `scanned === 0` 时用它解释**为什么**一个候选都没有：选区与工程对不上、选中的
+ * 音频块确实没有音频源、还是全都被用户显式设置过声道模式。没有这份统计，三种
+ * 情况在界面上长得一模一样，用户只能看到"这个功能什么都不做"。
+ *
+ * 字段名与后端 `snake_case` 序列化逐字一致（见 `FakeStereoScanEntry` 的说明）。
+ */
+export interface FakeStereoScanEligibility {
+    /** 命中筛选条件的 Clip 数。 */
+    matched_clips: number;
+    /** 这些 Clip 里被检查的 Take 总数。 */
+    takes_seen: number;
+    /** 因没有音频源而跳过。 */
+    skipped_no_source: number;
+    /** 因用户已显式设置过声道模式而跳过（只有自动扫描会跳过）。 */
+    skipped_user_seal: number;
+    /** 带着用户设置、但被这次显式命令纳入判定的 Take 数。 */
+    overrode_user_seal: number;
+}
+
+/** 假立体声扫描结果（后端 `FakeStereoScanPayload`）。 */
+export interface FakeStereoScanResult {
+    ok: boolean;
+    /** 被检查的 Take 数。 */
+    scanned: number;
+    /** 被折叠（dryRun 时为"将会被折叠"）的 Take 数。 */
+    converted: number;
+    /**
+     * 本次**没能得出结论**的 Take 数（源缺失 / 不可解码 / 覆盖不完整）。
+     *
+     * 与"单声道、无事可做"不同：这些 Take 记着"待重试"，下次打开工程会自动
+     * 再判一次。
+     */
+    pending: number;
+    entries: FakeStereoScanEntry[];
+    /** 待重试的源文件路径（去重）。 */
+    pending_files?: string[];
+    /** 候选筛选的去向统计。 */
+    eligibility: FakeStereoScanEligibility;
+}
+
+/**
  * Clip 源共振峰分析结果（analyze_clip_formants）。
  * 与后端 commands/formant.rs 的 ClipFormantAnalysisPayload 一一对应。
  */
@@ -310,6 +383,8 @@ export const timelineApi = {
             reversed?: boolean;
             /** Loop（循环源）开关。 */
             loopEnabled?: boolean;
+            /** 声道模式 0..=4（对齐 REAPER CHANMODE）。 */
+            channelMode?: number;
         }>;
         checkpoint?: boolean;
     }) => invoke<TimelineResult>("set_clips_state_bulk", payload.updates, payload.checkpoint),
@@ -378,6 +453,33 @@ export const timelineApi = {
             payload.takeId,
             payload.reversed,
             payload.checkpoint,
+        ),
+
+    setClipTakeChannelMode: (payload: {
+        clipId: string;
+        takeId: string;
+        /** 0..=4，对齐 REAPER CHANMODE（0 正常 / 1 交换 / 2 混合 / 3 仅左 / 4 仅右） */
+        channelMode: number;
+        checkpoint?: boolean;
+    }) =>
+        invoke<TimelineResult>(
+            "set_clip_take_channel_mode",
+            payload.clipId,
+            payload.takeId,
+            payload.channelMode,
+            payload.checkpoint,
+        ),
+
+    /**
+     * 扫描并（可选）把"假立体声"Take 折叠为单声道。
+     *
+     * `clipIds` 缺省 = 整个工程；`dryRun` 只报告不修改（供先看结果再确认）。
+     */
+    scanAndConvertFakeStereo: (payload?: { clipIds?: string[]; dryRun?: boolean }) =>
+        invoke<FakeStereoScanResult>(
+            "scan_and_convert_fake_stereo",
+            payload?.clipIds,
+            payload?.dryRun,
         ),
 
     addClipTakeFromMedia: (payload: {

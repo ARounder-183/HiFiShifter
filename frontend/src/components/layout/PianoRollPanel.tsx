@@ -1,3 +1,4 @@
+// hs-interaction-exempt: 边缘平滑度裸 range（约 7429 行）与 attachEdgeSmoothnessWheel 原生滚轮监听、松开落盘逻辑耦合，按迁移范围刻意保留；本文件其余取值控件已走能力层原语。
 import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
 import React, {
     type CSSProperties,
@@ -9,7 +10,7 @@ import React, {
     useState,
 } from "react";
 import { flushSync } from "react-dom";
-import { Flex, Text, Button, Select, Box, IconButton, DropdownMenu } from "@radix-ui/themes";
+import { Flex, Button, Box, DropdownMenu } from "@radix-ui/themes";
 import {
     ChevronDownIcon,
     CursorArrowIcon,
@@ -23,6 +24,8 @@ import {
 
 import { shallowEqual } from "react-redux";
 import { useAppDispatch, useAppSelector, useAppStore } from "../../app/hooks";
+import { resolveSyncOffsetForms } from "../../features/dock/dockSchema";
+import { PANEL_PARAM_EDITOR, PANEL_TIMELINE } from "../dock/registerBuiltinPanels";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -36,6 +39,7 @@ import {
     cycleDragDirection,
     setToolMode,
     persistUiSettings,
+    toggleParamAxisUnit,
     setParamEditorSyncTimeline,
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
@@ -106,7 +110,12 @@ import {
 import { resolveTimelineMinPxPerSec } from "./timeline/runtime/timelineZoomBounds";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 
-import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./pianoRoll/constants";
+import {
+    AXIS_W,
+    PARAM_EDITOR_BOTTOM_BAR_PX,
+    PITCH_MAX_MIDI,
+    PITCH_MIN_MIDI,
+} from "./pianoRoll/constants";
 import { drawPianoRoll } from "./pianoRoll/render";
 import type { DetectedPitchCurve, ReferencePitchOverlay } from "./pianoRoll/render";
 import type { MainCanvasSignature } from "./pianoRoll/mainCanvasSignature";
@@ -126,34 +135,67 @@ import {
     type SelectionEditExtension,
 } from "./pianoRoll/selectionEditApply";
 import {
-    addBeatRange,
-    beatRangesToFrameRanges,
+    addFrameRange,
+    addFrameRanges,
+    frameRangeEnd,
+    frameRangeEndCut,
+    frameRangeStartCut,
     normalizeSelection,
-    selectionBoundingRange,
-    selectionFromBeatRange,
-    subtractBeatRange,
-    toggleBeatRange,
+    selectionBoundingSpan,
+    selectionFromFrames,
+    selectionToFrameRanges,
+    subtractFrameRange,
+    toggleFrameRange,
     type FrameRange,
     type ParamSelection,
 } from "./pianoRoll/paramSelection";
 import {
     clipboardPreviewSpans,
     mapClipboardToTargetRanges,
+    pasteTargetSelectionFromClipboard,
     toParamClipboardPayload,
     type ParamClipboardData,
     type ParamClipboardSegment,
 } from "./pianoRoll/paramClipboardMapping";
+import { createClipboardPreviewSync } from "./pianoRoll/clipboardPreviewSync";
 import { uploadFullResCurveSegments } from "./pianoRoll/selectionEditData";
+import { planParamConversion } from "./pianoRoll/paramConversion";
 import { editablePitchValue } from "./pianoRoll/paramSmoothing";
+import {
+    DYN_DEFAULT_VIEW,
+    DYN_FOLLOW_ORIG,
+    DYN_VALUE_MAX,
+    dynMultiplicativeFactor,
+    isDynParam,
+    VOLUME_DEFAULT_VIEW,
+    restoreDynSentinels,
+} from "./pianoRoll/paramRanges";
 import { usePianoRollData } from "./pianoRoll/usePianoRollData";
 import { useClipsPeaksForPianoRoll } from "./pianoRoll/useClipsPeaksForPianoRoll";
 import { PianoRollWaveformSurface } from "./pianoRoll/PianoRollWaveformSurface";
+import { makeLoudnessAmplitudeMap } from "./pianoRoll/PianoRollWaveformSurface";
+import { clampParamWriteValue } from "./pianoRoll/paramRanges";
+import {
+    formatDbReadout,
+    resolveParamAxisUnit,
+    supportsParamAxisUnit,
+} from "./pianoRoll/paramAxisUnits";
+import { framesToTime, midiToLabel, timeToFrame } from "./pianoRoll/utils";
+import { useLoudnessCurves } from "./pianoRoll/useLoudnessCurves";
+import {
+    createLiveOverrideReader,
+    type LiveOverrideReader,
+} from "./pianoRoll/liveLoudnessOverride";
 import { pianoRollViewportBus } from "./pianoRoll/pianoRollViewportBus";
+import { createRenderLoop, type RenderLoop } from "./renderKernel/renderLoop.js";
 import { buildTimelineTicks } from "./timeline/runtime/buildTimelineTicks.js";
+import { createTickAxis } from "./timeline/runtime/tickAxis.js";
 import {
     createTimelineAxis,
+    playheadLineLeftPx,
     viewportEndSec,
     viewportStartSec,
+    rulerLayerTranslatePx,
 } from "./renderKernel/timelineAxis.js";
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
 import { useLiveParamEditing } from "./pianoRoll/useLiveParamEditing";
@@ -182,7 +224,7 @@ import { getParamEditorWheelAction } from "./pianoRoll/wheelGesture";
 import type { Keybinding } from "../../features/keybindings/types";
 import { pianoKeySound } from "../../utils/PianoKeySound";
 import { computeAutoFollowScrollLeft } from "../../utils/autoFollowScroll";
-import { readDevicePixelRatio, snapToDevicePx } from "../../utils/devicePixelLine";
+import { readDevicePixelRatio } from "../../utils/devicePixelLine";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
 import {
     getVisibleSecondaryParamIds,
@@ -201,13 +243,14 @@ import {
     selectMergedKeybindings,
 } from "../../features/keybindings/keybindingsSlice";
 
-import { usePianoRollStatusUpdate } from "../../contexts/PianoRollStatusContext";
+import { clearPianoRollLoading, setPianoRollLoading } from "../../utils/pianoRollStatusBus";
+import { createLiveEditFlag } from "./pianoRoll/liveEditFlag";
 import { MidiTrackSelectDialog } from "./MidiTrackSelectDialog";
 import { settingsApi } from "../../services/api/settings";
 import { EditContextMenu } from "../editDialogs/EditContextMenu";
 import { resolveScrollableProjectSec } from "../../features/session/projectBoundary";
-import { applySelectWheelChange } from "../../utils/selectWheel";
 import { parseCustomScaleToken } from "../../utils/scaleSelection";
+import { AppIconButton, AppSelect } from "../../ui";
 import {
     centerFromVerticalScrollTop,
     verticalScrollTopFromCenter,
@@ -238,6 +281,57 @@ import { parseRgbaColor } from "./timeline/runtime/timelineClipGlRenderer";
 
 const NOTE_NAMES_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX = PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX;
+
+/**
+ * **不参与「无选区时先全选」** 的操作（见 `handleEditOp` 开头的隐式全选）。
+ *
+ * 参数编辑器里的操作绝大多数以**参数选区**为作用域（复制/剪切、初始化、
+ * 各类对话框编辑、音量↔动态互转、另存为音高参考、导出 MIDI…）：没有选区时它们
+ * 原本静默什么都不做，用户得先自己"全选"再点一次。这些一律先全选再执行。
+ *
+ * 只有三类例外：
+ * - **选区自身的命令**：`selectAll` / `deselect` —— 它们就是在操作选区，
+ *   "先全选再执行"会把"取消选择"变成"全选"；
+ * - **作用域来自剪辑选择**的命令：`selectClipParamRange` /
+ *   `addClipsToParamSelection` / `removeClipsFromParamSelection` —— 它们按被选中的
+ *   剪辑（或其起止时间）改写参数选区，与"当前有没有参数选区"无关；
+ * - **`paste`** —— 粘贴的作用对象完全由**剪贴板**决定：无选区时按"播放光标作为
+ *   复制起点 + 剪贴板自己的段布局"推导选区（见 `pasteTargetSelectionFromClipboard`）。
+ *   在这里全选会把数据摊到整条曲线上（起点跑到工程开头、断层被拉长）。
+ */
+const SELECTION_SCOPE_EXEMPT_OPS: ReadonlySet<string> = new Set([
+    "selectAll",
+    "deselect",
+    "selectClipParamRange",
+    "addClipsToParamSelection",
+    "removeClipsFromParamSelection",
+    "paste",
+]);
+
+/**
+ * 音频块的时间范围（秒）→ 选区**帧边界**（半开 `[startBound, endBound)`）。
+ *
+ * 起点向下取整、终点向上取整（沿用改造前 `floor(起点) / ceil(终点)` 的约定）：
+ * 块两端**部分覆盖**的帧也算在范围内，不会在边界处悄悄丢掉一帧。
+ *
+ * 【为什么需要这一层】音频块是秒制（`startSec` / `lengthSec`，与 BPM 无关），
+ * 选区是帧制；两者只在"按块选参数范围"这类入口处交界，故集中在此一处换算。
+ *
+ * 注意结果走**数据路径**（`selectionFromFrames` / `addFrameRanges`），不经过
+ * "切点"量化：块的起止是绝对时间，不该被"最近中点"再挪半帧。
+ */
+function clipTimeRangeToFrameBounds(
+    clip: { startSec: number; lengthSec: number },
+    framePeriodMs: number,
+): { startBound: number; endBound: number } {
+    const fp = Math.max(1e-6, framePeriodMs);
+    const startBound = Math.max(0, timeToFrame(clip.startSec, fp));
+    const endBound = Math.max(
+        startBound,
+        Math.ceil(((clip.startSec + clip.lengthSec) * 1000) / fp),
+    );
+    return { startBound, endBound };
+}
 
 /**
  * 本面板在共享视口中的来源标识。
@@ -326,12 +420,13 @@ function resolvePlayheadRgba(themeMode: "dark" | "light"): [number, number, numb
  * 参数编辑器工具栏的参数显示顺序排名（数值越小越靠左）。
  * - 「音高」为核心参数，固定在最左侧（在 JSX 中单独渲染，不在此排序）；
  * - 「音量/声像」是所有算法的共通参数，固定在最右侧；
+ * - 「动态」紧挨音量（两者共用一个药丸呈现，排序只需保证相邻）；
  * - 中间参数随算法不同而变化。
  */
 function getParamToolbarRank(paramId: string, algo: string | undefined | null): number {
     switch (algo) {
         case "nsf_hifigan_onnx":
-            // 音高、共振峰、气声音量、张力、音量、声像
+            // 音高、共振峰、气声音量、张力、音量、动态、声像
             switch (paramId) {
                 case "formant_shift_cents":
                     return 10;
@@ -341,13 +436,15 @@ function getParamToolbarRank(paramId: string, algo: string | undefined | null): 
                     return 30;
                 case "volume":
                     return 90;
+                case "dyn":
+                    return 91;
                 case "pan":
                     return 100;
                 default:
                     return 50;
             }
         case "vslib":
-            // 音高、共振峰、气声强度、音量、声像
+            // 音高、共振峰、气声强度、音量、动态、声像
             switch (paramId) {
                 case "formant_shift_cents":
                     return 10;
@@ -355,16 +452,20 @@ function getParamToolbarRank(paramId: string, algo: string | undefined | null): 
                     return 20;
                 case "volume":
                     return 90;
+                case "dyn":
+                    return 91;
                 case "pan":
                     return 100;
                 default:
                     return 50;
             }
         default:
-            // world / 其它：仅保证音量/声像在右侧，其余保持后端顺序
+            // world / 其它：仅保证音量/动态/声像在右侧，其余保持后端顺序
             switch (paramId) {
                 case "volume":
                     return 90;
+                case "dyn":
+                    return 91;
                 case "pan":
                     return 100;
                 default:
@@ -499,7 +600,19 @@ const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
     );
 };
 
-type FormantParamButtonProps = {
+/**
+ * 「一个药丸 + 下拉切换两个参数」的通用按钮。
+ *
+ * 两个使用场景：
+ * - **共振峰**：根参数（整个轨道组）与子参数（当前子轨道的偏移）。只有在
+ *   选中子轨道时才有第二个选项，否则退化为普通药丸。
+ * - **音量 / 动态**：两个同量纲的混音级参数。两者**始终**可选，因此
+ *   `alwaysShowDropdown = true`。
+ *
+ * 下拉的样式与交互（RadioGroup + ChevronDown 段）与「音高」参数组完全一致，
+ * 保持工具栏里三组参数的观感统一。
+ */
+type ParamGroupButtonProps = {
     rootParamId: string;
     /** 按钮上的简短标签（如 FRM / 共振峰） */
     rootLabel: string;
@@ -523,9 +636,14 @@ type FormantParamButtonProps = {
     onSelectRoot: () => void;
     onSelectChild: () => void;
     onToggleSecondary: () => void;
+    /**
+     * `true` = 即使没有子参数也显示下拉（音量/动态这类"恒有两个选项"的组）。
+     * 缺省 `false`（共振峰语义：只有子轨道才有第二个选项）。
+     */
+    alwaysShowDropdown?: boolean;
 };
 
-const FormantParamButton: React.FC<FormantParamButtonProps> = ({
+const ParamGroupButton: React.FC<ParamGroupButtonProps> = ({
     rootParamId,
     rootLabel,
     rootMenuLabel,
@@ -543,11 +661,12 @@ const FormantParamButton: React.FC<FormantParamButtonProps> = ({
     onSelectRoot,
     onSelectChild,
     onToggleSecondary,
+    alwaysShowDropdown = false,
 }) => {
     const eyeMode: "main" | "on" | "off" =
         rootActive || childActive ? "main" : secondaryVisible ? "on" : "off";
 
-    if (!childParamId) {
+    if (!childParamId && !alwaysShowDropdown) {
         return (
             <ParamToolbarPill
                 label={rootLabel}
@@ -603,16 +722,33 @@ const FormantParamButton: React.FC<FormantParamButtonProps> = ({
                     <DropdownMenu.RadioItem value={rootParamId}>
                         {rootMenuLabel ?? rootLabel}
                     </DropdownMenu.RadioItem>
-                    <DropdownMenu.RadioItem value={childParamId}>
-                        {childMenuLabel ?? childLabel}
-                    </DropdownMenu.RadioItem>
+                    {childParamId ? (
+                        <DropdownMenu.RadioItem value={childParamId}>
+                            {childMenuLabel ?? childLabel}
+                        </DropdownMenu.RadioItem>
+                    ) : null}
                 </DropdownMenu.RadioGroup>
             </DropdownMenu.Content>
         </DropdownMenu.Root>
     );
 };
 
-export const PianoRollPanel: React.FC = () => {
+/**
+ * 参数编辑器面板的 props。
+ *
+ * 只有一个**跨渲染稳定**的字符串 —— 这正是下面能用 `React.memo` 的前提。
+ */
+interface PianoRollPanelProps {
+    /**
+     * 本窗体在停靠布局里的 id（由 `setPanelRenderer` 注入）。
+     *
+     * 用于判断"我是否与时间轴上下堆叠" —— 同步偏移只在堆叠时有意义。缺省时
+     * 按面板 id 回退查找，保证单独渲染（测试、独立窗口）也能工作。
+     */
+    dockFormId?: string;
+}
+
+const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const dispatch = useAppDispatch();
     // 事件监听器内同步读取 session（如 selectClipParamRange 的 Clip 查找），
     // 避免闭包快照滞后。
@@ -657,9 +793,34 @@ export const PianoRollPanel: React.FC = () => {
             drawRef.current();
         });
     }, []);
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+
+    /**
+     * 标尺播放头元素（竖线 / 倒三角）的挂载回调。
+     *
+     * 【为什么挂载时要请求一帧】位置只由内核在帧提交里写，而元素可能在**播放头
+     * 静止**时被重建（面板重挂载 / 视图切换）：新节点没有任何 `left`，等价于
+     * `left: auto` ⇒ 落在静态位置（左缘 = 工程起始处）。此时若没有任何东西弄脏帧
+     * （暂停且不滚动），内核不会提交，元素就**停在工程起始处不动**。元素一出现就
+     * 请求一帧，写入器随即按当前视口定位它（去重键含元素身份，见
+     * `createPlayheadElementWriter`）。
+     */
+    const attachRulerPlayheadLine = useCallback((element: HTMLDivElement | null) => {
+        rulerPlayheadLineRef.current = element;
+        if (element !== null) hostRef.current?.invalidate();
+    }, []);
+    const attachRulerPlayheadHead = useCallback((element: HTMLDivElement | null) => {
+        rulerPlayheadHeadRef.current = element;
+        if (element !== null) hostRef.current?.invalidate();
+    }, []);
+    const { t, tf } = useI18n();
     const s = useAppSelector((state: RootState) => state.session, shallowEqual);
+
+    // 工程会话切换：强制视口总线按当前工程内容重绘一次（跨工程投影保留契约
+    // 的强制点，见 utils/timelineViewportBus.invalidate 的说明）。
+    const projectSessionPath = s.project.path;
+    React.useEffect(() => {
+        pianoRollViewportBus.invalidate();
+    }, [projectSessionPath]);
     const effectiveProjectScale = useMemo<ScaleLike>(
         () =>
             s.project.useCustomScale && s.project.customScale
@@ -745,7 +906,7 @@ export const PianoRollPanel: React.FC = () => {
     // 边缘平滑度滑块的滚轮步进：React 17+ 的根容器 wheel 监听是 passive，
     // JSX onWheel 里的 preventDefault 无效（伴随干预警告），必须走原生
     // 非 passive 监听（与主画布滚轮路径同模式）。
-    const edgeSmoothnessWheelRef = useNonPassiveWheel<HTMLInputElement>((e) => {
+    const attachEdgeSmoothnessWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
         e.preventDefault();
         const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
         const step = fine ? 1 : 5;
@@ -895,6 +1056,29 @@ export const PianoRollPanel: React.FC = () => {
         value: number;
         displayText?: string;
     } | null>(null);
+    /**
+     * 纵轴标尺的悬浮读数（`弹出展示参数` 在左轴上的形态）。
+     *
+     * 【为什么与 `paramValuePreview` 分开】那个浮窗挂**曲线画布**的坐标系
+     * （`canvasRef` 的 rect），本浮窗挂轴列（`axisWrapRef` 的 rect）。两者坐标系
+     * 不同，混用会让浮窗横向偏出 56px 宽的轴列。
+     */
+    const [axisValuePreview, setAxisValuePreview] = useState<{
+        clientX: number;
+        clientY: number;
+        text: string;
+    } | null>(null);
+
+    /**
+     * 当前参数的纵轴展示单位（音量 / 动态支持倍率 ↔ dB 切换）。
+     *
+     * 一个值同时喂给三处：GL 刻度标签（经 `buildGridSpec`）、参数线悬浮浮窗
+     * （`formatParamValuePreview`）、纵轴标尺悬浮浮窗。三者必须同源，否则同一位
+     * 置会出现"刻度写 −6、浮窗写 0.501"的自相矛盾读数。
+     */
+    const editParamAxisUnit = resolveParamAxisUnit(s.paramAxisUnits, editParam);
+    /** 当前参数的左轴是否可切换展示单位（决定光标与角标）。 */
+    const axisUnitToggleAvailable = supportsParamAxisUnit(editParam);
 
     const formatParamValuePreview = useCallback(
         (value: number): string => {
@@ -914,16 +1098,21 @@ export const PianoRollPanel: React.FC = () => {
                 if (Math.abs(display) >= 10) return display.toFixed(2);
                 return display.toFixed(3);
             }
+            // 音量 / 动态切到 dB 读法：1× = 0 dB（见 paramAxisUnits）。带 `dB` 后缀
+            // 与倍率读数区分——浮窗有空间写清楚单位，用户才不会把 −6 误读成倍率。
+            if (editParamAxisUnit === "db" && supportsParamAxisUnit(editParam)) {
+                return formatDbReadout(value);
+            }
             if (Math.abs(value) >= 100) return value.toFixed(1);
             if (Math.abs(value) >= 10) return value.toFixed(2);
             return value.toFixed(3);
         },
-        [editParam],
+        [editParam, editParamAxisUnit],
     );
 
     const currentDrawTool = s.drawToolMode === "line" ? "vibrato" : s.drawToolMode;
     const drawToolButtonTitle =
-        currentDrawTool === "vibrato" ? tAny("vibrato_draw_tool") : tAny("draw_tool");
+        currentDrawTool === "vibrato" ? tf("vibrato_draw_tool") : tf("draw_tool");
     const activeDragDirection =
         s.toolMode === "select"
             ? s.selectDragDirection
@@ -1192,6 +1381,27 @@ export const PianoRollPanel: React.FC = () => {
     const timelineSyncApplyingRef = useRef(false);
     const timelineOffsetRef = useRef(0);
     const [timelineOffsetPx, setTimelineOffsetPx] = useState(0);
+
+    /**
+     * 同步偏移是否适用 —— 判据是**两个面板都可见**。
+     *
+     * 【为什么不是"必须上下堆叠"】偏移 = 轨道区左缘 − 参数编辑器绘制区左缘，把参数
+     * 编辑器的内容按它平移后，同一时刻会落在**同一个屏幕 x** 上。只要两个面板同时
+     * 可见，这个对齐就有意义（上下相邻是主场景，并排或一个浮在另一个之上同样成立：
+     * 偏移可正可负，负值由 `minScrollLeft = -offset` 兜住）。
+     *
+     * 早期实现把第一个参数写成了 `dockFormId`（本面板自己的窗体 id），两个参数于是
+     * 是同一个窗体 —— 判定必然为假、偏移被强制为 0，"同步时间轴视图"的像素对齐因此
+     * **整个失效**。这里改为分别取时间轴与本面板的窗体 id，并只要求"都可见"。
+     */
+    const dockLayout = useAppSelector((state) => state.dock.layout);
+    const syncOffsetApplicable = useMemo(
+        () =>
+            resolveSyncOffsetForms(dockLayout, PANEL_TIMELINE, PANEL_PARAM_EDITOR, dockFormId) !==
+            null,
+        [dockFormId, dockLayout],
+    );
+
     // 待落地的同步视口：**只记缩放**。位置在落地时直接取共享视口的当前值（权威且最新），
     // 不再捕获快照——见下方落地 effect 的说明（捕获值 + 比对 React state 的老做法会在
     // state 被同期写入点覆盖时静默取消落地，造成随机错位）。
@@ -1222,6 +1432,13 @@ export const PianoRollPanel: React.FC = () => {
     // 因此这里：测不到就保持上一次的有效值，并在后续帧重试（时间轴元素可能刚出现）；
     // 每次重测都重新绑定观察器，元素后出现时也能补上。
     useLayoutEffect(() => {
+        // 时间轴不可见（或本面板不可见）：偏移没有意义，固定为 0 并停止重试/观察。
+        if (!syncOffsetApplicable) {
+            timelineOffsetRef.current = 0;
+            setTimelineOffsetPx((prev) => (prev === 0 ? prev : 0));
+            return;
+        }
+
         /** 视口元素缺失时的重试上限（帧）；超过后退回低频轮询，避免长期每帧空转。 */
         const RETRY_FRAMES = 120;
         /** 低频轮询间隔（ms）。 */
@@ -1243,14 +1460,28 @@ export const PianoRollPanel: React.FC = () => {
             }
         };
 
+        // 当前已绑定的观察目标（元素身份比较，见 observeViewports 的卫兵说明）。
+        let observedPiano: Element | null = null;
+        let observedTrack: Element | null = null;
+
         /** 把两边的视口元素（重新）挂到观察器上：元素可能后于本面板出现。 */
         const observeViewports = () => {
             if (typeof ResizeObserver === "undefined") return;
+            const piano = scrollerRef.current;
+            const track = document.querySelector<HTMLElement>("[data-timeline-scroller]");
+            // 【目标集合未变化时绝不重绑】disconnect + observe 会对同一元素再次
+            // 投递初始回调，回调路径（measureAndApply → applyMeasured）又会走到
+            // 这里 —— 每帧一次投递的永久循环，正是 "ResizeObserver loop
+            // completed with undelivered notifications" 以 60Hz 刷屏的来源。
+            // 只在目标元素真的出现 / 被替换时才重新绑定。
+            if (observer !== null && piano === observedPiano && track === observedTrack) {
+                return;
+            }
             observer = observer ?? new ResizeObserver(() => measureAndApply());
             observer.disconnect();
-            const piano = scrollerRef.current;
+            observedPiano = piano;
+            observedTrack = track;
             if (piano) observer.observe(piano);
-            const track = document.querySelector<HTMLElement>("[data-timeline-scroller]");
             if (track) observer.observe(track);
         };
 
@@ -1306,7 +1537,11 @@ export const PianoRollPanel: React.FC = () => {
             observer?.disconnect();
             window.removeEventListener("resize", measureAndApply);
         };
-    }, []);
+        // 【为什么要依赖布局】停靠重排会把面板的 DOM 宿主搬到别处，而**尺寸可能
+        // 完全不变** —— 那样 ResizeObserver 不会触发，本 effect 若只挂载时跑一次，
+        // 偏移就永远停在旧布局测出的值（实测：两面板相差数百像素，且只在恰好发生
+        // 一次尺寸变化时才自愈）。因此布局一变就重测。
+    }, [syncOffsetApplicable, dockLayout]);
 
     // BPM 变化时，按比例调 ?scrollLeft，保持视口中心点的秒数不 ?
     // scrollLeft_new = scrollLeft_old × (bpm_old / bpm_new)
@@ -1404,6 +1639,7 @@ export const PianoRollPanel: React.FC = () => {
                 setScrollLeft(next);
             }
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- commitViewportNow 随渲染重建，加入会让共享视口订阅随每次渲染反复退订/重订（既有热路径口径）
     }, [s.paramEditorSyncTimeline]);
 
     // 布局偏移变化时，同一共享视口对应的绘制坐标也会变化。
@@ -1513,6 +1749,7 @@ export const PianoRollPanel: React.FC = () => {
         // 原生滚动位置的钳制校正由宿主的镜像回写负责（它每帧都会把原生位置对齐真值）
         // ——不要再写原生 scroller，否则会与内核真值打架。
         setScrollLeft(next);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- commitViewportNow 随渲染重建，加入会让缩放落地 effect 随每次渲染重跑（既有热路径口径）
     }, [pxPerSec, s.paramEditorSyncTimeline]);
 
     const zoomTimelineStateRef = useRef({
@@ -1712,7 +1949,7 @@ export const PianoRollPanel: React.FC = () => {
             ? t("child_pitch_offset_cents_label")
             : editParam === childPitchOffsetDegreesParam
               ? t("child_pitch_offset_degrees_label")
-              : t("pitch");
+              : t("common_pitch");
 
     // 声码器参数描述符（由 algo 动态定制面板）
     const [processorParams, setProcessorParams] = useState<ProcessorParamDescriptor[]>([]);
@@ -1774,7 +2011,7 @@ export const PianoRollPanel: React.FC = () => {
         if (desc?.kind.type === "automation_curve") {
             return Number(desc.kind.default_value) || 0;
         }
-        if (editParam === "volume" || editParam === "dyn_edit") {
+        if (editParam === "volume" || editParam === "dyn" || editParam === "dyn_edit") {
             return 1;
         }
         return 0;
@@ -1784,7 +2021,9 @@ export const PianoRollPanel: React.FC = () => {
         if (isChildPitchOffsetCentsParam(editParam)) return 100;
         if (isChildPitchOffsetDegreesParam(editParam)) return 0.5;
         if (isChildFormantOffsetCentsParam(editParam)) return 50;
-        if (editParam === "volume" || editParam === "dyn_edit") return 0.05;
+        if (editParam === "volume" || isDynParam(editParam)) {
+            return 0.05;
+        }
         if (editParam === "formant_shift_cents") return 50;
         if (editParam === "breath_gain" || editParam === "hifigan_tension") {
             return 0.05;
@@ -1919,6 +2158,9 @@ export const PianoRollPanel: React.FC = () => {
                 case "hifigan_volume":
                 case "volume":
                     return t("volume_label");
+                case "dyn":
+                case "dyn_edit":
+                    return t("dyn_label");
                 case "synth_mode":
                     return t("vslib_synth_mode_label");
                 case "pan":
@@ -1949,6 +2191,9 @@ export const PianoRollPanel: React.FC = () => {
                 case "volume":
                 case "vslib_volume":
                     return t("param_btn_volume");
+                case "dyn":
+                case "dyn_edit":
+                    return t("param_btn_dyn");
                 case "pan":
                     return t("param_btn_pan");
                 case "breathiness":
@@ -2126,7 +2371,10 @@ export const PianoRollPanel: React.FC = () => {
         [dispatch],
     );
 
-    const secPerBeat = 60 / Math.max(1e-6, s.bpm);
+    // 【已删除 `secPerBeat = 60 / bpm`】参数编辑器的选区、剪贴板映射、交互换算、
+    // 取数窗口全部改为**帧制**（工程级常量栅格，见 `paramSelection.ts`），BPM 只
+    // 剩下一个消费者：网格与标尺（`buildTimelineTicks` 直接读 `s.bpm` + Tempo Map）。
+    // 因此这里不再需要"每拍秒数"，改 BPM 也不会再牵动选区或触发曲线重取。
     const contentWidth = contentWidthAt(pxPerSec);
 
     const scrollerRef = useRef<HTMLDivElement | null>(null);
@@ -2270,6 +2518,50 @@ export const PianoRollPanel: React.FC = () => {
         invalidate();
     }, [s.playheadSec, invalidate]);
 
+    /**
+     * 标尺播放头线的**首帧与缩放后**定位。
+     *
+     * 【为什么位置不再交给 React 渲染】见 `TimeRulerPlayhead.positionFromProps`：
+     * React 只持有 30Hz 的已提交播放头，而画布/GL 上的播放头用的是 60Hz 插值
+     * 位置，两者同时写 `style.left` 会让标尺上的线落在旧位置 —— 用户看到的就是
+     * "标尺的播放头与参数编辑器里的播放头分离"。
+     *
+     * 这里用 layout effect（绘制前执行）补上首帧与缩放后的位置，播放/滚动期间的
+     * 逐帧位置由 `useVisualPlayhead` 的 onFrame 与 `applyScrollLayers` 负责。
+     */
+    useLayoutEffect(() => {
+        // 内核宿主每帧都在写这两个元素（单写者原则，见 4b0bbb40）：此 effect 只在
+        // 无宿主的回退路径补首帧/缩放后定位，否则一次一帧过期的 React 提交会把
+        // 播放头拉回旧位置（"标尺播放头与主体分离"回归）。
+        if (hostRef.current !== null) {
+            return;
+        }
+        // 缩放取**内核真值**（与 GL 播放头、标尺平移同一口径）：面板的 React
+        // `pxPerSec` 是请求值，内核可能因视口宽度变化而钳制它，用请求值定位会与
+        // 主体播放头差一个 `播放头秒数 × 缩放差`。此分支只在无宿主时执行，
+        // 因此没有内核视口可取，直接退回面板值。
+        const view = resolvePanelRenderViewport({
+            kernelView: null,
+            refPxPerSec: pxPerSecRef.current,
+            refScrollLeftPx: scrollLeftRef.current,
+        });
+        const leftPx = playheadLineLeftPx(
+            createTimelineAxis({
+                pxPerSec: view.pxPerSec,
+                scrollLeftPx: view.scrollLeftPx,
+                viewportWidthPx: viewSizeRef.current.w,
+                dpr: readDevicePixelRatio(),
+            }),
+            visualPlayheadSecRef.current,
+        );
+        if (rulerPlayheadLineRef.current) {
+            rulerPlayheadLineRef.current.style.left = `${leftPx}px`;
+        }
+        if (rulerPlayheadHeadRef.current) {
+            rulerPlayheadHeadRef.current.style.left = `${leftPx}px`;
+        }
+    }, [pxPerSec]);
+
     // 原地等待渲染（位置冻结）期间不得推进视觉插值（见 TimelinePanel 同名注释）。
     const isTransportAdvancing =
         s.runtime.isPlaying &&
@@ -2283,18 +2575,11 @@ export const PianoRollPanel: React.FC = () => {
         onFrame: useCallback(
             (visualPlayheadSec: number) => {
                 visualPlayheadSecRef.current = visualPlayheadSec;
-                const playheadLeftPx = visualPlayheadSec * pxPerSecRef.current;
-                // 播放头 DOM 写入统一设备像素吸附（与时间线侧同一函数）：
-                // 分数 DPR 下不吸附的落点相位随播放连续变化，1/2 物理像素
-                // 交替 —— 即"播放时粗细不一"。
-                const dpr = readDevicePixelRatio();
-                const snappedPlayheadLeftPx = snapToDevicePx(playheadLeftPx, dpr);
-                if (rulerPlayheadLineRef.current) {
-                    rulerPlayheadLineRef.current.style.left = `${snappedPlayheadLeftPx}px`;
-                }
-                if (rulerPlayheadHeadRef.current) {
-                    rulerPlayheadHeadRef.current.style.left = `${snappedPlayheadLeftPx}px`;
-                }
+                // 标尺播放头线**不在这里写**：它由内核在帧提交里按内核视口写，
+                // 与 GL 主体播放头同源同帧（见 `sync.rulerPlayheadLine` 的说明）。
+                // 这里曾用面板的 `pxPerSecRef` 写同一条线 —— 面板缩放与内核缩放
+                // 一旦不一致（面板宽度变化时内核会重新钳制缩放），两条线就会相差
+                // `播放头秒数 × 缩放差`，也就是用户报告的"标尺线与主体线分离"。
                 if (!s.paramEditorSyncTimeline && s.autoScrollEnabled && s.runtime.isPlaying) {
                     const scroller = scrollerRef.current;
                     if (scroller) {
@@ -2339,9 +2624,13 @@ export const PianoRollPanel: React.FC = () => {
         };
     }, []);
 
-    function applyScrollLayers(next: number) {
+    // 以 useCallback 稳定引用（依赖仅含 ref 与模块级工具）：供 syncScrollLeft 等
+    // 需要长期持有本函数的路径使用，避免随渲染重建引发上游回调引用抖动。
+    const applyScrollLayers = useCallback(function applyScrollLayers(next: number) {
         if (rulerContentRef.current) {
-            rulerContentRef.current.style.transform = `translateX(${-next}px)`;
+            // 平移量吸附到设备像素（见 `rulerLayerTranslatePx`）：与内核同一约定，
+            // 否则层内标尺竖线在系统缩放率 > 1 时粗细不一。
+            rulerContentRef.current.style.transform = `translateX(${-rulerLayerTranslatePx(next, readDevicePixelRatio())}px)`;
         }
 
         if (gridLayerRef.current) {
@@ -2361,20 +2650,27 @@ export const PianoRollPanel: React.FC = () => {
             refScrollLeftPx: scrollLeftRef.current,
         }).pxPerSec;
         pianoRollViewportBus.emit(next, emitPxPerSec, viewSizeRef.current.w);
-        // 播放头 DOM 线并入同帧提交：缩放（pxPerSec 变化）时立即对齐新投影，
-        // 避免与画布的播放头错位一帧（与 useVisualPlayhead 的 onFrame 同源）。
-        // 设备像素吸附与其余播放头写入点一致（见 onFrame 注释）。
-        const playheadLeftPx = snapToDevicePx(
-            visualPlayheadSecRef.current * emitPxPerSec,
-            readDevicePixelRatio(),
-        );
-        if (rulerPlayheadLineRef.current) {
-            rulerPlayheadLineRef.current.style.left = `${playheadLeftPx}px`;
+        // 标尺播放头线：**宿主模式下由内核写**（同一次帧提交、同一份内核视口，
+        // 与 GL 主体播放头逐设备像素一致）。这里只在无宿主时兜底 —— 两个写者写同一
+        // 个 `style.left` 是"最后一次写入者获胜"，一旦口径不同就会分离。
+        if (hostRef.current === null) {
+            const playheadLeftPx = playheadLineLeftPx(
+                createTimelineAxis({
+                    pxPerSec: emitPxPerSec,
+                    scrollLeftPx: next,
+                    viewportWidthPx: viewSizeRef.current.w,
+                    dpr: readDevicePixelRatio(),
+                }),
+                visualPlayheadSecRef.current,
+            );
+            if (rulerPlayheadLineRef.current) {
+                rulerPlayheadLineRef.current.style.left = `${playheadLeftPx}px`;
+            }
+            if (rulerPlayheadHeadRef.current) {
+                rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
+            }
         }
-        if (rulerPlayheadHeadRef.current) {
-            rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
-        }
-    }
+    }, []);
 
     /**
      * 把「绘制坐标」的水平位置提交到当前滚动载体。
@@ -2482,57 +2778,62 @@ export const PianoRollPanel: React.FC = () => {
      *
      * @param scroller 原生滚动容器。
      */
-    function syncScrollLeft(scroller: HTMLDivElement) {
-        const syncEnabled = s.paramEditorSyncTimeline;
-        const offset = syncEnabled ? timelineOffsetRef.current : 0;
-        const next = timelineViewportNativeToState(scroller.scrollLeft, offset);
-        if (lastScrollLeftRef.current != null && lastScrollLeftRef.current === next) {
-            return;
-        }
-        lastScrollLeftRef.current = next;
-        scrollLeftRef.current = next;
-        if (syncEnabled && !timelineSyncApplyingRef.current) {
-            // 【必须用 next（采纳值）而不是 scroller.scrollLeft（原生 DOM）】
+    // 以 useCallback 稳定引用（依赖仅含同步开关设置态与 ref）：下游
+    // `onScrollerScroll` 等回调的依赖数组直接持有它，引用抖动会连带放大。
+    const syncScrollLeft = useCallback(
+        function syncScrollLeft(scroller: HTMLDivElement) {
+            const syncEnabled = s.paramEditorSyncTimeline;
+            const offset = syncEnabled ? timelineOffsetRef.current : 0;
+            const next = timelineViewportNativeToState(scroller.scrollLeft, offset);
+            if (lastScrollLeftRef.current != null && lastScrollLeftRef.current === next) {
+                return;
+            }
+            lastScrollLeftRef.current = next;
+            scrollLeftRef.current = next;
+            if (syncEnabled && !timelineSyncApplyingRef.current) {
+                // 【必须用 next（采纳值）而不是 scroller.scrollLeft（原生 DOM）】
+                //
+                // 原生 scroller 只是**镜像**：真值在 ScrollKernel，由宿主在帧
+                // 提交时回写。直接读 DOM 会拿到**尚未回写**的旧值，于是把旧位置当成
+                // "用户滚动"推回共享视口——时间轴收到后应用旧值，位置出现回退。
+                //
+                // 实测（拖时间轴带动参数编辑器时）：共享视口序列 `10 → 20 → pianoRoll
+                // 推回 10`，时间轴内核随之从 20 退回 10。连续拖拽时每三帧回退一次
+                // （增量呈 `+30, +10, -10` 循环），即用户报告的"阶梯感/被吸附感"。
+                //
+                // `next` 是刚由原生位置换算出的绘制坐标，再换算回原生即得权威值；
+                // 与 `onUserScrollLeft` 的口径一致（后者用的是内核的绘制坐标）。
+                timelineViewportSync.setViewport(
+                    {
+                        scrollLeft: timelineViewportStateToNative(next, offset),
+                        pxPerSec: pxPerSecRef.current,
+                    },
+                    PIANO_ROLL_SYNC_ORIGIN,
+                );
+            }
+            // 交给内核（它会按新边界钳制、镜像回写并提交各图层）。
             //
-            // 原生 scroller 只是**镜像**：真值在 ScrollKernel，由宿主在帧
-            // 提交时回写。直接读 DOM 会拿到**尚未回写**的旧值，于是把旧位置当成
-            // "用户滚动"推回共享视口——时间轴收到后应用旧值，位置出现回退。
-            //
-            // 实测（拖时间轴带动参数编辑器时）：共享视口序列 `10 → 20 → pianoRoll
-            // 推回 10`，时间轴内核随之从 20 退回 10。连续拖拽时每三帧回退一次
-            // （增量呈 `+30, +10, -10` 循环），即用户报告的"阶梯感/被吸附感"。
-            //
-            // `next` 是刚由原生位置换算出的绘制坐标，再换算回原生即得权威值；
-            // 与 `onUserScrollLeft` 的口径一致（后者用的是内核的绘制坐标）。
-            timelineViewportSync.setViewport(
-                {
-                    scrollLeft: timelineViewportStateToNative(next, offset),
-                    pxPerSec: pxPerSecRef.current,
-                },
-                PIANO_ROLL_SYNC_ORIGIN,
-            );
-        }
-        // 交给内核（它会按新边界钳制、镜像回写并提交各图层）。
-        //
-        // 【为什么在内核写入后立刻 `paintNow`】本函数由**原生滚动事件**驱动（触摸拖拽、
-        // 触控板惯性、中键平移、框选自动滚屏）。原生滚动发生在浏览器的渲染步骤里，而
-        // 滚轮/拖拽任务里排队的 rAF 要等**下一帧**才跑——这会让可见内容（标尺、网格、
-        // 主画布、波形、曲线、播放头）比原生滚动慢一帧。旧实现是在滚动事件里同步重绘，
-        // 因此没有这一帧差；这里用 `paintNow()`（同任务提交）恢复到同一时序。
-        const host = hostRef.current;
-        if (host) {
-            host.setScrollLeft(next);
-            host.paintNow();
-            return;
-        }
-        applyScrollLayers(next);
-        if (scrollStateRafRef.current == null) {
-            scrollStateRafRef.current = requestAnimationFrame(() => {
-                scrollStateRafRef.current = null;
-                setScrollLeft(scrollLeftRef.current);
-            });
-        }
-    }
+            // 【为什么在内核写入后立刻 `paintNow`】本函数由**原生滚动事件**驱动（触摸拖拽、
+            // 触控板惯性、中键平移、框选自动滚屏）。原生滚动发生在浏览器的渲染步骤里，而
+            // 滚轮/拖拽任务里排队的 rAF 要等**下一帧**才跑——这会让可见内容（标尺、网格、
+            // 主画布、波形、曲线、播放头）比原生滚动慢一帧。旧实现是在滚动事件里同步重绘，
+            // 因此没有这一帧差；这里用 `paintNow()`（同任务提交）恢复到同一时序。
+            const host = hostRef.current;
+            if (host) {
+                host.setScrollLeft(next);
+                host.paintNow();
+                return;
+            }
+            applyScrollLayers(next);
+            if (scrollStateRafRef.current == null) {
+                scrollStateRafRef.current = requestAnimationFrame(() => {
+                    scrollStateRafRef.current = null;
+                    setScrollLeft(scrollLeftRef.current);
+                });
+            }
+        },
+        [applyScrollLayers, s.paramEditorSyncTimeline, setScrollLeft],
+    );
 
     // ── 内核宿主：创建 / 销毁 ────────────────────────────────────────
     //
@@ -2576,9 +2877,16 @@ export const PianoRollPanel: React.FC = () => {
             // 偏移经 ref 读取（同步开关与布局偏移都在运行时变化，闭包捕获会读到挂载时的旧值）。
             horizontalOffsetPx: () =>
                 paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0,
+            // 全部传 **getter**（见 `PianoRollKernelDomSync` 的说明）：这些元素可能
+            // 在宿主创建之后才挂载（标尺随视图出现、停靠重排后 DOM 重建）。按值捕获
+            // 会让宿主永久持有 null 或已脱离文档的节点，对应写入从此静默失效。
             sync: {
-                rulerContent: rulerContentRef.current,
-                gridLayer: gridLayerRef.current,
+                rulerContent: () => rulerContentRef.current,
+                gridLayer: () => gridLayerRef.current,
+                // 标尺播放头线与三角由内核在同一次帧提交里写（与 GL 播放头同源同帧），
+                // 避免"面板按自己的缩放写、GL 按内核缩放画"造成的水平分离。
+                rulerPlayheadLine: () => rulerPlayheadLineRef.current,
+                rulerPlayheadHead: () => rulerPlayheadHeadRef.current,
             },
             // 帧提交：宿主已完成滚动条几何与标尺 / 网格的 DOM 写入，这里只做
             // 「画布 + 波形 + 播放头」三项的提交。复用 `applyScrollLayers`，
@@ -2744,6 +3052,15 @@ export const PianoRollPanel: React.FC = () => {
     function buildGridSpec(): PianoRollGridSpec | null {
         // 显式标注为字面量联合：不加标注时 TS 会把嵌套三元推断成 `string`，
         // 导致返回值无法赋给 `PianoRollGridSpec["kind"]`。
+        //
+        // 【fallback 分支为什么必须有】内核模式下轴画布整张归 GL（`skipAxisCanvas`
+        // 恒为 true，见下方 drawPianoRoll 调用点），这里返回 null 就意味着该参数
+        // 的左侧刻度与网格**没有任何绘制者** —— 整列空白。曾表现为：切到音量 /
+        // 声像 / 张力 / 气声等一般数值参数时左侧刻度完全消失。凡自动化曲线参数
+        // 一律给出 fallback kind（GL 的 resolveAxisKind / 签名层早已支持），
+        // 只有非曲线参数（理论上一条都不该走到这）才维持 null。
+        const descForKind = processorParamsRef.current.find((d) => d.id === editParam);
+        const isAutomationCurve = descForKind?.kind.type === "automation_curve";
         const kind: PianoRollGridSpec["kind"] | null =
             editParam === "pitch"
                 ? "pitch"
@@ -2753,7 +3070,13 @@ export const PianoRollPanel: React.FC = () => {
                     ? "degrees"
                     : isChildFormantOffsetCentsParam(editParam)
                       ? "formantCents"
-                      : null;
+                      : // 动态面板用倍率刻度（1.0× / 0.5× / 0.25×…），
+                        // 与纵轴标签的 dB 换算表配合，见 axisMarkInstances。
+                        isDynParam(editParam)
+                        ? "level"
+                        : isAutomationCurve
+                          ? "fallback"
+                          : null;
         if (kind === null) return null;
 
         const bounds = getParamValueBoundsForScrollbar(editParam);
@@ -2784,6 +3107,10 @@ export const PianoRollPanel: React.FC = () => {
             weakRgba: toRgba(colors.pitchGridOther),
             // 文字与刻度线（阶段 2 Task 5）：GL 侧据此渲染轴标签与刻度。
             paramName: editParam,
+            // 纵轴展示单位（音量 / 动态的倍率 ↔ dB）。只对支持切换的参数下发，
+            // 其余参数保持缺省 —— 签名里的 `axisUnit ?? ""` 因此不会给非切换参数
+            // 附加一个无意义的常量。
+            ...(supportsParamAxisUnit(editParam) ? { axisUnit: editParamAxisUnit } : {}),
             // 与传给 drawPianoRoll 的 fontFamily 同一个值（第 3268 行），
             // 保证两种渲染模式的字形完全一致。
             fontFamily,
@@ -2896,12 +3223,15 @@ export const PianoRollPanel: React.FC = () => {
         themeMode,
         s.scaleHighlightMode,
         effectiveProjectScale,
+        // 纵轴展示单位（倍率 / dB）：同样是 buildGridSpec 的输入，漏了就是
+        // "点了切换但刻度纹丝不动"（签名不变 → GL 几何与文字都不重建）。
+        editParamAxisUnit,
         // Tempo Map 分段音阶（缺陷 #6）：换 Tempo Map 会换分段。
         s.tempoMap,
     ]);
 
-    // 渲染期刷新 syncScrollLeft 引用（其函数体随每次渲染重建）：供只注册一次的
-    // 原生 `wheel` 监听器调用，避免闭包捕获陈旧实现。
+    // 渲染期刷新 syncScrollLeft 引用（useCallback 化后引用仅在同步开关变化时更新）：
+    // 供只注册一次的原生 `wheel` 监听器调用，避免闭包捕获陈旧实现。
     const syncScrollLeftRef = useRef(syncScrollLeft);
     syncScrollLeftRef.current = syncScrollLeft;
 
@@ -3070,6 +3400,12 @@ export const PianoRollPanel: React.FC = () => {
                 max: desc.kind.max_value,
             };
         }
+        // `dyn_edit` 是动态的历史别名（后端描述符只有 "dyn"）。若在这里退化成
+        // {0,1}，动态面板的值域会从 0..4 塌成 0..1，网格与轴线全部按错误值域
+        // 绘制（表现为"动态显示成了音量的标尺"的另一种形态）。它与 dyn 同值域。
+        if (isDynParam(param)) {
+            return { min: 0, max: DYN_VALUE_MAX };
+        }
         return { min: 0, max: 1 };
     }
 
@@ -3080,10 +3416,20 @@ export const PianoRollPanel: React.FC = () => {
 
         const bounds = getParamValueBoundsForScrollbar(param);
         return (
-            paramViewsRef.current[param] ?? {
-                center: (bounds.min + bounds.max) / 2,
-                span: Math.max(1e-6, bounds.max - bounds.min),
-            }
+            paramViewsRef.current[param] ??
+            // 默认视口按参数语义分流（见 paramRanges 的两个常量说明）：
+            // - dyn：0..1.25，0 dB 在 80% 高度 —— 面板主体留给 −∞..0 dB 的
+            //   编辑区间（目标电平几乎不会超过 0 dB）；
+            // - volume：0..2，1.0 在中线（>1 的提升是常态操作）。
+            // 自定义过的视口（paramViewsRef 已有记录）原样尊重。
+            (isDynParam(param)
+                ? { center: DYN_DEFAULT_VIEW.center, span: DYN_DEFAULT_VIEW.span }
+                : param === "volume"
+                  ? { center: VOLUME_DEFAULT_VIEW.center, span: VOLUME_DEFAULT_VIEW.span }
+                  : {
+                        center: (bounds.min + bounds.max) / 2,
+                        span: Math.max(1e-6, bounds.max - bounds.min),
+                    })
         );
     }
 
@@ -3148,7 +3494,7 @@ export const PianoRollPanel: React.FC = () => {
      * `syncVerticalScrollbarForViewport` 提供。
      */
 
-    /** 多选区（升序、互不相交、相邻已合并的 beat 区间列表；null = 无选区） */
+    /** 多选区（升序、互不相交、相邻已合并的**帧**区间列表；null = 无选区） */
     const selectionRef = useRef<ParamSelection | null>(null);
     // 记录打开 MIDI 弹窗时的 editParam / toolMode 快照，避免异步加载轨道期间 Redux 状态变化导致 selectionAvailable 跳变
     const midiDialogOpenParamsRef = useRef<{
@@ -3163,9 +3509,10 @@ export const PianoRollPanel: React.FC = () => {
     useEffect(() => {
         dispatch(setParamSelectionActive(selectionUi !== null));
     }, [dispatch, selectionUi]);
-    // 撤销/重做恢复参数编辑器选区：只有「边缘拉伸」手势登记的步骤会送来请求
-    // （见 sessionSlice.ParamSelectionStep）；其余选区变化不参与历史，撤销/
-    // 重做也不会去动它们。requestId 单调，按 id 幂等应用一次。
+    // 撤销/重做/跳转恢复参数编辑器选区：请求由后端载荷驱动 —— 只有「边缘拉伸」
+    // 这类同时改变选区的步骤才在后端记了快照（见 state.rs 的
+    // `HistoryRecord::param_selection`），撤销/重做时随载荷带回；其余操作不带该
+    // 字段，因此**不会**动用户手动调整过的选区。requestId 单调，按 id 幂等应用一次。
     const appliedParamSelectionRestoreRef = useRef(0);
     useEffect(() => {
         const request = s.pendingParamSelectionRestore;
@@ -3203,12 +3550,21 @@ export const PianoRollPanel: React.FC = () => {
      */
     const clipboardRef = useRef<ParamClipboardData | null>(null);
 
-    // 将 PianoRoll 加载状态同步到全局 Context（供 status bar 使用）
-    const updatePianoRollStatus = usePianoRollStatusUpdate();
-
-    // 用于通知 usePianoRollData 当前是否处于 live 编辑状态（pointer down 期间 ?true） ?
-    // pitch_orig_updated 事件到达时若 ?true，则延迟曲线刷新 ?pointer-up 后执行 ?
-    const liveEditActiveRef = useRef(false);
+    /**
+     * 笔画进行中标志（pointer down 期间为 true）。
+     *
+     * 读它的是两个取数 hook（`usePianoRollData` / `useLoudnessCurves`）：笔画期间的
+     * 回包必须推迟落地，否则换掉 `paramView` 或响度快照都会打断进行中的笔画。
+     *
+     * 写它的有十余处手势收尾分支（见 `usePianoRollInteractions`），因此这里用
+     * **带边沿回调**的受控标志：任何 `= false` 的写入都自动补触发一次推迟的刷新，
+     * 不需要在十余处逐一记得调用 —— 漏一处就会让曲线停在旧数据上。
+     */
+    const liveEditEndHandlerRef = useRef<(() => void) | null>(null);
+    const liveEditActiveRef = useMemo(
+        () => createLiveEditFlag(() => liveEditEndHandlerRef.current?.()),
+        [],
+    );
 
     const {
         paramView,
@@ -3216,6 +3572,7 @@ export const PianoRollPanel: React.FC = () => {
         secondaryParamViews,
         referencePitchViews,
         bumpRefreshToken,
+        refreshToken,
         refreshNow,
         refreshSecondaryNow,
         notifyLiveEditEnded,
@@ -3228,16 +3585,173 @@ export const PianoRollPanel: React.FC = () => {
         paramsEpoch: (s as unknown as { paramsEpoch?: number }).paramsEpoch ?? 0,
         rootTrackId,
         selectedTrackId: effectiveSelectedTrackId,
-        secPerBeat,
         scrollLeft,
-        pxPerBeat,
+        // 视口窗口只需要「秒 ↔ 像素」这一个系数。此前传的是 `pxPerBeat` +
+        // `secPerBeat`（两者相乘才等于它），于是**改 BPM 会让取数 effect 重跑**、
+        // 整条曲线白取一次；换成 pxPerSec 后 BPM 与取数彻底解耦。
+        pxPerSec,
         viewWidth: viewSize.w,
         viewSizeRef,
         scrollLeftRef,
-        pxPerBeatRef,
+        pxPerSecRef,
         invalidate,
         liveEditActiveRef,
     });
+
+    /**
+     * 波形「可听结果」映射所需的响度自动化快照（整条工程的 volume 曲线 +
+     * 动态目标/原声基线）。
+     *
+     * 【为什么独立于 paramView】波形的形变与"当前编辑哪个参数"无关 —— 用户在
+     * **任何**参数面板都要实时看到音频波形（画一笔音量/动态曲线波形立刻跟着
+     * 动）。paramView 只覆盖当前参数且随视口窗口化，撑不起这个语义；快照按
+     * 整工程自适应 stride 拉取，滚动/缩放零重取（见 useLoudnessCurves）。
+     */
+    const loudnessFpMs = paramView?.framePeriodMs ?? 5;
+    const loudnessProjectFrames = Math.max(1, Math.ceil((dynamicProjectSec * 1000) / loudnessFpMs));
+    const {
+        snapshot: loudnessSnapshot,
+        analysisPending: loudnessAnalysisPending,
+        snapshotFetchSeq: loudnessSnapshotFetchSeq,
+        getLatestFetchSeq: getLatestLoudnessFetchSeq,
+        flushPending: flushLoudnessPending,
+    } = useLoudnessCurves({
+        rootTrackId,
+        projectFrames: loudnessProjectFrames,
+        framePeriodMs: loudnessFpMs,
+        liveEditActiveRef,
+        paramsEpoch: (s as unknown as { paramsEpoch?: number }).paramsEpoch ?? 0,
+        refreshToken,
+    });
+
+    /**
+     * live 覆盖读取器（解析按覆盖对象身份缓存，见 `createLiveOverrideReader`）。
+     *
+     * 【为什么必须缓存】`readLiveOverrideFor` 在波形几何重建的热路径上被反复
+     * 调用 —— 几何层按列内增益切片调用幅度映射，一次重建可达数万次（实测
+     * 2112 列 × 16 切片 × 2 = 6.8 万次）。若每次询问都 `split` key 再新建视图
+     * 对象，仅字符串切分就要吃掉 ~26ms/帧 —— 用户报告的「编辑音量/动态时
+     * 卡顿」。读取器把稳态压缩成一次身份比较，零分配。
+     */
+    const liveOverrideReaderRef = useRef<LiveOverrideReader | null>(null);
+    if (liveOverrideReaderRef.current === null) {
+        liveOverrideReaderRef.current = createLiveOverrideReader();
+    }
+
+    /**
+     * 把 live 覆盖读成 LoudnessLiveCurve（按 key 中的参数 id 与窗口对齐）。
+     *
+     * 键解析与视图对象由 `createLiveOverrideReader` 按覆盖对象身份缓存。
+     */
+    const readLiveOverrideFor = useCallback((param: "volume" | "dyn") => {
+        return liveOverrideReaderRef.current?.read(param, liveEditOverrideRef.current) ?? null;
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- 两个 ref 都是稳定引用（reader 在下方惰性创建、live 覆盖由 useLiveParamEditing 持有并就地更新）；加入依赖不会让回调更正确，反而会在每次渲染换掉引用、使幅度映射的几何缓存键失效
+    }, []);
+
+    /**
+     * 波形响度映射的修订号（ref，**不触发 React 渲染**）。
+     *
+     * 绘制中的 live 覆盖写在 ref 上，幅度映射内部用延迟取值读它，因此函数引用
+     * 不变也能产出不同结果 —— 几何缓存若只按引用比较会误判"没变"，
+     * 绘制中的曲线就画不上去。这里用 ref 累加计数、映射通过 `revision()`
+     * 惰性读取：若改成 state，拖动时每次 pointermove 都会重渲染整块面板。
+     */
+    const loudnessWaveformRevisionRef = useRef(0);
+
+    /**
+     * 波形重绘的**帧内合并**调度（与曲线层同用 `renderKernel/renderLoop` 语义）。
+     *
+     * 【为什么需要】一次全量重建要重算两千余列 × 16 切片的包络并上传数百 KB
+     * 顶点（实测典型窗口 ~2.7ms）。而绘制中的 live 覆盖在**同一帧内可能被更新
+     * 多次**：手绘工具会把一个 `pointermove` 的 coalesced 采样全部展开处理
+     * （`usePianoRollInteractions` 的 `flushPendingMoves`），高刷鼠标 / 笔一帧
+     * 可积 2~8 个采样。此前每个采样都**同步**强制提交一次全量重建 —— 单帧
+     * 8~30ms 的几何工作，正是用户报告的"编辑音量/动态时卡顿"。
+     *
+     * 改为标脏 + rAF 合并后一帧至多重建一次，且与曲线层（面板自己的
+     * `invalidate()` → 宿主 renderLoop）落在**同一帧**，两层不再错帧。
+     *
+     * 【为什么不用同帧 `flush()`】滚动路径要求同帧提交，是因为要与原生滚动的
+     * DOM 内容层对齐（见 PianoRollWaveformSurface / viewportBus 的契约）。绘制
+     * 参数曲线的路径没有随滚动移动的 DOM 层，与曲线层同帧即可。
+     */
+    const waveformRepaintLoopRef = useRef<RenderLoop | null>(null);
+    if (waveformRepaintLoopRef.current === null) {
+        waveformRepaintLoopRef.current = createRenderLoop({
+            draw: () => pianoRollViewportBus.invalidate(),
+        });
+    }
+    useEffect(() => {
+        const loop = waveformRepaintLoopRef.current;
+        loop?.start();
+        return () => loop?.stop();
+    }, []);
+
+    /**
+     * 强制重绘参数面板波形（**仅当绘制中的 live 覆盖会改变波形时**）。
+     *
+     * 必要性：绘制中的响度曲线只写在 `liveEditOverrideRef`（ref 变更不触发
+     * React 渲染），而波形面是 memo 组件 + 几何缓存，既收不到 ref 变更、
+     * 也不会因 props 未变而重绘。故显式强制重绘一次：总线以同一份投影 force
+     * commit，波形图层命中重绘并因修订号变化而重建几何（其余图层内容未变，
+     * 开销可忽略）。
+     *
+     * 【为什么必须按参数过滤】波形画的是「可听结果」
+     * （`源峰值 × clip增益×淡化 × volume(t) × dyn增益(t)`，见
+     * `makeLoudnessAmplitudeMap`）—— 它**不依赖音高 / 共振峰 / 齿度**等参数。
+     * 而波形面的几何重建在总线驱动下是**每次全量**（`WaveformSurface.draw`：
+     * 总线驱动的 `canReuse` 恒为 false，见该函数的说明），一次重建要重算
+     * 两千余列 × 16 切片的包络。绘制音高时逐帧触发它纯属浪费 —— 一次重建
+     * 在参数面板的典型窗口下约 2.7ms（响度映射），叠加曲线自身重绘后会
+     * 明显抬高指针帧成本。因此这里用当前 live 覆盖的参数 id 做闸门：
+     * 只有编辑 volume / dyn 时才推进修订号并请求重绘。
+     *
+     * 【与曲线绘制的关系】曲线（选区、绘制中的参数线）由面板自己的
+     * `invalidate()` → 宿主帧提交驱动，**不经过本函数**；因此本闸门只影响波形
+     * 面，绘制音高时曲线仍然逐帧更新。
+     */
+    const requestWaveformRepaint = useCallback(() => {
+        // 闸门：只有编辑 volume / dyn 时波形才可能变（波形画的是可听结果，
+        // 与音高 / 共振峰等参数无关）。判定复用读取器的解析缓存，零分配。
+        if (!liveOverrideReaderRef.current?.affectsWaveform(liveEditOverrideRef.current)) {
+            return;
+        }
+        // 修订号在**请求时**推进（不是绘制时）：同一帧内其它路径触发的绘制也要
+        // 看到"上次重建之后 live 覆盖变过"，否则几何缓存会误判为可复用。
+        loudnessWaveformRevisionRef.current += 1;
+        // 绘制请求帧内合并：同一帧内多次请求只重绘一次（见 waveformRepaintLoop）。
+        waveformRepaintLoopRef.current?.invalidate();
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- liveOverrideReaderRef / waveformRepaintLoopRef 是稳定引用（惰性创建）；live 覆盖经 ref 读取，故本回调必须保持引用稳定（它进入 usePianoRollInteractions 的依赖链）
+    }, []);
+
+    /**
+     * 参数面板波形的幅度映射（**所有参数统一**）。
+     *
+     * 把源波形画成**应用响度自动化之后的可听结果**
+     * （`源峰值 × clip增益×淡化 × volume(t) × dyn增益(t)`）：
+     * - 编辑任何参数时画一笔音量/动态曲线，波形立刻跟着起伏；
+     * - 切换参数时波形保持稳定（映射不依赖 editParam），只有曲线叠加层变化；
+     * - 音量↔动态互转前后波形逐像素不变 —— 等效性最直观的佐证。
+     *
+     * 【引用稳定性】该值参与 `WaveformSurface` 的几何缓存键，因此必须 memo：
+     * 只在快照对象真正变化时换引用。绘制中的 live 覆盖不改变本对象
+     * （延迟取值 + 修订号），由 `requestWaveformRepaint` 驱动重建。
+     *
+     * 【恒等快化】volume 恒 1 且动态无基线（未使用响度自动化的工程）时
+     * `identity = true` → 不挂映射，与时间线及既有行为逐像素一致。
+     */
+    const pianoRollAmplitudeMap = useMemo(() => {
+        if (!loudnessSnapshot || loudnessSnapshot.identity) return undefined;
+        if (loudnessSnapshot.volume.length === 0) return undefined;
+        return makeLoudnessAmplitudeMap(
+            loudnessSnapshot,
+            {
+                volume: () => readLiveOverrideFor("volume"),
+                dyn: () => readLiveOverrideFor("dyn"),
+            },
+            () => loudnessWaveformRevisionRef.current,
+        );
+    }, [loudnessSnapshot, readLiveOverrideFor]);
 
     const refreshSecondaryNowRef = useRef(refreshSecondaryNow);
     useEffect(() => {
@@ -3380,10 +3894,9 @@ export const PianoRollPanel: React.FC = () => {
     // 落在任一段内的帧（断层保持原值），对齐基准为首段起点。
     const midiSelRanges = useMemo(() => {
         if (!midiDialogSelection) return undefined;
-        const fp = paramView?.framePeriodMs ?? 5;
-        const ranges = beatRangesToFrameRanges(midiDialogSelection, secPerBeat, fp);
+        const ranges = selectionToFrameRanges(midiDialogSelection);
         return ranges.length > 0 ? ranges : undefined;
-    }, [midiDialogSelection, paramView?.framePeriodMs, secPerBeat]);
+    }, [midiDialogSelection]);
 
     // selection 导入模式是否可用（基于弹窗打开时的快照，避免异步加载轨道时状态变化）
     const midiSelectionAvailable = useMemo(() => {
@@ -3397,24 +3910,21 @@ export const PianoRollPanel: React.FC = () => {
     // 时间跨度里有没有音阶变化点"，包围区间是它的保守上界。
     useEffect(() => {
         const sel = selectionUi;
-        const bounding = selectionBoundingRange(sel);
+        const bounding = selectionBoundingSpan(sel);
         if (!bounding) {
             publishPianoRollSelection(null);
             return;
         }
-        const fp = paramView?.framePeriodMs ?? 5;
+        // 选区已经是帧制：直接发布，不再有任何换算（此前要经 `secPerBeat` 转一道）。
         publishPianoRollSelection({
-            startFrame: Math.max(0, Math.floor((bounding.startBeat * secPerBeat * 1000) / fp)),
-            frameCount: Math.max(
-                1,
-                Math.ceil(((bounding.endBeat - bounding.startBeat) * secPerBeat * 1000) / fp),
-            ),
-            framePeriodMs: fp,
+            startFrame: Math.max(0, bounding.startFrame),
+            frameCount: Math.max(1, bounding.frameCount),
+            framePeriodMs: paramView?.framePeriodMs ?? 5,
         });
         return () => {
             publishPianoRollSelection(null);
         };
-    }, [selectionUi, paramView?.framePeriodMs, secPerBeat]);
+    }, [selectionUi, paramView?.framePeriodMs]);
 
     // 获取当前 track 下的所 ?clips，用 ?per-clip 波形叠加绘制
     // 获取轨道组内所有 clips（包含 root 轨道及所有子轨道的 clip）
@@ -3436,6 +3946,27 @@ export const PianoRollPanel: React.FC = () => {
     const prAxis = useMemo(
         () =>
             createTimelineAxis({
+                pxPerSec,
+                scrollLeftPx: scrollLeft,
+                viewportWidthPx: viewSize.w,
+                dpr: window.devicePixelRatio || 1,
+            }),
+        [pxPerSec, scrollLeft, viewSize.w],
+    );
+
+    /**
+     * **刻度生成**专用轴（与 `prAxis` 分开）。
+     *
+     * 【为什么要分开】`prAxis` 是绘制投影，消费方（画布 / 波形 / 曲线 / 命中测试）
+     * 要的是真实视口；而刻度生成要的是"窗口必须覆盖真实视口"的**保守**窗口 ——
+     * 这里传入的 `scrollLeft` 是 256px 量化提交的 React state，最多滞后内核 255px。
+     * 生成窗口按 `createTickAxis` 的约定多留一个量化步长，覆盖才成立。此前本面板
+     * 直接拿 `prAxis`（既无量化也无宽度补偿）生成刻度，缩放后窗口可能盖不住视口
+     * —— 用户看到的就是"标尺文字整片消失"。
+     */
+    const prTickAxis = useMemo(
+        () =>
+            createTickAxis({
                 pxPerSec,
                 scrollLeftPx: scrollLeft,
                 viewportWidthPx: viewSize.w,
@@ -3479,6 +4010,9 @@ export const PianoRollPanel: React.FC = () => {
         liveEditOverrideRef,
         ensureLiveEditBase,
         applyDenseToLiveEdit,
+        resetLiveEditPreview,
+        clearCommittedLiveEditOverride,
+        markLiveEditCommitted,
         commitStroke: commitStrokeBase,
     } = useLiveParamEditing({
         rootTrackId,
@@ -3489,6 +4023,51 @@ export const PianoRollPanel: React.FC = () => {
         bumpRefreshToken,
         invalidate,
     });
+
+    /**
+     * 提交时记下的"已发出的最大取数序号"（见 `useLoudnessCurves` 的
+     * `getLatestFetchSeq` 与下方收尾 effect）。
+     */
+    const committedSettleSeqRef = useRef(0);
+
+    /**
+     * **参数写入成功**后调用：让波形在快照追上之前继续显示刚提交的值。
+     *
+     * 【做两件事】① 记下当前的取数序号水位（只有序号更大的快照才可能是提交之后
+     * 取的）；② 把 live 覆盖层标记为"已提交"—— **保留**其值而不是立刻撤下，
+     * 避免波形的幅度因子退回旧快照（"松手闪回旧波形"）。
+     *
+     * 【谁调用】面板的 `commitStroke` 包装层，以及 `usePianoRollInteractions` 里
+     * 四条**自己发起回写**的提交路径（选区拖拽 / 右键拖拽 / 直线拖拽 / morph
+     * 应用）—— 它们不经过 `commitStroke`，此前都是立刻把覆盖层置空，正是闪屏的
+     * 来源。失败路径仍走硬清除（见各自的 catch）。
+     */
+    const onParamCommitSucceeded = useCallback(() => {
+        committedSettleSeqRef.current = getLatestLoudnessFetchSeq();
+        markLiveEditCommitted();
+    }, [getLatestLoudnessFetchSeq, markLiveEditCommitted]);
+
+    /**
+     * **提交之后取得**的响度快照到位 ⇒ 撤下"已提交"的 live 覆盖层。
+     *
+     * 【为什么要等】提交成功后覆盖层不立刻撤下（见 `LiveEditOverride.committed`）：
+     * 它的值就是刚提交的曲线，而整工程快照还要走一趟 IPC。若此时撤下，波形的幅度
+     * 因子退回**旧快照**，于是"先跳回旧波形、再恢复新波形"（用户报告的松手闪屏）。
+     *
+     * 【为什么用取数序号而不是"快照换了引用"】提交发生时可能有一次**提交之前就
+     * 已发出**的在飞取数（例如原声基线分析完成触发的刷新），它的数据里没有本次
+     * 编辑。只看"引用变了"会在这份陈旧快照到达时提前收尾、照样闪一下。比较取数
+     * 序号则可以排除它：那种请求的序号 ≤ 提交时的最大值。
+     *
+     * 【为什么不会挡住撤销】撤销/重做经 `paramsEpoch`、切轨经 `rootTrackId`，
+     * 都会重新取数并带来更大的序号，因此覆盖层的存活期最多到"下一个提交后的快照
+     * 到达"，不会长期遮挡后续状态。
+     */
+    useEffect(() => {
+        if (loudnessSnapshotFetchSeq > committedSettleSeqRef.current) {
+            clearCommittedLiveEditOverride();
+        }
+    }, [loudnessSnapshotFetchSeq, clearCommittedLiveEditOverride]);
 
     // Clip 音高拖拽（修饰键 + 波形垂直拖拽）的实时预览桥：拖拽侧以节流
     // 后端预览写入修改 pitch 参数线；这里把同一音分偏移实时应用到本机
@@ -3525,13 +4104,29 @@ export const PianoRollPanel: React.FC = () => {
             if (!override || override.key !== paramView.key) return;
             const deltaSemitones = drag.cents / 100;
             const windowEndFrame = drag.startFrame + drag.frameCount;
+            // 以 paramView 的原始帧为基准重复推导（预览事件幂等，不叠加），
+            // 再走**统一的 live 写入入口**：它负责值域钳制（与后端同构）、版本号
+            // 推进与区间记账。此前这里直接改数组 —— 既不钳制（音高拖到 127 以上
+            // 时预览值与后端存下的值不一致），也不推进版本号（主画布签名与波形
+            // 几何缓存都看不到变化）。
+            const dense = new Array<number>(drag.frameCount);
             for (let i = 0; i < override.edit.length; i += 1) {
                 const frame = paramView.startFrame + i * paramView.stride;
                 if (frame < drag.startFrame || frame >= windowEndFrame) continue;
-                // 以 paramView 的原始帧为基准重复推导（预览事件幂等，不叠加）。
-                const base = paramView.edit[i] ?? 0;
-                override.edit[i] = shiftPitchValue(base, deltaSemitones);
+                dense[frame - drag.startFrame] = shiftPitchValue(
+                    paramView.edit[i] ?? 0,
+                    deltaSemitones,
+                );
             }
+            // 步长 > 1 时 dense 会有空洞：写入侧 `dense[j] ?? edit[i]` 会保留原值。
+            applyDenseToLiveEdit(
+                paramView,
+                drag.startFrame,
+                dense,
+                drag.startFrame,
+                windowEndFrame - 1,
+                "draw",
+            );
             invalidate();
         }
         function commitPitchDragPreview(e: Event) {
@@ -3543,7 +4138,11 @@ export const PianoRollPanel: React.FC = () => {
             for (let i = 0; i < nextEdit.length; i += 1) {
                 const frame = paramView.startFrame + i * paramView.stride;
                 if (frame < drag.startFrame || frame >= windowEndFrame) continue;
-                nextEdit[i] = shiftPitchValue(paramView.edit[i] ?? 0, deltaSemitones);
+                // 与后端写入值域同构地钳制，保证"本地曲线"与"随后取回的曲线"一致。
+                nextEdit[i] = clampParamWriteValue(
+                    "pitch",
+                    shiftPitchValue(paramView.edit[i] ?? 0, deltaSemitones),
+                );
             }
             setParamView({ ...paramView, edit: nextEdit });
             liveEditOverrideRef.current = null;
@@ -3563,17 +4162,37 @@ export const PianoRollPanel: React.FC = () => {
         liveEditOverrideRef,
         setParamView,
         invalidate,
+        applyDenseToLiveEdit,
     ]);
 
-    // 包装 commitStroke：在 pointer-up 提交笔画后，清除 liveEditActive 状态，
-    // 并触发可能被延迟 ?pitch_orig_updated 曲线刷新 ?
+    /**
+     * 笔画结束时补触发所有被推迟的刷新。
+     *
+     * 由 `liveEditActiveRef` 的 **true→false 边沿**自动调用（见其定义），因此
+     * pointerup / pointercancel / 各工具自己的中止分支都会走到这里，不需要逐个
+     * 调用点记得补取。
+     */
+    liveEditEndHandlerRef.current = () => {
+        // 曲线：用最新视口重取（含 pitch_orig_updated 的强制取数）。
+        notifyLiveEditEnded();
+        // 响度快照：把笔画期间被推迟的那一份落地，避免等下一次 IPC 往返。
+        flushLoudnessPending();
+    };
+
+    // 包装 commitStroke：提交笔画后清除 liveEditActive 状态 —— 该写入会经边沿回调
+    // 自动补触发上面两项刷新，因此这里不再显式调用。
     const commitStroke: typeof commitStrokeBase = useCallback(
         async (points, mode) => {
+            // 收尾分工：**水位**记在这里（必须在发起写入之前 —— 提交内部会 bump
+            // 刷新令牌、立刻发起取数）；**标记已提交**由 commitStrokeBase 在成功
+            // 路径完成（失败则硬清除覆盖层）。两者合起来即 onParamCommitSucceeded
+            // 的语义，见其说明。
+            committedSettleSeqRef.current = getLatestLoudnessFetchSeq();
             await commitStrokeBase(points, mode);
+            // 置回 false 即触发边沿回调（补取曲线 + 落地响度快照）。
             liveEditActiveRef.current = false;
-            notifyLiveEditEnded();
         },
-        [commitStrokeBase, notifyLiveEditEnded],
+        [commitStrokeBase, getLatestLoudnessFetchSeq, liveEditActiveRef],
     );
 
     // 从 store 中的 clipPitchCurves 转换为 DetectedPitchCurve[] 供 drawPianoRoll 使用。
@@ -3831,17 +4450,13 @@ export const PianoRollPanel: React.FC = () => {
 
             // ── ⑦ 剪贴板预览（不同的投影语义：从落点起点按原始帧距排布）──
             // 与 Canvas2D 路径（render.ts）共用 paramClipboardMapping 的唯一映射
-            // 规则：选区（beat）→ 帧范围 → 逐段落点 span，每段推一层。预览画的
+            // 规则：选区（帧）→ 帧区间 → 逐段落点 span，每段推一层。预览画的
             // 就是粘贴会落下的数据，断层两侧的截断与 Canvas2D 路径完全一致。
             // 时间换算用目标帧周期（粘贴按帧号落盘，用剪贴板帧周期会让预览与
             // 结果错位，见 clipboardPreviewSpans 说明）。
             const preview = clipboardRef.current;
             if (preview && selection && selection.length > 0 && preview.param === editParam) {
-                const frameRanges = beatRangesToFrameRanges(
-                    selection,
-                    secPerBeat,
-                    pv.framePeriodMs,
-                );
+                const frameRanges = selectionToFrameRanges(selection);
                 const spans = clipboardPreviewSpans({
                     targetRanges: frameRanges,
                     clipboard: preview,
@@ -3880,24 +4495,31 @@ export const PianoRollPanel: React.FC = () => {
     /**
      * 把选区（拍单位）组装为 GL 场景层的选区块镜像。
      *
-     * 【为什么在这里换算拍 → 秒】宿主只认统一投影（`TimelineAxis` 以秒为单位），
-     * 而选区数据是拍。拍 → 秒依赖 BPM，属于面板的业务语义；放到宿主侧就是第三份
-     * 口径。因此本函数只做"业务单位 → 宿主的秒"，不改任何几何。
+     * 【为什么在这里换算帧 → 秒】宿主只认统一投影（`TimelineAxis` 以秒为单位），
+     * 而选区数据是帧。帧 → 秒只依赖工程级帧周期（与 BPM 无关）；放到宿主侧就是
+     * 第三份口径。因此本函数只做"业务单位 → 宿主的秒"，不改任何几何。
+     *
+     * 【选区带 == 被圈住的采样点】选区边界是**切点**（两帧中间，见
+     * `paramSelection.snapCut`）：第 k 帧的采样点画在 `framesToTime(k)`，它的领地
+     * 是左右各半帧，因此带画在 `[startFrame - 0.5, startFrame + frameCount - 0.5]`。
+     * 于是"框住第 2、3 帧"的两条边界正好落在第 1/2 帧之间与第 3/4 帧之间。
      *
      * 【为什么空选区返回 null 而不是空数组】两者对宿主是同一件事（清空实例），
      * 但 null 让"没有选区"与"有选区但都在视口外"在调试时仍然可区分。
      *
-     * @param selection 选区（多区间，拍）；null / 空表示无选区。
+     * @param selection 选区（多区间，帧）；null / 空表示无选区。
      * @returns 选区块镜像；无选区时 null。
      */
-    function buildSelectionBandSpec(selection: ParamSelection | null): PianoRollSelectionBandSpec | null {
+    function buildSelectionBandSpec(
+        selection: ParamSelection | null,
+    ): PianoRollSelectionBandSpec | null {
         if (!selection || selection.length === 0) return null;
-        const beatToSecAxis = Math.max(1e-9, secPerBeat);
+        const framePeriodMs = paramView?.framePeriodMs ?? 5;
         const colors = resolvePianoRollColors(themeMode === "dark");
         return {
             spansSec: selection.map((range) => ({
-                startSec: range.startBeat * beatToSecAxis,
-                endSec: range.endBeat * beatToSecAxis,
+                startSec: framesToTime(frameRangeStartCut(range), framePeriodMs),
+                endSec: framesToTime(frameRangeEndCut(range), framePeriodMs),
             })),
             fillRgba: parseRgbaColor(normalizeCssColor(colors.selectionBand)),
             borderRgba: parseRgbaColor(normalizeCssColor(colors.selectionBorder)),
@@ -3925,21 +4547,23 @@ export const PianoRollPanel: React.FC = () => {
     }
 
     /**
-     * 把单段选区（beat）换算为视口坐标的裁剪矩形。
+     * 把单段选区（帧）换算为视口坐标的裁剪矩形。
+     *
+     * 与选区带同口径：边界取**切点**（两帧中间）。
      *
      * @param axis 当前投影。
-     * @param range 单段选区（beat；start/end 颠倒时自动归一）。
+     * @param range 单段选区（半开帧区间）。
      * @returns 裁剪矩形；宽度为 0 时返回 null。
      */
     function selectionClipRect(
         axis: TimelineAxis,
-        range: { startBeat: number; endBeat: number },
+        range: FrameRange,
     ): { x: number; y: number; w: number; h: number } | null {
-        const beatToSec = Math.max(1e-9, secPerBeat);
+        const framePeriodMs = paramView?.framePeriodMs ?? 5;
         return secSpanClipRect(
             axis,
-            Math.min(range.startBeat, range.endBeat) * beatToSec,
-            Math.max(range.startBeat, range.endBeat) * beatToSec,
+            framesToTime(frameRangeStartCut(range), framePeriodMs),
+            framesToTime(frameRangeEndCut(range), framePeriodMs),
         );
     }
 
@@ -4009,12 +4633,18 @@ export const PianoRollPanel: React.FC = () => {
          * 【为什么非 pitch 参数用 childPitchHardDisableReason】子音高偏移参数
          * （cents / degrees / formant）走的是 `childPitchHardDisableReason`，
          * 与 `pitchEnabled` 的判定分支保持一一对应（见上方 `pitchEnabled`）。
+         *
+         * 【动态基线分析中】dyn 面板的虚线基线依赖后台电平分析；未就绪时基线是
+         * 静默的 1.0 平线，用户无从知道"稍后会变"。就绪事件（dyn_orig_updated）
+         * 会刷新快照并清掉本提示（useLoudnessCurves 的 analysisPending）。
          */
         const overlayText = !pitchEnabled
             ? editParam === "pitch"
                 ? pitchHardDisableReason
                 : childPitchHardDisableReason
-            : null;
+            : isDynParam(editParam) && loudnessAnalysisPending
+              ? t("dyn_analysis_pending")
+              : null;
 
         /**
          * 主画布的内容签名（阶段 2 Task 6）。
@@ -4041,7 +4671,8 @@ export const PianoRollPanel: React.FC = () => {
          * `"[object Object]"`，两个内容完全不同的选区因此得到同一个签名，缓存命中、
          * 主画布在清屏前就 return，旧选区框留在画布上不消失（缺陷 #4，详见
          * `pianoRoll/mainCanvasSignature.ts`）。引用比较之所以能逐帧失效，是因为
-         * 选区 / 覆盖层在变化时都被赋**新对象**，而非原地改字段。
+         * 选区在变化时被赋**新对象**；绘制中的 live 覆盖改成了原地更新，故它
+         * 不参与引用比较，而是以**显式版本号**参与（见下方签名项）。
          *
          * 【必须与绘制入参一一对应】下面每一项都刻意对应 `drawPianoRoll` 的某个
          * 入参（或影响其投影的视口量），避免"签名里写了 A、实际喂给绘制的是 B"。
@@ -4059,12 +4690,10 @@ export const PianoRollPanel: React.FC = () => {
             themeMode,
             fontFamily,
             pitchEnabled ? 1 : 0,
-            // beat → sec 的换算系数：选区框与剪贴板预览的 x 由 `beatToSec` 投影，
-            // 改 BPM 会改变它们的位置。此前它**不在**签名里，靠的是另一个巧合
-            // （`usePianoRollData` 的取数 effect 恰好也依赖 `secPerBeat` → 重取 →
-            // `secondaryParamViews` 换引用而顺带让缓存失效）。签名契约不该依赖这种
-            // 旁路，故显式纳入。
-            secPerBeat,
+            // 帧 → sec 的换算系数：选区框与剪贴板预览的 x 由它投影。它与 BPM
+            // **无关**（工程级常量栅格），因此改 BPM 不再需要重绘主画布；签名里
+            // 保留它是为了"帧周期一旦变化，选区几何必须跟着失效"这条契约。
+            paramView?.framePeriodMs ?? 5,
             // 数据与几何（按引用比较）。刻意与传给 drawPianoRoll 的字段一一对应，
             // 避免"签名里写了 A、实际喂给绘制的是 B"这种漂移。
             detectedPitchCurves,
@@ -4074,7 +4703,10 @@ export const PianoRollPanel: React.FC = () => {
             paramMorphOverlays,
             s.showClipboardPreview ? clipboardRef.current : null,
             selectionRef.current,
-            liveEditOverrideRef.current,
+            // 绘制中的 live 覆盖：用**显式版本号**而非对象引用参与签名。
+            // 覆盖层改为原地更新后引用不再变化，比引用即可正确失效（且"无覆盖"
+            // → 0 与"新覆盖"→ 非 0 天然可分）。见 mainCanvasSignature 的约束说明。
+            liveEditOverrideRef.current?.version ?? 0,
             // 中央提示文字（"音高被硬禁用"的原因）：本面板**新增**的字符串签名项，
             // 切换参数 / 轨道组时会变（禁用原因出现或消失）。
             // 注意 `drawPianoRoll` 另有多项字符串入参（editParam / fontFamily 等），
@@ -4104,7 +4736,7 @@ export const PianoRollPanel: React.FC = () => {
             liveEditOverride: liveEditOverrideRef.current,
             selection: selectionRef.current,
             axis: drawAxis,
-            secPerBeat,
+            framePeriodMs: paramView?.framePeriodMs ?? 5,
             // 画布每帧重绘（onFrame invalidate），播放头必须用插值的视觉值：
             // 用 Redux 提交值会让 60fps 的重绘画着同一个旧播放头（且与标尺
             // 的 DOM 插值播放头节奏不一致、短暂错位）。
@@ -4162,17 +4794,13 @@ export const PianoRollPanel: React.FC = () => {
         editParam,
         pitchEnabled,
         toolMode: s.toolMode,
-        secPerBeat,
+        framePeriodMs: paramView?.framePeriodMs ?? 5,
         dynamicProjectSec,
         scrollLeftRef,
-        pxPerBeatRef,
         pxPerSecRef,
         // 交互侧坐标换算的视口真值：与渲染侧（`resolvePanelRenderViewport`）同源，
         // 避免框选 / 命中测试读到量化提交滞后的 `scrollLeftRef`。见该字段的说明。
-        getViewportTruth: useCallback(
-            () => hostRef.current?.getViewport() ?? null,
-            [],
-        ),
+        getViewportTruth: useCallback(() => hostRef.current?.getViewport() ?? null, []),
         horizontalZoomChainRef,
         onHorizontalZoom: handleHorizontalZoom,
         syncTimelineEnabled: s.paramEditorSyncTimeline,
@@ -4187,9 +4815,6 @@ export const PianoRollPanel: React.FC = () => {
         selectionRef,
         selectionUi,
         setSelectionUi,
-        // 撤销栈深度读取器（拉伸手势把选区登记到对应历史步骤时使用）；
-        // 稳定引用，避免每次渲染都让上层的 pointerdown 回调失效重建。
-        getHistoryPosition: useCallback(() => store.getState().session.historyUndoDepth, [store]),
         setCanvasCursor,
         strokeRef,
         panRef,
@@ -4204,6 +4829,9 @@ export const PianoRollPanel: React.FC = () => {
         clampViewport,
         ensureLiveEditBase,
         applyDenseToLiveEdit,
+        resetLiveEditPreview,
+        onParamCommitSucceeded,
+        requestWaveformRepaint,
         commitStroke,
         setParamView,
         liveEditOverrideRef,
@@ -4363,6 +4991,46 @@ export const PianoRollPanel: React.FC = () => {
         };
     }, []); // 空依赖
 
+    // ── 自绘滚动条 / 标尺上的滚轮 ──────────────────────────────────────
+    // 自绘滚动条是滚动容器的**兄弟节点**（见下方轨道注释），标尺则在滚动容器
+    // **之上**，两者都不在 `scroller` 的事件路径里，原生 `wheel` 不会冒泡到它。
+    // 于是它们各自把「轴」显式托付给同一个入口：命中判定不同，语义同源
+    //（无修饰键 = 该轴滚动，`modifier.scrollbarZoom` = 该轴缩放），不存在第二套口径。
+    //
+    // 用回调 ref（而非 `useEffect(..., [])` + `ref.current`）挂监听：轨道与标尺
+    // 会随停靠重排重建 DOM，回调 ref 把「元素出现」本身当作挂载时机。
+    const attachVerticalScrollbarWheel = useNonPassiveWheel<HTMLDivElement>((event) => {
+        scrollerWheelHandlerRef.current(event as unknown as globalThis.WheelEvent, "vertical");
+    });
+    const attachHorizontalScrollbarWheel = useNonPassiveWheel<HTMLDivElement>((event) => {
+        scrollerWheelHandlerRef.current(event as unknown as globalThis.WheelEvent, "horizontal");
+    });
+    const attachVerticalScrollbarTrack = useCallback(
+        (element: HTMLDivElement | null) => {
+            vScrollbarTrackRef.current = element;
+            attachVerticalScrollbarWheel(element);
+        },
+        [attachVerticalScrollbarWheel],
+    );
+    const attachHorizontalScrollbarTrack = useCallback(
+        (element: HTMLDivElement | null) => {
+            hScrollbarTrackRef.current = element;
+            attachHorizontalScrollbarWheel(element);
+        },
+        [attachHorizontalScrollbarWheel],
+    );
+    /**
+     * 标尺上的滚轮：**与画布内的滚轮完全同义**。
+     *
+     * 标尺在滚动容器**之上**，不在 `scroller` 的事件路径里；这里只做"转交"，不指定
+     * 滚动条轴 —— 交给画布滚轮总入口后，命中判定由 `nativeScrollbarZoneAt` 按指针
+     * 位置自行得出（标尺在容器矩形之外 ⇒ 返回 null），keybinding 判定、锚点换算、
+     * 上下限全部与画布同一套，标尺不定义第二种语义。
+     */
+    const handleRulerWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+        scrollerWheelHandlerRef.current(event as unknown as globalThis.WheelEvent);
+    }, []);
+
     // 参数切换或参数描述符变化后，刷新竖向滚动条位置，保证滚动条与当前视口保持一致。
     useLayoutEffect(() => {
         syncVerticalScrollbarForViewport(editParam, getCurrentViewportForScrollbar(editParam));
@@ -4420,7 +5088,11 @@ export const PianoRollPanel: React.FC = () => {
             const horizontalZoomRequested = isWheelBindingRequested(horizontalZoomKb);
 
             const bounds = el.getBoundingClientRect();
-            const h = Math.max(1, bounds.height);
+            // 竖直分母必须用**绘图区**高度（`viewSize.h`），不是纵轴列的高度：
+            // 列比滚动视口高出一条自绘水平滚动条的行，且轴位图/琴键是按
+            // `viewSize.h` 投影的（见内核的 AXIS_TICK_LABEL_DESCENT_PX 说明）。
+            // 用列高会让滚轮/悬停算出的值比渲染出来的位置偏低。
+            const h = Math.max(1, viewSizeRef.current.h);
             const pointerY = clamp(e.clientY - bounds.top, 0, h);
             // t: 0=top, 1=bottom — same semantics as usePianoRollInteractions
             const t = pointerY / h;
@@ -4568,6 +5240,12 @@ export const PianoRollPanel: React.FC = () => {
 
     // Piano keys (axis) hover: play sine wave sound when pointer moves over keys
     useEffect(() => {
+        // 【只有音高参数的左轴才是钢琴卷帘】其余参数的左轴是数值刻度（音量 / 动态 /
+        // 音分…），没有"对应的音高"可发声——对着刻度按下就响是纯粹的噪声，且音量 /
+        // 动态的刻度点击另有语义（切换展示单位，见下一个 effect）。非音高时直接在
+        // 注册监听之前返回，连手势状态都不建立。
+        if (editParam !== "pitch") return;
+
         const el = axisWrapRef.current;
         if (!el) return;
 
@@ -4577,7 +5255,9 @@ export const PianoRollPanel: React.FC = () => {
         const getMidiNoteFromY = (clientY: number): number => {
             const bounds = el.getBoundingClientRect();
             const y = clientY - bounds.top;
-            const h = Math.max(1, bounds.height);
+            // 同滚轮路径：分母取绘图区高度，与琴键实例的投影同源
+            //（见内核的 AXIS_TICK_LABEL_DESCENT_PX 说明）。
+            const h = Math.max(1, viewSizeRef.current.h);
             const t = 1 - clamp(y / h, 0, 1);
             const absMin = PITCH_MIN_MIDI;
             const absMax = PITCH_MAX_MIDI;
@@ -4641,7 +5321,80 @@ export const PianoRollPanel: React.FC = () => {
             el.removeEventListener("pointerleave", onPointerLeave);
             stopNote();
         };
-    }, [pitchViewRef]);
+    }, [editParam, pitchViewRef]);
+
+    // ── 纵轴标尺：左键点击切换展示单位（音量 / 动态）──────────────────────────
+    //
+    // 「倍率 ↔ dB」只对**线性幅值倍率**参数有意义（1× = 0 dB，见 paramAxisUnits）。
+    // 其余参数的左轴单位由参数语义唯一确定（音高是音名、音分就是音分），因此支持
+    // 判定不通过时**完全不注册监听**——点击左轴保持"无操作"，而不是静默写一个
+    // 无意义的设置项。
+    //
+    // 用 `click` 而不是 pointerdown/up 自配对：`click` 只在按下与抬起都落在本元素
+    // （或本元素内的子元素）上时触发，天然排除"从轴列拖到画布"这类手势；轴列上
+    // 目前没有其它拖拽手势，因此不需要更复杂的裁决。
+    useEffect(() => {
+        const el = axisWrapRef.current;
+        if (!el) return;
+        if (!supportsParamAxisUnit(editParam)) return;
+        const onClick = (e: MouseEvent) => {
+            // 只认左键：中键留给内核的平移手势，右键留给上下文菜单。
+            if (e.button !== 0) return;
+            dispatch(toggleParamAxisUnit(editParam));
+            void dispatch(persistUiSettings());
+        };
+        el.addEventListener("click", onClick);
+        return () => el.removeEventListener("click", onClick);
+    }, [dispatch, editParam]);
+
+    // ── 纵轴标尺的悬浮读数（`弹出展示参数`）──────────────────────────────────
+    //
+    // 与曲线上的浮窗共用同一个开关（`showParamValuePopup`）。读数口径按左轴的**内容**
+    // 分两种：
+    // - 钢琴卷帘（音高）：**只给音名**（E4 / D4），不给音分 —— 左轴本来就是按琴键
+    //   分行画出来的，"E4+12" 并不指向某个键，反而会被误读成另一个音；
+    // - 数值刻度（音量 / 动态 / 音分 / 张力…）：给该 y 处的参数值，其中音量 / 动态
+    //   按纵轴展示单位读数（切 dB 时就是 dB）。
+    useEffect(() => {
+        const el = axisWrapRef.current;
+        if (!el) return;
+        if (!s.showParamValuePopup) {
+            setAxisValuePreview(null);
+            return;
+        }
+
+        const describe = (clientY: number): string => {
+            const bounds = el.getBoundingClientRect();
+            // 分母必须是**绘图区**高度（`viewSize.h`），不是轴列高度：轴列比滚动
+            // 视口高出标尺行与底部滚动条行，用列高会让读数整体偏低（与轴上滚轮
+            // 处理同一条约束，见上方 wheel effect 的说明）。
+            const h = Math.max(1, viewSizeRef.current.h);
+            const y = clamp(clientY - bounds.top, 0, h);
+            if (editParam === "pitch") {
+                // 与琴键实例同一投影：向下取整到"这一行属于哪个键"。
+                return midiToLabel(Math.floor(yToValue("pitch", y, h)));
+            }
+            return formatParamValuePreview(yToValue(editParam, y, h));
+        };
+
+        const onPointerMove = (e: PointerEvent) => {
+            const text = describe(e.clientY);
+            if (text.length === 0) {
+                setAxisValuePreview(null);
+                return;
+            }
+            setAxisValuePreview({ clientX: e.clientX, clientY: e.clientY, text });
+        };
+        const onPointerLeave = () => setAxisValuePreview(null);
+
+        el.addEventListener("pointermove", onPointerMove);
+        el.addEventListener("pointerleave", onPointerLeave);
+        return () => {
+            el.removeEventListener("pointermove", onPointerMove);
+            el.removeEventListener("pointerleave", onPointerLeave);
+            setAxisValuePreview(null);
+        };
+    }, [s.showParamValuePopup, editParam, yToValue, formatParamValuePreview]);
 
     // 选区在所有工具模式下保留并持续渲染（选区带 / 剪贴板预览在 render.ts
     // 不按工具门控）：绘制 / 直线颤音工具下不再自动清空，用户可以换轨后
@@ -4658,12 +5411,45 @@ export const PianoRollPanel: React.FC = () => {
         setCtxMenu(null);
     }, [s.toolMode]);
 
-    // 同步数据加载状态到全局 Context
+    // 同步数据加载状态到状态栏。
+    //
+    // 走**外部 store** 而非 Context：这个 boolean 只服务状态栏一处显示，而它随每次
+    // 取数（水平缩放 / 滚动 / 编辑提交）翻转 —— 曾经它住在包裹整个 AppInner 的
+    // Context 里，于是每次翻转都重渲染整棵应用树，把正在进行的绘制笔画打断。
+    // 现在只有状态栏那个小组件会重渲染（见 pianoRollStatusBus）。
+    //
+    // 按**窗体 id** 记账：参数编辑器可以多开，共用一个 boolean 会让一个实例卸载时
+    // 抹掉另一个实例的状态。
+    const loadingPublisherId = dockFormId ?? "param-editor";
     useEffect(() => {
-        updatePianoRollStatus({
-            dataLoading: isLoading,
-        });
-    }, [isLoading, updatePianoRollStatus]);
+        setPianoRollLoading(loadingPublisherId, isLoading);
+    }, [isLoading, loadingPublisherId]);
+
+    // 卸载时注销（否则本实例的最后状态会永远粘住，状态栏再也不会收起）。
+    useEffect(() => () => clearPianoRollLoading(loadingPublisherId), [loadingPublisherId]);
+
+    /**
+     * 参数编辑器「全选」：把整条参数曲线（0 → 工程时长）设为选区。
+     *
+     * 独立成函数有两个用途：`selectAll` 菜单命令本身，以及 `handleEditOp` 开头的
+     * **隐式全选**（无选区时先把作用域铺满整条曲线，再执行原本需要选区的操作）。
+     *
+     * @returns 是否真的设置了选区；工具模式不是「选择」时为 `false`（与菜单命令
+     *   同一守卫：绘制 / 直线 / 颤音工具下不产生选区），调用方据此保持原行为。
+     */
+    const selectAllParamRange = useCallback((): boolean => {
+        if (s.toolMode !== "select") return false;
+        // 整条曲线 = 帧 [0, 工程末端)。**数据路径**直接按整数帧构造：全选的边界就是
+        // 首帧与末帧，不该被"最近中点"再挪半帧（见 paramSelection 的两个构造器）。
+        const totalFrames = Math.max(
+            0,
+            timeToFrame(dynamicProjectSec, paramView?.framePeriodMs ?? 5),
+        );
+        selectionRef.current = selectionFromFrames(0, totalFrames);
+        setSelectionUi(selectionRef.current);
+        invalidate();
+        return true;
+    }, [s.toolMode, dynamicProjectSec, paramView?.framePeriodMs, invalidate]);
 
     // ── Edit operation handler (shared by context menu + MenuBar events) ──
     const handleEditOp = useCallback(
@@ -4671,12 +5457,25 @@ export const PianoRollPanel: React.FC = () => {
             if (!rootTrackId) return;
             const fp = paramView?.framePeriodMs ?? 5;
 
+            // ── 无选区时的隐式全选 ────────────────────────────────────────
+            // 本编辑器里的操作几乎都以**参数选区**为作用域（见
+            // SELECTION_SCOPE_EXEMPT_OPS 的说明）。没有选区时它们原本静默什么都
+            // 不做 —— 用户得先"全选"再点一次，而右键菜单里点下去毫无反应更容易被
+            // 当成功能坏了。这里统一改为：**先全选，再执行**，作用域 = 整条参数曲线
+            // （与用户手动全选完全等价：同样的 `selectionFromFrames(0, 工程末端)`）。
+            //
+            // 非「选择」工具下全选不生效（与菜单命令同一守卫），此时行为与改动前
+            // 逐字一致：这些操作在绘制类工具里本就没有意义。
+            const hadSelectionAtEntry = selectionRef.current;
+            if (
+                !SELECTION_SCOPE_EXEMPT_OPS.has(op) &&
+                (!hadSelectionAtEntry || hadSelectionAtEntry.length === 0)
+            ) {
+                selectAllParamRange();
+            }
+
             if (op === "selectAll") {
-                if (s.toolMode !== "select") return;
-                const totalBeats = dynamicProjectSec / secPerBeat;
-                selectionRef.current = selectionFromBeatRange(0, totalBeats);
-                setSelectionUi(selectionRef.current);
-                invalidate();
+                selectAllParamRange();
                 return;
             }
             if (op === "deselect") {
@@ -4687,13 +5486,14 @@ export const PianoRollPanel: React.FC = () => {
                 return;
             }
 
-            // 双击 Clip（无拖拽，ClipItem 派发）：按 Clip 起止范围在参数编辑器
+            // 时间轴右键手势（按住 `modifier.clipRangeToParamSelection`，默认 Alt，
+            // 右键单击 Clip；`TimelinePanel` 派发）：按 Clip 起止范围在参数编辑器
             // 内创建选区，并把交互焦点切到参数编辑器侧 ——
             // 复制/剪切路由（resolveCopyCutRoute 依据 selectionContext，经由下方
             // selectionUi 同步派发 setParamSelectionActive 标记）与活动表面
             // （focusSurface，外来源粘贴兜底等）随之指向参数编辑器。
             //
-            // mode（来自时间轴的双击手势）：
+            // mode（来自时间轴的右键手势）：
             //   - "replace"（缺省）：替换为该块范围，与旧行为逐字一致；
             //   - "add"：把该块范围并入（重叠/相接自动合并）；
             //   - "toggle"：该块范围已被完整覆盖则挖掉，否则并入 —— 同一个块
@@ -4702,24 +5502,23 @@ export const PianoRollPanel: React.FC = () => {
                 const clipId = typeof data?.clipId === "string" ? data.clipId : "";
                 const clip = store.getState().session.clips.find((entry) => entry.id === clipId);
                 if (!clip) return;
-                const aBeat = Math.max(0, clip.startSec / secPerBeat);
-                const bBeat = Math.max(0, (clip.startSec + clip.lengthSec) / secPerBeat);
+                const { startBound, endBound } = clipTimeRangeToFrameBounds(clip, fp);
                 const rawMode = typeof data?.mode === "string" ? data.mode : "replace";
                 const mode: "replace" | "add" | "toggle" =
                     rawMode === "add" || rawMode === "toggle" ? rawMode : "replace";
                 selectionRef.current =
                     mode === "add"
-                        ? addBeatRange(selectionRef.current, aBeat, bBeat)
+                        ? addFrameRange(selectionRef.current, startBound, endBound)
                         : mode === "toggle"
-                          ? toggleBeatRange(selectionRef.current, aBeat, bBeat)
-                          : selectionFromBeatRange(aBeat, bBeat);
+                          ? toggleFrameRange(selectionRef.current, startBound, endBound)
+                          : selectionFromFrames(startBound, endBound - startBound);
                 setSelectionUi(selectionRef.current);
                 setActiveSurfaceExplicit("pianoRoll");
                 invalidate();
                 return;
             }
 
-            // 音频块范围 → 参数编辑器选区（批量入口；单个音频块的双击手势见
+            // 音频块范围 → 参数编辑器选区（批量入口；单个音频块的右键手势见
             // selectClipParamRange 的 add/toggle 模式）。
             //
             // 只取**当前参数编辑器所属根轨道组**内的音频块：参数编辑器一次只
@@ -4737,24 +5536,22 @@ export const PianoRollPanel: React.FC = () => {
                       : session.selectedClipId
                         ? [session.selectedClipId]
                         : [];
-                const ranges: Array<{ startBeat: number; endBeat: number }> = [];
+                const ranges: FrameRange[] = [];
                 for (const id of requestedIds) {
                     const clip = session.clips.find((entry) => entry.id === id);
                     if (!clip) continue;
                     if (resolveRootTrackId(session.tracks, clip.trackId) !== rootTrackId) continue;
-                    ranges.push({
-                        startBeat: Math.max(0, clip.startSec / secPerBeat),
-                        endBeat: Math.max(0, (clip.startSec + clip.lengthSec) / secPerBeat),
-                    });
+                    const { startBound, endBound } = clipTimeRangeToFrameBounds(clip, fp);
+                    ranges.push({ startFrame: startBound, frameCount: endBound - startBound });
                 }
                 if (ranges.length === 0) return;
 
                 let next: ParamSelection | null = selectionRef.current;
                 if (op === "addClipsToParamSelection") {
-                    next = normalizeSelection([...(next ?? []), ...ranges]);
+                    next = addFrameRanges(next, ranges);
                 } else {
                     for (const range of ranges) {
-                        next = subtractBeatRange(next, range.startBeat, range.endBeat);
+                        next = subtractFrameRange(next, range.startFrame, frameRangeEnd(range));
                     }
                 }
                 selectionRef.current = next;
@@ -4769,7 +5566,7 @@ export const PianoRollPanel: React.FC = () => {
             // 落在这些段内的帧（断层不会被填充），偏移基准为首段起点。
             if (op === "pasteVocalShifter") {
                 const sel2 = selectionRef.current;
-                const selRanges = sel2 ? beatRangesToFrameRanges(sel2, secPerBeat, fp) : [];
+                const selRanges = sel2 ? selectionToFrameRanges(sel2) : [];
                 void dispatch(
                     pasteVocalShifterClipboard({
                         selectionRanges: selRanges.length > 0 ? selRanges : undefined,
@@ -4791,21 +5588,11 @@ export const PianoRollPanel: React.FC = () => {
                           selectionMaxFrames?: number;
                       }
                     | undefined;
-                const bounding = selectionBoundingRange(sel2);
+                const bounding = selectionBoundingSpan(sel2);
                 if (bounding) {
-                    const sf = Math.max(
-                        0,
-                        Math.floor((bounding.startBeat * secPerBeat * 1000) / fp),
-                    );
-                    const fc = Math.max(
-                        1,
-                        Math.ceil(
-                            ((bounding.endBeat - bounding.startBeat) * secPerBeat * 1000) / fp,
-                        ),
-                    );
                     selArgs = {
-                        selectionStartFrame: sf,
-                        selectionMaxFrames: fc,
+                        selectionStartFrame: Math.max(0, bounding.startFrame),
+                        selectionMaxFrames: Math.max(1, bounding.frameCount),
                     };
                 }
                 void (async () => {
@@ -4843,23 +5630,74 @@ export const PianoRollPanel: React.FC = () => {
                 bumpRefreshToken();
             };
 
-            const selAtEntry = selectionRef.current;
-            // Normal paste prefers HiFiShifter param data. When there is no
-            // pitch selection (or pitch editing is unavailable), the normal
-            // paste still tries REAPERMedia data, matching the removed
-            // dedicated "Paste Reaper Clipboard Data" action.
-            if (op === "paste" && (!selAtEntry || !pitchEnabled)) {
-                pasteReaperClipboardFallback();
-                return;
+            /**
+             * 解析参数线剪贴板：内部缓存 → 系统剪贴板（后者优先，保持"最后复制的
+             * 胜出"：时间轴复制过 Clip 后系统槽位已换，内部缓存随之失效）。
+             */
+            const readParamClipboardForPaste = async (): Promise<ParamClipboardData | null> => {
+                let clip = clipboardRef.current;
+                try {
+                    const fromSystem = await readSystemClipboardObject("param");
+                    if (fromSystem) {
+                        clip = fromSystem;
+                        clipboardRef.current = clip;
+                    }
+                } catch {
+                    // 系统剪贴板不可用 → 退回内部缓存。
+                }
+                return clip ?? null;
+            };
+
+            // ── 粘贴：剪贴板优先；无选区时按剪贴板 + 播放光标推导选区 ──────────
+            // 粘贴与其它操作不同：它的"作用对象"完全由**剪贴板**决定（从哪里开始、
+            // 铺多宽、中间有几个断层）。因此无选区时**不做全选**，而是以当前播放
+            // 光标为复制起点，按剪贴板自己的段布局重建选区（段数 / 段长 / 断层照搬），
+            // 再把数据贴进去 —— 选区就是"粘贴会落到哪里"。
+            //
+            // 【推导出的选区**先不发布**】它要与粘贴后的曲线**同一次提交**落地：
+            // 先亮出一个空选区、隔几毫秒再填上数据，会让用户看到"先划选区、再粘贴"
+            // 两步；而用户的心智是"选区出现时粘贴就已经完成了"。因此这里只把它交给
+            // 下面的目标帧换算，真正的 ref/UI 更新发生在 paste 分支里（与本地曲线
+            // 更新同一次 setState 批处理）。
+            //
+            // 剪贴板里没有参数线数据时保持既有语义：落到 REAPERMedia / MIDI 剪贴板
+            // 回退（那个回退的目标不是参数选区）；音高编辑不可用时同理。
+            let pasteClipboard: ParamClipboardData | null = null;
+            let derivedPasteSelection: ParamSelection | null = null;
+            if (op === "paste") {
+                if (!pitchEnabled) {
+                    pasteReaperClipboardFallback();
+                    return;
+                }
+                pasteClipboard = await readParamClipboardForPaste();
+                if (!pasteClipboard) {
+                    pasteReaperClipboardFallback();
+                    return;
+                }
+                const selAtEntry = selectionRef.current;
+                if (!selAtEntry || selAtEntry.length === 0) {
+                    derivedPasteSelection = pasteTargetSelectionFromClipboard({
+                        clipboard: pasteClipboard,
+                        // 锚点 = 播放光标所在帧（与粘贴的帧制口径一致）。
+                        anchorFrame: timeToFrame(s.playheadSec, fp),
+                    });
+                    if (!derivedPasteSelection) {
+                        pasteReaperClipboardFallback();
+                        return;
+                    }
+                }
             }
 
-            const sel = selectionRef.current;
+            // 目标选区：现有选区，或（粘贴且无选区时）刚推导出的那一份。
+            const sel =
+                (selectionRef.current?.length ? selectionRef.current : null) ??
+                derivedPasteSelection;
             if (!sel || sel.length === 0) return;
             if (!pitchEnabled) return;
 
-            // 选区的帧区间集合（逐段；沿用旧单选区算式 floor(起点)/ceil(时长)，
-            // 帧域再次合并相接窗口）。全部 op 都以「每段独立」语义消费它。
-            const selFrameRanges = beatRangesToFrameRanges(sel, secPerBeat, fp);
+            // 选区的帧区间集合（逐段独立）。选区本来就是帧制，这里只做起点夹取、
+            // 帧数钳制与越界截断（见 selectionToFrameRanges）。
+            const selFrameRanges = selectionToFrameRanges(sel);
             if (selFrameRanges.length === 0) return;
             const firstRange = selFrameRanges[0];
             const startFrame = firstRange.startFrame;
@@ -4888,6 +5726,82 @@ export const PianoRollPanel: React.FC = () => {
                 return wrote;
             };
 
+            /**
+             * 粘贴的「本地先落」：把写入值先写进本地 paramView，并把**推导出的选区**
+             * 在同一次 React 提交里发布。
+             *
+             * 【为什么需要】后端回写 + 重新取数要走若干个 IPC 往返。若只发布选区、
+             * 等取数回来才显示曲线，用户看到的是"先出现一个空选区、隔一会儿才填上
+             * 数据"两步；而用户的心智是"选区一出现，粘贴就已经完成"。这里与其它提交
+             * 路径同一范式（先本地、后后端；失败时由 `bumpRefreshToken` 的取数纠正），
+             * 于是选区与曲线在**同一次 setState 批处理**里落地 —— 感知上是一步。
+             *
+             * 已有选区时（`derivedPasteSelection` 为 null）只更新曲线，行为不变。
+             *
+             * @param writes 绝对帧号 + 逐帧值（全分辨率）。
+             */
+            const applyPasteLocally = (
+                writes: readonly { startFrame: number; values: number[] }[],
+            ): void => {
+                if (derivedPasteSelection) {
+                    selectionRef.current = derivedPasteSelection;
+                    setSelectionUi(derivedPasteSelection);
+                }
+                const pv = paramViewRef.current;
+                if (pv && writes.length > 0) {
+                    const step = Math.max(1, Math.floor(pv.stride));
+                    const nextEdit = pv.edit.slice();
+                    for (const write of writes) {
+                        for (let i = 0; i < write.values.length; i += 1) {
+                            const idx = Math.round((write.startFrame + i - pv.startFrame) / step);
+                            if (idx >= 0 && idx < nextEdit.length) {
+                                nextEdit[idx] = write.values[i];
+                            }
+                        }
+                    }
+                    setParamView({ ...pv, edit: nextEdit });
+                }
+                invalidate();
+            };
+
+            // 音量 ↔ 动态 曲线互转（后端单事务：基线补偿换算 + 源参数归位）。
+            //
+            // 【为什么换算在后端】两者最终增益的语义不同：volume 是乘性增益，
+            // dyn 是「目标电平 / 原声基线」。等效互转需要逐帧基线补偿
+            // （dyn_target = volume × orig、volume = target/orig），而权威基线与
+            // "曲线哪些帧有数据"只有后端知道 —— 前端只传选区（旧的前端纯搬迁
+            // 已被证伪：gain = v/orig ≠ v，且会把未画帧物化成显式基线值）。
+            //
+            // 撤销点在后端单次打点：Ctrl+Z 一次回退整个互转（含源归位）。
+            if (op === "convertVolumeToDyn" || op === "convertDynToVolume") {
+                // 菜单项只在选中 volume / dyn 时出现，但键盘/程序化触发仍要复核，
+                // 避免用一个不匹配的方向覆盖掉用户真正在编辑的参数。
+                const fromNarrowed: "volume" | "dyn" =
+                    op === "convertVolumeToDyn" ? "volume" : "dyn";
+                if (editParam !== fromNarrowed) return;
+                const plan = planParamConversion(fromNarrowed);
+                if (!plan) return;
+
+                const res = await paramsApi.convertMixParam(
+                    rootTrackId,
+                    fromNarrowed,
+                    selFrameRanges.map((range) => ({
+                        startFrame: range.startFrame,
+                        frameCount: range.frameCount,
+                    })),
+                );
+                if (!res?.ok) {
+                    // 基线分析未就绪是最常见的失败原因：保持静默（与其它操作对
+                    // not-ok 的处理一致），dyn_orig_updated 事件后用户重试即可。
+                    return;
+                }
+                bumpRefreshToken();
+                // 目标参数可能刚获得第一个非默认值（尤其动态）→ 切换显示，
+                // 让用户立刻看到互转结果而不是停在空白的源参数上。
+                dispatch(setEditParam(plan.targetParam));
+                return;
+            }
+
             // 选区编辑统一入口：取数/编辑/边缘淡化/回写全部在
             // selectionEditApply 模块内完成（delta 空间交叉淡化 + 毫秒定标）。
             // 多选区逐段独立执行，整批只打一个撤销点。
@@ -4895,6 +5809,7 @@ export const PianoRollPanel: React.FC = () => {
             const runSelectionEdit = async (
                 editSelection: (currentSelectionVals: number[]) => number[],
                 extension?: SelectionEditExtension,
+                options?: { preserveDynSentinels?: boolean },
             ) => {
                 const ok = await applySelectionEditOverRanges({
                     ranges: selFrameRanges,
@@ -4912,6 +5827,7 @@ export const PianoRollPanel: React.FC = () => {
                     editSelection,
                     extension,
                     isEditable: editParam === "pitch" ? editablePitchValue : undefined,
+                    ...options,
                 });
                 if (ok) bumpRefreshToken();
             };
@@ -4929,13 +5845,21 @@ export const PianoRollPanel: React.FC = () => {
                             range.startFrame,
                             range.frameCount,
                             1,
+                            true,
+                            isDynParam(editParam),
                         );
                         if (!res?.ok) continue;
                         const payload = res as ParamFramesPayload;
                         if (segments.length === 0) {
                             framePeriodMsFromBackend = Number(payload.frame_period_ms ?? fp) || fp;
                         }
-                        const values = (payload.edit ?? []).map((v) => Number(v) || 0);
+                        // dyn：未画帧在复制时就编码回哨兵（负值）。后端
+                        // set_param_frames 入口原样接受负值 = 沿用原声，因此
+                        // 粘贴路径无需任何特判 —— "未画"语义跨复制/粘贴存活。
+                        const sentinels = payload.edit_sentinel;
+                        const values = (payload.edit ?? []).map((v, i) =>
+                            sentinels?.[i] === true ? DYN_FOLLOW_ORIG : Number(v) || 0,
+                        );
                         if (values.length === 0) continue;
                         segments.push({
                             startFrame: range.startFrame - startFrame,
@@ -4971,13 +5895,19 @@ export const PianoRollPanel: React.FC = () => {
                             range.startFrame,
                             range.frameCount,
                             1,
+                            true,
+                            isDynParam(editParam),
                         );
                         if (!res?.ok) continue;
                         const payload = res as ParamFramesPayload;
                         if (segments.length === 0) {
                             framePeriodMsFromBackend = Number(payload.frame_period_ms ?? fp) || fp;
                         }
-                        const values = (payload.edit ?? []).map((v) => Number(v) || 0);
+                        // dyn：未画帧编码回哨兵（与 copy 同口径，见该处说明）。
+                        const sentinels = payload.edit_sentinel;
+                        const values = (payload.edit ?? []).map((v, i) =>
+                            sentinels?.[i] === true ? DYN_FOLLOW_ORIG : Number(v) || 0,
+                        );
                         if (values.length > 0) {
                             segments.push({
                                 startFrame: range.startFrame - startFrame,
@@ -5014,21 +5944,10 @@ export const PianoRollPanel: React.FC = () => {
                     break;
                 }
                 case "paste": {
-                    let clip = clipboardRef.current;
-                    try {
-                        const fromSystem = await readSystemClipboardObject("param");
-                        if (fromSystem) {
-                            clip = fromSystem;
-                            clipboardRef.current = clip;
-                        }
-                    } catch {
-                        // ignore and fallback to internal clipboard
-                    }
-                    if (!clip) {
-                        // No HiFiShifter param clipboard data: try REAPERMedia.
-                        pasteReaperClipboardFallback();
-                        return;
-                    }
+                    // 剪贴板已在上方（进入通用守卫之前）解析过 —— 无选区时的目标
+                    // 选区就是据它推导的，这里直接复用同一份，避免再读一次系统剪贴板。
+                    const clip = pasteClipboard;
+                    if (!clip) return;
 
                     // 剪贴板 → 目标选区的映射（预览与粘贴同源）：交集之外不写，
                     // 断层两侧都保持原值。
@@ -5079,24 +5998,42 @@ export const PianoRollPanel: React.FC = () => {
                             });
                         }
                         if (convertedWrites.length === 0) return;
-                        await uploadFullResCurveSegments({
-                            trackId: rootTrackId,
-                            param: editParam,
-                            segments: convertedWrites,
-                        });
-                        bumpRefreshToken();
+                        // 选区（若为新推导）+ 本地曲线：同一次提交落地，再走后端回写。
+                        applyPasteLocally(convertedWrites);
+                        try {
+                            await uploadFullResCurveSegments({
+                                trackId: rootTrackId,
+                                param: editParam,
+                                segments: convertedWrites,
+                            });
+                        } catch (err) {
+                            console.error("[pianoRoll] paste (converted) failed", err);
+                        } finally {
+                            // 无论成败都重新取数：失败时把上面乐观写入的曲线纠正回后端真值
+                            // （与拖拽提交路径同一纪律）。
+                            bumpRefreshToken();
+                        }
                         break;
                     }
 
-                    await uploadFullResCurveSegments({
-                        trackId: rootTrackId,
-                        param: editParam,
-                        segments: writes.map((write) => ({
-                            startFrame: write.startFrame,
-                            values: write.values,
-                        })),
-                    });
-                    bumpRefreshToken();
+                    const pasteWrites = writes.map((write) => ({
+                        startFrame: write.startFrame,
+                        values: write.values,
+                    }));
+                    // 选区（若为新推导）+ 本地曲线：同一次提交落地，再走后端回写。
+                    applyPasteLocally(pasteWrites);
+                    try {
+                        await uploadFullResCurveSegments({
+                            trackId: rootTrackId,
+                            param: editParam,
+                            segments: pasteWrites,
+                        });
+                    } catch (err) {
+                        console.error("[pianoRoll] paste failed", err);
+                    } finally {
+                        // 同拖拽提交路径：失败时用重新取数把乐观写入的曲线纠正回来。
+                        bumpRefreshToken();
+                    }
                     break;
                 }
                 case "initialize": {
@@ -5122,12 +6059,18 @@ export const PianoRollPanel: React.FC = () => {
                         startFrame,
                         frameCount,
                         1,
+                        true,
+                        isDynParam(editParam),
                     );
                     if (!res?.ok) return;
                     const payload = res as ParamFramesPayload;
                     const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
                     if (vals.length === 0) return;
                     const result = averageSelectionValues(vals, editParam, strengthPercent);
+                    // dyn：未画帧写回哨兵（防止"沿用原声"被物化成显式目标电平）。
+                    if (isDynParam(editParam)) {
+                        restoreDynSentinels(result, payload.edit_sentinel);
+                    }
                     await paramsApi.setParamFrames(
                         rootTrackId,
                         editParam,
@@ -5204,6 +6147,8 @@ export const PianoRollPanel: React.FC = () => {
                                 : vals.map(() => midiNote),
                         // 选区外延拓 = 目标值本身：向目标的自然滑移
                         { kind: "editedAt", editedAt: () => midiNote },
+                        // 显式写常量：用户意图是覆盖整个选区 → 不保留未画哨兵。
+                        { preserveDynSentinels: false },
                     );
                     break;
                 }
@@ -5218,6 +6163,30 @@ export const PianoRollPanel: React.FC = () => {
                             (param) => param.id === editParam,
                         );
                         const magnitude = parseParamShiftMagnitude(data?.magnitude);
+                        // dyn 是倍率域（0 = 静音）：**档位命令**上下移动用乘性 ——
+                        // 一次 ±shift = ×2^±magnitude（默认 ×2 / ×0.5 = ±6 dB），
+                        // 与 DAW 的"增益 ±6 dB"同一语义；0 帧保持 0。选区外延拓同样
+                        // 按乘性表达：`deltaAt = base × (factor − 1)`，边缘淡化在
+                        // delta 空间里得到的就是"同一系数作用下的差值"。
+                        //
+                        // ⚠ 拖拽**不走**这条法则：拖拽一律是值域内线性偏移，因为
+                        // 只有线性偏移能让被抓住的那一点始终停在光标下（见
+                        // `paramRanges.shiftValueForDrag`）。命令是离散的增益档位，
+                        // 不涉及"跟手"，两者语义不同、不应互相"对齐"。
+                        if (isDynParam(editParam)) {
+                            // 档位（对齐 pitch 的 fine/normal/coarse 节奏）：
+                            // fine ≈ +0.6 dB、normal = ×2（+6 dB）、coarse = ×4（+12 dB）。
+                            const dynStepDelta =
+                                magnitude === "fine" ? 0.05 : magnitude === "coarse" ? 1.0 : 0.5;
+                            const factor = dynMultiplicativeFactor(
+                                op === "shiftParamUpSelection" ? dynStepDelta : -dynStepDelta,
+                            );
+                            await runSelectionEdit((vals) => vals.map((v) => v * factor), {
+                                kind: "deltaAt",
+                                deltaAt: (_f, base) => base * (factor - 1),
+                            });
+                            break;
+                        }
                         const step = getParamShiftStep(editParam, descriptor, magnitude);
                         const delta = op === "shiftParamUpSelection" ? step : -step;
                         // 不透传 data?.edgeSmoothnessPercent：键盘路径的事件
@@ -5249,6 +6218,8 @@ export const PianoRollPanel: React.FC = () => {
                             ctxStart,
                             leftLen + range.frameCount + pad,
                             1,
+                            true,
+                            isDynParam(editParam),
                         );
                         if (!res?.ok) return false;
                         const payload = res as ParamFramesPayload;
@@ -5260,6 +6231,13 @@ export const PianoRollPanel: React.FC = () => {
                             leftContext: all.slice(0, leftLen),
                             rightContext: all.slice(leftLen + range.frameCount),
                         });
+                        // dyn：未画帧写回哨兵（防止"沿用原声"被物化成显式目标电平）。
+                        if (isDynParam(editParam)) {
+                            restoreDynSentinels(
+                                result,
+                                payload.edit_sentinel?.slice(leftLen, leftLen + range.frameCount),
+                            );
+                        }
                         const written = await paramsApi.setParamFrames(
                             rootTrackId,
                             editParam,
@@ -5287,6 +6265,8 @@ export const PianoRollPanel: React.FC = () => {
                             range.startFrame,
                             range.frameCount,
                             1,
+                            true,
+                            isDynParam(editParam),
                         );
                         if (!res?.ok) return false;
                         const payload = res as ParamFramesPayload;
@@ -5296,9 +6276,16 @@ export const PianoRollPanel: React.FC = () => {
                         const attackMs = Math.min(attack, totalMs / 2);
                         const releaseMs = Math.min(release, totalMs / 2);
                         // For pitch: amplitude in cents → divide by 100 to get semitones
+                        // For dyn: amplitude is a **depth percentage** (±N% ratio
+                        // modulation) — multiplicative so drawn silence stays silent.
                         // For other params: amplitude is a raw value used directly as max deviation
                         const isPitchVib = editParam === "pitch";
-                        const ampFactor = isPitchVib ? amplitude / 100 : amplitude;
+                        const isDynVib = isDynParam(editParam);
+                        const ampFactor = isPitchVib
+                            ? amplitude / 100
+                            : isDynVib
+                              ? amplitude / 100
+                              : amplitude;
                         const result = vals.map((v, i) => {
                             const tMs = i * fpMs;
                             let env = 1;
@@ -5309,8 +6296,17 @@ export const PianoRollPanel: React.FC = () => {
                             const vib = Math.sin(
                                 (2 * Math.PI * tMs) / Math.max(1, period) + phaseRad,
                             );
-                            return v + ampFactor * env * vib;
+                            // dyn：乘性调制（v × (1 + 深度·包络·正弦)）—— 静音帧
+                            // （v = 0）保持 0；深度 > 100% 时负半周钳到 0 = 静音。
+                            const next = isDynVib
+                                ? v * (1 + ampFactor * env * vib)
+                                : v + ampFactor * env * vib;
+                            return isDynVib ? Math.max(0, next) : next;
                         });
+                        // dyn：未画帧写回哨兵（"沿用原声"不被颤音物化）。
+                        if (isDynParam(editParam)) {
+                            restoreDynSentinels(result, payload.edit_sentinel);
+                        }
                         const written = await paramsApi.setParamFrames(
                             rootTrackId,
                             editParam,
@@ -5473,7 +6469,6 @@ export const PianoRollPanel: React.FC = () => {
             editParam,
             s.tracks,
             paramView?.framePeriodMs,
-            secPerBeat,
             dynamicProjectSec,
             s.edgeSmoothnessPercent,
             effectiveProjectScale,
@@ -5487,6 +6482,7 @@ export const PianoRollPanel: React.FC = () => {
             bumpRefreshToken,
             invalidate,
             dispatch,
+            selectAllParamRange,
         ],
     );
 
@@ -5510,17 +6506,35 @@ export const PianoRollPanel: React.FC = () => {
         return () => window.removeEventListener("hifi:editOp", handler);
     }, [handleEditOp]);
 
-    // 单剪贴板纪律：时间轴复制/剪切替换整个应用剪贴板后（copyClips 成功时
-    // 派发 hifi:clipboardReplaced），参数线内部剪贴板缓存随之失效 —— 否则
-    // "复制 Clip 后在参数编辑器粘贴"会把更早复制、已被剪贴板替换掉的参数线
-    // 数据从内部缓存复活，违反"剪贴板只保留最后复制的一份"的语义。
+    // 单剪贴板纪律：槽位被别的表面整体替换后（时间轴复制/剪切，或记事本暂存块
+    // 的「恢复到剪贴板」），内部剪贴板缓存必须**重新对齐槽位** —— 否则
+    // "复制 Clip 后在参数编辑器粘贴"会把更早复制、已被替换掉的参数线数据从
+    // 内部缓存复活。
+    //
+    // 【只清不读是不够的】清空只解决了"槽位里不再是参数线数据"的一半；另一半
+    // 是"槽位里（重新）是参数线数据"：从记事本恢复一份参数线载荷时，数据明明
+    // 可粘贴，预览却始终空白 —— 而预览画的正是"粘贴会落下的数据"，它必须跟着
+    // 槽位走。因此这里清空之后立刻回读一次。
     useEffect(() => {
+        const sync = createClipboardPreviewSync(() => readSystemClipboardObject("param"));
         const handler = () => {
+            // 先清空：待读取期间也绝不展示已经过期的曲线。读取到（或读不到）
+            // 参数线数据后，结果统一由 apply 落地。
             clipboardRef.current = null;
             invalidate();
+            void sync.sync((data) => {
+                clipboardRef.current = data;
+                invalidate();
+            });
         };
         window.addEventListener("hifi:clipboardReplaced", handler);
-        return () => window.removeEventListener("hifi:clipboardReplaced", handler);
+        // 面板首次挂载时也对齐一次：槽位可能在面板被打开之前就已经恢复好了
+        // （恢复动作发生在记事本，参数编辑器当时还没有挂载）。
+        handler();
+        return () => {
+            sync.cancel();
+            window.removeEventListener("hifi:clipboardReplaced", handler);
+        };
     }, [invalidate]);
 
     // Dispatch helper: context menu dialog ops → open MenuBar dialogs
@@ -5549,13 +6563,20 @@ export const PianoRollPanel: React.FC = () => {
     /**
      * 「另存为音高参考」：每个选区段生成一个独立的 Pitch Ref clip
      * （不合并断层 —— 合并会把缺口处也填上参考音高）。
+     *
+     * 无选区时先做一次隐式全选（作用域 = 整条参数曲线），与右键菜单里其它
+     * 以选区为作用域的操作一致 —— 否则这个菜单项点下去会毫无反应。
      */
     const handleSaveAsPitchRef = useCallback(async () => {
+        if (!rootTrackId) return;
+        if (!selectionRef.current || selectionRef.current.length === 0) {
+            selectAllParamRange();
+        }
         const sel = selectionRef.current;
-        if (!sel || sel.length === 0 || !rootTrackId) return;
+        if (!sel || sel.length === 0) return;
 
         const fp = paramView?.framePeriodMs ?? 5;
-        const selFrameRanges = beatRangesToFrameRanges(sel, secPerBeat, fp);
+        const selFrameRanges = selectionToFrameRanges(sel);
         if (selFrameRanges.length === 0) return;
 
         // 逐段取 pitch → MIDI 音符事件（与旧单选区同一转换，保留浮点音高）
@@ -5699,12 +6720,12 @@ export const PianoRollPanel: React.FC = () => {
     }, [
         selectionRef,
         rootTrackId,
-        secPerBeat,
         paramView,
         s.tracks,
         s.selectedTrackId,
         s.clips,
         dispatch,
+        selectAllParamRange,
     ]);
 
     /**
@@ -5713,6 +6734,11 @@ export const PianoRollPanel: React.FC = () => {
      */
     const handleExportMidiFromEditor = useCallback(async () => {
         if (!rootTrackId) return;
+        // 无选区时先隐式全选（作用域 = 整条参数曲线），与菜单里其它以选区为
+        // 作用域的操作一致。
+        if (!selectionRef.current || selectionRef.current.length === 0) {
+            selectAllParamRange();
+        }
         const sel = selectionRef.current;
         if (!sel || sel.length === 0) return;
 
@@ -5727,8 +6753,10 @@ export const PianoRollPanel: React.FC = () => {
         await paramsApi.exportPitchToMidi({
             outputPath: saveResult.path,
             tracks: sel.map((range) => {
-                const startSec = range.startBeat * secPerBeat;
-                const endSec = Math.max(startSec + 0.01, range.endBeat * secPerBeat);
+                // 半开帧区间 → 秒（右端是最后一帧的右缘）。
+                const fp = paramView?.framePeriodMs ?? 5;
+                const startSec = framesToTime(range.startFrame, fp);
+                const endSec = Math.max(startSec + 0.01, framesToTime(frameRangeEnd(range), fp));
                 return {
                     trackId: s.selectedTrackId ?? rootTrackId,
                     rootTrackId,
@@ -5742,7 +6770,7 @@ export const PianoRollPanel: React.FC = () => {
             baseScale: s.project?.baseScale ?? "C",
             projectScaleNotes: scaleNotes,
         });
-    }, [rootTrackId, selectionRef, secPerBeat, s]);
+    }, [rootTrackId, selectionRef, paramView?.framePeriodMs, s, selectAllParamRange]);
 
     // Pitch Snap 设置弹窗状态
     const [pitchSnapOpen, setPitchSnapOpen] = useState(false);
@@ -5804,7 +6832,7 @@ export const PianoRollPanel: React.FC = () => {
     const timelineTicks = useMemo(
         () =>
             buildTimelineTicks({
-                axis: prAxis,
+                axis: prTickAxis.axis,
                 bpm: s.bpm,
                 beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
                 grid: s.grid,
@@ -5816,7 +6844,7 @@ export const PianoRollPanel: React.FC = () => {
                 tempoMap: s.tempoMap,
             }),
         [
-            prAxis,
+            prTickAxis,
             s.bpm,
             s.beats,
             s.grid,
@@ -5893,88 +6921,94 @@ export const PianoRollPanel: React.FC = () => {
             <Flex
                 align="center"
                 justify="between"
-                className="h-8 bg-qt-base border-b border-qt-border px-2 shrink-0"
+                className="h-qt-bar-main bg-qt-base border-b border-qt-border px-2 shrink-0"
             >
                 <Flex align="center" gap="2" style={{ flex: "1 1 auto", minWidth: 0 }}>
-                    <IconButton
-                        size="1"
-                        variant={s.paramEditorSyncTimeline ? "solid" : "ghost"}
-                        data-tooltip={tAny("sync_timeline_view_tooltip")}
-                        aria-label={tAny("sync_timeline_view")}
+                    <AppIconButton
+                        active={s.paramEditorSyncTimeline}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={tf("sync_timeline_view_tooltip")}
+                        aria-label={tf("sync_timeline_view")}
                         tabIndex={-1}
                         onClick={() => {
                             dispatch(setParamEditorSyncTimeline(!s.paramEditorSyncTimeline));
                             void dispatch(persistUiSettings());
                         }}
-                    >
-                        {s.paramEditorSyncTimeline ? <Link2Icon /> : <LinkBreak2Icon />}
-                    </IconButton>
-                    <Text size="1" weight="bold" color="gray">
-                        {tAny("param_editor_short")}
-                    </Text>
-                    {/* 音高吸附按钮，紧邻 param_editor 右侧，留 8px 空白 */}
-                    <Flex gap="1" align="center" style={{ marginLeft: 8 }}>
-                        <IconButton
-                            size="1"
-                            variant={s.toolModeGroup === "select" ? "solid" : "ghost"}
-                            data-tooltip={t("select")}
+                        icon={s.paramEditorSyncTimeline ? <Link2Icon /> : <LinkBreak2Icon />}
+                    />
+                    <span className="hs-type-muted font-semibold">{tf("param_editor_short")}</span>
+                    {/* 工具按钮组（音高吸附等）+ 平滑度滑块。`marginLeft: 8` 是紧邻
+                        `参数编辑器` 标题留出的空白。
+                        【minWidth 必须显式置 0】flex 项默认 `min-width: auto`（= min-content），
+                        这一组的 min-content 里含**滑块的 max-content（120px）**与标签全文，
+                        实测 384px —— 面板比它窄时整组拒绝收缩、直接溢出，于是组内的滑块永远
+                        停在 120px（用户报告"平滑度滑块无法缩小"）。置 0 后收缩按 base 分摊：
+                        按钮（min-content = 24px）保持不动，滑块与标签先让位。 */}
+                    <Flex gap="1" align="center" style={{ marginLeft: 8, minWidth: 0 }}>
+                        <AppIconButton
+                            active={s.toolModeGroup === "select"}
+                            // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                            emphasis="accent"
+                            tooltip={t("common_select")}
                             tabIndex={-1}
                             onClick={() => dispatch(setToolMode("select"))}
-                        >
-                            <CursorArrowIcon />
-                        </IconButton>
+                            icon={<CursorArrowIcon />}
+                        />
                         <Box style={{ position: "relative" }} data-hs-context-menu>
-                            <IconButton
-                                size="1"
-                                variant={s.toolModeGroup === "draw" ? "solid" : "ghost"}
-                                data-tooltip={drawToolButtonTitle}
+                            <AppIconButton
+                                active={s.toolModeGroup === "draw"}
+                                // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                                emphasis="accent"
+                                tooltip={drawToolButtonTitle}
                                 tabIndex={-1}
                                 onClick={() => dispatch(setToolMode(currentDrawTool))}
                                 onContextMenu={(e) => {
                                     e.preventDefault();
                                     setDrawToolMenuOpen(true);
                                 }}
-                            >
-                                <Box
-                                    style={{
-                                        position: "relative",
-                                        width: 15,
-                                        height: 15,
-                                    }}
-                                >
+                                icon={
                                     <Box
                                         style={{
-                                            position: "absolute",
-                                            inset: 0,
-                                            display: "flex",
-                                            alignItems: "center",
-                                            justifyContent: "center",
+                                            position: "relative",
+                                            width: 15,
+                                            height: 15,
                                         }}
                                     >
-                                        {currentDrawToolIcon}
-                                    </Box>
-                                    <Box
-                                        style={{
-                                            position: "absolute",
-                                            right: -1,
-                                            bottom: -1,
-                                            width: 6,
-                                            height: 6,
-                                            opacity: 0.7,
-                                        }}
-                                    >
-                                        <svg
-                                            width="6"
-                                            height="6"
-                                            viewBox="0 0 6 6"
-                                            fill="none"
-                                            xmlns="http://www.w3.org/2000/svg"
+                                        <Box
+                                            style={{
+                                                position: "absolute",
+                                                inset: 0,
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "center",
+                                            }}
                                         >
-                                            <path d="M0 6L6 0V6Z" fill="currentColor" />
-                                        </svg>
+                                            {currentDrawToolIcon}
+                                        </Box>
+                                        <Box
+                                            style={{
+                                                position: "absolute",
+                                                right: -1,
+                                                bottom: -1,
+                                                width: 6,
+                                                height: 6,
+                                                opacity: 0.7,
+                                            }}
+                                        >
+                                            <svg
+                                                width="6"
+                                                height="6"
+                                                viewBox="0 0 6 6"
+                                                fill="none"
+                                                xmlns="http://www.w3.org/2000/svg"
+                                            >
+                                                <path d="M0 6L6 0V6Z" fill="currentColor" />
+                                            </svg>
+                                        </Box>
                                     </Box>
-                                </Box>
-                            </IconButton>
+                                }
+                            />
 
                             {drawToolMenuOpen && (
                                 <Box
@@ -5985,12 +7019,12 @@ export const PianoRollPanel: React.FC = () => {
                                     {[
                                         {
                                             mode: "draw" as const,
-                                            label: tAny("draw_tool"),
+                                            label: tf("draw_tool"),
                                             icon: <Pencil1Icon />,
                                         },
                                         {
                                             mode: "vibrato" as const,
-                                            label: tAny("vibrato_draw_tool"),
+                                            label: tf("vibrato_draw_tool"),
                                             icon: vibratoToolIcon,
                                         },
                                     ].map((item) => {
@@ -5999,7 +7033,7 @@ export const PianoRollPanel: React.FC = () => {
                                             <button
                                                 key={item.mode}
                                                 type="button"
-                                                className={`w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover`}
+                                                className={`w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover`}
                                                 onClick={() => {
                                                     dispatch(setToolMode(item.mode));
                                                     setDrawToolMenuOpen(false);
@@ -6018,7 +7052,9 @@ export const PianoRollPanel: React.FC = () => {
                                                     >
                                                         {item.icon}
                                                     </Box>
-                                                    <Text size="1">{item.label}</Text>
+                                                    <span className="hs-type-label">
+                                                        {item.label}
+                                                    </span>
                                                 </Flex>
                                                 {active ? <CheckIcon /> : null}
                                             </button>
@@ -6038,11 +7074,9 @@ export const PianoRollPanel: React.FC = () => {
                             }}
                         />
                         {/* 拖动方向按钮 */}
-                        <IconButton
-                            size="1"
-                            color="gray"
-                            variant={activeDragDirection === "free" ? "ghost" : "solid"}
-                            data-tooltip={`${tAny("drag_direction")}: ${tAny(activeDragDirection === "free" ? "drag_direction_free" : activeDragDirection === "x-only" ? "drag_direction_x_only" : "drag_direction_y_only")}${
+                        <AppIconButton
+                            active={activeDragDirection !== "free"}
+                            tooltip={`${tf("drag_direction")}: ${tf(activeDragDirection === "free" ? "drag_direction_free" : activeDragDirection === "x-only" ? "drag_direction_x_only" : "drag_direction_y_only")}${
                                 isNoneBinding(cycleDragDirectionKb)
                                     ? ""
                                     : ` (${formatKeybinding(cycleDragDirectionKb, "")})`
@@ -6052,67 +7086,69 @@ export const PianoRollPanel: React.FC = () => {
                                 dispatch(cycleDragDirection(activeDragDirectionTool));
                                 void dispatch(persistUiSettings());
                             }}
-                        >
-                            {activeDragDirection === "free" ? (
-                                <svg
-                                    width="15"
-                                    height="15"
-                                    viewBox="0 0 15 15"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                >
-                                    <path
-                                        d="M3.5 11.5L11.5 3.5M11.5 3.5L8 3.5M11.5 3.5L11.5 7M3.5 11.5L7 11.5M3.5 11.5L3.5 8"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                    />
-                                </svg>
-                            ) : activeDragDirection === "x-only" ? (
-                                <svg
-                                    width="15"
-                                    height="15"
-                                    viewBox="0 0 15 15"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                >
-                                    <path
-                                        d="M2 7.5H13M2 7.5L4.5 5M2 7.5L4.5 10M13 7.5L10.5 5M13 7.5L10.5 10"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                    />
-                                </svg>
-                            ) : (
-                                <svg
-                                    width="15"
-                                    height="15"
-                                    viewBox="0 0 15 15"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                >
-                                    <path
-                                        d="M7.5 2V13M7.5 2L5 4.5M7.5 2L10 4.5M7.5 13L5 10.5M7.5 13L10 10.5"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                    />
-                                </svg>
-                            )}
-                        </IconButton>
+                            icon={
+                                activeDragDirection === "free" ? (
+                                    <svg
+                                        width="15"
+                                        height="15"
+                                        viewBox="0 0 15 15"
+                                        fill="none"
+                                        xmlns="http://www.w3.org/2000/svg"
+                                    >
+                                        <path
+                                            d="M3.5 11.5L11.5 3.5M11.5 3.5L8 3.5M11.5 3.5L11.5 7M3.5 11.5L7 11.5M3.5 11.5L3.5 8"
+                                            stroke="currentColor"
+                                            strokeWidth="1.2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                        />
+                                    </svg>
+                                ) : activeDragDirection === "x-only" ? (
+                                    <svg
+                                        width="15"
+                                        height="15"
+                                        viewBox="0 0 15 15"
+                                        fill="none"
+                                        xmlns="http://www.w3.org/2000/svg"
+                                    >
+                                        <path
+                                            d="M2 7.5H13M2 7.5L4.5 5M2 7.5L4.5 10M13 7.5L10.5 5M13 7.5L10.5 10"
+                                            stroke="currentColor"
+                                            strokeWidth="1.2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                        />
+                                    </svg>
+                                ) : (
+                                    <svg
+                                        width="15"
+                                        height="15"
+                                        viewBox="0 0 15 15"
+                                        fill="none"
+                                        xmlns="http://www.w3.org/2000/svg"
+                                    >
+                                        <path
+                                            d="M7.5 2V13M7.5 2L5 4.5M7.5 2L10 4.5M7.5 13L5 10.5M7.5 13L10 10.5"
+                                            stroke="currentColor"
+                                            strokeWidth="1.2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                        />
+                                    </svg>
+                                )
+                            }
+                        />
                         <Box style={{ position: "relative" }} data-hs-context-menu>
-                            <IconButton
-                                size="1"
-                                variant={effectivePitchSnapVisual ? "solid" : "ghost"}
-                                data-tooltip={`${t("pitch_snap")}: ${
+                            <AppIconButton
+                                active={effectivePitchSnapVisual}
+                                // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                                emphasis="accent"
+                                tooltip={`${t("pitch_snap")}: ${
                                     effectivePitchSnapVisual
                                         ? s.pitchSnapUnit === "semitone"
-                                            ? tAny("quantize_semitone")
-                                            : tAny("quantize_scale")
-                                        : tAny("pitch_snap_off")
+                                            ? tf("quantize_semitone")
+                                            : tf("quantize_scale")
+                                        : tf("pitch_snap_off")
                                 }`}
                                 tabIndex={-1}
                                 onClick={() => {
@@ -6123,77 +7159,78 @@ export const PianoRollPanel: React.FC = () => {
                                     e.preventDefault();
                                     setPitchSnapMenuOpen(true);
                                 }}
-                            >
-                                <Box
-                                    style={{
-                                        position: "relative",
-                                        width: 15,
-                                        height: 15,
-                                    }}
-                                >
+                                icon={
                                     <Box
                                         style={{
-                                            position: "absolute",
-                                            inset: 0,
-                                            display: "flex",
-                                            alignItems: "center",
-                                            justifyContent: "center",
+                                            position: "relative",
+                                            width: 15,
+                                            height: 15,
                                         }}
                                     >
-                                        {!effectivePitchSnapVisual ? (
-                                            <Box
-                                                style={{
-                                                    position: "relative",
-                                                    width: 15,
-                                                    height: 15,
-                                                    opacity: 0.45,
-                                                }}
-                                            >
-                                                {pitchSnapSemitoneIcon}
-                                                <svg
-                                                    className="absolute inset-0"
-                                                    width="15"
-                                                    height="15"
-                                                    viewBox="0 0 15 15"
-                                                    fill="none"
-                                                    xmlns="http://www.w3.org/2000/svg"
-                                                >
-                                                    <path
-                                                        d="M3 3L12 12"
-                                                        stroke="currentColor"
-                                                        strokeWidth="1.2"
-                                                        strokeLinecap="round"
-                                                    />
-                                                </svg>
-                                            </Box>
-                                        ) : s.pitchSnapUnit === "semitone" ? (
-                                            pitchSnapSemitoneIcon
-                                        ) : (
-                                            pitchSnapScaleIcon
-                                        )}
-                                    </Box>
-                                    <Box
-                                        style={{
-                                            position: "absolute",
-                                            right: -1,
-                                            bottom: -1,
-                                            width: 6,
-                                            height: 6,
-                                            opacity: 0.7,
-                                        }}
-                                    >
-                                        <svg
-                                            width="6"
-                                            height="6"
-                                            viewBox="0 0 6 6"
-                                            fill="none"
-                                            xmlns="http://www.w3.org/2000/svg"
+                                        <Box
+                                            style={{
+                                                position: "absolute",
+                                                inset: 0,
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "center",
+                                            }}
                                         >
-                                            <path d="M0 6L6 0V6Z" fill="currentColor" />
-                                        </svg>
+                                            {!effectivePitchSnapVisual ? (
+                                                <Box
+                                                    style={{
+                                                        position: "relative",
+                                                        width: 15,
+                                                        height: 15,
+                                                        opacity: 0.45,
+                                                    }}
+                                                >
+                                                    {pitchSnapSemitoneIcon}
+                                                    <svg
+                                                        className="absolute inset-0"
+                                                        width="15"
+                                                        height="15"
+                                                        viewBox="0 0 15 15"
+                                                        fill="none"
+                                                        xmlns="http://www.w3.org/2000/svg"
+                                                    >
+                                                        <path
+                                                            d="M3 3L12 12"
+                                                            stroke="currentColor"
+                                                            strokeWidth="1.2"
+                                                            strokeLinecap="round"
+                                                        />
+                                                    </svg>
+                                                </Box>
+                                            ) : s.pitchSnapUnit === "semitone" ? (
+                                                pitchSnapSemitoneIcon
+                                            ) : (
+                                                pitchSnapScaleIcon
+                                            )}
+                                        </Box>
+                                        <Box
+                                            style={{
+                                                position: "absolute",
+                                                right: -1,
+                                                bottom: -1,
+                                                width: 6,
+                                                height: 6,
+                                                opacity: 0.7,
+                                            }}
+                                        >
+                                            <svg
+                                                width="6"
+                                                height="6"
+                                                viewBox="0 0 6 6"
+                                                fill="none"
+                                                xmlns="http://www.w3.org/2000/svg"
+                                            >
+                                                <path d="M0 6L6 0V6Z" fill="currentColor" />
+                                            </svg>
+                                        </Box>
                                     </Box>
-                                </Box>
-                            </IconButton>
+                                }
+                            />
 
                             {pitchSnapMenuOpen && (
                                 <Box
@@ -6203,7 +7240,7 @@ export const PianoRollPanel: React.FC = () => {
                                 >
                                     <button
                                         type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                         onClick={() => {
                                             dispatch(setPitchSnapUnit("semitone"));
                                             if (!s.pitchSnapEnabled) {
@@ -6226,13 +7263,13 @@ export const PianoRollPanel: React.FC = () => {
                                             >
                                                 {pitchSnapSemitoneIcon}
                                             </Box>
-                                            <span>{tAny("pitch_snap_menu_semitone")}</span>
+                                            <span>{tf("pitch_snap_menu_semitone")}</span>
                                         </Flex>
                                         {s.pitchSnapUnit === "semitone" ? <CheckIcon /> : null}
                                     </button>
                                     <button
                                         type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                         onClick={() => {
                                             dispatch(setPitchSnapUnit("scale"));
                                             if (!s.pitchSnapEnabled) {
@@ -6255,29 +7292,30 @@ export const PianoRollPanel: React.FC = () => {
                                             >
                                                 {pitchSnapScaleIcon}
                                             </Box>
-                                            <span>{tAny("pitch_snap_menu_scale")}</span>
+                                            <span>{tf("pitch_snap_menu_scale")}</span>
                                         </Flex>
                                         {s.pitchSnapUnit === "scale" ? <CheckIcon /> : null}
                                     </button>
                                     <div className="my-1 border-t border-qt-border" />
                                     <button
                                         type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                         onClick={() => {
                                             setPitchSnapMenuOpen(false);
                                             setPitchSnapOpen(true);
                                         }}
                                         onPointerDown={(e) => e.stopPropagation()}
                                     >
-                                        <span>{tAny("pitch_snap_settings_action")}</span>
+                                        <span>{tf("pitch_snap_settings_action")}</span>
                                     </button>
                                 </Box>
                             )}
                         </Box>
-                        <IconButton
-                            size="1"
-                            variant={s.scaleHighlightMode === "always" ? "solid" : "ghost"}
-                            data-tooltip={tAny("scale_highlight")}
+                        <AppIconButton
+                            active={s.scaleHighlightMode === "always"}
+                            // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                            emphasis="accent"
+                            tooltip={tf("scale_highlight")}
                             tabIndex={-1}
                             onClick={() => {
                                 dispatch(
@@ -6287,101 +7325,116 @@ export const PianoRollPanel: React.FC = () => {
                                 );
                                 void dispatch(persistUiSettings());
                             }}
-                        >
-                            {s.scaleHighlightMode === "always" ? (
-                                <svg
-                                    width="14"
-                                    height="14"
-                                    viewBox="0 0 14 14"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                >
-                                    <circle cx="5" cy="9" r="2.2" fill="currentColor" />
-                                    <path
-                                        d="M7 4V8.5"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                    />
-                                    <path
-                                        d="M7 4L11 3.2"
-                                        stroke="currentColor"
-                                        strokeWidth="1"
-                                        strokeLinecap="round"
-                                    />
-                                </svg>
-                            ) : (
-                                <svg
-                                    width="14"
-                                    height="14"
-                                    viewBox="0 0 14 14"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                >
-                                    <circle
-                                        cx="5"
-                                        cy="9"
-                                        r="2.2"
-                                        stroke="currentColor"
-                                        strokeWidth="1"
+                            icon={
+                                s.scaleHighlightMode === "always" ? (
+                                    <svg
+                                        width="14"
+                                        height="14"
+                                        viewBox="0 0 14 14"
                                         fill="none"
-                                    />
-                                    <path
-                                        d="M7 4V8.5"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                    />
-                                    <path
-                                        d="M7 4L11 3.2"
-                                        stroke="currentColor"
-                                        strokeWidth="1"
-                                        strokeLinecap="round"
-                                    />
-                                </svg>
-                            )}
-                        </IconButton>
-                        <IconButton
-                            size="1"
-                            variant={s.lockParamLinesEnabled ? "solid" : "ghost"}
-                            data-tooltip={t("lock_param_lines")}
+                                        xmlns="http://www.w3.org/2000/svg"
+                                    >
+                                        <circle cx="5" cy="9" r="2.2" fill="currentColor" />
+                                        <path
+                                            d="M7 4V8.5"
+                                            stroke="currentColor"
+                                            strokeWidth="1.2"
+                                            strokeLinecap="round"
+                                        />
+                                        <path
+                                            d="M7 4L11 3.2"
+                                            stroke="currentColor"
+                                            strokeWidth="1"
+                                            strokeLinecap="round"
+                                        />
+                                    </svg>
+                                ) : (
+                                    <svg
+                                        width="14"
+                                        height="14"
+                                        viewBox="0 0 14 14"
+                                        fill="none"
+                                        xmlns="http://www.w3.org/2000/svg"
+                                    >
+                                        <circle
+                                            cx="5"
+                                            cy="9"
+                                            r="2.2"
+                                            stroke="currentColor"
+                                            strokeWidth="1"
+                                            fill="none"
+                                        />
+                                        <path
+                                            d="M7 4V8.5"
+                                            stroke="currentColor"
+                                            strokeWidth="1.2"
+                                            strokeLinecap="round"
+                                        />
+                                        <path
+                                            d="M7 4L11 3.2"
+                                            stroke="currentColor"
+                                            strokeWidth="1"
+                                            strokeLinecap="round"
+                                        />
+                                    </svg>
+                                )
+                            }
+                        />
+                        <AppIconButton
+                            active={s.lockParamLinesEnabled}
+                            // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                            emphasis="accent"
+                            tooltip={t("lock_param_lines")}
                             tabIndex={-1}
                             onClick={() => {
                                 dispatch(toggleLockParamLines());
                                 void dispatch(persistUiSettings());
                             }}
-                        >
-                            <svg
-                                width="15"
-                                height="15"
-                                viewBox="0 0 15 15"
-                                fill="none"
-                                xmlns="http://www.w3.org/2000/svg"
-                            >
-                                <rect
-                                    x="3"
-                                    y="6"
-                                    width="9"
-                                    height="7"
-                                    rx="1"
-                                    stroke="currentColor"
-                                    strokeWidth="1"
+                            icon={
+                                <svg
+                                    width="15"
+                                    height="15"
+                                    viewBox="0 0 15 15"
                                     fill="none"
-                                />
-                                <path
-                                    d="M5 6V4.5C5 3.12 6.12 2 7.5 2C8.88 2 10 3.12 10 4.5V6"
-                                    stroke="currentColor"
-                                    strokeWidth="1"
-                                    fill="none"
-                                />
-                            </svg>
-                        </IconButton>
+                                    xmlns="http://www.w3.org/2000/svg"
+                                >
+                                    <rect
+                                        x="3"
+                                        y="6"
+                                        width="9"
+                                        height="7"
+                                        rx="1"
+                                        stroke="currentColor"
+                                        strokeWidth="1"
+                                        fill="none"
+                                    />
+                                    <path
+                                        d="M5 6V4.5C5 3.12 6.12 2 7.5 2C8.88 2 10 3.12 10 4.5V6"
+                                        stroke="currentColor"
+                                        strokeWidth="1"
+                                        fill="none"
+                                    />
+                                </svg>
+                            }
+                        />
                         <Flex align="center" gap="1" ml="2" style={{ minWidth: 0, flexShrink: 1 }}>
-                            <Text size="1" data-tooltip={tAny("edge_smoothness")}>
-                                {tAny("edge_smoothness_short")}:
-                            </Text>
+                            {/* 标签允许被压缩裁切（完整名称在悬停提示里）：横向极窄时
+                                应当由它先让位，而不是把整行撑到溢出。省略号让"让位"
+                                看起来是有意的降级，而不是渲染出错的半截字。 */}
+                            <span
+                                className="hs-type-label"
+                                data-tooltip={tf("edge_smoothness")}
+                                style={{
+                                    minWidth: 0,
+                                    whiteSpace: "nowrap",
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                }}
+                            >
+                                {tf("edge_smoothness_short")}:
+                            </span>
                             <input
-                                ref={edgeSmoothnessWheelRef}
+                                ref={attachEdgeSmoothnessWheel}
                                 className="qt-range"
                                 type="range"
                                 min={0}
@@ -6399,16 +7452,32 @@ export const PianoRollPanel: React.FC = () => {
                                     void dispatch(persistUiSettings());
                                 }}
                                 style={{
-                                    // 根据工具栏拥挤程度自动伸缩：宽裕时最多 120px，拥挤时缩到 48px
-                                    flex: "1 1 auto",
+                                    // 【flex-basis 必须取 0，而不是 `auto`（= width: 120）】
+                                    // 基准为 120 时，横向不足的收缩量会**按基准比例分摊**给
+                                    // 同排所有项 —— 实测窄容器下它只缩到 102px，仍占着大头。
+                                    // 基准为 0 时，它先让出空间、只取"别人用剩下的"，宽裕时再由
+                                    // `maxWidth` 封顶在 120px。它是低频调节项，理应最先让步。
+                                    //
+                                    // 【下限取 16】基准为 0 的项在收缩阶段分摊到的是 0（0 × shrink
+                                    // 恒为 0），因此**它的下限就是它实际能到的最小宽度**：下限多大，
+                                    // 拥挤时它就让出多少。16 = 12px 滑块 + 两侧各 2px，是仍能拖动的
+                                    // 最小值；再窄就只剩滑块本身、看不到轨道了。极窄时它本就该让位
+                                    // （数值仍可读，滚轮调值照常可用）。
+                                    flex: "1 1 0",
+                                    // 非 flex 上下文（理论上不会发生）时的兜底宽度。
                                     width: 120,
-                                    minWidth: 48,
+                                    minWidth: 16,
                                     maxWidth: 120,
                                 }}
                             />
-                            <Text size="1" style={{ minWidth: 36, textAlign: "right" }}>
+                            {/* 数值需要完整可读（"100%"），因此给它一个较小的固定下限，
+                                但不再是 36px 那种"宁可溢出也不缩"的宽度。 */}
+                            <span
+                                className="hs-type-caption"
+                                style={{ minWidth: 28, textAlign: "right" }}
+                            >
                                 {Math.round(s.edgeSmoothnessPercent)}%
-                            </Text>
+                            </span>
                         </Flex>
                     </Flex>
                 </Flex>
@@ -6435,7 +7504,7 @@ export const PianoRollPanel: React.FC = () => {
                                             style={{ cursor: "pointer" }}
                                         >
                                             {buildReferenceRootTrackTriggerElement(
-                                                `${tAny("reference_root_tracks_short")}${
+                                                `${tf("reference_root_tracks_short")}${
                                                     visibleReferenceRootTrackIds.length > 0
                                                         ? ` (${visibleReferenceRootTrackIds.length})`
                                                         : ""
@@ -6508,7 +7577,7 @@ export const PianoRollPanel: React.FC = () => {
                                 </DropdownMenu.Root>
                                 <span
                                     className="inline-flex"
-                                    data-tooltip={pitchHardDisableReason ?? tAny("midi_import")}
+                                    data-tooltip={pitchHardDisableReason ?? tf("midi_import")}
                                 >
                                     <Button
                                         size="1"
@@ -6518,7 +7587,7 @@ export const PianoRollPanel: React.FC = () => {
                                         disabled={!pitchEnabled}
                                         style={{ cursor: "pointer" }}
                                     >
-                                        {tAny("midi_import")}
+                                        {tf("midi_import")}
                                     </Button>
                                 </span>
                             </React.Fragment>
@@ -6587,7 +7656,7 @@ export const PianoRollPanel: React.FC = () => {
                         ) : (
                             <ParamToolbarPill
                                 label={t("param_btn_pitch")}
-                                labelTooltip={t("pitch")}
+                                labelTooltip={t("common_pitch")}
                                 active={editParam === "pitch"}
                                 onSelect={() => dispatch(setEditParam("pitch"))}
                                 eyeMode={
@@ -6614,7 +7683,7 @@ export const PianoRollPanel: React.FC = () => {
                         {orderedProcessorParams.map((p) => {
                             if (p.id === "formant_shift_cents") {
                                 return (
-                                    <FormantParamButton
+                                    <ParamGroupButton
                                         key={p.id}
                                         rootParamId={p.id}
                                         rootLabel={getProcessorParamShortLabel(p)}
@@ -6643,6 +7712,80 @@ export const PianoRollPanel: React.FC = () => {
                                         onToggleSecondary={() => toggleSecondaryParam(p.id)}
                                     />
                                 );
+                            }
+
+                            // 音量 / 动态：同量纲的两个混音级参数，用一个药丸 + 下拉切换。
+                            // 只在遇到 "volume" 时渲染这一次（"dyn" 会被跳过），
+                            // 否则会得到两个内容相同的按钮。
+                            if (p.id === "volume") {
+                                const hasDyn = orderedProcessorParams.some((q) => q.id === "dyn");
+                                const volDesc = processorParamsRef.current.find(
+                                    (d) => d.id === "volume",
+                                );
+                                const dynDesc = processorParamsRef.current.find(
+                                    (d) => d.id === "dyn",
+                                );
+                                const groupSecondaryVisible =
+                                    (secondaryParamVisible["volume"] ?? false) ||
+                                    (secondaryParamVisible["dyn"] ?? false);
+                                return (
+                                    <ParamGroupButton
+                                        key="volume-group"
+                                        rootParamId="volume"
+                                        rootLabel={
+                                            volDesc
+                                                ? getProcessorParamShortLabel(volDesc)
+                                                : t("param_btn_volume")
+                                        }
+                                        rootMenuLabel={t("volume_label")}
+                                        rootTooltip={t("volume_label")}
+                                        childParamId={hasDyn ? "dyn" : null}
+                                        childLabel={
+                                            dynDesc
+                                                ? getProcessorParamShortLabel(dynDesc)
+                                                : t("param_btn_dyn")
+                                        }
+                                        childMenuLabel={t("dyn_label")}
+                                        rootActive={editParam === "volume"}
+                                        childActive={editParam === "dyn"}
+                                        secondaryVisible={groupSecondaryVisible}
+                                        hideSecondaryLabel={t("hide_secondary_param")}
+                                        showSecondaryLabel={t("show_secondary_param")}
+                                        hideSecondaryTooltip={t("secondary_overlay_tooltip_hidden")}
+                                        showSecondaryTooltip={t(
+                                            "secondary_overlay_tooltip_visible",
+                                        )}
+                                        alwaysShowDropdown
+                                        onSelectRoot={() => dispatch(setEditParam("volume"))}
+                                        onSelectChild={() => {
+                                            if (hasDyn) dispatch(setEditParam("dyn"));
+                                        }}
+                                        onToggleSecondary={() => {
+                                            // 眼睛对整组生效：音量与动态的副参数叠加一起切换，
+                                            // 否则会出现"眼睛亮着但只有一条叠加线"的分裂观感。
+                                            if (groupSecondaryVisible) {
+                                                if (secondaryParamVisible["volume"]) {
+                                                    toggleSecondaryParam("volume");
+                                                }
+                                                if (secondaryParamVisible["dyn"]) {
+                                                    toggleSecondaryParam("dyn");
+                                                }
+                                            } else {
+                                                if (!secondaryParamVisible["volume"]) {
+                                                    toggleSecondaryParam("volume");
+                                                }
+                                                if (hasDyn && !secondaryParamVisible["dyn"]) {
+                                                    toggleSecondaryParam("dyn");
+                                                }
+                                            }
+                                        }}
+                                    />
+                                );
+                            }
+
+                            // dyn 已并入上面的音量组药丸，不再单独渲染。
+                            if (p.id === "dyn") {
+                                return null;
                             }
 
                             const paramActive = editParam === p.id;
@@ -6727,9 +7870,6 @@ export const PianoRollPanel: React.FC = () => {
 
                                 // vslib 的合成模式：改为支持滚轮切换的下拉栏。
                                 if (param.id === "synth_mode") {
-                                    const stringOptions = param.kind.options.map(([, value]) =>
-                                        String(value),
-                                    );
                                     const currentString = String(currentValue);
                                     const selectOptions = param.kind.options.map(
                                         ([label, value]) => ({
@@ -6742,53 +7882,42 @@ export const PianoRollPanel: React.FC = () => {
                                             (opt) => String(opt.value) === currentString,
                                         )?.label ?? currentString;
                                     return (
-                                        <Select.Root
+                                        <span
                                             key={param.id}
-                                            value={currentString}
-                                            onValueChange={(v) =>
-                                                void handleStaticParamChange(param.id, Number(v))
-                                            }
+                                            data-tooltip={`${t("vslib_synth_mode_label")}: ${currentOptionLabel}`}
+                                            className="inline-flex"
                                         >
-                                            <Select.Trigger
+                                            <AppSelect
+                                                // 参数编辑器头部是 32px 的紧凑 chrome，邻居是 24px 图标按钮
+                                                density="compact"
+                                                value={currentString}
+                                                onValueChange={(v) =>
+                                                    void handleStaticParamChange(
+                                                        param.id,
+                                                        Number(v),
+                                                    )
+                                                }
+                                                fullWidth={false}
                                                 // 与“算法”下拉栏一致使用固定宽度，选项切换时宽度不变
                                                 className="w-[140px]"
-                                                data-tooltip={`${t("vslib_synth_mode_label")}: ${currentOptionLabel}`}
-                                                onWheel={(event) => {
-                                                    applySelectWheelChange({
-                                                        event,
-                                                        currentValue: currentString,
-                                                        options: stringOptions,
-                                                        onChange: (next) =>
-                                                            void handleStaticParamChange(
-                                                                param.id,
-                                                                Number(next),
-                                                            ),
-                                                    });
-                                                }}
+                                                ariaLabel={t("vslib_synth_mode_label")}
+                                                options={selectOptions.map((opt) => ({
+                                                    value: String(opt.value),
+                                                    label: opt.label,
+                                                }))}
                                             />
-                                            <Select.Content>
-                                                {selectOptions.map((opt) => (
-                                                    <Select.Item
-                                                        key={`${param.id}-${opt.value}`}
-                                                        value={String(opt.value)}
-                                                    >
-                                                        {opt.label}
-                                                    </Select.Item>
-                                                ))}
-                                            </Select.Content>
-                                        </Select.Root>
+                                        </span>
                                     );
                                 }
 
                                 return (
                                     <Flex key={param.id} align="center" gap="1">
-                                        <Text
-                                            size="1"
-                                            color="gray"
+                                        <span
+                                            className="hs-type-caption"
                                             data-tooltip={getProcessorParamLabel(param)}
                                         >
                                             {getProcessorParamLabel(param)}
-                                        </Text>
+                                        </span>
                                         {param.kind.options.map(([label, value]) => (
                                             <Button
                                                 key={`${param.id}-${value}`}
@@ -6808,12 +7937,14 @@ export const PianoRollPanel: React.FC = () => {
                                     </Flex>
                                 );
                             })}
-                            <Text size="1" color="gray" data-tooltip={tAny("algo_label")}>
-                                {tAny("algo_label_short")}
-                            </Text>
-                            <Select.Root
+                            <span className="hs-type-caption" data-tooltip={tf("algo_label")}>
+                                {tf("algo_label_short")}
+                            </span>
+                            <AppSelect
+                                // 同上：头部紧凑条内的控件
+                                density="compact"
                                 value={
-                                    ["world_dll", "nsf_hifigan_onnx", "vslib", "none"].includes(
+                                    ["nsf_hifigan_onnx", "world_dll", "vslib", "none"].includes(
                                         rootTrack.pitchAnalysisAlgo,
                                     )
                                         ? rootTrack.pitchAnalysisAlgo
@@ -6828,46 +7959,16 @@ export const PianoRollPanel: React.FC = () => {
                                         }),
                                     );
                                 }}
-                            >
-                                <Select.Trigger
-                                    className="min-w-[140px]"
-                                    onWheel={(event) => {
-                                        const currentValue = [
-                                            "world_dll",
-                                            "nsf_hifigan_onnx",
-                                            "vslib",
-                                            "none",
-                                        ].includes(rootTrack.pitchAnalysisAlgo)
-                                            ? rootTrack.pitchAnalysisAlgo
-                                            : "nsf_hifigan_onnx";
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue,
-                                            options: [
-                                                "world_dll",
-                                                "nsf_hifigan_onnx",
-                                                "vslib",
-                                                "none",
-                                            ],
-                                            onChange: (next) => {
-                                                if (!rootTrackId) return;
-                                                dispatch(
-                                                    setTrackStateRemote({
-                                                        trackId: rootTrackId,
-                                                        pitchAnalysisAlgo: next,
-                                                    }),
-                                                );
-                                            },
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    <Select.Item value="world_dll">world</Select.Item>
-                                    <Select.Item value="nsf_hifigan_onnx">nsf-hifigan</Select.Item>
-                                    <Select.Item value="vslib">vslib</Select.Item>
-                                    <Select.Item value="none">{t("none")}</Select.Item>
-                                </Select.Content>
-                            </Select.Root>
+                                fullWidth={false}
+                                className="min-w-[140px]"
+                                ariaLabel={tf("algo_label")}
+                                options={[
+                                    { value: "nsf_hifigan_onnx", label: "nsf-hifigan" },
+                                    { value: "world_dll", label: "world" },
+                                    { value: "vslib", label: "vslib" },
+                                    { value: "none", label: t("common_none") },
+                                ]}
+                            />
                         </Flex>
                     ) : null}
                 </Flex>
@@ -6895,7 +7996,13 @@ export const PianoRollPanel: React.FC = () => {
                     <div
                         ref={axisWrapRef}
                         className="bg-qt-window border-r border-qt-border relative"
-                        style={{ width: AXIS_W, flex: 1 }}
+                        // 支持切换展示单位的参数（音量 / 动态）整列可点：光标给
+                        // pointer 作为"这里可点"的提示，否则该交互完全不可发现。
+                        style={{
+                            width: AXIS_W,
+                            flex: 1,
+                            cursor: axisUnitToggleAvailable ? "pointer" : undefined,
+                        }}
                     >
                         {/* 键盘轴 GL 层（阶段 2/3）：铺在 Canvas2D 轴画布**下面**
                             （DOM 顺序在前、无 z-index），画键盘几何与音名标签。
@@ -6910,6 +8017,43 @@ export const PianoRollPanel: React.FC = () => {
                             aria-hidden
                         />
                         <canvas ref={axisCanvasRef} className="absolute inset-0" />
+
+                        {/* 纵轴展示单位角标（仅音量 / 动态）：显示当前读数单位，同时
+                            是"点击可切换"的可见提示（整列光标为 pointer）。
+                            刻意**不**挂 onClick —— 点击会冒泡到上面的轴列处理器，
+                            再挂一个会切换两次（净效果为"点了没反应"）。 */}
+                        {axisUnitToggleAvailable ? (
+                            <div
+                                className="absolute top-0 right-0 z-10 px-1 text-qt-3xs leading-[14px] text-qt-text-muted"
+                                aria-hidden
+                            >
+                                {editParamAxisUnit === "db"
+                                    ? tf("param_axis_unit_db")
+                                    : tf("param_axis_unit_ratio")}
+                            </div>
+                        ) : null}
+
+                        {/* 纵轴浮动读数（`弹出展示参数` 的轴列形态）：挂在轴列坐标系里，
+                            底边对齐光标向上展开——与曲线浮窗同一观感。 */}
+                        {s.showParamValuePopup && axisValuePreview
+                            ? (() => {
+                                  const rect = axisWrapRef.current?.getBoundingClientRect();
+                                  if (!rect) return null;
+                                  return (
+                                      <div
+                                          className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-qt-xs leading-none text-qt-text"
+                                          style={{
+                                              left: axisValuePreview.clientX - rect.left,
+                                              top: axisValuePreview.clientY - rect.top,
+                                              transform: "translate(0, -100%)",
+                                              whiteSpace: "nowrap",
+                                          }}
+                                      >
+                                          {axisValuePreview.text}
+                                      </div>
+                                  );
+                              })()
+                            : null}
                     </div>
                 </Flex>
 
@@ -6917,12 +8061,14 @@ export const PianoRollPanel: React.FC = () => {
                 <Flex direction="column" className="flex-1 min-w-0 select-none">
                     <TimeRuler
                         scrollLeft={scrollLeft}
+                        tickWindowAnchorPx={prTickAxis.anchorPx}
                         ticks={timelineTicks}
                         pxPerSec={pxPerSec}
                         viewportWidth={viewSize.w}
                         playheadSec={s.playheadSec}
-                        playheadLineRef={rulerPlayheadLineRef}
-                        playheadHeadRef={rulerPlayheadHeadRef}
+                        positionPlayheadFromProps={false}
+                        playheadLineRef={attachRulerPlayheadLine}
+                        playheadHeadRef={attachRulerPlayheadHead}
                         contentRef={rulerContentRef}
                         timeContext={timeContext}
                         primaryUnit={s.primaryTimeUnit}
@@ -6931,7 +8077,7 @@ export const PianoRollPanel: React.FC = () => {
                         onSecondaryUnitChange={handleSecondaryUnitChange}
                         onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
                         onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
-                        t={t as (key: string) => string}
+                        t={tf}
                         tempoMap={s.tempoMap}
                         tempoMapVisible={s.tempoMapVisible}
                         projectSec={dynamicProjectSec}
@@ -6948,6 +8094,8 @@ export const PianoRollPanel: React.FC = () => {
                         customScalePresets={s.customScalePresets}
                         onTempoMapChange={handleTempoMapChange}
                         onTempoMapCommit={handleTempoMapCommit}
+                        subscribeViewport={pianoRollViewportBus.subscribe}
+                        onRulerWheel={handleRulerWheel}
                         onMouseDown={(e) => {
                             interactions.onRulerMouseDown(e);
                         }}
@@ -6963,7 +8111,13 @@ export const PianoRollPanel: React.FC = () => {
                             // ——原生 scroller 是被动镜像，必须保留滚动范围才能接受宿主
                             // 每帧的程序化回写，也让尚未迁移的输入代码（中键平移等）
                             // 继续可读可写。`.custom-scrollbar` 不再需要：原生条恒不可见。
-                            className="absolute inset-0 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll hide-scrollbar outline-none focus:outline-none focus-visible:outline-none"
+                            //
+                            // 底部预留 8px（bottom-2）：给自绘水平滚动条独占一行。滚动
+                            // 条若叠加在内容上，会挡住贴底的参数线；让 scroller 在水平
+                            // 条上方收边，二者互不重叠（竖直条同步缩短，见下方轨道）。
+                            className="absolute left-0 right-0 top-0 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll hide-scrollbar outline-none focus:outline-none focus-visible:outline-none"
+                            // 底部预留一行给自绘水平滚动条（见 PARAM_EDITOR_BOTTOM_BAR_PX）
+                            style={{ bottom: PARAM_EDITOR_BOTTOM_BAR_PX }}
                             data-piano-roll-scroller
                             tabIndex={0}
                             onAuxClick={interactions.onScrollerAuxClick}
@@ -7021,6 +8175,7 @@ export const PianoRollPanel: React.FC = () => {
                                         scrollLeftPx={scrollLeft}
                                         pxPerSec={pxPerSec}
                                         colors={waveformColors}
+                                        amplitudeMap={pianoRollAmplitudeMap}
                                     />
 
                                     {/* GL 静态层（阶段 2）：网格等静态图层。
@@ -7077,7 +8232,7 @@ export const PianoRollPanel: React.FC = () => {
                                             if (!rect) return null;
                                             return (
                                                 <div
-                                                    className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-[11px] leading-none text-qt-text"
+                                                    className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-qt-xs leading-none text-qt-text"
                                                     style={{
                                                         left: paramValuePreview.clientX - rect.left,
                                                         top: paramValuePreview.clientY - rect.top,
@@ -7112,36 +8267,47 @@ export const PianoRollPanel: React.FC = () => {
                             - thumb 取 `--qt-scrollbar-thumb`（浅色主题下才看得见），
                               而不是固定半透明黑；
                             - 轨道**透明**，加底色会多出一条灰带；
-                            - 8px 厚 + 胶囊圆角，对应 macOS 的 overlay thin 滚动条
-                              （原生滚动条不占布局，这里绝对定位叠加，行为等价）。
+                            - 8px 厚 + 胶囊圆角，对应 macOS 的 overlay thin 滚动条。
+                            - 水平条**独占一行**：scroller 已在 bottom-2 收边（见上），
+                              轨道落在预留行内，不再叠加内容；竖直条同步在 bottom-2
+                              收边，右下角让位给水平条（与原生滚动条的角落行为一致）。
                             - 外层即**轨道**：承接「点空白翻页」。宿主的 thumb 处理器
                               会 `stopPropagation`，因此到达轨道的按下必然不在 thumb 上。
                             恒挂载：原生滚动条已被 `.hide-scrollbar` 隐藏，自绘条是
                             用户可见的**唯一**滚动条。 */}
+                        {/* `data-hs-scrollbar` + 光标类：与时间轴自绘滚动条同一
+                            约定（见 TimelineKernelView 的 JSX 说明）——轨道区域
+                            的光标由自身声明，不继承内容手势。 */}
                         <div
-                            ref={vScrollbarTrackRef}
-                            className="absolute right-0 top-0 bottom-0 w-2 z-20"
+                            ref={attachVerticalScrollbarTrack}
+                            data-hs-scrollbar="1"
+                            className="absolute right-0 top-0 w-2 z-20 cursor-default"
+                            style={{ bottom: PARAM_EDITOR_BOTTOM_BAR_PX }}
                         >
                             <div
                                 ref={vScrollbarThumbRef}
-                                className="absolute left-0 w-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                                data-hs-scrollbar="1"
+                                className="absolute left-0 w-full cursor-grab rounded-full bg-[var(--qt-scrollbar-thumb)]"
                             />
                         </div>
                         <div
-                            ref={hScrollbarTrackRef}
-                            className="absolute bottom-0 left-0 right-0 h-2 z-20"
+                            ref={attachHorizontalScrollbarTrack}
+                            data-hs-scrollbar="1"
+                            className="absolute bottom-0 left-0 right-0 z-20 cursor-default"
+                            style={{ height: PARAM_EDITOR_BOTTOM_BAR_PX }}
                         >
                             <div
                                 ref={hScrollbarThumbRef}
-                                className="absolute top-0 h-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                                data-hs-scrollbar="1"
+                                className="absolute top-0 h-full cursor-grab rounded-full bg-[var(--qt-scrollbar-thumb)]"
                             />
                         </div>
                     </div>
                 </Flex>
             </Flex>
             {paramEditorMidiDragOver ? (
-                <div className="pointer-events-none absolute left-1/2 top-10 z-40 -translate-x-1/2 rounded border border-qt-snap-source/70 bg-qt-panel/95 px-3 py-1.5 text-[12px] text-qt-text shadow-lg">
-                    {tAny("param_editor_drop_midi_hint")}
+                <div className="pointer-events-none absolute left-1/2 top-10 z-40 -translate-x-1/2 rounded border border-qt-snap-source/70 bg-qt-panel/95 px-3 py-1.5 text-qt-sm text-qt-text shadow-lg">
+                    {tf("param_editor_drop_midi_hint")}
                 </div>
             ) : null}
             <MidiTrackSelectDialog
@@ -7207,8 +8373,40 @@ export const PianoRollPanel: React.FC = () => {
                     onMeanQuantize={() => openEditDialog("meanQuantize")}
                     onSaveAsPitchRef={() => void handleSaveAsPitchRef()}
                     onExportMidi={() => void handleExportMidiFromEditor()}
+                    // 音量 ↔ 动态 互转：参数本身就是这两个之一时始终可用。
+                    //
+                    // 【为什么不按"有无选区"门控】这里曾经只在有选区时显示（理由是
+                    // "无选区时整条互换应由初始化表达"）。现在菜单里所有以选区为作用域
+                    // 的操作都遵循同一条规则：**无选区时先隐式全选再执行**（见
+                    // `handleEditOp` 开头），因此"整条互换"就是一次明确的全选 + 互换，
+                    // 不再需要靠隐藏菜单项来回避。
+                    isVolumeParam={
+                        editParam === "volume" && planParamConversion(editParam) !== null
+                    }
+                    isDynParam={editParam === "dyn" && planParamConversion(editParam) !== null}
+                    onConvertVolumeToDyn={() => void handleEditOp("convertVolumeToDyn")}
+                    onConvertDynToVolume={() => void handleEditOp("convertDynToVolume")}
                 />
             )}
         </Flex>
     );
 };
+
+/**
+ * 参数编辑器面板。
+ *
+ * ★ `React.memo` 不是"顺手加的性能优化"，而是**契约的一部分**：本组件由
+ * `App.tsx` 通过 `setPanelRenderer(PANEL_PARAM_EDITOR, (form) => <PianoRollPanel .../>)`
+ * 的闭包渲染，而 `DockPanelHosts` 的 `PanelMount` 是**直接调用**该闭包、没有 memo 边界
+ * —— 于是 `AppInner` 每重渲染一次，这里就跟着重渲染一次（元素是新创建的，但 props
+ * 只有一个稳定字符串，memo 的浅比较正好能拦住）。
+ *
+ * 这正是「参数编辑器里的绘制被打断」的放大环节：它是个 8000 行的重组件，重渲染会
+ * 重建整条 `usePianoRollInteractions` 回调链。此前任何高频全局状态（如曾经的
+ * `PianoRollStatusContext`）都会经由这条路径打到它身上。
+ *
+ * 【为什么不能给 `PanelMount` 加 memo 代替】那会连带冻结时间轴面板 —— 它的渲染闭包
+ * 捕获了 `App.tsx` 的约三十个 props（见 `panelRenderer.ts` 的设计说明），冻结即意味着
+ * props 不再更新。而本组件的 props 只有一个稳定 id，memo 是安全的。
+ */
+export const PianoRollPanel = React.memo(PianoRollPanelImpl);

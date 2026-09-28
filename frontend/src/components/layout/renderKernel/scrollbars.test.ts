@@ -21,6 +21,7 @@ import {
     hitTestScrollbarThumb,
     scrollDeltaFromThumbDrag,
     scrollTargetFromTrackClick,
+    scrollbarContentSizePx,
 } from "./scrollbars";
 
 describe("computeScrollbar", () => {
@@ -182,5 +183,40 @@ describe("scrollTargetFromTrackClick", () => {
     it("结果可能越界，由调用方（ScrollKernel）钳制", () => {
         // 滚动已在顶部时点上方：结果 -500 —— 本函数只做算术，钳制是单一上限来源。
         expect(scrollTargetFromTrackClick(50, geometry, 0, 500)).toBe(-500);
+    });
+});
+
+describe("scrollbarContentSizePx", () => {
+    it("内容尺寸 = 上限 + 视口（原生 scrollWidth 口径）", () => {
+        expect(scrollbarContentSizePx(3000, 500)).toBe(3500);
+    });
+
+    it("上限为 0（内容装得下）时内容尺寸退化为视口，滚动条隐藏", () => {
+        expect(scrollbarContentSizePx(0, 500)).toBe(500);
+        const geometry = computeScrollbar({
+            contentSizePx: scrollbarContentSizePx(0, 500),
+            viewportSizePx: 500,
+            scrollPx: 0,
+            maxScrollPx: 0,
+        });
+        expect(geometry.scrollable).toBe(false);
+    });
+
+    it("工程装进一屏（上限 > 0）时仍判定可滚动——本轮回归的根因", () => {
+        // 工程宽 200 ≤ 视口 800：裸内容宽会判不可滚动；走「上限 + 视口」后恒可滚动。
+        const geometry = computeScrollbar({
+            contentSizePx: scrollbarContentSizePx(200, 800),
+            viewportSizePx: 800,
+            scrollPx: 0,
+            maxScrollPx: 200,
+        });
+        expect(geometry.scrollable).toBe(true);
+        // thumb 占轨道 800/1000 = 80%
+        expect(geometry.thumbLengthPx).toBe(640);
+    });
+
+    it("非法输入不产生 NaN", () => {
+        expect(scrollbarContentSizePx(Number.NaN, 500)).toBe(500);
+        expect(scrollbarContentSizePx(-100, Number.NaN)).toBe(0);
     });
 });

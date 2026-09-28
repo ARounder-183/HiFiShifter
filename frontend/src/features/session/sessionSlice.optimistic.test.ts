@@ -213,11 +213,7 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
                 { trackId: "track-b", applySelectedClip: false },
             ),
         );
-        assertEqual(
-            next.selectedClipId,
-            null,
-            "applySelectedClip:false keeps the local deselect",
-        );
+        assertEqual(next.selectedClipId, null, "applySelectedClip:false keeps the local deselect");
         assertEqual(next.selectedTrackId, "track-b", "track still switches");
     }
 
@@ -384,6 +380,7 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
                 playbackRate: 1,
                 reversed: false,
                 loopEnabled: false,
+                channelMode: 0,
                 midiFillGaps: false,
             },
             {
@@ -395,6 +392,7 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
                 playbackRate: 2,
                 reversed: false,
                 loopEnabled: false,
+                channelMode: 0,
                 midiFillGaps: false,
             },
         ];

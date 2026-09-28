@@ -87,6 +87,11 @@ pub(crate) struct EngineClip {
     pub(crate) reversed: bool,
     pub(crate) playback_rate: f64,
 
+    /// Take 级声道模式（0..=4，对齐 REAPER CHANMODE）。
+    /// 仅作用于**源 PCM 采样路径**（`sample_clip_pcm` 的 `src` 分支）：
+    /// 合成 clip 的 `rendered_pcm` 已在渲染期条件化，不得二次施加。
+    pub(crate) channel_mode: crate::channel_mode::TakeChannelMode,
+
     // Local (timeline) frame offset applied before sampling the source.
     // Negative values mean leading silence (i.e. slip-edit past the source start).
     pub(crate) local_src_offset_frames: i64,
@@ -130,6 +135,18 @@ pub(crate) struct EngineClip {
     /// 可选的 pan 曲线；存在时在 audio callback / mixdown 中逐帧应用到左右声道。
     pub(crate) pan_curve: Option<Arc<Vec<f32>>>,
     pub(crate) pan_curve_frame_period_ms: f64,
+
+    /// 可选的动态（DYN）目标电平曲线；与 `dyn_orig_curve` 一起在 audio callback /
+    /// mixdown 中求出逐帧增益 `目标/原声`（见 `common_params::compute_dyn_gain`）。
+    ///
+    /// **进入引擎前哨兵已被解析成真实目标电平**
+    /// （`common_params::resolve_dyn_sentinels_for_audio`）：引擎逐 PCM 样本在
+    /// 相邻帧之间插值，含负哨兵的曲线会在"哨兵 ↔ 已画"交界扫过 0（0 = 画静音），
+    /// 产生一帧宽的掉音跌落。解析后本曲线不再含负值，未画帧的增益仍恒为 1。
+    pub(crate) dyn_curve: Option<Arc<Vec<f32>>>,
+    /// 原声电平基线（轨道级派生数据）。缺失（None 或空）时动态增益恒为 1.0。
+    pub(crate) dyn_orig_curve: Option<Arc<Vec<f32>>>,
+    pub(crate) dyn_curve_frame_period_ms: f64,
 
     /// 该 clip 是否需要 pitch 合成。
     /// - true：需要合成；若 rendered_pcm 为 None，则静音等待渲染完成。
@@ -185,6 +202,12 @@ pub(crate) enum EngineCommand {
     ClipPitchReady {
         clip_id: String,
     },
+    /// 请求 worker 侧为「动态（DYN）」提交后台分析任务。
+    ///
+    /// 为什么需要它：`schedule_clip_pitch_jobs` 需要 worker 持有的 sender，
+    /// 命令层拿不到；而动态是**混音级**参数，未开启合成的轨道同样需要它，
+    /// 因此不能挂在 pitch（受 compose_enabled 门控）的调度上。
+    ScheduleDynLevelAnalysis,
     /// 设置 Tauri app handle，使 engine worker 能向前端推送事件。
     SetAppHandle {
         handle: tauri::AppHandle,

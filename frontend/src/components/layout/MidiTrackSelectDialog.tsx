@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Dialog, Flex, Text, Button, ScrollArea, RadioGroup } from "@radix-ui/themes";
+import { Flex, ScrollArea, RadioGroup } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
-import { useNonPassiveWheel } from "../../utils/useNonPassiveWheel";
 import { paramsApi } from "../../services/api/params";
+import { AppButton, AppNumberField } from "../../ui";
+import { AppDialog, type AppDialogAction } from "../../ui/Dialog";
+import { AppForm, AppSwitchRow } from "../../ui/Field";
 
 /** MIDI 轨道信息（与后端返回结构对齐） */
 interface MidiTrackInfo {
@@ -153,19 +155,10 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
     importTempoMapKeySignature = false,
     onImportTempoMapKeySignatureChange,
 }) => {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
 
     // 导入目标（统一弹窗用）：pitchRef = 创建音高参考块，pitchParam = 导入到音高参数
     const isReplaceMode = mode === "replaceMidi";
-    // BPM 数字输入的滚轮调值：内容可滚动时 preventDefault 必须用非被动
-    // 原生监听才生效（React 合成 onWheel 上的 preventDefault 是空操作）。
-    const specifiedBpmWheelRef = useNonPassiveWheel<HTMLInputElement>((e) => {
-        e.preventDefault();
-        const dir = e.deltaY < 0 ? 1 : -1;
-        const next = specifiedBpm + dir;
-        if (next >= 1 && next <= 999) onSpecifiedBpmChange?.(next);
-    });
     const resolveImportTarget = () =>
         (importTarget as "pitchRef" | "pitchParam") ?? defaultImportTarget ?? "pitchParam";
     const [currentTarget, setCurrentTarget] = useState<"pitchRef" | "pitchParam">(
@@ -239,7 +232,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                         // 默认全选
                         setSelectedTracks(res.tracks.map((t) => t.index));
                     } else {
-                        setError(res.error ?? tAny("midi_import_failed"));
+                        setError(res.error ?? tf("midi_import_failed"));
                         setTracks([]);
                         setInitialBpm(null);
                         setMidiHasBpm(true);
@@ -247,14 +240,14 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 })
                 .catch((err) => {
                     console.error("[midi_import_ui] load_tracks:error", err);
-                    setError(tAny("midi_import_failed"));
+                    setError(tf("midi_import_failed"));
                     setTracks([]);
                     setInitialBpm(null);
                     setMidiHasBpm(true);
                 })
                 .finally(() => setLoading(false));
         },
-        [tAny],
+        [tf],
     );
 
     // 从剪贴板 GUID 加载轨道（通过后端缓存查询，不重复读取剪贴板）
@@ -278,7 +271,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                         setMidiKeySigCount(res.key_signature_count ?? 0);
                         setSelectedTracks(res.tracks.map((t) => t.index));
                     } else {
-                        setError(res.error ?? tAny("midi_clipboard_read_failed"));
+                        setError(res.error ?? tf("midi_clipboard_read_failed"));
                         setTracks([]);
                         setInitialBpm(null);
                         setMidiHasBpm(true);
@@ -286,14 +279,14 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 })
                 .catch((err) => {
                     console.error("[midi_import_ui] loadTracksFromClipboard:error", err);
-                    setError(tAny("midi_clipboard_read_failed"));
+                    setError(tf("midi_clipboard_read_failed"));
                     setTracks([]);
                     setInitialBpm(null);
                     setMidiHasBpm(true);
                 })
                 .finally(() => setLoading(false));
         },
-        [tAny],
+        [tf],
     );
 
     // 当弹窗打开且有 effectivePath 或 effectiveClipboardGuid，加载轨道列表
@@ -409,14 +402,14 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 }
             } else {
                 const errorKey = res.error ?? "midi_clipboard_read_failed";
-                setError(tAny(errorKey));
+                setError(tf(errorKey));
             }
         } catch {
-            setError(tAny("midi_clipboard_read_failed"));
+            setError(tf("midi_clipboard_read_failed"));
         } finally {
             setReadingClipboard(false);
         }
-    }, [tAny]);
+    }, [tf]);
 
     const handleImport = useCallback(async () => {
         if ((!effectivePath && !effectiveClipboardGuid) || selectedTracks.length === 0) return;
@@ -474,12 +467,15 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
             // 根据导入位置模式计算选区约束
             let effectivePosition = importPosition;
             if (effectivePosition === "selection") {
-                if (selectionRanges == null || selectionRanges.length === 0 || !selectionAvailable) {
+                if (
+                    selectionRanges == null ||
+                    selectionRanges.length === 0 ||
+                    !selectionAvailable
+                ) {
                     effectivePosition = "playhead"; // 回退
                 }
             }
-            const rangesForImport =
-                effectivePosition === "selection" ? selectionRanges : undefined;
+            const rangesForImport = effectivePosition === "selection" ? selectionRanges : undefined;
 
             const res = await paramsApi.importMidiToPitch(
                 midiSrc,
@@ -502,18 +498,18 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 const errKey = res.error ?? "midi_import_failed";
                 // 尝试翻译已知的错误键
                 const knownErrors: Record<string, string> = {
-                    file_not_found: tAny("midi_file_not_found"),
-                    no_notes_in_track: tAny("midi_no_notes"),
-                    no_frames_touched: tAny("midi_no_frames_touched"),
-                    no_pitch_line_selected: tAny("vs_paste_no_pitch_line"),
-                    pitch_requires_compose: tAny("pitch_requires_compose"),
-                    pitch_requires_algo: tAny("pitch_requires_algo"),
+                    file_not_found: tf("midi_file_not_found"),
+                    no_notes_in_track: tf("midi_no_notes"),
+                    no_frames_touched: tf("midi_no_frames_touched"),
+                    no_pitch_line_selected: tf("vs_paste_no_pitch_line"),
+                    pitch_requires_compose: tf("pitch_requires_compose"),
+                    pitch_requires_algo: tf("pitch_requires_algo"),
                 };
                 setError(knownErrors[errKey] ?? errKey);
             }
         } catch (err) {
             console.error("[midi_import_ui] import:error", err);
-            setError(tAny("midi_import_failed"));
+            setError(tf("midi_import_failed"));
         } finally {
             setImporting(false);
         }
@@ -524,7 +520,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
         onImported,
         onImportAsClip,
         onOpenChange,
-        tAny,
+        tf,
         effectiveMode,
         tracks,
         importPosition,
@@ -582,20 +578,18 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                     onOpenChange(false);
                 } else {
                     const knownErrors: Record<string, string> = {
-                        file_not_found: tAny("midi_file_not_found"),
-                        no_notes_in_track: tAny("midi_no_notes"),
-                        no_frames_touched: tAny("midi_no_frames_touched"),
-                        no_pitch_line_selected: tAny("vs_paste_no_pitch_line"),
-                        pitch_requires_compose: tAny("pitch_requires_compose"),
-                        pitch_requires_algo: tAny("pitch_requires_algo"),
+                        file_not_found: tf("midi_file_not_found"),
+                        no_notes_in_track: tf("midi_no_notes"),
+                        no_frames_touched: tf("midi_no_frames_touched"),
+                        no_pitch_line_selected: tf("vs_paste_no_pitch_line"),
+                        pitch_requires_compose: tf("pitch_requires_compose"),
+                        pitch_requires_algo: tf("pitch_requires_algo"),
                     };
-                    setError(
-                        knownErrors[res.error ?? ""] ?? res.error ?? tAny("midi_import_failed"),
-                    );
+                    setError(knownErrors[res.error ?? ""] ?? res.error ?? tf("midi_import_failed"));
                 }
             })
             .catch(() => {
-                setError(tAny("midi_import_failed"));
+                setError(tf("midi_import_failed"));
             })
             .finally(() => {
                 setImporting(false);
@@ -615,7 +609,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
         onRequestEnableCompose,
         onImported,
         onOpenChange,
-        tAny,
+        tf,
     ]);
 
     const handleComposeDecline = useCallback(() => {
@@ -623,30 +617,73 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
         composePendingRef.current = false;
     }, []);
 
-    return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content maxWidth="520px">
-                <Dialog.Title>
-                    {effectiveMode === "replaceMidi"
-                        ? tAny("midi_replace_title")
-                        : currentTarget === "pitchParam"
-                          ? tAny("midi_import_title")
-                          : tAny("midi_import_clip_title")}
-                </Dialog.Title>
-                <Dialog.Description size="2" color="gray">
-                    {effectiveMode === "replaceMidi"
-                        ? tAny("midi_replace_desc")
-                        : currentTarget === "pitchParam"
-                          ? tAny("midi_import_desc")
-                          : tAny("midi_import_clip_desc")}
-                </Dialog.Description>
+    // 解析失败（无轨道）时也要提供可见的关闭出口，不能只剩错误文本。
+    // 页脚动作：仅在「有来源且加载结束」时出现；无轨道时只给关闭，
+    // 有轨道时给出关闭 + 导入。原实现把这两套页脚埋在正文里，现交由 AppDialog 页脚。
+    const showFooter = Boolean((effectivePath || effectiveClipboardGuid) && !loading);
+    const importLabel = importing
+        ? tf("midi_importing")
+        : effectiveMode === "replaceMidi"
+          ? tf("midi_replace_button")
+          : currentTarget === "pitchParam"
+            ? tf("midi_import")
+            : tf("midi_create_clip");
+    const footerActions: AppDialogAction[] | undefined = !showFooter
+        ? undefined
+        : tracks.length === 0
+          ? [{ id: "close", label: tf("kb_close"), onClick: () => onOpenChange(false) }]
+          : [
+                {
+                    id: "close",
+                    label: tf("kb_close"),
+                    disabled: importing,
+                    onClick: () => onOpenChange(false),
+                },
+                {
+                    id: "import",
+                    label: importLabel,
+                    intent: "primary",
+                    disabled:
+                        importing ||
+                        loading ||
+                        tracks.length === 0 ||
+                        selectedTracks.length === 0 ||
+                        !!error,
+                    autoClose: false,
+                    onClick: () => {
+                        void handleImport();
+                    },
+                },
+            ];
 
+    return (
+        <>
+            <AppDialog
+                open={open}
+                onOpenChange={onOpenChange}
+                title={
+                    effectiveMode === "replaceMidi"
+                        ? tf("midi_replace_title")
+                        : currentTarget === "pitchParam"
+                          ? tf("midi_import_title")
+                          : tf("midi_import_clip_title")
+                }
+                description={
+                    effectiveMode === "replaceMidi"
+                        ? tf("midi_replace_desc")
+                        : currentTarget === "pitchParam"
+                          ? tf("midi_import_desc")
+                          : tf("midi_import_clip_desc")
+                }
+                size="md"
+                actions={footerActions}
+            >
                 {/* ── 导入目标选择（replace 模式不显示） ── */}
                 {!isReplaceMode && (
                     <Flex direction="column" gap="1" mt="3">
-                        <Text size="1" weight="medium">
-                            {tAny("midi_import_target")}
-                        </Text>
+                        <span className="hs-type-label font-medium">
+                            {tf("midi_import_target")}
+                        </span>
                         <RadioGroup.Root
                             value={currentTarget}
                             onValueChange={(v) => {
@@ -658,11 +695,15 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                             <Flex gap="3">
                                 <label className="flex items-center gap-1 cursor-pointer">
                                     <RadioGroup.Item value="pitchParam" />
-                                    <Text size="1">{tAny("midi_import_target_pitch_param")}</Text>
+                                    <span className="hs-type-label">
+                                        {tf("midi_import_target_pitch_param")}
+                                    </span>
                                 </label>
                                 <label className="flex items-center gap-1 cursor-pointer">
                                     <RadioGroup.Item value="pitchRef" />
-                                    <Text size="1">{tAny("midi_import_target_pitch_block")}</Text>
+                                    <span className="hs-type-label">
+                                        {tf("midi_import_target_pitch_block")}
+                                    </span>
                                 </label>
                             </Flex>
                         </RadioGroup.Root>
@@ -671,22 +712,20 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
 
                 {/* ── 文件选择区域（始终显示） ── */}
                 <Flex direction="column" gap="1" mt="3">
-                    <Text size="1" weight="medium">
-                        {tAny("midi_file_path")}
-                    </Text>
+                    <span className="hs-type-label font-medium">{tf("midi_file_path")}</span>
                     <Flex gap="2" align="center">
                         <input
                             type="text"
-                            className="flex-1 px-2 py-1 text-xs rounded border border-qt-border bg-qt-base text-qt-text"
+                            className="flex-1 px-2 py-1 text-qt-xs rounded border border-qt-border bg-qt-base text-qt-text"
                             readOnly
                             value={
                                 effectiveClipboardGuid
-                                    ? tAny("midi_clipboard_midi_prefix") +
+                                    ? tf("midi_clipboard_midi_prefix") +
                                       effectiveClipboardGuid +
                                       ".mid"
                                     : effectivePath
                                       ? effectivePath
-                                      : tAny("midi_no_file_selected")
+                                      : tf("midi_no_file_selected")
                             }
                             style={{
                                 color: effectivePath || effectiveClipboardGuid ? undefined : "#888",
@@ -694,43 +733,36 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                 minWidth: 0,
                             }}
                         />
-                        <Button variant="soft" size="1" onClick={handleBrowse} disabled={importing}>
-                            {tAny("midi_browse")}
-                        </Button>
-                        <Button
-                            variant="soft"
-                            size="1"
+                        <AppButton size="sm" onClick={handleBrowse} disabled={importing}>
+                            {tf("midi_browse")}
+                        </AppButton>
+                        <AppButton
+                            size="sm"
                             onClick={handleReadClipboard}
                             disabled={importing || readingClipboard}
                         >
-                            {readingClipboard
-                                ? tAny("midi_importing")
-                                : tAny("midi_read_clipboard")}
-                        </Button>
+                            {readingClipboard ? tf("midi_importing") : tf("midi_read_clipboard")}
+                        </AppButton>
                     </Flex>
                 </Flex>
 
                 {loading && (
                     <Flex justify="center" py="4">
-                        <Text size="2" color="gray">
-                            {tAny("loading")}
-                        </Text>
+                        <span className="hs-type-muted">{tf("common_loading")}</span>
                     </Flex>
                 )}
 
                 {error && (
                     <Flex py="2">
-                        <Text size="2" color="red">
+                        <span className="hs-type-body" style={{ color: "var(--qt-danger-text)" }}>
                             {error}
-                        </Text>
+                        </span>
                     </Flex>
                 )}
 
                 {effectivePath && !loading && !error && tracks.length === 0 && (
                     <Flex py="4" justify="center">
-                        <Text size="2" color="gray">
-                            {tAny("midi_no_tracks")}
-                        </Text>
+                        <span className="hs-type-muted">{tf("midi_no_tracks")}</span>
                     </Flex>
                 )}
 
@@ -738,35 +770,29 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                     <>
                         {/* 全选 / 全不选 快捷按钮 */}
                         <Flex gap="2" mt="3">
-                            <Button
-                                variant="soft"
-                                color="gray"
-                                size="1"
+                            <AppButton
+                                size="sm"
                                 onClick={() => setSelectedTracks(tracks.map((t) => t.index))}
                             >
-                                {tAny("midi_select_all")}
-                            </Button>
-                            <Button
-                                variant="soft"
-                                color="gray"
-                                size="1"
-                                onClick={() => setSelectedTracks([])}
-                            >
-                                {tAny("midi_deselect_all")}
-                            </Button>
+                                {tf("midi_select_all")}
+                            </AppButton>
+                            <AppButton size="sm" onClick={() => setSelectedTracks([])}>
+                                {tf("midi_deselect_all")}
+                            </AppButton>
                             {initialBpm != null && (
-                                <Text
-                                    size="1"
-                                    color={midiHasBpm ? "gray" : "red"}
-                                    className="ml-auto self-center"
+                                <span
+                                    className="hs-type-caption ml-auto self-center"
+                                    style={
+                                        midiHasBpm ? undefined : { color: "var(--qt-danger-text)" }
+                                    }
                                 >
                                     {midiHasBpm
-                                        ? tAny("midi_midi_bpm_label").replace(
+                                        ? tf("midi_midi_bpm_label").replace(
                                               "{bpm}",
                                               initialBpm.toFixed(2),
                                           )
-                                        : `${tAny("midi_no_bpm")}`}
-                                </Text>
+                                        : `${tf("midi_no_bpm")}`}
+                                </span>
                             )}
                         </Flex>
 
@@ -781,38 +807,40 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                         key={track.index}
                                         className="flex items-center gap-2 px-3 py-2 hover:bg-qt-highlight cursor-pointer border-b border-qt-border last:border-b-0"
                                     >
-                                        <input
-                                            type="checkbox"
-                                            className="w-4 h-4"
-                                            checked={selectedTracks.includes(track.index)}
-                                            onChange={(e) => {
-                                                if (e.target.checked) {
-                                                    setSelectedTracks([
-                                                        ...selectedTracks,
-                                                        track.index,
-                                                    ]);
-                                                } else {
-                                                    setSelectedTracks(
-                                                        selectedTracks.filter(
-                                                            (i) => i !== track.index,
-                                                        ),
-                                                    );
-                                                }
-                                            }}
-                                        />
+                                        <AppForm booleanRow="leading">
+                                            <AppSwitchRow
+                                                control="checkbox"
+                                                ariaLabel={track.name || `Track ${track.index + 1}`}
+                                                checked={selectedTracks.includes(track.index)}
+                                                onCheckedChange={(next) => {
+                                                    if (next) {
+                                                        setSelectedTracks([
+                                                            ...selectedTracks,
+                                                            track.index,
+                                                        ]);
+                                                    } else {
+                                                        setSelectedTracks(
+                                                            selectedTracks.filter(
+                                                                (i) => i !== track.index,
+                                                            ),
+                                                        );
+                                                    }
+                                                }}
+                                            />
+                                        </AppForm>
                                         <Flex direction="column" gap="0" className="flex-1 min-w-0">
-                                            <Text size="2" weight="medium" className="truncate">
+                                            <span className="hs-type-label font-medium truncate">
                                                 {track.name || `Track ${track.index + 1}`}
-                                            </Text>
+                                            </span>
                                             <Flex gap="2">
-                                                <Text size="1" color="gray">
-                                                    {tAny("midi_track_notes").replace(
+                                                <span className="hs-type-caption">
+                                                    {tf("midi_track_notes").replace(
                                                         "{count}",
                                                         String(track.note_count),
                                                     )}
-                                                </Text>
-                                                <Text size="1" color="gray">
-                                                    {tAny("midi_track_range")
+                                                </span>
+                                                <span className="hs-type-caption">
+                                                    {tf("midi_track_range")
                                                         .replace(
                                                             "{min}",
                                                             noteToName(track.min_note),
@@ -821,7 +849,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                                             "{max}",
                                                             noteToName(track.max_note),
                                                         )}
-                                                </Text>
+                                                </span>
                                             </Flex>
                                         </Flex>
                                     </label>
@@ -831,27 +859,20 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
 
                         {/* ── BPM 选项（在多轨合并和填补空隙上方） ── */}
                         {/* 将 MIDI BPM 导入为工程 BPM */}
-                        <label
-                            className={`flex items-center gap-2 mt-3 ${
-                                midiHasBpm && !importTempoMapEnabled
-                                    ? "cursor-pointer"
-                                    : "opacity-50"
+                        <AppForm
+                            booleanRow="leading"
+                            className={`mt-3 ${
+                                midiHasBpm && !importTempoMapEnabled ? "" : "opacity-50"
                             }`}
                         >
-                            <input
-                                type="checkbox"
+                            <AppSwitchRow
+                                control="checkbox"
+                                label={tf("midi_import_bpm_as_project")}
                                 checked={importBpmAsProject && !importTempoMapEnabled}
-                                onChange={(e) => onImportBpmAsProjectChange?.(e.target.checked)}
                                 disabled={!midiHasBpm || importTempoMapEnabled}
-                                className="w-4 h-4"
+                                onCheckedChange={(checked) => onImportBpmAsProjectChange?.(checked)}
                             />
-                            <Text
-                                size="1"
-                                color={midiHasBpm && !importTempoMapEnabled ? undefined : "gray"}
-                            >
-                                {tAny("midi_import_bpm_as_project")}
-                            </Text>
-                        </label>
+                        </AppForm>
 
                         {/* ── 导入为 Tempo Map（仅“音高参考块”目标显示） ── */}
                         {currentTarget === "pitchRef" && !isReplaceMode && (
@@ -861,126 +882,100 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                 mt="3"
                                 className="rounded border border-qt-border p-2"
                             >
-                                <label className="flex items-center gap-2 cursor-pointer">
-                                    <input
-                                        type="checkbox"
+                                <AppForm booleanRow="leading">
+                                    <AppSwitchRow
+                                        control="checkbox"
+                                        label={tf("midi_import_as_tempo_map")}
                                         checked={importTempoMapEnabled}
-                                        onChange={(e) =>
-                                            onImportTempoMapEnabledChange?.(e.target.checked)
+                                        onCheckedChange={(checked) =>
+                                            onImportTempoMapEnabledChange?.(checked)
                                         }
-                                        className="w-4 h-4"
                                     />
-                                    <Text size="1" weight="medium">
-                                        {tAny("midi_import_as_tempo_map")}
-                                    </Text>
-                                </label>
+                                </AppForm>
                                 <Flex direction="column" gap="1" className="ml-6 mt-1">
-                                    <label
-                                        className={`flex items-center gap-2 ${
-                                            importTempoMapEnabled && midiHasBpm
-                                                ? "cursor-pointer"
-                                                : "opacity-50"
-                                        }`}
-                                    >
-                                        <input
-                                            type="checkbox"
-                                            checked={importTempoMapTempo}
-                                            onChange={(e) =>
-                                                onImportTempoMapTempoChange?.(e.target.checked)
-                                            }
-                                            disabled={!importTempoMapEnabled || !midiHasBpm}
-                                            className="w-4 h-4"
-                                        />
-                                        <Text
-                                            size="1"
-                                            color={
+                                    <AppForm booleanRow="leading">
+                                        <AppSwitchRow
+                                            control="checkbox"
+                                            className={
                                                 importTempoMapEnabled && midiHasBpm
                                                     ? undefined
-                                                    : "gray"
+                                                    : "opacity-50"
                                             }
-                                        >
-                                            {tAny("midi_import_tempo_map_tempo")}
-                                            {midiTempoPointCount > 1
-                                                ? ` (${midiTempoPointCount})`
-                                                : ""}
-                                        </Text>
-                                    </label>
-                                    <label
-                                        className={`flex items-center gap-2 ${
-                                            importTempoMapEnabled && midiHasTimeSignature
-                                                ? "cursor-pointer"
-                                                : "opacity-50"
-                                        }`}
-                                    >
-                                        <input
-                                            type="checkbox"
+                                            label={
+                                                <>
+                                                    {tf("midi_import_tempo_map_tempo")}
+                                                    {midiTempoPointCount > 1
+                                                        ? ` (${midiTempoPointCount})`
+                                                        : ""}
+                                                </>
+                                            }
+                                            checked={importTempoMapTempo}
+                                            disabled={!importTempoMapEnabled || !midiHasBpm}
+                                            onCheckedChange={(checked) =>
+                                                onImportTempoMapTempoChange?.(checked)
+                                            }
+                                        />
+                                    </AppForm>
+                                    <AppForm booleanRow="leading">
+                                        <AppSwitchRow
+                                            control="checkbox"
+                                            className={
+                                                importTempoMapEnabled && midiHasTimeSignature
+                                                    ? undefined
+                                                    : "opacity-50"
+                                            }
+                                            label={
+                                                <>
+                                                    {tf("midi_import_tempo_map_time_signature")}
+                                                    {midiTimeSigCount > 0
+                                                        ? ` (${midiTimeSigCount})`
+                                                        : ""}
+                                                </>
+                                            }
                                             checked={importTempoMapTimeSignature}
-                                            onChange={(e) =>
-                                                onImportTempoMapTimeSignatureChange?.(
-                                                    e.target.checked,
-                                                )
-                                            }
                                             disabled={
                                                 !importTempoMapEnabled || !midiHasTimeSignature
                                             }
-                                            className="w-4 h-4"
+                                            onCheckedChange={(checked) =>
+                                                onImportTempoMapTimeSignatureChange?.(checked)
+                                            }
                                         />
-                                        <Text
-                                            size="1"
-                                            color={
-                                                importTempoMapEnabled && midiHasTimeSignature
+                                    </AppForm>
+                                    <AppForm booleanRow="leading">
+                                        <AppSwitchRow
+                                            control="checkbox"
+                                            className={
+                                                importTempoMapEnabled && midiHasKeySignature
                                                     ? undefined
-                                                    : "gray"
+                                                    : "opacity-50"
                                             }
-                                        >
-                                            {tAny("midi_import_tempo_map_time_signature")}
-                                            {midiTimeSigCount > 0 ? ` (${midiTimeSigCount})` : ""}
-                                        </Text>
-                                    </label>
-                                    <label
-                                        className={`flex items-center gap-2 ${
-                                            importTempoMapEnabled && midiHasKeySignature
-                                                ? "cursor-pointer"
-                                                : "opacity-50"
-                                        }`}
-                                    >
-                                        <input
-                                            type="checkbox"
+                                            label={
+                                                <>
+                                                    {tf("midi_import_tempo_map_key_signature")}
+                                                    {midiKeySigCount > 0
+                                                        ? ` (${midiKeySigCount})`
+                                                        : ""}
+                                                </>
+                                            }
                                             checked={importTempoMapKeySignature}
-                                            onChange={(e) =>
-                                                onImportTempoMapKeySignatureChange?.(
-                                                    e.target.checked,
-                                                )
-                                            }
                                             disabled={
                                                 !importTempoMapEnabled || !midiHasKeySignature
                                             }
-                                            className="w-4 h-4"
-                                        />
-                                        <Text
-                                            size="1"
-                                            color={
-                                                importTempoMapEnabled && midiHasKeySignature
-                                                    ? undefined
-                                                    : "gray"
+                                            onCheckedChange={(checked) =>
+                                                onImportTempoMapKeySignatureChange?.(checked)
                                             }
-                                        >
-                                            {tAny("midi_import_tempo_map_key_signature")}
-                                            {midiKeySigCount > 0 ? ` (${midiKeySigCount})` : ""}
-                                        </Text>
-                                    </label>
+                                        />
+                                    </AppForm>
                                 </Flex>
-                                <Text size="1" color="gray" className="ml-6 mt-1">
-                                    {tAny("midi_import_as_tempo_map_hint")}
-                                </Text>
+                                <span className="hs-type-caption ml-6 mt-1">
+                                    {tf("midi_import_as_tempo_map_hint")}
+                                </span>
                             </Flex>
                         )}
 
                         {/* 音符 BPM 设置 */}
                         <Flex direction="column" gap="1" mt="2">
-                            <Text size="2" weight="medium">
-                                {tAny("midi_note_bpm")}
-                            </Text>
+                            <span className="hs-type-label font-medium">{tf("midi_note_bpm")}</span>
                             <RadioGroup.Root
                                 value={importTempoMapEnabled ? "midi" : displayNoteBpmMode}
                                 onValueChange={(v) => {
@@ -999,16 +994,9 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             value="midi"
                                             disabled={!midiHasBpm || importTempoMapEnabled}
                                         />
-                                        <Text
-                                            size="1"
-                                            color={
-                                                midiHasBpm && !importTempoMapEnabled
-                                                    ? undefined
-                                                    : "gray"
-                                            }
-                                        >
-                                            {tAny("midi_note_bpm_midi")}
-                                        </Text>
+                                        <span className="hs-type-label">
+                                            {tf("midi_note_bpm_midi")}
+                                        </span>
                                     </label>
                                     <label
                                         className={`flex items-center gap-1 ${
@@ -1019,15 +1007,19 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             value="project"
                                             disabled={importTempoMapEnabled}
                                         />
-                                        <Text
-                                            size="1"
-                                            color={importTempoMapEnabled ? "gray" : undefined}
+                                        <span
+                                            className="hs-type-label"
+                                            style={
+                                                importTempoMapEnabled
+                                                    ? { color: "var(--qt-text-muted)" }
+                                                    : undefined
+                                            }
                                         >
-                                            {tAny("midi_note_bpm_project")}
+                                            {tf("midi_note_bpm_project")}
                                             {projectBpm != null
                                                 ? ` (${projectBpm.toFixed(2)} BPM)`
                                                 : ""}
-                                        </Text>
+                                        </span>
                                     </label>
                                     <label
                                         className={`flex items-center gap-1 ${
@@ -1038,45 +1030,31 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             value="specified"
                                             disabled={importTempoMapEnabled}
                                         />
-                                        <Text
-                                            size="1"
-                                            color={importTempoMapEnabled ? "gray" : undefined}
+                                        <span
+                                            className="hs-type-label"
+                                            style={
+                                                importTempoMapEnabled
+                                                    ? { color: "var(--qt-text-muted)" }
+                                                    : undefined
+                                            }
                                         >
-                                            {tAny("midi_note_bpm_specified")}
-                                        </Text>
+                                            {tf("midi_note_bpm_specified")}
+                                        </span>
                                     </label>
                                     {noteBpmMode === "specified" && !importTempoMapEnabled && (
                                         <Flex gap="2" align="center" className="ml-5 mt-1">
-                                            <input
-                                                ref={specifiedBpmWheelRef}
-                                                type="number"
-                                                className="w-20 px-2 py-1 text-xs rounded border border-qt-border bg-qt-base text-qt-text"
+                                            <AppNumberField
                                                 value={specifiedBpm}
+                                                unit="bpm"
                                                 min={1}
                                                 max={999}
-                                                step={1}
-                                                onKeyDown={(e) => {
-                                                    if (e.key === "ArrowUp") {
-                                                        e.preventDefault();
-                                                        const next = specifiedBpm + 1;
-                                                        if (next <= 999)
-                                                            onSpecifiedBpmChange?.(next);
-                                                    } else if (e.key === "ArrowDown") {
-                                                        e.preventDefault();
-                                                        const next = specifiedBpm - 1;
-                                                        if (next >= 1) onSpecifiedBpmChange?.(next);
-                                                    }
-                                                }}
-                                                onChange={(e) => {
-                                                    const v = parseFloat(e.target.value);
-                                                    if (!isNaN(v) && v > 0) {
-                                                        onSpecifiedBpmChange?.(v);
-                                                    }
-                                                }}
+                                                width={80}
+                                                ariaLabel={tf("midi_note_bpm_specified")}
+                                                onCommit={(next) => onSpecifiedBpmChange?.(next)}
                                             />
-                                            <Text size="1" color="gray">
-                                                {tAny("midi_specified_bpm_placeholder")}
-                                            </Text>
+                                            <span className="hs-type-caption">
+                                                {tf("midi_specified_bpm_placeholder")}
+                                            </span>
                                         </Flex>
                                     )}
                                 </Flex>
@@ -1085,23 +1063,14 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                     </>
                 )}
 
-                {/* 解析失败（无轨道）时也要提供可见的关闭出口，不能只剩错误文本 */}
-                {(effectivePath || effectiveClipboardGuid) && !loading && tracks.length === 0 && (
-                    <Flex justify="end" gap="2" mt="4">
-                        <Button variant="soft" color="gray" onClick={() => onOpenChange(false)}>
-                            {tAny("kb_close")}
-                        </Button>
-                    </Flex>
-                )}
-
                 {(effectivePath || effectiveClipboardGuid) && !loading && tracks.length > 0 && (
                     <>
                         {/* 导入位置选项（仅在 paramEditor 目标下显示） */}
                         {currentTarget === "pitchParam" && !isReplaceMode && (
                             <Flex direction="column" gap="1" mt="3">
-                                <Text size="2" weight="medium">
-                                    {tAny("midi_import_position")}
-                                </Text>
+                                <span className="hs-type-label font-medium">
+                                    {tf("midi_import_position")}
+                                </span>
                                 <RadioGroup.Root
                                     value={
                                         importPosition === "selection" && !selectionAvailable
@@ -1113,27 +1082,31 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                     <Flex gap="3">
                                         <label className="flex items-center gap-1 cursor-pointer">
                                             <RadioGroup.Item value="projectStart" />
-                                            <Text size="1">
-                                                {tAny("midi_import_position_start")}
-                                            </Text>
+                                            <span className="hs-type-label">
+                                                {tf("midi_import_position_start")}
+                                            </span>
                                         </label>
                                         <label className="flex items-center gap-1 cursor-pointer">
                                             <RadioGroup.Item value="playhead" />
-                                            <Text size="1">
-                                                {tAny("midi_import_position_playhead")}
-                                            </Text>
+                                            <span className="hs-type-label">
+                                                {tf("midi_import_position_playhead")}
+                                            </span>
                                         </label>
                                         <label className="flex items-center gap-1 cursor-pointer">
                                             <RadioGroup.Item
                                                 value="selection"
                                                 disabled={!selectionAvailable}
                                             />
-                                            <Text
-                                                size="1"
-                                                color={selectionAvailable ? undefined : "gray"}
+                                            <span
+                                                className="hs-type-label"
+                                                style={
+                                                    selectionAvailable
+                                                        ? undefined
+                                                        : { color: "var(--qt-text-muted)" }
+                                                }
                                             >
-                                                {tAny("midi_import_position_selection")}
-                                            </Text>
+                                                {tf("midi_import_position_selection")}
+                                            </span>
                                         </label>
                                     </Flex>
                                 </RadioGroup.Root>
@@ -1142,98 +1115,73 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
 
                         {/* 多轨合并选项 */}
                         {!isReplaceMode && (
-                            <label
-                                className={`flex items-center gap-2 mt-3 ${
-                                    currentTarget === "pitchParam" ? "opacity-60" : "cursor-pointer"
+                            <AppForm
+                                booleanRow="leading"
+                                className={`mt-3 ${
+                                    currentTarget === "pitchParam" ? "opacity-60" : ""
                                 }`}
                             >
-                                <input
-                                    type="checkbox"
+                                <AppSwitchRow
+                                    control="checkbox"
+                                    label={tf("midi_multi_track_merge")}
                                     checked={
                                         currentTarget === "pitchParam"
                                             ? true
                                             : (multiTrackMerge ?? true)
                                     }
-                                    onChange={(e) =>
-                                        currentTarget !== "pitchParam" &&
-                                        onMultiTrackMergeChange?.(e.target.checked)
-                                    }
                                     disabled={currentTarget === "pitchParam"}
-                                    className="w-4 h-4"
+                                    onCheckedChange={(checked) =>
+                                        currentTarget !== "pitchParam" &&
+                                        onMultiTrackMergeChange?.(checked)
+                                    }
                                 />
-                                <Text size="1">{tAny("midi_multi_track_merge")}</Text>
-                            </label>
+                            </AppForm>
                         )}
 
                         {/* 关闭开头空隙选项 */}
-                        <label className="flex items-center gap-2 mt-3 cursor-pointer">
-                            <input
-                                type="checkbox"
+                        <AppForm booleanRow="leading" className="mt-3">
+                            <AppSwitchRow
+                                control="checkbox"
+                                label={tf("midi_close_leading_gap")}
                                 checked={closeLeadingGap ?? true}
-                                onChange={(e) => onCloseLeadingGapChange?.(e.target.checked)}
-                                className="w-4 h-4"
+                                onCheckedChange={(checked) => onCloseLeadingGapChange?.(checked)}
                             />
-                            <Text size="1">{tAny("midi_close_leading_gap")}</Text>
-                        </label>
+                        </AppForm>
 
                         {/* 填补空隙选项 */}
-                        <label className="flex items-center gap-2 mt-3 cursor-pointer">
-                            <input
-                                type="checkbox"
+                        <AppForm booleanRow="leading" className="mt-3">
+                            <AppSwitchRow
+                                control="checkbox"
+                                label={tf("midi_fill_gaps")}
                                 checked={fillGaps}
-                                onChange={(e) => onFillGapsChange?.(e.target.checked)}
-                                className="w-4 h-4"
+                                onCheckedChange={(checked) => onFillGapsChange?.(checked)}
                             />
-                            <Text size="1">{tAny("midi_fill_gaps")}</Text>
-                        </label>
-
-                        <Flex justify="end" gap="2" mt="4">
-                            <Button
-                                variant="soft"
-                                color="gray"
-                                onClick={() => onOpenChange(false)}
-                                disabled={importing}
-                            >
-                                {tAny("kb_close")}
-                            </Button>
-                            <Button
-                                onClick={handleImport}
-                                disabled={
-                                    importing ||
-                                    loading ||
-                                    tracks.length === 0 ||
-                                    selectedTracks.length === 0 ||
-                                    !!error
-                                }
-                            >
-                                {importing
-                                    ? tAny("midi_importing")
-                                    : effectiveMode === "replaceMidi"
-                                      ? tAny("midi_replace_button")
-                                      : currentTarget === "pitchParam"
-                                        ? tAny("midi_import")
-                                        : tAny("midi_create_clip")}
-                            </Button>
-                        </Flex>
+                        </AppForm>
                     </>
                 )}
-            </Dialog.Content>
+            </AppDialog>
 
             {/* Compose 未开启确认对话框 */}
-            <Dialog.Root open={composeConfirmOpen} onOpenChange={setComposeConfirmOpen}>
-                <Dialog.Content maxWidth="400px">
-                    <Dialog.Title>{tAny("midi_compose_required_title")}</Dialog.Title>
-                    <Dialog.Description size="2" mt="2">
-                        {tAny("midi_compose_required_message")}
-                    </Dialog.Description>
-                    <Flex justify="end" gap="2" mt="4">
-                        <Button variant="soft" color="gray" onClick={handleComposeDecline}>
-                            {tAny("cancel")}
-                        </Button>
-                        <Button onClick={handleComposeConfirm}>{tAny("ok")}</Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
-        </Dialog.Root>
+            <AppDialog
+                open={composeConfirmOpen}
+                onOpenChange={setComposeConfirmOpen}
+                title={tf("midi_compose_required_title")}
+                message={tf("midi_compose_required_message")}
+                size="sm"
+                actions={[
+                    {
+                        id: "cancel",
+                        label: tf("cancel"),
+                        onClick: handleComposeDecline,
+                    },
+                    {
+                        id: "confirm",
+                        label: tf("ok"),
+                        intent: "primary",
+                        onClick: handleComposeConfirm,
+                    },
+                ]}
+            />
+        </>
     );
 };

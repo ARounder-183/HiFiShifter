@@ -24,6 +24,8 @@ type BulkClipRemoteChange = {
     /** 源窗口（派生窗口模型下随 Loop 开关等操作一并归一）。 */
     sourceStartSec?: number;
     sourceEndSec?: number;
+    /** 声道模式 0..=4（对齐 REAPER CHANMODE）。 */
+    channelMode?: number;
 };
 
 export function buildBulkClipStateUpdates(args: {

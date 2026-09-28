@@ -147,9 +147,19 @@ function installSyntheticPeakSource(mediaDurationSec: number): void {
         preferredLevel,
         startSec,
         durationSec,
+        channelMode,
+        sourceChannels,
     ) {
         if (sourcePath.startsWith(PERF_SOURCE_PREFIX) && syntheticSource !== null) {
-            return syntheticSource.getPeaks(sourcePath, DEFAULT_SAMPLE_RATE, startSec, durationSec);
+            const view = syntheticSource.getPeaks(
+                sourcePath,
+                DEFAULT_SAMPLE_RATE,
+                startSec,
+                durationSec,
+            );
+            // store 契约要求 channels 必填；合成源是单带数据。
+            if (view) return { ...view, channels: view.channels ?? 1 };
+            return null;
         }
         return originalGetBestSliceView.call(
             waveformMipmapStore,
@@ -157,6 +167,8 @@ function installSyntheticPeakSource(mediaDurationSec: number): void {
             preferredLevel,
             startSec,
             durationSec,
+            channelMode,
+            sourceChannels,
         );
     };
 

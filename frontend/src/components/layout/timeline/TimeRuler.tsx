@@ -1,7 +1,10 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { AppContextMenu, type AppMenuItemSpec } from "../../../ui/Menu";
+import { AppConfirmDialog } from "../../../ui";
 import { Box } from "@radix-ui/themes";
 import { screenXToWorldSec } from "./runtime/timelineWorld.js";
+import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat.js";
 import { TIME_UNITS, TIME_UNIT_CHOICES, formatCursorTime } from "./timeFormat.js";
 import type { GridSize } from "../../../features/session/sessionTypes.ts";
@@ -25,13 +28,13 @@ import {
     type TempoPointEditRequest,
 } from "./TempoMapRulerRow.tsx";
 import { RULER_BASE_HEIGHT_PX, timeRulerHeightPx } from "./rulerHeight.ts";
-import { RULER_LABEL_HIDDEN_GAP_PX } from "./runtime/buildTimelineTicks.js";
 import type { TimelineTick } from "./runtime/buildTimelineTicks.js";
 import {
     readDevicePixelRatio,
-    snapToDevicePx,
+    verticalHairlineGeometry,
     wholeDevicePxLength,
 } from "../../../utils/devicePixelLine.ts";
+import { playheadLineLeftViewportPx } from "../renderKernel/timelineAxis.ts";
 import { clampAxisPosition } from "../../appTooltipPosition";
 
 function unitLabelKey(unit: TimeUnit): string {
@@ -46,33 +49,6 @@ function unitLabelKey(unit: TimeUnit): string {
             return "time_unit_clock";
     }
 }
-
-function ContextMenuItem({
-    active,
-    label,
-    onSelect,
-}: {
-    active: boolean;
-    label: string;
-    onSelect: () => void;
-}) {
-    return (
-        <button
-            type="button"
-            className="px-3 py-1.5 text-left w-full text-[12px] transition-colors flex items-center justify-between gap-3 hover:bg-qt-button-hover"
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-                e.stopPropagation();
-                onSelect();
-            }}
-        >
-            <span>{label}</span>
-            {active ? <span className="text-[10px] opacity-50 shrink-0">✓</span> : null}
-        </button>
-    );
-}
-
-const ContextDivider: React.FC = () => <div className="my-1 border-t border-qt-border" />;
 
 /**
  * 标尺刻度。
@@ -117,25 +93,40 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
 
     return (
         <>
-            {visibleTicks.map((tick, index) => {
-                const left = tick.contentPx;
-                // 每个刻度文本的显示区域限定在“到下一刻度”的间距内：
-                // - 间距足够时，文本右侧裁切到下一刻度之前（主/副单位与分隔线一起裁切）；
-                // - 间距过近（放不下任何有意义的文本片段）时，完全隐藏本刻度文本，
-                //   保证后出现的刻度文本完整可见、两个标签绝不重叠。
-                const nextTick = visibleTicks[index + 1];
-                const gapPx = nextTick != null ? nextTick.contentPx - tick.contentPx : null;
-                const labelHidden = gapPx != null && gapPx < RULER_LABEL_HIDDEN_GAP_PX;
-                const labelMaxWidth = gapPx != null ? (labelHidden ? 0 : gapPx - 6) : undefined;
+            {visibleTicks.map((tick, tickIndex) => {
+                // 设备像素比在每次渲染时现读（放在 map 内而不是组件体：组件体里的
+                // 非纯调用会让 React Compiler 无法保留下面那个 useMemo 的记忆化）。
+                const dpr = readDevicePixelRatio();
+                // 竖线的位置与线宽都按**设备像素**取整（见 `devicePixelLine`）。
+                //
+                // 【为什么必须这样】内容层虽已把平移量吸附到设备像素（见
+                // `rulerLayerTranslatePx`），但刻度自身的 `contentPx` 是小数：
+                // 层原点 + 小数刻度 ⇒ 竖线跨在两个物理像素上被抗锯齿，且覆盖度随每条
+                // 刻度的小数部分变化 —— 系统缩放率 > 1 时表现为**同一排竖线粗细不一**。
+                // 内核的网格线不会这样：它按设备像素绘制。这里采用同一份吸附，两层
+                // 因此逐设备像素对齐。
+                const { left, width: lineWidth } = verticalHairlineGeometry(
+                    tick.contentPx,
+                    tick.isBarStart ? 2 : 1,
+                    dpr,
+                );
+                // 版式完全由生成器决定（见 `TimelineTick.labelMaxWidth`）：
+                // 渲染期不再做"与可见切片里的下一条比较"——那个判据会随滚动位置
+                // 改变，正是"标尺文字时有时无"的来源。这里只消费结果。
+                const labelMaxWidth = tick.labelMaxWidth;
                 return (
-                    <div key={tick.beat} className="absolute top-0 bottom-0" style={{ left }}>
+                    // key 用**位置**而不是音乐身份：刻度全是无状态的展示节点，位置
+                    // key 让 React 永远复用同一批 DOM，只更新 left/文本。用身份 key
+                    // 时，一旦网格步长在缩放/BPM 阈值处整档变化，全部 key 同时改名 ⇒
+                    // 整棵刻度子树卸载重建 —— 连续手势下这就是一次可见的闪烁。
+                    <div key={tickIndex} className="absolute top-0 bottom-0" style={{ left }}>
                         <div
                             className="absolute top-0 bottom-0"
                             style={{
-                                // 与下方网格保持一致：小节线 2px、弱网格线 1px；
-                                // 2px 线以刻度位置为中心，避免左右偏移半个像素。
-                                left: tick.isBarStart ? -1 : 0,
-                                width: tick.isBarStart ? 2 : 1,
+                                // 与下方网格保持一致：小节线 2 物理像素、弱线 1 物理像素；
+                                // 都以刻度位置为中心（居中量按设备像素宽度算）。
+                                left: 0,
+                                width: lineWidth,
                                 backgroundColor: "var(--qt-border)",
                                 opacity: tick.isBarStart ? 1 : 0.6,
                             }}
@@ -143,16 +134,15 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
                         <div
                             className="flex flex-col justify-center h-full pl-2 pr-1 select-none"
                             style={{
-                                maxWidth: labelMaxWidth,
+                                maxWidth: labelMaxWidth ?? undefined,
                                 overflow: "hidden",
-                                visibility: labelHidden ? "hidden" : undefined,
                             }}
                         >
                             <div
                                 className={
                                     tick.isBarStart
-                                        ? "text-[13px] leading-tight font-semibold text-qt-text tabular-nums whitespace-nowrap"
-                                        : "text-[13px] leading-tight text-qt-text tabular-nums whitespace-nowrap"
+                                        ? "text-qt-md leading-tight font-semibold text-qt-text tabular-nums whitespace-nowrap"
+                                        : "text-qt-md leading-tight text-qt-text tabular-nums whitespace-nowrap"
                                 }
                             >
                                 {tick.primaryLabel}
@@ -160,7 +150,7 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
                             {tick.secondaryLabel != null ? (
                                 <>
                                     <div className="w-5 border-t border-qt-border/20 my-[3px]" />
-                                    <div className="text-[10px] leading-tight text-qt-text-muted/45 tabular-nums whitespace-nowrap">
+                                    <div className="text-qt-micro leading-tight text-qt-text-muted/45 tabular-nums whitespace-nowrap">
                                         {tick.secondaryLabel}
                                     </div>
                                 </>
@@ -176,13 +166,28 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
 const TimeRulerPlayhead = React.memo(function TimeRulerPlayhead({
     playheadSec,
     pxPerSec,
+    scrollLeft,
     lineRef,
     headRef,
+    positionFromProps,
 }: {
     playheadSec: number;
     pxPerSec: number;
+    /** 绘制坐标下的水平滚动量（线在视口坐标里定位，因此需要它）。 */
+    scrollLeft: number;
     lineRef?: React.Ref<HTMLDivElement>;
     headRef?: React.Ref<HTMLDivElement>;
+    /**
+     * 位置是否由 React 渲染。
+     *
+     * 【为什么允许调用方关掉它】播放头的 DOM 线在调用方那里是**逐帧命令式写入**
+     * 的（60Hz 插值位置），而 React 只持有 30Hz 轮询提交的**已提交位置**。两者
+     * 同时写同一个 `style.left` 就会互相覆盖：React 那次提交晚于同帧的 rAF 写入
+     * 时，标尺上的线会停在旧位置，而画布/GL 上的线已经在新位置 —— 表现为两条
+     * 播放头线"分离"，播放中尤其明显（缩放越大，一个 33ms 采样周期对应的像素差
+     * 越大）。传 `false` 即表示"位置由我负责"，React 只提供首帧的初始值。
+     */
+    positionFromProps?: boolean;
 }) {
     // 播放头竖线设备像素对齐（与 56238d45 的网格线修复同根同法）：
     // 分数 DPR（125%/150%）下 1px CSS 线覆盖 1.25/1.5 物理像素，落点相位
@@ -191,19 +196,31 @@ const TimeRulerPlayhead = React.memo(function TimeRulerPlayhead({
     // 滚动期间的逐帧写入（useVisualPlayhead onFrame / syncScrollLeft）使用
     // 同一套吸附，双方逐设备像素一致。
     const dpr = readDevicePixelRatio();
-    const playheadLeft = snapToDevicePx(playheadSec * pxPerSec, dpr);
+    // 视口坐标（不再是内容坐标）：与 GL 主体播放头同一个换算函数，两条线逐设备
+    // 像素一致；也避免被内容层的小数平移带偏。
+    const playheadLeft = playheadLineLeftViewportPx({
+        sec: playheadSec,
+        pxPerSec,
+        scrollLeftPx: scrollLeft,
+        dpr,
+    });
+    // 首帧仍给出正确位置（避免挂载瞬间闪到 0），此后不再由 React 改写。
+    const lineStyle: React.CSSProperties =
+        positionFromProps === false
+            ? { width: wholeDevicePxLength(1, dpr) }
+            : { left: playheadLeft, width: wholeDevicePxLength(1, dpr) };
     return (
         <>
             <div
                 ref={lineRef}
                 className="absolute top-0 bottom-0 bg-qt-playhead z-20 pointer-events-none"
-                style={{ left: playheadLeft, width: wholeDevicePxLength(1, dpr) }}
+                style={lineStyle}
             />
             <div
                 ref={headRef}
                 className="absolute top-0 z-30 pointer-events-none"
                 style={{
-                    left: playheadLeft,
+                    ...(positionFromProps === false ? null : { left: playheadLeft }),
                     transform: "translateX(-6px)",
                 }}
             >
@@ -279,7 +296,7 @@ const TempoMapFloatingLabel = React.memo(function TempoMapFloatingLabel({
                 {/* 注意：仅在可见时接收指针事件 —— 隐藏（opacity: 0）时若仍可点击， */}
                 {/* 会挡住其下方的初始变化点旗帜（双击无法进入编辑模式）。 */}
                 <div
-                    className="px-1 rounded-[2px] text-[9px] leading-[11px] whitespace-nowrap font-medium shadow-md"
+                    className="px-1 rounded-[2px] text-qt-3xs leading-[11px] whitespace-nowrap font-medium shadow-md"
                     style={{
                         backgroundColor: "var(--qt-panel)",
                         color: "var(--qt-text)",
@@ -346,21 +363,6 @@ function TimeRulerContextMenu({
     onClearTempoMap: () => void;
     onClose: () => void;
 }) {
-    const ref = useRef<HTMLDivElement | null>(null);
-    useLayoutEffect(() => {
-        const el = ref.current;
-        if (!el) return;
-        const rect = el.getBoundingClientRect();
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        if (rect.right > vw) {
-            el.style.left = `${Math.max(0, vw - rect.width)}px`;
-        }
-        if (rect.bottom > vh) {
-            el.style.top = `${Math.max(0, vh - rect.height)}px`;
-        }
-    }, [x, y]);
-
     // 找到点击位置命中的变化点（旗帜可视范围：点的位置向右延伸整个旗帜文本宽度）。
     const nearPoint = React.useMemo(() => {
         if (!tempoMap) return null;
@@ -370,131 +372,134 @@ function TimeRulerContextMenu({
     }, [tempoMap, clickedSec, pxPerSec]);
     const hasMap = tempoMap != null && tempoMap.points.length > 0;
 
-    return createPortal(
-        <div
-            ref={ref}
-            data-time-ruler-context-menu
-            data-hs-context-menu="1"
-            data-hs-floating-menu="1"
-            className="fixed z-[999] min-w-[140px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
-            style={{ left: x, top: y }}
-            onPointerDown={(e) => e.stopPropagation()}
-            onMouseDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-            }}
-            onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-            }}
-        >
-            {/* Tempo Map（位于“主时间单位”等选项之前） */}
-            <div className="px-3 py-1 text-[11px] text-qt-text/50 select-none">
-                {t("tempo_map")}
-            </div>
-            <ContextMenuItem
-                active={false}
-                label={t("tempo_map_add_point")}
-                onSelect={() => {
-                    onAddTempoPointAt(clickedSec, null);
-                    onClose();
-                }}
-            />
-            {nearPoint ? (
-                <ContextMenuItem
-                    active={false}
-                    label={t("tempo_map_edit_point")}
-                    onSelect={() => {
-                        onEditTempoPoint(nearPoint.point.id);
-                        onClose();
-                    }}
-                />
-            ) : null}
-            {nearPoint && !nearPoint.isFirst ? (
-                <ContextMenuItem
-                    active={false}
-                    label={t("tempo_map_delete_point")}
-                    onSelect={() => {
-                        onDeleteTempoPoint(nearPoint.point.id);
-                        onClose();
-                    }}
-                />
-            ) : null}
-            {hasMap ? (
-                <ContextMenuItem
-                    active={false}
-                    label={t("tempo_map_clear_all")}
-                    onSelect={() => {
-                        onClearTempoMap();
-                        onClose();
-                    }}
-                />
-            ) : null}
-            <ContextDivider />
+    // 分区标题：原语没有「非交互标签行」，用 disabled 项承载（不可选、
+    // 方向键跳过、悬停无反应），保留原有分组文字与顺序。
+    const items: AppMenuItemSpec[] = [
+        { key: "tempoMapHeader", label: t("tempo_map"), disabled: true, onSelect: () => {} },
+        {
+            key: "addTempoPoint",
+            label: t("tempo_map_add_point"),
+            onSelect: () => onAddTempoPointAt(clickedSec, null),
+        },
+        ...(nearPoint
+            ? [
+                  {
+                      key: "editTempoPoint",
+                      label: t("tempo_map_edit_point"),
+                      onSelect: () => onEditTempoPoint(nearPoint.point.id),
+                  } satisfies AppMenuItemSpec,
+              ]
+            : []),
+        ...(nearPoint && !nearPoint.isFirst
+            ? [
+                  {
+                      key: "deleteTempoPoint",
+                      label: t("tempo_map_delete_point"),
+                      onSelect: () => onDeleteTempoPoint(nearPoint.point.id),
+                  } satisfies AppMenuItemSpec,
+              ]
+            : []),
+        ...(hasMap
+            ? [
+                  {
+                      key: "clearTempoMap",
+                      label: t("tempo_map_clear_all"),
+                      onSelect: () => onClearTempoMap(),
+                  } satisfies AppMenuItemSpec,
+              ]
+            : []),
+        {
+            key: "primaryHeader",
+            label: t("time_unit_primary"),
+            disabled: true,
+            separatorBefore: true,
+            onSelect: () => {},
+        },
+        ...TIME_UNITS.map((unit) => ({
+            key: `primary-${unit}`,
+            label: t(unitLabelKey(unit)),
+            checked: primaryUnit === unit,
+            onSelect: () => onSelectPrimary(unit),
+        })),
+        {
+            key: "secondaryHeader",
+            label: t("time_unit_secondary"),
+            disabled: true,
+            separatorBefore: true,
+            onSelect: () => {},
+        },
+        ...TIME_UNIT_CHOICES.map((unit) => ({
+            key: `secondary-${unit}`,
+            label: unit === "none" ? t("time_unit_none") : t(unitLabelKey(unit as TimeUnit)),
+            checked: secondaryUnit === unit,
+            onSelect: () => onSelectSecondary(unit),
+        })),
+        ...(onCopyPlayheadTime
+            ? [
+                  {
+                      key: "copyPlayheadTime",
+                      label: t("copy_playhead_time"),
+                      separatorBefore: true,
+                      onSelect: onCopyPlayheadTime,
+                  } satisfies AppMenuItemSpec,
+              ]
+            : []),
+        ...(onOpenSettings
+            ? [
+                  {
+                      key: "openSettings",
+                      label: t("timeline_display_settings"),
+                      separatorBefore: !onCopyPlayheadTime,
+                      onSelect: onOpenSettings,
+                  } satisfies AppMenuItemSpec,
+              ]
+            : []),
+    ];
 
-            <div className="px-3 py-1 text-[11px] text-qt-text/50 select-none">
-                {t("time_unit_primary")}
-            </div>
-            {TIME_UNITS.map((unit) => (
-                <ContextMenuItem
-                    key={unit}
-                    active={primaryUnit === unit}
-                    label={t(unitLabelKey(unit))}
-                    onSelect={() => {
-                        onSelectPrimary(unit);
-                        onClose();
-                    }}
-                />
-            ))}
-            <ContextDivider />
-            <div className="px-3 py-1 text-[11px] text-qt-text/50 select-none">
-                {t("time_unit_secondary")}
-            </div>
-            {TIME_UNIT_CHOICES.map((unit) => (
-                <ContextMenuItem
-                    key={unit}
-                    active={secondaryUnit === unit}
-                    label={
-                        unit === "none" ? t("time_unit_none") : t(unitLabelKey(unit as TimeUnit))
-                    }
-                    onSelect={() => {
-                        onSelectSecondary(unit);
-                        onClose();
-                    }}
-                />
-            ))}
-            <ContextDivider />
-            {onCopyPlayheadTime ? (
-                <ContextMenuItem
-                    active={false}
-                    label={t("copy_playhead_time")}
-                    onSelect={() => {
-                        onCopyPlayheadTime();
-                        onClose();
-                    }}
-                />
-            ) : null}
-            {onOpenSettings ? (
-                <ContextMenuItem
-                    active={false}
-                    label={t("timeline_display_settings")}
-                    onSelect={() => {
-                        onOpenSettings();
-                        onClose();
-                    }}
-                />
-            ) : null}
-        </div>,
+    return createPortal(
+        <AppContextMenu
+            x={x}
+            y={y}
+            items={items}
+            onClose={onClose}
+            // 时间轴浮动菜单契约（提示气泡抑制 / 内联编辑器失焦 / 角标编辑守卫）。
+            floating
+        />,
         document.body,
     );
 }
 
 const TimeRulerInner: React.FC<{
+    /**
+     * **真实**水平滚动位置（绘制坐标）。
+     *
+     * 用于交互换算（悬停时间、Tempo Map 行的可见段、播放头定位）——这些地方需要
+     * 尽可能接近用户看到的滚动位置。**不**用于刻度切片：切片用
+     * `tickWindowAnchorPx`（量化锚点），两者相差不超过一个量化步长，切片缓冲足以
+     * 覆盖。曾经一个字段身兼两职，量化值会把悬停时间算偏最多一个步长。
+     */
     scrollLeft: number;
+    /**
+     * 刻度切片用的量化锚点（`createTickAxis` 的产物）。
+     *
+     * 缺省取 `scrollLeft`。时间轴与参数编辑器都传量化值，以换取"滚动时不重算
+     * 刻度"；它必须与生成刻度时使用的锚点**是同一个值**，否则切片窗口与生成窗口
+     * 不一致（参数编辑器曾经就是这样漏掉宽度补偿的）。
+     */
+    tickWindowAnchorPx?: number;
     ticks: readonly TimelineTick[];
     pxPerSec: number;
     viewportWidth?: number;
     playheadSec: number;
+    /**
+     * 标尺上的滚轮（由面板决定语义：默认水平滚动，按住"滚动条滚轮缩放"修饰键时水平缩放）。
+     *
+     * 【为什么必须交给面板】标尺是内核容器**之外**的 DOM 条，它的滚轮进不了容器监听；
+     * 而滚动/缩放的落点换算、上下限都在各自面板里。标尺只负责"阻止默认滚动 + 转交"。
+     */
+    onRulerWheel?: (event: React.WheelEvent<HTMLDivElement>) => void;
+    /** 见 `TimeRulerPlayhead.positionFromProps`。 */
+    positionPlayheadFromProps?: boolean;
     playheadLineRef?: React.Ref<HTMLDivElement>;
     playheadHeadRef?: React.Ref<HTMLDivElement>;
     onMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
@@ -524,12 +529,20 @@ const TimeRulerInner: React.FC<{
     onTempoMapChange?: (next: TempoMap | null) => void;
     /** 离散提交（对话框/菜单/拖拽结束），同步后端。 */
     onTempoMapCommit?: (next: TempoMap | null) => void;
+    /**
+     * 本面板的视口总线订阅，透传给 Tempo Map 行（拖拽期间的视口重放用）。
+     * 见 `TempoMapRulerRow.subscribeViewport`。
+     */
+    subscribeViewport?: (listener: (scrollLeft: number, pxPerSec: number) => void) => () => void;
 }> = ({
     scrollLeft,
+    tickWindowAnchorPx,
     ticks,
     pxPerSec,
     viewportWidth,
     playheadSec,
+    positionPlayheadFromProps,
+    onRulerWheel,
     playheadLineRef,
     playheadHeadRef,
     onMouseDown,
@@ -555,17 +568,54 @@ const TimeRulerInner: React.FC<{
     customScalePresets = [],
     onTempoMapChange,
     onTempoMapCommit,
+    subscribeViewport,
 }) => {
     const tAny = useMemo(() => t ?? ((key: string) => key), [t]);
     const useManualTransform = contentRef != null;
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; sec: number } | null>(null);
+    /**
+     * 待确认的 Tempo Map 破坏性操作（删除变化点 / 清空整张速度图）。
+     *
+     * 右键菜单是 portal 且在关闭时卸载，确认对话框不能住在它的子树里 ——
+     * 否则菜单一关，对话框跟着消失、根本来不及显示。这里把「待执行动作」
+     * 提升到常驻的标尺组件：菜单项只置位，确认后才走原来的提交函数。
+     */
+    const [tempoConfirm, setTempoConfirm] = useState<
+        { kind: "delete"; id: string } | { kind: "clear" } | null
+    >(null);
     const [hover, setHover] = useState<{ x: number; y: number; sec: number } | null>(null);
     const [tempoEditRequest, setTempoEditRequest] = useState<TempoPointEditRequest | null>(null);
     /** Tempo Map 编辑对话框打开时抑制标尺悬浮时间提示。 */
     const [tempoDialogOpen, setTempoDialogOpen] = useState(false);
     /** 标签内联输入编辑进行中：隐藏悬浮标签，避免遮挡视口左侧的输入框。 */
     const [tempoInlineEditing, setTempoInlineEditing] = useState(false);
+    /**
+     * 变化点正在被悬停或拖拽：此时已有一个内容更丰富的变化点提示，标尺自己的
+     * 悬浮时间提示必须让位（两个气泡叠在一起既看不清也互相遮挡）。
+     */
+    const [tempoInteracting, setTempoInteracting] = useState(false);
     const rulerRef = useRef<HTMLDivElement | null>(null);
+
+    /**
+     * 标尺滚轮：**非被动**监听 + 转交面板。
+     *
+     * 曾经的 `onWheel` 只调 `e.preventDefault()` 就结束（注释写着"防止标尺成为第二个
+     * 滚动源"）—— 而 React 的 `onWheel` 是 passive 的，那行 `preventDefault` 本身是空
+     * 操作：既没阻止默认滚动，也没做任何滚动/缩放。用户报告"标尺上滚轮没反应"。
+     */
+    const attachRulerWheel = useNonPassiveWheel<HTMLDivElement>((event) => {
+        event.preventDefault();
+        onRulerWheel?.(event);
+    });
+
+    /** 标尺根：既供内部量测（`rulerRef`），也挂非被动滚轮监听。 */
+    const attachRulerRoot = useCallback(
+        (element: HTMLDivElement | null) => {
+            rulerRef.current = element;
+            attachRulerWheel(element);
+        },
+        [attachRulerWheel],
+    );
 
     const showTempoRow = Boolean(tempoMap && tempoMap.points.length > 0 && tempoMapVisible);
     const rulerHeight = timeRulerHeightPx(showTempoRow);
@@ -579,6 +629,10 @@ const TimeRulerInner: React.FC<{
     const handleTempoDialogOpenChange = useCallback((open: boolean) => {
         setTempoDialogOpen(open);
         if (open) setHover(null);
+    }, []);
+    const handleTempoInteractionChange = useCallback((active: boolean) => {
+        setTempoInteracting(active);
+        if (active) setHover(null);
     }, []);
     const handleEditTempoPoint = useCallback((id: string) => {
         setTempoEditRequest({ pointId: id, positionSec: null, focus: null, mode: "dialog" });
@@ -666,28 +720,11 @@ const TimeRulerInner: React.FC<{
         tAny,
     ]);
 
-    useEffect(() => {
-        if (!ctxMenu) return;
-        const close = (e: PointerEvent) => {
-            const target = e.target as HTMLElement | null;
-            if (target?.closest?.("[data-time-ruler-context-menu]")) return;
-            setCtxMenu(null);
-        };
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key === "Escape") setCtxMenu(null);
-        };
-        window.addEventListener("pointerdown", close, true);
-        window.addEventListener("keydown", onKey, true);
-        return () => {
-            window.removeEventListener("pointerdown", close, true);
-            window.removeEventListener("keydown", onKey, true);
-        };
-    }, [ctxMenu]);
-
     const handleMouseMove = useCallback(
         (e: React.MouseEvent<HTMLDivElement>) => {
-            // 右键菜单或 Tempo Map 编辑对话框打开期间不显示标尺悬浮时间。
-            if (ctxMenu || tempoDialogOpen) {
+            // 右键菜单 / Tempo Map 编辑对话框打开 / 变化点交互中：不显示标尺悬浮时间。
+            // 最后一项覆盖"悬停或拖拽变化点"——那时已有变化点自己的提示。
+            if (ctxMenu || tempoDialogOpen || tempoInteracting) {
                 setHover(null);
                 return;
             }
@@ -714,7 +751,7 @@ const TimeRulerInner: React.FC<{
             );
             setHover({ x: e.clientX - bounds.left, y: e.clientY - bounds.top, sec });
         },
-        [ctxMenu, tempoDialogOpen, pxPerSec, scrollLeft],
+        [ctxMenu, tempoDialogOpen, tempoInteracting, pxPerSec, scrollLeft],
     );
 
     const hoverTime = hover
@@ -748,7 +785,7 @@ const TimeRulerInner: React.FC<{
 
     return (
         <Box
-            ref={rulerRef}
+            ref={attachRulerRoot}
             className="bg-qt-window border-b border-qt-border relative overflow-hidden shrink-0 select-none"
             style={{ height: rulerHeight }}
             onMouseDown={(e) => {
@@ -794,10 +831,6 @@ const TimeRulerInner: React.FC<{
             }}
             onMouseMove={handleMouseMove}
             onMouseLeave={() => setHover(null)}
-            onWheel={(e) => {
-                // Prevent the ruler from becoming a separate scroll source.
-                e.preventDefault();
-            }}
         >
             <div
                 ref={contentRef}
@@ -809,7 +842,7 @@ const TimeRulerInner: React.FC<{
                 <div className="absolute inset-x-0 top-0" style={{ height: RULER_BASE_HEIGHT_PX }}>
                     <TimeRulerMarks
                         ticks={ticks}
-                        scrollLeft={scrollLeft}
+                        scrollLeft={tickWindowAnchorPx ?? scrollLeft}
                         viewportWidth={viewportWidth}
                     />
                 </div>
@@ -841,15 +874,28 @@ const TimeRulerInner: React.FC<{
                     editRequest={tempoEditRequest}
                     onEditRequestHandled={() => setTempoEditRequest(null)}
                     onDialogOpenChange={handleTempoDialogOpenChange}
+                    onTempoInteractionChange={handleTempoInteractionChange}
                     onFloatingInlineEditChange={setTempoInlineEditing}
-                />
-                <TimeRulerPlayhead
-                    playheadSec={playheadSec}
-                    pxPerSec={pxPerSec}
-                    lineRef={playheadLineRef}
-                    headRef={playheadHeadRef}
+                    subscribeViewport={subscribeViewport}
                 />
             </div>
+
+            {/*
+              播放头竖线刻意放在**内容平移层之外**，按视口坐标定位。
+              内容层带 `will-change: transform` 且被 `translateX(-小数)` 平移：合成层
+              会以自己的原点栅格化子元素，于是 1 物理像素的竖线落在半个设备像素上被
+              抗锯齿 —— 表现为"宽度忽粗忽细、颜色发淡"，与 GL 直接按设备像素绘制的
+              主体线看上去不像同一条线。移出图层后，左缘即 GL 用的同一函数结果，
+              两条线逐设备像素重合。
+            */}
+            <TimeRulerPlayhead
+                playheadSec={playheadSec}
+                positionFromProps={positionPlayheadFromProps}
+                pxPerSec={pxPerSec}
+                scrollLeft={scrollLeft}
+                lineRef={playheadLineRef}
+                headRef={playheadHeadRef}
+            />
 
             {/* 时间标尺与 Tempo Map 行之间的分隔横线：固定在标尺盒内（视口宽度），
                 不随内容平移/缩放伸缩 —— 与标尺底部边框等其他横线一致。 */}
@@ -884,11 +930,11 @@ const TimeRulerInner: React.FC<{
                     className="absolute top-1 z-40 pointer-events-none rounded border border-qt-border bg-qt-panel px-2 py-1 shadow-lg"
                     style={{ left: hover.x + 10 }}
                 >
-                    <div className="text-[12px] leading-tight text-qt-text tabular-nums whitespace-nowrap">
+                    <div className="text-qt-sm leading-tight text-qt-text tabular-nums whitespace-nowrap">
                         {hoverTime.primaryLabel}
                     </div>
                     {hoverTime.secondaryLabel ? (
-                        <div className="text-[10px] leading-tight text-qt-text-muted/60 tabular-nums whitespace-nowrap">
+                        <div className="text-qt-micro leading-tight text-qt-text-muted/60 tabular-nums whitespace-nowrap">
                             {hoverTime.secondaryLabel}
                         </div>
                     ) : null}
@@ -911,11 +957,43 @@ const TimeRulerInner: React.FC<{
                     onOpenSettings={onOpenSettings}
                     onAddTempoPointAt={handleAddTempoPointAt}
                     onEditTempoPoint={handleEditTempoPoint}
-                    onDeleteTempoPoint={handleDeleteTempoPoint}
-                    onClearTempoMap={handleClearTempoMap}
+                    // 破坏性动作不立即执行：先置位，由常驻的确认对话框在
+                    // 菜单卸载后询问，确认时才调用 handleDeleteTempoPoint。
+                    onDeleteTempoPoint={(id) => setTempoConfirm({ kind: "delete", id })}
+                    onClearTempoMap={() => setTempoConfirm({ kind: "clear" })}
                     onClose={() => setCtxMenu(null)}
                 />
             ) : null}
+
+            {/* Tempo Map 破坏性操作的确认框（常驻于标尺，不随右键菜单卸载）。 */}
+            <AppConfirmDialog
+                open={tempoConfirm !== null}
+                onOpenChange={(open) => {
+                    if (!open) setTempoConfirm(null);
+                }}
+                title={
+                    tempoConfirm?.kind === "delete"
+                        ? tAny("tempo_map_delete_point")
+                        : tAny("tempo_map_clear_dialog_title")
+                }
+                message={
+                    tempoConfirm?.kind === "delete"
+                        ? tAny("tempo_map_delete_point_confirm")
+                        : tAny("tempo_map_clear_dialog_message")
+                }
+                confirmLabel={
+                    tempoConfirm?.kind === "delete"
+                        ? tAny("tempo_map_delete_point")
+                        : tAny("tempo_map_clear_confirm")
+                }
+                cancelLabel={tAny("cancel")}
+                intent="danger"
+                onConfirm={() => {
+                    if (tempoConfirm?.kind === "delete") handleDeleteTempoPoint(tempoConfirm.id);
+                    else if (tempoConfirm?.kind === "clear") handleClearTempoMap();
+                    setTempoConfirm(null);
+                }}
+            />
         </Box>
     );
 };

@@ -1,12 +1,12 @@
-import { useState, useEffect, useMemo } from "react";
-import { Dialog, Flex, Text, TextField, Button, Select } from "@radix-ui/themes";
+import { useState, useMemo } from "react";
+import { Flex } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { ScaleKey } from "../../utils/musicalScales";
 import { useAppSelector } from "../../app/hooks";
-import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
-import { applySelectWheelChange } from "../../utils/selectWheel";
-import { useWheelScrollGuard } from "../../utils/useWheelScrollGuard";
 import { buildScaleSelectGroups } from "../../utils/scaleSelection";
+import { AppNumberField, AppSelect, AppSlider, AppSliderReadout, useDialogDraft } from "../../ui";
+import { AppDialog } from "../../ui/Dialog";
+import { AppField, AppForm } from "../../ui/Field";
 
 interface Props {
     open: boolean;
@@ -21,85 +21,58 @@ export function TransposeCentsDialog({
     defaultSmoothness = 0,
     onConfirm,
 }: Props) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const [cents, setCents] = useState("0");
-    const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
-    const paramFineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
+    const [smoothness, setSmoothness] = useDialogDraft(open, () =>
+        String(Math.round(defaultSmoothness)),
     );
 
-    useEffect(() => {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
-        if (open) setSmoothness(String(Math.round(defaultSmoothness)));
-    }, [open, defaultSmoothness]);
-
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 340 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{tAny("menu_transpose_cents")}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tf("menu_transpose_cents")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tf("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        onConfirm?.(
+                            Number(cents) || 0,
+                            Math.max(0, Math.min(100, Number(smoothness) || 0)),
+                        );
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={tf("dlg_cents")}>
+                    <AppNumberField
+                        value={Number(cents)}
+                        unit="cents"
+                        ariaLabel={tf("dlg_cents")}
+                        onCommit={(next) => setCents(String(next))}
+                    />
+                </AppField>
+                <AppField label={tf("edge_smoothness")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {tAny("dlg_cents")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={cents}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setCents(e.target.value)
-                            }
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {tAny("edge_smoothness")}
-                        </Text>
-                        <input
-                            type="range"
+                        <AppSlider
+                            value={Math.round(Number(smoothness) || 0)}
+                            unit="percent"
                             min={0}
                             max={100}
-                            step={1}
-                            value={Math.round(Number(smoothness) || 0)}
-                            onWheel={(e) => {
-                                e.preventDefault();
-                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                const step = fine ? 1 : 5;
-                                const dir = e.deltaY < 0 ? 1 : -1;
-                                const current = Math.round(Number(smoothness) || 0);
-                                const next = Math.max(0, Math.min(100, current + dir * step));
-                                setSmoothness(String(next));
-                            }}
-                            onChange={(e) => setSmoothness(e.currentTarget.value)}
-                            style={{ flex: 1 }}
+                            ariaLabel={tf("edge_smoothness")}
+                            onChange={(next) => setSmoothness(String(next))}
                         />
-                        <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
-                            {Math.round(Number(smoothness) || 0)}%
-                        </Text>
+                        <AppSliderReadout>{Math.round(Number(smoothness) || 0)}%</AppSliderReadout>
                     </Flex>
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button
-                        onClick={() => {
-                            onConfirm?.(
-                                Number(cents) || 0,
-                                Math.max(0, Math.min(100, Number(smoothness) || 0)),
-                            );
-                            onOpenChange(false);
-                        }}
-                    >
-                        {tAny("ok")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }
 
@@ -122,136 +95,86 @@ export function TransposeDegreesDialog({
     defaultSmoothness = 0,
     onConfirm,
 }: TransposeDegreesProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const [degrees, setDegrees] = useState("3");
-    const [scaleValue, setScaleValue] = useState<string>(
+    const [scaleValue, setScaleValue] = useDialogDraft<string>(open, () =>
         defaultUseProjectScale ? "__project__" : defaultScale,
     );
-    const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
-    const paramFineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
+    const [smoothness, setSmoothness] = useDialogDraft(open, () =>
+        String(Math.round(defaultSmoothness)),
     );
     const customScalePresets = useAppSelector((state) => state.session.customScalePresets);
     const scaleSelectGroups = useMemo(
         () =>
             buildScaleSelectGroups(
-                projectScaleLabel ?? tAny("project_scale_generic"),
+                projectScaleLabel ?? tf("project_scale_generic"),
                 customScalePresets,
             ),
-        [projectScaleLabel, customScalePresets, tAny],
+        [projectScaleLabel, customScalePresets, tf],
     );
 
-    useEffect(() => {
-        if (open) {
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
-            setScaleValue(defaultUseProjectScale ? "__project__" : defaultScale);
-            setSmoothness(String(Math.round(defaultSmoothness)));
-        }
-    }, [open, defaultScale, defaultSmoothness, defaultUseProjectScale]);
-
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 360 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{tAny("menu_transpose_degrees")}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tf("menu_transpose_degrees")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tf("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        onConfirm?.(
+                            Number(degrees) || 0,
+                            scaleValue,
+                            Math.max(0, Math.min(100, Number(smoothness) || 0)),
+                        );
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={tf("transpose_degrees_amount")}>
+                    <AppNumberField
+                        value={Number(degrees)}
+                        unit="integer"
+                        ariaLabel={tf("transpose_degrees_amount")}
+                        onCommit={(next) => setDegrees(String(next))}
+                    />
+                </AppField>
+                <AppField label={tf("base_scale")}>
+                    <AppSelect
+                        value={scaleValue}
+                        onValueChange={setScaleValue}
+                        options={[
+                            scaleSelectGroups.projectOption,
+                            { separator: true },
+                            ...scaleSelectGroups.builtinOptions,
+                            ...(scaleSelectGroups.customOptions.length > 0
+                                ? [{ separator: true } as const]
+                                : []),
+                            ...scaleSelectGroups.customOptions,
+                        ]}
+                    />
+                </AppField>
+                <AppField label={tf("edge_smoothness")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {tAny("transpose_degrees_amount")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={degrees}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setDegrees(e.target.value)
-                            }
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {tAny("base_scale")}
-                        </Text>
-                        <Select.Root value={scaleValue} size="2" onValueChange={setScaleValue}>
-                            <Select.Trigger
-                                style={{ flex: 1 }}
-                                onWheel={(event) => {
-                                    applySelectWheelChange({
-                                        event,
-                                        currentValue: scaleValue,
-                                        options: scaleSelectGroups.wheelOptions,
-                                        onChange: setScaleValue,
-                                    });
-                                }}
-                            />
-                            <Select.Content>
-                                <Select.Item value={scaleSelectGroups.projectOption.value}>
-                                    {scaleSelectGroups.projectOption.label}
-                                </Select.Item>
-                                <Select.Separator />
-                                {scaleSelectGroups.builtinOptions.map((option) => (
-                                    <Select.Item key={option.value} value={option.value}>
-                                        {option.label}
-                                    </Select.Item>
-                                ))}
-                                {scaleSelectGroups.customOptions.length > 0 && <Select.Separator />}
-                                {scaleSelectGroups.customOptions.map((option) => (
-                                    <Select.Item key={option.value} value={option.value}>
-                                        {option.label}
-                                    </Select.Item>
-                                ))}
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {tAny("edge_smoothness")}
-                        </Text>
-                        <input
-                            type="range"
+                        <AppSlider
+                            value={Math.round(Number(smoothness) || 0)}
+                            unit="percent"
                             min={0}
                             max={100}
-                            step={1}
-                            value={Math.round(Number(smoothness) || 0)}
-                            onWheel={(e) => {
-                                e.preventDefault();
-                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                const step = fine ? 1 : 5;
-                                const dir = e.deltaY < 0 ? 1 : -1;
-                                const current = Math.round(Number(smoothness) || 0);
-                                const next = Math.max(0, Math.min(100, current + dir * step));
-                                setSmoothness(String(next));
-                            }}
-                            onChange={(e) => setSmoothness(e.currentTarget.value)}
-                            style={{ flex: 1 }}
+                            ariaLabel={tf("edge_smoothness")}
+                            onChange={(next) => setSmoothness(String(next))}
                         />
-                        <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
-                            {Math.round(Number(smoothness) || 0)}%
-                        </Text>
+                        <AppSliderReadout>{Math.round(Number(smoothness) || 0)}%</AppSliderReadout>
                     </Flex>
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button
-                        onClick={() => {
-                            onConfirm?.(
-                                Number(degrees) || 0,
-                                scaleValue,
-                                Math.max(0, Math.min(100, Number(smoothness) || 0)),
-                            );
-                            onOpenChange(false);
-                        }}
-                    >
-                        {tAny("ok")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }
 
@@ -274,92 +197,57 @@ export function SetPitchDialog({
     defaultSmoothness = 0,
     onConfirm,
 }: SetPitchProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
-    const [note, setNote] = useState(String(defaultValue));
-    const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
-    const paramFineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
+    const { tf } = useI18n();
+    const [note, setNote] = useDialogDraft(open, () => String(defaultValue));
+    const [smoothness, setSmoothness] = useDialogDraft(open, () =>
+        String(Math.round(defaultSmoothness)),
     );
 
-    useEffect(() => {
-        if (open) {
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
-            setSmoothness(String(Math.round(defaultSmoothness)));
-            setNote(String(defaultValue));
-        }
-    }, [open, defaultSmoothness, defaultValue]);
-
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 340 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{titleText ?? tAny("menu_set_pitch")}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={titleText ?? tf("menu_set_pitch")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tf("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        const parsedNote = Number(note);
+                        const nextValue = Number.isFinite(parsedNote) ? parsedNote : defaultValue;
+                        onConfirm?.(nextValue, Math.max(0, Math.min(100, Number(smoothness) || 0)));
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={valueLabelText ?? tf("dlg_midi_note")}>
+                    <AppNumberField
+                        value={Number(note)}
+                        unit="semitone"
+                        ariaLabel={valueLabelText ?? tf("dlg_midi_note")}
+                        onCommit={(next) => setNote(String(next))}
+                    />
+                </AppField>
+                <AppField label={tf("edge_smoothness")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 100 }}>
-                            {valueLabelText ?? tAny("dlg_midi_note")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={note}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setNote(e.target.value)
-                            }
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 100 }}>
-                            {tAny("edge_smoothness")}
-                        </Text>
-                        <input
-                            type="range"
+                        <AppSlider
+                            value={Math.round(Number(smoothness) || 0)}
+                            unit="percent"
                             min={0}
                             max={100}
-                            step={1}
-                            value={Math.round(Number(smoothness) || 0)}
-                            onWheel={(e) => {
-                                e.preventDefault();
-                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                const step = fine ? 1 : 5;
-                                const dir = e.deltaY < 0 ? 1 : -1;
-                                const current = Math.round(Number(smoothness) || 0);
-                                const next = Math.max(0, Math.min(100, current + dir * step));
-                                setSmoothness(String(next));
-                            }}
-                            onChange={(e) => setSmoothness(e.currentTarget.value)}
-                            style={{ flex: 1 }}
+                            ariaLabel={tf("edge_smoothness")}
+                            onChange={(next) => setSmoothness(String(next))}
                         />
-                        <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
-                            {Math.round(Number(smoothness) || 0)}%
-                        </Text>
+                        <AppSliderReadout>{Math.round(Number(smoothness) || 0)}%</AppSliderReadout>
                     </Flex>
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button
-                        onClick={() => {
-                            const parsedNote = Number(note);
-                            const nextValue = Number.isFinite(parsedNote)
-                                ? parsedNote
-                                : defaultValue;
-                            onConfirm?.(
-                                nextValue,
-                                Math.max(0, Math.min(100, Number(smoothness) || 0)),
-                            );
-                            onOpenChange(false);
-                        }}
-                    >
-                        {tAny("ok")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }
 
@@ -370,66 +258,44 @@ interface AverageProps {
 }
 
 export function AverageDialog({ open, onOpenChange, onConfirm }: AverageProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const [strength, setStrength] = useState("100");
-    const paramFineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
-    );
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 400 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{tAny("menu_average")}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tf("menu_average")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tf("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        onConfirm?.(Math.max(0, Math.min(100, Math.round(Number(strength) || 0))));
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={tf("dlg_average_strength")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 72 }}>
-                            {tAny("dlg_average_strength")}
-                        </Text>
-                        <input
-                            type="range"
+                        <AppSlider
+                            value={Math.round(Number(strength) || 0)}
+                            unit="percent"
                             min={0}
                             max={100}
-                            step={1}
-                            value={Math.round(Number(strength) || 0)}
-                            onWheel={(e) => {
-                                e.preventDefault();
-                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                const step = fine ? 1 : 5;
-                                const dir = e.deltaY < 0 ? 1 : -1;
-                                const current = Math.round(Number(strength) || 0);
-                                const next = Math.max(0, Math.min(100, current + dir * step));
-                                setStrength(String(next));
-                            }}
-                            onChange={(e) => {
-                                setStrength(e.currentTarget.value);
-                            }}
-                            style={{ flex: 1 }}
+                            ariaLabel={tf("dlg_average_strength")}
+                            onChange={(next) => setStrength(String(next))}
                         />
-                        <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
-                            {Math.round(Number(strength) || 0)}%
-                        </Text>
+                        <AppSliderReadout>{Math.round(Number(strength) || 0)}%</AppSliderReadout>
                     </Flex>
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button
-                        onClick={() => {
-                            onConfirm?.(
-                                Math.max(0, Math.min(100, Math.round(Number(strength) || 0))),
-                            );
-                            onOpenChange(false);
-                        }}
-                    >
-                        {tAny("ok")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }
 
@@ -446,71 +312,46 @@ export function SmoothDialog({
     defaultSmoothness = 50,
     onConfirm,
 }: SmoothProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
-    const [strength, setStrength] = useState(50);
-    const paramFineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
+    const { tf } = useI18n();
+    const [strength, setStrength] = useDialogDraft(open, () =>
+        Math.max(0, Math.min(100, Math.round(defaultSmoothness))),
     );
 
-    useEffect(() => {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
-        if (open) setStrength(Math.max(0, Math.min(100, Math.round(defaultSmoothness))));
-    }, [open, defaultSmoothness]);
-
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 400 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{tAny("menu_smooth")}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tf("menu_smooth")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tf("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        onConfirm?.(Math.max(0, Math.min(100, Math.round(strength))));
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={tf("dlg_smoothness")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 72 }}>
-                            {tAny("dlg_smoothness")}
-                        </Text>
-                        <input
-                            type="range"
+                        <AppSlider
+                            value={Math.round(strength)}
+                            unit="percent"
                             min={0}
                             max={100}
-                            step={1}
-                            value={Math.round(strength)}
-                            onWheel={(e) => {
-                                e.preventDefault();
-                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                const step = fine ? 1 : 5;
-                                const dir = e.deltaY < 0 ? 1 : -1;
-                                const next = Math.max(
-                                    0,
-                                    Math.min(100, Math.round(strength) + dir * step),
-                                );
-                                setStrength(next);
-                            }}
-                            onChange={(e) => {
-                                setStrength(Number(e.currentTarget.value) || 0);
-                            }}
-                            style={{ flex: 1 }}
+                            ariaLabel={tf("dlg_smoothness")}
+                            onChange={(next) => setStrength(next)}
                         />
-                        <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
-                            {Math.round(strength)}%
-                        </Text>
+                        <AppSliderReadout>{Math.round(strength)}%</AppSliderReadout>
                     </Flex>
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button
-                        onClick={() => {
-                            onConfirm?.(Math.max(0, Math.min(100, Math.round(strength))));
-                            onOpenChange(false);
-                        }}
-                    >
-                        {tAny("ok")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }
 
@@ -529,40 +370,22 @@ interface VibratoProps {
     ) => void;
 }
 
-export function VibratoDialog({
-    open,
-    onOpenChange,
-    onConfirm,
-    editParam,
-    paramRange,
-}: VibratoProps) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
-
+export function VibratoDialog({ open, onOpenChange, onConfirm, editParam }: VibratoProps) {
+    const { tf } = useI18n();
     const isPitch = editParam === "pitch";
-    // nsf-hifigan 气声音量参数范围为 0~2，此时默认振幅钳制为 1
-    const isBreathGain =
-        !isPitch && paramRange != null && paramRange.min === 0 && paramRange.max === 2;
+    // 气声音量（breath_gain，0..2）按原值域给小振幅；dyn 落到默认 30 ——
+    // 它在 op 侧是**深度百分比**（±30% 乘性调制，静音保持静音）。
+    // 【注意】不能按"值域 0..2"来识别 breath_gain：dyn 的值域也是 0..2。
+    const isBreathGain = editParam === "breath_gain";
     const defaultAmplitude = isPitch ? "30" : isBreathGain ? "1" : "30";
 
-    const [amplitude, setAmplitude] = useState(defaultAmplitude);
-    const [rate, setRate] = useState("5.5");
-    const [attack, setAttack] = useState("50");
-    const [release, setRelease] = useState("50");
-    const [phase, setPhase] = useState("0");
-
-    // 对话框常驻挂载（useState 初始值只在首挂载生效）：每次打开必须按
-    // 当前参数重置默认值，否则对 breath_gain 打开时仍显示 pitch 的 30。
-    useEffect(() => {
-        if (open) {
-            setAmplitude(defaultAmplitude);
-            setRate("5.5");
-            setAttack("50");
-            setRelease("50");
-            setPhase("0");
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- 打开时按最新参数重置
-    }, [open, editParam, paramRange]);
+    // 对话框常驻挂载：草稿在每次「打开」时按当前参数重新播种（useDialogDraft），
+    // 否则对 breath_gain 打开时仍显示 pitch 的 30。
+    const [amplitude, setAmplitude] = useDialogDraft<string>(open, () => defaultAmplitude);
+    const [rate, setRate] = useDialogDraft(open, () => "5.5");
+    const [attack, setAttack] = useDialogDraft(open, () => "50");
+    const [release, setRelease] = useDialogDraft(open, () => "50");
+    const [phase, setPhase] = useDialogDraft(open, () => "0");
 
     // 兜底 NaN/Infinity 而不吞掉合法的 0（`Number(x) || default` 会把 0
     // 替换成默认值——对幅度/速率/相位，0 都是合法输入）。
@@ -572,104 +395,73 @@ export function VibratoDialog({
     };
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 380 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{tAny("menu_add_vibrato")}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 120 }}>
-                            {isPitch ? tAny("dlg_amplitude_cents") : tAny("dlg_amplitude")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={amplitude}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setAmplitude(e.target.value)
-                            }
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 120 }}>
-                            {tAny("dlg_rate_hz")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={rate}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setRate(e.target.value)
-                            }
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 120 }}>
-                            {tAny("dlg_attack_ms")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={attack}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setAttack(e.target.value)
-                            }
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 120 }}>
-                            {tAny("dlg_release_ms")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={release}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setRelease(e.target.value)
-                            }
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 120 }}>
-                            {tAny("dlg_phase_deg")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={phase}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setPhase(e.target.value)
-                            }
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button
-                        onClick={() => {
-                            onConfirm?.(
-                                parseNumberOr(amplitude, 30),
-                                parseNumberOr(rate, 5.5),
-                                parseNumberOr(attack, 50),
-                                parseNumberOr(release, 50),
-                                parseNumberOr(phase, 0),
-                            );
-                            onOpenChange(false);
-                        }}
-                    >
-                        {tAny("ok")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tf("menu_add_vibrato")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tf("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        onConfirm?.(
+                            parseNumberOr(amplitude, 30),
+                            parseNumberOr(rate, 5.5),
+                            parseNumberOr(attack, 50),
+                            parseNumberOr(release, 50),
+                            parseNumberOr(phase, 0),
+                        );
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={isPitch ? tf("dlg_amplitude_cents") : tf("dlg_amplitude")}>
+                    <AppNumberField
+                        value={Number(amplitude)}
+                        unit={isPitch ? "cents" : "integer"}
+                        ariaLabel={isPitch ? tf("dlg_amplitude_cents") : tf("dlg_amplitude")}
+                        onCommit={(next) => setAmplitude(String(next))}
+                    />
+                </AppField>
+                <AppField label={tf("dlg_rate_hz")}>
+                    <AppNumberField
+                        value={Number(rate)}
+                        unit="rate"
+                        ariaLabel={tf("dlg_rate_hz")}
+                        onCommit={(next) => setRate(String(next))}
+                    />
+                </AppField>
+                <AppField label={tf("dlg_attack_ms")}>
+                    <AppNumberField
+                        value={Number(attack)}
+                        unit="milliseconds"
+                        ariaLabel={tf("dlg_attack_ms")}
+                        onCommit={(next) => setAttack(String(next))}
+                    />
+                </AppField>
+                <AppField label={tf("dlg_release_ms")}>
+                    <AppNumberField
+                        value={Number(release)}
+                        unit="milliseconds"
+                        ariaLabel={tf("dlg_release_ms")}
+                        onCommit={(next) => setRelease(String(next))}
+                    />
+                </AppField>
+                <AppField label={tf("dlg_phase_deg")}>
+                    <AppNumberField
+                        value={Number(phase)}
+                        unit="integer"
+                        ariaLabel={tf("dlg_phase_deg")}
+                        onCommit={(next) => setPhase(String(next))}
+                    />
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }
 
@@ -706,213 +498,121 @@ export function QuantizeDialog({
     defaultSmoothness = 0,
     onConfirm,
 }: QuantizeProps) {
-    // 滚轮守卫：滑块滚轮步进时阻止祖先容器滚动（见 useWheelScrollGuard）。
-    const quantizeWheelGuard = useWheelScrollGuard<HTMLDivElement>('input[type="range"]');
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const toleranceDefault = defaultTolerance ?? defaultToleranceCents;
     const [unit, setUnit] = useState<"semitone" | "scale">("semitone");
-    const [scaleValue, setScaleValue] = useState<string>(
+    const [scaleValue, setScaleValue] = useDialogDraft<string>(open, () =>
         defaultUseProjectScale ? "__project__" : defaultScale,
     );
     const customScalePresets = useAppSelector((state) => state.session.customScalePresets);
     const scaleSelectGroups = useMemo(
         () =>
             buildScaleSelectGroups(
-                projectScaleLabel ?? tAny("project_scale_generic"),
+                projectScaleLabel ?? tf("project_scale_generic"),
                 customScalePresets,
             ),
-        [projectScaleLabel, customScalePresets, tAny],
+        [projectScaleLabel, customScalePresets, tf],
     );
-    const [toleranceCents, setToleranceCents] = useState<string>(String(toleranceDefault));
-    const [quantizeUnit, setQuantizeUnit] = useState<string>(String(defaultQuantizeUnit));
-    const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
-    const paramFineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
+    const [toleranceCents, setToleranceCents] = useDialogDraft(open, () =>
+        String(toleranceDefault),
     );
-
-    useEffect(() => {
-        if (open) {
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
-            setScaleValue(defaultUseProjectScale ? "__project__" : defaultScale);
-            setToleranceCents(String(toleranceDefault));
-            setQuantizeUnit(String(defaultQuantizeUnit));
-            setSmoothness(String(Math.round(defaultSmoothness)));
-        }
-    }, [
-        open,
-        defaultScale,
-        toleranceDefault,
-        defaultUseProjectScale,
-        defaultQuantizeUnit,
-        defaultSmoothness,
-    ]);
+    const [quantizeUnit, setQuantizeUnit] = useDialogDraft(open, () => String(defaultQuantizeUnit));
+    const [smoothness, setSmoothness] = useDialogDraft(open, () =>
+        String(Math.round(defaultSmoothness)),
+    );
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content
-                ref={quantizeWheelGuard}
-                style={{ maxWidth: 360 }}
-                onKeyDown={(e) => e.stopPropagation()}
-            >
-                <Dialog.Title>{tAny("menu_quantize")}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
-                    {!valueMode && (
-                        <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 80 }}>
-                                {tAny("quantize_unit")}
-                            </Text>
-                            <Select.Root
-                                value={unit}
-                                size="2"
-                                onValueChange={(v) => setUnit(v as "semitone" | "scale")}
-                            >
-                                <Select.Trigger
-                                    style={{ flex: 1 }}
-                                    onWheel={(event) => {
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue: unit,
-                                            options: ["semitone", "scale"],
-                                            onChange: (next) =>
-                                                setUnit(next as "semitone" | "scale"),
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    <Select.Item value="semitone">
-                                        {tAny("quantize_semitone")}
-                                    </Select.Item>
-                                    <Select.Item value="scale">
-                                        {tAny("quantize_scale")}
-                                    </Select.Item>
-                                </Select.Content>
-                            </Select.Root>
-                        </Flex>
-                    )}
-                    {!valueMode && unit === "scale" && (
-                        <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 80 }}>
-                                {tAny("base_scale")}
-                            </Text>
-                            <Select.Root value={scaleValue} size="2" onValueChange={setScaleValue}>
-                                <Select.Trigger
-                                    style={{ flex: 1 }}
-                                    onWheel={(event) => {
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue: scaleValue,
-                                            options: scaleSelectGroups.wheelOptions,
-                                            onChange: setScaleValue,
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    <Select.Item value={scaleSelectGroups.projectOption.value}>
-                                        {scaleSelectGroups.projectOption.label}
-                                    </Select.Item>
-                                    <Select.Separator />
-                                    {scaleSelectGroups.builtinOptions.map((option) => (
-                                        <Select.Item key={option.value} value={option.value}>
-                                            {option.label}
-                                        </Select.Item>
-                                    ))}
-                                    {scaleSelectGroups.customOptions.length > 0 && (
-                                        <Select.Separator />
-                                    )}
-                                    {scaleSelectGroups.customOptions.map((option) => (
-                                        <Select.Item key={option.value} value={option.value}>
-                                            {option.label}
-                                        </Select.Item>
-                                    ))}
-                                </Select.Content>
-                            </Select.Root>
-                        </Flex>
-                    )}
-                    {valueMode && (
-                        <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 80 }}>
-                                {tAny("quantize_unit")}
-                            </Text>
-                            <TextField.Root
-                                size="2"
-                                type="number"
-                                value={quantizeUnit}
-                                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                    setQuantizeUnit(e.target.value)
-                                }
-                                style={{ flex: 1 }}
-                            />
-                        </Flex>
-                    )}
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={toleranceCents}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setToleranceCents(e.target.value)
-                            }
-                            style={{ flex: 1 }}
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tf("menu_quantize")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tf("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        const parsed = Math.abs(Math.round(Number(toleranceCents) || 0));
+                        const parsedUnit = Math.abs(Number(quantizeUnit) || 0);
+                        onConfirm?.(
+                            valueMode ? "value" : unit,
+                            scaleValue,
+                            parsed,
+                            valueMode ? parsedUnit : undefined,
+                            Math.max(0, Math.min(100, Number(smoothness) || 0)),
+                        );
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <AppForm>
+                {!valueMode && (
+                    <AppField label={tf("quantize_unit")}>
+                        <AppSelect
+                            value={unit}
+                            onValueChange={(v) => setUnit(v as "semitone" | "scale")}
+                            options={[
+                                { value: "semitone", label: tf("quantize_semitone") },
+                                { value: "scale", label: tf("quantize_scale") },
+                            ]}
                         />
-                    </Flex>
+                    </AppField>
+                )}
+                {!valueMode && unit === "scale" && (
+                    <AppField label={tf("base_scale")}>
+                        <AppSelect
+                            value={scaleValue}
+                            onValueChange={setScaleValue}
+                            options={[
+                                scaleSelectGroups.projectOption,
+                                { separator: true },
+                                ...scaleSelectGroups.builtinOptions,
+                                ...(scaleSelectGroups.customOptions.length > 0
+                                    ? [{ separator: true } as const]
+                                    : []),
+                                ...scaleSelectGroups.customOptions,
+                            ]}
+                        />
+                    </AppField>
+                )}
+                {valueMode && (
+                    <AppField label={tf("quantize_unit")}>
+                        <AppNumberField
+                            value={Number(quantizeUnit)}
+                            unit="integer"
+                            ariaLabel={tf("quantize_unit")}
+                            onCommit={(next) => setQuantizeUnit(String(next))}
+                        />
+                    </AppField>
+                )}
+                <AppField label={valueMode ? tf("quantize_tolerance") : tf("pitch_snap_tolerance")}>
+                    <AppNumberField
+                        value={Number(toleranceCents)}
+                        unit="cents"
+                        ariaLabel={
+                            valueMode ? tf("quantize_tolerance") : tf("pitch_snap_tolerance")
+                        }
+                        onCommit={(next) => setToleranceCents(String(next))}
+                    />
+                </AppField>
+                <AppField label={tf("edge_smoothness")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {tAny("edge_smoothness")}
-                        </Text>
-                        <input
-                            type="range"
+                        <AppSlider
+                            value={Math.round(Number(smoothness) || 0)}
+                            unit="percent"
                             min={0}
                             max={100}
-                            step={1}
-                            value={Math.round(Number(smoothness) || 0)}
-                            onWheel={(e) => {
-                                // 阻止默认滚动由 Dialog.Content 上的原生非被动
-                                // 守卫完成（React onWheel 的 preventDefault 是
-                                // no-op，见 useWheelScrollGuard）。
-                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                const step = fine ? 1 : 5;
-                                const dir = e.deltaY < 0 ? 1 : -1;
-                                const current = Math.round(Number(smoothness) || 0);
-                                const next = Math.max(0, Math.min(100, current + dir * step));
-                                setSmoothness(String(next));
-                            }}
-                            onChange={(e) => setSmoothness(e.currentTarget.value)}
-                            style={{ flex: 1 }}
+                            ariaLabel={tf("edge_smoothness")}
+                            onChange={(next) => setSmoothness(String(next))}
                         />
-                        <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
-                            {Math.round(Number(smoothness) || 0)}%
-                        </Text>
+                        <AppSliderReadout>{Math.round(Number(smoothness) || 0)}%</AppSliderReadout>
                     </Flex>
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button
-                        onClick={() => {
-                            const parsed = Math.abs(Math.round(Number(toleranceCents) || 0));
-                            const parsedUnit = Math.abs(Number(quantizeUnit) || 0);
-                            onConfirm?.(
-                                valueMode ? "value" : unit,
-                                scaleValue,
-                                parsed,
-                                valueMode ? parsedUnit : undefined,
-                                Math.max(0, Math.min(100, Number(smoothness) || 0)),
-                            );
-                            onOpenChange(false);
-                        }}
-                    >
-                        {tAny("ok")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }
 
@@ -949,212 +649,120 @@ export function MeanQuantizeDialog({
     defaultSmoothness = 0,
     onConfirm,
 }: MeanQuantizeProps) {
-    // 滚轮守卫：滑块滚轮步进时阻止祖先容器滚动（见 useWheelScrollGuard）。
-    const meanQuantizeWheelGuard = useWheelScrollGuard<HTMLDivElement>('input[type="range"]');
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const toleranceDefault = defaultTolerance ?? defaultToleranceCents;
     const [unit, setUnit] = useState<"semitone" | "scale">("semitone");
-    const [scaleValue, setScaleValue] = useState<string>(
+    const [scaleValue, setScaleValue] = useDialogDraft<string>(open, () =>
         defaultUseProjectScale ? "__project__" : defaultScale,
     );
     const customScalePresets = useAppSelector((state) => state.session.customScalePresets);
     const scaleSelectGroups = useMemo(
         () =>
             buildScaleSelectGroups(
-                projectScaleLabel ?? tAny("project_scale_generic"),
+                projectScaleLabel ?? tf("project_scale_generic"),
                 customScalePresets,
             ),
-        [projectScaleLabel, customScalePresets, tAny],
+        [projectScaleLabel, customScalePresets, tf],
     );
-    const [toleranceCents, setToleranceCents] = useState<string>(String(toleranceDefault));
-    const [quantizeUnit, setQuantizeUnit] = useState<string>(String(defaultQuantizeUnit));
-    const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
-    const paramFineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
+    const [toleranceCents, setToleranceCents] = useDialogDraft(open, () =>
+        String(toleranceDefault),
     );
-
-    useEffect(() => {
-        if (open) {
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
-            setScaleValue(defaultUseProjectScale ? "__project__" : defaultScale);
-            setToleranceCents(String(toleranceDefault));
-            setQuantizeUnit(String(defaultQuantizeUnit));
-            setSmoothness(String(Math.round(defaultSmoothness)));
-        }
-    }, [
-        open,
-        defaultScale,
-        toleranceDefault,
-        defaultUseProjectScale,
-        defaultQuantizeUnit,
-        defaultSmoothness,
-    ]);
+    const [quantizeUnit, setQuantizeUnit] = useDialogDraft(open, () => String(defaultQuantizeUnit));
+    const [smoothness, setSmoothness] = useDialogDraft(open, () =>
+        String(Math.round(defaultSmoothness)),
+    );
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content
-                ref={meanQuantizeWheelGuard}
-                style={{ maxWidth: 360 }}
-                onKeyDown={(e) => e.stopPropagation()}
-            >
-                <Dialog.Title>{tAny("mean_quantize_title")}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
-                    {!valueMode && (
-                        <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 80 }}>
-                                {tAny("quantize_unit")}
-                            </Text>
-                            <Select.Root
-                                value={unit}
-                                size="2"
-                                onValueChange={(v) => setUnit(v as "semitone" | "scale")}
-                            >
-                                <Select.Trigger
-                                    style={{ flex: 1 }}
-                                    onWheel={(event) => {
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue: unit,
-                                            options: ["semitone", "scale"],
-                                            onChange: (next) =>
-                                                setUnit(next as "semitone" | "scale"),
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    <Select.Item value="semitone">
-                                        {tAny("quantize_semitone")}
-                                    </Select.Item>
-                                    <Select.Item value="scale">
-                                        {tAny("quantize_scale")}
-                                    </Select.Item>
-                                </Select.Content>
-                            </Select.Root>
-                        </Flex>
-                    )}
-                    {!valueMode && unit === "scale" && (
-                        <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 80 }}>
-                                {tAny("base_scale")}
-                            </Text>
-                            <Select.Root value={scaleValue} size="2" onValueChange={setScaleValue}>
-                                <Select.Trigger
-                                    style={{ flex: 1 }}
-                                    onWheel={(event) => {
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue: scaleValue,
-                                            options: scaleSelectGroups.wheelOptions,
-                                            onChange: setScaleValue,
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    <Select.Item value={scaleSelectGroups.projectOption.value}>
-                                        {scaleSelectGroups.projectOption.label}
-                                    </Select.Item>
-                                    <Select.Separator />
-                                    {scaleSelectGroups.builtinOptions.map((option) => (
-                                        <Select.Item key={option.value} value={option.value}>
-                                            {option.label}
-                                        </Select.Item>
-                                    ))}
-                                    {scaleSelectGroups.customOptions.length > 0 && (
-                                        <Select.Separator />
-                                    )}
-                                    {scaleSelectGroups.customOptions.map((option) => (
-                                        <Select.Item key={option.value} value={option.value}>
-                                            {option.label}
-                                        </Select.Item>
-                                    ))}
-                                </Select.Content>
-                            </Select.Root>
-                        </Flex>
-                    )}
-                    {valueMode && (
-                        <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 80 }}>
-                                {tAny("quantize_unit")}
-                            </Text>
-                            <TextField.Root
-                                size="2"
-                                type="number"
-                                value={quantizeUnit}
-                                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                    setQuantizeUnit(e.target.value)
-                                }
-                                style={{ flex: 1 }}
-                            />
-                        </Flex>
-                    )}
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={toleranceCents}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setToleranceCents(e.target.value)
-                            }
-                            style={{ flex: 1 }}
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tf("mean_quantize_title")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tf("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        const parsed = Math.abs(Math.round(Number(toleranceCents) || 0));
+                        const parsedUnit = Math.abs(Number(quantizeUnit) || 0);
+                        onConfirm?.(
+                            valueMode ? "value" : unit,
+                            scaleValue,
+                            parsed,
+                            valueMode ? parsedUnit : undefined,
+                            Math.max(0, Math.min(100, Number(smoothness) || 0)),
+                        );
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <AppForm>
+                {!valueMode && (
+                    <AppField label={tf("quantize_unit")}>
+                        <AppSelect
+                            value={unit}
+                            onValueChange={(v) => setUnit(v as "semitone" | "scale")}
+                            options={[
+                                { value: "semitone", label: tf("quantize_semitone") },
+                                { value: "scale", label: tf("quantize_scale") },
+                            ]}
                         />
-                    </Flex>
+                    </AppField>
+                )}
+                {!valueMode && unit === "scale" && (
+                    <AppField label={tf("base_scale")}>
+                        <AppSelect
+                            value={scaleValue}
+                            onValueChange={setScaleValue}
+                            options={[
+                                scaleSelectGroups.projectOption,
+                                { separator: true },
+                                ...scaleSelectGroups.builtinOptions,
+                                ...(scaleSelectGroups.customOptions.length > 0
+                                    ? [{ separator: true } as const]
+                                    : []),
+                                ...scaleSelectGroups.customOptions,
+                            ]}
+                        />
+                    </AppField>
+                )}
+                {valueMode && (
+                    <AppField label={tf("quantize_unit")}>
+                        <AppNumberField
+                            value={Number(quantizeUnit)}
+                            unit="integer"
+                            ariaLabel={tf("quantize_unit")}
+                            onCommit={(next) => setQuantizeUnit(String(next))}
+                        />
+                    </AppField>
+                )}
+                <AppField label={valueMode ? tf("quantize_tolerance") : tf("pitch_snap_tolerance")}>
+                    <AppNumberField
+                        value={Number(toleranceCents)}
+                        unit="cents"
+                        ariaLabel={
+                            valueMode ? tf("quantize_tolerance") : tf("pitch_snap_tolerance")
+                        }
+                        onCommit={(next) => setToleranceCents(String(next))}
+                    />
+                </AppField>
+                <AppField label={tf("edge_smoothness")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {tAny("edge_smoothness")}
-                        </Text>
-                        <input
-                            type="range"
+                        <AppSlider
+                            value={Math.round(Number(smoothness) || 0)}
+                            unit="percent"
                             min={0}
                             max={100}
-                            step={1}
-                            value={Math.round(Number(smoothness) || 0)}
-                            onWheel={(e) => {
-                                // 阻止默认滚动由 Dialog.Content 上的原生非被动
-                                // 守卫完成（React onWheel 的 preventDefault 是
-                                // no-op，见 useWheelScrollGuard）。
-                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                const step = fine ? 1 : 5;
-                                const dir = e.deltaY < 0 ? 1 : -1;
-                                const current = Math.round(Number(smoothness) || 0);
-                                const next = Math.max(0, Math.min(100, current + dir * step));
-                                setSmoothness(String(next));
-                            }}
-                            onChange={(e) => setSmoothness(e.currentTarget.value)}
-                            style={{ flex: 1 }}
+                            ariaLabel={tf("edge_smoothness")}
+                            onChange={(next) => setSmoothness(String(next))}
                         />
-                        <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
-                            {Math.round(Number(smoothness) || 0)}%
-                        </Text>
+                        <AppSliderReadout>{Math.round(Number(smoothness) || 0)}%</AppSliderReadout>
                     </Flex>
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button
-                        onClick={() => {
-                            const parsed = Math.abs(Math.round(Number(toleranceCents) || 0));
-                            const parsedUnit = Math.abs(Number(quantizeUnit) || 0);
-                            onConfirm?.(
-                                valueMode ? "value" : unit,
-                                scaleValue,
-                                parsed,
-                                valueMode ? parsedUnit : undefined,
-                                Math.max(0, Math.min(100, Number(smoothness) || 0)),
-                            );
-                            onOpenChange(false);
-                        }}
-                    >
-                        {tAny("ok")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }

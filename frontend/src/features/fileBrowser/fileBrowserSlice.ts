@@ -3,8 +3,13 @@ import { fileBrowserApi, type FileEntry } from "../../services/api/fileBrowser";
 
 export type SortMode = "name" | "date" | "size";
 
-interface FileBrowserState {
-    visible: boolean;
+/**
+ * 本分片的状态类型。
+ *
+ * 导出是因为 `RootState` 由它组合而成 —— SDK 的声明产出需要能命名它
+ * （否则 `tsc --emitDeclarationOnly` 报 TS4023「cannot be named」）。
+ */
+export interface FileBrowserState {
     currentPath: string;
     entries: FileEntry[];
     loading: boolean;
@@ -31,7 +36,6 @@ function getInitialPath(): string {
 }
 
 const initialState: FileBrowserState = {
-    visible: false,
     currentPath: getInitialPath(),
     entries: [],
     loading: false,
@@ -76,12 +80,6 @@ const fileBrowserSlice = createSlice({
     name: "fileBrowser",
     initialState,
     reducers: {
-        toggleVisible(state) {
-            state.visible = !state.visible;
-        },
-        setVisible(state, action: PayloadAction<boolean>) {
-            state.visible = action.payload;
-        },
         setPreviewVolume(state, action: PayloadAction<number>) {
             state.previewVolume = Math.max(0, Math.min(1, action.payload));
         },
@@ -147,8 +145,6 @@ const fileBrowserSlice = createSlice({
 });
 
 export const {
-    toggleVisible,
-    setVisible,
     setPreviewVolume,
     setPreviewingFile,
     setSearchQuery,

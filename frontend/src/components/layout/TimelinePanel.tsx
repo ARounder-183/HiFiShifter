@@ -30,10 +30,15 @@
  * @see docs/superpowers/specs/2026-09-13-timeline-single-path-design.md
  */
 import React, { useMemo, Profiler } from "react";
-import { Flex, Dialog, Button, Text } from "@radix-ui/themes";
+import { Flex } from "@radix-ui/themes";
+import { AppDialog } from "../../ui/Dialog";
+import { AppContextMenu } from "../../ui/Menu";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { useAppSelector } from "../../app/hooks";
+import { DockGutter } from "../dock/DockGutter";
+import { DEFAULT_GUTTER_SIZES, GUTTER_LIMITS } from "../../features/dock/dockSchema";
+import { setGutterSize } from "../../features/dock/dockSlice";
 import { shallowEqual } from "react-redux";
 import { isModifierActive } from "../../features/keybindings/keybindingsSlice";
 import { resolveClipDragCopyMode } from "./timeline/hooks/clipDragCopyMode";
@@ -87,6 +92,7 @@ import {
     importMultipleAudioAtPosition,
     setClipStateRemote,
     setClipsStateBulkRemote,
+    scanAndConvertFakeStereoRemote,
     setClipFades,
     setClipGain,
     setClipPlaybackRate,
@@ -237,7 +243,7 @@ import {
     computeAutoFollowScrollLeft,
     computeFocusCursorScrollLeft,
 } from "../../utils/autoFollowScroll";
-import { readDevicePixelRatio, snapToDevicePx } from "../../utils/devicePixelLine";
+import { createTimelineAxis, playheadLineLeftPx } from "./renderKernel/timelineAxis";
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
 import { isMirrorEcho } from "./timeline/scrollEcho";
 import {
@@ -246,11 +252,10 @@ import {
     type ClipFormantMorph,
 } from "../../features/session/sessionTypes";
 import { ClipFormantToolWindow } from "./timeline/clip/ClipFormantToolWindow";
+import { timelineViewportBus } from "../../utils/timelineViewportBus";
 
 const TimelineTransportBridge = React.memo(function TimelineTransportBridge(props: {
     pxPerSecRef: React.MutableRefObject<number>;
-    rulerPlayheadLineRef: React.MutableRefObject<HTMLDivElement | null>;
-    rulerPlayheadHeadRef: React.MutableRefObject<HTMLDivElement | null>;
     /**
      * 模式无关的视口访问器。
      *
@@ -269,8 +274,6 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
 }) {
     const {
         pxPerSecRef,
-        rulerPlayheadLineRef,
-        rulerPlayheadHeadRef,
         viewport,
         visualPlayheadRef,
         syncScrollLeft,
@@ -310,7 +313,6 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                 // 造成跳变。内核宿主也经 `playheadSec` getter 读同一份真值
                 // （见 `timelineKernelHost.readPlayheadSec`）。
                 visualPlayheadRef.current = visualPlayheadSec;
-                const playheadLeftPx = visualPlayheadSec * pxPerSecRef.current;
 
                 // 自动滚动先行：syncScrollLeft 内部会用 Redux 同步播放头（滞后于
                 // 视觉插值）重写播放头位置 —— 若先定位播放头再滚动，播放头每帧
@@ -330,19 +332,15 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                     }
                 }
 
-                // 标尺播放头定位（在自动滚动之后，用最新的视觉插值位置）。
-                // 写入前吸附到设备像素边界（readDevicePixelRatio 每帧现读，
-                // 浏览器缩放/跨屏后下一帧自愈）：分数 DPR 下不吸附的落点相位
-                // 随播放连续变化，1/2 物理像素交替 —— 即"播放时粗细不一"。
-                // 轨道区播放头不在这里写：它由内核在 draw() 内自绘（见下方重绘请求）。
-                const dpr = readDevicePixelRatio();
-                if (rulerPlayheadLineRef.current) {
-                    rulerPlayheadLineRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
-                }
-                if (rulerPlayheadHeadRef.current) {
-                    rulerPlayheadHeadRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
-                }
-
+                // 标尺播放头线**不在这里写**：它由内核在 draw() 内与轨道区播放头
+                // 一起写（同一次帧提交、同一份内核视口、同一个 `playheadLineLeftPx`）。
+                //
+                // 【为什么必须收走】这里曾用 `visualPlayheadSec × pxPerSec`（**内容
+                // 坐标**）写同一条线，而线现在位于内容平移层之外（视口坐标），两者
+                // 差一个 scrollLeft；再加上 React 渲染路径与内核路径，同一条线一度有
+                // 三个写者、两套坐标。内核的去重逻辑还会因此**跳过**自己的正确写入，
+                // 让错误的坐标一直留到下一次滚动 —— 这正是"标尺线与主体线不像同一条
+                // 线"的根因之一。
                 // 请求内核重绘轨道区播放头。
                 //
                 // 【为什么必须显式请求】内核的渲染循环是纯脏标记驱动的
@@ -357,8 +355,6 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
             [
                 autoScrollEnabled,
                 pxPerSecRef,
-                rulerPlayheadHeadRef,
-                rulerPlayheadLineRef,
                 viewport,
                 syncScrollLeft,
                 transport.isPlaying,
@@ -454,8 +450,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const importTarget = midiDialogSource === "dragDrop" ? importTargetDragDrop : importTargetMenu;
     const onImportTargetChange =
         midiDialogSource === "dragDrop" ? onImportTargetDragDropChange : onImportTargetMenuChange;
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { t, tf } = useI18n();
+    // 轨道头宽度是**布局状态**的一部分（用户调过的尺寸必须随布局持久化），
+    // 取代了原先写死的 `w-64`。
+    const trackHeaderWidthPx = useAppSelector(
+        (state) => state.dock.layout.gutters.timelineTrackHeaderPx,
+    );
+    const trackHeaderRef = React.useRef<HTMLDivElement | null>(null);
     const ignoreGrouping = useAppSelector((state) => state.session.ignoreGrouping);
     const disabledGroupIds = useAppSelector((state) => state.session.disabledGroupIds);
     /**
@@ -626,6 +627,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         contentHeight,
         dynamicProjectSec,
         timelineTicks,
+        scrollLeft,
         rulerScrollLeft,
         verticalZoomKb,
         paramFineAdjustKb,
@@ -668,6 +670,34 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         viewportAccessRef.current = createTimelineViewportAccess({ scrollRef, kernelHostRef });
     }
     const viewportAccess = viewportAccessRef.current;
+
+    /**
+     * 标尺播放头（竖线 + 倒三角）的**挂载定位**。
+     *
+     * 两者都由内核逐帧写（与轨道区播放头同源同帧、同一视口左缘），但内核宿主是在
+     * 被动 effect 里创建的、首帧要等一个 rAF；在那之前元素若没有 `left`，会停在
+     * 静态位置（左缘）闪一帧。这里用绘制前执行的 layout effect 补上初值 —— 之后由
+     * 内核接管（含倒三角，见 `TimelineKernelDomSync.rulerPlayheadHead`）。
+     */
+    React.useLayoutEffect(() => {
+        const left = playheadLineLeftPx(
+            createTimelineAxis({
+                pxPerSec: pxPerSecRef.current,
+                scrollLeftPx: viewportAccess.getScrollLeft(),
+                viewportWidthPx: viewportAccess.getViewportWidth(),
+                dpr: window.devicePixelRatio || 1,
+            }),
+            visualPlayheadSecRef.current,
+        );
+        if (rulerPlayheadLineRef.current) {
+            rulerPlayheadLineRef.current.style.left = `${left}px`;
+        }
+        if (rulerPlayheadHeadRef.current) {
+            rulerPlayheadHeadRef.current.style.left = `${left}px`;
+        }
+        // 只在挂载时定位：之后的每一次写入都由内核负责（同一次帧提交）。
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     /**
      * clientY → 轨道 id（模式无关）。
@@ -732,15 +762,40 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 // 触发重渲染，下面的 layout effect 也就永远不会跑，请求会被搁置。
                 pendingKernelZoomRef.current = null;
                 viewportAccess.setZoomAndScroll(next.pxPerSec, next.scrollLeft);
+                // 同上：位置变了，标尺刻度的窗口就必须跟着变（这一支不改 `pxPerSec`，
+                // 不会触发下面的 layout effect，所以位置要在这里自己提交）。
+                setScrollLeftState(next.scrollLeft);
                 return;
             }
             pendingKernelZoomRef.current = next;
             // 只改缩放：位置由下面的 layout effect 与缩放**原子**应用（分两次写会让
             // 中间那一帧出现"新缩放 + 旧位置"的错位）。
             setPxPerSec(next.pxPerSec);
+            // 【位置也必须与缩放**同批**提交给 React】标尺刻度是按 React 的
+            // `scrollLeft` 状态取窗口的（见 `useTimelineState` 的 `tickAxis`），而缩放
+            // 会大幅改变位置：以光标为锚放大 10 倍时，位置可以从 1000px 直接跳到
+            // 14500px。若这一批只提交 `pxPerSec`，刻度的窗口仍按**旧位置**生成 ——
+            // 可见视口完全落在窗口之外，标尺文字整片消失（用户报告的"水平缩放时标尺
+            // 文本闪烁 / 消失"）；小步缩放则表现为窗口错位一帧的闪烁。量化提交
+            // （`onScrollLeftCommit`）虽然最终会纠正它，但那要等到下一次 rAF。
+            // 同批提交后，标尺刻度、内核视口（layout effect 里原子应用）与 GL 网格
+            // 落在同一帧的同一投影上。
+            setScrollLeftState(next.scrollLeft);
         },
-        [pxPerSec, viewportAccess],
+        [pxPerSec, setPxPerSec, setScrollLeftState, viewportAccess],
     );
+    /**
+     * 标尺上的滚轮：**与画布内的滚轮完全同义**。
+     *
+     * 标尺是内核容器**之外**的 DOM 条，过去它的 `onWheel` 只 `preventDefault` 把滚轮
+     * 吞掉（而那行在 React 的 passive 监听下还是空操作），用户在标尺上滚轮毫无反应。
+     * 现在只做"转交"：把事件原样交给内核的滚轮入口，keybinding 判定（自由滚动 /
+     * 横纵滚动 / 横纵缩放）、锚点换算、上下限全部复用画布那一套，标尺不定义第二种语义。
+     */
+    const handleRulerWheel = React.useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+        kernelHostRef.current?.dispatchWheel(event as unknown as WheelEvent);
+    }, []);
+
     React.useLayoutEffect(() => {
         const pending = pendingKernelZoomRef.current;
         if (pending === null) return;
@@ -1946,6 +2001,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             s.autoCrossfadeEnabled,
             s.snapEnabled,
             sessionRef,
+            slipEditKb,
             snapTimelineDetailed,
         ],
     );
@@ -2261,6 +2317,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             s.autoCrossfadeEnabled,
             sessionRef,
             setMultiSelectedClipIds,
+            setMultiSelectedClipIdsFromAction,
         ],
     );
 
@@ -2376,7 +2433,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 拖回原位所需要的（旧实现同样无条件调用）。
             applyRippleFollowerShift(dispatch, origin.rippleFollowers, rippleRightDelta);
         },
-        [dispatch, store],
+        [dispatch],
     );
 
     /**
@@ -2806,7 +2863,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 );
             }
         },
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- pxPerSec 随缩放变化，加入会让 trim 预览回调在缩放期间反复重建（既有热路径口径，弧长换算读创建时快照）
         [
+            applyKernelTrimRipplePreview,
             beginKernelGestureInteraction,
             dispatch,
             sessionRef,
@@ -2897,7 +2956,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 }),
             );
         },
-        [dispatch, noSnapKb, s.snapEnabled, snapTimelineDetailed],
+        [
+            beginKernelGestureInteraction,
+            dispatch,
+            noSnapKb,
+            s.snapEnabled,
+            sessionRef,
+            snapTimelineDetailed,
+        ],
     );
 
     /**
@@ -2945,7 +3011,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 })
                 .finally(endKernelGestureInteraction);
         },
-        [dispatch, endKernelGestureInteraction],
+        [dispatch, endKernelGestureInteraction, sessionRef],
     );
 
     const handleKernelTrimCommit = React.useCallback(
@@ -3593,7 +3659,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 }
             });
         },
-        [beginKernelGestureInteraction, dispatch, multiSelectedClipIds, sessionRef],
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- pxPerSec 随缩放变化，加入会让淡变预览回调在缩放期间反复重建（既有热路径口径，曲率换算读创建时快照）
+        [
+            beginKernelGestureInteraction,
+            dispatch,
+            fadeCurvatureKb,
+            multiSelectedClipIds,
+            sessionRef,
+        ],
     );
 
     /** 内核淡变角收尾：提交或回滚（取消时两侧一起还原）。 */
@@ -3701,7 +3774,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     /** 框选期间「已同步为焦点 clip」的去重（避免每帧重复一次同样的后端请求）。 */
     const kernelBoxSelectSingleRef = React.useRef<string | null>(null);
     const multiSelectedIdsRef = React.useRef<string[]>([]);
-    // eslint-disable-next-line react-hooks/refs -- 选择镜像：框选手势需在回调里读最新值
     multiSelectedIdsRef.current = multiSelectedClipIds;
 
     /**
@@ -3742,7 +3814,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 kernelBoxSelectSingleRef.current = null;
             }
         },
-        [dispatch, setMultiSelectedClipIds],
+        [dispatch, sessionRef, setMultiSelectedClipIds],
     );
 
     /** 内核框选收尾：取消时恢复拖动前的选择。 */
@@ -3966,21 +4038,23 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
 
     /**
-     * 内核双击 clip：请求参数编辑器按 clip 起止范围创建选区。
+     * 内核右键手势（按住 `modifier.clipRangeToParamSelection`，默认 Alt，右键单击
+     * clip）：请求参数编辑器按 clip 起止范围创建选区。
      *
-     * 与旧实现（`ClipItem` 的双击分支）同源：关闭右键菜单 → 派发
-     * `hifi:editOp/selectClipParamRange`，交互焦点随之切到参数编辑器侧。
+     * 左键双击 clip 主体已不再走此入口（易误触且会抢走 clip 的复制/剪切焦点），
+     * 「在参数编辑器内为 Clip 创建选区」统一由上述右键手势承担。关闭右键菜单 →
+     * 派发 `hifi:editOp/selectClipParamRange`，交互焦点随之切到参数编辑器侧。
      * 用 window 事件而不是直接调 store：参数编辑器在另一棵子树里监听它，
      * 这条契约与渲染模式无关（内核 / 旧实现共用同一入口）。
      */
-    const handleKernelDoubleClickClip = React.useCallback(
+    const handleKernelClipParamSelectionGesture = React.useCallback(
         (clipId: string, mode: "replace" | "toggle" = "replace") => {
             clearContextMenu();
             window.dispatchEvent(
                 new CustomEvent("hifi:editOp", {
-                    // mode 缺省 replace（不传即旧行为）；按住
-                    // `modifier.clipRangeToParamSelection`（默认 Alt）双击时内核
-                    // 传 "toggle"，由参数编辑器并入 / 挖掉该块范围。
+                    // mode 缺省 replace；按住 `modifier.clipRangeToParamSelection`
+                    // （默认 Alt）右键单击时内核传 "toggle"，由参数编辑器并入 / 挖掉
+                    // 该块范围。
                     detail: { op: "selectClipParamRange", clipId, mode },
                 }),
             );
@@ -4207,23 +4281,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     } | null>(null);
 
     /** 内核双击名称区 → 进入重命名。 */
-    const handleKernelRenameClipStart = React.useCallback((clipId: string) => {
-        const clip = sessionRef.current.clips.find((item) => item.id === clipId);
-        if (clip === undefined) return;
-        setKernelInlineEdit({
-            clipId,
-            field: "name",
-            // 初值必须是**活动 Take 的名字**（`activeClipTakeName`），不是容器
-            // clip 的 `name`。
-            //
-            // 提交方（`commitTrackLaneRename` → `renameClipTakeRemote`）在多 Take
-            // clip 上写的是**当前 Take 的名字**：预填容器名会让"双击 + 直接回车"
-            // 把 Take 名**改成容器名**，而用户什么都没输入。旧实现 `ClipHeader`
-            // 的 `editTakeName` 同源。
-            initialValue: activeClipTakeName(clip),
-            inputMode: "text",
-        });
-    }, []);
+    const handleKernelRenameClipStart = React.useCallback(
+        (clipId: string) => {
+            const clip = sessionRef.current.clips.find((item) => item.id === clipId);
+            if (clip === undefined) return;
+            setKernelInlineEdit({
+                clipId,
+                field: "name",
+                // 初值必须是**活动 Take 的名字**（`activeClipTakeName`），不是容器
+                // clip 的 `name`。
+                //
+                // 提交方（`commitTrackLaneRename` → `renameClipTakeRemote`）在多 Take
+                // clip 上写的是**当前 Take 的名字**：预填容器名会让"双击 + 直接回车"
+                // 把 Take 名**改成容器名**，而用户什么都没输入。旧实现 `ClipHeader`
+                // 的 `editTakeName` 同源。
+                initialValue: activeClipTakeName(clip),
+                inputMode: "text",
+            });
+        },
+        [sessionRef],
+    );
 
     /**
      * 内核单击增益 / 速率标签 → 进入行内编辑。
@@ -4241,7 +4318,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     : formatEditNumber(Math.min(12, Math.max(-12, gainToDb(clip.gain))));
             setKernelInlineEdit({ clipId, field, initialValue, inputMode: "decimal" });
         },
-        [],
+        [sessionRef],
     );
 
     /**
@@ -4681,14 +4758,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 }
             });
         },
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- s.snapEnabled 为设置态，加入会让交叉抓手预览回调随设置切换重建（既有热路径口径，手势中读创建时快照）
         [
             beginKernelGestureInteraction,
             crossfadeGripKb,
             dispatch,
             // 曲率分支用它把归一化 t 换算回屏幕距离权重。
             fadeCurvatureKb,
+            noSnapKb,
             pxPerSec,
             sessionRef,
+            snapTimelineDetailed,
         ],
     );
 
@@ -4827,7 +4907,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 .catch(() => undefined)
                 .finally(endKernelGestureInteraction);
         },
-        [dispatch, endKernelGestureInteraction, sessionRef, s.autoCrossfadeEnabled],
+        [dispatch, endKernelGestureInteraction, sessionRef],
     );
 
     /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
@@ -4836,7 +4916,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onSeek: handleKernelSeek,
             onSeekTo: handleKernelSeekTo,
             onSelectClip: handleKernelSelectClip,
-            onDoubleClickClip: handleKernelDoubleClickClip,
+            onClipParamSelectionGesture: handleKernelClipParamSelectionGesture,
             onToggleClipMute: handleKernelToggleClipMute,
             onToggleGroupDisabled: handleToggleGroupDisabled,
             onOpenClipFormant: handleKernelOpenClipFormant,
@@ -4899,6 +4979,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             handleKernelSnapOffsetCommit,
             handleKernelBoxSelectPreview,
             handleKernelBoxSelectCommit,
+            handleKernelBoxSelectToParamSelection,
             handleKernelContextMenu,
             handleKernelFadeContextMenu,
             handleKernelFadeHover,
@@ -4909,7 +4990,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 原先同样漏在依赖数组外：`useMemo` 会继续持有**首帧闭包**，表现为
             // 「改了设置 / 选择后，内核手势仍按旧值执行」。依赖数组必须与
             // useMemo 体内引用的回调一一对应。
-            handleKernelDoubleClickClip,
+            handleKernelClipParamSelectionGesture,
             handleKernelToggleClipMute,
             handleToggleGroupDisabled,
             handleKernelOpenClipFormant,
@@ -5213,6 +5294,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         // 被误当成用户输入收下，形成「内核 → DOM → 内核」的回退循环。
         const host = kernelHostRef.current;
         if (host != null) {
+            // 画布竖直缩放在途（React 行高未落地）：窗口内的 scroll 事件是内容高
+            // 变化的钳制回弹 / 滚动锚定补偿，与"上次写入值"必然不符，绝不能当用户
+            // 输入回灌——否则会把视口从锚点位置拽回（竖直抽动）。位置由宿主在行高
+            // 落地后补写，见 `verticalZoomInFlight`。
+            if (host.isVerticalZoomInFlight()) {
+                return;
+            }
             if (
                 isMirrorEcho({
                     mirroredPx: host.getMirroredTrackListScrollTop(),
@@ -5267,6 +5355,31 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     // 这里不需要再纠正任何 DOM。
 
     /**
+     * 标尺播放头元素（竖线 / 倒三角）的挂载回调。
+     *
+     * 【为什么挂载时要请求一帧】两者的位置只由内核在帧提交里写，而元素可能在
+     * **播放头静止**时被重建（面板重挂载 / 视图切换）：新节点没有任何 `left`，
+     * 等价于 `left: auto` ⇒ 落在静态位置（左缘 = 工程起始处）。此时若没有任何东西
+     * 弄脏帧（暂停且不滚动），内核不提交，元素就**停在工程起始处不动**。元素一出现
+     * 就请求一帧，写入器随即按当前视口定位它（去重键含元素身份，见
+     * `createPlayheadElementWriter`）。
+     */
+    const attachRulerPlayheadLine = React.useCallback(
+        (element: HTMLDivElement | null) => {
+            rulerPlayheadLineRef.current = element;
+            if (element !== null) kernelHostRef.current?.invalidatePlayhead();
+        },
+        [rulerPlayheadLineRef],
+    );
+    const attachRulerPlayheadHead = React.useCallback(
+        (element: HTMLDivElement | null) => {
+            rulerPlayheadHeadRef.current = element;
+            if (element !== null) kernelHostRef.current?.invalidatePlayhead();
+        },
+        [rulerPlayheadHeadRef],
+    );
+
+    /**
      * 标尺节点（内核模式与旧模式共用同一实例）。
      *
      * 标尺是重交互、低频变化的 DOM 子树（刻度标签 / Tempo Map 旗帜拖拽 / 内联编辑 /
@@ -5275,22 +5388,29 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * transform 写入（见 kernel host 的 syncDom）。
      */
     const timeRulerNode = (
-        // playheadSec 传提交值（而非渲染期读 ref）：视觉插值由
-        // `rulerPlayheadLineRef` / `rulerPlayheadHeadRef` 命令式驱动；React 仅在
-        // 该值真正变化时重写 style.left，写入的是最新提交位置而非陈旧值。
+        // playheadSec 传提交值（而非渲染期读 ref）：`positionPlayheadFromProps={false}`
+        // 时 React **不写**这两个元素的位置，视觉插值完全由内核逐帧命令式驱动
+        // （含倒三角，见 `TimelineKernelDomSync.rulerPlayheadHead`）；`playheadSec`
+        // 只作为其它消费方（如内联编辑）的提交值来源。
         //
         // 标尺不消费实时滚动位置：刻度与可见范围都按量化的 `rulerScrollLeft` 生成
         // （缓冲已保证覆盖视口），这样滚动期间 `TimeRulerMarks` 的 memo 不会失效，
         // 整棵刻度子树不必每帧重渲染。内核模式下水平滚动由内核在 rAF 内直接写
         // 内容层 transform（不经 React），这条量化约定依然成立。
         <TimeRuler
-            scrollLeft={rulerScrollLeft}
+            // 交互换算（悬停时间 / Tempo Map 可见段 / 播放头）用**尽可能新**的滚动
+            // 位置；刻度切片用下面的量化锚点。一个字段身兼两职时，量化值会把悬停
+            // 时间算偏最多一个量化步长（≤255px 的位移对应的秒数）。
+            scrollLeft={scrollLeft}
+            tickWindowAnchorPx={rulerScrollLeft}
             ticks={timelineTicks}
             pxPerSec={pxPerSec}
             viewportWidth={viewportWidth}
             playheadSec={s.playheadSec}
-            playheadLineRef={rulerPlayheadLineRef}
-            playheadHeadRef={rulerPlayheadHeadRef}
+            positionPlayheadFromProps={false}
+            onRulerWheel={handleRulerWheel}
+            playheadLineRef={attachRulerPlayheadLine}
+            playheadHeadRef={attachRulerPlayheadHead}
             contentRef={rulerContentRef}
             timeContext={timeContext}
             primaryUnit={s.primaryTimeUnit}
@@ -5299,7 +5419,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onSecondaryUnitChange={handleSecondaryUnitChange}
             onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
             onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
-            t={t as (key: string) => string}
+            t={tf}
             tempoMap={s.tempoMap}
             tempoMapVisible={s.tempoMapVisible}
             projectSec={dynamicProjectSec}
@@ -5314,6 +5434,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             customScalePresets={s.customScalePresets}
             onTempoMapChange={handleTempoMapChange}
             onTempoMapCommit={handleTempoMapCommit}
+            subscribeViewport={timelineViewportBus.subscribe}
             onMouseDown={(e) => {
                 // 数位笔 / 触摸不触发标尺 seek：pen 的兼容 mouse 事件（无
                 // pointerType）会让悬停画线起笔误定位播放头。
@@ -5364,11 +5485,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     }
                 };
 
+                // 拖拽期间**视口变化**（滚轮滚动/缩放、键盘滚动、跨面板同步）后按最后
+                // 指针位置重放一次落点。
+                //
+                // 【为什么必须重放】落点 = 指针客户端 X 换算出的时间，而换算依赖当前
+                // 视口（`readScrollLeft` 是实时的）。滚轮**不产生任何 mousemove**，视口
+                // 变了而指针没动时若不重放，播放头就停在旧落点上、与光标脱开，直到用户
+                // 再动一下鼠标才归位（用户报告的"拖拽中滚动/缩放导致偏移"）。订阅总线
+                // 而非 React 属性：总线在每次视口提交时**同步**广播，重放与绘制同帧。
+                const unsubscribeViewport = timelineViewportBus.subscribe(() => {
+                    if (planSeekGesture("move", isPlayingNow()).playhead === "preview") {
+                        updateAt(lastClientX, false);
+                    }
+                });
+
                 // 失焦取消：切屏期间 mouseup 不送达本窗口，blur 时以
                 // 最后一次已知位置收尾（提交 seek + 清吸附高亮），
                 // 防止监听器泄漏：否则下次点击会被旧的 onEnd 消费。
                 const finish = () => {
                     unregisterAbort();
+                    unsubscribeViewport();
                     window.removeEventListener("mousemove", onMove, true);
                     window.removeEventListener("mouseup", onEnd, true);
                     window.removeEventListener("mouseleave", onEnd, true);
@@ -5592,38 +5728,72 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     }
                 }}
             >
-                <TrackList
-                    t={t}
-                    tracks={s.tracks}
-                    trackMeters={s.trackMeters}
-                    selectedTrackId={s.selectedTrackId}
-                    rowHeight={rowHeight}
-                    setRowHeight={setRowHeight}
-                    verticalZoomKb={verticalZoomKb}
-                    paramFineAdjustKb={paramFineAdjustKb}
-                    trackVolumeUi={trackVolumeUi}
-                    listScrollRef={trackListScrollRef}
-                    onSelectTrack={handleSelectTrack}
-                    onRemoveTrack={handleRemoveTrack}
-                    onMoveTrack={handleMoveTrack}
-                    copyDragKb={copyDragKb}
-                    onDuplicateTrackTo={handleDuplicateTrackTo}
-                    onToggleMute={handleToggleTrackMute}
-                    onToggleSolo={handleToggleTrackSolo}
-                    onToggleCompose={handleToggleTrackCompose}
-                    onVolumeUiChange={handleTrackVolumeUiChange}
-                    onVolumeCommit={handleTrackVolumeCommit}
-                    onAddTrack={handleAddTrack}
-                    onTrackColorChange={handleTrackColorChange}
-                    onAlgoChange={handleTrackAlgoChange}
-                    onTrackNameChange={handleTrackNameChange}
-                    onDuplicateTrack={handleDuplicateTrack}
-                    onCreateTrackBelow={handleCreateTrackBelow}
-                    onScrollTopChange={handleTrackListScrollTopChange}
-                    headerHeight={timeRulerHeightPx(
-                        Boolean(s.tempoMap && s.tempoMap.points.length > 0 && s.tempoMapVisible),
-                    )}
-                    bottomGutterHeightPx={horizontalScrollbarGutterPx}
+                {/*
+                 * 轨道头宽度由布局状态驱动（`gutters.timelineTrackHeaderPx`），
+                 * 取代原先写死的 `w-64`。外层 div 持有宽度：拖动时只改它的
+                 * 内联样式，TrackList 自身填满即可，避免 memo 组件因宽度 prop
+                 * 变化而重渲染。
+                 */}
+                <div
+                    ref={trackHeaderRef}
+                    className="shrink-0 flex min-h-0"
+                    style={{ width: trackHeaderWidthPx }}
+                >
+                    <TrackList
+                        t={t}
+                        tracks={s.tracks}
+                        trackMeters={s.trackMeters}
+                        selectedTrackId={s.selectedTrackId}
+                        rowHeight={rowHeight}
+                        setRowHeight={setRowHeight}
+                        verticalZoomKb={verticalZoomKb}
+                        paramFineAdjustKb={paramFineAdjustKb}
+                        trackVolumeUi={trackVolumeUi}
+                        listScrollRef={trackListScrollRef}
+                        onSelectTrack={handleSelectTrack}
+                        onRemoveTrack={handleRemoveTrack}
+                        onMoveTrack={handleMoveTrack}
+                        copyDragKb={copyDragKb}
+                        onDuplicateTrackTo={handleDuplicateTrackTo}
+                        onToggleMute={handleToggleTrackMute}
+                        onToggleSolo={handleToggleTrackSolo}
+                        onToggleCompose={handleToggleTrackCompose}
+                        onVolumeUiChange={handleTrackVolumeUiChange}
+                        onVolumeCommit={handleTrackVolumeCommit}
+                        onAddTrack={handleAddTrack}
+                        onTrackColorChange={handleTrackColorChange}
+                        onAlgoChange={handleTrackAlgoChange}
+                        onTrackNameChange={handleTrackNameChange}
+                        onDuplicateTrack={handleDuplicateTrack}
+                        onCreateTrackBelow={handleCreateTrackBelow}
+                        onScrollTopChange={handleTrackListScrollTopChange}
+                        headerHeight={timeRulerHeightPx(
+                            Boolean(
+                                s.tempoMap && s.tempoMap.points.length > 0 && s.tempoMapVisible,
+                            ),
+                        )}
+                        bottomGutterHeightPx={horizontalScrollbarGutterPx}
+                    />
+                </div>
+                <DockGutter
+                    dir="col"
+                    value={trackHeaderWidthPx}
+                    min={GUTTER_LIMITS.timelineTrackHeaderPx.min}
+                    max={GUTTER_LIMITS.timelineTrackHeaderPx.max}
+                    label={t("aria_resize_track_header")}
+                    onLive={(px) => {
+                        const element = trackHeaderRef.current;
+                        if (element) element.style.width = `${px}px`;
+                    }}
+                    onCommit={(px) => dispatch(setGutterSize({ key: "timelineTrackHeaderPx", px }))}
+                    onReset={() =>
+                        dispatch(
+                            setGutterSize({
+                                key: "timelineTrackHeaderPx",
+                                px: DEFAULT_GUTTER_SIZES.timelineTrackHeaderPx,
+                            }),
+                        )
+                    }
                 />
 
                 {/* Timeline View (Right) */}
@@ -5657,6 +5827,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 rulerContentRef={rulerContentRef}
                                 trackListScrollerRef={trackListScrollRef}
                                 rulerPlayheadLineRef={rulerPlayheadLineRef}
+                                rulerPlayheadHeadRef={rulerPlayheadHeadRef}
                                 hostRef={kernelHostRef}
                                 interactions={kernelInteractions}
                                 activeGroupIds={kernelActiveGroupIds}
@@ -5787,29 +5958,28 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         />
                     ) : null}
 
-                    {/* 导入模式选择菜单 */}
-                    {importModeMenu && (
-                        <div
-                            className="fixed inset-0 z-[9999]"
-                            onClick={() => setImportModeMenu(null)}
-                            onContextMenu={(e) => {
-                                e.preventDefault();
-                                setImportModeMenu(null);
-                            }}
-                        >
-                            <div
-                                className="absolute bg-qt-panel border border-qt-border rounded shadow-lg py-1 min-w-[180px]"
-                                style={{
-                                    left: importModeMenu.x,
-                                    top: importModeMenu.y,
-                                }}
-                                onClick={(e) => e.stopPropagation()}
-                            >
-                                <button
-                                    className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
-                                    onClick={() => {
+                    {/*
+                      导入模式选择菜单 / 工程文件拖放菜单。
+
+                      这两处此前是手写模态（`fixed inset-0` + 绝对定位卡片）：没有 Esc、
+                      没有焦点管理、不抑制全局快捷键，菜单项的悬停/焦点样式也与全应用
+                      其它菜单不同。它们的内容是**扁平项列表**，正好是 `AppContextMenu`
+                      的形态 —— 迁过去即得到位置夹紧、方向键、Home/End、Esc、外部点击
+                      关闭这一整套，且与剪辑右键菜单视觉一致。
+                    */}
+                    {importModeMenu ? (
+                        <AppContextMenu
+                            x={importModeMenu.x}
+                            y={importModeMenu.y}
+                            floating
+                            ariaLabel={t("menu_import_media")}
+                            onClose={() => setImportModeMenu(null)}
+                            items={[
+                                {
+                                    key: "across-time",
+                                    label: t("import_across_time"),
+                                    onSelect: () => {
                                         const m = importModeMenu;
-                                        setImportModeMenu(null);
                                         if (m.audioPaths.length === 1) {
                                             void dispatch(
                                                 importAudioAtPosition({
@@ -5828,15 +5998,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                                 }),
                                             );
                                         }
-                                    }}
-                                >
-                                    {t("import_across_time") || "Import across time (same track)"}
-                                </button>
-                                <button
-                                    className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
-                                    onClick={() => {
+                                    },
+                                },
+                                {
+                                    key: "across-tracks",
+                                    label: t("import_across_tracks"),
+                                    onSelect: () => {
                                         const m = importModeMenu;
-                                        setImportModeMenu(null);
                                         if (m.audioPaths.length === 1) {
                                             void dispatch(
                                                 importAudioAtPosition({
@@ -5855,15 +6023,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                                 }),
                                             );
                                         }
-                                    }}
-                                >
-                                    {t("import_across_tracks")}
-                                </button>
-                                <button
-                                    className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
-                                    onClick={() => {
+                                    },
+                                },
+                                {
+                                    key: "as-takes",
+                                    label: t("import_as_takes"),
+                                    onSelect: () => {
                                         const m = importModeMenu;
-                                        setImportModeMenu(null);
                                         void dispatch(
                                             importMultipleAudioAtPosition({
                                                 audioPaths: m.audioPaths,
@@ -5872,59 +6038,42 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                                 startSec: m.startSec,
                                             }),
                                         );
-                                    }}
-                                >
-                                    {t("import_as_takes")}
-                                </button>
-                            </div>
-                        </div>
-                    )}
+                                    },
+                                },
+                            ]}
+                        />
+                    ) : null}
 
-                    {/* 工程文件（hshp/hsp）拖放操作菜单：打开工程 / 导入工程 */}
-                    {projectActionMenu && (
-                        <div
-                            className="fixed inset-0 z-[9999]"
-                            onClick={() => setProjectActionMenu(null)}
-                            onContextMenu={(e) => {
-                                e.preventDefault();
-                                setProjectActionMenu(null);
-                            }}
-                        >
-                            <div
-                                className="absolute bg-qt-panel border border-qt-border rounded shadow-lg py-1 min-w-[180px]"
-                                style={{
-                                    left: projectActionMenu.x,
-                                    top: projectActionMenu.y,
-                                }}
-                                onClick={(e) => e.stopPropagation()}
-                            >
-                                <button
-                                    className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
-                                    onClick={() => {
-                                        const m = projectActionMenu;
-                                        setProjectActionMenu(null);
-                                        emitExternalFileAction("openProject", m.path);
-                                    }}
-                                >
-                                    {t("menu_open_project")}
-                                </button>
-                                <button
-                                    className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
-                                    onClick={() => {
-                                        const m = projectActionMenu;
-                                        setProjectActionMenu(null);
+                    {projectActionMenu ? (
+                        <AppContextMenu
+                            x={projectActionMenu.x}
+                            y={projectActionMenu.y}
+                            floating
+                            ariaLabel={tf("import_project_dialog_title")}
+                            onClose={() => setProjectActionMenu(null)}
+                            items={[
+                                {
+                                    key: "open-project",
+                                    label: t("menu_open_project"),
+                                    onSelect: () =>
+                                        emitExternalFileAction(
+                                            "openProject",
+                                            projectActionMenu.path,
+                                        ),
+                                },
+                                {
+                                    key: "import-project",
+                                    label: tf("import_project_dialog_title"),
+                                    onSelect: () =>
                                         window.dispatchEvent(
                                             new CustomEvent("hifi:importProjectPick", {
-                                                detail: { path: m.path },
+                                                detail: { path: projectActionMenu.path },
                                             }),
-                                        );
-                                    }}
-                                >
-                                    {tAny("import_project_dialog_title")}
-                                </button>
-                            </div>
-                        </div>
-                    )}
+                                        ),
+                                },
+                            ]}
+                        />
+                    ) : null}
 
                     <FadeContextMenuHost />
                     {contextMenu
@@ -6015,10 +6164,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                               }),
                                           );
                                       }}
-                                      onRename={(clipId) => {
-                                          setContextMenu(null);
-                                          clipActions.setRenamingClipId(clipId);
-                                      }}
                                       onCopy={(ids) => {
                                           const s = sessionRef.current;
                                           const expandedIds = expandClipIdsWithGroups(
@@ -6101,48 +6246,29 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                               }),
                                           );
                                       }}
-                                      onRemoveFromParamSelection={(ids) => {
-                                          setContextMenu(null);
-                                          window.dispatchEvent(
-                                              new CustomEvent("hifi:editOp", {
-                                                  detail: {
-                                                      op: "removeClipsFromParamSelection",
-                                                      clipIds: ids,
-                                                  },
-                                              }),
-                                          );
-                                      }}
-                                      onFadeShapeChange={(clipId, target, shape) => {
+                                      onFadeShapeChange={(clipIds, target, shape) => {
                                           // 切换形状必须重置曲率（REAPER 语义：各形状的
                                           // 默认曲率由形状自身定义，见 reaperFade 的
                                           // DEFAULT_FADE_DIR_BY_SHAPE / defaultFadeDirFor）。
                                           const dir = defaultFadeDirFor(shape, target === "out");
-                                          dispatch(
-                                              setClipFades({
-                                                  clipId,
-                                                  ...(target === "in"
-                                                      ? {
-                                                            fadeInShape: shape,
-                                                            fadeInDir: dir,
-                                                        }
-                                                      : {
-                                                            fadeOutShape: shape,
-                                                            fadeOutDir: dir,
-                                                        }),
-                                              }),
-                                          );
+                                          const patch =
+                                              target === "in"
+                                                  ? { fadeInShape: shape, fadeInDir: dir }
+                                                  : { fadeOutShape: shape, fadeOutDir: dir };
+                                          // 乐观更新（本地 reducer）逐条应用；
+                                          // 持久化走 bulk 通道：单次 IPC + 单个撤销步。
+                                          batch(() => {
+                                              for (const clipId of clipIds) {
+                                                  dispatch(setClipFades({ clipId, ...patch }));
+                                              }
+                                          });
                                           void dispatch(
-                                              setClipStateRemote({
-                                                  clipId,
-                                                  ...(target === "in"
-                                                      ? {
-                                                            fadeInShape: shape,
-                                                            fadeInDir: dir,
-                                                        }
-                                                      : {
-                                                            fadeOutShape: shape,
-                                                            fadeOutDir: dir,
-                                                        }),
+                                              setClipsStateBulkRemote({
+                                                  updates: clipIds.map((clipId) => ({
+                                                      clipId,
+                                                      ...patch,
+                                                  })),
+                                                  checkpoint: true,
                                               }),
                                           );
                                       }}
@@ -6199,6 +6325,29 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                               setClipsStateBulkRemote({
                                                   updates,
                                                   checkpoint: true,
+                                              }),
+                                          );
+                                      }}
+                                      onSetChannelMode={(ids, mode) => {
+                                          // 批量走 bulk 通道：单次 IPC + 单个撤销步。
+                                          // 作用范围（active take / 全部 take）跟随全局的
+                                          // "同步编辑所有 Take"设置。
+                                          void dispatch(
+                                              setClipsStateBulkRemote({
+                                                  updates: ids.map((id) => ({
+                                                      clipId: id,
+                                                      channelMode: mode,
+                                                  })),
+                                                  checkpoint: true,
+                                              }),
+                                          );
+                                      }}
+                                      onScanFakeStereo={(ids) => {
+                                          // 后端整批只打一个撤销步，因此前端不做
+                                          // 逐条乐观更新；结果摘要写进状态行。
+                                          void dispatch(
+                                              scanAndConvertFakeStereoRemote({
+                                                  clipIds: ids,
                                               }),
                                           );
                                       }}
@@ -6332,7 +6481,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         onCloseLeadingGapChange={onCloseLeadingGapChange}
                     />
 
-                    <Dialog.Root
+                    <AppDialog
                         open={sameSourceConfirmOpen}
                         onOpenChange={(open) => {
                             setSameSourceConfirmOpen(open);
@@ -6341,45 +6490,38 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 sameSourceConfirmResolverRef.current = null;
                             }
                         }}
-                    >
-                        <Dialog.Content maxWidth="480px">
-                            <Dialog.Title>{t("ctx_replace")}</Dialog.Title>
-                            <Dialog.Description>
-                                <Text size="2">{t("clip_replace_same_source_confirm")}</Text>
-                            </Dialog.Description>
-                            <Flex justify="end" gap="2" mt="4">
-                                <Button
-                                    variant="soft"
-                                    color="gray"
-                                    onClick={() => {
-                                        setSameSourceConfirmOpen(false);
-                                        if (sameSourceConfirmResolverRef.current) {
-                                            sameSourceConfirmResolverRef.current(false);
-                                            sameSourceConfirmResolverRef.current = null;
-                                        }
-                                    }}
-                                >
-                                    {t("cancel")}
-                                </Button>
-                                <Button
-                                    onClick={() => {
-                                        setSameSourceConfirmOpen(false);
-                                        if (sameSourceConfirmResolverRef.current) {
-                                            sameSourceConfirmResolverRef.current(true);
-                                            sameSourceConfirmResolverRef.current = null;
-                                        }
-                                    }}
-                                >
-                                    {t("ok")}
-                                </Button>
-                            </Flex>
-                        </Dialog.Content>
-                    </Dialog.Root>
+                        title={t("ctx_replace")}
+                        message={t("clip_replace_same_source_confirm")}
+                        size="sm"
+                        actions={[
+                            {
+                                id: "cancel",
+                                label: t("cancel"),
+                                onClick: () => {
+                                    setSameSourceConfirmOpen(false);
+                                    if (sameSourceConfirmResolverRef.current) {
+                                        sameSourceConfirmResolverRef.current(false);
+                                        sameSourceConfirmResolverRef.current = null;
+                                    }
+                                },
+                            },
+                            {
+                                id: "ok",
+                                label: t("ok"),
+                                intent: "primary",
+                                onClick: () => {
+                                    setSameSourceConfirmOpen(false);
+                                    if (sameSourceConfirmResolverRef.current) {
+                                        sameSourceConfirmResolverRef.current(true);
+                                        sameSourceConfirmResolverRef.current = null;
+                                    }
+                                },
+                            },
+                        ]}
+                    />
 
                     <TimelineTransportBridge
                         pxPerSecRef={pxPerSecRef}
-                        rulerPlayheadLineRef={rulerPlayheadLineRef}
-                        rulerPlayheadHeadRef={rulerPlayheadHeadRef}
                         viewport={viewportAccess}
                         visualPlayheadRef={visualPlayheadSecRef}
                         syncScrollLeft={syncScrollLeft}

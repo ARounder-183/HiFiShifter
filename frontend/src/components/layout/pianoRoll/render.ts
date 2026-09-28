@@ -20,7 +20,7 @@
 
 import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } from "./types";
 import type { ParamSelection } from "./paramSelection";
-import { beatRangesToFrameRanges } from "./paramSelection";
+import { frameRangeEndCut, frameRangeStartCut, selectionToFrameRanges } from "./paramSelection";
 import { clipboardPreviewSpans, type ParamClipboardData } from "./paramClipboardMapping";
 import { normalizeCssColor, resolvePianoRollColors } from "./colors";
 import { clamp } from "../timeline";
@@ -37,11 +37,12 @@ import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./constants";
 import { framesToTime, isBlackKey, midiToLabel } from "./utils";
 import { resolveSecondaryOverlayValues } from "./secondaryOverlaySelection";
 import {
-    childPitchOffsetValueToDisplay,
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
     isChildFormantOffsetCentsParam,
 } from "./childPitchOffsetParams";
+import { formatAxisMarkLabel } from "./kernel/scene/axisMarkInstances";
+import { isDynParam } from "./paramRanges";
 import { isSameMainCanvasSignature, type MainCanvasSignature } from "./mainCanvasSignature";
 
 // 调试开关缓存：drawCurveTimed 每帧会被调用多次（主曲线 / 编辑线 / 选区叠加 /
@@ -79,6 +80,64 @@ export function getFixedDashPattern(baseDashPx: number, baseGapPx: number): numb
 }
 
 /**
+ * 虚线相位的起始偏移：曲线起点到**首个可见点**的前缀弧长（CSS px）。
+ *
+ * 【为什么需要它】Canvas2D 从不设置 `lineDashOffset` 时，虚线相位从子路径起点
+ * 起算；而曲线的子路径起点是**首个可见采样点**，于是相位被钉在视口左缘 ——
+ * 横向滚动时第一个可见点不断更换，虚线图案就会在屏幕上原地重排（用户看到的
+ * 就是虚线在"蠕动"）。
+ *
+ * 【为什么逐点累加欧氏距离】相邻采样点的 Δx 由两点的内容坐标之差给出
+ * （scrollLeft 相减抵消）、Δy 只依赖采样值，因此每段距离与滚动无关，前缀和
+ * 滚动时恒定 —— 这正是"虚线跟着内容走"的根据。纵向走势也占弧长，所以不能
+ * 只算水平距离；这与 GL 投影（`projectCurvePoints`）的相位口径逐段一致。
+ *
+ * @param args 与 `drawCurveTimed` 相同的时间/值参数（`valueToY` 已绑定参数与
+ *            pitch 偏移）。
+ * @returns 前缀弧长（CSS px，>= 0）；无可见点时为 0。
+ */
+export function arcLengthPrefixPx(args: {
+    values: number[];
+    startFrame: number;
+    stride: number;
+    framePeriodMs: number;
+    axis: TimelineAxis;
+    valueToY: (v: number) => number;
+}): number {
+    const { values, startFrame, stride, framePeriodMs, axis, valueToY } = args;
+    if (values.length < 2) return 0;
+    const fp = Math.max(1e-6, framePeriodMs);
+    const step = Math.max(1, Math.floor(stride));
+    const visibleStartSec = viewportStartSec(axis);
+    const visibleEndSec = viewportEndSec(axis);
+
+    let prefix = 0;
+    let phaseComplete = false;
+    let havePrev = false;
+    let prevX = 0;
+    let prevY = 0;
+    for (let i = 0; i < values.length; i += 1) {
+        const tSec = framesToTime(startFrame + i * step, fp);
+        if (tSec > visibleEndSec) break;
+        const x = secToViewportPx(axis, tSec);
+        const y = valueToY(values[i] ?? 0);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        if (!phaseComplete) {
+            if (havePrev) {
+                prefix += Math.hypot(x - prevX, y - prevY);
+            }
+            if (tSec >= visibleStartSec) {
+                phaseComplete = true;
+            }
+        }
+        prevX = x;
+        prevY = y;
+        havePrev = true;
+    }
+    return phaseComplete ? prefix : 0;
+}
+
+/**
  * 主画布的内容签名缓存（阶段 2 Task 6）。
  *
  * 【为什么用模块级 WeakMap】缓存必须跨调用保持，但又不能阻止画布被回收：面板
@@ -107,12 +166,15 @@ function niceAxisStep(range: number, targetCount: number): number {
     return nice * mag;
 }
 
-/** 格式化轴标记数值，避免浮点噪声 */
+/**
+ * 格式化轴标记数值，避免浮点噪声。
+ *
+ * 实现委托给 GL 侧共用的 `formatAxisMarkLabel`：Canvas2D 与 GL 两条渲染路径
+ * 必须产出**逐字一致**的标签（否则切换渲染后端时纵轴文字会变），因此此处
+ * 只保留签名差异，不再复制格式化逻辑。
+ */
 function formatAxisMark(v: number, param?: ParamName): string {
-    const displayValue = param != null ? childPitchOffsetValueToDisplay(param, v) : v;
-    // 最多保留 4 位有效数字，去掉尾随零
-    const s = parseFloat(displayValue.toPrecision(4)).toString();
-    return s;
+    return formatAxisMarkLabel(v, param);
 }
 
 /**
@@ -137,6 +199,15 @@ function drawCurveTimed(args: {
     /** 统一投影：曲线与其它图层的唯一坐标来源。 */
     axis: TimelineAxis;
     valueToY: (param: ParamName, v: number, h: number) => number;
+    /**
+     * 虚线相位的起始偏移（CSS px）＝曲线起点到首个可见点的**前缀弧长**。
+     *
+     * 必须锚在**数据**上，否则 Canvas2D 会从不设 `lineDashOffset` 的默认值 0
+     * 起算 —— 也就是"相位从首个可见点重启"，横向滚动时虚线在屏幕上原地重排
+     * （"蠕动"）。逐采样点累加、与 GL 投影同一口径（见 `drawCurveTimed` 循环
+     * 内的累加），不是简单的水平距离：纵向走势也占弧长。
+     */
+    dashPhasePx?: number;
 }) {
     const { ctx, values, param, w, h, startFrame, stride, framePeriodMs, axis, valueToY } = args;
 
@@ -185,6 +256,7 @@ function drawCurveTimed(args: {
     let lastX = 0;
 
     ctx.beginPath();
+    let dashPhaseApplied = false;
     for (let i = 0; i < values.length; i += 1) {
         const frame = startFrame + i * step;
         const tSec = framesToTime(frame, fp);
@@ -211,6 +283,14 @@ function drawCurveTimed(args: {
         const mappedValue = param === "pitch" ? rawValue + 0.5 : rawValue;
         const y = valueToY(param, mappedValue, h);
         if (!started) {
+            // 首个可见点：把"被跳过的那一段前缀弧长"补进虚线相位，让 `mod`
+            // 的零点始终落在曲线自身起点（数据锚点），而不是跟着视口左缘。
+            // Canvas2D 的 `lineDashOffset = d` 与 GL 的 `mod(along + d)` 同义：
+            // 相位都前移 d，因此这里用**正号**，与 GL 的 `u_dashPhase` 一致。
+            if (!dashPhaseApplied && args.dashPhasePx !== undefined) {
+                ctx.lineDashOffset = args.dashPhasePx;
+                dashPhaseApplied = true;
+            }
             ctx.moveTo(x, y);
             started = true;
         } else {
@@ -339,15 +419,15 @@ export function drawPianoRoll(args: {
     showSecondaryParam: boolean;
     overlayText?: string | null;
     liveEditOverride: { key: string; edit: number[] } | null;
-    /** 多选区（有序、互不相交的 beat 区间列表；null = 无选区） */
+    /** 多选区（有序、互不相交的帧区间列表；null = 无选区） */
     selection: ParamSelection | null;
     /**
      * 统一投影：本函数内**所有**时间↔像素换算的唯一来源。
      * 不再单独接收 pxPerSec / scrollLeft，避免图层各自执行 `t*p - s`。
      */
     axis: TimelineAxis;
-    /** 每拍秒数。仅用于 beat↔sec 换算（选区数据以 beat 为单位），不参与投影。 */
-    secPerBeat: number;
+    /** 每帧时长（毫秒）。仅用于帧↔秒换算（选区数据以帧为单位），不参与投影。 */
+    framePeriodMs: number;
     playheadSec: number; // 播放头位置（秒）
     pitchAnalysisPending?: boolean;
     referencePitchOverlays?: ReferencePitchOverlay[];
@@ -467,7 +547,7 @@ export function drawPianoRoll(args: {
         liveEditOverride,
         selection,
         axis,
-        secPerBeat,
+        framePeriodMs,
         playheadSec,
         pitchAnalysisPending,
         referencePitchOverlays,
@@ -701,6 +781,36 @@ export function drawPianoRoll(args: {
                     // 确保 0 的刻度一定显示
                     const y0 = valueToY(editParam, 0, h);
                     ctx.fillText(formatAxisMark(0, editParam), 6, y0);
+                } else if (isDynParam(editParam)) {
+                    // 动态（倍率域）：步进候选与 GL 侧的 resolveAxisStep("level")
+                    // 同一套；强线落在每个整数倍率（1.0 = 0 dB、2.0 = +6 dB…）。
+                    // 【内核模式说明】本分支在 GL 接管后不可达（skipAxisCanvas
+                    // 恒为 true），保留仅为维持"两条路径逐值等价"的测试基准与
+                    // WebGL2 不可用时的最后参照。
+                    const range = vMax - vMin;
+                    const candidates = [1.0, 0.5, 0.25, 0.1, 0.05, 0.025, 0.01];
+                    let chosen = candidates[candidates.length - 1];
+                    for (const c of candidates) {
+                        const count = Math.ceil(range / c) + 1;
+                        if (count >= 5 && count <= 12) {
+                            chosen = c;
+                            break;
+                        }
+                    }
+                    const firstMark = Math.ceil((vMin - 1e-9) / chosen) * chosen;
+                    for (let m = firstMark; m <= vMax + chosen * 0.01; m += chosen) {
+                        const y = valueToY(editParam, m, h);
+                        // 强线：整倍率值（容差吸收步进累加的浮点残差），与 GL
+                        // 侧 buildAxisMarkInstances 的 level 口径逐字一致。
+                        const isStrong = Math.abs(m - Math.round(m)) < 1e-9;
+                        ctx.fillText(formatAxisMark(m, editParam), 6, y);
+                        ctx.strokeStyle = colors.tensionLine;
+                        ctx.lineWidth = isStrong ? 1.25 : 1;
+                        ctx.beginPath();
+                        ctx.moveTo(0, y + 0.5);
+                        ctx.lineTo(w, y + 0.5);
+                        ctx.stroke();
+                    }
                 } else {
                     // 回退：使用常规的“nice”步长
                     const niceStep = niceAxisStep(span, 4);
@@ -743,9 +853,10 @@ export function drawPianoRoll(args: {
     clearCanvasPhysical(ctx, target);
 
     // 所有 x 坐标 = axis.secToViewportPx(sec)，与时间线侧同一实现。
-    // beat → sec 的换算系数（选区/剪贴板预览数据仍以 beat 为单位）。
-    // 注意：不构造 pxPerBeat —— 像素投影一律走 axis，beat 先转 sec 再投影。
-    const beatToSec = Math.max(1e-9, secPerBeat);
+    // 帧 → 秒的换算系数（选区/剪贴板预览数据以帧为单位；帧栅格是工程级常量，
+    // 与 BPM 无关）。
+    // 注意：不构造 pxPerFrame —— 像素投影一律走 axis，帧先转 sec 再投影。
+    const frameToSec = Math.max(1e-6, framePeriodMs) / 1000;
 
     // Horizontal grid lines
     //
@@ -1056,6 +1167,15 @@ export function drawPianoRoll(args: {
                 framePeriodMs: paramView.framePeriodMs,
                 axis,
                 valueToY,
+                // 相位锚在数据上：滚动时虚线跟着内容走，不在屏幕上重排。
+                dashPhasePx: arcLengthPrefixPx({
+                    values: paramView.orig,
+                    startFrame: paramView.startFrame,
+                    stride: paramView.stride,
+                    framePeriodMs: paramView.framePeriodMs,
+                    axis,
+                    valueToY: (v) => valueToY(editParam, editParam === "pitch" ? v + 0.5 : v, h),
+                }),
             });
             ctx.restore();
         }
@@ -1087,8 +1207,9 @@ export function drawPianoRoll(args: {
             ctx.save();
             ctx.beginPath();
             for (const range of selection) {
-                const x0 = secToViewportPx(axis, range.startBeat * beatToSec);
-                const x1 = secToViewportPx(axis, range.endBeat * beatToSec);
+                // 边界取**切点**（两帧中间）：与 GL 的选区带同口径，见 paramSelection。
+                const x0 = secToViewportPx(axis, frameRangeStartCut(range) * frameToSec);
+                const x1 = secToViewportPx(axis, frameRangeEndCut(range) * frameToSec);
                 ctx.rect(x0, 0, x1 - x0, h);
             }
             ctx.clip();
@@ -1121,11 +1242,7 @@ export function drawPianoRoll(args: {
             selection.length > 0 &&
             clipboardPreview.param === editParam
         ) {
-            const frameRanges = beatRangesToFrameRanges(
-                selection,
-                secPerBeat,
-                paramView.framePeriodMs,
-            );
+            const frameRanges = selectionToFrameRanges(selection);
             const spans = clipboardPreviewSpans({
                 targetRanges: frameRanges,
                 clipboard: clipboardPreview,

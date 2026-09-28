@@ -3,7 +3,6 @@
  *
  * 支持多入口（多窗口 Tauri 应用）：
  * - index.html → 主窗口
- * - appearance.html → 外观设置独立窗口
  */
 
 import { resolve } from "path";
@@ -14,11 +13,25 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
     base: "./",
     plugins: [react()],
+    /*
+     * 扩展作者用的入口别名。
+     *
+     * 应用内部仍用相对路径（既有代码不做大扫除）；这两个别名是给**扩展**用的：
+     * 第三方不该写 `../../../features/dock/panelRegistry` 这种路径。
+     * 同步在 tsconfig.app.json 的 `paths` 里声明，两处必须一致。
+     */
+    resolve: {
+        alias: {
+            "@hs/sdk": resolve(__dirname, "src/sdk/index.ts"),
+            "@hs/ui": resolve(__dirname, "src/ui/index.ts"),
+        },
+    },
     build: {
         rollupOptions: {
             input: {
                 main: resolve(__dirname, "index.html"),
-                appearance: resolve(__dirname, "appearance.html"),
+                // 独立窗口（把一个窗体拆到主窗口之外）：见 features/dock/detachedWindow.ts
+                detached: resolve(__dirname, "detached.html"),
                 waveformTest: resolve(__dirname, "waveform-test.html"),
             },
             output: {

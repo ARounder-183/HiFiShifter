@@ -42,9 +42,15 @@
 
 import type { Rgba } from "../../../renderKernel/instanceTypes";
 import { isBlackKey } from "../../utils";
+import { niceAxisStep } from "./axisMarkInstances";
 
-/** 非音高参数的网格种类（决定步进与强线间隔）。 */
-export type ValueGridKind = "cents" | "degrees" | "formantCents";
+/**
+ * 非音高参数的网格种类（决定步进与强线间隔）。
+ *
+ * `level` = 动态（DYN）面板：值域是**倍率**（1.0 = 0 dB，0.5 = −6 dB）。
+ * `fallback` = 其余数值参数（volume / pan / 张力 / 气声…）：步进随视口走 nice step。
+ */
+export type ValueGridKind = "cents" | "degrees" | "formantCents" | "level" | "fallback";
 
 /**
  * 一条横向网格线（或背景带）的实例几何。
@@ -173,12 +179,49 @@ export interface ValueGridArgs {
     readonly weakRgba: Rgba;
 }
 
-/** 各参数的步进与强线间隔（与 render.ts 的分支逐一对应）。 */
-const VALUE_GRID_SPEC: Record<ValueGridKind, { step: number; strongMod: number }> = {
-    cents: { step: 100, strongMod: 1200 },
-    degrees: { step: 1, strongMod: 7 },
-    formantCents: { step: 50, strongMod: 600 },
+/**
+ * 各参数的步进与强线间隔（与 render.ts 的分支逐一对应）。
+ *
+ * `strongBy` 是**强线判定的口径**，四种各有存在理由：
+ * - `value`：按"值"取模。cents / degrees / formantCents 是整数域且 strongMod
+ *   整除步长，按值判定即按序号判定，与历史 Canvas2D 逐字一致。
+ * - `integer`：整倍率值为强线（`v ≈ 整数`，容差吸收浮点残差）。level 的语义是
+ *   "每个整数倍率 = 0 dB 整点都是强线"；步进随视口在 1.0..0.01 间变化，任何
+ *   "按步数取模"的写法都只在某个特定步长下碰巧正确（span=4 → 步进 1.0 时，
+ *   stepIndex % 4 会漏掉 1.0/2.0/3.0 的强线）。
+ * - `never`：无强线概念（fallback 的 nice step 本身已足够稀疏）。
+ */
+interface ValueGridSpec {
+    readonly step: number;
+    readonly strongMod: number;
+    readonly strongBy: "value" | "integer" | "never";
+}
+
+const VALUE_GRID_SPEC: Record<Exclude<ValueGridKind, "fallback">, ValueGridSpec> = {
+    cents: { step: 100, strongMod: 1200, strongBy: "value" },
+    degrees: { step: 1, strongMod: 7, strongBy: "value" },
+    formantCents: { step: 50, strongMod: 600, strongBy: "value" },
+    // 动态：0.25 步进 = 6 dB；强线落在每个整数倍率（1.0 = 0 dB 整点）。
+    level: { step: 0.25, strongMod: 4, strongBy: "integer" },
 };
+
+/**
+ * 解析网格步进规格。
+ *
+ * `fallback`（volume / pan 等一般数值参数）的值域随参数而变（0..4 / −1..1 / 0..1），
+ * 固定步进无法通用，因此随视口现算 nice step。刻意与轴刻度
+ * （`resolveAxisStep("fallback")` = `niceAxisStep(span, 4)`）**同一公式**：
+ * 两者的候选家族相同（1-2-5 序列）、跨度相同，产出的步进必然一致 —— 网格线与
+ * 轴刻度逐线对齐。其他种类的网格比刻度更密是手工调过的既有设计，不套用此逻辑。
+ */
+function resolveValueGridSpec(kind: ValueGridKind, span: number): ValueGridSpec {
+    if (kind !== "fallback") return VALUE_GRID_SPEC[kind];
+    return {
+        step: niceAxisStep(Math.max(1e-6, span), 4),
+        strongMod: Number.POSITIVE_INFINITY,
+        strongBy: "never",
+    };
+}
 
 /**
  * 弱线 / 普通线的**描边中心**设备像素对齐。
@@ -485,7 +528,7 @@ export function buildValueGridInstances(args: ValueGridArgs): GridInstance[] {
     if (!Number.isFinite(view.span) || !Number.isFinite(view.center)) return [];
     if (!Number.isFinite(heightPx) || !Number.isFinite(dpr) || dpr <= 0) return [];
 
-    const spec = VALUE_GRID_SPEC[kind];
+    const spec = resolveValueGridSpec(kind, view.span);
     const span = Math.max(1e-6, view.span);
     const vMin = view.center - span / 2;
     const vMax = view.center + span / 2;
@@ -507,7 +550,13 @@ export function buildValueGridInstances(args: ValueGridArgs): GridInstance[] {
     const strongThickness = 2 / dpr;
     const items: GridInstance[] = [];
     for (let v = start; v <= vMax + spec.step * 0.01; v += spec.step) {
-        const isStrong = Math.round(v) % spec.strongMod === 0;
+        // 强线口径见 ValueGridSpec.strongBy 的说明（level 按整倍率值判定）。
+        const isStrong =
+            spec.strongBy === "value"
+                ? Math.round(v) % spec.strongMod === 0
+                : spec.strongBy === "integer"
+                  ? Math.abs(v - Math.round(v)) < 1e-9
+                  : false;
         const thickness = isStrong ? strongThickness : weakThickness;
         // 描边中心按设备像素吸附（弱线 + 半像素、强线不加——偶数物理像素宽无需偏移，
         // 见两个 helper 的说明），再回算矩形上缘。

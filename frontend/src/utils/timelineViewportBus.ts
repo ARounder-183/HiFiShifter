@@ -21,6 +21,12 @@
  * 新代码请用 `register(layer, order)` 注册图层并消费 `TimelineAxis`，坐标一律走
  * `timelineAxis.ts`。`subscribe()` / `getSnapshot()` 是为尚未迁移的旧订阅方保留的
  * 兼容层，它们排在 LAYER_ORDER.legacy，会在所有已迁移图层之后绘制。
+ *
+ * 【跨工程契约（显式）】总线投影**跨工程保留**：面板不随工程切换卸载，滚动容
+ * 器的 DOM 滚动位置即权威，因此打开新工程后视口延续（新工程内容变短时浏览器
+ * 的钳制滚动会自然触发 emit 校正）。晚挂载图层读 `getAxis()` 与 DOM 一致；
+ * 工程会话切换时面板会调用 `invalidate()` 强制按当前工程内容重绘一次（见
+ * 该方法说明）。
  */
 
 import {
@@ -71,6 +77,20 @@ export const timelineViewportBus = {
      * 由 useTimelineState.syncScrollLeft() / syncScrollTop() 在每次滚动/缩放时调用。
      * scrollTopPx / rowHeight 可省略：沿用上一个值，便于只更新单一轴。
      */
+
+    /**
+     * 强制所有已注册图层按**当前投影**重绘一次（投影不变也重画）。
+     *
+     * 【跨工程契约的强制点】总线投影**跨工程保留**（见下方契约说明）：面板不随
+     * 工程切换卸载，DOM 滚动容器才是权威，新工程内容变化引发的浏览器钳制滚动
+     * 会自然触发 emit。本方法供"工程会话切换"时机调用（面板 keyed on
+     * project.path）：晚挂载/带几何缓存的图层据此被显式要求"按当前工程内容 +
+     * 当前投影重画一次"，杜绝任何按上个工程内容缓存的画面残留。
+     */
+    invalidate(): void {
+        bus.invalidate();
+    },
+
     emit(
         scrollLeft: number,
         pxPerSec: number,

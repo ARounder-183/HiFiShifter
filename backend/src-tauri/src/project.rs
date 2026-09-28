@@ -1,6 +1,7 @@
 use crate::state::{SynthPipelineKind, TimelineState};
 use crate::time_stretch::UserStretchAlgorithm;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Component;
 use std::path::{Path, PathBuf};
 
@@ -87,7 +88,17 @@ impl SynthConfig {
 /// （Loop / 循环源属性）与 `Clip.snap_offset_sec`。v3 及更早的扁平 Clip
 /// 打开时迁移为单 Take，并按"为新的音频块启用循环"设置补齐 Loop
 /// （见 open_project）。
-pub const CURRENT_PROJECT_FILE_VERSION: u32 = 4;
+///
+/// v5：`ClipTake` 新增 `channel_mode`（声道模式，0..=4 对齐 REAPER
+/// CHANMODE）与 `source_channels`（源声道数）。旧工程反序列化时
+/// `channel_mode` 缺省为 0（正常）、`source_channels` 缺省为 None，
+/// `finalize_timeline_for_session` 阶段对越界值规范化 —— 无需数据搬移。
+///
+/// v5 同期还加入了记事本字段：`notes_markdown`（正文）与 `notebook_assets`
+/// （附件登记表 —— 图片与 HiFiShifter 剪贴板载荷，字节以 base64 **内嵌在
+/// 工程文件里**，因此工程自包含：拷走/分享/打包都不会丢图）。两者都带
+/// `serde(default)`，缺省为空，旧文件照常打开。
+pub const CURRENT_PROJECT_FILE_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -97,6 +108,12 @@ pub struct ProjectFile {
     /// 用户笔记；为空时省略（旧版本已容忍缺省，且空内容无可丢失信息）。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes_markdown: String,
+    /// 记事本附件登记表：图片与剪贴板载荷，**字节（base64）内嵌在这里**。
+    ///
+    /// 用 `BTreeMap` 而非 `HashMap`：序列化顺序稳定，工程文件在不同次保存
+    /// 之间可二进制比对。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub notebook_assets: BTreeMap<String, crate::notebook_assets::NotebookAsset>,
     pub timeline: TimelineState,
     /// 工程的基础音乐参数（基准音阶/拍号/网格）始终序列化。
     /// 这些参数定义工程的语义身份，不能依赖"缺省 = 默认值"的隐式规则：
@@ -142,6 +159,7 @@ impl ProjectFile {
             version: CURRENT_PROJECT_FILE_VERSION,
             name,
             notes_markdown: String::new(),
+            notebook_assets: BTreeMap::new(),
             timeline,
             base_scale,
             beats_per_bar,
@@ -584,6 +602,17 @@ pub fn finalize_timeline_for_session(
     }
     tl.sync_clip_takes_from_flat();
 
+    // 加载边界：清掉历史上被批量伪造的"用户封印"（标着用户决定、却没有记录
+    // 用户选了什么）。它们会让 Take 永久免疫于折叠，而本程序写出的每个工程都
+    // 是 v5，等于折叠功能对所有保存过的工程失效 —— 必须清回"未判定"重新裁决。
+    //
+    // 与工程版本**无关**：判定该不该扫的依据是档案本身（谁定的、选了什么），
+    // 不是版本号。这也是"版本号只用于格式迁移、不用于语义推断"的落点。
+    let cleared = tl.clear_untrusted_channel_seals();
+    if cleared > 0 {
+        log::info!("[open_project] cleared {cleared} fabricated channel seal(s) back to undecided");
+    }
+
     (tl, missing_files)
 }
 
@@ -601,6 +630,379 @@ mod tests {
             8,
             "1/8".to_string(),
         )
+    }
+
+    /// 写一个临时 WAV；`identical` 为 true 时 L == R（假立体声）。
+    fn write_test_wav(name: &str, identical: bool) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("hifishifter_project_policy_test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(name);
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut w = hound::WavWriter::create(&path, spec).expect("wav");
+        for i in 0..44_100 {
+            let v = ((i as f32) * 0.01).sin() * 0.4;
+            w.write_sample(v).expect("l");
+            w.write_sample(if identical { v } else { -v }).expect("r");
+        }
+        w.finalize().expect("finalize");
+        path
+    }
+
+    /// 造一个"v4 形态"的工程：Take 存在但没有 channel_mode 字段。
+    fn timeline_with_legacy_take(source: &std::path::Path) -> TimelineState {
+        let mut tl = TimelineState::default();
+        let root = tl.tracks[0].id.clone();
+        let clip_id = tl.add_clip(
+            Some(root),
+            Some("V".to_string()),
+            Some(0.0),
+            Some(1.0),
+            Some(source.to_string_lossy().to_string()),
+        );
+        let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).expect("clip");
+        clip.sync_take_from_flat();
+        for take in &mut clip.takes {
+            take.channel_mode = 0;
+            take.source_channels = None;
+        }
+        tl
+    }
+
+    #[test]
+    fn legacy_project_takes_stay_eligible_for_the_resumable_scan() {
+        let _guard = crate::config::channel_policy_test_guard();
+        crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy::default());
+        let path = write_test_wav("legacy_fake.wav", true);
+        let tl = timeline_with_legacy_take(&path);
+
+        let (finalized, _missing) =
+            finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 4);
+
+        // v4 的 Take **不再在打开时同步折叠**（那会让大工程冻结分钟级，且任何
+        // 一次读不到都会因工程随即存成 v5 而永久漏判）。打开只负责把它标成
+        // "从未判定"，折叠交给可恢复扫描。
+        assert_eq!(
+            finalized.clips[0].takes[0].channel_mode, 0,
+            "打开阶段不得改写模式"
+        );
+        assert_eq!(
+            finalized.clips[0].takes[0].channel_decision, None,
+            "v4 的 Take 必须保持'从未判定'，否则不会被扫描纳入候选"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_take_is_actually_folded_by_the_resumable_scan() {
+        // 端到端：打开（不折叠）→ 可恢复扫描（折叠）。这是"漏判不再永久化"
+        // 的主链路。
+        let _guard = crate::config::channel_policy_test_guard();
+        crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy::default());
+        let path = write_test_wav("legacy_fold_e2e.wav", true);
+        let tl = timeline_with_legacy_take(&path);
+
+        let (mut finalized, _missing) =
+            finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 4);
+
+        let policy = crate::config::channel_import_policy();
+        let targets =
+            crate::commands::channel_scan::collect_targets(&finalized, None, &policy, false, true);
+        assert_eq!(targets.targets.len(), 1, "v4 的 Take 必须在扫描候选里");
+        let planned = crate::commands::channel_scan::plan(targets.targets, &policy, false);
+        assert_eq!(
+            planned[0].outcome,
+            crate::channel_policy::ChannelScanOutcome::FakeStereo
+        );
+        let resolution = planned[0].resolution;
+        let applied = crate::channel_policy::apply_resolution(
+            &mut finalized.clips[0].takes[0],
+            resolution,
+        );
+        assert!(applied.mode_changed, "假立体声应被折叠");
+        assert_eq!(finalized.clips[0].takes[0].channel_mode, 2);
+        // 折叠后档案权威 ⇒ 下一次打开不必再判（零解码）。
+        let ctx = crate::channel_policy::DecisionContext::for_take(
+            &finalized.clips[0].takes[0],
+            &policy.detect_options(),
+        );
+        assert!(
+            finalized.clips[0].takes[0]
+                .channel_decision
+                .expect("record")
+                .is_authoritative_for(
+                    finalized.clips[0].takes[0].source_file_fingerprint,
+                    ctx.policy_sig,
+                    ctx.region_q
+                ),
+            "折叠结论必须落成权威档案，否则每次打开都会重判"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_project_keeps_true_stereo_takes() {
+        let _guard = crate::config::channel_policy_test_guard();
+        crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy::default());
+        let path = write_test_wav("legacy_true.wav", false);
+        let tl = timeline_with_legacy_take(&path);
+
+        let (finalized, _missing) =
+            finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 4);
+
+        assert_eq!(
+            finalized.clips[0].takes[0].channel_mode, 0,
+            "真立体声不得被折叠"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_trusted_user_seal_survives_the_load_boundary() {
+        // 用户在 v5 工程里显式把某 Take 设为 Normal(0)（= 明确不要折叠）：
+        // 档案里记着"选了什么"，加载边界必须原样保留，扫描也不得碰它。
+        let _guard = crate::config::channel_policy_test_guard();
+        crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy::default());
+        let path = write_test_wav("v5_explicit.wav", true);
+        let mut tl = timeline_with_legacy_take(&path);
+        tl.clips[0].takes[0].channel_decision =
+            Some(crate::channel_decision::ChannelDecisionRecord::user(0));
+
+        let (finalized, _missing) =
+            finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 5);
+
+        assert_eq!(
+            finalized.clips[0].takes[0].channel_mode, 0,
+            "用户显式选择的模式不得被改写"
+        );
+        let record = finalized.clips[0].takes[0]
+            .channel_decision
+            .expect("可信的用户封印必须保留");
+        assert!(record.is_trusted_user_seal());
+        assert_eq!(record.chosen_mode, Some(0), "封印必须记得用户选了什么");
+        let policy = crate::config::channel_import_policy();
+        assert!(
+            crate::commands::channel_scan::collect_targets(&finalized, None, &policy, false, true)
+                .targets
+                .is_empty(),
+            "用户真实选择过的 Take 不得进入自动扫描候选"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_fabricated_user_seal_is_cleared_so_the_scan_can_fold_again() {
+        // 回归：历史上加载边界把"没有档案"批量伪造成"用户决定"，而本程序写出的
+        // 每个工程都是 v5 —— 于是保存过一次的工程里**所有** Take 都带着伪造封印，
+        // 折叠功能（含右键"扫描假立体声并转换"）对所有工程彻底失效。
+        // 这类档案没有 `chosen_mode`（没记用户选了什么），必须清回"未判定"。
+        let _guard = crate::config::channel_policy_test_guard();
+        crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy::default());
+        let path = write_test_wav("v5_fabricated.wav", true);
+        let mut tl = timeline_with_legacy_take(&path);
+        // 伪造封印：标着 ORIGIN_USER，但没有任何"选了啥"的记录。
+        tl.clips[0].takes[0].channel_decision =
+            Some(crate::channel_decision::ChannelDecisionRecord {
+                origin: crate::channel_decision::ORIGIN_USER,
+                verdict: crate::channel_decision::VERDICT_USER,
+                chosen_mode: None,
+                fingerprint: None,
+                policy_sig: 0,
+                region_q: None,
+            });
+
+        let (mut finalized, _missing) =
+            finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 5);
+
+        assert_eq!(
+            finalized.clips[0].takes[0].channel_decision, None,
+            "伪造的用户封印必须被清除（否则该 Take 永久免疫于折叠）"
+        );
+
+        // 清除之后，同一文件里的假立体声必须能被重新判定并折叠 —— 这就是
+        // "右键菜单什么都没转换"的修复点。
+        let policy = crate::config::channel_import_policy();
+        let targets =
+            crate::commands::channel_scan::collect_targets(&finalized, None, &policy, true, true);
+        assert_eq!(targets.targets.len(), 1, "清掉伪造封印后 Take 必须重回候选");
+        let planned = crate::commands::channel_scan::plan(targets.targets, &policy, false);
+        assert_eq!(
+            planned[0].outcome,
+            crate::channel_policy::ChannelScanOutcome::FakeStereo
+        );
+        let applied = crate::channel_policy::apply_resolution(
+            &mut finalized.clips[0].takes[0],
+            planned[0].resolution,
+        );
+        assert!(applied.mode_changed, "假立体声必须被折叠");
+        assert_eq!(finalized.clips[0].takes[0].channel_mode, 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_v5_take_with_no_record_stays_eligible_for_the_scan() {
+        // 回归：v5 工程里"没有档案"就是"从未判定"，绝不是"用户决定"。
+        // 曾经版本号 ≥ 5 被当作"用户已决定"，把整个功能锁死。
+        let _guard = crate::config::channel_policy_test_guard();
+        crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy::default());
+        let path = write_test_wav("v5_undecided.wav", true);
+        let tl = timeline_with_legacy_take(&path);
+
+        let (finalized, _missing) =
+            finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 5);
+
+        assert_eq!(
+            finalized.clips[0].takes[0].channel_decision, None,
+            "v5 工程的空档案必须保持'未判定'，不得被伪造为'用户决定'"
+        );
+        let policy = crate::config::channel_import_policy();
+        assert_eq!(
+            crate::commands::channel_scan::collect_targets(&finalized, None, &policy, false, true)
+                .targets
+                .len(),
+            1,
+            "未判定的 Take 必须在自动扫描候选里"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn probe_v4_flat_project_targets() {
+        let dir = std::env::temp_dir().join("hifishifter_probe_v4");
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("probe.wav");
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut w = hound::WavWriter::create(&wav, spec).unwrap();
+        for i in 0..44_100 {
+            let v = ((i as f32) * 0.01).sin() * 0.4;
+            w.write_sample(v).unwrap();
+            w.write_sample(v).unwrap();
+        }
+        w.finalize().unwrap();
+        let src = wav.to_string_lossy().replace('\\', "/");
+
+        let value = serde_json::json!({
+            "version": 4,
+            "name": "legacy",
+            "timeline": {
+                "tracks": [{
+                    "id": "track_1", "name": "Track", "order": 0,
+                    "muted": false, "solo": false, "volume": 1.0,
+                    "compose_enabled": false,
+                    "pitch_analysis_algo": "nsf_hifigan_onnx",
+                    "color": "#4a8fd1"
+                }],
+                "clips": [{
+                    "id": "clip_1", "track_id": "track_1", "name": "Legacy Clip",
+                    "start_sec": 0.0, "length_sec": 1.0, "color": "blue",
+                    "source_path": src,
+                    "duration_sec": 1.0, "duration_frames": 44100,
+                    "source_sample_rate": 44100,
+                    "gain": 1.0, "muted": false,
+                    "source_start_sec": 0.0, "source_end_sec": 1.0,
+                    "playback_rate": 1.0, "reversed": false,
+                    "channel_mode": 0,
+                    "fade_in_sec": 0.0, "fade_out_sec": 0.0,
+                    "fade_in_curve": "sine", "fade_out_curve": "sine"
+                }],
+                "bpm": 120.0, "playhead_sec": 0.0, "project_sec": 1.0,
+                "next_track_order": 1
+            }
+        });
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let loaded = match crate::project::load_project_file(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                println!("PARSE ERR: {e}");
+                return;
+            }
+        };
+        let (fin, _m) = crate::project::finalize_timeline_for_session(
+            loaded.timeline,
+            std::path::Path::new(&wav),
+            4,
+        );
+        let clip = &fin.clips[0];
+        println!(
+            "V4FLAT: takes={} clip.src={:?} take0.src={:?} take0.region={:?}",
+            clip.takes.len(),
+            clip.source_path,
+            clip.takes.first().and_then(|t| t.source_path.clone()),
+            clip.takes
+                .first()
+                .map(|t| (t.source_start_sec, t.source_end_sec))
+        );
+        let policy = crate::config::channel_import_policy().for_explicit_scan();
+        let filter: std::collections::HashSet<String> =
+            [clip.id.clone()].into_iter().collect();
+        println!(
+            "V4FLAT TARGETS(filtered)={} TARGETS(all)={}",
+            crate::commands::channel_scan::collect_targets(&fin, Some(&filter), &policy, true, true)
+            .targets
+            .len(),
+            crate::commands::channel_scan::collect_targets(&fin, None, &policy, true, true)
+            .targets
+            .len()
+        );
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    #[test]
+    fn channel_decision_record_survives_a_project_roundtrip() {
+        // 判定档案是"漏判不再永久化"的载体：它必须随工程持久化，否则每次
+        // 打开都会退回"从未判定"，重判成本（解码）永远付不完。
+        let mut tl = timeline_with_clip_and_zero_curves();
+        let record = crate::channel_decision::ChannelDecisionRecord::auto(
+            crate::channel_decision::VERDICT_FAKE_STEREO,
+            Some(0xABCD_1234),
+            0x55AA,
+            Some((0, 5_000)),
+        );
+        {
+            let clip = &mut tl.clips[0];
+            clip.sync_take_from_flat();
+            clip.takes[0].channel_decision = Some(record);
+            clip.takes[0].channel_mode = 2;
+            // 与生产一致：Take 是权威，改完必须物化回 Clip 投影，否则下一次
+            // sync 会用旧投影把 Take 覆盖回去。
+            let take = clip.takes[0].clone();
+            take.apply_to_clip(clip);
+        }
+
+        let prepared = prepare_timeline_for_project_save(tl, Path::new("C:/proj/test.hshp"));
+        let pf = project_file_with_clip(prepared);
+        let bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
+        let loaded = load_project_file(&bytes).expect("roundtrip");
+
+        let take = &loaded.timeline.clips[0].takes[0];
+        assert_eq!(take.channel_decision, Some(record), "判定档案必须持久化");
+        assert_eq!(take.channel_mode, 2);
+    }
+
+    #[test]
+    fn saving_does_not_mint_a_decision_where_there_was_none() {
+        // 反方向同样重要：没有档案的 Take 存盘后必须**仍然**没有档案，
+        // 否则一次保存就会把"从未判定"伪装成"已定论"。
+        let mut tl = timeline_with_clip_and_zero_curves();
+        {
+            let clip = &mut tl.clips[0];
+            clip.sync_take_from_flat();
+            clip.takes[0].channel_decision = None;
+        }
+        let prepared = prepare_timeline_for_project_save(tl, Path::new("C:/proj/test.hshp"));
+        let pf = project_file_with_clip(prepared);
+        let bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
+        let loaded = load_project_file(&bytes).expect("roundtrip");
+        assert_eq!(loaded.timeline.clips[0].takes[0].channel_decision, None);
     }
 
     fn timeline_with_clip_and_zero_curves() -> TimelineState {
@@ -662,17 +1064,17 @@ mod tests {
         let bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
         let text = std::str::from_utf8(&bytes).unwrap();
         assert!(!text.contains('\n'), "JSON project should be compact");
-        assert!(text.contains("\"version\":4"));
+        assert!(text.contains("\"version\":5"));
     }
 
     #[test]
     fn project_file_version_can_be_read_without_full_timeline_parse() {
         let pf = project_file_with_clip(TimelineState::default());
         let json_bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
-        assert_eq!(read_project_file_version(&json_bytes), Some(4));
+        assert_eq!(read_project_file_version(&json_bytes), Some(5));
 
         let msgpack_bytes = serialize_project_file_for_path(&pf, Path::new("test.hshp")).unwrap();
-        assert_eq!(read_project_file_version(&msgpack_bytes), Some(4));
+        assert_eq!(read_project_file_version(&msgpack_bytes), Some(5));
     }
 
     #[test]

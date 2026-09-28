@@ -34,3 +34,34 @@ export function wholeDevicePxLength(cssLen: number, dpr: number): number {
     const len = Number.isFinite(cssLen) && cssLen > 0 ? cssLen : 1;
     return Math.max(1, Math.round(len * ratio)) / ratio;
 }
+
+/**
+ * 竖直细线的**设备像素几何**：位置吸附到设备像素栅格、宽度取整数个物理像素，
+ * 并以 `x` 为中心。
+ *
+ * 【为什么必须成对做这两件事】只吸附位置、宽度仍是 `1px` CSS：在 dpr=1.25 下
+ * 1px CSS = 1.25 物理像素，边缘必然落在半个物理像素上被抗锯齿。只取整宽度、不
+ * 吸附位置：线跨在两个物理像素之间，覆盖度随位置的小数部分变化 —— 同一排竖线
+ * **粗细不一**（系统缩放率 > 1 时尤其明显，用户报告过）。
+ *
+ * 两者都做之后，任何 dpr 下线体都覆盖**恰好** `physicalWidthPx` 个物理像素，
+ * 且左右边缘都落在设备像素边界上，粗细恒定。
+ *
+ * @param x 线中心的 CSS 像素位置（内容坐标，可为小数）。
+ * @param physicalWidthPx 期望的物理像素宽度（1 = 发丝线，2 = 小节线）。
+ * @param dpr 设备像素比。
+ */
+export function verticalHairlineGeometry(
+    x: number,
+    physicalWidthPx: number,
+    dpr: number,
+): { left: number; width: number } {
+    const ratio = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+    // 取整数个物理像素宽（与 `wholeDevicePxLength` 同一规则）。
+    const physical = Math.max(1, Math.round((physicalWidthPx > 0 ? physicalWidthPx : 1) * ratio));
+    // 【左缘必须在**设备空间**里算】曾经先吸附中心、再减去 `width/2`：当宽度是奇数个
+    // 物理像素时（如 1），两条边都落在半像素边界上 —— 线体横跨相邻两列、各覆盖一半，
+    // 恰恰是最该避免的抗锯齿。改为在设备空间取整左缘，线体因此**恰好覆盖整数列**。
+    const leftDevice = Math.round(x * ratio - physical / 2);
+    return { left: leftDevice / ratio, width: physical / ratio };
+}

@@ -164,12 +164,33 @@ export function resolveViewportOffsetPx(args: {
  */
 export function measureTimelineViewportOffsetPx(): number | null {
     if (typeof document === "undefined") return null;
-    const track = document.querySelector<HTMLElement>("[data-timeline-scroller]");
-    const param = document.querySelector<HTMLElement>("[data-piano-roll-scroller]");
     return resolveViewportOffsetPx({
-        trackLeftPx: track === null ? null : track.getBoundingClientRect().left,
-        paramLeftPx: param === null ? null : param.getBoundingClientRect().left,
+        trackLeftPx: readableLeftPx(
+            document.querySelector<HTMLElement>("[data-timeline-scroller]"),
+        ),
+        paramLeftPx: readableLeftPx(
+            document.querySelector<HTMLElement>("[data-piano-roll-scroller]"),
+        ),
     });
+}
+
+/**
+ * 取元素左缘，但**拒绝**那些"存在却不可信"的元素。
+ *
+ * 【为什么必须拒绝】面板可停靠/浮动之后，非活动标签的 DOM 宿主被停在视口外
+ * （`left: -20000px`，见 `panelHostRegistry`），折叠/隐藏时尺寸为 0。这些元素
+ * 依然能被 `querySelector` 找到，但它们的左缘是 −20000 或任意值 —— 一旦被当成
+ * 测量结果，参数编辑器的同步偏移就会离谱到几千像素，两个面板彻底错位。
+ * 返回 null 会让调用方保持上一次的有效值并重试。
+ */
+function readableLeftPx(element: HTMLElement | null): number | null {
+    if (element === null) return null;
+    const rect = element.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return null;
+    // 停泊区在视口外约 −20000；浮动窗允许适度出屏，因此阈值放到 1000。
+    if (rect.right < -1000) return null;
+    if (rect.left > (window.innerWidth || 0) + 1000) return null;
+    return rect.left;
 }
 
 /**

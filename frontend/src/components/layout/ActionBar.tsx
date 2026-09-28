@@ -1,14 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import {
-    Flex,
-    Select,
-    TextField,
-    Button,
-    IconButton,
-    Separator,
-    Text,
-    Box,
-} from "@radix-ui/themes";
+// hs-interaction-exempt: 主工具栏是紧凑 chrome（size 1、内联底色、BPM 有手势累加器），能力层原语是表单尺寸；本文件的滚轮与精细调整接线已完备（BPM/节拍器音量/三个下拉均有），故刻意保留。
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Flex, Select, TextField, Button, IconButton, Box } from "@radix-ui/themes";
 import {
     CheckIcon,
     DoubleArrowRightIcon,
@@ -17,7 +9,6 @@ import {
     PlayIcon,
     StopIcon,
 } from "@radix-ui/react-icons";
-import { UndoHistoryPanel } from "./UndoHistoryPanel";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
 import type { RootState } from "../../app/store";
@@ -26,6 +17,9 @@ import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
 import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
 import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
 import { CustomScaleDialog } from "./CustomScaleDialog";
+import { AppContextMenu } from "../../ui/Menu";
+import { AppToolbarSeparator } from "../../ui/Toolbar";
+import { AppIconButton } from "../../ui";
 
 import {
     playOriginal,
@@ -69,14 +63,21 @@ import {
 } from "../../utils/tempoMap";
 import { SCALE_KEYS, SCALE_LABELS, type ScaleLike } from "../../utils/musicalScales";
 import { applySelectWheelChange } from "../../utils/selectWheel";
-import { useWheelScrollGuard } from "../../utils/useWheelScrollGuard";
+import { useRangeWheelGuard } from "../../utils/useRangeWheelGuard";
+import { useNonPassiveWheel } from "../../utils/useNonPassiveWheel";
+import { createFrameCommitter, type FrameCommitter } from "../../utils/commitOncePerFrame";
 import {
     formatKeybinding,
     isModifierActive,
     selectKeybinding,
 } from "../../features/keybindings/keybindingsSlice";
-import { toggleVisible } from "../../features/fileBrowser/fileBrowserSlice";
-import { toggleNotebookVisible } from "../../features/notebook/notebookSlice";
+import { openPanelById, selectPanelVisible, togglePanelVisible } from "../../features/dock/dockApi";
+import {
+    PANEL_FILE_BROWSER,
+    PANEL_NOTEBOOK,
+    PANEL_UNDO_HISTORY,
+} from "../dock/registerBuiltinPanels";
+import { store } from "../../app/store";
 import {
     cancelRecordingCountdown,
     loadRecordingApps,
@@ -195,14 +196,13 @@ export function ActionBar() {
     // runtime 的两个标量单独订阅：runtime 对象随播放轮询每 tick 新建，
     // 但 isPlaying 本身只在播放/暂停时变化。
     const isPlaying = useAppSelector((state: RootState) => state.session.runtime.isPlaying);
-    const fileBrowserVisible = useAppSelector((state: RootState) => state.fileBrowser.visible);
-    const notebookVisible = useAppSelector((state: RootState) => state.notebook.visible);
+    const fileBrowserVisible = useAppSelector(selectPanelVisible(PANEL_FILE_BROWSER));
+    const notebookVisible = useAppSelector(selectPanelVisible(PANEL_NOTEBOOK));
     const recording = useAppSelector((state: RootState) => state.recording);
     const paramFineAdjustKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.paramFineAdjust"),
     );
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { t, tf } = useI18n();
 
     const [pitchSnapOpen, setPitchSnapOpen] = useState(false);
     const [snapSettingsOpen, setSnapSettingsOpen] = useState(false);
@@ -210,25 +210,24 @@ export function ActionBar() {
     const [customScaleOpen, setCustomScaleOpen] = useState(false);
     const [recordingSettingsOpen, setRecordingSettingsOpen] = useState(false);
     const [recordingMenuPos, setRecordingMenuPos] = useState<{ x: number; y: number } | null>(null);
-    const recordingMenuRef = useRef<HTMLDivElement | null>(null);
     const [metronomeMenuPos, setMetronomeMenuPos] = useState<{ x: number; y: number } | null>(null);
     const metronomeMenuRef = useRef<HTMLDivElement | null>(null);
-    // 「操作记录」窗口：右键撤销/重做按钮打开（非模态，不影响轨道编辑）。
-    const [historyPanelOpen, setHistoryPanelOpen] = useState(false);
-    const [historyPanelAnchor, setHistoryPanelAnchor] = useState<DOMRect | null>(null);
+    // 「操作记录」面板：右键撤销/重做按钮打开。它是**可停靠面板**，显隐由停靠
+    // 布局决定（不再是本组件的局部 state），因此它能被拖到任意位置、与其他面板
+    // 合并成标签页，也能被"布局"菜单统一管理。
     const undoButtonRef = useRef<HTMLButtonElement | null>(null);
     const openHistoryPanel = useCallback(() => {
-        setHistoryPanelAnchor(undoButtonRef.current?.getBoundingClientRect() ?? null);
-        setHistoryPanelOpen(true);
-    }, []);
-    const closeHistoryPanel = useCallback(() => setHistoryPanelOpen(false), []);
-    // 「编辑」菜单的「操作记录」项经事件打开（面板由本组件持有并渲染）。
-    useEffect(() => {
-        const open = () => openHistoryPanel();
-        window.addEventListener("hifi:open-undo-history", open as EventListener);
-        return () =>
-            window.removeEventListener("hifi:open-undo-history", open as EventListener);
-    }, [openHistoryPanel]);
+        // 【落点提示：按钮矩形】从撤销/重做按钮打开时，面板浮在按钮**正下方**
+        // （下方放不下则翻到上方）—— 用户刚点的按钮就是他的注意力所在，把它丢到
+        // 屏幕角落会让人以为没打开。见 `resolveFloatNearRect`。
+        const rect = undoButtonRef.current?.getBoundingClientRect() ?? null;
+        openPanelById(
+            dispatch,
+            store.getState,
+            PANEL_UNDO_HISTORY,
+            rect ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height } : null,
+        );
+    }, [dispatch]);
     // 按钮 tooltip 里的快捷键提示（跟随用户在快捷键设置中的自定义绑定）。
     const undoShortcutKb = useAppSelector((state: RootState) =>
         selectKeybinding(state, "edit.undo"),
@@ -237,8 +236,8 @@ export function ActionBar() {
         selectKeybinding(state, "edit.redo"),
     );
     // 滚轮守卫：节拍器音量滑块滚轮步进时不触发默认滚动
-    // （React onWheel 的 preventDefault 是 passive no-op，见 useWheelScrollGuard）。
-    const metronomeVolumeWheelGuard = useWheelScrollGuard<HTMLInputElement>();
+    // （React onWheel 的 preventDefault 是 passive no-op，见 useRangeWheelGuard）。
+    const metronomeVolumeWheelGuard = useRangeWheelGuard<HTMLInputElement>();
 
     // ── "拖动时切换吸附"（modifier.clipNoSnap）────────────────────────
     // 时间轴拖拽手势进行中且按住该修饰键时，工具栏吸附按钮临时显示为
@@ -275,24 +274,6 @@ export function ActionBar() {
     );
 
     useEffect(() => {
-        if (!recordingMenuPos) return;
-        const onPointerDown = (e: PointerEvent) => {
-            const target = e.target as Node | null;
-            if (recordingMenuRef.current?.contains(target)) return;
-            setRecordingMenuPos(null);
-        };
-        const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === "Escape") setRecordingMenuPos(null);
-        };
-        window.addEventListener("pointerdown", onPointerDown, true);
-        window.addEventListener("keydown", onKeyDown, true);
-        return () => {
-            window.removeEventListener("pointerdown", onPointerDown, true);
-            window.removeEventListener("keydown", onKeyDown, true);
-        };
-    }, [recordingMenuPos]);
-
-    useEffect(() => {
         if (!metronomeMenuPos) return;
         const onPointerDown = (e: PointerEvent) => {
             const target = e.target as Node | null;
@@ -313,11 +294,11 @@ export function ActionBar() {
     const recordingSourceLabel = (() => {
         switch (recording.settings.captureMode) {
             case "loopback":
-                return tAny("recording_mode_loopback");
+                return tf("recording_mode_loopback");
             case "application":
-                return tAny("recording_mode_application");
+                return tf("recording_mode_application");
             default:
-                return tAny("recording_mode_device");
+                return tf("recording_mode_device");
         }
     })();
 
@@ -326,37 +307,37 @@ export function ActionBar() {
         if (captureMode === "device") {
             // "default" 是后端枚举出的合成项（未本地化），始终显示本地化文案。
             if (recording.settings.sourceDevice === "default") {
-                return tAny("recording_device_default");
+                return tf("recording_device_default");
             }
             const device = recording.devices.find(
                 (item) => !item.isLoopback && item.id === recording.settings.sourceDevice,
             );
-            return device?.name ?? tAny("recording_device_default");
+            return device?.name ?? tf("recording_device_default");
         }
         if (captureMode === "loopback") {
             if (
                 recording.settings.loopbackDevice === "default" ||
                 recording.settings.loopbackDevice === "loopback:default"
             ) {
-                return tAny("recording_loopback_default");
+                return tf("recording_loopback_default");
             }
             const device = recording.devices.find(
                 (item) => item.isLoopback && item.id === recording.settings.loopbackDevice,
             );
-            return device?.name ?? tAny("recording_loopback_default");
+            return device?.name ?? tf("recording_loopback_default");
         }
         const app = recording.apps.find((item) => item.id === recording.settings.captureAppId);
-        return app?.name || recording.settings.captureAppName || tAny("recording_application");
+        return app?.name || recording.settings.captureAppName || tf("recording_application");
     })();
 
     const recordingTooltip = [
         recording.active
-            ? tAny("recording_tooltip_stop")
+            ? tf("recording_tooltip_stop")
             : recording.countdownRemaining > 0
-              ? tAny("recording_tooltip_cancel_countdown")
-              : tAny("recording_tooltip_start"),
-        `${tAny("recording_source_mode")}: ${recordingSourceLabel}`,
-        `${tAny("recording_device")}: ${recordingDeviceLabel}`,
+              ? tf("recording_tooltip_cancel_countdown")
+              : tf("recording_tooltip_start"),
+        `${tf("recording_source_mode")}: ${recordingSourceLabel}`,
+        `${tf("recording_device")}: ${recordingDeviceLabel}`,
     ].join("\n");
 
     async function applyRecordingSettings(patch: Partial<RecordingSettings>) {
@@ -525,10 +506,93 @@ export function ActionBar() {
         [s.tempoMap, s.project, dispatch, updateTempoPointAtPlayhead],
     );
 
+    /**
+     * BPM 的**落地提交**（每帧最多一次）。
+     *
+     * 【为什么要合并】一次滚轮手势会产生几十个 wheel 事件，每个事件各提交一次
+     * 意味着订阅方（标尺刻度、网格、波形）全量重算几十次 —— 用户看到的就是标尺
+     * "抽搐"，且滚得越快越明显。合并到帧粒度后，手势期间画面仍然逐帧跟随
+     * （手感不变），但每帧只重算一次。
+     */
+    const applyBpmCommit = useCallback(
+        (value: number) => {
+            if (s.tempoMap && s.tempoMap.points.length > 0) {
+                updateTempoPointAtPlayhead({ bpm: value });
+                return;
+            }
+            dispatch(setBpm(value));
+            void dispatch(updateTransportBpm(value));
+        },
+        [s.tempoMap, updateTempoPointAtPlayhead, dispatch],
+    );
+    /** 提交体经 ref 现读：宿主回调只创建一次，闭包捕获会用到旧的 tempoMap。 */
+    const applyBpmCommitRef = useRef(applyBpmCommit);
+    applyBpmCommitRef.current = applyBpmCommit;
+    const bpmCommitRef = useRef<FrameCommitter<number> | null>(null);
+    if (bpmCommitRef.current === null) {
+        bpmCommitRef.current = createFrameCommitter<number>((value) =>
+            applyBpmCommitRef.current(value),
+        );
+    }
+    useEffect(() => {
+        const committer = bpmCommitRef.current;
+        return () => {
+            // 卸载前落地最后一次滚轮值：否则"最后一格"永远到不了 store。
+            committer?.flush();
+        };
+    }, []);
+
+    /**
+     * 滚轮累积的起点。
+     *
+     * 【为什么不能直接读 `bpmText`】`setBpmText` 是异步的，同一帧内的多个 wheel
+     * 事件会读到同一个旧值，各算出同一个"下一格"，连续滚动因此只前进一格。
+     * 这里用 ref 持有手势内的当前值；手势结束（提交后静默 200ms）或外部改动时失效。
+     */
+    const wheelBpmBaseRef = useRef<number | null>(null);
+    const wheelBpmAtRef = useRef(0);
+
+    /**
+     * BPM 输入的滚轮调值。
+     *
+     * 【为什么用非被动原生监听】React 的 `onWheel` 是 passive 的，里面的
+     * `preventDefault()` 是空操作（本仓库其它数值滚轮控件都用 `useNonPassiveWheel`
+     * 或 `useRangeWheelGuard`）：滚轮调值会同时滚动祖先容器，产生第二路视觉位移，
+     * 并触发浏览器干预告警。
+     */
+    const attachBpmWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
+        // 【必须调用】换成非被动原生监听的意义正是让这两句生效：滚轮调值不得同时
+        // 滚动祖先容器（ActionBar 自己是 overflow-x-auto），也不得被其它滚轮逻辑
+        // 顺带处理。曾经在改写监听方式时把它们一起删掉，结果滚轮既改 BPM 又滚动
+        // 容器，产生第二路视觉位移 —— 用户报告的"仍然抽搐"。
+        e.preventDefault();
+        e.stopPropagation();
+        const now = performance.now();
+        // 手势起点：距上一次滚轮超过 200ms，或尚未开始过手势。
+        if (wheelBpmBaseRef.current === null || now - wheelBpmAtRef.current > 200) {
+            const current = Number(bpmText);
+            wheelBpmBaseRef.current = Number.isFinite(current) ? current : displayBpm;
+        }
+        wheelBpmAtRef.current = now;
+        const direction = e.deltaY < 0 ? 1 : -1;
+        const step = isModifierActive(paramFineAdjustKb, e) ? 0.1 : 1;
+        const next = Math.round((wheelBpmBaseRef.current + direction * step) * 1000) / 1000;
+        // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+        const clamped = clampBpm(next);
+        if (Math.abs(clamped - wheelBpmBaseRef.current) < 1e-9) return; // 已到边界
+        wheelBpmBaseRef.current = clamped;
+        // 文本逐事件更新（手感不变，且它不触发标尺重算）；Redux 提交合并到每帧一次。
+        setBpmText(formatBpmValue(clamped));
+        setBpmDirty(false);
+        bpmCommitRef.current?.schedule(clamped);
+    });
+
     function commitBpm(nextText?: string) {
         const raw = (nextText ?? bpmText).trim();
         const next = Number(raw);
         setBpmDirty(false);
+        // 键盘/失焦提交结束当前滚轮手势：下一次滚轮从新值重新累积。
+        wheelBpmBaseRef.current = null;
         if (!Number.isFinite(next)) {
             setBpmText(formatBpmValue(displayBpm));
             return;
@@ -556,9 +620,9 @@ export function ActionBar() {
         // Backend errors may carry a `:detail` suffix (e.g.
         // "recording_error_wasapi_init:0x80004005"); localize the base key.
         const baseKey = code.split(":")[0] ?? code;
-        const text = tAny(baseKey);
+        const text = tf(baseKey);
         if (text && text !== baseKey) return text;
-        return tAny(
+        return tf(
             code.startsWith("recording_error_stop")
                 ? "recording_error_stop_failed"
                 : "recording_error_start_failed",
@@ -573,16 +637,18 @@ export function ActionBar() {
         <Flex
             align="center"
             gap="3"
-            className="h-8 bg-qt-window border-b border-qt-border px-1 text-qt-text flex-nowrap overflow-x-auto overflow-y-hidden min-w-0 custom-scrollbar"
+            className="h-qt-bar-main bg-qt-window border-b border-qt-border px-1 text-qt-text flex-nowrap overflow-x-auto overflow-y-hidden min-w-0 custom-scrollbar"
         >
             {/* BPM & Time */}
             <Flex align="center" gap="2" className="shrink-0">
                 {/* Metronome */}
                 <Box style={{ position: "relative" }} data-hs-context-menu>
-                    <IconButton
-                        size="1"
-                        variant={s.metronomeEnabled ? "solid" : "ghost"}
-                        data-tooltip={t("action_metronome")}
+                    <AppIconButton
+                        active={s.metronomeEnabled}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
+                        tooltip={t("action_metronome")}
+                        icon={<MetronomeIcon />}
                         onClick={() => {
                             void dispatch(
                                 updateMetronome({ metronomeEnabled: !s.metronomeEnabled }),
@@ -592,17 +658,15 @@ export function ActionBar() {
                             event.preventDefault();
                             setMetronomeMenuPos({ x: event.clientX, y: event.clientY });
                         }}
-                    >
-                        <MetronomeIcon />
-                    </IconButton>
+                    />
                     {metronomeMenuPos && (
                         <div
                             ref={metronomeMenuRef}
                             data-hs-context-menu
-                            className="fixed z-[600] min-w-[200px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+                            className="fixed z-qt-popover min-w-[200px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
                             style={{ left: metronomeMenuPos.x, top: metronomeMenuPos.y }}
                         >
-                            <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
+                            <div className="px-3 py-1 text-qt-xs uppercase tracking-wide text-qt-text-muted">
                                 {t("metronome_volume")}
                             </div>
                             <div className="px-3 py-1.5 flex items-center gap-2">
@@ -635,14 +699,14 @@ export function ActionBar() {
                                         );
                                     }}
                                     onPointerDown={(e) => e.stopPropagation()}
-                                    className="flex-1"
+                                    className="qt-range flex-1"
                                 />
-                                <span className="text-[11px] tabular-nums w-8 text-right opacity-70">
+                                <span className="text-qt-xs tabular-nums w-8 text-right opacity-70">
                                     {Math.round(s.metronomeGain * 100)}
                                 </span>
                             </div>
                             <div className="my-1 border-t border-qt-border" />
-                            <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
+                            <div className="px-3 py-1 text-qt-xs uppercase tracking-wide text-qt-text-muted">
                                 {t("metronome_mode")}
                             </div>
                             {(
@@ -655,7 +719,7 @@ export function ActionBar() {
                                 <button
                                     key={mode}
                                     type="button"
-                                    className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                    className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                     onClick={() => {
                                         void dispatch(updateMetronome({ metronomeMode: mode }));
                                         setMetronomeMenuPos(null);
@@ -667,7 +731,7 @@ export function ActionBar() {
                                 </button>
                             ))}
                             <div className="my-1 border-t border-qt-border" />
-                            <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
+                            <div className="px-3 py-1 text-qt-xs uppercase tracking-wide text-qt-text-muted">
                                 {t("metronome_sound")}
                             </div>
                             {(
@@ -680,7 +744,7 @@ export function ActionBar() {
                                 <button
                                     key={sound}
                                     type="button"
-                                    className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                    className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                     onClick={() => {
                                         void dispatch(updateMetronome({ metronomeSound: sound }));
                                         setMetronomeMenuPos(null);
@@ -694,7 +758,7 @@ export function ActionBar() {
                             <div className="my-1 border-t border-qt-border" />
                             <button
                                 type="button"
-                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
                                 onClick={() => {
                                     void dispatch(
                                         updateMetronome({ metronomeAccent: !s.metronomeAccent }),
@@ -708,15 +772,14 @@ export function ActionBar() {
                         </div>
                     )}
                 </Box>
-                <Text size="1" className="text-qt-text-muted">
-                    {t("bpm")}:
-                </Text>
+                <span className="hs-type-caption">{t("common_bpm")}:</span>
                 <TextField.Root
+                    ref={attachBpmWheel}
                     size="1"
                     value={bpmText}
-                    title={
+                    data-tooltip={
                         s.tempoMap && s.tempoMap.points.length > 0
-                            ? tAny("tempo_map_actionbar_tip")
+                            ? tf("tempo_map_actionbar_tip")
                             : undefined
                     }
                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
@@ -736,43 +799,21 @@ export function ActionBar() {
                             (e.currentTarget as HTMLInputElement).blur();
                         }
                     }}
-                    onWheel={(e: React.WheelEvent<HTMLInputElement>) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        const direction = e.deltaY < 0 ? 1 : -1;
-                        const step = isModifierActive(paramFineAdjustKb, e) ? 0.1 : 1;
-                        const current = Number(bpmText);
-                        const base = Number.isFinite(current) ? current : Number(displayBpm);
-                        const nextRaw = base + direction * step;
-                        const next = Math.round(nextRaw * 1000) / 1000;
-                        // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
-                        const clamped = clampBpm(next);
-                        if (s.tempoMap && s.tempoMap.points.length > 0) {
-                            updateTempoPointAtPlayhead({ bpm: clamped });
-                        } else {
-                            dispatch(setBpm(clamped));
-                            void dispatch(updateTransportBpm(clamped));
-                        }
-                        setBpmText(formatBpmValue(clamped));
-                        setBpmDirty(false);
-                    }}
                     style={{
                         width: 60,
                         textAlign: "center",
                         backgroundColor: "var(--qt-base)",
                     }}
                 />
-                <Text size="1" className="text-qt-text-muted">
-                    {t("time_signature")}:
-                </Text>
+                <span className="hs-type-caption">{t("time_signature")}:</span>
                 <Flex align="center" gap="1">
                     <TextField.Root
                         size="1"
                         type="number"
                         value={String(displayBeats)}
-                        title={
+                        data-tooltip={
                             s.tempoMap && s.tempoMap.points.length > 0
-                                ? tAny("tempo_map_actionbar_tip")
+                                ? tf("tempo_map_actionbar_tip")
                                 : undefined
                         }
                         onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
@@ -832,9 +873,7 @@ export function ActionBar() {
                             backgroundColor: "var(--qt-base)",
                         }}
                     />
-                    <Text size="1" className="text-qt-text-muted">
-                        /
-                    </Text>
+                    <span className="hs-type-caption">/</span>
                     <Select.Root
                         size="1"
                         value={String(displayDenominator)}
@@ -903,9 +942,7 @@ export function ActionBar() {
                     </Select.Root>
                 </Flex>
 
-                <Text size="1" className="text-qt-text-muted">
-                    {t("grid")}:
-                </Text>
+                <span className="hs-type-caption">{t("common_grid")}:</span>
                 <Select.Root
                     value={s.grid}
                     size="1"
@@ -960,7 +997,7 @@ export function ActionBar() {
                     />
                     <Select.Content style={{ maxHeight: "none", overflow: "visible" }}>
                         <Select.Group>
-                            <Select.Label>{tAny("grid_note_normal")}</Select.Label>
+                            <Select.Label>{tf("grid_note_normal")}</Select.Label>
                             <Select.Item value="1/1">1/1</Select.Item>
                             <Select.Item value="1/2">1/2</Select.Item>
                             <Select.Item value="1/4">1/4</Select.Item>
@@ -971,7 +1008,7 @@ export function ActionBar() {
                         </Select.Group>
                         <Select.Separator />
                         <Select.Group>
-                            <Select.Label>{tAny("grid_note_dotted")}</Select.Label>
+                            <Select.Label>{tf("grid_note_dotted")}</Select.Label>
                             <Select.Item value="1/2d">1/2.</Select.Item>
                             <Select.Item value="1/4d">1/4.</Select.Item>
                             <Select.Item value="1/8d">1/8.</Select.Item>
@@ -981,7 +1018,7 @@ export function ActionBar() {
                         </Select.Group>
                         <Select.Separator />
                         <Select.Group>
-                            <Select.Label>{tAny("grid_note_triplet")}</Select.Label>
+                            <Select.Label>{tf("grid_note_triplet")}</Select.Label>
                             <Select.Item value="1/2t">1/2t</Select.Item>
                             <Select.Item value="1/4t">1/4t</Select.Item>
                             <Select.Item value="1/8t">1/8t</Select.Item>
@@ -991,9 +1028,7 @@ export function ActionBar() {
                         </Select.Group>
                     </Select.Content>
                 </Select.Root>
-                <Text size="1" className="text-qt-text-muted">
-                    {t("base_scale")}:
-                </Text>
+                <span className="hs-type-caption">{t("base_scale")}:</span>
                 <Select.Root
                     value={displayScaleSelectValue}
                     size="1"
@@ -1072,7 +1107,7 @@ export function ActionBar() {
                                 <Select.Separator />
                                 <Select.Group>
                                     <Select.Item value="__tempo_custom__">
-                                        {tempoCustomScaleName ?? tAny("custom_scale_short")}
+                                        {tempoCustomScaleName ?? tf("custom_scale_short")}
                                     </Select.Item>
                                 </Select.Group>
                             </>
@@ -1082,7 +1117,7 @@ export function ActionBar() {
                                 <Select.Separator />
                                 <Select.Group>
                                     <Select.Item value="__custom__">
-                                        {`${tAny("custom_scale_label")}: ${s.project.customScale.name}`}
+                                        {`${tf("custom_scale_label")}: ${s.project.customScale.name}`}
                                     </Select.Item>
                                 </Select.Group>
                             </>
@@ -1090,14 +1125,14 @@ export function ActionBar() {
                         <Select.Separator />
                         <Select.Group>
                             <Select.Item value="__custom_dialog__">
-                                {tAny("custom_scale_action")}
+                                {tf("custom_scale_action")}
                             </Select.Item>
                         </Select.Group>
                     </Select.Content>
                 </Select.Root>
             </Flex>
 
-            <Separator orientation="vertical" size="2" />
+            <AppToolbarSeparator />
 
             {/* Transport */}
             <Flex gap="1" className="shrink-0">
@@ -1122,7 +1157,7 @@ export function ActionBar() {
                         }
                         dispatch(playOriginal());
                     }}
-                    data-tooltip={isPlaying ? tAny("action_pause") : t("action_play_out")}
+                    data-tooltip={isPlaying ? tf("action_pause") : t("action_play_out")}
                 >
                     {isPlaying ? <PauseIcon /> : <PlayIcon />}
                 </IconButton>
@@ -1165,216 +1200,173 @@ export function ActionBar() {
                         )}
                     </IconButton>
                     {recordingMenuPos && (
-                        <div
-                            ref={recordingMenuRef}
-                            data-hs-context-menu
-                            className="fixed z-[600] min-w-[220px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
-                            style={{ left: recordingMenuPos.x, top: recordingMenuPos.y }}
-                        >
-                            <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
-                                {tAny("recording_source_mode")}
-                            </div>
-                            <button
-                                type="button"
-                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
-                                onClick={() =>
-                                    void applyRecordingSettings({ captureMode: "device" })
-                                }
-                                onPointerDown={(e) => e.stopPropagation()}
-                            >
-                                <span>{tAny("recording_mode_device")}</span>
-                                {recording.settings.captureMode === "device" ? <CheckIcon /> : null}
-                            </button>
-                            <button
-                                type="button"
-                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
-                                onClick={() =>
-                                    void applyRecordingSettings({ captureMode: "loopback" })
-                                }
-                                onPointerDown={(e) => e.stopPropagation()}
-                            >
-                                <span>{tAny("recording_mode_loopback")}</span>
-                                {recording.settings.captureMode === "loopback" ? (
-                                    <CheckIcon />
-                                ) : null}
-                            </button>
-                            <button
-                                type="button"
-                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
-                                onClick={() =>
-                                    void applyRecordingSettings({ captureMode: "application" })
-                                }
-                                onPointerDown={(e) => e.stopPropagation()}
-                            >
-                                <span>{tAny("recording_mode_application")}</span>
-                                {recording.settings.captureMode === "application" ? (
-                                    <CheckIcon />
-                                ) : null}
-                            </button>
-                            <div className="my-1 border-t border-qt-border" />
-                            <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
-                                {tAny(
-                                    recording.settings.captureMode === "application"
-                                        ? "recording_application"
-                                        : "recording_device",
-                                )}
-                            </div>
-                            {recording.settings.captureMode === "device" ? (
-                                <>
-                                    <button
-                                        type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
-                                        onClick={() =>
-                                            void applyRecordingSettings({ sourceDevice: "default" })
-                                        }
-                                        onPointerDown={(e) => e.stopPropagation()}
-                                    >
-                                        <span>{tAny("recording_device_default")}</span>
-                                        {recording.settings.sourceDevice === "default" ? (
-                                            <CheckIcon />
-                                        ) : null}
-                                    </button>
-                                    {recording.devices
-                                        .filter(
-                                            (device) =>
-                                                !device.isLoopback && device.id !== "default",
-                                        )
-                                        .map((device) => (
-                                            <button
-                                                key={device.id}
-                                                type="button"
-                                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
-                                                onClick={() =>
+                        <AppContextMenu
+                            x={recordingMenuPos.x}
+                            y={recordingMenuPos.y}
+                            minWidth={220}
+                            ariaLabel={tf("recording_source_mode")}
+                            onClose={() => setRecordingMenuPos(null)}
+                            items={[
+                                {
+                                    key: "mode-heading",
+                                    heading: true,
+                                    label: tf("recording_source_mode"),
+                                },
+                                {
+                                    key: "mode-device",
+                                    label: tf("recording_mode_device"),
+                                    checked: recording.settings.captureMode === "device",
+                                    onSelect: () =>
+                                        void applyRecordingSettings({ captureMode: "device" }),
+                                },
+                                {
+                                    key: "mode-loopback",
+                                    label: tf("recording_mode_loopback"),
+                                    checked: recording.settings.captureMode === "loopback",
+                                    onSelect: () =>
+                                        void applyRecordingSettings({ captureMode: "loopback" }),
+                                },
+                                {
+                                    key: "mode-application",
+                                    label: tf("recording_mode_application"),
+                                    checked: recording.settings.captureMode === "application",
+                                    onSelect: () =>
+                                        void applyRecordingSettings({ captureMode: "application" }),
+                                },
+                                {
+                                    key: "source-heading",
+                                    heading: true,
+                                    separatorBefore: true,
+                                    label: tf(
+                                        recording.settings.captureMode === "application"
+                                            ? "recording_application"
+                                            : "recording_device",
+                                    ),
+                                },
+                                ...(recording.settings.captureMode === "device"
+                                    ? [
+                                          {
+                                              key: "device-default",
+                                              label: tf("recording_device_default"),
+                                              checked:
+                                                  recording.settings.sourceDevice === "default",
+                                              onSelect: () =>
+                                                  void applyRecordingSettings({
+                                                      sourceDevice: "default",
+                                                  }),
+                                          },
+                                          ...recording.devices
+                                              .filter(
+                                                  (device) =>
+                                                      !device.isLoopback && device.id !== "default",
+                                              )
+                                              .map((device) => ({
+                                                  key: device.id,
+                                                  label: device.name,
+                                                  checked:
+                                                      recording.settings.sourceDevice === device.id,
+                                                  onSelect: () =>
+                                                      void applyRecordingSettings({
+                                                          sourceDevice: device.id,
+                                                      }),
+                                              })),
+                                      ]
+                                    : recording.settings.captureMode === "loopback"
+                                      ? [
+                                            {
+                                                key: "loopback-default",
+                                                label: tf("recording_loopback_default"),
+                                                checked:
+                                                    recording.settings.loopbackDevice === "default",
+                                                onSelect: () =>
                                                     void applyRecordingSettings({
-                                                        sourceDevice: device.id,
-                                                    })
-                                                }
-                                                onPointerDown={(e) => e.stopPropagation()}
-                                            >
-                                                <span className="truncate">{device.name}</span>
-                                                {recording.settings.sourceDevice === device.id ? (
-                                                    <CheckIcon />
-                                                ) : null}
-                                            </button>
-                                        ))}
-                                </>
-                            ) : recording.settings.captureMode === "loopback" ? (
-                                <>
-                                    <button
-                                        type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
-                                        onClick={() =>
-                                            void applyRecordingSettings({
-                                                loopbackDevice: "default",
-                                            })
-                                        }
-                                        onPointerDown={(e) => e.stopPropagation()}
-                                    >
-                                        <span>{tAny("recording_loopback_default")}</span>
-                                        {recording.settings.loopbackDevice === "default" ? (
-                                            <CheckIcon />
-                                        ) : null}
-                                    </button>
-                                    {recording.devices
-                                        .filter(
-                                            (device) =>
-                                                device.isLoopback &&
-                                                device.id !== "loopback:default",
-                                        )
-                                        .map((device) => (
-                                            <button
-                                                key={device.id}
-                                                type="button"
-                                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
-                                                onClick={() =>
+                                                        loopbackDevice: "default",
+                                                    }),
+                                            },
+                                            ...recording.devices
+                                                .filter(
+                                                    (device) =>
+                                                        device.isLoopback &&
+                                                        device.id !== "loopback:default",
+                                                )
+                                                .map((device) => ({
+                                                    key: device.id,
+                                                    label: device.name,
+                                                    checked:
+                                                        recording.settings.loopbackDevice ===
+                                                        device.id,
+                                                    onSelect: () =>
+                                                        void applyRecordingSettings({
+                                                            loopbackDevice: device.id,
+                                                        }),
+                                                })),
+                                        ]
+                                      : [
+                                            ...(recording.settings.captureAppId &&
+                                            !recording.apps.some(
+                                                (app) => app.id === recording.settings.captureAppId,
+                                            )
+                                                ? [
+                                                      {
+                                                          key: recording.settings.captureAppId,
+                                                          label:
+                                                              recording.settings.captureAppName ||
+                                                              recording.settings.captureAppId,
+                                                          checked: true,
+                                                          onSelect: () =>
+                                                              void applyRecordingSettings({
+                                                                  captureAppId:
+                                                                      recording.settings
+                                                                          .captureAppId,
+                                                                  captureAppName:
+                                                                      recording.settings
+                                                                          .captureAppName,
+                                                                  captureAppProcess:
+                                                                      recording.settings
+                                                                          .captureAppProcess,
+                                                              }),
+                                                      },
+                                                  ]
+                                                : []),
+                                            ...recording.apps.map((app) => ({
+                                                key: app.id,
+                                                label: app.name,
+                                                checked: recording.settings.captureAppId === app.id,
+                                                onSelect: () =>
                                                     void applyRecordingSettings({
-                                                        loopbackDevice: device.id,
-                                                    })
-                                                }
-                                                onPointerDown={(e) => e.stopPropagation()}
-                                            >
-                                                <span className="truncate">{device.name}</span>
-                                                {recording.settings.loopbackDevice === device.id ? (
-                                                    <CheckIcon />
-                                                ) : null}
-                                            </button>
-                                        ))}
-                                </>
-                            ) : (
-                                <>
-                                    {recording.settings.captureAppId &&
-                                    !recording.apps.some(
-                                        (app) => app.id === recording.settings.captureAppId,
-                                    ) ? (
-                                        <button
-                                            type="button"
-                                            className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
-                                            onClick={() =>
-                                                void applyRecordingSettings({
-                                                    captureAppId: recording.settings.captureAppId,
-                                                    captureAppName:
-                                                        recording.settings.captureAppName,
-                                                    captureAppProcess:
-                                                        recording.settings.captureAppProcess,
-                                                })
-                                            }
-                                            onPointerDown={(e) => e.stopPropagation()}
-                                        >
-                                            <span className="truncate">
-                                                {recording.settings.captureAppName ||
-                                                    recording.settings.captureAppId}
-                                            </span>
-                                            <CheckIcon />
-                                        </button>
-                                    ) : null}
-                                    {recording.apps.map((app) => (
-                                        <button
-                                            key={app.id}
-                                            type="button"
-                                            className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
-                                            onClick={() =>
-                                                void applyRecordingSettings({
-                                                    captureAppId: app.id,
-                                                    captureAppName: app.name,
-                                                    captureAppProcess: app.processName,
-                                                })
-                                            }
-                                            onPointerDown={(e) => e.stopPropagation()}
-                                        >
-                                            <span className="truncate">{app.name}</span>
-                                            {recording.settings.captureAppId === app.id ? (
-                                                <CheckIcon />
-                                            ) : null}
-                                        </button>
-                                    ))}
-                                </>
-                            )}
-                            <div className="my-1 border-t border-qt-border" />
-                            <button
-                                type="button"
-                                className="w-full flex items-center gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
-                                onClick={() => {
-                                    setRecordingMenuPos(null);
-                                    setRecordingSettingsOpen(true);
-                                }}
-                                onPointerDown={(e) => e.stopPropagation()}
-                            >
-                                <span>{tAny("recording_context_settings")}</span>
-                            </button>
-                        </div>
+                                                        captureAppId: app.id,
+                                                        captureAppName: app.name,
+                                                        captureAppProcess: app.processName,
+                                                    }),
+                                            })),
+                                        ]),
+                                {
+                                    key: "settings",
+                                    label: tf("recording_context_settings"),
+                                    separatorBefore: true,
+                                    onSelect: () => {
+                                        setRecordingMenuPos(null);
+                                        setRecordingSettingsOpen(true);
+                                    },
+                                },
+                            ]}
+                        />
                     )}
                 </Box>
                 {recording.active || recording.countdownRemaining > 0 ? (
                     <Flex align="center" gap="1" className="shrink-0">
-                        <Text
-                            size="1"
-                            color={recording.active ? "red" : "gray"}
-                            className="tabular-nums"
+                        <span
+                            className="hs-type-caption tabular-nums"
+                            style={{
+                                color: recording.active
+                                    ? "var(--qt-danger-text)"
+                                    : "var(--qt-text-muted)",
+                            }}
                         >
                             {recording.countdownRemaining > 0
                                 ? `-${recording.countdownRemaining}`
                                 : formatRecordingTime(recording.elapsedSec)}
-                        </Text>
+                        </span>
                         <div
                             style={{
                                 width: 48,
@@ -1389,7 +1381,10 @@ export function ActionBar() {
                                 style={{
                                     width: `${Math.min(100, Math.round((recording.level || 0) * 100))}%`,
                                     height: "100%",
-                                    background: recording.level > 0.98 ? "red" : "#e5484d",
+                                    background:
+                                        recording.level > 0.98
+                                            ? "var(--qt-danger-text)"
+                                            : "var(--qt-danger-border)",
                                     transition: "width 80ms linear",
                                 }}
                             />
@@ -1397,19 +1392,17 @@ export function ActionBar() {
                     </Flex>
                 ) : null}
                 {recording.error ? (
-                    <Text
-                        size="1"
-                        color="red"
-                        title={recording.error}
-                        className="truncate"
-                        style={{ maxWidth: 220 }}
+                    <span
+                        className="hs-type-caption truncate"
+                        data-tooltip={recording.error}
+                        style={{ maxWidth: 220, color: "var(--qt-danger-text)" }}
                     >
                         {recordingErrorMessage(recording.error)}
-                    </Text>
+                    </span>
                 ) : null}
             </Flex>
 
-            <Separator orientation="vertical" size="2" />
+            <AppToolbarSeparator />
 
             {/* ── 撤销 / 重做 ──────────────────────────────────────────
                 独立成组、两侧以分隔线与其他按钮隔开；右键打开「操作记录」
@@ -1450,83 +1443,88 @@ export function ActionBar() {
                 </IconButton>
             </Flex>
 
-            <Separator orientation="vertical" size="2" />
+            <AppToolbarSeparator />
 
             {/* File Browser Toggle */}
             <Flex gap="1" className="shrink-0">
-                <IconButton
-                    size="1"
-                    variant={fileBrowserVisible ? "solid" : "ghost"}
-                    data-tooltip={tAny("fb_title")}
-                    onClick={() => dispatch(toggleVisible())}
-                >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <path
-                            d="M2 3.5C2 3.22386 2.22386 3 2.5 3H5.29289L6.64645 4.35355C6.74021 4.44732 6.86739 4.5 7 4.5H12.5C12.7761 4.5 13 4.72386 13 5V11.5C13 11.7761 12.7761 12 12.5 12H2.5C2.22386 12 2 11.7761 2 11.5V3.5Z"
-                            fill="currentColor"
-                        />
-                    </svg>
-                </IconButton>
-                <IconButton
-                    size="1"
-                    variant={notebookVisible ? "solid" : "ghost"}
-                    data-tooltip={t("notebook")}
-                    onClick={() => dispatch(toggleNotebookVisible())}
-                >
-                    <Pencil1Icon />
-                </IconButton>
+                <AppIconButton
+                    active={fileBrowserVisible}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
+                    tooltip={tf("fb_title")}
+                    onClick={() => togglePanelVisible(dispatch, store.getState, PANEL_FILE_BROWSER)}
+                    icon={
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 15 15"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path
+                                d="M2 3.5C2 3.22386 2.22386 3 2.5 3H5.29289L6.64645 4.35355C6.74021 4.44732 6.86739 4.5 7 4.5H12.5C12.7761 4.5 13 4.72386 13 5V11.5C13 11.7761 12.7761 12 12.5 12H2.5C2.22386 12 2 11.7761 2 11.5V3.5Z"
+                                fill="currentColor"
+                            />
+                        </svg>
+                    }
+                />
+                <AppIconButton
+                    active={notebookVisible}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
+                    tooltip={t("common_notebook")}
+                    onClick={() => togglePanelVisible(dispatch, store.getState, PANEL_NOTEBOOK)}
+                    icon={<Pencil1Icon />}
+                />
             </Flex>
 
-            <Separator orientation="vertical" size="2" />
+            <AppToolbarSeparator />
 
             {/* Toolbar Toggles */}
             <Flex align="center" gap="1" className="shrink-0">
                 {/* Auto Crossfade */}
-                <IconButton
-                    size="1"
-                    variant={s.autoCrossfadeEnabled ? "solid" : "ghost"}
-                    data-tooltip={tAny("auto_crossfade")}
+                <AppIconButton
+                    active={s.autoCrossfadeEnabled}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
+                    tooltip={tf("auto_crossfade")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleAutoCrossfade());
                         void dispatch(persistUiSettings());
                     }}
-                >
-                    {/* X icon for crossfade */}
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <path
-                            d="M2 12L7.5 3L13 12"
-                            stroke="currentColor"
-                            strokeWidth="1.2"
+                    icon={
+                        /* X icon for crossfade */
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 15 15"
                             fill="none"
-                        />
-                        <path
-                            d="M2 3L7.5 12L13 3"
-                            stroke="currentColor"
-                            strokeWidth="1.2"
-                            fill="none"
-                            opacity="0.5"
-                        />
-                    </svg>
-                </IconButton>
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path
+                                d="M2 12L7.5 3L13 12"
+                                stroke="currentColor"
+                                strokeWidth="1.2"
+                                fill="none"
+                            />
+                            <path
+                                d="M2 3L7.5 12L13 3"
+                                stroke="currentColor"
+                                strokeWidth="1.2"
+                                fill="none"
+                                opacity="0.5"
+                            />
+                        </svg>
+                    }
+                />
 
                 {/* Split Transition */}
-                <IconButton
-                    size="1"
-                    variant={s.splitTransitionEnabled ? "solid" : "ghost"}
-                    data-tooltip={tAny("split_transition_tooltip")}
+                <AppIconButton
+                    active={s.splitTransitionEnabled}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
+                    tooltip={tf("split_transition_tooltip")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleSplitTransition());
@@ -1536,27 +1534,37 @@ export function ActionBar() {
                         e.preventDefault();
                         setSplitTransitionOpen(true);
                     }}
-                >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <path d="M7.5 1.5V13.5" stroke="currentColor" strokeWidth="1.2" />
-                        <path d="M3.5 3.5L7.5 5.5L3.5 7.5Z" fill="currentColor" opacity="0.85" />
-                        <path d="M11.5 7.5L7.5 9.5L11.5 11.5Z" fill="currentColor" opacity="0.45" />
-                    </svg>
-                </IconButton>
+                    icon={
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 15 15"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path d="M7.5 1.5V13.5" stroke="currentColor" strokeWidth="1.2" />
+                            <path
+                                d="M3.5 3.5L7.5 5.5L3.5 7.5Z"
+                                fill="currentColor"
+                                opacity="0.85"
+                            />
+                            <path
+                                d="M11.5 7.5L7.5 9.5L11.5 11.5Z"
+                                fill="currentColor"
+                                opacity="0.45"
+                            />
+                        </svg>
+                    }
+                />
 
                 {/* Snap */}
-                <IconButton
-                    size="1"
-                    variant={effectiveSnapVisual ? "solid" : "ghost"}
-                    data-tooltip={`${tAny("snap")}${
+                <AppIconButton
+                    active={effectiveSnapVisual}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
+                    tooltip={`${tf("common_snap")}${
                         snapGestureActive && snapToggleHeld
-                            ? ` · ${tAny("snap")}: ${tAny("snap_toggle_inverted")}`
+                            ? ` · ${tf("common_snap")}: ${tf("snap_toggle_inverted")}`
                             : ""
                     }`}
                     tabIndex={-1}
@@ -1568,37 +1576,38 @@ export function ActionBar() {
                         e.preventDefault();
                         setSnapSettingsOpen(true);
                     }}
-                >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <path
-                            d="m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15Z"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                        />
-                        <path
-                            d="m5 8 4 4"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                        />
-                        <path
-                            d="m12 15 4 4"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                        />
-                    </svg>
-                </IconButton>
+                    icon={
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path
+                                d="m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15Z"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                            />
+                            <path
+                                d="m5 8 4 4"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                            />
+                            <path
+                                d="m12 15 4 4"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                            />
+                        </svg>
+                    }
+                />
 
                 {/* Ripple Edit (Auto Follow) */}
                 <RippleModeButton
@@ -1613,181 +1622,207 @@ export function ActionBar() {
                     }}
                 />
 
-                <Separator orientation="vertical" size="2" />
+                <AppToolbarSeparator />
 
                 {/* Playhead Zoom */}
-                <IconButton
-                    size="1"
-                    variant={s.playheadZoomEnabled ? "solid" : "ghost"}
-                    data-tooltip={tAny("playhead_zoom")}
+                <AppIconButton
+                    active={s.playheadZoomEnabled}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
+                    tooltip={tf("playhead_zoom")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(togglePlayheadZoom());
                         void dispatch(persistUiSettings());
                     }}
-                >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <path d="M7.5 2V13" stroke="currentColor" strokeWidth="1.2" />
-                        <path d="M6 3.5L7.5 2L9 3.5" stroke="currentColor" strokeWidth="1" />
-                        <path d="M5.5 5.5L4 7.5L5.5 9.5" stroke="currentColor" strokeWidth="1.2" />
-                        <path d="M9.5 5.5L11 7.5L9.5 9.5" stroke="currentColor" strokeWidth="1.2" />
-                        <path d="M3 12H12" stroke="currentColor" strokeWidth="0.8" opacity="0.5" />
-                    </svg>
-                </IconButton>
+                    icon={
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 15 15"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path d="M7.5 2V13" stroke="currentColor" strokeWidth="1.2" />
+                            <path d="M6 3.5L7.5 2L9 3.5" stroke="currentColor" strokeWidth="1" />
+                            <path
+                                d="M5.5 5.5L4 7.5L5.5 9.5"
+                                stroke="currentColor"
+                                strokeWidth="1.2"
+                            />
+                            <path
+                                d="M9.5 5.5L11 7.5L9.5 9.5"
+                                stroke="currentColor"
+                                strokeWidth="1.2"
+                            />
+                            <path
+                                d="M3 12H12"
+                                stroke="currentColor"
+                                strokeWidth="0.8"
+                                opacity="0.5"
+                            />
+                        </svg>
+                    }
+                />
 
                 {/* Auto Scroll (horizontal arrows) */}
-                <IconButton
-                    size="1"
-                    variant={s.autoScrollEnabled ? "solid" : "ghost"}
-                    data-tooltip={tAny("auto_scroll")}
+                <AppIconButton
+                    active={s.autoScrollEnabled}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
+                    tooltip={tf("auto_scroll")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleAutoScroll());
                         void dispatch(persistUiSettings());
                     }}
-                >
-                    <DoubleArrowRightIcon width="15" height="15" />
-                </IconButton>
+                    icon={<DoubleArrowRightIcon width="15" height="15" />}
+                />
 
-                <Separator orientation="vertical" size="2" />
+                <AppToolbarSeparator />
 
-                <IconButton
-                    size="1"
-                    variant={s.paramEditorSeekPlayheadEnabled ? "solid" : "ghost"}
-                    data-tooltip={tAny("param_editor_seek_playhead")}
+                <AppIconButton
+                    active={s.paramEditorSeekPlayheadEnabled}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
+                    tooltip={tf("param_editor_seek_playhead")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleParamEditorSeekPlayhead());
                         void dispatch(persistUiSettings());
                     }}
-                >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <path d="M2 2.5H13" stroke="currentColor" strokeWidth="0.8" opacity="0.5" />
-                        <path
-                            d="M2 12.5H13"
-                            stroke="currentColor"
-                            strokeWidth="0.8"
-                            opacity="0.5"
-                        />
-                        <path d="M7.5 3.5V11.5" stroke="currentColor" strokeWidth="1.2" />
-                        <path d="M6 4.5L7.5 3L9 4.5" stroke="currentColor" strokeWidth="1" />
-                        <path
-                            d="M7.8 8.2C8.9 8.2 9.8 9.1 9.8 10.2C9.8 11.3 8.9 12.2 7.8 12.2C6.9 12.2 6.2 11.6 6 10.8H7.8V8.2Z"
-                            fill="currentColor"
-                        />
-                    </svg>
-                </IconButton>
+                    icon={
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 15 15"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path
+                                d="M2 2.5H13"
+                                stroke="currentColor"
+                                strokeWidth="0.8"
+                                opacity="0.5"
+                            />
+                            <path
+                                d="M2 12.5H13"
+                                stroke="currentColor"
+                                strokeWidth="0.8"
+                                opacity="0.5"
+                            />
+                            <path d="M7.5 3.5V11.5" stroke="currentColor" strokeWidth="1.2" />
+                            <path d="M6 4.5L7.5 3L9 4.5" stroke="currentColor" strokeWidth="1" />
+                            <path
+                                d="M7.8 8.2C8.9 8.2 9.8 9.1 9.8 10.2C9.8 11.3 8.9 12.2 7.8 12.2C6.9 12.2 6.2 11.6 6 10.8H7.8V8.2Z"
+                                fill="currentColor"
+                            />
+                        </svg>
+                    }
+                />
 
                 {/* Allow timeline clicks to switch the parameter editor track */}
-                <IconButton
-                    size="1"
-                    variant={s.paramEditorTimelineClickSelectTrackEnabled ? "solid" : "ghost"}
-                    data-tooltip={tAny("param_editor_timeline_click_select_track")}
+                <AppIconButton
+                    active={s.paramEditorTimelineClickSelectTrackEnabled}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
+                    tooltip={tf("param_editor_timeline_click_select_track")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleParamEditorTimelineClickSelectTrack());
                         void dispatch(persistUiSettings());
                     }}
-                >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <defs>
-                            <marker
-                                id="hs-track-switch-arrow"
-                                viewBox="0 0 6 6"
-                                refX="3"
-                                refY="3"
-                                markerWidth="5"
-                                markerHeight="5"
-                                orient="auto-start-reverse"
-                            >
-                                <path d="M0,0 L6,3 L0,6 Z" fill="currentColor" />
-                            </marker>
-                        </defs>
-                        <rect
-                            x="1.5"
-                            y="2"
-                            width="8"
-                            height="3"
-                            rx="1"
-                            stroke="currentColor"
-                            strokeWidth="1"
-                        />
-                        <rect
-                            x="5.5"
-                            y="10"
-                            width="8"
-                            height="3"
-                            rx="1"
-                            stroke="currentColor"
-                            strokeWidth="1"
-                        />
-                        <line
-                            x1="9.5"
-                            y1="4.5"
-                            x2="5.5"
-                            y2="10.5"
-                            stroke="currentColor"
-                            strokeWidth="1"
-                            markerStart="url(#hs-track-switch-arrow)"
-                            markerEnd="url(#hs-track-switch-arrow)"
-                        />
-                    </svg>
-                </IconButton>
+                    icon={
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 15 15"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <defs>
+                                <marker
+                                    id="hs-track-switch-arrow"
+                                    viewBox="0 0 6 6"
+                                    refX="3"
+                                    refY="3"
+                                    markerWidth="5"
+                                    markerHeight="5"
+                                    orient="auto-start-reverse"
+                                >
+                                    <path d="M0,0 L6,3 L0,6 Z" fill="currentColor" />
+                                </marker>
+                            </defs>
+                            <rect
+                                x="1.5"
+                                y="2"
+                                width="8"
+                                height="3"
+                                rx="1"
+                                stroke="currentColor"
+                                strokeWidth="1"
+                            />
+                            <rect
+                                x="5.5"
+                                y="10"
+                                width="8"
+                                height="3"
+                                rx="1"
+                                stroke="currentColor"
+                                strokeWidth="1"
+                            />
+                            <line
+                                x1="9.5"
+                                y1="4.5"
+                                x2="5.5"
+                                y2="10.5"
+                                stroke="currentColor"
+                                strokeWidth="1"
+                                markerStart="url(#hs-track-switch-arrow)"
+                                markerEnd="url(#hs-track-switch-arrow)"
+                            />
+                        </svg>
+                    }
+                />
 
-                <Separator orientation="vertical" size="2" />
+                <AppToolbarSeparator />
 
                 {/* Ignore Grouping (broken chain) */}
-                <IconButton
-                    size="1"
-                    variant={s.ignoreGrouping ? "solid" : "ghost"}
-                    data-tooltip={tAny("ignore_grouping")}
+                <AppIconButton
+                    active={s.ignoreGrouping}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
+                    tooltip={tf("ignore_grouping")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleIgnoreGrouping());
                         void dispatch(persistUiSettings());
                     }}
-                >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                    >
-                        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-                        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-                        <line
-                            x1="2"
-                            y1="2"
-                            x2="22"
-                            y2="22"
+                    icon={
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 24 24"
+                            fill="none"
                             stroke="currentColor"
-                            strokeWidth="2.5"
-                            opacity="0.7"
-                        />
-                    </svg>
-                </IconButton>
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        >
+                            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                            <line
+                                x1="2"
+                                y1="2"
+                                x2="22"
+                                y2="22"
+                                stroke="currentColor"
+                                strokeWidth="2.5"
+                                opacity="0.7"
+                            />
+                        </svg>
+                    }
+                />
             </Flex>
 
             {/* Pitch Snap Settings Dialog */}
@@ -1816,11 +1851,6 @@ export function ActionBar() {
                     open={snapSettingsOpen}
                     onOpenChange={setSnapSettingsOpen}
                 />
-            )}
-
-            {/* 「操作记录」：非模态浮动窗口（portal 到 body，不受工具栏裁剪） */}
-            {historyPanelOpen && (
-                <UndoHistoryPanel anchorRect={historyPanelAnchor} onClose={closeHistoryPanel} />
             )}
 
             {/* Snap Context Menu removed: right-click opens the settings dialog above. */}
@@ -1897,77 +1927,25 @@ function RippleModeMenu({
     onChange: (mode: "off" | "track" | "all") => void;
     onClose: () => void;
 }) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
-    const menuRef = useRef<HTMLDivElement>(null);
-    const onCloseRef = useRef(onClose);
-
-    useLayoutEffect(() => {
-        onCloseRef.current = onClose;
-    }, [onClose]);
-
-    useLayoutEffect(() => {
-        const el = menuRef.current;
-        if (!el) return;
-        const rect = el.getBoundingClientRect();
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        if (rect.right > vw) {
-            el.style.left = `${Math.max(0, vw - rect.width)}px`;
-        }
-        if (rect.bottom > vh) {
-            el.style.top = `${Math.max(0, vh - rect.height)}px`;
-        }
-
-        const onPointerDown = (e: PointerEvent) => {
-            if (el && !el.contains(e.target as Node)) {
-                onCloseRef.current();
-            }
-        };
-        const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === "Escape") {
-                e.preventDefault();
-                onCloseRef.current();
-            }
-        };
-        window.addEventListener("pointerdown", onPointerDown, true);
-        window.addEventListener("keydown", onKeyDown);
-        return () => {
-            window.removeEventListener("pointerdown", onPointerDown, true);
-            window.removeEventListener("keydown", onKeyDown);
-        };
-    }, [x, y]);
-
+    const { tf } = useI18n();
     const options: Array<{ value: "off" | "track" | "all"; label: string }> = [
-        { value: "off", label: tAny("ripple_mode_off") as string },
-        { value: "track", label: tAny("ripple_mode_track") as string },
-        { value: "all", label: tAny("ripple_mode_all") as string },
+        { value: "off", label: tf("ripple_mode_off") as string },
+        { value: "track", label: tf("ripple_mode_track") as string },
+        { value: "all", label: tf("ripple_mode_all") as string },
     ];
 
     return (
-        <div
-            ref={menuRef}
-            data-hs-context-menu="1"
-            className="fixed z-50 min-w-[150px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
-            style={{ left: x, top: y }}
-            onPointerDown={(e) => e.stopPropagation()}
-        >
-            {options.map((opt) => (
-                <button
-                    key={opt.value}
-                    className="px-3 py-1.5 text-left w-full text-[12px] transition-colors flex items-center justify-between gap-3 hover:bg-qt-highlight hover:text-white"
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        onChange(opt.value);
-                        onClose();
-                    }}
-                >
-                    <span>{opt.label}</span>
-                    {mode === opt.value && <span className="text-qt-accent">✓</span>}
-                </button>
-            ))}
-        </div>
+        <AppContextMenu
+            x={x}
+            y={y}
+            onClose={onClose}
+            items={options.map((opt) => ({
+                key: opt.value,
+                label: opt.label,
+                checked: mode === opt.value,
+                onSelect: () => onChange(opt.value),
+            }))}
+        />
     );
 }
 
@@ -1981,25 +1959,24 @@ function RippleModeButton({
     onCycle: () => void;
     onSelect: (mode: "off" | "track" | "all") => void;
 }) {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
     return (
         <>
-            <IconButton
-                size="1"
-                variant={mode !== "off" ? "solid" : "ghost"}
-                data-tooltip={(tAny(`ripple_tooltip_${mode}`) as string) ?? tAny("ripple")}
+            <AppIconButton
+                active={mode !== "off"}
+                // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                emphasis="accent"
+                tooltip={(tf(`ripple_tooltip_${mode}`) as string) ?? tf("common_ripple")}
                 tabIndex={-1}
                 onClick={onCycle}
                 onContextMenu={(e) => {
                     e.preventDefault();
                     setMenu({ x: e.clientX, y: e.clientY });
                 }}
-            >
-                <RippleIcon multiTrack={mode === "all"} />
-            </IconButton>
+                icon={<RippleIcon multiTrack={mode === "all"} />}
+            />
             {menu && (
                 <RippleModeMenu
                     x={menu.x}

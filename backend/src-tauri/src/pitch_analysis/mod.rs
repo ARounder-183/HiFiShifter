@@ -7,10 +7,14 @@ use serde::Serialize;
 use std::path::Path;
 
 pub(crate) mod analysis;
+pub(crate) mod dyn_analysis;
 pub(crate) mod schedule;
 
 // 公开 API — 供 crate 内其他模块使用
 pub use schedule::maybe_schedule_pitch_orig;
+
+// DYN（动态）原声电平基线的组装入口。
+pub use dyn_analysis::{assemble_dyn_orig_for_engine, maybe_schedule_dyn_orig};
 
 #[allow(dead_code)]
 pub(crate) fn hz_to_midi(hz: f64) -> f32 {

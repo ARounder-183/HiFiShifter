@@ -83,8 +83,8 @@ export function buildSingleFadeInfoText(args: {
 }): string {
     const sideLabel = args.isOut ? args.t("fade_out") : args.t("fade_in");
     const name = shapeName(args.shape, args.t);
-    const curvature = args.t("curvature");
-    const length = args.t("length");
+    const curvature = args.t("common_curvature");
+    const length = args.t("common_length");
     const sign = args.dir >= 0 ? "+" : "";
     return [
         `${sideLabel}${args.t("fade_type_label")}：${name}`,
@@ -103,8 +103,8 @@ export function buildSingleFadeInfoContent(args: {
     t: FadeLabelLookup;
 }): ReactNode {
     const sideLabel = args.isOut ? args.t("fade_out") : args.t("fade_in");
-    const curvature = args.t("curvature");
-    const length = args.t("length");
+    const curvature = args.t("common_curvature");
+    const length = args.t("common_length");
     const sign = args.dir >= 0 ? "+" : "";
     return [
         [`${sideLabel}${args.t("fade_type_label")}：`, fadeIconNode(args.shape, args.isOut)],

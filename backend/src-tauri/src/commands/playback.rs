@@ -93,6 +93,13 @@ fn bg_render_restart_request_is_stale(last_requested_at_ms: u64, now_ms: u64) ->
     now_ms.saturating_sub(last_requested_at_ms) >= BG_RENDER_RESTART_QUIET_WINDOW_MS
 }
 
+/// 距渲染请求的去抖窗口结束还需等待多少毫秒（0 = 可以启动）。
+///
+/// 抽成纯函数是为了可测：调度线程本身无法在单测里稳定复现。
+fn render_request_debounce_remaining_ms(last_requested_at_ms: u64, now_ms: u64) -> u64 {
+    BG_RENDER_DEBOUNCE_MS.saturating_sub(now_ms.saturating_sub(last_requested_at_ms))
+}
+
 /// 请求重启后台渲染（合流版）。
 ///
 /// 不立即取消在途渲染：仅置位重启标志并刷新请求时间戳。渲染循环在 clip
@@ -117,6 +124,63 @@ pub(crate) static BG_RENDER_PITCH_PENDING: std::sync::atomic::AtomicBool =
 /// 才允许清理全局标志，避免取消旧渲染后开新一轮时被旧线程把新状态清掉。
 pub(crate) static BG_RENDER_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+
+/// 渲染请求去抖窗口（毫秒）。
+///
+/// 背景：音高分析完成、缓存失效、编辑提交都会请求渲染，而工程加载期间这类事件
+/// 以几十毫秒一次的频率到来 —— 实测一次打开工程的前 1.5 s 内启动了 **61 轮**
+/// pass，其中 53 轮只处理 6 个 clip 且毫无进展。每轮都要全量收集待渲染 Clip
+/// （逐个计算渲染键，含曲线切片哈希）、扩容四个缓存并 spawn 线程，空转成本与
+/// 真实渲染同阶。
+///
+/// 去抖把窗口内的多个请求合流成一次启动。窗口结束后到达的新请求会开启新的
+/// 调度，因此不存在"请求被吞掉"的情况。
+pub(crate) const BG_RENDER_DEBOUNCE_MS: u64 = 200;
+
+/// 加载收敛的兜底静默窗口（毫秒）。
+///
+/// 正常路径靠"本轮没有 clip 因音高分析未完成被跳过"直接上报工程级汇总（见
+/// `render_background_pass` 末尾）。但存在**永远无法就绪**的 clip（源文件缺失、
+/// 音高分析不可用等）时该条件永不成立，因此另设兜底：连续这么久没有新一轮 pass
+/// 完成，就认为加载已收敛并上报最新累计值。
+///
+/// 取 3 s 是因为实测逐步加载过程中，相邻两轮**已完成** pass 的间隔最长约 2.2 s
+/// （音高分析逐批完成的节奏）——窗口必须大于它，否则会在加载中途抢先上报。
+const RENDER_SUMMARY_SETTLE_MS: u64 = 3_000;
+
+/// 已完成的后台渲染 pass 计数。
+///
+/// 兜底窗口用它判断"等待期间是否又有新一轮完成"：有则重新计时，避免在加载
+/// 尚未收敛时抢先上报中途值。
+static BG_RENDER_PASS_EPOCH: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// 兜底上报线程是否已在等待窗口结束（同一窗口内的重复请求合流）。
+static BG_RENDER_SETTLE_TIMER_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 最近一次上报对应的 pass 纪元（避免"收敛上报"与"兜底上报"对同一轮重复发事件）。
+static BG_RENDER_SUMMARY_EMITTED_EPOCH: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// 本次工程加载是否已经上报过渲染缓存复用汇总。
+///
+/// 见 [`try_emit_render_cache_summary`]：这条提示的语义是"本次打开"，必须
+/// **至多一次**。由 `cancel_background_render` 在打开/新建工程时复位。
+static BG_RENDER_SUMMARY_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 最近一次渲染请求的时间戳（进程启动相对毫秒）。
+///
+/// 与 [`BG_RENDER_RESTART_REQUESTED_AT_MS`] 是**两件事**：后者描述"在途 pass
+/// 需要重启"（由渲染循环在 clip 边界消费），前者描述"还没有 pass 在跑，需要
+/// 起一轮"（由调度线程消费）。混用会让两个静默窗口互相干扰。
+static BG_RENDER_REQUESTED_AT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// 是否已有调度线程在等待去抖窗口（用于合流同一窗口内的重复请求）。
+static BG_RENDER_SCHEDULER_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// `render_single_clip` 内部检测到后台渲染取消时返回的错误标记。
 const BG_RENDER_CANCELLED_ERR: &str = "bg_render_cancelled";
@@ -147,6 +211,11 @@ fn is_clip_pitch_analysis_ready(
     timeline: &crate::state::TimelineState,
     clip: &crate::state::Clip,
 ) -> bool {
+    // 【渲染输入稳定性卫兵（按根轨道）】所在根轨道的 `pitch_orig` 组装尚未
+    // 收敛时跳过：组装在 clip 音高分析落地过程中会多次改写曲线（未就绪 span
+    // 以零填充占位），而它是渲染键的输入 —— 未收敛时渲染的条目在收敛后必然
+    // 键失效（播放时 miss 重渲染，同一 clip 渲两遍）。收敛判定见
+    // root_pitch_assembly_pending；由 collect 侧按根记忆，避免逐 clip 重算。
     let Some(clip_root) = timeline.resolve_root_track_id(&clip.track_id) else {
         return false;
     };
@@ -161,6 +230,51 @@ fn is_clip_pitch_analysis_ready(
         entry.frame_period_ms.max(0.1),
     );
     clip_pitch.is_some()
+}
+
+/// 该根轨道的 `pitch_orig` 组装是否仍未收敛（渲染键还会漂移）。
+///
+/// 【为什么按根轨道而不是全局】clip 音高分析落地时，`maybe_schedule_pitch_orig`
+/// 会用各 clip 的缓存逐次重组装整条根曲线（未就绪 span 以零填充占位），全部
+/// 落地后的"全量命中"组装才会置位 `pitch_orig_key`（见 `maybe_schedule_pitch_orig`
+/// 的分支说明）—— 它因此是"该根曲线已到终值、渲染键不再漂移"的权威信号。
+/// 按根判定让**已收敛根轨道**的 clip 立即渲染（例如全缓存命中的工程打开即渲），
+/// 不为其他根轨道的分析整体推迟；未收敛根的 clip 由完成回调链条逐根解锁。
+///
+/// 前置条件与 `build_pitch_job` 的"是否需要组装"判定保持一致（不含其昂贵的
+/// mix timeline 构建）——该根根本没有组装任务时不视为 pending，否则会永久
+/// 卡住渲染。
+fn root_pitch_assembly_pending(
+    timeline: &crate::state::TimelineState,
+    root_track_id: &str,
+) -> bool {
+    let Some(track) = timeline.tracks.iter().find(|t| t.id == root_track_id) else {
+        return false;
+    };
+    let has_active_midi_clip = timeline.clips.iter().any(|c| {
+        timeline.resolve_root_track_id(&c.track_id).as_deref() == Some(root_track_id)
+            && !c.muted
+            && c.midi_note_data.is_some()
+    });
+    let currently_has_adjustment = timeline
+        .params_by_root_track
+        .get(root_track_id)
+        .map(|e| e.has_pitch_adjustment_active)
+        .unwrap_or(false);
+    if !track.compose_enabled && !has_active_midi_clip && !currently_has_adjustment {
+        return false;
+    }
+    if matches!(
+        track.pitch_analysis_algo,
+        crate::state::PitchAnalysisAlgo::None
+    ) {
+        return false;
+    }
+    timeline
+        .params_by_root_track
+        .get(root_track_id)
+        .map(|e| e.pitch_orig_key.is_none())
+        .unwrap_or(false)
 }
 
 pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
@@ -328,6 +442,17 @@ fn ensure_hifigan_tension_cache(
         }
     }
 
+    // 【持久化缓存读回】张力变体：内存未命中时回退磁盘（渲染线程内）。
+    if crate::render_cache::enabled() {
+        if let Some(loaded) = crate::render_cache::load_tension(&cache_key, out_rate) {
+            let mut cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            cache.insert(cache_key.clone(), loaded);
+            return Ok((Some(cache_key), false));
+        }
+    }
+
     let tensioned = crate::hifigan_tension::apply_tension_to_stereo(
         base_pcm_stereo,
         out_rate,
@@ -344,11 +469,157 @@ fn ensure_hifigan_tension_cache(
         sample_rate: out_rate,
         rendered_take_id: clip.active_take_id.clone(),
     };
+    // 【持久化】张力变体异步落盘。
+    crate::render_cache::store_tension(&cache_key, &entry);
     let mut cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     cache.insert(cache_key.clone(), entry);
     Ok((Some(cache_key), true))
+}
+
+/// Clip 播放速率（非法值按 1.0 处理，与实时引擎口径一致）。
+fn clip_playback_rate(clip: &crate::state::Clip) -> f64 {
+    let rate = clip.playback_rate as f64;
+    if rate.is_finite() && rate > 0.0 {
+        rate
+    } else {
+        1.0
+    }
+}
+
+/// 构造整 Clip 渲染哈希输入。
+///
+/// ★ 所有需要计算渲染缓存键的位置（收集待渲染、气声噪声键、快照回退）都必须
+/// 经由本函数：任何一处参数口径漂移都会让"写入的键"与"查询的键"不一致 ——
+/// 轻则缓存永久 miss，重则跨参数误命中。
+fn build_rendered_hash_input<'a>(
+    clip: &'a crate::state::Clip,
+    entry: &'a crate::state::TrackParamsState,
+    renderer_id: &'a str,
+    sr: u32,
+    input_pitch_curve: Option<&'a [f32]>,
+    compose_enabled: bool,
+    scale_signature: &'a str,
+) -> crate::synth_clip_cache::RenderedClipHashInput<'a> {
+    let start_frame = (clip.start_sec.max(0.0) * sr as f64).round() as u64;
+    let end_frame =
+        start_frame + (clip.length_sec.max(0.0) * sr as f64).round().max(1.0) as u64;
+
+    crate::synth_clip_cache::RenderedClipHashInput {
+        clip_id: &clip.id,
+        source_path: clip.source_path.as_deref().unwrap_or(""),
+        source_file_mtime: clip.source_file_mtime,
+        source_file_fingerprint: clip.source_file_fingerprint,
+        active_take_id: clip.active_take_id.as_deref(),
+        renderer_id,
+        start_frame,
+        end_frame,
+        sample_rate: sr,
+        playback_rate: clip_playback_rate(clip),
+        reversed: clip.reversed,
+        loop_enabled: clip.loop_enabled,
+        channel_mode: clip.channel_mode,
+        source_range_q: (
+            (clip.source_start_sec * 1000.0).round() as i64,
+            (clip.source_end_sec * 1000.0).round() as i64,
+        ),
+        pitch_edit: entry.pitch_edit.as_slice(),
+        pitch_orig: Some(entry.pitch_orig.as_slice()),
+        frame_period_ms: entry.frame_period_ms.max(0.1),
+        extra_curves: &entry.extra_curves,
+        extra_params: &entry.extra_params,
+        formant_morph: clip.formant_morph.as_ref().filter(|params| params.enabled),
+        input_pitch_curve,
+        compose_enabled,
+        scale_signature,
+        source_file_size: clip.source_file_size,
+    }
+}
+
+/// clip 的渲染材料：根轨道的参数与轨道本身。
+struct ClipRenderMaterial<'a> {
+    entry: &'a crate::state::TrackParamsState,
+    track: &'a crate::state::Track,
+}
+
+/// 解析 clip 的渲染材料，并回答"这个 clip 当前是否需要渲染"。
+///
+/// ★ 这是该判定的**唯一实现**：收集待渲染（热路径）与 miss 归因诊断都必须经由
+/// 它。两处各写一份必然漂移，而漂移的后果是"写入的键"与"查询的键"不一致 ——
+/// 轻则永久 miss，重则跨参数误命中（见 `synth_clip_cache` 的模块契约）。
+///
+/// `find_track` 由调用方注入：热路径传预构建的 O(1) 查找表，诊断路径传线性查找
+/// （每次 miss 至多一次，轨道数是常数级）。
+fn resolve_render_material<'a>(
+    timeline: &'a crate::state::TimelineState,
+    clip: &crate::state::Clip,
+    find_track: impl Fn(&str) -> Option<&'a crate::state::Track>,
+) -> Option<ClipRenderMaterial<'a>> {
+    if clip.muted || clip.source_path.is_none() {
+        return None;
+    }
+    // 使用新的检测逻辑：检查 clip 是否需要 pitch edit
+    let clip_start_sec = clip.start_sec.max(0.0);
+    if !crate::pitch_editing::does_clip_need_processor_render(timeline, clip, clip_start_sec) {
+        return None;
+    }
+    // 获取 pitch edit 参数（按根轨道）
+    let clip_root = timeline.resolve_root_track_id(&clip.track_id)?;
+    let entry = timeline.params_by_root_track.get(&clip_root)?;
+    let track = find_track(&clip_root)?;
+    Some(ClipRenderMaterial { entry, track })
+}
+
+/// 组装单个 clip 的渲染键输入（与收集、快照回退共用同一口径）。
+fn rendered_hash_input_for_clip<'a>(
+    timeline: &'a crate::state::TimelineState,
+    clip: &'a crate::state::Clip,
+    sr: u32,
+    scale_signature: &'a str,
+) -> Option<crate::synth_clip_cache::RenderedClipHashInput<'a>> {
+    let material =
+        resolve_render_material(timeline, clip, |id| timeline.tracks.iter().find(|t| t.id == id))?;
+    let kind = crate::state::SynthPipelineKind::from_track_algo(&material.track.pitch_analysis_algo);
+    let renderer_id = crate::renderer::get_renderer(kind).id();
+    Some(build_rendered_hash_input(
+        clip,
+        material.entry,
+        renderer_id,
+        sr,
+        None,
+        material.track.compose_enabled,
+        scale_signature,
+    ))
+}
+
+/// miss 归因：逐个排除最易漂移的输入后重算哈希，并探测磁盘上是否存在该变体。
+///
+/// 渲染键是不可逆的摘要，单看两个哈希无法知道"哪个输入变了"。但排除某项后重算
+/// 若反而能在磁盘上找到条目，就唯一地指向该输入在两个会话之间发生了漂移 ——
+/// 典型来源是音高分析在 GPU / CPU EP 之间切换导致 `pitch_orig` 出现 ULP 级差异、
+/// 源文件因复制 / 同步而 mtime 变动。这是"整库静默失效"唯一可行的定位手段。
+///
+/// 仅在 `HIFISHIFTER_RENDER_CACHE_LOG=1` 下调用：每个 miss 要多算若干次哈希
+/// （含曲线切片），不能进常规路径。
+fn log_render_key_drift(timeline: &crate::state::TimelineState, clip: &crate::state::Clip, sr: u32) {
+    use crate::synth_clip_cache::{compute_rendered_clip_hash_excluding, HashExclusions};
+
+    let scale_signature = timeline.render_scale_signature();
+    let Some(input) = rendered_hash_input_for_clip(timeline, clip, sr, &scale_signature) else {
+        return;
+    };
+    for (label, exclusions) in HashExclusions::DIAGNOSTIC_CANDIDATES {
+        let variant = compute_rendered_clip_hash_excluding(&input, exclusions);
+        if crate::render_cache::contains_rendered(variant) {
+            log::warn!(
+                "[bg_render][cache] MISS attribution clip_id={} would_hit_if_excluded={} variant_hash={:#018x}",
+                clip.id,
+                label,
+                variant
+            );
+        }
+    }
 }
 
 /// 收集 timeline 中所有需要预渲染的 clip。
@@ -373,73 +644,29 @@ fn collect_clips_needing_render(
     // 预构建轨道的 O(1) 查找表，消除内部的 O(N) 线性扫描
     let tracks_by_id: std::collections::HashMap<&str, &crate::state::Track> =
         timeline.tracks.iter().map(|t| (t.id.as_str(), t)).collect();
+    // 生效音阶签名在整个收集过程中不变，只需算一次（它遍历 Tempo Map）。
+    let scale_signature = timeline.render_scale_signature();
 
     for clip in &timeline.clips {
-        if clip.muted {
-            continue;
-        }
-        let Some(source_path) = clip.source_path.as_deref() else {
-            continue;
-        };
-
-        // 使用新的检测逻辑：检查clip是否需要pitch edit
-        let clip_start_sec = clip.start_sec.max(0.0);
-        let needs_pitch_edit =
-            crate::pitch_editing::does_clip_need_processor_render(timeline, clip, clip_start_sec);
-
-        if !needs_pitch_edit {
-            continue;
-        }
-
-        let playback_rate = {
-            let r = clip.playback_rate as f64;
-            if r.is_finite() && r > 0.0 {
-                r
-            } else {
-                1.0
-            }
-        };
-        let start_frame = (clip.start_sec.max(0.0) * sr as f64).round() as u64;
-        let end_frame =
-            start_frame + (clip.length_sec.max(0.0) * sr as f64).round().max(1.0) as u64;
-
-        // 获取pitch edit参数
-        let Some(clip_root) = timeline.resolve_root_track_id(&clip.track_id) else {
+        let Some(material) =
+            resolve_render_material(timeline, clip, |id| tracks_by_id.get(id).copied())
+        else {
             continue;
         };
-        let entry = match timeline.params_by_root_track.get(&clip_root) {
-            Some(e) => e,
-            None => continue,
-        };
-        let track = match tracks_by_id.get(clip_root.as_str()) {
-            Some(&t) => t,
-            None => continue,
-        };
-        let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
+        let kind = crate::state::SynthPipelineKind::from_track_algo(&material.track.pitch_analysis_algo);
         let renderer_id = crate::renderer::get_renderer(kind).id();
-        let pitch_edit = entry.pitch_edit.as_slice();
-        let frame_period_ms = entry.frame_period_ms.max(0.1);
-        let param_hash = crate::synth_clip_cache::compute_rendered_clip_hash(
-            &clip.id,
-            source_path,
-            start_frame,
-            end_frame,
-            sr,
+
+        // 渲染参数哈希：与渲染线程、快照回退共用同一份输入口径。
+        let hash_input = build_rendered_hash_input(
+            clip,
+            material.entry,
             renderer_id,
-            pitch_edit,
-            frame_period_ms,
-            playback_rate,
-            &entry.extra_curves,
-            &entry.extra_params,
-            clip.formant_morph.as_ref().filter(|params| params.enabled),
+            sr,
             None,
-            clip.source_file_mtime,
-            clip.loop_enabled,
-            (
-                (clip.source_start_sec * 1000.0).round() as i64,
-                (clip.source_end_sec * 1000.0).round() as i64,
-            ),
+            material.track.compose_enabled,
+            scale_signature.as_str(),
         );
+        let param_hash = crate::synth_clip_cache::compute_rendered_clip_hash(&hash_input);
         let cache_key = crate::synth_clip_cache::RenderedClipCacheKey {
             clip_id: clip.id.clone(),
             param_hash,
@@ -448,7 +675,7 @@ fn collect_clips_needing_render(
         if debug {
             log::warn!(
                 "[collect_clips_needing_render] clip_id={} sr={} start_frame={} end_frame={} hash={:#018x}",
-                clip.id, sr, start_frame, end_frame, param_hash
+                clip.id, sr, hash_input.start_frame, hash_input.end_frame, param_hash
             );
         }
 
@@ -459,6 +686,92 @@ fn collect_clips_needing_render(
         });
     }
     out
+}
+
+/// 单个 clip 是否已经**无需再处理**。
+///
+/// 两个条件必须同时成立（抽成纯函数以便测试这两种"半成品"状态）：
+/// - `registered_hash == Some(current_hash)`：当前渲染键已登记。键不匹配说明参数
+///   变过（编辑 / 撤销 / 换 Take），必须重渲；
+/// - `cached`：该键的条目确实在内存渲染缓存中。只登记而无条目说明它已被字节
+///   预算 LRU 逐出，同样必须重渲。
+///
+/// 反过来，"只缓存而未登记"也必须重渲：快照按 `pending_rendered_keys` 解析
+/// （见该表契约），登记缺失时它会把已渲染的 clip 当成未渲染，等待中的传输层
+/// 会一直原地冻结。
+fn clip_work_is_complete(registered_hash: Option<u64>, current_hash: u64, cached: bool) -> bool {
+    registered_hash == Some(current_hash) && cached
+}
+
+/// 计算"已无需再处理"的 clip id 集合（纯函数，便于测试）。
+///
+/// - `clips`：`(clip_id, 当前渲染键)`；
+/// - `registered`：当前渲染键**已登记**的 clip id 集合（调用方在登记表锁内算好）；
+/// - `is_cached`：该渲染键是否存在于内存渲染缓存。
+///
+/// 两者同时成立才算完成 —— 任一缺失都必须重渲，理由见 [`clip_work_is_complete`]。
+fn completed_clip_ids<'a>(
+    clips: impl Iterator<Item = (&'a str, &'a crate::synth_clip_cache::RenderedClipCacheKey)>,
+    registered: &std::collections::HashSet<String>,
+    is_cached: impl Fn(&crate::synth_clip_cache::RenderedClipCacheKey) -> bool,
+) -> std::collections::HashSet<String> {
+    clips
+        .filter(|(clip_id, key)| {
+            clip_work_is_complete(
+                registered.contains(*clip_id).then_some(key.param_hash),
+                key.param_hash,
+                is_cached(key),
+            )
+        })
+        .map(|(clip_id, _)| clip_id.to_string())
+        .collect()
+}
+
+/// 从待渲染队列中剔除**已经完成**的 clip，返回剔除数量。
+///
+/// # 为什么需要这道闸门
+/// 打开工程时音高分析逐批完成，每一批都会触发一次渲染请求（见
+/// `handle_clip_pitch_ready`）。而每轮 pass 都会重新遍历**全部**可渲染 clip ——
+/// 已完成的也在内。实测一个 465 片段的工程因此跑了 **80 轮 pass、近 2 万次 clip
+/// 遍历**，其中绝大多数是纯缓存命中的空转：每轮每个 clip 2 行日志、每个 clip 一次
+/// 全量快照重建（`refresh_rendered_snapshot` → 引擎 O(clips) 重建）。日志刷屏只是
+/// 表象，底下是成百上千次无谓的快照重建。
+///
+/// 判据见 [`clip_work_is_complete`]。参数变更会让键失配、缓存失效会移除登记，
+/// 两种情况下 clip 都会被保留下来重渲，因此这里不会漏掉任何真实工作。
+fn retain_clips_needing_work(clips: &mut Vec<ClipRenderInfo>) -> usize {
+    // ★ 两把锁**绝不嵌套**：登记表锁只在这个作用域内持有，随后才去锁渲染缓存。
+    // 渲染循环里的顺序是"渲染缓存锁 → 登记表锁"（见 pass 内 `cache.insert(..)`
+    // 后紧跟 `register_pending_rendered_key`），这里若反过来嵌套就是交叉死锁。
+    let registered: std::collections::HashSet<String> = {
+        let pending = crate::synth_clip_cache::global_pending_rendered_keys()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clips
+            .iter()
+            .filter(|info| {
+                pending
+                    .get(&info.clip.id)
+                    .map(|key| key.param_hash == info.cache_key.param_hash)
+                    .unwrap_or(false)
+            })
+            .map(|info| info.clip.id.clone())
+            .collect()
+    };
+
+    let cache = crate::synth_clip_cache::global_rendered_clip_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let completed = completed_clip_ids(
+        clips.iter().map(|info| (info.clip.id.as_str(), &info.cache_key)),
+        &registered,
+        |key| cache.contains_key(key),
+    );
+    drop(cache);
+
+    let before = clips.len();
+    clips.retain(|info| !completed.contains(&info.clip.id));
+    before - clips.len()
 }
 
 /// 渲染单个 clip 的完整 stereo PCM（从源文件解码 -> resample -> pitch edit -> stereo）。
@@ -489,6 +802,12 @@ fn render_single_clip(
     let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
 
     // 阶段日志：渲染进度永久卡 0% 时，日志要能直接指出卡在哪一步。
+    //
+    // 分级原则：**每渲染一个 clip 记一行**是默认级别的上限 —— `stage=begin` 恰好
+    // 提供"当前在渲染谁"，卡住时最后一行就是卡住的那个 clip。更细的子阶段耗时
+    //（解码 / 处理器 / HNSEP，且按声道扇出会重复）属于跟踪级信息，放到
+    // `HIFISHIFTER_DEBUG_COMMANDS=1` 下；异常慢的 clip 另有
+    // `[bg_render] clip N/M was slow` 告警兜底（见 `SLOW_CLIP_WARN_THRESHOLD`）。
     let stage_started = std::time::Instant::now();
     log::warn!(
         "[render] stage=begin clip_id={} rate={:.6} len_sec={:.3}",
@@ -590,23 +909,13 @@ fn render_single_clip(
         crate::mixdown::reverse_interleaved_frames(&mut segment, in_channels_usize);
     }
 
-    // 4. 转 stereo
-    let segment = if in_channels == 1 {
-        let frames = segment.len();
-        let mut stereo = Vec::with_capacity(frames * 2);
-        for sample in segment {
-            stereo.push(sample);
-            stereo.push(sample);
-        }
-        stereo
-    } else if in_channels >= 2 {
-        segment
-            .chunks_exact(in_channels_usize)
-            .flat_map(|chunk| [chunk[0], chunk[1]])
-            .collect()
-    } else {
-        return Err("unsupported channel count".to_string());
-    };
+    // 4. 声道条件化（take 级 channel_mode 的唯一语义实现，与 mixdown 一致）：
+    //    mono 源复制为双声道、stereo 源按模式取平面/交换/下混。
+    let segment = crate::channel_mode::condition_take_channels(
+        &segment,
+        in_channels,
+        clip.take_channel_mode(),
+    );
     let mut segment = segment;
 
     if cancel.is_cancelled() {
@@ -639,6 +948,10 @@ fn render_single_clip(
             key_start_sec,
             key_end_sec,
             clip.reversed && !loop_mode,
+            clip.channel_mode,
+            // 本域输入已在上方做过声道条件化，与实时域（原始 stereo +
+            // 混音时施加模式）必须用 preconditioned 判别隔离。
+            true,
             // 离线 Loop 的处理对象是"回绕平铺 segment"，与实时域（完整文件
             // 自然顺序）不同 —— 用 tiled_wrap 域判别隔离，避免互相毒化缓存。
             loop_mode,
@@ -733,11 +1046,13 @@ fn render_single_clip(
 
     let render_variant = |clip_variant: &crate::state::Clip| -> Result<Vec<f32>, String> {
         let mut rendered = segment.clone();
-        log::warn!(
-            "[render] stage=processor_begin clip_id={} elapsed_ms={}",
-            clip_variant.id,
-            stage_started.elapsed().as_millis()
-        );
+        if debug {
+            log::warn!(
+                "[render] stage=processor_begin clip_id={} elapsed_ms={}",
+                clip_variant.id,
+                stage_started.elapsed().as_millis()
+            );
+        }
         match crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
             timeline,
             clip_variant,
@@ -826,32 +1141,17 @@ fn render_single_clip(
                 let kind =
                     crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
                 let renderer_id = crate::renderer::get_renderer(kind).id();
-                let start_frame = (clip.start_sec.max(0.0) * out_rate as f64).round() as u64;
-                let end_frame = start_frame
-                    + (clip.length_sec.max(0.0) * out_rate as f64)
-                        .round()
-                        .max(1.0) as u64;
-                let source_path = clip.source_path.as_deref().unwrap_or("");
-                let param_hash = crate::synth_clip_cache::compute_breath_noise_hash(
-                    &clip.id,
-                    source_path,
-                    start_frame,
-                    end_frame,
-                    out_rate,
+                let scale_signature = timeline.render_scale_signature();
+                let hash_input = build_rendered_hash_input(
+                    clip,
+                    entry,
                     renderer_id,
-                    &entry.pitch_edit,
-                    entry.frame_period_ms.max(0.1),
-                    playback_rate,
-                    &entry.extra_curves,
-                    &entry.extra_params,
-                    clip.formant_morph.as_ref().filter(|params| params.enabled),
-                    clip.source_file_mtime,
-                    clip.loop_enabled,
-                    (
-                        (clip.source_start_sec * 1000.0).round() as i64,
-                        (clip.source_end_sec * 1000.0).round() as i64,
-                    ),
+                    out_rate,
+                    None,
+                    track.compose_enabled,
+                    scale_signature.as_str(),
                 );
+                let param_hash = crate::synth_clip_cache::compute_breath_noise_hash(&hash_input);
                 Some(crate::synth_clip_cache::BreathNoiseCacheKey {
                     clip_id: clip.id.clone(),
                     param_hash,
@@ -873,10 +1173,28 @@ fn render_single_clip(
     // 因此命中时必须验证长度严格一致；不一致则视为未命中, 走完整的双 render
     // miss 路径重新生成 noise。
     let cached_noise = breath_noise_cache_key.as_ref().and_then(|key| {
-        let mut cache = crate::synth_clip_cache::global_breath_noise_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        cache.get(key).map(|entry| entry.noise_stereo.clone())
+        {
+            let mut cache = crate::synth_clip_cache::global_breath_noise_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = cache.get(key) {
+                return Some(entry.noise_stereo.clone());
+            }
+        }
+        // 【持久化缓存读回】独立噪声 stem：内存未命中时回退磁盘（渲染线程内）。
+        // 命中即回填内存缓存，省掉一次 HNSEP 分离推理。
+        if !crate::render_cache::enabled() {
+            return None;
+        }
+        let loaded = crate::render_cache::load_noise(key, out_rate)?;
+        let noise = loaded.noise_stereo.clone();
+        {
+            let mut cache = crate::synth_clip_cache::global_breath_noise_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            cache.insert(key.clone(), loaded);
+        }
+        Some(noise)
     });
 
     if let Some(cached_noise_arc) = cached_noise {
@@ -944,37 +1262,60 @@ fn render_single_clip(
         );
     }
 
-    // Step 1: Extract mono from the (already time-stretched) stereo segment
-    let mono: Vec<f32> = segment
-        .chunks_exact(2)
-        .map(|ch| (ch[0] + ch[1]) * 0.5f32)
-        .collect();
-
-    // Step 2: Pre-populate HNSEP cache by doing separation once.
-    // This ensures the subsequent render_variant(harmonic_only)? hits the cache
-    // and only runs HiFiGAN, skipping HNSEP.
-    if cancel.is_cancelled() {
-        return Err(BG_RENDER_CANCELLED_ERR.to_string());
-    }
-    // HNSEP 分离失败（模型缺失/推理错误）时降级为非 breath 渲染：外层已因
-    // 气声跳过外部拉伸，硬错误会让整条 clip 无声等待，比"没有气声"严重得多。
-    log::warn!(
-        "[render] stage=hnsep_begin clip_id={} elapsed_ms={}",
-        clip.id,
-        stage_started.elapsed().as_millis()
-    );
-    let noise_mono = match crate::hnsep_onnx::infer_noise_mono(&clip.id, &mono, out_rate) {
-        Ok(noise) => noise,
-        Err(e) => {
-            log::warn!(
-                "render_single_clip: HNSEP failed for clip_id={}, falling back to non-breath render: {e}",
-                clip.id
-            );
-            return Ok(RenderedClipOutput {
-                rendered_stereo: render_variant(clip)?,
-                breath_noise_stereo: None,
-            });
+    // Step 1+2: 按有效声道数逐声道分离并预填 HNSEP 缓存。
+    // - 等效单声道：对 (L+R)/2 下混分离一次，缓存键 channel 0 —— 与既有
+    //   1-pass 优化完全一致（后续 render_variant 的链内分离命中缓存）。
+    // - 真立体声：L/R 平面各自分离并预填各自声道位的缓存键（链内逐声道
+    //   命中），噪声 stem 取两声道 noise 交错 —— 保证气声层也是真立体声。
+    let fanout_channels = crate::channel_mode::effective_channels(
+        clip.source_channels.unwrap_or(1).max(1),
+        clip.take_channel_mode(),
+    ) as usize;
+    let noise_planes: Vec<std::sync::Arc<Vec<f32>>> = {
+        if cancel.is_cancelled() {
+            return Err(BG_RENDER_CANCELLED_ERR.to_string());
         }
+        // HNSEP 分离失败（模型缺失/推理错误）时降级为非 breath 渲染：外层已因
+        // 气声跳过外部拉伸，硬错误会让整条 clip 无声等待，比"没有气声"严重得多。
+        if debug {
+            log::warn!(
+                "[render] stage=hnsep_begin clip_id={} channels={fanout_channels} elapsed_ms={}",
+                clip.id,
+                stage_started.elapsed().as_millis()
+            );
+        }
+        let extract_plane = |plane: usize| -> Vec<f32> {
+            segment
+                .chunks_exact(2)
+                .map(|ch| ch[plane])
+                .collect::<Vec<f32>>()
+        };
+        let mixdown_mono: Vec<f32> = segment
+            .chunks_exact(2)
+            .map(|ch| (ch[0] + ch[1]) * 0.5f32)
+            .collect();
+        let channels_mono: Vec<Vec<f32>> = if fanout_channels <= 1 {
+            vec![mixdown_mono]
+        } else {
+            vec![extract_plane(0), extract_plane(1)]
+        };
+        let mut planes = Vec::with_capacity(channels_mono.len());
+        for (ch_idx, ch_mono) in channels_mono.iter().enumerate() {
+            match crate::hnsep_onnx::infer_noise_mono(&clip.id, ch_mono, out_rate, ch_idx as u16, clip.source_file_fingerprint) {
+                Ok(noise) => planes.push(noise),
+                Err(e) => {
+                    log::warn!(
+                        "render_single_clip: HNSEP failed for clip_id={} channel={ch_idx}, falling back to non-breath render: {e}",
+                        clip.id
+                    );
+                    return Ok(RenderedClipOutput {
+                        rendered_stereo: render_variant(clip)?,
+                        breath_noise_stereo: None,
+                    });
+                }
+            }
+        }
+        planes
     };
 
     // Step 3: Render harmonic_only through ProcessorChain (HNSEP cache hits → HiFiGAN only)
@@ -988,26 +1329,41 @@ fn render_single_clip(
     }
     let harmonic_only = render_variant(&harmonic_only_clip)?;
 
-    // Step 4: Convert noise mono to stereo, matching harmonic_only length
+    // Step 4: Convert noise stem(s) to stereo, matching harmonic_only length.
+    // 等效单声道 → 对齐后复制双声道；真立体声 → 两声道分别对齐后交错。
     let out_len = harmonic_only.len();
     let out_frames = out_len / 2;
     let noise_stereo: Vec<f32> = {
-        let noise_mono_raw = noise_mono.as_ref();
         // 时间拉伸若由处理器内部完成（mel 域），谐波输出是**时间轴**长度，
         // 而 HNSEP 的噪声 stem 仍是**源速率**长度。必须对齐后再转立体声；
         // 对齐必须用与谐波一致的拉伸算法 —— 线性重采样会把气声的谱包络
         // 按 1/rate 缩放（慢放变闷、快放混叠），听感即"气声没有被正确拉伸"。
-        let aligned = crate::renderer::chain::align_noise_stem_to_len(
-            noise_mono_raw,
-            out_rate,
-            out_frames,
-            crate::time_stretch::resolved_external_stretch_algorithm(),
-        );
+        let stretch_algo = crate::time_stretch::resolved_external_stretch_algorithm();
+        let aligned: Vec<Vec<f32>> = noise_planes
+            .iter()
+            .map(|plane| {
+                crate::renderer::chain::align_noise_stem_to_len(
+                    plane.as_slice(),
+                    out_rate,
+                    out_frames,
+                    stretch_algo,
+                )
+            })
+            .collect();
         let mut stereo = Vec::with_capacity(out_len);
-        // Duplicate each mono sample to L/R channels
-        for &s in &aligned {
-            stereo.push(s);
-            stereo.push(s);
+        if aligned.len() <= 1 {
+            // Duplicate each mono sample to L/R channels
+            if let Some(aligned_mono) = aligned.first() {
+                for &s in aligned_mono.iter().take(out_frames) {
+                    stereo.push(s);
+                    stereo.push(s);
+                }
+            }
+        } else {
+            for f in 0..out_frames {
+                stereo.push(aligned[0].get(f).copied().unwrap_or(0.0));
+                stereo.push(aligned[1].get(f).copied().unwrap_or(0.0));
+            }
         }
         // 长度兜底（重采样在极小输入下可能少一帧）
         if stereo.len() < out_len {
@@ -1026,6 +1382,8 @@ fn render_single_clip(
             frames: (breath_noise_stereo.len() / 2) as u64,
             sample_rate: out_rate,
         };
+        // 【持久化】噪声 stem 异步落盘：formant 变化时可跨会话复用，省一次 HNSEP。
+        crate::render_cache::store_noise(&key, &entry);
         let mut cache = crate::synth_clip_cache::global_breath_noise_cache()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1293,32 +1651,96 @@ fn start_background_render_inner(
 
     let mut clips_to_render = collect_clips_needing_render(&timeline, sr);
     let unfiltered_total = clips_to_render.len();
-    clips_to_render.retain(|info| is_clip_pitch_analysis_ready(&timeline, &info.clip));
+    // 工程级汇总的分母：本工程需要渲染的 clip 总数。它只取决于时间线上需要
+    // pitch edit 的 clip 集合，与音高分析进度无关 —— 因此整个加载过程中恒定，
+    // 而"本轮处理的 clip 数"会随分析完成逐轮增长（6 → 35 → … → 465）。
+    crate::commands::render_summary::set_project_total(unfiltered_total);
+    // 渲染输入稳定性卫兵（按根记忆收敛判定，见 root_pitch_assembly_pending）：
+    // 未收敛根的 clip 跳过并计入 pending，由完成回调链条在收敛后补触发渲染。
+    let mut root_settled: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    clips_to_render.retain(|info| {
+        let root_key = timeline
+            .resolve_root_track_id(&info.clip.track_id)
+            .unwrap_or_default();
+        let settled = *root_settled
+            .entry(root_key.clone())
+            .or_insert_with(|| !root_pitch_assembly_pending(&timeline, &root_key));
+        settled && is_clip_pitch_analysis_ready(&timeline, &info.clip)
+    });
     let skipped_not_ready = unfiltered_total.saturating_sub(clips_to_render.len());
     BG_RENDER_PITCH_PENDING.store(skipped_not_ready > 0, Ordering::Release);
+
+    // ★ 剔除已经完成的 clip：音高分析逐批完成会触发一批又一批渲染请求，而每轮
+    // pass 都从头遍历全部可渲染 clip。不做这道剔除，绝大多数轮次都是"零进展的
+    // 空转"——既刷屏，又对每个 clip 做一次全量快照重建（见 `retain_clips_needing_work`）。
+    let already_done = retain_clips_needing_work(&mut clips_to_render);
     clips_to_render.sort_by(|a, b| a.clip.start_sec.total_cmp(&b.clip.start_sec));
 
     // Save len before clips_to_render is moved into the thread closure
     let total = clips_to_render.len();
 
     if total == 0 {
-        log::warn!(
-            "[bg_render] no clips need rendering (ready={} skipped_not_ready={})",
-            clips_to_render.len(),
-            skipped_not_ready
-        );
+        // 本轮无事可做。两种情况都无需开线程，也都不是异常：
+        // - `already_done > 0`：就绪的 clip 都已渲染完，本次请求是**空转**
+        //   （音高分析逐批完成期间这是绝大多数请求的归宿）；
+        // - 否则：所有 clip 都还在等音高分析。
+        //
+        // 去重：同一个 (已完成数, 未就绪数) 组合在加载期间会被反复命中，
+        // 同一条信息刷几十遍没有意义。计数变化时才记一行。
+        let key = ((already_done as u64) << 32) | (skipped_not_ready as u64 & 0xFFFF_FFFF);
+        if LAST_IDLE_LOG_KEY.swap(key, Ordering::AcqRel) != key {
+            if already_done > 0 {
+                log::info!(
+                    "[bg_render] idle: {} clip(s) already rendered, {} waiting for pitch analysis",
+                    already_done,
+                    skipped_not_ready
+                );
+            } else {
+                log::info!(
+                    "[bg_render] idle: no clips need rendering (skipped_not_ready={})",
+                    skipped_not_ready
+                );
+            }
+        }
         BG_RENDER_ACTIVE.store(false, Ordering::Release);
         BG_RENDER_CANCEL.store(false, Ordering::Release);
-        // 不发送渲染事件，避免前端状态栏闪烁。
+
+        // 本轮无事可做，但这**可能正是加载完成的时刻**：最后一批 clip 被上一轮
+        // pass 处理掉之后，剩下的请求（音高分析逐批完成、播放触发）都会走到这里。
+        // 不在这里补一次上报的话，"最终那一轮恰好是空转"的加载就永远看不到提示。
+        // 上报自身限流为每次加载至多一次，因此这里反复调用是安全的。
+        if skipped_not_ready == 0 {
+            try_emit_render_cache_summary(&app);
+        } else {
+            schedule_settled_render_cache_summary(app.clone());
+        }
+
+        // ★ 必须发一条 active=false 收尾事件：本路径可能紧跟在"上一轮收尾时
+        // 没发完成事件就串联启动了本轮"之后（follow-up 补轮 / 重启 / 取消后
+        // 重启都是"先起下一轮再说"的退出分支）。若本轮恰好无事可做，渲染链
+        // 到此终结 —— 没有这条事件，状态栏徽标会永远停在上一轮最后一次
+        // 进度事件（往往是"渲染中 100%"）上。事件本身幂等（active 已是
+        // false 时前端只是再收到一次同样状态），不会造成闪烁。
+        let _ = app.emit(
+            "playback_rendering_state",
+            PlaybackRenderingStateEvent {
+                active: false,
+                progress: Some(1.0),
+                target: Some("background".to_string()),
+            },
+        );
+
         // 当前端有实质性编辑时，自然会触发下一次渲染。
         return serde_json::json!({"ok": true, "rendered": 0});
     }
 
     log::warn!(
-        "[bg_render] starting background render: {} clips, engine_sr={}, timeline_version={}",
+        "[bg_render] starting background render: {} clips, engine_sr={}, timeline_version={} ({} already done, {} not pitch-ready)",
         total,
         sr,
-        render_timeline_version
+        render_timeline_version,
+        already_done,
+        skipped_not_ready
     );
 
     // ★ 不在此处清空 pending_rendered_keys。
@@ -1485,6 +1907,124 @@ fn select_next_render_index(
         .map(|(index, _)| index)
 }
 
+/// 上报**工程级**渲染缓存复用汇总（每次工程加载**至多一次**）。
+///
+/// 前端据此在状态栏提示"本次打开复用了多少、省了多少"。数值全部取自
+/// `render_summary` 的加载级累计快照，按 clip 去重、跨 pass 重启保持 —— 绝不是
+/// "本轮处理了多少"。分母是工程需要渲染的 clip 总数。
+///
+/// # 为什么必须"至多一次"
+/// 这条提示的语义是**本次打开**的结果。而"收敛"条件（本轮没有 clip 因音高分析
+/// 未完成被跳过）在加载完成后依然会被后续 pass 满足 —— 典型触发是
+/// `invalidate_clip_for_pitch_edit`：它**刻意保留** RenderedClipCache 条目、只解除
+/// pending 绑定（为的是新渲染完成前能无缝垫音，见其文档），于是"缓存里有条目、
+/// 但没有登记"的 clip 会被工作闸门判为待处理，跑出一轮零成本的 pass，再次满足
+/// 收敛条件。结果是用户每暂停/播放一次就再看到一遍同样的"本次打开复用"。
+///
+/// 因此这里用一次性标志锁死：每次工程加载只上报一次，由
+/// `cancel_background_render`（打开/新建工程的必经之路）复位。
+fn try_emit_render_cache_summary(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+
+    let summary = crate::commands::render_summary::snapshot();
+    if !claim_load_summary_slot(summary.project_total) {
+        return;
+    }
+    BG_RENDER_SUMMARY_EMITTED_EPOCH.store(
+        BG_RENDER_PASS_EPOCH.load(Ordering::Acquire),
+        Ordering::Release,
+    );
+    let _ = app.emit(
+        "render_cache_summary",
+        serde_json::json!({
+            "diskHits": summary.disk_hits,
+            "total": summary.project_total,
+            "rendered": summary.rendered,
+            "failed": summary.failed,
+            "misses": summary.rendered + summary.failed,
+            "savedMs": summary.saved_ms,
+            "persisted": summary.persisted,
+        }),
+    );
+}
+
+/// 尝试占用"本次工程加载的汇总上报名额"；占用成功返回 `true`（调用方随即发事件）。
+///
+/// - `project_total == 0`（启动早期 / 空工程 / 打开工程前）**不占用名额**：
+///   那些时机的空转同样会走到上报点，若在那里就把标志置起，真正加载完成后
+///   该有的那一次提示会被吞掉。
+/// - 有内容时每次加载只放行一次。名额由 [`reset_load_summary_slot`] 在工程切换时
+///   归还。
+fn claim_load_summary_slot(project_total: u64) -> bool {
+    use std::sync::atomic::Ordering;
+    if project_total == 0 {
+        return false;
+    }
+    !BG_RENDER_SUMMARY_REPORTED.swap(true, Ordering::AcqRel)
+}
+
+/// 归还上报名额（打开 / 新建工程时调用）。
+fn reset_load_summary_slot() {
+    BG_RENDER_SUMMARY_REPORTED.store(false, std::sync::atomic::Ordering::Release);
+}
+
+/// 静默窗口结束后补报一次工程级汇总。
+///
+/// 窗口内又有 pass 完成则重新计时（说明加载仍在推进，此刻上报的会是中途值）；
+/// 同一轮已经报过（收敛路径抢先上报）则直接跳过。
+///
+/// # 为什么还要看音高分析是否在跑
+/// 兜底的存在意义是"收敛条件永不成立"的工程（存在永远无法就绪的 clip）。但**仅靠
+/// 静默窗口不足以区分"分析已结束"和"两批分析之间的长空档"** —— 单个长文件的分析
+/// 动辄数秒，空档期没有任何 pass 完成，静默窗口会照常到期。若此时上报，用户看到的
+/// 是中途值，而名额已被占用，加载真正完成时那次正确的提示反而没了。
+///
+/// 因此再要求"没有正在进行的音高分析批次"（`get_clip_pitch_batch_progress` 为
+/// `None`）：它是"该来的结果都已经到了"的权威信号，正好把上述两种情况分开。
+fn schedule_settled_render_cache_summary(app: tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+
+    if BG_RENDER_SETTLE_TIMER_ACTIVE.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    std::thread::spawn(move || {
+        loop {
+            let seen = BG_RENDER_PASS_EPOCH.load(Ordering::Acquire);
+            std::thread::sleep(std::time::Duration::from_millis(
+                RENDER_SUMMARY_SETTLE_MS,
+            ));
+            // 又有 pass 完成（含工程切换）→ 重新计时，并让本轮改判新的工程状态。
+            if BG_RENDER_PASS_EPOCH.load(Ordering::Acquire) != seen {
+                continue;
+            }
+            // 音高分析仍在进行 → 加载尚未收敛，继续等，不要报中途值。
+            if crate::pitch_clip::get_clip_pitch_batch_progress().is_some() {
+                continue;
+            }
+            break;
+        }
+        BG_RENDER_SETTLE_TIMER_ACTIVE.store(false, Ordering::Release);
+        if BG_RENDER_SUMMARY_EMITTED_EPOCH.load(Ordering::Acquire)
+            != BG_RENDER_PASS_EPOCH.load(Ordering::Acquire)
+        {
+            try_emit_render_cache_summary(&app);
+        }
+    });
+}
+
+/// 上一次"本轮无事可做"日志的 `(已完成数 << 32) | 未就绪数`，用于去重。
+///
+/// 加载期间音高分析每完成一批就触发一次渲染请求，而绝大多数请求到来时已无待办；
+/// 不去重的话同一条"无事可做"会刷几十遍。`u64::MAX` = 尚未记录过。
+static LAST_IDLE_LOG_KEY: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// 单个 clip 处理耗时超过该阈值才单独告警（毫秒）。
+///
+/// 正常合成在数百毫秒量级；超过它是"用户会明显感到卡顿 / 进度卡住"的直接线索，
+/// 也是逐 clip 跟踪日志被降级为调试开关后，唯一值得打扰用户的单条信号。
+const SLOW_CLIP_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// 后台渲染单轮主循环（在渲染线程上执行；由调用方负责 panic 隔离）。
 ///
 /// 本轮渲染**不按固定顺序遍历**：每个 clip 边界都按实时播放位置动态择优
@@ -1507,13 +2047,22 @@ fn render_background_pass(
             .ok()
             .as_deref()
             == Some("1");
+        // 逐 clip 跟踪日志的总开关（见下方 begin/done 处的说明）。
+        let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
         let started_at = std::time::Instant::now();
+        // 落盘准入计数基线：本轮结束时取差值，得到"这一轮里有多少产物通过
+        // 准入、多少被拒以及为什么"。后台渲染会反复重启，用全局累计值当
+        // 每轮结果会互相污染。
+        let admission_before = crate::render_cache::admission_counters();
 
         let mut rendered_count = 0u32;
         let mut cache_hit_count = 0u32;
         let mut cache_miss_count = 0u32;
         let mut render_success_count = 0u32;
         let mut render_failed_count = 0u32;
+        // 持久化缓存（磁盘）命中数：用于"本次打开省了多少"的反馈与统计。
+        let mut disk_hit_count = 0u32;
+        let mut disk_load_elapsed = std::time::Duration::ZERO;
         let mut cache_probe_elapsed = std::time::Duration::ZERO;
         let mut render_elapsed = std::time::Duration::ZERO;
         let mut tension_elapsed = std::time::Duration::ZERO;
@@ -1539,13 +2088,20 @@ fn render_background_pass(
             done[index] = true;
             let clip_render_info = &clips_to_render[index];
             let clip_started_at = std::time::Instant::now();
-            log::warn!(
-                "[bg_render] clip {}/{} begin clip_id={} start_sec={:.3}",
-                rendered_count + 1,
-                total,
-                clip_render_info.clip.id,
-                clip_render_info.clip.start_sec
-            );
+            // 逐 clip 的 begin/done 是**跟踪级**日志：一轮 465 个 clip 就是 930 行，
+            // 而它们承载的信息（处理了谁、花了多久）已由本轮汇总行
+            //（`[bg_render] complete:`）与 `[bg_render][cache] DONE` 覆盖。因此默认
+            // 静默，只在 `HIFISHIFTER_DEBUG_COMMANDS=1` 下输出；真正值得打扰用户的
+            // 只有"某个 clip 卡了很久"，那一条在下方单独判定。
+            if debug {
+                log::warn!(
+                    "[bg_render] clip {}/{} begin clip_id={} start_sec={:.3}",
+                    rendered_count + 1,
+                    total,
+                    clip_render_info.clip.id,
+                    clip_render_info.clip.start_sec
+                );
+            }
 
             // 方案 A：重启请求静默窗口 —— 请求挂起超过窗口才升级为实际取消。
             // 失效风暴（工程加载 / 连续编辑）期间时间戳被持续刷新、当前轮
@@ -1607,6 +2163,59 @@ fn render_background_pass(
                 pending_clip_ids_written.insert(clip_render_info.clip.id.clone());
             }
 
+            // ── 持久化缓存读回（磁盘）──────────────────────────────────────────
+            // 内存未命中时回退磁盘：命中即回填内存缓存并注册 pending key，
+            // 本次直接跳过合成。磁盘 I/O 只允许发生在这里（渲染线程）——
+            // 音频回调与 `build_snapshot` 绝不读盘。
+            if base_entry.is_none() && crate::render_cache::enabled() {
+                let disk_started_at = std::time::Instant::now();
+                if let Some(entry) = crate::render_cache::load_rendered(
+                    &clip_render_info.cache_key,
+                    clip_render_info.sr,
+                ) {
+                    disk_load_elapsed += disk_started_at.elapsed();
+                    disk_hit_count += 1;
+                    // 工程级汇总：按 clip 去重累计（跨 pass 重启保持）。
+                    crate::commands::render_summary::note(
+                        &clip_render_info.clip.id,
+                        crate::commands::render_summary::ClipOutcome::DiskHit,
+                        std::time::Duration::ZERO,
+                    );
+                    if cache_log {
+                        log::warn!(
+                            "[bg_render][cache] DISK HIT clip_id={} hash={:#018x} load_ms={}",
+                            clip_render_info.clip.id,
+                            clip_render_info.cache_key.param_hash,
+                            disk_started_at.elapsed().as_millis()
+                        );
+                    }
+                    {
+                        let mut cache = crate::synth_clip_cache::global_rendered_clip_cache()
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        cache.insert(clip_render_info.cache_key.clone(), entry.clone());
+                    }
+                    crate::synth_clip_cache::register_pending_rendered_key(
+                        &clip_render_info.clip.id,
+                        clip_render_info.cache_key.clone(),
+                    );
+                    pending_clip_ids_written.insert(clip_render_info.clip.id.clone());
+                    if let Ok(mut state_mgr) =
+                        crate::clip_rendering_state::global_clip_rendering_state().lock()
+                    {
+                        state_mgr.set_state(
+                            &clip_render_info.clip.id,
+                            crate::clip_rendering_state::ClipRenderingState::Ready,
+                            1.0,
+                            None,
+                        );
+                    }
+                    base_entry = Some(entry);
+                } else {
+                    disk_load_elapsed += disk_started_at.elapsed();
+                }
+            }
+
             if base_entry.is_none() {
                 cache_miss_count += 1;
                 if cache_log {
@@ -1615,6 +2224,9 @@ fn render_background_pass(
                         clip_render_info.clip.id,
                         clip_render_info.cache_key.param_hash
                     );
+                    // 归因：如果排除某个输入后反而能命中磁盘，就说明那个输入
+                    // 在两次会话之间漂移了 —— 这是定位"整库静默失效"的唯一手段。
+                    log_render_key_drift(timeline, &clip_render_info.clip, clip_render_info.sr);
                 }
                 if !rendering_started {
                     rendering_started = true;
@@ -1671,8 +2283,21 @@ fn render_background_pass(
                         );
                         pending_clip_ids_written.insert(clip_render_info.clip.id.clone());
 
+                        // 【持久化】渲染产物异步落盘（不阻塞渲染线程）。总开关、
+                        // 片段时长下限、单条上限、磁盘保留空间等过滤在 store_* 内。
+                        crate::render_cache::store_rendered(
+                            &clip_render_info.cache_key,
+                            &entry,
+                        );
+
                         base_entry = Some(entry);
                         render_success_count += 1;
+                        // 工程级汇总：本次真正重新合成的 clip（按 clip 去重）。
+                        crate::commands::render_summary::note(
+                            &clip_render_info.clip.id,
+                            crate::commands::render_summary::ClipOutcome::Rendered,
+                            render_started_at.elapsed(),
+                        );
                         // 每个 clip 处理完毕后由循环末尾统一推送刷新
                         //（refresh_rendered_snapshot），等待中的传输层据此
                         // 恢复播放 —— 推送模型，无轮询、无版本号比对。
@@ -1689,6 +2314,11 @@ fn render_background_pass(
                             e
                         );
                         render_failed_count += 1;
+                        crate::commands::render_summary::note(
+                            &clip_render_info.clip.id,
+                            crate::commands::render_summary::ClipOutcome::Failed,
+                            std::time::Duration::ZERO,
+                        );
                         if let Ok(mut state_mgr) =
                             crate::clip_rendering_state::global_clip_rendering_state().lock()
                         {
@@ -1774,13 +2404,27 @@ fn render_background_pass(
                     },
                 );
             }
-            log::warn!(
-                "[bg_render] clip {}/{} done clip_id={} elapsed_ms={}",
-                rendered_count,
-                total,
-                clip_render_info.clip.id,
-                clip_started_at.elapsed().as_millis()
-            );
+            // 默认只记"异常慢"的 clip：正常合成在数百毫秒量级，超过该阈值意味着
+            // 用户会明显感到卡顿（也是"进度卡住"的直接线索）。逐 clip 的完整
+            // begin/done 见上方 `debug` 分支。
+            let clip_elapsed = clip_started_at.elapsed();
+            if clip_elapsed >= SLOW_CLIP_WARN_THRESHOLD {
+                log::warn!(
+                    "[bg_render] clip {}/{} was slow: clip_id={} elapsed_ms={}",
+                    rendered_count,
+                    total,
+                    clip_render_info.clip.id,
+                    clip_elapsed.as_millis()
+                );
+            } else if debug {
+                log::warn!(
+                    "[bg_render] clip {}/{} done clip_id={} elapsed_ms={}",
+                    rendered_count,
+                    total,
+                    clip_render_info.clip.id,
+                    clip_elapsed.as_millis()
+                );
+            }
 
             // 本 clip 处理完毕（命中缓存或新渲染入库）→ 推送刷新引擎快照。
             // 这是"原地等待渲染"解除的唯一入口（见
@@ -1792,6 +2436,19 @@ fn render_background_pass(
                 engine.refresh_rendered_snapshot();
             }
         }
+
+        // ── 本轮结束的公共收尾 ────────────────────────────────────────────────
+        // 以下两步对"正常跑完"与"被取消"两条路径都必须执行，因此放在分支之前。
+        //
+        // 落盘准入增量（本轮）：`accepted` 是"通过准入并已投递写盘"的条数。
+        // 被取消的轮次同样会产生准入结果（immediate 模式下已投递），漏掉会低估。
+        let admission = crate::render_cache::admission_counters().since(&admission_before);
+        crate::commands::render_summary::add_admission(admission.accepted);
+
+        // 推进 pass 纪元。兜底上报线程据此判断"等待期间是否又有新一轮结束"——
+        // 取消的轮次也算进展（它同样结算了一批 clip），漏掉它会让兜底窗口在
+        // "编辑风暴导致连续取消"期间误判为加载已收敛，抢先把中途值报给用户。
+        BG_RENDER_PASS_EPOCH.fetch_add(1, Ordering::AcqRel);
 
         if cancelled {
             // 如果取消后已经启动了新一轮渲染（代数已变），旧线程不得再清理
@@ -1820,14 +2477,11 @@ fn render_background_pass(
                 return;
             }
 
-            // 真正取消（时间线版本变更等）：发出完成事件
-            if cache_log {
-                log::info!(
-                    "[bg_render][cache] CANCELLED total={} hit={} miss={} rendered_ok={} rendered_fail={}",
-                    total, cache_hit_count, cache_miss_count,
-                    render_success_count, render_failed_count
-                );
-            }
+            // ★ 无重启的取消（如时间线版本变更后该轮被掐断，也没有任何编辑
+            // 请求新一轮）：渲染链到此终结，必须发出完成事件 —— 否则状态栏
+            // 徽标停在上一条进度事件（"渲染中 100%"）上不消失。
+            // `start_background_render` 被外部取消路径拦下的情况同理：
+            // 那条路径（cancel_background_render）自带完成事件，无需此处补发。
             let _ = app.emit(
                 "playback_rendering_state",
                 PlaybackRenderingStateEvent {
@@ -1846,27 +2500,50 @@ fn render_background_pass(
 
         if cache_log {
             log::warn!(
-                "[bg_render][cache] DONE total={} hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} total_ms={:.2}",
+                "[bg_render][cache] DONE total={} hit={} disk_hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} disk_load_ms={:.2} render_ms={:.2} tension_ms={:.2} total_ms={:.2}",
                 total,
                 cache_hit_count,
+                disk_hit_count,
                 cache_miss_count,
                 render_success_count,
                 render_failed_count,
                 cache_probe_elapsed.as_secs_f64() * 1000.0,
+                disk_load_elapsed.as_secs_f64() * 1000.0,
                 render_elapsed.as_secs_f64() * 1000.0,
                 tension_elapsed.as_secs_f64() * 1000.0,
                 started_at.elapsed().as_secs_f64() * 1000.0
             );
         }
+        // 落盘准入结果（本轮增量）。`accepted` 是"通过准入并已投递写盘"的条数；
+        // `stored` 是写盘线程真正落盘的条数（异步，可能略滞后于本轮）。
+        let admission = crate::render_cache::admission_counters().since(&admission_before);
+        let stored_this_pass = crate::render_cache::session_stored();
         log::warn!(
-            "[bg_render] complete: {} clips, {} hit, {} miss, {} ok, {} fail in {:.2}s",
+            "[bg_render] complete: {} clips, {} hit ({} from disk), {} miss, {} ok, {} fail in {:.2}s",
             total,
-            cache_hit_count,
+            cache_hit_count + disk_hit_count,
+            disk_hit_count,
             cache_miss_count,
             render_success_count,
             render_failed_count,
             started_at.elapsed().as_secs_f64()
         );
+        // 落盘准入是一类**静默失败**：产物进内存缓存、播放完全正常，只是永远
+        // 不落盘 → 每次重开工程都要重新合成。只在真有拒绝时才打，且带上原因
+        // 分解，使"命中率低"能在日志里直接定位到是哪个闸门在拦。
+        if admission.accepted > 0 || admission.skipped > 0 {
+            log::warn!(
+                "[render_cache] pass admission: accepted={} skipped={} [{}] (stored_total={})",
+                admission.accepted,
+                admission.skipped,
+                if admission.skipped > 0 {
+                    admission.reason_summary()
+                } else {
+                    "none".to_string()
+                },
+                stored_this_pass
+            );
+        }
 
         // 旧代数线程完成时不得清理新一轮渲染的全局状态。
         if BG_RENDER_GENERATION.load(Ordering::Acquire) != render_generation {
@@ -1920,19 +2597,32 @@ fn render_background_pass(
                 target: Some("background".to_string()),
             },
         );
+
+        // 渲染缓存复用汇总：前端据此在状态栏提示"本次打开复用了多少、省了多少"。
+        //
+        // ★ 两条硬约束，缺一就会重演"逐轮数字"的老毛病：
+        // 1. **数值是工程级的**（`render_summary` 按 clip 去重累计、分母是工程
+        //    需要渲染的 clip 总数），不是本轮处理了多少；
+        // 2. **只在加载收敛后上报一次**。打开工程是逐步加载的：音高分析逐批完成
+        //    → 逐批解锁可渲染 clip → 跑出十余轮 pass（实测 6 / 35 / 137 / … /
+        //    465）。逐轮上报会让用户看到 `6/6` → `5/35` → `156/465` 这样一串
+        //    互相矛盾的中途值。
+        //
+        // 位置也有讲究：必须放在上面所有"还要再来一轮"的早退分支之后 —— 那些
+        // 分支意味着加载尚未结束，此刻上报就是中途值。收敛判据是本轮没有任何
+        // clip 因音高分析未完成被跳过（`skipped_not_ready == 0`），即本轮已覆盖
+        // 工程的全部可渲染 clip。对"永远无法就绪"的 clip（源文件缺失等）该条件
+        // 永不成立，故另设静默兜底（见 `schedule_settled_render_cache_summary`）。
+        //
+        // 上报本身由 `try_emit_render_cache_summary` 限流为"每次加载至多一次"。
+        if skipped_not_ready == 0 {
+            try_emit_render_cache_summary(&app);
+        } else {
+            schedule_settled_render_cache_summary(app.clone());
+        }
     }
 }
 
-/// Request a background pre-render after render caches have been invalidated.
-///
-/// Unlike `start_background_render`, this is safe to call even while a render is
-/// already running: it cancels the in-flight render and requests a restart with
-/// the fresh cache state. It is a no-op when background pre-render is disabled.
-///
-/// ★ 线程安全约定（防死锁）：
-/// `start_background_render` 内部会锁定 `state.timeline`，而本函数常被
-/// “已经持有时间线锁”的调用方使用（如 `set_timeline_tempo_map` 的音阶
-/// 变化分支）。std Mutex 不可重入，若在调用方线程上同步启动渲染，
 /// 播放命令的按需渲染：**无论后台预渲染开关如何**，确保一轮渲染正在运行
 /// （本次播放需要待渲染 Clip 的结果）。
 ///
@@ -1945,17 +2635,66 @@ pub(crate) fn ensure_render_pass_running(app: &tauri::AppHandle) {
     if BG_RENDER_ACTIVE.load(Ordering::Relaxed) {
         return;
     }
-    // A fresh render request supersedes any stale restart marker.
-    BG_RENDER_RESTART_NEEDED.store(false, Ordering::Release);
-    let app = app.clone();
+    schedule_render_pass(app.clone());
+}
+
+/// 请求一轮渲染，并把去抖窗口内的重复请求合流成一次启动。
+///
+/// ★ 为什么在**调用 `start_background_render` 之前**清除调度标志：
+/// 若等启动完成后再清，等待窗口期间到达的新请求会因为"已有调度线程"而被合流
+/// 掉，而此刻 `BG_RENDER_ACTIVE` 还是 false —— 既不进重启合流分支、也不进新
+/// 启动分支，请求就真的丢了。提前清除则保证新请求一定会开启新的调度；与在途
+/// 调度线程的并发竞争由 `start_background_render` 自身的 `BG_RENDER_ACTIVE`
+/// 守卫收口，输掉竞争的一方补发重启请求，让在途 pass 收敛到更新的时间线。
+fn schedule_render_pass(app: tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+
+    BG_RENDER_REQUESTED_AT_MS.fetch_max(now_millis(), Ordering::Release);
+    if BG_RENDER_SCHEDULER_ACTIVE.swap(true, Ordering::AcqRel) {
+        // 同一去抖窗口内已有调度线程在等：本次请求已被合流。
+        return;
+    }
+
     std::thread::spawn(move || {
-        let _ = start_background_render(app);
+        // 等到"最后一次请求之后静默满一个窗口"为止。循环而非单次 sleep：
+        // 窗口内到达的新请求会刷新时间戳，需要重新计算剩余等待。
+        loop {
+            let last_requested_at = BG_RENDER_REQUESTED_AT_MS.load(Ordering::Acquire);
+            let remaining = render_request_debounce_remaining_ms(last_requested_at, now_millis());
+            if remaining == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(remaining));
+        }
+        BG_RENDER_SCHEDULER_ACTIVE.store(false, Ordering::Release);
+        // A fresh render request supersedes any stale restart marker.
+        BG_RENDER_RESTART_NEEDED.store(false, Ordering::Release);
+        let started = start_background_render(app);
+        // 并发竞争输给了另一个调度线程：在途 pass 覆盖的是它收集时刻的待渲染
+        // 集合，可能落后于本次请求看到的时间线 —— 补发重启请求让它收敛。
+        if started
+            .get("skipped")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            request_bg_render_restart();
+        }
     });
 }
 
+/// 请求一轮后台预渲染（编辑触发；受"后台预渲染"开关约束）。
+///
+/// ★ 线程安全约定（防死锁）：
+/// `start_background_render` 内部会锁定 `state.timeline`，而本函数常被
+/// “已经持有时间线锁”的调用方使用（如 `set_timeline_tempo_map` 的音阶
+/// 变化分支）。std Mutex 不可重入，若在调用方线程上同步启动渲染，
 /// 调用方会自我死锁 —— 命令线程永久阻塞，整个应用进入“未响应”。
-/// 因此这里把真正的启动工作转移到新线程：本函数只做原子的状态检查与
-/// 标记（无锁），渲染启动线程会等待时间线锁自然释放后再开始收集。
+/// 因此这里只做原子的状态检查与标记（无锁），真正的启动交给调度线程，
+/// 它会在时间线锁自然释放后再收集待渲染集合。
+///
+/// 与 [`start_background_render`] 的分工：后者是"现在就起一轮"，本函数是
+/// "在去抖窗口结束后起一轮"，并负责在已有 pass 在跑时合流为重启请求。
+/// 返回值仅用于诊断，调用方普遍忽略。
 pub(crate) fn request_background_render(app: &tauri::AppHandle) -> serde_json::Value {
     use std::sync::atomic::Ordering;
 
@@ -1980,17 +2719,8 @@ pub(crate) fn request_background_render(app: &tauri::AppHandle) -> serde_json::V
         return serde_json::json!({"ok": true, "restart_requested": true});
     }
 
-    // A fresh render request supersedes any stale restart marker.
-    BG_RENDER_RESTART_NEEDED.store(false, Ordering::Release);
-
-    // 在新线程上启动渲染：既避免调用方持有时间线锁时自我死锁，
-    // 也让命令线程尽快返回、界面保持响应。
-    let app = app.clone();
-    std::thread::spawn(move || {
-        let _ = start_background_render(app);
-    });
-
-    serde_json::json!({"ok": true, "starting": true})
+    schedule_render_pass(app.clone());
+    serde_json::json!({"ok": true, "starting": true, "debounced": true})
 }
 
 /// 取消当前正在运行的后台预渲染（如果有），并通知前台预渲染退出。
@@ -2022,6 +2752,17 @@ pub(super) fn cancel_background_render(app: Option<&tauri::AppHandle>) -> serde_
     BG_RENDER_PITCH_PENDING.store(false, Ordering::Release);
     // 递增代数，使旧渲染线程的收尾清理不再影响新的一轮渲染。
     BG_RENDER_GENERATION.fetch_add(1, Ordering::AcqRel);
+    // 工程级复用汇总归零：本函数是打开/新建工程的必经之路，也就是"一次加载"的
+    // 边界。不清零的话，新工程会显示上一个工程的复用率。
+    //
+    // 同时推进 pass 纪元：上一个工程遗留的兜底上报线程还在睡，它会把这次工程切换
+    // 视为"又有新一轮结束"而继续等待（而不是醒来就把新工程的中途值报出去）。
+    crate::commands::render_summary::reset();
+    BG_RENDER_PASS_EPOCH.fetch_add(1, Ordering::AcqRel);
+    // 新工程要能重新记录一次"无事可做"（否则会沿用上一个工程去重后的静默）。
+    LAST_IDLE_LOG_KEY.store(u64::MAX, Ordering::Release);
+    // 新工程要能重新上报一次"本次打开复用"（见 `try_emit_render_cache_summary`）。
+    reset_load_summary_slot();
     log::warn!("[bg_render] cancel requested, was_active={was_active}");
     // 立即通知前端“后台渲染已结束”，避免旧线程迟到的进度事件让状态卡在
     // “渲染中 100%”。如果随后有新工程的新一轮渲染，会再发 active=true。
@@ -2041,9 +2782,142 @@ pub(super) fn cancel_background_render(app: Option<&tauri::AppHandle>) -> serde_
 #[cfg(test)]
 mod tests {
     use super::{
-        bg_render_restart_request_is_stale, render_priority_key, should_follow_up_render,
+        bg_render_restart_request_is_stale, clip_work_is_complete, render_priority_key,
+        render_request_debounce_remaining_ms, should_follow_up_render, BG_RENDER_DEBOUNCE_MS,
         BG_RENDER_RESTART_QUIET_WINDOW_MS,
     };
+
+    /// 过滤决策核心：只有"键已登记 **且** 条目在缓存中"才被剔除。
+    ///
+    /// 用受控替身覆盖四类边界，其中两个"半成品"状态是最危险的 —— 误剔它们会让
+    /// 快照解析到空 PCM，等待中的传输层永久冻结。
+    #[test]
+    fn completed_clip_ids_only_drops_fully_ready_clips() {
+        use crate::synth_clip_cache::RenderedClipCacheKey;
+        use std::collections::HashSet;
+
+        let key = |id: &str, hash: u64| RenderedClipCacheKey {
+            clip_id: id.to_string(),
+            param_hash: hash,
+        };
+        let clips = [
+            key("done", 1),         // 已登记 + 在缓存 → 剔除
+            key("evicted", 2),      // 已登记但条目被 LRU 逐出 → 保留
+            key("unregistered", 3), // 在缓存但未登记 → 保留（否则传输层冻结）
+            key("stale-key", 4),    // 登记的仍是旧键 → 保留
+            key("fresh", 5),        // 全新 → 保留
+        ];
+        // 登记表：done / evicted 登记的就是当前键；stale-key 登记的是旧键 40。
+        let registered: HashSet<String> = ["done", "evicted", "stale-key"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // 缓存中存在：done / unregistered / stale-key 的旧条目。
+        let cached: HashSet<u64> = [1, 3, 40].into_iter().collect();
+
+        let completed = super::completed_clip_ids(
+            clips.iter().map(|k| (k.clip_id.as_str(), k)),
+            &registered,
+            |k| cached.contains(&k.param_hash),
+        );
+
+        assert_eq!(completed.len(), 1, "只有完全就绪的 clip 才该被剔除");
+        assert!(completed.contains("done"));
+        for kept in ["evicted", "unregistered", "stale-key", "fresh"] {
+            assert!(!completed.contains(kept), "{kept} 被误剔，会导致漏渲染");
+        }
+    }
+
+    /// 汇总上报名额的契约：**每次工程加载至多一次**，且空工程不占用名额。
+    ///
+    /// 这条不变量直接对应一个用户可见的缺陷：加载完成后任何一轮"零成本 pass"
+    /// （典型来源是 `invalidate_clip_for_pitch_edit` 刻意保留缓存条目、只解除
+    /// pending 绑定）都会再次满足收敛条件，于是用户每暂停/播放一次就再看到一遍
+    /// "本次打开复用"。
+    #[test]
+    fn load_summary_slot_is_claimed_once_and_not_by_empty_projects() {
+        use super::{claim_load_summary_slot, reset_load_summary_slot};
+
+        reset_load_summary_slot();
+        // 空工程：不占用名额，且连续调用都不放行。
+        assert!(!claim_load_summary_slot(0));
+        assert!(!claim_load_summary_slot(0));
+        // 有内容：第一次放行，之后拦下 —— 这正是"用户看到两遍"的修复点。
+        assert!(claim_load_summary_slot(43), "加载完成后的首次上报必须放行");
+        assert!(!claim_load_summary_slot(43), "同一次加载不得重复上报");
+        assert!(!claim_load_summary_slot(43));
+        // 工程切换归还名额 → 新工程能再报一次。
+        reset_load_summary_slot();
+        assert!(claim_load_summary_slot(43), "新工程必须能重新上报");
+
+        reset_load_summary_slot();
+    }
+
+    /// "已无需再处理"必须同时满足"键已登记"与"条目在缓存中"。
+    ///
+    /// 两个"半成品"状态都必须判定为**需要重渲**，它们各自对应一类真实的静默故障：
+    /// - 只登记无条目 → 条目被字节预算 LRU 逐出，快照会解析到空 PCM；
+    /// - 只缓存无登记 → 快照按 `pending_rendered_keys` 解析，会当成未渲染，
+    ///   等待中的传输层永久冻结。
+    ///
+    /// 这条判据是"后台渲染不做无用功"闸门的核心：判宽了会漏渲染（上面两种故障），
+    /// 判严了就会退回"每轮空转遍历全部 clip"的刷屏老路。
+    #[test]
+    fn clip_work_is_complete_requires_both_registration_and_cache_entry() {
+        let key = 0xABCD_u64;
+        let other = 0x1234_u64;
+
+        // 两个条件都满足 → 完成。
+        assert!(clip_work_is_complete(Some(key), key, true));
+
+        // 只登记、条目已被逐出 → 必须重渲。
+        assert!(!clip_work_is_complete(Some(key), key, false));
+        // 只缓存、未登记 → 必须重渲（否则传输层永久等待）。
+        assert!(!clip_work_is_complete(None, key, true));
+        // 参数变过（键失配）→ 必须重渲。
+        assert!(!clip_work_is_complete(Some(other), key, true));
+        assert!(!clip_work_is_complete(Some(other), key, false));
+        // 什么都没有 → 必须渲染。
+        assert!(!clip_work_is_complete(None, key, false));
+    }
+
+    /// 去抖窗口：请求刚发出时要等满一个窗口；期间被新请求刷新则重新计时；
+    /// 静默满窗口后立即可启动。
+    #[test]
+    fn render_request_debounce_waits_for_a_quiet_window() {
+        let t0 = 10_000;
+        // 刚请求：需要等满整个窗口。
+        assert_eq!(
+            render_request_debounce_remaining_ms(t0, t0),
+            BG_RENDER_DEBOUNCE_MS
+        );
+        // 窗口过半。
+        assert_eq!(
+            render_request_debounce_remaining_ms(t0, t0 + BG_RENDER_DEBOUNCE_MS / 2),
+            BG_RENDER_DEBOUNCE_MS - BG_RENDER_DEBOUNCE_MS / 2
+        );
+        // 静默满窗口 → 可以启动。
+        assert_eq!(
+            render_request_debounce_remaining_ms(t0, t0 + BG_RENDER_DEBOUNCE_MS),
+            0
+        );
+        // 超出窗口仍为 0（不得下溢成天文数字）。
+        assert_eq!(
+            render_request_debounce_remaining_ms(t0, t0 + BG_RENDER_DEBOUNCE_MS * 100),
+            0
+        );
+        // 窗口内到达的新请求刷新时间戳 → 重新计满一个窗口（这就是"合流"）。
+        let refreshed = t0 + BG_RENDER_DEBOUNCE_MS - 1;
+        assert_eq!(
+            render_request_debounce_remaining_ms(refreshed, refreshed),
+            BG_RENDER_DEBOUNCE_MS
+        );
+        // 时钟回退（不应出现，但必须不 panic 且不无限等待）。
+        assert_eq!(
+            render_request_debounce_remaining_ms(t0, t0 - 5_000),
+            BG_RENDER_DEBOUNCE_MS
+        );
+    }
 
     /// 渲染优先级：覆盖播放关注点的 clip 最优先，其后是位于关注点之后的
     /// clip（按时间线顺序），最后是关注点之前的 clip。前后台渲染共用此逻辑。

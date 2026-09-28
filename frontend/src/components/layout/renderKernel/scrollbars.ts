@@ -98,6 +98,27 @@ export function computeScrollbar(args: ScrollbarArgs): ScrollbarGeometry {
 }
 
 /**
+ * 自绘滚动条的「内容尺寸」口径：可滚上限 + 视口尺寸。
+ *
+ * 【为什么需要它】`computeScrollbar` 把「内容不超出视口」判为不可滚动并隐藏 thumb。
+ * 但宿主自己实现的滚动上限（`ScrollKernel`）常常**不等于**内容尺寸——例如时间轴的
+ * 水平上限是工程宽度，工程装进一屏时上限仍 > 0，滚轮 / 方向键一直能滚。若把内容
+ * 尺寸传成"裸内容宽度"，用户一缩到装进一屏，滚动条就会整体消失，只剩看不见入口的
+ * 手势（2026-09 用户反馈）。原生滚动条用 `scrollWidth = 内容 + 视口`，本函数即该口径
+ * 的最小实现：只要 `maxScrollPx > 0`，`contentSize` 必大于视口，滚动条恒可交互。
+ *
+ * 特殊说明：**多轴共用一个上限时务必走这里**——几何写入、thumb 拖拽换算、点轨道翻页
+ * 三处若有一处传回裸内容尺寸，就会出现"滚动条消失 / 拖拽失效"的不一致。
+ *
+ * @param maxScrollPx 宿主该轴的滚动上限（CSS px）。
+ * @param viewportSizePx 该轴视口尺寸（CSS px）。
+ * @returns 传给 `computeScrollbar` 的内容尺寸（CSS px）。
+ */
+export function scrollbarContentSizePx(maxScrollPx: number, viewportSizePx: number): number {
+    return Math.max(0, toFinite(maxScrollPx)) + Math.max(0, toFinite(viewportSizePx));
+}
+
+/**
  * 判定指针是否落在 thumb 上（用于拖拽起点识别）。
  *
  * @param pointerOffsetPx 指针相对轨道起点的偏移（CSS px）。

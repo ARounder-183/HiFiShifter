@@ -782,7 +782,7 @@ export function useTimelineClipActions(
                 }
             })();
         },
-        [dispatch, setMultiSelectedClipIds, sessionRef],
+        [dispatch, setMultiSelectedClipIdsFromAction, sessionRef],
     );
 
     // ── TrackLane callbacks ───────────────────────────────────

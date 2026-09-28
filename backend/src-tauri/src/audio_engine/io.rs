@@ -138,7 +138,14 @@ pub(crate) fn decode_resampled_stereo(path: &Path, out_rate: u32) -> Option<Resa
     };
     let in_channels = in_channels.max(1);
 
-    let resampled = linear_resample_interleaved(&pcm, in_channels, in_rate, out_rate);
+    // 同采样率时**移动**刚解码的缓冲，避免 `linear_resample_interleaved` 的
+    // `input.to_vec()` 整文件再拷一份 —— 长音频（1 小时立体声 ≈ 1.27GB）在解码
+    // 阶段的瞬时内存会因此翻倍。跨采样率仍需输入 + 输出两份，属重采样的固有代价。
+    let resampled = if in_rate == out_rate {
+        pcm
+    } else {
+        linear_resample_interleaved(&pcm, in_channels, in_rate, out_rate)
+    };
 
     let stereo: Vec<f32> = if in_channels == 1 {
         let mut out = Vec::with_capacity(resampled.len() * 2);

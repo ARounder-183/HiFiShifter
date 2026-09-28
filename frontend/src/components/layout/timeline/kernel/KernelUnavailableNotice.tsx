@@ -24,7 +24,8 @@
  * - 独立性：只依赖 i18n 与诊断模块，不读 Redux。
  */
 import React from "react";
-import { Button, Flex, Text } from "@radix-ui/themes";
+import { Flex } from "@radix-ui/themes";
+import { AppButton } from "../../../../ui";
 
 import { useI18n } from "../../../../i18n/I18nProvider";
 import { collectGlDiagnostics } from "../../renderKernel/gl/glDiagnostics";
@@ -35,8 +36,7 @@ interface Props {
 }
 
 export const KernelUnavailableNotice: React.FC<Props> = ({ reason }) => {
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const [copied, setCopied] = React.useState(false);
 
     /**
@@ -87,20 +87,14 @@ export const KernelUnavailableNotice: React.FC<Props> = ({ reason }) => {
             justify="center"
             className="absolute inset-0 px-6 text-center"
         >
-            <Text size="4" weight="bold">
-                {tAny("kernel_unavailable_title")}
-            </Text>
-            <Text size="2" color="gray">
-                {tAny("kernel_unavailable_reason")}
-            </Text>
-            <Text size="1" color="gray" className="max-w-[620px] text-left whitespace-pre-line">
-                {tAny("kernel_unavailable_hints")}
-            </Text>
-            <Button size="1" variant="soft" onClick={() => void handleCopy()}>
-                {copied
-                    ? tAny("kernel_unavailable_copied")
-                    : tAny("kernel_unavailable_diagnostics")}
-            </Button>
+            <span className="hs-type-section font-bold">{tf("kernel_unavailable_title")}</span>
+            <span className="hs-type-muted">{tf("kernel_unavailable_reason")}</span>
+            <span className="hs-type-caption max-w-[620px] text-left whitespace-pre-line">
+                {tf("kernel_unavailable_hints")}
+            </span>
+            <AppButton size="sm" onClick={() => void handleCopy()}>
+                {copied ? tf("kernel_unavailable_copied") : tf("kernel_unavailable_diagnostics")}
+            </AppButton>
         </Flex>
     );
 };

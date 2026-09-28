@@ -86,9 +86,18 @@ pub fn processor_handles_time_stretch(kind: SynthPipelineKind, compose_enabled: 
     }
 }
 
+/// 列出某算法实际可编辑的全部自动化/静态参数：**共通混音级参数在前，算法专有在后**。
+///
+/// 这是「参数集合」的唯一对外口径：前端工具栏、默认值解析、能力查询都经由此处，
+/// 因此共通参数（volume / pan / dyn）对所有算法一律可见，无需各处理器重复声明。
+pub fn all_param_descriptors(kind: SynthPipelineKind) -> Vec<ParamDescriptor> {
+    let mut out = common_params::common_mix_params().to_vec();
+    out.extend(get_processor(kind).param_descriptors());
+    out
+}
+
 pub fn get_param_descriptor(kind: SynthPipelineKind, param_id: &str) -> Option<ParamDescriptor> {
-    get_processor(kind)
-        .param_descriptors()
+    all_param_descriptors(kind)
         .into_iter()
         .find(|descriptor| descriptor.id == param_id)
 }

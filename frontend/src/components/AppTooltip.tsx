@@ -14,12 +14,7 @@ import {
 export const HS_TOOLTIP_CONTENT_EVENT = "hs-tooltip-content";
 import { createPortal } from "react-dom";
 
-import {
-    CURSOR_OFFSET_X,
-    CURSOR_OFFSET_Y,
-    clampTooltipPosition,
-    type AppTooltipPosition,
-} from "./appTooltipPosition";
+import { clampTooltipPosition, type AppTooltipPosition } from "./appTooltipPosition";
 
 export type { AppTooltipPosition } from "./appTooltipPosition";
 
@@ -49,15 +44,31 @@ export function AppTooltipBubble({
     position: AppTooltipPosition | null;
 }) {
     const bubbleRef = useRef<HTMLDivElement | null>(null);
-    // 气泡内容宽度不定（两字短文案 → 400px 长链接），挂载后按实测尺寸
-    // 夹紧。useLayoutEffect 在绘制前完成修正，首帧不闪；初始样式用原始
-    // 光标偏移落点，修正前后只差夹紧差值。
+    /**
+     * 测量 → 夹紧 → 落位（绘制前完成，用户看不到中间态）。
+     *
+     * 【为什么必须先回到中性位置再量】曾经初始样式直接写成
+     * `left: 光标 x + 14`：光标贴近右缘时这个位置**已经在视口之外**，浏览器便按
+     * 剩余空间（≈0）给气泡排版 —— 内容被压成窄柱（实测 38px 宽 / 970px 高）并自动
+     * 折行；随后 `clampTooltipPosition` 量到的 `offsetWidth` 已经是**被压过**的宽度，
+     * 于是"夹紧"退化成"原地不动"。用户看到的正是"不移动、只折行"。
+     *
+     * 因此每次测量都先把气泡放回 `left: 0; top: 0`（此时视口整宽可用）量出**自然
+     * 尺寸**，再据此算出夹紧后的位置并显示。`visibility: hidden` 保证中间态不可见；
+     * 因为气泡是 `position: fixed`，中性位置不会影响页面布局或滚动条。
+     */
     useLayoutEffect(() => {
         const el = bubbleRef.current;
         if (!el || !position) return;
-        const clamped = clampTooltipPosition(position, el.offsetWidth, el.offsetHeight);
+        el.style.visibility = "hidden";
+        el.style.left = "0px";
+        el.style.top = "0px";
+        const naturalWidth = el.offsetWidth;
+        const naturalHeight = el.offsetHeight;
+        const clamped = clampTooltipPosition(position, naturalWidth, naturalHeight);
         el.style.left = `${clamped.x}px`;
         el.style.top = `${clamped.y}px`;
+        el.style.visibility = "visible";
     });
     if (!position || !isRenderable(text)) return null;
 
@@ -67,8 +78,10 @@ export function AppTooltipBubble({
             className="app-tooltip"
             role="tooltip"
             style={{
-                left: position.x + CURSOR_OFFSET_X,
-                top: position.y + CURSOR_OFFSET_Y,
+                // 初始落点交给 layout effect（见上）：中性位置起步，量完再夹紧。
+                left: 0,
+                top: 0,
+                visibility: "hidden",
             }}
         >
             {text}

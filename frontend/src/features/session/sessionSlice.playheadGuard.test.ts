@@ -991,11 +991,7 @@ test("features/session/sessionSlice.playheadGuard.test.ts repeated play while pl
         true,
         "no-op must not clear the waiting flag",
     );
-    assertEqual(
-        next.runtime.playbackPositionSec,
-        0,
-        "no-op must not touch the position report",
-    );
+    assertEqual(next.runtime.playbackPositionSec, 0, "no-op must not touch the position report");
     assertEqual(next.playheadSec, 42.5, "no-op must not move the playhead");
     // playbackAnchorSec 是 session 顶层字段（不是 runtime）。
     assertEqual(

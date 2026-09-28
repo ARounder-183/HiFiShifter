@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Button, Dialog, Flex, Select, Text, TextField } from "@radix-ui/themes";
+import { Flex, TextField } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -16,6 +16,10 @@ import {
     type RecordingSettings,
 } from "../../services/api/recording";
 import { webApi } from "../../services/webviewApi";
+import { AppButton } from "../../ui";
+import { AppDialog } from "../../ui/Dialog";
+import { AppField, AppForm, AppSwitchRow } from "../../ui/Field";
+import { AppNumberField, AppSelect } from "../../ui";
 
 interface RecordingSettingsDialogProps {
     open: boolean;
@@ -29,8 +33,7 @@ function clampGain(raw: number): number {
 
 export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSettingsDialogProps) {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
-    const tAny = t as (key: string) => string;
+    const { tf } = useI18n();
     const savedSettings = useAppSelector((state) => state.recording.settings);
     const devices = useAppSelector((state) => state.recording.devices);
     const apps = useAppSelector((state) => state.recording.apps);
@@ -96,7 +99,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                 dispatch(devicesLoaded(result.devices));
             }
         } catch {
-            setErrorText(tAny("recording_error_load_devices"));
+            setErrorText(tf("recording_error_load_devices"));
         }
     }
 
@@ -107,7 +110,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                 dispatch(appsLoaded(result.apps));
             }
         } catch {
-            setErrorText(tAny("recording_error_load_apps"));
+            setErrorText(tf("recording_error_load_apps"));
         }
     }
 
@@ -144,129 +147,115 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
             await dispatch(saveRecordingSettings(nextSettings)).unwrap();
             onOpenChange(false);
         } catch {
-            setErrorText(tAny("recording_error_save_settings"));
+            setErrorText(tf("recording_error_save_settings"));
         } finally {
             setSubmitting(false);
         }
     }
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content
-                style={{ maxWidth: 760 }}
-                onKeyDown={(event) => event.stopPropagation()}
-            >
-                <Dialog.Title>{tAny("menu_recording_settings")}</Dialog.Title>
-                <Dialog.Description>{tAny("recording_settings_desc")}</Dialog.Description>
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tf("menu_recording_settings")}
+            description={tf("recording_settings_desc")}
+            size="xl"
+            actions={[
+                { id: "cancel", label: tf("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "save",
+                    label: tf("recording_save_settings"),
+                    intent: "primary",
+                    disabled: submitting,
+                    onClick: handleSave,
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={tf("recording_source_mode")}>
+                    <AppSelect
+                        value={draft.captureMode}
+                        onValueChange={(value) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                captureMode: value as RecordingSettings["captureMode"],
+                            }))
+                        }
+                        options={[
+                            { value: "device", label: tf("recording_mode_device") },
+                            { value: "loopback", label: tf("recording_mode_loopback") },
+                            { value: "application", label: tf("recording_mode_application") },
+                        ]}
+                    />
+                </AppField>
 
-                <Flex direction="column" gap="3" mt="3">
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("recording_source_mode")}
-                        </Text>
-                        <Select.Root
-                            value={draft.captureMode}
-                            onValueChange={(value) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    captureMode: value as RecordingSettings["captureMode"],
-                                }))
-                            }
-                        >
-                            <Select.Trigger style={{ minWidth: 260 }} />
-                            <Select.Content>
-                                <Select.Item value="device">
-                                    {tAny("recording_mode_device")}
-                                </Select.Item>
-                                <Select.Item value="loopback">
-                                    {tAny("recording_mode_loopback")}
-                                </Select.Item>
-                                <Select.Item value="application">
-                                    {tAny("recording_mode_application")}
-                                </Select.Item>
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
-
-                    {draft.captureMode === "device" ? (
+                {draft.captureMode === "device" ? (
+                    <AppField label={tf("recording_device")}>
                         <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 132 }}>
-                                {tAny("recording_device")}
-                            </Text>
-                            <Select.Root
+                            <AppSelect
+                                fullWidth={false}
+                                // 不定长文本（设备名/应用名），给下限防止塌缩与切换时宽度跳动
+                                minWidth={260}
                                 value={draft.sourceDevice}
                                 onValueChange={(value) =>
                                     setDraft((prev) => ({ ...prev, sourceDevice: value }))
                                 }
-                            >
-                                <Select.Trigger style={{ minWidth: 260 }} />
-                                <Select.Content>
-                                    <Select.Item value="default">
-                                        {tAny("recording_device_default")}
-                                    </Select.Item>
-                                    {inputDevices
+                                options={[
+                                    { value: "default", label: tf("recording_device_default") },
+                                    ...inputDevices
                                         .filter((device) => !device.isDefault)
-                                        .map((device) => (
-                                            <Select.Item key={device.id} value={device.id}>
-                                                {device.name}
-                                            </Select.Item>
-                                        ))}
-                                </Select.Content>
-                            </Select.Root>
-                            <Button
-                                size="1"
-                                variant="ghost"
-                                color="gray"
-                                onClick={() => void refreshDevices()}
-                            >
-                                {tAny("recording_refresh_devices")}
-                            </Button>
+                                        .map((device) => ({
+                                            value: device.id,
+                                            label: device.name,
+                                        })),
+                                ]}
+                            />
+                            <AppButton size="sm" onClick={() => void refreshDevices()}>
+                                {tf("recording_refresh_devices")}
+                            </AppButton>
                         </Flex>
-                    ) : null}
+                    </AppField>
+                ) : null}
 
-                    {draft.captureMode === "loopback" ? (
+                {draft.captureMode === "loopback" ? (
+                    <AppField label={tf("recording_loopback_device")}>
                         <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 132 }}>
-                                {tAny("recording_loopback_device")}
-                            </Text>
-                            <Select.Root
+                            <AppSelect
+                                fullWidth={false}
+                                // 不定长文本（设备名/应用名），给下限防止塌缩与切换时宽度跳动
+                                minWidth={260}
                                 value={loopbackValue}
                                 onValueChange={(value) =>
                                     setDraft((prev) => ({ ...prev, loopbackDevice: value }))
                                 }
-                            >
-                                <Select.Trigger style={{ minWidth: 260 }} />
-                                <Select.Content>
-                                    <Select.Item value="loopback:default">
-                                        {tAny("recording_loopback_default")}
-                                    </Select.Item>
-                                    {loopbackDevices
+                                options={[
+                                    {
+                                        value: "loopback:default",
+                                        label: tf("recording_loopback_default"),
+                                    },
+                                    ...loopbackDevices
                                         .filter((device) => device.id !== "loopback:default")
-                                        .map((device) => (
-                                            <Select.Item key={device.id} value={device.id}>
-                                                {device.name}
-                                            </Select.Item>
-                                        ))}
-                                </Select.Content>
-                            </Select.Root>
-                            <Button
-                                size="1"
-                                variant="ghost"
-                                color="gray"
-                                onClick={() => void refreshDevices()}
-                            >
-                                {tAny("recording_refresh_devices")}
-                            </Button>
+                                        .map((device) => ({
+                                            value: device.id,
+                                            label: device.name,
+                                        })),
+                                ]}
+                            />
+                            <AppButton size="sm" onClick={() => void refreshDevices()}>
+                                {tf("recording_refresh_devices")}
+                            </AppButton>
                         </Flex>
-                    ) : null}
+                    </AppField>
+                ) : null}
 
-                    {draft.captureMode === "application" ? (
-                        <>
+                {draft.captureMode === "application" ? (
+                    <>
+                        <AppField label={tf("recording_application")}>
                             <Flex align="center" gap="2">
-                                <Text size="2" style={{ minWidth: 132 }}>
-                                    {tAny("recording_application")}
-                                </Text>
-                                <Select.Root
+                                <AppSelect
+                                    fullWidth={false}
+                                    // 不定长文本（设备名/应用名），给下限防止塌缩与切换时宽度跳动
+                                    minWidth={260}
                                     value={draft.captureAppId}
                                     onValueChange={(value) => {
                                         const app = apps.find((item) => item.id === value);
@@ -277,65 +266,54 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                             captureAppProcess: app?.processName ?? "",
                                         }));
                                     }}
-                                >
-                                    <Select.Trigger style={{ minWidth: 260 }} />
-                                    <Select.Content>
-                                        {missingApp ? (
-                                            <Select.Item value={draft.captureAppId}>
-                                                {appNameById(draft.captureAppId)}
-                                            </Select.Item>
-                                        ) : null}
-                                        {apps.map((app: RecordingAppInfo) => (
-                                            <Select.Item key={app.id} value={app.id}>
-                                                {app.name}
-                                            </Select.Item>
-                                        ))}
-                                    </Select.Content>
-                                </Select.Root>
-                                <Button
-                                    size="1"
-                                    variant="ghost"
-                                    color="gray"
-                                    onClick={() => void refreshApps()}
-                                >
-                                    {tAny("recording_refresh_apps")}
-                                </Button>
+                                    options={[
+                                        ...(missingApp
+                                            ? [
+                                                  {
+                                                      value: draft.captureAppId,
+                                                      label: appNameById(draft.captureAppId),
+                                                  },
+                                              ]
+                                            : []),
+                                        ...apps.map((app: RecordingAppInfo) => ({
+                                            value: app.id,
+                                            label: app.name,
+                                        })),
+                                    ]}
+                                />
+                                <AppButton size="sm" onClick={() => void refreshApps()}>
+                                    {tf("recording_refresh_apps")}
+                                </AppButton>
                             </Flex>
-                            <Text size="1" color="gray" style={{ paddingLeft: 20 }}>
-                                {tAny("recording_application_hint")}
-                            </Text>
-                        </>
-                    ) : null}
+                        </AppField>
+                        <span className="hs-type-caption" style={{ paddingLeft: 20 }}>
+                            {tf("recording_application_hint")}
+                        </span>
+                    </>
+                ) : null}
 
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("recording_sample_rate")}
-                        </Text>
-                        <Select.Root
-                            value={String(draft.sampleRate)}
-                            onValueChange={(value) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    sampleRate: Number(value),
-                                }))
-                            }
-                        >
-                            <Select.Trigger style={{ minWidth: 120 }} />
-                            <Select.Content>
-                                {[44_100, 48_000, 88_200, 96_000].map((rate) => (
-                                    <Select.Item key={rate} value={String(rate)}>
-                                        {rate} Hz
-                                    </Select.Item>
-                                ))}
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
+                <AppField label={tf("recording_sample_rate")}>
+                    <AppSelect
+                        value={String(draft.sampleRate)}
+                        onValueChange={(value) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                sampleRate: Number(value),
+                            }))
+                        }
+                        options={[44_100, 48_000, 88_200, 96_000].map((rate) => ({
+                            value: String(rate),
+                            label: `${rate} Hz`,
+                        }))}
+                    />
+                </AppField>
 
+                <AppField label={tf("recording_bit_depth")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("recording_bit_depth")}
-                        </Text>
-                        <Select.Root
+                        <AppSelect
+                            fullWidth={false}
+                            // 不定长文本（设备名/应用名），给下限防止塌缩与切换时宽度跳动
+                            minWidth={120}
                             value={String(draft.bitDepth)}
                             onValueChange={(value) =>
                                 setDraft((prev) => ({
@@ -343,19 +321,18 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                     bitDepth: Number(value) as 16 | 24 | 32,
                                 }))
                             }
-                        >
-                            <Select.Trigger style={{ minWidth: 120 }} />
-                            <Select.Content>
-                                <Select.Item value="16">16-bit</Select.Item>
-                                <Select.Item value="24">24-bit</Select.Item>
-                                <Select.Item value="32">32-bit float</Select.Item>
-                            </Select.Content>
-                        </Select.Root>
+                            options={[
+                                { value: "16", label: "16-bit" },
+                                { value: "24", label: "24-bit" },
+                                { value: "32", label: "32-bit float" },
+                            ]}
+                        />
 
-                        <Text size="2" ml="4">
-                            {tAny("recording_channels")}
-                        </Text>
-                        <Select.Root
+                        <span className="hs-type-label ml-4">{tf("recording_channels")}</span>
+                        <AppSelect
+                            fullWidth={false}
+                            // 不定长文本（设备名/应用名），给下限防止塌缩与切换时宽度跳动
+                            minWidth={100}
                             value={String(draft.channels)}
                             onValueChange={(value) =>
                                 setDraft((prev) => ({
@@ -363,188 +340,139 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                     channels: Number(value) === 1 ? 1 : 2,
                                 }))
                             }
-                        >
-                            <Select.Trigger style={{ minWidth: 100 }} />
-                            <Select.Content>
-                                <Select.Item value="1">{tAny("recording_mono")}</Select.Item>
-                                <Select.Item value="2">{tAny("recording_stereo")}</Select.Item>
-                            </Select.Content>
-                        </Select.Root>
+                            options={[
+                                { value: "1", label: tf("recording_mono") },
+                                { value: "2", label: tf("recording_stereo") },
+                            ]}
+                        />
                     </Flex>
+                </AppField>
 
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("recording_input_gain")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
+                <AppField label={tf("recording_input_gain")}>
+                    <AppNumberField
+                        value={draft.inputGainDb}
+                        unit="gainDb"
+                        min={-24}
+                        max={24}
+                        width={120}
+                        suffix="dB"
+                        ariaLabel={tf("recording_input_gain")}
+                        onCommit={(inputGainDb) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                inputGainDb,
+                            }))
+                        }
+                    />
+                </AppField>
+
+                <AppField label={tf("recording_countdown")}>
+                    <AppNumberField
+                        value={draft.countdownSec}
+                        unit="integer"
+                        min={0}
+                        max={10}
+                        width={120}
+                        suffix={tf("recording_countdown_unit")}
+                        ariaLabel={tf("recording_countdown")}
+                        onCommit={(countdownSec) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                countdownSec,
+                            }))
+                        }
+                    />
+                </AppField>
+
+                <AppSwitchRow
+                    control="checkbox"
+                    label={tf("recording_monitor_enabled")}
+                    checked={draft.monitorEnabled}
+                    onCheckedChange={(monitorEnabled) =>
+                        setDraft((prev) => ({
+                            ...prev,
+                            monitorEnabled,
+                        }))
+                    }
+                />
+
+                {draft.monitorEnabled ? (
+                    <AppField label={tf("recording_monitor_gain")} className="pl-6">
+                        <AppNumberField
+                            value={draft.monitorGainDb}
+                            unit="gainDb"
                             min={-24}
                             max={24}
-                            step={0.1}
-                            value={String(draft.inputGainDb)}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            width={120}
+                            suffix="dB"
+                            ariaLabel={tf("recording_monitor_gain")}
+                            onCommit={(monitorGainDb) =>
                                 setDraft((prev) => ({
                                     ...prev,
-                                    inputGainDb: Number(event.target.value),
-                                }))
-                            }
-                            style={{ width: 120 }}
-                        />
-                        <Text size="1" color="gray">
-                            dB
-                        </Text>
-                    </Flex>
-
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("recording_countdown")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            min={0}
-                            max={10}
-                            step={1}
-                            value={String(draft.countdownSec)}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    countdownSec: Number(event.target.value),
-                                }))
-                            }
-                            style={{ width: 120 }}
-                        />
-                        <Text size="1" color="gray">
-                            {tAny("recording_countdown_unit")}
-                        </Text>
-                    </Flex>
-
-                    <label className="flex items-center gap-2 text-sm text-qt-text">
-                        <input
-                            type="checkbox"
-                            checked={draft.monitorEnabled}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    monitorEnabled: event.target.checked,
+                                    monitorGainDb,
                                 }))
                             }
                         />
-                        <span>{tAny("recording_monitor_enabled")}</span>
-                    </label>
+                    </AppField>
+                ) : null}
 
-                    {draft.monitorEnabled ? (
-                        <Flex align="center" gap="2" pl="6">
-                            <Text size="2" style={{ minWidth: 120 }}>
-                                {tAny("recording_monitor_gain")}
-                            </Text>
-                            <TextField.Root
-                                size="2"
-                                type="number"
-                                min={-24}
-                                max={24}
-                                step={0.1}
-                                value={String(draft.monitorGainDb)}
-                                onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                    setDraft((prev) => ({
-                                        ...prev,
-                                        monitorGainDb: Number(event.target.value),
-                                    }))
-                                }
-                                style={{ width: 120 }}
-                            />
-                            <Text size="1" color="gray">
-                                dB
-                            </Text>
-                        </Flex>
-                    ) : null}
+                <AppSwitchRow
+                    control="checkbox"
+                    label={tf("recording_auto_normalize")}
+                    checked={draft.autoNormalize}
+                    onCheckedChange={(autoNormalize) =>
+                        setDraft((prev) => ({
+                            ...prev,
+                            autoNormalize,
+                        }))
+                    }
+                />
 
-                    <label className="flex items-center gap-2 text-sm text-qt-text">
-                        <input
-                            type="checkbox"
-                            checked={draft.autoNormalize}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    autoNormalize: event.target.checked,
-                                }))
-                            }
-                        />
-                        <span>{tAny("recording_auto_normalize")}</span>
-                    </label>
+                <AppSwitchRow
+                    control="checkbox"
+                    label={tf("recording_auto_stop_selection")}
+                    checked={draft.autoStopAtSelectionEnd}
+                    onCheckedChange={(autoStopAtSelectionEnd) =>
+                        setDraft((prev) => ({
+                            ...prev,
+                            autoStopAtSelectionEnd,
+                        }))
+                    }
+                />
 
-                    <label className="flex items-center gap-2 text-sm text-qt-text">
-                        <input
-                            type="checkbox"
-                            checked={draft.autoStopAtSelectionEnd}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    autoStopAtSelectionEnd: event.target.checked,
-                                }))
-                            }
-                        />
-                        <span>{tAny("recording_auto_stop_selection")}</span>
-                    </label>
+                <AppField label={tf("recording_path_template")}>
+                    <TextField.Root
+                        size="2"
+                        value={draft.pathTemplate}
+                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                pathTemplate: event.target.value,
+                            }))
+                        }
+                        onFocus={(event) => {
+                            pathInputRef.current = event.target as HTMLInputElement;
+                        }}
+                    />
+                </AppField>
 
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("recording_path_template")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            value={draft.pathTemplate}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    pathTemplate: event.target.value,
-                                }))
-                            }
-                            onFocus={(event) => {
-                                pathInputRef.current = event.target as HTMLInputElement;
-                            }}
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-
-                    <Flex gap="2" wrap="wrap" align="center">
-                        <Text size="1" color="gray">
-                            {tAny("auto_backup_placeholders")}
-                        </Text>
-                        {["<ProjectFolder>", "<ProjectName>"].map((token) => (
-                            <Button
-                                key={token}
-                                size="1"
-                                variant="ghost"
-                                color="gray"
-                                onClick={() => insertPathToken(token)}
-                            >
-                                {token}
-                            </Button>
-                        ))}
-                    </Flex>
-
-                    <Text size="1" color="gray">
-                        {tAny("auto_backup_time_format_hint")}
-                    </Text>
-
-                    {errorText ? (
-                        <Text size="2" color="red">
-                            {errorText}
-                        </Text>
-                    ) : null}
+                <Flex gap="2" wrap="wrap" align="center">
+                    <span className="hs-type-caption">{tf("auto_backup_placeholders")}</span>
+                    {["<ProjectFolder>", "<ProjectName>"].map((token) => (
+                        <AppButton key={token} size="sm" onClick={() => insertPathToken(token)}>
+                            {token}
+                        </AppButton>
+                    ))}
                 </Flex>
 
-                <Flex justify="end" gap="2" mt="4">
-                    <Button variant="soft" color="gray" onClick={() => onOpenChange(false)}>
-                        {tAny("cancel")}
-                    </Button>
-                    <Button onClick={() => void handleSave()} disabled={submitting}>
-                        {tAny("recording_save_settings")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                <span className="hs-type-caption">{tf("auto_backup_time_format_hint")}</span>
+
+                {errorText ? (
+                    <span className="hs-type-body" style={{ color: "var(--qt-danger-text)" }}>
+                        {errorText}
+                    </span>
+                ) : null}
+            </AppForm>
+        </AppDialog>
     );
 }

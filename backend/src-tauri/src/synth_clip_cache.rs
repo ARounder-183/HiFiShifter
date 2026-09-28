@@ -230,6 +230,7 @@ pub fn compute_param_hash<K, V, I>(
     start_frame: u64,
     end_frame: u64,
     sr: u32,
+    channel_index: u16,
     renderer_id: &str,
     curves: &PitchCurvesSnapshot<'_>,
     extra_curves: I,
@@ -257,6 +258,9 @@ where
     mix_bytes!(&start_frame.to_le_bytes());
     mix_bytes!(&end_frame.to_le_bytes());
     mix_bytes!(&sr.to_le_bytes());
+    // 混入声道位：逐声道扇出时同一 clip/参数会以不同输入调用多次，
+    // 缺少该值会让第二个声道命中第一个声道的缓存（立体声坍缩）。
+    mix_bytes!(&channel_index.to_le_bytes());
 
     // 混入与 clip 时间范围重叠的 pitch_edit 曲线片段
     let fp = curves.frame_period_ms.max(0.1);
@@ -355,6 +359,15 @@ impl RenderedClipCache {
     /// 查询缓存。命中时将 key 移到 front（最近使用）。
     pub fn get(&mut self, key: &RenderedClipCacheKey) -> Option<&RenderedClipCacheEntry> {
         self.inner.get(key)
+    }
+
+    /// 是否存在该键的条目（**不**提升 LRU 顺序）。
+    ///
+    /// 用于"还有没有活要干"的判定（见
+    /// `commands::playback::retain_clips_needing_work`）：那里只想知道条目在不在，
+    /// 不该因为一次探测就改变淘汰顺序。
+    pub fn contains_key(&self, key: &RenderedClipCacheKey) -> bool {
+        self.inner.contains_key(key)
     }
 
     /// 插入缓存。字节预算自动管理淘汰。
@@ -526,56 +539,239 @@ pub fn clear_pad_suppressed_clips() {
     set.clear();
 }
 
-/// 计算整 Clip 渲染的参数哈希。
+// ─── 渲染管线指纹 ───────────────────────────────────────────────────────────────
+
+/// 渲染管线指纹。
 ///
-/// 输入覆盖：
-/// - `clip_id`：clip 唯一标识
-/// - `source_path`：源文件路径
-/// - `start_frame` / `end_frame`：clip 在时间轴上的帧范围
-/// - `sr`：采样率
-/// - `pitch_edit` 曲线中与 clip 时间范围重叠的片段
-/// - `playback_rate`：播放速率
-/// - `extra_curves`：声码器专属自动化曲线（AutomationCurve 类型）
-/// - `extra_params`：声码器专属静态参数（StaticEnum 类型）
-pub fn compute_rendered_clip_hash(
-    clip_id: &str,
-    source_path: &str,
-    start_frame: u64,
-    end_frame: u64,
-    sr: u32,
-    renderer_id: &str,
-    pitch_edit: &[f32],
-    frame_period_ms: f64,
-    playback_rate: f64,
-    extra_curves: &std::collections::HashMap<String, Vec<f32>>,
-    extra_params: &std::collections::HashMap<String, f64>,
-    formant_morph: Option<&crate::state::ClipFormantMorph>,
-    input_pitch_curve: Option<&[f32]>,
-    // 源文件的 mtime（Unix 秒），用于区分同路径不同内容的文件版本。
-    // 当文件被外部替换后，此值变化 → hash 变化 → 旧渲染缓存自动失效。
-    source_file_mtime: Option<u64>,
-    // Loop（循环源）属性：Loop 与非 Loop 的渲染输出完全不同（整文件平铺 vs
-    // 窗口切片），必须参与哈希 —— 否则后台预渲染与 Loop 开关切换之间的竞态
-    // 会把旧域的渲染结果当作新域的缓存命中。
-    loop_enabled: bool,
-    // 量化的源窗口 `(source_start_sec·1000, source_end_sec·1000)`：
-    // 渲染输入随 trim/split 的锚点推进而变化，同样必须参与哈希。
-    source_range_q: (i64, i64),
+/// 任何会改变"同一组输入产生不同 PCM"的实现变更（声码器实现、处理器链、
+/// 后处理算法、量化口径…）都必须递增此值：它混入渲染缓存键，并在磁盘缓存
+/// 文件头中二次记录（不匹配直接判废），从而把"升级后读到旧算法的结果"
+/// 收敛为必然失效而不是偶发错播。
+///
+/// v2：vslib 不再把 volume/pan 烘焙进合成输出（改由 mix 阶段统一应用）。
+/// 旧缓存里这些 PCM 已含音量/声像，若沿用会与新混音层叠加成二次增益，
+/// 因此必须整体失效。
+/// v3：声道条件化（take 级 channel_mode）与合成链逐声道扇出。旧缓存是
+/// "取左声道 → 处理 → 复制双声道"的坍缩结果，与新语义必然不同，整体失效。
+/// v4：渲染键补齐了此前缺失的渲染输入（Compose 开关、生效音阶签名、源文件
+/// 大小、气声曲线缺失时按描述符默认 1.0 处理的语义）。这些输入此前只依赖
+/// **命令式**失效调用点传导，漏掉一个调用点就会"参数已变、仍播上一版 PCM"，
+/// 而磁盘缓存会让这种错配跨会话持续存在。纳入按键后，正确性不再依赖调用点是
+/// 否记得失效。
+pub const RENDER_PIPELINE_VERSION: u32 = 4;
+
+/// [`compute_rendered_clip_hash`] 的输入集合。
+///
+/// 采用结构体而非长参数列表：新增渲染输入时只需扩字段，调用方按名填写，
+/// 不会因位置参数错排而静默产出错误哈希 —— 那是本缓存"宁失效不误用"
+/// 契约最危险的破坏方式。
+#[derive(Debug, Clone, Copy)]
+pub struct RenderedClipHashInput<'a> {
+    /// clip 唯一标识。
+    pub clip_id: &'a str,
+    /// 源文件路径。
+    pub source_path: &'a str,
+    /// 源文件 mtime（Unix 秒，运行时元数据，不持久化）。
+    pub source_file_mtime: Option<u64>,
+    /// 源文件内容指纹（head+tail+size，随工程持久化）。
+    pub source_file_fingerprint: Option<u64>,
+    /// 当前活跃 Take 的 id。
+    pub active_take_id: Option<&'a str>,
+    /// 渲染器 id（world_vocoder / nsf_hifigan_onnx / vslib）。
+    pub renderer_id: &'a str,
+    /// clip 在时间轴上的起始帧。
+    pub start_frame: u64,
+    /// clip 在时间轴上的结束帧。
+    pub end_frame: u64,
+    /// 输出采样率（Hz）。
+    pub sample_rate: u32,
+    /// 播放速率。
+    pub playback_rate: f64,
+    /// 是否倒放（同窗口下正向/倒向输出完全不同）。
+    pub reversed: bool,
+    /// 是否 Loop（循环源）。
+    pub loop_enabled: bool,
+    /// 声道模式（0..=4，对齐 REAPER CHANMODE）：条件化发生在渲染输入段上，
+    /// 同一源窗口/速率下不同模式产出不同内容，必须参与哈希。
+    pub channel_mode: i32,
+    /// 量化的源窗口 `(source_start_sec·1000, source_end_sec·1000)`。
+    pub source_range_q: (i64, i64),
+    /// 全局 pitch_edit 曲线。
+    pub pitch_edit: &'a [f32],
+    /// 原始音高曲线（音高分析结果）。
+    pub pitch_orig: Option<&'a [f32]>,
+    /// 分析帧周期（毫秒）。
+    pub frame_period_ms: f64,
+    /// 声码器专属自动化曲线（AutomationCurve 类型）。
+    pub extra_curves: &'a std::collections::HashMap<String, Vec<f32>>,
+    /// 声码器专属静态参数（StaticEnum 类型）。
+    pub extra_params: &'a std::collections::HashMap<String, f64>,
+    /// Clip 级共振峰形变。
+    pub formant_morph: Option<&'a crate::state::ClipFormantMorph>,
+    /// 渲染输入 pitch 曲线（clip 局部时间轴）。
+    pub input_pitch_curve: Option<&'a [f32]>,
+    /// 该轨道的 Compose 开关。
+    ///
+    /// `compose_enabled` 直接决定处理器链是否运行、以及外部预拉伸是否被跳过
+    /// （见 `pitch_editing::processor_should_handle_stretch`）。开着与关着产出
+    /// 的 PCM 完全不同，却从未进入按键 —— 切换开关后只能靠命令式失效点传导。
+    pub compose_enabled: bool,
+    /// 实际生效音阶的签名（工程音阶 + Tempo Map 分段音阶）。
+    ///
+    /// 子轨音高/共振峰差经音阶量化后写进渲染输入（`apply_child_pitch_offset_to_midi`
+    /// 消费 `scale_segments()`），而音阶此前完全不在按键里：改音阶只能靠四处
+    /// 命令式失效调用点覆盖，漏一处就会长期播错音高。
+    pub scale_signature: &'a str,
+    /// 源文件大小（字节）。
+    ///
+    /// `source_file_mtime` 只有整秒精度，同秒内被替换为**同大小**文件时 mtime
+    /// 可能不变；`source_file_fingerprint` 覆盖 head+tail+size，但旧工程可能
+    /// 没有该值（None 时只按 mtime 判）。补上大小可把这类"假命中"再收敛一层。
+    pub source_file_size: Option<u64>,
+}
+
+/// 计算渲染键时**排除**哪些输入（仅供诊断，生产路径永远用全量参与）。
+///
+/// 渲染键是不可逆的摘要，单看两个哈希无法判断"哪个输入变了"。但排除某项后
+/// 重算、若反而能在磁盘上找到条目，就唯一地指向该输入在两次会话之间发生了
+/// 漂移。这是"整库静默失效"唯一可行的归因手段 —— 没有它，任何 1 ULP 级的
+/// 非确定性都会表现为"命中率低"而无法定位。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HashExclusions {
+    /// 排除原始音高曲线（`pitch_orig`，跨会话重分析最易抖动）。
+    pub pitch_orig: bool,
+    /// 排除渲染输入 pitch 曲线（clip 局部时间轴）。
+    pub input_pitch_curve: bool,
+    /// 排除全局拉伸设置（默认算法 / HiFiGAN mel 拉伸开关）。
+    pub stretch_settings: bool,
+    /// 排除源身份（mtime / 内容指纹 / 文件大小）。
+    pub source_identity: bool,
+}
+
+impl HashExclusions {
+    /// 全量参与（生产口径）。
+    pub const NONE: HashExclusions = HashExclusions {
+        pitch_orig: false,
+        input_pitch_curve: false,
+        stretch_settings: false,
+        source_identity: false,
+    };
+
+    /// 诊断候选：逐项单独排除，`(标签, 排除集)`。
+    ///
+    /// 覆盖四类"跨会话可能变化、但用户并未真正编辑"的输入。标签直接进日志，
+    /// 因此保持与字段同名，便于对照。
+    pub const DIAGNOSTIC_CANDIDATES: [(&'static str, HashExclusions); 4] = [
+        (
+            "pitch_orig",
+            HashExclusions {
+                pitch_orig: true,
+                ..HashExclusions::NONE
+            },
+        ),
+        (
+            "input_pitch_curve",
+            HashExclusions {
+                input_pitch_curve: true,
+                ..HashExclusions::NONE
+            },
+        ),
+        (
+            "stretch_settings",
+            HashExclusions {
+                stretch_settings: true,
+                ..HashExclusions::NONE
+            },
+        ),
+        (
+            "source_identity",
+            HashExclusions {
+                source_identity: true,
+                ..HashExclusions::NONE
+            },
+        ),
+    ];
+}
+
+/// 计算整 Clip 渲染的参数哈希（渲染缓存键的核心）。
+///
+/// # 契约（新增渲染输入必须同步加入本函数）
+/// 覆盖：clip_id、源身份（path + mtime + 内容指纹）、活跃 Take、渲染器、
+/// 管线指纹、时间轴帧范围、输出采样率、播放速率、倒放、Loop、源窗口、
+/// 拉伸设置、pitch_edit、pitch_orig、extra 曲线/参数、formant morph、
+/// 渲染输入 pitch 曲线。
+///
+/// 以上任一项变化都必须产出不同哈希，否则会出现跨会话/跨参数的错误复用。
+pub fn compute_rendered_clip_hash(input: &RenderedClipHashInput<'_>) -> u64 {
+    compute_rendered_clip_hash_excluding(input, HashExclusions::NONE)
+}
+
+/// [`compute_rendered_clip_hash`] 的可排除变体。
+///
+/// 唯一的调用场景是 miss 归因诊断（见 [`HashExclusions`]）：生产路径一律传
+/// [`HashExclusions::NONE`]。之所以做成参数而不是复制一份函数，是因为渲染键
+/// 最危险的失效方式是"两处口径漂移"—— 复制必然漂移。
+pub fn compute_rendered_clip_hash_excluding(
+    input: &RenderedClipHashInput<'_>,
+    exclusions: HashExclusions,
 ) -> u64 {
+    // 解构输入（结构体是 Copy）：让下游混入代码保持单纯的字段名读写。
+    let RenderedClipHashInput {
+        clip_id,
+        source_path,
+        source_file_mtime,
+        source_file_fingerprint,
+        active_take_id,
+        renderer_id,
+        start_frame,
+        end_frame,
+        sample_rate: sr,
+        playback_rate,
+        reversed,
+        loop_enabled,
+        channel_mode,
+        source_range_q,
+        pitch_edit,
+        pitch_orig,
+        frame_period_ms,
+        extra_curves,
+        extra_params,
+        formant_morph,
+        input_pitch_curve,
+        compose_enabled,
+        scale_signature,
+        source_file_size,
+    } = *input;
+
+    // 被排除的可选输入直接置空：下游混入代码因此保持**与全量口径逐字一致**，
+    // 不存在"某处忘了加守卫"的风险 —— 这正是排除法诊断可信的前提。
+    let pitch_orig = if exclusions.pitch_orig {
+        None
+    } else {
+        pitch_orig
+    };
+    let input_pitch_curve = if exclusions.input_pitch_curve {
+        None
+    } else {
+        input_pitch_curve
+    };
+    let (source_file_mtime, source_file_fingerprint, source_file_size) = if exclusions.source_identity
+    {
+        (None, None, None)
+    } else {
+        (source_file_mtime, source_file_fingerprint, source_file_size)
+    };
+
     let mut h: u64 = 14695981039346656037u64;
 
-    fn include_rendered_extra_curve(renderer_id: &str, param_id: &str) -> bool {
-        // vslib 把全部曲线烘焙进合成输出（含共通 volume/pan），
-        // 因此这些曲线必须参与渲染缓存 key。
-        if renderer_id == "vslib" {
-            return true;
-        }
-        // 共通 volume/pan 在 mix 阶段实时应用，改变它们不应触发底层重渲染。
+    fn include_rendered_extra_curve(_renderer_id: &str, param_id: &str) -> bool {
+        // 共通 volume/pan/dyn 一律在 mix 阶段实时应用，改变它们不应触发底层重渲染。
+        // 这里没有按算法区分的分支：任何处理器都不再烘焙它们（vslib 的旧行为已移除）。
         if crate::renderer::common_params::is_common_mix_param(param_id) {
             return false;
         }
         // nsf-hifigan 的气声与张力属于渲染后处理，有独立缓存 key。
-        !(renderer_id == "nsf_hifigan_onnx"
+        !(_renderer_id == "nsf_hifigan_onnx"
             && matches!(param_id, "breath_gain" | "hifigan_tension"))
     }
 
@@ -594,34 +790,73 @@ pub fn compute_rendered_clip_hash(
     if let Some(mtime) = source_file_mtime {
         mix_bytes!(&mtime.to_le_bytes());
     }
+    // 混入 source_file_fingerprint（源文件内容指纹：head+tail+size）：mtime 只有
+    // 整秒精度，同秒内被替换为同大小文件会产生"假命中"；内容指纹把这类场景收敛
+    // 为必然失效。指纹随工程持久化，此处零额外 I/O；旧工程无该值时为 None，
+    // 只可能额外 miss，绝不会误命中。
+    if let Some(fingerprint) = source_file_fingerprint {
+        mix_bytes!(b"src_fingerprint");
+        mix_bytes!(&fingerprint.to_le_bytes());
+    }
+    if let Some(size) = source_file_size {
+        mix_bytes!(b"src_size");
+        mix_bytes!(&size.to_le_bytes());
+    }
+    // 混入 active_take_id：同一 Clip 切换 Take（undo 回退、垫音复用等场景）后，
+    // 即便源路径与窗口碰巧一致，可听内容也已不同。
+    if let Some(take_id) = active_take_id {
+        mix_bytes!(b"active_take");
+        mix_bytes!(take_id.as_bytes());
+    }
     mix_bytes!(renderer_id.as_bytes());
+    // 混入渲染管线指纹：实现变更（声码器/处理器链/后处理算法）必须整体失效。
+    mix_bytes!(b"pipeline");
+    mix_bytes!(&RENDER_PIPELINE_VERSION.to_le_bytes());
     mix_bytes!(&start_frame.to_le_bytes());
     mix_bytes!(&end_frame.to_le_bytes());
     mix_bytes!(&sr.to_le_bytes());
     mix_bytes!(&playback_rate.to_bits().to_le_bytes());
+    // 混入 reversed：同一源窗口下正向/倒向的渲染输出完全不同（segment 反转 /
+    // Loop 回绕索引方向不同）。漏掉它会让"反转开关"直接命中旧渲染结果。
+    mix_bytes!(&[u8::from(reversed)]);
     mix_bytes!(&[u8::from(loop_enabled)]);
+    // 混入 channel_mode：同窗口下 Swap/mono 系模式的条件化输出不同。
+    mix_bytes!(&channel_mode.to_le_bytes());
     mix_bytes!(&source_range_q.0.to_le_bytes());
     mix_bytes!(&source_range_q.1.to_le_bytes());
+    // 混入 Compose 开关：它决定处理器链是否运行以及外部预拉伸是否被跳过，
+    // 同一组曲线/参数在开与关下产出完全不同的 PCM。缺少它会让开关切换后的
+    // 旧渲染持续被命中（只在恰好有命令式失效调用点的路径上才碰巧正确）。
+    mix_bytes!(b"compose");
+    mix_bytes!(&[u8::from(compose_enabled)]);
+    // 混入生效音阶签名：子轨音高/共振峰差经音阶量化后进入渲染输入，音阶变化
+    // 必须产出不同哈希。此前它只靠四处命令式失效调用点覆盖，漏一处即长期错音高。
+    if !scale_signature.is_empty() {
+        mix_bytes!(b"scale");
+        mix_bytes!(scale_signature.as_bytes());
+    }
 
     // 混入拉伸设置：渲染输出依赖拉伸模式 —— HiFiGAN Mel Stretch 开启时由
     // 处理器在 mel 域内部拉伸，关闭时由外部算法预拉伸后以 rate=1 渲染；
     // 气声噪声 stem 同样跟随外部算法。用户切换算法/开关后旧缓存必须失效，
     // 否则会持续返回旧算法的渲染结果（谐波与气声都不更新）。
     {
-        let stretch = crate::time_stretch::current_runtime_stretch_settings();
-        mix_bytes!(b"stretch_settings");
-        mix_bytes!(&(stretch.default_algorithm as u32).to_le_bytes());
-        mix_bytes!(&[u8::from(stretch.default_hifigan_mel_stretch)]);
-        mix_bytes!(&stretch
-            .project_algorithm_override
-            .map(|a| a as u32)
-            .unwrap_or(u32::MAX)
-            .to_le_bytes());
-        mix_bytes!(&stretch
-            .project_hifigan_mel_stretch_override
-            .map(u8::from)
-            .unwrap_or(u8::MAX)
-            .to_le_bytes());
+        if !exclusions.stretch_settings {
+            let stretch = crate::time_stretch::current_runtime_stretch_settings();
+            mix_bytes!(b"stretch_settings");
+            mix_bytes!(&(stretch.default_algorithm as u32).to_le_bytes());
+            mix_bytes!(&[u8::from(stretch.default_hifigan_mel_stretch)]);
+            mix_bytes!(&stretch
+                .project_algorithm_override
+                .map(|a| a as u32)
+                .unwrap_or(u32::MAX)
+                .to_le_bytes());
+            mix_bytes!(&stretch
+                .project_hifigan_mel_stretch_override
+                .map(u8::from)
+                .unwrap_or(u8::MAX)
+                .to_le_bytes());
+        }
     }
 
     // 混入与 clip 时间范围重叠的 pitch_edit 曲线片段
@@ -635,6 +870,19 @@ pub fn compute_rendered_clip_hash(
     let hi = end_idx.min(pitch_edit.len());
     for &v in &pitch_edit[lo..hi] {
         mix_bytes!(&v.to_bits().to_le_bytes());
+    }
+
+    // 混入 pitch_orig（原始音高分析结果）在 clip 时间范围内的片段：
+    // 渲染是"pitch_orig + pitch_edit"共同决定的，重新分析 / 更换分析算法 /
+    // 源文件重分析都可能让 pitch_orig 变化而 pitch_edit 不变 —— 只哈希
+    // pitch_edit 会把新分析结果当作旧渲染的命中（音高错误）。
+    if let Some(pitch_orig) = pitch_orig {
+        mix_bytes!(b"pitch_orig");
+        let orig_lo = start_idx.min(pitch_orig.len());
+        let orig_hi = end_idx.min(pitch_orig.len());
+        for &v in &pitch_orig[orig_lo..orig_hi] {
+            mix_bytes!(&v.to_bits().to_le_bytes());
+        }
     }
 
     // 混入“渲染输入 pitch curve”（clip 局部时间轴），
@@ -692,46 +940,24 @@ pub fn compute_rendered_clip_hash(
     h
 }
 
-pub fn compute_breath_noise_hash(
-    clip_id: &str,
-    source_path: &str,
-    start_frame: u64,
-    end_frame: u64,
-    sr: u32,
-    renderer_id: &str,
-    pitch_edit: &[f32],
-    frame_period_ms: f64,
-    playback_rate: f64,
-    extra_curves: &std::collections::HashMap<String, Vec<f32>>,
-    extra_params: &std::collections::HashMap<String, f64>,
-    formant_morph: Option<&crate::state::ClipFormantMorph>,
-    source_file_mtime: Option<u64>,
-    loop_enabled: bool,
-    source_range_q: (i64, i64),
-) -> u64 {
-    let filtered_curves: std::collections::HashMap<String, Vec<f32>> = extra_curves
+pub fn compute_breath_noise_hash(input: &RenderedClipHashInput<'_>) -> u64 {
+    // 气声噪声 stem 与 formant 无关（formant 只作用于谐波分量），因此显式排除
+    // 曲线级 `formant_shift_cents` 与 clip 级 `formant_morph`：任一共振峰设置
+    // 变化时都可直接复用噪声 stem，省掉一次 HNSEP。
+    let filtered_curves: std::collections::HashMap<String, Vec<f32>> = input
+        .extra_curves
         .iter()
         .filter(|(k, _)| k.as_str() != "formant_shift_cents")
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    compute_rendered_clip_hash(
-        clip_id,
-        source_path,
-        start_frame,
-        end_frame,
-        sr,
-        renderer_id,
-        pitch_edit,
-        frame_period_ms,
-        playback_rate,
-        &filtered_curves,
-        extra_params,
-        formant_morph,
-        None,
-        source_file_mtime,
-        loop_enabled,
-        source_range_q,
-    )
+    compute_rendered_clip_hash(&RenderedClipHashInput {
+        extra_curves: &filtered_curves,
+        input_pitch_curve: None,
+        // 只排除曲线不够：clip 级 morph 同样只作用于谐波分量，留着它会让
+        // "仅改 morph" churn 掉噪声缓存，违背本函数的存在意义。
+        formant_morph: None,
+        ..*input
+    })
 }
 
 fn curve_slice_bounds(
@@ -880,14 +1106,15 @@ pub fn global_tension_rendered_clip_cache() -> &'static Mutex<TensionRenderedCli
 
 // ─── Breath Noise 独立缓存（formant 变化时可复用，避免重复 HNSEP 分离）─────────
 
-/// Breath Noise 缓存的 key：使用不含 formant_shift_cents 的 base hash。
+/// Breath Noise 缓存的 key：使用不含 formant 的 base hash。
 ///
-/// formant 变化时 RenderedClipCache 的 hash 不变（因为 formant 已排除），
-/// 但如果其他参数（pitch_edit、playback_rate 等）变化，此 key 也会变化。
+/// 曲线级 `formant_shift_cents` 与 clip 级 `formant_morph` 都不参与
+/// （见 `compute_breath_noise_hash`）：formant 变化时 RenderedClipCache 的
+/// hash 不变，但如果其他参数（pitch_edit、playback_rate 等）变化，此 key 也会变化。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BreathNoiseCacheKey {
     pub clip_id: String,
-    /// 与 RenderedClipCacheKey.param_hash 相同（不含 formant_shift_cents）。
+    /// 与 RenderedClipCacheKey.param_hash 相同（不含曲线级与 clip 级 formant）。
     pub param_hash: u64,
 }
 
@@ -901,7 +1128,8 @@ pub struct BreathNoiseCacheEntry {
 
 /// Breath Noise 独立 byte-budgeted LRU 缓存。
 ///
-/// 在 Breath 路径中，`breath_noise_stereo`（= unity_mix - harmonic_only）不受 formant 影响。
+/// 在 Breath 路径中，`breath_noise_stereo`（= unity_mix - harmonic_only）不受
+/// formant 影响（曲线级 shift 与 clip 级 morph 均只作用于谐波分量）。
 /// 当仅 formant 变化时，可直接复用此缓存中的 noise stem，跳过第二次 render_variant 调用，
 /// 从而避免每个 clip 的两次 HNSEP 推理变为一次。
 pub struct BreathNoiseCache {
@@ -1107,6 +1335,7 @@ fn take_identity_matches(entry_take: Option<&str>, active_take: Option<&str>) ->
 pub fn get_latest_rendered_pcm(
     clip_id: &str,
     active_take_id: Option<&str>,
+    expected_frames: Option<u64>,
 ) -> Option<(Arc<Vec<f32>>, Option<Arc<Vec<f32>>>)> {
     let cache = global_rendered_clip_cache()
         .lock()
@@ -1117,6 +1346,11 @@ pub fn get_latest_rendered_pcm(
         .find(|(k, v)| {
             k.clip_id == clip_id
                 && take_identity_matches(v.rendered_take_id.as_deref(), active_take_id)
+                // 长度守卫：垫音只用于"同一段音频、参数刚变"的过渡场景，此时
+                // 帧数必然一致。若帧数不同（clip 被移动/拉伸/换 Take），这条
+                // 旧渲染对应的是**另一个窗口**的内容 —— 垫上去就是把错误位置
+                // 的音频播给用户（表现为搬移后先响一下旧位置的声、再切换）。
+                && expected_frames.map_or(true, |want| v.frames == want)
         })
         .map(|(_, v)| v)?;
     Some((entry.pcm_stereo.clone(), entry.breath_noise_stereo.clone()))
@@ -1126,6 +1360,7 @@ pub fn get_latest_rendered_pcm(
 pub fn get_latest_tension_rendered_pcm(
     clip_id: &str,
     active_take_id: Option<&str>,
+    expected_frames: Option<u64>,
 ) -> Option<Arc<Vec<f32>>> {
     let cache = global_tension_rendered_clip_cache()
         .lock()
@@ -1136,6 +1371,8 @@ pub fn get_latest_tension_rendered_pcm(
         .find(|(k, v)| {
             k.clip_id == clip_id
                 && take_identity_matches(v.rendered_take_id.as_deref(), active_take_id)
+                // 与 `get_latest_rendered_pcm` 同一长度守卫理由。
+                && expected_frames.map_or(true, |want| v.frames == want)
         })
         .map(|(_, v)| v)?;
     Some(entry.pcm_stereo.clone())
@@ -1143,114 +1380,282 @@ pub fn get_latest_tension_rendered_pcm(
 
 #[cfg(test)]
 mod tests {
-    use super::compute_rendered_clip_hash;
+    use super::{
+        compute_rendered_clip_hash, compute_rendered_clip_hash_excluding, HashExclusions,
+        RenderedClipHashInput,
+    };
+
+    /// 运行时拉伸设置是**进程级全局**（`time_stretch::current_runtime_stretch_settings`），
+    /// 而渲染键会把它混进哈希 —— 同时 `cargo test` 默认多线程并行。
+    ///
+    /// 于是"读全局算哈希"的测试与"改全局"的测试并发时，同一个测试内的两次哈希
+    /// 可能跨越一次全局变更，产生与代码无关的间歇性失败（实测 HEAD 上 5 次运行
+    /// 失败 1 次）。
+    ///
+    /// 约定：凡是**计算渲染键**的测试都持读锁；唯一改写该全局的测试持写锁。
+    /// 读锁之间不互斥，因此不影响并行度。
+    static STRETCH_GLOBAL_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    fn lock_stretch_global_read() -> std::sync::RwLockReadGuard<'static, ()> {
+        STRETCH_GLOBAL_LOCK
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn lock_stretch_global_write() -> std::sync::RwLockWriteGuard<'static, ()> {
+        STRETCH_GLOBAL_LOCK
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 测试夹具：持有全部"按值"输入，供各断言按字段变体构造哈希输入。
+    struct Fixture {
+        pitch_edit: Vec<f32>,
+        pitch_orig: Vec<f32>,
+        extra_curves: std::collections::HashMap<String, Vec<f32>>,
+        extra_params: std::collections::HashMap<String, f64>,
+        formant_morph: Option<crate::state::ClipFormantMorph>,
+        input_pitch_curve: Option<Vec<f32>>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self {
+                pitch_edit: vec![60.0, 61.0, 62.0],
+                pitch_orig: vec![64.0, 65.0, 66.0],
+                extra_curves: std::collections::HashMap::new(),
+                extra_params: std::collections::HashMap::new(),
+                formant_morph: None,
+                input_pitch_curve: None,
+            }
+        }
+
+        fn input(&self) -> RenderedClipHashInput<'_> {
+            RenderedClipHashInput {
+                clip_id: "clip-1",
+                source_path: "demo.wav",
+                source_file_mtime: None,
+                source_file_fingerprint: None,
+                active_take_id: None,
+                renderer_id: "nsf_hifigan_onnx",
+                start_frame: 0,
+                end_frame: 48_000,
+                sample_rate: 48_000,
+                playback_rate: 1.0,
+                reversed: false,
+                loop_enabled: false,
+                channel_mode: 0,
+                source_range_q: (0, 1_000),
+                pitch_edit: &self.pitch_edit,
+                pitch_orig: Some(&self.pitch_orig),
+                frame_period_ms: 5.0,
+                extra_curves: &self.extra_curves,
+                extra_params: &self.extra_params,
+                formant_morph: self.formant_morph.as_ref(),
+                input_pitch_curve: self.input_pitch_curve.as_deref(),
+                compose_enabled: true,
+                scale_signature: "",
+                source_file_size: None,
+            }
+        }
+
+        fn hash(&self) -> u64 {
+            compute_rendered_clip_hash(&self.input())
+        }
+    }
 
     #[test]
     fn rendered_clip_hash_changes_when_formant_morph_changes() {
-        let formant_a = crate::state::ClipFormantMorph {
+        let _stretch = lock_stretch_global_read();
+        let mut fixture = Fixture::new();
+        fixture.formant_morph = Some(crate::state::ClipFormantMorph {
             enabled: true,
             target_f1_hz: 700.0,
             target_f2_hz: 1_400.0,
             strength: 0.55,
-        };
-        let formant_b = crate::state::ClipFormantMorph {
+        });
+        let hash_a = fixture.hash();
+        fixture.formant_morph = Some(crate::state::ClipFormantMorph {
+            enabled: true,
             target_f1_hz: 900.0,
-            ..formant_a.clone()
+            target_f2_hz: 1_400.0,
+            strength: 0.55,
+        });
+        assert_ne!(hash_a, fixture.hash());
+    }
+
+    #[test]
+    fn rendered_clip_hash_changes_when_reversed_changes() {
+        let _stretch = lock_stretch_global_read();
+        // 反转（倒放）在同一源窗口下产生完全不同的 PCM：漏掉此维度会让
+        // "反转开关"直接命中旧渲染结果。
+        let fixture = Fixture::new();
+        let forward = fixture.hash();
+        let mut input = fixture.input();
+        input.reversed = true;
+        let reversed = compute_rendered_clip_hash(&input);
+        assert_ne!(forward, reversed);
+    }
+
+    #[test]
+    fn rendered_clip_hash_changes_when_source_identity_changes() {
+        let _stretch = lock_stretch_global_read();
+        // 源文件内容指纹 / 活跃 Take：持久化缓存必须能识别"同路径不同内容"、
+        // "同 Clip 换 Take"。
+        let fixture = Fixture::new();
+        let base = fixture.hash();
+
+        let mut with_fingerprint = fixture.input();
+        with_fingerprint.source_file_fingerprint = Some(0x1122_3344_5566_7788);
+        assert_ne!(base, compute_rendered_clip_hash(&with_fingerprint));
+
+        let mut with_mtime = fixture.input();
+        with_mtime.source_file_mtime = Some(1_700_000_000);
+        assert_ne!(base, compute_rendered_clip_hash(&with_mtime));
+
+        let mut with_take = fixture.input();
+        with_take.active_take_id = Some("take-2");
+        assert_ne!(base, compute_rendered_clip_hash(&with_take));
+    }
+
+    #[test]
+    fn rendered_clip_hash_changes_when_pitch_orig_changes() {
+        let _stretch = lock_stretch_global_read();
+        // pitch_orig 是渲染输入的一部分（pitch_orig + pitch_edit 共同决定音高）。
+        // 重新分析 / 更换分析算法后 pitch_edit 可能不变，只哈希 pitch_edit 会
+        // 命中旧渲染结果。
+        let mut fixture = Fixture::new();
+        let base = fixture.hash();
+        fixture.pitch_orig[1] = 72.0;
+        assert_ne!(base, fixture.hash());
+    }
+
+    /// 排除变体的语义：排除某项必须真的改变哈希，未排除的项必须不影响结果。
+    ///
+    /// 这是归因诊断可信的前提 —— 如果"排除 pitch_orig"与全量哈希相同，那么
+    /// 用排除法反推漂移字段就毫无意义。
+    #[test]
+    fn exclusion_variants_isolate_their_own_input() {
+        let _stretch = lock_stretch_global_read();
+        // 夹具默认不设"输入 pitch 曲线"与源身份，而它们正是诊断候选之一 ——
+        // 必须补上，否则"排除后哈希不变"只是因为该字段本就缺席，什么也没测到。
+        let mut fixture = Fixture::new();
+        fixture.input_pitch_curve = Some(vec![67.0, 68.0]);
+        let mut input = fixture.input();
+        input.source_file_mtime = Some(1_700_000_000);
+        input.source_file_fingerprint = Some(0x1122_3344_5566_7788);
+        input.source_file_size = Some(4_194_304);
+
+        let base = compute_rendered_clip_hash(&input);
+
+        // 每个候选排除项都产出与全量不同的哈希（说明该项确实参与了混入）。
+        for (label, exclusions) in HashExclusions::DIAGNOSTIC_CANDIDATES {
+            assert_ne!(
+                base,
+                compute_rendered_clip_hash_excluding(&input, exclusions),
+                "排除 {label} 后哈希未变化，说明该字段根本没进键"
+            );
+        }
+
+        // 全量口径必须与 `compute_rendered_clip_hash` 完全一致（单一实现）。
+        assert_eq!(
+            base,
+            compute_rendered_clip_hash_excluding(&input, HashExclusions::NONE)
+        );
+
+        // 排除是**逐项独立**的：改变 pitch_orig 后，"排除 pitch_orig"的变体
+        // 必须保持不变（这正是归因能指出漂移字段的原理）。
+        let mut drifted = Fixture::new();
+        drifted.pitch_orig[1] = 72.0;
+        drifted.input_pitch_curve = fixture.input_pitch_curve.clone();
+        let mut drifted_input = drifted.input();
+        drifted_input.source_file_mtime = input.source_file_mtime;
+        drifted_input.source_file_fingerprint = input.source_file_fingerprint;
+        drifted_input.source_file_size = input.source_file_size;
+
+        let exclude_pitch_orig = HashExclusions {
+            pitch_orig: true,
+            ..HashExclusions::NONE
         };
-
-        let hash_a = compute_rendered_clip_hash(
-            "clip-1",
-            "demo.wav",
-            0,
-            48_000,
-            48_000,
-            "nsf_hifigan_onnx",
-            &[60.0, 61.0, 62.0],
-            5.0,
-            1.0,
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-            Some(&formant_a),
-            None,
-            None, // source_file_mtime
-            false,
-            (0, 1_000),
+        assert_eq!(
+            compute_rendered_clip_hash_excluding(&input, exclude_pitch_orig),
+            compute_rendered_clip_hash_excluding(&drifted_input, exclude_pitch_orig),
+            "排除 pitch_orig 后，pitch_orig 的漂移不应再影响哈希"
         );
-        let hash_b = compute_rendered_clip_hash(
-            "clip-1",
-            "demo.wav",
-            0,
-            48_000,
-            48_000,
-            "nsf_hifigan_onnx",
-            &[60.0, 61.0, 62.0],
-            5.0,
-            1.0,
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-            Some(&formant_b),
-            None,
-            None, // source_file_mtime
-            false,
-            (0, 1_000),
+        // 而排除别的字段时，pitch_orig 的漂移仍然可见。
+        let exclude_source = HashExclusions {
+            source_identity: true,
+            ..HashExclusions::NONE
+        };
+        assert_ne!(
+            compute_rendered_clip_hash_excluding(&input, exclude_source),
+            compute_rendered_clip_hash_excluding(&drifted_input, exclude_source)
         );
+    }
 
-        assert_ne!(hash_a, hash_b);
+    /// 源身份排除：mtime / 指纹 / 大小三者必须同时被排除。
+    #[test]
+    fn source_identity_exclusion_covers_mtime_fingerprint_and_size() {
+        let _stretch = lock_stretch_global_read();
+        let fixture = Fixture::new();
+        let exclusions = HashExclusions {
+            source_identity: true,
+            ..HashExclusions::NONE
+        };
+        let base = compute_rendered_clip_hash_excluding(&fixture.input(), exclusions);
+
+        for mutate in [
+            (|input: &mut super::RenderedClipHashInput<'_>| input.source_file_mtime = Some(1)),
+            (|input: &mut super::RenderedClipHashInput<'_>| {
+                input.source_file_fingerprint = Some(7)
+            }),
+            (|input: &mut super::RenderedClipHashInput<'_>| input.source_file_size = Some(9)),
+        ] {
+            let mut input = fixture.input();
+            mutate(&mut input);
+            assert_eq!(
+                base,
+                compute_rendered_clip_hash_excluding(&input, exclusions),
+                "源身份的任一维度被排除后都不应再影响哈希"
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_clip_hash_changes_when_playback_rate_changes() {
+        let _stretch = lock_stretch_global_read();
+        let fixture = Fixture::new();
+        let base = fixture.hash();
+        let mut input = fixture.input();
+        input.playback_rate = 0.75;
+        assert_ne!(base, compute_rendered_clip_hash(&input));
     }
 
     #[test]
     fn rendered_clip_hash_changes_when_loop_or_source_range_changes() {
+        let _stretch = lock_stretch_global_read();
         // Loop（循环源）与源窗口（trim/split 锚点推进）都会改变渲染输入，
         // 任一变化必须使渲染缓存失效。
-        let base = |loop_enabled: bool, range: (i64, i64)| {
-            compute_rendered_clip_hash(
-                "clip-1",
-                "demo.wav",
-                0,
-                48_000,
-                48_000,
-                "nsf_hifigan_onnx",
-                &[60.0, 61.0, 62.0],
-                5.0,
-                1.0,
-                &std::collections::HashMap::new(),
-                &std::collections::HashMap::new(),
-                None,
-                None,
-                None, // source_file_mtime
-                loop_enabled,
-                range,
-            )
-        };
-        assert_ne!(base(false, (0, 1_000)), base(true, (0, 1_000)));
-        assert_ne!(base(false, (0, 1_000)), base(false, (500, 1_000)));
+        let fixture = Fixture::new();
+        let base = fixture.hash();
+
+        let mut looped = fixture.input();
+        looped.loop_enabled = true;
+        assert_ne!(base, compute_rendered_clip_hash(&looped));
+
+        let mut trimmed = fixture.input();
+        trimmed.source_range_q = (500, 1_000);
+        assert_ne!(base, compute_rendered_clip_hash(&trimmed));
     }
 
     #[test]
     fn rendered_clip_hash_follows_stretch_settings() {
+        let _stretch = lock_stretch_global_write();
         // 渲染输出依赖拉伸模式（Mel Stretch 内部拉伸 vs 外部算法预拉伸），
         // 气声噪声 stem 也跟随外部算法。切换任一设置都必须使缓存失效。
         use crate::time_stretch::{update_runtime_stretch_settings, UserStretchAlgorithm};
-        let base = || {
-            compute_rendered_clip_hash(
-                "clip-1",
-                "demo.wav",
-                0,
-                48_000,
-                48_000,
-                "nsf_hifigan_onnx",
-                &[60.0, 61.0, 62.0],
-                5.0,
-                0.5,
-                &std::collections::HashMap::new(),
-                &std::collections::HashMap::new(),
-                None,
-                None,
-                None, // source_file_mtime
-                false,
-                (0, 1_000),
-            )
-        };
+        let fixture = Fixture::new();
+        let base = || fixture.hash();
 
         update_runtime_stretch_settings(UserStretchAlgorithm::Signalsmith, true, None, None);
         let mel_on_signalsmith = base();
@@ -1268,44 +1673,27 @@ mod tests {
 
     #[test]
     fn rendered_clip_hash_is_stable_under_subquantum_formant_jitter() {
+        let _stretch = lock_stretch_global_read();
         // 量化粒度: f1/f2 步长 0.1 Hz, strength 步长 0.001。
         // 在该粒度以下的浮点抖动 (前后端 round-trip / serde 反序列化 / 状态重建)
         // 不应改变 hash, 否则会触发 RenderedClipCache 的"假性失效"。
-        let formant_a = crate::state::ClipFormantMorph {
+        let mut fixture = Fixture::new();
+        fixture.formant_morph = Some(crate::state::ClipFormantMorph {
             enabled: true,
             target_f1_hz: 700.0,
             target_f2_hz: 1_400.0,
             strength: 0.55,
-        };
-        let formant_b = crate::state::ClipFormantMorph {
+        });
+        let base = fixture.hash();
+
+        fixture.formant_morph = Some(crate::state::ClipFormantMorph {
             // 抖动远小于量化步长 (0.001 Hz << 0.1 Hz, 0.0001 << 0.001)
             target_f1_hz: 700.0 + 1e-6,
             target_f2_hz: 1_400.0 - 5e-6,
             strength: 0.55 + 1e-7,
-            ..formant_a.clone()
-        };
+            enabled: true,
+        });
 
-        let make_hash = |formant: &crate::state::ClipFormantMorph| {
-            compute_rendered_clip_hash(
-                "clip-1",
-                "demo.wav",
-                0,
-                48_000,
-                48_000,
-                "nsf_hifigan_onnx",
-                &[60.0, 61.0, 62.0],
-                5.0,
-                1.0,
-                &std::collections::HashMap::new(),
-                &std::collections::HashMap::new(),
-                Some(formant),
-                None,
-                None, // source_file_mtime
-                false,
-                (0, 1_000),
-            )
-        };
-
-        assert_eq!(make_hash(&formant_a), make_hash(&formant_b));
+        assert_eq!(base, fixture.hash());
     }
 }

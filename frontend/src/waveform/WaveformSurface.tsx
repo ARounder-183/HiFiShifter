@@ -22,7 +22,17 @@ import type { TimelineAxis } from "../components/layout/renderKernel/timelineAxi
 import { withAxis } from "../components/layout/renderKernel/timelineAxis.ts";
 import { LAYER_ORDER } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
 import type { TimelineLayer } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
-import { buildWaveformGeometry, type WaveformVertexSink } from "./geometry";
+import {
+    buildWaveformGeometry,
+    readAmplitudeRevision,
+    type WaveformAmplitudeMap,
+    type WaveformVertexSink,
+} from "./geometry";
+import {
+    canReuseGeometry,
+    type WaveformGeometryAnchor,
+    type WaveformReuseQuery,
+} from "./geometryCache";
 import { buildWaveformScene, type WaveformSceneRow } from "./sceneBuilder";
 import {
     Canvas2dWaveformRenderer,
@@ -54,6 +64,37 @@ export interface WaveformSurfaceProps {
         getAxis(): TimelineAxis;
         register(layer: TimelineLayer, order: number): () => void;
     };
+    /**
+     * 幅度映射：把线性峰值投影到本面板纵轴的量纲。
+     *
+     * 缺省（不传）为线性直投 —— 时间线与绝大多数参数面板的行为。
+     * 参数编辑器在「动态（DYN）」面板下传入 dB 映射，使波形与 DYN 曲线、
+     * 原声基线共用同一坐标系。
+     *
+     * ⚠ 该函数**参与几何缓存键**（详见 draw() 内的复用判定）：换参数
+     * 面板时必须传一个新引用，否则会复用旧映射构建的几何。
+     */
+    amplitudeMap?: WaveformAmplitudeMap;
+    /**
+     * `rows` 的**水平完整性**承诺：视口在水平方向移到任何位置，所需的 clip
+     * 都已在 `rows` 中（即上游**不做水平窗口化**）。
+     *
+     * 【为什么这个承诺能换来一个数量级的性能】它为真时，平移帧可以只做一次
+     * `u_viewOrigin` 更新 + `drawArrays`（`repaint()`），成本与 clip 数、
+     * 像素列数**完全无关**；为假时每帧都要重建场景与几何（400 clip / 全览实测
+     * ≈ 10.8 ms，占满 60 fps 预算的 2/3）。
+     *
+     * 【缺省 false 是刻意的保守默认】多数调用方的 `rows` 是按当前（量化提交的）
+     * 视口窗口裁剪出来的，几何里可能不含刚进入视口的 clip —— 此时复用会把缺了
+     * 内容的旧几何平移上去，表现为「波形消失、随滚动又恢复」。承诺为真才解锁
+     * 复用，判定细节见 `geometryCache.canReuseGeometry`。
+     *
+     * 【时间轴为什么可以为真】`TimelineKernelView.waveformClipsByTrackId` 把每条
+     * **可见轨道的全部 clip** 都放进 map，不做任何时间窗裁剪，因此视口移到哪儿
+     * 都在 `rows` 里。⚠ 若将来上游改成按时间窗裁剪 `rows`，这里必须改回
+     * `false`（或让裁剪余量 ≥ 几何余量 + React 提交滞后），否则波形会缺内容。
+     */
+    rowsCoverViewport?: boolean;
 }
 
 export const WaveformSurface = React.memo(function WaveformSurface(props: WaveformSurfaceProps) {
@@ -78,23 +119,19 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
     /**
      * 几何缓存的锚点：记录「当前 GPU 上的几何是按什么窗口与缩放构建的」。
      *
-     * `rows` / `color` 用引用比较：它们是 React 侧 memo 的产物，引用不变即
-     * 内容不变。任一字段变化或视口越出窗口，都必须全量重建。
+     * 判定逻辑本身在 `geometryCache.canReuseGeometry`（纯函数、可单测）；
+     * 这里只持有它的输入。任一字段变化或视口越出窗口都必须全量重建。
      */
-    const geometryCacheRef = React.useRef<{
-        pxPerSec: number;
-        widthPx: number;
-        heightPx: number;
-        rows: readonly WaveformSceneRow[];
-        color: string;
-        rendererKind: "webgl2" | "canvas2d";
-        /** 构建窗口的内容坐标左边界（含余量）。 */
-        windowStartPx: number;
-        windowEndPx: number;
-        windowTopPx: number;
-        windowBottomPx: number;
-    } | null>(null);
+    const geometryCacheRef = React.useRef<WaveformGeometryAnchor | null>(null);
     const [rendererKind, setRendererKind] = React.useState<"webgl2" | "canvas2d">("webgl2");
+    /**
+     * 当前 dpr 快照，**只**用于驱动下方 matchMedia 订阅的换绑。
+     *
+     * draw() 每帧直接读 `window.devicePixelRatio`（值永远新鲜），不经 state；
+     * 这里单独存一份是因为 `(resolution: N dppx)` 查询只在 dpr **离开** N 时
+     * 触发一次，必须用新 dpr 重新订阅才能收到下一次变化。
+     */
+    const [dpr, setDpr] = React.useState(() => window.devicePixelRatio || 1);
 
     // render 期写 ref 镜像（本仓库热路径既有模式；原出处 TimelineCanvasViewport 已随
     // 旧渲染路径删除，同一手法现仍见于 TimelineKernelView 等命令式绘制组件）。
@@ -114,17 +151,49 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
     }, []);
 
     /**
+     * DPR 变化（浏览器缩放 / 显示器切换）必须触发一次重绘。
+     *
+     * 【为什么需要】dpr 参与绘制结果的两处：包络列按设备像素网格枚举、dpr
+     * 又是几何缓存键的一部分（`canReuseGeometry` 第 1 组），画布物理尺寸也
+     * 随 dpr 变化（`rasterize`）。但 dpr 变化不带来任何 props / 视口变化 ——
+     * 没有这条订阅，缩放/换屏后波形会停留在旧 dpr 的几何与画布尺寸上
+     * （发虚/糊边），直到下一次滚动或缩放才有机会重画。
+     *
+     * 【换绑模式】监听 `(resolution: N dppx)`（N = 订阅时的 dpr）：它只在
+     * dpr 离开 N 时触发；回调里作废几何缓存、请求重绘，并重读真实 dpr 写回
+     * state —— effect 依赖 [dpr] 随之重跑，用新 dpr 的 query 重新订阅。不换
+     * 绑的话旧 query 已永久失配，第二次缩放就会丢。
+     */
+    React.useEffect(() => {
+        const mql = window.matchMedia?.(`(resolution: ${dpr}dppx)`);
+        if (!mql) return;
+        const onChange = () => {
+            // dpr 参与几何缓存键、旧几何的列栅格按旧 dpr 枚举，必须作废后
+            // 全量重建（仅 invalidate 的 repaint 命不中重建路径的原因见
+            // canReuseGeometry 的锚点全等组）。
+            geometryCacheRef.current = null;
+            invalidate();
+            setDpr(window.devicePixelRatio || 1);
+        };
+        mql.addEventListener("change", onChange);
+        return () => mql.removeEventListener("change", onChange);
+    }, [dpr, invalidate]);
+
+    /**
      * 绘制一帧波形。
      *
      * 流程：
      * 1. 取视口快照（总线驱动时用总线快照，否则用 props.axis）；
-     * 2. **复用判定**（仅非总线路径）：缩放、尺寸、行数据、颜色都没变，且视口
-     *    矩形仍落在已构建的「窗口 + 余量」之内 → 走 `repaint()`，只更新视口原点，
-     *    不重建场景与几何（WebGL 路径退化为一次 uniform 更新 + drawArrays）；
+     * 2. **复用判定**（`geometryCache.canReuseGeometry`）：缩放、尺寸、行数据、
+     *    颜色、幅度映射都没变，调用方承诺了 `rowsCoverViewport`，且视口矩形仍落在
+     *    已构建的「窗口 + 余量」之内 → 走 `repaint()`，只更新视口原点，不重建场景
+     *    与几何（WebGL 路径退化为一次 uniform 更新 + drawArrays，成本与 clip 数
+     *    完全无关）；
      * 3. 否则按窗口重建场景与几何，再 `render()`。
-     *    总线驱动（`viewportSource`）时**恒走本分支**：rows 的更新由 React 量化
-     *    提交滞后于总线视口，余量窗口复用会把「几何不含刚进入视口的 clip」的旧
-     *    内容平移一整段。
+     *
+     * 也就是说：**平移（水平或竖直）只要没滚出余量窗口就不重建**，这是「大量
+     * 波形下拖动时间轴仍然顺滑」的关键；重建只发生在缩放、尺寸变化、行窗口切换、
+     * clip 编辑、峰值数据到达，以及视口滚出余量窗口时。
      *
      * 【坐标系】几何顶点是**窗口局部坐标** = 内容坐标 − 窗口左上角。实现上
      * 不给 `buildWaveformScene` 改签名，而是传一个派生 axis：
@@ -160,45 +229,33 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
 
         const cache = geometryCacheRef.current;
 
-        // canReuse 的「视口仍落在已构建窗口内就只平移」判定，隐含假设是：
-        // 「几何覆盖的 clip 集合 ⊇ 当前视口内的 clip 集合」。这个假设在时间轴侧
-        // 成立（行窗口由内核逐帧派生，rows 引用随视口更新），但在参数编辑器侧
-        // 不成立：它的 `props.rows` 由 React 用 **256px 量化提交**的 scrollLeft
-        // 计算（SCROLL_COMMIT_STEP_PX 死区），滞后内核真值最多 255px。于是：
+        // 幅度映射修订号：引用不变也可能内部数据已变（响度映射的延迟取值），
+        // 必须在复用判定之前取一次，并在重建时写入缓存。
+        const amplitudeRevision = readAmplitudeRevision(props.amplitudeMap);
+        // 复用判定是纯函数（见 geometryCache.canReuseGeometry）：它为真时本帧
+        // 只更新一次 `u_viewOrigin` 并重发 draw call，成本与 clip 数、像素列数
+        // **完全无关**；为假时才重建场景与几何。
         //
-        //   向左滚 → 内核把左侧 clip 拉进视口，但 rows 还是旧的（几何里没有
-        //   它）→ 视口仍在旧窗口内 → 命中 canReuse → repaint() 把没有该 clip
-        //   的旧几何原样平移上去 —— 该 clip 的波形「消失」；
-        //   满了 256px → React 提交 → rows 换引用 → 全量重建 → 波形「恢复」；
-        //   向右拖回去 → rows / 几何都还在，但视口越出旧窗口 → 不等重建，本帧
-        //   先 repaint() 旧几何 —— 波形又「消失」，松手后才恢复。
-        //
-        // 用户报告为「从右往左拖时，左侧进入的 clip 波形消失，随着拖动又恢复，
-        // 不松手往回拖又消失」，与是否开启「同步到时间轴」无关（两套滚动路径
-        // 都汇入同一总线，症状一致）。
-        //
-        // 修复：总线同步 paint 路径**始终全量重建**。这条路径的调用频率等于
-        // 视口提交频率（滚动帧 / 对账帧），重建成本可控（实测全览 ~1ms 量级），
-        // 且此时窗口按当帧视口构建，几何与 rows 的错位窗口不复存在。非总线
-        // 路径（rows / 尺寸 / 缩放由 props 驱动）保留余量窗口复用不变。
-        const canReuse =
-            source === null &&
-            cache !== null &&
-            cache.pxPerSec === pxPerSec &&
-            cache.widthPx === widthPx &&
-            cache.heightPx === heightPx &&
-            cache.rows === props.rows &&
-            cache.color === props.color &&
-            cache.rendererKind === rendererKind &&
-            // 水平：视口必须完整落在已构建的窗口内（两侧各 `marginPx` 可平移）。
-            scrollLeftPx >= cache.windowStartPx &&
-            scrollLeftPx + widthPx <= cache.windowEndPx &&
-            // 竖直：只要求视口**顶边**落在行覆盖范围内。画布比视口高 8 行
-            // （overscan），行集合不变时底边必然被覆盖。
-            scrollTopPx >= cache.windowTopPx &&
-            scrollTopPx <= cache.windowBottomPx;
+        // 判定的两组条件（锚点全等 + 视口仍落在构建窗口内）之外，还要求调用方
+        // 承诺 `rowsCoverViewport`——即 rows 在水平方向不做窗口化，视口移到哪儿
+        // 所需的 clip 都在里面。缺省 false（保守）：水平窗口化的调用方（参数
+        // 编辑器）的 rows 会滞后于真值，复用会把缺内容的旧几何平移上去。
+        const reuseQuery: WaveformReuseQuery = {
+            pxPerSec,
+            widthPx,
+            heightPx,
+            dpr,
+            rows: props.rows,
+            color: props.color,
+            rendererKind,
+            amplitudeMap: props.amplitudeMap,
+            amplitudeRevision,
+            scrollLeftPx,
+            scrollTopPx,
+            rowsCoverViewport: props.rowsCoverViewport === true,
+        };
 
-        if (canReuse && cache !== null) {
+        if (canReuseGeometry(cache, reuseQuery) && cache !== null) {
             const renderer = cache.rendererKind === "webgl2" ? webglRendererRef.current : null;
             const active = renderer ?? fallbackRendererRef.current;
             if (active !== null) {
@@ -223,27 +280,24 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         const windowStartPx = scrollLeftPx - marginPx;
         const windowEndPx = scrollLeftPx + widthPx + marginPx;
         // 竖直窗口 = 行数据覆盖的内容范围（行 topPx 是内容绝对坐标、按轨道
-        // 顺序升序）。注意**不能**用 `heightPx` 做竖直包含判定：它是
-        // `visibleTracks.length * rowHeight`，比视口高 8 行（overscan），
-        // 拿它当视口高会得到永远不成立的条件。竖直方向实际上不需要余量——
-        // 上游的轨道窗口化已带 4 行 overscan，行集合不变时几何必然覆盖视口。
+        // 顺序升序）。注意**不能**用 `heightPx` 推竖直窗口：它是画布高度，
+        // 与行数据的实际覆盖无关（上游的轨道窗口化自带 overscan，两者不必
+        // 相等），拿它当界会得到与几何覆盖无关的条件。
         let firstRowTopPx = Number.POSITIVE_INFINITY;
-        let lastRowTopPx = Number.NEGATIVE_INFINITY;
+        // 几何的**真实覆盖底端**：几何只画各行波形带，覆盖到
+        // 「行顶 + 带内偏移 + 带高」为止。此前用「(末行 top − 首行 top) ÷ 行数」
+        // 的平均行高外推底端、再加视口高作余量 —— 平均隐含行间距均匀的假设，
+        // 余量则干脆高估覆盖；两者都会让竖直复用判定放过「视口底边越出几何」
+        // 的帧，越出部分没有几何可画（快速竖直平移时视口底部出现空白条）。
+        let geometryBottomPx = Number.NEGATIVE_INFINITY;
         for (const row of props.rows) {
             if (row.topPx < firstRowTopPx) firstRowTopPx = row.topPx;
-            if (row.topPx > lastRowTopPx) lastRowTopPx = row.topPx;
-        }
-        let rowHeightPx: number;
-        if (props.rows.length >= 2) {
-            rowHeightPx = (lastRowTopPx - firstRowTopPx) / (props.rows.length - 1);
-        } else if (props.rows.length === 1) {
-            rowHeightPx = heightPx;
-        } else {
-            rowHeightPx = 0;
+            const bandBottomPx = row.topPx + row.waveformTopPx + row.waveformHeightPx;
+            if (bandBottomPx > geometryBottomPx) geometryBottomPx = bandBottomPx;
         }
         const windowTopPx = Number.isFinite(firstRowTopPx) ? firstRowTopPx : scrollTopPx;
-        const windowBottomPx = Number.isFinite(lastRowTopPx)
-            ? lastRowTopPx + Math.max(rowHeightPx, heightPx)
+        const windowBottomPx = Number.isFinite(geometryBottomPx)
+            ? geometryBottomPx
             : scrollTopPx + heightPx;
 
         const scene = buildWaveformScene({
@@ -260,7 +314,14 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         const geometry = buildWaveformGeometry({
             scene,
             color: props.color,
-            getPeaks: (sourcePath, sampleRate, sourceStartSec, sourceDurationSec) => {
+            getPeaks: (
+                sourcePath,
+                sampleRate,
+                sourceStartSec,
+                sourceDurationSec,
+                channelMode,
+                sourceChannels,
+            ) => {
                 // 迟滞选级：spp 在阈值附近时 selectLevel 会在两档间来回跳变
                 // （每次跳变都拉取不同级别的 peaks → 几何反复重建）；用上一帧
                 // 的选级做迟滞（与 mipmap store 的 selectLevelStable 同参数）。
@@ -291,9 +352,15 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
                     level,
                     sourceStartSec,
                     sourceDurationSec,
+                    channelMode,
+                    sourceChannels,
                 );
             },
             sink: vertexSinkRef.current,
+            amplitudeMap: props.amplitudeMap,
+            // 包络列按设备像素网格枚举（见 waveformColumnWidthDevicePx）：
+            // 非整数 dpr 下若仍按 CSS 像素枚举，列宽会在 1~2 物理像素间抖动。
+            dpr,
         });
 
         const originXPx = scrollLeftPx - windowStartPx;
@@ -303,9 +370,12 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
                 pxPerSec,
                 widthPx,
                 heightPx,
+                dpr,
                 rows: props.rows,
                 color: props.color,
                 rendererKind: renderer.kind,
+                amplitudeMap: props.amplitudeMap,
+                amplitudeRevision,
                 windowStartPx,
                 windowEndPx,
                 windowTopPx,
@@ -370,6 +440,11 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             viewportTopPx: props.viewportTopPx,
             pxPerSec: props.axis.pxPerSec,
             axis: props.viewportSource ? null : props.axis,
+            // 幅度映射参与签名：参数编辑器在「动态」面板下切换参数时换引用，
+            // 必须触发一次重绘 —— 总线驱动模式下没有滚动/缩放就不会有其它
+            // 的 draw() 入口，漏掉它会让波形停留在上一参数的映射结果上
+            // （表现为"编辑动态时波形不更新"）。
+            amplitudeMap: props.amplitudeMap,
         }),
         [
             props.rows,
@@ -378,6 +453,7 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             props.viewportTopPx,
             props.axis,
             props.viewportSource,
+            props.amplitudeMap,
         ],
     );
     const previousVisualSignatureRef = React.useRef(visualSignature);

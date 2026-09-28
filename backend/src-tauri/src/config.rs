@@ -302,6 +302,15 @@ pub struct UiSettings {
     pub show_clipboard_preview: bool,
     #[serde(default = "default_true")]
     pub show_param_value_popup: bool,
+    /// 纵轴标尺的展示单位（参数 id → `"ratio"` / `"db"`）。
+    ///
+    /// 只对音量 / 动态这类线性幅值倍率参数有意义（`1× = 0 dB`）：同一个值既能读成
+    /// 倍率也能读成 dB，用户按习惯选择读法。空映射 = 全部按倍率（历史行为）。
+    ///
+    /// 取值合法性由前端收口（`normalizeParamAxisUnits`），后端只做透传存储 ——
+    /// 这里加一份校验会让"支持哪些参数"这个业务知识在两处各写一遍。
+    #[serde(default)]
+    pub param_axis_units: std::collections::HashMap<String, String>,
     #[serde(default = "default_true")]
     pub lock_param_lines: bool,
 
@@ -445,6 +454,37 @@ pub struct UiSettings {
     /// （源偏移、播放速率、倒放、Loop、增益）会尝试同步到同一 Clip 的其余 Take。
     #[serde(default = "default_true")]
     pub sync_edits_across_takes: bool,
+    /// 渲染缓存：把渲染结果落盘，重新打开工程时直接复用。
+    #[serde(default)]
+    pub render_cache: RenderCacheSettings,
+    /// 导入媒体时的声道处理策略（假立体声 → 单声道）。
+    #[serde(default)]
+    pub channel_import_policy: ChannelImportPolicy,
+    /// 记事本（Notebook）设置。
+    ///
+    /// **后端只做透传存储**：字段语义、取值合法性与默认值都在前端收口
+    /// （`components/layout/notebook/notebookSettings.ts` 的
+    /// `normalizeNotebookSettings`），理由与 `param_axis_units` 相同 ——
+    /// "支持哪些取值"属于业务知识，写两遍必然漂移。
+    ///
+    /// 用 `serde_json::Value` 而不是具体结构体还有一个实际好处：前端新增
+    /// 字段时后端不必同步改结构体，用户降级运行旧版本时未知字段也会原样保留。
+    #[serde(default)]
+    pub notebook: serde_json::Value,
+    /// 停靠窗体系统设置与布局。
+    ///
+    /// 结构与 `notebook` 同理：**后端只做透传存储**，字段语义、合法性与默认
+    /// 值都在前端收口（`features/dock/dockSettings.ts` 的 `normalizeDockSettings`
+    /// 与 `dockSchema.ts` 的 `normalizeDockLayout`）。
+    ///
+    /// 用 `serde_json::Value` 而非具体结构体的额外理由：布局 schema 会随功能
+    /// 演进反复增删字段，强类型会让每次演进都触发后端改动与迁移代码，而这份
+    /// 数据的使用者自始至终只有前端。
+    ///
+    /// 注意：`"dock"` 必须在 `commands/ui_settings.rs` 的深度合并白名单里，
+    /// 否则"只保存行为选项"的部分写入会把 `layout` 子键整个清掉。
+    #[serde(default)]
+    pub dock: serde_json::Value,
 }
 
 /// "为新的音频块启用循环"的进程级生效值（默认 true）。
@@ -475,6 +515,46 @@ pub fn sync_edits_across_takes() -> bool {
 
 pub fn set_sync_edits_across_takes(enabled: bool) {
     SYNC_EDITS_ACROSS_TAKES.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 导入声道处理策略的进程级生效值（默认"智能转换"）。
+///
+/// 与 `LOOP_NEW_CLIPS_DEFAULT` / `SYNC_EDITS_ACROSS_TAKES` 同款：由
+/// `commands::ui_settings` 在加载与保存设置时同步；供 `TimelineState::add_clip`、
+/// 各格式 importer、旧工程迁移等无法访问 `AppState` 的创建点读取。
+static CHANNEL_IMPORT_POLICY: std::sync::OnceLock<
+    std::sync::RwLock<ChannelImportPolicy>,
+> = std::sync::OnceLock::new();
+
+fn channel_import_policy_cell() -> &'static std::sync::RwLock<ChannelImportPolicy> {
+    CHANNEL_IMPORT_POLICY.get_or_init(|| std::sync::RwLock::new(ChannelImportPolicy::default()))
+}
+
+/// 读取当前生效的导入声道策略。
+pub fn channel_import_policy() -> ChannelImportPolicy {
+    channel_import_policy_cell()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// 同步导入声道策略的进程级生效值（入参先规范化）。
+pub fn set_channel_import_policy(policy: &ChannelImportPolicy) {
+    let normalized = policy.normalized();
+    *channel_import_policy_cell()
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = normalized;
+}
+
+/// 测试专用：串行化所有会改写**进程级设置**的测试。
+///
+/// 这些设置（导入声道策略、Loop 默认值、同步编辑所有 Take…）是进程级单例，
+/// 而 `cargo test` 默认并行跑用例 —— 一个用例把它设成 `off`、另一个用例依赖
+/// `smart` 时，会得到随机的假失败。所有触碰这些全局的测试都必须先拿这把锁。
+#[cfg(test)]
+pub(crate) fn channel_policy_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn default_ort_ep() -> String {
@@ -584,6 +664,403 @@ impl AutoBackupSettings {
             timed_backup_interval_sec: interval,
             timed_backup_path_template: template,
         }
+    }
+}
+
+/// 渲染缓存设置（持久化到 app_config.json）
+///
+/// 渲染缓存把整 Clip 的合成结果（含气声 stem / 张力变体）按内容哈希落盘，
+/// 使"重新打开工程"不再重新合成未变更的片段。这里的每一项都对应管理面板上的
+/// 一个可调项；容量/年龄通过 `normalized()` 钳制，损坏的配置值不会让缓存失控。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderCacheSettings {
+    /// 总开关：渲染结果写入磁盘并在重新打开工程时复用（关闭后行为与旧版本一致）。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 磁盘占用上限（MB；0 = 不限制）。超出后按最旧优先回收到 90% 水位。
+    #[serde(default = "default_render_cache_max_size_mb")]
+    pub max_size_mb: u32,
+    /// 超过 N 天未写入的条目自动清理（0 = 不限龄）。
+    #[serde(default = "default_render_cache_max_age_days")]
+    pub max_age_days: u32,
+    /// 小于该时长的片段不落盘（秒；**0 = 不设时长下限，出厂默认**）。
+    ///
+    /// ★ 时长不是渲染成本的代理变量。渲染开销由模型推理 / 解码 / 重采样这些
+    /// **固定**环节主导，与片段时长几乎无关（实测：0.2 s 片段 158 ms，0.45 s
+    /// 片段 203 ms —— 时长差 3 倍，耗时只差 1.3 倍）；而存储开销与时长线性相关。
+    /// 因此「按秒数过滤」恰好剔除了性价比最高的一类条目：短片段每 KB 换回的
+    /// 渲染时间约为长片段的 2.3 倍。
+    ///
+    /// 该判据历史上出厂为 `0.5`，实测使一个 465 片段的工程有 175 个（37.6%）
+    /// 永久无法落盘、每次打开都必须重新合成，而它们总共只值约 9.8 MB。
+    /// 现默认关闭，仅作为用户显式需要的可选闸门保留；真正防退化的是
+    /// [`Self::min_entry_kb`]（字节下限）。
+    #[serde(default = "default_render_cache_min_clip_secs")]
+    pub min_clip_secs: f64,
+    /// 小于该大小的条目不落盘（KB；0 = 不限制，出厂 4 KB）。
+    ///
+    /// 字节才是准入判据的正确变量：它直接对应"这份产物值不值得占一个文件"。
+    /// 4 KB ≈ 10 ms @48 kHz 立体声 f32，只用于挡住空 / 单帧一类的退化条目。
+    #[serde(default = "default_render_cache_min_entry_kb")]
+    pub min_entry_kb: u32,
+    /// 单条缓存上限（MB；0 = 不限制），防止单个巨型片段挤掉整库。
+    #[serde(default = "default_render_cache_max_entry_mb")]
+    pub max_entry_mb: u32,
+    /// 写入模式：`"immediate"`（渲染完即异步落盘，默认）/ `"onExit"`（退出时
+    /// 批量落盘）/ `"manual"`（仅保存工程时落盘）。
+    #[serde(default = "default_render_cache_write_mode")]
+    pub write_mode: String,
+    /// 缓存位置：`"system"`（应用缓存目录，默认）/ `"custom"`（自定义目录）。
+    #[serde(default = "default_render_cache_location")]
+    pub location: String,
+    /// 自定义缓存目录（`location = "custom"` 时生效；不可写时自动回退系统目录）。
+    #[serde(default)]
+    pub custom_dir: Option<String>,
+    /// 读取时校验 payload 完整性（默认开启；关闭仅省极少 CPU，不建议）。
+    #[serde(default = "default_true")]
+    pub verify_checksum: bool,
+    /// 可用磁盘空间低于该值（MB）时暂停写入（0 = 不检查）。
+    #[serde(default = "default_render_cache_min_free_disk_mb")]
+    pub min_free_disk_mb: u32,
+    /// 打开工程后显示命中统计（默认开启）。
+    #[serde(default = "default_true")]
+    pub show_hit_stats: bool,
+    /// 准入策略版本（迁移标记，不面向用户）。
+    ///
+    /// `0`（缺省）= 出厂于"时长下限 0.5 s"时代的配置。升级到字节准入后，
+    /// [`crate::config::AppConfig::migrated`] 会把**恰好等于旧默认值**的
+    /// `min_clip_secs` 重置为 0 并把本字段置 2，避免存量用户的 `app_config.json`
+    /// 里的 0.5 永久锁死命中率。
+    ///
+    /// 版本号随 `save_ui_settings` 落盘：用户此后即使显式把时长设回 0.5，
+    /// 也不会被再次重置（迁移只认"仍是旧默认值"的配置）。
+    #[serde(default)]
+    pub policy_version: u32,
+}
+
+/// 当前渲染缓存准入策略版本（见 [`RenderCacheSettings::policy_version`]）。
+pub const RENDER_CACHE_POLICY_VERSION: u32 = 2;
+
+/// 旧版出厂时长下限：只有恰好等于它的配置才会被迁移重置。
+const LEGACY_DEFAULT_MIN_CLIP_SECS: f64 = 0.5;
+
+fn default_render_cache_max_size_mb() -> u32 {
+    4096
+}
+fn default_render_cache_max_age_days() -> u32 {
+    90
+}
+fn default_render_cache_min_clip_secs() -> f64 {
+    // 0 = 不设时长下限。见 `RenderCacheSettings::min_clip_secs` 的说明：
+    // 时长与渲染成本弱相关，用它当准入闸门会剔除性价比最高的短片段。
+    0.0
+}
+fn default_render_cache_min_entry_kb() -> u32 {
+    4
+}
+fn default_render_cache_max_entry_mb() -> u32 {
+    512
+}
+fn default_render_cache_write_mode() -> String {
+    "immediate".to_string()
+}
+fn default_render_cache_location() -> String {
+    "system".to_string()
+}
+fn default_render_cache_min_free_disk_mb() -> u32 {
+    512
+}
+
+impl Default for RenderCacheSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_size_mb: default_render_cache_max_size_mb(),
+            max_age_days: default_render_cache_max_age_days(),
+            min_clip_secs: default_render_cache_min_clip_secs(),
+            min_entry_kb: default_render_cache_min_entry_kb(),
+            max_entry_mb: default_render_cache_max_entry_mb(),
+            write_mode: default_render_cache_write_mode(),
+            location: default_render_cache_location(),
+            custom_dir: None,
+            verify_checksum: true,
+            min_free_disk_mb: default_render_cache_min_free_disk_mb(),
+            show_hit_stats: true,
+            policy_version: RENDER_CACHE_POLICY_VERSION,
+        }
+    }
+}
+
+impl RenderCacheSettings {
+    /// 规范化：钳制数值、校验枚举字符串（非法值回退默认，避免手改配置破坏行为）。
+    pub fn normalized(&self) -> Self {
+        let mut s = self.clone();
+        s.max_size_mb = s.max_size_mb.min(1024 * 1024); // ≤ 1 TB
+        s.max_age_days = s.max_age_days.min(3650);
+        if !s.min_clip_secs.is_finite() {
+            s.min_clip_secs = default_render_cache_min_clip_secs();
+        }
+        s.min_clip_secs = s.min_clip_secs.clamp(0.0, 60.0);
+        s.min_entry_kb = s.min_entry_kb.min(64 * 1024); // ≤ 64 MB
+        s.max_entry_mb = s.max_entry_mb.min(64 * 1024); // ≤ 64 GB
+        s.min_free_disk_mb = s.min_free_disk_mb.min(1024 * 1024);
+        if !matches!(s.write_mode.as_str(), "immediate" | "onExit" | "manual") {
+            s.write_mode = default_render_cache_write_mode();
+        }
+        if !matches!(s.location.as_str(), "system" | "custom") {
+            s.location = default_render_cache_location();
+        }
+        s.custom_dir = s
+            .custom_dir
+            .as_ref()
+            .map(|dir| dir.trim().to_string())
+            .filter(|dir| !dir.is_empty());
+        s
+    }
+
+    /// 占用上限（字节；0 = 不限）。
+    pub fn max_size_bytes(&self) -> u64 {
+        (self.max_size_mb as u64) * 1024 * 1024
+    }
+
+    /// 超龄阈值（秒；0 = 不限）。
+    pub fn max_age_secs(&self) -> u64 {
+        (self.max_age_days as u64) * 86_400
+    }
+
+    /// 单条上限（字节；0 = 不限）。
+    pub fn max_entry_bytes(&self) -> u64 {
+        (self.max_entry_mb as u64) * 1024 * 1024
+    }
+
+    /// 单条下限（字节；0 = 不限）。
+    pub fn min_entry_bytes(&self) -> u64 {
+        (self.min_entry_kb as u64) * 1024
+    }
+
+    /// 磁盘保留空间（字节；0 = 不检查）。
+    pub fn min_free_disk_bytes(&self) -> u64 {
+        (self.min_free_disk_mb as u64) * 1024 * 1024
+    }
+
+    /// 准入策略迁移（幂等；只在**配置读取边界**调用，见 `AppConfig::migrated`）。
+    ///
+    /// 出厂默认从"时长下限 0.5 s"改为"字节下限 4 KB"后，存量用户的
+    /// `app_config.json` 里仍写着 `minClipSecs: 0.5`（那是旧默认值被序列化的结果，
+    /// 而非用户的主动选择）。不做迁移，这些用户的命中率会永久停留在旧行为上。
+    ///
+    /// 只重置**恰好等于旧默认值**的配置：刻意设过其他值的用户不受影响。
+    /// 方向也是安全的 —— 只会让更多片段落盘，绝不会产出错误音频。
+    ///
+    /// ★ 不可放进 `normalized()`：那是"每次读写都跑"的值钳制函数，放在那里会
+    /// 让用户日后显式设回 0.5 的选择被反复清掉。此处只认版本号，一次性生效。
+    pub fn migrate_admission_policy(&mut self) {
+        if self.policy_version >= RENDER_CACHE_POLICY_VERSION {
+            return;
+        }
+        // 只处理"旧出厂时长下限"。字节下限无需迁移：旧配置根本没有该字段，
+        // serde 的 `default = "default_render_cache_min_entry_kb"` 会补上出厂值
+        // （若在此处按 0 判断重置，反而会覆盖用户显式设置的 0 = 不设下限）。
+        if (self.min_clip_secs - LEGACY_DEFAULT_MIN_CLIP_SECS).abs() < f64::EPSILON {
+            self.min_clip_secs = default_render_cache_min_clip_secs();
+        }
+        self.policy_version = RENDER_CACHE_POLICY_VERSION;
+    }
+}
+
+/// 导入媒体时的声道处理策略（持久化到 app_config.json 的 `ui.channelImportPolicy`）。
+///
+/// 背景：真立体声源在渲染时会把整条处理器链按声道跑两遍，耗时翻倍。大量
+/// "人力"素材实际是单声道内容被混流成双声道（两声道逐样本相同），折叠为
+/// 单声道后听感不变、耗时减半。
+///
+/// **作用范围仅限"无声道权威来源"的新建 Take**：媒体导入、`add_clip`、
+/// VocalShifter 导入、以及 v4 及更早工程的 Take 升级。REAPER 导入/导出
+/// 自带 `CHANMODE`，一律不走本策略（见 `import::channel_policy` 的模块说明）。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelImportPolicy {
+    /// 总策略：`"smart"`（智能判定，默认）/ `"alwaysMono"` / `"off"`。
+    #[serde(default = "default_channel_import_mode")]
+    pub mode: String,
+    /// 抽样窗口时长（秒）。
+    #[serde(default = "default_detect_window_sec")]
+    pub window_sec: f64,
+    /// 抽样窗口数（0 = 不限，扫描整个消费区间）。
+    #[serde(default = "default_detect_window_count")]
+    pub window_count: usize,
+    /// 逐样本绝对差容差（覆盖有损编码的量化噪声）。
+    ///
+    /// 默认 1e-2（1%，约 -40 dBFS）：有损编码——尤其 mp3 joint stereo 的 M/S
+    /// 量化残留——解码后左右声道本就带着这个量级的差异，容差过严会把大量"内容
+    /// 其实一致"的素材判成真立体声（漏折叠）。判定是"任一样本超出即真立体声"，
+    /// 所以偏松只会让**几乎就是单声道**的素材被折叠（差异小于 -40 dB 本就听不出
+    /// 声像），不会把真立体声折错 —— 后者的差异比它大好几个数量级。
+    /// 归一化范围 `[0, 1]`（0 = 逐样本完全一致，1 = 满幅，界面按百分比 0~100%
+    /// 呈现）。
+    #[serde(default = "default_detect_tolerance")]
+    pub tolerance: f32,
+    /// 转换目标模式：2 = 混合为单声道（默认）/ 3 = 仅左 / 4 = 仅右。
+    ///
+    /// 假立体声 L == R，故 `(L+R)/2 == L == R` 逐样本等价；默认取 2 是因为
+    /// 语义更诚实，且对**容差内**的近似假立体声，混合比丢弃一个声道更保真
+    /// （两声道量化噪声部分抵消）。
+    #[serde(default = "default_mono_target_mode")]
+    pub mono_target_mode: i32,
+    /// 容差默认值的迁移标记（迁移用，不面向用户）。
+    ///
+    /// `0`（缺省）= 出厂于"容差 0.1%"时代的配置。有损编码——尤其 mp3 joint
+    /// stereo 的 M/S 残留——解码后左右本就带着 1% 量级的差异，0.1% 会把大量
+    /// "内容其实一致"的素材判成真立体声（漏折叠）。读取边界会把**恰好等于旧
+    /// 默认值**的容差抬到新默认值，避免存量 `app_config.json` 里的 `0.001`
+    /// 永久锁死漏判。
+    ///
+    /// 版本号随保存落盘（它在 `DEEP_MERGE_KEYS` 的深合并里会被保留）：用户此后
+    /// 即使显式把容差设回 0.1%，也不会被再次重置 —— 迁移只认"仍是旧默认值"
+    /// 的配置。
+    #[serde(default)]
+    pub tolerance_version: u32,
+}
+
+/// 当前容差默认值的版本（见 [`ChannelImportPolicy::tolerance_version`]）。
+pub const CHANNEL_TOLERANCE_VERSION: u32 = 1;
+
+/// 旧版出厂容差：只有**恰好等于它**的配置才会被迁移抬高。
+pub const LEGACY_DEFAULT_TOLERANCE: f32 = 1e-3;
+
+fn default_channel_import_mode() -> String {
+    "smart".to_string()
+}
+fn default_detect_window_sec() -> f64 {
+    0.25
+}
+fn default_detect_window_count() -> usize {
+    12
+}
+fn default_detect_tolerance() -> f32 {
+    // 单一事实来源：判定模块定义默认容差，策略层只引用它 —— 避免两处各自
+    // 维护一个字面量而悄悄漂移（这已经在"非有限值回退"上发生过一次）。
+    crate::stereo_detect::DEFAULT_TOLERANCE
+}
+fn default_mono_target_mode() -> i32 {
+    2
+}
+
+impl Default for ChannelImportPolicy {
+    fn default() -> Self {
+        Self {
+            mode: default_channel_import_mode(),
+            window_sec: default_detect_window_sec(),
+            window_count: default_detect_window_count(),
+            tolerance: default_detect_tolerance(),
+            mono_target_mode: default_mono_target_mode(),
+            tolerance_version: CHANNEL_TOLERANCE_VERSION,
+        }
+    }
+}
+
+impl ChannelImportPolicy {
+    /// 规范化：校验枚举、钳制数值（非法值回退默认，避免手改配置破坏行为）。
+    pub fn normalized(&self) -> Self {
+        let mode = match self.mode.as_str() {
+            "smart" | "alwaysMono" | "off" => self.mode.clone(),
+            _ => default_channel_import_mode(),
+        };
+        let window_sec = if self.window_sec.is_finite() {
+            self.window_sec.clamp(0.05, 5.0)
+        } else {
+            default_detect_window_sec()
+        };
+        let tolerance = if self.tolerance.is_finite() {
+            // 容差以满幅为 1：1%（默认）挡编解码量化噪声，上限放到 100%
+            //（= 任何差异都判"假立体声"）交由用户自担语义。
+            self.tolerance.clamp(0.0, 1.0)
+        } else {
+            default_detect_tolerance()
+        };
+        let mono_target_mode = match self.mono_target_mode {
+            2 | 3 | 4 => self.mono_target_mode,
+            _ => default_mono_target_mode(),
+        };
+
+        Self {
+            mode,
+            window_sec,
+            window_count: self.window_count.min(256),
+            tolerance,
+            mono_target_mode,
+            // 迁移标记不属于"值钳制"：原样带过，别在每次读写时把它抹掉
+            //（抹掉会让下面的迁移反复判定，用户显式设回旧值也留不住）。
+            tolerance_version: self.tolerance_version,
+        }
+    }
+
+    /// 容差默认值迁移（幂等；只在**配置读取边界**调用，见 `AppConfig::migrated`）。
+    ///
+    /// 出厂默认从 0.1%（`1e-3`）抬到 1%（`1e-2`）后，存量用户的
+    /// `app_config.json` 里仍写着 `"tolerance": 0.001` —— 那是旧默认值被序列化
+    /// 的结果，而非用户的主动选择。不做迁移，这些用户的漏判会永久停留在旧行为
+    /// 上（有损编码的左右残留常达 1% 量级，0.1% 会把它们判成真立体声）。
+    ///
+    /// 只抬**恰好等于旧默认值**的配置：刻意设过其他值的用户不受影响。
+    /// 方向也是安全的 —— 只会让更多"几乎就是单声道"的素材被折叠，绝不会把
+    /// 真立体声折错（后者差异比 1% 大几个数量级）。
+    ///
+    /// ★ 不可放进 `normalized()`：那是"每次读写都跑"的值钳制函数，放在那里会
+    /// 让用户日后显式设回 0.1% 的选择被反复清掉。此处只认版本号，一次性生效。
+    pub fn migrate_tolerance(&mut self) {
+        if self.tolerance_version >= CHANNEL_TOLERANCE_VERSION {
+            return;
+        }
+        if (self.tolerance - LEGACY_DEFAULT_TOLERANCE).abs() < f32::EPSILON {
+            self.tolerance = default_detect_tolerance();
+        }
+        self.tolerance_version = CHANNEL_TOLERANCE_VERSION;
+    }
+
+    /// 是否启用"智能判定"（需要解码音频内容）。
+    pub fn is_smart(&self) -> bool {
+        self.mode == "smart"
+    }
+
+    /// 是否完全关闭自动转换。
+    pub fn is_off(&self) -> bool {
+        self.mode == "off"
+    }
+
+    /// 供**显式**扫描命令（右键"扫描假立体声并转换"）使用的判定参数。
+    ///
+    /// `mode` 是**自动**导入策略：`off` = 不自动转换、`alwaysMono` = 全部折叠。
+    /// 显式命令两条都不能直接用：
+    /// - `off` 会让命令静默变成空操作（用户点了却什么都不发生）；
+    /// - `alwaysMono` 会让它无差别折叠**真立体声** —— 一个叫"扫描假立体声"
+    ///   的命令不该有这种破坏力。
+    ///
+    /// 因此显式命令一律按**检测**语义执行，只沿用用户调好的窗口/容差/目标模式；
+    /// 想无条件折叠应该用声道模式子菜单里的"混合为单声道"。
+    pub fn for_explicit_scan(&self) -> Self {
+        Self {
+            mode: "smart".to_string(),
+            ..self.normalized()
+        }
+    }
+
+    /// 转换到判定模块所需的参数。
+    ///
+    /// 容器解码预算取**后台扫描**口径（[`crate::stereo_detect::DEFAULT_CONTAINER_BUDGET_SEC`]）：
+    /// 导入路径若想换取更低的同步延迟，自行用
+    /// `DetectOptions::with_container_budget_sec` 收窄 —— 预算计入策略签名，
+    /// 因此短预算得出的结论不会顶掉长预算的结论。
+    pub fn detect_options(&self) -> crate::stereo_detect::DetectOptions {
+        let n = self.normalized();
+        crate::stereo_detect::DetectOptions {
+            window_sec: n.window_sec,
+            window_count: n.window_count,
+            tolerance: n.tolerance,
+            container_budget_sec: crate::stereo_detect::DEFAULT_CONTAINER_BUDGET_SEC,
+        }
+        .normalized()
     }
 }
 
@@ -929,6 +1406,7 @@ impl Default for UiSettings {
             param_editor_seek_playhead: true,
             show_clipboard_preview: true,
             show_param_value_popup: true,
+            param_axis_units: std::collections::HashMap::new(),
             lock_param_lines: true,
             metronome_enabled: false,
             metronome_gain: default_metronome_gain(),
@@ -973,6 +1451,10 @@ impl Default for UiSettings {
             auto_reload_modified_media: true,
             loop_new_clips: true,
             sync_edits_across_takes: true,
+            render_cache: RenderCacheSettings::default(),
+            channel_import_policy: ChannelImportPolicy::default(),
+            notebook: serde_json::Value::Null,
+            dock: serde_json::Value::Null,
         }
     }
 }
@@ -1043,6 +1525,301 @@ impl UiSettings {
 mod tests {
     use super::UiSettings;
     use crate::time_stretch::UserStretchAlgorithm;
+
+    /// 旧配置（出厂时长下限 0.5 s 被序列化进文件、没有 policyVersion）必须被迁移。
+    #[test]
+    fn legacy_duration_floor_is_migrated_away() {
+        let mut s = super::RenderCacheSettings {
+            min_clip_secs: 0.5,
+            policy_version: 0,
+            ..Default::default()
+        };
+        s.migrate_admission_policy();
+        assert_eq!(s.min_clip_secs, 0.0, "旧出厂时长下限必须被清掉");
+        assert_eq!(s.policy_version, super::RENDER_CACHE_POLICY_VERSION);
+    }
+
+    /// 用户刻意设过的其他时长值不受迁移影响。
+    #[test]
+    fn migration_leaves_deliberate_values_alone() {
+        let mut s = super::RenderCacheSettings {
+            min_clip_secs: 2.5,
+            policy_version: 0,
+            ..Default::default()
+        };
+        s.migrate_admission_policy();
+        assert_eq!(s.min_clip_secs, 2.5, "非旧默认值不得被重置");
+    }
+
+    /// 迁移幂等：版本号已推进后不再改动任何值。
+    ///
+    /// 这是"用户日后显式把时长设回 0.5"能存活的前提 —— 保存会带上版本号，
+    /// 因此后续加载不会再把它清掉。
+    #[test]
+    fn migration_is_idempotent_and_respects_later_choices() {
+        let mut s = super::RenderCacheSettings {
+            min_clip_secs: 0.5,
+            policy_version: 0,
+            ..Default::default()
+        };
+        s.migrate_admission_policy();
+        assert_eq!(s.min_clip_secs, 0.0);
+
+        // 用户显式设回 0.5 并保存（版本号随之落盘）。
+        s.min_clip_secs = 0.5;
+        s.migrate_admission_policy();
+        assert_eq!(s.min_clip_secs, 0.5, "已迁移过的配置不得再次被重置");
+    }
+
+    /// 存量配置里写着旧出厂容差（0.1%）时抬到新默认（1%）。
+    #[test]
+    fn legacy_default_tolerance_is_raised_to_the_new_default() {
+        let mut p = super::ChannelImportPolicy {
+            tolerance: super::LEGACY_DEFAULT_TOLERANCE,
+            tolerance_version: 0,
+            ..Default::default()
+        };
+        p.migrate_tolerance();
+        assert_eq!(
+            p.tolerance,
+            crate::stereo_detect::DEFAULT_TOLERANCE,
+            "旧默认容差应当被抬到新默认值"
+        );
+        assert_eq!(p.tolerance_version, super::CHANNEL_TOLERANCE_VERSION);
+    }
+
+    /// 用户刻意设过的其他容差不受迁移影响。
+    #[test]
+    fn tolerance_migration_leaves_deliberate_values_alone() {
+        let mut p = super::ChannelImportPolicy {
+            tolerance: 0.05,
+            tolerance_version: 0,
+            ..Default::default()
+        };
+        p.migrate_tolerance();
+        assert_eq!(p.tolerance, 0.05, "非旧默认值不得被改写");
+    }
+
+    /// 迁移幂等：版本号推进后不再改动，用户显式设回 0.1% 也能存活。
+    #[test]
+    fn tolerance_migration_is_idempotent_and_respects_later_choices() {
+        let mut p = super::ChannelImportPolicy {
+            tolerance: super::LEGACY_DEFAULT_TOLERANCE,
+            tolerance_version: 0,
+            ..Default::default()
+        };
+        p.migrate_tolerance();
+        assert_eq!(p.tolerance, crate::stereo_detect::DEFAULT_TOLERANCE);
+
+        // 用户显式设回 0.1% 并保存（版本号随之落盘）。
+        p.tolerance = super::LEGACY_DEFAULT_TOLERANCE;
+        p.migrate_tolerance();
+        assert_eq!(
+            p.tolerance,
+            super::LEGACY_DEFAULT_TOLERANCE,
+            "已迁移过的配置不得再次被改写"
+        );
+    }
+
+    /// 迁移标记必须原样穿过 `normalized()`，否则每次读写都会把它抹掉，
+    /// 让"用户显式设回旧值"在下次加载时又被重置。
+    #[test]
+    fn normalized_preserves_the_tolerance_migration_marker() {
+        let p = super::ChannelImportPolicy {
+            tolerance: super::LEGACY_DEFAULT_TOLERANCE,
+            tolerance_version: super::CHANNEL_TOLERANCE_VERSION,
+            ..Default::default()
+        };
+        assert_eq!(
+            p.normalized().tolerance_version,
+            super::CHANNEL_TOLERANCE_VERSION
+        );
+    }
+
+    /// 存量 app_config.json（无迁移标记）在读取边界被抬到新默认值。
+    #[test]
+    fn legacy_config_file_tolerance_is_migrated_on_load() {
+        let ui: super::UiSettings = serde_json::from_value(serde_json::json!({
+            "channelImportPolicy": {
+                "mode": "smart",
+                "windowSec": 0.25,
+                "windowCount": 12,
+                "tolerance": 0.001,
+                "monoTargetMode": 2
+            }
+        }))
+        .expect("legacy ui settings must parse");
+        assert_eq!(ui.channel_import_policy.tolerance_version, 0, "旧配置无标记");
+        let mut cfg = super::AppConfig::default();
+        cfg.ui = ui;
+        // `migrated` 是私有的读取边界钩子，这里直接调策略层的迁移（同一副作用）。
+        cfg.ui.channel_import_policy.migrate_tolerance();
+        assert_eq!(
+            cfg.ui.channel_import_policy.tolerance,
+            crate::stereo_detect::DEFAULT_TOLERANCE,
+            "旧配置里的 0.001 必须被抬到 1%"
+        );
+    }
+
+    /// 出厂默认本身就是"不设时长下限"。
+    #[test]
+    fn factory_default_has_no_duration_floor() {        let s = super::RenderCacheSettings::default();
+        assert_eq!(s.min_clip_secs, 0.0);
+        assert_eq!(s.min_entry_kb, 4);
+        assert_eq!(s.min_entry_bytes(), 4 * 1024);
+    }
+
+    /// 端到端迁移：真实旧配置文件（`minClipSecs: 0.5`、无 `policyVersion`、
+    /// 无 `minEntryKb`）经 serde 默认值 + 读取边界迁移后，必须落到
+    /// "不设时长下限、字节下限 4 KB"。
+    ///
+    /// 这条测试覆盖的是**反序列化路径**，而不是手工构造的结构体 —— 迁移逻辑
+    /// 之所以放在 `load_config`，正是因为 serde 默认值与迁移必须协同工作，
+    /// 只测结构体测不出这一层。
+    #[test]
+    fn legacy_config_file_migrates_on_load() {
+        let dir = std::env::temp_dir().join(format!(
+            "hifishifter_config_migration_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("app_config.json"),
+            r#"{"ui":{"renderCache":{"enabled":true,"minClipSecs":0.5}}}"#,
+        )
+        .expect("write legacy config");
+
+        let ui = super::load_ui_settings(&dir);
+        assert_eq!(
+            ui.render_cache.min_clip_secs, 0.0,
+            "旧出厂时长下限必须被迁移掉"
+        );
+        assert_eq!(ui.render_cache.min_entry_kb, 4, "缺失的字节下限取出厂值");
+        assert_eq!(
+            ui.render_cache.policy_version,
+            super::RENDER_CACHE_POLICY_VERSION
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn channel_import_policy_default_is_smart() {
+        let p = super::ChannelImportPolicy::default();
+        assert_eq!(p.mode, "smart");
+        assert!(p.is_smart());
+        assert!(!p.is_off());
+        assert_eq!(p.mono_target_mode, 2);
+        assert_eq!(
+            p.tolerance,
+            crate::stereo_detect::DEFAULT_TOLERANCE,
+            "默认容差取判定模块的默认值（满幅 1%）"
+        );
+    }
+
+    #[test]
+    fn channel_import_policy_normalizes_out_of_range_values() {
+        let p = super::ChannelImportPolicy {
+            mode: "bogus".into(),
+            window_sec: 999.0,
+            window_count: 99_999,
+            tolerance: 5.0,
+            mono_target_mode: 7,
+            ..Default::default()
+        };
+        let n = p.normalized();
+        assert_eq!(n.mode, "smart", "非法枚举回落默认");
+        assert!(n.window_sec <= 5.0 && n.window_sec >= 0.05);
+        assert_eq!(n.window_count, 256);
+        assert!(n.tolerance <= 1.0);
+        assert_eq!(n.mono_target_mode, 2, "7 不在 {{2,3,4}} → 回落 2");
+    }
+
+    #[test]
+    fn channel_import_policy_keeps_valid_values() {
+        let p = super::ChannelImportPolicy {
+            mode: "alwaysMono".into(),
+            window_sec: 1.0,
+            window_count: 4,
+            tolerance: 1e-4,
+            mono_target_mode: 3,
+            ..Default::default()
+        };
+        let n = p.normalized();
+        assert_eq!(n.mode, "alwaysMono");
+        assert_eq!(n.window_sec, 1.0);
+        assert_eq!(n.window_count, 4);
+        assert_eq!(n.mono_target_mode, 3);
+        assert_eq!(n.tolerance, 1e-4);
+    }
+
+    #[test]
+    fn channel_import_policy_handles_non_finite_numbers() {
+        let p = super::ChannelImportPolicy {
+            window_sec: f64::NAN,
+            tolerance: f32::NAN,
+            ..Default::default()
+        };
+        let n = p.normalized();
+        assert_eq!(n.window_sec, 0.25);
+        assert_eq!(n.tolerance, crate::stereo_detect::DEFAULT_TOLERANCE);
+    }
+
+    #[test]
+    fn channel_import_policy_detect_options_mirror_policy() {
+        let p = super::ChannelImportPolicy {
+            window_sec: 0.5,
+            window_count: 3,
+            tolerance: 1e-5,
+            ..Default::default()
+        };
+        let o = p.detect_options();
+        assert_eq!(o.window_sec, 0.5);
+        assert_eq!(o.window_count, 3);
+        assert_eq!(o.tolerance, 1e-5);
+    }
+
+    #[test]
+    fn explicit_scan_always_detects_regardless_of_the_import_mode() {
+        // 回归：显式命令（右键"扫描假立体声并转换"）曾经直接套用导入策略的
+        // mode —— `off` 让它静默变成空操作，`alwaysMono` 让它无差别折叠
+        // 真立体声。两者都与"扫描假立体声"这个命令名不符。
+        for mode in ["off", "alwaysMono", "smart"] {
+            let policy = super::ChannelImportPolicy {
+                mode: mode.into(),
+                mono_target_mode: 3,
+                tolerance: 1e-2,
+                ..Default::default()
+            }
+            .normalized();
+            let scan = policy.for_explicit_scan();
+            assert!(scan.is_smart(), "{mode}: 显式扫描必须按检测语义执行");
+            assert!(!scan.is_off());
+            // 用户的偏好参数原样保留：只换判定语义，不动窗口/容差/目标模式。
+            assert_eq!(scan.mono_target_mode, 3, "{mode}: 目标模式必须保留");
+            assert_eq!(scan.tolerance, 1e-2, "{mode}: 容差必须保留");
+        }
+    }
+
+    #[test]
+    fn process_level_policy_round_trips_and_normalizes() {
+        let _guard = super::channel_policy_test_guard();
+        let original = super::channel_import_policy();
+        super::set_channel_import_policy(&super::ChannelImportPolicy {
+            mode: "off".into(),
+            window_sec: 12345.0,
+            ..Default::default()
+        });
+        let read = super::channel_import_policy();
+        assert_eq!(read.mode, "off");
+        assert!(read.window_sec <= 5.0, "写入时即规范化");
+        // 还原，避免影响同进程其它测试。
+        super::set_channel_import_policy(&original);
+    }
 
     #[test]
     fn ui_settings_defaults_to_signalsmith_and_hifigan_mel_stretch_on() {
@@ -1381,6 +2158,21 @@ struct AppConfig {
     window: WindowState,
 }
 
+impl AppConfig {
+    /// 读取边界上的配置迁移（幂等）。
+    ///
+    /// 放在这里而不是 `RenderCacheSettings::normalized()`：后者是"每次读写都跑"
+    /// 的值钳制函数，把一次性迁移塞进去会让用户后续的显式选择被反复覆盖。
+    /// 放在 `load_config` 则保证**所有**读者（`get_ui_settings`、
+    /// `save_ui_settings` 的基线、导出/备份设置…）看到同一份已迁移的值，
+    /// 迁移结果也会随下一次保存自然落盘。
+    fn migrated(mut self) -> Self {
+        self.ui.render_cache.migrate_admission_policy();
+        self.ui.channel_import_policy.migrate_tolerance();
+        self
+    }
+}
+
 /// 窗口状态（持久化）
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -1405,14 +2197,14 @@ fn load_config(config_dir: &Path) -> AppConfig {
         return AppConfig::default();
     };
     match serde_json::from_str::<AppConfig>(&data) {
-        Ok(cfg) => cfg,
+        Ok(cfg) => cfg.migrated(),
         Err(e) => {
             // 解析失败不能无痕回退默认值：那会静默丢掉全部用户设置。
             log::error!("app_config.json parse failed ({e}); trying .bak fallback");
             let bak = config_dir.join("app_config.json.bak");
             if let Ok(bak_data) = fs::read_to_string(&bak) {
                 if let Ok(cfg) = serde_json::from_str::<AppConfig>(&bak_data) {
-                    return cfg;
+                    return cfg.migrated();
                 }
             }
             AppConfig::default()

@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { FadeShapeIcon } from "./FadeShapeIcon";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
+import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
@@ -15,10 +16,18 @@ import {
     removeClipTakeRemote,
     renameClipTakeRemote,
     setClipActiveTakeRemote,
+    setClipTakeChannelModeRemote,
     setClipTakeReversedRemote,
 } from "../../../features/session/sessionSlice";
+import {
+    CHANNEL_MODE_OPTIONS,
+    channelModeI18nKey,
+    channelModeShortLabel,
+    normalizeChannelMode,
+    nextChannelMode,
+} from "../../../utils/channelMode";
 import { webApi } from "../../../services/webviewApi";
-import { sortAndFilterFadedClips } from "./clipFadeContext";
+import { sharedFadeShape, sortAndFilterFadedClips } from "./clipFadeContext";
 
 // ── 单条菜单项 ──────────────────────────────────────────────────────────────
 const MenuItem: React.FC<{
@@ -32,13 +41,13 @@ const MenuItem: React.FC<{
 }> = ({ label, shortcut, disabled, danger, title, onClick }) => (
     <button
         role="menuitem"
-        title={title}
-        className={`px-3 py-1.5 text-left w-full text-[12px] transition-colors flex items-center justify-between gap-3
+        data-tooltip={title}
+        className={`px-3 py-1.5 text-left w-full text-qt-sm transition-colors flex items-center justify-between gap-3
             ${
                 disabled
                     ? "opacity-40 cursor-default"
                     : danger
-                      ? "hover:bg-red-500/20 text-red-400"
+                      ? "hover:bg-qt-danger-bg hover:text-qt-danger-text"
                       : "hover:bg-qt-button-hover"
             }`}
         disabled={disabled}
@@ -49,7 +58,7 @@ const MenuItem: React.FC<{
         }}
     >
         <span>{label}</span>
-        {shortcut && <span className="text-[10px] opacity-50 shrink-0">{shortcut}</span>}
+        {shortcut && <span className="text-qt-micro opacity-50 shrink-0">{shortcut}</span>}
     </button>
 );
 
@@ -75,13 +84,32 @@ const TakeMenuItem: React.FC<{
     disabled?: boolean;
     reversed: boolean;
     reverseLabel: string;
+    /** 声道模式（0..=4，对齐 REAPER CHANMODE）；MIDI take 等无声道语义时省略按钮。 */
+    channelMode?: number;
+    modeLabel?: string;
+    modeTitle?: string;
     onSwitch: () => void;
     onToggleReverse: () => void;
-}> = ({ label, disabled = false, reversed, reverseLabel, onSwitch, onToggleReverse }) => (
-    <div className="relative flex items-center w-full">
+    onCycleChannelMode?: () => void;
+}> = ({
+    label,
+    disabled = false,
+    reversed,
+    reverseLabel,
+    channelMode,
+    modeLabel,
+    modeTitle,
+    onSwitch,
+    onToggleReverse,
+    onCycleChannelMode,
+}) => (
+    // 行内布局：标签 flex-1 + 尾随两个 shrink-0 按钮（flex 兄弟，绝不定
+    // 位）—— 任何语言下按钮互不重叠、不挤压标签；标签超长时 truncate
+    // 兜底（面板宽度已随内容展开，见 SubMenu 的 width:max-content）。
+    <div className="flex items-center w-full gap-1 pr-1.5">
         <button
             role="menuitem"
-            className={`px-3 py-1.5 text-left w-full text-[12px] transition-colors pr-14
+            className={`px-3 py-1.5 text-left flex-1 min-w-0 text-qt-sm transition-colors rounded
                 ${disabled ? "opacity-40 cursor-default" : "hover:bg-qt-button-hover"}`}
             disabled={disabled}
             onPointerDown={(e) => e.stopPropagation()}
@@ -90,13 +118,33 @@ const TakeMenuItem: React.FC<{
                 onSwitch();
             }}
         >
-            <span>{label}</span>
+            <span className="block truncate">{label}</span>
         </button>
+        {onCycleChannelMode != null && modeLabel != null && (
+            <button
+                role="menuitem"
+                aria-label={`${modeTitle ?? modeLabel}: ${label}`}
+                data-tooltip={modeTitle}
+                className={`shrink-0 px-1.5 py-0.5 text-qt-micro leading-none rounded border transition-colors
+                    ${
+                        (channelMode ?? 0) !== 0
+                            ? "border-qt-highlight text-qt-highlight"
+                            : "border-qt-border text-qt-text-muted opacity-70"
+                    } hover:bg-qt-button-hover`}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    onCycleChannelMode();
+                }}
+            >
+                {modeLabel}
+            </button>
+        )}
         <button
             role="menuitem"
             aria-label={`${reverseLabel}: ${label}`}
-            title={reverseLabel}
-            className={`absolute right-1.5 px-1.5 py-0.5 text-[10px] leading-none rounded border transition-colors
+            data-tooltip={reverseLabel}
+            className={`shrink-0 px-1.5 py-0.5 text-qt-micro leading-none rounded border transition-colors
                 ${
                     reversed
                         ? "border-qt-highlight text-qt-highlight"
@@ -123,6 +171,8 @@ const SubMenu: React.FC<{
     const [open, setOpen] = useState(false);
     const wrapperRef = useRef<HTMLDivElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
+    // 子面板（滑杆/次级项）也是一个 role="menu" 表面，同样需要方向键。
+    useMenuKeyboard(panelRef);
 
     useLayoutEffect(() => {
         if (!open) return;
@@ -132,14 +182,27 @@ const SubMenu: React.FC<{
         panel.style.right = "auto";
         panel.style.top = "-5px";
         panel.style.bottom = "auto";
+        // 宽度随内容展开：绝对定位面板的宽度默认被包含块（触发项宽度）封顶，
+        // Take 行等长文本会因此换行。max-content 展开后若超出视口，按最终
+        // 锚定侧的可用空间收口 —— 行内标签以 truncate 兜底。
+        panel.style.width = "max-content";
+        panel.style.maxWidth = "none";
 
-        const rect = panel.getBoundingClientRect();
         const vw = window.innerWidth;
         const vh = window.innerHeight;
+        let rect = panel.getBoundingClientRect();
         if (rect.right > vw - 4) {
             panel.style.left = "auto";
             panel.style.right = "calc(100% - 4px)";
         }
+        rect = panel.getBoundingClientRect();
+        const anchoredLeft = panel.style.left !== "auto";
+        const availableWidth = anchoredLeft ? vw - 8 - rect.left : rect.right - 8;
+        if (rect.width > availableWidth) {
+            panel.style.maxWidth = `${Math.max(160, Math.floor(availableWidth))}px`;
+        }
+
+        rect = panel.getBoundingClientRect();
         if (rect.bottom > vh - 4) {
             panel.style.top = "auto";
             panel.style.bottom = "-5px";
@@ -156,7 +219,7 @@ const SubMenu: React.FC<{
             onMouseLeave={() => setOpen(false)}
         >
             <button
-                className={`px-3 py-1.5 text-left w-full text-[12px] transition-colors flex items-center justify-between gap-3
+                className={`px-3 py-1.5 text-left w-full text-qt-sm transition-colors flex items-center justify-between gap-3
                     ${disabled ? "opacity-40 cursor-default" : "hover:bg-qt-button-hover"}`}
                 disabled={disabled}
                 onPointerDown={(e) => e.stopPropagation()}
@@ -170,7 +233,7 @@ const SubMenu: React.FC<{
                 <span className="flex items-center gap-2 min-w-0">
                     <span className="truncate">{label}</span>
                     {badge && (
-                        <span className="text-[10px] leading-none rounded bg-black/20 px-1 py-0.5 opacity-70">
+                        <span className="text-qt-micro leading-none rounded bg-black/20 px-1 py-0.5 opacity-70">
                             {badge}
                         </span>
                     )}
@@ -231,14 +294,15 @@ const FADE_SHAPE_OPTIONS: { shape: number; key: MessageKey }[] = [
 
 const FadeShapeRow: React.FC<{
     label: string;
-    current: number;
+    /** 当前形状；`null` = 各 Clip 不一致，不预选任何一项。 */
+    current: number | null;
     /** 本行是淡出（图标水平镜像，曲线方向与画布一致）。 */
     isOut?: boolean;
     onSelect: (shape: number) => void;
     t: (key: MessageKey) => string;
 }> = ({ label, current, isOut = false, onSelect, t }) => (
     <div className="px-3 py-1.5 flex items-center gap-1 flex-wrap">
-        <span className="text-[11px] text-qt-text/60 mr-1 shrink-0">{label}</span>
+        <span className="text-qt-xs text-qt-text/60 mr-1 shrink-0">{label}</span>
         {FADE_SHAPE_OPTIONS.map((opt) => (
             <button
                 key={opt.key}
@@ -246,7 +310,7 @@ const FadeShapeRow: React.FC<{
                 className={`p-0.5 rounded transition-colors leading-none
                     ${
                         // 小数变体（如 1.1）按基础族高亮（REAPER 同语义）。
-                        Math.trunc(current) === opt.shape
+                        current !== null && Math.trunc(current) === opt.shape
                             ? "bg-qt-highlight text-white"
                             : "bg-qt-button hover:bg-qt-button-hover text-qt-text/80"
                     }`}
@@ -278,7 +342,6 @@ export const ClipContextMenu: React.FC<{
     onClose: () => void;
     onDelete: (ids: string[]) => void;
     onMute: (ids: string[], muted: boolean) => void;
-    onRename: (clipId: string) => void;
     onCopy: (ids: string[]) => void;
     onCut: (ids: string[]) => void;
     onReplace: (ids: string[]) => void;
@@ -293,15 +356,24 @@ export const ClipContextMenu: React.FC<{
     onExportMidi?: (ids: string[]) => void;
     /** 把所选 Clip 的时间范围并入参数编辑器选区（只作用于同一根轨道组）。 */
     onAddToParamSelection?: (ids: string[]) => void;
-    /** 从参数编辑器选区中挖掉所选 Clip 的时间范围。 */
-    onRemoveFromParamSelection?: (ids: string[]) => void;
     onNormalize: (ids: string[]) => void;
     /** 打开"静音检测"对话框（多选时作用于全部所选 Clip 中含音频源者）。 */
     onSilenceDetection?: (ids: string[]) => void;
     onToggleReverse: (ids: string[], reversed: boolean) => void;
     onToggleLoop?: (ids: string[], loopEnabled: boolean) => void;
-    /** 切换淡入/淡出的 REAPER 形状预设（保留曲率 dir 不变）。 */
-    onFadeShapeChange?: (clipId: string, target: "in" | "out", shape: number) => void;
+    /**
+     * 批量设置所选 Clip 的声道模式（作用范围跟随全局"同步编辑所有 Take"设置）。
+     */
+    onSetChannelMode?: (ids: string[], mode: number) => void;
+    /** 扫描并把所选 Clip 里的"假立体声"Take 折叠为单声道。 */
+    onScanFakeStereo?: (ids: string[]) => void;
+    /**
+     * 切换淡入/淡出的 REAPER 形状预设（保留曲率 dir 不变）。
+     *
+     * 接收**一组 Clip**：多选时形状行只给一行，选择即批量应用到全部所选 Clip
+     * （单次 IPC + 单个撤销步）；单选时传入长度为 1 的数组。
+     */
+    onFadeShapeChange?: (clipIds: string[], target: "in" | "out", shape: number) => void;
     /** 打开"编辑播放速率"浮层（锚点 = 菜单位置）。与倍率角标右键同一浮层；
      *  多选时以右键的 clip 为 anchor 批量应用（提交管线内聚）。 */
     onEditRate?: (clipId: string, screenX: number, screenY: number) => void;
@@ -316,7 +388,6 @@ export const ClipContextMenu: React.FC<{
     onClose,
     onDelete,
     onMute,
-    onRename,
     onCopy,
     onCut,
     onReplace,
@@ -330,17 +401,19 @@ export const ClipContextMenu: React.FC<{
     onUpdatePitchRef,
     onExportMidi,
     onAddToParamSelection,
-    onRemoveFromParamSelection,
     onNormalize,
     onSilenceDetection,
     onToggleReverse,
     onToggleLoop,
+    onSetChannelMode,
+    onScanFakeStereo,
     onFadeShapeChange,
     onEditRate,
 }) => {
     const { t } = useI18n();
     const dispatch = useAppDispatch();
     const menuRef = useRef<HTMLDivElement>(null);
+    useMenuKeyboard(menuRef);
     /** Take 重命名的内联输入草稿（替代 window.prompt）。 */
     const [takeRenameDraft, setTakeRenameDraft] = useState<{
         takeId: string;
@@ -371,7 +444,6 @@ export const ClipContextMenu: React.FC<{
     const cycleTakeNextShortcut = useMenuShortcut("clip.cycleTake");
     const cycleTakePrevShortcut = useMenuShortcut("clip.cycleTakePrev");
     const addToParamSelectionShortcut = useMenuShortcut("edit.addClipsToParamSelection");
-    const removeFromParamSelectionShortcut = useMenuShortcut("edit.removeClipsFromParamSelection");
 
     // 胶合：仅同轨且多选时可用，且不能混合音高参考块和常规音频块
     const hasMixedTypes = hasPitchAdjustment && !allPitchAdjustment;
@@ -392,6 +464,11 @@ export const ClipContextMenu: React.FC<{
     const allReversed = isMulti ? selectedClips.every((c) => c.reversed) : clip.reversed;
     // 多选中是否已全部启用 Loop（循环源）
     const allLooped = isMulti ? selectedClips.every((c) => c.loopEnabled) : clip.loopEnabled;
+    // 多选中共同的声道模式（不一致时为 null，子菜单不显示选中标记）。
+    const commonChannelMode = (() => {
+        const modes = new Set(selectedClips.map((c) => normalizeChannelMode(c.channelMode)));
+        return modes.size === 1 ? normalizeChannelMode(clip.channelMode) : null;
+    })();
 
     // 编组 / 解组
     const hasGroup = selectedClips.some((c) => c.groupId != null);
@@ -429,12 +506,12 @@ export const ClipContextMenu: React.FC<{
             role="menu"
             data-hs-context-menu="1"
             data-hs-floating-menu="1"
-            className="fixed z-[999] min-w-[140px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+            className="fixed z-qt-menu min-w-[140px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
             style={{ left: x, top: y }}
             onPointerDown={(e) => e.stopPropagation()}
         >
             {isMulti && (
-                <div className="px-3 py-1 text-[11px] text-qt-text/50 select-none">
+                <div className="px-3 py-1 text-qt-xs text-qt-text/50 select-none">
                     {t("ctx_selected_n").replace("{n}", String(selectedClips.length))}
                 </div>
             )}
@@ -492,6 +569,28 @@ export const ClipContextMenu: React.FC<{
                                 disabled={takes.length <= 1}
                                 reversed={Boolean(take.reversed)}
                                 reverseLabel={t("clip_take_reverse")}
+                                {...(take.sourcePath
+                                    ? {
+                                          channelMode: take.channelMode,
+                                          modeLabel: channelModeShortLabel(take.channelMode),
+                                          modeTitle: `${t("clip_take_channel_mode")}: ${t(
+                                              channelModeI18nKey(take.channelMode),
+                                          )} (${t("clip_take_channel_mode_cycle")})`,
+                                          onCycleChannelMode: () => {
+                                              // 不关闭菜单：连续切换声道无需反复
+                                              // 重开；乐观更新即时刷新按钮状态。
+                                              void dispatch(
+                                                  setClipTakeChannelModeRemote({
+                                                      clipId: clip.id,
+                                                      takeId: take.id,
+                                                      channelMode: nextChannelMode(
+                                                          take.channelMode,
+                                                      ),
+                                                  }),
+                                              );
+                                          },
+                                      }
+                                    : {})}
                                 onSwitch={() => {
                                     // 点击已激活的 take 是 no-op：跳过 dispatch，
                                     // 避免无谓的乐观切换+回滚快照+全量快照刷新。
@@ -508,6 +607,7 @@ export const ClipContextMenu: React.FC<{
                                     close();
                                 }}
                                 onToggleReverse={() => {
+                                    // 不关闭菜单：与声道按钮同口径，连续翻转。
                                     void dispatch(
                                         setClipTakeReversedRemote({
                                             clipId: clip.id,
@@ -515,7 +615,6 @@ export const ClipContextMenu: React.FC<{
                                             reversed: !take.reversed,
                                         }),
                                     );
-                                    close();
                                 }}
                             />
                         ))}
@@ -606,7 +705,7 @@ export const ClipContextMenu: React.FC<{
                                     autoFocus
                                     role="menuitem"
                                     aria-label={t("clip_take_rename")}
-                                    className="w-full bg-qt-window text-[12px] border border-qt-border rounded px-2 py-1 outline-none focus:border-qt-highlight text-qt-text"
+                                    className="w-full bg-qt-window text-qt-sm border border-qt-border rounded px-2 py-1 outline-none focus:border-qt-highlight text-qt-text"
                                     value={takeRenameDraft.value}
                                     onChange={(e) =>
                                         setTakeRenameDraft({
@@ -663,7 +762,66 @@ export const ClipContextMenu: React.FC<{
                         )}
                     </>
                 )}
+                {/* 替换素材：作用对象是**活跃 Take** 的源媒体，因此归入 Take 范畴
+                    （与"添加媒体为 Take"相邻）。多选时对每个 Clip 的活跃 Take 生效。 */}
+                {(!allPitchAdjustment || (hasPitchAdjustment && onReplaceMidi)) && <Divider />}
+                {!allPitchAdjustment && (
+                    <MenuItem
+                        label={isMulti ? t("ctx_replace_all") : t("ctx_replace")}
+                        onClick={() => {
+                            onReplace(hasPitchAdjustment ? audioOnlyIds : ids);
+                            close();
+                        }}
+                    />
+                )}
+                {hasPitchAdjustment && onReplaceMidi && (
+                    <MenuItem
+                        label={isMulti ? t("ctx_replace_midi_all") : t("ctx_replace_midi")}
+                        onClick={() => {
+                            onReplaceMidi(pitchOnlyIds);
+                            close();
+                        }}
+                    />
+                )}
             </SubMenu>
+            {(onSetChannelMode || onScanFakeStereo) && (
+                <SubMenu
+                    label={t("ctx_channel_mode")}
+                    badge={
+                        commonChannelMode === null
+                            ? undefined
+                            : channelModeShortLabel(commonChannelMode)
+                    }
+                >
+                    {CHANNEL_MODE_OPTIONS.map((option) => (
+                        <MenuItem
+                            key={option.value}
+                            // ● 标记当前共同模式；多选模式不一致时全部留空。
+                            label={`${commonChannelMode === option.value ? "●" : "\u2003"} ${t(
+                                option.i18nKey,
+                            )}`}
+                            shortcut={option.shortLabel}
+                            onClick={() => {
+                                onSetChannelMode?.(ids, option.value);
+                                close();
+                            }}
+                        />
+                    ))}
+                    {onScanFakeStereo && (
+                        <>
+                            <Divider />
+                            <MenuItem
+                                label={t("ctx_scan_fake_stereo")}
+                                title={t("ctx_scan_fake_stereo_hint")}
+                                onClick={() => {
+                                    onScanFakeStereo(ids);
+                                    close();
+                                }}
+                            />
+                        </>
+                    )}
+                </SubMenu>
+            )}
             <MenuItem
                 label={
                     allReversed
@@ -696,15 +854,7 @@ export const ClipContextMenu: React.FC<{
                     }}
                 />
             )}
-            {isSingle && (
-                <MenuItem
-                    label={t("ctx_rename")}
-                    onClick={() => {
-                        onRename(clip.id);
-                        close();
-                    }}
-                />
-            )}
+            <Divider />
             <MenuItem
                 label={isMulti ? t("ctx_copy_all") : t("ctx_copy")}
                 shortcut={copyShortcut}
@@ -721,33 +871,6 @@ export const ClipContextMenu: React.FC<{
                     close();
                 }}
             />
-            {!allPitchAdjustment && (
-                <MenuItem
-                    label={isMulti ? t("ctx_replace_all") : t("ctx_replace")}
-                    onClick={() => {
-                        onReplace(hasPitchAdjustment ? audioOnlyIds : ids);
-                        close();
-                    }}
-                />
-            )}
-            {hasPitchAdjustment && onReplaceMidi && (
-                <MenuItem
-                    label={isMulti ? t("ctx_replace_midi_all") : t("ctx_replace_midi")}
-                    onClick={() => {
-                        onReplaceMidi(pitchOnlyIds);
-                        close();
-                    }}
-                />
-            )}
-            {!allPitchAdjustment && (
-                <MenuItem
-                    label={t("ctx_quick_export")}
-                    onClick={() => {
-                        onQuickExport(hasPitchAdjustment ? audioOnlyIds : ids);
-                        close();
-                    }}
-                />
-            )}
             <MenuItem
                 label={t("ctx_split_at_playhead")}
                 shortcut={splitShortcut}
@@ -765,109 +888,6 @@ export const ClipContextMenu: React.FC<{
                     close();
                 }}
             />
-            {onSilenceDetection && (
-                <MenuItem
-                    label={t("ctx_silence_detection")}
-                    disabled={!silenceEligible}
-                    title={silenceEligible ? undefined : t("silence_no_audio_source")}
-                    onClick={() => {
-                        onSilenceDetection(ids);
-                        close();
-                    }}
-                />
-            )}
-            {onEditRate && (
-                <MenuItem
-                    label={t("ctx_edit_rate")}
-                    onClick={() => {
-                        // 锚点 = 菜单弹出位置：菜单关闭后浮层原地展开。
-                        // 多选时右键的 clip 即 anchor（提交走 getBulkEditableClipIds 批量管线）。
-                        onEditRate(clip.id, x, y);
-                        close();
-                    }}
-                />
-            )}
-
-            {(isMulti || hasGroup) && (
-                <>
-                    <Divider />
-                    {isMulti && !hasGroup && (
-                        <MenuItem
-                            label={t("group")}
-                            shortcut={groupShortcut}
-                            onClick={() => {
-                                onGroup?.(ids);
-                                close();
-                            }}
-                        />
-                    )}
-                    {hasGroup && (
-                        <MenuItem
-                            label={t("ungroup")}
-                            shortcut={ungroupShortcut}
-                            onClick={() => {
-                                onUngroup?.(ids);
-                                close();
-                            }}
-                        />
-                    )}
-                </>
-            )}
-            {isMulti && (
-                <MenuItem
-                    label={t("glue")}
-                    disabled={glueDisabled}
-                    onClick={() => {
-                        onGlue(ids);
-                        close();
-                    }}
-                />
-            )}
-
-            {!allPitchAdjustment && (
-                <>
-                    <Divider />
-                    <MenuItem
-                        label={t("ctx_convert_to_pitch_ref")}
-                        onClick={() => {
-                            const audioIds = selectedClips
-                                .filter((c) => !isPitch(c))
-                                .map((c) => c.id);
-                            if (audioIds.length > 0) {
-                                onConvertToPitchRef?.(audioIds);
-                            }
-                            close();
-                        }}
-                    />
-                </>
-            )}
-
-            {allPitchAdjustment && onUpdatePitchRef && (
-                <>
-                    <Divider />
-                    <MenuItem
-                        label={t("ctx_update_pitch_ref")}
-                        onClick={() => {
-                            if (pitchOnlyIds.length > 0) {
-                                onUpdatePitchRef(pitchOnlyIds);
-                            }
-                            close();
-                        }}
-                    />
-                </>
-            )}
-
-            {onExportMidi && (
-                <MenuItem
-                    label={t("ctx_export_midi")}
-                    onClick={() => {
-                        onExportMidi(ids);
-                        close();
-                    }}
-                />
-            )}
-
-            {(onAddToParamSelection || onRemoveFromParamSelection) && <Divider />}
             {onAddToParamSelection && (
                 <MenuItem
                     label={t("ctx_add_to_param_selection")}
@@ -878,52 +898,202 @@ export const ClipContextMenu: React.FC<{
                     }}
                 />
             )}
-            {onRemoveFromParamSelection && (
-                <MenuItem
-                    label={t("ctx_remove_from_param_selection")}
-                    shortcut={removeFromParamSelectionShortcut}
-                    onClick={() => {
-                        onRemoveFromParamSelection(ids);
-                        close();
-                    }}
-                />
+            {/* ── 内容工具 ───────────────────────────────────────────────
+                「播放速率」「静音检测」「音高参考」「导出」都是**单个动作**，
+                折叠成子菜单只会多一次悬停/点击，因此平铺在一级。每段自带
+                前置分隔线，段不存在时不留空分隔。 */}
+            {(onEditRate || onSilenceDetection) && (
+                <>
+                    <Divider />
+                    {onEditRate && (
+                        <MenuItem
+                            label={t("ctx_edit_rate")}
+                            onClick={() => {
+                                // 锚点 = 菜单弹出位置：菜单关闭后浮层原地展开。
+                                // 多选时右键的 clip 即 anchor（提交走 getBulkEditableClipIds 批量管线）。
+                                onEditRate(clip.id, x, y);
+                                close();
+                            }}
+                        />
+                    )}
+                    {onSilenceDetection && (
+                        <MenuItem
+                            label={t("ctx_silence_detection")}
+                            disabled={!silenceEligible}
+                            data-tooltip={
+                                silenceEligible ? undefined : t("silence_no_audio_source")
+                            }
+                            onClick={() => {
+                                onSilenceDetection(ids);
+                                close();
+                            }}
+                        />
+                    )}
+                </>
+            )}
+            {((!allPitchAdjustment && onConvertToPitchRef) ||
+                (allPitchAdjustment && onUpdatePitchRef)) && (
+                <>
+                    <Divider />
+                    {!allPitchAdjustment && onConvertToPitchRef && (
+                        <MenuItem
+                            label={t("ctx_convert_to_pitch_ref")}
+                            onClick={() => {
+                                const audioIds = selectedClips
+                                    .filter((c) => !isPitch(c))
+                                    .map((c) => c.id);
+                                if (audioIds.length > 0) {
+                                    onConvertToPitchRef(audioIds);
+                                }
+                                close();
+                            }}
+                        />
+                    )}
+                    {allPitchAdjustment && onUpdatePitchRef && (
+                        <MenuItem
+                            label={t("ctx_update_pitch_ref")}
+                            onClick={() => {
+                                if (pitchOnlyIds.length > 0) {
+                                    onUpdatePitchRef(pitchOnlyIds);
+                                }
+                                close();
+                            }}
+                        />
+                    )}
+                </>
+            )}
+            {(!allPitchAdjustment || onExportMidi) && (
+                <>
+                    <Divider />
+                    {!allPitchAdjustment && (
+                        <MenuItem
+                            label={t("ctx_quick_export")}
+                            onClick={() => {
+                                onQuickExport(hasPitchAdjustment ? audioOnlyIds : ids);
+                                close();
+                            }}
+                        />
+                    )}
+                    {onExportMidi && (
+                        <MenuItem
+                            label={t("ctx_export_midi")}
+                            onClick={() => {
+                                onExportMidi(ids);
+                                close();
+                            }}
+                        />
+                    )}
+                </>
+            )}
+            {(isMulti || hasGroup) && (
+                <>
+                    <Divider />
+                    <SubMenu label={t("ctx_group")}>
+                        {isMulti && !hasGroup && (
+                            <MenuItem
+                                label={t("common_group")}
+                                shortcut={groupShortcut}
+                                onClick={() => {
+                                    onGroup?.(ids);
+                                    close();
+                                }}
+                            />
+                        )}
+                        {hasGroup && (
+                            <MenuItem
+                                label={t("common_ungroup")}
+                                shortcut={ungroupShortcut}
+                                onClick={() => {
+                                    onUngroup?.(ids);
+                                    close();
+                                }}
+                            />
+                        )}
+                        {isMulti && (
+                            <MenuItem
+                                label={t("common_glue")}
+                                disabled={glueDisabled}
+                                onClick={() => {
+                                    onGlue(ids);
+                                    close();
+                                }}
+                            />
+                        )}
+                    </SubMenu>
+                </>
             )}
 
             {onFadeShapeChange &&
                 (() => {
-                    const fadedClips = isSingle
-                        ? sortAndFilterFadedClips({
-                              clip,
-                              overlappingClips,
-                          })
-                        : sortAndFilterFadedClips({
-                              clip: selectedClips[0] ?? clip,
-                              overlappingClips: selectedClips.slice(1),
-                          });
+                    // 多选：**每个方向只给一行**，选择即批量应用到全部所选 Clip。
+                    // 旧实现逐个 Clip 列举（还带名字表头），选项行数随选择数线性
+                    // 膨胀，实际使用时几乎不可读，且"给某一个 Clip 单独换形状"
+                    // 在多选语境下并无意义。
+                    if (isMulti) {
+                        const fadeInTargets = selectedClips.filter(
+                            (c) => effectiveFadeSecondsOf(c).in > 0,
+                        );
+                        const fadeOutTargets = selectedClips.filter(
+                            (c) => effectiveFadeSecondsOf(c).out > 0,
+                        );
+                        if (fadeInTargets.length === 0 && fadeOutTargets.length === 0) {
+                            return null;
+                        }
+                        return (
+                            <>
+                                <Divider />
+                                {fadeInTargets.length > 0 && (
+                                    <FadeShapeRow
+                                        label={t("fade_in")}
+                                        // 各 Clip 形状不一致时不预选任何一项（null）。
+                                        current={sharedFadeShape(fadeInTargets, "in")}
+                                        isOut={false}
+                                        onSelect={(shape) => {
+                                            onFadeShapeChange(ids, "in", shape);
+                                        }}
+                                        t={t}
+                                    />
+                                )}
+                                {fadeOutTargets.length > 0 && (
+                                    <FadeShapeRow
+                                        label={t("fade_out")}
+                                        current={sharedFadeShape(fadeOutTargets, "out")}
+                                        isOut={true}
+                                        onSelect={(shape) => {
+                                            onFadeShapeChange(ids, "out", shape);
+                                        }}
+                                        t={t}
+                                    />
+                                )}
+                            </>
+                        );
+                    }
+
+                    // 单选：保持"本 Clip + 相邻重叠 Clip 各自一行"。这里逐个指定
+                    // 形状是有意义的 —— 交叉淡化两侧通常要用互补的曲线。
+                    const fadedClips = sortAndFilterFadedClips({
+                        clip,
+                        overlappingClips,
+                    });
                     if (fadedClips.length === 0) return null;
 
-                    const showHeader = isMulti || fadedClips.length > 1;
+                    const showHeader = fadedClips.length > 1;
 
                     return (
                         <>
                             <Divider />
                             {showHeader && (
-                                <div className="px-3 py-1 text-[11px] text-qt-text/50 select-none">
-                                    {isMulti
-                                        ? t("ctx_selected_n").replace(
-                                              "{n}",
-                                              String(fadedClips.length),
-                                          )
-                                        : t("overlapping_clips_header").replace(
-                                              "{n}",
-                                              String(fadedClips.length),
-                                          )}
+                                <div className="px-3 py-1 text-qt-xs text-qt-text/50 select-none">
+                                    {t("overlapping_clips_header").replace(
+                                        "{n}",
+                                        String(fadedClips.length),
+                                    )}
                                 </div>
                             )}
                             {fadedClips.map((fc) => (
                                 <React.Fragment key={fc.id}>
                                     {showHeader && (
-                                        <div className="px-3 pt-1 text-[10px] text-qt-text/40 truncate">
+                                        <div className="px-3 pt-1 text-qt-micro text-qt-text/40 truncate">
                                             {fc.name || fc.id}
                                         </div>
                                     )}
@@ -935,7 +1105,7 @@ export const ClipContextMenu: React.FC<{
                                             }
                                             isOut={false}
                                             onSelect={(shape) => {
-                                                onFadeShapeChange?.(fc.id, "in", shape);
+                                                onFadeShapeChange([fc.id], "in", shape);
                                             }}
                                             t={t}
                                         />
@@ -950,7 +1120,7 @@ export const ClipContextMenu: React.FC<{
                                             }
                                             isOut={true}
                                             onSelect={(shape) => {
-                                                onFadeShapeChange?.(fc.id, "out", shape);
+                                                onFadeShapeChange([fc.id], "out", shape);
                                             }}
                                             t={t}
                                         />

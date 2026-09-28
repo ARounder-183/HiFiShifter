@@ -93,12 +93,19 @@ export interface TimelineKernelViewProps {
     /** 轨道头滚动容器（宿主在 rAF 内写 scrollTop 跟随纵向滚动）。 */
     readonly trackListScrollerRef?: React.MutableRefObject<HTMLElement | null>;
     /**
-     * 标尺播放头竖线（**位于标尺内容层内**）。
+     * 标尺播放头竖线（**位于标尺内容层之外**，视口坐标）。
      *
-     * 宿主写它的 `left`（内容坐标）：标尺内容层已带 translateX(-scrollLeft)，
-     * 播放头因此自动跟随滚动；若改写成视口坐标会双重计滚动。
+     * 宿主写它的 `left`：与轨道区播放头同帧、同左缘（`playheadLineLeftPx`）。
+     * 位置由内核逐帧命令式驱动，React 只给首帧初值（见 `TimeRulerPlayhead`）。
      */
     readonly rulerPlayheadLineRef?: React.MutableRefObject<HTMLElement | null>;
+    /**
+     * 标尺播放头**倒三角**（与竖线同帧、同视口左缘）。
+     *
+     * 【为什么也要由内核写】三角此前只在面板的挂载 layout effect 里定位过一次，
+     * 宿主接管后不再更新 —— 表现为"三角停在工程起始处不动"。
+     */
+    readonly rulerPlayheadHeadRef?: React.MutableRefObject<HTMLElement | null>;
     /** 宿主句柄出口：面板用它把「轨道头滚动」等外部意图转发给内核。 */
     readonly hostRef?: React.MutableRefObject<TimelineKernelHost | null>;
     /**
@@ -301,6 +308,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         rulerContentRef,
         trackListScrollerRef,
         rulerPlayheadLineRef,
+        rulerPlayheadHeadRef,
         hostRef,
         interactions,
         snapHighlight,
@@ -448,7 +456,6 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
 
     // 数据镜像：渲染期写 ref，宿主在 rAF 内读取（避免宿主订阅 React 状态）。
     const dataRef = React.useRef<TimelineKernelData>(buildData());
-    // eslint-disable-next-line react-hooks/refs -- 数据镜像：命令式宿主需在 rAF 内读取最新值（既有热路径模式）
     dataRef.current = buildData();
 
     /**
@@ -464,7 +471,21 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 : { firstRow, rowCount },
         );
         const host = localHostRef.current;
-        if (host !== null) setWaveformAxis(host.getAxis());
+        if (host === null) return;
+        const next = host.getAxis();
+        // 只在**真正参与渲染的字段**变化时替换 state：总线驱动下 axis 的
+        // scrollLeft / scrollTop 恒被总线快照覆盖（不参与绘制），若每次跨行都
+        // 换一个新对象，只会白白让 `WaveformSurface.visualSignature` 失效、
+        // 多走一轮 React 提交与重绘。pxPerSec / viewportWidthPx / dpr 才是
+        // 波形面从 props.axis 实际读取的字段。
+        setWaveformAxis((prev) =>
+            prev !== null &&
+            prev.pxPerSec === next.pxPerSec &&
+            prev.viewportWidthPx === next.viewportWidthPx &&
+            prev.dpr === next.dpr
+                ? prev
+                : next,
+        );
     }, []);
 
     // 回调镜像：宿主持有的是稳定函数，函数内部读取最新回调，避免重建宿主。
@@ -479,7 +500,6 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         onViewportWidthChange,
         onUnavailable,
     });
-    // eslint-disable-next-line react-hooks/refs -- 回调镜像：同上
     callbacksRef.current = {
         onRowHeightChange,
         onPxPerSecChange,
@@ -494,7 +514,6 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
 
     // 交互回调镜像：同上（面板用 useCallback 提供，但引用仍可能在依赖变化时更新）。
     const interactionsRef = React.useRef<TimelineKernelInteractions | undefined>(interactions);
-    // eslint-disable-next-line react-hooks/refs -- 回调镜像：同上
     interactionsRef.current = interactions;
     /**
      * 稳定引用的交互回调集合（内核创建时只取一次，引用抖动不生效）。
@@ -510,8 +529,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             onSeekTo: (sec) => interactionsRef.current?.onSeekTo?.(sec),
             onSelectClip: (clipId, additive, rangeSelect, clientX) =>
                 interactionsRef.current?.onSelectClip?.(clipId, additive, rangeSelect, clientX),
-            onDoubleClickClip: (clipId, mode) =>
-                interactionsRef.current?.onDoubleClickClip?.(clipId, mode),
+            onClipParamSelectionGesture: (clipId, mode) =>
+                interactionsRef.current?.onClipParamSelectionGesture?.(clipId, mode),
             onToggleClipMute: (clipId, nextMuted) =>
                 interactionsRef.current?.onToggleClipMute?.(clipId, nextMuted),
             onOpenClipFormant: (clipId, screenX, screenY) =>
@@ -640,15 +659,18 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 // 因此滞后一次提交，用它定位播放头会停在上一次的位置（实测连续两次
                 // seek，镜像恰好差一次）。getter 直连面板 ref，读到当帧真值。
                 playheadSec: () => callbacksRef.current.getPlayheadSec(),
+                // 全部传 getter：这些元素可能在本视图（宿主）创建之后才挂载或被重建，
+                // 按值捕获会让宿主永久持有 null / 脱离文档的节点，写入从此静默失效。
                 sync: {
-                    rulerContent: rulerContentRef?.current ?? null,
-                    trackListScroller: trackListScrollerRef?.current ?? null,
-                    playheadLine: playheadLineRef?.current ?? null,
-                    rulerPlayheadLine: rulerPlayheadLineRef?.current ?? null,
-                    snapHighlightContent: snapContentRef.current,
-                    ghostContent: ghostContentRef.current,
-                    dropPreviewContent: dropPreviewContentRef.current,
-                    newTrackDropContent: newTrackDropContentRef.current,
+                    rulerContent: () => rulerContentRef?.current ?? null,
+                    trackListScroller: () => trackListScrollerRef?.current ?? null,
+                    playheadLine: () => playheadLineRef?.current ?? null,
+                    rulerPlayheadLine: () => rulerPlayheadLineRef?.current ?? null,
+                    rulerPlayheadHead: () => rulerPlayheadHeadRef?.current ?? null,
+                    snapHighlightContent: () => snapContentRef.current,
+                    ghostContent: () => ghostContentRef.current,
+                    dropPreviewContent: () => dropPreviewContentRef.current,
+                    newTrackDropContent: () => newTrackDropContentRef.current,
                 },
                 onRowHeightChange: (px) => callbacksRef.current.onRowHeightChange(px),
                 onZoomChange: (pxPerSec) => callbacksRef.current.onPxPerSecChange(pxPerSec),
@@ -744,8 +766,21 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     // - `selectedClipId` / `multiSelectedClipIds`：选中描边（白 2px）
     // - `activeGroupIds` / `disabledGroupIds`：编组激活的金色描边
     // - `silenceSegmentsByClipId`：静音检测预览的红色覆盖层
-    React.useEffect(() => {
-        localHostRef.current?.invalidateScene();
+    //
+    // 【为什么是 layout effect 且立即绘制，而不是被动 effect 标脏】
+    // 可见内容来自两个来源：React/DOM 的**标尺刻度文本**，与内核 GL 的**网格线**
+    // （两者都按 `buildTimelineTicks` 排布，但一个走 React 提交、一个走 rAF）。
+    // 被动 effect 在浏览器绘制之后才跑，于是"文本已是新刻度、网格还是旧刻度"会
+    // 被真实绘制出来一帧 —— 连续手势（滚轮调 BPM）下这帧差异每帧重复，肉眼就是
+    // **标尺与网格一起抽搐**（两者相对错动）。改成 layout effect + `paintNow()`
+    // 后，内核的几何重建与 DOM 文本落在**同一个任务、同一次绘制**里，与缩放落地
+    // 的既有做法（`TimelinePanel` 的缩放 layout effect）完全一致。
+    React.useLayoutEffect(() => {
+        const host = localHostRef.current;
+        if (!host) return;
+        host.invalidateScene();
+        // 同一任务内提交：文本与网格同帧切换（见上方说明）。
+        host.paintNow();
     }, [
         tracks,
         clips,
@@ -916,7 +951,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                                   // 【样式必须与旧实现逐类一致】旧实现的素材拖入预览是
                                   // `rounded-sm` + **1px 虚线 `--qt-highlight`** 边框 +
                                   // `color-mix(in oklab, var(--qt-highlight) 20%, transparent)`
-                                  // 底，文件名用 `px-2 pt-1 text-[10px] text-qt-text truncate`
+                                  // 底，文件名用 `px-2 pt-1 text-qt-micro text-qt-text truncate`
                                   // 顶对齐贴在左上角。这里照搬同一组类（含 `truncate` 需要
                                   // 的块级容器，因此文件名用 div 而不是 inline 的 span）。
                                   className="absolute overflow-hidden rounded-sm border border-dashed border-qt-highlight bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]"
@@ -927,7 +962,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                                       height: Math.max(1, rowHeight - 16),
                                   }}
                               >
-                                  <div className="truncate px-2 pt-1 text-[10px] text-qt-text">
+                                  <div className="truncate px-2 pt-1 text-qt-micro text-qt-text">
                                       {dropPreview.fileName}
                                   </div>
                               </div>
@@ -1041,16 +1076,31 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 滚动条盖掉，且该处无法拖动。
                 取值与参数编辑器的自绘滚动条一致（那里也是 `z-20`），
                 两者观感与层级语义保持统一。 */}
-            <div ref={vTrackRef} className="absolute right-0 top-0 bottom-0 z-20 w-2">
+            {/* `data-hs-scrollbar`：宿主的悬停光标 / 浮标逻辑据此把滚动条区域按
+                "非内容"处理（轨道 / thumb 是容器子元素，事件会冒泡，按坐标命中
+                会把滚动条底下的 clip / 淡变当成命中对象）。`cursor-default` /
+                `cursor-grab` 是声明式光标：子元素自身的 cursor 覆盖宿主写入在
+                容器上的 inline cursor，滚动条区域的光标因此不再继承内容手势。 */}
+            <div
+                ref={vTrackRef}
+                data-hs-scrollbar="1"
+                className="absolute right-0 top-0 bottom-0 z-20 w-2 cursor-default"
+            >
                 <div
                     ref={vThumbRef}
-                    className="absolute left-0 w-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                    data-hs-scrollbar="1"
+                    className="absolute left-0 w-full cursor-grab rounded-full bg-[var(--qt-scrollbar-thumb)]"
                 />
             </div>
-            <div ref={hTrackRef} className="absolute bottom-0 left-0 right-0 z-20 h-2">
+            <div
+                ref={hTrackRef}
+                data-hs-scrollbar="1"
+                className="absolute bottom-0 left-0 right-0 z-20 h-2 cursor-default"
+            >
                 <div
                     ref={hThumbRef}
-                    className="absolute top-0 h-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                    data-hs-scrollbar="1"
+                    className="absolute top-0 h-full cursor-grab rounded-full bg-[var(--qt-scrollbar-thumb)]"
                 />
             </div>
         </div>

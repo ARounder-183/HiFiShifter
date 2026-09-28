@@ -71,11 +71,21 @@ pub(super) fn import_project(
             }
         }
     }
-    // 非 Loop 存储窗口规范化（同 open_project，见其注释）。
+    // 非 Loop 存储窗口规范化（同 open_project，见其注释）：Clip 投影与**每个
+    // Take** 的窗口都要自愈，只做投影会让 inactive take 的旧窗口在切换时回流。
     for clip in &mut timeline.clips {
         crate::state::normalize_nonloop_source_window(clip);
+        crate::state::normalize_nonloop_all_take_windows(clip);
     }
     timeline.sync_clip_takes_from_flat();
+
+    // 清理历史上被批量伪造的"用户封印"（同 open_project）：被导入工程里那些
+    // 标着用户决定、却没记录选了什么 的档案会让 Take 永久免疫于折叠。清回
+    // "未判定"，由合并后的后台扫描按当前策略重新裁决。
+    let cleared = timeline.clear_untrusted_channel_seals();
+    if cleared > 0 {
+        log::info!("[import_project] cleared {cleared} fabricated channel seal(s)");
+    }
 
     let imported_notes = std::mem::take(&mut pf.notes_markdown);
     let imported_tempo_map = timeline.tempo_map.take();
@@ -216,7 +226,10 @@ pub(super) fn import_project(
             crate::pitch_analysis::maybe_schedule_pitch_orig(&state, root_id);
         }
         if let Some(handle) = state.app_handle.get() {
-            crate::commands::playback::request_background_render(handle);
+            // 被导入工程里 v4 及更早的 Take 没有任何判定档案（v5+ 的已在上面
+            // 封印为"用户决定"），交给可恢复扫描按当前策略补判 —— 它会带着
+            // 完整容器预算重判，并在此之后才放行后台预渲染。
+            crate::commands::channel_scan::request_channel_scan(handle);
         }
 
         let mut json = serde_json::to_value(&payload).unwrap_or_default();

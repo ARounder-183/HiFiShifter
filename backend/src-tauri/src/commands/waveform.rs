@@ -4,8 +4,6 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::hfspeaks_v2::{WaveformManifestPayload, WaveformTileRequest};
-
 use super::common::guard_waveform_command;
 
 const WAVEFORM_COLUMNS_MIN: usize = 16;
@@ -120,6 +118,7 @@ pub(super) fn get_root_mix_waveform_peaks_segment(
             output: crate::encode::OutputSpec::wav_32f(),
             quality_preset: crate::mixdown::QualityPreset::Realtime,
             cancel_flag: None,
+            progress: None,
         };
 
         let (_sr, ch, _dur, mix) = match crate::mixdown::render_mixdown_interleaved(&tl, opts) {
@@ -264,6 +263,7 @@ pub(super) fn get_track_mix_waveform_peaks_segment(
             output: crate::encode::OutputSpec::wav_32f(),
             quality_preset: crate::mixdown::QualityPreset::Realtime,
             cancel_flag: None,
+            progress: None,
         };
 
         let (_sr, ch, _dur, mix) = match crate::mixdown::render_mixdown_interleaved(&tl, opts) {
@@ -333,13 +333,14 @@ pub(super) fn get_track_mix_waveform_peaks_segment(
 /// 杩斿洖 Vec<u8>锛孴auri 浼氫紶杈撲负 number[]锛圝S 渚ч渶杞?ArrayBuffer锛夛紝
 /// 鍓嶇閫氳繃 DataView + Float32Array 鐩存帴璇诲彇銆?
 ///
-/// 浜岃繘鍒跺崗璁細[Header 20B] [min f32[]] [max f32[]]
+/// 浜岃繘鍒跺崗璁細[Header 28B: magic"WFPK" | format_version u32 | sample_rate | division_factor | count | level | channels] + per-channel [min f32[]] [max f32[]]
 /// 获取指定级别的波形 mipmap 数据（Base64 编码的二进制格式）
 ///
 /// 返回 Base64 编码的 String，避免 Tauri v2 将 Vec<u8> 序列化为 JSON number[]
 /// 导致的 3~5 倍传输膨胀。前端通过 atob() 解码后直接创建 Float32Array 视图。
 ///
-/// 二进制协议：[Header 20B] [min f32[]] [max f32[]]
+/// 二进制协议（v2）：[Header 28B: magic"WFPK" | format_version u32 | sample_rate |
+/// division_factor | count | level | channels] 后接逐声道 [min f32[]] [max f32[]]
 pub(super) fn get_waveform_mipmap_binary(
     state: State<'_, AppState>,
     source_path: String,
@@ -375,20 +376,45 @@ pub(super) fn preload_waveform_mipmap(
 /// 将 N 个文件 × 3 级 = 3N 次 IPC 合并为 1 次，大幅减少 IPC 往返开销。
 /// 返回 HashMap<sourcePath, [L0_base64, L1_base64, L2_base64]>。
 /// 若某个文件计算失败，对应值为 3 个空字符串。
+///
+/// `levels` 为要**编码并传输**的级别白名单（`None` = 全部三级，与旧行为一致；
+/// 空列表同样按全部处理）。批量预载只落地 L2，却曾让后端把 L0（单级 ≈ 159MB/小时
+/// 素材、base64 后 ≈ 212MB）也编码传输后由前端丢弃——传 `[2]` 即消除这段浪费。
+/// 未被请求的级别返回空字符串，返回形状保持不变。
 pub(super) fn batch_get_waveform_mipmap(
     state: State<'_, AppState>,
     source_paths: Vec<String>,
+    levels: Option<Vec<u8>>,
 ) -> std::collections::HashMap<String, [String; 3]> {
     let encoder = base64::engine::general_purpose::STANDARD;
     let mut result = std::collections::HashMap::with_capacity(source_paths.len());
 
+    let mut selected = [false; 3];
+    match &levels {
+        Some(requested) => {
+            for &level in requested {
+                if (level as usize) < 3 {
+                    selected[level as usize] = true;
+                }
+            }
+            // 空白名单视为"全都要"，避免调用方传空数组时拿到全空结果。
+            if !selected.iter().any(|&on| on) {
+                selected = [true; 3];
+            }
+        }
+        None => selected = [true; 3],
+    }
+
     for path in source_paths {
         match state.get_or_compute_waveform_peaks_v2(&path) {
             Ok(data) => {
-                let l0 = encoder.encode(data.to_binary_level(0));
-                let l1 = encoder.encode(data.to_binary_level(1));
-                let l2 = encoder.encode(data.to_binary_level(2));
-                result.insert(path, [l0, l1, l2]);
+                let mut encoded: [String; 3] = Default::default();
+                for level in 0..3 {
+                    if selected[level] {
+                        encoded[level] = encoder.encode(data.to_binary_level(level));
+                    }
+                }
+                result.insert(path, encoded);
             }
             Err(e) => {
                 log::warn!("waveform mipmap batch compute failed for {path}: {e}");
@@ -400,28 +426,4 @@ pub(super) fn batch_get_waveform_mipmap(
     result
 }
 
-pub(super) fn get_waveform_manifest(
-    state: State<'_, AppState>,
-    source_path: String,
-) -> Result<WaveformManifestPayload, String> {
-    let peaks = state.get_or_compute_waveform_peaks_v2(&source_path)?;
-    Ok(peaks.to_manifest_payload(&source_path))
-}
 
-pub(super) fn get_waveform_tiles_binary(
-    state: State<'_, AppState>,
-    source_path: String,
-    revision: String,
-    requests: Vec<WaveformTileRequest>,
-) -> Result<String, String> {
-    let peaks = state.get_or_compute_waveform_peaks_v2(&source_path)?;
-    let expected_revision = crate::hfspeaks_v2::HfsPeakFile::source_revision(std::path::Path::new(
-        &source_path,
-    ));
-    if revision != expected_revision {
-        return Err("waveform source revision mismatch".to_string());
-    }
-
-    let bytes = peaks.to_tile_binary(&requests);
-    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
-}
