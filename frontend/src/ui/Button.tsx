@@ -145,6 +145,22 @@ export interface AppIconButtonProps
     active?: boolean;
     intent?: "default" | "danger";
     size?: AppIconSize;
+    /**
+     * 强调色。
+     *
+     * `neutral`（默认）—— 中性灰，用于次要动作与不表达状态的图标按钮。
+     * `accent` —— 主题强调色，用于**表达"已启用"的开关**。
+     *
+     * 【为什么必须由调用方声明】"激活时该不该用强调色"是**语义**（它是否在
+     * 表达一种"开着"的状态），上下文推断不出来 —— 与 `AppButton` 的 `intent`
+     * 同类，属于**不该由原语写死**的那一维。
+     *
+     * 【回归修正】上一版把 `color` 写死成 `gray`，而它替换掉的旧写法是
+     * `<IconButton variant={on ? "solid" : "ghost"}>`（**不带 color**）——
+     * Radix 会回落到主题强调色。于是 18 个开关从强调色变成了灰色
+     * （实测 `rgb(91,91,214)` → `rgb(111,109,120)`），而原语没有表达强调色的途径。
+     */
+    emphasis?: "neutral" | "accent";
 }
 
 /**
@@ -159,14 +175,20 @@ export function AppIconButton({
     tooltip,
     active = false,
     intent = "default",
+    emphasis = "neutral",
     size = "md",
     className,
     ...rest
 }: AppIconButtonProps) {
+    /*
+     * 强调色 = **不传 `color`**，让 Radix 回落到主题强调色（`--accent-9`）。
+     * 这与它替换掉的旧写法逐字节一致，因此那 18 个开关恢复原色。
+     */
+    const color = intent === "danger" ? "red" : emphasis === "accent" ? undefined : "gray";
     return (
         <IconButton
             variant={active ? "solid" : "ghost"}
-            color={intent === "danger" ? "red" : "gray"}
+            color={color}
             size="1"
             data-tooltip={tooltip}
             aria-label={tooltip}

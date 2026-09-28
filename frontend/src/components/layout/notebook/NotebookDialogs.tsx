@@ -267,7 +267,8 @@ export function NotebookSettingsDialog({
             size="md"
             actions={[{ id: "close", label: t("close"), onClick: () => onClose() }]}
         >
-            <AppForm>
+            {/* 混排表单：字段与开关共用标签列，因此显式声明 aligned */}
+            <AppForm booleanRow="aligned">
                 <Section title={tAny("notebook_settings_group_view")}>
                     <AppField label={tAny("notebook_setting_default_mode")}>
                         <AppSelect

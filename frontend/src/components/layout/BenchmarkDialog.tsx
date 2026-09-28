@@ -165,7 +165,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                 {/* Running state */}
                 {phase === "running" && (
                     <Flex align="center" gap="2">
-                        <AppBusy label={t("benchmark_running")} />
+                        <AppBusy size="md" label={t("benchmark_running")} />
                     </Flex>
                 )}
 

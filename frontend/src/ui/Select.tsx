@@ -43,6 +43,15 @@ export interface AppSelectProps {
      * 只给**不是工具条**的紧凑表面用（快速搜索排序行、轨道头算法下拉）。
      */
     density?: AppDensity;
+    /**
+     * 触发器最小宽度（px）。
+     *
+     * 【为什么需要】有些下拉的内容是**不定长文本**（设备名、应用名、路径），
+     * 不设下限时触发器会塌缩成"当前选项那么宽"，切换选项时宽度还会跳动。
+     * 旧写法用内联 `style={{minWidth: 260}}`；迁移到原语时原语没有这一维，
+     * 于是 `RecordingSettingsDialog` 的设备/回环/应用三个下拉失去了下限。
+     */
+    minWidth?: number;
     ariaLabel?: string;
     className?: string;
 }
@@ -68,6 +77,7 @@ export function AppSelect({
     disabled = false,
     fullWidth = true,
     density,
+    minWidth,
     ariaLabel,
     className,
 }: AppSelectProps) {
@@ -116,6 +126,7 @@ export function AppSelect({
                 ref={setWheelTarget}
                 aria-label={ariaLabel}
                 className={cx(fullWidth && "w-full", className)}
+                style={minWidth === undefined ? undefined : { minWidth }}
             />
             <Select.Content>
                 {options.map((entry, index) =>

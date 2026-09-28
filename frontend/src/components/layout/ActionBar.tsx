@@ -665,6 +665,8 @@ export function ActionBar() {
                 <Box style={{ position: "relative" }} data-hs-context-menu>
                     <AppIconButton
                         active={s.metronomeEnabled}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
                         tooltip={t("action_metronome")}
                         icon={<MetronomeIcon />}
                         onClick={() => {
@@ -1519,6 +1521,8 @@ export function ActionBar() {
             <Flex gap="1" className="shrink-0">
                 <AppIconButton
                     active={fileBrowserVisible}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
                     tooltip={tAny("fb_title")}
                     onClick={() => togglePanelVisible(dispatch, store.getState, PANEL_FILE_BROWSER)}
                     icon={
@@ -1538,6 +1542,8 @@ export function ActionBar() {
                 />
                 <AppIconButton
                     active={notebookVisible}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
                     tooltip={t("notebook")}
                     onClick={() => togglePanelVisible(dispatch, store.getState, PANEL_NOTEBOOK)}
                     icon={<Pencil1Icon />}
@@ -1551,6 +1557,8 @@ export function ActionBar() {
                 {/* Auto Crossfade */}
                 <AppIconButton
                     active={s.autoCrossfadeEnabled}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
                     tooltip={tAny("auto_crossfade")}
                     tabIndex={-1}
                     onClick={() => {
@@ -1586,6 +1594,8 @@ export function ActionBar() {
                 {/* Split Transition */}
                 <AppIconButton
                     active={s.splitTransitionEnabled}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
                     tooltip={tAny("split_transition_tooltip")}
                     tabIndex={-1}
                     onClick={() => {
@@ -1622,6 +1632,8 @@ export function ActionBar() {
                 {/* Snap */}
                 <AppIconButton
                     active={effectiveSnapVisual}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
                     tooltip={`${tAny("snap")}${
                         snapGestureActive && snapToggleHeld
                             ? ` · ${tAny("snap")}: ${tAny("snap_toggle_inverted")}`
@@ -1687,6 +1699,8 @@ export function ActionBar() {
                 {/* Playhead Zoom */}
                 <AppIconButton
                     active={s.playheadZoomEnabled}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
                     tooltip={tAny("playhead_zoom")}
                     tabIndex={-1}
                     onClick={() => {
@@ -1726,6 +1740,8 @@ export function ActionBar() {
                 {/* Auto Scroll (horizontal arrows) */}
                 <AppIconButton
                     active={s.autoScrollEnabled}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
                     tooltip={tAny("auto_scroll")}
                     tabIndex={-1}
                     onClick={() => {
@@ -1739,6 +1755,8 @@ export function ActionBar() {
 
                 <AppIconButton
                     active={s.paramEditorSeekPlayheadEnabled}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
                     tooltip={tAny("param_editor_seek_playhead")}
                     tabIndex={-1}
                     onClick={() => {
@@ -1778,6 +1796,8 @@ export function ActionBar() {
                 {/* Allow timeline clicks to switch the parameter editor track */}
                 <AppIconButton
                     active={s.paramEditorTimelineClickSelectTrackEnabled}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
                     tooltip={tAny("param_editor_timeline_click_select_track")}
                     tabIndex={-1}
                     onClick={() => {
@@ -1842,6 +1862,8 @@ export function ActionBar() {
                 {/* Ignore Grouping (broken chain) */}
                 <AppIconButton
                     active={s.ignoreGrouping}
+                    // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                    emphasis="accent"
                     tooltip={tAny("ignore_grouping")}
                     tabIndex={-1}
                     onClick={() => {
@@ -2019,6 +2041,8 @@ function RippleModeButton({
         <>
             <AppIconButton
                 active={mode !== "off"}
+                // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                emphasis="accent"
                 tooltip={(tAny(`ripple_tooltip_${mode}`) as string) ?? tAny("ripple")}
                 tabIndex={-1}
                 onClick={onCycle}

@@ -256,6 +256,8 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                     <Flex align="center" gap="2">
                         <AppSelect
                             fullWidth={false}
+                            // 旧写法是 size="1"（24px）：对话框里也要紧凑
+                            density="compact"
                             value={sizePresetValue}
                             onValueChange={(v) => {
                                 if (v === "custom") return;
@@ -283,6 +285,8 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                     <Flex align="center" gap="2">
                         <AppSelect
                             fullWidth={false}
+                            // 旧写法是 size="1"（24px）：对话框里也要紧凑
+                            density="compact"
                             value={agePresetValue}
                             onValueChange={(v) => {
                                 if (v === "custom") return;
@@ -362,6 +366,8 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                 {/* ── 高级 ─────────────────────────────────────────────── */}
                 <AppField label={tAny("render_cache_write_mode")}>
                     <AppSelect
+                        // 旧写法是 size="1"（24px）：对话框里也要紧凑
+                        density="compact"
                         value={draft.writeMode}
                         onValueChange={(v) => patch({ writeMode: v as RenderCacheWriteMode })}
                         options={[
@@ -376,6 +382,8 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                     <Flex align="center" gap="2" wrap="wrap">
                         <AppSelect
                             fullWidth={false}
+                            // 旧写法是 size="1"（24px）：对话框里也要紧凑
+                            density="compact"
                             value={draft.location}
                             onValueChange={(v) =>
                                 patch({ location: v === "custom" ? "custom" : "system" })

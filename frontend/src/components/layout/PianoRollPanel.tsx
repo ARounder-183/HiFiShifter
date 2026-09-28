@@ -6924,6 +6924,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 <Flex align="center" gap="2" style={{ flex: "1 1 auto", minWidth: 0 }}>
                     <AppIconButton
                         active={s.paramEditorSyncTimeline}
+                        // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                        emphasis="accent"
                         tooltip={tAny("sync_timeline_view_tooltip")}
                         aria-label={tAny("sync_timeline_view")}
                         tabIndex={-1}
@@ -6948,6 +6950,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     <Flex gap="1" align="center" style={{ marginLeft: 8, minWidth: 0 }}>
                         <AppIconButton
                             active={s.toolModeGroup === "select"}
+                            // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                            emphasis="accent"
                             tooltip={t("select")}
                             tabIndex={-1}
                             onClick={() => dispatch(setToolMode("select"))}
@@ -6956,6 +6960,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         <Box style={{ position: "relative" }} data-hs-context-menu>
                             <AppIconButton
                                 active={s.toolModeGroup === "draw"}
+                                // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                                emphasis="accent"
                                 tooltip={drawToolButtonTitle}
                                 tabIndex={-1}
                                 onClick={() => dispatch(setToolMode(currentDrawTool))}
@@ -7135,6 +7141,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         <Box style={{ position: "relative" }} data-hs-context-menu>
                             <AppIconButton
                                 active={effectivePitchSnapVisual}
+                                // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                                emphasis="accent"
                                 tooltip={`${t("pitch_snap")}: ${
                                     effectivePitchSnapVisual
                                         ? s.pitchSnapUnit === "semitone"
@@ -7305,6 +7313,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         </Box>
                         <AppIconButton
                             active={s.scaleHighlightMode === "always"}
+                            // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                            emphasis="accent"
                             tooltip={tAny("scale_highlight")}
                             tabIndex={-1}
                             onClick={() => {
@@ -7372,6 +7382,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         />
                         <AppIconButton
                             active={s.lockParamLinesEnabled}
+                            // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
+                            emphasis="accent"
                             tooltip={t("lock_param_lines")}
                             tabIndex={-1}
                             onClick={() => {

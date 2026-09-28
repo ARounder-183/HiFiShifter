@@ -48,7 +48,8 @@ export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSetti
             size="md"
             actions={[{ id: "close", label: t("close"), onClick: () => onOpenChange(false) }]}
         >
-            <AppForm>
+            {/* 混排表单：字段与开关共用标签列，因此显式声明 aligned */}
+            <AppForm booleanRow="aligned">
                 <AppField label={tAny("layout_setting_dock_modifier")}>
                     <AppSelect
                         value={settings.dockModifier}

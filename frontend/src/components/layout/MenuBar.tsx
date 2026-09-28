@@ -1400,7 +1400,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 dismissible={false}
             >
                 <Flex align="center" gap="3">
-                    <AppBusy label={tAny("menu_export_diagnostics_running")} />
+                    <AppBusy size="md" label={tAny("menu_export_diagnostics_running")} />
                 </Flex>
             </AppDialog>
 

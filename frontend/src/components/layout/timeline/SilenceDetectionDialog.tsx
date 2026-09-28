@@ -152,6 +152,8 @@ export const SilenceDetectionDialog: React.FC<{
                 >
                     <AppField label={tAny("silence_method")}>
                         <AppSelect
+                            // 旧写法是 size="1"（24px）：对话框里也要紧凑
+                            density="compact"
                             value={options.method}
                             onValueChange={(v) => update({ method: v as "rms" | "peak" })}
                             options={[
@@ -241,6 +243,8 @@ export const SilenceDetectionDialog: React.FC<{
                 >
                     <AppField label={tAny("silence_action")}>
                         <AppSelect
+                            // 旧写法是 size="1"（24px）：对话框里也要紧凑
+                            density="compact"
                             value={options.action}
                             onValueChange={(v) =>
                                 update({ action: v as SilenceDetectSettings["action"] })

@@ -194,7 +194,9 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                         <Flex align="center" gap="2">
                             <AppSelect
                                 fullWidth={false}
-                                value={draft.sourceDevice}
+                                // 不定长文本（设备名/应用名），给下限防止塌缩与切换时宽度跳动
+                                minWidth={260}
+                                                                value={draft.sourceDevice}
                                 onValueChange={(value) =>
                                     setDraft((prev) => ({ ...prev, sourceDevice: value }))
                                 }
@@ -226,7 +228,9 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                         <Flex align="center" gap="2">
                             <AppSelect
                                 fullWidth={false}
-                                value={loopbackValue}
+                                // 不定长文本（设备名/应用名），给下限防止塌缩与切换时宽度跳动
+                                minWidth={260}
+                                                                value={loopbackValue}
                                 onValueChange={(value) =>
                                     setDraft((prev) => ({ ...prev, loopbackDevice: value }))
                                 }
@@ -262,7 +266,9 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                             <Flex align="center" gap="2">
                                 <AppSelect
                                     fullWidth={false}
-                                    value={draft.captureAppId}
+                                    // 不定长文本（设备名/应用名），给下限防止塌缩与切换时宽度跳动
+                                    minWidth={260}
+                                                                        value={draft.captureAppId}
                                     onValueChange={(value) => {
                                         const app = apps.find((item) => item.id === value);
                                         setDraft((prev) => ({
@@ -324,7 +330,9 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                     <Flex align="center" gap="2">
                         <AppSelect
                             fullWidth={false}
-                            value={String(draft.bitDepth)}
+                            // 不定长文本（设备名/应用名），给下限防止塌缩与切换时宽度跳动
+                            minWidth={120}
+                                                        value={String(draft.bitDepth)}
                             onValueChange={(value) =>
                                 setDraft((prev) => ({
                                     ...prev,
@@ -343,7 +351,9 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                         </Text>
                         <AppSelect
                             fullWidth={false}
-                            value={String(draft.channels)}
+                            // 不定长文本（设备名/应用名），给下限防止塌缩与切换时宽度跳动
+                            minWidth={100}
+                                                        value={String(draft.channels)}
                             onValueChange={(value) =>
                                 setDraft((prev) => ({
                                     ...prev,

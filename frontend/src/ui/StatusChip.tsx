@@ -62,7 +62,8 @@ export function AppStatusChip({
                 tabular && "tabular-nums",
                 className,
             )}
-            style={{ background, color }}
+            // 状态片比正文小一档：恢复迁移前 11px（hs-type-mono 是 12px）
+            style={{ background, color, fontSize: "var(--qt-fs-xs)" }}
         >
             {children}
         </span>

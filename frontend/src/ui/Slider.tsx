@@ -124,9 +124,16 @@ export function AppSlider({
  * 与滑块成对使用，保证读数与滑块的排版一致（等宽数字、右对齐、固定宽度），
  * 而不是每处自己写 `style={{ width: 36, textAlign: "right" }}`。
  */
-export function AppSliderReadout({ children }: { children: ReactNode }) {
+export function AppSliderReadout({
+    children,
+    minWidth = 40,
+}: {
+    children: ReactNode;
+    /** 读数最小宽度；旧的各处用 40/52/56 不等，统一由调用方按需给出。 */
+    minWidth?: number;
+}) {
     return (
-        <span className="hs-type-mono shrink-0 text-right" style={{ minWidth: 40 }}>
+        <span className="hs-type-mono shrink-0 text-right" style={{ minWidth }}>
             {children}
         </span>
     );

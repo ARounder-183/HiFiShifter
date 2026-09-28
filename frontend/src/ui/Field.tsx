@@ -15,7 +15,7 @@
  * 现在标签宽度只有三档，且**由表单容器统一下发**：同一张表单里的所有行
  * 天然对齐，各行的作者根本不需要（也无法）表达宽度。
  */
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, useId, type ReactNode } from "react";
 import { Checkbox, Switch } from "@radix-ui/themes";
 
 import { cx } from "./cx";
@@ -43,7 +43,7 @@ const LabelWidthContext = createContext<AppFieldLabelWidth>("md");
  * 标签列形态 —— 改完之后这 15 行的开关不再与同一张表单里字段的标签列对齐。
  * 形态应当由"这张表单整体长什么样"决定，因此声明在表单上。
  */
-const BooleanRowLayoutContext = createContext<"aligned" | "leading">("aligned");
+const BooleanRowLayoutContext = createContext<"aligned" | "leading">("leading");
 
 export interface AppFormProps {
     /** 本表单内所有 `AppField` 的标签宽度。默认 `md`（112px）。 */
@@ -71,7 +71,7 @@ export interface AppFormProps {
  */
 export function AppForm({
     labelWidth = "md",
-    booleanRow = "aligned",
+    booleanRow = "leading",
     children,
     className,
 }: AppFormProps) {
@@ -197,20 +197,47 @@ export function AppSwitchRow({
     const layout = useContext(BooleanRowLayoutContext);
     const inheritedLabelWidth = useContext(LabelWidthContext);
 
+    /*
+     * 标签必须是**真正的 `<label>`**，并与控件用 `id`/`htmlFor` 关联。
+     *
+     * 【回归修正】上一版标签是裸 `<span>`，而它替换掉的旧写法是
+     * `<label><input/><span>文案</span></label>` —— 点标签文本即可切换。改完之后
+     * **只有那 16px 的控件可点**，11 处设置行的点击目标凭空缩小（浏览器实测：
+     * 点标签文本 `labelClickToggled: false`、`controlId: null`）。
+     *
+     * 用 `useId` 而不是手写 id：同一表单里可以有几十行，手写必然撞号。
+     */
+    const controlId = useId();
+    const labelClass = cx(
+        // 旧标签带 `cursor-pointer select-none`：整行可点，且拖选不会选中文案
+        "cursor-pointer select-none",
+        disabled && "cursor-default",
+    );
+    const controlNode = (
+        <Control
+            id={controlId}
+            checked={checked}
+            onCheckedChange={(value) => onCheckedChange(Boolean(value))}
+            disabled={disabled}
+            // 有可见标签时不再给 aria-label（避免可访问名重复）；仅 aria-only 行才用
+            aria-label={label == null ? ariaLabel : undefined}
+        />
+    );
+
     if (layout === "leading") {
         return (
             <div className={cx("flex items-start gap-2", className)}>
-                <Control
-                    checked={checked}
-                    onCheckedChange={(value) => onCheckedChange(Boolean(value))}
-                    disabled={disabled}
-                    aria-label={ariaLabel}
-                    // 与 12px 标签的首行基线对齐（控件高 16–20px，标签行高 18px）
-                    style={{ marginTop: 1 }}
-                />
+                {/* 与 12px 标签的首行基线对齐（控件高 16–20px，标签行高 18px） */}
+                <span className="shrink-0" style={{ marginTop: 1 }}>
+                    {controlNode}
+                </span>
                 {label != null || hint ? (
                     <div className="flex min-w-0 flex-1 flex-col">
-                        {label != null ? <span className="hs-type-body">{label}</span> : null}
+                        {label != null ? (
+                            <label htmlFor={controlId} className={cx("hs-type-label", labelClass)}>
+                                {label}
+                            </label>
+                        ) : null}
                         {hint ? <span className="hs-type-caption">{hint}</span> : null}
                     </div>
                 ) : null}
@@ -222,8 +249,9 @@ export function AppSwitchRow({
     return (
         <div className={cx("flex items-start gap-2", className)}>
             {label != null ? (
-                <span
-                    className="hs-type-label shrink-0 pt-0.5"
+                <label
+                    htmlFor={controlId}
+                    className={cx("hs-type-label shrink-0 pt-0.5", labelClass)}
                     style={
                         inheritedLabelWidth === "auto"
                             ? undefined
@@ -231,15 +259,10 @@ export function AppSwitchRow({
                     }
                 >
                     {label}
-                </span>
+                </label>
             ) : null}
             <div className="flex min-w-0 flex-1 flex-col gap-1">
-                <Control
-                    checked={checked}
-                    onCheckedChange={(value) => onCheckedChange(Boolean(value))}
-                    disabled={disabled}
-                    aria-label={ariaLabel}
-                />
+                {controlNode}
                 {hint ? <span className="hs-type-caption">{hint}</span> : null}
             </div>
         </div>
