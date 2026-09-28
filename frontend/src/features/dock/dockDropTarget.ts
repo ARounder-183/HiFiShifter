@@ -234,7 +234,7 @@ export function resolveFloatRect(
     },
     viewport: { w: number; h: number },
 ): DockRect {
-    if (geometry.anchor !== "bottom-right") {
+    if (geometry.anchor !== "bottom-right" && geometry.anchor !== "center") {
         return { x: geometry.x, y: geometry.y, w: geometry.w, h: geometry.h };
     }
     const margin = geometry.anchorMarginPx ?? 24;
@@ -244,10 +244,26 @@ export function resolveFloatRect(
     const offsetY = Number.isFinite(geometry.anchorOffsetY)
         ? (geometry.anchorOffsetY as number)
         : 0;
+
+    /*
+     * 居中：设置类面板（外观设置）的落点。
+     *
+     * 与右下角同样**按当前视口每帧解析**，因此主窗口缩放后它仍在正中；
+     * 同样把结果夹进视口 —— 视口比窗体还小时宁可盖住内容，也不要跑到屏幕外
+     * （夹紧后它退化为"贴着边距原点"，与右下角锚点的兜底一致）。
+     */
+    const x =
+        geometry.anchor === "center"
+            ? Math.round((viewport.w - geometry.w) / 2 + offsetX)
+            : Math.round(viewport.w - geometry.w - margin + offsetX);
+    const y =
+        geometry.anchor === "center"
+            ? Math.round((viewport.h - geometry.h) / 2 + offsetY)
+            : Math.round(viewport.h - geometry.h - margin + offsetY);
+
     return {
-        // 视口比窗体还小时退回边距原点（宁可盖住内容，也不要跑到屏幕外）。
-        x: Math.max(margin, Math.round(viewport.w - geometry.w - margin + offsetX)),
-        y: Math.max(margin, Math.round(viewport.h - geometry.h - margin + offsetY)),
+        x: Math.max(margin, x),
+        y: Math.max(margin, y),
         w: geometry.w,
         h: geometry.h,
     };

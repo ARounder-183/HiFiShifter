@@ -71,6 +71,7 @@ import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
 import { PitchAnalysisProvider, usePitchAnalysis } from "./contexts/PitchAnalysisContext";
 import { ParamDataLoadingChip } from "./components/layout/ParamDataLoadingChip";
 import { FileBrowserPanel } from "./components/layout/FileBrowserPanel";
+import { AppearanceSettingsPanel } from "./components/layout/AppearanceSettingsPanel";
 import { UndoHistoryPanel } from "./components/layout/UndoHistoryPanel";
 import { DockRoot } from "./components/dock/DockRoot";
 import { registerBuiltinPanels } from "./components/dock/registerBuiltinPanels";
@@ -81,6 +82,7 @@ import {
     PANEL_PARAM_EDITOR,
     PANEL_TIMELINE,
     PANEL_UNDO_HISTORY,
+    PANEL_APPEARANCE,
 } from "./components/dock/registerBuiltinPanels";
 import { setPanelRenderer } from "./features/dock/panelRenderer";
 import { cycleFocus, maximizeActive, toggleFloatActive } from "./features/dock/dockApi";
@@ -3487,6 +3489,9 @@ function AppInner() {
     setPanelRenderer(PANEL_PARAM_EDITOR, (form) => <PianoRollPanel dockFormId={form.id} />);
     setPanelRenderer(PANEL_FILE_BROWSER, () => <FileBrowserPanel />);
     setPanelRenderer(PANEL_UNDO_HISTORY, () => <UndoHistoryPanel />);
+    // 外观设置：曾经是独立 OS 窗口（`appearance.html` + 独立 React 根），现在复用
+    // 停靠机制 —— 居中浮出、不可停靠、不进「窗口」菜单（见注册表声明）。
+    setPanelRenderer(PANEL_APPEARANCE, (form) => <AppearanceSettingsPanel formId={form.id} />);
     // 记事本走 Suspense：TipTap 那几百 KB 只在真正打开时才拉取。
     setPanelRenderer(PANEL_NOTEBOOK, () => (
         <Suspense fallback={null}>

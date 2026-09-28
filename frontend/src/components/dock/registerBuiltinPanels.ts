@@ -19,6 +19,7 @@ export const PANEL_PARAM_EDITOR = MAIN_FORM_PARAM_EDITOR;
 export const PANEL_FILE_BROWSER = "fileBrowser";
 export const PANEL_NOTEBOOK = "notebook";
 export const PANEL_UNDO_HISTORY = "undoHistory";
+export const PANEL_APPEARANCE = "appearance";
 
 /**
  * 记事本默认浮窗尺寸。
@@ -32,13 +33,17 @@ const NOTEBOOK_FLOAT_HEIGHT = 420;
 /** 默认浮窗距视口边缘的边距（与 `openAsFloating.marginPx` 的默认值一致）。 */
 const DEFAULT_FLOAT_MARGIN_PX = 24;
 
-let registered = false;
-
-/** 注册全部内置面板。幂等：重复调用只是重放注册。 */
+/**
+ * 注册全部内置面板。
+ *
+ * 【为什么没有"只注册一次"的私有标志】此前有一个模块级 `registered` 布尔量做早退，
+ * 而 `resetPanelRegistryForTests()` 只清注册表、清不掉那个布尔量 —— 于是"先 reset
+ * 再注册"的测试会静默地什么都没注册（表现为断言拿到空列表）。那是个陷阱。
+ *
+ * 现在靠 `registerPanel` 自身的幂等（同 id 覆盖）实现重放：生产路径上本函数在
+ * `App.tsx` / `detachedMain.tsx` 的模块作用域各调用一次，重放代价为零。
+ */
 export function registerBuiltinPanels(): void {
-    if (registered) return;
-    registered = true;
-
     registerPanel({
         id: PANEL_TIMELINE,
         titleKey: "panel_timeline",
@@ -123,6 +128,41 @@ export function registerBuiltinPanels(): void {
         },
         detachable: true,
         order: 50,
+    });
+
+    registerPanel({
+        id: PANEL_APPEARANCE,
+        // 复用既有菜单词条（「视图 → 外观设置」）。另起 `appearance` 会得到一个
+        // 查不到的键 —— 面板标题因此会显示成键名本身（`notebook` 就栽在这上面）。
+        titleKey: "menu_appearance_settings",
+        singleton: true,
+        defaultWidth: 900,
+        defaultHeight: 640,
+        minWidth: 560,
+        minHeight: 420,
+        /*
+         * 居中浮出，而不是落在某个角。
+         *
+         * 右下角锚点是给"随手记"性质的辅助面板用的（记事本、撤销历史）—— 它们
+         * 出现在手边即可。外观设置不是那种面板：用户打开它是要**专心改一轮**，
+         * 接下来一段时间它都是主焦点，正中最合适，也不会盖住时间轴的轨道头。
+         */
+        openAsFloating: { width: 900, height: 640, anchor: "center" },
+        /*
+         * 不进「视图 → 窗口」：那个菜单列的是日常切换的工作面板，低频设置入口
+         * 混进去只会稀释常用项。入口留在「视图 → 外观设置」（`openPanel`）。
+         */
+        excludeFromWindowMenu: true,
+        /*
+         * 不可停靠：拖得动，但停不进去。把设置界面编入工作布局占一格既没有意义
+         * （改完就走），也会污染用户精心排好的布局。
+         */
+        dockable: false,
+        // 已经不需要"拆到独立窗口"：它本来就是主窗口里的浮窗，而独立窗口是另一个
+        // JS 上下文、必须重新挂载面板 —— 对一个设置界面没有收益。
+        detachable: false,
+        // 排在最后：它是低频入口，顺序上也不该插进工作面板之间。
+        order: 90,
     });
 }
 

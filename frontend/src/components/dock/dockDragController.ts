@@ -71,6 +71,14 @@ interface DragSession {
     mode: "tab" | "float";
     formId: string;
     panelId: string;
+    /**
+     * 本次拖拽是否允许停靠。
+     *
+     * `false` 时拖拽仍然移动窗口，但**永不产生落点** —— 用于声明了
+     * `dockable: false` 的面板（外观设置）：设置界面不该被编入工作布局，
+     * 拖进主编辑区占一格既无意义又会污染用户排好的布局。
+     */
+    dockable: boolean;
     pointerId: number;
     startX: number;
     startY: number;
@@ -339,12 +347,17 @@ function computeMovePatch(
     y: number,
     intentSource: PointerEvent | KeyboardEvent,
 ): Partial<DockDragState> {
-    const dockIntent = isDockModifierDown(intentSource);
+    /*
+     * 不可停靠的面板（`dockable: false`，如外观设置）：拖拽照常移动窗口，但
+     * **永不产生落点**，也不显示停靠预览 —— 否则用户会看到"这里能放"的暗示，
+     * 松手却发现它停不进去（或更糟：真的停进去了，设置界面占了主编辑区一格）。
+     */
+    const dockIntent = active.dockable && isDockModifierDown(intentSource);
     // 重排带内没有"落点"可言：松手是调整顺序。落点置空让覆盖层的停靠预览
     // （含根级边缘带的贯通预览）退场，浮动预览被 `reorder` 标志显式压掉 ——
     // 否则用户只想交换标签位置，却看到浮窗轮廓跟着鼠标跑（用户报告）。
-    const reorder = inReorderBand(active, x, y);
-    const target = reorder ? null : resolveTarget(x, y);
+    const reorder = active.dockable && inReorderBand(active, x, y);
+    const target = reorder || !active.dockable ? null : resolveTarget(x, y);
     // 浮窗搬运与标签拖拽都要算出"若此刻松手，浮窗会落在哪、多大" —— 覆盖层
     // 据此画虚线轮廓。没有它，不按修饰键拖拽时用户完全看不到结果。两种模式的
     // 换算相同：标签拖拽用记住的浮窗尺寸（`sourceSize`），搬运沿用当前几何。
@@ -682,6 +695,8 @@ export function beginTabDrag(event: React.PointerEvent, args: TabDragArgs): void
         mode: "tab",
         formId: args.formId,
         panelId: args.panelId,
+        // 标签拖拽永远可停靠：不可停靠的面板根本不会出现在标签组里。
+        dockable: true,
         pointerId: event.pointerId,
         startX: event.clientX,
         startY: event.clientY,
@@ -710,6 +725,8 @@ export function beginTabDrag(event: React.PointerEvent, args: TabDragArgs): void
 export interface FloatDragArgs {
     formId: string;
     panelId: string;
+    /** 是否允许停靠（见 `DragSession.dockable`）。缺省允许。 */
+    dockable?: boolean;
     geometry: DockRect;
     /**
      * 松手落库的尺寸；缺省 = `geometry` 的尺寸。折叠为标签条的浮窗传
@@ -727,6 +744,7 @@ export function beginFloatDrag(event: React.PointerEvent, args: FloatDragArgs): 
         mode: "float",
         formId: args.formId,
         panelId: args.panelId,
+        dockable: args.dockable ?? true,
         pointerId: event.pointerId,
         startX: event.clientX,
         startY: event.clientY,

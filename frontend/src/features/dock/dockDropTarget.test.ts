@@ -208,6 +208,42 @@ test("features/dock/dockDropTarget.test.ts scripted checks", async () => {
         );
     }
 
+    // ── 居中锚点：设置类面板（外观设置）的落点 ────────────────────
+    //
+    // 居中与右下角同样**按视口每帧解析**，所以窗口缩放后它仍在正中；
+    // 视口小于窗体时退回边距原点，与右下角锚点的兜底一致（宁可盖住内容，
+    // 也不要跑到屏幕外）。
+    {
+        const centered = {
+            x: 0,
+            y: 0,
+            w: 900,
+            h: 640,
+            anchor: "center" as const,
+        };
+        assertEqual(
+            resolveFloatRect(centered, { w: 1920, h: 1080 }),
+            { x: 510, y: 220, w: 900, h: 640 },
+            "centered float sits in the middle of the viewport",
+        );
+        assertEqual(
+            resolveFloatRect(centered, { w: 1280, h: 800 }),
+            { x: 190, y: 80, w: 900, h: 640 },
+            "and stays centered when the viewport changes",
+        );
+        assertEqual(
+            resolveFloatRect(centered, { w: 400, h: 300 }),
+            { x: 24, y: 24, w: 900, h: 640 },
+            "degenerate viewport falls back to the margin (same as bottom-right)",
+        );
+        // 居中锚点下偏移量仍然生效（多个居中浮窗错开用）
+        assertEqual(
+            resolveFloatRect({ ...centered, anchorOffsetX: -100, anchorOffsetY: 40 }, { w: 1920, h: 1080 }),
+            { x: 410, y: 260, w: 900, h: 640 },
+            "offset still applies on top of centering",
+        );
+    }
+
     // ── 锚点偏移：多个默认浮窗必须错开 ────────────────────────────
     //
     // 记事本（460×420）在右下角，撤销历史（420×420）声明 offsetX = -(460 + 24)：

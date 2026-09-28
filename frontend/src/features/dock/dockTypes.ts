@@ -92,7 +92,7 @@ export type DockNode = DockSplitNode | DockTabsetNode;
  * 时**按当前视口解析，位置就总是对的。用户一旦手动移动/缩放浮窗，锚点即被清除
  * （见 `setFloatGeometry`），此后它就是一个普通的固定位置。
  */
-export type DockFloatAnchor = "bottom-right";
+export type DockFloatAnchor = "bottom-right" | "center";
 
 /** 浮动窗体的几何与状态。 */
 export interface DockFloatGeometry {

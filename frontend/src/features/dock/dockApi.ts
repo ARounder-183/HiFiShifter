@@ -602,15 +602,24 @@ export function listPanelEntries(getState: GetState): DockPanelEntry[] {
 
 /** 纯函数版本，理由同 `listPresetNamesFromLayout`。 */
 export function listPanelEntriesFromLayout(layout: DockLayout): DockPanelEntry[] {
-    return listPanels().map((panel) => {
-        const formId = visibleFormFor(layout, panel.id);
-        return {
-            panelId: panel.id,
-            titleKey: panel.titleKey,
-            visible: formId !== null,
-            formId,
-        };
-    });
+    /*
+     * 排除声明了 `excludeFromWindowMenu` 的面板（外观设置）。
+     *
+     * 「视图 → 窗口」列的是**用户日常切换的工作面板**；设置类面板复用同一套停靠
+     * 机制，但把它列进去只会稀释常用项。它仍可被 `openPanel` 打开，入口留在
+     * 「视图 → 外观设置」。
+     */
+    return listPanels()
+        .filter((panel) => !panel.excludeFromWindowMenu)
+        .map((panel) => {
+            const formId = visibleFormFor(layout, panel.id);
+            return {
+                panelId: panel.id,
+                titleKey: panel.titleKey,
+                visible: formId !== null,
+                formId,
+            };
+        });
 }
 
 /** 供 UI 判断某面板是否注册过（菜单据此隐藏未注册项）。 */

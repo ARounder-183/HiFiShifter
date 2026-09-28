@@ -3,7 +3,6 @@
  *
  * 支持多入口（多窗口 Tauri 应用）：
  * - index.html → 主窗口
- * - appearance.html → 外观设置独立窗口
  */
 
 import { resolve } from "path";
@@ -31,7 +30,6 @@ export default defineConfig({
         rollupOptions: {
             input: {
                 main: resolve(__dirname, "index.html"),
-                appearance: resolve(__dirname, "appearance.html"),
                 // 独立窗口（把一个窗体拆到主窗口之外）：见 features/dock/detachedWindow.ts
                 detached: resolve(__dirname, "detached.html"),
                 waveformTest: resolve(__dirname, "waveform-test.html"),

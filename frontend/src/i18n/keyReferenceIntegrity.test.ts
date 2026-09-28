@@ -119,7 +119,7 @@ describe("键引用完整性", () => {
         const FAMILIES: Record<string, { values: readonly string[]; note: string }> = {
             theme_: {
                 values: THEME_MODE_SETTINGS,
-                note: "MenuBar / AppearanceWindow 的主题模式标签",
+                note: "MenuBar / 外观设置的主题模式标签",
             },
             ripple_tooltip_: {
                 // 取值域与 `RippleMode` 绑定：多一个模式就多一个键。

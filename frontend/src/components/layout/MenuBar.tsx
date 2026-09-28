@@ -3,7 +3,7 @@ import { DropdownMenu, Flex } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
-import type { RootState } from "../../app/store";
+import { store, type RootState } from "../../app/store";
 import {
     openReaperFromDialog,
     openVocalShifterFromDialog,
@@ -66,7 +66,6 @@ import {
 import { getActiveSurface } from "../../features/uiFocus/focusSurface";
 import { webApi } from "../../services/webviewApi";
 import { KeybindingsDialog } from "./KeybindingsDialog";
-import { AppearanceSettingsDialog } from "./AppearanceSettingsDialog";
 import {
     TransposeCentsDialog,
     TransposeDegreesDialog,
@@ -94,6 +93,8 @@ import { isDynParam } from "./pianoRoll/paramRanges";
 import type { AutoBackupSettings } from "../../services/api/project";
 import { AppDialog } from "../../ui/Dialog";
 import { AppChoiceList } from "../../ui/ChoiceList";
+import { togglePanelVisible } from "../../features/dock/dockApi";
+import { PANEL_APPEARANCE } from "../dock/registerBuiltinPanels";
 import { AppBusy, AppConfirmDialog, AppNoticeDialog } from "../../ui";
 // import type { VibratoParams } from "../editDialogs/EditDialogs"; // 已移除无效导入
 
@@ -188,7 +189,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const theme = useAppTheme();
     const keybindings = useAppSelector(selectMergedKeybindings);
     const [kbDialogOpen, setKbDialogOpen] = useState(false);
-    const [appearanceDialogOpen, setAppearanceDialogOpen] = useState(false);
     const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = useState(false);
     const [snapSettingsOpen, setSnapSettingsOpen] = useState(false);
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
@@ -942,7 +942,17 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             ))}
                         </DropdownMenu.SubContent>
                     </DropdownMenu.Sub>
-                    <DropdownMenu.Item onSelect={() => setAppearanceDialogOpen(true)}>
+                    {/*
+                      外观设置现在是停靠面板（居中浮出、不可停靠、不进「窗口」菜单）。
+                      `togglePanelVisible` 让它与「窗口」菜单里的其它面板行为一致：
+                      已打开则关闭、关闭则打开 —— 比"每次新建一个"更符合用户预期，
+                      而且它声明了 `singleton: true`，重复打开本来就只会聚焦同一个窗体。
+                    */}
+                    <DropdownMenu.Item
+                        onSelect={() =>
+                            togglePanelVisible(dispatch, store.getState, PANEL_APPEARANCE)
+                        }
+                    >
                         {tf("menu_appearance_settings")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
@@ -1339,12 +1349,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
             {/* 快捷键设置对话框 */}
             <KeybindingsDialog open={kbDialogOpen} onOpenChange={setKbDialogOpen} />
-
-            {/* 外观设置对话框 */}
-            <AppearanceSettingsDialog
-                open={appearanceDialogOpen}
-                onOpenChange={setAppearanceDialogOpen}
-            />
 
             {/* 停靠窗体的「窗口 / 布局」二级菜单所触发的对话框（常驻，
                 不能放进视图菜单的 Content —— 菜单关闭时那里会卸载）。 */}

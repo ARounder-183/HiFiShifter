@@ -40,7 +40,7 @@ export function formIdFromWindowLabel(label: string): string | null {
         : null;
 }
 
-/** 卫星窗口的 URL（相对应用根，与 `appearance.html` 同一约定）。 */
+/** 卫星窗口的 URL（相对应用根）。 */
 export function detachedWindowUrl(formId: string): string {
     return `detached.html?hsDetachedForm=${encodeURIComponent(formId)}`;
 }

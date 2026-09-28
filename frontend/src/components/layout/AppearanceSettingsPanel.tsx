@@ -1,23 +1,34 @@
 /**
- * 外观设置独立窗口根组件
+ * 外观设置面板。
  *
- * 在 Tauri 独立窗口中运行，拥有自己的 React 树。
- * 复用了 AppearanceSettingsDialog 中的全部业务逻辑：
- * - 主题模式 / 强调色 / 灰阶 / 圆角选择
- * - 自定义颜色编辑（CSS 变量实时预览）
- * - 字体选择 / 系统字体检测
- * - 主题导入导出
+ * 【为什么从独立 OS 窗口改成停靠面板】它此前是一个单独的 Tauri 窗口
+ * （`appearance.html` + 独立 React 根），于是完全落在 UI 系统之外：自带 15px 标题、
+ * 自造按钮类（11px 字、`bg-qt-highlight`），而对话框标题是 20px、按钮是 32px
+ * `--qt-accent`。它是全仓库**唯一**还有自造按钮类的文件。
  *
- * 与主窗口通过 localStorage（天然共享）+ Tauri 事件通信。
- * 点击「应用」时：保存到 localStorage → 通知主窗口刷新 → 关闭自身。
- * 点击「关闭」时：恢复预览 → 关闭自身。
+ * 现在它复用停靠机制，并声明为：
+ * - `openAsFloating: { anchor: "center" }` —— 默认在主窗口**正中**浮出
+ *   （不是右下角：它不是"瞥一眼"的辅助面板，而是接下来一段时间的主焦点）；
+ * - `dockable: false` —— 拖得动，但停不进去。设置界面被编入工作布局占一格
+ *   既无意义又会污染用户排好的布局；
+ * - `excludeFromWindowMenu: true` —— 不进「视图 → 窗口」。那个菜单列的是日常
+ *   切换的工作面板，低频设置入口混进去只会稀释常用项。
+ *
+ * 【为什么不再需要 Tauri 事件】主窗口与面板现在是**同一个 React 树**，
+ * `AppThemeProvider` 是同一个实例：预览直接改它，应用直接落盘。原先那套
+ * `appearance-preview / -applied / -reverted` 事件是为跨窗口通信存在的，
+ * 跨窗口消失了，事件也就没有存在理由。
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { AppFileInput } from "../../ui/FileInput";
+import { useAppDispatch } from "../../app/hooks";
+import { closeForm } from "../../features/dock/dockSlice";
+import { broadcastAppearanceToSatellites } from "../../features/dock/detachBridge";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppTheme } from "../../theme/AppThemeProvider";
+import type { AppearanceSettings } from "../../theme/themeTypes";
 import {
     RADIX_ACCENT_COLORS,
     RADIX_RADIUS_OPTIONS,
@@ -32,7 +43,7 @@ import {
     type ThemeModeSetting,
 } from "../../theme/themeTypes";
 import { getBuiltinThemeColors } from "../../theme/defaultThemes";
-import { AppConfirmDialog } from "../../ui";
+import { AppButton, AppConfirmDialog } from "../../ui";
 import {
     loadCustomThemes,
     loadAppearance,
@@ -131,7 +142,6 @@ const PALETTE_GROUPS: Array<{ labelKey: string; tokens: QtColorToken[] }> = [
 ];
 
 const CARD_CLASS = "rounded-md border border-qt-border bg-qt-panel";
-const SECTION_LABEL_CLASS = "text-qt-xs font-semibold text-qt-text";
 
 /** 主题模式卡片的迷你预览配色：auto = 深浅各半（示意跟随系统）。 */
 const MODE_PREVIEW: Record<
@@ -157,10 +167,6 @@ const MODE_PREVIEW: Record<
         bar2: "#d9d9e0",
     },
 };
-const SECONDARY_BUTTON_CLASS =
-    "px-3 py-1.5 text-qt-xs font-medium rounded border border-qt-border bg-qt-surface text-qt-text-muted hover:bg-qt-hover hover:text-qt-text transition-colors cursor-pointer select-none";
-const PRIMARY_BUTTON_CLASS =
-    "px-4 py-1.5 text-qt-xs font-semibold rounded bg-qt-highlight text-white hover:brightness-110 transition-colors cursor-pointer select-none";
 const PREVIEW_SETTINGS_KEY = "hifishifter.appearance.preview";
 const PREVIEW_COLORS_KEY = "hifishifter.appearance.preview.colors";
 
@@ -437,64 +443,70 @@ const ColorTokenRow: React.FC<{
 };
 
 /* ═══════════════════════════════════════════════════════════
- * 关闭窗口辅助
- * ═══════════════════════════════════════════════════════════ */
-
-async function closeThisWindow() {
-    try {
-        const mod = await import("@tauri-apps/api/window");
-        const win = mod.getCurrentWindow();
-        await win.close();
-    } catch {
-        // 如果 Tauri API 不可用（如开发模式下直接在浏览器打开），尝试关闭标签
-        window.close();
-    }
-}
-
-/** 通知主窗口刷新主题 */
-async function emitThemeApplied() {
-    try {
-        const { emit } = await import("@tauri-apps/api/event");
-        await emit("appearance-applied");
-    } catch {
-        // fallback: 不做任何事，主窗口重新 focus 时会从 localStorage 重新读取
-    }
-}
-
-async function emitThemePreview(payload: {
-    settings: {
-        mode: ThemeModeSetting;
-        accentColor: RadixAccentColor;
-        grayColor: RadixGrayColor;
-        radius: RadixRadius;
-        fontFamily: string;
-    };
-    colors: Partial<Record<QtColorToken, string>>;
-}) {
-    try {
-        const { emit } = await import("@tauri-apps/api/event");
-        await emit("appearance-preview", payload);
-    } catch {
-        // ignore when Tauri API unavailable
-    }
-}
-
-async function emitThemeReverted() {
-    try {
-        const { emit } = await import("@tauri-apps/api/event");
-        await emit("appearance-reverted");
-    } catch {
-        // ignore when Tauri API unavailable
-    }
-}
-
-/* ═══════════════════════════════════════════════════════════
  * 主组件
  * ═══════════════════════════════════════════════════════════ */
 
-export const AppearanceWindow: React.FC = () => {
+export interface AppearanceSettingsPanelProps {
+    /** 本面板所在的停靠窗体 id —— 关闭时用它从布局里移除自己。 */
+    formId: string;
+}
+
+export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = ({ formId }) => {
     const { tf, plural } = useI18n();
     const theme = useAppTheme();
+    const dispatch = useAppDispatch();
+
+    /**
+     * 关闭本面板。
+     *
+     * 【为什么不是 `window.close()`】它不再是独立 OS 窗口，而是停靠系统里的一个
+     * 浮窗：关闭 = 从布局里移除该窗体，由停靠内核收尾（浮窗层卸载、布局落盘）。
+     */
+    const onRequestClose = useCallback(() => {
+        dispatch(closeForm(formId));
+    }, [dispatch, formId]);
+
+    /**
+     * 打开面板那一刻的外观。关闭**未应用的草稿**时回滚到它。
+     *
+     * 【为什么自己存一份，而不用 `theme.revertPreview()`】provider 的快照语义是
+     * "上一次 `applySettings` 之前的状态"，而**预览本身就调 `applySettings`** ——
+     * 于是第一次预览之后 provider 的快照已经变成预览值，`revertPreview()` 会
+     * "回退到预览"，等于没回退。面板自己记下打开前的样子，语义才准确。
+     *
+     * 【为什么必须有回滚】预览会落盘（`applySettings` 会 `saveAppearance`）。
+     * 于是用户点浮动窗的 X 关掉面板时，如果他只是随手试了试颜色，那些颜色会
+     * **变成已保存的设置** —— 用户以为取消了，实际生效了。这是必须堵住的。
+     */
+    const openedWithRef = useRef<AppearanceSettings | null>(null);
+    const themeRef = useRef(theme);
+    useEffect(() => {
+        themeRef.current = theme;
+    }, [theme]);
+
+    useEffect(() => {
+        // 只在挂载时抓一次：这是"打开面板前的样子"。
+        const current = themeRef.current;
+        openedWithRef.current = {
+            mode: current.modeSetting,
+            accentColor: current.accentColor,
+            grayColor: current.grayColor,
+            radius: current.radius,
+            fontFamily: current.fontFamily,
+            activeCustomThemeId: current.activeCustomThemeId,
+        };
+        return () => {
+            // 卸载 = 关闭（浮动窗的 X、菜单开关、布局重置都会走到这里）。
+            // 草稿未应用就回滚，否则预览会被当成用户的选择留下来。
+            if (!draftDirtyRef.current) return;
+            draftDirtyRef.current = false;
+            const opened = openedWithRef.current;
+            if (opened) themeRef.current.applySettings(opened);
+            localStorage.removeItem(PREVIEW_SETTINGS_KEY);
+            localStorage.removeItem(PREVIEW_COLORS_KEY);
+            void broadcastAppearanceToSatellites();
+        };
+    }, []);
 
     /* ── Tab ── */
     const [activeTab, setActiveTab] = useState<SettingsTab>("theme");
@@ -655,9 +667,17 @@ export const AppearanceWindow: React.FC = () => {
         }
     }, [editColors, theme.mode]);
 
+    /*
+     * 实时预览：直接作用到**共享的** `AppThemeProvider`。
+     *
+     * 此前这里把设置写进 localStorage 再 `emit("appearance-preview")`，由主窗口
+     * 收到事件后应用 —— 那是跨窗口通信的必需品。现在主窗口与面板在同一个 React 树里，
+     * 直接调用即可：少一次序列化、少一次 IPC，也少一个"事件没送到就不同步"的失败面。
+     *
+     * localStorage 仍然写：`draftDirtyRef` 的同步逻辑与"预览在重载后仍生效"
+     * 都依赖它（见 `applyPreviewFromStorage` 的语义）。
+     */
     useEffect(() => {
-        // 预览/应用均透传"设置值"（含 auto），而非解析后的具体模式，
-        // 避免把 auto 固化成 dark/light；各窗口自行按系统偏好解析。
         localStorage.setItem(
             PREVIEW_SETTINGS_KEY,
             JSON.stringify({
@@ -669,17 +689,15 @@ export const AppearanceWindow: React.FC = () => {
             }),
         );
         localStorage.setItem(PREVIEW_COLORS_KEY, JSON.stringify(editColors));
-        void emitThemePreview({
-            settings: {
-                mode: theme.modeSetting,
-                accentColor,
-                grayColor,
-                radius,
-                fontFamily,
-            },
-            colors: editColors,
+        theme.applySettings({
+            mode: theme.modeSetting,
+            accentColor,
+            grayColor,
+            radius,
+            fontFamily,
+            activeCustomThemeId: null,
         });
-    }, [theme.modeSetting, accentColor, grayColor, radius, fontFamily, editColors]);
+    }, [theme, theme.modeSetting, accentColor, grayColor, radius, fontFamily, editColors]);
 
     /* ── 应用 & 关闭 ── */
     const handleApply = useCallback(() => {
@@ -721,9 +739,18 @@ export const AppearanceWindow: React.FC = () => {
         });
         localStorage.removeItem(PREVIEW_SETTINGS_KEY);
         localStorage.removeItem(PREVIEW_COLORS_KEY);
+        // 草稿已应用：卸载时的回滚逻辑据此跳过。
+        draftDirtyRef.current = false;
 
-        // 通知主窗口刷新 → 关闭自身
-        void emitThemeApplied().then(() => closeThisWindow());
+        /*
+         * 拆到独立窗口的面板不共享主题（另一个 JS 上下文），必须显式通知。
+         * 此前这条链是"外观窗口发事件 → 主窗口的桥收到 → 转发给卫星"；现在外观设置
+         * 就在主窗口里，直接调用即可。
+         */
+        void broadcastAppearanceToSatellites();
+
+        // 主题已经是共享实例上的最新值（`applySettings` 刚刚落盘），直接关面板。
+        onRequestClose();
     }, [
         accentColor,
         grayColor,
@@ -736,14 +763,24 @@ export const AppearanceWindow: React.FC = () => {
         customThemes,
         theme,
         tf,
+        onRequestClose,
     ]);
 
     const handleClose = useCallback(() => {
-        theme.revertPreview();
+        /*
+         * 直接调 `revertPreview()` 在这里**不够**（见 `openedWithRef` 的说明：
+         * provider 的快照会被预览覆盖）。改为显式回到打开前的设置。
+         */
+        const opened = openedWithRef.current;
+        if (opened) theme.applySettings(opened);
         localStorage.removeItem(PREVIEW_SETTINGS_KEY);
         localStorage.removeItem(PREVIEW_COLORS_KEY);
-        void emitThemeReverted().then(() => closeThisWindow());
-    }, [theme]);
+        // 清掉草稿标记：卸载时的回滚逻辑据此跳过（这里已经回滚过了）。
+        draftDirtyRef.current = false;
+        // 回滚也改变了外观 —— 卫星窗口同样要跟上。
+        void broadcastAppearanceToSatellites();
+        onRequestClose();
+    }, [theme, onRequestClose]);
 
     const paletteTokens = useMemo(() => PALETTE_GROUPS.flatMap((group) => group.tokens), []);
     const paletteTokenSet = useMemo(() => new Set<QtColorToken>(paletteTokens), [paletteTokens]);
@@ -890,38 +927,35 @@ export const AppearanceWindow: React.FC = () => {
     );
 
     /* ═══════════════════════════════════════════════════════════
-     * 渲染 — 直接作为窗口内容，不需要 portal
+     * 渲染
      * ═══════════════════════════════════════════════════════════ */
     return (
-        <div className="flex h-screen flex-col overflow-hidden select-none bg-qt-window">
-            {/* ═══════ 头部：标题栏 + Tab 切换 ═══════ */}
-            <div
-                className={`mx-auto w-full max-w-[920px] ${CARD_CLASS} space-y-2 px-4 py-3 shrink-0`}
-                data-tauri-drag-region
-            >
-                <div className="flex items-start justify-between gap-3">
-                    <div className="space-y-1">
-                        <h2 className="m-0 text-qt-lg font-semibold text-qt-text">
-                            {tf("appearance_title")}
-                        </h2>
-                    </div>
-                    <div className="flex items-center gap-2 pt-1">
-                        {modifiedColorCount > 0 && (
-                            <span className="text-qt-micro text-qt-highlight bg-qt-highlight/10 px-2 py-0.5 rounded font-semibold">
-                                {plural("appearance_modified_count", modifiedColorCount)}
-                            </span>
-                        )}
-                    </div>
+        /*
+         * `h-full` 而不是 `h-screen`：面板高度由停靠宿主决定。`h-screen` 在浮窗里
+         * 会撑到整屏高，超出浮窗自身的框。
+         *
+         * 不再渲染自带标题栏：浮动窗已经有一条标题栏（`.hs-dock-float-title`），
+         * 再画一条会出现**两个标题**。标题由注册表的 `titleKey` 提供。
+         */
+        <div className="flex h-full flex-col overflow-hidden select-none">
+            {/* ═══════ 头部：Tab 切换 + 改动计数 ═══════ */}
+            <div className={`shrink-0 space-y-2 ${CARD_CLASS} mx-1 mt-1 px-3 py-2`}>
+                <div className="flex items-center justify-between gap-3">
+                    <SegmentedControl
+                        tabs={tabItems}
+                        active={activeTab}
+                        onChange={(id) => setActiveTab(id as SettingsTab)}
+                    />
+                    {modifiedColorCount > 0 && (
+                        <span className="hs-type-caption shrink-0 rounded bg-qt-highlight/10 px-2 py-0.5 font-semibold text-qt-highlight">
+                            {plural("appearance_modified_count", modifiedColorCount)}
+                        </span>
+                    )}
                 </div>
-                <SegmentedControl
-                    tabs={tabItems}
-                    active={activeTab}
-                    onChange={(id) => setActiveTab(id as SettingsTab)}
-                />
             </div>
 
             {/* ═══════ 内容区 ═══════ */}
-            <div className="mx-auto mt-1 flex-1 w-full max-w-[920px] overflow-y-auto custom-scrollbar">
+            <div className="mx-1 mt-1 min-h-0 flex-1 overflow-y-auto custom-scrollbar">
                 <div className="pb-1">
                     {/* ═══════ Tab: 主题 ═══════ */}
                     {activeTab === "theme" && (
@@ -930,32 +964,26 @@ export const AppearanceWindow: React.FC = () => {
                             <div
                                 className={`${CARD_CLASS} flex items-center gap-2 flex-wrap px-3 py-2`}
                             >
-                                <button
-                                    className={SECONDARY_BUTTON_CLASS}
-                                    onClick={() => fileInputRef.current?.click()}
-                                >
+                                <AppButton onClick={() => fileInputRef.current?.click()}>
                                     {tf("appearance_import_theme")}
-                                </button>
+                                </AppButton>
                                 <AppFileInput
                                     inputRef={fileInputRef}
                                     accept=".json"
                                     onFiles={handleImportTheme}
                                 />
-                                <button
-                                    className={SECONDARY_BUTTON_CLASS}
-                                    onClick={handleExportTheme}
-                                >
+                                <AppButton onClick={handleExportTheme}>
                                     {tf("appearance_export_theme")}
-                                </button>
+                                </AppButton>
                                 {hasCustomColors && (
                                     <>
                                         <div className="flex-1" />
-                                        <button
-                                            className="px-3 py-1.5 text-qt-xs font-medium rounded border border-qt-danger-border/40 bg-qt-danger-bg/20 text-qt-danger-text hover:bg-qt-danger-bg/35 transition-colors cursor-pointer select-none"
+                                        <AppButton
+                                            intent="danger"
                                             onClick={() => setResetColorsConfirmOpen(true)}
                                         >
                                             {tf("appearance_reset_all_colors")}
-                                        </button>
+                                        </AppButton>
                                     </>
                                 )}
                             </div>
@@ -963,7 +991,7 @@ export const AppearanceWindow: React.FC = () => {
                             {/* ── 已保存主题 ── */}
                             {customThemes.length > 0 && (
                                 <div className={`${CARD_CLASS} p-3 space-y-2`}>
-                                    <span className={SECTION_LABEL_CLASS}>
+                                    <span className="hs-type-label font-semibold">
                                         {tf("appearance_saved_themes")}
                                     </span>
                                     <div className="flex flex-wrap gap-1.5">
@@ -1019,7 +1047,9 @@ export const AppearanceWindow: React.FC = () => {
 
                             {/* ── 主题模式 ── */}
                             <div className={`${CARD_CLASS} p-3 space-y-2`}>
-                                <span className={SECTION_LABEL_CLASS}>{tf("appearance_mode")}</span>
+                                <span className="hs-type-label font-semibold">
+                                    {tf("appearance_mode")}
+                                </span>
                                 <div className="grid grid-cols-3 gap-2">
                                     {(["auto", "dark", "light"] as const).map((mode) => {
                                         const isSelected = theme.modeSetting === mode;
@@ -1073,7 +1103,7 @@ export const AppearanceWindow: React.FC = () => {
                             {/* ── 强调色 ── */}
                             <div className={`${CARD_CLASS} p-3 space-y-2`}>
                                 <div className="flex items-center justify-between">
-                                    <span className={SECTION_LABEL_CLASS}>
+                                    <span className="hs-type-label font-semibold">
                                         {tf("appearance_accent")}
                                     </span>
                                     <span className="text-qt-3xs text-qt-text-muted/50 font-mono">
@@ -1121,7 +1151,7 @@ export const AppearanceWindow: React.FC = () => {
 
                             {/* ── 圆角 ── */}
                             <div className={`${CARD_CLASS} p-3 space-y-2`}>
-                                <span className={SECTION_LABEL_CLASS}>
+                                <span className="hs-type-label font-semibold">
                                     {tf("appearance_radius")}
                                 </span>
                                 <div className="flex gap-1.5">
@@ -1169,7 +1199,7 @@ export const AppearanceWindow: React.FC = () => {
                             {/* ── 颜色编辑（单套色卡） ── */}
                             <div className={`${CARD_CLASS} space-y-3 p-3`}>
                                 <div className="flex items-center justify-between">
-                                    <span className={SECTION_LABEL_CLASS}>
+                                    <span className="hs-type-label font-semibold">
                                         {tf("appearance_tab_colors")}
                                     </span>
                                     <span className="text-qt-micro text-qt-text-muted">
@@ -1222,7 +1252,9 @@ export const AppearanceWindow: React.FC = () => {
                         <div className="space-y-2">
                             {/* 字体输入 */}
                             <div className={`${CARD_CLASS} p-3 space-y-2`}>
-                                <span className={SECTION_LABEL_CLASS}>{tf("appearance_font")}</span>
+                                <span className="hs-type-label font-semibold">
+                                    {tf("appearance_font")}
+                                </span>
                                 <div className="flex items-center gap-2">
                                     <input
                                         type="text"
@@ -1235,17 +1267,15 @@ export const AppearanceWindow: React.FC = () => {
                                         placeholder={DEFAULT_FONT_FAMILY}
                                         spellCheck={false}
                                     />
-                                    <button
-                                        className={SECONDARY_BUTTON_CLASS}
+                                    <AppButton
                                         onClick={() => {
                                             markDraftDirty();
                                             setFontFamily(DEFAULT_FONT_FAMILY);
                                         }}
                                     >
                                         {tf("appearance_reset")}
-                                    </button>
-                                    <button
-                                        className={SECONDARY_BUTTON_CLASS}
+                                    </AppButton>
+                                    <AppButton
                                         onClick={() => {
                                             markDraftDirty();
                                             setFontFamily(DEFAULT_FONT_FAMILY);
@@ -1253,7 +1283,7 @@ export const AppearanceWindow: React.FC = () => {
                                         }}
                                     >
                                         {tf("appearance_font_restore_default")}
-                                    </button>
+                                    </AppButton>
                                 </div>
 
                                 {/* 字体预览 */}
@@ -1277,7 +1307,7 @@ export const AppearanceWindow: React.FC = () => {
                             <div className={`${CARD_CLASS} p-3 space-y-2`}>
                                 <div className="flex items-center justify-between gap-3">
                                     <div className="flex items-center gap-2">
-                                        <span className={SECTION_LABEL_CLASS}>
+                                        <span className="hs-type-label font-semibold">
                                             {tf("appearance_font_system")}
                                         </span>
                                         {availableFonts.length > 0 && (
@@ -1289,14 +1319,11 @@ export const AppearanceWindow: React.FC = () => {
                                             </span>
                                         )}
                                     </div>
-                                    <button
-                                        className={SECONDARY_BUTTON_CLASS}
-                                        onClick={() => void systemFonts.detect(true)}
-                                    >
+                                    <AppButton onClick={() => void systemFonts.detect(true)}>
                                         {systemFonts.loading
                                             ? tf("appearance_font_detecting")
                                             : tf("appearance_font_detect")}
-                                    </button>
+                                    </AppButton>
                                 </div>
 
                                 {/* 加载中 */}
@@ -1411,16 +1438,13 @@ export const AppearanceWindow: React.FC = () => {
 
             {/* ═══════ 底部按钮 ═══════ */}
             <div className="mx-auto mt-1 flex w-full max-w-[920px] items-center justify-end gap-2 border-t border-qt-border px-1 pt-1.5 shrink-0">
-                <button className={SECONDARY_BUTTON_CLASS} onClick={handleClose}>
-                    {tf("close")}
-                </button>
-                <button className={PRIMARY_BUTTON_CLASS} onClick={handleApply}>
+                <AppButton onClick={handleClose}>{tf("close")}</AppButton>
+                <AppButton intent="primary" onClick={handleApply}>
                     {tf("appearance_apply")}
-                </button>
+                </AppButton>
             </div>
 
-            {/* 重置全部颜色确认：丢弃当前所有自定义色覆盖。对话框 portal 到 body，
-                本窗口自带 I18nProvider 与 AppThemeProvider（Radix Theme），无需 Redux。 */}
+            {/* 重置全部颜色确认：丢弃当前所有自定义色覆盖。 */}
             <AppConfirmDialog
                 open={resetColorsConfirmOpen}
                 onOpenChange={setResetColorsConfirmOpen}

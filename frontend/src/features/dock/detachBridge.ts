@@ -43,11 +43,6 @@ export const BRIDGE_SNAPSHOT_REQUEST_EVENT = "hs:store/snapshot-request";
 export const BRIDGE_SNAPSHOT_EVENT = "hs:store/snapshot";
 /** 主窗口 → 卫星窗口：外观（主题 / 字体）变更。 */
 export const BRIDGE_APPEARANCE_EVENT = "hs:store/appearance";
-/** 外观设置窗口发出的三个事件（见 `AppearanceWindow`）。 */
-const APPEARANCE_APPLIED_EVENT = "appearance-applied";
-const APPEARANCE_PREVIEW_EVENT = "appearance-preview";
-const APPEARANCE_REVERTED_EVENT = "appearance-reverted";
-
 interface BridgeEnvelope {
     /** 发送方窗口标签（用于忽略自己发出的事件）。 */
     origin: string;
@@ -200,6 +195,25 @@ async function loadEventApi(): Promise<{
 }
 
 /**
+ * 把当前外观广播给所有卫星窗口。
+ *
+ * 【为什么由面板**直接调用**，而不是监听 Tauri 事件】外观设置曾经是独立 OS 窗口，
+ * 它改完外观后发 `appearance-applied / -preview / -reverted` 三个事件，主窗口的桥
+ * 监听它们再转发给卫星窗口。现在外观设置是主窗口里的一个停靠面板，那三个事件
+ * 不复存在 —— 于是改成面板直接调用本函数，链路比"面板 → 事件 → 桥 → 卫星"更短，
+ * 也少一个"事件没送到就不同步"的失败面。
+ *
+ * 卫星窗口（拆到独立窗口的面板）不共享主题，必须显式通知，见 `BRIDGE_APPEARANCE_EVENT`。
+ */
+export async function broadcastAppearanceToSatellites(): Promise<void> {
+    const api = await loadEventApi();
+    if (!api) return;
+    const appearance = trySerialize(loadAppearance());
+    if (appearance === null) return;
+    await api.emit(BRIDGE_APPEARANCE_EVENT, { appearance }).catch(() => undefined);
+}
+
+/**
  * 动作复制中间件。
  *
  * @param role 本窗口角色（目前两侧行为一致：都广播自己派发的动作；差异体现在
@@ -289,29 +303,11 @@ export function installBridge(args: {
         unsubscribers.push(offAction);
 
         if (role === "main") {
-            // 外观（主题 / 字体）变更 → 广播给所有卫星窗口。
-            //
-            // 【为什么由桥来做，而不是复用 `AppearanceSettingsDialog` 的监听】那个监听
-            // 只在对话框打开时挂载，而卫星窗口可能在对话框关闭后才打开、或用户改了外观
-            // 之后才拆出面板。桥在主窗口常驻，是唯一"总在"的地方。
-            const broadcastAppearance = () => {
-                const appearance = trySerialize(loadAppearance());
-                if (appearance !== null) {
-                    void api.emit(BRIDGE_APPEARANCE_EVENT, { appearance }).catch(() => undefined);
-                }
-            };
-            const offApplied = await api.listen(APPEARANCE_APPLIED_EVENT, broadcastAppearance);
-            unsubscribers.push(offApplied);
-            const offReverted = await api.listen(APPEARANCE_REVERTED_EVENT, broadcastAppearance);
-            unsubscribers.push(offReverted);
-            const offPreview = await api.listen(APPEARANCE_PREVIEW_EVENT, (event) => {
-                const payload = event.payload as { settings?: unknown } | null;
-                const appearance = trySerialize(payload?.settings ?? null);
-                if (appearance !== null) {
-                    void api.emit(BRIDGE_APPEARANCE_EVENT, { appearance }).catch(() => undefined);
-                }
-            });
-            unsubscribers.push(offPreview);
+            /*
+             * 外观广播不再在这里接线：外观设置已是主窗口内的面板，它改完外观后
+             * **直接调用** `broadcastAppearanceToSatellites()`（见该函数）。
+             * 这里原本监听外观窗口发出的三个 Tauri 事件，那些事件随独立窗口一起消失了。
+             */
 
             // 主窗口应答快照请求（卫星会重试，因此这里必须**幂等且无副作用**）。
             const offRequest = await api.listen(BRIDGE_SNAPSHOT_REQUEST_EVENT, (event) => {

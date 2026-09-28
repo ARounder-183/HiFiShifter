@@ -307,8 +307,8 @@ function normalizeFloat(raw: unknown): DockForm["float"] {
     if (value.minimized === true) float.minimized = true;
     // 锚点必须原样保留：丢了它，一次落盘就退化成写死的坐标，窗口尺寸变化后
     // 浮窗不再跟随（见 `DockFloatAnchor`）。
-    if (value.anchor === "bottom-right") {
-        float.anchor = "bottom-right";
+    if (value.anchor === "bottom-right" || value.anchor === "center") {
+        float.anchor = value.anchor;
         float.anchorMarginPx = clampNumber(value.anchorMarginPx, 0, 400, 24);
         // 偏移同锚点一起保留：丢了它，两个默认浮出的面板会落回同一处完全重叠。
         float.anchorOffsetX = clampNumber(value.anchorOffsetX, -4000, 4000, 0);

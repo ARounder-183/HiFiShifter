@@ -2,7 +2,7 @@
  * 浮动层：浮在主界面之上的窗体。
  *
  * 【为什么默认不做成独立 OS 窗口】真实的 `WebviewWindow` 是另一个 JS 上下文，
- * 不共享 Redux / Context / 主题（`appearanceMain.tsx` 刻意不带 Redux 就是
+ * 不共享 Redux / Context / 主题（独立窗口是另一个 JS 上下文，这正是
  * 这个原因）。要让时间轴或参数编辑器在独立窗口里工作，就得为每个面板重建
  * 状态桥 —— 而这两个面板恰恰是本应用最重的部分。走主窗口内的 portal 浮层
  * 则完全共享一切，且因为宿主是同一个 DOM 节点（见 `panelHostRegistry`），
@@ -84,6 +84,13 @@ function DockFloatWindow({
     const title = form.title ?? (definition ? tf(definition.titleKey) : form.panelId);
     /** 本面板能否拆到独立窗口（见 `PanelDefinition.detachable`）。 */
     const detachable = definition?.detachable === true;
+    /**
+     * 本面板能否被拖拽停靠（见 `PanelDefinition.dockable`）。
+     *
+     * 直接进 `onTitlePointerDown` 的依赖，不绕 ref：它来自注册表，只在热更新时
+     * 变化，回调身份因此稳定；而渲染期写 ref 会违反 React Compiler 的引用规则。
+     */
+    const dockable = definition?.dockable ?? true;
     const doubleClickAction = useAppSelector((s) => s.dock.settings.doubleClickHeaderAction);
 
     /**
@@ -115,6 +122,8 @@ function DockFloatWindow({
                 beginFloatDrag(event, {
                     formId: form.id,
                     panelId: form.panelId,
+                    // 设置类面板（`dockable: false`）拖得动但停不进去。
+                    dockable,
                     geometry: dragGeometry,
                     dropSize,
                 });
@@ -179,7 +188,7 @@ function DockFloatWindow({
 
             startDragAndTrack(rect);
         },
-        [dispatch, form.id, form.panelId, rect, geometry],
+        [dispatch, form.id, form.panelId, rect, geometry, dockable],
     );
 
     const onResizePointerDown = useCallback(

@@ -389,7 +389,7 @@ describe("抽象层不能空转（采用率）", () => {
         /*
          * 【为什么禁止 Tailwind 固定调色板】`bg-gray-700` / `text-blue-600` 这类
          * 取值不跟随主题：浅色主题下它们要么对比度不足、要么和周围 chrome 脱节，
-         * 用户在 AppearanceWindow 里换主题也影响不到它们。本仓库为此有整套
+         * 用户在外观设置里换主题也影响不到它们。本仓库为此有整套
          * `--qt-*` 语义色（含 danger / warning / success / info 四组）。
          *
          * 【豁免的是什么】有两处色相**必须**固定，因为它们承载的是"类别"而不是
@@ -432,7 +432,7 @@ describe("抽象层不能空转（采用率）", () => {
          * 允许清单里的是**例外且有意**的一处：设置页里的字体列表。外层是页面滚动、
          * 内层是有界的列表滚动，两条都各自有用（见该处注释）。
          */
-        const ALLOWED = new Set([join("src", "components", "layout", "AppearanceWindow.tsx")]);
+        const ALLOWED = new Set([join("src", "components", "layout", "AppearanceSettingsPanel.tsx")]);
         const BOUNDED_SCROLL =
             /["'`](?=[^"'`]*max-h-\[\d+px\])(?=[^"'`]*overflow-(?:x|y)?-auto)[^"'`]*["'`]/g;
 
