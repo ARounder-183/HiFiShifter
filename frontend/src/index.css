@@ -32,6 +32,16 @@
     --qt-warning-bg: #3d2a0a;
     --qt-warning-text: #fcd34d;
     --qt-warning-border: #f59e0b;
+    /* 成功 / 信息：与 danger/warning 同构的第三、四组语义色。
+       此前"成功"只能写死 `text-green-600`、"处理中"只能写死 `text-blue-600` ——
+       于是这两类状态在浅色主题下要么对比度不足、要么和强调色打架，而且
+       主题定制（AppearanceWindow）完全管不到它们。 */
+    --qt-success-bg: #14351f;
+    --qt-success-text: #86efac;
+    --qt-success-border: #22c55e;
+    --qt-info-bg: #10243d;
+    --qt-info-text: #93c5fd;
+    --qt-info-border: #3b82f6;
     /* 画布区（时间线轨道/参数编辑器）比 chrome 区（window/panel）深一档，
        让工具栏/标尺/画布靠明度而不是仅靠 1px 细线分区 */
     --qt-graph-bg: #1f1f1f;
@@ -88,6 +98,12 @@
     --qt-warning-bg: #fff1dc;
     --qt-warning-text: #9b5f13;
     --qt-warning-border: #d59140;
+    --qt-success-bg: #e2f7e8;
+    --qt-success-text: #1f6b3a;
+    --qt-success-border: #4aa96c;
+    --qt-info-bg: #e4eefc;
+    --qt-info-text: #2a5aa8;
+    --qt-info-border: #6d9bd8;
     --qt-graph-bg: #edf0f5;
     /* 半透明蓝灰：在泳道上与旧实色等效，在 clip 色块/波形上则化为
        同色调的细线，不再切出高对比条纹 */

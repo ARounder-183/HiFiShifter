@@ -347,7 +347,7 @@ function ClipRateEditorFields({
                 <input
                     className={`w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border ${
                         durationEdited && parsedDuration == null
-                            ? "border-red-400/80"
+                            ? "border-qt-danger-border"
                             : "border-qt-border"
                     }`}
                     value={durationText}

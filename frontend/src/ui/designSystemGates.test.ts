@@ -15,7 +15,7 @@
  *   2. 匹配前先**剥离注释与字符串**，再做跨行匹配；
  *   3. 断言"抽象层不能空转"（采用率下限 + 棘轮）。
  */
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 
@@ -30,6 +30,20 @@ const NO_CONSUMER_ALLOWED: Record<string, string> = {
     AppButton:
         "由 AppDialog 的页脚使用 —— 42 个对话框都经由它渲染按钮，属于壳内部件。" +
         "门禁只在 src/ui 之外找消费者，因此看不到这一层。",
+};
+
+/**
+ * 允许使用 Tailwind 固定调色板的文件。每条都必须写明理由。
+ * 与 `NO_CONSUMER_ALLOWED` 同一约定：这是**已审计的记录**，不是静音开关。
+ *
+ * 允许的都是"色相即语义"的域内表面 —— 颜色在这里表达类别（文件类型、电平档位），
+ * 而不是主题角色，因此**必须**固定，不能跟随用户的强调色。
+ */
+const PALETTE_ALLOWED: Record<string, string> = {
+    [join("src", "components", "layout", "FileBrowserPanel.tsx")]:
+        "文件类型图标：色相即类型标识（文件夹 / 视频 / 音频 / 工程），不随主题变化。",
+    [join("src", "components", "layout", "timeline", "TrackList.tsx")]:
+        "电平表：色相即电平档位（削顶 / 过载 / 偏高 / 正常），必须固定，否则读数失去意义。",
 };
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -369,6 +383,41 @@ describe("抽象层不能空转（采用率）", () => {
             if (hits.length > 0) offenders.push(`${file}: ${hits.length} 处`);
         }
         expect(offenders, "请改用 `tf`（键名有类型，拼错会在编译期报错）").toEqual([]);
+    });
+
+    test("颜色只从语义令牌取（域内固定色相有豁免清单）", () => {
+        /*
+         * 【为什么禁止 Tailwind 固定调色板】`bg-gray-700` / `text-blue-600` 这类
+         * 取值不跟随主题：浅色主题下它们要么对比度不足、要么和周围 chrome 脱节，
+         * 用户在 AppearanceWindow 里换主题也影响不到它们。本仓库为此有整套
+         * `--qt-*` 语义色（含 danger / warning / success / info 四组）。
+         *
+         * 【豁免的是什么】有两处色相**必须**固定，因为它们承载的是"类别"而不是
+         * "主题语义"：文件类型图标（按类型分色）与电平表（按电平分色）。电平表
+         * 若跟随用户的强调色，就再也读不出"这一段是不是要削顶了"。
+         */
+        const PALETTE =
+            /\b(?:text|bg|border|from|to|via|ring|outline|fill|stroke|divide|placeholder|decoration|caret|shadow)-(?:gray|slate|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}\b/g;
+
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.tsx?$/)) {
+            if (file in PALETTE_ALLOWED) continue;
+            const source = stripCommentsAndStrings(readFileSync(file, "utf8"));
+            const hits = source.match(PALETTE) ?? [];
+            if (hits.length > 0) offenders.push(`${file}: ${[...new Set(hits)].join(", ")}`);
+        }
+        expect(
+            offenders,
+            "请改用 `qt-*` 语义色（danger/warning/success/info/text/text-muted/border…）。" +
+                "确实需要固定色相时，把文件加进本测试的 ALLOWED 并写明理由",
+        ).toEqual([]);
+    });
+
+    test("调色板豁免清单里每条都写了理由，且指向真实文件", () => {
+        for (const [name, reason] of Object.entries(PALETTE_ALLOWED)) {
+            expect(reason.length, `${name} 的豁免理由过短`).toBeGreaterThan(20);
+            expect(existsSync(name), `豁免清单指向了不存在的文件：${name}`).toBe(true);
+        }
     });
 
     test("排版角色在 src/ui 之外的采用率只增不减（棘轮）", () => {

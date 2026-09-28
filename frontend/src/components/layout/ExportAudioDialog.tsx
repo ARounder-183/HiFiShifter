@@ -1793,6 +1793,14 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                 percentage={displayProgress}
                                 label={progressLabel}
                                 completed={exportCompleted}
+                                /*
+                                 * 长任务必须能取消：一次多目标导出可能跑几分钟，
+                                 * 而进度区此前只有读数、没有出口。后端本来就有
+                                 * `cancel_export_audio`（页脚的取消也走它），
+                                 * 这里只是把它接到进度条上。
+                                 */
+                                showCancel={!exportCompleted && exportProgress.active}
+                                onCancel={() => void handleCancel()}
                             />
                         </div>
                     ) : null}

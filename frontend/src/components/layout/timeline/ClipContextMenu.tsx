@@ -47,7 +47,7 @@ const MenuItem: React.FC<{
                 disabled
                     ? "opacity-40 cursor-default"
                     : danger
-                      ? "hover:bg-red-500/20 text-red-400"
+                      ? "hover:bg-qt-danger-bg hover:text-qt-danger-text"
                       : "hover:bg-qt-button-hover"
             }`}
         disabled={disabled}

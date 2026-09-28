@@ -3860,13 +3860,13 @@ function AppInner() {
                             item.action === "replaced";
                         const statusBadgeClass =
                             item.action === "ignored"
-                                ? "border border-gray-500/25 bg-gray-500/10 text-gray-600"
+                                ? "border border-qt-border bg-qt-base text-qt-text-muted"
                                 : item.action === "reloaded" || item.action === "replaced"
-                                  ? "border border-green-500/25 bg-green-500/10 text-green-600"
+                                  ? "border border-qt-success-border bg-qt-success-bg text-qt-success-text"
                                   : item.action === "failed"
-                                    ? "border border-red-500/25 bg-red-500/10 text-red-600"
+                                    ? "border border-qt-danger-border bg-qt-danger-bg text-qt-danger-text"
                                     : item.action === "processing"
-                                      ? "border border-blue-500/25 bg-blue-500/10 text-blue-600"
+                                      ? "border border-qt-info-border bg-qt-info-bg text-qt-info-text"
                                       : "border border-qt-border bg-qt-base text-qt-text-muted";
                         const statusLabel =
                             item.action === "ignored"
@@ -3894,8 +3894,8 @@ function AppInner() {
                                 <div
                                     className={`shrink-0 whitespace-nowrap rounded px-1 py-0.5 text-center text-qt-micro font-semibold leading-none ${
                                         item.change === "deleted"
-                                            ? "border border-red-500/25 bg-red-500/10 text-red-600"
-                                            : "border border-amber-500/25 bg-amber-500/10 text-amber-600"
+                                            ? "border border-qt-danger-border bg-qt-danger-bg text-qt-danger-text"
+                                            : "border border-qt-warning-border bg-qt-warning-bg text-qt-warning-text"
                                     }`}
                                 >
                                     {item.change === "deleted"
@@ -3905,11 +3905,14 @@ function AppInner() {
                                 <div className="min-w-0">
                                     <div className="truncate" data-tooltip={item.source_path}>
                                         <span className="font-medium">{item.clip_name}</span>
-                                        <span className="text-gray-500"> — {item.source_path}</span>
+                                        <span className="text-qt-text-muted">
+                                            {" "}
+                                            — {item.source_path}
+                                        </span>
                                     </div>
                                     {item.reloadedPath && (
                                         <div
-                                            className="mt-0.5 flex items-center gap-1 truncate text-qt-micro text-green-600"
+                                            className="mt-0.5 flex items-center gap-1 truncate text-qt-micro text-qt-success-text"
                                             data-tooltip={item.reloadedPath}
                                         >
                                             <span className="shrink-0 font-semibold">
