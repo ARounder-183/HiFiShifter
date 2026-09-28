@@ -342,7 +342,7 @@ export const ClipFormantToolWindow: React.FC<{
                                 if (!Number.isFinite(next)) return;
                                 updateDraft({ strength: clamp(next / 100, 0, 1) });
                             }}
-                            className="w-14 rounded border border-qt-border bg-qt-window px-1 py-0.5 text-right text-xs text-qt-text"
+                            className="w-14 rounded border border-qt-border bg-qt-window px-1 py-0.5 text-right text-qt-xs text-qt-text"
                         />
                     </Flex>
                     <Slider

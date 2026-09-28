@@ -66,7 +66,7 @@ export function AppBusy({ label, layout = "inline", className }: AppBusyProps) {
             )}
         >
             <Spinner size="1" />
-            {label ? <span className="text-xs">{label}</span> : null}
+            {label ? <span className="hs-type-caption">{label}</span> : null}
         </span>
     );
 }

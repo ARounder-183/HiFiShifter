@@ -5955,7 +5955,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 onClick={(e) => e.stopPropagation()}
                             >
                                 <button
-                                    className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
+                                    className="w-full text-left px-3 py-1.5 text-qt-md text-qt-text hover:bg-qt-hover"
                                     onClick={() => {
                                         const m = importModeMenu;
                                         setImportModeMenu(null);
@@ -5982,7 +5982,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     {t("import_across_time") || "Import across time (same track)"}
                                 </button>
                                 <button
-                                    className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
+                                    className="w-full text-left px-3 py-1.5 text-qt-md text-qt-text hover:bg-qt-hover"
                                     onClick={() => {
                                         const m = importModeMenu;
                                         setImportModeMenu(null);
@@ -6009,7 +6009,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     {t("import_across_tracks")}
                                 </button>
                                 <button
-                                    className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
+                                    className="w-full text-left px-3 py-1.5 text-qt-md text-qt-text hover:bg-qt-hover"
                                     onClick={() => {
                                         const m = importModeMenu;
                                         setImportModeMenu(null);
@@ -6048,7 +6048,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 onClick={(e) => e.stopPropagation()}
                             >
                                 <button
-                                    className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
+                                    className="w-full text-left px-3 py-1.5 text-qt-md text-qt-text hover:bg-qt-hover"
                                     onClick={() => {
                                         const m = projectActionMenu;
                                         setProjectActionMenu(null);
@@ -6058,7 +6058,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     {t("menu_open_project")}
                                 </button>
                                 <button
-                                    className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
+                                    className="w-full text-left px-3 py-1.5 text-qt-md text-qt-text hover:bg-qt-hover"
                                     onClick={() => {
                                         const m = projectActionMenu;
                                         setProjectActionMenu(null);

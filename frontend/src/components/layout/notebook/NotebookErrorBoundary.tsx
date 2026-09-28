@@ -65,7 +65,7 @@ class NotebookErrorBoundaryInner extends Component<Props, State> {
 
         return (
             <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 bg-qt-window p-4 text-center">
-                <div className="text-xs font-medium text-qt-text">{this.props.labels.title}</div>
+                <div className="text-qt-xs font-medium text-qt-text">{this.props.labels.title}</div>
                 <div className="max-w-[280px] text-[11px] text-qt-text-muted">
                     {this.props.labels.hint}
                 </div>

@@ -1614,7 +1614,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                             ).map(([key, i18nKey]) => (
                                                 <label
                                                     key={key}
-                                                    className="flex flex-col gap-1 text-xs text-qt-text"
+                                                    className="flex flex-col gap-1 text-qt-xs text-qt-text"
                                                 >
                                                     <Text size="1" color="gray">
                                                         {tAny(i18nKey)}
@@ -1952,7 +1952,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                                 {group.options.map((target) => (
                                                     <label
                                                         key={target.id}
-                                                        className="flex items-center gap-2 text-xs text-qt-text cursor-pointer"
+                                                        className="flex items-center gap-2 text-qt-xs text-qt-text cursor-pointer"
                                                     >
                                                         <input
                                                             type="checkbox"
@@ -2073,7 +2073,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     },
                 ]}
             >
-                <label className="flex items-center gap-2 text-sm">
+                <label className="flex items-center gap-2 text-qt-md">
                     <input
                         type="checkbox"
                         checked={conflictDialog.applyAll}

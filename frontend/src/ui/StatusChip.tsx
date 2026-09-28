@@ -58,11 +58,11 @@ export function AppStatusChip({
         <span
             title={title}
             className={cx(
-                "shrink-0 rounded px-1 py-0 text-xs font-medium leading-4",
+                "hs-type-mono shrink-0 rounded px-1 py-0 font-medium leading-4",
                 tabular && "tabular-nums",
                 className,
             )}
-            style={{ background, color, fontSize: "var(--qt-fs-sm)" }}
+            style={{ background, color }}
         >
             {children}
         </span>

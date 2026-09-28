@@ -49,10 +49,7 @@ export default {
              * 都取 CSS 变量，使「同一语义只有一处取值来源」。新增样式请优先用
              * 这些，而不是 `h-[26px]` / `z-[9999]` 这类字面量。
              *
-             * 注意 fontSize 里的 xs/sm/base 是**遗留兼容层**：它把 text-xs 映射成
-             * 非标准的 0.7rem(11.2px)，与 `text-[11px]` 长期双轨并存。
-             * 新代码请用 `text-qt-*`（像素绝对值），旧代码触及时就地迁移。
-             */
+                         */
             spacing: {
                 "qt-0": "var(--qt-space-0)",
                 "qt-1": "var(--qt-space-1)",
@@ -78,14 +75,13 @@ export default {
                 "qt-lg": "var(--qt-radius-lg)",
             },
             fontSize: {
-                xs: "0.7rem",
-                sm: "0.8rem",
-                base: "0.9rem",
                 "qt-micro": "var(--qt-fs-micro)",
                 "qt-xs": "var(--qt-fs-xs)",
                 "qt-sm": "var(--qt-fs-sm)",
                 "qt-md": "var(--qt-fs-md)",
                 "qt-lg": "var(--qt-fs-lg)",
+                "qt-xl": "var(--qt-fs-xl)",
+                "qt-2xl": "var(--qt-fs-2xl)",
             },
             zIndex: {
                 "qt-transient": "var(--qt-z-transient)",

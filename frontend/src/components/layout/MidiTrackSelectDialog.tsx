@@ -724,7 +724,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                     <Flex gap="2" align="center">
                         <input
                             type="text"
-                            className="flex-1 px-2 py-1 text-xs rounded border border-qt-border bg-qt-base text-qt-text"
+                            className="flex-1 px-2 py-1 text-qt-xs rounded border border-qt-border bg-qt-base text-qt-text"
                             readOnly
                             value={
                                 effectiveClipboardGuid
@@ -1097,7 +1097,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             <input
                                                 ref={attachSpecifiedBpmWheel}
                                                 type="number"
-                                                className="w-20 px-2 py-1 text-xs rounded border border-qt-border bg-qt-base text-qt-text"
+                                                className="w-20 px-2 py-1 text-qt-xs rounded border border-qt-border bg-qt-base text-qt-text"
                                                 value={specifiedBpm}
                                                 min={1}
                                                 max={999}

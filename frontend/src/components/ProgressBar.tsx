@@ -40,7 +40,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
 
     return (
         <div className={`flex flex-col gap-2 ${className}`}>
-            <div className="flex items-center justify-between text-sm">
+            <div className="flex items-center justify-between text-qt-md">
                 <div className="flex items-center gap-2">
                     {completed ? (
                         <span
@@ -56,7 +56,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
                     <span className="text-gray-400">{clampedPercentage.toFixed(0)}%</span>
                 </div>
                 {estimatedRemaining !== null && estimatedRemaining !== undefined && (
-                    <span className="text-xs text-gray-500">
+                    <span className="text-qt-xs text-gray-500">
                         {t("progress_est_remaining").replace(
                             "{time}",
                             formatTime(estimatedRemaining),
@@ -75,7 +75,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
             {showCancel && onCancel && (
                 <button
                     onClick={onCancel}
-                    className="self-end rounded px-3 py-1 text-xs text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-colors"
+                    className="self-end rounded px-3 py-1 text-qt-xs text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-colors"
                     type="button"
                 >
                     {t("progress_cancel")}

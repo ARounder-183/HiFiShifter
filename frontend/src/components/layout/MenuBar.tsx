@@ -522,19 +522,19 @@ export const MenuBar: React.FC<MenuBarProps> = ({
              */}
             {/* File Menu */}
             <DropdownMenu.Root>
-                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                     <span>{t("menu_file")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
                     <DropdownMenu.Item onSelect={onNewProject}>
                         {t("menu_new_project")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("project.new")}
                         </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Item onSelect={onOpenProject}>
                         {t("menu_open_project")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("project.open")}
                         </div>
                     </DropdownMenu.Item>
@@ -569,13 +569,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                     <DropdownMenu.Item onSelect={() => void dispatch(saveProjectRemote())}>
                         {t("menu_save_project")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("project.save")}
                         </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Item onSelect={() => void dispatch(saveProjectAsRemote())}>
                         {t("menu_save_project_as")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("project.saveAs")}
                         </div>
                     </DropdownMenu.Item>
@@ -588,7 +588,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         }}
                     >
                         {t("menu_import_media")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("project.importMedia")}
                         </div>
                     </DropdownMenu.Item>
@@ -598,7 +598,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         }}
                     >
                         {t("menu_import_midi")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("project.importMidi")}
                         </div>
                     </DropdownMenu.Item>
@@ -610,7 +610,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         <DropdownMenu.SubContent>
                             <DropdownMenu.Item onSelect={onImportProject}>
                                 {t("menu_import_hifishifter")}
-                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                                <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                                     {shortcutLabel("project.importHifishifter")}
                                 </div>
                             </DropdownMenu.Item>
@@ -618,7 +618,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 onSelect={() => void dispatch(openReaperFromDialog())}
                             >
                                 {t("menu_import_reaper")}
-                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                                <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                                     {shortcutLabel("project.importReaper")}
                                 </div>
                             </DropdownMenu.Item>
@@ -626,7 +626,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 onSelect={() => void dispatch(openVocalShifterFromDialog())}
                             >
                                 {t("menu_import_vocalshifter")}
-                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                                <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                                     {shortcutLabel("project.importVocalShifter")}
                                 </div>
                             </DropdownMenu.Item>
@@ -634,7 +634,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     </DropdownMenu.Sub>
                     <DropdownMenu.Item onSelect={() => setExportDialogOpen(true)}>
                         {t("menu_export_audio")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("project.export")}
                         </div>
                     </DropdownMenu.Item>
@@ -654,7 +654,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
             {/* Edit Menu */}
             <DropdownMenu.Root>
-                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                     <span>{t("menu_edit")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
@@ -665,7 +665,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         onSelect={() => void dispatch(undoRemote())}
                     >
                         {t("menu_undo")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("edit.undo")}
                         </div>
                     </DropdownMenu.Item>
@@ -674,7 +674,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         onSelect={() => void dispatch(redoRemote())}
                     >
                         {t("menu_redo")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("edit.redo")}
                         </div>
                     </DropdownMenu.Item>
@@ -682,26 +682,26 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     {/* 剪贴板：剪切 / 复制 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("cut")}>
                         {tAny("menu_cut")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("clip.cut")}
                         </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("copy")}>
                         {tAny("menu_copy")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("pianoRoll.copy")}
                         </div>
                     </DropdownMenu.Item>
                     {/* 剪贴板：粘贴 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("paste")}>
                         {tAny("menu_paste")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("pianoRoll.paste")}
                         </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteTracks")}>
                         {t("menu_paste_new_tracks")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("edit.pasteTracks")}
                         </div>
                     </DropdownMenu.Item>
@@ -709,7 +709,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     {/* 外部剪贴板交换 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteVocalShifter")}>
                         {t("menu_paste_vocalshifter_clipboard")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("edit.pasteVocalShifter")}
                         </div>
                     </DropdownMenu.Item>
@@ -717,13 +717,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     {/* 选择 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("selectAll")}>
                         {tAny("menu_select_all")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("edit.selectAll")}
                         </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("deselect")}>
                         {tAny("menu_deselect")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("edit.deselect")}
                         </div>
                     </DropdownMenu.Item>
@@ -733,7 +733,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         避免两处翻译漂移。 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("addClipsToParamSelection")}>
                         {tAny("kb_edit_add_clips_to_param_selection")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("edit.addClipsToParamSelection")}
                         </div>
                     </DropdownMenu.Item>
@@ -741,7 +741,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         onSelect={() => dispatchEditOp("removeClipsFromParamSelection")}
                     >
                         {tAny("kb_edit_remove_clips_from_param_selection")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("edit.removeClipsFromParamSelection")}
                         </div>
                     </DropdownMenu.Item>
@@ -750,7 +750,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
             {/* Track Menu */}
             <DropdownMenu.Root>
-                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                     <span>{t("menu_track")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
@@ -770,7 +770,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         }}
                     >
                         {t("track_add")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("track.add")}
                         </div>
                     </DropdownMenu.Item>
@@ -781,7 +781,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         }
                     >
                         {tAny("menu_clone_selected_track")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("track.clone")}
                         </div>
                     </DropdownMenu.Item>
@@ -797,7 +797,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         }
                     >
                         {t("track_remove_selected")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                             {shortcutLabel("track.delete")}
                         </div>
                     </DropdownMenu.Item>
@@ -806,7 +806,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
             {/* View Menu */}
             <DropdownMenu.Root>
-                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                     <span>{t("menu_view")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
@@ -951,7 +951,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             </DropdownMenu.Root>
 
             <DropdownMenu.Root>
-                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                     <span>{t("menu_options")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
@@ -1265,7 +1265,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
             {/* Help Menu */}
             <DropdownMenu.Root>
-                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                     <span>{t("menu_help")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
@@ -1300,7 +1300,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
             <Flex ml="auto" gap="2" align="center" className="shrink-0">
                 <DropdownMenu.Root>
-                    <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+                    <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                         <Flex align="center" gap="1">
                             <GlobeIcon width={14} height={14} />
                             <span>{t("language")}</span>
@@ -1405,10 +1405,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="px-4 py-3 border-b border-qt-border">
-                            <div className="text-sm font-medium text-qt-text">
+                            <div className="text-qt-md font-medium text-qt-text">
                                 {tAny("import_dialog_title")}
                             </div>
-                            <div className="mt-1 text-xs text-qt-text-muted">
+                            <div className="mt-1 text-qt-xs text-qt-text-muted">
                                 {plural(
                                     "import_files_selected",
                                     menuImportMode.audioPaths.length,
@@ -1418,7 +1418,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                         <div className="px-3 py-3 flex flex-col gap-2">
                             <button
-                                className="w-full text-left px-3 py-2 rounded-lg text-sm text-qt-text border border-qt-border hover:bg-qt-hover"
+                                className="w-full text-left px-3 py-2 rounded-lg text-qt-md text-qt-text border border-qt-border hover:bg-qt-hover"
                                 onClick={() => {
                                     const m = menuImportMode;
                                     setMenuImportMode(null);
@@ -1435,7 +1435,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 {t("import_across_time")}
                             </button>
                             <button
-                                className="w-full text-left px-3 py-2 rounded-lg text-sm text-qt-text border border-qt-border hover:bg-qt-hover"
+                                className="w-full text-left px-3 py-2 rounded-lg text-qt-md text-qt-text border border-qt-border hover:bg-qt-hover"
                                 onClick={() => {
                                     const m = menuImportMode;
                                     setMenuImportMode(null);
@@ -1452,7 +1452,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 {t("import_across_tracks")}
                             </button>
                             <button
-                                className="w-full text-left px-3 py-2 rounded-lg text-sm text-qt-text border border-qt-border hover:bg-qt-hover"
+                                className="w-full text-left px-3 py-2 rounded-lg text-qt-md text-qt-text border border-qt-border hover:bg-qt-hover"
                                 onClick={() => {
                                     const m = menuImportMode;
                                     setMenuImportMode(null);
@@ -1472,7 +1472,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                         <div className="px-3 py-2 border-t border-qt-border flex justify-end">
                             <button
-                                className="px-3 py-1.5 text-xs text-qt-text hover:bg-qt-hover rounded-lg"
+                                className="px-3 py-1.5 text-qt-xs text-qt-text hover:bg-qt-hover rounded-lg"
                                 onClick={() => setMenuImportMode(null)}
                             >
                                 {tAny("cancel")}
@@ -1493,13 +1493,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="px-4 py-3 border-b border-qt-border">
-                            <div className="text-sm font-medium text-qt-text">
+                            <div className="text-qt-md font-medium text-qt-text">
                                 {tAny("media_stream_select_title")}
                             </div>
-                            <div className="mt-1 text-xs text-qt-text-muted truncate">
+                            <div className="mt-1 text-qt-xs text-qt-text-muted truncate">
                                 {mediaStreamImport.path}
                             </div>
-                            <div className="mt-1 text-xs text-qt-text-muted">
+                            <div className="mt-1 text-qt-xs text-qt-text-muted">
                                 {tAny("media_stream_select_hint")}
                             </div>
                         </div>
@@ -1518,7 +1518,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 return (
                                     <button
                                         key={stream.index}
-                                        className="w-full text-left px-3 py-2 rounded-lg text-sm text-qt-text border border-qt-border hover:bg-qt-hover"
+                                        className="w-full text-left px-3 py-2 rounded-lg text-qt-md text-qt-text border border-qt-border hover:bg-qt-hover"
                                         onClick={() => {
                                             const m = mediaStreamImport;
                                             setMediaStreamImport(null);
@@ -1535,7 +1535,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                         <span className="font-medium">
                                             {tAny("media_stream_track")} {stream.index + 1}
                                         </span>
-                                        <span className="ml-2 text-xs text-qt-text-muted">
+                                        <span className="ml-2 text-qt-xs text-qt-text-muted">
                                             {meta.join(" · ")}
                                         </span>
                                     </button>
@@ -1545,7 +1545,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                         <div className="px-3 py-2 border-t border-qt-border flex justify-end">
                             <button
-                                className="px-3 py-1.5 text-xs text-qt-text hover:bg-qt-hover rounded-lg"
+                                className="px-3 py-1.5 text-qt-xs text-qt-text hover:bg-qt-hover rounded-lg"
                                 onClick={() => setMediaStreamImport(null)}
                             >
                                 {tAny("cancel")}

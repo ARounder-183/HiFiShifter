@@ -422,7 +422,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                     </Flex>
                 </AppField>
 
-                <label className="flex items-center gap-2 text-sm text-qt-text">
+                <label className="flex items-center gap-2 text-qt-md text-qt-text">
                     <input
                         type="checkbox"
                         checked={draft.monitorEnabled}
@@ -461,7 +461,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                     </AppField>
                 ) : null}
 
-                <label className="flex items-center gap-2 text-sm text-qt-text">
+                <label className="flex items-center gap-2 text-qt-md text-qt-text">
                     <input
                         type="checkbox"
                         checked={draft.autoNormalize}
@@ -475,7 +475,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                     <span>{tAny("recording_auto_normalize")}</span>
                 </label>
 
-                <label className="flex items-center gap-2 text-sm text-qt-text">
+                <label className="flex items-center gap-2 text-qt-md text-qt-text">
                     <input
                         type="checkbox"
                         checked={draft.autoStopAtSelectionEnd}

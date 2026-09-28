@@ -16,7 +16,7 @@
  * 天然对齐，各行的作者根本不需要（也无法）表达宽度。
  */
 import { createContext, useContext, type ReactNode } from "react";
-import { Switch, Text } from "@radix-ui/themes";
+import { Checkbox, Switch } from "@radix-ui/themes";
 
 import { cx } from "./cx";
 
@@ -89,8 +89,13 @@ export function AppField({
 
     return (
         <div className={cx("flex items-start gap-2", className)}>
+            {/*
+             * 标签用 `hs-type-label`（12px、正文色），不是 `text-qt-sm` + muted。
+             * 原实现 11px + muted 让标签比它自己的提示（12px）和取值（12px）都小、
+             * 还更淡 —— 主次完全反了。现在：label(12) > caption(11) 且同为正文色系。
+             */}
             <label
-                className="shrink-0 pt-0.5 text-qt-sm leading-5 text-qt-text-muted"
+                className="hs-type-label shrink-0 pt-0.5"
                 htmlFor={htmlFor}
                 style={width === "auto" ? undefined : { minWidth: LABEL_WIDTH_PX[width] }}
             >
@@ -99,14 +104,12 @@ export function AppField({
             <div className="app-field__control flex min-w-0 flex-1 flex-col gap-1">
                 {children}
                 {error ? (
-                    // `AppErrorText` 的等价内联形态：避免为一个简单场景引入额外依赖
-                    <Text size="1" color="red">
+                    // 错误用 caption 的尺寸但换成危险色（保留语义区分）
+                    <span className="hs-type-caption" style={{ color: "var(--qt-danger-text)" }}>
                         {error}
-                    </Text>
+                    </span>
                 ) : hint ? (
-                    <Text size="1" color="gray">
-                        {hint}
-                    </Text>
+                    <span className="hs-type-caption">{hint}</span>
                 ) : null}
             </div>
         </div>
@@ -120,27 +123,27 @@ export interface AppSwitchRowProps {
     disabled?: boolean;
     hint?: ReactNode;
     /**
-     * 开关位置。
+     * 用哪种控件。
      *
-     * `inline`（默认）与 `AppField` 共用同一列标签宽度，开关紧跟在标签列右侧 ——
-     * 与同一张表单里的输入框/下拉框左缘对齐。`DockLayoutSettingsDialog` 与
-     * `NotebookDialogs` 原先的 `SwitchRow` 都是这个形态，默认值因此取 `inline`：
-     * 若改成两端对齐，同一张表单里六行开关会突然比其他行"散开"。
-     *
-     * `between` 用于独立成块的开关（标签贴左、开关贴右边框）。
+     * 两者语义不同，不要随意替换：`switch` 表示"立即生效的开关"，
+     * `checkbox` 表示"提交时一并生效的选项"。这里提供同一个外壳是因为
+     * **排布与排版必须一致** —— 此前两者是两套手写行，标签一个 11px 一个 14px。
      */
-    layout?: "inline" | "between";
-    /** 覆盖表单级标签宽度（仅 `inline` 布局生效）。 */
-    labelWidth?: AppFieldLabelWidth;
+    control?: "switch" | "checkbox";
     className?: string;
 }
 
 /**
- * 开关行。
+ * 布尔行 —— 全应用**唯一**的布尔设置行形态：控件在左、标签紧随其后。
  *
- * 这类行在 `DockLayoutSettingsDialog`、`NotebookDialogs` 各有一份实现，
- * 两处都是"标签列 + Switch"，但标签宽度常量各写了一个（118 / 132）。
- * 合并后由 `AppForm` 统一下发宽度。
+ * 【为什么统一成"控件在左"而不是"标签列 + 控件"】
+ * 布尔行是列表性质的（一屏十几行），标签全部左对齐在同一列才扫得动。
+ * 若沿用 `AppField` 的定宽标签列，复选框与自己的标签之间会隔出 112px 空白，
+ * 简单布尔列表读起来很别扭。原先 `吸附/网格设置` 里 17 行是"控件在左"、
+ * 8 行是"标签列 + 控件"，两种混排正是"字号混杂"的现场。
+ *
+ * 【为什么不再有 `layout` 开关】上一版给了 `inline` / `between` 两种布局，
+ * 于是"该用哪种"又变成作者的决定 —— 与本轮的核心教训相悖。现在只有一种。
  */
 export function AppSwitchRow({
     label,
@@ -148,48 +151,64 @@ export function AppSwitchRow({
     onCheckedChange,
     disabled,
     hint,
-    layout = "inline",
-    labelWidth,
+    control = "switch",
     className,
 }: AppSwitchRowProps) {
-    const inherited = useContext(LabelWidthContext);
-    const width = labelWidth ?? inherited;
-    const labelNode = (
-        <span className="text-qt-sm leading-5 text-qt-text">{label}</span>
-    );
-
-    if (layout === "between") {
-        return (
-            <div className={cx("flex items-center justify-between gap-3", className)}>
-                <div className="flex min-w-0 flex-col">
-                    {labelNode}
-                    {hint ? (
-                        <Text size="1" color="gray">
-                            {hint}
-                        </Text>
-                    ) : null}
-                </div>
-                <Switch checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} />
-            </div>
-        );
-    }
-
+    const Control = control === "checkbox" ? Checkbox : Switch;
     return (
-        <div className={cx("flex items-center gap-2", className)}>
-            <span
-                className="shrink-0 pt-0.5 text-qt-sm leading-5 text-qt-text-muted"
-                style={width === "auto" ? undefined : { minWidth: LABEL_WIDTH_PX[width] }}
-            >
-                {labelNode}
-            </span>
-            <div className="flex min-w-0 flex-1 flex-col gap-1">
-                <Switch checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} />
-                {hint ? (
-                    <Text size="1" color="gray">
-                        {hint}
-                    </Text>
-                ) : null}
+        <div className={cx("flex items-start gap-2", className)}>
+            <Control
+                checked={checked}
+                onCheckedChange={(value) => onCheckedChange(Boolean(value))}
+                disabled={disabled}
+                // 与 12px 标签的首行基线对齐（控件高 16–20px，标签行高 18px）
+                style={{ marginTop: 1 }}
+            />
+            <div className="flex min-w-0 flex-1 flex-col">
+                <span className="hs-type-body">{label}</span>
+                {hint ? <span className="hs-type-caption">{hint}</span> : null}
             </div>
         </div>
+    );
+}
+
+export interface AppFormSectionProps {
+    /** 分区标题。用 `section` 角色（13px/600）——**不缩字号**，靠字重分层。 */
+    title: ReactNode;
+    /** 分区说明（可选），挂在标题下方。 */
+    description?: ReactNode;
+    /** 标题右侧的附加控件（如分区级开关）。 */
+    action?: ReactNode;
+    children: ReactNode;
+    className?: string;
+}
+
+/**
+ * 表单分区 —— 把长表单切成可扫读的段落。
+ *
+ * 【为什么需要它】`吸附/网格设置` 的内容有 1175px（视口 492px，2.4 屏），
+ * 而分区标题与正文同号、只用 muted 表示，滚动时没有任何"路标"。
+ * 本组件同时负责三件事：标题角色、分区留白、以及**分区之间的分隔**
+ * —— 分隔由留白承担，调用方不再需要手写 Radix `Separator`
+ * （那是全仓第四种分隔线做法，`吸附/网格设置` 里还留着 5 个）。
+ */
+export function AppFormSection({
+    title,
+    description,
+    action,
+    children,
+    className,
+}: AppFormSectionProps) {
+    return (
+        <section className={cx("flex flex-col gap-3", className)}>
+            <div className="flex items-center justify-between gap-2">
+                <div className="flex min-w-0 flex-col">
+                    <h3 className="hs-type-section m-0">{title}</h3>
+                    {description ? <p className="hs-type-caption m-0">{description}</p> : null}
+                </div>
+                {action ? <div className="shrink-0">{action}</div> : null}
+            </div>
+            <div className="flex flex-col gap-3">{children}</div>
+        </section>
     );
 }

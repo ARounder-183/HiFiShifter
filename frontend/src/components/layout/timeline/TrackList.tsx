@@ -1830,7 +1830,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                             <input
                                                                 ref={nameInputRef}
                                                                 value={editingName}
-                                                                className="bg-transparent outline outline-1 outline-qt-highlight rounded px-0.5 flex-1 min-w-0 text-qt-text text-sm font-medium pr-2"
+                                                                className="bg-transparent outline outline-1 outline-qt-highlight rounded px-0.5 flex-1 min-w-0 text-qt-text text-qt-md font-medium pr-2"
                                                                 onChange={(e) =>
                                                                     setEditingName(e.target.value)
                                                                 }
@@ -1999,7 +1999,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                         {editingGainTrackId === track.id ? (
                                                             <input
                                                                 ref={editingGainInputRef}
-                                                                className="text-xs rounded px-1 outline-none text-left tabular-nums bg-qt-base text-qt-text border border-qt-border"
+                                                                className="text-qt-xs rounded px-1 outline-none text-left tabular-nums bg-qt-base text-qt-text border border-qt-border"
                                                                 style={{
                                                                     // 实测文本宽度：自定义字体下 ch 估算不可靠
                                                                     width: `${editingGainWidthPx}px`,

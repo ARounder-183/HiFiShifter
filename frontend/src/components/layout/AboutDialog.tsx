@@ -112,7 +112,7 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
                                 type="button"
                                 onClick={() => void openExternal(`${repoUrl}/tree/${info?.commit}`)}
                                 data-tooltip={`${repoUrl}\n/tree/${info?.commit}`}
-                                className="text-xs text-qt-accent underline underline-offset-2 hover:text-qt-text"
+                                className="text-qt-xs text-qt-accent underline underline-offset-2 hover:text-qt-text"
                             >
                                 {commitShort}
                             </button>

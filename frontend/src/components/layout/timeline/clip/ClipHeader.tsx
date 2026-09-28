@@ -771,7 +771,7 @@ export const ClipHeader: React.FC<{
                     {nameEditing ? (
                         <input
                             ref={nameInputRef}
-                            className="w-full text-xs font-medium rounded px-1 outline-none"
+                            className="w-full text-qt-xs font-medium rounded px-1 outline-none"
                             style={{
                                 color: isDark ? "rgba(255,255,255,0.95)" : "rgba(0,0,0,0.88)",
                                 backgroundColor: isDark
@@ -795,7 +795,7 @@ export const ClipHeader: React.FC<{
                         />
                     ) : (
                         <div
-                            className="text-xs font-medium drop-shadow-md truncate cursor-default"
+                            className="text-qt-xs font-medium drop-shadow-md truncate cursor-default"
                             data-tooltip={clipTooltipText}
                             style={{
                                 color: visualStyle.textFill,
@@ -918,7 +918,7 @@ export const ClipHeader: React.FC<{
                     {badgeEditing === "gain" ? (
                         <input
                             ref={badgeInputRef}
-                            className="text-xs rounded px-1 outline-none text-right"
+                            className="text-qt-xs rounded px-1 outline-none text-right"
                             style={{
                                 // 实测文本宽度：自定义字体下 ch 估算不可靠
                                 width: `${gainInputWidthPx}px`,
@@ -943,7 +943,7 @@ export const ClipHeader: React.FC<{
                         />
                     ) : showGainVal ? (
                         <div
-                            className="text-xs drop-shadow-md cursor-text"
+                            className="text-qt-xs drop-shadow-md cursor-text"
                             style={{
                                 color: "rgba(233, 239, 244, 0.82)",
                                 opacity: hideVisuals ? 0 : 1,

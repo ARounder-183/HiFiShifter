@@ -163,12 +163,29 @@
     --qt-radius-md: 6px;
     --qt-radius-lg: 10px;
 
-    /* 字号：统一为 px 绝对量，终结 text-xs（0.7rem）≠ text-[11px] 的双轨 */
-    --qt-fs-micro: 9px;
-    --qt-fs-xs: 10px;
-    --qt-fs-sm: 11px;
-    --qt-fs-md: 12px;
-    --qt-fs-lg: 13px;
+    /*
+     * 字号阶梯：统一为 px 绝对量，终结 text-xs（0.7rem = 11.2px）≠ text-[11px] 的双轨。
+     *
+     * 【为什么上限拉到 20px】上一版阶梯最高只到 13px，容不下"标题"这个角色 ——
+     * 于是对话框标题被压到 13px，反而比 14px 的正文标签还小（层级倒挂）。
+     * 阶梯必须覆盖全部角色，否则作者只能拿最接近的数值凑。
+     */
+    --qt-fs-micro: 10px;
+    --qt-fs-xs: 11px;
+    --qt-fs-sm: 12px;
+    --qt-fs-md: 13px;
+    --qt-fs-lg: 15px;
+    --qt-fs-xl: 17px;
+    --qt-fs-2xl: 20px;
+
+    /*
+     * 行高阶梯：与字号成对使用。此前各处要么不写行高（继承，随上下文跳变），
+     * 要么写死 20px（与 11px 字搭配时过于松散）。
+     */
+    --qt-lh-tight: 16px;
+    --qt-lh-base: 18px;
+    --qt-lh-relaxed: 20px;
+    --qt-lh-display: 26px;
 
     /* 图标尺寸：由 AppIconButton 等原语注入，禁止调用方再写 width="15" */
     --qt-icon-sm: 12px;
@@ -363,21 +380,102 @@ textarea {
  * `size="2"` / `size="1"` / 默认值三种写法互相冲突。收进令牌后，
  * 标题/描述的层次只由这一处决定。
  */
-.app-dialog__title {
-    font-size: var(--qt-fs-lg);
-    line-height: 20px;
+/* ===========================================================================
+ * 排版角色层（type roles）
+ *
+ * 【为什么需要"角色"而不是"字号"】上一轮只补了值令牌（--qt-fs-*），结果作者
+ * 拿到一串数字仍要自己挑：标题挑到 13px（因为它就在旁边）、标签挑到 11px、
+ * 页脚按钮挑了 sm。**令牌给的是数值，不是语义** —— 没有"标题该多大"的答案，
+ * 只有"有哪些数字"，层级必然散架。
+ *
+ * 本层把「字号 + 字重 + 行高 + 颜色」四件套按角色固定下来，调用方只说
+ * "这是标题"，不说"这是 20px"。层级关系因此写死在 CSS 里，而不是靠每个作者
+ * 的自觉 —— 与 `AppButton` 用 `intent` 收掉 Radix 变体词汇表是同一个做法。
+ *
+ * 层级（必须保持，见 typography.test.ts）：
+ *   display(20/700) > section(13/600) > body(13/400) = mono(12)
+ *     > label(12/400) > caption(11/400 muted)
+ *
+ * 【为什么 section 不比 body 大，而是更粗】节标题统领的是同号正文，靠字重与
+ * 留白区分比靠"更小的字"更可靠 —— 原实现把节标题做成 12px/700，比它统领的
+ * 14px 行还小，视觉上成了正文的附属。
+ * ======================================================================== */
+
+.hs-type-display {
+    font-size: var(--qt-fs-2xl);
+    line-height: var(--qt-lh-display);
+    font-weight: 700;
+    color: var(--qt-text);
+}
+
+.hs-type-section {
+    font-size: var(--qt-fs-md);
+    line-height: var(--qt-lh-base);
     font-weight: 600;
+    color: var(--qt-text);
+}
+
+.hs-type-body {
+    font-size: var(--qt-fs-md);
+    line-height: var(--qt-lh-relaxed);
+    font-weight: 400;
+    color: var(--qt-text);
+}
+
+/* 字段标签：比正文小一档，但**用正文色**。
+   原实现是 11px + muted，于是标签比它自己的提示（12px）和取值（12px）都小、
+   还更淡 —— 主次完全反了。 */
+.hs-type-label {
+    font-size: var(--qt-fs-sm);
+    line-height: var(--qt-lh-base);
+    font-weight: 400;
+    color: var(--qt-text);
+}
+
+/* 说明 / 提示 / 单位 / 状态：全应用最小的正文级文字 */
+.hs-type-caption {
+    font-size: var(--qt-fs-xs);
+    line-height: var(--qt-lh-tight);
+    font-weight: 400;
+    color: var(--qt-text-muted);
+}
+
+/* 数值读数：等宽数字，避免滚动调值时文字宽度抖动 */
+.hs-type-mono {
+    font-size: var(--qt-fs-sm);
+    line-height: var(--qt-lh-tight);
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+    color: var(--qt-text);
+}
+
+/*
+ * 对话框标题/描述：直接引用角色，不再各自写字号。
+ *
+ * 【回归修正】此前是 13px/600 与 12px —— 标题比正文标签（14px）还小。
+ * Radix 原本给的是 `Heading size="5"` = 20px/700，这里恢复该量级。
+ */
+.app-dialog__title {
+    font-size: var(--qt-fs-2xl);
+    line-height: var(--qt-lh-display);
+    font-weight: 700;
     margin: 0;
 }
 
 .app-dialog__description {
-    font-size: var(--qt-fs-md);
-    line-height: 18px;
+    font-size: var(--qt-fs-xs);
+    line-height: var(--qt-lh-tight);
     color: var(--qt-text-muted);
 }
 
-/* 页脚上沿的细分割线：让"操作区"与"内容区"分开，避免长表单里按钮浮在正文中间 */
-.app-dialog__footer {
+/*
+ * 页脚上沿的细分割线：让"操作区"与"内容区"分开。
+ *
+ * 【为什么改成可选】上一轮无条件加线，于是"只有一个确定按钮"的短对话框
+ * （快捷键、关于、吸附…）凭空多出一条横线。默认不画，由 AppDialog 的
+ * `footerDivider` 显式打开。
+ */
+.app-dialog__footer--divided {
     border-top: 1px solid var(--qt-divider);
     padding-top: var(--qt-space-5);
 }

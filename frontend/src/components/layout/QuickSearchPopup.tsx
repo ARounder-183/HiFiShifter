@@ -421,7 +421,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                                   "搜索音频文件..."
                         }
                         disabled={noFolder}
-                        className="flex-1 bg-transparent border-none outline-none text-qt-text text-xs placeholder:text-qt-text-muted"
+                        className="flex-1 bg-transparent border-none outline-none text-qt-text text-qt-xs placeholder:text-qt-text-muted"
                         autoComplete="off"
                         spellCheck={false}
                     />
@@ -518,7 +518,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                                 key={entry.path}
                                 data-qs-item
                                 className={[
-                                    "flex items-center gap-1.5 px-2 py-[4px] cursor-pointer text-xs",
+                                    "flex items-center gap-1.5 px-2 py-[4px] cursor-pointer text-qt-xs",
                                     index === selectedIndex
                                         ? "bg-[color-mix(in_oklab,var(--qt-highlight)_25%,transparent)]"
                                         : "hover:bg-[color-mix(in_oklab,var(--qt-highlight)_10%,transparent)]",

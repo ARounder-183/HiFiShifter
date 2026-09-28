@@ -370,7 +370,7 @@ const SegmentedControl: React.FC<{
                 <button
                     key={tab.id}
                     className={
-                        "flex-1 px-3 py-1.5 text-xs font-semibold rounded transition-colors duration-150 " +
+                        "flex-1 px-3 py-1.5 text-qt-xs font-semibold rounded transition-colors duration-150 " +
                         "cursor-pointer select-none " +
                         (isActive
                             ? "bg-qt-highlight text-white"
@@ -899,7 +899,7 @@ export const AppearanceWindow: React.FC = () => {
             >
                 <div className="flex items-start justify-between gap-3">
                     <div className="space-y-1">
-                        <h2 className="m-0 text-base font-semibold text-qt-text">
+                        <h2 className="m-0 text-qt-lg font-semibold text-qt-text">
                             {tAny("appearance_title")}
                         </h2>
                     </div>
@@ -1265,10 +1265,10 @@ export const AppearanceWindow: React.FC = () => {
                                     className="rounded border border-qt-border bg-qt-base px-3 py-3 text-qt-text"
                                     style={{ fontFamily }}
                                 >
-                                    <div className="text-sm mb-1.5 leading-relaxed">
+                                    <div className="text-qt-md mb-1.5 leading-relaxed">
                                         The quick brown fox jumps over the lazy dog.
                                     </div>
-                                    <div className="text-sm mb-1.5 leading-relaxed">
+                                    <div className="text-qt-md mb-1.5 leading-relaxed">
                                         中文字体预览：你好世界 1234567890
                                     </div>
                                     <div className="text-[10px] text-qt-text-muted">

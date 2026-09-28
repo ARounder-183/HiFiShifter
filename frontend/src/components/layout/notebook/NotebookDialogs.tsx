@@ -582,7 +582,7 @@ export function NotebookSettingsDialog({
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
     return (
         <div>
-            <div className="mb-1 text-xs font-medium text-qt-text-muted">{title}</div>
+            <div className="mb-1 text-qt-xs font-medium text-qt-text-muted">{title}</div>
             {children}
         </div>
     );

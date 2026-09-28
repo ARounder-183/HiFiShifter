@@ -105,6 +105,14 @@ export interface AppDialogProps {
      */
     suppressGlobalShortcuts?: boolean;
     /**
+     * 页脚上方是否画一条分割线。
+     *
+     * 默认 **false**：上一版无条件画线，于是"只有一个确定按钮"的短对话框
+     * （快捷键、关于、吸附…）凭空多出一条横线。只有动作区需要与**长内容**
+     * 分离时才显式打开。
+     */
+    footerDivider?: boolean;
+    /**
      * 正文。纯确认对话框（如「确定要重置布局吗？」）可以没有正文。
      */
     children?: ReactNode;
@@ -142,6 +150,7 @@ export function AppDialog({
     beforeClose,
     dismissible = true,
     suppressGlobalShortcuts = true,
+    footerDivider = false,
     children,
     className,
     ariaDescribedBy,
@@ -317,7 +326,12 @@ export function AppDialog({
                     <div className="app-dialog__body mt-3 min-h-0 flex-1 overflow-y-auto">{children}</div>
 
                     {actions?.length ? (
-                        <div className="app-dialog__footer mt-4 flex shrink-0 items-center gap-2">
+                        <div
+                            className={cx(
+                                "app-dialog__footer mt-4 flex shrink-0 items-center gap-2",
+                                footerDivider && "app-dialog__footer--divided",
+                            )}
+                        >
                             <div className="flex items-center gap-2">
                                 {startActions.map((action) => (
                                     <DialogActionButton
@@ -361,6 +375,11 @@ function DialogActionButton({
 }) {
     return (
         <AppButton
+            /*
+             * 页脚按钮尺寸由**壳**固定为 32px（`md`），不由各对话框自己挑。
+             * 上一版默认 `sm`（24px）把全部 42 个对话框的页脚压小了 25%。
+             */
+            size="md"
             intent={action.intent ?? "default"}
             disabled={action.disabled || (busy && !pending)}
             loading={pending}
@@ -412,7 +431,7 @@ export function AppConfirmDialog({
                 { id: "confirm", label: confirmLabel, intent, onClick: onConfirm },
             ]}
         >
-            <p className="text-sm leading-5 text-qt-text">{message}</p>
+            <p className="hs-type-body m-0">{message}</p>
         </AppDialog>
     );
 }

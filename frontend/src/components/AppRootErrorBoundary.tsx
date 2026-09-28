@@ -55,7 +55,7 @@ export class AppRootErrorBoundary extends Component<
                 role="alert"
                 className="flex h-screen w-screen flex-col items-center justify-center gap-4 bg-qt-window p-8 text-center text-qt-text"
             >
-                <div className="text-sm font-semibold">{error.message || String(error)}</div>
+                <div className="text-qt-md font-semibold">{error.message || String(error)}</div>
                 {error.stack ? (
                     <pre
                         data-hs-selectable="true"
@@ -67,7 +67,7 @@ export class AppRootErrorBoundary extends Component<
                 <div className="flex items-center gap-2">
                     <button
                         type="button"
-                        className="rounded border border-qt-border px-3 py-1 text-xs hover:bg-qt-hover"
+                        className="rounded border border-qt-border px-3 py-1 text-qt-xs hover:bg-qt-hover"
                         onClick={() => {
                             void navigator.clipboard?.writeText(
                                 `${error.message}\n\n${error.stack ?? ""}`,
@@ -78,7 +78,7 @@ export class AppRootErrorBoundary extends Component<
                     </button>
                     <button
                         type="button"
-                        className="rounded border border-qt-border px-3 py-1 text-xs hover:bg-qt-hover"
+                        className="rounded border border-qt-border px-3 py-1 text-qt-xs hover:bg-qt-hover"
                         // 重新加载是这里唯一能真正恢复的手段：出错的组件树无法原地修复，
                         // 而项目数据在后端 / Redux 之外，重载不会丢。
                         onClick={() => window.location.reload()}

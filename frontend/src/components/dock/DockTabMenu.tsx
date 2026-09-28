@@ -121,7 +121,7 @@ export function DockTabMenu({
                             dispatch(renameForm({ formId, title: draft }));
                             onClose();
                         }}
-                        className="w-full rounded border border-qt-border bg-qt-base px-1 py-0.5 text-xs text-qt-text outline-none"
+                        className="w-full rounded border border-qt-border bg-qt-base px-1 py-0.5 text-qt-xs text-qt-text outline-none"
                     />
                 </div>
             ) : (
@@ -190,7 +190,7 @@ function MenuItem({
             type="button"
             role="menuitem"
             disabled={disabled}
-            className={`block w-full px-3 py-1.5 text-left text-xs ${
+            className={`block w-full px-3 py-1.5 text-left text-qt-xs ${
                 disabled
                     ? "cursor-default text-qt-text-muted"
                     : danger

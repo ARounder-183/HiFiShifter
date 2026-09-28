@@ -84,7 +84,7 @@ export function DetachedRoot() {
              * 已注册 → 渲染；快照未到（无 formId）→ 显示"正在连接"。
              */}
             {panelId && !PanelComponent ? (
-                <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-xs text-qt-text-muted">
+                <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-qt-xs text-qt-text-muted">
                     <span>{translateOutsideReact("panel_unavailable")}</span>
                     <span className="text-qt-text-muted opacity-70">{panelId}</span>
                 </div>
@@ -92,7 +92,7 @@ export function DetachedRoot() {
                 // 与停靠宿主一致：注册表里的 component 可能是 lazy 组件
                 <Suspense
                     fallback={
-                        <div className="flex h-full w-full items-center justify-center text-xs text-qt-text-muted">
+                        <div className="flex h-full w-full items-center justify-center text-qt-xs text-qt-text-muted">
                             …
                         </div>
                     }
@@ -104,7 +104,7 @@ export function DetachedRoot() {
                     />
                 </Suspense>
             ) : (
-                <div className="flex h-full w-full items-center justify-center text-xs text-qt-text-muted">
+                <div className="flex h-full w-full items-center justify-center text-qt-xs text-qt-text-muted">
                     …
                 </div>
             )}

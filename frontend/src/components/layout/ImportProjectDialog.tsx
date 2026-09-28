@@ -54,7 +54,7 @@ export function ImportProjectDialog({
                     {tAny("import_project_file")}: {projectPath ?? ""}
                 </Text>
 
-                <label className="flex items-center gap-2 text-sm text-qt-text">
+                <label className="flex items-center gap-2 text-qt-md text-qt-text">
                     <input
                         type="radio"
                         name="hifishifter-import-position"
@@ -63,7 +63,7 @@ export function ImportProjectDialog({
                     />
                     {tAny("import_project_original_position")}
                 </label>
-                <label className="flex items-center gap-2 text-sm text-qt-text">
+                <label className="flex items-center gap-2 text-qt-md text-qt-text">
                     <input
                         type="radio"
                         name="hifishifter-import-position"
@@ -73,7 +73,7 @@ export function ImportProjectDialog({
                     {tAny("import_project_playhead_position")}
                 </label>
 
-                <label className="flex items-center gap-2 text-sm text-qt-text">
+                <label className="flex items-center gap-2 text-qt-md text-qt-text">
                     <input
                         type="checkbox"
                         checked={importTempoMap}

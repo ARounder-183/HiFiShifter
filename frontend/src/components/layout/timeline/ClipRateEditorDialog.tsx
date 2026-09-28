@@ -246,7 +246,7 @@ function ClipRateEditorFields({
             <label className="flex flex-col gap-1">
                 <span className="text-[10px] text-qt-text/60">{tAny("clip_rate_editor_rate")}</span>
                 <input
-                    className="w-full text-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
+                    className="w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
                     value={rateText}
                     onChange={(e) => {
                         setRateEdited(true);
@@ -287,7 +287,7 @@ function ClipRateEditorFields({
                         {tAny("clip_rate_editor_old_bpm")}
                     </span>
                     <input
-                        className="w-full text-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
+                        className="w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
                         value={oldBpmText}
                         onChange={(e) => {
                             setOldBpmText(e.target.value);
@@ -313,7 +313,7 @@ function ClipRateEditorFields({
                         {tAny("clip_rate_editor_new_bpm")}
                     </span>
                     <input
-                        className="w-full text-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
+                        className="w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
                         value={newBpmText}
                         onChange={(e) => {
                             setNewBpmText(e.target.value);
@@ -343,7 +343,7 @@ function ClipRateEditorFields({
                     {formatFadeLengthTooltip(Number(clip.lengthSec) || 0, formatCtx)}
                 </span>
                 <input
-                    className={`w-full text-xs rounded px-2 py-1 outline-none bg-black/20 border ${
+                    className={`w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border ${
                         durationEdited && parsedDuration == null
                             ? "border-red-400/80"
                             : "border-qt-border"

@@ -3499,7 +3499,7 @@ function AppInner() {
     return (
         <Flex
             direction="column"
-            className="h-screen w-screen bg-qt-window text-qt-text overflow-hidden font-sans text-sm selection:bg-qt-highlight selection:text-white"
+            className="h-screen w-screen bg-qt-window text-qt-text overflow-hidden font-sans text-qt-md selection:bg-qt-highlight selection:text-white"
         >
             <AppDialog
                 open={Boolean(vocalShifterSkippedFilesDialog?.length)}
@@ -3522,7 +3522,7 @@ function AppInner() {
                     },
                 ]}
             >
-                <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-xs">
+                <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-qt-xs">
                     {(vocalShifterSkippedFilesDialog ?? []).map((file) => (
                         <div key={file} className="truncate" data-tooltip={file}>
                             • {file}
@@ -3552,7 +3552,7 @@ function AppInner() {
                     },
                 ]}
             >
-                <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-xs">
+                <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-qt-xs">
                     {(reaperSkippedFilesDialog ?? []).map((file) => (
                         <div key={file} className="truncate" data-tooltip={file}>
                             • {file}
@@ -3889,7 +3889,7 @@ function AppInner() {
                         return (
                             <div
                                 key={itemKey}
-                                className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1.5 text-xs last:border-b-0"
+                                className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1.5 text-qt-xs last:border-b-0"
                             >
                                 <div
                                     className={`shrink-0 whitespace-nowrap rounded px-1 py-0.5 text-center text-[10px] font-semibold leading-none ${
@@ -4100,7 +4100,7 @@ function AppInner() {
                         短的插在它右侧，左侧位置就永远稳定。 */}
                     {noticeText ? (
                         <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
+                            className="shrink-0 rounded px-1 py-0 text-qt-xs font-medium"
                             style={{
                                 background: "var(--green-3)",
                                 color: "var(--green-11)",
@@ -4115,7 +4115,7 @@ function AppInner() {
                         位置紧跟长时效提示位之后、短时效进度片之前。 */}
                     {importBusy ? (
                         <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
+                            className="shrink-0 rounded px-1 py-0 text-qt-xs font-medium"
                             style={{
                                 background: "var(--accent-3)",
                                 color: "var(--accent-11)",
@@ -4128,7 +4128,7 @@ function AppInner() {
                     ) : null}
                     {stretching.active ? (
                         <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
+                            className="shrink-0 rounded px-1 py-0 text-qt-xs font-medium"
                             style={{
                                 background: "var(--accent-3)",
                                 color: "var(--accent-11)",
@@ -4142,7 +4142,7 @@ function AppInner() {
                     ) : null}
                     {waveformAnalysis.active ? (
                         <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
+                            className="shrink-0 rounded px-1 py-0 text-qt-xs font-medium"
                             style={{
                                 background: "var(--accent-3)",
                                 color: "var(--accent-11)",
@@ -4159,7 +4159,7 @@ function AppInner() {
                     ) : null}
                     {pitchAnalysisText ? (
                         <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
+                            className="shrink-0 rounded px-1 py-0 text-qt-xs font-medium"
                             style={{
                                 background: "var(--accent-3)",
                                 color: "var(--accent-11)",
@@ -4175,7 +4175,7 @@ function AppInner() {
                     <ParamDataLoadingChip />
                     {rendering.active ? (
                         <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
+                            className="shrink-0 rounded px-1 py-0 text-qt-xs font-medium"
                             style={{
                                 background: "var(--accent-3)",
                                 color: "var(--accent-11)",

@@ -37,7 +37,15 @@ export type AppButtonIntent =
     /** 破坏性操作（删除/丢弃/覆盖）。 */
     | "danger";
 
-/** `sm` 对齐 Radix `size="1"`（24px），`md` 对齐 `size="2"`（32px）。 */
+/**
+ * 尺寸档。
+ *
+ * 【为什么默认是 `md`（32px）】上一版默认 `sm`（24px），于是全部 42 个对话框的
+ * 页脚按钮都从重构前的 32px 被压到 24px —— 用户实测反馈下方的按钮过小。
+ * 默认值必须是大多数场景该用的那个，而对话框页脚就是大多数场景。
+ *
+ * `sm` 留给**行内**动作（列表行里的按钮、紧凑工具条），由调用方显式选择。
+ */
 export type AppButtonSize = "sm" | "md";
 
 const INTENT_PROPS: Record<AppButtonIntent, Pick<ComponentPropsWithoutRef<typeof Button>, "variant" | "color">> =
@@ -63,7 +71,7 @@ export interface AppButtonProps extends Omit<ComponentPropsWithoutRef<typeof But
  * <AppButton onClick={cancel}>取消</AppButton>
  * <AppButton intent="danger" onClick={discard}>丢弃</AppButton>
  */
-export function AppButton({ intent = "default", size = "sm", className, ...rest }: AppButtonProps) {
+export function AppButton({ intent = "default", size = "md", className, ...rest }: AppButtonProps) {
     return (
         <Button
             {...INTENT_PROPS[intent]}

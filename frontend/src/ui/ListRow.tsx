@@ -82,7 +82,7 @@ export function AppListRow({
             onDoubleClick={disabled ? undefined : onDoubleClick}
             onContextMenu={onContextMenu}
             className={cx(
-                "group flex items-center gap-1.5 text-xs",
+                "hs-type-body group flex items-center gap-1.5",
                 DENSITY_CLASS[density],
                 interactive && !disabled && "cursor-pointer",
                 disabled && "cursor-default opacity-50",

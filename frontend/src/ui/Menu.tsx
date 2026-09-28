@@ -8,7 +8,7 @@
  * 【它解决的三个问题】
  *
  * 1. **漂移的菜单项外观**。审查发现同一个"菜单项"在 6 个文件里有 6 套
- *    class：`text-[12px]` / `text-sm` / `text-xs`，`hover:bg-qt-button-hover` /
+ *    class：`text-[12px]` / `text-qt-md` / `text-qt-xs`，`hover:bg-qt-button-hover` /
  *    `hover:bg-qt-hover` / `hover:bg-qt-highlight hover:text-white`，
  *    以及 `py-1` / `py-1.5` / `py-2` 三种行内边距。
  *
@@ -66,7 +66,7 @@ export interface AppContextMenuProps {
 }
 
 const ITEM_BASE =
-    "flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-xs outline-none";
+    "hs-type-body flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left outline-none";
 
 /**
  * 上下文菜单。

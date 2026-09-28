@@ -79,7 +79,7 @@ function PanelMount({ form }: { form: DockForm }) {
 /** lazy 面板加载中的占位（与 MissingPanel 同形，但语义是"正在来"）。 */
 function PanelLoading() {
     return (
-        <div className="flex h-full w-full items-center justify-center bg-qt-window p-4 text-xs text-qt-text-muted">
+        <div className="flex h-full w-full items-center justify-center bg-qt-window p-4 text-qt-xs text-qt-text-muted">
             …
         </div>
     );
@@ -87,7 +87,7 @@ function PanelLoading() {
 
 function MissingPanel({ panelId }: { panelId: string }) {
     return (
-        <div className="flex h-full w-full items-center justify-center bg-qt-window p-4 text-center text-xs text-qt-text-muted">
+        <div className="flex h-full w-full items-center justify-center bg-qt-window p-4 text-center text-qt-xs text-qt-text-muted">
             {panelId}
         </div>
     );
@@ -98,8 +98,8 @@ function PanelUnavailable({ panelId }: { panelId: string }) {
     const { t } = useI18n();
     return (
         <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-qt-window p-4 text-center">
-            <div className="text-xs text-qt-text">{panelId}</div>
-            <div className="text-xs text-qt-text-muted">{t("panel_unavailable")}</div>
+            <div className="text-qt-xs text-qt-text">{panelId}</div>
+            <div className="text-qt-xs text-qt-text-muted">{t("panel_unavailable")}</div>
         </div>
     );
 }
@@ -129,15 +129,15 @@ class PanelErrorBoundary extends Component<
         if (!this.state.error) return this.props.children;
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-qt-window p-4 text-center">
-                <div className="text-xs text-qt-text">
+                <div className="text-qt-xs text-qt-text">
                     {this.props.panelId} — panel failed to render
                 </div>
-                <div className="max-w-full truncate text-xs text-qt-text-muted">
+                <div className="max-w-full truncate text-qt-xs text-qt-text-muted">
                     {this.state.error.message}
                 </div>
                 <button
                     type="button"
-                    className="rounded border border-qt-border bg-qt-panel px-2 py-1 text-xs text-qt-text hover:bg-qt-hover"
+                    className="rounded border border-qt-border bg-qt-panel px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-hover"
                     onClick={() => this.setState({ error: null })}
                 >
                     Retry

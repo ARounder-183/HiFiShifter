@@ -27,7 +27,7 @@ export function ParamDataLoadingChip() {
 
     return (
         <span
-            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
+            className="shrink-0 rounded px-1 py-0 text-qt-xs font-medium"
             style={{
                 background: "var(--accent-3)",
                 color: "var(--accent-11)",

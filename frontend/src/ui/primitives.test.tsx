@@ -59,10 +59,20 @@ test("AppButton 语义映射：primary 走 solid、默认走 soft+gray、danger 
     expect(danger.getAttribute("data-accent-color")).toBe("red");
 });
 
-test("AppButton 默认尺寸为 sm（对齐 Radix size=1），不写 size 也是 24px 档", async () => {
+test("AppButton 默认尺寸为 md（对齐 Radix size=2，32px）", async () => {
+    /*
+     * 这条曾经断言默认是 `sm`（24px）—— 那个默认值把全部 42 个对话框的页脚按钮
+     * 从重构前的 32px 压小了 25%，用户实测反馈"下方的按钮过小"。
+     * 默认值必须是"大多数场景该用的那个"，而对话框页脚就是大多数场景。
+     */
     await render(<AppButton>x</AppButton>);
     const button = container.querySelector("button")!;
-    expect(button.className).toContain("rt-r-size-1");
+    expect(button.className).toContain("rt-r-size-2");
+});
+
+test("AppButton 显式 size=sm 时才是 24px 档（行内动作用）", async () => {
+    await render(<AppButton size="sm">x</AppButton>);
+    expect(container.querySelector("button")!.className).toContain("rt-r-size-1");
 });
 
 test("AppField 的标签宽度只允许三档令牌值", async () => {
