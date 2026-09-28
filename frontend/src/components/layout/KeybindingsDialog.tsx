@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Flex, Text, Button, ScrollArea, Separator, Select, Badge } from "@radix-ui/themes";
+import { Flex, Text, Button, ScrollArea, Separator, Badge } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { IS_MAC } from "../../utils/platform";
@@ -24,6 +24,7 @@ import type { ActionId, ActionMeta, Keybinding } from "../../features/keybinding
 import { canonicalKeyFromEvent } from "../../features/keybindings/keybindingMatch";
 import { useShortcutSuppression } from "../../ui/shortcutScope";
 import { AppDialog } from "../../ui/Dialog";
+import { AppSelect } from "../../ui";
 import {
     KEYBINDING_PRESET_SELECTION_IDS,
     KEYBINDING_PRESETS,
@@ -320,16 +321,15 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                     <Text size="2" color="gray" style={{ whiteSpace: "nowrap" }}>
                         {tAny("kb_preset_label")}
                     </Text>
-                    <Select.Root value={selectedPreset} onValueChange={handleApplyPreset}>
-                        <Select.Trigger style={{ minWidth: 220 }} />
-                        <Select.Content>
-                            {KEYBINDING_PRESET_SELECTION_IDS.map((presetId) => (
-                                <Select.Item key={presetId} value={presetId}>
-                                    {tAny(`kb_preset_${presetId}`)}
-                                </Select.Item>
-                            ))}
-                        </Select.Content>
-                    </Select.Root>
+                    <AppSelect
+                        fullWidth={false}
+                        value={selectedPreset}
+                        onValueChange={handleApplyPreset}
+                        options={KEYBINDING_PRESET_SELECTION_IDS.map((presetId) => ({
+                            value: presetId,
+                            label: tAny(`kb_preset_${presetId}`),
+                        }))}
+                    />
                 </Flex>
 
                 <ScrollArea style={{ maxHeight: "56vh", marginTop: 8 }} scrollbars="vertical">

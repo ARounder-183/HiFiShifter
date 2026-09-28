@@ -1,13 +1,6 @@
+// hs-interaction-exempt: 主工具栏是紧凑 chrome（size 1、内联底色、BPM 有手势累加器），能力层原语是表单尺寸；本文件的滚轮与精细调整接线已完备（BPM/节拍器音量/三个下拉均有），故刻意保留。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-    Flex,
-    Select,
-    TextField,
-    Button,
-    IconButton,
-    Text,
-    Box,
-} from "@radix-ui/themes";
+import { Flex, Select, TextField, Button, IconButton, Text, Box } from "@radix-ui/themes";
 import {
     CheckIcon,
     DoubleArrowRightIcon,
@@ -69,7 +62,7 @@ import {
 } from "../../utils/tempoMap";
 import { SCALE_KEYS, SCALE_LABELS, type ScaleLike } from "../../utils/musicalScales";
 import { applySelectWheelChange } from "../../utils/selectWheel";
-import { useWheelScrollGuard } from "../../utils/useWheelScrollGuard";
+import { useRangeWheelGuard } from "../../utils/useRangeWheelGuard";
 import { useNonPassiveWheel } from "../../utils/useNonPassiveWheel";
 import { createFrameCommitter, type FrameCommitter } from "../../utils/commitOncePerFrame";
 import {
@@ -244,8 +237,8 @@ export function ActionBar() {
         selectKeybinding(state, "edit.redo"),
     );
     // 滚轮守卫：节拍器音量滑块滚轮步进时不触发默认滚动
-    // （React onWheel 的 preventDefault 是 passive no-op，见 useWheelScrollGuard）。
-    const metronomeVolumeWheelGuard = useWheelScrollGuard<HTMLInputElement>();
+    // （React onWheel 的 preventDefault 是 passive no-op，见 useRangeWheelGuard）。
+    const metronomeVolumeWheelGuard = useRangeWheelGuard<HTMLInputElement>();
 
     // ── "拖动时切换吸附"（modifier.clipNoSnap）────────────────────────
     // 时间轴拖拽手势进行中且按住该修饰键时，工具栏吸附按钮临时显示为
@@ -583,7 +576,7 @@ export function ActionBar() {
      *
      * 【为什么用非被动原生监听】React 的 `onWheel` 是 passive 的，里面的
      * `preventDefault()` 是空操作（本仓库其它数值滚轮控件都用 `useNonPassiveWheel`
-     * 或 `useWheelScrollGuard`）：滚轮调值会同时滚动祖先容器，产生第二路视觉位移，
+     * 或 `useRangeWheelGuard`）：滚轮调值会同时滚动祖先容器，产生第二路视觉位移，
      * 并触发浏览器干预告警。
      */
     const attachBpmWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
@@ -725,7 +718,7 @@ export function ActionBar() {
                                         );
                                     }}
                                     onPointerDown={(e) => e.stopPropagation()}
-                                    className="flex-1"
+                                    className="qt-range flex-1"
                                 />
                                 <span className="text-[11px] tabular-nums w-8 text-right opacity-70">
                                     {Math.round(s.metronomeGain * 100)}

@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "re
 import { registerDragAbort } from "./gestureFocusGuard";
 import { formatEditNumber } from "./math";
 import { measureTextWidth } from "./runtime/timelineCanvasStyle";
-import { Flex, Box, Text, IconButton, Select } from "@radix-ui/themes";
+import { Flex, Box, Text, IconButton } from "@radix-ui/themes";
 import { Cross2Icon, PlusIcon } from "@radix-ui/react-icons";
 import { shallowEqual } from "react-redux";
 import type { TrackInfo, TrackMeterInfo } from "../../../features/session/sessionTypes";
@@ -29,6 +29,7 @@ import { resolveScrollCommitStepPx, shouldCommitScroll } from "./scrollCommit";
 import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
 import { useAppTheme } from "../../../theme/AppThemeProvider";
 import { AppContextMenu } from "../../../ui/Menu";
+import { AppSelect } from "../../../ui";
 
 /** Color palette options shown when creating a new track.
  * 色值选取与归一化带（s 0.30-0.46、感知亮度 0.50-0.60）对齐：暖色系
@@ -1876,8 +1877,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 e.stopPropagation()
                                                             }
                                                         >
-                                                            <Select.Root
-                                                                size="1"
+                                                            <AppSelect
                                                                 value={
                                                                     PITCH_ANALYSIS_ALGO_OPTIONS.includes(
                                                                         track.pitchAnalysisAlgo as
@@ -1892,27 +1892,19 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 onValueChange={(v) => {
                                                                     onAlgoChange(track.id, v);
                                                                 }}
-                                                            >
-                                                                <Select.Trigger
-                                                                    style={{
-                                                                        minWidth: 80,
-                                                                    }}
-                                                                />
-                                                                <Select.Content>
-                                                                    <Select.Item value="nsf_hifigan_onnx">
-                                                                        nsf-hifigan
-                                                                    </Select.Item>
-                                                                    <Select.Item value="world_dll">
-                                                                        world
-                                                                    </Select.Item>
-                                                                    <Select.Item value="vslib">
-                                                                        vslib
-                                                                    </Select.Item>
-                                                                    <Select.Item value="none">
-                                                                        {t("none")}
-                                                                    </Select.Item>
-                                                                </Select.Content>
-                                                            </Select.Root>
+                                                                fullWidth={false}
+                                                                className="min-w-[80px]"
+                                                                ariaLabel={t("algo_label")}
+                                                                options={[
+                                                                    {
+                                                                        value: "nsf_hifigan_onnx",
+                                                                        label: "nsf-hifigan",
+                                                                    },
+                                                                    { value: "world_dll", label: "world" },
+                                                                    { value: "vslib", label: "vslib" },
+                                                                    { value: "none", label: t("none") },
+                                                                ]}
+                                                            />
                                                         </div>
                                                     ) : null}
                                                     <IconButton

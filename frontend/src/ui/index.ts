@@ -66,6 +66,22 @@ export {
 
 export { AppListRow, type AppListRowDensity, type AppListRowProps } from "./ListRow";
 
+export { AppSelect, type AppSelectEntry, type AppSelectItem, type AppSelectProps } from "./Select";
+
+export { AppNumberField, type AppNumberFieldProps } from "./NumberField";
+
+export { AppSlider, AppSliderReadout, type AppSliderProps } from "./Slider";
+
+export {
+    FINE_ADJUST_ACTION_ID,
+    quantizeValue,
+    resolveStep,
+    stepFor,
+    stepValue,
+    type StepSpec,
+    type StepUnit,
+} from "./stepPolicy";
+
 export { AppBusy, AppEmptyState, type AppBusyProps, type AppEmptyStateProps } from "./State";
 
 export {

@@ -8,8 +8,6 @@ import {
     Button,
     Flex,
     SegmentedControl,
-    Select,
-    Slider,
     Text,
     TextField,
 } from "@radix-ui/themes";
@@ -38,7 +36,7 @@ import {
 } from "../../utils/exportFormat";
 import { ProgressBar } from "../ProgressBar";
 import type { TrackInfo } from "../../features/session/sessionTypes";
-import { applySelectWheelChange } from "../../utils/selectWheel";
+import { AppNumberField, AppSelect, AppSlider, AppSliderReadout } from "../../ui";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm } from "../../ui/Field";
 
@@ -50,12 +48,6 @@ interface ExportAudioDialogProps {
 type ExportMode = "project" | "separated";
 type ExportRangeKind = "all" | "custom";
 type Mp3ModeKind = "cbr" | "vbr";
-
-/** FLAC 压缩级别滑条的滚轮步进选项（"0" ~ "8"，供 applySelectWheelChange 使用）。 */
-const FLAC_LEVEL_OPTIONS = Array.from(
-    { length: FLAC_COMPRESSION_RANGE.max - FLAC_COMPRESSION_RANGE.min + 1 },
-    (_, index) => String(FLAC_COMPRESSION_RANGE.min + index),
-);
 
 type TargetKind = "root" | "sub";
 
@@ -248,8 +240,8 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
     const [mode, setMode] = useState<ExportMode>("project");
     const [rangeKind, setRangeKind] = useState<ExportRangeKind>("all");
-    const [customStartSec, setCustomStartSec] = useState("0");
-    const [customEndSec, setCustomEndSec] = useState("0");
+    const [customStartSec, setCustomStartSec] = useState(0);
+    const [customEndSec, setCustomEndSec] = useState(0);
     const [projectOutputDir, setProjectOutputDir] = useState("");
     const [projectFileName, setProjectFileName] = useState("<ProjectName>.wav");
     const [separatedOutputDir, setSeparatedOutputDir] = useState("");
@@ -351,8 +343,8 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
         setMode("project");
         setRangeKind("all");
-        setCustomStartSec("0");
-        setCustomEndSec(String(Math.max(0, Math.ceil(projectSecAtOpenRef.current))));
+        setCustomStartSec(0);
+        setCustomEndSec(Math.max(0, Math.ceil(projectSecAtOpenRef.current)));
         setProjectOutputDir("");
         setProjectFileName("<ProjectName>.wav");
         setSeparatedOutputDir("");
@@ -1287,56 +1279,28 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
             >
                 <AppForm labelWidth="lg">
                     <AppField label={tAny("export_dialog_mode")}>
-                        <Select.Root
+                        <AppSelect
                             value={mode}
                             onValueChange={(value) => setMode(value as ExportMode)}
-                        >
-                            <Select.Trigger
-                                onWheel={(event) => {
-                                    applySelectWheelChange({
-                                        event,
-                                        currentValue: mode,
-                                        options: ["project", "separated"],
-                                        onChange: (next) => setMode(next as ExportMode),
-                                    });
-                                }}
-                            />
-                            <Select.Content>
-                                <Select.Item value="project">
-                                    {tAny("export_dialog_mode_project")}
-                                </Select.Item>
-                                <Select.Item value="separated">
-                                    {tAny("export_dialog_mode_separated")}
-                                </Select.Item>
-                            </Select.Content>
-                        </Select.Root>
+                            options={[
+                                { value: "project", label: tAny("export_dialog_mode_project") },
+                                {
+                                    value: "separated",
+                                    label: tAny("export_dialog_mode_separated"),
+                                },
+                            ]}
+                        />
                     </AppField>
 
                     <AppField label={tAny("export_dialog_range")}>
-                        <Select.Root
+                        <AppSelect
                             value={rangeKind}
                             onValueChange={(value) => setRangeKind(value as ExportRangeKind)}
-                        >
-                            <Select.Trigger
-                                onWheel={(event) => {
-                                    applySelectWheelChange({
-                                        event,
-                                        currentValue: rangeKind,
-                                        options: ["all", "custom"],
-                                        onChange: (next) =>
-                                            setRangeKind(next as ExportRangeKind),
-                                    });
-                                }}
-                            />
-                            <Select.Content>
-                                <Select.Item value="all">
-                                    {tAny("export_dialog_range_all")}
-                                </Select.Item>
-                                <Select.Item value="custom">
-                                    {tAny("export_dialog_range_custom")}
-                                </Select.Item>
-                            </Select.Content>
-                        </Select.Root>
+                            options={[
+                                { value: "all", label: tAny("export_dialog_range_all") },
+                                { value: "custom", label: tAny("export_dialog_range_custom") },
+                            ]}
+                        />
                     </AppField>
 
                     {rangeKind === "custom" && (
@@ -1344,30 +1308,26 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                             <Text size="2" style={{ minWidth: 132 }}>
                                 {tAny("export_dialog_range_custom_label")}
                             </Text>
-                            <TextField.Root
-                                size="2"
-                                type="number"
-                                min={0}
-                                step="0.001"
+                            <AppNumberField
                                 value={customStartSec}
-                                onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                    setCustomStartSec(event.target.value)
-                                }
-                                style={{ width: 160 }}
+                                unit="seconds"
+                                min={0}
+                                max={86400}
+                                width={160}
+                                ariaLabel={tAny("export_dialog_range_custom_label")}
+                                onCommit={(next) => setCustomStartSec(next)}
                             />
                             <Text size="2" color="gray">
                                 ~
                             </Text>
-                            <TextField.Root
-                                size="2"
-                                type="number"
-                                min={0}
-                                step="0.001"
+                            <AppNumberField
                                 value={customEndSec}
-                                onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                    setCustomEndSec(event.target.value)
-                                }
-                                style={{ width: 160 }}
+                                unit="seconds"
+                                min={0}
+                                max={86400}
+                                width={160}
+                                ariaLabel={tAny("export_dialog_range_custom_label")}
+                                onCommit={(next) => setCustomEndSec(next)}
                             />
                             <Text size="1" color="gray">
                                 sec
@@ -1387,34 +1347,17 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     </AppField>
 
                     <AppField label={tAny("export_dialog_sample_rate")}>
-                        <Select.Root
+                        <AppSelect
                             value={sampleRate}
                             onValueChange={(value) => {
                                 setSampleRate(value);
                                 setSampleRateNotice("");
                             }}
-                        >
-                            <Select.Trigger
-                                onWheel={(event) => {
-                                    applySelectWheelChange({
-                                        event,
-                                        currentValue: sampleRate,
-                                        options: sampleRateOptions(format).map(String),
-                                        onChange: (next) => {
-                                            setSampleRate(next);
-                                            setSampleRateNotice("");
-                                        },
-                                    });
-                                }}
-                            />
-                            <Select.Content>
-                                {sampleRateOptions(format).map((rate) => (
-                                    <Select.Item key={rate} value={String(rate)}>
-                                        {rate} Hz
-                                    </Select.Item>
-                                ))}
-                            </Select.Content>
-                        </Select.Root>
+                            options={sampleRateOptions(format).map((rate) => ({
+                                value: String(rate),
+                                label: `${rate} Hz`,
+                            }))}
+                        />
                     </AppField>
 
                     {sampleRateNotice ? (
@@ -1425,7 +1368,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
                     {format !== "mp3" ? (
                         <AppField label={tAny("export_dialog_bit_depth")}>
-                            <Select.Root
+                            <AppSelect
                                 value={format === "wav" ? wavBitDepth : flacBitDepth}
                                 onValueChange={(value) => {
                                     if (format === "wav") {
@@ -1440,40 +1383,14 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                         setFlacBitDepth(value);
                                     }
                                 }}
-                            >
-                                <Select.Trigger
-                                    onWheel={(event) => {
-                                        const isWav = format === "wav";
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue: isWav ? wavBitDepth : flacBitDepth,
-                                            options: isWav
-                                                ? ["i16", "i24", "f32"]
-                                                : ["i16", "i24"],
-                                            onChange: (next) => {
-                                                if (isWav) {
-                                                    if (
-                                                        next === "i16" ||
-                                                        next === "i24" ||
-                                                        next === "f32"
-                                                    ) {
-                                                        setWavBitDepth(next);
-                                                    }
-                                                } else if (next === "i16" || next === "i24") {
-                                                    setFlacBitDepth(next);
-                                                }
-                                            },
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    <Select.Item value="i16">16-bit</Select.Item>
-                                    <Select.Item value="i24">24-bit</Select.Item>
-                                    {format === "wav" && (
-                                        <Select.Item value="f32">32-bit float</Select.Item>
-                                    )}
-                                </Select.Content>
-                            </Select.Root>
+                                options={[
+                                    { value: "i16", label: "16-bit" },
+                                    { value: "i24", label: "24-bit" },
+                                    ...(format === "wav"
+                                        ? [{ value: "f32", label: "32-bit float" }]
+                                        : []),
+                                ]}
+                            />
                         </AppField>
                     ) : (
                         <Text size="1" color="gray">
@@ -1497,105 +1414,51 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                             {format === "mp3" && (
                                 <>
                                     <AppField label={tAny("export_dialog_mp3_mode")}>
-                                        <Select.Root
+                                        <AppSelect
                                             value={mp3Mode}
                                             onValueChange={(value) => {
                                                 if (value === "cbr" || value === "vbr") {
                                                     setMp3Mode(value);
                                                 }
                                             }}
-                                        >
-                                            <Select.Trigger
-                                                onWheel={(event) => {
-                                                    applySelectWheelChange({
-                                                        event,
-                                                        currentValue: mp3Mode,
-                                                        options: ["vbr", "cbr"],
-                                                        onChange: (next) => {
-                                                            if (
-                                                                next === "cbr" ||
-                                                                next === "vbr"
-                                                            ) {
-                                                                setMp3Mode(next);
-                                                            }
-                                                        },
-                                                    });
-                                                }}
-                                            />
-                                            <Select.Content>
-                                                <Select.Item value="vbr">
-                                                    {tAny("export_dialog_mp3_mode_vbr")}
-                                                </Select.Item>
-                                                <Select.Item value="cbr">
-                                                    {tAny("export_dialog_mp3_mode_cbr")}
-                                                </Select.Item>
-                                            </Select.Content>
-                                        </Select.Root>
+                                            options={[
+                                                {
+                                                    value: "vbr",
+                                                    label: tAny("export_dialog_mp3_mode_vbr"),
+                                                },
+                                                {
+                                                    value: "cbr",
+                                                    label: tAny("export_dialog_mp3_mode_cbr"),
+                                                },
+                                            ]}
+                                        />
                                     </AppField>
 
                                     {mp3Mode === "cbr" ? (
                                         <AppField label={tAny("export_dialog_mp3_bitrate")}>
-                                            <Select.Root
+                                            <AppSelect
                                                 value={String(mp3Bitrate)}
                                                 onValueChange={(value) =>
                                                     setMp3Bitrate(Number(value))
                                                 }
-                                            >
-                                                <Select.Trigger
-                                                    onWheel={(event) => {
-                                                        applySelectWheelChange({
-                                                            event,
-                                                            currentValue: String(mp3Bitrate),
-                                                            options: MP3_BITRATES.map(String),
-                                                            onChange: (next) =>
-                                                                setMp3Bitrate(Number(next)),
-                                                        });
-                                                    }}
-                                                />
-                                                <Select.Content>
-                                                    {MP3_BITRATES.map((rate) => (
-                                                        <Select.Item
-                                                            key={rate}
-                                                            value={String(rate)}
-                                                        >
-                                                            {rate} kbps
-                                                        </Select.Item>
-                                                    ))}
-                                                </Select.Content>
-                                            </Select.Root>
+                                                options={MP3_BITRATES.map((rate) => ({
+                                                    value: String(rate),
+                                                    label: `${rate} kbps`,
+                                                }))}
+                                            />
                                         </AppField>
                                     ) : (
                                         <AppField label={tAny("export_dialog_mp3_quality")}>
-                                            <Select.Root
+                                            <AppSelect
                                                 value={String(mp3Quality)}
                                                 onValueChange={(value) =>
                                                     setMp3Quality(Number(value))
                                                 }
-                                            >
-                                                <Select.Trigger
-                                                    onWheel={(event) => {
-                                                        applySelectWheelChange({
-                                                            event,
-                                                            currentValue: String(mp3Quality),
-                                                            options: MP3_VBR_AVG_KBPS.map(
-                                                                (_, index) => String(index),
-                                                            ),
-                                                            onChange: (next) =>
-                                                                setMp3Quality(Number(next)),
-                                                        });
-                                                    }}
-                                                />
-                                                <Select.Content>
-                                                    {MP3_VBR_AVG_KBPS.map((avg, index) => (
-                                                        <Select.Item
-                                                            key={index}
-                                                            value={String(index)}
-                                                        >
-                                                            q{index} · ~{avg} kbps
-                                                        </Select.Item>
-                                                    ))}
-                                                </Select.Content>
-                                            </Select.Root>
+                                                options={MP3_VBR_AVG_KBPS.map((avg, index) => ({
+                                                    value: String(index),
+                                                    label: `q${index} · ~${avg} kbps`,
+                                                }))}
+                                            />
                                         </AppField>
                                     )}
 
@@ -1644,34 +1507,15 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                         <Text size="2" style={{ minWidth: 132 }}>
                                             {tAny("export_dialog_flac_level")}
                                         </Text>
-                                        <Slider
+                                        <AppSlider
+                                            value={flacLevel}
+                                            unit="integer"
                                             min={FLAC_COMPRESSION_RANGE.min}
                                             max={FLAC_COMPRESSION_RANGE.max}
-                                            step={1}
-                                            value={[flacLevel]}
-                                            onValueChange={(value) =>
-                                                setFlacLevel(
-                                                    Array.isArray(value) ? value[0] : value,
-                                                )
-                                            }
-                                            onWheel={(event) => {
-                                                applySelectWheelChange({
-                                                    event,
-                                                    currentValue: String(flacLevel),
-                                                    options: FLAC_LEVEL_OPTIONS,
-                                                    onChange: (next) =>
-                                                        setFlacLevel(Number(next)),
-                                                });
-                                            }}
-                                            style={{ flex: 1 }}
+                                            ariaLabel={tAny("export_dialog_flac_level")}
+                                            onChange={(next) => setFlacLevel(next)}
                                         />
-                                        <Text
-                                            size="1"
-                                            color="gray"
-                                            style={{ minWidth: 24, textAlign: "right" }}
-                                        >
-                                            {flacLevel}
-                                        </Text>
+                                        <AppSliderReadout>{flacLevel}</AppSliderReadout>
                                     </Flex>
                                     <Text size="1" color="gray">
                                         {tAny("export_dialog_flac_level_hint")}
@@ -1683,75 +1527,46 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                 (wavBitDepth === "i16" || wavBitDepth === "i24")) ||
                                 format === "flac") && (
                                 <AppField label={tAny("export_dialog_dither")}>
-                                    <Select.Root
+                                    <AppSelect
                                         value={dither}
                                         onValueChange={(value) => {
                                             if (value === "none" || value === "tpdf") {
                                                 setDither(value);
                                             }
                                         }}
-                                    >
-                                        <Select.Trigger
-                                            onWheel={(event) => {
-                                                applySelectWheelChange({
-                                                    event,
-                                                    currentValue: dither,
-                                                    options: ["none", "tpdf"],
-                                                    onChange: (next) => {
-                                                        if (
-                                                            next === "none" ||
-                                                            next === "tpdf"
-                                                        ) {
-                                                            setDither(next);
-                                                        }
-                                                    },
-                                                });
-                                            }}
-                                        />
-                                        <Select.Content>
-                                            <Select.Item value="none">
-                                                {tAny("export_dialog_dither_none")}
-                                            </Select.Item>
-                                            <Select.Item value="tpdf">
-                                                {tAny("export_dialog_dither_tpdf")}
-                                            </Select.Item>
-                                        </Select.Content>
-                                    </Select.Root>
+                                        options={[
+                                            {
+                                                value: "none",
+                                                label: tAny("export_dialog_dither_none"),
+                                            },
+                                            {
+                                                value: "tpdf",
+                                                label: tAny("export_dialog_dither_tpdf"),
+                                            },
+                                        ]}
+                                    />
                                 </AppField>
                             )}
 
                             <AppField label={tAny("export_dialog_channel_mode")}>
-                                <Select.Root
+                                <AppSelect
                                     value={channelMode}
                                     onValueChange={(value) => {
                                         if (value === "stereo" || value === "mono") {
                                             setChannelMode(value);
                                         }
                                     }}
-                                >
-                                    <Select.Trigger
-                                        onWheel={(event) => {
-                                            applySelectWheelChange({
-                                                event,
-                                                currentValue: channelMode,
-                                                options: ["stereo", "mono"],
-                                                onChange: (next) => {
-                                                    if (next === "stereo" || next === "mono") {
-                                                        setChannelMode(next);
-                                                    }
-                                                },
-                                            });
-                                        }}
-                                    />
-                                    <Select.Content>
-                                        <Select.Item value="stereo">
-                                            {tAny("export_dialog_channel_stereo")}
-                                        </Select.Item>
-                                        <Select.Item value="mono">
-                                            {tAny("export_dialog_channel_mono")}
-                                        </Select.Item>
-                                    </Select.Content>
-                                </Select.Root>
+                                    options={[
+                                        {
+                                            value: "stereo",
+                                            label: tAny("export_dialog_channel_stereo"),
+                                        },
+                                        {
+                                            value: "mono",
+                                            label: tAny("export_dialog_channel_mono"),
+                                        },
+                                    ]}
+                                />
                             </AppField>
                         </Flex>
                     )}

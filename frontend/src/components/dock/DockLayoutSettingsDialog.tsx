@@ -10,22 +10,20 @@
  * 给它们加一层待提交状态只会制造"改了没反应"的困惑。
  */
 
-import { Flex, Select, Text, TextField } from "@radix-ui/themes";
+import { Text } from "@radix-ui/themes";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { setDockSettings, setTabPosition } from "../../features/dock/dockSlice";
 import type { DockSettings } from "../../features/dock/dockSettings";
 import { useI18n } from "../../i18n/I18nProvider";
-import { applySelectWheelChange } from "../../utils/selectWheel";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm, AppSwitchRow } from "../../ui/Field";
+import { AppNumberField, AppSelect } from "../../ui";
 
 export interface DockLayoutSettingsDialogProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;
 }
-
-const DOCK_MODIFIERS = ["primary", "alt", "shift", "none"] as const;
 
 export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSettingsDialogProps) {
     const dispatch = useAppDispatch();
@@ -52,85 +50,77 @@ export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSetti
         >
             <AppForm>
                 <AppField label={tAny("layout_setting_dock_modifier")}>
-                    <Select.Root
+                    <AppSelect
                         value={settings.dockModifier}
                         onValueChange={(value) =>
                             patch({ dockModifier: value as DockSettings["dockModifier"] })
                         }
-                    >
-                        <Select.Trigger
-                            onWheel={(event) =>
-                                applySelectWheelChange({
-                                    event,
-                                    currentValue: settings.dockModifier,
-                                    options: DOCK_MODIFIERS,
-                                    onChange: (dockModifier) => patch({ dockModifier }),
-                                })
-                            }
-                        />
-                        <Select.Content>
-                            <Select.Item value="primary">
-                                {tAny("layout_modifier_primary")}
-                            </Select.Item>
-                            <Select.Item value="alt">{tAny("layout_modifier_alt")}</Select.Item>
-                            <Select.Item value="shift">{tAny("layout_modifier_shift")}</Select.Item>
-                            <Select.Item value="none">{tAny("layout_modifier_none")}</Select.Item>
-                        </Select.Content>
-                    </Select.Root>
+                        options={[
+                            { value: "primary", label: tAny("layout_modifier_primary") },
+                            { value: "alt", label: tAny("layout_modifier_alt") },
+                            { value: "shift", label: tAny("layout_modifier_shift") },
+                            { value: "none", label: tAny("layout_modifier_none") },
+                        ]}
+                    />
                 </AppField>
                 <Text size="1" color="gray">
                     {tAny("layout_setting_dock_modifier_hint")}
                 </Text>
 
                 <AppField label={tAny("layout_setting_edge_band")}>
-                    <NumberField
+                    <AppNumberField
                         value={settings.edgeBandPx}
+                        unit="pixels"
                         min={8}
                         max={120}
+                        width={110}
                         suffix={tAny("layout_unit_px")}
-                        onChange={(edgeBandPx) => patch({ edgeBandPx })}
+                        ariaLabel={tAny("layout_setting_edge_band")}
+                        onCommit={(edgeBandPx) => patch({ edgeBandPx })}
                     />
                 </AppField>
 
                 <AppField label={tAny("layout_setting_snap_px")}>
-                    <NumberField
+                    <AppNumberField
                         value={settings.floatSnapThresholdPx}
+                        unit="pixels"
                         min={0}
                         max={64}
+                        width={110}
                         suffix={tAny("layout_unit_px")}
-                        onChange={(floatSnapThresholdPx) => patch({ floatSnapThresholdPx })}
+                        ariaLabel={tAny("layout_setting_snap_px")}
+                        onCommit={(floatSnapThresholdPx) => patch({ floatSnapThresholdPx })}
                     />
                 </AppField>
 
                 <AppField label={tAny("layout_setting_tab_position")}>
-                    <Select.Root
+                    <AppSelect
                         value={layoutTabPosition}
                         onValueChange={(value) =>
                             dispatch(setTabPosition(value === "top" ? "top" : "bottom"))
                         }
-                    >
-                        <Select.Trigger />
-                        <Select.Content>
-                            <Select.Item value="bottom">
-                                {tAny("layout_tab_position_bottom")}
-                            </Select.Item>
-                            <Select.Item value="top">{tAny("layout_tab_position_top")}</Select.Item>
-                        </Select.Content>
-                    </Select.Root>
+                        options={[
+                            { value: "bottom", label: tAny("layout_tab_position_bottom") },
+                            { value: "top", label: tAny("layout_tab_position_top") },
+                        ]}
+                    />
                 </AppField>
 
                 <AppField label={tAny("layout_setting_save_delay")}>
-                    <NumberField
+                    <AppNumberField
                         value={settings.saveDebounceMs}
+                        unit="milliseconds"
                         min={0}
                         max={5000}
+                        width={110}
                         suffix={tAny("layout_unit_ms")}
-                        onChange={(saveDebounceMs) => patch({ saveDebounceMs })}
+                        ariaLabel={tAny("layout_setting_save_delay")}
+                        onCommit={(saveDebounceMs) => patch({ saveDebounceMs })}
                     />
                 </AppField>
 
                 <AppField label={tAny("layout_setting_double_click")}>
-                    <Select.Root
+                    <AppSelect
                         value={settings.doubleClickHeaderAction}
                         onValueChange={(value) =>
                             patch({
@@ -138,32 +128,24 @@ export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSetti
                                     value as DockSettings["doubleClickHeaderAction"],
                             })
                         }
-                    >
-                        <Select.Trigger />
-                        <Select.Content>
-                            <Select.Item value="toggleFloat">{tAny("layout_dc_float")}</Select.Item>
-                            <Select.Item value="maximize">{tAny("layout_dc_maximize")}</Select.Item>
-                            <Select.Item value="collapse">{tAny("layout_dc_collapse")}</Select.Item>
-                            <Select.Item value="none">{tAny("layout_dc_none")}</Select.Item>
-                        </Select.Content>
-                    </Select.Root>
+                        options={[
+                            { value: "toggleFloat", label: tAny("layout_dc_float") },
+                            { value: "maximize", label: tAny("layout_dc_maximize") },
+                            { value: "collapse", label: tAny("layout_dc_collapse") },
+                            { value: "none", label: tAny("layout_dc_none") },
+                        ]}
+                    />
                 </AppField>
 
                 <AppField label={tAny("layout_setting_startup")}>
-                    <Select.Root
+                    <AppSelect
                         value={settings.startupLayout}
                         onValueChange={(value) => patch({ startupLayout: value })}
-                    >
-                        <Select.Trigger />
-                        <Select.Content>
-                            <Select.Item value="last">{tAny("layout_startup_last")}</Select.Item>
-                            {presetNames.map((name) => (
-                                <Select.Item key={name} value={name}>
-                                    {name}
-                                </Select.Item>
-                            ))}
-                        </Select.Content>
-                    </Select.Root>
+                        options={[
+                            { value: "last", label: tAny("layout_startup_last") },
+                            ...presetNames.map((name) => ({ value: name, label: name })),
+                        ]}
+                    />
                 </AppField>
 
                 <AppSwitchRow
@@ -198,41 +180,5 @@ export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSetti
                 />
             </AppForm>
         </AppDialog>
-    );
-}
-
-/** 数值输入：与 `RenderCacheDialog` 同一形态（Radix `TextField.Root` + 单位后缀）。 */
-function NumberField({
-    value,
-    min,
-    max,
-    suffix,
-    onChange,
-}: {
-    value: number;
-    min: number;
-    max: number;
-    suffix: string;
-    onChange: (value: number) => void;
-}) {
-    return (
-        <Flex align="center" gap="2">
-            <TextField.Root
-                size="2"
-                type="number"
-                min={min}
-                max={max}
-                value={String(value)}
-                onChange={(event) => {
-                    const next = Number(event.target.value);
-                    if (!Number.isFinite(next)) return;
-                    onChange(Math.min(max, Math.max(min, Math.round(next))));
-                }}
-                style={{ width: 110 }}
-            />
-            <Text size="1" color="gray">
-                {suffix}
-            </Text>
-        </Flex>
     );
 }

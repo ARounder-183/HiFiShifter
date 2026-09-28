@@ -1,5 +1,5 @@
 import React from "react";
-import { Button, Flex, Slider, Switch, Text } from "@radix-ui/themes";
+import { Button, Flex, Switch, Text } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../../../app/hooks";
 import type {
     ClipFormantAnalysisState,
@@ -17,6 +17,7 @@ import {
     CLIP_FORMANT_ACTIVE_ATTR,
     shouldSuppressFormantToolSpaceDefault,
 } from "./clipFormantInteractionGuards";
+import { AppNumberField, AppSlider } from "../../../../ui";
 
 function clamp(value: number, min: number, max: number): number {
     return Math.min(max, Math.max(min, value));
@@ -331,33 +332,25 @@ export const ClipFormantToolWindow: React.FC<{
                 <div className="rounded-lg border border-qt-border bg-qt-panel px-3 py-2">
                     <Flex align="center" justify="between" mb="2">
                         <Text size="2">{t("clip_formant_strength")}</Text>
-                        <input
-                            type="number"
+                        <AppNumberField
+                            value={strengthPercent}
+                            unit="percent"
                             min={0}
                             max={100}
-                            value={strengthPercent}
+                            width={56}
                             disabled={!draft.enabled}
-                            onChange={(event) => {
-                                const next = Number(event.target.value);
-                                if (!Number.isFinite(next)) return;
-                                updateDraft({ strength: clamp(next / 100, 0, 1) });
-                            }}
-                            className="w-14 rounded border border-qt-border bg-qt-window px-1 py-0.5 text-right text-qt-xs text-qt-text"
+                            ariaLabel={t("clip_formant_strength")}
+                            onCommit={(next) => updateDraft({ strength: clamp(next / 100, 0, 1) })}
                         />
                     </Flex>
-                    <Slider
-                        value={[strengthPercent]}
+                    <AppSlider
+                        value={strengthPercent}
+                        unit="percent"
                         min={0}
                         max={100}
                         disabled={!draft.enabled}
-                        onValueChange={(nextValue) =>
-                            updateDraft({
-                                strength: Math.max(
-                                    0,
-                                    Math.min(1, Number(nextValue[0] ?? strengthPercent) / 100),
-                                ),
-                            })
-                        }
+                        ariaLabel={t("clip_formant_strength")}
+                        onChange={(next) => updateDraft({ strength: clamp(next / 100, 0, 1) })}
                     />
                 </div>
 

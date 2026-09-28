@@ -1,3 +1,4 @@
+// hs-interaction-exempt: 淡变曲率滑块位于自绘 SVG 面板内（与拖动/预览联动），已有滚轮 + 精细调整接线；原语不适用。
 /**
  * FadeContextMenu — 淡入淡出包络专属上下文菜单。
  *
@@ -188,6 +189,7 @@ const CurvatureSlider: React.FC<{
             </svg>
             <input
                 type="range"
+                className="qt-range"
                 min={-1}
                 max={1}
                 step={0.01}

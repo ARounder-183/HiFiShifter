@@ -1297,6 +1297,7 @@ export const enUS = {
         "Extend & Overlap moves the left clip's tail forward by X and the right clip's head backward by X, creating a 2X-second overlap. Extensions are clamped to the clip source's actual length.",
     snap: "Snap",
     snap_grid_settings_title: "Snap/Grid Settings...",
+    snap_grid_settings_desc: "Control how clips snap to the grid, to selection markers, and to the cursor.",
     snap_section_grid: "Grid",
     snap_grid_show_lines: "Show grid lines",
     snap_grid_spacing: "Grid spacing",

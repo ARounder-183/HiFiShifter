@@ -1130,6 +1130,7 @@ export const zhTW = {
         "延伸重疊會分別向後、向前延長前後兩個音訊塊 X 秒，形成 2X 秒的重疊區域；延伸範圍會被鉗制在音訊塊原素材的實際長度範圍內。",
     snap: "吸附",
     snap_grid_settings_title: "吸附/網格設定...",
+    snap_grid_settings_desc: "設定音訊塊吸附到網格、選取區標記與游標的方式。",
     snap_section_grid: "網格",
     snap_grid_show_lines: "顯示網格線",
     snap_grid_spacing: "網格間距",

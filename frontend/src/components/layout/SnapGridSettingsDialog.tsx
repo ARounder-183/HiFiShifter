@@ -1,5 +1,22 @@
-import { Checkbox, Flex, Select, Separator, Slider, Text, TextField } from "@radix-ui/themes";
-import { useEffect, useState } from "react";
+/*
+ * 吸附 / 网格设置。
+ *
+ * 【为什么重写结构】上一版是 25 行挤在一条长滚动里（内容 1175px、视口 492px，
+ * 约 2.4 屏），而且：
+ *   - 节标题 12px/700 比它统领的 14px 复选框行**还小**，滚动时没有路标；
+ *   - 同一张表单里两种标签：`AppField` 是 11px muted、裸复选框行是 14px；
+ *   - 3 个下拉、4 个数字框、1 个滑块**全部不能滚轮调值**；
+ *   - 5 条 Radix `Separator`（全仓第四种分隔线做法）；
+ *   - 矩阵区用内联 130/90 像素宽度，与标签列错位。
+ *
+ * 现在：五个 `AppFormSection` 分组（节标题 13px/600，靠字重与留白分层），
+ * 布尔行统一 `AppSwitchRow`，取值控件统一走能力层原语（滚轮与精细调整内建），
+ * 矩阵列与 `AppField` 的标签列同宽。
+ *
+ * 【为什么不做页签】设置项之间有关联（"独立吸附间距"开关决定下面的间距下拉
+ * 是否有意义），页签会把上下文藏起来。用分组 + 留白解决扫读，而不是用导航。
+ */
+import { Checkbox } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -13,7 +30,10 @@ import {
 import type { GridSize, TimelineSnapSettings } from "../../features/session/sessionTypes";
 import { alignClipsToSwingGrid } from "../../utils/timelineSnapping";
 import { AppDialog } from "../../ui/Dialog";
-import { AppField, AppForm } from "../../ui/Field";
+import { AppField, AppForm, AppFormSection, AppSwitchRow } from "../../ui/Field";
+import { AppNumberField } from "../../ui/NumberField";
+import { AppSelect } from "../../ui/Select";
+import { AppSlider, AppSliderReadout } from "../../ui/Slider";
 
 interface Props {
     open: boolean;
@@ -44,54 +64,17 @@ const GRID_SIZES: readonly GridSize[] = [
     "1/64t",
 ];
 
-function NumberField({
-    value,
-    onCommit,
-    min,
-    max,
-    step = 1,
-    className,
-}: {
-    value: number;
-    onCommit: (next: number) => void;
-    min: number;
-    max: number;
-    step?: number;
-    className?: string;
-}) {
-    const [text, setText] = useState(String(value));
-    useEffect(() => {
-        setText(String(value));
-    }, [value]);
-    const commit = () => {
-        const parsed = Number(text);
-        if (!Number.isFinite(parsed)) {
-            setText(String(value));
-            return;
-        }
-        onCommit(Math.min(max, Math.max(min, parsed)));
-    };
-    return (
-        <TextField.Root
-            size="1"
-            type="number"
-            value={text}
-            step={step}
-            onChange={(e) => setText(e.target.value)}
-            onBlur={commit}
-            onKeyDown={(e) => {
-                if (e.key === "Enter") commit();
-            }}
-            className={className}
-            style={{ width: 72 }}
-        />
-    );
-}
+/** 网格档位的下拉选项（值即标签）。 */
+const GRID_OPTIONS = GRID_SIZES.map((grid) => ({ value: grid as string, label: grid }));
+
+/** 矩阵标签列宽：与 `AppField` 的标签列同宽，保证矩阵与上方各行左缘对齐。 */
+const MATRIX_LABEL_WIDTH = 112;
+/** 矩阵「吸附至网格」列宽：三行共用，列头与单元格居中于同一宽度。 */
+const MATRIX_GRID_COLUMN_WIDTH = 96;
 
 export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
     const dispatch = useAppDispatch();
     const { t } = useI18n();
-    const tAny = t as (key: string) => string;
     const session = useAppSelector((state) => state.session);
     const snap = session.timelineSnap;
 
@@ -99,39 +82,40 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
         dispatch(setTimelineSnapSettings(next));
     };
 
-    const swingSettingsFor = (percent: number) => {
-        const prev = session.timelineSnap;
-        return {
-            ...prev,
+    const persist = () => {
+        void dispatch(persistUiSettings());
+    };
+
+    /** 拖动中只更新设置值（轻量 Redux 写）。 */
+    const applySwingPreview = (percent: number) => {
+        dispatch(
+            setTimelineSnapSettings({
+                swingPercent: percent,
+                swingEnabled: percent > 0 || snap.swingEnabled,
+            }),
+        );
+    };
+
+    /**
+     * 提交摇摆强度：对齐剪辑 + checkpoint + IPC 一律推迟到这里。
+     *
+     * 拖动会以高频率触发 onValueChange，逐 tick 全量重排会刷满撤销栈并打爆
+     * move_clips / save_ui_settings IPC（与 TimelineDisplaySettingsDialog 的
+     * onValueCommit 模式一致）。
+     */
+    const commitSwing = (percent: number, forceAlign = false) => {
+        const nextSettings = {
+            ...snap,
             swingPercent: percent,
-            swingEnabled: percent > 0 || prev.swingEnabled,
+            swingEnabled: percent > 0 || snap.swingEnabled,
         };
-    };
-
-    // 拖动中只更新设置值（轻量 Redux 写）。对齐剪辑 + checkpoint + IPC 一律
-    // 推迟到 onValueCommit：Radix 拖动会以高频率触发 onValueChange，逐 tick
-    // 全量重排会刷满撤销栈并打爆 move_clips / save_ui_settings IPC（与
-    // TimelineDisplaySettingsDialog 的 onValueCommit 模式一致）。
-    const handleSwingPreview = (nextPercent: number) => {
-        const nextSettings = swingSettingsFor(nextPercent);
         dispatch(
             setTimelineSnapSettings({
                 swingPercent: nextSettings.swingPercent,
                 swingEnabled: nextSettings.swingEnabled,
             }),
         );
-    };
-
-    const handleSwingCommit = (nextPercent: number, forceAlign = false) => {
-        const prev = session.timelineSnap;
-        const nextSettings = swingSettingsFor(nextPercent);
-        dispatch(
-            setTimelineSnapSettings({
-                swingPercent: nextSettings.swingPercent,
-                swingEnabled: nextSettings.swingEnabled,
-            }),
-        );
-        if (nextSettings.adjustClipsOnSwingChange && (prev.swingEnabled || forceAlign)) {
+        if (nextSettings.adjustClipsOnSwingChange && (snap.swingEnabled || forceAlign)) {
             const updates = alignClipsToSwingGrid({
                 clips: session.clips,
                 settings: nextSettings,
@@ -154,456 +138,392 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
         void dispatch(persistUiSettings());
     };
 
-    const persist = () => {
-        void dispatch(persistUiSettings());
-    };
+    /** 矩阵三行：行标签 + 两个目标列的勾选状态与写回。 */
+    const matrixRows = [
+        {
+            key: "clips",
+            label: t("snap_clips"),
+            toMarkersCursor: snap.snapClipsToSelectionMarkersCursor,
+            setToMarkersCursor: (v: boolean) => patch({ snapClipsToSelectionMarkersCursor: v }),
+            toGrid: snap.snapClipsToGrid,
+            setToGrid: (v: boolean) => patch({ snapClipsToGrid: v }),
+        },
+        {
+            key: "selection",
+            label: t("snap_selection"),
+            toMarkersCursor: snap.snapSelectionToSelectionMarkersCursor,
+            setToMarkersCursor: (v: boolean) =>
+                patch({ snapSelectionToSelectionMarkersCursor: v }),
+            toGrid: snap.snapSelectionToGrid,
+            setToGrid: (v: boolean) => patch({ snapSelectionToGrid: v }),
+        },
+        {
+            key: "cursor",
+            label: t("snap_cursor"),
+            toMarkersCursor: snap.snapCursorToSelectionMarkersCursor,
+            setToMarkersCursor: (v: boolean) => patch({ snapCursorToSelectionMarkersCursor: v }),
+            toGrid: snap.snapCursorToGrid,
+            setToGrid: (v: boolean) => patch({ snapCursorToGrid: v }),
+        },
+    ];
 
     return (
         <AppDialog
             open={open}
             onOpenChange={onOpenChange}
-            title={tAny("snap_grid_settings_title")}
+            title={t("snap_grid_settings_title")}
+            description={t("snap_grid_settings_desc")}
             size="md"
+            // 动作区与长内容之间需要一条分割线（本窗口内容远高于视口）
+            footerDivider
             actions={[
                 {
                     id: "ok",
-                    label: tAny("ok"),
+                    label: t("ok"),
                     intent: "primary",
                     onClick: () => onOpenChange(false),
                 },
             ]}
         >
             <AppForm>
-                {/* ── Grid ── */}
-                <Text size="1" weight="bold" className="text-qt-text-muted">
-                    {tAny("snap_section_grid")}
-                </Text>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                <AppFormSection title={t("snap_section_grid")}>
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_grid_show_lines")}
                         checked={snap.gridVisible}
                         onCheckedChange={(v) => {
-                            patch({ gridVisible: Boolean(v) });
+                            patch({ gridVisible: v });
                             persist();
                         }}
                     />
-                    <Text size="2">{tAny("snap_grid_show_lines")}</Text>
-                </Flex>
-                <AppField label={tAny("snap_grid_spacing")}>
-                    <Select.Root
-                        value={session.grid}
-                        size="1"
-                        onValueChange={(v) => {
-                            void dispatch(
-                                setProjectTimelineSettingsRemote({
-                                    beatsPerBar: session.beats,
-                                    timeSignatureDenominator:
-                                        session.project.timeSignatureDenominator,
-                                    gridSize: v,
-                                }),
-                            );
-                        }}
-                    >
-                        <Select.Trigger />
-                        <Select.Content>
-                            {GRID_SIZES.map((grid) => (
-                                <Select.Item key={grid} value={grid}>
-                                    {grid}
-                                </Select.Item>
-                            ))}
-                        </Select.Content>
-                    </Select.Root>
-                </AppField>
-                <AppField label={tAny("snap_grid_min_spacing_px")}>
-                    <Flex align="center" gap="2">
-                        <NumberField
+                    <AppField label={t("snap_grid_spacing")}>
+                        <AppSelect
+                            value={session.grid}
+                            ariaLabel={t("snap_grid_spacing")}
+                            options={GRID_OPTIONS}
+                            onValueChange={(v) => {
+                                void dispatch(
+                                    setProjectTimelineSettingsRemote({
+                                        beatsPerBar: session.beats,
+                                        timeSignatureDenominator:
+                                            session.project.timeSignatureDenominator,
+                                        gridSize: v,
+                                    }),
+                                );
+                            }}
+                        />
+                    </AppField>
+                    <AppField label={t("snap_grid_min_spacing_px")}>
+                        <AppNumberField
                             value={snap.gridMinSpacingPx}
+                            unit="pixels"
                             min={2}
                             max={200}
+                            suffix="px"
+                            ariaLabel={t("snap_grid_min_spacing_px")}
                             onCommit={(v) => {
                                 patch({ gridMinSpacingPx: v });
                                 persist();
                             }}
                         />
-                        <Text size="1" className="text-qt-text-muted">
-                            px
-                        </Text>
-                    </Flex>
-                </AppField>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                    </AppField>
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_grid_swing")}
                         checked={snap.swingEnabled}
-                        onCheckedChange={(v) => {
-                            const enabled = Boolean(v);
+                        onCheckedChange={(enabled) => {
                             patch({ swingEnabled: enabled });
                             if (enabled && session.clips.length > 0) {
-                                // 离散开关动作：直接走提交（对齐 + checkpoint + 持久化）。
-                                handleSwingCommit(snap.swingPercent, true);
+                                // 离散开关动作：直接走提交（对齐 + checkpoint + 持久化）
+                                commitSwing(snap.swingPercent, true);
                             } else {
                                 persist();
                             }
                         }}
                     />
-                    <Text size="2">{tAny("snap_grid_swing")}</Text>
-                </Flex>
-                <AppField label={tAny("snap_grid_swing_strength")}>
-                    <Flex align="center" gap="2">
-                        <Slider
-                            value={[snap.swingPercent]}
-                            min={0}
-                            max={100}
-                            step={1}
-                            onValueChange={(values) => handleSwingPreview(values[0] ?? 0)}
-                            onValueCommit={(values) =>
-                                handleSwingCommit(
-                                    values[0] ?? 0,
-                                    !snap.swingEnabled && (values[0] ?? 0) > 0,
-                                )
-                            }
-                            style={{ flex: 1 }}
-                        />
-                        <Text size="1" style={{ width: 36, textAlign: "right" }}>
-                            {Math.round(snap.swingPercent)}%
-                        </Text>
-                    </Flex>
-                </AppField>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                    <AppField label={t("snap_grid_swing_strength")}>
+                        <div className="flex items-center gap-2">
+                            <AppSlider
+                                value={snap.swingPercent}
+                                unit="percent"
+                                min={0}
+                                max={100}
+                                ariaLabel={t("snap_grid_swing_strength")}
+                                onChange={applySwingPreview}
+                                onCommit={(v) => commitSwing(v, !snap.swingEnabled && v > 0)}
+                            />
+                            <AppSliderReadout>{Math.round(snap.swingPercent)}%</AppSliderReadout>
+                        </div>
+                    </AppField>
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_grid_adjust_clips_on_swing")}
                         checked={snap.adjustClipsOnSwingChange}
                         onCheckedChange={(v) => {
-                            patch({ adjustClipsOnSwingChange: Boolean(v) });
+                            patch({ adjustClipsOnSwingChange: v });
                             persist();
                         }}
                     />
-                    <Text size="2">{tAny("snap_grid_adjust_clips_on_swing")}</Text>
-                </Flex>
+                </AppFormSection>
 
-                <Separator size="4" />
-
-                {/* ── Snap master ── */}
-                <Text size="1" weight="bold" className="text-qt-text-muted">
-                    {tAny("snap_section_master")}
-                </Text>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                <AppFormSection title={t("snap_section_master")}>
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_enable_snapping")}
                         checked={snap.enabled}
                         onCheckedChange={(v) => {
-                            patch({ enabled: Boolean(v) });
+                            patch({ enabled: v });
                             persist();
                         }}
                     />
-                    <Text size="2">{tAny("snap_enable_snapping")}</Text>
-                </Flex>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_show_highlight")}
                         checked={snap.snapHighlightEnabled}
                         onCheckedChange={(v) => {
-                            patch({ snapHighlightEnabled: Boolean(v) });
+                            patch({ snapHighlightEnabled: v });
                             persist();
                         }}
                     />
-                    <Text size="2">{tAny("snap_show_highlight")}</Text>
-                </Flex>
-                <AppField label={tAny("snap_distance_px")}>
-                    <Flex align="center" gap="2">
-                        <NumberField
+                    <AppField label={t("snap_distance_px")}>
+                        <AppNumberField
                             value={snap.snapDistancePx}
+                            unit="pixels"
                             min={0}
                             max={200}
+                            suffix="px"
+                            ariaLabel={t("snap_distance_px")}
                             onCommit={(v) => {
                                 patch({ snapDistancePx: v });
                                 persist();
                             }}
                         />
-                        <Text size="1" className="text-qt-text-muted">
-                            px
-                        </Text>
-                    </Flex>
-                </AppField>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                    </AppField>
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_relative_to_grid")}
                         checked={snap.snapRelativeToGrid}
                         onCheckedChange={(v) => {
-                            patch({ snapRelativeToGrid: Boolean(v) });
+                            patch({ snapRelativeToGrid: v });
                             persist();
                         }}
                     />
-                    <Text size="2">{tAny("snap_relative_to_grid")}</Text>
-                </Flex>
+                </AppFormSection>
 
-                <Separator size="4" />
+                {/*
+                 * 吸附对象 × 目标矩阵：三行两列。
+                 *
+                 * 列头与行标签同宽（`MATRIX_LABEL_WIDTH` 与 AppField 的标签列一致），
+                 * 因此矩阵与上方所有 `AppField` 行左缘对齐 —— 原实现用内联
+                 * 130/90，与 112px 的标签列错位。
+                 */}
+                <AppFormSection title={t("snap_section_targets")}>
+                    <div className="flex items-center gap-2">
+                        <span
+                            className="hs-type-caption shrink-0"
+                            style={{ width: MATRIX_LABEL_WIDTH }}
+                        />
+                        <span className="hs-type-caption flex-1">
+                            {t("snap_to_selection_markers_cursor")}
+                        </span>
+                        <span
+                            className="hs-type-caption shrink-0 text-center"
+                            style={{ width: MATRIX_GRID_COLUMN_WIDTH }}
+                        >
+                            {t("snap_to_grid")}
+                        </span>
+                    </div>
+                    {matrixRows.map((row) => (
+                        <div key={row.key} className="flex items-center gap-2">
+                            <span
+                                className="hs-type-label shrink-0"
+                                style={{ width: MATRIX_LABEL_WIDTH }}
+                            >
+                                {row.label}
+                            </span>
+                            <div className="flex flex-1 items-center">
+                                <Checkbox
+                                    checked={row.toMarkersCursor}
+                                    aria-label={`${row.label} — ${t("snap_to_selection_markers_cursor")}`}
+                                    onCheckedChange={(v) => {
+                                        row.setToMarkersCursor(Boolean(v));
+                                        persist();
+                                    }}
+                                />
+                            </div>
+                            <div
+                                className="flex shrink-0 items-center justify-center"
+                                style={{ width: MATRIX_GRID_COLUMN_WIDTH }}
+                            >
+                                <Checkbox
+                                    checked={row.toGrid}
+                                    aria-label={`${row.label} — ${t("snap_to_grid")}`}
+                                    onCheckedChange={(v) => {
+                                        row.setToGrid(Boolean(v));
+                                        persist();
+                                    }}
+                                />
+                            </div>
+                        </div>
+                    ))}
+                </AppFormSection>
 
-                {/* ── Snap targets matrix ── */}
-                <Text size="1" weight="bold" className="text-qt-text-muted">
-                    {tAny("snap_section_targets")}
-                </Text>
-                <Flex gap="2">
-                    <Text size="1" style={{ width: 130 }} />
-                    <Text size="1" className="text-qt-text-muted" style={{ flex: 1 }}>
-                        {tAny("snap_to_selection_markers_cursor")}
-                    </Text>
-                    <Text size="1" className="text-qt-text-muted" style={{ width: 90 }}>
-                        {tAny("snap_to_grid")}
-                    </Text>
-                </Flex>
-                <Flex align="center" gap="2">
-                    <Text size="2" style={{ width: 130 }}>
-                        {tAny("snap_clips")}
-                    </Text>
-                    <Checkbox
-                        style={{ flex: 1 }}
-                        checked={snap.snapClipsToSelectionMarkersCursor}
-                        onCheckedChange={(v) => {
-                            patch({ snapClipsToSelectionMarkersCursor: Boolean(v) });
-                            persist();
-                        }}
-                    />
-                    <Checkbox
-                        style={{ width: 90 }}
-                        checked={snap.snapClipsToGrid}
-                        onCheckedChange={(v) => {
-                            patch({ snapClipsToGrid: Boolean(v) });
-                            persist();
-                        }}
-                    />
-                </Flex>
-                <Flex align="center" gap="2">
-                    <Text size="2" style={{ width: 130 }}>
-                        {tAny("snap_selection")}
-                    </Text>
-                    <Checkbox
-                        style={{ flex: 1 }}
-                        checked={snap.snapSelectionToSelectionMarkersCursor}
-                        onCheckedChange={(v) => {
-                            patch({ snapSelectionToSelectionMarkersCursor: Boolean(v) });
-                            persist();
-                        }}
-                    />
-                    <Checkbox
-                        style={{ width: 90 }}
-                        checked={snap.snapSelectionToGrid}
-                        onCheckedChange={(v) => {
-                            patch({ snapSelectionToGrid: Boolean(v) });
-                            persist();
-                        }}
-                    />
-                </Flex>
-                <Flex align="center" gap="2">
-                    <Text size="2" style={{ width: 130 }}>
-                        {tAny("snap_cursor")}
-                    </Text>
-                    <Checkbox
-                        style={{ flex: 1 }}
-                        checked={snap.snapCursorToSelectionMarkersCursor}
-                        onCheckedChange={(v) => {
-                            patch({ snapCursorToSelectionMarkersCursor: Boolean(v) });
-                            persist();
-                        }}
-                    />
-                    <Checkbox
-                        style={{ width: 90 }}
-                        checked={snap.snapCursorToGrid}
-                        onCheckedChange={(v) => {
-                            patch({ snapCursorToGrid: Boolean(v) });
-                            persist();
-                        }}
-                    />
-                </Flex>
-
-                <Separator size="4" />
-
-                {/* ── Grid snap behavior ── */}
-                <Text size="1" weight="bold" className="text-qt-text-muted">
-                    {tAny("snap_section_grid_behavior")}
-                </Text>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                <AppFormSection title={t("snap_section_grid_behavior")}>
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_follow_grid_visibility")}
                         checked={snap.snapFollowsGridVisibility}
                         onCheckedChange={(v) => {
-                            patch({ snapFollowsGridVisibility: Boolean(v) });
+                            patch({ snapFollowsGridVisibility: v });
                             persist();
                         }}
                     />
-                    <Text size="2">{tAny("snap_follow_grid_visibility")}</Text>
-                </Flex>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_any_distance")}
                         checked={snap.snapToGridAnyDistance}
                         onCheckedChange={(v) => {
-                            patch({ snapToGridAnyDistance: Boolean(v) });
+                            patch({ snapToGridAnyDistance: v });
                             persist();
                         }}
                     />
-                    <Text size="2">{tAny("snap_any_distance")}</Text>
-                </Flex>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_independent_spacing")}
                         checked={snap.useIndependentSnapSpacing}
                         onCheckedChange={(v) => {
-                            patch({ useIndependentSnapSpacing: Boolean(v) });
+                            patch({ useIndependentSnapSpacing: v });
                             persist();
                         }}
                     />
-                    <Text size="2">{tAny("snap_independent_spacing")}</Text>
-                </Flex>
-                <AppField label={tAny("snap_grid_spacing")}>
-                    <Select.Root
-                        value={snap.snapSpacing}
-                        size="1"
-                        onValueChange={(v) => {
-                            patch({ snapSpacing: v as GridSize });
-                            persist();
-                        }}
-                    >
-                        <Select.Trigger />
-                        <Select.Content>
-                            {GRID_SIZES.map((grid) => (
-                                <Select.Item key={grid} value={grid}>
-                                    {grid}
-                                </Select.Item>
-                            ))}
-                        </Select.Content>
-                    </Select.Root>
-                </AppField>
-                <AppField label={tAny("snap_spacing_min_px")}>
-                    <Flex align="center" gap="2">
-                        <NumberField
+                    <AppField label={t("snap_grid_spacing")}>
+                        <AppSelect
+                            value={snap.snapSpacing}
+                            ariaLabel={t("snap_grid_spacing")}
+                            options={GRID_OPTIONS}
+                            onValueChange={(v) => {
+                                patch({ snapSpacing: v as GridSize });
+                                persist();
+                            }}
+                        />
+                    </AppField>
+                    <AppField label={t("snap_spacing_min_px")}>
+                        <AppNumberField
                             value={snap.snapSpacingMinPx}
+                            unit="pixels"
                             min={2}
                             max={200}
+                            suffix="px"
+                            ariaLabel={t("snap_spacing_min_px")}
                             onCommit={(v) => {
                                 patch({ snapSpacingMinPx: v });
                                 persist();
                             }}
                         />
-                        <Text size="1" className="text-qt-text-muted">
-                            px
-                        </Text>
-                    </Flex>
-                </AppField>
+                    </AppField>
+                </AppFormSection>
 
-                <Separator size="4" />
-
-                {/* ── Item & special interactions ── */}
-                <Text size="1" weight="bold" className="text-qt-text-muted">
-                    {tAny("snap_section_interactions")}
-                </Text>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                <AppFormSection title={t("snap_section_interactions")}>
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_clip_edges")}
                         checked={snap.snapClipEdges}
                         onCheckedChange={(v) => {
-                            patch({ snapClipEdges: Boolean(v) });
+                            patch({ snapClipEdges: v });
                             persist();
                         }}
                     />
-                    <Text size="2">{tAny("snap_clip_edges")}</Text>
-                </Flex>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_clip_snap_offset")}
                         checked={snap.snapClipSnapOffset}
                         onCheckedChange={(v) => {
-                            patch({ snapClipSnapOffset: Boolean(v) });
+                            patch({ snapClipSnapOffset: v });
                             persist();
                         }}
                     />
-                    <Text size="2">{tAny("snap_clip_snap_offset")}</Text>
-                </Flex>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_across_tracks")}
                         checked={snap.snapAcrossTracks}
                         onCheckedChange={(v) => {
-                            patch({ snapAcrossTracks: Boolean(v) });
+                            patch({ snapAcrossTracks: v });
                             persist();
                         }}
                     />
-                    <Text size="2">{tAny("snap_across_tracks")}</Text>
-                </Flex>
-                <AppField label={tAny("snap_track_distance")}>
-                    <NumberField
-                        value={snap.snapTrackDistance}
-                        min={0}
-                        max={32}
-                        onCommit={(v) => {
-                            patch({ snapTrackDistance: v });
-                            persist();
-                        }}
-                    />
-                </AppField>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                    <AppField label={t("snap_track_distance")}>
+                        <AppNumberField
+                            value={snap.snapTrackDistance}
+                            unit="integer"
+                            min={0}
+                            max={32}
+                            ariaLabel={t("snap_track_distance")}
+                            onCommit={(v) => {
+                                patch({ snapTrackDistance: v });
+                                persist();
+                            }}
+                        />
+                    </AppField>
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_razor_edits")}
                         checked={snap.snapRazorEdits}
                         onCheckedChange={(v) => {
-                            patch({ snapRazorEdits: Boolean(v) });
+                            patch({ snapRazorEdits: v });
                             persist();
                         }}
                     />
-                    <Text size="2">{tAny("snap_razor_edits")}</Text>
-                </Flex>
+                </AppFormSection>
 
-                <Separator size="4" />
-
-                {/* ── Advanced ── */}
-                <Text size="1" weight="bold" className="text-qt-text-muted">
-                    {tAny("snap_section_advanced")}
-                </Text>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                <AppFormSection title={t("snap_section_advanced")}>
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_project_sample_rate")}
                         checked={snap.snapToProjectSampleRate}
                         onCheckedChange={(v) => {
-                            patch({ snapToProjectSampleRate: Boolean(v) });
+                            patch({ snapToProjectSampleRate: v });
                             persist();
                         }}
                     />
-                    <Text size="2">{tAny("snap_project_sample_rate")}</Text>
-                </Flex>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_source_edges")}
                         checked={snap.snapClipsToSourceMedia}
                         onCheckedChange={(v) => {
-                            patch({ snapClipsToSourceMedia: Boolean(v) });
+                            patch({ snapClipsToSourceMedia: v });
                             persist();
                         }}
                     />
-                    <Text size="2">{tAny("snap_source_edges")}</Text>
-                </Flex>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_force_selection_multiples")}
                         checked={snap.forceSelectionsToMultiples}
                         onCheckedChange={(v) => {
-                            patch({ forceSelectionsToMultiples: Boolean(v) });
+                            patch({ forceSelectionsToMultiples: v });
                             persist();
                         }}
                     />
-                    <Text size="2">{tAny("snap_force_selection_multiples")}</Text>
-                </Flex>
-                <AppField label={tAny("snap_selection_multiple")}>
-                    <Select.Root
-                        value={snap.selectionMultiple}
-                        size="1"
-                        onValueChange={(v) => {
-                            patch({ selectionMultiple: v as GridSize });
-                            persist();
-                        }}
-                    >
-                        <Select.Trigger />
-                        <Select.Content>
-                            {GRID_SIZES.map((grid) => (
-                                <Select.Item key={grid} value={grid}>
-                                    {grid}
-                                </Select.Item>
-                            ))}
-                        </Select.Content>
-                    </Select.Root>
-                </AppField>
-                <Flex align="center" gap="2">
-                    <Checkbox
+                    <AppField label={t("snap_selection_multiple")}>
+                        <AppSelect
+                            value={snap.selectionMultiple}
+                            ariaLabel={t("snap_selection_multiple")}
+                            options={GRID_OPTIONS}
+                            onValueChange={(v) => {
+                                patch({ selectionMultiple: v as GridSize });
+                                persist();
+                            }}
+                        />
+                    </AppField>
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={t("snap_sync_grid_views")}
                         checked={snap.syncArrangeAndMidiGrid}
                         onCheckedChange={(v) => {
-                            patch({ syncArrangeAndMidiGrid: Boolean(v) });
+                            patch({ syncArrangeAndMidiGrid: v });
                             persist();
                         }}
                     />
-                    <Text size="2">{tAny("snap_sync_grid_views")}</Text>
-                </Flex>
+                </AppFormSection>
             </AppForm>
         </AppDialog>
     );

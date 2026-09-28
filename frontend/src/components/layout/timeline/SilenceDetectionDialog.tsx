@@ -1,10 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Flex, Text, Select, Checkbox } from "@radix-ui/themes";
+import { Flex, Text, Checkbox } from "@radix-ui/themes";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
-import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
-import { applySelectWheelChange } from "../../../utils/selectWheel";
-import { useWheelScrollGuard } from "../../../utils/useWheelScrollGuard";
 import {
     setSilenceDetectOptions,
     setSilencePreview,
@@ -17,6 +14,7 @@ import {
     type SilenceDetectSettings,
 } from "../../../features/session/sessionTypes";
 import type { ClipSilenceReport } from "../../../types/api";
+import { AppSelect, AppSlider, AppSliderReadout } from "../../../ui";
 import { AppDialog } from "../../../ui/Dialog";
 import { AppField, AppForm } from "../../../ui/Field";
 import { useShortcutSuppression } from "../../../ui/shortcutScope";
@@ -40,10 +38,6 @@ export const SilenceDetectionDialog: React.FC<{
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const dispatch = useAppDispatch();
-    // 滑块滚轮的“精细调整”修饰键（与其他编辑对话框一致：modifier.paramFineAdjust）。
-    const paramFineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
-    );
     const storedOptions = useAppSelector((s) => s.session.silenceDetectOptions);
     const clips = useAppSelector((s) => s.session.clips);
     const preview = useAppSelector((s) => s.session.silencePreviewSegments);
@@ -53,9 +47,6 @@ export const SilenceDetectionDialog: React.FC<{
     const [analyzing, setAnalyzing] = useState(false);
     const [applying, setApplying] = useState(false);
     const debounceRef = useRef<number | null>(null);
-    // 滚轮守卫：滑块滚轮步进时阻止对话框内容滚动（React onWheel 的
-    // preventDefault 是 passive no-op，见 useWheelScrollGuard）。
-    const wheelGuard = useWheelScrollGuard<HTMLDivElement>('input[type="range"]');
 
     // 打开时用已记忆的参数初始化，并清掉上一次的预览报告。
     useEffect(() => {
@@ -132,19 +123,6 @@ export const SilenceDetectionDialog: React.FC<{
     const update = (patch: Partial<SilenceDetectSettings>) =>
         setOptions((prev) => ({ ...prev, ...patch }));
 
-    /**
-     * 滑块滚轮步进：向上 / 向下各走一步；按住“精细调整”修饰键时步长为 1，
-     * 否则用该控件的粗步长。与 TransposeCentsDialog 等编辑对话框同款手势。
-     * 阻止默认滚动由 Dialog.Content 上的原生非被动守卫完成（React onWheel
-     * 的 preventDefault 是 passive no-op，见 useWheelScrollGuard）。
-     */
-    const wheelDelta = (e: React.WheelEvent<HTMLInputElement>, coarse: number): number => {
-        const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-        return (e.deltaY < 0 ? 1 : -1) * (fine ? 1 : coarse);
-    };
-
-    const clampRange = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
-
     // 双击参数行 = 该参数重置回默认值（提示文案挂在行 title 上）。
     const resetHint = tAny("silence_double_click_reset");
 
@@ -167,253 +145,185 @@ export const SilenceDetectionDialog: React.FC<{
                 },
             ]}
         >
-            {/* 滚轮守卫：滑块滚轮步进时阻止对话框内容滚动（React onWheel 的
-                preventDefault 是 passive no-op，见 useWheelScrollGuard）。 */}
-            <div ref={wheelGuard}>
-                <AppForm>
-                    <div
-                        data-tooltip={resetHint}
-                        onDoubleClick={() => update({ method: SILENCE_DETECT_DEFAULTS.method })}
-                    >
-                        <AppField label={tAny("silence_method")}>
-                            <Select.Root
-                                size="1"
-                                value={options.method}
-                                onValueChange={(v) => update({ method: v as "rms" | "peak" })}
-                            >
-                                <Select.Trigger
-                                    onWheel={(e) =>
-                                        applySelectWheelChange({
-                                            event: e,
-                                            currentValue: options.method,
-                                            options: ["rms", "peak"] as const,
-                                            onChange: (v) => update({ method: v }),
-                                        })
-                                    }
-                                />
-                                <Select.Content>
-                                    <Select.Item value="rms">
-                                        {tAny("silence_method_rms")}
-                                    </Select.Item>
-                                    <Select.Item value="peak">
-                                        {tAny("silence_method_peak")}
-                                    </Select.Item>
-                                </Select.Content>
-                            </Select.Root>
-                        </AppField>
-                    </div>
+            <AppForm>
+                <div
+                    data-tooltip={resetHint}
+                    onDoubleClick={() => update({ method: SILENCE_DETECT_DEFAULTS.method })}
+                >
+                    <AppField label={tAny("silence_method")}>
+                        <AppSelect
+                            value={options.method}
+                            onValueChange={(v) => update({ method: v as "rms" | "peak" })}
+                            options={[
+                                { value: "rms", label: tAny("silence_method_rms") },
+                                { value: "peak", label: tAny("silence_method_peak") },
+                            ]}
+                        />
+                    </AppField>
+                </div>
 
+                <div
+                    data-tooltip={resetHint}
+                    onDoubleClick={() =>
+                        update({ thresholdDb: SILENCE_DETECT_DEFAULTS.thresholdDb })
+                    }
+                >
+                    <AppField label={tAny("silence_threshold")}>
+                        <Flex align="center" gap="2">
+                            <AppSlider
+                                value={options.thresholdDb}
+                                unit="levelDb"
+                                min={-96}
+                                max={-6}
+                                disabled={options.adaptive}
+                                ariaLabel={tAny("silence_threshold")}
+                                onChange={(next) => update({ thresholdDb: next })}
+                            />
+                            <AppSliderReadout>
+                                {options.adaptive
+                                    ? tAny("silence_adaptive_short")
+                                    : `${Math.round(options.thresholdDb)} dB`}
+                            </AppSliderReadout>
+                        </Flex>
+                    </AppField>
+                </div>
+
+                <label
+                    className="flex items-center gap-2 text-[12px]"
+                    data-tooltip={resetHint}
+                    onDoubleClick={() => update({ adaptive: SILENCE_DETECT_DEFAULTS.adaptive })}
+                >
+                    <Checkbox
+                        checked={options.adaptive}
+                        onCheckedChange={(v) => update({ adaptive: v === true })}
+                    />
+                    {tAny("silence_adaptive")}
+                </label>
+
+                {(
+                    [
+                        ["minSilenceMs", "silence_min_silence", 10, 2000],
+                        ["minSoundMs", "silence_min_sound", 0, 500],
+                        ["paddingMs", "silence_padding", 0, 200],
+                        ["cutFadeMs", "silence_cut_fade", 0, 100],
+                    ] as const
+                ).map(([key, labelKey, min, max]) => (
                     <div
+                        key={key}
                         data-tooltip={resetHint}
                         onDoubleClick={() =>
-                            update({ thresholdDb: SILENCE_DETECT_DEFAULTS.thresholdDb })
+                            update({
+                                [key]: SILENCE_DETECT_DEFAULTS[key],
+                            } as Partial<SilenceDetectSettings>)
                         }
                     >
-                        <AppField label={tAny("silence_threshold")}>
+                        <AppField label={tAny(labelKey)}>
                             <Flex align="center" gap="2">
-                                <input
-                                    type="range"
-                                    min={-96}
-                                    max={-6}
-                                    step={1}
-                                    value={Math.round(options.thresholdDb)}
-                                    disabled={options.adaptive}
-                                    onChange={(e) =>
-                                        update({ thresholdDb: Number(e.target.value) })
-                                    }
-                                    onWheel={(e) => {
-                                        if (options.adaptive) return;
-                                        const delta = wheelDelta(e, 3);
-                                        update({
-                                            thresholdDb: clampRange(
-                                                Math.round(options.thresholdDb) + delta,
-                                                -96,
-                                                -6,
-                                            ),
-                                        });
-                                    }}
-                                    style={{ flex: 1 }}
+                                <AppSlider
+                                    value={options[key]}
+                                    unit="milliseconds"
+                                    min={min}
+                                    max={max}
+                                    ariaLabel={tAny(labelKey)}
+                                    onChange={(next) => update({ [key]: next })}
                                 />
-                                <Text size="1" style={{ minWidth: 56, textAlign: "right" }}>
-                                    {options.adaptive
-                                        ? tAny("silence_adaptive_short")
-                                        : `${Math.round(options.thresholdDb)} dB`}
-                                </Text>
+                                <AppSliderReadout>
+                                    {Math.round(options[key])} ms
+                                </AppSliderReadout>
                             </Flex>
                         </AppField>
                     </div>
+                ))}
 
-                    <label
-                        className="flex items-center gap-2 text-[12px]"
-                        data-tooltip={resetHint}
-                        onDoubleClick={() => update({ adaptive: SILENCE_DETECT_DEFAULTS.adaptive })}
-                    >
-                        <Checkbox
-                            checked={options.adaptive}
-                            onCheckedChange={(v) => update({ adaptive: v === true })}
-                        />
-                        {tAny("silence_adaptive")}
-                    </label>
-
-                    {(
-                        [
-                            ["minSilenceMs", "silence_min_silence", 10, 2000],
-                            ["minSoundMs", "silence_min_sound", 0, 500],
-                            ["paddingMs", "silence_padding", 0, 200],
-                            ["cutFadeMs", "silence_cut_fade", 0, 100],
-                        ] as const
-                    ).map(([key, labelKey, min, max]) => (
-                        <div
-                            key={key}
-                            data-tooltip={resetHint}
-                            onDoubleClick={() =>
-                                update({
-                                    [key]: SILENCE_DETECT_DEFAULTS[key],
-                                } as Partial<SilenceDetectSettings>)
+                <div
+                    data-tooltip={resetHint}
+                    onDoubleClick={() => update({ action: SILENCE_DETECT_DEFAULTS.action })}
+                >
+                    <AppField label={tAny("silence_action")}>
+                        <AppSelect
+                            value={options.action}
+                            onValueChange={(v) =>
+                                update({ action: v as SilenceDetectSettings["action"] })
                             }
-                        >
-                            <AppField label={tAny(labelKey)}>
-                                <Flex align="center" gap="2">
-                                    <input
-                                        type="range"
-                                        min={min}
-                                        max={max}
-                                        step={1}
-                                        value={Math.round(options[key])}
-                                        onChange={(e) => update({ [key]: Number(e.target.value) })}
-                                        onWheel={(e) => {
-                                            const coarse = key === "cutFadeMs" ? 5 : 10;
-                                            const delta = wheelDelta(e, coarse);
-                                            update({
-                                                [key]: clampRange(
-                                                    Math.round(options[key]) + delta,
-                                                    min,
-                                                    max,
-                                                ),
-                                            });
-                                        }}
-                                        style={{ flex: 1 }}
-                                    />
-                                    <Text size="1" style={{ minWidth: 52, textAlign: "right" }}>
-                                        {Math.round(options[key])} ms
-                                    </Text>
-                                </Flex>
-                            </AppField>
-                        </div>
-                    ))}
-
-                    <div
-                        data-tooltip={resetHint}
-                        onDoubleClick={() => update({ action: SILENCE_DETECT_DEFAULTS.action })}
-                    >
-                        <AppField label={tAny("silence_action")}>
-                            <Select.Root
-                                size="1"
-                                value={options.action}
-                                onValueChange={(v) =>
-                                    update({ action: v as SilenceDetectSettings["action"] })
-                                }
-                            >
-                                <Select.Trigger
-                                    onWheel={(e) =>
-                                        applySelectWheelChange({
-                                            event: e,
-                                            currentValue: options.action,
-                                            options: ["close", "keep", "split"] as const,
-                                            onChange: (v) => update({ action: v }),
-                                        })
-                                    }
-                                />
-                                <Select.Content>
-                                    <Select.Item value="close">
-                                        {tAny("silence_action_close")}
-                                    </Select.Item>
-                                    <Select.Item value="keep">
-                                        {tAny("silence_action_keep")}
-                                    </Select.Item>
-                                    <Select.Item value="split">
-                                        {tAny("silence_action_split")}
-                                    </Select.Item>
-                                </Select.Content>
-                            </Select.Root>
-                        </AppField>
-                    </div>
-
-                    <label
-                        className="flex items-center gap-2 text-[12px]"
-                        data-tooltip={resetHint}
-                        onDoubleClick={() =>
-                            update({ deleteSilentClips: SILENCE_DETECT_DEFAULTS.deleteSilentClips })
-                        }
-                    >
-                        <Checkbox
-                            checked={options.deleteSilentClips}
-                            onCheckedChange={(v) => update({ deleteSilentClips: v === true })}
+                            options={[
+                                { value: "close", label: tAny("silence_action_close") },
+                                { value: "keep", label: tAny("silence_action_keep") },
+                                { value: "split", label: tAny("silence_action_split") },
+                            ]}
                         />
-                        {tAny("silence_delete_silent_clips")}
-                    </label>
-                    <label
-                        className="flex items-center gap-2 text-[12px]"
-                        data-tooltip={resetHint}
-                        onDoubleClick={() =>
-                            update({ syncAllTakes: SILENCE_DETECT_DEFAULTS.syncAllTakes })
-                        }
-                    >
-                        <Checkbox
-                            checked={options.syncAllTakes}
-                            onCheckedChange={(v) => update({ syncAllTakes: v === true })}
-                        />
-                        {tAny("silence_sync_all_takes")}
-                    </label>
+                    </AppField>
+                </div>
 
-                    {/* 预览摘要（与时间线上的红色覆盖层联动） */}
-                    <Flex
-                        direction="column"
-                        gap="1"
-                        className="rounded border border-qt-border p-2"
-                    >
-                        <Text size="1" className="text-qt-text-muted">
-                            {analyzing
-                                ? tAny("silence_analyzing")
-                                : totalRegions > 0
-                                  ? tAny("silence_preview_summary")
-                                        .replace("{n}", String(totalRegions))
-                                        .replace("{dur}", totalSilent.toFixed(2))
-                                  : tAny("silence_no_silence")}
-                        </Text>
-                        {clipIds.slice(0, 6).map((id) => {
-                            const clip = clips.find((c) => c.id === id);
-                            const report = reportFor(id);
-                            const regions = previewFor(id)?.length ?? 0;
-                            const name = clip?.name ?? id;
-                            return (
-                                <Text key={id} size="1" className="text-qt-text-muted">
-                                    {`· ${name}: `}
-                                    {report && !report.ok
-                                        ? tAny("silence_skipped") +
-                                          (report.message ? ` (${report.message})` : "")
-                                        : regions > 0
-                                          ? tAny("silence_preview_clip")
-                                                .replace("{n}", String(regions))
-                                                .replace(
-                                                    "{dur}",
-                                                    (report?.totalSilentSec ?? 0).toFixed(2),
-                                                )
-                                          : tAny("silence_no_silence")}
-                                </Text>
-                            );
-                        })}
-                        {clipIds.length > 6 ? (
-                            <Text size="1" className="text-qt-text-muted">
-                                {tAny("silence_more_clips").replace(
-                                    "{n}",
-                                    String(clipIds.length - 6),
-                                )}
+                <label
+                    className="flex items-center gap-2 text-[12px]"
+                    data-tooltip={resetHint}
+                    onDoubleClick={() =>
+                        update({ deleteSilentClips: SILENCE_DETECT_DEFAULTS.deleteSilentClips })
+                    }
+                >
+                    <Checkbox
+                        checked={options.deleteSilentClips}
+                        onCheckedChange={(v) => update({ deleteSilentClips: v === true })}
+                    />
+                    {tAny("silence_delete_silent_clips")}
+                </label>
+                <label
+                    className="flex items-center gap-2 text-[12px]"
+                    data-tooltip={resetHint}
+                    onDoubleClick={() =>
+                        update({ syncAllTakes: SILENCE_DETECT_DEFAULTS.syncAllTakes })
+                    }
+                >
+                    <Checkbox
+                        checked={options.syncAllTakes}
+                        onCheckedChange={(v) => update({ syncAllTakes: v === true })}
+                    />
+                    {tAny("silence_sync_all_takes")}
+                </label>
+
+                {/* 预览摘要（与时间线上的红色覆盖层联动） */}
+                <Flex direction="column" gap="1" className="rounded border border-qt-border p-2">
+                    <Text size="1" className="text-qt-text-muted">
+                        {analyzing
+                            ? tAny("silence_analyzing")
+                            : totalRegions > 0
+                              ? tAny("silence_preview_summary")
+                                    .replace("{n}", String(totalRegions))
+                                    .replace("{dur}", totalSilent.toFixed(2))
+                              : tAny("silence_no_silence")}
+                    </Text>
+                    {clipIds.slice(0, 6).map((id) => {
+                        const clip = clips.find((c) => c.id === id);
+                        const report = reportFor(id);
+                        const regions = previewFor(id)?.length ?? 0;
+                        const name = clip?.name ?? id;
+                        return (
+                            <Text key={id} size="1" className="text-qt-text-muted">
+                                {`· ${name}: `}
+                                {report && !report.ok
+                                    ? tAny("silence_skipped") +
+                                      (report.message ? ` (${report.message})` : "")
+                                    : regions > 0
+                                      ? tAny("silence_preview_clip")
+                                            .replace("{n}", String(regions))
+                                            .replace(
+                                                "{dur}",
+                                                (report?.totalSilentSec ?? 0).toFixed(2),
+                                            )
+                                      : tAny("silence_no_silence")}
                             </Text>
-                        ) : null}
-                    </Flex>
-                </AppForm>
-            </div>
+                        );
+                    })}
+                    {clipIds.length > 6 ? (
+                        <Text size="1" className="text-qt-text-muted">
+                            {tAny("silence_more_clips").replace(
+                                "{n}",
+                                String(clipIds.length - 6),
+                            )}
+                        </Text>
+                    ) : null}
+                </Flex>
+            </AppForm>
         </AppDialog>
     );
 };

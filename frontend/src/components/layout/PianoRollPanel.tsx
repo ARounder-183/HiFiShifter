@@ -1,3 +1,4 @@
+// hs-interaction-exempt: 边缘平滑度裸 range（约 7429 行）与 attachEdgeSmoothnessWheel 原生滚轮监听、松开落盘逻辑耦合，按迁移范围刻意保留；本文件其余取值控件已走能力层原语。
 import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
 import React, {
     type CSSProperties,
@@ -9,7 +10,7 @@ import React, {
     useState,
 } from "react";
 import { flushSync } from "react-dom";
-import { Flex, Text, Button, Select, Box, IconButton, DropdownMenu } from "@radix-ui/themes";
+import { Flex, Text, Button, Box, IconButton, DropdownMenu } from "@radix-ui/themes";
 import {
     ChevronDownIcon,
     CursorArrowIcon,
@@ -248,8 +249,8 @@ import { MidiTrackSelectDialog } from "./MidiTrackSelectDialog";
 import { settingsApi } from "../../services/api/settings";
 import { EditContextMenu } from "../editDialogs/EditContextMenu";
 import { resolveScrollableProjectSec } from "../../features/session/projectBoundary";
-import { applySelectWheelChange } from "../../utils/selectWheel";
 import { parseCustomScaleToken } from "../../utils/scaleSelection";
+import { AppSelect } from "../../ui";
 import {
     centerFromVerticalScrollTop,
     verticalScrollTopFromCenter,
@@ -7857,9 +7858,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
 
                                 // vslib 的合成模式：改为支持滚轮切换的下拉栏。
                                 if (param.id === "synth_mode") {
-                                    const stringOptions = param.kind.options.map(([, value]) =>
-                                        String(value),
-                                    );
                                     const currentString = String(currentValue);
                                     const selectOptions = param.kind.options.map(
                                         ([label, value]) => ({
@@ -7872,41 +7870,26 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             (opt) => String(opt.value) === currentString,
                                         )?.label ?? currentString;
                                     return (
-                                        <Select.Root
+                                        <span
                                             key={param.id}
-                                            value={currentString}
-                                            onValueChange={(v) =>
-                                                void handleStaticParamChange(param.id, Number(v))
-                                            }
+                                            data-tooltip={`${t("vslib_synth_mode_label")}: ${currentOptionLabel}`}
+                                            className="inline-flex"
                                         >
-                                            <Select.Trigger
+                                            <AppSelect
+                                                value={currentString}
+                                                onValueChange={(v) =>
+                                                    void handleStaticParamChange(param.id, Number(v))
+                                                }
+                                                fullWidth={false}
                                                 // 与“算法”下拉栏一致使用固定宽度，选项切换时宽度不变
                                                 className="w-[140px]"
-                                                data-tooltip={`${t("vslib_synth_mode_label")}: ${currentOptionLabel}`}
-                                                onWheel={(event) => {
-                                                    applySelectWheelChange({
-                                                        event,
-                                                        currentValue: currentString,
-                                                        options: stringOptions,
-                                                        onChange: (next) =>
-                                                            void handleStaticParamChange(
-                                                                param.id,
-                                                                Number(next),
-                                                            ),
-                                                    });
-                                                }}
+                                                ariaLabel={t("vslib_synth_mode_label")}
+                                                options={selectOptions.map((opt) => ({
+                                                    value: String(opt.value),
+                                                    label: opt.label,
+                                                }))}
                                             />
-                                            <Select.Content>
-                                                {selectOptions.map((opt) => (
-                                                    <Select.Item
-                                                        key={`${param.id}-${opt.value}`}
-                                                        value={String(opt.value)}
-                                                    >
-                                                        {opt.label}
-                                                    </Select.Item>
-                                                ))}
-                                            </Select.Content>
-                                        </Select.Root>
+                                        </span>
                                     );
                                 }
 
@@ -7941,7 +7924,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             <Text size="1" color="gray" data-tooltip={tAny("algo_label")}>
                                 {tAny("algo_label_short")}
                             </Text>
-                            <Select.Root
+                            <AppSelect
                                 value={
                                     ["nsf_hifigan_onnx", "world_dll", "vslib", "none"].includes(
                                         rootTrack.pitchAnalysisAlgo,
@@ -7958,46 +7941,16 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         }),
                                     );
                                 }}
-                            >
-                                <Select.Trigger
-                                    className="min-w-[140px]"
-                                    onWheel={(event) => {
-                                        const currentValue = [
-                                            "nsf_hifigan_onnx",
-                                            "world_dll",
-                                            "vslib",
-                                            "none",
-                                        ].includes(rootTrack.pitchAnalysisAlgo)
-                                            ? rootTrack.pitchAnalysisAlgo
-                                            : "nsf_hifigan_onnx";
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue,
-                                            options: [
-                                                "nsf_hifigan_onnx",
-                                                "world_dll",
-                                                "vslib",
-                                                "none",
-                                            ],
-                                            onChange: (next) => {
-                                                if (!rootTrackId) return;
-                                                dispatch(
-                                                    setTrackStateRemote({
-                                                        trackId: rootTrackId,
-                                                        pitchAnalysisAlgo: next,
-                                                    }),
-                                                );
-                                            },
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    <Select.Item value="nsf_hifigan_onnx">nsf-hifigan</Select.Item>
-                                    <Select.Item value="world_dll">world</Select.Item>
-                                    <Select.Item value="vslib">vslib</Select.Item>
-                                    <Select.Item value="none">{t("none")}</Select.Item>
-                                </Select.Content>
-                            </Select.Root>
+                                fullWidth={false}
+                                className="min-w-[140px]"
+                                ariaLabel={tAny("algo_label")}
+                                options={[
+                                    { value: "nsf_hifigan_onnx", label: "nsf-hifigan" },
+                                    { value: "world_dll", label: "world" },
+                                    { value: "vslib", label: "vslib" },
+                                    { value: "none", label: t("none") },
+                                ]}
+                            />
                         </Flex>
                     ) : null}
                 </Flex>

@@ -1,4 +1,4 @@
-import { Checkbox, Flex, Select, Slider, Text } from "@radix-ui/themes";
+import { Checkbox, Flex, Text } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -11,7 +11,7 @@ import {
 } from "../../features/session/sessionSlice";
 import type { TimeUnit, TimeUnitChoice } from "../../features/session/sessionTypes";
 import { TIME_UNITS, TIME_UNIT_CHOICES } from "./timeline/timeFormat";
-import { applySelectWheelChange } from "../../utils/selectWheel";
+import { AppSelect, AppSlider, AppSliderReadout } from "../../ui";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm } from "../../ui/Field";
 
@@ -54,88 +54,50 @@ export function TimelineDisplaySettingsDialog({ open, onOpenChange }: Props) {
         >
             <AppForm>
                 <AppField label={tAny("time_unit_primary")}>
-                    <Select.Root
+                    <AppSelect
                         value={s.primaryTimeUnit}
-                        size="2"
                         onValueChange={(v) => {
                             dispatch(setPrimaryTimeUnit(v as TimeUnit));
                             void dispatch(persistUiSettings());
                         }}
-                    >
-                        <Select.Trigger
-                            onWheel={(event) => {
-                                applySelectWheelChange({
-                                    event,
-                                    currentValue: s.primaryTimeUnit,
-                                    options: TIME_UNITS as readonly string[],
-                                    onChange: (next) => {
-                                        dispatch(setPrimaryTimeUnit(next as TimeUnit));
-                                        void dispatch(persistUiSettings());
-                                    },
-                                });
-                            }}
-                        />
-                        <Select.Content>
-                            {TIME_UNITS.map((unit) => (
-                                <Select.Item key={unit} value={unit}>
-                                    {tAny(unitLabelKey(unit))}
-                                </Select.Item>
-                            ))}
-                        </Select.Content>
-                    </Select.Root>
+                        options={TIME_UNITS.map((unit) => ({
+                            value: unit,
+                            label: tAny(unitLabelKey(unit)),
+                        }))}
+                    />
                 </AppField>
 
                 <AppField label={tAny("time_unit_secondary")}>
-                    <Select.Root
+                    <AppSelect
                         value={s.secondaryTimeUnit}
-                        size="2"
                         onValueChange={(v) => {
                             dispatch(setSecondaryTimeUnit(v as TimeUnitChoice));
                             void dispatch(persistUiSettings());
                         }}
-                    >
-                        <Select.Trigger
-                            onWheel={(event) => {
-                                applySelectWheelChange({
-                                    event,
-                                    currentValue: s.secondaryTimeUnit,
-                                    options: TIME_UNIT_CHOICES as readonly string[],
-                                    onChange: (next) => {
-                                        dispatch(setSecondaryTimeUnit(next as TimeUnitChoice));
-                                        void dispatch(persistUiSettings());
-                                    },
-                                });
-                            }}
-                        />
-                        <Select.Content>
-                            {TIME_UNIT_CHOICES.map((unit) => (
-                                <Select.Item key={unit} value={unit}>
-                                    {unit === "none"
-                                        ? tAny("time_unit_none")
-                                        : tAny(unitLabelKey(unit as TimeUnit))}
-                                </Select.Item>
-                            ))}
-                        </Select.Content>
-                    </Select.Root>
+                        options={TIME_UNIT_CHOICES.map((unit) => ({
+                            value: unit,
+                            label:
+                                unit === "none"
+                                    ? tAny("time_unit_none")
+                                    : tAny(unitLabelKey(unit as TimeUnit)),
+                        }))}
+                    />
                 </AppField>
 
                 <AppField label={tAny("ruler_label_spacing")}>
                     <Flex align="center" gap="2">
-                        <Slider
-                            size="1"
+                        <AppSlider
+                            value={s.rulerLabelSpacingPx}
+                            unit="pixels"
                             min={40}
                             max={320}
-                            step={5}
-                            value={[s.rulerLabelSpacingPx]}
-                            onValueChange={(values: number[]) => {
-                                dispatch(setRulerLabelSpacingPx(values[0]));
+                            ariaLabel={tAny("ruler_label_spacing")}
+                            onChange={(next) => {
+                                dispatch(setRulerLabelSpacingPx(next));
                             }}
-                            onValueCommit={() => void dispatch(persistUiSettings())}
-                            className="flex-1"
+                            onCommit={() => void dispatch(persistUiSettings())}
                         />
-                        <Text size="1" color="gray" className="w-[36px] text-right shrink-0">
-                            {s.rulerLabelSpacingPx}px
-                        </Text>
+                        <AppSliderReadout>{s.rulerLabelSpacingPx}px</AppSliderReadout>
                     </Flex>
                 </AppField>
 

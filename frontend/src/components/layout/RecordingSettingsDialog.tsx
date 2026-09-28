@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Button, Flex, Select, Text, TextField } from "@radix-ui/themes";
+import { Button, Flex, Text, TextField } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -18,6 +18,7 @@ import {
 import { webApi } from "../../services/webviewApi";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm } from "../../ui/Field";
+import { AppNumberField, AppSelect } from "../../ui";
 
 interface RecordingSettingsDialogProps {
     open: boolean;
@@ -172,7 +173,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
         >
             <AppForm>
                 <AppField label={tAny("recording_source_mode")}>
-                    <Select.Root
+                    <AppSelect
                         value={draft.captureMode}
                         onValueChange={(value) =>
                             setDraft((prev) => ({
@@ -180,45 +181,33 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                 captureMode: value as RecordingSettings["captureMode"],
                             }))
                         }
-                    >
-                        <Select.Trigger style={{ minWidth: 260 }} />
-                        <Select.Content>
-                            <Select.Item value="device">
-                                {tAny("recording_mode_device")}
-                            </Select.Item>
-                            <Select.Item value="loopback">
-                                {tAny("recording_mode_loopback")}
-                            </Select.Item>
-                            <Select.Item value="application">
-                                {tAny("recording_mode_application")}
-                            </Select.Item>
-                        </Select.Content>
-                    </Select.Root>
+                        options={[
+                            { value: "device", label: tAny("recording_mode_device") },
+                            { value: "loopback", label: tAny("recording_mode_loopback") },
+                            { value: "application", label: tAny("recording_mode_application") },
+                        ]}
+                    />
                 </AppField>
 
                 {draft.captureMode === "device" ? (
                     <AppField label={tAny("recording_device")}>
                         <Flex align="center" gap="2">
-                            <Select.Root
+                            <AppSelect
+                                fullWidth={false}
                                 value={draft.sourceDevice}
                                 onValueChange={(value) =>
                                     setDraft((prev) => ({ ...prev, sourceDevice: value }))
                                 }
-                            >
-                                <Select.Trigger style={{ minWidth: 260 }} />
-                                <Select.Content>
-                                    <Select.Item value="default">
-                                        {tAny("recording_device_default")}
-                                    </Select.Item>
-                                    {inputDevices
+                                options={[
+                                    { value: "default", label: tAny("recording_device_default") },
+                                    ...inputDevices
                                         .filter((device) => !device.isDefault)
-                                        .map((device) => (
-                                            <Select.Item key={device.id} value={device.id}>
-                                                {device.name}
-                                            </Select.Item>
-                                        ))}
-                                </Select.Content>
-                            </Select.Root>
+                                        .map((device) => ({
+                                            value: device.id,
+                                            label: device.name,
+                                        })),
+                                ]}
+                            />
                             <Button
                                 type="button"
                                 size="1"
@@ -235,26 +224,25 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                 {draft.captureMode === "loopback" ? (
                     <AppField label={tAny("recording_loopback_device")}>
                         <Flex align="center" gap="2">
-                            <Select.Root
+                            <AppSelect
+                                fullWidth={false}
                                 value={loopbackValue}
                                 onValueChange={(value) =>
                                     setDraft((prev) => ({ ...prev, loopbackDevice: value }))
                                 }
-                            >
-                                <Select.Trigger style={{ minWidth: 260 }} />
-                                <Select.Content>
-                                    <Select.Item value="loopback:default">
-                                        {tAny("recording_loopback_default")}
-                                    </Select.Item>
-                                    {loopbackDevices
+                                options={[
+                                    {
+                                        value: "loopback:default",
+                                        label: tAny("recording_loopback_default"),
+                                    },
+                                    ...loopbackDevices
                                         .filter((device) => device.id !== "loopback:default")
-                                        .map((device) => (
-                                            <Select.Item key={device.id} value={device.id}>
-                                                {device.name}
-                                            </Select.Item>
-                                        ))}
-                                </Select.Content>
-                            </Select.Root>
+                                        .map((device) => ({
+                                            value: device.id,
+                                            label: device.name,
+                                        })),
+                                ]}
+                            />
                             <Button
                                 type="button"
                                 size="1"
@@ -272,7 +260,8 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                     <>
                         <AppField label={tAny("recording_application")}>
                             <Flex align="center" gap="2">
-                                <Select.Root
+                                <AppSelect
+                                    fullWidth={false}
                                     value={draft.captureAppId}
                                     onValueChange={(value) => {
                                         const app = apps.find((item) => item.id === value);
@@ -283,21 +272,21 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                             captureAppProcess: app?.processName ?? "",
                                         }));
                                     }}
-                                >
-                                    <Select.Trigger style={{ minWidth: 260 }} />
-                                    <Select.Content>
-                                        {missingApp ? (
-                                            <Select.Item value={draft.captureAppId}>
-                                                {appNameById(draft.captureAppId)}
-                                            </Select.Item>
-                                        ) : null}
-                                        {apps.map((app: RecordingAppInfo) => (
-                                            <Select.Item key={app.id} value={app.id}>
-                                                {app.name}
-                                            </Select.Item>
-                                        ))}
-                                    </Select.Content>
-                                </Select.Root>
+                                    options={[
+                                        ...(missingApp
+                                            ? [
+                                                  {
+                                                      value: draft.captureAppId,
+                                                      label: appNameById(draft.captureAppId),
+                                                  },
+                                              ]
+                                            : []),
+                                        ...apps.map((app: RecordingAppInfo) => ({
+                                            value: app.id,
+                                            label: app.name,
+                                        })),
+                                    ]}
+                                />
                                 <Button
                                     type="button"
                                     size="1"
@@ -316,7 +305,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                 ) : null}
 
                 <AppField label={tAny("recording_sample_rate")}>
-                    <Select.Root
+                    <AppSelect
                         value={String(draft.sampleRate)}
                         onValueChange={(value) =>
                             setDraft((prev) => ({
@@ -324,21 +313,17 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                 sampleRate: Number(value),
                             }))
                         }
-                    >
-                        <Select.Trigger style={{ minWidth: 120 }} />
-                        <Select.Content>
-                            {[44_100, 48_000, 88_200, 96_000].map((rate) => (
-                                <Select.Item key={rate} value={String(rate)}>
-                                    {rate} Hz
-                                </Select.Item>
-                            ))}
-                        </Select.Content>
-                    </Select.Root>
+                        options={[44_100, 48_000, 88_200, 96_000].map((rate) => ({
+                            value: String(rate),
+                            label: `${rate} Hz`,
+                        }))}
+                    />
                 </AppField>
 
                 <AppField label={tAny("recording_bit_depth")}>
                     <Flex align="center" gap="2">
-                        <Select.Root
+                        <AppSelect
+                            fullWidth={false}
                             value={String(draft.bitDepth)}
                             onValueChange={(value) =>
                                 setDraft((prev) => ({
@@ -346,19 +331,18 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                     bitDepth: Number(value) as 16 | 24 | 32,
                                 }))
                             }
-                        >
-                            <Select.Trigger style={{ minWidth: 120 }} />
-                            <Select.Content>
-                                <Select.Item value="16">16-bit</Select.Item>
-                                <Select.Item value="24">24-bit</Select.Item>
-                                <Select.Item value="32">32-bit float</Select.Item>
-                            </Select.Content>
-                        </Select.Root>
+                            options={[
+                                { value: "16", label: "16-bit" },
+                                { value: "24", label: "24-bit" },
+                                { value: "32", label: "32-bit float" },
+                            ]}
+                        />
 
                         <Text size="2" ml="4">
                             {tAny("recording_channels")}
                         </Text>
-                        <Select.Root
+                        <AppSelect
+                            fullWidth={false}
                             value={String(draft.channels)}
                             onValueChange={(value) =>
                                 setDraft((prev) => ({
@@ -366,60 +350,48 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                     channels: Number(value) === 1 ? 1 : 2,
                                 }))
                             }
-                        >
-                            <Select.Trigger style={{ minWidth: 100 }} />
-                            <Select.Content>
-                                <Select.Item value="1">{tAny("recording_mono")}</Select.Item>
-                                <Select.Item value="2">{tAny("recording_stereo")}</Select.Item>
-                            </Select.Content>
-                        </Select.Root>
+                            options={[
+                                { value: "1", label: tAny("recording_mono") },
+                                { value: "2", label: tAny("recording_stereo") },
+                            ]}
+                        />
                     </Flex>
                 </AppField>
 
                 <AppField label={tAny("recording_input_gain")}>
-                    <Flex align="center" gap="2">
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            min={-24}
-                            max={24}
-                            step={0.1}
-                            value={String(draft.inputGainDb)}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    inputGainDb: Number(event.target.value),
-                                }))
-                            }
-                            style={{ width: 120 }}
-                        />
-                        <Text size="1" color="gray">
-                            dB
-                        </Text>
-                    </Flex>
+                    <AppNumberField
+                        value={draft.inputGainDb}
+                        unit="gainDb"
+                        min={-24}
+                        max={24}
+                        width={120}
+                        suffix="dB"
+                        ariaLabel={tAny("recording_input_gain")}
+                        onCommit={(inputGainDb) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                inputGainDb,
+                            }))
+                        }
+                    />
                 </AppField>
 
                 <AppField label={tAny("recording_countdown")}>
-                    <Flex align="center" gap="2">
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            min={0}
-                            max={10}
-                            step={1}
-                            value={String(draft.countdownSec)}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    countdownSec: Number(event.target.value),
-                                }))
-                            }
-                            style={{ width: 120 }}
-                        />
-                        <Text size="1" color="gray">
-                            {tAny("recording_countdown_unit")}
-                        </Text>
-                    </Flex>
+                    <AppNumberField
+                        value={draft.countdownSec}
+                        unit="integer"
+                        min={0}
+                        max={10}
+                        width={120}
+                        suffix={tAny("recording_countdown_unit")}
+                        ariaLabel={tAny("recording_countdown")}
+                        onCommit={(countdownSec) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                countdownSec,
+                            }))
+                        }
+                    />
                 </AppField>
 
                 <label className="flex items-center gap-2 text-qt-md text-qt-text">
@@ -438,26 +410,21 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
 
                 {draft.monitorEnabled ? (
                     <AppField label={tAny("recording_monitor_gain")} className="pl-6">
-                        <Flex align="center" gap="2">
-                            <TextField.Root
-                                size="2"
-                                type="number"
-                                min={-24}
-                                max={24}
-                                step={0.1}
-                                value={String(draft.monitorGainDb)}
-                                onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                    setDraft((prev) => ({
-                                        ...prev,
-                                        monitorGainDb: Number(event.target.value),
-                                    }))
-                                }
-                                style={{ width: 120 }}
-                            />
-                            <Text size="1" color="gray">
-                                dB
-                            </Text>
-                        </Flex>
+                        <AppNumberField
+                            value={draft.monitorGainDb}
+                            unit="gainDb"
+                            min={-24}
+                            max={24}
+                            width={120}
+                            suffix="dB"
+                            ariaLabel={tAny("recording_monitor_gain")}
+                            onCommit={(monitorGainDb) =>
+                                setDraft((prev) => ({
+                                    ...prev,
+                                    monitorGainDb,
+                                }))
+                            }
+                        />
                     </AppField>
                 ) : null}
 

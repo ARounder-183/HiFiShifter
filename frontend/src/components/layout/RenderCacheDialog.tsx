@@ -15,7 +15,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Button, Checkbox, Flex, Select, Separator, Text, TextField } from "@radix-ui/themes";
+import { Button, Checkbox, Flex, Separator, Text, TextField } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -32,6 +32,7 @@ import { persistUiSettings } from "../../features/session/thunks/runtimeThunks";
 import { setRenderCacheSettings } from "../../features/session/sessionSlice";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm } from "../../ui/Field";
+import { AppNumberField, AppSelect } from "../../ui";
 
 interface RenderCacheDialogProps {
     open: boolean;
@@ -253,78 +254,59 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                 {/* ── 容量 ─────────────────────────────────────────────── */}
                 <AppField label={tAny("render_cache_max_size")}>
                     <Flex align="center" gap="2">
-                        <Select.Root
+                        <AppSelect
+                            fullWidth={false}
                             value={sizePresetValue}
-                            size="1"
                             onValueChange={(v) => {
                                 if (v === "custom") return;
                                 patch({ maxSizeMb: Number(v) });
                             }}
-                        >
-                            <Select.Trigger />
-                            <Select.Content>
-                                {SIZE_PRESETS_MB.map((mb) => (
-                                    <Select.Item key={mb} value={String(mb)}>
-                                        {mb === 0
-                                            ? tAny("render_cache_unlimited")
-                                            : `${mb / 1024} GB`}
-                                    </Select.Item>
-                                ))}
-                            </Select.Content>
-                        </Select.Root>
-                        <TextField.Root
-                            size="1"
-                            type="number"
-                            min={0}
-                            value={String(draft.maxSizeMb)}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                patch({ maxSizeMb: Number(event.target.value) })
-                            }
-                            style={{ width: 110 }}
+                            options={SIZE_PRESETS_MB.map((mb) => ({
+                                value: String(mb),
+                                label:
+                                    mb === 0 ? tAny("render_cache_unlimited") : `${mb / 1024} GB`,
+                            }))}
                         />
-                        <Text size="1" color="gray">
-                            MB
-                        </Text>
+                        <AppNumberField
+                            value={draft.maxSizeMb}
+                            unit="integer"
+                            min={0}
+                            max={1024 * 1024}
+                            width={110}
+                            suffix="MB"
+                            ariaLabel={tAny("render_cache_max_size")}
+                            onCommit={(maxSizeMb) => patch({ maxSizeMb })}
+                        />
                     </Flex>
                 </AppField>
 
                 <AppField label={tAny("render_cache_max_age")}>
                     <Flex align="center" gap="2">
-                        <Select.Root
+                        <AppSelect
+                            fullWidth={false}
                             value={agePresetValue}
-                            size="1"
                             onValueChange={(v) => {
                                 if (v === "custom") return;
                                 patch({ maxAgeDays: Number(v) });
                             }}
-                        >
-                            <Select.Trigger />
-                            <Select.Content>
-                                {AGE_PRESETS_DAYS.map((days) => (
-                                    <Select.Item key={days} value={String(days)}>
-                                        {days === 0
-                                            ? tAny("render_cache_never")
-                                            : tAny("render_cache_days").replace(
-                                                  "{n}",
-                                                  String(days),
-                                              )}
-                                    </Select.Item>
-                                ))}
-                            </Select.Content>
-                        </Select.Root>
-                        <TextField.Root
-                            size="1"
-                            type="number"
-                            min={0}
-                            value={String(draft.maxAgeDays)}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                patch({ maxAgeDays: Number(event.target.value) })
-                            }
-                            style={{ width: 90 }}
+                            options={AGE_PRESETS_DAYS.map((days) => ({
+                                value: String(days),
+                                label:
+                                    days === 0
+                                        ? tAny("render_cache_never")
+                                        : tAny("render_cache_days").replace("{n}", String(days)),
+                            }))}
                         />
-                        <Text size="1" color="gray">
-                            {tAny("render_cache_days_unit")}
-                        </Text>
+                        <AppNumberField
+                            value={draft.maxAgeDays}
+                            unit="integer"
+                            min={0}
+                            max={3650}
+                            width={90}
+                            suffix={tAny("render_cache_days_unit")}
+                            ariaLabel={tAny("render_cache_max_age")}
+                            onCommit={(maxAgeDays) => patch({ maxAgeDays })}
+                        />
                     </Flex>
                 </AppField>
 
@@ -332,111 +314,83 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                     <Text size="2" style={{ minWidth: 132 }}>
                         {tAny("render_cache_min_clip")}
                     </Text>
-                    <TextField.Root
-                        size="1"
-                        type="number"
+                    <AppNumberField
+                        value={draft.minClipSecs}
+                        unit="seconds"
                         min={0}
-                        step={0.1}
-                        value={String(draft.minClipSecs)}
-                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                            patch({ minClipSecs: Number(event.target.value) })
-                        }
-                        style={{ width: 90 }}
+                        max={60}
+                        width={90}
+                        suffix={tAny("render_cache_seconds_unit")}
+                        ariaLabel={tAny("render_cache_min_clip")}
+                        onCommit={(minClipSecs) => patch({ minClipSecs })}
                     />
-                    <Text size="1" color="gray">
-                        {tAny("render_cache_seconds_unit")}
-                    </Text>
                     <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
                         {tAny("render_cache_min_entry")}
                     </Text>
-                    <TextField.Root
-                        size="1"
-                        type="number"
+                    <AppNumberField
+                        value={draft.minEntryKb}
+                        unit="integer"
                         min={0}
-                        value={String(draft.minEntryKb)}
-                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                            patch({ minEntryKb: Number(event.target.value) })
-                        }
-                        style={{ width: 90 }}
+                        max={64 * 1024}
+                        width={90}
+                        suffix="KB"
+                        ariaLabel={tAny("render_cache_min_entry")}
+                        onCommit={(minEntryKb) => patch({ minEntryKb })}
                     />
-                    <Text size="1" color="gray">
-                        KB
-                    </Text>
                     <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
                         {tAny("render_cache_max_entry")}
                     </Text>
-                    <TextField.Root
-                        size="1"
-                        type="number"
+                    <AppNumberField
+                        value={draft.maxEntryMb}
+                        unit="integer"
                         min={0}
-                        value={String(draft.maxEntryMb)}
-                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                            patch({ maxEntryMb: Number(event.target.value) })
-                        }
-                        style={{ width: 90 }}
+                        max={64 * 1024}
+                        width={90}
+                        suffix="MB"
+                        ariaLabel={tAny("render_cache_max_entry")}
+                        onCommit={(maxEntryMb) => patch({ maxEntryMb })}
                     />
-                    <Text size="1" color="gray">
-                        MB
-                    </Text>
                     <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
                         {tAny("render_cache_min_free_disk")}
                     </Text>
-                    <TextField.Root
-                        size="1"
-                        type="number"
+                    <AppNumberField
+                        value={draft.minFreeDiskMb}
+                        unit="integer"
                         min={0}
-                        value={String(draft.minFreeDiskMb)}
-                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                            patch({ minFreeDiskMb: Number(event.target.value) })
-                        }
-                        style={{ width: 90 }}
+                        max={1024 * 1024}
+                        width={90}
+                        suffix="MB"
+                        ariaLabel={tAny("render_cache_min_free_disk")}
+                        onCommit={(minFreeDiskMb) => patch({ minFreeDiskMb })}
                     />
-                    <Text size="1" color="gray">
-                        MB
-                    </Text>
                 </Flex>
 
                 {/* ── 高级 ─────────────────────────────────────────────── */}
                 <AppField label={tAny("render_cache_write_mode")}>
-                    <Select.Root
+                    <AppSelect
                         value={draft.writeMode}
-                        size="1"
                         onValueChange={(v) => patch({ writeMode: v as RenderCacheWriteMode })}
-                    >
-                        <Select.Trigger />
-                        <Select.Content>
-                            <Select.Item value="immediate">
-                                {tAny("render_cache_write_immediate")}
-                            </Select.Item>
-                            <Select.Item value="onExit">
-                                {tAny("render_cache_write_on_exit")}
-                            </Select.Item>
-                            <Select.Item value="manual">
-                                {tAny("render_cache_write_manual")}
-                            </Select.Item>
-                        </Select.Content>
-                    </Select.Root>
+                        options={[
+                            { value: "immediate", label: tAny("render_cache_write_immediate") },
+                            { value: "onExit", label: tAny("render_cache_write_on_exit") },
+                            { value: "manual", label: tAny("render_cache_write_manual") },
+                        ]}
+                    />
                 </AppField>
 
                 <AppField label={tAny("render_cache_location_mode")}>
                     <Flex align="center" gap="2" wrap="wrap">
-                        <Select.Root
+                        <AppSelect
+                            fullWidth={false}
                             value={draft.location}
-                            size="1"
                             onValueChange={(v) =>
                                 patch({ location: v === "custom" ? "custom" : "system" })
                             }
-                        >
-                            <Select.Trigger />
-                            <Select.Content>
-                                <Select.Item value="system">
-                                    {tAny("render_cache_location_system")}
-                                </Select.Item>
-                                <Select.Item value="custom">
-                                    {tAny("render_cache_location_custom")}
-                                </Select.Item>
-                            </Select.Content>
-                        </Select.Root>
+                            options={[
+                                { value: "system", label: tAny("render_cache_location_system") },
+                                { value: "custom", label: tAny("render_cache_location_custom") },
+                            ]}
+                        />
                         {draft.location === "custom" ? (
                             <TextField.Root
                                 size="1"

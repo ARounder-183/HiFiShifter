@@ -12,14 +12,12 @@
  * 交互约定（与其它设置对话框一致）：
  * - 设置以草稿形式编辑，点「保存」才落盘；
  * - 草稿只在"打开"这一时机初始化一次，避免保存后 effect 重跑清掉提示；
- * - 下拉框滚轮切换选项（`applySelectWheelChange`）；
- * - 数字输入框滚轮步进，按住「精细调整」修饰键时用更小步长
- *   （`isModifierActive` + `modifier.paramFineAdjust`），并由
- *   `useWheelScrollGuard` 阻止滚轮冒泡去滚动对话框。
+ * - 下拉框与数字输入框统一走 `AppSelect` / `AppNumberField` 原语，滚轮
+ *   步进与「精细调整」修饰键由原语内建（不再逐控件手写）。
  */
 
 import { useEffect, useRef, useState } from "react";
-import { Flex, Select, Separator, Text, TextField } from "@radix-ui/themes";
+import { Flex, Separator, Text } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -32,9 +30,7 @@ import {
 } from "../../services/api/settings";
 import { persistUiSettings } from "../../features/session/thunks/runtimeThunks";
 import { setChannelImportPolicy } from "../../features/session/sessionSlice";
-import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
-import { applySelectWheelChange } from "../../utils/selectWheel";
-import { useNonPassiveWheel } from "../../utils/useNonPassiveWheel";
+import { AppNumberField, AppSelect } from "../../ui";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm } from "../../ui/Field";
 
@@ -61,30 +57,11 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const saved = useAppSelector((state) => state.session.channelImportPolicy);
-    const paramFineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
-    );
 
     const [draft, setDraft] = useState<ChannelImportPolicy>(saved);
     const [saving, setSaving] = useState(false);
     const [notice, setNotice] = useState("");
     const [errorText, setErrorText] = useState("");
-
-    // 滚轮守卫：数字输入框与下拉触发按钮自行消费滚轮步进，必须阻止该事件再去
-    // 滚动对话框。React 的合成 `onWheel` 是 passive 监听，里面的 preventDefault
-    // 是空操作，所以要在这里挂**原生非被动**监听。
-    //
-    // 用回调 ref（`useNonPassiveWheel`）而不是 `useWheelScrollGuard`：后者在
-    // `[selector]` 依赖的 effect 里读 `ref.current`，而 Dialog 内容是条件挂载的
-    // —— 首次打开时元素尚不存在，守卫永远挂不上。
-    const attachWheelGuard = useNonPassiveWheel<HTMLDivElement>((event) => {
-        const target = event.target;
-        if (!(target instanceof Element)) return;
-        // 只拦截会自行处理滚轮的控件：数字输入框与 Radix 下拉触发按钮。
-        if (target.closest("input") || target.closest('[role="combobox"]')) {
-            event.preventDefault();
-        }
-    });
 
     // 草稿只在"打开"这一时机初始化一次：保存后 Redux 中的设置会更新，若把
     // `saved` 放进依赖，effect 会立刻重跑并把"设置已保存"的提示清掉。
@@ -102,32 +79,6 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
 
     function patch(partial: Partial<ChannelImportPolicy>) {
         setDraft((prev) => ({ ...prev, ...partial }));
-    }
-
-    /** 数字输入框滚轮步进：普通步长 / 精细步长。 */
-    function stepNumber(
-        event: React.WheelEvent<HTMLInputElement>,
-        current: number,
-        coarse: number,
-        fine: number,
-        min: number,
-        max: number,
-        apply: (next: number) => void,
-    ) {
-        if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return;
-        event.preventDefault();
-        const step = isModifierActive(paramFineAdjustKb, event.nativeEvent) ? fine : coarse;
-        const dir = event.deltaY < 0 ? 1 : -1;
-        // 以步进量的最小精度四舍五入，规避浮点累加误差（如 0.25 + 0.05 变成
-        // 0.29999999999999993），避免输入框显示 0.39999999999999997 之类的值。
-        const decimals = Math.max(
-            (String(coarse).split(".")[1] || "").length,
-            (String(fine).split(".")[1] || "").length,
-        );
-        const factor = Math.pow(10, decimals);
-        const raw = current + dir * step;
-        const next = Math.min(max, Math.max(min, Math.round(raw * factor) / factor));
-        if (next !== current) apply(next);
     }
 
     async function handleSave() {
@@ -168,181 +119,108 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                 },
             ]}
         >
-            <div ref={attachWheelGuard}>
-                <AppForm>
-                    <Separator size="4" />
+            <AppForm>
+                <Separator size="4" />
 
-                    {/* ── 总策略 ─────────────────────────────────────────── */}
-                    <AppField label={tAny("clip_channel_import_mode")}>
-                        <Select.Root
-                            value={draft.mode}
-                            onValueChange={(value) => patch({ mode: value as ChannelImportMode })}
-                        >
-                            <Select.Trigger
-                                onWheel={(event) =>
-                                    applySelectWheelChange({
-                                        event,
-                                        currentValue: draft.mode,
-                                        options: MODE_OPTIONS.map((option) => option.value),
-                                        onChange: (next) => patch({ mode: next }),
-                                    })
-                                }
-                            />
-                            <Select.Content>
-                                {MODE_OPTIONS.map((option) => (
-                                    <Select.Item key={option.value} value={option.value}>
-                                        {tAny(option.labelKey)}
-                                    </Select.Item>
-                                ))}
-                            </Select.Content>
-                        </Select.Root>
+                {/* ── 总策略 ─────────────────────────────────────────── */}
+                <AppField label={tAny("clip_channel_import_mode")}>
+                    <AppSelect
+                        value={draft.mode}
+                        onValueChange={(value) => patch({ mode: value as ChannelImportMode })}
+                        options={MODE_OPTIONS.map((option) => ({
+                            value: option.value,
+                            label: tAny(option.labelKey),
+                        }))}
+                    />
+                </AppField>
+                <Text size="1" color="gray">
+                    {isOff
+                        ? tAny("clip_channel_import_mode_off_hint")
+                        : tAny("clip_channel_import_mode_hint")}
+                </Text>
+
+                {/* ── 目标模式 ───────────────────────────────────────── */}
+                {!isOff && (
+                    <AppField label={tAny("clip_channel_import_target_mode")}>
+                        <AppSelect
+                            value={String(draft.monoTargetMode)}
+                            onValueChange={(value) => patch({ monoTargetMode: Number(value) })}
+                            options={TARGET_MODE_OPTIONS.map((option) => ({
+                                value: option.value,
+                                label: tAny(option.labelKey),
+                            }))}
+                        />
                     </AppField>
-                    <Text size="1" color="gray">
-                        {isOff
-                            ? tAny("clip_channel_import_mode_off_hint")
-                            : tAny("clip_channel_import_mode_hint")}
-                    </Text>
+                )}
 
-                    {/* ── 目标模式 ───────────────────────────────────────── */}
-                    {!isOff && (
-                        <AppField label={tAny("clip_channel_import_target_mode")}>
-                            <Select.Root
-                                value={String(draft.monoTargetMode)}
-                                onValueChange={(value) => patch({ monoTargetMode: Number(value) })}
-                            >
-                                <Select.Trigger
-                                    onWheel={(event) =>
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue: String(draft.monoTargetMode),
-                                            options: TARGET_MODE_OPTIONS.map(
-                                                (option) => option.value,
-                                            ),
-                                            onChange: (next) =>
-                                                patch({ monoTargetMode: Number(next) }),
-                                        })
-                                    }
-                                />
-                                <Select.Content>
-                                    {TARGET_MODE_OPTIONS.map((option) => (
-                                        <Select.Item key={option.value} value={option.value}>
-                                            {tAny(option.labelKey)}
-                                        </Select.Item>
-                                    ))}
-                                </Select.Content>
-                            </Select.Root>
-                        </AppField>
-                    )}
+                {/* ── 采样参数（仅智能模式）──────────────────────────── */}
+                {isSmart && (
+                    <>
+                        <Separator size="4" />
+                        <Text size="2" weight="medium">
+                            {tAny("clip_channel_import_advanced")}
+                        </Text>
 
-                    {/* ── 采样参数（仅智能模式）──────────────────────────── */}
-                    {isSmart && (
-                        <>
-                            <Separator size="4" />
-                            <Text size="2" weight="medium">
-                                {tAny("clip_channel_import_advanced")}
-                            </Text>
-
-                            <AppField label={tAny("clip_channel_import_tolerance")}>
-                                <Flex align="center" gap="2">
-                                    <TextField.Root
-                                        type="number"
-                                        min={0}
-                                        max={TOLERANCE_PERCENT_MAX}
-                                        step={0.1}
-                                        style={{ width: 120 }}
-                                        value={String(toleranceToPercent(draft.tolerance))}
-                                        onChange={(event) =>
-                                            patch({
-                                                tolerance: percentToTolerance(
-                                                    Number(event.target.value),
-                                                ),
-                                            })
-                                        }
-                                        onWheel={(event) =>
-                                            stepNumber(
-                                                event,
-                                                toleranceToPercent(draft.tolerance),
-                                                0.1,
-                                                0.01,
-                                                0,
-                                                TOLERANCE_PERCENT_MAX,
-                                                (next) =>
-                                                    patch({
-                                                        tolerance: percentToTolerance(next),
-                                                    }),
-                                            )
-                                        }
-                                    />
-                                    <Text size="2" color="gray">
-                                        %
-                                    </Text>
-                                </Flex>
-                            </AppField>
-                            <Text size="1" color="gray">
-                                {tAny("clip_channel_import_tolerance_hint")}
-                            </Text>
-
-                            <AppField label={tAny("clip_channel_import_window_sec")}>
-                                <TextField.Root
-                                    type="number"
-                                    min={0.05}
-                                    max={5}
-                                    step={0.05}
-                                    style={{ width: 120 }}
-                                    value={String(draft.windowSec)}
-                                    onChange={(event) =>
-                                        patch({ windowSec: Number(event.target.value) })
-                                    }
-                                    onWheel={(event) =>
-                                        stepNumber(
-                                            event,
-                                            draft.windowSec,
-                                            0.05,
-                                            0.01,
-                                            0.05,
-                                            5,
-                                            (next) => patch({ windowSec: next }),
-                                        )
-                                    }
-                                />
-                            </AppField>
-
-                            <AppField label={tAny("clip_channel_import_window_count")}>
-                                <TextField.Root
-                                    type="number"
+                        <AppField label={tAny("clip_channel_import_tolerance")}>
+                            <Flex align="center" gap="2">
+                                <AppNumberField
+                                    value={toleranceToPercent(draft.tolerance)}
+                                    unit="percentFine"
                                     min={0}
-                                    max={256}
-                                    step={1}
-                                    style={{ width: 120 }}
-                                    value={String(draft.windowCount)}
-                                    onChange={(event) =>
-                                        patch({ windowCount: Number(event.target.value) })
-                                    }
-                                    onWheel={(event) =>
-                                        stepNumber(event, draft.windowCount, 1, 1, 0, 256, (next) =>
-                                            patch({ windowCount: next }),
-                                        )
+                                    max={TOLERANCE_PERCENT_MAX}
+                                    width={120}
+                                    suffix="%"
+                                    ariaLabel={tAny("clip_channel_import_tolerance")}
+                                    onCommit={(next) =>
+                                        patch({ tolerance: percentToTolerance(next) })
                                     }
                                 />
-                            </AppField>
-                            <Text size="1" color="gray">
-                                {tAny("clip_channel_import_window_hint")}
-                            </Text>
-                        </>
-                    )}
+                            </Flex>
+                        </AppField>
+                        <Text size="1" color="gray">
+                            {tAny("clip_channel_import_tolerance_hint")}
+                        </Text>
 
-                    {notice && (
-                        <Text size="1" color="green">
-                            {notice}
+                        <AppField label={tAny("clip_channel_import_window_sec")}>
+                            <AppNumberField
+                                value={draft.windowSec}
+                                unit="seconds"
+                                min={0.05}
+                                max={5}
+                                width={120}
+                                ariaLabel={tAny("clip_channel_import_window_sec")}
+                                onCommit={(next) => patch({ windowSec: next })}
+                            />
+                        </AppField>
+
+                        <AppField label={tAny("clip_channel_import_window_count")}>
+                            <AppNumberField
+                                value={draft.windowCount}
+                                unit="integer"
+                                min={0}
+                                max={256}
+                                width={120}
+                                ariaLabel={tAny("clip_channel_import_window_count")}
+                                onCommit={(next) => patch({ windowCount: next })}
+                            />
+                        </AppField>
+                        <Text size="1" color="gray">
+                            {tAny("clip_channel_import_window_hint")}
                         </Text>
-                    )}
-                    {errorText && (
-                        <Text size="1" color="red">
-                            {errorText}
-                        </Text>
-                    )}
-                </AppForm>
-            </div>
+                    </>
+                )}
+
+                {notice && (
+                    <Text size="1" color="green">
+                        {notice}
+                    </Text>
+                )}
+                {errorText && (
+                    <Text size="1" color="red">
+                        {errorText}
+                    </Text>
+                )}
+            </AppForm>
         </AppDialog>
     );
 }

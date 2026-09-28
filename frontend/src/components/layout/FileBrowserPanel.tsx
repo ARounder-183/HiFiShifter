@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Flex, Text, IconButton, Select, Slider, TextField, ScrollArea } from "@radix-ui/themes";
+import { Flex, Text, IconButton, TextField, ScrollArea } from "@radix-ui/themes";
 import {
     Cross2Icon,
     FileIcon,
@@ -27,7 +27,7 @@ import { audioPreview } from "../../features/fileBrowser/audioPreview";
 import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
 import { PanelToolbar, PanelToolbarButton } from "./shared/PanelToolbar";
 import { fileBrowserApi, type FileEntry } from "../../services/api/fileBrowser";
-import { applySelectWheelChange } from "../../utils/selectWheel";
+import { AppSelect, AppSlider, AppSliderReadout } from "../../ui";
 import { isPrimaryModifierDown } from "../../utils/platform";
 
 /** 支持的音频与视频媒体扩展名（视频按音轨导入） */
@@ -100,8 +100,6 @@ const PROJECT_EXTENSIONS = new Set([
     "vshp",
     "vsp",
 ]);
-
-const SORT_MODE_OPTIONS: SortMode[] = ["name", "date", "size"];
 
 function isAudioFile(entry: FileEntry): boolean {
     return !entry.isDir && !!entry.extension && AUDIO_EXTENSIONS.has(entry.extension);
@@ -739,28 +737,17 @@ export const FileBrowserPanel: React.FC = () => {
                     >
                         <AudioIcon />
                     </IconButton>
-                    <Select.Root
+                    <AppSelect
+                        fullWidth={false}
+                        className="flex-1"
                         value={fb.sortMode}
-                        size="1"
                         onValueChange={(v) => dispatch(setSortMode(v as SortMode))}
-                    >
-                        <Select.Trigger
-                            style={{ fontSize: 11, height: 22, flex: 1 }}
-                            onWheel={(event) => {
-                                applySelectWheelChange({
-                                    event,
-                                    currentValue: fb.sortMode,
-                                    options: SORT_MODE_OPTIONS,
-                                    onChange: (next) => dispatch(setSortMode(next as SortMode)),
-                                });
-                            }}
-                        />
-                        <Select.Content>
-                            <Select.Item value="name">{tAny("fb_sort_name")}</Select.Item>
-                            <Select.Item value="date">{tAny("fb_sort_date")}</Select.Item>
-                            <Select.Item value="size">{tAny("fb_sort_size")}</Select.Item>
-                        </Select.Content>
-                    </Select.Root>
+                        options={[
+                            { value: "name", label: tAny("fb_sort_name") },
+                            { value: "date", label: tAny("fb_sort_date") },
+                            { value: "size", label: tAny("fb_sort_size") },
+                        ]}
+                    />
                 </Flex>
 
                 {hasRegexError && (
@@ -846,20 +833,17 @@ export const FileBrowserPanel: React.FC = () => {
             {/* 底部音量滑块 */}
             <Flex align="center" gap="2" className="px-2 py-1.5 border-t border-qt-border shrink-0">
                 <SpeakerLoudIcon width="14" height="14" className="text-qt-text-muted shrink-0" />
-                <Slider
-                    size="1"
+                <AppSlider
+                    value={Math.round(fb.previewVolume * 100)}
+                    unit="percent"
                     min={0}
                     max={100}
-                    step={1}
-                    value={[Math.round(fb.previewVolume * 100)]}
-                    onValueChange={(values: number[]) => {
-                        dispatch(setPreviewVolume(values[0] / 100));
+                    ariaLabel={tAny("fb_preview_volume")}
+                    onChange={(next) => {
+                        dispatch(setPreviewVolume(next / 100));
                     }}
-                    className="flex-1"
                 />
-                <Text size="1" color="gray" className="w-[32px] text-right shrink-0">
-                    {Math.round(fb.previewVolume * 100)}%
-                </Text>
+                <AppSliderReadout>{Math.round(fb.previewVolume * 100)}%</AppSliderReadout>
             </Flex>
 
             {/* 拖拽 ghost 元素 */}

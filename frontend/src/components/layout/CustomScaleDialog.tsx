@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Flex, Select, Text, TextField } from "@radix-ui/themes";
+import { Button, Flex, Text, TextField } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -17,8 +17,8 @@ import {
     sanitizeCustomScalePreset,
 } from "../../utils/customScales";
 import { SCALE_KEYS, SCALE_LABELS, resolveScaleNotes } from "../../utils/musicalScales";
-import { applySelectWheelChange } from "../../utils/selectWheel";
 import { getSelectedCustomScaleId } from "./customScaleDialogLogic";
+import { AppSelect } from "../../ui";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm } from "../../ui/Field";
 
@@ -163,47 +163,23 @@ export function CustomScaleDialog({ open, onOpenChange }: Props) {
         >
             <AppForm>
                 <AppField label={tAny("custom_scale_template")}>
-                    <Select.Root value={templateValue} onValueChange={applyTemplate} size="2">
-                        <Select.Trigger
-                            onWheel={(event) => {
-                                applySelectWheelChange({
-                                    event,
-                                    currentValue: templateValue,
-                                    options: [
-                                        ...SCALE_KEYS.map((k) => `${BUILTIN_TEMPLATE_PREFIX}${k}`),
-                                        ...customPresetOptions.map(
-                                            (preset) => `${CUSTOM_TEMPLATE_PREFIX}${preset.id}`,
-                                        ),
-                                    ],
-                                    onChange: applyTemplate,
-                                });
-                            }}
-                        />
-                        <Select.Content>
-                            <Select.Group>
-                                {SCALE_KEYS.map((k) => (
-                                    <Select.Item key={k} value={`${BUILTIN_TEMPLATE_PREFIX}${k}`}>
-                                        {SCALE_LABELS[k]}
-                                    </Select.Item>
-                                ))}
-                            </Select.Group>
-                            {customPresetOptions.length > 0 ? (
-                                <>
-                                    <Select.Separator />
-                                    <Select.Group>
-                                        {customPresetOptions.map((preset) => (
-                                            <Select.Item
-                                                key={preset.id}
-                                                value={`${CUSTOM_TEMPLATE_PREFIX}${preset.id}`}
-                                            >
-                                                {`${preset.name} (${formatScaleNotes(preset.notes)})`}
-                                            </Select.Item>
-                                        ))}
-                                    </Select.Group>
-                                </>
-                            ) : null}
-                        </Select.Content>
-                    </Select.Root>
+                    <AppSelect
+                        value={templateValue}
+                        onValueChange={applyTemplate}
+                        options={[
+                            ...SCALE_KEYS.map((k) => ({
+                                value: `${BUILTIN_TEMPLATE_PREFIX}${k}`,
+                                label: SCALE_LABELS[k],
+                            })),
+                            ...(customPresetOptions.length > 0
+                                ? [{ separator: true as const }]
+                                : []),
+                            ...customPresetOptions.map((preset) => ({
+                                value: `${CUSTOM_TEMPLATE_PREFIX}${preset.id}`,
+                                label: `${preset.name} (${formatScaleNotes(preset.notes)})`,
+                            })),
+                        ]}
+                    />
                 </AppField>
 
                 <AppField label={tAny("custom_scale_name")}>

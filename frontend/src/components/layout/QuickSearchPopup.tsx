@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Text, Select, IconButton } from "@radix-ui/themes";
+import { Text, IconButton } from "@radix-ui/themes";
 import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
@@ -23,7 +23,7 @@ import {
     QUICK_SEARCH_POPUP_HEIGHT,
     QUICK_SEARCH_POPUP_WIDTH,
 } from "./quickSearchPosition";
-import { applySelectWheelChange } from "../../utils/selectWheel";
+import { AppSelect } from "../../ui";
 import { useShortcutSuppression } from "../../ui/shortcutScope";
 
 /** 支持的音频与视频媒体扩展名（视频按音轨导入） */
@@ -67,7 +67,6 @@ const AUDIO_EXTENSIONS = new Set([
     "rm",
     "rmvb",
 ]);
-const SORT_MODE_OPTIONS = ["name", "date", "size"] as const;
 
 function isAudioFile(entry: FileEntry): boolean {
     return !entry.isDir && !!entry.extension && AUDIO_EXTENSIONS.has(entry.extension);
@@ -446,43 +445,19 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         .*
                     </IconButton>
                     {/* 排序 */}
-                    <Select.Root
+                    <AppSelect
+                        fullWidth={false}
                         value={sortMode}
-                        size="1"
                         onValueChange={(v) => {
                             setSortMode(v as "name" | "date" | "size");
+                            focusSearchInput();
                         }}
-                    >
-                        <Select.Trigger
-                            style={{
-                                fontSize: 10,
-                                height: 20,
-                                minWidth: 52,
-                                flexShrink: 0,
-                            }}
-                            onWheel={(event) => {
-                                applySelectWheelChange({
-                                    event,
-                                    currentValue: sortMode,
-                                    options: SORT_MODE_OPTIONS,
-                                    onChange: (next) => {
-                                        setSortMode(next as "name" | "date" | "size");
-                                        focusSearchInput();
-                                    },
-                                });
-                            }}
-                        />
-                        <Select.Content
-                            onCloseAutoFocus={(event) => {
-                                event.preventDefault();
-                                focusSearchInput();
-                            }}
-                        >
-                            <Select.Item value="name">{tAny("fb_sort_name")}</Select.Item>
-                            <Select.Item value="date">{tAny("fb_sort_date")}</Select.Item>
-                            <Select.Item value="size">{tAny("fb_sort_size")}</Select.Item>
-                        </Select.Content>
-                    </Select.Root>
+                        options={[
+                            { value: "name", label: tAny("fb_sort_name") },
+                            { value: "date", label: tAny("fb_sort_date") },
+                            { value: "size", label: tAny("fb_sort_size") },
+                        ]}
+                    />
                     {loading && (
                         <span className="text-[10px] text-qt-text-muted shrink-0">...</span>
                     )}

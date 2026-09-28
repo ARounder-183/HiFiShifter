@@ -1128,6 +1128,7 @@ export const zhCN = {
         "延伸重叠会分别向后、向前延长前后两个音频块 X 秒，形成 2X 秒的重叠区域；延伸范围会被钳制在音频块原素材的实际长度范围内。",
     snap: "吸附",
     snap_grid_settings_title: "吸附/网格设置...",
+    snap_grid_settings_desc: "设置音频块吸附到网格、选择区标记与光标的方式。",
     snap_section_grid: "网格",
     snap_grid_show_lines: "显示网格线",
     snap_grid_spacing: "网格间距",

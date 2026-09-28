@@ -13,6 +13,7 @@ import { useI18n } from "../../i18n/I18nProvider";
 import { projectApi, type AutoBackupSettings } from "../../services/api/project";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm } from "../../ui/Field";
+import { AppNumberField } from "../../ui";
 
 interface AutoBackupDialogProps {
     open: boolean;
@@ -155,25 +156,21 @@ export function AutoBackupDialog({
                 </label>
 
                 <AppField label={tAny("auto_backup_interval_sec")}>
-                    <Flex align="center" gap="2">
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            min={1}
-                            step={1}
-                            value={String(draft.timedBackupIntervalSec)}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    timedBackupIntervalSec: Number(event.target.value),
-                                }))
-                            }
-                            style={{ width: 180 }}
-                        />
-                        <Text size="1" color="gray">
-                            sec
-                        </Text>
-                    </Flex>
+                    <AppNumberField
+                        value={draft.timedBackupIntervalSec}
+                        unit="integer"
+                        min={1}
+                        max={86_400}
+                        width={180}
+                        suffix="sec"
+                        ariaLabel={tAny("auto_backup_interval_sec")}
+                        onCommit={(timedBackupIntervalSec) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                timedBackupIntervalSec,
+                            }))
+                        }
+                    />
                 </AppField>
 
                 <AppField label={tAny("auto_backup_path_template")}>

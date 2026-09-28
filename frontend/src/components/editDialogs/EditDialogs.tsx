@@ -1,12 +1,10 @@
 import { useState, useEffect, useMemo } from "react";
-import { Flex, Text, TextField, Select } from "@radix-ui/themes";
+import { Flex } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { ScaleKey } from "../../utils/musicalScales";
 import { useAppSelector } from "../../app/hooks";
-import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
-import { applySelectWheelChange } from "../../utils/selectWheel";
-import { useWheelScrollGuard } from "../../utils/useWheelScrollGuard";
 import { buildScaleSelectGroups } from "../../utils/scaleSelection";
+import { AppNumberField, AppSelect, AppSlider, AppSliderReadout } from "../../ui";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm } from "../../ui/Field";
 
@@ -27,9 +25,6 @@ export function TransposeCentsDialog({
     const tAny = t as (key: string) => string;
     const [cents, setCents] = useState("0");
     const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
-    const paramFineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
-    );
 
     useEffect(() => {
         // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
@@ -60,38 +55,28 @@ export function TransposeCentsDialog({
         >
             <AppForm>
                 <AppField label={tAny("dlg_cents")}>
-                    <TextField.Root
-                        size="2"
-                        type="number"
-                        value={cents}
-                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                            setCents(e.target.value)
-                        }
+                    <AppNumberField
+                        value={Number(cents)}
+                        unit="cents"
+                        min={-1200}
+                        max={1200}
+                        ariaLabel={tAny("dlg_cents")}
+                        onCommit={(next) => setCents(String(next))}
                     />
                 </AppField>
                 <AppField label={tAny("edge_smoothness")}>
                     <Flex align="center" gap="2">
-                        <input
-                            type="range"
+                        <AppSlider
+                            value={Math.round(Number(smoothness) || 0)}
+                            unit="percent"
                             min={0}
                             max={100}
-                            step={1}
-                            value={Math.round(Number(smoothness) || 0)}
-                            onWheel={(e) => {
-                                e.preventDefault();
-                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                const step = fine ? 1 : 5;
-                                const dir = e.deltaY < 0 ? 1 : -1;
-                                const current = Math.round(Number(smoothness) || 0);
-                                const next = Math.max(0, Math.min(100, current + dir * step));
-                                setSmoothness(String(next));
-                            }}
-                            onChange={(e) => setSmoothness(e.currentTarget.value)}
-                            style={{ flex: 1 }}
+                            ariaLabel={tAny("edge_smoothness")}
+                            onChange={(next) => setSmoothness(String(next))}
                         />
-                        <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
+                        <AppSliderReadout>
                             {Math.round(Number(smoothness) || 0)}%
-                        </Text>
+                        </AppSliderReadout>
                     </Flex>
                 </AppField>
             </AppForm>
@@ -125,9 +110,6 @@ export function TransposeDegreesDialog({
         defaultUseProjectScale ? "__project__" : defaultScale,
     );
     const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
-    const paramFineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
-    );
     const customScalePresets = useAppSelector((state) => state.session.customScalePresets);
     const scaleSelectGroups = useMemo(
         () =>
@@ -171,69 +153,43 @@ export function TransposeDegreesDialog({
         >
             <AppForm>
                 <AppField label={tAny("transpose_degrees_amount")}>
-                    <TextField.Root
-                        size="2"
-                        type="number"
-                        value={degrees}
-                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                            setDegrees(e.target.value)
-                        }
+                    <AppNumberField
+                        value={Number(degrees)}
+                        unit="integer"
+                        min={-100}
+                        max={100}
+                        ariaLabel={tAny("transpose_degrees_amount")}
+                        onCommit={(next) => setDegrees(String(next))}
                     />
                 </AppField>
                 <AppField label={tAny("base_scale")}>
-                    <Select.Root value={scaleValue} size="2" onValueChange={setScaleValue}>
-                        <Select.Trigger
-                            onWheel={(event) => {
-                                applySelectWheelChange({
-                                    event,
-                                    currentValue: scaleValue,
-                                    options: scaleSelectGroups.wheelOptions,
-                                    onChange: setScaleValue,
-                                });
-                            }}
-                        />
-                        <Select.Content>
-                            <Select.Item value={scaleSelectGroups.projectOption.value}>
-                                {scaleSelectGroups.projectOption.label}
-                            </Select.Item>
-                            <Select.Separator />
-                            {scaleSelectGroups.builtinOptions.map((option) => (
-                                <Select.Item key={option.value} value={option.value}>
-                                    {option.label}
-                                </Select.Item>
-                            ))}
-                            {scaleSelectGroups.customOptions.length > 0 && <Select.Separator />}
-                            {scaleSelectGroups.customOptions.map((option) => (
-                                <Select.Item key={option.value} value={option.value}>
-                                    {option.label}
-                                </Select.Item>
-                            ))}
-                        </Select.Content>
-                    </Select.Root>
+                    <AppSelect
+                        value={scaleValue}
+                        onValueChange={setScaleValue}
+                        options={[
+                            scaleSelectGroups.projectOption,
+                            { separator: true },
+                            ...scaleSelectGroups.builtinOptions,
+                            ...(scaleSelectGroups.customOptions.length > 0
+                                ? [{ separator: true } as const]
+                                : []),
+                            ...scaleSelectGroups.customOptions,
+                        ]}
+                    />
                 </AppField>
                 <AppField label={tAny("edge_smoothness")}>
                     <Flex align="center" gap="2">
-                        <input
-                            type="range"
+                        <AppSlider
+                            value={Math.round(Number(smoothness) || 0)}
+                            unit="percent"
                             min={0}
                             max={100}
-                            step={1}
-                            value={Math.round(Number(smoothness) || 0)}
-                            onWheel={(e) => {
-                                e.preventDefault();
-                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                const step = fine ? 1 : 5;
-                                const dir = e.deltaY < 0 ? 1 : -1;
-                                const current = Math.round(Number(smoothness) || 0);
-                                const next = Math.max(0, Math.min(100, current + dir * step));
-                                setSmoothness(String(next));
-                            }}
-                            onChange={(e) => setSmoothness(e.currentTarget.value)}
-                            style={{ flex: 1 }}
+                            ariaLabel={tAny("edge_smoothness")}
+                            onChange={(next) => setSmoothness(String(next))}
                         />
-                        <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
+                        <AppSliderReadout>
                             {Math.round(Number(smoothness) || 0)}%
-                        </Text>
+                        </AppSliderReadout>
                     </Flex>
                 </AppField>
             </AppForm>
@@ -264,9 +220,6 @@ export function SetPitchDialog({
     const tAny = t as (key: string) => string;
     const [note, setNote] = useState(String(defaultValue));
     const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
-    const paramFineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
-    );
 
     useEffect(() => {
         if (open) {
@@ -299,38 +252,28 @@ export function SetPitchDialog({
         >
             <AppForm>
                 <AppField label={valueLabelText ?? tAny("dlg_midi_note")}>
-                    <TextField.Root
-                        size="2"
-                        type="number"
-                        value={note}
-                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                            setNote(e.target.value)
-                        }
+                    <AppNumberField
+                        value={Number(note)}
+                        unit="semitone"
+                        min={-1000}
+                        max={1000}
+                        ariaLabel={valueLabelText ?? tAny("dlg_midi_note")}
+                        onCommit={(next) => setNote(String(next))}
                     />
                 </AppField>
                 <AppField label={tAny("edge_smoothness")}>
                     <Flex align="center" gap="2">
-                        <input
-                            type="range"
+                        <AppSlider
+                            value={Math.round(Number(smoothness) || 0)}
+                            unit="percent"
                             min={0}
                             max={100}
-                            step={1}
-                            value={Math.round(Number(smoothness) || 0)}
-                            onWheel={(e) => {
-                                e.preventDefault();
-                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                const step = fine ? 1 : 5;
-                                const dir = e.deltaY < 0 ? 1 : -1;
-                                const current = Math.round(Number(smoothness) || 0);
-                                const next = Math.max(0, Math.min(100, current + dir * step));
-                                setSmoothness(String(next));
-                            }}
-                            onChange={(e) => setSmoothness(e.currentTarget.value)}
-                            style={{ flex: 1 }}
+                            ariaLabel={tAny("edge_smoothness")}
+                            onChange={(next) => setSmoothness(String(next))}
                         />
-                        <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
+                        <AppSliderReadout>
                             {Math.round(Number(smoothness) || 0)}%
-                        </Text>
+                        </AppSliderReadout>
                     </Flex>
                 </AppField>
             </AppForm>
@@ -348,9 +291,6 @@ export function AverageDialog({ open, onOpenChange, onConfirm }: AverageProps) {
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const [strength, setStrength] = useState("100");
-    const paramFineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
-    );
 
     return (
         <AppDialog
@@ -374,29 +314,17 @@ export function AverageDialog({ open, onOpenChange, onConfirm }: AverageProps) {
             <AppForm>
                 <AppField label={tAny("dlg_average_strength")}>
                     <Flex align="center" gap="2">
-                        <input
-                            type="range"
+                        <AppSlider
+                            value={Math.round(Number(strength) || 0)}
+                            unit="percent"
                             min={0}
                             max={100}
-                            step={1}
-                            value={Math.round(Number(strength) || 0)}
-                            onWheel={(e) => {
-                                e.preventDefault();
-                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                const step = fine ? 1 : 5;
-                                const dir = e.deltaY < 0 ? 1 : -1;
-                                const current = Math.round(Number(strength) || 0);
-                                const next = Math.max(0, Math.min(100, current + dir * step));
-                                setStrength(String(next));
-                            }}
-                            onChange={(e) => {
-                                setStrength(e.currentTarget.value);
-                            }}
-                            style={{ flex: 1 }}
+                            ariaLabel={tAny("dlg_average_strength")}
+                            onChange={(next) => setStrength(String(next))}
                         />
-                        <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
+                        <AppSliderReadout>
                             {Math.round(Number(strength) || 0)}%
-                        </Text>
+                        </AppSliderReadout>
                     </Flex>
                 </AppField>
             </AppForm>
@@ -420,9 +348,6 @@ export function SmoothDialog({
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const [strength, setStrength] = useState(50);
-    const paramFineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
-    );
 
     useEffect(() => {
         // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
@@ -451,31 +376,15 @@ export function SmoothDialog({
             <AppForm>
                 <AppField label={tAny("dlg_smoothness")}>
                     <Flex align="center" gap="2">
-                        <input
-                            type="range"
+                        <AppSlider
+                            value={Math.round(strength)}
+                            unit="percent"
                             min={0}
                             max={100}
-                            step={1}
-                            value={Math.round(strength)}
-                            onWheel={(e) => {
-                                e.preventDefault();
-                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                const step = fine ? 1 : 5;
-                                const dir = e.deltaY < 0 ? 1 : -1;
-                                const next = Math.max(
-                                    0,
-                                    Math.min(100, Math.round(strength) + dir * step),
-                                );
-                                setStrength(next);
-                            }}
-                            onChange={(e) => {
-                                setStrength(Number(e.currentTarget.value) || 0);
-                            }}
-                            style={{ flex: 1 }}
+                            ariaLabel={tAny("dlg_smoothness")}
+                            onChange={(next) => setStrength(next)}
                         />
-                        <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
-                            {Math.round(strength)}%
-                        </Text>
+                        <AppSliderReadout>{Math.round(strength)}%</AppSliderReadout>
                     </Flex>
                 </AppField>
             </AppForm>
@@ -568,53 +477,53 @@ export function VibratoDialog({
         >
             <AppForm>
                 <AppField label={isPitch ? tAny("dlg_amplitude_cents") : tAny("dlg_amplitude")}>
-                    <TextField.Root
-                        size="2"
-                        type="number"
-                        value={amplitude}
-                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                            setAmplitude(e.target.value)
-                        }
+                    <AppNumberField
+                        value={Number(amplitude)}
+                        unit={isPitch ? "cents" : "integer"}
+                        min={isPitch ? -1200 : -1000}
+                        max={isPitch ? 1200 : 1000}
+                        ariaLabel={isPitch ? tAny("dlg_amplitude_cents") : tAny("dlg_amplitude")}
+                        onCommit={(next) => setAmplitude(String(next))}
                     />
                 </AppField>
                 <AppField label={tAny("dlg_rate_hz")}>
-                    <TextField.Root
-                        size="2"
-                        type="number"
-                        value={rate}
-                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                            setRate(e.target.value)
-                        }
+                    <AppNumberField
+                        value={Number(rate)}
+                        unit="rate"
+                        min={0}
+                        max={100}
+                        ariaLabel={tAny("dlg_rate_hz")}
+                        onCommit={(next) => setRate(String(next))}
                     />
                 </AppField>
                 <AppField label={tAny("dlg_attack_ms")}>
-                    <TextField.Root
-                        size="2"
-                        type="number"
-                        value={attack}
-                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                            setAttack(e.target.value)
-                        }
+                    <AppNumberField
+                        value={Number(attack)}
+                        unit="milliseconds"
+                        min={0}
+                        max={10000}
+                        ariaLabel={tAny("dlg_attack_ms")}
+                        onCommit={(next) => setAttack(String(next))}
                     />
                 </AppField>
                 <AppField label={tAny("dlg_release_ms")}>
-                    <TextField.Root
-                        size="2"
-                        type="number"
-                        value={release}
-                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                            setRelease(e.target.value)
-                        }
+                    <AppNumberField
+                        value={Number(release)}
+                        unit="milliseconds"
+                        min={0}
+                        max={10000}
+                        ariaLabel={tAny("dlg_release_ms")}
+                        onCommit={(next) => setRelease(String(next))}
                     />
                 </AppField>
                 <AppField label={tAny("dlg_phase_deg")}>
-                    <TextField.Root
-                        size="2"
-                        type="number"
-                        value={phase}
-                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                            setPhase(e.target.value)
-                        }
+                    <AppNumberField
+                        value={Number(phase)}
+                        unit="integer"
+                        min={0}
+                        max={360}
+                        ariaLabel={tAny("dlg_phase_deg")}
+                        onCommit={(next) => setPhase(String(next))}
                     />
                 </AppField>
             </AppForm>
@@ -655,8 +564,6 @@ export function QuantizeDialog({
     defaultSmoothness = 0,
     onConfirm,
 }: QuantizeProps) {
-    // 滚轮守卫：滑块滚轮步进时阻止祖先容器滚动（见 useWheelScrollGuard）。
-    const quantizeWheelGuard = useWheelScrollGuard<HTMLDivElement>('input[type="range"]');
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const toleranceDefault = defaultTolerance ?? defaultToleranceCents;
@@ -676,9 +583,6 @@ export function QuantizeDialog({
     const [toleranceCents, setToleranceCents] = useState<string>(String(toleranceDefault));
     const [quantizeUnit, setQuantizeUnit] = useState<string>(String(defaultQuantizeUnit));
     const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
-    const paramFineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
-    );
 
     useEffect(() => {
         if (open) {
@@ -724,127 +628,78 @@ export function QuantizeDialog({
                 },
             ]}
         >
-            <div ref={quantizeWheelGuard}>
-                <AppForm>
-                    {!valueMode && (
-                        <AppField label={tAny("quantize_unit")}>
-                            <Select.Root
-                                value={unit}
-                                size="2"
-                                onValueChange={(v) => setUnit(v as "semitone" | "scale")}
-                            >
-                                <Select.Trigger
-                                    onWheel={(event) => {
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue: unit,
-                                            options: ["semitone", "scale"],
-                                            onChange: (next) =>
-                                                setUnit(next as "semitone" | "scale"),
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    <Select.Item value="semitone">
-                                        {tAny("quantize_semitone")}
-                                    </Select.Item>
-                                    <Select.Item value="scale">
-                                        {tAny("quantize_scale")}
-                                    </Select.Item>
-                                </Select.Content>
-                            </Select.Root>
-                        </AppField>
-                    )}
-                    {!valueMode && unit === "scale" && (
-                        <AppField label={tAny("base_scale")}>
-                            <Select.Root value={scaleValue} size="2" onValueChange={setScaleValue}>
-                                <Select.Trigger
-                                    onWheel={(event) => {
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue: scaleValue,
-                                            options: scaleSelectGroups.wheelOptions,
-                                            onChange: setScaleValue,
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    <Select.Item value={scaleSelectGroups.projectOption.value}>
-                                        {scaleSelectGroups.projectOption.label}
-                                    </Select.Item>
-                                    <Select.Separator />
-                                    {scaleSelectGroups.builtinOptions.map((option) => (
-                                        <Select.Item key={option.value} value={option.value}>
-                                            {option.label}
-                                        </Select.Item>
-                                    ))}
-                                    {scaleSelectGroups.customOptions.length > 0 && (
-                                        <Select.Separator />
-                                    )}
-                                    {scaleSelectGroups.customOptions.map((option) => (
-                                        <Select.Item key={option.value} value={option.value}>
-                                            {option.label}
-                                        </Select.Item>
-                                    ))}
-                                </Select.Content>
-                            </Select.Root>
-                        </AppField>
-                    )}
-                    {valueMode && (
-                        <AppField label={tAny("quantize_unit")}>
-                            <TextField.Root
-                                size="2"
-                                type="number"
-                                value={quantizeUnit}
-                                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                    setQuantizeUnit(e.target.value)
-                                }
-                            />
-                        </AppField>
-                    )}
-                    <AppField
-                        label={
-                            valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")
-                        }
-                    >
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={toleranceCents}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setToleranceCents(e.target.value)
-                            }
+            <AppForm>
+                {!valueMode && (
+                    <AppField label={tAny("quantize_unit")}>
+                        <AppSelect
+                            value={unit}
+                            onValueChange={(v) => setUnit(v as "semitone" | "scale")}
+                            options={[
+                                { value: "semitone", label: tAny("quantize_semitone") },
+                                { value: "scale", label: tAny("quantize_scale") },
+                            ]}
                         />
                     </AppField>
-                    <AppField label={tAny("edge_smoothness")}>
-                        <Flex align="center" gap="2">
-                            <input
-                                type="range"
-                                min={0}
-                                max={100}
-                                step={1}
-                                value={Math.round(Number(smoothness) || 0)}
-                                onWheel={(e) => {
-                                    // 阻止默认滚动由 Dialog.Content 上的原生非被动
-                                    // 守卫完成（React onWheel 的 preventDefault 是
-                                    // no-op，见 useWheelScrollGuard）。
-                                    const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                    const step = fine ? 1 : 5;
-                                    const dir = e.deltaY < 0 ? 1 : -1;
-                                    const current = Math.round(Number(smoothness) || 0);
-                                    const next = Math.max(0, Math.min(100, current + dir * step));
-                                    setSmoothness(String(next));
-                                }}
-                                onChange={(e) => setSmoothness(e.currentTarget.value)}
-                                style={{ flex: 1 }}
-                            />
-                            <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
-                                {Math.round(Number(smoothness) || 0)}%
-                            </Text>
-                        </Flex>
+                )}
+                {!valueMode && unit === "scale" && (
+                    <AppField label={tAny("base_scale")}>
+                        <AppSelect
+                            value={scaleValue}
+                            onValueChange={setScaleValue}
+                            options={[
+                                scaleSelectGroups.projectOption,
+                                { separator: true },
+                                ...scaleSelectGroups.builtinOptions,
+                                ...(scaleSelectGroups.customOptions.length > 0
+                                    ? [{ separator: true } as const]
+                                    : []),
+                                ...scaleSelectGroups.customOptions,
+                            ]}
+                        />
                     </AppField>
-                </AppForm>
-            </div>
+                )}
+                {valueMode && (
+                    <AppField label={tAny("quantize_unit")}>
+                        <AppNumberField
+                            value={Number(quantizeUnit)}
+                            unit="integer"
+                            min={-1000}
+                            max={1000}
+                            ariaLabel={tAny("quantize_unit")}
+                            onCommit={(next) => setQuantizeUnit(String(next))}
+                        />
+                    </AppField>
+                )}
+                <AppField
+                    label={valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")}
+                >
+                    <AppNumberField
+                        value={Number(toleranceCents)}
+                        unit="cents"
+                        min={-1200}
+                        max={1200}
+                        ariaLabel={
+                            valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")
+                        }
+                        onCommit={(next) => setToleranceCents(String(next))}
+                    />
+                </AppField>
+                <AppField label={tAny("edge_smoothness")}>
+                    <Flex align="center" gap="2">
+                        <AppSlider
+                            value={Math.round(Number(smoothness) || 0)}
+                            unit="percent"
+                            min={0}
+                            max={100}
+                            ariaLabel={tAny("edge_smoothness")}
+                            onChange={(next) => setSmoothness(String(next))}
+                        />
+                        <AppSliderReadout>
+                            {Math.round(Number(smoothness) || 0)}%
+                        </AppSliderReadout>
+                    </Flex>
+                </AppField>
+            </AppForm>
         </AppDialog>
     );
 }
@@ -882,8 +737,6 @@ export function MeanQuantizeDialog({
     defaultSmoothness = 0,
     onConfirm,
 }: MeanQuantizeProps) {
-    // 滚轮守卫：滑块滚轮步进时阻止祖先容器滚动（见 useWheelScrollGuard）。
-    const meanQuantizeWheelGuard = useWheelScrollGuard<HTMLDivElement>('input[type="range"]');
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const toleranceDefault = defaultTolerance ?? defaultToleranceCents;
@@ -903,9 +756,6 @@ export function MeanQuantizeDialog({
     const [toleranceCents, setToleranceCents] = useState<string>(String(toleranceDefault));
     const [quantizeUnit, setQuantizeUnit] = useState<string>(String(defaultQuantizeUnit));
     const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
-    const paramFineAdjustKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.paramFineAdjust"),
-    );
 
     useEffect(() => {
         if (open) {
@@ -951,127 +801,78 @@ export function MeanQuantizeDialog({
                 },
             ]}
         >
-            <div ref={meanQuantizeWheelGuard}>
-                <AppForm>
-                    {!valueMode && (
-                        <AppField label={tAny("quantize_unit")}>
-                            <Select.Root
-                                value={unit}
-                                size="2"
-                                onValueChange={(v) => setUnit(v as "semitone" | "scale")}
-                            >
-                                <Select.Trigger
-                                    onWheel={(event) => {
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue: unit,
-                                            options: ["semitone", "scale"],
-                                            onChange: (next) =>
-                                                setUnit(next as "semitone" | "scale"),
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    <Select.Item value="semitone">
-                                        {tAny("quantize_semitone")}
-                                    </Select.Item>
-                                    <Select.Item value="scale">
-                                        {tAny("quantize_scale")}
-                                    </Select.Item>
-                                </Select.Content>
-                            </Select.Root>
-                        </AppField>
-                    )}
-                    {!valueMode && unit === "scale" && (
-                        <AppField label={tAny("base_scale")}>
-                            <Select.Root value={scaleValue} size="2" onValueChange={setScaleValue}>
-                                <Select.Trigger
-                                    onWheel={(event) => {
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue: scaleValue,
-                                            options: scaleSelectGroups.wheelOptions,
-                                            onChange: setScaleValue,
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    <Select.Item value={scaleSelectGroups.projectOption.value}>
-                                        {scaleSelectGroups.projectOption.label}
-                                    </Select.Item>
-                                    <Select.Separator />
-                                    {scaleSelectGroups.builtinOptions.map((option) => (
-                                        <Select.Item key={option.value} value={option.value}>
-                                            {option.label}
-                                        </Select.Item>
-                                    ))}
-                                    {scaleSelectGroups.customOptions.length > 0 && (
-                                        <Select.Separator />
-                                    )}
-                                    {scaleSelectGroups.customOptions.map((option) => (
-                                        <Select.Item key={option.value} value={option.value}>
-                                            {option.label}
-                                        </Select.Item>
-                                    ))}
-                                </Select.Content>
-                            </Select.Root>
-                        </AppField>
-                    )}
-                    {valueMode && (
-                        <AppField label={tAny("quantize_unit")}>
-                            <TextField.Root
-                                size="2"
-                                type="number"
-                                value={quantizeUnit}
-                                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                    setQuantizeUnit(e.target.value)
-                                }
-                            />
-                        </AppField>
-                    )}
-                    <AppField
-                        label={
-                            valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")
-                        }
-                    >
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={toleranceCents}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setToleranceCents(e.target.value)
-                            }
+            <AppForm>
+                {!valueMode && (
+                    <AppField label={tAny("quantize_unit")}>
+                        <AppSelect
+                            value={unit}
+                            onValueChange={(v) => setUnit(v as "semitone" | "scale")}
+                            options={[
+                                { value: "semitone", label: tAny("quantize_semitone") },
+                                { value: "scale", label: tAny("quantize_scale") },
+                            ]}
                         />
                     </AppField>
-                    <AppField label={tAny("edge_smoothness")}>
-                        <Flex align="center" gap="2">
-                            <input
-                                type="range"
-                                min={0}
-                                max={100}
-                                step={1}
-                                value={Math.round(Number(smoothness) || 0)}
-                                onWheel={(e) => {
-                                    // 阻止默认滚动由 Dialog.Content 上的原生非被动
-                                    // 守卫完成（React onWheel 的 preventDefault 是
-                                    // no-op，见 useWheelScrollGuard）。
-                                    const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                    const step = fine ? 1 : 5;
-                                    const dir = e.deltaY < 0 ? 1 : -1;
-                                    const current = Math.round(Number(smoothness) || 0);
-                                    const next = Math.max(0, Math.min(100, current + dir * step));
-                                    setSmoothness(String(next));
-                                }}
-                                onChange={(e) => setSmoothness(e.currentTarget.value)}
-                                style={{ flex: 1 }}
-                            />
-                            <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
-                                {Math.round(Number(smoothness) || 0)}%
-                            </Text>
-                        </Flex>
+                )}
+                {!valueMode && unit === "scale" && (
+                    <AppField label={tAny("base_scale")}>
+                        <AppSelect
+                            value={scaleValue}
+                            onValueChange={setScaleValue}
+                            options={[
+                                scaleSelectGroups.projectOption,
+                                { separator: true },
+                                ...scaleSelectGroups.builtinOptions,
+                                ...(scaleSelectGroups.customOptions.length > 0
+                                    ? [{ separator: true } as const]
+                                    : []),
+                                ...scaleSelectGroups.customOptions,
+                            ]}
+                        />
                     </AppField>
-                </AppForm>
-            </div>
+                )}
+                {valueMode && (
+                    <AppField label={tAny("quantize_unit")}>
+                        <AppNumberField
+                            value={Number(quantizeUnit)}
+                            unit="integer"
+                            min={-1000}
+                            max={1000}
+                            ariaLabel={tAny("quantize_unit")}
+                            onCommit={(next) => setQuantizeUnit(String(next))}
+                        />
+                    </AppField>
+                )}
+                <AppField
+                    label={valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")}
+                >
+                    <AppNumberField
+                        value={Number(toleranceCents)}
+                        unit="cents"
+                        min={-1200}
+                        max={1200}
+                        ariaLabel={
+                            valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")
+                        }
+                        onCommit={(next) => setToleranceCents(String(next))}
+                    />
+                </AppField>
+                <AppField label={tAny("edge_smoothness")}>
+                    <Flex align="center" gap="2">
+                        <AppSlider
+                            value={Math.round(Number(smoothness) || 0)}
+                            unit="percent"
+                            min={0}
+                            max={100}
+                            ariaLabel={tAny("edge_smoothness")}
+                            onChange={(next) => setSmoothness(String(next))}
+                        />
+                        <AppSliderReadout>
+                            {Math.round(Number(smoothness) || 0)}%
+                        </AppSliderReadout>
+                    </Flex>
+                </AppField>
+            </AppForm>
         </AppDialog>
     );
 }
