@@ -161,4 +161,47 @@ describe("键引用完整性", () => {
             missing.length === 0 ? [] : ["以下动态键展开后不存在：", ...missing].join("\n"),
         ).toEqual([]);
     });
+
+    /*
+     * 调用的**字面量**键必须存在于参考目录。
+     *
+     * 【为什么必须补这一条】`t()` 的 `MessageKey` 类型保护只覆盖字面量调用，
+     * 而快速搜索弹窗当年正是用 `(t as (key: string) => string)("qs_placeholder")`
+     * 显式绕开它，后来那批强转又被换成同样无类型的 `tf()` —— 于是 8 个**根本不存在**
+     * 的键一直在界面上以键名原文显示（`tf` 查不到时原样返回键名）。目录一致性门禁
+     * 只管目录、类型只管 `t` 的字面量，**没有一层在守调用点** —— 本用例就是那一层。
+     *
+     * 【为什么必须剥离注释】`src/ui/*` 的 JSDoc 示例里写着 `t("bitrate")` 这类
+     * 示范键，不剥离会误报 8 处、逼人加无意义的豁免。
+     */
+    test("调用的字面量键必须在参考目录里", () => {
+        const callRe = /\b(?:t|tf|tAny)\("([a-zA-Z0-9_]+)"\)/g;
+        const stripCommentLines = (source: string): string =>
+            source
+                .split("\n")
+                .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+                .join("\n");
+        const offenders: string[] = [];
+        let scanned = 0;
+        for (const file of walk("src")) {
+            if (/\.test\.tsx?$/.test(file)) continue;
+            // 目录自身的键定义处不必检查（那是"键存在"的地方）
+            if (file.startsWith(join("src", "i18n"))) continue;
+            const source = stripCommentLines(readFileSync(file, "utf8"));
+            for (const match of source.matchAll(callRe)) {
+                scanned += 1;
+                if (!CATALOG_KEYS.has(match[1])) offenders.push(`  ${file}: ${match[1]}`);
+            }
+        }
+
+        // 自检：正则必须真的扫到东西，否则"0 处违规"毫无意义（实测约 1500 处）。
+        expect(scanned, "没有扫到字面量键调用，正则或扫描路径已失效").toBeGreaterThan(1000);
+        expect(
+            offenders.length === 0
+                ? []
+                : ["以下调用点使用了目录里不存在的键（界面会原样显示键名）：", ...offenders].join(
+                      "\n",
+                  ),
+        ).toEqual([]);
+    });
 });
