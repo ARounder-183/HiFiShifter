@@ -616,10 +616,8 @@ export const jaJP = {
     status_selecting_output: "出力パスを選択中...",
     status_synthesizing: "合成中...",
     unsaved_changes_title: "未保存の変更",
-    unsaved_changes_switch_desc:
-        "現在のプロジェクトには未保存の変更があります。切り替え前に保存しますか？",
-    unsaved_changes_exit_desc:
-        "現在のプロジェクトには未保存の変更があります。終了前に保存しますか？",
+    unsaved_changes_switch_desc: "切り替え前に保存しますか？",
+    unsaved_changes_exit_desc: "終了前に保存しますか？",
     unsaved_changes_discard: "保存しない",
 
     menu_export_separated: "トラック別オーディオをエクスポート",

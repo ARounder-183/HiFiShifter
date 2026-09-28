@@ -587,8 +587,8 @@ export const zhCN = {
     status_selecting_output: "正在选择输出路径...",
     status_synthesizing: "正在合成...",
     unsaved_changes_title: "未保存更改",
-    unsaved_changes_switch_desc: "当前工程有未保存的更改。切换工程前是否先保存？",
-    unsaved_changes_exit_desc: "当前工程有未保存的更改。关闭应用前是否先保存？",
+    unsaved_changes_switch_desc: "切换工程前是否先保存？",
+    unsaved_changes_exit_desc: "关闭应用前是否先保存？",
     unsaved_changes_discard: "不保存",
 
     menu_export_separated: "导出分轨音频",

@@ -588,8 +588,8 @@ export const zhTW = {
     status_selecting_output: "正在選擇輸出路徑...",
     status_synthesizing: "正在合成...",
     unsaved_changes_title: "未儲存的變更",
-    unsaved_changes_switch_desc: "目前專案有未儲存的變更。切換專案前是否先儲存？",
-    unsaved_changes_exit_desc: "目前專案有未儲存的變更。關閉應用程式前是否先儲存？",
+    unsaved_changes_switch_desc: "切換專案前是否先儲存？",
+    unsaved_changes_exit_desc: "關閉應用程式前是否先儲存？",
     unsaved_changes_discard: "不儲存",
 
     menu_export_separated: "匯出分軌音訊",

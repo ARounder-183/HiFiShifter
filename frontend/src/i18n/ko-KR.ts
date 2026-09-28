@@ -694,10 +694,8 @@ export const koKR = {
     status_selecting_output: "출력 경로 선택 중...",
     status_synthesizing: "합성 중...",
     unsaved_changes_title: "저장되지 않은 변경 사항",
-    unsaved_changes_switch_desc:
-        "현재 프로젝트에 저장되지 않은 변경 사항이 있습니다. 전환하기 전에 저장하시겠습니까?",
-    unsaved_changes_exit_desc:
-        "현재 프로젝트에 저장되지 않은 변경 사항이 있습니다. 종료하기 전에 저장하시겠습니까?",
+    unsaved_changes_switch_desc: "전환하기 전에 저장하시겠습니까?",
+    unsaved_changes_exit_desc: "종료하기 전에 저장하시겠습니까?",
     unsaved_changes_discard: "저장 안 함",
 
     menu_export_separated: "트랙별 오디오 내보내기",

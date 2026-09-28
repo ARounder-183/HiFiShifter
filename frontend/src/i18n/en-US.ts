@@ -749,10 +749,8 @@ export const enUS = {
     status_selecting_output: "Selecting output path...",
     status_synthesizing: "Synthesizing...",
     unsaved_changes_title: "Unsaved Changes",
-    unsaved_changes_switch_desc:
-        "The current project has unsaved changes. Save before switching projects?",
-    unsaved_changes_exit_desc:
-        "The current project has unsaved changes. Save before closing the application?",
+    unsaved_changes_switch_desc: "Save before switching projects?",
+    unsaved_changes_exit_desc: "Save before closing the application?",
     unsaved_changes_discard: "Don't Save",
 
     menu_export_separated: "Export Separated Tracks",
