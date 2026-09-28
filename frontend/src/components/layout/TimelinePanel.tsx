@@ -32,6 +32,7 @@
 import React, { useMemo, Profiler } from "react";
 import { Flex } from "@radix-ui/themes";
 import { AppDialog } from "../../ui/Dialog";
+import { AppContextMenu } from "../../ui/Menu";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { useAppSelector } from "../../app/hooks";
@@ -5950,29 +5951,28 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         />
                     ) : null}
 
-                    {/* 导入模式选择菜单 */}
-                    {importModeMenu && (
-                        <div
-                            className="fixed inset-0 z-qt-fullscreen"
-                            onClick={() => setImportModeMenu(null)}
-                            onContextMenu={(e) => {
-                                e.preventDefault();
-                                setImportModeMenu(null);
-                            }}
-                        >
-                            <div
-                                className="absolute bg-qt-panel border border-qt-border rounded shadow-lg py-1 min-w-[180px]"
-                                style={{
-                                    left: importModeMenu.x,
-                                    top: importModeMenu.y,
-                                }}
-                                onClick={(e) => e.stopPropagation()}
-                            >
-                                <button
-                                    className="w-full text-left px-3 py-1.5 text-qt-md text-qt-text hover:bg-qt-hover"
-                                    onClick={() => {
+                    {/*
+                      导入模式选择菜单 / 工程文件拖放菜单。
+
+                      这两处此前是手写模态（`fixed inset-0` + 绝对定位卡片）：没有 Esc、
+                      没有焦点管理、不抑制全局快捷键，菜单项的悬停/焦点样式也与全应用
+                      其它菜单不同。它们的内容是**扁平项列表**，正好是 `AppContextMenu`
+                      的形态 —— 迁过去即得到位置夹紧、方向键、Home/End、Esc、外部点击
+                      关闭这一整套，且与剪辑右键菜单视觉一致。
+                    */}
+                    {importModeMenu ? (
+                        <AppContextMenu
+                            x={importModeMenu.x}
+                            y={importModeMenu.y}
+                            floating
+                            ariaLabel={t("menu_import_media")}
+                            onClose={() => setImportModeMenu(null)}
+                            items={[
+                                {
+                                    key: "across-time",
+                                    label: t("import_across_time"),
+                                    onSelect: () => {
                                         const m = importModeMenu;
-                                        setImportModeMenu(null);
                                         if (m.audioPaths.length === 1) {
                                             void dispatch(
                                                 importAudioAtPosition({
@@ -5991,15 +5991,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                                 }),
                                             );
                                         }
-                                    }}
-                                >
-                                    {t("import_across_time") || "Import across time (same track)"}
-                                </button>
-                                <button
-                                    className="w-full text-left px-3 py-1.5 text-qt-md text-qt-text hover:bg-qt-hover"
-                                    onClick={() => {
+                                    },
+                                },
+                                {
+                                    key: "across-tracks",
+                                    label: t("import_across_tracks"),
+                                    onSelect: () => {
                                         const m = importModeMenu;
-                                        setImportModeMenu(null);
                                         if (m.audioPaths.length === 1) {
                                             void dispatch(
                                                 importAudioAtPosition({
@@ -6018,15 +6016,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                                 }),
                                             );
                                         }
-                                    }}
-                                >
-                                    {t("import_across_tracks")}
-                                </button>
-                                <button
-                                    className="w-full text-left px-3 py-1.5 text-qt-md text-qt-text hover:bg-qt-hover"
-                                    onClick={() => {
+                                    },
+                                },
+                                {
+                                    key: "as-takes",
+                                    label: t("import_as_takes"),
+                                    onSelect: () => {
                                         const m = importModeMenu;
-                                        setImportModeMenu(null);
                                         void dispatch(
                                             importMultipleAudioAtPosition({
                                                 audioPaths: m.audioPaths,
@@ -6035,59 +6031,42 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                                 startSec: m.startSec,
                                             }),
                                         );
-                                    }}
-                                >
-                                    {t("import_as_takes")}
-                                </button>
-                            </div>
-                        </div>
-                    )}
+                                    },
+                                },
+                            ]}
+                        />
+                    ) : null}
 
-                    {/* 工程文件（hshp/hsp）拖放操作菜单：打开工程 / 导入工程 */}
-                    {projectActionMenu && (
-                        <div
-                            className="fixed inset-0 z-qt-fullscreen"
-                            onClick={() => setProjectActionMenu(null)}
-                            onContextMenu={(e) => {
-                                e.preventDefault();
-                                setProjectActionMenu(null);
-                            }}
-                        >
-                            <div
-                                className="absolute bg-qt-panel border border-qt-border rounded shadow-lg py-1 min-w-[180px]"
-                                style={{
-                                    left: projectActionMenu.x,
-                                    top: projectActionMenu.y,
-                                }}
-                                onClick={(e) => e.stopPropagation()}
-                            >
-                                <button
-                                    className="w-full text-left px-3 py-1.5 text-qt-md text-qt-text hover:bg-qt-hover"
-                                    onClick={() => {
-                                        const m = projectActionMenu;
-                                        setProjectActionMenu(null);
-                                        emitExternalFileAction("openProject", m.path);
-                                    }}
-                                >
-                                    {t("menu_open_project")}
-                                </button>
-                                <button
-                                    className="w-full text-left px-3 py-1.5 text-qt-md text-qt-text hover:bg-qt-hover"
-                                    onClick={() => {
-                                        const m = projectActionMenu;
-                                        setProjectActionMenu(null);
+                    {projectActionMenu ? (
+                        <AppContextMenu
+                            x={projectActionMenu.x}
+                            y={projectActionMenu.y}
+                            floating
+                            ariaLabel={tf("import_project_dialog_title")}
+                            onClose={() => setProjectActionMenu(null)}
+                            items={[
+                                {
+                                    key: "open-project",
+                                    label: t("menu_open_project"),
+                                    onSelect: () =>
+                                        emitExternalFileAction(
+                                            "openProject",
+                                            projectActionMenu.path,
+                                        ),
+                                },
+                                {
+                                    key: "import-project",
+                                    label: tf("import_project_dialog_title"),
+                                    onSelect: () =>
                                         window.dispatchEvent(
                                             new CustomEvent("hifi:importProjectPick", {
-                                                detail: { path: m.path },
+                                                detail: { path: projectActionMenu.path },
                                             }),
-                                        );
-                                    }}
-                                >
-                                    {tf("import_project_dialog_title")}
-                                </button>
-                            </div>
-                        </div>
-                    )}
+                                        ),
+                                },
+                            ]}
+                        />
+                    ) : null}
 
                     <FadeContextMenuHost />
                     {contextMenu

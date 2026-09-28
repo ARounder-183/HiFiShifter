@@ -93,6 +93,7 @@ import {
 import { isDynParam } from "./pianoRoll/paramRanges";
 import type { AutoBackupSettings } from "../../services/api/project";
 import { AppDialog } from "../../ui/Dialog";
+import { AppChoiceList } from "../../ui/ChoiceList";
 import { AppBusy, AppConfirmDialog, AppNoticeDialog } from "../../ui";
 // import type { VibratoParams } from "../editDialogs/EditDialogs"; // 已移除无效导入
 
@@ -1427,163 +1428,107 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 closeLabel={t("ok")}
             />
 
-            {/* 菜单导入模式选择（多文件） */}
-            {menuImportMode && (
-                <div
-                    className="fixed inset-0 z-qt-fullscreen bg-qt-overlay flex items-center justify-center"
-                    onClick={() => setMenuImportMode(null)}
-                >
-                    <div
-                        className="w-[380px] max-w-[92vw] bg-qt-panel border border-qt-border rounded-xl shadow-[0_20px_44px_rgba(0,0,0,0.28)]"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <div className="px-4 py-3 border-b border-qt-border">
-                            <div className="text-qt-md font-medium text-qt-text">
-                                {tf("import_dialog_title")}
-                            </div>
-                            <div className="mt-1 text-qt-xs text-qt-text-muted">
-                                {plural("import_files_selected", menuImportMode.audioPaths.length)}
-                            </div>
-                        </div>
+            {/*
+              菜单导入模式选择（多文件）。
+              
+              此前是手写模态：缺 Esc、无焦点管理、不抑制全局快捷键（框内按空格会触发
+              播放）、无 Enter 默认动作，标题 13px（其余对话框是 20px），宽度写死
+              380px（四档是 400/520/640/800）。改走 `AppDialog` 后这些一次对齐。
+             */}
+            <AppDialog
+                open={menuImportMode !== null}
+                onOpenChange={(open) => {
+                    if (!open) setMenuImportMode(null);
+                }}
+                title={tf("import_dialog_title")}
+                message={
+                    menuImportMode
+                        ? plural("import_files_selected", menuImportMode.audioPaths.length)
+                        : null
+                }
+                size="sm"
+                actions={[
+                    {
+                        id: "cancel",
+                        label: tf("cancel"),
+                        onClick: () => setMenuImportMode(null),
+                    },
+                ]}
+            >
+                <AppChoiceList
+                    options={[
+                        { id: "across-time", label: t("import_across_time") },
+                        { id: "across-tracks", label: t("import_across_tracks") },
+                        { id: "as-takes", label: t("import_as_takes") },
+                    ]}
+                    onSelect={(id) => {
+                        const mode = menuImportMode;
+                        if (!mode) return;
+                        setMenuImportMode(null);
+                        void dispatch(
+                            importMultipleAudioAtPosition({
+                                audioPaths: mode.audioPaths,
+                                mode: id as "across-time" | "across-tracks" | "as-takes",
+                                trackId: mode.trackId,
+                                startSec: mode.startSec,
+                            }),
+                        );
+                    }}
+                />
+            </AppDialog>
 
-                        <div className="px-3 py-3 flex flex-col gap-2">
-                            <button
-                                className="w-full text-left px-3 py-2 rounded-lg text-qt-md text-qt-text border border-qt-border hover:bg-qt-hover"
-                                onClick={() => {
-                                    const m = menuImportMode;
-                                    setMenuImportMode(null);
-                                    void dispatch(
-                                        importMultipleAudioAtPosition({
-                                            audioPaths: m.audioPaths,
-                                            mode: "across-time",
-                                            trackId: m.trackId,
-                                            startSec: m.startSec,
-                                        }),
-                                    );
-                                }}
-                            >
-                                {t("import_across_time")}
-                            </button>
-                            <button
-                                className="w-full text-left px-3 py-2 rounded-lg text-qt-md text-qt-text border border-qt-border hover:bg-qt-hover"
-                                onClick={() => {
-                                    const m = menuImportMode;
-                                    setMenuImportMode(null);
-                                    void dispatch(
-                                        importMultipleAudioAtPosition({
-                                            audioPaths: m.audioPaths,
-                                            mode: "across-tracks",
-                                            trackId: m.trackId,
-                                            startSec: m.startSec,
-                                        }),
-                                    );
-                                }}
-                            >
-                                {t("import_across_tracks")}
-                            </button>
-                            <button
-                                className="w-full text-left px-3 py-2 rounded-lg text-qt-md text-qt-text border border-qt-border hover:bg-qt-hover"
-                                onClick={() => {
-                                    const m = menuImportMode;
-                                    setMenuImportMode(null);
-                                    void dispatch(
-                                        importMultipleAudioAtPosition({
-                                            audioPaths: m.audioPaths,
-                                            mode: "as-takes",
-                                            trackId: m.trackId,
-                                            startSec: m.startSec,
-                                        }),
-                                    );
-                                }}
-                            >
-                                {t("import_as_takes")}
-                            </button>
-                        </div>
-
-                        <div className="px-3 py-2 border-t border-qt-border flex justify-end">
-                            <button
-                                className="px-3 py-1.5 text-qt-xs text-qt-text hover:bg-qt-hover rounded-lg"
-                                onClick={() => setMenuImportMode(null)}
-                            >
-                                {tf("cancel")}
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* 多音轨媒体：选择要导入的音轨 */}
-            {mediaStreamImport && (
-                <div
-                    className="fixed inset-0 z-qt-fullscreen bg-qt-overlay flex items-center justify-center"
-                    onClick={() => setMediaStreamImport(null)}
-                >
-                    <div
-                        className="w-[420px] max-w-[92vw] bg-qt-panel border border-qt-border rounded-xl shadow-[0_20px_44px_rgba(0,0,0,0.28)]"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <div className="px-4 py-3 border-b border-qt-border">
-                            <div className="text-qt-md font-medium text-qt-text">
-                                {tf("media_stream_select_title")}
-                            </div>
-                            <div className="mt-1 text-qt-xs text-qt-text-muted truncate">
-                                {mediaStreamImport.path}
-                            </div>
-                            <div className="mt-1 text-qt-xs text-qt-text-muted">
-                                {tf("media_stream_select_hint")}
-                            </div>
-                        </div>
-
-                        <div className="px-3 py-3 flex flex-col gap-2 max-h-[50vh] overflow-y-auto custom-scrollbar">
-                            {mediaStreamImport.streams.map((stream) => {
-                                const meta = [
-                                    stream.codec,
-                                    stream.channels > 0 ? `${stream.channels} ch` : null,
-                                    stream.sampleRate > 0 ? `${stream.sampleRate} Hz` : null,
-                                    stream.title || stream.language,
-                                    stream.durationSec > 0
-                                        ? `${stream.durationSec.toFixed(2)} s`
-                                        : null,
-                                ].filter(Boolean);
-                                return (
-                                    <button
-                                        key={stream.index}
-                                        className="w-full text-left px-3 py-2 rounded-lg text-qt-md text-qt-text border border-qt-border hover:bg-qt-hover"
-                                        onClick={() => {
-                                            const m = mediaStreamImport;
-                                            setMediaStreamImport(null);
-                                            void dispatch(
-                                                importAudioAtPosition({
-                                                    audioPath: m.path,
-                                                    trackId: m.trackId,
-                                                    startSec: m.startSec,
-                                                    mediaAudioStreamIndex: stream.index,
-                                                }),
-                                            );
-                                        }}
-                                    >
-                                        <span className="font-medium">
-                                            {tf("media_stream_track")} {stream.index + 1}
-                                        </span>
-                                        <span className="ml-2 text-qt-xs text-qt-text-muted">
-                                            {meta.join(" · ")}
-                                        </span>
-                                    </button>
-                                );
-                            })}
-                        </div>
-
-                        <div className="px-3 py-2 border-t border-qt-border flex justify-end">
-                            <button
-                                className="px-3 py-1.5 text-qt-xs text-qt-text hover:bg-qt-hover rounded-lg"
-                                onClick={() => setMediaStreamImport(null)}
-                            >
-                                {tf("cancel")}
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
+            {/* 多音轨媒体：选择要导入的音轨（同样从手写模态迁入 UI 系统） */}
+            <AppDialog
+                open={mediaStreamImport !== null}
+                onOpenChange={(open) => {
+                    if (!open) setMediaStreamImport(null);
+                }}
+                title={tf("media_stream_select_title")}
+                message={tf("media_stream_select_hint")}
+                description={
+                    mediaStreamImport ? (
+                        <span className="block truncate">{mediaStreamImport.path}</span>
+                    ) : null
+                }
+                size="md"
+                actions={[
+                    {
+                        id: "cancel",
+                        label: tf("cancel"),
+                        onClick: () => setMediaStreamImport(null),
+                    },
+                ]}
+            >
+                <AppChoiceList
+                    options={(mediaStreamImport?.streams ?? []).map((stream) => {
+                        const meta = [
+                            stream.codec,
+                            stream.channels > 0 ? `${stream.channels} ch` : null,
+                            stream.sampleRate > 0 ? `${stream.sampleRate} Hz` : null,
+                            stream.title || stream.language,
+                            stream.durationSec > 0 ? `${stream.durationSec.toFixed(2)} s` : null,
+                        ].filter(Boolean);
+                        return {
+                            id: String(stream.index),
+                            label: `${tf("media_stream_track")} ${stream.index + 1}`,
+                            description: meta.join(" · "),
+                        };
+                    })}
+                    onSelect={(id) => {
+                        const m = mediaStreamImport;
+                        if (!m) return;
+                        setMediaStreamImport(null);
+                        void dispatch(
+                            importAudioAtPosition({
+                                audioPath: m.path,
+                                trackId: m.trackId,
+                                startSec: m.startSec,
+                                mediaAudioStreamIndex: Number(id),
+                            }),
+                        );
+                    }}
+                />
+            </AppDialog>
 
             {/* Edit operation dialogs */}
             <TransposeCentsDialog

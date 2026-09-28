@@ -89,6 +89,20 @@ function isCommentLine(line: string): boolean {
     );
 }
 
+/**
+ * 去掉块注释（含 JSX 的 `{/* … *\/}`）。
+ *
+ * 【为什么需要】`isCommentLine` 只能判断**单行**，而 JSX 注释常跨多行：续行的
+ * 文字不以 `*` 开头，于是"说明为什么不用 `fixed inset-0`"这类注释会被当成
+ * 真实代码报违规。规则要检查的是代码，不是解释。
+ */
+function stripBlockComments(source: string): string {
+    return source
+        .replace(/\{\/\*[\s\S]*?\*\/\}/g, "")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/[^\n]*/g, "");
+}
+
 function walk(dir: string, out: string[] = []): string[] {
     for (const entry of readdirSync(dir)) {
         const full = join(dir, entry);
@@ -155,6 +169,61 @@ describe("豁免清单是受控的", () => {
             expect(line, `${file} 缺少豁免理由`).toBeTruthy();
             const reason = line!.slice(line!.indexOf(EXEMPT_MARKER) + EXEMPT_MARKER.length).trim();
             expect(reason.length, `${file} 的豁免理由过短`).toBeGreaterThan(20);
+        }
+    });
+});
+
+/*
+ * 模态表面必须走组合壳。
+ *
+ * 【为什么禁 `fixed inset-0`】这是"手写模态"的指纹：自己铺一层遮罩 + 自己定位
+ * 卡片。实测过 5 处，其中 4 处缺 Esc、全部不抑制全局快捷键（框内按空格会触发
+ * 播放）、没有焦点管理、没有 Enter 默认动作，标题字号与宽度也各自为政
+ * （13px vs 20px；380/420px vs 四档 400/520/640/800）。
+ *
+ * `AppDialog` 与 `AppContextMenu` 已经把这 9 件事各做一次，没有理由再手写。
+ * 允许清单里只剩快速搜索面板：它不是对话框也不是菜单，而是一个带输入框的
+ * 命令面板（自己的输入、自己的列表、自己的快捷键模型），并且已经完整实现了
+ * 键盘契约（Esc / Enter / 方向键 / 快捷键抑制）—— 强行套 `AppDialog` 会把它
+ * 变成一个"对话框里放输入框"的别扭结构。
+ */
+const MODAL_SHELL_ALLOWED = [join("src", "components", "layout", "QuickSearchPopup.tsx")];
+
+describe("模态表面必须走组合壳", () => {
+    test("没有手写的 fixed inset-0 遮罩", () => {
+        const offenders: string[] = [];
+        for (const file of walk("src")) {
+            if (MODAL_SHELL_ALLOWED.includes(file)) continue;
+            // 先剥注释：说明性文字里提到这个写法不算违规。
+            const lines = stripBlockComments(readFileSync(file, "utf8")).split("\n");
+            for (let i = 0; i < lines.length; i += 1) {
+                if (/fixed inset-0/.test(lines[i])) offenders.push(`  ${file}:${i + 1}`);
+            }
+        }
+        expect(
+            offenders.length === 0
+                ? []
+                : [
+                      "以下位置手写了模态遮罩 —— 请用 AppDialog / AppContextMenu：",
+                      ...offenders,
+                  ].join("\n"),
+        ).toEqual([]);
+    });
+
+    test("允许清单里的文件仍然完整实现了键盘契约", () => {
+        /*
+         * 豁免的前提是"它自己做得对"，所以这里把前提钉住：一旦快速搜索面板
+         * 丢了关闭键或快捷键抑制，豁免就不再成立。
+         *
+         * 【关闭键为什么接受两种形态】它走的是 `quickSearch.close` **键位绑定**
+         * （默认 Escape，但用户可改），而不是写死的 `"Escape"` 字面量 ——
+         * 这是更好的做法，门禁不该因此判它不合格。
+         */
+        for (const file of MODAL_SHELL_ALLOWED) {
+            const source = readFileSync(file, "utf8");
+            const hasDismiss = /Escape|escape/.test(source) || /close"\]/.test(source);
+            expect(hasDismiss, `${file} 没有任何关闭键（Escape 或键位绑定）`).toBe(true);
+            expect(source, `${file} 未抑制全局快捷键`).toContain("useShortcutSuppression");
         }
     });
 });

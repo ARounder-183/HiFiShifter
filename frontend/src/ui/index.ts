@@ -43,6 +43,7 @@ export {
     type AppSwitchRowProps,
 } from "./Field";
 
+export { AppChoiceList, type AppChoiceListProps, type AppChoiceOption } from "./ChoiceList";
 export { AppContextMenu, type AppContextMenuProps, type AppMenuItemSpec } from "./Menu";
 
 export {
