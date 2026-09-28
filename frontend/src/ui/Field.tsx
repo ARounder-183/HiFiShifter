@@ -31,9 +31,31 @@ const LABEL_WIDTH_PX: Record<Exclude<AppFieldLabelWidth, "auto">, string> = {
 
 const LabelWidthContext = createContext<AppFieldLabelWidth>("md");
 
+/**
+ * 布尔行的形态。由 `AppForm` 声明一次，`AppSwitchRow` 读取。
+ *
+ * 【为什么是表单的属性，不是每一行的属性】`aligned` 让布尔行的**控件**与
+ * `AppField` 的控件列左缘对齐；`leading` 让控件贴左、标签紧随。
+ *
+ * 上一轮把 `AppSwitchRow` 统一成 `leading`，理由是"吸附/网格设置里 17 行是
+ * 控件在左"。但那个对话框已整体重写，而另外两个用它的大对话框
+ * （`DockLayoutSettingsDialog` 6 行、`NotebookDialogs` 9 行）原本**是**
+ * 标签列形态 —— 改完之后这 15 行的开关不再与同一张表单里字段的标签列对齐。
+ * 形态应当由"这张表单整体长什么样"决定，因此声明在表单上。
+ */
+const BooleanRowLayoutContext = createContext<"aligned" | "leading">("aligned");
+
 export interface AppFormProps {
     /** 本表单内所有 `AppField` 的标签宽度。默认 `md`（112px）。 */
     labelWidth?: AppFieldLabelWidth;
+    /**
+     * 布尔行的形态。
+     *
+     * - `aligned`（默认）—— 控件与 `AppField` 的控件列对齐。混排字段与开关的
+     *   设置表单用这个（DockLayoutSettingsDialog / NotebookDialogs）。
+     * - `leading` —— 控件贴左、标签紧随。纯布尔列表用这个（吸附/网格设置）。
+     */
+    booleanRow?: "aligned" | "leading";
     children: ReactNode;
     className?: string;
 }
@@ -47,10 +69,17 @@ export interface AppFormProps {
  *   <AppField label={t("sample_rate")}><Select .../></AppField>
  * </AppForm>
  */
-export function AppForm({ labelWidth = "md", children, className }: AppFormProps) {
+export function AppForm({
+    labelWidth = "md",
+    booleanRow = "aligned",
+    children,
+    className,
+}: AppFormProps) {
     return (
         <LabelWidthContext.Provider value={labelWidth}>
-            <div className={cx("flex flex-col gap-3", className)}>{children}</div>
+            <BooleanRowLayoutContext.Provider value={booleanRow}>
+                <div className={cx("flex flex-col gap-3", className)}>{children}</div>
+            </BooleanRowLayoutContext.Provider>
         </LabelWidthContext.Provider>
     );
 }
@@ -155,17 +184,46 @@ export function AppSwitchRow({
     className,
 }: AppSwitchRowProps) {
     const Control = control === "checkbox" ? Checkbox : Switch;
+    const layout = useContext(BooleanRowLayoutContext);
+    const inheritedLabelWidth = useContext(LabelWidthContext);
+
+    if (layout === "leading") {
+        return (
+            <div className={cx("flex items-start gap-2", className)}>
+                <Control
+                    checked={checked}
+                    onCheckedChange={(value) => onCheckedChange(Boolean(value))}
+                    disabled={disabled}
+                    // 与 12px 标签的首行基线对齐（控件高 16–20px，标签行高 18px）
+                    style={{ marginTop: 1 }}
+                />
+                <div className="flex min-w-0 flex-1 flex-col">
+                    <span className="hs-type-body">{label}</span>
+                    {hint ? <span className="hs-type-caption">{hint}</span> : null}
+                </div>
+            </div>
+        );
+    }
+
+    // aligned：标签占 `AppField` 那一列，控件落在同一列起点 —— 与同表单的字段行对齐。
     return (
         <div className={cx("flex items-start gap-2", className)}>
-            <Control
-                checked={checked}
-                onCheckedChange={(value) => onCheckedChange(Boolean(value))}
-                disabled={disabled}
-                // 与 12px 标签的首行基线对齐（控件高 16–20px，标签行高 18px）
-                style={{ marginTop: 1 }}
-            />
-            <div className="flex min-w-0 flex-1 flex-col">
-                <span className="hs-type-body">{label}</span>
+            <span
+                className="hs-type-label shrink-0 pt-0.5"
+                style={
+                    inheritedLabelWidth === "auto"
+                        ? undefined
+                        : { minWidth: LABEL_WIDTH_PX[inheritedLabelWidth] }
+                }
+            >
+                {label}
+            </span>
+            <div className="flex min-w-0 flex-1 flex-col gap-1">
+                <Control
+                    checked={checked}
+                    onCheckedChange={(value) => onCheckedChange(Boolean(value))}
+                    disabled={disabled}
+                />
                 {hint ? <span className="hs-type-caption">{hint}</span> : null}
             </div>
         </div>

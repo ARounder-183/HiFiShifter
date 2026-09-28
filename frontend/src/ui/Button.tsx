@@ -58,9 +58,25 @@ const INTENT_PROPS: Record<AppButtonIntent, Pick<ComponentPropsWithoutRef<typeof
         danger: { variant: "soft", color: "red" },
     };
 
+/**
+ * 强调程度。
+ *
+ * 【为什么与 `intent` 分成两个维度】`intent` 回答"这个按钮做什么"（确认 / 取消 /
+ * 删除），`emphasis` 回答"它有多强"。两者独立：破坏性操作既可能是次要的
+ * （列表行里的"删除"），也可能是**整个对话框的主操作**（"清空速度图"——
+ * 那是用户打开该对话框唯一要做的事）。
+ *
+ * 上一轮把两者压成了一个 `danger` 语义并固定为浅色，于是所有破坏性确认按钮
+ * 都从实心变成了浅色，"清空速度图"这类主操作失去了应有的分量。
+ *
+ * 省略时按语义取默认：`primary` → 实心，其余 → 浅色。
+ */
+export type AppButtonEmphasis = "solid" | "soft";
+
 export interface AppButtonProps extends Omit<ComponentPropsWithoutRef<typeof Button>, "variant" | "color" | "size"> {
     intent?: AppButtonIntent;
     size?: AppButtonSize;
+    emphasis?: AppButtonEmphasis;
 }
 
 /**
@@ -71,10 +87,18 @@ export interface AppButtonProps extends Omit<ComponentPropsWithoutRef<typeof But
  * <AppButton onClick={cancel}>取消</AppButton>
  * <AppButton intent="danger" onClick={discard}>丢弃</AppButton>
  */
-export function AppButton({ intent = "default", size = "md", className, ...rest }: AppButtonProps) {
+export function AppButton({
+    intent = "default",
+    size = "md",
+    emphasis,
+    className,
+    ...rest
+}: AppButtonProps) {
+    const base = INTENT_PROPS[intent];
     return (
         <Button
-            {...INTENT_PROPS[intent]}
+            {...base}
+            variant={emphasis === undefined ? base.variant : emphasis}
             size={size === "md" ? "2" : "1"}
             className={cx("app-button", className)}
             {...rest}

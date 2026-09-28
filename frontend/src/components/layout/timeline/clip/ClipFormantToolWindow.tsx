@@ -340,6 +340,7 @@ export const ClipFormantToolWindow: React.FC<{
                             width={56}
                             disabled={!draft.enabled}
                             ariaLabel={t("clip_formant_strength")}
+                            onChange={(next) => updateDraft({ strength: clamp(next / 100, 0, 1) })}
                             onCommit={(next) => updateDraft({ strength: clamp(next / 100, 0, 1) })}
                         />
                     </Flex>

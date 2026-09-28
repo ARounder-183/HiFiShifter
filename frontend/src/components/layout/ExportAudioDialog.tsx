@@ -1312,9 +1312,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                 value={customStartSec}
                                 unit="seconds"
                                 min={0}
-                                max={86400}
                                 width={160}
                                 ariaLabel={tAny("export_dialog_range_custom_label")}
+                                onChange={(next) => setCustomStartSec(next)}
                                 onCommit={(next) => setCustomStartSec(next)}
                             />
                             <Text size="2" color="gray">
@@ -1324,9 +1324,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                 value={customEndSec}
                                 unit="seconds"
                                 min={0}
-                                max={86400}
                                 width={160}
                                 ariaLabel={tAny("export_dialog_range_custom_label")}
+                                onChange={(next) => setCustomEndSec(next)}
                                 onCommit={(next) => setCustomEndSec(next)}
                             />
                             <Text size="1" color="gray">

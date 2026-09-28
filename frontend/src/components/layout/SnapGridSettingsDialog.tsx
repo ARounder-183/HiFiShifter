@@ -209,7 +209,11 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
                 },
             ]}
         >
-            <AppForm>
+            {/*
+             * 纯布尔列表：控件贴左、标签紧随（与同表单的字段行不同 —— 这里
+             * 大多数行都是开关，标签列会把控件推到 112px 之后，读起来很别扭）。
+             */}
+            <AppForm booleanRow="leading">
                 <AppFormSection title={t("snap_section_grid")}>
                     <AppSwitchRow
                         control="checkbox"

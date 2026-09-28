@@ -271,7 +271,6 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                             value={draft.maxSizeMb}
                             unit="integer"
                             min={0}
-                            max={1024 * 1024}
                             width={110}
                             suffix="MB"
                             ariaLabel={tAny("render_cache_max_size")}
@@ -301,7 +300,6 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                             value={draft.maxAgeDays}
                             unit="integer"
                             min={0}
-                            max={3650}
                             width={90}
                             suffix={tAny("render_cache_days_unit")}
                             ariaLabel={tAny("render_cache_max_age")}
@@ -318,7 +316,6 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                         value={draft.minClipSecs}
                         unit="seconds"
                         min={0}
-                        max={60}
                         width={90}
                         suffix={tAny("render_cache_seconds_unit")}
                         ariaLabel={tAny("render_cache_min_clip")}
@@ -331,7 +328,6 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                         value={draft.minEntryKb}
                         unit="integer"
                         min={0}
-                        max={64 * 1024}
                         width={90}
                         suffix="KB"
                         ariaLabel={tAny("render_cache_min_entry")}
@@ -344,7 +340,6 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                         value={draft.maxEntryMb}
                         unit="integer"
                         min={0}
-                        max={64 * 1024}
                         width={90}
                         suffix="MB"
                         ariaLabel={tAny("render_cache_max_entry")}
@@ -357,7 +352,6 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                         value={draft.minFreeDiskMb}
                         unit="integer"
                         min={0}
-                        max={1024 * 1024}
                         width={90}
                         suffix="MB"
                         ariaLabel={tAny("render_cache_min_free_disk")}

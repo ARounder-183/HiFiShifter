@@ -160,7 +160,6 @@ export function AutoBackupDialog({
                         value={draft.timedBackupIntervalSec}
                         unit="integer"
                         min={1}
-                        max={86_400}
                         width={180}
                         suffix="sec"
                         ariaLabel={tAny("auto_backup_interval_sec")}

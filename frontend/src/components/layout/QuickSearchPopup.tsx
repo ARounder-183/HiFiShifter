@@ -447,6 +447,8 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                     {/* 排序 */}
                     <AppSelect
                         fullWidth={false}
+                        // 紧凑搜索行里的控件，不是工具条子项 —— 显式声明密度
+                        density="compact"
                         value={sortMode}
                         onValueChange={(v) => {
                             setSortMode(v as "name" | "date" | "size");

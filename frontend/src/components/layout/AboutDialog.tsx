@@ -79,6 +79,8 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
                     id: "open-repo",
                     label: tAny("about_open_repo"),
                     align: "start",
+                    // 迁移时丢失：悬停显示完整仓库地址（原按钮带 data-tooltip={repoUrl}）
+                    tooltip: repoUrl,
                     // 异步包装：打开仓库不关闭对话框，避免页脚表单重新提交触发默认动作。
                     onClick: () => openExternal(repoUrl),
                 },

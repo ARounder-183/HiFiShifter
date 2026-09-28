@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Flex, Text, Button, ScrollArea, Separator, Badge } from "@radix-ui/themes";
+import { Cross2Icon } from "@radix-ui/react-icons";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { IS_MAC } from "../../utils/platform";
@@ -304,6 +305,8 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                 {
                     id: "close",
                     label: tAny("close"),
+                    // 迁移时丢失的 ✕ 图标（原按钮是 <Cross2Icon /> + 文案）
+                    icon: <Cross2Icon />,
                     onClick: () => onOpenChange(false),
                 },
             ]}

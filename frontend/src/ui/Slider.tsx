@@ -22,6 +22,7 @@ import { stepValue, type StepUnit } from "./stepPolicy";
 import { useFineAdjustModifier } from "./useFineAdjustModifier";
 import { useNonPassiveWheel } from "../utils/useNonPassiveWheel";
 import { useFrameCommitter, useWheelStepAccumulator } from "./useFrameCommit";
+import { radixSizeFor, useDensity, type AppDensity } from "./density";
 
 export interface AppSliderProps {
     value: number;
@@ -42,6 +43,8 @@ export interface AppSliderProps {
     max: number;
     disabled?: boolean;
     ariaLabel?: string;
+    /** 密度覆盖，默认继承容器。 */
+    density?: AppDensity;
     className?: string;
 }
 
@@ -67,9 +70,11 @@ export function AppSlider({
     min,
     max,
     disabled = false,
+    density,
     ariaLabel,
     className,
 }: AppSliderProps) {
+    const size = radixSizeFor(useDensity(density));
     const isFine = useFineAdjustModifier();
 
     /*
@@ -99,6 +104,7 @@ export function AppSlider({
         <span ref={setWheelTarget} className={cx("inline-flex min-w-0 flex-1 items-center", className)}>
             <Slider
                 value={[value]}
+                size={size}
                 min={min}
                 max={max}
                 step={1}

@@ -69,8 +69,6 @@ export function PitchSnapSettingsDialog({ open, onOpenChange }: Props) {
                     <AppNumberField
                         value={pitchSnapToleranceCents}
                         unit="cents"
-                        min={0}
-                        max={1000}
                         ariaLabel={tAny("pitch_snap_tolerance")}
                         onCommit={commitTolerance}
                     />

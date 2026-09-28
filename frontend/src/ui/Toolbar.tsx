@@ -18,6 +18,7 @@
 import type { ReactNode } from "react";
 
 import { AppIconButton, type AppIconButtonProps } from "./Button";
+import { AppDensityProvider } from "./density";
 import { cx } from "./cx";
 
 /** 横条高度档位，取值来自 `--qt-bar-*` 令牌。 */
@@ -74,15 +75,16 @@ export function AppToolbar({
     className,
 }: AppToolbarProps) {
     return (
-        <div
-            className={cx(
-                "flex shrink-0 items-center justify-between gap-2 px-2",
-                HEIGHT_CLASS[height],
-                border && "border-b border-qt-border",
-                className,
-            )}
-            style={{ background: "var(--qt-window)" }}
-        >
+        <AppDensityProvider value="compact">
+            <div
+                className={cx(
+                    "flex shrink-0 items-center justify-between gap-2 px-2",
+                    HEIGHT_CLASS[height],
+                    border && "border-b border-qt-border",
+                    className,
+                )}
+                style={{ background: "var(--qt-window)" }}
+            >
             {/*
              * 默认 `overflow: visible` —— 不裁剪弹层、不产生吃掉高度的滚动条。
              * 需要滚动的长工具栏由调用方显式打开 `scrollable`（见该属性说明）。
@@ -95,8 +97,11 @@ export function AppToolbar({
             >
                 {leading}
             </div>
-            {trailing ? <div className="flex shrink-0 items-center gap-1">{trailing}</div> : null}
-        </div>
+                {trailing ? (
+                    <div className="flex shrink-0 items-center gap-1">{trailing}</div>
+                ) : null}
+            </div>
+        </AppDensityProvider>
     );
 }
 

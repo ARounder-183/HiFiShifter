@@ -58,8 +58,6 @@ export function TransposeCentsDialog({
                     <AppNumberField
                         value={Number(cents)}
                         unit="cents"
-                        min={-1200}
-                        max={1200}
                         ariaLabel={tAny("dlg_cents")}
                         onCommit={(next) => setCents(String(next))}
                     />
@@ -156,8 +154,6 @@ export function TransposeDegreesDialog({
                     <AppNumberField
                         value={Number(degrees)}
                         unit="integer"
-                        min={-100}
-                        max={100}
                         ariaLabel={tAny("transpose_degrees_amount")}
                         onCommit={(next) => setDegrees(String(next))}
                     />
@@ -255,8 +251,6 @@ export function SetPitchDialog({
                     <AppNumberField
                         value={Number(note)}
                         unit="semitone"
-                        min={-1000}
-                        max={1000}
                         ariaLabel={valueLabelText ?? tAny("dlg_midi_note")}
                         onCommit={(next) => setNote(String(next))}
                     />
@@ -480,8 +474,6 @@ export function VibratoDialog({
                     <AppNumberField
                         value={Number(amplitude)}
                         unit={isPitch ? "cents" : "integer"}
-                        min={isPitch ? -1200 : -1000}
-                        max={isPitch ? 1200 : 1000}
                         ariaLabel={isPitch ? tAny("dlg_amplitude_cents") : tAny("dlg_amplitude")}
                         onCommit={(next) => setAmplitude(String(next))}
                     />
@@ -490,8 +482,6 @@ export function VibratoDialog({
                     <AppNumberField
                         value={Number(rate)}
                         unit="rate"
-                        min={0}
-                        max={100}
                         ariaLabel={tAny("dlg_rate_hz")}
                         onCommit={(next) => setRate(String(next))}
                     />
@@ -500,8 +490,6 @@ export function VibratoDialog({
                     <AppNumberField
                         value={Number(attack)}
                         unit="milliseconds"
-                        min={0}
-                        max={10000}
                         ariaLabel={tAny("dlg_attack_ms")}
                         onCommit={(next) => setAttack(String(next))}
                     />
@@ -510,8 +498,6 @@ export function VibratoDialog({
                     <AppNumberField
                         value={Number(release)}
                         unit="milliseconds"
-                        min={0}
-                        max={10000}
                         ariaLabel={tAny("dlg_release_ms")}
                         onCommit={(next) => setRelease(String(next))}
                     />
@@ -520,8 +506,6 @@ export function VibratoDialog({
                     <AppNumberField
                         value={Number(phase)}
                         unit="integer"
-                        min={0}
-                        max={360}
                         ariaLabel={tAny("dlg_phase_deg")}
                         onCommit={(next) => setPhase(String(next))}
                     />
@@ -663,8 +647,6 @@ export function QuantizeDialog({
                         <AppNumberField
                             value={Number(quantizeUnit)}
                             unit="integer"
-                            min={-1000}
-                            max={1000}
                             ariaLabel={tAny("quantize_unit")}
                             onCommit={(next) => setQuantizeUnit(String(next))}
                         />
@@ -676,8 +658,6 @@ export function QuantizeDialog({
                     <AppNumberField
                         value={Number(toleranceCents)}
                         unit="cents"
-                        min={-1200}
-                        max={1200}
                         ariaLabel={
                             valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")
                         }
@@ -836,8 +816,6 @@ export function MeanQuantizeDialog({
                         <AppNumberField
                             value={Number(quantizeUnit)}
                             unit="integer"
-                            min={-1000}
-                            max={1000}
                             ariaLabel={tAny("quantize_unit")}
                             onCommit={(next) => setQuantizeUnit(String(next))}
                         />
@@ -849,8 +827,6 @@ export function MeanQuantizeDialog({
                     <AppNumberField
                         value={Number(toleranceCents)}
                         unit="cents"
-                        min={-1200}
-                        max={1200}
                         ariaLabel={
                             valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")
                         }

@@ -17,6 +17,7 @@ import { Select } from "@radix-ui/themes";
 import type { ReactNode } from "react";
 
 import { cx } from "./cx";
+import { radixSizeFor, useDensity, type AppDensity } from "./density";
 import { useNonPassiveWheel } from "../utils/useNonPassiveWheel";
 import { useFrameCommitter, useWheelStepAccumulator } from "./useFrameCommit";
 
@@ -37,6 +38,11 @@ export interface AppSelectProps {
     disabled?: boolean;
     /** 触发器宽度铺满容器（表单里默认如此）。 */
     fullWidth?: boolean;
+    /**
+     * 密度覆盖。默认继承容器（对话框 = `form`，工具条 = `compact`）。
+     * 只给**不是工具条**的紧凑表面用（快速搜索排序行、轨道头算法下拉）。
+     */
+    density?: AppDensity;
     ariaLabel?: string;
     className?: string;
 }
@@ -61,9 +67,11 @@ export function AppSelect({
     options,
     disabled = false,
     fullWidth = true,
+    density,
     ariaLabel,
     className,
 }: AppSelectProps) {
+    const size = radixSizeFor(useDensity(density));
     /*
      * 滚轮换项只关心"值"的有序列表，分隔线要滤掉 —— 否则滚轮会停在分隔线上。
      */
@@ -102,6 +110,7 @@ export function AppSelect({
             // 手动选择（点菜单项）不经过滚轮，直接提交；无需节流。
             onValueChange={onValueChange}
             disabled={disabled}
+            size={size}
         >
             <Select.Trigger
                 ref={setWheelTarget}

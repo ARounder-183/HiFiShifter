@@ -73,6 +73,18 @@ export interface AppDialogAction {
     onClick: () => void | Promise<void>;
     /** 覆盖默认的"点击后自动关闭"。异步动作默认 `false`。 */
     autoClose?: boolean;
+    /**
+     * 悬停提示。用于按钮文案不足以说明后果的场景（例如"打开仓库"要显示完整 URL）。
+     * 走项目自定义 tooltip（`data-tooltip`），不是浏览器原生 title。
+     */
+    tooltip?: string;
+    /**
+     * 按钮前缀图标。
+     *
+     * 【为什么需要】上一轮迁移时，"关闭"按钮上的 ✕ 图标没有落地位置而丢失 ——
+     * 动作模型只能给文字。给一个 icon 槽位即可恢复。
+     */
+    icon?: ReactNode;
 }
 
 export interface AppDialogProps {
@@ -339,6 +351,7 @@ export function AppDialog({
                                         action={action}
                                         busy={busy}
                                         pending={pendingActionId === action.id}
+                                        isDefault={false}
                                         onRun={() => void runAction(action)}
                                     />
                                 ))}
@@ -350,6 +363,7 @@ export function AppDialog({
                                         action={action}
                                         busy={busy}
                                         pending={pendingActionId === action.id}
+                                        isDefault={action.id === resolvedDefaultId}
                                         onRun={() => void runAction(action)}
                                     />
                                 ))}
@@ -366,13 +380,17 @@ function DialogActionButton({
     action,
     busy,
     pending,
+    isDefault,
     onRun,
 }: {
     action: AppDialogAction;
     busy: boolean;
     pending: boolean;
+    /** 是否是 Enter 触发的默认动作 —— 破坏性默认动作要实心。 */
+    isDefault: boolean;
     onRun: () => void;
 }) {
+    const intent = action.intent ?? "default";
     return (
         <AppButton
             /*
@@ -380,11 +398,23 @@ function DialogActionButton({
              * 上一版默认 `sm`（24px）把全部 42 个对话框的页脚压小了 25%。
              */
             size="md"
-            intent={action.intent ?? "default"}
+            intent={intent}
+            /*
+             * 破坏性动作若**就是本对话框的主操作**（例如"清空速度图"——那是用户
+             * 打开它唯一要做的事），渲染成实心。上一轮把 danger 固定成浅色，
+             * 于是这类主操作失去了应有的分量。
+             *
+             * 这是**壳的规则**，不是每个调用点的选择：因此不会出现同一类操作
+             * 在不同对话框里深浅不一。
+             */
+            emphasis={intent === "danger" && isDefault ? "solid" : undefined}
+            // 自定义 tooltip（data-tooltip），不是浏览器原生 title
+            data-tooltip={action.tooltip}
             disabled={action.disabled || (busy && !pending)}
             loading={pending}
             onClick={onRun}
         >
+            {action.icon}
             {action.label}
         </AppButton>
     );

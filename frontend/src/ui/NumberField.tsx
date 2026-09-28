@@ -23,21 +23,51 @@ import { stepFor, stepValue, type StepUnit } from "./stepPolicy";
 import { useFineAdjustModifier } from "./useFineAdjustModifier";
 import { useNonPassiveWheel } from "../utils/useNonPassiveWheel";
 import { useFrameCommitter, useWheelStepAccumulator } from "./useFrameCommit";
+import { radixSizeFor, useDensity, type AppDensity } from "./density";
 
 export interface AppNumberFieldProps {
     value: number;
-    /** 提交回调（blur / Enter / 滚轮每格）。 */
+    /**
+     * 提交回调（失焦 / Enter / 滚轮手势停止后一帧）。
+     *
+     * 用于**落盘、IPC、checkpoint** 这类昂贵且需要"最终值"的动作。
+     */
     onCommit: (next: number) => void;
+    /**
+     * 实时回调（每次输入 / 滚轮每帧）。
+     *
+     * 用于**实时预览** —— 例如导出对话框里"改区间就刷新路径示例"、
+     * 共振峰工具窗里"改强度就刷新预览"。上一轮迁移时这些字段只接了
+     * `onCommit`，于是预览要等失焦才更新（配套滑块却是实时的，同一量两种手感）。
+     *
+     * 与 `AppSlider` 的 `onChange` / `onCommit` 对称，语义由回调名表达，不需要 mode 开关。
+     */
+    onChange?: (next: number) => void;
     /**
      * 单位语义，决定步长与小数位。
      * 例：`bpm` → 粗调 1 / 精调 0.1；`percent` → 5 / 1。
      */
     unit: StepUnit;
-    min: number;
-    max: number;
+    /**
+     * 上下界。**可选** —— 省略即不夹紧。
+     *
+     * 【为什么不做必填】上一轮把它做成必填，于是每个迁移点都凭空发明了一组界限
+     * （例如原本无上界的导出区间被加上 86400、vibrato 相位被夹到 0–360），
+     * 用户已存数据下次编辑就被静默改掉。要求显式界限是好事，但不能由原语强制。
+     */
+    min?: number;
+    max?: number;
     disabled?: boolean;
-    /** 宽度（px）。默认 72，与既有数字字段一致。 */
+    /**
+     * 宽度（px）。**省略即铺满控件列**（与 `AppField` 的其它控件一致）；
+     * 紧凑表面（工具条）里缺省为 72px。
+     *
+     * 上一轮默认固定 72px，把 13 个原本满宽的字段（各编辑对话框的数值输入）
+     * 压成了左对齐的小盒子。
+     */
     width?: number;
+    /** 密度覆盖，默认继承容器。 */
+    density?: AppDensity;
     /** 字段后缀（如 `px`、`ms`）。 */
     suffix?: ReactNode;
     /** 无障碍名称；缺省时用 `aria-label` 传入。 */
@@ -62,17 +92,22 @@ export interface AppNumberFieldProps {
 export function AppNumberField({
     value,
     onCommit,
+    onChange,
     unit,
     min,
     max,
     disabled = false,
-    width = 72,
+    width,
+    density,
     suffix,
     ariaLabel,
     className,
 }: AppNumberFieldProps) {
     const spec = stepFor(unit);
     const isFine = useFineAdjustModifier();
+    const resolvedDensity = useDensity(density);
+    // 表单里铺满控件列；紧凑表面里给一个够放 4~5 位数字的固定宽度。
+    const resolvedWidth = width ?? (resolvedDensity === "compact" ? 72 : undefined);
 
     /*
      * 草稿状态。
@@ -102,7 +137,7 @@ export function AppNumberField({
             setDraft({ source: value, text: format(value, spec.decimals) });
             return;
         }
-        const clamped = Math.min(max, Math.max(min, parsed));
+        const clamped = clamp(parsed, min, max);
         setDraft({ source: clamped, text: format(clamped, spec.decimals) });
         if (clamped !== value) onCommit(clamped);
     };
@@ -125,11 +160,19 @@ export function AppNumberField({
         const direction: 1 | -1 = event.deltaY < 0 ? 1 : -1;
         const fine = isFine(event);
         const next = accumulator.advance(value, (base) =>
-            stepValue({ value: base, direction, unit, fine, min, max }),
+            stepValue({
+                value: base,
+                direction,
+                unit,
+                fine,
+                min: min ?? Number.NEGATIVE_INFINITY,
+                max: max ?? Number.POSITIVE_INFINITY,
+            }),
         );
         if (next === value) return;
-        // 草稿立即跟随（本地、廉价），提交按帧合并。
+        // 草稿立即跟随（本地、廉价）；实时回调立即上报；提交按帧合并。
         setDraft({ source: next, text: format(next, spec.decimals) });
+        onChange?.(next);
         committer.schedule(next);
     });
 
@@ -137,18 +180,25 @@ export function AppNumberField({
         <div
             ref={setWheelTarget}
             className={cx("flex items-center gap-1", className)}
-            style={{ width: suffix ? undefined : width }}
+            style={{ width: suffix || resolvedWidth === undefined ? undefined : resolvedWidth }}
         >
             <TextField.Root
                 type="number"
-                size="2"
+                size={radixSizeFor(resolvedDensity)}
                 value={text}
                 min={min}
                 max={max}
                 step={spec.coarse}
                 disabled={disabled}
                 aria-label={ariaLabel}
-                onChange={(event) => setDraft({ source: draft.source, text: event.target.value })}
+                onChange={(event) => {
+                    const raw = event.target.value;
+                    setDraft({ source: draft.source, text: raw });
+                    const parsed = Number(raw);
+                    if (onChange && raw.trim() !== "" && Number.isFinite(parsed)) {
+                        onChange(clamp(parsed, min, max));
+                    }
+                }}
                 onBlur={commitText}
                 onKeyDown={(event) => {
                     if (event.key !== "Enter") return;
@@ -158,11 +208,19 @@ export function AppNumberField({
                     event.preventDefault();
                     commitText();
                 }}
-                style={suffix ? { width } : { width: "100%" }}
+                style={suffix && resolvedWidth !== undefined ? { width: resolvedWidth } : { width: "100%" }}
             />
             {suffix ? <span className="hs-type-caption shrink-0">{suffix}</span> : null}
         </div>
     );
+}
+
+/** 按需夹紧：上下界省略时不夹（保留调用方的原有行为）。 */
+function clamp(value: number, min: number | undefined, max: number | undefined): number {
+    let out = value;
+    if (min !== undefined) out = Math.max(min, out);
+    if (max !== undefined) out = Math.min(max, out);
+    return out;
 }
 
 /** 按小数位格式化，避免 `0.30000000000000004` 出现在输入框里。 */

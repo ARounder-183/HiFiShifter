@@ -1878,6 +1878,8 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                             }
                                                         >
                                                             <AppSelect
+                                                                // 轨道头内的紧凑控件
+                                                                density="compact"
                                                                 value={
                                                                     PITCH_ANALYSIS_ALGO_OPTIONS.includes(
                                                                         track.pitchAnalysisAlgo as

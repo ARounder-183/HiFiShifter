@@ -7876,6 +7876,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             className="inline-flex"
                                         >
                                             <AppSelect
+                                                // 参数编辑器头部是 32px 的紧凑 chrome，邻居是 24px 图标按钮
+                                                density="compact"
                                                 value={currentString}
                                                 onValueChange={(v) =>
                                                     void handleStaticParamChange(param.id, Number(v))
@@ -7925,6 +7927,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 {tAny("algo_label_short")}
                             </Text>
                             <AppSelect
+                                // 同上：头部紧凑条内的控件
+                                density="compact"
                                 value={
                                     ["nsf_hifigan_onnx", "world_dll", "vslib", "none"].includes(
                                         rootTrack.pitchAnalysisAlgo,
