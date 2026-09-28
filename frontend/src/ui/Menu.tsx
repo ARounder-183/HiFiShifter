@@ -109,7 +109,19 @@ export function AppContextMenu({
         [items],
     );
 
-    /** 按实测尺寸夹紧（`useLayoutEffect` 在绘制前完成，无闪动）。 */
+    /**
+     * 按实测尺寸夹紧。
+     *
+     * 【为什么推翻了原先"固定估算高度"的决策】被替换掉的 `NotebookContextMenu`
+     * 里有一段注释，说明它刻意用估算而非测量，理由是"在 layout effect 里同步
+     * setState 会触发级联渲染（React Compiler 会告警）"。那条理由针对的是**告警**，
+     * 不是正确性；而估算的代价是菜单一旦出现换行项（长标签、勾选标记、快捷键列）
+     * 就会被裁掉或跑出视口 —— 用户看到的菜单缺一项，且没有任何报错。
+     *
+     * 现在统一为测量：`useLayoutEffect` 在**绘制前**完成，因此没有视觉闪动；
+     * 多付一次渲染的代价远小于"菜单被裁"。同时消除了同一仓库里两种做法并存
+     * （本组件测量、`DockTabMenu` 估算），后者也已改为测量。
+     */
     useLayoutEffect(() => {
         const el = ref.current;
         if (!el) return;

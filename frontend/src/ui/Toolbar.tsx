@@ -38,6 +38,20 @@ export interface AppToolbarProps {
     trailing?: ReactNode;
     /** 底边分隔线。多数横条需要，浮层标题栏不需要（它贴着自己的内容）。 */
     border?: boolean;
+    /**
+     * 内容放不下时横向滚动。
+     *
+     * 默认 **false**（`overflow: visible`）。上一版默认开了滚动，有两个实测后果：
+     *
+     * 1. **吃掉高度**：26px 的横条里出现 10px 横向滚动条，24px 的按钮放不进
+     *    剩下 16px —— 按钮被压扁。
+     * 2. **裁剪弹层**：CSS 规范规定 `overflow-x: auto` 时 `overflow-y` 计算为
+     *    `auto`，于是该容器成为**裁剪上下文**，放在工具栏里的下拉/气泡会被切掉。
+     *
+     * 因此"不裁剪"是更重要的默认；确实需要滚动的长工具栏显式打开，并且
+     * 打开后**不要在工具栏里放弹层**。
+     */
+    scrollable?: boolean;
     className?: string;
 }
 
@@ -56,6 +70,7 @@ export function AppToolbar({
     leading,
     trailing,
     border = true,
+    scrollable = false,
     className,
 }: AppToolbarProps) {
     return (
@@ -69,11 +84,15 @@ export function AppToolbar({
             style={{ background: "var(--qt-window)" }}
         >
             {/*
-             * 左侧可横向滚动：横条是 chrome，塞不下时应该滚动而不是把按钮挤扁或换行
-             * （换行会让横条高度变化，进而让画布跳动）。`custom-scrollbar` 让滚动条
-             * 细而透明，与其它自定义容器一致。
+             * 默认 `overflow: visible` —— 不裁剪弹层、不产生吃掉高度的滚动条。
+             * 需要滚动的长工具栏由调用方显式打开 `scrollable`（见该属性说明）。
              */}
-            <div className="custom-scrollbar flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+            <div
+                className={cx(
+                    "flex min-w-0 flex-1 items-center gap-1",
+                    scrollable && "custom-scrollbar overflow-x-auto",
+                )}
+            >
                 {leading}
             </div>
             {trailing ? <div className="flex shrink-0 items-center gap-1">{trailing}</div> : null}

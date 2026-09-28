@@ -11,8 +11,10 @@
  * 此前面板注册了却只能在 Window 菜单里被找到。
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+
+import { EDGE_GAP, clampAxisPosition } from "../appTooltipPosition";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { renameForm } from "../../features/dock/dockSlice";
@@ -36,11 +38,8 @@ export interface DockTabMenuProps {
     detachAction?: { labelKey: string; run: () => void } | null;
 }
 
+/** 菜单宽度：与 `AppContextMenu` 的默认 `minWidth` 保持一致。 */
 const MENU_WIDTH = 190;
-/** 单个菜单项的高度（含内边距）。 */
-const MENU_ITEM_PX = 24;
-/** 菜单的纵向内边距 + 分隔线。 */
-const MENU_CHROME_PX = 18;
 
 export function DockTabMenu({
     formId,
@@ -61,19 +60,29 @@ export function DockTabMenu({
     const [renaming, setRenaming] = useState(false);
     const [draft, setDraft] = useState("");
 
-    // 视口夹紧：右键点在屏幕右下角时菜单不能跑出可视区。
-    //
-    // 用**固定估算高度**而不是"先渲染再测量"：后者要在 layout effect 里同步
-    // setState（触发级联渲染，React Compiler 会就此告警），而菜单项高度本来就是
-    // 确定的常量。估算偏差最多几个像素，视觉上不可见。
-    const itemCount = renaming
-        ? 1
-        : 2 + (detachAction ? 1 : 0) + contributedItems.length;
-    const estimatedHeight = itemCount * MENU_ITEM_PX + MENU_CHROME_PX;
-    const position = {
-        x: Math.min(x, Math.max(0, window.innerWidth - MENU_WIDTH - 4)),
-        y: Math.min(y, Math.max(0, window.innerHeight - estimatedHeight - 4)),
-    };
+    /*
+     * 视口夹紧：右键点在屏幕右下角时菜单不能跑出可视区。
+     *
+     * 与 `AppContextMenu` 统一为**按实测尺寸**夹紧。原先这里是估算（固定 24px
+     * 行高 + 18px chrome），但本菜单有几种高度不确定的内容：重命名输入框、
+     * 贡献项（第三方可以加任意多项，标签长度也不受控）。估算一旦偏低，菜单底部
+     * 就会跑出视口 —— 用户看不到"关闭标签"这一项。测量在绘制前完成，无闪动。
+     */
+    const [position, setPosition] = useState<{ x: number; y: number; ready: boolean }>({
+        x,
+        y,
+        ready: false,
+    });
+    useLayoutEffect(() => {
+        const el = menuRef.current;
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        setPosition({
+            x: clampAxisPosition(x, rect.width, window.innerWidth, 0, EDGE_GAP),
+            y: clampAxisPosition(y, rect.height, window.innerHeight, 0, EDGE_GAP),
+            ready: true,
+        });
+    }, [x, y, renaming, contributedItems.length, detachAction]);
 
     useEffect(() => {
         const onKeyDown = (event: KeyboardEvent) => {
@@ -100,7 +109,12 @@ export function DockTabMenu({
             role="menu"
             data-hs-context-menu="1"
             className="fixed z-qt-menu min-w-[190px] rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg"
-            style={{ left: position.x, top: position.y }}
+            style={{
+                left: position.x,
+                top: position.y,
+                minWidth: MENU_WIDTH,
+                visibility: position.ready ? undefined : "hidden",
+            }}
             onPointerDown={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}
         >
