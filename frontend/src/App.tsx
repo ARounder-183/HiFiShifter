@@ -482,15 +482,6 @@ function detectExternalActionKindFromPath(path: string): ExternalFileActionKind 
     return kind;
 }
 
-/** 近似时长文本（用于"缓存复用节省了多久"的粗略提示）。 */
-function formatApproxDuration(ms: number): string {
-    const seconds = Math.max(0, Math.round(ms / 1000));
-    if (seconds < 60) return `${seconds} s`;
-    const minutes = Math.floor(seconds / 60);
-    const rest = seconds % 60;
-    return rest > 0 ? `${minutes} min ${rest} s` : `${minutes} min`;
-}
-
 function AppInner() {
     const dispatch = useAppDispatch();
     const { t, tf, plural } = useI18n();
@@ -1453,7 +1444,6 @@ function AppInner() {
                         payload?: {
                             diskHits?: number;
                             total?: number;
-                            savedMs?: number;
                         };
                     }) => {
                         if (disposed) return;
@@ -1468,16 +1458,9 @@ function AppInner() {
                         if (!(Number.isFinite(hits) && hits > 0 && total > 0)) return;
                         // 各段都是完整分句、自身不带前导分隔符，由这里统一用
                         // " · " 连接。
-                        let hitText = tf("status_render_cache_summary")
+                        const hitText = tf("status_render_cache_summary")
                             .replace("{hits}", String(hits))
                             .replace("{total}", String(total));
-                        const savedMs = Number(payload.savedMs ?? 0);
-                        if (Number.isFinite(savedMs) && savedMs >= 1000) {
-                            hitText += tf("status_render_cache_saved_suffix").replace(
-                                "{saved}",
-                                formatApproxDuration(savedMs),
-                            );
-                        }
                         showNotice(hitText);
                     },
                 );
