@@ -1472,6 +1472,11 @@ export const zhCN = {
     appearance_accent: "强调色",
     appearance_gray: "灰阶色系",
     appearance_radius: "圆角风格",
+    appearance_radius_none: "无",
+    appearance_radius_small: "小",
+    appearance_radius_medium: "中",
+    appearance_radius_large: "大",
+    appearance_radius_full: "全圆",
     appearance_font: "字体",
 
     appearance_font_system: "系统字体",
@@ -1492,6 +1497,8 @@ export const zhCN = {
     appearance_reset_all_colors_confirm:
         "重置所有颜色？所有自定义颜色覆盖都会被丢弃。此操作无法撤销。",
     appearance_saved_themes: "已保存的主题",
+    appearance_saved_themes_empty:
+        "暂无已保存的主题。导入一份，或修改颜色后点「应用」保存当前外观。",
     appearance_theme_name: "主题名称",
     appearance_custom_theme: "自定义主题",
     appearance_no_custom_colors: "暂无自定义颜色覆盖。点击「新建主题」创建。",

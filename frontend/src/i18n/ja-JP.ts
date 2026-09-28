@@ -1527,6 +1527,11 @@ export const jaJP = {
     appearance_accent: "アクセントカラー",
     appearance_gray: "グレースケール",
     appearance_radius: "角丸スタイル",
+    appearance_radius_none: "なし",
+    appearance_radius_small: "小",
+    appearance_radius_medium: "中",
+    appearance_radius_large: "大",
+    appearance_radius_full: "フル",
     appearance_font: "フォント",
 
     appearance_font_system: "システム",
@@ -1547,6 +1552,8 @@ export const jaJP = {
     appearance_reset_all_colors_confirm:
         "すべてのカラーをリセットしますか？カスタムカラーの上書きはすべて破棄されます。この操作は取り消せません。",
     appearance_saved_themes: "保存済みテーマ",
+    appearance_saved_themes_empty:
+        "保存済みテーマはまだありません。インポートするか、色を変更して「適用」すると現在の外観が保存されます。",
     appearance_theme_name: "テーマ名",
     appearance_custom_theme: "カスタムテーマ",
     appearance_no_custom_colors:

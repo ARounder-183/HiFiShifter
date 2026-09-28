@@ -158,6 +158,11 @@ export const koKR = {
     appearance_accent: "강조색",
     appearance_gray: "회색 계열",
     appearance_radius: "모서리 반경",
+    appearance_radius_none: "없음",
+    appearance_radius_small: "작게",
+    appearance_radius_medium: "보통",
+    appearance_radius_large: "크게",
+    appearance_radius_full: "전체",
     appearance_font: "글꼴",
     appearance_font_system: "시스템 글꼴",
     appearance_font_detect: "시스템 글꼴 감지",
@@ -177,6 +182,8 @@ export const koKR = {
     appearance_reset_all_colors_confirm:
         "모든 색상을 초기화할까요? 모든 사용자 정의 색상 재정의가 삭제됩니다. 이 작업은 되돌릴 수 없습니다.",
     appearance_saved_themes: "저장된 테마",
+    appearance_saved_themes_empty:
+        "저장된 테마가 아직 없습니다. 가져오거나 색상을 수정한 뒤 적용을 눌러 현재 모양을 저장하세요.",
     appearance_theme_name: "테마 이름",
     appearance_custom_theme: "사용자 정의 테마",
     appearance_no_custom_colors: "사용자 정의 색상 오버라이드가 없습니다.",

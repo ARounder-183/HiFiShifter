@@ -132,22 +132,28 @@ export function registerBuiltinPanels(): void {
 
     registerPanel({
         id: PANEL_APPEARANCE,
-        // 复用既有菜单词条（「视图 → 外观设置」）。另起 `appearance` 会得到一个
-        // 查不到的键 —— 面板标题因此会显示成键名本身（`notebook` 就栽在这上面）。
-        titleKey: "menu_appearance_settings",
+        // 复用既有键 `appearance_title`（旧独立窗口的标题，无省略号）。**不能**
+        // 用菜单词条 `menu_appearance_settings`：命令尾的省略号是"点开还有下文"
+        // 的约定，放进窗口标题就成了「外观设置...」这种残缺句（实测泄漏过）。
+        // 另起新键也没必要 —— 键已存在且五语言齐全（`notebook` 就栽在另起键上）。
+        titleKey: "appearance_title",
         singleton: true,
-        defaultWidth: 900,
+        defaultWidth: 560,
         defaultHeight: 640,
-        minWidth: 560,
+        minWidth: 460,
         minHeight: 420,
         /*
-         * 居中浮出，而不是落在某个角。
+         * 560×640，居中浮出，而不是落在某个角。
+         *
+         * 【为什么是 560 宽】它是颜色行（色块 + 标签 + 92px hex 输入）与字体行
+         * （150px 名列 + 预览片段）都不换行的最小舒适宽度。曾经给到 900 ——
+         * 单列表单的每一行都被拉成"跑道"，标签与值之间隔着半屏空白。
          *
          * 右下角锚点是给"随手记"性质的辅助面板用的（记事本、撤销历史）—— 它们
          * 出现在手边即可。外观设置不是那种面板：用户打开它是要**专心改一轮**，
          * 接下来一段时间它都是主焦点，正中最合适，也不会盖住时间轴的轨道头。
          */
-        openAsFloating: { width: 900, height: 640, anchor: "center" },
+        openAsFloating: { width: 560, height: 640, anchor: "center" },
         /*
          * 不进「视图 → 窗口」：那个菜单列的是日常切换的工作面板，低频设置入口
          * 混进去只会稀释常用项。入口留在「视图 → 外观设置」（`openPanel`）。

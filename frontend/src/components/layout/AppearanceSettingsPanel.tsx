@@ -27,6 +27,7 @@ import { useAppDispatch } from "../../app/hooks";
 import { closeForm } from "../../features/dock/dockSlice";
 import { broadcastAppearanceToSatellites } from "../../features/dock/detachBridge";
 import { useI18n } from "../../i18n/I18nProvider";
+import type { MessageKey } from "../../i18n/messages";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import type { AppearanceSettings } from "../../theme/themeTypes";
 import {
@@ -43,7 +44,7 @@ import {
     type ThemeModeSetting,
 } from "../../theme/themeTypes";
 import { getBuiltinThemeColors } from "../../theme/defaultThemes";
-import { AppButton, AppConfirmDialog } from "../../ui";
+import { AppButton, AppConfirmDialog, AppField, AppFormSection, AppStatusChip } from "../../ui";
 import {
     loadCustomThemes,
     loadAppearance,
@@ -141,7 +142,17 @@ const PALETTE_GROUPS: Array<{ labelKey: string; tokens: QtColorToken[] }> = [
     },
 ];
 
-const CARD_CLASS = "rounded-md border border-qt-border bg-qt-panel";
+/**
+ * 圆角档位的可见文字。此前磁贴只有图形、标签是 `sr-only` —— 用户看到的是
+ * 五个无字磁贴，只能靠猜。键名与 `RadixRadius` 一一对应，错位是编译错误。
+ */
+const RADIUS_LABEL_KEYS: Record<RadixRadius, MessageKey> = {
+    none: "appearance_radius_none",
+    small: "appearance_radius_small",
+    medium: "appearance_radius_medium",
+    large: "appearance_radius_large",
+    full: "appearance_radius_full",
+};
 
 /** 主题模式卡片的迷你预览配色：auto = 深浅各半（示意跟随系统）。 */
 const MODE_PREVIEW: Record<
@@ -393,7 +404,7 @@ const SegmentedControl: React.FC<{
     </div>
 );
 
-/** 单个颜色 token 行 */
+/** 单个颜色 token 行：标签列对齐 `AppField` 的表单网格，值区 = 色块 + hex 输入。 */
 const ColorTokenRow: React.FC<{
     label: string;
     color: string;
@@ -405,40 +416,37 @@ const ColorTokenRow: React.FC<{
     const hasPicker = (validHex || validHexAlpha) && !disableNativePicker;
     const previewColor = validHex || validHexAlpha ? color : "#000000";
     return (
-        <div
-            className={
-                "flex items-center gap-2 px-2 py-2 rounded border border-qt-border bg-qt-panel group"
-            }
-        >
-            <label
-                className={`relative shrink-0 ${hasPicker ? "cursor-pointer" : "cursor-default"}`}
-            >
-                <div
-                    className={`w-5 h-5 rounded ${hasPicker ? "transition-transform duration-100 group-hover:scale-110" : ""}`}
-                    style={{
-                        backgroundColor: previewColor,
-                        boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.1)",
-                    }}
-                />
-                {hasPicker && (
-                    <input
-                        type="color"
-                        value={validHex ? color : `#${color.slice(1, 7)}`}
-                        onInput={(e) => onChange((e.target as HTMLInputElement).value)}
-                        onChange={(e) => onChange(e.target.value)}
-                        className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+        <AppField label={label}>
+            <div className="flex items-center justify-end gap-2">
+                <label
+                    className={`relative shrink-0 ${hasPicker ? "cursor-pointer" : "cursor-default"}`}
+                >
+                    <div
+                        className="w-5 h-5 rounded"
+                        style={{
+                            backgroundColor: previewColor,
+                            boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.1)",
+                        }}
                     />
-                )}
-            </label>
-            <span className="text-qt-micro text-qt-text flex-1 truncate">{label}</span>
-            <input
-                type="text"
-                value={color}
-                onChange={(e) => onChange(e.target.value)}
-                className="w-[92px] px-2 py-1 text-qt-micro bg-qt-panel text-qt-text-muted font-mono text-right rounded border border-qt-border focus:text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
-                spellCheck={false}
-            />
-        </div>
+                    {hasPicker && (
+                        <input
+                            type="color"
+                            value={validHex ? color : `#${color.slice(1, 7)}`}
+                            onInput={(e) => onChange((e.target as HTMLInputElement).value)}
+                            onChange={(e) => onChange(e.target.value)}
+                            className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                        />
+                    )}
+                </label>
+                <input
+                    type="text"
+                    value={color}
+                    onChange={(e) => onChange(e.target.value)}
+                    className="w-[92px] px-2 py-1 text-qt-micro bg-qt-base text-qt-text-muted font-mono text-right rounded border border-qt-border focus:text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
+                    spellCheck={false}
+                />
+            </div>
+        </AppField>
     );
 };
 
@@ -452,7 +460,7 @@ export interface AppearanceSettingsPanelProps {
 }
 
 export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = ({ formId }) => {
-    const { tf, plural } = useI18n();
+    const { t, tf, plural } = useI18n();
     const theme = useAppTheme();
     const dispatch = useAppDispatch();
 
@@ -936,64 +944,57 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
          *
          * 不再渲染自带标题栏：浮动窗已经有一条标题栏（`.hs-dock-float-title`），
          * 再画一条会出现**两个标题**。标题由注册表的 `titleKey` 提供。
+         *
+         * 【为什么没有卡片】此前内容是六张同色圆角卡片的堆叠（实测间距 8px、
+         * 页边距 4px），卡中卡让层级消失。分组交给 `AppFormSection` 的留白 +
+         * 节标题 —— 与本应用其它设置表单同一套语言。
          */
-        <div className="flex h-full flex-col overflow-hidden select-none">
-            {/* ═══════ 头部：Tab 切换 + 改动计数 ═══════ */}
-            <div className={`shrink-0 space-y-2 ${CARD_CLASS} mx-1 mt-1 px-3 py-2`}>
-                <div className="flex items-center justify-between gap-3">
-                    <SegmentedControl
-                        tabs={tabItems}
-                        active={activeTab}
-                        onChange={(id) => setActiveTab(id as SettingsTab)}
-                    />
-                    {modifiedColorCount > 0 && (
-                        <span className="hs-type-caption shrink-0 rounded bg-qt-highlight/10 px-2 py-0.5 font-semibold text-qt-highlight">
-                            {plural("appearance_modified_count", modifiedColorCount)}
-                        </span>
-                    )}
-                </div>
+        <div className="flex h-full flex-col overflow-hidden">
+            {/* ═══════ 页眉行：Tab 切换 + 修改计数（唯一一处，不再在颜色节重复） ═══════ */}
+            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-qt-border px-3 py-2">
+                <SegmentedControl
+                    tabs={tabItems}
+                    active={activeTab}
+                    onChange={(id) => setActiveTab(id as SettingsTab)}
+                />
+                {modifiedColorCount > 0 ? (
+                    <AppStatusChip tone="accent">
+                        {plural("appearance_modified_count", modifiedColorCount)}
+                    </AppStatusChip>
+                ) : null}
             </div>
 
             {/* ═══════ 内容区 ═══════ */}
-            <div className="mx-1 mt-1 min-h-0 flex-1 overflow-y-auto custom-scrollbar">
-                <div className="pb-1">
+            <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar px-3">
+                <div className="pb-3">
                     {/* ═══════ Tab: 主题 ═══════ */}
                     {activeTab === "theme" && (
-                        <div className="space-y-2">
-                            {/* ── 工具栏 ── */}
-                            <div
-                                className={`${CARD_CLASS} flex items-center gap-2 flex-wrap px-3 py-2`}
-                            >
-                                <AppButton onClick={() => fileInputRef.current?.click()}>
-                                    {tf("appearance_import_theme")}
-                                </AppButton>
-                                <AppFileInput
-                                    inputRef={fileInputRef}
-                                    accept=".json"
-                                    onFiles={handleImportTheme}
-                                />
-                                <AppButton onClick={handleExportTheme}>
-                                    {tf("appearance_export_theme")}
-                                </AppButton>
-                                {hasCustomColors && (
-                                    <>
-                                        <div className="flex-1" />
+                        <>
+                            {/* ── 已保存主题 ──
+                                节**常显**：导入/导出在节头动作区，不能随"还没有
+                                主题"一起消失 —— 否则第一次导入无处可点。 */}
+                            <AppFormSection
+                                title={tf("appearance_saved_themes")}
+                                action={
+                                    <div className="flex items-center gap-2">
                                         <AppButton
-                                            intent="danger"
-                                            onClick={() => setResetColorsConfirmOpen(true)}
+                                            size="sm"
+                                            onClick={() => fileInputRef.current?.click()}
                                         >
-                                            {tf("appearance_reset_all_colors")}
+                                            {tf("appearance_import_theme")}
                                         </AppButton>
-                                    </>
-                                )}
-                            </div>
-
-                            {/* ── 已保存主题 ── */}
-                            {customThemes.length > 0 && (
-                                <div className={`${CARD_CLASS} p-3 space-y-2`}>
-                                    <span className="hs-type-label font-semibold">
-                                        {tf("appearance_saved_themes")}
-                                    </span>
+                                        <AppFileInput
+                                            inputRef={fileInputRef}
+                                            accept=".json"
+                                            onFiles={handleImportTheme}
+                                        />
+                                        <AppButton size="sm" onClick={handleExportTheme}>
+                                            {tf("appearance_export_theme")}
+                                        </AppButton>
+                                    </div>
+                                }
+                            >
+                                {customThemes.length > 0 ? (
                                     <div className="flex flex-wrap gap-1.5">
                                         {customThemes.map((ct) => {
                                             const isActive = activeThemeId === ct.id;
@@ -1023,33 +1024,31 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                             );
                                         })}
                                     </div>
+                                ) : (
+                                    <p className="hs-type-caption m-0">
+                                        {tf("appearance_saved_themes_empty")}
+                                    </p>
+                                )}
 
-                                    {/* ── 主题名称（内嵌在已保存主题卡片内） ── */}
-                                    {hasCustomColors && (
-                                        <div className="flex items-center gap-2 pt-2 border-t border-[color:var(--qt-divider)]">
-                                            <span className="text-qt-xs text-qt-text-muted shrink-0">
-                                                {tf("appearance_theme_name")}
-                                            </span>
-                                            <input
-                                                type="text"
-                                                value={editThemeName}
-                                                onChange={(e) => {
-                                                    markDraftDirty();
-                                                    setEditThemeName(e.target.value);
-                                                }}
-                                                className="flex-1 rounded border border-qt-border bg-qt-base px-2 py-1.5 text-qt-xs text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
-                                                placeholder={tf("appearance_custom_theme")}
-                                            />
-                                        </div>
-                                    )}
-                                </div>
-                            )}
+                                {/* ── 主题名称：有自定义颜色才需要命名 ── */}
+                                {hasCustomColors && (
+                                    <AppField label={tf("appearance_theme_name")}>
+                                        <input
+                                            type="text"
+                                            value={editThemeName}
+                                            onChange={(e) => {
+                                                markDraftDirty();
+                                                setEditThemeName(e.target.value);
+                                            }}
+                                            className="w-full rounded border border-qt-border bg-qt-base px-2 py-1.5 text-qt-xs text-qt-text transition-colors focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
+                                            placeholder={tf("appearance_custom_theme")}
+                                        />
+                                    </AppField>
+                                )}
+                            </AppFormSection>
 
                             {/* ── 主题模式 ── */}
-                            <div className={`${CARD_CLASS} p-3 space-y-2`}>
-                                <span className="hs-type-label font-semibold">
-                                    {tf("appearance_mode")}
-                                </span>
+                            <AppFormSection title={tf("appearance_mode")}>
                                 <div className="grid grid-cols-3 gap-2">
                                     {(["auto", "dark", "light"] as const).map((mode) => {
                                         const isSelected = theme.modeSetting === mode;
@@ -1058,11 +1057,11 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                             <button
                                                 key={mode}
                                                 className={
-                                                    "flex flex-col items-center gap-2 p-2.5 rounded border transition-all duration-150 " +
-                                                    "cursor-pointer select-none active:scale-[0.98] " +
+                                                    "flex flex-col items-center gap-2 p-2.5 rounded border transition-colors duration-150 " +
+                                                    "cursor-pointer select-none " +
                                                     (isSelected
                                                         ? "border-qt-highlight bg-qt-highlight/12"
-                                                        : "border-qt-border bg-qt-panel hover:bg-qt-hover")
+                                                        : "border-qt-border bg-qt-base hover:bg-qt-hover")
                                                 }
                                                 onClick={() => theme.setMode(mode)}
                                             >
@@ -1098,18 +1097,17 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                         );
                                     })}
                                 </div>
-                            </div>
+                            </AppFormSection>
 
                             {/* ── 强调色 ── */}
-                            <div className={`${CARD_CLASS} p-3 space-y-2`}>
-                                <div className="flex items-center justify-between">
-                                    <span className="hs-type-label font-semibold">
-                                        {tf("appearance_accent")}
-                                    </span>
-                                    <span className="text-qt-3xs text-qt-text-muted/50 font-mono">
+                            <AppFormSection
+                                title={tf("appearance_accent")}
+                                action={
+                                    <span className="hs-type-mono shrink-0 text-qt-text-muted">
                                         {accentColor} {RADIX_ACCENT_HEX[accentColor]}
                                     </span>
-                                </div>
+                                }
+                            >
                                 <div className="flex flex-wrap gap-1">
                                     {RADIX_ACCENT_COLORS.map((c) => {
                                         const isSelected = accentColor === c;
@@ -1119,10 +1117,9 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                                 data-tooltip={c}
                                                 className={
                                                     "w-6 h-6 rounded-md transition-all duration-100 cursor-pointer relative " +
-                                                    "active:scale-90 " +
                                                     (isSelected
-                                                        ? "ring-2 ring-offset-1 ring-qt-text scale-105"
-                                                        : "hover:scale-110 ring-1 ring-transparent hover:ring-white/20")
+                                                        ? "ring-2 ring-offset-1 ring-qt-text"
+                                                        : "ring-1 ring-transparent hover:ring-white/20")
                                                 }
                                                 style={{
                                                     backgroundColor: RADIX_ACCENT_HEX[c],
@@ -1147,13 +1144,10 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                         );
                                     })}
                                 </div>
-                            </div>
+                            </AppFormSection>
 
                             {/* ── 圆角 ── */}
-                            <div className={`${CARD_CLASS} p-3 space-y-2`}>
-                                <span className="hs-type-label font-semibold">
-                                    {tf("appearance_radius")}
-                                </span>
+                            <AppFormSection title={tf("appearance_radius")}>
                                 <div className="flex gap-1.5">
                                     {RADIX_RADIUS_OPTIONS.map((r) => {
                                         const isSelected = radius === r;
@@ -1168,8 +1162,8 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                             <button
                                                 key={r}
                                                 className={
-                                                    "flex-1 flex flex-col items-center gap-1 py-2 rounded " +
-                                                    "transition-all duration-100 cursor-pointer select-none active:scale-[0.97] " +
+                                                    "flex flex-1 flex-col items-center gap-1 py-2 rounded " +
+                                                    "transition-colors duration-100 cursor-pointer select-none " +
                                                     (isSelected
                                                         ? "bg-qt-highlight/12"
                                                         : "bg-qt-base hover:bg-qt-hover")
@@ -1189,47 +1183,46 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                                         opacity: isSelected ? 0.8 : 0.25,
                                                     }}
                                                 />
-                                                <span className="sr-only">{r}</span>
+                                                <span
+                                                    className={
+                                                        isSelected
+                                                            ? "text-qt-micro text-qt-highlight"
+                                                            : "text-qt-micro text-qt-text-muted"
+                                                    }
+                                                >
+                                                    {t(RADIUS_LABEL_KEYS[r])}
+                                                </span>
                                             </button>
                                         );
                                     })}
                                 </div>
-                            </div>
+                            </AppFormSection>
 
                             {/* ── 颜色编辑（单套色卡） ── */}
-                            <div className={`${CARD_CLASS} space-y-3 p-3`}>
-                                <div className="flex items-center justify-between">
-                                    <span className="hs-type-label font-semibold">
-                                        {tf("appearance_tab_colors")}
-                                    </span>
-                                    <span className="text-qt-micro text-qt-text-muted">
-                                        {plural("appearance_modified_count", modifiedColorCount)}
-                                    </span>
-                                </div>
+                            <AppFormSection
+                                title={tf("appearance_tab_colors")}
+                                action={
+                                    hasCustomColors ? (
+                                        <AppButton
+                                            size="sm"
+                                            intent="danger"
+                                            onClick={() => setResetColorsConfirmOpen(true)}
+                                        >
+                                            {tf("appearance_reset_all_colors")}
+                                        </AppButton>
+                                    ) : undefined
+                                }
+                            >
+                                <SegmentedControl
+                                    tabs={PALETTE_GROUPS.map((group) => ({
+                                        id: group.labelKey,
+                                        label: tf(group.labelKey),
+                                    }))}
+                                    active={activePaletteGroup}
+                                    onChange={(id) => setActivePaletteGroup(id)}
+                                />
 
-                                <div className="flex items-center gap-1 p-1 rounded border border-qt-border bg-qt-panel">
-                                    {PALETTE_GROUPS.map((group) => {
-                                        const active = activePaletteGroup === group.labelKey;
-                                        return (
-                                            <button
-                                                key={group.labelKey}
-                                                className={
-                                                    "px-2.5 py-1 text-qt-micro rounded transition-colors " +
-                                                    (active
-                                                        ? "bg-qt-highlight text-white"
-                                                        : "text-qt-text-muted hover:bg-qt-hover hover:text-qt-text")
-                                                }
-                                                onClick={() =>
-                                                    setActivePaletteGroup(group.labelKey)
-                                                }
-                                            >
-                                                {tf(group.labelKey)}
-                                            </button>
-                                        );
-                                    })}
-                                </div>
-
-                                <div className="space-y-1">
+                                <div className="flex flex-col gap-1">
                                     {(
                                         PALETTE_GROUPS.find(
                                             (group) => group.labelKey === activePaletteGroup,
@@ -1243,92 +1236,92 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                         />
                                     ))}
                                 </div>
-                            </div>
-                        </div>
+                            </AppFormSection>
+                        </>
                     )}
 
                     {/* ═══════ Tab: 字体 ═══════ */}
                     {activeTab === "font" && (
-                        <div className="space-y-2">
-                            {/* 字体输入 */}
-                            <div className={`${CARD_CLASS} p-3 space-y-2`}>
-                                <span className="hs-type-label font-semibold">
-                                    {tf("appearance_font")}
-                                </span>
-                                <div className="flex items-center gap-2">
-                                    <input
-                                        type="text"
-                                        value={fontFamily}
-                                        onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                                            markDraftDirty();
-                                            setFontFamily(e.target.value);
-                                        }}
-                                        className="flex-1 rounded-xl border border-[color:var(--qt-divider)] bg-qt-surface/40 px-3 py-2 text-qt-xs text-qt-text font-mono focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
-                                        placeholder={DEFAULT_FONT_FAMILY}
-                                        spellCheck={false}
-                                    />
-                                    <AppButton
-                                        onClick={() => {
-                                            markDraftDirty();
-                                            setFontFamily(DEFAULT_FONT_FAMILY);
-                                        }}
-                                    >
-                                        {tf("appearance_reset")}
-                                    </AppButton>
-                                    <AppButton
-                                        onClick={() => {
-                                            markDraftDirty();
-                                            setFontFamily(DEFAULT_FONT_FAMILY);
-                                            setFontSearch("");
-                                        }}
-                                    >
-                                        {tf("appearance_font_restore_default")}
-                                    </AppButton>
-                                </div>
+                        <>
+                            <AppFormSection
+                                title={tf("appearance_font")}
+                                action={
+                                    <div className="flex items-center gap-2">
+                                        <AppButton
+                                            size="sm"
+                                            onClick={() => {
+                                                markDraftDirty();
+                                                setFontFamily(DEFAULT_FONT_FAMILY);
+                                            }}
+                                        >
+                                            {tf("appearance_reset")}
+                                        </AppButton>
+                                        <AppButton
+                                            size="sm"
+                                            onClick={() => {
+                                                markDraftDirty();
+                                                setFontFamily(DEFAULT_FONT_FAMILY);
+                                                setFontSearch("");
+                                            }}
+                                        >
+                                            {tf("appearance_font_restore_default")}
+                                        </AppButton>
+                                    </div>
+                                }
+                            >
+                                <input
+                                    type="text"
+                                    value={fontFamily}
+                                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                                        markDraftDirty();
+                                        setFontFamily(e.target.value);
+                                    }}
+                                    className="w-full rounded-md border border-[color:var(--qt-divider)] bg-qt-surface/40 px-3 py-2 text-qt-xs text-qt-text font-mono focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
+                                    placeholder={DEFAULT_FONT_FAMILY}
+                                    spellCheck={false}
+                                />
 
                                 {/* 字体预览 */}
                                 <div
                                     className="rounded border border-qt-border bg-qt-base px-3 py-3 text-qt-text"
                                     style={{ fontFamily }}
                                 >
-                                    <div className="text-qt-md mb-1.5 leading-relaxed">
+                                    <div className="hs-type-body mb-1.5">
                                         The quick brown fox jumps over the lazy dog.
                                     </div>
-                                    <div className="text-qt-md mb-1.5 leading-relaxed">
+                                    <div className="hs-type-body mb-1.5">
                                         中文字体预览：你好世界 1234567890
                                     </div>
-                                    <div className="text-qt-micro text-qt-text-muted">
+                                    <div className="hs-type-caption">
                                         ABCDEFG abcdefg !@#$%^&*()
                                     </div>
                                 </div>
-                            </div>
+                            </AppFormSection>
 
-                            {/* 系统字体列表 */}
-                            <div className={`${CARD_CLASS} p-3 space-y-2`}>
-                                <div className="flex items-center justify-between gap-3">
-                                    <div className="flex items-center gap-2">
-                                        <span className="hs-type-label font-semibold">
-                                            {tf("appearance_font_system")}
-                                        </span>
-                                        {availableFonts.length > 0 && (
-                                            <span className="rounded-full bg-qt-surface/60 px-2 py-0.5 text-qt-micro text-qt-text-muted">
-                                                {tf("appearance_font_count").replace(
-                                                    "{count}",
-                                                    String(availableFonts.length),
-                                                )}
-                                            </span>
-                                        )}
-                                    </div>
-                                    <AppButton onClick={() => void systemFonts.detect(true)}>
+                            <AppFormSection
+                                title={tf("appearance_font_system")}
+                                description={
+                                    availableFonts.length > 0
+                                        ? tf("appearance_font_count").replace(
+                                              "{count}",
+                                              String(availableFonts.length),
+                                          )
+                                        : undefined
+                                }
+                                action={
+                                    <AppButton
+                                        size="sm"
+                                        onClick={() => void systemFonts.detect(true)}
+                                    >
                                         {systemFonts.loading
                                             ? tf("appearance_font_detecting")
                                             : tf("appearance_font_detect")}
                                     </AppButton>
-                                </div>
-
+                                }
+                            >
                                 {/* 加载中 */}
                                 {availableFonts.length === 0 && (
-                                    <div className="flex items-center gap-2 rounded-xl border border-dashed border-[color:var(--qt-divider)] bg-qt-base/35 px-3 py-3 text-qt-xs text-qt-text-muted">
+                                    <div className="flex items-center gap-2 rounded-md border border-dashed border-[color:var(--qt-divider)] bg-qt-base/35 px-3 py-3 text-qt-xs text-qt-text-muted">
                                         {systemFonts.loading ? (
                                             <>
                                                 <span className="animate-spin inline-block w-3 h-3 border-2 border-qt-text-muted/20 border-t-qt-highlight rounded-full" />
@@ -1353,7 +1346,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                                 onChange={(e: ChangeEvent<HTMLInputElement>) =>
                                                     setFontSearch(e.target.value)
                                                 }
-                                                className="w-full rounded-xl border border-[color:var(--qt-divider)] bg-qt-surface/40 py-2 pl-8 pr-8 text-qt-xs text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
+                                                className="w-full rounded-md border border-[color:var(--qt-divider)] bg-qt-surface/40 py-2 pl-8 pr-8 text-qt-xs text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
                                                 placeholder={tf(
                                                     "appearance_font_search_placeholder",
                                                 )}
@@ -1391,7 +1384,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                                         <button
                                                             key={f}
                                                             className={
-                                                                "w-full rounded-xl border px-3 py-2 text-left transition-colors duration-100 " +
+                                                                "w-full rounded-md border px-3 py-2 text-left transition-colors duration-100 " +
                                                                 "cursor-pointer select-none text-qt-xs flex items-center gap-3 " +
                                                                 (isActive
                                                                     ? "border-qt-highlight/25 bg-qt-highlight/12 text-qt-highlight"
@@ -1430,14 +1423,14 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                         </div>
                                     </>
                                 )}
-                            </div>
-                        </div>
+                            </AppFormSection>
+                        </>
                     )}
                 </div>
             </div>
 
             {/* ═══════ 底部按钮 ═══════ */}
-            <div className="mx-auto mt-1 flex w-full max-w-[920px] items-center justify-end gap-2 border-t border-qt-border px-1 pt-1.5 shrink-0">
+            <div className="flex shrink-0 items-center justify-end gap-2 border-t border-qt-border px-3 py-2">
                 <AppButton onClick={handleClose}>{tf("close")}</AppButton>
                 <AppButton intent="primary" onClick={handleApply}>
                     {tf("appearance_apply")}

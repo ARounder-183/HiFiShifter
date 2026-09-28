@@ -1474,6 +1474,11 @@ export const zhTW = {
     appearance_accent: "強調色",
     appearance_gray: "灰階色系",
     appearance_radius: "圓角風格",
+    appearance_radius_none: "無",
+    appearance_radius_small: "小",
+    appearance_radius_medium: "中",
+    appearance_radius_large: "大",
+    appearance_radius_full: "全圓",
     appearance_font: "字型",
 
     appearance_font_system: "系統字型",
@@ -1494,6 +1499,8 @@ export const zhTW = {
     appearance_reset_all_colors_confirm:
         "重設所有顏色？所有自訂顏色覆寫都會被捨棄。此操作無法復原。",
     appearance_saved_themes: "已儲存的主題",
+    appearance_saved_themes_empty:
+        "尚無已儲存的主題。匯入一份，或修改顏色後點「套用」儲存目前外觀。",
     appearance_theme_name: "主題名稱",
     appearance_custom_theme: "自訂主題",
     appearance_no_custom_colors: "尚無自訂顏色覆寫。點擊「新建主題」建立。",

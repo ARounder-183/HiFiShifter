@@ -1653,6 +1653,11 @@ export const enUS = {
     appearance_accent: "Accent",
     appearance_gray: "Gray",
     appearance_radius: "Radius",
+    appearance_radius_none: "None",
+    appearance_radius_small: "Small",
+    appearance_radius_medium: "Medium",
+    appearance_radius_large: "Large",
+    appearance_radius_full: "Full",
     appearance_font: "Font",
 
     appearance_font_system: "System",
@@ -1673,6 +1678,8 @@ export const enUS = {
     appearance_reset_all_colors_confirm:
         "Reset all colors? Every custom color override is discarded. This cannot be undone.",
     appearance_saved_themes: "Saved Themes",
+    appearance_saved_themes_empty:
+        "No saved themes yet. Import one, or apply modified colors to save the current look.",
     appearance_theme_name: "Theme Name",
     appearance_custom_theme: "Custom Theme",
     appearance_no_custom_colors: 'No custom color overrides. Click "New Theme" to create one.',
