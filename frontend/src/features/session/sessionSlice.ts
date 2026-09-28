@@ -2391,6 +2391,8 @@ const sessionSlice = createSlice({
             const track = state.tracks.find((entry) => entry.id === action.payload.trackId);
             if (track) {
                 track.name = action.payload.name;
+                // 同上：轨道名是工程数据。
+                markProjectDirty(state.project);
             }
         },
         setTrackMeters(state, action: PayloadAction<Record<string, TrackMeterInfo>>) {
@@ -3155,6 +3157,8 @@ const sessionSlice = createSlice({
             const track = state.tracks.find((entry) => entry.id === action.payload.trackId);
             if (track) {
                 track.volume = clamp(action.payload.volume, 0, MAX_TRACK_VOLUME);
+                // 轨道音量写进工程文件：改了不标脏，切工程时会被静默丢弃。
+                markProjectDirty(state.project);
             }
         },
         addAutomationPoint(
@@ -5275,6 +5279,7 @@ const sessionSlice = createSlice({
             .addCase(setTempoMapRemote.fulfilled, (state, action) => {
                 const payload = action.payload as {
                     ok?: boolean;
+                    project?: { dirty?: boolean };
                 } & TimelineState;
                 if (!payload.ok || !payload.tracks || !payload.clips) {
                     return;
@@ -5313,6 +5318,19 @@ const sessionSlice = createSlice({
                 // 地图未变（纯回声）时不再递增：没有任何音阶变化需要重渲染。
                 if (tempoMapChanged) {
                     state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
+                }
+                /*
+                 * 【为什么必须在**接受分支**里标脏，而不是用 `tempoMapChanged`】
+                 * BPM / 拍号的编辑是乐观更新：提交前本地已 `setTempoMap(nextMap)`，
+                 * 后端回声与本地完全一致 —— 上面的"纯回声"判据在此恒为 false，
+                 * 拿它当脏标记条件等于永不标脏（这正是本处曾经的缺口：改 BPM 后
+                 * "新建工程"不询问、静默丢弃）。后端若在响应里回报 `project.dirty`
+                 * 就以它为准（与基础音阶/时间线设置那几条一致），否则视为已修改。
+                 */
+                if (typeof payload.project?.dirty === "boolean") {
+                    state.project.dirty = payload.project.dirty;
+                } else {
+                    markProjectDirty(state.project);
                 }
                 state.status = "Tempo map updated";
             })
@@ -6110,10 +6128,14 @@ const sessionSlice = createSlice({
             .addCase(addTrackRemote.fulfilled, (state, action) => {
                 const payload = action.payload as {
                     ok?: boolean;
+                    project?: { dirty?: boolean };
                 } & TimelineState;
                 if (!payload.ok) {
                     return;
                 }
+                // 增删轨道是工程结构变更：与 clip 级 reducer 一样必须标脏，
+                // 否则"加了轨道 → 新建工程"会静默丢弃（与 Tempo Map 同款缺口）。
+                markProjectDirty(state.project);
                 // 交互锁期间（如拖拽中）仅同步轨道列表，
                 // 避免 add_track 的后端快照覆盖前端 clip 乐观位置并产生闪烁。
                 if (state._interactionLockCount > 0) {
@@ -6130,6 +6152,7 @@ const sessionSlice = createSlice({
                 if (!payload.ok) {
                     return;
                 }
+                markProjectDirty(state.project);
                 applyTimelineState(state, payload, { force: true });
             })
 
