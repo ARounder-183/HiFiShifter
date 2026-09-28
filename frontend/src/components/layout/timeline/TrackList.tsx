@@ -1362,7 +1362,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                         e.stopPropagation();
                     }
                 }}
-                className="flex-1 relative overflow-y-auto custom-scrollbar hide-v-scrollbar"
+                className="flex-1 relative overflow-y-auto custom-scrollbar hide-v-scrollbar no-scroll-anchor"
                 onScroll={(e) => {
                     const nextScrollTop = (e.currentTarget as HTMLDivElement).scrollTop;
                     // 【为什么这里要量化】内核模式下本容器每帧都被镜像回写，

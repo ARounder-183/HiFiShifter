@@ -5294,6 +5294,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         // 被误当成用户输入收下，形成「内核 → DOM → 内核」的回退循环。
         const host = kernelHostRef.current;
         if (host != null) {
+            // 画布竖直缩放在途（React 行高未落地）：窗口内的 scroll 事件是内容高
+            // 变化的钳制回弹 / 滚动锚定补偿，与"上次写入值"必然不符，绝不能当用户
+            // 输入回灌——否则会把视口从锚点位置拽回（竖直抽动）。位置由宿主在行高
+            // 落地后补写，见 `verticalZoomInFlight`。
+            if (host.isVerticalZoomInFlight()) {
+                return;
+            }
             if (
                 isMirrorEcho({
                     mirroredPx: host.getMirroredTrackListScrollTop(),

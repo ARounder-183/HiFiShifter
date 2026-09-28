@@ -126,6 +126,11 @@ import {
     scrollbarContentSizePx,
 } from "../../../renderKernel/scrollbars";
 import { normalizeWheelDelta } from "../input/normalizeWheel";
+import {
+    createVerticalZoomFlight,
+    shouldSettleVerticalZoom,
+    type VerticalZoomFlight,
+} from "../input/verticalZoomSettle";
 // 拖拽边缘自动滚屏：内核自绘滚动没有浏览器兜底，缺了它 clip 拖到视口边缘就再也
 // 无法继续右移（设计文档早已承诺、此前未实现）。
 import { resolveDragEdgeScroll, shouldAutoScrollForGesture } from "../input/dragAutoScroll";
@@ -1082,9 +1087,22 @@ export interface TimelineKernelHost {
      * "宿主刚写过的值"作基准才能判出来。写这个值的地方只有宿主（`syncDom`），
      * 因此只能由宿主提供。判据见 `timeline/scrollEcho`。
      *
-     * @returns 上次镜像写入值（CSS px）；从未写过时为 `NaN`。
+     * @returns 上次镜像写入后容器**实际接受**的位置（CSS px）；从未写过时为 `NaN`。
+     *   取读回值而非请求值：浏览器可能按设备像素量化，或在内容高未及时更新时钳制，
+     *   以读回值为基准才能让这类被修正的写入同样被认作回声（见 `mirrorTrackListScrollTop`）。
      */
     getMirroredTrackListScrollTop(): number;
+    /**
+     * 当前是否有画布竖直缩放在途（React 行高尚未落地）。
+     *
+     * 【为什么面板需要它】在途窗口内轨道头报来的 scroll 事件（内容高变化的钳制回弹、
+     * 浏览器滚动锚定补偿）与"上次写入值"不符，会被 `isMirrorEcho` 误判为用户输入。
+     * 面板据此把窗口内的回灌一律视为回声；位置由宿主在行高落地后补写（见宿主内
+     * `verticalZoomInFlight` 的机制说明）。
+     *
+     * @returns 有竖直缩放在途时为 true。
+     */
+    isVerticalZoomInFlight(): boolean;
     /**
      * 原子地设置缩放与横向滚动位置（键盘缩放 / 视图同步）。
      *
@@ -1201,6 +1219,15 @@ const VERTICAL_OVERSCAN_ROWS = 2;
 
 /** 自绘滚动条厚度（CSS px），与视图中的 thumb 容器一致。 */
 const SCROLLBAR_SIZE_PX = 8;
+
+/**
+ * 竖直缩放的"在途"兜底超时（毫秒）。
+ *
+ * 画布竖直缩放等待 React 行高落地后才补写轨道头位置（见 `verticalZoomInFlight`）。
+ * 正常一个提交周期内就会落地；超时仅在宿主脱离 React（测试环境）或行高被外部改成
+ * 别的值时兜底，避免镜像写入被永久跳过。
+ */
+const VERTICAL_ZOOM_SETTLE_TIMEOUT_MS = 250;
 
 /**
  * 水平滚动向 React 量化提交的步长（CSS px）。
@@ -1937,6 +1964,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (d.rowHeight !== lastMirroredRowHeight) {
             lastMirroredRowHeight = d.rowHeight;
             scroll.setRowHeight(d.rowHeight);
+            // React 行高已落地：结算在途的竖直缩放（补写轨道头位置，见该状态的说明）。
+            settleVerticalZoom();
         }
         const needsRebuild =
             sceneDirty ||
@@ -2035,6 +2064,22 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     // 但重复写同一个值会白白触发样式重算，因此只在跨过阈值时写。
     let lastRulerTranslateX = Number.NaN;
     let lastTrackListScrollTop = Number.NaN;
+    /**
+     * 竖直缩放的"在途"提交；非空期间**跳过**轨道头镜像写入。
+     *
+     * 【为什么需要】画布竖直缩放由内核**当帧**原子提交（行高 + 锚点 scrollTop，
+     * 见 `onWheel` 的 vertical-zoom 分支），而 React 侧行高要等下一次提交才落地。
+     * 若此刻把新 scrollTop 同步镜像进轨道头 DOM，容器还是**旧行高**的内容高 ——
+     * 新位置一旦超过旧上限就被浏览器钳制；且该钳制/滚动锚定产生的 scroll 事件与
+     * "上次写入值"不符，会被 `isMirrorEcho` 判成用户输入反灌内核，把视口从锚点位置
+     * 拽回。每格缩放"先跳到位再被拽回"，即用户报告的竖直抽动（悬停轨道头无此问题：
+     * 那里 DOM 先行、内核跟随，方向一致无对抗）。
+     *
+     * 处置：在途期间跳过镜像写入；等 React 行高落地（`ensureScene` 里镜像到同一值，
+     * 或兜底超时）后由 `settleVerticalZoom` 补写一次。其间轨道头位置不变（配合
+     * `.no-scroll-anchor` 也不会被浏览器改写），因此不会产生误导性的 scroll 事件。
+     */
+    let verticalZoomInFlight: VerticalZoomFlight | null = null;
     /**
      * 播放头元素（轨道区竖线 / 标尺竖线 / 标尺倒三角）的写入器。
      *
@@ -2200,10 +2245,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
         const trackList = dom.trackListScroller;
         if (trackList != null) {
-            // 容差 0.5px：与调用方的回灌判定同量级，避免「内核 → DOM → 内核」循环。
-            if (shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)) {
-                lastTrackListScrollTop = view.scrollTop;
-                trackList.scrollTop = view.scrollTop;
+            // 竖直缩放在途时**不得**写入（见 `verticalZoomInFlight`）：此刻 DOM 还是
+            // 旧行高，写入会被钳制并触发回声反灌。等 `settleVerticalZoom` 补写。
+            if (verticalZoomInFlight == null) {
+                // 容差 0.5px：与调用方的回灌判定同量级，避免「内核 → DOM → 内核」循环。
+                if (shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)) {
+                    trackList.scrollTop = view.scrollTop;
+                    // 读回值作回声基准（与 `mirrorTrackListScrollTop` 同一约定）。
+                    lastTrackListScrollTop = trackList.scrollTop;
+                }
             }
         }
 
@@ -2397,13 +2447,44 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * （见 `timeline/scrollEcho` 与 `getMirroredTrackListScrollTop`）。
      */
     function mirrorTrackListScrollTop(): void {
+        // 竖直缩放在途：此刻轨道头 DOM 还是旧行高，写入会被钳制（见
+        // `verticalZoomInFlight`）。跳过，等行高落地后由 `settleVerticalZoom` 补写。
+        if (verticalZoomInFlight != null) return;
         const trackList = sync?.trackListScroller?.() ?? null;
         if (trackList == null) return;
         const view = scroll.get();
         if (shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)) {
-            lastTrackListScrollTop = view.scrollTop;
             trackList.scrollTop = view.scrollTop;
+            // 记录**读回值**而非请求值：浏览器可能在内容高未及时更新时钳制写入
+            // （轨道头 DOM 的内容高由 React 行渲染决定，未必与内核上限逐像素相等）。
+            // 以读回值为回声基准，这次钳制就不会被误判成用户输入而把内核拽回 ——
+            // 这是"防拽回"的最后一道防线（见 `timeline/scrollEcho`）。
+            lastTrackListScrollTop = trackList.scrollTop;
         }
+    }
+
+    /**
+     * 结算在途的竖直缩放：React 行高落地（或兜底超时）后补写一次轨道头位置。
+     *
+     * 由 `ensureScene` 在检测到 React 行高变化时调用（每帧一处，且行高一变就立即结算）。
+     * 见 `verticalZoomInFlight` 的完整机制说明。
+     */
+    function settleVerticalZoom(): void {
+        const flight = verticalZoomInFlight;
+        if (flight == null) return;
+        if (
+            !shouldSettleVerticalZoom({
+                flight,
+                landedRowHeight: data().rowHeight,
+                nowMs: performance.now(),
+                timeoutMs: VERTICAL_ZOOM_SETTLE_TIMEOUT_MS,
+            })
+        ) {
+            return;
+        }
+        // 先清标志再补写：`mirrorTrackListScrollTop` 依赖它为 null 才会真正写入。
+        verticalZoomInFlight = null;
+        mirrorTrackListScrollTop();
     }
 
     const unsubscribeScroll = scroll.subscribe(() => {
@@ -2599,6 +2680,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // "纵向缩放会导致纵向滚动"。原子提交后两者同帧自洽。
             // React 侧的 `onRowHeightChange` 仍要发（轨道头行高与内核必须同源）；
             // 它落地时值已与内核一致，不会二次跳动。
+            //
+            // 【必须在提交**之前**标记在途】提交的订阅回调会**同步**执行轨道头镜像
+            // 写入；此刻 React 行高尚未落地，写入会被旧内容高钳制并触发回声反灌
+            // （见 `verticalZoomInFlight`）。先标记，镜像才会跳过、改由
+            // `settleVerticalZoom` 在行高落地后补写。
+            verticalZoomInFlight = createVerticalZoomFlight(nextRowHeight, performance.now());
             scroll.setRowHeightAndScrollTop(
                 nextRowHeight,
                 rowUnitAtPointer * nextRowHeight - pointerY,
@@ -5575,6 +5662,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
         getMirroredTrackListScrollTop() {
             return lastTrackListScrollTop;
+        },
+
+        isVerticalZoomInFlight() {
+            return verticalZoomInFlight != null;
         },
 
         setViewport(next: { pxPerSec?: number; scrollLeft?: number }) {
