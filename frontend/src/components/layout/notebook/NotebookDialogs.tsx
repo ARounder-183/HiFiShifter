@@ -13,6 +13,8 @@ import type { NotebookAssetSummary } from "../../../features/notebook/notebookSl
 import { useI18n } from "../../../i18n/I18nProvider";
 import { notebookApi } from "../../../services/api/notebook";
 import { AppSelect } from "../../../ui";
+import { ClipboardIcon, ImageIcon } from "@radix-ui/react-icons";
+
 import { AppButton } from "../../../ui";
 import { AppDialog } from "../../../ui/Dialog";
 import { AppField, AppForm, AppSwitchRow } from "../../../ui/Field";
@@ -190,7 +192,7 @@ function AttachmentThumb({ entry }: { entry: NotebookAssetSummary }) {
     }
     return (
         <span className="hs-notebook-attachment-thumb grid place-items-center text-qt-text-muted">
-            {isImage ? "🖼" : "📋"}
+            {isImage ? <ImageIcon /> : <ClipboardIcon />}
         </span>
     );
 }

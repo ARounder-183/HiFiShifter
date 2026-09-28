@@ -1,16 +1,33 @@
 /*
  * 记事本格式化工具栏 + `/` 斜杠插入菜单。
  *
- * 工具栏刻意用**文字字形**（B / I / S / `<>` / H1 …）而不是图标包：Markdown
- * 的标记本身就是文字，字形与"这段会变成什么语法"一一对应，比抽象图标更
- * 直观，也不用为 20 个按钮去挑图标。
+ * 【两套符号，各有理由】Markdown 的标记型按钮刻意用**文字字形**
+ * （B / I / S / `<>` / H1 / • / 1. / { } / ―）：标记本身就是文字，字形与
+ * "这段会变成什么语法"一一对应。
+ *
+ * 而**图示型动作**（链接 / 图片 / 表格 / 时间码 / 片段引用 / 暂存到暂存区 /
+ * 工程信息 / 任务清单 / 引用）此前用 emoji（🔗 🖼 ▦ ⏱ ✂ 📋 ℹ ☑ ❝）——
+ * emoji 的渲染随平台与字体变化（Windows 上是彩色字形、macOS 上是另一套），
+ * 同一排按钮里深浅与尺寸都不齐，和其余按钮的线性图标语言也冲突。它们没有
+ * "语法自示"的价值，改用 `@radix-ui/react-icons`。
  *
  * 所有按钮都走 `editor.chain()` 命令，因此在源码视图（不挂编辑器）下工具栏
  * 会被整体隐藏 —— 面板负责这件事。
  */
 
 import type { Editor } from "@tiptap/core";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import {
+    CheckboxIcon,
+    ClipboardIcon,
+    ImageIcon,
+    InfoCircledIcon,
+    Link2Icon,
+    QuoteIcon,
+    ScissorsIcon,
+    TableIcon,
+    TimerIcon,
+} from "@radix-ui/react-icons";
 
 import { useI18n } from "../../../i18n/I18nProvider";
 import { insertTable, type ToolbarInsertHandlers } from "./notebookInsert";
@@ -128,13 +145,13 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
                     onClick={() => editor.chain().focus().toggleOrderedList().run()}
                 />
                 <ToolbarButton
-                    label="☑"
+                    label={<CheckboxIcon />}
                     tooltip={t("notebook_toolbar_task_list")}
                     active={editor.isActive("taskList")}
                     onClick={() => editor.chain().focus().toggleTaskList().run()}
                 />
                 <ToolbarButton
-                    label="❝"
+                    label={<QuoteIcon />}
                     tooltip={t("notebook_toolbar_quote")}
                     active={editor.isActive("blockquote")}
                     onClick={() => editor.chain().focus().toggleBlockquote().run()}
@@ -151,18 +168,18 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
 
             <div className="hs-notebook-toolbar-group">
                 <ToolbarButton
-                    label="🔗"
+                    label={<Link2Icon />}
                     tooltip={shortcut("notebook_toolbar_link")}
                     active={editor.isActive("link") || linkDraft !== null}
                     onClick={() => setLinkDraft(String(editor.getAttributes("link").href ?? ""))}
                 />
                 <ToolbarButton
-                    label="🖼"
+                    label={<ImageIcon />}
                     tooltip={t("notebook_toolbar_image")}
                     onClick={handlers.insertImage}
                 />
                 <ToolbarButton
-                    label="▦"
+                    label={<TableIcon />}
                     tooltip={t("notebook_toolbar_table")}
                     onClick={() => insertTable(editor)}
                 />
@@ -177,22 +194,22 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
 
             <div className="hs-notebook-toolbar-group">
                 <ToolbarButton
-                    label="⏱"
+                    label={<TimerIcon />}
                     tooltip={t("notebook_toolbar_timecode")}
                     onClick={handlers.insertTimecode}
                 />
                 <ToolbarButton
-                    label="✂"
+                    label={<ScissorsIcon />}
                     tooltip={t("notebook_toolbar_clip_ref")}
                     onClick={handlers.insertClipReference}
                 />
                 <ToolbarButton
-                    label="📋"
+                    label={<ClipboardIcon />}
                     tooltip={t("notebook_toolbar_stage_clipboard")}
                     onClick={handlers.stageClipboard}
                 />
                 <ToolbarButton
-                    label="ℹ"
+                    label={<InfoCircledIcon />}
                     tooltip={t("notebook_toolbar_project_info")}
                     onClick={handlers.insertProjectInfo}
                 />
@@ -268,7 +285,8 @@ function ToolbarButton({
     strike,
     onClick,
 }: {
-    label: string;
+    /** 文字字形或图标（图示型动作用图标，见文件头）。 */
+    label: ReactNode;
     /** 悬停提示文本；渲染为项目自定义 tooltip 的 `data-tooltip`。 */
     tooltip: string;
     active?: boolean;
