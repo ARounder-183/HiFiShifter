@@ -83,6 +83,7 @@ pub(crate) fn render_timeline_to_wav(
             output: crate::encode::OutputSpec::wav_32f(),
             quality_preset: crate::mixdown::QualityPreset::Export,
             cancel_flag: None,
+            progress: None,
         },
     )
 }

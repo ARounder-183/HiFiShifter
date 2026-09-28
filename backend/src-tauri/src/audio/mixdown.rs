@@ -4,7 +4,8 @@ use crate::time_stretch::{time_stretch_interleaved, StretchAlgorithm};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 // ─── 导出格式与质量预设 ────────────────────────────────────────────────────────
 
@@ -47,6 +48,17 @@ pub struct MixdownOptions {
     pub quality_preset: QualityPreset,
     /// 可选取消标记：为 true 时中断渲染并返回 `export_cancelled`。
     pub cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// 可选进度回调：参数为**整体**进度（`0.0..=1.0`，单调不减）。
+    ///
+    /// 【语义】`render_mixdown_to_file` 的整体进度 = 混音相位 `[0, 0.92]` +
+    /// 编码相位 `(0.92, 1.0]`。节流（≥50ms）与单调由实现内部保证，回调方不必
+    /// 自己限频。直接调用 `render_mixdown_interleaved` 时参数是**混音比例**
+    /// （`0.0..=1.0`，不含编码）且**不节流**——生产路径请走 `render_mixdown_to_file`。
+    ///
+    /// 【为什么用独立通道而非复用 `renderer::progress`】后者是 `OnceLock` 进程级
+    /// 单例，与后台渲染 pass 并发会互相污染计数器/回调；导出走 `spawn_blocking`，
+    /// 必须与之隔离。
+    pub progress: Option<ProgressCallback>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +77,152 @@ fn mixdown_cancelled(opts: &MixdownOptions) -> bool {
         .as_ref()
         .map(|flag| flag.load(Ordering::Relaxed))
         .unwrap_or(false)
+}
+
+/// 导出进度回调（进度值恒在 `0.0..=1.0`）。
+///
+/// 【为什么包成 newtype 而不是裸 `Arc<dyn Fn>`】`MixdownOptions` 派生 `Debug`，
+/// 而 `Arc<dyn Fn>` 不实现 `Debug`——直接放进结构体会让整个结构体失去 `Debug`
+/// （调用点用 `{:?}` 打印过它）。包一层并手写 `Debug`（只打印占位符）即可保留
+/// 其余字段的派生。
+#[derive(Clone)]
+pub struct ProgressCallback(Arc<dyn Fn(f64) + Send + Sync>);
+
+impl ProgressCallback {
+    /// 由闭包构造。
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(f64) + Send + Sync + 'static,
+    {
+        Self(Arc::new(callback))
+    }
+
+    /// 触发回调。
+    pub fn call(&self, progress: f64) {
+        (self.0)(progress);
+    }
+}
+
+impl std::fmt::Debug for ProgressCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressCallback(..)")
+    }
+}
+
+/// 混音相位在整体进度中占到的比例；剩余 `(MIX_PHASE_END, 1.0]` 属于编码写盘相位。
+///
+/// 【为什么这样切】混音里含解码、变速/变调 DSP 与 formant 处理，是绝对大头
+/// （长 clip 的 pitch-edit 可达分钟级）；编码相对轻（WAV 增量写盘、MP3/FLAC
+/// 内存缓冲），给 8% 已足够反映等待。
+const MIX_PHASE_END: f64 = 0.92;
+
+/// 进度上报节流间隔。内核循环里每 4096 帧就有一个检查点，1 小时 44.1k 素材
+/// 约合每秒十余次，不节流会把 IPC 打爆。
+const PROGRESS_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// 进度上报节流器：限制回调频率，并保证进度**单调不减**。
+///
+/// 相位边界（起点 `0.0`、混音→编码切换、终点 `1.0`）走 [`Self::report_forced`]，
+/// 不受节流限制，避免边界值被节流吞掉。
+struct ProgressThrottle {
+    callback: Option<ProgressCallback>,
+    last_value: f64,
+    last_at: Option<Instant>,
+}
+
+impl ProgressThrottle {
+    fn new(callback: Option<ProgressCallback>) -> Self {
+        Self {
+            callback,
+            last_value: f64::NEG_INFINITY,
+            last_at: None,
+        }
+    }
+
+    /// 常规上报：受节流与单调约束。
+    fn report(&mut self, value: f64) {
+        self.emit(value, false);
+    }
+
+    /// 强制上报：跳过节流（仍保证不减）。
+    fn report_forced(&mut self, value: f64) {
+        self.emit(value, true);
+    }
+
+    fn emit(&mut self, value: f64, force: bool) {
+        let Some(callback) = &self.callback else {
+            return;
+        };
+        let value = value.clamp(0.0, 1.0);
+        if value < self.last_value {
+            return;
+        }
+        let now = Instant::now();
+        if !force {
+            if let Some(last_at) = self.last_at {
+                if now.duration_since(last_at) < PROGRESS_MIN_INTERVAL {
+                    return;
+                }
+            }
+        }
+        self.last_value = value;
+        self.last_at = Some(now);
+        callback.call(value);
+    }
+}
+
+/// 在线程间共享的节流器上报入口（导出会跨 `spawn_blocking` 边界持有它）。
+fn report_shared(throttle: &Arc<Mutex<ProgressThrottle>>, value: f64, force: bool) {
+    let mut guard = throttle.lock().unwrap_or_else(|e| e.into_inner());
+    if force {
+        guard.report_forced(value);
+    } else {
+        guard.report(value);
+    }
+}
+
+/// 混音阶段的进度上报（`0.0..=1.0` 的混音比例）。
+///
+/// 【为什么按 clip 计数而非"已混输出帧数 / 输出总帧数"】多轨素材在时间上大量
+/// 重叠，逐 clip 累加的帧数会远超输出总帧数（例如 4 条满长轨道 → 累加 4× 总帧数），
+/// 用帧数比会在中途就饱和到 1.0 之后长时间不动。改用「已完成 clip 数 + 当前 clip
+/// 内帧比例」：天然单调、不受重叠影响，且与"渲染中"（`renderer::progress`）的
+/// 两级公式同构。`begin_clip` 在每次迭代开头调用，因此即便该 clip 被 `continue`
+/// 提前跳过，进度也不会漏掉它。
+struct MixdownProgress<'a> {
+    total_clips: f64,
+    callback: Option<&'a ProgressCallback>,
+}
+
+impl<'a> MixdownProgress<'a> {
+    fn new(total_clips: usize, callback: Option<&'a ProgressCallback>) -> Self {
+        Self {
+            total_clips: total_clips.max(1) as f64,
+            callback,
+        }
+    }
+
+    /// 进入第 `index` 个 clip（= 前 `index` 个已完成）。
+    fn begin_clip(&self, index: usize) {
+        self.emit(index as f64 / self.total_clips);
+    }
+
+    /// 第 `index` 个 clip 内已混 `frames_done / frames_total` 帧。
+    fn report_intra(&self, index: usize, frames_done: usize, frames_total: usize) {
+        let intra = frames_done as f64 / frames_total.max(1) as f64;
+        self.emit((index as f64 + intra.clamp(0.0, 1.0)) / self.total_clips);
+    }
+
+    /// 全部 clip 处理完毕。
+    fn finish(&self) {
+        self.emit(1.0);
+    }
+
+    fn emit(&self, value: f64) {
+        if let Some(callback) = self.callback {
+            callback.call(value.clamp(0.0, 1.0));
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -378,12 +536,34 @@ pub fn render_mixdown_to_file(
         return Err("export_cancelled".to_string());
     }
 
+    // 相位划分：混音 0..0.92、编码 0.92..1.0。节流器在混音与编码两相位之间共享，
+    // 因此跨相位的单调性由它统一保证（回调次数少，锁开销可忽略）。
+    let throttle = Arc::new(Mutex::new(ProgressThrottle::new(opts.progress.clone())));
+    report_shared(&throttle, 0.0, true);
+
+    // 混音相位：`render_mixdown_interleaved` 上报 `0..1` 的混音比例，这里映射到
+    // `0..MIX_PHASE_END` 并交给共享节流器。
+    let mut mix_opts = opts.clone();
+    mix_opts.progress = Some(ProgressCallback::new({
+        let throttle = Arc::clone(&throttle);
+        move |mix_fraction: f64| {
+            report_shared(
+                &throttle,
+                mix_fraction.clamp(0.0, 1.0) * MIX_PHASE_END,
+                false,
+            );
+        }
+    }));
+
     let (out_rate, out_channels, duration_sec, mix) =
-        render_mixdown_interleaved(timeline, opts.clone())?;
+        render_mixdown_interleaved(timeline, mix_opts)?;
 
     if mixdown_cancelled(&opts) {
         return Err("export_cancelled".to_string());
     }
+
+    // 混音相位结束：强制上报相位边界，避免被节流吞掉。
+    report_shared(&throttle, MIX_PHASE_END, true);
 
     // Mono 下混在编码分叉点之前完成，不侵入混音核心；混音管线恒为双声道。
     let (mix, channels) = match opts.output.channel_mode {
@@ -429,6 +609,12 @@ pub fn render_mixdown_to_file(
                 break Err(e);
             }
             offset = end;
+            // 编码相位进度（节流器限频；`offset` 单调 -> 进度单调）。
+            report_shared(
+                &throttle,
+                MIX_PHASE_END + (offset as f64 / mix.len().max(1) as f64) * (1.0 - MIX_PHASE_END),
+                false,
+            );
             if offset >= mix.len() {
                 output_touched = true;
                 break encoder.finish().map(|summary| summary.bytes_written);
@@ -437,12 +623,15 @@ pub fn render_mixdown_to_file(
     };
 
     match encode_result {
-        Ok(bytes_written) => Ok(MixdownResult {
-            sample_rate: out_rate,
-            duration_sec,
-            channels,
-            bytes_written,
-        }),
+        Ok(bytes_written) => {
+            report_shared(&throttle, 1.0, true);
+            Ok(MixdownResult {
+                sample_rate: out_rate,
+                duration_sec,
+                channels,
+                bytes_written,
+            })
+        }
         Err(e) => {
             if output_touched {
                 let _ = std::fs::remove_file(output_path);
@@ -491,7 +680,14 @@ pub fn render_mixdown_interleaved(
         }
     }
 
-    for clip in &timeline.clips {
+    // 混音相位进度（`0..1` 的混音比例；映射到整体进度由调用方负责）。
+    let mix_progress = MixdownProgress::new(timeline.clips.len(), opts.progress.as_ref());
+
+    for (clip_index, clip) in timeline.clips.iter().enumerate() {
+        // 在迭代开头上报（= 前 `clip_index` 个已完成）。放在 `continue` 之前，
+        // 因此被跳过的 clip 也不会让进度漏拍。
+        mix_progress.begin_clip(clip_index);
+
         if mixdown_cancelled(&opts) {
             return Err("export_cancelled".to_string());
         }
@@ -932,8 +1128,12 @@ pub fn render_mixdown_interleaved(
         let mut last_r: f32 = 0.0;
         let mut has_last: bool = false;
         for f in 0..max_frames_to_mix {
-            if f % 4096 == 0 && mixdown_cancelled(&opts) {
-                return Err("export_cancelled".to_string());
+            if f % 4096 == 0 {
+                if mixdown_cancelled(&opts) {
+                    return Err("export_cancelled".to_string());
+                }
+                // 复用既有的 4k 帧检查点上报 clip 内进度（4096 = 0 时 intra 也为 0）。
+                mix_progress.report_intra(clip_index, f, max_frames_to_mix);
             }
             let oi = (out_offset_frames + f) * 2;
             let si = (seg_offset_frames + f) * 2;
@@ -1097,6 +1297,8 @@ pub fn render_mixdown_interleaved(
         );
     }
 
+    mix_progress.finish();
+
     Ok((out_rate, out_channels, duration_sec, mix))
 }
 
@@ -1200,6 +1402,7 @@ mod tests {
                     output: crate::encode::OutputSpec::wav_32f(),
                     quality_preset: QualityPreset::Realtime,
                     cancel_flag: None,
+                    progress: None,
                 },
             )
             .unwrap();
@@ -1333,6 +1536,7 @@ mod tests {
                     output: crate::encode::OutputSpec::wav_32f(),
                     quality_preset: preset,
                     cancel_flag: None,
+                    progress: None,
                 },
             )
             .unwrap();
@@ -1349,6 +1553,124 @@ mod tests {
         assert!(
             realtime == export,
             "QualityPreset 当前必须是'写入但忽略'：两档渲染输出出现差异说明有人开始消费该字段 —— 先完成 QualityPreset 文档要求的 A/B 验证，再有意更新本测试"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 【导出进度】混音阶段的进度必须：从 0 起、单调不减、结束时到 1.0，且在
+    /// 多 clip 下按 clip 加权推进（不是一步跳到 1）。守护 `MixdownProgress` 的
+    /// 单调性与两级公式。
+    #[test]
+    fn interleaved_reports_monotonic_clip_weighted_progress() {
+        use crate::state::{Clip, TimelineState};
+        use std::sync::Mutex;
+
+        let dir = std::env::temp_dir().join(format!("hfs_mix_progress_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav_path = dir.join("tone.wav");
+        {
+            let spec = hound::WavSpec {
+                channels: 2,
+                sample_rate: 44100,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::create(&wav_path, spec).unwrap();
+            for i in 0..44100 {
+                let v = ((i as f32) * 0.01).sin();
+                writer.write_sample((v * 16384.0) as i32).unwrap();
+                writer.write_sample((v * 16384.0) as i32).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        let source_path = wav_path.to_string_lossy().to_string();
+
+        let mut tl = TimelineState::default();
+        let track = tl.tracks[0].id.clone();
+        for (index, start) in [0.0f64, 0.5].into_iter().enumerate() {
+            let clip = Clip {
+                id: format!("clip_progress_{index}"),
+                group_id: None,
+                track_id: track.clone(),
+                name: "V".to_string(),
+                start_sec: start,
+                length_sec: 0.5,
+                color: "#000000".to_string(),
+                takes: vec![],
+                active_take_id: None,
+                clip_playback_rate: 1.0,
+                source_path: Some(source_path.clone()),
+                source_path_relative: None,
+                duration_sec: Some(1.0),
+                duration_frames: Some(44100),
+                source_sample_rate: Some(44100),
+                source_channels: Some(2),
+                source_file_mtime: None,
+                source_file_size: None,
+                source_file_fingerprint: None,
+                waveform_preview: None,
+                pitch_range: None,
+                gain: 1.0,
+                muted: false,
+                source_start_sec: 0.0,
+                source_end_sec: 1.0,
+                playback_rate: 1.0,
+                reversed: false,
+                channel_mode: 0,
+                loop_enabled: false,
+                snap_offset_sec: 0.0,
+                fade_in_sec: 0.0,
+                fade_out_sec: 0.0,
+                fade_in_shape: 0.0,
+                fade_out_shape: 0.0,
+                fade_in_dir: 0.0,
+                fade_out_dir: 0.0,
+                fade_in_curve: String::new(),
+                fade_out_curve: String::new(),
+                auto_fade_in_sec: 0.0,
+                auto_fade_out_sec: 0.0,
+                extra_curves: None,
+                extra_params: None,
+                formant_morph: None,
+                midi_note_data: None,
+                midi_fill_gaps: false,
+            };
+            tl.clips.push(clip);
+        }
+        tl.normalize_clip_takes();
+
+        let recorded: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&recorded);
+        let (_rate, _ch, _dur, _mix) = render_mixdown_interleaved(
+            &tl,
+            MixdownOptions {
+                sample_rate: 44100,
+                start_sec: 0.0,
+                end_sec: Some(1.0),
+                stretch: crate::time_stretch::StretchAlgorithm::LinearResample,
+                apply_pitch_edit: false,
+                output: crate::encode::OutputSpec::wav_32f(),
+                quality_preset: QualityPreset::Export,
+                cancel_flag: None,
+                progress: Some(ProgressCallback::new(move |value: f64| {
+                    sink.lock().unwrap().push(value);
+                })),
+            },
+        )
+        .unwrap();
+
+        let values = recorded.lock().unwrap().clone();
+        assert!(!values.is_empty(), "必须至少上报一次进度");
+        assert_eq!(values[0], 0.0, "首次上报应为 0.0");
+        assert_eq!(*values.last().unwrap(), 1.0, "结束时必须到 1.0");
+        assert!(
+            values.windows(2).all(|w| w[1] >= w[0]),
+            "进度必须单调不减，实际: {values:?}"
+        );
+        assert!(
+            values.iter().any(|v| (*v - 0.5).abs() < 1e-9),
+            "两个 clip 之间应上报 0.5（clip 加权），实际: {values:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1512,6 +1834,7 @@ mod tests {
                     output: OutputSpec::wav_32f(),
                     quality_preset: QualityPreset::Export,
                     cancel_flag: None,
+                    progress: None,
                 };
                 let (r, ch, _dur, mix) = render_mixdown_interleaved(&tl, opts).expect("render ok");
                 let ch = ch as usize;
@@ -1618,6 +1941,7 @@ mod tests {
                 output: spec,
                 quality_preset: QualityPreset::Export,
                 cancel_flag: None,
+                progress: None,
             }
         }
 

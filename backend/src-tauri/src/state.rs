@@ -10799,6 +10799,7 @@ impl TimelineState {
                     output: crate::encode::OutputSpec::wav_32f(),
                     quality_preset: crate::mixdown::QualityPreset::Export,
                     cancel_flag: None,
+                    progress: None,
                 },
             );
 

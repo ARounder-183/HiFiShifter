@@ -634,7 +634,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     const target = Math.round(
                         Math.max(0, Math.min(1, exportProgress.progress)) * 100,
                     );
-                    if (target > prev) return Math.min(target, prev + 6);
+                    // 上限 12（而非 6）：后端现在按混音帧 / clip / 编码块细粒度上报
+                    // （最快 ~50ms 一次），步进太小会让显示值追不上真实进度。
+                    if (target > prev) return Math.min(target, prev + 12);
                     if (target < prev) return prev;
                     if (target >= 100) return 100;
                 }

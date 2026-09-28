@@ -328,6 +328,7 @@ pub(super) fn save_synthesized(
         output: crate::encode::OutputSpec::wav_32f(),
         quality_preset: crate::mixdown::QualityPreset::Export,
         cancel_flag: None,
+        progress: None,
     };
 
     // 3. 直接调用 mixdown 模块进行高质量重新渲染并写入目标路径
@@ -467,6 +468,7 @@ pub(super) fn save_separated(state: State<'_, AppState>, output_dir: String) -> 
             output: crate::encode::OutputSpec::wav_32f(),
             quality_preset: crate::mixdown::QualityPreset::Export,
             cancel_flag: None,
+            progress: None,
         };
 
         match crate::mixdown::render_mixdown_to_file(&sub_tl, &out_path, opts) {
@@ -1008,6 +1010,7 @@ pub(super) fn export_audio_advanced(
                 },
             );
 
+            let app_handle_for_progress = state.app_handle.get().cloned();
             let opts = crate::mixdown::MixdownOptions {
                 sample_rate: requested_sample_rate,
                 start_sec,
@@ -1017,6 +1020,23 @@ pub(super) fn export_audio_advanced(
                 output: output_spec.clone(),
                 quality_preset: crate::mixdown::QualityPreset::Export,
                 cancel_flag: Some(cancel_flag.clone()),
+                // 细粒度进度：mixdown 内部按"已完成 clip + clip 内帧比例"上报，
+                // 这里转成 export_audio_progress 事件（project 模式只有一个输出，
+                // 故 current/total 恒为 1/1）。
+                progress: app_handle_for_progress.map(|handle| {
+                    crate::mixdown::ProgressCallback::new(move |progress: f64| {
+                        let _ = handle.emit(
+                            "export_audio_progress",
+                            ExportAudioProgressEvent {
+                                active: true,
+                                mode: Some(ExportAudioMode::Project),
+                                progress: Some(progress.clamp(0.0, 1.0)),
+                                current: Some(1),
+                                total: Some(1),
+                            },
+                        );
+                    })
+                }),
             };
 
             match crate::mixdown::render_mixdown_to_file(&timeline, &out_path, opts) {
@@ -1349,6 +1369,7 @@ pub(super) fn export_audio_advanced(
                     .clips
                     .retain(|clip| active_track_ids.contains(clip.track_id.as_str()));
 
+                let app_handle_for_progress = state.app_handle.get().cloned();
                 let opts = crate::mixdown::MixdownOptions {
                     sample_rate: requested_sample_rate,
                     start_sec,
@@ -1358,6 +1379,29 @@ pub(super) fn export_audio_advanced(
                     output: output_spec.clone(),
                     quality_preset: crate::mixdown::QualityPreset::Export,
                     cancel_flag: Some(cancel_flag.clone()),
+                    // 细粒度进度：本目标内的混音比例映射进整体进度，公式与
+                    // "渲染中"同构 —— (已完成目标数 + 目标内比例) / 目标总数。
+                    // current 取"正在处理的目标序号"，文件边界处仍由下方循环尾
+                    // 的权威 emit 收口（两者在边界处数值一致，不会跳变）。
+                    progress: app_handle_for_progress.map(|handle| {
+                        crate::mixdown::ProgressCallback::new(move |intra: f64| {
+                            let overall = if total_targets == 0 {
+                                1.0
+                            } else {
+                                (target_index as f64 + intra.clamp(0.0, 1.0)) / total_targets as f64
+                            };
+                            let _ = handle.emit(
+                                "export_audio_progress",
+                                ExportAudioProgressEvent {
+                                    active: true,
+                                    mode: Some(ExportAudioMode::Separated),
+                                    progress: Some(overall.clamp(0.0, 1.0)),
+                                    current: Some(target_index + 1),
+                                    total: Some(total_targets),
+                                },
+                            );
+                        })
+                    }),
                 };
 
                 match crate::mixdown::render_mixdown_to_file(&sub_timeline, &out_path, opts) {
@@ -1613,6 +1657,7 @@ pub(super) fn quick_export_selected_clips(
             output: output_spec.clone(),
             quality_preset: crate::mixdown::QualityPreset::Export,
             cancel_flag: None,
+            progress: None,
         },
     ) {
         Ok(result) => {

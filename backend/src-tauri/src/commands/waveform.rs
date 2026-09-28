@@ -118,6 +118,7 @@ pub(super) fn get_root_mix_waveform_peaks_segment(
             output: crate::encode::OutputSpec::wav_32f(),
             quality_preset: crate::mixdown::QualityPreset::Realtime,
             cancel_flag: None,
+            progress: None,
         };
 
         let (_sr, ch, _dur, mix) = match crate::mixdown::render_mixdown_interleaved(&tl, opts) {
@@ -262,6 +263,7 @@ pub(super) fn get_track_mix_waveform_peaks_segment(
             output: crate::encode::OutputSpec::wav_32f(),
             quality_preset: crate::mixdown::QualityPreset::Realtime,
             cancel_flag: None,
+            progress: None,
         };
 
         let (_sr, ch, _dur, mix) = match crate::mixdown::render_mixdown_interleaved(&tl, opts) {
