@@ -121,14 +121,18 @@ describe("排版角色层级", () => {
      * 还要求它**不是弱化色** —— 主消息不许比标题淡两档。只断言字号会让
      * "13px 但仍然灰得看不清"通过。
      */
-    test("对话框主消息用正文字号与正文色，且明显大于副标题", () => {
-        const message = ruleBody(".app-dialog__message");
-        expect(fontSizeOf(message)).toBe(ROLE_FONT.body);
-        expect(usesMuted(message)).toBe(false);
+    test("对话框主消息复用 .hs-type-body，而不是复制它的声明", () => {
+        /*
+         * 【为什么断言结构而不是取值】主消息就是正文 —— 字号、行高、颜色都该来自
+         * 角色层。这里再写一份，改正文字号就要改两处，忘一处就分叉（标题曾经就是
+         * 这么分叉的，见上一段）。
+         */
+        const dialogSource = readFileSync(new URL("./Dialog.tsx", import.meta.url), "utf8");
+        expect(dialogSource, "消息元素上没有挂 hs-type-body").toContain("hs-type-body");
+        // 角色的颜色必须是正文色：主消息不许比标题淡两档
+        expect(usesMuted(ruleBody(".hs-type-body"))).toBe(false);
         // 主消息必须比副标题大一档，否则两者在视觉上无法区分
-        expect(fontSizeOf(message)).toBeGreaterThan(
-            fontSizeOf(ruleBody(".app-dialog__description")),
-        );
+        expect(ROLE_FONT.body).toBeGreaterThan(ROLE_FONT.label);
     });
 
     test("严重度配色走语义令牌，不写死颜色", () => {

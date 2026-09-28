@@ -432,7 +432,9 @@ describe("抽象层不能空转（采用率）", () => {
          * 允许清单里的是**例外且有意**的一处：设置页里的字体列表。外层是页面滚动、
          * 内层是有界的列表滚动，两条都各自有用（见该处注释）。
          */
-        const ALLOWED = new Set([join("src", "components", "layout", "AppearanceSettingsPanel.tsx")]);
+        const ALLOWED = new Set([
+            join("src", "components", "layout", "AppearanceSettingsPanel.tsx"),
+        ]);
         const BOUNDED_SCROLL =
             /["'`](?=[^"'`]*max-h-\[\d+px\])(?=[^"'`]*overflow-(?:x|y)?-auto)[^"'`]*["'`]/g;
 
@@ -454,7 +456,9 @@ describe("抽象层不能空转（采用率）", () => {
     test("排版角色在 src/ui 之外的采用率只增不减（棘轮）", () => {
         /*
          * 【目标与现状】目标是 ≥ 50（把 130 处 `<Text size="N">` 收敛到角色层）。
-         * 实测基线只有 **4** 处 —— 角色层目前几乎无人使用。
+         * 实测基线从 **4** 涨到 **12**：本轮让对话框标题复用 `.hs-type-display`、
+         * 主消息复用 `.hs-type-body`、外观设置的区块标签改用 `.hs-type-label`，
+         * 并且这三处原本都在"自己写一份声明"。下限就钉在实测值上 —— 只增不减。
          *
          * 【为什么本轮没做那个迁移】`<Text size>` 不能一对一替换成角色类：
          * Radix 的 `size="2"` 是 14px/24px，而设计系统的正文字号是 13px/20px；
@@ -467,7 +471,7 @@ describe("抽象层不能空转（采用率）", () => {
          * —— 那正是本文件开头记下的失败模式。所以这里只钉住水位：涨了不管，
          * 跌回来就红（例如有人把角色层唯一的消费者删掉）。
          */
-        const floor = 4;
+        const floor = 12;
         const count = sourceFiles(/\.tsx?$/).reduce((total, file) => {
             /*
              * 这里必须**保留字符串**：`hs-type-*` 是写在 `className="..."` 里的

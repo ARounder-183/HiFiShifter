@@ -386,7 +386,8 @@ export function AppDialog({
                     {message ? (
                         <div
                             className={cx(
-                                "app-dialog__message mt-2",
+                                // 字号/行高/颜色来自角色层；本类只管严重度的呈现。
+                                "hs-type-body app-dialog__message mt-2",
                                 tone !== "default" && "app-dialog__message--tone",
                                 tone === "warning" && "app-dialog__message--warning",
                                 tone === "danger" && "app-dialog__message--danger",
