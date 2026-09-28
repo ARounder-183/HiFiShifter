@@ -47,26 +47,23 @@ function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 /**
- * 复合控件自己拥有方向键 —— 全局快捷键必须让路。
+ * 弹出式复合表面：只有**打开**时才拥有方向键。
  *
- * 【为什么必须有】`playback.seekLeft/Right` 默认绑定在左右方向键上、
- * `track.selectUp/Down` 绑在上下方向键上，而本分发器运行在 **window 捕获阶段**，
- * 命中后 `stopPropagation()`。于是凡是声明了 ARIA 键盘契约的复合控件，方向键
- * 永远到不了控件自己：焦点停在停靠标签上按 ←/→ 会去 seek，而不是切标签。
- * （实测确认：在标签上派发 `ArrowLeft`，事件在 window 捕获阶段就被本分发器
- * 吞掉，标签自己的处理器收不到。）
- *
- * ARIA 角色是"方向键归我管"的承诺，与 `isEditableTarget` 放行输入框是同一个
- * 道理：**先看谁拥有这组键，再谈全局绑定**。
- *
- * 覆盖的角色是标准里明确拥有方向键的那些。本仓库自己的停靠标签条与手写菜单
- * 都在其中；Radix 的 Select / Slider / Menu 也各自渲染这些角色，因此一并受益。
+ * 【为什么必须排除 `data-state="closed"`】Radix 的菜单内容关闭后**仍留在 DOM 里**
+ * （实测：关掉「选项」菜单后仍能查到 1 个 `role="menu"`，且焦点还停在它内部）。
+ * 若把"存在"当作"打开"，方向键的全局绑定会被永久屏蔽 —— 时间轴的 ←/→ seek
+ * 直接失效。本仓库手写的菜单不写 `data-state` 且只在打开期间挂载，因此
+ * "存在即打开"仍然成立。
  */
-const ARROW_OWNING_SELECTOR = [
+const POPUP_SURFACE_SELECTOR = [
+    '[role="menu"]:not([data-state="closed"])',
+    '[role="menubar"]:not([data-state="closed"])',
+    '[role="listbox"]:not([data-state="closed"])',
+].join(",");
+
+/** 常驻的复合表面：挂在 DOM 里就说明它在用，存在即拥有方向键。 */
+const PERSISTENT_WIDGET_SELECTOR = [
     '[role="tablist"]',
-    '[role="menu"]',
-    '[role="menubar"]',
-    '[role="listbox"]',
     '[role="radiogroup"]',
     '[role="slider"]',
     '[role="spinbutton"]',
@@ -74,6 +71,14 @@ const ARROW_OWNING_SELECTOR = [
     '[role="tree"]',
     '[role="treegrid"]',
 ].join(",");
+
+/**
+ * 拥有方向键的容器。两类合起来用：焦点落在其中时由控件自己处理按键。
+ *
+ * 覆盖的角色是标准里明确拥有方向键的那些。本仓库自己的停靠标签条与手写菜单
+ * 都在其中；Radix 的 Select / Slider / Menu 也各自渲染这些角色，因此一并受益。
+ */
+const ARROW_OWNING_SELECTOR = `${POPUP_SURFACE_SELECTOR},${PERSISTENT_WIDGET_SELECTOR}`;
 
 /** 会被复合控件接管的按键（方向键 + 标准里同组的首尾/翻页键）。 */
 const COMPOSITE_WIDGET_KEYS = new Set([
@@ -91,6 +96,17 @@ function ownsArrowKeys(target: EventTarget | null): boolean {
     const el = target as HTMLElement | null;
     if (!el?.closest) return false;
     return el.closest(ARROW_OWNING_SELECTOR) !== null;
+}
+
+/**
+ * 弹出式复合表面（菜单 / 下拉列表）当前是否**打开**。
+ *
+ * 【为什么不能只看焦点】右键菜单打开时**焦点并不在菜单里** —— 它还在被右键
+ * 的那个元素上（浏览器原生右键菜单也是这个行为）。只检查焦点归属会漏掉这一整
+ * 类：菜单开着，方向键却去 seek 了，菜单里一项都动不了（实测确认过）。
+ */
+function hasOpenPopupSurface(): boolean {
+    return document.querySelector(POPUP_SURFACE_SELECTOR) !== null;
 }
 
 /**
@@ -165,11 +181,13 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
              * 必须在下面的 `resolveActionByFocus` 之前返回 —— 那条路径会
              * `stopPropagation()`，让控件再也收不到这个按键。
              */
-            if (
-                COMPOSITE_WIDGET_KEYS.has(key) &&
-                (ownsArrowKeys(e.target) || ownsArrowKeys(document.activeElement))
-            ) {
-                return;
+            if (COMPOSITE_WIDGET_KEYS.has(key)) {
+                const owned =
+                    ownsArrowKeys(e.target) ||
+                    ownsArrowKeys(document.activeElement) ||
+                    // 右键菜单打开时焦点仍在触发元素上，只能靠"表面是否打开"判断。
+                    hasOpenPopupSurface();
+                if (owned) return;
             }
 
             // 直线/颤音拖拽期间，命中振幅/频率方向键时，交给参数编辑器本地监听处理。

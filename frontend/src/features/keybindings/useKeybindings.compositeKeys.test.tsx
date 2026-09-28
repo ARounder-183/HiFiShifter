@@ -130,6 +130,82 @@ test("菜单里的方向键同样归菜单自己", async () => {
     expect(fired).toEqual([]);
 });
 
+test("右键菜单打开时（焦点不在菜单里）方向键也归菜单", async () => {
+    /*
+     * 右键菜单的真实状态：焦点还在被右键的元素上，菜单只是"打开了"。
+     * 只检查焦点归属会漏掉这一整类 —— 菜单开着，方向键却去 seek 了。
+     */
+    await mount();
+    const menu = document.createElement("div");
+    menu.setAttribute("role", "menu");
+    const item = document.createElement("button");
+    item.setAttribute("role", "menuitem");
+    item.tabIndex = 0;
+    menu.append(item);
+    document.body.append(menu);
+    mounted.push(async () => {
+        menu.remove();
+    });
+    // 刻意**不**把焦点放进菜单：焦点留在 body 上，与右键点开时一致。
+    document.body.focus();
+
+    expect(press(document.body, "ArrowDown").defaultPrevented).toBe(false);
+    expect(fired).toEqual([]);
+});
+
+test("关闭但**仍挂载**的菜单不得屏蔽方向键", async () => {
+    /*
+     * Radix 的菜单内容关闭后仍留在 DOM 里（`data-state="closed"`）。若把"存在"
+     * 当作"打开"，方向键的全局绑定会被永久屏蔽 —— 时间轴的 ←/→ seek 直接失效。
+     * 这条就是那个回归的守卫。
+     */
+    await mount();
+    const menu = document.createElement("div");
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("data-state", "closed");
+    const item = document.createElement("button");
+    item.setAttribute("role", "menuitem");
+    menu.append(item);
+    document.body.append(menu);
+    mounted.push(async () => {
+        menu.remove();
+    });
+
+    press(document.body, "ArrowDown");
+    expect(fired).toEqual(["track.selectDown"]);
+});
+
+test("焦点滞留在**已关闭**的菜单里时，方向键也回到全局绑定", async () => {
+    /*
+     * Radix 关闭菜单后会把内容留在 DOM 里，实测焦点也还停在里面。若"焦点在
+     * `role="menu"` 内"就算拥有方向键，一个已经关掉的菜单会继续吞掉时间轴的
+     * ←/→ seek。
+     */
+    await mount();
+    const menu = document.createElement("div");
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("data-state", "closed");
+    const item = document.createElement("button");
+    item.setAttribute("role", "menuitem");
+    item.tabIndex = 0;
+    menu.append(item);
+    document.body.append(menu);
+    mounted.push(async () => {
+        menu.remove();
+    });
+    item.focus();
+
+    press(item, "ArrowDown");
+    expect(fired).toEqual(["track.selectDown"]);
+});
+
+test("菜单关闭后，方向键回到全局绑定", async () => {
+    // 对照：让路必须以"表面打开"为条件，否则时间轴的 ←/→ 会被永久屏蔽。
+    await mount();
+    press(document.body, "ArrowDown");
+    expect(fired).toEqual(["track.selectDown"]);
+});
+
 test("非方向键的全局快捷键在标签条里照常生效", async () => {
     await mount();
     const { tab } = buildTablist();
