@@ -238,7 +238,10 @@ test("features/dock/dockDropTarget.test.ts scripted checks", async () => {
         );
         // 居中锚点下偏移量仍然生效（多个居中浮窗错开用）
         assertEqual(
-            resolveFloatRect({ ...centered, anchorOffsetX: -100, anchorOffsetY: 40 }, { w: 1920, h: 1080 }),
+            resolveFloatRect(
+                { ...centered, anchorOffsetX: -100, anchorOffsetY: 40 },
+                { w: 1920, h: 1080 },
+            ),
             { x: 410, y: 260, w: 900, h: 640 },
             "offset still applies on top of centering",
         );
