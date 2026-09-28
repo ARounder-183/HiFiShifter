@@ -72,7 +72,7 @@ function registerFakes(): void {
     });
     registerPanel({
         id: "notebook",
-        titleKey: "notebook",
+        titleKey: "common_notebook",
         component: noop,
         defaultWidth: 360,
         defaultHeight: 400,
@@ -81,7 +81,7 @@ function registerFakes(): void {
     });
     registerPanel({
         id: "undoHistory",
-        titleKey: "undo_history",
+        titleKey: "undo_history_title",
         component: noop,
         defaultWidth: 380,
         defaultHeight: 420,
@@ -90,7 +90,7 @@ function registerFakes(): void {
     });
     registerPanel({
         id: "opensAsFloat",
-        titleKey: "notebook",
+        titleKey: "common_notebook",
         component: noop,
         defaultWidth: 460,
         defaultHeight: 420,

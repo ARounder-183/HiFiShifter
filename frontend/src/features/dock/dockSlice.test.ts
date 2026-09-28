@@ -71,7 +71,7 @@ function registerFakes(): void {
     });
     registerPanel({
         id: "notebook",
-        titleKey: "notebook",
+        titleKey: "common_notebook",
         component: noop,
         defaultWidth: 420,
         defaultHeight: 400,

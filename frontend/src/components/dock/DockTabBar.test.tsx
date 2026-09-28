@@ -26,6 +26,7 @@ import { afterEach, expect, test } from "vitest";
 import dockReducer, { setDockLayout } from "../../features/dock/dockSlice";
 import { registerPanel, resetPanelRegistryForTests } from "../../features/dock/panelRegistry";
 import type { DockTabsetNode } from "../../features/dock/dockTypes";
+import type { MessageKey } from "../../i18n/messages";
 import { I18nProvider } from "../../i18n/I18nProvider";
 import { DockTabBar } from "./DockTabBar";
 
@@ -34,11 +35,22 @@ import { DockTabBar } from "./DockTabBar";
 
 const TAB_IDS = ["alpha", "beta", "gamma"] as const;
 
+/**
+ * 标题键必须取自真实词典：`titleKey` 的类型是 `MessageKey`，用假键（如
+ * `panel_alpha`）编译期就会失败 —— 这正是它该有的约束（面板标题曾经因为
+ * 一个不存在的键把 `notebook` 直接渲染给了用户）。
+ */
+const TITLE_KEYS: Record<(typeof TAB_IDS)[number], MessageKey> = {
+    alpha: "panel_timeline",
+    beta: "panel_editor",
+    gamma: "common_notebook",
+};
+
 function registerFakes(): void {
     for (const id of TAB_IDS) {
         registerPanel({
             id,
-            titleKey: `panel_${id}`,
+            titleKey: TITLE_KEYS[id],
             component: () => null,
             defaultWidth: 300,
             defaultHeight: 200,

@@ -84,7 +84,7 @@ export function registerBuiltinPanels(): void {
 
     registerPanel({
         id: PANEL_NOTEBOOK,
-        titleKey: "notebook",
+        titleKey: "common_notebook",
         singleton: true,
         defaultWidth: 420,
         defaultHeight: 480,

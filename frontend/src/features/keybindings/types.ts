@@ -1,3 +1,5 @@
+import type { MessageKey } from "../../i18n/messages";
+
 /**
  * 快捷键管理系统 — 类型定义
  */
@@ -188,8 +190,13 @@ export type ModifierConflictScene =
 
 /** 操作元信息（用于 UI 显示） */
 export interface ActionMeta {
-    /** 国际化文本的 key（用于操作名称显示） */
-    labelKey: string;
+    /**
+     * 国际化文本的 key（用于操作名称显示）。
+     *
+     * 类型是 `MessageKey` 而不是 `string`：键名写错/被改名时必须在编译期报错。
+     * 与 `PanelDefinition.titleKey` 同一条约定 —— 见那里的长注释。
+     */
+    labelKey: MessageKey;
     /**
      * 分组（用于设置面板分组展示）。
      * 键盘快捷键按「全局 / 时间轴 / 钢琴卷帘」等使用场景划分；

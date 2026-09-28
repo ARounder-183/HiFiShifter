@@ -12,6 +12,7 @@
  */
 
 import type { ComponentType, LazyExoticComponent } from "react";
+import type { MessageKey } from "../../i18n/messages";
 
 import type { DockPlacement } from "./dockTypes";
 
@@ -44,8 +45,19 @@ export interface DockPanelLifecycle {
 export interface PanelDefinition {
     /** 唯一 id，同时是持久化 JSON 里的键 —— 一旦发布不可更改。 */
     id: string;
-    /** 标题的 i18n key。 */
-    titleKey: string;
+    /**
+     * 标题的 i18n key。
+     *
+     * 【为什么类型是 `MessageKey` 而不是 `string`】这里曾经是 `string`，于是
+     * 键名拼错、键被改名、键根本不存在，**编译期一律无感** —— `tf()` 查不到时
+     * 会原样返回键名（那是给扩展键设计的可诊断行为），界面上就出现一个看起来
+     * 像英文单词的"文案"。这个用户可见的 bug 已经发生过两次：
+     * `undo_history_title`，以及上一轮 i18n 改名后的 `notebook`。
+     *
+     * 收紧成 `MessageKey` 后，两个方向都被编译期守住：改名必须同步改这里，
+     * 写错直接报错。
+     */
+    titleKey: MessageKey;
     /** 标签条上的图标。 */
     icon?: ComponentType;
     /**
