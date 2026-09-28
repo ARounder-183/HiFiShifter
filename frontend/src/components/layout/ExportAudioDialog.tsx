@@ -1830,7 +1830,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         ? tf("export_conflict_source_title")
                         : tf("export_conflict_exists_title")
                 }
-                description={
+                message={
                     <span
                         style={{
                             userSelect: "text",
@@ -1845,6 +1845,12 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         {conflictDialog.path}
                     </span>
                 }
+                /*
+                 * 只有 source-path 那一类是**不可逆的数据丢失**（导出目标与工程
+                 * 媒体同路径，覆写不可逆），给它 danger；"目标已存在"用 skip 就能
+                 * 绕开，属于可恢复情形，保持默认样式 —— 到处报警等于没有报警。
+                 */
+                tone={conflictDialog.kind === "source-path" ? "danger" : "default"}
                 size="lg"
                 /*
                  * Enter 的默认动作必须显式指定。

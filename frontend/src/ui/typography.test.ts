@@ -9,7 +9,7 @@
  * 断言直接读 `src/index.css` 的角色定义（而不是渲染后取计算样式）：
  * 这样失败信息直接指向那行 CSS，且不依赖浏览器是否加载了样式表。
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 
 /*
@@ -92,9 +92,56 @@ describe("排版角色层级", () => {
         expect(usesMuted(ruleBody(".hs-type-caption"))).toBe(true);
     });
 
-    test("对话框标题/描述沿用角色量级，不再各自写字号", () => {
-        expect(fontSizeOf(ruleBody(".app-dialog__title"))).toBe(ROLE_FONT.display);
-        expect(fontSizeOf(ruleBody(".app-dialog__description"))).toBe(ROLE_FONT.caption);
+    test("对话框副标题沿用角色量级，不再各自写字号", () => {
+        expect(fontSizeOf(ruleBody(".app-dialog__description"))).toBe(ROLE_FONT.label);
+    });
+
+    /*
+     * 标题**复用角色类**，而不是把角色的声明抄一遍。
+     *
+     * 【为什么要断言结构而不是取值】此前 `.app-dialog__title` 逐字复制了
+     * `.hs-type-display` 的四条声明（只差 color），于是全应用最重要的标题反而成了
+     * 角色层唯一没有消费者的地方 —— 改字号要改两处，忘一处就分叉。
+     * 断言"规则里不再写 font-size"能钉住这一点：一旦有人把声明抄回来就会红。
+     */
+    test("对话框标题复用 .hs-type-display，不复制它的声明", () => {
+        const dialogSource = readFileSync(new URL("./Dialog.tsx", import.meta.url), "utf8");
+        expect(dialogSource, "标题元素上没有挂 hs-type-display").toContain("hs-type-display");
+        expect(
+            ruleBody(".app-dialog__title"),
+            "标题规则又写回了自己的 font-size —— 字号必须只有一个来源",
+        ).not.toMatch(/font-size:/);
+    });
+
+    /*
+     * 对话框的**主消息**：这一档是本轮新增的，也是最容易被写错的一档。
+     *
+     * 【为什么单独断言颜色】此前的失败模式不是"字号小"一件事，而是
+     * **主消息被放进了副标题槽位**：11px + 弱化色。所以这里不仅要求它等于正文字号，
+     * 还要求它**不是弱化色** —— 主消息不许比标题淡两档。只断言字号会让
+     * "13px 但仍然灰得看不清"通过。
+     */
+    test("对话框主消息用正文字号与正文色，且明显大于副标题", () => {
+        const message = ruleBody(".app-dialog__message");
+        expect(fontSizeOf(message)).toBe(ROLE_FONT.body);
+        expect(usesMuted(message)).toBe(false);
+        // 主消息必须比副标题大一档，否则两者在视觉上无法区分
+        expect(fontSizeOf(message)).toBeGreaterThan(
+            fontSizeOf(ruleBody(".app-dialog__description")),
+        );
+    });
+
+    test("严重度配色走语义令牌，不写死颜色", () => {
+        // 用 warning/danger 令牌而不是十六进制：两套主题各有一份取值。
+        for (const [tone, token] of [
+            ["warning", "--qt-warning"],
+            ["danger", "--qt-danger"],
+        ] as const) {
+            const body = ruleBody(`.app-dialog__message--${tone}`);
+            expect(body, `${tone} 未使用 ${token}-bg`).toContain(`var(${token}-bg)`);
+            expect(body, `${tone} 未使用 ${token}-border`).toContain(`var(${token}-border)`);
+            expect(body, `${tone} 未使用 ${token}-text`).toContain(`var(${token}-text)`);
+        }
     });
 
     test("字号阶梯覆盖到标题量级（否则作者只能拿最接近的值凑）", () => {
@@ -121,6 +168,45 @@ describe("排版角色层级", () => {
                 /line-height:/,
             );
         }
+    });
+
+    /*
+     * 同一个槽位只能有一种渲染。
+     *
+     * 【为什么要禁掉 `<Text>`】实测过：`description` 裸用时是 11px 弱化色，
+     * 而套一层 `<Text size="2" color="gray">` 后是 14px —— **同一个字段两种字号**，
+     * 取决于作者当时怎么写的。槽位的样式只能由槽位自己决定。
+     */
+    test("description / message 槽位里不得再套 Radix <Text>", () => {
+        const offenders: string[] = [];
+        const stack: string[] = ["."];
+        while (stack.length > 0) {
+            const dir = stack.pop()!;
+            for (const entry of readdirSync(dir)) {
+                if (entry === "node_modules") continue;
+                const full = dir === "." ? entry : `${dir}/${entry}`;
+                if (statSync(full).isDirectory()) {
+                    stack.push(full);
+                    continue;
+                }
+                if (!full.startsWith("src") || !/\.tsx$/.test(full)) continue;
+                if (/\.test\.tsx$/.test(full)) continue;
+                const lines = readFileSync(full, "utf8").split("\n");
+                for (let i = 0; i < lines.length; i += 1) {
+                    if (!/<Text/.test(lines[i])) continue;
+                    // 往回看 3 行：槽位 prop 就在附近
+                    const context = lines.slice(Math.max(0, i - 3), i).join("\n");
+                    if (/(?:description|message)=\{/.test(context)) {
+                        offenders.push(`  ${full}:${i + 1}`);
+                    }
+                }
+            }
+        }
+        expect(
+            offenders.length === 0
+                ? []
+                : ["以下槽位里套了 <Text>，会让同一槽位出现两种字号：", ...offenders].join("\n"),
+        ).toEqual([]);
     });
 
     /*

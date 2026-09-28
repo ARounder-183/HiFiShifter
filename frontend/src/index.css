@@ -510,22 +510,96 @@ textarea {
 }
 
 /*
- * 对话框标题/描述：直接引用角色，不再各自写字号。
+ * 对话框的四个文字槽位。三档字号、两种颜色，职责互不重叠：
  *
- * 【回归修正】此前是 13px/600 与 12px —— 标题比正文标签（14px）还小。
- * Radix 原本给的是 `Heading size="5"` = 20px/700，这里恢复该量级。
+ *   .app-dialog__title        20px  正文色  700   这是什么对话框
+ *   .app-dialog__description  12px  弱化色  400   一句补充（副标题）
+ *   .app-dialog__message      13px  正文色  400   对话框想说的那句话
+ *   .app-dialog__body         —     正文色  —     表单/列表等内容
+ *
+ * 【为什么必须有 message 这一档】此前只有 title 与 description 两档，于是
+ * 6 个"纯确认框"只好把**主消息**塞进 description —— 那是副标题的位置，11px +
+ * 弱化色。实测一个同构对话框：标题 20px/`--qt-text`，描述 11px/`--qt-text-muted`，
+ * 而描述**下方**的间距（28px）是上方（4px）的 7 倍 —— 全框最小最淡的一句话，
+ * 却被排版粘在标题上、推离页脚。字号、颜色、分组三件事同时错。
+ *
+ * 【为什么 description 从 11px 提到 12px】11px 在本应用里是"角标"量级
+ * （`--qt-fs-3xs` 9px / `--qt-fs-micro` 10px / `--qt-fs-xs` 11px 都只用于标尺
+ * 旗帜、单位后缀这类角标），用它承载一个句子是层级误用。12px 仍是明显的次要档
+ * （比正文 13px 小、比角标 11px 大），但可读。
+ *
+ * 【回归修正】更早一轮是 13px/600 与 12px —— 标题比正文标签还小。Radix 原本给的是
+ * `Heading size="5"` = 20px/700，这里保持该量级。
+ */
+/*
+ * 标题只保留"标题自己的事"（外边距），字号/字重/颜色**全部交给
+ * `.hs-type-display` 角色类**（由 `Dialog.tsx` 挂在同一个元素上）。
+ *
+ * 【为什么不再复制一遍声明】此前这里逐字写了 `.hs-type-display` 的四条声明，
+ * 只差一个 `color` —— 于是角色层最重要的那一档（display）在全应用**零消费者**，
+ * 而它的取值又存在两份。改字号要改两处，忘了一处就分叉。
+ * 现在字号只有一个来源，本规则也不再写 `font-size`（门禁会检查这一点）。
  */
 .app-dialog__title {
-    font-size: var(--qt-fs-2xl);
-    line-height: var(--qt-lh-display);
-    font-weight: 700;
     margin: 0;
 }
 
 .app-dialog__description {
-    font-size: var(--qt-fs-xs);
-    line-height: var(--qt-lh-tight);
+    font-size: var(--qt-fs-sm);
+    line-height: var(--qt-lh-base);
     color: var(--qt-text-muted);
+}
+
+/*
+ * 主消息。**颜色必须是正文色，不能是弱化色** —— 这是本轮的核心断言：
+ * 主消息不许比标题淡两档。字号取正文档（13px），与 `.hs-type-body` 同源。
+ *
+ * 间距方向（实测）：标题→消息 8px，消息→页脚 16px。消息属于标题那一组，
+ * 动作区才是另一组 —— 间距表达分组，分组不能反。此前是 4px / 28px（7 倍倒挂）。
+ */
+.app-dialog__message {
+    font-size: var(--qt-fs-md);
+    line-height: var(--qt-lh-relaxed);
+    color: var(--qt-text);
+}
+
+/*
+ * 严重度：只给**确实会造成数据损失/损坏**的确认框用（丢弃未保存更改、覆盖
+ * 更高版本的工程文件、清空速度映射…）。
+ *
+ * 【为什么单独一档而不是让按钮变色】按钮语义由 `intent` 回答（按下去做什么），
+ * 严重度由这里回答（这事多危险）。上一轮把两者合并过一次，结果是破坏性主操作
+ * 失去分量 —— 同样的错误不重复。
+ *
+ * 【为什么用左侧色条而不是整块底色】整块底色会和对话框自身的面板底色打架，
+ * 也让"消息"看起来像一个独立区块；左侧 3px 色条 + 图标既传达严重度，
+ * 又保持消息是"对话框正文"而不是"另一个卡片"。
+ */
+.app-dialog__message--tone {
+    display: flex;
+    gap: var(--qt-space-5);
+    align-items: flex-start;
+    padding: var(--qt-space-5) var(--qt-space-5) var(--qt-space-5) var(--qt-space-6);
+    border-left: 3px solid transparent;
+    border-radius: var(--qt-radius-sm);
+}
+
+.app-dialog__message--warning {
+    background: var(--qt-warning-bg);
+    border-left-color: var(--qt-warning-border);
+    color: var(--qt-warning-text);
+}
+
+.app-dialog__message--danger {
+    background: var(--qt-danger-bg);
+    border-left-color: var(--qt-danger-border);
+    color: var(--qt-danger-text);
+}
+
+/* 图标与首行文字对齐（不随行高漂移） */
+.app-dialog__tone-icon {
+    flex: 0 0 auto;
+    margin-top: 2px;
 }
 
 /*

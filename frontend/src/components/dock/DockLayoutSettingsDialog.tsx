@@ -39,11 +39,7 @@ export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSetti
             open={open}
             onOpenChange={onOpenChange}
             title={tf("layout_settings_title")}
-            description={
-                <Text size="2" color="gray">
-                    {tf("layout_settings_hint")}
-                </Text>
-            }
+            description={tf("layout_settings_hint")}
             size="md"
             actions={[{ id: "close", label: t("close"), onClick: () => onOpenChange(false) }]}
         >

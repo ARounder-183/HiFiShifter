@@ -27,6 +27,7 @@
  * 交互协议（Enter/Esc/焦点/快捷键抑制），不必重新发明。
  */
 import { Dialog } from "@radix-ui/themes";
+import { ExclamationTriangleIcon } from "@radix-ui/react-icons";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { AppButton, type AppButtonIntent } from "./Button";
@@ -40,6 +41,15 @@ import { acquireShortcutSuppression, releaseShortcutSuppression } from "./shortc
  * 620–720（多列表单）→ lg；760–860（含表格/预览的大对话框）→ xl。
  */
 export type AppDialogSize = "sm" | "md" | "lg" | "xl";
+
+/**
+ * 对话框严重度。
+ *
+ * 【取值克制】只有"会丢数据 / 会损坏文件"的场景才配 `warning` / `danger`。
+ * 这两档会把消息块染成警示色并加图标，用多了就变成噪音 —— 用户会像忽略
+ * 弹窗广告一样忽略它。默认 `default` 是**无样式**的。
+ */
+export type AppDialogTone = "default" | "warning" | "danger";
 
 const SIZE_PX: Record<AppDialogSize, number> = {
     sm: 400,
@@ -91,8 +101,30 @@ export interface AppDialogProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     title: ReactNode;
-    /** 副标题/说明。Radix 要求对话框有可读描述，缺失时用标题兜底。 */
+    /**
+     * 主消息：**对话框想说的那句话**。渲染为 `.app-dialog__message`
+     * （13px 正文色）。
+     *
+     * 【为什么与 `description` 分开】此前只有 `description` 一个文字槽位，
+     * 于是纯确认框（"当前工程有未保存的更改…"）只好把主消息塞进副标题位置 ——
+     * 11px 弱化色。这个槽位是给它们用的。
+     *
+     * 有表单/列表内容的对话框通常**不需要**它：正文本身就是消息。
+     */
+    message?: ReactNode;
+    /**
+     * 副标题：在正文之前做一句补充，**不承载主消息**。
+     * 渲染为 `.app-dialog__description`（12px 弱化色）。
+     */
     description?: ReactNode;
+    /**
+     * 严重度。只影响"图标 + 左侧色条 + 消息底色"，**不改变按钮语义**
+     * （那是 `actions[].intent` 的职责）。
+     *
+     * 只给确实会造成数据损失/损坏的确认框用。普通提示保持 `default` ——
+     * 到处报警等于没有报警。
+     */
+    tone?: AppDialogTone;
     size?: AppDialogSize;
     /** 页脚动作。省略则渲染无页脚（例如纯进度对话框）。 */
     actions?: AppDialogAction[];
@@ -155,7 +187,9 @@ export function AppDialog({
     open,
     onOpenChange,
     title,
+    message,
     description,
+    tone = "default",
     size = "md",
     actions,
     defaultActionId,
@@ -329,7 +363,9 @@ export function AppDialog({
                         />
                     ) : null}
 
-                    <Dialog.Title className="app-dialog__title">{title}</Dialog.Title>
+                    <Dialog.Title className="app-dialog__title hs-type-display">
+                        {title}
+                    </Dialog.Title>
                     {description ? (
                         <Dialog.Description className="app-dialog__description mt-1">
                             {description}
@@ -347,9 +383,46 @@ export function AppDialog({
                         <Dialog.Description className="sr-only">{title}</Dialog.Description>
                     )}
 
-                    <div className="app-dialog__body mt-3 min-h-0 flex-1 overflow-y-auto">
-                        {children}
-                    </div>
+                    {message ? (
+                        <div
+                            className={cx(
+                                "app-dialog__message mt-2",
+                                tone !== "default" && "app-dialog__message--tone",
+                                tone === "warning" && "app-dialog__message--warning",
+                                tone === "danger" && "app-dialog__message--danger",
+                            )}
+                            /*
+                             * 带严重度时，消息块自己就是可读描述；否则它仍是
+                             * 描述的一部分。两种都由 Radix 的 Description
+                             * 承载（上面已渲染），这里不再重复挂 aria 属性。
+                             */
+                            data-tone={tone === "default" ? undefined : tone}
+                        >
+                            {tone === "default" ? null : (
+                                <ExclamationTriangleIcon
+                                    className="app-dialog__tone-icon"
+                                    width="16"
+                                    height="16"
+                                    aria-hidden
+                                />
+                            )}
+                            <div className="min-w-0">{message}</div>
+                        </div>
+                    ) : null}
+
+                    {/*
+                     * 正文区**只在有内容时渲染**。
+                     *
+                     * 此前无条件渲染：一个 `mt-3`（12px）+ `flex-1` 的空 div，加上
+                     * 页脚的 `mt-4`（16px），在"只有 title + message"的确认框里
+                     * 制造出 28px 的空白 —— 而消息**上方**只有 4px。间距本该表达
+                     * "谁和谁是一组"，28px 比 4px 大 7 倍等于把分组说反了。
+                     */}
+                    {children ? (
+                        <div className="app-dialog__body mt-3 min-h-0 flex-1 overflow-y-auto">
+                            {children}
+                        </div>
+                    ) : null}
 
                     {actions?.length ? (
                         <div
@@ -451,6 +524,11 @@ export interface AppConfirmDialogProps {
     confirmLabel: ReactNode;
     cancelLabel: ReactNode;
     intent?: "primary" | "danger";
+    /**
+     * 严重度。破坏性确认（会丢数据）传 `"danger"`，与 `intent: "danger"`
+     * 各管一件事：`intent` 管按钮长什么样，`tone` 管消息多醒目。
+     */
+    tone?: AppDialogTone;
     onConfirm: () => void | Promise<void>;
 }
 
@@ -462,6 +540,7 @@ export function AppConfirmDialog({
     confirmLabel,
     cancelLabel,
     intent = "primary",
+    tone = "default",
     onConfirm,
 }: AppConfirmDialogProps) {
     return (
@@ -469,14 +548,19 @@ export function AppConfirmDialog({
             open={open}
             onOpenChange={onOpenChange}
             title={title}
+            /*
+             * 消息走 `message` 槽位，而不是手工塞进 children 并套
+             * `<p className="hs-type-body">` —— 那个写法是本壳在
+             * "没有主消息槽位"时的绕路，现在槽位有了。
+             */
+            message={message}
+            tone={tone}
             size="sm"
             actions={[
                 { id: "cancel", label: cancelLabel, onClick: () => onOpenChange(false) },
                 { id: "confirm", label: confirmLabel, intent, onClick: onConfirm },
             ]}
-        >
-            <p className="hs-type-body m-0">{message}</p>
-        </AppDialog>
+        />
     );
 }
 
@@ -508,6 +592,7 @@ export function AppNoticeDialog({
             open={open}
             onOpenChange={onOpenChange}
             title={title}
+            message={message}
             size="sm"
             actions={[
                 {
@@ -517,8 +602,6 @@ export function AppNoticeDialog({
                     onClick: () => onOpenChange(false),
                 },
             ]}
-        >
-            <p className="hs-type-body m-0">{message}</p>
-        </AppDialog>
+        />
     );
 }

@@ -11,7 +11,6 @@
  * 因此切换 视图 → 速度映射 会自动更新本按钮。
  */
 import { useCallback, useMemo, useState } from "react";
-import { Text } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
 import { useI18n } from "../../../i18n/I18nProvider";
 import {
@@ -194,11 +193,13 @@ export const TempoMapCornerButton: React.FC = () => {
                 open={dialogOpen}
                 onOpenChange={setDialogOpen}
                 title={tf("tempo_map_clear_dialog_title")}
-                description={
-                    <Text size="2" className="text-qt-text-muted">
-                        {tf("tempo_map_clear_dialog_message")}
-                    </Text>
-                }
+                /*
+                 * 此前是 `description` 套一层 `<Text size="2" color="gray">` ——
+                 * 同一个槽位因此在 11px 与 14px 之间摇摆，还叠了两层弱化色。
+                 * 主消息走 `message`，严重度交给 `tone`。
+                 */
+                message={tf("tempo_map_clear_dialog_message")}
+                tone="danger"
                 size="sm"
                 actions={[
                     {

@@ -6505,7 +6505,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             }
                         }}
                         title={t("ctx_replace")}
-                        description={t("clip_replace_same_source_confirm")}
+                        message={t("clip_replace_same_source_confirm")}
                         size="sm"
                         actions={[
                             {

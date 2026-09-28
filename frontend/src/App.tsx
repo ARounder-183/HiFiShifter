@@ -3597,11 +3597,16 @@ function AppInner() {
                     }
                 }}
                 title={t("unsaved_changes_title")}
-                description={t(
+                /*
+                 * 主消息走 `message`（13px 正文色），不再借用副标题槽位
+                 * （11px 弱化色）—— 这是全应用最需要被读到的一句话之一。
+                 */
+                message={t(
                     unsavedDialog.mode === "exit"
                         ? "unsaved_changes_exit_desc"
                         : "unsaved_changes_switch_desc",
                 )}
+                tone="danger"
                 size="sm"
                 actions={[
                     {
@@ -3635,12 +3640,13 @@ function AppInner() {
                     }
                 }}
                 title={t("project_version_too_new_title")}
-                description={t("project_version_too_new_desc")
+                message={t("project_version_too_new_desc")
                     .replace("{fileVersion}", String(projectVersionDialog.fileVersion || "?"))
                     .replace(
                         "{currentVersion}",
                         String(projectVersionDialog.currentVersion || "?"),
                     )}
+                tone="warning"
                 size="sm"
                 actions={[
                     {
@@ -3666,7 +3672,12 @@ function AppInner() {
                     }
                 }}
                 title={t("save_version_conflict_title")}
-                description={
+                /*
+                 * 这是全应用最长的单条提示（343 字符），而它讲的是"覆盖会降级、
+                 * 可能丢参数"。此前它以 11px 弱化色渲染在 400px 列里 —— 约 7 行
+                 * 全应用最小最淡的字。改走 `message` 并标为 danger。
+                 */
+                message={
                     saveVersionConflictDialog?.existingIsNewer
                         ? t("save_version_conflict_desc_higher")
                               .replace(
@@ -3687,6 +3698,7 @@ function AppInner() {
                                   String(saveVersionConflictDialog?.currentVersion ?? "?"),
                               )
                 }
+                tone="danger"
                 size="md"
                 actions={[
                     {

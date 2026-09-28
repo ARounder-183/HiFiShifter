@@ -50,9 +50,9 @@ export function NotebookAttachmentsDialog({
             onOpenChange={(open) => !open && onClose()}
             title={t("notebook_attachments")}
             description={
-                <Text size="1" color="gray">
+                <>
                     {entries.length} · {formatBytes(totalBytes)}
-                </Text>
+                </>
             }
             size="md"
             actions={[

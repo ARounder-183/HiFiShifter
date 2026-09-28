@@ -1170,7 +1170,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 open={composeConfirmOpen}
                 onOpenChange={setComposeConfirmOpen}
                 title={tf("midi_compose_required_title")}
-                description={tf("midi_compose_required_message")}
+                message={tf("midi_compose_required_message")}
                 size="sm"
                 actions={[
                     {

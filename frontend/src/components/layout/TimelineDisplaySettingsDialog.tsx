@@ -43,11 +43,7 @@ export function TimelineDisplaySettingsDialog({ open, onOpenChange }: Props) {
             open={open}
             onOpenChange={onOpenChange}
             title={tf("timeline_display_settings")}
-            description={
-                <Text size="2" color="gray">
-                    {tf("timeline_display_settings_desc")}
-                </Text>
-            }
+            description={tf("timeline_display_settings_desc")}
             size="sm"
             actions={[{ id: "close", label: tf("close"), onClick: () => onOpenChange(false) }]}
         >
