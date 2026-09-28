@@ -240,6 +240,8 @@ export const enUS = {
     export_track_label_root_suffix: "(Root)",
     export_track_label_sub_suffix: "(Sub)",
     menu_clear_waveform_cache: "Clear Waveform Cache",
+    menu_clear_waveform_cache_confirm:
+        "Clear the waveform cache? Every waveform is rebuilt the next time it is needed.",
     menu_exit: "Exit",
     shortcut_ctrl_o: "{modifier}+O",
     shortcut_ctrl_e: "{modifier}+E",
@@ -374,6 +376,7 @@ export const enUS = {
     layout_presets: "Presets",
     layout_no_presets: "No saved presets",
     layout_delete_preset: "Delete preset",
+    layout_delete_preset_confirm: "Delete this layout preset? This cannot be undone.",
     layout_export: "Export layout...",
     layout_import: "Import layout...",
     layout_import_failed: "That file is not a valid layout",
@@ -470,6 +473,8 @@ export const enUS = {
     notebook_clip_copied: "Copied",
     notebook_clip_save_payload: "Save payload as file...",
     notebook_clip_remove: "Remove block",
+    notebook_clip_remove_confirm:
+        "Remove this block? Its content is deleted from the notebook. This cannot be undone.",
     notebook_clip_missing_payload:
         "The staged payload is missing (attachment deleted). Restore and use are unavailable.",
     notebook_clip_restored: "Restored to the system clipboard",
@@ -503,6 +508,8 @@ export const enUS = {
     notebook_image_width_reset: "Reset display width",
     notebook_image_edit_alt: "Edit alt text",
     notebook_image_remove: "Remove image",
+    notebook_image_remove_confirm:
+        "Remove this image? It is deleted from the notebook. This cannot be undone.",
     notebook_image_alt_placeholder: "Describe the image (alt text)",
     notebook_find_placeholder: "Find in notebook",
     notebook_find_no_match: "No match",
@@ -599,6 +606,8 @@ export const enUS = {
 
     track_add: "Add Track",
     track_remove_selected: "Remove Selected Track",
+    track_remove_confirm:
+        "Remove this track? The track and all of its clips are deleted. This cannot be undone.",
 
     param_editor: "Parameter Editor",
     param_editor_short: "Param Editor",
@@ -860,6 +869,7 @@ export const enUS = {
     status_stretching: "Stretching",
 
     fb_title: "File Browser",
+    fb_file_list: "File list",
     fb_search_placeholder: "Search files...",
     fb_open_folder: "Open Folder",
     fb_refresh: "Refresh",
@@ -1434,6 +1444,8 @@ export const enUS = {
     tempo_map_add_point: "Add Tempo / Time Signature / Scale Change Here...",
     tempo_map_edit_point: "Edit This Point...",
     tempo_map_delete_point: "Delete This Point",
+    tempo_map_delete_point_confirm:
+        "Delete this Tempo Map point? The tempo, time-signature and scale changes at this position are removed. This cannot be undone.",
     tempo_map_clear_all: "Clear Tempo Map",
     tempo_map_dialog_title: "Tempo Map Point",
     tempo_map_dialog_title_initial: "Initial Tempo Map Point",
@@ -1656,6 +1668,8 @@ export const enUS = {
     appearance_export_theme: "Export",
     appearance_reset_colors: "Reset Colors",
     appearance_reset_all_colors: "Reset All Colors",
+    appearance_reset_all_colors_confirm:
+        "Reset all colors? Every custom color override is discarded. This cannot be undone.",
     appearance_saved_themes: "Saved Themes",
     appearance_theme_name: "Theme Name",
     appearance_custom_theme: "Custom Theme",

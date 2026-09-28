@@ -178,32 +178,3 @@ export function AppIconButton({
         </IconButton>
     );
 }
-
-/**
- * 开关按钮：把散落各处的 `variant={on ? "solid" : "ghost"}` 三元式收进来。
- *
- * 与 `AppIconButton active` 的区别是它带文字标签，用于"网格吸附""循环播放"
- * 这类有名字的开关。
- */
-export interface AppToggleButtonProps extends Omit<ComponentPropsWithoutRef<typeof Button>, "variant" | "color" | "size"> {
-    /** 开关状态。 */
-    on: boolean;
-    icon?: ReactNode;
-    size?: AppButtonSize;
-}
-
-export function AppToggleButton({ on, icon, size = "sm", className, children, ...rest }: AppToggleButtonProps) {
-    return (
-        <Button
-            variant={on ? "solid" : "ghost"}
-            color="gray"
-            size={size === "md" ? "2" : "1"}
-            aria-pressed={on}
-            className={cx("app-toggle-button", className)}
-            {...rest}
-        >
-            {icon ? withIconSize(icon, "md") : null}
-            {children}
-        </Button>
-    );
-}

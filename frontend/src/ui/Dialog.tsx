@@ -254,6 +254,18 @@ export function AppDialog({
         // SubmitEvent 上定义 —— 这里收窄回真实类型。
         const submitter = (event.nativeEvent as SubmitEvent).submitter;
         if (submitter && submitter !== defaultSubmitRef.current) return;
+        /*
+         * 【Enter 的归属】这里**刻意不**检查"焦点是否在输入框里"。
+         *
+         * 桌面端惯例是：对话框里按 Enter = 按默认按钮，**即使焦点在单行输入框里**
+         * （Windows / macOS 的原生设置窗都是如此）。曾试图加"焦点在文本控件就跳过
+         * 默认动作"，但 Radix 打开对话框时会自动聚焦第一个可聚焦元素 —— 于是几乎所有
+         * 含输入框的对话框都会失去 Enter 确认，反而违背惯例。
+         *
+         * 需要自己吃掉 Enter 的控件要**显式** `preventDefault`：
+         * - `AppNumberField`：Enter 提交本字段并下移焦点（已实现）；
+         * - 多行 `textarea`：Enter 换行由引擎处理，本来就不触发提交。
+         */
         const action = actions?.find((candidate) => candidate.id === resolvedDefaultId);
         if (!action || action.disabled) return;
         void runAction(action);
@@ -459,6 +471,49 @@ export function AppConfirmDialog({
             actions={[
                 { id: "cancel", label: cancelLabel, onClick: () => onOpenChange(false) },
                 { id: "confirm", label: confirmLabel, intent, onClick: onConfirm },
+            ]}
+        >
+            <p className="hs-type-body m-0">{message}</p>
+        </AppDialog>
+    );
+}
+
+/**
+ * 纯通知对话框 —— `window.alert()` 的单按钮替换。
+ *
+ * 【与 `AppConfirmDialog` 的区别】只有「关闭」一个动作：用于**报告**而不是
+ * **征询**（导出失败、无法打开日志文件夹、未预期的异常…）。给这类调用点一个
+ * 无需伪造 confirm/cancel 语义的壳，是让它们愿意离开 `window.alert` 的前提。
+ */
+export interface AppNoticeDialogProps {
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
+    title: ReactNode;
+    message: ReactNode;
+    /** 唯一按钮（关闭）的文案。 */
+    closeLabel: ReactNode;
+}
+
+export function AppNoticeDialog({
+    open,
+    onOpenChange,
+    title,
+    message,
+    closeLabel,
+}: AppNoticeDialogProps) {
+    return (
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={title}
+            size="sm"
+            actions={[
+                {
+                    id: "close",
+                    label: closeLabel,
+                    intent: "primary",
+                    onClick: () => onOpenChange(false),
+                },
             ]}
         >
             <p className="hs-type-body m-0">{message}</p>

@@ -5,7 +5,7 @@
  */
 
 import React from "react";
-import { LoadingSpinner } from "./LoadingSpinner";
+import { AppBusy } from "../ui";
 import { useI18n } from "../i18n/I18nProvider";
 
 export interface ProgressBarProps {
@@ -50,7 +50,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
                             √
                         </span>
                     ) : (
-                        <LoadingSpinner size="sm" />
+                        <AppBusy />
                     )}
                     {label && <span className="text-gray-300">{label}</span>}
                     <span className="text-gray-400">{clampedPercentage.toFixed(0)}%</span>

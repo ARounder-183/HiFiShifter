@@ -13,6 +13,7 @@
 import { useSyncExternalStore } from "react";
 
 import { useI18n } from "../../i18n/I18nProvider";
+import { AppStatusChip } from "../../ui";
 import { getPianoRollLoading, subscribePianoRollLoading } from "../../utils/pianoRollStatusBus";
 
 export function ParamDataLoadingChip() {
@@ -25,17 +26,5 @@ export function ParamDataLoadingChip() {
 
     if (!loading) return null;
 
-    return (
-        <span
-            className="shrink-0 rounded px-1 py-0 text-qt-xs font-medium"
-            style={{
-                background: "var(--accent-3)",
-                color: "var(--accent-11)",
-                fontSize: "11px",
-                lineHeight: "16px",
-            }}
-        >
-            {t("loading")}
-        </span>
-    );
+    return <AppStatusChip tone="accent">{t("loading")}</AppStatusChip>;
 }

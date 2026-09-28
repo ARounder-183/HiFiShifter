@@ -29,7 +29,7 @@ import { resolveScrollCommitStepPx, shouldCommitScroll } from "./scrollCommit";
 import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
 import { useAppTheme } from "../../../theme/AppThemeProvider";
 import { AppContextMenu } from "../../../ui/Menu";
-import { AppSelect } from "../../../ui";
+import { AppConfirmDialog, AppSelect } from "../../../ui";
 
 /** Color palette options shown when creating a new track.
  * 色值选取与归一化带（s 0.30-0.46、感知亮度 0.50-0.60）对齐：暖色系
@@ -508,6 +508,13 @@ const TrackListInner: React.FC<TrackListProps> = ({
         y: number;
         trackId: string;
     } | null>(null);
+    /**
+     * 待确认删除的轨道 id。
+     *
+     * 右键菜单关闭时卸载，确认框不能住在菜单子树里；把待删除的轨道提升到
+     * 常驻的轨道列表组件，菜单项只置位，确认后才调用 onRemoveTrack。
+     */
+    const [pendingRemoveTrackId, setPendingRemoveTrackId] = useState<string | null>(null);
     const [listScrollTop, setListScrollTop] = useState(0);
     /**
      * 上一次真正提交给 `setListScrollTop` 的位置。
@@ -2223,11 +2230,30 @@ const TrackListInner: React.FC<TrackListProps> = ({
                             shortcut: trackDeleteShortcut,
                             danger: true,
                             disabled: isLastRootTrack(trackCtxMenu.trackId),
-                            onSelect: () => onRemoveTrack(trackCtxMenu.trackId),
+                            // 不立即删除：先置位待确认轨道，由常驻的确认框在
+                            // 菜单卸载后询问，确认时才调用 onRemoveTrack。
+                            onSelect: () => setPendingRemoveTrackId(trackCtxMenu.trackId),
                         },
                     ]}
                 />
             )}
+
+            {/* 删除轨道确认框（常驻于轨道列表，不随右键菜单卸载）。 */}
+            <AppConfirmDialog
+                open={pendingRemoveTrackId !== null}
+                onOpenChange={(open) => {
+                    if (!open) setPendingRemoveTrackId(null);
+                }}
+                title={t("track_remove_selected")}
+                message={t("track_remove_confirm")}
+                confirmLabel={t("ctx_delete")}
+                cancelLabel={t("cancel")}
+                intent="danger"
+                onConfirm={() => {
+                    if (pendingRemoveTrackId !== null) onRemoveTrack(pendingRemoveTrackId);
+                    setPendingRemoveTrackId(null);
+                }}
+            />
             <AppTooltipBubble
                 text={volumeTooltipText}
                 position={showVolumeTooltip ? volumeTooltipPos : null}

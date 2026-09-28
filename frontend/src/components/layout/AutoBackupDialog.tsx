@@ -12,7 +12,7 @@ import { Button, Flex, Text, TextField } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { projectApi, type AutoBackupSettings } from "../../services/api/project";
 import { AppDialog } from "../../ui/Dialog";
-import { AppField, AppForm } from "../../ui/Field";
+import { AppField, AppForm, AppSwitchRow } from "../../ui/Field";
 import { AppNumberField } from "../../ui";
 
 interface AutoBackupDialogProps {
@@ -127,33 +127,29 @@ export function AutoBackupDialog({
             ]}
         >
             <AppForm labelWidth="lg">
-                <label className="flex items-center gap-2 text-qt-md text-qt-text">
-                    <input
-                        type="checkbox"
-                        checked={draft.saveOnSaveEnabled}
-                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                            setDraft((prev) => ({
-                                ...prev,
-                                saveOnSaveEnabled: event.target.checked,
-                            }))
-                        }
-                    />
-                    <span>{tAny("auto_backup_save_on_save")}</span>
-                </label>
+                <AppSwitchRow
+                    control="checkbox"
+                    label={tAny("auto_backup_save_on_save")}
+                    checked={draft.saveOnSaveEnabled}
+                    onCheckedChange={(checked) =>
+                        setDraft((prev) => ({
+                            ...prev,
+                            saveOnSaveEnabled: checked,
+                        }))
+                    }
+                />
 
-                <label className="flex items-center gap-2 text-qt-md text-qt-text">
-                    <input
-                        type="checkbox"
-                        checked={draft.timedBackupEnabled}
-                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                            setDraft((prev) => ({
-                                ...prev,
-                                timedBackupEnabled: event.target.checked,
-                            }))
-                        }
-                    />
-                    <span>{tAny("auto_backup_timed")}</span>
-                </label>
+                <AppSwitchRow
+                    control="checkbox"
+                    label={tAny("auto_backup_timed")}
+                    checked={draft.timedBackupEnabled}
+                    onCheckedChange={(checked) =>
+                        setDraft((prev) => ({
+                            ...prev,
+                            timedBackupEnabled: checked,
+                        }))
+                    }
+                />
 
                 <AppField label={tAny("auto_backup_interval_sec")}>
                     <AppNumberField

@@ -1,10 +1,10 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import { Flex } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { ScaleKey } from "../../utils/musicalScales";
 import { useAppSelector } from "../../app/hooks";
 import { buildScaleSelectGroups } from "../../utils/scaleSelection";
-import { AppNumberField, AppSelect, AppSlider, AppSliderReadout } from "../../ui";
+import { AppNumberField, AppSelect, AppSlider, AppSliderReadout, useDialogDraft } from "../../ui";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm } from "../../ui/Field";
 
@@ -24,12 +24,9 @@ export function TransposeCentsDialog({
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const [cents, setCents] = useState("0");
-    const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
-
-    useEffect(() => {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
-        if (open) setSmoothness(String(Math.round(defaultSmoothness)));
-    }, [open, defaultSmoothness]);
+    const [smoothness, setSmoothness] = useDialogDraft(open, () =>
+        String(Math.round(defaultSmoothness)),
+    );
 
     return (
         <AppDialog
@@ -104,10 +101,12 @@ export function TransposeDegreesDialog({
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const [degrees, setDegrees] = useState("3");
-    const [scaleValue, setScaleValue] = useState<string>(
+    const [scaleValue, setScaleValue] = useDialogDraft<string>(open, () =>
         defaultUseProjectScale ? "__project__" : defaultScale,
     );
-    const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
+    const [smoothness, setSmoothness] = useDialogDraft(open, () =>
+        String(Math.round(defaultSmoothness)),
+    );
     const customScalePresets = useAppSelector((state) => state.session.customScalePresets);
     const scaleSelectGroups = useMemo(
         () =>
@@ -117,14 +116,6 @@ export function TransposeDegreesDialog({
             ),
         [projectScaleLabel, customScalePresets, tAny],
     );
-
-    useEffect(() => {
-        if (open) {
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
-            setScaleValue(defaultUseProjectScale ? "__project__" : defaultScale);
-            setSmoothness(String(Math.round(defaultSmoothness)));
-        }
-    }, [open, defaultScale, defaultSmoothness, defaultUseProjectScale]);
 
     return (
         <AppDialog
@@ -214,16 +205,10 @@ export function SetPitchDialog({
 }: SetPitchProps) {
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
-    const [note, setNote] = useState(String(defaultValue));
-    const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
-
-    useEffect(() => {
-        if (open) {
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
-            setSmoothness(String(Math.round(defaultSmoothness)));
-            setNote(String(defaultValue));
-        }
-    }, [open, defaultSmoothness, defaultValue]);
+    const [note, setNote] = useDialogDraft(open, () => String(defaultValue));
+    const [smoothness, setSmoothness] = useDialogDraft(open, () =>
+        String(Math.round(defaultSmoothness)),
+    );
 
     return (
         <AppDialog
@@ -341,12 +326,9 @@ export function SmoothDialog({
 }: SmoothProps) {
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
-    const [strength, setStrength] = useState(50);
-
-    useEffect(() => {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
-        if (open) setStrength(Math.max(0, Math.min(100, Math.round(defaultSmoothness))));
-    }, [open, defaultSmoothness]);
+    const [strength, setStrength] = useDialogDraft(open, () =>
+        Math.max(0, Math.min(100, Math.round(defaultSmoothness))),
+    );
 
     return (
         <AppDialog
@@ -406,7 +388,6 @@ export function VibratoDialog({
     onOpenChange,
     onConfirm,
     editParam,
-    paramRange,
 }: VibratoProps) {
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
@@ -418,24 +399,13 @@ export function VibratoDialog({
     const isBreathGain = editParam === "breath_gain";
     const defaultAmplitude = isPitch ? "30" : isBreathGain ? "1" : "30";
 
-    const [amplitude, setAmplitude] = useState(defaultAmplitude);
-    const [rate, setRate] = useState("5.5");
-    const [attack, setAttack] = useState("50");
-    const [release, setRelease] = useState("50");
-    const [phase, setPhase] = useState("0");
-
-    // 对话框常驻挂载（useState 初始值只在首挂载生效）：每次打开必须按
-    // 当前参数重置默认值，否则对 breath_gain 打开时仍显示 pitch 的 30。
-    useEffect(() => {
-        if (open) {
-            setAmplitude(defaultAmplitude);
-            setRate("5.5");
-            setAttack("50");
-            setRelease("50");
-            setPhase("0");
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- 打开时按最新参数重置
-    }, [open, editParam, paramRange]);
+    // 对话框常驻挂载：草稿在每次「打开」时按当前参数重新播种（useDialogDraft），
+    // 否则对 breath_gain 打开时仍显示 pitch 的 30。
+    const [amplitude, setAmplitude] = useDialogDraft<string>(open, () => defaultAmplitude);
+    const [rate, setRate] = useDialogDraft(open, () => "5.5");
+    const [attack, setAttack] = useDialogDraft(open, () => "50");
+    const [release, setRelease] = useDialogDraft(open, () => "50");
+    const [phase, setPhase] = useDialogDraft(open, () => "0");
 
     // 兜底 NaN/Infinity 而不吞掉合法的 0（`Number(x) || default` 会把 0
     // 替换成默认值——对幅度/速率/相位，0 都是合法输入）。
@@ -552,7 +522,7 @@ export function QuantizeDialog({
     const tAny = t as (key: string) => string;
     const toleranceDefault = defaultTolerance ?? defaultToleranceCents;
     const [unit, setUnit] = useState<"semitone" | "scale">("semitone");
-    const [scaleValue, setScaleValue] = useState<string>(
+    const [scaleValue, setScaleValue] = useDialogDraft<string>(open, () =>
         defaultUseProjectScale ? "__project__" : defaultScale,
     );
     const customScalePresets = useAppSelector((state) => state.session.customScalePresets);
@@ -564,26 +534,15 @@ export function QuantizeDialog({
             ),
         [projectScaleLabel, customScalePresets, tAny],
     );
-    const [toleranceCents, setToleranceCents] = useState<string>(String(toleranceDefault));
-    const [quantizeUnit, setQuantizeUnit] = useState<string>(String(defaultQuantizeUnit));
-    const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
-
-    useEffect(() => {
-        if (open) {
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
-            setScaleValue(defaultUseProjectScale ? "__project__" : defaultScale);
-            setToleranceCents(String(toleranceDefault));
-            setQuantizeUnit(String(defaultQuantizeUnit));
-            setSmoothness(String(Math.round(defaultSmoothness)));
-        }
-    }, [
-        open,
-        defaultScale,
-        toleranceDefault,
-        defaultUseProjectScale,
-        defaultQuantizeUnit,
-        defaultSmoothness,
-    ]);
+    const [toleranceCents, setToleranceCents] = useDialogDraft(open, () =>
+        String(toleranceDefault),
+    );
+    const [quantizeUnit, setQuantizeUnit] = useDialogDraft(open, () =>
+        String(defaultQuantizeUnit),
+    );
+    const [smoothness, setSmoothness] = useDialogDraft(open, () =>
+        String(Math.round(defaultSmoothness)),
+    );
 
     return (
         <AppDialog
@@ -721,7 +680,7 @@ export function MeanQuantizeDialog({
     const tAny = t as (key: string) => string;
     const toleranceDefault = defaultTolerance ?? defaultToleranceCents;
     const [unit, setUnit] = useState<"semitone" | "scale">("semitone");
-    const [scaleValue, setScaleValue] = useState<string>(
+    const [scaleValue, setScaleValue] = useDialogDraft<string>(open, () =>
         defaultUseProjectScale ? "__project__" : defaultScale,
     );
     const customScalePresets = useAppSelector((state) => state.session.customScalePresets);
@@ -733,26 +692,15 @@ export function MeanQuantizeDialog({
             ),
         [projectScaleLabel, customScalePresets, tAny],
     );
-    const [toleranceCents, setToleranceCents] = useState<string>(String(toleranceDefault));
-    const [quantizeUnit, setQuantizeUnit] = useState<string>(String(defaultQuantizeUnit));
-    const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
-
-    useEffect(() => {
-        if (open) {
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
-            setScaleValue(defaultUseProjectScale ? "__project__" : defaultScale);
-            setToleranceCents(String(toleranceDefault));
-            setQuantizeUnit(String(defaultQuantizeUnit));
-            setSmoothness(String(Math.round(defaultSmoothness)));
-        }
-    }, [
-        open,
-        defaultScale,
-        toleranceDefault,
-        defaultUseProjectScale,
-        defaultQuantizeUnit,
-        defaultSmoothness,
-    ]);
+    const [toleranceCents, setToleranceCents] = useDialogDraft(open, () =>
+        String(toleranceDefault),
+    );
+    const [quantizeUnit, setQuantizeUnit] = useDialogDraft(open, () =>
+        String(defaultQuantizeUnit),
+    );
+    const [smoothness, setSmoothness] = useDialogDraft(open, () =>
+        String(Math.round(defaultSmoothness)),
+    );
 
     return (
         <AppDialog

@@ -14,7 +14,13 @@
  * 本原语把这两个状态各归一为一档：悬停 10%、选中 22%，行高与内边距取令牌。
  * 选中态额外加 `data-selected` 供外部的键盘导航样式挂钩。
  */
-import type { ReactNode } from "react";
+import { forwardRef } from "react";
+import type {
+    CSSProperties,
+    MouseEvent as ReactMouseEvent,
+    PointerEvent as ReactPointerEvent,
+    ReactNode,
+} from "react";
 
 import { cx } from "./cx";
 
@@ -28,13 +34,31 @@ export interface AppListRowProps {
     intent?: "default" | "danger";
     density?: AppListRowDensity;
     disabled?: boolean;
-    onClick?: () => void;
-    onDoubleClick?: () => void;
-    onContextMenu?: (event: React.MouseEvent) => void;
+    onClick?: (event: ReactMouseEvent<HTMLDivElement>) => void;
+    onDoubleClick?: (event: ReactMouseEvent<HTMLDivElement>) => void;
+    onContextMenu?: (event: ReactMouseEvent) => void;
+    /**
+     * 指针按下（文件浏览器的拖拽起点）。
+     *
+     * 【为什么加这个】拖拽行可能**不可点击**（例如只能拖入时间轴的 MIDI / 工程
+     * 文件），此时 `interactive` 为 false，但仍需要指针按下回调才能发起拖拽。
+     */
+    onPointerDown?: (event: ReactPointerEvent<HTMLDivElement>) => void;
+    /** 行获得焦点。roving tabindex 下用它把"活动行"同步到真实焦点。 */
+    onFocus?: () => void;
+    /** roving tabindex：活动行为 `0`，其余为 `-1`；省略则不可聚焦（旧行为）。 */
+    tabIndex?: number;
+    /**
+     * 显式列表项角色。
+     *
+     * 仅凭 `onClick` / `onDoubleClick` 推导会让"只能拖拽"与"暂不可用"的行在
+     * listbox 里没有角色。文件浏览器对所有行显式传 `"option"`。
+     */
+    role?: "option";
     title?: string;
     className?: string;
     /** 供虚拟化列表用；普通列表省略。 */
-    style?: React.CSSProperties;
+    style?: CSSProperties;
     "data-testid"?: string;
 }
 
@@ -53,27 +77,39 @@ const DENSITY_CLASS: Record<AppListRowDensity, string> = {
  *   <span className="truncate">{name}</span>
  * </AppListRow>
  */
-export function AppListRow({
-    children,
-    selected = false,
-    intent = "default",
-    density = "compact",
-    disabled = false,
-    onClick,
-    onDoubleClick,
-    onContextMenu,
-    title,
-    className,
-    style,
-    "data-testid": testId,
-}: AppListRowProps) {
+export const AppListRow = forwardRef<HTMLDivElement, AppListRowProps>(function AppListRow(
+    {
+        children,
+        selected = false,
+        intent = "default",
+        density = "compact",
+        disabled = false,
+        onClick,
+        onDoubleClick,
+        onContextMenu,
+        onPointerDown,
+        onFocus,
+        tabIndex,
+        role,
+        title,
+        className,
+        style,
+        "data-testid": testId,
+    },
+    ref,
+) {
     const interactive = Boolean(onClick || onDoubleClick);
+    // 显式 `role="option"`（含仅可拖拽/暂不可用的行）与可点击行一样进入列表语义，
+    // 否则 listbox 里会混入没有角色、键盘也无从表达的行。
+    const isOption = role === "option" || interactive;
 
     return (
         <div
-            role={interactive ? "option" : undefined}
-            aria-selected={interactive ? selected : undefined}
+            ref={ref}
+            role={isOption ? "option" : undefined}
+            aria-selected={isOption ? selected : undefined}
             aria-disabled={disabled || undefined}
+            tabIndex={tabIndex}
             data-selected={selected || undefined}
             title={title}
             style={style}
@@ -81,6 +117,8 @@ export function AppListRow({
             onClick={disabled ? undefined : onClick}
             onDoubleClick={disabled ? undefined : onDoubleClick}
             onContextMenu={onContextMenu}
+            onPointerDown={onPointerDown}
+            onFocus={onFocus}
             className={cx(
                 "hs-type-body group flex items-center gap-1.5",
                 DENSITY_CLASS[density],
@@ -96,4 +134,4 @@ export function AppListRow({
             {children}
         </div>
     );
-}
+});

@@ -111,6 +111,7 @@ const NotebookErrorBoundary = lazy(() =>
 );
 import { ImportProjectDialog } from "./components/layout/ImportProjectDialog";
 import { AppDialog } from "./ui/Dialog";
+import { AppStatusChip } from "./ui";
 import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
 import { selectMergedKeybindings } from "./features/keybindings/keybindingsSlice";
@@ -4099,95 +4100,41 @@ function AppInner() {
                         横移一次 —— 用户视线里"提示在乱动"。把长时效的钉在最左，
                         短的插在它右侧，左侧位置就永远稳定。 */}
                     {noticeText ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-qt-xs font-medium"
-                            style={{
-                                background: "var(--green-3)",
-                                color: "var(--green-11)",
-                                fontSize: "11px",
-                                lineHeight: "16px",
-                            }}
-                        >
-                            {noticeText}
-                        </span>
+                        <AppStatusChip tone="success">{noticeText}</AppStatusChip>
                     ) : null}
                     {/* 导入等待提示：只在真慢时点亮（见 IMPORT_BUSY_DELAY_MS），
                         位置紧跟长时效提示位之后、短时效进度片之前。 */}
                     {importBusy ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-qt-xs font-medium"
-                            style={{
-                                background: "var(--accent-3)",
-                                color: "var(--accent-11)",
-                                fontSize: "11px",
-                                lineHeight: "16px",
-                            }}
-                        >
-                            {t("status_importing")}
-                        </span>
+                        <AppStatusChip tone="accent">{t("status_importing")}</AppStatusChip>
                     ) : null}
                     {stretching.active ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-qt-xs font-medium"
-                            style={{
-                                background: "var(--accent-3)",
-                                color: "var(--accent-11)",
-                                fontSize: "11px",
-                                lineHeight: "16px",
-                            }}
-                        >
+                        <AppStatusChip tone="accent">
                             {t("status_stretching")}
                             {stretching.clipName ? ` "${stretching.clipName}"` : ""}
-                        </span>
+                        </AppStatusChip>
                     ) : null}
                     {waveformAnalysis.active ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-qt-xs font-medium"
-                            style={{
-                                background: "var(--accent-3)",
-                                color: "var(--accent-11)",
-                                fontSize: "11px",
-                                lineHeight: "16px",
-                            }}
-                        >
+                        <AppStatusChip tone="accent">
                             {t("status_analyzing_waveform")}
                             {waveformAnalysis.sourcePath ? ` "${waveformAnalysis.sourcePath}"` : ""}
                             {waveformAnalysis.progress != null
                                 ? ` ${Math.round(waveformAnalysis.progress * 100)}%`
                                 : ""}
-                        </span>
+                        </AppStatusChip>
                     ) : null}
                     {pitchAnalysisText ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-qt-xs font-medium"
-                            style={{
-                                background: "var(--accent-3)",
-                                color: "var(--accent-11)",
-                                fontSize: "11px",
-                                lineHeight: "16px",
-                            }}
-                        >
-                            {pitchAnalysisText}
-                        </span>
+                        <AppStatusChip tone="accent">{pitchAnalysisText}</AppStatusChip>
                     ) : null}
                     {/* 参数曲线取数提示：**独立订阅**外部 store，不参与本组件重渲染
                         （见 ParamDataLoadingChip 的说明）。 */}
                     <ParamDataLoadingChip />
                     {rendering.active ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-qt-xs font-medium"
-                            style={{
-                                background: "var(--accent-3)",
-                                color: "var(--accent-11)",
-                                fontSize: "11px",
-                                lineHeight: "16px",
-                            }}
-                        >
+                        <AppStatusChip tone="accent">
                             {t("rendering")}
                             {rendering.progress != null
                                 ? ` ${Math.round(rendering.progress * 100)}%`
                                 : ""}
-                        </span>
+                        </AppStatusChip>
                     ) : null}
                     <Text size="1" color={error ? "red" : "gray"} className="truncate">
                         {errorText}

@@ -252,3 +252,4 @@ test("异步动作进入 pending 且不自动关闭", async () => {
     // 异步动作默认 autoClose=false：由调用方决定何时关
     expect(onOpenChange).not.toHaveBeenCalled();
 });
+

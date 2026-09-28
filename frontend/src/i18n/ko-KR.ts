@@ -96,6 +96,8 @@ export const koKR = {
     export_track_label_root_suffix: "(루트)",
     export_track_label_sub_suffix: "(하위)",
     menu_clear_waveform_cache: "파형 캐시 지우기",
+    menu_clear_waveform_cache_confirm:
+        "파형 캐시를 지울까요? 다음에 필요할 때 모든 파형을 다시 생성합니다.",
     menu_exit: "종료",
     shortcut_ctrl_o: "{modifier}+O",
     shortcut_ctrl_e: "{modifier}+E",
@@ -172,6 +174,8 @@ export const koKR = {
     appearance_export_theme: "내보내기",
     appearance_reset_colors: "색상 초기화",
     appearance_reset_all_colors: "모든 색상 초기화",
+    appearance_reset_all_colors_confirm:
+        "모든 색상을 초기화할까요? 모든 사용자 정의 색상 재정의가 삭제됩니다. 이 작업은 되돌릴 수 없습니다.",
     appearance_saved_themes: "저장된 테마",
     appearance_theme_name: "테마 이름",
     appearance_custom_theme: "사용자 정의 테마",
@@ -311,6 +315,7 @@ export const koKR = {
     layout_presets: "프리셋",
     layout_no_presets: "저장된 프리셋 없음",
     layout_delete_preset: "프리셋 삭제",
+    layout_delete_preset_confirm: "이 레이아웃 프리셋을 삭제할까요? 이 작업은 되돌릴 수 없습니다.",
     layout_export: "레이아웃 내보내기...",
     layout_import: "레이아웃 가져오기...",
     layout_import_failed: "유효한 레이아웃 파일이 아닙니다",
@@ -407,6 +412,8 @@ export const koKR = {
     notebook_clip_copied: "복사했습니다",
     notebook_clip_save_payload: "페이로드를 파일로 저장...",
     notebook_clip_remove: "블록 제거",
+    notebook_clip_remove_confirm:
+        "이 블록을 제거할까요? 내용이 노트북에서 삭제됩니다. 이 작업은 되돌릴 수 없습니다.",
     notebook_clip_missing_payload:
         "임시 저장된 페이로드가 없습니다(첨부 파일 삭제됨). 복원하거나 사용할 수 없습니다.",
     notebook_clip_restored: "시스템 클립보드로 복원했습니다",
@@ -440,6 +447,8 @@ export const koKR = {
     notebook_image_width_reset: "표시 너비 초기화",
     notebook_image_edit_alt: "대체 텍스트 편집",
     notebook_image_remove: "이미지 제거",
+    notebook_image_remove_confirm:
+        "이 이미지를 제거할까요? 노트북에서 삭제됩니다. 이 작업은 되돌릴 수 없습니다.",
     notebook_image_alt_placeholder: "이미지 설명(대체 텍스트)",
     notebook_find_placeholder: "노트에서 찾기",
     notebook_find_no_match: "일치 항목 없음",
@@ -536,6 +545,8 @@ export const koKR = {
 
     track_add: "트랙 추가",
     track_remove_selected: "선택한 트랙 삭제",
+    track_remove_confirm:
+        "이 트랙을 삭제할까요? 트랙과 그 위의 모든 클립이 삭제됩니다. 이 작업은 되돌릴 수 없습니다.",
 
     param_editor: "파라미터 에디터",
     param_editor_short: "파라미터",
@@ -798,6 +809,7 @@ export const koKR = {
     status_stretching: "타임 스트레치 중",
 
     fb_title: "파일 브라우저",
+    fb_file_list: "파일 목록",
     fb_search_placeholder: "파일 검색...",
     fb_open_folder: "폴더 열기",
     fb_refresh: "새로고침",
@@ -1374,6 +1386,8 @@ export const koKR = {
     tempo_map_add_point: "여기에 템포/박자표/스케일 변경 추가...",
     tempo_map_edit_point: "이 변경점 편집...",
     tempo_map_delete_point: "이 변경점 삭제",
+    tempo_map_delete_point_confirm:
+        "이 변경점을 삭제할까요? 이 위치의 템포, 박자표, 스케일 변경이 모두 제거됩니다. 이 작업은 되돌릴 수 없습니다.",
     tempo_map_clear_all: "템포 맵 지우기",
     tempo_map_dialog_title: "템포 맵 변경점",
     tempo_map_dialog_title_initial: "초기 템포 맵 포인트",

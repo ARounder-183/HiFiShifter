@@ -19,6 +19,10 @@ export interface AppEmptyStateProps {
     children: ReactNode;
     /** 居中留白档位，`compact` 用于面板内部，`default` 用于整块空列表。 */
     size?: "compact" | "default";
+    /**
+     * 语义色调。`danger` 用于错误态（原先在文件浏览器里就地写 `color="red"`）。
+     */
+    tone?: "default" | "danger";
     className?: string;
 }
 
@@ -27,12 +31,18 @@ export interface AppEmptyStateProps {
  *
  * @example
  * <AppEmptyState>{t("no_matching_files")}</AppEmptyState>
+ * <AppEmptyState tone="danger">{t("fb_error")}</AppEmptyState>
  */
-export function AppEmptyState({ children, size = "default", className }: AppEmptyStateProps) {
+export function AppEmptyState({
+    children,
+    size = "default",
+    tone = "default",
+    className,
+}: AppEmptyStateProps) {
     return (
         <Text
             size="1"
-            color="gray"
+            color={tone === "danger" ? "red" : "gray"}
             className={cx("block text-center", size === "default" ? "px-3 py-4" : "px-3 py-2", className)}
         >
             {children}

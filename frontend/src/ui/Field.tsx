@@ -146,7 +146,16 @@ export function AppField({
 }
 
 export interface AppSwitchRowProps {
-    label: ReactNode;
+    /**
+     * 可见标签。仅在控件**没有相邻可见标签**时才省略（如表格 / 矩阵里
+     * 与整行内容并列的复选框），此时改用 `ariaLabel` 提供无障碍名称。
+     */
+    label?: ReactNode;
+    /**
+     * 控件的无障碍名称（`aria-label`）。`label` 省略时必填 ——
+     * 无可见标签的控件不能没有名称。
+     */
+    ariaLabel?: string;
     checked: boolean;
     onCheckedChange: (checked: boolean) => void;
     disabled?: boolean;
@@ -176,6 +185,7 @@ export interface AppSwitchRowProps {
  */
 export function AppSwitchRow({
     label,
+    ariaLabel,
     checked,
     onCheckedChange,
     disabled,
@@ -194,13 +204,16 @@ export function AppSwitchRow({
                     checked={checked}
                     onCheckedChange={(value) => onCheckedChange(Boolean(value))}
                     disabled={disabled}
+                    aria-label={ariaLabel}
                     // 与 12px 标签的首行基线对齐（控件高 16–20px，标签行高 18px）
                     style={{ marginTop: 1 }}
                 />
-                <div className="flex min-w-0 flex-1 flex-col">
-                    <span className="hs-type-body">{label}</span>
-                    {hint ? <span className="hs-type-caption">{hint}</span> : null}
-                </div>
+                {label != null || hint ? (
+                    <div className="flex min-w-0 flex-1 flex-col">
+                        {label != null ? <span className="hs-type-body">{label}</span> : null}
+                        {hint ? <span className="hs-type-caption">{hint}</span> : null}
+                    </div>
+                ) : null}
             </div>
         );
     }
@@ -208,21 +221,24 @@ export function AppSwitchRow({
     // aligned：标签占 `AppField` 那一列，控件落在同一列起点 —— 与同表单的字段行对齐。
     return (
         <div className={cx("flex items-start gap-2", className)}>
-            <span
-                className="hs-type-label shrink-0 pt-0.5"
-                style={
-                    inheritedLabelWidth === "auto"
-                        ? undefined
-                        : { minWidth: LABEL_WIDTH_PX[inheritedLabelWidth] }
-                }
-            >
-                {label}
-            </span>
+            {label != null ? (
+                <span
+                    className="hs-type-label shrink-0 pt-0.5"
+                    style={
+                        inheritedLabelWidth === "auto"
+                            ? undefined
+                            : { minWidth: LABEL_WIDTH_PX[inheritedLabelWidth] }
+                    }
+                >
+                    {label}
+                </span>
+            ) : null}
             <div className="flex min-w-0 flex-1 flex-col gap-1">
                 <Control
                     checked={checked}
                     onCheckedChange={(value) => onCheckedChange(Boolean(value))}
                     disabled={disabled}
+                    aria-label={ariaLabel}
                 />
                 {hint ? <span className="hs-type-caption">{hint}</span> : null}
             </div>

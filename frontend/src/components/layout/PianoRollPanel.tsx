@@ -10,7 +10,7 @@ import React, {
     useState,
 } from "react";
 import { flushSync } from "react-dom";
-import { Flex, Text, Button, Box, IconButton, DropdownMenu } from "@radix-ui/themes";
+import { Flex, Text, Button, Box, DropdownMenu } from "@radix-ui/themes";
 import {
     ChevronDownIcon,
     CursorArrowIcon,
@@ -250,7 +250,7 @@ import { settingsApi } from "../../services/api/settings";
 import { EditContextMenu } from "../editDialogs/EditContextMenu";
 import { resolveScrollableProjectSec } from "../../features/session/projectBoundary";
 import { parseCustomScaleToken } from "../../utils/scaleSelection";
-import { AppSelect } from "../../ui";
+import { AppIconButton, AppSelect } from "../../ui";
 import {
     centerFromVerticalScrollTop,
     verticalScrollTopFromCenter,
@@ -6922,19 +6922,19 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 className="h-8 bg-qt-base border-b border-qt-border px-2 shrink-0"
             >
                 <Flex align="center" gap="2" style={{ flex: "1 1 auto", minWidth: 0 }}>
-                    <IconButton
-                        size="1"
-                        variant={s.paramEditorSyncTimeline ? "solid" : "ghost"}
-                        data-tooltip={tAny("sync_timeline_view_tooltip")}
+                    <AppIconButton
+                        active={s.paramEditorSyncTimeline}
+                        tooltip={tAny("sync_timeline_view_tooltip")}
                         aria-label={tAny("sync_timeline_view")}
                         tabIndex={-1}
                         onClick={() => {
                             dispatch(setParamEditorSyncTimeline(!s.paramEditorSyncTimeline));
                             void dispatch(persistUiSettings());
                         }}
-                    >
-                        {s.paramEditorSyncTimeline ? <Link2Icon /> : <LinkBreak2Icon />}
-                    </IconButton>
+                        icon={
+                            s.paramEditorSyncTimeline ? <Link2Icon /> : <LinkBreak2Icon />
+                        }
+                    />
                     <Text size="1" weight="bold" color="gray">
                         {tAny("param_editor_short")}
                     </Text>
@@ -6946,67 +6946,65 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         停在 120px（用户报告"平滑度滑块无法缩小"）。置 0 后收缩按 base 分摊：
                         按钮（min-content = 24px）保持不动，滑块与标签先让位。 */}
                     <Flex gap="1" align="center" style={{ marginLeft: 8, minWidth: 0 }}>
-                        <IconButton
-                            size="1"
-                            variant={s.toolModeGroup === "select" ? "solid" : "ghost"}
-                            data-tooltip={t("select")}
+                        <AppIconButton
+                            active={s.toolModeGroup === "select"}
+                            tooltip={t("select")}
                             tabIndex={-1}
                             onClick={() => dispatch(setToolMode("select"))}
-                        >
-                            <CursorArrowIcon />
-                        </IconButton>
+                            icon={<CursorArrowIcon />}
+                        />
                         <Box style={{ position: "relative" }} data-hs-context-menu>
-                            <IconButton
-                                size="1"
-                                variant={s.toolModeGroup === "draw" ? "solid" : "ghost"}
-                                data-tooltip={drawToolButtonTitle}
+                            <AppIconButton
+                                active={s.toolModeGroup === "draw"}
+                                tooltip={drawToolButtonTitle}
                                 tabIndex={-1}
                                 onClick={() => dispatch(setToolMode(currentDrawTool))}
                                 onContextMenu={(e) => {
                                     e.preventDefault();
                                     setDrawToolMenuOpen(true);
                                 }}
-                            >
-                                <Box
-                                    style={{
-                                        position: "relative",
-                                        width: 15,
-                                        height: 15,
-                                    }}
-                                >
+                                icon={
                                     <Box
                                         style={{
-                                            position: "absolute",
-                                            inset: 0,
-                                            display: "flex",
-                                            alignItems: "center",
-                                            justifyContent: "center",
+                                            position: "relative",
+                                            width: 15,
+                                            height: 15,
                                         }}
                                     >
-                                        {currentDrawToolIcon}
-                                    </Box>
-                                    <Box
-                                        style={{
-                                            position: "absolute",
-                                            right: -1,
-                                            bottom: -1,
-                                            width: 6,
-                                            height: 6,
-                                            opacity: 0.7,
-                                        }}
-                                    >
-                                        <svg
-                                            width="6"
-                                            height="6"
-                                            viewBox="0 0 6 6"
-                                            fill="none"
-                                            xmlns="http://www.w3.org/2000/svg"
+                                        <Box
+                                            style={{
+                                                position: "absolute",
+                                                inset: 0,
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "center",
+                                            }}
                                         >
-                                            <path d="M0 6L6 0V6Z" fill="currentColor" />
-                                        </svg>
+                                            {currentDrawToolIcon}
+                                        </Box>
+                                        <Box
+                                            style={{
+                                                position: "absolute",
+                                                right: -1,
+                                                bottom: -1,
+                                                width: 6,
+                                                height: 6,
+                                                opacity: 0.7,
+                                            }}
+                                        >
+                                            <svg
+                                                width="6"
+                                                height="6"
+                                                viewBox="0 0 6 6"
+                                                fill="none"
+                                                xmlns="http://www.w3.org/2000/svg"
+                                            >
+                                                <path d="M0 6L6 0V6Z" fill="currentColor" />
+                                            </svg>
+                                        </Box>
                                     </Box>
-                                </Box>
-                            </IconButton>
+                                }
+                            />
 
                             {drawToolMenuOpen && (
                                 <Box
@@ -7070,11 +7068,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             }}
                         />
                         {/* 拖动方向按钮 */}
-                        <IconButton
-                            size="1"
-                            color="gray"
-                            variant={activeDragDirection === "free" ? "ghost" : "solid"}
-                            data-tooltip={`${tAny("drag_direction")}: ${tAny(activeDragDirection === "free" ? "drag_direction_free" : activeDragDirection === "x-only" ? "drag_direction_x_only" : "drag_direction_y_only")}${
+                        <AppIconButton
+                            active={activeDragDirection !== "free"}
+                            tooltip={`${tAny("drag_direction")}: ${tAny(activeDragDirection === "free" ? "drag_direction_free" : activeDragDirection === "x-only" ? "drag_direction_x_only" : "drag_direction_y_only")}${
                                 isNoneBinding(cycleDragDirectionKb)
                                     ? ""
                                     : ` (${formatKeybinding(cycleDragDirectionKb, "")})`
@@ -7084,62 +7080,62 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 dispatch(cycleDragDirection(activeDragDirectionTool));
                                 void dispatch(persistUiSettings());
                             }}
-                        >
-                            {activeDragDirection === "free" ? (
-                                <svg
-                                    width="15"
-                                    height="15"
-                                    viewBox="0 0 15 15"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                >
-                                    <path
-                                        d="M3.5 11.5L11.5 3.5M11.5 3.5L8 3.5M11.5 3.5L11.5 7M3.5 11.5L7 11.5M3.5 11.5L3.5 8"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                    />
-                                </svg>
-                            ) : activeDragDirection === "x-only" ? (
-                                <svg
-                                    width="15"
-                                    height="15"
-                                    viewBox="0 0 15 15"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                >
-                                    <path
-                                        d="M2 7.5H13M2 7.5L4.5 5M2 7.5L4.5 10M13 7.5L10.5 5M13 7.5L10.5 10"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                    />
-                                </svg>
-                            ) : (
-                                <svg
-                                    width="15"
-                                    height="15"
-                                    viewBox="0 0 15 15"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                >
-                                    <path
-                                        d="M7.5 2V13M7.5 2L5 4.5M7.5 2L10 4.5M7.5 13L5 10.5M7.5 13L10 10.5"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                    />
-                                </svg>
-                            )}
-                        </IconButton>
+                            icon={
+                                activeDragDirection === "free" ? (
+                                    <svg
+                                        width="15"
+                                        height="15"
+                                        viewBox="0 0 15 15"
+                                        fill="none"
+                                        xmlns="http://www.w3.org/2000/svg"
+                                    >
+                                        <path
+                                            d="M3.5 11.5L11.5 3.5M11.5 3.5L8 3.5M11.5 3.5L11.5 7M3.5 11.5L7 11.5M3.5 11.5L3.5 8"
+                                            stroke="currentColor"
+                                            strokeWidth="1.2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                        />
+                                    </svg>
+                                ) : activeDragDirection === "x-only" ? (
+                                    <svg
+                                        width="15"
+                                        height="15"
+                                        viewBox="0 0 15 15"
+                                        fill="none"
+                                        xmlns="http://www.w3.org/2000/svg"
+                                    >
+                                        <path
+                                            d="M2 7.5H13M2 7.5L4.5 5M2 7.5L4.5 10M13 7.5L10.5 5M13 7.5L10.5 10"
+                                            stroke="currentColor"
+                                            strokeWidth="1.2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                        />
+                                    </svg>
+                                ) : (
+                                    <svg
+                                        width="15"
+                                        height="15"
+                                        viewBox="0 0 15 15"
+                                        fill="none"
+                                        xmlns="http://www.w3.org/2000/svg"
+                                    >
+                                        <path
+                                            d="M7.5 2V13M7.5 2L5 4.5M7.5 2L10 4.5M7.5 13L5 10.5M7.5 13L10 10.5"
+                                            stroke="currentColor"
+                                            strokeWidth="1.2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                        />
+                                    </svg>
+                                )
+                            }
+                        />
                         <Box style={{ position: "relative" }} data-hs-context-menu>
-                            <IconButton
-                                size="1"
-                                variant={effectivePitchSnapVisual ? "solid" : "ghost"}
-                                data-tooltip={`${t("pitch_snap")}: ${
+                            <AppIconButton
+                                active={effectivePitchSnapVisual}
+                                tooltip={`${t("pitch_snap")}: ${
                                     effectivePitchSnapVisual
                                         ? s.pitchSnapUnit === "semitone"
                                             ? tAny("quantize_semitone")
@@ -7155,77 +7151,78 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     e.preventDefault();
                                     setPitchSnapMenuOpen(true);
                                 }}
-                            >
-                                <Box
-                                    style={{
-                                        position: "relative",
-                                        width: 15,
-                                        height: 15,
-                                    }}
-                                >
+                                icon={
                                     <Box
                                         style={{
-                                            position: "absolute",
-                                            inset: 0,
-                                            display: "flex",
-                                            alignItems: "center",
-                                            justifyContent: "center",
+                                            position: "relative",
+                                            width: 15,
+                                            height: 15,
                                         }}
                                     >
-                                        {!effectivePitchSnapVisual ? (
-                                            <Box
-                                                style={{
-                                                    position: "relative",
-                                                    width: 15,
-                                                    height: 15,
-                                                    opacity: 0.45,
-                                                }}
-                                            >
-                                                {pitchSnapSemitoneIcon}
-                                                <svg
-                                                    className="absolute inset-0"
-                                                    width="15"
-                                                    height="15"
-                                                    viewBox="0 0 15 15"
-                                                    fill="none"
-                                                    xmlns="http://www.w3.org/2000/svg"
-                                                >
-                                                    <path
-                                                        d="M3 3L12 12"
-                                                        stroke="currentColor"
-                                                        strokeWidth="1.2"
-                                                        strokeLinecap="round"
-                                                    />
-                                                </svg>
-                                            </Box>
-                                        ) : s.pitchSnapUnit === "semitone" ? (
-                                            pitchSnapSemitoneIcon
-                                        ) : (
-                                            pitchSnapScaleIcon
-                                        )}
-                                    </Box>
-                                    <Box
-                                        style={{
-                                            position: "absolute",
-                                            right: -1,
-                                            bottom: -1,
-                                            width: 6,
-                                            height: 6,
-                                            opacity: 0.7,
-                                        }}
-                                    >
-                                        <svg
-                                            width="6"
-                                            height="6"
-                                            viewBox="0 0 6 6"
-                                            fill="none"
-                                            xmlns="http://www.w3.org/2000/svg"
+                                        <Box
+                                            style={{
+                                                position: "absolute",
+                                                inset: 0,
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "center",
+                                            }}
                                         >
-                                            <path d="M0 6L6 0V6Z" fill="currentColor" />
-                                        </svg>
+                                            {!effectivePitchSnapVisual ? (
+                                                <Box
+                                                    style={{
+                                                        position: "relative",
+                                                        width: 15,
+                                                        height: 15,
+                                                        opacity: 0.45,
+                                                    }}
+                                                >
+                                                    {pitchSnapSemitoneIcon}
+                                                    <svg
+                                                        className="absolute inset-0"
+                                                        width="15"
+                                                        height="15"
+                                                        viewBox="0 0 15 15"
+                                                        fill="none"
+                                                        xmlns="http://www.w3.org/2000/svg"
+                                                    >
+                                                        <path
+                                                            d="M3 3L12 12"
+                                                            stroke="currentColor"
+                                                            strokeWidth="1.2"
+                                                            strokeLinecap="round"
+                                                        />
+                                                    </svg>
+                                                </Box>
+                                            ) : s.pitchSnapUnit === "semitone" ? (
+                                                pitchSnapSemitoneIcon
+                                            ) : (
+                                                pitchSnapScaleIcon
+                                            )}
+                                        </Box>
+                                        <Box
+                                            style={{
+                                                position: "absolute",
+                                                right: -1,
+                                                bottom: -1,
+                                                width: 6,
+                                                height: 6,
+                                                opacity: 0.7,
+                                            }}
+                                        >
+                                            <svg
+                                                width="6"
+                                                height="6"
+                                                viewBox="0 0 6 6"
+                                                fill="none"
+                                                xmlns="http://www.w3.org/2000/svg"
+                                            >
+                                                <path d="M0 6L6 0V6Z" fill="currentColor" />
+                                            </svg>
+                                        </Box>
                                     </Box>
-                                </Box>
-                            </IconButton>
+                                }
+                            />
 
                             {pitchSnapMenuOpen && (
                                 <Box
@@ -7306,10 +7303,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 </Box>
                             )}
                         </Box>
-                        <IconButton
-                            size="1"
-                            variant={s.scaleHighlightMode === "always" ? "solid" : "ghost"}
-                            data-tooltip={tAny("scale_highlight")}
+                        <AppIconButton
+                            active={s.scaleHighlightMode === "always"}
+                            tooltip={tAny("scale_highlight")}
                             tabIndex={-1}
                             onClick={() => {
                                 dispatch(
@@ -7319,95 +7315,96 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 );
                                 void dispatch(persistUiSettings());
                             }}
-                        >
-                            {s.scaleHighlightMode === "always" ? (
-                                <svg
-                                    width="14"
-                                    height="14"
-                                    viewBox="0 0 14 14"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                >
-                                    <circle cx="5" cy="9" r="2.2" fill="currentColor" />
-                                    <path
-                                        d="M7 4V8.5"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                    />
-                                    <path
-                                        d="M7 4L11 3.2"
-                                        stroke="currentColor"
-                                        strokeWidth="1"
-                                        strokeLinecap="round"
-                                    />
-                                </svg>
-                            ) : (
-                                <svg
-                                    width="14"
-                                    height="14"
-                                    viewBox="0 0 14 14"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                >
-                                    <circle
-                                        cx="5"
-                                        cy="9"
-                                        r="2.2"
-                                        stroke="currentColor"
-                                        strokeWidth="1"
+                            icon={
+                                s.scaleHighlightMode === "always" ? (
+                                    <svg
+                                        width="14"
+                                        height="14"
+                                        viewBox="0 0 14 14"
                                         fill="none"
-                                    />
-                                    <path
-                                        d="M7 4V8.5"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                    />
-                                    <path
-                                        d="M7 4L11 3.2"
-                                        stroke="currentColor"
-                                        strokeWidth="1"
-                                        strokeLinecap="round"
-                                    />
-                                </svg>
-                            )}
-                        </IconButton>
-                        <IconButton
-                            size="1"
-                            variant={s.lockParamLinesEnabled ? "solid" : "ghost"}
-                            data-tooltip={t("lock_param_lines")}
+                                        xmlns="http://www.w3.org/2000/svg"
+                                    >
+                                        <circle cx="5" cy="9" r="2.2" fill="currentColor" />
+                                        <path
+                                            d="M7 4V8.5"
+                                            stroke="currentColor"
+                                            strokeWidth="1.2"
+                                            strokeLinecap="round"
+                                        />
+                                        <path
+                                            d="M7 4L11 3.2"
+                                            stroke="currentColor"
+                                            strokeWidth="1"
+                                            strokeLinecap="round"
+                                        />
+                                    </svg>
+                                ) : (
+                                    <svg
+                                        width="14"
+                                        height="14"
+                                        viewBox="0 0 14 14"
+                                        fill="none"
+                                        xmlns="http://www.w3.org/2000/svg"
+                                    >
+                                        <circle
+                                            cx="5"
+                                            cy="9"
+                                            r="2.2"
+                                            stroke="currentColor"
+                                            strokeWidth="1"
+                                            fill="none"
+                                        />
+                                        <path
+                                            d="M7 4V8.5"
+                                            stroke="currentColor"
+                                            strokeWidth="1.2"
+                                            strokeLinecap="round"
+                                        />
+                                        <path
+                                            d="M7 4L11 3.2"
+                                            stroke="currentColor"
+                                            strokeWidth="1"
+                                            strokeLinecap="round"
+                                        />
+                                    </svg>
+                                )
+                            }
+                        />
+                        <AppIconButton
+                            active={s.lockParamLinesEnabled}
+                            tooltip={t("lock_param_lines")}
                             tabIndex={-1}
                             onClick={() => {
                                 dispatch(toggleLockParamLines());
                                 void dispatch(persistUiSettings());
                             }}
-                        >
-                            <svg
-                                width="15"
-                                height="15"
-                                viewBox="0 0 15 15"
-                                fill="none"
-                                xmlns="http://www.w3.org/2000/svg"
-                            >
-                                <rect
-                                    x="3"
-                                    y="6"
-                                    width="9"
-                                    height="7"
-                                    rx="1"
-                                    stroke="currentColor"
-                                    strokeWidth="1"
+                            icon={
+                                <svg
+                                    width="15"
+                                    height="15"
+                                    viewBox="0 0 15 15"
                                     fill="none"
-                                />
-                                <path
-                                    d="M5 6V4.5C5 3.12 6.12 2 7.5 2C8.88 2 10 3.12 10 4.5V6"
-                                    stroke="currentColor"
-                                    strokeWidth="1"
-                                    fill="none"
-                                />
-                            </svg>
-                        </IconButton>
+                                    xmlns="http://www.w3.org/2000/svg"
+                                >
+                                    <rect
+                                        x="3"
+                                        y="6"
+                                        width="9"
+                                        height="7"
+                                        rx="1"
+                                        stroke="currentColor"
+                                        strokeWidth="1"
+                                        fill="none"
+                                    />
+                                    <path
+                                        d="M5 6V4.5C5 3.12 6.12 2 7.5 2C8.88 2 10 3.12 10 4.5V6"
+                                        stroke="currentColor"
+                                        strokeWidth="1"
+                                        fill="none"
+                                    />
+                                </svg>
+                            }
+                        />
                         <Flex align="center" gap="1" ml="2" style={{ minWidth: 0, flexShrink: 1 }}>
                             {/* 标签允许被压缩裁切（完整名称在悬停提示里）：横向极窄时
                                 应当由它先让位，而不是把整行撑到溢出。省略号让"让位"

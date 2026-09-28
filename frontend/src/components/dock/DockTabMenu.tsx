@@ -61,6 +61,23 @@ export function DockTabMenu({
     const [draft, setDraft] = useState("");
 
     /*
+     * 关闭时归还焦点（与 `AppContextMenu` 同一约定）。
+     *
+     * 菜单是弹出表面：卸载后若不归还焦点，键盘用户会被丢到 `<body>`，下一个 Tab
+     * 从文档头重新开始。触发者可能已随菜单一起消失（例如"关闭标签"删掉了它），
+     * 故归还前先查 `isConnected`。
+     */
+    const openerRef = useRef<HTMLElement | null>(null);
+    useEffect(() => {
+        openerRef.current =
+            document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        return () => {
+            const opener = openerRef.current;
+            if (opener?.isConnected) opener.focus();
+        };
+    }, []);
+
+    /*
      * 视口夹紧：右键点在屏幕右下角时菜单不能跑出可视区。
      *
      * 与 `AppContextMenu` 统一为**按实测尺寸**夹紧。原先这里是估算（固定 24px

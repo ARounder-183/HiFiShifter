@@ -28,6 +28,7 @@ import {
 } from "./hifiClipBlock";
 import { insertClipPayload, restoreClipPayload } from "./notebookClipboard";
 import { NotebookContextMenu, type NotebookMenuItem } from "./NotebookContextMenu";
+import { AppConfirmDialog } from "../../../ui";
 
 interface ClipPreviewRow {
     trackId: string;
@@ -67,6 +68,11 @@ export function HifiClipNodeView(props: NodeViewProps) {
         [node.attrs.body],
     );
     const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+    /**
+     * 删除暂存块的确认开关。菜单关闭即卸载，确认框必须住在常驻的 NodeView
+     * 组件里；菜单项只置位，确认后才调用 deleteNode。
+     */
+    const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
     const [renaming, setRenaming] = useState(false);
     const [titleDraft, setTitleDraft] = useState("");
     const [busy, setBusy] = useState(false);
@@ -213,7 +219,8 @@ export function HifiClipNodeView(props: NodeViewProps) {
             label: t("notebook_clip_remove"),
             danger: true,
             separatorBefore: true,
-            onSelect: () => deleteNode(),
+            // 不立即删除：先置位，由常驻的确认框在菜单卸载后询问。
+            onSelect: () => setRemoveConfirmOpen(true),
         },
     ];
 
@@ -364,6 +371,18 @@ export function HifiClipNodeView(props: NodeViewProps) {
                     onClose={() => setMenu(null)}
                 />
             ) : null}
+
+            {/* 删除暂存块确认（常驻于卡片视图，不随右键菜单卸载）。 */}
+            <AppConfirmDialog
+                open={removeConfirmOpen}
+                onOpenChange={setRemoveConfirmOpen}
+                title={t("notebook_clip_remove")}
+                message={t("notebook_clip_remove_confirm")}
+                confirmLabel={t("notebook_clip_remove")}
+                cancelLabel={t("cancel")}
+                intent="danger"
+                onConfirm={() => deleteNode()}
+            />
         </NodeViewWrapper>
     );
 

@@ -43,20 +43,52 @@ import {
 } from "../../features/dock/dockApi";
 import { getPanel } from "../../features/dock/panelRegistry";
 import { AppDialog } from "../../ui/Dialog";
+import { AppConfirmDialog, AppNoticeDialog } from "../../ui";
 
 /* ── 二级菜单 → 对话框宿主的通信 ─────────────────────────────────
  * 二级菜单在菜单关闭时卸载，持有不了对话框的开关状态；把三份状态提升到
  * `MenuBar` 又会让停靠 UI 的细节漏进菜单栏。这里用模块级单值桥接：菜单项
  * 置位、常驻宿主订阅。快照是原始值，`useSyncExternalStore` 不会抖。 */
-type DockDialogKind = "settings" | "namePrompt" | "resetConfirm" | null;
+type DockDialogKind =
+    | "settings"
+    | "namePrompt"
+    | "resetConfirm"
+    | "deletePresetConfirm"
+    | "notice"
+    | null;
 
 let dockDialogKind: DockDialogKind = null;
 const dockDialogListeners = new Set<() => void>();
+
+/**
+ * 待删除的预设名。与 `dockNoticeMessage` 同理：快照仍是原始值（kind），
+ * 预设名在 kind 变化触发的那次重渲染里读取即可，`useSyncExternalStore` 不会抖。
+ */
+let dockPresetToDelete: string | null = null;
+
+/**
+ * 纯通知对话框的正文。与 `dockDialogKind` 分开存放：快照仍是原始字符串
+ * （`useSyncExternalStore` 不会因对象不稳定而反复重渲染），正文在 kind 变化
+ * 触发的那次重渲染里直接读取即可。
+ */
+let dockNoticeMessage: string | null = null;
 
 function setDockDialogKind(kind: DockDialogKind) {
     if (dockDialogKind === kind) return;
     dockDialogKind = kind;
     dockDialogListeners.forEach((listener) => listener());
+}
+
+/** 打开错误通知（取代此前的 `window.alert`）。 */
+function setDockNotice(message: string) {
+    dockNoticeMessage = message;
+    setDockDialogKind("notice");
+}
+
+/** 请求删除预设：菜单项只置位（记下待删名字），常驻宿主弹确认框。 */
+function requestDeletePreset(name: string) {
+    dockPresetToDelete = name;
+    setDockDialogKind("deletePresetConfirm");
 }
 
 function useDockDialogKind(): DockDialogKind {
@@ -146,10 +178,10 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
         try {
             const result = await exportLayoutJson(json);
             if (!result.ok && !result.canceled) {
-                window.alert(result.error || tAny("layout_export_failed"));
+                setDockNotice(result.error || tAny("layout_export_failed"));
             }
         } catch {
-            window.alert(tAny("layout_export_failed"));
+            setDockNotice(tAny("layout_export_failed"));
         }
     }, [layout, tAny]);
 
@@ -216,7 +248,8 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
                                 <DropdownMenu.Item
                                     key={name}
                                     color="red"
-                                    onSelect={() => deletePreset(dispatch, name)}
+                                    // 不立即删除：菜单关闭即卸载，确认框住在常驻宿主里。
+                                    onSelect={() => requestDeletePreset(name)}
                                 >
                                     {name}
                                 </DropdownMenu.Item>
@@ -267,9 +300,11 @@ export function DockLayoutDialogs() {
     const dialogKind = useDockDialogKind();
     const [presetDraft, setPresetDraft] = useState("");
 
-    // 关闭即清空命名草稿：下一次打开总是从空名开始（Escape / 取消 / 确认都经过这里）。
+    // 关闭即清空命名草稿与通知正文：下一次打开总是从空名开始（Escape / 取消 / 确认都经过这里）。
     const closeDialog = useCallback(() => {
         setPresetDraft("");
+        dockNoticeMessage = null;
+        dockPresetToDelete = null;
         setDockDialogKind(null);
     }, []);
 
@@ -277,7 +312,7 @@ export function DockLayoutDialogs() {
         async (file: File | null) => {
             if (!file) return;
             const text = await file.text();
-            if (!importLayoutJson(dispatch, text)) window.alert(tAny("layout_import_failed"));
+            if (!importLayoutJson(dispatch, text)) setDockNotice(tAny("layout_import_failed"));
         },
         [dispatch, tAny],
     );
@@ -290,26 +325,37 @@ export function DockLayoutDialogs() {
             />
 
             {/* 重置确认：`confirmResetLayout` 关闭时菜单项直接重置，根本不会走到这里。 */}
-            <AppDialog
+            <AppConfirmDialog
                 open={dialogKind === "resetConfirm"}
                 onOpenChange={(open) => {
                     if (!open) closeDialog();
                 }}
                 title={tAny("layout_reset_confirm_title")}
-                description={tAny("layout_reset_confirm_body")}
-                size="sm"
-                actions={[
-                    { id: "cancel", label: t("cancel"), onClick: () => closeDialog() },
-                    {
-                        id: "reset",
-                        label: tAny("layout_reset"),
-                        intent: "primary",
-                        onClick: () => {
-                            resetLayout(dispatch);
-                            closeDialog();
-                        },
-                    },
-                ]}
+                message={tAny("layout_reset_confirm_body")}
+                confirmLabel={tAny("layout_reset")}
+                cancelLabel={t("cancel")}
+                intent="primary"
+                onConfirm={() => {
+                    resetLayout(dispatch);
+                    closeDialog();
+                }}
+            />
+
+            {/* 删除预设确认：预设名经模块级桥接传入（菜单项已随菜单卸载）。 */}
+            <AppConfirmDialog
+                open={dialogKind === "deletePresetConfirm"}
+                onOpenChange={(open) => {
+                    if (!open) closeDialog();
+                }}
+                title={tAny("layout_delete_preset")}
+                message={tAny("layout_delete_preset_confirm")}
+                confirmLabel={tAny("layout_delete_preset")}
+                cancelLabel={t("cancel")}
+                intent="danger"
+                onConfirm={() => {
+                    if (dockPresetToDelete) deletePreset(dispatch, dockPresetToDelete);
+                    closeDialog();
+                }}
             />
 
             <AppDialog
@@ -340,6 +386,18 @@ export function DockLayoutDialogs() {
                     onChange={(event) => setPresetDraft(event.target.value)}
                 />
             </AppDialog>
+
+            {/* 布局导入/导出的错误通知：由常驻宿主渲染（导出失败发生在菜单已关闭
+                之后，二级菜单此时已卸载，对话框不能住在菜单子树里）。 */}
+            <AppNoticeDialog
+                open={dialogKind === "notice"}
+                onOpenChange={(open) => {
+                    if (!open) closeDialog();
+                }}
+                title={tAny("status_error_prefix")}
+                message={dockNoticeMessage ?? ""}
+                closeLabel={tAny("ok")}
+            />
 
             {/*
               隐藏的文件输入：导入走浏览器原生文件选择（WebView 内可用，不必动用

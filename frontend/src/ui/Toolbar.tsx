@@ -17,7 +17,6 @@
  */
 import type { ReactNode } from "react";
 
-import { AppIconButton, type AppIconButtonProps } from "./Button";
 import { AppDensityProvider } from "./density";
 import { cx } from "./cx";
 
@@ -105,17 +104,6 @@ export function AppToolbar({
     );
 }
 
-/** 一组相关按钮。组与组之间用 `AppToolbarSeparator` 分隔。 */
-export function AppToolbarGroup({
-    children,
-    className,
-}: {
-    children: ReactNode;
-    className?: string;
-}) {
-    return <div className={cx("flex shrink-0 items-center gap-1", className)}>{children}</div>;
-}
-
 /**
  * 组间分隔线。
  *
@@ -129,18 +117,4 @@ export function AppToolbarSeparator({ className }: { className?: string }) {
             className={cx("mx-1 h-4 w-px shrink-0 bg-qt-border", className)}
         />
     );
-}
-
-/**
- * 工具栏图标按钮。
- *
- * 就是 `AppIconButton`，单独起一个名字是因为它在工具栏语境下多一条约定：
- * **不进 Tab 序列**（`tabIndex={-1}`）。工具栏是"用鼠标扫视"的表面，让 Tab
- * 逐个停在十几个图标按钮上会淹没真正的焦点路径（表单、列表、对话框）。
- *
- * 历史实现里 `tabIndex={-1}` 只在 ActionBar 与 PianoRollPanel 出现过
- * （各 11 处），其余工具栏没有 —— 于是 Tab 行为按工具栏而异。
- */
-export function AppToolbarButton({ tabIndex = -1, ...rest }: AppIconButtonProps) {
-    return <AppIconButton tabIndex={tabIndex} {...rest} />;
 }

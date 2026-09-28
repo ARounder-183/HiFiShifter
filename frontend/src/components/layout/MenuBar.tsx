@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { DropdownMenu, Flex, Spinner, Text } from "@radix-ui/themes";
+import { DropdownMenu, Flex } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
@@ -93,6 +93,7 @@ import {
 import { isDynParam } from "./pianoRoll/paramRanges";
 import type { AutoBackupSettings } from "../../services/api/project";
 import { AppDialog } from "../../ui/Dialog";
+import { AppBusy, AppConfirmDialog, AppNoticeDialog } from "../../ui";
 // import type { VibratoParams } from "../editDialogs/EditDialogs"; // 已移除无效导入
 
 interface MenuBarProps {
@@ -198,7 +199,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     // 避免用户以为点击没生效而反复触发。
     const [diagnosticsExporting, setDiagnosticsExporting] = useState(false);
     const [aboutDialogOpen, setAboutDialogOpen] = useState(false);
+    // 纯通知对话框（取代此前的 window.alert）：错误报告用标题 + 正文两段。
+    const [notice, setNotice] = useState<{ title: string; message: string } | null>(null);
     const [renderCacheDialogOpen, setRenderCacheDialogOpen] = useState(false);
+    /** 清空波形缓存确认框。缓存重建代价高，且下拉菜单关闭即卸载，故由常驻菜单栏托管。 */
+    const [waveformCacheConfirmOpen, setWaveformCacheConfirmOpen] = useState(false);
     const [channelImportDialogOpen, setChannelImportDialogOpen] = useState(false);
     const [dmlAdapters, setDmlAdapters] = useState<
         { deviceId: number; name: string; memoryMb: number }[]
@@ -493,10 +498,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             setDiagnosticsExporting(true);
             const res = await exportDiagnostics(pick.path);
             if (!res.ok) {
-                window.alert(res.error || tAny("menu_export_diagnostics_failed"));
+                setNotice({
+                    title: tAny("status_error_prefix"),
+                    message: res.error || tAny("menu_export_diagnostics_failed"),
+                });
             }
         } catch (e) {
-            window.alert(String(e));
+            setNotice({ title: tAny("status_error_prefix"), message: String(e) });
         } finally {
             setDiagnosticsExporting(false);
         }
@@ -944,7 +952,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Item onSelect={() => dispatch(refreshRuntime())}>
                         {t("action_refresh")}
                     </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => void dispatch(clearWaveformCacheRemote())}>
+                    <DropdownMenu.Item onSelect={() => setWaveformCacheConfirmOpen(true)}>
                         {t("menu_clear_waveform_cache")}
                     </DropdownMenu.Item>
                 </DropdownMenu.Content>
@@ -1276,10 +1284,18 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             try {
                                 const res = await openLogFolder();
                                 if (!res.ok) {
-                                    window.alert(res.error || tAny("menu_open_log_folder_failed"));
+                                    setNotice({
+                                        title: tAny("status_error_prefix"),
+                                        message:
+                                            res.error ||
+                                            tAny("menu_open_log_folder_failed"),
+                                    });
                                 }
                             } catch (e) {
-                                window.alert(String(e));
+                                setNotice({
+                                    title: tAny("status_error_prefix"),
+                                    message: String(e),
+                                });
                             }
                         }}
                     >
@@ -1384,15 +1400,38 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 dismissible={false}
             >
                 <Flex align="center" gap="3">
-                    <Spinner size="2" />
-                    <Text size="2" color="gray">
-                        {tAny("menu_export_diagnostics_running")}
-                    </Text>
+                    <AppBusy label={tAny("menu_export_diagnostics_running")} />
                 </Flex>
             </AppDialog>
 
+            {/* 清空波形缓存：代价高的破坏性维护操作，先确认再执行。 */}
+            <AppConfirmDialog
+                open={waveformCacheConfirmOpen}
+                onOpenChange={setWaveformCacheConfirmOpen}
+                title={tAny("menu_clear_waveform_cache")}
+                message={tAny("menu_clear_waveform_cache_confirm")}
+                confirmLabel={tAny("menu_clear_waveform_cache")}
+                cancelLabel={tAny("cancel")}
+                intent="danger"
+                onConfirm={() => {
+                    void dispatch(clearWaveformCacheRemote());
+                }}
+            />
+
             {/* 关于对话框：简介 + 版本 + Commit（可点击跳转源码快照）+ 仓库链接 */}
             <AboutDialog open={aboutDialogOpen} onOpenChange={setAboutDialogOpen} />
+
+            {/* 错误报告：取代此前的 window.alert（原生弹窗在 Tauri 里不可主题化、
+                按钮不可本地化）。标题与正文分开，便于放系统错误原文。 */}
+            <AppNoticeDialog
+                open={notice !== null}
+                onOpenChange={(open) => {
+                    if (!open) setNotice(null);
+                }}
+                title={notice?.title ?? ""}
+                message={notice?.message ?? ""}
+                closeLabel={t("ok")}
+            />
 
             {/* 菜单导入模式选择（多文件） */}
             {menuImportMode && (

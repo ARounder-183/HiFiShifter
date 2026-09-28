@@ -17,7 +17,7 @@ import {
 } from "../../services/api/recording";
 import { webApi } from "../../services/webviewApi";
 import { AppDialog } from "../../ui/Dialog";
-import { AppField, AppForm } from "../../ui/Field";
+import { AppField, AppForm, AppSwitchRow } from "../../ui/Field";
 import { AppNumberField, AppSelect } from "../../ui";
 
 interface RecordingSettingsDialogProps {
@@ -394,19 +394,17 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                     />
                 </AppField>
 
-                <label className="flex items-center gap-2 text-qt-md text-qt-text">
-                    <input
-                        type="checkbox"
-                        checked={draft.monitorEnabled}
-                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                            setDraft((prev) => ({
-                                ...prev,
-                                monitorEnabled: event.target.checked,
-                            }))
-                        }
-                    />
-                    <span>{tAny("recording_monitor_enabled")}</span>
-                </label>
+                <AppSwitchRow
+                    control="checkbox"
+                    label={tAny("recording_monitor_enabled")}
+                    checked={draft.monitorEnabled}
+                    onCheckedChange={(monitorEnabled) =>
+                        setDraft((prev) => ({
+                            ...prev,
+                            monitorEnabled,
+                        }))
+                    }
+                />
 
                 {draft.monitorEnabled ? (
                     <AppField label={tAny("recording_monitor_gain")} className="pl-6">
@@ -428,33 +426,29 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                     </AppField>
                 ) : null}
 
-                <label className="flex items-center gap-2 text-qt-md text-qt-text">
-                    <input
-                        type="checkbox"
-                        checked={draft.autoNormalize}
-                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                            setDraft((prev) => ({
-                                ...prev,
-                                autoNormalize: event.target.checked,
-                            }))
-                        }
-                    />
-                    <span>{tAny("recording_auto_normalize")}</span>
-                </label>
+                <AppSwitchRow
+                    control="checkbox"
+                    label={tAny("recording_auto_normalize")}
+                    checked={draft.autoNormalize}
+                    onCheckedChange={(autoNormalize) =>
+                        setDraft((prev) => ({
+                            ...prev,
+                            autoNormalize,
+                        }))
+                    }
+                />
 
-                <label className="flex items-center gap-2 text-qt-md text-qt-text">
-                    <input
-                        type="checkbox"
-                        checked={draft.autoStopAtSelectionEnd}
-                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                            setDraft((prev) => ({
-                                ...prev,
-                                autoStopAtSelectionEnd: event.target.checked,
-                            }))
-                        }
-                    />
-                    <span>{tAny("recording_auto_stop_selection")}</span>
-                </label>
+                <AppSwitchRow
+                    control="checkbox"
+                    label={tAny("recording_auto_stop_selection")}
+                    checked={draft.autoStopAtSelectionEnd}
+                    onCheckedChange={(autoStopAtSelectionEnd) =>
+                        setDraft((prev) => ({
+                            ...prev,
+                            autoStopAtSelectionEnd,
+                        }))
+                    }
+                />
 
                 <AppField label={tAny("recording_path_template")}>
                     <TextField.Root

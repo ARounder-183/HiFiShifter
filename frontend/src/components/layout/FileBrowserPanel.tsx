@@ -27,8 +27,20 @@ import { audioPreview } from "../../features/fileBrowser/audioPreview";
 import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
 import { PanelToolbar, PanelToolbarButton } from "./shared/PanelToolbar";
 import { fileBrowserApi, type FileEntry } from "../../services/api/fileBrowser";
-import { AppSelect, AppSlider, AppSliderReadout } from "../../ui";
+import {
+    AppEmptyState,
+    AppIconButton,
+    AppListRow,
+    AppSelect,
+    AppSlider,
+    AppSliderReadout,
+} from "../../ui";
 import { isPrimaryModifierDown } from "../../utils/platform";
+import {
+    isFileListActivationKey,
+    isFileListNavKey,
+    nextActiveIndex,
+} from "./fileBrowserKeyboardNav";
 
 /** 支持的音频与视频媒体扩展名（视频按音轨导入） */
 const AUDIO_EXTENSIONS = new Set([
@@ -386,6 +398,18 @@ export const FileBrowserPanel: React.FC = () => {
     const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
     const lastClickedIndexRef = useRef<number>(-1);
 
+    // ── 键盘导航（roving tabindex） ─────────────────────────────────────────
+    // activeIndex 指向当前活动行（-1 = 尚无）。只有活动行可 Tab 进入（tabIndex=0），
+    // 方向键在同一列表内移动它；行获得焦点时同步回来，鼠标与键盘共用一套"当前行"。
+    const [activeIndex, setActiveIndex] = useState(-1);
+    const rowRefs = useRef<(HTMLDivElement | null)[]>([]);
+    const registerRowRef = useCallback((index: number, el: HTMLDivElement | null) => {
+        rowRefs.current[index] = el;
+    }, []);
+    const handleRowFocus = useCallback((index: number) => {
+        setActiveIndex(index);
+    }, []);
+
     // 获取仅音频的列表用于 shift-range 选择
     const audioEntries = useMemo(() => displayEntries.filter(isAudioFile), [displayEntries]);
 
@@ -429,11 +453,56 @@ export const FileBrowserPanel: React.FC = () => {
         [audioEntries, previewToggle],
     );
 
+    /**
+     * 键盘激活一行：与鼠标走**同一条**路径 —— 目录进入子目录，音频文件切换试听。
+     * 不复制这两段逻辑，只做选择。
+     */
+    const activateEntry = useCallback(
+        (entry: FileEntry) => {
+            if (entry.isDir) {
+                handleEnterDir(entry.path);
+            } else if (isAudioFile(entry)) {
+                handleClickAudio(entry);
+            }
+        },
+        [handleEnterDir, handleClickAudio],
+    );
+
+    /**
+     * 列表容器的键盘模型：方向键 / Home / End 移动活动行（夹紧，不环绕），
+     * Enter 与空格激活。方向键必须 `preventDefault`，否则 ScrollArea 会跟着滚动。
+     */
+    const handleListKeyDown = useCallback(
+        (event: React.KeyboardEvent<HTMLDivElement>) => {
+            if (isFileListNavKey(event.key)) {
+                event.preventDefault();
+                const next = nextActiveIndex(activeIndex, event.key, displayEntries.length);
+                if (next < 0) return;
+                setActiveIndex(next);
+                rowRefs.current[next]?.focus();
+                return;
+            }
+            if (isFileListActivationKey(event.key)) {
+                const entry = displayEntries[activeIndex];
+                if (!entry) return;
+                event.preventDefault();
+                activateEntry(entry);
+            }
+        },
+        [activeIndex, displayEntries, activateEntry],
+    );
+
     // Clear selection when directory changes
     useEffect(() => {
         setSelectedPaths(new Set());
         lastClickedIndexRef.current = -1;
+        setActiveIndex(-1);
     }, [fb.currentPath]);
+
+    // 列表内容变化（搜索、排序、过滤）后，活动行可能越界：收回为"无活动行"。
+    useEffect(() => {
+        setActiveIndex((current) => (current >= displayEntries.length ? -1 : current));
+    }, [displayEntries.length]);
 
     // 拖拽开始 — 使用自定义 pointer 事件实现，替代 HTML5 drag API
     const [dragState, setDragState] = useState<{
@@ -625,6 +694,17 @@ export const FileBrowserPanel: React.FC = () => {
         };
     }, [dragState !== null]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    // 列表真正渲染出条目时，容器才承担 listbox 语义（加载/错误/空态不是列表）。
+    const showEntries =
+        !fb.loading &&
+        !fb.error &&
+        !!fb.currentPath &&
+        !(isSearchMode && fb.searchLoading) &&
+        displayEntries.length > 0;
+
+    // roving tabindex 的起点：尚无活动行时首行可 Tab 进入。
+    const tabbableIndex = activeIndex >= 0 ? activeIndex : 0;
+
     return (
         <Flex direction="column" className="h-full bg-qt-window text-qt-text select-none">
             {/* 工具条：只放本面板**独有**的功能按钮。
@@ -693,11 +773,9 @@ export const FileBrowserPanel: React.FC = () => {
 
                 {/* 正则切换 + 排序 */}
                 <Flex align="center" gap="1" mt="1">
-                    <IconButton
-                        size="1"
-                        variant={fb.regexEnabled ? "solid" : "ghost"}
-                        color="gray"
-                        data-tooltip={tAny("fb_regex")}
+                    <AppIconButton
+                        active={fb.regexEnabled}
+                        tooltip={tAny("fb_regex")}
                         onClick={() => {
                             const nextRegexEnabled = !fb.regexEnabled;
                             dispatch(toggleRegex());
@@ -721,22 +799,18 @@ export const FileBrowserPanel: React.FC = () => {
                             width: 22,
                             height: 22,
                         }}
-                    >
-                        .*
-                    </IconButton>
-                    <IconButton
-                        size="1"
-                        variant={fb.audioOnly ? "solid" : "ghost"}
-                        color="gray"
-                        data-tooltip={tAny("fb_audio_only")}
+                        icon=".*"
+                    />
+                    <AppIconButton
+                        active={fb.audioOnly}
+                        tooltip={tAny("fb_audio_only")}
                         onClick={() => dispatch(toggleAudioOnly())}
                         style={{
                             width: 22,
                             height: 22,
                         }}
-                    >
-                        <AudioIcon />
-                    </IconButton>
+                        icon={<AudioIcon />}
+                    />
                     <AppSelect
                         fullWidth={false}
                         className="flex-1"
@@ -786,34 +860,39 @@ export const FileBrowserPanel: React.FC = () => {
 
             {/* 文件列表 */}
             <ScrollArea className="flex-1 min-h-0" scrollbars="vertical">
-                <div className="py-1">
+                <div
+                    className="py-1"
+                    role={showEntries ? "listbox" : undefined}
+                    aria-label={showEntries ? tAny("fb_file_list") : undefined}
+                    // 列表本就支持 Ctrl/Shift 多选，声明多选语义以免读屏按单选播报。
+                    aria-multiselectable={showEntries ? true : undefined}
+                    onKeyDown={showEntries ? handleListKeyDown : undefined}
+                >
                     {fb.loading ? (
-                        <Text size="1" color="gray" className="px-3 py-4 block text-center">
-                            {(t as (key: string) => string)("fb_loading")}
-                        </Text>
+                        <AppEmptyState>{(t as (key: string) => string)("fb_loading")}</AppEmptyState>
                     ) : fb.error ? (
-                        <Text size="1" color="red" className="px-3 py-4 block text-center">
+                        <AppEmptyState tone="danger">
                             {(t as (key: string) => string)("fb_error")}: {fb.error}
-                        </Text>
+                        </AppEmptyState>
                     ) : !fb.currentPath ? (
-                        <Text size="1" color="gray" className="px-3 py-4 block text-center">
-                            {(t as (key: string) => string)("fb_no_folder")}
-                        </Text>
+                        <AppEmptyState>{(t as (key: string) => string)("fb_no_folder")}</AppEmptyState>
                     ) : isSearchMode && fb.searchLoading ? (
-                        <Text size="1" color="gray" className="px-3 py-4 block text-center">
-                            {(t as (key: string) => string)("fb_searching")}
-                        </Text>
+                        <AppEmptyState>{(t as (key: string) => string)("fb_searching")}</AppEmptyState>
                     ) : displayEntries.length === 0 ? (
-                        <Text size="1" color="gray" className="px-3 py-4 block text-center">
+                        <AppEmptyState>
                             {isSearchMode
                                 ? (t as (key: string) => string)("fb_no_results")
                                 : (t as (key: string) => string)("fb_empty_folder")}
-                        </Text>
+                        </AppEmptyState>
                     ) : (
-                        displayEntries.map((entry) => (
+                        displayEntries.map((entry, index) => (
                             <FileEntryRow
                                 key={entry.path}
                                 entry={entry}
+                                index={index}
+                                tabIndex={index === tabbableIndex ? 0 : -1}
+                                onFocus={handleRowFocus}
+                                registerRowRef={registerRowRef}
                                 isPlaying={fb.previewingFile === entry.path}
                                 isSelected={selectedPaths.has(entry.path)}
                                 onDoubleClickDir={handleEnterDir}
@@ -882,6 +961,12 @@ export const FileBrowserPanel: React.FC = () => {
 
 interface FileEntryRowProps {
     entry: FileEntry;
+    /** 在 displayEntries 中的下标，用于 roving tabindex 的焦点登记。 */
+    index: number;
+    /** roving tabindex：活动行为 0，其余为 -1。 */
+    tabIndex: number;
+    onFocus: (index: number) => void;
+    registerRowRef: (index: number, el: HTMLDivElement | null) => void;
     isPlaying: boolean;
     isSelected?: boolean;
     onDoubleClickDir: (dirPath: string) => void;
@@ -894,6 +979,10 @@ interface FileEntryRowProps {
 const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
     ({
         entry,
+        index,
+        tabIndex,
+        onFocus,
+        registerRowRef,
         isPlaying,
         isSelected,
         onDoubleClickDir,
@@ -906,25 +995,31 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
         const isMidi = isMidiFile(entry);
         const isProject = isProjectFile(entry);
         const isDraggable = isDraggableFile(entry);
+        // 既不能打开、也不能拖拽的行（例如 .txt）在列表里是禁用项：
+        // AppListRow 据此给出 cursor-default + opacity-50 与 aria-disabled，
+        // 与改动前的视觉一致。
+        const isInert = !entry.isDir && !isDraggable;
 
         return (
-            <div
+            <AppListRow
+                ref={(el) => registerRowRef(index, el)}
+                role="option"
+                selected={isSelected}
+                disabled={isInert}
+                tabIndex={tabIndex}
+                onFocus={() => onFocus(index)}
                 className={[
-                    "flex items-center gap-1.5 px-2 py-[3px] cursor-default",
-                    "hover:bg-[color-mix(in_oklab,var(--qt-highlight)_12%,transparent)]",
-                    isSelected
-                        ? "bg-[color-mix(in_oklab,var(--qt-highlight)_25%,transparent)]"
-                        : isPlaying
-                          ? "bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]"
-                          : "",
+                    // 试听高亮：改动前 20%，选中态（22%）优先。
+                    isPlaying && !isSelected
+                        ? "bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]"
+                        : "",
                     isDragging ? "opacity-50" : "",
-                    !entry.isDir && !isDraggable ? "opacity-50" : "",
                 ]
                     .filter(Boolean)
                     .join(" ")}
                 onPointerDown={isDraggable ? (e) => onPointerDownForDrag(e, entry) : undefined}
                 onDoubleClick={entry.isDir ? () => onDoubleClickDir(entry.path) : undefined}
-                onClick={isAudio ? (ev: React.MouseEvent) => onClickAudio(entry, ev) : undefined}
+                onClick={isAudio ? (ev) => onClickAudio(entry, ev) : undefined}
             >
                 {/* 图标 */}
                 <span className="shrink-0 w-[14px] flex items-center justify-center">
@@ -985,7 +1080,7 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                         className="shrink-0 text-qt-highlight animate-pulse"
                     />
                 )}
-            </div>
+            </AppListRow>
         );
     },
 );

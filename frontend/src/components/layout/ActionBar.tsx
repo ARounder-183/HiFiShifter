@@ -19,6 +19,7 @@ import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
 import { CustomScaleDialog } from "./CustomScaleDialog";
 import { AppContextMenu } from "../../ui/Menu";
 import { AppToolbarSeparator } from "../../ui/Toolbar";
+import { AppIconButton } from "../../ui";
 
 import {
     playOriginal,
@@ -662,10 +663,10 @@ export function ActionBar() {
             <Flex align="center" gap="2" className="shrink-0">
                 {/* Metronome */}
                 <Box style={{ position: "relative" }} data-hs-context-menu>
-                    <IconButton
-                        size="1"
-                        variant={s.metronomeEnabled ? "solid" : "ghost"}
-                        data-tooltip={t("action_metronome")}
+                    <AppIconButton
+                        active={s.metronomeEnabled}
+                        tooltip={t("action_metronome")}
+                        icon={<MetronomeIcon />}
                         onClick={() => {
                             void dispatch(
                                 updateMetronome({ metronomeEnabled: !s.metronomeEnabled }),
@@ -675,9 +676,7 @@ export function ActionBar() {
                             event.preventDefault();
                             setMetronomeMenuPos({ x: event.clientX, y: event.clientY });
                         }}
-                    >
-                        <MetronomeIcon />
-                    </IconButton>
+                    />
                     {metronomeMenuPos && (
                         <div
                             ref={metronomeMenuRef}
@@ -1518,33 +1517,31 @@ export function ActionBar() {
 
             {/* File Browser Toggle */}
             <Flex gap="1" className="shrink-0">
-                <IconButton
-                    size="1"
-                    variant={fileBrowserVisible ? "solid" : "ghost"}
-                    data-tooltip={tAny("fb_title")}
+                <AppIconButton
+                    active={fileBrowserVisible}
+                    tooltip={tAny("fb_title")}
                     onClick={() => togglePanelVisible(dispatch, store.getState, PANEL_FILE_BROWSER)}
-                >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <path
-                            d="M2 3.5C2 3.22386 2.22386 3 2.5 3H5.29289L6.64645 4.35355C6.74021 4.44732 6.86739 4.5 7 4.5H12.5C12.7761 4.5 13 4.72386 13 5V11.5C13 11.7761 12.7761 12 12.5 12H2.5C2.22386 12 2 11.7761 2 11.5V3.5Z"
-                            fill="currentColor"
-                        />
-                    </svg>
-                </IconButton>
-                <IconButton
-                    size="1"
-                    variant={notebookVisible ? "solid" : "ghost"}
-                    data-tooltip={t("notebook")}
+                    icon={
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 15 15"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path
+                                d="M2 3.5C2 3.22386 2.22386 3 2.5 3H5.29289L6.64645 4.35355C6.74021 4.44732 6.86739 4.5 7 4.5H12.5C12.7761 4.5 13 4.72386 13 5V11.5C13 11.7761 12.7761 12 12.5 12H2.5C2.22386 12 2 11.7761 2 11.5V3.5Z"
+                                fill="currentColor"
+                            />
+                        </svg>
+                    }
+                />
+                <AppIconButton
+                    active={notebookVisible}
+                    tooltip={t("notebook")}
                     onClick={() => togglePanelVisible(dispatch, store.getState, PANEL_NOTEBOOK)}
-                >
-                    <Pencil1Icon />
-                </IconButton>
+                    icon={<Pencil1Icon />}
+                />
             </Flex>
 
             <AppToolbarSeparator />
@@ -1552,45 +1549,44 @@ export function ActionBar() {
             {/* Toolbar Toggles */}
             <Flex align="center" gap="1" className="shrink-0">
                 {/* Auto Crossfade */}
-                <IconButton
-                    size="1"
-                    variant={s.autoCrossfadeEnabled ? "solid" : "ghost"}
-                    data-tooltip={tAny("auto_crossfade")}
+                <AppIconButton
+                    active={s.autoCrossfadeEnabled}
+                    tooltip={tAny("auto_crossfade")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleAutoCrossfade());
                         void dispatch(persistUiSettings());
                     }}
-                >
-                    {/* X icon for crossfade */}
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <path
-                            d="M2 12L7.5 3L13 12"
-                            stroke="currentColor"
-                            strokeWidth="1.2"
+                    icon={
+                        /* X icon for crossfade */
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 15 15"
                             fill="none"
-                        />
-                        <path
-                            d="M2 3L7.5 12L13 3"
-                            stroke="currentColor"
-                            strokeWidth="1.2"
-                            fill="none"
-                            opacity="0.5"
-                        />
-                    </svg>
-                </IconButton>
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path
+                                d="M2 12L7.5 3L13 12"
+                                stroke="currentColor"
+                                strokeWidth="1.2"
+                                fill="none"
+                            />
+                            <path
+                                d="M2 3L7.5 12L13 3"
+                                stroke="currentColor"
+                                strokeWidth="1.2"
+                                fill="none"
+                                opacity="0.5"
+                            />
+                        </svg>
+                    }
+                />
 
                 {/* Split Transition */}
-                <IconButton
-                    size="1"
-                    variant={s.splitTransitionEnabled ? "solid" : "ghost"}
-                    data-tooltip={tAny("split_transition_tooltip")}
+                <AppIconButton
+                    active={s.splitTransitionEnabled}
+                    tooltip={tAny("split_transition_tooltip")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleSplitTransition());
@@ -1600,25 +1596,33 @@ export function ActionBar() {
                         e.preventDefault();
                         setSplitTransitionOpen(true);
                     }}
-                >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <path d="M7.5 1.5V13.5" stroke="currentColor" strokeWidth="1.2" />
-                        <path d="M3.5 3.5L7.5 5.5L3.5 7.5Z" fill="currentColor" opacity="0.85" />
-                        <path d="M11.5 7.5L7.5 9.5L11.5 11.5Z" fill="currentColor" opacity="0.45" />
-                    </svg>
-                </IconButton>
+                    icon={
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 15 15"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path d="M7.5 1.5V13.5" stroke="currentColor" strokeWidth="1.2" />
+                            <path
+                                d="M3.5 3.5L7.5 5.5L3.5 7.5Z"
+                                fill="currentColor"
+                                opacity="0.85"
+                            />
+                            <path
+                                d="M11.5 7.5L7.5 9.5L11.5 11.5Z"
+                                fill="currentColor"
+                                opacity="0.45"
+                            />
+                        </svg>
+                    }
+                />
 
                 {/* Snap */}
-                <IconButton
-                    size="1"
-                    variant={effectiveSnapVisual ? "solid" : "ghost"}
-                    data-tooltip={`${tAny("snap")}${
+                <AppIconButton
+                    active={effectiveSnapVisual}
+                    tooltip={`${tAny("snap")}${
                         snapGestureActive && snapToggleHeld
                             ? ` · ${tAny("snap")}: ${tAny("snap_toggle_inverted")}`
                             : ""
@@ -1632,37 +1636,38 @@ export function ActionBar() {
                         e.preventDefault();
                         setSnapSettingsOpen(true);
                     }}
-                >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <path
-                            d="m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15Z"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                        />
-                        <path
-                            d="m5 8 4 4"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                        />
-                        <path
-                            d="m12 15 4 4"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                        />
-                    </svg>
-                </IconButton>
+                    icon={
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path
+                                d="m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15Z"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                            />
+                            <path
+                                d="m5 8 4 4"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                            />
+                            <path
+                                d="m12 15 4 4"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                            />
+                        </svg>
+                    }
+                />
 
                 {/* Ripple Edit (Auto Follow) */}
                 <RippleModeButton
@@ -1680,178 +1685,194 @@ export function ActionBar() {
                 <AppToolbarSeparator />
 
                 {/* Playhead Zoom */}
-                <IconButton
-                    size="1"
-                    variant={s.playheadZoomEnabled ? "solid" : "ghost"}
-                    data-tooltip={tAny("playhead_zoom")}
+                <AppIconButton
+                    active={s.playheadZoomEnabled}
+                    tooltip={tAny("playhead_zoom")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(togglePlayheadZoom());
                         void dispatch(persistUiSettings());
                     }}
-                >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <path d="M7.5 2V13" stroke="currentColor" strokeWidth="1.2" />
-                        <path d="M6 3.5L7.5 2L9 3.5" stroke="currentColor" strokeWidth="1" />
-                        <path d="M5.5 5.5L4 7.5L5.5 9.5" stroke="currentColor" strokeWidth="1.2" />
-                        <path d="M9.5 5.5L11 7.5L9.5 9.5" stroke="currentColor" strokeWidth="1.2" />
-                        <path d="M3 12H12" stroke="currentColor" strokeWidth="0.8" opacity="0.5" />
-                    </svg>
-                </IconButton>
+                    icon={
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 15 15"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path d="M7.5 2V13" stroke="currentColor" strokeWidth="1.2" />
+                            <path d="M6 3.5L7.5 2L9 3.5" stroke="currentColor" strokeWidth="1" />
+                            <path
+                                d="M5.5 5.5L4 7.5L5.5 9.5"
+                                stroke="currentColor"
+                                strokeWidth="1.2"
+                            />
+                            <path
+                                d="M9.5 5.5L11 7.5L9.5 9.5"
+                                stroke="currentColor"
+                                strokeWidth="1.2"
+                            />
+                            <path
+                                d="M3 12H12"
+                                stroke="currentColor"
+                                strokeWidth="0.8"
+                                opacity="0.5"
+                            />
+                        </svg>
+                    }
+                />
 
                 {/* Auto Scroll (horizontal arrows) */}
-                <IconButton
-                    size="1"
-                    variant={s.autoScrollEnabled ? "solid" : "ghost"}
-                    data-tooltip={tAny("auto_scroll")}
+                <AppIconButton
+                    active={s.autoScrollEnabled}
+                    tooltip={tAny("auto_scroll")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleAutoScroll());
                         void dispatch(persistUiSettings());
                     }}
-                >
-                    <DoubleArrowRightIcon width="15" height="15" />
-                </IconButton>
+                    icon={<DoubleArrowRightIcon width="15" height="15" />}
+                />
 
                 <AppToolbarSeparator />
 
-                <IconButton
-                    size="1"
-                    variant={s.paramEditorSeekPlayheadEnabled ? "solid" : "ghost"}
-                    data-tooltip={tAny("param_editor_seek_playhead")}
+                <AppIconButton
+                    active={s.paramEditorSeekPlayheadEnabled}
+                    tooltip={tAny("param_editor_seek_playhead")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleParamEditorSeekPlayhead());
                         void dispatch(persistUiSettings());
                     }}
-                >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <path d="M2 2.5H13" stroke="currentColor" strokeWidth="0.8" opacity="0.5" />
-                        <path
-                            d="M2 12.5H13"
-                            stroke="currentColor"
-                            strokeWidth="0.8"
-                            opacity="0.5"
-                        />
-                        <path d="M7.5 3.5V11.5" stroke="currentColor" strokeWidth="1.2" />
-                        <path d="M6 4.5L7.5 3L9 4.5" stroke="currentColor" strokeWidth="1" />
-                        <path
-                            d="M7.8 8.2C8.9 8.2 9.8 9.1 9.8 10.2C9.8 11.3 8.9 12.2 7.8 12.2C6.9 12.2 6.2 11.6 6 10.8H7.8V8.2Z"
-                            fill="currentColor"
-                        />
-                    </svg>
-                </IconButton>
+                    icon={
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 15 15"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path
+                                d="M2 2.5H13"
+                                stroke="currentColor"
+                                strokeWidth="0.8"
+                                opacity="0.5"
+                            />
+                            <path
+                                d="M2 12.5H13"
+                                stroke="currentColor"
+                                strokeWidth="0.8"
+                                opacity="0.5"
+                            />
+                            <path d="M7.5 3.5V11.5" stroke="currentColor" strokeWidth="1.2" />
+                            <path d="M6 4.5L7.5 3L9 4.5" stroke="currentColor" strokeWidth="1" />
+                            <path
+                                d="M7.8 8.2C8.9 8.2 9.8 9.1 9.8 10.2C9.8 11.3 8.9 12.2 7.8 12.2C6.9 12.2 6.2 11.6 6 10.8H7.8V8.2Z"
+                                fill="currentColor"
+                            />
+                        </svg>
+                    }
+                />
 
                 {/* Allow timeline clicks to switch the parameter editor track */}
-                <IconButton
-                    size="1"
-                    variant={s.paramEditorTimelineClickSelectTrackEnabled ? "solid" : "ghost"}
-                    data-tooltip={tAny("param_editor_timeline_click_select_track")}
+                <AppIconButton
+                    active={s.paramEditorTimelineClickSelectTrackEnabled}
+                    tooltip={tAny("param_editor_timeline_click_select_track")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleParamEditorTimelineClickSelectTrack());
                         void dispatch(persistUiSettings());
                     }}
-                >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <defs>
-                            <marker
-                                id="hs-track-switch-arrow"
-                                viewBox="0 0 6 6"
-                                refX="3"
-                                refY="3"
-                                markerWidth="5"
-                                markerHeight="5"
-                                orient="auto-start-reverse"
-                            >
-                                <path d="M0,0 L6,3 L0,6 Z" fill="currentColor" />
-                            </marker>
-                        </defs>
-                        <rect
-                            x="1.5"
-                            y="2"
-                            width="8"
-                            height="3"
-                            rx="1"
-                            stroke="currentColor"
-                            strokeWidth="1"
-                        />
-                        <rect
-                            x="5.5"
-                            y="10"
-                            width="8"
-                            height="3"
-                            rx="1"
-                            stroke="currentColor"
-                            strokeWidth="1"
-                        />
-                        <line
-                            x1="9.5"
-                            y1="4.5"
-                            x2="5.5"
-                            y2="10.5"
-                            stroke="currentColor"
-                            strokeWidth="1"
-                            markerStart="url(#hs-track-switch-arrow)"
-                            markerEnd="url(#hs-track-switch-arrow)"
-                        />
-                    </svg>
-                </IconButton>
+                    icon={
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 15 15"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <defs>
+                                <marker
+                                    id="hs-track-switch-arrow"
+                                    viewBox="0 0 6 6"
+                                    refX="3"
+                                    refY="3"
+                                    markerWidth="5"
+                                    markerHeight="5"
+                                    orient="auto-start-reverse"
+                                >
+                                    <path d="M0,0 L6,3 L0,6 Z" fill="currentColor" />
+                                </marker>
+                            </defs>
+                            <rect
+                                x="1.5"
+                                y="2"
+                                width="8"
+                                height="3"
+                                rx="1"
+                                stroke="currentColor"
+                                strokeWidth="1"
+                            />
+                            <rect
+                                x="5.5"
+                                y="10"
+                                width="8"
+                                height="3"
+                                rx="1"
+                                stroke="currentColor"
+                                strokeWidth="1"
+                            />
+                            <line
+                                x1="9.5"
+                                y1="4.5"
+                                x2="5.5"
+                                y2="10.5"
+                                stroke="currentColor"
+                                strokeWidth="1"
+                                markerStart="url(#hs-track-switch-arrow)"
+                                markerEnd="url(#hs-track-switch-arrow)"
+                            />
+                        </svg>
+                    }
+                />
 
                 <AppToolbarSeparator />
 
                 {/* Ignore Grouping (broken chain) */}
-                <IconButton
-                    size="1"
-                    variant={s.ignoreGrouping ? "solid" : "ghost"}
-                    data-tooltip={tAny("ignore_grouping")}
+                <AppIconButton
+                    active={s.ignoreGrouping}
+                    tooltip={tAny("ignore_grouping")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleIgnoreGrouping());
                         void dispatch(persistUiSettings());
                     }}
-                >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                    >
-                        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-                        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-                        <line
-                            x1="2"
-                            y1="2"
-                            x2="22"
-                            y2="22"
+                    icon={
+                        <svg
+                            width="15"
+                            height="15"
+                            viewBox="0 0 24 24"
+                            fill="none"
                             stroke="currentColor"
-                            strokeWidth="2.5"
-                            opacity="0.7"
-                        />
-                    </svg>
-                </IconButton>
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        >
+                            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                            <line
+                                x1="2"
+                                y1="2"
+                                x2="22"
+                                y2="22"
+                                stroke="currentColor"
+                                strokeWidth="2.5"
+                                opacity="0.7"
+                            />
+                        </svg>
+                    }
+                />
             </Flex>
 
             {/* Pitch Snap Settings Dialog */}
@@ -1996,19 +2017,17 @@ function RippleModeButton({
 
     return (
         <>
-            <IconButton
-                size="1"
-                variant={mode !== "off" ? "solid" : "ghost"}
-                data-tooltip={(tAny(`ripple_tooltip_${mode}`) as string) ?? tAny("ripple")}
+            <AppIconButton
+                active={mode !== "off"}
+                tooltip={(tAny(`ripple_tooltip_${mode}`) as string) ?? tAny("ripple")}
                 tabIndex={-1}
                 onClick={onCycle}
                 onContextMenu={(e) => {
                     e.preventDefault();
                     setMenu({ x: e.clientX, y: e.clientY });
                 }}
-            >
-                <RippleIcon multiTrack={mode === "all"} />
-            </IconButton>
+                icon={<RippleIcon multiTrack={mode === "all"} />}
+            />
             {menu && (
                 <RippleModeMenu
                     x={menu.x}

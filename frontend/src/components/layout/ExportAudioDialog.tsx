@@ -38,7 +38,7 @@ import { ProgressBar } from "../ProgressBar";
 import type { TrackInfo } from "../../features/session/sessionTypes";
 import { AppNumberField, AppSelect, AppSlider, AppSliderReadout } from "../../ui";
 import { AppDialog } from "../../ui/Dialog";
-import { AppField, AppForm } from "../../ui/Field";
+import { AppField, AppForm, AppSwitchRow } from "../../ui/Field";
 
 interface ExportAudioDialogProps {
     open: boolean;
@@ -1763,25 +1763,23 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                             <Text size="1" color="gray">
                                                 {group.title}
                                             </Text>
-                                            <Flex direction="column" gap="1" mt="1">
-                                                {group.options.map((target) => (
-                                                    <label
-                                                        key={target.id}
-                                                        className="flex items-center gap-2 text-qt-xs text-qt-text cursor-pointer"
-                                                    >
-                                                        <input
-                                                            type="checkbox"
+                                            <AppForm booleanRow="leading">
+                                                <Flex direction="column" gap="1" mt="1">
+                                                    {group.options.map((target) => (
+                                                        <AppSwitchRow
+                                                            key={target.id}
+                                                            control="checkbox"
+                                                            label={target.label}
                                                             checked={selectedTargetIds.includes(
                                                                 target.id,
                                                             )}
-                                                            onChange={() =>
+                                                            onCheckedChange={() =>
                                                                 toggleTarget(target.id)
                                                             }
                                                         />
-                                                        <span>{target.label}</span>
-                                                    </label>
-                                                ))}
-                                            </Flex>
+                                                    ))}
+                                                </Flex>
+                                            </AppForm>
                                         </div>
                                     ))}
                                 </Flex>
@@ -1888,19 +1886,19 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     },
                 ]}
             >
-                <label className="flex items-center gap-2 text-qt-md">
-                    <input
-                        type="checkbox"
+                <AppForm booleanRow="leading">
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={tAny("export_conflict_apply_all")}
                         checked={conflictDialog.applyAll}
-                        onChange={(event) =>
+                        onCheckedChange={(applyAll) =>
                             setConflictDialog((prev) => ({
                                 ...prev,
-                                applyAll: event.target.checked,
+                                applyAll,
                             }))
                         }
                     />
-                    <span>{tAny("export_conflict_apply_all")}</span>
-                </label>
+                </AppForm>
             </AppDialog>
         </>
     );

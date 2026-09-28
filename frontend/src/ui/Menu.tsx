@@ -103,6 +103,24 @@ export function AppContextMenu({
     /** 键盘焦点所在的下标（指向**可选项**，跳过禁用项与分隔符）。 */
     const [activeIndex, setActiveIndex] = useState(-1);
 
+    /**
+     * 打开菜单前的焦点元素。
+     *
+     * 【为什么需要】菜单是弹出表面：关闭后若不归还焦点，键盘用户会被丢回
+     * `<body>`，下一次 Tab 从文档头重新开始 —— 对右键菜单而言"关闭"等于"迷路"。
+     * 卸载时归还；触发者可能已随菜单一起消失（例如菜单项删掉了它），故先查
+     * `isConnected`，不存在就什么都不做。
+     */
+    const openerRef = useRef<HTMLElement | null>(null);
+    useEffect(() => {
+        openerRef.current =
+            document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        return () => {
+            const opener = openerRef.current;
+            if (opener?.isConnected) opener.focus();
+        };
+    }, []);
+
     /** 可被键盘选中的项下标（禁用项不参与）。 */
     const selectableIndexes = useMemo(
         () => items.reduce<number[]>((acc, item, index) => (item.disabled ? acc : [...acc, index]), []),

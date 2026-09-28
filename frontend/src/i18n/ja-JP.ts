@@ -99,6 +99,8 @@ export const jaJP = {
     export_track_label_root_suffix: "(ルート)",
     export_track_label_sub_suffix: "(サブ)",
     menu_clear_waveform_cache: "波形キャッシュをクリア",
+    menu_clear_waveform_cache_confirm:
+        "波形キャッシュをクリアしますか？次に必要になった時点ですべての波形を再生成します。",
     menu_exit: "終了",
     shortcut_ctrl_o: "{modifier}+O",
     shortcut_ctrl_e: "{modifier}+E",
@@ -234,6 +236,7 @@ export const jaJP = {
     layout_presets: "プリセット",
     layout_no_presets: "保存済みプリセットはありません",
     layout_delete_preset: "プリセットを削除",
+    layout_delete_preset_confirm: "このレイアウトプリセットを削除しますか？この操作は取り消せません。",
     layout_export: "レイアウトを書き出す...",
     layout_import: "レイアウトを読み込む...",
     layout_import_failed: "有効なレイアウトファイルではありません",
@@ -331,6 +334,8 @@ export const jaJP = {
     notebook_clip_copied: "コピーしました",
     notebook_clip_save_payload: "ペイロードをファイルとして保存...",
     notebook_clip_remove: "ブロックを削除",
+    notebook_clip_remove_confirm:
+        "このブロックを削除しますか？内容はノートブックから削除されます。この操作は取り消せません。",
     notebook_clip_missing_payload:
         "一時保存されたペイロードがありません（添付ファイルが削除されました）。復元と使用はできません。",
     notebook_clip_restored: "システムクリップボードに復元しました",
@@ -364,6 +369,8 @@ export const jaJP = {
     notebook_image_width_reset: "表示幅をリセット",
     notebook_image_edit_alt: "代替テキストを編集",
     notebook_image_remove: "画像を削除",
+    notebook_image_remove_confirm:
+        "この画像を削除しますか？ノートブックから削除されます。この操作は取り消せません。",
     notebook_image_alt_placeholder: "画像の説明（代替テキスト）",
     notebook_find_placeholder: "ノート内を検索",
     notebook_find_no_match: "一致なし",
@@ -461,6 +468,8 @@ export const jaJP = {
 
     track_add: "トラックを追加",
     track_remove_selected: "選択トラックを削除",
+    track_remove_confirm:
+        "このトラックを削除しますか？トラックとその上のすべてのクリップが削除されます。この操作は取り消せません。",
 
     param_editor: "パラメータエディタ",
     param_editor_short: "パラメータ",
@@ -727,6 +736,7 @@ export const jaJP = {
     status_stretching: "タイムストレッチ中",
 
     fb_title: "ファイルブラウザ",
+    fb_file_list: "ファイル一覧",
     fb_search_placeholder: "ファイルを検索...",
     fb_open_folder: "フォルダを開く",
     fb_refresh: "更新",
@@ -1310,6 +1320,8 @@ export const jaJP = {
     tempo_map_add_point: "ここにテンポ/拍子/スケール変更を追加...",
     tempo_map_edit_point: "この変更点を編集...",
     tempo_map_delete_point: "この変更点を削除",
+    tempo_map_delete_point_confirm:
+        "この変更点を削除しますか？この位置のテンポ・拍子・スケールの変化がすべて削除されます。この操作は取り消せません。",
     tempo_map_clear_all: "テンポマップを消去",
     tempo_map_dialog_title: "テンポマップ変更点",
     tempo_map_dialog_title_initial: "テンポマップ初期点",
@@ -1530,6 +1542,8 @@ export const jaJP = {
     appearance_export_theme: "エクスポート",
     appearance_reset_colors: "カラーリセット",
     appearance_reset_all_colors: "すべてのカラーをリセット",
+    appearance_reset_all_colors_confirm:
+        "すべてのカラーをリセットしますか？カスタムカラーの上書きはすべて破棄されます。この操作は取り消せません。",
     appearance_saved_themes: "保存済みテーマ",
     appearance_theme_name: "テーマ名",
     appearance_custom_theme: "カスタムテーマ",

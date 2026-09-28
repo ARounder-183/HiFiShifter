@@ -7,11 +7,12 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { Flex, Text, Spinner } from "@radix-ui/themes";
+import { Flex, Text } from "@radix-ui/themes";
 import type { BenchmarkResult } from "../../types/api";
 import { coreApi } from "../../services/api/core";
 import { useI18n } from "../../i18n/I18nProvider";
 import { AppDialog } from "../../ui/Dialog";
+import { AppBusy } from "../../ui";
 import { AppForm } from "../../ui/Field";
 
 interface BenchmarkDialogProps {
@@ -164,10 +165,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                 {/* Running state */}
                 {phase === "running" && (
                     <Flex align="center" gap="2">
-                        <Spinner size="2" />
-                        <Text size="2" color="gray">
-                            {t("benchmark_running")}
-                        </Text>
+                        <AppBusy label={t("benchmark_running")} />
                     </Flex>
                 )}
 

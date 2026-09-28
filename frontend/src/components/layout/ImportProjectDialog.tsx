@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Text } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { AppDialog } from "../../ui/Dialog";
-import { AppForm } from "../../ui/Field";
+import { AppForm, AppSwitchRow } from "../../ui/Field";
 
 export interface ImportProjectOptions {
     placeAtPlayhead: boolean;
@@ -73,15 +73,13 @@ export function ImportProjectDialog({
                     {tAny("import_project_playhead_position")}
                 </label>
 
-                <label className="flex items-center gap-2 text-qt-md text-qt-text">
-                    <input
-                        type="checkbox"
-                        checked={importTempoMap}
-                        disabled={hasExistingTempoMap}
-                        onChange={(event) => setImportTempoMap(event.target.checked)}
-                    />
-                    {tAny("import_project_tempo_map")}
-                </label>
+                <AppSwitchRow
+                    control="checkbox"
+                    label={tAny("import_project_tempo_map")}
+                    checked={importTempoMap}
+                    disabled={hasExistingTempoMap}
+                    onCheckedChange={setImportTempoMap}
+                />
                 {hasExistingTempoMap ? (
                     <Text size="1" className="text-qt-text-muted">
                         {tAny("import_project_tempo_map_unavailable")}

@@ -13,6 +13,7 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
+import { AppForm, AppSwitchRow } from "../../../ui/Field";
 import { useAppSelector } from "../../../app/hooks";
 import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
 import { tempoAtSec, clampBpm } from "../../../utils/tempoMap";
@@ -388,15 +389,14 @@ function ClipRateEditorFields({
                 </span>
             </label>
 
-            <label className="flex items-center gap-2 select-none">
-                <input
-                    type="checkbox"
-                    className="accent-current"
+            <AppForm booleanRow="leading">
+                <AppSwitchRow
+                    control="checkbox"
+                    label={tAny("clip_rate_editor_auto_length")}
                     checked={autoLength}
-                    onChange={(e) => setAutoLength(e.target.checked)}
+                    onCheckedChange={setAutoLength}
                 />
-                <span className="text-[11px]">{tAny("clip_rate_editor_auto_length")}</span>
-            </label>
+            </AppForm>
 
             <div className="text-[10px] text-qt-text/60">
                 {tAny("clip_rate_editor_result")}

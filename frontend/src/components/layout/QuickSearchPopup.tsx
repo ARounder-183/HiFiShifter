@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Text, IconButton } from "@radix-ui/themes";
+import { Text } from "@radix-ui/themes";
 import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
@@ -23,7 +23,8 @@ import {
     QUICK_SEARCH_POPUP_HEIGHT,
     QUICK_SEARCH_POPUP_WIDTH,
 } from "./quickSearchPosition";
-import { AppSelect } from "../../ui";
+import { AppBusy, AppEmptyState, AppIconButton, AppSelect } from "../../ui";
+import { AppForm, AppSwitchRow } from "../../ui/Field";
 import { useShortcutSuppression } from "../../ui/shortcutScope";
 
 /** 支持的音频与视频媒体扩展名（视频按音轨导入） */
@@ -425,11 +426,9 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         spellCheck={false}
                     />
                     {/* 正则切换 */}
-                    <IconButton
-                        size="1"
-                        variant={regexEnabled ? "solid" : "ghost"}
-                        color="gray"
-                        data-tooltip={tAny("fb_regex")}
+                    <AppIconButton
+                        active={regexEnabled}
+                        tooltip={tAny("fb_regex")}
                         onClick={() => {
                             setRegexEnabled((v) => !v);
                             focusSearchInput();
@@ -441,9 +440,8 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                             height: 20,
                             flexShrink: 0,
                         }}
-                    >
-                        .*
-                    </IconButton>
+                        icon=".*"
+                    />
                     {/* 排序 */}
                     <AppSelect
                         fullWidth={false}
@@ -460,9 +458,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                             { value: "size", label: tAny("fb_sort_size") },
                         ]}
                     />
-                    {loading && (
-                        <span className="text-[10px] text-qt-text-muted shrink-0">...</span>
-                    )}
+                    {loading && <AppBusy className="shrink-0" />}
                 </div>
 
                 {/* 候选列表 */}
@@ -472,23 +468,23 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                     style={{ maxHeight: 340 }}
                 >
                     {noFolder ? (
-                        <Text size="1" color="gray" className="px-3 py-4 block text-center">
+                        <AppEmptyState>
                             {(t as (key: string) => string)("qs_no_folder_hint") ||
                                 "请先在文件管理器中选择目录"}
-                        </Text>
+                        </AppEmptyState>
                     ) : !query.trim() ? (
-                        <Text size="1" color="gray" className="px-3 py-4 block text-center">
+                        <AppEmptyState>
                             {(t as (key: string) => string)("qs_type_to_search") ||
                                 "输入关键词搜索音频文件"}
-                        </Text>
+                        </AppEmptyState>
                     ) : loading ? (
-                        <Text size="1" color="gray" className="px-3 py-4 block text-center">
+                        <AppEmptyState>
                             {(t as (key: string) => string)("fb_searching") || "搜索中..."}
-                        </Text>
+                        </AppEmptyState>
                     ) : sortedResults.length === 0 ? (
-                        <Text size="1" color="gray" className="px-3 py-4 block text-center">
+                        <AppEmptyState>
                             {(t as (key: string) => string)("fb_no_results") || "无匹配文件"}
-                        </Text>
+                        </AppEmptyState>
                     ) : (
                         sortedResults.map((entry, index) => (
                             <div
@@ -540,18 +536,18 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
 
                 {/* 底部提示栏 */}
                 <div className="px-2 py-1 border-t border-qt-border flex items-center gap-2 justify-between">
-                    <label className="flex items-center gap-1.5 text-[10px] text-qt-text-muted cursor-pointer select-none">
-                        <input
-                            type="checkbox"
+                    <AppForm booleanRow="leading">
+                        <AppSwitchRow
+                            control="checkbox"
+                            label={tAny("qs_auto_normalize")}
                             checked={quickSearchAutoNormalizeEnabled}
-                            onChange={() => {
+                            onCheckedChange={() => {
                                 dispatch(toggleQuickSearchAutoNormalize());
                                 void dispatch(persistUiSettings());
                                 focusSearchInput();
                             }}
                         />
-                        <span>{tAny("qs_auto_normalize")}</span>
-                    </label>
+                    </AppForm>
                     {sortedResults.length > 0 && (
                         <Text size="1" color="gray" className="text-[10px]">
                             {formatKeybinding(keybindings["quickSearch.navigate.up"])}/

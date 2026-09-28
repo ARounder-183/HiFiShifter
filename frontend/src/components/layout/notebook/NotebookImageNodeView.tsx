@@ -17,6 +17,7 @@ import { useI18n } from "../../../i18n/I18nProvider";
 import { notebookApi } from "../../../services/api/notebook";
 import { assetIdFromSrc, isAssetRef } from "./assetRef";
 import { NotebookContextMenu, type NotebookMenuItem } from "./NotebookContextMenu";
+import { AppConfirmDialog } from "../../../ui";
 import { resolveImage, subscribeAssetInvalidation } from "./notebookImageCache";
 import { dirName } from "./notebookPaths";
 
@@ -44,6 +45,11 @@ export function NotebookImageNodeView(props: NodeViewProps) {
     );
     const current = resolved.src === src ? resolved : { src, url: null, missing: false };
     const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+    /**
+     * 删除图片的确认开关。菜单关闭即卸载，确认框必须住在常驻的 NodeView
+     * 组件里；菜单项只置位，确认后才调用 deleteNode。
+     */
+    const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
     const [editingAlt, setEditingAlt] = useState(false);
     const [altDraft, setAltDraft] = useState(String(node.attrs.alt ?? ""));
     const [dragWidth, setDragWidth] = useState<number | null>(null);
@@ -176,10 +182,11 @@ export function NotebookImageNodeView(props: NodeViewProps) {
             label: t("notebook_image_remove"),
             danger: true,
             separatorBefore: true,
-            onSelect: () => deleteNode(),
+            // 不立即删除：先置位，由常驻的确认框在菜单卸载后询问。
+            onSelect: () => setRemoveConfirmOpen(true),
         });
         return items;
-    }, [assetId, commitWidth, current.url, deleteNode, isAsset, loadFailed, node.attrs.alt, t, width]);
+    }, [assetId, commitWidth, current.url, isAsset, loadFailed, node.attrs.alt, t, width]);
 
     const displayWidth = dragWidth ?? width ?? null;
 
@@ -272,6 +279,18 @@ export function NotebookImageNodeView(props: NodeViewProps) {
                     onClose={() => setMenu(null)}
                 />
             ) : null}
+
+            {/* 删除图片确认（常驻于图片视图，不随右键菜单卸载）。 */}
+            <AppConfirmDialog
+                open={removeConfirmOpen}
+                onOpenChange={setRemoveConfirmOpen}
+                title={t("notebook_image_remove")}
+                message={t("notebook_image_remove_confirm")}
+                confirmLabel={t("notebook_image_remove")}
+                cancelLabel={t("cancel")}
+                intent="danger"
+                onConfirm={() => deleteNode()}
+            />
         </NodeViewWrapper>
     );
 }

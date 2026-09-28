@@ -31,6 +31,7 @@ import {
     type ThemeModeSetting,
 } from "../../theme/themeTypes";
 import { getBuiltinThemeColors } from "../../theme/defaultThemes";
+import { AppConfirmDialog } from "../../ui";
 import {
     loadCustomThemes,
     loadAppearance,
@@ -497,6 +498,8 @@ export const AppearanceWindow: React.FC = () => {
 
     /* ── Tab ── */
     const [activeTab, setActiveTab] = useState<SettingsTab>("theme");
+    /** 「重置全部颜色」确认框：会丢弃当前所有自定义色覆盖，先确认再执行。 */
+    const [resetColorsConfirmOpen, setResetColorsConfirmOpen] = useState(false);
 
     /* ── 本地编辑状态 ── */
     const [accentColor, setAccentColor] = useState<RadixAccentColor>(theme.accentColor);
@@ -952,7 +955,7 @@ export const AppearanceWindow: React.FC = () => {
                                         <div className="flex-1" />
                                         <button
                                             className="px-3 py-1.5 text-[11px] font-medium rounded border border-qt-danger-border/40 bg-qt-danger-bg/20 text-qt-danger-text hover:bg-qt-danger-bg/35 transition-colors cursor-pointer select-none"
-                                            onClick={handleResetColors}
+                                            onClick={() => setResetColorsConfirmOpen(true)}
                                         >
                                             {tAny("appearance_reset_all_colors")}
                                         </button>
@@ -1410,6 +1413,19 @@ export const AppearanceWindow: React.FC = () => {
                     {tAny("appearance_apply")}
                 </button>
             </div>
+
+            {/* 重置全部颜色确认：丢弃当前所有自定义色覆盖。对话框 portal 到 body，
+                本窗口自带 I18nProvider 与 AppThemeProvider（Radix Theme），无需 Redux。 */}
+            <AppConfirmDialog
+                open={resetColorsConfirmOpen}
+                onOpenChange={setResetColorsConfirmOpen}
+                title={tAny("appearance_reset_all_colors")}
+                message={tAny("appearance_reset_all_colors_confirm")}
+                confirmLabel={tAny("appearance_reset_all_colors")}
+                cancelLabel={tAny("cancel")}
+                intent="danger"
+                onConfirm={handleResetColors}
+            />
         </div>
     );
 };

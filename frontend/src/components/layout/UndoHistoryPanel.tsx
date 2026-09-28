@@ -5,6 +5,7 @@ import { shallowEqual } from "react-redux";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
+import { AppForm, AppSwitchRow } from "../../ui/Field";
 import {
     persistUiSettings,
     setHistoryPositionRemote,
@@ -132,28 +133,28 @@ export const UndoHistoryPanel: React.FC = () => {
             <div className="shrink-0 space-y-1 border-t border-qt-border px-3 py-1.5">
                 {/* 工程级：保存本工程时是否写出 UNDO 数据（随工程文件持久化）。
                     无论勾选与否，打开工程时都会尝试读取伴生文件。 */}
-                <label className="flex cursor-pointer items-center gap-2 select-none">
-                    <input
-                        type="checkbox"
+                <AppForm booleanRow="leading">
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={tAny("undo_history_save_with_project")}
                         checked={s.saveUndoHistory}
-                        onChange={(event) => {
-                            void dispatch(setProjectSaveUndoHistoryRemote(event.target.checked));
+                        onCheckedChange={(checked) => {
+                            void dispatch(setProjectSaveUndoHistoryRemote(checked));
                         }}
                     />
-                    <span className="text-[11px]">{tAny("undo_history_save_with_project")}</span>
-                </label>
+                </AppForm>
                 {/* 全局：新工程的默认值（默认开启）。 */}
-                <label className="flex cursor-pointer items-center gap-2 select-none">
-                    <input
-                        type="checkbox"
+                <AppForm booleanRow="leading">
+                    <AppSwitchRow
+                        control="checkbox"
+                        label={tAny("undo_history_save_by_default")}
                         checked={s.saveUndoHistoryByDefault}
-                        onChange={(event) => {
-                            dispatch(setSaveUndoHistoryByDefault(event.target.checked));
+                        onCheckedChange={(checked) => {
+                            dispatch(setSaveUndoHistoryByDefault(checked));
                             void dispatch(persistUiSettings());
                         }}
                     />
-                    <span className="text-[11px]">{tAny("undo_history_save_by_default")}</span>
-                </label>
+                </AppForm>
                 <div className="text-[10px] text-qt-text-muted">{countText}</div>
             </div>
         </div>

@@ -4,6 +4,7 @@ import { useI18n } from "../../i18n/I18nProvider";
 import { paramsApi } from "../../services/api/params";
 import { AppNumberField } from "../../ui";
 import { AppDialog, type AppDialogAction } from "../../ui/Dialog";
+import { AppForm, AppSwitchRow } from "../../ui/Field";
 
 /** MIDI 轨道信息（与后端返回结构对齐） */
 interface MidiTrackInfo {
@@ -820,25 +821,29 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                         key={track.index}
                                         className="flex items-center gap-2 px-3 py-2 hover:bg-qt-highlight cursor-pointer border-b border-qt-border last:border-b-0"
                                     >
-                                        <input
-                                            type="checkbox"
-                                            className="w-4 h-4"
-                                            checked={selectedTracks.includes(track.index)}
-                                            onChange={(e) => {
-                                                if (e.target.checked) {
-                                                    setSelectedTracks([
-                                                        ...selectedTracks,
-                                                        track.index,
-                                                    ]);
-                                                } else {
-                                                    setSelectedTracks(
-                                                        selectedTracks.filter(
-                                                            (i) => i !== track.index,
-                                                        ),
-                                                    );
+                                        <AppForm booleanRow="leading">
+                                            <AppSwitchRow
+                                                control="checkbox"
+                                                ariaLabel={
+                                                    track.name || `Track ${track.index + 1}`
                                                 }
-                                            }}
-                                        />
+                                                checked={selectedTracks.includes(track.index)}
+                                                onCheckedChange={(next) => {
+                                                    if (next) {
+                                                        setSelectedTracks([
+                                                            ...selectedTracks,
+                                                            track.index,
+                                                        ]);
+                                                    } else {
+                                                        setSelectedTracks(
+                                                            selectedTracks.filter(
+                                                                (i) => i !== track.index,
+                                                            ),
+                                                        );
+                                                    }
+                                                }}
+                                            />
+                                        </AppForm>
                                         <Flex direction="column" gap="0" className="flex-1 min-w-0">
                                             <Text size="2" weight="medium" className="truncate">
                                                 {track.name || `Track ${track.index + 1}`}
@@ -870,27 +875,22 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
 
                         {/* ── BPM 选项（在多轨合并和填补空隙上方） ── */}
                         {/* 将 MIDI BPM 导入为工程 BPM */}
-                        <label
-                            className={`flex items-center gap-2 mt-3 ${
-                                midiHasBpm && !importTempoMapEnabled
-                                    ? "cursor-pointer"
-                                    : "opacity-50"
+                        <AppForm
+                            booleanRow="leading"
+                            className={`mt-3 ${
+                                midiHasBpm && !importTempoMapEnabled ? "" : "opacity-50"
                             }`}
                         >
-                            <input
-                                type="checkbox"
+                            <AppSwitchRow
+                                control="checkbox"
+                                label={tAny("midi_import_bpm_as_project")}
                                 checked={importBpmAsProject && !importTempoMapEnabled}
-                                onChange={(e) => onImportBpmAsProjectChange?.(e.target.checked)}
                                 disabled={!midiHasBpm || importTempoMapEnabled}
-                                className="w-4 h-4"
+                                onCheckedChange={(checked) =>
+                                    onImportBpmAsProjectChange?.(checked)
+                                }
                             />
-                            <Text
-                                size="1"
-                                color={midiHasBpm && !importTempoMapEnabled ? undefined : "gray"}
-                            >
-                                {tAny("midi_import_bpm_as_project")}
-                            </Text>
-                        </label>
+                        </AppForm>
 
                         {/* ── 导入为 Tempo Map（仅“音高参考块”目标显示） ── */}
                         {currentTarget === "pitchRef" && !isReplaceMode && (
@@ -900,114 +900,90 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                 mt="3"
                                 className="rounded border border-qt-border p-2"
                             >
-                                <label className="flex items-center gap-2 cursor-pointer">
-                                    <input
-                                        type="checkbox"
+                                <AppForm booleanRow="leading">
+                                    <AppSwitchRow
+                                        control="checkbox"
+                                        label={tAny("midi_import_as_tempo_map")}
                                         checked={importTempoMapEnabled}
-                                        onChange={(e) =>
-                                            onImportTempoMapEnabledChange?.(e.target.checked)
+                                        onCheckedChange={(checked) =>
+                                            onImportTempoMapEnabledChange?.(checked)
                                         }
-                                        className="w-4 h-4"
                                     />
-                                    <Text size="1" weight="medium">
-                                        {tAny("midi_import_as_tempo_map")}
-                                    </Text>
-                                </label>
+                                </AppForm>
                                 <Flex direction="column" gap="1" className="ml-6 mt-1">
-                                    <label
-                                        className={`flex items-center gap-2 ${
-                                            importTempoMapEnabled && midiHasBpm
-                                                ? "cursor-pointer"
-                                                : "opacity-50"
-                                        }`}
-                                    >
-                                        <input
-                                            type="checkbox"
-                                            checked={importTempoMapTempo}
-                                            onChange={(e) =>
-                                                onImportTempoMapTempoChange?.(e.target.checked)
-                                            }
-                                            disabled={!importTempoMapEnabled || !midiHasBpm}
-                                            className="w-4 h-4"
-                                        />
-                                        <Text
-                                            size="1"
-                                            color={
+                                    <AppForm booleanRow="leading">
+                                        <AppSwitchRow
+                                            control="checkbox"
+                                            className={
                                                 importTempoMapEnabled && midiHasBpm
                                                     ? undefined
-                                                    : "gray"
+                                                    : "opacity-50"
                                             }
-                                        >
-                                            {tAny("midi_import_tempo_map_tempo")}
-                                            {midiTempoPointCount > 1
-                                                ? ` (${midiTempoPointCount})`
-                                                : ""}
-                                        </Text>
-                                    </label>
-                                    <label
-                                        className={`flex items-center gap-2 ${
-                                            importTempoMapEnabled && midiHasTimeSignature
-                                                ? "cursor-pointer"
-                                                : "opacity-50"
-                                        }`}
-                                    >
-                                        <input
-                                            type="checkbox"
+                                            label={
+                                                <>
+                                                    {tAny("midi_import_tempo_map_tempo")}
+                                                    {midiTempoPointCount > 1
+                                                        ? ` (${midiTempoPointCount})`
+                                                        : ""}
+                                                </>
+                                            }
+                                            checked={importTempoMapTempo}
+                                            disabled={!importTempoMapEnabled || !midiHasBpm}
+                                            onCheckedChange={(checked) =>
+                                                onImportTempoMapTempoChange?.(checked)
+                                            }
+                                        />
+                                    </AppForm>
+                                    <AppForm booleanRow="leading">
+                                        <AppSwitchRow
+                                            control="checkbox"
+                                            className={
+                                                importTempoMapEnabled && midiHasTimeSignature
+                                                    ? undefined
+                                                    : "opacity-50"
+                                            }
+                                            label={
+                                                <>
+                                                    {tAny("midi_import_tempo_map_time_signature")}
+                                                    {midiTimeSigCount > 0
+                                                        ? ` (${midiTimeSigCount})`
+                                                        : ""}
+                                                </>
+                                            }
                                             checked={importTempoMapTimeSignature}
-                                            onChange={(e) =>
-                                                onImportTempoMapTimeSignatureChange?.(
-                                                    e.target.checked,
-                                                )
-                                            }
                                             disabled={
                                                 !importTempoMapEnabled || !midiHasTimeSignature
                                             }
-                                            className="w-4 h-4"
+                                            onCheckedChange={(checked) =>
+                                                onImportTempoMapTimeSignatureChange?.(checked)
+                                            }
                                         />
-                                        <Text
-                                            size="1"
-                                            color={
-                                                importTempoMapEnabled && midiHasTimeSignature
+                                    </AppForm>
+                                    <AppForm booleanRow="leading">
+                                        <AppSwitchRow
+                                            control="checkbox"
+                                            className={
+                                                importTempoMapEnabled && midiHasKeySignature
                                                     ? undefined
-                                                    : "gray"
+                                                    : "opacity-50"
                                             }
-                                        >
-                                            {tAny("midi_import_tempo_map_time_signature")}
-                                            {midiTimeSigCount > 0 ? ` (${midiTimeSigCount})` : ""}
-                                        </Text>
-                                    </label>
-                                    <label
-                                        className={`flex items-center gap-2 ${
-                                            importTempoMapEnabled && midiHasKeySignature
-                                                ? "cursor-pointer"
-                                                : "opacity-50"
-                                        }`}
-                                    >
-                                        <input
-                                            type="checkbox"
+                                            label={
+                                                <>
+                                                    {tAny("midi_import_tempo_map_key_signature")}
+                                                    {midiKeySigCount > 0
+                                                        ? ` (${midiKeySigCount})`
+                                                        : ""}
+                                                </>
+                                            }
                                             checked={importTempoMapKeySignature}
-                                            onChange={(e) =>
-                                                onImportTempoMapKeySignatureChange?.(
-                                                    e.target.checked,
-                                                )
-                                            }
                                             disabled={
                                                 !importTempoMapEnabled || !midiHasKeySignature
                                             }
-                                            className="w-4 h-4"
-                                        />
-                                        <Text
-                                            size="1"
-                                            color={
-                                                importTempoMapEnabled && midiHasKeySignature
-                                                    ? undefined
-                                                    : "gray"
+                                            onCheckedChange={(checked) =>
+                                                onImportTempoMapKeySignatureChange?.(checked)
                                             }
-                                        >
-                                            {tAny("midi_import_tempo_map_key_signature")}
-                                            {midiKeySigCount > 0 ? ` (${midiKeySigCount})` : ""}
-                                        </Text>
-                                    </label>
+                                        />
+                                    </AppForm>
                                 </Flex>
                                 <Text size="1" color="gray" className="ml-6 mt-1">
                                     {tAny("midi_import_as_tempo_map_hint")}
@@ -1154,50 +1130,48 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
 
                         {/* 多轨合并选项 */}
                         {!isReplaceMode && (
-                            <label
-                                className={`flex items-center gap-2 mt-3 ${
-                                    currentTarget === "pitchParam" ? "opacity-60" : "cursor-pointer"
+                            <AppForm
+                                booleanRow="leading"
+                                className={`mt-3 ${
+                                    currentTarget === "pitchParam" ? "opacity-60" : ""
                                 }`}
                             >
-                                <input
-                                    type="checkbox"
+                                <AppSwitchRow
+                                    control="checkbox"
+                                    label={tAny("midi_multi_track_merge")}
                                     checked={
                                         currentTarget === "pitchParam"
                                             ? true
                                             : (multiTrackMerge ?? true)
                                     }
-                                    onChange={(e) =>
-                                        currentTarget !== "pitchParam" &&
-                                        onMultiTrackMergeChange?.(e.target.checked)
-                                    }
                                     disabled={currentTarget === "pitchParam"}
-                                    className="w-4 h-4"
+                                    onCheckedChange={(checked) =>
+                                        currentTarget !== "pitchParam" &&
+                                        onMultiTrackMergeChange?.(checked)
+                                    }
                                 />
-                                <Text size="1">{tAny("midi_multi_track_merge")}</Text>
-                            </label>
+                            </AppForm>
                         )}
 
                         {/* 关闭开头空隙选项 */}
-                        <label className="flex items-center gap-2 mt-3 cursor-pointer">
-                            <input
-                                type="checkbox"
+                        <AppForm booleanRow="leading" className="mt-3">
+                            <AppSwitchRow
+                                control="checkbox"
+                                label={tAny("midi_close_leading_gap")}
                                 checked={closeLeadingGap ?? true}
-                                onChange={(e) => onCloseLeadingGapChange?.(e.target.checked)}
-                                className="w-4 h-4"
+                                onCheckedChange={(checked) => onCloseLeadingGapChange?.(checked)}
                             />
-                            <Text size="1">{tAny("midi_close_leading_gap")}</Text>
-                        </label>
+                        </AppForm>
 
                         {/* 填补空隙选项 */}
-                        <label className="flex items-center gap-2 mt-3 cursor-pointer">
-                            <input
-                                type="checkbox"
+                        <AppForm booleanRow="leading" className="mt-3">
+                            <AppSwitchRow
+                                control="checkbox"
+                                label={tAny("midi_fill_gaps")}
                                 checked={fillGaps}
-                                onChange={(e) => onFillGapsChange?.(e.target.checked)}
-                                className="w-4 h-4"
+                                onCheckedChange={(checked) => onFillGapsChange?.(checked)}
                             />
-                            <Text size="1">{tAny("midi_fill_gaps")}</Text>
-                        </label>
+                        </AppForm>
                     </>
                 )}
             </AppDialog>

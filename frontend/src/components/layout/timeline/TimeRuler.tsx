@@ -1,6 +1,7 @@
 import React, { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AppContextMenu, type AppMenuItemSpec } from "../../../ui/Menu";
+import { AppConfirmDialog } from "../../../ui";
 import { Box } from "@radix-ui/themes";
 import { screenXToWorldSec } from "./runtime/timelineWorld.js";
 import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
@@ -572,6 +573,16 @@ const TimeRulerInner: React.FC<{
     const tAny = useMemo(() => t ?? ((key: string) => key), [t]);
     const useManualTransform = contentRef != null;
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; sec: number } | null>(null);
+    /**
+     * 待确认的 Tempo Map 破坏性操作（删除变化点 / 清空整张速度图）。
+     *
+     * 右键菜单是 portal 且在关闭时卸载，确认对话框不能住在它的子树里 ——
+     * 否则菜单一关，对话框跟着消失、根本来不及显示。这里把「待执行动作」
+     * 提升到常驻的标尺组件：菜单项只置位，确认后才走原来的提交函数。
+     */
+    const [tempoConfirm, setTempoConfirm] = useState<
+        { kind: "delete"; id: string } | { kind: "clear" } | null
+    >(null);
     const [hover, setHover] = useState<{ x: number; y: number; sec: number } | null>(null);
     const [tempoEditRequest, setTempoEditRequest] = useState<TempoPointEditRequest | null>(null);
     /** Tempo Map 编辑对话框打开时抑制标尺悬浮时间提示。 */
@@ -946,11 +957,43 @@ const TimeRulerInner: React.FC<{
                     onOpenSettings={onOpenSettings}
                     onAddTempoPointAt={handleAddTempoPointAt}
                     onEditTempoPoint={handleEditTempoPoint}
-                    onDeleteTempoPoint={handleDeleteTempoPoint}
-                    onClearTempoMap={handleClearTempoMap}
+                    // 破坏性动作不立即执行：先置位，由常驻的确认对话框在
+                    // 菜单卸载后询问，确认时才调用 handleDeleteTempoPoint。
+                    onDeleteTempoPoint={(id) => setTempoConfirm({ kind: "delete", id })}
+                    onClearTempoMap={() => setTempoConfirm({ kind: "clear" })}
                     onClose={() => setCtxMenu(null)}
                 />
             ) : null}
+
+            {/* Tempo Map 破坏性操作的确认框（常驻于标尺，不随右键菜单卸载）。 */}
+            <AppConfirmDialog
+                open={tempoConfirm !== null}
+                onOpenChange={(open) => {
+                    if (!open) setTempoConfirm(null);
+                }}
+                title={
+                    tempoConfirm?.kind === "delete"
+                        ? tAny("tempo_map_delete_point")
+                        : tAny("tempo_map_clear_dialog_title")
+                }
+                message={
+                    tempoConfirm?.kind === "delete"
+                        ? tAny("tempo_map_delete_point_confirm")
+                        : tAny("tempo_map_clear_dialog_message")
+                }
+                confirmLabel={
+                    tempoConfirm?.kind === "delete"
+                        ? tAny("tempo_map_delete_point")
+                        : tAny("tempo_map_clear_confirm")
+                }
+                cancelLabel={tAny("cancel")}
+                intent="danger"
+                onConfirm={() => {
+                    if (tempoConfirm?.kind === "delete") handleDeleteTempoPoint(tempoConfirm.id);
+                    else if (tempoConfirm?.kind === "clear") handleClearTempoMap();
+                    setTempoConfirm(null);
+                }}
+            />
         </Box>
     );
 };
