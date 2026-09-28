@@ -117,7 +117,14 @@ export const UndoHistoryPanel: React.FC = () => {
                             <button
                                 type="button"
                                 data-tooltip={tf("undo_history_jump")}
-                                className={`shrink-0 rounded p-0.5 text-qt-text-muted transition-colors hover:bg-qt-button-hover hover:text-qt-text ${
+                                /* 图标按钮没有可见文字，`data-tooltip` 不是可访问名称。 */
+                                aria-label={tf("undo_history_jump")}
+                                /*
+                                 * 悬停之外还要在**聚焦**时显形：这个按钮默认
+                                 * `opacity-0`，Tab 到它时若仍透明，焦点环就画在
+                                 * 一个看不见的元素上 —— 键盘用户以为焦点丢了。
+                                 */
+                                className={`shrink-0 rounded p-0.5 text-qt-text-muted transition-colors hover:bg-qt-button-hover hover:text-qt-text focus-visible:opacity-100 group-focus-within:opacity-100 ${
                                     isCurrent ? "invisible" : "opacity-0 group-hover:opacity-100"
                                 }`}
                                 onClick={() => jumpTo(row.index)}

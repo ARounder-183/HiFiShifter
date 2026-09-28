@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { AppForm, AppSwitchRow } from "../../../ui/Field";
 import { useAppSelector } from "../../../app/hooks";
@@ -90,6 +91,7 @@ function ClipRateEditorFields({
 }) {
     const { tf } = useI18n();
     const menuRef = useRef<HTMLDivElement | null>(null);
+    useMenuKeyboard(menuRef);
     // 精细调整修饰键（与 FadeContextMenu 的滑轮步进同一来源）。
     const fineAdjustKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.paramFineAdjust"),

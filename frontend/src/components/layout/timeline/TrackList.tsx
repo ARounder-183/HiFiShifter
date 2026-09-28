@@ -1929,7 +1929,10 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                         size="1"
                                                         variant="ghost"
                                                         color="gray"
-                                                        className="opacity-0 group-hover:opacity-100"
+                                                        aria-label={t("history_op_remove_track")}
+                                                        /* 默认 `opacity-0`：Tab 到它时必须显形，
+                                                           否则焦点环画在一个透明元素上。 */
+                                                        className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
                                                         disabled={isLastRootTrack(track.id)}
                                                         onPointerDown={(e) => e.stopPropagation()}
                                                         onClick={(e) => {
@@ -2192,12 +2195,22 @@ const TrackListInner: React.FC<TrackListProps> = ({
                     </div>
                 </div>
 
+                {/* 整行是一条"添加轨道"按钮。它是可点区域，因此必须有键盘等价操作
+                    与按钮角色 —— 一个只响应 onClick 的 `div` 对键盘用户不存在。 */}
                 <Flex
                     align="center"
                     justify="center"
+                    role="button"
+                    tabIndex={0}
+                    aria-label={t("track_add")}
                     className="h-8 border-b border-qt-border border-dashed text-qt-text-muted hover:text-qt-text hover:bg-qt-button-hover cursor-pointer transition-colors"
                     style={{ height: TRACK_ADD_ROW_HEIGHT }}
                     onClick={onAddTrack}
+                    onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        onAddTrack();
+                    }}
                 >
                     <PlusIcon className="mr-1" /> <Text size="1">{t("track_add")}</Text>
                 </Flex>

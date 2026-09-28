@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { FadeShapeIcon } from "./FadeShapeIcon";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
+import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
@@ -170,6 +171,8 @@ const SubMenu: React.FC<{
     const [open, setOpen] = useState(false);
     const wrapperRef = useRef<HTMLDivElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
+    // 子面板（滑杆/次级项）也是一个 role="menu" 表面，同样需要方向键。
+    useMenuKeyboard(panelRef);
 
     useLayoutEffect(() => {
         if (!open) return;
@@ -410,6 +413,7 @@ export const ClipContextMenu: React.FC<{
     const { t } = useI18n();
     const dispatch = useAppDispatch();
     const menuRef = useRef<HTMLDivElement>(null);
+    useMenuKeyboard(menuRef);
     /** Take 重命名的内联输入草稿（替代 window.prompt）。 */
     const [takeRenameDraft, setTakeRenameDraft] = useState<{
         takeId: string;

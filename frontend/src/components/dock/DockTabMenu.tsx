@@ -16,6 +16,7 @@ import { createPortal } from "react-dom";
 
 import { EDGE_GAP, clampAxisPosition } from "../appTooltipPosition";
 
+import { useMenuKeyboard } from "../../ui/useMenuKeyboard";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { renameForm } from "../../features/dock/dockSlice";
 import { usePanelTabMenuItems } from "../../features/dock/contributions";
@@ -58,6 +59,8 @@ export function DockTabMenu({
     const menuRef = useRef<HTMLDivElement | null>(null);
     const [renaming, setRenaming] = useState(false);
     const [draft, setDraft] = useState("");
+    // 重命名模式下容器里只有输入框，没有菜单项可导航 —— 交给输入框自己。
+    useMenuKeyboard(menuRef, !renaming);
 
     /*
      * 关闭时归还焦点（与 `AppContextMenu` 同一约定）。

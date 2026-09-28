@@ -17,6 +17,7 @@
 /* eslint-disable react-refresh/only-export-components -- 文件同时导出组件与 Hook/常量（刷新边界按文件粒度接受） */
 import React, { useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
+import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { registerDragAbort } from "./gestureFocusGuard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
@@ -287,6 +288,7 @@ export const FadeContextMenu: React.FC<{
 }> = ({ x, y, primary, secondary, onClose, onShapeChange, onDirChange }) => {
     const { t } = useI18n();
     const menuRef = useRef<HTMLDivElement>(null);
+    useMenuKeyboard(menuRef);
     // 底部提示展示用户实际配置的曲率修饰键（如 "Alt"）。
     const curvatureKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.fadeCurvatureDrag"),
