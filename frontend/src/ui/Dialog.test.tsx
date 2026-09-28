@@ -122,7 +122,13 @@ test("默认动作取最后一个右侧非危险动作，而不是危险动作",
                 onOpenChange={() => {}}
                 title="自定义音阶"
                 actions={[
-                    { id: "delete", label: "删除", intent: "danger", align: "start", onClick: onDelete },
+                    {
+                        id: "delete",
+                        label: "删除",
+                        intent: "danger",
+                        align: "start",
+                        onClick: onDelete,
+                    },
                     { id: "cancel", label: "取消", onClick: () => {} },
                     { id: "apply", label: "应用", intent: "primary", onClick: onApply },
                 ]}
@@ -252,4 +258,3 @@ test("异步动作进入 pending 且不自动关闭", async () => {
     // 异步动作默认 autoClose=false：由调用方决定何时关
     expect(onOpenChange).not.toHaveBeenCalled();
 });
-

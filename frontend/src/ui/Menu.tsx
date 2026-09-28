@@ -123,7 +123,11 @@ export function AppContextMenu({
 
     /** 可被键盘选中的项下标（禁用项不参与）。 */
     const selectableIndexes = useMemo(
-        () => items.reduce<number[]>((acc, item, index) => (item.disabled ? acc : [...acc, index]), []),
+        () =>
+            items.reduce<number[]>(
+                (acc, item, index) => (item.disabled ? acc : [...acc, index]),
+                [],
+            ),
         [items],
     );
 
@@ -156,7 +160,8 @@ export function AppContextMenu({
             if (selectableIndexes.length === 0) return;
             setActiveIndex((current) => {
                 const at = selectableIndexes.indexOf(current);
-                if (at === -1) return delta === 1 ? selectableIndexes[0] : selectableIndexes.at(-1)!;
+                if (at === -1)
+                    return delta === 1 ? selectableIndexes[0] : selectableIndexes.at(-1)!;
                 const next = (at + delta + selectableIndexes.length) % selectableIndexes.length;
                 return selectableIndexes[next];
             });

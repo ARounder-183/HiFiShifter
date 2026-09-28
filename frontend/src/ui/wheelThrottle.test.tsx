@@ -29,7 +29,7 @@ import { AppSelect } from "./Select";
  * jsdom 没有 ResizeObserver，而 Radix Select 的 Trigger 用它测量宽度。
  * 原语测试不需要真实测量，给一个空实现即可。
  */
-if (typeof globalThis.ResizeObserver === 'undefined') {
+if (typeof globalThis.ResizeObserver === "undefined") {
     class ResizeObserverStub {
         observe() {}
         unobserve() {}

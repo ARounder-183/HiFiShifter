@@ -77,10 +77,9 @@ test("components/layout/notebook/htmlToMarkdown.test.ts scripted checks", async 
     assertIncludes(oversized, "前", "text before oversized data image kept");
     assertIncludes(oversized, "[image]", "oversized data image leaves a placeholder");
     assertExcludes(oversized, "base64", "oversized payload dropped");
-    const smallData = htmlToMarkdown(
-        `<p><img src="data:image/png;base64,${"A".repeat(16)}"></p>`,
-        { maxDataImageBytes: 1000 },
-    );
+    const smallData = htmlToMarkdown(`<p><img src="data:image/png;base64,${"A".repeat(16)}"></p>`, {
+        maxDataImageBytes: 1000,
+    });
     assertIncludes(smallData, "data:image/png;base64,", "small data image kept");
 
     // 空输入不炸。

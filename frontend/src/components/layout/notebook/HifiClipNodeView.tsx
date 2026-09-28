@@ -207,8 +207,7 @@ export function HifiClipNodeView(props: NodeViewProps) {
                 // 建议文件名要过一遍 Windows 非法字符：标题是自由文本
                 //（`AC/DC: mix` 之类）会直接让保存对话框拒收。后端还会再
                 // 收口一次，这里保证给出去的名字本身合法。
-                const base =
-                    sanitizeSuggestedFileName(`${attrs.title || attrs.id}`) || attrs.id;
+                const base = sanitizeSuggestedFileName(`${attrs.title || attrs.id}`) || attrs.id;
                 void notebookApi
                     .saveAssetAs(attrs.id, `${base}.${entry?.ext ?? "hsf"}`)
                     .catch(() => {});
@@ -296,7 +295,8 @@ export function HifiClipNodeView(props: NodeViewProps) {
                         {attrs.param ? <span>{attrs.param}</span> : null}
                         {typeof attrs.frameCount === "number" ? (
                             <span>
-                                {attrs.frameCount} {plural("notebook_clip_unit_frames", attrs.frameCount)}
+                                {attrs.frameCount}{" "}
+                                {plural("notebook_clip_unit_frames", attrs.frameCount)}
                             </span>
                         ) : null}
                     </>
@@ -307,7 +307,8 @@ export function HifiClipNodeView(props: NodeViewProps) {
                         </span>
                         {attrs.trackCount > 1 ? (
                             <span>
-                                {attrs.trackCount} {plural("notebook_clip_unit_tracks", attrs.trackCount)}
+                                {attrs.trackCount}{" "}
+                                {plural("notebook_clip_unit_tracks", attrs.trackCount)}
                             </span>
                         ) : null}
                         <span>{formatClipDuration(attrs.durationSec)}</span>

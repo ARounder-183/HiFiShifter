@@ -869,15 +869,21 @@ export const FileBrowserPanel: React.FC = () => {
                     onKeyDown={showEntries ? handleListKeyDown : undefined}
                 >
                     {fb.loading ? (
-                        <AppEmptyState>{(t as (key: string) => string)("fb_loading")}</AppEmptyState>
+                        <AppEmptyState>
+                            {(t as (key: string) => string)("fb_loading")}
+                        </AppEmptyState>
                     ) : fb.error ? (
                         <AppEmptyState tone="danger">
                             {(t as (key: string) => string)("fb_error")}: {fb.error}
                         </AppEmptyState>
                     ) : !fb.currentPath ? (
-                        <AppEmptyState>{(t as (key: string) => string)("fb_no_folder")}</AppEmptyState>
+                        <AppEmptyState>
+                            {(t as (key: string) => string)("fb_no_folder")}
+                        </AppEmptyState>
                     ) : isSearchMode && fb.searchLoading ? (
-                        <AppEmptyState>{(t as (key: string) => string)("fb_searching")}</AppEmptyState>
+                        <AppEmptyState>
+                            {(t as (key: string) => string)("fb_searching")}
+                        </AppEmptyState>
                     ) : displayEntries.length === 0 ? (
                         <AppEmptyState>
                             {isSearchMode

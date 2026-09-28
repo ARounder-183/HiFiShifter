@@ -134,7 +134,11 @@ export function AppSelect({
                         // 分隔线用索引做 key：它没有稳定标识，且位置固定
                         <Select.Separator key={`sep-${index}`} />
                     ) : (
-                        <Select.Item key={entry.value} value={entry.value} disabled={entry.disabled}>
+                        <Select.Item
+                            key={entry.value}
+                            value={entry.value}
+                            disabled={entry.disabled}
+                        >
                             {entry.label}
                         </Select.Item>
                     ),

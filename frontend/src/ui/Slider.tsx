@@ -101,7 +101,10 @@ export function AppSlider({
 
     return (
         // Radix Slider 的根是 span；滚轮监听挂在它上面，指针落在滑块任意位置都生效
-        <span ref={setWheelTarget} className={cx("inline-flex min-w-0 flex-1 items-center", className)}>
+        <span
+            ref={setWheelTarget}
+            className={cx("inline-flex min-w-0 flex-1 items-center", className)}
+        >
             <Slider
                 value={[value]}
                 size={size}
@@ -138,4 +141,3 @@ export function AppSliderReadout({
         </span>
     );
 }
-

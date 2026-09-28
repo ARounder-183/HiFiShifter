@@ -320,193 +320,186 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                 {tAny("kb_dialog_hint_click")}
             </Text>
 
-                <Flex align="center" gap="2" mt="2" mb="2">
-                    <Text size="2" color="gray" style={{ whiteSpace: "nowrap" }}>
-                        {tAny("kb_preset_label")}
-                    </Text>
-                    <AppSelect
-                        fullWidth={false}
-                        value={selectedPreset}
-                        onValueChange={handleApplyPreset}
-                        options={KEYBINDING_PRESET_SELECTION_IDS.map((presetId) => ({
-                            value: presetId,
-                            label: tAny(`kb_preset_${presetId}`),
-                        }))}
-                    />
-                </Flex>
+            <Flex align="center" gap="2" mt="2" mb="2">
+                <Text size="2" color="gray" style={{ whiteSpace: "nowrap" }}>
+                    {tAny("kb_preset_label")}
+                </Text>
+                <AppSelect
+                    fullWidth={false}
+                    value={selectedPreset}
+                    onValueChange={handleApplyPreset}
+                    options={KEYBINDING_PRESET_SELECTION_IDS.map((presetId) => ({
+                        value: presetId,
+                        label: tAny(`kb_preset_${presetId}`),
+                    }))}
+                />
+            </Flex>
 
-                <ScrollArea style={{ maxHeight: "56vh", marginTop: 8 }} scrollbars="vertical">
-                    <Flex direction="column" gap="3" py="3">
-                        {groups.map(({ group, actions }) => (
-                            <Flex direction="column" gap="1" key={group}>
-                                <Text
-                                    size="1"
-                                    weight="bold"
-                                    color="gray"
-                                    style={{
-                                        textTransform: "uppercase",
-                                        letterSpacing: "0.05em",
-                                        padding: "4px 0",
-                                    }}
-                                >
-                                    {tAny(GROUP_LABEL_KEYS[group])}
-                                </Text>
-                                <Separator size="4" />
-                                {actions.map((actionId) => {
-                                    const meta = ACTION_META[actionId];
-                                    const currentKb = keybindings[actionId];
-                                    const defaultKb = DEFAULT_KEYBINDINGS[actionId];
-                                    const isDefault =
-                                        currentKb.key === defaultKb.key &&
-                                        Boolean(currentKb.ctrl) === Boolean(defaultKb.ctrl) &&
-                                        Boolean(currentKb.shift) === Boolean(defaultKb.shift) &&
-                                        Boolean(currentKb.alt) === Boolean(defaultKb.alt) &&
-                                        Boolean(currentKb.modifierOnly) ===
-                                            Boolean(defaultKb.modifierOnly);
-                                    const isRecording = recordingId === actionId;
+            <ScrollArea style={{ maxHeight: "56vh", marginTop: 8 }} scrollbars="vertical">
+                <Flex direction="column" gap="3" py="3">
+                    {groups.map(({ group, actions }) => (
+                        <Flex direction="column" gap="1" key={group}>
+                            <Text
+                                size="1"
+                                weight="bold"
+                                color="gray"
+                                style={{
+                                    textTransform: "uppercase",
+                                    letterSpacing: "0.05em",
+                                    padding: "4px 0",
+                                }}
+                            >
+                                {tAny(GROUP_LABEL_KEYS[group])}
+                            </Text>
+                            <Separator size="4" />
+                            {actions.map((actionId) => {
+                                const meta = ACTION_META[actionId];
+                                const currentKb = keybindings[actionId];
+                                const defaultKb = DEFAULT_KEYBINDINGS[actionId];
+                                const isDefault =
+                                    currentKb.key === defaultKb.key &&
+                                    Boolean(currentKb.ctrl) === Boolean(defaultKb.ctrl) &&
+                                    Boolean(currentKb.shift) === Boolean(defaultKb.shift) &&
+                                    Boolean(currentKb.alt) === Boolean(defaultKb.alt) &&
+                                    Boolean(currentKb.modifierOnly) ===
+                                        Boolean(defaultKb.modifierOnly);
+                                const isRecording = recordingId === actionId;
 
-                                    return (
-                                        <Flex
-                                            key={actionId}
-                                            align="center"
-                                            justify="between"
-                                            px="2"
-                                            py="1"
-                                            style={{
-                                                borderRadius: 4,
-                                                background: isRecording
-                                                    ? "var(--accent-3)"
-                                                    : undefined,
-                                                minHeight: 36,
-                                            }}
-                                        >
-                                            <Flex align="center" gap="2" minWidth="0">
-                                                {/* 修饰键手势徽章：区分拖拽 / 点击 / 滚轮 / 按住 */}
-                                                {meta.modifierOperationType && (
-                                                    <Badge
-                                                        size="1"
-                                                        variant="soft"
-                                                        color={
-                                                            GESTURE_BADGES[
-                                                                meta.modifierOperationType
-                                                            ].color
-                                                        }
-                                                    >
-                                                        {tAny(
-                                                            GESTURE_BADGES[
-                                                                meta.modifierOperationType
-                                                            ].labelKey,
-                                                        )}
-                                                    </Badge>
-                                                )}
-                                                <Text size="2" style={{ minWidth: 0 }}>
-                                                    {tAny(meta.labelKey)}
-                                                </Text>
-                                            </Flex>
-                                            <Flex align="center" gap="2">
-                                                {/* 快捷键显示 / 录入按钮 */}
-                                                <Button
-                                                    variant={isRecording ? "solid" : "soft"}
-                                                    color={
-                                                        isRecording
-                                                            ? "blue"
-                                                            : !isDefault
-                                                              ? "green"
-                                                              : "gray"
-                                                    }
+                                return (
+                                    <Flex
+                                        key={actionId}
+                                        align="center"
+                                        justify="between"
+                                        px="2"
+                                        py="1"
+                                        style={{
+                                            borderRadius: 4,
+                                            background: isRecording ? "var(--accent-3)" : undefined,
+                                            minHeight: 36,
+                                        }}
+                                    >
+                                        <Flex align="center" gap="2" minWidth="0">
+                                            {/* 修饰键手势徽章：区分拖拽 / 点击 / 滚轮 / 按住 */}
+                                            {meta.modifierOperationType && (
+                                                <Badge
                                                     size="1"
-                                                    style={{
-                                                        minWidth: 120,
-                                                        fontFamily: "monospace",
-                                                    }}
-                                                    onClick={() => {
-                                                        if (isRecording) {
-                                                            // 录入中左键点击 → 设为"无"
-                                                            dispatch(
-                                                                setKeybinding({
-                                                                    actionId,
-                                                                    binding: NONE_BINDING,
-                                                                }),
-                                                            );
-                                                            setSelectedPreset("custom");
-                                                            setRecordingId(null);
-                                                            setConflict(null);
-                                                        } else {
-                                                            setConflict(null);
-                                                            setRecordingId(actionId);
-                                                        }
-                                                    }}
-                                                    onContextMenu={(e) => {
-                                                        e.preventDefault();
-                                                        // 右键点击 → 直接重置为默认
-                                                        dispatch(resetKeybinding(actionId));
+                                                    variant="soft"
+                                                    color={
+                                                        GESTURE_BADGES[meta.modifierOperationType]
+                                                            .color
+                                                    }
+                                                >
+                                                    {tAny(
+                                                        GESTURE_BADGES[meta.modifierOperationType]
+                                                            .labelKey,
+                                                    )}
+                                                </Badge>
+                                            )}
+                                            <Text size="2" style={{ minWidth: 0 }}>
+                                                {tAny(meta.labelKey)}
+                                            </Text>
+                                        </Flex>
+                                        <Flex align="center" gap="2">
+                                            {/* 快捷键显示 / 录入按钮 */}
+                                            <Button
+                                                variant={isRecording ? "solid" : "soft"}
+                                                color={
+                                                    isRecording
+                                                        ? "blue"
+                                                        : !isDefault
+                                                          ? "green"
+                                                          : "gray"
+                                                }
+                                                size="1"
+                                                style={{
+                                                    minWidth: 120,
+                                                    fontFamily: "monospace",
+                                                }}
+                                                onClick={() => {
+                                                    if (isRecording) {
+                                                        // 录入中左键点击 → 设为"无"
+                                                        dispatch(
+                                                            setKeybinding({
+                                                                actionId,
+                                                                binding: NONE_BINDING,
+                                                            }),
+                                                        );
                                                         setSelectedPreset("custom");
                                                         setRecordingId(null);
                                                         setConflict(null);
-                                                    }}
-                                                >
-                                                    {isRecording
-                                                        ? tAny(
-                                                              defaultKb.modifierOnly
-                                                                  ? "kb_press_modifier"
-                                                                  : "kb_press_key",
-                                                          )
-                                                        : formatKeybinding(
-                                                              currentKb,
-                                                              tAny("kb_none"),
-                                                          )}
-                                                </Button>
-                                            </Flex>
+                                                    } else {
+                                                        setConflict(null);
+                                                        setRecordingId(actionId);
+                                                    }
+                                                }}
+                                                onContextMenu={(e) => {
+                                                    e.preventDefault();
+                                                    // 右键点击 → 直接重置为默认
+                                                    dispatch(resetKeybinding(actionId));
+                                                    setSelectedPreset("custom");
+                                                    setRecordingId(null);
+                                                    setConflict(null);
+                                                }}
+                                            >
+                                                {isRecording
+                                                    ? tAny(
+                                                          defaultKb.modifierOnly
+                                                              ? "kb_press_modifier"
+                                                              : "kb_press_key",
+                                                      )
+                                                    : formatKeybinding(currentKb, tAny("kb_none"))}
+                                            </Button>
                                         </Flex>
-                                    );
-                                })}
-                            </Flex>
+                                    </Flex>
+                                );
+                            })}
+                        </Flex>
+                    ))}
+                </Flex>
+            </ScrollArea>
+
+            {/* 冲突提示：按所属场景分组展示冲突项 */}
+            {conflict && (
+                <Flex
+                    align="center"
+                    gap="2"
+                    py="2"
+                    px="3"
+                    style={{
+                        background: "var(--red-3)",
+                        borderRadius: 6,
+                        marginTop: 8,
+                    }}
+                >
+                    <Flex direction="column" gap="1" style={{ flex: 1, minWidth: 0 }}>
+                        <Text size="2" color="red">
+                            {tAny("kb_conflict_msg")}
+                        </Text>
+                        {Array.from(
+                            conflict.conflictWith.reduce((map, id) => {
+                                const group = ACTION_META[id].group;
+                                const ids = map.get(group) ?? [];
+                                ids.push(id);
+                                map.set(group, ids);
+                                return map;
+                            }, new Map<ActionMeta["group"], ActionId[]>()),
+                        ).map(([group, ids]) => (
+                            <Text key={group} size="2" color="red">
+                                {tAny(GROUP_LABEL_KEYS[group])}：
+                                <strong>
+                                    {ids.map((id) => tAny(ACTION_META[id].labelKey)).join("、")}
+                                </strong>
+                            </Text>
                         ))}
                     </Flex>
-                </ScrollArea>
-
-                {/* 冲突提示：按所属场景分组展示冲突项 */}
-                {conflict && (
-                    <Flex
-                        align="center"
-                        gap="2"
-                        py="2"
-                        px="3"
-                        style={{
-                            background: "var(--red-3)",
-                            borderRadius: 6,
-                            marginTop: 8,
-                        }}
-                    >
-                        <Flex direction="column" gap="1" style={{ flex: 1, minWidth: 0 }}>
-                            <Text size="2" color="red">
-                                {tAny("kb_conflict_msg")}
-                            </Text>
-                            {Array.from(
-                                conflict.conflictWith.reduce((map, id) => {
-                                    const group = ACTION_META[id].group;
-                                    const ids = map.get(group) ?? [];
-                                    ids.push(id);
-                                    map.set(group, ids);
-                                    return map;
-                                }, new Map<ActionMeta["group"], ActionId[]>()),
-                            ).map(([group, ids]) => (
-                                <Text key={group} size="2" color="red">
-                                    {tAny(GROUP_LABEL_KEYS[group])}：
-                                    <strong>
-                                        {ids.map((id) => tAny(ACTION_META[id].labelKey)).join("、")}
-                                    </strong>
-                                </Text>
-                            ))}
-                        </Flex>
-                        <Button size="1" color="red" variant="soft" onClick={handleConfirmConflict}>
-                            {tAny("kb_conflict_override")}
-                        </Button>
-                        <Button size="1" color="gray" variant="soft" onClick={handleCancelConflict}>
-                            {tAny("kb_conflict_cancel")}
-                        </Button>
-                    </Flex>
-                )}
+                    <Button size="1" color="red" variant="soft" onClick={handleConfirmConflict}>
+                        {tAny("kb_conflict_override")}
+                    </Button>
+                    <Button size="1" color="gray" variant="soft" onClick={handleCancelConflict}>
+                        {tAny("kb_conflict_cancel")}
+                    </Button>
+                </Flex>
+            )}
         </AppDialog>
     );
 };

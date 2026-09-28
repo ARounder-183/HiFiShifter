@@ -274,7 +274,8 @@ const dockSlice = createSlice({
             // 决定了位置，不该再被"右下角"这个语义覆盖。锚点偏移随锚点一起清。
             // 只给了 w/h（resize 路径）则**保留锚点**：位置仍由锚点语义表达，
             // 见 dockApi::detachFormToWindow 的注释。
-            const setsPosition = geometry != null && (geometry.x !== undefined || geometry.y !== undefined);
+            const setsPosition =
+                geometry != null && (geometry.x !== undefined || geometry.y !== undefined);
             const next = {
                 ...base,
                 ...geometry,

@@ -11,10 +11,7 @@
  * "精细调整无法被忘记"。
  */
 import { useAppSelector } from "../app/hooks";
-import {
-    isModifierActive,
-    selectKeybinding,
-} from "../features/keybindings/keybindingsSlice";
+import { isModifierActive, selectKeybinding } from "../features/keybindings/keybindingsSlice";
 import { FINE_ADJUST_ACTION_ID } from "./stepPolicy";
 
 /** 供滚轮事件判定用的事件形状（原生与 React 事件都满足）。 */

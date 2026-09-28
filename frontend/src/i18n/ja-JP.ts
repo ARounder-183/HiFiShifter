@@ -236,7 +236,8 @@ export const jaJP = {
     layout_presets: "プリセット",
     layout_no_presets: "保存済みプリセットはありません",
     layout_delete_preset: "プリセットを削除",
-    layout_delete_preset_confirm: "このレイアウトプリセットを削除しますか？この操作は取り消せません。",
+    layout_delete_preset_confirm:
+        "このレイアウトプリセットを削除しますか？この操作は取り消せません。",
     layout_export: "レイアウトを書き出す...",
     layout_import: "レイアウトを読み込む...",
     layout_import_failed: "有効なレイアウトファイルではありません",
@@ -1183,7 +1184,8 @@ export const jaJP = {
         "拡張オーバーラップでは、前のクリップを後方へ X 秒、後ろのクリップを前方へ X 秒延長して 2X 秒の重なりを作ります。延長範囲はクリップの元素材の実際の長さの範囲内に制限されます。",
     snap: "スナップ",
     snap_grid_settings_title: "スナップ/グリッド設定...",
-    snap_grid_settings_desc: "クリップがグリッド・選択マーカー・カーソルに吸着する挙動を設定します。",
+    snap_grid_settings_desc:
+        "クリップがグリッド・選択マーカー・カーソルに吸着する挙動を設定します。",
     snap_section_grid: "グリッド",
     snap_grid_show_lines: "グリッド線を表示",
     snap_grid_spacing: "グリッド間隔",

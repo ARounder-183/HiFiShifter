@@ -176,8 +176,7 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
             key: "selection",
             label: t("snap_selection"),
             toMarkersCursor: snap.snapSelectionToSelectionMarkersCursor,
-            setToMarkersCursor: (v: boolean) =>
-                patch({ snapSelectionToSelectionMarkersCursor: v }),
+            setToMarkersCursor: (v: boolean) => patch({ snapSelectionToSelectionMarkersCursor: v }),
             toGrid: snap.snapSelectionToGrid,
             setToGrid: (v: boolean) => patch({ snapSelectionToGrid: v }),
         },

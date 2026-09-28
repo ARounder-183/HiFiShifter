@@ -584,10 +584,7 @@ export interface TimelineKernelInteractions {
      *   （该块范围已被完整覆盖则挖掉，否则并入；按住修饰键右键单击时由
      *   `resolveClipParamSelectionMode` 解析得出）。
      */
-    readonly onClipParamSelectionGesture?: (
-        clipId: string,
-        mode?: "replace" | "toggle",
-    ) => void;
+    readonly onClipParamSelectionGesture?: (clipId: string, mode?: "replace" | "toggle") => void;
     /**
      * 切换 clip 静音（单击 header 的静音徽标）。
      *
@@ -3900,8 +3897,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         // 由其自身 CSS 提供）。`data-hs-scrollbar` 见 TimelineKernelView 的 JSX。
         const eventTarget = event.target;
         if (eventTarget instanceof Element && eventTarget.closest("[data-hs-scrollbar]")) {
-            publishFadeHover({ kind: "empty", sec: 0, trackId: null, trackIndex: -1 },
-                event.clientX, event.clientY);
+            publishFadeHover(
+                { kind: "empty", sec: 0, trackId: null, trackIndex: -1 },
+                event.clientX,
+                event.clientY,
+            );
             if (container.style.cursor !== "default") container.style.cursor = "default";
             return;
         }

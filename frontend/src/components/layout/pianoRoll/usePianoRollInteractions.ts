@@ -30,7 +30,12 @@ import type {
 } from "./types";
 import { computeDynGeometricMean } from "./selectionTransforms";
 import { framesToTime, timeToFrame } from "./utils";
-import { isDynParam, restoreDynSentinels, shiftDynValueForDrag, shiftValueForDrag } from "./paramRanges";
+import {
+    isDynParam,
+    restoreDynSentinels,
+    shiftDynValueForDrag,
+    shiftValueForDrag,
+} from "./paramRanges";
 import {
     curvePointAtPointer,
     hitTestSelectionBody,
@@ -320,10 +325,7 @@ export function usePianoRollInteractions(args: {
      * 直线 / 颤音工具的预览每帧重算整段，必须先擦掉上一帧写过的点；本入口
      * 只还原**上一帧写过的区间**，不需要重建整份覆盖（见 useLiveParamEditing）。
      */
-    resetLiveEditPreview: (
-        pv: ParamViewSegment,
-        opts?: { keepWrittenRange?: boolean },
-    ) => void;
+    resetLiveEditPreview: (pv: ParamViewSegment, opts?: { keepWrittenRange?: boolean }) => void;
 
     /**
      * 请求波形面重绘。

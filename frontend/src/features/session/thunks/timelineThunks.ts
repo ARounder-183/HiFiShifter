@@ -433,10 +433,7 @@ export const setClipTakeChannelModeRemote = createAsyncThunk(
 
 export const scanAndConvertFakeStereoRemote = createAsyncThunk(
     "session/scanAndConvertFakeStereoRemote",
-    async (
-        payload: { clipIds?: string[]; dryRun?: boolean },
-        { dispatch, rejectWithValue },
-    ) => {
+    async (payload: { clipIds?: string[]; dryRun?: boolean }, { dispatch, rejectWithValue }) => {
         let result: Awaited<ReturnType<typeof webApi.scanAndConvertFakeStereo>>;
         try {
             result = await webApi.scanAndConvertFakeStereo(payload);

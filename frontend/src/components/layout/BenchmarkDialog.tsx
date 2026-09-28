@@ -149,9 +149,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                 {
                     id: "run",
                     label:
-                        phase === "running"
-                            ? t("benchmark_running_btn")
-                            : t("benchmark_run_btn"),
+                        phase === "running" ? t("benchmark_running_btn") : t("benchmark_run_btn"),
                     intent: "primary",
                     disabled: phase === "running",
                     autoClose: false,
@@ -228,9 +226,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                                 <td style={{ padding: "6px 12px" }}>
                                                     <Flex align="center" gap="1">
                                                         {isFastest && (
-                                                            <span data-tooltip="Fastest">
-                                                                ⚡
-                                                            </span>
+                                                            <span data-tooltip="Fastest">⚡</span>
                                                         )}
                                                         <span
                                                             style={{
@@ -292,11 +288,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                     border: "1px solid var(--red-5)",
                                 }}
                             >
-                                <Text
-                                    size="2"
-                                    weight="medium"
-                                    style={{ color: "var(--red-10)" }}
-                                >
+                                <Text size="2" weight="medium" style={{ color: "var(--red-10)" }}>
                                     {t("benchmark_gpu_failed_title")}
                                 </Text>
                                 <Text size="1" style={{ color: "var(--red-9)" }}>
@@ -330,11 +322,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                     border: "1px solid var(--red-5)",
                                 }}
                             >
-                                <Text
-                                    size="2"
-                                    weight="medium"
-                                    style={{ color: "var(--red-10)" }}
-                                >
+                                <Text size="2" weight="medium" style={{ color: "var(--red-10)" }}>
                                     {t("benchmark_gpu_failed_title")}
                                 </Text>
                                 <Text size="1" style={{ color: "var(--red-9)" }}>
@@ -355,11 +343,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                         {/* GPU enumeration */}
                         {result.gpuDevices && result.gpuDevices.length > 0 && (
                             <Flex direction="column" gap="1" style={{ marginTop: 4 }}>
-                                <Text
-                                    size="1"
-                                    weight="medium"
-                                    style={{ color: "var(--gray-9)" }}
-                                >
+                                <Text size="1" weight="medium" style={{ color: "var(--gray-9)" }}>
                                     {t("benchmark_gpu_label")}:
                                 </Text>
                                 {result.gpuDevices.map((gpu) => (

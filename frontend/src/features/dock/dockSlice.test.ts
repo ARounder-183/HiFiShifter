@@ -307,11 +307,7 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
     {
         let state = reducer(undefined, syncRegisteredPanels());
         state = reducer(state, openPanel({ panelId: "notebook" }));
-        assertEqual(
-            state.layout.forms.notebook.float?.anchor,
-            "bottom-right",
-            "opens anchored",
-        );
+        assertEqual(state.layout.forms.notebook.float?.anchor, "bottom-right", "opens anchored");
         // resize 路径：锚点保留。
         state = reducer(state, floatForm({ formId: "notebook", geometry: { w: 500, h: 300 } }));
         assertEqual(
@@ -521,11 +517,7 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
         state = reducer(state, { type: "dock/focusForm", payload: "timeline" });
         state = reducer(state, toggleMaximizeActive());
         state = reducer(state, openPanel({ panelId: "fileBrowser" }));
-        assertEqual(
-            isFormVisible(state.layout, "fileBrowser"),
-            true,
-            "opened while maximized",
-        );
+        assertEqual(isFormVisible(state.layout, "fileBrowser"), true, "opened while maximized");
         state = reducer(state, toggleMaximizeActive());
         assertEqual(state.maximized, null, "restored");
         assertEqual(
@@ -577,10 +569,7 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
 
         state = reducer(state, resetDockLayout());
         assertEqual(shape(state.layout.tree), "([timeline]|[paramEditor])", "tree back to factory");
-        assert(
-            state.layout.presets?.["mine"] !== undefined,
-            "presets survive the reset",
-        );
+        assert(state.layout.presets?.["mine"] !== undefined, "presets survive the reset");
         assertEqual(state.layout.activePreset, null, "no preset is active after reset");
 
         // 重置后仍能一键回到自己的排布：树与保存时一致，窗体重新可见。

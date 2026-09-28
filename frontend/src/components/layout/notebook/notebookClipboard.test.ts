@@ -23,7 +23,11 @@ function assertEqual<T>(actual: T, expected: T, label: string): void {
 }
 
 /** 带可控 target/clipboardData 的合成事件（jsdom 的 ClipboardEvent 拿不到 data）。 */
-function fakeClipboardEvent(type: string, target: EventTarget, clipboardData: unknown): ClipboardEvent {
+function fakeClipboardEvent(
+    type: string,
+    target: EventTarget,
+    clipboardData: unknown,
+): ClipboardEvent {
     const event = new Event(type, { bubbles: true });
     Object.defineProperty(event, "target", { value: target });
     Object.defineProperty(event, "clipboardData", { value: clipboardData });

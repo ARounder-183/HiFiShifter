@@ -152,7 +152,10 @@ export async function insertImageFromPath(
         // "读取失败"，归类仍由 reason 区分。
         const tooLarge = notebookErrorKey(file.error) === "notebook_image_too_large";
         ctx.notify?.(
-            translateInsert(ctx, tooLarge ? "notebook_image_too_large" : "notebook_image_read_failed"),
+            translateInsert(
+                ctx,
+                tooLarge ? "notebook_image_too_large" : "notebook_image_read_failed",
+            ),
             "error",
         );
         return {

@@ -149,7 +149,9 @@ export function listToolbarItems(scope: ContributionScope = {}): ToolbarItemCont
     return listFor<ToolbarItemContribution>("toolbarItem", scope);
 }
 
-export function listPanelTabMenuItems(scope: ContributionScope = {}): PanelTabMenuItemContribution[] {
+export function listPanelTabMenuItems(
+    scope: ContributionScope = {},
+): PanelTabMenuItemContribution[] {
     return listFor<PanelTabMenuItemContribution>("panelTabMenuItem", scope);
 }
 
@@ -190,7 +192,9 @@ export function useToolbarItems(scope: ContributionScope = {}): ToolbarItemContr
     return listToolbarItems(scope);
 }
 
-export function usePanelTabMenuItems(scope: ContributionScope = {}): PanelTabMenuItemContribution[] {
+export function usePanelTabMenuItems(
+    scope: ContributionScope = {},
+): PanelTabMenuItemContribution[] {
     const version = useSyncExternalStore(
         subscribeContributions,
         getContributionVersion,

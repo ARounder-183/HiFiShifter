@@ -84,18 +84,18 @@ export function AppToolbar({
                 )}
                 style={{ background: "var(--qt-window)" }}
             >
-            {/*
-             * 默认 `overflow: visible` —— 不裁剪弹层、不产生吃掉高度的滚动条。
-             * 需要滚动的长工具栏由调用方显式打开 `scrollable`（见该属性说明）。
-             */}
-            <div
-                className={cx(
-                    "flex min-w-0 flex-1 items-center gap-1",
-                    scrollable && "custom-scrollbar overflow-x-auto",
-                )}
-            >
-                {leading}
-            </div>
+                {/*
+                 * 默认 `overflow: visible` —— 不裁剪弹层、不产生吃掉高度的滚动条。
+                 * 需要滚动的长工具栏由调用方显式打开 `scrollable`（见该属性说明）。
+                 */}
+                <div
+                    className={cx(
+                        "flex min-w-0 flex-1 items-center gap-1",
+                        scrollable && "custom-scrollbar overflow-x-auto",
+                    )}
+                >
+                    {leading}
+                </div>
                 {trailing ? (
                     <div className="flex shrink-0 items-center gap-1">{trailing}</div>
                 ) : null}
@@ -112,9 +112,6 @@ export function AppToolbar({
  */
 export function AppToolbarSeparator({ className }: { className?: string }) {
     return (
-        <div
-            aria-hidden="true"
-            className={cx("mx-1 h-4 w-px shrink-0 bg-qt-border", className)}
-        />
+        <div aria-hidden="true" className={cx("mx-1 h-4 w-px shrink-0 bg-qt-border", className)} />
     );
 }

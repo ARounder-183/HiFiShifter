@@ -69,9 +69,7 @@ export function TransposeCentsDialog({
                             ariaLabel={tAny("edge_smoothness")}
                             onChange={(next) => setSmoothness(String(next))}
                         />
-                        <AppSliderReadout>
-                            {Math.round(Number(smoothness) || 0)}%
-                        </AppSliderReadout>
+                        <AppSliderReadout>{Math.round(Number(smoothness) || 0)}%</AppSliderReadout>
                     </Flex>
                 </AppField>
             </AppForm>
@@ -174,9 +172,7 @@ export function TransposeDegreesDialog({
                             ariaLabel={tAny("edge_smoothness")}
                             onChange={(next) => setSmoothness(String(next))}
                         />
-                        <AppSliderReadout>
-                            {Math.round(Number(smoothness) || 0)}%
-                        </AppSliderReadout>
+                        <AppSliderReadout>{Math.round(Number(smoothness) || 0)}%</AppSliderReadout>
                     </Flex>
                 </AppField>
             </AppForm>
@@ -250,9 +246,7 @@ export function SetPitchDialog({
                             ariaLabel={tAny("edge_smoothness")}
                             onChange={(next) => setSmoothness(String(next))}
                         />
-                        <AppSliderReadout>
-                            {Math.round(Number(smoothness) || 0)}%
-                        </AppSliderReadout>
+                        <AppSliderReadout>{Math.round(Number(smoothness) || 0)}%</AppSliderReadout>
                     </Flex>
                 </AppField>
             </AppForm>
@@ -301,9 +295,7 @@ export function AverageDialog({ open, onOpenChange, onConfirm }: AverageProps) {
                             ariaLabel={tAny("dlg_average_strength")}
                             onChange={(next) => setStrength(String(next))}
                         />
-                        <AppSliderReadout>
-                            {Math.round(Number(strength) || 0)}%
-                        </AppSliderReadout>
+                        <AppSliderReadout>{Math.round(Number(strength) || 0)}%</AppSliderReadout>
                     </Flex>
                 </AppField>
             </AppForm>
@@ -383,12 +375,7 @@ interface VibratoProps {
     ) => void;
 }
 
-export function VibratoDialog({
-    open,
-    onOpenChange,
-    onConfirm,
-    editParam,
-}: VibratoProps) {
+export function VibratoDialog({ open, onOpenChange, onConfirm, editParam }: VibratoProps) {
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
 
@@ -537,9 +524,7 @@ export function QuantizeDialog({
     const [toleranceCents, setToleranceCents] = useDialogDraft(open, () =>
         String(toleranceDefault),
     );
-    const [quantizeUnit, setQuantizeUnit] = useDialogDraft(open, () =>
-        String(defaultQuantizeUnit),
-    );
+    const [quantizeUnit, setQuantizeUnit] = useDialogDraft(open, () => String(defaultQuantizeUnit));
     const [smoothness, setSmoothness] = useDialogDraft(open, () =>
         String(Math.round(defaultSmoothness)),
     );
@@ -633,9 +618,7 @@ export function QuantizeDialog({
                             ariaLabel={tAny("edge_smoothness")}
                             onChange={(next) => setSmoothness(String(next))}
                         />
-                        <AppSliderReadout>
-                            {Math.round(Number(smoothness) || 0)}%
-                        </AppSliderReadout>
+                        <AppSliderReadout>{Math.round(Number(smoothness) || 0)}%</AppSliderReadout>
                     </Flex>
                 </AppField>
             </AppForm>
@@ -695,9 +678,7 @@ export function MeanQuantizeDialog({
     const [toleranceCents, setToleranceCents] = useDialogDraft(open, () =>
         String(toleranceDefault),
     );
-    const [quantizeUnit, setQuantizeUnit] = useDialogDraft(open, () =>
-        String(defaultQuantizeUnit),
-    );
+    const [quantizeUnit, setQuantizeUnit] = useDialogDraft(open, () => String(defaultQuantizeUnit));
     const [smoothness, setSmoothness] = useDialogDraft(open, () =>
         String(Math.round(defaultSmoothness)),
     );
@@ -791,9 +772,7 @@ export function MeanQuantizeDialog({
                             ariaLabel={tAny("edge_smoothness")}
                             onChange={(next) => setSmoothness(String(next))}
                         />
-                        <AppSliderReadout>
-                            {Math.round(Number(smoothness) || 0)}%
-                        </AppSliderReadout>
+                        <AppSliderReadout>{Math.round(Number(smoothness) || 0)}%</AppSliderReadout>
                     </Flex>
                 </AppField>
             </AppForm>

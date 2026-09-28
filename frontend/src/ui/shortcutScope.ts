@@ -90,4 +90,3 @@ export function useShortcutSuppression(enabled: boolean): void {
         return () => releaseShortcutSuppression(token);
     }, [enabled]);
 }
-

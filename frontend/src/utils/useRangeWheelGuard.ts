@@ -24,10 +24,13 @@ import { useNonPassiveWheel } from "./useNonPassiveWheel";
 const RANGE_SELECTOR = 'input[type="range"]';
 
 export function useRangeWheelGuard<E extends HTMLElement>(): (element: E | null) => void {
-    const handler = useCallback((event: { target: EventTarget | null; preventDefault: () => void }) => {
-        const target = event.target;
-        if (!(target instanceof Element) || !target.closest(RANGE_SELECTOR)) return;
-        event.preventDefault();
-    }, []);
+    const handler = useCallback(
+        (event: { target: EventTarget | null; preventDefault: () => void }) => {
+            const target = event.target;
+            if (!(target instanceof Element) || !target.closest(RANGE_SELECTOR)) return;
+            event.preventDefault();
+        },
+        [],
+    );
     return useNonPassiveWheel<E>(handler as never);
 }

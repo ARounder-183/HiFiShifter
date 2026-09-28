@@ -389,15 +389,13 @@ function buildMockTimeline(): Record<string, unknown> {
                                   id: `${trackId}-take-1`,
                                   name: "Take 1",
                                   source_path: `/mock/audio-${trackIndex + 1}.wav`,
-                                  channel_mode:
-                                      mockTakeChannelModes.get(`${trackId}-take-1`) ?? 0,
+                                  channel_mode: mockTakeChannelModes.get(`${trackId}-take-1`) ?? 0,
                               },
                               {
                                   id: `${trackId}-take-2`,
                                   name: "Take 2",
                                   source_path: `/mock/audio-${trackIndex + 1}-alt.wav`,
-                                  channel_mode:
-                                      mockTakeChannelModes.get(`${trackId}-take-2`) ?? 0,
+                                  channel_mode: mockTakeChannelModes.get(`${trackId}-take-2`) ?? 0,
                               },
                           ]
                         : [],

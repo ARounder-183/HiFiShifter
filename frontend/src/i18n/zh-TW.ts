@@ -1491,7 +1491,8 @@ export const zhTW = {
     appearance_export_theme: "匯出",
     appearance_reset_colors: "重設顏色",
     appearance_reset_all_colors: "重設所有顏色",
-    appearance_reset_all_colors_confirm: "重設所有顏色？所有自訂顏色覆寫都會被捨棄。此操作無法復原。",
+    appearance_reset_all_colors_confirm:
+        "重設所有顏色？所有自訂顏色覆寫都會被捨棄。此操作無法復原。",
     appearance_saved_themes: "已儲存的主題",
     appearance_theme_name: "主題名稱",
     appearance_custom_theme: "自訂主題",

@@ -165,9 +165,38 @@ describe("文本风格", () => {
      */
     test("英文标签不整体大写", () => {
         const ACRONYMS = new Set([
-            "BPM","MIDI","WAV","MP3","FLAC","OGG","RTF","CPU","GPU","RAM","OK",
-            "VS","REAPER","ONNX","TPDF","ID","UI","URL","JSON","CSV","HTML","MD",
-            "AIFF","AAC","OPUS","DSP","LFO","ADSR","FFT","STFT","RMS","LUFS",
+            "BPM",
+            "MIDI",
+            "WAV",
+            "MP3",
+            "FLAC",
+            "OGG",
+            "RTF",
+            "CPU",
+            "GPU",
+            "RAM",
+            "OK",
+            "VS",
+            "REAPER",
+            "ONNX",
+            "TPDF",
+            "ID",
+            "UI",
+            "URL",
+            "JSON",
+            "CSV",
+            "HTML",
+            "MD",
+            "AIFF",
+            "AAC",
+            "OPUS",
+            "DSP",
+            "LFO",
+            "ADSR",
+            "FFT",
+            "STFT",
+            "RMS",
+            "LUFS",
         ]);
         const violations: string[] = [];
         for (const [key, value] of entriesOf(REFERENCE)) {
@@ -198,8 +227,26 @@ describe("文本风格", () => {
     test("同一命名族内的短标签不重名", () => {
         /** 同一语义在不同族复用是正常的（各处的 "None"、"Mono" 等）。 */
         const SHARED_OK = new Set([
-            "None", "Auto", "Default", "Custom", "Mono", "Stereo", "On", "Off",
-            "—", "✓", "✕", "%", "s", "ms", "px", "Hz", "kHz", "dB", "BPM", "MIDI",
+            "None",
+            "Auto",
+            "Default",
+            "Custom",
+            "Mono",
+            "Stereo",
+            "On",
+            "Off",
+            "—",
+            "✓",
+            "✕",
+            "%",
+            "s",
+            "ms",
+            "px",
+            "Hz",
+            "kHz",
+            "dB",
+            "BPM",
+            "MIDI",
         ]);
 
         /*
@@ -211,12 +258,9 @@ describe("文本风格", () => {
                 "刷新音频设备 / 刷新应用列表 —— 同一个词，动作对象不同，标签本就相同",
             "recapture_missing::Reset All":
                 "Reset 与 Reset All 是两个不同范围的按钮，但都该读作「全部重置」",
-            "algo_label::Algo":
-                "`algo_label_short` 是 `algo_label` 的短版，长/短变体刻意同值",
-            "custom_scale::Custom Scale":
-                "标签 / 对话框标题 / 默认名三处都该是「自定义音阶」",
-            "tempo_map::Tempo Map":
-                "面板名与「清除速度图」对话框标题共用同一个名词",
+            "algo_label::Algo": "`algo_label_short` 是 `algo_label` 的短版，长/短变体刻意同值",
+            "custom_scale::Custom Scale": "标签 / 对话框标题 / 默认名三处都该是「自定义音阶」",
+            "tempo_map::Tempo Map": "面板名与「清除速度图」对话框标题共用同一个名词",
         };
 
         /** 取前两段作为命名族（`param_btn_breath` → `param_btn`）。 */
@@ -256,7 +300,9 @@ describe("CJK 排版", () => {
         for (const locale of ["zh-CN", "zh-TW"] as const) {
             for (const [key, value] of entriesOf(locale)) {
                 // 括号内若是纯拉丁/数字内容则允许（例如 "MP3 (VBR)"）
-                const halfWidthAroundCjk = /[\u4e00-\u9fff]\s*\([^)]*[\u4e00-\u9fff][^)]*\)/.test(value);
+                const halfWidthAroundCjk = /[\u4e00-\u9fff]\s*\([^)]*[\u4e00-\u9fff][^)]*\)/.test(
+                    value,
+                );
                 if (halfWidthAroundCjk) violations.push(`${locale}.${key} = ${value}`);
             }
         }

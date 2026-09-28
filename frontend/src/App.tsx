@@ -4099,9 +4099,7 @@ function AppInner() {
                         若把进度片放在前面，它每出现/消失一次，后面所有片就整体
                         横移一次 —— 用户视线里"提示在乱动"。把长时效的钉在最左，
                         短的插在它右侧，左侧位置就永远稳定。 */}
-                    {noticeText ? (
-                        <AppStatusChip tone="success">{noticeText}</AppStatusChip>
-                    ) : null}
+                    {noticeText ? <AppStatusChip tone="success">{noticeText}</AppStatusChip> : null}
                     {/* 导入等待提示：只在真慢时点亮（见 IMPORT_BUSY_DELAY_MS），
                         位置紧跟长时效提示位之后、短时效进度片之前。 */}
                     {importBusy ? (

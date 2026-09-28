@@ -506,7 +506,10 @@ test("features/dock/dockTree.test.ts scripted checks", async () => {
             assert(created !== null, "the form landed in a tabset");
             const parent = findParentSplit(next, created!.id);
             // shape() 不编码方向，"贯通全高"必须显式验证拆分方向。
-            assert(parent !== null && parent.dir === "row", "the root split is a row (side by side)");
+            assert(
+                parent !== null && parent.dir === "row",
+                "the root split is a row (side by side)",
+            );
         }
 
         // 已停靠窗体拖到根左侧：先摘除（源组收缩、空组被剪掉），再对剪枝后的

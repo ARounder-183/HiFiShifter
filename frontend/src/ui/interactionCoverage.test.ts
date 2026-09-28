@@ -108,7 +108,12 @@ function collect(): Violation[] {
                 // 这条是必要的：新 hook 的文档注释必须能写出被替换者的名字。
                 if (isCommentLine(lines[i])) continue;
                 if (pattern.test(lines[i])) {
-                    violations.push({ file, line: i + 1, rule, text: lines[i].trim().slice(0, 70) });
+                    violations.push({
+                        file,
+                        line: i + 1,
+                        rule,
+                        text: lines[i].trim().slice(0, 70),
+                    });
                 }
             }
         }
@@ -121,9 +126,7 @@ describe("取值控件必须走能力层", () => {
         const violations = collect();
         const report = violations.map((v) => `${v.file}:${v.line}  [${v.rule}]\n    ${v.text}`);
         expect(
-            violations.length === 0
-                ? []
-                : [`共 ${violations.length} 处：`, ...report].join("\n"),
+            violations.length === 0 ? [] : [`共 ${violations.length} 处：`, ...report].join("\n"),
         ).toEqual([]);
     });
 });

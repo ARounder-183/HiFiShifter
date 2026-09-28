@@ -525,59 +525,67 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     // 以 useCallback 稳定引用（依赖仅含稳定 ref）：供只注册一次的订阅回调 /
     // useCallback 化的同步入口长期持有，引用抖动会连带放大（与 `syncScrollLeft`
     // 同一口径）。
-    const livePxPerSec = React.useCallback(function livePxPerSec(): number {
-        const host = kernelHostRef.current;
-        if (host !== null) return host.getViewport().pxPerSec;
-        return pxPerSecRef.current;
-    }, [kernelHostRef]);
+    const livePxPerSec = React.useCallback(
+        function livePxPerSec(): number {
+            const host = kernelHostRef.current;
+            if (host !== null) return host.getViewport().pxPerSec;
+            return pxPerSecRef.current;
+        },
+        [kernelHostRef],
+    );
 
-    const syncScrollLeft = React.useCallback(function syncScrollLeft(next: number) {
-        scrollLeftRef.current = next;
-        if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
-            timelineViewportSync.setViewport(
-                {
-                    scrollLeft: next,
-                    pxPerSec: livePxPerSec(),
-                },
-                TIMELINE_SYNC_ORIGIN,
+    const syncScrollLeft = React.useCallback(
+        function syncScrollLeft(next: number) {
+            scrollLeftRef.current = next;
+            if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
+                timelineViewportSync.setViewport(
+                    {
+                        scrollLeft: next,
+                        pxPerSec: livePxPerSec(),
+                    },
+                    TIMELINE_SYNC_ORIGIN,
+                );
+            }
+            if (rulerContentRef.current) {
+                // 平移量吸附到设备像素（见 `rulerLayerTranslatePx`）：与内核同一约定，
+                // 否则层内标尺竖线在系统缩放率 > 1 时粗细不一。
+                rulerContentRef.current.style.transform = `translateX(${-rulerLayerTranslatePx(next, readDevicePixelRatio())}px)`;
+            }
+            // 标尺播放头线**不在这里写**：它由内核在 draw() 内与轨道区播放头一起写
+            // （同一次帧提交、同一份内核视口、同一个 `playheadLineLeftPx`）。
+            //
+            // 【为什么必须收走】这里曾用 `playheadSec × pxPerSec`（**内容坐标**）写同一条
+            // 线；而线现在位于内容平移层之外（视口坐标），两者差一个 scrollLeft。同一条
+            // 线一度有四个写者、两套坐标，内核的去重逻辑还会因此跳过自己的正确写入 ——
+            // 这正是"标尺线与主体线不像同一条线"的根因之一。
+            // ★ 立即广播视口变化 → sticky 画布层同步重绘（绕过 React）
+            timelineViewportBus.emit(
+                next,
+                pxPerSecRef.current,
+                viewportWidthRef.current,
+                scrollTopPxRef.current,
+                rowHeightRef.current,
             );
-        }
-        if (rulerContentRef.current) {
-            // 平移量吸附到设备像素（见 `rulerLayerTranslatePx`）：与内核同一约定，
-            // 否则层内标尺竖线在系统缩放率 > 1 时粗细不一。
-            rulerContentRef.current.style.transform = `translateX(${-rulerLayerTranslatePx(next, readDevicePixelRatio())}px)`;
-        }
-        // 标尺播放头线**不在这里写**：它由内核在 draw() 内与轨道区播放头一起写
-        // （同一次帧提交、同一份内核视口、同一个 `playheadLineLeftPx`）。
-        //
-        // 【为什么必须收走】这里曾用 `playheadSec × pxPerSec`（**内容坐标**）写同一条
-        // 线；而线现在位于内容平移层之外（视口坐标），两者差一个 scrollLeft。同一条
-        // 线一度有四个写者、两套坐标，内核的去重逻辑还会因此跳过自己的正确写入 ——
-        // 这正是"标尺线与主体线不像同一条线"的根因之一。
-        // ★ 立即广播视口变化 → sticky 画布层同步重绘（绕过 React）
-        timelineViewportBus.emit(
-            next,
-            pxPerSecRef.current,
-            viewportWidthRef.current,
-            scrollTopPxRef.current,
-            rowHeightRef.current,
-        );
-        // 背景网格无需在这里单独通知：它已注册为统一帧提交的图层，上面的
-        // emit 会由提交器按固定顺序调用（携带 scrollTop，供 sticky 网格裁剪
-        // 轨道区底边）。提交入口唯一，可避免新增视口变更路径时漏通知网格。
-        // 用 rAF 合并状态更新，保证自动滚屏可达 60Hz 且避免同步抖动
-        if (scrollStateRafRef.current == null) {
-            scrollStateRafRef.current = requestAnimationFrame(() => {
-                scrollStateRafRef.current = null;
-                const next = scrollLeftRef.current;
-                if (Math.abs(next - reactCommittedScrollLeftRef.current) < REACT_SCROLL_STEP_PX) {
-                    return;
-                }
-                reactCommittedScrollLeftRef.current = next;
-                setScrollLeft(next);
-            });
-        }
-    }, [livePxPerSec]);
+            // 背景网格无需在这里单独通知：它已注册为统一帧提交的图层，上面的
+            // emit 会由提交器按固定顺序调用（携带 scrollTop，供 sticky 网格裁剪
+            // 轨道区底边）。提交入口唯一，可避免新增视口变更路径时漏通知网格。
+            // 用 rAF 合并状态更新，保证自动滚屏可达 60Hz 且避免同步抖动
+            if (scrollStateRafRef.current == null) {
+                scrollStateRafRef.current = requestAnimationFrame(() => {
+                    scrollStateRafRef.current = null;
+                    const next = scrollLeftRef.current;
+                    if (
+                        Math.abs(next - reactCommittedScrollLeftRef.current) < REACT_SCROLL_STEP_PX
+                    ) {
+                        return;
+                    }
+                    reactCommittedScrollLeftRef.current = next;
+                    setScrollLeft(next);
+                });
+            }
+        },
+        [livePxPerSec],
+    );
 
     /**
      * 水平滚动位置的**逐帧**同步（内核模式下由宿主每帧通知）。
@@ -595,25 +603,28 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
      * 因此把两件事拆开：本函数只做"写 ref + 广播共享视口"（几个赋值 + 一次
      * emit，不进 React），可以安全逐帧调用；React 对齐仍走量化路径。
      */
-    const syncScrollLeftFrame = React.useCallback(function syncScrollLeftFrame(next: number) {
-        scrollLeftRef.current = next;
-        timelineViewportBus.emit(
-            next,
-            pxPerSecRef.current,
-            viewportWidthRef.current,
-            scrollTopPxRef.current,
-            rowHeightRef.current,
-        );
-        if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
-            timelineViewportSync.setViewport(
-                {
-                    scrollLeft: next,
-                    pxPerSec: livePxPerSec(),
-                },
-                TIMELINE_SYNC_ORIGIN,
+    const syncScrollLeftFrame = React.useCallback(
+        function syncScrollLeftFrame(next: number) {
+            scrollLeftRef.current = next;
+            timelineViewportBus.emit(
+                next,
+                pxPerSecRef.current,
+                viewportWidthRef.current,
+                scrollTopPxRef.current,
+                rowHeightRef.current,
             );
-        }
-    }, [livePxPerSec]);
+            if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
+                timelineViewportSync.setViewport(
+                    {
+                        scrollLeft: next,
+                        pxPerSec: livePxPerSec(),
+                    },
+                    TIMELINE_SYNC_ORIGIN,
+                );
+            }
+        },
+        [livePxPerSec],
+    );
 
     // ── syncScrollTop：竖直轴的同帧提交 ──────────────────────────
     // sticky 画布层（clip 体 / 波形面）不随滚动容器原生移动，竖直滚动时

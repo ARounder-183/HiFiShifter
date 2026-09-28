@@ -12,7 +12,9 @@
  * `--qt-*` 令牌（见 `src/index.css`）也能继承用户的自定义主题。
  * 因此新增原语时请一并在此导出，并保证其视觉取值只来自令牌层。
  */
-export { cx, type ClassValue } from "./cx";
+// `cx` / `ClassValue` 刻意不导出：它们只在 src/ui 内部使用（作为原语的实现细节）。
+// 对外暴露一个无人使用的类名工具，只会让"公共 API"这个说法变模糊 ——
+// 第三方需要类名合并时直接依赖 `clsx` 即可。
 
 export {
     AppButton,
@@ -36,11 +38,7 @@ export {
     type AppSwitchRowProps,
 } from "./Field";
 
-export {
-    AppContextMenu,
-    type AppContextMenuProps,
-    type AppMenuItemSpec,
-} from "./Menu";
+export { AppContextMenu, type AppContextMenuProps, type AppMenuItemSpec } from "./Menu";
 
 export {
     AppConfirmDialog,
@@ -67,8 +65,4 @@ export { AppSlider, AppSliderReadout, type AppSliderProps } from "./Slider";
 
 export { AppBusy, AppEmptyState, type AppBusyProps, type AppEmptyStateProps } from "./State";
 
-export {
-    AppStatusChip,
-    type AppStatusChipProps,
-    type AppStatusTone,
-} from "./StatusChip";
+export { AppStatusChip, type AppStatusChipProps, type AppStatusTone } from "./StatusChip";

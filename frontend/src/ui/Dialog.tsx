@@ -347,7 +347,9 @@ export function AppDialog({
                         <Dialog.Description className="sr-only">{title}</Dialog.Description>
                     )}
 
-                    <div className="app-dialog__body mt-3 min-h-0 flex-1 overflow-y-auto">{children}</div>
+                    <div className="app-dialog__body mt-3 min-h-0 flex-1 overflow-y-auto">
+                        {children}
+                    </div>
 
                     {actions?.length ? (
                         <div

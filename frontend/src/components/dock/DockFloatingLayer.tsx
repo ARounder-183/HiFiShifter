@@ -134,8 +134,7 @@ function DockFloatWindow({
             // 还原尺寸落到指针下继续拖（与资源管理器 / 浏览器同款）。抓取点在
             // 标题栏上的相对横向位置保持不变，纵向让标题条跟住指针。
             if (geometry?.maximized === true) {
-                const restore =
-                    geometry.restore ?? { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
+                const restore = geometry.restore ?? { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
                 dispatch(
                     setFloatGeometry({
                         formId: form.id,

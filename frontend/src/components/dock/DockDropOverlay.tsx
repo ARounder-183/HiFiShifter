@@ -163,10 +163,10 @@ function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
                             : drag.dockIntent
                               ? drag.target
                                   ? `${
-                                      drag.target.zoneId === DOCK_ROOT_ZONE_ID
-                                          ? tAny("dock_hint_root_dock")
-                                          : tAny("dock_hint_dock")
-                                  } · ${describeZone(drag.target.zone, tAny)}`
+                                        drag.target.zoneId === DOCK_ROOT_ZONE_ID
+                                            ? tAny("dock_hint_root_dock")
+                                            : tAny("dock_hint_dock")
+                                    } · ${describeZone(drag.target.zone, tAny)}`
                                   : tAny("dock_hint_snapback")
                               : tAny("dock_hint_float")}
                     </span>

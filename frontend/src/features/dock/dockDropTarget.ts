@@ -94,10 +94,7 @@ export const DOCK_ROOT_ZONE_ID = "__dock_root__";
  * 命中一条；`pickDropTarget` 的"面积最小者优先"规则恰好让细带压过下方
  * 标签组的大矩形，不需要额外优先级逻辑。
  */
-export function buildRootEdgeZones(
-    rootRect: DockRect,
-    edgeBandPx: number,
-): DockZoneRect[] {
+export function buildRootEdgeZones(rootRect: DockRect, edgeBandPx: number): DockZoneRect[] {
     if (rootRect.w <= 0 || rootRect.h <= 0) return [];
     // 与 resolveDropZone 同样的钳制思路：停靠区极小时按短边收缩，保证中央
     // 区域（并入标签组）永远还有立足之地。

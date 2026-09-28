@@ -48,15 +48,17 @@ export type AppButtonIntent =
  */
 export type AppButtonSize = "sm" | "md";
 
-const INTENT_PROPS: Record<AppButtonIntent, Pick<ComponentPropsWithoutRef<typeof Button>, "variant" | "color">> =
-    {
-        // 裸 Button 即 Radix 默认的 solid + accent —— 与现有确认按钮逐字节一致。
-        primary: { variant: "solid" },
-        // 与现有 83 处 `variant="soft" color="gray"` 一致。
-        default: { variant: "soft", color: "gray" },
-        subtle: { variant: "ghost", color: "gray" },
-        danger: { variant: "soft", color: "red" },
-    };
+const INTENT_PROPS: Record<
+    AppButtonIntent,
+    Pick<ComponentPropsWithoutRef<typeof Button>, "variant" | "color">
+> = {
+    // 裸 Button 即 Radix 默认的 solid + accent —— 与现有确认按钮逐字节一致。
+    primary: { variant: "solid" },
+    // 与现有 83 处 `variant="soft" color="gray"` 一致。
+    default: { variant: "soft", color: "gray" },
+    subtle: { variant: "ghost", color: "gray" },
+    danger: { variant: "soft", color: "red" },
+};
 
 /**
  * 强调程度。
@@ -73,7 +75,10 @@ const INTENT_PROPS: Record<AppButtonIntent, Pick<ComponentPropsWithoutRef<typeof
  */
 export type AppButtonEmphasis = "solid" | "soft";
 
-export interface AppButtonProps extends Omit<ComponentPropsWithoutRef<typeof Button>, "variant" | "color" | "size"> {
+export interface AppButtonProps extends Omit<
+    ComponentPropsWithoutRef<typeof Button>,
+    "variant" | "color" | "size"
+> {
     intent?: AppButtonIntent;
     size?: AppButtonSize;
     emphasis?: AppButtonEmphasis;
@@ -132,8 +137,10 @@ function withIconSize(icon: ReactNode, size: AppIconSize): ReactNode {
     return cloneElement(icon, { width: px, height: px });
 }
 
-export interface AppIconButtonProps
-    extends Omit<ComponentPropsWithoutRef<typeof IconButton>, "variant" | "color" | "size" | "children"> {
+export interface AppIconButtonProps extends Omit<
+    ComponentPropsWithoutRef<typeof IconButton>,
+    "variant" | "color" | "size" | "children"
+> {
     /** 图标节点。尺寸由本组件统一注入，调用方不要自己写 width/height。 */
     icon: ReactNode;
     /**

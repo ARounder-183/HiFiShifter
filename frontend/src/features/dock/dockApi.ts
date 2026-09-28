@@ -624,10 +624,7 @@ export function isRegistered(panelId: string): boolean {
  * 面板 id 可能对应多个窗体（`singleton: false` 时），此时返回第一个；
  * 需要精确控制时用 `getFormProps`。
  */
-export function getPanelProps(
-    getState: GetState,
-    panelId: string,
-): Record<string, unknown> | null {
+export function getPanelProps(getState: GetState, panelId: string): Record<string, unknown> | null {
     const form = findFormByPanelId(getState(), panelId);
     return form ? { ...(form.props ?? {}) } : null;
 }
@@ -667,10 +664,7 @@ export function setFormPropsById(
 }
 
 /** 面板 id → 窗体（取第一个匹配；无则 `null`）。 */
-function findFormByPanelId(
-    state: RootState,
-    panelId: string,
-): DockForm | null {
+function findFormByPanelId(state: RootState, panelId: string): DockForm | null {
     for (const form of Object.values(state.dock.layout.forms)) {
         if (form.panelId === panelId) return form;
     }

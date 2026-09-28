@@ -2781,57 +2781,60 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
      */
     // 以 useCallback 稳定引用（依赖仅含同步开关设置态与 ref）：下游
     // `onScrollerScroll` 等回调的依赖数组直接持有它，引用抖动会连带放大。
-    const syncScrollLeft = useCallback(function syncScrollLeft(scroller: HTMLDivElement) {
-        const syncEnabled = s.paramEditorSyncTimeline;
-        const offset = syncEnabled ? timelineOffsetRef.current : 0;
-        const next = timelineViewportNativeToState(scroller.scrollLeft, offset);
-        if (lastScrollLeftRef.current != null && lastScrollLeftRef.current === next) {
-            return;
-        }
-        lastScrollLeftRef.current = next;
-        scrollLeftRef.current = next;
-        if (syncEnabled && !timelineSyncApplyingRef.current) {
-            // 【必须用 next（采纳值）而不是 scroller.scrollLeft（原生 DOM）】
+    const syncScrollLeft = useCallback(
+        function syncScrollLeft(scroller: HTMLDivElement) {
+            const syncEnabled = s.paramEditorSyncTimeline;
+            const offset = syncEnabled ? timelineOffsetRef.current : 0;
+            const next = timelineViewportNativeToState(scroller.scrollLeft, offset);
+            if (lastScrollLeftRef.current != null && lastScrollLeftRef.current === next) {
+                return;
+            }
+            lastScrollLeftRef.current = next;
+            scrollLeftRef.current = next;
+            if (syncEnabled && !timelineSyncApplyingRef.current) {
+                // 【必须用 next（采纳值）而不是 scroller.scrollLeft（原生 DOM）】
+                //
+                // 原生 scroller 只是**镜像**：真值在 ScrollKernel，由宿主在帧
+                // 提交时回写。直接读 DOM 会拿到**尚未回写**的旧值，于是把旧位置当成
+                // "用户滚动"推回共享视口——时间轴收到后应用旧值，位置出现回退。
+                //
+                // 实测（拖时间轴带动参数编辑器时）：共享视口序列 `10 → 20 → pianoRoll
+                // 推回 10`，时间轴内核随之从 20 退回 10。连续拖拽时每三帧回退一次
+                // （增量呈 `+30, +10, -10` 循环），即用户报告的"阶梯感/被吸附感"。
+                //
+                // `next` 是刚由原生位置换算出的绘制坐标，再换算回原生即得权威值；
+                // 与 `onUserScrollLeft` 的口径一致（后者用的是内核的绘制坐标）。
+                timelineViewportSync.setViewport(
+                    {
+                        scrollLeft: timelineViewportStateToNative(next, offset),
+                        pxPerSec: pxPerSecRef.current,
+                    },
+                    PIANO_ROLL_SYNC_ORIGIN,
+                );
+            }
+            // 交给内核（它会按新边界钳制、镜像回写并提交各图层）。
             //
-            // 原生 scroller 只是**镜像**：真值在 ScrollKernel，由宿主在帧
-            // 提交时回写。直接读 DOM 会拿到**尚未回写**的旧值，于是把旧位置当成
-            // "用户滚动"推回共享视口——时间轴收到后应用旧值，位置出现回退。
-            //
-            // 实测（拖时间轴带动参数编辑器时）：共享视口序列 `10 → 20 → pianoRoll
-            // 推回 10`，时间轴内核随之从 20 退回 10。连续拖拽时每三帧回退一次
-            // （增量呈 `+30, +10, -10` 循环），即用户报告的"阶梯感/被吸附感"。
-            //
-            // `next` 是刚由原生位置换算出的绘制坐标，再换算回原生即得权威值；
-            // 与 `onUserScrollLeft` 的口径一致（后者用的是内核的绘制坐标）。
-            timelineViewportSync.setViewport(
-                {
-                    scrollLeft: timelineViewportStateToNative(next, offset),
-                    pxPerSec: pxPerSecRef.current,
-                },
-                PIANO_ROLL_SYNC_ORIGIN,
-            );
-        }
-        // 交给内核（它会按新边界钳制、镜像回写并提交各图层）。
-        //
-        // 【为什么在内核写入后立刻 `paintNow`】本函数由**原生滚动事件**驱动（触摸拖拽、
-        // 触控板惯性、中键平移、框选自动滚屏）。原生滚动发生在浏览器的渲染步骤里，而
-        // 滚轮/拖拽任务里排队的 rAF 要等**下一帧**才跑——这会让可见内容（标尺、网格、
-        // 主画布、波形、曲线、播放头）比原生滚动慢一帧。旧实现是在滚动事件里同步重绘，
-        // 因此没有这一帧差；这里用 `paintNow()`（同任务提交）恢复到同一时序。
-        const host = hostRef.current;
-        if (host) {
-            host.setScrollLeft(next);
-            host.paintNow();
-            return;
-        }
-        applyScrollLayers(next);
-        if (scrollStateRafRef.current == null) {
-            scrollStateRafRef.current = requestAnimationFrame(() => {
-                scrollStateRafRef.current = null;
-                setScrollLeft(scrollLeftRef.current);
-            });
-        }
-    }, [applyScrollLayers, s.paramEditorSyncTimeline, setScrollLeft]);
+            // 【为什么在内核写入后立刻 `paintNow`】本函数由**原生滚动事件**驱动（触摸拖拽、
+            // 触控板惯性、中键平移、框选自动滚屏）。原生滚动发生在浏览器的渲染步骤里，而
+            // 滚轮/拖拽任务里排队的 rAF 要等**下一帧**才跑——这会让可见内容（标尺、网格、
+            // 主画布、波形、曲线、播放头）比原生滚动慢一帧。旧实现是在滚动事件里同步重绘，
+            // 因此没有这一帧差；这里用 `paintNow()`（同任务提交）恢复到同一时序。
+            const host = hostRef.current;
+            if (host) {
+                host.setScrollLeft(next);
+                host.paintNow();
+                return;
+            }
+            applyScrollLayers(next);
+            if (scrollStateRafRef.current == null) {
+                scrollStateRafRef.current = requestAnimationFrame(() => {
+                    scrollStateRafRef.current = null;
+                    setScrollLeft(scrollLeftRef.current);
+                });
+            }
+        },
+        [applyScrollLayers, s.paramEditorSyncTimeline, setScrollLeft],
+    );
 
     // ── 内核宿主：创建 / 销毁 ────────────────────────────────────────
     //
@@ -6933,9 +6936,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             dispatch(setParamEditorSyncTimeline(!s.paramEditorSyncTimeline));
                             void dispatch(persistUiSettings());
                         }}
-                        icon={
-                            s.paramEditorSyncTimeline ? <Link2Icon /> : <LinkBreak2Icon />
-                        }
+                        icon={s.paramEditorSyncTimeline ? <Link2Icon /> : <LinkBreak2Icon />}
                     />
                     <Text size="1" weight="bold" color="gray">
                         {tAny("param_editor_short")}
@@ -7889,7 +7890,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                 density="compact"
                                                 value={currentString}
                                                 onValueChange={(v) =>
-                                                    void handleStaticParamChange(param.id, Number(v))
+                                                    void handleStaticParamChange(
+                                                        param.id,
+                                                        Number(v),
+                                                    )
                                                 }
                                                 fullWidth={false}
                                                 // 与“算法”下拉栏一致使用固定宽度，选项切换时宽度不变

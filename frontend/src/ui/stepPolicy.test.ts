@@ -106,7 +106,13 @@ describe("stepValue", () => {
     });
 
     test("精调一次只走精调步长", () => {
-        const args = { value: 120, direction: 1 as const, unit: "bpm" as StepUnit, min: 0, max: 999 };
+        const args = {
+            value: 120,
+            direction: 1 as const,
+            unit: "bpm" as StepUnit,
+            min: 0,
+            max: 999,
+        };
         expect(stepValue({ ...args, fine: false })).toBe(121);
         expect(stepValue({ ...args, fine: true })).toBe(120.1);
     });

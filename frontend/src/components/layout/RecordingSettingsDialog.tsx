@@ -196,7 +196,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                 fullWidth={false}
                                 // 不定长文本（设备名/应用名），给下限防止塌缩与切换时宽度跳动
                                 minWidth={260}
-                                                                value={draft.sourceDevice}
+                                value={draft.sourceDevice}
                                 onValueChange={(value) =>
                                     setDraft((prev) => ({ ...prev, sourceDevice: value }))
                                 }
@@ -230,7 +230,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                 fullWidth={false}
                                 // 不定长文本（设备名/应用名），给下限防止塌缩与切换时宽度跳动
                                 minWidth={260}
-                                                                value={loopbackValue}
+                                value={loopbackValue}
                                 onValueChange={(value) =>
                                     setDraft((prev) => ({ ...prev, loopbackDevice: value }))
                                 }
@@ -268,7 +268,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                     fullWidth={false}
                                     // 不定长文本（设备名/应用名），给下限防止塌缩与切换时宽度跳动
                                     minWidth={260}
-                                                                        value={draft.captureAppId}
+                                    value={draft.captureAppId}
                                     onValueChange={(value) => {
                                         const app = apps.find((item) => item.id === value);
                                         setDraft((prev) => ({
@@ -332,7 +332,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                             fullWidth={false}
                             // 不定长文本（设备名/应用名），给下限防止塌缩与切换时宽度跳动
                             minWidth={120}
-                                                        value={String(draft.bitDepth)}
+                            value={String(draft.bitDepth)}
                             onValueChange={(value) =>
                                 setDraft((prev) => ({
                                     ...prev,
@@ -353,7 +353,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                             fullWidth={false}
                             // 不定长文本（设备名/应用名），给下限防止塌缩与切换时宽度跳动
                             minWidth={100}
-                                                        value={String(draft.channels)}
+                            value={String(draft.channels)}
                             onValueChange={(value) =>
                                 setDraft((prev) => ({
                                     ...prev,

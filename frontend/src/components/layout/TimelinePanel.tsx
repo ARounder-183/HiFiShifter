@@ -3660,7 +3660,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             });
         },
         // eslint-disable-next-line react-hooks/exhaustive-deps -- pxPerSec 随缩放变化，加入会让淡变预览回调在缩放期间反复重建（既有热路径口径，曲率换算读创建时快照）
-        [beginKernelGestureInteraction, dispatch, fadeCurvatureKb, multiSelectedClipIds, sessionRef],
+        [
+            beginKernelGestureInteraction,
+            dispatch,
+            fadeCurvatureKb,
+            multiSelectedClipIds,
+            sessionRef,
+        ],
     );
 
     /** 内核淡变角收尾：提交或回滚（取消时两侧一起还原）。 */
@@ -4275,23 +4281,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     } | null>(null);
 
     /** 内核双击名称区 → 进入重命名。 */
-    const handleKernelRenameClipStart = React.useCallback((clipId: string) => {
-        const clip = sessionRef.current.clips.find((item) => item.id === clipId);
-        if (clip === undefined) return;
-        setKernelInlineEdit({
-            clipId,
-            field: "name",
-            // 初值必须是**活动 Take 的名字**（`activeClipTakeName`），不是容器
-            // clip 的 `name`。
-            //
-            // 提交方（`commitTrackLaneRename` → `renameClipTakeRemote`）在多 Take
-            // clip 上写的是**当前 Take 的名字**：预填容器名会让"双击 + 直接回车"
-            // 把 Take 名**改成容器名**，而用户什么都没输入。旧实现 `ClipHeader`
-            // 的 `editTakeName` 同源。
-            initialValue: activeClipTakeName(clip),
-            inputMode: "text",
-        });
-    }, [sessionRef]);
+    const handleKernelRenameClipStart = React.useCallback(
+        (clipId: string) => {
+            const clip = sessionRef.current.clips.find((item) => item.id === clipId);
+            if (clip === undefined) return;
+            setKernelInlineEdit({
+                clipId,
+                field: "name",
+                // 初值必须是**活动 Take 的名字**（`activeClipTakeName`），不是容器
+                // clip 的 `name`。
+                //
+                // 提交方（`commitTrackLaneRename` → `renameClipTakeRemote`）在多 Take
+                // clip 上写的是**当前 Take 的名字**：预填容器名会让"双击 + 直接回车"
+                // 把 Take 名**改成容器名**，而用户什么都没输入。旧实现 `ClipHeader`
+                // 的 `editTakeName` 同源。
+                initialValue: activeClipTakeName(clip),
+                inputMode: "text",
+            });
+        },
+        [sessionRef],
+    );
 
     /**
      * 内核单击增益 / 速率标签 → 进入行内编辑。
@@ -5348,14 +5357,20 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 就请求一帧，写入器随即按当前视口定位它（去重键含元素身份，见
      * `createPlayheadElementWriter`）。
      */
-    const attachRulerPlayheadLine = React.useCallback((element: HTMLDivElement | null) => {
-        rulerPlayheadLineRef.current = element;
-        if (element !== null) kernelHostRef.current?.invalidatePlayhead();
-    }, [rulerPlayheadLineRef]);
-    const attachRulerPlayheadHead = React.useCallback((element: HTMLDivElement | null) => {
-        rulerPlayheadHeadRef.current = element;
-        if (element !== null) kernelHostRef.current?.invalidatePlayhead();
-    }, [rulerPlayheadHeadRef]);
+    const attachRulerPlayheadLine = React.useCallback(
+        (element: HTMLDivElement | null) => {
+            rulerPlayheadLineRef.current = element;
+            if (element !== null) kernelHostRef.current?.invalidatePlayhead();
+        },
+        [rulerPlayheadLineRef],
+    );
+    const attachRulerPlayheadHead = React.useCallback(
+        (element: HTMLDivElement | null) => {
+            rulerPlayheadHeadRef.current = element;
+            if (element !== null) kernelHostRef.current?.invalidatePlayhead();
+        },
+        [rulerPlayheadHeadRef],
+    );
 
     /**
      * 标尺节点（内核模式与旧模式共用同一实例）。

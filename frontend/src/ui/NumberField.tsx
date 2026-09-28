@@ -208,7 +208,11 @@ export function AppNumberField({
                     event.preventDefault();
                     commitText();
                 }}
-                style={suffix && resolvedWidth !== undefined ? { width: resolvedWidth } : { width: "100%" }}
+                style={
+                    suffix && resolvedWidth !== undefined
+                        ? { width: resolvedWidth }
+                        : { width: "100%" }
+                }
             />
             {suffix ? <span className="hs-type-caption shrink-0">{suffix}</span> : null}
         </div>

@@ -322,12 +322,7 @@ export function normalizeChannelImportPolicy(input: ChannelImportPolicy): Channe
         : DEFAULT_CHANNEL_IMPORT_POLICY.mode;
     return {
         mode,
-        windowSec: clampNumber(
-            input.windowSec,
-            0.05,
-            5,
-            DEFAULT_CHANNEL_IMPORT_POLICY.windowSec,
-        ),
+        windowSec: clampNumber(input.windowSec, 0.05, 5, DEFAULT_CHANNEL_IMPORT_POLICY.windowSec),
         windowCount: Math.min(
             256,
             Math.max(
@@ -337,12 +332,7 @@ export function normalizeChannelImportPolicy(input: ChannelImportPolicy): Channe
                     : DEFAULT_CHANNEL_IMPORT_POLICY.windowCount,
             ),
         ),
-        tolerance: clampNumber(
-            input.tolerance,
-            0,
-            1,
-            DEFAULT_CHANNEL_IMPORT_POLICY.tolerance,
-        ),
+        tolerance: clampNumber(input.tolerance, 0, 1, DEFAULT_CHANNEL_IMPORT_POLICY.tolerance),
         monoTargetMode: [2, 3, 4].includes(input.monoTargetMode)
             ? input.monoTargetMode
             : DEFAULT_CHANNEL_IMPORT_POLICY.monoTargetMode,
@@ -363,9 +353,7 @@ let saveChain: Promise<unknown> = Promise.resolve();
 export const settingsApi = {
     getUiSettings: () => invoke<UiSettings>("get_ui_settings"),
     saveUiSettings: (settings: Partial<UiSettings>) => {
-        const run = saveChain.then(() =>
-            invoke<{ ok: boolean }>("save_ui_settings", { settings }),
-        );
+        const run = saveChain.then(() => invoke<{ ok: boolean }>("save_ui_settings", { settings }));
         // 失败不能断链：这一笔照常向调用方抛错，但队列本身继续消化后续保存。
         saveChain = run.catch(() => undefined);
         return run;

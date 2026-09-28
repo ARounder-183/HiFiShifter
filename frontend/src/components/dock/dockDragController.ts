@@ -217,7 +217,8 @@ function resolveTarget(x: number, y: number): DockDropTargetState | null {
     // 合成 Zone（根级边缘带）整条带就是一个部位，部位已在采集时固定；
     // 普通标签组 Zone 现场按指针在矩形内的位置解析。
     const band = store.getState().dock.settings.edgeBandPx;
-    const zone: DockDropZone = hit.fixedZone ?? (resolveDropZone(hit.rect, { x, y }, band) ?? "center");
+    const zone: DockDropZone =
+        hit.fixedZone ?? resolveDropZone(hit.rect, { x, y }, band) ?? "center";
     // 根级带的提交/预览基准是整个停靠区矩形（"贯通整侧"），不是那条细带。
     return { zoneId: hit.zoneId, zone, rect: hit.previewRect ?? hit.rect };
 }
@@ -738,7 +739,10 @@ export function beginFloatDrag(event: React.PointerEvent, args: FloatDragArgs): 
         reorderMoved: false,
         floatStart: args.geometry,
         sourceSize: { w: args.geometry.w, h: args.geometry.h },
-        dropSize: { w: args.dropSize?.w ?? args.geometry.w, h: args.dropSize?.h ?? args.geometry.h },
+        dropSize: {
+            w: args.dropSize?.w ?? args.geometry.w,
+            h: args.dropSize?.h ?? args.geometry.h,
+        },
         lastX: event.clientX,
         lastY: event.clientY,
     };

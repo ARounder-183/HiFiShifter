@@ -1489,7 +1489,8 @@ export const zhCN = {
     appearance_export_theme: "导出",
     appearance_reset_colors: "重置颜色",
     appearance_reset_all_colors: "重置所有颜色",
-    appearance_reset_all_colors_confirm: "重置所有颜色？所有自定义颜色覆盖都会被丢弃。此操作无法撤销。",
+    appearance_reset_all_colors_confirm:
+        "重置所有颜色？所有自定义颜色覆盖都会被丢弃。此操作无法撤销。",
     appearance_saved_themes: "已保存的主题",
     appearance_theme_name: "主题名称",
     appearance_custom_theme: "自定义主题",

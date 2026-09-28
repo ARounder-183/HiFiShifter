@@ -44,7 +44,11 @@ export function AppEmptyState({
         <Text
             size="1"
             color={tone === "danger" ? "red" : "gray"}
-            className={cx("block text-center", size === "default" ? "px-3 py-4" : "px-3 py-2", className)}
+            className={cx(
+                "block text-center",
+                size === "default" ? "px-3 py-4" : "px-3 py-2",
+                className,
+            )}
         >
             {children}
         </Text>

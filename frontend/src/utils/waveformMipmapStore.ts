@@ -634,8 +634,7 @@ class WaveformMipmapStoreImpl {
         // 把 0 当成单声道，立体声 L/R 双带渲染静默退化为合并单带。因此先做
         // 归一化：非正数一律回退峰值数据自身的 channels（v1 峰值数据报告
         // channels: 1，下面的第二道闸仍然有效）。
-        const src =
-            sourceChannels != null && sourceChannels > 0 ? sourceChannels : peaks.channels;
+        const src = sourceChannels != null && sourceChannels > 0 ? sourceChannels : peaks.channels;
         const effChannels = effectiveChannels(src, channelMode);
 
         if (effChannels === 2 && peaks.channels === 2) {

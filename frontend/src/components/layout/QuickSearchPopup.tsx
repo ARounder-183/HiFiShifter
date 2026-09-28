@@ -281,7 +281,14 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
             );
             onClose();
         },
-        [dispatch, onClose, playheadSec, quickSearchAutoNormalizeEnabled, selectedTrackId, stopPreview],
+        [
+            dispatch,
+            onClose,
+            playheadSec,
+            quickSearchAutoNormalizeEnabled,
+            selectedTrackId,
+            stopPreview,
+        ],
     );
 
     const focusSearchInput = useCallback(() => {

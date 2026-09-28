@@ -824,9 +824,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                         <AppForm booleanRow="leading">
                                             <AppSwitchRow
                                                 control="checkbox"
-                                                ariaLabel={
-                                                    track.name || `Track ${track.index + 1}`
-                                                }
+                                                ariaLabel={track.name || `Track ${track.index + 1}`}
                                                 checked={selectedTracks.includes(track.index)}
                                                 onCheckedChange={(next) => {
                                                     if (next) {
@@ -886,9 +884,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                 label={tAny("midi_import_bpm_as_project")}
                                 checked={importBpmAsProject && !importTempoMapEnabled}
                                 disabled={!midiHasBpm || importTempoMapEnabled}
-                                onCheckedChange={(checked) =>
-                                    onImportBpmAsProjectChange?.(checked)
-                                }
+                                onCheckedChange={(checked) => onImportBpmAsProjectChange?.(checked)}
                             />
                         </AppForm>
 

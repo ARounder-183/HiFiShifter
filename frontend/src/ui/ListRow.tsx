@@ -127,7 +127,9 @@ export const AppListRow = forwardRef<HTMLDivElement, AppListRowProps>(function A
                 intent === "danger"
                     ? "hover:bg-qt-danger-bg hover:text-qt-danger-text"
                     : "hover:bg-[color-mix(in_oklab,var(--qt-highlight)_10%,transparent)]",
-                selected && intent === "default" && "bg-[color-mix(in_oklab,var(--qt-highlight)_22%,transparent)]",
+                selected &&
+                    intent === "default" &&
+                    "bg-[color-mix(in_oklab,var(--qt-highlight)_22%,transparent)]",
                 className,
             )}
         >

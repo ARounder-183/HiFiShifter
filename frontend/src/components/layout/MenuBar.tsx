@@ -489,9 +489,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
      * 没有反应而反复触发。
      */
     const handleExportDiagnostics = useCallback(async () => {
-        const { pickDiagnosticsOutputPath, exportDiagnostics } = await import(
-            "../../services/api/diagnostics"
-        );
+        const { pickDiagnosticsOutputPath, exportDiagnostics } =
+            await import("../../services/api/diagnostics");
         try {
             const pick = await pickDiagnosticsOutputPath();
             if (!pick?.ok || !pick.path) return; // 用户取消
@@ -1286,9 +1285,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 if (!res.ok) {
                                     setNotice({
                                         title: tAny("status_error_prefix"),
-                                        message:
-                                            res.error ||
-                                            tAny("menu_open_log_folder_failed"),
+                                        message: res.error || tAny("menu_open_log_folder_failed"),
                                     });
                                 }
                             } catch (e) {
@@ -1448,10 +1445,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 {tAny("import_dialog_title")}
                             </div>
                             <div className="mt-1 text-qt-xs text-qt-text-muted">
-                                {plural(
-                                    "import_files_selected",
-                                    menuImportMode.audioPaths.length,
-                                )}
+                                {plural("import_files_selected", menuImportMode.audioPaths.length)}
                             </div>
                         </div>
 

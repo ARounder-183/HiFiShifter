@@ -109,7 +109,12 @@ test("标签菜单项也按作用域筛选，并保留 danger 标记", () => {
         danger: true,
         onSelect: () => {},
     });
-    registerPanelTabMenuItem({ id: "menu.b", panelId: "panelB", label: "Other", onSelect: () => {} });
+    registerPanelTabMenuItem({
+        id: "menu.b",
+        panelId: "panelB",
+        label: "Other",
+        onSelect: () => {},
+    });
 
     const items = listPanelTabMenuItems({ panelId: "panelA" });
     expect(items.map((item) => item.id)).toEqual(["menu.a"]);

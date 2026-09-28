@@ -68,9 +68,7 @@ export function getDockDragState(): DockDragState | null {
  * 是否渲染落点提示。（早期版本把它写成 `false` 且再无处置真，结果停靠能用、
  * 预览却从不出现：用户拖拽时完全看不到落点结果。）
  */
-export function beginDockDrag(
-    next: Omit<DockDragState, "started" | "target" | "reorder">,
-): void {
+export function beginDockDrag(next: Omit<DockDragState, "started" | "target" | "reorder">): void {
     state = { ...next, started: true, target: null, reorder: false };
     emit();
 }

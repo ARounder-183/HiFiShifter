@@ -15,7 +15,14 @@ import {
     placeForm,
     resolveSyncOffsetForms,
 } from "./dockSchema.ts";
-import { collectTabsets, findTabsetOfForm, isFormVisible, MAX_SPLIT_RATIO, MIN_SPLIT_RATIO, addFormToTabset } from "./dockTree.ts";
+import {
+    collectTabsets,
+    findTabsetOfForm,
+    isFormVisible,
+    MAX_SPLIT_RATIO,
+    MIN_SPLIT_RATIO,
+    addFormToTabset,
+} from "./dockTree.ts";
 import { registerPanel, resetPanelRegistryForTests } from "./panelRegistry.ts";
 import type { DockSplitNode, DockTabsetNode } from "./dockTypes.ts";
 
@@ -265,10 +272,7 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         });
         const anonTabsets = collectTabsets(anonymous.tree);
         assertEqual(anonTabsets.length, 2, "both anonymous tabsets survive");
-        assert(
-            anonTabsets[0]!.id !== anonTabsets[1]!.id,
-            "missing zone ids are minted distinctly",
-        );
+        assert(anonTabsets[0]!.id !== anonTabsets[1]!.id, "missing zone ids are minted distinctly");
     }
 
     // ── 归一化：分割比例钳制 ────────────────────────────────────

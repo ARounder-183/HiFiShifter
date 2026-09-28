@@ -4,13 +4,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import {
-    Button,
-    Flex,
-    SegmentedControl,
-    Text,
-    TextField,
-} from "@radix-ui/themes";
+import { Button, Flex, SegmentedControl, Text, TextField } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { exportAudioAdvanced } from "../../features/session/sessionSlice";
@@ -1372,11 +1366,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                 value={format === "wav" ? wavBitDepth : flacBitDepth}
                                 onValueChange={(value) => {
                                     if (format === "wav") {
-                                        if (
-                                            value === "i16" ||
-                                            value === "i24" ||
-                                            value === "f32"
-                                        ) {
+                                        if (value === "i16" || value === "i24" || value === "f32") {
                                             setWavBitDepth(value);
                                         }
                                     } else if (value === "i16" || value === "i24") {
@@ -1582,8 +1572,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                     value={projectOutputDir}
                                     onFocus={(event) => {
                                         setActiveInputKey("projectOutputDir");
-                                        activeInputRef.current =
-                                            event.target as HTMLInputElement;
+                                        activeInputRef.current = event.target as HTMLInputElement;
                                     }}
                                     onChange={(event: ChangeEvent<HTMLInputElement>) =>
                                         setProjectOutputDir(event.target.value)
@@ -1605,8 +1594,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                     value={projectFileName}
                                     onFocus={(event) => {
                                         setActiveInputKey("projectFileName");
-                                        activeInputRef.current =
-                                            event.target as HTMLInputElement;
+                                        activeInputRef.current = event.target as HTMLInputElement;
                                     }}
                                     onChange={(event: ChangeEvent<HTMLInputElement>) =>
                                         setProjectFileName(event.target.value)
@@ -1618,24 +1606,29 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                 <Text size="1" color="gray">
                                     {tAny("export_pattern_placeholders")}
                                 </Text>
-                                {(["<ProjectName>", "<ProjectFolder>"] as const).map(
-                                    (token) => (
-                                        <Button
-                                            key={token}
-                                            size="1"
-                                            variant="ghost"
-                                            color="gray"
-                                            onClick={() => applyTokenToActiveInput(token)}
-                                        >
-                                            {token}
-                                        </Button>
-                                    ),
-                                )}
+                                {(["<ProjectName>", "<ProjectFolder>"] as const).map((token) => (
+                                    <Button
+                                        key={token}
+                                        size="1"
+                                        variant="ghost"
+                                        color="gray"
+                                        onClick={() => applyTokenToActiveInput(token)}
+                                    >
+                                        {token}
+                                    </Button>
+                                ))}
                             </Flex>
 
                             {examplePath ? (
-                                <Text size="1" color="gray" style={{ userSelect: "text", wordBreak: "break-all" }}>
-                                    {tAny("export_dialog_example_path").replace("{path}", examplePath)}
+                                <Text
+                                    size="1"
+                                    color="gray"
+                                    style={{ userSelect: "text", wordBreak: "break-all" }}
+                                >
+                                    {tAny("export_dialog_example_path").replace(
+                                        "{path}",
+                                        examplePath,
+                                    )}
                                 </Text>
                             ) : null}
                         </>
@@ -1650,8 +1643,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                     value={separatedOutputDir}
                                     onFocus={(event) => {
                                         setActiveInputKey("separatedOutputDir");
-                                        activeInputRef.current =
-                                            event.target as HTMLInputElement;
+                                        activeInputRef.current = event.target as HTMLInputElement;
                                     }}
                                     onChange={(event: ChangeEvent<HTMLInputElement>) =>
                                         setSeparatedOutputDir(event.target.value)
@@ -1673,8 +1665,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                     value={separatedNamePattern}
                                     onFocus={(event) => {
                                         setActiveInputKey("separatedNamePattern");
-                                        activeInputRef.current =
-                                            event.target as HTMLInputElement;
+                                        activeInputRef.current = event.target as HTMLInputElement;
                                     }}
                                     onChange={(event: ChangeEvent<HTMLInputElement>) =>
                                         setSeparatedNamePattern(event.target.value)
@@ -1708,8 +1699,15 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                             </Flex>
 
                             {examplePath ? (
-                                <Text size="1" color="gray" style={{ userSelect: "text", wordBreak: "break-all" }}>
-                                    {tAny("export_dialog_example_path").replace("{path}", examplePath)}
+                                <Text
+                                    size="1"
+                                    color="gray"
+                                    style={{ userSelect: "text", wordBreak: "break-all" }}
+                                >
+                                    {tAny("export_dialog_example_path").replace(
+                                        "{path}",
+                                        examplePath,
+                                    )}
                                 </Text>
                             ) : null}
 

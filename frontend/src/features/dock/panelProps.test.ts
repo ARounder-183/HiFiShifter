@@ -12,7 +12,12 @@ import { describe, expect, test, vi } from "vitest";
 import dockReducer from "./dockSlice";
 import { setPanelProps, setFormPropsById } from "./dockApi";
 import type { GetState } from "./dockApi";
-import { getPanel, registerPanel, resetPanelRegistryForTests, setPanelComponent } from "./panelRegistry";
+import {
+    getPanel,
+    registerPanel,
+    resetPanelRegistryForTests,
+    setPanelComponent,
+} from "./panelRegistry";
 
 function makeStore() {
     return configureStore({

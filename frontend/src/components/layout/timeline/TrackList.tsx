@@ -1909,9 +1909,18 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                         value: "nsf_hifigan_onnx",
                                                                         label: "nsf-hifigan",
                                                                     },
-                                                                    { value: "world_dll", label: "world" },
-                                                                    { value: "vslib", label: "vslib" },
-                                                                    { value: "none", label: t("none") },
+                                                                    {
+                                                                        value: "world_dll",
+                                                                        label: "world",
+                                                                    },
+                                                                    {
+                                                                        value: "vslib",
+                                                                        label: "vslib",
+                                                                    },
+                                                                    {
+                                                                        value: "none",
+                                                                        label: t("none"),
+                                                                    },
                                                                 ]}
                                                             />
                                                         </div>

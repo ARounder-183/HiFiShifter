@@ -100,7 +100,15 @@ describe("排版角色层级", () => {
     test("字号阶梯覆盖到标题量级（否则作者只能拿最接近的值凑）", () => {
         expect(tokenPx("--qt-fs-2xl")).toBeGreaterThanOrEqual(18);
         // 阶梯必须单调递增，且每个角色都能在阶梯上找到落点
-        const ladder = ["--qt-fs-micro", "--qt-fs-xs", "--qt-fs-sm", "--qt-fs-md", "--qt-fs-lg", "--qt-fs-xl", "--qt-fs-2xl"].map(tokenPx);
+        const ladder = [
+            "--qt-fs-micro",
+            "--qt-fs-xs",
+            "--qt-fs-sm",
+            "--qt-fs-md",
+            "--qt-fs-lg",
+            "--qt-fs-xl",
+            "--qt-fs-2xl",
+        ].map(tokenPx);
         for (let i = 1; i < ladder.length; i += 1) {
             expect(ladder[i], `阶梯在 ${i} 处不递增`).toBeGreaterThan(ladder[i - 1]);
         }
@@ -108,7 +116,9 @@ describe("排版角色层级", () => {
 
     test("行高与字号成对给出（不留继承导致的行距跳变）", () => {
         for (const role of Object.keys(ROLE_FONT)) {
-            expect(ruleBody(`.hs-type-${role}`), `.hs-type-${role} 未给行高`).toMatch(/line-height:/);
+            expect(ruleBody(`.hs-type-${role}`), `.hs-type-${role} 未给行高`).toMatch(
+                /line-height:/,
+            );
         }
     });
 });

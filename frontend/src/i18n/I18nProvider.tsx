@@ -117,9 +117,7 @@ export function I18nProvider({ children }: PropsWithChildren) {
          * 否则一个面板注册 `ok` 就能改掉全应用的「确定」按钮。
          */
         const lookup = (key: MessageKey): string =>
-            dict[key] ??
-            lookupExtensionMessage(localeState, key) ??
-            messages["en-US"][key];
+            dict[key] ?? lookupExtensionMessage(localeState, key) ?? messages["en-US"][key];
         return {
             locale: localeState,
             setLocale: (nextLocale: Locale) => {

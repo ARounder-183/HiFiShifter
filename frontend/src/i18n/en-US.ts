@@ -271,7 +271,8 @@ export const enUS = {
     menu_paste_vocalshifter_clipboard: "Paste VocalShifter Clipboard",
     ctx_quick_export: "Quick Export",
     quick_export_title: "Quick Export Selected Clips",
-    quick_export_description: "Export the selected {count} clip only.|Export the selected {count} clips only.",
+    quick_export_description:
+        "Export the selected {count} clip only.|Export the selected {count} clips only.",
     quick_export_file_name: "File Name",
     quick_export_output_dir: "Output Folder",
     quick_export_browse: "Browse",
@@ -1307,7 +1308,8 @@ export const enUS = {
         "Extend & Overlap moves the left clip's tail forward by X and the right clip's head backward by X, creating a 2X-second overlap. Extensions are clamped to the clip source's actual length.",
     snap: "Snap",
     snap_grid_settings_title: "Snap/Grid Settings...",
-    snap_grid_settings_desc: "Control how clips snap to the grid, to selection markers, and to the cursor.",
+    snap_grid_settings_desc:
+        "Control how clips snap to the grid, to selection markers, and to the cursor.",
     snap_section_grid: "Grid",
     snap_grid_show_lines: "Show grid lines",
     snap_grid_spacing: "Grid spacing",
@@ -1801,13 +1803,17 @@ export const enUS = {
     status_fake_stereo_scan_rejected: "Fake-stereo scan rejected",
     status_fake_stereo_scan_foldable: "Fake-stereo: {m}/{n} foldable",
     status_fake_stereo_scan_folded: "Fake-stereo: {m}/{n} folded",
-    status_channel_scan_folded: "Folded {count} clip to mono automatically|Folded {count} clips to mono automatically",
-    status_channel_scan_pending: "{count} source unreadable, retried on next open|{count} sources unreadable, retried on next open",
+    status_channel_scan_folded:
+        "Folded {count} clip to mono automatically|Folded {count} clips to mono automatically",
+    status_channel_scan_pending:
+        "{count} source unreadable, retried on next open|{count} sources unreadable, retried on next open",
     status_importing: "Importing...",
-    status_fake_stereo_scan_no_source: "Fake-stereo: {count} take has no source|Fake-stereo: {count} takes have no source",
+    status_fake_stereo_scan_no_source:
+        "Fake-stereo: {count} take has no source|Fake-stereo: {count} takes have no source",
     status_fake_stereo_scan_no_clips: "Fake-stereo: the project has no clips",
     status_fake_stereo_scan_range_unmatched: "Fake-stereo: range matches no clip ({p} in project)",
-    status_fake_stereo_scan_no_takes: "Fake-stereo: {count} clip has no takes|Fake-stereo: {count} clips have no takes",
+    status_fake_stereo_scan_no_takes:
+        "Fake-stereo: {count} clip has no takes|Fake-stereo: {count} clips have no takes",
     status_fake_stereo_scan_nothing: "Fake-stereo: nothing to decide",
     status_take_channel_mode_rejected: "Take channel mode rejected",
 

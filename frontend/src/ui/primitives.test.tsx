@@ -107,7 +107,9 @@ const ITEMS: AppMenuItemSpec[] = [
 
 function press(key: string) {
     return act(async () => {
-        document.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+        document.dispatchEvent(
+            new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
+        );
     });
 }
 

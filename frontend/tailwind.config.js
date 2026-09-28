@@ -49,7 +49,7 @@ export default {
              * 都取 CSS 变量，使「同一语义只有一处取值来源」。新增样式请优先用
              * 这些，而不是 `h-[26px]` / `z-[9999]` 这类字面量。
              *
-                         */
+             */
             spacing: {
                 "qt-0": "var(--qt-space-0)",
                 "qt-1": "var(--qt-space-1)",

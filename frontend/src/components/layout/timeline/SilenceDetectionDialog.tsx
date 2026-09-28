@@ -229,9 +229,7 @@ export const SilenceDetectionDialog: React.FC<{
                                     ariaLabel={tAny(labelKey)}
                                     onChange={(next) => update({ [key]: next })}
                                 />
-                                <AppSliderReadout>
-                                    {Math.round(options[key])} ms
-                                </AppSliderReadout>
+                                <AppSliderReadout>{Math.round(options[key])} ms</AppSliderReadout>
                             </Flex>
                         </AppField>
                     </div>
@@ -320,10 +318,7 @@ export const SilenceDetectionDialog: React.FC<{
                     })}
                     {clipIds.length > 6 ? (
                         <Text size="1" className="text-qt-text-muted">
-                            {tAny("silence_more_clips").replace(
-                                "{n}",
-                                String(clipIds.length - 6),
-                            )}
+                            {tAny("silence_more_clips").replace("{n}", String(clipIds.length - 6))}
                         </Text>
                     ) : null}
                 </Flex>
