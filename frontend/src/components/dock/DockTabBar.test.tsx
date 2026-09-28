@@ -85,9 +85,7 @@ function seedLayout(store: ReturnType<typeof createTestStore>): void {
  */
 function Harness() {
     const node = useSelector((s: TestState) => s.dock.layout.tree) as DockTabsetNode;
-    return (
-        <DockTabBar node={node} onToggleFloat={() => {}} compact={false} tabPosition="top" />
-    );
+    return <DockTabBar node={node} onToggleFloat={() => {}} compact={false} tabPosition="top" />;
 }
 
 interface Mounted {
