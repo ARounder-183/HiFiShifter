@@ -27,6 +27,7 @@ import type { DockForm, DockRect } from "../../features/dock/dockTypes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { resolveFloatRect } from "../../features/dock/dockDropTarget";
 import { beginFloatDrag } from "./dockDragController";
+import { floatTitleBarActions } from "./floatTitleBar";
 import { useDockSlot } from "./useDockSlot";
 
 /** `geometry` 缺失（理论上不会发生）时的占位矩形，避免把 null 传进解析函数。 */
@@ -82,15 +83,12 @@ function DockFloatWindow({
 
     const definition = getPanel(form.panelId);
     const title = form.title ?? (definition ? tf(definition.titleKey) : form.panelId);
-    /** 本面板能否拆到独立窗口（见 `PanelDefinition.detachable`）。 */
-    const detachable = definition?.detachable === true;
     /**
-     * 本面板能否被拖拽停靠（见 `PanelDefinition.dockable`）。
-     *
-     * 直接进 `onTitlePointerDown` 的依赖，不绕 ref：它来自注册表，只在热更新时
-     * 变化，回调身份因此稳定；而渲染期写 ref 会违反 React Compiler 的引用规则。
+     * 标题栏动作矩阵：折叠 / 拆分 / 重停的可见性由注册表声明一次给出。
+     * `redock` 与拖拽停靠共用同一条 `dockable` 声明 —— 拖不进去的面板
+     * 也不能留一枚按钮绕道 dock 进去（见 `floatTitleBar.ts`）。
      */
-    const dockable = definition?.dockable ?? true;
+    const actions = floatTitleBarActions(definition);
     const doubleClickAction = useAppSelector((s) => s.dock.settings.doubleClickHeaderAction);
 
     /**
@@ -123,7 +121,7 @@ function DockFloatWindow({
                     formId: form.id,
                     panelId: form.panelId,
                     // 设置类面板（`dockable: false`）拖得动但停不进去。
-                    dockable,
+                    dockable: actions.redock,
                     geometry: dragGeometry,
                     dropSize,
                 });
@@ -188,7 +186,7 @@ function DockFloatWindow({
 
             startDragAndTrack(rect);
         },
-        [dispatch, form.id, form.panelId, rect, geometry, dockable],
+        [dispatch, form.id, form.panelId, rect, geometry, actions.redock],
     );
 
     const onResizePointerDown = useCallback(
@@ -329,7 +327,7 @@ function DockFloatWindow({
                 >
                     {minimized ? "\u25B2" : "\u25BC"}
                 </button>
-                {detachable ? (
+                {actions.detach === "available" ? (
                     <button
                         type="button"
                         className="hs-dock-tabbar-action"
@@ -339,7 +337,7 @@ function DockFloatWindow({
                     >
                         <ExternalLinkIcon />
                     </button>
-                ) : (
+                ) : actions.detach === "unsupported" ? (
                     // 不可拆的面板给出**解释**而不是一个点不动的按钮：时间轴与
                     // 参数编辑器带着 WebGL 上下文与波形缓存，跨窗口必须重新挂载，
                     // 代价是数秒卡顿，因此不支持。
@@ -351,27 +349,29 @@ function DockFloatWindow({
                     >
                         <ExternalLinkIcon />
                     </span>
-                )}
-                <button
-                    type="button"
-                    className="hs-dock-tabbar-action"
-                    data-tooltip={tf("dock_redock")}
-                    aria-label={tf("dock_redock")}
-                    onClick={() => {
-                        // 现读 store 而不是把树存进 ref：渲染期写 ref 违反
-                        // React Compiler 的引用规则，而 store 随时可读。
-                        const main = findMainTabset(store.getState().dock.layout);
-                        if (!main) return;
-                        dispatch(
-                            dockFormTo({
-                                formId: form.id,
-                                target: { kind: "tab", tabsetId: main.id },
-                            }),
-                        );
-                    }}
-                >
-                    <EnterIcon />
-                </button>
+                ) : null}
+                {actions.redock ? (
+                    <button
+                        type="button"
+                        className="hs-dock-tabbar-action"
+                        data-tooltip={tf("dock_redock")}
+                        aria-label={tf("dock_redock")}
+                        onClick={() => {
+                            // 现读 store 而不是把树存进 ref：渲染期写 ref 违反
+                            // React Compiler 的引用规则，而 store 随时可读。
+                            const main = findMainTabset(store.getState().dock.layout);
+                            if (!main) return;
+                            dispatch(
+                                dockFormTo({
+                                    formId: form.id,
+                                    target: { kind: "tab", tabsetId: main.id },
+                                }),
+                            );
+                        }}
+                    >
+                        <EnterIcon />
+                    </button>
+                ) : null}
                 <button
                     type="button"
                     className="hs-dock-tabbar-action"
