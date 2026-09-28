@@ -1,7 +1,7 @@
 // hs-interaction-exempt: 标尺行内的内联控件（尺寸与行高耦合、随标尺滚动重建），已有正确的原生非被动滚轮接线；表单尺寸的原语不适用。
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { registerDragAbort } from "./gestureFocusGuard";
-import { Checkbox, Flex, Select, Text, TextField } from "@radix-ui/themes";
+import { Checkbox, Flex, Select, TextField } from "@radix-ui/themes";
 import { shallowEqual } from "react-redux";
 import type { GridSize, TimelineSnapSettings } from "../../../features/session/sessionTypes";
 import type { ScaleLike } from "../../../utils/musicalScales";
@@ -362,9 +362,7 @@ function TempoPointDialog({
                             }}
                             style={{ width: 90 }}
                         />
-                        <Text size="1" className="text-qt-text-muted">
-                            {t("tempo_map_bpm_range")}
-                        </Text>
+                        <span className="hs-type-caption">{t("tempo_map_bpm_range")}</span>
                     </Flex>
                 </AppField>
                 <AppField label={t("tempo_map_time_signature")}>
@@ -383,7 +381,7 @@ function TempoPointDialog({
                             }}
                             style={{ width: 48 }}
                         />
-                        <Text size="1">/</Text>
+                        <span className="hs-type-label">/</span>
                         <Select.Root
                             size="1"
                             value={String(denominator)}
@@ -425,9 +423,9 @@ function TempoPointDialog({
                             disabled={isFirst}
                             onCheckedChange={(checked) => setSigFollow(checked === true)}
                         />
-                        <Text size="1" className="text-qt-text-muted">
+                        <span className="hs-type-caption">
                             {t("tempo_map_ts_inherit")} ({previousTimeSignatureLabel})
-                        </Text>
+                        </span>
                     </Flex>
                 ) : null}
                 <AppField label={t("tempo_map_scale")}>

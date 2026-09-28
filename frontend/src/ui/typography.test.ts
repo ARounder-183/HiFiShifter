@@ -242,7 +242,6 @@ describe("排版角色层级", () => {
             "src/components/layout/ActionBar.tsx",
             "src/components/layout/ChannelImportDialog.tsx",
             "src/components/layout/CustomScaleDialog.tsx",
-            "src/components/layout/FileBrowserPanel.tsx",
             "src/components/layout/ImportProjectDialog.tsx",
             "src/components/layout/KeybindingsDialog.tsx",
             "src/components/layout/PianoRollPanel.tsx",
@@ -251,10 +250,6 @@ describe("排版角色层级", () => {
             "src/components/layout/TimelineDisplaySettingsDialog.tsx",
             "src/components/layout/notebook/NotebookDialogs.tsx",
             "src/components/layout/timeline/TempoMapCornerButton.tsx",
-            "src/components/layout/timeline/TempoMapRulerRow.tsx",
-            "src/components/layout/timeline/TrackList.tsx",
-            "src/components/layout/timeline/clip/ClipFormantToolWindow.tsx",
-            "src/components/layout/timeline/kernel/KernelUnavailableNotice.tsx",
         ]);
         const offenders: string[] = [];
         const stack: string[] = ["src"];

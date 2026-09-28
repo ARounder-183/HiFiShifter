@@ -1,5 +1,6 @@
 import React from "react";
-import { Button, Flex, Switch, Text } from "@radix-ui/themes";
+import { Flex, Switch } from "@radix-ui/themes";
+import { AppButton } from "../../../../ui";
 import { useAppDispatch, useAppSelector } from "../../../../app/hooks";
 import type {
     ClipFormantAnalysisState,
@@ -261,16 +262,12 @@ export const ClipFormantToolWindow: React.FC<{
                     <div
                         className={`h-2.5 w-2.5 rounded-full ${status === "failed" ? "bg-qt-danger-border" : status === "rebuilding" ? "bg-qt-warning-border" : draft.enabled ? "bg-qt-highlight" : "bg-qt-border"}`}
                     />
-                    <Text size="2" weight="medium">
-                        {t("clip_formant_title")}
-                    </Text>
-                    <Text size="1" color="gray" className="truncate">
-                        {clip.name}
-                    </Text>
+                    <span className="hs-type-label font-medium">{t("clip_formant_title")}</span>
+                    <span className="hs-type-caption truncate">{clip.name}</span>
                 </Flex>
-                <Button size="1" variant="ghost" color="gray" onClick={onClose}>
+                <AppButton size="sm" onClick={onClose}>
                     {t("close")}
-                </Button>
+                </AppButton>
             </Flex>
 
             <Flex direction="column" gap="3" className="bg-qt-base px-3 py-3">
@@ -281,17 +278,11 @@ export const ClipFormantToolWindow: React.FC<{
                             disabled={status === "failed"}
                             onCheckedChange={(checked) => updateDraft({ enabled: checked })}
                         />
-                        <Text size="2">{t("clip_formant_enabled")}</Text>
+                        <span className="hs-type-label">{t("clip_formant_enabled")}</span>
                     </Flex>
-                    <Button
-                        size="1"
-                        variant="soft"
-                        color="gray"
-                        disabled={!draft.enabled}
-                        {...bypassHandlers}
-                    >
+                    <AppButton size="sm" disabled={!draft.enabled} {...bypassHandlers}>
                         {t("clip_formant_bypass")}
-                    </Button>
+                    </AppButton>
                 </Flex>
 
                 <div className="rounded-lg border border-qt-border bg-qt-panel p-2">
@@ -311,7 +302,7 @@ export const ClipFormantToolWindow: React.FC<{
                         }
                     />
                     <Flex justify="between" mt="2">
-                        <Text size="1" color="gray">
+                        <span className="hs-type-caption">
                             {t("clip_formant_source")}: F1{" "}
                             {analysis?.status === "ready" && analysis.sourceF1Hz > 0
                                 ? Math.round(analysis.sourceF1Hz)
@@ -321,17 +312,17 @@ export const ClipFormantToolWindow: React.FC<{
                                 ? Math.round(analysis.sourceF2Hz)
                                 : "—"}{" "}
                             Hz
-                        </Text>
-                        <Text size="1" color="gray">
+                        </span>
+                        <span className="hs-type-caption">
                             {t("clip_formant_target")}: F1 {Math.round(draft.targetF1Hz)} / F2{" "}
                             {Math.round(draft.targetF2Hz)} Hz
-                        </Text>
+                        </span>
                     </Flex>
                 </div>
 
                 <div className="rounded-lg border border-qt-border bg-qt-panel px-3 py-2">
                     <Flex align="center" justify="between" mb="2">
-                        <Text size="2">{t("clip_formant_strength")}</Text>
+                        <span className="hs-type-label">{t("clip_formant_strength")}</span>
                         <AppNumberField
                             value={strengthPercent}
                             unit="percent"
@@ -355,15 +346,13 @@ export const ClipFormantToolWindow: React.FC<{
                     />
                 </div>
 
-                <Text size="1" className={statusClassName}>
-                    {statusText}
-                </Text>
+                <span className={`hs-type-caption ${statusClassName ?? ""}`}>{statusText}</span>
                 {analysis?.status === "ready" &&
                 (analysis.message === "no_voiced_frames" ||
                     analysis.voicedRatio < VOICED_RATIO_HINT_THRESHOLD) ? (
-                    <Text size="1" className="text-qt-warning-text">
+                    <span className="hs-type-caption" style={{ color: "var(--qt-warning-text)" }}>
                         {t("clip_formant_no_voiced")}
-                    </Text>
+                    </span>
                 ) : null}
             </Flex>
         </div>

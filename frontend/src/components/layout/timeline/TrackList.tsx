@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "re
 import { registerDragAbort } from "./gestureFocusGuard";
 import { formatEditNumber } from "./math";
 import { measureTextWidth } from "./runtime/timelineCanvasStyle";
-import { Flex, Box, Text, IconButton } from "@radix-ui/themes";
+import { Flex, Box, IconButton } from "@radix-ui/themes";
 import { Cross2Icon, PlusIcon } from "@radix-ui/react-icons";
 import { shallowEqual } from "react-redux";
 import type { TrackInfo, TrackMeterInfo } from "../../../features/session/sessionTypes";
@@ -92,10 +92,8 @@ const SlotTimeText = React.memo(function SlotTimeText({
 }) {
     const parts = React.useMemo(() => splitDigitRuns(text), [text]);
     return (
-        <Text
-            size="2"
-            weight="medium"
-            className={selectable ? `${className ?? ""} cursor-text` : className}
+        <span
+            className={`hs-type-body font-medium ${selectable ? `${className ?? ""} cursor-text` : (className ?? "")}`}
             style={
                 selectable
                     ? {
@@ -144,7 +142,7 @@ const SlotTimeText = React.memo(function SlotTimeText({
                     <span key={index}>{part.text}</span>
                 ),
             )}
-        </Text>
+        </span>
     );
 });
 
@@ -286,15 +284,13 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
             >
                 <SlotTimeText text={maxLabel} digitWidthPx={digitWidth} className="tabular-nums" />
             </span>
-            <Text
+            <span
                 ref={digitProbeRef}
-                size="2"
-                weight="medium"
                 aria-hidden
-                className="absolute invisible whitespace-nowrap tabular-nums"
+                className="hs-type-body font-medium absolute invisible whitespace-nowrap tabular-nums"
             >
                 0
-            </Text>
+            </span>
             <SlotTimeText
                 text={formatted.combined}
                 digitWidthPx={digitWidth}
@@ -1334,9 +1330,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                 className="border-b border-qt-border px-2 flex items-center justify-between gap-2 bg-qt-window shadow-sm z-10 relative"
                 style={{ height: headerHeight }}
             >
-                <Text size="2" weight="bold" color="gray" className="shrink-0">
-                    {t("common_tracks")}
-                </Text>
+                <span className="hs-type-muted font-semibold shrink-0">{t("common_tracks")}</span>
                 <TrackHeaderPlayheadTime />
                 {/* 速度映射小按钮（右下角）：显示/创建 或 清空/隐藏。 */}
                 <TempoMapCornerButton />
@@ -1857,10 +1851,8 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 autoFocus
                                                             />
                                                         ) : (
-                                                            <Text
-                                                                size="2"
-                                                                weight="medium"
-                                                                className={`text-qt-text truncate pr-2 ${depth > 0 ? "opacity-90" : ""} cursor-text select-none`}
+                                                            <span
+                                                                className={`hs-type-body font-medium text-qt-text truncate pr-2 ${depth > 0 ? "opacity-90" : ""} cursor-text select-none`}
                                                                 onPointerDown={(e) =>
                                                                     e.stopPropagation()
                                                                 }
@@ -1874,7 +1866,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 }}
                                                             >
                                                                 {track.name}
-                                                            </Text>
+                                                            </span>
                                                         )}
                                                     </Flex>
                                                     {isRoot && composeEnabled && onAlgoChange ? (
@@ -2045,28 +2037,24 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 }
                                                             />
                                                         ) : (
-                                                            <Text
-                                                                size="1"
-                                                                color={
-                                                                    Math.abs(gainToDb(volume)) <
-                                                                    0.05
-                                                                        ? "iris"
-                                                                        : "gray"
-                                                                }
+                                                            <span
                                                                 /* 0.0 dB 用强调色标记"默认增益"，
-                                                                   highContrast 保证小字在面板底色上可读 */
-                                                                highContrast={
-                                                                    Math.abs(gainToDb(volume)) <
-                                                                    0.05
-                                                                }
-                                                                className="leading-none tabular-nums select-none"
+                                                                   其余保持弱化色 */
+                                                                style={{
+                                                                    color:
+                                                                        Math.abs(gainToDb(volume)) <
+                                                                        0.05
+                                                                            ? "var(--qt-accent)"
+                                                                            : "var(--qt-text-muted)",
+                                                                }}
+                                                                className="hs-type-caption leading-none tabular-nums select-none"
                                                                 data-track-gain-value
                                                                 onPointerDown={(e) =>
                                                                     e.stopPropagation()
                                                                 }
                                                             >
                                                                 {formatGainLabel(volume)}
-                                                            </Text>
+                                                            </span>
                                                         )}
                                                     </Flex>
                                                 </div>
@@ -2161,13 +2149,16 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                     justify="between"
                                                     className="h-full pt-1 pb-0"
                                                 >
-                                                    <Text
-                                                        size="1"
-                                                        color={clipped ? "red" : "gray"}
-                                                        className="leading-none tabular-nums"
+                                                    <span
+                                                        className="hs-type-caption leading-none tabular-nums"
+                                                        style={{
+                                                            color: clipped
+                                                                ? "var(--qt-danger-text)"
+                                                                : "var(--qt-text-muted)",
+                                                        }}
                                                     >
                                                         {formatPeakLabel(maxPeakLinear, clipped)}
-                                                    </Text>
+                                                    </span>
                                                     <div
                                                         className="relative h-full w-full"
                                                         style={{
@@ -2212,7 +2203,8 @@ const TrackListInner: React.FC<TrackListProps> = ({
                         onAddTrack();
                     }}
                 >
-                    <PlusIcon className="mr-1" /> <Text size="1">{t("track_add")}</Text>
+                    <PlusIcon className="mr-1" />{" "}
+                    <span className="hs-type-label">{t("track_add")}</span>
                 </Flex>
             </div>
 

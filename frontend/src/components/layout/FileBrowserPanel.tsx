@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Flex, Text, IconButton, TextField, ScrollArea } from "@radix-ui/themes";
+import { Flex, IconButton, TextField, ScrollArea } from "@radix-ui/themes";
 import {
     Cross2Icon,
     FileIcon,
@@ -824,9 +824,9 @@ export const FileBrowserPanel: React.FC = () => {
                 </Flex>
 
                 {hasRegexError && (
-                    <Text size="1" color="red" mt="1">
+                    <span className="hs-type-caption" style={{ color: "var(--qt-danger-text)" }}>
                         {tf("fb_regex_error")}
-                    </Text>
+                    </span>
                 )}
             </div>
 
@@ -846,14 +846,9 @@ export const FileBrowserPanel: React.FC = () => {
                     >
                         <ChevronUpIcon />
                     </IconButton>
-                    <Text
-                        size="1"
-                        color="gray"
-                        className="truncate flex-1"
-                        data-tooltip={fb.currentPath}
-                    >
+                    <span className="hs-type-caption truncate flex-1" data-tooltip={fb.currentPath}>
                         {fb.currentPath}
-                    </Text>
+                    </span>
                 </Flex>
             )}
 
@@ -1042,31 +1037,31 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
 
                 {/* 文件名 + 路径提示 */}
                 <div className="flex flex-col min-w-0 flex-1">
-                    <Text
-                        size="1"
-                        className={isProject ? "truncate text-amber-300" : "truncate"}
+                    <span
+                        className={`hs-type-label ${isProject ? "truncate text-amber-300" : "truncate"}`}
                         data-tooltip={entry.name}
                     >
                         {entry.name}
                         {entry.isDir ? "/" : ""}
-                    </Text>
+                    </span>
                     {pathHint && (
-                        <Text
-                            size="1"
-                            color="gray"
-                            className="truncate leading-none"
+                        <span
+                            className="hs-type-caption truncate leading-none"
                             style={{ fontSize: "var(--qt-fs-micro)" }}
                         >
                             {pathHint}
-                        </Text>
+                        </span>
                     )}
                 </div>
 
                 {/* 右侧信息 */}
                 {!entry.isDir && entry.size != null && (
-                    <Text size="1" color="gray" className="shrink-0 text-qt-micro">
+                    <span
+                        className="hs-type-caption shrink-0"
+                        style={{ fontSize: "var(--qt-fs-micro)" }}
+                    >
                         {formatSize(entry.size)}
-                    </Text>
+                    </span>
                 )}
 
                 {/* 音频播放指示 */}
