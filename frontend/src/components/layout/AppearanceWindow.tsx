@@ -1344,6 +1344,18 @@ export const AppearanceWindow: React.FC = () => {
                                             )}
                                         </div>
 
+                                        {/*
+                                         * 【这里的两层滚动是**有意**的】本页是设置页：
+                                         * 外层是页面滚动（Tab 内容比视口高），内层是字体
+                                         * 列表的有界滚动（字体可能有几百项，展开会把这
+                                         * 一页撑到几千像素，把下面的颜色设置挤到很远处）。
+                                         * 两条滚动条各自都有用，用户不会"滚下去看不到
+                                         * 东西"。
+                                         *
+                                         * 这与对话框里那种"内层滚下去什么也看不到"的嵌套
+                                         * 不同 —— 那种已按"外层不滚、内层滚"改掉（见
+                                         * AppDialog 的滚动契约）。这里保留。
+                                         */}
                                         <div className="max-h-[320px] overflow-y-auto rounded border border-qt-border bg-qt-base p-1 custom-scrollbar">
                                             {filteredFonts.length > 0 ? (
                                                 filteredFonts.map((f) => {

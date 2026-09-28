@@ -1267,7 +1267,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     },
                 ]}
             >
-                <AppForm labelWidth="lg">
+                {/* 让表单填满 body 高度，好把下面的"目标"列表变成唯一的滚动区
+                    （见该列表上的注释）。 */}
+                <AppForm labelWidth="lg" className="h-full min-h-0">
                     <AppField label={tf("export_dialog_mode")}>
                         <AppSelect
                             value={mode}
@@ -1707,7 +1709,14 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                 </Text>
                             ) : null}
 
-                            <div className="rounded border border-qt-border bg-qt-base p-2 max-h-[240px] overflow-y-auto">
+                            {/*
+                             * 外层不滚、内层滚：对话框 body 本身就是
+                             * `overflow-y-auto`，这里再叠一个 `max-h-[240px]` 的
+                             * 滚动盒，表单变高时就会出现两条竖直滚动条。改为参与
+                             * 表单的 flex 布局（AppForm 已是 flex 列），让它吃掉
+                             * 剩余高度。
+                             */}
+                            <div className="min-h-0 flex-1 overflow-y-auto rounded border border-qt-border bg-qt-base p-2">
                                 <Text size="2" className="font-medium">
                                     {tf("export_dialog_targets")}
                                 </Text>

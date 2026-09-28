@@ -79,22 +79,29 @@ export function NotebookAttachmentsDialog({
                 },
             ]}
         >
-            <div className="mt-2 min-h-0 flex-1 overflow-auto">
-                {entries.length === 0 ? (
-                    <Text size="1" color="gray">
-                        {t("notebook_attachments_empty")}
-                    </Text>
-                ) : (
-                    entries.map((entry) => (
-                        <AttachmentRow
-                            key={entry.id}
-                            entry={entry}
-                            used={usedAssetIds.has(entry.id)}
-                            onChanged={onChanged}
-                            notify={notify}
-                        />
-                    ))
-                )}
+            {/*
+             * 附件列表是这个对话框唯一的滚动区：`flex-1 min-h-0` 需要 body 是
+             * flex 列才生效，否则 `flex-1` 是空转（子元素高度仍由内容决定，
+             * 结果是 body 在滚、这层 `overflow-auto` 永不触发）。这里把外层补上。
+             */}
+            <div className="flex h-full min-h-0 flex-col pt-2">
+                <div className="min-h-0 flex-1 overflow-auto">
+                    {entries.length === 0 ? (
+                        <Text size="1" color="gray">
+                            {t("notebook_attachments_empty")}
+                        </Text>
+                    ) : (
+                        entries.map((entry) => (
+                            <AttachmentRow
+                                key={entry.id}
+                                entry={entry}
+                                used={usedAssetIds.has(entry.id)}
+                                onChanged={onChanged}
+                                notify={notify}
+                            />
+                        ))
+                    )}
+                </div>
             </div>
         </AppDialog>
     );

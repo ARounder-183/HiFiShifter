@@ -420,6 +420,37 @@ describe("抽象层不能空转（采用率）", () => {
         }
     });
 
+    test("没有「有界滚动盒」造成的嵌套滚动条", () => {
+        /*
+         * 【为什么禁止】`max-h-[240px] overflow-y-auto` 这种写法等于在页面/对话框里
+         * 再嵌一个滚动区。用户已经报过两次同一个现象：**两层竖直滚动条，而里面那条
+         * 滚下去什么也看不到**（内层内容其实没有溢出，只是它的 `max-h` 比可用高度小）。
+         *
+         * 正确做法是让这一层参与外层的 flex 布局（`min-h-0 flex-1`），使外层永不溢出，
+         * 只留一条滚动条 —— 对话框的滚动契约见 `src/index.css` 的 `.app-dialog` 注释。
+         *
+         * 允许清单里的是**例外且有意**的一处：设置页里的字体列表。外层是页面滚动、
+         * 内层是有界的列表滚动，两条都各自有用（见该处注释）。
+         */
+        const ALLOWED = new Set([join("src", "components", "layout", "AppearanceWindow.tsx")]);
+        const BOUNDED_SCROLL =
+            /["'`](?=[^"'`]*max-h-\[\d+px\])(?=[^"'`]*overflow-(?:x|y)?-auto)[^"'`]*["'`]/g;
+
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.tsx?$/)) {
+            if (ALLOWED.has(file)) continue;
+            // 保留字符串（类名在字符串里）、剥掉注释（否则解释性文字会被误判）。
+            const source = stripCommentsAndStrings(readFileSync(file, "utf8"), true);
+            const hits = source.match(BOUNDED_SCROLL) ?? [];
+            if (hits.length > 0) offenders.push(`${file}: ${hits.length} 处`);
+        }
+        expect(
+            offenders,
+            "有界滚动盒会和外层滚动条叠成两层。请改为 `min-h-0 flex-1` 参与外层 flex 布局，" +
+                "让外层不溢出（确需保留两层时加进本测试的 ALLOWED 并写明理由）",
+        ).toEqual([]);
+    });
+
     test("排版角色在 src/ui 之外的采用率只增不减（棘轮）", () => {
         /*
          * 【目标与现状】目标是 ≥ 50（把 130 处 `<Text size="N">` 收敛到角色层）。
