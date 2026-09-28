@@ -26,5 +26,5 @@ export function ParamDataLoadingChip() {
 
     if (!loading) return null;
 
-    return <AppStatusChip tone="accent">{t("loading")}</AppStatusChip>;
+    return <AppStatusChip tone="accent">{t("common_loading")}</AppStatusChip>;
 }

@@ -2,11 +2,11 @@
  * 词典完整性门禁。
  *
  * 【为什么必须有】审查结论是：**键结构严丝合缝，文本风格完全失控**。
- * 1638 键 × 5 语系的键集合、占位符集合都一致（这靠 `tsc` 的
+ * 1649 键 × 5 语系的键集合、占位符集合都一致（这靠 `tsc` 的
  * `MessageKey = keyof typeof enUS` 强制），但除此之外**没有任何检查**：
  *
  *   - 213 个测试文件里只有 2 个涉及 i18n，且 `historyOpLabels.test.ts`
- *     只覆盖 47/1638 键（且它是在一次真实的五语系回归之后才补上的）；
+ *     只覆盖 47/1649 键（且它是在一次真实的五语系回归之后才补上的）；
  *   - `eslint.config.js` 没有任何 i18n 规则；
  *   - 于是 `param_btn_breath` 与 `param_btn_breathiness` 在 en-US / ja-JP / ko-KR
  *     里同为 `"BRE"` —— 参数编辑器出现两个标签完全相同的按钮，长期无人发现；
@@ -14,7 +14,7 @@
  *
  * 这些问题类型检查抓不到（`"BRE"` 是合法字符串）。本文件把它们变成
  * **会失败的测试**，因为上一轮的经验是：只靠人肉 review 的约定一定会漂移
- * ——词典里 1611/1638 个键在各语系文件中的索引位置不同（最大位移 1482 位），
+ * ——词典里绝大多数键在各语系文件中的索引位置不同（当时实测最大位移 1482 位），
  * 人肉 diff 根本不现实。
  */
 import { describe, expect, test } from "vitest";
@@ -78,6 +78,49 @@ describe("词典结构", () => {
                 expect(actual, `${locale}.${key} 占位符不一致`).toEqual(expected);
             }
         }
+    });
+});
+
+describe("键命名规范", () => {
+    /*
+     * 【为什么需要】键结构此前只被"五语系键集合一致"守着 —— 那只保证**一致**，
+     * 不保证**成体系**。实测有 32 个裸键（`pitch` / `none` / `loading` …）与
+     * 7 个 camelCase 键（`kb_preset_vegasPro` / `render_cache_skip_tooShort` …）：
+     * 裸键没有命名空间，读者无法从键名判断它属于哪个界面；camelCase 与其余
+     * 1600 多个 snake_case 键并存，两种风格都"看起来官方"。
+     *
+     * 约定：**snake_case + 命名空间前缀**。只有三个通用确认词可以裸名 ——
+     * 它们本身就是"任何界面都用的那三个词"，加前缀反而不便。
+     */
+    const BARE_ALLOWED = new Set(["ok", "cancel", "close"]);
+
+    test("键名一律 snake_case", () => {
+        const offenders = referenceKeys.filter((key) => !/^[a-z][a-z0-9_]*$/.test(key));
+        expect(
+            offenders.length === 0
+                ? []
+                : ["以下键名不是 snake_case：", ...offenders.map((k) => `  ${k}`)].join("\n"),
+        ).toEqual([]);
+    });
+
+    test("键名一律带命名空间前缀（通用确认词除外）", () => {
+        const offenders = referenceKeys.filter(
+            (key) => !key.includes("_") && !BARE_ALLOWED.has(key),
+        );
+        expect(
+            offenders.length === 0
+                ? []
+                : [
+                      "以下键没有命名空间前缀，读者无法判断它属于哪个界面：",
+                      ...offenders.map((k) => `  ${k}`),
+                  ].join("\n"),
+        ).toEqual([]);
+    });
+
+    test("裸名豁免恰好只有那三个通用确认词", () => {
+        // 豁免不能悄悄扩大：这条断言让"再加一个裸键"必须同时改测试。
+        const bare = referenceKeys.filter((key) => !key.includes("_"));
+        expect([...bare].sort()).toEqual([...BARE_ALLOWED].sort());
     });
 });
 

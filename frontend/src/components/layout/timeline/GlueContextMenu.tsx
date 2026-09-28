@@ -24,7 +24,7 @@ export const GlueContextMenu: React.FC<{
             x={x}
             y={y}
             onClose={onClose ?? noop}
-            items={[{ key: "glue", label: t("glue"), disabled, onSelect: onGlue }]}
+            items={[{ key: "glue", label: t("common_glue"), disabled, onSelect: onGlue }]}
         />
     );
 };

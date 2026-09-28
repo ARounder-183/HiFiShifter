@@ -991,7 +991,7 @@ export const ClipContextMenu: React.FC<{
                     <SubMenu label={t("ctx_group")}>
                         {isMulti && !hasGroup && (
                             <MenuItem
-                                label={t("group")}
+                                label={t("common_group")}
                                 shortcut={groupShortcut}
                                 onClick={() => {
                                     onGroup?.(ids);
@@ -1001,7 +1001,7 @@ export const ClipContextMenu: React.FC<{
                         )}
                         {hasGroup && (
                             <MenuItem
-                                label={t("ungroup")}
+                                label={t("common_ungroup")}
                                 shortcut={ungroupShortcut}
                                 onClick={() => {
                                     onUngroup?.(ids);
@@ -1011,7 +1011,7 @@ export const ClipContextMenu: React.FC<{
                         )}
                         {isMulti && (
                             <MenuItem
-                                label={t("glue")}
+                                label={t("common_glue")}
                                 disabled={glueDisabled}
                                 onClick={() => {
                                     onGlue(ids);

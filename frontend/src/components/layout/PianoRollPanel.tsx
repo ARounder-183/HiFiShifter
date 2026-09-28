@@ -1949,7 +1949,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             ? t("child_pitch_offset_cents_label")
             : editParam === childPitchOffsetDegreesParam
               ? t("child_pitch_offset_degrees_label")
-              : t("pitch");
+              : t("common_pitch");
 
     // 声码器参数描述符（由 algo 动态定制面板）
     const [processorParams, setProcessorParams] = useState<ProcessorParamDescriptor[]>([]);
@@ -6952,7 +6952,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             active={s.toolModeGroup === "select"}
                             // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                             emphasis="accent"
-                            tooltip={t("select")}
+                            tooltip={t("common_select")}
                             tabIndex={-1}
                             onClick={() => dispatch(setToolMode("select"))}
                             icon={<CursorArrowIcon />}
@@ -7653,7 +7653,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         ) : (
                             <ParamToolbarPill
                                 label={t("param_btn_pitch")}
-                                labelTooltip={t("pitch")}
+                                labelTooltip={t("common_pitch")}
                                 active={editParam === "pitch"}
                                 onSelect={() => dispatch(setEditParam("pitch"))}
                                 eyeMode={
@@ -7964,7 +7964,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     { value: "nsf_hifigan_onnx", label: "nsf-hifigan" },
                                     { value: "world_dll", label: "world" },
                                     { value: "vslib", label: "vslib" },
-                                    { value: "none", label: t("none") },
+                                    { value: "none", label: t("common_none") },
                                 ]}
                             />
                         </Flex>

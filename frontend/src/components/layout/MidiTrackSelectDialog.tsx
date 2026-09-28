@@ -748,7 +748,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 {loading && (
                     <Flex justify="center" py="4">
                         <Text size="2" color="gray">
-                            {tf("loading")}
+                            {tf("common_loading")}
                         </Text>
                     </Flex>
                 )}

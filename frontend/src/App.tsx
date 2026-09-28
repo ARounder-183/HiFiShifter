@@ -4182,7 +4182,7 @@ function AppInner() {
                     <ParamDataLoadingChip />
                     {rendering.active ? (
                         <AppStatusChip tone="accent">
-                            {t("rendering")}
+                            {t("common_rendering")}
                             {rendering.progress != null
                                 ? ` ${Math.round(rendering.progress * 100)}%`
                                 : ""}

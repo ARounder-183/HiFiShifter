@@ -792,7 +792,7 @@ export function ActionBar() {
                     )}
                 </Box>
                 <Text size="1" className="text-qt-text-muted">
-                    {t("bpm")}:
+                    {t("common_bpm")}:
                 </Text>
                 <TextField.Root
                     ref={attachBpmWheel}
@@ -968,7 +968,7 @@ export function ActionBar() {
                 </Flex>
 
                 <Text size="1" className="text-qt-text-muted">
-                    {t("grid")}:
+                    {t("common_grid")}:
                 </Text>
                 <Select.Root
                     value={s.grid}
@@ -1543,7 +1543,7 @@ export function ActionBar() {
                     active={notebookVisible}
                     // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                     emphasis="accent"
-                    tooltip={t("notebook")}
+                    tooltip={t("common_notebook")}
                     onClick={() => togglePanelVisible(dispatch, store.getState, PANEL_NOTEBOOK)}
                     icon={<Pencil1Icon />}
                 />
@@ -1633,9 +1633,9 @@ export function ActionBar() {
                     active={effectiveSnapVisual}
                     // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                     emphasis="accent"
-                    tooltip={`${tf("snap")}${
+                    tooltip={`${tf("common_snap")}${
                         snapGestureActive && snapToggleHeld
-                            ? ` · ${tf("snap")}: ${tf("snap_toggle_inverted")}`
+                            ? ` · ${tf("common_snap")}: ${tf("snap_toggle_inverted")}`
                             : ""
                     }`}
                     tabIndex={-1}
@@ -2039,7 +2039,7 @@ function RippleModeButton({
                 active={mode !== "off"}
                 // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                 emphasis="accent"
-                tooltip={(tf(`ripple_tooltip_${mode}`) as string) ?? tf("ripple")}
+                tooltip={(tf(`ripple_tooltip_${mode}`) as string) ?? tf("common_ripple")}
                 tabIndex={-1}
                 onClick={onCycle}
                 onContextMenu={(e) => {

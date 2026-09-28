@@ -348,7 +348,7 @@ function TempoPointDialog({
             ]}
         >
             <AppForm>
-                <AppField label={t("bpm")}>
+                <AppField label={t("common_bpm")}>
                     <Flex gap="2" align="center">
                         <TextField.Root
                             size="1"

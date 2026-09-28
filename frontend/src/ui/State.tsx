@@ -85,7 +85,7 @@ export function AppBusy({ label, layout = "inline", size = "sm", className }: Ap
         <span
             role="status"
             aria-live="polite"
-            aria-label={label == null ? t("loading") : undefined}
+            aria-label={label == null ? t("common_loading") : undefined}
             className={cx(
                 "inline-flex items-center gap-2 text-qt-text-muted",
                 layout === "block" && "w-full justify-center px-3 py-4",

@@ -26,12 +26,35 @@ import { canonicalKeyFromEvent } from "../../features/keybindings/keybindingMatc
 import { useShortcutSuppression } from "../../ui/shortcutScope";
 import { AppDialog } from "../../ui/Dialog";
 import { AppSelect } from "../../ui";
+import type { MessageKey } from "../../i18n/messages";
 import {
     KEYBINDING_PRESET_SELECTION_IDS,
     KEYBINDING_PRESETS,
     isKeybindingPresetId,
     type KeybindingPresetSelectionId,
 } from "../../features/keybindings/keybindingPresets";
+
+/**
+ * 预设名 → 词典键的**显式**映射。
+ *
+ * 【为什么不用 `kb_preset_${presetId}` 模板拼接】预设 id 是运行期标识符
+ * （`spaceReturnPlayhead` / `vegasPro` / `vocalShifter`…），它们会被写进用户设置，
+ * 不能为了迎合词典的 snake_case 约定而改名 —— 改了会丢用户的预设选择。反过来，
+ * 用模板拼键名意味着**词典里少一个键也不会报错**：`tf` 拿到一个不存在的键会原样
+ * 返回键名，界面上就出现 `kb_preset_vegasPro` 这样的英文键。
+ *
+ * 写成显式表后，两个方向都被类型检查守住：表必须覆盖全部 id（`Record<...>`），
+ * 值必须是真实存在的词典键（`MessageKey`）。
+ */
+const PRESET_LABEL_KEY: Record<KeybindingPresetSelectionId, MessageKey> = {
+    custom: "kb_preset_custom",
+    default: "kb_preset_default",
+    spaceReturnPlayhead: "kb_preset_space_return_playhead",
+    touchpad: "kb_preset_touchpad",
+    reaper: "kb_preset_reaper",
+    vegasPro: "kb_preset_vegas_pro",
+    vocalShifter: "kb_preset_vocal_shifter",
+};
 
 /** "无" 绑定常量 */
 const NONE_BINDING: Keybinding = { key: "__none__" };
@@ -328,7 +351,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                     onValueChange={handleApplyPreset}
                     options={KEYBINDING_PRESET_SELECTION_IDS.map((presetId) => ({
                         value: presetId,
-                        label: tf(`kb_preset_${presetId}`),
+                        label: tf(PRESET_LABEL_KEY[presetId]),
                     }))}
                 />
             </Flex>

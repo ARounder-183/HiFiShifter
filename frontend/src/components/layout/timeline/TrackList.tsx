@@ -1335,7 +1335,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                 style={{ height: headerHeight }}
             >
                 <Text size="2" weight="bold" color="gray" className="shrink-0">
-                    {t("tracks")}
+                    {t("common_tracks")}
                 </Text>
                 <TrackHeaderPlayheadTime />
                 {/* 速度映射小按钮（右下角）：显示/创建 或 清空/隐藏。 */}
@@ -1919,7 +1919,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                     },
                                                                     {
                                                                         value: "none",
-                                                                        label: t("none"),
+                                                                        label: t("common_none"),
                                                                     },
                                                                 ]}
                                                             />
@@ -2086,7 +2086,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                             composeEnabled ? "solid" : "surface"
                                                         }
                                                         color={composeEnabled ? "iris" : "gray"}
-                                                        data-tooltip={t("compose")}
+                                                        data-tooltip={t("common_compose")}
                                                         onPointerDown={(e) => e.stopPropagation()}
                                                         onClick={(e) => {
                                                             e.stopPropagation();
@@ -2132,7 +2132,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                     size="1"
                                                     variant={solo ? "solid" : "surface"}
                                                     color={solo ? "amber" : "gray"}
-                                                    data-tooltip={t("solo")}
+                                                    data-tooltip={t("common_solo")}
                                                     onPointerDown={(e) => e.stopPropagation()}
                                                     onClick={(e) => {
                                                         e.stopPropagation();

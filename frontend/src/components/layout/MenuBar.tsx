@@ -919,7 +919,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     </DropdownMenu.Sub>
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
-                            {`${t("theme")}: ${tf(`theme_${theme.modeSetting}`)}`}
+                            {`${t("common_theme")}: ${tf(`theme_${theme.modeSetting}`)}`}
                         </DropdownMenu.SubTrigger>
                         <DropdownMenu.SubContent>
                             {(["auto", "dark", "light"] as const).map((mode) => (
@@ -1313,7 +1313,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                         <Flex align="center" gap="1">
                             <GlobeIcon width={14} height={14} />
-                            <span>{t("language")}</span>
+                            <span>{t("common_language")}</span>
                         </Flex>
                     </DropdownMenu.Trigger>
                     <DropdownMenu.Content>

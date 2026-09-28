@@ -43,7 +43,7 @@ export interface AppStatusChipProps {
  * 状态片。
  *
  * @example
- * <AppStatusChip tone="accent">{t("loading")}</AppStatusChip>
+ * <AppStatusChip tone="accent">{t("common_loading")}</AppStatusChip>
  * <AppStatusChip tone="danger">{errorCount}</AppStatusChip>
  */
 export function AppStatusChip({
