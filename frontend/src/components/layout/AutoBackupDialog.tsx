@@ -8,9 +8,10 @@
  */
 
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Button, Flex, Text, TextField } from "@radix-ui/themes";
+import { Flex, TextField } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { projectApi, type AutoBackupSettings } from "../../services/api/project";
+import { AppButton } from "../../ui";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm, AppSwitchRow } from "../../ui/Field";
 import { AppNumberField } from "../../ui";
@@ -184,31 +185,20 @@ export function AutoBackupDialog({
                 </AppField>
 
                 <Flex gap="2" wrap="wrap" align="center">
-                    <Text size="1" color="gray">
-                        {tf("auto_backup_placeholders")}
-                    </Text>
+                    <span className="hs-type-caption">{tf("auto_backup_placeholders")}</span>
                     {["<ProjectFolder>", "<ProjectName>"].map((token) => (
-                        <Button
-                            key={token}
-                            type="button"
-                            size="1"
-                            variant="ghost"
-                            color="gray"
-                            onClick={() => insertPathToken(token)}
-                        >
+                        <AppButton key={token} size="sm" onClick={() => insertPathToken(token)}>
                             {token}
-                        </Button>
+                        </AppButton>
                     ))}
                 </Flex>
 
-                <Text size="1" color="gray">
-                    {tf("auto_backup_time_format_hint")}
-                </Text>
+                <span className="hs-type-caption">{tf("auto_backup_time_format_hint")}</span>
 
                 {errorText ? (
-                    <Text size="2" color="red">
+                    <span className="hs-type-body" style={{ color: "var(--qt-danger-text)" }}>
                         {errorText}
-                    </Text>
+                    </span>
                 ) : null}
             </AppForm>
         </AppDialog>

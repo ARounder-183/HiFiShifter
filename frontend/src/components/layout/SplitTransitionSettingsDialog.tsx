@@ -1,4 +1,4 @@
-import { Flex, Text } from "@radix-ui/themes";
+import { Flex } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -65,9 +65,7 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
             ]}
         >
             <AppForm>
-                <Text size="1" color="gray">
-                    {tf("split_transition_settings_desc")}
-                </Text>
+                <span className="hs-type-muted">{tf("split_transition_settings_desc")}</span>
 
                 <AppField label={tf("split_transition_mode")}>
                     <AppSelect
@@ -127,20 +125,20 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                                 void dispatch(persistUiSettings());
                             }}
                         />
-                        <Text size="1" color="gray">
+                        <span className="hs-type-caption">
                             {tf(
                                 isPercent
                                     ? "split_transition_duration_percent_unit"
                                     : "split_transition_duration_unit",
                             )}
-                        </Text>
+                        </span>
                     </Flex>
                 </AppField>
 
                 {isPercent && (
-                    <Text size="1" color="gray">
+                    <span className="hs-type-caption">
                         {tf("split_transition_duration_percent_hint")}
-                    </Text>
+                    </span>
                 )}
 
                 <AppField label={tf("split_transition_curve")}>
@@ -178,9 +176,7 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                 </AppField>
 
                 {splitTransitionMode === "overlap" && (
-                    <Text size="1" color="gray">
-                        {tf("split_transition_overlap_hint")}
-                    </Text>
+                    <span className="hs-type-caption">{tf("split_transition_overlap_hint")}</span>
                 )}
             </AppForm>
         </AppDialog>

@@ -15,7 +15,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Button, Checkbox, Flex, Separator, Text, TextField } from "@radix-ui/themes";
+import { Checkbox, Flex, Separator, TextField } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -32,7 +32,7 @@ import { persistUiSettings } from "../../features/session/thunks/runtimeThunks";
 import { setRenderCacheSettings } from "../../features/session/sessionSlice";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm } from "../../ui/Field";
-import { AppNumberField, AppSelect } from "../../ui";
+import { AppButton, AppNumberField, AppSelect } from "../../ui";
 
 interface RenderCacheDialogProps {
     open: boolean;
@@ -192,43 +192,36 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
             <AppForm labelWidth="lg">
                 {/* ── 状态 ─────────────────────────────────────────────── */}
                 <Flex direction="column" gap="1">
-                    <Text size="2">{summaryText}</Text>
-                    <Text size="1" color="gray" style={{ wordBreak: "break-all" }}>
+                    <span className="hs-type-body">{summaryText}</span>
+                    <span className="hs-type-caption" style={{ wordBreak: "break-all" }}>
                         {tf("render_cache_location_label")}：{stats?.dir ?? "…"}
-                    </Text>
+                    </span>
                     <Flex gap="2" mt="1">
-                        <Button
-                            type="button"
-                            size="1"
-                            variant="soft"
-                            color="gray"
-                            onClick={() => void handleOpenDir()}
-                        >
+                        <AppButton size="sm" onClick={() => void handleOpenDir()}>
                             {tf("render_cache_open_dir")}
-                        </Button>
-                        <Button
-                            type="button"
-                            size="1"
-                            variant="soft"
-                            color="gray"
-                            disabled={loading}
-                            onClick={() => void refreshStats()}
-                        >
+                        </AppButton>
+                        <AppButton size="sm" disabled={loading} onClick={() => void refreshStats()}>
                             {tf("render_cache_refresh")}
-                        </Button>
+                        </AppButton>
                     </Flex>
                     {stats && !stats.writable ? (
-                        <Text size="1" color="amber">
+                        <span
+                            className="hs-type-caption"
+                            style={{ color: "var(--qt-warning-text)" }}
+                        >
                             {tf("render_cache_dir_not_writable")}
-                        </Text>
+                        </span>
                     ) : null}
                     {stats && stats.sessionWriteErrors > 0 ? (
-                        <Text size="1" color="amber">
+                        <span
+                            className="hs-type-caption"
+                            style={{ color: "var(--qt-warning-text)" }}
+                        >
                             {tf("render_cache_write_errors").replace(
                                 "{n}",
                                 String(stats.sessionWriteErrors),
                             )}
-                        </Text>
+                        </span>
                     ) : null}
                 </Flex>
 
@@ -240,14 +233,14 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                         checked={draft.enabled}
                         onCheckedChange={(v) => patch({ enabled: Boolean(v) })}
                     />
-                    <Text size="2">{tf("render_cache_enable")}</Text>
+                    <span className="hs-type-label">{tf("render_cache_enable")}</span>
                 </Flex>
                 <Flex align="center" gap="2">
                     <Checkbox
                         checked={draft.showHitStats}
                         onCheckedChange={(v) => patch({ showHitStats: Boolean(v) })}
                     />
-                    <Text size="2">{tf("render_cache_show_hit_stats")}</Text>
+                    <span className="hs-type-label">{tf("render_cache_show_hit_stats")}</span>
                 </Flex>
 
                 {/* ── 容量 ─────────────────────────────────────────────── */}
@@ -311,9 +304,9 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                 </AppField>
 
                 <Flex align="center" gap="2" wrap="wrap">
-                    <Text size="2" style={{ minWidth: 132 }}>
+                    <span className="hs-type-label shrink-0" style={{ minWidth: 132 }}>
                         {tf("render_cache_min_clip")}
-                    </Text>
+                    </span>
                     <AppNumberField
                         value={draft.minClipSecs}
                         unit="seconds"
@@ -323,9 +316,12 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                         ariaLabel={tf("render_cache_min_clip")}
                         onCommit={(minClipSecs) => patch({ minClipSecs })}
                     />
-                    <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
+                    <span
+                        className="hs-type-label shrink-0"
+                        style={{ minWidth: 108, marginLeft: 8 }}
+                    >
                         {tf("render_cache_min_entry")}
-                    </Text>
+                    </span>
                     <AppNumberField
                         value={draft.minEntryKb}
                         unit="integer"
@@ -335,9 +331,12 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                         ariaLabel={tf("render_cache_min_entry")}
                         onCommit={(minEntryKb) => patch({ minEntryKb })}
                     />
-                    <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
+                    <span
+                        className="hs-type-label shrink-0"
+                        style={{ minWidth: 108, marginLeft: 8 }}
+                    >
                         {tf("render_cache_max_entry")}
-                    </Text>
+                    </span>
                     <AppNumberField
                         value={draft.maxEntryMb}
                         unit="integer"
@@ -347,9 +346,12 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                         ariaLabel={tf("render_cache_max_entry")}
                         onCommit={(maxEntryMb) => patch({ maxEntryMb })}
                     />
-                    <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
+                    <span
+                        className="hs-type-label shrink-0"
+                        style={{ minWidth: 108, marginLeft: 8 }}
+                    >
                         {tf("render_cache_min_free_disk")}
-                    </Text>
+                    </span>
                     <AppNumberField
                         value={draft.minFreeDiskMb}
                         unit="integer"
@@ -410,7 +412,7 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                         checked={draft.verifyChecksum}
                         onCheckedChange={(v) => patch({ verifyChecksum: Boolean(v) })}
                     />
-                    <Text size="2">{tf("render_cache_verify_checksum")}</Text>
+                    <span className="hs-type-label">{tf("render_cache_verify_checksum")}</span>
                 </Flex>
 
                 <Separator size="4" />
@@ -419,55 +421,43 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                 <Flex gap="2" wrap="wrap" align="center">
                     {pendingClearAll ? (
                         <>
-                            <Text size="2" color="red">
+                            <span
+                                className="hs-type-body"
+                                style={{ color: "var(--qt-danger-text)" }}
+                            >
                                 {tf("render_cache_confirm_clear_all")}
-                            </Text>
-                            <Button
-                                type="button"
-                                size="1"
-                                color="red"
+                            </span>
+                            <AppButton
+                                size="sm"
+                                intent="danger"
                                 disabled={busyScope !== null}
                                 onClick={() => void handleClear("all")}
                             >
                                 {tf("render_cache_confirm_yes")}
-                            </Button>
-                            <Button
-                                type="button"
-                                size="1"
-                                variant="soft"
-                                color="gray"
-                                onClick={() => setPendingClearAll(false)}
-                            >
+                            </AppButton>
+                            <AppButton size="sm" onClick={() => setPendingClearAll(false)}>
                                 {tf("cancel")}
-                            </Button>
+                            </AppButton>
                         </>
                     ) : (
                         <>
-                            <Button
-                                type="button"
-                                size="1"
-                                variant="soft"
-                                color="red"
+                            <AppButton
+                                size="sm"
+                                intent="danger"
                                 disabled={busyScope !== null}
                                 onClick={() => setPendingClearAll(true)}
                             >
                                 {tf("render_cache_clear_all")}
-                            </Button>
-                            <Button
-                                type="button"
-                                size="1"
-                                variant="soft"
-                                color="gray"
+                            </AppButton>
+                            <AppButton
+                                size="sm"
                                 disabled={busyScope !== null}
                                 onClick={() => void handleClear("currentProject")}
                             >
                                 {tf("render_cache_clear_project")}
-                            </Button>
-                            <Button
-                                type="button"
-                                size="1"
-                                variant="soft"
-                                color="gray"
+                            </AppButton>
+                            <AppButton
+                                size="sm"
                                 disabled={busyScope !== null}
                                 onClick={() =>
                                     void handleClear(
@@ -477,30 +467,27 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                                 }
                             >
                                 {tf("render_cache_clear_old")}
-                            </Button>
-                            <Button
-                                type="button"
-                                size="1"
-                                variant="soft"
-                                color="gray"
+                            </AppButton>
+                            <AppButton
+                                size="sm"
                                 disabled={busyScope !== null}
                                 onClick={() => void handleClear("otherSampleRates")}
                             >
                                 {tf("render_cache_clear_other_rates")}
-                            </Button>
+                            </AppButton>
                         </>
                     )}
                 </Flex>
 
                 {notice ? (
-                    <Text size="2" color="green">
+                    <span className="hs-type-body" style={{ color: "var(--qt-success-text)" }}>
                         {notice}
-                    </Text>
+                    </span>
                 ) : null}
                 {errorText ? (
-                    <Text size="2" color="red">
+                    <span className="hs-type-body" style={{ color: "var(--qt-danger-text)" }}>
                         {errorText}
-                    </Text>
+                    </span>
                 ) : null}
             </AppForm>
         </AppDialog>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Flex, Text, Checkbox } from "@radix-ui/themes";
+import { Flex, Checkbox } from "@radix-ui/themes";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
 import {
@@ -284,7 +284,7 @@ export const SilenceDetectionDialog: React.FC<{
 
                 {/* 预览摘要（与时间线上的红色覆盖层联动） */}
                 <Flex direction="column" gap="1" className="rounded border border-qt-border p-2">
-                    <Text size="1" className="text-qt-text-muted">
+                    <span className="hs-type-muted">
                         {analyzing
                             ? tf("silence_analyzing")
                             : totalRegions > 0
@@ -292,14 +292,14 @@ export const SilenceDetectionDialog: React.FC<{
                                     .replace("{n}", String(totalRegions))
                                     .replace("{dur}", totalSilent.toFixed(2))
                               : tf("silence_no_silence")}
-                    </Text>
+                    </span>
                     {clipIds.slice(0, 6).map((id) => {
                         const clip = clips.find((c) => c.id === id);
                         const report = reportFor(id);
                         const regions = previewFor(id)?.length ?? 0;
                         const name = clip?.name ?? id;
                         return (
-                            <Text key={id} size="1" className="text-qt-text-muted">
+                            <span key={id} className="hs-type-muted">
                                 {`· ${name}: `}
                                 {report && !report.ok
                                     ? tf("silence_skipped") +
@@ -312,13 +312,13 @@ export const SilenceDetectionDialog: React.FC<{
                                                 (report?.totalSilentSec ?? 0).toFixed(2),
                                             )
                                       : tf("silence_no_silence")}
-                            </Text>
+                            </span>
                         );
                     })}
                     {clipIds.length > 6 ? (
-                        <Text size="1" className="text-qt-text-muted">
+                        <span className="hs-type-muted">
                             {tf("silence_more_clips").replace("{n}", String(clipIds.length - 6))}
-                        </Text>
+                        </span>
                     ) : null}
                 </Flex>
             </AppForm>

@@ -7,7 +7,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { Flex, Text } from "@radix-ui/themes";
+import { Flex } from "@radix-ui/themes";
 import type { BenchmarkResult } from "../../types/api";
 import { coreApi } from "../../services/api/core";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -170,17 +170,17 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                 {/* Results table */}
                 {phase === "done" && result && rows.length > 0 && (
                     <Flex direction="column" gap="2">
-                        <Text size="2" weight="medium">
+                        <span className="hs-type-label font-medium">
                             {t("benchmark_results").replace(
                                 "{samples}",
                                 String(result.benchmarkSamples),
                             )}
-                        </Text>
+                        </span>
                         <div
                             style={{
                                 borderRadius: 6,
                                 overflow: "hidden",
-                                border: "1px solid var(--gray-5)",
+                                border: "1px solid var(--qt-border)",
                             }}
                         >
                             <table
@@ -193,7 +193,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                 <thead>
                                     <tr
                                         style={{
-                                            background: "var(--gray-3)",
+                                            background: "var(--qt-surface)",
                                             textAlign: "left",
                                         }}
                                     >
@@ -220,7 +220,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                                     background: isFastest
                                                         ? "var(--accent-3)"
                                                         : "transparent",
-                                                    borderTop: "1px solid var(--gray-4)",
+                                                    borderTop: "1px solid var(--qt-border)",
                                                 }}
                                             >
                                                 <td style={{ padding: "6px 12px" }}>
@@ -232,7 +232,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                                             style={{
                                                                 fontWeight: isFastest ? 600 : 400,
                                                                 color: isUnavailable
-                                                                    ? "var(--gray-9)"
+                                                                    ? "var(--qt-text-muted)"
                                                                     : undefined,
                                                             }}
                                                         >
@@ -242,9 +242,14 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                                 </td>
                                                 <td style={{ padding: "6px 12px" }}>
                                                     {isUnavailable ? (
-                                                        <Text size="1" color="red">
+                                                        <span
+                                                            className="hs-type-caption"
+                                                            style={{
+                                                                color: "var(--qt-danger-text)",
+                                                            }}
+                                                        >
                                                             {t("benchmark_failed")}
-                                                        </Text>
+                                                        </span>
                                                     ) : (
                                                         formatMs(row.medianMs)
                                                     )}
@@ -253,10 +258,10 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                                     style={{
                                                         padding: "6px 12px",
                                                         color: isUnavailable
-                                                            ? "var(--gray-9)"
+                                                            ? "var(--qt-text-muted)"
                                                             : row.rtf >= 1
-                                                              ? "var(--green-10)"
-                                                              : "var(--red-10)",
+                                                              ? "var(--qt-success-text)"
+                                                              : "var(--qt-danger-text)",
                                                     }}
                                                 >
                                                     {isUnavailable ? "N/A" : formatRtf(row.rtf)}
@@ -267,13 +272,11 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                 </tbody>
                             </table>
                         </div>
-                        <Text size="1" color="gray">
-                            {t("benchmark_rtf_hint")}
-                        </Text>
+                        <span className="hs-type-caption">{t("benchmark_rtf_hint")}</span>
                         {fastestRow && fastestRow.available && (
-                            <Text size="2">
+                            <span className="hs-type-body">
                                 {t("benchmark_recommended")} <strong>{fastestRow.label}</strong>
-                            </Text>
+                            </span>
                         )}
 
                         {/* GPU (WebGPU) available but benchmark failed */}
@@ -284,28 +287,33 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                 style={{
                                     padding: "8px 12px",
                                     borderRadius: 6,
-                                    background: "var(--red-3)",
-                                    border: "1px solid var(--red-5)",
+                                    background: "var(--qt-danger-bg)",
+                                    border: "1px solid var(--qt-danger-border)",
                                 }}
                             >
-                                <Text size="2" weight="medium" style={{ color: "var(--red-10)" }}>
+                                <span
+                                    className="hs-type-label font-medium"
+                                    style={{ color: "var(--qt-danger-text)" }}
+                                >
                                     {t("benchmark_gpu_failed_title")}
-                                </Text>
-                                <Text size="1" style={{ color: "var(--red-9)" }}>
+                                </span>
+                                <span
+                                    className="hs-type-caption"
+                                    style={{ color: "var(--qt-danger-text)" }}
+                                >
                                     {t("benchmark_gpu_failed_desc")}
-                                </Text>
+                                </span>
                                 {result.gpuError && (
-                                    <Text
-                                        size="1"
+                                    <span
+                                        className="hs-type-mono"
                                         style={{
-                                            color: "var(--red-9)",
-                                            fontFamily: "monospace",
+                                            color: "var(--qt-danger-text)",
                                             whiteSpace: "pre-wrap",
                                             wordBreak: "break-word",
                                         }}
                                     >
                                         {result.gpuError}
-                                    </Text>
+                                    </span>
                                 )}
                             </Flex>
                         )}
@@ -318,43 +326,45 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                 style={{
                                     padding: "8px 12px",
                                     borderRadius: 6,
-                                    background: "var(--red-3)",
-                                    border: "1px solid var(--red-5)",
+                                    background: "var(--qt-danger-bg)",
+                                    border: "1px solid var(--qt-danger-border)",
                                 }}
                             >
-                                <Text size="2" weight="medium" style={{ color: "var(--red-10)" }}>
+                                <span
+                                    className="hs-type-label font-medium"
+                                    style={{ color: "var(--qt-danger-text)" }}
+                                >
                                     {t("benchmark_gpu_failed_title")}
-                                </Text>
-                                <Text size="1" style={{ color: "var(--red-9)" }}>
+                                </span>
+                                <span
+                                    className="hs-type-caption"
+                                    style={{ color: "var(--qt-danger-text)" }}
+                                >
                                     {t("benchmark_gpu_failed_desc")}
-                                </Text>
+                                </span>
                             </Flex>
                         )}
 
                         {/* Available providers */}
-                        <Text size="1" style={{ color: "var(--gray-9)", marginTop: 4 }}>
+                        <span className="hs-type-caption" style={{ marginTop: 4 }}>
                             {t("benchmark_providers_label")}{" "}
                             {result.availableProviders.join(", ") || "unknown"}
-                        </Text>
-                        <Text size="1" style={{ color: "var(--gray-9)" }}>
+                        </span>
+                        <span className="hs-type-caption">
                             {t("benchmark_ort_info_label")} {result.ortBuildInfo || "unknown"}
-                        </Text>
+                        </span>
 
                         {/* GPU enumeration */}
                         {result.gpuDevices && result.gpuDevices.length > 0 && (
                             <Flex direction="column" gap="1" style={{ marginTop: 4 }}>
-                                <Text size="1" weight="medium" style={{ color: "var(--gray-9)" }}>
+                                <span className="hs-type-caption font-medium">
                                     {t("benchmark_gpu_label")}:
-                                </Text>
+                                </span>
                                 {result.gpuDevices.map((gpu) => (
-                                    <Text
-                                        key={gpu.deviceId}
-                                        size="1"
-                                        style={{ color: "var(--gray-9)" }}
-                                    >
+                                    <span key={gpu.deviceId} className="hs-type-caption">
                                         · {t("benchmark_gpu_device_label")} {gpu.deviceId}:{" "}
                                         {gpu.name} ({(gpu.memoryMb / 1024).toFixed(1)} GB)
-                                    </Text>
+                                    </span>
                                 ))}
                             </Flex>
                         )}
@@ -363,16 +373,14 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
 
                 {/* Error state */}
                 {phase === "error" && (
-                    <Text size="2" color="red">
+                    <span className="hs-type-body" style={{ color: "var(--qt-danger-text)" }}>
                         {errorText || t("benchmark_error_default")}
-                    </Text>
+                    </span>
                 )}
 
                 {/* Idle hint */}
                 {phase === "idle" && (
-                    <Text size="2" color="gray">
-                        {t("benchmark_idle_hint")}
-                    </Text>
+                    <span className="hs-type-muted">{t("benchmark_idle_hint")}</span>
                 )}
             </AppForm>
         </AppDialog>

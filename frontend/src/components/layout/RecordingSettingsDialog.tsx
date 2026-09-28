@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Button, Flex, Text, TextField } from "@radix-ui/themes";
+import { Flex, TextField } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -16,6 +16,7 @@ import {
     type RecordingSettings,
 } from "../../services/api/recording";
 import { webApi } from "../../services/webviewApi";
+import { AppButton } from "../../ui";
 import { AppDialog } from "../../ui/Dialog";
 import { AppField, AppForm, AppSwitchRow } from "../../ui/Field";
 import { AppNumberField, AppSelect } from "../../ui";
@@ -209,15 +210,9 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                         })),
                                 ]}
                             />
-                            <Button
-                                type="button"
-                                size="1"
-                                variant="ghost"
-                                color="gray"
-                                onClick={() => void refreshDevices()}
-                            >
+                            <AppButton size="sm" onClick={() => void refreshDevices()}>
                                 {tf("recording_refresh_devices")}
-                            </Button>
+                            </AppButton>
                         </Flex>
                     </AppField>
                 ) : null}
@@ -246,15 +241,9 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                         })),
                                 ]}
                             />
-                            <Button
-                                type="button"
-                                size="1"
-                                variant="ghost"
-                                color="gray"
-                                onClick={() => void refreshDevices()}
-                            >
+                            <AppButton size="sm" onClick={() => void refreshDevices()}>
                                 {tf("recording_refresh_devices")}
-                            </Button>
+                            </AppButton>
                         </Flex>
                     </AppField>
                 ) : null}
@@ -292,20 +281,14 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                         })),
                                     ]}
                                 />
-                                <Button
-                                    type="button"
-                                    size="1"
-                                    variant="ghost"
-                                    color="gray"
-                                    onClick={() => void refreshApps()}
-                                >
+                                <AppButton size="sm" onClick={() => void refreshApps()}>
                                     {tf("recording_refresh_apps")}
-                                </Button>
+                                </AppButton>
                             </Flex>
                         </AppField>
-                        <Text size="1" color="gray" style={{ paddingLeft: 20 }}>
+                        <span className="hs-type-caption" style={{ paddingLeft: 20 }}>
                             {tf("recording_application_hint")}
-                        </Text>
+                        </span>
                     </>
                 ) : null}
 
@@ -345,9 +328,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                             ]}
                         />
 
-                        <Text size="2" ml="4">
-                            {tf("recording_channels")}
-                        </Text>
+                        <span className="hs-type-label ml-4">{tf("recording_channels")}</span>
                         <AppSelect
                             fullWidth={false}
                             // 不定长文本（设备名/应用名），给下限防止塌缩与切换时宽度跳动
@@ -476,31 +457,20 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                 </AppField>
 
                 <Flex gap="2" wrap="wrap" align="center">
-                    <Text size="1" color="gray">
-                        {tf("auto_backup_placeholders")}
-                    </Text>
+                    <span className="hs-type-caption">{tf("auto_backup_placeholders")}</span>
                     {["<ProjectFolder>", "<ProjectName>"].map((token) => (
-                        <Button
-                            key={token}
-                            type="button"
-                            size="1"
-                            variant="ghost"
-                            color="gray"
-                            onClick={() => insertPathToken(token)}
-                        >
+                        <AppButton key={token} size="sm" onClick={() => insertPathToken(token)}>
                             {token}
-                        </Button>
+                        </AppButton>
                     ))}
                 </Flex>
 
-                <Text size="1" color="gray">
-                    {tf("auto_backup_time_format_hint")}
-                </Text>
+                <span className="hs-type-caption">{tf("auto_backup_time_format_hint")}</span>
 
                 {errorText ? (
-                    <Text size="2" color="red">
+                    <span className="hs-type-body" style={{ color: "var(--qt-danger-text)" }}>
                         {errorText}
-                    </Text>
+                    </span>
                 ) : null}
             </AppForm>
         </AppDialog>
