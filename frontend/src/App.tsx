@@ -3840,7 +3840,7 @@ function AppInner() {
                             mt="1"
                             className="rounded border border-qt-border bg-qt-base px-2 py-1.5"
                         >
-                            <span className="hs-type-caption min-w-0 truncate">
+                            <span className="hs-type-label min-w-0 truncate">
                                 {t("recapture_missing_media_search_result_summary")
                                     .replace("{total}", String(sourceFileSearchMatchTotal))
                                     .replace("{exact}", String(sourceFileSearchExactTotal))
@@ -4071,7 +4071,7 @@ function AppInner() {
                         })}
                     </div>
                     <Flex justify="between" align="center" gap="2" mt="3">
-                        <span className="hs-type-caption">
+                        <span className="hs-type-label">
                             {t("recapture_missing_media_summary")
                                 .replace(
                                     "{ignored}",
@@ -4191,8 +4191,8 @@ function AppInner() {
                         </AppStatusChip>
                     ) : null}
                     <span
-                        className="hs-type-caption truncate"
-                        style={{ color: error ? "var(--qt-danger-text)" : "var(--qt-text-muted)" }}
+                        className="hs-type-label truncate"
+                        style={error ? { color: "var(--qt-danger-text)" } : undefined}
                     >
                         {errorText}
                     </span>

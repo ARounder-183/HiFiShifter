@@ -210,12 +210,12 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                 )}
 
                 {notice && (
-                    <span className="hs-type-caption" style={{ color: "var(--qt-success-text)" }}>
+                    <span className="hs-type-label" style={{ color: "var(--qt-success-text)" }}>
                         {notice}
                     </span>
                 )}
                 {errorText && (
-                    <span className="hs-type-caption" style={{ color: "var(--qt-danger-text)" }}>
+                    <span className="hs-type-label" style={{ color: "var(--qt-danger-text)" }}>
                         {errorText}
                     </span>
                 )}

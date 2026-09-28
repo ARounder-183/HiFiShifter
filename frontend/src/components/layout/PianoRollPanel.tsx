@@ -6937,7 +6937,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         }}
                         icon={s.paramEditorSyncTimeline ? <Link2Icon /> : <LinkBreak2Icon />}
                     />
-                    <span className="hs-type-muted font-semibold">{tf("param_editor_short")}</span>
+                    <span className="hs-type-label font-semibold">{tf("param_editor_short")}</span>
                     {/* 工具按钮组（音高吸附等）+ 平滑度滑块。`marginLeft: 8` 是紧邻
                         `参数编辑器` 标题留出的空白。
                         【minWidth 必须显式置 0】flex 项默认 `min-width: auto`（= min-content），
@@ -7473,7 +7473,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             {/* 数值需要完整可读（"100%"），因此给它一个较小的固定下限，
                                 但不再是 36px 那种"宁可溢出也不缩"的宽度。 */}
                             <span
-                                className="hs-type-caption"
+                                className="hs-type-label"
                                 style={{ minWidth: 28, textAlign: "right" }}
                             >
                                 {Math.round(s.edgeSmoothnessPercent)}%
@@ -7913,7 +7913,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 return (
                                     <Flex key={param.id} align="center" gap="1">
                                         <span
-                                            className="hs-type-caption"
+                                            className="hs-type-label"
                                             data-tooltip={getProcessorParamLabel(param)}
                                         >
                                             {getProcessorParamLabel(param)}
@@ -7937,7 +7937,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     </Flex>
                                 );
                             })}
-                            <span className="hs-type-caption" data-tooltip={tf("algo_label")}>
+                            <span className="hs-type-label" data-tooltip={tf("algo_label")}>
                                 {tf("algo_label_short")}
                             </span>
                             <AppSelect

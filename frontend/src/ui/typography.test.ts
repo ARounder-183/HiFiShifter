@@ -190,6 +190,28 @@ describe("排版角色层级", () => {
     });
 
     /*
+     * 正文档角色**不许锁字重**。
+     *
+     * 【为什么】角色定义在未分层的样式表里、晚于 Tailwind utilities，所以角色一旦
+     * 声明 `font-weight: 400`，调用方写在同一元素上的 `font-medium` /
+     * `font-semibold` 就被静默吃掉（实测 `hs-type-label font-semibold` 渲染为 400，
+     * 表现为"标签的加粗不见了"）。字重是调用方的意图，不该被角色层吞掉。
+     *
+     * 只有 display / section 允许自带字重 —— 它们正是"靠字重分层"的承担者
+     * （见上一条断言）。
+     */
+    test("正文档角色不锁字重，字重留给调用方", () => {
+        for (const role of ["body", "label", "muted", "caption", "mono"]) {
+            expect(
+                ruleBody(`.hs-type-${role}`),
+                `.hs-type-${role} 锁了字重 —— 调用方的 font-* 工具类会静默失效`,
+            ).not.toMatch(/font-weight:/);
+        }
+        expect(ruleBody(".hs-type-section")).toMatch(/font-weight:/);
+        expect(ruleBody(".hs-type-display")).toMatch(/font-weight:/);
+    });
+
+    /*
      * 同一个槽位只能有一种渲染。
      *
      * 【为什么要禁掉 `<Text>`】实测过：`description` 裸用时是 11px 弱化色，

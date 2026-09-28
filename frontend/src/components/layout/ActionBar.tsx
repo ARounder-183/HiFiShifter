@@ -772,7 +772,7 @@ export function ActionBar() {
                         </div>
                     )}
                 </Box>
-                <span className="hs-type-caption">{t("common_bpm")}:</span>
+                <span className="hs-type-muted">{t("common_bpm")}:</span>
                 <TextField.Root
                     ref={attachBpmWheel}
                     size="1"
@@ -805,7 +805,7 @@ export function ActionBar() {
                         backgroundColor: "var(--qt-base)",
                     }}
                 />
-                <span className="hs-type-caption">{t("time_signature")}:</span>
+                <span className="hs-type-muted">{t("time_signature")}:</span>
                 <Flex align="center" gap="1">
                     <TextField.Root
                         size="1"
@@ -873,7 +873,7 @@ export function ActionBar() {
                             backgroundColor: "var(--qt-base)",
                         }}
                     />
-                    <span className="hs-type-caption">/</span>
+                    <span className="hs-type-muted">/</span>
                     <Select.Root
                         size="1"
                         value={String(displayDenominator)}
@@ -942,7 +942,7 @@ export function ActionBar() {
                     </Select.Root>
                 </Flex>
 
-                <span className="hs-type-caption">{t("common_grid")}:</span>
+                <span className="hs-type-muted">{t("common_grid")}:</span>
                 <Select.Root
                     value={s.grid}
                     size="1"
@@ -1028,7 +1028,7 @@ export function ActionBar() {
                         </Select.Group>
                     </Select.Content>
                 </Select.Root>
-                <span className="hs-type-caption">{t("base_scale")}:</span>
+                <span className="hs-type-muted">{t("base_scale")}:</span>
                 <Select.Root
                     value={displayScaleSelectValue}
                     size="1"
@@ -1356,12 +1356,10 @@ export function ActionBar() {
                 {recording.active || recording.countdownRemaining > 0 ? (
                     <Flex align="center" gap="1" className="shrink-0">
                         <span
-                            className="hs-type-caption tabular-nums"
-                            style={{
-                                color: recording.active
-                                    ? "var(--qt-danger-text)"
-                                    : "var(--qt-text-muted)",
-                            }}
+                            className="hs-type-label tabular-nums"
+                            style={
+                                recording.active ? { color: "var(--qt-danger-text)" } : undefined
+                            }
                         >
                             {recording.countdownRemaining > 0
                                 ? `-${recording.countdownRemaining}`
@@ -1393,7 +1391,7 @@ export function ActionBar() {
                 ) : null}
                 {recording.error ? (
                     <span
-                        className="hs-type-caption truncate"
+                        className="hs-type-label truncate"
                         data-tooltip={recording.error}
                         style={{ maxWidth: 220, color: "var(--qt-danger-text)" }}
                     >

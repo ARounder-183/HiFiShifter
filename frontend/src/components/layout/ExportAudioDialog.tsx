@@ -1473,7 +1473,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                                     key={key}
                                                     className="flex flex-col gap-1 text-qt-xs text-qt-text"
                                                 >
-                                                    <span className="hs-type-caption">
+                                                    <span className="hs-type-label">
                                                         {tf(i18nKey)}
                                                     </span>
                                                     <TextField.Root
@@ -1622,7 +1622,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
                             {examplePath ? (
                                 <span
-                                    className="hs-type-caption"
+                                    className="hs-type-muted"
                                     style={{ userSelect: "text", wordBreak: "break-all" }}
                                 >
                                     {tf("export_dialog_example_path").replace(
@@ -1697,7 +1697,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
                             {examplePath ? (
                                 <span
-                                    className="hs-type-caption"
+                                    className="hs-type-muted"
                                     style={{ userSelect: "text", wordBreak: "break-all" }}
                                 >
                                     {tf("export_dialog_example_path").replace(
@@ -1744,7 +1744,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                             key={group.id}
                                             className="rounded border border-qt-border bg-qt-window px-2 py-2"
                                         >
-                                            <span className="hs-type-caption">{group.title}</span>
+                                            <span className="hs-type-label">{group.title}</span>
                                             <AppForm booleanRow="leading">
                                                 <Flex direction="column" gap="1" mt="1">
                                                     {group.options.map((target) => (

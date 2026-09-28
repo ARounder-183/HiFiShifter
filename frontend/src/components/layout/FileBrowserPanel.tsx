@@ -824,7 +824,7 @@ export const FileBrowserPanel: React.FC = () => {
                 </Flex>
 
                 {hasRegexError && (
-                    <span className="hs-type-caption" style={{ color: "var(--qt-danger-text)" }}>
+                    <span className="hs-type-label" style={{ color: "var(--qt-danger-text)" }}>
                         {tf("fb_regex_error")}
                     </span>
                 )}
@@ -846,7 +846,7 @@ export const FileBrowserPanel: React.FC = () => {
                     >
                         <ChevronUpIcon />
                     </IconButton>
-                    <span className="hs-type-caption truncate flex-1" data-tooltip={fb.currentPath}>
+                    <span className="hs-type-label truncate flex-1" data-tooltip={fb.currentPath}>
                         {fb.currentPath}
                     </span>
                 </Flex>

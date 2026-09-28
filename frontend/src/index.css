@@ -440,6 +440,13 @@ textarea {
  *   display(20/700) > section(13/600) > body(13/400) = mono(12)
  *     > label(12/400) = muted(12/400 muted) > caption(11/400 muted)
  *
+ * 【字重归属】只有标题档（display / section）自带字重 —— 它们正是"靠字重分层"的
+ * 承担者。正文档（body / label / muted / caption / mono）**不锁字重**：默认 400 由
+ * 继承给出，调用方可以用 `font-medium` / `font-semibold` 调整。此前它们锁了 400，
+ * 而本文件在未分层的样式表里晚于 Tailwind utilities，于是那些工具类被静默吃掉
+ * （实测 `hs-type-label font-semibold` 渲染为 400 —— 用户看到的"加粗没了"）。
+ * typography.test 钉住了这条可组合性。
+ *
  * 【为什么 muted 与 label 同字号】12px 的"弱化正文句"（面板说明、空态提示）
  * 与 12px 的字段标签字号相同、**靠颜色分层**：标签用正文色（不许比自己的提示
  * 还淡），muted 用弱化色。此前这个语义被 Radix `<Text size="2" color="gray">`
@@ -463,7 +470,6 @@ textarea {
 .hs-type-body {
     font-size: var(--qt-fs-md);
     line-height: var(--qt-lh-relaxed);
-    font-weight: 400;
     color: var(--qt-text);
 }
 
@@ -473,7 +479,6 @@ textarea {
 .hs-type-label {
     font-size: var(--qt-fs-sm);
     line-height: var(--qt-lh-base);
-    font-weight: 400;
     color: var(--qt-text);
 }
 
@@ -483,7 +488,6 @@ textarea {
 .hs-type-muted {
     font-size: var(--qt-fs-sm);
     line-height: var(--qt-lh-base);
-    font-weight: 400;
     color: var(--qt-text-muted);
 }
 
@@ -491,7 +495,6 @@ textarea {
 .hs-type-caption {
     font-size: var(--qt-fs-xs);
     line-height: var(--qt-lh-tight);
-    font-weight: 400;
     color: var(--qt-text-muted);
 }
 
@@ -499,7 +502,6 @@ textarea {
 .hs-type-mono {
     font-size: var(--qt-fs-sm);
     line-height: var(--qt-lh-tight);
-    font-weight: 400;
     font-variant-numeric: tabular-nums;
     color: var(--qt-text);
 }

@@ -781,7 +781,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                             </AppButton>
                             {initialBpm != null && (
                                 <span
-                                    className="hs-type-caption ml-auto self-center"
+                                    className="hs-type-label ml-auto self-center"
                                     style={
                                         midiHasBpm ? undefined : { color: "var(--qt-danger-text)" }
                                     }

@@ -1330,7 +1330,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                 className="border-b border-qt-border px-2 flex items-center justify-between gap-2 bg-qt-window shadow-sm z-10 relative"
                 style={{ height: headerHeight }}
             >
-                <span className="hs-type-muted font-semibold shrink-0">{t("common_tracks")}</span>
+                <span className="hs-type-label font-semibold shrink-0">{t("common_tracks")}</span>
                 <TrackHeaderPlayheadTime />
                 {/* 速度映射小按钮（右下角）：显示/创建 或 清空/隐藏。 */}
                 <TempoMapCornerButton />
@@ -2038,16 +2038,20 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                             />
                                                         ) : (
                                                             <span
-                                                                /* 0.0 dB 用强调色标记"默认增益"，
-                                                                   其余保持弱化色 */
+                                                                /* 0.0 dB 用**强调色的高对比档**
+                                                                   （Radix step 12，原实现是
+                                                                   color="iris" highContrast）标记
+                                                                   "默认增益"；其余用正文色 —— 两者
+                                                                   都可读，不再用 accent-9 那种
+                                                                   偏暗的底色档当文字色。 */
                                                                 style={{
                                                                     color:
                                                                         Math.abs(gainToDb(volume)) <
                                                                         0.05
-                                                                            ? "var(--qt-accent)"
-                                                                            : "var(--qt-text-muted)",
+                                                                            ? "var(--accent-12)"
+                                                                            : "var(--qt-text)",
                                                                 }}
-                                                                className="hs-type-caption leading-none tabular-nums select-none"
+                                                                className="hs-type-label tabular-nums select-none"
                                                                 data-track-gain-value
                                                                 onPointerDown={(e) =>
                                                                     e.stopPropagation()
@@ -2150,11 +2154,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                     className="h-full pt-1 pb-0"
                                                 >
                                                     <span
-                                                        className="hs-type-caption leading-none tabular-nums"
+                                                        className="hs-type-label tabular-nums"
                                                         style={{
                                                             color: clipped
                                                                 ? "var(--qt-danger-text)"
-                                                                : "var(--qt-text-muted)",
+                                                                : "var(--qt-text)",
                                                         }}
                                                     >
                                                         {formatPeakLabel(maxPeakLinear, clipped)}

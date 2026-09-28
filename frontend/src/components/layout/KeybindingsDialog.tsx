@@ -337,7 +337,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
              */
             beforeClose={() => recordingId === null}
         >
-            <span className="hs-type-caption" style={{ marginBottom: 4, display: "block" }}>
+            <span className="hs-type-muted" style={{ marginBottom: 4, display: "block" }}>
                 {tf("kb_dialog_hint_click")}
             </span>
 
@@ -361,7 +361,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                     {groups.map(({ group, actions }) => (
                         <Flex direction="column" gap="1" key={group}>
                             <span
-                                className="hs-type-caption font-semibold"
+                                className="hs-type-label font-semibold"
                                 style={{
                                     textTransform: "uppercase",
                                     letterSpacing: "0.05em",
