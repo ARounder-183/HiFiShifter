@@ -123,6 +123,7 @@ import {
     computeScrollbar,
     scrollDeltaFromThumbDrag,
     scrollTargetFromTrackClick,
+    scrollbarContentSizePx,
 } from "../../../renderKernel/scrollbars";
 import { normalizeWheelDelta } from "../input/normalizeWheel";
 // 拖拽边缘自动滚屏：内核自绘滚动没有浏览器兜底，缺了它 clip 拖到视口边缘就再也
@@ -1987,7 +1988,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     function updateScrollbars(): void {
         const view = scroll.get();
         const horizontal = computeScrollbar({
-            contentSizePx: view.pxPerSec * Math.max(0, data().projectSec),
+            contentSizePx: scrollbarContentSizePx(scroll.maxScrollLeft(), viewportWidthPx),
             viewportSizePx: viewportWidthPx,
             scrollPx: view.scrollLeft,
             maxScrollPx: scroll.maxScrollLeft(),
@@ -5186,10 +5187,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     /** 把拖拽位移换算为滚动位置增量并提交。 */
     function applyThumbDrag(pointerDeltaPx: number): void {
-        const view = scroll.get();
         if (dragAxis === "x") {
             const geometry = computeScrollbar({
-                contentSizePx: view.pxPerSec * Math.max(0, data().projectSec),
+                contentSizePx: scrollbarContentSizePx(scroll.maxScrollLeft(), viewportWidthPx),
                 viewportSizePx: viewportWidthPx,
                 scrollPx: dragStartScroll,
                 maxScrollPx: scroll.maxScrollLeft(),
@@ -5253,7 +5253,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const view = scroll.get();
             if (axis === "x") {
                 const geometry = computeScrollbar({
-                    contentSizePx: view.pxPerSec * Math.max(0, data().projectSec),
+                    contentSizePx: scrollbarContentSizePx(scroll.maxScrollLeft(), viewportWidthPx),
                     viewportSizePx: viewportWidthPx,
                     scrollPx: view.scrollLeft,
                     maxScrollPx: scroll.maxScrollLeft(),

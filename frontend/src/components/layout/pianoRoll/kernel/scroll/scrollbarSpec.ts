@@ -24,7 +24,11 @@
  * - 独立性：纯函数，不依赖 DOM / React。
  */
 
-import { computeScrollbar, type ScrollbarGeometry } from "../../../renderKernel/scrollbars";
+import {
+    computeScrollbar,
+    scrollbarContentSizePx,
+    type ScrollbarGeometry,
+} from "../../../renderKernel/scrollbars";
 
 /** 装配入参。 */
 export interface PianoRollScrollbarArgs {
@@ -107,7 +111,8 @@ export function resolvePianoRollScrollbarGeometries(
     return {
         horizontal: computeScrollbar({
             contentSizePx:
-                args.horizontalContentSizePx ?? args.maxScrollLeftPx + args.viewportWidthPx,
+                args.horizontalContentSizePx ??
+                scrollbarContentSizePx(args.maxScrollLeftPx, args.viewportWidthPx),
             viewportSizePx: args.viewportWidthPx,
             scrollPx: args.scrollLeftPx,
             maxScrollPx: args.maxScrollLeftPx,
@@ -124,7 +129,8 @@ export function resolvePianoRollScrollbarGeometries(
                   }
                 : {
                       contentSizePx:
-                          args.verticalContentSizePx ?? args.maxScrollTopPx + args.viewportHeightPx,
+                          args.verticalContentSizePx ??
+                          scrollbarContentSizePx(args.maxScrollTopPx, args.viewportHeightPx),
                       viewportSizePx: args.viewportHeightPx,
                       scrollPx: args.scrollTopPx,
                       maxScrollPx: args.maxScrollTopPx,
