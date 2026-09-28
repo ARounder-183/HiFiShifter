@@ -17,7 +17,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { Flex, Separator, Text } from "@radix-ui/themes";
+import { Flex, Separator } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -132,11 +132,11 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                         }))}
                     />
                 </AppField>
-                <Text size="1" color="gray">
+                <span className="hs-type-caption">
                     {isOff
                         ? tf("clip_channel_import_mode_off_hint")
                         : tf("clip_channel_import_mode_hint")}
-                </Text>
+                </span>
 
                 {/* ── 目标模式 ───────────────────────────────────────── */}
                 {!isOff && (
@@ -156,9 +156,9 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                 {isSmart && (
                     <>
                         <Separator size="4" />
-                        <Text size="2" weight="medium">
+                        <span className="hs-type-label font-medium">
                             {tf("clip_channel_import_advanced")}
-                        </Text>
+                        </span>
 
                         <AppField label={tf("clip_channel_import_tolerance")}>
                             <Flex align="center" gap="2">
@@ -176,9 +176,9 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                                 />
                             </Flex>
                         </AppField>
-                        <Text size="1" color="gray">
+                        <span className="hs-type-caption">
                             {tf("clip_channel_import_tolerance_hint")}
-                        </Text>
+                        </span>
 
                         <AppField label={tf("clip_channel_import_window_sec")}>
                             <AppNumberField
@@ -203,21 +203,21 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                                 onCommit={(next) => patch({ windowCount: next })}
                             />
                         </AppField>
-                        <Text size="1" color="gray">
+                        <span className="hs-type-caption">
                             {tf("clip_channel_import_window_hint")}
-                        </Text>
+                        </span>
                     </>
                 )}
 
                 {notice && (
-                    <Text size="1" color="green">
+                    <span className="hs-type-caption" style={{ color: "var(--qt-success-text)" }}>
                         {notice}
-                    </Text>
+                    </span>
                 )}
                 {errorText && (
-                    <Text size="1" color="red">
+                    <span className="hs-type-caption" style={{ color: "var(--qt-danger-text)" }}>
                         {errorText}
-                    </Text>
+                    </span>
                 )}
             </AppForm>
         </AppDialog>

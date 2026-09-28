@@ -1,6 +1,6 @@
 // hs-interaction-exempt: 主工具栏是紧凑 chrome（size 1、内联底色、BPM 有手势累加器），能力层原语是表单尺寸；本文件的滚轮与精细调整接线已完备（BPM/节拍器音量/三个下拉均有），故刻意保留。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Flex, Select, TextField, Button, IconButton, Text, Box } from "@radix-ui/themes";
+import { Flex, Select, TextField, Button, IconButton, Box } from "@radix-ui/themes";
 import {
     CheckIcon,
     DoubleArrowRightIcon,
@@ -791,9 +791,7 @@ export function ActionBar() {
                         </div>
                     )}
                 </Box>
-                <Text size="1" className="text-qt-text-muted">
-                    {t("common_bpm")}:
-                </Text>
+                <span className="hs-type-caption">{t("common_bpm")}:</span>
                 <TextField.Root
                     ref={attachBpmWheel}
                     size="1"
@@ -826,9 +824,7 @@ export function ActionBar() {
                         backgroundColor: "var(--qt-base)",
                     }}
                 />
-                <Text size="1" className="text-qt-text-muted">
-                    {t("time_signature")}:
-                </Text>
+                <span className="hs-type-caption">{t("time_signature")}:</span>
                 <Flex align="center" gap="1">
                     <TextField.Root
                         size="1"
@@ -896,9 +892,7 @@ export function ActionBar() {
                             backgroundColor: "var(--qt-base)",
                         }}
                     />
-                    <Text size="1" className="text-qt-text-muted">
-                        /
-                    </Text>
+                    <span className="hs-type-caption">/</span>
                     <Select.Root
                         size="1"
                         value={String(displayDenominator)}
@@ -967,9 +961,7 @@ export function ActionBar() {
                     </Select.Root>
                 </Flex>
 
-                <Text size="1" className="text-qt-text-muted">
-                    {t("common_grid")}:
-                </Text>
+                <span className="hs-type-caption">{t("common_grid")}:</span>
                 <Select.Root
                     value={s.grid}
                     size="1"
@@ -1055,9 +1047,7 @@ export function ActionBar() {
                         </Select.Group>
                     </Select.Content>
                 </Select.Root>
-                <Text size="1" className="text-qt-text-muted">
-                    {t("base_scale")}:
-                </Text>
+                <span className="hs-type-caption">{t("base_scale")}:</span>
                 <Select.Root
                     value={displayScaleSelectValue}
                     size="1"
@@ -1430,15 +1420,18 @@ export function ActionBar() {
                 </Box>
                 {recording.active || recording.countdownRemaining > 0 ? (
                     <Flex align="center" gap="1" className="shrink-0">
-                        <Text
-                            size="1"
-                            color={recording.active ? "red" : "gray"}
-                            className="tabular-nums"
+                        <span
+                            className="hs-type-caption tabular-nums"
+                            style={{
+                                color: recording.active
+                                    ? "var(--qt-danger-text)"
+                                    : "var(--qt-text-muted)",
+                            }}
                         >
                             {recording.countdownRemaining > 0
                                 ? `-${recording.countdownRemaining}`
                                 : formatRecordingTime(recording.elapsedSec)}
-                        </Text>
+                        </span>
                         <div
                             style={{
                                 width: 48,
@@ -1461,15 +1454,13 @@ export function ActionBar() {
                     </Flex>
                 ) : null}
                 {recording.error ? (
-                    <Text
-                        size="1"
-                        color="red"
+                    <span
+                        className="hs-type-caption truncate"
                         data-tooltip={recording.error}
-                        className="truncate"
-                        style={{ maxWidth: 220 }}
+                        style={{ maxWidth: 220, color: "var(--qt-danger-text)" }}
                     >
                         {recordingErrorMessage(recording.error)}
-                    </Text>
+                    </span>
                 ) : null}
             </Flex>
 

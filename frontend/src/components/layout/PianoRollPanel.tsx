@@ -10,7 +10,7 @@ import React, {
     useState,
 } from "react";
 import { flushSync } from "react-dom";
-import { Flex, Text, Button, Box, DropdownMenu } from "@radix-ui/themes";
+import { Flex, Button, Box, DropdownMenu } from "@radix-ui/themes";
 import {
     ChevronDownIcon,
     CursorArrowIcon,
@@ -6937,9 +6937,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         }}
                         icon={s.paramEditorSyncTimeline ? <Link2Icon /> : <LinkBreak2Icon />}
                     />
-                    <Text size="1" weight="bold" color="gray">
-                        {tf("param_editor_short")}
-                    </Text>
+                    <span className="hs-type-muted font-semibold">{tf("param_editor_short")}</span>
                     {/* 工具按钮组（音高吸附等）+ 平滑度滑块。`marginLeft: 8` 是紧邻
                         `参数编辑器` 标题留出的空白。
                         【minWidth 必须显式置 0】flex 项默认 `min-width: auto`（= min-content），
@@ -7054,7 +7052,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                     >
                                                         {item.icon}
                                                     </Box>
-                                                    <Text size="1">{item.label}</Text>
+                                                    <span className="hs-type-label">
+                                                        {item.label}
+                                                    </span>
                                                 </Flex>
                                                 {active ? <CheckIcon /> : null}
                                             </button>
@@ -7421,8 +7421,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             {/* 标签允许被压缩裁切（完整名称在悬停提示里）：横向极窄时
                                 应当由它先让位，而不是把整行撑到溢出。省略号让"让位"
                                 看起来是有意的降级，而不是渲染出错的半截字。 */}
-                            <Text
-                                size="1"
+                            <span
+                                className="hs-type-label"
                                 data-tooltip={tf("edge_smoothness")}
                                 style={{
                                     minWidth: 0,
@@ -7432,7 +7432,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 }}
                             >
                                 {tf("edge_smoothness_short")}:
-                            </Text>
+                            </span>
                             <input
                                 ref={attachEdgeSmoothnessWheel}
                                 className="qt-range"
@@ -7472,9 +7472,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             />
                             {/* 数值需要完整可读（"100%"），因此给它一个较小的固定下限，
                                 但不再是 36px 那种"宁可溢出也不缩"的宽度。 */}
-                            <Text size="1" style={{ minWidth: 28, textAlign: "right" }}>
+                            <span
+                                className="hs-type-caption"
+                                style={{ minWidth: 28, textAlign: "right" }}
+                            >
                                 {Math.round(s.edgeSmoothnessPercent)}%
-                            </Text>
+                            </span>
                         </Flex>
                     </Flex>
                 </Flex>
@@ -7909,13 +7912,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
 
                                 return (
                                     <Flex key={param.id} align="center" gap="1">
-                                        <Text
-                                            size="1"
-                                            color="gray"
+                                        <span
+                                            className="hs-type-caption"
                                             data-tooltip={getProcessorParamLabel(param)}
                                         >
                                             {getProcessorParamLabel(param)}
-                                        </Text>
+                                        </span>
                                         {param.kind.options.map(([label, value]) => (
                                             <Button
                                                 key={`${param.id}-${value}`}
@@ -7935,9 +7937,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     </Flex>
                                 );
                             })}
-                            <Text size="1" color="gray" data-tooltip={tf("algo_label")}>
+                            <span className="hs-type-caption" data-tooltip={tf("algo_label")}>
                                 {tf("algo_label_short")}
-                            </Text>
+                            </span>
                             <AppSelect
                                 // 同上：头部紧凑条内的控件
                                 density="compact"

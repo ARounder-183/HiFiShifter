@@ -8,7 +8,7 @@ import {
     useState,
     type ReactNode,
 } from "react";
-import { Flex, Text, Button } from "@radix-ui/themes";
+import { Flex, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
 import { TimelinePanel } from "./components/layout/TimelinePanel";
@@ -3857,12 +3857,12 @@ function AppInner() {
                             mt="1"
                             className="rounded border border-qt-border bg-qt-base px-2 py-1.5"
                         >
-                            <Text size="1" color="gray" className="min-w-0 truncate">
+                            <span className="hs-type-caption min-w-0 truncate">
                                 {t("recapture_missing_media_search_result_summary")
                                     .replace("{total}", String(sourceFileSearchMatchTotal))
                                     .replace("{exact}", String(sourceFileSearchExactTotal))
                                     .replace("{selected}", String(sourceFileSelectedApplyTotal))}
-                            </Text>
+                            </span>
                             <Flex gap="1" align="center" className="shrink-0">
                                 {(sourceFileExactApplyTotal > 0 ||
                                     sourceFileSelectedApplyTotal > 0) && (
@@ -4088,7 +4088,7 @@ function AppInner() {
                         })}
                     </div>
                     <Flex justify="between" align="center" gap="2" mt="3">
-                        <Text size="1" color="gray">
+                        <span className="hs-type-caption">
                             {t("recapture_missing_media_summary")
                                 .replace(
                                     "{ignored}",
@@ -4115,7 +4115,7 @@ function AppInner() {
                                     ),
                                 )
                                 .replace("{total}", String(sourceFileChangedDialog.changes.length))}
-                        </Text>
+                        </span>
                     </Flex>
                 </div>
             </AppDialog>
@@ -4207,9 +4207,12 @@ function AppInner() {
                                 : ""}
                         </AppStatusChip>
                     ) : null}
-                    <Text size="1" color={error ? "red" : "gray"} className="truncate">
+                    <span
+                        className="hs-type-caption truncate"
+                        style={{ color: error ? "var(--qt-danger-text)" : "var(--qt-text-muted)" }}
+                    >
                         {errorText}
-                    </Text>
+                    </span>
                 </Flex>
             </Flex>
         </Flex>

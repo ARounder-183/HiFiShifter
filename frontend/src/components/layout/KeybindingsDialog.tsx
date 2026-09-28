@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Flex, Text, Button, ScrollArea, Separator, Badge } from "@radix-ui/themes";
+import { Flex, Button, ScrollArea, Separator, Badge } from "@radix-ui/themes";
 import { Cross2Icon } from "@radix-ui/react-icons";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -337,14 +337,14 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
              */
             beforeClose={() => recordingId === null}
         >
-            <Text size="1" color="gray" style={{ marginBottom: 4, display: "block" }}>
+            <span className="hs-type-caption" style={{ marginBottom: 4, display: "block" }}>
                 {tf("kb_dialog_hint_click")}
-            </Text>
+            </span>
 
             <Flex align="center" gap="2" mt="2" mb="2">
-                <Text size="2" color="gray" style={{ whiteSpace: "nowrap" }}>
+                <span className="hs-type-muted" style={{ whiteSpace: "nowrap" }}>
                     {tf("kb_preset_label")}
-                </Text>
+                </span>
                 <AppSelect
                     fullWidth={false}
                     value={selectedPreset}
@@ -360,10 +360,8 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                 <Flex direction="column" gap="3" py="3">
                     {groups.map(({ group, actions }) => (
                         <Flex direction="column" gap="1" key={group}>
-                            <Text
-                                size="1"
-                                weight="bold"
-                                color="gray"
+                            <span
+                                className="hs-type-caption font-semibold"
                                 style={{
                                     textTransform: "uppercase",
                                     letterSpacing: "0.05em",
@@ -371,7 +369,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                                 }}
                             >
                                 {tf(GROUP_LABEL_KEYS[group])}
-                            </Text>
+                            </span>
                             <Separator size="4" />
                             {actions.map((actionId) => {
                                 const meta = ACTION_META[actionId];
@@ -416,9 +414,9 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                                                     )}
                                                 </Badge>
                                             )}
-                                            <Text size="2" style={{ minWidth: 0 }}>
+                                            <span className="hs-type-body" style={{ minWidth: 0 }}>
                                                 {tf(meta.labelKey)}
-                                            </Text>
+                                            </span>
                                         </Flex>
                                         <Flex align="center" gap="2">
                                             {/* 快捷键显示 / 录入按钮 */}
@@ -493,9 +491,9 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                     }}
                 >
                     <Flex direction="column" gap="1" style={{ flex: 1, minWidth: 0 }}>
-                        <Text size="2" color="red">
+                        <span className="hs-type-body" style={{ color: "var(--qt-danger-text)" }}>
                             {tf("kb_conflict_msg")}
-                        </Text>
+                        </span>
                         {Array.from(
                             conflict.conflictWith.reduce((map, id) => {
                                 const group = ACTION_META[id].group;
@@ -505,12 +503,16 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                                 return map;
                             }, new Map<ActionMeta["group"], ActionId[]>()),
                         ).map(([group, ids]) => (
-                            <Text key={group} size="2" color="red">
+                            <span
+                                key={group}
+                                className="hs-type-body"
+                                style={{ color: "var(--qt-danger-text)" }}
+                            >
                                 {tf(GROUP_LABEL_KEYS[group])}：
                                 <strong>
                                     {ids.map((id) => tf(ACTION_META[id].labelKey)).join("、")}
                                 </strong>
-                            </Text>
+                            </span>
                         ))}
                     </Flex>
                     <Button size="1" color="red" variant="soft" onClick={handleConfirmConflict}>

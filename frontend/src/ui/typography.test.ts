@@ -236,15 +236,10 @@ describe("排版角色层级", () => {
      */
     test("src/ui 之外禁止 Radix <Text>（白名单棘轮）", () => {
         const whitelist = new Set([
-            "src/App.tsx",
             "src/components/dock/DockLayoutSettingsDialog.tsx",
             "src/components/layout/AboutDialog.tsx",
-            "src/components/layout/ActionBar.tsx",
-            "src/components/layout/ChannelImportDialog.tsx",
             "src/components/layout/CustomScaleDialog.tsx",
             "src/components/layout/ImportProjectDialog.tsx",
-            "src/components/layout/KeybindingsDialog.tsx",
-            "src/components/layout/PianoRollPanel.tsx",
             "src/components/layout/QuickClipExportDialog.tsx",
             "src/components/layout/QuickSearchPopup.tsx",
             "src/components/layout/TimelineDisplaySettingsDialog.tsx",
