@@ -228,6 +228,58 @@ describe("模态表面必须走组合壳", () => {
     });
 });
 
+describe("菜单表面必须走组合壳", () => {
+    /*
+     * `role="menu"` 且自带 `fixed` 定位的**菜单框**只允许出现在两个地方：组合壳
+     * `ui/Menu.tsx`，以及登记在案的「组合菜单面」。
+     *
+     * 【组合菜单面为什么不是"没迁完"】扁平条目模型（`AppMenuItemSpec`）表达不了
+     * 它们的内容：
+     *   - `ClipContextMenu` / `FadeContextMenu`：行内嵌控件（take 行的反向/声道
+     *     按钮）、飞出子菜单、淡变形状图标条 —— 迁成扁平条目会**删功能**；
+     *   - `ClipRateEditorDialog`：速率编辑浮层，内嵌多个输入框与按钮。
+     * 它们已共享壳的全部机制（`useMenuKeyboard` 键盘模型、`clampAxisPosition`
+     * 定位钳制、`data-hs-floating-menu` 契约、同一套条目样式）。
+     *
+     * ActionBar 的弹层与快速搜索不是菜单（内嵌滑杆 / 自有输入框），它们不写
+     * `role="menu"`，因此不在本门禁范围内 —— 这正是"角色如实声明"的例子。
+     *
+     * 新增一处菜单框必须改这个清单：让"又手写了一个"在 review 里被看见。
+     */
+    const MENU_SURFACE_ALLOWED = [
+        join("src", "ui", "Menu.tsx"),
+        join("src", "components", "layout", "timeline", "ClipContextMenu.tsx"),
+        join("src", "components", "layout", "timeline", "FadeContextMenu.tsx"),
+        join("src", "components", "layout", "timeline", "ClipRateEditorDialog.tsx"),
+    ];
+
+    test("没有白名单之外的菜单框", () => {
+        const offenders: string[] = [];
+        for (const file of walk("src")) {
+            if (!/\.tsx$/.test(file) || /\.test\.tsx$/.test(file)) continue;
+            if (MENU_SURFACE_ALLOWED.includes(file)) continue;
+            const source = readFileSync(file, "utf8");
+            if (/role="menu"/.test(source) && /fixed z-|"fixed /.test(source)) {
+                offenders.push(`  ${file}`);
+            }
+        }
+        expect(
+            offenders.length === 0
+                ? []
+                : ["以下位置手写了菜单框 —— 请用 AppContextMenu：", ...offenders].join("\n"),
+        ).toEqual([]);
+    });
+
+    test("豁免的组合菜单面仍在共享键盘模型与时间轴契约", () => {
+        // 豁免的前提是"它们做对了"，这里把前提钉住。
+        for (const file of MENU_SURFACE_ALLOWED.slice(1)) {
+            const source = readFileSync(file, "utf8");
+            expect(source, `${file} 丢了共享键盘模型`).toContain("useMenuKeyboard");
+            expect(source, `${file} 丢了时间轴浮动菜单契约`).toContain("data-hs-floating-menu");
+        }
+    });
+});
+
 describe("能力层原语本身是齐备的", () => {
     test("三个原语都有实现且已从 barrel 导出", () => {
         const barrel = readFileSync(join("src", "ui", "index.ts"), "utf8");

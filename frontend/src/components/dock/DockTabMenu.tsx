@@ -1,22 +1,23 @@
 /*
  * 标签右键菜单。
  *
- * 【为什么它没有迁到 `AppContextMenu`】菜单第一行是**重命名输入框**，带自己的
- * 模式机（Esc 退回菜单、Enter/blur 提交）。`AppContextMenu` 是"扁平项列表 +
- * 选中即关闭"，没有容纳输入框的槽位；强行迁会在这个文件里留下第二套手写外壳，
- * 反而更差。等原语支持内联编辑器后再统一。
+ * 【收编自手写壳】本菜单曾是 `AppContextMenu` 之外的第二套手写实现，卡点是
+ * 菜单第一行的**重命名输入框**（自带 Enter/blur 提交、Esc 退回菜单的模式机）。
+ * `AppContextMenu` 增加 `header` 槽并把 keydown 监听挪到冒泡阶段后，输入框可以
+ * 优先于菜单的全局处理吃到按键，卡点消除 —— 条目、贡献项、危险项全部走壳。
  *
  * 【它是贡献点的第一个生产用例】第三方 / 内置面板可以往这里加自己的标签菜单项
  * （见 `features/dock/contributions.ts` 的 `registerPanelTabMenuItem`）——
  * 此前面板注册了却只能在 Window 菜单里被找到。
+ *
+ * 【重命名模式的行为】点「重命名」后整份菜单变成输入框（items 清空、只留
+ * header）：Enter 或失焦提交、Esc 退回条目列表、点外面提交 —— 与收编前一致。
  */
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { EDGE_GAP, clampAxisPosition } from "../appTooltipPosition";
-
-import { useMenuKeyboard } from "../../ui/useMenuKeyboard";
+import { AppContextMenu, type AppMenuItemSpec } from "../../ui/Menu";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { renameForm } from "../../features/dock/dockSlice";
 import { usePanelTabMenuItems } from "../../features/dock/contributions";
@@ -39,9 +40,6 @@ export interface DockTabMenuProps {
     detachAction?: { labelKey: string; run: () => void } | null;
 }
 
-/** 菜单宽度：与 `AppContextMenu` 的默认 `minWidth` 保持一致。 */
-const MENU_WIDTH = 190;
-
 export function DockTabMenu({
     formId,
     x,
@@ -56,183 +54,129 @@ export function DockTabMenu({
     /** 本窗体所属面板：贡献项按面板作用域筛选（全局项对所有面板可见）。 */
     const panelId = useAppSelector((state) => state.dock.layout.forms[formId]?.panelId);
     const contributedItems = usePanelTabMenuItems({ panelId });
-    const menuRef = useRef<HTMLDivElement | null>(null);
     const [renaming, setRenaming] = useState(false);
-    const [draft, setDraft] = useState("");
-    // 重命名模式下容器里只有输入框，没有菜单项可导航 —— 交给输入框自己。
-    useMenuKeyboard(menuRef, !renaming);
 
-    /*
-     * 关闭时归还焦点（与 `AppContextMenu` 同一约定）。
-     *
-     * 菜单是弹出表面：卸载后若不归还焦点，键盘用户会被丢到 `<body>`，下一个 Tab
-     * 从文档头重新开始。触发者可能已随菜单一起消失（例如"关闭标签"删掉了它），
-     * 故归还前先查 `isConnected`。
-     */
-    const openerRef = useRef<HTMLElement | null>(null);
-    useEffect(() => {
-        openerRef.current =
-            document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        return () => {
-            const opener = openerRef.current;
-            if (opener?.isConnected) opener.focus();
-        };
-    }, []);
-
-    /*
-     * 视口夹紧：右键点在屏幕右下角时菜单不能跑出可视区。
-     *
-     * 与 `AppContextMenu` 统一为**按实测尺寸**夹紧。原先这里是估算（固定 24px
-     * 行高 + 18px chrome），但本菜单有几种高度不确定的内容：重命名输入框、
-     * 贡献项（第三方可以加任意多项，标签长度也不受控）。估算一旦偏低，菜单底部
-     * 就会跑出视口 —— 用户看不到"关闭标签"这一项。测量在绘制前完成，无闪动。
-     */
-    const [position, setPosition] = useState<{ x: number; y: number; ready: boolean }>({
-        x,
-        y,
-        ready: false,
-    });
-    useLayoutEffect(() => {
-        const el = menuRef.current;
-        if (!el) return;
-        const rect = el.getBoundingClientRect();
-        setPosition({
-            x: clampAxisPosition(x, rect.width, window.innerWidth, 0, EDGE_GAP),
-            y: clampAxisPosition(y, rect.height, window.innerHeight, 0, EDGE_GAP),
-            ready: true,
-        });
-    }, [x, y, renaming, contributedItems.length, detachAction]);
-
-    useEffect(() => {
-        const onKeyDown = (event: KeyboardEvent) => {
-            if (event.key === "Escape") {
-                event.stopPropagation();
-                onClose();
-            }
-        };
-        const onPointerDown = (event: PointerEvent) => {
-            if (menuRef.current?.contains(event.target as Node)) return;
-            onClose();
-        };
-        window.addEventListener("keydown", onKeyDown, true);
-        window.addEventListener("pointerdown", onPointerDown, true);
-        return () => {
-            window.removeEventListener("keydown", onKeyDown, true);
-            window.removeEventListener("pointerdown", onPointerDown, true);
-        };
-    }, [onClose]);
+    const items: AppMenuItemSpec[] = renaming
+        ? []
+        : [
+              {
+                  key: "rename",
+                  label: tf("dock_rename_tab"),
+                  onSelect: () => setRenaming(true),
+              },
+              { key: "float", label: tf("dock_float"), onSelect: onFloat },
+              ...(detachAction
+                  ? [
+                        {
+                            key: "detach",
+                            label: tf(detachAction.labelKey),
+                            onSelect: () => {
+                                detachAction.run();
+                                onClose();
+                            },
+                        },
+                    ]
+                  : []),
+              ...(contributedItems.length > 0
+                  ? contributedItems.map((item, index) => ({
+                        key: item.id,
+                        label: item.label,
+                        danger: item.danger,
+                        disabled: item.enabled ? !item.enabled() : false,
+                        separatorBefore: index === 0,
+                        onSelect: () => {
+                            item.onSelect();
+                            onClose();
+                        },
+                    }))
+                  : []),
+              {
+                  key: "close",
+                  label: t("close"),
+                  danger: true,
+                  separatorBefore: true,
+                  onSelect: () => {
+                      onCloseForm();
+                      onClose();
+                  },
+              },
+          ];
 
     return createPortal(
-        <div
-            ref={menuRef}
-            role="menu"
-            data-hs-context-menu="1"
-            className="fixed z-qt-menu min-w-[190px] rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg"
-            style={{
-                left: position.x,
-                top: position.y,
-                minWidth: MENU_WIDTH,
-                visibility: position.ready ? undefined : "hidden",
-            }}
-            onPointerDown={(event) => event.stopPropagation()}
-            onContextMenu={(event) => event.preventDefault()}
-        >
-            {renaming ? (
-                <div className="px-2 py-1">
-                    <input
-                        autoFocus
-                        value={draft}
-                        onChange={(event) => setDraft(event.target.value)}
-                        onKeyDown={(event) => {
-                            if (event.key === "Enter") {
-                                dispatch(renameForm({ formId, title: draft }));
-                                onClose();
-                            }
-                            if (event.key === "Escape") setRenaming(false);
-                        }}
-                        onBlur={() => {
-                            dispatch(renameForm({ formId, title: draft }));
+        <AppContextMenu
+            x={x}
+            y={y}
+            ariaLabel={tf("dock_rename_tab")}
+            items={items}
+            onClose={onClose}
+            header={
+                renaming ? (
+                    <RenameInput
+                        onCommit={(title) => {
+                            dispatch(renameForm({ formId, title }));
                             onClose();
                         }}
-                        className="w-full rounded border border-qt-border bg-qt-base px-1 py-0.5 text-qt-xs text-qt-text outline-none"
+                        onCancel={() => setRenaming(false)}
                     />
-                </div>
-            ) : (
-                <MenuItem
-                    label={tf("dock_rename_tab")}
-                    onClick={() => {
-                        setDraft("");
-                        setRenaming(true);
-                    }}
-                />
-            )}
-            <MenuItem label={tf("dock_float")} onClick={onFloat} />
-            {detachAction ? (
-                <MenuItem
-                    label={tf(detachAction.labelKey)}
-                    onClick={() => {
-                        detachAction.run();
-                        onClose();
-                    }}
-                />
-            ) : null}
-            {contributedItems.length > 0 ? (
-                <>
-                    <div className="my-1 border-t border-qt-border" />
-                    {contributedItems.map((item) => (
-                        <MenuItem
-                            key={item.id}
-                            label={item.label}
-                            danger={item.danger}
-                            disabled={item.enabled ? !item.enabled() : false}
-                            onClick={() => {
-                                item.onSelect();
-                                onClose();
-                            }}
-                        />
-                    ))}
-                </>
-            ) : null}
-            <div className="my-1 border-t border-qt-border" />
-            <MenuItem
-                label={t("close")}
-                danger
-                onClick={() => {
-                    onCloseForm();
-                    onClose();
-                }}
-            />
-        </div>,
+                ) : undefined
+            }
+        />,
         document.body,
     );
 }
 
-function MenuItem({
-    label,
-    onClick,
-    danger,
-    disabled = false,
+/**
+ * 重命名输入框（header 槽内容）。
+ *
+ * 【按键时序】Enter/Escape 在输入框自己的 onKeyDown 里 `stopPropagation()` ——
+ * `AppContextMenu` 的 keydown 监听在冒泡阶段，输入框（目标）先跑，退回菜单
+ * 不会被菜单的全局 Esc 处理抢先把整个菜单关掉。
+ *
+ * 【点外面 = 提交】与收编前一致：捕获阶段监听 pointerdown，点在输入框之外
+ * 视为确认（失焦提交在 portal 卸载时不会触发，所以这里显式监听）。
+ */
+function RenameInput({
+    onCommit,
+    onCancel,
 }: {
-    label: string;
-    onClick: () => void;
-    danger?: boolean;
-    disabled?: boolean;
+    onCommit: (title: string) => void;
+    onCancel: () => void;
 }) {
+    const [draft, setDraft] = useState("");
+    const ref = useRef<HTMLInputElement | null>(null);
+    /** 外部点击提交时读最新草稿：在事件处理器里同步（渲染期写 ref 会被
+     *  React Compiler 的引用规则拒绝）。 */
+    const draftRef = useRef("");
+
+    useEffect(() => {
+        function onPointerDown(event: PointerEvent) {
+            if (ref.current?.contains(event.target as Node)) return;
+            onCommit(draftRef.current);
+        }
+        window.addEventListener("pointerdown", onPointerDown, true);
+        return () => window.removeEventListener("pointerdown", onPointerDown, true);
+    }, [onCommit]);
+
     return (
-        <button
-            type="button"
-            role="menuitem"
-            disabled={disabled}
-            className={`block w-full px-3 py-1.5 text-left text-qt-xs ${
-                disabled
-                    ? "cursor-default text-qt-text-muted"
-                    : danger
-                      ? "hover:bg-qt-danger-bg hover:text-qt-danger-text"
-                      : "hover:bg-qt-hover"
-            }`}
-            onClick={onClick}
-        >
-            {label}
-        </button>
+        <input
+            ref={ref}
+            autoFocus
+            value={draft}
+            onChange={(event) => {
+                setDraft(event.target.value);
+                draftRef.current = event.target.value;
+            }}
+            onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                    event.stopPropagation();
+                    onCommit(draft);
+                }
+                if (event.key === "Escape") {
+                    event.stopPropagation();
+                    onCancel();
+                }
+            }}
+            className="w-full rounded border border-qt-border bg-qt-base px-1 py-0.5 text-qt-xs text-qt-text outline-none"
+        />
     );
 }

@@ -30,7 +30,8 @@ import { cx } from "./cx";
 export interface AppMenuItemSpec {
     key: string;
     label: ReactNode;
-    onSelect: () => void;
+    /** 选择回调。`heading: true` 的标题行可省略。 */
+    onSelect?: () => void;
     /** 展示用快捷键文本（不参与绑定，与 `data-tooltip` 同源）。 */
     shortcut?: string;
     /** 破坏性操作：悬停变红底红字。 */
@@ -40,6 +41,18 @@ export interface AppMenuItemSpec {
     separatorBefore?: boolean;
     /** 右侧勾选标记（用于"当前选中项"这类菜单）。 */
     checked?: boolean;
+    /** 条目左侧图标（take 操作、菜单按钮等）。 */
+    icon?: ReactNode;
+    /**
+     * 悬停 / 禁用原因解释（走项目自定义 tooltip 通道）。收编自
+     * `ClipContextMenu` 的 `title` prop —— "为什么点不了"应当可见。
+     */
+    tooltip?: string;
+    /**
+     * 分组标题行：渲染为不可选中的小标题（大写弱化色），不参与键盘导航。
+     * 收编自 ActionBar 录音菜单的手写分组行 —— 平面菜单也常有分段需求。
+     */
+    heading?: boolean;
 }
 
 export interface AppContextMenuProps {
@@ -52,6 +65,13 @@ export interface AppContextMenuProps {
     minWidth?: number;
     /** 无障碍名称：菜单是弹出表面，需要有可读名称。 */
     ariaLabel?: string;
+    /**
+     * 顶部自定义区：渲染在条目列表之上、参与同一次定位测量。
+     * `DockTabMenu` 的行内重命名、ActionBar 录音菜单的分组头由此承载。
+     * 注意：这里是**非条目**内容，不参与键盘导航 —— 需要可聚焦控件的
+     * 内容（如重命名输入框）自己处理焦点与 Enter/Esc。
+     */
+    header?: ReactNode;
     /**
      * 是否标记为「时间轴浮动菜单」（`data-hs-floating-menu="1"`）。
      *
@@ -92,6 +112,7 @@ export function AppContextMenu({
     onClose,
     minWidth = 190,
     ariaLabel,
+    header,
     floating = false,
 }: AppContextMenuProps) {
     const ref = useRef<HTMLDivElement | null>(null);
@@ -121,11 +142,11 @@ export function AppContextMenu({
         };
     }, []);
 
-    /** 可被键盘选中的项下标（禁用项不参与）。 */
+    /** 可被键盘选中的项下标（禁用项与标题行不参与）。 */
     const selectableIndexes = useMemo(
         () =>
             items.reduce<number[]>(
-                (acc, item, index) => (item.disabled ? acc : [...acc, index]),
+                (acc, item, index) => (item.disabled || item.heading ? acc : [...acc, index]),
                 [],
             ),
         [items],
@@ -172,9 +193,13 @@ export function AppContextMenu({
     /**
      * 全局监听：Esc 关闭、外部指针按下关闭、方向键导航。
      *
-     * 捕获阶段监听：编辑器/画布自身的 `pointerdown` 会先改变选择，
-     * 若用冒泡阶段，菜单可能先关闭又被下层重新打开。与既有
-     * `NotebookContextMenu` 的处理一致。
+     * 【pointerdown 用捕获阶段】编辑器/画布自身的 `pointerdown` 会先改变选择，
+     * 若用冒泡阶段，菜单可能先关闭又被下层重新打开。
+     *
+     * 【keydown 用冒泡阶段】header 槽里的可交互内容（如 DockTabMenu 的重命名
+     * 输入框）需要先吃到 Enter/Esc：监听在冒泡阶段时，目标元素的处理先于
+     * 本监听，输入框 `stopPropagation()` 即可优先。全局快捷键分发器挂在
+     * window 捕获层，无论如何都先于这里 —— 时序不受影响。
      */
     useEffect(() => {
         function onPointerDown(event: PointerEvent) {
@@ -207,14 +232,14 @@ export function AppContextMenu({
             }
         }
         document.addEventListener("pointerdown", onPointerDown, true);
-        document.addEventListener("keydown", onKeyDown, true);
+        document.addEventListener("keydown", onKeyDown);
         return () => {
             document.removeEventListener("pointerdown", onPointerDown, true);
-            document.removeEventListener("keydown", onKeyDown, true);
+            document.removeEventListener("keydown", onKeyDown);
         };
     }, [onClose, step, selectableIndexes]);
 
-    /** 键盘激活：与鼠标点击走同一条路径，保证行为不分叉。 */
+    /** 键盘激活：与鼠标点击走同一条路径，保证行为不分叉。（冒泡阶段，理由同上） */
     useEffect(() => {
         function onKeyActivate(event: KeyboardEvent) {
             if (event.key !== "Enter" && event.key !== " ") return;
@@ -223,11 +248,11 @@ export function AppContextMenu({
             const item = items[index];
             if (!item || item.disabled) return;
             event.preventDefault();
-            item.onSelect();
+            item.onSelect?.();
             onClose();
         }
-        document.addEventListener("keydown", onKeyActivate, true);
-        return () => document.removeEventListener("keydown", onKeyActivate, true);
+        document.addEventListener("keydown", onKeyActivate);
+        return () => document.removeEventListener("keydown", onKeyActivate);
     }, [activeIndex, items, onClose]);
 
     return (
@@ -251,6 +276,7 @@ export function AppContextMenu({
             onPointerDown={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}
         >
+            {header ? <div className="border-b border-qt-border px-2 py-1">{header}</div> : null}
             {items.map((item, index) => (
                 <AppContextMenuItem
                     key={item.key}
@@ -258,7 +284,7 @@ export function AppContextMenu({
                     active={index === activeIndex}
                     onHover={() => setActiveIndex(item.disabled ? -1 : index)}
                     onSelect={() => {
-                        item.onSelect();
+                        item.onSelect?.();
                         onClose();
                     }}
                 />
@@ -278,6 +304,16 @@ function AppContextMenuItem({
     onHover: () => void;
     onSelect: () => void;
 }) {
+    if (item.heading) {
+        return (
+            <div
+                className="hs-type-caption px-3 py-1 font-semibold uppercase tracking-wide"
+                style={{ paddingLeft: "var(--qt-space-5)" }}
+            >
+                {item.label}
+            </div>
+        );
+    }
     const tone = item.disabled
         ? "cursor-default text-qt-text-muted"
         : item.danger
@@ -298,13 +334,21 @@ function AppContextMenuItem({
                 active && !item.disabled && "bg-qt-hover",
             )}
             style={{ paddingLeft: "var(--qt-space-5)", paddingRight: "var(--qt-space-5)" }}
+            data-tooltip={item.tooltip}
             onMouseEnter={onHover}
             onClick={() => {
                 if (item.disabled) return;
                 onSelect();
             }}
         >
-            <span className="truncate">{item.label}</span>
+            <span className="flex min-w-0 items-center gap-2">
+                {item.icon ? (
+                    <span className="shrink-0" aria-hidden>
+                        {item.icon}
+                    </span>
+                ) : null}
+                <span className="truncate">{item.label}</span>
+            </span>
             <span className="flex shrink-0 items-center gap-2">
                 {item.checked ? <span aria-hidden>✓</span> : null}
                 {item.shortcut ? <span className="text-qt-text-muted">{item.shortcut}</span> : null}
