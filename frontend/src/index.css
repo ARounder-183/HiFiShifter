@@ -568,32 +568,34 @@ textarea {
  * 严重度：只给**确实会造成数据损失/损坏**的确认框用（丢弃未保存更改、覆盖
  * 更高版本的工程文件、清空速度映射…）。
  *
- * 【为什么单独一档而不是让按钮变色】按钮语义由 `intent` 回答（按下去做什么），
- * 严重度由这里回答（这事多危险）。上一轮把两者合并过一次，结果是破坏性主操作
- * 失去分量 —— 同样的错误不重复。
+ * 【为什么消息本身不上色】上一轮把严重度画成"底色 + 左色条 + 彩色文字"的告警卡，
+ * 实测在一枚 400px 的确认框里占了三分之一，还与 accent 实心按钮形成两块饱和色，
+ * 用户反馈"太怪、不符合本项目的一贯风格"。桌面消息框的惯例（Qt / Win32 /
+ * macOS / Radix AlertDialog）是**消息永远是平文本正文**，严重度只住在两处：
+ * 这里的图标，以及动作按钮的 `intent` —— 严重度要落在后果上。仓库内的对照组是
+ * 「清除波形缓存」（无 tone + `intent: "danger"`），观感正确；填充告警卡是
+ * web 文档的惯例，不进本系统。
  *
- * 【为什么用左侧色条而不是整块底色】整块底色会和对话框自身的面板底色打架，
- * 也让"消息"看起来像一个独立区块；左侧 3px 色条 + 图标既传达严重度，
- * 又保持消息是"对话框正文"而不是"另一个卡片"。
+ * 【为什么单独一档而不是让按钮变色】按钮语义由 `intent` 回答（按下去做什么），
+ * 严重度由这里回答（这事多危险）。两者互补：tone 负责图标，调用方给破坏性动作
+ * 显式挂 `intent: "danger"`。上一轮把两者合并过一次，结果是破坏性主操作失去
+ * 分量 —— 同样的错误不重复。
  */
 .app-dialog__message--tone {
     display: flex;
     gap: var(--qt-space-5);
     align-items: flex-start;
-    padding: var(--qt-space-5) var(--qt-space-5) var(--qt-space-5) var(--qt-space-6);
-    border-left: 3px solid transparent;
-    border-radius: var(--qt-radius-sm);
 }
 
-.app-dialog__message--warning {
-    background: var(--qt-warning-bg);
-    border-left-color: var(--qt-warning-border);
+/*
+ * 图标着色走语义令牌（两套主题各有一份取值）；消息文字保持 `.hs-type-body`
+ * 的正文色。容器上的 `data-tone` 由 `Dialog.tsx` 写入，非 default 才存在。
+ */
+[data-tone="warning"] .app-dialog__tone-icon {
     color: var(--qt-warning-text);
 }
 
-.app-dialog__message--danger {
-    background: var(--qt-danger-bg);
-    border-left-color: var(--qt-danger-border);
+[data-tone="danger"] .app-dialog__tone-icon {
     color: var(--qt-danger-text);
 }
 

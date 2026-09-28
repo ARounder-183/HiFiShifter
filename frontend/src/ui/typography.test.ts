@@ -135,17 +135,19 @@ describe("排版角色层级", () => {
         expect(ROLE_FONT.body).toBeGreaterThan(ROLE_FONT.label);
     });
 
-    test("严重度配色走语义令牌，不写死颜色", () => {
-        // 用 warning/danger 令牌而不是十六进制：两套主题各有一份取值。
-        for (const [tone, token] of [
-            ["warning", "--qt-warning"],
-            ["danger", "--qt-danger"],
-        ] as const) {
-            const body = ruleBody(`.app-dialog__message--${tone}`);
-            expect(body, `${tone} 未使用 ${token}-bg`).toContain(`var(${token}-bg)`);
-            expect(body, `${tone} 未使用 ${token}-border`).toContain(`var(${token}-border)`);
-            expect(body, `${tone} 未使用 ${token}-text`).toContain(`var(${token}-text)`);
-        }
+    test("严重度只落在图标上，消息永远是平文本正文", () => {
+        /*
+         * 上一轮把 tone 画成"底色 + 左色条 + 彩色文字"的告警卡，实测在一枚
+         * 400px 的确认框里占了三分之一，用户反馈"太怪"。桌面消息框的惯例是
+         * 消息保持平文本，严重度住在图标与动作按钮上 —— 这里把"平文本"钉死：
+         * 谁把填充告警卡写回来就红。
+         */
+        const tone = ruleBody(".app-dialog__message--tone");
+        expect(tone, "消息块又画回了告警卡（background）").not.toMatch(/background:/);
+        expect(tone, "消息块又画回了告警卡（border-left）").not.toMatch(/border-left:/);
+        // 图标着色走语义令牌，不写死十六进制：两套主题各有一份取值。
+        expect(css).toMatch(/\[data-tone="warning"\][^}]*var\(--qt-warning-text\)/);
+        expect(css).toMatch(/\[data-tone="danger"\][^}]*var\(--qt-danger-text\)/);
     });
 
     test("字号阶梯覆盖到标题量级（否则作者只能拿最接近的值凑）", () => {

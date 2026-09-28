@@ -3622,6 +3622,8 @@ function AppInner() {
                     {
                         id: "discard",
                         label: t("unsaved_changes_discard"),
+                        // 丢弃是本对话框里唯一不可逆的选择：严重度落在后果上。
+                        intent: "danger",
                         onClick: discardUnsavedAndContinue,
                     },
                     {

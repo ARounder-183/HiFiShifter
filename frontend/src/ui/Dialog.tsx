@@ -46,8 +46,9 @@ export type AppDialogSize = "sm" | "md" | "lg" | "xl";
  * 对话框严重度。
  *
  * 【取值克制】只有"会丢数据 / 会损坏文件"的场景才配 `warning` / `danger`。
- * 这两档会把消息块染成警示色并加图标，用多了就变成噪音 —— 用户会像忽略
- * 弹窗广告一样忽略它。默认 `default` 是**无样式**的。
+ * 这两档会在消息前放一个警示色图标（消息本身保持平文本正文，呈现规则见
+ * `index.css` 的 `.app-dialog__message--tone`），用多了就变成噪音 —— 用户会
+ * 像忽略弹窗广告一样忽略它。默认 `default` 是**无样式**的。
  */
 export type AppDialogTone = "default" | "warning" | "danger";
 
@@ -118,8 +119,9 @@ export interface AppDialogProps {
      */
     description?: ReactNode;
     /**
-     * 严重度。只影响"图标 + 左侧色条 + 消息底色"，**不改变按钮语义**
-     * （那是 `actions[].intent` 的职责）。
+     * 严重度。只影响**消息前图标的配色**，不改变消息文字，也不改变按钮
+     * （破坏性动作请显式给 `actions[].intent: "danger"` —— 严重度要落在
+     * 后果上，而不是把消息染成告警卡）。
      *
      * 只给确实会造成数据损失/损坏的确认框用。普通提示保持 `default` ——
      * 到处报警等于没有报警。
@@ -386,11 +388,10 @@ export function AppDialog({
                     {message ? (
                         <div
                             className={cx(
-                                // 字号/行高/颜色来自角色层；本类只管严重度的呈现。
+                                // 字号/行高/颜色来自角色层；本类只管图标与文字的排列。
+                                // 严重度的配色只作用于下面的图标（见 index.css 的 data-tone 规则）。
                                 "hs-type-body app-dialog__message mt-2",
                                 tone !== "default" && "app-dialog__message--tone",
-                                tone === "warning" && "app-dialog__message--warning",
-                                tone === "danger" && "app-dialog__message--danger",
                             )}
                             /*
                              * 带严重度时，消息块自己就是可读描述；否则它仍是
