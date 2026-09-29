@@ -126,6 +126,15 @@ import {
     scrollbarContentSizePx,
 } from "../../../renderKernel/scrollbars";
 import { normalizeWheelDelta } from "../input/normalizeWheel";
+// 场景重建判定：**行高判据必须与几何构建所用行高同源**（都用内核值，不用 React
+// 镜像）。用镜像会让"内核已换行高、几何还是旧行高"的那一帧逃过重建 —— 画布按旧
+// 行高绘制一帧，即用户报告的"竖直缩放后竖直方向抽动"。见该模块文件头与回归测试。
+import { shouldRebuildScene } from "../input/sceneRebuildPolicy";
+import {
+    resolveVerticalZoomScrollTop,
+    resolveVerticalZoomStep,
+    type VerticalZoomRequest,
+} from "../input/verticalZoomRequest";
 import {
     createVerticalZoomFlight,
     shouldSettleVerticalZoom,
@@ -417,6 +426,13 @@ export interface TimelineKernelHostArgs {
      *
      * 行高的真值源在 React（左侧轨道头与内核必须同源），内核只负责手势解析与
      * 锚点换算，不能自行改行高——否则两侧会各持一个行高并立刻错位。
+     *
+     * 【必须配对使用 `applyPendingVerticalZoom`】本回调只交付**行高**；位置由 React
+     * 落地的那次提交里调 `applyPendingVerticalZoom(rowHeight)` 原子应用。两者缺一不可：
+     * 只写行高不落地位置，锚点就丢了（视口跳到别处）。
+     *
+     * 缺省（未提供）时**退回内核立即生效**：老调用方不会因为缺这个回调而失去缩放
+     * （见 `onWheel` 的兜底分支与 `verticalZoomInFlight`）。
      */
     readonly onRowHeightChange?: (rowHeightPx: number) => void;
     /**
@@ -1100,9 +1116,43 @@ export interface TimelineKernelHost {
      * 面板据此把窗口内的回灌一律视为回声；位置由宿主在行高落地后补写（见宿主内
      * `verticalZoomInFlight` 的机制说明）。
      *
+     * 特殊说明：主路径（有 `onRowHeightChange` 落地通道）**不会**进入在途状态——它
+     * 走"请求 → React 落地 → 同一次提交原子应用"，内核不领先 React。本方法只为兜底
+     * 路径而存在，返回 true 只可能来自未接线宿主。
+     *
      * @returns 有竖直缩放在途时为 true。
      */
     isVerticalZoomInFlight(): boolean;
+    /**
+     * 由 React 在**行高落地的同一次提交**里调用：把待定的竖直缩放原子应用到内核。
+     *
+     * 【为什么必须由 React 调、且必须在同一次提交里】行高落地的那次提交是"轨道头 DOM
+     * 重排、波形行几何重建、内核视口切换"三者唯一能对齐的时机（见 `pendingVerticalZoom`）。
+     * 调用方应在同一次 layout effect 里紧接着 `invalidateScene()` + `paintNow()`，
+     * 使这三者落在**同一个任务、同一次绘制**里。
+     *
+     * 【守卫语义】只在"提交的行高等于请求的行高"时才应用；否则直接返回并**保留**请求
+     * （行高被别的来源改掉时不能把请求错配上去，与 `TrackList` 的 `pendingVerticalZoomRef`
+     * 同一守卫）。没有待定请求时，本方法退化为"让内核跟上 React 提交的行高"，即外部
+     * 来源（持久化恢复 / 轨道头缩放）仍照常同步。
+     *
+     * @param committedRowHeight React 本次提交生效的行高（CSS px）。必须传**已提交**的
+     *   值而不是请求值：内核对行高的任何写入都不得领先 React。
+     * @returns 无返回值；无待定请求且行高未变时不产生任何状态变化。
+     */
+    applyPendingVerticalZoom(committedRowHeight: number): void;
+    /**
+     * 诊断（DEV 出口，经 `window.__hfsKernel` 读取）：**几何与视口不同源**的绘制帧数。
+     *
+     * 【怎么用】在画布上连续竖直缩放，全程读它：修好之后必须恒为 0。竖直缩放的抽动
+     * 就是这类帧造成的（几何按旧行高、视口按新行高 → 内容错位一帧再跳回），因此这是
+     * 本缺陷最直接的可证伪观测点。
+     *
+     * 特殊说明：只在 DEV 构建里自增（生产构建该分支被裁剪，恒返回 0）。
+     *
+     * @returns 累计帧数。
+     */
+    staleGeometryFrameCount(): number;
     /**
      * 原子地设置缩放与横向滚动位置（键盘缩放 / 视图同步）。
      *
@@ -1668,20 +1718,30 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let builtBeatsPerBar = -1;
     let builtRowHeight = -1;
     /**
+     * 诊断计数：**几何与视口不同源**的绘制帧数（`builtRowHeight !== view.rowHeight`）。
+     *
+     * 【为什么留着它】竖直缩放的抽动正是这类帧造成的：几何按旧行高、视口按新行高，
+     * 画面上"内容先错位再跳回"。修好之后它必须恒为 0，因此这是本缺陷最直接的
+     * 可证伪观测点（比"看着不抖了"可靠）。只在 DEV 构建里自增，生产构建被裁剪。
+     */
+    let staleGeometryFrameCount = 0;
+    /**
      * 上一次从 React 镜像**推入内核**的行高。
      *
      * 【为什么需要单独追踪——纵向缩放"跳一下"的根因】
-     * 竖直缩放分支会一次写入「新行高 + 新位置」（`setRowHeightAndScrollTop`），
-     * 但那之后 `ensureScene` 每帧还会执行 `scroll.setRowHeight(d.rowHeight)`。
-     * `d.rowHeight` 是 React 镜像，**必然滞后一帧**（要经 state 提交再回流），
-     * 于是它会把内核刚写入的新行高**改回旧值**，制造出「新位置 + 旧行高」的一帧
+     * `ensureScene` 每帧都可能执行 `scroll.setRowHeight(d.rowHeight)`，而
+     * `d.rowHeight` 是 React 镜像，**必然滞后一帧**（要经 state 提交再回流）。
+     * 每帧无条件回灌会把内核刚写入的新行高**改回旧值**，制造出「新位置 + 旧行高」的一帧
      * ——实测连续放大时内核真值为
      * `(scrollTop 223.8, rowHeight 80) → (223.8, 88) → (250.58, 88) …`，
      * 即每步缩放多出一帧错配，画布按旧行高绘制 → 用户看到"纵向滚动了一下"。
      *
-     * 改为**仅在镜像值真正变化时**同步：缩放期间镜像从 80 → 88 只会触发一次同步
+     * 改为**仅在镜像值真正变化时**同步：连续缩放期间镜像从 80 → 88 只会触发一次同步
      * （且此时内核已是 88，是无操作），中间那一帧不再被回灌旧值。
-     * 外部驱动的行高变化（改设置 / 持久化恢复 / 轨道头缩放）仍照常同步。
+     *
+     * 【现在谁还需要它】竖直缩放的主路径已改为"请求 → React 落地 → 同一次提交原子应用"
+     * （见 `applyPendingVerticalZoom`），内核不再领先 React；本回灌通道现在服务的是
+     * **外部来源**的行高变化（持久化恢复 / 轨道头缩放 / 兜底路径的镜像回灌）。
      */
     let lastMirroredRowHeight = -1;
     // 选中态影响 clip 描边 / 高亮样式，变化时必须重建（用引用比较：Immer 未变更
@@ -1763,6 +1823,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * 用**引用比较**（Redux/Immer 在未变更时保持引用稳定）而不是字段值比较：
      * clip 拖动 / 编辑只改元素内容、不改数组长度，按长度比较会漏掉重建；
      * 引用比较既准确又零分配（不拼字符串）。
+     *
+     * 特殊说明：**行高不在这里判**。行高改变所有行的内容坐标，必须重建，但判据必须与
+     * 几何构建所用行高同源（内核值），因此由 `ensureScene` 交给 `shouldRebuildScene`
+     * 统一判（见该模块文件头：用 React 镜像判会漏掉"内核先行"的那一帧）。
      */
     function sceneContentChanged(d: TimelineKernelData): boolean {
         return (
@@ -1772,8 +1836,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             builtGrid !== d.grid ||
             builtBpm !== d.bpm ||
             builtBeatsPerBar !== d.beatsPerBar ||
-            // 行高变化会改变所有行的内容坐标（分界线 / clip 位置），必须重建。
-            builtRowHeight !== d.rowHeight ||
             builtSelectedClipId !== d.selectedClipId ||
             builtMultiSelectedRef !== d.multiSelectedClipIds
         );
@@ -1911,7 +1973,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         builtGrid = d.grid;
         builtBpm = d.bpm;
         builtBeatsPerBar = d.beatsPerBar;
-        builtRowHeight = d.rowHeight;
+        // 记**内核行高**而不是 React 镜像：判据（`shouldRebuildScene`）必须与几何
+        // 构建所用行高同源，否则镜像滞后的那一帧会逃过重建（见该模块文件头）。
+        builtRowHeight = view.rowHeight;
         builtSelectedClipId = d.selectedClipId;
         builtMultiSelectedRef = d.multiSelectedClipIds;
         // 细节层窗口：与 GL 几何窗口完全一致（同一批 drawClips、同一内容坐标
@@ -1946,34 +2010,66 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     }
 
     /**
-     * 判断是否需要重建几何。
+     * 把 React 镜像的行高同步进内核。
      *
-     * 触发条件（任一成立即重建）：
-     * - 显式标脏 / 缩放变化 / 主题变化 / 内容引用变化；
-     * - 水平滚动超出横向余量；
-     * - **竖直滚动超出 overscan 行**（轨道窗口按 scrollTop 构建，不重建会缺行）。
+     * 行高的真值源在 React（左侧轨道头与内核必须同源），但**只在镜像值真正变化时**才
+     * 推入内核：每帧无条件回灌会把缩放分支刚写入的新行高改回滞后的旧值，产生
+     * 「新位置 + 旧行高」的错配帧（见 `lastMirroredRowHeight`）。
      *
-     * 特殊说明：余量内的纯滚动不重建——这正是"滚动零重绘"的实现点。
+     * 【为什么必须是独立的一步、且必须在取视口快照**之前**调用】
+     * `scroll.setRowHeight` 会顺带按新行高**钳制竖直位置**（见 `ScrollKernel` 的约束 1），
+     * 即它可能改变本帧的视口。若先取快照再同步，本帧就会出现"几何按同步后的行高、
+     * 各图层按同步前的位置"的错配 —— 与"竖直缩放抽动"同一类缺陷（几何与视口不同源）。
+     * 因此调用方（`draw`）必须先调本函数，再取快照，且两者之间不得插入其它写入。
+     *
+     * @returns 无返回值；镜像未变化时不产生任何状态变化。
      */
-    function ensureScene(axis: TimelineAxis): boolean {
-        const view = scroll.get();
+    function syncRowHeightFromMirror(): void {
         const d = data();
-        // 行高的真值源在 React（左侧轨道头与内核必须同源），但**只在镜像值真正
-        // 变化时**才推入内核：每帧无条件回灌会把缩放分支刚写入的新行高改回
-        // 滞后的旧值，产生「新位置 + 旧行高」的错配帧（见 lastMirroredRowHeight）。
-        if (d.rowHeight !== lastMirroredRowHeight) {
-            lastMirroredRowHeight = d.rowHeight;
-            scroll.setRowHeight(d.rowHeight);
-            // React 行高已落地：结算在途的竖直缩放（补写轨道头位置，见该状态的说明）。
-            settleVerticalZoom();
-        }
-        const needsRebuild =
-            sceneDirty ||
-            builtPxPerSec !== view.pxPerSec ||
-            builtDarkMode !== d.darkMode ||
-            sceneContentChanged(d) ||
-            Math.abs(view.scrollLeft - builtScrollLeftPx) > HORIZONTAL_MARGIN_PX ||
-            Math.abs(view.scrollTop - builtScrollTopPx) > view.rowHeight * VERTICAL_OVERSCAN_ROWS;
+        if (d.rowHeight === lastMirroredRowHeight) return;
+        lastMirroredRowHeight = d.rowHeight;
+        scroll.setRowHeight(d.rowHeight);
+        // React 行高已落地：结算在途的竖直缩放（补写轨道头位置，见该状态的说明）。
+        settleVerticalZoom();
+    }
+
+    /**
+     * 判断是否需要重建几何（判据本体在 `shouldRebuildScene`，纯函数、可单测）。
+     *
+     * 触发条件（任一成立即重建）：显式标脏 / 水平缩放变化 / 主题变化 / 内容引用变化 /
+     * **行高变化** / 水平滚动超出余量 / 竖直滚动超出 overscan 行。
+     * 余量内的纯滚动不重建 —— 这正是"滚动零重绘"的实现点。
+     *
+     * 【调用契约】`view` 与 `axis` 必须是**行高镜像同步之后**取的同一份快照
+     * （见 `syncRowHeightFromMirror`）：行高同步可能钳制竖直位置，取早了本帧的
+     * 几何与视口偏移就不同源。
+     *
+     * 特殊说明：`view` 必须是**未吸附**的视口真值。几何的记账（`built*`）取自未吸附
+     * 值，余量比较同口径才不会在边界上随机多重建一帧；吸附值只服务渲染。
+     *
+     * @param view 同步后的视口真值快照（未吸附）。
+     * @param axis 同一快照派生的内容坐标投影（渲染吸附后的值，供几何记账用）。
+     * @returns 已重建时为 true。
+     */
+    function ensureScene(view: TimelineViewportState, axis: TimelineAxis): boolean {
+        const d = data();
+        const needsRebuild = shouldRebuildScene({
+            sceneDirty,
+            builtPxPerSec,
+            viewPxPerSec: view.pxPerSec,
+            builtDarkMode,
+            darkMode: d.darkMode,
+            contentChanged: sceneContentChanged(d),
+            builtScrollLeftPx,
+            viewScrollLeft: view.scrollLeft,
+            builtScrollTopPx,
+            viewScrollTop: view.scrollTop,
+            // 行高判据与几何同源：几何用内核值构建（见 rebuildInstances），这里也用内核值。
+            viewRowHeight: view.rowHeight,
+            builtRowHeight,
+            horizontalMarginPx: HORIZONTAL_MARGIN_PX,
+            verticalOverscanRows: VERTICAL_OVERSCAN_ROWS,
+        });
         if (!needsRebuild) return false;
         rebuildInstances(axis);
         return true;
@@ -2065,19 +2161,36 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let lastRulerTranslateX = Number.NaN;
     let lastTrackListScrollTop = Number.NaN;
     /**
+     * 已提出、但 React 还没落地的竖直缩放请求（`null` = 没有待定请求）。
+     *
+     * 【作用一：行高的累积基准】连续滚轮时 React 会把多次 `setRowHeight` 合并成最后一次
+     * 提交，若每步都以内核（还是旧行高）为基准重算，中间步进会被丢掉 —— 与水平缩放的
+     * `pendingZoom` 完全同一理由（见 `applyHorizontalWheelZoom`）。
+     *
+     * 【作用二：锚点不变式的载体】请求里记的是"指针处的行位置"，不是算好的像素位置：
+     * 落地时才知道 React 最终提交了哪个行高，届时再乘（见 `verticalZoomRequest`）。
+     *
+     * 【生命周期】`onWheel` 的竖直缩放分支写入；`applyPendingVerticalZoom` 在行高落地
+     * 的那次提交里消费并清空。行高被别的来源改掉（持久化恢复 / 轨道头缩放）时**保留**
+     * 待定（与 `TrackList` 的 `pendingVerticalZoomRef` 同一条守卫），以免把请求错配到
+     * 别人的行高上。
+     */
+    let pendingVerticalZoom: VerticalZoomRequest | null = null;
+    /**
      * 竖直缩放的"在途"提交；非空期间**跳过**轨道头镜像写入。
      *
-     * 【为什么需要】画布竖直缩放由内核**当帧**原子提交（行高 + 锚点 scrollTop，
-     * 见 `onWheel` 的 vertical-zoom 分支），而 React 侧行高要等下一次提交才落地。
-     * 若此刻把新 scrollTop 同步镜像进轨道头 DOM，容器还是**旧行高**的内容高 ——
-     * 新位置一旦超过旧上限就被浏览器钳制；且该钳制/滚动锚定产生的 scroll 事件与
-     * "上次写入值"不符，会被 `isMirrorEcho` 判成用户输入反灌内核，把视口从锚点位置
-     * 拽回。每格缩放"先跳到位再被拽回"，即用户报告的竖直抽动（悬停轨道头无此问题：
-     * 那里 DOM 先行、内核跟随，方向一致无对抗）。
+     * 【现在只服务哪条路径】竖直缩放的主路径已改为"请求 → React 落地 → 同一次提交里
+     * 原子应用"（见 `pendingVerticalZoom` 与 `applyPendingVerticalZoom`）：内核不再领先
+     * React，行高与位置落在同一任务里，因此**不需要**在途窗口。本状态只保留给
+     * **未接线**的宿主（没有 `onRowHeightChange` 落地通道，内核只能立即生效，见
+     * `onWheel` 的兜底分支），与 `applyHorizontalWheelZoom` 的兜底分支同一形状。
      *
-     * 处置：在途期间跳过镜像写入；等 React 行高落地（`ensureScene` 里镜像到同一值，
-     * 或兜底超时）后由 `settleVerticalZoom` 补写一次。其间轨道头位置不变（配合
-     * `.no-scroll-anchor` 也不会被浏览器改写），因此不会产生误导性的 scroll 事件。
+     * 【兜底路径为什么仍然需要它】内核当帧改了行高与位置，而 React 侧行高要等下一次
+     * 提交才落地。若此刻把新 scrollTop 同步镜像进轨道头 DOM，容器还是**旧行高**的内容高
+     * —— 新位置一旦超过旧上限就被浏览器钳制；且该钳制/滚动锚定产生的 scroll 事件与
+     * "上次写入值"不符，会被 `isMirrorEcho` 判成用户输入反灌内核，把视口从锚点位置拽回。
+     * 处置：在途期间跳过镜像写入；等 React 行高落地（`syncRowHeightFromMirror` 里镜像到
+     * 同一值，或兜底超时）后由 `settleVerticalZoom` 补写一次。
      */
     let verticalZoomInFlight: VerticalZoomFlight | null = null;
     /**
@@ -2339,13 +2452,28 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     function draw(): void {
         const profiler = readFrameProfiler();
         const startMs = profiler === undefined ? 0 : performance.now();
+        // 【顺序承重】先把 React 镜像的行高同步进内核，**再**取本帧快照。
+        // 行高同步会按新行高钳制竖直位置（`scroll.setRowHeight`），因此同步前后是
+        // 两个不同的视口；取早了本帧就会出现"几何按新行高、各图层按旧位置"的错配
+        // （即用户报告的竖直缩放抽动）。详见 `syncRowHeightFromMirror`。
+        syncRowHeightFromMirror();
         // 渲染原点统一吸附到设备像素（见 `snapRenderView`）：GL 原点、各独立图层、
         // 细节层与 DOM 同步全部用**同一个**吸附值，任何两层都不会出现亚像素相位差。
         // `lastDrawnView` 存的也是吸附值——吸附后没变就不重绘（同一设备像素列内的
         // 滚动不产生任何视觉变化，这正是"零重绘"要的效果）。
-        const view = snapRenderView(scroll.get());
+        //
+        // 【为什么判据用未吸附值】几何的记账（`builtScrollLeftPx` / `builtScrollTopPx` /
+        // `builtRowHeight`）都取自未吸附的视口真值，余量比较必须同口径——否则每次滚动
+        // 都会多出不到 1 设备像素的账差，在余量边界上随机多重建一帧。
+        const exactView = scroll.get();
+        const view = snapRenderView(exactView);
         const axis = currentRenderAxis();
-        const rebuilt = ensureScene(axis);
+        const rebuilt = ensureScene(exactView, axis);
+        // 诊断（DEV）：本帧的几何是否与视口同源。重建过就不会错配；没重建而内核行高
+        // 已变，说明本帧按旧行高绘制（竖直缩放抽动的直接证据）。生产构建整段被裁剪。
+        if (import.meta.env.DEV && builtRowHeight !== exactView.rowHeight) {
+            staleGeometryFrameCount += 1;
+        }
         const viewChanged = lastDrawnView !== view;
         lastDrawnView = view;
 
@@ -2662,35 +2790,45 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         const factor = zoomStep.direction < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR;
 
         if (action === "vertical-zoom") {
-            const baseRowHeight = Math.max(1, view.rowHeight);
             const pointerY = clampNumber(event.clientY - rect.top, 0, Math.max(1, rect.height));
-            // 锚点：指针下的行位置（行单位）保持不变。
-            const rowUnitAtPointer = (view.scrollTop + pointerY) / baseRowHeight;
-            const nextRowHeight = Math.round(
-                clampNumber(baseRowHeight * factor, MIN_ROW_HEIGHT, MAX_ROW_HEIGHT),
-            );
-            if (nextRowHeight === baseRowHeight) return;
-            // 行高与滚动位置必须**一次**写进内核：
-            // - 行高经 `onRowHeightChange` 回 React，要等下一次提交、再经下一帧
-            //   `ensureScene` 里的 `scroll.setRowHeight(d.rowHeight)` 才进内核；
-            // - 而 `setScrollTop` 当帧就生效。
-            // 分两次写会留下一帧「新位置 + 旧行高」，该帧的锚点行位置是错的 ——
-            // 实测连续放大（80→88→97→107，指针 y=38，初始 scrollTop=200）出现
-            // 行位置 2.975 → 3.273 → 2.975 → 3.279 的**逐步振荡**，即用户报告的
-            // "纵向缩放会导致纵向滚动"。原子提交后两者同帧自洽。
-            // React 侧的 `onRowHeightChange` 仍要发（轨道头行高与内核必须同源）；
-            // 它落地时值已与内核一致，不会二次跳动。
+            // 解析成一条**请求**（目标行高 + 锚点不变式），纯计算见 `verticalZoomRequest`。
             //
-            // 【必须在提交**之前**标记在途】提交的订阅回调会**同步**执行轨道头镜像
-            // 写入；此刻 React 行高尚未落地，写入会被旧内容高钳制并触发回声反灌
-            // （见 `verticalZoomInFlight`）。先标记，镜像才会跳过、改由
-            // `settleVerticalZoom` 在行高落地后补写。
-            verticalZoomInFlight = createVerticalZoomFlight(nextRowHeight, performance.now());
+            // 【为什么不在内核侧立即生效——这是"竖直缩放抽动"的架构根因】
+            // 行高的真值源在 React（左侧轨道头、波形行几何、标尺派生量都按它布局）。
+            // 内核先行改行高时，镜像要等下一次提交才落地，于是必然存在一帧"内核已是
+            // 新行高、而 React 侧还是旧行高"的窗口；更糟的是几何的脏判据若与几何的
+            // 构建来源不同源，那一帧还会**按旧行高绘制**（见 `sceneRebuildPolicy`）。
+            // 水平缩放早就按同一理由改成请求式（见 `applyHorizontalWheelZoom`：标尺是
+            // DOM、用 React 的 pxPerSec 布局，不同帧切缩放就会抽动），轨道头路径同理
+            // （`TrackList` 的 `pendingVerticalZoomRef` + 行高落地后的 layout effect）。
+            // 这里收编到同一条契约：**内核只提出请求，React 落地，落地的那次提交里
+            // 由 `applyPendingVerticalZoom` 原子应用行高与锚点位置**。
+            const request = resolveVerticalZoomStep({
+                factor,
+                kernelRowHeight: Math.max(1, view.rowHeight),
+                scrollTop: view.scrollTop,
+                pointerY,
+                // 累积基准：未落地的请求优先（连续滚轮不丢中间步进，同 `pendingZoom`）。
+                baseRowHeight: pendingVerticalZoom?.rowHeight ?? Math.max(1, view.rowHeight),
+                minRowHeight: MIN_ROW_HEIGHT,
+                maxRowHeight: MAX_ROW_HEIGHT,
+            });
+            if (request === null) return;
+
+            if (onRowHeightChange !== undefined) {
+                pendingVerticalZoom = request;
+                // 只把**行高**交给 React；位置等行高落地时按不变式反算（见上）。
+                onRowHeightChange(request.rowHeight);
+                return;
+            }
+
+            // 兜底：没有 React 落地通道（老调用方 / 未接线宿主）。退回"内核立即生效
+            // + 在途窗口"，与 `applyHorizontalWheelZoom` 的兜底分支同一形状，功能不缺失。
+            verticalZoomInFlight = createVerticalZoomFlight(request.rowHeight, performance.now());
             scroll.setRowHeightAndScrollTop(
-                nextRowHeight,
-                rowUnitAtPointer * nextRowHeight - pointerY,
+                request.rowHeight,
+                resolveVerticalZoomScrollTop(request, request.rowHeight),
             );
-            onRowHeightChange?.(nextRowHeight);
             return;
         }
 
@@ -5666,6 +5804,33 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
         isVerticalZoomInFlight() {
             return verticalZoomInFlight != null;
+        },
+
+        applyPendingVerticalZoom(committedRowHeight: number) {
+            if (!Number.isFinite(committedRowHeight)) return;
+            const pending = pendingVerticalZoom;
+            if (pending === null) {
+                // 没有待定请求：让内核跟上 React 提交的行高（外部来源：持久化恢复 /
+                // 轨道头缩放）。与 `ensureScene` 的镜像回灌同一口径，此处只是让"行高
+                // 落地"这一时机不必等到下一次绘制。
+                scroll.setRowHeight(committedRowHeight);
+                return;
+            }
+            // 行高还没轮到本次请求（本次提交是别的原因触发的，或行高被别的来源改过）
+            // → 保留请求，等真正落地的那次提交。**不得**在此消费掉请求：一旦丢掉，
+            // 行高落地时就只剩"改行高、不改位置"，锚点丢失即视口跳动。
+            if (Math.abs(pending.rowHeight - committedRowHeight) > 1e-6) return;
+            pendingVerticalZoom = null;
+            // 行高与位置**一次**提交：读侧不会观察到"新行高 + 旧位置"的中间态。
+            // 用**已提交**的行高反算位置（不是请求值）——内核不得领先 React。
+            scroll.setRowHeightAndScrollTop(
+                committedRowHeight,
+                resolveVerticalZoomScrollTop(pending, committedRowHeight),
+            );
+        },
+
+        staleGeometryFrameCount() {
+            return staleGeometryFrameCount;
         },
 
         setViewport(next: { pxPerSec?: number; scrollLeft?: number }) {

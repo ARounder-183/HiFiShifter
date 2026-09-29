@@ -433,12 +433,15 @@ textarea {
 
 /* 轨道头滚动容器：禁用浏览器滚动锚定（scroll anchoring）。
  *
- * 内核模式下画布竖直缩放会在 React 行高落地**之前**改写视口（内核当帧原子提交行高
- * 与锚点位置），而行高变化时 Chromium 默认会为"保持锚点行视觉稳定"自动改写容器
- * scrollTop。该改写产生的 scroll 事件与宿主"上次写入值"不符，会被回声判定当成用户
- * 输入反灌内核，把视口从锚点位置拽回 —— 表现为"竖直缩放后竖直方向抽动"。轨道头
+ * 内核模式下竖直缩放会改写视口（行高 + 锚点位置），而行高变化时 Chromium 默认会为
+ * "保持锚点行视觉稳定"自动改写容器 scrollTop。该改写产生的 scroll 事件与宿主"上次
+ * 写入值"不符，会被回声判定当成用户输入反灌内核，把视口从锚点位置拽回。轨道头
  * 自己的缩放路径本就显式计算锚点（TrackList 的 layout effect），不依赖浏览器锚定，
- * 因此禁用无害。详见 timelineKernelHost 的 `verticalZoomInFlight`。 */
+ * 因此禁用无害。
+ *
+ * 特殊说明：主路径已改为"请求 → React 落地 → 同一次提交原子应用"（内核不领先
+ * React，DOM 与内核一起变），本规则挡的是浏览器自作主张的那一次改写，与
+ * `verticalZoomInFlight`（只服务未接线宿主的兜底路径）无关。 */
 .no-scroll-anchor {
     overflow-anchor: none;
 }
