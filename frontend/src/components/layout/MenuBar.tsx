@@ -80,6 +80,7 @@ import { SCALE_LABELS } from "../../utils/musicalScales";
 import { ExportAudioDialog } from "./ExportAudioDialog";
 import { AutoBackupDialog } from "./AutoBackupDialog";
 import { RenderCacheDialog } from "./RenderCacheDialog";
+import { VibratoPresetDialog } from "./VibratoPresetDialog";
 import { ChannelImportDialog } from "./ChannelImportDialog";
 import { RecordingSettingsDialog } from "./RecordingSettingsDialog";
 import { BenchmarkDialog } from "./BenchmarkDialog";
@@ -236,6 +237,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [averageOpen, setAverageOpen] = useState(false);
     const [smoothOpen, setSmoothOpen] = useState(false);
     const [vibratoOpen, setVibratoOpen] = useState(false);
+    const [vibratoPresetDialogOpen, setVibratoPresetDialogOpen] = useState(false);
     const [vibratoParamRange, setVibratoParamRange] = useState<
         { min: number; max: number } | undefined
     >(undefined);
@@ -1264,6 +1266,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {tf("menu_render_cache_manager")}
                     </DropdownMenu.Item>
 
+                    {/* Vibrato preset library */}
+                    <DropdownMenu.Item onSelect={() => setVibratoPresetDialogOpen(true)}>
+                        {tf("vibrato_manager_open")}
+                    </DropdownMenu.Item>
+
                     {/* Import channel policy（假立体声 → 单声道） */}
                     <DropdownMenu.Item onSelect={() => setChannelImportDialogOpen(true)}>
                         {tf("menu_channel_import_settings")}
@@ -1377,6 +1384,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             <RenderCacheDialog
                 open={renderCacheDialogOpen}
                 onOpenChange={setRenderCacheDialogOpen}
+            />
+
+            {/* 颤音预设库：与右键菜单的「管理预设…」共用同一个对话框 */}
+            <VibratoPresetDialog
+                open={vibratoPresetDialogOpen}
+                onOpenChange={setVibratoPresetDialogOpen}
+                editParam={s.editParam}
+                paramRange={vibratoParamRange}
             />
 
             <RecordingSettingsDialog

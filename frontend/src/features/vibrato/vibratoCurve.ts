@@ -63,6 +63,13 @@ export interface VibratoRenderInput {
     snapFinalValue?: (value: number, frame: number) => number;
     /** 不规则度的确定性种子。预览与提交必须传同一个值，否则波形会跳。 */
     seed?: number;
+    /**
+     * 一并返回逐帧的深度包络（cents，恒非负）。
+     *
+     * 【为什么是 opt-in】拖拽预览每帧都重建整段曲线，多一个等长数组就是每帧
+     * 多一次分配；而只有预设编辑器的波形预览需要把包络画出来。默认关闭。
+     */
+    collectEnvelope?: boolean;
 }
 
 export interface VibratoRenderResult {
@@ -70,6 +77,8 @@ export interface VibratoRenderResult {
     maxF: number;
     /** `dense[k]` 对应帧 `minF + k`。 */
     dense: number[];
+    /** 仅在 `collectEnvelope` 为 true 时给出：`depthCents * env`，逐帧对应 `dense`。 */
+    envelope?: number[];
 }
 
 /** 整数哈希 → `[0,1)`。确定性、无浮点、跨调用稳定。 */
@@ -225,6 +234,7 @@ export function buildVibratoCurve(input: VibratoRenderInput): VibratoRenderResul
         : 1;
     const useOriginalBlend = blend < 1 && Boolean(input.original);
     const snap = input.snapFinalValue;
+    const envelope = input.collectEnvelope ? new Array<number>(len) : undefined;
 
     for (let i = 0; i < len; i += 1) {
         const frame = minF + i;
@@ -256,6 +266,7 @@ export function buildVibratoCurve(input: VibratoRenderInput): VibratoRenderResul
             1 +
             irr * DEPTH_JITTER_RATIO * valueNoise(tc * DEPTH_NOISE_RATE * durationSec, seed + 7);
         env = Math.max(0, env);
+        if (envelope) envelope[i] = depthCents * env;
 
         const delta = depthCents * mapping.factor * env * wave;
 
@@ -275,7 +286,7 @@ export function buildVibratoCurve(input: VibratoRenderInput): VibratoRenderResul
         dense[i] = snap ? snap(value, frame) : value;
     }
 
-    return { minF, maxF, dense };
+    return envelope ? { minF, maxF, dense, envelope } : { minF, maxF, dense };
 }
 
 /**

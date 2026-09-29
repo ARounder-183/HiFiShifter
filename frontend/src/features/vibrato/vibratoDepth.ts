@@ -147,6 +147,52 @@ export function paramUnitToDepth(value: number, param: string, range?: VibratoPa
 }
 
 /**
+ * 深度在**编辑器 / HUD** 上的显示换算（cents → 显示单位）。
+ *
+ * 【为什么与 `depthMappingFor().factor` 分开】两者对"cents 值多少"的回答不同：
+ * 曲线把音高按**半音**存（`pitch` 的曲线因子是 1/100，30 cents = 0.3 半音），
+ * 而编辑器按**分**显示（揉弦深度用分直观得多）。显示若套用曲线因子，用户在
+ * 音高上看到的就是 `0.3` 而不是 `30`。
+ *
+ * | 参数 | 显示单位 | 因子 |
+ * | - | - | - |
+ * | `pitch` 及 cents 类 | 分 | 1 |
+ * | 音级类 | 音级 | 1/100 |
+ * | 乘性增益 | 百分比 | 1 |
+ * | 其余原始值域 | 原生数字 | 半量程/100 |
+ *
+ * 必须与 {@link depthStepUnitFor} 成对使用：因子决定"显示几"，步长单位决定
+ * "滚一格走多少"。
+ */
+export function depthDisplayFactor(param: string, range?: VibratoParamRange): number {
+    if (depthFamilyOf(param) === "raw") {
+        const effective = range ?? fallbackRangeFor(param) ?? { min: 0, max: 2 };
+        const span = Number(effective.max) - Number(effective.min);
+        const halfSpan = Number.isFinite(span) && span > 0 ? span / 2 : 1;
+        return halfSpan / 100;
+    }
+    // 音级类：1 音级名义 100 分；其余（分、百分比）都是 1:1。
+    if (isChildPitchOffsetDegreesParam(param)) return 1 / CENTS_PER_SCALE_STEP;
+    return 1;
+}
+
+/** 深度（cents）→ 编辑器显示值。 */
+export function depthToDisplay(
+    depthCents: number,
+    param: string,
+    range?: VibratoParamRange,
+): number {
+    return depthCents * depthDisplayFactor(param, range);
+}
+
+/** 编辑器显示值 → 深度（cents）。 */
+export function displayToDepth(value: number, param: string, range?: VibratoParamRange): number {
+    const factor = depthDisplayFactor(param, range);
+    if (!(factor > 0)) return 0;
+    return value / factor;
+}
+
+/**
  * 参数深度的**步长单位**（`AppNumberField` 的 `unit`）。
  *
  * 预设编辑器与 HUD 都以参数原生单位呈现深度，用户永远看不到 cents 这个
@@ -158,7 +204,7 @@ export function depthStepUnitFor(param: string): StepUnit {
         case "ratio":
             return "percent";
         case "cents":
-            // 半音值参数（pitch）以 cents 编辑 —— 揉弦深度用分比用半音直观得多。
+            // 音高与 cents 类参数都以分编辑 —— 揉弦深度用分比用半音直观得多。
             return "cents";
         default:
             return "integer";
