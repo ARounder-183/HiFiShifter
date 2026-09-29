@@ -70,6 +70,7 @@ mod pitch_editing;
 mod pitch_progress;
 mod recording;
 mod render_cache;
+mod render_key;
 mod renderer;
 mod synth_clip_cache;
 

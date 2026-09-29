@@ -698,7 +698,7 @@ impl HashExclusions {
 /// # 契约（新增渲染输入必须同步加入本函数）
 /// 覆盖：clip_id、源身份（path + mtime + 内容指纹）、活跃 Take、渲染器、
 /// 管线指纹、时间轴帧范围、输出采样率、播放速率、倒放、Loop、源窗口、
-/// 拉伸设置、pitch_edit、pitch_orig、extra 曲线/参数、formant morph、
+/// 拉伸设置、分析帧周期、pitch_edit、pitch_orig、extra 曲线/参数、formant morph、
 /// 渲染输入 pitch 曲线。
 ///
 /// 以上任一项变化都必须产出不同哈希，否则会出现跨会话/跨参数的错误复用。
@@ -858,6 +858,19 @@ pub fn compute_rendered_clip_hash_excluding(
                 .to_le_bytes());
         }
     }
+
+    // 混入分析帧周期（量化到 0.001ms，与音高分析键同一约定）。
+    //
+    // 【为什么必须混】帧周期是声码器的帧步长，直接决定渲染结果；而它此前**只**通过
+    // "曲线切片窗口"间接影响本键 —— 当曲线长度不足以区分两种周期时（切片边界相同），
+    // 改变周期不会改变哈希，缓存就会把按旧周期渲染的音频当成新周期的结果返回
+    // （陈旧音频 = 跨参数误命中，本模块契约里最严重的一类）。`pitch_analysis` 的
+    // 分析缓存键一直混入量化后的帧周期（`pitch_analysis/mod.rs` 的同名键），
+    // 渲染键此前漏了它 —— 由 `render_key` 的键敏感性测试发现并钉住。
+    mix_bytes!(b"frame_period_ms");
+    mix_bytes!(
+        &crate::pitch_analysis::quantize_u32(frame_period_ms.max(0.1), 1000.0).to_le_bytes()
+    );
 
     // 混入与 clip 时间范围重叠的 pitch_edit 曲线片段
     let fp = frame_period_ms.max(0.1);
