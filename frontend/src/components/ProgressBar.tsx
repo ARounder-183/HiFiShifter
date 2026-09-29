@@ -101,6 +101,12 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
 
             {showCancel && onCancel && (
                 <button
+                    /*
+                     * 稳定钩子：页面里可能同时存在"页脚取消"与"进度条取消"（文案相同），
+                     * 自动化只能靠它区分二者。见 `ExportAudioDialog.cancel.test.tsx`
+                     * 对"进度条取消不得关闭对话框"这条契约的断言。
+                     */
+                    data-hs-progress-cancel="1"
                     onClick={onCancel}
                     className="self-end rounded px-3 py-1 text-qt-xs text-qt-text-muted hover:bg-qt-button-hover hover:text-qt-text transition-colors"
                     type="button"

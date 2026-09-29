@@ -1056,14 +1056,42 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         return code || tf("status_export_failed");
     }
 
-    async function handleCancel() {
-        if (submitting || exportProgress.active) {
-            try {
-                await coreApi.cancelExportAudio();
-            } catch {
-                // ignore cancellation command failures
-            }
+    /**
+     * 只取消本次导出：**不关闭对话框**（进度条上的取消走这里）。
+     *
+     * 【为什么不能顺手关窗】界面里有两个取消入口，用户的预期不同：进度条旁边的取消
+     * 只该结束这次渲染（用户可能只是想改个设置再导一次），而页脚的取消/关闭才是
+     * "离开对话框"。早先两者共用一个 handler，于是点进度条的取消会把整个对话框也关掉。
+     */
+    async function cancelRunningExport() {
+        if (!submitting && !exportProgress.active) return;
+        try {
+            await coreApi.cancelExportAudio();
+        } catch {
+            // 取消命令失败不阻塞 UI：下面的乐观收敛仍会把界面带回"可再次导出"。
         }
+        // 乐观收敛，**不依赖取消事件是否到达**（事件可能丢失，或与 invoke 响应竞态）：
+        // 清空进度状态 → 进度区收起；`submitting` 由 `submitExport` 的 cancelled 分支
+        // 置回 false → 页脚「导出」重新可用。显示值与目标一并归零，避免下一次导出
+        // 被上一轮残留的 100% 拉高。
+        setExportProgress({
+            active: false,
+            mode: null,
+            progress: null,
+            current: null,
+            total: null,
+        });
+        setKeepProgressVisible(false);
+        targetProgressRef.current = null;
+        setDisplayProgress(0);
+    }
+
+    /**
+     * 关闭对话框：正在导出时**先取消**，避免留下一个没有界面的后台导出任务。
+     * 页脚取消、Esc、点击遮罩都走这里。
+     */
+    async function handleCloseDialog() {
+        await cancelRunningExport();
         onOpenChange(false);
     }
 
@@ -1275,7 +1303,17 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         <>
             <AppDialog
                 open={open}
-                onOpenChange={onOpenChange}
+                /*
+                 * 关闭请求（Esc / 点遮罩）与页脚取消同契约：**先取消再关闭**。
+                 * 直接透传 onOpenChange 会让"导出中按 Esc"关掉界面却把导出留在后台跑。
+                 */
+                onOpenChange={(nextOpen) => {
+                    if (nextOpen) {
+                        onOpenChange(true);
+                        return;
+                    }
+                    void handleCloseDialog();
+                }}
                 title={tf("menu_export_audio")}
                 description={tf("export_dialog_desc")}
                 size="xl"
@@ -1303,8 +1341,15 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     {
                         id: "cancel",
                         label: tf("cancel"),
+                        /*
+                         * `autoClose: false`：关闭由 `handleCloseDialog` 自己负责
+                         * （它要先取消正在跑的导出）。若让 AppDialog 的默认
+                         * autoClose 也关一次，同一次点击会走两条关闭路径 ——
+                         * 取消命令因此被发两次（回归测试钉住了这一点）。
+                         */
+                        autoClose: false,
                         onClick: () => {
-                            void handleCancel();
+                            void handleCloseDialog();
                         },
                     },
                     {
@@ -1831,7 +1876,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                  * 这里只是把它接到进度条上。
                                  */
                                 showCancel={!exportCompleted && exportProgress.active}
-                                onCancel={() => void handleCancel()}
+                                onCancel={() => void cancelRunningExport()}
                             />
                         </div>
                     ) : null}

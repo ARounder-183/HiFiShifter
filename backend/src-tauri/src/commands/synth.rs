@@ -1082,12 +1082,15 @@ pub(super) fn export_audio_advanced(
                 }
                 Err(e) => {
                     if e == "export_cancelled" {
+                        // 取消：**不报进度值**（`progress: None`）。此前这里报 `1.0`，
+                        // 等于宣称"导出完成"——前端会在事件到达瞬间把进度条推到 100%
+                        // （事件到达即单调推进），任何"取消后"的界面都会读到这个假值。
                         emit_export_audio_progress(
                             &state,
                             ExportAudioProgressEvent {
                                 active: false,
                                 mode: Some(ExportAudioMode::Project),
-                                progress: Some(1.0),
+                                progress: None,
                                 current: Some(1),
                                 total: Some(1),
                             },
@@ -1485,7 +1488,8 @@ pub(super) fn export_audio_advanced(
                 ExportAudioProgressEvent {
                     active: false,
                     mode: Some(ExportAudioMode::Separated),
-                    progress: Some(1.0),
+                    // 取消时**不报进度值**：见 project 分支的说明 —— 取消不是"完成"。
+                    progress: if cancelled { None } else { Some(1.0) },
                     current: Some(total_targets),
                     total: Some(total_targets),
                 },
