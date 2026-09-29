@@ -1,5 +1,7 @@
 import { useI18n } from "../../i18n/I18nProvider";
 import { AppContextMenu, useMenuShortcut, type AppMenuItemSpec } from "../../ui";
+import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
+import { vibratoPresetLabel } from "../layout/vibrato/vibratoDialogLogic";
 
 interface EditContextMenuProps {
     x: number;
@@ -24,6 +26,7 @@ interface EditContextMenuProps {
     onSetPitch?: () => void;
     onAverage?: () => void;
     onSmooth?: () => void;
+    /** 套用当前活动的颤音预设（`Ctrl+B`）。 */
     onAddVibrato?: () => void;
     onQuantize?: () => void;
     onMeanQuantize?: () => void;
@@ -33,6 +36,21 @@ interface EditContextMenuProps {
     onConvertVolumeToDyn?: () => void;
     /** 动态 → 音量（源参数归位到「沿用原声」）。 */
     onConvertDynToVolume?: () => void;
+    /**
+     * 可用颤音预设（系统 + 用户），用于在菜单里直接切换。
+     *
+     * 【为什么在菜单里铺开而不是开对话框】预设的用途就是"一键套用"。
+     * 打开对话框再选一次，等于把两步的操作变成四步。
+     */
+    vibratoPresets?: readonly VibratoPreset[];
+    /** 当前活动的颤音预设 id（列表里打勾）。 */
+    activeVibratoPresetId?: string;
+    /** 选中某条预设：设为活动预设并立即套用到选区。 */
+    onSelectVibratoPreset?: (presetId: string) => void;
+    /** 打开预设管理器。 */
+    onManageVibratoPresets?: () => void;
+    /** 从选区提取预设（选区里已有一段颤音时可用）。 */
+    onExtractVibratoPreset?: () => void;
 }
 
 export function EditContextMenu({
@@ -60,6 +78,11 @@ export function EditContextMenu({
     onExportMidi,
     onConvertVolumeToDyn,
     onConvertDynToVolume,
+    vibratoPresets,
+    activeVibratoPresetId,
+    onSelectVibratoPreset,
+    onManageVibratoPresets,
+    onExtractVibratoPreset,
 }: EditContextMenuProps) {
     const { tf } = useI18n();
 
@@ -80,6 +103,27 @@ export function EditContextMenu({
     const addVibratoShortcut = useMenuShortcut("edit.addVibrato");
     const quantizeShortcut = useMenuShortcut("edit.quantize");
     const meanQuantizeShortcut = useMenuShortcut("edit.meanQuantize");
+
+    // 预设列表存在时才显示这一整组；否则「添加颤音」保持为唯一的入口。
+    const presetItems: AppMenuItemSpec[] =
+        onSelectVibratoPreset && vibratoPresets && vibratoPresets.length > 0
+            ? [
+                  {
+                      key: "vibratoPresetHeading",
+                      label: tf("vibrato_menu_presets"),
+                      heading: true,
+                  },
+                  ...vibratoPresets.map(
+                      (preset): AppMenuItemSpec => ({
+                          key: `vibratoPreset:${preset.id}`,
+                          label: vibratoPresetLabel(preset, tf),
+                          checked: preset.id === activeVibratoPresetId,
+                          separatorBefore: false,
+                          onSelect: () => onSelectVibratoPreset(preset.id),
+                      }),
+                  ),
+              ]
+            : [];
 
     // 菜单项映射到共享原语的 AppMenuItemSpec：分组分隔线由每段首项的
     // `separatorBefore` 表达；`onSelect` 只调用业务动作，关闭由原语负责
@@ -159,16 +203,38 @@ export function EditContextMenu({
             shortcut: smoothShortcut,
             onSelect: () => onSmooth?.(),
         },
+        // 颤音：一键套用当前预设，下面是预设列表本身。
         {
             key: "addVibrato",
             label: tf("menu_add_vibrato"),
             shortcut: addVibratoShortcut,
             onSelect: () => onAddVibrato?.(),
         },
+        ...presetItems,
+        ...(onManageVibratoPresets
+            ? ([
+                  {
+                      key: "manageVibratoPresets",
+                      label: tf("vibrato_manager_open"),
+                      separatorBefore: presetItems.length === 0,
+                      onSelect: onManageVibratoPresets,
+                  },
+              ] satisfies AppMenuItemSpec[])
+            : []),
+        ...(onExtractVibratoPreset
+            ? ([
+                  {
+                      key: "extractVibratoPreset",
+                      label: tf("vibrato_extract_action"),
+                      onSelect: onExtractVibratoPreset,
+                  },
+              ] satisfies AppMenuItemSpec[])
+            : []),
         {
             key: "quantize",
             label: tf("menu_quantize"),
             shortcut: quantizeShortcut,
+            separatorBefore: true,
             onSelect: () => onQuantize?.(),
         },
         {

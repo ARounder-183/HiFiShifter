@@ -1508,14 +1508,10 @@ export const koKR = {
     average_strength: "평균 강도",
 
     // 비브라토 추가 다이얼로그
-    vibrato_title: "비브라토 추가",
-    vibrato_amplitude: "진폭",
-    vibrato_period: "주기",
     vibrato_attack: "페이드 인",
     vibrato_release: "페이드 아웃",
     vibrato_phase: "시작 위상",
     vibrato_unit_cents: "센트",
-    vibrato_unit_ms: "ms",
 
     // 퀀타이즈 다이얼로그
     quantize_title: "퀀타이즈",

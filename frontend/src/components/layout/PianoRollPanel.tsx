@@ -40,6 +40,7 @@ import {
     setToolMode,
     persistUiSettings,
     setLastVibratoAdjust,
+    setActiveVibratoPreset,
     toggleParamAxisUnit,
     setParamEditorSyncTimeline,
     setPrimaryTimeUnit,
@@ -199,6 +200,8 @@ import {
     rulerLayerTranslatePx,
 } from "./renderKernel/timelineAxis.js";
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
+import { VibratoPresetDialog } from "./VibratoPresetDialog";
+import { buildVibratoCurve } from "../../features/vibrato/vibratoCurve";
 import {
     resolveActiveVibratoPreset,
     resolveVibratoPresets,
@@ -976,6 +979,14 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         clientX: number;
         clientY: number;
     } | null>(null);
+    /**
+     * 预设管理器是否打开。
+     *
+     * 参数编辑器自己持有这个状态（不走 `hifi:openEditDialog`）：那个通道是给
+     * 「一次性参数对话框」用的，而管理器是常驻的预设库，菜单栏的「管理预设…」
+     * 与这里的右键入口共用同一个对话框组件。
+     */
+    const [vibratoPresetDialogOpen, setVibratoPresetDialogOpen] = useState(false);
     // 拖动方向循环切换键：拖拽进行中按下可即时切换本次拖拽方向（触控板替代右键）。
     const cycleDragDirectionKb = useAppSelector((state) =>
         selectKeybinding(state, "pianoRoll.cycleDragDirection"),
@@ -6314,13 +6325,19 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     break;
                 }
                 case "addVibrato": {
-                    const amplitude = Number(data?.amplitude ?? 30);
-                    const rateHz = Number(data?.rate ?? 5.5);
-                    const period = rateHz > 0 ? 1000 / rateHz : 200;
-                    const attack = Number(data?.attack ?? 50);
-                    const release = Number(data?.release ?? 50);
-                    const phase = Number(data?.phase ?? 0);
-                    // 多选区：咬合/释放包络按**每段自身时长**定标，各段独立。
+                    /**
+                     * 套用颤音预设。
+                     *
+                     * 【与旧实现的区别】旧版把整段替换成「起点→终点的直线 + 正弦」，
+                     * 会抹平歌手原本的音高运动。现在预设默认 `baseline: "existing"`
+                     * （见系统预设表），在**已有曲线**上叠加颤音，原曲线被保留。
+                     * 波形、包络、速率渐变、不规则度全部来自预设。
+                     */
+                    const preset = resolveActiveVibratoPreset(
+                        resolvedVibratoPresets,
+                        typeof data?.presetId === "string" ? data.presetId : activeVibratoPresetId,
+                    );
+                    // 多选区：包络按**每段自身时长**定标，各段独立。
                     await runPerRange(async (range, _index, isFirstWrite) => {
                         const res = await paramsApi.getParamFrames(
                             rootTrackId,
@@ -6334,38 +6351,20 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         if (!res?.ok) return false;
                         const payload = res as ParamFramesPayload;
                         const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
+                        if (vals.length === 0) return false;
                         const fpMs = Number(payload.frame_period_ms ?? fp) || fp;
-                        const totalMs = vals.length * fpMs;
-                        const attackMs = Math.min(attack, totalMs / 2);
-                        const releaseMs = Math.min(release, totalMs / 2);
-                        // For pitch: amplitude in cents → divide by 100 to get semitones
-                        // For dyn: amplitude is a **depth percentage** (±N% ratio
-                        // modulation) — multiplicative so drawn silence stays silent.
-                        // For other params: amplitude is a raw value used directly as max deviation
-                        const isPitchVib = editParam === "pitch";
-                        const isDynVib = isDynParam(editParam);
-                        const ampFactor = isPitchVib
-                            ? amplitude / 100
-                            : isDynVib
-                              ? amplitude / 100
-                              : amplitude;
-                        const result = vals.map((v, i) => {
-                            const tMs = i * fpMs;
-                            let env = 1;
-                            if (tMs < attackMs) env = tMs / Math.max(1, attackMs);
-                            else if (tMs > totalMs - releaseMs)
-                                env = (totalMs - tMs) / Math.max(1, releaseMs);
-                            const phaseRad = (phase * Math.PI) / 180;
-                            const vib = Math.sin(
-                                (2 * Math.PI * tMs) / Math.max(1, period) + phaseRad,
-                            );
-                            // dyn：乘性调制（v × (1 + 深度·包络·正弦)）—— 静音帧
-                            // （v = 0）保持 0；深度 > 100% 时负半周钳到 0 = 静音。
-                            const next = isDynVib
-                                ? v * (1 + ampFactor * env * vib)
-                                : v + ampFactor * env * vib;
-                            return isDynVib ? Math.max(0, next) : next;
+                        const built = buildVibratoCurve({
+                            startFrame: range.startFrame,
+                            startValue: vals[0],
+                            endFrame: range.startFrame + vals.length - 1,
+                            endValue: vals[vals.length - 1],
+                            original: vals,
+                            preset,
+                            param: editParam,
+                            framePeriodMs: fpMs,
+                            range: currentParamRange,
                         });
+                        const result = built.dense;
                         // dyn：未画帧写回哨兵（"沿用原声"不被颤音物化）。
                         if (isDynParam(editParam)) {
                             restoreDynSentinels(result, payload.edit_sentinel);
@@ -6601,27 +6600,13 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     }, [invalidate]);
 
     // Dispatch helper: context menu dialog ops → open MenuBar dialogs
-    const openEditDialog = useCallback(
-        (dialog: string) => {
-            // 为颤音对话框附带当前参数范围信息
-            let paramRange: { min: number; max: number } | undefined;
-            if (dialog === "addVibrato") {
-                const desc = processorParamsRef.current.find((d) => d.id === editParam);
-                if (desc?.kind.type === "automation_curve") {
-                    paramRange = {
-                        min: desc.kind.min_value,
-                        max: desc.kind.max_value,
-                    };
-                }
-            }
-            window.dispatchEvent(
-                new CustomEvent("hifi:openEditDialog", {
-                    detail: { dialog, paramRange },
-                }),
-            );
-        },
-        [editParam],
-    );
+    const openEditDialog = useCallback((dialog: string) => {
+        window.dispatchEvent(
+            new CustomEvent("hifi:openEditDialog", {
+                detail: { dialog },
+            }),
+        );
+    }, []);
 
     /**
      * 「另存为音高参考」：每个选区段生成一个独立的 Pitch Ref clip
@@ -8468,9 +8453,18 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     onSetPitch={() => openEditDialog("setPitch")}
                     onAverage={() => openEditDialog("average")}
                     onSmooth={() => openEditDialog("smooth")}
-                    onAddVibrato={() => openEditDialog("addVibrato")}
+                    onAddVibrato={() => void handleEditOp("addVibrato", {})}
                     onQuantize={() => openEditDialog("quantize")}
                     onMeanQuantize={() => openEditDialog("meanQuantize")}
+                    // 颤音预设：菜单里直接切换，选中即"设为活动 + 立即套用"。
+                    vibratoPresets={resolvedVibratoPresets}
+                    activeVibratoPresetId={activeVibratoPresetId}
+                    onSelectVibratoPreset={(presetId) => {
+                        dispatch(setActiveVibratoPreset(presetId));
+                        void dispatch(persistUiSettings());
+                        void handleEditOp("addVibrato", { presetId });
+                    }}
+                    onManageVibratoPresets={() => setVibratoPresetDialogOpen(true)}
                     onSaveAsPitchRef={() => void handleSaveAsPitchRef()}
                     onExportMidi={() => void handleExportMidiFromEditor()}
                     // 音量 ↔ 动态 互转：参数本身就是这两个之一时始终可用。
@@ -8488,6 +8482,14 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     onConvertDynToVolume={() => void handleEditOp("convertDynToVolume")}
                 />
             )}
+
+            {/* 颤音预设管理器：右键菜单与菜单栏共用同一个对话框组件。 */}
+            <VibratoPresetDialog
+                open={vibratoPresetDialogOpen}
+                onOpenChange={setVibratoPresetDialogOpen}
+                editParam={editParam}
+                paramRange={currentParamRange}
+            />
         </Flex>
     );
 };

@@ -1559,14 +1559,10 @@ export const enUS = {
     average_strength: "Average Amount",
 
     // Add vibrato dialog
-    vibrato_title: "Add Vibrato",
-    vibrato_amplitude: "Amplitude",
-    vibrato_period: "Period",
     vibrato_attack: "Fade in",
     vibrato_release: "Fade out",
     vibrato_phase: "Start phase",
     vibrato_unit_cents: "cents",
-    vibrato_unit_ms: "ms",
 
     // Quantize dialog
     quantize_title: "Quantize",

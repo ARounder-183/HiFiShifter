@@ -1382,14 +1382,10 @@ export const zhTW = {
     average_strength: "平均度",
 
     // 新增顫音對話框
-    vibrato_title: "新增顫音",
-    vibrato_amplitude: "振幅",
-    vibrato_period: "週期",
     vibrato_attack: "漸入",
     vibrato_release: "漸出",
     vibrato_phase: "起始相位",
     vibrato_unit_cents: "音分",
-    vibrato_unit_ms: "ms",
 
     // 量化對話框
     quantize_title: "量化",

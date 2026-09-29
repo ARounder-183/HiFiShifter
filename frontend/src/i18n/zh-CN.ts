@@ -1380,14 +1380,10 @@ export const zhCN = {
     average_strength: "平均度",
 
     // Add vibrato dialog
-    vibrato_title: "添加颤音",
-    vibrato_amplitude: "振幅",
-    vibrato_period: "周期",
     vibrato_attack: "渐入",
     vibrato_release: "渐出",
     vibrato_phase: "起始相位",
     vibrato_unit_cents: "音分",
-    vibrato_unit_ms: "ms",
 
     // Quantize dialog
     quantize_title: "量化",

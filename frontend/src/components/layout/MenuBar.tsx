@@ -72,7 +72,6 @@ import {
     SetPitchDialog,
     AverageDialog,
     SmoothDialog,
-    VibratoDialog,
     QuantizeDialog,
     MeanQuantizeDialog,
 } from "../editDialogs/EditDialogs";
@@ -236,11 +235,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [setPitchOpen, setSetPitchOpen] = useState(false);
     const [averageOpen, setAverageOpen] = useState(false);
     const [smoothOpen, setSmoothOpen] = useState(false);
-    const [vibratoOpen, setVibratoOpen] = useState(false);
     const [vibratoPresetDialogOpen, setVibratoPresetDialogOpen] = useState(false);
-    const [vibratoParamRange, setVibratoParamRange] = useState<
-        { min: number; max: number } | undefined
-    >(undefined);
     const [quantizeOpen, setQuantizeOpen] = useState(false);
     const [meanQuantizeOpen, setMeanQuantizeOpen] = useState(false);
     const [menuImportMode, setMenuImportMode] = useState<{
@@ -370,10 +365,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     break;
                 case "smooth":
                     setSmoothOpen(true);
-                    break;
-                case "addVibrato":
-                    setVibratoParamRange((e as CustomEvent).detail?.paramRange);
-                    setVibratoOpen(true);
                     break;
                 case "quantize":
                     setQuantizeOpen(true);
@@ -1391,7 +1382,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 open={vibratoPresetDialogOpen}
                 onOpenChange={setVibratoPresetDialogOpen}
                 editParam={s.editParam}
-                paramRange={vibratoParamRange}
             />
 
             <RecordingSettingsDialog
@@ -1602,15 +1592,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onOpenChange={setSmoothOpen}
                 defaultSmoothness={s.edgeSmoothnessPercent}
                 onConfirm={(strength) => dispatchEditOp("smooth", { strength })}
-            />
-            <VibratoDialog
-                open={vibratoOpen}
-                onOpenChange={setVibratoOpen}
-                editParam={s.editParam}
-                paramRange={vibratoParamRange}
-                onConfirm={(amplitude, rate, attack, release, phase) =>
-                    dispatchEditOp("addVibrato", { amplitude, rate, attack, release, phase })
-                }
             />
             <QuantizeDialog
                 open={quantizeOpen}

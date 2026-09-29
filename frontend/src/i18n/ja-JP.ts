@@ -1433,14 +1433,10 @@ export const jaJP = {
     average_strength: "平均度",
 
     // ビブラート追加ダイアログ
-    vibrato_title: "ビブラートを追加",
-    vibrato_amplitude: "振幅",
-    vibrato_period: "周期",
     vibrato_attack: "フェードイン",
     vibrato_release: "フェードアウト",
     vibrato_phase: "開始位相",
     vibrato_unit_cents: "セント",
-    vibrato_unit_ms: "ms",
 
     // クオンタイズダイアログ
     quantize_title: "クオンタイズ",
