@@ -96,18 +96,24 @@ function dominantAxisDelta(deltaX: number, deltaY: number): number {
  * 1. 取主轴增量（`dominantAxisDelta`）；非有限值归零；
  * 2. **反向先清零**：主轴增量与累积量符号相反时把累积量重置为 0
  *    ——真实反向必须立刻生效，不能让上一次手势的残余把反向吃掉；
- * 3. 累积；越过死区则产出一个方向（**饱和**在死区处，使真实滚轮"一格一步"，
- *    不会因单次大增量攒出多步）。
+ * 3. 累积；越过死区则产出一个方向，并把累积量**归零**（见特殊说明 2）。
  *
  * 特殊说明 1：**不修改入参**，返回新的累积状态（调用方负责替换）。
- * 特殊说明 2：饱和而非「减去死区」是刻意的——减去会让一个 ±100 的滚轮格
- * 留下约 ±92 的余额，此后**任何一次微小噪声事件都会立刻触发一整步缩放**，
- * 正是抖动的一个来源。
+ * 特殊说明 2：产出后**归零**，既不"减去死区"也不"饱和在死区"：
+ * - "减去死区"会让一个 ±100 的滚轮格留下约 ±92 的余额，此后任何一次微小噪声事件
+ *   都会立刻触发一整步缩放；
+ * - "饱和在死区"（本模块的旧写法）留下的是 ±8 的**满额**残余，配合下面第 2 步
+ *   "反向才清零"的判定（零增量不满足 `axisDelta !== 0`，因此不清零），会让
+ *   **每一次后续同向或零增量事件都立刻再出一整步** —— 死区实际只挡住了手势的第一步。
+ *   实测可复现：真实一格（±100）之后紧跟一个 `deltaY = 0` 的事件（纯横向手势、
+ *   纵向噪声归零、手势收尾时都很常见）会再缩放一步。
+ * - 归零则两头都满足：单次大增量本来就只出一步（不需要余额），
+ *   且死区对第 2 步及之后同样有效。
  *
  * @param args.accumulator 上一次的累积状态。
  * @param args.deltaX 水平增量（CSS px）。
  * @param args.deltaY 竖直增量（CSS px）。
- * @param args.deadzonePx 死区（缺省 `WHEEL_ZOOM_DEADZONE_PX`；非法值回退缺省）。
+ * @param deadzonePx 死区（缺省 `WHEEL_ZOOM_DEADZONE_PX`；非法值回退缺省）。
  * @returns 本次的缩放方向与推进后的累积状态。
  */
 export function resolveWheelZoomStep(args: {
@@ -128,11 +134,12 @@ export function resolveWheelZoomStep(args: {
     const base = previous !== 0 && axisDelta !== 0 && previous > 0 !== axisDelta > 0 ? 0 : previous;
     const pending = base + axisDelta;
 
+    // 产出即归零：死区对每一步都生效（见特殊说明 2）。
     if (pending >= deadzone) {
-        return { direction: 1, accumulator: { pending: deadzone } };
+        return { direction: 1, accumulator: { pending: 0 } };
     }
     if (pending <= -deadzone) {
-        return { direction: -1, accumulator: { pending: -deadzone } };
+        return { direction: -1, accumulator: { pending: 0 } };
     }
     return { direction: 0, accumulator: { pending } };
 }
