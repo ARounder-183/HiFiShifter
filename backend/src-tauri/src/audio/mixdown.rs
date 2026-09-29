@@ -555,11 +555,13 @@ pub(crate) fn clip_duration_sec_from_wav(
 /// 关闭时读写都会静默降级为"未命中"。
 fn export_render_cache_reuse_enabled() -> bool {
     match std::env::var("HIFISHIFTER_EXPORT_RENDER_CACHE") {
+        // 环境变量优先：便于现场 A/B 与快速回滚，不必改设置。
         Ok(value) => !matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "0" | "false" | "off" | "no"
         ),
-        Err(_) => true,
+        // 未设环境变量时跟随「渲染缓存管理」窗口里的设置（默认开启）。
+        Err(_) => crate::render_cache::export_reuse_enabled(),
     }
 }
 

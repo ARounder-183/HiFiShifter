@@ -292,7 +292,8 @@ export const koKR = {
     dock_detach_to_window: "별도 창에서 열기",
     dock_detach_unsupported: "이 패널은 메인 창 밖으로 이동할 수 없습니다",
     dock_redock: "메인 영역으로 도킹",
-    dock_detach_blocked_by: "별도 창으로 이동할 수 없습니다: {names}은(는) 기본 창을 벗어날 수 없습니다",
+    dock_detach_blocked_by:
+        "별도 창으로 이동할 수 없습니다: {names}은(는) 기본 창을 벗어날 수 없습니다",
     dock_panel_title: "패널",
     dock_panel_empty_hint: "창을 여기로 끌어다 놓기",
     dock_expand: "펼치기",
@@ -1632,6 +1633,7 @@ export const koKR = {
     render_cache_write_errors: "{n}건 쓰기 실패(디스크 공간 또는 권한 문제).",
     render_cache_enable: "렌더 캐시 사용(프로젝트를 다시 열 때 렌더 결과 재사용)",
     render_cache_show_hit_stats: "프로젝트를 연 뒤 캐시 재사용 통계 표시",
+    render_cache_export_reuse: "오디오 내보내기 시 렌더 캐시 재사용(재합성 생략)",
     render_cache_max_size: "사용량 상한",
     render_cache_unlimited: "제한 없음",
     render_cache_max_age: "미사용 기간 초과 시 정리",

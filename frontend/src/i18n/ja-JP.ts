@@ -206,7 +206,8 @@ export const jaJP = {
     dock_detach_to_window: "独立ウィンドウで開く",
     dock_detach_unsupported: "このパネルはメインウィンドウ外に移動できません",
     dock_redock: "メイン領域にドック",
-    dock_detach_blocked_by: "別ウィンドウへ移動できません：{names} はメインウィンドウから出られません",
+    dock_detach_blocked_by:
+        "別ウィンドウへ移動できません：{names} はメインウィンドウから出られません",
     dock_panel_title: "パネル",
     dock_panel_empty_hint: "ここにウィンドウをドラッグ",
     dock_expand: "展開",
@@ -1655,6 +1656,7 @@ export const jaJP = {
     render_cache_write_errors: "{n} 件の書き込みに失敗しました（容量または権限の問題）。",
     render_cache_enable: "レンダーキャッシュを有効にする（プロジェクトを開き直すときに再利用）",
     render_cache_show_hit_stats: "プロジェクトを開いた後にキャッシュの再利用状況を表示",
+    render_cache_export_reuse: "音声の書き出し時にレンダーキャッシュを再利用（再合成を省略）",
     render_cache_max_size: "使用量の上限",
     render_cache_unlimited: "無制限",
     render_cache_max_age: "未使用期間による削除",

@@ -53,6 +53,15 @@ export interface AppSelectProps {
      */
     minWidth?: number;
     ariaLabel?: string;
+    /**
+     * 滚轮是否调整选中项（默认 `true`）。
+     *
+     * 【为什么需要关掉】滚轮调值是能力层的默认行为，但有些下拉的选项里含**极端值**：
+     * 「渲染缓存管理」的容量/超龄预设末尾就是 `0`（不限 / 永不清理），滚轮滚下去会
+     * 把 4096 MB 直接变成"不限"——那是改数据，不只是改选择。这类下拉应关掉滚轮，
+     * 把滚轮留给紧邻的数字输入框（按步长 ±1，修饰键精细调整）。
+     */
+    wheelAdjust?: boolean;
     className?: string;
 }
 
@@ -79,6 +88,7 @@ export function AppSelect({
     density,
     minWidth,
     ariaLabel,
+    wheelAdjust = true,
     className,
 }: AppSelectProps) {
     const size = radixSizeFor(useDensity(density));
@@ -99,6 +109,8 @@ export function AppSelect({
     const setWheelTarget = useNonPassiveWheel<HTMLButtonElement>((event) => {
         if (disabled) return;
         if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return;
+        // 关掉滚轮时仍阻止祖先滚动（与数字输入框一致：指针在控件上不该滚页面）。
+        if (!wheelAdjust) return;
         if (wheelOptions.length <= 1) return;
         const at = wheelOptions.indexOf(value);
         if (at < 0) return;

@@ -1601,6 +1601,7 @@ export const zhTW = {
     render_cache_write_errors: "有 {n} 次寫入失敗（磁碟空間或權限問題）。",
     render_cache_enable: "啟用渲染快取（重新開啟專案時重用渲染結果）",
     render_cache_show_hit_stats: "開啟專案後顯示快取命中統計",
+    render_cache_export_reuse: "匯出音訊時重用渲染快取（略過重複合成）",
     render_cache_max_size: "佔用上限",
     render_cache_unlimited: "不限制",
     render_cache_max_age: "未使用超期清理",

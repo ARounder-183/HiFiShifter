@@ -242,6 +242,13 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                     />
                     <span className="hs-type-label">{tf("render_cache_show_hit_stats")}</span>
                 </Flex>
+                <Flex align="center" gap="2">
+                    <Checkbox
+                        checked={draft.exportReuseEnabled}
+                        onCheckedChange={(v) => patch({ exportReuseEnabled: Boolean(v) })}
+                    />
+                    <span className="hs-type-label">{tf("render_cache_export_reuse")}</span>
+                </Flex>
 
                 {/* ── 容量 ─────────────────────────────────────────────── */}
                 <AppField label={tf("render_cache_max_size")}>
@@ -251,6 +258,11 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                             // 旧写法是 size="1"（24px）：对话框里也要紧凑
                             density="compact"
                             value={sizePresetValue}
+                            /*
+                             * 关掉滚轮：本预设列表**末项是 0（不限）**，滚轮滚下去会把
+                             * 4096 MB 直接变成"不限"。滚轮留给右侧数字框（±1 + 精细调整）。
+                             */
+                            wheelAdjust={false}
                             onValueChange={(v) => {
                                 if (v === "custom") return;
                                 patch({ maxSizeMb: Number(v) });
@@ -279,6 +291,8 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                             // 旧写法是 size="1"（24px）：对话框里也要紧凑
                             density="compact"
                             value={agePresetValue}
+                            // 同上：末项是 0（永不清理），滚轮不得把它选中。
+                            wheelAdjust={false}
                             onValueChange={(v) => {
                                 if (v === "custom") return;
                                 patch({ maxAgeDays: Number(v) });

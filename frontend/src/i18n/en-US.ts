@@ -1781,6 +1781,7 @@ export const enUS = {
     render_cache_write_errors: "{n} writes failed (disk space or permissions).",
     render_cache_enable: "Enable render cache (reuse rendered results when reopening projects)",
     render_cache_show_hit_stats: "Show cache hit summary after opening a project",
+    render_cache_export_reuse: "Reuse the render cache when exporting audio (skips re-synthesis)",
     render_cache_max_size: "Size limit",
     render_cache_unlimited: "Unlimited",
     render_cache_max_age: "Prune unused after",

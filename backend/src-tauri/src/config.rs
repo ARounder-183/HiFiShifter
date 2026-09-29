@@ -726,6 +726,12 @@ pub struct RenderCacheSettings {
     /// 打开工程后显示命中统计（默认开启）。
     #[serde(default = "default_true")]
     pub show_hit_stats: bool,
+    /// 导出音频时复用渲染缓存（默认开启）。
+    ///
+    /// 关闭后导出总是自行渲染（与引入复用之前的行为一致）。做成设置而不只是环境
+    /// 变量，是为了让用户能在管理面板里对比"复用 / 重渲染"的产物，也便于一键回退。
+    #[serde(default = "default_true")]
+    pub export_reuse_enabled: bool,
     /// 准入策略版本（迁移标记，不面向用户）。
     ///
     /// `0`（缺省）= 出厂于"时长下限 0.5 s"时代的配置。升级到字节准入后，
@@ -787,6 +793,7 @@ impl Default for RenderCacheSettings {
             verify_checksum: true,
             min_free_disk_mb: default_render_cache_min_free_disk_mb(),
             show_hit_stats: true,
+            export_reuse_enabled: true,
             policy_version: RENDER_CACHE_POLICY_VERSION,
         }
     }

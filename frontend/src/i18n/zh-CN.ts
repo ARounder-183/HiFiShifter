@@ -1599,6 +1599,7 @@ export const zhCN = {
     render_cache_write_errors: "有 {n} 次写入失败（磁盘空间或权限问题）。",
     render_cache_enable: "启用渲染缓存（重新打开工程时复用渲染结果）",
     render_cache_show_hit_stats: "打开工程后显示缓存命中统计",
+    render_cache_export_reuse: "导出音频时复用渲染缓存（跳过重复合成）",
     render_cache_max_size: "占用上限",
     render_cache_unlimited: "不限制",
     render_cache_max_age: "未使用超期清理",
