@@ -44,9 +44,8 @@ import {
     reclaimDetachedForm,
 } from "../../features/dock/dockApi";
 import { focusForm } from "../../features/dock/dockSlice";
-import { panelTitleOf } from "../../features/dock/dockPanel";
+import { displayTitleOf, panelTitleOf } from "../../features/dock/dockPanel";
 import { isPanelForm } from "../../features/dock/dockTree";
-import { getPanel } from "../../features/dock/panelRegistry";
 import { AppFileInput } from "../../ui/FileInput";
 import { AppDialog } from "../../ui/Dialog";
 import { AppConfirmDialog, AppNoticeDialog } from "../../ui";
@@ -215,8 +214,7 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
                                         void reclaimDetachedForm(dispatch, store.getState, form.id)
                                     }
                                 >
-                                    {form.title ??
-                                        tf(getPanel(form.panelId)?.titleKey ?? form.panelId)}
+                                    {displayTitleOf(layout, form.id, tf)}
                                 </DropdownMenu.Item>
                             ))}
                         </DropdownMenu.SubContent>

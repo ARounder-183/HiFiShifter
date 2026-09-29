@@ -19,7 +19,13 @@ import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { EnterIcon, ExternalLinkIcon } from "@radix-ui/react-icons";
 
 import { getDockDragState, subscribeDockDrag } from "../../features/dock/dockDragStore";
-import { closeForm, dockFormTo, raiseFloat, setFloatGeometry } from "../../features/dock/dockSlice";
+import {
+    closeForm,
+    dockFormTo,
+    raiseFloat,
+    renameForm,
+    setFloatGeometry,
+} from "../../features/dock/dockSlice";
 import { findMainTabset } from "../../features/dock/dockSchema";
 import { detachFormToWindow, maximizeActive } from "../../features/dock/dockApi";
 import {
@@ -33,6 +39,7 @@ import type { DockForm, DockRect } from "../../features/dock/dockTypes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { resolveFloatRect } from "../../features/dock/dockDropTarget";
 import { beginFloatDrag } from "./dockDragController";
+import { DockInlineRename } from "./DockInlineRename";
 import { DockSubRoot } from "./DockSubRoot";
 import { floatTitleBarActions } from "./floatTitleBar";
 import { useDockSlot } from "./useDockSlot";
@@ -85,6 +92,8 @@ function DockFloatWindow({
     const slotRef = useDockSlot(floatingIsPanel ? null : form.id);
     const geometry = form.float;
     const [dragging, setDragging] = useState(false);
+    /** 行内重命名中（双击面板标题进入）：标题文本被输入框替换。 */
+    const [renaming, setRenaming] = useState(false);
     const elementRef = useRef<HTMLDivElement | null>(null);
 
     // 拖拽中跟随实时几何，松手才落库（与分隔条同一策略）。
@@ -310,6 +319,11 @@ function DockFloatWindow({
                 className="hs-dock-float-title"
                 onPointerDown={onTitlePointerDown}
                 onDoubleClick={() => {
+                    // 面板的名称区域双击 = 进入行内重命名（先于设置的默认动作）。
+                    if (floatingIsPanel) {
+                        setRenaming(true);
+                        return;
+                    }
                     if (doubleClickAction === "none") return;
                     if (doubleClickAction === "maximize") {
                         dispatch(raiseFloat(form.id));
@@ -354,7 +368,20 @@ function DockFloatWindow({
                 // 停靠修饰键），悬停时再弹一条更长的提示只会挡住标题栏本身。停靠态的
                 // 抓手仍保留悬停提示（见 `DockTabBar`）。
             >
-                <span className="hs-dock-tab-label">{title}</span>
+                {renaming && floatingIsPanel ? (
+                    <DockInlineRename
+                        initial={form.title ?? ""}
+                        placeholder={title}
+                        ariaLabel={tf("dock_rename_tab")}
+                        onCommit={(next) => {
+                            dispatch(renameForm({ formId: form.id, title: next }));
+                            setRenaming(false);
+                        }}
+                        onCancel={() => setRenaming(false)}
+                    />
+                ) : (
+                    <span className="hs-dock-tab-label">{title}</span>
+                )}
                 <div className="hs-dock-tabbar-spacer" />
                 <button
                     type="button"

@@ -20,7 +20,7 @@ import {
 } from "../../features/dock/dockDragStore";
 import { dropPreviewRect, DOCK_ROOT_ZONE_ID } from "../../features/dock/dockDropTarget";
 import { DOCK_SPLITTER_PX, type DockDropZone } from "../../features/dock/dockTypes";
-import { getPanel } from "../../features/dock/panelRegistry";
+import { displayTitleOf } from "../../features/dock/dockPanel";
 import { dockModifierHint } from "./dockTooltips";
 import { useI18n } from "../../i18n/I18nProvider";
 
@@ -65,8 +65,10 @@ function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
     const { tf } = useI18n();
     const showPreview = useAppSelector((s) => s.dock.settings.showDropPreview);
     const dockModifier = useAppSelector((s) => s.dock.settings.dockModifier);
-    const definition = getPanel(drag.panelId);
-    const title = definition ? tf(definition.titleKey) : drag.panelId;
+    // 幽灵标题按**窗体**解析（用户重命名 > 面板按内容派生 > 注册表标题）：
+    // 面板不在注册表里，此前对它回退显示原始 panelId（"__panel"）—— 用户报告。
+    const layout = useAppSelector((s) => s.dock.layout);
+    const title = displayTitleOf(layout, drag.formId, tf);
 
     // 停靠预览：按住修饰键且命中某个 Zone 时，画出"新组会占哪半边"。
     // 根级边缘带的 target.rect 就是整个停靠区矩形，预览自然是贯通全高/全宽的

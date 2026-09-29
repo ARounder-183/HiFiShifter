@@ -44,6 +44,7 @@ import {
     dropZoneToSide,
     pickDropTarget,
     resolveDropZone,
+    resolveFloatRect,
     rootEdgeBandThickness,
     snapFloatPosition,
     tabsetSideBands,
@@ -57,9 +58,8 @@ import {
     splitFormTo,
     composeFloats,
 } from "../../features/dock/dockSlice";
-import { collectSubtreeRootIds } from "../../features/dock/dockPanel";
+import { collectSubtreeRootIds, synthesizePanelDefinition } from "../../features/dock/dockPanel";
 import { findZoneInLayout, isPanelForm } from "../../features/dock/dockTree";
-import { getPanel } from "../../features/dock/panelRegistry";
 import type { DockDropZone, DockRect } from "../../features/dock/dockTypes";
 import { isPrimaryModifierDown } from "../../utils/platform";
 
@@ -553,7 +553,7 @@ function onPointerUp(event: PointerEvent): void {
         // 2) 按住修饰键 → 停靠；落空则回弹（什么都不做）。
         if (dockIntent) {
             if (!target) return;
-            commitDock(active.formId, target, active.mode);
+            commitDock(active.formId, target, active.mode, state.floatRect);
             return;
         }
         // 3) 拖出标签条 → 浮动，落在指针处。
@@ -573,7 +573,7 @@ function onPointerUp(event: PointerEvent): void {
 
     // 浮动窗体
     if (dockIntent && target) {
-        commitDock(active.formId, target, active.mode);
+        commitDock(active.formId, target, active.mode, state.floatRect);
         return;
     }
     const geometry = state.floatRect ?? active.floatStart;
@@ -598,7 +598,13 @@ function onPointerUp(event: PointerEvent): void {
  * 把落点提交为"并入标签组"、"在某一侧拆分"、"贯通某棵根的某一侧"，或
  * "与另一枚浮窗组合成面板"。
  */
-function commitDock(formId: string, target: DockDropTargetState, mode: "tab" | "float"): void {
+function commitDock(
+    formId: string,
+    target: DockDropTargetState,
+    mode: "tab" | "float",
+    /** 松手瞬间的"幽灵"矩形（指针处的浮窗预览）：组合时源窗体以它为准。 */
+    pendingFloatRect?: DockRect | null,
+): void {
     // ── 浮窗组合目标：拖到另一枚浮窗上 → 组合成面板 / 停入它的树 ──
     if (target.floatFormId) {
         if (mode === "tab") {
@@ -613,7 +619,7 @@ function commitDock(formId: string, target: DockDropTargetState, mode: "tab" | "
             };
             store.dispatch(floatForm({ formId, geometry }));
         }
-        const rect = composeRectFor(formId, target.floatFormId);
+        const rect = composeRectFor(formId, target.floatFormId, pendingFloatRect);
         store.dispatch(
             composeFloats({
                 sourceFormId: formId,
@@ -658,11 +664,31 @@ function commitDock(formId: string, target: DockDropTargetState, mode: "tab" | "
     store.dispatch(splitFormTo({ formId, referenceFormId, side }));
 }
 
-/** 组合成面板时的并集矩形：按视口夹紧后交给 reducer（reducer 保持纯函数）。 */
-function composeRectFor(sourceFormId: string, targetFormId: string): DockRect | null {
+/**
+ * 组合成面板时的并集矩形：按视口夹紧后交给 reducer（reducer 保持纯函数）。
+ *
+ * 【为什么必须先 resolve】带锚点的浮窗（如首次打开的记事本）里 `float.x/y`
+ * 只是**占位值**（真实位置由锚点在渲染时按视口推导）。直接对占位值取并集，
+ * 组合出的面板会跳到视口左上角 —— 两枚锚定浮窗的占位 x/y 恰好都是 0 附近
+ * （用户报告"组合后面板没有继承原浮窗的位置"）。先把每枚浮窗解析成它**此刻
+ * 实际所在**的矩形，再取并集、夹紧进视口。
+ */
+function composeRectFor(
+    sourceFormId: string,
+    targetFormId: string,
+    pendingFloatRect?: DockRect | null,
+): DockRect | null {
     const layout = store.getState().dock.layout;
-    const source = layout.forms[sourceFormId]?.float ?? null;
-    const target = layout.forms[targetFormId]?.float ?? null;
+    const viewport = { w: window.innerWidth, h: window.innerHeight };
+    const resolve = (formId: string): DockRect | null => {
+        const float = layout.forms[formId]?.float ?? null;
+        return float ? resolveFloatRect(float, viewport) : null;
+    };
+    // 源窗体优先用**幽灵矩形**：停靠意图的松手不会先落库拖拽位移，窗体的
+    // `float` 还停在拖拽前 —— 而用户看到的是拖到指针处的幽灵。以幽灵为准，
+    // 组合出的面板恰好盖住"所拖之窗 + 目标之窗"。
+    const source = pendingFloatRect ?? resolve(sourceFormId);
+    const target = resolve(targetFormId);
     if (!source && !target) return null;
     if (!source || !target) {
         const single = (source ?? target) as DockRect;
@@ -676,11 +702,7 @@ function composeRectFor(sourceFormId: string, targetFormId: string): DockRect | 
         w: Math.max(source.x + source.w, target.x + target.w) - x,
         h: Math.max(source.y + source.h, target.y + target.h) - y,
     };
-    return clampFloatRect(
-        raw,
-        { w: window.innerWidth, h: window.innerHeight },
-        FLOAT_TITLE_BAR_PX,
-    );
+    return clampFloatRect(raw, viewport, FLOAT_TITLE_BAR_PX);
 }
 
 /**
@@ -856,7 +878,9 @@ export function beginTabDrag(event: React.PointerEvent, args: TabDragArgs): void
     // 浮窗，而当初那个大小已经无从找回。浮动态与停靠态的尺寸是两个独立意图，
     // 必须分开保存（见 `DockForm.float`）。
     const form = store.getState().dock.layout.forms[args.formId];
-    const definition = getPanel(form?.panelId ?? args.panelId);
+    // 面板不在注册表里，尺寸兜底走派生定义（`synthesizePanelDefinition`），
+    // 否则面板被拖出标签时会退回通用的 420×320。
+    const definition = synthesizePanelDefinition(store.getState().dock.layout, args.formId);
     const sourceSize = {
         w: Math.max(200, Math.round(form?.float?.w ?? definition?.defaultWidth ?? 420)),
         h: Math.max(120, Math.round(form?.float?.h ?? definition?.defaultHeight ?? 320)),

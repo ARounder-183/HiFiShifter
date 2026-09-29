@@ -23,16 +23,19 @@ import {
     closeForm,
     floatForm,
     focusForm,
+    renameForm,
     setActiveTabOf,
     toggleTabsetCollapsed,
 } from "../../features/dock/dockSlice";
 import { maximizeActive } from "../../features/dock/dockApi";
+import { displayTitleOf, synthesizePanelDefinition } from "../../features/dock/dockPanel";
+import { isPanelForm } from "../../features/dock/dockTree";
 import { dockDragHint } from "./dockTooltips";
-import { getPanel } from "../../features/dock/panelRegistry";
 import type { DockTabsetNode, DockTabPosition } from "../../features/dock/dockTypes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { beginTabDrag } from "./dockDragController";
 import { DockTabMenu } from "./DockTabMenu";
+import { DockInlineRename } from "./DockInlineRename";
 import { detachFormToWindow } from "../../features/dock/dockApi";
 import { store } from "../../app/store";
 
@@ -57,12 +60,15 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
     // 时触发，不会带来额外渲染。
     const [barElement, setBarElement] = useState<HTMLDivElement | null>(null);
     const [menu, setMenu] = useState<{ formId: string; x: number; y: number } | null>(null);
+    /** 正在行内重命名的窗体 id（双击面板标签进入，见 `onTabDoubleClick`）。 */
+    const [renamingFormId, setRenamingFormId] = useState<string | null>(null);
     const showIcons = useAppSelector((s) => s.dock.settings.tabIcons);
     const dockModifier = useAppSelector((s) => s.dock.settings.dockModifier);
     // 提示里带上**当前生效的**修饰键文本（可被用户改），两行由自定义 tooltip 的
     // `white-space: pre-line` 渲染。原生 `title` 无法保证换行与主题一致。
     const dragHint = dockDragHint(dockModifier, tf);
     const doubleClickAction = useAppSelector((s) => s.dock.settings.doubleClickHeaderAction);
+    const layout = useAppSelector((s) => s.dock.layout);
     const forms = useAppSelector((s) => s.dock.layout.forms);
 
     // 拖拽中的视觉反馈只有两处：被拖标签自身（`data-dragging` 置灰），以及
@@ -71,9 +77,14 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
     // 位置"指示线：顺序真的在动，指示线只会成为多余的第三种反馈。
     const drag = useSyncExternalStore(subscribeDockDrag, getDockDragState, getDockDragState);
 
-    /** 双击标签的行为由设置决定（默认浮动/停靠切换）。 */
+    /** 双击标签的行为：面板 = 进入行内重命名（名称区域的专属交互，先于设置的
+     *  默认动作）；其余窗体由设置决定（默认浮动/停靠切换）。 */
     const onTabDoubleClick = useCallback(
         (formId: string) => {
+            if (isPanelForm(forms[formId])) {
+                setRenamingFormId(formId);
+                return;
+            }
             if (doubleClickAction === "none") return;
             if (doubleClickAction === "toggleFloat") {
                 onToggleFloat(formId);
@@ -86,7 +97,7 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
             }
             dispatch(toggleTabsetCollapsed({ tabsetId: node.id }));
         },
-        [dispatch, doubleClickAction, node.id, onToggleFloat],
+        [dispatch, doubleClickAction, forms, node.id, onToggleFloat],
     );
 
     /**
@@ -142,6 +153,9 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
             if (event.button !== 0) return;
             // 关闭按钮走自己的 onClick。
             if ((event.target as HTMLElement).closest("[data-dock-tab-close]")) return;
+            // 行内重命名中：启动拖拽会 setPointerCapture 到标签元素，光标定位与
+            // 文本选择会被指针捕获劫持 —— 编辑期间标签不参与拖拽。
+            if (renamingFormId === formId) return;
             dispatch(focusForm(formId));
             const panelId = forms[formId]?.panelId;
             beginTabDrag(event, {
@@ -152,7 +166,7 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                 tabBarElement: barElement,
             });
         },
-        [barElement, dispatch, forms, node.id, node.tabs.length],
+        [barElement, dispatch, forms, node.id, node.tabs.length, renamingFormId],
     );
 
     return (
@@ -169,9 +183,12 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                 >
                     {node.tabs.map((formId) => {
                         const form = forms[formId];
-                        const definition = form ? getPanel(form.panelId) : undefined;
-                        const title =
-                            form?.title ?? (definition ? tf(definition.titleKey) : formId);
+                        // 标题按**窗体**解析（重命名 > 面板按内容派生 > 注册表）：
+                        // 面板不在注册表里，此前会退回显示原始窗体 id（用户报告）。
+                        const definition = form
+                            ? synthesizePanelDefinition(layout, formId)
+                            : undefined;
+                        const title = form ? displayTitleOf(layout, formId, tf) : formId;
                         const Icon = definition?.icon;
                         const active = node.active === formId;
                         return (
@@ -199,7 +216,20 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                                 }}
                             >
                                 {showIcons && Icon ? <Icon /> : null}
-                                <span className="hs-dock-tab-label">{title}</span>
+                                {renamingFormId === formId && form ? (
+                                    <DockInlineRename
+                                        initial={form.title ?? ""}
+                                        placeholder={title}
+                                        ariaLabel={tf("dock_rename_tab")}
+                                        onCommit={(next) => {
+                                            dispatch(renameForm({ formId, title: next }));
+                                            setRenamingFormId(null);
+                                        }}
+                                        onCancel={() => setRenamingFormId(null)}
+                                    />
+                                ) : (
+                                    <span className="hs-dock-tab-label">{title}</span>
+                                )}
                                 <span
                                     className="hs-dock-tab-close"
                                     data-dock-tab-close="1"
@@ -292,10 +322,11 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                         setMenu(null);
                     }}
                     detachAction={
-                        // 只有声明了 `detachable` 的面板才给出这个入口 —— 否则用户
-                        // 会点到一个开不出来的窗口（时间轴带着 WebGL 上下文，跨窗口
-                        // 必须重新挂载，代价不可接受）。
-                        getPanel(forms[menu.formId]?.panelId ?? "")?.detachable
+                        // 只有**可拆**的窗体才给出这个入口 —— 否则用户会点到一个
+                        // 开不出来的窗口（时间轴带着 WebGL 上下文，跨窗口必须重新
+                        // 挂载，代价不可接受）。面板的可拆性是派生的（全体成员可
+                        // 拆才可拆），走同一份解析。
+                        synthesizePanelDefinition(layout, menu.formId)?.detachable
                             ? {
                                   labelKey: "dock_detach_to_window",
                                   run: () => {
