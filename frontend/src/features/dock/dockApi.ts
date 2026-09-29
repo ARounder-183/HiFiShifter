@@ -526,8 +526,10 @@ export function resetLayout(dispatch: AppDispatch): void {
 /**
  * 新建一个不含任何窗体的空面板（布局菜单 / 快捷键入口）。
  *
- * 面板以"停靠在主工作区右侧、固定 320px"为默认落点：空面板不是浮窗 —— 它是
- * 用户接下来要往里装窗体的容器，出现在布局里才符合"向当前布局添加"的语义。
+ * 默认以**浮动**出现在主窗口正中（居中锚点，随主窗口缩放保持居中；连续新建
+ * 的面板级联错开 28px）：新建面板的下一步动作几乎总是"往里拖窗体"，让它浮在
+ * 眼前成为焦点，而不是挤进布局里占一格。用户随后可以把它拖停进布局，或拖到
+ * 别处 —— 那一步由用户决定。
  */
 export function addEmptyPanel(dispatch: AppDispatch): void {
     dispatch(createEmptyPanel({}));

@@ -57,6 +57,8 @@ import {
     makePanelForm,
     ownerOfRoot,
     panelDepth,
+    PANEL_DEFAULT_HEIGHT,
+    PANEL_DEFAULT_WIDTH,
     synthesizePanelDefinition,
 } from "./dockPanel";
 import {
@@ -629,42 +631,76 @@ const dockSlice = createSlice({
             state,
             action: PayloadAction<{
                 rootId?: string;
+                /** 显式落点 → 停靠进该根。缺省 = 浮动（见下）。 */
                 placement?: DockPlacement;
+                /** 显式浮动几何（命令层按触发控件算出）；缺省 = 居中锚点。 */
+                float?: DockFloatGeometry | null;
                 /** 面板窗体的显示标题（缺省走 i18n / 内容派生）。 */
                 title?: string;
             }>,
         ) {
-            const { rootId, placement, title } = action.payload;
+            const { rootId, placement, float, title } = action.payload;
             const targetRootId = rootId ?? MAIN_ROOT_ID;
-
-            // 嵌套深度上限：往深层面板里再塞面板必须先过这一关。
-            if (depthOfRoot(state.layout, targetRootId) + 1 > Math.max(1, state.settings.maxPanelDepth)) {
-                return;
-            }
 
             const layout = state.layout;
             const newFormId = `${DOCK_PANEL_FORM}:${nextFormSuffix(layout, DOCK_PANEL_FORM)}`;
             const newRootId = nextRootId(layout);
-            const forms = {
-                ...layout.forms,
-                [newFormId]: makePanelForm(newFormId, newRootId),
-            };
-            if (title && title.trim()) forms[newFormId].title = title.trim();
-            const order = [...layout.order, newFormId];
-            const base: DockLayout = { ...layout, forms, order };
-            const resolved: DockPlacement = placement ?? { side: "right", sizePx: 320, rootId: targetRootId };
-            const placedRootId = resolved.rootId ?? targetRootId;
-            const tree = placeForm(base, newFormId, resolved);
-            const pruned = pruneTree(tree);
+            const form = makePanelForm(newFormId, newRootId);
+            if (title && title.trim()) form.title = title.trim();
+
+            if (placement) {
+                // 显式落点：停靠进指定根（命令式入口保留这条通道，菜单默认不走）。
+                // 嵌套深度上限：往深层面板里再塞面板必须先过这一关。
+                const placedRootId = placement.rootId ?? targetRootId;
+                if (
+                    depthOfRoot(layout, placedRootId) + 1 >
+                    Math.max(1, state.settings.maxPanelDepth)
+                ) {
+                    return;
+                }
+                const base: DockLayout = {
+                    ...layout,
+                    forms: { ...layout.forms, [newFormId]: form },
+                    order: [...layout.order, newFormId],
+                };
+                const tree = placeForm(base, newFormId, placement);
+                const pruned = pruneTree(tree);
+                state.layout = {
+                    ...base,
+                    roots: {
+                        ...base.roots,
+                        [placedRootId]:
+                            pruned ??
+                            base.roots[placedRootId] ??
+                            makeTabset(nextZoneIdInLayout(base), newFormId),
+                    },
+                };
+                state.activeFormId = newFormId;
+                return;
+            }
+
+            // ── 默认：浮动 ──────────────────────────────────────────
+            // 新建空面板是"接下来要往里装窗体"的动作，让它浮在主窗口正中成为
+            // 眼前的焦点（与外观设置同一条锚点语义），而不是挤进布局里占一格。
+            // 位置交给**居中锚点**按当前视口推导（用户移动后锚点自然清除）；
+            // 级联偏移让连续新建的面板错开 28px，不会完全叠在一起。
+            const cascadeIndex = layout.floatOrder.length;
+            const geometry: DockFloatGeometry =
+                float ?? {
+                    x: 0,
+                    y: 0,
+                    w: PANEL_DEFAULT_WIDTH,
+                    h: PANEL_DEFAULT_HEIGHT,
+                    anchor: "center",
+                    anchorMarginPx: 24,
+                    anchorOffsetX: cascadeIndex * 28,
+                    anchorOffsetY: cascadeIndex * 28,
+                };
             state.layout = {
-                ...base,
-                roots: {
-                    ...base.roots,
-                    [placedRootId]:
-                        pruned ??
-                        base.roots[placedRootId] ??
-                        makeTabset(nextZoneIdInLayout(base), newFormId),
-                },
+                ...layout,
+                forms: { ...layout.forms, [newFormId]: { ...form, float: geometry, floating: true } },
+                order: [...layout.order, newFormId],
+                floatOrder: [...layout.floatOrder, newFormId],
             };
             state.activeFormId = newFormId;
         },

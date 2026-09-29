@@ -243,8 +243,8 @@ export function synthesizePanelDefinition(
     return {
         id: DOCK_PANEL_FORM,
         titleKey: "dock_panel_title",
-        defaultWidth: 720,
-        defaultHeight: 480,
+        defaultWidth: PANEL_DEFAULT_WIDTH,
+        defaultHeight: PANEL_DEFAULT_HEIGHT,
         minWidth: 200,
         minHeight: 140,
         singleton: false,
@@ -253,6 +253,15 @@ export function synthesizePanelDefinition(
         excludeFromWindowMenu: true,
     };
 }
+
+/**
+ * 面板的默认浮动尺寸。
+ *
+ * 空面板的"新建落点"与独立窗口的兜底尺寸都从这里取 —— 两处各写一份 720×480
+ * 迟早漂移。作为容器，默认给一个能直接往里排布的中等偏大尺寸。
+ */
+export const PANEL_DEFAULT_WIDTH = 720;
+export const PANEL_DEFAULT_HEIGHT = 480;
 
 /** 面板的直接成员窗体 id（嵌套面板计为一个成员）。 */
 export function panelMemberFormIds(layout: DockLayout, formId: string): string[] {

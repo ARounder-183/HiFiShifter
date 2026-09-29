@@ -128,6 +128,14 @@ test("dock panel behaviors", () => {
         ) as string;
         const rootId = state.layout.forms[panelFormId].childRootId as string;
         assert(isFormVisible(state.layout, panelFormId), "empty panel is visible (it renders a well)");
+        assert(
+            state.layout.forms[panelFormId].floating === true,
+            "a new empty panel floats by default",
+        );
+        assert(
+            state.layout.forms[panelFormId].float?.anchor === "center",
+            "default float position is the centered anchor (cascade offsets keep stacks apart)",
+        );
         assertEqual(state.layout.roots[rootId], undefined, "empty panel has no root entry");
         assertEqual(state.activeFormId, panelFormId, "creation focuses the new panel");
 
