@@ -8,16 +8,6 @@ pub fn is_available() -> bool {
     false
 }
 
-pub fn infer_f0_hz(
-    _mono: &[f64],
-    _sample_rate: u32,
-    _frame_period_ms: f64,
-    _f0_floor: f64,
-    _f0_ceil: f64,
-) -> Result<Vec<f64>, String> {
-    Err("ONNX feature not compiled".to_string())
-}
-
 pub fn infer_f0_hz_f32(
     _mono: &[f32],
     _sample_rate: u32,

@@ -1009,27 +1009,6 @@ pub fn infer_f0_hz_f32(
     Ok(sanitize_f0(resized, f0_floor, f0_ceil))
 }
 
-/// F0 推理（f64 输入）。保留给仍以 f64 表示素材的调用方；内部转为 f32 后转发。
-pub fn infer_f0_hz(
-    mono: &[f64],
-    sample_rate: u32,
-    frame_period_ms: f64,
-    f0_floor: f64,
-    f0_ceil: f64,
-) -> Result<Vec<f64>, String> {
-    if mono.is_empty() {
-        return Ok(Vec::new());
-    }
-    let waveform: Vec<f32> = mono.iter().map(|&v| v as f32).collect();
-    infer_f0_hz_f32(
-        &waveform,
-        sample_rate,
-        frame_period_ms,
-        f0_floor,
-        f0_ceil,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

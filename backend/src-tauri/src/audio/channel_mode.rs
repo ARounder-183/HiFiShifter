@@ -161,6 +161,12 @@ pub fn condition_take_channels(
 /// - MonoLeft / MonoRight → 对应平面；
 /// - MonoMix → (ch1+ch2)×0.5；
 /// - Normal / Swap（stereo）→ (ch1+ch2)×0.5（Swap 的均值与 Normal 相同）。
+// 【为何显式保留】活的音高分析路径**不**按声道模式条件化，只取声道均值（见
+// `streaming_pitch` 的降混），因此本函数当前没有生产调用者。但它是声道模式
+// 语义（MonoLeft 取 L、MonoRight 取 R、其余取均值）的唯一权威实现，与
+// `effective_channels` / `condition_take_channels` 同属一组，且有单元测试覆盖。
+// 删掉它等于丢掉这层语义，所以标注为有意保留，而不是留下一个会误导的无用函数。
+#[allow(dead_code)]
 pub fn effective_mono(interleaved: &[f32], in_channels: u16, mode: TakeChannelMode) -> Vec<f32> {
     let in_channels = in_channels.max(1) as usize;
     let frames = interleaved.len() / in_channels;

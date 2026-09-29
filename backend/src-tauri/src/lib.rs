@@ -40,8 +40,6 @@ pub(crate) mod channel_mode;
 pub(crate) mod stereo_detect;
 #[path = "import/channel_policy.rs"]
 pub(crate) mod channel_policy;
-#[path = "pitch/clip_pitch_cache.rs"]
-mod clip_pitch_cache;
 #[path = "pitch/clip_rendering_state.rs"]
 mod clip_rendering_state;
 mod fade_curves;
@@ -68,8 +66,6 @@ mod streaming_pitch;
 #[path = "pitch/pitch_config.rs"]
 mod pitch_config;
 mod pitch_editing;
-#[path = "pitch/pitch_progress.rs"]
-mod pitch_progress;
 mod recording;
 mod render_cache;
 mod render_key;

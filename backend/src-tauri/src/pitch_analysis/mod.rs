@@ -160,21 +160,18 @@ pub(crate) fn build_root_pitch_key(tl: &TimelineState, root_track_id: &str) -> S
     hasher.finalize().to_hex().to_string()
 }
 
+/// 一次 `pitch_orig` 装配任务的最小描述。
+///
+/// 只携带调用方真正需要的两项：目标根轨道，以及本次装配对应的缓存 key。
+///
+/// 【历史】它曾额外携带 `timeline`（根子树快照）以及 `frame_period_ms` /
+/// `target_frames` / `algo`。前三者只被已经删除的旧分析流水线读取，`timeline` 更是
+/// 让每次 `maybe_schedule_pitch_orig` 都白克隆一份完整 `TimelineState` —— 而该函数
+/// 在时间线编辑路径上有数十个调用点。这些都随旧流水线一并移除。
 #[derive(Debug, Clone)]
 pub(crate) struct PitchJob {
     pub(crate) root_track_id: String,
     pub(crate) key: String,
-    #[allow(dead_code)]
-    pub(crate) frame_period_ms: f64,
-    #[allow(dead_code)]
-    pub(crate) target_frames: usize,
-    #[allow(dead_code)]
-    pub(crate) algo: PitchAnalysisAlgo,
-
-    /// Root-subtree timeline snapshot used for root-mix analysis.
-    /// This matches what the parameter panel background waveform shows.
-    #[allow(dead_code)]
-    pub(crate) timeline: TimelineState,
 }
 
 #[derive(Debug, Clone, Serialize)]

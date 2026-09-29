@@ -381,13 +381,6 @@ pub(super) fn remove_track(
         }
     }
 
-    // 清理被删除轨道的 pitch_timeline_snapshot，防止增量分析数据残留。
-    if let Ok(mut snapshot_map) = state.pitch_timeline_snapshot.lock() {
-        for root_id in &root_track_ids_to_clean {
-            snapshot_map.remove(root_id);
-        }
-    }
-
     // 清理 pitch_inflight 中包含被删轨道 ID 的去重 key。
     if let Ok(mut inflight) = state.pitch_inflight.lock() {
         inflight.retain(|key| {
