@@ -309,10 +309,25 @@ export function AppDialog({
 
     const busy = pendingActionId !== null;
 
+    /*
+     * 【为什么要自己补主题作用域】Radix 把 Dialog 的内容 portal 到 `<body>`，并用它自己的
+     * `<Theme asChild>` 只补 `radix-themes` 类 —— 本应用挂在外壳上的 `qt-theme` 类**不会**
+     * 跟过来。而 `--qt-*` 里的**派生令牌**（值形如 `var(--accent-9)` 的 `--qt-accent` /
+     * `--qt-focus-ring`）必须在与 `--accent-9` 相同的作用域里求值，否则会变成无效值并被后代
+     * 继承 —— 表现为 `bg-qt-accent` 解析成 `transparent`（导出进度条的填充条就是这么消失的，
+     * 详见 `src/index.css` 里 `.radix-themes` 规则的说明）。
+     *
+     * 模式取自 `<html data-theme>`：`AppThemeProvider` 在 render 期写入（幂等），所以这里读到
+     * 的就是当帧模式；拿不到时（测试环境未挂 Provider）**不加类**，行为与修复前一致。
+     */
+    const themeMode = document.documentElement.dataset.theme;
+    const themeScopeClass =
+        themeMode === "dark" || themeMode === "light" ? `qt-theme ${themeMode}` : null;
+
     return (
         <Dialog.Root open={open} onOpenChange={requestClose}>
             <Dialog.Content
-                className={cx("app-dialog flex flex-col", className)}
+                className={cx("app-dialog flex flex-col", themeScopeClass, className)}
                 style={{
                     maxWidth: SIZE_PX[size],
                     // 高度上限统一：小窗口上内容滚动而不是溢出屏幕。

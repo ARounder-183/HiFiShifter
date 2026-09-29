@@ -54,8 +54,10 @@
        `scrollbar-thumb-hover:` 类因此静默失效。补上定义而不是删掉映射：
        hover 是滚动条唯一的价格反馈。 */
     --qt-scrollbar-thumb-hover: #6b6b6b;
-    /* 强调色的语义别名。此前两处 `text-qt-accent` 因为无此 token 而取不到颜色。 */
-    --qt-accent: var(--accent-9);
+    /* 强调色的语义别名。此前两处 `text-qt-accent` 因为无此 token 而取不到颜色。
+       注意这只是一个"就近声明"：真正能正确求值的位置在下方 `.radix-themes` 规则
+       （本令牌引用了 `--accent-9`，必须在拥有该变量的元素上声明）。 */
+    --qt-accent: var(--accent-9, var(--qt-highlight));
     --qt-overlay: rgba(0, 0, 0, 0.35);
     --qt-divider: rgba(255, 255, 255, 0.04);
     --qt-subtle-1: rgba(255, 255, 255, 0.025);
@@ -111,7 +113,7 @@
     --qt-graph-grid-weak: rgba(74, 88, 112, 0.3);
     --qt-scrollbar-thumb: #b4bac7;
     --qt-scrollbar-thumb-hover: #9aa1b1;
-    --qt-accent: var(--accent-9);
+    --qt-accent: var(--accent-9, var(--qt-highlight));
     --qt-overlay: rgba(20, 24, 32, 0.22);
     --qt-divider: rgba(32, 38, 52, 0.1);
     --qt-subtle-1: rgba(28, 36, 52, 0.025);
@@ -129,6 +131,39 @@
     --qt-snap-cursor: #de4f5d;
     --qt-snap-sample: #64748b;
     --qt-snap-loop: #16a34a;
+}
+
+/*
+ * 派生令牌（值引用其它自定义属性）的**求值作用域**。
+ *
+ * 【为什么必须单独声明在 `.radix-themes` 上】自定义属性在**声明它的元素**上求值，
+ * 不是在"使用它的元素"上求值。`--qt-accent: var(--accent-9)` 写在 `:root`/`<html>`
+ * 时，`<html>` 上并没有 `--accent-9`（Radix 只把它定义在 `.radix-themes` 元素上，
+ * 见 @radix-ui/themes 的 `.radix-themes:where(.accent-*)` 规则），于是这个自定义属性
+ * 计算为**无效值**，并被后代按无效值继承 —— 用到它的声明（`background: var(--qt-accent)`）
+ * 随之整条失效，回落到初始值 `transparent`。
+ *
+ * 应用外壳恰好还有一个"更近"的声明（外壳元素同时带 `.qt-theme` 与 `.radix-themes`），
+ * 因此外壳内看起来一切正常；而 **Dialog / Select / Tooltip / 右键菜单等 Radix portal
+ * 的内容挂在 `<body>` 下**，Radix 只把 `radix-themes` 类挂到 portal 包裹层（不带本应用
+ * 的 `qt-theme`），拿到的就是无效值：
+ *   - 导出进度条的**填充条**一直不可见（`bg-qt-accent`，它也是全仓唯一的 ProgressBar，
+ *     且唯一使用点就在对话框里）—— 用户报告的"进度条不更新"；
+ *   - `AboutDialog` 的链接色（`text-qt-accent`）、`SegmentedControl` 的激活底色
+ *     在对话框内同样失效（在面板里正常）。
+ *
+ * 声明在 `.radix-themes` 上即可一次覆盖外壳与所有 portal；两处 `.qt-theme.*` / `:root`
+ * 上的声明保留为"就近值 + fallback"，供不在 Radix 主题内的元素兜底。
+ *
+ * 【同类前科】`--default-font-family` 被 Radix 在 `.radix-themes` 上遮蔽过
+ * （见 `AppThemeProvider` 的注释）——同一个陷阱的另一个实例。
+ *
+ * 【防回归】`src/ui/designSystemGates.test.ts` 有一条门禁：任何"值引用其它自定义属性"
+ * 的 `--qt-*` 令牌，必须声明在本规则的选择器下，或自带 fallback。
+ */
+.radix-themes {
+    --qt-accent: var(--accent-9, var(--qt-highlight));
+    --qt-focus-ring: var(--accent-9, #3b82f6);
 }
 
 :root {

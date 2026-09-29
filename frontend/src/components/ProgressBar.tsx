@@ -69,10 +69,33 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
                 )}
             </div>
 
-            <div className="relative h-2 w-full overflow-hidden rounded-full bg-qt-meter-well">
+            {/*
+             * 槽体带 1px 描边：暗色下 `--qt-meter-well`(#1d1d1d) 与对话框底色
+             * `--qt-window`(#353535) 明度接近，不描边时槽体边界几乎看不出来
+             * —— 填充正常也难判断"走到哪了"。
+             *
+             * 填充元素带 `data-hs-progress-fill` / `data-percentage`：现场诊断
+             * "宽度在动但颜色透明"这类 portal 令牌问题时可直接用选择器取到它
+             * （根因见 `src/index.css` 里 `.radix-themes` 规则的说明）。
+             */}
+            <div
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(clampedPercentage)}
+                data-hs-progress-track="1"
+                className="relative h-2 w-full overflow-hidden rounded-full border border-qt-border bg-qt-meter-well"
+            >
                 <div
+                    data-hs-progress-fill="1"
+                    data-percentage={clampedPercentage}
                     className="absolute left-0 top-0 h-full bg-qt-accent transition-all duration-300"
-                    style={{ width: `${clampedPercentage}%` }}
+                    style={{
+                        width: `${clampedPercentage}%`,
+                        // 小百分比在窄条上几乎不可见；但 0% 不给最小宽度，
+                        // 否则会显示一个"已经开始了"的假点。
+                        minWidth: clampedPercentage > 0 ? 3 : 0,
+                    }}
                 />
             </div>
 
