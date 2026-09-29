@@ -202,6 +202,8 @@ import {
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
 import { VibratoPresetDialog } from "./VibratoPresetDialog";
 import { buildVibratoCurve } from "../../features/vibrato/vibratoCurve";
+import { extractVibratoPreset } from "../../features/vibrato/vibratoExtract";
+import { upsertVibratoPreset } from "../../features/session/sessionSlice";
 import {
     resolveActiveVibratoPreset,
     resolveVibratoPresets,
@@ -260,7 +262,7 @@ import { settingsApi } from "../../services/api/settings";
 import { EditContextMenu } from "../editDialogs/EditContextMenu";
 import { resolveScrollableProjectSec } from "../../features/session/projectBoundary";
 import { parseCustomScaleToken } from "../../utils/scaleSelection";
-import { AppIconButton, AppSelect } from "../../ui";
+import { AppIconButton, AppNoticeDialog, AppSelect } from "../../ui";
 import {
     centerFromVerticalScrollTop,
     verticalScrollTopFromCenter,
@@ -987,6 +989,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
      * 与这里的右键入口共用同一个对话框组件。
      */
     const [vibratoPresetDialogOpen, setVibratoPresetDialogOpen] = useState(false);
+    /** 提取失败提示（选区太短 / 找不到稳定颤音）。 */
+    const [vibratoExtractFailure, setVibratoExtractFailure] = useState(false);
     // 拖动方向循环切换键：拖拽进行中按下可即时切换本次拖拽方向（触控板替代右键）。
     const cycleDragDirectionKb = useAppSelector((state) =>
         selectKeybinding(state, "pianoRoll.cycleDragDirection"),
@@ -6609,6 +6613,73 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     }, []);
 
     /**
+     * 「从选区提取颤音预设」。
+     *
+     * 把用户手绘（或导入）的一段颤音拟合成预设：去趋势 → 自相关测周期 →
+     * 折叠出单周期波形 → 测包络与不规则度。成功后直接入库并打开预设编辑器，
+     * 用户在那里改名字、微调参数。
+     *
+     * 【为什么用第一段选区】多种选区下"提取一个预设"的语义是模糊的；取第一段
+     * 最符合直觉（也是 `runPerRange` 之外唯一不需要用户再做选择的解释）。
+     */
+    const handleExtractVibratoPreset = useCallback(async () => {
+        if (!rootTrackId) return;
+        if (!selectionRef.current || selectionRef.current.length === 0) {
+            selectAllParamRange();
+        }
+        const ranges = selectionRef.current ? selectionToFrameRanges(selectionRef.current) : [];
+        const range = ranges[0];
+        if (!range || range.frameCount < 8) {
+            setVibratoExtractFailure(true);
+            return;
+        }
+
+        const fp = paramView?.framePeriodMs ?? 5;
+        const res = await paramsApi.getParamFrames(
+            rootTrackId,
+            editParam,
+            range.startFrame,
+            range.frameCount,
+            1,
+            true,
+            isDynParam(editParam),
+        );
+        if (!res?.ok) return;
+        const payload = res as ParamFramesPayload;
+        const values = (payload.edit ?? []).map((value) => Number(value) || 0);
+        const fpMs = Number(payload.frame_period_ms ?? fp) || fp;
+        const extracted = extractVibratoPreset({
+            values,
+            framePeriodMs: fpMs,
+            param: editParam,
+            range: currentParamRange,
+        });
+        if (!extracted.ok) {
+            setVibratoExtractFailure(true);
+            return;
+        }
+
+        const preset = {
+            ...extracted.preset,
+            name: t("vibrato_from_selection"),
+        };
+        dispatch(upsertVibratoPreset(preset));
+        dispatch(setActiveVibratoPreset(preset.id));
+        void dispatch(persistUiSettings());
+        // 直接打开编辑器：提取出来的参数几乎总还要微调（名字、深度、速率）。
+        setVibratoPresetDialogOpen(true);
+    }, [
+        rootTrackId,
+        selectionRef,
+        selectAllParamRange,
+        paramView?.framePeriodMs,
+        editParam,
+        currentParamRange,
+        dispatch,
+        t,
+    ]);
+
+    /**
      * 「另存为音高参考」：每个选区段生成一个独立的 Pitch Ref clip
      * （不合并断层 —— 合并会把缺口处也填上参考音高）。
      *
@@ -8465,6 +8536,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         void handleEditOp("addVibrato", { presetId });
                     }}
                     onManageVibratoPresets={() => setVibratoPresetDialogOpen(true)}
+                    onExtractVibratoPreset={() => void handleExtractVibratoPreset()}
                     onSaveAsPitchRef={() => void handleSaveAsPitchRef()}
                     onExportMidi={() => void handleExportMidiFromEditor()}
                     // 音量 ↔ 动态 互转：参数本身就是这两个之一时始终可用。
@@ -8489,6 +8561,14 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 onOpenChange={setVibratoPresetDialogOpen}
                 editParam={editParam}
                 paramRange={currentParamRange}
+            />
+
+            <AppNoticeDialog
+                open={vibratoExtractFailure}
+                onOpenChange={setVibratoExtractFailure}
+                title={t("vibrato_extract_title")}
+                message={t("vibrato_extract_failed")}
+                closeLabel={t("close")}
             />
         </Flex>
     );

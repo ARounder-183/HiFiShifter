@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { Box, Flex, ScrollArea } from "@radix-ui/themes";
+import { Box, Flex, ScrollArea, TextField } from "@radix-ui/themes";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
@@ -340,6 +340,18 @@ export function VibratoPresetDialog({
                                 ) : null}
 
                                 <AppForm>
+                                    {!isBuiltin ? (
+                                        <AppField label={t("vibrato_manager_name")}>
+                                            <TextField.Root
+                                                size="2"
+                                                value={draft.name}
+                                                aria-label={t("vibrato_manager_name")}
+                                                onChange={(event) =>
+                                                    patch({ name: event.target.value })
+                                                }
+                                            />
+                                        </AppField>
+                                    ) : null}
                                     <AppFormSection title={t("vibrato_section_wave")}>
                                         <AppField label={t("vibrato_shape_label")}>
                                             <AppSelect
