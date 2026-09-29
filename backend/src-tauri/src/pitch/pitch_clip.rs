@@ -807,11 +807,15 @@ pub fn schedule_clip_pitch_jobs(
             );
             global_batch_state().set_current(Some(job.clip.name.clone()));
 
-            let analysis = analyze_clip_pitch_and_level(
+            // 块间取消：工程一旦切换就尽早退出，否则旧素材还要占着分析期的工作集
+            // 一直跑到结束（那正是内存峰值的来源）。
+            let cancelled = || current_pitch_generation() != generation;
+            let analysis = analyze_clip_pitch_and_level_cancellable(
                 &tl_shared,
                 &job.clip,
                 &job.root_track_id,
                 frame_period_ms,
+                &cancelled,
             );
 
             // 取消检查：分析期间工程可能已切换（或缓存已被清空）。此时结果属于
@@ -928,22 +932,145 @@ pub fn schedule_clip_pitch_jobs(
 /// 分析单个 clip 的源音频，产出**音高曲线 + 逐帧电平**。
 ///
 /// 一次解码同时服务两个用途（零额外 I/O）：FCPE 推理得到 MIDI 音高，同一份
-/// mono PCM 上再做逐帧 RMS 得到电平。音高需要 FCPE（不可用时 `midi` 为空），
+/// mono PCM 上再做逐帧峰值得到电平。音高需要 FCPE（不可用时 `midi` 为空），
 /// 电平不需要 —— DYN 参数的原声基线在任何环境下都要能算出来。
+///
+/// 默认走**分块流式**路径（见 `crate::streaming_pitch`），工作集只与块长有关；
+/// 设 `HIFISHIFTER_PITCH_CHUNK_SEC=0` 可回落到一次性整份分析。
 pub fn analyze_clip_pitch_and_level(
     tl: &TimelineState,
     clip: &Clip,
     root_track_id: &str,
     frame_period_ms: f64,
 ) -> Option<ClipPitchAnalysis> {
-    let ck = build_clip_pitch_key(tl, clip, root_track_id, frame_period_ms)?;
+    analyze_clip_pitch_and_level_cancellable(tl, clip, root_track_id, frame_period_ms, &|| false)
+}
 
-    // ── 始终解码源音频全量 PCM 进行分析 ─────────────────────────────────────
-    // 缓存中存的是全量源音频的曲线，不含 trim/rate 处理。
-    // trim 截取 + rate 拉伸在推送/组装阶段按需执行。
+/// 同 [`analyze_clip_pitch_and_level`]，但允许调用方在分块之间请求放弃。
+///
+/// 【为什么需要】超长素材的分析可持续数分钟。没有块间取消，用户切换工程后就只能
+/// 等旧素材整份跑完才开始释放 —— 而分析期的工作集正是内存峰值所在。取消命中时
+/// 返回 `None`，调用方按"无结果"处理即可（结果本来也属于已被放弃的工程）。
+pub fn analyze_clip_pitch_and_level_cancellable(
+    tl: &TimelineState,
+    clip: &Clip,
+    root_track_id: &str,
+    frame_period_ms: f64,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<ClipPitchAnalysis> {
+    let ck = build_clip_pitch_key(tl, clip, root_track_id, frame_period_ms)?;
     let source_path = clip.source_path.as_deref()?;
+    let want_pitch = crate::fcpe_onnx::is_available();
+
+    let (f0_hz, level, was_cancelled) =
+        if crate::pitch_config::PitchAnalysisConfig::global().chunking_enabled {
+            let mut source =
+                crate::streaming_pitch::MediaFileSource::new(Path::new(source_path));
+            let params = crate::streaming_pitch::StreamParams {
+                analysis_rate: ck.sample_rate,
+                frame_period_ms: ck.frame_period_ms,
+                want_pitch,
+                chunking: crate::streaming_pitch::Chunking::from_config(),
+                estimator: &crate::streaming_pitch::FcpeEstimator,
+                cancelled,
+            };
+            match crate::streaming_pitch::analyze_streaming(&mut source, &params) {
+                Ok(streamed) => {
+                    log::debug!(
+                        "[pitch_clip] streamed analysis for clip '{}': {} pitch frames, {} level frames",
+                        clip.name,
+                        streamed.f0_hz.len(),
+                        streamed.level.len()
+                    );
+                    (streamed.f0_hz, streamed.level, streamed.cancelled)
+                }
+                Err(e) => {
+                    log::error!(
+                        "[pitch_clip] streaming analysis failed for clip '{}' ({}): {}",
+                        clip.name,
+                        clip.id,
+                        e
+                    );
+                    return None;
+                }
+            }
+        } else {
+            let (f0_hz, level) =
+                analyze_whole_source(Path::new(source_path), ck.sample_rate, ck.frame_period_ms, want_pitch)?;
+            (f0_hz, level, false)
+        };
+
+    if was_cancelled {
+        log::warn!(
+            "[pitch_clip] analysis cancelled for clip '{}', discarding partial result",
+            clip.name
+        );
+        return None;
+    }
+
+    // ── 音高 → MIDI ─────────────────────────────────────────────────────
+    // FCPE 不可用时只让 midi 为空：电平是有独立价值的产出（DYN 不需要声码器）。
+    let mut midi: Vec<f32> = Vec::new();
+    if f0_hz.len() >= 2 {
+        midi = Vec::with_capacity(f0_hz.len());
+        for hz in f0_hz {
+            midi.push(hz_to_midi(hz));
+        }
+    } else if want_pitch {
+        log::warn!(
+            "[pitch_clip] FCPE returned too few frames for clip '{}'",
+            clip.name
+        );
+    }
+
+    // ── 全量曲线直接返回 ──────────────────────────────────────────────
+    // 缓存中始终存全量源音频的曲线。
+    // trim 截取 + rate resample 在推送（handle_clip_pitch_ready）
+    // 和组装（assemble_pitch_orig_from_cache）阶段按需执行。
+
+    // Small gap fill.
+    let gap_ms = std::env::var("HIFISHIFTER_FCPE_F0_GAP_MS")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0)
+        .clamp(0.0, 200.0);
+    if gap_ms > 0.0 {
+        let gap_frames = ((gap_ms / ck.frame_period_ms.max(0.1)).round() as isize).max(1) as usize;
+        let mut last = 0.0f32;
+        let mut zeros = 0usize;
+        for v in midi.iter_mut() {
+            if *v > 0.0 {
+                last = *v;
+                zeros = 0;
+            } else {
+                zeros += 1;
+                if zeros <= gap_frames && last > 0.0 {
+                    *v = last;
+                }
+            }
+        }
+    }
+
+    Some(ClipPitchAnalysis { midi, level })
+}
+
+/// 一次性整份分析：解码整个源文件，整份降混 / 去直流 / 推理。
+///
+/// 【为什么保留】它有两个用途：
+/// 1. `HIFISHIFTER_PITCH_CHUNK_SEC=0` 时的逃生阀 —— 分块会给块边界带来亚帧级的
+///    近似，怀疑分块有问题时可以一键回到"完全原样"的行为；
+/// 2. 作为分块结果的**对照基准**，回归测试逐帧比对两者（见本文件测试模块）。
+///
+/// 代价是内存与素材长度线性相关：1 小时 44.1 kHz 立体声素材峰值约 1.9 GB，因此
+/// 默认不启用。新增分析逻辑请改分块路径，不要在这里加东西。
+fn analyze_whole_source(
+    source_path: &Path,
+    analysis_rate: u32,
+    frame_period_ms: f64,
+    want_pitch: bool,
+) -> Option<(Vec<f64>, Vec<f32>)> {
     let (in_rate, in_channels, pcm) =
-        crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path)).ok()?;
+        crate::audio_utils::decode_audio_f32_interleaved(source_path).ok()?;
     let in_channels_usize = (in_channels as usize).max(1);
     if pcm.len() / in_channels_usize < 2 {
         return None;
@@ -952,21 +1079,20 @@ pub fn analyze_clip_pitch_and_level(
     // `linear_resample_interleaved` 在采样率相同时直接 `input.to_vec()`，也就是
     // 把整份解码结果再拷一遍（1 小时立体声 ≈ 1.27 GB）。直接移动即可 —— 源缓冲
     // 此后不再使用。`audio_engine/io.rs` 的解码路径已为长音频做过同样处理。
-    let analysis_pcm = if in_rate == ck.sample_rate {
+    let analysis_pcm = if in_rate == analysis_rate {
         pcm
     } else {
         let resampled = crate::mixdown::linear_resample_interleaved(
             &pcm,
             in_channels_usize,
             in_rate,
-            ck.sample_rate,
+            analysis_rate,
         );
         // 重采样完成后解码缓冲不再需要。显式释放，否则它会随函数作用域一直存活到
         // 分析结束 —— 长素材上那正是整份立体声 PCM。
         drop(pcm);
         resampled
     };
-    let analysis_rate = ck.sample_rate;
     let analysis_channels = in_channels_usize;
 
     let analysis_frames = analysis_pcm.len() / analysis_channels;
@@ -1021,77 +1147,29 @@ pub fn analyze_clip_pitch_and_level(
     // 再留一份整段副本。
     let level: Vec<f32> = {
         let dc_removed: Vec<f32> = mono.iter().map(|&v| (v as f64 - mean) as f32).collect();
-        compute_frame_levels(&dc_removed, analysis_rate, ck.frame_period_ms)
+        compute_frame_levels(&dc_removed, analysis_rate, frame_period_ms)
     };
-    for v in mono.iter_mut() {
-        *v = (((*v as f64 - mean) * scale) as f32).clamp(-1.0, 1.0);
-    }
 
-    // ── 音高（FCPE）──────────────────────────────────────────────────
-    // 声码器不可用时不再整体失败：电平是有独立价值的产出（DYN 不需要声码器），
-    // 因此这里只让 midi 为空。
-    let mut midi: Vec<f32> = Vec::new();
-    if crate::fcpe_onnx::is_available() {
-        let frame_period_tl_ms = ck.frame_period_ms.max(0.1);
-        let f0_floor = crate::fcpe_onnx::FCPE_F0_MIN_HZ;
-        let f0_ceil = crate::fcpe_onnx::FCPE_F0_MAX_HZ;
-
+    let mut f0_hz: Vec<f64> = Vec::new();
+    if want_pitch {
+        for v in mono.iter_mut() {
+            *v = (((*v as f64 - mean) * scale) as f32).clamp(-1.0, 1.0);
+        }
         match crate::fcpe_onnx::infer_f0_hz_f32(
             &mono,
             analysis_rate,
-            frame_period_tl_ms,
-            f0_floor,
-            f0_ceil,
+            frame_period_ms.max(0.1),
+            crate::fcpe_onnx::FCPE_F0_MIN_HZ,
+            crate::fcpe_onnx::FCPE_F0_MAX_HZ,
         ) {
-            Ok(f0_hz) if f0_hz.len() >= 2 => {
-                midi = Vec::with_capacity(f0_hz.len());
-                for hz in f0_hz {
-                    midi.push(hz_to_midi(hz));
-                }
-            }
-            Ok(_) => {
-                log::warn!(
-                    "[pitch_clip] FCPE returned too few frames for clip '{}'",
-                    clip.name
-                );
-            }
+            Ok(f0) => f0_hz = f0,
             Err(e) => {
-                log::error!(
-                    "[pitch_clip] FCPE inference failed for clip '{}' ({}): {}",
-                    clip.name, clip.id, e
-                );
-            }
-        }
-    }
-    // ── 全量曲线直接返回 ──────────────────────────────────────────────
-    // 缓存中始终存全量源音频的曲线。
-    // trim 截取 + rate resample 在推送（handle_clip_pitch_ready）
-    // 和组装（assemble_pitch_orig_from_cache）阶段按需执行。
-
-    // Small gap fill.
-    let gap_ms = std::env::var("HIFISHIFTER_FCPE_F0_GAP_MS")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.0)
-        .clamp(0.0, 200.0);
-    if gap_ms > 0.0 {
-        let gap_frames = ((gap_ms / ck.frame_period_ms.max(0.1)).round() as isize).max(1) as usize;
-        let mut last = 0.0f32;
-        let mut zeros = 0usize;
-        for v in midi.iter_mut() {
-            if *v > 0.0 {
-                last = *v;
-                zeros = 0;
-            } else {
-                zeros += 1;
-                if zeros <= gap_frames && last > 0.0 {
-                    *v = last;
-                }
+                log::error!("[pitch_clip] FCPE inference failed: {e}");
             }
         }
     }
 
-    Some(ClipPitchAnalysis { midi, level })
+    Some((f0_hz, level))
 }
 
 /// 兼容包装：只要音高曲线。FCPE 不可用或推理失败时返回 None

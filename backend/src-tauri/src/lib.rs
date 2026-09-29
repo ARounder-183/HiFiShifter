@@ -63,6 +63,8 @@ mod models;
 mod pitch_analysis;
 #[path = "pitch/pitch_clip.rs"]
 mod pitch_clip;
+#[path = "pitch/streaming_pitch.rs"]
+mod streaming_pitch;
 #[path = "pitch/pitch_config.rs"]
 mod pitch_config;
 mod pitch_editing;
