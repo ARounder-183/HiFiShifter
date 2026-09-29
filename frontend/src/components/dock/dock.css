@@ -28,7 +28,7 @@
  */
 .hs-dock-root[data-dock-root-kind="panel"] {
     border: 1px solid var(--qt-border);
-    border-radius: 4px;
+    border-radius: var(--qt-radius-md);
 }
 
 /*
@@ -63,7 +63,7 @@
     height: 18px;
     padding: 0 4px;
     border: 1px solid var(--accent-8);
-    border-radius: 3px;
+    border-radius: var(--qt-radius-sm);
     background: var(--qt-base);
     color: var(--qt-text);
     font-size: var(--qt-fs-xs);
@@ -242,7 +242,7 @@
     justify-content: center;
     width: 14px;
     height: 14px;
-    border-radius: 2px;
+    border-radius: var(--qt-radius-sm);
     opacity: 0;
     flex: 0 0 auto;
 }
@@ -283,7 +283,7 @@
     justify-content: center;
     width: 18px;
     height: 18px;
-    border-radius: 3px;
+    border-radius: var(--qt-radius-sm);
     color: var(--qt-text-muted);
 }
 
@@ -330,7 +330,7 @@
     min-height: 120px;
     background: var(--qt-window);
     border: 1px solid var(--qt-border);
-    border-radius: 4px;
+    border-radius: var(--qt-radius-lg);
     box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
     overflow: hidden;
 }
@@ -450,7 +450,7 @@
     position: fixed;
     background: var(--accent-a4);
     border: 2px solid var(--accent-9);
-    border-radius: 3px;
+    border-radius: var(--qt-radius-md);
     pointer-events: none;
 }
 
@@ -636,7 +636,7 @@ body[data-dock-dragging="true"] iframe {
 .hs-dock-float-preview {
     position: fixed;
     border: 2px dashed var(--accent-9);
-    border-radius: 4px;
+    border-radius: var(--qt-radius-lg);
     background: var(--accent-a2);
     pointer-events: none;
 }

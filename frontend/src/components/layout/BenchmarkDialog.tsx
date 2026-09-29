@@ -178,7 +178,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                         </span>
                         <div
                             style={{
-                                borderRadius: 6,
+                                borderRadius: "var(--qt-radius-md)",
                                 overflow: "hidden",
                                 border: "1px solid var(--qt-border)",
                             }}
@@ -286,7 +286,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                 gap="2"
                                 style={{
                                     padding: "8px 12px",
-                                    borderRadius: 6,
+                                    borderRadius: "var(--qt-radius-md)",
                                     background: "var(--qt-danger-bg)",
                                     border: "1px solid var(--qt-danger-border)",
                                 }}
@@ -325,7 +325,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                 gap="2"
                                 style={{
                                     padding: "8px 12px",
-                                    borderRadius: 6,
+                                    borderRadius: "var(--qt-radius-md)",
                                     background: "var(--qt-danger-bg)",
                                     border: "1px solid var(--qt-danger-border)",
                                 }}

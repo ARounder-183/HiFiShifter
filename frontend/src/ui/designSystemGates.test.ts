@@ -442,6 +442,53 @@ describe("抽象层不能空转（采用率）", () => {
         ).toEqual([]);
     });
 
+    test("圆角只从语义令牌取，没有裸 px 字面量", () => {
+        /*
+         * 【为什么禁止】圆角是**外观设置的一部分**（视图 → 外观设置 → 圆角风格，
+         * 五档）。写死 px 的圆角不跟随它 —— 用户报告的"参数编辑器工具栏的参数胶囊
+         * 没有适配圆角风格"就是这么来的：那条规则写的是 `border-radius: 6px`。
+         * 采集时全仓 30 余处写死值（对话框 10px、菜单项 7px、提示 6px、参数胶囊 6px、
+         * 停靠浮窗 4px…），全都替换成了 `var(--qt-radius-*)`。
+         *
+         * 【豁免】圆形与个别"形状"必须是字面量，逐条列在下面：
+         *   - `50%` / `9999px`：圆点、滑块拇指、开关轨道是**形状**而不是风格；
+         *   - 停靠浮窗最大化时的 `0`：贴边展开，任何圆角都会露出背景；
+         *   - 不对称角（如 `2px 0 2px 0`）：那是装饰性缺口，不是圆角档位；
+         *   - 记事本导出文档里的内联样式：它是一份**独立 HTML**，与运行中的应用
+         *     不共享令牌（导出后拿到别处打开也要正常）。
+         */
+        const ALLOWED_FILES = new Set([
+            // 导出的独立 HTML 模板（自带一套固定样式）。
+            join("src", "components", "layout", "notebook", "NotebookDialogs.tsx"),
+            // 圆角档位的**示意**磁贴：它画的正是"每个选项长什么样"，因此不能取当前值。
+            join("src", "components", "layout", "AppearanceSettingsPanel.tsx"),
+        ]);
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.(tsx?|css)$/)) {
+            if (ALLOWED_FILES.has(file)) continue;
+            const source = readFileSync(file, "utf8");
+            const literals: string[] = [];
+            if (file.endsWith(".css")) {
+                for (const match of source.matchAll(/border-radius:\s*([^;]+);/g)) {
+                    literals.push(match[1].trim());
+                }
+            } else {
+                const stripped = stripCommentsAndStrings(source);
+                for (const match of stripped.matchAll(/borderRadius:\s*(?:"([^"]*)"|'([^']*)')/g)) {
+                    literals.push((match[1] ?? match[2] ?? "").trim());
+                }
+            }
+            // 只保留"纯 px 数值"：`var(--qt-radius-*)`、`50%`、`0`、`9999px` 都不算。
+            const numeric = literals.filter((value) => /^[\d.]+px(\s+[\d.]+px)*$/i.test(value));
+            if (numeric.length > 0) offenders.push(`${file}: ${numeric.join(" / ")}`);
+        }
+        expect(
+            offenders,
+            "圆角请取 `var(--qt-radius-sm|md|lg|pill)`（或 `rounded-qt-*`）——" +
+                "写死 px 的圆角不会跟随「圆角风格」设置；确属形状/独立文档的加进本测试的豁免清单",
+        ).toEqual([]);
+    });
+
     test("tf 有真实消费者（无类型翻译器不能是摆设）", () => {
         const count = sourceFiles(/\.tsx?$/).reduce((total, file) => {
             const stripped = stripCommentsAndStrings(readFileSync(file, "utf8"));

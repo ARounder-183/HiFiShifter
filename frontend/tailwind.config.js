@@ -75,10 +75,35 @@ export default {
                 "qt-bar-main": "var(--qt-bar-main)",
                 "qt-bar-status": "var(--qt-bar-status)",
             },
+            /*
+             * 圆角阶梯全部落到 `--qt-radius-*` —— 它们由外观设置的「圆角风格」推导
+             * （见 `src/index.css` 的令牌说明）。
+             *
+             * 【为什么连 Tailwind 的默认档也改】全仓有 126 处裸 `rounded`，另有
+             * sm/md/lg/xl 若干，此前都是写死的 rem 值：于是"圆角风格"只影响 Radix
+             * 自己的控件，应用自己的表面（对话框、浮窗、菜单、参数编辑器工具栏的
+             * 参数胶囊…）一处都不跟随。把默认档也绑到令牌上，存量调用点**不必逐个
+             * 迁移**就一起跟随。
+             *
+             * `full` 保持 9999px：圆/胶囊是**形状**（头像、圆点、开关轨道），不是
+             * 风格偏好 —— 跟着"无圆角"变成方块反而是 bug。
+             * `lg` 及以上并到同一档：`--qt-radius-lg` 已是"容器级"圆角，再细分三档
+             * 只会让作者重新开始挑数字。
+             */
             borderRadius: {
+                none: "0px",
+                sm: "var(--qt-radius-sm)",
+                DEFAULT: "var(--qt-radius-sm)",
+                md: "var(--qt-radius-md)",
+                lg: "var(--qt-radius-lg)",
+                xl: "var(--qt-radius-lg)",
+                "2xl": "var(--qt-radius-lg)",
+                "3xl": "var(--qt-radius-lg)",
+                full: "9999px",
                 "qt-sm": "var(--qt-radius-sm)",
                 "qt-md": "var(--qt-radius-md)",
                 "qt-lg": "var(--qt-radius-lg)",
+                "qt-pill": "var(--qt-radius-pill)",
             },
             fontSize: {
                 "qt-3xs": "var(--qt-fs-3xs)",

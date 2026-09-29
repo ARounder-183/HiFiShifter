@@ -207,6 +207,22 @@ export function AppThemeProvider({ children }: PropsWithChildren) {
     // 才变色。渲染期写入保证后代的一切 layout effect 读到的都是新主题。
     // （写入是幂等的：无关重渲染重复写同一值无副作用。）
     document.documentElement.dataset.theme = mode;
+    /*
+     * 圆角档位同样写到 `<html>` 上。
+     *
+     * 【为什么不止 `<Theme radius>`】Radix 把整条圆角标尺定义在**属性选择器**上
+     * （`[data-radius='medium'] { --radius-factor: … }`、`[data-radius] { --radius-1..6: … }`），
+     * 而 `<Theme radius>` 只把该属性写在自己的 wrapper 上。于是凡是**不在那个
+     * wrapper 里**的表面都拿不到 `--radius-*`：停靠面板与浮动窗（`panelHostRegistry`
+     * 把宿主 div 挂到 `document.body`）、`AppTooltip`（同样 portal 到 body）。
+     * 它们的圆角因此写死，跟着"圆角风格"变不了 —— 这正是用户报告的问题面。
+     *
+     * 写到 `<html>` 之后 `[data-radius]` 就在文档根上成立，整条标尺被所有后代继承
+     * （含上述 portal 表面），与 `<Theme>` 的取值来自同一个 state，不会分叉。
+     * 前提是 `:root` 上也给了 `--scaling`（Radix 的 `calc(… * var(--scaling))` 缺它
+     * 会整档失效）—— 见 `index.css` 的圆角令牌说明。
+     */
+    document.documentElement.dataset.radius = radius;
     document.documentElement.style.setProperty("--qt-font-family", fontFamily);
     document.documentElement.style.setProperty("--default-font-family", fontFamily);
     document.body.style.fontFamily = fontFamily;

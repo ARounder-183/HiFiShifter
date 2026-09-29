@@ -1531,7 +1531,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     verticalLockBadgeEl.style.right = "8px";
     verticalLockBadgeEl.style.top = "4px";
     verticalLockBadgeEl.style.padding = "1px 8px";
-    verticalLockBadgeEl.style.borderRadius = "4px";
+    verticalLockBadgeEl.style.borderRadius = "var(--qt-radius-sm)";
     verticalLockBadgeEl.style.fontSize = "10px";
     verticalLockBadgeEl.style.fontWeight = "600";
     verticalLockBadgeEl.style.letterSpacing = "0.08em";

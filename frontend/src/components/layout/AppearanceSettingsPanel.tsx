@@ -1186,6 +1186,14 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                 <div className="flex gap-1.5">
                                     {RADIX_RADIUS_OPTIONS.map((r) => {
                                         const isSelected = radius === r;
+                                        /*
+                                         * 磁贴里的样本圆角是**示意**值，刻意不是真实像素：
+                                         * 真实档位（small 3 / medium 4 / large 6px）在
+                                         * 28×20 的方块上看不出差别，五个选项就会变成"五个
+                                         * 一样的方块"。这里按比例夸张到 0/3/6/10/9999，让
+                                         * "更圆"这件事可见；实际生效的圆角由 `--qt-radius-*`
+                                         * 从同一档位推导（见 src/index.css）。
+                                         */
                                         const px: Record<string, string> = {
                                             none: "0",
                                             small: "3px",

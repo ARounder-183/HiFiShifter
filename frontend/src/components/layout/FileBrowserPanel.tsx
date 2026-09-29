@@ -930,7 +930,7 @@ export const FileBrowserPanel: React.FC = () => {
                         background: "var(--qt-highlight)",
                         color: "var(--qt-text)",
                         padding: "2px 8px",
-                        borderRadius: 4,
+                        borderRadius: "var(--qt-radius-sm)",
                         fontSize: "var(--qt-fs-xs)",
                         whiteSpace: "nowrap",
                         opacity: 0.9,

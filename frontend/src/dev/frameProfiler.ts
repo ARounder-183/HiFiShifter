@@ -159,7 +159,7 @@ export function startFrameProfiler(): void {
         top: "12px",
         zIndex: "9999",
         padding: "8px 10px",
-        borderRadius: "6px",
+        borderRadius: "var(--qt-radius-md)",
         background: "rgba(17, 24, 39, 0.92)",
         color: "#86efac",
         font: "12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace",
