@@ -39,11 +39,6 @@ interface RenderCacheDialogProps {
     onOpenChange: (open: boolean) => void;
 }
 
-/** 容量预设（MB）；0 表示不限制。 */
-const SIZE_PRESETS_MB = [512, 1024, 2048, 4096, 8192, 0];
-/** 超龄清理预设（天）；0 表示不按时间清理。 */
-const AGE_PRESETS_DAYS = [7, 30, 90, 180, 365, 0];
-
 function formatBytes(bytes: number): string {
     if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
     const units = ["B", "KB", "MB", "GB", "TB"];
@@ -164,13 +159,6 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
               .replace("{total}", String(sessionTotal))
         : "";
 
-    const agePresetValue = AGE_PRESETS_DAYS.includes(draft.maxAgeDays)
-        ? String(draft.maxAgeDays)
-        : "custom";
-    const sizePresetValue = SIZE_PRESETS_MB.includes(draft.maxSizeMb)
-        ? String(draft.maxSizeMb)
-        : "custom";
-
     return (
         <AppDialog
             open={open}
@@ -251,70 +239,45 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                 </Flex>
 
                 {/* ── 容量 ─────────────────────────────────────────────── */}
-                <AppField label={tf("render_cache_max_size")}>
-                    <Flex align="center" gap="2">
-                        <AppSelect
-                            fullWidth={false}
-                            // 旧写法是 size="1"（24px）：对话框里也要紧凑
-                            density="compact"
-                            value={sizePresetValue}
-                            /*
-                             * 关掉滚轮：本预设列表**末项是 0（不限）**，滚轮滚下去会把
-                             * 4096 MB 直接变成"不限"。滚轮留给右侧数字框（±1 + 精细调整）。
-                             */
-                            wheelAdjust={false}
-                            onValueChange={(v) => {
-                                if (v === "custom") return;
-                                patch({ maxSizeMb: Number(v) });
-                            }}
-                            options={SIZE_PRESETS_MB.map((mb) => ({
-                                value: String(mb),
-                                label: mb === 0 ? tf("render_cache_unlimited") : `${mb / 1024} GB`,
-                            }))}
-                        />
-                        <AppNumberField
-                            value={draft.maxSizeMb}
-                            unit="integer"
-                            min={0}
-                            width={110}
-                            suffix="MB"
-                            ariaLabel={tf("render_cache_max_size")}
-                            onCommit={(maxSizeMb) => patch({ maxSizeMb })}
-                        />
-                    </Flex>
+                {/*
+                 * 这两个字段是**普通数字输入框**（滚轮按步长 ±1，修饰键精细调整），
+                 * 与下方「最小块长 / 最小条目 / 单条上限 / 保留磁盘」完全同一种控件。
+                 *
+                 * 【为什么不配预设下拉】曾经各配一个 `AppSelect`（512 MB…8 GB / 不限，
+                 * 7…365 天 / 永不），用 "custom" 这个**不在选项里**的哨兵值表示"当前
+                 * 值不是预设"。而 Radix 会为表单兼容渲染一个隐藏的原生 `<select>`，
+                 * 把受控值镜像进去；受控值一旦不在 `<option>` 里，浏览器就把
+                 * `select.value` 归为 `""` 并派发一个冒泡的 `change`，Radix 原样转发成
+                 * `onValueChange("")` —— 于是"滚轮把 4096 调成 4097"会顺带触发一次
+                 * `Number("") === 0`，把占用上限静默改成"不限"（用户报告的"滚轮直接跳到
+                 * 0"）。哨兵值这条路本身就不稳（触发器还会变成空白），因此这里按
+                 * 最小惊讶原则取消下拉，只保留数字框；`0` 的语义由 hint 讲明。
+                 */}
+                <AppField
+                    label={tf("render_cache_max_size")}
+                    hint={tf("render_cache_max_size_hint")}
+                >
+                    <AppNumberField
+                        value={draft.maxSizeMb}
+                        unit="integer"
+                        min={0}
+                        width={110}
+                        suffix="MB"
+                        ariaLabel={tf("render_cache_max_size")}
+                        onCommit={(maxSizeMb) => patch({ maxSizeMb })}
+                    />
                 </AppField>
 
-                <AppField label={tf("render_cache_max_age")}>
-                    <Flex align="center" gap="2">
-                        <AppSelect
-                            fullWidth={false}
-                            // 旧写法是 size="1"（24px）：对话框里也要紧凑
-                            density="compact"
-                            value={agePresetValue}
-                            // 同上：末项是 0（永不清理），滚轮不得把它选中。
-                            wheelAdjust={false}
-                            onValueChange={(v) => {
-                                if (v === "custom") return;
-                                patch({ maxAgeDays: Number(v) });
-                            }}
-                            options={AGE_PRESETS_DAYS.map((days) => ({
-                                value: String(days),
-                                label:
-                                    days === 0
-                                        ? tf("render_cache_never")
-                                        : tf("render_cache_days").replace("{n}", String(days)),
-                            }))}
-                        />
-                        <AppNumberField
-                            value={draft.maxAgeDays}
-                            unit="integer"
-                            min={0}
-                            width={90}
-                            suffix={tf("render_cache_days_unit")}
-                            ariaLabel={tf("render_cache_max_age")}
-                            onCommit={(maxAgeDays) => patch({ maxAgeDays })}
-                        />
-                    </Flex>
+                <AppField label={tf("render_cache_max_age")} hint={tf("render_cache_max_age_hint")}>
+                    <AppNumberField
+                        value={draft.maxAgeDays}
+                        unit="integer"
+                        min={0}
+                        width={110}
+                        suffix={tf("render_cache_days_unit")}
+                        ariaLabel={tf("render_cache_max_age")}
+                        onCommit={(maxAgeDays) => patch({ maxAgeDays })}
+                    />
                 </AppField>
 
                 <Flex align="center" gap="2" wrap="wrap">
