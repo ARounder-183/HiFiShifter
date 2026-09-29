@@ -57,7 +57,9 @@ export const DEFAULT_RENDER_CACHE_SETTINGS: RenderCacheSettings = {
     minClipSecs: 0,
     minEntryKb: 4,
     maxEntryMb: 512,
-    writeMode: "immediate",
+    // 出厂默认「仅保存工程时写入」。渲染产物动辄几百 MB，而"渲染完就写盘"会把每一次
+    // 试听 / 微调都变成一次写入 —— 用户当时并没有要求留档。要更早留档的人在设置里改。
+    writeMode: "manual",
     location: "system",
     customDir: null,
     verifyChecksum: true,

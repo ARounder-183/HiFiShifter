@@ -51,7 +51,43 @@ export type StepUnit =
     /** 像素。整数 */
     | "pixels"
     /** 纯计数 / 索引 / 档位。整数（精调无意义，故与粗调相同） */
-    | "integer";
+    | "integer"
+    /**
+     * 缓存总容量（MB）。粗调 1024，精调 128。
+     *
+     * 【为什么是 MB 而不是通用的"字节"】渲染缓存的总占用上限以 GB 为量级
+     * （出厂 4096 MB、上限 1 TB），滚轮一格跳 1 MB 毫无意义 —— 走一圈 100 多格
+     * 才挪动 1%。1 GB 一档正好是用户心里的单位，128 MB 的精调也仍比"填一个
+     * 任意数字"快。
+     */
+    | "megabytes"
+    /**
+     * 单条缓存上限（MB）。粗调 64，精调 8。
+     *
+     * 【为什么与 `megabytes` 分开】同一个 MB 量纲，但"一条缓存能占多大"是**单条**
+     * 的尺度（出厂 512 MB），而总容量是**汇总**的尺度（出厂 4096 MB）。一个刻度
+     * 代表多少应当由参数自身的量级决定，而不是由单位符号决定。
+     */
+    | "entryMegabytes"
+    /**
+     * 保留可用磁盘（MB）。粗调 256，精调 32。
+     *
+     * 【为什么又是第三个 MB 单位】它是"余量"语义：用户想表达的是"给我留 2 GB"，
+     * 因此以更大的档位走（256 MB），但比总容量细（那是 GB 级）。
+     */
+    | "diskMegabytes"
+    /** 容量阈值（KB）。粗调 16，精调 1 —— 阈值型参数，精调必须能落在个位 KB。 */
+    | "kilobytes"
+    /** 天数（保留期）。粗调 10，精调 1。 */
+    | "days"
+    /**
+     * 片段时长（秒，缓存准入闸门）。粗调 0.5，精调 0.05，保留 2 位小数。
+     *
+     * 【为什么不复用 `seconds`】那个是**参数时序**用的（0.01 / 0.001，3 位小数），
+     * 对"小于几秒的片段不落盘"这种闸门细得离谱 —— 滚一格 0.01 秒要走 100 格才
+     * 挪动 1 秒。这里的量级是"零点几秒"。
+     */
+    | "clipSeconds";
 
 export interface StepSpec {
     /** 无修饰键时的步长。 */
@@ -75,6 +111,15 @@ const STEPS: Record<StepUnit, StepSpec> = {
     seconds: { coarse: 0.01, fine: 0.001, decimals: 3 },
     pixels: { coarse: 1, fine: 1, decimals: 0 },
     integer: { coarse: 1, fine: 1, decimals: 0 },
+    // 渲染缓存的六个参数：同一个"大小 / 时长"概念在不同量级上，各自配一组步长
+    // （理由分别写在 `StepUnit` 的对应条目里）。此前它们统一用 `integer`（±1），
+    // 于是"占用上限"要滚 1024 格才挪动 1 GB。
+    megabytes: { coarse: 1024, fine: 128, decimals: 0 },
+    entryMegabytes: { coarse: 64, fine: 8, decimals: 0 },
+    diskMegabytes: { coarse: 256, fine: 32, decimals: 0 },
+    kilobytes: { coarse: 16, fine: 1, decimals: 0 },
+    days: { coarse: 10, fine: 1, decimals: 0 },
+    clipSeconds: { coarse: 0.5, fine: 0.05, decimals: 2 },
 };
 
 export function stepFor(unit: StepUnit): StepSpec {

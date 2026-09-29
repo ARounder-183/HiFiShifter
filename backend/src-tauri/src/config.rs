@@ -769,7 +769,17 @@ fn default_render_cache_max_entry_mb() -> u32 {
     512
 }
 fn default_render_cache_write_mode() -> String {
-    "immediate".to_string()
+    // 出厂默认「仅保存工程时写入」（`manual`）。
+    //
+    // 【为什么不是 `immediate`】渲染产物动辄几十到几百 MB，"渲染完成就写盘"把每一次
+    // 试听 / 微调都变成一次大文件写入 —— 而用户当时并没有要求留档，只是在调音。落到
+    // "保存工程"这一明确意图上，写入时机与用户对成本的预期一致；要更早留档的人可以
+    // 在设置里显式改成 `immediate`。
+    //
+    // 【只改出厂默认】`app_config.json` 里已有显式取值的用户不受影响。前端
+    // `DEFAULT_RENDER_CACHE_SETTINGS` 必须与本函数保持一致（出厂值有两份，因为前端
+    // 要在后端还没应答时就能显示设置）。
+    "manual".to_string()
 }
 fn default_render_cache_location() -> String {
     "system".to_string()
