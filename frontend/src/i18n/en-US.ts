@@ -1757,7 +1757,7 @@ export const enUS = {
     menu_inference_cpu: "CPU",
     menu_inference_gpu: "GPU",
     menu_gpu_device: "GPU Device",
-    menu_gpu_auto_select: "Auto-select (Recommended)",
+    menu_gpu_auto_select: "Auto-select",
     menu_run_benchmark: "Run Benchmark...",
     menu_background_prerender: "Background Pre-render",
     menu_background_prerender_desc:

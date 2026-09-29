@@ -1631,7 +1631,7 @@ export const jaJP = {
     menu_inference_cpu: "CPU",
     menu_inference_gpu: "GPU",
     menu_gpu_device: "GPU デバイス",
-    menu_gpu_auto_select: "自動選択（推奨）",
+    menu_gpu_auto_select: "自動選択",
     menu_run_benchmark: "ベンチマークを実行...",
     menu_background_prerender: "バックグラウンド事前レンダリング",
     menu_background_prerender_desc:

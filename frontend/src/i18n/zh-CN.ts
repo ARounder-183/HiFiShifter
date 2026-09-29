@@ -1576,7 +1576,7 @@ export const zhCN = {
     menu_inference_cpu: "CPU",
     menu_inference_gpu: "GPU",
     menu_gpu_device: "GPU 设备",
-    menu_gpu_auto_select: "自动选择（推荐）",
+    menu_gpu_auto_select: "自动选择",
     menu_run_benchmark: "运行基准测试...",
     menu_background_prerender: "后台预渲染",
     menu_background_prerender_desc:

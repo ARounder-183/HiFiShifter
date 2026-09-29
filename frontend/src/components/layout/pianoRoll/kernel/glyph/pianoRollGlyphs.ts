@@ -98,13 +98,12 @@ export const AXIS_TICK_LABEL_DESCENT_PX = Math.ceil(
 /**
  * 刻度标签在绘图区两端额外内缩的余量（CSS px）。
  *
- * 【为什么不止"正好放得下"】下面的区间把标签的 em 盒约束在**绘图区内部**，
- * 而墨迹并非严格等于 em 盒（实测常见字体里，数字的墨迹比 em 盒顶低 0.4~1.6px，
- * 个别字体如 Meiryo 会下探到 em 盒底附近）。留 1px 余量让"贴着边缘的那一行"
- * 不至于恰好压在边界像素上；同时它也让本区间**不依赖**画布下方那点预留高度
- * （见 `AXIS_TICK_LABEL_DESCENT_PX`）——预留高度只够容下 em 盒的一半，一旦父层
- * 裁掉那一条（父容器 `overflow-hidden`、预留行小于常量、分数 DPR 取整），
- * 最下方标签就会缺半截。
+ * 【为什么不止"正好放得下"】下面的区间把标签的**字形槽位**约束在绘图区内部，
+ * 而墨迹并非严格等于槽位（实测常见字体里，数字的墨迹比槽位顶低 0.4~1.6px，
+ * 个别字体如 Meiryo 会更深）。留 1px 余量让"贴着边缘的那一行"不至于恰好压在
+ * 边界像素上；同时它也让本区间**不依赖**画布下方那点预留高度
+ * （见 `AXIS_TICK_LABEL_DESCENT_PX`）——父容器 `overflow-hidden`、预留行小于
+ * 常量、分数 DPR 取整都可能裁掉那一条。
  */
 export const AXIS_TICK_LABEL_EDGE_MARGIN_PX = 1;
 
@@ -115,17 +114,33 @@ export const AXIS_TICK_LABEL_EDGE_MARGIN_PX = 1;
  * 的上下边缘（`y = 0` 与 `y = heightPx`）。以 `middle` 基准绘制的文字有一半在锚点
  * **上/下方**，于是：
  * - 最上面那条刻度（通常是视口上界）上半个字被画布上缘裁掉；
- * - 最下面那条刻度（通常是 `0` / dB 的 `-∞`）下半个字压在绘图区下边缘，只能靠
- *   `AXIS_TICK_LABEL_DESCENT_PX` 的下方预留来救 —— 一旦那条预留被裁或字体墨迹
- *   略低，就露出"缺半截"。
+ * - 最下面那条刻度（通常是 `0` / dB 的 `-∞`）下半个字压在绘图区下边缘。
  *
- * 【做法】把锚点夹进"em 盒（±字号/2）连同 {@link AXIS_TICK_LABEL_EDGE_MARGIN_PX}
- * 余量都落在绘图区内"的区间。两端各最多内缩 `字号/2 + 1`（本字号 6 CSS px），
- * 对 5~12 条刻度的密度而言远小于刻度间距，不会与其他标签重叠。
+ * 【做法（本轮修正：上下内缩量**不再对称**，也不再由 em 盒推导下方）】
+ * 锚点被夹进"字形管线真正画的槽位整体落在绘图区内"的区间：
+ * - **上方内缩** = `字号/2 + 余量` —— 槽位上缘在锚点上方正好 `字号/2`（字形管线
+ *   的 `middle → originY = y − 字号/2`），与 em 盒模型一致；
+ * - **下方内缩** = `glyphMiddleSlotDescentPx(字号) + 余量` —— 槽位下缘在锚点下方
+ *   `字号 × (行高比 − 0.5) = 字号 × 0.7`，**比 `字号/2` 多 `字号 × 0.2`（本字号 2px）**。
+ *
+ * 【为什么下方必须用下探量而不是 `字号/2`】上一版两侧都按 `字号/2 + 1` 夹取，
+ * 于是最下方那条标签的**槽位下缘**落在 `h + 1` —— 探出绘图区 1px，且与画布下缘
+ * 只剩 6px（其中墨迹只占约 3px），等于**没有墨迹余量**。这条标签在音量 / 动态上
+ * 必然是 dB 的 `-∞`（值域下界恰为 0，见 `formatDbLabel`），而它恰好也是唯一必然
+ * 贴在绘图区底边的标签 —— 于是"左下角的负无穷下半截被挡"只在 dB 单位下显形。
+ * 其余刻度（音分 / 度数 / 张力…）的值域两端不保证落刻度线，`0` 又是单字符、
+ * 墨迹比 `∞` 高 2px，所以同一个缺陷在它们身上看不出来。
+ *
+ * 【内缩量的量级】本字号下 上 6px、下 8px；最密的一档刻度是 12 条，间距 ≥ h/11
+ * （h ≥ 100 时为 9px），远大于两端内缩之和，不会让相邻标签重叠。
  *
  * 【为什么夹锚点而不是加高画布】画布下方最多只能多出 `PARAM_EDITOR_BOTTOM_BAR_PX`
  * （8px），上方则**完全没有**可扩展空间（轴列顶端就是角框）。夹锚点是唯一在两个
  * 方向都成立的做法，且只动文字、不动任何几何（刻度线位置保持不变）。
+ *
+ * 【与 `AXIS_TICK_LABEL_DESCENT_PX` 的分工】那个常量描述"槽位本身有多长"（画布
+ * 预留量），本函数描述"槽位必须落在哪里"。两者由 `axisLabelMetrics.test.ts` 里的
+ * 不变式钉在一起：`maxY + 下探量 <= 绘图区高度`（槽位不越界）。
  *
  * @param fontSizePx 标签字号（CSS px）。
  * @param viewportHeightPx 绘图区高度（CSS px）。
@@ -135,17 +150,17 @@ export function axisTickLabelAnchorBounds(
     fontSizePx: number,
     viewportHeightPx: number,
 ): { readonly minY: number; readonly maxY: number } {
-    const half = fontSizePx / 2;
     if (!Number.isFinite(fontSizePx) || fontSizePx <= 0) {
         return { minY: 0, maxY: Number.POSITIVE_INFINITY };
     }
     if (!Number.isFinite(viewportHeightPx) || viewportHeightPx <= 0) {
         return { minY: 0, maxY: Number.POSITIVE_INFINITY };
     }
-    const minY = half;
+    const minY = fontSizePx / 2 + AXIS_TICK_LABEL_EDGE_MARGIN_PX;
+    const downInset = glyphMiddleSlotDescentPx(fontSizePx) + AXIS_TICK_LABEL_EDGE_MARGIN_PX;
     // `Math.max(minY, …)` 兜住"绘图区比一个字还矮"的退化情形：此时宁可让标签落在
     // 顶端（仍可读），也不要让区间反转（夹取会得到不可预期的值）。
-    const maxY = Math.max(minY, viewportHeightPx - half - AXIS_TICK_LABEL_EDGE_MARGIN_PX);
+    const maxY = Math.max(minY, viewportHeightPx - downInset);
     return { minY, maxY };
 }
 
