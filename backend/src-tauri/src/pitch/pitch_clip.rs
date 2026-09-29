@@ -1601,10 +1601,10 @@ pub fn get_clips_for_root<'a>(tl: &'a TimelineState, root_track_id: &str) -> Vec
 #[cfg(test)]
 mod tests {
     use super::{
-        assemble_nonloop_pitch_from_window, cached_pitch_bytes, clip_pitch_cache_budget_bytes,
-        clip_pitch_cache_entry_limit, clip_pitch_cache_max_entries, compute_frame_levels,
-        dyn_needs_level_analysis, dyn_panel_open_roots, global_cache, trim_and_resample_midi,
-        CachedClipPitch, UNBOUNDED_ENTRY_CAPACITY,
+        analyze_whole_source, assemble_nonloop_pitch_from_window, cached_pitch_bytes,
+        clip_pitch_cache_budget_bytes, clip_pitch_cache_entry_limit, clip_pitch_cache_max_entries,
+        compute_frame_levels, dyn_needs_level_analysis, dyn_panel_open_roots, global_cache,
+        trim_and_resample_midi, CachedClipPitch, UNBOUNDED_ENTRY_CAPACITY,
     };
 
     /// Loop + 媒体时长未知 + 环绕窗口（start > end，split 产生）：
@@ -1909,5 +1909,52 @@ mod tests {
     fn global_cache_is_wired_to_a_byte_budget() {
         let cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(cache.budget_bytes(), clip_pitch_cache_budget_bytes());
+    }
+
+    /// 逃生阀覆盖：`HIFISHIFTER_PITCH_CHUNK_SEC=0` 会切到一次性整份路径
+    /// （`analyze_whole_source`）。该分支默认不被任何测试执行 —— 一旦腐化，只有
+    /// 用户手动改环境变量才会暴露，因此这里用一个真实 WAV 走通它。
+    #[test]
+    fn whole_source_fallback_analyses_a_real_wav() {
+        let sr = 44_100u32;
+        let dir = std::env::temp_dir().join(format!("hifi-whole-src-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("tone.wav");
+
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: sr,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        {
+            let mut writer = hound::WavWriter::create(&path, spec).expect("create wav");
+            // 0.5 s 440 Hz 正弦，左右相同。
+            for i in 0..(sr as usize / 2) {
+                let t = i as f32 / sr as f32;
+                let v = (0.5
+                    * (2.0 * std::f32::consts::PI * 440.0 * t).sin()
+                    * i16::MAX as f32) as i16;
+                writer.write_sample(v).expect("write L");
+                writer.write_sample(v).expect("write R");
+            }
+            writer.finalize().expect("finalize wav");
+        }
+
+        let (f0, level) =
+            analyze_whole_source(&path, sr, 5.0, false).expect("whole-source analysis failed");
+        // want_pitch=false 时不应触碰检测器（FCPE 缺失的环境下也要能跑）。
+        assert!(f0.is_empty(), "want_pitch=false must not run the detector");
+        // 0.5 s @ 5 ms 帧 → 100 帧。
+        assert_eq!(level.len(), 100, "unexpected level frame count");
+        // 满量程 0.5 的正弦：峰值电平应落在 0.5 附近。
+        let peak = level.iter().copied().fold(0.0f32, f32::max);
+        assert!(
+            (peak - 0.5).abs() < 0.05,
+            "peak level {peak} is not near the expected 0.5"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 }
