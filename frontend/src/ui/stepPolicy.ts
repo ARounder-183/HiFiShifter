@@ -87,7 +87,24 @@ export type StepUnit =
      * 对"小于几秒的片段不落盘"这种闸门细得离谱 —— 滚一格 0.01 秒要走 100 格才
      * 挪动 1 秒。这里的量级是"零点几秒"。
      */
-    | "clipSeconds";
+    | "clipSeconds"
+    /**
+     * 颤音速率（Hz）。粗调 0.5，精调 0.1。
+     *
+     * 【为什么不复用 `rate`】`rate` 是**播放速率倍率**（0.1 / 0.01，围绕 1.0）；
+     * 颤音速率的量级是 3–8 Hz，套用倍率的步长要么太细（一格 0.01 Hz 走不动），
+     * 要么量纲不对。人耳对颤音速率的刚辨差在 5 Hz 附近约 0.2–0.3 Hz，
+     * 0.5 的粗调与 0.1 的精调正好落在"能听出差别"的刻度上。
+     */
+    | "vibratoHz"
+    /**
+     * 音级（音阶步数）。粗调 0.5，精调 0.1，保留 2 位。
+     *
+     * 【为什么不复用 `semitone`】那个是**整数半音**（音高曲线 / 移调用）。
+     * 子轨的音级偏移参数允许小数音级（做微分音与揉弦深度），取整的步长
+     * 会把 0.35 音级直接吃成 0。
+     */
+    | "scaleDegree";
 
 export interface StepSpec {
     /** 无修饰键时的步长。 */
@@ -120,6 +137,8 @@ const STEPS: Record<StepUnit, StepSpec> = {
     kilobytes: { coarse: 16, fine: 1, decimals: 0 },
     days: { coarse: 10, fine: 1, decimals: 0 },
     clipSeconds: { coarse: 0.5, fine: 0.05, decimals: 2 },
+    vibratoHz: { coarse: 0.5, fine: 0.1, decimals: 2 },
+    scaleDegree: { coarse: 0.5, fine: 0.1, decimals: 2 },
 };
 
 export function stepFor(unit: StepUnit): StepSpec {
