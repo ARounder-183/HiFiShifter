@@ -866,8 +866,12 @@ fn run_with_named_inputs(
     ))
 }
 
-pub fn infer_f0_hz(
-    mono: &[f64],
+/// F0 推理（单声道 f32 输入）。
+///
+/// 分析流水线本身就以 f32 持有单声道素材（FCPE 的通道输入也是 f32），因此这是
+/// 首选入口 —— 走它就不会为了调用而把整段素材转成 f64 再转回来。
+pub fn infer_f0_hz_f32(
+    mono: &[f32],
     sample_rate: u32,
     frame_period_ms: f64,
     f0_floor: f64,
@@ -887,14 +891,12 @@ pub fn infer_f0_hz(
         .round()
         .max(1.0) as usize;
 
-    let waveform: Vec<f32> = mono.iter().map(|&v| v as f32).collect();
     let shared = get_or_init_shared_session()?;
     let mut session = shared
         .lock()
         .map_err(|e| format!("FCPE session lock poisoned: {e}"))?;
 
-    let output_values =
-        run_with_named_inputs(&mut session, &waveform, sample_rate, f0_floor, f0_ceil)?;
+    let output_values = run_with_named_inputs(&mut session, mono, sample_rate, f0_floor, f0_ceil)?;
 
     if output_values.is_empty() {
         return Ok(vec![0.0; target_frames]);
@@ -902,4 +904,25 @@ pub fn infer_f0_hz(
 
     let resized = resample_f0_linear(&output_values, target_frames);
     Ok(sanitize_f0(resized, f0_floor, f0_ceil))
+}
+
+/// F0 推理（f64 输入）。保留给仍以 f64 表示素材的调用方；内部转为 f32 后转发。
+pub fn infer_f0_hz(
+    mono: &[f64],
+    sample_rate: u32,
+    frame_period_ms: f64,
+    f0_floor: f64,
+    f0_ceil: f64,
+) -> Result<Vec<f64>, String> {
+    if mono.is_empty() {
+        return Ok(Vec::new());
+    }
+    let waveform: Vec<f32> = mono.iter().map(|&v| v as f32).collect();
+    infer_f0_hz_f32(
+        &waveform,
+        sample_rate,
+        frame_period_ms,
+        f0_floor,
+        f0_ceil,
+    )
 }

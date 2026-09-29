@@ -18,6 +18,16 @@ pub fn infer_f0_hz(
     Err("ONNX feature not compiled".to_string())
 }
 
+pub fn infer_f0_hz_f32(
+    _mono: &[f32],
+    _sample_rate: u32,
+    _frame_period_ms: f64,
+    _f0_floor: f64,
+    _f0_ceil: f64,
+) -> Result<Vec<f64>, String> {
+    Err("ONNX feature not compiled".to_string())
+}
+
 pub fn drop_shared_session() {}
 
 pub fn update_ort_ep(_choice: &str, _device_id: Option<i32>) {}

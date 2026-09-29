@@ -305,15 +305,12 @@ pub(crate) fn compute_frame_levels(mono: &[f32], sample_rate: u32, frame_period_
 
     // 窗内 max|x|：单调队列一次线性扫描（窗口随帧单调右移），
     // 避免每帧重扫 20 ms 窗（44.1 kHz 下 882 样本 × 上万帧）。
-    let mut abs: Vec<f64> = Vec::with_capacity(mono.len());
-    for &v in mono {
-        let a = (v as f64).abs();
-        abs.push(if a.is_finite() { a } else { 0.0 });
-    }
-
+    //
+    // 队列直接存 `(索引, |x|)` 而不是索引 + 一份全长的 `|x|` 副本：后者在 1 小时
+    // 素材上是 635 MB 的 f64 数组，只为做一次滑窗最大值 —— 而这里每个元素只会被
+    // 入队/出队一次，值本身随元素一起进出即可，不需要回查数组。
     let mut out = Vec::with_capacity(total_hops);
-    // 单调递减队列：存索引，队首 = 当前窗内最大值的索引。
-    let mut deque: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    let mut deque: std::collections::VecDeque<(usize, f64)> = std::collections::VecDeque::new();
     let mut next_push: usize = 0;
 
     for hop in 0..total_hops {
@@ -327,26 +324,27 @@ pub(crate) fn compute_frame_levels(mono: &[f32], sample_rate: u32, frame_period_
         }
         // 推进队列右端到 end（保持递减）。
         while next_push < end {
-            let v = abs[next_push];
-            while let Some(&back) = deque.back() {
-                if abs[back] <= v {
+            let a = (mono[next_push] as f64).abs();
+            let v = if a.is_finite() { a } else { 0.0 };
+            while let Some(&(_, back_v)) = deque.back() {
+                if back_v <= v {
                     deque.pop_back();
                 } else {
                     break;
                 }
             }
-            deque.push_back(next_push);
+            deque.push_back((next_push, v));
             next_push += 1;
         }
         // 弹出已滑出窗口左端的索引。
-        while let Some(&front) = deque.front() {
+        while let Some(&(front, _)) = deque.front() {
             if front < start {
                 deque.pop_front();
             } else {
                 break;
             }
         }
-        let peak = deque.front().map(|&i| abs[i]).unwrap_or(0.0);
+        let peak = deque.front().map(|&(_, v)| v).unwrap_or(0.0);
         out.push(if peak.is_finite() { peak as f32 } else { 0.0 });
     }
     out
@@ -947,16 +945,27 @@ pub fn analyze_clip_pitch_and_level(
     let (in_rate, in_channels, pcm) =
         crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path)).ok()?;
     let in_channels_usize = (in_channels as usize).max(1);
-    let in_frames = pcm.len() / in_channels_usize;
-    if in_frames < 2 {
+    if pcm.len() / in_channels_usize < 2 {
         return None;
     }
-    let analysis_pcm = crate::mixdown::linear_resample_interleaved(
-        &pcm,
-        in_channels_usize,
-        in_rate,
-        ck.sample_rate,
-    );
+    // 分析采样率恒为 44.1 kHz，而绝大多数素材本身就是 44.1 kHz。
+    // `linear_resample_interleaved` 在采样率相同时直接 `input.to_vec()`，也就是
+    // 把整份解码结果再拷一遍（1 小时立体声 ≈ 1.27 GB）。直接移动即可 —— 源缓冲
+    // 此后不再使用。`audio_engine/io.rs` 的解码路径已为长音频做过同样处理。
+    let analysis_pcm = if in_rate == ck.sample_rate {
+        pcm
+    } else {
+        let resampled = crate::mixdown::linear_resample_interleaved(
+            &pcm,
+            in_channels_usize,
+            in_rate,
+            ck.sample_rate,
+        );
+        // 重采样完成后解码缓冲不再需要。显式释放，否则它会随函数作用域一直存活到
+        // 分析结束 —— 长素材上那正是整份立体声 PCM。
+        drop(pcm);
+        resampled
+    };
     let analysis_rate = ck.sample_rate;
     let analysis_channels = in_channels_usize;
 
@@ -965,28 +974,34 @@ pub fn analyze_clip_pitch_and_level(
         return None;
     }
 
-    // ── 转 mono + 归一化 ──────────────────────────────────────────────────
-    let mut mono_raw: Vec<f64> = Vec::with_capacity(analysis_frames);
+    // ── 转 mono（f32）─────────────────────────────────────────────────────
+    //
+    // 【为什么用 f32 而不是 f64】FCPE 的输入本来就是 f32，它内部的第一件事就是
+    // 把整段 f64 转成 f32；电平分析只取 20 ms 窗内的峰值。用 f64 表示等于把整段
+    // 素材的驻留翻倍、再在推理入口转回来 —— 1 小时素材上是白白多出的两个
+    // 635 MB 缓冲。累加（均值 / 峰值）仍以 f64 标量进行，精度不受影响。
+    let mut mono: Vec<f32> = Vec::with_capacity(analysis_frames);
     for f in 0..analysis_frames {
         let base = f * analysis_channels;
-        let mut sum = 0.0f64;
+        let mut sum = 0.0f32;
         for c in 0..analysis_channels {
-            sum += analysis_pcm[base + c] as f64;
+            sum += analysis_pcm[base + c];
         }
-        mono_raw.push(sum / analysis_channels as f64);
+        mono.push(sum / analysis_channels as f32);
     }
+    // 交错 PCM 到此不再需要。
+    drop(analysis_pcm);
 
     // remove DC + clamp like other WORLD callers
     let mut mean = 0.0f64;
-    for &v in &mono_raw {
-        mean += v;
+    for &v in &mono {
+        mean += v as f64;
     }
-    mean /= mono_raw.len().max(1) as f64;
+    mean /= mono.len().max(1) as f64;
 
     let mut max_abs = 0.0f64;
-    for &v in &mono_raw {
-        let vv = v - mean;
-        let a = vv.abs();
+    for &v in &mono {
+        let a = (v as f64 - mean).abs();
         if a.is_finite() && a > max_abs {
             max_abs = a;
         }
@@ -997,20 +1012,20 @@ pub fn analyze_clip_pitch_and_level(
         1.0
     };
 
-    let mut mono: Vec<f64> = Vec::with_capacity(mono_raw.len());
-    for &v in &mono_raw {
-        let vv = (v - mean) * scale;
-        mono.push(vv.clamp(-1.0, 1.0));
-    }
-
     // ── 逐帧电平（DYN 的原声基线）───────────────────────────────────────
     // 用**去直流但未归一化**的信号：归一化（scale）是为 FCPE 准备的动态范围
     // 拉伸，若把它算进电平，响度就会随"这一片段有多响"被反复改写，
     // DYN 的目标电平也就失去了绝对意义。
+    //
+    // 先算电平、再把 `mono` **原地**归一化。反过来的话就要为归一化前的形态
+    // 再留一份整段副本。
     let level: Vec<f32> = {
-        let dc_removed: Vec<f32> = mono_raw.iter().map(|&v| (v - mean) as f32).collect();
+        let dc_removed: Vec<f32> = mono.iter().map(|&v| (v as f64 - mean) as f32).collect();
         compute_frame_levels(&dc_removed, analysis_rate, ck.frame_period_ms)
     };
+    for v in mono.iter_mut() {
+        *v = (((*v as f64 - mean) * scale) as f32).clamp(-1.0, 1.0);
+    }
 
     // ── 音高（FCPE）──────────────────────────────────────────────────
     // 声码器不可用时不再整体失败：电平是有独立价值的产出（DYN 不需要声码器），
@@ -1021,7 +1036,7 @@ pub fn analyze_clip_pitch_and_level(
         let f0_floor = crate::fcpe_onnx::FCPE_F0_MIN_HZ;
         let f0_ceil = crate::fcpe_onnx::FCPE_F0_MAX_HZ;
 
-        match crate::fcpe_onnx::infer_f0_hz(
+        match crate::fcpe_onnx::infer_f0_hz_f32(
             &mono,
             analysis_rate,
             frame_period_tl_ms,
