@@ -1196,6 +1196,9 @@ pub(super) fn export_audio_advanced(
             }
 
             let total_targets = resolved_targets.len();
+            // `current` 的语义（全流程统一）：**正在处理的目标序号（1-based）**。
+            // 这里的 0 只表示"尚未开始"；目标内的 intra 事件与循环尾的边界事件都用
+            // `target_index + 1`，因此标签从 0/N 起步后只会逐目标递增，不会跳变。
             emit_export_audio_progress(
                 &state,
                 ExportAudioProgressEvent {
@@ -1381,8 +1384,9 @@ pub(super) fn export_audio_advanced(
                     cancel_flag: Some(cancel_flag.clone()),
                     // 细粒度进度：本目标内的混音比例映射进整体进度，公式与
                     // "渲染中"同构 —— (已完成目标数 + 目标内比例) / 目标总数。
-                    // current 取"正在处理的目标序号"，文件边界处仍由下方循环尾
-                    // 的权威 emit 收口（两者在边界处数值一致，不会跳变）。
+                    // `current` 取"正在处理的目标序号"（语义见上方初值处的说明）；
+                    // 文件边界处仍由下方循环尾的权威 emit 收口（两者在边界处数值
+                    // 一致，不会跳变）。
                     progress: app_handle_for_progress.map(|handle| {
                         crate::mixdown::ProgressCallback::new(move |intra: f64| {
                             let overall = if total_targets == 0 {
