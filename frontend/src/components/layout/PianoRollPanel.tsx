@@ -6560,6 +6560,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             invalidate,
             dispatch,
             selectAllParamRange,
+            // 颤音预设：`case "addVibrato"` 读这两个值来决定"套用哪个预设"。
+            // 漏掉它们会让闭包拿到旧列表，表现为"点了新预设却套用了旧的"。
+            resolvedVibratoPresets,
+            activeVibratoPresetId,
         ],
     );
 
