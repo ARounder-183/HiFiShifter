@@ -1954,7 +1954,6 @@ export const jaJP = {
     vibrato_blend: "ドライ / ウェット",
     vibrato_preview: "プレビュー",
     vibrato_cycles_estimate: "約 {count} 周期",
-    vibrato_depth_resolved: "このパラメータでは {value} {unit}",
 
     vibrato_manager_title: "ビブラートプリセット",
     vibrato_manager_new: "新規",
@@ -1972,21 +1971,16 @@ export const jaJP = {
     vibrato_manager_open: "プリセットを管理…",
 
     vibrato_menu_presets: "ビブラートプリセット",
-    vibrato_menu_custom: "カスタムビブラート…",
     vibrato_extract_action: "選択範囲からプリセットを作成…",
     vibrato_extract_title: "ビブラートプリセットを作成",
-    vibrato_extract_name: "プリセット名",
     vibrato_extract_failed: "選択範囲に明確なビブラートが見つかりません。",
-    vibrato_extract_summary: "約 {rate}、深さ {depth} セントと測定されました。",
     vibrato_from_selection: "選択範囲から",
 
     vibrato_toolbar_label: "ビブラートプリセット",
     vibrato_hud_hint: "サイドボタンまたは , と . でプリセットを切り替え",
     vibrato_adjusted: "編集中",
-    vibrato_save_to_preset: "プリセットに保存",
 
     vibrato_unit_percent: "%",
-    vibrato_unit_semitone: "半音",
     vibrato_unit_degree: "音級",
     vibrato_unit_hz: "Hz",
     vibrato_unit_cycles: "周期",

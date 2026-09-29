@@ -1942,7 +1942,6 @@ export const enUS = {
     vibrato_blend: "Dry / wet",
     vibrato_preview: "Preview",
     vibrato_cycles_estimate: "About {count} cycles",
-    vibrato_depth_resolved: "{value} {unit} on this parameter",
 
     vibrato_manager_title: "Vibrato Presets",
     vibrato_manager_new: "New",
@@ -1959,21 +1958,16 @@ export const enUS = {
     vibrato_manager_open: "Manage presets...",
 
     vibrato_menu_presets: "Vibrato preset",
-    vibrato_menu_custom: "Custom vibrato...",
     vibrato_extract_action: "Create preset from selection...",
     vibrato_extract_title: "Create Vibrato Preset",
-    vibrato_extract_name: "Preset name",
     vibrato_extract_failed: "No clear vibrato found in the selection.",
-    vibrato_extract_summary: "Measured about {rate} and {depth} cents.",
     vibrato_from_selection: "From selection",
 
     vibrato_toolbar_label: "Vibrato preset",
     vibrato_hud_hint: "Side buttons or , and . switch presets",
     vibrato_adjusted: "edited",
-    vibrato_save_to_preset: "Save back to preset",
 
     vibrato_unit_percent: "%",
-    vibrato_unit_semitone: "semitone",
     vibrato_unit_degree: "degree",
     vibrato_unit_hz: "Hz",
     vibrato_unit_cycles: "cycles",

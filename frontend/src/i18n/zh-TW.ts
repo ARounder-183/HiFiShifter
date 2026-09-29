@@ -1888,7 +1888,6 @@ export const zhTW = {
     vibrato_blend: "乾濕比",
     vibrato_preview: "預覽",
     vibrato_cycles_estimate: "約 {count} 個週期",
-    vibrato_depth_resolved: "在該參數上為 {value} {unit}",
 
     vibrato_manager_title: "顫音預設",
     vibrato_manager_new: "新增",
@@ -1905,21 +1904,16 @@ export const zhTW = {
     vibrato_manager_open: "管理預設…",
 
     vibrato_menu_presets: "顫音預設",
-    vibrato_menu_custom: "自訂顫音…",
     vibrato_extract_action: "從選區提取預設…",
     vibrato_extract_title: "提取顫音預設",
-    vibrato_extract_name: "預設名稱",
     vibrato_extract_failed: "選區裡沒有找到明顯的顫音。",
-    vibrato_extract_summary: "測得約 {rate}，深度 {depth} 分。",
     vibrato_from_selection: "來自選區",
 
     vibrato_toolbar_label: "顫音預設",
     vibrato_hud_hint: "滑鼠側鍵或 , 與 . 切換預設",
     vibrato_adjusted: "已調整",
-    vibrato_save_to_preset: "儲存回預設",
 
     vibrato_unit_percent: "%",
-    vibrato_unit_semitone: "半音",
     vibrato_unit_degree: "音級",
     vibrato_unit_hz: "Hz",
     vibrato_unit_cycles: "週期",

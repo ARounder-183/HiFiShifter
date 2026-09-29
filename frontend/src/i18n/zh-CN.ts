@@ -1886,7 +1886,6 @@ export const zhCN = {
     vibrato_blend: "干湿比",
     vibrato_preview: "预览",
     vibrato_cycles_estimate: "约 {count} 个周期",
-    vibrato_depth_resolved: "在该参数上为 {value} {unit}",
 
     vibrato_manager_title: "颤音预设",
     vibrato_manager_new: "新建",
@@ -1903,21 +1902,16 @@ export const zhCN = {
     vibrato_manager_open: "管理预设…",
 
     vibrato_menu_presets: "颤音预设",
-    vibrato_menu_custom: "自定义颤音…",
     vibrato_extract_action: "从选区提取预设…",
     vibrato_extract_title: "提取颤音预设",
-    vibrato_extract_name: "预设名称",
     vibrato_extract_failed: "选区里没有找到明显的颤音。",
-    vibrato_extract_summary: "测得约 {rate}，深度 {depth} 分。",
     vibrato_from_selection: "来自选区",
 
     vibrato_toolbar_label: "颤音预设",
     vibrato_hud_hint: "鼠标侧键或 , 与 . 切换预设",
     vibrato_adjusted: "已调整",
-    vibrato_save_to_preset: "保存回预设",
 
     vibrato_unit_percent: "%",
-    vibrato_unit_semitone: "半音",
     vibrato_unit_degree: "音级",
     vibrato_unit_hz: "Hz",
     vibrato_unit_cycles: "周期",

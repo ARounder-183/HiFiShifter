@@ -428,6 +428,8 @@ Right-drag on a selected curve to adjust its amplitude: drag up to increase ampl
 
 Right-click in the parameter editor to open a context menu with operations such as `Initialize`, `Transpose by Cents`, `Transpose by Degrees`, `Set To`, `Average`, `Smooth`, `Add Vibrato`, `Quantize`, `Mean Quantize`, etc.
 
+`Add Vibrato` applies the **current vibrato preset** to the selection directly, with no dialog. The presets themselves are listed right below it: picking one makes it current and applies it at once. Applying keeps the pitch movement that is already there and superimposes the vibrato on top, rather than replacing the curve with a straight line. `Manage presets...` at the bottom opens the preset manager, and `Create preset from selection...` turns a vibrato you have already drawn into a preset.
+
 Hold `Alt` to enter four-point editing mode for the selected curve. Similar to the feature in VocalShifter, dragging the four points allows you to bend the curve.
 
 Hold `Alt` and drag the edge of the selection area to stretch the parameter curve within the selection.
@@ -448,13 +450,40 @@ Right-click the Draw tool button to switch to the Line/Vibrato tool. This tool a
 
 Left-drag to draw a straight line freely or horizontally, depending on the `Drag Direction` setting. While left-dragging, press the right button (or the `D` key) to quickly toggle drag direction.
 
-While left-dragging, scroll the mouse wheel to superimpose a horizontal sine wave; scrolling adjusts the amplitude. Hold `Alt` while scrolling to adjust frequency. Hold the `Param Fine Adjust` modifier (default `Ctrl`) to fine-tune while scrolling.
+While left-dragging, scroll the wheel to adjust the vibrato **depth**; hold `Alt` while scrolling to adjust the **rate**. Hold the `Param Fine Adjust` modifier (default `Ctrl`) to fine-tune while scrolling. A readout follows the pointer during the drag, showing the current preset, depth and rate.
+
+You can switch vibrato presets mid-drag:
+
+- **Mouse side buttons**: forward switches to the next preset, back to the previous one.
+- **Keyboard**: `,` for the previous preset and `.` for the next (rebindable in `Options → Keyboard Shortcuts`).
+
+A preset decides the waveform (sine, triangle, saw, square, trapezoid, trill, or a hand-drawn table), the envelope (fade in, swell, fade out), the rate ramp, the irregularity and how the wave is placed; depth and rate belong to the gesture itself. Adjustments made during a drag never rewrite the preset — presets change only in the preset manager.
+
+The drag rate is always measured in Hz, so a preset sounds the same speed however long you drag.
 
 Right-drag resets the current curve.
 
 Press `Tab` to cycle through editing tools (Select / Draw-type tools).
 
-### 5. Pitch Snap
+### 5. Vibrato Presets
+
+A vibrato preset is a reusable set of vibrato parameters. Open the manager from `Options → Manage presets...`, from the preset button in the parameter editor toolbar, or from `Manage presets...` in the context menu.
+
+The preset list is on the left and the editor on the right. The editor opens with a **waveform preview** that redraws as you change anything; its vertical axis scales to the preset's own depth, so a 5-cent and a 100-cent preset are both legible, and the readout underneath gives the real amount.
+
+The parameters fall into four groups:
+
+- **Waveform**: shape (sine, triangle, saw up, saw down, square, trapezoid, trill) and skew. Skew means different things per shape — the rising fraction for a triangle, the duty cycle for the square family. It is the single most important parameter for making a vibrato sound human, because a real voice does not rise and fall symmetrically.
+- **Depth**: the amount, shown in the current parameter's own unit (cents for pitch and cents-like parameters, percent for gain parameters such as dynamics, native numbers otherwise); swell, as a depth multiplier at the start and at the end; centre offset; and irregularity, which jitters phase and depth with deterministic noise so the result wavers rather than sounding mechanical.
+- **Rate**: measured by frequency in Hz or by a cycle count over the whole region; the rate at the end, for speeding up or slowing down toward the end of a phrase; and landing on a whole cycle so the note returns cleanly to its baseline.
+- **Envelope**: fade in and fade out, each with a duration and a curve shape; and the start phase.
+- **Placement**: what the vibrato oscillates around — start to end, hold the start, hold the end, the average, or **keep the curve**, which superimposes the vibrato on the pitch movement that is already there. The last one also has a dry/wet control.
+
+Built-in presets are read-only: duplicate one to edit it. Clicking a list entry only selects it for editing; **double-click** makes it the preset you are using, so shaping a preset you have not settled on does not change the sound you are about to draw with.
+
+**Creating a preset from a selection**: once you have drawn a vibrato you like, select it and choose `Create preset from selection...`. The pitch movement itself is removed, the period is measured by autocorrelation, the remainder is folded into one averaged cycle to become the waveform, and the depth, fades and irregularity are measured, giving you a preset you can keep tuning. It works on any parameter.
+
+### 6. Pitch Snap
 
 When editing pitch parameters with any tool, Pitch Snap allows you to snap edits to semitones or scale degrees. Hold `Shift` to temporarily toggle snap.
 
@@ -478,7 +507,7 @@ Alternatively, use the `Cents Offset` and `Degree Offset` parameters on child tr
 
 This quickly creates harmonies by degree transposition. Similarly, switch to a child track's `Formant Offset` parameter to draw a per-frame formant-shift curve and create timbrally varied harmonies on algorithms that support `Formant Shift` (NSF-HiFiGAN / vslib).
 
-### 6. Pitch Reference Clip
+### 7. Pitch Reference Clip
 
 A Pitch Reference Clip on a track is a special type of audio clip that stores a pitch curve on the timeline.
 
@@ -511,7 +540,7 @@ Pitch Reference Clips have the following common uses:
 
 Select a Pitch Reference Clip and choose `Update Pitch` from the context menu to update the Pitch Reference Clip with the existing pitch parameters within its range.
 
-### 7. Other Features
+### 8. Other Features
 
 Additional convenient features of the parameter editor:
 
@@ -522,7 +551,7 @@ Additional convenient features of the parameter editor:
 - `Reference Track Group`: When the parameter is `Pitch`, lets you choose other tracks and display pitch curves from other track groups as references in the pitch editor.
 - `Import MIDI`: Allows you to select a MIDI file and import notes from one or more tracks as a pitch curve.
 
-### 8. Smoothing
+### 9. Smoothing
 
 After selecting a region with the Select tool, right-click and choose `Smooth…` (default shortcut `Ctrl + M`) to calm down a jittery parameter curve.
 

@@ -17,7 +17,11 @@ import {
 } from "../../../features/vibrato/systemPresets";
 import { isBuiltinVibratoPresetId } from "../../../features/vibrato/vibratoPresets";
 import { buildVibratoCurve, DEFAULT_FRAME_PERIOD_MS } from "../../../features/vibrato/vibratoCurve";
-import { depthToDisplay, displayToDepth } from "../../../features/vibrato/vibratoDepth";
+import {
+    depthStepUnitFor,
+    depthToDisplay,
+    displayToDepth,
+} from "../../../features/vibrato/vibratoDepth";
 import type {
     BaselineMode,
     EnvelopeCurve,
@@ -153,6 +157,27 @@ export function depthToCents(
     range?: { min: number; max: number },
 ): number {
     return displayToDepth(value, param, range);
+}
+
+/**
+ * 深度显示值的**单位标签**（`null` = 原始值域参数，不带单位后缀）。
+ *
+ * 【为什么必须按参数取】`depthForParam` 已经把深度换算成参数原生单位，
+ * 标签必须跟着变：在 `dyn` 上显示 "30 cents" 是把百分比说成了音分。单位
+ * 由 `depthStepUnitFor` 决定（它同时决定编辑器里滚轮一格走多少），两者
+ * 从同一个来源取，不会各自漂移。
+ */
+export function depthUnitLabelKey(param: string): MessageKey | null {
+    switch (depthStepUnitFor(param)) {
+        case "cents":
+            return "vibrato_unit_cents";
+        case "percent":
+            return "vibrato_unit_percent";
+        case "scaleDegree":
+            return "vibrato_unit_degree";
+        default:
+            return null;
+    }
 }
 
 /** 预设编辑器波形预览的几何。 */

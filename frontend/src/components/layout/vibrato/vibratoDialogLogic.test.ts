@@ -19,6 +19,7 @@ import {
     builtinIdOf,
     depthForParam,
     depthToCents,
+    depthUnitLabelKey,
     formatNumber,
     previewScaleCents,
     vibratoPresetDescription,
@@ -151,6 +152,40 @@ describe("深度单位换算", () => {
     test("换算可逆（各参数族往返一致）", () => {
         for (const param of ["pitch", "dyn", "volume", "tension", "breathiness", "pan"]) {
             expect(depthToCents(depthForParam(37, param), param)).toBeCloseTo(37, 6);
+        }
+    });
+});
+
+describe("depthUnitLabelKey", () => {
+    /*
+     * 深度显示值已经按参数换算成原生单位，单位标签必须跟着变 ——
+     * 在 dyn 上标 "cents" 就是把百分比说成了音分。
+     */
+    test("音高与 cents 类参数用分", () => {
+        expect(depthUnitLabelKey("pitch")).toBe("vibrato_unit_cents");
+        expect(depthUnitLabelKey("child_pitch_offset_cents@t1")).toBe("vibrato_unit_cents");
+    });
+
+    test("乘性增益用百分比", () => {
+        expect(depthUnitLabelKey("dyn")).toBe("vibrato_unit_percent");
+        expect(depthUnitLabelKey("volume")).toBe("vibrato_unit_percent");
+        expect(depthUnitLabelKey("breath_gain")).toBe("vibrato_unit_percent");
+    });
+
+    test("音级参数用音级", () => {
+        expect(depthUnitLabelKey("child_pitch_offset_degrees@t1")).toBe("vibrato_unit_degree");
+    });
+
+    test("原始值域参数不带单位后缀", () => {
+        expect(depthUnitLabelKey("tension")).toBeNull();
+        expect(depthUnitLabelKey("breathiness")).toBeNull();
+    });
+
+    test("返回的词条键都真实存在", () => {
+        for (const param of ["pitch", "dyn", "child_pitch_offset_degrees@t1"]) {
+            const key = depthUnitLabelKey(param);
+            expect(key).not.toBeNull();
+            if (key) expect(t(key)).toBeTruthy();
         }
     });
 });

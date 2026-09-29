@@ -1927,7 +1927,6 @@ export const koKR = {
     vibrato_blend: "드라이 / 웻",
     vibrato_preview: "미리보기",
     vibrato_cycles_estimate: "약 {count} 주기",
-    vibrato_depth_resolved: "이 파라미터에서 {value} {unit}",
 
     vibrato_manager_title: "비브라토 프리셋",
     vibrato_manager_new: "새로 만들기",
@@ -1944,21 +1943,16 @@ export const koKR = {
     vibrato_manager_open: "프리셋 관리…",
 
     vibrato_menu_presets: "비브라토 프리셋",
-    vibrato_menu_custom: "사용자 비브라토…",
     vibrato_extract_action: "선택 범위에서 프리셋 만들기…",
     vibrato_extract_title: "비브라토 프리셋 만들기",
-    vibrato_extract_name: "프리셋 이름",
     vibrato_extract_failed: "선택 범위에서 뚜렷한 비브라토를 찾지 못했습니다.",
-    vibrato_extract_summary: "약 {rate}, 깊이 {depth} 센트로 측정되었습니다.",
     vibrato_from_selection: "선택 범위에서",
 
     vibrato_toolbar_label: "비브라토 프리셋",
     vibrato_hud_hint: "사이드 버튼 또는 , 와 . 로 프리셋 전환",
     vibrato_adjusted: "편집됨",
-    vibrato_save_to_preset: "프리셋에 저장",
 
     vibrato_unit_percent: "%",
-    vibrato_unit_semitone: "반음",
     vibrato_unit_degree: "음계",
     vibrato_unit_hz: "Hz",
     vibrato_unit_cycles: "주기",
