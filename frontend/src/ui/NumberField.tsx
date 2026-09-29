@@ -11,12 +11,21 @@
  *   3. **步长按单位语义**（`unit="bpm"` 而不是 `step={1}`）。
  *
  * 【提交语义】打字过程中只更新本地草稿，**blur 或 Enter 才提交**；
- * 滚轮每格是离散动作，立即提交。这与设置类表单的心智一致：改到一半不会
+ * 滚轮与方向键每格是离散动作，立即提交。这与设置类表单的心智一致：改到一半不会
  * 每敲一个字符就往 Redux / 后端写一次。
+ *
+ * 【为什么原生 `step` 是 `any` 而不是单位步长】原生 `step` 是**取值约束**，不是
+ * "滚轮走多远"：`<input type="number" step="16">` 会把 4 判成 `stepMismatch`，
+ * 于是提交表单时浏览器弹出"请输入一个有效的值。最接近的两个有效值为 0 和 16。"
+ * 并**拦下提交** —— 用户看到的是一句与本应用无关的原生提示（实测：渲染缓存的
+ * 「音频块大小下限」默认 4、步长 16，一按保存就触发）。任何 coarse 步长 > 1 的
+ * 单位（percent 5、levelDb 3、milliseconds 10、kilobytes 16…）都有这个隐患，
+ * 只是值为整数倍时才碰巧不触发。因此数值合法性只由「输入即夹紧 + 单位步长」表达，
+ * 原生 step 一律 `any`；方向键的步进改由本组件自己按单位语义实现（见下方 onKeyDown）。
  */
 import { TextField } from "@radix-ui/themes";
 import { useState } from "react";
-import type { ReactNode } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 
 import { cx } from "./cx";
 import { stepFor, stepValue, type StepUnit } from "./stepPolicy";
@@ -176,6 +185,35 @@ export function AppNumberField({
         committer.schedule(next);
     });
 
+    /*
+     * 方向键：按**单位语义**走一格（与滚轮同一份 `stepValue`），按住精细调整修饰键
+     * 走 fine 一档。
+     *
+     * 【为什么必须自己实现】原生 `step` 已经被设成 `any`（见文件头：它是取值约束，
+     * 会把合法的 4 KB 判成非法值并拦下表单提交）。`step="any"` 下浏览器给方向键的
+     * 默认步长是 1，对"占用上限"这种 GB 量级的字段等于没动。因此这里接管方向键，
+     * 让键盘与滚轮给出同一种手感 —— 也与 `AppSlider` 的方向键语义对齐。
+     */
+    const stepByArrow = (event: KeyboardEvent<HTMLInputElement>, direction: 1 | -1) => {
+        if (disabled) return;
+        // 必须拦下默认行为：否则光标会移动、原生也会再走一格（步长 1）。
+        event.preventDefault();
+        const parsed = Number(text);
+        const base = Number.isFinite(parsed) ? parsed : value;
+        const next = stepValue({
+            value: base,
+            direction,
+            unit,
+            fine: isFine(event),
+            min: min ?? Number.NEGATIVE_INFINITY,
+            max: max ?? Number.POSITIVE_INFINITY,
+        });
+        if (next === value) return;
+        setDraft({ source: next, text: format(next, spec.decimals) });
+        onChange?.(next);
+        committer.schedule(next);
+    };
+
     return (
         <div
             ref={setWheelTarget}
@@ -188,7 +226,9 @@ export function AppNumberField({
                 value={text}
                 min={min}
                 max={max}
-                step={spec.coarse}
+                // 见文件头：原生 step 是取值约束，会把合法值判成 stepMismatch 并拦下
+                // 对话框的提交。步进语义由滚轮与方向键各自按单位实现。
+                step="any"
                 disabled={disabled}
                 aria-label={ariaLabel}
                 onChange={(event) => {
@@ -201,6 +241,14 @@ export function AppNumberField({
                 }}
                 onBlur={commitText}
                 onKeyDown={(event) => {
+                    if (event.key === "ArrowUp") {
+                        stepByArrow(event, 1);
+                        return;
+                    }
+                    if (event.key === "ArrowDown") {
+                        stepByArrow(event, -1);
+                        return;
+                    }
                     if (event.key !== "Enter") return;
                     // Enter 提交本字段；不 `preventDefault` 的话会继续冒泡触发
                     // 对话框表单的默认动作（AppDialog 已在 submitter 层拦一道，

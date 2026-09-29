@@ -360,8 +360,17 @@ export function AppDialog({
                  * `<form>`，靠浏览器原生提交语义才不需要为每个输入框手工接
                  * keydown。单行输入里 Enter 提交、多行 textarea 里 Enter 换行，
                  * 两种行为都由引擎给出，无需特判。
+                 *
+                 * 【为什么要 `noValidate`】这里借用的只是"隐式提交"这一个语义，
+                 * **不**要浏览器的原生校验：它会在提交前拦下表单并弹出与本应用无关
+                 * 的气泡（"请输入一个有效的值…"）。真实案例：数值字段的原生 `step`
+                 * 一旦大于 1，任何非整数倍的值都会被判成 `stepMismatch`（渲染缓存的
+                 * 「音频块大小下限」默认 4、步长 16，一按保存就弹）。本应用的取值
+                 * 合法性由各自的处理器表达（输入即夹紧、提交时规范化），因此这里
+                 * 明确关掉原生校验 —— 全仓没有任何 `required` / `pattern` /
+                 * `type="email"`，关掉它不会漏掉真正的校验。
                  */}
-                <form onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col">
+                <form onSubmit={onSubmit} noValidate className="flex min-h-0 flex-1 flex-col">
                     {/*
                      * 隐藏的默认提交按钮必须位于**树序最前**。
                      *
