@@ -1175,6 +1175,8 @@ export const enUS = {
     kb_pianoroll_vibrato_drag_amp_decrease: "Vibrato Drag: Decrease Amplitude",
     kb_pianoroll_vibrato_drag_freq_increase: "Vibrato Drag: Increase Frequency",
     kb_pianoroll_vibrato_drag_freq_decrease: "Vibrato Drag: Decrease Frequency",
+    kb_pianoroll_vibrato_preset_prev: "Vibrato Drag: Previous Preset",
+    kb_pianoroll_vibrato_preset_next: "Vibrato Drag: Next Preset",
     kb_pianoroll_cycle_drag_direction: "Cycle Drag Direction",
     kb_modifier_clip_multi_select_toggle: "Multi-Select Toggle (hold + click clip)",
     kb_modifier_clip_range_select: "Range Select (hold + click clip, extends from anchor)",

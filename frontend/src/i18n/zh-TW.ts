@@ -1013,6 +1013,8 @@ export const zhTW = {
     kb_pianoroll_vibrato_drag_amp_decrease: "顫音拖拽：減小振幅",
     kb_pianoroll_vibrato_drag_freq_increase: "顫音拖拽：增大頻率",
     kb_pianoroll_vibrato_drag_freq_decrease: "顫音拖拽：減小頻率",
+    kb_pianoroll_vibrato_preset_prev: "顫音拖拽：上一個預設",
+    kb_pianoroll_vibrato_preset_next: "顫音拖拽：下一個預設",
     kb_pianoroll_cycle_drag_direction: "切換拖曳方向",
     kb_group_mode: "模式與工具",
     kb_mode_toggle: "模式切換",

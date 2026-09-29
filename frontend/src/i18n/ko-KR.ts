@@ -1127,6 +1127,8 @@ export const koKR = {
     kb_pianoroll_vibrato_drag_amp_decrease: "비브라토 드래그: 진폭 감소",
     kb_pianoroll_vibrato_drag_freq_increase: "비브라토 드래그: 주파수 증가",
     kb_pianoroll_vibrato_drag_freq_decrease: "비브라토 드래그: 주파수 감소",
+    kb_pianoroll_vibrato_preset_prev: "비브라토 드래그: 이전 프리셋",
+    kb_pianoroll_vibrato_preset_next: "비브라토 드래그: 다음 프리셋",
     kb_pianoroll_cycle_drag_direction: "드래그 방향 전환",
     kb_modifier_clip_multi_select_toggle: "다중 선택 전환 (누른 채 클릭)",
     kb_modifier_clip_range_select: "범위 선택 (누른 채 클릭, 앵커에서 확장)",

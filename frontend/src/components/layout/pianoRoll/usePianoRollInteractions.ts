@@ -127,9 +127,21 @@ import {
     type ParamSelection,
 } from "./paramSelection";
 import {
+    buildDragVibratoCurve,
     computeVibratoDragAdjustment,
+    createDragWorking,
     resolveVibratoDragKeyboardAdjustment,
+    resolveVibratoPresetSwitch,
+    switchDragPreset,
+    type VibratoAdjustTarget,
+    type VibratoDragWorking,
 } from "./vibratoDragAdjust";
+import {
+    cycleVibratoPresetId,
+    findVibratoPreset,
+} from "../../../features/vibrato/vibratoPresetList";
+import { vibratoSeedForPreset } from "../../../features/vibrato/vibratoSeed";
+import type { VibratoPreset } from "../../../features/vibrato/vibratoTypes";
 import {
     formatRightDragMorphPercent,
     getDrawPreviewValue,
@@ -376,6 +388,38 @@ export function usePianoRollInteractions(args: {
     vibratoDragFrequencyIncreaseKb: Keybinding;
     /** 直线/颤音拖拽时减小频率 */
     vibratoDragFrequencyDecreaseKb: Keybinding;
+    /** 拖拽颤音时切换到上一个预设 */
+    vibratoPresetPrevKb: Keybinding;
+    /** 拖拽颤音时切换到下一个预设 */
+    vibratoPresetNextKb: Keybinding;
+    /**
+     * 当前活动的颤音预设。
+     *
+     * 拖拽起手时从它取波形、包络、深度与速率。系统预设与用户预设的合成见
+     * `vibratoPresetList.resolveVibratoPresets`。
+     */
+    vibratoPreset: VibratoPreset;
+    /** 可用预设的全量列表（系统 + 用户），供拖拽中环绕切换。 */
+    vibratoPresetList: readonly VibratoPreset[];
+    /** 最近一次拖拽调参后的深度 / 速率（`null` = 用预设自带值）。 */
+    lastVibratoDepthCents?: number | null;
+    lastVibratoRateHz?: number | null;
+    /**
+     * 拖拽中切换预设 / 调参后的上报。
+     *
+     * 面板据此更新持久化的活动预设与 `lastVibrato*`，并刷新 HUD。
+     */
+    onVibratoDragStateChange?: (next: {
+        presetId: string;
+        depthCents: number;
+        rateHz: number;
+        adjusted: boolean;
+        /** 指针的视口坐标，供 HUD 定位。 */
+        clientX: number;
+        clientY: number;
+    }) => void;
+    /** 拖拽结束：清掉 HUD 并落盘 `lastVibrato*`。 */
+    onVibratoDragEnd?: (next: { depthCents: number; rateHz: number; adjusted: boolean }) => void;
     /** 右键菜单回调 */
     onContextMenu?: (x: number, y: number) => void;
     /** 播放头位置（秒）读取器，用于以播放头为中心缩放。播放中必须返回与
@@ -499,6 +543,14 @@ export function usePianoRollInteractions(args: {
         vibratoDragAmplitudeDecreaseKb,
         vibratoDragFrequencyIncreaseKb,
         vibratoDragFrequencyDecreaseKb,
+        vibratoPresetPrevKb,
+        vibratoPresetNextKb,
+        vibratoPreset,
+        vibratoPresetList,
+        lastVibratoDepthCents,
+        lastVibratoRateHz,
+        onVibratoDragStateChange,
+        onVibratoDragEnd,
         getPlayheadSec,
         playheadZoomEnabled,
         paramEditorSeekPlayheadEnabled,
@@ -787,9 +839,11 @@ export function usePianoRollInteractions(args: {
         currentFrame: number;
         currentValue: number;
         mode: StrokeMode;
-        amplitude: number;
-        frequency: number;
+        /** 拖拽工作副本：预设 + 本次拖拽的深度 / 速率覆盖。 */
+        working: VibratoDragWorking;
         shiftHeld: boolean;
+        /** 不规则度的确定性种子：同一次拖拽内保持恒定，预览与提交才逐帧一致。 */
+        seed: number;
     } | null>(null);
     // Track last pointer position so we can synthesize pointermove when modifiers change
     const lastPointerPosRef = useRef<{
@@ -1167,103 +1221,87 @@ export function usePianoRollInteractions(args: {
         [buildMorphOverlaysFromSelection, setMorphOverlay, setSelectionUi],
     );
 
+    /**
+     * 按拖拽工作副本渲染整段颤音。
+     *
+     * 走 `buildDragVibratoCurve`（→ `buildVibratoCurve`）：波形、包络（渐入 /
+     * 渐强 / 渐出）、速率渐变、不规则度、基线模式全部来自预设，只有深度与速率
+     * 是本次拖拽覆盖的。
+     *
+     * 吸附仍按**合成后的值**逐帧作用 —— 这是刻意保留的行为：开着吸附时用户
+     * 可以快速画出一条量化的参数线。
+     */
     const buildVibratoDense = useCallback(
         (
             startFrame: number,
             startValue: number,
             endFrame: number,
             endValue: number,
-            amplitude: number,
-            frequency: number,
+            working: VibratoDragWorking,
             shiftHeld: boolean,
+            seed: number,
         ) => {
-            const minF = Math.min(startFrame, endFrame);
-            const maxF = Math.max(startFrame, endFrame);
-            const len = maxF - minF + 1;
-            const dense = new Array<number>(len);
-            const denom = endFrame - startFrame;
-            const safeFreq = Math.max(1e-4, Number.isFinite(frequency) ? frequency : 1);
-            for (let f = minF; f <= maxF; f += 1) {
-                const t = denom === 0 ? 1 : (f - startFrame) / denom;
-                const base = startValue + (endValue - startValue) * t;
-                const wave = amplitude * Math.sin(2 * Math.PI * safeFreq * t);
-                dense[f - minF] = snapDrawValue(base + wave, shiftHeld, f);
-            }
-            return { minF, maxF, dense };
+            return buildDragVibratoCurve({
+                working,
+                startFrame,
+                startValue,
+                endFrame,
+                endValue,
+                param: editParam,
+                framePeriodMs: paramViewRef.current?.framePeriodMs ?? 5,
+                range: currentParamRange,
+                snapFinalValue: (value, frame) => snapDrawValue(value, shiftHeld, frame),
+                seed,
+            });
         },
-        [snapDrawValue],
+        [editParam, currentParamRange, paramViewRef, snapDrawValue],
     );
 
-    const applyVibratoDragAdjustment = useCallback(
-        (input: {
-            target: "amplitude" | "frequency";
-            direction: 1 | -1;
-            steps: number;
-            shiftHeld: boolean;
-            fineEvent: {
-                ctrlKey: boolean;
-                shiftKey: boolean;
-                altKey: boolean;
-                metaKey?: boolean;
-            };
-        }): boolean => {
+    /**
+     * 重画拖拽预览（参数或预设变更后调用）。
+     *
+     * 先擦掉**上一帧写过的区间**（而不是丢弃整份覆盖层再整份拷贝 —— 那是每帧
+     * 一次 O(窗口) 的拷贝），再按当前工作副本写入。`applyDenseToLiveEdit`
+     * 内部会按需重建基准。
+     */
+    const repaintVibratoDragPreview = useCallback(
+        (shiftHeld: boolean): boolean => {
             const vib = vibratoStateRef.current;
             if (!vib) return false;
 
-            const fineScale = pointerFineWheelScale(input.fineEvent);
-            const next = computeVibratoDragAdjustment({
-                editParam,
-                currentParamRange,
-                amplitude: vib.amplitude,
-                frequency: vib.frequency,
-                target: input.target,
-                direction: input.direction,
-                steps: input.steps,
-                fineScale,
-            });
-            vib.amplitude = next.amplitude;
-            vib.frequency = next.frequency;
-
             const st = strokeRef.current;
             const pvNow = paramViewRef.current;
-            if (st && pvNow && st.pointerId === vib.pointerId) {
-                // 参数变更后重画整段预览：先擦掉**上一帧写过的区间**（而不是丢弃
-                // 整份覆盖层再整份拷贝 —— 那是每帧一次 O(窗口) 的拷贝），再按新
-                // 参数写入。`applyDenseToLiveEdit` 内部会按需重建基准。
-                resetLiveEditPreview(pvNow);
-                const built = buildVibratoDense(
-                    vib.startFrame,
-                    vib.startValue,
-                    vib.currentFrame,
-                    vib.currentValue,
-                    vib.amplitude,
-                    vib.frequency,
-                    input.shiftHeld,
-                );
-                vib.shiftHeld = input.shiftHeld;
-                st.points = [
-                    { frame: vib.startFrame, value: vib.startValue },
-                    { frame: vib.currentFrame, value: vib.currentValue },
-                ];
-                applyDenseToLiveEdit(
-                    pvNow,
-                    built.minF,
-                    st.mode === "restore" ? null : built.dense,
-                    built.minF,
-                    built.maxF,
-                    st.mode,
-                );
-                invalidate();
-                // 同上：live 覆盖只改 ref，波形面需显式重绘。
-                requestWaveformRepaint();
-            }
+            if (!st || !pvNow || st.pointerId !== vib.pointerId) return false;
 
+            resetLiveEditPreview(pvNow);
+            const built = buildVibratoDense(
+                vib.startFrame,
+                vib.startValue,
+                vib.currentFrame,
+                vib.currentValue,
+                vib.working,
+                shiftHeld,
+                vib.seed,
+            );
+            vib.shiftHeld = shiftHeld;
+            st.points = [
+                { frame: vib.startFrame, value: vib.startValue },
+                { frame: vib.currentFrame, value: vib.currentValue },
+            ];
+            applyDenseToLiveEdit(
+                pvNow,
+                built.minF,
+                st.mode === "restore" ? null : built.dense,
+                built.minF,
+                built.maxF,
+                st.mode,
+            );
+            invalidate();
+            // 同上：live 覆盖只改 ref，波形面需显式重绘。
+            requestWaveformRepaint();
             return true;
         },
         [
-            pointerFineWheelScale,
-            editParam,
-            currentParamRange,
             strokeRef,
             paramViewRef,
             buildVibratoDense,
@@ -1273,6 +1311,106 @@ export function usePianoRollInteractions(args: {
             requestWaveformRepaint,
         ],
     );
+
+    /** 把当前工作副本上报给面板（HUD + 持久化 `lastVibrato*`）。 */
+    const reportVibratoDragState = useCallback(
+        (clientX: number, clientY: number) => {
+            const vib = vibratoStateRef.current;
+            if (!vib || !onVibratoDragStateChange) return;
+            onVibratoDragStateChange({
+                presetId: vib.working.preset.id,
+                depthCents: vib.working.depthCents,
+                rateHz: vib.working.rateHz,
+                adjusted: vib.working.adjusted,
+                clientX,
+                clientY,
+            });
+        },
+        [onVibratoDragStateChange],
+    );
+
+    const applyVibratoDragAdjustment = useCallback(
+        (input: {
+            target: VibratoAdjustTarget;
+            direction: 1 | -1;
+            steps: number;
+            shiftHeld: boolean;
+            fineEvent: {
+                ctrlKey: boolean;
+                shiftKey: boolean;
+                altKey: boolean;
+                metaKey?: boolean;
+            };
+            clientX?: number;
+            clientY?: number;
+        }): boolean => {
+            const vib = vibratoStateRef.current;
+            if (!vib) return false;
+
+            const fineScale = pointerFineWheelScale(input.fineEvent);
+            const next = computeVibratoDragAdjustment({
+                editParam,
+                currentParamRange,
+                depthCents: vib.working.depthCents,
+                rateHz: vib.working.rateHz,
+                target: input.target,
+                direction: input.direction,
+                steps: input.steps,
+                fineScale,
+            });
+            vib.working = {
+                ...vib.working,
+                depthCents: next.depthCents,
+                rateHz: next.rateHz,
+                adjusted: true,
+            };
+
+            repaintVibratoDragPreview(input.shiftHeld);
+            if (input.clientX != null && input.clientY != null) {
+                reportVibratoDragState(input.clientX, input.clientY);
+            }
+            return true;
+        },
+        [
+            pointerFineWheelScale,
+            editParam,
+            currentParamRange,
+            repaintVibratoDragPreview,
+            reportVibratoDragState,
+        ],
+    );
+
+    /**
+     * 切换拖拽中的颤音预设。
+     *
+     * 深度与速率整体换成新预设的值（换的是"音色"，不是叠加调整），并立刻按新
+     * 预设重画 —— 不重画的话用户要等下一次指针移动才看到变化。
+     */
+    const switchVibratoDragPreset = useCallback(
+        (next: VibratoPreset, clientX?: number, clientY?: number): boolean => {
+            const vib = vibratoStateRef.current;
+            if (!vib) return false;
+            vib.working = switchDragPreset(next);
+            // 不规则度的种子跟着预设换：不同预设的"随机味"不一样，沿用旧种子
+            // 会让两个预设的抖动图案完全相同。
+            vib.seed = vibratoSeedForPreset(next);
+            repaintVibratoDragPreview(vib.shiftHeld);
+            if (clientX != null && clientY != null) reportVibratoDragState(clientX, clientY);
+            return true;
+        },
+        [repaintVibratoDragPreview, reportVibratoDragState],
+    );
+
+    /** 拖拽结束时的收尾上报（面板据此清 HUD 并落盘 `lastVibrato*`）。 */
+    const finishVibratoDrag = useCallback(() => {
+        const vib = vibratoStateRef.current;
+        if (!vib || !onVibratoDragEnd) return;
+        onVibratoDragEnd({
+            depthCents: vib.working.depthCents,
+            rateHz: vib.working.rateHz,
+            adjusted: vib.working.adjusted,
+        });
+    }, [onVibratoDragEnd]);
 
     useEffect(() => {
         if (toolMode !== "select") {
@@ -1761,24 +1899,24 @@ export function usePianoRollInteractions(args: {
                     deltaX: e.deltaX,
                     deltaY: e.deltaY,
                     deltaMode: e.deltaMode,
-                    amplitudeRequested: ampRequested,
-                    frequencyRequested: freqRequested,
+                    depthRequested: ampRequested,
+                    rateRequested: freqRequested,
                 });
 
                 // During vibrato drag, wheel always adjusts vibrato (amplitude by default,
                 // frequency via modifier or horizontal scroll). If no modifier is held and
                 // neither binding is "None", fall back to amplitude adjustment so the wheel
                 // never gets blocked or interpreted as zoom/scroll.
-                const resolvedTarget = wheelTarget !== "none" ? wheelTarget : "amplitude";
+                const resolvedTarget = wheelTarget !== "none" ? wheelTarget : "depth";
 
                 e.preventDefault();
                 const controlDelta =
-                    resolvedTarget === "frequency" && Math.abs(e.deltaX) > Math.abs(e.deltaY)
+                    resolvedTarget === "rate" && Math.abs(e.deltaX) > Math.abs(e.deltaY)
                         ? e.deltaX
                         : e.deltaY;
                 const steps = Math.max(1, Math.round(Math.abs(controlDelta) / 100));
                 const direction =
-                    resolvedTarget === "amplitude"
+                    resolvedTarget === "depth"
                         ? controlDelta < 0
                             ? 1
                             : -1
@@ -1997,6 +2135,27 @@ export function usePianoRollInteractions(args: {
         const onKeyDown = (e: globalThis.KeyboardEvent) => {
             if (!vibratoStateRef.current) return;
 
+            // 预设切换先判：`,` / `.` 的命中与深度 / 速率的绑定互斥（默认值
+            // 不重叠，但用户可能把它们绑到同一个键上），先把离散跳转判掉。
+            const switchDirection = resolveVibratoPresetSwitch(
+                e,
+                vibratoPresetPrevKb,
+                vibratoPresetNextKb,
+                paramFineAdjustKb,
+            );
+            if (switchDirection) {
+                e.preventDefault();
+                e.stopPropagation();
+                const nextId = cycleVibratoPresetId(
+                    vibratoPresetList,
+                    vibratoStateRef.current.working.preset.id,
+                    switchDirection,
+                );
+                const next = findVibratoPreset(vibratoPresetList, nextId);
+                if (next) switchVibratoDragPreset(next);
+                return;
+            }
+
             const adjustment = resolveVibratoDragKeyboardAdjustment(
                 e,
                 {
@@ -2027,10 +2186,14 @@ export function usePianoRollInteractions(args: {
         };
     }, [
         applyVibratoDragAdjustment,
+        switchVibratoDragPreset,
         vibratoDragAmplitudeIncreaseKb,
         vibratoDragAmplitudeDecreaseKb,
         vibratoDragFrequencyIncreaseKb,
         vibratoDragFrequencyDecreaseKb,
+        vibratoPresetPrevKb,
+        vibratoPresetNextKb,
+        vibratoPresetList,
         paramFineAdjustKb,
     ]);
 
@@ -2359,6 +2522,34 @@ export function usePianoRollInteractions(args: {
             ) {
                 return;
             }
+            // 鼠标侧键（X1 / X2）在颤音拖拽期间切换预设。
+            //
+            // 【为什么必须放在 `activePointerGestureEndRef.current()` 之前】那一句
+            // 会结束当前手势 —— 侧键按下时若走到那里，颤音拖拽会被直接掐断。
+            //
+            // 【为什么用 `button` 而判 `buttons` 掩码】侧键的 `button` 是 3 / 4，
+            // 而位掩码是 8 / 16 —— 与 `penInput.ts` 里"橡皮端是位 32 不是位 2"
+            // 那条注释同一类陷阱。左键仍按住时 `buttons` 为 9 / 17，
+            // `9 & 1 === 1` 依然成立，因此按下侧键不会被 onMove 的存活判据误判
+            // 成松手。指针捕获是按 pointerId 的，鼠标只有一个指针，所以侧键的
+            // pointerdown 会被重定向到画布这里，不会漏。
+            if (
+                (e.button === 3 || e.button === 4) &&
+                vibratoStateRef.current &&
+                (e.nativeEvent.buttons & 1) === 1
+            ) {
+                e.preventDefault();
+                const direction: 1 | -1 = e.button === 4 ? 1 : -1;
+                const nextId = cycleVibratoPresetId(
+                    vibratoPresetList,
+                    vibratoStateRef.current.working.preset.id,
+                    direction,
+                );
+                const next = findVibratoPreset(vibratoPresetList, nextId);
+                if (next) switchVibratoDragPreset(next, e.clientX, e.clientY);
+                return;
+            }
+
             if (activePointerGestureEndRef.current) {
                 activePointerGestureEndRef.current();
             }
@@ -4710,6 +4901,13 @@ export function usePianoRollInteractions(args: {
                 const canCycleDragDirection = e.button === 0;
 
                 if (isVibratoTool) {
+                    // 起手自活动预设：深度 / 速率用 `lastVibrato*` 续上次停下的
+                    // 位置（有的话），波形与包络一律来自预设。
+                    const working = createDragWorking(
+                        vibratoPreset,
+                        lastVibratoDepthCents ?? null,
+                        lastVibratoRateHz ?? null,
+                    );
                     vibratoStateRef.current = {
                         pointerId: e.pointerId,
                         startFrame,
@@ -4717,9 +4915,9 @@ export function usePianoRollInteractions(args: {
                         currentFrame: startFrame,
                         currentValue: startValue,
                         mode,
-                        amplitude: 0,
-                        frequency: 3,
+                        working,
                         shiftHeld: snapToggleHeld,
+                        seed: vibratoSeedForPreset(working.preset),
                     };
                     setVibratoDragCaptureActive(true);
                 }
@@ -4779,9 +4977,9 @@ export function usePianoRollInteractions(args: {
                                         startValue,
                                         f2,
                                         v2,
-                                        vib.amplitude,
-                                        vib.frequency,
+                                        vib.working,
                                         moveSnapToggleHeld,
+                                        vib.seed,
                                     );
                                     applyDenseToLiveEdit(
                                         pv2,
@@ -4791,6 +4989,7 @@ export function usePianoRollInteractions(args: {
                                         built.maxF,
                                         mode,
                                     );
+                                    reportVibratoDragState(adjusted.clientX, adjusted.clientY);
                                 }
                             } else {
                                 const len = maxF - minF + 1;
@@ -4882,9 +5081,9 @@ export function usePianoRollInteractions(args: {
                                 vib.startValue,
                                 vib.currentFrame,
                                 vib.currentValue,
-                                vib.amplitude,
-                                vib.frequency,
+                                vib.working,
                                 vib.shiftHeld,
+                                vib.seed,
                             );
                             const densePoints = built.dense.map((valueAtFrame, idx) => ({
                                 frame: built.minF + idx,
@@ -4897,6 +5096,7 @@ export function usePianoRollInteractions(args: {
                             await applyPostStrokeSmoothing(st.points, st.mode);
                         }
                     })();
+                    finishVibratoDrag();
                     vibratoStateRef.current = null;
                     setVibratoDragCaptureActive(false);
                 };
@@ -5267,6 +5467,14 @@ export function usePianoRollInteractions(args: {
             installDragDirectionKeyCycler,
             paramStretchKb,
             snapDrawValue,
+            // 颤音拖拽：预设起手、拖拽中切换预设、HUD 上报与收尾落盘。
+            vibratoPreset,
+            vibratoPresetList,
+            lastVibratoDepthCents,
+            lastVibratoRateHz,
+            switchVibratoDragPreset,
+            reportVibratoDragState,
+            finishVibratoDrag,
         ],
     );
 

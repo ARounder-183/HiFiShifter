@@ -39,6 +39,7 @@ import {
     cycleDragDirection,
     setToolMode,
     persistUiSettings,
+    setLastVibratoAdjust,
     toggleParamAxisUnit,
     setParamEditorSyncTimeline,
     setPrimaryTimeUnit,
@@ -198,6 +199,12 @@ import {
     rulerLayerTranslatePx,
 } from "./renderKernel/timelineAxis.js";
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
+import {
+    resolveActiveVibratoPreset,
+    resolveVibratoPresets,
+    findVibratoPreset,
+} from "../../features/vibrato/vibratoPresetList";
+import { depthForParam, formatNumber, vibratoPresetLabel } from "./vibrato/vibratoDialogLogic";
 import { useLiveParamEditing } from "./pianoRoll/useLiveParamEditing";
 import { getParamShiftStep, parseParamShiftMagnitude } from "./pianoRoll/paramShiftStep";
 import {
@@ -936,6 +943,39 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const vibratoDragFrequencyDecreaseKb = useAppSelector((state) =>
         selectKeybinding(state, "pianoRoll.vibratoDragFrequencyDecrease"),
     );
+    // 拖拽颤音时切换预设（默认 `,` / `.`）。只在拖拽期间生效 —— 这两个动作的
+    // `scopedContext` 是 `pianoRollVibratoDrag`，全局派发器不会执行它们。
+    const vibratoPresetPrevKb = useAppSelector((state) =>
+        selectKeybinding(state, "pianoRoll.vibratoPresetPrev"),
+    );
+    const vibratoPresetNextKb = useAppSelector((state) =>
+        selectKeybinding(state, "pianoRoll.vibratoPresetNext"),
+    );
+    const vibratoPresetUserList = useAppSelector((state) => state.session.vibratoPresets);
+    const activeVibratoPresetId = useAppSelector((state) => state.session.activeVibratoPresetId);
+    const lastVibratoDepthCents = useAppSelector((state) => state.session.lastVibratoDepthCents);
+    const lastVibratoRateHz = useAppSelector((state) => state.session.lastVibratoRateHz);
+    const resolvedVibratoPresets = useMemo(
+        () => resolveVibratoPresets(vibratoPresetUserList).all,
+        [vibratoPresetUserList],
+    );
+    const activeVibratoPreset = useMemo(
+        () => resolveActiveVibratoPreset(resolvedVibratoPresets, activeVibratoPresetId),
+        [resolvedVibratoPresets, activeVibratoPresetId],
+    );
+    /**
+     * 拖拽 HUD 的内容。`null` = 没在拖。
+     *
+     * 用一个本地 state 而不是 ref：HUD 要跟着切换预设 / 滚轮调参实时刷新。
+     */
+    const [vibratoDragHud, setVibratoDragHud] = useState<{
+        presetId: string;
+        depthCents: number;
+        rateHz: number;
+        adjusted: boolean;
+        clientX: number;
+        clientY: number;
+    } | null>(null);
     // 拖动方向循环切换键：拖拽进行中按下可即时切换本次拖拽方向（触控板替代右键）。
     const cycleDragDirectionKb = useAppSelector((state) =>
         selectKeybinding(state, "pianoRoll.cycleDragDirection"),
@@ -4850,6 +4890,29 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         vibratoDragAmplitudeDecreaseKb,
         vibratoDragFrequencyIncreaseKb,
         vibratoDragFrequencyDecreaseKb,
+        vibratoPresetPrevKb,
+        vibratoPresetNextKb,
+        vibratoPreset: activeVibratoPreset,
+        vibratoPresetList: resolvedVibratoPresets,
+        lastVibratoDepthCents,
+        lastVibratoRateHz,
+        onVibratoDragStateChange: setVibratoDragHud,
+        onVibratoDragEnd: useCallback(
+            (next: { depthCents: number; rateHz: number; adjusted: boolean }) => {
+                setVibratoDragHud(null);
+                // 只有真的调过才落盘：没调过时写回"预设自带值"会让
+                // `lastVibrato*` 覆盖掉用户下次可能重新选择的预设参数。
+                if (!next.adjusted) return;
+                dispatch(
+                    setLastVibratoAdjust({
+                        depthCents: next.depthCents,
+                        rateHz: next.rateHz,
+                    }),
+                );
+                void dispatch(persistUiSettings());
+            },
+            [dispatch],
+        ),
         cycleDragDirectionKb,
         paramFineAdjustKb,
         onContextMenu: useCallback((x: number, y: number) => {
@@ -8244,6 +8307,43 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                         formatParamValuePreview(
                                                             paramValuePreview.value,
                                                         )}
+                                                </div>
+                                            );
+                                        })()}
+                                    {/* 颤音拖拽 HUD：预设名 + 实时深度 / 速率。
+                                        没有它，切换预设与滚轮调参都是"盲操作"。 */}
+                                    {vibratoDragHud &&
+                                        (() => {
+                                            const rect = canvasRef.current?.getBoundingClientRect();
+                                            if (!rect) return null;
+                                            const hudPreset = findVibratoPreset(
+                                                resolvedVibratoPresets,
+                                                vibratoDragHud.presetId,
+                                            );
+                                            return (
+                                                <div
+                                                    className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-qt-xs leading-tight text-qt-text"
+                                                    style={{
+                                                        left: vibratoDragHud.clientX - rect.left,
+                                                        top: vibratoDragHud.clientY - rect.top,
+                                                        transform: "translate(12px, -100%)",
+                                                        whiteSpace: "nowrap",
+                                                    }}
+                                                >
+                                                    <div>
+                                                        {hudPreset
+                                                            ? vibratoPresetLabel(hudPreset, t)
+                                                            : ""}
+                                                        {vibratoDragHud.adjusted
+                                                            ? ` · ${t("vibrato_adjusted")}`
+                                                            : ""}
+                                                    </div>
+                                                    <div className="text-qt-text-muted">
+                                                        {`${formatNumber(depthForParam(vibratoDragHud.depthCents, editParam, currentParamRange))} ${t("vibrato_unit_cents")} · ${formatNumber(vibratoDragHud.rateHz)} ${t("vibrato_unit_hz")}`}
+                                                    </div>
+                                                    <div className="text-qt-text-muted">
+                                                        {t("vibrato_hud_hint")}
+                                                    </div>
                                                 </div>
                                             );
                                         })()}

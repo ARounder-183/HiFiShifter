@@ -1047,6 +1047,8 @@ export const jaJP = {
     kb_pianoroll_vibrato_drag_amp_decrease: "ビブラートドラッグ：振幅を減少",
     kb_pianoroll_vibrato_drag_freq_increase: "ビブラートドラッグ：周波数を増加",
     kb_pianoroll_vibrato_drag_freq_decrease: "ビブラートドラッグ：周波数を減少",
+    kb_pianoroll_vibrato_preset_prev: "ビブラートドラッグ：前のプリセット",
+    kb_pianoroll_vibrato_preset_next: "ビブラートドラッグ：次のプリセット",
     kb_pianoroll_cycle_drag_direction: "ドラッグ方向を切り替え",
     kb_modifier_clip_multi_select_toggle: "複数選択切替（押しながらクリック）",
     kb_modifier_clip_range_select: "範囲選択（押しながらクリック、アンカーから拡張）",

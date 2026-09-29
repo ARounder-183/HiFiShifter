@@ -51,7 +51,14 @@ export type TimelineWheelAction =
     | "horizontal-zoom"
     | "native";
 
-export type VibratoDragWheelTarget = "amplitude" | "frequency" | "none";
+/**
+ * 颤音拖拽期间滚轮调的是哪个量。
+ *
+ * 【命名与 `vibratoDragAdjust` 对齐】`depth` / `rate` 是拖拽工作副本上的
+ * 字段名，`amplitude` / `frequency` 是旧实现里"每次拖拽的周期数"那套语义的
+ * 残留 —— 同一件事不该有两个名字。
+ */
+export type VibratoDragWheelTarget = "depth" | "rate" | "none";
 
 function isLikelyTouchpadWheelGesture(input: {
     deltaX: number;
@@ -88,8 +95,8 @@ export function getVibratoDragWheelTarget(input: {
     deltaX: number;
     deltaY: number;
     deltaMode: number;
-    amplitudeRequested: boolean;
-    frequencyRequested: boolean;
+    depthRequested: boolean;
+    rateRequested: boolean;
 }): VibratoDragWheelTarget {
     const absX = Math.abs(input.deltaX);
     const absY = Math.abs(input.deltaY);
@@ -101,17 +108,17 @@ export function getVibratoDragWheelTarget(input: {
     // Touchpad gestures do not require modifiers while dragging with line/vibrato tool.
     if (isLikelyTouchpadWheelGesture(input)) {
         if (absX > WHEEL_AXIS_EPSILON && absX >= absY * VIBRATO_TOUCHPAD_FREQUENCY_AXIS_RATIO) {
-            return "frequency";
+            return "rate";
         }
-        return "amplitude";
+        return "depth";
     }
 
-    if (input.frequencyRequested) {
-        return "frequency";
+    if (input.rateRequested) {
+        return "rate";
     }
 
-    if (input.amplitudeRequested) {
-        return "amplitude";
+    if (input.depthRequested) {
+        return "depth";
     }
 
     return "none";

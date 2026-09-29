@@ -1012,6 +1012,8 @@ export const zhCN = {
     kb_pianoroll_vibrato_drag_amp_decrease: "颤音拖拽：减小振幅",
     kb_pianoroll_vibrato_drag_freq_increase: "颤音拖拽：增大频率",
     kb_pianoroll_vibrato_drag_freq_decrease: "颤音拖拽：减小频率",
+    kb_pianoroll_vibrato_preset_prev: "颤音拖拽：上一个预设",
+    kb_pianoroll_vibrato_preset_next: "颤音拖拽：下一个预设",
     kb_pianoroll_cycle_drag_direction: "切换拖动方向",
     kb_group_mode: "模式与工具",
     kb_mode_toggle: "模式切换",
