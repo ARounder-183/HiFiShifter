@@ -863,4 +863,117 @@ mod tests {
             .expect_err("rate change should be rejected");
         assert!(err.contains("changed mid-stream"), "unexpected error: {err}");
     }
+
+    // ── Phase 4：峰值工作集必须与素材长度解耦 ──────────────────────────────
+
+    /// 廉价方波：内存测试只关心"跑了多少分配"，不关心检测精度，因此避免
+    /// 逐样本 `sin()` 的开销（数千万样本下那会拖慢基准本身）。
+    fn square(rate: u32, secs: f64, period_hz: f64) -> Vec<f32> {
+        let n = (rate as f64 * secs) as usize;
+        let half = ((rate as f64 / period_hz) * 0.5).max(1.0) as usize;
+        (0..n)
+            .map(|i| if (i / half) % 2 == 0 { 0.6 } else { -0.6 })
+            .collect()
+    }
+
+    /// 借用式信号源：基准里的大素材不应被再克隆一份（那会污染测量）。
+    struct BorrowedSource<'a> {
+        rate: u32,
+        channels: u16,
+        samples: &'a [f32],
+        block_frames: usize,
+    }
+
+    impl SampleSource for BorrowedSource<'_> {
+        fn for_each_block(
+            &mut self,
+            on_block: &mut dyn FnMut(&[f32], u32, u16) -> Result<(), String>,
+        ) -> Result<(), String> {
+            let ch = (self.channels.max(1)) as usize;
+            let block = self.block_frames.max(1) * ch;
+            let mut start = 0usize;
+            while start < self.samples.len() {
+                let end = (start + block).min(self.samples.len());
+                on_block(&self.samples[start..end], self.rate, self.channels)?;
+                start = end;
+            }
+            Ok(())
+        }
+    }
+
+    fn measure_stream_peak(samples: &[f32], rate: u32, channels: u16) -> usize {
+        let estimator = ZeroCrossEstimator;
+        let params = StreamParams {
+            analysis_rate: rate,
+            frame_period_ms: 5.0,
+            want_pitch: true,
+            // 生产默认：30 s 块 + 0.3 s 上下文。
+            chunking: Chunking {
+                chunk_sec: 30.0,
+                ctx_sec: 0.3,
+            },
+            estimator: &estimator,
+            cancelled: &|| false,
+        };
+        let mut source = BorrowedSource {
+            rate,
+            channels,
+            samples,
+            block_frames: 8192,
+        };
+        let (result, peak) =
+            crate::alloc_probe::measure_peak_alloc(|| analyze_streaming(&mut source, &params));
+        result.expect("analysis failed");
+        peak
+    }
+
+    /// 峰值工作集必须由**块长**决定，而不是素材长度：这是本模块存在的全部理由。
+    ///
+    /// `#[ignore]`：分配计数器是进程级的，必须独占运行。手动执行：
+    ///   cargo test --lib -- --ignored --test-threads=1 pitch_memory
+    #[test]
+    #[ignore]
+    fn pitch_memory_peak_is_bounded_and_independent_of_source_length() {
+        let rate = 44_100u32;
+        let channels = 2u16;
+
+        // 60 s 与 240 s（4×）：若峰值仍与长度线性相关，后者会接近 4 倍。
+        let short = stereo(&square(rate, 60.0, 300.0));
+        let long = stereo(&square(rate, 240.0, 300.0));
+        let long_source_bytes = long.len() * std::mem::size_of::<f32>();
+
+        let short_peak = measure_stream_peak(&short, rate, channels);
+        let long_peak = measure_stream_peak(&long, rate, channels);
+
+        println!(
+            "chunked peak: 60s = {} MiB, 240s = {} MiB (source 240s = {} MiB)",
+            short_peak / (1024 * 1024),
+            long_peak / (1024 * 1024),
+            long_source_bytes / (1024 * 1024),
+        );
+
+        // (1) 峰值必须由块长决定：一块的工作集 = staged（源采样率交错）+ 重采样副本
+        //     + 单声道 + 去直流副本 ≈ 3×块字节数。给 4 倍余量以容纳输出累积器与
+        //     分配器碎片，但绝不允许它随素材长度走。
+        let chunk_bytes = (30.0 * rate as f64) as usize * channels as usize * 4;
+        assert!(
+            long_peak < chunk_bytes * 4,
+            "peak {long_peak} B exceeds the chunk-derived bound {} B",
+            chunk_bytes * 4
+        );
+
+        // (2) 峰值必须**远小于**素材样本量：素材比一块长 8 倍，因此若没有流式化，
+        //     峰值至少要与样本量同量级。
+        assert!(
+            long_peak * 2 < long_source_bytes,
+            "peak {long_peak} B is not well below the {long_source_bytes} B of source samples"
+        );
+
+        // (3) 4 倍素材长度不应带来成比例的峰值增长。输出曲线随长度增长（那是必须
+        //     留下的结果，240 s ≈ 0.5 MB），所以给 1.6 倍余量；线性增长会是 ~4 倍。
+        assert!(
+            long_peak < short_peak * 16 / 10,
+            "peak grew with source length: {short_peak} B -> {long_peak} B"
+        );
+    }
 }
