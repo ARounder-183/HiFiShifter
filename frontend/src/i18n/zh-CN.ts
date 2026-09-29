@@ -1512,6 +1512,8 @@ export const zhCN = {
     appearance_new_theme: "新建主题",
     appearance_import_theme: "导入...",
     appearance_export_theme: "导出",
+    appearance_export_failed: "导出主题文件失败。",
+    appearance_import_failed: "该文件不是有效的主题文件（或无法读取）。",
     appearance_reset_colors: "重置颜色",
     appearance_reset_all_colors: "重置所有颜色",
     appearance_reset_all_colors_confirm:

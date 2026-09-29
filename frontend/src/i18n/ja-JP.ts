@@ -1566,6 +1566,9 @@ export const jaJP = {
     appearance_new_theme: "新規テーマ",
     appearance_import_theme: "インポート...",
     appearance_export_theme: "エクスポート",
+    appearance_export_failed: "テーマファイルの書き出しに失敗しました。",
+    appearance_import_failed:
+        "有効なテーマファイルではありません（読み込めない可能性があります）。",
     appearance_reset_colors: "カラーリセット",
     appearance_reset_all_colors: "すべてのカラーをリセット",
     appearance_reset_all_colors_confirm:

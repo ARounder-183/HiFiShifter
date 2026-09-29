@@ -1692,6 +1692,8 @@ export const enUS = {
     appearance_new_theme: "New Theme",
     appearance_import_theme: "Import...",
     appearance_export_theme: "Export",
+    appearance_export_failed: "Failed to export the theme file.",
+    appearance_import_failed: "That file is not a valid theme (or could not be read).",
     appearance_reset_colors: "Reset Colors",
     appearance_reset_all_colors: "Reset All Colors",
     appearance_reset_all_colors_confirm:

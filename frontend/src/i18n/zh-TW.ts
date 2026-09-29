@@ -1514,6 +1514,8 @@ export const zhTW = {
     appearance_new_theme: "新建主題",
     appearance_import_theme: "匯入...",
     appearance_export_theme: "匯出",
+    appearance_export_failed: "匯出主題檔案失敗。",
+    appearance_import_failed: "該檔案不是有效的主題檔案（或無法讀取）。",
     appearance_reset_colors: "重設顏色",
     appearance_reset_all_colors: "重設所有顏色",
     appearance_reset_all_colors_confirm:

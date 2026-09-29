@@ -49,9 +49,11 @@ import {
     AppConfirmDialog,
     AppField,
     AppFormSection,
+    AppNoticeDialog,
     AppSegmentedControl,
     AppStatusChip,
 } from "../../ui";
+import { exportThemeJson } from "../../services/api/jsonExport";
 import {
     loadCustomThemes,
     loadAppearance,
@@ -267,6 +269,22 @@ function uniqueSortedStrings(values: Iterable<string>): string[] {
     return [...new Set([...values].map((value) => value.trim()).filter(Boolean))].sort((a, b) =>
         a.localeCompare(b, undefined, { sensitivity: "base" }),
     );
+}
+
+/**
+ * 由主题名得到"可安全落盘的文件主名"。
+ *
+ * 【为什么要过滤】主题名是用户随便起的，可能含路径分隔符（`/`、`\`）或 Windows
+ * 保留字符（`:` `*` `?` `"` `<` `>` `|`）。旧实现只把空白换成下划线，于是叫
+ * 「a/b」的主题会让原生保存对话框把 `b.json` 当成另一个目录下的文件。
+ * 空名/全非法字符时回退到一个固定名（不返回空串，否则后缀会变成纯 `.json`）。
+ */
+function exportFileBaseName(themeName: string): string {
+    const cleaned = themeName
+        .replace(/[\\/:*?"<>|]/g, "_")
+        .replace(/\s+/g, "_")
+        .trim();
+    return cleaned.length > 0 ? cleaned : "hifishifter-theme";
 }
 
 function normalizeFontName(value: string): string {
@@ -499,6 +517,14 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
     const [activeTab, setActiveTab] = useState<SettingsTab>("theme");
     /** 「重置全部颜色」确认框：会丢弃当前所有自定义色覆盖，先确认再执行。 */
     const [resetColorsConfirmOpen, setResetColorsConfirmOpen] = useState(false);
+    /**
+     * 导入 / 导出失败的通知。
+     *
+     * 【为什么必须有】这个面板此前**没有任何提示通道**：导入坏文件静默、导出被
+     * WebView 拦下也静默，用户只知道"不起作用"。提示走 `AppNoticeDialog`（与
+     * 全应用其它通知同一壳），不弹浏览器原生 alert。
+     */
+    const [notice, setNotice] = useState("");
 
     /* ── 本地编辑状态 ── */
     const [accentColor, setAccentColor] = useState<RadixAccentColor>(theme.accentColor);
@@ -816,7 +842,15 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
         [customThemes, activeThemeId],
     );
 
-    const handleExportTheme = useCallback(() => {
+    /**
+     * 导出当前外观为主题 JSON。
+     *
+     * 【为什么不是浏览器下载】此前这里是 `Blob` + 游离 `<a download>` —— 而 wry
+     * （Tauri 的 WebView）默认**拦截页面发起的下载**，于是在应用壳里点「导出」什么
+     * 都不会发生（也没有任何报错）。现在与布局导出共用后端命令：原生保存对话框 +
+     * 后端写文件（见 `services/api/jsonExport.ts`）。
+     */
+    const handleExportTheme = useCallback(async () => {
         const themeData: CustomTheme = {
             id: activeThemeId ?? crypto.randomUUID(),
             name: editThemeName || `${theme.mode === "dark" ? "Dark" : "Light"} Theme`,
@@ -828,13 +862,19 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
             radius,
         };
         const json = exportThemeAsJson(themeData, { accentColor, grayColor, radius });
-        const blob = new Blob([json], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `${themeData.name.replace(/\s+/g, "_")}.json`;
-        a.click();
-        URL.revokeObjectURL(url);
+        setNotice("");
+        try {
+            const result = await exportThemeJson(
+                json,
+                `${exportFileBaseName(themeData.name)}.json`,
+            );
+            // 取消不是错误；只有真正失败才提示。
+            if (!result.ok && !result.canceled) {
+                setNotice(result.error || tf("appearance_export_failed"));
+            }
+        } catch {
+            setNotice(tf("appearance_export_failed"));
+        }
     }, [
         activeThemeId,
         editThemeName,
@@ -844,32 +884,46 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
         accentColor,
         grayColor,
         radius,
+        tf,
     ]);
 
+    /**
+     * 导入主题 JSON。
+     *
+     * 【为什么要提示失败】`importThemeFromJson` 对坏文件返回 `null`，旧实现在那种
+     * 情况下**什么都不做**（静默）—— 用户点完「导入...」选了个文件，界面毫无反应，
+     * 于是"导入不起作用"。失败必须说出来。
+     */
     const handleImportTheme = useCallback(
-        (files: File[]) => {
+        async (files: File[]) => {
             const file = files[0];
             if (!file) return;
-            const reader = new FileReader();
-            reader.onload = () => {
-                const result = importThemeFromJson(reader.result as string);
-                if (result) {
-                    markDraftDirty();
-                    const updated = [...customThemes, result.theme];
-                    setCustomThemes(updated);
-                    saveCustomThemes(updated);
-                    setActiveThemeId(result.theme.id);
-                    setEditColors(result.theme.colors);
-                    setEditWaveform(result.theme.waveformColors);
-                    setEditThemeName(result.theme.name);
-                    if (result.accentColor) setAccentColor(result.accentColor);
-                    if (result.grayColor) setGrayColor(result.grayColor);
-                    if (result.radius) setRadius(result.radius);
-                }
-            };
-            reader.readAsText(file);
+            setNotice("");
+            let text: string;
+            try {
+                text = await file.text();
+            } catch {
+                setNotice(tf("appearance_import_failed"));
+                return;
+            }
+            const result = importThemeFromJson(text);
+            if (!result) {
+                setNotice(tf("appearance_import_failed"));
+                return;
+            }
+            markDraftDirty();
+            const updated = [...customThemes, result.theme];
+            setCustomThemes(updated);
+            saveCustomThemes(updated);
+            setActiveThemeId(result.theme.id);
+            setEditColors(result.theme.colors);
+            setEditWaveform(result.theme.waveformColors);
+            setEditThemeName(result.theme.name);
+            if (result.accentColor) setAccentColor(result.accentColor);
+            if (result.grayColor) setGrayColor(result.grayColor);
+            if (result.radius) setRadius(result.radius);
         },
-        [customThemes, markDraftDirty],
+        [customThemes, markDraftDirty, tf],
     );
 
     const updateColorToken = useCallback(
@@ -1431,6 +1485,17 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                 cancelLabel={tf("cancel")}
                 intent="danger"
                 onConfirm={handleResetColors}
+            />
+
+            {/* 导入 / 导出失败：纯通知（用户唯一能做的就是关闭）。 */}
+            <AppNoticeDialog
+                open={notice.length > 0}
+                onOpenChange={(open) => {
+                    if (!open) setNotice("");
+                }}
+                title={tf("status_error_prefix")}
+                message={notice}
+                closeLabel={tf("ok")}
             />
         </div>
     );

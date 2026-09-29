@@ -177,6 +177,8 @@ export const koKR = {
     appearance_new_theme: "새 테마",
     appearance_import_theme: "가져오기...",
     appearance_export_theme: "내보내기",
+    appearance_export_failed: "테마 파일을 내보내지 못했습니다.",
+    appearance_import_failed: "유효한 테마 파일이 아닙니다(읽을 수 없을 수도 있습니다).",
     appearance_reset_colors: "색상 초기화",
     appearance_reset_all_colors: "모든 색상 초기화",
     appearance_reset_all_colors_confirm:
