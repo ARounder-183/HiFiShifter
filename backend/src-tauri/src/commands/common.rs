@@ -84,6 +84,7 @@ pub(crate) fn render_timeline_to_wav(
             quality_preset: crate::mixdown::QualityPreset::Export,
             cancel_flag: None,
             progress: None,
+            cache_stats: None,
         },
     )
 }

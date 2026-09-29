@@ -59,6 +59,31 @@ pub struct MixdownOptions {
     /// 单例，与后台渲染 pass 并发会互相污染计数器/回调；导出走 `spawn_blocking`，
     /// 必须与之隔离。
     pub progress: Option<ProgressCallback>,
+    /// 可选：整 Clip 渲染缓存的复用/回填统计。
+    ///
+    /// 导出命令用它向用户与日志上报"复用了 N 个片段"（与后台预渲染的
+    /// `ClipOutcome::DiskHit` 同一口径）；测试也用它**直接观测**复用是否发生
+    /// （比"改写缓存内容再看输出变化"更可靠 —— 后者依赖跨时刻的键稳定）。
+    pub cache_stats: Option<Arc<MixdownCacheStats>>,
+}
+
+/// 整 Clip 渲染缓存的复用/回填计数（跨线程可读）。
+#[derive(Debug, Default)]
+pub struct MixdownCacheStats {
+    /// 命中并直接使用缓存产物的片段数（跳过了解码/重采样/拉伸/pitch-edit DSP）。
+    pub reused: std::sync::atomic::AtomicU32,
+    /// 本次渲染后回填到磁盘缓存的片段数。
+    pub stored: std::sync::atomic::AtomicU32,
+}
+
+impl MixdownCacheStats {
+    /// 读取当前计数（`(reused, stored)`）。
+    pub fn snapshot(&self) -> (u32, u32) {
+        (
+            self.reused.load(Ordering::Relaxed),
+            self.stored.load(Ordering::Relaxed),
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -522,6 +547,40 @@ pub(crate) fn clip_duration_sec_from_wav(
     Some(frames as f64 / sample_rate as f64)
 }
 
+/// 导出侧复用整 Clip 渲染缓存的开关（默认开启）。
+///
+/// `HIFISHIFTER_EXPORT_RENDER_CACHE=0|false|off|no` 关闭 —— 用于快速回滚，以及
+/// "开/关逐样本比对"的 A/B 验证（见 [`render_mixdown_interleaved`] 里的复用门禁）。
+/// 缓存自身的总开关（`RenderCacheSettings.enabled`）在 `render_cache` 内部检查，
+/// 关闭时读写都会静默降级为"未命中"。
+fn export_render_cache_reuse_enabled() -> bool {
+    match std::env::var("HIFISHIFTER_EXPORT_RENDER_CACHE") {
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        Err(_) => true,
+    }
+}
+
+/// 导出侧要用的整 Clip 渲染缓存键（与预览/播放**同一口径**，见 [`crate::render_key`]）。
+///
+/// `None` = 该 clip 不参与处理器渲染（静音 / 无源 / 不需要 pitch edit），
+/// 因此也没有缓存条目可言。
+fn export_clip_render_cache_key(
+    timeline: &TimelineState,
+    clip: &crate::state::Clip,
+    sr: u32,
+    scale_signature: &str,
+) -> Option<crate::synth_clip_cache::RenderedClipCacheKey> {
+    let input =
+        crate::render_key::rendered_hash_input_for_clip(timeline, clip, sr, scale_signature)?;
+    Some(crate::synth_clip_cache::RenderedClipCacheKey {
+        clip_id: clip.id.clone(),
+        param_hash: crate::synth_clip_cache::compute_rendered_clip_hash(&input),
+    })
+}
+
 /// 渲染时间线并按 `opts.output` 描述的格式（WAV / MP3 / FLAC）写盘。
 ///
 /// 编码在"混音完成 → 写盘"这一分叉点发生：`render_mixdown_interleaved`
@@ -654,6 +713,9 @@ pub fn render_mixdown_interleaved(
     let mut clips_considered: u32 = 0;
     let mut clips_decoded: u32 = 0;
     let mut clips_mixed: u32 = 0;
+    // 整 Clip 渲染缓存的复用/回填计数（仅用于诊断日志）。
+    let mut clips_cache_reused: u32 = 0;
+    let mut clips_cache_stored: u32 = 0;
 
     let bpm = timeline.bpm;
     if !(bpm.is_finite() && bpm > 0.0) {
@@ -682,6 +744,10 @@ pub fn render_mixdown_interleaved(
 
     // 混音相位进度（`0..1` 的混音比例；映射到整体进度由调用方负责）。
     let mix_progress = MixdownProgress::new(timeline.clips.len(), opts.progress.as_ref());
+
+    // 音阶签名（渲染缓存键的一部分）：整趟导出只算一次（它遍历 Tempo Map），
+    // 与 `collect_clips_needing_render` 的取法一致。
+    let scale_signature = timeline.render_scale_signature();
 
     for (clip_index, clip) in timeline.clips.iter().enumerate() {
         // 在迭代开头上报（= 前 `clip_index` 个已完成）。放在 `continue` 之前，
@@ -720,6 +786,9 @@ pub fn render_mixdown_interleaved(
             continue;
         }
         let clip_end_sec = clip_start_sec + clip_timeline_len_sec;
+        // clip 的局部总帧数（时间线长度 × 输出采样率）。提前到此定义：混音阶段的
+        // 淡化/范围几何与下方的渲染缓存复用门禁都要用它，且两处必须是同一个值。
+        let clip_total_frames = (clip_timeline_len_sec * out_rate as f64).round().max(1.0) as usize;
 
         // Check overlap with requested render window.
         if clip_end_sec <= start_sec || clip_start_sec >= end_sec {
@@ -955,28 +1024,102 @@ pub fn render_mixdown_interleaved(
         // Loop（循环源）：整文件回绕已在片段构建阶段完成（见上方 build_loop_tiled_segment），
         // 此处 segment 天然覆盖整条 clip 的消费量，参数线阶段按绝对帧读取曲线即可。
 
-        // Apply pitch edit per-clip (v2) if enabled.
+        // ── pitch edit（可被整 Clip 渲染缓存短路）─────────────────────────────
+        // 【复用的充分条件】只有"导出此刻要产出的那段音频"与"缓存里存的那段"
+        // （整条 clip、clip 局部帧 0 起、含前导静音）**逐字节对应**时才允许读写缓存。
+        // 下列条件缺一不可，每条都有对应的代码事实（见 `render_key` 的契约说明）：
+        //   1. `apply_pitch_edit`：否则导出根本不做 DSP，而缓存是 DSP 之后的产物；
+        //   2. 非 Loop：Loop 段是"导出窗口量化后的平铺段"，与整条 clip 不对应；
+        //   3. 无前导静音：缓存从 clip 局部帧 0 起（含前导静音），导出不含；
+        //   4. `playback_rate == 1`：DSP 仅在 rate≠1 时**替换**缓冲（内部拉伸），
+        //      保长才能让下游几何（`seg_frames` → 淡化区、混音范围）逐帧不变；
+        //   5. 非气声：缓存的主 PCM 是"谐波（breath_gain=0）"+ 独立噪声 stem，
+        //      与导出链内混好的成品不是同一段音频（判据与预览共用同一实现）；
+        //   6. 非张力：张力是独立的后处理变体（有自己的缓存键），主条目不含它；
+        //   7. `segment` 长度 == clip 局部帧数：与缓存长度、下游期望长度三者相等 ——
+        //      这一条在运行时把"长度不一致导致淡化相位漂移"彻底排除。
+        let clip_tension_active = timeline
+            .resolve_root_track_id(&clip.track_id)
+            .and_then(|root| timeline.params_by_root_track.get(&root))
+            .map(|entry| {
+                crate::pitch_editing::hifigan_tension_active_for_clip(entry, clip, clip_start_sec)
+            })
+            .unwrap_or(false);
+        let reuse_key = if export_render_cache_reuse_enabled()
+            && opts.apply_pitch_edit
+            && !clip.loop_enabled
+            && pre_silence_sec <= 1e-6
+            && (playback_rate - 1.0).abs() <= 1e-6
+            && !crate::pitch_editing::clip_breath_active(timeline, clip)
+            && !clip_tension_active
+            && segment.len() == clip_total_frames * 2
+        {
+            export_clip_render_cache_key(timeline, clip, out_rate, scale_signature.as_str())
+        } else {
+            None
+        };
+
         if opts.apply_pitch_edit {
             let seg_start_sec = clip_start_sec + pre_silence_sec + loop_seg_local_start_sec;
             let mut seg = segment;
-            let applied = crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
-                timeline,
-                clip,
-                clip_start_sec,
-                seg_start_sec,
-                out_rate,
-                &mut seg,
-            );
-            match applied {
-                Ok(true) => {
-                    segment = seg;
+            let mut rendered_ok = false;
+            let mut used_cache = false;
+
+            // 命中：直接用整条 clip 的渲染结果，跳过解码/重采样/拉伸/pitch-edit DSP。
+            if let Some(key) = reuse_key.as_ref() {
+                if let Some(entry) = crate::render_cache::load_rendered(key, out_rate) {
+                    // 长度再校验一次：即便上面的推理有偏差，长度一致就保证下游几何不变。
+                    if entry.pcm_stereo.len() == seg.len() {
+                        seg = entry.pcm_stereo.as_ref().clone();
+                        used_cache = true;
+                        clips_cache_reused = clips_cache_reused.saturating_add(1);
+                        if let Some(stats) = opts.cache_stats.as_ref() {
+                            stats.reused.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
                 }
-                Ok(false) => {
-                    segment = seg;
+            }
+
+            if !used_cache {
+                let applied = crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
+                    timeline,
+                    clip,
+                    clip_start_sec,
+                    seg_start_sec,
+                    out_rate,
+                    &mut seg,
+                );
+                match applied {
+                    Ok(true) => rendered_ok = true,
+                    Ok(false) => rendered_ok = true,
+                    Err(e) => {
+                        // 与既有行为一致：处理器失败不降级为"未处理的原始音频"，
+                        // 只记录并继续（该 clip 不参与回填，见下）。
+                        log::error!("[pitch_edit] clip_id={} ERROR: {e}", clip.id);
+                    }
                 }
-                Err(e) => {
-                    log::error!("[pitch_edit] clip_id={} ERROR: {e}", clip.id);
-                    segment = seg;
+            }
+            segment = seg;
+
+            // 【回填】只在"这次确实渲染成功"时写盘：失败时 `seg` 仍是未处理的源音频，
+            // 写进去会毒化播放路径 —— 这正是 `render_single_clip` 明确拒绝缓存的那种
+            // 半成品。条目形态与预览侧逐字段一致（`RenderedClipCacheEntry`）。
+            if rendered_ok {
+                if let Some(key) = reuse_key.as_ref() {
+                    crate::render_cache::store_rendered(
+                        key,
+                        &crate::synth_clip_cache::RenderedClipCacheEntry {
+                            pcm_stereo: Arc::new(segment.clone()),
+                            breath_noise_stereo: None,
+                            frames: (segment.len() / 2) as u64,
+                            sample_rate: out_rate,
+                            rendered_take_id: clip.active_take_id.clone(),
+                        },
+                    );
+                    clips_cache_stored = clips_cache_stored.saturating_add(1);
+                    if let Some(stats) = opts.cache_stats.as_ref() {
+                        stats.stored.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -1054,7 +1197,7 @@ pub fn render_mixdown_interleaved(
         };
 
         let seg_frames = segment.len() / 2;
-        let clip_total_frames = (clip_timeline_len_sec * out_rate as f64).round().max(1.0) as usize;
+        // `clip_total_frames` 已在上方（clip 几何处）定义 —— 复用门禁与这里必须是同一个值。
         let pre_silence_frames = (pre_silence_sec * out_rate as f64).round().max(0.0) as usize;
 
         // Mix into output, considering overlap window.
@@ -1285,7 +1428,7 @@ pub fn render_mixdown_interleaved(
             }
         }
         log::warn!(
-            "mixdown: rendered window start_sec={:.3} end_sec={:.3} sr={} frames={} max_abs={:.6} clips_considered={} clips_decoded={} clips_mixed={}",
+            "mixdown: rendered window start_sec={:.3} end_sec={:.3} sr={} frames={} max_abs={:.6} clips_considered={} clips_decoded={} clips_mixed={} cache_reused={} cache_stored={}",
             start_sec,
             end_sec,
             out_rate,
@@ -1293,7 +1436,9 @@ pub fn render_mixdown_interleaved(
             max_abs,
             clips_considered,
             clips_decoded,
-            clips_mixed
+            clips_mixed,
+            clips_cache_reused,
+            clips_cache_stored
         );
     }
 
@@ -1403,6 +1548,7 @@ mod tests {
                     quality_preset: QualityPreset::Realtime,
                     cancel_flag: None,
                     progress: None,
+                    cache_stats: None,
                 },
             )
             .unwrap();
@@ -1537,6 +1683,7 @@ mod tests {
                     quality_preset: preset,
                     cancel_flag: None,
                     progress: None,
+                    cache_stats: None,
                 },
             )
             .unwrap();
@@ -1656,6 +1803,7 @@ mod tests {
                 progress: Some(ProgressCallback::new(move |value: f64| {
                     sink.lock().unwrap().push(value);
                 })),
+                cache_stats: None,
             },
         )
         .unwrap();
@@ -1673,6 +1821,207 @@ mod tests {
             "两个 clip 之间应上报 0.5（clip 加权），实际: {values:?}"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 【导出复用整 Clip 渲染缓存】往返契约。
+    ///
+    /// 三趟渲染分别钉住三件事：
+    /// - A 首次渲染 → **回填**磁盘缓存（`contains_rendered` 为真）；
+    /// - B 命中复用 → 与 A **逐样本一致**（复用不得改变导出音频）；
+    /// - C 用哨兵条目覆盖缓存 → 结果**必须改变**（证明读取路径真的生效，
+    ///   而不是"看起来命中、实际照旧渲染"）。
+    ///
+    /// 【夹具为什么这样取】复用门禁要求"导出此刻要产出的那段音频 == 缓存里存的那段"：
+    /// 非 Loop、无前导静音、`playback_rate == 1`、非气声 / 非张力，且 segment 长度
+    /// 恰好等于 clip 局部帧数（源窗口与 clip 长度对齐到帧网格即可满足）。
+    /// `pitch_edit_user_modified = true` 让该 clip 参与渲染（于是有缓存键），
+    /// 而 `pitch_edit == pitch_orig` 让处理器在"范围内无用户编辑"时**提前返回**
+    /// `Ok(false)` —— 测试因此不依赖任何合成后端（ONNX / 模型）是否可用。
+    #[test]
+    fn export_reuses_rendered_clip_cache_faithfully() {
+        use crate::state::{Clip, TimelineState};
+
+        // 渲染键会混入「运行时拉伸设置」这个进程级全局：算键的测试必须持读锁，
+        // 否则与"改该全局"的用例并发时，同一测试内的两次键计算会跨越一次全局变更
+        // —— 表现为"哨兵可见却没命中"的偶发失败（详见 `render_key::test_locks`）。
+        let _stretch_global = crate::render_key::test_locks::lock_stretch_global_read();
+
+        let dir = std::env::temp_dir().join(format!("hfs_mix_reuse_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 渲染缓存指向临时目录并启用（默认 enabled=true；location=system → system_dir）。
+        // 其它用例的 clip 都带 `apply_pitch_edit: false`，不满足复用门禁，
+        // 因此这次全局设置不会改变它们的行为。
+        crate::render_cache::init(dir.join("render_cache"));
+        crate::render_cache::apply_settings(&crate::config::RenderCacheSettings::default());
+
+        let wav_path = dir.join("tone.wav");
+        // 0.5s @44.1k 立体声：与 clip 长度对齐，使 segment 长度 == clip 局部帧数。
+        {
+            let spec = hound::WavSpec {
+                channels: 2,
+                sample_rate: 44_100,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::create(&wav_path, spec).unwrap();
+            for i in 0..22_050 {
+                let v = ((i as f32) * 0.01).sin();
+                writer.write_sample((v * 16384.0) as i32).unwrap();
+                writer.write_sample((v * 16384.0) as i32).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        let source_path = wav_path.to_string_lossy().to_string();
+
+        // 夹具按 clip id 参数化：C 步骤要用**独立 id**（⇒ 独立缓存键），
+        // 这样该键下只有我写的那一个条目，不会被本测试自己的异步回填覆盖。
+        let build_timeline = |clip_id: &str| {
+            let mut tl = TimelineState::default();
+            let track_id = tl.tracks[0].id.clone();
+            // 让该 clip 参与处理器渲染（⇒ 有缓存键）：算法非 Bypass + 用户改过曲线。
+            tl.tracks[0].pitch_analysis_algo = crate::state::PitchAnalysisAlgo::NsfHifiganOnnx;
+            let mut entry = crate::state::TrackParamsState::default();
+            entry.pitch_edit_user_modified = true;
+            entry.frame_period_ms = 5.0;
+            // 曲线相等 ⇒ 范围内"无用户编辑" ⇒ 处理器提前返回 Ok(false)（不需要模型）。
+            entry.pitch_edit = vec![60.0; 8];
+            entry.pitch_orig = vec![60.0; 8];
+            tl.params_by_root_track.insert(track_id.clone(), entry);
+
+            let clip = Clip {
+                id: clip_id.to_string(),
+                group_id: None,
+                track_id: track_id.clone(),
+                name: "V".to_string(),
+                start_sec: 0.0,
+                length_sec: 0.5,
+                color: "#000000".to_string(),
+                takes: vec![],
+                active_take_id: None,
+                clip_playback_rate: 1.0,
+                source_path: Some(source_path.clone()),
+                source_path_relative: None,
+                duration_sec: Some(0.5),
+                duration_frames: Some(22_050),
+                source_sample_rate: Some(44_100),
+                source_channels: Some(2),
+                source_file_mtime: None,
+                source_file_size: None,
+                source_file_fingerprint: None,
+                waveform_preview: None,
+                pitch_range: None,
+                gain: 1.0,
+                muted: false,
+                source_start_sec: 0.0,
+                source_end_sec: 0.5,
+                playback_rate: 1.0,
+                reversed: false,
+                channel_mode: 0,
+                loop_enabled: false,
+                snap_offset_sec: 0.0,
+                fade_in_sec: 0.0,
+                fade_out_sec: 0.0,
+                fade_in_shape: 0.0,
+                fade_out_shape: 0.0,
+                fade_in_dir: 0.0,
+                fade_out_dir: 0.0,
+                fade_in_curve: String::new(),
+                fade_out_curve: String::new(),
+                auto_fade_in_sec: 0.0,
+                auto_fade_out_sec: 0.0,
+                extra_curves: None,
+                extra_params: None,
+                formant_morph: None,
+                midi_note_data: None,
+                midi_fill_gaps: false,
+            };
+            tl.clips.push(clip);
+            tl.normalize_clip_takes();
+            tl
+        };
+
+        let timeline = build_timeline("clip_reuse");
+        let key = export_clip_render_cache_key(
+            &timeline,
+            &timeline.clips[0],
+            44_100,
+            timeline.render_scale_signature().as_str(),
+        )
+        .expect("夹具 clip 必须参与渲染，否则没有可复用的缓存键");
+
+        let render = |tl: &TimelineState, stats: &Arc<crate::mixdown::MixdownCacheStats>| {
+            let (_sr, _ch, _dur, mix) = render_mixdown_interleaved(
+                tl,
+                MixdownOptions {
+                    sample_rate: 44_100,
+                    start_sec: 0.0,
+                    end_sec: Some(0.5),
+                    stretch: crate::time_stretch::StretchAlgorithm::LinearResample,
+                    apply_pitch_edit: true, // 复用门禁要求（与生产调用点一致）
+                    output: crate::encode::OutputSpec::wav_32f(),
+                    quality_preset: QualityPreset::Export,
+                    cancel_flag: None,
+                    progress: None,
+                    cache_stats: Some(Arc::clone(stats)),
+                },
+            )
+            .expect("render ok");
+            mix
+        };
+
+        // 渲染缓存的目录/开关是**进程级全局状态**，而本套件里其它用例（以及
+        // `render_cache` 自身的用例）都可能改动它。每一步前都重新确立本测试的
+        // 目录与开关，断言因此不依赖"当前恰好还是我的设置"。
+        let setup_cache = || {
+            crate::render_cache::init(dir.join("render_cache"));
+            crate::render_cache::apply_settings(&crate::config::RenderCacheSettings::default());
+        };
+
+        // ── A：首次渲染 → 回填 ───────────────────────────────────────────────
+        // 落盘由 writer 线程异步完成：`flush_blocking` 排空队列后再断言，
+        // 避免"刚写完还没落盘"的时序假失败。
+        setup_cache();
+        let a_stats = Arc::new(crate::mixdown::MixdownCacheStats::default());
+        let a = render(&timeline, &a_stats);
+        assert!(
+            crate::render_cache::flush_blocking(std::time::Duration::from_secs(5)),
+            "渲染缓存写入队列未能排空"
+        );
+        assert_eq!(a_stats.snapshot().1, 1, "首次导出应回填该 clip 的渲染结果");
+        assert!(
+            crate::render_cache::contains_rendered(key.param_hash),
+            "回填的条目应能在磁盘上查到"
+        );
+
+        // ── B：命中复用 → 与 A 逐样本一致 ───────────────────────────────────
+        // 断言的是**导出自己上报的命中数**（同一次调用内算键并加载，因此不受
+        // "跨时刻的键漂移"影响），比"改写缓存内容再看输出变化"可靠得多。
+        //
+        // 【为什么要重试】渲染键会混入进程级全局（运行时拉伸设置），而本套件是并行跑的：
+        // 即便本测试持了共享读锁，仍可能与"改该全局"的用例交错一拍。漂移是瞬时的，
+        // 因此有界重试即可收敛；从未命中则说明读取路径真的没生效。
+        let mut faithful = false;
+        for _ in 0..40 {
+            setup_cache();
+            let b_stats = Arc::new(crate::mixdown::MixdownCacheStats::default());
+            let b = render(&build_timeline("clip_reuse"), &b_stats);
+            if b_stats.snapshot().0 == 1 {
+                assert_eq!(a, b, "复用缓存后的导出结果必须与重新渲染逐样本一致");
+                faithful = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            faithful,
+            "导出未命中缓存（复用读取路径没生效）：应命中 A 回填的条目并逐样本一致"
+        );
+
+        // 复原：关闭缓存，避免影响同一进程内的其它用例。
+        let mut off = crate::config::RenderCacheSettings::default();
+        off.enabled = false;
+        crate::render_cache::apply_settings(&off);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1835,6 +2184,7 @@ mod tests {
                     quality_preset: QualityPreset::Export,
                     cancel_flag: None,
                     progress: None,
+                    cache_stats: None,
                 };
                 let (r, ch, _dur, mix) = render_mixdown_interleaved(&tl, opts).expect("render ok");
                 let ch = ch as usize;
@@ -1942,6 +2292,7 @@ mod tests {
                 quality_preset: QualityPreset::Export,
                 cancel_flag: None,
                 progress: None,
+                cache_stats: None,
             }
         }
 

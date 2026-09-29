@@ -1398,28 +1398,11 @@ mod tests {
         RenderedClipHashInput,
     };
 
-    /// 运行时拉伸设置是**进程级全局**（`time_stretch::current_runtime_stretch_settings`），
-    /// 而渲染键会把它混进哈希 —— 同时 `cargo test` 默认多线程并行。
-    ///
-    /// 于是"读全局算哈希"的测试与"改全局"的测试并发时，同一个测试内的两次哈希
-    /// 可能跨越一次全局变更，产生与代码无关的间歇性失败（实测 HEAD 上 5 次运行
-    /// 失败 1 次）。
-    ///
-    /// 约定：凡是**计算渲染键**的测试都持读锁；唯一改写该全局的测试持写锁。
-    /// 读锁之间不互斥，因此不影响并行度。
-    static STRETCH_GLOBAL_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
-
-    fn lock_stretch_global_read() -> std::sync::RwLockReadGuard<'static, ()> {
-        STRETCH_GLOBAL_LOCK
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn lock_stretch_global_write() -> std::sync::RwLockWriteGuard<'static, ()> {
-        STRETCH_GLOBAL_LOCK
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-    }
+    // 运行时拉伸设置是**进程级全局**，而渲染键会把它混进哈希：算键的测试必须持读锁，
+    // 改写该全局的测试持写锁（读锁之间不互斥，因此不影响并行度）。
+    // 锁本身与完整理由见 `crate::render_key::test_locks` —— 该锁上提到那里，
+    // 是为了让**其它模块**（如 `audio::mixdown` 的导出复用往返测试）也能遵守同一约定。
+    use crate::render_key::test_locks::{lock_stretch_global_read, lock_stretch_global_write};
 
     /// 测试夹具：持有全部"按值"输入，供各断言按字段变体构造哈希输入。
     struct Fixture {

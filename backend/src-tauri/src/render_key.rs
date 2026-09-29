@@ -142,6 +142,37 @@ pub(crate) fn rendered_hash_input_for_clip<'a>(
     ))
 }
 
+/// 计算渲染键的测试必须持有的**共享锁**。
+///
+/// 【为什么需要】渲染键会混入「运行时拉伸设置」这个**进程级全局**
+/// （`time_stretch::current_runtime_stretch_settings`），而 `cargo test` 默认多线程并行。
+/// 于是"读全局算键"的测试与"改全局"的测试并发时，同一个测试内的两次键计算可能跨越一次
+/// 全局变更 —— 产生与代码无关的间歇性失败（实测：5 次运行失败 1 次）。
+///
+/// 约定：凡是**计算渲染键**的测试都持读锁（可并发），唯一改写该全局的测试持写锁。
+/// 新增"算键"的测试（如 `audio::mixdown` 的导出复用往返测试）也必须持读锁 ——
+/// 否则会以同样方式偶发失败，且失败信息指向被测代码，极难定位。
+#[cfg(test)]
+pub(crate) mod test_locks {
+    use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+    static STRETCH_GLOBAL_LOCK: RwLock<()> = RwLock::new(());
+
+    /// 读锁：允许并发，但排除"正在改全局"的测试。
+    pub(crate) fn lock_stretch_global_read() -> RwLockReadGuard<'static, ()> {
+        STRETCH_GLOBAL_LOCK
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 写锁：仅"改写运行时拉伸设置"的测试持有。
+    pub(crate) fn lock_stretch_global_write() -> RwLockWriteGuard<'static, ()> {
+        STRETCH_GLOBAL_LOCK
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

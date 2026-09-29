@@ -900,30 +900,16 @@ fn render_single_clip(
     let root_params = clip_root
         .as_ref()
         .and_then(|root| timeline.params_by_root_track.get(root));
-    let effective_extra_params = clip
-        .extra_params
-        .as_ref()
-        .or_else(|| root_params.map(|entry| &entry.extra_params));
     // 气声（HNSEP 分离 + noise stem）只由 NSF-HiGAN 渲染器消费：快照混音
     // （renderer_id == "nsf_hifigan_onnx" 才挂 breath_curve）与
     // track_requests_extra_processing 均按渲染器种类门控。轨道切换算法
     // （如 HiFiGAN → WORLD）不会清空 extra_params，这里若不门控，残留的
     // breath_enabled 会让 WORLD/vslib 渲染白跑一次 HNSEP 推理 —— 其 noise
     // stem 在混音侧永远不会被使用（World 声码器本身也不消费气声参数）。
-    let breath_capable = clip_root
-        .as_ref()
-        .and_then(|root| timeline.tracks.iter().find(|track| &track.id == root))
-        .map(|track| {
-            matches!(
-                crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo),
-                crate::state::SynthPipelineKind::NsfHifiganOnnx
-            )
-        })
-        .unwrap_or(false);
-    let breath_enabled = breath_capable
-        && effective_extra_params
-            .map(|params| crate::pitch_editing::extra_param_enabled(params, "breath_enabled"))
-            .unwrap_or(false);
+    //
+    // 判据的唯一实现见 `clip_breath_active`：导出侧的渲染缓存复用门禁共用它，
+    // 两处必须同口径（漏判会让导出把"谐波 + 独立噪声 stem"的缓存产物当成品复用）。
+    let breath_enabled = crate::pitch_editing::clip_breath_active(timeline, clip);
     let frame_period_ms = root_params
         .map(|entry| entry.frame_period_ms.max(0.1))
         .unwrap_or(5.0);
