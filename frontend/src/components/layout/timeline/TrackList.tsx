@@ -6,12 +6,7 @@ import { Flex, Box, IconButton } from "@radix-ui/themes";
 import { Cross2Icon, PlusIcon } from "@radix-ui/react-icons";
 import { shallowEqual } from "react-redux";
 import type { TrackInfo, TrackMeterInfo } from "../../../features/session/sessionTypes";
-import {
-    isNoneBinding,
-    isModifierActive,
-    selectKeybinding,
-    formatKeybinding,
-} from "../../../features/keybindings/keybindingsSlice";
+import { isNoneBinding, isModifierActive } from "../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../features/keybindings/types";
 import type { MessageKey } from "../../../i18n/messages";
 import { useAppSelector } from "../../../app/hooks";
@@ -29,7 +24,7 @@ import { resolveScrollCommitStepPx, shouldCommitScroll } from "./scrollCommit";
 import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
 import { useAppTheme } from "../../../theme/AppThemeProvider";
 import { AppContextMenu } from "../../../ui/Menu";
-import { AppConfirmDialog, AppSelect } from "../../../ui";
+import { AppConfirmDialog, AppSelect, useMenuShortcut } from "../../../ui";
 
 /** Color palette options shown when creating a new track.
  * 色值选取与归一化带（s 0.30-0.46、感知亮度 0.50-0.60）对齐：暖色系
@@ -523,15 +518,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
     const [listViewportHeight, setListViewportHeight] = useState(0);
 
     // 轨道右键菜单的快捷键提示（随用户在快捷键设置中的自定义绑定实时变化）。
-    const trackAddShortcut = useAppSelector((s) =>
-        formatKeybinding(selectKeybinding(s, "track.add"), ""),
-    );
-    const trackCloneShortcut = useAppSelector((s) =>
-        formatKeybinding(selectKeybinding(s, "track.clone"), ""),
-    );
-    const trackDeleteShortcut = useAppSelector((s) =>
-        formatKeybinding(selectKeybinding(s, "track.delete"), ""),
-    );
+    const trackAddShortcut = useMenuShortcut("track.add");
+    const trackCloneShortcut = useMenuShortcut("track.clone");
+    const trackDeleteShortcut = useMenuShortcut("track.delete");
 
     function commitTrackName() {
         if (!editingTrackId) return;

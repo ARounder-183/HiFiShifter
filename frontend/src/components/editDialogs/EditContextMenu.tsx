@@ -1,17 +1,5 @@
 import { useI18n } from "../../i18n/I18nProvider";
-import { useAppSelector } from "../../app/hooks";
-import { selectKeybinding, formatKeybinding } from "../../features/keybindings/keybindingsSlice";
-import type { ActionId } from "../../features/keybindings/types";
-import { AppContextMenu, type AppMenuItemSpec } from "../../ui/Menu";
-
-/**
- * 读取动作当前生效的快捷键文本（跟随用户在快捷键设置中的自定义绑定）。
- * 未绑定（None binding）时返回 undefined，菜单项不显示快捷键。
- */
-function useMenuShortcut(actionId: ActionId): string | undefined {
-    const kb = useAppSelector((state) => selectKeybinding(state, actionId));
-    return formatKeybinding(kb, "") || undefined;
-}
+import { AppContextMenu, useMenuShortcut, type AppMenuItemSpec } from "../../ui";
 
 interface EditContextMenuProps {
     x: number;

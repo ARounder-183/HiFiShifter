@@ -33,6 +33,7 @@ import React, { useMemo, Profiler } from "react";
 import { Flex } from "@radix-ui/themes";
 import { AppDialog } from "../../ui/Dialog";
 import { AppContextMenu } from "../../ui/Menu";
+import { useMenuShortcut } from "../../ui/useMenuShortcut";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { useAppSelector } from "../../app/hooks";
@@ -493,6 +494,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         y: number;
         path: string;
     } | null>(null);
+    // 该菜单里「打开工程」的快捷键提示（与菜单栏「文件 → 打开工程」同一个动作）。
+    // 取值是原始字符串，因此只有在用户真的改了绑定时才会让本面板重渲染。
+    const openProjectShortcut = useMenuShortcut("project.open");
 
     // ── 1. State / refs / viewport / scroll / 坐标转换 ──────
     /**
@@ -6059,6 +6063,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 {
                                     key: "open-project",
                                     label: t("menu_open_project"),
+                                    shortcut: openProjectShortcut,
                                     onSelect: () =>
                                         emitExternalFileAction(
                                             "openProject",

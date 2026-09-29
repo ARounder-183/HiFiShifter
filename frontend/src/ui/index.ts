@@ -65,6 +65,8 @@ export {
 
 export { useDialogDraft } from "./useDialogDraft";
 
+export { useMenuShortcut } from "./useMenuShortcut";
+
 export { isShortcutSuppressed } from "./shortcutScope";
 
 export { AppListRow, type AppListRowDensity, type AppListRowProps } from "./ListRow";
