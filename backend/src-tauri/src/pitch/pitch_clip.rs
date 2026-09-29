@@ -1,8 +1,8 @@
 use crate::state::{Clip, TimelineState};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-use std::sync::{mpsc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 // ── 全局 clip pitch 分析进度状态 ─────────────────────────────────────────────
@@ -133,7 +133,7 @@ static CLIP_PITCH_CACHE_MAX_ENTRIES: OnceLock<Option<usize>> = OnceLock::new();
 
 const DEFAULT_CLIP_PITCH_CACHE_MAX_ENTRIES: usize = 4096;
 
-fn clip_pitch_cache_max_entries() -> Option<usize> {
+pub fn clip_pitch_cache_max_entries() -> Option<usize> {
     *CLIP_PITCH_CACHE_MAX_ENTRIES.get_or_init(|| {
         let parsed = std::env::var("HIFISHIFTER_CLIP_PITCH_CACHE_MAX_ENTRIES")
             .ok()
@@ -155,6 +155,100 @@ fn global_inflight() -> &'static Mutex<HashSet<String>> {
     GLOBAL_CLIP_PITCH_INFLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+// ── 分析代次（generation）：让在途分析线程在工程切换后自行放弃 ──────────────────
+//
+// 音高分析是"整份源音频解码 + 全量 FCPE 推理"的重活，单条任务在长素材上可达
+// 分钟级。分析线程是游离的（无 JoinHandle），无法 join 或 abort，因此用代次令牌
+// 做协作式取消：切换工程时递增代次，线程在关键节点（拿到结果后、写缓存前）比对
+// 自己出发时的代次，不一致就丢弃结果并退出。
+//
+// 【为什么必须丢弃而不是照常写入】结果缓存的 key 由源文件内容签名派生，新工程里
+// 没有任何 clip 能生成同一个 key —— 照常写入等于往全局缓存塞一条永远不可达、
+// 也无人清理的常驻条目，正是"切换工程后内存不降"的直接来源。
+//
+// 同一模式在 `commands::channel_scan` 里已用于声道扫描（`bump_generation`），此处
+// 保持一致。
+static PITCH_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 递增分析代次：所有已出发的分析线程在下一个检查点放弃结果。
+pub fn bump_pitch_generation() -> u64 {
+    PITCH_GENERATION.fetch_add(1, AtomicOrdering::AcqRel) + 1
+}
+
+/// 当前分析代次。分析线程出发时记录，检查点比对。
+pub fn current_pitch_generation() -> u64 {
+    PITCH_GENERATION.load(AtomicOrdering::Acquire)
+}
+
+fn release_inflight(key: &str) {
+    let mut set = global_inflight().lock().unwrap_or_else(|e| e.into_inner());
+    set.remove(key);
+}
+
+/// 音高分析相关进程级状态的内存快照（诊断用）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PitchCacheMemoryStats {
+    /// 缓存条目数（每个条目 = 一个源文件的全量曲线）。
+    pub entries: usize,
+    /// 全部条目的估算字节数。
+    pub total_bytes: u64,
+    /// 最大单条目的字节数。
+    pub largest_entry_bytes: u64,
+    /// 在途分析任务数。
+    pub inflight: usize,
+}
+
+fn cached_pitch_bytes(entry: &CachedClipPitch) -> u64 {
+    ((entry.midi.len() + entry.level.len()) as u64).saturating_mul(std::mem::size_of::<f32>() as u64)
+}
+
+/// 估算音高分析缓存的驻留内存。
+pub fn pitch_cache_memory_stats() -> PitchCacheMemoryStats {
+    let mut stats = PitchCacheMemoryStats::default();
+    if let Ok(cache) = global_cache().lock() {
+        stats.entries = cache.len();
+        for entry in cache.values() {
+            let bytes = cached_pitch_bytes(entry);
+            stats.total_bytes = stats.total_bytes.saturating_add(bytes);
+            stats.largest_entry_bytes = stats.largest_entry_bytes.max(bytes);
+        }
+    }
+    if let Ok(set) = global_inflight().lock() {
+        stats.inflight = set.len();
+    }
+    stats
+}
+
+/// 清空音高分析的全部进程级状态，返回递增后的分析代次。
+///
+/// 【调用时机】新建/打开工程时必须调用 —— 缓存条目只按源文件内容签名索引，
+/// 跨工程没有语义，留着只会白占内存。用户手动"清空音高缓存"也走这里。
+///
+/// 三步顺序有讲究：
+/// 1. 先递增代次 —— 让在途线程在其后的检查点放弃，避免它们在我们清空之后
+///    又往缓存里写入旧工程的结果（清空与写入的竞态）。
+/// 2. 再清缓存/inflight/文件签名/进度状态。
+/// 3. `shrink_to_fit` 把 HashMap 的桶数组真正交还分配器：长素材下桶数组本身
+///    可能已经涨到数 MB，只 `clear()` 会把它留到进程结束。
+pub fn clear_pitch_analysis_state() -> u64 {
+    let generation = bump_pitch_generation();
+
+    if let Ok(mut cache) = global_cache().lock() {
+        cache.clear();
+        cache.shrink_to_fit();
+    }
+    if let Ok(mut set) = global_inflight().lock() {
+        set.clear();
+        set.shrink_to_fit();
+    }
+    if let Ok(mut sig) = global_file_sig_cache().lock() {
+        sig.clear();
+        sig.shrink_to_fit();
+    }
+    global_batch_state().reset(0);
+
+    generation
+}
 
 fn hz_to_midi(hz: f64) -> f32 {
     if !(hz.is_finite() && hz > 1e-6) {
@@ -695,10 +789,17 @@ pub fn schedule_clip_pitch_jobs(
         log::error!("[pitch_clip] WARNING: app_handle is None, cannot emit events!");
     }
 
+    // 所有 job 共享同一份 timeline 快照。逐 job `tl.clone()` 会为每个待分析 clip
+    // 复制一次 `params_by_root_track` 的全部曲线（长工程下每条曲线可达 MB 级），
+    // 而这些副本会被闭包持有到线程结束 —— 10 个待分析 clip 就是十几份纯曲线副本。
+    // 分析只读 timeline，因此共享一份即可。
+    let tl_shared = Arc::new(tl.clone());
+    let generation = current_pitch_generation();
+
     for job in pending_jobs {
         let tx = engine_tx.clone();
         let app_handle_clone = app_handle.cloned();
-        let tl_clone = tl.clone();
+        let tl_shared = Arc::clone(&tl_shared);
 
         std::thread::spawn(move || {
             // 通知进度：开始分析此 clip
@@ -708,8 +809,24 @@ pub fn schedule_clip_pitch_jobs(
             );
             global_batch_state().set_current(Some(job.clip.name.clone()));
 
-            let analysis =
-                analyze_clip_pitch_and_level(&tl_clone, &job.clip, &job.root_track_id, frame_period_ms);
+            let analysis = analyze_clip_pitch_and_level(
+                &tl_shared,
+                &job.clip,
+                &job.root_track_id,
+                frame_period_ms,
+            );
+
+            // 取消检查：分析期间工程可能已切换（或缓存已被清空）。此时结果属于
+            // 旧工程 —— 既不该写进新工程的全局缓存，也不该再推进旧批次的进度。
+            if current_pitch_generation() != generation {
+                log::warn!(
+                    "[pitch_clip] thread: discarding result for clip '{}' (generation changed)",
+                    job.clip.name
+                );
+                release_inflight(&job.inflight_key);
+                return;
+            }
+
             // 只要拿到电平（或音高）就值得写缓存：DYN 的原声基线独立于声码器。
             let has_data = analysis
                 .as_ref()
@@ -753,9 +870,17 @@ pub fn schedule_clip_pitch_jobs(
             }
 
             // 无论成功与否，先清除 inflight 标记
-            {
-                let mut set = global_inflight().lock().unwrap_or_else(|e| e.into_inner());
-                set.remove(&job.inflight_key);
+            release_inflight(&job.inflight_key);
+
+            // 写缓存前再确认一次代次：进度事件与缓存写入之间仍可能发生工程切换，
+            // 而写入是不可回滚的 —— 一旦写进全局缓存，条目在新工程里既不可达
+            // 也无人清理。
+            if current_pitch_generation() != generation {
+                log::warn!(
+                    "[pitch_clip] thread: skipping cache store for clip '{}' (generation changed)",
+                    job.clip.name
+                );
+                return;
             }
 
             if let Some(analysis) = analysis.filter(|_| has_data) {
@@ -767,14 +892,14 @@ pub fn schedule_clip_pitch_jobs(
                 store_clip_pitch_cache(cached);
                 // 通知引擎缓存已就绪，触发 snapshot rebuild。
                 // 以内容哈希查找所有共享该源文件的 clip，逐一发送通知。
-                let sharing_clip_ids: Vec<String> = tl_clone
+                let sharing_clip_ids: Vec<String> = tl_shared
                     .clips
                     .iter()
                     .filter_map(|c| {
-                        let root = tl_clone
+                        let root = tl_shared
                             .resolve_root_track_id(&c.track_id)
                             .unwrap_or_default();
-                        build_clip_pitch_key(&tl_clone, c, &root, frame_period_ms)
+                        build_clip_pitch_key(&tl_shared, c, &root, frame_period_ms)
                             .filter(|other_ck| other_ck.key == job.ck.key)
                             .map(|_| c.id.clone())
                     })

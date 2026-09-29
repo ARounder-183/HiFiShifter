@@ -860,6 +860,22 @@ pub(super) fn run_timed_auto_backup(
     }
 }
 
+/// 工程切换时按 clip 失效所有派生缓存。
+///
+/// 【为什么必须对**旧**工程的 clip 调用】这些缓存的 key 只含 clip_id（渲染参数进
+/// 哈希，但 map 键本身不含工程身份），条目只在收到该 clip_id 的失效请求时才移除。
+/// 切换工程后旧 clip_id 再不会出现，其渲染 PCM / 共振峰结果只能等 LRU 或字节预算
+/// 压力才被动逐出 —— 长素材下整 clip 渲染 PCM 可达数百 MB。
+///
+/// 【为什么不用"整体清空"代替】`pending_rendered_keys` 的语义要求按需移除：一刀切
+/// 清空会让传输层把已渲染的 clip 视为未渲染而重新冻结（见
+/// `synth_clip_cache::invalidate_clip_all_caches` 的文档注释）。沿用既有按 clip 路径
+/// 即可同时满足"清得干净"与"不误伤垫音语义"。
+fn switch_safety_invalidate_clip_caches(clip_id: &str) {
+    synth_clip_cache::invalidate_clip_all_caches(clip_id);
+    crate::formant_cache::invalidate_formant_cache_for_clip(clip_id);
+}
+
 pub(super) fn new_project(
     state: State<'_, AppState>,
     window: Window,
@@ -869,8 +885,18 @@ pub(super) fn new_project(
     // 同时作废在途的声道扫描：工程文件里 clip/take id 复用是常态，旧工程的
     // 扫描线程若不拦下，会把结论写进新工程的同 id Take。
     crate::commands::channel_scan::bump_generation();
+    // 音高分析缓存（音高曲线 + 逐帧电平）按源文件内容签名索引，跨工程没有语义。
+    // 不清则旧工程的曲线常驻：长素材单条可达数 MB，且条目数上限 4096 —— 这是
+    // "切换工程内存不释放"的主因。此调用同时递增分析代次，让在途线程放弃。
+    crate::commands::pitch_cache::clear_pitch_analysis_caches();
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        // 旧工程的整 clip 渲染缓存也必须失效：`new_project` 此前完全不清理，
+        // 而 `open_project` 只对本工程（新）的 clip id 做失效，方向是反的 ——
+        // 旧 clip_id 再不会收到失效请求，其渲染 PCM 只能等 LRU 压力才逐出。
+        for clip in &tl.clips {
+            switch_safety_invalidate_clip_caches(&clip.id);
+        }
         *tl = crate::state::TimelineState::default();
         state.audio_engine.update_timeline(tl.clone());
     }
@@ -992,11 +1018,21 @@ pub(super) fn open_project(
     // 打开工程时清除所有渲染缓存，确保旧的预渲染结果不会影响新的播放。
     // 这是修复"音高分析未完成时播放导致音高编辑不生效"问题的关键步骤。
     log::warn!("[open_project] Clearing all render caches before loading project...");
+    // 音高分析缓存：按源文件内容签名索引，跨工程没有语义，且单条可达数 MB。
+    // 同时递增分析代次，让仍在为旧工程跑的分析线程放弃结果（否则它们会在
+    // 切换之后往全局缓存里写入一条新工程永远不可达、也无人清理的条目）。
+    crate::commands::pitch_cache::clear_pitch_analysis_caches();
     // hnsep 分离缓存键只含 clip_id+采样率+样本数：换工程后同 id/等长 clip
     // 会命中上一个工程的 stems，必须一并清空（低频操作，整体清空可接受）。
     crate::hnsep_onnx::clear_separation_cache();
-    for clip in &pf.timeline.clips {
-        synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+    // 【方向】必须失效**旧**工程（`state.timeline`）的 clip，而不是即将载入的
+    // `pf.timeline` 的 clip。这些缓存按 clip_id 索引且只在收到失效请求时移除；
+    // 失效新工程的 id 是空操作（新 clip 尚未渲染），旧 id 则永远收不到请求。
+    {
+        let old_timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        for clip in &old_timeline.clips {
+            switch_safety_invalidate_clip_caches(&clip.id);
+        }
     }
 
     {
