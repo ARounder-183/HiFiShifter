@@ -22,6 +22,15 @@ export const CUSTOM_VIBRATO_PREFIX = "custom_";
 /** 系统预设的 id 前缀。 */
 export const BUILTIN_VIBRATO_PREFIX = "builtin.";
 
+/**
+ * 用户自定义预设的数量上限。
+ *
+ * 【为什么要封顶】预设列表随设置整体读写，也在预设菜单里完整铺开。无上限既会
+ * 让菜单比屏幕高，也让"环绕切换预设"失去意义。上限收在前端 —— 后端只做透传
+ * 存储，不重复定义第二份业务规则。
+ */
+export const MAX_VIBRATO_PRESETS = 256;
+
 const WAVE_SHAPES: readonly WaveShape[] = [
     "sine",
     "triangle",

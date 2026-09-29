@@ -151,6 +151,21 @@ import {
 } from "../../components/layout/pianoRoll/paramAxisUnits";
 import type { CustomScalePreset } from "../../utils/customScales";
 import { sanitizeCustomScalePreset } from "../../utils/customScales";
+import {
+    MAX_VIBRATO_PRESETS,
+    isBuiltinVibratoPresetId,
+    sanitizeVibratoPreset,
+} from "../../features/vibrato/vibratoPresets";
+import {
+    activeIdAfterRemoval,
+    cycleVibratoPresetId,
+    reorderUserVibratoPresets,
+} from "../../features/vibrato/vibratoPresetList";
+import {
+    DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
+    SYSTEM_VIBRATO_PRESETS,
+} from "../../features/vibrato/systemPresets";
+import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
 import type { TempoMap } from "../../utils/tempoMap";
 import {
     clampDenominator,
@@ -629,6 +644,26 @@ export interface SessionState {
     };
 
     customScalePresets: CustomScalePreset[];
+
+    /**
+     * 用户自定义颤音预设。系统预设在代码里（`features/vibrato/systemPresets.ts`），
+     * 不在这份列表里 —— 两者合成"可用预设列表"的逻辑见
+     * `features/vibrato/vibratoPresetList.ts`。
+     */
+    vibratoPresets: VibratoPreset[];
+    /** 当前活动颤音预设的 id（系统预设的 `builtin.*` 也合法）。 */
+    activeVibratoPresetId: string;
+    /**
+     * 上一次拖拽调参后的深度 / 速率。
+     *
+     * 【为什么单独存】拖拽时滚轮与方向键会把深度、速率调到预设值之外。把这两个
+     * 数记在这里，下一次用同一预设起手就能从上次停下的位置续；预设本身只在预设
+     * 编辑器里改，不会被拖拽悄悄改写（"预设被改掉了"是这类工具最恼人的错法）。
+     * `null` = 还没调过，用预设自带的值。
+     */
+    lastVibratoDepthCents: number | null;
+    lastVibratoRateHz: number | null;
+
     project: {
         name: string;
         path: string | null;
@@ -746,6 +781,17 @@ export interface SessionState {
 
 function clamp(value: number, minValue: number, maxValue: number): number {
     return Math.min(maxValue, Math.max(minValue, value));
+}
+
+/**
+ * 有限数字原样返回，其余（缺失 / NaN / Infinity）一律收敛成 `null`。
+ *
+ * 用于"可缺省的数值设置"：`undefined` 与 `NaN` 在 Redux 里是两种不同的坏值，
+ * 统一成 `null` 之后下游只需判断一个哨兵。
+ */
+function finiteOrNull(value: unknown): number | null {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
 }
 
 function createId(prefix: string): string {
@@ -2161,6 +2207,10 @@ const initialState: SessionState = {
     },
 
     customScalePresets: [],
+    vibratoPresets: [],
+    activeVibratoPresetId: DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
+    lastVibratoDepthCents: null,
+    lastVibratoRateHz: null,
     project: {
         name: "Untitled",
         path: null,
@@ -2584,6 +2634,67 @@ const sessionSlice = createSlice({
             state.customScalePresets = state.customScalePresets.filter(
                 (preset) => preset.id !== presetId,
             );
+        },
+        /** 新增或覆盖一个用户颤音预设（按 id 匹配）。 */
+        upsertVibratoPreset(state, action: PayloadAction<VibratoPreset>) {
+            const incoming = sanitizeVibratoPreset(action.payload);
+            // 系统预设只能来自代码；混进用户列表会让"只读"失效。
+            if (isBuiltinVibratoPresetId(incoming.id)) return;
+            const idx = state.vibratoPresets.findIndex((preset) => preset.id === incoming.id);
+            if (idx >= 0) {
+                state.vibratoPresets[idx] = incoming;
+                return;
+            }
+            if (state.vibratoPresets.length >= MAX_VIBRATO_PRESETS) return;
+            state.vibratoPresets.push(incoming);
+        },
+        /**
+         * 删除一个用户颤音预设，并把活动 id 迁移到一个仍然存在的预设上。
+         *
+         * 【为什么在这里迁移】活动 id 指向被删的预设会让"当前预设"悬空。迁移
+         * 规则收在 `activeIdAfterRemoval` 里（纯函数、可单测），与预设编辑器
+         * 各自维护一份相比不会漂移。
+         */
+        removeVibratoPreset(state, action: PayloadAction<string>) {
+            const presetId = action.payload;
+            const all = [...SYSTEM_VIBRATO_PRESETS, ...state.vibratoPresets];
+            state.vibratoPresets = state.vibratoPresets.filter((preset) => preset.id !== presetId);
+            state.activeVibratoPresetId = activeIdAfterRemoval(
+                all,
+                state.activeVibratoPresetId,
+                presetId,
+            );
+        },
+        /** 移动用户颤音预设的位置（仅用户段内部）。 */
+        reorderVibratoPreset(state, action: PayloadAction<{ id: string; toIndex: number }>) {
+            state.vibratoPresets = reorderUserVibratoPresets(
+                state.vibratoPresets,
+                action.payload.id,
+                action.payload.toIndex,
+            );
+        },
+        /** 设定当前活动颤音预设。 */
+        setActiveVibratoPreset(state, action: PayloadAction<string>) {
+            state.activeVibratoPresetId = action.payload;
+        },
+        /**
+         * 环绕切换活动颤音预设。
+         *
+         * `delta` 的语义与 `clip.cycleTake`、`layout.focusNext` 一致：一个实现
+         * 同时服务"上一个"与"下一个"。
+         */
+        cycleActiveVibratoPreset(state, action: PayloadAction<1 | -1>) {
+            const all = [...SYSTEM_VIBRATO_PRESETS, ...state.vibratoPresets];
+            const next = cycleVibratoPresetId(all, state.activeVibratoPresetId, action.payload);
+            if (next) state.activeVibratoPresetId = next;
+        },
+        /** 记录上一次拖拽调参的结果（下一次起手从这里续）。 */
+        setLastVibratoAdjust(
+            state,
+            action: PayloadAction<{ depthCents: number | null; rateHz: number | null }>,
+        ) {
+            state.lastVibratoDepthCents = action.payload.depthCents;
+            state.lastVibratoRateHz = action.payload.rateHz;
         },
         togglePlayheadZoom(state) {
             state.playheadZoomEnabled = !state.playheadZoomEnabled;
@@ -3589,6 +3700,18 @@ const sessionSlice = createSlice({
                         sanitizeCustomScalePreset(preset as Partial<CustomScalePreset>),
                     );
                 }
+                // 逐项规整：手改过的配置不能让内核拿到越界或缺失的字段。
+                if (Array.isArray(s.vibratoPresets)) {
+                    state.vibratoPresets = s.vibratoPresets
+                        .map((preset: unknown) => sanitizeVibratoPreset(preset as VibratoPreset))
+                        .filter((preset) => !isBuiltinVibratoPresetId(preset.id))
+                        .slice(0, MAX_VIBRATO_PRESETS);
+                }
+                if (typeof s.activeVibratoPresetId === "string" && s.activeVibratoPresetId) {
+                    state.activeVibratoPresetId = s.activeVibratoPresetId;
+                }
+                state.lastVibratoDepthCents = finiteOrNull(s.lastVibratoDepthCents);
+                state.lastVibratoRateHz = finiteOrNull(s.lastVibratoRateHz);
             })
 
             .addCase(loadDefaultModel.pending, (state) =>
@@ -6338,6 +6461,12 @@ export const {
     setScaleHighlightMode,
     upsertCustomScalePreset,
     removeCustomScalePreset,
+    upsertVibratoPreset,
+    removeVibratoPreset,
+    reorderVibratoPreset,
+    setActiveVibratoPreset,
+    cycleActiveVibratoPreset,
+    setLastVibratoAdjust,
     toggleLockParamLines,
     setMetronomeConfig,
     setSilencePreview,

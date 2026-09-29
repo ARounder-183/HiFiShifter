@@ -103,6 +103,13 @@ export const persistUiSettings = createAsyncThunk(
             lineVibratoDragDirection: s.lineVibratoDragDirection,
             smoothnessPercent: s.edgeSmoothnessPercent,
             customScalePresets: s.customScalePresets,
+            // `null` 在线上格式里表示"没设过"，因此转成 `undefined` 让字段整个
+            // 缺席，而不是写一个 `null` 回去（后端那两个字段是 Option<f64>，
+            // 但缺席更贴合"用户从没调过"的语义）。
+            vibratoPresets: s.vibratoPresets,
+            activeVibratoPresetId: s.activeVibratoPresetId,
+            lastVibratoDepthCents: s.lastVibratoDepthCents ?? undefined,
+            lastVibratoRateHz: s.lastVibratoRateHz ?? undefined,
         });
     },
 );

@@ -15,6 +15,7 @@ import {
 import {
     dedupeVibratoPresets,
     isBuiltinVibratoPresetId,
+    MAX_VIBRATO_PRESETS,
     sanitizeVibratoPreset,
 } from "./vibratoPresets";
 import type { VibratoPreset } from "./vibratoTypes";
@@ -46,7 +47,9 @@ export function resolveVibratoPresets(
         (userPresets ?? [])
             .map((preset) => sanitizeVibratoPreset(preset))
             .filter((preset) => !isBuiltinVibratoPresetId(preset.id) && !systemIds.has(preset.id)),
-    );
+        // 手改过的配置可能远超上限：这里截断而不是照单全收，避免
+        // 把一份病态配置一路拖进菜单与渲染。
+    ).slice(0, MAX_VIBRATO_PRESETS);
     return { system, user, all: [...system, ...user] };
 }
 

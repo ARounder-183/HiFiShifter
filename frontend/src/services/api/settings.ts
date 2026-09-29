@@ -2,6 +2,7 @@ import { invoke } from "../invoke";
 import type { NotebookSettings } from "../../components/layout/notebook/notebookSettings";
 import type { DockPersistedSettings } from "../../features/dock/dockSettings";
 import type { TimelineSnapSettings } from "../../features/session/sessionTypes";
+import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
 
 export type StretchAlgorithmOption = "linear" | "signalsmith" | "soundtouch";
 
@@ -248,6 +249,21 @@ export interface UiSettings {
         name: string;
         notes: number[];
     }>;
+    /**
+     * 用户自定义颤音预设。
+     *
+     * 元素类型复用 `features/vibrato` 里的 `VibratoPreset`（而非就地写一份
+     * 结构相同的匿名类型）：它同时被生成内核、预设编辑器与切片消费，抄一份
+     * 出来必然漂移。名字字段一律 camelCase，与后端
+     * `vibrato::VibratoPreset` 的 `rename_all = "camelCase"` 对应。
+     */
+    vibratoPresets?: VibratoPreset[];
+    /** 当前活动颤音预设的 id（系统预设的 `builtin.*` 也合法）。 */
+    activeVibratoPresetId?: string;
+    /** 上一次拖拽调参后的深度（cents）。 */
+    lastVibratoDepthCents?: number;
+    /** 上一次拖拽调参后的速率（Hz）。 */
+    lastVibratoRateHz?: number;
 }
 
 /** 导入声道处理策略的总模式。 */
