@@ -226,7 +226,7 @@ fn is_clip_pitch_analysis_ready(
         return false;
     };
     // 检查 clip_pitch（原始 MIDI 曲线）是否已分析
-    let clip_pitch = crate::pitch_clip::get_or_compute_clip_pitch_midi_global(
+    let clip_pitch = crate::pitch_clip::get_clip_pitch_midi_global(
         timeline,
         clip,
         &clip_root,

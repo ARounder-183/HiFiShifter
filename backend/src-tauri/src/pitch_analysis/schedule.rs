@@ -228,8 +228,8 @@ pub(crate) fn assemble_pitch_orig_from_cache(
 
         // ── 音频 clip 路径：从缓存获取 FCPE 分析结果 ──
         let root = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
-        let cached =
-            match crate::pitch_clip::get_or_compute_clip_pitch_midi_global(tl, clip, &root, fp) {
+        let midi_curve =
+            match crate::pitch_clip::get_clip_pitch_midi_global(tl, clip, &root, fp) {
                 Some(c) => c,
                 None => {
                     all_cache_hit = false;
@@ -256,9 +256,9 @@ pub(crate) fn assemble_pitch_orig_from_cache(
                 // 全量源音频曲线）。此前回退值是 1 —— 所有帧都映射到第 0 帧，
                 // 曲线塌缩成恒定音高；缓存为空时更会直接越界 panic。
                 let n_frames = media_total
-                    .map(|total| (((total * 1000.0) / fp).round() as usize).min(cached.midi.len()))
+                    .map(|total| (((total * 1000.0) / fp).round() as usize).min(midi_curve.len()))
                     .filter(|n| *n > 0)
-                    .unwrap_or(cached.midi.len());
+                    .unwrap_or(midi_curve.len());
                 // 正放锚点用**原始** source_start_sec（可为负，floor_mod 环绕），
                 // 与音频回绕（mix/snapshot/mixdown）保持一致。
                 let anchor_f = ((clip.source_start_sec * 1000.0) / fp).round() as i64;
@@ -268,7 +268,7 @@ pub(crate) fn assemble_pitch_orig_from_cache(
                     .source_end_sec
                     .min(media_total.unwrap_or(f64::INFINITY));
                 let anchor_r = ((end_eff * 1000.0) / fp).round() as i64;
-                if write_len > 0 && !cached.midi.is_empty() {
+                if write_len > 0 && !midi_curve.is_empty() {
                     let n_frames = n_frames.max(1);
                     let dst_slice = &mut out[clip_start_frame..clip_start_frame + write_len];
                     for (i, dst) in dst_slice.iter_mut().enumerate() {
@@ -278,7 +278,7 @@ pub(crate) fn assemble_pitch_orig_from_cache(
                             anchor_f + i as i64
                         };
                         let idx = idx_i.rem_euclid(n_frames as i64) as usize;
-                        let pitch = cached.midi[idx];
+                        let pitch = midi_curve[idx];
                         *dst = if pitch.is_finite() && pitch > 0.0 {
                             pitch
                         } else {
@@ -295,7 +295,7 @@ pub(crate) fn assemble_pitch_orig_from_cache(
                 let pr_valid = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
                 let (win_start_sec, win_end_sec) = crate::state::clip_pitch_trim_window_sec(clip);
                 let mut mapped = crate::pitch_clip::assemble_nonloop_pitch_from_window(
-                    &cached.midi,
+                    &midi_curve,
                     fp,
                     win_start_sec,
                     win_end_sec,
@@ -324,7 +324,7 @@ pub(crate) fn assemble_pitch_orig_from_cache(
             // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]。
             let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
             let mut resampled = crate::pitch_clip::trim_and_resample_midi(
-                &cached.midi,
+                &midi_curve,
                 fp,
                 trim_src_start,
                 trim_src_end,

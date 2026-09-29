@@ -81,7 +81,7 @@ pub(super) fn get_pitch_cache_stats(
     let stats = crate::pitch_clip::pitch_cache_memory_stats();
     PitchCacheStatsPayload {
         cached_clips: stats.entries,
-        total_capacity: crate::pitch_clip::clip_pitch_cache_max_entries().unwrap_or(0),
+        total_capacity: crate::pitch_clip::clip_pitch_cache_entry_limit().unwrap_or(0),
         total_bytes: stats.total_bytes,
         largest_entry_bytes: stats.largest_entry_bytes,
         cache_hit_rate: None,

@@ -1,3 +1,4 @@
+use crate::audio_engine::byte_budget_cache::ByteBudgetCache;
 use crate::state::{Clip, TimelineState};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -127,28 +128,87 @@ pub struct ClipPitchAnalysis {
     pub level: Vec<f32>,
 }
 
-static GLOBAL_CLIP_PITCH_CACHE: OnceLock<Mutex<HashMap<String, CachedClipPitch>>> = OnceLock::new();
+// ── 结果缓存 ─────────────────────────────────────────────────────────────────
+//
+// 每个条目是**整个源文件**的音高 + 电平曲线（全量分析策略：key 只含源文件内容
+// 签名，trim/rate 变化在组装阶段按需截取）。长素材单条可达数 MB，因此缓存必须
+// 同时受"条目数"和"字节数"约束 —— 与仓库里其它 PCM 缓存（`ByteBudgetCache`）
+// 保持同一口径。
+//
+// 【为什么必须是真 LRU】旧实现用 `HashMap` + `keys().take(n)` 驱逐，而
+// `HashMap::keys()` 是哈希序 —— 等于随机驱逐。刚算完的大条目可能立刻被逐出，
+// 而 key 是确定性哈希，下次调度必然 miss 并重新整份解码 + 推理，形成抖动。
+static GLOBAL_CLIP_PITCH_CACHE: OnceLock<Mutex<ClipPitchByteCache>> = OnceLock::new();
 static GLOBAL_CLIP_PITCH_INFLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-static CLIP_PITCH_CACHE_MAX_ENTRIES: OnceLock<Option<usize>> = OnceLock::new();
+static CLIP_PITCH_CACHE_MAX_ENTRIES: OnceLock<usize> = OnceLock::new();
+static CLIP_PITCH_CACHE_BUDGET_BYTES: OnceLock<u64> = OnceLock::new();
 
 const DEFAULT_CLIP_PITCH_CACHE_MAX_ENTRIES: usize = 4096;
+/// 缓存字节预算默认取 PCM 预算的 1/16（默认 1 GB → 64 MB）。
+///
+/// 音高曲线比 PCM 小两个数量级，参照仓库既有比例（formant 取 1/8、合成缓存取
+/// 1/2）取一个更保守的值即可 —— 64 MB 足以容纳数十条长素材的曲线。
+const CLIP_PITCH_CACHE_BUDGET_DIVISOR: u64 = 16;
+/// `HIFISHIFTER_CLIP_PITCH_CACHE_MAX_ENTRIES=0` 语义为"不限条目数"。LruCache 需要
+/// 一个有限容量，用这个足够大的值代替 —— 真正的上限由字节预算把关。
+const UNBOUNDED_ENTRY_CAPACITY: usize = 1 << 20;
 
-pub fn clip_pitch_cache_max_entries() -> Option<usize> {
+fn clip_pitch_cache_max_entries() -> usize {
     *CLIP_PITCH_CACHE_MAX_ENTRIES.get_or_init(|| {
-        let parsed = std::env::var("HIFISHIFTER_CLIP_PITCH_CACHE_MAX_ENTRIES")
+        match std::env::var("HIFISHIFTER_CLIP_PITCH_CACHE_MAX_ENTRIES")
             .ok()
-            .and_then(|raw| raw.trim().parse::<usize>().ok());
-        match parsed {
-            // 0 = disable hard limit (unbounded)
-            Some(0) => None,
-            Some(v) => Some(v.max(1)),
-            None => Some(DEFAULT_CLIP_PITCH_CACHE_MAX_ENTRIES),
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+        {
+            Some(0) => UNBOUNDED_ENTRY_CAPACITY,
+            Some(v) => v.max(1),
+            None => DEFAULT_CLIP_PITCH_CACHE_MAX_ENTRIES,
         }
     })
 }
 
-pub(crate) fn global_cache() -> &'static Mutex<HashMap<String, CachedClipPitch>> {
-    GLOBAL_CLIP_PITCH_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+/// 对外汇报用的条目数上限（`None` = 不限条目数，由字节预算把关）。
+pub fn clip_pitch_cache_entry_limit() -> Option<usize> {
+    let cap = clip_pitch_cache_max_entries();
+    if cap >= UNBOUNDED_ENTRY_CAPACITY {
+        None
+    } else {
+        Some(cap)
+    }
+}
+
+fn clip_pitch_cache_budget_bytes() -> u64 {
+    *CLIP_PITCH_CACHE_BUDGET_BYTES.get_or_init(|| {
+        let mb = std::env::var("HIFISHIFTER_PITCH_CACHE_BUDGET_MB")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|v| *v > 0);
+        match mb {
+            Some(mb) => mb.saturating_mul(1024 * 1024),
+            None => {
+                (crate::audio_engine::byte_budget_cache::env_cache_budget_bytes()
+                    / CLIP_PITCH_CACHE_BUDGET_DIVISOR)
+                    .max(1024 * 1024)
+            }
+        }
+    })
+}
+
+/// 缓存条目权重：两份 f32 曲线 + key 字符串。
+fn cached_pitch_bytes(entry: &CachedClipPitch) -> u64 {
+    ((entry.midi.len() + entry.level.len()) as u64)
+        .saturating_mul(std::mem::size_of::<f32>() as u64)
+        .saturating_add(entry.key.len() as u64)
+}
+
+type ClipPitchByteCache = ByteBudgetCache<String, CachedClipPitch>;
+
+pub(crate) fn global_cache() -> &'static Mutex<ClipPitchByteCache> {
+    GLOBAL_CLIP_PITCH_CACHE.get_or_init(|| {
+        Mutex::new(ByteBudgetCache::new(
+            clip_pitch_cache_max_entries(),
+            clip_pitch_cache_budget_bytes(),
+        ))
+    })
 }
 
 fn global_inflight() -> &'static Mutex<HashSet<String>> {
@@ -198,19 +258,14 @@ pub struct PitchCacheMemoryStats {
     pub inflight: usize,
 }
 
-fn cached_pitch_bytes(entry: &CachedClipPitch) -> u64 {
-    ((entry.midi.len() + entry.level.len()) as u64).saturating_mul(std::mem::size_of::<f32>() as u64)
-}
-
 /// 估算音高分析缓存的驻留内存。
 pub fn pitch_cache_memory_stats() -> PitchCacheMemoryStats {
     let mut stats = PitchCacheMemoryStats::default();
     if let Ok(cache) = global_cache().lock() {
         stats.entries = cache.len();
-        for entry in cache.values() {
-            let bytes = cached_pitch_bytes(entry);
-            stats.total_bytes = stats.total_bytes.saturating_add(bytes);
-            stats.largest_entry_bytes = stats.largest_entry_bytes.max(bytes);
+        stats.total_bytes = cache.total_bytes();
+        for (_, entry) in cache.iter() {
+            stats.largest_entry_bytes = stats.largest_entry_bytes.max(cached_pitch_bytes(entry));
         }
     }
     if let Ok(set) = global_inflight().lock() {
@@ -224,18 +279,13 @@ pub fn pitch_cache_memory_stats() -> PitchCacheMemoryStats {
 /// 【调用时机】新建/打开工程时必须调用 —— 缓存条目只按源文件内容签名索引，
 /// 跨工程没有语义，留着只会白占内存。用户手动"清空音高缓存"也走这里。
 ///
-/// 三步顺序有讲究：
-/// 1. 先递增代次 —— 让在途线程在其后的检查点放弃，避免它们在我们清空之后
-///    又往缓存里写入旧工程的结果（清空与写入的竞态）。
-/// 2. 再清缓存/inflight/文件签名/进度状态。
-/// 3. `shrink_to_fit` 把 HashMap 的桶数组真正交还分配器：长素材下桶数组本身
-///    可能已经涨到数 MB，只 `clear()` 会把它留到进程结束。
+/// 顺序有讲究：**先递增代次**，让在途线程在其后的检查点放弃；否则它们会在我们
+/// 清空之后又把旧工程的结果写回来（清空与写入的竞态）。
 pub fn clear_pitch_analysis_state() -> u64 {
     let generation = bump_pitch_generation();
 
     if let Ok(mut cache) = global_cache().lock() {
         cache.clear();
-        cache.shrink_to_fit();
     }
     if let Ok(mut set) = global_inflight().lock() {
         set.clear();
@@ -534,58 +584,53 @@ fn build_clip_pitch_key(
     })
 }
 
-/// 查询 clip 分析缓存（音高 + 电平，同一条目）。
-/// - 缓存命中：直接返回 `Some`。
-/// - 缓存未命中：**不再同步计算**，直接返回 `None`。
-///   调用方应提前通过 `schedule_clip_pitch_jobs` 触发异步预计算。
-pub fn get_clip_analysis_global(
+/// 查询 clip 的**逐帧电平**缓存（DYN 的原声基线）。
+///
+/// 只克隆 `level`：调用方（`dyn_analysis`）不需要音高。旧实现把整个条目
+/// （音高 + 电平两份全长曲线）克隆出去，长素材上每次组装都要白白多拷一份
+/// 数 MB 的曲线。也**不**在未命中时同步计算 —— 调用方应提前通过
+/// `schedule_clip_pitch_jobs` 触发异步预计算。
+pub fn get_clip_level_global(
     tl: &TimelineState,
     clip: &Clip,
     root_track_id: &str,
     frame_period_ms: f64,
-) -> Option<CachedClipPitch> {
+) -> Option<Vec<f32>> {
     let ck = build_clip_pitch_key(tl, clip, root_track_id, frame_period_ms)?;
-
-    let cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
-    // 以内容哈希为 key 查找——相同源文件的多个 clip 共享同一缓存条目。
-    if let Some(found) = cache.get(&ck.key) {
-        return Some(found.clone());
-    }
-    // 缓存未命中，返回 None，等待异步预计算完成后由 ClipPitchReady 触发 snapshot rebuild。
-    None
+    let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
+    // 以内容哈希为 key 查找 —— 相同源文件的多个 clip 共享同一缓存条目。
+    cache
+        .get(&ck.key)
+        .filter(|cached| !cached.level.is_empty())
+        .map(|cached| cached.level.clone())
 }
 
-/// 查询 clip pitch MIDI 缓存（`get_clip_analysis_global` 的音高专用视图：
-/// 缓存命中但音高缺失时返回 None）。
-pub fn get_or_compute_clip_pitch_midi_global(
+/// 查询 clip 的音高（MIDI）缓存。缓存命中但音高缺失（FCPE 不可用时仍会缓存电平）
+/// 时返回 `None`。
+///
+/// 只克隆 `midi`，理由同 [`get_clip_level_global`]。
+pub fn get_clip_pitch_midi_global(
     tl: &TimelineState,
     clip: &Clip,
     root_track_id: &str,
     frame_period_ms: f64,
-) -> Option<CachedClipPitch> {
-    get_clip_analysis_global(tl, clip, root_track_id, frame_period_ms)
+) -> Option<Vec<f32>> {
+    let ck = build_clip_pitch_key(tl, clip, root_track_id, frame_period_ms)?;
+    let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
+    cache
+        .get(&ck.key)
         .filter(|cached| !cached.midi.is_empty())
+        .map(|cached| cached.midi.clone())
 }
 
 /// 将计算结果写入全局缓存（供异步 worker 调用）。
 /// 以内容哈希（`cached.key`）为 key，相同源文件的多个 clip 共享同一条目。
 fn store_clip_pitch_cache(cached: CachedClipPitch) {
     let content_key = cached.key.clone();
+    let weight = cached_pitch_bytes(&cached);
     let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
-    cache.insert(content_key, cached);
-
-    if let Some(max_entries) = clip_pitch_cache_max_entries() {
-        if cache.len() > max_entries {
-            let keys: Vec<String> = cache
-                .keys()
-                .take(cache.len().saturating_sub(max_entries))
-                .cloned()
-                .collect();
-            for k in keys {
-                cache.remove(&k);
-            }
-        }
-    }
+    // 逐出由 `ByteBudgetCache` 按真 LRU + 字节预算处理（见缓存定义的注释）。
+    cache.insert(content_key, cached, weight);
 }
 
 /// 遍历 timeline 中所有可见 clip，对缓存未命中的 clip 异步提交分析任务
@@ -1526,7 +1571,7 @@ pub fn invalidate_clip_pitch_cache(tl: &TimelineState, clip: &Clip) {
         return;
     };
     let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
-    cache.remove(&ck.key);
+    cache.pop(&ck.key);
 }
 
 /// 清除指定 clip 对应源文件的 inflight 标记。
@@ -1556,8 +1601,10 @@ pub fn get_clips_for_root<'a>(tl: &'a TimelineState, root_track_id: &str) -> Vec
 #[cfg(test)]
 mod tests {
     use super::{
-        assemble_nonloop_pitch_from_window, compute_frame_levels, dyn_needs_level_analysis,
-        dyn_panel_open_roots, trim_and_resample_midi,
+        assemble_nonloop_pitch_from_window, cached_pitch_bytes, clip_pitch_cache_budget_bytes,
+        clip_pitch_cache_entry_limit, clip_pitch_cache_max_entries, compute_frame_levels,
+        dyn_needs_level_analysis, dyn_panel_open_roots, global_cache, trim_and_resample_midi,
+        CachedClipPitch, UNBOUNDED_ENTRY_CAPACITY,
     };
 
     /// Loop + 媒体时长未知 + 环绕窗口（start > end，split 产生）：
@@ -1818,5 +1865,49 @@ mod tests {
             !dyn_needs_level_analysis(&tl, "root"),
             "面板关闭后应停止分析"
         );
+    }
+
+    // ── Phase 3：结果缓存的字节预算 / 容量接线 ─────────────────────────────
+
+    /// 条目权重必须同时计入音高与电平两份曲线 —— 只算一份会让字节预算低估一半，
+    /// 长素材下预算形同虚设。
+    #[test]
+    fn cache_entry_weight_counts_both_curves() {
+        let entry = CachedClipPitch {
+            key: "abcdefgh".to_string(),
+            midi: vec![0.0; 100],
+            level: vec![0.0; 50],
+        };
+        assert_eq!(cached_pitch_bytes(&entry), (150 * 4) + 8);
+    }
+
+    /// 字节预算必须是一个有限的、远小于 PCM 预算的值 —— 无限预算等于没有预算，
+    /// 而接近 PCM 预算又会让音高曲线挤掉真正的大头（渲染 PCM）。
+    #[test]
+    fn cache_budget_is_bounded_and_below_the_pcm_budget() {
+        let pitch_budget = clip_pitch_cache_budget_bytes();
+        let pcm_budget = crate::audio_engine::byte_budget_cache::env_cache_budget_bytes();
+        assert!(pitch_budget >= 1024 * 1024, "budget unexpectedly tiny");
+        assert!(
+            pitch_budget < pcm_budget / 2,
+            "pitch budget {pitch_budget} should be a small fraction of the PCM budget {pcm_budget}"
+        );
+    }
+
+    /// `HIFISHIFTER_CLIP_PITCH_CACHE_MAX_ENTRIES=0` 的语义是"不限条目数"，对外
+    /// 汇报应体现为 `None` 而不是一个巨大的魔数。
+    #[test]
+    fn entry_limit_reports_none_for_the_unbounded_sentinel() {
+        match clip_pitch_cache_entry_limit() {
+            Some(cap) => assert!(cap < UNBOUNDED_ENTRY_CAPACITY),
+            None => assert!(clip_pitch_cache_max_entries() >= UNBOUNDED_ENTRY_CAPACITY),
+        }
+    }
+
+    /// 缓存实例必须真的带上字节预算（而不是一个无穷大值）。
+    #[test]
+    fn global_cache_is_wired_to_a_byte_budget() {
+        let cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(cache.budget_bytes(), clip_pitch_cache_budget_bytes());
     }
 }

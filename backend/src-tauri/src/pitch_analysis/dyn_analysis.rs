@@ -106,15 +106,12 @@ pub(crate) fn assemble_dyn_orig_from_cache(
     let mut all_cache_hit = true;
 
     for clip in ordered_clips {
-        let Some(cached) =
-            crate::pitch_clip::get_clip_analysis_global(tl, clip, root_track_id, fp)
+        let Some(level_curve) =
+            crate::pitch_clip::get_clip_level_global(tl, clip, root_track_id, fp)
         else {
             all_cache_hit = false;
             continue;
         };
-        if cached.level.is_empty() {
-            continue;
-        }
 
         let clip_len_sec = clip.length_sec.max(0.0);
         let clip_start_frame = ((clip.start_sec.max(0.0) * 1000.0) / fp).round().max(0.0) as usize;
@@ -131,7 +128,7 @@ pub(crate) fn assemble_dyn_orig_from_cache(
         }
 
         // 全量源域 → clip 可见区间：与音高走同一条映射（窗口/Loop/倒放/rate）。
-        let mapped = map_clip_curve(tl, clip, &cached.level, fp, clip_len_sec, clip_len_frames);
+        let mapped = map_clip_curve(tl, clip, &level_curve, fp, clip_len_sec, clip_len_frames);
         if mapped.is_empty() {
             continue;
         }

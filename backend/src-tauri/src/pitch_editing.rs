@@ -1377,7 +1377,7 @@ pub(crate) fn build_clip_input_pitch_curve(
         Vec::new()
     } else {
         let clip_root = clip_root_track_id(timeline, clip)?;
-        let clip_pitch = crate::pitch_clip::get_or_compute_clip_pitch_midi_global(
+        let clip_pitch = crate::pitch_clip::get_clip_pitch_midi_global(
             timeline,
             clip,
             &clip_root,
@@ -1387,7 +1387,7 @@ pub(crate) fn build_clip_input_pitch_curve(
         // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]。
         let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
         let mut tm = crate::pitch_clip::trim_and_resample_midi(
-            &clip_pitch.midi,
+            &clip_pitch,
             frame_period_ms,
             trim_src_start,
             trim_src_end,
