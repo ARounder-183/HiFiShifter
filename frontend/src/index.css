@@ -412,6 +412,22 @@ textarea {
     scrollbar-color: var(--qt-scrollbar-thumb, #555555) transparent;
 }
 
+/*
+ * 滑块包装盒：把 Radix 滑块头的**装饰溢出**收在自己的盒子里（见 `ui/Slider.tsx`
+ * 的说明）。盒高由组件的 `style.minHeight` 按 Radix 尺寸下发，这里只负责裁切。
+ *
+ * 【为什么是 clip 而不是 hidden】`overflow: hidden` 会把裁切盒卡在 `minHeight`
+ * 上，而焦点环的盒高正好等于它（0 余量，分数 DPR 下可能削掉 1px）；`clip-margin`
+ * 给出 3px 余量，可见部分（轨道 / 滑块头 / 焦点环）全部保留。
+ *
+ * 【删掉这条规则的后果】含滑块的对话框会重新长出那条滚不动的竖直滚动条 ——
+ * 滑块头的装饰是绝对定位的，会被祖先的滚动容器算成可滚动溢出。
+ */
+.hs-slider-box {
+    overflow: clip;
+    overflow-clip-margin: 3px;
+}
+
 /* 隐藏纵向滚动条（保留滚动功能）用于左侧轨道头。
  * 置于 .custom-scrollbar 之后：同类选择器按源序覆盖 scrollbar-width。 */
 .hide-v-scrollbar {
