@@ -393,10 +393,113 @@ fn env_fcpe_fmax(sr: u32) -> f32 {
     })
 }
 
+/// 每次分析都要用到的、只由进程级常量决定的 STFT 前置产物。
+///
+/// `n_fft` / `win_size` 来自 `CACHED_FCPE_*`（env 读一次即固定），因此窗口系数与
+/// FFT plan 在整个进程内只需构建一次。原实现每次推理都 `FftPlanner::new()` +
+/// `hann_window()` 重建，分块后每 30 s 调一次，属于纯浪费。
+struct MelStftPlan {
+    n_fft: usize,
+    win_size: usize,
+    window: Arc<Vec<f32>>,
+    fft: Arc<dyn rustfft::Fft<f32>>,
+}
+
+static MEL_STFT_PLAN: OnceLock<Mutex<Option<Arc<MelStftPlan>>>> = OnceLock::new();
+
+fn mel_stft_plan_cached(n_fft: usize, win_size: usize) -> Arc<MelStftPlan> {
+    let slot = MEL_STFT_PLAN.get_or_init(|| Mutex::new(None));
+    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(plan) = guard.as_ref() {
+        if plan.n_fft == n_fft && plan.win_size == win_size {
+            // 取 Arc 后即释放锁：整段 mel 计算不该被这把锁串行化。
+            return Arc::clone(plan);
+        }
+    }
+    let mut planner = FftPlanner::<f32>::new();
+    let plan = Arc::new(MelStftPlan {
+        n_fft,
+        win_size,
+        window: Arc::new(crate::mel_utils::hann_window(win_size)),
+        fft: planner.plan_fft_forward(n_fft),
+    });
+    *guard = Some(Arc::clone(&plan));
+    plan
+}
+
+/// mel 滤波bank，展平为行主序 `[n_mels × n_freqs]`。
+///
+/// 同样只由进程级常量决定，构建一次即可。展平（而非保留 `Array2`）是为了让
+/// "某一 mel 带与功率谱的点积"退化成一次连续切片的 zip 求和 —— `Array2` 的
+/// `[[m, f]]` 逐元素索引在 128 × 513 的双重循环里无法向量化。
+struct MelFilterbank {
+    sr: u32,
+    n_fft: usize,
+    n_mels: usize,
+    fmin: f32,
+    fmax: f32,
+    flat: Arc<Vec<f32>>,
+}
+
+static MEL_FILTERBANK: OnceLock<Mutex<Option<MelFilterbank>>> = OnceLock::new();
+
+fn mel_filterbank_cached(
+    sr: u32,
+    n_fft: usize,
+    n_mels: usize,
+    fmin: f32,
+    fmax: f32,
+) -> Arc<Vec<f32>> {
+    let slot = MEL_FILTERBANK.get_or_init(|| Mutex::new(None));
+    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(cached) = guard.as_ref() {
+        if cached.sr == sr
+            && cached.n_fft == n_fft
+            && cached.n_mels == n_mels
+            && cached.fmin == fmin
+            && cached.fmax == fmax
+        {
+            return Arc::clone(&cached.flat);
+        }
+    }
+    let n_freqs = n_fft / 2 + 1;
+    let bank = crate::mel_utils::mel_filterbank_slaney(sr, n_fft, n_mels, fmin, fmax);
+    let mut flat = Vec::with_capacity(n_mels * n_freqs);
+    for m in 0..n_mels {
+        for f in 0..n_freqs {
+            flat.push(bank[[m, f]]);
+        }
+    }
+    let flat = Arc::new(flat);
+    *guard = Some(MelFilterbank {
+        sr,
+        n_fft,
+        n_mels,
+        fmin,
+        fmax,
+        flat: Arc::clone(&flat),
+    });
+    flat
+}
+
+/// 计算 log-mel 频谱，返回 `(mel, n_frames)`。
+///
+/// `time_major` 决定输出布局：`true` → `[n_frames × n_mels]`（一帧的 mel 连续），
+/// `false` → `[n_mels × n_frames]`。由调用方按模型期望的输入轴直接索取，因此
+/// `[B,T,M]` 的模型不再需要一次整块转置拷贝。
+///
+/// ## 为什么按帧融合，而不是先算整张频谱再乘 bank
+///
+/// 原实现先把功率谱写进一张 `n_freqs × n_frames`（= 513 × T）矩阵，第二遍才乘
+/// 滤波bank。那张矩阵是分析期单项最大的分配：16 kHz / hop 160 下 1 小时素材是
+/// 36 万帧 → 513 × 360k × 4B ≈ **739 MB**；而它每一列（一帧）算完即被消费、
+/// 从不回看。融合后只需 `n_freqs` 长度的功率 scratch，内存与素材长度彻底解耦，
+/// 顺带消除了"逐帧跨 513 行跳写"的糟糕缓存局部性。
 fn build_mel_from_waveform(
     waveform: &[f32],
     in_sr: u32,
     n_mels: usize,
+    time_major: bool,
 ) -> Result<(Vec<f32>, usize), String> {
     let target_sr = env_fcpe_sr();
     let hop = env_fcpe_hop();
@@ -419,38 +522,46 @@ fn build_mel_from_waveform(
 
     let n_frames = 1 + (y.len().saturating_sub(win_size)) / hop;
     let n_freqs = n_fft / 2 + 1;
-    let window = crate::mel_utils::hann_window(win_size);
-    let fb = crate::mel_utils::mel_filterbank_slaney(target_sr, n_fft, n_mels, fmin, fmax);
 
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_forward(n_fft);
+    let plan = mel_stft_plan_cached(n_fft, win_size);
+    let fb = mel_filterbank_cached(target_sr, n_fft, n_mels, fmin, fmax);
+
     let mut fft_buf = vec![Complex32::new(0.0, 0.0); n_fft];
-    let mut spec = vec![0.0f32; n_freqs * n_frames];
+    // 单帧功率谱 scratch：整段分析里唯一与帧数无关的工作缓冲。
+    let mut power = vec![0.0f32; n_freqs];
+    let mut frame_mel = vec![0.0f32; n_mels];
+    let mut mel = vec![0.0f32; n_mels * n_frames];
 
     for frame in 0..n_frames {
         let start = frame * hop;
         for i in 0..win_size {
-            fft_buf[i] = Complex32::new(y[start + i] * window[i], 0.0);
+            fft_buf[i] = Complex32::new(y[start + i] * plan.window[i], 0.0);
         }
         for c in &mut fft_buf[win_size..] {
             *c = Complex32::new(0.0, 0.0);
         }
-        fft.process(&mut fft_buf);
+        plan.fft.process(&mut fft_buf);
 
-        for f in 0..n_freqs {
+        for (f, p) in power.iter_mut().enumerate() {
             let c = fft_buf[f];
-            spec[f * n_frames + frame] = (c.re * c.re + c.im * c.im).sqrt();
+            *p = (c.re * c.re + c.im * c.im).sqrt();
         }
-    }
 
-    let mut mel = vec![0.0f32; n_mels * n_frames];
-    for m in 0..n_mels {
-        for t in 0..n_frames {
+        for (m, out) in frame_mel.iter_mut().enumerate() {
+            let band = &fb[m * n_freqs..(m + 1) * n_freqs];
             let mut acc = 0.0f32;
-            for f in 0..n_freqs {
-                acc += fb[[m, f]] * spec[f * n_frames + t];
+            for (b, p) in band.iter().zip(power.iter()) {
+                acc += b * p;
             }
-            mel[m * n_frames + t] = (acc.max(1e-9)).ln();
+            *out = (acc.max(1e-9)).ln();
+        }
+
+        if time_major {
+            mel[frame * n_mels..(frame + 1) * n_mels].copy_from_slice(&frame_mel);
+        } else {
+            for (m, v) in frame_mel.iter().enumerate() {
+                mel[m * n_frames + frame] = *v;
+            }
         }
     }
 
@@ -664,18 +775,14 @@ fn run_with_named_inputs(
             let mel_axis = mel_shape.iter().position(|&d| d == 128).unwrap_or(2);
             let n_mels = 128usize;
 
-            let (mel, t) = build_mel_from_waveform(waveform, sample_rate, n_mels)
+            // 直接按模型期望的轴序产出 mel，省掉一次整块转置拷贝。
+            let time_major = mel_axis == 2;
+            let (mel, t) = build_mel_from_waveform(waveform, sample_rate, n_mels, time_major)
                 .map_err(|e| format!("{e}; {io_summary}"))?;
 
-            let mel_tensor = if mel_axis == 2 {
+            let mel_tensor = if time_major {
                 // Model expects [B, T, M] where M=128.
-                let mut btm = vec![0.0f32; t * n_mels];
-                for m in 0..n_mels {
-                    for ti in 0..t {
-                        btm[ti * n_mels + m] = mel[m * t + ti];
-                    }
-                }
-                Tensor::from_array(([1usize, t, n_mels], btm.into_boxed_slice()))
+                Tensor::from_array(([1usize, t, n_mels], mel.into_boxed_slice()))
                     .map_err(|e| format!("build FCPE mel tensor [B,T,M] failed: {e}"))?
             } else {
                 // Fallback to [B, M, T].
@@ -728,17 +835,13 @@ fn run_with_named_inputs(
             let mel_axis = mel_shape.iter().position(|&d| d == 128).unwrap_or(2);
             let n_mels = 128usize;
 
-            let (mel, t) = build_mel_from_waveform(waveform, sample_rate, n_mels)
+            // 同上：按模型期望的轴序直接产出，免去转置拷贝。
+            let time_major = mel_axis == 2;
+            let (mel, t) = build_mel_from_waveform(waveform, sample_rate, n_mels, time_major)
                 .map_err(|e| format!("{e}; {io_summary}"))?;
 
-            let mel_tensor = if mel_axis == 2 {
-                let mut btm = vec![0.0f32; t * n_mels];
-                for m in 0..n_mels {
-                    for ti in 0..t {
-                        btm[ti * n_mels + m] = mel[m * t + ti];
-                    }
-                }
-                Tensor::from_array(([1usize, t, n_mels], btm.into_boxed_slice()))
+            let mel_tensor = if time_major {
+                Tensor::from_array(([1usize, t, n_mels], mel.into_boxed_slice()))
                     .map_err(|e| format!("build FCPE mel tensor [B,T,M] failed: {e}"))?
             } else {
                 Tensor::from_array(([1usize, n_mels, t], mel.into_boxed_slice()))
@@ -925,4 +1028,134 @@ pub fn infer_f0_hz(
         f0_floor,
         f0_ceil,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 融合改造前 `build_mel_from_waveform` 的逐字复制：先把整张功率谱写进
+    /// `n_freqs × n_frames` 矩阵，第二遍才逐 (mel 带, 帧) 乘滤波bank。
+    ///
+    /// 保留它作为行为基准 —— mel 计算的任何改动都必须与此逐位一致，否则
+    /// 音高曲线会整体偏移，而这类偏差极难从听感或 UI 上发现。
+    fn reference_mel_two_pass(waveform: &[f32], in_sr: u32, n_mels: usize) -> (Vec<f32>, usize) {
+        let target_sr = env_fcpe_sr();
+        let hop = env_fcpe_hop();
+        let n_fft = env_fcpe_n_fft();
+        let win_size = env_fcpe_win();
+        let fmin = env_fcpe_fmin();
+        let fmax = env_fcpe_fmax(target_sr);
+
+        let y = crate::mel_utils::linear_resample_mono(waveform, in_sr, target_sr);
+        let pad_left = ((win_size as isize - hop as isize) / 2).max(0) as usize;
+        let pad_right = ((win_size as isize - hop as isize + 1) / 2).max(0) as usize;
+        let y = crate::mel_utils::reflect_pad(&y, pad_left, pad_right);
+        if y.len() < win_size {
+            return (vec![(1e-9f32).ln(); n_mels], 1);
+        }
+
+        let n_frames = 1 + (y.len().saturating_sub(win_size)) / hop;
+        let n_freqs = n_fft / 2 + 1;
+        let window = crate::mel_utils::hann_window(win_size);
+        let fb = crate::mel_utils::mel_filterbank_slaney(target_sr, n_fft, n_mels, fmin, fmax);
+
+        let mut planner = FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(n_fft);
+        let mut fft_buf = vec![Complex32::new(0.0, 0.0); n_fft];
+        let mut spec = vec![0.0f32; n_freqs * n_frames];
+
+        for frame in 0..n_frames {
+            let start = frame * hop;
+            for i in 0..win_size {
+                fft_buf[i] = Complex32::new(y[start + i] * window[i], 0.0);
+            }
+            for c in &mut fft_buf[win_size..] {
+                *c = Complex32::new(0.0, 0.0);
+            }
+            fft.process(&mut fft_buf);
+            for f in 0..n_freqs {
+                let c = fft_buf[f];
+                spec[f * n_frames + frame] = (c.re * c.re + c.im * c.im).sqrt();
+            }
+        }
+
+        let mut mel = vec![0.0f32; n_mels * n_frames];
+        for m in 0..n_mels {
+            for t in 0..n_frames {
+                let mut acc = 0.0f32;
+                for f in 0..n_freqs {
+                    acc += fb[[m, f]] * spec[f * n_frames + t];
+                }
+                mel[m * n_frames + t] = (acc.max(1e-9)).ln();
+            }
+        }
+        (mel, n_frames)
+    }
+
+    fn test_waveform(sr: u32, secs: f32) -> Vec<f32> {
+        let n = (sr as f32 * secs) as usize;
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                // 两个非谐波分量 + 慢速幅度调制：既覆盖安静的窄带，也覆盖
+                // 会让滤波bank 多带同时非零的富谐波情形。
+                (0.6 * (2.0 * std::f32::consts::PI * 220.0 * t).sin()
+                    + 0.3 * (2.0 * std::f32::consts::PI * 1310.0 * t).sin())
+                    * (0.5 + 0.5 * (2.0 * std::f32::consts::PI * 3.0 * t).sin())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fused_mel_is_bit_identical_to_two_pass() {
+        let sr = 44_100u32;
+        let waveform = test_waveform(sr, 0.5);
+        let n_mels = 128usize;
+
+        let (reference, ref_frames) = reference_mel_two_pass(&waveform, sr, n_mels);
+        let (freq_major, fm_frames) = build_mel_from_waveform(&waveform, sr, n_mels, false).unwrap();
+
+        assert_eq!(ref_frames, fm_frames);
+        assert_eq!(reference.len(), freq_major.len());
+        // 融合版对每个 (mel 带, 帧) 仍按 f 升序累加，与两遍版求和顺序一致，
+        // 因此这里要求逐位相同，而不是"近似相等"。
+        assert_eq!(
+            reference, freq_major,
+            "fused mel diverged from the two-pass reference"
+        );
+        assert!(reference.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn time_major_layout_is_the_same_values_transposed() {
+        let sr = 44_100u32;
+        let waveform = test_waveform(sr, 0.5);
+        let n_mels = 128usize;
+
+        let (reference, frames) = reference_mel_two_pass(&waveform, sr, n_mels);
+        let (time_major, tm_frames) = build_mel_from_waveform(&waveform, sr, n_mels, true).unwrap();
+
+        assert_eq!(frames, tm_frames);
+        assert_eq!(time_major.len(), frames * n_mels);
+        for t in 0..frames {
+            for m in 0..n_mels {
+                assert_eq!(
+                    time_major[t * n_mels + m],
+                    reference[m * frames + t],
+                    "time-major value mismatch at (t={t}, m={m})"
+                );
+            }
+        }
+    }
+
+    /// 短于一个 FFT 窗的输入走早退分支，两种布局都必须仍是 `n_mels` 长。
+    #[test]
+    fn too_short_input_returns_single_frame() {
+        let sr = 44_100u32;
+        let waveform = vec![0.1f32; 16];
+        let (mel, frames) = build_mel_from_waveform(&waveform, sr, 128, true).unwrap();
+        assert_eq!(frames, 1);
+        assert_eq!(mel.len(), 128);
+    }
 }
