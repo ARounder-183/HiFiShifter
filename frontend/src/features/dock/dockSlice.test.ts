@@ -91,7 +91,7 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
     // ── 出厂状态：两个主窗体，未 hydrate ─────────────────────────
     {
         const state = reducer(undefined, { type: "@@INIT" });
-        assertEqual(shape(state.layout.tree), "([timeline]|[paramEditor])", "factory layout");
+        assertEqual(shape(state.layout.roots.main), "([timeline]|[paramEditor])", "factory layout");
         assertEqual(state.hydrated, false, "starts unhydrated (the persist gate stays shut)");
         assertEqual(state.settings.dockModifier, DEFAULT_DOCK_SETTINGS.dockModifier, "defaults");
         assertEqual(state.mountedFormIds, [], "nothing mounted before the first visibility pass");
@@ -101,8 +101,9 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
     // ── hydrate：从磁盘恢复布局 + 行为选项 ───────────────────────
     {
         const persisted = {
-            schema: 1,
-            tree: {
+            schema: 2,
+            roots: {
+                main: {
                 t: "split",
                 id: "z1",
                 dir: "row",
@@ -110,6 +111,7 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
                 fixed: { side: "b", px: 380 },
                 a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
                 b: { t: "tabset", id: "z3", tabs: ["fileBrowser", "notebook"], active: "notebook" },
+                },
             },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
@@ -128,12 +130,12 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
         );
         assertEqual(state.hydrated, true, "hydrated flag opens the persist gate");
         assertEqual(
-            shape(state.layout.tree),
+            shape(state.layout.roots.main),
             "([timeline]|[fileBrowser,notebook])",
             "persisted arrangement restored",
         );
         assertEqual(
-            (state.layout.tree as DockSplitNode).fixed,
+            (state.layout.roots.main as DockSplitNode).fixed,
             { side: "b", px: 380 },
             "fixed-width dock restored",
         );
@@ -163,7 +165,7 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
         );
         const opened = reducer(state, openPanel({ panelId: "fileBrowser" }));
         assertEqual(
-            findTabsetOfForm(opened.layout.tree, "fileBrowser")?.tabs,
+            findTabsetOfForm(opened.layout.roots.main, "fileBrowser")?.tabs,
             ["fileBrowser"],
             "opening a panel reuses its canonical form id",
         );
@@ -177,7 +179,7 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
     // ── hydrate：磁盘内容是垃圾 → 出厂布局，且仍然标记已 hydrate ──
     {
         const state = reducer(undefined, hydrateDock({ settings: null, layout: "not a layout" }));
-        assertEqual(shape(state.layout.tree), "([timeline]|[paramEditor])", "garbage falls back");
+        assertEqual(shape(state.layout.roots.main), "([timeline]|[paramEditor])", "garbage falls back");
         assertEqual(state.hydrated, true, "still hydrated so the layout can be re-saved");
     }
 
@@ -188,12 +190,14 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
             hydrateDock({
                 settings: null,
                 layout: {
-                    schema: 1,
-                    tree: {
+                    schema: 2,
+                    roots: {
+                        main: {
                         t: "tabset",
                         id: "z1",
                         tabs: ["timeline", "ghost"],
                         active: "ghost",
+                        },
                     },
                     forms: {
                         timeline: { id: "timeline", panelId: "timeline" },
@@ -202,7 +206,7 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
                 },
             }),
         );
-        assertEqual(shape(state.layout.tree), "[timeline]", "unregistered form dropped");
+        assertEqual(shape(state.layout.roots.main), "[timeline]", "unregistered form dropped");
         assertEqual(state.layout.forms.ghost, undefined, "its record is dropped too");
     }
 
@@ -272,7 +276,7 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
             "still visible while floating",
         );
         assertEqual(
-            findTabsetOfForm(state.layout.tree, "fileBrowser"),
+            findTabsetOfForm(state.layout.roots.main, "fileBrowser"),
             null,
             "removed from the tree",
         );
@@ -288,12 +292,12 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
         let state = reducer(undefined, syncRegisteredPanels());
         // 先把参数编辑器浮走，树上只剩时间轴。
         state = reducer(state, floatForm({ formId: "paramEditor" }));
-        assertEqual(findTabsetOfForm(state.layout.tree, "timeline") !== null, true, "still docked");
+        assertEqual(findTabsetOfForm(state.layout.roots.main, "timeline") !== null, true, "still docked");
         const before = state.layout;
         state = reducer(state, floatForm({ formId: "timeline" }));
         assertEqual(state.layout, before, "the last docked form cannot float");
         assertEqual(
-            findTabsetOfForm(state.layout.tree, "timeline") !== null,
+            findTabsetOfForm(state.layout.roots.main, "timeline") !== null,
             true,
             "and it stays in the tree, not in the float layer",
         );
@@ -391,7 +395,7 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
             "anchored to the lower-right corner",
         );
         assertEqual(
-            findTabsetOfForm(opened.layout.tree, "notebook"),
+            findTabsetOfForm(opened.layout.roots.main, "notebook"),
             null,
             "taking no cell in the layout tree",
         );
@@ -414,7 +418,7 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
             let state = dockedTabsetId();
             state = reducer(state, floatForm({ formId: "notebook" }));
             assertEqual(isFormVisible(state.layout, "notebook"), true, "floating to start with");
-            const target = findTabsetOfForm(state.layout.tree, "timeline");
+            const target = findTabsetOfForm(state.layout.roots.main, "timeline");
             assert(target !== null, "the timeline tab group exists");
             state = reducer(
                 state,
@@ -427,7 +431,7 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
                 "docking a floating form must keep it visible",
             );
             assertEqual(
-                findTabsetOfForm(state.layout.tree, "notebook")?.id,
+                findTabsetOfForm(state.layout.roots.main, "notebook")?.id,
                 target!.id,
                 "and it lands in the requested group",
             );
@@ -454,7 +458,7 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
             let state = reducer(undefined, syncRegisteredPanels());
             state = reducer(state, floatForm({ formId: "notebook" }));
             state = reducer(state, openPanel({ panelId: "fileBrowser" }));
-            const main = findTabsetOfForm(state.layout.tree, "timeline");
+            const main = findTabsetOfForm(state.layout.roots.main, "timeline");
             assert(main !== null, "main group exists");
             state = reducer(
                 state,
@@ -471,11 +475,11 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
         {
             let state = reducer(undefined, syncRegisteredPanels());
             state = reducer(state, floatForm({ formId: "notebook" }));
-            const target = findTabsetOfForm(state.layout.tree, "paramEditor");
+            const target = findTabsetOfForm(state.layout.roots.main, "paramEditor");
             assert(target !== null, "param editor group exists");
             state = reducer(state, toggleTabsetCollapsed({ tabsetId: target!.id }));
             assertEqual(
-                findTabsetOfForm(state.layout.tree, "paramEditor")?.collapsed,
+                findTabsetOfForm(state.layout.roots.main, "paramEditor")?.collapsed,
                 true,
                 "precondition: the target group is collapsed",
             );
@@ -485,7 +489,7 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
             );
             assertEqual(isFormVisible(state.layout, "notebook"), true, "the form is visible");
             assertEqual(
-                findTabsetOfForm(state.layout.tree, "notebook")?.collapsed,
+                findTabsetOfForm(state.layout.roots.main, "notebook")?.collapsed,
                 false,
                 "docking expands the target group",
             );
@@ -496,13 +500,13 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
     {
         let state = reducer(undefined, syncRegisteredPanels());
         state = reducer(state, openPanel({ panelId: "fileBrowser" }));
-        const before = shape(state.layout.tree);
+        const before = shape(state.layout.roots.main);
         state = reducer(state, { type: "dock/focusForm", payload: "timeline" });
         state = reducer(state, toggleMaximizeActive());
-        assertEqual(shape(state.layout.tree), "[timeline]", "maximized to the focused form");
+        assertEqual(shape(state.layout.roots.main), "[timeline]", "maximized to the focused form");
         assert(state.maximized !== null, "previous tree remembered");
         state = reducer(state, toggleMaximizeActive());
-        assertEqual(shape(state.layout.tree), before, "restored exactly");
+        assertEqual(shape(state.layout.roots.main), before, "restored exactly");
         assertEqual(state.maximized, null, "maximize state cleared");
     }
 
@@ -526,7 +530,7 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
             "a panel opened during maximize survives the restore",
         );
         assertEqual(
-            shape(state.layout.tree),
+            shape(state.layout.roots.main),
             "([timeline,fileBrowser]|[paramEditor])",
             "it is re-adopted into the main tabset",
         );
@@ -549,7 +553,7 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
     {
         const state = reducer(undefined, setDockLayout({ schema: 1, tree: { t: "bogus" } }));
         assertEqual(
-            shape(state.layout.tree),
+            shape(state.layout.roots.main),
             "([timeline]|[paramEditor])",
             "invalid layout rejected",
         );
@@ -565,16 +569,16 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
         state = reducer(state, saveDockPreset("mine"));
         assert(state.layout.presets?.["mine"] !== undefined, "preset saved");
         assertEqual(state.layout.activePreset, "mine", "the saved preset becomes active");
-        const presetTree = state.layout.presets!["mine"].tree;
+        const presetTree = state.layout.presets!["mine"].roots.main;
 
         state = reducer(state, resetDockLayout());
-        assertEqual(shape(state.layout.tree), "([timeline]|[paramEditor])", "tree back to factory");
+        assertEqual(shape(state.layout.roots.main), "([timeline]|[paramEditor])", "tree back to factory");
         assert(state.layout.presets?.["mine"] !== undefined, "presets survive the reset");
         assertEqual(state.layout.activePreset, null, "no preset is active after reset");
 
         // 重置后仍能一键回到自己的排布：树与保存时一致，窗体重新可见。
         state = reducer(state, applyDockPreset("mine"));
-        assertEqual(shape(state.layout.tree), shape(presetTree), "preset re-applies its tree");
+        assertEqual(shape(state.layout.roots.main), shape(presetTree), "preset re-applies its tree");
         assertEqual(state.layout.activePreset, "mine", "the re-applied preset is active");
         assert(isFormVisible(state.layout, "fileBrowser"), "the preset's forms are visible");
     }

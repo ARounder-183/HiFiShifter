@@ -18,6 +18,15 @@ export interface DockDropTargetState {
     zoneId: string;
     zone: DockDropZone;
     rect: DockRect;
+    /**
+     * 落点属于**哪棵布局根**（缺省 = 主根）。多根之后提交必须按根改树。
+     */
+    rootId?: string;
+    /**
+     * 非空 = 落点是"拖到这枚**浮窗**上"：松手即组合成面板（目标已是面板则
+     * 停入它的树）。见 `composeFloats`。
+     */
+    floatFormId?: string;
 }
 
 export interface DockDragState {

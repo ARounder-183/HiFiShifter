@@ -18,6 +18,39 @@
     overflow: hidden;
 }
 
+/*
+ * 面板内部的布局根（嵌套停靠区）。
+ *
+ * 【为什么要有一道内描边】嵌套容器与外层标签组唯一的视觉差别是"这里还有一层
+ * 停靠结构"；没有描边时用户分不清"这只是一个标签组"和"这是一个面板"。描边
+ * 走边框变量而不是硬编码色，明暗主题自动成立。主根（data-dock-root-kind="main"）
+ * 不描边 —— 主界面不能再包一层框。
+ */
+.hs-dock-root[data-dock-root-kind="panel"] {
+    border: 1px solid var(--qt-border);
+    border-radius: 4px;
+}
+
+/*
+ * 空面板的占位井。
+ *
+ * 井面同时就是停靠目标（data-dock-root 在它身上），因此整体可接收拖放；
+ * 居中提示文字告诉用户"往里拖就行"。pointer-events 关掉文字的命中 ——
+ * 拖放命中交给井面本身。
+ */
+.hs-dock-root.hs-dock-empty-root {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.hs-dock-empty-hint {
+    color: var(--qt-text-muted);
+    font-size: var(--qt-fs-xs);
+    user-select: none;
+    pointer-events: none;
+}
+
 .hs-dock-split {
     display: flex;
     flex: 1 1 0;
@@ -259,6 +292,15 @@
     height: 100%;
 }
 
+/*
+ * 面板成员的槽位里放的是它自己的布局根（不是宿主 div）：根要撑满槽位，
+ * 且槽位要变成 flex 容器来解释 `flex: 1 1 0`（与 `.hs-dock-pane` 同理）。
+ */
+.hs-dock-slot > .hs-dock-root {
+    position: absolute;
+    inset: 0;
+}
+
 /* ── 浮动窗体 ───────────────────────────────────────────────────── */
 
 .hs-dock-float {
@@ -308,6 +350,7 @@
 
 .hs-dock-float-body {
     position: relative;
+    display: flex;
     flex: 1 1 0;
     min-height: 0;
     overflow: hidden;

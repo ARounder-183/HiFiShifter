@@ -72,13 +72,15 @@ function createTestStore() {
 function seedLayout(store: ReturnType<typeof createTestStore>): void {
     store.dispatch(
         setDockLayout({
-            schema: 1,
-            tree: {
+            schema: 2,
+            roots: {
+                main: {
                 t: "tabset",
                 id: "ts1",
                 tabs: [...TAB_IDS],
                 active: TAB_IDS[0],
                 collapsed: false,
+                },
             },
             forms: Object.fromEntries(
                 TAB_IDS.map((id) => [id, { id, panelId: id, float: null, floating: false }]),
@@ -96,7 +98,7 @@ function seedLayout(store: ReturnType<typeof createTestStore>): void {
  * 测试里同样从 store 取，避免把"props 没更新"这种真实缺陷测没了。
  */
 function Harness() {
-    const node = useSelector((s: TestState) => s.dock.layout.tree) as DockTabsetNode;
+    const node = useSelector((s: TestState) => s.dock.layout.roots.main) as DockTabsetNode;
     return <DockTabBar node={node} onToggleFloat={() => {}} compact={false} tabPosition="top" />;
 }
 
@@ -171,12 +173,12 @@ async function mount(): Promise<Mounted> {
 }
 
 function activeTabId(store: ReturnType<typeof createTestStore>): string {
-    const tree = store.getState().dock.layout.tree as DockTabsetNode;
+    const tree = store.getState().dock.layout.roots.main as DockTabsetNode;
     return tree.active;
 }
 
 function tabIds(store: ReturnType<typeof createTestStore>): string[] {
-    return (store.getState().dock.layout.tree as DockTabsetNode).tabs;
+    return (store.getState().dock.layout.roots.main as DockTabsetNode).tabs;
 }
 
 test("标签组声明为水平 tablist，且只有活动标签在 Tab 停留点上", async () => {

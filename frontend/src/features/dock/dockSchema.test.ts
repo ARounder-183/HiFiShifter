@@ -24,7 +24,7 @@ import {
     addFormToTabset,
 } from "./dockTree.ts";
 import { registerPanel, resetPanelRegistryForTests } from "./panelRegistry.ts";
-import type { DockSplitNode, DockTabsetNode } from "./dockTypes.ts";
+import { DOCK_LAYOUT_SCHEMA, type DockSplitNode, type DockTabsetNode } from "./dockTypes.ts";
 
 function assertEqual<T>(actual: T, expected: T, label: string): void {
     const a = JSON.stringify(actual);
@@ -109,9 +109,9 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
     // ── 出厂布局：上时间轴 / 下参数编辑器，其余面板不预置 ──────────
     {
         const layout = createDefaultDockLayout();
-        assertEqual(shape(layout.tree), "([timeline]|[paramEditor])", "default split");
-        assertEqual((layout.tree as DockSplitNode).dir, "col", "default is a vertical split");
-        assertEqual((layout.tree as DockSplitNode).ratio, 0.6, "timeline keeps 60%");
+        assertEqual(shape(layout.roots.main), "([timeline]|[paramEditor])", "default split");
+        assertEqual((layout.roots.main as DockSplitNode).dir, "col", "default is a vertical split");
+        assertEqual((layout.roots.main as DockSplitNode).ratio, 0.6, "timeline keeps 60%");
         assertEqual(
             Object.keys(layout.forms).sort(),
             ["paramEditor", "timeline"],
@@ -128,7 +128,7 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             ["fileBrowser", "notebook", "opensAsFloat", "paramEditor", "timeline", "undoHistory"],
             "all registered panels get records",
         );
-        assertEqual(shape(layout.tree), "([timeline]|[paramEditor])", "tree untouched");
+        assertEqual(shape(layout.roots.main), "([timeline]|[paramEditor])", "tree untouched");
         assertEqual(isFormVisible(layout, "fileBrowser"), false, "new records start closed");
 
         // ── 声明了 openAsFloating 的面板：**默认仍是关闭**，打开时才浮出 ──
@@ -153,7 +153,7 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
                 "and it is anchored to the lower-right corner",
             );
             assertEqual(
-                findTabsetOfForm(opened.tree, "opensAsFloat"),
+                findTabsetOfForm(opened.roots.main, "opensAsFloat"),
                 null,
                 "a floating panel takes no cell in the layout tree",
             );
@@ -175,8 +175,9 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
     // ── 归一化：剔除未注册面板 ───────────────────────────────────
     {
         const raw = {
-            schema: 1,
-            tree: {
+            schema: 2,
+            roots: {
+                main: {
                 t: "split",
                 id: "z1",
                 dir: "row",
@@ -184,6 +185,7 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
                 fixed: null,
                 a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
                 b: { t: "tabset", id: "z3", tabs: ["ghost"], active: "ghost" },
+                },
             },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
@@ -193,14 +195,15 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         };
         const layout = normalizeDockLayout(raw);
         assertEqual(layout.forms.ghost, undefined, "unregistered panel dropped");
-        assertEqual(shape(layout.tree), "[timeline]", "tabset of only ghosts collapses away");
+        assertEqual(shape(layout.roots.main), "[timeline]", "tabset of only ghosts collapses away");
     }
 
     // ── 归一化：同一窗体在树上出现两次 → 只保留首次 ────────────────
     {
         const raw = {
-            schema: 1,
-            tree: {
+            schema: 2,
+            roots: {
+                main: {
                 t: "split",
                 id: "z1",
                 dir: "row",
@@ -208,6 +211,7 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
                 fixed: null,
                 a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
                 b: { t: "tabset", id: "z3", tabs: ["timeline", "paramEditor"], active: "timeline" },
+                },
             },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
@@ -215,7 +219,7 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             },
         };
         const layout = normalizeDockLayout(raw);
-        assertEqual(shape(layout.tree), "([timeline]|[paramEditor])", "duplicate form deduped");
+        assertEqual(shape(layout.roots.main), "([timeline]|[paramEditor])", "duplicate form deduped");
     }
 
     // ── 归一化：重复的 Zone id → 现场重编，两组都保持可用 ──────────
@@ -225,8 +229,9 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
     // "拖入标签组"就会同时改掉两个组。必须在归一化时重编其中一个。
     {
         const raw = {
-            schema: 1,
-            tree: {
+            schema: 2,
+            roots: {
+                main: {
                 t: "split",
                 id: "z1",
                 dir: "row",
@@ -234,6 +239,7 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
                 fixed: null,
                 a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
                 b: { t: "tabset", id: "z2", tabs: ["paramEditor"], active: "paramEditor" },
+                },
             },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
@@ -241,12 +247,12 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             },
         };
         const layout = normalizeDockLayout(raw);
-        const tabsets = collectTabsets(layout.tree);
+        const tabsets = collectTabsets(layout.roots.main);
         assertEqual(tabsets.length, 2, "both tabsets survive");
         assert(tabsets[0]!.id !== tabsets[1]!.id, "duplicate zone id re-minted");
-        assertEqual(shape(layout.tree), "([timeline]|[paramEditor])", "tabs intact");
+        assertEqual(shape(layout.roots.main), "([timeline]|[paramEditor])", "tabs intact");
         // 曾经被重复 id 破坏的操作：插入只命中一个组。
-        const retargeted = addFormToTabset(layout.tree, tabsets[0]!.id, "undoHistory");
+        const retargeted = addFormToTabset(layout.roots.main, tabsets[0]!.id, "undoHistory");
         assertEqual(
             shape(retargeted),
             "([timeline,undoHistory]|[paramEditor])",
@@ -255,8 +261,9 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
 
         // id 缺失的两个节点（历史上都会落成 "z0"）同样不能共享 id。
         const anonymous = normalizeDockLayout({
-            schema: 1,
-            tree: {
+            schema: 2,
+            roots: {
+                main: {
                 t: "split",
                 id: "z1",
                 dir: "row",
@@ -264,13 +271,14 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
                 fixed: null,
                 a: { t: "tabset", tabs: ["timeline"], active: "timeline" },
                 b: { t: "tabset", tabs: ["paramEditor"], active: "paramEditor" },
+                },
             },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
                 paramEditor: { id: "paramEditor", panelId: "paramEditor" },
             },
         });
-        const anonTabsets = collectTabsets(anonymous.tree);
+        const anonTabsets = collectTabsets(anonymous.roots.main);
         assertEqual(anonTabsets.length, 2, "both anonymous tabsets survive");
         assert(anonTabsets[0]!.id !== anonTabsets[1]!.id, "missing zone ids are minted distinctly");
     }
@@ -288,8 +296,9 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             },
         };
         const treeFor = (ratio: number) => ({
-            schema: 1,
-            tree: {
+            schema: 2,
+            roots: {
+                main: {
                 t: "split",
                 id: "z1",
                 dir: "row",
@@ -297,18 +306,19 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
                 fixed: null,
                 a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
                 b: { t: "tabset", id: "z3", tabs: ["paramEditor"], active: "paramEditor" },
+                },
             },
             ...base,
         });
         const tooBig = normalizeDockLayout(treeFor(999));
         assertEqual(
-            (tooBig.tree as DockSplitNode).ratio,
+            (tooBig.roots.main as DockSplitNode).ratio,
             MAX_SPLIT_RATIO,
             "corrupt ratio clamped high",
         );
         const tooSmall = normalizeDockLayout(treeFor(-3));
         assertEqual(
-            (tooSmall.tree as DockSplitNode).ratio,
+            (tooSmall.roots.main as DockSplitNode).ratio,
             MIN_SPLIT_RATIO,
             "corrupt ratio clamped low",
         );
@@ -317,12 +327,14 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
     // ── 归一化：active 失效 → 修正为首个标签 ─────────────────────
     {
         const raw = {
-            schema: 1,
-            tree: {
+            schema: 2,
+            roots: {
+                main: {
                 t: "tabset",
                 id: "z1",
                 tabs: ["timeline", "paramEditor"],
                 active: "not-there",
+                },
             },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
@@ -330,14 +342,14 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             },
         };
         const layout = normalizeDockLayout(raw);
-        assertEqual((layout.tree as DockTabsetNode).active, "timeline", "stale active repaired");
+        assertEqual((layout.roots.main as DockTabsetNode).active, "timeline", "stale active repaired");
     }
 
     // ── 归一化：树彻底坏掉 → 回退默认（但保留窗体记录）────────────
     {
         const raw = {
-            schema: 1,
-            tree: { t: "nonsense" },
+            schema: 2,
+            roots: { main: { t: "nonsense" } },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
                 notebook: { id: "notebook", panelId: "notebook" },
@@ -345,23 +357,23 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             order: ["timeline", "notebook"],
         };
         const layout = normalizeDockLayout(raw);
-        assertEqual(shape(layout.tree), "([timeline]|[paramEditor])", "broken tree falls back");
+        assertEqual(shape(layout.roots.main), "([timeline]|[paramEditor])", "broken tree falls back");
         assertEqual(layout.forms.notebook?.panelId, "notebook", "form records survive");
     }
 
     // ── 归一化：沟槽尺寸钳制 ────────────────────────────────────
     {
         const layout = normalizeDockLayout({
-            schema: 1,
-            tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
+            schema: 2,
+            roots: { main: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" } },
             forms: { timeline: { id: "timeline", panelId: "timeline" } },
             gutters: { timelineTrackHeaderPx: 99999 },
         });
         assertEqual(layout.gutters.timelineTrackHeaderPx, 560, "gutter clamped high");
 
         const tooSmall = normalizeDockLayout({
-            schema: 1,
-            tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
+            schema: 2,
+            roots: { main: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" } },
             forms: { timeline: { id: "timeline", panelId: "timeline" } },
             gutters: { timelineTrackHeaderPx: -5 },
         });
@@ -375,8 +387,8 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
     // `floatScreen` 字段被忽略（归一化只挑它认识的字段）。
     {
         const withDetach = normalizeDockLayout({
-            schema: 1,
-            tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
+            schema: 2,
+            roots: { main: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" } },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
                 notebook: {
@@ -401,8 +413,8 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
 
         // 未知形态回退：回 inApp。
         const garbage = normalizeDockLayout({
-            schema: 1,
-            tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
+            schema: 2,
+            roots: { main: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" } },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
                 notebook: {
@@ -420,8 +432,8 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         // 标签行位置：默认下方，显式 top 保留。
         assertEqual(withDetach.tabPosition, "bottom", "标签行默认在下方");
         const topTabs = normalizeDockLayout({
-            schema: 1,
-            tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
+            schema: 2,
+            roots: { main: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" } },
             forms: { timeline: { id: "timeline", panelId: "timeline" } },
             tabPosition: "top",
         });
@@ -431,8 +443,8 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
     // ── 归一化：浮动几何清洗 + 与停靠互斥 ─────────────────────────
     {
         const layout = normalizeDockLayout({
-            schema: 1,
-            tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
+            schema: 2,
+            roots: { main: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" } },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
                 notebook: {
@@ -452,8 +464,8 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
     // ── 归一化：既在树上又有浮动几何 → 清掉浮动（可见性互斥）──────
     {
         const layout = normalizeDockLayout({
-            schema: 1,
-            tree: { t: "tabset", id: "z1", tabs: ["notebook"], active: "notebook" },
+            schema: 2,
+            roots: { main: { t: "tabset", id: "z1", tabs: ["notebook"], active: "notebook" } },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
                 notebook: {
@@ -484,8 +496,8 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
     // 浮窗。上限 4000 与锚点偏移的钳制（±4000）同源：正常拖放永远碰不到。
     {
         const layout = normalizeDockLayout({
-            schema: 1,
-            tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
+            schema: 2,
+            roots: { main: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" } },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
                 notebook: {
@@ -502,10 +514,21 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         assertEqual(layout.forms.notebook?.float?.h, 4000, "float height clamped to the ceiling");
     }
 
-    // ── 迁移：来自更新版本 → 交给归一化重建 ──────────────────────
+    // ── 迁移：v1 → v2 定向搬移；来自更新版本 → 交给归一化重建 ────
     {
         assertEqual(migrateDockLayout({ schema: 99 }), null, "future schema rejected");
-        const current = { schema: 1, tree: null };
+        // v1 布局升级为 v2：单棵 tree 成为主根条目，schema 抬到当前版本。
+        const legacy = {
+            schema: 1,
+            tree: { t: "tabset", id: "z1", tabs: ["a"], active: "a" },
+        };
+        const migrated = migrateDockLayout(legacy) as {
+            schema: number;
+            roots: Record<string, unknown>;
+        };
+        assertEqual(migrated.schema, DOCK_LAYOUT_SCHEMA, "v1 migrated to the current schema");
+        assert("main" in migrated.roots, "v1 tree becomes the main root");
+        const current = { schema: DOCK_LAYOUT_SCHEMA, roots: {} };
         assert(migrateDockLayout(current) === current, "current schema passes through");
         assertEqual(migrateDockLayout(null), null, "null passes through");
 
@@ -513,12 +536,12 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         // 经过它）—— 更新版本的布局必须整体回退默认，而不是被逐项修补曲解。
         const future = normalizeDockLayout({
             schema: 99,
-            tree: { t: "tabset", id: "z1", tabs: ["notebook"], active: "notebook" },
+            roots: { main: { t: "tabset", id: "z1", tabs: ["notebook"], active: "notebook" } },
             forms: { notebook: { id: "notebook", panelId: "notebook" } },
             order: ["notebook"],
         });
         assertEqual(
-            shape(future.tree),
+            shape(future.roots.main),
             "([timeline]|[paramEditor])",
             "a layout from a newer build rebuilds defaults",
         );
@@ -528,8 +551,8 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
     {
         const base = ensureRegisteredPanels(createDefaultDockLayout());
         const opened = openPanelInLayout(base, "fileBrowser");
-        assertEqual(collectTabsets(opened.tree).length, 3, "a third tabset appeared");
-        const split = opened.tree as DockSplitNode;
+        assertEqual(collectTabsets(opened.roots.main).length, 3, "a third tabset appeared");
+        const split = opened.roots.main as DockSplitNode;
         assertEqual(split.dir, "row", "workspace splits horizontally");
         assertEqual(split.fixed, { side: "b", px: 360 }, "right dock pinned to 360px");
         assertEqual(shape(split.a), "([timeline]|[paramEditor])", "main area stays intact");
@@ -544,9 +567,9 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             "fileBrowser",
         );
         const withNotebook = openPanelInLayout(withBrowser, "notebook");
-        const browserTabset = findTabsetOfForm(withNotebook.tree, "fileBrowser");
+        const browserTabset = findTabsetOfForm(withNotebook.roots.main, "fileBrowser");
         assertEqual(browserTabset?.tabs, ["fileBrowser", "notebook"], "notebook tabs with browser");
-        assertEqual(collectTabsets(withNotebook.tree).length, 3, "no extra column created");
+        assertEqual(collectTabsets(withNotebook.roots.main).length, 3, "no extra column created");
     }
 
     // ── 单例面板已可见时再打开 = 无操作（不产生第二个时间轴）────────
@@ -582,7 +605,7 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         layout = closeFormInLayout(layout, "opensAsFloat");
         layout = closeFormInLayout(layout, MAIN_FORM_PARAM_EDITOR);
         assertEqual(isFormVisible(layout, MAIN_FORM_PARAM_EDITOR), false, "param editor closed");
-        assertEqual(shape(layout.tree), "[timeline]", "its group collapsed");
+        assertEqual(shape(layout.roots.main), "[timeline]", "its group collapsed");
         const guarded = closeFormInLayout(layout, MAIN_FORM_TIMELINE);
         assertEqual(
             isFormVisible(guarded, MAIN_FORM_TIMELINE),
@@ -645,8 +668,9 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
 
         // 并排 / 浮动同样成立：判据是"都可见"，不是"必须上下堆叠"。
         const sideBySide = normalizeDockLayout({
-            schema: 1,
-            tree: {
+            schema: 2,
+            roots: {
+                main: {
                 t: "split",
                 id: "z1",
                 dir: "row",
@@ -654,6 +678,7 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
                 fixed: null,
                 a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
                 b: { t: "tabset", id: "z3", tabs: ["paramEditor"], active: "paramEditor" },
+                },
             },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
@@ -667,8 +692,8 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         );
 
         const floated = normalizeDockLayout({
-            schema: 1,
-            tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
+            schema: 2,
+            roots: { main: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" } },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
                 paramEditor: {

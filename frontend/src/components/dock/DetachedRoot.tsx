@@ -20,14 +20,22 @@
  * 主窗口"，等状态就位再挂载面板 —— 面板的首次渲染就是完整状态。
  */
 
-import { Suspense, useCallback, useEffect } from "react";
+import { Suspense, useCallback, useEffect, useMemo } from "react";
 
 import { useAppSelector } from "../../app/hooks";
 import { translateOutsideReact } from "../../i18n/I18nProvider";
 import { getPanel } from "../../features/dock/panelRegistry";
-import { satelliteFormId, subscribeRemoteAppearance } from "../../features/dock/detachBridge";
+import {
+    satelliteFormId,
+    subscribeRemoteAppearance,
+} from "../../features/dock/detachBridge";
+import { collectSubtreeRootIds } from "../../features/dock/dockPanel";
+import { isPanelForm, rootOfForm } from "../../features/dock/dockTree";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import type { AppearanceSettings } from "../../theme/themeTypes";
+import { DockSubRoot } from "./DockSubRoot";
+import { DockPanelHosts } from "./DockPanelHosts";
+import "./dock.css";
 
 export function DetachedRoot() {
     const formId = satelliteFormId();
@@ -73,6 +81,28 @@ export function DetachedRoot() {
         event.preventDefault();
     }, []);
 
+    // ── 面板分支：整棵子树在本窗口渲染 ─────────────────────────────
+    // 面板被拆到独立窗口时，拆出的不是"一个面板组件"而是**一片可停靠区**：
+    // 子树里的全部成员都要在本窗口重新挂载（跨 JS 上下文无法搬 DOM —— 可拆性
+    // 恰好就是"重挂载代价可接受"的证书，见 `isPanelDetachable`），所以这里
+    // 先挂宿主层，再渲染面板自己的布局根。
+    const layout = useAppSelector((state) => state.dock.layout);
+    const isPanel = isPanelForm(form ?? undefined);
+    const subtreeRootIds = useMemo(
+        () => (isPanel && form?.childRootId ? collectSubtreeRootIds(layout, form.childRootId) : null),
+        [isPanel, form, layout],
+    );
+    const hostedForms = useMemo(() => {
+        if (!subtreeRootIds) return [];
+        return layout.order
+            .map((id) => layout.forms[id])
+            .filter((member) => {
+                if (!member || isPanelForm(member)) return false;
+                const memberRoot = rootOfForm(layout, member.id);
+                return memberRoot !== null && subtreeRootIds.has(memberRoot);
+            });
+    }, [layout, subtreeRootIds]);
+
     return (
         <div
             className="h-screen w-screen overflow-hidden bg-qt-window text-qt-text"
@@ -80,10 +110,16 @@ export function DetachedRoot() {
             data-detached-form={formId ?? undefined}
         >
             {/*
-             * 三态：面板未注册（找不到 panelId）→ 显示"不可用"而不是空白；
-             * 已注册 → 渲染；快照未到（无 formId）→ 显示"正在连接"。
+             * 三态（普通窗体）：面板未注册（找不到 panelId）→ 显示"不可用"而不是
+             * 空白；已注册 → 渲染；快照未到（无 formId）→ 显示"正在连接"。
+             * 面板窗体走上面的分支：渲染它自己的整棵布局树。
              */}
-            {panelId && !PanelComponent ? (
+            {isPanel && form?.childRootId ? (
+                <div className="flex h-full w-full flex-col">
+                    <DockPanelHosts forms={hostedForms} />
+                    <DockSubRoot rootId={form.childRootId} kind="panel" />
+                </div>
+            ) : panelId && !PanelComponent ? (
                 <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-qt-xs text-qt-text-muted">
                     <span>{translateOutsideReact("panel_unavailable")}</span>
                     <span className="text-qt-text-muted opacity-70">{panelId}</span>

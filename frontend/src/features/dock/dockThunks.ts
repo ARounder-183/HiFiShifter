@@ -20,6 +20,7 @@ import { applyDockPreset, setDockLayout } from "./dockSlice";
 import { findMainTabset } from "./dockSchema";
 import { restoreDetachedWindows } from "./dockApi";
 import { insertForm } from "./dockTree";
+import { MAIN_ROOT_ID } from "./dockTypes";
 
 export const loadDockSettings = createAsyncThunk("dock/loadSettings", async () => {
     const ui = await settingsApi.getUiSettings();
@@ -69,14 +70,23 @@ export function finalizeDockHydration(dispatch: AppDispatch, getState: () => Roo
             : [];
         if (main && floating.length > 0) {
             const forms = { ...current.forms };
-            let tree = current.tree;
+            const mainRootId = MAIN_ROOT_ID;
+            let tree = current.roots[mainRootId];
+            if (!tree) return;
             for (const formId of floating) {
                 const form = forms[formId];
                 if (!form) continue;
                 forms[formId] = { ...form, floating: false };
                 tree = insertForm(tree, formId, { kind: "tab", tabsetId: main.id });
             }
-            dispatch(setDockLayout({ ...current, tree, forms, floatOrder: [] }));
+            dispatch(
+                setDockLayout({
+                    ...current,
+                    roots: { ...current.roots, [mainRootId]: tree },
+                    forms,
+                    floatOrder: [],
+                }),
+            );
         }
     }
 

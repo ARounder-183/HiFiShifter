@@ -36,6 +36,14 @@ export interface DockPlacement {
     sizePx?: number;
     /** 优先并入该面板所在的标签组（若它当前可见）。 */
     tabWith?: string;
+    /**
+     * 落到**哪一棵布局树**里（缺省 = 主布局根）。
+     *
+     * 面板出现之后，布局不止一棵树：每个面板窗体拥有自己的根。命令式入口
+     * （菜单、快捷键、将来的 API）要往指定面板里放窗体，就必须能指名根 ——
+     * 否则"放进面板"只有拖拽这一条路。
+     */
+    rootId?: string;
 }
 
 /** 矩形（视口坐标，逻辑像素）。 */
@@ -161,6 +169,20 @@ export interface DockForm {
      */
     /** 面板私有状态（随布局持久化，未来 API 面板可直接受益）。 */
     props?: Record<string, unknown>;
+    /**
+     * 非空 = 本窗体是一个**面板**：它是 `layout.roots[childRootId]` 这棵布局树
+     * 的容器窗体。
+     *
+     * 【为什么用字段而不是子类型】面板必须继承窗体的一切（几何、浮动、独立窗口、
+     * 关闭后重开、重命名），分支出 `PanelForm` 子类型会让每一个 `forms[id]` 读取点
+     * 都要考虑"它可能没有组件"。平坦表示下，面板与叶窗体只差"渲染什么"：叶窗体
+     * 渲染注册表里的组件，面板渲染自己的那棵树。
+     *
+     * 【为什么根条目可以缺失】`roots[childRootId]` 不存在 = 空面板（尚未放入任何
+     * 窗体）。这样"空面板"不需要额外的表示 —— 根表只存**非空**的树，孤儿根
+     * （没有任何面板引用的条目）在归一化时被丢弃，两个方向都不会积累垃圾。
+     */
+    childRootId?: string | null;
 }
 
 /**
@@ -195,7 +217,17 @@ export type DockFloatMode = "inApp" | "osWindow";
 export interface DockLayout {
     /** schema 版本号，用于迁移。 */
     schema: number;
-    tree: DockNode;
+    /**
+     * 全部布局树，按根 id 索引。
+     *
+     * 【为什么从单棵 `tree` 变成根表】面板出现后，"容器"成为一等公民：主界面
+     * 是主布局根（`MAIN_ROOT_ID`），每个面板窗体拥有自己的根。用一张表而不是
+     * "主树 + 面板树旁表"，是因为后者要求"面板窗体必须同时记在两处且永不错位"
+     * —— 这类双份记录必然要同步、也必然会有不一致的时候（`DockForm.float` 与
+     * 被删除的 `floatScreen` 正是前车之鉴）。表里只存**非空**的树：面板的根
+     * 条目缺失即空面板。
+     */
+    roots: Record<string, DockNode>;
     forms: Record<string, DockForm>;
     /** 窗体创建顺序（稳定顺序，用于挂载顺序与浮动 z 序的基线）。 */
     order: string[];
@@ -212,7 +244,8 @@ export interface DockLayout {
 /** 命名预设只存"排布"，不存面板私有 props —— 预设的语义是换一套工作区，不是换内容。 */
 export interface DockPreset {
     name: string;
-    tree: DockNode;
+    /** 预设的全部布局树（含面板的根），键与 `DockLayout.roots` 同一约定。 */
+    roots: Record<string, DockNode>;
     forms: Record<string, DockForm>;
     order: string[];
     floatOrder: string[];
@@ -222,7 +255,28 @@ export interface DockPreset {
 }
 
 /** 当前布局的 schema 版本。 */
-export const DOCK_LAYOUT_SCHEMA = 1;
+export const DOCK_LAYOUT_SCHEMA = 2;
+
+/** 主布局根的键：它就是用户看到的"HiFiShifter 主界面"。 */
+export const MAIN_ROOT_ID = "main";
+
+/**
+ * 面板窗体的 `panelId`：**保留字**，不是注册表里的面板。
+ *
+ * 面板不注册进 `panelRegistry`（它没有组件，可拆性来自子窗体，只能派生），
+ * 因此用保留 id 标记。`ensureRegisteredPanels` 遍历注册表补记录，天然不会
+ * 碰到它；归一化对它显式放行（见 `normalizeDockLayout`）。
+ */
+export const DOCK_PANEL_FORM = "__panel";
+
+/**
+ * 面板嵌套的硬上限（归一化兜底）。
+ *
+ * 面板嵌面板是允许的（面板既是窗体又是容器），但落盘数据可能被手工拼出环形
+ * 或超深嵌套 —— 渲染是递归的，没有上限就是栈溢出。用户可在设置里调更小的
+ * 交互上限（`maxPanelDepth`）；这里是归一化不顾设置也要守住的最后防线。
+ */
+export const DOCK_MAX_PANEL_DEPTH_HARD = 16;
 
 /** 停靠区最小尺寸（低于此值不允许再分割/收缩）。 */
 export const DOCK_MIN_ZONE_PX = { w: 120, h: 90 };

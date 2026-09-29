@@ -140,6 +140,18 @@ export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSetti
                     />
                 </AppField>
 
+                <AppField label={tf("layout_setting_max_panel_depth")}>
+                    <AppNumberField
+                        value={settings.maxPanelDepth}
+                        unit="integer"
+                        min={1}
+                        max={16}
+                        width={110}
+                        ariaLabel={tf("layout_setting_max_panel_depth")}
+                        onCommit={(maxPanelDepth) => patch({ maxPanelDepth })}
+                    />
+                </AppField>
+
                 <AppSwitchRow
                     label={tf("layout_setting_show_preview")}
                     checked={settings.showDropPreview}
@@ -159,6 +171,21 @@ export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSetti
                     label={tf("layout_setting_float_snap")}
                     checked={settings.floatSnapEnabled}
                     onCheckedChange={(floatSnapEnabled) => patch({ floatSnapEnabled })}
+                />
+                <AppSwitchRow
+                    label={tf("layout_setting_float_compose")}
+                    checked={settings.floatComposeEnabled}
+                    onCheckedChange={(floatComposeEnabled) => patch({ floatComposeEnabled })}
+                />
+                <AppSwitchRow
+                    label={tf("layout_setting_empty_panel_dissolve")}
+                    checked={settings.emptyPanelAutoDissolve}
+                    onCheckedChange={(emptyPanelAutoDissolve) => patch({ emptyPanelAutoDissolve })}
+                />
+                <AppSwitchRow
+                    label={tf("layout_setting_panel_title_child")}
+                    checked={settings.panelTitleFromChild}
+                    onCheckedChange={(panelTitleFromChild) => patch({ panelTitleFromChild })}
                 />
                 <AppSwitchRow
                     label={tf("layout_setting_restore_floats")}

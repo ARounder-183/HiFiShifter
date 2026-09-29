@@ -271,8 +271,8 @@ test("features/dock/dockTree.test.ts scripted checks", async () => {
     // ── 可见性判定 ──────────────────────────────────────────────
     {
         const layout: DockLayout = {
-            schema: 1,
-            tree: split("z1", tabset("z2", ["a"]), tabset("z3", ["b"])),
+            schema: 2,
+            roots: { main: split("z1", tabset("z2", ["a"]), tabset("z3", ["b"])) },
             forms: {
                 a: { id: "a", panelId: "a", float: null },
                 b: { id: "b", panelId: "b", float: { x: 0, y: 0, w: 300, h: 200 } },
@@ -286,8 +286,8 @@ test("features/dock/dockTree.test.ts scripted checks", async () => {
         assertEqual(isFormVisible(layout, "a"), true, "docked form is visible");
         assertEqual(isFormVisible(layout, "c"), false, "closed form is not visible");
         assertEqual(collectVisibleForms(layout).sort(), ["a", "b"], "visible = docked + floating");
-        assertEqual(findTabsetOfForm(layout.tree, "a")?.id, "z2", "locates owning tabset");
-        assertEqual(findTabsetOfForm(layout.tree, "c"), null, "closed form has no tabset");
+        assertEqual(findTabsetOfForm(layout.roots.main, "a")?.id, "z2", "locates owning tabset");
+        assertEqual(findTabsetOfForm(layout.roots.main, "c"), null, "closed form has no tabset");
     }
 
     // ── 源不在树上（浮动态）：必须照常插入，而不是原样返回 ─────────

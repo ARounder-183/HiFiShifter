@@ -13,13 +13,15 @@
 
 import { useCallback, useRef } from "react";
 
-import { useAppDispatch } from "../../app/hooks";
+import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { setSplitRatioOf } from "../../features/dock/dockSlice";
+import { panelMinSize } from "../../features/dock/dockPanel";
 import { MIN_PANE_PX, applyLivePaneStyles, paneStyle } from "../../features/dock/dockTree";
-import type { DockNode, DockSplitNode } from "../../features/dock/dockTypes";
+import { isPanelForm } from "../../features/dock/dockTree";
+import type { DockLayout, DockNode, DockSplitNode } from "../../features/dock/dockTypes";
+import { getPanel } from "../../features/dock/panelRegistry";
 import { DockSplitter } from "./DockSplitter";
 import { DockZone } from "./DockZone";
-import { getPanel } from "../../features/dock/panelRegistry";
 
 export function DockNodeView({ node }: { node: DockNode }) {
     if (node.t === "split") return <DockSplit node={node} />;
@@ -28,13 +30,14 @@ export function DockNodeView({ node }: { node: DockNode }) {
 
 function DockSplit({ node }: { node: DockSplitNode }) {
     const dispatch = useAppDispatch();
+    const layout = useAppSelector((state) => state.dock.layout);
     const paneARef = useRef<HTMLDivElement | null>(null);
     const paneBRef = useRef<HTMLDivElement | null>(null);
     const containerRef = useRef<HTMLDivElement | null>(null);
 
     const horizontal = node.dir === "row";
-    const minA = subtreeMinSize(node.a, horizontal);
-    const minB = subtreeMinSize(node.b, horizontal);
+    const minA = subtreeMinSize(layout, node.a, horizontal);
+    const minB = subtreeMinSize(layout, node.b, horizontal);
 
     /**
      * 拖拽期间把两侧写成"目标尺寸"。
@@ -94,15 +97,25 @@ function DockSplit({ node }: { node: DockSplitNode }) {
  * 子树在该方向上的最小尺寸。
  *
  * 取子树内所有面板定义的最小值中的最大值 —— 一组面板挤在一起时，最小的那个
- * 决定了下限。没有声明最小尺寸的面板按 `MIN_PANE_PX` 算。
+ * 决定了下限。没有声明最小尺寸的面板按 `MIN_PANE_PX` 算。面板成员的值来自
+ * **它自己那棵树**的递归（`panelMinSize`）：面板的最小值不是注册表里的静态
+ * 声明，否则嵌套面板会被外层分割挤成不可用的窄条。
  */
-function subtreeMinSize(node: DockNode, horizontal: boolean): number {
+function subtreeMinSize(layout: DockLayout, node: DockNode, horizontal: boolean): number {
     if (node.t === "split") {
-        return Math.max(subtreeMinSize(node.a, horizontal), subtreeMinSize(node.b, horizontal));
+        return Math.max(
+            subtreeMinSize(layout, node.a, horizontal),
+            subtreeMinSize(layout, node.b, horizontal),
+        );
     }
     let min = 0;
     for (const formId of node.tabs) {
-        const definition = getPanel(formId.split(":")[0]);
+        const form = layout.forms[formId];
+        if (form && isPanelForm(form)) {
+            min = Math.max(min, panelMinSize(layout, formId, horizontal) || MIN_PANE_PX);
+            continue;
+        }
+        const definition = form ? getPanel(form.panelId) : undefined;
         const value = horizontal ? definition?.minWidth : definition?.minHeight;
         min = Math.max(min, value ?? MIN_PANE_PX);
     }

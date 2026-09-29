@@ -27,19 +27,38 @@ import {
     normalizeTabPosition,
 } from "./dockSchema";
 import {
+    addFormToTabset,
     collectDockedForms,
+    collectTabsets,
     dockForm,
     findTabsetOfForm,
     findZone,
+    isPanelForm,
+    makeTabset,
+    nextRootId,
+    nextZoneIdInLayout,
+    pruneTree,
     removeForm,
     removeZone,
     replaceTabset,
+    replaceZone,
+    rootOfForm,
     setActiveTab,
     setSplitRatio,
     setTabsetCollapsed,
     splitRootWith,
+    splitTabsetWith,
+    withRoot,
+    zoneIdAllocatorForLayout,
     type DockInsertTarget,
 } from "./dockTree";
+import {
+    collectSubtreeRootIds,
+    makePanelForm,
+    ownerOfRoot,
+    panelDepth,
+    synthesizePanelDefinition,
+} from "./dockPanel";
 import {
     DEFAULT_DOCK_SETTINGS,
     normalizeDockSettings,
@@ -47,12 +66,17 @@ import {
     type ResolvedDockSettings,
 } from "./dockSettings";
 import {
+    type DockDropZone,
     type DockFloatGeometry,
     type DockGutterSizes,
     type DockLayout,
+    type DockNode,
     type DockPreset,
     type DockFloatMode,
     type DockTabPosition,
+    type DockTabsetNode,
+    DOCK_PANEL_FORM,
+    MAIN_ROOT_ID,
 } from "./dockTypes";
 import { getPanel } from "./panelRegistry";
 
@@ -80,9 +104,10 @@ export interface DockState {
      *
      * 刻意**不持久化**：最大化的语义是"临时看一眼"，重启后回到用户排好的
      * 布局才符合预期。放在这里而不是往布局树里加字段，是因为它不是一种排布，
-     * 而是对排布的一次临时覆盖。
+     * 而是对排布的一次临时覆盖。按**根**记（`rootId` + 原树）：在面板里最大化
+     * 只应铺满那个面板，而不是整片主工作区。
      */
-    maximized: { tree: DockLayout["tree"] } | null;
+    maximized: { rootId: string; tree: DockNode } | null;
 }
 
 const initialState: DockState = {
@@ -169,38 +194,55 @@ const dockSlice = createSlice({
         /**
          * 最大化当前窗体 / 还原。
          *
-         * 实现是"把当前窗体所在的标签组替换成整棵树"，而不是给它加宽高 ——
-         * 这样最大化在任意嵌套布局下都成立，且不需要改动分割比例（用户还原后
-         * 尺寸分毫不变）。
+         * 实现是"把当前窗体所在的标签组替换成**它所在那棵根**"，而不是给它加宽高
+         * —— 这样最大化在任意嵌套布局下都成立，且不需要改动分割比例（用户还原后
+         * 尺寸分毫不变）。作用域是根：在面板里最大化只铺满那个面板。
          */
         toggleMaximizeActive(state) {
             if (state.maximized) {
-                const restoredTree = state.maximized.tree;
-                const temporaryTree = state.layout.tree;
+                const { rootId, tree: restoredTree } = state.maximized;
+                const temporaryTree = state.layout.roots[rootId] ?? null;
                 state.maximized = null;
                 // 还原时补回"最大化期间打开"的面板：它们在**临时树**上可见，换回
                 // 原树后既不在树上也不浮动（窗体记录还在，floating=false）—— 表现
                 // 为面板凭空消失。判据必须是"在临时树里出现过"，而不是"不在原树
                 // 里"：后者会把一直关闭着的面板记录也一并打开。走"并入主组"的
                 // 既有插入路径（与 center 打开落点同源）。
-                let layout: DockLayout = { ...state.layout, tree: restoredTree };
-                for (const formId of collectDockedForms(temporaryTree)) {
-                    const form = layout.forms[formId];
-                    if (!form || form.floating) continue;
-                    if (findTabsetOfForm(layout.tree, formId)) continue;
-                    layout = { ...layout, tree: placeForm(layout, formId, { side: "center" }) };
+                const roots = { ...state.layout.roots, [rootId]: restoredTree };
+                let layout: DockLayout = { ...state.layout, roots };
+                if (temporaryTree) {
+                    for (const formId of collectDockedForms(temporaryTree)) {
+                        const form = layout.forms[formId];
+                        if (!form || form.floating) continue;
+                        const stillDocked = Object.values(layout.roots).some((tree) =>
+                            findTabsetOfForm(tree, formId),
+                        );
+                        if (stillDocked) continue;
+                        layout = {
+                            ...layout,
+                            roots: {
+                                ...layout.roots,
+                                [MAIN_ROOT_ID]: placeForm(layout, formId, { side: "center" }),
+                            },
+                        };
+                    }
                 }
                 state.layout = layout;
                 return;
             }
             const formId = state.activeFormId ?? findMainTabset(state.layout)?.active ?? null;
             if (!formId) return;
-            const tabset = findTabsetOfForm(state.layout.tree, formId);
-            if (!tabset) return;
-            state.maximized = { tree: state.layout.tree };
+            const rootId = rootOfForm(state.layout, formId) ?? MAIN_ROOT_ID;
+            const tree = state.layout.roots[rootId];
+            const tabset = tree ? findTabsetOfForm(tree, formId) : null;
+            if (!tree || !tabset) return;
+            state.maximized = { rootId, tree };
             state.layout = {
                 ...state.layout,
-                tree: { ...tabset, active: formId, collapsed: false },
+                roots: {
+                    ...state.layout.roots,
+                    [rootId]: { ...tabset, active: formId, collapsed: false },
+                },
             };
         },
         /** 打开面板（复用已关闭的窗体记录，或新建）。 */
@@ -220,8 +262,8 @@ const dockSlice = createSlice({
         },
         closeForm(state, action: PayloadAction<string>) {
             const formId = action.payload;
-            state.layout = closeFormInLayout(state.layout, formId);
-            if (state.activeFormId === formId) {
+            updateLayout(state, closeFormInLayout(state.layout, formId));
+            if (state.activeFormId === formId || !state.layout.forms[state.activeFormId ?? ""]) {
                 state.activeFormId =
                     state.layout.order.find((id) => state.layout.forms[id]?.floating === true) ??
                     findMainTabset(state.layout)?.active ??
@@ -233,15 +275,25 @@ const dockSlice = createSlice({
             if (!state.layout.forms[formId]) return;
             state.activeFormId = formId;
             // 停靠窗体获得焦点时同步把它的标签组切到它，否则"焦点在 A、显示的是 B"。
-            const tabset = state.layout.tree;
-            state.layout = { ...state.layout, tree: setActiveTabEverywhere(tabset, formId) };
+            // 多根之后要在每一棵可达的树上同步（面板里的标签组也在其中）。
+            let roots = state.layout.roots;
+            let changed = false;
+            for (const [rootId, tree] of Object.entries(roots)) {
+                const next = setActiveTabEverywhere(tree, formId);
+                if (next !== tree) {
+                    roots = { ...roots, [rootId]: next };
+                    changed = true;
+                }
+            }
+            if (changed) state.layout = { ...state.layout, roots };
         },
         setActiveTabOf(state, action: PayloadAction<{ tabsetId: string; formId: string }>) {
             const { tabsetId, formId } = action.payload;
-            state.layout = {
-                ...state.layout,
-                tree: setActiveTab(state.layout.tree, tabsetId, formId),
-            };
+            const rootId = rootIdOfZone(state.layout, tabsetId);
+            if (!rootId) return;
+            state.layout = withRoot(state.layout, rootId, (tree) =>
+                setActiveTab(tree, tabsetId, formId),
+            );
             state.activeFormId = formId;
         },
         /** 停靠到指定落点（拖动结束、菜单"停靠到…"都走这里）。 */
@@ -253,7 +305,12 @@ const dockSlice = createSlice({
             if (!dockFormInto(state, formId, target)) return;
             if (focus !== false) state.activeFormId = formId;
         },
-        /** 浮动（从树上摘除，记录几何）。 */
+        /**
+         * 浮动（从所在的树上摘除，记录几何）。
+         *
+         * 主根不允许被清空（见下）；面板根被清空是合法的 —— 面板留在原处显示
+         * 占位井，随后按设置走"失去最后一个成员 → 自动解散"的收尾。
+         */
         floatForm(
             state,
             action: PayloadAction<{ formId: string; geometry?: Partial<DockFloatGeometry> }>,
@@ -261,12 +318,21 @@ const dockSlice = createSlice({
             const { formId, geometry } = action.payload;
             const form = state.layout.forms[formId];
             if (!form) return;
-            const pruned = removeForm(state.layout.tree, formId);
-            if (pruned === null) {
-                // 树上只剩它自己：摘除会得到 null（见 removeForm 的约定）。若回退到
-                // 旧树继续浮动，同一个窗体会同时出现在树上和浮层里（两个宿主抢一个
-                // 面板），所以最后一个停靠窗体不允许浮走。
-                return;
+            const sourceRootId = rootOfForm(state.layout, formId);
+            let roots = state.layout.roots;
+            if (sourceRootId) {
+                const pruned = removeForm(roots[sourceRootId], formId);
+                if (pruned === null) {
+                    // 树上只剩它自己：摘除会得到 null（见 removeForm 的约定）。若回退到
+                    // 旧树继续浮动，同一个窗体会同时出现在树上和浮层里（两个宿主抢一个
+                    // 面板），所以最后一个停靠窗体不允许浮走。面板根没有这条限制 ——
+                    // 摘空即空面板，删条目即可。
+                    if (sourceRootId === MAIN_ROOT_ID) return;
+                    roots = { ...roots };
+                    delete roots[sourceRootId];
+                } else {
+                    roots = { ...roots, [sourceRootId]: pruned };
+                }
             }
             const index = state.layout.floatOrder.length;
             const base = form.float ?? defaultFloatGeometry(formId, index);
@@ -283,17 +349,16 @@ const dockSlice = createSlice({
                 anchorOffsetX: setsPosition ? 0 : base.anchorOffsetX,
                 anchorOffsetY: setsPosition ? 0 : base.anchorOffsetY,
             };
-            const tree = pruned;
 
-            state.layout = {
+            updateLayout(state, {
                 ...state.layout,
-                tree,
+                roots,
                 forms: {
                     ...state.layout.forms,
                     [formId]: { ...form, float: next, floating: true },
                 },
                 floatOrder: [...state.layout.floatOrder.filter((id) => id !== formId), formId],
-            };
+            });
             state.activeFormId = formId;
         },
         /** 更新浮动几何（拖动/缩放结束、最大化切换）。 */
@@ -334,7 +399,7 @@ const dockSlice = createSlice({
             };
             state.activeFormId = formId;
         },
-        /** 在目标组某一侧拆出新组（拖动到边缘时用）。 */
+        /** 在目标组某一侧拆出新组（拖动到边缘时用）。目标根从参照窗体解析。 */
         splitFormTo(
             state,
             action: PayloadAction<{
@@ -344,34 +409,48 @@ const dockSlice = createSlice({
             }>,
         ) {
             const { formId, referenceFormId, side } = action.payload;
-            const tabset = findZone(
-                state.layout.tree,
-                findTabsetIdOf(state.layout, referenceFormId) ?? "",
-            );
-            if (!tabset || tabset.t !== "tabset") return;
-            dockFormInto(state, formId, { kind: "split", tabsetId: tabset.id, side });
+            const located = locateTabsetOfForm(state.layout, referenceFormId);
+            if (!located) return;
+            dockFormInto(state, formId, {
+                kind: "split",
+                tabsetId: located.tabsetId,
+                rootId: located.rootId,
+                side,
+            });
         },
-        /** 合并到目标组（拖动到中央时用）。 */
+        /** 合并到目标组（拖动到中央时用）。目标根从参照窗体解析。 */
         mergeFormInto(state, action: PayloadAction<{ formId: string; referenceFormId: string }>) {
             const { formId, referenceFormId } = action.payload;
-            const tabsetId = findTabsetIdOf(state.layout, referenceFormId);
-            if (!tabsetId) return;
-            dockFormInto(state, formId, { kind: "tab", tabsetId });
+            const located = locateTabsetOfForm(state.layout, referenceFormId);
+            if (!located) return;
+            dockFormInto(state, formId, {
+                kind: "tab",
+                tabsetId: located.tabsetId,
+                rootId: located.rootId,
+            });
         },
-        /** 把整个标签组连同它的标签搬到工作区某一侧（拖动组内空白处时用）。 */
+        /** 把整个标签组连同它的标签搬到**所在根**的某一侧（拖动组内空白处时用）。 */
         moveTabsetToRootSide(
             state,
             action: PayloadAction<{ tabsetId: string; side: "left" | "right" | "top" | "bottom" }>,
         ) {
             const { tabsetId, side } = action.payload;
-            const node = findZone(state.layout.tree, tabsetId);
-            if (!node || node.t !== "tabset" || node.tabs.length === 0) return;
-            const pruned = removeZone(state.layout.tree, tabsetId);
-            if (!pruned) return;
+            const rootId = rootIdOfZone(state.layout, tabsetId);
+            const node = rootId ? findZone(state.layout.roots[rootId], tabsetId) : null;
+            if (!rootId || !node || node.t !== "tabset" || node.tabs.length === 0) return;
+            const baseTree = state.layout.roots[rootId];
+            const pruned = removeZone(baseTree, tabsetId);
+            if (!pruned) {
+                // 整棵根就是这一组：把组内容重建为一侧的新组（主根不允许清空，
+                // 但"只剩一组再搬到边上"等价于原样保留 —— 直接返回）。
+                if (rootId !== MAIN_ROOT_ID) return;
+                return;
+            }
 
             // 摘掉整组后在根部重建，等价于"这一组连同它的所有标签一起搬到边上"。
+            const allocate = zoneIdAllocatorForLayout(state.layout);
             const anchor = node.tabs[0];
-            let tree = splitRootWith(pruned, anchor, side);
+            let tree = splitRootWith(pruned, anchor, side, allocate);
             const created = findTabsetOfForm(tree, anchor);
             if (created) {
                 tree = replaceTabset(tree, created.id, {
@@ -379,10 +458,9 @@ const dockSlice = createSlice({
                     tabs: node.tabs,
                     active: node.active,
                 });
-                if (node.collapsed)
-                    tree = setTabsetCollapsed(tree, created.id, true, node.collapsedPx);
+                if (node.collapsed) tree = setTabsetCollapsed(tree, created.id, true, node.collapsedPx);
             }
-            state.layout = { ...state.layout, tree };
+            updateLayout(state, { ...state.layout, roots: { ...state.layout.roots, [rootId]: tree } });
             state.activeFormId = node.active;
         },
         setSplitRatioOf(
@@ -394,22 +472,23 @@ const dockSlice = createSlice({
             }>,
         ) {
             const { splitId, ratio, fixed } = action.payload;
-            state.layout = {
-                ...state.layout,
-                tree: setSplitRatio(state.layout.tree, splitId, ratio, fixed ?? null),
-            };
+            const rootId = rootIdOfZone(state.layout, splitId);
+            if (!rootId) return;
+            state.layout = withRoot(state.layout, rootId, (tree) =>
+                setSplitRatio(tree, splitId, ratio, fixed ?? null),
+            );
         },
         toggleTabsetCollapsed(
             state,
             action: PayloadAction<{ tabsetId: string; collapsedPx?: number }>,
         ) {
             const { tabsetId, collapsedPx } = action.payload;
-            const node = findZone(state.layout.tree, tabsetId);
-            if (!node || node.t !== "tabset") return;
-            state.layout = {
-                ...state.layout,
-                tree: setTabsetCollapsed(state.layout.tree, tabsetId, !node.collapsed, collapsedPx),
-            };
+            const rootId = rootIdOfZone(state.layout, tabsetId);
+            const node = rootId ? findZone(state.layout.roots[rootId], tabsetId) : null;
+            if (!rootId || !node || node.t !== "tabset") return;
+            state.layout = withRoot(state.layout, rootId, (tree) =>
+                setTabsetCollapsed(tree, tabsetId, !node.collapsed, collapsedPx),
+            );
         },
         setGutterSize(state, action: PayloadAction<{ key: keyof DockGutterSizes; px: number }>) {
             const { key, px } = action.payload;
@@ -497,7 +576,7 @@ const dockSlice = createSlice({
             if (!name) return;
             const preset: DockPreset = {
                 name,
-                tree: state.layout.tree,
+                roots: state.layout.roots,
                 forms: state.layout.forms,
                 order: state.layout.order,
                 floatOrder: state.layout.floatOrder,
@@ -515,7 +594,7 @@ const dockSlice = createSlice({
             if (!preset) return;
             const next = normalizeDockLayout({
                 schema: state.layout.schema,
-                tree: preset.tree,
+                roots: preset.roots,
                 forms: preset.forms,
                 order: preset.order,
                 floatOrder: preset.floatOrder,
@@ -524,6 +603,8 @@ const dockSlice = createSlice({
                 activePreset: preset.name,
             });
             state.layout = ensureRegisteredPanels(next);
+            // 预设替换一切：旧的活动窗体若已不存在，清空以免指向幽灵记录。
+            if (!state.layout.forms[state.activeFormId ?? ""]) state.activeFormId = null;
         },
         deleteDockPreset(state, action: PayloadAction<string>) {
             const name = action.payload;
@@ -536,6 +617,193 @@ const dockSlice = createSlice({
                 activePreset: state.layout.activePreset === name ? null : state.layout.activePreset,
             };
         },
+        /**
+         * 新建一个**空面板**（不含任何窗体）。
+         *
+         * 「面板」是容器窗体：先分配窗体记录（`panelId` 为保留字）与它自己的布局
+         * 根（此时无条目 = 空），再按落点把它放进目标根 —— 与打开普通面板共用
+         * `placeForm` 的全部落点语义。空面板的根条目在放入第一个窗体时才创建，
+         * 因此"新建空面板"不会在根表里留下任何待清理的残留。
+         */
+        createEmptyPanel(
+            state,
+            action: PayloadAction<{
+                rootId?: string;
+                placement?: DockPlacement;
+                /** 面板窗体的显示标题（缺省走 i18n / 内容派生）。 */
+                title?: string;
+            }>,
+        ) {
+            const { rootId, placement, title } = action.payload;
+            const targetRootId = rootId ?? MAIN_ROOT_ID;
+
+            // 嵌套深度上限：往深层面板里再塞面板必须先过这一关。
+            if (depthOfRoot(state.layout, targetRootId) + 1 > Math.max(1, state.settings.maxPanelDepth)) {
+                return;
+            }
+
+            const layout = state.layout;
+            const newFormId = `${DOCK_PANEL_FORM}:${nextFormSuffix(layout, DOCK_PANEL_FORM)}`;
+            const newRootId = nextRootId(layout);
+            const forms = {
+                ...layout.forms,
+                [newFormId]: makePanelForm(newFormId, newRootId),
+            };
+            if (title && title.trim()) forms[newFormId].title = title.trim();
+            const order = [...layout.order, newFormId];
+            const base: DockLayout = { ...layout, forms, order };
+            const resolved: DockPlacement = placement ?? { side: "right", sizePx: 320, rootId: targetRootId };
+            const placedRootId = resolved.rootId ?? targetRootId;
+            const tree = placeForm(base, newFormId, resolved);
+            const pruned = pruneTree(tree);
+            state.layout = {
+                ...base,
+                roots: {
+                    ...base.roots,
+                    [placedRootId]:
+                        pruned ??
+                        base.roots[placedRootId] ??
+                        makeTabset(nextZoneIdInLayout(base), newFormId),
+                },
+            };
+            state.activeFormId = newFormId;
+        },
+        /**
+         * 解散面板：用面板自己的树替换它在父容器中的位置。
+         *
+         * 组合的对偶操作。三种情形各有归宿：停靠在标签组里 → 内容摊平进那个组
+         * （内容是分割树时以分割包裹其余标签）；停靠在分割一侧 → 该侧直接换成
+         * 面板的树；浮动 → 成员按各自记住的浮窗几何还回浮动层。面板窗体记录与
+         * 它的根条目一并删除 —— 解散就是"当作没组合过"。
+         */
+        dissolvePanel(state, action: PayloadAction<string>) {
+            dissolvePanelForm(state, action.payload);
+            state.activeFormId = state.layout.forms[state.activeFormId ?? ""]
+                ? state.activeFormId
+                : null;
+        },
+        /**
+         * 浮窗 ⇄ 浮窗组合。
+         *
+         * 目标已是面板 → 源窗体按落点停入它的树（不新建面板，避免意外的深嵌套）；
+         * 目标是叶窗体 → **提升**：新建面板把两者一起装进去。两边的浮窗几何记忆
+         * 都保留 —— 日后把成员从这个面板里拖出来，会回到它当初的大小与位置
+         * （这正是 `DockForm.float` 的记忆语义）。
+         *
+         * `rect` 是命令层按视口夹紧过的**并集矩形**（reducer 保持纯函数，不读
+         * window）；缺省退化取目标浮窗的几何。
+         */
+        composeFloats(
+            state,
+            action: PayloadAction<{
+                sourceFormId: string;
+                targetFormId: string;
+                zone: DockDropZone;
+                rect?: { x: number; y: number; w: number; h: number } | null;
+            }>,
+        ) {
+            const { sourceFormId, targetFormId, zone, rect } = action.payload;
+            const source = state.layout.forms[sourceFormId];
+            const target = state.layout.forms[targetFormId];
+            if (!source?.floating || !target?.floating) return;
+            if (sourceFormId === targetFormId) return;
+
+            if (isPanelForm(target) && target.childRootId) {
+                // 深度上限：往面板里塞面板（源是面板时）要先过这一关。
+                if (
+                    isPanelForm(source) &&
+                    !panelDepthFits(
+                        state.layout,
+                        target.childRootId,
+                        state.settings.maxPanelDepth,
+                    )
+                ) {
+                    return;
+                }
+                const rootId = target.childRootId;
+                const tree = state.layout.roots[rootId];
+                const allocate = zoneIdAllocatorForLayout(state.layout);
+                const nextTree = tree
+                    ? dockForm(
+                          tree,
+                          sourceFormId,
+                          zone === "center"
+                              ? { kind: "tab", tabsetId: mainTabsetIdOfTree(tree), rootId }
+                              : { kind: "root", rootId, side: dropZoneToSideKind(zone) },
+                          allocate,
+                      )
+                    : makeTabset(allocate(), sourceFormId);
+                const pruned = pruneTree(nextTree);
+                updateLayout(state, {
+                    ...state.layout,
+                    roots: { ...state.layout.roots, [rootId]: pruned ?? nextTree },
+                    forms: {
+                        ...state.layout.forms,
+                        [sourceFormId]: { ...source, floating: false },
+                    },
+                    floatOrder: state.layout.floatOrder.filter((id) => id !== sourceFormId),
+                });
+                state.activeFormId = sourceFormId;
+                return;
+            }
+
+            // ── 提升：目标叶窗体与源窗体共同组成一个新面板 ──────────────
+            if (
+                isPanelForm(source) &&
+                !panelDepthFits(state.layout, null, state.settings.maxPanelDepth)
+            ) {
+                return;
+            }
+            const layout = state.layout;
+            const newFormId = `${DOCK_PANEL_FORM}:${nextFormSuffix(layout, DOCK_PANEL_FORM)}`;
+            const newRootId = nextRootId(layout);
+            const allocate = zoneIdAllocatorForLayout(layout);
+            const seedId = allocate();
+            let tree: DockNode = makeTabset(seedId, targetFormId);
+            tree =
+                zone === "center"
+                    ? addFormToTabset(tree, seedId, sourceFormId)
+                    : splitTabsetWith(tree, seedId, sourceFormId, dropZoneToSideKind(zone), allocate);
+            const pruned = pruneTree(tree);
+            if (!pruned) return;
+
+            const union = rect ?? unionRects(source.float, target.float);
+            // 浮动态渲染以 `float` 为前提（DockFloatingLayer 的空几何守卫）：
+            // 两个来源都缺失（理论不可达）时给默认几何。
+            const panelFloat = union ?? { x: 140, y: 120, w: 720, h: 480 };
+            const forms = {
+                ...layout.forms,
+                [newFormId]: {
+                    ...makePanelForm(newFormId, newRootId),
+                    float: {
+                        ...panelFloat,
+                        anchor: null,
+                        anchorOffsetX: 0,
+                        anchorOffsetY: 0,
+                    },
+                    floating: true,
+                },
+                [targetFormId]: { ...target, floating: false },
+                [sourceFormId]: { ...source, floating: false },
+            };
+            // 新面板顶替**目标**在 z 序里的位置：视觉上"目标窗体变成了一组"，
+            // z 序不应跳动。
+            const targetIndex = layout.floatOrder.indexOf(targetFormId);
+            const floatOrder = layout.floatOrder.filter(
+                (id) => id !== sourceFormId && id !== targetFormId,
+            );
+            floatOrder.splice(Math.min(Math.max(0, targetIndex), floatOrder.length), 0, newFormId);
+            state.layout = {
+                ...layout,
+                roots: { ...layout.roots, [newRootId]: pruned },
+                forms,
+                order: layout.order.includes(newFormId)
+                    ? layout.order
+                    : [...layout.order, newFormId],
+                floatOrder,
+            };
+            state.activeFormId = sourceFormId;
+        },
     },
 });
 
@@ -543,31 +811,78 @@ const dockSlice = createSlice({
  * **停靠的唯一出口**。
  *
  * 三件事必须同时成立，否则用户就会看到"停靠之后窗口没被正确展示"：
- * 1. 窗体真的落到了布局树上（`dockForm` 负责搬运 + 兜底 + 展开折叠组）；
+ * 1. 窗体真的落到了目标根的布局树上（`dockForm` 负责搬运 + 兜底 + 展开折叠组）；
  * 2. `floating` 被清掉（否则它同时"在树上"又"在浮动"，两个槽位抢同一个宿主，
  *    内容会落到其中一边，另一边空白）；
  * 3. `float` 几何**保留**（那是"下次拆下来用多大"的记忆，与"此刻是否浮动"无关）。
  *
- * 把这三件事收在一个函数里，是因为它们曾经散落在三个 reducer 里，而其中一处
- * （`mergeFormInto`）漏了第 2 条又多做了一次"清几何"—— 正是本次缺陷的来源。
+ * 多根之后新增两条防线：
+ * 4. **跨根搬运**——源根与目标根不是同一棵树时，先插目标、再从源根摘除（两个
+ *    动作在一次 dispatch 里完成，中间态不可见）；
+ * 5. **自引用与深度防护**——面板不能被塞进它自己的子树（渲染是递归的），嵌套
+ *    深度受用户设置约束。
  *
  * @returns 是否真的停靠了（窗体不存在时返回 false）。
  */
 function dockFormInto(state: DockState, formId: string, target: DockInsertTarget): boolean {
     const form = state.layout.forms[formId];
     if (!form) return false;
-    state.layout = {
+    const rootId = target.rootId ?? MAIN_ROOT_ID;
+
+    // 防线一：面板不能落进自己的子树（主根除外——主根永远不可能属于面板）。
+    if (isPanelForm(form) && form.childRootId) {
+        const forbidden = collectSubtreeRootIds(state.layout, form.childRootId);
+        if (forbidden.has(rootId)) return false;
+    }
+    // 防线二：嵌套深度上限（交互语义由设置表达，这里是 reducer 层的统一闸门）。
+    if (isPanelForm(form) && !panelDepthFits(state.layout, rootId, state.settings.maxPanelDepth)) {
+        return false;
+    }
+    // 防线三：独立窗口承载的面板只收"可拆"的成员 —— 整个面板已经在另一个
+    // JS 上下文里渲染了，混进不可拆的窗体等于把那条约束击穿。
+    if (collectOsWindowRootIdSet(state.layout).has(rootId)) {
+        const candidate = synthesizePanelDefinition(state.layout, formId);
+        if (!candidate?.detachable) return false;
+    }
+
+    const allocate = zoneIdAllocatorForLayout(state.layout);
+    let roots = state.layout.roots;
+    const targetTree = roots[rootId];
+    const sourceRootId = rootOfForm(state.layout, formId);
+
+    if (!targetTree) {
+        // 空面板：播种它的第一个标签组。
+        roots = { ...roots, [rootId]: makeTabset(allocate(), formId) };
+    } else if (sourceRootId === rootId || sourceRootId === null) {
+        roots = { ...roots, [rootId]: dockForm(targetTree, formId, target, allocate) };
+    } else {
+        // 跨根搬运：先插目标根（窗体不在那棵树里，moveForm 走"直接插入"），
+        // 再从源根摘除。顺序无所谓 —— 两步都在同一次 dispatch 里。
+        roots = { ...roots, [rootId]: dockForm(targetTree, formId, target, allocate) };
+        const pruned = removeForm(roots[sourceRootId], formId);
+        if (pruned === null) {
+            if (sourceRootId !== MAIN_ROOT_ID) {
+                const next = { ...roots };
+                delete next[sourceRootId];
+                roots = next;
+            }
+        } else {
+            roots = { ...roots, [sourceRootId]: pruned };
+        }
+    }
+
+    updateLayout(state, {
         ...state.layout,
-        tree: dockForm(state.layout.tree, formId, target),
+        roots,
         forms: { ...state.layout.forms, [formId]: { ...form, floating: false } },
         floatOrder: state.layout.floatOrder.filter((id) => id !== formId),
-    };
+    });
     state.activeFormId = formId;
     return true;
 }
 
 /** 在整棵树上把包含 formId 的标签组切到该窗体。 */
-function setActiveTabEverywhere(node: DockLayout["tree"], formId: string): DockLayout["tree"] {
+function setActiveTabEverywhere(node: DockNode, formId: string): DockNode {
     if (node.t === "tabset") {
         return node.tabs.includes(formId) ? { ...node, active: formId } : node;
     }
@@ -578,12 +893,219 @@ function setActiveTabEverywhere(node: DockLayout["tree"], formId: string): DockL
     };
 }
 
-function findTabsetIdOf(layout: DockLayout, formId: string): string | null {
-    const walk = (node: DockLayout["tree"]): string | null => {
-        if (node.t === "tabset") return node.tabs.includes(formId) ? node.id : null;
-        return walk(node.a) ?? walk(node.b);
+/** zone id 在哪棵根里（多根之后这是所有"按 id 改树"操作的入口）。 */
+function rootIdOfZone(layout: DockLayout, zoneId: string): string | null {
+    for (const [rootId, tree] of Object.entries(layout.roots)) {
+        if (tree && findZone(tree, zoneId)) return rootId;
+    }
+    return null;
+}
+
+/** 参照窗体所在的 {根, 标签组}（splitFormTo / mergeFormInto 的目标解析）。 */
+function locateTabsetOfForm(
+    layout: DockLayout,
+    formId: string,
+): { rootId: string; tabsetId: string } | null {
+    for (const [rootId, tree] of Object.entries(layout.roots)) {
+        const tabset = tree ? findTabsetOfForm(tree, formId) : null;
+        if (tabset) return { rootId, tabsetId: tabset.id };
+    }
+    return null;
+}
+
+/** 布局根的嵌套深度：主根为 0，面板的根 = 它自己的深度。 */
+function depthOfRoot(layout: DockLayout, rootId: string): number {
+    if (rootId === MAIN_ROOT_ID) return 0;
+    const ownerId = ownerOfRoot(layout, rootId);
+    return ownerId ? panelDepth(layout, ownerId) : 0;
+}
+
+/** 面板落到 rootId 之后深度是否仍在限额内（`rootId` 为 null 表示浮出为顶层）。 */
+function panelDepthFits(layout: DockLayout, rootId: string | null, maxDepth: number): boolean {
+    const base = rootId === null ? 0 : depthOfRoot(layout, rootId);
+    return base + 1 <= Math.max(1, maxDepth);
+}
+
+/** 当前由独立操作系统窗口承载的全部布局根。 */
+function collectOsWindowRootIdSet(layout: DockLayout): Set<string> {
+    const out = new Set<string>();
+    for (const form of Object.values(layout.forms)) {
+        if (
+            isPanelForm(form) &&
+            form.childRootId &&
+            form.floating === true &&
+            form.floatMode === "osWindow"
+        ) {
+            for (const nested of collectSubtreeRootIds(layout, form.childRootId)) out.add(nested);
+        }
+    }
+    return out;
+}
+
+/**
+ * 布局变更的统一出口：写回新布局，并追查"这次变更清空了哪些面板根"。
+ *
+ * 【为什么要在这里追查】"面板失去最后一个成员 → 自动解散"是一条跨操作的
+ * 收尾规则（拖走、关掉、拆出独立窗口都会触发），而触发点分散在每个 reducer。
+ * 与其在每处手工判断，不如对比变更前后根表里**消失的条目** —— 从有到无的
+ * 转移本身就是判据，显式新建的空面板从未有过条目，天然不会被误伤。
+ */
+function updateLayout(state: DockState, next: DockLayout): void {
+    const emptiedRootIds: string[] = [];
+    for (const [rootId, tree] of Object.entries(state.layout.roots)) {
+        if (tree !== undefined && next.roots[rootId] === undefined) emptiedRootIds.push(rootId);
+    }
+    state.layout = next;
+    if (emptiedRootIds.length > 0 && state.settings.emptyPanelAutoDissolve) {
+        dissolveEmptiedPanels(state, emptiedRootIds);
+    }
+}
+
+/** 面板根刚被清空后的级联解散：面板消失可能又清空外层面板，逐层跟进。 */
+function dissolveEmptiedPanels(state: DockState, emptiedRootIds: string[]): void {
+    const queue = [...emptiedRootIds];
+    while (queue.length > 0) {
+        const rootId = queue.shift() as string;
+        const ownerId = ownerOfRoot(state.layout, rootId);
+        if (!ownerId) continue;
+        // 解散动作可能再清空别的根：dissolvePanelForm 返回新清空的根，继续入队。
+        for (const nested of dissolvePanelForm(state, ownerId)) queue.push(nested);
+    }
+}
+
+/**
+ * 解散一个面板窗体（从布局中彻底移除面板与其根条目）。
+ *
+ * @returns 本次解散**新清空**的布局根 id（供级联），通常为空。
+ */
+function dissolvePanelForm(state: DockState, formId: string): string[] {
+    const layout = state.layout;
+    const form = layout.forms[formId];
+    if (!isPanelForm(form) || !form?.childRootId) return [];
+    const childRootId = form.childRootId;
+    const panelTree = layout.roots[childRootId] ?? null;
+    const emptied: string[] = [];
+
+    let roots = { ...layout.roots };
+    let forms = { ...layout.forms };
+    const order = layout.order.filter((id) => id !== formId);
+    let floatOrder = layout.floatOrder.filter((id) => id !== formId);
+
+    if (form.floating) {
+        // 浮动面板：成员按各自记住的浮窗几何还回浮动层（嵌套面板整体浮出，
+        // 它的根与内容原样保留 —— 解散只拆一层）。
+        if (panelTree) {
+            for (const memberId of collectDockedForms(panelTree)) {
+                const member = forms[memberId];
+                if (!member) continue;
+                const remembered =
+                    member.float ??
+                    { x: 140 + order.length * 28, y: 120 + order.length * 28, w: 640, h: 440 };
+                forms = { ...forms, [memberId]: { ...member, floating: true, float: remembered } };
+                floatOrder = [...floatOrder.filter((id) => id !== memberId), memberId];
+            }
+        }
+    } else {
+        // 停靠面板：用自己的树替换它在父容器中的位置。
+        const parentRootId = rootOfForm(layout, formId);
+        const host = parentRootId ? findTabsetOfForm(roots[parentRootId], formId) : null;
+        if (parentRootId && host) {
+            const parentTree = roots[parentRootId];
+            const tabsWithout = host.tabs.filter((id) => id !== formId);
+            if (!panelTree) {
+                const pruned = removeForm(parentTree, formId);
+                if (pruned === null) {
+                    if (parentRootId !== MAIN_ROOT_ID) {
+                        delete roots[parentRootId];
+                        emptied.push(parentRootId);
+                    }
+                } else {
+                    roots = { ...roots, [parentRootId]: pruned };
+                }
+            } else if (tabsWithout.length === 0) {
+                // 宿主组除面板外没有别的标签：整组直接换成面板的树。
+                roots = { ...roots, [parentRootId]: panelTree };
+            } else if (panelTree.t === "tabset") {
+                // 面板内容本身就是一组标签 → 摊平并入宿主组。
+                const merged: DockTabsetNode = {
+                    ...host,
+                    tabs: [...tabsWithout, ...panelTree.tabs],
+                    active: panelTree.active,
+                };
+                roots = { ...roots, [parentRootId]: replaceZone(parentTree, host.id, merged) };
+            } else {
+                // 面板内容是分割树、宿主组还有别的标签：以面板的分割方向包裹
+                // —— 面板内容占先，其余标签整体排到另一侧。
+                const sibling: DockTabsetNode = {
+                    ...host,
+                    tabs: tabsWithout,
+                    active: tabsWithout.includes(host.active) ? host.active : tabsWithout[0],
+                };
+                const allocate = zoneIdAllocatorForLayout(layout);
+                roots = {
+                    ...roots,
+                    [parentRootId]: replaceZone(parentTree, host.id, {
+                        t: "split",
+                        id: allocate(),
+                        dir: panelTree.dir,
+                        ratio: 0.5,
+                        fixed: null,
+                        a: panelTree,
+                        b: sibling,
+                    }),
+                };
+            }
+        }
+    }
+
+    delete roots[childRootId];
+    delete forms[formId];
+    state.layout = { ...layout, roots, forms, order, floatOrder };
+    return emptied;
+}
+
+/** 面板窗体的后缀分配：`__panel:2`、`__panel:3`…（与 `dockSchema.nextFormSuffix` 同一约定）。 */
+function nextFormSuffix(layout: DockLayout, panelId: string): number {
+    let max = 1;
+    const pattern = new RegExp(`^${panelId}:(\\d+)$`);
+    for (const formId of Object.keys(layout.forms)) {
+        const matched = pattern.exec(formId);
+        if (matched) max = Math.max(max, Number(matched[1]));
+    }
+    return max + 1;
+}
+
+/** 一棵树里的"主编辑区"标签组：优先含 preferMain 面板者，否则第一个（浮窗组合的落点）。 */
+function mainTabsetIdOfTree(tree: DockNode): string {
+    const tabsets = collectTabsets(tree);
+    return tabsets[0]?.id ?? "";
+}
+
+/** 落点部位 → 分割方向（center 不会走到这里：调用方已分流）。 */
+function dropZoneToSideKind(zone: DockDropZone): "left" | "right" | "top" | "bottom" {
+    return zone === "left" || zone === "right" || zone === "top" || zone === "bottom"
+        ? zone
+        : "right";
+}
+
+/** 两个浮窗矩形的并集（缺省值兜底为后者）。 */
+function unionRects(
+    a: DockFloatGeometry | null | undefined,
+    b: DockFloatGeometry | null | undefined,
+): { x: number; y: number; w: number; h: number } | null {
+    if (!a && !b) return null;
+    if (!a || !b) {
+        const single = (a ?? b) as { x: number; y: number; w: number; h: number };
+        return { x: single.x, y: single.y, w: single.w, h: single.h };
+    }
+    const x = Math.min(a.x, b.x);
+    const y = Math.min(a.y, b.y);
+    return {
+        x,
+        y,
+        w: Math.max(a.x + a.w, b.x + b.w) - x,
+        h: Math.max(a.y + a.h, b.y + b.h) - y,
     };
-    return walk(layout.tree);
 }
 
 export const {
@@ -615,6 +1137,9 @@ export const {
     saveDockPreset,
     applyDockPreset,
     deleteDockPreset,
+    createEmptyPanel,
+    dissolvePanel,
+    composeFloats,
 } = dockSlice.actions;
 
 export default dockSlice.reducer;

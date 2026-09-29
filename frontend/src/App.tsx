@@ -85,7 +85,13 @@ import {
     PANEL_APPEARANCE,
 } from "./components/dock/registerBuiltinPanels";
 import { setPanelRenderer } from "./features/dock/panelRenderer";
-import { cycleFocus, maximizeActive, toggleFloatActive } from "./features/dock/dockApi";
+import {
+    addEmptyPanel,
+    cycleFocus,
+    dissolvePanelCommand,
+    maximizeActive,
+    toggleFloatActive,
+} from "./features/dock/dockApi";
 import { hydrateDock } from "./features/dock/dockSlice";
 import {
     finalizeDockHydration,
@@ -2783,6 +2789,12 @@ function AppInner() {
                     break;
                 case "layout.maximize":
                     maximizeActive(dispatch);
+                    break;
+                case "layout.newPanel":
+                    addEmptyPanel(dispatch);
+                    break;
+                case "layout.dissolvePanel":
+                    dissolvePanelCommand(dispatch, store.getState);
                     break;
                 case "project.new":
                     handleNewProject();

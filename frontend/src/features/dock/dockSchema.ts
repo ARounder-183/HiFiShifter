@@ -19,19 +19,28 @@
 
 import {
     clampRatio,
+    collectDockedForms,
     collectTabsets,
     findTabsetOfForm,
     insertForm,
     isFormVisible,
+    isPanelForm,
+    makeTabset,
+    nextZoneIdInLayout,
     pinChildSize,
     pruneTree,
     removeForm,
+    rootOfForm,
     splitRootWith,
     type DockInsertTarget,
 } from "./dockTree";
+import { panelDepth } from "./dockPanel";
 import { getPanel, isPanelRegistered, listPanels, type PanelDefinition } from "./panelRegistry";
 import {
     DOCK_LAYOUT_SCHEMA,
+    DOCK_MAX_PANEL_DEPTH_HARD,
+    DOCK_PANEL_FORM,
+    MAIN_ROOT_ID,
     type DockFloatGeometry,
     type DockForm,
     type DockPlacement,
@@ -91,7 +100,7 @@ export function createDefaultDockLayout(): DockLayout {
 
     return {
         schema: DOCK_LAYOUT_SCHEMA,
-        tree,
+        roots: { [MAIN_ROOT_ID]: tree },
         forms: {
             [MAIN_FORM_TIMELINE]: {
                 id: MAIN_FORM_TIMELINE,
@@ -345,7 +354,14 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
     for (const [formId, form] of Object.entries(rawForms)) {
         if (!form || typeof form !== "object") continue;
         const panelId = typeof form.panelId === "string" ? form.panelId : formId;
-        if (!isPanelRegistered(panelId)) continue;
+        const isPanel = panelId === DOCK_PANEL_FORM;
+        if (isPanel) {
+            // 面板不在注册表里，靠 `childRootId` 放行：根 id 缺失/非法的面板无法
+            // 渲染也无法播种，属于"坏字段修复"，整条丢弃（其余成员退化为已关闭）。
+            if (typeof form.childRootId !== "string" || !form.childRootId) continue;
+        } else if (!isPanelRegistered(panelId)) {
+            continue;
+        }
         const next: DockForm = { id: formId, panelId, float: normalizeFloat(form.float) };
         // 兼容早期落盘数据：那时 `float != null` 就是"正在浮动"，没有独立标志。
         next.floating =
@@ -355,6 +371,7 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
         if (form.props && typeof form.props === "object") {
             next.props = form.props as Record<string, unknown>;
         }
+        if (isPanel) next.childRootId = form.childRootId;
         forms[formId] = next;
     }
 
@@ -366,11 +383,37 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
 
     const knownForms = new Set(Object.keys(forms));
 
-    // ── 树 ────────────────────────────────────────────────────────
+    // ── 根表：主根必在；其余只保留被面板引用的（孤儿根丢弃）────────
+    const rawRoots = (input.roots ?? {}) as Record<string, unknown>;
     const seen = new Set<string>();
-    const normalized = normalizeTree(input.tree, knownForms, seen, new Set<string>());
-    const tree =
-        pruneTree(normalized ?? createDefaultDockLayout().tree) ?? createDefaultDockLayout().tree;
+    const roots: Record<string, DockNode> = {};
+    const defaultTree = createDefaultDockLayout().roots[MAIN_ROOT_ID] as DockNode;
+    // 主根缺失或不可用 → 出厂布局。主是不可渲染的空缺，属于可以整体回退的一类。
+    const mainNorm = normalizeTree(
+        rawRoots[MAIN_ROOT_ID] ?? defaultTree,
+        knownForms,
+        seen,
+        new Set<string>(),
+    );
+    roots[MAIN_ROOT_ID] = pruneTree(mainNorm ?? defaultTree) ?? defaultTree;
+    for (const [rootId, rawTree] of Object.entries(rawRoots)) {
+        if (rootId === MAIN_ROOT_ID) continue;
+        const owned = Object.values(forms).some((form) => form.childRootId === rootId);
+        if (!owned) continue;
+        const norm = normalizeTree(rawTree, knownForms, seen, new Set<string>());
+        const pruned = norm ? pruneTree(norm) : null;
+        // pruned === null = 面板的所有成员都不可用 → 空面板（根条目缺席即空）。
+        if (pruned) roots[rootId] = pruned;
+    }
+    // 兼容直接传入的 v1 形状（未经迁移入口的调用方）：单棵 tree 视作主根。
+    const legacyTree = (input as { tree?: unknown }).tree;
+    if (!rawRoots[MAIN_ROOT_ID] && legacyTree && typeof legacyTree === "object") {
+        const norm = normalizeTree(legacyTree, knownForms, seen, new Set<string>());
+        roots[MAIN_ROOT_ID] = pruneTree(norm ?? roots[MAIN_ROOT_ID]) ?? roots[MAIN_ROOT_ID];
+    }
+
+    breakPanelCycles(forms, roots);
+    enforcePanelDepthCap(forms, roots);
 
     // ── 顺序：磁盘上的顺序优先，缺的按窗体表补全 ─────────────────
     const order: string[] = [];
@@ -383,10 +426,12 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
         if (!order.includes(formId)) order.push(formId);
     }
 
-    // 可见性互斥：出现在树上的窗体必然处于停靠态（浮窗不占布局树）。
+    // 可见性互斥：出现在**任何**根里的窗体必然处于停靠态（浮窗不占布局树）。
     // 注意只清 `floating`，**保留** `float` 几何 —— 那是"下次拆下来时用多大"。
     for (const form of Object.values(forms)) {
-        if (form.floating && findTabsetOfForm(tree, form.id)) form.floating = false;
+        if (!form.floating) continue;
+        const docked = Object.values(roots).some((tree) => findTabsetOfForm(tree, form.id));
+        if (docked) form.floating = false;
     }
 
     const floatOrder: string[] = [];
@@ -400,7 +445,7 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
 
     return {
         schema: DOCK_LAYOUT_SCHEMA,
-        tree,
+        roots,
         forms,
         order,
         floatOrder,
@@ -411,31 +456,141 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
     };
 }
 
+/**
+ * 面板环形引用的归一化防护。
+ *
+ * 交互路径有自引用防护（拖拽时排除自己子树里的落点），但布局是持久化 JSON，
+ * 手工编辑或外部工具可能拼出 A 含 B、B 又含 A 的环 —— 渲染是递归的，环就是
+ * 栈溢出。这里沿"面板 → 它的树里直接引用的面板"建图做 DFS，环上成员从它们
+ * 被引用的每一棵根里摘除（摘成空根的删除条目 = 面板退化为空面板）。
+ */
+function breakPanelCycles(forms: Record<string, DockForm>, roots: Record<string, DockNode>): void {
+    const edges = new Map<string, string[]>();
+    for (const form of Object.values(forms)) {
+        if (!isPanelForm(form) || !form.childRootId) continue;
+        const tree = roots[form.childRootId];
+        edges.set(
+            form.id,
+            tree
+                ? collectDockedForms(tree).filter((id) => {
+                      const member = forms[id];
+                      return member ? isPanelForm(member) : false;
+                  })
+                : [],
+        );
+    }
+    const mark = new Map<string, 0 | 1 | 2>();
+    const cyclic = new Set<string>();
+    const visit = (id: string): void => {
+        const state = mark.get(id) ?? 0;
+        if (state === 1) {
+            cyclic.add(id);
+            return;
+        }
+        if (state === 2) return;
+        mark.set(id, 1);
+        for (const child of edges.get(id) ?? []) visit(child);
+        mark.set(id, 2);
+    };
+    for (const id of edges.keys()) visit(id);
+    if (cyclic.size === 0) return;
+    for (const panelId of cyclic) {
+        for (const [rootId, tree] of Object.entries(roots)) {
+            const next = removeForm(tree, panelId);
+            if (next === null) delete roots[rootId];
+            else if (next !== tree) roots[rootId] = next;
+        }
+    }
+}
+
+/**
+ * 面板嵌套的硬上限（`DOCK_MAX_PANEL_DEPTH_HARD`）。
+ *
+ * 交互上限是用户设置（`maxPanelDepth`），归一化读不到设置 —— 但递归渲染必须
+ * 有最后一道与设置无关的防线：超限面板从它的父容器里摘除（窗体记录保留，
+ * 退化为已关闭）。摘除后它的整棵子树不可达，无需递归处理。
+ */
+function enforcePanelDepthCap(
+    forms: Record<string, DockForm>,
+    roots: Record<string, DockNode>,
+): void {
+    const layout: DockLayout = {
+        schema: DOCK_LAYOUT_SCHEMA,
+        roots,
+        forms,
+        order: Object.keys(forms),
+        floatOrder: [],
+        gutters: DEFAULT_GUTTER_SIZES,
+        tabPosition: "bottom",
+    };
+    const offenders = Object.values(forms)
+        .filter((form) => isPanelForm(form) && form.childRootId)
+        .filter((form) => panelDepth(layout, form.id) > DOCK_MAX_PANEL_DEPTH_HARD);
+    for (const form of offenders) {
+        for (const [rootId, tree] of Object.entries(roots)) {
+            const next = removeForm(tree, form.id);
+            if (next === null) delete roots[rootId];
+            else if (next !== tree) roots[rootId] = next;
+        }
+    }
+}
+
 function normalizePresets(raw: unknown, knownForms: Set<string>): Record<string, DockPreset> {
     if (!raw || typeof raw !== "object") return {};
     const out: Record<string, DockPreset> = {};
     for (const [name, value] of Object.entries(raw as Record<string, Partial<DockPreset>>)) {
         if (!value || typeof value !== "object") continue;
-        const seen = new Set<string>();
-        const tree = normalizeTree(value.tree, knownForms, seen, new Set<string>());
-        if (tree === null) continue;
-        const pruned = pruneTree(tree);
-        if (pruned === null) continue;
+        // 窗体记录沿用外层布局的 knownForms 过滤：预设引用的面板必须当前存在
+        // （面板被解散后再套旧预设，引用会被剔除而不是凭空复活）。
         const forms: Record<string, DockForm> = {};
         for (const [formId, form] of Object.entries(value.forms ?? {})) {
             if (!form || typeof form !== "object") continue;
             const panelId = typeof form.panelId === "string" ? form.panelId : formId;
-            if (!knownForms.has(formId) || !isPanelRegistered(panelId)) continue;
+            const isPanel = panelId === DOCK_PANEL_FORM;
+            if (isPanel) {
+                if (typeof form.childRootId !== "string" || !form.childRootId) continue;
+            } else if (!knownForms.has(formId) || !isPanelRegistered(panelId)) {
+                continue;
+            }
             const next: DockForm = { id: formId, panelId, float: normalizeFloat(form.float) };
             next.floating =
                 form.floating === true || (form.floating === undefined && next.float !== null);
             next.floatMode = normalizeFloatMode(form.floatMode);
             if (typeof form.title === "string" && form.title.trim()) next.title = form.title;
+            if (isPanel) next.childRootId = form.childRootId;
             forms[formId] = next;
+        }
+        const presetKnownForms = new Set(Object.keys(forms));
+
+        // 根表：v2 形状的 `roots`，或 v1 遗留的单棵 `tree`（就地升级为主根，
+        // 下次落盘自动写成 v2 形状 —— 与顶层布局的迁移同一待遇）。
+        const legacy = value as Record<string, unknown>;
+        const rawRoots = (legacy.roots ??
+            (legacy.tree ? { [MAIN_ROOT_ID]: legacy.tree } : {})) as Record<string, unknown>;
+        const seen = new Set<string>();
+        const roots: Record<string, DockNode> = {};
+        const mainNorm = normalizeTree(
+            rawRoots[MAIN_ROOT_ID],
+            presetKnownForms,
+            seen,
+            new Set<string>(),
+        );
+        // 预设的主根不可用 = 整个预设作废（与今日"树不可用 → 丢弃预设"一致）：
+        // 预设的语义是"换一套工作区"，没有主工作区的预设无从谈起。
+        const mainPruned = mainNorm ? pruneTree(mainNorm) : null;
+        if (mainPruned === null) continue;
+        roots[MAIN_ROOT_ID] = mainPruned;
+        for (const [rootId, rawTree] of Object.entries(rawRoots)) {
+            if (rootId === MAIN_ROOT_ID) continue;
+            const owned = Object.values(forms).some((form) => form.childRootId === rootId);
+            if (!owned) continue;
+            const norm = normalizeTree(rawTree, presetKnownForms, seen, new Set<string>());
+            const pruned = norm ? pruneTree(norm) : null;
+            if (pruned) roots[rootId] = pruned;
         }
         out[name] = {
             name,
-            tree: pruned,
+            roots,
             forms,
             order: Array.isArray(value.order)
                 ? value.order.filter((id): id is string => typeof id === "string")
@@ -459,21 +614,48 @@ function normalizePresets(raw: unknown, knownForms: Set<string>): Record<string,
  * 布局的全部导入/恢复路径（`hydrateDock`、`setDockLayout`、`applyDockPreset`）
  * 都经过 `normalizeDockLayout`，因此版本判断只需在这一处生效。
  *
- * v1 是首个版本，所以这里只做"版本不可识别 → 交给归一化重建"的处理；入口
- * 先于归一化存在，是为了让将来新增字段时能在此做定向搬移，而不是被迫把
- * 版本判断写进通用归一化逻辑（那会让通用逻辑越来越难读）。
+ * v1 → v2 是本入口的第一个真实用例：单棵 `tree` 变成根表（面板的到来让"容器"
+ * 成为一等公民，主界面成为 `roots.main`）。搬移是机械的 —— `forms`、`order`、
+ * `floatOrder`、浮窗几何一概不动。
  */
 export function migrateDockLayout(raw: unknown): unknown {
     if (!raw || typeof raw !== "object") return raw;
     const version = (raw as { schema?: unknown }).schema;
-    if (typeof version !== "number" || version <= DOCK_LAYOUT_SCHEMA) return raw;
+    if (typeof version !== "number") return raw;
+    if (version === 1) return migrateV1ToV2(raw);
+    if (version <= DOCK_LAYOUT_SCHEMA) return raw;
     // 来自更新版本（用户降级了应用）：不认识就不猜，交给归一化重建。
     return null;
 }
 
-/** 主编辑区所在的标签组：优先含 `preferMain` 面板者，否则取第一个。 */
-export function findMainTabset(layout: DockLayout): DockTabsetNode | null {
-    const tabsets = collectTabsets(layout.tree);
+function migrateV1ToV2(raw: object): unknown {
+    const source = raw as Record<string, unknown>;
+    // 预设的迁移交给 `normalizePresets`（它同时接受 v2 的 `roots` 与 v1 遗留的
+    // `tree`，一次读取就地升级，下次落盘自动写成 v2 形状）。
+    let roots: Record<string, unknown> = {};
+    if (source.tree && typeof source.tree === "object") {
+        roots = { ...roots, [MAIN_ROOT_ID]: source.tree };
+    } else if (source.roots && typeof source.roots === "object") {
+        // 已经带根表的输入（半迁移的手工数据）：原样保留，交给归一化修补。
+        roots = source.roots as Record<string, unknown>;
+    }
+    return { ...source, schema: DOCK_LAYOUT_SCHEMA, roots, tree: undefined };
+}
+
+/**
+ * 某棵布局根里的"主编辑区"标签组：优先含 `preferMain` 面板者，否则取第一个。
+ *
+ * 【为什么按根而不是全布局】面板出现后，每个面板的树都是一个小工作区，往面板
+ * 里打开窗体（`DockPlacement.rootId`）也要有"它的主组"可依。缺省主根 —— 原
+ * `findMainTabset` 的全部调用方（重新停靠、启动收回）语义不变。
+ */
+export function findMainTabset(
+    layout: DockLayout,
+    rootId: string = MAIN_ROOT_ID,
+): DockTabsetNode | null {
+    const tree = layout.roots[rootId];
+    if (!tree) return null;
+    const tabsets = collectTabsets(tree);
     for (const tabset of tabsets) {
         const isMain = tabset.tabs.some((formId) => {
             const form = layout.forms[formId];
@@ -537,24 +719,38 @@ export function findClosedFormForPanel(layout: DockLayout, panelId: string): str
     return null;
 }
 
-/** 把一个窗体放到指定落点。 */
+/**
+ * 把一个窗体放到指定落点，返回**目标根的新树**。
+ *
+ * 【返回树而不是布局】调用方知道落点属于哪个根（`placement.rootId`），写回去
+ * 是它的事；本函数只负责"在给定的现有结构上算出新结构"。
+ *
+ * 【空根的播种】目标根条目缺失 = 空面板：任何落点都等价于"播种它的第一个
+ * 标签组"—— 用户把窗体拖进空面板、或命令式地把窗体开进空面板，走的都是这里。
+ */
 export function placeForm(layout: DockLayout, formId: string, placement: DockPlacement): DockNode {
+    const rootId = placement.rootId ?? MAIN_ROOT_ID;
+    const base = layout.roots[rootId];
+    if (!base) return makeTabset(nextZoneIdInLayout(layout), formId);
+
     if (placement.side === "center" || placement.tabWith) {
-        // 先尝试并入同伴组；没有同伴（或它就是 center）则并入主编辑组。
+        // 先尝试并入同伴组；没有同伴（或它就是 center）则并入该根的主编辑组。
         if (placement.tabWith) {
             const companion = findVisibleFormForPanel(layout, placement.tabWith);
-            const target = companion ? findTabsetOfForm(layout.tree, companion) : null;
-            if (target)
-                return insertForm(layout.tree, formId, { kind: "tab", tabsetId: target.id });
+            // 同伴必须在**同一棵根**里：跨根引用会把窗体放错工作区。
+            const companionRoot = companion ? rootOfForm(layout, companion) : null;
+            const target =
+                companion && companionRoot === rootId ? findTabsetOfForm(base, companion) : null;
+            if (target) return insertForm(base, formId, { kind: "tab", tabsetId: target.id });
         }
-        const main = findMainTabset(layout);
-        if (!main) return layout.tree;
-        return insertForm(layout.tree, formId, { kind: "tab", tabsetId: main.id });
+        const main = findMainTabset(layout, rootId);
+        if (!main) return base;
+        return insertForm(base, formId, { kind: "tab", tabsetId: main.id });
     }
 
-    // 边缘落点：拆整个工作区，让新组贯通全高/全宽（默认落点的正确语义）。
-    const before = new Set(collectTabsets(layout.tree).map((tabset) => tabset.id));
-    const next = splitRootWith(layout.tree, formId, placement.side);
+    // 边缘落点：拆该根的整个工作区，让新组贯通全高/全宽（默认落点的正确语义）。
+    const before = new Set(collectTabsets(base).map((tabset) => tabset.id));
+    const next = splitRootWith(base, formId, placement.side);
     if (!placement.sizePx) return next;
 
     const created = collectTabsets(next).find(
@@ -615,8 +811,17 @@ export function openPanelInLayout(
         : { id: formId, panelId, float: null, floating: false };
     const base: DockLayout = { ...layout, forms, order };
     const resolved = placement ?? definition.defaultPlacement ?? { side: "center" };
+    const targetRootId = resolved.rootId ?? MAIN_ROOT_ID;
     const tree = placeForm(base, formId, resolved);
-    return { ...base, tree: pruneTree(tree) ?? base.tree };
+    const pruned = pruneTree(tree);
+    return {
+        ...base,
+        roots: {
+            ...base.roots,
+            [targetRootId]:
+                pruned ?? base.roots[targetRootId] ?? makeTabset(nextZoneIdInLayout(base), formId),
+        },
+    };
 }
 
 /** 多实例窗体的后缀：`paramEditor:2`、`paramEditor:3`… */
@@ -631,9 +836,13 @@ function nextFormSuffix(layout: DockLayout, panelId: string): number {
 }
 
 /**
- * 关掉一个窗体（从树上摘除 / 清掉浮动几何），保留窗体记录。
+ * 关掉一个窗体（从所在的树上摘除 / 清掉浮动几何），保留窗体记录。
  *
  * 拒绝关掉最后一个可见窗体：空布局无法渲染，也不该是可持久化的状态。
+ *
+ * 【面板被关闭 = 整棵子树休眠】面板从所在树摘除后，它子树里的窗体不可达
+ * （见 `collectReachableRootIds`），自然表现为"全部消失"；但根条目**保留**
+ * —— 重开面板即恢复全部内容，与"关闭窗体保留标题与 props"同一承诺。
  */
 export function closeFormInLayout(layout: DockLayout, formId: string): DockLayout {
     const form = layout.forms[formId];
@@ -642,9 +851,19 @@ export function closeFormInLayout(layout: DockLayout, formId: string): DockLayou
     const visibleCount = layout.order.filter((id) => isFormVisible(layout, id)).length;
     if (visibleCount <= 1 && isFormVisible(layout, formId)) return layout;
 
-    const tree = removeForm(layout.tree, formId) ?? layout.tree;
+    const roots = { ...layout.roots };
+    const sourceRootId = rootOfForm(layout, formId);
+    if (sourceRootId) {
+        const pruned = removeForm(roots[sourceRootId], formId);
+        if (pruned === null) {
+            // 主根不允许被清空（守卫在上面）；面板根被清空 = 空面板，删条目。
+            if (sourceRootId !== MAIN_ROOT_ID) delete roots[sourceRootId];
+        } else {
+            roots[sourceRootId] = pruned;
+        }
+    }
     const forms = { ...layout.forms, [formId]: { ...form, floating: false } };
-    return { ...layout, tree, forms, floatOrder: layout.floatOrder.filter((id) => id !== formId) };
+    return { ...layout, roots, forms, floatOrder: layout.floatOrder.filter((id) => id !== formId) };
 }
 
 /** 供外部构造落点用。 */

@@ -30,8 +30,10 @@ import { useI18n } from "../../i18n/I18nProvider";
 import { DockLayoutSettingsDialog } from "./DockLayoutSettingsDialog";
 import { exportLayoutJson } from "../../services/api/dockLayout";
 import {
+    addEmptyPanel,
     applyPreset,
     deletePreset,
+    dissolvePanelCommand,
     exportLayoutJsonFromLayout,
     importLayoutJson,
     listPanelEntriesFromLayout,
@@ -41,6 +43,9 @@ import {
     togglePanelVisible,
     reclaimDetachedForm,
 } from "../../features/dock/dockApi";
+import { focusForm } from "../../features/dock/dockSlice";
+import { panelTitleOf } from "../../features/dock/dockPanel";
+import { isPanelForm } from "../../features/dock/dockTree";
 import { getPanel } from "../../features/dock/panelRegistry";
 import { AppFileInput } from "../../ui/FileInput";
 import { AppDialog } from "../../ui/Dialog";
@@ -166,6 +171,14 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
                 .filter((form): form is NonNullable<typeof form> => form?.floatMode === "osWindow"),
         [layout],
     );
+    /** 现存的全部面板窗体（用于"面板"子菜单；顺序即创建顺序）。 */
+    const panelForms = useMemo(
+        () =>
+            layout.order
+                .map((formId) => layout.forms[formId])
+                .filter((form): form is NonNullable<typeof form> => isPanelForm(form)),
+        [layout],
+    );
     const presetNames = useMemo(() => listPresetNamesFromLayout(layout), [layout]);
 
     // 导出走后端命令（原生保存对话框 + 写文件）：Tauri 的 WebView 默认拦截
@@ -209,6 +222,33 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
                         </DropdownMenu.SubContent>
                     </DropdownMenu.Sub>
                 ) : null}
+
+                {/* 面板：现存的容器窗体。点按聚焦；标题按内容派生（重命名过则用
+                    用户文本）。仿照 os_windows 的模式：没有面板时不渲染空壳。 */}
+                {panelForms.length > 0 ? (
+                    <DropdownMenu.Sub>
+                        <DropdownMenu.SubTrigger>{tf("layout_panels")}</DropdownMenu.SubTrigger>
+                        <DropdownMenu.SubContent>
+                            {panelForms.map((form) => (
+                                <DropdownMenu.Item
+                                    key={form.id}
+                                    onSelect={() => dispatch(focusForm(form.id))}
+                                >
+                                    {panelTitleOf(layout, form.id, tf)}
+                                </DropdownMenu.Item>
+                            ))}
+                        </DropdownMenu.SubContent>
+                    </DropdownMenu.Sub>
+                ) : null}
+                <DropdownMenu.Item onSelect={() => addEmptyPanel(dispatch)}>
+                    {tf("layout_new_panel")}
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                    color="red"
+                    onSelect={() => dissolvePanelCommand(dispatch, store.getState)}
+                >
+                    {tf("layout_dissolve_panel")}
+                </DropdownMenu.Item>
 
                 <DropdownMenu.Sub>
                     <DropdownMenu.SubTrigger>{tf("layout_presets")}</DropdownMenu.SubTrigger>

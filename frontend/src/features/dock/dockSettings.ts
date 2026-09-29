@@ -46,6 +46,25 @@ export interface DockSettings {
      * 可以固定成"混音布局"开机即用。
      */
     startupLayout?: string;
+    /**
+     * 浮窗拖到浮窗上是否组合成面板。
+     *
+     * 「组合」是新的默认落点语义（拖动 + 停靠修饰键 → 与另一浮窗共同组成面板）。
+     * 有些用户只想让浮窗互相重叠、不想要一个新层级 —— 这道总闸让组合可以被
+     * 整体关掉，关闭后浮窗拖拽行为与旧版完全一致。
+     */
+    floatComposeEnabled?: boolean;
+    /**
+     * 面板失去最后一个成员后是否自动解散。
+     *
+     * 判据是"从有成员变为无成员"这一次转移：显式新建的空面板从未有过成员，
+     * 不会被误删。开着它的意义在于拖走唯一成员后面板随之消失，不留一个空窗。
+     */
+    emptyPanelAutoDissolve?: boolean;
+    /** 面板标题是否显示活动成员的标题（用户显式重命名永远优先）。 */
+    panelTitleFromChild?: boolean;
+    /** 面板嵌套深度上限（归一化另有一道更高的硬上限兜底）。 */
+    maxPanelDepth?: number;
 }
 
 export type ResolvedDockSettings = Required<DockSettings>;
@@ -76,6 +95,10 @@ export const DEFAULT_DOCK_SETTINGS: ResolvedDockSettings = {
     saveDebounceMs: 400,
     confirmResetLayout: true,
     startupLayout: "last",
+    floatComposeEnabled: true,
+    emptyPanelAutoDissolve: true,
+    panelTitleFromChild: true,
+    maxPanelDepth: 8,
 };
 
 const MODIFIERS: ReadonlyArray<ResolvedDockSettings["dockModifier"]> = [
@@ -134,5 +157,12 @@ export function normalizeDockSettings(
             typeof raw.startupLayout === "string" && raw.startupLayout
                 ? raw.startupLayout
                 : DEFAULT_DOCK_SETTINGS.startupLayout,
+        floatComposeEnabled:
+            raw.floatComposeEnabled ?? DEFAULT_DOCK_SETTINGS.floatComposeEnabled,
+        emptyPanelAutoDissolve:
+            raw.emptyPanelAutoDissolve ?? DEFAULT_DOCK_SETTINGS.emptyPanelAutoDissolve,
+        panelTitleFromChild:
+            raw.panelTitleFromChild ?? DEFAULT_DOCK_SETTINGS.panelTitleFromChild,
+        maxPanelDepth: clampInt(raw.maxPanelDepth, 1, 16, DEFAULT_DOCK_SETTINGS.maxPanelDepth),
     };
 }
