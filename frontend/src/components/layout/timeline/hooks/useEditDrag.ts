@@ -27,7 +27,7 @@ import {
     previewAutoCrossfade,
 } from "./autoCrossfade";
 import { clamp } from "../math";
-import { advanceFineAxisDrag, type FineAxisDragState } from "../fineAxisDrag";
+import { advanceFineAxisDrag, type FineAxisDragState } from "../../../../utils/fineAxisDrag";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
 import { resolveCurvatureEditBase, solveNearestCurveDir } from "../reaperFade";
 import { modifierWatcher } from "./modifierWatcher";

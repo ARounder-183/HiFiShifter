@@ -23,8 +23,8 @@ import {
     type PreviewZone,
 } from "./vibratoPreviewGestures";
 
-/** 手势开始时上报的画布几何（调用方据此构造换算快照）。 */
-export interface VibratoPreviewGestureInfo {
+/** 画布几何：绘制与手势换算共用同一套标尺。 */
+export interface VibratoPreviewGeometry {
     /** CSS 像素宽度。 */
     width: number;
     /** CSS 像素高度。 */
@@ -33,12 +33,39 @@ export interface VibratoPreviewGestureInfo {
     centsPerPx: number;
 }
 
+/** 手势开始时上报的几何 + 按下瞬间的修饰键状态。 */
+export interface VibratoPreviewGestureInfo extends VibratoPreviewGeometry {
+    /**
+     * 按下瞬间的修饰键状态。
+     *
+     * 【为什么起点就要给】「精细调整」按增量缩放位移（见 `utils/fineAxisDrag.ts`），
+     * 起手时修饰键是否已按下决定了首帧走哪个比例 —— 起手就按住时不该按"刚按下"
+     * 的过渡比例处理。
+     */
+    modifiers: VibratoPreviewModifiers;
+}
+
 /** 手势开始时的修饰键状态（用于「精细调整」这类按修饰键缩放的手势）。 */
 export interface VibratoPreviewModifiers {
     ctrlKey: boolean;
     shiftKey: boolean;
     altKey: boolean;
     metaKey: boolean;
+}
+
+/** 从指针事件读出修饰键状态。 */
+function readModifiers(event: {
+    ctrlKey: boolean;
+    shiftKey: boolean;
+    altKey: boolean;
+    metaKey: boolean;
+}): VibratoPreviewModifiers {
+    return {
+        ctrlKey: event.ctrlKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        metaKey: event.metaKey,
+    };
 }
 
 export interface VibratoPreviewCanvasProps {
@@ -90,7 +117,7 @@ export function VibratoPreviewCanvas({
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const containerRef = useRef<HTMLDivElement | null>(null);
     /** 最近一次绘制的几何：手势换算要用与绘制**同一套**标尺。 */
-    const geometryRef = useRef<VibratoPreviewGestureInfo>({ width: 0, height, centsPerPx: 1 });
+    const geometryRef = useRef<VibratoPreviewGeometry>({ width: 0, height, centsPerPx: 1 });
     /** 手势起点（未按下时为 null）。 */
     const gestureRef = useRef<{ zone: PreviewZone; x: number; y: number } | null>(null);
     const interactive = Boolean(handles && (onGestureStart || onGestureMove));
@@ -271,7 +298,7 @@ export function VibratoPreviewCanvas({
         const zone = hitTestPreviewZone(x, geometryRef.current.width, handles);
         gestureRef.current = { zone, x, y };
         event.currentTarget.setPointerCapture(event.pointerId);
-        onGestureStart?.(zone, { ...geometryRef.current });
+        onGestureStart?.(zone, { ...geometryRef.current, modifiers: readModifiers(event) });
     };
 
     const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -285,12 +312,7 @@ export function VibratoPreviewCanvas({
             );
             return;
         }
-        onGestureMove?.(x - gesture.x, y - gesture.y, {
-            ctrlKey: event.ctrlKey,
-            shiftKey: event.shiftKey,
-            altKey: event.altKey,
-            metaKey: event.metaKey,
-        });
+        onGestureMove?.(x - gesture.x, y - gesture.y, readModifiers(event));
     };
 
     const endGesture = (event: React.PointerEvent<HTMLDivElement>) => {

@@ -267,6 +267,83 @@ test("系统预设：预览画布只读（不渲染交互层）", async () => {
 });
 
 /*
+ * 预览画布拖拽：拖到一半才按下 / 松开「精细调整」，不能打断当前拖拽。
+ *
+ * 【为什么值得测】根因是每帧用"从起点算起的**总**位移 × 当前比例"重算 —— 一按
+ * Ctrl，此前累计的位移被整体重新缩小，数值瞬间跳回去（闪回），正在进行的拖拽
+ * 被打断。正确做法是按**增量**缩放：比例变化只影响此后每帧走多少。这里把"累计量
+ * 连续"钉在组件层面（换算本身在 `vibratoPreviewGestures.test.ts` 另有单测）。
+ *
+ * jsdom 没有排版：画布宽度为 0，命中测试因此一律落在**主体**（相位 / 深度）上，
+ * 纵向位移与深度 1:1（`centsPerPx` 初值为 1）—— 断言正好干净。
+ */
+test("预览画布拖拽：中途按下 / 松开精细调整都不闪回", async () => {
+    const custom = sanitizeVibratoPreset({
+        id: "custom_fine_drag",
+        name: "Fine Drag",
+        depthCents: 30,
+    });
+    await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(custom));
+        store.dispatch(setActiveVibratoPreset(custom.id));
+    });
+
+    const container = document.querySelector<HTMLElement>(
+        '[data-testid="vibrato-preview-interactive"]',
+    );
+    expect(container, "交互层应已渲染").toBeTruthy();
+    // jsdom 没有指针捕获 API（画布按下时会调）。
+    container!.setPointerCapture = () => undefined;
+    container!.releasePointerCapture = () => undefined;
+    container!.hasPointerCapture = () => false;
+
+    const depthValue = () =>
+        Number(
+            document.querySelector<HTMLInputElement>('input[aria-label="Depth"]')?.value ?? "NaN",
+        );
+
+    const dragTo = async (clientY: number, ctrlKey: boolean) => {
+        // 手势回调挂在画布容器上（React 合成事件），因此要派发到容器而不是 window。
+        await act(async () => {
+            container!.dispatchEvent(
+                new PointerEvent("pointermove", { bubbles: true, clientY, ctrlKey }),
+            );
+        });
+        return depthValue();
+    };
+
+    await act(async () => {
+        container!.dispatchEvent(
+            new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: 0, clientY: 0 }),
+        );
+    });
+
+    // 不按修饰键：向上 20px → 深度 +20。
+    const coarse = await dragTo(-20, false);
+    expect(coarse).toBeCloseTo(50, 0);
+
+    // 按下 Ctrl 的瞬间：累计量必须还在原处（闪回时这里会掉到 30 出头）。
+    const atToggle = await dragTo(-30, true);
+    expect(atToggle, "按下 Ctrl 的瞬间不得闪回").toBeGreaterThanOrEqual(coarse);
+    // 同样走 10px，现在推进得明显更少（但不为零）。
+    expect(atToggle - coarse).toBeGreaterThan(0);
+    expect(atToggle - coarse).toBeLessThan(10);
+
+    // 按住 Ctrl 继续走：仍在推进，只是慢。
+    const fine = await dragTo(-40, true);
+    expect(fine).toBeGreaterThan(atToggle);
+    expect(fine - atToggle).toBeLessThan(10);
+
+    // 松开 Ctrl：累计量同样不跳，速度恢复。
+    const released = await dragTo(-50, false);
+    expect(released).toBeGreaterThan(fine);
+
+    await act(async () => {
+        container!.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientY: -50 }));
+    });
+});
+
+/*
  * R6b：手绘周期编辑器的入口。
  *
  * 【契约】用户预设可以展开手绘编辑器（`table` 波形的一等入口）；系统预设只读，

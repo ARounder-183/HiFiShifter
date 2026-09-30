@@ -258,13 +258,19 @@ export function buildVibratoCurve(input: VibratoRenderInput): VibratoRenderResul
         const u = wrap01((phases[i] * phaseScale) / (2 * Math.PI) + phaseOffset + phaseJitter);
         const wave = sampleCycle(preset.cycle, u);
 
-        // 深度包络：渐入 → 渐强 → 渐出。三段都按整段时长的一半封顶，
-        // 避免短选区上渐入与渐出互相吃掉。
+        // 深度包络：渐入 → 渐强 → 渐出。渐入 / 渐出各自以**整段时长**为上限 ——
+        // 预设里存的是绝对毫秒，落到具体选区上被选区长度封顶，于是"渐入拉满"就是
+        // 整条线由弱到强。
+        //
+        // 【两者重叠时相乘】它们各是一条独立的增益斜坡，串联起来自然是乘积
+        //（与音频里两级推子串联同理）：两边都拉满时中间会凹下去，而不是突然截断。
+        // 保持乘法而不是"按比例压到刚好相接"，是因为手柄的位置必须始终等于斜坡的
+        // 起点/终点 —— 归一化会让另一个手柄在用户拖这一个时自己动起来。
         const tMs = i * fp;
-        const maxHalf = totalMs / 2;
+        const maxSpan = totalMs;
         let env = 1;
-        const atk = Math.min(attackMs, maxHalf);
-        const rel = Math.min(releaseMs, maxHalf);
+        const atk = Math.min(attackMs, maxSpan);
+        const rel = Math.min(releaseMs, maxSpan);
         if (atk > 0 && tMs < atk) env *= shapeProgress(tMs / atk, preset.attackCurve);
         if (rel > 0 && tMs > totalMs - rel) {
             env *= shapeProgress((totalMs - tMs) / rel, preset.releaseCurve);

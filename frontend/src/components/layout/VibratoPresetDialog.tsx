@@ -109,10 +109,12 @@ import {
     vibratoPresetSummary,
 } from "./vibrato/vibratoDialogLogic";
 import {
+    advancePreviewFineDrag,
     applyPreviewGesture,
+    createPreviewFineDragState,
     cycleWidthPxFor,
     handleLayoutFor,
-    scalePreviewGestureDeltas,
+    type PreviewFineDragState,
     type PreviewGestureSnapshot,
     type PreviewZone,
 } from "./vibrato/vibratoPreviewGestures";
@@ -340,21 +342,27 @@ export function VibratoPresetDialog({
     }
 
     /**
-     * 预览画布手势的活动状态（起点快照 + 区域）。
+     * 预览画布手势的活动状态（起点快照 + 区域 + 精细调整累计量）。
      *
      * 【为什么快照】主体拖动的深度换算依赖画布**当前**的纵轴标尺，而深度一改
      * 标尺（按峰值自适应）也跟着变；每帧重取会让拖动变成非线性甚至反向。起点
      * 取一次，整段手势按同一套几何走。
+     *
+     * 【为什么带着精细调整状态】修饰键可以在拖拽途中按下 / 松开，位移必须**按增量**
+     * 缩放（见 `advancePreviewFineDrag`），否则切换修饰键的一瞬间累计位移被整体
+     * 重算，数值闪回、拖拽被打断。
      */
     const previewGestureRef = useRef<{
         zone: PreviewZone;
         snapshot: PreviewGestureSnapshot;
+        fine: PreviewFineDragState;
     } | null>(null);
 
     /** 画布手势开始：登记起点快照（窗口时长取预览默认几何）。 */
     function handlePreviewGestureStart(zone: PreviewZone, info: VibratoPreviewGestureInfo) {
         if (!draft || isBuiltin) return;
         const windowMs = (PREVIEW_DEFAULT.frameCount - 1) * PREVIEW_DEFAULT.framePeriodMs;
+        const fineActive = isModifierActive(paramFineAdjustKb, info.modifiers);
         previewGestureRef.current = {
             zone,
             snapshot: {
@@ -367,6 +375,7 @@ export function VibratoPresetDialog({
                 cycleWidthPx: cycleWidthPxFor(draft, info.width, windowMs),
                 centsPerPx: info.centsPerPx,
             },
+            fine: createPreviewFineDragState(fineActive),
         };
     }
 
@@ -378,9 +387,9 @@ export function VibratoPresetDialog({
     ) {
         const gesture = previewGestureRef.current;
         if (!gesture) return;
-        // 按住「精细调整」时位移缩到 1/10 —— 与滚轮调参的精细调整同一比例，
-        // 大深度预设也能一像素一像素地捏。
-        const scaled = scalePreviewGestureDeltas(
+        // 「精细调整」按增量缩放位移：中途按下 / 松开只改变此后的速度，累计量连续。
+        const scaled = advancePreviewFineDrag(
+            gesture.fine,
             deltaX,
             deltaY,
             isModifierActive(paramFineAdjustKb, modifiers),

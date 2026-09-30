@@ -14,7 +14,7 @@ import { useVisualPlayhead } from "../../../hooks/useVisualPlayhead";
 import { formatCursorTime } from "./timeFormat";
 import type { TimeFormatContext } from "./timeFormat";
 import { MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, TRACK_ADD_ROW_HEIGHT } from "./constants";
-import { advanceFineAxisDrag, type FineAxisDragState } from "./fineAxisDrag";
+import { advanceFineAxisDrag, type FineAxisDragState } from "../../../utils/fineAxisDrag";
 import { shouldSuppressHoverSideEffects } from "../../../utils/penInput";
 import { AppTooltipBubble } from "../../AppTooltip";
 import { TempoMapCornerButton } from "./TempoMapCornerButton";

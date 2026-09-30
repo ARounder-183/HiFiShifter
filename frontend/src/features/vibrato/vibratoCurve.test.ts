@@ -42,6 +42,28 @@ function render(
 }
 
 /**
+ * 与 `render` 同一条件，但取深度包络（cents，恒非负）。
+ *
+ * 包络是"渐入 / 渐出把深度压到多少"的直接读数：断言它比断言波形本身清楚得多
+ * （波形值还叠着当前相位，同一帧可能恰好落在过零点上）。
+ */
+function renderEnvelope(p: VibratoPreset, seconds: number): number[] {
+    const frames = Math.round((seconds * 1000) / FP) + 1;
+    return (
+        buildVibratoCurve({
+            startFrame: 0,
+            startValue: 60,
+            endFrame: frames - 1,
+            endValue: 60,
+            preset: p,
+            param: "pitch",
+            framePeriodMs: FP,
+            collectEnvelope: true,
+        }).envelope ?? []
+    );
+}
+
+/**
  * 统计向上穿越基线的次数（≈ 周期数）。
  *
  * 用严格 `<` 作为"前值"条件：首帧的相位为 0，波形恰好等于基线，若用
@@ -309,12 +331,47 @@ describe("深度包络", () => {
         expect(late).toBeGreaterThan(early);
     });
 
-    test("渐入与渐出各自不超过整段时长的一半（短选区上不互相吃掉）", () => {
-        // 100 ms 的选区，但请求 500 ms 的渐入 / 渐出。
-        const values = render(steady({ depthCents: 100, attackMs: 500, releaseMs: 500 }), 0.1);
-        // 中点应当已经走完渐入，即达到接近满幅。
-        const mid = values[Math.floor(values.length / 2)];
-        expect(Math.abs(mid - 60)).toBeGreaterThan(0.5);
+    /*
+     * 【这条测试锁的是"渐入 / 渐出只能到中线"的旧限制】上限曾经是整段时长的
+     * **一半**（怕短选区上两者互相吃掉），于是用户做不出"整条线由弱到强"的颤音：
+     * 渐入拉到一半就到顶了。现在上限是整段时长本身。
+     */
+    test("渐入可以铺满整条线（上限是整段时长，而不是一半）", () => {
+        // 100 ms 的选区，却请求 500 ms 的渐入：整条线都在渐入，末帧才到满幅。
+        const env = renderEnvelope(steady({ depthCents: 100, attackMs: 500 }), 0.1);
+        expect(env[0]).toBeCloseTo(0, 9);
+        expect(env[env.length - 1]).toBeCloseTo(100, 6);
+        // 旧实现的中点已经满幅了；现在中点应当只有一半左右。
+        const mid = env[Math.floor(env.length / 2)];
+        expect(mid).toBeGreaterThan(20);
+        expect(mid).toBeLessThan(80);
+    });
+
+    test("渐出可以铺满整条线", () => {
+        const env = renderEnvelope(steady({ depthCents: 100, releaseMs: 500 }), 0.1);
+        expect(env[0]).toBeCloseTo(100, 6);
+        expect(env[env.length - 1]).toBeCloseTo(0, 9);
+    });
+
+    /*
+     * 两者重叠时按**乘积**合成（与音频里两级推子串联同理）：两端归零、中间是一个
+     * 连续凹下去的拱形，而不是互相截断。保持乘法而不是"按比例压到刚好相接"，
+     * 是因为手柄位置必须始终等于斜坡的起点 / 终点 —— 归一化会让另一个手柄在用户
+     * 拖这一个时自己动起来。
+     */
+    test("渐入与渐出重叠时相乘：连续凹形，两端归零", () => {
+        const env = renderEnvelope(steady({ depthCents: 100, attackMs: 500, releaseMs: 500 }), 0.1);
+        expect(env[0]).toBeCloseTo(0, 9);
+        expect(env[env.length - 1]).toBeCloseTo(0, 9);
+        const mid = env[Math.floor(env.length / 2)];
+        expect(mid).toBeGreaterThan(0);
+        expect(mid).toBeLessThan(50);
+        // 相邻帧连续：重叠不会制造台阶。
+        let maxJump = 0;
+        for (let i = 1; i < env.length; i += 1) {
+            maxJump = Math.max(maxJump, Math.abs(env[i] - env[i - 1]));
+        }
+        expect(maxJump).toBeLessThan(20);
     });
 });
 
