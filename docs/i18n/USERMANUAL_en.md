@@ -459,7 +459,15 @@ You can switch vibrato presets mid-drag:
 
 A preset decides the waveform (sine, triangle, saw, square, trapezoid, trill, or a hand-drawn table), the envelope (fade in, swell, fade out), the rate ramp, the irregularity and how the wave is placed; depth and rate belong to the gesture itself. Depth and rate tweaks made during a drag never rewrite the preset and are not carried into the next drag — presets change only in the preset manager. **Switching presets, however, is persistent**: pressing a side button or `,` / `.` mid-drag really does change the preset you are using (it is remembered across restarts).
 
-Depth and rate are inherited when you switch: **if this gesture has adjusted either one, both keep the values you adjusted to** — you changed the tone, not the amount; if nothing was adjusted yet, the new preset's own depth and rate are used.
+Depth and rate are inherited when you switch, **judged separately**: an adjusted depth is kept, an adjusted rate is kept, and whichever one you did not touch takes the new preset's own value — you changed the tone, so the value you never touched should follow the new preset.
+
+A few "both keys" gestures during a drag return things to a known state in one step:
+
+- **Press both preset-switch keys** (`,` and `.` by default), or **press both mouse side buttons**: resets the current preset to `Straight` (so you draw a straight line) and clears this gesture's recorded depth and rate adjustments.
+- **Press both amplitude keys** (`↑` and `↓` by default), or **press the middle mouse button while the wheel is in amplitude mode** (the frequency modifier `Alt` is not held): puts the depth back to the preset's own value and clears the recorded depth adjustment.
+- **Press both frequency keys** (`←` and `→` by default), or **press the middle mouse button while the wheel is in frequency mode** (`Alt` held): puts the rate back to the preset's own value and clears the recorded rate adjustment.
+
+Clearing the record means that value no longer follows your adjustment when you switch presets — it takes the new preset's own value instead.
 
 The drag rate is always measured in Hz, so a preset sounds the same speed however long you drag.
 
