@@ -200,8 +200,15 @@ const BUILTIN_SPECS: Record<BuiltinVibratoId, VibratoPresetInput> = {
     },
 };
 
-/** 出厂预设的默认顺序。 */
+/**
+ * 出厂预设的默认顺序。
+ *
+ * 【为什么「直线」排首位】直线/颤音工具共用一条代码路径，「直线」就是这个工具在
+ * 零颤音时的样子。把它放在列表最前，切到该工具后默认看到的就是最常用的那个
+ * —— 先画直线、需要时再往上加颤音，比先落在一个颤音预设上更贴近实际用法。
+ */
 export const BUILTIN_VIBRATO_ORDER: readonly BuiltinVibratoId[] = [
+    "straight",
     "natural",
     "soft",
     "deep",
@@ -213,7 +220,6 @@ export const BUILTIN_VIBRATO_ORDER: readonly BuiltinVibratoId[] = [
     "breath",
     "drift",
     "synth",
-    "straight",
 ];
 
 /** 出厂预设的 id（`builtin.<key>`）。 */

@@ -57,17 +57,28 @@ test("features/session/sessionSlice.vibratoPresets.test.ts vibrato preset reduce
 
     // 活动预设切换与环绕
     const withTwo = reducer(added, upsertVibratoPreset(userPreset("custom_b")));
+    // 起点是默认活动预设（自然），"下一个"是它在出厂顺序里的下一项 —— 按索引算，
+    // 不写死下标（出厂顺序调整过，"自然"已不再是首项）。
+    const defaultIndex = SYSTEM_VIBRATO_PRESETS.findIndex(
+        (preset) => preset.id === DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
+    );
     const cycled = reducer(withTwo, cycleActiveVibratoPreset(1));
-    assertEqual(cycled.activeVibratoPresetId, SYSTEM_VIBRATO_PRESETS[1]?.id, "下一个预设");
+    assertEqual(
+        cycled.activeVibratoPresetId,
+        SYSTEM_VIBRATO_PRESETS[defaultIndex + 1]?.id,
+        "下一个预设",
+    );
     const cycledBack = reducer(cycled, cycleActiveVibratoPreset(-1));
     assertEqual(
         cycledBack.activeVibratoPresetId,
         DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
-        "上一个预设回到首项",
+        "上一个预设回到默认活动预设",
     );
 
-    // 从首项向前环绕到用户段末尾
-    const wrapped = reducer(withTwo, cycleActiveVibratoPreset(-1));
+    // 从列表首项向前环绕到末尾（用户段最后一项）—— 首项用系统预设表的第 0 项，
+    // 不假设它就是默认活动预设。
+    const atHead = reducer(withTwo, setActiveVibratoPreset(SYSTEM_VIBRATO_PRESETS[0]!.id));
+    const wrapped = reducer(atHead, cycleActiveVibratoPreset(-1));
     assertEqual(wrapped.activeVibratoPresetId, "custom_b", "首项向前环绕到末尾");
 
     const explicit = reducer(withTwo, setActiveVibratoPreset("custom_a"));

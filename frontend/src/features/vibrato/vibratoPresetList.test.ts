@@ -58,6 +58,13 @@ describe("resolveVibratoPresets", () => {
         expect(ids).toHaveLength(BUILTIN_VIBRATO_ORDER.length);
         expect(new Set(ids).size).toBe(ids.length);
     });
+
+    test("「直线」排在出厂顺序首位", () => {
+        expect(BUILTIN_VIBRATO_ORDER[0]).toBe("straight");
+        expect(SYSTEM_VIBRATO_PRESETS[0]?.id).toBe(builtinVibratoPresetId("straight"));
+        // 默认活动预设不受排序影响，仍是「自然」。
+        expect(DEFAULT_ACTIVE_VIBRATO_PRESET_ID).toBe(builtinVibratoPresetId("natural"));
+    });
 });
 
 describe("系统预设表", () => {
@@ -131,8 +138,16 @@ describe("cycleVibratoPresetId", () => {
         expect(cycleVibratoPresetId(all, all[0].id, -1)).toBe(last);
     });
 
-    test("未知 id 从列表头部起步（不返回 null）", () => {
-        expect(cycleVibratoPresetId(all, "custom_missing", 1)).toBe(all[1].id);
+    test("未知 id 从默认活动预设起步（不返回 null）", () => {
+        // 未知 id 会回落到默认活动预设（自然），而不是列表头部 —— 后者只是
+        // 出厂顺序恰好把自然排在最前时的巧合。
+        const fallbackIndex = all.findIndex(
+            (preset) => preset.id === DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
+        );
+        expect(fallbackIndex).toBeGreaterThanOrEqual(0);
+        expect(cycleVibratoPresetId(all, "custom_missing", 1)).toBe(
+            all[(fallbackIndex + 1) % all.length].id,
+        );
     });
 
     test("空列表返回 null", () => {
