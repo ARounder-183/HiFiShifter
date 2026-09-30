@@ -239,11 +239,44 @@ export function sanitizeVibratoPreset(input: VibratoPresetInput | null | undefin
     };
 }
 
+/** 名称末尾的「 N」副本编号。 */
+const DUPLICATE_SUFFIX_PATTERN = /\s+\d+$/;
+
+/**
+ * 求一个"副本名"：在来源名后面追加编号，并避开已占用的名字。
+ *
+ * 【为什么不能直接拼 " 2"】连点两次会得到 `名字 2 2`、再点变 `名字 2 2 2` —— 编号
+ * 越叠越长，读起来像是名字本身的一部分。这里先把来源名里**已有的编号**剥掉，再从
+ * 2 开始找第一个没被占用的编号：`名字` → `名字 2` → `名字 3`。
+ *
+ * @param displayName 来源预设**显示用的**名字（系统预设要走词条，见调用方）。
+ * @param takenNames 现有全部预设的显示名 —— 编号要避开它们，而不是只看用户段。
+ */
+export function nextDuplicatePresetName(
+    displayName: string,
+    takenNames: readonly string[],
+): string {
+    const trimmed = displayName.trim();
+    // 反复剥掉末尾编号：`名字 2 2` 也要回到 `名字`，否则这个坏名字会被当成基底继续叠。
+    let base = trimmed;
+    let previous = "";
+    while (base !== previous) {
+        previous = base;
+        base = base.replace(DUPLICATE_SUFFIX_PATTERN, "").trim();
+    }
+    if (!base) return "";
+    const taken = new Set(takenNames.map((name) => name.trim()));
+    let index = 2;
+    while (taken.has(`${base} ${index}`)) index += 1;
+    return `${base} ${index}`;
+}
+
 /**
  * 由既有预设派生一份**用户预设**（系统预设只读，要改必须先复制）。
  *
  * @param source 来源预设。
- * @param name 新名称；省略时在原名后追加「副本」。
+ * @param name 新名称；省略时在原名后追加 `2`。调用方通常先用
+ *   `nextDuplicatePresetName` 算好（它会避开已占用的编号，且能处理系统预设的显示名）。
  */
 export function duplicateVibratoPreset(source: VibratoPreset, name?: string): VibratoPreset {
     const base = source.name.trim();

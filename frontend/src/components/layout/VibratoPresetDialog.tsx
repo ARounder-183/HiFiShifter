@@ -36,6 +36,7 @@ import {
     createVibratoPresetId,
     duplicateVibratoPreset,
     isBuiltinVibratoPresetId,
+    nextDuplicatePresetName,
     sanitizeVibratoPreset,
 } from "../../features/vibrato/vibratoPresets";
 import { resolveVibratoPresets } from "../../features/vibrato/vibratoPresetList";
@@ -457,7 +458,15 @@ export function VibratoPresetDialog({
 
     /** 复制一份预设（管理器页脚与列表右键菜单共用）。 */
     function duplicatePreset(source: VibratoPreset) {
-        const copy = duplicateVibratoPreset(source);
+        /*
+         * 名字按**显示名**预填：系统预设的 `name` 是空的（名字走词条），拿它当基底会
+         * 得到一个无名副本。编号还要避开现有全部显示名，否则连点两次就是"名字 2 2"。
+         */
+        const name = nextDuplicatePresetName(
+            vibratoPresetLabel(source, t) || t("vibrato_manager_new"),
+            resolved.all.map((preset) => vibratoPresetLabel(preset, t)),
+        );
+        const copy = duplicateVibratoPreset(source, name);
         persistPreset(copy);
         selectPreset(copy);
         activatePreset(copy);
@@ -1336,15 +1345,39 @@ export function VibratoPresetDialog({
                                                                     selectedWaveSkew * 100,
                                                                 )}
                                                                 ariaLabel={t("vibrato_skew")}
-                                                                onChange={(next) =>
+                                                                onChange={(next) => {
+                                                                    const skew = next / 100;
+                                                                    if (handDraw) {
+                                                                        // 与形状下拉同一套：改的是"当前形状"的参数，
+                                                                        // 记进手绘状态并即时套用，**不**退出编辑器。
+                                                                        // 少了这一步，滑块写的是草稿里的形状、显示的却是
+                                                                        // `handDraw.skew`，于是拖了不动。
+                                                                        setHandDraw({
+                                                                            ...handDraw,
+                                                                            skew,
+                                                                        });
+                                                                        patch({
+                                                                            cycle: {
+                                                                                kind: "table",
+                                                                                table: tableFromCycle(
+                                                                                    {
+                                                                                        kind: "shape",
+                                                                                        shape: handDraw.shape,
+                                                                                        skew,
+                                                                                    },
+                                                                                ),
+                                                                            },
+                                                                        });
+                                                                        return;
+                                                                    }
                                                                     patch({
                                                                         cycle: {
                                                                             kind: "shape",
                                                                             shape: selectedWaveShape,
-                                                                            skew: next / 100,
+                                                                            skew,
                                                                         },
-                                                                    })
-                                                                }
+                                                                    });
+                                                                }}
                                                             />
                                                             <AppSliderReadout>
                                                                 {`${formatNumber(selectedWaveSkew * 100)}%`}

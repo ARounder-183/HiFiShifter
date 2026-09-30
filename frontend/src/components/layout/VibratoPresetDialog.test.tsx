@@ -854,3 +854,75 @@ test("右键菜单重命名：Esc 取消，名字不变", async () => {
         store.getState().session.vibratoPresets.find((preset) => preset.id === "custom_rn2")?.name,
     ).toBe("Keep Me");
 });
+
+/*
+ * 复制为自定义的预填名。
+ *
+ * 【为什么值得测】连点两次曾得到 `名字 2 2`、再点变 `名字 2 2 2` —— 编号越叠越长，
+ * 读起来像名字本身的一部分。系统预设的 `name` 字段还是空的（名字走词条），不按显示名
+ * 预填的话副本会没有名字。
+ */
+test("复制为自定义：按显示名预填编号，且不会叠成「2 2」", async () => {
+    const store = await mountDialog();
+
+    const duplicateButton = () =>
+        [...document.querySelectorAll("button")].find(
+            (button) => button.textContent?.trim() === "Duplicate as mine",
+        );
+
+    await act(async () => {
+        duplicateButton()!.click();
+    });
+    expect(store.getState().session.vibratoPresets.map((preset) => preset.name)).toEqual([
+        "Straight 2",
+    ]);
+
+    // 第二次复制的是刚生成的 "Straight 2"：剥掉编号后应得到 "Straight 3"。
+    await act(async () => {
+        duplicateButton()!.click();
+    });
+    expect(store.getState().session.vibratoPresets.map((preset) => preset.name)).toEqual([
+        "Straight 2",
+        "Straight 3",
+    ]);
+});
+
+/*
+ * 手绘中偏斜滑块仍要能调。
+ *
+ * 【为什么值得测】手绘状态下"当前形状"存在 `handDraw` 里而不是草稿里；滑块若只写草稿、
+ * 显示却读 `handDraw`，拖动就会立刻弹回原位 —— 表现为"拖了不动"。
+ */
+test("手绘中偏斜滑块仍可调整", async () => {
+    const custom = sanitizeVibratoPreset({
+        id: "custom_skew",
+        name: "Skew Me",
+        cycle: { kind: "shape", shape: "triangle", skew: 0.5 },
+    });
+    await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(custom));
+        store.dispatch(setActiveVibratoPreset(custom.id));
+    });
+
+    const drawButton = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Draw...",
+    );
+    await act(async () => {
+        drawButton!.click();
+    });
+
+    // 偏斜是波形分区里的第一个滑块（Radix 把 aria-label 挂在 Root 上，这里按顺序取）。
+    const thumb = document.querySelectorAll<HTMLElement>('[role="slider"]')[0];
+    expect(thumb, "偏斜滑块应已渲染").toBeTruthy();
+    // 偏斜读数是第一个 `.hs-type-mono`：键盘步进 +1，应当从 50% 变成 51%。
+    // 修复前它写的是草稿里的形状、显示的却是 `handDraw.skew`，拖了会弹回 50%。
+    const readouts = () =>
+        [...document.querySelectorAll(".hs-type-mono")].map((el) => el.textContent);
+    expect(readouts()[0]).toBe("50%");
+
+    await act(async () => {
+        thumb!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    });
+
+    expect(readouts()[0]).toBe("51%");
+});

@@ -7,6 +7,7 @@ import {
     DEFAULT_VIBRATO_PRESET,
     duplicateVibratoPreset,
     isBuiltinVibratoPresetId,
+    nextDuplicatePresetName,
     sanitizeCycleSource,
     sanitizeVibratoPreset,
     VIBRATO_LIMITS,
@@ -242,5 +243,37 @@ describe("dedupeVibratoPresets", () => {
             sanitizeVibratoPreset({ id: "custom_a" }),
         ]);
         expect(list.map((preset) => preset.id)).toEqual(["custom_b", "custom_a"]);
+    });
+});
+
+describe("nextDuplicatePresetName（副本预填名）", () => {
+    test("首个副本追加 2", () => {
+        expect(nextDuplicatePresetName("Mine", [])).toBe("Mine 2");
+        expect(nextDuplicatePresetName("Mine", ["Mine"])).toBe("Mine 2");
+    });
+
+    test("编号已被占用就往后找第一个空位", () => {
+        expect(nextDuplicatePresetName("Mine", ["Mine", "Mine 2"])).toBe("Mine 3");
+        expect(nextDuplicatePresetName("Mine", ["Mine", "Mine 2", "Mine 3"])).toBe("Mine 4");
+    });
+
+    /*
+     * 【为什么值得测】连点两次复制曾得到 `名字 2 2`、再点变 `名字 2 2 2` —— 编号越叠
+     * 越长，读起来像名字本身的一部分。这里钉住"先剥掉已有编号再找空位"。
+     */
+    test("来源名自带编号时先剥掉，不叠成 2 2", () => {
+        expect(nextDuplicatePresetName("Mine 2", ["Mine", "Mine 2"])).toBe("Mine 3");
+        expect(nextDuplicatePresetName("Mine 2 2", ["Mine", "Mine 2"])).toBe("Mine 3");
+        expect(nextDuplicatePresetName("Mine 2", [])).toBe("Mine 2");
+    });
+
+    test("首尾空白不影响判定", () => {
+        expect(nextDuplicatePresetName("  Mine  ", [])).toBe("Mine 2");
+        expect(nextDuplicatePresetName("Mine", ["  Mine  "])).toBe("Mine 2");
+    });
+
+    test("空名返回空串（调用方负责给兜底名）", () => {
+        expect(nextDuplicatePresetName("", ["Mine"])).toBe("");
+        expect(nextDuplicatePresetName("   ", ["Mine"])).toBe("");
     });
 });
