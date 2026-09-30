@@ -92,6 +92,11 @@ export function KeybindingsActionRow({
             <Flex align="center" gap="2" style={{ flexShrink: 0 }}>
                 {/* 快捷键显示 / 录入按钮 */}
                 <Button
+                    /*
+                     * `data-hs-kb-bind` 是键盘导航（↑/↓ 从搜索框跳进行内）与测试选中
+                     * 这一行的入口。行内可能还有手势徽章里的按钮，靠索引选不可靠。
+                     */
+                    data-hs-kb-bind={label}
                     variant={isRecording ? "solid" : "soft"}
                     color={isRecording ? "blue" : !isDefault ? "green" : "gray"}
                     size="1"

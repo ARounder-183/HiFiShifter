@@ -151,6 +151,32 @@ describe("KeybindingsDialog — 搜索过滤", () => {
         }
     });
 
+    it("搜索框里按 ↓ 把焦点交到第一个结果行的按键按钮", () => {
+        const { cleanup } = renderDialog();
+        try {
+            pressKey("ArrowDown");
+            const firstRow = document.body.querySelector<HTMLElement>("[data-hs-kb-row]");
+            const button = firstRow?.querySelector("[data-hs-kb-bind]");
+            expect(button).toBeTruthy();
+            expect(document.activeElement).toBe(button);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it("搜索框里按 ↑ 跳到最后一个结果行", () => {
+        const { cleanup } = renderDialog();
+        try {
+            pressKey("ArrowUp");
+            const rows = document.body.querySelectorAll<HTMLElement>("[data-hs-kb-row]");
+            const button = rows[rows.length - 1]?.querySelector("[data-hs-kb-bind]");
+            expect(button).toBeTruthy();
+            expect(document.activeElement).toBe(button);
+        } finally {
+            cleanup();
+        }
+    });
+
     it("Enter 不触发对话框的默认动作（不关窗）", () => {
         const onOpenChange = vi.fn();
         const { cleanup } = renderDialog(onOpenChange);

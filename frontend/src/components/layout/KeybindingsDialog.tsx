@@ -422,30 +422,69 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
     const pressKeyLabel = tf("kb_press_key");
     const pressModifierLabel = tf("kb_press_modifier");
 
-    const handleSearchKeyDown = useCallback((event: React.KeyboardEvent<HTMLInputElement>) => {
-        if (event.key === "Escape") {
-            /*
-             * Esc 分级：**有查询先清空查询**，没有才让窗口关闭。
-             *
-             * 【为什么这里只用 `preventDefault`】Radix 在 `document` 上监听 Esc，
-             * React 的 `stopPropagation()` 拦不住已经走到原生的事件；真正决定窗口
-             * 生死的开关在 `beforeClose`（见下）—— Esc 在这里只负责清空查询。
-             */
-            event.preventDefault();
-            setQuery("");
-            return;
+    const resultListRef = useRef<HTMLDivElement | null>(null);
+
+    /** 把某一行滚进视野并聚焦它的按键按钮。 */
+    const focusRow = useCallback((index: number) => {
+        const rows = resultListRef.current?.querySelectorAll<HTMLElement>("[data-hs-kb-row]");
+        const target = rows?.[index];
+        if (!target) return;
+        /*
+         * 【为什么把 `scrollIntoView` 包在 try 里】jsdom 没实现它（缺少 layout），
+         * 直接调用会抛。真实浏览器不受影响，但即便哪天滚动这一步失败，用户也应该
+         * 拿到正确的键盘焦点 —— 焦点移动优先于滚动。
+         */
+        try {
+            target.scrollIntoView({ block: "nearest" });
+        } catch {
+            // 环境不支持滚动定位；焦点仍然移动。
         }
-        if (event.key === "Enter") {
-            /*
-             * 【为什么必须 `preventDefault`】`AppDialog` 的 `<form>` 会把输入框里的
-             * Enter 交给默认动作（这里的默认动作是"关闭"）。不拦的话，搜完按回车
-             * 等于关掉整个窗口 —— 而用户只是想确认搜索。见 `Dialog.tsx` 里
-             * 「Enter 的归属」那段注释。
-             */
-            event.preventDefault();
-            searchInputRef.current?.blur();
-        }
+        // 行内可能还有手势徽章里的按钮，只认 `data-hs-kb-bind` 这一个。
+        target.querySelector<HTMLButtonElement>("[data-hs-kb-bind]")?.focus();
     }, []);
+
+    const handleSearchKeyDown = useCallback(
+        (event: React.KeyboardEvent<HTMLInputElement>) => {
+            if (event.key === "Escape") {
+                /*
+                 * Esc 分级：**有查询先清空查询**，没有才让窗口关闭。
+                 *
+                 * 【为什么这里只用 `preventDefault`】Radix 在 `document` 上监听 Esc，
+                 * React 的 `stopPropagation()` 拦不住已经走到原生的事件；真正决定窗口
+                 * 生死的开关在 `beforeClose`（见下）—— Esc 在这里只负责清空查询。
+                 */
+                event.preventDefault();
+                setQuery("");
+                return;
+            }
+            /*
+             * ↓ / ↑：从搜索框跳到结果行。
+             *
+             * 【为什么只在无查询时启用】有查询时结果顺序由相关度决定、用户还没看清，
+             * 方向键直接落进行内反而容易误触录入按钮；此时需要的是继续输入，而不是
+             * 移动焦点。无查询时列表是稳定的场景分组，跳进去才是无歧义的。
+             */
+            if ((event.key === "ArrowDown" || event.key === "ArrowUp") && !query.trim()) {
+                const rows =
+                    resultListRef.current?.querySelectorAll<HTMLElement>("[data-hs-kb-row]");
+                if (!rows?.length) return;
+                event.preventDefault();
+                focusRow(event.key === "ArrowDown" ? 0 : rows.length - 1);
+                return;
+            }
+            if (event.key === "Enter") {
+                /*
+                 * 【为什么必须 `preventDefault`】`AppDialog` 的 `<form>` 会把输入框里的
+                 * Enter 交给默认动作（这里的默认动作是"关闭"）。不拦的话，搜完按回车
+                 * 等于关掉整个窗口 —— 而用户只是想确认搜索。见 `Dialog.tsx` 里
+                 * 「Enter 的归属」那段注释。
+                 */
+                event.preventDefault();
+                searchInputRef.current?.blur();
+            }
+        },
+        [query, focusRow],
+    );
 
     const renderRow = useCallback(
         (actionId: ActionId, groupLabel?: string) => {
@@ -600,7 +639,10 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                      * 而不是写 `max-h-[Npx]` —— 后者会在滚动瓶颈里叠出第二条滚动条
                      * （见 `designSystemGates.test.ts` 的"有界滚动盒"门禁）。
                      */}
-                    <div className="min-h-0 min-w-0 flex-1 overflow-y-auto custom-scrollbar">
+                    <div
+                        ref={resultListRef}
+                        className="min-h-0 min-w-0 flex-1 overflow-y-auto custom-scrollbar"
+                    >
                         {hasQuery ? (
                             visibleEntries.length > 0 ? (
                                 <Flex direction="column" gap="1">
