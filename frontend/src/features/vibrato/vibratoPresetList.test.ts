@@ -59,11 +59,10 @@ describe("resolveVibratoPresets", () => {
         expect(new Set(ids).size).toBe(ids.length);
     });
 
-    test("「直线」排在出厂顺序首位", () => {
+    test("「直线」排在出厂顺序首位，也是默认活动预设", () => {
         expect(BUILTIN_VIBRATO_ORDER[0]).toBe("straight");
         expect(SYSTEM_VIBRATO_PRESETS[0]?.id).toBe(builtinVibratoPresetId("straight"));
-        // 默认活动预设不受排序影响，仍是「自然」。
-        expect(DEFAULT_ACTIVE_VIBRATO_PRESET_ID).toBe(builtinVibratoPresetId("natural"));
+        expect(DEFAULT_ACTIVE_VIBRATO_PRESET_ID).toBe(builtinVibratoPresetId("straight"));
     });
 });
 

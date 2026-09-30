@@ -261,5 +261,11 @@ export const SYSTEM_VIBRATO_PRESETS: readonly VibratoPreset[] = Object.freeze(
     ),
 );
 
-/** 默认活动预设 = 自然。 */
-export const DEFAULT_ACTIVE_VIBRATO_PRESET_ID = builtinVibratoPresetId("natural");
+/**
+ * 默认活动预设 = 直线。
+ *
+ * 【为什么是直线】直线/颤音工具共用一条代码路径，「直线」就是这个工具在零颤音
+ * 时的样子 —— 新用户切到该工具后，默认画出的就是最常用的那条直线，需要颤音时再
+ * 从列表里挑预设。它同时也是列表首项，默认值与"第一眼看到的"一致。
+ */
+export const DEFAULT_ACTIVE_VIBRATO_PRESET_ID = builtinVibratoPresetId("straight");
