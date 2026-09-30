@@ -71,12 +71,16 @@ import {
 } from "../../ui";
 import { AppFileInput } from "../../ui/FileInput";
 import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
-import { VibratoPreviewCanvas } from "./vibrato/VibratoPreviewCanvas";
+import {
+    VibratoPreviewCanvas,
+    type VibratoPreviewGestureInfo,
+} from "./vibrato/VibratoPreviewCanvas";
 import {
     BASELINE_MODE_KEYS,
     BASELINE_MODE_ORDER,
     ENVELOPE_CURVE_KEYS,
     ENVELOPE_CURVE_ORDER,
+    PREVIEW_DEFAULT,
     RATE_MODE_KEYS,
     WAVE_SHAPE_KEYS,
     WAVE_SHAPE_ORDER,
@@ -88,6 +92,13 @@ import {
     vibratoPresetLabel,
     vibratoPresetSummary,
 } from "./vibrato/vibratoDialogLogic";
+import {
+    applyPreviewGesture,
+    cycleWidthPxFor,
+    handleLayoutFor,
+    type PreviewGestureSnapshot,
+    type PreviewZone,
+} from "./vibrato/vibratoPreviewGestures";
 
 interface Props {
     open: boolean;
@@ -193,6 +204,49 @@ export function VibratoPresetDialog({
     /** 草稿的局部更新（不落盘）。 */
     function patch(changes: Partial<VibratoPreset>) {
         setDraft((prev) => (prev ? { ...prev, ...changes } : prev));
+    }
+
+    /**
+     * 预览画布手势的活动状态（起点快照 + 区域）。
+     *
+     * 【为什么快照】主体拖动的深度换算依赖画布**当前**的纵轴标尺，而深度一改
+     * 标尺（按峰值自适应）也跟着变；每帧重取会让拖动变成非线性甚至反向。起点
+     * 取一次，整段手势按同一套几何走。
+     */
+    const previewGestureRef = useRef<{
+        zone: PreviewZone;
+        snapshot: PreviewGestureSnapshot;
+    } | null>(null);
+
+    /** 画布手势开始：登记起点快照（窗口时长取预览默认几何）。 */
+    function handlePreviewGestureStart(zone: PreviewZone, info: VibratoPreviewGestureInfo) {
+        if (!draft || isBuiltin) return;
+        const windowMs = (PREVIEW_DEFAULT.frameCount - 1) * PREVIEW_DEFAULT.framePeriodMs;
+        previewGestureRef.current = {
+            zone,
+            snapshot: {
+                attackMs: draft.attackMs,
+                releaseMs: draft.releaseMs,
+                depthCents: draft.depthCents,
+                startPhaseDeg: draft.startPhaseDeg,
+                windowMs,
+                widthPx: info.width,
+                cycleWidthPx: cycleWidthPxFor(draft, info.width, windowMs),
+                centsPerPx: info.centsPerPx,
+            },
+        };
+    }
+
+    /** 画布手势移动：位移 → 草稿字段（换算规则见 `vibratoPreviewGestures`）。 */
+    function handlePreviewGestureMove(deltaX: number, deltaY: number) {
+        const gesture = previewGestureRef.current;
+        if (!gesture) return;
+        patch(applyPreviewGesture(gesture.zone, gesture.snapshot, deltaX, deltaY));
+    }
+
+    /** 画布手势结束。 */
+    function handlePreviewGestureEnd() {
+        previewGestureRef.current = null;
     }
 
     function persistPreset(preset: VibratoPreset) {
@@ -335,6 +389,11 @@ export function VibratoPresetDialog({
     const depthUnit = depthStepUnitFor(editParam);
     const depthValue = draft ? depthForParam(draft.depthCents, editParam, paramRange) : 0;
     const cycleEstimate = draft ? estimateCycles(draft, 320, 5) : 0;
+    /** 预览窗口时长（ms）：与 `buildVibratoPreview` 的默认几何一致。 */
+    const previewWindowMs = (PREVIEW_DEFAULT.frameCount - 1) * PREVIEW_DEFAULT.framePeriodMs;
+    /** 渐入 / 渐出手柄的归一化位置。系统预设只读，不画手柄。 */
+    const previewHandles =
+        draft && !isBuiltin ? handleLayoutFor(draft, previewWindowMs) : undefined;
 
     const customCount = resolved.user.length;
     const atCap = customCount >= MAX_VIBRATO_PRESETS;
@@ -408,6 +467,10 @@ export function VibratoPresetDialog({
                                 <VibratoPreviewCanvas
                                     samples={previewSamples}
                                     ariaLabel={t("vibrato_preview")}
+                                    handles={previewHandles}
+                                    onGestureStart={handlePreviewGestureStart}
+                                    onGestureMove={handlePreviewGestureMove}
+                                    onGestureEnd={handlePreviewGestureEnd}
                                 />
                                 <Flex justify="between" align="center" mt="1" gap="2">
                                     <Flex gap="2" align="center" style={{ minWidth: 0 }}>

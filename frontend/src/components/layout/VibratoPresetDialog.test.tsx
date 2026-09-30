@@ -23,7 +23,11 @@ import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, expect, test } from "vitest";
 
 import keybindingsReducer from "../../features/keybindings/keybindingsSlice";
-import sessionReducer from "../../features/session/sessionSlice";
+import sessionReducer, {
+    setActiveVibratoPreset,
+    upsertVibratoPreset,
+} from "../../features/session/sessionSlice";
+import { sanitizeVibratoPreset } from "../../features/vibrato/vibratoPresets";
 import { I18nProvider } from "../../i18n/I18nProvider";
 import { AppThemeProvider } from "../../theme/AppThemeProvider";
 import { VibratoPresetDialog } from "./VibratoPresetDialog";
@@ -54,10 +58,11 @@ afterEach(async () => {
     document.body.innerHTML = "";
 });
 
-async function mountDialog() {
+async function mountDialog(prepare?: (store: ReturnType<typeof configureStore>) => void) {
     const store = configureStore({
         reducer: { session: sessionReducer, keybindings: keybindingsReducer },
     });
+    prepare?.(store);
     await act(async () => {
         root.render(
             <Provider store={store}>
@@ -234,4 +239,26 @@ test("导入拿错的文件（主题 / 布局 JSON）：拒收且给出明确反
 
     const notice = document.querySelector('[role="status"]');
     expect(notice?.textContent ?? "").toContain("not a vibrato preset file");
+});
+
+/*
+ * R6a：预览画布的可编辑性。
+ *
+ * 【契约】用户预设的预览可拖（画手柄、接受手势），系统预设的预览只读 ——
+ * 与参数表单"系统预设禁用一切字段"一致，避免"为什么别的能拖这里不能"的歧义。
+ * 交互性由 `data-testid` 暴露：它只在可拖时出现。
+ */
+test("用户预设：预览画布可编辑（渲染交互层）", async () => {
+    const custom = sanitizeVibratoPreset({ id: "custom_grab", name: "Grab Me", depthCents: 40 });
+    await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(custom));
+        store.dispatch(setActiveVibratoPreset(custom.id));
+    });
+    expect(document.querySelector('[data-testid="vibrato-preview-interactive"]')).toBeTruthy();
+});
+
+test("系统预设：预览画布只读（不渲染交互层）", async () => {
+    await mountDialog();
+    // 默认活动预设是系统预设「自然」。
+    expect(document.querySelector('[data-testid="vibrato-preview-interactive"]')).toBeNull();
 });

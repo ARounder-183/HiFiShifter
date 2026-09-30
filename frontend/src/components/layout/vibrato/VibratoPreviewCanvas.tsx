@@ -7,17 +7,45 @@
  *
  * 纵轴按预设**自身**的幅度定标（见 `previewScaleCents`）：按参数值域定标的话，
  * 30 cents 的颤音会是一条直线。真实幅度由旁边的读数表达。
+ *
+ * 【可编辑】传入 `handles` 与手势回调后，画布从"只读渲染"升级为"所见即所编"：
+ * 左右手柄拖动改渐入 / 渐出，主体拖动改相位与深度。手势只上报**区域与像素位移**，
+ * 具体的字段换算由 `vibratoPreviewGestures.ts` 的纯函数完成 —— 画布不持有草稿。
  */
 
 import { useEffect, useRef } from "react";
 import { readDevicePixelRatio } from "../../../utils/devicePixelLine";
 import { previewScaleCents, type VibratoPreviewSamples } from "./vibratoDialogLogic";
+import {
+    cursorForZone,
+    hitTestPreviewZone,
+    type PreviewHandleLayout,
+    type PreviewZone,
+} from "./vibratoPreviewGestures";
+
+/** 手势开始时上报的画布几何（调用方据此构造换算快照）。 */
+export interface VibratoPreviewGestureInfo {
+    /** CSS 像素宽度。 */
+    width: number;
+    /** CSS 像素高度。 */
+    height: number;
+    /** 纵向每像素对应的 cents（与绘制同一套换算）。 */
+    centsPerPx: number;
+}
 
 export interface VibratoPreviewCanvasProps {
     samples: VibratoPreviewSamples;
     /** CSS 像素高度。 */
     height?: number;
     ariaLabel?: string;
+    /** 手柄的归一化横向位置（0..1）。提供时画出手柄并接受手势。 */
+    handles?: PreviewHandleLayout;
+    /** 手势开始。 */
+    onGestureStart?: (zone: PreviewZone, info: VibratoPreviewGestureInfo) => void;
+    /** 手势移动：自起点累计的像素位移。 */
+    onGestureMove?: (deltaX: number, deltaY: number) => void;
+    /** 手势结束。 */
+    onGestureEnd?: () => void;
 }
 
 /** 读取语义色令牌；缺失（测试 / 非浏览器环境）时回退到中性色。 */
@@ -27,13 +55,25 @@ function tokenColor(name: string, fallback: string): string {
     return value || fallback;
 }
 
+/** 手柄方块边长（CSS 像素）。 */
+const HANDLE_SIZE = 7;
+
 export function VibratoPreviewCanvas({
     samples,
     height = 120,
     ariaLabel,
+    handles,
+    onGestureStart,
+    onGestureMove,
+    onGestureEnd,
 }: VibratoPreviewCanvasProps) {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const containerRef = useRef<HTMLDivElement | null>(null);
+    /** 最近一次绘制的几何：手势换算要用与绘制**同一套**标尺。 */
+    const geometryRef = useRef<VibratoPreviewGestureInfo>({ width: 0, height, centsPerPx: 1 });
+    /** 手势起点（未按下时为 null）。 */
+    const gestureRef = useRef<{ zone: PreviewZone; x: number; y: number } | null>(null);
+    const interactive = Boolean(handles && (onGestureStart || onGestureMove));
 
     useEffect(() => {
         const canvas = canvasRef.current;
@@ -57,11 +97,17 @@ export function VibratoPreviewCanvas({
             const accent = tokenColor("--qt-accent", "#6aa9ff");
             const muted = tokenColor("--qt-text-muted", "#8a8a8a");
             const divider = tokenColor("--qt-divider", "#3a3a3a");
+            const panel = tokenColor("--qt-panel", "#1e1e1e");
 
             const midY = height / 2;
             const verticalReach = height / 2 - 6;
             const halfCents = previewScaleCents(samples.peakCents);
             const toY = (cents: number) => midY - (cents / halfCents) * verticalReach;
+            geometryRef.current = {
+                width,
+                height,
+                centsPerPx: halfCents / Math.max(1, verticalReach),
+            };
 
             const count = Math.max(2, samples.wave.length);
             const toX = (index: number) => (index / (count - 1)) * width;
@@ -128,6 +174,29 @@ export function VibratoPreviewCanvas({
                 else ctx.lineTo(x, y);
             }
             ctx.stroke();
+
+            // 渐入 / 渐出手柄：小方块落在包络斜坡的起止处，语言与时间轴 clip 的
+            // fade 手柄一致 —— 用户已经学会在那里拖。
+            if (handles) {
+                const drawHandle = (frac: number) => {
+                    const index = Math.round(frac * (count - 1));
+                    const envValue = samples.envelope.length
+                        ? samples.envelope[Math.min(index, samples.envelope.length - 1)]
+                        : 0;
+                    const x = toX(index);
+                    const y = toY(envValue);
+                    const half = HANDLE_SIZE / 2;
+                    ctx.fillStyle = panel;
+                    ctx.strokeStyle = accent;
+                    ctx.lineWidth = 1.5;
+                    ctx.beginPath();
+                    ctx.rect(x - half, y - half, HANDLE_SIZE, HANDLE_SIZE);
+                    ctx.fill();
+                    ctx.stroke();
+                };
+                drawHandle(handles.attackFrac);
+                drawHandle(handles.releaseFrac);
+            }
         };
 
         draw();
@@ -136,10 +205,59 @@ export function VibratoPreviewCanvas({
         const observer = new ResizeObserver(draw);
         observer.observe(container);
         return () => observer.disconnect();
-    }, [samples, height]);
+    }, [samples, height, handles]);
+
+    const localPoint = (event: React.PointerEvent<HTMLDivElement>) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    };
+
+    const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+        if (!interactive || !handles || event.button !== 0) return;
+        const { x, y } = localPoint(event);
+        const zone = hitTestPreviewZone(x, geometryRef.current.width, handles);
+        gestureRef.current = { zone, x, y };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        onGestureStart?.(zone, { ...geometryRef.current });
+    };
+
+    const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+        if (!interactive || !handles) return;
+        const { x, y } = localPoint(event);
+        const gesture = gestureRef.current;
+        if (!gesture) {
+            // 未按下时只更新光标，给出"这里能拖"的提示。
+            event.currentTarget.style.cursor = cursorForZone(
+                hitTestPreviewZone(x, geometryRef.current.width, handles),
+            );
+            return;
+        }
+        onGestureMove?.(x - gesture.x, y - gesture.y);
+    };
+
+    const endGesture = (event: React.PointerEvent<HTMLDivElement>) => {
+        if (!gestureRef.current) return;
+        gestureRef.current = null;
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+        onGestureEnd?.();
+    };
 
     return (
-        <div ref={containerRef} className="w-full" style={{ height }}>
+        <div
+            ref={containerRef}
+            className="w-full"
+            style={{ height, touchAction: interactive ? "none" : undefined }}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={endGesture}
+            onPointerCancel={endGesture}
+            onPointerLeave={(event) => {
+                if (!gestureRef.current) event.currentTarget.style.cursor = "";
+            }}
+            data-testid={interactive ? "vibrato-preview-interactive" : undefined}
+        >
             <canvas
                 ref={canvasRef}
                 role="img"
