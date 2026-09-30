@@ -1427,7 +1427,7 @@ export function usePianoRollInteractions(args: {
         (next: VibratoPreset, clientX?: number, clientY?: number): boolean => {
             const vib = vibratoStateRef.current;
             if (!vib) return false;
-            vib.working = switchDragPreset(vib.working, next);
+            vib.working = switchDragPreset(vib.working, next, editParam, currentParamRange);
             // 不规则度的种子跟着预设换：不同预设的"随机味"不一样，沿用旧种子
             // 会让两个预设的抖动图案完全相同。
             vib.seed = vibratoSeedForPreset(next);
@@ -1435,7 +1435,7 @@ export function usePianoRollInteractions(args: {
             if (clientX != null && clientY != null) reportVibratoDragState(clientX, clientY);
             return true;
         },
-        [repaintVibratoDragPreview, reportVibratoDragState],
+        [editParam, currentParamRange, repaintVibratoDragPreview, reportVibratoDragState],
     );
 
     /**
@@ -1476,7 +1476,7 @@ export function usePianoRollInteractions(args: {
                 if (straight) {
                     dispatch(setActiveVibratoPreset(straight.id));
                     void dispatch(persistUiSettings());
-                    vib.working = createDragWorking(straight);
+                    vib.working = createDragWorking(straight, editParam, currentParamRange);
                     vib.seed = vibratoSeedForPreset(straight);
                 } else {
                     // 找不到直线预设（理论上不会）：至少把深度归零并清记录。
@@ -1488,7 +1488,7 @@ export function usePianoRollInteractions(args: {
                     };
                 }
             } else if (intent === "depth") {
-                vib.working = resetVibratoDragDepth(vib.working);
+                vib.working = resetVibratoDragDepth(vib.working, editParam, currentParamRange);
             } else {
                 vib.working = resetVibratoDragRate(vib.working);
             }
@@ -1497,7 +1497,14 @@ export function usePianoRollInteractions(args: {
             if (clientX != null && clientY != null) reportVibratoDragState(clientX, clientY);
             return true;
         },
-        [dispatch, vibratoPresetList, repaintVibratoDragPreview, reportVibratoDragState],
+        [
+            dispatch,
+            vibratoPresetList,
+            editParam,
+            currentParamRange,
+            repaintVibratoDragPreview,
+            reportVibratoDragState,
+        ],
     );
 
     /** 拖拽结束时的收尾：清掉双键记录并上报（面板据此清掉 HUD）。 */
@@ -5022,7 +5029,7 @@ export function usePianoRollInteractions(args: {
                 if (isVibratoTool) {
                     // 起手自活动预设：深度 / 速率都是预设自带值 —— 预设切换
                     // 已持久化，不存在"上一次的调整"要续。
-                    const working = createDragWorking(vibratoPreset);
+                    const working = createDragWorking(vibratoPreset, editParam, currentParamRange);
                     vibratoStateRef.current = {
                         pointerId: e.pointerId,
                         startFrame,
@@ -5643,6 +5650,9 @@ export function usePianoRollInteractions(args: {
             // 自己带着依赖，这里只列循环切换用的 `vibratoPresetCycleList`。
             vibratoPreset,
             vibratoPresetCycleList,
+            // 深度按当前参数的满摆幅换算与钳制（`createDragWorking`），因此起手
+            // 也依赖参数与它的量程。
+            currentParamRange,
             switchVibratoPresetPersistently,
             applyVibratoReset,
             vibratoFrequencyAdjustKb,

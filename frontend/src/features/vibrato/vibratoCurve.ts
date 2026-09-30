@@ -23,7 +23,7 @@
  */
 
 import { sampleCycle, wrap01 } from "./vibratoCycle";
-import { depthMappingFor, type VibratoParamRange } from "./vibratoDepth";
+import { clampDepthCentsForParam, depthMappingFor, type VibratoParamRange } from "./vibratoDepth";
 import type { EnvelopeCurve, VibratoPreset } from "./vibratoTypes";
 
 /** 默认的帧周期，与后端 `state.rs::default_frame_period_ms` 一致。 */
@@ -185,7 +185,15 @@ export function buildVibratoCurve(input: VibratoRenderInput): VibratoRenderResul
     const durationSec = spanSec;
 
     const mapping = depthMappingFor(param, input.range);
-    const depthCents = Number.isFinite(preset.depthCents) ? preset.depthCents : 0;
+    // 深度按**当前参数**的满摆幅钳住：预设是跨参数共用的，同一个 300 分落在
+    // 声像（±1）或共振峰（±500）上远超其可表达范围，不钳的话写入口会把超出的
+    // 部分钳平，波形顶部变成一条直线 —— 用户拉到 300 分并不"更颤"，只是变成
+    // 方波。见 `fullSwingCentsFor`。
+    const depthCents = clampDepthCentsForParam(
+        Number.isFinite(preset.depthCents) ? preset.depthCents : 0,
+        param,
+        input.range,
+    );
     const biasCents = Number.isFinite(preset.biasCents) ? preset.biasCents : 0;
     const bias = biasCents * mapping.factor;
 

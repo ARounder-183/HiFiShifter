@@ -189,9 +189,14 @@ describe("深度单位换算", () => {
         expect(depthToCents(30, "dyn")).toBeCloseTo(30, 9);
     });
 
-    test("张力：cents ↔ 原生单位（半量程 100 → 1:1）", () => {
+    test("原始值域：cents ↔ 满摆幅百分比（满摆幅 100 分 → 1:1）", () => {
+        // 声像的原生量程是 ±1，若按原生单位显示会得到 `0.3` 这种没有量纲感的
+        // 裸数字；改成"占满摆幅的百分比"之后，声像、张力、气声一律说成 30%。
         expect(depthForParam(30, "tension")).toBeCloseTo(30, 9);
         expect(depthToCents(30, "tension")).toBeCloseTo(30, 9);
+        expect(depthForParam(30, "pan", { min: -1, max: 1 })).toBeCloseTo(30, 9);
+        expect(depthToCents(30, "pan", { min: -1, max: 1 })).toBeCloseTo(30, 9);
+        expect(depthForParam(30, "breathiness", { min: -10000, max: 10000 })).toBeCloseTo(30, 9);
     });
 
     test("音级参数：cents ↔ 音级（100 分 = 1 音级）", () => {
@@ -226,13 +231,21 @@ describe("depthUnitLabelKey", () => {
         expect(depthUnitLabelKey("child_pitch_offset_degrees@t1")).toBe("vibrato_unit_degree");
     });
 
-    test("原始值域参数不带单位后缀", () => {
-        expect(depthUnitLabelKey("tension")).toBeNull();
-        expect(depthUnitLabelKey("breathiness")).toBeNull();
+    test("原始值域参数同样用百分比（深度说的是占满摆幅的几成，不是原生数字）", () => {
+        expect(depthUnitLabelKey("hifigan_tension")).toBe("vibrato_unit_percent");
+        expect(depthUnitLabelKey("tension")).toBe("vibrato_unit_percent");
+        expect(depthUnitLabelKey("breathiness")).toBe("vibrato_unit_percent");
+        expect(depthUnitLabelKey("pan")).toBe("vibrato_unit_percent");
     });
 
     test("返回的词条键都真实存在", () => {
-        for (const param of ["pitch", "dyn", "child_pitch_offset_degrees@t1"]) {
+        for (const param of [
+            "pitch",
+            "dyn",
+            "child_pitch_offset_degrees@t1",
+            "hifigan_tension",
+            "pan",
+        ]) {
             const key = depthUnitLabelKey(param);
             expect(key).not.toBeNull();
             if (key) expect(t(key)).toBeTruthy();

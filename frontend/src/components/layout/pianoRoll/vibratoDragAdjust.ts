@@ -19,10 +19,9 @@ import type { Keybinding } from "../../../features/keybindings/types";
 import { matchesKeybindingAllowingFineModifier } from "../../../features/keybindings/keybindingMatch";
 import { isModifierActive, isNoneBinding } from "../../../features/keybindings/keybindingsSlice";
 import { buildVibratoCurve } from "../../../features/vibrato/vibratoCurve";
-import { VIBRATO_LIMITS } from "../../../features/vibrato/vibratoPresets";
 import {
-    depthFamilyOf,
-    PITCH_PARAM_ID,
+    clampDepthCentsForParam,
+    depthStepCentsFor,
     type VibratoParamRange,
 } from "../../../features/vibrato/vibratoDepth";
 import type { VibratoPreset } from "../../../features/vibrato/vibratoTypes";
@@ -67,11 +66,20 @@ export interface VibratoDragWorking {
  * 【为什么没有"续上一次"】预设切换是**持久化**的（切换即写活动预设），拖拽中的
  * 滚轮 / 方向键微调只属于本次手势 —— 若把上一次的调整跨预设地带进下一次起手，
  * "换了个音色深度却没变"的困惑就回来了。要保留调整，去管理器里改预设。
+ *
+ * 【为什么在这里就钳深度】预设是跨参数共用的，它的深度以 cents 存储，落到窄
+ * 量程的参数上（声像 ±1、共振峰 ±500）可能远超该参数能表达的幅度 —— 不钳的话
+ * 拖出来的曲线会被写入口钳平，顶部变成一条直线。钳制按**当前参数**的满摆幅
+ * 走（见 `fullSwingCentsFor`），因此音高上的大深度不受影响。
  */
-export function createDragWorking(preset: VibratoPreset): VibratoDragWorking {
+export function createDragWorking(
+    preset: VibratoPreset,
+    param: ParamName,
+    range?: VibratoParamRange,
+): VibratoDragWorking {
     return {
         preset,
-        depthCents: preset.depthCents,
+        depthCents: clampDepthCentsForParam(preset.depthCents, param, range),
         rateHz: preset.rateHz,
         depthAdjusted: false,
         rateAdjusted: false,
@@ -86,14 +94,22 @@ export function createDragWorking(preset: VibratoPreset): VibratoDragWorking {
  * 预设，期待的是"换个音色、幅度不变"。两个量各自独立判断：
  * - 调过深度 → 沿用工作副本的深度；否则取新预设自带的深度。
  * - 调过速率 → 沿用工作副本的速率；否则取新预设自带的速率。
+ *
+ * 无论取自哪一边，深度都按当前参数的满摆幅钳一次（理由同 `createDragWorking`）。
  */
 export function switchDragPreset(
     previous: VibratoDragWorking,
     next: VibratoPreset,
+    param: ParamName,
+    range?: VibratoParamRange,
 ): VibratoDragWorking {
     return {
         preset: next,
-        depthCents: previous.depthAdjusted ? previous.depthCents : next.depthCents,
+        depthCents: clampDepthCentsForParam(
+            previous.depthAdjusted ? previous.depthCents : next.depthCents,
+            param,
+            range,
+        ),
         rateHz: previous.rateAdjusted ? previous.rateHz : next.rateHz,
         depthAdjusted: previous.depthAdjusted,
         rateAdjusted: previous.rateAdjusted,
@@ -107,36 +123,21 @@ export function switchDragPreset(
  * （它换的是预设本身）。这里撤销的是"我对幅度的微调"，撤销之后本次手势的振幅
  * 就等于预设的振幅，记录自然也不必再留着。
  */
-export function resetVibratoDragDepth(working: VibratoDragWorking): VibratoDragWorking {
-    return { ...working, depthCents: working.preset.depthCents, depthAdjusted: false };
+export function resetVibratoDragDepth(
+    working: VibratoDragWorking,
+    param: ParamName,
+    range?: VibratoParamRange,
+): VibratoDragWorking {
+    return {
+        ...working,
+        depthCents: clampDepthCentsForParam(working.preset.depthCents, param, range),
+        depthAdjusted: false,
+    };
 }
 
 /** 重置本次手势的速率：回到预设自带的速率，并清掉"调过速率"的记录。 */
 export function resetVibratoDragRate(working: VibratoDragWorking): VibratoDragWorking {
     return { ...working, rateHz: working.preset.rateHz, rateAdjusted: false };
-}
-
-/**
- * 拖拽调参每一步改变多少深度（cents）。
- *
- * 【为什么以分计】深度在预设里就是 cents，拖拽时用户对"幅度"的直觉也是分
- * （"再多 20 分"）。各族取值：
- * - 音高：24 分 / 格 —— 与历史实现 `rangeSpan / 200`（48 半音 / 200 = 0.24
- *   半音）完全一致，手感不变；
- * - cents 类参数：值域的 1/200，下限 1 分；
- * - 乘性增益（`dyn` / `volume` / `breath_gain`）：1 分 = 1% / 格；
- * - 其余原始值域：半量程的 1/200，换算回分恒为 0.5。
- */
-export function depthStepCentsFor(param: ParamName, range?: VibratoParamRange): number {
-    if (param === PITCH_PARAM_ID) return 24;
-    const family = depthFamilyOf(param);
-    // 乘性增益的显示单位就是百分比，1 分 = 1%。
-    if (family === "ratio") return 1;
-    const span = Number(range ? range.max - range.min : 0);
-    if (family === "cents") {
-        return Math.max(1, (Number.isFinite(span) && span > 0 ? span : 4800) / 200);
-    }
-    return 0.5;
 }
 
 export function resolveVibratoDragKeyboardAdjustment(
@@ -199,6 +200,8 @@ export function resolveVibratoPresetSwitch(
  * 深度是加性的（分），速率是几何的（等比缩放）—— 速率用加性会在低速端过于
  * 敏感：4 Hz 加 1 Hz 是 +25%，12 Hz 加 1 Hz 只有 +8%。
  *
+ * 每格走多少由 `depthStepCentsFor` 按**参数类型**决定（满摆幅的 1/50），
+ * 结果再按同一满摆幅钳住 —— 于是"一格""到顶"在每个参数上都是同一量级的响应。
  * 深度可为负：负值等于把波形整体反相（起点先往下摆），与预设深度的合法区间一致。
  * 速率钳在预设的合法区间内。
  */
@@ -221,12 +224,10 @@ export function computeVibratoDragAdjustment(input: {
 
     if (input.target === "depth") {
         const step = depthStepCentsFor(input.editParam, input.currentParamRange);
-        depthCents = Math.max(
-            VIBRATO_LIMITS.depthCents.min,
-            Math.min(
-                VIBRATO_LIMITS.depthCents.max,
-                depthCents + input.direction * step * safeSteps * safeFineScale,
-            ),
+        depthCents = clampDepthCentsForParam(
+            depthCents + input.direction * step * safeSteps * safeFineScale,
+            input.editParam,
+            input.currentParamRange,
         );
     } else {
         const ratio = Math.pow(1 + 0.1 * safeFineScale, safeSteps);

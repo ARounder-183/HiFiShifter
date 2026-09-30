@@ -6,7 +6,6 @@ import {
     buildDragVibratoCurve,
     computeVibratoDragAdjustment,
     createDragWorking,
-    depthStepCentsFor,
     matchedVibratoResetSlots,
     resetVibratoDragDepth,
     resetVibratoDragRate,
@@ -22,6 +21,9 @@ import {
     switchDragPreset,
 } from "./vibratoDragAdjust";
 
+/** 拖拽工作副本的测试夹具：默认在音高参数上（满摆幅 ±1200 分，不夹紧任何用例）。 */
+const PITCH = "pitch";
+
 const preset = (overrides: Parameters<typeof sanitizeVibratoPreset>[0] = {}) =>
     sanitizeVibratoPreset({ id: "custom_test", ...overrides });
 
@@ -30,7 +32,7 @@ const kb = (overrides: Partial<Keybinding> = {}): Keybinding => ({ key: "a", ...
 describe("createDragWorking", () => {
     test("深度与速率都取预设自带值", () => {
         const p = preset({ depthCents: 42, rateHz: 6.5 });
-        const working = createDragWorking(p);
+        const working = createDragWorking(p, PITCH);
         expect(working.depthCents).toBe(42);
         expect(working.rateHz).toBe(6.5);
         expect(working.preset.id).toBe(p.id);
@@ -39,13 +41,13 @@ describe("createDragWorking", () => {
     });
 
     test("起手不携带任何跨手势的调整", () => {
-        const working = createDragWorking(preset({ depthCents: 42, rateHz: 6.5 }));
+        const working = createDragWorking(preset({ depthCents: 42, rateHz: 6.5 }), PITCH);
         expect(working.depthCents).toBe(42);
         expect(working.rateHz).toBe(6.5);
     });
 
     test("两个调整标记初始都为 false", () => {
-        const working = createDragWorking(preset({ depthCents: 30 }));
+        const working = createDragWorking(preset({ depthCents: 30 }), PITCH);
         expect(working.depthAdjusted).toBe(false);
         expect(working.rateAdjusted).toBe(false);
     });
@@ -53,10 +55,11 @@ describe("createDragWorking", () => {
 
 describe("switchDragPreset", () => {
     test("未调整过：深度与速率取新预设自带的值", () => {
-        const before = createDragWorking(preset({ depthCents: 40 }));
+        const before = createDragWorking(preset({ depthCents: 40 }), PITCH);
         const after = switchDragPreset(
             before,
             preset({ id: "builtin.deep", depthCents: 55, rateHz: 4.5 }),
+            PITCH,
         );
         expect(after.depthCents).toBe(55);
         expect(after.rateHz).toBe(4.5);
@@ -67,13 +70,14 @@ describe("switchDragPreset", () => {
 
     test("只调过振幅：振幅沿用、速率取新预设的值", () => {
         const before = {
-            ...createDragWorking(preset({ depthCents: 40, rateHz: 5 })),
+            ...createDragWorking(preset({ depthCents: 40, rateHz: 5 }), PITCH),
             depthCents: 90,
             depthAdjusted: true,
         };
         const after = switchDragPreset(
             before,
             preset({ id: "builtin.deep", depthCents: 55, rateHz: 4.5 }),
+            PITCH,
         );
         expect(after.depthCents).toBe(90);
         // 速率没调过 → 用新预设的速率（两者分别管理）。
@@ -85,13 +89,14 @@ describe("switchDragPreset", () => {
 
     test("只调过速率：速率沿用、振幅取新预设的值", () => {
         const before = {
-            ...createDragWorking(preset({ depthCents: 40, rateHz: 5 })),
+            ...createDragWorking(preset({ depthCents: 40, rateHz: 5 }), PITCH),
             rateHz: 9,
             rateAdjusted: true,
         };
         const after = switchDragPreset(
             before,
             preset({ id: "builtin.deep", depthCents: 55, rateHz: 4.5 }),
+            PITCH,
         );
         expect(after.depthCents).toBe(55);
         expect(after.rateHz).toBe(9);
@@ -101,7 +106,7 @@ describe("switchDragPreset", () => {
 
     test("两个都调过：两个都沿用", () => {
         const before = {
-            ...createDragWorking(preset({ depthCents: 40, rateHz: 5 })),
+            ...createDragWorking(preset({ depthCents: 40, rateHz: 5 }), PITCH),
             depthCents: 90,
             rateHz: 9,
             depthAdjusted: true,
@@ -110,6 +115,7 @@ describe("switchDragPreset", () => {
         const after = switchDragPreset(
             before,
             preset({ id: "builtin.deep", depthCents: 55, rateHz: 4.5 }),
+            PITCH,
         );
         expect(after.depthCents).toBe(90);
         expect(after.rateHz).toBe(9);
@@ -119,13 +125,13 @@ describe("switchDragPreset", () => {
 describe("resetVibratoDragDepth / resetVibratoDragRate", () => {
     test("重置振幅：回到预设自带深度并清掉振幅记录（速率记录不动）", () => {
         const working = {
-            ...createDragWorking(preset({ depthCents: 40, rateHz: 5 })),
+            ...createDragWorking(preset({ depthCents: 40, rateHz: 5 }), PITCH),
             depthCents: 90,
             rateHz: 9,
             depthAdjusted: true,
             rateAdjusted: true,
         };
-        const after = resetVibratoDragDepth(working);
+        const after = resetVibratoDragDepth(working, PITCH);
         expect(after.depthCents).toBe(40);
         expect(after.depthAdjusted).toBe(false);
         // 频率那一路不受影响。
@@ -135,7 +141,7 @@ describe("resetVibratoDragDepth / resetVibratoDragRate", () => {
 
     test("重置速率：回到预设自带速率并清掉速率记录（振幅记录不动）", () => {
         const working = {
-            ...createDragWorking(preset({ depthCents: 40, rateHz: 5 })),
+            ...createDragWorking(preset({ depthCents: 40, rateHz: 5 }), PITCH),
             depthCents: 90,
             rateHz: 9,
             depthAdjusted: true,
@@ -149,27 +155,65 @@ describe("resetVibratoDragDepth / resetVibratoDragRate", () => {
     });
 });
 
-describe("depthStepCentsFor", () => {
-    test("音高：24 分/格（与历史手感一致）", () => {
-        expect(depthStepCentsFor("pitch")).toBe(24);
+describe("按参数钳住拖拽深度", () => {
+    /*
+     * 预设是跨参数共用的，深度以 cents 存储。落到窄量程的参数上时，超出该参数
+     * 可表达范围的深度会被写入口静默钳平 —— 波形顶部变成一条直线，用户拉到
+     * 300 分并不"更颤"，只是变成方波。因此工作副本一律按当前参数的满摆幅钳一次。
+     */
+    test("音高：满摆幅就是工具的深度上限，宽深度原样保留", () => {
+        const working = createDragWorking(preset({ depthCents: 900 }), "pitch");
+        expect(working.depthCents).toBe(900);
     });
 
-    test("乘性增益：1 分 = 1% / 格", () => {
-        expect(depthStepCentsFor("dyn")).toBe(1);
-        expect(depthStepCentsFor("volume")).toBe(1);
-        expect(depthStepCentsFor("breath_gain")).toBe(1);
+    test("原始值域（张力 ±100）：深度钳在满摆幅 100 分", () => {
+        const range = { min: -100, max: 100 };
+        const working = createDragWorking(preset({ depthCents: 1200 }), "hifigan_tension", range);
+        expect(working.depthCents).toBe(100);
     });
 
-    test("cents 类参数：按值域的 1/200，下限 1 分", () => {
-        // 子轨音分偏移值域 ±2400 → 4800 分 / 200 = 24 分
-        expect(depthStepCentsFor("child_pitch_offset_cents@t1")).toBeCloseTo(24, 9);
-        // 极度受限的值域不会退化成 0
-        expect(depthStepCentsFor("formant_shift_cents")).toBeGreaterThanOrEqual(1);
+    test("cents 族（共振峰 ±500）：钳在参数自己的量程，而不是工具的 1200", () => {
+        const range = { min: -500, max: 500 };
+        const working = createDragWorking(
+            preset({ depthCents: 1200 }),
+            "formant_shift_cents",
+            range,
+        );
+        expect(working.depthCents).toBe(500);
     });
 
-    test("原始值域参数：半量程的 1/200，恒为 0.5 分", () => {
-        expect(depthStepCentsFor("tension")).toBe(0.5);
-        expect(depthStepCentsFor("breathiness")).toBe(0.5);
+    test("切换预设时同样钳住（取新预设的深度也走同一道闸）", () => {
+        const before = createDragWorking(preset({ depthCents: 10 }), "pan", { min: -1, max: 1 });
+        const after = switchDragPreset(
+            before,
+            preset({ id: "builtin.deep", depthCents: 800 }),
+            "pan",
+            {
+                min: -1,
+                max: 1,
+            },
+        );
+        expect(after.depthCents).toBe(100);
+    });
+
+    test("重置振幅回到预设自带值时也钳住", () => {
+        const working = {
+            ...createDragWorking(preset({ depthCents: 400 }), "pan", { min: -1, max: 1 }),
+            depthCents: 20,
+            depthAdjusted: true,
+        };
+        expect(working.depthCents).toBe(20);
+        const after = resetVibratoDragDepth(working, "pan", { min: -1, max: 1 });
+        // 预设自带 400 分超出声像的满摆幅（100 分），回到的是钳后的值。
+        expect(after.depthCents).toBe(100);
+    });
+
+    test("负深度按同一幅度钳住（反相不受影响）", () => {
+        const working = createDragWorking(preset({ depthCents: -1200 }), "hifigan_tension", {
+            min: -100,
+            max: 100,
+        });
+        expect(working.depthCents).toBe(-100);
     });
 });
 
@@ -217,6 +261,44 @@ describe("computeVibratoDragAdjustment", () => {
             fineScale: 1,
         });
         expect(floored.depthCents).toBe(VIBRATO_LIMITS.depthCents.min);
+    });
+
+    test("每格步长按参数类型取：音高 24 分、原始值域 2 分（满摆幅的 1/50）", () => {
+        const pitch = computeVibratoDragAdjustment({
+            ...base,
+            target: "depth",
+            direction: 1,
+            steps: 1,
+            fineScale: 1,
+        });
+        expect(pitch.depthCents).toBeCloseTo(30 + 24, 9);
+
+        const raw = computeVibratoDragAdjustment({
+            ...base,
+            editParam: "hifigan_tension",
+            currentParamRange: { min: -100, max: 100 },
+            target: "depth",
+            direction: 1,
+            steps: 1,
+            fineScale: 1,
+        });
+        // 张力满摆幅 100 分 → 一格 2 分（= 2 个原生单位）。旧实现是 0.5 分，
+        // 从零扫到满幅要 400 格。
+        expect(raw.depthCents).toBeCloseTo(32, 9);
+    });
+
+    test("深度钳在参数的满摆幅内，不会拖出被写入口钳平的平顶波形", () => {
+        const next = computeVibratoDragAdjustment({
+            ...base,
+            editParam: "hifigan_tension",
+            currentParamRange: { min: -100, max: 100 },
+            depthCents: 95,
+            target: "depth",
+            direction: 1,
+            steps: 5,
+            fineScale: 1,
+        });
+        expect(next.depthCents).toBe(100);
     });
 
     test("深度为负时继续向上调可以回到正值", () => {
