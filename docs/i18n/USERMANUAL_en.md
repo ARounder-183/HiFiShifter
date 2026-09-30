@@ -450,14 +450,16 @@ Right-click the Draw tool button to switch to the Line/Vibrato tool. This tool a
 
 Left-drag to draw a straight line freely or horizontally, depending on the `Drag Direction` setting. While left-dragging, press the right button (or the `D` key) to quickly toggle drag direction.
 
-While left-dragging, scroll the wheel to adjust the vibrato **depth**; hold `Alt` while scrolling to adjust the **rate**. Hold the `Param Fine Adjust` modifier (default `Ctrl`) to fine-tune while scrolling. A two-line readout follows the pointer during the drag, showing the current preset, depth and rate. It shares the `Options → Show Parameter Popup` switch with the curve value popup, so turning that off hides it.
+While left-dragging, scroll the wheel to adjust the vibrato **depth**; hold `Alt` while scrolling to adjust the **rate**. Hold the `Param Fine Adjust` modifier (default `Ctrl`) to fine-tune while scrolling. A two-line readout follows the pointer during the drag, showing the current preset, depth and rate. It shares the `Options → Show Parameter Popup` switch with the curve value popup, so turning that off hides it. Depth can go **negative**: a negative depth inverts the waveform (it starts by swinging down), and turning the wheel further down does not stick at 0.
 
 You can switch vibrato presets mid-drag:
 
 - **Mouse side buttons**: forward switches to the next preset, back to the previous one.
 - **Keyboard**: `,` for the previous preset and `.` for the next (rebindable in `Options → Keyboard Shortcuts`).
 
-A preset decides the waveform (sine, triangle, saw, square, trapezoid, trill, or a hand-drawn table), the envelope (fade in, swell, fade out), the rate ramp, the irregularity and how the wave is placed; depth and rate belong to the gesture itself. Depth and rate tweaks made during a drag never rewrite the preset and are not carried into the next drag — presets change only in the preset manager. **Switching presets, however, is persistent**: pressing a side button or `,` / `.` mid-drag really does change the preset you are using (it is remembered across restarts), and the gesture restarts from the new preset's own values.
+A preset decides the waveform (sine, triangle, saw, square, trapezoid, trill, or a hand-drawn table), the envelope (fade in, swell, fade out), the rate ramp, the irregularity and how the wave is placed; depth and rate belong to the gesture itself. Depth and rate tweaks made during a drag never rewrite the preset and are not carried into the next drag — presets change only in the preset manager. **Switching presets, however, is persistent**: pressing a side button or `,` / `.` mid-drag really does change the preset you are using (it is remembered across restarts).
+
+Depth and rate are inherited when you switch: **if this gesture has adjusted either one, both keep the values you adjusted to** — you changed the tone, not the amount; if nothing was adjusted yet, the new preset's own depth and rate are used.
 
 The drag rate is always measured in Hz, so a preset sounds the same speed however long you drag.
 
@@ -467,11 +469,13 @@ Press `Tab` to cycle through editing tools (Select / Draw-type tools).
 
 ### 5. Vibrato Presets
 
-A vibrato preset is a reusable set of vibrato parameters. Open the manager from `Options → Vibrato Preset Manager...` or from the vibrato preset button in the parameter editor toolbar.
+A vibrato preset is a reusable set of vibrato parameters. Open the manager from `Options → Vibrato Preset Manager...`, from the vibrato preset button in the parameter editor toolbar (**left-click** opens the quick-switch dropdown, **right-click** opens the manager directly), or from `Create vibrato preset from selection...` in the context menu. Among the built-in presets `Straight` sits first in the list — it is what this tool looks like with no vibrato at all, and drawing a straight line first and adding vibrato on top later is the common case.
 
 The **waveform preview** sits across the top of the manager and is deliberately outside every scroll region, so it stays visible while you edit the parameters below it and redraws as you change anything; its vertical axis scales to the preset's own depth, so a 5-cent and a 100-cent preset are both legible, and the readout underneath gives the real amount. The card's play button **auditions** the preset with a synthesized tone -- the same voice as the piano-roll keys, no vocoder involved: one click sounds immediately, a second click stops, and what you hear is exactly the drawn curve including the fade-in, the swell and the irregularity. Built-in presets can be auditioned too.
 
 The preview is editable, not just readable: drag the **small square handles at the left and right edges** to change the fade-in and fade-out durations (the cursor becomes a horizontal resize), and drag on the waveform body to change the start phase (horizontally) and the depth (vertically). Every gesture edits the current draft -- nothing is written back until you press `Save`, and a built-in preset's canvas is read-only just like its form.
+
+`Save` **does not close the window** — you can save a version and keep editing, or move on to another preset. Switching to another preset mid-edit writes the current changes back to the library automatically (the same path as `Save`), so changing presets never loses your work. Close the window with `Esc` or the close button in the corner.
 
 `Export...` in the footer saves the selected preset as a JSON file, and `Import...` reads one back: duplicates are skipped automatically (importing the same file twice does not double the library), the imported preset is selected afterwards with a line of feedback, and a wrong file -- a theme's JSON, say -- is rejected with a reason. Imported presets always become new custom presets, even when the file carries a built-in preset's name.
 
@@ -485,7 +489,7 @@ The parameters fall into four groups:
 
 Built-in presets are read-only: duplicate one to edit it. Clicking a list entry only selects it for editing; **double-click** makes it the preset you are using, so shaping a preset you have not settled on does not change the sound you are about to draw with.
 
-**Creating a preset from a selection**: once you have drawn a vibrato you like, select it and choose `Create preset from selection...`. The pitch movement itself is removed, the period is measured by autocorrelation, the remainder is folded into one averaged cycle to become the waveform, and the depth, fades and irregularity are measured, giving you a preset you can keep tuning. It works on any parameter.
+**Creating a vibrato preset from a selection**: once you have drawn a vibrato you like, select it and choose `Create vibrato preset from selection...` (or the same button in the apply dialog footer). The pitch movement itself is removed, the period is measured by autocorrelation, the remainder is folded into one averaged cycle to become the waveform, and the depth, fades and irregularity are measured, giving you a preset you can keep tuning. The folded waveform is low-passed (only the lowest few harmonics are kept), so the result is a **smooth** curve rather than one that carries the recording's observation noise and looks bumpy. It works on any parameter.
 
 ### 6. Pitch Snap
 
