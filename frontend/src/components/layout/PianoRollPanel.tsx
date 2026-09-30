@@ -202,6 +202,7 @@ import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
 import { VibratoPresetDialog } from "./VibratoPresetDialog";
 import { VibratoApplyDialog } from "./VibratoApplyDialog";
 import { resolveMenuMaxHeight } from "./menuPlacement";
+import { pointerOverlayOffset } from "./pointerOverlayOffset";
 import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
 import { buildVibratoCurve } from "../../features/vibrato/vibratoCurve";
 import { extractVibratoPreset } from "../../features/vibrato/vibratoExtract";
@@ -8414,8 +8415,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                       <div
                                           className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-qt-xs leading-none text-qt-text"
                                           style={{
-                                              left: axisValuePreview.clientX - rect.left,
-                                              top: axisValuePreview.clientY - rect.top,
+                                              // 整像素定位：小数坐标会让文字逐帧重栅格化而抖动
+                                              // （见 `pointerOverlayOffset`）。
+                                              ...pointerOverlayOffset(axisValuePreview, rect),
                                               transform: "translate(0, -100%)",
                                               whiteSpace: "nowrap",
                                           }}
@@ -8621,8 +8623,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                 <div
                                                     className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-qt-xs leading-none text-qt-text"
                                                     style={{
-                                                        left: anchor.clientX - rect.left,
-                                                        top: anchor.clientY - rect.top,
+                                                        // 整像素定位：`clientX/Y` 在 HiDPI 屏上是小数，
+                                                        // 直接拿来做 `left/top` 会让气泡里的文字每帧换一个
+                                                        // 次像素相位、被反复重栅格化 —— 看起来就是"文字在抖"
+                                                        // （见 `pointerOverlayOffset`）。
+                                                        ...pointerOverlayOffset(anchor, rect),
                                                         transform: "translate(0, -100%)",
                                                         whiteSpace: "nowrap",
                                                     }}
@@ -8663,7 +8668,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                                     ? ` · ${t("vibrato_adjusted")}`
                                                                     : ""}
                                                             </div>
-                                                            <div className="text-qt-text-muted">
+                                                            <div className="text-qt-text-muted tabular-nums">
                                                                 {`${formatNumber(depthForParam(vibratoDragHud.depthCents, editParam, currentParamRange))}${depthUnitKey ? ` ${t(depthUnitKey)}` : ""} · ${formatNumber(vibratoDragHud.rateHz)} ${t("vibrato_unit_hz")}`}
                                                             </div>
                                                         </div>
