@@ -50,13 +50,21 @@ export function KeybindingsNavRail({
             role="listbox"
             aria-label={ariaLabel}
             /*
+             * 【宽度为什么不写死】分组名在五种语系里长度差一倍：中文最长 142px 而
+             * 日文 214px（12px 字号实测）。写死 `w-44`（176px）时中文恰好够、
+             * 英日韩全部被截断 —— 而给最宽的语系定宽又会让中文版空出一大片。
+             *
+             * 因此让这一栏**按内容取宽**（`w-max`），再用 `max-w-[…]` 封顶：短语言
+             * 不给多余留白，长语言撑到上限后由 `title` + 省略号兜底。将来新增语系
+             * 也不需要回来改数字。
+             *
              * 【为什么这里可以有独立滚动】`AppDialog` 用 `bodyLayout="pane"` 之后，
              * body 不再滚动，而是提供一个确定高度的 flex 容器；本栏作为
              * `shrink-0` + `min-h-0` 的兄弟节点，可以在**不产生第二条页面级滚动条**
              * 的前提下自己滚。这也是不用 `max-h-[Npx]` 的原因 ——
              * 那会在 `designSystemGates.test.ts` 的"有界滚动盒"门禁上报错。
              */
-            className="hide-v-scrollbar w-44 shrink-0 overflow-y-auto border-r border-qt-border pr-1"
+            className="hide-v-scrollbar w-max max-w-[15rem] shrink-0 overflow-y-auto border-r border-qt-border pr-1"
         >
             {items.map((item) => {
                 const dimmed = item.matchCount === 0;
@@ -73,9 +81,19 @@ export function KeybindingsNavRail({
                          */
                         className={dimmed ? "opacity-50" : undefined}
                         onClick={() => onSelect(item.group)}
-                        title={item.customized ? customizedHint : undefined}
+                        /*
+                         * `title` 始终给完整标签：宽度已按内容取，但极长语系仍可能
+                         * 撞到 `max-w` 上限，那时悬停要能看到全名。
+                         */
+                        title={item.customized ? `${item.label} · ${customizedHint}` : item.label}
                     >
-                        <span className="hs-type-label flex-1 truncate">{item.label}</span>
+                        {/*
+                         * 【为什么不 `truncate`】宽度已经是"按内容取 + 上限"，
+                         * 截断只在撞到上限那一种情况下才需要，而那时保留尾部可见
+                         * 比显示省略号更有用（`max-w` 下的 `truncate` 会给几乎每行
+                         * 都加省略号，反而制造噪音）。
+                         */}
+                        <span className="hs-type-label flex-1 whitespace-nowrap">{item.label}</span>
                         {item.customized && (
                             /*
                              * 已改动标记：一个小圆点 + 无障碍说明。

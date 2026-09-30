@@ -48,7 +48,11 @@ import {
     type KeybindingPresetSelectionId,
 } from "../../features/keybindings/keybindingPresets";
 import { KeybindingsActionRow } from "./keybindings/KeybindingsActionRow";
-import { GESTURE_BADGES, isDefaultBinding } from "./keybindings/keybindingRowShared";
+import {
+    GESTURE_BADGES,
+    isDefaultBinding,
+    resolveGroupNavLabel,
+} from "./keybindings/keybindingRowShared";
 import { KeybindingsNavRail, type KeybindingsNavItem } from "./keybindings/KeybindingsNavRail";
 
 /**
@@ -397,7 +401,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
             },
             ...ACTION_GROUP_ORDER.map((group) => ({
                 group,
-                label: tf(GROUP_LABEL_KEYS[group]),
+                label: resolveGroupNavLabel(group, tf),
                 total: totalsByGroup.get(group) ?? 0,
                 matchCount: query.trim() ? (countsByGroup.get(group) ?? 0) : undefined,
                 customized: customizedGroups.has(group),
@@ -651,7 +655,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                             visibleEntries.length > 0 ? (
                                 <Flex direction="column" gap="1">
                                     {visibleEntries.map((entry) =>
-                                        renderRow(entry.id, tf(GROUP_LABEL_KEYS[entry.group])),
+                                        renderRow(entry.id, resolveGroupNavLabel(entry.group, tf)),
                                     )}
                                 </Flex>
                             ) : (

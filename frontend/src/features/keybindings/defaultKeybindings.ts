@@ -725,6 +725,32 @@ export const GROUP_LABEL_KEYS: Record<ActionMeta["group"], string> = {
 };
 
 /**
+ * 分组的**短**标签 i18n key（导航栏与搜索结果路标专用）。
+ *
+ * 【为什么需要两套标签】`GROUP_LABEL_KEYS` 里那些是**完整描述句**
+ * （英文 `Piano Roll · Param Edit Commands`、日文 `ピアノロール · パラメータ編集コマンド`），
+ * 写的时候是给**内容区里的分组标题**用的 —— 那里有整栏宽度（实测 562px）。
+ * 同一份文本放进窄导航栏（实测需要 205–214px，而栏内只有 155px）必然被截断：
+ * 中文恰好够（142px），英日韩全部溢出。
+ *
+ * 【为什么是"可选"表而不是必填】只有真正冗长的组才需要短版；`编辑` / `布局` /
+ * `钢琴卷帘` 这类本来就短的，短版会和长版重复 —— 而 `catalogIntegrity.test.ts`
+ * 明确禁止同一命名族内出现相同文案。缺哪一组就自动回落长版（见
+ * `resolveGroupNavLabel`），因此这张表**不需要覆盖全部 14 组**。
+ */
+export const GROUP_NAV_LABEL_KEYS: Partial<Record<ActionMeta["group"], string>> = {
+    playback: "kb_group_playback_nav",
+    project: "kb_group_project_nav",
+    clip: "kb_group_clip_nav",
+    paramEditor: "kb_group_param_editor_nav",
+    modClip: "kb_group_mod_clip_nav",
+    modFade: "kb_group_mod_fade_nav",
+    modParam: "kb_group_mod_param_nav",
+    modWheel: "kb_group_mod_wheel_nav",
+    modFine: "kb_group_mod_fine_nav",
+};
+
+/**
  * 设置面板中的分组展示顺序：
  * 先键盘快捷键（按全局 → 时间轴 → 钢琴卷帘 → 快速搜索的场景排列），
  * 再修饰键（按音频块 → 淡化 → 参数编辑 → 滚轮 → 全局微调的场景排列）。
