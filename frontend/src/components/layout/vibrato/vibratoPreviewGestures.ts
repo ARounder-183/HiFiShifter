@@ -96,7 +96,7 @@ export function wrapPhaseDeg(value: number): number {
  * | 区域 | 映射 |
  * | - | - |
  * | 渐入 | 水平位移 → `attackMs`（`dx/width × windowMs`），钳 `0..windowMs/2` |
- * | 渐出 | 同上（向右加长）→ `releaseMs` |
+ * | 渐出 | 同上但**取反**（手柄画在斜坡起点，向右拖即缩短渐出）→ `releaseMs` |
  * | 主体 | `dx → startPhaseDeg`（一个可见周期 = 360°）；`dy → depthCents`（向上加深） |
  */
 export function applyPreviewGesture(
@@ -113,7 +113,10 @@ export function applyPreviewGesture(
         return { attackMs: clamp(snapshot.attackMs + deltaX * msPerPx, 0, maxHalf) };
     }
     if (zone.kind === "release") {
-        return { releaseMs: clamp(snapshot.releaseMs + deltaX * msPerPx, 0, maxHalf) };
+        // 渐出手柄画在 `windowMs - releaseMs` 处（渐出斜坡的起点），因此**向右拖**
+        // 是让斜坡起点右移、渐出变**短**。映射取负号，手柄才会跟着指针走 —— 与
+        // 渐入手柄同向会得到"往右拖、手柄却往左跑"的反直觉手感。
+        return { releaseMs: clamp(snapshot.releaseMs - deltaX * msPerPx, 0, maxHalf) };
     }
 
     const cycleWidthPx = snapshot.cycleWidthPx > 0 ? snapshot.cycleWidthPx : width;

@@ -78,11 +78,37 @@ describe("applyPreviewGesture", () => {
         expect(short.attackMs).toBe(0);
     });
 
-    test("渐出：向右加长（与渐入同向）", () => {
-        const next = applyPreviewGesture({ kind: "release" }, snapshot(), 25, 0);
-        expect(next.releaseMs).toBeCloseTo(200, 9);
-        const long = applyPreviewGesture({ kind: "release" }, snapshot(), 10_000, 0);
-        expect(long.releaseMs).toBe(800);
+    test("渐出：手柄跟手 —— 向右拖缩短，向左拖加长", () => {
+        // 手柄画在 windowMs - releaseMs 处，向右拖即让斜坡起点右移、渐出变短。
+        const shorter = applyPreviewGesture({ kind: "release" }, snapshot(), 25, 0);
+        expect(shorter.releaseMs).toBeCloseTo(0, 9); // 100 - 25*4 → 钳到 0
+        const longer = applyPreviewGesture({ kind: "release" }, snapshot(), -25, 0);
+        expect(longer.releaseMs).toBeCloseTo(200, 9);
+        // 上限仍是窗口一半。
+        const capped = applyPreviewGesture({ kind: "release" }, snapshot(), -10_000, 0);
+        expect(capped.releaseMs).toBe(800);
+    });
+
+    /*
+     * 手感回归：**手柄必须跟着指针走**。
+     *
+     * 【为什么单测这条】"拖拽逻辑与直觉相反"是一个只有上手才会发现的缺陷，而且
+     * 恰好不会抛错 —— 渐出手柄画在 `windowMs - releaseMs`，映射一旦忘了取反，
+     * 往右拖手柄却往左跑。这里把"位移方向 → 手柄绘制方向"这条不变量钉住，不依赖
+     * 具体数值。
+     */
+    test("渐入手柄跟手：向右拖 → 手柄右移", () => {
+        const before = handleLayoutFor({ attackMs: 100, releaseMs: 100 }, 1600);
+        const next = applyPreviewGesture({ kind: "attack" }, snapshot(), 25, 0);
+        const after = handleLayoutFor({ attackMs: next.attackMs as number, releaseMs: 100 }, 1600);
+        expect(after.attackFrac).toBeGreaterThan(before.attackFrac);
+    });
+
+    test("渐出手柄跟手：向右拖 → 手柄右移（不是反向）", () => {
+        const before = handleLayoutFor({ attackMs: 100, releaseMs: 400 }, 1600);
+        const next = applyPreviewGesture({ kind: "release" }, snapshot({ releaseMs: 400 }), 25, 0);
+        const after = handleLayoutFor({ attackMs: 100, releaseMs: next.releaseMs as number }, 1600);
+        expect(after.releaseFrac).toBeGreaterThan(before.releaseFrac);
     });
 
     test("主体：水平位移改相位（一个可见周期 = 360°）", () => {
