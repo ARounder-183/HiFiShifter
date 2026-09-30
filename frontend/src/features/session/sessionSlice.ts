@@ -151,6 +151,25 @@ import {
 } from "../../components/layout/pianoRoll/paramAxisUnits";
 import type { CustomScalePreset } from "../../utils/customScales";
 import { sanitizeCustomScalePreset } from "../../utils/customScales";
+import {
+    MAX_VIBRATO_PRESETS,
+    isBuiltinVibratoPresetId,
+    sanitizeVibratoPreset,
+} from "../../features/vibrato/vibratoPresets";
+import {
+    activeIdAfterRemoval,
+    cycleVibratoPresetId,
+    effectiveBuiltinPresetOrder,
+    enabledVibratoPresets,
+    reorderBuiltinPresetIds,
+    reorderUserVibratoPresets,
+    resolveVibratoPresets,
+} from "../../features/vibrato/vibratoPresetList";
+import {
+    DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
+    SYSTEM_VIBRATO_PRESETS,
+} from "../../features/vibrato/systemPresets";
+import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
 import type { TempoMap } from "../../utils/tempoMap";
 import {
     clampDenominator,
@@ -629,6 +648,33 @@ export interface SessionState {
     };
 
     customScalePresets: CustomScalePreset[];
+
+    /**
+     * 用户自定义颤音预设。系统预设在代码里（`features/vibrato/systemPresets.ts`），
+     * 不在这份列表里 —— 两者合成"可用预设列表"的逻辑见
+     * `features/vibrato/vibratoPresetList.ts`。
+     */
+    vibratoPresets: VibratoPreset[];
+    /** 当前活动颤音预设的 id（系统预设的 `builtin.*` 也合法）。 */
+    activeVibratoPresetId: string;
+    /**
+     * 被停用的颤音预设 id（系统与用户预设共用一份名单）。
+     *
+     * 【为什么单独存一份名单，而不是给预设加 `enabled` 字段】系统预设在代码里、
+     * 用户预设在设置里，两者都要能被停用；而预设对象还会被导出成预设文件，往里塞
+     * 一个"本机是否启用"的字段会让文件携带与它无关的本地状态。停用只影响本机的
+     * 工具栏列表与循环切换，因此单独记一份 id 名单最干净。
+     */
+    disabledVibratoPresetIds: string[];
+    /**
+     * 系统预设的自定义顺序（id 列表）。
+     *
+     * 【为什么单独存】系统预设在代码里（`systemPresets.ts` 的出厂顺序），要允许用户
+     * 排序就只能把顺序记在设置里。空数组 = 用出厂顺序；缺项（新版本新增的出厂预设）
+     * 与无效项（旧版本删过的）由 `effectiveBuiltinPresetOrder` 兜底，因此不需要迁移。
+     */
+    builtinVibratoPresetOrder: string[];
+
     project: {
         name: string;
         path: string | null;
@@ -2161,6 +2207,10 @@ const initialState: SessionState = {
     },
 
     customScalePresets: [],
+    vibratoPresets: [],
+    activeVibratoPresetId: DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
+    disabledVibratoPresetIds: [],
+    builtinVibratoPresetOrder: [],
     project: {
         name: "Untitled",
         path: null,
@@ -2584,6 +2634,96 @@ const sessionSlice = createSlice({
             state.customScalePresets = state.customScalePresets.filter(
                 (preset) => preset.id !== presetId,
             );
+        },
+        /** 新增或覆盖一个用户颤音预设（按 id 匹配）。 */
+        upsertVibratoPreset(state, action: PayloadAction<VibratoPreset>) {
+            const incoming = sanitizeVibratoPreset(action.payload);
+            // 系统预设只能来自代码；混进用户列表会让"只读"失效。
+            if (isBuiltinVibratoPresetId(incoming.id)) return;
+            const idx = state.vibratoPresets.findIndex((preset) => preset.id === incoming.id);
+            if (idx >= 0) {
+                state.vibratoPresets[idx] = incoming;
+                return;
+            }
+            if (state.vibratoPresets.length >= MAX_VIBRATO_PRESETS) return;
+            state.vibratoPresets.push(incoming);
+        },
+        /**
+         * 删除一个用户颤音预设，并把活动 id 迁移到一个仍然存在的预设上。
+         *
+         * 【为什么在这里迁移】活动 id 指向被删的预设会让"当前预设"悬空。迁移
+         * 规则收在 `activeIdAfterRemoval` 里（纯函数、可单测），与预设编辑器
+         * 各自维护一份相比不会漂移。
+         */
+        removeVibratoPreset(state, action: PayloadAction<string>) {
+            const presetId = action.payload;
+            const all = [...SYSTEM_VIBRATO_PRESETS, ...state.vibratoPresets];
+            state.vibratoPresets = state.vibratoPresets.filter((preset) => preset.id !== presetId);
+            state.activeVibratoPresetId = activeIdAfterRemoval(
+                all,
+                state.activeVibratoPresetId,
+                presetId,
+            );
+            // 顺手把停用名单里的这条清掉：id 是随机生成的，留着不会误伤别的预设，
+            // 但会让持久化的名单随着"建了又删"一直变长。
+            state.disabledVibratoPresetIds = state.disabledVibratoPresetIds.filter(
+                (id) => id !== presetId,
+            );
+        },
+        /** 移动用户颤音预设的位置（仅用户段内部）。 */
+        reorderVibratoPreset(state, action: PayloadAction<{ id: string; toIndex: number }>) {
+            state.vibratoPresets = reorderUserVibratoPresets(
+                state.vibratoPresets,
+                action.payload.id,
+                action.payload.toIndex,
+            );
+        },
+        /**
+         * 移动**系统预设**的位置。
+         *
+         * 顺序以 id 列表持久化：先取当前有效顺序（含出厂顺序兜底），再移动一项后整体
+         * 写回 —— 这样"从未排过序"与"排过序"最终都落在同一份完整列表上。
+         */
+        reorderBuiltinVibratoPreset(state, action: PayloadAction<{ id: string; toIndex: number }>) {
+            state.builtinVibratoPresetOrder = reorderBuiltinPresetIds(
+                effectiveBuiltinPresetOrder(state.builtinVibratoPresetOrder),
+                action.payload.id,
+                action.payload.toIndex,
+            );
+        },
+        /** 设定当前活动颤音预设。 */
+        setActiveVibratoPreset(state, action: PayloadAction<string>) {
+            state.activeVibratoPresetId = action.payload;
+        },
+        /**
+         * 启用 / 停用一条颤音预设。
+         *
+         * 停用只影响本机的工具栏列表与循环切换，预设本身、以及"当前使用"的选择都
+         * 不受影响 —— 停用正在用的那一条是允许的，它仍然是当前预设。
+         */
+        toggleVibratoPresetEnabled(state, action: PayloadAction<string>) {
+            const id = action.payload;
+            const index = state.disabledVibratoPresetIds.indexOf(id);
+            if (index >= 0) state.disabledVibratoPresetIds.splice(index, 1);
+            else state.disabledVibratoPresetIds.push(id);
+        },
+        /**
+         * 环绕切换活动颤音预设。
+         *
+         * `delta` 的语义与 `clip.cycleTake`、`layout.focusNext` 一致：一个实现
+         * 同时服务"上一个"与"下一个"。被停用的预设**跳过**。
+         */
+        cycleActiveVibratoPreset(state, action: PayloadAction<1 | -1>) {
+            const all = resolveVibratoPresets(
+                state.vibratoPresets,
+                state.builtinVibratoPresetOrder,
+            ).all;
+            const next = cycleVibratoPresetId(
+                enabledVibratoPresets(all, state.disabledVibratoPresetIds),
+                state.activeVibratoPresetId,
+                action.payload,
+            );
+            if (next) state.activeVibratoPresetId = next;
         },
         togglePlayheadZoom(state) {
             state.playheadZoomEnabled = !state.playheadZoomEnabled;
@@ -3587,6 +3727,34 @@ const sessionSlice = createSlice({
                 if (Array.isArray(s.customScalePresets)) {
                     state.customScalePresets = s.customScalePresets.map((preset: unknown) =>
                         sanitizeCustomScalePreset(preset as Partial<CustomScalePreset>),
+                    );
+                }
+                // 逐项规整：手改过的配置不能让内核拿到越界或缺失的字段。
+                if (Array.isArray(s.vibratoPresets)) {
+                    state.vibratoPresets = s.vibratoPresets
+                        .map((preset: unknown) => sanitizeVibratoPreset(preset as VibratoPreset))
+                        .filter((preset) => !isBuiltinVibratoPresetId(preset.id))
+                        .slice(0, MAX_VIBRATO_PRESETS);
+                }
+                if (typeof s.activeVibratoPresetId === "string" && s.activeVibratoPresetId) {
+                    state.activeVibratoPresetId = s.activeVibratoPresetId;
+                }
+                // 停用名单：只收字符串，去重；未知 id 留着无害（过滤时按 id 比对）。
+                if (Array.isArray(s.disabledVibratoPresetIds)) {
+                    state.disabledVibratoPresetIds = [
+                        ...new Set(
+                            s.disabledVibratoPresetIds.filter(
+                                (id: unknown): id is string =>
+                                    typeof id === "string" && id.length > 0,
+                            ),
+                        ),
+                    ];
+                }
+                // 系统预设的自定义顺序：同样只收字符串；缺项 / 无效项由
+                // `effectiveBuiltinPresetOrder` 兜底，这里不必校验成员合法性。
+                if (Array.isArray(s.builtinVibratoPresetOrder)) {
+                    state.builtinVibratoPresetOrder = s.builtinVibratoPresetOrder.filter(
+                        (id: unknown): id is string => typeof id === "string" && id.length > 0,
                     );
                 }
             })
@@ -6338,6 +6506,13 @@ export const {
     setScaleHighlightMode,
     upsertCustomScalePreset,
     removeCustomScalePreset,
+    upsertVibratoPreset,
+    removeVibratoPreset,
+    reorderVibratoPreset,
+    reorderBuiltinVibratoPreset,
+    setActiveVibratoPreset,
+    cycleActiveVibratoPreset,
+    toggleVibratoPresetEnabled,
     toggleLockParamLines,
     setMetronomeConfig,
     setSilencePreview,

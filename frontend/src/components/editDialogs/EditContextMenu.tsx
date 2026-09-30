@@ -24,6 +24,12 @@ interface EditContextMenuProps {
     onSetPitch?: () => void;
     onAverage?: () => void;
     onSmooth?: () => void;
+    /**
+     * 打开「添加颤音」弹窗（`Ctrl+B`）：在弹窗里选预设、调旋钮、看套用预览。
+     *
+     * 【为什么菜单里不再直接铺预设列表】预设的选择与微调是弹窗的事 —— 那里有
+     * 波形缩略图与套用预览，菜单行给不了。菜单只保留这一个入口。
+     */
     onAddVibrato?: () => void;
     onQuantize?: () => void;
     onMeanQuantize?: () => void;
@@ -33,6 +39,8 @@ interface EditContextMenuProps {
     onConvertVolumeToDyn?: () => void;
     /** 动态 → 音量（源参数归位到「沿用原声」）。 */
     onConvertDynToVolume?: () => void;
+    /** 从选区提取预设（作用于当前选区，与预设选择无关，故留在菜单）。 */
+    onExtractVibratoPreset?: () => void;
 }
 
 export function EditContextMenu({
@@ -60,6 +68,7 @@ export function EditContextMenu({
     onExportMidi,
     onConvertVolumeToDyn,
     onConvertDynToVolume,
+    onExtractVibratoPreset,
 }: EditContextMenuProps) {
     const { tf } = useI18n();
 
@@ -159,16 +168,27 @@ export function EditContextMenu({
             shortcut: smoothShortcut,
             onSelect: () => onSmooth?.(),
         },
+        // 颤音：唯一入口是弹窗 —— 选预设、微调、看套用预览都在那里。
         {
             key: "addVibrato",
             label: tf("menu_add_vibrato"),
             shortcut: addVibratoShortcut,
             onSelect: () => onAddVibrato?.(),
         },
+        ...(onExtractVibratoPreset
+            ? ([
+                  {
+                      key: "extractVibratoPreset",
+                      label: tf("vibrato_extract_action"),
+                      onSelect: onExtractVibratoPreset,
+                  },
+              ] satisfies AppMenuItemSpec[])
+            : []),
         {
             key: "quantize",
             label: tf("menu_quantize"),
             shortcut: quantizeShortcut,
+            separatorBefore: true,
             onSelect: () => onQuantize?.(),
         },
         {

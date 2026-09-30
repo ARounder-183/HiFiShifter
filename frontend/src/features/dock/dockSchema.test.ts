@@ -178,13 +178,13 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             schema: 2,
             roots: {
                 main: {
-                t: "split",
-                id: "z1",
-                dir: "row",
-                ratio: 0.5,
-                fixed: null,
-                a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
-                b: { t: "tabset", id: "z3", tabs: ["ghost"], active: "ghost" },
+                    t: "split",
+                    id: "z1",
+                    dir: "row",
+                    ratio: 0.5,
+                    fixed: null,
+                    a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
+                    b: { t: "tabset", id: "z3", tabs: ["ghost"], active: "ghost" },
                 },
             },
             forms: {
@@ -204,13 +204,18 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             schema: 2,
             roots: {
                 main: {
-                t: "split",
-                id: "z1",
-                dir: "row",
-                ratio: 0.5,
-                fixed: null,
-                a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
-                b: { t: "tabset", id: "z3", tabs: ["timeline", "paramEditor"], active: "timeline" },
+                    t: "split",
+                    id: "z1",
+                    dir: "row",
+                    ratio: 0.5,
+                    fixed: null,
+                    a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
+                    b: {
+                        t: "tabset",
+                        id: "z3",
+                        tabs: ["timeline", "paramEditor"],
+                        active: "timeline",
+                    },
                 },
             },
             forms: {
@@ -219,7 +224,11 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             },
         };
         const layout = normalizeDockLayout(raw);
-        assertEqual(shape(layout.roots.main), "([timeline]|[paramEditor])", "duplicate form deduped");
+        assertEqual(
+            shape(layout.roots.main),
+            "([timeline]|[paramEditor])",
+            "duplicate form deduped",
+        );
     }
 
     // ── 归一化：重复的 Zone id → 现场重编，两组都保持可用 ──────────
@@ -232,13 +241,13 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             schema: 2,
             roots: {
                 main: {
-                t: "split",
-                id: "z1",
-                dir: "row",
-                ratio: 0.5,
-                fixed: null,
-                a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
-                b: { t: "tabset", id: "z2", tabs: ["paramEditor"], active: "paramEditor" },
+                    t: "split",
+                    id: "z1",
+                    dir: "row",
+                    ratio: 0.5,
+                    fixed: null,
+                    a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
+                    b: { t: "tabset", id: "z2", tabs: ["paramEditor"], active: "paramEditor" },
                 },
             },
             forms: {
@@ -264,13 +273,13 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             schema: 2,
             roots: {
                 main: {
-                t: "split",
-                id: "z1",
-                dir: "row",
-                ratio: 0.5,
-                fixed: null,
-                a: { t: "tabset", tabs: ["timeline"], active: "timeline" },
-                b: { t: "tabset", tabs: ["paramEditor"], active: "paramEditor" },
+                    t: "split",
+                    id: "z1",
+                    dir: "row",
+                    ratio: 0.5,
+                    fixed: null,
+                    a: { t: "tabset", tabs: ["timeline"], active: "timeline" },
+                    b: { t: "tabset", tabs: ["paramEditor"], active: "paramEditor" },
                 },
             },
             forms: {
@@ -299,13 +308,13 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             schema: 2,
             roots: {
                 main: {
-                t: "split",
-                id: "z1",
-                dir: "row",
-                ratio,
-                fixed: null,
-                a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
-                b: { t: "tabset", id: "z3", tabs: ["paramEditor"], active: "paramEditor" },
+                    t: "split",
+                    id: "z1",
+                    dir: "row",
+                    ratio,
+                    fixed: null,
+                    a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
+                    b: { t: "tabset", id: "z3", tabs: ["paramEditor"], active: "paramEditor" },
                 },
             },
             ...base,
@@ -330,10 +339,10 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             schema: 2,
             roots: {
                 main: {
-                t: "tabset",
-                id: "z1",
-                tabs: ["timeline", "paramEditor"],
-                active: "not-there",
+                    t: "tabset",
+                    id: "z1",
+                    tabs: ["timeline", "paramEditor"],
+                    active: "not-there",
                 },
             },
             forms: {
@@ -342,7 +351,11 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             },
         };
         const layout = normalizeDockLayout(raw);
-        assertEqual((layout.roots.main as DockTabsetNode).active, "timeline", "stale active repaired");
+        assertEqual(
+            (layout.roots.main as DockTabsetNode).active,
+            "timeline",
+            "stale active repaired",
+        );
     }
 
     // ── 归一化：树彻底坏掉 → 回退默认（但保留窗体记录）────────────
@@ -357,7 +370,11 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             order: ["timeline", "notebook"],
         };
         const layout = normalizeDockLayout(raw);
-        assertEqual(shape(layout.roots.main), "([timeline]|[paramEditor])", "broken tree falls back");
+        assertEqual(
+            shape(layout.roots.main),
+            "([timeline]|[paramEditor])",
+            "broken tree falls back",
+        );
         assertEqual(layout.forms.notebook?.panelId, "notebook", "form records survive");
     }
 
@@ -671,13 +688,13 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             schema: 2,
             roots: {
                 main: {
-                t: "split",
-                id: "z1",
-                dir: "row",
-                ratio: 0.5,
-                fixed: null,
-                a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
-                b: { t: "tabset", id: "z3", tabs: ["paramEditor"], active: "paramEditor" },
+                    t: "split",
+                    id: "z1",
+                    dir: "row",
+                    ratio: 0.5,
+                    fixed: null,
+                    a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
+                    b: { t: "tabset", id: "z3", tabs: ["paramEditor"], active: "paramEditor" },
                 },
             },
             forms: {

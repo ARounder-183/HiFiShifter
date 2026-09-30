@@ -104,13 +104,18 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
             schema: 2,
             roots: {
                 main: {
-                t: "split",
-                id: "z1",
-                dir: "row",
-                ratio: 0.7,
-                fixed: { side: "b", px: 380 },
-                a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
-                b: { t: "tabset", id: "z3", tabs: ["fileBrowser", "notebook"], active: "notebook" },
+                    t: "split",
+                    id: "z1",
+                    dir: "row",
+                    ratio: 0.7,
+                    fixed: { side: "b", px: 380 },
+                    a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
+                    b: {
+                        t: "tabset",
+                        id: "z3",
+                        tabs: ["fileBrowser", "notebook"],
+                        active: "notebook",
+                    },
                 },
             },
             forms: {
@@ -179,7 +184,11 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
     // ── hydrate：磁盘内容是垃圾 → 出厂布局，且仍然标记已 hydrate ──
     {
         const state = reducer(undefined, hydrateDock({ settings: null, layout: "not a layout" }));
-        assertEqual(shape(state.layout.roots.main), "([timeline]|[paramEditor])", "garbage falls back");
+        assertEqual(
+            shape(state.layout.roots.main),
+            "([timeline]|[paramEditor])",
+            "garbage falls back",
+        );
         assertEqual(state.hydrated, true, "still hydrated so the layout can be re-saved");
     }
 
@@ -193,10 +202,10 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
                     schema: 2,
                     roots: {
                         main: {
-                        t: "tabset",
-                        id: "z1",
-                        tabs: ["timeline", "ghost"],
-                        active: "ghost",
+                            t: "tabset",
+                            id: "z1",
+                            tabs: ["timeline", "ghost"],
+                            active: "ghost",
                         },
                     },
                     forms: {
@@ -292,7 +301,11 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
         let state = reducer(undefined, syncRegisteredPanels());
         // 先把参数编辑器浮走，树上只剩时间轴。
         state = reducer(state, floatForm({ formId: "paramEditor" }));
-        assertEqual(findTabsetOfForm(state.layout.roots.main, "timeline") !== null, true, "still docked");
+        assertEqual(
+            findTabsetOfForm(state.layout.roots.main, "timeline") !== null,
+            true,
+            "still docked",
+        );
         const before = state.layout;
         state = reducer(state, floatForm({ formId: "timeline" }));
         assertEqual(state.layout, before, "the last docked form cannot float");
@@ -572,13 +585,21 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
         const presetTree = state.layout.presets!["mine"].roots.main;
 
         state = reducer(state, resetDockLayout());
-        assertEqual(shape(state.layout.roots.main), "([timeline]|[paramEditor])", "tree back to factory");
+        assertEqual(
+            shape(state.layout.roots.main),
+            "([timeline]|[paramEditor])",
+            "tree back to factory",
+        );
         assert(state.layout.presets?.["mine"] !== undefined, "presets survive the reset");
         assertEqual(state.layout.activePreset, null, "no preset is active after reset");
 
         // 重置后仍能一键回到自己的排布：树与保存时一致，窗体重新可见。
         state = reducer(state, applyDockPreset("mine"));
-        assertEqual(shape(state.layout.roots.main), shape(presetTree), "preset re-applies its tree");
+        assertEqual(
+            shape(state.layout.roots.main),
+            shape(presetTree),
+            "preset re-applies its tree",
+        );
         assertEqual(state.layout.activePreset, "mine", "the re-applied preset is active");
         assert(isFormVisible(state.layout, "fileBrowser"), "the preset's forms are visible");
     }

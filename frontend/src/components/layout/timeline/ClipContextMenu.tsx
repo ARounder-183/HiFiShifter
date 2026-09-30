@@ -1,6 +1,8 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { FadeShapeIcon } from "./FadeShapeIcon";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
+
+import { AppSubMenu } from "../../../ui";
 import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
@@ -105,7 +107,7 @@ const TakeMenuItem: React.FC<{
 }) => (
     // 行内布局：标签 flex-1 + 尾随两个 shrink-0 按钮（flex 兄弟，绝不定
     // 位）—— 任何语言下按钮互不重叠、不挤压标签；标签超长时 truncate
-    // 兜底（面板宽度已随内容展开，见 SubMenu 的 width:max-content）。
+    // 兜底（面板宽度已随内容展开，见 AppSubMenu 的 width:max-content）。
     <div className="flex items-center w-full gap-1 pr-1.5">
         <button
             role="menuitem"
@@ -160,116 +162,6 @@ const TakeMenuItem: React.FC<{
         </button>
     </div>
 );
-
-/** 一级菜单中的二级子菜单；悬停或点击均可展开。 */
-const SubMenu: React.FC<{
-    label: string;
-    disabled?: boolean;
-    badge?: string;
-    children: React.ReactNode;
-}> = ({ label, disabled = false, badge, children }) => {
-    const [open, setOpen] = useState(false);
-    const wrapperRef = useRef<HTMLDivElement>(null);
-    const panelRef = useRef<HTMLDivElement>(null);
-    // 子面板（滑杆/次级项）也是一个 role="menu" 表面，同样需要方向键。
-    useMenuKeyboard(panelRef);
-
-    useLayoutEffect(() => {
-        if (!open) return;
-        const panel = panelRef.current;
-        if (!panel) return;
-        panel.style.left = "calc(100% - 4px)";
-        panel.style.right = "auto";
-        panel.style.top = "-5px";
-        panel.style.bottom = "auto";
-        // 宽度随内容展开：绝对定位面板的宽度默认被包含块（触发项宽度）封顶，
-        // Take 行等长文本会因此换行。max-content 展开后若超出视口，按最终
-        // 锚定侧的可用空间收口 —— 行内标签以 truncate 兜底。
-        panel.style.width = "max-content";
-        panel.style.maxWidth = "none";
-
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        let rect = panel.getBoundingClientRect();
-        if (rect.right > vw - 4) {
-            panel.style.left = "auto";
-            panel.style.right = "calc(100% - 4px)";
-        }
-        rect = panel.getBoundingClientRect();
-        const anchoredLeft = panel.style.left !== "auto";
-        const availableWidth = anchoredLeft ? vw - 8 - rect.left : rect.right - 8;
-        if (rect.width > availableWidth) {
-            panel.style.maxWidth = `${Math.max(160, Math.floor(availableWidth))}px`;
-        }
-
-        rect = panel.getBoundingClientRect();
-        if (rect.bottom > vh - 4) {
-            panel.style.top = "auto";
-            panel.style.bottom = "-5px";
-        }
-    }, [open]);
-
-    return (
-        <div
-            ref={wrapperRef}
-            className="relative"
-            onMouseEnter={() => {
-                if (!disabled) setOpen(true);
-            }}
-            onMouseLeave={() => setOpen(false)}
-        >
-            <button
-                className={`px-3 py-1.5 text-left w-full text-qt-sm transition-colors flex items-center justify-between gap-3
-                    ${disabled ? "opacity-40 cursor-default" : "hover:bg-qt-button-hover"}`}
-                disabled={disabled}
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                    e.stopPropagation();
-                    if (!disabled) setOpen((value) => !value);
-                }}
-                aria-haspopup="menu"
-                aria-expanded={open}
-            >
-                <span className="flex items-center gap-2 min-w-0">
-                    <span className="truncate">{label}</span>
-                    {badge && (
-                        <span className="text-qt-micro leading-none rounded bg-black/20 px-1 py-0.5 opacity-70">
-                            {badge}
-                        </span>
-                    )}
-                </span>
-                <svg
-                    width="12"
-                    height="12"
-                    viewBox="0 0 15 15"
-                    fill="none"
-                    aria-hidden="true"
-                    className="opacity-50 shrink-0"
-                >
-                    <path
-                        d="M6 3.5L10 7.5L6 11.5"
-                        stroke="currentColor"
-                        strokeWidth="1.2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                    />
-                </svg>
-            </button>
-            {open && !disabled && (
-                <div
-                    ref={panelRef}
-                    role="menu"
-                    data-hs-context-menu="1"
-                    className="absolute z-[60] min-w-[190px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => e.stopPropagation()}
-                >
-                    {children}
-                </div>
-            )}
-        </div>
-    );
-};
 
 function effectiveFadeSecondsOf(clip: ClipInfo): { in: number; out: number } {
     return {
@@ -541,7 +433,7 @@ export const ClipContextMenu: React.FC<{
                 }}
             />
             <Divider />
-            <SubMenu
+            <AppSubMenu
                 label={t("clip_takes")}
                 badge={takes.length > 1 ? String(takes.length) : undefined}
             >
@@ -783,9 +675,9 @@ export const ClipContextMenu: React.FC<{
                         }}
                     />
                 )}
-            </SubMenu>
+            </AppSubMenu>
             {(onSetChannelMode || onScanFakeStereo) && (
-                <SubMenu
+                <AppSubMenu
                     label={t("ctx_channel_mode")}
                     badge={
                         commonChannelMode === null
@@ -820,7 +712,7 @@ export const ClipContextMenu: React.FC<{
                             />
                         </>
                     )}
-                </SubMenu>
+                </AppSubMenu>
             )}
             <MenuItem
                 label={
@@ -988,7 +880,7 @@ export const ClipContextMenu: React.FC<{
             {(isMulti || hasGroup) && (
                 <>
                     <Divider />
-                    <SubMenu label={t("ctx_group")}>
+                    <AppSubMenu label={t("ctx_group")}>
                         {isMulti && !hasGroup && (
                             <MenuItem
                                 label={t("common_group")}
@@ -1019,7 +911,7 @@ export const ClipContextMenu: React.FC<{
                                 }}
                             />
                         )}
-                    </SubMenu>
+                    </AppSubMenu>
                 </>
             )}
 

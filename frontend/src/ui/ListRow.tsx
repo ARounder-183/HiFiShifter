@@ -55,6 +55,14 @@ export interface AppListRowProps {
      * listbox 里没有角色。文件浏览器对所有行显式传 `"option"`。
      */
     role?: "option";
+    /**
+     * 悬停提示（项目自定义气泡，走 `data-tooltip` 通道）。
+     *
+     * 【为什么与 `title` 并存】`title` 是浏览器原生提示：延迟长、样式不可控、
+     * 深色主题下常与页面撞色。需要与全应用一致的气泡时用本字段。
+     */
+    tooltip?: string;
+    /** 原生浏览器提示。新代码优先用 `tooltip`。 */
     title?: string;
     className?: string;
     /** 供虚拟化列表用；普通列表省略。 */
@@ -91,6 +99,7 @@ export const AppListRow = forwardRef<HTMLDivElement, AppListRowProps>(function A
         onFocus,
         tabIndex,
         role,
+        tooltip,
         title,
         className,
         style,
@@ -111,6 +120,7 @@ export const AppListRow = forwardRef<HTMLDivElement, AppListRowProps>(function A
             aria-disabled={disabled || undefined}
             tabIndex={tabIndex}
             data-selected={selected || undefined}
+            data-tooltip={tooltip}
             title={title}
             style={style}
             data-testid={testId}

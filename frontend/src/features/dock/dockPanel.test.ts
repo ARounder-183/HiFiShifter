@@ -28,7 +28,13 @@ import {
     panelMinSize,
     panelTitleOf,
 } from "./dockPanel.ts";
-import { collectDockedForms, collectVisibleForms, isFormVisible, isPanelForm, rootOfForm } from "./dockTree.ts";
+import {
+    collectDockedForms,
+    collectVisibleForms,
+    isFormVisible,
+    isPanelForm,
+    rootOfForm,
+} from "./dockTree.ts";
 import { registerPanel, resetPanelRegistryForTests } from "./panelRegistry.ts";
 import { DOCK_LAYOUT_SCHEMA, DOCK_PANEL_FORM, type DockLayout } from "./dockTypes.ts";
 
@@ -127,7 +133,10 @@ test("dock panel behaviors", () => {
             id.startsWith(`${DOCK_PANEL_FORM}:`),
         ) as string;
         const rootId = state.layout.forms[panelFormId].childRootId as string;
-        assert(isFormVisible(state.layout, panelFormId), "empty panel is visible (it renders a well)");
+        assert(
+            isFormVisible(state.layout, panelFormId),
+            "empty panel is visible (it renders a well)",
+        );
         assert(
             state.layout.forms[panelFormId].floating === true,
             "a new empty panel floats by default",
@@ -152,14 +161,21 @@ test("dock panel behaviors", () => {
             "[fileBrowser]",
             "first drop seeds the panel root",
         );
-        assert(rootOfForm(state.layout, "fileBrowser") === rootId, "member lives in the panel root");
+        assert(
+            rootOfForm(state.layout, "fileBrowser") === rootId,
+            "member lives in the panel root",
+        );
     }
 
     // ── 可拆性推导：全体成员可拆才可拆；时间轴挡住整个面板 ────────
     {
         const { state, panelFormId } = seedPanel();
         const verdict = isPanelDetachable(state.layout, panelFormId);
-        assertEqual(verdict, { ok: true, blockedBy: [] }, "all-detachable members → panel detachable");
+        assertEqual(
+            verdict,
+            { ok: true, blockedBy: [] },
+            "all-detachable members → panel detachable",
+        );
 
         // 塞进不可拆的时间轴后，面板整体不可拆，且能点名阻挡者。
         const rootId = state.layout.forms[panelFormId].childRootId as string;
@@ -186,7 +202,10 @@ test("dock panel behaviors", () => {
         );
         next = reducer(
             next,
-            dockFormTo({ formId: "fileBrowser", target: { kind: "tab", tabsetId: rootId, rootId } }),
+            dockFormTo({
+                formId: "fileBrowser",
+                target: { kind: "tab", tabsetId: rootId, rootId },
+            }),
         );
         assertEqual(
             panelTitleOf(next.layout, panelFormId, translate),
@@ -230,11 +249,7 @@ test("dock panel behaviors", () => {
         ) as string;
         const panelForm = state.layout.forms[panelFormId];
         assert(panelForm.floating === true, "composed panel floats");
-        assertEqual(
-            state.layout.floatOrder.at(-1),
-            panelFormId,
-            "panel takes the target's z slot",
-        );
+        assertEqual(state.layout.floatOrder.at(-1), panelFormId, "panel takes the target's z slot");
         assertEqual(
             shape(state.layout.roots[panelForm.childRootId as string]),
             "[notebook,fileBrowser]",
@@ -288,8 +303,14 @@ test("dock panel behaviors", () => {
             }),
         );
         // 此时面板停靠在主根里；解散后它的内容进主根，面板记录消失。
-        state = reducer(state, { type: "dock/dissolvePanel", payload: seeded.panelFormId } as never);
-        assert(state.layout.forms[seeded.panelFormId] === undefined, "dissolved panel record removed");
+        state = reducer(state, {
+            type: "dock/dissolvePanel",
+            payload: seeded.panelFormId,
+        } as never);
+        assert(
+            state.layout.forms[seeded.panelFormId] === undefined,
+            "dissolved panel record removed",
+        );
         assert(
             collectVisibleForms(state.layout).includes("fileBrowser"),
             "panel contents survive the dissolve",
@@ -308,7 +329,10 @@ test("dock panel behaviors", () => {
         const rootId = state.layout.forms[panelFormId].childRootId as string;
         state = reducer(
             state,
-            dockFormTo({ formId: "fileBrowser", target: { kind: "tab", tabsetId: rootId, rootId } }),
+            dockFormTo({
+                formId: "fileBrowser",
+                target: { kind: "tab", tabsetId: rootId, rootId },
+            }),
         );
         // 拖走唯一成员（floatForm）→ 面板根清空 → 面板按设置自动解散。
         state = reducer(state, floatForm({ formId: "fileBrowser" }));
@@ -316,10 +340,7 @@ test("dock panel behaviors", () => {
             state.layout.forms[panelFormId] === undefined,
             "panel auto-dissolves once its last member leaves",
         );
-        assert(
-            state.layout.forms.fileBrowser?.floating === true,
-            "the leaving member is floating",
-        );
+        assert(state.layout.forms.fileBrowser?.floating === true, "the leaving member is floating");
     }
 
     // ── 关面板 = 子树休眠：成员不可见但记录与内容保留 ─────────────
@@ -344,10 +365,7 @@ test("dock panel behaviors", () => {
             state.layout.roots[seeded.rootId] !== undefined,
             "panel root survives close for reopen",
         );
-        assert(
-            state.layout.forms[seeded.panelFormId] !== undefined,
-            "panel record survives close",
-        );
+        assert(state.layout.forms[seeded.panelFormId] !== undefined, "panel record survives close");
     }
 
     // ── 归一化：面板放行 / 孤儿根回收 / 跨根去重 / 环形引用破除 ──
@@ -387,11 +405,7 @@ test("dock panel behaviors", () => {
         assert(layout.forms[`${DOCK_PANEL_FORM}:1`] !== undefined, "panel form kept by normalize");
         assert(layout.roots.r1 !== undefined, "referenced panel root kept");
         assert(layout.roots.r_orphan === undefined, "orphan root dropped");
-        assertEqual(
-            shape(layout.roots.r1),
-            "[notebook]",
-            "panel tree normalized intact",
-        );
+        assertEqual(shape(layout.roots.r1), "[notebook]", "panel tree normalized intact");
 
         // 跨根去重：同一窗体出现在两棵树里 → 只保留先归一化的那处（主根优先）。
         const deduped = normalizeDockLayout({
@@ -413,15 +427,29 @@ test("dock panel behaviors", () => {
             order: [`${DOCK_PANEL_FORM}:1`, "notebook"],
             floatOrder: [],
         });
-        assertEqual(shape(deduped.roots.r1), "∅", "duplicate membership removed from the panel root");
+        assertEqual(
+            shape(deduped.roots.r1),
+            "∅",
+            "duplicate membership removed from the panel root",
+        );
 
         // 环形引用：面板 A 的树里有 B，B 的树里又有 A → 环被打破，不致死循环。
         const cyclic = normalizeDockLayout({
             schema: DOCK_LAYOUT_SCHEMA,
             roots: {
                 main: { t: "tabset", id: "z1", tabs: ["fileBrowser"], active: "fileBrowser" },
-                rA: { t: "tabset", id: "z2", tabs: [`${DOCK_PANEL_FORM}:B`], active: `${DOCK_PANEL_FORM}:B` },
-                rB: { t: "tabset", id: "z3", tabs: [`${DOCK_PANEL_FORM}:A`], active: `${DOCK_PANEL_FORM}:A` },
+                rA: {
+                    t: "tabset",
+                    id: "z2",
+                    tabs: [`${DOCK_PANEL_FORM}:B`],
+                    active: `${DOCK_PANEL_FORM}:B`,
+                },
+                rB: {
+                    t: "tabset",
+                    id: "z3",
+                    tabs: [`${DOCK_PANEL_FORM}:A`],
+                    active: `${DOCK_PANEL_FORM}:A`,
+                },
             },
             forms: {
                 [`${DOCK_PANEL_FORM}:A`]: {
@@ -454,7 +482,9 @@ test("dock panel behaviors", () => {
                 const member = cyclic.forms[id];
                 return member ? isPanelForm(member) : false;
             });
-            cursor = nextPanel ? ((cyclic.forms[nextPanel].childRootId as string | null) ?? null) : null;
+            cursor = nextPanel
+                ? ((cyclic.forms[nextPanel].childRootId as string | null) ?? null)
+                : null;
             depth += 1;
         }
         assert(depth < 16, "panel graph terminates after the cycle is broken");

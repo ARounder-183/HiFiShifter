@@ -1,5 +1,6 @@
 use crate::project::CustomScale;
 use crate::time_stretch::UserStretchAlgorithm;
+use crate::vibrato::VibratoPreset;
 use std::fs;
 use std::path::Path;
 
@@ -364,6 +365,28 @@ pub struct UiSettings {
     pub scale_highlight_mode: String,
     #[serde(default)]
     pub custom_scale_presets: Vec<CustomScale>,
+    /// 用户自定义颤音预设。
+    ///
+    /// 系统预设（`builtin.*` 前缀）只存在于前端代码，不会写进这里 —— 因此这份
+    /// 列表只是"用户自己捏出来的那些"。形状、取值范围与默认值由前端收口，
+    /// 后端只做透传存储（与 `custom_scale_presets` 同一约定）。
+    #[serde(default)]
+    pub vibrato_presets: Vec<VibratoPreset>,
+    /// 当前活动颤音预设的 id（`builtin.natural` 一类的系统预设 id 也合法）。
+    ///
+    /// 存 id 而不是"用户列表里的下标"：预设被删除或重排后，下标会静默指向
+    /// 另一个预设；而 id 失效只会回落到出厂默认（见前端
+    /// `resolveActiveVibratoPreset`），不存在"指向了别的音色"这种错法。
+    #[serde(default)]
+    pub active_vibrato_preset_id: Option<String>,
+    /// 被停用的颤音预设 id（系统与用户预设共用一份名单）。
+    ///
+    /// 只影响前端的工具栏列表与拖拽中的循环切换，后端同样只做透传存储。
+    #[serde(default)]
+    pub disabled_vibrato_preset_ids: Vec<String>,
+    /// 系统预设的自定义顺序（id 列表）。空 = 出厂顺序。
+    #[serde(default)]
+    pub builtin_vibrato_preset_order: Vec<String>,
     #[serde(default)]
     pub ignore_grouping: bool,
     /// 波纹编辑（自动跟进）模式：off / track / all（对应 REAPER 的 Ripple Editing）。
@@ -1443,6 +1466,11 @@ impl Default for UiSettings {
             smoothness_percent: 0,
             scale_highlight_mode: default_scale_highlight_mode(),
             custom_scale_presets: Vec::new(),
+            vibrato_presets: Vec::new(),
+            // None = "还没选过"，由前端回落到出厂默认（直线）。
+            active_vibrato_preset_id: None,
+            disabled_vibrato_preset_ids: Vec::new(),
+            builtin_vibrato_preset_order: Vec::new(),
             ignore_grouping: false,
             ripple_mode: default_ripple_mode(),
 

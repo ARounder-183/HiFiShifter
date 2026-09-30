@@ -126,6 +126,7 @@ use fcpe_onnx_stub as fcpe_onnx;
 mod config;
 #[path = "audio/hfspeaks_v2.rs"]
 mod hfspeaks_v2;
+mod vibrato;
 
 // ── 测试专用的分配计量 ───────────────────────────────────────────────────────
 //
@@ -794,6 +795,7 @@ pub fn run() {
             commands::export_diagnostics,
             commands::export_layout_json,
             commands::export_theme_json,
+            commands::export_vibrato_presets_json,
             commands::log_frontend_error,
             commands::get_onnx_status,
             commands::get_onnx_diagnostic,

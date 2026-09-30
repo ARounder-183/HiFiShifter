@@ -50,7 +50,13 @@ export {
     type AppSegmentedControlProps,
     type AppSegmentedOption,
 } from "./SegmentedControl";
-export { AppContextMenu, type AppContextMenuProps, type AppMenuItemSpec } from "./Menu";
+export {
+    AppContextMenu,
+    AppSubMenu,
+    type AppContextMenuProps,
+    type AppMenuItemSpec,
+    type AppSubMenuProps,
+} from "./Menu";
 
 export {
     AppConfirmDialog,
@@ -64,6 +70,12 @@ export {
 } from "./Dialog";
 
 export { useDialogDraft } from "./useDialogDraft";
+
+export {
+    useRepeatPress,
+    type RepeatPressHandlers,
+    type RepeatPressOptions,
+} from "./useRepeatPress";
 
 export { useMenuShortcut } from "./useMenuShortcut";
 

@@ -157,12 +157,10 @@ export function normalizeDockSettings(
             typeof raw.startupLayout === "string" && raw.startupLayout
                 ? raw.startupLayout
                 : DEFAULT_DOCK_SETTINGS.startupLayout,
-        floatComposeEnabled:
-            raw.floatComposeEnabled ?? DEFAULT_DOCK_SETTINGS.floatComposeEnabled,
+        floatComposeEnabled: raw.floatComposeEnabled ?? DEFAULT_DOCK_SETTINGS.floatComposeEnabled,
         emptyPanelAutoDissolve:
             raw.emptyPanelAutoDissolve ?? DEFAULT_DOCK_SETTINGS.emptyPanelAutoDissolve,
-        panelTitleFromChild:
-            raw.panelTitleFromChild ?? DEFAULT_DOCK_SETTINGS.panelTitleFromChild,
+        panelTitleFromChild: raw.panelTitleFromChild ?? DEFAULT_DOCK_SETTINGS.panelTitleFromChild,
         maxPanelDepth: clampInt(raw.maxPanelDepth, 1, 16, DEFAULT_DOCK_SETTINGS.maxPanelDepth),
     };
 }

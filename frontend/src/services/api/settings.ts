@@ -2,6 +2,7 @@ import { invoke } from "../invoke";
 import type { NotebookSettings } from "../../components/layout/notebook/notebookSettings";
 import type { DockPersistedSettings } from "../../features/dock/dockSettings";
 import type { TimelineSnapSettings } from "../../features/session/sessionTypes";
+import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
 
 export type StretchAlgorithmOption = "linear" | "signalsmith" | "soundtouch";
 
@@ -248,6 +249,30 @@ export interface UiSettings {
         name: string;
         notes: number[];
     }>;
+    /**
+     * 用户自定义颤音预设。
+     *
+     * 元素类型复用 `features/vibrato` 里的 `VibratoPreset`（而非就地写一份
+     * 结构相同的匿名类型）：它同时被生成内核、预设编辑器与切片消费，抄一份
+     * 出来必然漂移。名字字段一律 camelCase，与后端
+     * `vibrato::VibratoPreset` 的 `rename_all = "camelCase"` 对应。
+     */
+    vibratoPresets?: VibratoPreset[];
+    /** 当前活动颤音预设的 id（系统预设的 `builtin.*` 也合法）。 */
+    activeVibratoPresetId?: string;
+    /**
+     * 被停用的颤音预设 id（系统与用户预设共用一份名单）。
+     *
+     * 停用只影响本机的工具栏列表与拖拽中的循环切换，因此不进预设文件、只进设置。
+     */
+    disabledVibratoPresetIds?: string[];
+    /**
+     * 系统预设的自定义顺序（id 列表）。空 / 缺席 = 出厂顺序。
+     *
+     * 系统预设在代码里，要允许用户排序就只能把顺序记在设置里；缺项与无效项在读取时
+     * 兜底，因此新增出厂预设不需要迁移。
+     */
+    builtinVibratoPresetOrder?: string[];
 }
 
 /** 导入声道处理策略的总模式。 */

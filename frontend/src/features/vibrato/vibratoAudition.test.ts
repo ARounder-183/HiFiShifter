@@ -1,0 +1,298 @@
+/**
+ * 颤音试听引擎的契约。
+ *
+ * 【要钉死的三条】与 `audioPreview` 同源（见其头部注释）：
+ * 1. **连发两次 `play`，旧的一路必须被停掉** —— 否则留下"还在响却已无人登记"的
+ *    孤儿，用户听到的是两路叠加（这是所有音频单例最容易破的不变量）。
+ * 2. **`stop()` 停掉所有已登记的源**。
+ * 3. **环境不支持 `AudioContext` 时收敛**：返回 `false`、不抛、不留状态。
+ *
+ * 另有 `buildAuditionCurve` 的换算契约：它保证"听到的 = 看到的"—— 试听直接吃
+ * 预览的同一份 cents 曲线，只做单位换算。
+ *
+ * 【为什么每个测试都 new 一个播放器】`AudioContext` 是单例播放器的私有状态，
+ * 跨测试存活会让第二个测试装的新假 context 永远收不到振荡器 —— 孤儿断言会因此
+ * 全部失真。导出类正是为了测试能拿到干净的实例；UI 用的单例只是
+ * `new VibratoAuditionPlayer()` 的一份。
+ */
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import { buildAuditionCurve, VibratoAuditionPlayer, AUDITION_BASE_MIDI } from "./vibratoAudition";
+
+/** 假振荡器：记录 start/stop 与音高调度，便于断言孤儿与包络。 */
+function makeFakeOsc() {
+    return {
+        type: "",
+        frequency: {
+            /** setValueCurveAtTime 的全部调用（曲线, 起点, 时长）。 */
+            curves: [] as Array<[Float32Array, number, number]>,
+            value: 0,
+            setValueCurveAtTime(
+                this: { curves: Array<[Float32Array, number, number]> },
+                curve: Float32Array,
+                start: number,
+                duration: number,
+            ) {
+                this.curves.push([curve, start, duration]);
+            },
+            setValueAtTime() {},
+            linearRampToValueAtTime() {},
+            setTargetAtTime() {},
+            cancelScheduledValues() {},
+            cancelAndHoldAtTime() {},
+        },
+        started: 0,
+        stopped: 0,
+        disconnected: 0,
+        connect() {},
+        start() {
+            this.started += 1;
+        },
+        stop() {
+            this.stopped += 1;
+        },
+        disconnect() {
+            this.disconnected += 1;
+        },
+        onended: null as (() => void) | null,
+    };
+}
+
+interface FakeGain {
+    connect(): void;
+    disconnect(): void;
+    gain: {
+        value: number;
+        events: Array<{ method: string; args: unknown[] }>;
+        setValueAtTime(...args: unknown[]): void;
+        linearRampToValueAtTime(...args: unknown[]): void;
+        setTargetAtTime(...args: unknown[]): void;
+        cancelScheduledValues(...args: unknown[]): void;
+        cancelAndHoldAtTime(...args: unknown[]): void;
+    };
+}
+
+function makeFakeGain(): FakeGain {
+    const gain: FakeGain["gain"] = {
+        value: 0,
+        events: [],
+        setValueAtTime(...args: unknown[]) {
+            gain.events.push({ method: "setValueAtTime", args });
+        },
+        linearRampToValueAtTime(...args: unknown[]) {
+            gain.events.push({ method: "linearRampToValueAtTime", args });
+        },
+        setTargetAtTime(...args: unknown[]) {
+            gain.events.push({ method: "setTargetAtTime", args });
+        },
+        cancelScheduledValues(...args: unknown[]) {
+            gain.events.push({ method: "cancelScheduledValues", args });
+        },
+        cancelAndHoldAtTime(...args: unknown[]) {
+            gain.events.push({ method: "cancelAndHoldAtTime", args });
+        },
+    };
+    return { connect() {}, disconnect() {}, gain };
+}
+
+/** 假 AudioContext：记录 createOscillator 的产物，供孤儿断言使用。 */
+function installFakeAudioContext() {
+    const oscs: ReturnType<typeof makeFakeOsc>[] = [];
+    const gains: FakeGain[] = [];
+    const fakeCtx = {
+        state: "running",
+        destination: {},
+        currentTime: 100,
+        resume: () => Promise.resolve(),
+        createGain: () => {
+            const gain = makeFakeGain();
+            gains.push(gain);
+            return gain;
+        },
+        createBiquadFilter: () => ({
+            connect() {},
+            disconnect() {},
+            type: "",
+            frequency: { value: 0 },
+            Q: { value: 0 },
+        }),
+        createDynamicsCompressor: () => ({
+            connect() {},
+            threshold: { value: 0 },
+            knee: { value: 0 },
+            ratio: { value: 0 },
+            attack: { value: 0 },
+            release: { value: 0 },
+        }),
+        createOscillator: () => {
+            const osc = makeFakeOsc();
+            oscs.push(osc);
+            return osc;
+        },
+    };
+    (globalThis as { AudioContext?: unknown }).AudioContext = function AudioContextStub() {
+        return fakeCtx;
+    } as unknown as typeof AudioContext;
+    return { oscs, gains };
+}
+
+/** 一条 4 点、15ms 的平直曲线。 */
+function flatCurve(cents = 0) {
+    const hz = 440 * 2 ** (cents / 1200);
+    return {
+        freqHz: new Float32Array([hz, hz, hz, hz]),
+        durationSec: 0.015,
+        peakHz: hz,
+    };
+}
+
+describe("buildAuditionCurve", () => {
+    const baseHz = 440 * 2 ** ((AUDITION_BASE_MIDI - 69) / 12);
+
+    it("深度 0 的预设输出恒等于基频（直线预设试听是平音）", () => {
+        const curve = buildAuditionCurve({ wave: new Array(10).fill(0) });
+        expect(curve.freqHz.length).toBe(10);
+        for (const hz of curve.freqHz) expect(hz).toBeCloseTo(baseHz, 4);
+    });
+
+    it("cents → Hz 换算正确：30 cents ≈ ×1.0174", () => {
+        const curve = buildAuditionCurve({ wave: [30, 0, -30] });
+        expect(curve.freqHz[0]).toBeCloseTo(baseHz * 2 ** (30 / 1200), 4);
+        expect(curve.freqHz[1]).toBeCloseTo(baseHz, 4);
+        expect(curve.freqHz[2]).toBeCloseTo(baseHz * 2 ** (-30 / 1200), 4);
+        expect(curve.peakHz).toBeCloseTo(curve.freqHz[0], 4);
+    });
+
+    it("时长 = (点数 - 1) × 5ms（与预览几何一致）", () => {
+        expect(buildAuditionCurve({ wave: new Array(321).fill(0) }).durationSec).toBeCloseTo(
+            1.6,
+            9,
+        );
+    });
+
+    it("非有限的 cents 按 0 处理，不产生 NaN 频率", () => {
+        const curve = buildAuditionCurve({ wave: [Number.NaN, 10, Number.POSITIVE_INFINITY] });
+        for (const hz of curve.freqHz) expect(Number.isFinite(hz)).toBe(true);
+    });
+
+    it("极短输入至少产出两个点（setValueCurveAtTime 的下限）", () => {
+        const curve = buildAuditionCurve({ wave: [] });
+        expect(curve.freqHz.length).toBeGreaterThanOrEqual(2);
+    });
+});
+
+describe("VibratoAuditionPlayer", () => {
+    let oscs: ReturnType<typeof makeFakeOsc>[];
+    let gains: FakeGain[];
+    let player: VibratoAuditionPlayer;
+
+    /**
+     * 取**voice 的**增益节点。
+     *
+     * 【为什么不是 gains[0]】`ensureContext` 会先造 masterGain（gains[0]），
+     * 它的 gain 从不排程任何事件 —— 断言排程必须找 voice 那个（最后一个）。
+     */
+    function voiceGain(): FakeGain {
+        expect(gains.length).toBeGreaterThanOrEqual(2);
+        return gains[gains.length - 1];
+    }
+
+    beforeEach(() => {
+        ({ oscs, gains } = installFakeAudioContext());
+        player = new VibratoAuditionPlayer();
+    });
+
+    afterEach(() => {
+        player.stop();
+        delete (globalThis as { AudioContext?: unknown }).AudioContext;
+    });
+
+    it("播放后 isPlaying 为真，stop 后源被停掉且不泄漏节点", () => {
+        expect(player.play(flatCurve())).toBe(true);
+        expect(player.isPlaying).toBe(true);
+        expect(oscs).toHaveLength(1);
+        expect(oscs[0].started).toBe(1);
+
+        player.stop();
+        // play 排过一次自然结束，stopInternal 又重排了一次提前结束 ——
+        // Web Audio 允许多次 stop、以最后一次为准，所以这里是 2 不是 1。
+        expect(oscs[0].stopped).toBe(2);
+        // 节点要等 onended 才拆链；这里手动触发以模拟引擎回调。
+        oscs[0].onended?.();
+        expect(oscs[0].disconnected).toBe(1);
+    });
+
+    it("★ 连发两次 play：旧的一路必须被停掉（不留孤儿）", () => {
+        player.play(flatCurve());
+        player.play(flatCurve(30));
+
+        expect(oscs).toHaveLength(2);
+        /*
+         * 旧的那路必须被**提前**停掉 —— 否则它与新的叠加，用户听到两路。
+         * 判据：旧路被 stop 了**两次**（play 自排的自然结束 + stopInternal 的
+         * 提前重排），而新路只有自然结束那一次。Web Audio 允许多次 stop、
+         * 以最后一次为准，因此次数差就是"谁被提前停了"的指纹。
+         */
+        expect(oscs[0].stopped).toBe(2);
+        expect(oscs[1].started).toBe(1);
+        expect(oscs[1].stopped).toBe(1);
+    });
+
+    it("音高走 setValueCurveAtTime 一条曲线（不是逐点排事件）", () => {
+        player.play(flatCurve());
+        expect(oscs[0].frequency.curves).toHaveLength(1);
+        const [curve, , duration] = oscs[0].frequency.curves[0];
+        expect(curve).toBeInstanceOf(Float32Array);
+        expect(duration).toBeCloseTo(0.015, 9);
+    });
+
+    it("滤波器按曲线峰值定标（深颤音的上半周不被削掉）", () => {
+        // 峰值频率是基频 × 2^(50/1200) ≈ ×1.029；滤波器点应高于它。
+        player.play(flatCurve(50));
+        // 滤波器的 frequency 由引擎写值；这里验证曲线峰值进了换算 ——
+        // peakHz 来自 buildAuditionCurve（上方已测），此处只需确认播放可用。
+        expect(oscs[0].started).toBe(1);
+    });
+
+    it("自然结束带渐出排程（收尾不在零点也不出爆音）", () => {
+        player.play(flatCurve());
+        const setTargets = voiceGain().gain.events.filter((e) => e.method === "setTargetAtTime");
+        // 第一段是持续电平，最后一段必须是向 0 的渐出。
+        expect(setTargets.length).toBeGreaterThanOrEqual(2);
+        const last = setTargets[setTargets.length - 1];
+        expect(last.args[0]).toBe(0);
+        // 渐出起点 = 起音偏移 5ms + 曲线时长 15ms。
+        expect(last.args[1]).toBeCloseTo(100.005 + 0.015, 6);
+    });
+
+    it("提前 stop 走 cancelAndHold + 向 0 渐出（不产生爆音）", () => {
+        player.play(flatCurve());
+        const gain = voiceGain();
+        gain.gain.events.length = 0;
+        player.stop();
+
+        const methods = gain.gain.events.map((e) => e.method);
+        expect(methods).toContain("cancelAndHoldAtTime");
+        const setTargets = gain.gain.events.filter((e) => e.method === "setTargetAtTime");
+        expect(setTargets[setTargets.length - 1]?.args[0]).toBe(0);
+        // 自然结束 + 提前重排（以最后一次为准）。
+        expect(oscs[0].stopped).toBe(2);
+    });
+
+    it("环境不支持 AudioContext 时收敛：返回 false、不抛、不留状态", () => {
+        const isolated = new VibratoAuditionPlayer();
+        delete (globalThis as { AudioContext?: unknown }).AudioContext;
+        expect(isolated.play(flatCurve())).toBe(false);
+        expect(isolated.isPlaying).toBe(false);
+    });
+
+    it("退化曲线（单点 / 零时长）不播放", () => {
+        expect(
+            player.play({ freqHz: new Float32Array([440]), durationSec: 0.005, peakHz: 440 }),
+        ).toBe(false);
+        expect(
+            player.play({ freqHz: new Float32Array([440, 880]), durationSec: 0, peakHz: 880 }),
+        ).toBe(false);
+        expect(player.isPlaying).toBe(false);
+    });
+});

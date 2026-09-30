@@ -37,3 +37,16 @@ export function exportLayoutJson(json: string): Promise<JsonExportResult> {
 export function exportThemeJson(json: string, defaultFileName: string): Promise<JsonExportResult> {
     return invoke("export_theme_json", json, defaultFileName);
 }
+
+/**
+ * 导出颤音预设（颤音预设管理器 → 「导出...」）。
+ *
+ * 与主题导出同一模式：默认文件名由前端给（预设名是用户起的，含非 ASCII，
+ * 且需要先剔除文件系统的保留字符）。
+ */
+export function exportVibratoPresetsJson(
+    json: string,
+    defaultFileName: string,
+): Promise<JsonExportResult> {
+    return invoke("export_vibrato_presets_json", json, defaultFileName);
+}

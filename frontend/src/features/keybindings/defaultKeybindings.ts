@@ -119,6 +119,12 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "pianoRoll.vibratoDragAmplitudeDecrease": { key: "arrowdown" },
     "pianoRoll.vibratoDragFrequencyIncrease": { key: "arrowleft" },
     "pianoRoll.vibratoDragFrequencyDecrease": { key: "arrowright" },
+    // 拖拽颤音时切换预设：`,` / `.` 是绘图软件里最常见的"上/下一个"位置，
+    // 落在右手小指与无名指的静止位上，按住左键拖拽时也能顺手按到。
+    // 只在拖拽期间生效（`scopedContext: "pianoRollVibratoDrag"`），因此不会
+    // 与任何全局动作抢键。
+    "pianoRoll.vibratoPresetPrev": { key: "," },
+    "pianoRoll.vibratoPresetNext": { key: "." },
     // 拖动方向循环切换：默认 `D`（Direction）。除切换设置外，左键拖拽参数线
     // 期间按下同一键可即时切换本次拖拽的方向 —— 触控板用户无法在按住左键
     // 的同时按下右键，这条键位是「右键拖拽中切换方向」的等价替代。
@@ -442,6 +448,16 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     },
     "pianoRoll.vibratoDragFrequencyDecrease": {
         labelKey: "kb_pianoroll_vibrato_drag_freq_decrease",
+        group: "pianoRoll",
+        scopedContext: "pianoRollVibratoDrag",
+    },
+    "pianoRoll.vibratoPresetPrev": {
+        labelKey: "kb_pianoroll_vibrato_preset_prev",
+        group: "pianoRoll",
+        scopedContext: "pianoRollVibratoDrag",
+    },
+    "pianoRoll.vibratoPresetNext": {
+        labelKey: "kb_pianoroll_vibrato_preset_next",
         group: "pianoRoll",
         scopedContext: "pianoRollVibratoDrag",
     },

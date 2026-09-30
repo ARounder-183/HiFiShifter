@@ -30,6 +30,9 @@ const VIBRATO_DRAG_KEYBOARD_ACTIONS: ActionId[] = [
     "pianoRoll.vibratoDragAmplitudeDecrease",
     "pianoRoll.vibratoDragFrequencyIncrease",
     "pianoRoll.vibratoDragFrequencyDecrease",
+    // 预设切换同样只在拖拽期间有意义：全局派发器放行，交由参数编辑器本地监听。
+    "pianoRoll.vibratoPresetPrev",
+    "pianoRoll.vibratoPresetNext",
 ];
 /**
  * 判断当前焦点是否在可编辑元素上（输入框等），此时不拦截快捷键

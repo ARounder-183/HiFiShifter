@@ -72,7 +72,6 @@ import {
     SetPitchDialog,
     AverageDialog,
     SmoothDialog,
-    VibratoDialog,
     QuantizeDialog,
     MeanQuantizeDialog,
 } from "../editDialogs/EditDialogs";
@@ -80,6 +79,7 @@ import { SCALE_LABELS } from "../../utils/musicalScales";
 import { ExportAudioDialog } from "./ExportAudioDialog";
 import { AutoBackupDialog } from "./AutoBackupDialog";
 import { RenderCacheDialog } from "./RenderCacheDialog";
+import { VibratoPresetDialog } from "./VibratoPresetDialog";
 import { ChannelImportDialog } from "./ChannelImportDialog";
 import { RecordingSettingsDialog } from "./RecordingSettingsDialog";
 import { BenchmarkDialog } from "./BenchmarkDialog";
@@ -235,10 +235,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [setPitchOpen, setSetPitchOpen] = useState(false);
     const [averageOpen, setAverageOpen] = useState(false);
     const [smoothOpen, setSmoothOpen] = useState(false);
-    const [vibratoOpen, setVibratoOpen] = useState(false);
-    const [vibratoParamRange, setVibratoParamRange] = useState<
-        { min: number; max: number } | undefined
-    >(undefined);
+    const [vibratoPresetDialogOpen, setVibratoPresetDialogOpen] = useState(false);
     const [quantizeOpen, setQuantizeOpen] = useState(false);
     const [meanQuantizeOpen, setMeanQuantizeOpen] = useState(false);
     const [menuImportMode, setMenuImportMode] = useState<{
@@ -368,10 +365,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     break;
                 case "smooth":
                     setSmoothOpen(true);
-                    break;
-                case "addVibrato":
-                    setVibratoParamRange((e as CustomEvent).detail?.paramRange);
-                    setVibratoOpen(true);
                     break;
                 case "quantize":
                     setQuantizeOpen(true);
@@ -1264,6 +1257,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {tf("menu_render_cache_manager")}
                     </DropdownMenu.Item>
 
+                    {/* 颤音预设库。与上下文菜单用**不同**的文案：选项菜单这一层
+                        没有"颤音"语境，只写"管理预设"没人知道管的是哪一种。 */}
+                    <DropdownMenu.Item onSelect={() => setVibratoPresetDialogOpen(true)}>
+                        {tf("menu_vibrato_presets")}
+                    </DropdownMenu.Item>
+
                     {/* Import channel policy（假立体声 → 单声道） */}
                     <DropdownMenu.Item onSelect={() => setChannelImportDialogOpen(true)}>
                         {tf("menu_channel_import_settings")}
@@ -1377,6 +1376,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             <RenderCacheDialog
                 open={renderCacheDialogOpen}
                 onOpenChange={setRenderCacheDialogOpen}
+            />
+
+            {/* 颤音预设库：与右键菜单的「管理预设…」共用同一个对话框 */}
+            <VibratoPresetDialog
+                open={vibratoPresetDialogOpen}
+                onOpenChange={setVibratoPresetDialogOpen}
+                editParam={s.editParam}
             />
 
             <RecordingSettingsDialog
@@ -1587,15 +1593,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onOpenChange={setSmoothOpen}
                 defaultSmoothness={s.edgeSmoothnessPercent}
                 onConfirm={(strength) => dispatchEditOp("smooth", { strength })}
-            />
-            <VibratoDialog
-                open={vibratoOpen}
-                onOpenChange={setVibratoOpen}
-                editParam={s.editParam}
-                paramRange={vibratoParamRange}
-                onConfirm={(amplitude, rate, attack, release, phase) =>
-                    dispatchEditOp("addVibrato", { amplitude, rate, attack, release, phase })
-                }
             />
             <QuantizeDialog
                 open={quantizeOpen}

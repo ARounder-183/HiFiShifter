@@ -213,7 +213,7 @@ import {
 import { computeEffectiveSnap } from "../../utils/timelineSnapping";
 import { store } from "../../app/store";
 import { applyBulkFadeValue, applyBulkGainDeltaDb } from "./timeline/hooks/bulkClipEdit";
-import { advanceFineAxisDrag, type FineAxisDragState } from "./timeline/fineAxisDrag";
+import { advanceFineAxisDrag, type FineAxisDragState } from "../../utils/fineAxisDrag";
 import { CLIP_GAIN_DRAG_DB_PER_PX } from "./timeline/constants";
 import { isLegacyMouseEventFromStylus } from "../../utils/penInput";
 import {
