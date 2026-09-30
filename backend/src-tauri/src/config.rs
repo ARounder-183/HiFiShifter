@@ -379,6 +379,11 @@ pub struct UiSettings {
     /// `resolveActiveVibratoPreset`），不存在"指向了别的音色"这种错法。
     #[serde(default)]
     pub active_vibrato_preset_id: Option<String>,
+    /// 被停用的颤音预设 id（系统与用户预设共用一份名单）。
+    ///
+    /// 只影响前端的工具栏列表与拖拽中的循环切换，后端同样只做透传存储。
+    #[serde(default)]
+    pub disabled_vibrato_preset_ids: Vec<String>,
     #[serde(default)]
     pub ignore_grouping: bool,
     /// 波纹编辑（自动跟进）模式：off / track / all（对应 REAPER 的 Ripple Editing）。
@@ -1459,8 +1464,9 @@ impl Default for UiSettings {
             scale_highlight_mode: default_scale_highlight_mode(),
             custom_scale_presets: Vec::new(),
             vibrato_presets: Vec::new(),
-            // None = "还没选过"，由前端回落到出厂默认（自然）。
+            // None = "还没选过"，由前端回落到出厂默认（直线）。
             active_vibrato_preset_id: None,
+            disabled_vibrato_preset_ids: Vec::new(),
             ignore_grouping: false,
             ripple_mode: default_ripple_mode(),
 

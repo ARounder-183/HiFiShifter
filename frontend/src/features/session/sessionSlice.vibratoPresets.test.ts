@@ -5,6 +5,7 @@ import reducer, {
     removeVibratoPreset,
     reorderVibratoPreset,
     setActiveVibratoPreset,
+    toggleVibratoPresetEnabled,
     upsertVibratoPreset,
 } from "./sessionSlice.ts";
 import {
@@ -127,4 +128,43 @@ test("features/session/sessionSlice.vibratoPresets.test.ts vibrato preset reduce
         upsertVibratoPreset(sanitizeVibratoPreset({ id: "builtin.deep" })),
     );
     assertEqual(guarded.vibratoPresets.length, 0, "builtin 前缀不写入用户列表");
+});
+
+/**
+ * 停用名单：切换、循环切换跳过、删除时清理。
+ *
+ * 停用只影响"本机怎么挑预设"（工具栏列表 + 拖拽中循环切换），不影响活动预设本身。
+ */
+test("features/session/sessionSlice.vibratoPresets.test.ts disabled preset ids", () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+    const userPreset = (id: string) => sanitizeVibratoPreset({ id, name: id });
+
+    const base = reducer(undefined, { type: "@@INIT" });
+    assertEqual(base.disabledVibratoPresetIds.length, 0, "初始没有停用项");
+
+    const withPresets = reducer(base, upsertVibratoPreset(userPreset("custom_a")));
+    const toggled = reducer(withPresets, toggleVibratoPresetEnabled("custom_a"));
+    assertEqual(toggled.disabledVibratoPresetIds.includes("custom_a"), true, "停用后进入名单");
+
+    const untoggled = reducer(toggled, toggleVibratoPresetEnabled("custom_a"));
+    assertEqual(untoggled.disabledVibratoPresetIds.includes("custom_a"), false, "再次切换即恢复");
+
+    // 循环切换跳过被停用的预设：把「自然」停用后，从直线向后一步应到「柔和」。
+    const natural = SYSTEM_VIBRATO_PRESETS.find((preset) => preset.id === "builtin.natural")!;
+    const soft = SYSTEM_VIBRATO_PRESETS.find((preset) => preset.id === "builtin.soft")!;
+    const straight = SYSTEM_VIBRATO_PRESETS.find((preset) => preset.id === "builtin.straight")!;
+    const disabled = reducer(
+        reducer(base, setActiveVibratoPreset(straight.id)),
+        toggleVibratoPresetEnabled(natural.id),
+    );
+    const cycled = reducer(disabled, cycleActiveVibratoPreset(1));
+    assertEqual(cycled.activeVibratoPresetId, soft.id, "循环切换跳过停用项");
+
+    // 删除预设时把它的停用记录一并清掉（否则名单会随着"建了又删"一直变长）。
+    const removed = reducer(toggled, removeVibratoPreset("custom_a"));
+    assertEqual(removed.disabledVibratoPresetIds.includes("custom_a"), false, "删除后清掉停用记录");
 });

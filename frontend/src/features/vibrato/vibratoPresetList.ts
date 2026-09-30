@@ -88,6 +88,22 @@ export function resolveActiveVibratoPreset(
 }
 
 /**
+ * 过滤掉被停用的预设。
+ *
+ * 【停用影响什么】只影响"本机怎么挑预设"：参数编辑器工具栏的列表、以及拖拽中按
+ * 快捷键 / 侧键的循环切换。它**不影响**预设本身能否被编辑、能否作为当前预设 ——
+ * 因此过滤只发生在取"可选列表"的地方，管理器与活动预设的解析仍看全量列表。
+ */
+export function enabledVibratoPresets(
+    all: readonly VibratoPreset[],
+    disabledIds: readonly string[] | null | undefined,
+): VibratoPreset[] {
+    if (!disabledIds || disabledIds.length === 0) return [...all];
+    const disabled = new Set(disabledIds);
+    return all.filter((preset) => !disabled.has(preset.id));
+}
+
+/**
  * 在预设列表中移动 `delta` 步（环绕），返回新的预设 id。
  *
  * 列表为空时返回 `null`。`delta` 为正表示下一个。

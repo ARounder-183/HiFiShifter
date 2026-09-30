@@ -422,3 +422,56 @@ test("预览卡片有「适应」按钮（重新拟合纵轴）", async () => {
     );
     expect(fitButton, "适应按钮应已渲染").toBeTruthy();
 });
+
+/*
+ * 停用 / 启用：每行一个按钮，停用后该预设不进工具栏列表、拖拽循环切换也跳过。
+ * 这里断言按钮确实写进了切片里的停用名单。
+ */
+test("预设行有启用 / 停用按钮，点击写进停用名单", async () => {
+    const store = await mountDialog();
+    const disableButtons = [...document.querySelectorAll("button")].filter(
+        (button) => button.getAttribute("aria-label") === "Disable",
+    );
+    // 每个预设一行，行数 = 系统 + 用户。
+    expect(disableButtons.length).toBeGreaterThan(0);
+
+    await act(async () => {
+        disableButtons[0].click();
+    });
+
+    // 出厂顺序首位是「直线」。
+    expect(store.getState().session.disabledVibratoPresetIds).toEqual(["builtin.straight"]);
+});
+
+/*
+ * 右键菜单：把"针对这一条预设"的动作（启用 / 停用、设为当前、复制、删除）收拢到指针处。
+ */
+test("右键预设行打开上下文菜单", async () => {
+    const store = await mountDialog();
+    const rows = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    const row = rows.find((entry) => entry.textContent?.includes("Straight"));
+    expect(row, "预设行应已渲染").toBeTruthy();
+
+    await act(async () => {
+        row!.dispatchEvent(
+            new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 30 }),
+        );
+    });
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Disable");
+    expect(text).toContain("Use as current");
+    expect(text).toContain("Duplicate as mine");
+    expect(text).toContain("Delete");
+
+    // 菜单里的「停用」与行内按钮同源：点一下即写进名单。
+    const menuDisable = [...document.querySelectorAll("button")].find(
+        (button) =>
+            button.textContent?.trim() === "Disable" && button.getAttribute("role") === "menuitem",
+    );
+    expect(menuDisable, "菜单项应已渲染").toBeTruthy();
+    await act(async () => {
+        menuDisable!.click();
+    });
+    expect(store.getState().session.disabledVibratoPresetIds).toContain("builtin.straight");
+});

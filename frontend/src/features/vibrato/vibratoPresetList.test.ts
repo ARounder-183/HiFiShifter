@@ -9,6 +9,7 @@ import {
 import {
     activeIdAfterRemoval,
     cycleVibratoPresetId,
+    enabledVibratoPresets,
     findVibratoPreset,
     reorderUserVibratoPresets,
     resolveActiveVibratoPreset,
@@ -230,5 +231,49 @@ describe("findVibratoPreset", () => {
         expect(findVibratoPreset(all, null)).toBeUndefined();
         expect(findVibratoPreset(all, undefined)).toBeUndefined();
         expect(findVibratoPreset(all, "")).toBeUndefined();
+    });
+});
+
+describe("enabledVibratoPresets（停用过滤）", () => {
+    const { all } = resolveVibratoPresets([userPreset("custom_a"), userPreset("custom_b")]);
+
+    test("没有停用名单时原样返回全部", () => {
+        expect(enabledVibratoPresets(all, [])).toEqual(all);
+        expect(enabledVibratoPresets(all, null)).toEqual(all);
+        expect(enabledVibratoPresets(all, undefined)).toEqual(all);
+    });
+
+    test("剔除被停用的条目，顺序不变", () => {
+        const kept = enabledVibratoPresets(all, ["custom_a"]);
+        expect(kept.map((preset) => preset.id)).not.toContain("custom_a");
+        expect(kept.length).toBe(all.length - 1);
+        // 其余顺序保持。
+        expect(kept.map((preset) => preset.id)).toEqual(
+            all.filter((preset) => preset.id !== "custom_a").map((preset) => preset.id),
+        );
+    });
+
+    test("系统预设同样可被停用", () => {
+        const kept = enabledVibratoPresets(all, [builtinVibratoPresetId("straight")]);
+        expect(kept.some((preset) => preset.id === builtinVibratoPresetId("straight"))).toBe(false);
+    });
+
+    test("名单里的未知 id 不影响结果", () => {
+        expect(enabledVibratoPresets(all, ["does_not_exist"])).toEqual(all);
+    });
+
+    test("全部停用时返回空列表（调用方据此不做切换）", () => {
+        expect(
+            enabledVibratoPresets(
+                all,
+                all.map((preset) => preset.id),
+            ),
+        ).toEqual([]);
+    });
+
+    test("不修改传入的列表", () => {
+        const before = [...all];
+        enabledVibratoPresets(all, ["custom_a"]);
+        expect(all).toEqual(before);
     });
 });

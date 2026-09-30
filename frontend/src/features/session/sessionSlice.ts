@@ -159,6 +159,7 @@ import {
 import {
     activeIdAfterRemoval,
     cycleVibratoPresetId,
+    enabledVibratoPresets,
     reorderUserVibratoPresets,
 } from "../../features/vibrato/vibratoPresetList";
 import {
@@ -653,6 +654,15 @@ export interface SessionState {
     vibratoPresets: VibratoPreset[];
     /** 当前活动颤音预设的 id（系统预设的 `builtin.*` 也合法）。 */
     activeVibratoPresetId: string;
+    /**
+     * 被停用的颤音预设 id（系统与用户预设共用一份名单）。
+     *
+     * 【为什么单独存一份名单，而不是给预设加 `enabled` 字段】系统预设在代码里、
+     * 用户预设在设置里，两者都要能被停用；而预设对象还会被导出成预设文件，往里塞
+     * 一个"本机是否启用"的字段会让文件携带与它无关的本地状态。停用只影响本机的
+     * 工具栏列表与循环切换，因此单独记一份 id 名单最干净。
+     */
+    disabledVibratoPresetIds: string[];
 
     project: {
         name: string;
@@ -2188,6 +2198,7 @@ const initialState: SessionState = {
     customScalePresets: [],
     vibratoPresets: [],
     activeVibratoPresetId: DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
+    disabledVibratoPresetIds: [],
     project: {
         name: "Untitled",
         path: null,
@@ -2641,6 +2652,11 @@ const sessionSlice = createSlice({
                 state.activeVibratoPresetId,
                 presetId,
             );
+            // 顺手把停用名单里的这条清掉：id 是随机生成的，留着不会误伤别的预设，
+            // 但会让持久化的名单随着"建了又删"一直变长。
+            state.disabledVibratoPresetIds = state.disabledVibratoPresetIds.filter(
+                (id) => id !== presetId,
+            );
         },
         /** 移动用户颤音预设的位置（仅用户段内部）。 */
         reorderVibratoPreset(state, action: PayloadAction<{ id: string; toIndex: number }>) {
@@ -2655,13 +2671,28 @@ const sessionSlice = createSlice({
             state.activeVibratoPresetId = action.payload;
         },
         /**
+         * 启用 / 停用一条颤音预设。
+         *
+         * 停用只影响本机的工具栏列表与循环切换，预设本身、以及"当前使用"的选择都
+         * 不受影响 —— 停用正在用的那一条是允许的，它仍然是当前预设。
+         */
+        toggleVibratoPresetEnabled(state, action: PayloadAction<string>) {
+            const id = action.payload;
+            const index = state.disabledVibratoPresetIds.indexOf(id);
+            if (index >= 0) state.disabledVibratoPresetIds.splice(index, 1);
+            else state.disabledVibratoPresetIds.push(id);
+        },
+        /**
          * 环绕切换活动颤音预设。
          *
          * `delta` 的语义与 `clip.cycleTake`、`layout.focusNext` 一致：一个实现
-         * 同时服务"上一个"与"下一个"。
+         * 同时服务"上一个"与"下一个"。被停用的预设**跳过**。
          */
         cycleActiveVibratoPreset(state, action: PayloadAction<1 | -1>) {
-            const all = [...SYSTEM_VIBRATO_PRESETS, ...state.vibratoPresets];
+            const all = enabledVibratoPresets(
+                [...SYSTEM_VIBRATO_PRESETS, ...state.vibratoPresets],
+                state.disabledVibratoPresetIds,
+            );
             const next = cycleVibratoPresetId(all, state.activeVibratoPresetId, action.payload);
             if (next) state.activeVibratoPresetId = next;
         },
@@ -3678,6 +3709,17 @@ const sessionSlice = createSlice({
                 }
                 if (typeof s.activeVibratoPresetId === "string" && s.activeVibratoPresetId) {
                     state.activeVibratoPresetId = s.activeVibratoPresetId;
+                }
+                // 停用名单：只收字符串，去重；未知 id 留着无害（过滤时按 id 比对）。
+                if (Array.isArray(s.disabledVibratoPresetIds)) {
+                    state.disabledVibratoPresetIds = [
+                        ...new Set(
+                            s.disabledVibratoPresetIds.filter(
+                                (id: unknown): id is string =>
+                                    typeof id === "string" && id.length > 0,
+                            ),
+                        ),
+                    ];
                 }
             })
 
@@ -6433,6 +6475,7 @@ export const {
     reorderVibratoPreset,
     setActiveVibratoPreset,
     cycleActiveVibratoPreset,
+    toggleVibratoPresetEnabled,
     toggleLockParamLines,
     setMetronomeConfig,
     setSilencePreview,

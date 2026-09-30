@@ -209,6 +209,7 @@ import { sanitizeVibratoPreset } from "../../features/vibrato/vibratoPresets";
 import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
 import { upsertVibratoPreset } from "../../features/session/sessionSlice";
 import {
+    enabledVibratoPresets,
     resolveActiveVibratoPreset,
     resolveVibratoPresets,
     findVibratoPreset,
@@ -970,9 +971,22 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     );
     const vibratoPresetUserList = useAppSelector((state) => state.session.vibratoPresets);
     const activeVibratoPresetId = useAppSelector((state) => state.session.activeVibratoPresetId);
+    const disabledVibratoPresetIds = useAppSelector(
+        (state) => state.session.disabledVibratoPresetIds,
+    );
     const resolvedVibratoPresets = useMemo(
         () => resolveVibratoPresets(vibratoPresetUserList).all,
         [vibratoPresetUserList],
+    );
+    /**
+     * 可选（未被停用）的预设：工具栏下拉只列这些，拖拽中的循环切换也只在这些里绕。
+     *
+     * 停用名单之外的用途仍走全量 `resolvedVibratoPresets` —— HUD 要按 id 找到
+     * 正在用的预设（它可能已被停用），「重置到直线」也要能找到直线预设。
+     */
+    const enabledVibratoPresetList = useMemo(
+        () => enabledVibratoPresets(resolvedVibratoPresets, disabledVibratoPresetIds),
+        [resolvedVibratoPresets, disabledVibratoPresetIds],
     );
     const activeVibratoPreset = useMemo(
         () => resolveActiveVibratoPreset(resolvedVibratoPresets, activeVibratoPresetId),
@@ -4989,6 +5003,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         vibratoPresetNextKb,
         vibratoPreset: activeVibratoPreset,
         vibratoPresetList: resolvedVibratoPresets,
+        vibratoPresetCycleList: enabledVibratoPresetList,
         onVibratoDragStateChange: setVibratoDragHud,
         onVibratoDragEnd: useCallback(() => {
             setVibratoDragHud(null);
@@ -7369,7 +7384,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             scrollbars="vertical"
                                             type="auto"
                                         >
-                                            {resolvedVibratoPresets.map((preset) => (
+                                            {enabledVibratoPresetList.map((preset) => (
                                                 <button
                                                     key={preset.id}
                                                     type="button"
@@ -8578,75 +8593,78 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         className="absolute inset-0 pointer-events-none"
                                         aria-hidden
                                     />
+                                    {/* 指针旁的实时读数：**参数值 + 颤音拖拽状态合成一个
+                                        气泡**。两者曾经各弹一个，颤音那个还压在值上面，
+                                        用户只能看到后弹出的那个 —— 合成之后第一行是参数值
+                                        （"这一笔落在什么值上"），其下才是预设 / 深度 / 速率。
+                                        共用「弹出展示参数」开关。 */}
                                     {s.showParamValuePopup &&
-                                        paramValuePreview &&
+                                        (paramValuePreview || vibratoDragHud) &&
                                         (() => {
                                             const rect = canvasRef.current?.getBoundingClientRect();
                                             if (!rect) return null;
-                                            return (
-                                                <div
-                                                    className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-qt-xs leading-none text-qt-text"
-                                                    style={{
-                                                        left: paramValuePreview.clientX - rect.left,
-                                                        top: paramValuePreview.clientY - rect.top,
-                                                        transform: "translate(0, -100%)",
-                                                        whiteSpace: "nowrap",
-                                                    }}
-                                                >
-                                                    {paramValuePreview.displayText ??
-                                                        formatParamValuePreview(
-                                                            paramValuePreview.value,
-                                                        )}
-                                                </div>
-                                            );
-                                        })()}
-                                    {/* 颤音拖拽 HUD：预设名 + 实时深度 / 速率。
-                                        没有它，切换预设与滚轮调参都是"盲操作"。
-                                        与曲线值浮窗共用「弹出展示参数」开关 —— 两个
-                                        都是"指针旁的实时读数"，各自一个开关只会让人
-                                        以为漏了一个。 */}
-                                    {s.showParamValuePopup &&
-                                        vibratoDragHud &&
-                                        (() => {
-                                            const rect = canvasRef.current?.getBoundingClientRect();
-                                            if (!rect) return null;
-                                            const hudPreset = findVibratoPreset(
-                                                resolvedVibratoPresets,
-                                                vibratoDragHud.presetId,
-                                            );
+                                            // 位置以值读数为准（它本就贴着指针）；只有 HUD
+                                            // 时（例如不产生值读数的路径）用 HUD 的位置。
+                                            const anchor = paramValuePreview ?? vibratoDragHud;
+                                            if (!anchor) return null;
+                                            const hudPreset = vibratoDragHud
+                                                ? findVibratoPreset(
+                                                      resolvedVibratoPresets,
+                                                      vibratoDragHud.presetId,
+                                                  )
+                                                : undefined;
                                             const depthUnitKey = depthUnitLabelKey(editParam);
                                             return (
                                                 <div
                                                     className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-qt-xs leading-none text-qt-text"
                                                     style={{
-                                                        left: vibratoDragHud.clientX - rect.left,
-                                                        top: vibratoDragHud.clientY - rect.top,
-                                                        // 与曲线值浮窗同一套定位：贴在指针上方，
-                                                        // 只是往右让开一点避免压住笔尖。
-                                                        transform: "translate(8px, -100%)",
+                                                        left: anchor.clientX - rect.left,
+                                                        top: anchor.clientY - rect.top,
+                                                        transform: "translate(0, -100%)",
                                                         whiteSpace: "nowrap",
                                                     }}
                                                 >
-                                                    <div className="flex items-center gap-1.5">
-                                                        {hudPreset ? (
-                                                            <VibratoPresetGlyph
-                                                                preset={hudPreset}
-                                                                width={20}
-                                                                height={10}
-                                                            />
-                                                        ) : null}
-                                                        <span>
-                                                            {hudPreset
-                                                                ? vibratoPresetLabel(hudPreset, t)
-                                                                : ""}
-                                                        </span>
-                                                        {vibratoDragHud.adjusted
-                                                            ? ` · ${t("vibrato_adjusted")}`
-                                                            : ""}
-                                                    </div>
-                                                    <div className="text-qt-text-muted">
-                                                        {`${formatNumber(depthForParam(vibratoDragHud.depthCents, editParam, currentParamRange))}${depthUnitKey ? ` ${t(depthUnitKey)}` : ""} · ${formatNumber(vibratoDragHud.rateHz)} ${t("vibrato_unit_hz")}`}
-                                                    </div>
+                                                    {paramValuePreview ? (
+                                                        <div>
+                                                            {paramValuePreview.displayText ??
+                                                                formatParamValuePreview(
+                                                                    paramValuePreview.value,
+                                                                )}
+                                                        </div>
+                                                    ) : null}
+                                                    {vibratoDragHud ? (
+                                                        <div
+                                                            className={
+                                                                paramValuePreview
+                                                                    ? "mt-1"
+                                                                    : undefined
+                                                            }
+                                                        >
+                                                            <div className="flex items-center gap-1.5">
+                                                                {hudPreset ? (
+                                                                    <VibratoPresetGlyph
+                                                                        preset={hudPreset}
+                                                                        width={20}
+                                                                        height={10}
+                                                                    />
+                                                                ) : null}
+                                                                <span>
+                                                                    {hudPreset
+                                                                        ? vibratoPresetLabel(
+                                                                              hudPreset,
+                                                                              t,
+                                                                          )
+                                                                        : ""}
+                                                                </span>
+                                                                {vibratoDragHud.adjusted
+                                                                    ? ` · ${t("vibrato_adjusted")}`
+                                                                    : ""}
+                                                            </div>
+                                                            <div className="text-qt-text-muted">
+                                                                {`${formatNumber(depthForParam(vibratoDragHud.depthCents, editParam, currentParamRange))}${depthUnitKey ? ` ${t(depthUnitKey)}` : ""} · ${formatNumber(vibratoDragHud.rateHz)} ${t("vibrato_unit_hz")}`}
+                                                            </div>
+                                                        </div>
+                                                    ) : null}
                                                 </div>
                                             );
                                         })()}

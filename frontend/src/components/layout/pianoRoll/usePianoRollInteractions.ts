@@ -416,8 +416,19 @@ export function usePianoRollInteractions(args: {
      * `vibratoPresetList.resolveVibratoPresets`。
      */
     vibratoPreset: VibratoPreset;
-    /** 可用预设的全量列表（系统 + 用户），供拖拽中环绕切换。 */
+    /**
+     * 全量预设列表（系统 + 用户）。
+     *
+     * 用于按 id 定位"当前预设"（它可能已被停用，HUD 仍要显示它的名字与缩略图）
+     * 以及「重置到直线」定位直线预设。
+     */
     vibratoPresetList: readonly VibratoPreset[];
+    /**
+     * 拖拽中环绕切换时**实际参与**的列表（已剔除被停用的预设）。
+     *
+     * 与 `vibratoPresetList` 分开：停用只影响"挑预设"，不影响"显示当前预设"。
+     */
+    vibratoPresetCycleList: readonly VibratoPreset[];
     /**
      * 拖拽中调参 / 切换后的上报（面板据此刷新 HUD）。
      *
@@ -562,6 +573,7 @@ export function usePianoRollInteractions(args: {
         vibratoPresetNextKb,
         vibratoPreset,
         vibratoPresetList,
+        vibratoPresetCycleList,
         onVibratoDragStateChange,
         onVibratoDragEnd,
         getPlayheadSec,
@@ -2255,11 +2267,11 @@ export function usePianoRollInteractions(args: {
                 e.preventDefault();
                 e.stopPropagation();
                 const nextId = cycleVibratoPresetId(
-                    vibratoPresetList,
+                    vibratoPresetCycleList,
                     vibratoStateRef.current.working.preset.id,
                     switchDirection,
                 );
-                const next = findVibratoPreset(vibratoPresetList, nextId);
+                const next = findVibratoPreset(vibratoPresetCycleList, nextId);
                 if (next) switchVibratoPresetPersistently(next);
                 return;
             }
@@ -2317,7 +2329,7 @@ export function usePianoRollInteractions(args: {
         vibratoDragFrequencyDecreaseKb,
         vibratoPresetPrevKb,
         vibratoPresetNextKb,
-        vibratoPresetList,
+        vibratoPresetCycleList,
         paramFineAdjustKb,
     ]);
 
@@ -5273,11 +5285,11 @@ export function usePianoRollInteractions(args: {
                             // 才可能两者皆空，而那已在上面返回）。
                             if (direction === null) return;
                             const nextId = cycleVibratoPresetId(
-                                vibratoPresetList,
+                                vibratoPresetCycleList,
                                 vibratoStateRef.current?.working.preset.id ?? null,
                                 direction,
                             );
-                            const next = findVibratoPreset(vibratoPresetList, nextId);
+                            const next = findVibratoPreset(vibratoPresetCycleList, nextId);
                             if (next) {
                                 switchVibratoPresetPersistently(next, ev.clientX, ev.clientY);
                             }
@@ -5627,8 +5639,10 @@ export function usePianoRollInteractions(args: {
             paramStretchKb,
             snapDrawValue,
             // 颤音拖拽：预设起手、拖拽中切换预设、双键 / 中键重置、HUD 上报与收尾清屏。
+            // 全量列表 `vibratoPresetList` 只在 `applyVibratoReset` 内部用到，故由它
+            // 自己带着依赖，这里只列循环切换用的 `vibratoPresetCycleList`。
             vibratoPreset,
-            vibratoPresetList,
+            vibratoPresetCycleList,
             switchVibratoPresetPersistently,
             applyVibratoReset,
             vibratoFrequencyAdjustKb,

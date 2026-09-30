@@ -1986,6 +1986,12 @@ export const jaJP = {
     vibrato_manager_empty:
         "カスタムプリセットはまだありません。内蔵プリセットを複製するところから始められます。",
     vibrato_manager_readonly: "内蔵プリセットは読み取り専用です。複製してから編集してください。",
+    vibrato_manager_enable: "有効にする",
+    vibrato_manager_disable: "無効にする",
+    vibrato_manager_disabled: "無効",
+    vibrato_manager_set_active: "現在使用する",
+    vibrato_manager_row_menu: "プリセットの操作",
+    vibrato_manager_at_cap: "プリセットの上限に達しました",
     vibrato_manager_move_up: "上へ",
     vibrato_manager_move_down: "下へ",
     vibrato_manager_open: "プリセットを管理...",

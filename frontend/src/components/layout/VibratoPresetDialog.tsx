@@ -14,7 +14,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PlayIcon, ShuffleIcon, StopIcon } from "@radix-ui/react-icons";
+import { PlayIcon, ShuffleIcon, StopIcon, EyeNoneIcon, EyeOpenIcon } from "@radix-ui/react-icons";
 import { Box, Flex, ScrollArea, TextField } from "@radix-ui/themes";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -26,6 +26,7 @@ import {
     removeVibratoPreset,
     reorderVibratoPreset,
     setActiveVibratoPreset,
+    toggleVibratoPresetEnabled,
     upsertVibratoPreset,
 } from "../../features/session/sessionSlice";
 import {
@@ -33,6 +34,7 @@ import {
     VIBRATO_LIMITS,
     createVibratoPresetId,
     duplicateVibratoPreset,
+    isBuiltinVibratoPresetId,
     sanitizeVibratoPreset,
 } from "../../features/vibrato/vibratoPresets";
 import { resolveVibratoPresets } from "../../features/vibrato/vibratoPresetList";
@@ -59,6 +61,7 @@ import type {
 } from "../../features/vibrato/vibratoTypes";
 import {
     AppButton,
+    AppContextMenu,
     AppIconButton,
     AppConfirmDialog,
     AppDialog,
@@ -72,6 +75,7 @@ import {
     AppSlider,
     AppSliderReadout,
     AppSwitchRow,
+    type AppMenuItemSpec,
 } from "../../ui";
 import { AppFileInput } from "../../ui/FileInput";
 import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
@@ -166,6 +170,17 @@ export function VibratoPresetDialog({
      */
     const [handDraw, setHandDraw] = useState<{ baseline: CycleSource } | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<VibratoPreset | null>(null);
+    /**
+     * 预设列表行的右键菜单（视口坐标 + 目标预设）。
+     *
+     * 列表行能做的动作（启用 / 停用、设为当前、复制、删除）散落在页脚与编辑器里，
+     * 右键菜单把它们按"针对这一条预设"收拢到指针处。
+     */
+    const [presetMenu, setPresetMenu] = useState<{
+        x: number;
+        y: number;
+        preset: VibratoPreset;
+    } | null>(null);
     /** 试听是否在响（驱动播放 / 停止按钮的图标与文案）。 */
     const [auditionPlaying, setAuditionPlaying] = useState(false);
     /** 导入 / 导出用的隐藏文件输入（必须常驻挂载，见 `AppFileInput` 的说明）。 */
@@ -349,6 +364,25 @@ export function VibratoPresetDialog({
         void dispatch(persistUiSettings());
     }
 
+    /**
+     * 启用 / 停用一条预设。
+     *
+     * 只影响本机的工具栏列表与拖拽中的循环切换 —— 预设本身、以及"当前使用"的
+     * 选择都不受影响，因此不需要动活动预设。
+     */
+    function togglePresetEnabled(preset: VibratoPreset) {
+        dispatch(toggleVibratoPresetEnabled(preset.id));
+        void dispatch(persistUiSettings());
+    }
+
+    /** 复制一份预设（管理器页脚与列表右键菜单共用）。 */
+    function duplicatePreset(source: VibratoPreset) {
+        const copy = duplicateVibratoPreset(source);
+        persistPreset(copy);
+        selectPreset(copy);
+        activatePreset(copy);
+    }
+
     function handleSave() {
         if (!draft || isBuiltin) return;
         const normalized = sanitizeVibratoPreset(draft);
@@ -360,10 +394,7 @@ export function VibratoPresetDialog({
 
     function handleDuplicate() {
         if (!draft) return;
-        const copy = duplicateVibratoPreset(draft);
-        persistPreset(copy);
-        selectPreset(copy);
-        activatePreset(copy);
+        duplicatePreset(draft);
     }
 
     /**
@@ -484,6 +515,49 @@ export function VibratoPresetDialog({
 
     const customCount = resolved.user.length;
     const atCap = customCount >= MAX_VIBRATO_PRESETS;
+
+    /** 列表行右键菜单的条目（针对被右击的那条预设）。 */
+    const presetMenuItems: AppMenuItemSpec[] = presetMenu
+        ? (() => {
+              const target = presetMenu.preset;
+              const targetDisabled = session.disabledVibratoPresetIds.includes(target.id);
+              return [
+                  {
+                      key: "toggle-enabled",
+                      label: targetDisabled
+                          ? t("vibrato_manager_enable")
+                          : t("vibrato_manager_disable"),
+                      icon: targetDisabled ? <EyeOpenIcon /> : <EyeNoneIcon />,
+                      onSelect: () => togglePresetEnabled(target),
+                  },
+                  {
+                      key: "activate",
+                      label: t("vibrato_manager_set_active"),
+                      checked: session.activeVibratoPresetId === target.id,
+                      onSelect: () => activatePreset(target),
+                  },
+                  {
+                      key: "duplicate",
+                      label: t("vibrato_manager_duplicate"),
+                      separatorBefore: true,
+                      disabled: atCap,
+                      tooltip: atCap ? t("vibrato_manager_at_cap") : undefined,
+                      onSelect: () => duplicatePreset(target),
+                  },
+                  {
+                      key: "delete",
+                      label: t("vibrato_manager_delete"),
+                      danger: true,
+                      // 系统预设只读：要删只能删副本。
+                      disabled: isBuiltinVibratoPresetId(target.id),
+                      tooltip: isBuiltinVibratoPresetId(target.id)
+                          ? t("vibrato_manager_readonly")
+                          : undefined,
+                      onSelect: () => setDeleteTarget(target),
+                  },
+              ];
+          })()
+        : [];
 
     return (
         <>
@@ -665,8 +739,17 @@ export function VibratoPresetDialog({
                                             preset={preset}
                                             selected={draft?.id === preset.id}
                                             active={session.activeVibratoPresetId === preset.id}
+                                            enabled={
+                                                !session.disabledVibratoPresetIds.includes(
+                                                    preset.id,
+                                                )
+                                            }
                                             onSelect={() => selectPreset(preset)}
                                             onActivate={() => activatePreset(preset)}
+                                            onToggleEnabled={() => togglePresetEnabled(preset)}
+                                            onContextMenu={(x, y) =>
+                                                setPresetMenu({ x, y, preset })
+                                            }
                                         />
                                     ))}
 
@@ -682,18 +765,26 @@ export function VibratoPresetDialog({
                                     ) : (
                                         resolved.user.map((preset, index) => (
                                             <Flex key={preset.id} align="center" gap="1">
-                                                <Box style={{ minWidth: 0, flex: 1 }}>
-                                                    <PresetRow
-                                                        preset={preset}
-                                                        selected={draft?.id === preset.id}
-                                                        active={
-                                                            session.activeVibratoPresetId ===
-                                                            preset.id
-                                                        }
-                                                        onSelect={() => selectPreset(preset)}
-                                                        onActivate={() => activatePreset(preset)}
-                                                    />
-                                                </Box>
+                                                <PresetRow
+                                                    preset={preset}
+                                                    selected={draft?.id === preset.id}
+                                                    active={
+                                                        session.activeVibratoPresetId === preset.id
+                                                    }
+                                                    enabled={
+                                                        !session.disabledVibratoPresetIds.includes(
+                                                            preset.id,
+                                                        )
+                                                    }
+                                                    onSelect={() => selectPreset(preset)}
+                                                    onActivate={() => activatePreset(preset)}
+                                                    onToggleEnabled={() =>
+                                                        togglePresetEnabled(preset)
+                                                    }
+                                                    onContextMenu={(x, y) =>
+                                                        setPresetMenu({ x, y, preset })
+                                                    }
+                                                />
                                                 <AppButton
                                                     size="sm"
                                                     emphasis="soft"
@@ -1213,6 +1304,17 @@ export function VibratoPresetDialog({
                 intent="danger"
                 onConfirm={handleDelete}
             />
+
+            {/* 预设行右键菜单：把"针对这一条预设"的动作收拢到指针处。 */}
+            {presetMenu ? (
+                <AppContextMenu
+                    x={presetMenu.x}
+                    y={presetMenu.y}
+                    items={presetMenuItems}
+                    ariaLabel={t("vibrato_manager_row_menu")}
+                    onClose={() => setPresetMenu(null)}
+                />
+            ) : null}
         </>
     );
 }
@@ -1221,43 +1323,77 @@ interface PresetRowProps {
     preset: VibratoPreset;
     selected: boolean;
     active: boolean;
+    /** 是否启用（停用的预设不出现在工具栏列表里，循环切换也会跳过）。 */
+    enabled: boolean;
     onSelect: () => void;
     onActivate: () => void;
+    onToggleEnabled: () => void;
+    onContextMenu: (x: number, y: number) => void;
 }
 
 /**
- * 列表行：单击选中（编辑它），双击设为当前使用。
+ * 列表行：单击选中（编辑它），双击设为当前使用，右侧按钮启用 / 停用。
  *
  * 【为什么分开】"编辑某个预设"与"现在就用某个预设"是两件事：用户可能正在调
  * 一个还没调好的预设，却仍然希望拖拽用着上一个。合起来会让编辑动作顺带改掉
  * 当前音色。
  */
-function PresetRow({ preset, selected, active, onSelect, onActivate }: PresetRowProps) {
+function PresetRow({
+    preset,
+    selected,
+    active,
+    enabled,
+    onSelect,
+    onActivate,
+    onToggleEnabled,
+    onContextMenu,
+}: PresetRowProps) {
     const { t } = useI18n();
     const description = vibratoPresetDescription(preset, t);
+    const label = vibratoPresetLabel(preset, t);
+    const summary = description ?? vibratoPresetSummary(preset, t);
     return (
-        <AppListRow
-            selected={selected}
-            density="compact"
-            role="option"
-            onClick={onSelect}
-            onDoubleClick={onActivate}
-            title={description ?? vibratoPresetSummary(preset, t)}
-        >
-            <Flex align="center" gap="2" style={{ minWidth: 0 }}>
-                {active ? <span aria-hidden="true">●</span> : null}
-                <VibratoPresetGlyph preset={preset} width={40} height={14} />
-                <span
-                    className="hs-type-label"
-                    style={{
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
+        <Flex align="center" gap="1" style={{ minWidth: 0, flex: 1 }}>
+            <Box style={{ minWidth: 0, flex: 1 }}>
+                <AppListRow
+                    selected={selected}
+                    density="compact"
+                    role="option"
+                    onClick={onSelect}
+                    onDoubleClick={onActivate}
+                    onContextMenu={(event) => {
+                        event.preventDefault();
+                        onContextMenu(event.clientX, event.clientY);
                     }}
+                    // 项目自定义气泡（不是浏览器原生 title）：样式与全应用一致。
+                    tooltip={enabled ? summary : `${summary} · ${t("vibrato_manager_disabled")}`}
                 >
-                    {vibratoPresetLabel(preset, t)}
-                </span>
-            </Flex>
-        </AppListRow>
+                    <Flex align="center" gap="2" style={{ minWidth: 0 }}>
+                        {active ? <span aria-hidden="true">●</span> : null}
+                        <VibratoPresetGlyph preset={preset} width={40} height={14} />
+                        <span
+                            className="hs-type-label"
+                            style={{
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                                // 停用的预设压暗：一眼看出它不会出现在工具栏里。
+                                opacity: enabled ? undefined : 0.45,
+                            }}
+                        >
+                            {label}
+                        </span>
+                    </Flex>
+                </AppListRow>
+            </Box>
+            {/* 启用 / 停用：停用后不进工具栏列表、拖拽切换也跳过。 */}
+            <AppIconButton
+                size="sm"
+                emphasis={enabled ? "neutral" : "accent"}
+                icon={enabled ? <EyeOpenIcon /> : <EyeNoneIcon />}
+                tooltip={enabled ? t("vibrato_manager_disable") : t("vibrato_manager_enable")}
+                onClick={onToggleEnabled}
+            />
+        </Flex>
     );
 }

@@ -260,6 +260,12 @@ export interface UiSettings {
     vibratoPresets?: VibratoPreset[];
     /** 当前活动颤音预设的 id（系统预设的 `builtin.*` 也合法）。 */
     activeVibratoPresetId?: string;
+    /**
+     * 被停用的颤音预设 id（系统与用户预设共用一份名单）。
+     *
+     * 停用只影响本机的工具栏列表与拖拽中的循环切换，因此不进预设文件、只进设置。
+     */
+    disabledVibratoPresetIds?: string[];
 }
 
 /** 导入声道处理策略的总模式。 */
