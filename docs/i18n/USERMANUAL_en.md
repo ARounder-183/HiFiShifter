@@ -450,7 +450,7 @@ Right-click the Draw tool button to switch to the Line/Vibrato tool. This tool a
 
 Left-drag to draw a straight line freely or horizontally, depending on the `Drag Direction` setting. While left-dragging, press the right button (or the `D` key) to quickly toggle drag direction.
 
-While left-dragging, scroll the wheel to adjust the vibrato **depth**; hold `Alt` while scrolling to adjust the **rate**. Hold the `Param Fine Adjust` modifier (default `Ctrl`) to fine-tune while scrolling. A two-line readout follows the pointer during the drag, showing the current preset, depth and rate. It shares the `Options → Show Parameter Popup` switch with the curve value popup, so turning that off hides it. Depth can go **negative**: a negative depth inverts the waveform (it starts by swinging down), and turning the wheel further down does not stick at 0.
+While left-dragging, scroll the wheel to adjust the vibrato **depth**; hold `Alt` while scrolling to adjust the **rate**. Hold the `Param Fine Adjust` modifier (default `Ctrl`) to fine-tune while scrolling. During the drag a single readout bubble follows the pointer: **the parameter value on the first line** (what this stroke is landing on) and **the vibrato state underneath it** (current preset, depth and rate). They share one bubble rather than popping two, which used to leave the second covering the first. The whole bubble is governed by `Options → Show Parameter Popup`. Depth can go **negative**: a negative depth inverts the waveform (it starts by swinging down), and turning the wheel further down does not stick at 0.
 
 You can switch vibrato presets mid-drag:
 
@@ -496,6 +496,10 @@ The parameters fall into four groups:
 - **Placement**: what the vibrato oscillates around — start to end, hold the start, hold the end, the average, or **keep the curve**, which superimposes the vibrato on the pitch movement that is already there. The last one also has a dry/wet control.
 
 Built-in presets are read-only: duplicate one to edit it. Clicking a list entry only selects it for editing; **double-click** makes it the preset you are using, so shaping a preset you have not settled on does not change the sound you are about to draw with.
+
+Each row has an **enable / disable** button on its right (the eye icon). A disabled preset disappears from the parameter editor's toolbar list and is **skipped** when you cycle presets with the keyboard or the mouse side buttons mid-drag. Built-in and custom presets can both be disabled — if you only ever use two or three of them, disable the rest and both the toolbar list and the cycling stay short. Disabling only affects *how you pick* a preset: the preset is still editable and can still be the current one (disabling the one you are using is allowed).
+
+**Right-clicking** a row opens that preset's context menu: `Enable / Disable`, `Use as current`, `Duplicate as mine`, and `Delete` (Delete is unavailable for built-in presets — duplicate one to delete it). Hovering a row shows the project's own tooltip with that preset's description and summary.
 
 **Creating a vibrato preset from a selection**: once you have drawn a vibrato you like, select it and choose `Create vibrato preset from selection...` (or the same button in the apply dialog footer). The pitch movement itself is removed, the period is measured by autocorrelation, the remainder is folded into one averaged cycle to become the waveform, and the depth, fades and irregularity are measured, giving you a preset you can keep tuning. The folded waveform is low-passed (only the lowest few harmonics are kept), so the result is a **smooth** curve rather than one that carries the recording's observation noise and looks bumpy. It works on any parameter.
 
