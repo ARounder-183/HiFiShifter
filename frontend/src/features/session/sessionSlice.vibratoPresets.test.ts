@@ -3,6 +3,7 @@ import { test } from "vitest";
 import reducer, {
     cycleActiveVibratoPreset,
     removeVibratoPreset,
+    reorderBuiltinVibratoPreset,
     reorderVibratoPreset,
     setActiveVibratoPreset,
     toggleVibratoPresetEnabled,
@@ -12,6 +13,7 @@ import {
     SYSTEM_VIBRATO_PRESETS,
     DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
 } from "../vibrato/systemPresets.ts";
+import { resolveVibratoPresets } from "../vibrato/vibratoPresetList.ts";
 import { MAX_VIBRATO_PRESETS, sanitizeVibratoPreset } from "../vibrato/vibratoPresets.ts";
 import type { VibratoPreset } from "../vibrato/vibratoTypes.ts";
 
@@ -167,4 +169,34 @@ test("features/session/sessionSlice.vibratoPresets.test.ts disabled preset ids",
     // 删除预设时把它的停用记录一并清掉（否则名单会随着"建了又删"一直变长）。
     const removed = reducer(toggled, removeVibratoPreset("custom_a"));
     assertEqual(removed.disabledVibratoPresetIds.includes("custom_a"), false, "删除后清掉停用记录");
+});
+
+/**
+ * 系统预设的自定义顺序：以 id 列表持久化，缺项 / 无效项由读取侧兜底。
+ */
+test("features/session/sessionSlice.vibratoPresets.test.ts builtin preset order", () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+    const natural = SYSTEM_VIBRATO_PRESETS.find((preset) => preset.id === "builtin.natural")!;
+    const base = reducer(undefined, { type: "@@INIT" });
+    assertEqual(base.builtinVibratoPresetOrder.length, 0, "初始没有自定义顺序");
+
+    // 把「自然」拖到最前。
+    const moved = reducer(base, reorderBuiltinVibratoPreset({ id: natural.id, toIndex: 0 }));
+    assertEqual(moved.builtinVibratoPresetOrder[0], natural.id, "顺序首位变成自然");
+    // 写回的是**完整**列表：之后新增出厂预设也能靠兜底补齐，不必迁移。
+    assertEqual(
+        moved.builtinVibratoPresetOrder.length,
+        SYSTEM_VIBRATO_PRESETS.length,
+        "写回完整顺序",
+    );
+    // 解析出来也按这个顺序。
+    assertEqual(
+        resolveVibratoPresets([], moved.builtinVibratoPresetOrder).system[0]?.id,
+        natural.id,
+        "解析出的系统段按自定义顺序",
+    );
 });

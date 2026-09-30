@@ -463,6 +463,14 @@ test("右键预设行打开上下文菜单", async () => {
     expect(text).toContain("Use as current");
     expect(text).toContain("Duplicate as mine");
     expect(text).toContain("Delete");
+    // 系统预设现在也可排序：菜单里应当有上移 / 下移（首项的上移禁用）。
+    expect(text).toContain("Move up");
+    expect(text).toContain("Move down");
+    const moveUp = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Move up",
+    ) as HTMLButtonElement | undefined;
+    expect(moveUp, "上移菜单项应已渲染").toBeTruthy();
+    expect(moveUp!.disabled, "首项的「上移」应禁用").toBe(true);
 
     /*
      * 层级契约：菜单必须在**对话框的 DOM 子树里**。
@@ -637,4 +645,37 @@ test("拖到列表下缘会自动滚动", async () => {
         await new Promise((resolve) => setTimeout(resolve, 40));
     });
     expect(scrollTop).toBe(afterDrop);
+});
+
+/*
+ * 系统预设也可排序：拖拽写进 `builtinVibratoPresetOrder`（以 id 列表持久化）。
+ *
+ * 与用户预设同一套拖拽机制，但两组各排各的 —— 跨组拖拽没有明确语义，也会让
+ * "系统预设只读"的边界变糊。
+ */
+test("拖拽系统预设行可以调整顺序", async () => {
+    const store = await mountDialog();
+    expect(store.getState().session.builtinVibratoPresetOrder).toEqual([]);
+
+    const row = document.querySelector<HTMLElement>('[data-preset-row="builtin.straight"]');
+    expect(row, "系统预设行应已渲染").toBeTruthy();
+    const target = row!.querySelector('[role="option"]') as HTMLElement;
+
+    await act(async () => {
+        target.dispatchEvent(
+            new PointerEvent("pointerdown", { bubbles: true, button: 0, clientY: 0 }),
+        );
+    });
+    await act(async () => {
+        window.dispatchEvent(new PointerEvent("pointermove", { clientY: 40 }));
+    });
+    await act(async () => {
+        window.dispatchEvent(new PointerEvent("pointerup", { clientY: 40 }));
+    });
+
+    // jsdom 没有排版：所有行中线都是 0，"向下拖"必然落到末尾。
+    const order = store.getState().session.builtinVibratoPresetOrder;
+    expect(order).toHaveLength(12);
+    expect(order).toContain("builtin.straight");
+    expect(order[order.length - 1]).toBe("builtin.straight");
 });

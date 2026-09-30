@@ -974,9 +974,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const disabledVibratoPresetIds = useAppSelector(
         (state) => state.session.disabledVibratoPresetIds,
     );
+    const builtinVibratoPresetOrder = useAppSelector(
+        (state) => state.session.builtinVibratoPresetOrder,
+    );
     const resolvedVibratoPresets = useMemo(
-        () => resolveVibratoPresets(vibratoPresetUserList).all,
-        [vibratoPresetUserList],
+        () => resolveVibratoPresets(vibratoPresetUserList, builtinVibratoPresetOrder).all,
+        [vibratoPresetUserList, builtinVibratoPresetOrder],
     );
     /**
      * 可选（未被停用）的预设：工具栏下拉只列这些，拖拽中的循环切换也只在这些里绕。

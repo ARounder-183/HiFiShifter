@@ -40,8 +40,9 @@ export interface ResolvedVibratoPresets {
  */
 export function resolveVibratoPresets(
     userPresets: readonly VibratoPreset[] | null | undefined,
+    builtinOrder?: readonly string[] | null,
 ): ResolvedVibratoPresets {
-    const system = SYSTEM_VIBRATO_PRESETS;
+    const system = orderSystemPresets(builtinOrder);
     const systemIds = new Set(system.map((preset) => preset.id));
     const user = dedupeVibratoPresets(
         (userPresets ?? [])
@@ -51,6 +52,47 @@ export function resolveVibratoPresets(
         // 把一份病态配置一路拖进菜单与渲染。
     ).slice(0, MAX_VIBRATO_PRESETS);
     return { system, user, all: [...system, ...user] };
+}
+
+/**
+ * 系统预设的**有效顺序**（id 列表）。
+ *
+ * 持久化的顺序可能缺项（新版本新增了出厂预设）、也可能含无效项（旧版本删过），
+ * 因此一律以出厂顺序为底：先按持久化顺序取有效项，再把没提到的按出厂顺序补在后面。
+ * 这样"新增一个出厂预设"不需要迁移任何配置。
+ */
+export function effectiveBuiltinPresetOrder(order?: readonly string[] | null): string[] {
+    const defaultIds = SYSTEM_VIBRATO_PRESETS.map((preset) => preset.id);
+    if (!order || order.length === 0) return defaultIds;
+    const known = new Set(defaultIds);
+    const result: string[] = [];
+    const seen = new Set<string>();
+    for (const id of order) {
+        if (!known.has(id) || seen.has(id)) continue;
+        seen.add(id);
+        result.push(id);
+    }
+    for (const id of defaultIds) {
+        if (!seen.has(id)) result.push(id);
+    }
+    return result;
+}
+
+/**
+ * 按持久化顺序排列系统预设。
+ *
+ * 顺序与出厂一致（含"没有自定义顺序"）时返回模块级那份**稳定数组** —— 上游拿它做
+ * React 依赖比较，每次返回新数组会让整棵子树白白重渲染。
+ */
+function orderSystemPresets(order?: readonly string[] | null): readonly VibratoPreset[] {
+    const ids = effectiveBuiltinPresetOrder(order);
+    if (ids.every((id, index) => id === SYSTEM_VIBRATO_PRESETS[index]?.id)) {
+        return SYSTEM_VIBRATO_PRESETS;
+    }
+    const byId = new Map(SYSTEM_VIBRATO_PRESETS.map((preset) => [preset.id, preset]));
+    return ids
+        .map((id) => byId.get(id))
+        .filter((preset): preset is VibratoPreset => Boolean(preset));
 }
 
 /** 取出厂预设（按稳定键）。 */
@@ -140,6 +182,23 @@ export function activeIdAfterRemoval(
 }
 
 /**
+ * 把第 `from` 项移动到 `toIndex`（**移除之后**的数组下标语义）。
+ *
+ * 越界索引被钳制；`from` 无效时原样返回。抽出来是为了让"用户预设"与"系统预设
+ * 顺序"两份排序共用同一套边界规则 —— 拖到首 / 尾、越界、id 不存在这几处最容易
+ * 各自漂移。
+ */
+export function moveItemToIndex<T>(items: readonly T[], from: number, toIndex: number): T[] {
+    if (from < 0 || from >= items.length) return [...items];
+    const clamped = Math.min(items.length - 1, Math.max(0, Math.round(toIndex)));
+    if (clamped === from) return [...items];
+    const next = [...items];
+    const [moved] = next.splice(from, 1);
+    next.splice(clamped, 0, moved);
+    return next;
+}
+
+/**
  * 把用户预设数组中的一项移动到新位置（仅用户段内部）。
  *
  * 纯函数：返回新数组，越界索引被钳制。抽出来是为了单测 —— 列表排序
@@ -150,12 +209,18 @@ export function reorderUserVibratoPresets(
     id: string,
     toIndex: number,
 ): VibratoPreset[] {
-    const from = user.findIndex((preset) => preset.id === id);
-    if (from < 0) return [...user];
-    const clamped = Math.min(user.length - 1, Math.max(0, Math.round(toIndex)));
-    if (clamped === from) return [...user];
-    const next = [...user];
-    const [moved] = next.splice(from, 1);
-    next.splice(clamped, 0, moved);
-    return next;
+    return moveItemToIndex(
+        user,
+        user.findIndex((preset) => preset.id === id),
+        toIndex,
+    );
+}
+
+/** 把系统预设顺序里的某个 id 移动到新位置（系统预设的顺序以 id 列表持久化）。 */
+export function reorderBuiltinPresetIds(
+    order: readonly string[],
+    id: string,
+    toIndex: number,
+): string[] {
+    return moveItemToIndex(order, order.indexOf(id), toIndex);
 }

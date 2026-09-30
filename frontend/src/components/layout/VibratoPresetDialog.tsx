@@ -24,6 +24,7 @@ import { useI18n } from "../../i18n/I18nProvider";
 import {
     persistUiSettings,
     removeVibratoPreset,
+    reorderBuiltinVibratoPreset,
     reorderVibratoPreset,
     setActiveVibratoPreset,
     toggleVibratoPresetEnabled,
@@ -129,6 +130,15 @@ interface Props {
 
 /** 列表列的宽度（CSS 像素）。 */
 const LIST_WIDTH = 208;
+
+/**
+ * 预设列表的两个分组。
+ *
+ * 拖拽只在**同组内**换位：系统预设与用户预设是两份独立的有序集合（前者顺序存在设置
+ * 里的 id 列表，后者就是数组本身），跨组拖拽没有明确的语义，也会让"系统预设只读"
+ * 的边界变糊。
+ */
+type PresetGroup = "system" | "user";
 /**
  * 对话框内容的定高。
  *
@@ -158,8 +168,8 @@ export function VibratoPresetDialog({
     );
 
     const resolved = useMemo(
-        () => resolveVibratoPresets(session.vibratoPresets),
-        [session.vibratoPresets],
+        () => resolveVibratoPresets(session.vibratoPresets, session.builtinVibratoPresetOrder),
+        [session.vibratoPresets, session.builtinVibratoPresetOrder],
     );
     /**
      * 编辑中的草稿。`null` 表示尚未选过 —— 打开时按活动预设播种。
@@ -194,16 +204,21 @@ export function VibratoPresetDialog({
      * `reorderVibratoPreset` 需要的下标在松手时做（见 `reorderTargetIndex`）。
      */
     const [presetDrag, setPresetDrag] = useState<{
+        group: PresetGroup;
         id: string;
         fromIndex: number;
         insertionIndex: number;
     } | null>(null);
     /** 按下的起点（尚未越过阈值）。用 ref 而不是 state：指针移动每帧都读它。 */
-    const presetDragStartRef = useRef<{ id: string; fromIndex: number; pointerY: number } | null>(
-        null,
-    );
+    const presetDragStartRef = useRef<{
+        group: PresetGroup;
+        id: string;
+        fromIndex: number;
+        pointerY: number;
+    } | null>(null);
     /** 进行中的拖拽（与 `presetDrag` 同步，供事件回调读取最新值）。 */
     const presetDragRef = useRef<{
+        group: PresetGroup;
         id: string;
         fromIndex: number;
         insertionIndex: number;
@@ -212,6 +227,8 @@ export function VibratoPresetDialog({
     const presetDragPointerYRef = useRef<number | null>(null);
     /** 本次指针交互是否已经变成拖拽 —— 用于吞掉拖完那一下的 click。 */
     const suppressPresetClickRef = useRef(false);
+    /** 两组列表各自的容器：拖拽落点只看**同组**的行。 */
+    const systemListRef = useRef<HTMLDivElement | null>(null);
     const userListRef = useRef<HTMLDivElement | null>(null);
     /** 试听是否在响（驱动播放 / 停止按钮的图标与文案）。 */
     const [auditionPlaying, setAuditionPlaying] = useState(false);
@@ -528,18 +545,30 @@ export function VibratoPresetDialog({
         setDraft((prev) => (prev?.id === removedId ? null : prev));
     }
 
+    /**
+     * 上移 / 下移一条预设。
+     *
+     * 右键菜单里的这条是**键盘可达的等价操作** —— 列表靠拖拽排序，只为了拖拽就砍掉
+     * 非指针用户的路子代价太大。两组各自在自己的集合里换位。
+     */
     function movePreset(preset: VibratoPreset, delta: 1 | -1) {
-        const index = resolved.user.findIndex((item) => item.id === preset.id);
+        const isSystem = isBuiltinVibratoPresetId(preset.id);
+        const list = isSystem ? resolved.system : resolved.user;
+        const index = list.findIndex((item) => item.id === preset.id);
         if (index < 0) return;
         const next = index + delta;
-        if (next < 0 || next >= resolved.user.length) return;
-        dispatch(reorderVibratoPreset({ id: preset.id, toIndex: next }));
+        if (next < 0 || next >= list.length) return;
+        dispatch(
+            isSystem
+                ? reorderBuiltinVibratoPreset({ id: preset.id, toIndex: next })
+                : reorderVibratoPreset({ id: preset.id, toIndex: next }),
+        );
         void dispatch(persistUiSettings());
     }
 
-    /** 用户预设各行的中线（视口 Y），按当前顺序 —— 拖拽落点据此判定。 */
-    const userPresetRowCenters = useCallback((): number[] => {
-        const container = userListRef.current;
+    /** 某一组预设各行的中线（视口 Y），按当前顺序 —— 拖拽落点据此判定。 */
+    const presetRowCenters = useCallback((group: PresetGroup): number[] => {
+        const container = group === "system" ? systemListRef.current : userListRef.current;
         if (!container) return [];
         return Array.from(container.querySelectorAll<HTMLElement>("[data-preset-row]")).map(
             (row) => {
@@ -555,14 +584,15 @@ export function VibratoPresetDialog({
             const start = presetDragStartRef.current;
             if (!start) return;
             const next = {
+                group: start.group,
                 id: start.id,
                 fromIndex: start.fromIndex,
-                insertionIndex: reorderInsertionIndex(userPresetRowCenters(), clientY),
+                insertionIndex: reorderInsertionIndex(presetRowCenters(start.group), clientY),
             };
             presetDragRef.current = next;
             setPresetDrag(next);
         },
-        [userPresetRowCenters],
+        [presetRowCenters],
     );
 
     /**
@@ -576,6 +606,7 @@ export function VibratoPresetDialog({
         (
             preset: VibratoPreset,
             index: number,
+            group: PresetGroup,
             event: { button: number; clientY: number; target: EventTarget | null },
         ) => {
             if (event.button !== 0) return;
@@ -583,6 +614,7 @@ export function VibratoPresetDialog({
             if (target?.closest("button")) return;
             suppressPresetClickRef.current = false;
             presetDragStartRef.current = {
+                group,
                 id: preset.id,
                 fromIndex: index,
                 pointerY: event.clientY,
@@ -665,7 +697,12 @@ export function VibratoPresetDialog({
             stopAutoScroll();
             if (!start || !drag) return;
             const toIndex = reorderTargetIndex(drag.insertionIndex, drag.fromIndex);
-            dispatch(reorderVibratoPreset({ id: drag.id, toIndex }));
+            // 两组各自排序：系统预设的顺序以 id 列表持久化，用户预设直接排数组。
+            dispatch(
+                drag.group === "system"
+                    ? reorderBuiltinVibratoPreset({ id: drag.id, toIndex })
+                    : reorderVibratoPreset({ id: drag.id, toIndex }),
+            );
             void dispatch(persistUiSettings());
         };
         window.addEventListener("pointermove", onMove);
@@ -707,7 +744,9 @@ export function VibratoPresetDialog({
               const target = presetMenu.preset;
               const targetDisabled = session.disabledVibratoPresetIds.includes(target.id);
               const targetIsBuiltin = isBuiltinVibratoPresetId(target.id);
-              const userIndex = resolved.user.findIndex((preset) => preset.id === target.id);
+              // 两组各自排序：系统预设排在 resolved.system 里，自定义排在 resolved.user 里。
+              const groupList = targetIsBuiltin ? resolved.system : resolved.user;
+              const groupIndex = groupList.findIndex((preset) => preset.id === target.id);
               return [
                   {
                       key: "toggle-enabled",
@@ -723,22 +762,22 @@ export function VibratoPresetDialog({
                       checked: session.activeVibratoPresetId === target.id,
                       onSelect: () => activatePreset(target),
                   },
-                  // 上移 / 下移：列表现在靠拖拽排序，这里是**键盘可达的等价操作**
-                  // —— 只为了拖拽就砍掉非指针用户的路子，代价太大。
-                  ...(targetIsBuiltin || userIndex < 0
+                  // 上移 / 下移：列表靠拖拽排序，这里是**键盘可达的等价操作**
+                  // —— 只为了拖拽就砍掉非指针用户的路子，代价太大。两组都可排。
+                  ...(groupIndex < 0
                       ? []
                       : [
                             {
                                 key: "move-up",
                                 label: t("vibrato_manager_move_up"),
                                 separatorBefore: true,
-                                disabled: userIndex === 0,
+                                disabled: groupIndex === 0,
                                 onSelect: () => movePreset(target, -1),
                             },
                             {
                                 key: "move-down",
                                 label: t("vibrato_manager_move_down"),
-                                disabled: userIndex === resolved.user.length - 1,
+                                disabled: groupIndex === groupList.length - 1,
                                 onSelect: () => movePreset(target, 1),
                             },
                         ]),
@@ -950,25 +989,73 @@ export function VibratoPresetDialog({
                                     <span className="hs-type-muted">
                                         {t("vibrato_manager_group_system")}
                                     </span>
-                                    {resolved.system.map((preset) => (
-                                        <PresetRow
-                                            key={preset.id}
-                                            preset={preset}
-                                            selected={draft?.id === preset.id}
-                                            active={session.activeVibratoPresetId === preset.id}
-                                            enabled={
-                                                !session.disabledVibratoPresetIds.includes(
-                                                    preset.id,
-                                                )
-                                            }
-                                            onSelect={() => selectPreset(preset)}
-                                            onActivate={() => activatePreset(preset)}
-                                            onToggleEnabled={() => togglePresetEnabled(preset)}
-                                            onContextMenu={(x, y) =>
-                                                setPresetMenu({ x, y, preset })
-                                            }
-                                        />
-                                    ))}
+                                    {/* 系统预设同样可拖拽排序（顺序以 id 列表持久化）。
+                                        只在本组内换位，不会与下面的自定义预设混排。 */}
+                                    <Flex direction="column" gap="1" ref={systemListRef}>
+                                        {resolved.system.map((preset, index) => (
+                                            <Fragment key={preset.id}>
+                                                {presetDrag?.group === "system" &&
+                                                presetDrag.insertionIndex === index ? (
+                                                    <Box
+                                                        aria-hidden
+                                                        className="rounded-full bg-qt-accent"
+                                                        style={{ height: 2 }}
+                                                    />
+                                                ) : null}
+                                                <Box
+                                                    data-preset-row={preset.id}
+                                                    style={{
+                                                        opacity:
+                                                            presetDrag?.group === "system" &&
+                                                            presetDrag.id === preset.id
+                                                                ? 0.4
+                                                                : undefined,
+                                                    }}
+                                                >
+                                                    <PresetRow
+                                                        preset={preset}
+                                                        selected={draft?.id === preset.id}
+                                                        active={
+                                                            session.activeVibratoPresetId ===
+                                                            preset.id
+                                                        }
+                                                        enabled={
+                                                            !session.disabledVibratoPresetIds.includes(
+                                                                preset.id,
+                                                            )
+                                                        }
+                                                        reorderable
+                                                        onSelect={() =>
+                                                            handlePresetRowClick(preset)
+                                                        }
+                                                        onActivate={() => activatePreset(preset)}
+                                                        onToggleEnabled={() =>
+                                                            togglePresetEnabled(preset)
+                                                        }
+                                                        onContextMenu={(x, y) =>
+                                                            setPresetMenu({ x, y, preset })
+                                                        }
+                                                        onDragPointerDown={(event) =>
+                                                            beginPresetDrag(
+                                                                preset,
+                                                                index,
+                                                                "system",
+                                                                event,
+                                                            )
+                                                        }
+                                                    />
+                                                </Box>
+                                            </Fragment>
+                                        ))}
+                                        {presetDrag?.group === "system" &&
+                                        presetDrag.insertionIndex >= resolved.system.length ? (
+                                            <Box
+                                                aria-hidden
+                                                className="rounded-full bg-qt-accent"
+                                                style={{ height: 2 }}
+                                            />
+                                        ) : null}
+                                    </Flex>
 
                                     <Box pt="2">
                                         <span className="hs-type-muted">
@@ -987,7 +1074,8 @@ export function VibratoPresetDialog({
                                         <Flex direction="column" gap="1" ref={userListRef}>
                                             {resolved.user.map((preset, index) => (
                                                 <Fragment key={preset.id}>
-                                                    {presetDrag?.insertionIndex === index ? (
+                                                    {presetDrag?.group === "user" &&
+                                                    presetDrag.insertionIndex === index ? (
                                                         <Box
                                                             aria-hidden
                                                             className="rounded-full bg-qt-accent"
@@ -998,7 +1086,8 @@ export function VibratoPresetDialog({
                                                         data-preset-row={preset.id}
                                                         style={{
                                                             opacity:
-                                                                presetDrag?.id === preset.id
+                                                                presetDrag?.group === "user" &&
+                                                                presetDrag.id === preset.id
                                                                     ? 0.4
                                                                     : undefined,
                                                         }}
@@ -1032,6 +1121,7 @@ export function VibratoPresetDialog({
                                                                 beginPresetDrag(
                                                                     preset,
                                                                     index,
+                                                                    "user",
                                                                     event,
                                                                 )
                                                             }
@@ -1039,7 +1129,7 @@ export function VibratoPresetDialog({
                                                     </Box>
                                                 </Fragment>
                                             ))}
-                                            {presetDrag &&
+                                            {presetDrag?.group === "user" &&
                                             presetDrag.insertionIndex >= resolved.user.length ? (
                                                 <Box
                                                     aria-hidden

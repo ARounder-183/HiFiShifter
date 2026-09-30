@@ -266,6 +266,13 @@ export interface UiSettings {
      * 停用只影响本机的工具栏列表与拖拽中的循环切换，因此不进预设文件、只进设置。
      */
     disabledVibratoPresetIds?: string[];
+    /**
+     * 系统预设的自定义顺序（id 列表）。空 / 缺席 = 出厂顺序。
+     *
+     * 系统预设在代码里，要允许用户排序就只能把顺序记在设置里；缺项与无效项在读取时
+     * 兜底，因此新增出厂预设不需要迁移。
+     */
+    builtinVibratoPresetOrder?: string[];
 }
 
 /** 导入声道处理策略的总模式。 */

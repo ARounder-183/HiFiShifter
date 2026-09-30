@@ -109,6 +109,7 @@ export const persistUiSettings = createAsyncThunk(
             vibratoPresets: s.vibratoPresets,
             activeVibratoPresetId: s.activeVibratoPresetId,
             disabledVibratoPresetIds: s.disabledVibratoPresetIds,
+            builtinVibratoPresetOrder: s.builtinVibratoPresetOrder,
         });
     },
 );

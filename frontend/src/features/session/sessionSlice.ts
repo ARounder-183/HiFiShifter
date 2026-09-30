@@ -159,8 +159,11 @@ import {
 import {
     activeIdAfterRemoval,
     cycleVibratoPresetId,
+    effectiveBuiltinPresetOrder,
     enabledVibratoPresets,
+    reorderBuiltinPresetIds,
     reorderUserVibratoPresets,
+    resolveVibratoPresets,
 } from "../../features/vibrato/vibratoPresetList";
 import {
     DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
@@ -663,6 +666,14 @@ export interface SessionState {
      * 工具栏列表与循环切换，因此单独记一份 id 名单最干净。
      */
     disabledVibratoPresetIds: string[];
+    /**
+     * 系统预设的自定义顺序（id 列表）。
+     *
+     * 【为什么单独存】系统预设在代码里（`systemPresets.ts` 的出厂顺序），要允许用户
+     * 排序就只能把顺序记在设置里。空数组 = 用出厂顺序；缺项（新版本新增的出厂预设）
+     * 与无效项（旧版本删过的）由 `effectiveBuiltinPresetOrder` 兜底，因此不需要迁移。
+     */
+    builtinVibratoPresetOrder: string[];
 
     project: {
         name: string;
@@ -2199,6 +2210,7 @@ const initialState: SessionState = {
     vibratoPresets: [],
     activeVibratoPresetId: DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
     disabledVibratoPresetIds: [],
+    builtinVibratoPresetOrder: [],
     project: {
         name: "Untitled",
         path: null,
@@ -2666,6 +2678,19 @@ const sessionSlice = createSlice({
                 action.payload.toIndex,
             );
         },
+        /**
+         * 移动**系统预设**的位置。
+         *
+         * 顺序以 id 列表持久化：先取当前有效顺序（含出厂顺序兜底），再移动一项后整体
+         * 写回 —— 这样"从未排过序"与"排过序"最终都落在同一份完整列表上。
+         */
+        reorderBuiltinVibratoPreset(state, action: PayloadAction<{ id: string; toIndex: number }>) {
+            state.builtinVibratoPresetOrder = reorderBuiltinPresetIds(
+                effectiveBuiltinPresetOrder(state.builtinVibratoPresetOrder),
+                action.payload.id,
+                action.payload.toIndex,
+            );
+        },
         /** 设定当前活动颤音预设。 */
         setActiveVibratoPreset(state, action: PayloadAction<string>) {
             state.activeVibratoPresetId = action.payload;
@@ -2689,11 +2714,15 @@ const sessionSlice = createSlice({
          * 同时服务"上一个"与"下一个"。被停用的预设**跳过**。
          */
         cycleActiveVibratoPreset(state, action: PayloadAction<1 | -1>) {
-            const all = enabledVibratoPresets(
-                [...SYSTEM_VIBRATO_PRESETS, ...state.vibratoPresets],
-                state.disabledVibratoPresetIds,
+            const all = resolveVibratoPresets(
+                state.vibratoPresets,
+                state.builtinVibratoPresetOrder,
+            ).all;
+            const next = cycleVibratoPresetId(
+                enabledVibratoPresets(all, state.disabledVibratoPresetIds),
+                state.activeVibratoPresetId,
+                action.payload,
             );
-            const next = cycleVibratoPresetId(all, state.activeVibratoPresetId, action.payload);
             if (next) state.activeVibratoPresetId = next;
         },
         togglePlayheadZoom(state) {
@@ -3720,6 +3749,13 @@ const sessionSlice = createSlice({
                             ),
                         ),
                     ];
+                }
+                // 系统预设的自定义顺序：同样只收字符串；缺项 / 无效项由
+                // `effectiveBuiltinPresetOrder` 兜底，这里不必校验成员合法性。
+                if (Array.isArray(s.builtinVibratoPresetOrder)) {
+                    state.builtinVibratoPresetOrder = s.builtinVibratoPresetOrder.filter(
+                        (id: unknown): id is string => typeof id === "string" && id.length > 0,
+                    );
                 }
             })
 
@@ -6473,6 +6509,7 @@ export const {
     upsertVibratoPreset,
     removeVibratoPreset,
     reorderVibratoPreset,
+    reorderBuiltinVibratoPreset,
     setActiveVibratoPreset,
     cycleActiveVibratoPreset,
     toggleVibratoPresetEnabled,

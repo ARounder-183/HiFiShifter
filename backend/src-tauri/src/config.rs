@@ -384,6 +384,9 @@ pub struct UiSettings {
     /// 只影响前端的工具栏列表与拖拽中的循环切换，后端同样只做透传存储。
     #[serde(default)]
     pub disabled_vibrato_preset_ids: Vec<String>,
+    /// 系统预设的自定义顺序（id 列表）。空 = 出厂顺序。
+    #[serde(default)]
+    pub builtin_vibrato_preset_order: Vec<String>,
     #[serde(default)]
     pub ignore_grouping: bool,
     /// 波纹编辑（自动跟进）模式：off / track / all（对应 REAPER 的 Ripple Editing）。
@@ -1467,6 +1470,7 @@ impl Default for UiSettings {
             // None = "还没选过"，由前端回落到出厂默认（直线）。
             active_vibrato_preset_id: None,
             disabled_vibrato_preset_ids: Vec::new(),
+            builtin_vibrato_preset_order: Vec::new(),
             ignore_grouping: false,
             ripple_mode: default_ripple_mode(),
 

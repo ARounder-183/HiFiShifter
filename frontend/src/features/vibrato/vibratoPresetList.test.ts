@@ -9,8 +9,11 @@ import {
 import {
     activeIdAfterRemoval,
     cycleVibratoPresetId,
+    effectiveBuiltinPresetOrder,
     enabledVibratoPresets,
     findVibratoPreset,
+    moveItemToIndex,
+    reorderBuiltinPresetIds,
     reorderUserVibratoPresets,
     resolveActiveVibratoPreset,
     resolveVibratoPresets,
@@ -275,5 +278,73 @@ describe("enabledVibratoPresets（停用过滤）", () => {
         const before = [...all];
         enabledVibratoPresets(all, ["custom_a"]);
         expect(all).toEqual(before);
+    });
+});
+
+describe("effectiveBuiltinPresetOrder（系统预设顺序）", () => {
+    const defaultIds = SYSTEM_VIBRATO_PRESETS.map((preset) => preset.id);
+
+    test("没有自定义顺序时就是出厂顺序", () => {
+        expect(effectiveBuiltinPresetOrder([])).toEqual(defaultIds);
+        expect(effectiveBuiltinPresetOrder(null)).toEqual(defaultIds);
+        expect(effectiveBuiltinPresetOrder(undefined)).toEqual(defaultIds);
+    });
+
+    test("按持久化顺序取有效项，未提到的按出厂顺序补在后面", () => {
+        const moved = [builtinVibratoPresetId("deep"), builtinVibratoPresetId("straight")];
+        const result = effectiveBuiltinPresetOrder(moved);
+        expect(result.slice(0, 2)).toEqual(moved);
+        expect(result).toHaveLength(defaultIds.length);
+        expect(new Set(result)).toEqual(new Set(defaultIds));
+    });
+
+    test("无效项与重复项被剔除（旧配置 / 手改配置都能收敛）", () => {
+        const soft = builtinVibratoPresetId("soft");
+        const result = effectiveBuiltinPresetOrder([soft, "builtin.gone", soft]);
+        expect(result[0]).toBe(soft);
+        expect(result).toHaveLength(defaultIds.length);
+        expect(result.filter((id) => id === soft)).toHaveLength(1);
+    });
+});
+
+describe("reorderBuiltinPresetIds / moveItemToIndex", () => {
+    test("移动到指定位置", () => {
+        expect(reorderBuiltinPresetIds(["a", "b", "c"], "a", 2)).toEqual(["b", "c", "a"]);
+        expect(reorderBuiltinPresetIds(["a", "b", "c"], "c", 0)).toEqual(["c", "a", "b"]);
+    });
+
+    test("越界钳制；未知 id 原样返回", () => {
+        expect(reorderBuiltinPresetIds(["a", "b", "c"], "a", 99)).toEqual(["b", "c", "a"]);
+        expect(reorderBuiltinPresetIds(["a", "b", "c"], "zz", 0)).toEqual(["a", "b", "c"]);
+    });
+
+    test("moveItemToIndex 对空数组与无效下标安全（两份排序共用它）", () => {
+        expect(moveItemToIndex([], 0, 0)).toEqual([]);
+        expect(moveItemToIndex(["a"], 0, 0)).toEqual(["a"]);
+        expect(moveItemToIndex(["a", "b"], -1, 0)).toEqual(["a", "b"]);
+        expect(moveItemToIndex(["a", "b"], 5, 0)).toEqual(["a", "b"]);
+    });
+});
+
+describe("resolveVibratoPresets 的自定义系统顺序", () => {
+    test("默认顺序返回那份稳定数组（React 依赖比较靠它）", () => {
+        expect(resolveVibratoPresets([]).system).toBe(SYSTEM_VIBRATO_PRESETS);
+        expect(resolveVibratoPresets([], []).system).toBe(SYSTEM_VIBRATO_PRESETS);
+        expect(
+            resolveVibratoPresets(
+                [],
+                SYSTEM_VIBRATO_PRESETS.map((preset) => preset.id),
+            ).system,
+        ).toBe(SYSTEM_VIBRATO_PRESETS);
+    });
+
+    test("自定义顺序生效，all 里的系统段也跟着变", () => {
+        const order = [SYSTEM_VIBRATO_PRESETS[3].id, SYSTEM_VIBRATO_PRESETS[0].id];
+        const resolved = resolveVibratoPresets([], order);
+        expect(resolved.system[0].id).toBe(order[0]);
+        expect(resolved.system[1].id).toBe(order[1]);
+        expect(resolved.all.slice(0, 2).map((preset) => preset.id)).toEqual(order);
+        // 系统段整体仍是同一批预设，只是顺序不同。
+        expect(resolved.system).toHaveLength(SYSTEM_VIBRATO_PRESETS.length);
     });
 });
