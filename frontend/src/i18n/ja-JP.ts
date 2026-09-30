@@ -1988,7 +1988,6 @@ export const jaJP = {
     vibrato_manager_move_down: "下へ",
     vibrato_manager_open: "プリセットを管理...",
 
-    vibrato_menu_presets: "ビブラートプリセット",
     vibrato_apply_presets: "プリセット",
     vibrato_apply_preview: "選択範囲に適用",
     vibrato_apply_preview_empty: "範囲を選択すると結果をプレビューできます。",

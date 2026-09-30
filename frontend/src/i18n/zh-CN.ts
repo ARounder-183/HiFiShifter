@@ -1918,7 +1918,6 @@ export const zhCN = {
     vibrato_manager_move_down: "下移",
     vibrato_manager_open: "管理预设...",
 
-    vibrato_menu_presets: "颤音预设",
     vibrato_apply_presets: "预设",
     vibrato_apply_preview: "套用到选区",
     vibrato_apply_preview_empty: "选中一段后可在此预览效果。",

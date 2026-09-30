@@ -1920,7 +1920,6 @@ export const zhTW = {
     vibrato_manager_move_down: "下移",
     vibrato_manager_open: "管理預設...",
 
-    vibrato_menu_presets: "顫音預設",
     vibrato_apply_presets: "預設",
     vibrato_apply_preview: "套用到選區",
     vibrato_apply_preview_empty: "選取一段後可在此預覽效果。",

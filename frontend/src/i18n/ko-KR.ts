@@ -1959,7 +1959,6 @@ export const koKR = {
     vibrato_manager_move_down: "아래로",
     vibrato_manager_open: "프리셋 관리...",
 
-    vibrato_menu_presets: "비브라토 프리셋",
     vibrato_apply_presets: "프리셋",
     vibrato_apply_preview: "선택 범위에 적용",
     vibrato_apply_preview_empty: "범위를 선택하면 결과를 미리 볼 수 있습니다.",

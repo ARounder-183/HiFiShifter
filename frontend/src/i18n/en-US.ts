@@ -1974,7 +1974,6 @@ export const enUS = {
     vibrato_manager_move_down: "Move down",
     vibrato_manager_open: "Manage presets...",
 
-    vibrato_menu_presets: "Vibrato preset",
     vibrato_apply_presets: "Preset",
     vibrato_apply_preview: "Applied to selection",
     vibrato_apply_preview_empty: "Select a range to preview the result.",
