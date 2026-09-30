@@ -7,7 +7,12 @@ import {
     computeVibratoDragAdjustment,
     createDragWorking,
     depthStepCentsFor,
+    matchedVibratoResetSlots,
+    resetVibratoDragDepth,
+    resetVibratoDragRate,
     resolveVibratoDragKeyboardAdjustment,
+    resolveVibratoMiddleClickReset,
+    resolveVibratoPairReset,
     resolveVibratoPresetSwitch,
     resolveVibratoSideButton,
     SIDE_BUTTON_BACK,
@@ -29,7 +34,8 @@ describe("createDragWorking", () => {
         expect(working.depthCents).toBe(42);
         expect(working.rateHz).toBe(6.5);
         expect(working.preset.id).toBe(p.id);
-        expect(working.adjusted).toBe(false);
+        expect(working.depthAdjusted).toBe(false);
+        expect(working.rateAdjusted).toBe(false);
     });
 
     test("起手不携带任何跨手势的调整", () => {
@@ -38,9 +44,10 @@ describe("createDragWorking", () => {
         expect(working.rateHz).toBe(6.5);
     });
 
-    test("调整标记初始为 false（未调整）", () => {
+    test("两个调整标记初始都为 false", () => {
         const working = createDragWorking(preset({ depthCents: 30 }));
-        expect(working.adjusted).toBe(false);
+        expect(working.depthAdjusted).toBe(false);
+        expect(working.rateAdjusted).toBe(false);
     });
 });
 
@@ -53,27 +60,92 @@ describe("switchDragPreset", () => {
         );
         expect(after.depthCents).toBe(55);
         expect(after.rateHz).toBe(4.5);
-        expect(after.adjusted).toBe(false);
+        expect(after.depthAdjusted).toBe(false);
+        expect(after.rateAdjusted).toBe(false);
         expect(after.preset.id).toBe("builtin.deep");
     });
 
-    test("调整过：深度与速率沿用本次手势的值（换音色不改幅度）", () => {
+    test("只调过振幅：振幅沿用、速率取新预设的值", () => {
         const before = {
             ...createDragWorking(preset({ depthCents: 40, rateHz: 5 })),
             depthCents: 90,
-            rateHz: 9,
-            adjusted: true,
+            depthAdjusted: true,
         };
         const after = switchDragPreset(
             before,
             preset({ id: "builtin.deep", depthCents: 55, rateHz: 4.5 }),
         );
-        // 两个量都继承 —— 用户只调了幅度时，速率也应保持这一笔一直在用的值。
+        expect(after.depthCents).toBe(90);
+        // 速率没调过 → 用新预设的速率（两者分别管理）。
+        expect(after.rateHz).toBe(4.5);
+        expect(after.depthAdjusted).toBe(true);
+        expect(after.rateAdjusted).toBe(false);
+        expect(after.preset.id).toBe("builtin.deep");
+    });
+
+    test("只调过速率：速率沿用、振幅取新预设的值", () => {
+        const before = {
+            ...createDragWorking(preset({ depthCents: 40, rateHz: 5 })),
+            rateHz: 9,
+            rateAdjusted: true,
+        };
+        const after = switchDragPreset(
+            before,
+            preset({ id: "builtin.deep", depthCents: 55, rateHz: 4.5 }),
+        );
+        expect(after.depthCents).toBe(55);
+        expect(after.rateHz).toBe(9);
+        expect(after.depthAdjusted).toBe(false);
+        expect(after.rateAdjusted).toBe(true);
+    });
+
+    test("两个都调过：两个都沿用", () => {
+        const before = {
+            ...createDragWorking(preset({ depthCents: 40, rateHz: 5 })),
+            depthCents: 90,
+            rateHz: 9,
+            depthAdjusted: true,
+            rateAdjusted: true,
+        };
+        const after = switchDragPreset(
+            before,
+            preset({ id: "builtin.deep", depthCents: 55, rateHz: 4.5 }),
+        );
         expect(after.depthCents).toBe(90);
         expect(after.rateHz).toBe(9);
-        expect(after.adjusted).toBe(true);
-        // 但波形等仍来自新预设。
-        expect(after.preset.id).toBe("builtin.deep");
+    });
+});
+
+describe("resetVibratoDragDepth / resetVibratoDragRate", () => {
+    test("重置振幅：回到预设自带深度并清掉振幅记录（速率记录不动）", () => {
+        const working = {
+            ...createDragWorking(preset({ depthCents: 40, rateHz: 5 })),
+            depthCents: 90,
+            rateHz: 9,
+            depthAdjusted: true,
+            rateAdjusted: true,
+        };
+        const after = resetVibratoDragDepth(working);
+        expect(after.depthCents).toBe(40);
+        expect(after.depthAdjusted).toBe(false);
+        // 频率那一路不受影响。
+        expect(after.rateHz).toBe(9);
+        expect(after.rateAdjusted).toBe(true);
+    });
+
+    test("重置速率：回到预设自带速率并清掉速率记录（振幅记录不动）", () => {
+        const working = {
+            ...createDragWorking(preset({ depthCents: 40, rateHz: 5 })),
+            depthCents: 90,
+            rateHz: 9,
+            depthAdjusted: true,
+            rateAdjusted: true,
+        };
+        const after = resetVibratoDragRate(working);
+        expect(after.rateHz).toBe(5);
+        expect(after.rateAdjusted).toBe(false);
+        expect(after.depthCents).toBe(90);
+        expect(after.depthAdjusted).toBe(true);
     });
 });
 
@@ -328,7 +400,13 @@ describe("resolveVibratoPresetSwitch", () => {
 describe("buildDragVibratoCurve", () => {
     test("工作副本的深度 / 速率覆盖预设自身的值", () => {
         const p = preset({ depthCents: 100, rateHz: 5, attackMs: 0, releaseMs: 0 });
-        const working = { preset: p, depthCents: 10, rateHz: 5, adjusted: true };
+        const working = {
+            preset: p,
+            depthCents: 10,
+            rateHz: 5,
+            depthAdjusted: true,
+            rateAdjusted: false,
+        };
         const shallow = buildDragVibratoCurve({
             working,
             startFrame: 0,
@@ -348,7 +426,13 @@ describe("buildDragVibratoCurve", () => {
         // 预设是"整段 2 个周期"，但拖拽只给了 0.2 秒；若按周期数均分，
         // 会得到 10 Hz。按 Hz 则应当是设定值附近。
         const p = preset({ rateMode: "cycles", cycles: 2, rateHz: 5, attackMs: 0, releaseMs: 0 });
-        const working = { preset: p, depthCents: 50, rateHz: 5, adjusted: false };
+        const working = {
+            preset: p,
+            depthCents: 50,
+            rateHz: 5,
+            depthAdjusted: false,
+            rateAdjusted: false,
+        };
         const built = buildDragVibratoCurve({
             working,
             startFrame: 0,
@@ -371,7 +455,8 @@ describe("buildDragVibratoCurve", () => {
             preset: preset({ depthCents: 37, attackMs: 0, releaseMs: 0 }),
             depthCents: 37,
             rateHz: 5,
-            adjusted: false,
+            depthAdjusted: false,
+            rateAdjusted: false,
         };
         const built = buildDragVibratoCurve({
             working,
@@ -418,5 +503,107 @@ describe("resolveVibratoSideButton", () => {
         const bothForward = 1 | SIDE_BUTTON_FORWARD_MASK;
         expect(bothBack & 1).toBe(1);
         expect(bothForward & 1).toBe(1);
+    });
+});
+
+describe("双键重置：槽命中与配对", () => {
+    const bindings = {
+        presetPrev: kb({ key: "," }),
+        presetNext: kb({ key: "." }),
+        amplitudeIncrease: kb({ key: "arrowup" }),
+        amplitudeDecrease: kb({ key: "arrowdown" }),
+        frequencyIncrease: kb({ key: "arrowleft" }),
+        frequencyDecrease: kb({ key: "arrowright" }),
+    };
+    const event = (key: string, extra: Partial<KeyboardEvent> = {}) =>
+        ({
+            key,
+            code: key,
+            ctrlKey: false,
+            shiftKey: false,
+            altKey: false,
+            metaKey: false,
+            ...extra,
+        }) as KeyboardEvent;
+
+    test("命中单个槽", () => {
+        expect(matchedVibratoResetSlots(event("arrowup"), bindings)).toEqual(["amplitudeIncrease"]);
+        expect(matchedVibratoResetSlots(event(","), bindings)).toEqual(["presetPrev"]);
+    });
+
+    test("未命中返回空数组", () => {
+        expect(matchedVibratoResetSlots(event("q"), bindings)).toEqual([]);
+    });
+
+    test("同一个键绑两个动作时一次命中两槽（该配置下双键立刻成立）", () => {
+        const same = { ...bindings, presetNext: kb({ key: "," }) };
+        expect(matchedVibratoResetSlots(event(","), same)).toEqual(["presetPrev", "presetNext"]);
+    });
+
+    test("「无」绑定与 modifierOnly 绑定都不参与", () => {
+        const none = { ...bindings, amplitudeIncrease: kb({ key: "__none__" }) };
+        expect(matchedVibratoResetSlots(event("__none__"), none)).toEqual([]);
+        const modOnly = {
+            ...bindings,
+            amplitudeIncrease: kb({ key: "alt", modifierOnly: true, alt: true }),
+        };
+        expect(matchedVibratoResetSlots(event("alt", { altKey: true }), modOnly)).toEqual([]);
+    });
+
+    test("配对意图：一对齐了才算，未齐返回 null", () => {
+        expect(resolveVibratoPairReset(new Set())).toBeNull();
+        expect(resolveVibratoPairReset(new Set(["presetPrev"]))).toBeNull();
+        expect(resolveVibratoPairReset(new Set(["presetPrev", "presetNext"]))).toBe("straight");
+        expect(resolveVibratoPairReset(new Set(["amplitudeIncrease", "amplitudeDecrease"]))).toBe(
+            "depth",
+        );
+        expect(resolveVibratoPairReset(new Set(["frequencyIncrease", "frequencyDecrease"]))).toBe(
+            "rate",
+        );
+    });
+
+    test("三对全按满时优先级：预设 > 振幅 > 频率", () => {
+        const all: ReadonlySet<
+            | "presetPrev"
+            | "presetNext"
+            | "amplitudeIncrease"
+            | "amplitudeDecrease"
+            | "frequencyIncrease"
+            | "frequencyDecrease"
+        > = new Set([
+            "presetPrev",
+            "presetNext",
+            "amplitudeIncrease",
+            "amplitudeDecrease",
+            "frequencyIncrease",
+            "frequencyDecrease",
+        ]);
+        expect(resolveVibratoPairReset(all)).toBe("straight");
+        const ampAndFreq = new Set<
+            "amplitudeIncrease" | "amplitudeDecrease" | "frequencyIncrease" | "frequencyDecrease"
+        >(["amplitudeIncrease", "amplitudeDecrease", "frequencyIncrease", "frequencyDecrease"]);
+        expect(resolveVibratoPairReset(ampAndFreq)).toBe("depth");
+    });
+});
+
+describe("resolveVibratoMiddleClickReset", () => {
+    const freqKb = kb({ key: "alt", modifierOnly: true, alt: true });
+    const event = (alt: boolean) => ({
+        altKey: alt,
+        ctrlKey: false,
+        shiftKey: false,
+        metaKey: false,
+    });
+
+    test("默认（未按频率修饰键）→ 重置振幅", () => {
+        expect(resolveVibratoMiddleClickReset(event(false), freqKb)).toBe("depth");
+    });
+
+    test("按住频率修饰键 → 重置频率", () => {
+        expect(resolveVibratoMiddleClickReset(event(true), freqKb)).toBe("rate");
+    });
+
+    test("频率绑定为「无」时视为频率（与滚轮的判定同源）", () => {
+        expect(resolveVibratoMiddleClickReset(event(false), kb({ key: "__none__" }))).toBe("rate");
     });
 });

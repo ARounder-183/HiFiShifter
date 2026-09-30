@@ -135,17 +135,28 @@ import {
     buildDragVibratoCurve,
     computeVibratoDragAdjustment,
     createDragWorking,
+    matchedVibratoResetSlots,
+    resetVibratoDragDepth,
+    resetVibratoDragRate,
     resolveVibratoDragKeyboardAdjustment,
+    resolveVibratoMiddleClickReset,
+    resolveVibratoPairReset,
     resolveVibratoPresetSwitch,
     resolveVibratoSideButton,
+    SIDE_BUTTON_BACK_MASK,
+    SIDE_BUTTON_FORWARD_MASK,
     switchDragPreset,
     type VibratoAdjustTarget,
+    type VibratoDragResetIntent,
+    type VibratoDragResetBindings,
+    type VibratoDragResetSlot,
     type VibratoDragWorking,
 } from "./vibratoDragAdjust";
 import {
     cycleVibratoPresetId,
     findVibratoPreset,
 } from "../../../features/vibrato/vibratoPresetList";
+import { builtinVibratoPresetId } from "../../../features/vibrato/systemPresets";
 import { vibratoSeedForPreset } from "../../../features/vibrato/vibratoSeed";
 import type { VibratoPreset } from "../../../features/vibrato/vibratoTypes";
 import {
@@ -847,6 +858,14 @@ export function usePianoRollInteractions(args: {
         /** 不规则度的确定性种子：同一次拖拽内保持恒定，预览与提交才逐帧一致。 */
         seed: number;
     } | null>(null);
+    /**
+     * 拖拽期间**当前按住**的颤音绑定槽（用于识别"双键同时按下"）。
+     *
+     * 按绑定槽而不是键位记录：用户可以把任一动作改绑到任意键。keydown 加入、
+     * keyup 移除；拖拽结束与窗口失焦时整体清空，避免某次 keyup 被漏掉之后残留，
+     * 让后续的单击被误判成"双键"。
+     */
+    const vibratoResetSlotsRef = useRef<Set<VibratoDragResetSlot>>(new Set());
     // Track last pointer position so we can synthesize pointermove when modifiers change
     const lastPointerPosRef = useRef<{
         clientX: number;
@@ -1323,7 +1342,8 @@ export function usePianoRollInteractions(args: {
                 presetId: vib.working.preset.id,
                 depthCents: vib.working.depthCents,
                 rateHz: vib.working.rateHz,
-                adjusted: vib.working.adjusted,
+                // HUD 的"已调整"是聚合标记：任一项被调过就点亮。
+                adjusted: vib.working.depthAdjusted || vib.working.rateAdjusted,
                 clientX,
                 clientY,
             });
@@ -1364,7 +1384,9 @@ export function usePianoRollInteractions(args: {
                 ...vib.working,
                 depthCents: next.depthCents,
                 rateHz: next.rateHz,
-                adjusted: true,
+                // 只标记被调的那一个：另一个在切换预设时仍取新预设自带的值。
+                depthAdjusted: vib.working.depthAdjusted || input.target === "depth",
+                rateAdjusted: vib.working.rateAdjusted || input.target === "rate",
             };
 
             repaintVibratoDragPreview(input.shiftHeld);
@@ -1421,8 +1443,54 @@ export function usePianoRollInteractions(args: {
         [dispatch, switchVibratoDragPreset],
     );
 
-    /** 拖拽结束时的收尾上报（面板据此清掉 HUD）。 */
+    /**
+     * 双键重置：把本次手势的某个量（或整个预设）拉回已知状态。
+     *
+     * - `straight`：把当前预设换成「直线」，并清掉两条调整记录 —— 直接画一条直线，
+     *   不必先切走再切回。与其它预设切换一样**持久化**（它换的就是活动预设）。
+     * - `depth` / `rate`：撤销本次手势对该量的微调（回到预设自带值）并清掉记录，
+     *   于是下一次切换预设时该量会取新预设自己的值。
+     */
+    const applyVibratoReset = useCallback(
+        (intent: VibratoDragResetIntent, clientX?: number, clientY?: number): boolean => {
+            const vib = vibratoStateRef.current;
+            if (!vib) return false;
+
+            if (intent === "straight") {
+                const straight = findVibratoPreset(
+                    vibratoPresetList,
+                    builtinVibratoPresetId("straight"),
+                );
+                if (straight) {
+                    dispatch(setActiveVibratoPreset(straight.id));
+                    void dispatch(persistUiSettings());
+                    vib.working = createDragWorking(straight);
+                    vib.seed = vibratoSeedForPreset(straight);
+                } else {
+                    // 找不到直线预设（理论上不会）：至少把深度归零并清记录。
+                    vib.working = {
+                        ...vib.working,
+                        depthCents: 0,
+                        depthAdjusted: false,
+                        rateAdjusted: false,
+                    };
+                }
+            } else if (intent === "depth") {
+                vib.working = resetVibratoDragDepth(vib.working);
+            } else {
+                vib.working = resetVibratoDragRate(vib.working);
+            }
+
+            repaintVibratoDragPreview(vib.shiftHeld);
+            if (clientX != null && clientY != null) reportVibratoDragState(clientX, clientY);
+            return true;
+        },
+        [dispatch, vibratoPresetList, repaintVibratoDragPreview, reportVibratoDragState],
+    );
+
+    /** 拖拽结束时的收尾：清掉双键记录并上报（面板据此清掉 HUD）。 */
     const finishVibratoDrag = useCallback(() => {
+        vibratoResetSlotsRef.current.clear();
         if (!onVibratoDragEnd) return;
         onVibratoDragEnd();
     }, [onVibratoDragEnd]);
@@ -2147,8 +2215,33 @@ export function usePianoRollInteractions(args: {
     );
 
     useEffect(() => {
+        const resetBindings: VibratoDragResetBindings = {
+            presetPrev: vibratoPresetPrevKb,
+            presetNext: vibratoPresetNextKb,
+            amplitudeIncrease: vibratoDragAmplitudeIncreaseKb,
+            amplitudeDecrease: vibratoDragAmplitudeDecreaseKb,
+            frequencyIncrease: vibratoDragFrequencyIncreaseKb,
+            frequencyDecrease: vibratoDragFrequencyDecreaseKb,
+        };
+
         const onKeyDown = (e: globalThis.KeyboardEvent) => {
             if (!vibratoStateRef.current) return;
+
+            // ── 双键重置 ──────────────────────────────────────────────
+            // 先登记这次按住了哪些绑定槽，再看是否凑成一对。放在最前是因为凑成
+            // 一对时本次按键就是"重置"，不该再落进下面的单键切换 / 调参分支 ——
+            // 否则会先切一次预设、再重置，两个动作叠在一起。
+            const matched = matchedVibratoResetSlots(e, resetBindings, paramFineAdjustKb);
+            for (const slot of matched) vibratoResetSlotsRef.current.add(slot);
+            if (matched.length > 0 && !e.repeat) {
+                const intent = resolveVibratoPairReset(vibratoResetSlotsRef.current);
+                if (intent) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    applyVibratoReset(intent);
+                    return;
+                }
+            }
 
             // 预设切换先判：`,` / `.` 的命中与深度 / 速率的绑定互斥（默认值
             // 不重叠，但用户可能把它们绑到同一个键上），先把离散跳转判掉。
@@ -2195,12 +2288,28 @@ export function usePianoRollInteractions(args: {
             });
         };
 
+        // 松键即注销该槽。不依赖拖拽状态：拖拽可能在两次按键之间结束，
+        // 那时仍要把槽清掉（拖拽结束本身也会整体清空，这里是兜底）。
+        const onKeyUp = (e: globalThis.KeyboardEvent) => {
+            const matched = matchedVibratoResetSlots(e, resetBindings, paramFineAdjustKb);
+            for (const slot of matched) vibratoResetSlotsRef.current.delete(slot);
+        };
+
+        // 失焦（切到别的窗口）时按键状态会丢失：整体清空，避免残留把后续的
+        // 单击误判成"双键"。
+        const onBlur = () => vibratoResetSlotsRef.current.clear();
+
         window.addEventListener("keydown", onKeyDown, true);
+        window.addEventListener("keyup", onKeyUp, true);
+        window.addEventListener("blur", onBlur);
         return () => {
             window.removeEventListener("keydown", onKeyDown, true);
+            window.removeEventListener("keyup", onKeyUp, true);
+            window.removeEventListener("blur", onBlur);
         };
     }, [
         applyVibratoDragAdjustment,
+        applyVibratoReset,
         switchVibratoPresetPersistently,
         vibratoDragAmplitudeIncreaseKb,
         vibratoDragAmplitudeDecreaseKb,
@@ -5146,11 +5255,23 @@ export function usePianoRollInteractions(args: {
                     // 事件里"哪个键变了"（侧键是 3 / 4），此时左键仍在按住，因此
                     // 用位掩码确认"这次确实是拖拽中按下"（左键位 1 仍在）。
                     if (isVibratoTool) {
+                        // 两个侧键**同时**按下 = 把当前预设重置到直线（并清掉两条
+                        // 调整记录）。`buttons` 里两位都在，说明两次按下有重叠。
+                        const bothSideButtons =
+                            (ev.buttons & SIDE_BUTTON_BACK_MASK) !== 0 &&
+                            (ev.buttons & SIDE_BUTTON_FORWARD_MASK) !== 0;
                         const direction = resolveVibratoSideButton(ev.button);
-                        if (direction !== null) {
+                        if (direction !== null || bothSideButtons) {
                             if ((ev.buttons & 1) !== 1) return;
                             ev.preventDefault();
                             ev.stopPropagation();
+                            if (bothSideButtons) {
+                                applyVibratoReset("straight", ev.clientX, ev.clientY);
+                                return;
+                            }
+                            // 走到这里 `direction` 必非 null（仅 bothSideButtons 分支
+                            // 才可能两者皆空，而那已在上面返回）。
+                            if (direction === null) return;
                             const nextId = cycleVibratoPresetId(
                                 vibratoPresetList,
                                 vibratoStateRef.current?.working.preset.id ?? null,
@@ -5160,6 +5281,20 @@ export function usePianoRollInteractions(args: {
                             if (next) {
                                 switchVibratoPresetPersistently(next, ev.clientX, ev.clientY);
                             }
+                            return;
+                        }
+
+                        // 中键：按**当前滚轮所处的那一路**重置（默认是振幅；按住
+                        // 频率修饰键时是频率）。与滚轮共用同一套修饰键判定。
+                        if (ev.button === 1) {
+                            if ((ev.buttons & 1) !== 1) return;
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            applyVibratoReset(
+                                resolveVibratoMiddleClickReset(ev, vibratoFrequencyAdjustKb),
+                                ev.clientX,
+                                ev.clientY,
+                            );
                             return;
                         }
                     }
@@ -5491,10 +5626,12 @@ export function usePianoRollInteractions(args: {
             installDragDirectionKeyCycler,
             paramStretchKb,
             snapDrawValue,
-            // 颤音拖拽：预设起手、拖拽中切换预设、HUD 上报与收尾清屏。
+            // 颤音拖拽：预设起手、拖拽中切换预设、双键 / 中键重置、HUD 上报与收尾清屏。
             vibratoPreset,
             vibratoPresetList,
             switchVibratoPresetPersistently,
+            applyVibratoReset,
+            vibratoFrequencyAdjustKb,
             reportVibratoDragState,
             finishVibratoDrag,
         ],

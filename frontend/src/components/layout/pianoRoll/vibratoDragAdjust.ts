@@ -17,7 +17,7 @@
 
 import type { Keybinding } from "../../../features/keybindings/types";
 import { matchesKeybindingAllowingFineModifier } from "../../../features/keybindings/keybindingMatch";
-import { isNoneBinding } from "../../../features/keybindings/keybindingsSlice";
+import { isModifierActive, isNoneBinding } from "../../../features/keybindings/keybindingsSlice";
 import { buildVibratoCurve } from "../../../features/vibrato/vibratoCurve";
 import { VIBRATO_LIMITS } from "../../../features/vibrato/vibratoPresets";
 import {
@@ -51,8 +51,14 @@ export interface VibratoDragWorking {
     depthCents: number;
     /** 本次拖拽的速率（Hz）。 */
     rateHz: number;
-    /** 本次拖拽是否被用户调整过（HUD 据此标记"已调整"）。 */
-    adjusted: boolean;
+    /**
+     * 本次拖拽是否调过深度 / 速率。
+     *
+     * 【为什么分两个标记】两者各自独立：只调了振幅时切换预设，应当只把振幅带过去、
+     * 速率仍取新预设自带的值。合成一个 `adjusted` 会让"没碰过的那个"也被一起继承。
+     */
+    depthAdjusted: boolean;
+    rateAdjusted: boolean;
 }
 
 /**
@@ -67,7 +73,8 @@ export function createDragWorking(preset: VibratoPreset): VibratoDragWorking {
         preset,
         depthCents: preset.depthCents,
         rateHz: preset.rateHz,
-        adjusted: false,
+        depthAdjusted: false,
+        rateAdjusted: false,
     };
 }
 
@@ -75,32 +82,38 @@ export function createDragWorking(preset: VibratoPreset): VibratoDragWorking {
  * 切换到另一个预设。
  *
  * 【切换时的深度 / 速率归属】用户切换预设时，波形、包络、摆放方式这些"音色"
- * 一律换成新预设的；但**本次手势已经调过的**深度 / 速率要跟着走 —— 用户调完
- * 幅度再换预设，期待的是"换个音色、幅度不变"，而不是幅度被重置。因此：
- * - 本次手势调过（`adjusted`）→ 沿用工作副本里的深度与速率；
- * - 没调过 → 取新预设自带的深度与速率（"换了个音色，深度自然是它的"）。
- *
- * 两个量要么都继承、要么都不继承：用户只调了幅度时，速率仍应保持"这一笔一直
- * 在用的那个"，而不是突然跳回新预设的速率。
+ * 一律换成新预设的；但**本次手势调过的**那一个量要跟着走 —— 用户调完幅度再换
+ * 预设，期待的是"换个音色、幅度不变"。两个量各自独立判断：
+ * - 调过深度 → 沿用工作副本的深度；否则取新预设自带的深度。
+ * - 调过速率 → 沿用工作副本的速率；否则取新预设自带的速率。
  */
 export function switchDragPreset(
     previous: VibratoDragWorking,
     next: VibratoPreset,
 ): VibratoDragWorking {
-    if (previous.adjusted) {
-        return {
-            preset: next,
-            depthCents: previous.depthCents,
-            rateHz: previous.rateHz,
-            adjusted: true,
-        };
-    }
     return {
         preset: next,
-        depthCents: next.depthCents,
-        rateHz: next.rateHz,
-        adjusted: false,
+        depthCents: previous.depthAdjusted ? previous.depthCents : next.depthCents,
+        rateHz: previous.rateAdjusted ? previous.rateHz : next.rateHz,
+        depthAdjusted: previous.depthAdjusted,
+        rateAdjusted: previous.rateAdjusted,
     };
+}
+
+/**
+ * 重置本次手势的振幅：回到**预设自带**的深度，并清掉"调过振幅"的记录。
+ *
+ * 【重置成什么】回到预设自带值，而不是归零 —— 归零是「重置到直线」的语义
+ * （它换的是预设本身）。这里撤销的是"我对幅度的微调"，撤销之后本次手势的振幅
+ * 就等于预设的振幅，记录自然也不必再留着。
+ */
+export function resetVibratoDragDepth(working: VibratoDragWorking): VibratoDragWorking {
+    return { ...working, depthCents: working.preset.depthCents, depthAdjusted: false };
+}
+
+/** 重置本次手势的速率：回到预设自带的速率，并清掉"调过速率"的记录。 */
+export function resetVibratoDragRate(working: VibratoDragWorking): VibratoDragWorking {
+    return { ...working, rateHz: working.preset.rateHz, rateAdjusted: false };
 }
 
 /**
@@ -247,6 +260,87 @@ export function resolveVibratoSideButton(button: number): 1 | -1 | null {
     if (button === SIDE_BUTTON_FORWARD) return 1;
     if (button === SIDE_BUTTON_BACK) return -1;
     return null;
+}
+
+/**
+ * 拖拽期间可参与"双键重置"的绑定槽。
+ *
+ * 用槽名而不是键名：用户可以把任一动作改绑到任意键，判定必须按**绑定**走。
+ */
+export type VibratoDragResetSlot =
+    | "presetPrev"
+    | "presetNext"
+    | "amplitudeIncrease"
+    | "amplitudeDecrease"
+    | "frequencyIncrease"
+    | "frequencyDecrease";
+
+export interface VibratoDragResetBindings {
+    presetPrev: Keybinding;
+    presetNext: Keybinding;
+    amplitudeIncrease: Keybinding;
+    amplitudeDecrease: Keybinding;
+    frequencyIncrease: Keybinding;
+    frequencyDecrease: Keybinding;
+}
+
+/**
+ * 事件命中了哪些绑定槽。
+ *
+ * 返回数组而不是单个：两个动作可以被绑到同一个键上，此时一次按键同时命中两槽，
+ * "双键重置"会立刻成立 —— 这是该配置下唯一说得通的解释。`modifierOnly` 与
+ * "无"绑定一律不参与（它们不是可以"按住"的实体键）。
+ */
+export function matchedVibratoResetSlots(
+    event: KeyboardEvent,
+    bindings: VibratoDragResetBindings,
+    fineAdjustKb?: Keybinding,
+): VibratoDragResetSlot[] {
+    const slots: VibratoDragResetSlot[] = [];
+    const test = (slot: VibratoDragResetSlot, kb: Keybinding) => {
+        if (isNoneBinding(kb) || kb.modifierOnly) return;
+        if (matchesKeybindingAllowingFineModifier(event, kb, fineAdjustKb)) slots.push(slot);
+    };
+    test("presetPrev", bindings.presetPrev);
+    test("presetNext", bindings.presetNext);
+    test("amplitudeIncrease", bindings.amplitudeIncrease);
+    test("amplitudeDecrease", bindings.amplitudeDecrease);
+    test("frequencyIncrease", bindings.frequencyIncrease);
+    test("frequencyDecrease", bindings.frequencyDecrease);
+    return slots;
+}
+
+/** 双键同时按下时的重置意图。 */
+export type VibratoDragResetIntent = "straight" | "depth" | "rate";
+
+/**
+ * 一对绑定同时按下 → 重置。
+ *
+ * 优先级：预设切换对 > 振幅对 > 频率对。三对全按满（六个键）时按这个顺序取一个，
+ * 不会三件事一起做 —— 同时重置预设、振幅与速率既难解释，也没有实际需求。
+ */
+export function resolveVibratoPairReset(
+    held: ReadonlySet<VibratoDragResetSlot>,
+): VibratoDragResetIntent | null {
+    if (held.has("presetPrev") && held.has("presetNext")) return "straight";
+    if (held.has("amplitudeIncrease") && held.has("amplitudeDecrease")) return "depth";
+    if (held.has("frequencyIncrease") && held.has("frequencyDecrease")) return "rate";
+    return null;
+}
+
+/**
+ * 中键在拖拽中按下时，判定当前滚轮处于哪一路调整 —— 决定"重置振幅"还是"重置频率"。
+ *
+ * 与滚轮的判定同源：频率修饰键生效时滚轮调速率，否则调振幅。中键拿不到滚轮的
+ * 横向分量（触摸板的横向手势不参与），因此只看修饰键状态。
+ */
+export function resolveVibratoMiddleClickReset(
+    event: { altKey: boolean; ctrlKey: boolean; shiftKey: boolean; metaKey?: boolean },
+    frequencyAdjustKb: Keybinding,
+): "depth" | "rate" {
+    const rateRequested =
+        isNoneBinding(frequencyAdjustKb) || isModifierActive(frequencyAdjustKb, event);
+    return rateRequested ? "rate" : "depth";
 }
 
 /**
