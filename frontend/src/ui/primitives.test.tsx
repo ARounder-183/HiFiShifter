@@ -13,7 +13,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { AppButton } from "./Button";
 import { AppField, AppForm, AppFormSection, AppSwitchRow } from "./Field";
-import { AppContextMenu, type AppMenuItemSpec } from "./Menu";
+import { AppContextMenu, AppSubMenu, type AppMenuItemSpec } from "./Menu";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -273,4 +273,97 @@ test("AppSwitchRow 的 control 决定控件类型，两种共用同一排版", a
         (el) => getComputedStyle(el).fontSize,
     );
     expect(new Set(labels).size).toBeLessThanOrEqual(1);
+});
+
+/*
+ * 二级子菜单。它是从 `ClipContextMenu` 提到原语层的（颤音预设列表也需要它），
+ * 因此两条契约都要钉住：展开后子项出现在**本层**的 role="menu" 里，
+ * 以及"点开子项"只触发子项自身、不关闭整张菜单（`extraItems` 里的内容由
+ * 调用方负责 onClose，主菜单的 items 才是自动关闭）。
+ */
+test("AppSubMenu：点击展开子面板，再点收起", async () => {
+    await render(
+        <AppContextMenu
+            x={10}
+            y={10}
+            items={[{ key: "a", label: "Alpha", onSelect: () => {} }]}
+            extraItems={
+                <AppSubMenu label="Presets">
+                    <button type="button" role="menuitem">
+                        Natural
+                    </button>
+                </AppSubMenu>
+            }
+            onClose={() => {}}
+        />,
+    );
+
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]');
+    expect(trigger).not.toBeNull();
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+    // 未展开时子项不渲染
+    expect(container.textContent).not.toContain("Natural");
+
+    await act(async () => {
+        trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(trigger?.getAttribute("aria-expanded")).toBe("true");
+    expect(container.textContent).toContain("Natural");
+
+    await act(async () => {
+        trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(container.textContent).not.toContain("Natural");
+});
+
+test("AppSubMenu：子面板自身是独立的 role=menu 表面（键盘导航按层划分）", async () => {
+    await render(
+        <AppContextMenu
+            x={10}
+            y={10}
+            items={[{ key: "a", label: "Alpha", onSelect: () => {} }]}
+            extraItems={
+                <AppSubMenu label="Presets">
+                    <button type="button" role="menuitem">
+                        Natural
+                    </button>
+                    <button type="button" role="menuitem">
+                        Soft
+                    </button>
+                </AppSubMenu>
+            }
+            onClose={() => {}}
+        />,
+    );
+
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]');
+    await act(async () => {
+        trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+    // 外层菜单 + 子面板：两个独立的 role="menu"。
+    const menus = [...container.querySelectorAll<HTMLElement>('[role="menu"]')];
+    expect(menus.length).toBe(2);
+    const [outer, submenu] = menus;
+
+    /*
+     * 子面板在 DOM 上是外层菜单的**后代**（绝对定位只是视觉上浮出来），
+     * 因此 `outer.textContent` 当然含子项文字 —— 真正决定键盘归属的是
+     * `useMenuKeyboard` 的分层规则：`closest('[role="menu"]') === container`。
+     * 这里按同一条规则复算，断言外层**自己的**项里不含子项，
+     * 否则方向键会在两层之间串门。
+     */
+    const ownedBy = (menu: HTMLElement) =>
+        [...menu.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemradio"]')].filter(
+            (item) => item.closest('[role="menu"]') === menu,
+        );
+    const outerLabels = ownedBy(outer).map((item) => item.textContent);
+    const submenuLabels = ownedBy(submenu).map((item) => item.textContent);
+
+    expect(submenuLabels).toEqual(["Natural", "Soft"]);
+    // 外层只有「Alpha」与子菜单触发项；子项一个都不属于它。
+    expect(outerLabels).toHaveLength(2);
+    expect(outerLabels).not.toContain("Natural");
+    expect(outerLabels).not.toContain("Soft");
 });
