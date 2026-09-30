@@ -7287,6 +7287,14 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     aria-expanded={vibratoPresetMenuOpen}
                                     tabIndex={-1}
                                     onClick={() => setVibratoPresetMenuOpen((open) => !open)}
+                                    // 右键一步直达管理器：左键的下拉是"快速切换"，
+                                    // 右键的"进设置"与其它工具按钮的右键习惯一致，
+                                    // 不必先开下拉再点其中的「管理预设…」。
+                                    onContextMenu={(event) => {
+                                        event.preventDefault();
+                                        setVibratoPresetMenuOpen(false);
+                                        setVibratoPresetDialogOpen(true);
+                                    }}
                                     icon={
                                         // 图标即**活动预设的波形缩略图**：切预设即换图，
                                         // 看一眼工具栏就知道接下来画出来的会是什么。
