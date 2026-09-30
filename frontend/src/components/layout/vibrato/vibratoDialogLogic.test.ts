@@ -15,6 +15,7 @@ import {
     RATE_MODE_KEYS,
     WAVE_SHAPE_KEYS,
     WAVE_SHAPE_ORDER,
+    buildAppliedPreview,
     buildVibratoPreview,
     builtinIdOf,
     depthForParam,
@@ -251,5 +252,92 @@ describe("previewScaleCents", () => {
     test("下限为 1，避免纵轴除零", () => {
         expect(previewScaleCents(0)).toBe(2);
         expect(previewScaleCents(Number.NaN)).toBe(2);
+    });
+});
+
+describe("buildAppliedPreview（套用到选区的预览）", () => {
+    // 一段音高曲线（半音）：0 → 2 的上行，叠加 30 分正弦颤音。
+    const ramp = Array.from({ length: 200 }, (_, i) => (i / 199) * 2);
+    const preset = sanitizeVibratoPreset({
+        id: "custom_a",
+        depthCents: 30,
+        rateHz: 5.5,
+        attackMs: 0,
+        releaseMs: 0,
+        baseline: "existing",
+    });
+
+    test("原曲线与结果同长，且都围绕中心（均值≈0）", () => {
+        const preview = buildAppliedPreview({
+            preset,
+            original: ramp,
+            param: "pitch",
+            framePeriodMs: 5,
+        });
+        expect(preview).not.toBeNull();
+        expect(preview!.original.length).toBe(ramp.length);
+        expect(preview!.wave.length).toBe(ramp.length);
+        const mean = preview!.original.reduce((sum, value) => sum + value, 0) / ramp.length;
+        expect(Math.abs(mean)).toBeLessThan(1e-6);
+    });
+
+    test("baseline existing：结果 = 原曲线 + 颤音，因此偏离原曲线的幅度约等于深度", () => {
+        const preview = buildAppliedPreview({
+            preset,
+            original: ramp,
+            param: "pitch",
+            framePeriodMs: 5,
+        })!;
+        const deviation = preview.wave.map((value, i) => value - preview.original[i]);
+        const peak = Math.max(...deviation.map((value) => Math.abs(value)));
+        // 30 分深度：音高按分换算，偏离峰值应当在 30 附近（允许不规则度为 0 的解析值）。
+        expect(peak).toBeGreaterThan(28);
+        expect(peak).toBeLessThan(32);
+    });
+
+    test("深度为 0：结果与原曲线重合（直线预设不改动选区）", () => {
+        const flat = sanitizeVibratoPreset({ id: "custom_b", depthCents: 0, baseline: "existing" });
+        const preview = buildAppliedPreview({
+            preset: flat,
+            original: ramp,
+            param: "pitch",
+            framePeriodMs: 5,
+        })!;
+        for (let i = 0; i < ramp.length; i += 1) {
+            expect(preview.wave[i]).toBeCloseTo(preview.original[i], 6);
+        }
+    });
+
+    test("数据不足两点时返回 null（由调用方显示占位提示）", () => {
+        expect(
+            buildAppliedPreview({ preset, original: [0], param: "pitch", framePeriodMs: 5 }),
+        ).toBeNull();
+        expect(
+            buildAppliedPreview({ preset, original: [], param: "pitch", framePeriodMs: 5 }),
+        ).toBeNull();
+    });
+
+    test("非有限的帧值被当作 0，不产生 NaN 曲线", () => {
+        const preview = buildAppliedPreview({
+            preset,
+            original: [0, Number.NaN, 1, 2],
+            param: "pitch",
+            framePeriodMs: 5,
+        })!;
+        for (const value of [...preview.wave, ...preview.original]) {
+            expect(Number.isFinite(value)).toBe(true);
+        }
+    });
+
+    test("乘性参数（dyn）也给出可辨的偏离（换算到分后仍围绕中心）", () => {
+        const dyn = Array.from({ length: 120 }, () => 80);
+        const preview = buildAppliedPreview({
+            preset: sanitizeVibratoPreset({ id: "custom_c", depthCents: 30, baseline: "existing" }),
+            original: dyn,
+            param: "dyn",
+            framePeriodMs: 5,
+        })!;
+        const peak = Math.max(...preview.wave.map((value) => Math.abs(value)));
+        expect(peak).toBeGreaterThan(1);
     });
 });

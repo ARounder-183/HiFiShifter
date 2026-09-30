@@ -1918,6 +1918,11 @@ export const zhTW = {
     vibrato_manager_open: "管理預設...",
 
     vibrato_menu_presets: "顫音預設",
+    vibrato_apply_presets: "預設",
+    vibrato_apply_preview: "套用到選區",
+    vibrato_apply_preview_empty: "選取一段後可在此預覽效果。",
+    vibrato_apply_save_preset: "同時把這些調整儲存到預設",
+    vibrato_apply_apply: "套用",
     vibrato_extract_action: "從選區提取預設...",
     vibrato_extract_title: "提取顫音預設",
     vibrato_extract_failed: "選區裡沒有找到明顯的顫音。",

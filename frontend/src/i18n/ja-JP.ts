@@ -1986,6 +1986,11 @@ export const jaJP = {
     vibrato_manager_open: "プリセットを管理...",
 
     vibrato_menu_presets: "ビブラートプリセット",
+    vibrato_apply_presets: "プリセット",
+    vibrato_apply_preview: "選択範囲に適用",
+    vibrato_apply_preview_empty: "範囲を選択すると結果をプレビューできます。",
+    vibrato_apply_save_preset: "この調整をプリセットにも保存",
+    vibrato_apply_apply: "適用",
     vibrato_extract_action: "選択範囲からプリセットを作成...",
     vibrato_extract_title: "ビブラートプリセットを作成",
     vibrato_extract_failed: "選択範囲に明確なビブラートが見つかりません。",

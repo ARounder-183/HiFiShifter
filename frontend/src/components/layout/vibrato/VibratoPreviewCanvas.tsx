@@ -96,6 +96,26 @@ export function VibratoPreviewCanvas({
                 ctx.globalAlpha = 1;
             }
 
+            // 套用前的原曲线：弱化的虚线，"颤音叠在哪条运动之上"一眼可见。
+            // 只在"套用到选区"预览里出现（管理器预览没有原曲线）。
+            const original = samples.original;
+            if (original && original.length >= 2) {
+                ctx.save();
+                ctx.strokeStyle = muted;
+                ctx.lineWidth = 1;
+                ctx.setLineDash([4, 3]);
+                ctx.beginPath();
+                const oCount = original.length;
+                for (let i = 0; i < oCount; i += 1) {
+                    const x = (i / (oCount - 1)) * width;
+                    const y = toY(original[i] ?? 0);
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+                ctx.restore();
+            }
+
             // 波形本体。
             ctx.strokeStyle = accent;
             ctx.lineWidth = 1.5;

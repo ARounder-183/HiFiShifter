@@ -1972,6 +1972,11 @@ export const enUS = {
     vibrato_manager_open: "Manage presets...",
 
     vibrato_menu_presets: "Vibrato preset",
+    vibrato_apply_presets: "Preset",
+    vibrato_apply_preview: "Applied to selection",
+    vibrato_apply_preview_empty: "Select a range to preview the result.",
+    vibrato_apply_save_preset: "Also save these tweaks to the preset",
+    vibrato_apply_apply: "Apply",
     vibrato_extract_action: "Create preset from selection...",
     vibrato_extract_title: "Create Vibrato Preset",
     vibrato_extract_failed: "No clear vibrato found in the selection.",

@@ -21,6 +21,8 @@ import {
     depthStepUnitFor,
     depthToDisplay,
     displayToDepth,
+    paramUnitToDepth,
+    type VibratoParamRange,
 } from "../../../features/vibrato/vibratoDepth";
 import type {
     BaselineMode,
@@ -202,6 +204,13 @@ export interface VibratoPreviewSamples {
     envelope: number[];
     /** 纵轴半幅（cents）：波形与包络的绝对值上界，至少为 1 以免除零。 */
     peakCents: number;
+    /**
+     * 套用前的原曲线（cents，与 `wave` 同轴）。
+     *
+     * 仅"套用到选区"预览提供：管理器预览回答"波形长什么样"，这里回答
+     * "套到这段上长什么样"，两条线并置才看得出颤音叠在哪条运动之上。
+     */
+    original?: number[];
 }
 
 /**
@@ -234,6 +243,69 @@ export function buildVibratoPreview(
     let peak = Math.max(1, ...envelope.map((value) => Math.abs(value)));
     peak = Math.max(peak, ...wave.map((value) => Math.abs(value)));
     return { wave, envelope, peakCents: peak };
+}
+
+/** "套用到选区"预览的采样结果：波形 + 原曲线 + 包络，全部同轴（cents）。 */
+export interface VibratoAppliedPreview extends VibratoPreviewSamples {
+    /** 套用前的原曲线（cents，已减去中心）。 */
+    original: number[];
+}
+
+/**
+ * 生成"套用到选区"的预览采样。
+ *
+ * 【与管理器预览的区别】管理器预览拿 `buildVibratoPreview`（无原曲线、基线强制
+ * `line`），回答"波形长什么样"；这里喂入选区的**真实帧值**，走同一条
+ * `buildVibratoCurve`，回答"套到这段上长什么样" —— 原曲线被保留（`baseline:
+ * "existing"`）还是被拉直，一眼可见。
+ *
+ * 两条曲线都换算成 cents 并减去原曲线均值再画：否则音高上整段的上行运动会把
+ * 颤音挤出画面（绝对值域是几十个半音）。减中心之后"摆动"始终居中可辨。
+ *
+ * @returns 原值不足两点（无数据）时返回 `null`，由调用方显示占位提示。
+ */
+export function buildAppliedPreview(args: {
+    preset: VibratoPreset;
+    original: readonly number[];
+    param: string;
+    framePeriodMs: number;
+    range?: VibratoParamRange;
+}): VibratoAppliedPreview | null {
+    const values = args.original.map((value) => (Number.isFinite(value) ? Number(value) : 0));
+    if (values.length < 2) return null;
+
+    const framePeriodMs =
+        Number.isFinite(args.framePeriodMs) && args.framePeriodMs > 0
+            ? args.framePeriodMs
+            : DEFAULT_FRAME_PERIOD_MS;
+
+    const result = buildVibratoCurve({
+        startFrame: 0,
+        startValue: values[0],
+        endFrame: values.length - 1,
+        endValue: values[values.length - 1],
+        original: values,
+        preset: args.preset,
+        param: args.param,
+        framePeriodMs,
+        range: args.range,
+        collectEnvelope: true,
+    });
+
+    const toCents = (value: number) => paramUnitToDepth(value, args.param, args.range);
+    const originalCents = values.map(toCents);
+    const center = originalCents.reduce((sum, value) => sum + value, 0) / originalCents.length;
+    const original = originalCents.map((value) => value - center);
+    const wave = result.dense.map((value) => toCents(value) - center);
+    const envelope = (result.envelope ?? new Array(values.length).fill(0)).map((value) =>
+        Math.abs(value),
+    );
+
+    let peak = 1;
+    for (const value of original) peak = Math.max(peak, Math.abs(value));
+    for (const value of wave) peak = Math.max(peak, Math.abs(value));
+    for (const value of envelope) peak = Math.max(peak, Math.abs(value));
+    return { wave, envelope, original, peakCents: peak };
 }
 
 /**

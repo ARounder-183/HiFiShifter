@@ -1916,6 +1916,11 @@ export const zhCN = {
     vibrato_manager_open: "管理预设...",
 
     vibrato_menu_presets: "颤音预设",
+    vibrato_apply_presets: "预设",
+    vibrato_apply_preview: "套用到选区",
+    vibrato_apply_preview_empty: "选中一段后可在此预览效果。",
+    vibrato_apply_save_preset: "同时把这些调整保存到预设",
+    vibrato_apply_apply: "应用",
     vibrato_extract_action: "从选区提取预设...",
     vibrato_extract_title: "提取颤音预设",
     vibrato_extract_failed: "选区里没有找到明显的颤音。",
