@@ -472,6 +472,13 @@ test("右键预设行打开上下文菜单", async () => {
     expect(moveUp, "上移菜单项应已渲染").toBeTruthy();
     expect(moveUp!.disabled, "首项的「上移」应禁用").toBe(true);
 
+    // 系统预设的名字来自词条：重命名不可用。
+    const renameItem = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Rename",
+    ) as HTMLButtonElement | undefined;
+    expect(renameItem, "重命名菜单项应已渲染").toBeTruthy();
+    expect(renameItem!.disabled, "系统预设的「重命名」应禁用").toBe(true);
+
     /*
      * 层级契约：菜单必须在**对话框的 DOM 子树里**。
      *
@@ -678,4 +685,167 @@ test("拖拽系统预设行可以调整顺序", async () => {
     expect(order).toHaveLength(12);
     expect(order).toContain("builtin.straight");
     expect(order[order.length - 1]).toBe("builtin.straight");
+});
+
+/*
+ * 有未保存改动时切换预设：改动写回库之后，**选中必须真的切过去**。
+ *
+ * 【为什么值得测】切走前的落盘会让 `resolved.all` 变化，而"打开时播种草稿"的 effect
+ * 依赖它 —— 不设闸的话它会把草稿重新播种回当前活动预设，用户点了另一条却被弹回去，
+ * 只能再点一次。
+ */
+test("有未保存改动时切换预设：改动写回库，且选中确实切过去了", async () => {
+    const a = sanitizeVibratoPreset({ id: "custom_sw_a", name: "Switch A", depthCents: 30 });
+    const b = sanitizeVibratoPreset({ id: "custom_sw_b", name: "Switch B", depthCents: 40 });
+    const store = await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(a));
+        store.dispatch(upsertVibratoPreset(b));
+        store.dispatch(setActiveVibratoPreset(a.id));
+    });
+
+    // 在 A 上制造未保存改动：点「手绘…」把波形换成表。
+    const drawButton = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Draw...",
+    );
+    expect(drawButton, "手绘入口应已渲染").toBeTruthy();
+    await act(async () => {
+        drawButton!.click();
+    });
+
+    const bRow = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((row) =>
+        row.textContent?.includes("Switch B"),
+    );
+    expect(bRow, "B 行应已渲染").toBeTruthy();
+    await act(async () => {
+        bRow!.click();
+    });
+
+    // 改动已写回库。
+    expect(
+        store.getState().session.vibratoPresets.find((preset) => preset.id === "custom_sw_a")?.cycle
+            .kind,
+    ).toBe("table");
+
+    // 选中的确实是 B，而不是被播种逻辑弹回 A。
+    const selected = [...document.querySelectorAll<HTMLElement>('[role="option"]')].filter(
+        (row) => row.getAttribute("aria-selected") === "true",
+    );
+    expect(selected).toHaveLength(1);
+    expect(selected[0].textContent ?? "").toContain("Switch B");
+});
+
+/*
+ * 手绘编辑器的两个复位按钮：回到进入前的波形，或回到下拉框里当前的形状。
+ */
+test("手绘编辑器提供两个复位按钮：旧形状 + 当前形状", async () => {
+    const custom = sanitizeVibratoPreset({
+        id: "custom_reset",
+        name: "Reset Me",
+        cycle: { kind: "shape", shape: "triangle", skew: 0.5 },
+    });
+    await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(custom));
+        store.dispatch(setActiveVibratoPreset(custom.id));
+    });
+
+    const drawButton = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Draw...",
+    );
+    await act(async () => {
+        drawButton!.click();
+    });
+
+    const labels = [...document.querySelectorAll("button")].map(
+        (button) => button.textContent?.trim() ?? "",
+    );
+    expect(labels).toContain("Reset to previous");
+    // 进入手绘时来自三角波，因此"当前形状"就是三角 —— 按钮文案要跟着它，而不是
+    // 退化成固定的正弦。
+    expect(labels).toContain("Reset to Triangle");
+});
+
+/*
+ * 右键菜单重命名：输入框覆盖在列表里的名字上，Enter 提交、Esc 取消。
+ */
+test("右键菜单重命名：输入框覆盖在名字上，Enter 提交", async () => {
+    const custom = sanitizeVibratoPreset({ id: "custom_rn", name: "Old Name", depthCents: 30 });
+    const store = await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(custom));
+        store.dispatch(setActiveVibratoPreset(custom.id));
+    });
+
+    const row = document.querySelector<HTMLElement>('[data-preset-row="custom_rn"]');
+    expect(row, "用户预设行应已渲染").toBeTruthy();
+    await act(async () => {
+        row!
+            .querySelector('[role="option"]')!
+            .dispatchEvent(
+                new MouseEvent("contextmenu", { bubbles: true, clientX: 5, clientY: 5 }),
+            );
+    });
+
+    const renameItem = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Rename",
+    );
+    expect(renameItem, "重命名菜单项应已渲染").toBeTruthy();
+    await act(async () => {
+        renameItem!.click();
+    });
+
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="Rename"]');
+    expect(input, "内联输入框应已渲染").toBeTruthy();
+    expect(input!.value).toBe("Old Name");
+
+    // 受控输入：用原生 setter 写值再派发 input 事件，React 才收得到。
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    await act(async () => {
+        setter?.call(input!, "New Name");
+        input!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+        input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+
+    expect(
+        store.getState().session.vibratoPresets.find((preset) => preset.id === "custom_rn")?.name,
+    ).toBe("New Name");
+    expect(document.querySelector('input[aria-label="Rename"]')).toBeNull();
+});
+
+test("右键菜单重命名：Esc 取消，名字不变", async () => {
+    const custom = sanitizeVibratoPreset({ id: "custom_rn2", name: "Keep Me", depthCents: 30 });
+    const store = await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(custom));
+        store.dispatch(setActiveVibratoPreset(custom.id));
+    });
+
+    const row = document.querySelector<HTMLElement>('[data-preset-row="custom_rn2"]');
+    await act(async () => {
+        row!
+            .querySelector('[role="option"]')!
+            .dispatchEvent(
+                new MouseEvent("contextmenu", { bubbles: true, clientX: 5, clientY: 5 }),
+            );
+    });
+    const renameItem = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Rename",
+    );
+    await act(async () => {
+        renameItem!.click();
+    });
+
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="Rename"]')!;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    await act(async () => {
+        setter?.call(input, "Discarded");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+
+    expect(document.querySelector('input[aria-label="Rename"]')).toBeNull();
+    expect(
+        store.getState().session.vibratoPresets.find((preset) => preset.id === "custom_rn2")?.name,
+    ).toBe("Keep Me");
 });

@@ -16,6 +16,7 @@ import {
     type BuiltinVibratoId,
 } from "../../../features/vibrato/systemPresets";
 import { isBuiltinVibratoPresetId } from "../../../features/vibrato/vibratoPresets";
+import { sampleCycle } from "../../../features/vibrato/vibratoCycle";
 import { buildVibratoCurve, DEFAULT_FRAME_PERIOD_MS } from "../../../features/vibrato/vibratoCurve";
 import {
     depthStepUnitFor,
@@ -26,6 +27,7 @@ import {
 } from "../../../features/vibrato/vibratoDepth";
 import type {
     BaselineMode,
+    CycleSource,
     EnvelopeCurve,
     VibratoPreset,
     VibratoRateMode,
@@ -112,19 +114,79 @@ export function builtinIdOf(id: string): BuiltinVibratoId | undefined {
 }
 
 /**
+ * 波形的"形状"标签。
+ *
+ * 【为什么采样表不能一律叫「来自选区」】表波形有两个来源：从选区提取，以及用户手绘
+ * —— 后者占了编辑器里的主要操作，把它说成"来自选区"是错的。这里改成按**形状**说话：
+ * 采样表先与各个参数式形状比对，足够像就报那个形状名（"正弦"），都不像才承认它是
+ * 手绘出来的自定义波形。这样无论来源如何，标签描述的都是用户真正看到的东西。
+ */
+export function cycleShapeLabelKey(cycle: CycleSource): MessageKey {
+    if (cycle.kind === "shape") return WAVE_SHAPE_KEYS[cycle.shape];
+
+    const samples = new Array<number>(SHAPE_MATCH_SAMPLES);
+    for (let i = 0; i < SHAPE_MATCH_SAMPLES; i += 1) {
+        samples[i] = sampleCycle(cycle, i / SHAPE_MATCH_SAMPLES);
+    }
+    let bestShape: WaveShape | null = null;
+    let bestScore = 0;
+    for (const shape of WAVE_SHAPE_ORDER) {
+        const reference = new Array<number>(SHAPE_MATCH_SAMPLES);
+        for (let i = 0; i < SHAPE_MATCH_SAMPLES; i += 1) {
+            reference[i] = sampleCycle(
+                { kind: "shape", shape, skew: 0.5 },
+                i / SHAPE_MATCH_SAMPLES,
+            );
+        }
+        const score = correlation(samples, reference);
+        if (bestShape === null || score > bestScore) {
+            bestShape = shape;
+            bestScore = score;
+        }
+    }
+    return bestShape !== null && bestScore >= SHAPE_MATCH_MIN_CORRELATION
+        ? WAVE_SHAPE_KEYS[bestShape]
+        : "vibrato_cycle_drawn";
+}
+
+/** 相关系数（`-1..1`）；任一侧无变化时返回 0（无法判断，不算匹配）。 */
+function correlation(a: readonly number[], b: readonly number[]): number {
+    const n = Math.min(a.length, b.length);
+    if (n < 2) return 0;
+    let meanA = 0;
+    let meanB = 0;
+    for (let i = 0; i < n; i += 1) {
+        meanA += a[i];
+        meanB += b[i];
+    }
+    meanA /= n;
+    meanB /= n;
+    let dot = 0;
+    let varA = 0;
+    let varB = 0;
+    for (let i = 0; i < n; i += 1) {
+        const x = a[i] - meanA;
+        const y = b[i] - meanB;
+        dot += x * y;
+        varA += x * x;
+        varB += y * y;
+    }
+    const denom = Math.sqrt(varA * varB);
+    return denom > 1e-12 ? dot / denom : 0;
+}
+
+/**
  * 预设的一行摘要（列表行 / 选择器 / HUD 共用）。
  *
  * 形如 `正弦 · 30 分 · 5.5 Hz`；按周期数模式时把频率换成周期数。
  */
 export function vibratoPresetSummary(preset: VibratoPreset, t: Translate): string {
-    const shapeKey =
-        preset.cycle.kind === "table" ? undefined : WAVE_SHAPE_KEYS[preset.cycle.shape];
     const rate =
         preset.rateMode === "cycles"
             ? `${formatNumber(preset.cycles)} ${t("vibrato_unit_cycles")}`
             : `${formatNumber(preset.rateHz)} ${t("vibrato_unit_hz")}`;
     const parts = [
-        shapeKey ? t(shapeKey) : t("vibrato_from_selection"),
+        t(cycleShapeLabelKey(preset.cycle)),
         `${formatNumber(preset.depthCents)} ${t("vibrato_unit_cents")}`,
         rate,
     ];
@@ -352,6 +414,17 @@ export function fitPreviewRangeCents(peakCents: number): number {
 
 /** 缩略图专用采样数：64 点足够表达形状，path 缓存也便宜。 */
 export const GLYPH_FRAME_COUNT = 64;
+
+/** 形状比对用的采样数（摘要标签）。 */
+const SHAPE_MATCH_SAMPLES = 64;
+
+/**
+ * 采样表被判为某个参数式形状所需的最低相关系数。
+ *
+ * 取高阈值是故意的：宁可说"手绘"，也不要把一条捏出来的怪曲线硬说成正弦 —— 标签
+ * 的价值在于可信，而不是"总能给出一个形状名"。
+ */
+const SHAPE_MATCH_MIN_CORRELATION = 0.95;
 
 /**
  * 由预设求缩略图的折线点（`x0,y0 x1,y1 …`，y 向下为正）。

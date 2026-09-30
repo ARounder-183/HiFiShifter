@@ -26,10 +26,19 @@ export interface VibratoCycleEditorProps {
     table: number[];
     disabled?: boolean;
     onChange: (table: number[]) => void;
-    /** 复位到进入手绘前的形状；省略则不显示复位按钮。 */
+    /** 复位到进入手绘前的形状；省略则不显示该按钮。 */
     onReset?: () => void;
+    /**
+     * 复位到**当前选中的参数式形状**（按钮文案里带上形状名）。
+     *
+     * 与 `onReset` 的区别：那个回到"你进来之前的样子"（可能是一张提取/手绘出来的表），
+     * 这个把表重新采样成下拉框里当前那个形状 —— 手绘画歪了想从头来，或者想把提取出来
+     * 的波形换成规整的正弦，都靠它。
+     */
+    onResetToShape?: () => void;
     smoothLabel: string;
     resetLabel: string;
+    resetShapeLabel?: string;
     ariaLabel: string;
 }
 
@@ -47,8 +56,10 @@ export function VibratoCycleEditor({
     disabled = false,
     onChange,
     onReset,
+    onResetToShape,
     smoothLabel,
     resetLabel,
+    resetShapeLabel,
     ariaLabel,
 }: VibratoCycleEditorProps) {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -245,6 +256,16 @@ export function VibratoCycleEditor({
                 {onReset ? (
                     <AppButton size="sm" emphasis="soft" disabled={disabled} onClick={onReset}>
                         {resetLabel}
+                    </AppButton>
+                ) : null}
+                {onResetToShape && resetShapeLabel ? (
+                    <AppButton
+                        size="sm"
+                        emphasis="soft"
+                        disabled={disabled}
+                        onClick={onResetToShape}
+                    >
+                        {resetShapeLabel}
                     </AppButton>
                 ) : null}
             </Flex>

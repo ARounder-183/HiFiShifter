@@ -184,7 +184,18 @@ export function VibratoPresetDialog({
      * `baseline` = 进入手绘前的周期来源，「复位」回到它（采样成表后停留在编辑器里）。
      * 切换预设 / 改变形状时收起，避免"编辑器还开着、草稿却已经换人"的错位。
      */
-    const [handDraw, setHandDraw] = useState<{ baseline: CycleSource } | null>(null);
+    const [handDraw, setHandDraw] = useState<{
+        /** 进入手绘前的波形来源（「复位到旧形状」回到它）。 */
+        baseline: CycleSource;
+        /**
+         * 下拉框里当前选中的参数式形状（「复位到{形状}」用它）。
+         *
+         * 单独记一份：进入手绘后 `cycle` 已经是表，光看草稿推不出"当前形状"——那样
+         * 按钮只能退化成固定的"复位到正弦"，与用户看到的形状对不上。
+         */
+        shape: WaveShape;
+        skew: number;
+    } | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<VibratoPreset | null>(null);
     /**
      * 预设列表行的右键菜单（视口坐标 + 目标预设）。
@@ -257,9 +268,24 @@ export function VibratoPresetDialog({
         setPreviewHalfCents(fitPreviewRangeCents(buildVibratoPreview(preset).peakCents));
     }, []);
 
+    /**
+     * 本次"打开"是否已经播种过草稿。
+     *
+     * 【为什么需要它】这个 effect 依赖 `resolved.all`，而它会在**保存 / 切换预设**时
+     * 变化（切换前会先把未保存的改动写回库）。若不设闸，保存动作触发的重算会把草稿
+     * 重新播种回"当前活动预设"—— 于是用户点了另一条预设，改动保存了、选中却跳了回去，
+     * 得再点一次。播种只在"打开"这一沿做一次即可。
+     */
+    const seededForOpenRef = useRef(false);
+
     // 打开时播种：优先用活动预设，找不到就回落到列表首项。
     useEffect(() => {
-        if (!open) return;
+        if (!open) {
+            seededForOpenRef.current = false;
+            return;
+        }
+        if (seededForOpenRef.current) return;
+        seededForOpenRef.current = true;
         const active =
             resolved.all.find((preset) => preset.id === session.activeVibratoPresetId) ??
             resolved.all[0];
@@ -403,8 +429,12 @@ export function VibratoPresetDialog({
     function openHandDraw() {
         if (!draft || isBuiltin) return;
         const baseline = draft.cycle;
+        // 记下"当前形状"：来自参数式就用它，来自表（提取 / 上次手绘）则兜底正弦 ——
+        // 与形状下拉的显示口径一致。
+        const shape: WaveShape = baseline.kind === "shape" ? baseline.shape : "sine";
+        const skew = baseline.kind === "shape" ? baseline.skew : 0.5;
         const table = baseline.kind === "table" ? [...baseline.table] : tableFromCycle(baseline);
-        setHandDraw({ baseline });
+        setHandDraw({ baseline, shape, skew });
         patch({ cycle: { kind: "table", table } });
     }
 
@@ -717,6 +747,40 @@ export function VibratoPresetDialog({
         };
     }, [open, dispatch, applyPresetDragAtPointer]);
 
+    /** 正在就地重命名的那条预设（输入框覆盖在它的名字上）。 */
+    const [renameTarget, setRenameTarget] = useState<{ id: string; value: string } | null>(null);
+
+    /**
+     * 提交重命名。
+     *
+     * 空名不提交（预设名是列表里唯一的辨识信息，清空等于让条目变成空白）；`Esc` 走
+     * `onCancel`。与 Clip 的内联重命名同一套约定（Enter 提交 / Esc 取消 / 失焦提交）。
+     */
+    function commitRename() {
+        const target = renameTarget;
+        setRenameTarget(null);
+        if (!target) return;
+        const name = target.value.trim();
+        if (!name) return;
+        const stored = resolved.user.find((preset) => preset.id === target.id);
+        if (!stored || stored.name === name) return;
+        const renamed = sanitizeVibratoPreset({ ...stored, name });
+        persistPreset(renamed);
+        // 正在编辑的就是它时，草稿只更新名字 —— **不能**整体替换成入库版本，否则
+        // 草稿里还没保存的参数改动会被这次重命名顺手抹掉。
+        setDraft((current) => (current?.id === renamed.id ? { ...current, name } : current));
+    }
+
+    /** 就地重命名要摊给列表行的那几个 prop（两组共用）。 */
+    const renameProps = (preset: VibratoPreset) => ({
+        renaming: renameTarget?.id === preset.id,
+        renameValue: renameTarget?.value,
+        onRenameChange: (value: string) =>
+            setRenameTarget((current) => (current ? { ...current, value } : current)),
+        onRenameCommit: commitRename,
+        onRenameCancel: () => setRenameTarget(null),
+    });
+
     /** 选中一条预设；刚拖完的那一下 click 不触发选中。 */
     function handlePresetRowClick(preset: VibratoPreset) {
         if (suppressPresetClickRef.current) {
@@ -737,6 +801,17 @@ export function VibratoPresetDialog({
 
     const customCount = resolved.user.length;
     const atCap = customCount >= MAX_VIBRATO_PRESETS;
+
+    /**
+     * 形状下拉**当前显示**的形状与偏斜。
+     *
+     * 手绘中取 `handDraw.shape`（那是用户在编辑器里看到的形状）；否则表波形兜底显示
+     * 正弦 —— 与形状下拉本身同一套口径，按钮文案才不会与下拉值对不上。
+     */
+    const selectedWaveShape: WaveShape =
+        handDraw?.shape ?? (draft?.cycle.kind === "shape" ? draft.cycle.shape : "sine");
+    const selectedWaveSkew =
+        handDraw?.skew ?? (draft?.cycle.kind === "shape" ? draft.cycle.skew : 0.5);
 
     /** 列表行右键菜单的条目（针对被右击的那条预设）。 */
     const presetMenuItems: AppMenuItemSpec[] = presetMenu
@@ -761,6 +836,16 @@ export function VibratoPresetDialog({
                       label: t("vibrato_manager_set_active"),
                       checked: session.activeVibratoPresetId === target.id,
                       onSelect: () => activatePreset(target),
+                  },
+                  {
+                      // 就地重命名：输入框覆盖在列表里那条预设的名字上。
+                      // 系统预设的名字来自词条（只读），要改只能先复制为自定义。
+                      key: "rename",
+                      label: t("vibrato_manager_rename"),
+                      disabled: targetIsBuiltin,
+                      tooltip: targetIsBuiltin ? t("vibrato_manager_readonly") : undefined,
+                      onSelect: () =>
+                          setRenameTarget({ id: target.id, value: vibratoPresetLabel(target, t) }),
                   },
                   // 上移 / 下移：列表靠拖拽排序，这里是**键盘可达的等价操作**
                   // —— 只为了拖拽就砍掉非指针用户的路子，代价太大。两组都可排。
@@ -1043,6 +1128,7 @@ export function VibratoPresetDialog({
                                                                 event,
                                                             )
                                                         }
+                                                        {...renameProps(preset)}
                                                     />
                                                 </Box>
                                             </Fragment>
@@ -1125,6 +1211,7 @@ export function VibratoPresetDialog({
                                                                     event,
                                                                 )
                                                             }
+                                                            {...renameProps(preset)}
                                                         />
                                                     </Box>
                                                 </Fragment>
@@ -1170,19 +1257,39 @@ export function VibratoPresetDialog({
                                                     <AppField label={t("vibrato_shape_label")}>
                                                         <Flex align="center" gap="2" wrap="wrap">
                                                             <AppSelect
-                                                                value={
-                                                                    draft.cycle.kind === "shape"
-                                                                        ? draft.cycle.shape
-                                                                        : "sine"
-                                                                }
+                                                                value={selectedWaveShape}
                                                                 disabled={isBuiltin}
                                                                 onValueChange={(value) => {
+                                                                    const shape =
+                                                                        value as WaveShape;
+                                                                    if (handDraw) {
+                                                                        // 手绘中改形状：记下"当前形状"并即时套用，
+                                                                        // **不**退出编辑器 —— 否则「复位到{形状}」
+                                                                        // 永远只能指向兜底的正弦。
+                                                                        setHandDraw({
+                                                                            ...handDraw,
+                                                                            shape,
+                                                                        });
+                                                                        patch({
+                                                                            cycle: {
+                                                                                kind: "table",
+                                                                                table: tableFromCycle(
+                                                                                    {
+                                                                                        kind: "shape",
+                                                                                        shape,
+                                                                                        skew: handDraw.skew,
+                                                                                    },
+                                                                                ),
+                                                                            },
+                                                                        });
+                                                                        return;
+                                                                    }
                                                                     // 换成参数形状即退出"手绘表"，避免编辑器与草稿错位。
                                                                     setHandDraw(null);
                                                                     patch({
                                                                         cycle: {
                                                                             kind: "shape",
-                                                                            shape: value as WaveShape,
+                                                                            shape,
                                                                             skew:
                                                                                 draft.cycle.kind ===
                                                                                 "shape"
@@ -1219,43 +1326,28 @@ export function VibratoPresetDialog({
                                                                 max={98}
                                                                 disabled={
                                                                     isBuiltin ||
-                                                                    draft.cycle.kind !== "shape" ||
+                                                                    (draft.cycle.kind !== "shape" &&
+                                                                        !handDraw) ||
                                                                     !shapeUsesSkew(
-                                                                        draft.cycle.kind === "shape"
-                                                                            ? draft.cycle.shape
-                                                                            : "sine",
+                                                                        selectedWaveShape,
                                                                     )
                                                                 }
-                                                                value={
-                                                                    draft.cycle.kind === "shape"
-                                                                        ? Math.round(
-                                                                              draft.cycle.skew *
-                                                                                  100,
-                                                                          )
-                                                                        : 50
-                                                                }
+                                                                value={Math.round(
+                                                                    selectedWaveSkew * 100,
+                                                                )}
                                                                 ariaLabel={t("vibrato_skew")}
                                                                 onChange={(next) =>
                                                                     patch({
                                                                         cycle: {
                                                                             kind: "shape",
-                                                                            shape:
-                                                                                draft.cycle.kind ===
-                                                                                "shape"
-                                                                                    ? draft.cycle
-                                                                                          .shape
-                                                                                    : "sine",
+                                                                            shape: selectedWaveShape,
                                                                             skew: next / 100,
                                                                         },
                                                                     })
                                                                 }
                                                             />
                                                             <AppSliderReadout>
-                                                                {`${formatNumber(
-                                                                    (draft.cycle.kind === "shape"
-                                                                        ? draft.cycle.skew
-                                                                        : 0.5) * 100,
-                                                                )}%`}
+                                                                {`${formatNumber(selectedWaveSkew * 100)}%`}
                                                             </AppSliderReadout>
                                                         </Flex>
                                                     </AppField>
@@ -1269,6 +1361,16 @@ export function VibratoPresetDialog({
                                                                 "vibrato_handdraw_smooth",
                                                             )}
                                                             resetLabel={t("vibrato_handdraw_reset")}
+                                                            resetShapeLabel={t(
+                                                                "vibrato_handdraw_reset_shape",
+                                                            ).replace(
+                                                                "{shape}",
+                                                                t(
+                                                                    WAVE_SHAPE_KEYS[
+                                                                        selectedWaveShape
+                                                                    ],
+                                                                ),
+                                                            )}
                                                             onChange={(table) =>
                                                                 patch({
                                                                     cycle: { kind: "table", table },
@@ -1281,6 +1383,21 @@ export function VibratoPresetDialog({
                                                                         table: tableFromCycle(
                                                                             handDraw.baseline,
                                                                         ),
+                                                                    },
+                                                                })
+                                                            }
+                                                            // 复位到下拉框里当前选中的形状：
+                                                            // 手绘画歪了想从头来，或把提取出的
+                                                            // 波形换成规整形状，都靠它。
+                                                            onResetToShape={() =>
+                                                                patch({
+                                                                    cycle: {
+                                                                        kind: "table",
+                                                                        table: tableFromCycle({
+                                                                            kind: "shape",
+                                                                            shape: selectedWaveShape,
+                                                                            skew: selectedWaveSkew,
+                                                                        }),
                                                                     },
                                                                 })
                                                             }
@@ -1673,11 +1790,17 @@ interface PresetRowProps {
     onContextMenu: (x: number, y: number) => void;
     /** 行上按下指针（拖拽排序的起点）。 */
     onDragPointerDown?: (event: React.PointerEvent<HTMLDivElement>) => void;
+    /** 就地重命名：输入框覆盖在名字上。 */
+    renaming?: boolean;
+    renameValue?: string;
+    onRenameChange?: (value: string) => void;
+    onRenameCommit?: () => void;
+    onRenameCancel?: () => void;
 }
 
 /**
  * 列表行：单击选中（编辑它），双击设为当前使用，右侧按钮启用 / 停用；
- * 用户预设还可以按住行上下拖拽排序。
+ * 预设还可以按住行上下拖拽排序。
  *
  * 【为什么分开】"编辑某个预设"与"现在就用某个预设"是两件事：用户可能正在调
  * 一个还没调好的预设，却仍然希望拖拽用着上一个。合起来会让编辑动作顺带改掉
@@ -1694,11 +1817,36 @@ function PresetRow({
     onToggleEnabled,
     onContextMenu,
     onDragPointerDown,
+    renaming = false,
+    renameValue,
+    onRenameChange,
+    onRenameCommit,
+    onRenameCancel,
 }: PresetRowProps) {
     const { t } = useI18n();
     const description = vibratoPresetDescription(preset, t);
     const label = vibratoPresetLabel(preset, t);
     const summary = description ?? vibratoPresetSummary(preset, t);
+
+    /*
+     * 聚焦放在 effect 里，而不是用 `autoFocus`。
+     *
+     * 【为什么】重命名是从右键菜单点开的，而菜单关闭时会把"打开前的焦点"还回去
+     * （`AppContextMenu` 的焦点归还）。`autoFocus` 在**挂载那一刻**就抢焦点，紧接着
+     * 菜单的被动 effect 清理又把焦点还给了那一行 —— 输入框刚出现就被 blur，而 blur
+     * 会提交，于是它立刻消失，看起来"点了重命名没反应"。effect 在清理之后运行，
+     * 顺序才对。
+     */
+    const renameInputRef = useRef<HTMLInputElement | null>(null);
+    useEffect(() => {
+        if (!renaming) return;
+        const input = renameInputRef.current;
+        if (!input) return;
+        input.focus();
+        // 全选：重命名多半是整体替换，直接敲字即可。
+        input.select();
+    }, [renaming]);
+
     return (
         <Flex align="center" gap="1" style={{ minWidth: 0, flex: 1 }}>
             <Box style={{ minWidth: 0, flex: 1 }}>
@@ -1721,18 +1869,42 @@ function PresetRow({
                     <Flex align="center" gap="2" style={{ minWidth: 0 }}>
                         {active ? <span aria-hidden="true">●</span> : null}
                         <VibratoPresetGlyph preset={preset} width={40} height={14} />
-                        <span
-                            className="hs-type-label"
-                            style={{
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                                // 停用的预设压暗：一眼看出它不会出现在工具栏里。
-                                opacity: enabled ? undefined : 0.45,
-                            }}
-                        >
-                            {label}
-                        </span>
+                        {renaming ? (
+                            <input
+                                ref={renameInputRef}
+                                className="hs-type-label min-w-0 flex-1 rounded border border-qt-border bg-qt-window px-1 py-0 text-qt-text outline-none focus:border-qt-highlight"
+                                value={renameValue ?? ""}
+                                aria-label={t("vibrato_manager_rename")}
+                                // 行本身带点击 / 双击 / 拖拽：输入框内的事件一律不外泄，
+                                // 否则在框里拖选文字会触发"拖拽排序"、双击会激活预设。
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={(event) => event.stopPropagation()}
+                                onDoubleClick={(event) => event.stopPropagation()}
+                                onChange={(event) => onRenameChange?.(event.target.value)}
+                                onKeyDown={(event) => {
+                                    // 先于窗口级 Escape 关闭处理（与 Clip 的内联重命名
+                                    // 同一约定）。
+                                    event.stopPropagation();
+                                    if (event.key === "Enter") onRenameCommit?.();
+                                    else if (event.key === "Escape") onRenameCancel?.();
+                                }}
+                                // 失焦即提交：点别处不该丢掉刚敲的名字。
+                                onBlur={() => onRenameCommit?.()}
+                            />
+                        ) : (
+                            <span
+                                className="hs-type-label"
+                                style={{
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap",
+                                    // 停用的预设压暗：一眼看出它不会出现在工具栏里。
+                                    opacity: enabled ? undefined : 0.45,
+                                }}
+                            >
+                                {label}
+                            </span>
+                        )}
                     </Flex>
                 </AppListRow>
             </Box>
@@ -1741,6 +1913,7 @@ function PresetRow({
                 size="sm"
                 emphasis={enabled ? "neutral" : "accent"}
                 icon={enabled ? <EyeOpenIcon /> : <EyeNoneIcon />}
+                // 提示的是**这个按钮点了会做什么**：启用中就说"停用"，反之亦然。
                 tooltip={enabled ? t("vibrato_manager_disable") : t("vibrato_manager_enable")}
                 onClick={onToggleEnabled}
             />

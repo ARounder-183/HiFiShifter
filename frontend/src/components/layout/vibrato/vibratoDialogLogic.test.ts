@@ -19,6 +19,7 @@ import {
     buildAppliedPreview,
     buildVibratoPreview,
     builtinIdOf,
+    cycleShapeLabelKey,
     depthForParam,
     depthToCents,
     depthUnitLabelKey,
@@ -109,12 +110,58 @@ describe("vibratoPresetSummary", () => {
         expect(vibratoPresetSummary(preset, t)).toContain("Triangle");
     });
 
-    test("采样式波形（手绘）不显示形状名", () => {
+    test("采样表像某个形状时，报那个形状名", () => {
+        // 这 8 个点恰好是三角波一个周期。
         const preset = sanitizeVibratoPreset({
             id: "custom_a",
             cycle: { kind: "table", table: [0, 0.5, 1, 0.5, 0, -0.5, -1, -0.5] },
         });
-        expect(vibratoPresetSummary(preset, t)).toContain(enUS.vibrato_from_selection);
+        expect(vibratoPresetSummary(preset, t)).toContain(enUS.vibrato_shape_triangle);
+    });
+
+    /*
+     * 【为什么值得测】采样表有两个来源（从选区提取、手绘），把两者一律说成"来自选区"
+     * 是错的 —— 手绘才是编辑器里的主要操作。这里钉住新契约：标签描述**形状**，都不像
+     * 才承认是手绘。
+     */
+    test("采样表捏成自定义波形时报「手绘」，而不是「来自选区」", () => {
+        const preset = sanitizeVibratoPreset({
+            id: "custom_a",
+            // 一个周期里塞两个正弦 —— 参数式形状里没有这一款。
+            cycle: {
+                kind: "table",
+                table: [0, 0.7, 1, 0.7, 0, -0.7, -1, -0.7, 0, 0.7, 1, 0.7, 0, -0.7, -1, -0.7],
+            },
+        });
+        const summary = vibratoPresetSummary(preset, t);
+        expect(summary).toContain(enUS.vibrato_cycle_drawn);
+        expect(summary).not.toContain(enUS.vibrato_from_selection);
+    });
+});
+
+describe("cycleShapeLabelKey", () => {
+    test("参数式形状直接给形状名", () => {
+        expect(cycleShapeLabelKey({ kind: "shape", shape: "sine", skew: 0.5 })).toBe(
+            "vibrato_shape_sine",
+        );
+        expect(cycleShapeLabelKey({ kind: "shape", shape: "trill", skew: 0.5 })).toBe(
+            "vibrato_shape_trill",
+        );
+    });
+
+    test("采样表按最接近的形状取名", () => {
+        expect(
+            cycleShapeLabelKey({ kind: "table", table: [0, 0.5, 1, 0.5, 0, -0.5, -1, -0.5] }),
+        ).toBe("vibrato_shape_triangle");
+    });
+
+    test("都不像时归为手绘（不会硬套一个形状名）", () => {
+        expect(
+            cycleShapeLabelKey({
+                kind: "table",
+                table: [0, 0.7, 1, 0.7, 0, -0.7, -1, -0.7, 0, 0.7, 1, 0.7, 0, -0.7, -1, -0.7],
+            }),
+        ).toBe("vibrato_cycle_drawn");
     });
 });
 
