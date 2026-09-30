@@ -9,6 +9,11 @@ import {
     depthStepCentsFor,
     resolveVibratoDragKeyboardAdjustment,
     resolveVibratoPresetSwitch,
+    resolveVibratoSideButton,
+    SIDE_BUTTON_BACK,
+    SIDE_BUTTON_BACK_MASK,
+    SIDE_BUTTON_FORWARD,
+    SIDE_BUTTON_FORWARD_MASK,
     switchDragPreset,
 } from "./vibratoDragAdjust";
 
@@ -334,5 +339,39 @@ describe("buildDragVibratoCurve", () => {
             snapFinalValue: (value) => Math.round(value),
         });
         for (const value of built.dense) expect(Number.isInteger(value)).toBe(true);
+    });
+});
+
+describe("resolveVibratoSideButton", () => {
+    /*
+     * 侧键的 `button`（索引 3 / 4）与 `buttons`（位掩码 8 / 16）是两套编号 ——
+     * 与 `penInput.ts` 里"橡皮端是位 32 不是位 2"同一类陷阱。这里把两者都钉住，
+     * 因为"按了没反应"和"按了乱跳"都不会自己报错。
+     */
+    test("前进键 = 下一个，后退键 = 上一个（与键盘同一约定）", () => {
+        expect(resolveVibratoSideButton(SIDE_BUTTON_FORWARD)).toBe(1);
+        expect(resolveVibratoSideButton(SIDE_BUTTON_BACK)).toBe(-1);
+    });
+
+    test("左右中键与其他按键都不参与", () => {
+        for (const button of [0, 1, 2, 5, -1, 99]) {
+            expect(resolveVibratoSideButton(button)).toBeNull();
+        }
+    });
+
+    test("位掩码常量与 button 索引一致（左键 1 之外互不重叠）", () => {
+        // 侧键索引 3 / 4 对应位 3 / 4，即 8 / 16；两者不能相等，
+        // 否则"按住左键 + 按侧键"的 `buttons` 校验会失效。
+        expect(SIDE_BUTTON_BACK_MASK).toBe(1 << SIDE_BUTTON_BACK);
+        expect(SIDE_BUTTON_FORWARD_MASK).toBe(1 << SIDE_BUTTON_FORWARD);
+        expect(SIDE_BUTTON_BACK_MASK & 1).toBe(0);
+        expect(SIDE_BUTTON_FORWARD_MASK & 1).toBe(0);
+    });
+
+    test("左键 + 侧键同时按下时，左键位仍然成立（拖拽不会被误判为松手）", () => {
+        const bothBack = 1 | SIDE_BUTTON_BACK_MASK;
+        const bothForward = 1 | SIDE_BUTTON_FORWARD_MASK;
+        expect(bothBack & 1).toBe(1);
+        expect(bothForward & 1).toBe(1);
     });
 });

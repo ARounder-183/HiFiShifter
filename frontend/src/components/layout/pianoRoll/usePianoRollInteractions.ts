@@ -132,6 +132,7 @@ import {
     createDragWorking,
     resolveVibratoDragKeyboardAdjustment,
     resolveVibratoPresetSwitch,
+    resolveVibratoSideButton,
     switchDragPreset,
     type VibratoAdjustTarget,
     type VibratoDragWorking,
@@ -2522,34 +2523,17 @@ export function usePianoRollInteractions(args: {
             ) {
                 return;
             }
-            // 鼠标侧键（X1 / X2）在颤音拖拽期间切换预设。
+            // 注意：鼠标侧键（X1 / X2）切预设**不在这里**处理。
             //
-            // 【为什么必须放在 `activePointerGestureEndRef.current()` 之前】那一句
-            // 会结束当前手势 —— 侧键按下时若走到那里，颤音拖拽会被直接掐断。
+            // 【为什么】对鼠标而言 `pointerdown` 只在"从没有任何键按下"变为"有键
+            // 按下"时派发一次。左键已按住时再按侧键**不会再派发 `pointerdown`**，
+            // 只会有 `pointermove`（带着更新后的 `buttons`）—— 所以这个处理函数对
+            // 侧键根本不会被调用，挂在这里是死代码。这也正是"键盘有效、侧键无效"
+            // 的由来：键盘走的是独立的 window keydown，不依赖按键事件模型。
             //
-            // 【为什么用 `button` 而判 `buttons` 掩码】侧键的 `button` 是 3 / 4，
-            // 而位掩码是 8 / 16 —— 与 `penInput.ts` 里"橡皮端是位 32 不是位 2"
-            // 那条注释同一类陷阱。左键仍按住时 `buttons` 为 9 / 17，
-            // `9 & 1 === 1` 依然成立，因此按下侧键不会被 onMove 的存活判据误判
-            // 成松手。指针捕获是按 pointerId 的，鼠标只有一个指针，所以侧键的
-            // pointerdown 会被重定向到画布这里，不会漏。
-            if (
-                (e.button === 3 || e.button === 4) &&
-                vibratoStateRef.current &&
-                (e.nativeEvent.buttons & 1) === 1
-            ) {
-                e.preventDefault();
-                const direction: 1 | -1 = e.button === 4 ? 1 : -1;
-                const nextId = cycleVibratoPresetId(
-                    vibratoPresetList,
-                    vibratoStateRef.current.working.preset.id,
-                    direction,
-                );
-                const next = findVibratoPreset(vibratoPresetList, nextId);
-                if (next) switchVibratoDragPreset(next, e.clientX, e.clientY);
-                return;
-            }
-
+            // 侧键改在 line/vibrato 分支已安装的 `window` + 捕获阶段的 `mousedown`
+            // 里处理：`mousedown` 对**每一次**按键按下都会派发，与"拖拽中右键切换
+            // 拖动方向"共用同一个已验证可用的入口。
             if (activePointerGestureEndRef.current) {
                 activePointerGestureEndRef.current();
             }
@@ -5140,6 +5124,34 @@ export function usePianoRollInteractions(args: {
                     }
                 };
                 const onMouseDownDuringDraw = (ev: globalThis.MouseEvent) => {
+                    // 鼠标侧键（X1 / X2）在颤音拖拽期间切换预设。
+                    //
+                    // 【为什么在这里而不是画布的 pointerdown】见
+                    // `onCanvasPointerDown` 顶部那段注释：指针捕获不重定向
+                    // `pointerdown`，命中测试按真实坐标走，画布收不到。这条
+                    // `window` + 捕获阶段的 `mousedown` 不依赖命中测试，与下面
+                    // "右键切拖动方向"用的是同一个入口。
+                    //
+                    // 【为什么判 `buttons` 位掩码而不是 `button`】`button` 是
+                    // 事件里"哪个键变了"（侧键是 3 / 4），此时左键仍在按住，因此
+                    // 用位掩码确认"这次确实是拖拽中按下"（左键位 1 仍在）。
+                    if (isVibratoTool) {
+                        const direction = resolveVibratoSideButton(ev.button);
+                        if (direction !== null) {
+                            if ((ev.buttons & 1) !== 1) return;
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            const nextId = cycleVibratoPresetId(
+                                vibratoPresetList,
+                                vibratoStateRef.current?.working.preset.id ?? null,
+                                direction,
+                            );
+                            const next = findVibratoPreset(vibratoPresetList, nextId);
+                            if (next) switchVibratoDragPreset(next, ev.clientX, ev.clientY);
+                            return;
+                        }
+                    }
+
                     if (ev.button !== 2) return;
                     if (!canCycleDragDirection) return;
                     // 仅在左键拖拽进行中时，右键才切换拖拽方向。

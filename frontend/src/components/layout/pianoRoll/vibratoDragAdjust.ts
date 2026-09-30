@@ -200,6 +200,31 @@ export function computeVibratoDragAdjustment(input: {
     return { depthCents, rateHz };
 }
 
+/** 鼠标侧键在 `MouseEvent.button` 上的取值。 */
+export const SIDE_BUTTON_BACK = 3;
+export const SIDE_BUTTON_FORWARD = 4;
+
+/** 鼠标侧键在 `MouseEvent.buttons` 位掩码上的位。 */
+export const SIDE_BUTTON_BACK_MASK = 8;
+export const SIDE_BUTTON_FORWARD_MASK = 16;
+
+/**
+ * 把鼠标侧键映射成"上一个 / 下一个预设"。
+ *
+ * 【为什么单独抽出来】侧键的 `button`（索引 3 / 4）与 `buttons`（位掩码 8 / 16）
+ * 是两套编号 —— 这正是 `penInput.ts` 里"橡皮端是位 32 不是位 2"那条注释警告的
+ * 同一类陷阱，写错一位就变成"按了没反应"或"按了乱跳"，而后者不会报错。
+ *
+ * 约定与键盘一致：**前进键 = 下一个**（`+1`），后退键 = 上一个（`-1`）。
+ *
+ * @returns `1` = 下一个，`-1` = 上一个，`null` = 不是侧键。
+ */
+export function resolveVibratoSideButton(button: number): 1 | -1 | null {
+    if (button === SIDE_BUTTON_FORWARD) return 1;
+    if (button === SIDE_BUTTON_BACK) return -1;
+    return null;
+}
+
 /**
  * 按工作副本渲染一整段颤音曲线。
  *
