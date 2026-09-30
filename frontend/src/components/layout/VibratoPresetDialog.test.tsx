@@ -1016,6 +1016,70 @@ test("完全平直的预设读数显示 ±0", async () => {
 });
 
 /*
+ * 骰子按钮（换一种抖动图案）必须真的换掉预览。
+ *
+ * 【为什么值得测】它改的是预设的 `seed` 字段，而渲染曾经另取种子并兜底为 0 ——
+ * 按钮点了、字段也确实变了，画出来的波形却一模一样，用户看到的就是"完全不起作用"。
+ * 这里断言"点一下，预览的幅度读数就变"，把整条链路（按钮 → 草稿 → 预览采样）钉住。
+ */
+test("骰子按钮换抖动图案：预览随之改变", async () => {
+    const custom = sanitizeVibratoPreset({
+        id: "custom_dice",
+        name: "Dice",
+        depthCents: 40,
+        irregularity: 60,
+    });
+    await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(custom));
+        store.dispatch(setActiveVibratoPreset(custom.id));
+    });
+
+    const peakReadout = () => (document.body.textContent ?? "").match(/±[\d.]+ cents/)?.[0] ?? "";
+    const before = peakReadout();
+    expect(before, "预览的幅度读数应已渲染").toMatch(/^±[\d.]+ cents$/);
+
+    // 固定骰子结果，断言才是确定的（种子 = floor(0.5 × 100000)）。
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
+    try {
+        const dice = document.querySelector<HTMLButtonElement>(
+            'button[aria-label="Roll a new wobble pattern"]',
+        );
+        expect(dice, "骰子按钮应已渲染").toBeTruthy();
+        await act(async () => {
+            dice!.click();
+        });
+    } finally {
+        randomSpy.mockRestore();
+    }
+
+    expect(peakReadout(), "换了抖动图案，预览必须跟着变").not.toBe(before);
+});
+
+/*
+ * 不规则度为 0 时没有图案可换（噪声被整个乘掉），按钮应当停用**并说明原因**，
+ * 而不是让用户点了半天看不出变化 —— 新建的预设默认就是 0，很容易撞上。
+ */
+test("不规则度为 0 时骰子按钮停用并说明原因", async () => {
+    const custom = sanitizeVibratoPreset({
+        id: "custom_no_irr",
+        name: "No Wobble",
+        depthCents: 40,
+    });
+    expect(custom.irregularity).toBe(0);
+    await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(custom));
+        store.dispatch(setActiveVibratoPreset(custom.id));
+    });
+
+    expect(document.querySelector('button[aria-label="Roll a new wobble pattern"]')).toBeNull();
+    const dice = document.querySelector<HTMLButtonElement>(
+        'button[aria-label="Set the irregularity above 0 to roll a wobble pattern"]',
+    );
+    expect(dice, "应改用说明性 tooltip").toBeTruthy();
+    expect(dice!.disabled, "没有图案可换时应停用").toBe(true);
+});
+
+/*
  * 删除正在编辑的预设：草稿要切到"迁移后的活动预设"，而不是掉进"未选择"的空状态。
  *
  * 【为什么值得测】原来删除时把草稿置空，编辑器于是显示"还没有自定义预设"—— 而库里

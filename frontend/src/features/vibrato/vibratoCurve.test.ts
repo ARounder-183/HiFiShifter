@@ -394,6 +394,26 @@ describe("不规则度", () => {
         const p = steady({ depthCents: 40, irregularity: 0 });
         expect(render(p, 1, { seed: 1 })).toEqual(render(p, 1, { seed: 999 }));
     });
+
+    /*
+     * ★ 回归：省略 `seed` 时必须以**预设自己的 `seed` 字段**为准。
+     *
+     * 故障形态：这里只在 `input.seed` 里找种子并兜底为 0，于是除了显式传种子的
+     * 拖拽路径以外，管理器预览 / 试听 / 套用到选区都恒定用 0 渲染 —— 骰子按钮
+     * 明明改了 `preset.seed`，画面上却什么都不会变（"按钮完全不起作用"）。
+     */
+    test("省略 seed 时用预设自己的 seed 字段（骰子按钮改的就是它）", () => {
+        const one = render(steady({ depthCents: 40, irregularity: 60, seed: 1 }), 1);
+        const two = render(steady({ depthCents: 40, irregularity: 60, seed: 2 }), 1);
+        expect(one).not.toEqual(two);
+        // 同一预设仍然逐帧一致（预览与提交不能跳）。
+        expect(render(steady({ depthCents: 40, irregularity: 60, seed: 1 }), 1)).toEqual(one);
+    });
+
+    test("显式传入的 seed 优先于预设字段（拖拽路径用本次手势的工作种子）", () => {
+        const p = steady({ depthCents: 40, irregularity: 60, seed: 1 });
+        expect(render(p, 1, { seed: 7 })).not.toEqual(render(p, 1));
+    });
 });
 
 describe("逐帧吸附按最终值作用（既有的量化画线行为）", () => {

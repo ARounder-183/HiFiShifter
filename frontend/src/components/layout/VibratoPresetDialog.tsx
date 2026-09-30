@@ -1560,8 +1560,22 @@ export function VibratoPresetDialog({
                                                             </AppSliderReadout>
                                                             <AppIconButton
                                                                 icon={<ShuffleIcon />}
-                                                                tooltip={t("vibrato_seed_roll")}
-                                                                disabled={isBuiltin}
+                                                                /*
+                                                                 * 不规则度为 0 时**没有图案可换** —— 噪声整个被乘掉了，
+                                                                 * 换种子不会改变任何一帧。此时禁用并说明原因，而不是
+                                                                 * 让用户点了半天看不出变化（新建的预设默认就是 0）。
+                                                                 */
+                                                                tooltip={
+                                                                    draft.irregularity > 0
+                                                                        ? t("vibrato_seed_roll")
+                                                                        : t(
+                                                                              "vibrato_seed_roll_needs_irregularity",
+                                                                          )
+                                                                }
+                                                                disabled={
+                                                                    isBuiltin ||
+                                                                    !(draft.irregularity > 0)
+                                                                }
                                                                 onClick={() =>
                                                                     patch({
                                                                         seed: randomVibratoSeed(),

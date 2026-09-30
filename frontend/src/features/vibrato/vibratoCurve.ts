@@ -24,6 +24,7 @@
 
 import { sampleCycle, wrap01 } from "./vibratoCycle";
 import { clampDepthCentsForParam, depthMappingFor, type VibratoParamRange } from "./vibratoDepth";
+import { vibratoSeedForPreset } from "./vibratoSeed";
 import type { EnvelopeCurve, VibratoPreset } from "./vibratoTypes";
 
 /** 默认的帧周期，与后端 `state.rs::default_frame_period_ms` 一致。 */
@@ -61,7 +62,16 @@ export interface VibratoRenderInput {
      * 菜单 / 对话框路径不传此回调，行为与历史一致（不吸附）。
      */
     snapFinalValue?: (value: number, frame: number) => number;
-    /** 不规则度的确定性种子。预览与提交必须传同一个值，否则波形会跳。 */
+    /**
+     * 不规则度的确定性种子。
+     *
+     * 【省略时取预设自己的 `seed` 字段】预设编辑器里的骰子按钮改的正是那个字段，
+     * 因此**所有**渲染路径（管理器预览、试听、套用到选区）都必须默认读它 ——
+     * 曾经这里只读 `input.seed` 并兜底为 0，于是除了拖拽（它显式传了种子）以外的
+     * 每一条路径都恒定用 0 渲染，骰子按钮改了字段却看不到任何变化。
+     *
+     * 拖拽路径仍可显式覆盖：它维护的是本次手势的"工作种子"，切换预设时随之更换。
+     */
     seed?: number;
     /**
      * 一并返回逐帧的深度包络（cents，恒非负）。
@@ -201,7 +211,9 @@ export function buildVibratoCurve(input: VibratoRenderInput): VibratoRenderResul
         1,
         Math.max(0, (Number.isFinite(preset.irregularity) ? preset.irregularity : 0) / 100),
     );
-    const seed = Number.isFinite(input.seed) ? (input.seed as number) : 0;
+    const seed = Number.isFinite(input.seed)
+        ? (input.seed as number)
+        : vibratoSeedForPreset(preset);
 
     const attackMs = Math.max(0, Number.isFinite(preset.attackMs) ? preset.attackMs : 0);
     const releaseMs = Math.max(0, Number.isFinite(preset.releaseMs) ? preset.releaseMs : 0);

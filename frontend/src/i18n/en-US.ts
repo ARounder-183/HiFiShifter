@@ -1937,6 +1937,7 @@ export const enUS = {
     vibrato_align_cycles: "Land on a whole cycle",
     vibrato_irregularity: "Irregularity",
     vibrato_seed_roll: "Roll a new wobble pattern",
+    vibrato_seed_roll_needs_irregularity: "Set the irregularity above 0 to roll a wobble pattern",
     vibrato_bias: "Centre offset",
     vibrato_baseline: "Oscillate around",
     vibrato_baseline_line: "Start → End",

@@ -1922,6 +1922,8 @@ export const koKR = {
     vibrato_align_cycles: "정수 주기로 마무리",
     vibrato_irregularity: "불규칙도",
     vibrato_seed_roll: "흔들림 패턴 새로 뽑기",
+    vibrato_seed_roll_needs_irregularity:
+        "불규칙도를 0보다 크게 올려야 흔들림 패턴을 뽑을 수 있습니다",
     vibrato_bias: "중심 오프셋",
     vibrato_baseline: "진동 기준",
     vibrato_baseline_line: "시작 → 끝",

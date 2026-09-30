@@ -283,6 +283,31 @@ describe("buildVibratoPreview", () => {
         for (const value of samples.wave) expect(value).toBe(0);
     });
 
+    /*
+     * ★ 回归：管理器预览必须跟着预设的 `seed` 字段走。
+     *
+     * 骰子按钮改的正是这个字段；预览若在渲染时另取种子（曾经兜底为 0），按钮
+     * 就"完全不起作用" —— 字段变了，画出来的东西一模一样。
+     */
+    test("预览跟着预设的 seed 字段变（骰子按钮换的就是它）", () => {
+        const base = { depthCents: 40, irregularity: 60, attackMs: 0, releaseMs: 0 };
+        const one = buildVibratoPreview(sanitizeVibratoPreset({ ...base, seed: 1 }), {
+            frameCount: 200,
+            framePeriodMs: 5,
+        });
+        const two = buildVibratoPreview(sanitizeVibratoPreset({ ...base, seed: 2 }), {
+            frameCount: 200,
+            framePeriodMs: 5,
+        });
+        expect(one.wave).not.toEqual(two.wave);
+        // 同一个预设反复预览必须逐帧一致（否则编辑时画面会闪）。
+        const again = buildVibratoPreview(sanitizeVibratoPreset({ ...base, seed: 1 }), {
+            frameCount: 200,
+            framePeriodMs: 5,
+        });
+        expect(again.wave).toEqual(one.wave);
+    });
+
     test("baseline 为 existing 也被强制按 line 预览（无原曲线时才有确定形状）", () => {
         const preset = sanitizeVibratoPreset({ depthCents: 40, baseline: "existing" });
         const samples = buildVibratoPreview(preset, { frameCount: 64, framePeriodMs: 5 });
