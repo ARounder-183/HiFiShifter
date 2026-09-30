@@ -575,7 +575,46 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
             <Flex direction="column" className="min-h-0 flex-1 gap-2">
                 <span className="hs-type-muted shrink-0">{tf("kb_dialog_hint_click")}</span>
 
-                <Flex align="center" gap="2" className="shrink-0 flex-wrap">
+                {/*
+                 * 搜索框单独一行、铺满宽度。
+                 *
+                 * 【为什么不给它和预设下拉同一行】搜索是这个窗口的主入口，和结果列表
+                 * 上下对齐比与下拉框左右相邻更可读；挤在一行里它只能拿到剩余宽度
+                 * （实测 608/750），视觉重心还被左侧的下拉抢走。
+                 */}
+                <TextField.Root
+                    ref={searchInputRef}
+                    size="1"
+                    className="shrink-0"
+                    placeholder={tf("kb_search_placeholder")}
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    onKeyDown={handleSearchKeyDown}
+                    style={{ backgroundColor: "var(--qt-base)" }}
+                >
+                    <TextField.Slot>
+                        <MagnifyingGlassIcon height="12" width="12" />
+                    </TextField.Slot>
+                    {query && (
+                        <TextField.Slot>
+                            <IconButton
+                                size="1"
+                                variant="ghost"
+                                color="gray"
+                                aria-label={tf("kb_clear_search")}
+                                onClick={() => {
+                                    setQuery("");
+                                    searchInputRef.current?.focus();
+                                }}
+                                style={{ width: 16, height: 16 }}
+                            >
+                                <Cross2Icon width="10" height="10" />
+                            </IconButton>
+                        </TextField.Slot>
+                    )}
+                </TextField.Root>
+
+                <Flex align="center" gap="2" className="shrink-0">
                     <span className="hs-type-muted" style={{ whiteSpace: "nowrap" }}>
                         {tf("kb_preset_label")}
                     </span>
@@ -588,41 +627,6 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                             label: tf(PRESET_LABEL_KEY[presetId]),
                         }))}
                     />
-                    {/*
-                     * `TextField.Root` 转发 `HTMLInputElement` 的 ref（见其类型声明），
-                     * 因此聚焦与"清空后把焦点还回来"都直接挂在这个 ref 上。
-                     */}
-                    <TextField.Root
-                        ref={searchInputRef}
-                        className="min-w-0 flex-1"
-                        size="1"
-                        placeholder={tf("kb_search_placeholder")}
-                        value={query}
-                        onChange={(event) => setQuery(event.target.value)}
-                        onKeyDown={handleSearchKeyDown}
-                        style={{ backgroundColor: "var(--qt-base)" }}
-                    >
-                        <TextField.Slot>
-                            <MagnifyingGlassIcon height="12" width="12" />
-                        </TextField.Slot>
-                        {query && (
-                            <TextField.Slot>
-                                <IconButton
-                                    size="1"
-                                    variant="ghost"
-                                    color="gray"
-                                    aria-label={tf("kb_clear_search")}
-                                    onClick={() => {
-                                        setQuery("");
-                                        searchInputRef.current?.focus();
-                                    }}
-                                    style={{ width: 16, height: 16 }}
-                                >
-                                    <Cross2Icon width="10" height="10" />
-                                </IconButton>
-                            </TextField.Slot>
-                        )}
-                    </TextField.Root>
                 </Flex>
 
                 <Flex className="min-h-0 flex-1 gap-3">
