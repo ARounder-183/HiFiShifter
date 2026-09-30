@@ -1,94 +1,60 @@
 import { describe, expect, test } from "vitest";
 
 import {
-    MENU_MAX_VIEWPORT_FRACTION,
-    MENU_VIEWPORT_MARGIN,
-    resolveMenuPlacement,
+    MENU_BOUNDARY_MARGIN,
+    MENU_MAX_CONTAINER_FRACTION,
+    resolveMenuMaxHeight,
 } from "./menuPlacement";
 
-describe("resolveMenuPlacement", () => {
-    test("锚点靠上：向下展开，高度取 50vh 上限", () => {
-        const placement = resolveMenuPlacement({
-            anchorTop: 100,
+/*
+ * 契约：菜单**永远向下展开**，且只在面板（容器）内部铺开。
+ *
+ * 上一版按视口算并允许向上翻转 —— 参数编辑器是停靠窗口，上方没有展示区，翻上去
+ * 只会盖住自己的工具栏。这里把"向下、且在容器内"两条都钉住。
+ */
+describe("resolveMenuMaxHeight", () => {
+    const container = { containerTop: 100, containerBottom: 900 };
+
+    test("锚点下方空间充足时取面板高度的一半", () => {
+        const maxHeight = resolveMenuMaxHeight({ anchorBottom: 130, ...container });
+        // 面板高 800，一半是 400；下方可用 900-130-8 = 762。
+        expect(maxHeight).toBe(800 * MENU_MAX_CONTAINER_FRACTION);
+    });
+
+    test("锚点靠近面板底部时按剩余空间收窄（不会伸出面板）", () => {
+        const maxHeight = resolveMenuMaxHeight({ anchorBottom: 820, ...container });
+        // 900 - 820 - 8 = 72，比一半上限小。
+        expect(maxHeight).toBe(72);
+        expect(820 + maxHeight).toBeLessThanOrEqual(900);
+    });
+
+    test("锚点已经贴着底边时钳到 0（不产生负高度）", () => {
+        const maxHeight = resolveMenuMaxHeight({ anchorBottom: 1000, ...container });
+        expect(maxHeight).toBe(0);
+    });
+
+    test("面板很矮时也不会超过面板高度的一半", () => {
+        const maxHeight = resolveMenuMaxHeight({
+            anchorBottom: 30,
+            containerTop: 20,
+            containerBottom: 120,
+        });
+        // 面板高 100 → 上限 50；下方可用 120-30-8 = 82 → 取 50。
+        expect(maxHeight).toBe(50);
+    });
+
+    test("边距与上限可覆盖", () => {
+        const maxHeight = resolveMenuMaxHeight({
             anchorBottom: 130,
-            viewportHeight: 1000,
-        });
-        expect(placement.side).toBe("below");
-        expect(placement.maxHeight).toBe(1000 * MENU_MAX_VIEWPORT_FRACTION);
-    });
-
-    test("锚点靠下：向上翻转，不再伸出窗口底部", () => {
-        const placement = resolveMenuPlacement({
-            anchorTop: 900,
-            anchorBottom: 930,
-            viewportHeight: 1000,
-        });
-        expect(placement.side).toBe("above");
-        // 上方可用 900 - 8 = 892，被 50vh 上限压到 500。
-        expect(placement.maxHeight).toBe(500);
-    });
-
-    test("下方空间不足时按实际空间收窄（这是原来的缺陷）", () => {
-        // 窗口 400 高、锚点底部 130：下方只有 400-130-8 = 262，50vh 是 200。
-        const placement = resolveMenuPlacement({
-            anchorTop: 100,
-            anchorBottom: 130,
-            viewportHeight: 400,
-        });
-        expect(placement.side).toBe("below");
-        expect(placement.maxHeight).toBe(200);
-        // 关键不变量：菜单永远不越过视口下边缘。
-        expect(130 + placement.maxHeight).toBeLessThanOrEqual(400);
-    });
-
-    test("窗口很矮且锚点靠下：翻到上方，仍不越界", () => {
-        const placement = resolveMenuPlacement({
-            anchorTop: 150,
-            anchorBottom: 180,
-            viewportHeight: 200,
-        });
-        expect(placement.side).toBe("above");
-        // 上方可用 150 - 8 = 142，50vh 是 100。
-        expect(placement.maxHeight).toBe(100);
-        expect(180 - placement.maxHeight).toBeGreaterThanOrEqual(0);
-    });
-
-    test("两侧空间相等时朝下（默认方向）", () => {
-        // below = 1000 - 500 - 8 = 492；above = 492 - 8 = 484 → 下方更大。
-        // 构造严格相等：below === above ⇒ viewportHeight - anchorBottom === anchorTop。
-        const placement = resolveMenuPlacement({
-            anchorTop: 400,
-            anchorBottom: 608,
-            viewportHeight: 1008,
-        });
-        // below = 1008 - 608 - 8 = 392；above = 400 - 8 = 392 → 相等，取 below。
-        expect(placement.side).toBe("below");
-    });
-
-    test("空间为负时钳到 0（不产生负高度）", () => {
-        const placement = resolveMenuPlacement({
-            anchorTop: -50,
-            anchorBottom: -20,
-            viewportHeight: 100,
-        });
-        expect(placement.maxHeight).toBeGreaterThanOrEqual(0);
-        expect(Number.isFinite(placement.maxHeight)).toBe(true);
-    });
-
-    test("边距与上限可覆盖（便于复用与单测）", () => {
-        const placement = resolveMenuPlacement({
-            anchorTop: 10,
-            anchorBottom: 40,
-            viewportHeight: 1000,
+            ...container,
             margin: 0,
             maxFraction: 1,
         });
-        expect(placement.side).toBe("below");
-        expect(placement.maxHeight).toBe(960);
+        expect(maxHeight).toBe(770);
     });
 
     test("默认常量稳定", () => {
-        expect(MENU_VIEWPORT_MARGIN).toBe(8);
-        expect(MENU_MAX_VIEWPORT_FRACTION).toBe(0.5);
+        expect(MENU_BOUNDARY_MARGIN).toBe(8);
+        expect(MENU_MAX_CONTAINER_FRACTION).toBe(0.5);
     });
 });

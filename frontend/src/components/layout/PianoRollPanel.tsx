@@ -201,7 +201,7 @@ import {
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
 import { VibratoPresetDialog } from "./VibratoPresetDialog";
 import { VibratoApplyDialog } from "./VibratoApplyDialog";
-import { resolveMenuPlacement, type MenuPlacement } from "./menuPlacement";
+import { resolveMenuMaxHeight } from "./menuPlacement";
 import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
 import { buildVibratoCurve } from "../../features/vibrato/vibratoCurve";
 import { extractVibratoPreset } from "../../features/vibrato/vibratoExtract";
@@ -1023,15 +1023,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     /** 工具栏的颤音预设下拉是否展开。 */
     const [vibratoPresetMenuOpen, setVibratoPresetMenuOpen] = useState(false);
     /**
-     * 颤音预设下拉的展开方向与最大高度。
+     * 颤音预设下拉的最大高度。
      *
-     * 按锚点在视口里的位置算（见 `resolveMenuPlacement`）：面板可停靠在窗口任意
-     * 高度，固定 `vh` 上限会在靠下时伸出窗口底部。打开时算一次，窗口尺寸变化时重算。
+     * 按锚点在**本面板内**的位置算（见 `resolveMenuMaxHeight`）：面板可停靠在窗口
+     * 任意高度，菜单只在面板内向下铺开，既不会伸出面板、也不会向上翻转盖住工具栏。
      */
-    const [vibratoPresetMenuPlacement, setVibratoPresetMenuPlacement] = useState<MenuPlacement>({
-        side: "below",
-        maxHeight: 320,
-    });
+    const [vibratoPresetMenuMaxHeight, setVibratoPresetMenuMaxHeight] = useState(320);
     const vibratoPresetMenuRef = useRef<HTMLDivElement | null>(null);
     // 拖动方向循环切换键：拖拽进行中按下可即时切换本次拖拽方向（触控板替代右键）。
     const cycleDragDirectionKb = useAppSelector((state) =>
@@ -1249,36 +1246,43 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         };
     }, [drawToolMenuOpen, pitchSnapMenuOpen, vibratoPresetMenuOpen]);
 
-    /** 量一次颤音预设下拉的展开方向与最大高度（锚点缺失时返回 null）。 */
-    const measureVibratoPresetMenuPlacement = useCallback((): MenuPlacement | null => {
+    /** 量一次颤音预设下拉的最大高度（锚点 / 面板缺失时返回 null）。 */
+    const measureVibratoPresetMenuMaxHeight = useCallback((): number | null => {
         const anchor = vibratoPresetMenuRef.current;
-        if (!anchor) return null;
-        const rect = anchor.getBoundingClientRect();
-        return resolveMenuPlacement({
-            anchorTop: rect.top,
-            anchorBottom: rect.bottom,
-            viewportHeight: window.innerHeight,
+        const container = paramEditorRef.current;
+        if (!anchor || !container) return null;
+        const anchorRect = anchor.getBoundingClientRect();
+        const containerRect = container.getBoundingClientRect();
+        return resolveMenuMaxHeight({
+            anchorBottom: anchorRect.bottom,
+            containerTop: containerRect.top,
+            containerBottom: containerRect.bottom,
         });
     }, []);
 
-    /** 展开颤音预设下拉：先算好可用高度再展开，避免菜单伸出窗口。 */
+    /** 展开颤音预设下拉：先算好可用高度再展开，避免菜单伸出面板。 */
     const openVibratoPresetMenu = useCallback(() => {
-        const placement = measureVibratoPresetMenuPlacement();
-        if (placement) setVibratoPresetMenuPlacement(placement);
+        const maxHeight = measureVibratoPresetMenuMaxHeight();
+        if (maxHeight != null) setVibratoPresetMenuMaxHeight(maxHeight);
         setVibratoPresetMenuOpen(true);
-    }, [measureVibratoPresetMenuPlacement]);
+    }, [measureVibratoPresetMenuMaxHeight]);
 
-    // 窗口尺寸变化时重算：菜单开着时用户仍可能缩放窗口 / 切换全屏。setState 放在
-    // 事件回调里（而不是 effect 体内同步调用），避免级联渲染。
+    // 菜单开着时窗口缩放、或面板被拖动分隔条改变大小，都要重算高度。setState 放在
+    // 回调里（而不是 effect 体内同步调用），避免级联渲染。
     useEffect(() => {
         if (!vibratoPresetMenuOpen) return;
         const update = () => {
-            const placement = measureVibratoPresetMenuPlacement();
-            if (placement) setVibratoPresetMenuPlacement(placement);
+            const maxHeight = measureVibratoPresetMenuMaxHeight();
+            if (maxHeight != null) setVibratoPresetMenuMaxHeight(maxHeight);
         };
         window.addEventListener("resize", update);
-        return () => window.removeEventListener("resize", update);
-    }, [vibratoPresetMenuOpen, measureVibratoPresetMenuPlacement]);
+        const observer = new ResizeObserver(update);
+        if (paramEditorRef.current) observer.observe(paramEditorRef.current);
+        return () => {
+            window.removeEventListener("resize", update);
+            observer.disconnect();
+        };
+    }, [vibratoPresetMenuOpen, measureVibratoPresetMenuMaxHeight]);
 
     /** 打开“导入到参数编辑器”的 MIDI 导入对话框（编辑器按钮 / 拖放到编辑器内共用）。
      *  midiPath 为 null 时由用户在文件选择器中挑选文件；非 null 时直接导入该文件。 */
@@ -7354,12 +7358,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 {vibratoPresetMenuOpen && (
                                     <Box
                                         data-hs-context-menu
-                                        className={`absolute left-0 z-30 flex min-w-[190px] flex-col rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg ${
-                                            vibratoPresetMenuPlacement.side === "below"
-                                                ? "top-[calc(100%+4px)]"
-                                                : "bottom-[calc(100%+4px)]"
-                                        }`}
-                                        style={{ maxHeight: vibratoPresetMenuPlacement.maxHeight }}
+                                        // 永远向下展开：参数编辑器是停靠窗口，上方没有
+                                        // 展示区，翻上去只会盖住自己的工具栏。
+                                        className="absolute left-0 top-[calc(100%+4px)] z-30 flex min-w-[190px] flex-col rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg"
+                                        style={{ maxHeight: vibratoPresetMenuMaxHeight }}
                                     >
                                         <ScrollArea
                                             className="min-h-0"
