@@ -201,6 +201,7 @@ import {
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
 import { VibratoPresetDialog } from "./VibratoPresetDialog";
 import { VibratoApplyDialog } from "./VibratoApplyDialog";
+import { resolveMenuPlacement, type MenuPlacement } from "./menuPlacement";
 import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
 import { buildVibratoCurve } from "../../features/vibrato/vibratoCurve";
 import { extractVibratoPreset } from "../../features/vibrato/vibratoExtract";
@@ -1021,6 +1022,16 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const [vibratoExtractFailure, setVibratoExtractFailure] = useState(false);
     /** 工具栏的颤音预设下拉是否展开。 */
     const [vibratoPresetMenuOpen, setVibratoPresetMenuOpen] = useState(false);
+    /**
+     * 颤音预设下拉的展开方向与最大高度。
+     *
+     * 按锚点在视口里的位置算（见 `resolveMenuPlacement`）：面板可停靠在窗口任意
+     * 高度，固定 `vh` 上限会在靠下时伸出窗口底部。打开时算一次，窗口尺寸变化时重算。
+     */
+    const [vibratoPresetMenuPlacement, setVibratoPresetMenuPlacement] = useState<MenuPlacement>({
+        side: "below",
+        maxHeight: 320,
+    });
     const vibratoPresetMenuRef = useRef<HTMLDivElement | null>(null);
     // 拖动方向循环切换键：拖拽进行中按下可即时切换本次拖拽方向（触控板替代右键）。
     const cycleDragDirectionKb = useAppSelector((state) =>
@@ -1237,6 +1248,37 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             window.removeEventListener("keydown", onKeyDown, true);
         };
     }, [drawToolMenuOpen, pitchSnapMenuOpen, vibratoPresetMenuOpen]);
+
+    /** 量一次颤音预设下拉的展开方向与最大高度（锚点缺失时返回 null）。 */
+    const measureVibratoPresetMenuPlacement = useCallback((): MenuPlacement | null => {
+        const anchor = vibratoPresetMenuRef.current;
+        if (!anchor) return null;
+        const rect = anchor.getBoundingClientRect();
+        return resolveMenuPlacement({
+            anchorTop: rect.top,
+            anchorBottom: rect.bottom,
+            viewportHeight: window.innerHeight,
+        });
+    }, []);
+
+    /** 展开颤音预设下拉：先算好可用高度再展开，避免菜单伸出窗口。 */
+    const openVibratoPresetMenu = useCallback(() => {
+        const placement = measureVibratoPresetMenuPlacement();
+        if (placement) setVibratoPresetMenuPlacement(placement);
+        setVibratoPresetMenuOpen(true);
+    }, [measureVibratoPresetMenuPlacement]);
+
+    // 窗口尺寸变化时重算：菜单开着时用户仍可能缩放窗口 / 切换全屏。setState 放在
+    // 事件回调里（而不是 effect 体内同步调用），避免级联渲染。
+    useEffect(() => {
+        if (!vibratoPresetMenuOpen) return;
+        const update = () => {
+            const placement = measureVibratoPresetMenuPlacement();
+            if (placement) setVibratoPresetMenuPlacement(placement);
+        };
+        window.addEventListener("resize", update);
+        return () => window.removeEventListener("resize", update);
+    }, [vibratoPresetMenuOpen, measureVibratoPresetMenuPlacement]);
 
     /** 打开“导入到参数编辑器”的 MIDI 导入对话框（编辑器按钮 / 拖放到编辑器内共用）。
      *  midiPath 为 null 时由用户在文件选择器中挑选文件；非 null 时直接导入该文件。 */
@@ -7286,7 +7328,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     aria-haspopup="menu"
                                     aria-expanded={vibratoPresetMenuOpen}
                                     tabIndex={-1}
-                                    onClick={() => setVibratoPresetMenuOpen((open) => !open)}
+                                    onClick={() =>
+                                        vibratoPresetMenuOpen
+                                            ? setVibratoPresetMenuOpen(false)
+                                            : openVibratoPresetMenu()
+                                    }
                                     // 右键一步直达管理器：左键的下拉是"快速切换"，
                                     // 右键的"进设置"与其它工具按钮的右键习惯一致，
                                     // 不必先开下拉再点其中的「管理预设…」。
@@ -7308,10 +7354,16 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 {vibratoPresetMenuOpen && (
                                     <Box
                                         data-hs-context-menu
-                                        className="absolute left-0 top-[calc(100%+4px)] z-30 min-w-[190px] rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg"
+                                        className={`absolute left-0 z-30 flex min-w-[190px] flex-col rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg ${
+                                            vibratoPresetMenuPlacement.side === "below"
+                                                ? "top-[calc(100%+4px)]"
+                                                : "bottom-[calc(100%+4px)]"
+                                        }`}
+                                        style={{ maxHeight: vibratoPresetMenuPlacement.maxHeight }}
                                     >
                                         <ScrollArea
-                                            style={{ maxHeight: "50vh" }}
+                                            className="min-h-0"
+                                            style={{ flex: "1 1 auto" }}
                                             scrollbars="vertical"
                                             type="auto"
                                         >
@@ -7344,12 +7396,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             ))}
                                         </ScrollArea>
                                         <Box
-                                            className="my-1"
+                                            className="my-1 shrink-0"
                                             style={{ height: 1, background: "var(--qt-divider)" }}
                                         />
                                         <button
                                             type="button"
-                                            className="w-full px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-hover"
+                                            className="w-full shrink-0 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-hover"
                                             onClick={() => {
                                                 setVibratoPresetMenuOpen(false);
                                                 setVibratoPresetDialogOpen(true);
