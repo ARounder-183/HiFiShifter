@@ -386,3 +386,39 @@ test("导入 / 导出按钮文案不带省略号（省空间）", async () => {
     expect(labels.some((label) => label === "Import...")).toBe(false);
     expect(labels.some((label) => label === "Export...")).toBe(false);
 });
+
+/*
+ * 预览纵轴：一次性拟合到"档位值"，而不是跟着当前深度自适应。
+ *
+ * 【为什么值得测】自适应标尺会让波形永远填满画布 —— 调深度时只看到整幅在竖直方向
+ * 抖一下，读不出幅度大小。契约是：标尺由**拟合档位**给出（这里深度 40 → 量程 50），
+ * 编辑期间保持不动，于是波形高度就等于深度。
+ */
+test("预览纵轴是一次性拟合的档位值（不是当前峰值）", async () => {
+    const custom = sanitizeVibratoPreset({
+        id: "custom_axis",
+        name: "Axis",
+        depthCents: 40,
+        irregularity: 0,
+    });
+    await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(custom));
+        store.dispatch(setActiveVibratoPreset(custom.id));
+    });
+
+    const container = document.querySelector<HTMLElement>("[data-axis-cents]");
+    expect(container, "预览画布应暴露纵轴量程").toBeTruthy();
+    const axis = Number(container!.getAttribute("data-axis-cents"));
+    expect(Number.isFinite(axis)).toBe(true);
+    // 量程 ≥ 峰值（静止时不裁切），且落在阶梯档位上而不是等于峰值。
+    expect(axis).toBeGreaterThanOrEqual(40);
+    expect(axis).toBe(50);
+});
+
+test("预览卡片有「适应」按钮（重新拟合纵轴）", async () => {
+    await mountDialog();
+    const fitButton = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Fit",
+    );
+    expect(fitButton, "适应按钮应已渲染").toBeTruthy();
+});

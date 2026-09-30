@@ -13,7 +13,7 @@
  * 与失败恢复都变复杂。
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PlayIcon, ShuffleIcon, StopIcon } from "@radix-ui/react-icons";
 import { Box, Flex, ScrollArea, TextField } from "@radix-ui/themes";
 
@@ -92,6 +92,7 @@ import {
     buildVibratoPreview,
     depthToCents,
     depthForParam,
+    fitPreviewRangeCents,
     formatNumber,
     vibratoPresetDescription,
     vibratoPresetLabel,
@@ -176,6 +177,21 @@ export function VibratoPresetDialog({
      * 正是主题导入曾经的缺陷 —— 坏文件静默无反应，用户以为导入不起作用。
      */
     const [ioNotice, setIoNotice] = useState<{ text: string; danger: boolean } | null>(null);
+    /**
+     * 预览纵轴的半幅（cents）—— **一次性拟合，编辑期间不动**。
+     *
+     * 【为什么要稳定】若标尺跟着当前深度自适应，波形永远填满画布：调深度时看到的
+     * 只是整幅在竖直方向"抖一下"，读不出幅度大小。把标尺固定下来，波形高度就等于
+     * 深度，配合轴上的刻度标签可以直读。换预设 / 打开 / 点「适应」/ 保存时才重新
+     * 拟合（那是离散动作，不是每帧都在跳）。
+     */
+    const [previewHalfCents, setPreviewHalfCents] = useState<number>(() => fitPreviewRangeCents(0));
+
+    /** 按给定草稿重新拟合纵轴。 */
+    const fitPreviewAxis = useCallback((preset: VibratoPreset | null) => {
+        if (!preset) return;
+        setPreviewHalfCents(fitPreviewRangeCents(buildVibratoPreview(preset).peakCents));
+    }, []);
 
     // 打开时播种：优先用活动预设，找不到就回落到列表首项。
     useEffect(() => {
@@ -186,8 +202,10 @@ export function VibratoPresetDialog({
         if (active) {
             // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时按当前活动预设播种局部草稿（既有模式）
             setDraft(active);
+            // 纵轴在"打开"这一次离散动作里拟合一次，编辑期间保持不动。
+            fitPreviewAxis(active);
         }
-    }, [open, resolved.all, session.activeVibratoPresetId]);
+    }, [open, resolved.all, session.activeVibratoPresetId, fitPreviewAxis]);
 
     const isBuiltin = Boolean(draft?.builtin);
     const previewSamples = useMemo(() => (draft ? buildVibratoPreview(draft) : null), [draft]);
@@ -312,6 +330,8 @@ export function VibratoPresetDialog({
         }
         setHandDraw(null);
         setDraft(preset);
+        // 换预设 = 换一段波形，纵轴跟着重新拟合（编辑期间则保持不动）。
+        fitPreviewAxis(preset);
     }
 
     /** 进入手绘：把当前波形采样成表作为起点（改形比从零画顺手）。 */
@@ -334,6 +354,8 @@ export function VibratoPresetDialog({
         const normalized = sanitizeVibratoPreset(draft);
         persistPreset(normalized);
         setDraft(normalized);
+        // 保存是"这段波形定稿了"的时机：顺势把纵轴重新拟合回六成上下。
+        fitPreviewAxis(normalized);
     }
 
     function handleDuplicate() {
@@ -546,6 +568,7 @@ export function VibratoPresetDialog({
                                 <VibratoPreviewCanvas
                                     samples={previewSamples}
                                     ariaLabel={t("vibrato_preview")}
+                                    halfCents={previewHalfCents}
                                     handles={previewHandles}
                                     onGestureStart={handlePreviewGestureStart}
                                     onGestureMove={handlePreviewGestureMove}
@@ -563,25 +586,38 @@ export function VibratoPresetDialog({
                                             )}
                                         </span>
                                     </Flex>
-                                    {/* 试听：合成音色（钢琴卷帘琴键同款），不跑声码器。
-                                        系统预设也能试听 —— 试听是只读操作。 */}
-                                    <AppIconButton
-                                        tooltip={
-                                            auditionPlaying
-                                                ? t("vibrato_audition_stop")
-                                                : t("vibrato_audition_play")
-                                        }
-                                        size="sm"
-                                        aria-pressed={auditionPlaying}
-                                        onClick={toggleAudition}
-                                        icon={
-                                            auditionPlaying ? (
-                                                <StopIcon width="15" height="15" />
-                                            ) : (
-                                                <PlayIcon width="15" height="15" />
-                                            )
-                                        }
-                                    />
+                                    <Flex gap="1" align="center">
+                                        {/* 适应：把纵轴重新拟合到当前波形。标尺在编辑期间
+                                            刻意保持不动（这样高度才等于深度），拖到超出量程
+                                            或想重新看清形状时点它。 */}
+                                        <AppButton
+                                            size="sm"
+                                            emphasis="soft"
+                                            disabled={isBuiltin}
+                                            onClick={() => fitPreviewAxis(draft)}
+                                        >
+                                            {t("vibrato_preview_fit")}
+                                        </AppButton>
+                                        {/* 试听：合成音色（钢琴卷帘琴键同款），不跑声码器。
+                                            系统预设也能试听 —— 试听是只读操作。 */}
+                                        <AppIconButton
+                                            tooltip={
+                                                auditionPlaying
+                                                    ? t("vibrato_audition_stop")
+                                                    : t("vibrato_audition_play")
+                                            }
+                                            size="sm"
+                                            aria-pressed={auditionPlaying}
+                                            onClick={toggleAudition}
+                                            icon={
+                                                auditionPlaying ? (
+                                                    <StopIcon width="15" height="15" />
+                                                ) : (
+                                                    <PlayIcon width="15" height="15" />
+                                                )
+                                            }
+                                        />
+                                    </Flex>
                                 </Flex>
                             </Box>
                             {isBuiltin ? (

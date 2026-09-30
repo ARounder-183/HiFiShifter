@@ -1957,6 +1957,7 @@ export const jaJP = {
     vibrato_baseline_existing: "既存の曲線を保つ",
     vibrato_blend: "ドライ / ウェット",
     vibrato_preview: "プレビュー",
+    vibrato_preview_fit: "フィット",
     vibrato_cycles_estimate: "約 {count} 周期",
 
     vibrato_manager_title: "ビブラートプリセット",

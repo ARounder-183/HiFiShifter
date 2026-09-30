@@ -46,6 +46,12 @@ export interface VibratoPreviewCanvasProps {
     /** CSS 像素高度。 */
     height?: number;
     ariaLabel?: string;
+    /**
+     * 纵轴半幅（cents）。由调用方**一次性拟合**并保持稳定时，波形高度就等于深度，
+     * 用户能直接判断幅度大小；省略时按峰值自适应（只读预览够用，但深度一变整幅
+     * 就被重新缩放，看不出大小）。
+     */
+    halfCents?: number;
     /** 手柄的归一化横向位置（0..1）。提供时画出手柄并接受手势。 */
     handles?: PreviewHandleLayout;
     /** 手势开始。 */
@@ -66,10 +72,16 @@ function tokenColor(name: string, fallback: string): string {
 /** 手柄方块边长（CSS 像素）。 */
 const HANDLE_SIZE = 7;
 
+/** 轴标签的紧凑写法：整数不带小数点，非整数最多一位。 */
+function formatAxisCents(value: number): string {
+    return String(Math.round(value * 10) / 10);
+}
+
 export function VibratoPreviewCanvas({
     samples,
     height = 120,
     ariaLabel,
+    halfCents: explicitHalfCents,
     handles,
     onGestureStart,
     onGestureMove,
@@ -109,7 +121,13 @@ export function VibratoPreviewCanvas({
 
             const midY = height / 2;
             const verticalReach = height / 2 - 6;
-            const halfCents = previewScaleCents(samples.peakCents);
+            // 显式纵轴（半幅 cents）优先：它由调用方**一次性拟合**，编辑期间保持不变，
+            // 于是波形高度直接等于深度，用户能直观判断大小。省略时回落到按峰值自适应
+            // （缩略图 / 无手势的只读预览用得上）。
+            const halfCents =
+                explicitHalfCents != null && explicitHalfCents > 0
+                    ? explicitHalfCents
+                    : previewScaleCents(samples.peakCents);
             const toY = (cents: number) => midY - (cents / halfCents) * verticalReach;
             geometryRef.current = {
                 width,
@@ -119,6 +137,33 @@ export function VibratoPreviewCanvas({
 
             const count = Math.max(2, samples.wave.length);
             const toX = (index: number) => (index / (count - 1)) * width;
+
+            // 刻度网格 + 读数：没有它，"波形占画布多少"仍然只是相对量；有了它，
+            // 用户能直接把波峰高度读成 cents。上下边缘各标一次，中间画到 1/4 的细线。
+            ctx.strokeStyle = divider;
+            ctx.lineWidth = 1;
+            ctx.font = "10px sans-serif";
+            ctx.textBaseline = "middle";
+            for (const fraction of [1, 0.5]) {
+                for (const sign of [1, -1]) {
+                    const cents = sign * halfCents * fraction;
+                    const y = toY(cents);
+                    ctx.globalAlpha = fraction === 1 ? 0.55 : 0.28;
+                    ctx.beginPath();
+                    ctx.moveTo(0, y + 0.5);
+                    ctx.lineTo(width, y + 0.5);
+                    ctx.stroke();
+                    if (fraction === 1) {
+                        ctx.globalAlpha = 0.75;
+                        ctx.fillStyle = muted;
+                        // 标签贴在线的内侧，避免被裁掉；单位由下方读数承担。
+                        const label = `${sign > 0 ? "+" : "−"}${formatAxisCents(halfCents)}`;
+                        ctx.fillText(label, 3, y + (sign > 0 ? 7 : -7));
+                    }
+                }
+            }
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = muted;
 
             // 零基线：波形围绕它摆动，视觉上是"音高中心"。
             ctx.strokeStyle = divider;
@@ -213,7 +258,7 @@ export function VibratoPreviewCanvas({
         const observer = new ResizeObserver(draw);
         observer.observe(container);
         return () => observer.disconnect();
-    }, [samples, height, handles]);
+    }, [samples, height, handles, explicitHalfCents]);
 
     const localPoint = (event: React.PointerEvent<HTMLDivElement>) => {
         const rect = event.currentTarget.getBoundingClientRect();
@@ -262,6 +307,8 @@ export function VibratoPreviewCanvas({
             ref={containerRef}
             className="w-full"
             style={{ height, touchAction: interactive ? "none" : undefined }}
+            // 纵轴半幅（cents）：暴露出来便于测试断言"标尺是拟合档位而不是跟着当前值走"。
+            data-axis-cents={explicitHalfCents ?? undefined}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={endGesture}

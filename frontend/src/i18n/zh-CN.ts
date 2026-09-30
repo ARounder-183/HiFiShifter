@@ -1889,6 +1889,7 @@ export const zhCN = {
     vibrato_baseline_existing: "保持现有曲线",
     vibrato_blend: "干湿比",
     vibrato_preview: "预览",
+    vibrato_preview_fit: "适应",
     vibrato_cycles_estimate: "约 {count} 个周期",
 
     vibrato_manager_title: "颤音预设",

@@ -1930,6 +1930,7 @@ export const koKR = {
     vibrato_baseline_existing: "기존 곡선 유지",
     vibrato_blend: "드라이 / 웻",
     vibrato_preview: "미리보기",
+    vibrato_preview_fit: "맞춤",
     vibrato_cycles_estimate: "약 {count} 주기",
 
     vibrato_manager_title: "비브라토 프리셋",

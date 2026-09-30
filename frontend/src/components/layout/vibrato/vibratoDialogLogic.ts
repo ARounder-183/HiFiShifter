@@ -314,10 +314,40 @@ export function buildAppliedPreview(args: {
  * 【为什么不按参数值域定标】音高的值域是几十个半音，30 cents 的颤音按那个
  * 尺度画出来就是一条直线。按预设自身幅度定标，5 分与 100 分的预设都看得清
  * 形状，真实幅度由读数负责表达。
+ *
+ * 【注意】这是**一次性拟合**用的（见 `fitPreviewRangeCents`），不是每帧跟着
+ * 当前值走的自适应标尺 —— 后者会让波形永远填满画布，深度变化只表现为"抖动"，
+ * 用户无从判断幅度大小。
  */
 export function previewScaleCents(peakCents: number): number {
     const safe = Math.max(1, Number.isFinite(peakCents) ? peakCents : 1);
     return Math.ceil(safe * 1.15);
+}
+
+/**
+ * 预览纵轴的"好看"档位（半幅，cents）。
+ *
+ * 取值成阶梯而不是连续值：同一档位下不同预设的波形高度可以直接互相比较；跨档位
+ * 时轴上的刻度标签会跟着变，读数不会失真。
+ */
+export const PREVIEW_RANGE_LADDER: readonly number[] = [
+    5, 10, 20, 25, 50, 100, 200, 300, 500, 800, 1200, 2000, 3000, 5000, 8000,
+];
+
+/**
+ * 由一段波形的峰值拟合预览纵轴半幅。
+ *
+ * 只比峰值大 15% 再向上取到最近的档位，于是波形通常占据画布的六成上下 ——
+ * 既看得清形状，又留得下"再深一点"的余地。**只在打开 / 换预设 / 点「适应」时
+ * 调用**：编辑期间标尺保持不动，波形高度才等于深度，用户才能直观判断大小。
+ */
+export function fitPreviewRangeCents(peakCents: number): number {
+    const safe = Math.abs(Number.isFinite(peakCents) ? peakCents : 0);
+    const target = safe * 1.15;
+    for (const step of PREVIEW_RANGE_LADDER) {
+        if (target <= step) return step;
+    }
+    return PREVIEW_RANGE_LADDER[PREVIEW_RANGE_LADDER.length - 1];
 }
 
 /** 缩略图专用采样数：64 点足够表达形状，path 缓存也便宜。 */

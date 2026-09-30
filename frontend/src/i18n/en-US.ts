@@ -1945,6 +1945,7 @@ export const enUS = {
     vibrato_baseline_existing: "Keep curve",
     vibrato_blend: "Dry / wet",
     vibrato_preview: "Preview",
+    vibrato_preview_fit: "Fit",
     vibrato_cycles_estimate: "About {count} cycles",
 
     vibrato_manager_title: "Vibrato Presets",

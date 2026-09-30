@@ -13,6 +13,7 @@ import {
     ENVELOPE_CURVE_KEYS,
     ENVELOPE_CURVE_ORDER,
     RATE_MODE_KEYS,
+    PREVIEW_RANGE_LADDER,
     WAVE_SHAPE_KEYS,
     WAVE_SHAPE_ORDER,
     buildAppliedPreview,
@@ -21,6 +22,7 @@ import {
     depthForParam,
     depthToCents,
     depthUnitLabelKey,
+    fitPreviewRangeCents,
     formatNumber,
     previewScaleCents,
     vibratoPresetDescription,
@@ -339,5 +341,49 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
         })!;
         const peak = Math.max(...preview.wave.map((value) => Math.abs(value)));
         expect(peak).toBeGreaterThan(1);
+    });
+});
+
+describe("fitPreviewRangeCents（一次性拟合纵轴）", () => {
+    test("落在阶梯档位上，且比峰值大出余量", () => {
+        for (const peak of [0, 3, 5, 12, 30, 40, 70, 100, 150, 300, 700, 1200]) {
+            const range = fitPreviewRangeCents(peak);
+            expect(PREVIEW_RANGE_LADDER).toContain(range);
+            expect(range).toBeGreaterThanOrEqual(peak * 1.15 - 1e-9);
+        }
+    });
+
+    test("常见深度：波形约占画布六成（不顶格也不趴平）", () => {
+        for (const peak of [5, 12, 30, 55, 100]) {
+            const range = fitPreviewRangeCents(peak);
+            const fill = peak / range;
+            expect(fill).toBeGreaterThan(0.4);
+            expect(fill).toBeLessThanOrEqual(1);
+        }
+    });
+
+    test("单调不减（峰值更大绝不会得到更小的量程）", () => {
+        let previous = 0;
+        for (let peak = 0; peak <= 1200; peak += 7) {
+            const range = fitPreviewRangeCents(peak);
+            expect(range).toBeGreaterThanOrEqual(previous);
+            previous = range;
+        }
+    });
+
+    test("深度 0 也给一个可见量程（不会退化成除零）", () => {
+        expect(fitPreviewRangeCents(0)).toBeGreaterThan(0);
+    });
+
+    test("非有限输入回落到最小档位", () => {
+        expect(fitPreviewRangeCents(Number.NaN)).toBe(PREVIEW_RANGE_LADDER[0]);
+        expect(fitPreviewRangeCents(Number.POSITIVE_INFINITY)).toBe(PREVIEW_RANGE_LADDER[0]);
+    });
+
+    test("包络可以远大于 depthCents（渐强 × 不规则度），量程仍跟得上", () => {
+        // depthCents 上限 1200，渐强 2× 与不规则度抖动叠加后峰值可到数千。
+        const range = fitPreviewRangeCents(3240);
+        expect(range).toBeGreaterThanOrEqual(3240 * 1.15 - 1e-9);
+        expect(PREVIEW_RANGE_LADDER).toContain(range);
     });
 });

@@ -1891,6 +1891,7 @@ export const zhTW = {
     vibrato_baseline_existing: "保持現有曲線",
     vibrato_blend: "乾濕比",
     vibrato_preview: "預覽",
+    vibrato_preview_fit: "適應",
     vibrato_cycles_estimate: "約 {count} 個週期",
 
     vibrato_manager_title: "顫音預設",
