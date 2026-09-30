@@ -778,6 +778,13 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     React.useLayoutEffect(() => {
         const host = localHostRef.current;
         if (!host) return;
+        // 【必须先落地竖直缩放，再标脏绘制】竖直缩放走"请求 → React 落地 → 原子应用"
+        // 契约（见宿主 `pendingVerticalZoom`）：本提交生效的行高就是内核该采用的行高，
+        // 位置按锚点不变式反算。放在 `invalidateScene()` **之前**，是为了让"轨道头 DOM
+        // 重排（本次提交已发生）、波形行几何重建（子组件 layout effect 先跑）、内核几何
+        // 与视口切换"落在同一个任务、同一次绘制里 —— 任何一层领先或落后都会表现为
+        // 竖直缩放后的抽动。
+        host.applyPendingVerticalZoom(rowHeight);
         host.invalidateScene();
         // 同一任务内提交：文本与网格同帧切换（见上方说明）。
         host.paintNow();

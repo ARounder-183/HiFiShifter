@@ -1,6 +1,5 @@
 use crate::audio_engine::AudioEngine;
 use crate::audio_utils::try_read_wav_info;
-use crate::clip_pitch_cache::ClipPitchCache;
 use crate::midi_import::MidiNoteEvent;
 use crate::models::{
     ModelConfig, ModelConfigPayload, PitchRange, ProjectMetaPayload, RuntimeInfoPayload,
@@ -11,7 +10,7 @@ use crate::time_stretch::UserStretchAlgorithm;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 use uuid::Uuid;
 
 fn default_frame_period_ms() -> f64 {
@@ -2883,20 +2882,6 @@ impl TimelineState {
     }
 }
 
-/// Timeline snapshot for incremental pitch refresh
-///
-/// Stores a snapshot of the timeline state at the time of last pitch analysis
-/// to enable detection of which clips have changed and need re-analysis.
-#[derive(Debug, Clone)]
-pub struct TimelineSnapshot {
-    /// Mapping from clip ID to cache key
-    pub clips: HashMap<String, String>,
-    /// BPM at the time of analysis
-    pub bpm: f64,
-    /// Frame period used for analysis
-    pub frame_period_ms: f64,
-}
-
 pub struct AppState {
     pub timeline: std::sync::Mutex<TimelineState>,
     pub timeline_version: std::sync::atomic::AtomicU64,
@@ -2946,10 +2931,8 @@ pub struct AppState {
         std::sync::RwLock<Option<crate::pitch_analysis::PitchOrigAnalysisProgressEvent>>,
 
     // Clip-level pitch analysis cache for performance optimization
-    pub clip_pitch_cache: Arc<Mutex<ClipPitchCache>>,
 
     // Timeline snapshot for incremental pitch refresh (keyed by root_track_id)
-    pub pitch_timeline_snapshot: Mutex<HashMap<String, TimelineSnapshot>>,
 
     pub audio_engine: AudioEngine,
 
@@ -3009,8 +2992,6 @@ impl Default for AppState {
             app_handle: OnceLock::new(),
             pitch_inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
             pitch_analysis_progress: std::sync::RwLock::new(None),
-            clip_pitch_cache: Arc::new(Mutex::new(ClipPitchCache::new(100))),
-            pitch_timeline_snapshot: Mutex::new(HashMap::new()),
 
             audio_engine: AudioEngine::new(),
             transport_lock: std::sync::Mutex::new(()),
@@ -10800,6 +10781,7 @@ impl TimelineState {
                     quality_preset: crate::mixdown::QualityPreset::Export,
                     cancel_flag: None,
                     progress: None,
+                    cache_stats: None,
                 },
             );
 

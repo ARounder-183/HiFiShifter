@@ -1,8 +1,9 @@
+use crate::audio_engine::byte_budget_cache::ByteBudgetCache;
 use crate::state::{Clip, TimelineState};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-use std::sync::{mpsc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 // ── 全局 clip pitch 分析进度状态 ─────────────────────────────────────────────
@@ -127,34 +128,177 @@ pub struct ClipPitchAnalysis {
     pub level: Vec<f32>,
 }
 
-static GLOBAL_CLIP_PITCH_CACHE: OnceLock<Mutex<HashMap<String, CachedClipPitch>>> = OnceLock::new();
+// ── 结果缓存 ─────────────────────────────────────────────────────────────────
+//
+// 每个条目是**整个源文件**的音高 + 电平曲线（全量分析策略：key 只含源文件内容
+// 签名，trim/rate 变化在组装阶段按需截取）。长素材单条可达数 MB，因此缓存必须
+// 同时受"条目数"和"字节数"约束 —— 与仓库里其它 PCM 缓存（`ByteBudgetCache`）
+// 保持同一口径。
+//
+// 【为什么必须是真 LRU】旧实现用 `HashMap` + `keys().take(n)` 驱逐，而
+// `HashMap::keys()` 是哈希序 —— 等于随机驱逐。刚算完的大条目可能立刻被逐出，
+// 而 key 是确定性哈希，下次调度必然 miss 并重新整份解码 + 推理，形成抖动。
+static GLOBAL_CLIP_PITCH_CACHE: OnceLock<Mutex<ClipPitchByteCache>> = OnceLock::new();
 static GLOBAL_CLIP_PITCH_INFLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-static CLIP_PITCH_CACHE_MAX_ENTRIES: OnceLock<Option<usize>> = OnceLock::new();
+static CLIP_PITCH_CACHE_MAX_ENTRIES: OnceLock<usize> = OnceLock::new();
+static CLIP_PITCH_CACHE_BUDGET_BYTES: OnceLock<u64> = OnceLock::new();
 
 const DEFAULT_CLIP_PITCH_CACHE_MAX_ENTRIES: usize = 4096;
+/// 缓存字节预算默认取 PCM 预算的 1/16（默认 1 GB → 64 MB）。
+///
+/// 音高曲线比 PCM 小两个数量级，参照仓库既有比例（formant 取 1/8、合成缓存取
+/// 1/2）取一个更保守的值即可 —— 64 MB 足以容纳数十条长素材的曲线。
+const CLIP_PITCH_CACHE_BUDGET_DIVISOR: u64 = 16;
+/// `HIFISHIFTER_CLIP_PITCH_CACHE_MAX_ENTRIES=0` 语义为"不限条目数"。LruCache 需要
+/// 一个有限容量，用这个足够大的值代替 —— 真正的上限由字节预算把关。
+const UNBOUNDED_ENTRY_CAPACITY: usize = 1 << 20;
 
-fn clip_pitch_cache_max_entries() -> Option<usize> {
+fn clip_pitch_cache_max_entries() -> usize {
     *CLIP_PITCH_CACHE_MAX_ENTRIES.get_or_init(|| {
-        let parsed = std::env::var("HIFISHIFTER_CLIP_PITCH_CACHE_MAX_ENTRIES")
+        match std::env::var("HIFISHIFTER_CLIP_PITCH_CACHE_MAX_ENTRIES")
             .ok()
-            .and_then(|raw| raw.trim().parse::<usize>().ok());
-        match parsed {
-            // 0 = disable hard limit (unbounded)
-            Some(0) => None,
-            Some(v) => Some(v.max(1)),
-            None => Some(DEFAULT_CLIP_PITCH_CACHE_MAX_ENTRIES),
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+        {
+            Some(0) => UNBOUNDED_ENTRY_CAPACITY,
+            Some(v) => v.max(1),
+            None => DEFAULT_CLIP_PITCH_CACHE_MAX_ENTRIES,
         }
     })
 }
 
-pub(crate) fn global_cache() -> &'static Mutex<HashMap<String, CachedClipPitch>> {
-    GLOBAL_CLIP_PITCH_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+/// 对外汇报用的条目数上限（`None` = 不限条目数，由字节预算把关）。
+pub fn clip_pitch_cache_entry_limit() -> Option<usize> {
+    let cap = clip_pitch_cache_max_entries();
+    if cap >= UNBOUNDED_ENTRY_CAPACITY {
+        None
+    } else {
+        Some(cap)
+    }
+}
+
+fn clip_pitch_cache_budget_bytes() -> u64 {
+    *CLIP_PITCH_CACHE_BUDGET_BYTES.get_or_init(|| {
+        let mb = std::env::var("HIFISHIFTER_PITCH_CACHE_BUDGET_MB")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|v| *v > 0);
+        match mb {
+            Some(mb) => mb.saturating_mul(1024 * 1024),
+            None => {
+                (crate::audio_engine::byte_budget_cache::env_cache_budget_bytes()
+                    / CLIP_PITCH_CACHE_BUDGET_DIVISOR)
+                    .max(1024 * 1024)
+            }
+        }
+    })
+}
+
+/// 缓存条目权重：两份 f32 曲线 + key 字符串。
+fn cached_pitch_bytes(entry: &CachedClipPitch) -> u64 {
+    ((entry.midi.len() + entry.level.len()) as u64)
+        .saturating_mul(std::mem::size_of::<f32>() as u64)
+        .saturating_add(entry.key.len() as u64)
+}
+
+type ClipPitchByteCache = ByteBudgetCache<String, CachedClipPitch>;
+
+pub(crate) fn global_cache() -> &'static Mutex<ClipPitchByteCache> {
+    GLOBAL_CLIP_PITCH_CACHE.get_or_init(|| {
+        Mutex::new(ByteBudgetCache::new(
+            clip_pitch_cache_max_entries(),
+            clip_pitch_cache_budget_bytes(),
+        ))
+    })
 }
 
 fn global_inflight() -> &'static Mutex<HashSet<String>> {
     GLOBAL_CLIP_PITCH_INFLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+// ── 分析代次（generation）：让在途分析线程在工程切换后自行放弃 ──────────────────
+//
+// 音高分析是"整份源音频解码 + 全量 FCPE 推理"的重活，单条任务在长素材上可达
+// 分钟级。分析线程是游离的（无 JoinHandle），无法 join 或 abort，因此用代次令牌
+// 做协作式取消：切换工程时递增代次，线程在关键节点（拿到结果后、写缓存前）比对
+// 自己出发时的代次，不一致就丢弃结果并退出。
+//
+// 【为什么必须丢弃而不是照常写入】结果缓存的 key 由源文件内容签名派生，新工程里
+// 没有任何 clip 能生成同一个 key —— 照常写入等于往全局缓存塞一条永远不可达、
+// 也无人清理的常驻条目，正是"切换工程后内存不降"的直接来源。
+//
+// 同一模式在 `commands::channel_scan` 里已用于声道扫描（`bump_generation`），此处
+// 保持一致。
+static PITCH_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 递增分析代次：所有已出发的分析线程在下一个检查点放弃结果。
+pub fn bump_pitch_generation() -> u64 {
+    PITCH_GENERATION.fetch_add(1, AtomicOrdering::AcqRel) + 1
+}
+
+/// 当前分析代次。分析线程出发时记录，检查点比对。
+pub fn current_pitch_generation() -> u64 {
+    PITCH_GENERATION.load(AtomicOrdering::Acquire)
+}
+
+fn release_inflight(key: &str) {
+    let mut set = global_inflight().lock().unwrap_or_else(|e| e.into_inner());
+    set.remove(key);
+}
+
+/// 音高分析相关进程级状态的内存快照（诊断用）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PitchCacheMemoryStats {
+    /// 缓存条目数（每个条目 = 一个源文件的全量曲线）。
+    pub entries: usize,
+    /// 全部条目的估算字节数。
+    pub total_bytes: u64,
+    /// 最大单条目的字节数。
+    pub largest_entry_bytes: u64,
+    /// 在途分析任务数。
+    pub inflight: usize,
+}
+
+/// 估算音高分析缓存的驻留内存。
+pub fn pitch_cache_memory_stats() -> PitchCacheMemoryStats {
+    let mut stats = PitchCacheMemoryStats::default();
+    if let Ok(cache) = global_cache().lock() {
+        stats.entries = cache.len();
+        stats.total_bytes = cache.total_bytes();
+        for (_, entry) in cache.iter() {
+            stats.largest_entry_bytes = stats.largest_entry_bytes.max(cached_pitch_bytes(entry));
+        }
+    }
+    if let Ok(set) = global_inflight().lock() {
+        stats.inflight = set.len();
+    }
+    stats
+}
+
+/// 清空音高分析的全部进程级状态，返回递增后的分析代次。
+///
+/// 【调用时机】新建/打开工程时必须调用 —— 缓存条目只按源文件内容签名索引，
+/// 跨工程没有语义，留着只会白占内存。用户手动"清空音高缓存"也走这里。
+///
+/// 顺序有讲究：**先递增代次**，让在途线程在其后的检查点放弃；否则它们会在我们
+/// 清空之后又把旧工程的结果写回来（清空与写入的竞态）。
+pub fn clear_pitch_analysis_state() -> u64 {
+    let generation = bump_pitch_generation();
+
+    if let Ok(mut cache) = global_cache().lock() {
+        cache.clear();
+    }
+    if let Ok(mut set) = global_inflight().lock() {
+        set.clear();
+        set.shrink_to_fit();
+    }
+    if let Ok(mut sig) = global_file_sig_cache().lock() {
+        sig.clear();
+        sig.shrink_to_fit();
+    }
+    global_batch_state().reset(0);
+
+    generation
+}
 
 fn hz_to_midi(hz: f64) -> f32 {
     if !(hz.is_finite() && hz > 1e-6) {
@@ -211,15 +355,12 @@ pub(crate) fn compute_frame_levels(mono: &[f32], sample_rate: u32, frame_period_
 
     // 窗内 max|x|：单调队列一次线性扫描（窗口随帧单调右移），
     // 避免每帧重扫 20 ms 窗（44.1 kHz 下 882 样本 × 上万帧）。
-    let mut abs: Vec<f64> = Vec::with_capacity(mono.len());
-    for &v in mono {
-        let a = (v as f64).abs();
-        abs.push(if a.is_finite() { a } else { 0.0 });
-    }
-
+    //
+    // 队列直接存 `(索引, |x|)` 而不是索引 + 一份全长的 `|x|` 副本：后者在 1 小时
+    // 素材上是 635 MB 的 f64 数组，只为做一次滑窗最大值 —— 而这里每个元素只会被
+    // 入队/出队一次，值本身随元素一起进出即可，不需要回查数组。
     let mut out = Vec::with_capacity(total_hops);
-    // 单调递减队列：存索引，队首 = 当前窗内最大值的索引。
-    let mut deque: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    let mut deque: std::collections::VecDeque<(usize, f64)> = std::collections::VecDeque::new();
     let mut next_push: usize = 0;
 
     for hop in 0..total_hops {
@@ -233,26 +374,27 @@ pub(crate) fn compute_frame_levels(mono: &[f32], sample_rate: u32, frame_period_
         }
         // 推进队列右端到 end（保持递减）。
         while next_push < end {
-            let v = abs[next_push];
-            while let Some(&back) = deque.back() {
-                if abs[back] <= v {
+            let a = (mono[next_push] as f64).abs();
+            let v = if a.is_finite() { a } else { 0.0 };
+            while let Some(&(_, back_v)) = deque.back() {
+                if back_v <= v {
                     deque.pop_back();
                 } else {
                     break;
                 }
             }
-            deque.push_back(next_push);
+            deque.push_back((next_push, v));
             next_push += 1;
         }
         // 弹出已滑出窗口左端的索引。
-        while let Some(&front) = deque.front() {
+        while let Some(&(front, _)) = deque.front() {
             if front < start {
                 deque.pop_front();
             } else {
                 break;
             }
         }
-        let peak = deque.front().map(|&i| abs[i]).unwrap_or(0.0);
+        let peak = deque.front().map(|&(_, v)| v).unwrap_or(0.0);
         out.push(if peak.is_finite() { peak as f32 } else { 0.0 });
     }
     out
@@ -442,58 +584,53 @@ fn build_clip_pitch_key(
     })
 }
 
-/// 查询 clip 分析缓存（音高 + 电平，同一条目）。
-/// - 缓存命中：直接返回 `Some`。
-/// - 缓存未命中：**不再同步计算**，直接返回 `None`。
-///   调用方应提前通过 `schedule_clip_pitch_jobs` 触发异步预计算。
-pub fn get_clip_analysis_global(
+/// 查询 clip 的**逐帧电平**缓存（DYN 的原声基线）。
+///
+/// 只克隆 `level`：调用方（`dyn_analysis`）不需要音高。旧实现把整个条目
+/// （音高 + 电平两份全长曲线）克隆出去，长素材上每次组装都要白白多拷一份
+/// 数 MB 的曲线。也**不**在未命中时同步计算 —— 调用方应提前通过
+/// `schedule_clip_pitch_jobs` 触发异步预计算。
+pub fn get_clip_level_global(
     tl: &TimelineState,
     clip: &Clip,
     root_track_id: &str,
     frame_period_ms: f64,
-) -> Option<CachedClipPitch> {
+) -> Option<Vec<f32>> {
     let ck = build_clip_pitch_key(tl, clip, root_track_id, frame_period_ms)?;
-
-    let cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
-    // 以内容哈希为 key 查找——相同源文件的多个 clip 共享同一缓存条目。
-    if let Some(found) = cache.get(&ck.key) {
-        return Some(found.clone());
-    }
-    // 缓存未命中，返回 None，等待异步预计算完成后由 ClipPitchReady 触发 snapshot rebuild。
-    None
+    let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
+    // 以内容哈希为 key 查找 —— 相同源文件的多个 clip 共享同一缓存条目。
+    cache
+        .get(&ck.key)
+        .filter(|cached| !cached.level.is_empty())
+        .map(|cached| cached.level.clone())
 }
 
-/// 查询 clip pitch MIDI 缓存（`get_clip_analysis_global` 的音高专用视图：
-/// 缓存命中但音高缺失时返回 None）。
-pub fn get_or_compute_clip_pitch_midi_global(
+/// 查询 clip 的音高（MIDI）缓存。缓存命中但音高缺失（FCPE 不可用时仍会缓存电平）
+/// 时返回 `None`。
+///
+/// 只克隆 `midi`，理由同 [`get_clip_level_global`]。
+pub fn get_clip_pitch_midi_global(
     tl: &TimelineState,
     clip: &Clip,
     root_track_id: &str,
     frame_period_ms: f64,
-) -> Option<CachedClipPitch> {
-    get_clip_analysis_global(tl, clip, root_track_id, frame_period_ms)
+) -> Option<Vec<f32>> {
+    let ck = build_clip_pitch_key(tl, clip, root_track_id, frame_period_ms)?;
+    let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
+    cache
+        .get(&ck.key)
         .filter(|cached| !cached.midi.is_empty())
+        .map(|cached| cached.midi.clone())
 }
 
 /// 将计算结果写入全局缓存（供异步 worker 调用）。
 /// 以内容哈希（`cached.key`）为 key，相同源文件的多个 clip 共享同一条目。
 fn store_clip_pitch_cache(cached: CachedClipPitch) {
     let content_key = cached.key.clone();
+    let weight = cached_pitch_bytes(&cached);
     let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
-    cache.insert(content_key, cached);
-
-    if let Some(max_entries) = clip_pitch_cache_max_entries() {
-        if cache.len() > max_entries {
-            let keys: Vec<String> = cache
-                .keys()
-                .take(cache.len().saturating_sub(max_entries))
-                .cloned()
-                .collect();
-            for k in keys {
-                cache.remove(&k);
-            }
-        }
-    }
+    // 逐出由 `ByteBudgetCache` 按真 LRU + 字节预算处理（见缓存定义的注释）。
+    cache.insert(content_key, cached, weight);
 }
 
 /// 遍历 timeline 中所有可见 clip，对缓存未命中的 clip 异步提交分析任务
@@ -695,10 +832,17 @@ pub fn schedule_clip_pitch_jobs(
         log::error!("[pitch_clip] WARNING: app_handle is None, cannot emit events!");
     }
 
+    // 所有 job 共享同一份 timeline 快照。逐 job `tl.clone()` 会为每个待分析 clip
+    // 复制一次 `params_by_root_track` 的全部曲线（长工程下每条曲线可达 MB 级），
+    // 而这些副本会被闭包持有到线程结束 —— 10 个待分析 clip 就是十几份纯曲线副本。
+    // 分析只读 timeline，因此共享一份即可。
+    let tl_shared = Arc::new(tl.clone());
+    let generation = current_pitch_generation();
+
     for job in pending_jobs {
         let tx = engine_tx.clone();
         let app_handle_clone = app_handle.cloned();
-        let tl_clone = tl.clone();
+        let tl_shared = Arc::clone(&tl_shared);
 
         std::thread::spawn(move || {
             // 通知进度：开始分析此 clip
@@ -708,8 +852,28 @@ pub fn schedule_clip_pitch_jobs(
             );
             global_batch_state().set_current(Some(job.clip.name.clone()));
 
-            let analysis =
-                analyze_clip_pitch_and_level(&tl_clone, &job.clip, &job.root_track_id, frame_period_ms);
+            // 块间取消：工程一旦切换就尽早退出，否则旧素材还要占着分析期的工作集
+            // 一直跑到结束（那正是内存峰值的来源）。
+            let cancelled = || current_pitch_generation() != generation;
+            let analysis = analyze_clip_pitch_and_level_cancellable(
+                &tl_shared,
+                &job.clip,
+                &job.root_track_id,
+                frame_period_ms,
+                &cancelled,
+            );
+
+            // 取消检查：分析期间工程可能已切换（或缓存已被清空）。此时结果属于
+            // 旧工程 —— 既不该写进新工程的全局缓存，也不该再推进旧批次的进度。
+            if current_pitch_generation() != generation {
+                log::warn!(
+                    "[pitch_clip] thread: discarding result for clip '{}' (generation changed)",
+                    job.clip.name
+                );
+                release_inflight(&job.inflight_key);
+                return;
+            }
+
             // 只要拿到电平（或音高）就值得写缓存：DYN 的原声基线独立于声码器。
             let has_data = analysis
                 .as_ref()
@@ -753,9 +917,17 @@ pub fn schedule_clip_pitch_jobs(
             }
 
             // 无论成功与否，先清除 inflight 标记
-            {
-                let mut set = global_inflight().lock().unwrap_or_else(|e| e.into_inner());
-                set.remove(&job.inflight_key);
+            release_inflight(&job.inflight_key);
+
+            // 写缓存前再确认一次代次：进度事件与缓存写入之间仍可能发生工程切换，
+            // 而写入是不可回滚的 —— 一旦写进全局缓存，条目在新工程里既不可达
+            // 也无人清理。
+            if current_pitch_generation() != generation {
+                log::warn!(
+                    "[pitch_clip] thread: skipping cache store for clip '{}' (generation changed)",
+                    job.clip.name
+                );
+                return;
             }
 
             if let Some(analysis) = analysis.filter(|_| has_data) {
@@ -767,14 +939,14 @@ pub fn schedule_clip_pitch_jobs(
                 store_clip_pitch_cache(cached);
                 // 通知引擎缓存已就绪，触发 snapshot rebuild。
                 // 以内容哈希查找所有共享该源文件的 clip，逐一发送通知。
-                let sharing_clip_ids: Vec<String> = tl_clone
+                let sharing_clip_ids: Vec<String> = tl_shared
                     .clips
                     .iter()
                     .filter_map(|c| {
-                        let root = tl_clone
+                        let root = tl_shared
                             .resolve_root_track_id(&c.track_id)
                             .unwrap_or_default();
-                        build_clip_pitch_key(&tl_clone, c, &root, frame_period_ms)
+                        build_clip_pitch_key(&tl_shared, c, &root, frame_period_ms)
                             .filter(|other_ck| other_ck.key == job.ck.key)
                             .map(|_| c.id.clone())
                     })
@@ -805,124 +977,97 @@ pub fn schedule_clip_pitch_jobs(
 /// 分析单个 clip 的源音频，产出**音高曲线 + 逐帧电平**。
 ///
 /// 一次解码同时服务两个用途（零额外 I/O）：FCPE 推理得到 MIDI 音高，同一份
-/// mono PCM 上再做逐帧 RMS 得到电平。音高需要 FCPE（不可用时 `midi` 为空），
+/// mono PCM 上再做逐帧峰值得到电平。音高需要 FCPE（不可用时 `midi` 为空），
 /// 电平不需要 —— DYN 参数的原声基线在任何环境下都要能算出来。
+///
+/// 默认走**分块流式**路径（见 `crate::streaming_pitch`），工作集只与块长有关；
+/// 设 `HIFISHIFTER_PITCH_CHUNK_SEC=0` 可回落到一次性整份分析。
 pub fn analyze_clip_pitch_and_level(
     tl: &TimelineState,
     clip: &Clip,
     root_track_id: &str,
     frame_period_ms: f64,
 ) -> Option<ClipPitchAnalysis> {
+    analyze_clip_pitch_and_level_cancellable(tl, clip, root_track_id, frame_period_ms, &|| false)
+}
+
+/// 同 [`analyze_clip_pitch_and_level`]，但允许调用方在分块之间请求放弃。
+///
+/// 【为什么需要】超长素材的分析可持续数分钟。没有块间取消，用户切换工程后就只能
+/// 等旧素材整份跑完才开始释放 —— 而分析期的工作集正是内存峰值所在。取消命中时
+/// 返回 `None`，调用方按"无结果"处理即可（结果本来也属于已被放弃的工程）。
+pub fn analyze_clip_pitch_and_level_cancellable(
+    tl: &TimelineState,
+    clip: &Clip,
+    root_track_id: &str,
+    frame_period_ms: f64,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<ClipPitchAnalysis> {
     let ck = build_clip_pitch_key(tl, clip, root_track_id, frame_period_ms)?;
-
-    // ── 始终解码源音频全量 PCM 进行分析 ─────────────────────────────────────
-    // 缓存中存的是全量源音频的曲线，不含 trim/rate 处理。
-    // trim 截取 + rate 拉伸在推送/组装阶段按需执行。
     let source_path = clip.source_path.as_deref()?;
-    let (in_rate, in_channels, pcm) =
-        crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path)).ok()?;
-    let in_channels_usize = (in_channels as usize).max(1);
-    let in_frames = pcm.len() / in_channels_usize;
-    if in_frames < 2 {
-        return None;
-    }
-    let analysis_pcm = crate::mixdown::linear_resample_interleaved(
-        &pcm,
-        in_channels_usize,
-        in_rate,
-        ck.sample_rate,
-    );
-    let analysis_rate = ck.sample_rate;
-    let analysis_channels = in_channels_usize;
+    let want_pitch = crate::fcpe_onnx::is_available();
 
-    let analysis_frames = analysis_pcm.len() / analysis_channels;
-    if analysis_frames < 2 {
-        return None;
-    }
-
-    // ── 转 mono + 归一化 ──────────────────────────────────────────────────
-    let mut mono_raw: Vec<f64> = Vec::with_capacity(analysis_frames);
-    for f in 0..analysis_frames {
-        let base = f * analysis_channels;
-        let mut sum = 0.0f64;
-        for c in 0..analysis_channels {
-            sum += analysis_pcm[base + c] as f64;
-        }
-        mono_raw.push(sum / analysis_channels as f64);
-    }
-
-    // remove DC + clamp like other WORLD callers
-    let mut mean = 0.0f64;
-    for &v in &mono_raw {
-        mean += v;
-    }
-    mean /= mono_raw.len().max(1) as f64;
-
-    let mut max_abs = 0.0f64;
-    for &v in &mono_raw {
-        let vv = v - mean;
-        let a = vv.abs();
-        if a.is_finite() && a > max_abs {
-            max_abs = a;
-        }
-    }
-    let scale = if max_abs.is_finite() && max_abs > 1.0 {
-        (1.0 / max_abs).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
-
-    let mut mono: Vec<f64> = Vec::with_capacity(mono_raw.len());
-    for &v in &mono_raw {
-        let vv = (v - mean) * scale;
-        mono.push(vv.clamp(-1.0, 1.0));
-    }
-
-    // ── 逐帧电平（DYN 的原声基线）───────────────────────────────────────
-    // 用**去直流但未归一化**的信号：归一化（scale）是为 FCPE 准备的动态范围
-    // 拉伸，若把它算进电平，响度就会随"这一片段有多响"被反复改写，
-    // DYN 的目标电平也就失去了绝对意义。
-    let level: Vec<f32> = {
-        let dc_removed: Vec<f32> = mono_raw.iter().map(|&v| (v - mean) as f32).collect();
-        compute_frame_levels(&dc_removed, analysis_rate, ck.frame_period_ms)
-    };
-
-    // ── 音高（FCPE）──────────────────────────────────────────────────
-    // 声码器不可用时不再整体失败：电平是有独立价值的产出（DYN 不需要声码器），
-    // 因此这里只让 midi 为空。
-    let mut midi: Vec<f32> = Vec::new();
-    if crate::fcpe_onnx::is_available() {
-        let frame_period_tl_ms = ck.frame_period_ms.max(0.1);
-        let f0_floor = crate::fcpe_onnx::FCPE_F0_MIN_HZ;
-        let f0_ceil = crate::fcpe_onnx::FCPE_F0_MAX_HZ;
-
-        match crate::fcpe_onnx::infer_f0_hz(
-            &mono,
-            analysis_rate,
-            frame_period_tl_ms,
-            f0_floor,
-            f0_ceil,
-        ) {
-            Ok(f0_hz) if f0_hz.len() >= 2 => {
-                midi = Vec::with_capacity(f0_hz.len());
-                for hz in f0_hz {
-                    midi.push(hz_to_midi(hz));
+    let (f0_hz, level, was_cancelled) =
+        if crate::pitch_config::PitchAnalysisConfig::global().chunking_enabled {
+            let mut source =
+                crate::streaming_pitch::MediaFileSource::new(Path::new(source_path));
+            let params = crate::streaming_pitch::StreamParams {
+                analysis_rate: ck.sample_rate,
+                frame_period_ms: ck.frame_period_ms,
+                want_pitch,
+                chunking: crate::streaming_pitch::Chunking::from_config(),
+                estimator: &crate::streaming_pitch::FcpeEstimator,
+                cancelled,
+            };
+            match crate::streaming_pitch::analyze_streaming(&mut source, &params) {
+                Ok(streamed) => {
+                    log::debug!(
+                        "[pitch_clip] streamed analysis for clip '{}': {} pitch frames, {} level frames",
+                        clip.name,
+                        streamed.f0_hz.len(),
+                        streamed.level.len()
+                    );
+                    (streamed.f0_hz, streamed.level, streamed.cancelled)
+                }
+                Err(e) => {
+                    log::error!(
+                        "[pitch_clip] streaming analysis failed for clip '{}' ({}): {}",
+                        clip.name,
+                        clip.id,
+                        e
+                    );
+                    return None;
                 }
             }
-            Ok(_) => {
-                log::warn!(
-                    "[pitch_clip] FCPE returned too few frames for clip '{}'",
-                    clip.name
-                );
-            }
-            Err(e) => {
-                log::error!(
-                    "[pitch_clip] FCPE inference failed for clip '{}' ({}): {}",
-                    clip.name, clip.id, e
-                );
-            }
-        }
+        } else {
+            let (f0_hz, level) =
+                analyze_whole_source(Path::new(source_path), ck.sample_rate, ck.frame_period_ms, want_pitch)?;
+            (f0_hz, level, false)
+        };
+
+    if was_cancelled {
+        log::warn!(
+            "[pitch_clip] analysis cancelled for clip '{}', discarding partial result",
+            clip.name
+        );
+        return None;
     }
+
+    // ── 音高 → MIDI ─────────────────────────────────────────────────────
+    // FCPE 不可用时只让 midi 为空：电平是有独立价值的产出（DYN 不需要声码器）。
+    let mut midi: Vec<f32> = Vec::new();
+    if f0_hz.len() >= 2 {
+        midi = Vec::with_capacity(f0_hz.len());
+        for hz in f0_hz {
+            midi.push(hz_to_midi(hz));
+        }
+    } else if want_pitch {
+        log::warn!(
+            "[pitch_clip] FCPE returned too few frames for clip '{}'",
+            clip.name
+        );
+    }
+
     // ── 全量曲线直接返回 ──────────────────────────────────────────────
     // 缓存中始终存全量源音频的曲线。
     // trim 截取 + rate resample 在推送（handle_clip_pitch_ready）
@@ -952,6 +1097,124 @@ pub fn analyze_clip_pitch_and_level(
     }
 
     Some(ClipPitchAnalysis { midi, level })
+}
+
+/// 一次性整份分析：解码整个源文件，整份降混 / 去直流 / 推理。
+///
+/// 【为什么保留】它有两个用途：
+/// 1. `HIFISHIFTER_PITCH_CHUNK_SEC=0` 时的逃生阀 —— 分块会给块边界带来亚帧级的
+///    近似，怀疑分块有问题时可以一键回到"完全原样"的行为；
+/// 2. 作为分块结果的**对照基准**，回归测试逐帧比对两者（见本文件测试模块）。
+///
+/// 代价是内存与素材长度线性相关：1 小时 44.1 kHz 立体声素材峰值约 1.9 GB，因此
+/// 默认不启用。新增分析逻辑请改分块路径，不要在这里加东西。
+fn analyze_whole_source(
+    source_path: &Path,
+    analysis_rate: u32,
+    frame_period_ms: f64,
+    want_pitch: bool,
+) -> Option<(Vec<f64>, Vec<f32>)> {
+    let (in_rate, in_channels, pcm) =
+        crate::audio_utils::decode_audio_f32_interleaved(source_path).ok()?;
+    let in_channels_usize = (in_channels as usize).max(1);
+    if pcm.len() / in_channels_usize < 2 {
+        return None;
+    }
+    // 分析采样率恒为 44.1 kHz，而绝大多数素材本身就是 44.1 kHz。
+    // `linear_resample_interleaved` 在采样率相同时直接 `input.to_vec()`，也就是
+    // 把整份解码结果再拷一遍（1 小时立体声 ≈ 1.27 GB）。直接移动即可 —— 源缓冲
+    // 此后不再使用。`audio_engine/io.rs` 的解码路径已为长音频做过同样处理。
+    let analysis_pcm = if in_rate == analysis_rate {
+        pcm
+    } else {
+        let resampled = crate::mixdown::linear_resample_interleaved(
+            &pcm,
+            in_channels_usize,
+            in_rate,
+            analysis_rate,
+        );
+        // 重采样完成后解码缓冲不再需要。显式释放，否则它会随函数作用域一直存活到
+        // 分析结束 —— 长素材上那正是整份立体声 PCM。
+        drop(pcm);
+        resampled
+    };
+    let analysis_channels = in_channels_usize;
+
+    let analysis_frames = analysis_pcm.len() / analysis_channels;
+    if analysis_frames < 2 {
+        return None;
+    }
+
+    // ── 转 mono（f32）─────────────────────────────────────────────────────
+    //
+    // 【为什么用 f32 而不是 f64】FCPE 的输入本来就是 f32，它内部的第一件事就是
+    // 把整段 f64 转成 f32；电平分析只取 20 ms 窗内的峰值。用 f64 表示等于把整段
+    // 素材的驻留翻倍、再在推理入口转回来 —— 1 小时素材上是白白多出的两个
+    // 635 MB 缓冲。累加（均值 / 峰值）仍以 f64 标量进行，精度不受影响。
+    let mut mono: Vec<f32> = Vec::with_capacity(analysis_frames);
+    for f in 0..analysis_frames {
+        let base = f * analysis_channels;
+        let mut sum = 0.0f32;
+        for c in 0..analysis_channels {
+            sum += analysis_pcm[base + c];
+        }
+        mono.push(sum / analysis_channels as f32);
+    }
+    // 交错 PCM 到此不再需要。
+    drop(analysis_pcm);
+
+    // remove DC + clamp like other WORLD callers
+    let mut mean = 0.0f64;
+    for &v in &mono {
+        mean += v as f64;
+    }
+    mean /= mono.len().max(1) as f64;
+
+    let mut max_abs = 0.0f64;
+    for &v in &mono {
+        let a = (v as f64 - mean).abs();
+        if a.is_finite() && a > max_abs {
+            max_abs = a;
+        }
+    }
+    let scale = if max_abs.is_finite() && max_abs > 1.0 {
+        (1.0 / max_abs).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+
+    // ── 逐帧电平（DYN 的原声基线）───────────────────────────────────────
+    // 用**去直流但未归一化**的信号：归一化（scale）是为 FCPE 准备的动态范围
+    // 拉伸，若把它算进电平，响度就会随"这一片段有多响"被反复改写，
+    // DYN 的目标电平也就失去了绝对意义。
+    //
+    // 先算电平、再把 `mono` **原地**归一化。反过来的话就要为归一化前的形态
+    // 再留一份整段副本。
+    let level: Vec<f32> = {
+        let dc_removed: Vec<f32> = mono.iter().map(|&v| (v as f64 - mean) as f32).collect();
+        compute_frame_levels(&dc_removed, analysis_rate, frame_period_ms)
+    };
+
+    let mut f0_hz: Vec<f64> = Vec::new();
+    if want_pitch {
+        for v in mono.iter_mut() {
+            *v = (((*v as f64 - mean) * scale) as f32).clamp(-1.0, 1.0);
+        }
+        match crate::fcpe_onnx::infer_f0_hz_f32(
+            &mono,
+            analysis_rate,
+            frame_period_ms.max(0.1),
+            crate::fcpe_onnx::FCPE_F0_MIN_HZ,
+            crate::fcpe_onnx::FCPE_F0_MAX_HZ,
+        ) {
+            Ok(f0) => f0_hz = f0,
+            Err(e) => {
+                log::error!("[pitch_clip] FCPE inference failed: {e}");
+            }
+        }
+    }
+
+    Some((f0_hz, level))
 }
 
 /// 兼容包装：只要音高曲线。FCPE 不可用或推理失败时返回 None
@@ -1308,7 +1571,7 @@ pub fn invalidate_clip_pitch_cache(tl: &TimelineState, clip: &Clip) {
         return;
     };
     let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
-    cache.remove(&ck.key);
+    cache.pop(&ck.key);
 }
 
 /// 清除指定 clip 对应源文件的 inflight 标记。
@@ -1338,8 +1601,10 @@ pub fn get_clips_for_root<'a>(tl: &'a TimelineState, root_track_id: &str) -> Vec
 #[cfg(test)]
 mod tests {
     use super::{
-        assemble_nonloop_pitch_from_window, compute_frame_levels, dyn_needs_level_analysis,
-        dyn_panel_open_roots, trim_and_resample_midi,
+        analyze_whole_source, assemble_nonloop_pitch_from_window, cached_pitch_bytes,
+        clip_pitch_cache_budget_bytes, clip_pitch_cache_entry_limit, clip_pitch_cache_max_entries,
+        compute_frame_levels, dyn_needs_level_analysis, dyn_panel_open_roots, global_cache,
+        trim_and_resample_midi, CachedClipPitch, UNBOUNDED_ENTRY_CAPACITY,
     };
 
     /// Loop + 媒体时长未知 + 环绕窗口（start > end，split 产生）：
@@ -1600,5 +1865,96 @@ mod tests {
             !dyn_needs_level_analysis(&tl, "root"),
             "面板关闭后应停止分析"
         );
+    }
+
+    // ── Phase 3：结果缓存的字节预算 / 容量接线 ─────────────────────────────
+
+    /// 条目权重必须同时计入音高与电平两份曲线 —— 只算一份会让字节预算低估一半，
+    /// 长素材下预算形同虚设。
+    #[test]
+    fn cache_entry_weight_counts_both_curves() {
+        let entry = CachedClipPitch {
+            key: "abcdefgh".to_string(),
+            midi: vec![0.0; 100],
+            level: vec![0.0; 50],
+        };
+        assert_eq!(cached_pitch_bytes(&entry), (150 * 4) + 8);
+    }
+
+    /// 字节预算必须是一个有限的、远小于 PCM 预算的值 —— 无限预算等于没有预算，
+    /// 而接近 PCM 预算又会让音高曲线挤掉真正的大头（渲染 PCM）。
+    #[test]
+    fn cache_budget_is_bounded_and_below_the_pcm_budget() {
+        let pitch_budget = clip_pitch_cache_budget_bytes();
+        let pcm_budget = crate::audio_engine::byte_budget_cache::env_cache_budget_bytes();
+        assert!(pitch_budget >= 1024 * 1024, "budget unexpectedly tiny");
+        assert!(
+            pitch_budget < pcm_budget / 2,
+            "pitch budget {pitch_budget} should be a small fraction of the PCM budget {pcm_budget}"
+        );
+    }
+
+    /// `HIFISHIFTER_CLIP_PITCH_CACHE_MAX_ENTRIES=0` 的语义是"不限条目数"，对外
+    /// 汇报应体现为 `None` 而不是一个巨大的魔数。
+    #[test]
+    fn entry_limit_reports_none_for_the_unbounded_sentinel() {
+        match clip_pitch_cache_entry_limit() {
+            Some(cap) => assert!(cap < UNBOUNDED_ENTRY_CAPACITY),
+            None => assert!(clip_pitch_cache_max_entries() >= UNBOUNDED_ENTRY_CAPACITY),
+        }
+    }
+
+    /// 缓存实例必须真的带上字节预算（而不是一个无穷大值）。
+    #[test]
+    fn global_cache_is_wired_to_a_byte_budget() {
+        let cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(cache.budget_bytes(), clip_pitch_cache_budget_bytes());
+    }
+
+    /// 逃生阀覆盖：`HIFISHIFTER_PITCH_CHUNK_SEC=0` 会切到一次性整份路径
+    /// （`analyze_whole_source`）。该分支默认不被任何测试执行 —— 一旦腐化，只有
+    /// 用户手动改环境变量才会暴露，因此这里用一个真实 WAV 走通它。
+    #[test]
+    fn whole_source_fallback_analyses_a_real_wav() {
+        let sr = 44_100u32;
+        let dir = std::env::temp_dir().join(format!("hifi-whole-src-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("tone.wav");
+
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: sr,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        {
+            let mut writer = hound::WavWriter::create(&path, spec).expect("create wav");
+            // 0.5 s 440 Hz 正弦，左右相同。
+            for i in 0..(sr as usize / 2) {
+                let t = i as f32 / sr as f32;
+                let v = (0.5
+                    * (2.0 * std::f32::consts::PI * 440.0 * t).sin()
+                    * i16::MAX as f32) as i16;
+                writer.write_sample(v).expect("write L");
+                writer.write_sample(v).expect("write R");
+            }
+            writer.finalize().expect("finalize wav");
+        }
+
+        let (f0, level) =
+            analyze_whole_source(&path, sr, 5.0, false).expect("whole-source analysis failed");
+        // want_pitch=false 时不应触碰检测器（FCPE 缺失的环境下也要能跑）。
+        assert!(f0.is_empty(), "want_pitch=false must not run the detector");
+        // 0.5 s @ 5 ms 帧 → 100 帧。
+        assert_eq!(level.len(), 100, "unexpected level frame count");
+        // 满量程 0.5 的正弦：峰值电平应落在 0.5 附近。
+        let peak = level.iter().copied().fold(0.0f32, f32::max);
+        assert!(
+            (peak - 0.5).abs() < 0.05,
+            "peak level {peak} is not near the expected 0.5"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

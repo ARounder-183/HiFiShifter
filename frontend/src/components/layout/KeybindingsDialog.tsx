@@ -392,7 +392,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                                         px="2"
                                         py="1"
                                         style={{
-                                            borderRadius: 4,
+                                            borderRadius: "var(--qt-radius-sm)",
                                             background: isRecording ? "var(--accent-3)" : undefined,
                                             minHeight: 36,
                                         }}
@@ -484,7 +484,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                     px="3"
                     style={{
                         background: "var(--red-3)",
-                        borderRadius: 6,
+                        borderRadius: "var(--qt-radius-md)",
                         marginTop: 8,
                     }}
                 >

@@ -123,6 +123,26 @@ fn build_system_info(state: &State<'_, AppState>) -> serde_json::Value {
         },
         "gpuDevices": super::onnx_status::get_gpu_devices(),
         "dmlAdapters": super::onnx_status::get_dml_adapters(),
+        "memory": build_memory_info(),
+    })
+}
+
+/// 内存相关诊断：进程级缓存的驻留规模。
+///
+/// 【为什么放进诊断包】"导入长音频后内存不降"这类问题只有现场数据能定位 ——
+/// 让用户导出诊断包时顺手带上各缓存的条目数与字节数，比事后试图复现便宜得多。
+/// 关注点：`clipPitchCache.totalBytes` 是否远大于 `largestEntryBytes`（条目泄漏），
+/// 以及 `inflight` 在工程切换后是否归零（分析线程未退出）。
+fn build_memory_info() -> serde_json::Value {
+    let pitch = crate::pitch_clip::pitch_cache_memory_stats();
+    serde_json::json!({
+        "clipPitchCache": {
+            "entries": pitch.entries,
+            "totalBytes": pitch.total_bytes,
+            "largestEntryBytes": pitch.largest_entry_bytes,
+            "inflight": pitch.inflight,
+            "entryLimit": crate::pitch_clip::clip_pitch_cache_entry_limit(),
+        },
     })
 }
 

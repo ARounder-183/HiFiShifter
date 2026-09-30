@@ -309,10 +309,25 @@ export function AppDialog({
 
     const busy = pendingActionId !== null;
 
+    /*
+     * 【为什么要自己补主题作用域】Radix 把 Dialog 的内容 portal 到 `<body>`，并用它自己的
+     * `<Theme asChild>` 只补 `radix-themes` 类 —— 本应用挂在外壳上的 `qt-theme` 类**不会**
+     * 跟过来。而 `--qt-*` 里的**派生令牌**（值形如 `var(--accent-9)` 的 `--qt-accent` /
+     * `--qt-focus-ring`）必须在与 `--accent-9` 相同的作用域里求值，否则会变成无效值并被后代
+     * 继承 —— 表现为 `bg-qt-accent` 解析成 `transparent`（导出进度条的填充条就是这么消失的，
+     * 详见 `src/index.css` 里 `.radix-themes` 规则的说明）。
+     *
+     * 模式取自 `<html data-theme>`：`AppThemeProvider` 在 render 期写入（幂等），所以这里读到
+     * 的就是当帧模式；拿不到时（测试环境未挂 Provider）**不加类**，行为与修复前一致。
+     */
+    const themeMode = document.documentElement.dataset.theme;
+    const themeScopeClass =
+        themeMode === "dark" || themeMode === "light" ? `qt-theme ${themeMode}` : null;
+
     return (
         <Dialog.Root open={open} onOpenChange={requestClose}>
             <Dialog.Content
-                className={cx("app-dialog flex flex-col", className)}
+                className={cx("app-dialog flex flex-col", themeScopeClass, className)}
                 style={{
                     maxWidth: SIZE_PX[size],
                     // 高度上限统一：小窗口上内容滚动而不是溢出屏幕。
@@ -345,8 +360,17 @@ export function AppDialog({
                  * `<form>`，靠浏览器原生提交语义才不需要为每个输入框手工接
                  * keydown。单行输入里 Enter 提交、多行 textarea 里 Enter 换行，
                  * 两种行为都由引擎给出，无需特判。
+                 *
+                 * 【为什么要 `noValidate`】这里借用的只是"隐式提交"这一个语义，
+                 * **不**要浏览器的原生校验：它会在提交前拦下表单并弹出与本应用无关
+                 * 的气泡（"请输入一个有效的值…"）。真实案例：数值字段的原生 `step`
+                 * 一旦大于 1，任何非整数倍的值都会被判成 `stepMismatch`（渲染缓存的
+                 * 「音频块大小下限」默认 4、步长 16，一按保存就弹）。本应用的取值
+                 * 合法性由各自的处理器表达（输入即夹紧、提交时规范化），因此这里
+                 * 明确关掉原生校验 —— 全仓没有任何 `required` / `pattern` /
+                 * `type="email"`，关掉它不会漏掉真正的校验。
                  */}
-                <form onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col">
+                <form onSubmit={onSubmit} noValidate className="flex min-h-0 flex-1 flex-col">
                     {/*
                      * 隐藏的默认提交按钮必须位于**树序最前**。
                      *

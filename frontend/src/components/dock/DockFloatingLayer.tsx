@@ -19,14 +19,28 @@ import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { EnterIcon, ExternalLinkIcon } from "@radix-ui/react-icons";
 
 import { getDockDragState, subscribeDockDrag } from "../../features/dock/dockDragStore";
-import { closeForm, dockFormTo, raiseFloat, setFloatGeometry } from "../../features/dock/dockSlice";
+import {
+    closeForm,
+    dockFormTo,
+    raiseFloat,
+    renameForm,
+    setFloatGeometry,
+} from "../../features/dock/dockSlice";
 import { findMainTabset } from "../../features/dock/dockSchema";
 import { detachFormToWindow, maximizeActive } from "../../features/dock/dockApi";
-import { getPanel } from "../../features/dock/panelRegistry";
+import {
+    displayTitleOf,
+    isPanelDetachable,
+    panelTitleOf,
+    synthesizePanelDefinition,
+} from "../../features/dock/dockPanel";
+import { isPanelForm } from "../../features/dock/dockTree";
 import type { DockForm, DockRect } from "../../features/dock/dockTypes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { resolveFloatRect } from "../../features/dock/dockDropTarget";
 import { beginFloatDrag } from "./dockDragController";
+import { DockInlineRename } from "./DockInlineRename";
+import { DockSubRoot } from "./DockSubRoot";
 import { floatTitleBarActions } from "./floatTitleBar";
 import { useDockSlot } from "./useDockSlot";
 
@@ -71,24 +85,59 @@ function DockFloatWindow({
     active: boolean;
 }) {
     const dispatch = useAppDispatch();
-    const { t, tf } = useI18n();
-    const slotRef = useDockSlot(form.id);
+    const layout = useAppSelector((s) => s.dock.layout);
+    const { t, tf, tVars } = useI18n();
+    // 浮动面板没有宿主 div（它渲染自己的树）：槽位机制只服务叶窗体。
+    const floatingIsPanel = isPanelForm(form);
+    const slotRef = useDockSlot(floatingIsPanel ? null : form.id);
     const geometry = form.float;
     const [dragging, setDragging] = useState(false);
+    /** 行内重命名中（双击面板标题进入）：标题文本被输入框替换。 */
+    const [renaming, setRenaming] = useState(false);
     const elementRef = useRef<HTMLDivElement | null>(null);
 
     // 拖拽中跟随实时几何，松手才落库（与分隔条同一策略）。
     const drag = useSyncExternalStore(subscribeDockDrag, getDockDragState, getDockDragState);
     const liveRect = drag?.started && drag.formId === form.id ? drag.floatRect : null;
 
-    const definition = getPanel(form.panelId);
-    const title = form.title ?? (definition ? tf(definition.titleKey) : form.panelId);
+    const definition = synthesizePanelDefinition(layout, form.id);
     /**
-     * 标题栏动作矩阵：折叠 / 拆分 / 重停的可见性由注册表声明一次给出。
-     * `redock` 与拖拽停靠共用同一条 `dockable` 声明 —— 拖不进去的面板
-     * 也不能留一枚按钮绕道 dock 进去（见 `floatTitleBar.ts`）。
+     * 标题：用户重命名 > 内容派生（面板）> 注册表标题。
+     *
+     * 【面板为什么从内容派生】组合出来的面板若永远叫"面板"，屏幕上同时浮着
+     * 三个面板时无法分辨谁是谁。让它显示活动成员的标题，表现得像一个正常的
+     * 窗口标题；成员多于一个时附带数量。设置可关（`panelTitleFromChild`）。
+     */
+    const titleFromChild = useAppSelector((s) => s.dock.settings.panelTitleFromChild);
+    const title =
+        form.title ??
+        (isPanelForm(form)
+            ? titleFromChild
+                ? panelTitleOf(layout, form.id, tf)
+                : tf("dock_panel_title")
+            : definition
+              ? tf(definition.titleKey)
+              : form.panelId);
+    /**
+     * 标题栏动作矩阵：折叠 / 拆分 / 重停的可见性由定义给出 —— 叶窗体读注册表
+     * 声明，面板读**派生**声明（全体成员可拆才可拆）。`redock` 与拖拽停靠共用
+     * 同一条 `dockable` 声明 —— 拖不进去的面板也不能留一枚按钮绕道 dock 进去。
      */
     const actions = floatTitleBarActions(definition);
+    /**
+     * 不可拆时的解释：普通窗体是固定文案；面板指出**是谁挡住了**（递归到最内层
+     * 的成员），否则用户面对一枚点不动的按钮无从下手。
+     */
+    const detachBlockedReason = isPanelForm(form)
+        ? (() => {
+              const verdict = isPanelDetachable(layout, form.id);
+              if (verdict.ok) return null;
+              const names = verdict.blockedBy
+                  .map((id) => displayTitleOf(layout, id, tf))
+                  .join(", ");
+              return tVars("dock_detach_blocked_by", { names });
+          })()
+        : null;
     const doubleClickAction = useAppSelector((s) => s.dock.settings.doubleClickHeaderAction);
 
     /**
@@ -254,6 +303,11 @@ function DockFloatWindow({
             data-maximized={maximized ? "true" : "false"}
             data-minimized={minimized ? "true" : "false"}
             data-dragging={dragging ? "true" : "false"}
+            /* 拖拽落点的第三个来源：浮窗自己是可停靠目标（拖到另一浮窗上 =
+               组合成面板；拖到浮动面板上 = 停入它的树）。正在被拖的那枚由
+               data-dragging 标记，采集时跳过。 */
+            data-dock-float={form.id}
+            data-dock-float-panel={isPanelForm(form) ? "true" : undefined}
             style={
                 maximized
                     ? { left: 0, top: 0, width: "100vw", height: "100vh", zIndex }
@@ -265,6 +319,11 @@ function DockFloatWindow({
                 className="hs-dock-float-title"
                 onPointerDown={onTitlePointerDown}
                 onDoubleClick={() => {
+                    // 面板的名称区域双击 = 进入行内重命名（先于设置的默认动作）。
+                    if (floatingIsPanel) {
+                        setRenaming(true);
+                        return;
+                    }
                     if (doubleClickAction === "none") return;
                     if (doubleClickAction === "maximize") {
                         dispatch(raiseFloat(form.id));
@@ -309,7 +368,20 @@ function DockFloatWindow({
                 // 停靠修饰键），悬停时再弹一条更长的提示只会挡住标题栏本身。停靠态的
                 // 抓手仍保留悬停提示（见 `DockTabBar`）。
             >
-                <span className="hs-dock-tab-label">{title}</span>
+                {renaming && floatingIsPanel ? (
+                    <DockInlineRename
+                        initial={form.title ?? ""}
+                        placeholder={title}
+                        ariaLabel={tf("dock_rename_tab")}
+                        onCommit={(next) => {
+                            dispatch(renameForm({ formId: form.id, title: next }));
+                            setRenaming(false);
+                        }}
+                        onCancel={() => setRenaming(false)}
+                    />
+                ) : (
+                    <span className="hs-dock-tab-label">{title}</span>
+                )}
                 <div className="hs-dock-tabbar-spacer" />
                 <button
                     type="button"
@@ -338,12 +410,12 @@ function DockFloatWindow({
                         <ExternalLinkIcon />
                     </button>
                 ) : actions.detach === "unsupported" ? (
-                    // 不可拆的面板给出**解释**而不是一个点不动的按钮：时间轴与
-                    // 参数编辑器带着 WebGL 上下文与波形缓存，跨窗口必须重新挂载，
-                    // 代价是数秒卡顿，因此不支持。
+                    // 不可拆的面板给出**解释**而不是一个点不动的按钮：普通窗体是
+                    // 固定文案（时间轴与参数编辑器带着 WebGL 上下文与波形缓存，
+                    // 跨窗口必须重新挂载，代价是数秒卡顿）；面板则指出是谁挡住了。
                     <span
                         className="hs-dock-tabbar-action"
-                        data-tooltip={tf("dock_detach_unsupported")}
+                        data-tooltip={detachBlockedReason ?? tf("dock_detach_unsupported")}
                         aria-hidden
                         style={{ opacity: 0.4, cursor: "default" }}
                     >
@@ -384,7 +456,12 @@ function DockFloatWindow({
             </div>
 
             <div className="hs-dock-float-body">
-                <div ref={slotRef} className="h-full w-full" />
+                {floatingIsPanel && form.childRootId ? (
+                    // 浮动面板：body 里是它自己的布局根，不是宿主槽位。
+                    <DockSubRoot rootId={form.childRootId} kind="panel" />
+                ) : (
+                    <div ref={slotRef} className="h-full w-full" />
+                )}
             </div>
 
             {!maximized && !minimized

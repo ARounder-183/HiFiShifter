@@ -55,6 +55,9 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "layout.focusNext": { key: "f6" },
     "layout.focusPrev": { key: "f6", shift: true },
     "layout.maximize": { key: "m", ctrl: true, shift: true },
+    // 面板：新建/解散不设默认键 —— 低频操作，菜单入口即可；可在此绑定。
+    "layout.newPanel": { key: "__none__" },
+    "layout.dissolvePanel": { key: "__none__" },
 
     // 工程
     "project.new": { key: "n", ctrl: true },
@@ -668,6 +671,14 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     },
     "layout.maximize": {
         labelKey: "kb_layout_maximize",
+        group: "layout",
+    },
+    "layout.newPanel": {
+        labelKey: "kb_layout_new_panel",
+        group: "layout",
+    },
+    "layout.dissolvePanel": {
+        labelKey: "kb_layout_dissolve_panel",
         group: "layout",
     },
 };

@@ -10,19 +10,34 @@ pub struct PitchAnalysisConfig {
     pub vad_merge_gap_ms: f64, // Task 4.3: Merge gap threshold
     pub chunk_sec: f64,
     pub chunk_ctx_sec: f64,
+    /// 是否启用分块流式分析。
+    ///
+    /// 显式设 `HIFISHIFTER_PITCH_CHUNK_SEC=0` 可关闭分块，回落到一次性整份分析。
+    /// 这是超长素材内存问题的逃生阀：整份路径在素材不大时结果更"原样"（无块边界
+    /// 近似），也方便对照排查分块引入的差异。
+    pub chunking_enabled: bool,
 }
 
 impl PitchAnalysisConfig {
     pub fn global() -> &'static Self {
         static CFG: OnceLock<PitchAnalysisConfig> = OnceLock::new();
-        CFG.get_or_init(|| PitchAnalysisConfig {
-            analysis_sr: env_u32("HIFISHIFTER_PITCH_ANALYSIS_SR").unwrap_or(16000),
-            // Task 4.6: VAD RMS threshold configurable (default 0.02)
-            silence_rms_threshold: env_f64("HIFISHIFTER_VAD_RMS_THRESHOLD").unwrap_or(0.02),
-            // Task 4.3: Merge gap threshold (default 50ms)
-            vad_merge_gap_ms: env_f64("HIFISHIFTER_VAD_MERGE_GAP_MS").unwrap_or(50.0),
-            chunk_sec: env_f64("HIFISHIFTER_PITCH_CHUNK_SEC").unwrap_or(30.0),
-            chunk_ctx_sec: env_f64("HIFISHIFTER_PITCH_CHUNK_CTX_SEC").unwrap_or(0.3),
+        CFG.get_or_init(|| {
+            // 注意 `env_f64` 会过滤掉 0，因此"关闭"要单独判一次原始字符串。
+            let chunk_env = std::env::var("HIFISHIFTER_PITCH_CHUNK_SEC").ok();
+            let chunking_enabled = chunk_env
+                .as_deref()
+                .map(|raw| raw.trim().parse::<f64>().map(|v| v > 0.0).unwrap_or(true))
+                .unwrap_or(true);
+            PitchAnalysisConfig {
+                analysis_sr: env_u32("HIFISHIFTER_PITCH_ANALYSIS_SR").unwrap_or(16000),
+                // Task 4.6: VAD RMS threshold configurable (default 0.02)
+                silence_rms_threshold: env_f64("HIFISHIFTER_VAD_RMS_THRESHOLD").unwrap_or(0.02),
+                // Task 4.3: Merge gap threshold (default 50ms)
+                vad_merge_gap_ms: env_f64("HIFISHIFTER_VAD_MERGE_GAP_MS").unwrap_or(50.0),
+                chunk_sec: env_f64("HIFISHIFTER_PITCH_CHUNK_SEC").unwrap_or(30.0),
+                chunk_ctx_sec: env_f64("HIFISHIFTER_PITCH_CHUNK_CTX_SEC").unwrap_or(0.3),
+                chunking_enabled,
+            }
         })
     }
 }

@@ -329,6 +329,7 @@ pub(super) fn save_synthesized(
         quality_preset: crate::mixdown::QualityPreset::Export,
         cancel_flag: None,
         progress: None,
+        cache_stats: None,
     };
 
     // 3. 直接调用 mixdown 模块进行高质量重新渲染并写入目标路径
@@ -469,6 +470,7 @@ pub(super) fn save_separated(state: State<'_, AppState>, output_dir: String) -> 
             quality_preset: crate::mixdown::QualityPreset::Export,
             cancel_flag: None,
             progress: None,
+            cache_stats: None,
         };
 
         match crate::mixdown::render_mixdown_to_file(&sub_tl, &out_path, opts) {
@@ -1011,6 +1013,8 @@ pub(super) fn export_audio_advanced(
             );
 
             let app_handle_for_progress = state.app_handle.get().cloned();
+            // 复用/回填统计：随结果返回，供界面与日志报告"复用了 N 个片段"。
+            let cache_stats = Arc::new(crate::mixdown::MixdownCacheStats::default());
             let opts = crate::mixdown::MixdownOptions {
                 sample_rate: requested_sample_rate,
                 start_sec,
@@ -1037,6 +1041,7 @@ pub(super) fn export_audio_advanced(
                         );
                     })
                 }),
+                cache_stats: Some(Arc::clone(&cache_stats)),
             };
 
             match crate::mixdown::render_mixdown_to_file(&timeline, &out_path, opts) {
@@ -1066,9 +1071,12 @@ pub(super) fn export_audio_advanced(
                         },
                     );
 
+                    let (cache_reused, cache_stored) = cache_stats.snapshot();
                     serde_json::json!({
                         "ok": true,
                         "mode": "project",
+                        "cache_reused": cache_reused,
+                        "cache_stored": cache_stored,
                         "path": out_path.display().to_string(),
                         "output_dir": out_path
                             .parent()
@@ -1082,12 +1090,15 @@ pub(super) fn export_audio_advanced(
                 }
                 Err(e) => {
                     if e == "export_cancelled" {
+                        // 取消：**不报进度值**（`progress: None`）。此前这里报 `1.0`，
+                        // 等于宣称"导出完成"——前端会在事件到达瞬间把进度条推到 100%
+                        // （事件到达即单调推进），任何"取消后"的界面都会读到这个假值。
                         emit_export_audio_progress(
                             &state,
                             ExportAudioProgressEvent {
                                 active: false,
                                 mode: Some(ExportAudioMode::Project),
-                                progress: Some(1.0),
+                                progress: None,
                                 current: Some(1),
                                 total: Some(1),
                             },
@@ -1196,6 +1207,11 @@ pub(super) fn export_audio_advanced(
             }
 
             let total_targets = resolved_targets.len();
+            // 复用/回填统计：多个目标共用一份（随结果返回，见下方 JSON）。
+            let cache_stats = Arc::new(crate::mixdown::MixdownCacheStats::default());
+            // `current` 的语义（全流程统一）：**正在处理的目标序号（1-based）**。
+            // 这里的 0 只表示"尚未开始"；目标内的 intra 事件与循环尾的边界事件都用
+            // `target_index + 1`，因此标签从 0/N 起步后只会逐目标递增，不会跳变。
             emit_export_audio_progress(
                 &state,
                 ExportAudioProgressEvent {
@@ -1381,8 +1397,9 @@ pub(super) fn export_audio_advanced(
                     cancel_flag: Some(cancel_flag.clone()),
                     // 细粒度进度：本目标内的混音比例映射进整体进度，公式与
                     // "渲染中"同构 —— (已完成目标数 + 目标内比例) / 目标总数。
-                    // current 取"正在处理的目标序号"，文件边界处仍由下方循环尾
-                    // 的权威 emit 收口（两者在边界处数值一致，不会跳变）。
+                    // `current` 取"正在处理的目标序号"（语义见上方初值处的说明）；
+                    // 文件边界处仍由下方循环尾的权威 emit 收口（两者在边界处数值
+                    // 一致，不会跳变）。
                     progress: app_handle_for_progress.map(|handle| {
                         crate::mixdown::ProgressCallback::new(move |intra: f64| {
                             let overall = if total_targets == 0 {
@@ -1402,6 +1419,7 @@ pub(super) fn export_audio_advanced(
                             );
                         })
                     }),
+                    cache_stats: Some(Arc::clone(&cache_stats)),
                 };
 
                 match crate::mixdown::render_mixdown_to_file(&sub_timeline, &out_path, opts) {
@@ -1481,15 +1499,19 @@ pub(super) fn export_audio_advanced(
                 ExportAudioProgressEvent {
                     active: false,
                     mode: Some(ExportAudioMode::Separated),
-                    progress: Some(1.0),
+                    // 取消时**不报进度值**：见 project 分支的说明 —— 取消不是"完成"。
+                    progress: if cancelled { None } else { Some(1.0) },
                     current: Some(total_targets),
                     total: Some(total_targets),
                 },
             );
 
+            let (cache_reused, cache_stored) = cache_stats.snapshot();
             serde_json::json!({
                 "ok": all_ok,
                 "mode": "separated",
+                "cache_reused": cache_reused,
+                "cache_stored": cache_stored,
                 "cancelled": cancelled,
                 "count": results.len(),
                 "tracks": results,
@@ -1658,6 +1680,7 @@ pub(super) fn quick_export_selected_clips(
             quality_preset: crate::mixdown::QualityPreset::Export,
             cancel_flag: None,
             progress: None,
+            cache_stats: None,
         },
     ) {
         Ok(result) => {

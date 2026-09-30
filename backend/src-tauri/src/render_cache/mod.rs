@@ -69,6 +69,8 @@ pub struct RuntimeSettingsSnapshot {
     pub write_mode: WriteMode,
     pub verify_checksum: bool,
     pub min_free_disk_bytes: u64,
+    /// 导出音频时是否复用渲染缓存（管理面板的设置；默认开启）。
+    pub export_reuse_enabled: bool,
     /// 生效的缓存根目录（已解析 custom / system）。
     pub base_dir: PathBuf,
 }
@@ -95,6 +97,7 @@ fn default_runtime() -> Runtime {
             max_entry_bytes: 512 * 1024 * 1024,
             write_mode: WriteMode::Immediate,
             verify_checksum: true,
+            export_reuse_enabled: true,
             min_free_disk_bytes: 0,
             base_dir: system_dir.clone(),
         },
@@ -316,6 +319,7 @@ pub fn apply_settings(settings: &crate::config::RenderCacheSettings) {
             max_entry_bytes: normalized.max_entry_bytes(),
             write_mode: WriteMode::from_setting(&normalized.write_mode),
             verify_checksum: normalized.verify_checksum,
+            export_reuse_enabled: normalized.export_reuse_enabled,
             min_free_disk_bytes: normalized.min_free_disk_bytes(),
             base_dir: resolved,
         };
@@ -337,6 +341,14 @@ pub fn apply_settings(settings: &crate::config::RenderCacheSettings) {
 /// 是否启用持久化缓存。
 pub fn enabled() -> bool {
     runtime_snapshot().enabled
+}
+
+/// 导出音频时是否复用渲染缓存。
+///
+/// 与总开关 [`enabled`] 分开：总开关控制"要不要这个缓存"，本项控制"**导出**要不要
+/// 读/写它"。关掉它之后导出总是自行渲染，缓存仍照常服务预览与播放。
+pub fn export_reuse_enabled() -> bool {
+    runtime_snapshot().export_reuse_enabled
 }
 
 /// 生效的缓存根目录。
@@ -889,6 +901,7 @@ mod tests {
             write_mode: WriteMode::Immediate,
             verify_checksum: true,
             min_free_disk_bytes: 0,
+            export_reuse_enabled: true,
             base_dir: std::env::temp_dir(),
         }
     }

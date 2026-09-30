@@ -376,7 +376,7 @@ function mountPerfPanel(): void {
         flexDirection: "column",
         gap: "4px",
         padding: "8px",
-        borderRadius: "6px",
+        borderRadius: "var(--qt-radius-md)",
         background: "rgba(17, 24, 39, 0.92)",
         color: "#e5e7eb",
         font: "12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace",
@@ -399,7 +399,7 @@ function mountPerfPanel(): void {
         button.textContent = label;
         Object.assign(button.style, {
             padding: "3px 8px",
-            borderRadius: "4px",
+            borderRadius: "var(--qt-radius-sm)",
             border: "1px solid rgba(229, 231, 235, 0.25)",
             background: "transparent",
             color: "inherit",

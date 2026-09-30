@@ -726,6 +726,12 @@ pub struct RenderCacheSettings {
     /// 打开工程后显示命中统计（默认开启）。
     #[serde(default = "default_true")]
     pub show_hit_stats: bool,
+    /// 导出音频时复用渲染缓存（默认开启）。
+    ///
+    /// 关闭后导出总是自行渲染（与引入复用之前的行为一致）。做成设置而不只是环境
+    /// 变量，是为了让用户能在管理面板里对比"复用 / 重渲染"的产物，也便于一键回退。
+    #[serde(default = "default_true")]
+    pub export_reuse_enabled: bool,
     /// 准入策略版本（迁移标记，不面向用户）。
     ///
     /// `0`（缺省）= 出厂于"时长下限 0.5 s"时代的配置。升级到字节准入后，
@@ -763,7 +769,17 @@ fn default_render_cache_max_entry_mb() -> u32 {
     512
 }
 fn default_render_cache_write_mode() -> String {
-    "immediate".to_string()
+    // 出厂默认「仅保存工程时写入」（`manual`）。
+    //
+    // 【为什么不是 `immediate`】渲染产物动辄几十到几百 MB，"渲染完成就写盘"把每一次
+    // 试听 / 微调都变成一次大文件写入 —— 而用户当时并没有要求留档，只是在调音。落到
+    // "保存工程"这一明确意图上，写入时机与用户对成本的预期一致；要更早留档的人可以
+    // 在设置里显式改成 `immediate`。
+    //
+    // 【只改出厂默认】`app_config.json` 里已有显式取值的用户不受影响。前端
+    // `DEFAULT_RENDER_CACHE_SETTINGS` 必须与本函数保持一致（出厂值有两份，因为前端
+    // 要在后端还没应答时就能显示设置）。
+    "manual".to_string()
 }
 fn default_render_cache_location() -> String {
     "system".to_string()
@@ -787,6 +803,7 @@ impl Default for RenderCacheSettings {
             verify_checksum: true,
             min_free_disk_mb: default_render_cache_min_free_disk_mb(),
             show_hit_stats: true,
+            export_reuse_enabled: true,
             policy_version: RENDER_CACHE_POLICY_VERSION,
         }
     }

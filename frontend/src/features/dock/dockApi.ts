@@ -19,13 +19,16 @@ import { reportFrontendError } from "../../services/frontendErrorLog";
 import { translateOutsideReact } from "../../i18n/I18nProvider";
 import { clampFloatRect, resolveFloatNearRect, resolveFloatRect } from "./dockDropTarget";
 import { findMainTabset, normalizeDockLayout } from "./dockSchema";
-import { collectTabsets, isFormVisible } from "./dockTree";
+import { collectTabsets, findTabsetOfForm, isFormVisible, isPanelForm } from "./dockTree";
+import { displayTitleOf, synthesizePanelDefinition } from "./dockPanel";
 import { getPanel, listPanels } from "./panelRegistry";
 import type { DockForm } from "./dockTypes";
 import {
     applyDockPreset,
     closeForm,
+    createEmptyPanel,
     deleteDockPreset,
+    dissolvePanel,
     dockFormTo,
     floatForm,
     focusForm,
@@ -218,9 +221,11 @@ const detachingFormIds = new Set<string>();
  * 会随布局持久化），再创建独立窗口。创建失败时**回退**为进程内浮窗 —— 面板绝不会
  * 因为"窗口没开出来"而消失。
  *
- * 【为什么只有部分面板可用】独立窗口是另一个 JS 上下文，面板必须重新挂载；带
+ * 【为什么只有部分窗体可用】独立窗口是另一个 JS 上下文，窗体必须重新挂载；带
  * WebGL 上下文/波形缓存的面板（时间轴、参数编辑器）代价过高，见
- * `PanelDefinition.detachable`。未声明的面板在此直接拒绝，调用方据此提示用户。
+ * `PanelDefinition.detachable`。**面板**的可拆性是派生的：全体成员（递归）都可
+ * 拆时它才可拆 —— 由 `synthesizePanelDefinition` 统一给出。不可拆的窗体在此
+ * 直接拒绝，调用方据此提示用户。
  */
 export async function detachFormToWindow(
     dispatch: AppDispatch,
@@ -230,7 +235,7 @@ export async function detachFormToWindow(
     const state = getState();
     const form = state.dock.layout.forms[formId];
     if (!form) return { ok: false, reason: "form-not-found" };
-    const definition = getPanel(form.panelId);
+    const definition = synthesizePanelDefinition(state.dock.layout, formId);
     if (!definition?.detachable) return { ok: false, reason: "panel-not-detachable" };
     if (detachingFormIds.has(formId)) return { ok: false, reason: "detach-in-flight" };
     detachingFormIds.add(formId);
@@ -251,8 +256,9 @@ async function detachFormToWindowInner(
     const form = state.dock.layout.forms[formId];
 
     // 标题必须**翻译后**交给窗口：`titleKey` 是 i18n 键，直接塞进系统标题栏会显示成
-    // "undo_history_title"（用户报告过）。窗体被重命名过时用用户的文本。
-    const title = form?.title ?? translateOutsideReact(definition.titleKey);
+    // "undo_history_title"（用户报告过）。窗体被重命名过时用用户的文本；面板按
+    // 内容派生（活动成员的标题）。
+    const title = displayTitleOf(state.dock.layout, formId, (key) => translateOutsideReact(key));
 
     // 【原地转换】独立窗口落在浮窗**当前**位置：先把浮窗几何解析成具体矩形（带锚点时
     // 按视口推导，否则 x/y 只是占位值），再换算成屏幕坐标。
@@ -354,15 +360,16 @@ export async function restoreDetachedWindows(
     const frame = await readMainWindowFrame();
     for (const formId of detached) {
         const form = layout.forms[formId];
-        const definition = getPanel(form.panelId);
+        // 可拆性是派生的（面板 = 全体成员可拆）；面板定义不存在时同样走派生路径。
+        const definition = synthesizePanelDefinition(layout, formId);
         if (!definition?.detachable) {
-            // 面板不再支持（例如插件被换掉）：干净地回退为进程内浮窗。
+            // 面板不再支持（例如插件被换掉、面板失去可拆成员）：干净地回退为进程内浮窗。
             dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
             continue;
         }
         const result = await openDetachedWindow({
             formId,
-            title: form.title ?? translateOutsideReact(definition.titleKey),
+            title: displayTitleOf(layout, formId, (key) => translateOutsideReact(key)),
             width: form.float?.w ?? definition.defaultWidth,
             height: form.float?.h ?? definition.defaultHeight,
             // 启动恢复：位置由浮窗几何换算（独立窗口不单独记位置，见
@@ -516,6 +523,52 @@ export function resetLayout(dispatch: AppDispatch): void {
     dispatch(resetDockLayout());
 }
 
+/**
+ * 新建一个不含任何窗体的空面板（布局菜单 / 快捷键入口）。
+ *
+ * 默认以**浮动**出现在主窗口正中（居中锚点，随主窗口缩放保持居中；连续新建
+ * 的面板级联错开 28px）：新建面板的下一步动作几乎总是"往里拖窗体"，让它浮在
+ * 眼前成为焦点，而不是挤进布局里占一格。用户随后可以把它拖停进布局，或拖到
+ * 别处 —— 那一步由用户决定。
+ */
+export function addEmptyPanel(dispatch: AppDispatch): void {
+    dispatch(createEmptyPanel({}));
+}
+
+/**
+ * 解散面板：把面板的内容交还给它的父容器。
+ *
+ * `formId` 缺省时解析**当前活动窗体**的宿主面板 —— 焦点在面板内的某个窗体上
+ * 时解散那个面板；焦点本身就是面板时解散它自己。找不到宿主面板（窗体在主根
+ * 或浮动）时是空操作。
+ */
+export function dissolvePanelCommand(
+    dispatch: AppDispatch,
+    getState: GetState,
+    formId?: string | null,
+): void {
+    const state = getState();
+    const target = formId ?? activeFormId(getState);
+    if (!target) return;
+    const hostPanelId = findHostPanelId(state.dock.layout, target);
+    if (hostPanelId) dispatch(dissolvePanel(hostPanelId));
+}
+
+/** 包含指定窗体的**最内层**面板窗体 id；窗体本身是面板时返回它自己。 */
+export function findHostPanelId(layout: DockLayout, formId: string): string | null {
+    if (isPanelForm(layout.forms[formId])) return formId;
+    for (const form of Object.values(layout.forms)) {
+        if (!isPanelForm(form) || !form.childRootId) continue;
+        const tree = layout.roots[form.childRootId];
+        if (tree && findTabsetOfForm(tree, formId)) {
+            // 更深层的面板优先：这个面板自己若也被包着，先解散外层没有意义。
+            const outer = findHostPanelId(layout, form.id);
+            return outer ?? form.id;
+        }
+    }
+    return null;
+}
+
 /** 把当前排布存为命名预设。 */
 export function savePreset(dispatch: AppDispatch, name: string): void {
     dispatch(saveDockPreset(name));
@@ -560,7 +613,7 @@ export function exportLayoutJsonFromLayout(layout: DockLayout): string {
         {
             kind: "hifishifter.layout",
             schema: layout.schema,
-            tree: layout.tree,
+            roots: layout.roots,
             forms: layout.forms,
             order: layout.order,
             floatOrder: layout.floatOrder,
@@ -582,8 +635,11 @@ export function importLayoutJson(dispatch: AppDispatch, json: string): boolean {
     if (!parsed || typeof parsed !== "object") return false;
     const normalized = normalizeDockLayout(parsed);
     // 归一化一定会产出可用布局，所以"是否导入成功"由调用方通过布局是否变化
-    // 之外的信息判断 —— 这里额外校验树非空，避免把垃圾 JSON 当成成功。
-    if (collectTabsets(normalized.tree).length === 0) return false;
+    // 之外的信息判断 —— 这里额外校验至少有一棵根非空，避免把垃圾 JSON 当成成功。
+    const hasTree = Object.values(normalized.roots).some(
+        (tree) => collectTabsets(tree).length > 0,
+    );
+    if (!hasTree) return false;
     dispatch(setDockLayout(normalized));
     return true;
 }

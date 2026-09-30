@@ -37,7 +37,7 @@ use super::types::{
 };
 use crate::pitch_clip::schedule_clip_pitch_jobs;
 
-use crate::pitch_clip::get_or_compute_clip_pitch_midi_global;
+use crate::pitch_clip::get_clip_pitch_midi_global;
 use tauri::{Emitter, Manager};
 
 // debug_eprintln! 宏现定义于 crate 根（lib.rs），全 crate 热路径可用。
@@ -1996,7 +1996,7 @@ fn emit_clip_pitch_data_for_clip(
     }
 
     // ── 音频 clip 路径：从 FCPE 缓存获取音高曲线 ──
-    let Some(cached) = get_or_compute_clip_pitch_midi_global(tl, clip, &root, frame_period_ms)
+    let Some(cached_midi) = get_clip_pitch_midi_global(tl, clip, &root, frame_period_ms)
     else {
         debug_eprintln!("[pitch:emit] clip_id={} → cache miss, skipping", clip.id);
         return;
@@ -2005,7 +2005,7 @@ fn emit_clip_pitch_data_for_clip(
     debug_eprintln!(
         "[pitch:emit] clip_id={} cached_midi_len={}",
         clip.id,
-        cached.midi.len(),
+        cached_midi.len(),
     );
 
     // 统一截取 + resample（rate==1 时 resample 实际为无损复制）
@@ -2014,7 +2014,7 @@ fn emit_clip_pitch_data_for_clip(
     // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]。
     let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
     let mut midi_curve = crate::pitch_clip::trim_and_resample_midi(
-        &cached.midi,
+        &cached_midi,
         frame_period_ms,
         trim_src_start,
         trim_src_end,

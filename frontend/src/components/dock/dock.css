@@ -18,6 +18,58 @@
     overflow: hidden;
 }
 
+/*
+ * 面板内部的布局根（嵌套停靠区）。
+ *
+ * 【为什么要有一道内描边】嵌套容器与外层标签组唯一的视觉差别是"这里还有一层
+ * 停靠结构"；没有描边时用户分不清"这只是一个标签组"和"这是一个面板"。描边
+ * 走边框变量而不是硬编码色，明暗主题自动成立。主根（data-dock-root-kind="main"）
+ * 不描边 —— 主界面不能再包一层框。
+ */
+.hs-dock-root[data-dock-root-kind="panel"] {
+    border: 1px solid var(--qt-border);
+    border-radius: var(--qt-radius-md);
+}
+
+/*
+ * 空面板的占位井。
+ *
+ * 井面同时就是停靠目标（data-dock-root 在它身上），因此整体可接收拖放；
+ * 居中提示文字告诉用户"往里拖就行"。pointer-events 关掉文字的命中 ——
+ * 拖放命中交给井面本身。
+ */
+.hs-dock-root.hs-dock-empty-root {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.hs-dock-empty-hint {
+    color: var(--qt-text-muted);
+    font-size: var(--qt-fs-xs);
+    user-select: none;
+    pointer-events: none;
+}
+
+/*
+ * 行内重命名输入框（停靠标签 / 浮动标题条共用，见 `DockInlineRename`）。
+ *
+ * 尺寸贴着 26px 的标签条；宽度在标签内由 flex 收缩（标签本身就是 flex 行），
+ * 在标题条里占满标签文本的弹性位。边框用强调色 —— 编辑态一眼可辨。
+ */
+.hs-dock-rename-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 18px;
+    padding: 0 4px;
+    border: 1px solid var(--accent-8);
+    border-radius: var(--qt-radius-sm);
+    background: var(--qt-base);
+    color: var(--qt-text);
+    font-size: var(--qt-fs-xs);
+    outline: none;
+}
+
 .hs-dock-split {
     display: flex;
     flex: 1 1 0;
@@ -190,7 +242,7 @@
     justify-content: center;
     width: 14px;
     height: 14px;
-    border-radius: 2px;
+    border-radius: var(--qt-radius-sm);
     opacity: 0;
     flex: 0 0 auto;
 }
@@ -231,7 +283,7 @@
     justify-content: center;
     width: 18px;
     height: 18px;
-    border-radius: 3px;
+    border-radius: var(--qt-radius-sm);
     color: var(--qt-text-muted);
 }
 
@@ -259,6 +311,15 @@
     height: 100%;
 }
 
+/*
+ * 面板成员的槽位里放的是它自己的布局根（不是宿主 div）：根要撑满槽位，
+ * 且槽位要变成 flex 容器来解释 `flex: 1 1 0`（与 `.hs-dock-pane` 同理）。
+ */
+.hs-dock-slot > .hs-dock-root {
+    position: absolute;
+    inset: 0;
+}
+
 /* ── 浮动窗体 ───────────────────────────────────────────────────── */
 
 .hs-dock-float {
@@ -269,7 +330,7 @@
     min-height: 120px;
     background: var(--qt-window);
     border: 1px solid var(--qt-border);
-    border-radius: 4px;
+    border-radius: var(--qt-radius-lg);
     box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
     overflow: hidden;
 }
@@ -308,6 +369,7 @@
 
 .hs-dock-float-body {
     position: relative;
+    display: flex;
     flex: 1 1 0;
     min-height: 0;
     overflow: hidden;
@@ -388,7 +450,7 @@
     position: fixed;
     background: var(--accent-a4);
     border: 2px solid var(--accent-9);
-    border-radius: 3px;
+    border-radius: var(--qt-radius-md);
     pointer-events: none;
 }
 
@@ -574,7 +636,7 @@ body[data-dock-dragging="true"] iframe {
 .hs-dock-float-preview {
     position: fixed;
     border: 2px dashed var(--accent-9);
-    border-radius: 4px;
+    border-radius: var(--qt-radius-lg);
     background: var(--accent-a2);
     pointer-events: none;
 }

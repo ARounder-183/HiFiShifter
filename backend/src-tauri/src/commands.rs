@@ -21,8 +21,8 @@ mod diagnostics;
 mod dialogs;
 #[path = "commands/file_browser.rs"]
 mod file_browser;
-#[path = "commands/layout_export.rs"]
-mod layout_export;
+#[path = "commands/json_export.rs"]
+mod json_export;
 #[path = "commands/midi.rs"]
 mod midi;
 #[path = "commands/midi_export.rs"]
@@ -1854,10 +1854,29 @@ pub async fn export_diagnostics(
 }
 
 /// 视图 → 布局 → 「导出布局...」：原生保存对话框 + 后端写文件（WebView 内
-/// 的 `<a download>` 被拦截，见 `commands/layout_export.rs` 的模块说明）。
+/// 的 `<a download>` 被拦截，见 `commands/json_export.rs` 的模块说明）。
 #[tauri::command(rename_all = "camelCase")]
 pub fn export_layout_json(json: String) -> serde_json::Value {
-    layout_export::export_layout_json(json)
+    json_export::export_json_file(
+        json,
+        "hifishifter-layout.json",
+        "Export layout",
+        "layout",
+    )
+}
+
+/// 视图 → 外观设置 → 「导出」：把当前外观主题存成 JSON。
+///
+/// 与布局导出共用一个实现 —— 外观这条路径此前用的是浏览器下载，因此**完全不起作用**
+/// （wry 拦截 `<a download>`）。默认文件名由前端给（主题名是用户起的，含非 ASCII）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn export_theme_json(json: String, default_file_name: String) -> serde_json::Value {
+    let file_name = if default_file_name.trim().is_empty() {
+        "hifishifter-theme.json".to_string()
+    } else {
+        default_file_name
+    };
+    json_export::export_json_file(json, &file_name, "Export theme", "theme")
 }
 
 /// 前端把 invoke 失败 / 全局异常回传到后端统一日志（fire-and-forget）。

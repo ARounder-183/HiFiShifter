@@ -21,12 +21,24 @@ import {
     type DockSplitDir,
     type DockSplitNode,
     type DockTabsetNode,
+    DOCK_PANEL_FORM,
+    MAIN_ROOT_ID,
 } from "./dockTypes";
 
 // ─────────────────────────────────────────────────────────────────
 // 树查询：只读遍历。放在这里而不是 `dockTypes`，是为了让类型模块保持
 // 纯声明（零运行时导出），也让"树怎么走"只有一处实现。
 // ─────────────────────────────────────────────────────────────────
+
+/** 本窗体是否是「面板」（容器窗体）：`panelId` 是保留字且持有根 id。 */
+export function isPanelForm(form: DockLayout["forms"][string] | undefined): boolean {
+    return form?.panelId === DOCK_PANEL_FORM && typeof form.childRootId === "string";
+}
+
+/** 读取一棵布局树；根条目缺失 = 空面板（返回 null，调用方渲染占位井）。 */
+export function readRoot(layout: DockLayout, rootId: string): DockNode | null {
+    return layout.roots[rootId] ?? null;
+}
 
 /** 查找包含指定窗体的标签组。 */
 export function findTabsetOfForm(node: DockNode, formId: string): DockTabsetNode | null {
@@ -79,20 +91,84 @@ export function isFormFloating(layout: DockLayout, formId: string): boolean {
 }
 
 /**
+ * 收集当前**可达**的布局根。
+ *
+ * 【为什么需要"可达"而不是"存在"】`roots` 里的每棵树都索引着若干窗体，但一个
+ * 面板窗体自己可能是关闭的 —— 关闭面板时它的整棵子树随窗体记录一起休眠
+ * （`closeForm` 只摘树的引用、留记录，这正是"重开即恢复"的机制）。于是
+ * "可见"必须是递归定义：主根永远可达；浮动面板的根可达；停靠在可达根里的
+ * 面板，其根也可达。用不动点迭代收敛（面板数量是个位数，代价可忽略）。
+ */
+export function collectReachableRootIds(layout: DockLayout): Set<string> {
+    const reachable = new Set<string>([MAIN_ROOT_ID]);
+    let changed = true;
+    while (changed) {
+        changed = false;
+        for (const formId of layout.order) {
+            const form = layout.forms[formId];
+            if (!isPanelForm(form) || !form.childRootId) continue;
+            if (reachable.has(form.childRootId)) continue;
+            // 浮动面板的根直接可达；停靠中的面板要看它自己所在根是否可达。
+            if (form.floating || formInRoots(layout, formId, reachable)) {
+                reachable.add(form.childRootId);
+                changed = true;
+            }
+        }
+    }
+    return reachable;
+}
+
+/** 窗体是否停靠在 `roots` 列出的某一棵树里（不含浮动态）。 */
+function formInRoots(
+    layout: DockLayout,
+    formId: string,
+    rootIds: ReadonlySet<string>,
+): boolean {
+    for (const rootId of rootIds) {
+        const tree = layout.roots[rootId];
+        if (tree && findTabsetOfForm(tree, formId)) return true;
+    }
+    return false;
+}
+
+/** 窗体停靠在哪棵树里；浮动态 / 已关闭返回 null（主根优先被扫到）。 */
+export function rootOfForm(layout: DockLayout, formId: string): string | null {
+    const main = layout.roots[MAIN_ROOT_ID];
+    if (main && findTabsetOfForm(main, formId)) return MAIN_ROOT_ID;
+    for (const rootId of Object.keys(layout.roots)) {
+        if (rootId === MAIN_ROOT_ID) continue;
+        if (findTabsetOfForm(layout.roots[rootId], formId)) return rootId;
+    }
+    return null;
+}
+
+/**
  * 窗体可见性 —— 派生而非存储。
  *
- * 在布局树里（已停靠）或处于浮动状态即为可见；两者皆无 = 已关闭。关闭只从
- * 树上摘除并清掉浮动标志，`forms` 记录保留，所以重开时标题、私有 props 与
- * 浮窗尺寸都能回来。
+ * 在某棵**可达**的布局树里（已停靠）或处于浮动状态即为可见；两者皆无 = 已关闭。
+ * 关闭只从树上摘除并清掉浮动标志，`forms` 记录保留，所以重开时标题、私有 props
+ * 与浮窗尺寸都能回来。"可达"而非"存在"：关闭面板时它的整棵子树随之休眠
+ * （见 `collectReachableRootIds`）。
  */
 export function isFormVisible(layout: DockLayout, formId: string): boolean {
     if (isFormFloating(layout, formId)) return true;
-    return findTabsetOfForm(layout.tree, formId) !== null;
+    for (const rootId of collectReachableRootIds(layout)) {
+        const tree = layout.roots[rootId];
+        if (tree && findTabsetOfForm(tree, formId)) return true;
+    }
+    return false;
 }
 
 /** 当前可见的窗体 id（停靠 + 浮动），供"窗口"菜单使用。 */
 export function collectVisibleForms(layout: DockLayout): string[] {
-    const docked = collectDockedForms(layout.tree);
+    const docked: string[] = [];
+    for (const rootId of collectReachableRootIds(layout)) {
+        const tree = layout.roots[rootId];
+        if (!tree) continue;
+        for (const formId of collectDockedForms(tree)) {
+            if (!docked.includes(formId)) docked.push(formId);
+        }
+    }
     const floating = layout.order.filter((id) => isFormFloating(layout, id));
     return [...docked, ...floating.filter((id) => !docked.includes(id))];
 }
@@ -139,11 +215,85 @@ export function nextZoneId(tree: DockNode): string {
     return zoneIdAllocator(tree)();
 }
 
+/**
+ * 生成一个**跨所有布局根**未占用的 Zone id。
+ *
+ * 【为什么需要布局级的分配器】zone id 此前只需在一棵树内唯一（`findZone` 只在
+ * 一棵树里找）。多根之后，zone id 会以 `data-dock-zone` 的形式同时出现在同一份
+ * DOM 里，而标签拖拽的重排是按 id 全局查 DOM 的（`resolveTabIndex`）—— 两棵
+ * 树各有一个 `z1` 会让重排命中错误的标签条。因此新分配的 id 必须跨根唯一。
+ */
+export function zoneIdAllocatorForLayout(layout: DockLayout): () => string {
+    let max = 0;
+    const scan = (node: DockNode) => {
+        const matched = /^z(\d+)$/.exec(node.id);
+        if (matched) max = Math.max(max, Number(matched[1]));
+        if (node.t === "split") {
+            scan(node.a);
+            scan(node.b);
+        }
+    };
+    for (const tree of Object.values(layout.roots)) if (tree) scan(tree);
+    return () => {
+        max += 1;
+        return `z${max}`;
+    };
+}
+
+/** 便捷形式：取下一个跨根未占用的 Zone id。 */
+export function nextZoneIdInLayout(layout: DockLayout): string {
+    return zoneIdAllocatorForLayout(layout)();
+}
+
+/**
+ * 生成一个未占用的布局根 id（`r<递增整数>`）。
+ *
+ * 与 zone id 同一套可读性约定：布局 JSON 是给人看的，`r1` / `r2` 让预设文件的
+ * diff 可读。`main` 是保留键，分配器只扫 `r<n>` 形状的键。
+ */
+export function nextRootId(layout: DockLayout): string {
+    let max = 0;
+    for (const rootId of Object.keys(layout.roots)) {
+        const matched = /^r(\d+)$/.exec(rootId);
+        if (matched) max = Math.max(max, Number(matched[1]));
+    }
+    return `r${max + 1}`;
+}
+
+/**
+ * 在指定的布局根上做一次变换。
+ *
+ * 【为什么要有它】多根之后，"取一棵树 → 变换 → 写回去"这个动作遍布所有 reducer。
+ * 让它只有一个实现点：根不存在时原样返回（空面板的树本来就缺条目，写入前先
+ * 由调用方决定要不要播种）。
+ */
+export function withRoot(
+    layout: DockLayout,
+    rootId: string,
+    transform: (tree: DockNode) => DockNode,
+): DockLayout {
+    const tree = layout.roots[rootId];
+    if (!tree) return layout;
+    const next = transform(tree);
+    if (next === tree) return layout;
+    return { ...layout, roots: { ...layout.roots, [rootId]: next } };
+}
+
 /** 按 id 查找 Zone。 */
 export function findZone(node: DockNode, zoneId: string): DockNode | null {
     if (node.id === zoneId) return node;
     if (node.t === "split") {
         return findZone(node.a, zoneId) ?? findZone(node.b, zoneId);
+    }
+    return null;
+}
+
+/** 在**所有**布局根里按 id 查找 Zone（zone id 跨根唯一，由分配器保证）。 */
+export function findZoneInLayout(layout: DockLayout, zoneId: string): DockNode | null {
+    for (const tree of Object.values(layout.roots)) {
+        if (!tree) continue;
+        const zone = findZone(tree, zoneId);
+        if (zone) return zone;
     }
     return null;
 }
@@ -250,19 +400,22 @@ export function addFormToTabset(
  * 与 `splitTabsetWith`（拆某个组）语义不同，这条用于**默认落点**：右侧停靠栏
  * 应当贴着工作区右边缘、贯通全高，而不是只在时间轴旁边开一列、下方还留着
  * 参数编辑器横跨整幅宽度。用户手动拖到某个组边缘时走的才是后者。
+ *
+ * `allocate` 允许调用方注入**布局级**的 id 分配器（见 `zoneIdAllocatorForLayout`）：
+ * 多根之后 zone id 会同时出现在同一份 DOM 里，跨根唯一性要在分配时保证。
  */
 export function splitRootWith(
     tree: DockNode,
     formId: string,
     side: "left" | "right" | "top" | "bottom",
+    allocate: () => string = zoneIdAllocator(tree),
 ): DockNode {
     const dir: DockSplitDir = side === "left" || side === "right" ? "row" : "col";
-    const alloc = zoneIdAllocator(tree);
-    const newTabset = makeTabset(alloc(), formId);
+    const newTabset = makeTabset(allocate(), formId);
     const before = side === "left" || side === "top";
     return {
         t: "split",
-        id: alloc(),
+        id: allocate(),
         dir,
         ratio: 0.5,
         fixed: null,
@@ -289,16 +442,16 @@ export function splitTabsetWith(
     tabsetId: string,
     formId: string,
     side: "left" | "right" | "top" | "bottom",
+    allocate: () => string = zoneIdAllocator(tree),
 ): DockNode {
     const target = findZone(tree, tabsetId);
     if (!target || target.t !== "tabset") return tree;
 
     const dir: DockSplitDir = side === "left" || side === "right" ? "row" : "col";
-    const alloc = zoneIdAllocator(tree);
-    const newTabset = makeTabset(alloc(), formId);
+    const newTabset = makeTabset(allocate(), formId);
     const split: DockSplitNode = {
         t: "split",
-        id: alloc(),
+        id: allocate(),
         dir,
         ratio: 0.5,
         fixed: null,
@@ -321,8 +474,9 @@ export function splitTabsetWithFixedSize(
     formId: string,
     side: "left" | "right" | "top" | "bottom",
     sizePx: number,
+    allocate: () => string = zoneIdAllocator(tree),
 ): DockNode {
-    const split = splitTabsetWith(tree, tabsetId, formId, side);
+    const split = splitTabsetWith(tree, tabsetId, formId, side, allocate);
     const created = findTabsetOfFormNew(split, tree, formId);
     if (!created) return split;
     const parent = findParentSplit(split, created.id);
@@ -362,18 +516,23 @@ export function findParentSplit(node: DockNode, zoneId: string): DockSplitNode |
  * `buildRootEdgeZones`）。调用方负责先把窗体从旧位置摘除（见 `moveForm`）。
  */
 export type DockInsertTarget =
-    | { kind: "tab"; tabsetId: string; index?: number }
-    | { kind: "split"; tabsetId: string; side: "left" | "right" | "top" | "bottom" }
-    | { kind: "root"; side: "left" | "right" | "top" | "bottom" };
+    | { kind: "tab"; rootId?: string; tabsetId: string; index?: number }
+    | { kind: "split"; rootId?: string; tabsetId: string; side: "left" | "right" | "top" | "bottom" }
+    | { kind: "root"; rootId?: string; side: "left" | "right" | "top" | "bottom" };
 
-export function insertForm(tree: DockNode, formId: string, target: DockInsertTarget): DockNode {
+export function insertForm(
+    tree: DockNode,
+    formId: string,
+    target: DockInsertTarget,
+    allocate: () => string = zoneIdAllocator(tree),
+): DockNode {
     if (target.kind === "tab") {
         return addFormToTabset(tree, target.tabsetId, formId, target.index);
     }
     if (target.kind === "root") {
-        return splitRootWith(tree, formId, target.side);
+        return splitRootWith(tree, formId, target.side, allocate);
     }
-    return splitTabsetWith(tree, target.tabsetId, formId, target.side);
+    return splitTabsetWith(tree, target.tabsetId, formId, target.side, allocate);
 }
 
 /**
@@ -391,14 +550,19 @@ export function insertForm(tree: DockNode, formId: string, target: DockInsertTar
  *
  * 返回的树保证包含该窗体（除非树本身为空，那是不可渲染状态，由上层兜底）。
  */
-export function moveForm(tree: DockNode, formId: string, target: DockInsertTarget): DockNode {
+export function moveForm(
+    tree: DockNode,
+    formId: string,
+    target: DockInsertTarget,
+    allocate: () => string = zoneIdAllocator(tree),
+): DockNode {
     const source = collectTabsets(tree).find((tabset) => tabset.tabs.includes(formId));
 
     // 无源（浮动态）：没有"摘除"这一步，直接插入。
     if (!source) {
         // 根级落点不以任何标签组为参照，摘除与否都只对根做拆分。
-        if (target.kind === "root") return insertForm(tree, formId, target);
-        if (findZone(tree, target.tabsetId)) return insertForm(tree, formId, target);
+        if (target.kind === "root") return insertForm(tree, formId, target, allocate);
+        if (findZone(tree, target.tabsetId)) return insertForm(tree, formId, target, allocate);
         // 目标组已不存在（浮窗被拖到刚被剪掉的区域）：退化为并入第一个标签组。
         const fallback = collectTabsets(tree)[0];
         return fallback ? addFormToTabset(tree, fallback.id, formId) : tree;
@@ -413,7 +577,7 @@ export function moveForm(tree: DockNode, formId: string, target: DockInsertTarge
     if (pruned === null) return tree;
 
     // 根级落点：以剪枝后的根为参照拆分（它就是用户此刻看到的全部停靠区）。
-    if (target.kind === "root") return insertForm(pruned, formId, target);
+    if (target.kind === "root") return insertForm(pruned, formId, target, allocate);
 
     // 目标组可能因摘除而被剪掉（源组就是目标组的情况上面已排除）。
     if (!findZone(pruned, target.tabsetId)) {
@@ -423,7 +587,7 @@ export function moveForm(tree: DockNode, formId: string, target: DockInsertTarge
         return addFormToTabset(pruned, fallback.id, formId);
     }
 
-    return insertForm(pruned, formId, target);
+    return insertForm(pruned, formId, target, allocate);
 }
 
 /**
@@ -438,8 +602,13 @@ export function moveForm(tree: DockNode, formId: string, target: DockInsertTarge
  * 另外顺带展开目标组：往一个折叠的标签组里放窗口，用户的意图显然是"我要看它"，
  * 让它停在折叠态等于什么都没发生。
  */
-export function dockForm(tree: DockNode, formId: string, target: DockInsertTarget): DockNode {
-    let next = moveForm(tree, formId, target);
+export function dockForm(
+    tree: DockNode,
+    formId: string,
+    target: DockInsertTarget,
+    allocate: () => string = zoneIdAllocator(tree),
+): DockNode {
+    let next = moveForm(tree, formId, target, allocate);
 
     // 兜底：搬运没落地（源不在树上且目标也失效等）→ 并入第一个标签组。
     if (!findTabsetOfForm(next, formId)) {

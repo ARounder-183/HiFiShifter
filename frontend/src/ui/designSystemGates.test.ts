@@ -195,6 +195,86 @@ function stripCommentsAndStrings(source: string, keepStrings = false): string {
     return out;
 }
 
+/** 样式表路径（颜色令牌与主题作用域的唯一真值源）。 */
+const TOKEN_CSS = join("src", "index.css");
+
+/** 样式表里的一个规则块（`选择器 { 体 }`；`context` 为祖先选择器链，便于报错定位）。 */
+interface CssBlock {
+    readonly selector: string;
+    readonly context: string;
+    readonly body: string;
+}
+
+/**
+ * 把样式表切成规则块（已剔除注释）。
+ *
+ * 【为什么需要】颜色令牌的**求值作用域**是结构事实，只有解析出"某条声明写在哪个
+ * 选择器里"才能断言它 —— 正则扫全文做不到这件事。
+ *
+ * 特殊说明：`index.css` 里没有 `@media` / `@supports`（本函数仍按栈处理嵌套，
+ * 因此将来加了也能正确给出祖先链）。
+ */
+function cssBlocks(source: string): CssBlock[] {
+    const css = source.replace(/\/\*[\s\S]*?\*\//g, "");
+    const blocks: CssBlock[] = [];
+    const open: { selector: string; bodyStart: number; chain: string }[] = [];
+    let selectorStart = 0;
+    for (let i = 0; i < css.length; i += 1) {
+        const ch = css[i];
+        if (ch === "{") {
+            const raw = css.slice(selectorStart, i);
+            // 只取"上一个块/语句之后"的文本：`@tailwind …;` 这类语句与空行不属于选择器。
+            const tail = raw.slice(Math.max(raw.lastIndexOf("}"), raw.lastIndexOf(";")) + 1);
+            const selector = tail.trim();
+            const parent = open.length > 0 ? open[open.length - 1] : null;
+            const chain = parent ? `${parent.chain} > ${selector}` : selector;
+            open.push({ selector, bodyStart: i + 1, chain });
+            selectorStart = i + 1;
+        } else if (ch === "}") {
+            const frame = open.pop();
+            if (frame) {
+                blocks.push({
+                    selector: frame.selector,
+                    context: frame.chain,
+                    body: css.slice(frame.bodyStart, i),
+                });
+            }
+            selectorStart = i + 1;
+        }
+    }
+    return blocks;
+}
+
+/** 取从 `open`（指向 `var(` 的左括号）起与之配对的右括号之间的文本。 */
+function varArgsAt(value: string, open: number): string {
+    let depth = 0;
+    for (let i = open; i < value.length; i += 1) {
+        const ch = value[i];
+        if (ch === "(") depth += 1;
+        else if (ch === ")") {
+            depth -= 1;
+            if (depth === 0) return value.slice(open + 1, i);
+        }
+    }
+    return "";
+}
+
+/** 值里**任意**一个 `var()` 是否提供了 fallback（形参顶层出现逗号）。 */
+function hasVarFallback(value: string): boolean {
+    let index = value.indexOf("var(");
+    while (index >= 0) {
+        const args = varArgsAt(value, index + 3);
+        let depth = 0;
+        for (const ch of args) {
+            if (ch === "(") depth += 1;
+            else if (ch === ")") depth -= 1;
+            else if (ch === "," && depth === 0) return true;
+        }
+        index = value.indexOf("var(", index + 1);
+    }
+    return false;
+}
+
 /** 从 barrel 解析值导出名（跳过 `type`）。 */
 function barrelValueExports(): string[] {
     const source = readFileSync(join(UI_DIR, "index.ts"), "utf8");
@@ -362,6 +442,53 @@ describe("抽象层不能空转（采用率）", () => {
         ).toEqual([]);
     });
 
+    test("圆角只从语义令牌取，没有裸 px 字面量", () => {
+        /*
+         * 【为什么禁止】圆角是**外观设置的一部分**（视图 → 外观设置 → 圆角风格，
+         * 五档）。写死 px 的圆角不跟随它 —— 用户报告的"参数编辑器工具栏的参数胶囊
+         * 没有适配圆角风格"就是这么来的：那条规则写的是 `border-radius: 6px`。
+         * 采集时全仓 30 余处写死值（对话框 10px、菜单项 7px、提示 6px、参数胶囊 6px、
+         * 停靠浮窗 4px…），全都替换成了 `var(--qt-radius-*)`。
+         *
+         * 【豁免】圆形与个别"形状"必须是字面量，逐条列在下面：
+         *   - `50%` / `9999px`：圆点、滑块拇指、开关轨道是**形状**而不是风格；
+         *   - 停靠浮窗最大化时的 `0`：贴边展开，任何圆角都会露出背景；
+         *   - 不对称角（如 `2px 0 2px 0`）：那是装饰性缺口，不是圆角档位；
+         *   - 记事本导出文档里的内联样式：它是一份**独立 HTML**，与运行中的应用
+         *     不共享令牌（导出后拿到别处打开也要正常）。
+         */
+        const ALLOWED_FILES = new Set([
+            // 导出的独立 HTML 模板（自带一套固定样式）。
+            join("src", "components", "layout", "notebook", "NotebookDialogs.tsx"),
+            // 圆角档位的**示意**磁贴：它画的正是"每个选项长什么样"，因此不能取当前值。
+            join("src", "components", "layout", "AppearanceSettingsPanel.tsx"),
+        ]);
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.(tsx?|css)$/)) {
+            if (ALLOWED_FILES.has(file)) continue;
+            const source = readFileSync(file, "utf8");
+            const literals: string[] = [];
+            if (file.endsWith(".css")) {
+                for (const match of source.matchAll(/border-radius:\s*([^;]+);/g)) {
+                    literals.push(match[1].trim());
+                }
+            } else {
+                const stripped = stripCommentsAndStrings(source);
+                for (const match of stripped.matchAll(/borderRadius:\s*(?:"([^"]*)"|'([^']*)')/g)) {
+                    literals.push((match[1] ?? match[2] ?? "").trim());
+                }
+            }
+            // 只保留"纯 px 数值"：`var(--qt-radius-*)`、`50%`、`0`、`9999px` 都不算。
+            const numeric = literals.filter((value) => /^[\d.]+px(\s+[\d.]+px)*$/i.test(value));
+            if (numeric.length > 0) offenders.push(`${file}: ${numeric.join(" / ")}`);
+        }
+        expect(
+            offenders,
+            "圆角请取 `var(--qt-radius-sm|md|lg|pill)`（或 `rounded-qt-*`）——" +
+                "写死 px 的圆角不会跟随「圆角风格」设置；确属形状/独立文档的加进本测试的豁免清单",
+        ).toEqual([]);
+    });
+
     test("tf 有真实消费者（无类型翻译器不能是摆设）", () => {
         const count = sourceFiles(/\.tsx?$/).reduce((total, file) => {
             const stripped = stripCommentsAndStrings(readFileSync(file, "utf8"));
@@ -418,6 +545,43 @@ describe("抽象层不能空转（采用率）", () => {
             expect(reason.length, `${name} 的豁免理由过短`).toBeGreaterThan(20);
             expect(existsSync(name), `豁免清单指向了不存在的文件：${name}`).toBe(true);
         }
+    });
+
+    test("派生令牌在 portal 安全的作用域声明，或自带 fallback", () => {
+        /*
+         * 【为什么需要这条】`--qt-accent: var(--accent-9)` 这类"值引用其它自定义属性"
+         * 的令牌，其解析发生在**声明它的元素**上：声明在 `:root` 时，`<html>` 上并没有
+         * `--accent-9`（Radix 只把它定义在 `.radix-themes` 上），于是该令牌计算为
+         * **无效值**并被后代按无效值继承。应用外壳恰好还有一个更近的声明（外壳元素同时
+         * 带 `.qt-theme` 与 `.radix-themes`）所以看不出问题 —— 而 Dialog / Select /
+         * Tooltip 等 Radix portal 的内容挂在 `<body>` 下、只有 `radix-themes`，拿到的
+         * 就是无效值：`bg-qt-accent` 解析成 `transparent`。
+         *
+         * 【实测症状】导出进度条的填充条一直不可见（它是全仓唯一使用 `bg-qt-accent`
+         * 的进度组件，且唯一使用点就在对话框里）；`AboutDialog` 的链接色、
+         * `SegmentedControl` 的激活底色在对话框内同样失效。
+         *
+         * 【判据】要么声明在与来源变量相同的作用域（选择器含 `.radix-themes` —— 每个
+         * Radix portal 包裹层都有这个类），要么给 `var()` 提供 fallback。
+         */
+        const offenders: string[] = [];
+        for (const block of cssBlocks(readFileSync(TOKEN_CSS, "utf8"))) {
+            const declaration = /--qt-[a-z0-9-]+:\s*([^;]+);/g;
+            let match: RegExpExecArray | null;
+            while ((match = declaration.exec(block.body)) !== null) {
+                const value = match[1];
+                // 字面色（不引用其它自定义属性）在任何作用域都有效。
+                if (!value.includes("var(")) continue;
+                if (hasVarFallback(value)) continue;
+                if (/(^|[\s,])\.radix-themes([\s,:.]|$)/.test(block.selector)) continue;
+                offenders.push(`${block.context} → ${match[0].trim()}`);
+            }
+        }
+        expect(
+            offenders,
+            "派生令牌必须在 `.radix-themes` 作用域声明（该类的元素上才有 --accent-9），" +
+                "或给 var() 写 fallback；否则 portal 内容里会解析成 transparent",
+        ).toEqual([]);
     });
 
     test("没有「有界滚动盒」造成的嵌套滚动条", () => {

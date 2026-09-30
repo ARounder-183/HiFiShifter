@@ -216,6 +216,16 @@ pub fn global_clip_rendering_state() -> &'static Mutex<ClipRenderingStateManager
     })
 }
 
+/// 清空全部 clip 渲染状态。
+///
+/// 状态表按 clip_id 索引，只增不减（`remove_state` 仅在删除轨道时调用）。工程切换
+/// 后旧 clip_id 不会再收到移除请求，条目会随每次导入永久累积。
+pub fn clear_all_clip_rendering_state() {
+    if let Ok(mut manager) = global_clip_rendering_state().lock() {
+        manager.clear();
+    }
+}
+
 /// Clip 渲染状态事件（用于前端显示）
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ClipRenderingStateEvent {

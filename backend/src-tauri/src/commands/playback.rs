@@ -15,6 +15,9 @@
 //   前台与后台渲染各用一套彼此隔离的令牌（详见该模块头注释）。
 
 use crate::models::PlaybackStatePayload;
+use crate::render_key::{
+    build_rendered_hash_input, rendered_hash_input_for_clip, resolve_render_material,
+};
 use crate::state::AppState;
 use tauri::Emitter;
 use tauri::Manager;
@@ -223,7 +226,7 @@ fn is_clip_pitch_analysis_ready(
         return false;
     };
     // 检查 clip_pitch（原始 MIDI 曲线）是否已分析
-    let clip_pitch = crate::pitch_clip::get_or_compute_clip_pitch_midi_global(
+    let clip_pitch = crate::pitch_clip::get_clip_pitch_midi_global(
         timeline,
         clip,
         &clip_root,
@@ -476,121 +479,6 @@ fn ensure_hifigan_tension_cache(
         .unwrap_or_else(|e| e.into_inner());
     cache.insert(cache_key.clone(), entry);
     Ok((Some(cache_key), true))
-}
-
-/// Clip 播放速率（非法值按 1.0 处理，与实时引擎口径一致）。
-fn clip_playback_rate(clip: &crate::state::Clip) -> f64 {
-    let rate = clip.playback_rate as f64;
-    if rate.is_finite() && rate > 0.0 {
-        rate
-    } else {
-        1.0
-    }
-}
-
-/// 构造整 Clip 渲染哈希输入。
-///
-/// ★ 所有需要计算渲染缓存键的位置（收集待渲染、气声噪声键、快照回退）都必须
-/// 经由本函数：任何一处参数口径漂移都会让"写入的键"与"查询的键"不一致 ——
-/// 轻则缓存永久 miss，重则跨参数误命中。
-fn build_rendered_hash_input<'a>(
-    clip: &'a crate::state::Clip,
-    entry: &'a crate::state::TrackParamsState,
-    renderer_id: &'a str,
-    sr: u32,
-    input_pitch_curve: Option<&'a [f32]>,
-    compose_enabled: bool,
-    scale_signature: &'a str,
-) -> crate::synth_clip_cache::RenderedClipHashInput<'a> {
-    let start_frame = (clip.start_sec.max(0.0) * sr as f64).round() as u64;
-    let end_frame =
-        start_frame + (clip.length_sec.max(0.0) * sr as f64).round().max(1.0) as u64;
-
-    crate::synth_clip_cache::RenderedClipHashInput {
-        clip_id: &clip.id,
-        source_path: clip.source_path.as_deref().unwrap_or(""),
-        source_file_mtime: clip.source_file_mtime,
-        source_file_fingerprint: clip.source_file_fingerprint,
-        active_take_id: clip.active_take_id.as_deref(),
-        renderer_id,
-        start_frame,
-        end_frame,
-        sample_rate: sr,
-        playback_rate: clip_playback_rate(clip),
-        reversed: clip.reversed,
-        loop_enabled: clip.loop_enabled,
-        channel_mode: clip.channel_mode,
-        source_range_q: (
-            (clip.source_start_sec * 1000.0).round() as i64,
-            (clip.source_end_sec * 1000.0).round() as i64,
-        ),
-        pitch_edit: entry.pitch_edit.as_slice(),
-        pitch_orig: Some(entry.pitch_orig.as_slice()),
-        frame_period_ms: entry.frame_period_ms.max(0.1),
-        extra_curves: &entry.extra_curves,
-        extra_params: &entry.extra_params,
-        formant_morph: clip.formant_morph.as_ref().filter(|params| params.enabled),
-        input_pitch_curve,
-        compose_enabled,
-        scale_signature,
-        source_file_size: clip.source_file_size,
-    }
-}
-
-/// clip 的渲染材料：根轨道的参数与轨道本身。
-struct ClipRenderMaterial<'a> {
-    entry: &'a crate::state::TrackParamsState,
-    track: &'a crate::state::Track,
-}
-
-/// 解析 clip 的渲染材料，并回答"这个 clip 当前是否需要渲染"。
-///
-/// ★ 这是该判定的**唯一实现**：收集待渲染（热路径）与 miss 归因诊断都必须经由
-/// 它。两处各写一份必然漂移，而漂移的后果是"写入的键"与"查询的键"不一致 ——
-/// 轻则永久 miss，重则跨参数误命中（见 `synth_clip_cache` 的模块契约）。
-///
-/// `find_track` 由调用方注入：热路径传预构建的 O(1) 查找表，诊断路径传线性查找
-/// （每次 miss 至多一次，轨道数是常数级）。
-fn resolve_render_material<'a>(
-    timeline: &'a crate::state::TimelineState,
-    clip: &crate::state::Clip,
-    find_track: impl Fn(&str) -> Option<&'a crate::state::Track>,
-) -> Option<ClipRenderMaterial<'a>> {
-    if clip.muted || clip.source_path.is_none() {
-        return None;
-    }
-    // 使用新的检测逻辑：检查 clip 是否需要 pitch edit
-    let clip_start_sec = clip.start_sec.max(0.0);
-    if !crate::pitch_editing::does_clip_need_processor_render(timeline, clip, clip_start_sec) {
-        return None;
-    }
-    // 获取 pitch edit 参数（按根轨道）
-    let clip_root = timeline.resolve_root_track_id(&clip.track_id)?;
-    let entry = timeline.params_by_root_track.get(&clip_root)?;
-    let track = find_track(&clip_root)?;
-    Some(ClipRenderMaterial { entry, track })
-}
-
-/// 组装单个 clip 的渲染键输入（与收集、快照回退共用同一口径）。
-fn rendered_hash_input_for_clip<'a>(
-    timeline: &'a crate::state::TimelineState,
-    clip: &'a crate::state::Clip,
-    sr: u32,
-    scale_signature: &'a str,
-) -> Option<crate::synth_clip_cache::RenderedClipHashInput<'a>> {
-    let material =
-        resolve_render_material(timeline, clip, |id| timeline.tracks.iter().find(|t| t.id == id))?;
-    let kind = crate::state::SynthPipelineKind::from_track_algo(&material.track.pitch_analysis_algo);
-    let renderer_id = crate::renderer::get_renderer(kind).id();
-    Some(build_rendered_hash_input(
-        clip,
-        material.entry,
-        renderer_id,
-        sr,
-        None,
-        material.track.compose_enabled,
-        scale_signature,
-    ))
 }
 
 /// miss 归因：逐个排除最易漂移的输入后重算哈希，并探测磁盘上是否存在该变体。
@@ -1012,30 +900,16 @@ fn render_single_clip(
     let root_params = clip_root
         .as_ref()
         .and_then(|root| timeline.params_by_root_track.get(root));
-    let effective_extra_params = clip
-        .extra_params
-        .as_ref()
-        .or_else(|| root_params.map(|entry| &entry.extra_params));
     // 气声（HNSEP 分离 + noise stem）只由 NSF-HiGAN 渲染器消费：快照混音
     // （renderer_id == "nsf_hifigan_onnx" 才挂 breath_curve）与
     // track_requests_extra_processing 均按渲染器种类门控。轨道切换算法
     // （如 HiFiGAN → WORLD）不会清空 extra_params，这里若不门控，残留的
     // breath_enabled 会让 WORLD/vslib 渲染白跑一次 HNSEP 推理 —— 其 noise
     // stem 在混音侧永远不会被使用（World 声码器本身也不消费气声参数）。
-    let breath_capable = clip_root
-        .as_ref()
-        .and_then(|root| timeline.tracks.iter().find(|track| &track.id == root))
-        .map(|track| {
-            matches!(
-                crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo),
-                crate::state::SynthPipelineKind::NsfHifiganOnnx
-            )
-        })
-        .unwrap_or(false);
-    let breath_enabled = breath_capable
-        && effective_extra_params
-            .map(|params| crate::pitch_editing::extra_param_enabled(params, "breath_enabled"))
-            .unwrap_or(false);
+    //
+    // 判据的唯一实现见 `clip_breath_active`：导出侧的渲染缓存复用门禁共用它，
+    // 两处必须同口径（漏判会让导出把"谐波 + 独立噪声 stem"的缓存产物当成品复用）。
+    let breath_enabled = crate::pitch_editing::clip_breath_active(timeline, clip);
     let frame_period_ms = root_params
         .map(|entry| entry.frame_period_ms.max(0.1))
         .unwrap_or(5.0);

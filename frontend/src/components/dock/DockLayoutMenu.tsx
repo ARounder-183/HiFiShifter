@@ -28,10 +28,12 @@ import { store } from "../../app/store";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { useI18n } from "../../i18n/I18nProvider";
 import { DockLayoutSettingsDialog } from "./DockLayoutSettingsDialog";
-import { exportLayoutJson } from "../../services/api/dockLayout";
+import { exportLayoutJson } from "../../services/api/jsonExport";
 import {
+    addEmptyPanel,
     applyPreset,
     deletePreset,
+    dissolvePanelCommand,
     exportLayoutJsonFromLayout,
     importLayoutJson,
     listPanelEntriesFromLayout,
@@ -41,7 +43,9 @@ import {
     togglePanelVisible,
     reclaimDetachedForm,
 } from "../../features/dock/dockApi";
-import { getPanel } from "../../features/dock/panelRegistry";
+import { focusForm } from "../../features/dock/dockSlice";
+import { displayTitleOf, panelTitleOf } from "../../features/dock/dockPanel";
+import { isPanelForm } from "../../features/dock/dockTree";
 import { AppFileInput } from "../../ui/FileInput";
 import { AppDialog } from "../../ui/Dialog";
 import { AppConfirmDialog, AppNoticeDialog } from "../../ui";
@@ -166,11 +170,19 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
                 .filter((form): form is NonNullable<typeof form> => form?.floatMode === "osWindow"),
         [layout],
     );
+    /** 现存的全部面板窗体（用于"面板"子菜单；顺序即创建顺序）。 */
+    const panelForms = useMemo(
+        () =>
+            layout.order
+                .map((formId) => layout.forms[formId])
+                .filter((form): form is NonNullable<typeof form> => isPanelForm(form)),
+        [layout],
+    );
     const presetNames = useMemo(() => listPresetNamesFromLayout(layout), [layout]);
 
     // 导出走后端命令（原生保存对话框 + 写文件）：Tauri 的 WebView 默认拦截
     // 页面发起的下载，Blob + `<a download>` 的浏览器方案在壳内静默失败 ——
-    // 用户点「导出布局」什么都不会发生（见 `services/api/dockLayout.ts`）。
+    // 用户点「导出布局」什么都不会发生（见 `services/api/jsonExport.ts`）。
     const onExport = useCallback(async () => {
         const json = exportLayoutJsonFromLayout(layout);
         try {
@@ -202,13 +214,39 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
                                         void reclaimDetachedForm(dispatch, store.getState, form.id)
                                     }
                                 >
-                                    {form.title ??
-                                        tf(getPanel(form.panelId)?.titleKey ?? form.panelId)}
+                                    {displayTitleOf(layout, form.id, tf)}
                                 </DropdownMenu.Item>
                             ))}
                         </DropdownMenu.SubContent>
                     </DropdownMenu.Sub>
                 ) : null}
+
+                {/* 面板：现存的容器窗体。点按聚焦；标题按内容派生（重命名过则用
+                    用户文本）。仿照 os_windows 的模式：没有面板时不渲染空壳。 */}
+                {panelForms.length > 0 ? (
+                    <DropdownMenu.Sub>
+                        <DropdownMenu.SubTrigger>{tf("layout_panels")}</DropdownMenu.SubTrigger>
+                        <DropdownMenu.SubContent>
+                            {panelForms.map((form) => (
+                                <DropdownMenu.Item
+                                    key={form.id}
+                                    onSelect={() => dispatch(focusForm(form.id))}
+                                >
+                                    {panelTitleOf(layout, form.id, tf)}
+                                </DropdownMenu.Item>
+                            ))}
+                        </DropdownMenu.SubContent>
+                    </DropdownMenu.Sub>
+                ) : null}
+                <DropdownMenu.Item onSelect={() => addEmptyPanel(dispatch)}>
+                    {tf("layout_new_panel")}
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                    color="red"
+                    onSelect={() => dissolvePanelCommand(dispatch, store.getState)}
+                >
+                    {tf("layout_dissolve_panel")}
+                </DropdownMenu.Item>
 
                 <DropdownMenu.Sub>
                     <DropdownMenu.SubTrigger>{tf("layout_presets")}</DropdownMenu.SubTrigger>
@@ -397,7 +435,7 @@ export function DockLayoutDialogs() {
             {/*
               隐藏的文件输入：导入走浏览器原生文件选择（WebView 内可用，不必动用
               IPC）。导出不能照搬浏览器下载 —— WebView 默认拦截 `<a download>`，
-              所以走原生保存对话框 + 后端写文件（见 `services/api/dockLayout.ts`）。
+              所以走原生保存对话框 + 后端写文件（见 `services/api/jsonExport.ts`）。
               常驻渲染（不随菜单关闭卸载），保证选择完成后的 change 事件有人接。
             */}
             <AppFileInput

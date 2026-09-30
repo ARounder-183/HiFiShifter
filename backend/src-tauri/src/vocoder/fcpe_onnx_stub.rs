@@ -8,8 +8,8 @@ pub fn is_available() -> bool {
     false
 }
 
-pub fn infer_f0_hz(
-    _mono: &[f64],
+pub fn infer_f0_hz_f32(
+    _mono: &[f32],
     _sample_rate: u32,
     _frame_period_ms: f64,
     _f0_floor: f64,

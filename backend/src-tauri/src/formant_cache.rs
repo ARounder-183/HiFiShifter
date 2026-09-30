@@ -120,6 +120,16 @@ fn global_formant_rebuild_generations() -> &'static Mutex<HashMap<String, u64>> 
     FORMANT_REBUILD_GENERATIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 清空共振峰重建代次表。
+///
+/// 该表按 clip_id 索引且只增不减 —— 条目仅在 clip 被再次重建时覆写。工程切换后
+/// 旧 clip_id 不会再出现，条目永久常驻。单条很小，但工程导入频繁时是无界增长。
+pub fn clear_formant_rebuild_generations() {
+    if let Ok(mut map) = global_formant_rebuild_generations().lock() {
+        map.clear();
+    }
+}
+
 fn quantize_i64(value: f64, scale: f64) -> i64 {
     (value * scale).round() as i64
 }

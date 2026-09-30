@@ -1,7 +1,7 @@
 import React from "react";
 import { createPortal } from "react-dom";
 import { useI18n } from "../../../i18n/I18nProvider";
-import { AppContextMenu } from "../../../ui/Menu";
+import { AppContextMenu, useMenuShortcut } from "../../../ui";
 
 export const TrackAreaContextMenu: React.FC<{
     x: number;
@@ -16,6 +16,12 @@ export const TrackAreaContextMenu: React.FC<{
     onClose: () => void;
 }> = ({ x, y, canPaste, canSplit, canCloseGaps, onPaste, onSplit, onCloseGaps, onClose }) => {
     const { t } = useI18n();
+    // 快捷键提示：从快捷键注册表读取当前生效的绑定（随用户自定义实时变化）。
+    // 时间轴的右键菜单此前只有 label/onSelect，把 `shortcut` 整条信息丢了 ——
+    // 于是同一张时间轴上，剪辑菜单有快捷键、轨道区域菜单没有（见 ui/useMenuShortcut）。
+    // 「关闭间隙」没有对应动作，因此不显示（空值时原语不渲染那一列）。
+    const pasteShortcut = useMenuShortcut("clip.paste");
+    const splitShortcut = useMenuShortcut("clip.split");
 
     return createPortal(
         <AppContextMenu
@@ -29,12 +35,14 @@ export const TrackAreaContextMenu: React.FC<{
                 {
                     key: "paste",
                     label: t("menu_paste"),
+                    shortcut: pasteShortcut,
                     disabled: !canPaste,
                     onSelect: onPaste,
                 },
                 {
                     key: "split",
                     label: t("ctx_split_at_playhead"),
+                    shortcut: splitShortcut,
                     disabled: !canSplit,
                     onSelect: onSplit,
                 },

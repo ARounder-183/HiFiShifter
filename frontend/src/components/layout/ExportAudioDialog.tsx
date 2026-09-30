@@ -29,6 +29,12 @@ import {
     sampleRateOptions,
 } from "../../utils/exportFormat";
 import { ProgressBar } from "../ProgressBar";
+import {
+    DISPLAY_TICK_MS,
+    isSameExportProgress,
+    nextDisplayProgress,
+    realProgressPercent,
+} from "./exportProgressDisplay";
 import type { TrackInfo } from "../../features/session/sessionTypes";
 import {
     AppButton,
@@ -273,6 +279,25 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         total: number | null;
     }>({ active: false, mode: null, progress: null, current: null, total: null });
     const [displayProgress, setDisplayProgress] = useState(0);
+    /**
+     * 后端最近一次真实进度（0..100）；`null` = 本轮尚未收到任何真实进度。
+     *
+     * 【为什么用 ref 而不是 state】它是显示推进的**目标值**，由高频事件（约 50ms
+     * 一次）写入。放进 state 会让每次事件都重渲染整个对话框（约 2000 行）。显示值
+     * 本身仍是 state，由固定节拍的计时器按目标插值推进。
+     */
+    const targetProgressRef = useRef<number | null>(null);
+    /**
+     * 现场诊断开关：`localStorage.hifiDebugExportProgress = "1"` 时把每个进度事件
+     * 打到控制台。用于一次性区分"后端事件没到达"与"前端显示没推进"。
+     */
+    const debugExportProgress = useMemo(() => {
+        try {
+            return window.localStorage.getItem("hifiDebugExportProgress") === "1";
+        } catch {
+            return false;
+        }
+    }, []);
     const [keepProgressVisible, setKeepProgressVisible] = useState(false);
     const [lastOutputDir, setLastOutputDir] = useState("");
     // 上次成功导出产生的文件路径（分轨为多个）；用于「打开文件夹」时一并选中。
@@ -371,6 +396,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
             total: null,
         });
         setDisplayProgress(0);
+        targetProgressRef.current = null;
         setKeepProgressVisible(false);
         setAwaitingConflictDecision(false);
         setLastOutputDir("");
@@ -582,7 +608,16 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                 ? Math.max(0, Math.min(1, payload.progress))
                                 : null;
 
-                        setExportProgress({
+                        // 目标值写 ref（不触发渲染），并把显示值**立即单调推进**：
+                        // 即便推进计时器因任何原因停摆，进度条也始终反映真实进度；
+                        // 计时器只负责两次事件之间的插值（见 exportProgressDisplay）。
+                        const percent = realProgressPercent(progressValue);
+                        if (percent !== null) {
+                            targetProgressRef.current = percent;
+                            setDisplayProgress((prev) => Math.max(prev, percent));
+                        }
+
+                        const nextProgress = {
                             active: Boolean(payload.active),
                             mode:
                                 payload.mode === "project" || payload.mode === "separated"
@@ -598,7 +633,19 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                 typeof payload.total === "number" && Number.isFinite(payload.total)
                                     ? Math.max(0, Math.floor(payload.total))
                                     : null,
-                        });
+                        };
+
+                        if (debugExportProgress) {
+                            console.debug("[export-progress] event", {
+                                ...nextProgress,
+                                atMs: Math.round(performance.now()),
+                            });
+                        }
+
+                        // 字段未变时复用旧对象，避免高频事件触发无谓的整框重渲染。
+                        setExportProgress((prev) =>
+                            isSameExportProgress(prev, nextProgress) ? prev : nextProgress,
+                        );
                     },
                 );
             } catch {
@@ -611,50 +658,43 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
             disposed = true;
             if (unlisten) unlisten();
         };
-    }, [open]);
+        // `debugExportProgress` 是挂载时求值一次的诊断开关（useMemo 依赖为空），
+        // 稳定不变；列入依赖只为满足 exhaustive-deps，不会造成重复订阅。
+    }, [open, debugExportProgress]);
 
+    /**
+     * 显示推进计时器。
+     *
+     * 【为什么依赖里**没有** `exportProgress.progress`】这是"进度条不更新"的根因所在：
+     * 后端节流后约 50ms 一个事件，若进度值在依赖里，每个事件都会重建这个 effect ——
+     * 计时器被反复销毁，寿命（≈50ms）永远够不到周期（{@link DISPLAY_TICK_MS}），
+     * 回调从不执行，显示值因此冻结。目标值改由 `targetProgressRef` 承载（事件回调写入），
+     * 计时器只按固定节拍读取它；依赖里剩下的都是每次导出只变个位数的粗粒度标志。
+     *
+     * 【清零时机】显示值的归零只由**显式时机**负责（打开对话框 / 开始提交），不再用
+     * `!submitting && !active` 隐式清零 —— 那样会在导出刚完成的瞬间把已到 100% 的显示
+     * 抹掉，再靠插值爬回去（完成态因此闪烁）。
+     */
     useEffect(() => {
         if (!open) return;
-        if (!submitting && !exportProgress.active) {
-            if (!keepProgressVisible) {
-                setDisplayProgress(0);
-            }
-            return;
-        }
+        if (!submitting && !exportProgress.active && !keepProgressVisible) return;
+        // 冲突确认挂起期间导出暂停，显示也随之冻结。
+        if (awaitingConflictDecision && !exportProgress.active) return;
 
         const timer = window.setInterval(() => {
-            setDisplayProgress((prev) => {
-                if (awaitingConflictDecision && !exportProgress.active) {
-                    return prev;
-                }
-                if (
-                    typeof exportProgress.progress === "number" &&
-                    Number.isFinite(exportProgress.progress)
-                ) {
-                    const target = Math.round(
-                        Math.max(0, Math.min(1, exportProgress.progress)) * 100,
-                    );
-                    // 上限 12（而非 6）：后端现在按混音帧 / clip / 编码块细粒度上报
-                    // （最快 ~50ms 一次），步进太小会让显示值追不上真实进度。
-                    if (target > prev) return Math.min(target, prev + 12);
-                    if (target < prev) return prev;
-                    if (target >= 100) return 100;
-                }
-                return Math.min(95, prev + 2);
-            });
-        }, 180);
+            setDisplayProgress((prev) =>
+                nextDisplayProgress({
+                    current: prev,
+                    target: targetProgressRef.current,
+                    tickMs: DISPLAY_TICK_MS,
+                }),
+            );
+        }, DISPLAY_TICK_MS);
 
         return () => {
             window.clearInterval(timer);
         };
-    }, [
-        open,
-        submitting,
-        exportProgress.active,
-        exportProgress.progress,
-        keepProgressVisible,
-        awaitingConflictDecision,
-    ]);
+    }, [open, submitting, exportProgress.active, keepProgressVisible, awaitingConflictDecision]);
 
     /** 格式切换：文件名/命名模板扩展名原地替换 + 采样率合法性自动纠正。 */
     function handleFormatChange(next: ExportFormat) {
@@ -1016,14 +1056,42 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         return code || tf("status_export_failed");
     }
 
-    async function handleCancel() {
-        if (submitting || exportProgress.active) {
-            try {
-                await coreApi.cancelExportAudio();
-            } catch {
-                // ignore cancellation command failures
-            }
+    /**
+     * 只取消本次导出：**不关闭对话框**（进度条上的取消走这里）。
+     *
+     * 【为什么不能顺手关窗】界面里有两个取消入口，用户的预期不同：进度条旁边的取消
+     * 只该结束这次渲染（用户可能只是想改个设置再导一次），而页脚的取消/关闭才是
+     * "离开对话框"。早先两者共用一个 handler，于是点进度条的取消会把整个对话框也关掉。
+     */
+    async function cancelRunningExport() {
+        if (!submitting && !exportProgress.active) return;
+        try {
+            await coreApi.cancelExportAudio();
+        } catch {
+            // 取消命令失败不阻塞 UI：下面的乐观收敛仍会把界面带回"可再次导出"。
         }
+        // 乐观收敛，**不依赖取消事件是否到达**（事件可能丢失，或与 invoke 响应竞态）：
+        // 清空进度状态 → 进度区收起；`submitting` 由 `submitExport` 的 cancelled 分支
+        // 置回 false → 页脚「导出」重新可用。显示值与目标一并归零，避免下一次导出
+        // 被上一轮残留的 100% 拉高。
+        setExportProgress({
+            active: false,
+            mode: null,
+            progress: null,
+            current: null,
+            total: null,
+        });
+        setKeepProgressVisible(false);
+        targetProgressRef.current = null;
+        setDisplayProgress(0);
+    }
+
+    /**
+     * 关闭对话框：正在导出时**先取消**，避免留下一个没有界面的后台导出任务。
+     * 页脚取消、Esc、点击遮罩都走这里。
+     */
+    async function handleCloseDialog() {
+        await cancelRunningExport();
         onOpenChange(false);
     }
 
@@ -1034,6 +1102,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         // 如果上一次导出已达到 100%，需要将显示进度重置为较低值
         // 否则保持当前进度（不降级），并至少从 2% 开始缓升。
         setDisplayProgress((prev) => (prev >= 100 ? 2 : Math.max(prev, 2)));
+        // 目标值必须一并清空：否则上一轮残留的 100% 会在计时器下一次推进时
+        // 把刚重置到 2% 的显示值直接拉回 100。
+        targetProgressRef.current = null;
 
         const range =
             rangeKind === "all"
@@ -1232,7 +1303,17 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         <>
             <AppDialog
                 open={open}
-                onOpenChange={onOpenChange}
+                /*
+                 * 关闭请求（Esc / 点遮罩）与页脚取消同契约：**先取消再关闭**。
+                 * 直接透传 onOpenChange 会让"导出中按 Esc"关掉界面却把导出留在后台跑。
+                 */
+                onOpenChange={(nextOpen) => {
+                    if (nextOpen) {
+                        onOpenChange(true);
+                        return;
+                    }
+                    void handleCloseDialog();
+                }}
                 title={tf("menu_export_audio")}
                 description={tf("export_dialog_desc")}
                 size="xl"
@@ -1260,8 +1341,15 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     {
                         id: "cancel",
                         label: tf("cancel"),
+                        /*
+                         * `autoClose: false`：关闭由 `handleCloseDialog` 自己负责
+                         * （它要先取消正在跑的导出）。若让 AppDialog 的默认
+                         * autoClose 也关一次，同一次点击会走两条关闭路径 ——
+                         * 取消命令因此被发两次（回归测试钉住了这一点）。
+                         */
+                        autoClose: false,
                         onClick: () => {
-                            void handleCancel();
+                            void handleCloseDialog();
                         },
                     },
                     {
@@ -1788,7 +1876,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                  * 这里只是把它接到进度条上。
                                  */
                                 showCancel={!exportCompleted && exportProgress.active}
-                                onCancel={() => void handleCancel()}
+                                onCancel={() => void cancelRunningExport()}
                             />
                         </div>
                     ) : null}

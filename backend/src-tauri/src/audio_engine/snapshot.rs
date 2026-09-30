@@ -966,7 +966,7 @@ pub(crate) fn build_snapshot(
                                 .as_ref()
                                 .and_then(|root| {
                                     timeline.params_by_root_track.get(root).map(|entry| {
-                                        crate::pitch_clip::get_or_compute_clip_pitch_midi_global(
+                                        crate::pitch_clip::get_clip_pitch_midi_global(
                                             timeline,
                                             clip,
                                             root,

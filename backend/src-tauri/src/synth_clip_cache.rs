@@ -698,7 +698,7 @@ impl HashExclusions {
 /// # 契约（新增渲染输入必须同步加入本函数）
 /// 覆盖：clip_id、源身份（path + mtime + 内容指纹）、活跃 Take、渲染器、
 /// 管线指纹、时间轴帧范围、输出采样率、播放速率、倒放、Loop、源窗口、
-/// 拉伸设置、pitch_edit、pitch_orig、extra 曲线/参数、formant morph、
+/// 拉伸设置、分析帧周期、pitch_edit、pitch_orig、extra 曲线/参数、formant morph、
 /// 渲染输入 pitch 曲线。
 ///
 /// 以上任一项变化都必须产出不同哈希，否则会出现跨会话/跨参数的错误复用。
@@ -858,6 +858,19 @@ pub fn compute_rendered_clip_hash_excluding(
                 .to_le_bytes());
         }
     }
+
+    // 混入分析帧周期（量化到 0.001ms，与音高分析键同一约定）。
+    //
+    // 【为什么必须混】帧周期是声码器的帧步长，直接决定渲染结果；而它此前**只**通过
+    // "曲线切片窗口"间接影响本键 —— 当曲线长度不足以区分两种周期时（切片边界相同），
+    // 改变周期不会改变哈希，缓存就会把按旧周期渲染的音频当成新周期的结果返回
+    // （陈旧音频 = 跨参数误命中，本模块契约里最严重的一类）。`pitch_analysis` 的
+    // 分析缓存键一直混入量化后的帧周期（`pitch_analysis/mod.rs` 的同名键），
+    // 渲染键此前漏了它 —— 由 `render_key` 的键敏感性测试发现并钉住。
+    mix_bytes!(b"frame_period_ms");
+    mix_bytes!(
+        &crate::pitch_analysis::quantize_u32(frame_period_ms.max(0.1), 1000.0).to_le_bytes()
+    );
 
     // 混入与 clip 时间范围重叠的 pitch_edit 曲线片段
     let fp = frame_period_ms.max(0.1);
@@ -1385,28 +1398,11 @@ mod tests {
         RenderedClipHashInput,
     };
 
-    /// 运行时拉伸设置是**进程级全局**（`time_stretch::current_runtime_stretch_settings`），
-    /// 而渲染键会把它混进哈希 —— 同时 `cargo test` 默认多线程并行。
-    ///
-    /// 于是"读全局算哈希"的测试与"改全局"的测试并发时，同一个测试内的两次哈希
-    /// 可能跨越一次全局变更，产生与代码无关的间歇性失败（实测 HEAD 上 5 次运行
-    /// 失败 1 次）。
-    ///
-    /// 约定：凡是**计算渲染键**的测试都持读锁；唯一改写该全局的测试持写锁。
-    /// 读锁之间不互斥，因此不影响并行度。
-    static STRETCH_GLOBAL_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
-
-    fn lock_stretch_global_read() -> std::sync::RwLockReadGuard<'static, ()> {
-        STRETCH_GLOBAL_LOCK
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn lock_stretch_global_write() -> std::sync::RwLockWriteGuard<'static, ()> {
-        STRETCH_GLOBAL_LOCK
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-    }
+    // 运行时拉伸设置是**进程级全局**，而渲染键会把它混进哈希：算键的测试必须持读锁，
+    // 改写该全局的测试持写锁（读锁之间不互斥，因此不影响并行度）。
+    // 锁本身与完整理由见 `crate::render_key::test_locks` —— 该锁上提到那里，
+    // 是为了让**其它模块**（如 `audio::mixdown` 的导出复用往返测试）也能遵守同一约定。
+    use crate::render_key::test_locks::{lock_stretch_global_read, lock_stretch_global_write};
 
     /// 测试夹具：持有全部"按值"输入，供各断言按字段变体构造哈希输入。
     struct Fixture {

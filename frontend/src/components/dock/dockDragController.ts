@@ -37,12 +37,14 @@ import {
     type DockDropTargetState,
 } from "../../features/dock/dockDragStore";
 import {
+    buildEmptyRootZone,
     buildRootEdgeZones,
     clampFloatRect,
     DOCK_ROOT_ZONE_ID,
     dropZoneToSide,
     pickDropTarget,
     resolveDropZone,
+    resolveFloatRect,
     rootEdgeBandThickness,
     snapFloatPosition,
     tabsetSideBands,
@@ -54,9 +56,10 @@ import {
     mergeFormInto,
     setFloatGeometry,
     splitFormTo,
+    composeFloats,
 } from "../../features/dock/dockSlice";
-import { findZone } from "../../features/dock/dockTree";
-import { getPanel } from "../../features/dock/panelRegistry";
+import { collectSubtreeRootIds, synthesizePanelDefinition } from "../../features/dock/dockPanel";
+import { findZoneInLayout, isPanelForm } from "../../features/dock/dockTree";
 import type { DockDropZone, DockRect } from "../../features/dock/dockTypes";
 import { isPrimaryModifierDown } from "../../utils/platform";
 
@@ -168,37 +171,108 @@ function discardScheduledUpdate(): void {
     pendingPatch = null;
 }
 
+/**
+ * 采集全部可停靠目标。
+ *
+ * 三个来源：
+ * 1. `[data-dock-zone]` —— 各棵布局根里的标签组（原有）；
+ * 2. `[data-dock-float]` —— 浮窗本体：把浮窗拖到另一浮窗上 = 组合成面板（新增）；
+ * 3. `[data-dock-root]` —— 每棵布局根的边缘带；**没有**任何 Zone 的根（空面板
+ *    占位井）补一条盖满井面的 center 合成 Zone（新增）。
+ *
+ * 两条拖拽期排除：
+ * - 被拖的浮窗自己（`data-dragging`）不能成为自己的落点；
+ * - 拖面板时，位于它**自身子树内**的根全部排除 —— 把面板塞进自己的子树会构成
+ *   环，渲染是递归的，环就是栈溢出。
+ */
 function collectZoneRects(): DockZoneRect[] {
     const out: DockZoneRect[] = [];
     const band = store.getState().dock.settings.edgeBandPx;
+    const layout = store.getState().dock.layout;
+    // 自引用排除集：被拖面板自身子树里的全部根（含它自己的根）。
+    const draggedFormId = session?.formId ?? null;
+    const draggedForm = draggedFormId ? layout.forms[draggedFormId] : null;
+    const forbiddenRootIds =
+        draggedForm && isPanelForm(draggedForm) && draggedForm.childRootId
+            ? collectSubtreeRootIds(layout, draggedForm.childRootId)
+            : null;
+
+    // ① 各棵树里的标签组：归属由最近的 [data-dock-root] 祖先决定；浮窗内部的
+    //    Zone（浮动面板的树）还要记住它的浮窗主人，供"上层优先"过滤。
+    const rootRects = new Map<string, DockRect>();
+    const rootElements = new Map<string, HTMLElement>();
+    for (const element of document.querySelectorAll<HTMLElement>("[data-dock-root]")) {
+        const rootId = element.dataset.dockRoot;
+        if (!rootId) continue;
+        const rect = element.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) continue;
+        rootRects.set(rootId, { x: rect.x, y: rect.y, w: rect.width, h: rect.height });
+        rootElements.set(rootId, element);
+    }
+    const zoneByRoot = new Map<string, DockZoneRect[]>();
     for (const element of document.querySelectorAll<HTMLElement>("[data-dock-zone]")) {
         const zoneId = element.dataset.dockZone;
         if (!zoneId) continue;
         const rect = element.getBoundingClientRect();
         if (rect.width < 1 || rect.height < 1) continue;
-        out.push({ zoneId, rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height } });
+        const rootElement = element.closest<HTMLElement>("[data-dock-root]");
+        const rootId = rootElement?.dataset.dockRoot;
+        if (rootId && forbiddenRootIds?.has(rootId)) continue;
+        const zone: DockZoneRect = {
+            zoneId,
+            rootId,
+            rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height },
+        };
+        const ownerFloat = element.closest<HTMLElement>("[data-dock-float]");
+        const ownerFormId = ownerFloat?.dataset.dockFloat;
+        if (ownerFormId) zone.floatOwnerFormId = ownerFormId;
+        out.push(zone);
+        if (rootId) {
+            const list = zoneByRoot.get(rootId) ?? [];
+            list.push(zone);
+            zoneByRoot.set(rootId, list);
+        }
     }
-    // 根级边缘带：贴着整个停靠区外缘的合成 Zone，命中即"贯通该侧拆分"。
-    // 与标签组 Zone 一起参与"面积最小者优先"的挑选，细带自然压过外缘处的
-    // 大矩形（见 `buildRootEdgeZones`）。浮动拖拽同样受益 —— 浮窗可以贴边
-    // 重新停靠到贯通全高/全宽的位置。
-    const root = document.querySelector<HTMLElement>("[data-dock-root]");
-    if (root) {
-        const rect = root.getBoundingClientRect();
-        if (rect.width >= 1 && rect.height >= 1) {
-            const rootRect = { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
-            const rootBand = rootEdgeBandThickness(rootRect, band);
-            // 局部侧边带补偿：与根缘重合的侧边向外扩展（见 `tabsetSideBands`），
-            // 让"只拆这个标签组的某一侧"在根带内侧保有完整的感应宽度 —— 否则
-            // 默认布局里时间轴的右侧拆分会整个被根带遮住（用户报告）。
-            for (const zone of out) {
-                zone.sideBands = tabsetSideBands(zone.rect, rootRect, rootBand, band);
-            }
-            out.push(...buildRootEdgeZones(rootRect, band));
+
+    // ② 浮窗本体：组合目标（浮窗 rect 全域，center/sides 由现场解析给出）。
+    //    设置总闸关闭时不采集 —— 浮窗拖拽退回"只移动"的旧行为。
+    if (store.getState().dock.settings.floatComposeEnabled) {
+        for (const element of document.querySelectorAll<HTMLElement>("[data-dock-float]")) {
+            if (element.dataset.dragging === "true") continue;
+            const floatFormId = element.dataset.dockFloat;
+            if (!floatFormId || floatFormId === draggedFormId) continue;
+            const rect = element.getBoundingClientRect();
+            if (rect.width < 1 || rect.height < 1) continue;
+            out.push({
+                zoneId: DOCK_FLOAT_ZONE_ID,
+                floatFormId,
+                rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height },
+            });
+        }
+    }
+
+    // ③ 每棵根的边缘带 + 空根的整面 center 井。
+    for (const [rootId, rootRect] of rootRects) {
+        if (forbiddenRootIds?.has(rootId)) continue;
+        const rootBand = rootEdgeBandThickness(rootRect, band);
+        // 局部侧边带补偿：与根缘重合的侧边向外扩展（见 `tabsetSideBands`），
+        // 让"只拆这个标签组的某一侧"在根带内侧保有完整的感应宽度。
+        const zones = zoneByRoot.get(rootId) ?? [];
+        for (const zone of zones) {
+            zone.sideBands = tabsetSideBands(zone.rect, rootRect, rootBand, band);
+        }
+        out.push(...buildRootEdgeZones(rootRect, band, rootId));
+        // 根内没有任何标签组 = 空面板占位井：整块井面就是"并入"落点。
+        const rootElement = rootElements.get(rootId);
+        if (rootElement && zones.length === 0 && !rootElement.querySelector("[data-dock-zone]")) {
+            out.push(buildEmptyRootZone(rootRect, rootId));
         }
     }
     return out;
 }
+
+/** 浮窗组合目标共用的合成 Zone id（具体是哪枚浮窗看 `floatFormId`）。 */
+const DOCK_FLOAT_ZONE_ID = "__dock_float__";
 
 function isDockModifierDown(event: PointerEvent | KeyboardEvent): boolean {
     const mode = store.getState().dock.settings.dockModifier;
@@ -223,18 +297,52 @@ function pointInInflated(rect: DockRect, x: number, y: number, slop: number): bo
     );
 }
 
-/** 解析指针落点：命中哪个 Zone、落在该 Zone 的哪一部位。 */
+/**
+ * 解析指针落点：命中哪个 Zone、落在该 Zone 的哪一部位。
+ *
+ * 【上层优先】浮窗盖在主停靠区之上：指针落在某枚浮窗矩形内时，只在该浮窗
+ * 内部的落点中挑选（浮窗组合目标、浮动面板的标签组与边缘带）；被浮窗遮住的
+ * 主区落点全部让位 —— "看到的上层是谁，落点就是谁"。多枚浮窗重叠时取
+ * **DOM 顺序最后**的一枚（渲染顺序跟随 floatOrder，靠后者 z 序更高）。
+ */
 function resolveTarget(x: number, y: number): DockDropTargetState | null {
-    const hit = pickDropTarget(zoneRects, { x, y });
+    // 指针所在的最上层浮窗（正在被拖的那枚已由 data-dragging 排除）。
+    let topmostFloatId: string | null = null;
+    for (const element of document.querySelectorAll<HTMLElement>("[data-dock-float]")) {
+        if (element.dataset.dragging === "true") continue;
+        const floatFormId = element.dataset.dockFloat;
+        if (!floatFormId) continue;
+        const rect = element.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) continue;
+        if (x < rect.x || x > rect.x + rect.width || y < rect.y || y > rect.y + rect.height) continue;
+        // DOM 顺序后者更高；不断覆盖即可取到最上层。
+        topmostFloatId = floatFormId;
+    }
+
+    const candidates = topmostFloatId
+        ? zoneRects.filter(
+              (zone) =>
+                  zone.floatFormId === topmostFloatId ||
+                  zone.floatOwnerFormId === topmostFloatId,
+          )
+        : zoneRects.filter((zone) => !zone.floatFormId && !zone.floatOwnerFormId);
+
+    const hit = pickDropTarget(candidates, { x, y });
     if (!hit) return null;
-    // 合成 Zone（根级边缘带）整条带就是一个部位，部位已在采集时固定；
-    // 普通标签组 Zone 现场按指针在矩形内的位置解析 —— 感应带逐边给定，
-    // 与根缘重合的侧边用的是向外扩展过的厚度（见 `tabsetSideBands`）。
+    // 合成 Zone（根级边缘带 / 空根井面 / 浮窗组合目标）整条矩形就是一个部位，
+    // 部位已在采集时固定；普通标签组 Zone 现场按指针在矩形内的位置解析 ——
+    // 感应带逐边给定，与根缘重合的侧边用的是向外扩展过的厚度（见 `tabsetSideBands`）。
     const band = store.getState().dock.settings.edgeBandPx;
     const zone: DockDropZone =
         hit.fixedZone ?? (resolveDropZone(hit.rect, { x, y }, band, hit.sideBands) ?? "center");
     // 根级带的提交/预览基准是整个停靠区矩形（"贯通整侧"），不是那条细带。
-    return { zoneId: hit.zoneId, zone, rect: hit.previewRect ?? hit.rect };
+    return {
+        zoneId: hit.zoneId,
+        zone,
+        rect: hit.previewRect ?? hit.rect,
+        rootId: hit.rootId,
+        floatFormId: hit.floatFormId,
+    };
 }
 
 /**
@@ -297,7 +405,7 @@ function maybeLiveReorder(active: DragSession, x: number, y: number): void {
     if (!inReorderBand(active, x, y) || active.tabsetId === null) return;
     const index = resolveTabIndex(active.tabsetId, active.formId, x);
     if (index === null) return;
-    const zone = findZone(store.getState().dock.layout.tree, active.tabsetId);
+    const zone = findZoneInLayout(store.getState().dock.layout, active.tabsetId);
     if (!zone || zone.t !== "tabset") return;
     const currentIndex = zone.tabs.indexOf(active.formId);
     if (index === currentIndex) return;
@@ -431,7 +539,7 @@ function onPointerUp(event: PointerEvent): void {
         if (inReorderBand(active, x, y) && active.tabsetId !== null) {
             const index = resolveTabIndex(active.tabsetId, active.formId, x);
             if (index === null) return;
-            const zone = findZone(store.getState().dock.layout.tree, active.tabsetId);
+            const zone = findZoneInLayout(store.getState().dock.layout, active.tabsetId);
             if (zone?.t === "tabset" && index !== zone.tabs.indexOf(active.formId)) {
                 store.dispatch(
                     dockFormTo({
@@ -445,7 +553,7 @@ function onPointerUp(event: PointerEvent): void {
         // 2) 按住修饰键 → 停靠；落空则回弹（什么都不做）。
         if (dockIntent) {
             if (!target) return;
-            commitDock(active.formId, target);
+            commitDock(active.formId, target, active.mode, state.floatRect);
             return;
         }
         // 3) 拖出标签条 → 浮动，落在指针处。
@@ -465,7 +573,7 @@ function onPointerUp(event: PointerEvent): void {
 
     // 浮动窗体
     if (dockIntent && target) {
-        commitDock(active.formId, target);
+        commitDock(active.formId, target, active.mode, state.floatRect);
         return;
     }
     const geometry = state.floatRect ?? active.floatStart;
@@ -486,21 +594,63 @@ function onPointerUp(event: PointerEvent): void {
     }
 }
 
-/** 把落点提交为"并入标签组"、"在某一侧拆分"或"贯通整个停靠区的某一侧"。 */
-function commitDock(formId: string, target: DockDropTargetState): void {
+/**
+ * 把落点提交为"并入标签组"、"在某一侧拆分"、"贯通某棵根的某一侧"，或
+ * "与另一枚浮窗组合成面板"。
+ */
+function commitDock(
+    formId: string,
+    target: DockDropTargetState,
+    mode: "tab" | "float",
+    /** 松手瞬间的"幽灵"矩形（指针处的浮窗预览）：组合时源窗体以它为准。 */
+    pendingFloatRect?: DockRect | null,
+): void {
+    // ── 浮窗组合目标：拖到另一枚浮窗上 → 组合成面板 / 停入它的树 ──
+    if (target.floatFormId) {
+        if (mode === "tab") {
+            // 源还是停靠态：先按指针位置浮出（尺寸用记住的浮窗尺寸），再组合。
+            // 两步在同一次事件里派发，中间态不可见。
+            const active = session;
+            const geometry = {
+                x: Math.round(getDockDragState()?.pointerX ?? 0),
+                y: Math.round(getDockDragState()?.pointerY ?? 0),
+                w: active?.sourceSize.w ?? 420,
+                h: active?.sourceSize.h ?? 320,
+            };
+            store.dispatch(floatForm({ formId, geometry }));
+        }
+        const rect = composeRectFor(formId, target.floatFormId, pendingFloatRect);
+        store.dispatch(
+            composeFloats({
+                sourceFormId: formId,
+                targetFormId: target.floatFormId,
+                zone: target.zone,
+                rect,
+            }),
+        );
+        return;
+    }
+
     const side = dropZoneToSide(target.zone);
     const layout = store.getState().dock.layout;
+    const rootId = target.rootId;
 
-    // 根级边缘带：以整个停靠区为参照拆分（贯通全高/全宽），提交走
+    // 根级边缘带：以**该根**的整个停靠区为参照拆分（贯通全高/全宽），提交走
     // `{kind:"root"}`，与"打开面板时的默认落点"（`placeForm`）同一语义。
+    // 空根（空面板占位井）的整面 center 落点 = 播种它的第一个标签组。
     if (target.zoneId === DOCK_ROOT_ZONE_ID) {
-        if (side !== null) {
-            store.dispatch(dockFormTo({ formId, target: { kind: "root", side } }));
+        if (!rootId) return;
+        if (side === null) {
+            // 空根（空面板占位井）的整面 center 落点 = 播种它的第一个标签组：
+            // 播种路径不关心标签组 id（树还不存在），传空串即可。
+            store.dispatch(dockFormTo({ formId, target: { kind: "tab", tabsetId: "", rootId } }));
+        } else {
+            store.dispatch(dockFormTo({ formId, target: { kind: "root", rootId, side } }));
         }
         return;
     }
 
-    const zone = findZone(layout.tree, target.zoneId);
+    const zone = findZoneInLayout(layout, target.zoneId);
     if (!zone) return;
 
     if (zone.t === "tabset" && side === null) {
@@ -512,6 +662,47 @@ function commitDock(formId: string, target: DockDropTargetState): void {
     const referenceFormId = zone.t === "tabset" ? zone.active || zone.tabs[0] : null;
     if (!referenceFormId || side === null) return;
     store.dispatch(splitFormTo({ formId, referenceFormId, side }));
+}
+
+/**
+ * 组合成面板时的并集矩形：按视口夹紧后交给 reducer（reducer 保持纯函数）。
+ *
+ * 【为什么必须先 resolve】带锚点的浮窗（如首次打开的记事本）里 `float.x/y`
+ * 只是**占位值**（真实位置由锚点在渲染时按视口推导）。直接对占位值取并集，
+ * 组合出的面板会跳到视口左上角 —— 两枚锚定浮窗的占位 x/y 恰好都是 0 附近
+ * （用户报告"组合后面板没有继承原浮窗的位置"）。先把每枚浮窗解析成它**此刻
+ * 实际所在**的矩形，再取并集、夹紧进视口。
+ */
+function composeRectFor(
+    sourceFormId: string,
+    targetFormId: string,
+    pendingFloatRect?: DockRect | null,
+): DockRect | null {
+    const layout = store.getState().dock.layout;
+    const viewport = { w: window.innerWidth, h: window.innerHeight };
+    const resolve = (formId: string): DockRect | null => {
+        const float = layout.forms[formId]?.float ?? null;
+        return float ? resolveFloatRect(float, viewport) : null;
+    };
+    // 源窗体优先用**幽灵矩形**：停靠意图的松手不会先落库拖拽位移，窗体的
+    // `float` 还停在拖拽前 —— 而用户看到的是拖到指针处的幽灵。以幽灵为准，
+    // 组合出的面板恰好盖住"所拖之窗 + 目标之窗"。
+    const source = pendingFloatRect ?? resolve(sourceFormId);
+    const target = resolve(targetFormId);
+    if (!source && !target) return null;
+    if (!source || !target) {
+        const single = (source ?? target) as DockRect;
+        return { x: single.x, y: single.y, w: single.w, h: single.h };
+    }
+    const x = Math.min(source.x, target.x);
+    const y = Math.min(source.y, target.y);
+    const raw: DockRect = {
+        x,
+        y,
+        w: Math.max(source.x + source.w, target.x + target.w) - x,
+        h: Math.max(source.y + source.h, target.y + target.h) - y,
+    };
+    return clampFloatRect(raw, viewport, FLOAT_TITLE_BAR_PX);
 }
 
 /**
@@ -687,13 +878,15 @@ export function beginTabDrag(event: React.PointerEvent, args: TabDragArgs): void
     // 浮窗，而当初那个大小已经无从找回。浮动态与停靠态的尺寸是两个独立意图，
     // 必须分开保存（见 `DockForm.float`）。
     const form = store.getState().dock.layout.forms[args.formId];
-    const definition = getPanel(form?.panelId ?? args.panelId);
+    // 面板不在注册表里，尺寸兜底走派生定义（`synthesizePanelDefinition`），
+    // 否则面板被拖出标签时会退回通用的 420×320。
+    const definition = synthesizePanelDefinition(store.getState().dock.layout, args.formId);
     const sourceSize = {
         w: Math.max(200, Math.round(form?.float?.w ?? definition?.defaultWidth ?? 420)),
         h: Math.max(120, Math.round(form?.float?.h ?? definition?.defaultHeight ?? 320)),
     };
     // 实时重排会中途提交顺序，取消时按这个下标把源组恢复原状。
-    const sourceZone = findZone(store.getState().dock.layout.tree, args.tabsetId);
+    const sourceZone = findZoneInLayout(store.getState().dock.layout, args.tabsetId);
     const reorderBaseIndex =
         sourceZone && sourceZone.t === "tabset" ? sourceZone.tabs.indexOf(args.formId) : null;
 

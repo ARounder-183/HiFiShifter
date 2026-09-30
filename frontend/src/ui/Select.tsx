@@ -84,8 +84,9 @@ export function AppSelect({
     const size = radixSizeFor(useDensity(density));
     /*
      * 滚轮换项只关心"值"的有序列表，分隔线要滤掉 —— 否则滚轮会停在分隔线上。
+     * 同一份列表也用来判定"这个值是不是本组件的选项"，见下方的守卫。
      */
-    const wheelOptions = options.flatMap((entry) => (isSeparator(entry) ? [] : [entry.value]));
+    const optionValues = options.flatMap((entry) => (isSeparator(entry) ? [] : [entry.value]));
 
     /*
      * 滚轮提交走帧合并 + 手势累积（见 `useFrameCommit.ts` 的长注释）：
@@ -99,17 +100,17 @@ export function AppSelect({
     const setWheelTarget = useNonPassiveWheel<HTMLButtonElement>((event) => {
         if (disabled) return;
         if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return;
-        if (wheelOptions.length <= 1) return;
-        const at = wheelOptions.indexOf(value);
+        if (optionValues.length <= 1) return;
+        const at = optionValues.indexOf(value);
         if (at < 0) return;
         // 先接管这次滚轮（阻止祖先滚动），再算值 —— 算不出下一格时也不该滚动容器。
         event.preventDefault();
         event.stopPropagation();
         const next = accumulator.advance(value, (base) => {
-            const from = wheelOptions.indexOf(base);
+            const from = optionValues.indexOf(base);
             if (from < 0) return base;
             const direction = event.deltaY < 0 ? -1 : 1;
-            return wheelOptions[from + direction] ?? base;
+            return optionValues[from + direction] ?? base;
         });
         if (next !== value) committer.schedule(next);
     });
@@ -117,8 +118,27 @@ export function AppSelect({
     return (
         <Select.Root
             value={value}
-            // 手动选择（点菜单项）不经过滚轮，直接提交；无需节流。
-            onValueChange={onValueChange}
+            /*
+             * 手动选择（点菜单项）不经过滚轮，直接提交；无需节流。
+             *
+             * 【必须守卫：只接受本组件自己的选项值】Radix 会为表单兼容渲染一个隐藏的
+             * 原生 `<select>`，并在受控值变化时把它镜像进去（`SelectBubbleInput`：
+             * `setValue.call(select, value)` 后派发一个冒泡的 `change`）。受控值一旦
+             * **不在 `<option>` 里**，浏览器会把 `select.value` 归成 `""`，Radix 就把这个
+             * `""` 原样转发给 `onValueChange` —— 于是调用方会收到一次它从未请求过的
+             * 空字符串变更。
+             *
+             * 真实后果：`RenderCacheDialog` 的两个数字框旁边曾有预设下拉，用 "custom"
+             * 表示"当前值不是预设"。滚轮把 4096 调成 4097 时，下拉的受控值变成 "custom"
+             * ⇒ 触发一次 `onValueChange("")` ⇒ 调用方 `Number("") === 0` ⇒ 占用上限被
+             * 静默改成"不限"。用户看到的是"滚轮直接跳到 0"。
+             *
+             * 受控下拉**只可能**报告它自己的选项，因此这里把不属于选项集的值一律丢掉。
+             */
+            onValueChange={(next) => {
+                if (!optionValues.includes(next)) return;
+                onValueChange(next);
+            }}
             disabled={disabled}
             size={size}
         >

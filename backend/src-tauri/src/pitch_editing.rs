@@ -205,6 +205,47 @@ pub(crate) fn hifigan_tension_active_for_clip(
     )
 }
 
+/// 该 clip 是否会走气声（HNSEP 分离 + 独立 noise stem）渲染路径。
+///
+/// ★ **唯一实现**：预览渲染（`commands::playback::render_single_clip`）与导出侧的
+/// **渲染缓存复用门禁**都必须经由它。两处各写一份必然漂移，而漂移的后果分两种，
+/// 都不可接受：
+/// - 预览侧漏判 → WORLD/vslib 白跑一次 HNSEP 推理（见 `render_single_clip` 的说明）；
+/// - 导出侧漏判 → 把"谐波（`breath_gain=0`）+ 独立噪声 stem"的缓存产物当成
+///   "链内已按 breath_gain 混好的成品"复用，导出音频静默变化。
+///
+/// 判据与预览侧逐字一致：渲染器必须是 NSF-HiGAN（切换算法**不会**清空
+/// `extra_params`，残留的 `breath_enabled` 不得放行），且 `extra_params.breath_enabled`
+/// 为真（clip 级覆盖优先、轨道级兜底）。
+pub(crate) fn clip_breath_active(timeline: &TimelineState, clip: &crate::state::Clip) -> bool {
+    let Some(clip_root) = timeline.resolve_root_track_id(&clip.track_id) else {
+        return false;
+    };
+    let breath_capable = timeline
+        .tracks
+        .iter()
+        .find(|track| track.id == clip_root)
+        .map(|track| {
+            matches!(
+                SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo),
+                SynthPipelineKind::NsfHifiganOnnx
+            )
+        })
+        .unwrap_or(false);
+    if !breath_capable {
+        return false;
+    }
+    let effective_extra_params = clip.extra_params.as_ref().or_else(|| {
+        timeline
+            .params_by_root_track
+            .get(&clip_root)
+            .map(|entry| &entry.extra_params)
+    });
+    effective_extra_params
+        .map(|params| extra_param_enabled(params, "breath_enabled"))
+        .unwrap_or(false)
+}
+
 /// 解析 clip 级覆盖优先、轨道级兜底的 extra_curve。
 pub(crate) fn extra_curve_for_clip<'a>(
     entry: &'a crate::state::TrackParamsState,
@@ -1336,7 +1377,7 @@ pub(crate) fn build_clip_input_pitch_curve(
         Vec::new()
     } else {
         let clip_root = clip_root_track_id(timeline, clip)?;
-        let clip_pitch = crate::pitch_clip::get_or_compute_clip_pitch_midi_global(
+        let clip_pitch = crate::pitch_clip::get_clip_pitch_midi_global(
             timeline,
             clip,
             &clip_root,
@@ -1346,7 +1387,7 @@ pub(crate) fn build_clip_input_pitch_curve(
         // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]。
         let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
         let mut tm = crate::pitch_clip::trim_and_resample_midi(
-            &clip_pitch.midi,
+            &clip_pitch,
             frame_period_ms,
             trim_src_start,
             trim_src_end,

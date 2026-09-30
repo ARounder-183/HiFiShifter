@@ -402,7 +402,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                     maxHeight: QUICK_SEARCH_POPUP_HEIGHT,
                     background: "var(--qt-panel)",
                     border: "1px solid var(--qt-border)",
-                    borderRadius: 10,
+                    borderRadius: "var(--qt-radius-lg)",
                     boxShadow: "0 20px 44px rgba(0,0,0,0.28)",
                     overflow: "hidden",
                 }}

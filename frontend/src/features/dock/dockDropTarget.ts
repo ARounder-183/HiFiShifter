@@ -88,6 +88,26 @@ export interface DockZoneRect {
     zoneId: string;
     rect: DockRect;
     /**
+     * 这条 Zone 属于**哪棵布局根**。
+     *
+     * 多根之后，zone id 只在根内唯一，同一份 DOM 里可能有多个根的边缘带与
+     * 标签组 —— 提交时必须知道改哪棵树。浮窗组合目标没有根（它创建根）。
+     */
+    rootId?: string;
+    /**
+     * 非空 = 这是一条**浮窗组合目标**：拖一个浮窗到这个浮窗上 → 组合成面板
+     * （目标已是面板则停入它的树）。
+     */
+    floatFormId?: string;
+    /**
+     * 非空 = 这条 Zone 在某个浮窗内部（浮动面板的边缘带 / 标签组）。
+     *
+     * 【为什么需要】浮窗盖在主停靠区之上：指针落在浮窗里时，被浮窗遮住的
+     * 主区落点必须让位（用户看到的上层是谁，落点就是谁）。按"最上层浮窗"
+     * 过滤候选就是这条规则的实现（见 `resolveTarget`）。
+     */
+    floatOwnerFormId?: string;
+    /**
      * 预解析的落点部位。普通标签组 Zone 省略它（落点按指针在矩形内的位置
      * 现场解析）；**合成 Zone**（根级边缘带，见 `buildRootEdgeZones`）整个
      * 矩形只对应一个部位，必须在这里固定 —— 对着一条"右侧带"跑 `resolveDropZone`
@@ -110,7 +130,8 @@ export interface DockZoneRect {
 
 /**
  * 根级边缘带的合成 Zone id。四个方向的带共用它：提交与提示只需要知道
- * "这是根级落点"，具体侧向从 `zone`（由 `fixedZone` 解析而来）读取。
+ * "这是根级落点"，具体侧向从 `zone`（由 `fixedZone` 解析而来）读取，
+ * 具体改哪棵树由 `rootId` 读取（多根之后每个布局根都有自己的边缘带）。
  */
 export const DOCK_ROOT_ZONE_ID = "__dock_root__";
 
@@ -176,7 +197,11 @@ export function tabsetSideBands(
  * 命中一条；`pickDropTarget` 的"面积最小者优先"规则恰好让细带压过下方
  * 标签组的大矩形，不需要额外优先级逻辑。
  */
-export function buildRootEdgeZones(rootRect: DockRect, edgeBandPx: number): DockZoneRect[] {
+export function buildRootEdgeZones(
+    rootRect: DockRect,
+    edgeBandPx: number,
+    rootId?: string,
+): DockZoneRect[] {
     if (rootRect.w <= 0 || rootRect.h <= 0) return [];
     // 与 resolveDropZone 同样的钳制思路：停靠区极小时按短边收缩，保证中央
     // 区域（并入标签组）永远还有立足之地。
@@ -185,29 +210,51 @@ export function buildRootEdgeZones(rootRect: DockRect, edgeBandPx: number): Dock
     const innerW = Math.max(0, rootRect.w - band * 2);
     const left: DockZoneRect = {
         zoneId: DOCK_ROOT_ZONE_ID,
+        rootId,
         fixedZone: "left",
         previewRect: rootRect,
         rect: { x: rootRect.x, y: rootRect.y, w: band, h: rootRect.h },
     };
     const right: DockZoneRect = {
         zoneId: DOCK_ROOT_ZONE_ID,
+        rootId,
         fixedZone: "right",
         previewRect: rootRect,
         rect: { x: rootRect.x + rootRect.w - band, y: rootRect.y, w: band, h: rootRect.h },
     };
     const top: DockZoneRect = {
         zoneId: DOCK_ROOT_ZONE_ID,
+        rootId,
         fixedZone: "top",
         previewRect: rootRect,
         rect: { x: innerX, y: rootRect.y, w: innerW, h: band },
     };
     const bottom: DockZoneRect = {
         zoneId: DOCK_ROOT_ZONE_ID,
+        rootId,
         fixedZone: "bottom",
         previewRect: rootRect,
         rect: { x: innerX, y: rootRect.y + rootRect.h - band, w: innerW, h: band },
     };
     return [left, right, top, bottom];
+}
+
+/**
+ * 空面板占位井的合成 Zone：整块井面就是一个"并入"落点。
+ *
+ * 【为什么需要】空面板没有标签组（没有 `data-dock-zone`），而根级边缘带只
+ * 覆盖外缘一圈 —— 井的正中央会变成"无落点"，用户把窗体拖到空面板正中却
+ * 什么都发生。补一条盖满井面的 center 合成 Zone，空面板从建好那一刻起
+ * 全面积可停靠。
+ */
+export function buildEmptyRootZone(rootRect: DockRect, rootId: string): DockZoneRect {
+    return {
+        zoneId: DOCK_ROOT_ZONE_ID,
+        rootId,
+        fixedZone: "center",
+        previewRect: rootRect,
+        rect: { ...rootRect },
+    };
 }
 
 /**

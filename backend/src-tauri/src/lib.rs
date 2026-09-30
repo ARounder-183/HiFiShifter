@@ -40,8 +40,6 @@ pub(crate) mod channel_mode;
 pub(crate) mod stereo_detect;
 #[path = "import/channel_policy.rs"]
 pub(crate) mod channel_policy;
-#[path = "pitch/clip_pitch_cache.rs"]
-mod clip_pitch_cache;
 #[path = "pitch/clip_rendering_state.rs"]
 mod clip_rendering_state;
 mod fade_curves;
@@ -63,13 +61,14 @@ mod models;
 mod pitch_analysis;
 #[path = "pitch/pitch_clip.rs"]
 mod pitch_clip;
+#[path = "pitch/streaming_pitch.rs"]
+mod streaming_pitch;
 #[path = "pitch/pitch_config.rs"]
 mod pitch_config;
 mod pitch_editing;
-#[path = "pitch/pitch_progress.rs"]
-mod pitch_progress;
 mod recording;
 mod render_cache;
+mod render_key;
 mod renderer;
 mod synth_clip_cache;
 
@@ -127,6 +126,84 @@ use fcpe_onnx_stub as fcpe_onnx;
 mod config;
 #[path = "audio/hfspeaks_v2.rs"]
 mod hfspeaks_v2;
+
+// ── 测试专用的分配计量 ───────────────────────────────────────────────────────
+//
+// "导入超长音频内存爆炸"的验收标准是「峰值工作集与素材长度解耦」，这只能靠真的
+// 量分配量来验证 —— 比较输出曲线或帧数完全覆盖不到这一点。
+//
+// 只在测试构建下替换分配器（`#[cfg(test)]`），发布二进制走系统分配器，无任何
+// 运行时开销。
+#[cfg(test)]
+pub(crate) mod alloc_probe {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static LIVE: AtomicUsize = AtomicUsize::new(0);
+    static PEAK: AtomicUsize = AtomicUsize::new(0);
+
+    pub struct CountingAllocator;
+
+    impl CountingAllocator {
+        fn record_add(bytes: usize) {
+            let live = LIVE.fetch_add(bytes, Ordering::Relaxed) + bytes;
+            PEAK.fetch_max(live, Ordering::Relaxed);
+        }
+        fn record_sub(bytes: usize) {
+            LIVE.fetch_sub(bytes, Ordering::Relaxed);
+        }
+    }
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let ptr = unsafe { System.alloc(layout) };
+            if !ptr.is_null() {
+                Self::record_add(layout.size());
+            }
+            ptr
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            Self::record_sub(layout.size());
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            let ptr = unsafe { System.alloc_zeroed(layout) };
+            if !ptr.is_null() {
+                Self::record_add(layout.size());
+            }
+            ptr
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
+            if !new_ptr.is_null() {
+                Self::record_sub(layout.size());
+                Self::record_add(new_size);
+            }
+            new_ptr
+        }
+    }
+
+    /// 测量 `f` 执行期间**新增的峰值常驻分配**（字节）。
+    ///
+    /// 基线取进入 `f` 时刻的存活字节数，因此结果只反映 `f` 自身的开销。
+    /// 【前置条件】计数器是进程级的，调用期间不能有别的线程在分配 —— 使用者必须
+    /// 串行运行（见调用处的 `#[ignore]` 说明与 `--test-threads=1`）。
+    pub fn measure_peak_alloc<T>(f: impl FnOnce() -> T) -> (T, usize) {
+        let base = LIVE.load(Ordering::Relaxed);
+        PEAK.store(base, Ordering::Relaxed);
+        let out = f();
+        let peak = PEAK.load(Ordering::Relaxed);
+        (out, peak.saturating_sub(base))
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOCATOR: alloc_probe::CountingAllocator = alloc_probe::CountingAllocator;
+
 #[cfg(target_os = "linux")]
 mod linux_clipboard;
 #[path = "import/midi_import.rs"]
@@ -716,6 +793,7 @@ pub fn run() {
             commands::pick_diagnostics_output_path,
             commands::export_diagnostics,
             commands::export_layout_json,
+            commands::export_theme_json,
             commands::log_frontend_error,
             commands::get_onnx_status,
             commands::get_onnx_diagnostic,

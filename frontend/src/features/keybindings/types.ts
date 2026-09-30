@@ -124,6 +124,8 @@ export type ActionId =
     | "layout.focusNext" // 聚焦下一个窗体
     | "layout.focusPrev" // 聚焦上一个窗体
     | "layout.maximize" // 最大化 / 还原当前窗体
+    | "layout.newPanel" // 新建一个空面板
+    | "layout.dissolvePanel" // 解散包含当前窗体的面板
     | "quickSearch.preview" // 快速搜索：预览/试听
     | "quickSearch.confirm" // 快速搜索：确认放置
     | "quickSearch.close"; // 快速搜索：关闭弹窗

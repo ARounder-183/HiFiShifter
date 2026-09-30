@@ -11,9 +11,6 @@ import { resolveStep, stepFor, stepValue, type StepUnit } from "./stepPolicy";
 describe("stepFor", () => {
     test("精细步长严格小于粗调步长（除非该单位本身是离散的）", () => {
         const discrete: StepUnit[] = ["semitone", "integer", "pixels"];
-        for (const unit of Object.keys(stepFor("bpm")) as StepUnit[]) {
-            void unit;
-        }
         for (const unit of [
             "bpm",
             "cents",
@@ -24,6 +21,12 @@ describe("stepFor", () => {
             "rate",
             "milliseconds",
             "seconds",
+            "megabytes",
+            "entryMegabytes",
+            "diskMegabytes",
+            "kilobytes",
+            "days",
+            "clipSeconds",
         ] as StepUnit[]) {
             const spec = stepFor(unit);
             expect(spec.fine, `${unit} 的精调步长应小于粗调`).toBeLessThan(spec.coarse);
@@ -32,6 +35,23 @@ describe("stepFor", () => {
             const spec = stepFor(unit);
             expect(spec.fine, `${unit} 是离散量，精调应与粗调相同`).toBe(spec.coarse);
         }
+    });
+
+    test("渲染缓存的六个量各有自己的档位（同一个 MB 也不是同一个步长）", () => {
+        // 用户报告的正是"占用上限滚一格只跳 1"：它必须按 GB 量级走，而"单条上限"
+        // 按百 MB 量级走、"保留磁盘"介于两者之间 —— 因此三个 MB 单位刻意不同。
+        expect(stepFor("megabytes").coarse).toBe(1024);
+        expect(stepFor("megabytes").fine).toBe(128);
+        expect(stepFor("days").coarse).toBe(10);
+        expect(stepFor("days").fine).toBe(1);
+        expect(stepFor("entryMegabytes").coarse).toBe(64);
+        expect(stepFor("diskMegabytes").coarse).toBe(256);
+        expect(stepFor("kilobytes").fine).toBe(1);
+        expect(stepFor("clipSeconds").coarse).toBe(0.5);
+        expect(stepFor("clipSeconds").fine).toBe(0.05);
+        // 三者的量级必须真的不同，否则"按参数特性分配"就落空了。
+        expect(stepFor("megabytes").coarse).toBeGreaterThan(stepFor("diskMegabytes").coarse);
+        expect(stepFor("diskMegabytes").coarse).toBeGreaterThan(stepFor("entryMegabytes").coarse);
     });
 
     test("取整百分比与小数百分比是两个单位（避免把 0.35% 截成 1%）", () => {
@@ -45,6 +65,8 @@ describe("stepFor", () => {
         expect(stepFor("rate").decimals).toBe(2);
         expect(stepFor("seconds").decimals).toBe(3);
         expect(stepFor("integer").decimals).toBe(0);
+        // 0.05 的步长必须是 2 位小数，否则滚轮一动就会把 0.05 显示成 0.1。
+        expect(stepFor("clipSeconds").decimals).toBe(2);
     });
 
     test("每个单位都有定义（新增单位必须显式给步长）", () => {
@@ -61,6 +83,12 @@ describe("stepFor", () => {
             "seconds",
             "pixels",
             "integer",
+            "megabytes",
+            "entryMegabytes",
+            "diskMegabytes",
+            "kilobytes",
+            "days",
+            "clipSeconds",
         ];
         for (const unit of units) {
             const spec = stepFor(unit);

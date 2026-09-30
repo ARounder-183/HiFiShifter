@@ -54,8 +54,10 @@
        `scrollbar-thumb-hover:` 类因此静默失效。补上定义而不是删掉映射：
        hover 是滚动条唯一的价格反馈。 */
     --qt-scrollbar-thumb-hover: #6b6b6b;
-    /* 强调色的语义别名。此前两处 `text-qt-accent` 因为无此 token 而取不到颜色。 */
-    --qt-accent: var(--accent-9);
+    /* 强调色的语义别名。此前两处 `text-qt-accent` 因为无此 token 而取不到颜色。
+       注意这只是一个"就近声明"：真正能正确求值的位置在下方 `.radix-themes` 规则
+       （本令牌引用了 `--accent-9`，必须在拥有该变量的元素上声明）。 */
+    --qt-accent: var(--accent-9, var(--qt-highlight));
     --qt-overlay: rgba(0, 0, 0, 0.35);
     --qt-divider: rgba(255, 255, 255, 0.04);
     --qt-subtle-1: rgba(255, 255, 255, 0.025);
@@ -111,7 +113,7 @@
     --qt-graph-grid-weak: rgba(74, 88, 112, 0.3);
     --qt-scrollbar-thumb: #b4bac7;
     --qt-scrollbar-thumb-hover: #9aa1b1;
-    --qt-accent: var(--accent-9);
+    --qt-accent: var(--accent-9, var(--qt-highlight));
     --qt-overlay: rgba(20, 24, 32, 0.22);
     --qt-divider: rgba(32, 38, 52, 0.1);
     --qt-subtle-1: rgba(28, 36, 52, 0.025);
@@ -129,6 +131,39 @@
     --qt-snap-cursor: #de4f5d;
     --qt-snap-sample: #64748b;
     --qt-snap-loop: #16a34a;
+}
+
+/*
+ * 派生令牌（值引用其它自定义属性）的**求值作用域**。
+ *
+ * 【为什么必须单独声明在 `.radix-themes` 上】自定义属性在**声明它的元素**上求值，
+ * 不是在"使用它的元素"上求值。`--qt-accent: var(--accent-9)` 写在 `:root`/`<html>`
+ * 时，`<html>` 上并没有 `--accent-9`（Radix 只把它定义在 `.radix-themes` 元素上，
+ * 见 @radix-ui/themes 的 `.radix-themes:where(.accent-*)` 规则），于是这个自定义属性
+ * 计算为**无效值**，并被后代按无效值继承 —— 用到它的声明（`background: var(--qt-accent)`）
+ * 随之整条失效，回落到初始值 `transparent`。
+ *
+ * 应用外壳恰好还有一个"更近"的声明（外壳元素同时带 `.qt-theme` 与 `.radix-themes`），
+ * 因此外壳内看起来一切正常；而 **Dialog / Select / Tooltip / 右键菜单等 Radix portal
+ * 的内容挂在 `<body>` 下**，Radix 只把 `radix-themes` 类挂到 portal 包裹层（不带本应用
+ * 的 `qt-theme`），拿到的就是无效值：
+ *   - 导出进度条的**填充条**一直不可见（`bg-qt-accent`，它也是全仓唯一的 ProgressBar，
+ *     且唯一使用点就在对话框里）—— 用户报告的"进度条不更新"；
+ *   - `AboutDialog` 的链接色（`text-qt-accent`）、`SegmentedControl` 的激活底色
+ *     在对话框内同样失效（在面板里正常）。
+ *
+ * 声明在 `.radix-themes` 上即可一次覆盖外壳与所有 portal；两处 `.qt-theme.*` / `:root`
+ * 上的声明保留为"就近值 + fallback"，供不在 Radix 主题内的元素兜底。
+ *
+ * 【同类前科】`--default-font-family` 被 Radix 在 `.radix-themes` 上遮蔽过
+ * （见 `AppThemeProvider` 的注释）——同一个陷阱的另一个实例。
+ *
+ * 【防回归】`src/ui/designSystemGates.test.ts` 有一条门禁：任何"值引用其它自定义属性"
+ * 的 `--qt-*` 令牌，必须声明在本规则的选择器下，或自带 fallback。
+ */
+.radix-themes {
+    --qt-accent: var(--accent-9, var(--qt-highlight));
+    --qt-focus-ring: var(--accent-9, #3b82f6);
 }
 
 :root {
@@ -174,10 +209,33 @@
     --qt-bar-main: 32px; /* MenuBar / ActionBar / PianoRoll 头部 */
     --qt-bar-status: 24px; /* 状态栏 */
 
-    /* 圆角：三档。与 Radix --radius 变量并存（后者管 Radix 控件） */
-    --qt-radius-sm: 4px;
-    --qt-radius-md: 6px;
-    --qt-radius-lg: 10px;
+    /* 圆角：三档 + 一档药丸，**全部由外观设置的「圆角风格」推导**。
+     *
+     * 【为什么不是像素】上一版这里是写死的 4/6/10px，且**一个消费者都没有** ——
+     * 需要圆角的地方各自写 px（对话框 10px、菜单项 7px、提示与参数胶囊 6px），
+     * 于是"圆角风格"只影响 Radix 自己的控件，应用自己的表面（对话框、菜单、
+     * 参数编辑器工具栏的参数胶囊、停靠浮窗…）完全不跟随。用户报告的
+     * "参数编辑器工具栏的参数胶囊没有适配圆角风格"就是其中一处。
+     *
+     * 【取值口径】按 Radix 的标尺分档，语义与它的同名控件对齐：
+     *   sm   = --radius-2 → 小控件 / 标签 / 菜单项 / 提示
+     *   md   = --radius-3 → 卡片 / 列表行 / 分段控件底
+     *   lg   = --radius-5 → 对话框 / 浮窗 / 弹出层容器
+     *   pill = max(--radius-2, --radius-full) → 药丸型控件（与 Radix 分段控件同一公式：
+     *          "全圆"档下才真的变胶囊）
+     * 中档下依次是 4 / 6 / 12 / 4px。
+     *
+     * 【fallback 与求值位置】自定义属性在**声明处**求值：写在 `:root` 上就用
+     * `<html>` 的变量求值。`AppThemeProvider` 会把 `data-radius` 写到 `<html>`，
+     * 因此 Radix 的 `[data-radius]` 标尺在文档根上成立、这里能正确解析；
+     * 三个 fallback 是给"没有该属性"的环境（jsdom、独立测试）兜底为**中档**像素，
+     * 而不是让圆角塌成 0。`--scaling` 同理必须先给值，否则 Radix 的
+     * `calc(px * var(--scaling) * var(--radius-factor))` 整档失效。 */
+    --scaling: 1;
+    --qt-radius-sm: var(--radius-2, 4px);
+    --qt-radius-md: var(--radius-3, 6px);
+    --qt-radius-lg: var(--radius-5, 12px);
+    --qt-radius-pill: max(var(--radius-2, 4px), var(--radius-full, 0px));
 
     /*
      * 字号阶梯：统一为 px 绝对量，终结 text-xs（0.7rem = 11.2px）≠ text-[11px] 的双轨。
@@ -377,6 +435,22 @@ textarea {
     scrollbar-color: var(--qt-scrollbar-thumb, #555555) transparent;
 }
 
+/*
+ * 滑块包装盒：把 Radix 滑块头的**装饰溢出**收在自己的盒子里（见 `ui/Slider.tsx`
+ * 的说明）。盒高由组件的 `style.minHeight` 按 Radix 尺寸下发，这里只负责裁切。
+ *
+ * 【为什么是 clip 而不是 hidden】`overflow: hidden` 会把裁切盒卡在 `minHeight`
+ * 上，而焦点环的盒高正好等于它（0 余量，分数 DPR 下可能削掉 1px）；`clip-margin`
+ * 给出 3px 余量，可见部分（轨道 / 滑块头 / 焦点环）全部保留。
+ *
+ * 【删掉这条规则的后果】含滑块的对话框会重新长出那条滚不动的竖直滚动条 ——
+ * 滑块头的装饰是绝对定位的，会被祖先的滚动容器算成可滚动溢出。
+ */
+.hs-slider-box {
+    overflow: clip;
+    overflow-clip-margin: 3px;
+}
+
 /* 隐藏纵向滚动条（保留滚动功能）用于左侧轨道头。
  * 置于 .custom-scrollbar 之后：同类选择器按源序覆盖 scrollbar-width。 */
 .hide-v-scrollbar {
@@ -398,12 +472,15 @@ textarea {
 
 /* 轨道头滚动容器：禁用浏览器滚动锚定（scroll anchoring）。
  *
- * 内核模式下画布竖直缩放会在 React 行高落地**之前**改写视口（内核当帧原子提交行高
- * 与锚点位置），而行高变化时 Chromium 默认会为"保持锚点行视觉稳定"自动改写容器
- * scrollTop。该改写产生的 scroll 事件与宿主"上次写入值"不符，会被回声判定当成用户
- * 输入反灌内核，把视口从锚点位置拽回 —— 表现为"竖直缩放后竖直方向抽动"。轨道头
+ * 内核模式下竖直缩放会改写视口（行高 + 锚点位置），而行高变化时 Chromium 默认会为
+ * "保持锚点行视觉稳定"自动改写容器 scrollTop。该改写产生的 scroll 事件与宿主"上次
+ * 写入值"不符，会被回声判定当成用户输入反灌内核，把视口从锚点位置拽回。轨道头
  * 自己的缩放路径本就显式计算锚点（TrackList 的 layout effect），不依赖浏览器锚定，
- * 因此禁用无害。详见 timelineKernelHost 的 `verticalZoomInFlight`。 */
+ * 因此禁用无害。
+ *
+ * 特殊说明：主路径已改为"请求 → React 落地 → 同一次提交原子应用"（内核不领先
+ * React，DOM 与内核一起变），本规则挡的是浏览器自作主张的那一次改写，与
+ * `verticalZoomInFlight`（只服务未接线宿主的兜底路径）无关。 */
 .no-scroll-anchor {
     overflow-anchor: none;
 }
@@ -683,7 +760,8 @@ textarea {
     background: var(--qt-panel) !important;
     color: var(--qt-text) !important;
     border: 1px solid var(--qt-border) !important;
-    border-radius: 10px !important;
+    /* 跟随「圆角风格」：与 Radix 给同size对话框的档位一致（--radius-5）。 */
+    border-radius: var(--qt-radius-lg) !important;
     box-shadow: 0 20px 44px rgba(0, 0, 0, 0.28) !important;
 }
 
@@ -733,7 +811,9 @@ textarea {
     align-items: stretch;
     height: var(--space-5); /* 与 size-1 按钮一致：24px */
     border: 1px solid var(--qt-border);
-    border-radius: 6px;
+    /* 药丸型控件：与 `AppSegmentedControl` / Radix 分段控件同一公式 —— 中档是
+       小圆角，"全圆"档才真的变胶囊（见 --qt-radius-pill 的说明）。 */
+    border-radius: var(--qt-radius-pill);
     background: var(--qt-panel);
     overflow: hidden;
     white-space: nowrap;
@@ -823,7 +903,8 @@ textarea {
 }
 .qt-range::-webkit-slider-runnable-track {
     height: 4px;
-    border-radius: 2px;
+    /* 4px 高的轨道 + 药丸圆角 = 两端半圆；"无圆角"档下按设置变成方头。 */
+    border-radius: var(--qt-radius-pill);
     background: var(--qt-border);
 }
 .qt-range::-webkit-slider-thumb {
@@ -838,7 +919,8 @@ textarea {
 }
 .qt-range::-moz-range-track {
     height: 4px;
-    border-radius: 2px;
+    /* 4px 高的轨道 + 药丸圆角 = 两端半圆；"无圆角"档下按设置变成方头。 */
+    border-radius: var(--qt-radius-pill);
     background: var(--qt-border);
 }
 .qt-range::-moz-range-thumb {
@@ -852,7 +934,8 @@ textarea {
 .rt-DropdownMenuItem,
 .rt-SelectItem,
 .rt-ContextMenuItem {
-    border-radius: 7px !important;
+    /* 跟随「圆角风格」：与 Radix 菜单项同档（--radius-3）。 */
+    border-radius: var(--qt-radius-md) !important;
 }
 
 .rt-DropdownMenuItem[data-highlighted],
@@ -876,7 +959,7 @@ textarea {
     background: var(--qt-panel);
     color: var(--qt-text);
     padding: 4px 8px;
-    border-radius: 6px;
+    border-radius: var(--qt-radius-md);
     font-size: var(--qt-fs-sm);
     line-height: 16px;
     border: 1px solid var(--qt-border);

@@ -33,6 +33,7 @@ import React, { useMemo, Profiler } from "react";
 import { Flex } from "@radix-ui/themes";
 import { AppDialog } from "../../ui/Dialog";
 import { AppContextMenu } from "../../ui/Menu";
+import { useMenuShortcut } from "../../ui/useMenuShortcut";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { useAppSelector } from "../../app/hooks";
@@ -493,6 +494,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         y: number;
         path: string;
     } | null>(null);
+    // 该菜单里「打开工程」的快捷键提示（与菜单栏「文件 → 打开工程」同一个动作）。
+    // 取值是原始字符串，因此只有在用户真的改了绑定时才会让本面板重渲染。
+    const openProjectShortcut = useMenuShortcut("project.open");
 
     // ── 1. State / refs / viewport / scroll / 坐标转换 ──────
     /**
@@ -5294,10 +5298,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         // 被误当成用户输入收下，形成「内核 → DOM → 内核」的回退循环。
         const host = kernelHostRef.current;
         if (host != null) {
-            // 画布竖直缩放在途（React 行高未落地）：窗口内的 scroll 事件是内容高
-            // 变化的钳制回弹 / 滚动锚定补偿，与"上次写入值"必然不符，绝不能当用户
-            // 输入回灌——否则会把视口从锚点位置拽回（竖直抽动）。位置由宿主在行高
-            // 落地后补写，见 `verticalZoomInFlight`。
+            // 画布竖直缩放"内核先行"的在途窗口：窗口内的 scroll 事件是内容高变化的
+            // 钳制回弹 / 滚动锚定补偿，与"上次写入值"必然不符，绝不能当用户输入回灌
+            // ——否则会把视口从锚点位置拽回（竖直抽动）。位置由宿主在行高落地后补写，
+            // 见 `verticalZoomInFlight`。
+            //
+            // 特殊说明：主路径（宿主接上了 `onRowHeightChange` 落地通道）**不会**进入
+            // 这个状态——它走"请求 → React 落地 → 同一次提交原子应用"，内核不领先
+            // React，轨道头 DOM 与内核在同一次提交里一起变。本守卫只为兜底路径而存在。
             if (host.isVerticalZoomInFlight()) {
                 return;
             }
@@ -6055,6 +6063,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 {
                                     key: "open-project",
                                     label: t("menu_open_project"),
+                                    shortcut: openProjectShortcut,
                                     onSelect: () =>
                                         emitExternalFileAction(
                                             "openProject",

@@ -13,11 +13,13 @@ import { useEffect } from "react";
 
 import { useAppDispatch, useAppSelector, useAppStore } from "../../app/hooks";
 import { reconcileDetachedFormWindows } from "../../features/dock/dockApi";
-import { isFormVisible } from "../../features/dock/dockTree";
+import { collectOsWindowRootIds } from "../../features/dock/dockPanel";
+import { isFormVisible, isPanelForm, rootOfForm } from "../../features/dock/dockTree";
+import { MAIN_ROOT_ID } from "../../features/dock/dockTypes";
 import { markFormsMounted, syncRegisteredPanels } from "../../features/dock/dockSlice";
 import { DockDropOverlay } from "./DockDropOverlay";
 import { DockFloatingLayer } from "./DockFloatingLayer";
-import { DockNodeView } from "./DockNodeView";
+import { DockSubRoot } from "./DockSubRoot";
 import { DockPanelHosts } from "./DockPanelHosts";
 import { closeAllDetachedWindows } from "../../features/dock/detachedWindow";
 import "./dock.css";
@@ -70,20 +72,31 @@ export function DockRoot() {
         dispatch(markFormsMounted(visibleKey ? visibleKey.split("|") : []));
     }, [dispatch, visibleKey]);
 
+    // 独立窗口承载的面板根（含子树里的面板根）：这些根里的窗体由那个窗口渲染，
+    // 主窗口必须排除 —— 不排除的话同一份状态被两个实例各写一次（记事本自动
+    // 保存之类的副作用会翻倍，与 `floatMode === "osWindow"` 的排除同一道理）。
+    const osHostedRootIds = collectOsWindowRootIds(layout);
+
     const mountedForms = mountedFormIds
         .map((formId) => layout.forms[formId])
         .filter((form): form is NonNullable<typeof form> => Boolean(form))
         // 已经拆到**独立窗口**的窗体不在主窗口挂载：它此刻由那个窗口承载。
         // 不排除的话会同时存在两个实例（主窗口那个停在停泊区、仍在跑 effect），
         // 于是同一份状态被两个实例各写一次 —— 记事本自动保存之类的副作用会翻倍。
-        .filter((form) => form.floatMode !== "osWindow");
+        .filter((form) => form.floatMode !== "osWindow")
+        // 面板窗体没有组件（它渲染自己的树），不占宿主层；它的内容由
+        // `DockZone` 内嵌的 `DockSubRoot` 承载。
+        .filter((form) => !isPanelForm(form))
+        // 停靠在"被独立窗口承载的面板"里的窗体，同样归那个窗口渲染。
+        .filter((form) => {
+            const rootId = rootOfForm(layout, form.id);
+            return rootId === null || !osHostedRootIds.has(rootId);
+        });
 
     return (
         <>
             <DockPanelHosts forms={mountedForms} />
-            <div className="hs-dock-root" data-dock-root="1">
-                <DockNodeView node={layout.tree} />
-            </div>
+            <DockSubRoot rootId={MAIN_ROOT_ID} kind="main" />
             <DockFloatingLayer />
             <DockDropOverlay />
         </>

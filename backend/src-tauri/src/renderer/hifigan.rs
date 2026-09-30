@@ -33,6 +33,30 @@ pub fn global_chunk_cache_ref() -> &'static Mutex<HashMap<(String, usize), Chunk
     CHUNK_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 清空整个 chunk 推理缓存。
+///
+/// 缓存 key 只含 `(clip_id, mel_start)`，**没有任何容量或字节上限** —— 一个长 clip
+/// 可以产生数百个约 21 s 的波形 chunk。按 clip 失效只在 clip 被编辑时发生，工程
+/// 切换后旧 clip_id 不会再收到失效请求，条目因此永久常驻。切换工程时必须整体清空。
+pub fn clear_chunk_cache() {
+    if let Ok(mut cache) = global_chunk_cache_ref().lock() {
+        let dropped = cache.len();
+        let bytes: u64 = cache
+            .values()
+            .map(|e| (e.waveform.len() as u64).saturating_mul(std::mem::size_of::<f32>() as u64))
+            .sum();
+        cache.clear();
+        cache.shrink_to_fit();
+        if dropped > 0 {
+            log::warn!(
+                "[hifigan:cache] cleared {} chunk(s), ~{} bytes",
+                dropped,
+                bytes
+            );
+        }
+    }
+}
+
 /// 使指定 clip_id 的所有 chunk 推理缓存失效。
 /// 当源文件被替换时调用，避免 HiFiGAN 推理复用旧文件的输出。
 pub fn invalidate_chunk_cache_for_clip(clip_id: &str) {

@@ -1369,7 +1369,7 @@ export function ActionBar() {
                             style={{
                                 width: 48,
                                 height: 6,
-                                borderRadius: 3,
+                                borderRadius: "var(--qt-radius-pill)",
                                 background: "var(--qt-border)",
                                 overflow: "hidden",
                                 flexShrink: 0,

@@ -38,6 +38,12 @@ export interface RenderCacheSettings {
     /** 可用磁盘空间低于该值（MB）时暂停写入（0 = 不检查）。 */
     minFreeDiskMb: number;
     /** 打开工程后显示命中统计（默认开启）。 */
+    /**
+     * 导出音频时复用渲染缓存（默认开启）。
+     *
+     * 关闭后导出总是自行渲染（与引入复用之前一致）；缓存仍照常服务预览与播放。
+     */
+    exportReuseEnabled: boolean;
     showHitStats: boolean;
 }
 
@@ -51,12 +57,15 @@ export const DEFAULT_RENDER_CACHE_SETTINGS: RenderCacheSettings = {
     minClipSecs: 0,
     minEntryKb: 4,
     maxEntryMb: 512,
-    writeMode: "immediate",
+    // 出厂默认「仅保存工程时写入」。渲染产物动辄几百 MB，而"渲染完就写盘"会把每一次
+    // 试听 / 微调都变成一次写入 —— 用户当时并没有要求留档。要更早留档的人在设置里改。
+    writeMode: "manual",
     location: "system",
     customDir: null,
     verifyChecksum: true,
     minFreeDiskMb: 512,
     showHitStats: true,
+    exportReuseEnabled: true,
 };
 
 /** 规范化渲染缓存设置（钳制越界值、回退非法枚举），保存前调用。 */
@@ -99,6 +108,8 @@ export function normalizeRenderCacheSettings(input: RenderCacheSettings): Render
         location: input.location === "custom" ? "custom" : "system",
         customDir: customDir.length > 0 ? customDir : null,
         verifyChecksum: Boolean(input.verifyChecksum),
+        // 缺省视为开启（旧配置里没有这个字段）。
+        exportReuseEnabled: input.exportReuseEnabled !== false,
         minFreeDiskMb: clampInt(
             input.minFreeDiskMb,
             0,
