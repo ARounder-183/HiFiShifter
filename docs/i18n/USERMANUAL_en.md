@@ -428,7 +428,7 @@ Right-drag on a selected curve to adjust its amplitude: drag up to increase ampl
 
 Right-click in the parameter editor to open a context menu with operations such as `Initialize`, `Transpose by Cents`, `Transpose by Degrees`, `Set To`, `Average`, `Smooth`, `Add Vibrato`, `Quantize`, `Mean Quantize`, etc.
 
-`Add Vibrato` applies the **current vibrato preset** to the selection directly, with no dialog. The presets themselves are listed right below it: picking one makes it current and applies it at once. Applying keeps the pitch movement that is already there and superimposes the vibrato on top, rather than replacing the curve with a straight line. `Manage presets...` at the bottom opens the preset manager, and `Create preset from selection...` turns a vibrato you have already drawn into a preset.
+`Add Vibrato` applies the **current vibrato preset** to the selection directly, with no dialog. Below it is a `Vibrato preset...` submenu listing every available preset: picking one makes it current and applies it at once. Applying keeps the pitch movement that is already there and superimposes the vibrato on top, rather than replacing the curve with a straight line. The bottom of that submenu holds `Create preset from selection...`, which turns a vibrato you have already drawn into a preset, and `Manage presets...`, which opens the preset manager.
 
 Hold `Alt` to enter four-point editing mode for the selected curve. Similar to the feature in VocalShifter, dragging the four points allows you to bend the curve.
 
@@ -450,7 +450,7 @@ Right-click the Draw tool button to switch to the Line/Vibrato tool. This tool a
 
 Left-drag to draw a straight line freely or horizontally, depending on the `Drag Direction` setting. While left-dragging, press the right button (or the `D` key) to quickly toggle drag direction.
 
-While left-dragging, scroll the wheel to adjust the vibrato **depth**; hold `Alt` while scrolling to adjust the **rate**. Hold the `Param Fine Adjust` modifier (default `Ctrl`) to fine-tune while scrolling. A readout follows the pointer during the drag, showing the current preset, depth and rate.
+While left-dragging, scroll the wheel to adjust the vibrato **depth**; hold `Alt` while scrolling to adjust the **rate**. Hold the `Param Fine Adjust` modifier (default `Ctrl`) to fine-tune while scrolling. A two-line readout follows the pointer during the drag, showing the current preset, depth and rate. It shares the `Options → Show Parameter Popup` switch with the curve value popup, so turning that off hides it.
 
 You can switch vibrato presets mid-drag:
 
@@ -467,9 +467,9 @@ Press `Tab` to cycle through editing tools (Select / Draw-type tools).
 
 ### 5. Vibrato Presets
 
-A vibrato preset is a reusable set of vibrato parameters. Open the manager from `Options → Manage presets...`, from the preset button in the parameter editor toolbar, or from `Manage presets...` in the context menu.
+A vibrato preset is a reusable set of vibrato parameters. Open the manager from `Options → Vibrato Preset Manager...`, from the vibrato preset button in the parameter editor toolbar, or from `Vibrato preset... → Manage presets...` in the context menu.
 
-The preset list is on the left and the editor on the right. The editor opens with a **waveform preview** that redraws as you change anything; its vertical axis scales to the preset's own depth, so a 5-cent and a 100-cent preset are both legible, and the readout underneath gives the real amount.
+The **waveform preview** sits across the top of the manager and is deliberately outside every scroll region, so it stays visible while you edit the parameters below it and redraws as you change anything; its vertical axis scales to the preset's own depth, so a 5-cent and a 100-cent preset are both legible, and the readout underneath gives the real amount.
 
 The parameters fall into four groups:
 
