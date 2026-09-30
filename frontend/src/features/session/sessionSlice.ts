@@ -653,16 +653,6 @@ export interface SessionState {
     vibratoPresets: VibratoPreset[];
     /** 当前活动颤音预设的 id（系统预设的 `builtin.*` 也合法）。 */
     activeVibratoPresetId: string;
-    /**
-     * 上一次拖拽调参后的深度 / 速率。
-     *
-     * 【为什么单独存】拖拽时滚轮与方向键会把深度、速率调到预设值之外。把这两个
-     * 数记在这里，下一次用同一预设起手就能从上次停下的位置续；预设本身只在预设
-     * 编辑器里改，不会被拖拽悄悄改写（"预设被改掉了"是这类工具最恼人的错法）。
-     * `null` = 还没调过，用预设自带的值。
-     */
-    lastVibratoDepthCents: number | null;
-    lastVibratoRateHz: number | null;
 
     project: {
         name: string;
@@ -781,17 +771,6 @@ export interface SessionState {
 
 function clamp(value: number, minValue: number, maxValue: number): number {
     return Math.min(maxValue, Math.max(minValue, value));
-}
-
-/**
- * 有限数字原样返回，其余（缺失 / NaN / Infinity）一律收敛成 `null`。
- *
- * 用于"可缺省的数值设置"：`undefined` 与 `NaN` 在 Redux 里是两种不同的坏值，
- * 统一成 `null` 之后下游只需判断一个哨兵。
- */
-function finiteOrNull(value: unknown): number | null {
-    const num = Number(value);
-    return Number.isFinite(num) ? num : null;
 }
 
 function createId(prefix: string): string {
@@ -2209,8 +2188,6 @@ const initialState: SessionState = {
     customScalePresets: [],
     vibratoPresets: [],
     activeVibratoPresetId: DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
-    lastVibratoDepthCents: null,
-    lastVibratoRateHz: null,
     project: {
         name: "Untitled",
         path: null,
@@ -2687,14 +2664,6 @@ const sessionSlice = createSlice({
             const all = [...SYSTEM_VIBRATO_PRESETS, ...state.vibratoPresets];
             const next = cycleVibratoPresetId(all, state.activeVibratoPresetId, action.payload);
             if (next) state.activeVibratoPresetId = next;
-        },
-        /** 记录上一次拖拽调参的结果（下一次起手从这里续）。 */
-        setLastVibratoAdjust(
-            state,
-            action: PayloadAction<{ depthCents: number | null; rateHz: number | null }>,
-        ) {
-            state.lastVibratoDepthCents = action.payload.depthCents;
-            state.lastVibratoRateHz = action.payload.rateHz;
         },
         togglePlayheadZoom(state) {
             state.playheadZoomEnabled = !state.playheadZoomEnabled;
@@ -3710,8 +3679,6 @@ const sessionSlice = createSlice({
                 if (typeof s.activeVibratoPresetId === "string" && s.activeVibratoPresetId) {
                     state.activeVibratoPresetId = s.activeVibratoPresetId;
                 }
-                state.lastVibratoDepthCents = finiteOrNull(s.lastVibratoDepthCents);
-                state.lastVibratoRateHz = finiteOrNull(s.lastVibratoRateHz);
             })
 
             .addCase(loadDefaultModel.pending, (state) =>
@@ -6466,7 +6433,6 @@ export const {
     reorderVibratoPreset,
     setActiveVibratoPreset,
     cycleActiveVibratoPreset,
-    setLastVibratoAdjust,
     toggleLockParamLines,
     setMetronomeConfig,
     setSilencePreview,

@@ -23,30 +23,30 @@ const preset = (overrides: Parameters<typeof sanitizeVibratoPreset>[0] = {}) =>
 const kb = (overrides: Partial<Keybinding> = {}): Keybinding => ({ key: "a", ...overrides });
 
 describe("createDragWorking", () => {
-    test("没有 lastVibrato* 时用预设自带值", () => {
+    test("深度与速率都取预设自带值", () => {
         const p = preset({ depthCents: 42, rateHz: 6.5 });
-        const working = createDragWorking(p, null, null);
+        const working = createDragWorking(p);
         expect(working.depthCents).toBe(42);
         expect(working.rateHz).toBe(6.5);
         expect(working.preset.id).toBe(p.id);
         expect(working.adjusted).toBe(false);
     });
 
-    test("有 lastVibrato* 时优先续上次停下的位置", () => {
-        const working = createDragWorking(preset({ depthCents: 42, rateHz: 6.5 }), 18, 3.2);
-        expect(working.depthCents).toBe(18);
-        expect(working.rateHz).toBe(3.2);
+    test("起手不携带任何跨手势的调整", () => {
+        const working = createDragWorking(preset({ depthCents: 42, rateHz: 6.5 }));
+        expect(working.depthCents).toBe(42);
+        expect(working.rateHz).toBe(6.5);
     });
 
-    test("非有限的 lastVibrato* 不污染工作副本", () => {
-        const working = createDragWorking(preset({ depthCents: 30 }), Number.NaN, Number.NaN);
-        expect(working.depthCents).toBe(30);
+    test("调整标记初始为 false（未调整）", () => {
+        const working = createDragWorking(preset({ depthCents: 30 }));
+        expect(working.adjusted).toBe(false);
     });
 });
 
 describe("switchDragPreset", () => {
     test("深度与速率整体换成新预设的值（不是叠加）", () => {
-        const before = { ...createDragWorking(preset({ depthCents: 40 }), 90, 9), adjusted: true };
+        const before = { ...createDragWorking(preset({ depthCents: 40 })), adjusted: true };
         const after = switchDragPreset(preset({ id: "builtin.deep", depthCents: 55, rateHz: 4.5 }));
         expect(after.depthCents).toBe(55);
         expect(after.rateHz).toBe(4.5);

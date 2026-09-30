@@ -39,7 +39,6 @@ import {
     cycleDragDirection,
     setToolMode,
     persistUiSettings,
-    setLastVibratoAdjust,
     setActiveVibratoPreset,
     toggleParamAxisUnit,
     setParamEditorSyncTimeline,
@@ -964,8 +963,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     );
     const vibratoPresetUserList = useAppSelector((state) => state.session.vibratoPresets);
     const activeVibratoPresetId = useAppSelector((state) => state.session.activeVibratoPresetId);
-    const lastVibratoDepthCents = useAppSelector((state) => state.session.lastVibratoDepthCents);
-    const lastVibratoRateHz = useAppSelector((state) => state.session.lastVibratoRateHz);
     const resolvedVibratoPresets = useMemo(
         () => resolveVibratoPresets(vibratoPresetUserList).all,
         [vibratoPresetUserList],
@@ -4921,25 +4918,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         vibratoPresetNextKb,
         vibratoPreset: activeVibratoPreset,
         vibratoPresetList: resolvedVibratoPresets,
-        lastVibratoDepthCents,
-        lastVibratoRateHz,
         onVibratoDragStateChange: setVibratoDragHud,
-        onVibratoDragEnd: useCallback(
-            (next: { depthCents: number; rateHz: number; adjusted: boolean }) => {
-                setVibratoDragHud(null);
-                // 只有真的调过才落盘：没调过时写回"预设自带值"会让
-                // `lastVibrato*` 覆盖掉用户下次可能重新选择的预设参数。
-                if (!next.adjusted) return;
-                dispatch(
-                    setLastVibratoAdjust({
-                        depthCents: next.depthCents,
-                        rateHz: next.rateHz,
-                    }),
-                );
-                void dispatch(persistUiSettings());
-            },
-            [dispatch],
-        ),
+        onVibratoDragEnd: useCallback(() => {
+            setVibratoDragHud(null);
+        }, []),
         cycleDragDirectionKb,
         paramFineAdjustKb,
         onContextMenu: useCallback((x: number, y: number) => {

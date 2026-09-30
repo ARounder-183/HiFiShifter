@@ -379,12 +379,6 @@ pub struct UiSettings {
     /// `resolveActiveVibratoPreset`），不存在"指向了别的音色"这种错法。
     #[serde(default)]
     pub active_vibrato_preset_id: Option<String>,
-    /// 上一次拖拽调参后的深度（cents）：下一次用同一预设起手时从这里续。
-    #[serde(default)]
-    pub last_vibrato_depth_cents: Option<f64>,
-    /// 上一次拖拽调参后的速率（Hz）。
-    #[serde(default)]
-    pub last_vibrato_rate_hz: Option<f64>,
     #[serde(default)]
     pub ignore_grouping: bool,
     /// 波纹编辑（自动跟进）模式：off / track / all（对应 REAPER 的 Ripple Editing）。
@@ -1467,8 +1461,6 @@ impl Default for UiSettings {
             vibrato_presets: Vec::new(),
             // None = "还没选过"，由前端回落到出厂默认（自然）。
             active_vibrato_preset_id: None,
-            last_vibrato_depth_cents: None,
-            last_vibrato_rate_hz: None,
             ignore_grouping: false,
             ripple_mode: default_ripple_mode(),
 

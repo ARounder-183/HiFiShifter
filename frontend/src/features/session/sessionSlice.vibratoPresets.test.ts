@@ -5,7 +5,6 @@ import reducer, {
     removeVibratoPreset,
     reorderVibratoPreset,
     setActiveVibratoPreset,
-    setLastVibratoAdjust,
     upsertVibratoPreset,
 } from "./sessionSlice.ts";
 import {
@@ -110,14 +109,6 @@ test("features/session/sessionSlice.vibratoPresets.test.ts vibrato preset reduce
         capped = reducer(capped, upsertVibratoPreset(userPreset(`custom_${i}`)));
     }
     assertEqual(capped.vibratoPresets.length, MAX_VIBRATO_PRESETS, "用户预设数量被上限截住");
-
-    // 最近一次拖拽调参：可写可清
-    const adjusted = reducer(base, setLastVibratoAdjust({ depthCents: 33, rateHz: 6.2 }));
-    assertEqual(adjusted.lastVibratoDepthCents, 33, "记录深度");
-    assertEqual(adjusted.lastVibratoRateHz, 6.2, "记录速率");
-    const cleared = reducer(adjusted, setLastVibratoAdjust({ depthCents: null, rateHz: null }));
-    assertEqual(cleared.lastVibratoDepthCents, null, "清空深度");
-    assertEqual(cleared.lastVibratoRateHz, null, "清空速率");
 
     // 冗余：往用户列表里塞 builtin 前缀的项不会被采纳
     const guarded = reducer(

@@ -260,10 +260,6 @@ export interface UiSettings {
     vibratoPresets?: VibratoPreset[];
     /** 当前活动颤音预设的 id（系统预设的 `builtin.*` 也合法）。 */
     activeVibratoPresetId?: string;
-    /** 上一次拖拽调参后的深度（cents）。 */
-    lastVibratoDepthCents?: number;
-    /** 上一次拖拽调参后的速率（Hz）。 */
-    lastVibratoRateHz?: number;
 }
 
 /** 导入声道处理策略的总模式。 */

@@ -6,8 +6,8 @@
  * 不碰 React、不碰画布 —— 手感规则因此可以单测。
  *
  * 【工作副本的语义】拖拽永远在活动预设之上维护一份**工作副本**：
- * - 起手时从活动预设取深度与速率；`lastVibrato*` 有值时优先用它续上；
- * - 拖拽中滚轮 / 方向键改的是副本，**不改预设本身**；
+ * - 起手时从活动预设取深度与速率；
+ * - 拖拽中滚轮 / 方向键改的是副本，**不改预设本身**，也不跨手势保留；
  * - 切换预设时副本整体换成新预设 —— 用户换的是"音色"，把上一个预设的调整
  *   叠加到新预设上会得到一个既不是 A 也不是 B 的东西。
  *
@@ -50,28 +50,22 @@ export interface VibratoDragWorking {
     depthCents: number;
     /** 本次拖拽的速率（Hz）。 */
     rateHz: number;
-    /** 本次拖拽是否被用户调整过（决定是否回写 `lastVibrato*`）。 */
+    /** 本次拖拽是否被用户调整过（HUD 据此标记"已调整"）。 */
     adjusted: boolean;
 }
 
 /**
- * 建立拖拽工作副本。
+ * 建立拖拽工作副本：深度与速率一律取预设自带值。
  *
- * @param preset 活动预设。
- * @param lastDepthCents 上次拖拽后的深度；`null` 表示用预设自带值。
- * @param lastRateHz 上次拖拽后的速率；`null` 表示用预设自带值。
+ * 【为什么没有"续上一次"】预设切换是**持久化**的（切换即写活动预设），拖拽中的
+ * 滚轮 / 方向键微调只属于本次手势 —— 若把上一次的调整跨预设地带进下一次起手，
+ * "换了个音色深度却没变"的困惑就回来了。要保留调整，去管理器里改预设。
  */
-export function createDragWorking(
-    preset: VibratoPreset,
-    lastDepthCents: number | null,
-    lastRateHz: number | null,
-): VibratoDragWorking {
+export function createDragWorking(preset: VibratoPreset): VibratoDragWorking {
     return {
         preset,
-        depthCents: Number.isFinite(lastDepthCents)
-            ? (lastDepthCents as number)
-            : preset.depthCents,
-        rateHz: Number.isFinite(lastRateHz) ? (lastRateHz as number) : preset.rateHz,
+        depthCents: preset.depthCents,
+        rateHz: preset.rateHz,
         adjusted: false,
     };
 }

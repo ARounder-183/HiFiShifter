@@ -17,7 +17,12 @@ import {
 import type { ParamFramesPayload } from "../../../types/api";
 import type { AppDispatch } from "../../../app/store";
 import { paramsApi } from "../../../services/api";
-import { seekPlayhead, setplayheadSec } from "../../../features/session/sessionSlice";
+import {
+    persistUiSettings,
+    seekPlayhead,
+    setActiveVibratoPreset,
+    setplayheadSec,
+} from "../../../features/session/sessionSlice";
 import { clamp, MAX_PX_PER_SEC, MIN_PX_PER_SEC } from "../timeline";
 import type { LiveEditOverride } from "./useLiveParamEditing";
 import type {
@@ -402,13 +407,11 @@ export function usePianoRollInteractions(args: {
     vibratoPreset: VibratoPreset;
     /** 可用预设的全量列表（系统 + 用户），供拖拽中环绕切换。 */
     vibratoPresetList: readonly VibratoPreset[];
-    /** 最近一次拖拽调参后的深度 / 速率（`null` = 用预设自带值）。 */
-    lastVibratoDepthCents?: number | null;
-    lastVibratoRateHz?: number | null;
     /**
-     * 拖拽中切换预设 / 调参后的上报。
+     * 拖拽中调参 / 切换后的上报（面板据此刷新 HUD）。
      *
-     * 面板据此更新持久化的活动预设与 `lastVibrato*`，并刷新 HUD。
+     * 深度 / 速率只是本次手势的工作副本；预设切换的持久化由本钩子直接
+     * dispatch，不经这里。
      */
     onVibratoDragStateChange?: (next: {
         presetId: string;
@@ -419,8 +422,8 @@ export function usePianoRollInteractions(args: {
         clientX: number;
         clientY: number;
     }) => void;
-    /** 拖拽结束：清掉 HUD 并落盘 `lastVibrato*`。 */
-    onVibratoDragEnd?: (next: { depthCents: number; rateHz: number; adjusted: boolean }) => void;
+    /** 拖拽结束：面板据此清掉 HUD。 */
+    onVibratoDragEnd?: () => void;
     /** 右键菜单回调 */
     onContextMenu?: (x: number, y: number) => void;
     /** 播放头位置（秒）读取器，用于以播放头为中心缩放。播放中必须返回与
@@ -548,8 +551,6 @@ export function usePianoRollInteractions(args: {
         vibratoPresetNextKb,
         vibratoPreset,
         vibratoPresetList,
-        lastVibratoDepthCents,
-        lastVibratoRateHz,
         onVibratoDragStateChange,
         onVibratoDragEnd,
         getPlayheadSec,
@@ -1313,7 +1314,7 @@ export function usePianoRollInteractions(args: {
         ],
     );
 
-    /** 把当前工作副本上报给面板（HUD + 持久化 `lastVibrato*`）。 */
+    /** 把当前工作副本上报给面板（仅 HUD —— 切换的持久化走 dispatch）。 */
     const reportVibratoDragState = useCallback(
         (clientX: number, clientY: number) => {
             const vib = vibratoStateRef.current;
@@ -1402,15 +1403,27 @@ export function usePianoRollInteractions(args: {
         [repaintVibratoDragPreview, reportVibratoDragState],
     );
 
-    /** 拖拽结束时的收尾上报（面板据此清 HUD 并落盘 `lastVibrato*`）。 */
+    /**
+     * 切换颤音预设：**持久化**（写活动预设 + 落盘）并重置本次手势的工作副本。
+     *
+     * 【语义】侧键 / `,` `.` 与工具栏、管理器是同一个动作 —— "我换了预设"，
+     * 而不是"这一笔先用用看"。切换后工作副本整体换成新预设的值：上次手势的
+     * 调整不跨预设跟随（那是被移除的 `lastVibrato*` 的旧病）。
+     */
+    const switchVibratoPresetPersistently = useCallback(
+        (next: VibratoPreset, clientX?: number, clientY?: number): boolean => {
+            if (!vibratoStateRef.current) return false;
+            dispatch(setActiveVibratoPreset(next.id));
+            void dispatch(persistUiSettings());
+            return switchVibratoDragPreset(next, clientX, clientY);
+        },
+        [dispatch, switchVibratoDragPreset],
+    );
+
+    /** 拖拽结束时的收尾上报（面板据此清掉 HUD）。 */
     const finishVibratoDrag = useCallback(() => {
-        const vib = vibratoStateRef.current;
-        if (!vib || !onVibratoDragEnd) return;
-        onVibratoDragEnd({
-            depthCents: vib.working.depthCents,
-            rateHz: vib.working.rateHz,
-            adjusted: vib.working.adjusted,
-        });
+        if (!onVibratoDragEnd) return;
+        onVibratoDragEnd();
     }, [onVibratoDragEnd]);
 
     useEffect(() => {
@@ -2153,7 +2166,7 @@ export function usePianoRollInteractions(args: {
                     switchDirection,
                 );
                 const next = findVibratoPreset(vibratoPresetList, nextId);
-                if (next) switchVibratoDragPreset(next);
+                if (next) switchVibratoPresetPersistently(next);
                 return;
             }
 
@@ -2187,7 +2200,7 @@ export function usePianoRollInteractions(args: {
         };
     }, [
         applyVibratoDragAdjustment,
-        switchVibratoDragPreset,
+        switchVibratoPresetPersistently,
         vibratoDragAmplitudeIncreaseKb,
         vibratoDragAmplitudeDecreaseKb,
         vibratoDragFrequencyIncreaseKb,
@@ -4885,13 +4898,9 @@ export function usePianoRollInteractions(args: {
                 const canCycleDragDirection = e.button === 0;
 
                 if (isVibratoTool) {
-                    // 起手自活动预设：深度 / 速率用 `lastVibrato*` 续上次停下的
-                    // 位置（有的话），波形与包络一律来自预设。
-                    const working = createDragWorking(
-                        vibratoPreset,
-                        lastVibratoDepthCents ?? null,
-                        lastVibratoRateHz ?? null,
-                    );
+                    // 起手自活动预设：深度 / 速率都是预设自带值 —— 预设切换
+                    // 已持久化，不存在"上一次的调整"要续。
+                    const working = createDragWorking(vibratoPreset);
                     vibratoStateRef.current = {
                         pointerId: e.pointerId,
                         startFrame,
@@ -5147,7 +5156,9 @@ export function usePianoRollInteractions(args: {
                                 direction,
                             );
                             const next = findVibratoPreset(vibratoPresetList, nextId);
-                            if (next) switchVibratoDragPreset(next, ev.clientX, ev.clientY);
+                            if (next) {
+                                switchVibratoPresetPersistently(next, ev.clientX, ev.clientY);
+                            }
                             return;
                         }
                     }
@@ -5479,12 +5490,10 @@ export function usePianoRollInteractions(args: {
             installDragDirectionKeyCycler,
             paramStretchKb,
             snapDrawValue,
-            // 颤音拖拽：预设起手、拖拽中切换预设、HUD 上报与收尾落盘。
+            // 颤音拖拽：预设起手、拖拽中切换预设、HUD 上报与收尾清屏。
             vibratoPreset,
             vibratoPresetList,
-            lastVibratoDepthCents,
-            lastVibratoRateHz,
-            switchVibratoDragPreset,
+            switchVibratoPresetPersistently,
             reportVibratoDragState,
             finishVibratoDrag,
         ],
