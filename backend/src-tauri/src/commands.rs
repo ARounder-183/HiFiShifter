@@ -1880,6 +1880,20 @@ pub fn export_theme_json(json: String, default_file_name: String) -> serde_json:
 }
 
 /// 前端把 invoke 失败 / 全局异常回传到后端统一日志（fire-and-forget）。
+/// 颤音预设管理器 → 「导出...」：把当前预设存成 JSON。
+///
+/// 与布局 / 主题导出共用 `json_export::export_json_file` —— 命令名是 invoke 的
+/// 稳定契约，因此**每处一个命令**（标题与日志前缀随业务变化），实现只有一份。
+#[tauri::command(rename_all = "camelCase")]
+pub fn export_vibrato_presets_json(json: String, default_file_name: String) -> serde_json::Value {
+    let file_name = if default_file_name.trim().is_empty() {
+        "hifishifter-vibrato-preset.json".to_string()
+    } else {
+        default_file_name
+    };
+    json_export::export_json_file(json, &file_name, "Export vibrato preset", "vibrato_presets")
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn log_frontend_error(message: String, detail: Option<String>) -> serde_json::Value {
     diagnostics::log_frontend_error(message, detail)

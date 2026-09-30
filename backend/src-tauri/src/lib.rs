@@ -795,6 +795,7 @@ pub fn run() {
             commands::export_diagnostics,
             commands::export_layout_json,
             commands::export_theme_json,
+            commands::export_vibrato_presets_json,
             commands::log_frontend_error,
             commands::get_onnx_status,
             commands::get_onnx_diagnostic,
