@@ -14,7 +14,7 @@ import { useEffect, useRef } from "react";
 import { Flex } from "@radix-ui/themes";
 
 import { readDevicePixelRatio } from "../../../utils/devicePixelLine";
-import { AppButton } from "../../../ui";
+import { AppButton, useRepeatPress } from "../../../ui";
 import {
     cycleEditorPoint,
     paintCycleBin,
@@ -55,6 +55,26 @@ export function VibratoCycleEditor({
     const containerRef = useRef<HTMLDivElement | null>(null);
     const drawingRef = useRef(false);
     const lastPointRef = useRef<{ bin: number; value: number } | null>(null);
+
+    /*
+     * 最新的表与回调：长按重复时每一拍都要基于**上一拍的结果**继续平滑。
+     * 若闭包捕获的是按下那一刻的 `table`，连按十次也只会把同一份表平滑十遍 ——
+     * 看起来像"长按没反应"。写入放在 effect 里（不是渲染期），与 `useFrameCommitter`
+     * 的处理一致。
+     */
+    const latestRef = useRef({ table, onChange });
+    useEffect(() => {
+        latestRef.current = { table, onChange };
+    });
+
+    /** 短按平滑一次；按住则连续平滑（与键盘自动重复同一套手感）。 */
+    const smoothPress = useRepeatPress({
+        disabled,
+        onTrigger: () => {
+            const { table: current, onChange: apply } = latestRef.current;
+            apply(smoothCycleTable(current));
+        },
+    });
 
     useEffect(() => {
         const canvas = canvasRef.current;
@@ -217,7 +237,8 @@ export function VibratoCycleEditor({
                     size="sm"
                     emphasis="soft"
                     disabled={disabled}
-                    onClick={() => onChange(smoothCycleTable(table))}
+                    // 短按平滑一次，按住连续平滑（`useRepeatPress`）。
+                    {...smoothPress}
                 >
                     {smoothLabel}
                 </AppButton>

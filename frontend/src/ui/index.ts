@@ -71,6 +71,12 @@ export {
 
 export { useDialogDraft } from "./useDialogDraft";
 
+export {
+    useRepeatPress,
+    type RepeatPressHandlers,
+    type RepeatPressOptions,
+} from "./useRepeatPress";
+
 export { useMenuShortcut } from "./useMenuShortcut";
 
 export { isShortcutSuppressed } from "./shortcutScope";
