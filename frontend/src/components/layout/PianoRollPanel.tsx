@@ -201,6 +201,7 @@ import {
 } from "./renderKernel/timelineAxis.js";
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
 import { VibratoPresetDialog } from "./VibratoPresetDialog";
+import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
 import { buildVibratoCurve } from "../../features/vibrato/vibratoCurve";
 import { extractVibratoPreset } from "../../features/vibrato/vibratoExtract";
 import { upsertVibratoPreset } from "../../features/session/sessionSlice";
@@ -7215,21 +7216,13 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     tabIndex={-1}
                                     onClick={() => setVibratoPresetMenuOpen((open) => !open)}
                                     icon={
-                                        <svg
-                                            width="15"
-                                            height="15"
-                                            viewBox="0 0 15 15"
-                                            fill="none"
-                                            xmlns="http://www.w3.org/2000/svg"
-                                        >
-                                            <path
-                                                d="M1.5 7.5C3 7.5 3 3.5 4.5 3.5C6 3.5 6 11.5 7.5 11.5C9 11.5 9 3.5 10.5 3.5C12 3.5 12 7.5 13.5 7.5"
-                                                stroke="currentColor"
-                                                strokeWidth="1.2"
-                                                strokeLinecap="round"
-                                                strokeLinejoin="round"
-                                            />
-                                        </svg>
+                                        // 图标即**活动预设的波形缩略图**：切预设即换图，
+                                        // 看一眼工具栏就知道接下来画出来的会是什么。
+                                        <VibratoPresetGlyph
+                                            preset={activeVibratoPreset}
+                                            width={15}
+                                            height={15}
+                                        />
                                     }
                                 />
                                 {vibratoPresetMenuOpen && (
@@ -7254,7 +7247,16 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                     }}
                                                     onPointerDown={(e) => e.stopPropagation()}
                                                 >
-                                                    <span>{vibratoPresetLabel(preset, tf)}</span>
+                                                    <span className="flex items-center gap-2">
+                                                        <VibratoPresetGlyph
+                                                            preset={preset}
+                                                            width={26}
+                                                            height={10}
+                                                        />
+                                                        <span>
+                                                            {vibratoPresetLabel(preset, tf)}
+                                                        </span>
+                                                    </span>
                                                     {preset.id === activeVibratoPresetId ? (
                                                         <CheckIcon />
                                                     ) : null}
@@ -8491,10 +8493,19 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                         whiteSpace: "nowrap",
                                                     }}
                                                 >
-                                                    <div>
-                                                        {hudPreset
-                                                            ? vibratoPresetLabel(hudPreset, t)
-                                                            : ""}
+                                                    <div className="flex items-center gap-1.5">
+                                                        {hudPreset ? (
+                                                            <VibratoPresetGlyph
+                                                                preset={hudPreset}
+                                                                width={20}
+                                                                height={10}
+                                                            />
+                                                        ) : null}
+                                                        <span>
+                                                            {hudPreset
+                                                                ? vibratoPresetLabel(hudPreset, t)
+                                                                : ""}
+                                                        </span>
                                                         {vibratoDragHud.adjusted
                                                             ? ` · ${t("vibrato_adjusted")}`
                                                             : ""}

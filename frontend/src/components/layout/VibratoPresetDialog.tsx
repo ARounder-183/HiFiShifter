@@ -69,6 +69,7 @@ import {
     AppSwitchRow,
 } from "../../ui";
 import { AppFileInput } from "../../ui/FileInput";
+import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
 import { VibratoPreviewCanvas } from "./vibrato/VibratoPreviewCanvas";
 import {
     BASELINE_MODE_KEYS,
@@ -1014,8 +1015,9 @@ function PresetRow({ preset, selected, active, onSelect, onActivate }: PresetRow
             onDoubleClick={onActivate}
             title={description ?? vibratoPresetSummary(preset, t)}
         >
-            <Flex align="center" gap="1" style={{ minWidth: 0 }}>
+            <Flex align="center" gap="2" style={{ minWidth: 0 }}>
                 {active ? <span aria-hidden="true">●</span> : null}
+                <VibratoPresetGlyph preset={preset} width={40} height={14} />
                 <span
                     className="hs-type-label"
                     style={{

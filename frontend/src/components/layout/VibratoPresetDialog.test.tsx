@@ -153,7 +153,13 @@ test("布局：定高 wrapper + 两栏 flex 填充，且不再依赖 maxHeight�
  */
 test("参数表单里的并排控件行都允许换行（源码级约束）", () => {
     const source = readFileSync("src/components/layout/VibratoPresetDialog.tsx", "utf8");
-    const rows = source.match(/<Flex align="center" gap="2"[^>]*>/g) ?? [];
+    // 只扫**参数表单**区域：约束的对象是"两个以上表单控件并排"的行；列表行
+    // （glyph + 名称）同样用 Flex，但不属于这条约束。
+    const formStart = source.indexOf("<AppForm>");
+    const formEnd = source.indexOf("</AppForm>") + "</AppForm>".length;
+    expect(formStart).toBeGreaterThan(0);
+    const form = source.slice(formStart, formEnd);
+    const rows = form.match(/<Flex align="center" gap="2"[^>]*>/g) ?? [];
     // 先确认确实扫到了这些行 —— 否则下面的断言是空转（模式改名就会这样）。
     expect(rows.length, "应至少扫到一行并排控件").toBeGreaterThan(0);
     const missing = rows.filter((row) => !row.includes('wrap="wrap"'));

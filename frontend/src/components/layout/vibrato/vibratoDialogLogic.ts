@@ -247,3 +247,32 @@ export function previewScaleCents(peakCents: number): number {
     const safe = Math.max(1, Number.isFinite(peakCents) ? peakCents : 1);
     return Math.ceil(safe * 1.15);
 }
+
+/** 缩略图专用采样数：64 点足够表达形状，path 缓存也便宜。 */
+export const GLYPH_FRAME_COUNT = 64;
+
+/**
+ * 由预设求缩略图的折线点（`x0,y0 x1,y1 …`，y 向下为正）。
+ *
+ * 抽成纯函数以便单测：归一化方式（按自身峰值）、首末点、空输入的兜底都在这里。
+ * 定标与 `previewScaleCents` 同理 —— 选择场景里"形状可辨"优先于"深度可比"。
+ */
+export function glyphPath(preset: VibratoPreset, width: number, height: number): string {
+    const { wave } = buildVibratoPreview(preset, {
+        frameCount: GLYPH_FRAME_COUNT,
+        framePeriodMs: 5,
+    });
+    let peak = 1e-9;
+    for (const value of wave) peak = Math.max(peak, Math.abs(value));
+
+    const mid = height / 2;
+    const reach = height / 2 - 1;
+    const step = width / Math.max(1, wave.length - 1);
+    const points: string[] = [];
+    for (let i = 0; i < wave.length; i += 1) {
+        const x = i * step;
+        const y = mid - (wave[i] / peak) * reach;
+        points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    }
+    return points.join(" ");
+}
