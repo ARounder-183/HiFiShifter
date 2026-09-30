@@ -86,8 +86,17 @@ interface Props {
 
 /** 列表列的宽度（CSS 像素）。 */
 const LIST_WIDTH = 208;
-/** 列表滚动区高度：对话框本身不滚，列表自己滚一层（与快捷键对话框同一做法）。 */
-const LIST_MAX_HEIGHT = "52vh";
+/**
+ * 同排两栏共用的高度上限。
+ *
+ * 【为什么两栏共用一个值】两栏是同一个 `Flex` 行的兄弟，共用上限才能等高 ——
+ * 否则列表栏会比参数栏短一截，右下方空出一块。
+ *
+ * 【为什么必须封顶】对话框正文区自己是可滚动的；只要内容总高不超过它，正文区
+ * 就不出现滚动条，于是页面上只有两个**并排**的面板滚动区（不是嵌套的两层）。
+ * `min(46vh, 400px)` 让"预览 + 两栏 + 标题 + 页脚"落在对话框 86vh 的上限内。
+ */
+const PANE_MAX_HEIGHT = "min(46vh, 400px)";
 
 export function VibratoPresetDialog({
     open,
@@ -216,6 +225,12 @@ export function VibratoPresetDialog({
                         },
                     },
                     {
+                        id: "new",
+                        label: t("vibrato_manager_new"),
+                        disabled: atCap,
+                        onClick: handleCreate,
+                    },
+                    {
                         id: "duplicate",
                         label: t("vibrato_manager_duplicate"),
                         disabled: !draft,
@@ -230,458 +245,530 @@ export function VibratoPresetDialog({
                     },
                 ]}
             >
-                <Flex gap="4" align="start">
-                    {/* ---- 预设列表 ---- */}
-                    <Flex direction="column" gap="2" style={{ width: LIST_WIDTH, flexShrink: 0 }}>
-                        <Flex align="center" justify="between" gap="2">
-                            <span className="hs-type-muted">
-                                {t("vibrato_manager_group_system")}
-                            </span>
-                        </Flex>
-                        <ScrollArea
-                            style={{ maxHeight: LIST_MAX_HEIGHT }}
-                            scrollbars="vertical"
-                            type="auto"
-                        >
-                            <Flex direction="column" gap="1" pr="2">
-                                {resolved.system.map((preset) => (
-                                    <PresetRow
-                                        key={preset.id}
-                                        preset={preset}
-                                        selected={draft?.id === preset.id}
-                                        active={session.activeVibratoPresetId === preset.id}
-                                        onSelect={() => selectPreset(preset)}
-                                        onActivate={() => activatePreset(preset)}
-                                    />
-                                ))}
-
-                                <Box pt="2">
-                                    <span className="hs-type-muted">
-                                        {t("vibrato_manager_group_user")}
-                                    </span>
-                                </Box>
-                                {resolved.user.length === 0 ? (
+                <Flex direction="column" gap="3">
+                    {/* ---- 波形预览（整行置顶，不参与任何滚动） ----
+                        放在两栏之上而不是塞进参数流的头部：整行宽度读波形更清楚，
+                        且它不属于任何滚动区，调参数时**永远**不会滚出视野。 */}
+                    {draft && previewSamples ? (
+                        <>
+                            <Box className="rounded border border-qt-border bg-qt-panel p-2">
+                                <VibratoPreviewCanvas
+                                    samples={previewSamples}
+                                    ariaLabel={t("vibrato_preview")}
+                                />
+                                <Flex justify="between" mt="1">
                                     <span className="hs-type-caption">
-                                        {t("vibrato_manager_empty")}
+                                        {`±${formatNumber(previewSamples.peakCents)} ${t("vibrato_unit_cents")}`}
                                     </span>
-                                ) : (
-                                    resolved.user.map((preset, index) => (
-                                        <Flex key={preset.id} align="center" gap="1">
-                                            <Box style={{ minWidth: 0, flex: 1 }}>
-                                                <PresetRow
-                                                    preset={preset}
-                                                    selected={draft?.id === preset.id}
-                                                    active={
-                                                        session.activeVibratoPresetId === preset.id
-                                                    }
-                                                    onSelect={() => selectPreset(preset)}
-                                                    onActivate={() => activatePreset(preset)}
-                                                />
-                                            </Box>
-                                            <AppButton
-                                                size="sm"
-                                                emphasis="soft"
-                                                disabled={index === 0}
-                                                aria-label={t("vibrato_manager_move_up")}
-                                                onClick={() => movePreset(preset, -1)}
-                                            >
-                                                ▲
-                                            </AppButton>
-                                            <AppButton
-                                                size="sm"
-                                                emphasis="soft"
-                                                disabled={index === resolved.user.length - 1}
-                                                aria-label={t("vibrato_manager_move_down")}
-                                                onClick={() => movePreset(preset, 1)}
-                                            >
-                                                ▼
-                                            </AppButton>
-                                        </Flex>
-                                    ))
-                                )}
-                            </Flex>
-                        </ScrollArea>
-                        <AppButton
-                            size="sm"
-                            emphasis="soft"
-                            disabled={atCap}
-                            onClick={handleCreate}
-                        >
-                            {t("vibrato_manager_new")}
-                        </AppButton>
-                    </Flex>
-
-                    {/* ---- 编辑器 ---- */}
-                    <Box style={{ minWidth: 0, flex: 1 }}>
-                        {draft && previewSamples ? (
-                            <Flex direction="column" gap="3">
-                                <Box>
-                                    <VibratoPreviewCanvas
-                                        samples={previewSamples}
-                                        ariaLabel={t("vibrato_preview")}
-                                    />
-                                    <Flex justify="between" mt="1">
-                                        <span className="hs-type-caption">
-                                            {`±${formatNumber(previewSamples.peakCents)} ${t("vibrato_unit_cents")}`}
-                                        </span>
-                                        <span className="hs-type-caption">
-                                            {t("vibrato_cycles_estimate").replace(
-                                                "{count}",
-                                                formatNumber(cycleEstimate),
-                                            )}
-                                        </span>
-                                    </Flex>
-                                </Box>
-
-                                {isBuiltin ? (
                                     <span className="hs-type-caption">
-                                        {t("vibrato_manager_readonly")}
-                                    </span>
-                                ) : null}
-
-                                <AppForm>
-                                    {!isBuiltin ? (
-                                        <AppField label={t("vibrato_manager_name")}>
-                                            <TextField.Root
-                                                size="2"
-                                                value={draft.name}
-                                                aria-label={t("vibrato_manager_name")}
-                                                onChange={(event) =>
-                                                    patch({ name: event.target.value })
-                                                }
-                                            />
-                                        </AppField>
-                                    ) : null}
-                                    <AppFormSection title={t("vibrato_section_wave")}>
-                                        <AppField label={t("vibrato_shape_label")}>
-                                            <AppSelect
-                                                value={
-                                                    draft.cycle.kind === "shape"
-                                                        ? draft.cycle.shape
-                                                        : "sine"
-                                                }
-                                                disabled={isBuiltin}
-                                                onValueChange={(value) =>
-                                                    patch({
-                                                        cycle: {
-                                                            kind: "shape",
-                                                            shape: value as WaveShape,
-                                                            skew:
-                                                                draft.cycle.kind === "shape"
-                                                                    ? draft.cycle.skew
-                                                                    : 0.5,
-                                                        },
-                                                    })
-                                                }
-                                                options={WAVE_SHAPE_ORDER.map((shape) => ({
-                                                    value: shape,
-                                                    label: t(WAVE_SHAPE_KEYS[shape]),
-                                                }))}
-                                            />
-                                        </AppField>
-                                        <AppField label={t("vibrato_skew")}>
-                                            <Flex align="center" gap="2">
-                                                <AppSlider
-                                                    unit="percent"
-                                                    min={2}
-                                                    max={98}
-                                                    disabled={
-                                                        isBuiltin ||
-                                                        draft.cycle.kind !== "shape" ||
-                                                        !shapeUsesSkew(
-                                                            draft.cycle.kind === "shape"
-                                                                ? draft.cycle.shape
-                                                                : "sine",
-                                                        )
-                                                    }
-                                                    value={
-                                                        draft.cycle.kind === "shape"
-                                                            ? Math.round(draft.cycle.skew * 100)
-                                                            : 50
-                                                    }
-                                                    ariaLabel={t("vibrato_skew")}
-                                                    onChange={(next) =>
-                                                        patch({
-                                                            cycle: {
-                                                                kind: "shape",
-                                                                shape:
-                                                                    draft.cycle.kind === "shape"
-                                                                        ? draft.cycle.shape
-                                                                        : "sine",
-                                                                skew: next / 100,
-                                                            },
-                                                        })
-                                                    }
-                                                />
-                                                <AppSliderReadout>
-                                                    {`${formatNumber(
-                                                        (draft.cycle.kind === "shape"
-                                                            ? draft.cycle.skew
-                                                            : 0.5) * 100,
-                                                    )}%`}
-                                                </AppSliderReadout>
-                                            </Flex>
-                                        </AppField>
-                                    </AppFormSection>
-
-                                    <AppFormSection title={t("vibrato_section_depth")}>
-                                        <AppField label={t("vibrato_depth_label")}>
-                                            <AppNumberField
-                                                value={depthValue}
-                                                unit={depthUnit}
-                                                disabled={isBuiltin}
-                                                min={0}
-                                                ariaLabel={t("vibrato_depth_label")}
-                                                onChange={(next) =>
-                                                    patch({
-                                                        depthCents: depthToCents(
-                                                            next,
-                                                            editParam,
-                                                            paramRange,
-                                                        ),
-                                                    })
-                                                }
-                                                onCommit={() => undefined}
-                                            />
-                                        </AppField>
-                                        <AppField label={t("vibrato_depth_ramp")}>
-                                            <Flex align="center" gap="2">
-                                                <AppNumberField
-                                                    value={draft.depthRamp.start}
-                                                    unit="percentFine"
-                                                    disabled={isBuiltin}
-                                                    min={0}
-                                                    max={2}
-                                                    suffix={t("vibrato_depth_ramp_start")}
-                                                    ariaLabel={`${t("vibrato_depth_ramp")} ${t("vibrato_depth_ramp_start")}`}
-                                                    onCommit={(next) =>
-                                                        patch({
-                                                            depthRamp: {
-                                                                ...draft.depthRamp,
-                                                                start: next,
-                                                            },
-                                                        })
-                                                    }
-                                                />
-                                                <AppNumberField
-                                                    value={draft.depthRamp.end}
-                                                    unit="percentFine"
-                                                    disabled={isBuiltin}
-                                                    min={0}
-                                                    max={2}
-                                                    suffix={t("vibrato_depth_ramp_end")}
-                                                    ariaLabel={`${t("vibrato_depth_ramp")} ${t("vibrato_depth_ramp_end")}`}
-                                                    onCommit={(next) =>
-                                                        patch({
-                                                            depthRamp: {
-                                                                ...draft.depthRamp,
-                                                                end: next,
-                                                            },
-                                                        })
-                                                    }
-                                                />
-                                            </Flex>
-                                        </AppField>
-                                        <AppField label={t("vibrato_bias")}>
-                                            <AppNumberField
-                                                value={draft.biasCents}
-                                                unit="cents"
-                                                disabled={isBuiltin}
-                                                ariaLabel={t("vibrato_bias")}
-                                                onCommit={(next) => patch({ biasCents: next })}
-                                            />
-                                        </AppField>
-                                        <AppField label={t("vibrato_irregularity")}>
-                                            <Flex align="center" gap="2">
-                                                <AppSlider
-                                                    unit="percent"
-                                                    min={0}
-                                                    max={100}
-                                                    disabled={isBuiltin}
-                                                    value={Math.round(draft.irregularity)}
-                                                    ariaLabel={t("vibrato_irregularity")}
-                                                    onChange={(next) =>
-                                                        patch({ irregularity: next })
-                                                    }
-                                                />
-                                                <AppSliderReadout>
-                                                    {`${formatNumber(draft.irregularity)}%`}
-                                                </AppSliderReadout>
-                                            </Flex>
-                                        </AppField>
-                                    </AppFormSection>
-
-                                    <AppFormSection title={t("vibrato_section_rate")}>
-                                        <AppField label={t("vibrato_rate_mode")}>
-                                            {isBuiltin ? (
-                                                <span className="hs-type-label">
-                                                    {t(RATE_MODE_KEYS[draft.rateMode])}
-                                                </span>
-                                            ) : (
-                                                <AppSegmentedControl<VibratoRateMode>
-                                                    value={draft.rateMode}
-                                                    ariaLabel={t("vibrato_rate_mode")}
-                                                    onChange={(next) => patch({ rateMode: next })}
-                                                    options={(["hz", "cycles"] as const).map(
-                                                        (mode) => ({
-                                                            value: mode,
-                                                            label: t(RATE_MODE_KEYS[mode]),
-                                                        }),
-                                                    )}
-                                                />
-                                            )}
-                                        </AppField>
-                                        {draft.rateMode === "hz" ? (
-                                            <AppField label={t("vibrato_rate_label")}>
-                                                <AppNumberField
-                                                    value={draft.rateHz}
-                                                    unit="vibratoHz"
-                                                    disabled={isBuiltin}
-                                                    min={0.1}
-                                                    max={20}
-                                                    ariaLabel={t("vibrato_rate_label")}
-                                                    onCommit={(next) => patch({ rateHz: next })}
-                                                />
-                                            </AppField>
-                                        ) : (
-                                            <AppField label={t("vibrato_cycles")}>
-                                                <AppNumberField
-                                                    value={draft.cycles}
-                                                    unit="integer"
-                                                    disabled={isBuiltin}
-                                                    min={0.5}
-                                                    max={128}
-                                                    ariaLabel={t("vibrato_cycles")}
-                                                    onCommit={(next) => patch({ cycles: next })}
-                                                />
-                                            </AppField>
+                                        {t("vibrato_cycles_estimate").replace(
+                                            "{count}",
+                                            formatNumber(cycleEstimate),
                                         )}
-                                        <AppField label={t("vibrato_rate_ramp")}>
-                                            <AppNumberField
-                                                value={draft.rateRampEnd}
-                                                unit="percentFine"
-                                                disabled={isBuiltin}
-                                                min={0.25}
-                                                max={4}
-                                                ariaLabel={t("vibrato_rate_ramp")}
-                                                onCommit={(next) => patch({ rateRampEnd: next })}
-                                            />
-                                        </AppField>
-                                        <AppSwitchRow
-                                            label={t("vibrato_align_cycles")}
-                                            checked={draft.alignCycles}
-                                            disabled={isBuiltin}
-                                            onCheckedChange={(checked) =>
-                                                patch({ alignCycles: checked })
-                                            }
+                                    </span>
+                                </Flex>
+                            </Box>
+                            {isBuiltin ? (
+                                <span className="hs-type-caption">
+                                    {t("vibrato_manager_readonly")}
+                                </span>
+                            ) : null}
+                        </>
+                    ) : null}
+
+                    <Flex gap="4" align="start">
+                        {/* ---- 预设列表 ---- */}
+                        <Flex
+                            direction="column"
+                            gap="2"
+                            style={{ width: LIST_WIDTH, flexShrink: 0 }}
+                        >
+                            <ScrollArea
+                                style={{ maxHeight: PANE_MAX_HEIGHT }}
+                                scrollbars="vertical"
+                                type="auto"
+                            >
+                                <Flex direction="column" gap="1" pr="2">
+                                    <span className="hs-type-muted">
+                                        {t("vibrato_manager_group_system")}
+                                    </span>
+                                    {resolved.system.map((preset) => (
+                                        <PresetRow
+                                            key={preset.id}
+                                            preset={preset}
+                                            selected={draft?.id === preset.id}
+                                            active={session.activeVibratoPresetId === preset.id}
+                                            onSelect={() => selectPreset(preset)}
+                                            onActivate={() => activatePreset(preset)}
                                         />
-                                    </AppFormSection>
+                                    ))}
 
-                                    <AppFormSection title={t("vibrato_section_envelope")}>
-                                        <AppField label={t("vibrato_attack")}>
-                                            <Flex align="center" gap="2">
-                                                <AppNumberField
-                                                    value={draft.attackMs}
-                                                    unit="milliseconds"
-                                                    disabled={isBuiltin}
-                                                    min={0}
-                                                    ariaLabel={t("vibrato_attack")}
-                                                    onCommit={(next) => patch({ attackMs: next })}
-                                                />
-                                                <AppSelect
-                                                    value={draft.attackCurve}
-                                                    disabled={isBuiltin}
-                                                    ariaLabel={t("vibrato_curve")}
-                                                    onValueChange={(value) =>
-                                                        patch({
-                                                            attackCurve: value as EnvelopeCurve,
-                                                        })
-                                                    }
-                                                    options={ENVELOPE_CURVE_ORDER.map((curve) => ({
-                                                        value: curve,
-                                                        label: t(ENVELOPE_CURVE_KEYS[curve]),
-                                                    }))}
-                                                />
+                                    <Box pt="2">
+                                        <span className="hs-type-muted">
+                                            {t("vibrato_manager_group_user")}
+                                        </span>
+                                    </Box>
+                                    {resolved.user.length === 0 ? (
+                                        <span className="hs-type-caption">
+                                            {t("vibrato_manager_empty")}
+                                        </span>
+                                    ) : (
+                                        resolved.user.map((preset, index) => (
+                                            <Flex key={preset.id} align="center" gap="1">
+                                                <Box style={{ minWidth: 0, flex: 1 }}>
+                                                    <PresetRow
+                                                        preset={preset}
+                                                        selected={draft?.id === preset.id}
+                                                        active={
+                                                            session.activeVibratoPresetId ===
+                                                            preset.id
+                                                        }
+                                                        onSelect={() => selectPreset(preset)}
+                                                        onActivate={() => activatePreset(preset)}
+                                                    />
+                                                </Box>
+                                                <AppButton
+                                                    size="sm"
+                                                    emphasis="soft"
+                                                    disabled={index === 0}
+                                                    aria-label={t("vibrato_manager_move_up")}
+                                                    onClick={() => movePreset(preset, -1)}
+                                                >
+                                                    ▲
+                                                </AppButton>
+                                                <AppButton
+                                                    size="sm"
+                                                    emphasis="soft"
+                                                    disabled={index === resolved.user.length - 1}
+                                                    aria-label={t("vibrato_manager_move_down")}
+                                                    onClick={() => movePreset(preset, 1)}
+                                                >
+                                                    ▼
+                                                </AppButton>
                                             </Flex>
-                                        </AppField>
-                                        <AppField label={t("vibrato_release")}>
-                                            <Flex align="center" gap="2">
-                                                <AppNumberField
-                                                    value={draft.releaseMs}
-                                                    unit="milliseconds"
-                                                    disabled={isBuiltin}
-                                                    min={0}
-                                                    ariaLabel={t("vibrato_release")}
-                                                    onCommit={(next) => patch({ releaseMs: next })}
-                                                />
-                                                <AppSelect
-                                                    value={draft.releaseCurve}
-                                                    disabled={isBuiltin}
-                                                    ariaLabel={t("vibrato_curve")}
-                                                    onValueChange={(value) =>
-                                                        patch({
-                                                            releaseCurve: value as EnvelopeCurve,
-                                                        })
-                                                    }
-                                                    options={ENVELOPE_CURVE_ORDER.map((curve) => ({
-                                                        value: curve,
-                                                        label: t(ENVELOPE_CURVE_KEYS[curve]),
-                                                    }))}
-                                                />
-                                            </Flex>
-                                        </AppField>
-                                        <AppField label={t("vibrato_phase")}>
-                                            <AppNumberField
-                                                value={draft.startPhaseDeg}
-                                                unit="integer"
-                                                disabled={isBuiltin}
-                                                min={0}
-                                                max={360}
-                                                ariaLabel={t("vibrato_phase")}
-                                                onCommit={(next) => patch({ startPhaseDeg: next })}
-                                            />
-                                        </AppField>
-                                    </AppFormSection>
+                                        ))
+                                    )}
+                                </Flex>
+                            </ScrollArea>
+                        </Flex>
 
-                                    <AppFormSection title={t("vibrato_section_baseline")}>
-                                        <AppField label={t("vibrato_baseline")}>
-                                            <AppSelect
-                                                value={draft.baseline}
-                                                disabled={isBuiltin}
-                                                onValueChange={(value) =>
-                                                    patch({ baseline: value as BaselineMode })
-                                                }
-                                                options={BASELINE_MODE_ORDER.map((mode) => ({
-                                                    value: mode,
-                                                    label: t(BASELINE_MODE_KEYS[mode]),
-                                                }))}
-                                            />
-                                        </AppField>
-                                        <AppField label={t("vibrato_blend")}>
-                                            <Flex align="center" gap="2">
-                                                <AppSlider
-                                                    unit="percent"
-                                                    min={0}
-                                                    max={100}
-                                                    disabled={
-                                                        isBuiltin || draft.baseline !== "existing"
-                                                    }
-                                                    value={Math.round(draft.blend)}
-                                                    ariaLabel={t("vibrato_blend")}
-                                                    onChange={(next) => patch({ blend: next })}
-                                                />
-                                                <AppSliderReadout>
-                                                    {`${formatNumber(draft.blend)}%`}
-                                                </AppSliderReadout>
-                                            </Flex>
-                                        </AppField>
-                                    </AppFormSection>
-                                </AppForm>
-                            </Flex>
-                        ) : (
-                            <span className="hs-type-caption">{t("vibrato_manager_empty")}</span>
-                        )}
-                    </Box>
+                        {/* ---- 编辑器 ---- */}
+                        <Box style={{ minWidth: 0, flex: 1 }}>
+                            {draft && previewSamples ? (
+                                <Flex direction="column" gap="3">
+                                    <ScrollArea
+                                        style={{ maxHeight: PANE_MAX_HEIGHT }}
+                                        scrollbars="vertical"
+                                        type="auto"
+                                    >
+                                        <Box pr="2">
+                                            <AppForm>
+                                                {!isBuiltin ? (
+                                                    <AppField label={t("vibrato_manager_name")}>
+                                                        <TextField.Root
+                                                            size="2"
+                                                            value={draft.name}
+                                                            aria-label={t("vibrato_manager_name")}
+                                                            onChange={(event) =>
+                                                                patch({ name: event.target.value })
+                                                            }
+                                                        />
+                                                    </AppField>
+                                                ) : null}
+                                                <AppFormSection title={t("vibrato_section_wave")}>
+                                                    <AppField label={t("vibrato_shape_label")}>
+                                                        <AppSelect
+                                                            value={
+                                                                draft.cycle.kind === "shape"
+                                                                    ? draft.cycle.shape
+                                                                    : "sine"
+                                                            }
+                                                            disabled={isBuiltin}
+                                                            onValueChange={(value) =>
+                                                                patch({
+                                                                    cycle: {
+                                                                        kind: "shape",
+                                                                        shape: value as WaveShape,
+                                                                        skew:
+                                                                            draft.cycle.kind ===
+                                                                            "shape"
+                                                                                ? draft.cycle.skew
+                                                                                : 0.5,
+                                                                    },
+                                                                })
+                                                            }
+                                                            options={WAVE_SHAPE_ORDER.map(
+                                                                (shape) => ({
+                                                                    value: shape,
+                                                                    label: t(
+                                                                        WAVE_SHAPE_KEYS[shape],
+                                                                    ),
+                                                                }),
+                                                            )}
+                                                        />
+                                                    </AppField>
+                                                    <AppField label={t("vibrato_skew")}>
+                                                        <Flex align="center" gap="2" wrap="wrap">
+                                                            <AppSlider
+                                                                unit="percent"
+                                                                min={2}
+                                                                max={98}
+                                                                disabled={
+                                                                    isBuiltin ||
+                                                                    draft.cycle.kind !== "shape" ||
+                                                                    !shapeUsesSkew(
+                                                                        draft.cycle.kind === "shape"
+                                                                            ? draft.cycle.shape
+                                                                            : "sine",
+                                                                    )
+                                                                }
+                                                                value={
+                                                                    draft.cycle.kind === "shape"
+                                                                        ? Math.round(
+                                                                              draft.cycle.skew *
+                                                                                  100,
+                                                                          )
+                                                                        : 50
+                                                                }
+                                                                ariaLabel={t("vibrato_skew")}
+                                                                onChange={(next) =>
+                                                                    patch({
+                                                                        cycle: {
+                                                                            kind: "shape",
+                                                                            shape:
+                                                                                draft.cycle.kind ===
+                                                                                "shape"
+                                                                                    ? draft.cycle
+                                                                                          .shape
+                                                                                    : "sine",
+                                                                            skew: next / 100,
+                                                                        },
+                                                                    })
+                                                                }
+                                                            />
+                                                            <AppSliderReadout>
+                                                                {`${formatNumber(
+                                                                    (draft.cycle.kind === "shape"
+                                                                        ? draft.cycle.skew
+                                                                        : 0.5) * 100,
+                                                                )}%`}
+                                                            </AppSliderReadout>
+                                                        </Flex>
+                                                    </AppField>
+                                                </AppFormSection>
+
+                                                <AppFormSection title={t("vibrato_section_depth")}>
+                                                    <AppField label={t("vibrato_depth_label")}>
+                                                        <AppNumberField
+                                                            value={depthValue}
+                                                            unit={depthUnit}
+                                                            disabled={isBuiltin}
+                                                            min={0}
+                                                            ariaLabel={t("vibrato_depth_label")}
+                                                            onChange={(next) =>
+                                                                patch({
+                                                                    depthCents: depthToCents(
+                                                                        next,
+                                                                        editParam,
+                                                                        paramRange,
+                                                                    ),
+                                                                })
+                                                            }
+                                                            onCommit={() => undefined}
+                                                        />
+                                                    </AppField>
+                                                    <AppField label={t("vibrato_depth_ramp")}>
+                                                        <Flex align="center" gap="2" wrap="wrap">
+                                                            <AppNumberField
+                                                                value={draft.depthRamp.start}
+                                                                unit="percentFine"
+                                                                disabled={isBuiltin}
+                                                                min={0}
+                                                                max={2}
+                                                                suffix={t(
+                                                                    "vibrato_depth_ramp_start",
+                                                                )}
+                                                                ariaLabel={`${t("vibrato_depth_ramp")} ${t("vibrato_depth_ramp_start")}`}
+                                                                onCommit={(next) =>
+                                                                    patch({
+                                                                        depthRamp: {
+                                                                            ...draft.depthRamp,
+                                                                            start: next,
+                                                                        },
+                                                                    })
+                                                                }
+                                                            />
+                                                            <AppNumberField
+                                                                value={draft.depthRamp.end}
+                                                                unit="percentFine"
+                                                                disabled={isBuiltin}
+                                                                min={0}
+                                                                max={2}
+                                                                suffix={t("vibrato_depth_ramp_end")}
+                                                                ariaLabel={`${t("vibrato_depth_ramp")} ${t("vibrato_depth_ramp_end")}`}
+                                                                onCommit={(next) =>
+                                                                    patch({
+                                                                        depthRamp: {
+                                                                            ...draft.depthRamp,
+                                                                            end: next,
+                                                                        },
+                                                                    })
+                                                                }
+                                                            />
+                                                        </Flex>
+                                                    </AppField>
+                                                    <AppField label={t("vibrato_bias")}>
+                                                        <AppNumberField
+                                                            value={draft.biasCents}
+                                                            unit="cents"
+                                                            disabled={isBuiltin}
+                                                            ariaLabel={t("vibrato_bias")}
+                                                            onCommit={(next) =>
+                                                                patch({ biasCents: next })
+                                                            }
+                                                        />
+                                                    </AppField>
+                                                    <AppField label={t("vibrato_irregularity")}>
+                                                        <Flex align="center" gap="2" wrap="wrap">
+                                                            <AppSlider
+                                                                unit="percent"
+                                                                min={0}
+                                                                max={100}
+                                                                disabled={isBuiltin}
+                                                                value={Math.round(
+                                                                    draft.irregularity,
+                                                                )}
+                                                                ariaLabel={t(
+                                                                    "vibrato_irregularity",
+                                                                )}
+                                                                onChange={(next) =>
+                                                                    patch({ irregularity: next })
+                                                                }
+                                                            />
+                                                            <AppSliderReadout>
+                                                                {`${formatNumber(draft.irregularity)}%`}
+                                                            </AppSliderReadout>
+                                                        </Flex>
+                                                    </AppField>
+                                                </AppFormSection>
+
+                                                <AppFormSection title={t("vibrato_section_rate")}>
+                                                    <AppField label={t("vibrato_rate_mode")}>
+                                                        {isBuiltin ? (
+                                                            <span className="hs-type-label">
+                                                                {t(RATE_MODE_KEYS[draft.rateMode])}
+                                                            </span>
+                                                        ) : (
+                                                            <AppSegmentedControl<VibratoRateMode>
+                                                                value={draft.rateMode}
+                                                                ariaLabel={t("vibrato_rate_mode")}
+                                                                onChange={(next) =>
+                                                                    patch({ rateMode: next })
+                                                                }
+                                                                options={(
+                                                                    ["hz", "cycles"] as const
+                                                                ).map((mode) => ({
+                                                                    value: mode,
+                                                                    label: t(RATE_MODE_KEYS[mode]),
+                                                                }))}
+                                                            />
+                                                        )}
+                                                    </AppField>
+                                                    {draft.rateMode === "hz" ? (
+                                                        <AppField label={t("vibrato_rate_label")}>
+                                                            <AppNumberField
+                                                                value={draft.rateHz}
+                                                                unit="vibratoHz"
+                                                                disabled={isBuiltin}
+                                                                min={0.1}
+                                                                max={20}
+                                                                ariaLabel={t("vibrato_rate_label")}
+                                                                onCommit={(next) =>
+                                                                    patch({ rateHz: next })
+                                                                }
+                                                            />
+                                                        </AppField>
+                                                    ) : (
+                                                        <AppField label={t("vibrato_cycles")}>
+                                                            <AppNumberField
+                                                                value={draft.cycles}
+                                                                unit="integer"
+                                                                disabled={isBuiltin}
+                                                                min={0.5}
+                                                                max={128}
+                                                                ariaLabel={t("vibrato_cycles")}
+                                                                onCommit={(next) =>
+                                                                    patch({ cycles: next })
+                                                                }
+                                                            />
+                                                        </AppField>
+                                                    )}
+                                                    <AppField label={t("vibrato_rate_ramp")}>
+                                                        <AppNumberField
+                                                            value={draft.rateRampEnd}
+                                                            unit="percentFine"
+                                                            disabled={isBuiltin}
+                                                            min={0.25}
+                                                            max={4}
+                                                            ariaLabel={t("vibrato_rate_ramp")}
+                                                            onCommit={(next) =>
+                                                                patch({ rateRampEnd: next })
+                                                            }
+                                                        />
+                                                    </AppField>
+                                                    <AppSwitchRow
+                                                        label={t("vibrato_align_cycles")}
+                                                        checked={draft.alignCycles}
+                                                        disabled={isBuiltin}
+                                                        onCheckedChange={(checked) =>
+                                                            patch({ alignCycles: checked })
+                                                        }
+                                                    />
+                                                </AppFormSection>
+
+                                                <AppFormSection
+                                                    title={t("vibrato_section_envelope")}
+                                                >
+                                                    <AppField label={t("vibrato_attack")}>
+                                                        <Flex align="center" gap="2" wrap="wrap">
+                                                            <AppNumberField
+                                                                value={draft.attackMs}
+                                                                unit="milliseconds"
+                                                                disabled={isBuiltin}
+                                                                min={0}
+                                                                ariaLabel={t("vibrato_attack")}
+                                                                onCommit={(next) =>
+                                                                    patch({ attackMs: next })
+                                                                }
+                                                            />
+                                                            <AppSelect
+                                                                value={draft.attackCurve}
+                                                                disabled={isBuiltin}
+                                                                ariaLabel={t("vibrato_curve")}
+                                                                onValueChange={(value) =>
+                                                                    patch({
+                                                                        attackCurve:
+                                                                            value as EnvelopeCurve,
+                                                                    })
+                                                                }
+                                                                options={ENVELOPE_CURVE_ORDER.map(
+                                                                    (curve) => ({
+                                                                        value: curve,
+                                                                        label: t(
+                                                                            ENVELOPE_CURVE_KEYS[
+                                                                                curve
+                                                                            ],
+                                                                        ),
+                                                                    }),
+                                                                )}
+                                                            />
+                                                        </Flex>
+                                                    </AppField>
+                                                    <AppField label={t("vibrato_release")}>
+                                                        <Flex align="center" gap="2" wrap="wrap">
+                                                            <AppNumberField
+                                                                value={draft.releaseMs}
+                                                                unit="milliseconds"
+                                                                disabled={isBuiltin}
+                                                                min={0}
+                                                                ariaLabel={t("vibrato_release")}
+                                                                onCommit={(next) =>
+                                                                    patch({ releaseMs: next })
+                                                                }
+                                                            />
+                                                            <AppSelect
+                                                                value={draft.releaseCurve}
+                                                                disabled={isBuiltin}
+                                                                ariaLabel={t("vibrato_curve")}
+                                                                onValueChange={(value) =>
+                                                                    patch({
+                                                                        releaseCurve:
+                                                                            value as EnvelopeCurve,
+                                                                    })
+                                                                }
+                                                                options={ENVELOPE_CURVE_ORDER.map(
+                                                                    (curve) => ({
+                                                                        value: curve,
+                                                                        label: t(
+                                                                            ENVELOPE_CURVE_KEYS[
+                                                                                curve
+                                                                            ],
+                                                                        ),
+                                                                    }),
+                                                                )}
+                                                            />
+                                                        </Flex>
+                                                    </AppField>
+                                                    <AppField label={t("vibrato_phase")}>
+                                                        <AppNumberField
+                                                            value={draft.startPhaseDeg}
+                                                            unit="integer"
+                                                            disabled={isBuiltin}
+                                                            min={0}
+                                                            max={360}
+                                                            ariaLabel={t("vibrato_phase")}
+                                                            onCommit={(next) =>
+                                                                patch({ startPhaseDeg: next })
+                                                            }
+                                                        />
+                                                    </AppField>
+                                                </AppFormSection>
+
+                                                <AppFormSection
+                                                    title={t("vibrato_section_baseline")}
+                                                >
+                                                    <AppField label={t("vibrato_baseline")}>
+                                                        <AppSelect
+                                                            value={draft.baseline}
+                                                            disabled={isBuiltin}
+                                                            onValueChange={(value) =>
+                                                                patch({
+                                                                    baseline: value as BaselineMode,
+                                                                })
+                                                            }
+                                                            options={BASELINE_MODE_ORDER.map(
+                                                                (mode) => ({
+                                                                    value: mode,
+                                                                    label: t(
+                                                                        BASELINE_MODE_KEYS[mode],
+                                                                    ),
+                                                                }),
+                                                            )}
+                                                        />
+                                                    </AppField>
+                                                    <AppField label={t("vibrato_blend")}>
+                                                        <Flex align="center" gap="2" wrap="wrap">
+                                                            <AppSlider
+                                                                unit="percent"
+                                                                min={0}
+                                                                max={100}
+                                                                disabled={
+                                                                    isBuiltin ||
+                                                                    draft.baseline !== "existing"
+                                                                }
+                                                                value={Math.round(draft.blend)}
+                                                                ariaLabel={t("vibrato_blend")}
+                                                                onChange={(next) =>
+                                                                    patch({ blend: next })
+                                                                }
+                                                            />
+                                                            <AppSliderReadout>
+                                                                {`${formatNumber(draft.blend)}%`}
+                                                            </AppSliderReadout>
+                                                        </Flex>
+                                                    </AppField>
+                                                </AppFormSection>
+                                            </AppForm>
+                                        </Box>
+                                    </ScrollArea>
+                                </Flex>
+                            ) : (
+                                <span className="hs-type-caption">
+                                    {t("vibrato_manager_empty")}
+                                </span>
+                            )}
+                        </Box>
+                    </Flex>
                 </Flex>
             </AppDialog>
 
