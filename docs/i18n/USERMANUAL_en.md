@@ -469,7 +469,9 @@ Press `Tab` to cycle through editing tools (Select / Draw-type tools).
 
 A vibrato preset is a reusable set of vibrato parameters. Open the manager from `Options → Vibrato Preset Manager...`, from the vibrato preset button in the parameter editor toolbar, or from `Vibrato preset... → Manage presets...` in the context menu.
 
-The **waveform preview** sits across the top of the manager and is deliberately outside every scroll region, so it stays visible while you edit the parameters below it and redraws as you change anything; its vertical axis scales to the preset's own depth, so a 5-cent and a 100-cent preset are both legible, and the readout underneath gives the real amount.
+The **waveform preview** sits across the top of the manager and is deliberately outside every scroll region, so it stays visible while you edit the parameters below it and redraws as you change anything; its vertical axis scales to the preset's own depth, so a 5-cent and a 100-cent preset are both legible, and the readout underneath gives the real amount. The card's play button **auditions** the preset with a synthesized tone -- the same voice as the piano-roll keys, no vocoder involved: one click sounds immediately, a second click stops, and what you hear is exactly the drawn curve including the fade-in, the swell and the irregularity. Built-in presets can be auditioned too.
+
+`Export...` in the footer saves the selected preset as a JSON file, and `Import...` reads one back: duplicates are skipped automatically (importing the same file twice does not double the library), the imported preset is selected afterwards with a line of feedback, and a wrong file -- a theme's JSON, say -- is rejected with a reason. Imported presets always become new custom presets, even when the file carries a built-in preset's name.
 
 The parameters fall into four groups:
 
