@@ -21,6 +21,7 @@ import { useAppDispatch } from "../../app/hooks";
 import { useI18n } from "../../i18n/I18nProvider";
 import { persistUiSettings, upsertVibratoPreset } from "../../features/session/sessionSlice";
 import {
+    VIBRATO_LIMITS,
     isBuiltinVibratoPresetId,
     sanitizeVibratoPreset,
 } from "../../features/vibrato/vibratoPresets";
@@ -255,7 +256,7 @@ export function VibratoApplyDialog({
                                                     paramRange,
                                                 )}
                                                 unit={depthUnit}
-                                                min={0}
+                                                min={VIBRATO_LIMITS.depthCents.min}
                                                 ariaLabel={t("vibrato_depth_label")}
                                                 onChange={(next) =>
                                                     patch({

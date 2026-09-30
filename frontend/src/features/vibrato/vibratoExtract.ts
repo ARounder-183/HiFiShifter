@@ -74,6 +74,16 @@ const MIN_DEPTH_CENTS = 3;
 const ENVELOPE_SMOOTH_PERIODS = 0.5;
 
 /**
+ * 折叠波形保留的谐波数上限（环形低通）。
+ *
+ * 【取值依据】真实颤音的周期形状几乎都是低次谐波主导：正弦 1 个，三角 / 梯形
+ * 也就几个。保留到第 5 次谐波既能表达这些形状，又能滤掉折叠平均没消掉的观测
+ * 噪声 —— 噪声主要落在高次谐波上，而它正是"坑坑洼洼"的来源。再往上放，提取出的
+ * 波形就会把噪声一起存进去。
+ */
+const EXTRACT_MAX_HARMONICS = 5;
+
+/**
  * 参数原生单位的**偏差**换算成 cents。
  *
  * 【为什么不能复用 `depthDisplayFactor`】那一族函数是"编辑器显示单位"的换算，
@@ -270,6 +280,57 @@ function normalizeTable(table: readonly number[]): number[] {
     return table.map((value) => value / peak);
 }
 
+/** 环形线性插值：把 `u ∈ [0,1)` 处的表值取出来（首尾相接）。 */
+function sampleTableCircular(table: readonly number[], u: number): number {
+    const n = table.length;
+    if (n === 0) return 0;
+    if (n === 1) return table[0];
+    const wrapped = u - Math.floor(u);
+    const pos = wrapped * n;
+    const i0 = Math.floor(pos) % n;
+    const i1 = (i0 + 1) % n;
+    const frac = pos - Math.floor(pos);
+    return table[i0] * (1 - frac) + table[i1] * frac;
+}
+
+/**
+ * 环形低通：只保留最低的 `maxHarmonic` 次谐波（含直流）。
+ *
+ * 【为什么用谐波截断而不是滑动平均】滑动平均在边界要特殊处理，处理不好就在接缝
+ * 处留下折角；而这里的数据本来就是**环形**的（一个周期首尾相接），用环形傅里叶
+ * 截断既天然闭合，又是"理想低通"的定义本身 —— 想保留几个谐波是一个直观的旋钮，
+ * 不必调窗口大小。
+ */
+function lowpassCycleTable(table: readonly number[], maxHarmonic: number): number[] {
+    const n = table.length;
+    if (n < 4) return [...table];
+    const limit = Math.min(Math.floor((n - 1) / 2), Math.max(1, Math.round(maxHarmonic)));
+
+    const out = new Array<number>(n).fill(0);
+    // 直流分量。
+    let mean = 0;
+    for (const value of table) mean += value;
+    mean /= n;
+    out.fill(mean);
+
+    for (let harmonic = 1; harmonic <= limit; harmonic += 1) {
+        let cos = 0;
+        let sin = 0;
+        for (let i = 0; i < n; i += 1) {
+            const angle = (2 * Math.PI * harmonic * i) / n;
+            cos += table[i] * Math.cos(angle);
+            sin += table[i] * Math.sin(angle);
+        }
+        const a = (2 * cos) / n;
+        const b = (2 * sin) / n;
+        for (let i = 0; i < n; i += 1) {
+            const angle = (2 * Math.PI * harmonic * i) / n;
+            out[i] += a * Math.cos(angle) + b * Math.sin(angle);
+        }
+    }
+    return out;
+}
+
 /** 参数式形状的采样（与 `vibratoCycle.sampleCycle` 的约定一致：u=0 为上升零交叉）。 */
 function parametricSample(shape: WaveShape, u: number): number {
     switch (shape) {
@@ -388,15 +449,23 @@ export function extractVibratoPreset(input: VibratoExtractInput): VibratoExtract
     // 折叠出单周期波形。
     const bins = CYCLE_TABLE_DEFAULT_LEN;
     const folded = foldCycleTable(residual, estimate.periodFrames, bins);
-    const normalized = normalizeTable(folded);
+    // 低通：折叠出的表仍带着观测噪声与逐周期抖动，直接存成波形会"坑坑洼洼"。
+    // 真实颤音的周期形状由少数几个谐波就能表达（正弦只要 1 个，三角 / 梯形也就
+    // 几个），截断高次谐波等于一次理想低通 —— 形状保留、毛刺消失，且因为是环形
+    // 变换，首尾天然相接、不会在接缝处生出折角。
+    const smoothed = lowpassCycleTable(folded, EXTRACT_MAX_HARMONICS);
+    const normalized = normalizeTable(smoothed);
     const shapeHint = bestShapeMatch(normalized);
 
     // 不规则度：折叠时的周期内离散度相对幅值的比例。
+    //
+    // 参考值按**精确相位**在环形表上插值取得，而不是取最近的格子 —— 后者在相邻
+    // 两格之间会引入最多半格的插值误差，那部分误差与"真实的逐周期抖动"混在一起，
+    // 会把不规则度系统性抬高，进而让提取出的预设在应用时抖得比原曲线还厉害。
     let variance = 0;
     for (let i = 0; i < residual.length; i += 1) {
         const phase = (i / estimate.periodFrames) % 1;
-        const bin = Math.min(bins - 1, Math.max(0, Math.floor(phase * bins)));
-        const diff = residual[i] - folded[bin];
+        const diff = residual[i] - sampleTableCircular(folded, phase);
         variance += diff * diff;
     }
     const irregularity = Math.min(

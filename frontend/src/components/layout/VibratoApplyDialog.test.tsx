@@ -181,7 +181,7 @@ test("页脚「从选区提取…」可用（有 onExtract 时）", async () => 
     const onExtract = vi.fn();
     await mountDialog({ onExtract });
     const extract = [...document.querySelectorAll("button")].find((button) =>
-        (button.textContent ?? "").includes("Create preset from selection"),
+        (button.textContent ?? "").includes("Create vibrato preset from selection"),
     );
     expect(extract, "提取按钮应已渲染").toBeTruthy();
     await act(async () => {

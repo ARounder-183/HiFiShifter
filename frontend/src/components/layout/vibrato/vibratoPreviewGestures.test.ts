@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { sanitizeVibratoPreset } from "../../../features/vibrato/vibratoPresets";
+import { sanitizeVibratoPreset, VIBRATO_LIMITS } from "../../../features/vibrato/vibratoPresets";
 import {
     applyPreviewGesture,
     cursorForZone,
@@ -120,12 +120,16 @@ describe("applyPreviewGesture", () => {
         expect(back.startPhaseDeg).toBeCloseTo(270, 9);
     });
 
-    test("主体：向上拖动加深，向下拖动变浅且不小于 0", () => {
+    test("主体：向上拖动加深，向下拖动变浅（可为负，即反相）", () => {
         // centsPerPx = 0.5 → 向上 20px = +40 cents。
         const deeper = applyPreviewGesture({ kind: "body" }, snapshot(), 0, -20);
         expect(deeper.depthCents).toBeCloseTo(70, 9);
+        // 30 - 200/0.5 = -370：负值合法（波形反相）。
         const shallow = applyPreviewGesture({ kind: "body" }, snapshot(), 0, 200);
-        expect(shallow.depthCents).toBe(0);
+        expect(shallow.depthCents).toBeCloseTo(-370, 9);
+        // 越过下界才钳住。
+        const floored = applyPreviewGesture({ kind: "body" }, snapshot(), 0, 100_000);
+        expect(floored.depthCents).toBe(VIBRATO_LIMITS.depthCents.min);
     });
 
     test("退化几何不产生 NaN", () => {

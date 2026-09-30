@@ -29,6 +29,7 @@ import {
 } from "../../features/session/sessionSlice";
 import {
     MAX_VIBRATO_PRESETS,
+    VIBRATO_LIMITS,
     createVibratoPresetId,
     duplicateVibratoPreset,
     sanitizeVibratoPreset,
@@ -39,6 +40,7 @@ import {
     parseVibratoPresets,
     serializeVibratoPresets,
     vibratoPresetFileName,
+    vibratoPresetSignature,
 } from "../../features/vibrato/vibratoPresetFile";
 import { shapeUsesSkew } from "../../features/vibrato/vibratoCycle";
 import { randomVibratoSeed } from "../../features/vibrato/vibratoSeed";
@@ -264,7 +266,32 @@ export function VibratoPresetDialog({
         void dispatch(persistUiSettings());
     }
 
+    /**
+     * 草稿相对库中同 id 预设是否有未保存的改动。
+     *
+     * 系统预设永远不算"可保存的改动"（只读）；列表里找不到同 id，说明是刚新建、
+     * 还没入库的预设，也算有改动。
+     */
+    function draftHasUnsavedChanges(): boolean {
+        if (!draft || isBuiltin) return false;
+        const stored = resolved.user.find((preset) => preset.id === draft.id);
+        if (!stored) return true;
+        return (
+            vibratoPresetSignature(sanitizeVibratoPreset(draft)) !== vibratoPresetSignature(stored)
+        );
+    }
+
+    /**
+     * 选中一个预设进行编辑。
+     *
+     * 【切走时先落盘】用户在 A 上改了一半、切到 B 看看，若改动被直接丢弃，
+     * "编辑途中不能换预设"就成了硬伤。因此切换前先把 A 的未保存改动写回库 ——
+     * 与「保存」同一套净化 / 入库路径。没有改动（或系统预设）时什么都不做。
+     */
     function selectPreset(preset: VibratoPreset) {
+        if (draft && draft.id !== preset.id && draftHasUnsavedChanges()) {
+            persistPreset(sanitizeVibratoPreset(draft));
+        }
         setHandDraw(null);
         setDraft(preset);
     }
@@ -464,9 +491,12 @@ export function VibratoPresetDialog({
                     },
                     {
                         id: "save",
-                        label: t("ok"),
+                        label: t("vibrato_manager_save"),
                         intent: "primary",
                         disabled: !draft || isBuiltin,
+                        // 保存**不关闭**对话框：用户常要"先存一版、接着调"，
+                        // 存完就把窗口收掉等于逼他重新打开。关闭交给 Esc / 右上角。
+                        autoClose: false,
                         onClick: handleSave,
                     },
                 ]}
@@ -775,7 +805,7 @@ export function VibratoPresetDialog({
                                                             value={depthValue}
                                                             unit={depthUnit}
                                                             disabled={isBuiltin}
-                                                            min={0}
+                                                            min={VIBRATO_LIMITS.depthCents.min}
                                                             ariaLabel={t("vibrato_depth_label")}
                                                             onChange={(next) =>
                                                                 patch({

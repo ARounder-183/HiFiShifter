@@ -53,7 +53,9 @@ const RATE_MODES: readonly VibratoRateMode[] = ["hz", "cycles"];
 
 /** 各字段的合法区间。浏览器手改配置只能落进这些范围。 */
 export const VIBRATO_LIMITS = {
-    depthCents: { min: 0, max: 1200 },
+    // 深度允许为负：负值等于把波形整体反相（起点先往下摆），拖拽调幅与预设编辑
+    // 都要能表达它。量程对称，绝对值上限不变。
+    depthCents: { min: -1200, max: 1200 },
     rateHz: { min: 0.1, max: 20 },
     cycles: { min: 0.5, max: 128 },
     rateRampEnd: { min: 0.25, max: 4 },

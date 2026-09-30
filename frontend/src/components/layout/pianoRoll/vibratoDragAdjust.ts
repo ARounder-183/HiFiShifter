@@ -19,6 +19,7 @@ import type { Keybinding } from "../../../features/keybindings/types";
 import { matchesKeybindingAllowingFineModifier } from "../../../features/keybindings/keybindingMatch";
 import { isNoneBinding } from "../../../features/keybindings/keybindingsSlice";
 import { buildVibratoCurve } from "../../../features/vibrato/vibratoCurve";
+import { VIBRATO_LIMITS } from "../../../features/vibrato/vibratoPresets";
 import {
     depthFamilyOf,
     PITCH_PARAM_ID,
@@ -70,8 +71,30 @@ export function createDragWorking(preset: VibratoPreset): VibratoDragWorking {
     };
 }
 
-/** 切换到另一个预设：深度与速率整体换成新预设的值。 */
-export function switchDragPreset(next: VibratoPreset): VibratoDragWorking {
+/**
+ * 切换到另一个预设。
+ *
+ * 【切换时的深度 / 速率归属】用户切换预设时，波形、包络、摆放方式这些"音色"
+ * 一律换成新预设的；但**本次手势已经调过的**深度 / 速率要跟着走 —— 用户调完
+ * 幅度再换预设，期待的是"换个音色、幅度不变"，而不是幅度被重置。因此：
+ * - 本次手势调过（`adjusted`）→ 沿用工作副本里的深度与速率；
+ * - 没调过 → 取新预设自带的深度与速率（"换了个音色，深度自然是它的"）。
+ *
+ * 两个量要么都继承、要么都不继承：用户只调了幅度时，速率仍应保持"这一笔一直
+ * 在用的那个"，而不是突然跳回新预设的速率。
+ */
+export function switchDragPreset(
+    previous: VibratoDragWorking,
+    next: VibratoPreset,
+): VibratoDragWorking {
+    if (previous.adjusted) {
+        return {
+            preset: next,
+            depthCents: previous.depthCents,
+            rateHz: previous.rateHz,
+            adjusted: true,
+        };
+    }
     return {
         preset: next,
         depthCents: next.depthCents,
@@ -163,7 +186,8 @@ export function resolveVibratoPresetSwitch(
  * 深度是加性的（分），速率是几何的（等比缩放）—— 速率用加性会在低速端过于
  * 敏感：4 Hz 加 1 Hz 是 +25%，12 Hz 加 1 Hz 只有 +8%。
  *
- * 深度下限为 0（= 直线预设，用来画直线）。速率钳在预设的合法区间内。
+ * 深度可为负：负值等于把波形整体反相（起点先往下摆），与预设深度的合法区间一致。
+ * 速率钳在预设的合法区间内。
  */
 export function computeVibratoDragAdjustment(input: {
     editParam: ParamName;
@@ -184,7 +208,13 @@ export function computeVibratoDragAdjustment(input: {
 
     if (input.target === "depth") {
         const step = depthStepCentsFor(input.editParam, input.currentParamRange);
-        depthCents = Math.max(0, depthCents + input.direction * step * safeSteps * safeFineScale);
+        depthCents = Math.max(
+            VIBRATO_LIMITS.depthCents.min,
+            Math.min(
+                VIBRATO_LIMITS.depthCents.max,
+                depthCents + input.direction * step * safeSteps * safeFineScale,
+            ),
+        );
     } else {
         const ratio = Math.pow(1 + 0.1 * safeFineScale, safeSteps);
         rateHz = input.direction > 0 ? rateHz * ratio : rateHz / ratio;

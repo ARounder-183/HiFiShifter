@@ -184,6 +184,36 @@ describe("extractVibratoPreset：往返", () => {
         );
         expect(maxStep).toBeLessThan(0.5);
     });
+
+    /*
+     * 「采样后仍然坑坑洼洼」的回归：折叠平均消不掉的观测噪声会留在表里，直接存成
+     * 波形就是一条毛刺曲线。这里给一段干净正弦叠上确定性的高频噪声，断言提取出的
+     * 表被低通滤平（环形二阶差分很小），且仍被认成正弦 —— 也就是噪声没有被当成
+     * "形状"存下来。
+     */
+    test("带噪声的输入被低通：折叠表光滑且仍判为正弦", () => {
+        const clean = render(
+            { cycle: { kind: "shape", shape: "sine", skew: 0.5 }, depthCents: 40, rateHz: 5.5 },
+            3,
+        );
+        const noisy = clean.map(
+            (value, i) => value + 0.03 * Math.sin(i * 2.3) + 0.02 * Math.cos(i * 5.1),
+        );
+        const result = extractVibratoPreset({ values: noisy, framePeriodMs: FP, param: "pitch" });
+        expect(result.ok).toBe(true);
+        if (!result.ok || result.preset.cycle.kind !== "table") return;
+        expect(result.shapeHint).toBe("sine");
+
+        const table = result.preset.cycle.table;
+        const n = table.length;
+        // 环形二阶差分：64 格上的纯正弦约 0.0096，低通后应远小于噪声表。
+        const maxSecondDiff = Math.max(
+            ...table.map((value, i) =>
+                Math.abs(value - 2 * table[(i + 1) % n] + table[(i + 2) % n]),
+            ),
+        );
+        expect(maxSecondDiff).toBeLessThan(0.06);
+    });
 });
 
 describe("extractVibratoPreset：拒绝", () => {

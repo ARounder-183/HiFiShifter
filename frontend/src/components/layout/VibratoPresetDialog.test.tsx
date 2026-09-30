@@ -20,7 +20,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Provider } from "react-redux";
 import { readFileSync } from "node:fs";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import keybindingsReducer from "../../features/keybindings/keybindingsSlice";
 import sessionReducer, {
@@ -58,7 +58,10 @@ afterEach(async () => {
     document.body.innerHTML = "";
 });
 
-async function mountDialog(prepare?: (store: ReturnType<typeof configureStore>) => void) {
+async function mountDialog(
+    prepare?: (store: ReturnType<typeof configureStore>) => void,
+    onOpenChange: (open: boolean) => void = () => undefined,
+) {
     const store = configureStore({
         reducer: { session: sessionReducer, keybindings: keybindingsReducer },
     });
@@ -68,7 +71,7 @@ async function mountDialog(prepare?: (store: ReturnType<typeof configureStore>) 
             <Provider store={store}>
                 <AppThemeProvider>
                     <I18nProvider>
-                        <VibratoPresetDialog open onOpenChange={() => undefined} />
+                        <VibratoPresetDialog open onOpenChange={onOpenChange} />
                     </I18nProvider>
                 </AppThemeProvider>
             </Provider>,
@@ -296,4 +299,59 @@ test("系统预设：手绘入口禁用", async () => {
     expect(drawButton, "手绘入口应已渲染").toBeTruthy();
     expect(drawButton!.disabled).toBe(true);
     expect(document.querySelector('[data-testid="vibrato-cycle-editor"]')).toBeNull();
+});
+
+/*
+ * 交互修正：保存不关闭 + 切换预设不丢编辑。
+ *
+ * 【为什么值得测】这两条都是"用户能感觉到、但不会抛错"的交互缺陷：
+ * 1. 点「保存」把窗口一起收掉 —— 用户想"先存一版、接着调"时只能重开；
+ * 2. 编辑到一半切到别的预设，当前改动被静默丢弃 —— 于是"编辑途中不能换预设"。
+ * 前者断言"保存不请求关闭"，后者断言"切走时改动已写回库"。
+ */
+test("保存不关闭对话框（可先存一版接着调）", async () => {
+    const custom = sanitizeVibratoPreset({ id: "custom_save", name: "Save Me", depthCents: 40 });
+    const onOpenChange = vi.fn();
+    await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(custom));
+        store.dispatch(setActiveVibratoPreset(custom.id));
+    }, onOpenChange);
+
+    const saveButton = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Save",
+    );
+    expect(saveButton, "保存按钮应已渲染").toBeTruthy();
+    await act(async () => {
+        saveButton!.click();
+    });
+    expect(onOpenChange).not.toHaveBeenCalled();
+});
+
+test("切换预设时把未保存的改动写回库（编辑途中可换预设）", async () => {
+    const custom = sanitizeVibratoPreset({ id: "custom_edit", name: "Edit Me", depthCents: 40 });
+    const store = await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(custom));
+        store.dispatch(setActiveVibratoPreset(custom.id));
+    });
+
+    // 制造一处未保存的改动：点「手绘…」把草稿的波形换成手绘表。
+    const drawButton = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Draw...",
+    );
+    expect(drawButton, "手绘入口应已渲染").toBeTruthy();
+    await act(async () => {
+        drawButton!.click();
+    });
+
+    // 切到系统预设「直线」（出厂顺序首位）。
+    const rows = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    const straightRow = rows.find((row) => row.textContent?.includes("Straight"));
+    expect(straightRow, "系统预设行应已渲染").toBeTruthy();
+    await act(async () => {
+        straightRow!.click();
+    });
+
+    // 改动已写回库，而不是被丢弃。
+    const saved = store.getState().session.vibratoPresets.find((p) => p.id === "custom_edit");
+    expect(saved?.cycle.kind).toBe("table");
 });

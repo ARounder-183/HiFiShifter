@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import type { Keybinding } from "../../../features/keybindings/types";
-import { sanitizeVibratoPreset } from "../../../features/vibrato/vibratoPresets";
+import { VIBRATO_LIMITS, sanitizeVibratoPreset } from "../../../features/vibrato/vibratoPresets";
 import {
     buildDragVibratoCurve,
     computeVibratoDragAdjustment,
@@ -45,14 +45,35 @@ describe("createDragWorking", () => {
 });
 
 describe("switchDragPreset", () => {
-    test("深度与速率整体换成新预设的值（不是叠加）", () => {
-        const before = { ...createDragWorking(preset({ depthCents: 40 })), adjusted: true };
-        const after = switchDragPreset(preset({ id: "builtin.deep", depthCents: 55, rateHz: 4.5 }));
+    test("未调整过：深度与速率取新预设自带的值", () => {
+        const before = createDragWorking(preset({ depthCents: 40 }));
+        const after = switchDragPreset(
+            before,
+            preset({ id: "builtin.deep", depthCents: 55, rateHz: 4.5 }),
+        );
         expect(after.depthCents).toBe(55);
         expect(after.rateHz).toBe(4.5);
         expect(after.adjusted).toBe(false);
-        // 旧的调整不该泄漏过来
-        expect(after.depthCents).not.toBe(before.depthCents);
+        expect(after.preset.id).toBe("builtin.deep");
+    });
+
+    test("调整过：深度与速率沿用本次手势的值（换音色不改幅度）", () => {
+        const before = {
+            ...createDragWorking(preset({ depthCents: 40, rateHz: 5 })),
+            depthCents: 90,
+            rateHz: 9,
+            adjusted: true,
+        };
+        const after = switchDragPreset(
+            before,
+            preset({ id: "builtin.deep", depthCents: 55, rateHz: 4.5 }),
+        );
+        // 两个量都继承 —— 用户只调了幅度时，速率也应保持这一笔一直在用的值。
+        expect(after.depthCents).toBe(90);
+        expect(after.rateHz).toBe(9);
+        expect(after.adjusted).toBe(true);
+        // 但波形等仍来自新预设。
+        expect(after.preset.id).toBe("builtin.deep");
     });
 });
 
@@ -102,7 +123,7 @@ describe("computeVibratoDragAdjustment", () => {
         expect(down.depthCents).toBeCloseTo(6, 9);
     });
 
-    test("深度下限为 0（可用它调成直线）", () => {
+    test("深度可为负（波形反相），并钳在合法下界", () => {
         const next = computeVibratoDragAdjustment({
             ...base,
             depthCents: 5,
@@ -111,7 +132,31 @@ describe("computeVibratoDragAdjustment", () => {
             steps: 10,
             fineScale: 1,
         });
-        expect(next.depthCents).toBe(0);
+        // 5 - 24*10 = -235：负值是合法结果（反相），不再停在 0。
+        expect(next.depthCents).toBeCloseTo(-235, 9);
+
+        // 越过下界才钳住。
+        const floored = computeVibratoDragAdjustment({
+            ...base,
+            depthCents: 5,
+            target: "depth",
+            direction: -1,
+            steps: 1000,
+            fineScale: 1,
+        });
+        expect(floored.depthCents).toBe(VIBRATO_LIMITS.depthCents.min);
+    });
+
+    test("深度为负时继续向上调可以回到正值", () => {
+        const next = computeVibratoDragAdjustment({
+            ...base,
+            depthCents: -30,
+            target: "depth",
+            direction: 1,
+            steps: 1,
+            fineScale: 1,
+        });
+        expect(next.depthCents).toBeCloseTo(-30 + 24, 9);
     });
 
     test("精细修饰键缩放深度步长", () => {

@@ -77,7 +77,7 @@ export interface VibratoRenderResult {
     maxF: number;
     /** `dense[k]` 对应帧 `minF + k`。 */
     dense: number[];
-    /** 仅在 `collectEnvelope` 为 true 时给出：`depthCents * env`，逐帧对应 `dense`。 */
+    /** 仅在 `collectEnvelope` 为 true 时给出：`|depthCents| * env`，逐帧对应 `dense`。 */
     envelope?: number[];
 }
 
@@ -266,7 +266,9 @@ export function buildVibratoCurve(input: VibratoRenderInput): VibratoRenderResul
             1 +
             irr * DEPTH_JITTER_RATIO * valueNoise(tc * DEPTH_NOISE_RATE * durationSec, seed + 7);
         env = Math.max(0, env);
-        if (envelope) envelope[i] = depthCents * env;
+        // 包络恒为非负：深度可能为负（波形反相），取绝对值后包络带仍是上下对称的
+        // 幅度边界，不会被负号翻到基线下方。
+        if (envelope) envelope[i] = Math.abs(depthCents) * env;
 
         const delta = depthCents * mapping.factor * env * wave;
 

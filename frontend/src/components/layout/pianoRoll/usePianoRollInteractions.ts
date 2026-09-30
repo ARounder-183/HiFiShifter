@@ -1385,14 +1385,15 @@ export function usePianoRollInteractions(args: {
     /**
      * 切换拖拽中的颤音预设。
      *
-     * 深度与速率整体换成新预设的值（换的是"音色"，不是叠加调整），并立刻按新
-     * 预设重画 —— 不重画的话用户要等下一次指针移动才看到变化。
+     * 波形 / 包络 / 摆放换成新预设（换的是"音色"）；本次手势若调过深度或速率，
+     * 则这两个量跟着走（见 `switchDragPreset`）。切换后立刻按新预设重画 ——
+     * 不重画的话用户要等下一次指针移动才看到变化。
      */
     const switchVibratoDragPreset = useCallback(
         (next: VibratoPreset, clientX?: number, clientY?: number): boolean => {
             const vib = vibratoStateRef.current;
             if (!vib) return false;
-            vib.working = switchDragPreset(next);
+            vib.working = switchDragPreset(vib.working, next);
             // 不规则度的种子跟着预设换：不同预设的"随机味"不一样，沿用旧种子
             // 会让两个预设的抖动图案完全相同。
             vib.seed = vibratoSeedForPreset(next);
@@ -1404,11 +1405,11 @@ export function usePianoRollInteractions(args: {
     );
 
     /**
-     * 切换颤音预设：**持久化**（写活动预设 + 落盘）并重置本次手势的工作副本。
+     * 切换颤音预设：**持久化**（写活动预设 + 落盘）并同步本次手势的工作副本。
      *
-     * 【语义】侧键 / `,` `.` 与工具栏、管理器是同一个动作 —— "我换了预设"，
-     * 而不是"这一笔先用用看"。切换后工作副本整体换成新预设的值：上次手势的
-     * 调整不跨预设跟随（那是被移除的 `lastVibrato*` 的旧病）。
+     * 【语义】侧键 / `,` `.` 与工具栏、管理器是同一个动作 —— "我换了预设"。
+     * 工作副本按 `switchDragPreset` 的规则更新：调过深度 / 速率就沿用本次手势的
+     * 值（换音色不改幅度），没调过则取新预设自带的值。
      */
     const switchVibratoPresetPersistently = useCallback(
         (next: VibratoPreset, clientX?: number, clientY?: number): boolean => {
