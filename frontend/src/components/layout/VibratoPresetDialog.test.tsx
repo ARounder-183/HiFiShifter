@@ -515,3 +515,57 @@ test("导入 / 新建 / 复制为自定义 都不关闭窗口", async () => {
 
     expect(onOpenChange).not.toHaveBeenCalled();
 });
+
+/*
+ * 拖拽排序：用户预设按住行上下拖即可换位（取代了原来的 ▲ / ▼ 按钮）。
+ *
+ * jsdom 没有排版引擎，`getBoundingClientRect()` 一律返回 0，因此"向下拖"必然落到
+ * 列表末尾 —— 这刚好够断言"拖拽确实触发了一次 reorder"，而不必伪造行高。
+ */
+test("拖拽用户预设行可以调整顺序", async () => {
+    const a = sanitizeVibratoPreset({ id: "custom_drag_a", name: "Drag A", depthCents: 30 });
+    const b = sanitizeVibratoPreset({ id: "custom_drag_b", name: "Drag B", depthCents: 40 });
+    const store = await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(a));
+        store.dispatch(upsertVibratoPreset(b));
+        store.dispatch(setActiveVibratoPreset(a.id));
+    });
+    expect(store.getState().session.vibratoPresets.map((preset) => preset.id)).toEqual([
+        "custom_drag_a",
+        "custom_drag_b",
+    ]);
+
+    const row = document.querySelector<HTMLElement>('[data-preset-row="custom_drag_a"]');
+    expect(row, "可拖拽的用户预设行应已渲染").toBeTruthy();
+    const target = row!.querySelector('[role="option"]') as HTMLElement;
+
+    await act(async () => {
+        target.dispatchEvent(
+            new PointerEvent("pointerdown", { bubbles: true, button: 0, clientY: 0 }),
+        );
+    });
+    await act(async () => {
+        window.dispatchEvent(new PointerEvent("pointermove", { clientY: 40 }));
+    });
+    await act(async () => {
+        window.dispatchEvent(new PointerEvent("pointerup", { clientY: 40 }));
+    });
+
+    expect(store.getState().session.vibratoPresets.map((preset) => preset.id)).toEqual([
+        "custom_drag_b",
+        "custom_drag_a",
+    ]);
+});
+
+test("上下调整按钮已被移除（改为拖拽 + 右键菜单）", async () => {
+    const a = sanitizeVibratoPreset({ id: "custom_no_btn", name: "No Buttons" });
+    await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(a));
+        store.dispatch(setActiveVibratoPreset(a.id));
+    });
+    const labels = [...document.querySelectorAll("button")].map(
+        (button) => button.getAttribute("aria-label") ?? "",
+    );
+    expect(labels).not.toContain("Move up");
+    expect(labels).not.toContain("Move down");
+});

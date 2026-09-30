@@ -13,7 +13,7 @@
  * 与失败恢复都变复杂。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PlayIcon, ShuffleIcon, StopIcon, EyeNoneIcon, EyeOpenIcon } from "@radix-ui/react-icons";
 import { Box, Flex, ScrollArea, TextField } from "@radix-ui/themes";
 
@@ -112,6 +112,11 @@ import {
 } from "./vibrato/vibratoPreviewGestures";
 import { VibratoCycleEditor } from "./vibrato/VibratoCycleEditor";
 import { tableFromCycle } from "./vibrato/vibratoCycleEdit";
+import {
+    REORDER_DRAG_THRESHOLD_PX,
+    reorderInsertionIndex,
+    reorderTargetIndex,
+} from "./dragReorder";
 
 interface Props {
     open: boolean;
@@ -181,6 +186,30 @@ export function VibratoPresetDialog({
         y: number;
         preset: VibratoPreset;
     } | null>(null);
+    /**
+     * 用户预设列表的拖拽排序状态（`null` = 没在拖）。
+     *
+     * `insertionIndex` 是**当前顺序**里的插入位置，用于画落点指示线；换算成
+     * `reorderVibratoPreset` 需要的下标在松手时做（见 `reorderTargetIndex`）。
+     */
+    const [presetDrag, setPresetDrag] = useState<{
+        id: string;
+        fromIndex: number;
+        insertionIndex: number;
+    } | null>(null);
+    /** 按下的起点（尚未越过阈值）。用 ref 而不是 state：指针移动每帧都读它。 */
+    const presetDragStartRef = useRef<{ id: string; fromIndex: number; pointerY: number } | null>(
+        null,
+    );
+    /** 进行中的拖拽（与 `presetDrag` 同步，供事件回调读取最新值）。 */
+    const presetDragRef = useRef<{
+        id: string;
+        fromIndex: number;
+        insertionIndex: number;
+    } | null>(null);
+    /** 本次指针交互是否已经变成拖拽 —— 用于吞掉拖完那一下的 click。 */
+    const suppressPresetClickRef = useRef(false);
+    const userListRef = useRef<HTMLDivElement | null>(null);
     /** 试听是否在响（驱动播放 / 停止按钮的图标与文案）。 */
     const [auditionPlaying, setAuditionPlaying] = useState(false);
     /** 导入 / 导出用的隐藏文件输入（必须常驻挂载，见 `AppFileInput` 的说明）。 */
@@ -504,6 +533,96 @@ export function VibratoPresetDialog({
         void dispatch(persistUiSettings());
     }
 
+    /** 用户预设各行的中线（视口 Y），按当前顺序 —— 拖拽落点据此判定。 */
+    const userPresetRowCenters = useCallback((): number[] => {
+        const container = userListRef.current;
+        if (!container) return [];
+        return Array.from(container.querySelectorAll<HTMLElement>("[data-preset-row]")).map(
+            (row) => {
+                const rect = row.getBoundingClientRect();
+                return rect.top + rect.height / 2;
+            },
+        );
+    }, []);
+
+    /**
+     * 行上按下指针：登记起点。
+     *
+     * 这里**不**立刻进入拖拽 —— 越过 `REORDER_DRAG_THRESHOLD_PX` 才算，否则单击选中
+     * 与双击设为当前都会被拖拽逻辑吃掉。行内的按钮（启用 / 停用、右键菜单触发）不
+     * 参与拖拽。
+     */
+    const beginPresetDrag = useCallback(
+        (
+            preset: VibratoPreset,
+            index: number,
+            event: { button: number; clientY: number; target: EventTarget | null },
+        ) => {
+            if (event.button !== 0) return;
+            const target = event.target as HTMLElement | null;
+            if (target?.closest("button")) return;
+            suppressPresetClickRef.current = false;
+            presetDragStartRef.current = {
+                id: preset.id,
+                fromIndex: index,
+                pointerY: event.clientY,
+            };
+        },
+        [],
+    );
+
+    // 拖拽排序：指针越过阈值才进入拖拽状态，松手时落盘一次。
+    useEffect(() => {
+        if (!open) return;
+        const onMove = (event: PointerEvent) => {
+            const start = presetDragStartRef.current;
+            if (!start) return;
+            if (
+                !presetDragRef.current &&
+                Math.abs(event.clientY - start.pointerY) < REORDER_DRAG_THRESHOLD_PX
+            ) {
+                return;
+            }
+            const next = {
+                id: start.id,
+                fromIndex: start.fromIndex,
+                insertionIndex: reorderInsertionIndex(userPresetRowCenters(), event.clientY),
+            };
+            presetDragRef.current = next;
+            setPresetDrag(next);
+            // 已经进入拖拽：把松手时那一下 click 吞掉，避免顺带选中 / 激活。
+            suppressPresetClickRef.current = true;
+        };
+        const onUp = () => {
+            const start = presetDragStartRef.current;
+            presetDragStartRef.current = null;
+            const drag = presetDragRef.current;
+            presetDragRef.current = null;
+            setPresetDrag(null);
+            if (!start || !drag) return;
+            const toIndex = reorderTargetIndex(drag.insertionIndex, drag.fromIndex);
+            dispatch(reorderVibratoPreset({ id: drag.id, toIndex }));
+            void dispatch(persistUiSettings());
+        };
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp);
+        window.addEventListener("pointercancel", onUp);
+        return () => {
+            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointerup", onUp);
+            window.removeEventListener("pointercancel", onUp);
+        };
+    }, [open, dispatch, userPresetRowCenters]);
+
+    /** 选中一条预设；刚拖完的那一下 click 不触发选中。 */
+    function handlePresetRowClick(preset: VibratoPreset) {
+        if (suppressPresetClickRef.current) {
+            suppressPresetClickRef.current = false;
+            return;
+        }
+        selectPreset(preset);
+    }
+
     const depthUnit = depthStepUnitFor(editParam);
     const depthValue = draft ? depthForParam(draft.depthCents, editParam, paramRange) : 0;
     const cycleEstimate = draft ? estimateCycles(draft, 320, 5) : 0;
@@ -521,6 +640,8 @@ export function VibratoPresetDialog({
         ? (() => {
               const target = presetMenu.preset;
               const targetDisabled = session.disabledVibratoPresetIds.includes(target.id);
+              const targetIsBuiltin = isBuiltinVibratoPresetId(target.id);
+              const userIndex = resolved.user.findIndex((preset) => preset.id === target.id);
               return [
                   {
                       key: "toggle-enabled",
@@ -536,6 +657,25 @@ export function VibratoPresetDialog({
                       checked: session.activeVibratoPresetId === target.id,
                       onSelect: () => activatePreset(target),
                   },
+                  // 上移 / 下移：列表现在靠拖拽排序，这里是**键盘可达的等价操作**
+                  // —— 只为了拖拽就砍掉非指针用户的路子，代价太大。
+                  ...(targetIsBuiltin || userIndex < 0
+                      ? []
+                      : [
+                            {
+                                key: "move-up",
+                                label: t("vibrato_manager_move_up"),
+                                separatorBefore: true,
+                                disabled: userIndex === 0,
+                                onSelect: () => movePreset(target, -1),
+                            },
+                            {
+                                key: "move-down",
+                                label: t("vibrato_manager_move_down"),
+                                disabled: userIndex === resolved.user.length - 1,
+                                onSelect: () => movePreset(target, 1),
+                            },
+                        ]),
                   {
                       key: "duplicate",
                       label: t("vibrato_manager_duplicate"),
@@ -549,10 +689,8 @@ export function VibratoPresetDialog({
                       label: t("vibrato_manager_delete"),
                       danger: true,
                       // 系统预设只读：要删只能删副本。
-                      disabled: isBuiltinVibratoPresetId(target.id),
-                      tooltip: isBuiltinVibratoPresetId(target.id)
-                          ? t("vibrato_manager_readonly")
-                          : undefined,
+                      disabled: targetIsBuiltin,
+                      tooltip: targetIsBuiltin ? t("vibrato_manager_readonly") : undefined,
                       onSelect: () => setDeleteTarget(target),
                   },
               ];
@@ -776,48 +914,74 @@ export function VibratoPresetDialog({
                                             {t("vibrato_manager_empty")}
                                         </span>
                                     ) : (
-                                        resolved.user.map((preset, index) => (
-                                            <Flex key={preset.id} align="center" gap="1">
-                                                <PresetRow
-                                                    preset={preset}
-                                                    selected={draft?.id === preset.id}
-                                                    active={
-                                                        session.activeVibratoPresetId === preset.id
-                                                    }
-                                                    enabled={
-                                                        !session.disabledVibratoPresetIds.includes(
-                                                            preset.id,
-                                                        )
-                                                    }
-                                                    onSelect={() => selectPreset(preset)}
-                                                    onActivate={() => activatePreset(preset)}
-                                                    onToggleEnabled={() =>
-                                                        togglePresetEnabled(preset)
-                                                    }
-                                                    onContextMenu={(x, y) =>
-                                                        setPresetMenu({ x, y, preset })
-                                                    }
+                                        /* 用户预设可**拖拽排序**：按住行上下拖，越过别行中线
+                                           即换位，松手落盘。落点用一条指示线表达；被拖的那行
+                                           压暗。键盘可达的等价操作在行的右键菜单里
+                                           （上移 / 下移）。 */
+                                        <Flex direction="column" gap="1" ref={userListRef}>
+                                            {resolved.user.map((preset, index) => (
+                                                <Fragment key={preset.id}>
+                                                    {presetDrag?.insertionIndex === index ? (
+                                                        <Box
+                                                            aria-hidden
+                                                            className="rounded-full bg-qt-accent"
+                                                            style={{ height: 2 }}
+                                                        />
+                                                    ) : null}
+                                                    <Box
+                                                        data-preset-row={preset.id}
+                                                        style={{
+                                                            opacity:
+                                                                presetDrag?.id === preset.id
+                                                                    ? 0.4
+                                                                    : undefined,
+                                                        }}
+                                                    >
+                                                        <PresetRow
+                                                            preset={preset}
+                                                            selected={draft?.id === preset.id}
+                                                            active={
+                                                                session.activeVibratoPresetId ===
+                                                                preset.id
+                                                            }
+                                                            enabled={
+                                                                !session.disabledVibratoPresetIds.includes(
+                                                                    preset.id,
+                                                                )
+                                                            }
+                                                            reorderable
+                                                            onSelect={() =>
+                                                                handlePresetRowClick(preset)
+                                                            }
+                                                            onActivate={() =>
+                                                                activatePreset(preset)
+                                                            }
+                                                            onToggleEnabled={() =>
+                                                                togglePresetEnabled(preset)
+                                                            }
+                                                            onContextMenu={(x, y) =>
+                                                                setPresetMenu({ x, y, preset })
+                                                            }
+                                                            onDragPointerDown={(event) =>
+                                                                beginPresetDrag(
+                                                                    preset,
+                                                                    index,
+                                                                    event,
+                                                                )
+                                                            }
+                                                        />
+                                                    </Box>
+                                                </Fragment>
+                                            ))}
+                                            {presetDrag &&
+                                            presetDrag.insertionIndex >= resolved.user.length ? (
+                                                <Box
+                                                    aria-hidden
+                                                    className="rounded-full bg-qt-accent"
+                                                    style={{ height: 2 }}
                                                 />
-                                                <AppButton
-                                                    size="sm"
-                                                    emphasis="soft"
-                                                    disabled={index === 0}
-                                                    aria-label={t("vibrato_manager_move_up")}
-                                                    onClick={() => movePreset(preset, -1)}
-                                                >
-                                                    ▲
-                                                </AppButton>
-                                                <AppButton
-                                                    size="sm"
-                                                    emphasis="soft"
-                                                    disabled={index === resolved.user.length - 1}
-                                                    aria-label={t("vibrato_manager_move_down")}
-                                                    onClick={() => movePreset(preset, 1)}
-                                                >
-                                                    ▼
-                                                </AppButton>
-                                            </Flex>
-                                        ))
+                                            ) : null}
+                                        </Flex>
                                     )}
                                 </Flex>
                             </ScrollArea>
@@ -1345,14 +1509,19 @@ interface PresetRowProps {
     active: boolean;
     /** 是否启用（停用的预设不出现在工具栏列表里，循环切换也会跳过）。 */
     enabled: boolean;
+    /** 可拖拽排序（用户预设；系统预设顺序固定）。 */
+    reorderable?: boolean;
     onSelect: () => void;
     onActivate: () => void;
     onToggleEnabled: () => void;
     onContextMenu: (x: number, y: number) => void;
+    /** 行上按下指针（拖拽排序的起点）。 */
+    onDragPointerDown?: (event: React.PointerEvent<HTMLDivElement>) => void;
 }
 
 /**
- * 列表行：单击选中（编辑它），双击设为当前使用，右侧按钮启用 / 停用。
+ * 列表行：单击选中（编辑它），双击设为当前使用，右侧按钮启用 / 停用；
+ * 用户预设还可以按住行上下拖拽排序。
  *
  * 【为什么分开】"编辑某个预设"与"现在就用某个预设"是两件事：用户可能正在调
  * 一个还没调好的预设，却仍然希望拖拽用着上一个。合起来会让编辑动作顺带改掉
@@ -1363,10 +1532,12 @@ function PresetRow({
     selected,
     active,
     enabled,
+    reorderable = false,
     onSelect,
     onActivate,
     onToggleEnabled,
     onContextMenu,
+    onDragPointerDown,
 }: PresetRowProps) {
     const { t } = useI18n();
     const description = vibratoPresetDescription(preset, t);
@@ -1381,10 +1552,13 @@ function PresetRow({
                     role="option"
                     onClick={onSelect}
                     onDoubleClick={onActivate}
+                    onPointerDown={onDragPointerDown}
                     onContextMenu={(event) => {
                         event.preventDefault();
                         onContextMenu(event.clientX, event.clientY);
                     }}
+                    // 可拖拽的行给一个"抓得住"的光标；不可拖的（系统预设）保持默认。
+                    className={reorderable ? "cursor-grab" : undefined}
                     // 项目自定义气泡（不是浏览器原生 title）：样式与全应用一致。
                     tooltip={enabled ? summary : `${summary} · ${t("vibrato_manager_disabled")}`}
                 >
