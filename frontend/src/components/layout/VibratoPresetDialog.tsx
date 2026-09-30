@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { PlayIcon, StopIcon } from "@radix-ui/react-icons";
+import { PlayIcon, ShuffleIcon, StopIcon } from "@radix-ui/react-icons";
 import { Box, Flex, ScrollArea, TextField } from "@radix-ui/themes";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -41,6 +41,7 @@ import {
     vibratoPresetFileName,
 } from "../../features/vibrato/vibratoPresetFile";
 import { shapeUsesSkew } from "../../features/vibrato/vibratoCycle";
+import { randomVibratoSeed } from "../../features/vibrato/vibratoSeed";
 import { depthStepUnitFor } from "../../features/vibrato/vibratoDepth";
 import { estimateCycles } from "../../features/vibrato/vibratoCurve";
 import { exportVibratoPresetsJson } from "../../services/api/jsonExport";
@@ -736,6 +737,16 @@ export function VibratoPresetDialog({
                                                             <AppSliderReadout>
                                                                 {`${formatNumber(draft.irregularity)}%`}
                                                             </AppSliderReadout>
+                                                            <AppIconButton
+                                                                icon={<ShuffleIcon />}
+                                                                tooltip={t("vibrato_seed_roll")}
+                                                                disabled={isBuiltin}
+                                                                onClick={() =>
+                                                                    patch({
+                                                                        seed: randomVibratoSeed(),
+                                                                    })
+                                                                }
+                                                            />
                                                         </Flex>
                                                     </AppField>
                                                 </AppFormSection>

@@ -1878,6 +1878,7 @@ export const zhTW = {
     vibrato_depth_ramp_end: "終點倍率",
     vibrato_align_cycles: "收尾對齊整數週期",
     vibrato_irregularity: "不規則度",
+    vibrato_seed_roll: "換一種抖動圖案",
     vibrato_bias: "基線偏移",
     vibrato_baseline: "圍繞什麼擺動",
     vibrato_baseline_line: "起點 → 終點",

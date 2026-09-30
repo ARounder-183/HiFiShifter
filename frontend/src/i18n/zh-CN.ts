@@ -1876,6 +1876,7 @@ export const zhCN = {
     vibrato_depth_ramp_end: "终点倍率",
     vibrato_align_cycles: "收尾对齐整数周期",
     vibrato_irregularity: "不规则度",
+    vibrato_seed_roll: "换一种抖动图案",
     vibrato_bias: "基线偏移",
     vibrato_baseline: "围绕什么摆动",
     vibrato_baseline_line: "起点 → 终点",

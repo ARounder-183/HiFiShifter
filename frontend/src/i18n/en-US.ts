@@ -1932,6 +1932,7 @@ export const enUS = {
     vibrato_depth_ramp_end: "At end",
     vibrato_align_cycles: "Land on a whole cycle",
     vibrato_irregularity: "Irregularity",
+    vibrato_seed_roll: "Roll a new wobble pattern",
     vibrato_bias: "Centre offset",
     vibrato_baseline: "Oscillate around",
     vibrato_baseline_line: "Start → End",

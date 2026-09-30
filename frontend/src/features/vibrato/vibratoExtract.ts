@@ -18,6 +18,7 @@ import { smoothCurveGaussian } from "../../components/layout/pianoRoll/paramSmoo
 import { CYCLE_TABLE_DEFAULT_LEN } from "./vibratoCycle";
 import { depthFamilyOf, fallbackRangeFor, PITCH_PARAM_ID } from "./vibratoDepth";
 import { createVibratoPresetId } from "./vibratoPresets";
+import { vibratoSeedForPreset } from "./vibratoSeed";
 import type { VibratoParamRange } from "./vibratoDepth";
 import type { VibratoPreset, WaveShape } from "./vibratoTypes";
 
@@ -412,8 +413,9 @@ export function extractVibratoPreset(input: VibratoExtractInput): VibratoExtract
     );
     const edges = envelopeEdgesMs(envelope, framePeriodMs);
 
+    const presetId = createVibratoPresetId();
     const preset: VibratoPreset = {
-        id: createVibratoPresetId(),
+        id: presetId,
         name: "",
         builtin: false,
         cycle: { kind: "table", table: normalized },
@@ -432,6 +434,7 @@ export function extractVibratoPreset(input: VibratoExtractInput): VibratoExtract
         depthRamp: { start: 1, end: 1 },
         alignCycles: false,
         irregularity,
+        seed: vibratoSeedForPreset({ id: presetId }),
         biasCents: 0,
         // 提取出来的是"一段曲线上的颤音"，套回曲线时自然应当叠在已有曲线上。
         baseline: "existing",

@@ -1944,6 +1944,7 @@ export const jaJP = {
     vibrato_depth_ramp_end: "終了時の倍率",
     vibrato_align_cycles: "整数周期で終える",
     vibrato_irregularity: "不規則さ",
+    vibrato_seed_roll: "ゆらぎパターンを引き直す",
     vibrato_bias: "中心のずれ",
     vibrato_baseline: "振動の基準",
     vibrato_baseline_line: "開始 → 終了",

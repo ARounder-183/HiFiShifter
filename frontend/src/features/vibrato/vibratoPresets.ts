@@ -7,6 +7,7 @@
  */
 
 import { CYCLE_TABLE_DEFAULT_LEN, normalizeCycleTable, wrap01 } from "./vibratoCycle";
+import { vibratoSeedForPreset } from "./vibratoSeed";
 import type {
     BaselineMode,
     CycleSource,
@@ -60,6 +61,7 @@ export const VIBRATO_LIMITS = {
     releaseMs: { min: 0, max: 10000 },
     depthRamp: { min: 0, max: 2 },
     irregularity: { min: 0, max: 100 },
+    seed: { min: 0, max: 99999 },
     biasCents: { min: -200, max: 200 },
     blend: { min: 0, max: 100 },
 } as const;
@@ -83,6 +85,7 @@ export const DEFAULT_VIBRATO_PRESET: VibratoPreset = {
     depthRamp: { start: 1, end: 1 },
     alignCycles: false,
     irregularity: 0,
+    seed: 0,
     biasCents: 0,
     baseline: "line",
     blend: 100,
@@ -210,6 +213,13 @@ export function sanitizeVibratoPreset(input: VibratoPresetInput | null | undefin
             VIBRATO_LIMITS.irregularity.min,
             VIBRATO_LIMITS.irregularity.max,
             DEFAULT_VIBRATO_PRESET.irregularity,
+        ),
+        // 旧数据没有 seed：回落到按 id 派生，与移除字段前的图案一致。
+        seed: clampNumber(
+            raw.seed,
+            VIBRATO_LIMITS.seed.min,
+            VIBRATO_LIMITS.seed.max,
+            vibratoSeedForPreset({ id }),
         ),
         biasCents: clampNumber(
             raw.biasCents,
