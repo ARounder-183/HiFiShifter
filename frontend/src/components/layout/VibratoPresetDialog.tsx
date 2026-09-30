@@ -14,6 +14,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import { PlayIcon, StopIcon } from "@radix-ui/react-icons";
 import { Box, Flex, ScrollArea, TextField } from "@radix-ui/themes";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -36,6 +37,7 @@ import { resolveVibratoPresets } from "../../features/vibrato/vibratoPresetList"
 import { shapeUsesSkew } from "../../features/vibrato/vibratoCycle";
 import { depthStepUnitFor } from "../../features/vibrato/vibratoDepth";
 import { estimateCycles } from "../../features/vibrato/vibratoCurve";
+import { buildAuditionCurve, vibratoAudition } from "../../features/vibrato/vibratoAudition";
 import type {
     BaselineMode,
     EnvelopeCurve,
@@ -45,6 +47,7 @@ import type {
 } from "../../features/vibrato/vibratoTypes";
 import {
     AppButton,
+    AppIconButton,
     AppConfirmDialog,
     AppDialog,
     AppField,
@@ -120,6 +123,8 @@ export function VibratoPresetDialog({
      */
     const [draft, setDraft] = useState<VibratoPreset | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<VibratoPreset | null>(null);
+    /** 试听是否在响（驱动播放 / 停止按钮的图标与文案）。 */
+    const [auditionPlaying, setAuditionPlaying] = useState(false);
 
     // 打开时播种：优先用活动预设，找不到就回落到列表首项。
     useEffect(() => {
@@ -135,6 +140,34 @@ export function VibratoPresetDialog({
 
     const isBuiltin = Boolean(draft?.builtin);
     const previewSamples = useMemo(() => (draft ? buildVibratoPreview(draft) : null), [draft]);
+
+    // 卸载兜底：整个组件被卸载（而不只是关闭）时也要停 —— 否则试听会在
+    // 管理器消失之后继续响。这里不含 setState；关闭时的按钮状态复位在
+    // `handleOpenChange`（事件处理器）里做，不违反 effect 的规则。
+    useEffect(() => () => vibratoAudition.stop(), []);
+
+    /** 关闭对话框：先停试听、复位按钮，再向上传播。 */
+    function handleOpenChange(next: boolean) {
+        if (!next) {
+            vibratoAudition.stop();
+            setAuditionPlaying(false);
+        }
+        onOpenChange(next);
+    }
+
+    /** 播放 / 停止当前草稿的试听。自然结束后引擎回调把按钮切回「播放」。 */
+    function toggleAudition() {
+        if (auditionPlaying || !previewSamples) {
+            vibratoAudition.stop();
+            setAuditionPlaying(false);
+            return;
+        }
+        // 不变量「听到的 = 看到的」：直接吃预览的同一份数据，不重算。
+        const started = vibratoAudition.play(buildAuditionCurve(previewSamples), () =>
+            setAuditionPlaying(false),
+        );
+        setAuditionPlaying(started);
+    }
 
     /** 草稿的局部更新（不落盘）。 */
     function patch(changes: Partial<VibratoPreset>) {
@@ -209,7 +242,7 @@ export function VibratoPresetDialog({
         <>
             <AppDialog
                 open={open}
-                onOpenChange={onOpenChange}
+                onOpenChange={handleOpenChange}
                 title={t("vibrato_manager_title")}
                 size="xl"
                 actions={[
@@ -256,16 +289,37 @@ export function VibratoPresetDialog({
                                     samples={previewSamples}
                                     ariaLabel={t("vibrato_preview")}
                                 />
-                                <Flex justify="between" mt="1">
-                                    <span className="hs-type-caption">
-                                        {`±${formatNumber(previewSamples.peakCents)} ${t("vibrato_unit_cents")}`}
-                                    </span>
-                                    <span className="hs-type-caption">
-                                        {t("vibrato_cycles_estimate").replace(
-                                            "{count}",
-                                            formatNumber(cycleEstimate),
-                                        )}
-                                    </span>
+                                <Flex justify="between" align="center" mt="1" gap="2">
+                                    <Flex gap="2" align="center" style={{ minWidth: 0 }}>
+                                        <span className="hs-type-caption">
+                                            {`±${formatNumber(previewSamples.peakCents)} ${t("vibrato_unit_cents")}`}
+                                        </span>
+                                        <span className="hs-type-caption">
+                                            {t("vibrato_cycles_estimate").replace(
+                                                "{count}",
+                                                formatNumber(cycleEstimate),
+                                            )}
+                                        </span>
+                                    </Flex>
+                                    {/* 试听：合成音色（钢琴卷帘琴键同款），不跑声码器。
+                                        系统预设也能试听 —— 试听是只读操作。 */}
+                                    <AppIconButton
+                                        tooltip={
+                                            auditionPlaying
+                                                ? t("vibrato_audition_stop")
+                                                : t("vibrato_audition_play")
+                                        }
+                                        size="sm"
+                                        aria-pressed={auditionPlaying}
+                                        onClick={toggleAudition}
+                                        icon={
+                                            auditionPlaying ? (
+                                                <StopIcon width="15" height="15" />
+                                            ) : (
+                                                <PlayIcon width="15" height="15" />
+                                            )
+                                        }
+                                    />
                                 </Flex>
                             </Box>
                             {isBuiltin ? (

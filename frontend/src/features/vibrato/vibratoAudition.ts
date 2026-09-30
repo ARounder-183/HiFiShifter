@@ -77,6 +77,8 @@ export class VibratoAuditionPlayer {
     private ctx: AudioContext | null = null;
     private compressor: DynamicsCompressorNode | null = null;
     private masterGain: GainNode | null = null;
+    /** 最后一次 `play` 登记的结束回调（全部声音结束后触发一次）。 */
+    private onEndedCallback: (() => void) | null = null;
     /** 所有仍在发声的源（正常情况至多一个；登记表用于兜底清理孤儿）。 */
     private liveVoices = new Set<{
         osc: OscillatorNode;
@@ -115,10 +117,13 @@ export class VibratoAuditionPlayer {
     /**
      * 播放一段试听曲线；再次调用会先停掉上一路（约 0.1s 交叉渐出）。
      *
+     * @param onEnded 最后一路声音结束（自然结束或被 `stop()` 打断）后的回调。
+     *   只在**再无任何在响的声音**时触发 —— 供 UI 把按钮从「停止」切回「播放」，
+     *   与 `audioPreview.play` 的 `onEnd` 同构。失败时不回调。
      * @returns 是否真的开始播放。环境不支持 `AudioContext` 时为 `false`
      *   （静默退出 —— 试听不能因为环境不支持而报错）。
      */
-    play(curve: VibratoAuditionCurve): boolean {
+    play(curve: VibratoAuditionCurve, onEnded?: () => void): boolean {
         // 不变量 3：失败收敛。取不到 AudioContext 就什么都不做。
         const ctx = this.ensureContext();
         if (!ctx || !this.compressor) return false;
@@ -169,6 +174,7 @@ export class VibratoAuditionPlayer {
 
         const voice = { osc, filter, gain };
         this.liveVoices.add(voice);
+        this.onEndedCallback = onEnded ?? null;
         // 不变量 2：离开登记表并拆链。这里只清理自己的 voice —— 新会话有
         // 自己的 voice，互不触碰。
         osc.onended = () => {
@@ -176,6 +182,9 @@ export class VibratoAuditionPlayer {
             gain.disconnect();
             filter.disconnect();
             osc.disconnect();
+            // 全部结束才通知：上一路被抢占时的 onended 不得把新一路的
+            // 「正在播放」状态误清掉。
+            if (this.liveVoices.size === 0) this.onEndedCallback?.();
         };
         return true;
     }

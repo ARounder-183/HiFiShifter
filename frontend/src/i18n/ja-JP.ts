@@ -1956,6 +1956,8 @@ export const jaJP = {
     vibrato_cycles_estimate: "約 {count} 周期",
 
     vibrato_manager_title: "ビブラートプリセット",
+    vibrato_audition_play: "試聴",
+    vibrato_audition_stop: "試聴を停止",
     menu_vibrato_presets: "ビブラートプリセット管理...",
     vibrato_manager_new: "新規",
     vibrato_manager_duplicate: "マイプリセットとして複製",

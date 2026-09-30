@@ -1890,6 +1890,8 @@ export const zhTW = {
     vibrato_cycles_estimate: "約 {count} 個週期",
 
     vibrato_manager_title: "顫音預設",
+    vibrato_audition_play: "試聽",
+    vibrato_audition_stop: "停止試聽",
     menu_vibrato_presets: "顫音預設管理...",
     vibrato_manager_new: "新增",
     vibrato_manager_duplicate: "複製為自訂",

@@ -1888,6 +1888,8 @@ export const zhCN = {
     vibrato_cycles_estimate: "约 {count} 个周期",
 
     vibrato_manager_title: "颤音预设",
+    vibrato_audition_play: "试听",
+    vibrato_audition_stop: "停止试听",
     menu_vibrato_presets: "颤音预设管理...",
     vibrato_manager_new: "新建",
     vibrato_manager_duplicate: "复制为自定义",

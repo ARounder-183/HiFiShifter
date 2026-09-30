@@ -1929,6 +1929,8 @@ export const koKR = {
     vibrato_cycles_estimate: "약 {count} 주기",
 
     vibrato_manager_title: "비브라토 프리셋",
+    vibrato_audition_play: "들어보기",
+    vibrato_audition_stop: "들어보기 중지",
     menu_vibrato_presets: "비브라토 프리셋 관리...",
     vibrato_manager_new: "새로 만들기",
     vibrato_manager_duplicate: "내 것으로 복제",

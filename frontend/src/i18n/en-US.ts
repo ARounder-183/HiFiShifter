@@ -1944,6 +1944,8 @@ export const enUS = {
     vibrato_cycles_estimate: "About {count} cycles",
 
     vibrato_manager_title: "Vibrato Presets",
+    vibrato_audition_play: "Audition",
+    vibrato_audition_stop: "Stop audition",
     menu_vibrato_presets: "Vibrato Preset Manager...",
     vibrato_manager_new: "New",
     vibrato_manager_duplicate: "Duplicate as mine",
