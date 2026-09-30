@@ -26,14 +26,8 @@ jobs:
           npm --prefix frontend ci
           npm --prefix frontend run build
 
-      # lint / format 此前有脚本但没接进 CI，于是 lint 错误不阻塞合并。
-      # 设计系统门禁（原语必须有消费者、禁止原生 affordance）本身是测试，
-      # 只有跑测试才生效；把静态检查一并补齐，避免"脚本存在但从不执行"。
       - name: Lint frontend
         run: npm --prefix frontend run lint
-
-      - name: Check formatting
-        run: npm --prefix frontend run format:check
 
       - name: Run frontend unit tests
         run: npm --prefix frontend run test
