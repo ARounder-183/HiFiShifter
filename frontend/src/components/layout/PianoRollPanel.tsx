@@ -8449,8 +8449,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             );
                                         })()}
                                     {/* 颤音拖拽 HUD：预设名 + 实时深度 / 速率。
-                                        没有它，切换预设与滚轮调参都是"盲操作"。 */}
-                                    {vibratoDragHud &&
+                                        没有它，切换预设与滚轮调参都是"盲操作"。
+                                        与曲线值浮窗共用「弹出展示参数」开关 —— 两个
+                                        都是"指针旁的实时读数"，各自一个开关只会让人
+                                        以为漏了一个。 */}
+                                    {s.showParamValuePopup &&
+                                        vibratoDragHud &&
                                         (() => {
                                             const rect = canvasRef.current?.getBoundingClientRect();
                                             if (!rect) return null;
@@ -8461,11 +8465,13 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             const depthUnitKey = depthUnitLabelKey(editParam);
                                             return (
                                                 <div
-                                                    className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-qt-xs leading-tight text-qt-text"
+                                                    className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-qt-xs leading-none text-qt-text"
                                                     style={{
                                                         left: vibratoDragHud.clientX - rect.left,
                                                         top: vibratoDragHud.clientY - rect.top,
-                                                        transform: "translate(12px, -100%)",
+                                                        // 与曲线值浮窗同一套定位：贴在指针上方，
+                                                        // 只是往右让开一点避免压住笔尖。
+                                                        transform: "translate(8px, -100%)",
                                                         whiteSpace: "nowrap",
                                                     }}
                                                 >
@@ -8479,9 +8485,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                     </div>
                                                     <div className="text-qt-text-muted">
                                                         {`${formatNumber(depthForParam(vibratoDragHud.depthCents, editParam, currentParamRange))}${depthUnitKey ? ` ${t(depthUnitKey)}` : ""} · ${formatNumber(vibratoDragHud.rateHz)} ${t("vibrato_unit_hz")}`}
-                                                    </div>
-                                                    <div className="text-qt-text-muted">
-                                                        {t("vibrato_hud_hint")}
                                                     </div>
                                                 </div>
                                             );

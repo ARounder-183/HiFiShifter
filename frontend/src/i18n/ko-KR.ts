@@ -1929,6 +1929,7 @@ export const koKR = {
     vibrato_cycles_estimate: "약 {count} 주기",
 
     vibrato_manager_title: "비브라토 프리셋",
+    menu_vibrato_presets: "비브라토 프리셋 관리...",
     vibrato_manager_new: "새로 만들기",
     vibrato_manager_duplicate: "내 것으로 복제",
     vibrato_manager_delete: "삭제",
@@ -1940,16 +1941,15 @@ export const koKR = {
     vibrato_manager_readonly: "내장 프리셋은 읽기 전용입니다. 복제한 뒤 편집하세요.",
     vibrato_manager_move_up: "위로",
     vibrato_manager_move_down: "아래로",
-    vibrato_manager_open: "프리셋 관리…",
+    vibrato_manager_open: "프리셋 관리...",
 
     vibrato_menu_presets: "비브라토 프리셋",
-    vibrato_extract_action: "선택 범위에서 프리셋 만들기…",
+    vibrato_extract_action: "선택 범위에서 프리셋 만들기...",
     vibrato_extract_title: "비브라토 프리셋 만들기",
     vibrato_extract_failed: "선택 범위에서 뚜렷한 비브라토를 찾지 못했습니다.",
     vibrato_from_selection: "선택 범위에서",
 
     vibrato_toolbar_label: "비브라토 프리셋",
-    vibrato_hud_hint: "사이드 버튼 또는 , 와 . 로 프리셋 전환",
     vibrato_adjusted: "편집됨",
 
     vibrato_unit_percent: "%",

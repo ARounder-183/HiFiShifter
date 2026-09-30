@@ -1042,7 +1042,7 @@ export const zhCN = {
     kb_modifier_vibrato_frequency_adjust: "颤音频率调整（直线/颤音拖拽时滚轮）",
     kb_modifier_piano_keys_scroll_v: "琴键区竖直滚动（滚轮）",
     kb_modifier_piano_keys_zoom_v: "琴键区竖直缩放（滚轮）",
-    kb_press_modifier: "请按修饰键\u2026",
+    kb_press_modifier: "请按修饰键...",
     menu_keybindings: "快捷键设置...",
     kb_group_quick_search: "快速搜索",
     kb_quick_search_open: "打开快速搜索",
@@ -1888,6 +1888,7 @@ export const zhCN = {
     vibrato_cycles_estimate: "约 {count} 个周期",
 
     vibrato_manager_title: "颤音预设",
+    menu_vibrato_presets: "颤音预设管理...",
     vibrato_manager_new: "新建",
     vibrato_manager_duplicate: "复制为自定义",
     vibrato_manager_delete: "删除",
@@ -1899,16 +1900,15 @@ export const zhCN = {
     vibrato_manager_readonly: "系统预设是只读的，复制为自定义后才能修改。",
     vibrato_manager_move_up: "上移",
     vibrato_manager_move_down: "下移",
-    vibrato_manager_open: "管理预设…",
+    vibrato_manager_open: "管理预设...",
 
     vibrato_menu_presets: "颤音预设",
-    vibrato_extract_action: "从选区提取预设…",
+    vibrato_extract_action: "从选区提取预设...",
     vibrato_extract_title: "提取颤音预设",
     vibrato_extract_failed: "选区里没有找到明显的颤音。",
     vibrato_from_selection: "来自选区",
 
     vibrato_toolbar_label: "颤音预设",
-    vibrato_hud_hint: "鼠标侧键或 , 与 . 切换预设",
     vibrato_adjusted: "已调整",
 
     vibrato_unit_percent: "%",

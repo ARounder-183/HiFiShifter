@@ -1257,9 +1257,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {tf("menu_render_cache_manager")}
                     </DropdownMenu.Item>
 
-                    {/* Vibrato preset library */}
+                    {/* 颤音预设库。与上下文菜单用**不同**的文案：选项菜单这一层
+                        没有"颤音"语境，只写"管理预设"没人知道管的是哪一种。 */}
                     <DropdownMenu.Item onSelect={() => setVibratoPresetDialogOpen(true)}>
-                        {tf("vibrato_manager_open")}
+                        {tf("menu_vibrato_presets")}
                     </DropdownMenu.Item>
 
                     {/* Import channel policy（假立体声 → 单声道） */}

@@ -1210,7 +1210,7 @@ export const enUS = {
     kb_mode_select_tool: "Switch to Select Tool",
     kb_mode_draw_tool: "Switch to Draw Tool",
     kb_mode_vibrato_tool: "Switch to Line/Vibrato Tool",
-    kb_press_modifier: "Press modifier\u2026",
+    kb_press_modifier: "Press modifier...",
     menu_keybindings: "Keyboard Shortcuts...",
     kb_group_quick_search: "Quick Search",
     kb_quick_search_open: "Open Quick Search",
@@ -1944,6 +1944,7 @@ export const enUS = {
     vibrato_cycles_estimate: "About {count} cycles",
 
     vibrato_manager_title: "Vibrato Presets",
+    menu_vibrato_presets: "Vibrato Preset Manager...",
     vibrato_manager_new: "New",
     vibrato_manager_duplicate: "Duplicate as mine",
     vibrato_manager_delete: "Delete",
@@ -1964,7 +1965,6 @@ export const enUS = {
     vibrato_from_selection: "From selection",
 
     vibrato_toolbar_label: "Vibrato preset",
-    vibrato_hud_hint: "Side buttons or , and . switch presets",
     vibrato_adjusted: "edited",
 
     vibrato_unit_percent: "%",

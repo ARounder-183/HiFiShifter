@@ -1956,6 +1956,7 @@ export const jaJP = {
     vibrato_cycles_estimate: "約 {count} 周期",
 
     vibrato_manager_title: "ビブラートプリセット",
+    menu_vibrato_presets: "ビブラートプリセット管理...",
     vibrato_manager_new: "新規",
     vibrato_manager_duplicate: "マイプリセットとして複製",
     vibrato_manager_delete: "削除",
@@ -1968,16 +1969,15 @@ export const jaJP = {
     vibrato_manager_readonly: "内蔵プリセットは読み取り専用です。複製してから編集してください。",
     vibrato_manager_move_up: "上へ",
     vibrato_manager_move_down: "下へ",
-    vibrato_manager_open: "プリセットを管理…",
+    vibrato_manager_open: "プリセットを管理...",
 
     vibrato_menu_presets: "ビブラートプリセット",
-    vibrato_extract_action: "選択範囲からプリセットを作成…",
+    vibrato_extract_action: "選択範囲からプリセットを作成...",
     vibrato_extract_title: "ビブラートプリセットを作成",
     vibrato_extract_failed: "選択範囲に明確なビブラートが見つかりません。",
     vibrato_from_selection: "選択範囲から",
 
     vibrato_toolbar_label: "ビブラートプリセット",
-    vibrato_hud_hint: "サイドボタンまたは , と . でプリセットを切り替え",
     vibrato_adjusted: "編集中",
 
     vibrato_unit_percent: "%",
