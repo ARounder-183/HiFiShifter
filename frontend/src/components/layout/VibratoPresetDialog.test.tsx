@@ -795,6 +795,11 @@ test("右键菜单重命名：输入框覆盖在名字上，Enter 提交", async
     const input = document.querySelector<HTMLInputElement>('input[aria-label="Rename"]');
     expect(input, "内联输入框应已渲染").toBeTruthy();
     expect(input!.value).toBe("Old Name");
+    /*
+     * 宽度契约：`<input>` 默认 `size=20`（固有宽度约 170px），比列表列还宽，会把整行
+     * 撑出去、连累整个列表横向位移。压到 1 之后它只按 flex 填满行内剩余空间。
+     */
+    expect(input!.getAttribute("size")).toBe("1");
 
     // 受控输入：用原生 setter 写值再派发 input 事件，React 才收得到。
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;

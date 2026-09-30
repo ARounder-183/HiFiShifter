@@ -1866,12 +1866,21 @@ function PresetRow({
                     // 项目自定义气泡（不是浏览器原生 title）：样式与全应用一致。
                     tooltip={enabled ? summary : `${summary} · ${t("vibrato_manager_disabled")}`}
                 >
-                    <Flex align="center" gap="2" style={{ minWidth: 0 }}>
+                    {/* `flex: 1` 让这一行铺满列表行：重命名时输入框才有可用的宽度去
+                        撑开，而不是反过来把行撑宽（见输入框上的 `size` 说明）。 */}
+                    <Flex align="center" gap="2" style={{ minWidth: 0, flex: 1 }}>
                         {active ? <span aria-hidden="true">●</span> : null}
                         <VibratoPresetGlyph preset={preset} width={40} height={14} />
                         {renaming ? (
                             <input
                                 ref={renameInputRef}
+                                /*
+                                 * `size={1}` 是关键：`<input>` 默认 `size=20`，其固有宽度
+                                 * 约 170px —— 比列表列（208px）减去字形后还宽，会把整行
+                                 * 撑出去、连累整个列表横向位移。压到 1 之后它不再贡献
+                                 * 固有宽度，只按 `flex-1` 填满行内剩余空间。
+                                 */
+                                size={1}
                                 className="hs-type-label min-w-0 flex-1 rounded border border-qt-border bg-qt-window px-1 py-0 text-qt-text outline-none focus:border-qt-highlight"
                                 value={renameValue ?? ""}
                                 aria-label={t("vibrato_manager_rename")}
