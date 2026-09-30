@@ -569,3 +569,72 @@ test("上下调整按钮已被移除（改为拖拽 + 右键菜单）", async ()
     expect(labels).not.toContain("Move up");
     expect(labels).not.toContain("Move down");
 });
+
+/*
+ * 边缘自动滚动：指针贴住列表下缘不动时，列表也要持续上卷。
+ *
+ * jsdom 没有排版，这里给滚动视口伪造一个 400px 高的矩形与可读写的 `scrollTop`，
+ * 再让 rAF 真跑几帧 —— 断言"拖到下缘之后 scrollTop 变大了"。
+ */
+test("拖到列表下缘会自动滚动", async () => {
+    const presets = Array.from({ length: 6 }, (_, index) =>
+        sanitizeVibratoPreset({ id: `custom_scroll_${index}`, name: `Scroll ${index}` }),
+    );
+    await mountDialog((store) => {
+        presets.forEach((preset) => store.dispatch(upsertVibratoPreset(preset)));
+        store.dispatch(setActiveVibratoPreset(presets[0].id));
+    });
+
+    const viewport = document.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]");
+    expect(viewport, "滚动视口应已渲染").toBeTruthy();
+    viewport!.getBoundingClientRect = () =>
+        ({
+            top: 100,
+            bottom: 500,
+            left: 0,
+            right: 200,
+            width: 200,
+            height: 400,
+            x: 0,
+            y: 100,
+            toJSON: () => ({}),
+        }) as DOMRect;
+    let scrollTop = 0;
+    Object.defineProperty(viewport!, "scrollTop", {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+            // 模拟"滚到底就停"：到顶格后不再变化，rAF 循环随之收敛（真实视口同理）。
+            scrollTop = Math.min(30, value);
+        },
+    });
+
+    const row = document.querySelector<HTMLElement>('[data-preset-row="custom_scroll_0"]');
+    expect(row, "可拖拽的用户预设行应已渲染").toBeTruthy();
+    const target = row!.querySelector('[role="option"]') as HTMLElement;
+
+    await act(async () => {
+        target.dispatchEvent(
+            new PointerEvent("pointerdown", { bubbles: true, button: 0, clientY: 110 }),
+        );
+    });
+    // 拖到视口下缘（500 - 24 = 476 以内）并停住。
+    await act(async () => {
+        window.dispatchEvent(new PointerEvent("pointermove", { clientY: 495 }));
+    });
+    // 让 rAF 真跑几帧：指针不动，滚动仍应推进。
+    await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+    });
+    expect(scrollTop, "贴住下缘应当持续向下滚动").toBeGreaterThan(0);
+
+    await act(async () => {
+        window.dispatchEvent(new PointerEvent("pointerup", { clientY: 495 }));
+    });
+    // 松手后不再滚动。
+    const afterDrop = scrollTop;
+    await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    expect(scrollTop).toBe(afterDrop);
+});

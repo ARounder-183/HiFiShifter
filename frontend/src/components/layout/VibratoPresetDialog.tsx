@@ -114,6 +114,7 @@ import { VibratoCycleEditor } from "./vibrato/VibratoCycleEditor";
 import { tableFromCycle } from "./vibrato/vibratoCycleEdit";
 import {
     REORDER_DRAG_THRESHOLD_PX,
+    reorderAutoScrollDelta,
     reorderInsertionIndex,
     reorderTargetIndex,
 } from "./dragReorder";
@@ -207,6 +208,8 @@ export function VibratoPresetDialog({
         fromIndex: number;
         insertionIndex: number;
     } | null>(null);
+    /** 最近一次拖拽指针 Y：自动滚动的 rAF 循环每帧读它（指针不动时也要继续滚）。 */
+    const presetDragPointerYRef = useRef<number | null>(null);
     /** 本次指针交互是否已经变成拖拽 —— 用于吞掉拖完那一下的 click。 */
     const suppressPresetClickRef = useRef(false);
     const userListRef = useRef<HTMLDivElement | null>(null);
@@ -244,9 +247,10 @@ export function VibratoPresetDialog({
             resolved.all.find((preset) => preset.id === session.activeVibratoPresetId) ??
             resolved.all[0];
         if (active) {
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时按当前活动预设播种局部草稿（既有模式）
+            // 对话框打开是一次离散动作：按当前活动预设播种局部草稿，并把预览纵轴
+            // 拟合一次（编辑期间保持不动）。
+            // eslint-disable-next-line react-hooks/set-state-in-effect -- 打开时按活动预设播种草稿（既有模式）
             setDraft(active);
-            // 纵轴在"打开"这一次离散动作里拟合一次，编辑期间保持不动。
             fitPreviewAxis(active);
         }
     }, [open, resolved.all, session.activeVibratoPresetId, fitPreviewAxis]);
@@ -545,6 +549,22 @@ export function VibratoPresetDialog({
         );
     }, []);
 
+    /** 按指针 Y 更新拖拽落点（自动滚动推进后也要重算，指示线才跟得上）。 */
+    const applyPresetDragAtPointer = useCallback(
+        (clientY: number) => {
+            const start = presetDragStartRef.current;
+            if (!start) return;
+            const next = {
+                id: start.id,
+                fromIndex: start.fromIndex,
+                insertionIndex: reorderInsertionIndex(userPresetRowCenters(), clientY),
+            };
+            presetDragRef.current = next;
+            setPresetDrag(next);
+        },
+        [userPresetRowCenters],
+    );
+
     /**
      * 行上按下指针：登记起点。
      *
@@ -574,6 +594,53 @@ export function VibratoPresetDialog({
     // 拖拽排序：指针越过阈值才进入拖拽状态，松手时落盘一次。
     useEffect(() => {
         if (!open) return;
+
+        /*
+         * 边缘自动滚动。
+         *
+         * 【为什么是 rAF 而不是"在 pointermove 里滚"】指针贴住边缘不动时也要持续滚
+         * —— pointermove 不会再触发，只有逐帧推进才能把列表卷上来。滚动之后行位置
+         * 变了，因此每帧重算落点，指示线跟着内容走。
+         *
+         * 【为什么滚不动就停】视口已到顶 / 到底时 `scrollTop` 不再变化，继续排帧只会
+         * 空转；停下后用户再动一下指针即可重新启动。
+         *
+         * 【为什么写在 effect 里而不是 `useCallback`】这个循环要自引用（每帧重新排
+         * 自己），而 hook 的 lint 不允许 useCallback 访问尚未声明的自身。普通函数声明
+         * 没有这个问题，副作用也只属于这个 effect。
+         */
+        let autoScrollFrame: number | null = null;
+        const stopAutoScroll = () => {
+            if (autoScrollFrame != null) {
+                cancelAnimationFrame(autoScrollFrame);
+                autoScrollFrame = null;
+            }
+            presetDragPointerYRef.current = null;
+        };
+        const tickAutoScroll = () => {
+            autoScrollFrame = null;
+            const pointerY = presetDragPointerYRef.current;
+            const viewport = userListRef.current?.closest<HTMLElement>(
+                "[data-radix-scroll-area-viewport]",
+            );
+            if (pointerY == null || !presetDragRef.current || !viewport) return;
+            const rect = viewport.getBoundingClientRect();
+            const delta = reorderAutoScrollDelta({
+                pointerY,
+                viewportTop: rect.top,
+                viewportBottom: rect.bottom,
+            });
+            if (delta === 0) return;
+            const before = viewport.scrollTop;
+            viewport.scrollTop = before + delta;
+            if (viewport.scrollTop === before) return;
+            applyPresetDragAtPointer(pointerY);
+            autoScrollFrame = requestAnimationFrame(tickAutoScroll);
+        };
+        const ensureAutoScroll = () => {
+            if (autoScrollFrame == null) autoScrollFrame = requestAnimationFrame(tickAutoScroll);
+        };
+
         const onMove = (event: PointerEvent) => {
             const start = presetDragStartRef.current;
             if (!start) return;
@@ -583,15 +650,11 @@ export function VibratoPresetDialog({
             ) {
                 return;
             }
-            const next = {
-                id: start.id,
-                fromIndex: start.fromIndex,
-                insertionIndex: reorderInsertionIndex(userPresetRowCenters(), event.clientY),
-            };
-            presetDragRef.current = next;
-            setPresetDrag(next);
+            applyPresetDragAtPointer(event.clientY);
             // 已经进入拖拽：把松手时那一下 click 吞掉，避免顺带选中 / 激活。
             suppressPresetClickRef.current = true;
+            presetDragPointerYRef.current = event.clientY;
+            ensureAutoScroll();
         };
         const onUp = () => {
             const start = presetDragStartRef.current;
@@ -599,6 +662,7 @@ export function VibratoPresetDialog({
             const drag = presetDragRef.current;
             presetDragRef.current = null;
             setPresetDrag(null);
+            stopAutoScroll();
             if (!start || !drag) return;
             const toIndex = reorderTargetIndex(drag.insertionIndex, drag.fromIndex);
             dispatch(reorderVibratoPreset({ id: drag.id, toIndex }));
@@ -611,8 +675,10 @@ export function VibratoPresetDialog({
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onUp);
             window.removeEventListener("pointercancel", onUp);
+            // 对话框关闭 / 组件卸载时别把 rAF 循环留着。
+            stopAutoScroll();
         };
-    }, [open, dispatch, userPresetRowCenters]);
+    }, [open, dispatch, applyPresetDragAtPointer]);
 
     /** 选中一条预设；刚拖完的那一下 click 不触发选中。 */
     function handlePresetRowClick(preset: VibratoPreset) {

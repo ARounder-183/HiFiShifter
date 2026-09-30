@@ -1,7 +1,10 @@
 import { describe, expect, test } from "vitest";
 
 import {
+    REORDER_AUTOSCROLL_EDGE_PX,
+    REORDER_AUTOSCROLL_MAX_STEP_PX,
     REORDER_DRAG_THRESHOLD_PX,
+    reorderAutoScrollDelta,
     reorderInsertionIndex,
     reorderTargetIndex,
 } from "./dragReorder";
@@ -70,5 +73,58 @@ describe("REORDER_DRAG_THRESHOLD_PX", () => {
     test("阈值小而可感：够区分点击与拖拽，又不会迟钝", () => {
         expect(REORDER_DRAG_THRESHOLD_PX).toBeGreaterThan(0);
         expect(REORDER_DRAG_THRESHOLD_PX).toBeLessThanOrEqual(8);
+    });
+});
+
+describe("reorderAutoScrollDelta", () => {
+    // 视口 100..500（高 400），边缘带 24px。
+    const viewport = { viewportTop: 100, viewportBottom: 500 };
+
+    test("中部不滚", () => {
+        expect(reorderAutoScrollDelta({ pointerY: 300, ...viewport })).toBe(0);
+        expect(reorderAutoScrollDelta({ pointerY: 130, ...viewport })).toBe(0);
+    });
+
+    test("靠近上缘向上滚，越深越快", () => {
+        const shallow = reorderAutoScrollDelta({ pointerY: 122, ...viewport });
+        const deep = reorderAutoScrollDelta({ pointerY: 101, ...viewport });
+        expect(shallow).toBeLessThan(0);
+        expect(deep).toBeLessThan(shallow);
+        // 压到边缘之上也仍有步长（不会退化成 0）。
+        expect(reorderAutoScrollDelta({ pointerY: 0, ...viewport })).toBeLessThan(0);
+    });
+
+    test("靠近下缘向下滚，越深越快", () => {
+        const shallow = reorderAutoScrollDelta({ pointerY: 478, ...viewport });
+        const deep = reorderAutoScrollDelta({ pointerY: 499, ...viewport });
+        expect(shallow).toBeGreaterThan(0);
+        expect(deep).toBeGreaterThan(shallow);
+        expect(reorderAutoScrollDelta({ pointerY: 9999, ...viewport })).toBeGreaterThan(0);
+    });
+
+    test("步长不超过上限", () => {
+        const edge = reorderAutoScrollDelta({ pointerY: 99, ...viewport, maxStepPx: 12 });
+        expect(Math.abs(edge)).toBeLessThanOrEqual(12);
+    });
+
+    test("视口过矮不滚（否则整块都算边缘，会一直滚）", () => {
+        expect(reorderAutoScrollDelta({ pointerY: 50, viewportTop: 40, viewportBottom: 80 })).toBe(
+            0,
+        );
+    });
+
+    test("退化输入（零高视口）返回 0，不产生 NaN", () => {
+        const delta = reorderAutoScrollDelta({ pointerY: 0, viewportTop: 0, viewportBottom: 0 });
+        expect(delta).toBe(0);
+        expect(Number.isFinite(delta)).toBe(true);
+    });
+});
+
+describe("自动滚动常量", () => {
+    test("边缘带与步长都在合理量级", () => {
+        expect(REORDER_AUTOSCROLL_EDGE_PX).toBeGreaterThan(0);
+        expect(REORDER_AUTOSCROLL_EDGE_PX).toBeLessThanOrEqual(48);
+        expect(REORDER_AUTOSCROLL_MAX_STEP_PX).toBeGreaterThan(0);
+        expect(REORDER_AUTOSCROLL_MAX_STEP_PX).toBeLessThanOrEqual(24);
     });
 });
