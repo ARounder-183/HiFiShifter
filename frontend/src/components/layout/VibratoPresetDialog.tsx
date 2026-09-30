@@ -48,6 +48,7 @@ import { exportVibratoPresetsJson } from "../../services/api/jsonExport";
 import { buildAuditionCurve, vibratoAudition } from "../../features/vibrato/vibratoAudition";
 import type {
     BaselineMode,
+    CycleSource,
     EnvelopeCurve,
     VibratoPreset,
     VibratoRateMode,
@@ -99,6 +100,8 @@ import {
     type PreviewGestureSnapshot,
     type PreviewZone,
 } from "./vibrato/vibratoPreviewGestures";
+import { VibratoCycleEditor } from "./vibrato/VibratoCycleEditor";
+import { tableFromCycle } from "./vibrato/vibratoCycleEdit";
 
 interface Props {
     open: boolean;
@@ -145,6 +148,13 @@ export function VibratoPresetDialog({
      * 草稿会随列表点选反复替换；用普通 state + 打开时的 effect 更直白。
      */
     const [draft, setDraft] = useState<VibratoPreset | null>(null);
+    /**
+     * 手绘周期编辑器的展开状态。
+     *
+     * `baseline` = 进入手绘前的周期来源，「复位」回到它（采样成表后停留在编辑器里）。
+     * 切换预设 / 改变形状时收起，避免"编辑器还开着、草稿却已经换人"的错位。
+     */
+    const [handDraw, setHandDraw] = useState<{ baseline: CycleSource } | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<VibratoPreset | null>(null);
     /** 试听是否在响（驱动播放 / 停止按钮的图标与文案）。 */
     const [auditionPlaying, setAuditionPlaying] = useState(false);
@@ -255,7 +265,17 @@ export function VibratoPresetDialog({
     }
 
     function selectPreset(preset: VibratoPreset) {
+        setHandDraw(null);
         setDraft(preset);
+    }
+
+    /** 进入手绘：把当前波形采样成表作为起点（改形比从零画顺手）。 */
+    function openHandDraw() {
+        if (!draft || isBuiltin) return;
+        const baseline = draft.cycle;
+        const table = baseline.kind === "table" ? [...baseline.table] : tableFromCycle(baseline);
+        setHandDraw({ baseline });
+        patch({ cycle: { kind: "table", table } });
     }
 
     /** 设为当前使用（拖拽 / 菜单都用它）。 */
@@ -629,35 +649,48 @@ export function VibratoPresetDialog({
                                                 ) : null}
                                                 <AppFormSection title={t("vibrato_section_wave")}>
                                                     <AppField label={t("vibrato_shape_label")}>
-                                                        <AppSelect
-                                                            value={
-                                                                draft.cycle.kind === "shape"
-                                                                    ? draft.cycle.shape
-                                                                    : "sine"
-                                                            }
-                                                            disabled={isBuiltin}
-                                                            onValueChange={(value) =>
-                                                                patch({
-                                                                    cycle: {
-                                                                        kind: "shape",
-                                                                        shape: value as WaveShape,
-                                                                        skew:
-                                                                            draft.cycle.kind ===
-                                                                            "shape"
-                                                                                ? draft.cycle.skew
-                                                                                : 0.5,
-                                                                    },
-                                                                })
-                                                            }
-                                                            options={WAVE_SHAPE_ORDER.map(
-                                                                (shape) => ({
-                                                                    value: shape,
-                                                                    label: t(
-                                                                        WAVE_SHAPE_KEYS[shape],
-                                                                    ),
-                                                                }),
-                                                            )}
-                                                        />
+                                                        <Flex align="center" gap="2" wrap="wrap">
+                                                            <AppSelect
+                                                                value={
+                                                                    draft.cycle.kind === "shape"
+                                                                        ? draft.cycle.shape
+                                                                        : "sine"
+                                                                }
+                                                                disabled={isBuiltin}
+                                                                onValueChange={(value) => {
+                                                                    // 换成参数形状即退出"手绘表"，避免编辑器与草稿错位。
+                                                                    setHandDraw(null);
+                                                                    patch({
+                                                                        cycle: {
+                                                                            kind: "shape",
+                                                                            shape: value as WaveShape,
+                                                                            skew:
+                                                                                draft.cycle.kind ===
+                                                                                "shape"
+                                                                                    ? draft.cycle
+                                                                                          .skew
+                                                                                    : 0.5,
+                                                                        },
+                                                                    });
+                                                                }}
+                                                                options={WAVE_SHAPE_ORDER.map(
+                                                                    (shape) => ({
+                                                                        value: shape,
+                                                                        label: t(
+                                                                            WAVE_SHAPE_KEYS[shape],
+                                                                        ),
+                                                                    }),
+                                                                )}
+                                                            />
+                                                            <AppButton
+                                                                size="sm"
+                                                                emphasis="soft"
+                                                                disabled={isBuiltin}
+                                                                onClick={openHandDraw}
+                                                            >
+                                                                {t("vibrato_handdraw_open")}
+                                                            </AppButton>
+                                                        </Flex>
                                                     </AppField>
                                                     <AppField label={t("vibrato_skew")}>
                                                         <Flex align="center" gap="2" wrap="wrap">
@@ -707,6 +740,33 @@ export function VibratoPresetDialog({
                                                             </AppSliderReadout>
                                                         </Flex>
                                                     </AppField>
+                                                    {/* 手绘周期编辑器：波形分区下方展开（只在草稿是 table 时）。 */}
+                                                    {handDraw && draft.cycle.kind === "table" ? (
+                                                        <VibratoCycleEditor
+                                                            table={draft.cycle.table}
+                                                            disabled={isBuiltin}
+                                                            ariaLabel={t("vibrato_handdraw_open")}
+                                                            smoothLabel={t(
+                                                                "vibrato_handdraw_smooth",
+                                                            )}
+                                                            resetLabel={t("vibrato_handdraw_reset")}
+                                                            onChange={(table) =>
+                                                                patch({
+                                                                    cycle: { kind: "table", table },
+                                                                })
+                                                            }
+                                                            onReset={() =>
+                                                                patch({
+                                                                    cycle: {
+                                                                        kind: "table",
+                                                                        table: tableFromCycle(
+                                                                            handDraw.baseline,
+                                                                        ),
+                                                                    },
+                                                                })
+                                                            }
+                                                        />
+                                                    ) : null}
                                                 </AppFormSection>
 
                                                 <AppFormSection title={t("vibrato_section_depth")}>

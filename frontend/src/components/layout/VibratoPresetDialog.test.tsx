@@ -262,3 +262,38 @@ test("系统预设：预览画布只读（不渲染交互层）", async () => {
     // 默认活动预设是系统预设「自然」。
     expect(document.querySelector('[data-testid="vibrato-preview-interactive"]')).toBeNull();
 });
+
+/*
+ * R6b：手绘周期编辑器的入口。
+ *
+ * 【契约】用户预设可以展开手绘编辑器（`table` 波形的一等入口）；系统预设只读，
+ * 入口按钮禁用。展开后写进草稿的是 `table` 波形 —— 预览 / 试听 / 应用全管线
+ * 无差别支持。
+ */
+test("用户预设：点「手绘…」展开周期编辑器", async () => {
+    const custom = sanitizeVibratoPreset({ id: "custom_draw", name: "Draw Me", depthCents: 40 });
+    await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(custom));
+        store.dispatch(setActiveVibratoPreset(custom.id));
+    });
+
+    expect(document.querySelector('[data-testid="vibrato-cycle-editor"]')).toBeNull();
+    const drawButton = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Draw...",
+    );
+    expect(drawButton, "手绘入口应已渲染").toBeTruthy();
+    await act(async () => {
+        drawButton!.click();
+    });
+    expect(document.querySelector('[data-testid="vibrato-cycle-editor"]')).toBeTruthy();
+});
+
+test("系统预设：手绘入口禁用", async () => {
+    await mountDialog();
+    const drawButton = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Draw...",
+    ) as HTMLButtonElement | undefined;
+    expect(drawButton, "手绘入口应已渲染").toBeTruthy();
+    expect(drawButton!.disabled).toBe(true);
+    expect(document.querySelector('[data-testid="vibrato-cycle-editor"]')).toBeNull();
+});
