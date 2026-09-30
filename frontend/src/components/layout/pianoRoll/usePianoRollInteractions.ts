@@ -158,6 +158,7 @@ import {
 } from "../../../features/vibrato/vibratoPresetList";
 import { builtinVibratoPresetId } from "../../../features/vibrato/systemPresets";
 import { vibratoSeedForPreset } from "../../../features/vibrato/vibratoSeed";
+import { nextVibratoHudAnchor, vibratoHudState, type VibratoHudAnchor } from "./vibratoHudState";
 import type { VibratoPreset } from "../../../features/vibrato/vibratoTypes";
 import {
     formatRightDragMorphPercent,
@@ -1345,20 +1346,42 @@ export function usePianoRollInteractions(args: {
         ],
     );
 
-    /** 把当前工作副本上报给面板（仅 HUD —— 切换的持久化走 dispatch）。 */
+    /**
+     * HUD 气泡的锚点（指针坐标）。
+     *
+     * 【为什么记下来】深度 / 速率也能由滚轮与方向键改，而**键盘事件没有指针坐标** ——
+     * 若上报必须带上坐标，键盘调参就只能等下一次指针移动才刷新读数，用户看到的是
+     * "气泡里的数字比曲线慢一拍"。这里存住最近一次指针位置，让所有调参路径都能
+     * 立即上报（见 `nextVibratoHudAnchor`）。
+     */
+    const vibratoHudAnchorRef = useRef<VibratoHudAnchor | null>(null);
+
+    /**
+     * 把当前工作副本上报给面板（仅 HUD —— 切换的持久化走 dispatch）。
+     *
+     * @param clientX 新的指针横坐标；省略则沿用上一次的位置（滚轮 / 方向键调参）。
+     * @param clientY 同上，纵坐标。
+     */
     const reportVibratoDragState = useCallback(
-        (clientX: number, clientY: number) => {
+        (clientX?: number, clientY?: number) => {
             const vib = vibratoStateRef.current;
             if (!vib || !onVibratoDragStateChange) return;
-            onVibratoDragStateChange({
-                presetId: vib.working.preset.id,
-                depthCents: vib.working.depthCents,
-                rateHz: vib.working.rateHz,
-                // HUD 的"已调整"是聚合标记：任一项被调过就点亮。
-                adjusted: vib.working.depthAdjusted || vib.working.rateAdjusted,
+            vibratoHudAnchorRef.current = nextVibratoHudAnchor(
+                vibratoHudAnchorRef.current,
                 clientX,
                 clientY,
-            });
+            );
+            const next = vibratoHudState(
+                {
+                    presetId: vib.working.preset.id,
+                    depthCents: vib.working.depthCents,
+                    rateHz: vib.working.rateHz,
+                    depthAdjusted: vib.working.depthAdjusted,
+                    rateAdjusted: vib.working.rateAdjusted,
+                },
+                vibratoHudAnchorRef.current,
+            );
+            if (next) onVibratoDragStateChange(next);
         },
         [onVibratoDragStateChange],
     );
@@ -1402,9 +1425,10 @@ export function usePianoRollInteractions(args: {
             };
 
             repaintVibratoDragPreview(input.shiftHeld);
-            if (input.clientX != null && input.clientY != null) {
-                reportVibratoDragState(input.clientX, input.clientY);
-            }
+            // 曲线是命令式重画的（立即生效），读数走 React 状态。这里**无条件**上报：
+            // 滚轮 / 方向键改的也是深度与速率，若因为"没有指针坐标"就跳过，气泡里的
+            // 数字要等下一次指针移动才追上 —— 那正是"读数比曲线慢一拍"。
+            reportVibratoDragState(input.clientX, input.clientY);
             return true;
         },
         [
@@ -1432,7 +1456,8 @@ export function usePianoRollInteractions(args: {
             // 会让两个预设的抖动图案完全相同。
             vib.seed = vibratoSeedForPreset(next);
             repaintVibratoDragPreview(vib.shiftHeld);
-            if (clientX != null && clientY != null) reportVibratoDragState(clientX, clientY);
+            // 与滚轮 / 方向键同理：换预设也要立刻刷新读数（预设名就在气泡里）。
+            reportVibratoDragState(clientX, clientY);
             return true;
         },
         [editParam, currentParamRange, repaintVibratoDragPreview, reportVibratoDragState],
@@ -1494,7 +1519,8 @@ export function usePianoRollInteractions(args: {
             }
 
             repaintVibratoDragPreview(vib.shiftHeld);
-            if (clientX != null && clientY != null) reportVibratoDragState(clientX, clientY);
+            // 重置同样立刻刷新读数：深度 / 速率回到预设值，气泡不能停在旧数字上。
+            reportVibratoDragState(clientX, clientY);
             return true;
         },
         [
@@ -1507,9 +1533,11 @@ export function usePianoRollInteractions(args: {
         ],
     );
 
-    /** 拖拽结束时的收尾：清掉双键记录并上报（面板据此清掉 HUD）。 */
+    /** 拖拽结束时的收尾：清掉双键记录与气泡锚点并上报（面板据此清掉 HUD）。 */
     const finishVibratoDrag = useCallback(() => {
         vibratoResetSlotsRef.current.clear();
+        // 锚点属于本次手势：留着会让下一次起手在"还没动过指针"时先用旧位置闪一下。
+        vibratoHudAnchorRef.current = null;
         if (!onVibratoDragEnd) return;
         onVibratoDragEnd();
     }, [onVibratoDragEnd]);
@@ -2031,6 +2059,10 @@ export function usePianoRollInteractions(args: {
                     steps,
                     shiftHeld: e.shiftKey,
                     fineEvent: e,
+                    // 滚轮事件自带指针位置：用它当锚点，气泡不会因为"指针没动过"
+                    // 而停在旧坐标上。
+                    clientX: e.clientX,
+                    clientY: e.clientY,
                 });
                 return;
             }
@@ -5030,6 +5062,9 @@ export function usePianoRollInteractions(args: {
                     // 起手自活动预设：深度 / 速率都是预设自带值 —— 预设切换
                     // 已持久化，不存在"上一次的调整"要续。
                     const working = createDragWorking(vibratoPreset, editParam, currentParamRange);
+                    // 先记下锚点：用户可能一起手就滚轮 / 按方向键调参，那时还没有
+                    // 任何 pointermove，气泡得有个位置可放。
+                    vibratoHudAnchorRef.current = { clientX: e.clientX, clientY: e.clientY };
                     vibratoStateRef.current = {
                         pointerId: e.pointerId,
                         startFrame,
