@@ -267,7 +267,7 @@ import { settingsApi } from "../../services/api/settings";
 import { EditContextMenu } from "../editDialogs/EditContextMenu";
 import { resolveScrollableProjectSec } from "../../features/session/projectBoundary";
 import { parseCustomScaleToken } from "../../utils/scaleSelection";
-import { AppButton, AppIconButton, AppNoticeDialog, AppSelect } from "../../ui";
+import { AppIconButton, AppNoticeDialog, AppSelect } from "../../ui";
 import {
     centerFromVerticalScrollTop,
     verticalScrollTopFromCenter,
@@ -7198,6 +7198,88 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             )}
                         </Box>
 
+                        {/* 颤音预设选择器：紧贴颤音工具图标右侧 —— 同属"绘制工具"这一组，
+                            因此与它之间不放分隔线。样式按周围的图标按钮来做
+                            （15×15 波形图标 + tooltip），不再占一截文字宽度。 */}
+                        {activeDragDirectionTool === "vibrato" && (
+                            <Box
+                                ref={vibratoPresetMenuRef}
+                                style={{ position: "relative" }}
+                                data-hs-context-menu
+                            >
+                                <AppIconButton
+                                    active={vibratoPresetMenuOpen}
+                                    tooltip={`${tf("vibrato_toolbar_label")}: ${vibratoPresetLabel(activeVibratoPreset, tf)}`}
+                                    aria-haspopup="menu"
+                                    aria-expanded={vibratoPresetMenuOpen}
+                                    tabIndex={-1}
+                                    onClick={() => setVibratoPresetMenuOpen((open) => !open)}
+                                    icon={
+                                        <svg
+                                            width="15"
+                                            height="15"
+                                            viewBox="0 0 15 15"
+                                            fill="none"
+                                            xmlns="http://www.w3.org/2000/svg"
+                                        >
+                                            <path
+                                                d="M1.5 7.5C3 7.5 3 3.5 4.5 3.5C6 3.5 6 11.5 7.5 11.5C9 11.5 9 3.5 10.5 3.5C12 3.5 12 7.5 13.5 7.5"
+                                                stroke="currentColor"
+                                                strokeWidth="1.2"
+                                                strokeLinecap="round"
+                                                strokeLinejoin="round"
+                                            />
+                                        </svg>
+                                    }
+                                />
+                                {vibratoPresetMenuOpen && (
+                                    <Box
+                                        data-hs-context-menu
+                                        className="absolute left-0 top-[calc(100%+4px)] z-30 min-w-[190px] rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg"
+                                    >
+                                        <ScrollArea
+                                            style={{ maxHeight: "50vh" }}
+                                            scrollbars="vertical"
+                                            type="auto"
+                                        >
+                                            {resolvedVibratoPresets.map((preset) => (
+                                                <button
+                                                    key={preset.id}
+                                                    type="button"
+                                                    className="flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-hover"
+                                                    onClick={() => {
+                                                        dispatch(setActiveVibratoPreset(preset.id));
+                                                        void dispatch(persistUiSettings());
+                                                        setVibratoPresetMenuOpen(false);
+                                                    }}
+                                                    onPointerDown={(e) => e.stopPropagation()}
+                                                >
+                                                    <span>{vibratoPresetLabel(preset, tf)}</span>
+                                                    {preset.id === activeVibratoPresetId ? (
+                                                        <CheckIcon />
+                                                    ) : null}
+                                                </button>
+                                            ))}
+                                        </ScrollArea>
+                                        <Box
+                                            className="my-1"
+                                            style={{ height: 1, background: "var(--qt-divider)" }}
+                                        />
+                                        <button
+                                            type="button"
+                                            className="w-full px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-hover"
+                                            onClick={() => {
+                                                setVibratoPresetMenuOpen(false);
+                                                setVibratoPresetDialogOpen(true);
+                                            }}
+                                            onPointerDown={(e) => e.stopPropagation()}
+                                        >
+                                            {tf("vibrato_manager_open")}
+                                        </button>
+                                    </Box>
+                                )}
+                            </Box>
+                        )}
                         <Box
                             style={{
                                 width: 1,
@@ -7272,72 +7354,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 )
                             }
                         />
-                        {/* 颤音预设选择器：只在直线/颤音工具下出现 */}
-                        {activeDragDirectionTool === "vibrato" && (
-                            <Box
-                                ref={vibratoPresetMenuRef}
-                                style={{ position: "relative" }}
-                                data-hs-context-menu
-                            >
-                                <AppButton
-                                    size="sm"
-                                    emphasis="soft"
-                                    aria-label={tf("vibrato_toolbar_label")}
-                                    onClick={() => setVibratoPresetMenuOpen((open) => !open)}
-                                >
-                                    {vibratoPresetLabel(activeVibratoPreset, tf)}
-                                </AppButton>
-                                {vibratoPresetMenuOpen && (
-                                    <Box
-                                        data-hs-context-menu
-                                        className="absolute left-0 top-[calc(100%+4px)] z-30 min-w-[190px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
-                                    >
-                                        <ScrollArea
-                                            style={{ maxHeight: "50vh" }}
-                                            scrollbars="vertical"
-                                            type="auto"
-                                        >
-                                            {resolvedVibratoPresets.map((preset) => (
-                                                <button
-                                                    key={preset.id}
-                                                    type="button"
-                                                    className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
-                                                    onClick={() => {
-                                                        dispatch(setActiveVibratoPreset(preset.id));
-                                                        void dispatch(persistUiSettings());
-                                                        setVibratoPresetMenuOpen(false);
-                                                    }}
-                                                    onPointerDown={(e) => e.stopPropagation()}
-                                                >
-                                                    <span>{vibratoPresetLabel(preset, tf)}</span>
-                                                    {preset.id === activeVibratoPresetId ? (
-                                                        <CheckIcon />
-                                                    ) : null}
-                                                </button>
-                                            ))}
-                                        </ScrollArea>
-                                        <Box
-                                            className="my-1"
-                                            style={{
-                                                height: 1,
-                                                background: "var(--qt-divider)",
-                                            }}
-                                        />
-                                        <button
-                                            type="button"
-                                            className="w-full px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
-                                            onClick={() => {
-                                                setVibratoPresetMenuOpen(false);
-                                                setVibratoPresetDialogOpen(true);
-                                            }}
-                                            onPointerDown={(e) => e.stopPropagation()}
-                                        >
-                                            {tf("vibrato_manager_open")}
-                                        </button>
-                                    </Box>
-                                )}
-                            </Box>
-                        )}
 
                         <Box style={{ position: "relative" }} data-hs-context-menu>
                             <AppIconButton
