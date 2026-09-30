@@ -8629,15 +8629,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     onAddVibrato={() => void handleEditOp("addVibrato", {})}
                     onQuantize={() => openEditDialog("quantize")}
                     onMeanQuantize={() => openEditDialog("meanQuantize")}
-                    // 颤音预设：菜单里直接切换，选中即"设为活动 + 立即套用"。
-                    vibratoPresets={resolvedVibratoPresets}
-                    activeVibratoPresetId={activeVibratoPresetId}
-                    onSelectVibratoPreset={(presetId) => {
-                        dispatch(setActiveVibratoPreset(presetId));
-                        void dispatch(persistUiSettings());
-                        void handleEditOp("addVibrato", { presetId });
-                    }}
-                    onManageVibratoPresets={() => setVibratoPresetDialogOpen(true)}
                     onExtractVibratoPreset={() => void handleExtractVibratoPreset()}
                     onSaveAsPitchRef={() => void handleSaveAsPitchRef()}
                     onExportMidi={() => void handleExportMidiFromEditor()}

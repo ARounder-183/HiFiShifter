@@ -281,21 +281,21 @@ test("AppSwitchRow 的 control 决定控件类型，两种共用同一排版", a
  * 以及"点开子项"只触发子项自身、不关闭整张菜单（`extraItems` 里的内容由
  * 调用方负责 onClose，主菜单的 items 才是自动关闭）。
  */
+function renderSubMenu(children: React.ReactNode) {
+    return render(
+        <div role="menu" data-hs-context-menu="1" className="w-48">
+            {children}
+        </div>,
+    );
+}
+
 test("AppSubMenu：点击展开子面板，再点收起", async () => {
-    await render(
-        <AppContextMenu
-            x={10}
-            y={10}
-            items={[{ key: "a", label: "Alpha", onSelect: () => {} }]}
-            extraItems={
-                <AppSubMenu label="Presets">
-                    <button type="button" role="menuitem">
-                        Natural
-                    </button>
-                </AppSubMenu>
-            }
-            onClose={() => {}}
-        />,
+    await renderSubMenu(
+        <AppSubMenu label="Presets">
+            <button type="button" role="menuitem">
+                Natural
+            </button>
+        </AppSubMenu>,
     );
 
     const trigger = container.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]');
@@ -318,23 +318,15 @@ test("AppSubMenu：点击展开子面板，再点收起", async () => {
 });
 
 test("AppSubMenu：子面板自身是独立的 role=menu 表面（键盘导航按层划分）", async () => {
-    await render(
-        <AppContextMenu
-            x={10}
-            y={10}
-            items={[{ key: "a", label: "Alpha", onSelect: () => {} }]}
-            extraItems={
-                <AppSubMenu label="Presets">
-                    <button type="button" role="menuitem">
-                        Natural
-                    </button>
-                    <button type="button" role="menuitem">
-                        Soft
-                    </button>
-                </AppSubMenu>
-            }
-            onClose={() => {}}
-        />,
+    await renderSubMenu(
+        <AppSubMenu label="Presets">
+            <button type="button" role="menuitem">
+                Natural
+            </button>
+            <button type="button" role="menuitem">
+                Soft
+            </button>
+        </AppSubMenu>,
     );
 
     const trigger = container.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]');
@@ -342,7 +334,7 @@ test("AppSubMenu：子面板自身是独立的 role=menu 表面（键盘导航�
         trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
 
-    // 外层菜单 + 子面板：两个独立的 role="menu"。
+    // 外层容器 + 子面板：两个独立的 role="menu"。
     const menus = [...container.querySelectorAll<HTMLElement>('[role="menu"]')];
     expect(menus.length).toBe(2);
     const [outer, submenu] = menus;
@@ -362,8 +354,6 @@ test("AppSubMenu：子面板自身是独立的 role=menu 表面（键盘导航�
     const submenuLabels = ownedBy(submenu).map((item) => item.textContent);
 
     expect(submenuLabels).toEqual(["Natural", "Soft"]);
-    // 外层只有「Alpha」与子菜单触发项；子项一个都不属于它。
-    expect(outerLabels).toHaveLength(2);
-    expect(outerLabels).not.toContain("Natural");
-    expect(outerLabels).not.toContain("Soft");
+    // 外层只有子菜单触发项；子项一个都不属于它 —— 否则方向键会在两层之间串门。
+    expect(outerLabels).toEqual(["Presets"]);
 });

@@ -74,18 +74,6 @@ export interface AppContextMenuProps {
      */
     header?: ReactNode;
     /**
-     * 底部自定义区：渲染在条目列表之下、参与同一次定位测量。
-     *
-     * 【为什么需要它】`items` 是纯数据（`AppMenuItemSpec`），只表达得了扁平的
-     * 一行。二级子菜单（`AppSubMenu`）与内联输入框这类需要真实 React 节点的
-     * 内容装不进去，而"把它变成数据"意味着给 `AppMenuItemSpec` 加一棵递归树，
-     * 那会波及全部 20 多处消费者 —— 只为了一处需要子菜单。
-     *
-     * 与 `header` 同构：这里是**非条目**内容，不参与 `activeIndex` 键盘导航；
-     * `AppSubMenu` 自带 `useMenuKeyboard`，各层按 `role="menu"` 分层导航。
-     */
-    extraItems?: ReactNode;
-    /**
      * 是否标记为「时间轴浮动菜单」（`data-hs-floating-menu="1"`）。
      *
      * 这是时间轴侧的既有契约，有三个独立读取方，缺了它会静默失去豁免：
@@ -126,7 +114,6 @@ export function AppContextMenu({
     minWidth = 190,
     ariaLabel,
     header,
-    extraItems,
     floating = false,
 }: AppContextMenuProps) {
     const ref = useRef<HTMLDivElement | null>(null);
@@ -294,7 +281,6 @@ export function AppContextMenu({
             onContextMenu={(event) => event.preventDefault()}
         >
             {header ? <div className="border-b border-qt-border px-2 py-1">{header}</div> : null}
-            {extraItems}
             {items.map((item, index) => (
                 <AppContextMenuItem
                     key={item.key}

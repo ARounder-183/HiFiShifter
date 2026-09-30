@@ -1,7 +1,5 @@
 import { useI18n } from "../../i18n/I18nProvider";
-import { AppContextMenu, AppSubMenu, useMenuShortcut, type AppMenuItemSpec } from "../../ui";
-import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
-import { vibratoPresetLabel } from "../layout/vibrato/vibratoDialogLogic";
+import { AppContextMenu, useMenuShortcut, type AppMenuItemSpec } from "../../ui";
 
 interface EditContextMenuProps {
     x: number;
@@ -26,7 +24,12 @@ interface EditContextMenuProps {
     onSetPitch?: () => void;
     onAverage?: () => void;
     onSmooth?: () => void;
-    /** 套用当前活动的颤音预设（`Ctrl+B`）。 */
+    /**
+     * 打开「添加颤音」弹窗（`Ctrl+B`）：在弹窗里选预设、调旋钮、看套用预览。
+     *
+     * 【为什么菜单里不再直接铺预设列表】预设的选择与微调是弹窗的事 —— 那里有
+     * 波形缩略图与套用预览，菜单行给不了。菜单只保留这一个入口。
+     */
     onAddVibrato?: () => void;
     onQuantize?: () => void;
     onMeanQuantize?: () => void;
@@ -36,20 +39,7 @@ interface EditContextMenuProps {
     onConvertVolumeToDyn?: () => void;
     /** 动态 → 音量（源参数归位到「沿用原声」）。 */
     onConvertDynToVolume?: () => void;
-    /**
-     * 可用颤音预设（系统 + 用户），用于在菜单里直接切换。
-     *
-     * 【为什么在菜单里铺开而不是开对话框】预设的用途就是"一键套用"。
-     * 打开对话框再选一次，等于把两步的操作变成四步。
-     */
-    vibratoPresets?: readonly VibratoPreset[];
-    /** 当前活动的颤音预设 id（列表里打勾）。 */
-    activeVibratoPresetId?: string;
-    /** 选中某条预设：设为活动预设并立即套用到选区。 */
-    onSelectVibratoPreset?: (presetId: string) => void;
-    /** 打开预设管理器。 */
-    onManageVibratoPresets?: () => void;
-    /** 从选区提取预设（选区里已有一段颤音时可用）。 */
+    /** 从选区提取预设（作用于当前选区，与预设选择无关，故留在菜单）。 */
     onExtractVibratoPreset?: () => void;
 }
 
@@ -78,10 +68,6 @@ export function EditContextMenu({
     onExportMidi,
     onConvertVolumeToDyn,
     onConvertDynToVolume,
-    vibratoPresets,
-    activeVibratoPresetId,
-    onSelectVibratoPreset,
-    onManageVibratoPresets,
     onExtractVibratoPreset,
 }: EditContextMenuProps) {
     const { tf } = useI18n();
@@ -103,92 +89,6 @@ export function EditContextMenu({
     const addVibratoShortcut = useMenuShortcut("edit.addVibrato");
     const quantizeShortcut = useMenuShortcut("edit.quantize");
     const meanQuantizeShortcut = useMenuShortcut("edit.meanQuantize");
-
-    // 预设列表存在时才显示这一整组；否则「添加颤音」保持为唯一的入口。
-    /**
-     * 颤音预设二级菜单。
-     *
-     * 【为什么不平铺】系统预设已有 12 个，加上用户预设会把菜单撑得比屏幕还高，
-     * 而"添加颤音"本身只是一项动作 —— 十几行预设把它挤到需要滚动才能看见。
-     * 收进子菜单后主菜单长度与预设数量无关。
-     */
-    const vibratoSubmenu =
-        onSelectVibratoPreset && vibratoPresets && vibratoPresets.length > 0 ? (
-            <AppSubMenu label={tf("vibrato_menu_presets")}>
-                {vibratoPresets.map((preset) => {
-                    const active = preset.id === activeVibratoPresetId;
-                    return (
-                        <button
-                            key={preset.id}
-                            type="button"
-                            role="menuitemradio"
-                            aria-checked={active}
-                            className="hs-type-body flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left transition-colors hover:bg-qt-hover"
-                            style={{
-                                paddingLeft: "var(--qt-space-5)",
-                                paddingRight: "var(--qt-space-5)",
-                            }}
-                            onPointerDown={(event) => event.stopPropagation()}
-                            onClick={(event) => {
-                                event.stopPropagation();
-                                onSelectVibratoPreset(preset.id);
-                                onClose();
-                            }}
-                        >
-                            <span className="truncate">{vibratoPresetLabel(preset, tf)}</span>
-                            {active ? <span aria-hidden>✓</span> : null}
-                        </button>
-                    );
-                })}
-                {(onExtractVibratoPreset || onManageVibratoPresets) && (
-                    <div
-                        className="my-1 border-t border-qt-border"
-                        style={{
-                            marginLeft: "var(--qt-space-5)",
-                            marginRight: "var(--qt-space-5)",
-                        }}
-                    />
-                )}
-                {onExtractVibratoPreset ? (
-                    <button
-                        type="button"
-                        role="menuitem"
-                        className="hs-type-body flex w-full items-center px-3 py-1.5 text-left transition-colors hover:bg-qt-hover"
-                        style={{
-                            paddingLeft: "var(--qt-space-5)",
-                            paddingRight: "var(--qt-space-5)",
-                        }}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={(event) => {
-                            event.stopPropagation();
-                            onExtractVibratoPreset();
-                            onClose();
-                        }}
-                    >
-                        <span className="truncate">{tf("vibrato_extract_action")}</span>
-                    </button>
-                ) : null}
-                {onManageVibratoPresets ? (
-                    <button
-                        type="button"
-                        role="menuitem"
-                        className="hs-type-body flex w-full items-center px-3 py-1.5 text-left transition-colors hover:bg-qt-hover"
-                        style={{
-                            paddingLeft: "var(--qt-space-5)",
-                            paddingRight: "var(--qt-space-5)",
-                        }}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={(event) => {
-                            event.stopPropagation();
-                            onManageVibratoPresets();
-                            onClose();
-                        }}
-                    >
-                        <span className="truncate">{tf("vibrato_manager_open")}</span>
-                    </button>
-                ) : null}
-            </AppSubMenu>
-        ) : null;
 
     // 菜单项映射到共享原语的 AppMenuItemSpec：分组分隔线由每段首项的
     // `separatorBefore` 表达；`onSelect` 只调用业务动作，关闭由原语负责
@@ -268,14 +168,22 @@ export function EditContextMenu({
             shortcut: smoothShortcut,
             onSelect: () => onSmooth?.(),
         },
-        // 颤音：一键套用当前预设。预设列表、提取与管理都在二级菜单里 ——
-        // 十几行预设平铺会把这一项挤出视野（见上方 `vibratoSubmenu`）。
+        // 颤音：唯一入口是弹窗 —— 选预设、微调、看套用预览都在那里。
         {
             key: "addVibrato",
             label: tf("menu_add_vibrato"),
             shortcut: addVibratoShortcut,
             onSelect: () => onAddVibrato?.(),
         },
+        ...(onExtractVibratoPreset
+            ? ([
+                  {
+                      key: "extractVibratoPreset",
+                      label: tf("vibrato_extract_action"),
+                      onSelect: onExtractVibratoPreset,
+                  },
+              ] satisfies AppMenuItemSpec[])
+            : []),
         {
             key: "quantize",
             label: tf("menu_quantize"),
@@ -333,15 +241,5 @@ export function EditContextMenu({
             : []),
     ];
 
-    return (
-        <AppContextMenu
-            x={x}
-            y={y}
-            items={items}
-            // 二级子菜单：`items` 是纯数据，装不下需要真实 React 节点的内容
-            //（勾选行 + 分组线 + 两个动作）。见 `AppContextMenu.extraItems` 的说明。
-            extraItems={vibratoSubmenu}
-            onClose={onClose}
-        />
-    );
+    return <AppContextMenu x={x} y={y} items={items} onClose={onClose} />;
 }
