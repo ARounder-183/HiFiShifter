@@ -464,6 +464,17 @@ test("右键预设行打开上下文菜单", async () => {
     expect(text).toContain("Duplicate as mine");
     expect(text).toContain("Delete");
 
+    /*
+     * 层级契约：菜单必须在**对话框的 DOM 子树里**。
+     *
+     * 手写菜单的层级（--qt-z-menu: 999）低于对话框（--qt-z-dialog: 1000），挂在
+     * 对话框外面会被整个盖住、点不到；跑到对话框 DOM 之外时 Radix 还会把点击当成
+     * "点了弹窗外面"顺手关掉窗口。钉住这条，避免下次重构又把它挪出去。
+     */
+    const menu = document.querySelector('[role="menu"]');
+    expect(menu, "菜单应已渲染").toBeTruthy();
+    expect(menu!.closest('[role="dialog"]'), "菜单必须位于对话框内部").not.toBeNull();
+
     // 菜单里的「停用」与行内按钮同源：点一下即写进名单。
     const menuDisable = [...document.querySelectorAll("button")].find(
         (button) =>

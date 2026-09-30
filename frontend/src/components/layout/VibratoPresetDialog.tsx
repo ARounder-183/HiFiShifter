@@ -1277,6 +1277,24 @@ export function VibratoPresetDialog({
                             )}
                         </Box>
                     </Flex>
+
+                    {/* 预设行右键菜单：把"针对这一条预设"的动作收拢到指针处。
+                        **必须渲染在对话框内部** —— 手写菜单的层级（--qt-z-menu: 999）
+                        低于对话框（--qt-z-dialog: 1000），挂在对话框外面会被整个盖住、
+                        点不到；而且它一旦跑到对话框的 DOM 之外，Radix 还会把点击当成
+                        "点到了弹窗外面"从而顺手把窗口关掉。放在对话框子树里，层级归属
+                        对话框自己的 stacking context，就不会被压住。
+                        `position: fixed` 仍按视口定位（对话框没有常驻 transform），
+                        也不会被祖先的 `overflow: auto` 裁掉。 */}
+                    {presetMenu ? (
+                        <AppContextMenu
+                            x={presetMenu.x}
+                            y={presetMenu.y}
+                            items={presetMenuItems}
+                            ariaLabel={t("vibrato_manager_row_menu")}
+                            onClose={() => setPresetMenu(null)}
+                        />
+                    ) : null}
                 </Flex>
             </AppDialog>
 
@@ -1304,17 +1322,6 @@ export function VibratoPresetDialog({
                 intent="danger"
                 onConfirm={handleDelete}
             />
-
-            {/* 预设行右键菜单：把"针对这一条预设"的动作收拢到指针处。 */}
-            {presetMenu ? (
-                <AppContextMenu
-                    x={presetMenu.x}
-                    y={presetMenu.y}
-                    items={presetMenuItems}
-                    ariaLabel={t("vibrato_manager_row_menu")}
-                    onClose={() => setPresetMenu(null)}
-                />
-            ) : null}
         </>
     );
 }
