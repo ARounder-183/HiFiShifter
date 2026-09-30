@@ -567,13 +567,22 @@ export function VibratoPresetDialog({
                 title={t("vibrato_manager_title")}
                 size="xl"
                 actions={[
+                    /*
+                     * 【为什么每个动作都显式写 `autoClose: false`】
+                     * `AppDialog` 对**同步**动作默认 `autoClose: true`（异步动作默认
+                     * false）。本对话框里没有"点一下就完事"的动作：导入要挑文件、
+                     * 新建 / 复制 / 删除都要接着在同一个窗口里继续编辑。少了这个字段，
+                     * 一个同步动作就会顺手把窗口关掉 —— 而且这条规则很容易被一次
+                     * "把 async 去掉"的重构悄悄改回去，所以宁可逐个写明。
+                     */
                     {
                         id: "delete",
                         label: t("vibrato_manager_delete"),
                         intent: "danger",
                         align: "start",
                         disabled: !draft || isBuiltin,
-                        // 异步包装：删除走二次确认，不关闭主对话框。
+                        // 删除走二次确认，不关闭主对话框。
+                        autoClose: false,
                         onClick: async () => {
                             setDeleteTarget(draft);
                         },
@@ -581,12 +590,14 @@ export function VibratoPresetDialog({
                     {
                         id: "import",
                         label: t("vibrato_io_import"),
+                        autoClose: false,
                         onClick: () => fileInputRef.current?.click(),
                     },
                     {
                         id: "export",
                         label: t("vibrato_io_export"),
                         disabled: !draft,
+                        autoClose: false,
                         onClick: async () => {
                             await handleExport();
                         },
@@ -595,12 +606,14 @@ export function VibratoPresetDialog({
                         id: "new",
                         label: t("vibrato_manager_new"),
                         disabled: atCap,
+                        autoClose: false,
                         onClick: handleCreate,
                     },
                     {
                         id: "duplicate",
                         label: t("vibrato_manager_duplicate"),
                         disabled: !draft,
+                        autoClose: false,
                         onClick: handleDuplicate,
                     },
                     {

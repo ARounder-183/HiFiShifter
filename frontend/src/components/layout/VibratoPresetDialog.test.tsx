@@ -486,3 +486,32 @@ test("右键预设行打开上下文菜单", async () => {
     });
     expect(store.getState().session.disabledVibratoPresetIds).toContain("builtin.straight");
 });
+
+/*
+ * 页脚动作不应关闭窗口。
+ *
+ * 【为什么值得测】`AppDialog` 对**同步**动作默认 `autoClose: true`，所以「导入」
+ * 「新建」「复制为自定义」这类同步动作会顺手把窗口关掉 —— 用户刚点完就被弹出，
+ * 只能重新打开继续。异步动作默认不关，因此这个缺陷只落在同步的那几个上，很容易
+ * 在"把 async 去掉"的重构里复发。
+ */
+test("导入 / 新建 / 复制为自定义 都不关闭窗口", async () => {
+    const custom = sanitizeVibratoPreset({ id: "custom_keep", name: "Keep", depthCents: 40 });
+    const onOpenChange = vi.fn();
+    await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(custom));
+        store.dispatch(setActiveVibratoPreset(custom.id));
+    }, onOpenChange);
+
+    for (const label of ["Import", "New", "Duplicate as mine"]) {
+        const button = [...document.querySelectorAll("button")].find(
+            (entry) => entry.textContent?.trim() === label,
+        );
+        expect(button, `${label} 按钮应已渲染`).toBeTruthy();
+        await act(async () => {
+            button!.click();
+        });
+    }
+
+    expect(onOpenChange).not.toHaveBeenCalled();
+});
