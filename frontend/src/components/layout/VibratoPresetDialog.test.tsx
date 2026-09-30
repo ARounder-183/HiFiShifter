@@ -926,3 +926,54 @@ test("手绘中偏斜滑块仍可调整", async () => {
 
     expect(readouts()[0]).toBe("51%");
 });
+
+/*
+ * 直线预设的读数应为 "±0 分"，而不是被保底的 "±1"。
+ */
+test("完全平直的预设读数显示 ±0", async () => {
+    // 默认活动预设就是「直线」（深度 0）。
+    await mountDialog();
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("±0 cents");
+    expect(text).not.toContain("±1 cents");
+});
+
+/*
+ * 删除正在编辑的预设：草稿要切到"迁移后的活动预设"，而不是掉进"未选择"的空状态。
+ *
+ * 【为什么值得测】原来删除时把草稿置空，编辑器于是显示"还没有自定义预设"—— 而库里
+ * 明明还有一堆。活动 id 由 reducer 迁移到滑进同位置的预设上，草稿必须跟着走。
+ */
+test("删除正在编辑的预设：草稿切到迁移后的预设", async () => {
+    const a = sanitizeVibratoPreset({ id: "custom_del_a", name: "Del A" });
+    const b = sanitizeVibratoPreset({ id: "custom_del_b", name: "Del B" });
+    const store = await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(a));
+        store.dispatch(upsertVibratoPreset(b));
+        store.dispatch(setActiveVibratoPreset(b.id));
+    });
+
+    const deleteButtons = () =>
+        [...document.querySelectorAll("button")].filter(
+            (button) => button.textContent?.trim() === "Delete",
+        );
+    // 页脚的「删除」→ 二次确认里的「删除」。
+    await act(async () => {
+        deleteButtons()[0].click();
+    });
+    await act(async () => {
+        deleteButtons().at(-1)!.click();
+    });
+
+    expect(store.getState().session.vibratoPresets.map((preset) => preset.id)).toEqual([
+        "custom_del_a",
+    ]);
+
+    // 草稿切到了剩下的那条（活动 id 迁移到滑进同位置的预设）。
+    const selected = [...document.querySelectorAll<HTMLElement>('[role="option"]')].filter(
+        (row) => row.getAttribute("aria-selected") === "true",
+    );
+    expect(selected).toHaveLength(1);
+    expect(selected[0].textContent ?? "").toContain("Del A");
+    expect(document.body.textContent ?? "").not.toContain("No custom presets yet");
+});

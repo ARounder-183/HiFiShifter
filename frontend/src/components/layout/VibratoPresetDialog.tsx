@@ -39,7 +39,11 @@ import {
     nextDuplicatePresetName,
     sanitizeVibratoPreset,
 } from "../../features/vibrato/vibratoPresets";
-import { resolveVibratoPresets } from "../../features/vibrato/vibratoPresetList";
+import {
+    activeIdAfterRemoval,
+    findVibratoPreset,
+    resolveVibratoPresets,
+} from "../../features/vibrato/vibratoPresetList";
 import {
     mergeImportedPresets,
     parseVibratoPresets,
@@ -577,11 +581,27 @@ export function VibratoPresetDialog({
 
     function handleDelete() {
         if (!deleteTarget) return;
-        dispatch(removeVibratoPreset(deleteTarget.id));
-        void dispatch(persistUiSettings());
         const removedId = deleteTarget.id;
+        const deletingDraft = draft?.id === removedId;
+        /*
+         * 删的若是**正在编辑的那条**，草稿不能就这么置空 —— 那会把编辑器丢进"未选择
+         * 任何预设"的空状态（并显示"还没有自定义预设"，而库里明明还有一堆）。活动 id
+         * 已由 reducer 迁移到仍然存在的预设上，这里用**同一个** `activeIdAfterRemoval`
+         * 算出迁移目标，把草稿切过去，与库里的状态保持一致。
+         */
+        const nextActiveId = activeIdAfterRemoval(
+            resolved.all,
+            session.activeVibratoPresetId,
+            removedId,
+        );
+        dispatch(removeVibratoPreset(removedId));
+        void dispatch(persistUiSettings());
         setDeleteTarget(null);
-        setDraft((prev) => (prev?.id === removedId ? null : prev));
+        if (!deletingDraft) return;
+        const remaining = resolved.all.filter((preset) => preset.id !== removedId);
+        const next = findVibratoPreset(remaining, nextActiveId) ?? remaining[0] ?? null;
+        setDraft(next);
+        fitPreviewAxis(next);
     }
 
     /**

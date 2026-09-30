@@ -434,3 +434,37 @@ describe("fitPreviewRangeCents（一次性拟合纵轴）", () => {
         expect(PREVIEW_RANGE_LADDER).toContain(range);
     });
 });
+
+describe("直线预设的读数（peakCents）", () => {
+    /*
+     * 【为什么值得测】`peakCents` 是读数（"±N 分"）的来源，曾经在这里保底为 1，
+     * 于是完全平直的颤音线一直显示"±1 分"。需要非零尺度的地方各自兜底，读数应当如实。
+     */
+    test("深度为 0 的预设峰值为 0", () => {
+        const samples = buildVibratoPreview(
+            sanitizeVibratoPreset({ id: "custom_a", depthCents: 0 }),
+        );
+        expect(samples.peakCents).toBe(0);
+    });
+
+    test("纵轴定标仍然非零（尺度由定标函数兜底，不靠读数）", () => {
+        const samples = buildVibratoPreview(
+            sanitizeVibratoPreset({ id: "custom_a", depthCents: 0 }),
+        );
+        expect(previewScaleCents(samples.peakCents)).toBeGreaterThan(0);
+        expect(fitPreviewRangeCents(samples.peakCents)).toBeGreaterThan(0);
+    });
+
+    test("有深度的预设峰值等于深度（按参数换算成 cents）", () => {
+        const samples = buildVibratoPreview(
+            sanitizeVibratoPreset({
+                id: "custom_a",
+                depthCents: 40,
+                attackMs: 0,
+                releaseMs: 0,
+                irregularity: 0,
+            }),
+        );
+        expect(samples.peakCents).toBeCloseTo(40, 6);
+    });
+});

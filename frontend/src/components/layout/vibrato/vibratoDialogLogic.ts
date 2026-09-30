@@ -264,7 +264,13 @@ export interface VibratoPreviewSamples {
     wave: number[];
     /** 逐点包络上界（cents，恒非负）—— 渐入 / 渐强 / 渐出入画就靠它。 */
     envelope: number[];
-    /** 纵轴半幅（cents）：波形与包络的绝对值上界，至少为 1 以免除零。 */
+    /**
+     * 纵轴半幅（cents）：波形与包络的绝对值上界。
+     *
+     * 【为什么不在这里保底为 1】它是**读数**（"±N 分"）的来源，直线预设就该报 0 ——
+     * 曾经在这里保底 1，于是完全平直的颤音线一直显示"±1 分"。需要非零尺度的地方
+     * （`previewScaleCents` / `fitPreviewRangeCents`）各自兜底，不必让读数替它们背锅。
+     */
     peakCents: number;
     /**
      * 套用前的原曲线（cents，与 `wave` 同轴）。
@@ -302,8 +308,10 @@ export function buildVibratoPreview(
 
     const wave = result.dense.map((value) => value * 100);
     const envelope = (result.envelope ?? new Array(frameCount).fill(0)).slice();
-    let peak = Math.max(1, ...envelope.map((value) => Math.abs(value)));
-    peak = Math.max(peak, ...wave.map((value) => Math.abs(value)));
+    // 真实峰值：直线预设就是 0（读数据此显示 "±0 分"）。
+    let peak = 0;
+    for (const value of envelope) peak = Math.max(peak, Math.abs(value));
+    for (const value of wave) peak = Math.max(peak, Math.abs(value));
     return { wave, envelope, peakCents: peak };
 }
 
@@ -363,7 +371,8 @@ export function buildAppliedPreview(args: {
         Math.abs(value),
     );
 
-    let peak = 1;
+    // 真实峰值（与 `buildVibratoPreview` 同一约定）：读数据此显示，尺度由调用方兜底。
+    let peak = 0;
     for (const value of original) peak = Math.max(peak, Math.abs(value));
     for (const value of wave) peak = Math.max(peak, Math.abs(value));
     for (const value of envelope) peak = Math.max(peak, Math.abs(value));
