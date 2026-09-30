@@ -100,18 +100,41 @@ test("预览不落在任何滚动区内 —— 调参数时它不会被滚出视
     expect(section!.closest(SCROLL_VIEWPORT), "参数区应位于滚动区内").not.toBeNull();
 });
 
-test("同排两栏共用一个高度上限，两栏等高", async () => {
+test("布局：定高 wrapper + 两栏 flex 填充，且不再依赖 maxHeight（反双滚动条）", async () => {
     await mountDialog();
 
+    /*
+     * 【结构契约】对话框正文自身可滚；双竖直滚动条（内层两栏 + 外层正文）
+     * 的根因是"内容总高超过正文上限"。现在的结构是：内容包一层**定高**
+     * wrapper（min(60vh, 560px)），两栏 `flex-1 min-h-0` 填满剩余高度 ——
+     * 条件行（只读提示 / 导入反馈）只压缩栏高，永远把不破外层。
+     *
+     * 断言三条：
+     * 1. 定高 wrapper 恰有一个，两个滚动视口都是它的后代（同一高度语境）；
+     * 2. 面板**不再**使用 maxHeight（那正是被替换掉的失败机制）；
+     * 3. 面板以 flex 填充（min-h-0 + flex-1），jsdom 无排版引擎，测不了
+     *    真实高度，结构属性是能钉住的最强代理。
+     */
     const viewports = [...document.querySelectorAll<HTMLElement>(SCROLL_VIEWPORT)];
-    // 预设列表 + 参数表单：两个**并排**的滚动区（不是嵌套的两层）。
     expect(viewports.length).toBeGreaterThanOrEqual(2);
 
-    const heights = viewports
-        .map((viewport) => viewport.parentElement?.style.maxHeight ?? "")
-        .filter((value) => value !== "");
-    expect(heights.length).toBeGreaterThanOrEqual(2);
-    expect(new Set(heights).size, `两栏高度上限应相同，实际为 ${heights.join(" / ")}`).toBe(1);
+    const wrapperSelector = "[data-vibrato-content]";
+    const wrappers = document.querySelectorAll(wrapperSelector);
+    expect(wrappers.length, "定高 wrapper 应恰有一个").toBe(1);
+    for (const viewport of viewports) {
+        expect(
+            wrappers[0].contains(viewport),
+            "滚动视口必须都在定高 wrapper 内（否则外层正文会滚动）",
+        ).toBe(true);
+    }
+
+    const maxHeighted = viewports.filter(
+        (viewport) => (viewport.parentElement?.style.maxHeight ?? "") !== "",
+    );
+    expect(maxHeighted, "面板不得再用 maxHeight（那是双滚动条的失败机制）").toEqual([]);
+
+    const panes = viewports.map((viewport) => viewport.closest(".min-h-0.flex-1"));
+    expect(panes.filter(Boolean).length).toBeGreaterThanOrEqual(2);
 });
 
 /*

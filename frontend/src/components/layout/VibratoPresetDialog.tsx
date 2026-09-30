@@ -98,16 +98,18 @@ interface Props {
 /** 列表列的宽度（CSS 像素）。 */
 const LIST_WIDTH = 208;
 /**
- * 同排两栏共用的高度上限。
+ * 对话框内容的定高。
  *
- * 【为什么两栏共用一个值】两栏是同一个 `Flex` 行的兄弟，共用上限才能等高 ——
- * 否则列表栏会比参数栏短一截，右下方空出一块。
+ * 【为什么必须定高】对话框正文区自身是 `overflow-y-auto`；只要内容总高超过它，
+ * 外层就会出现第二条竖直滚动条（内层两栏各一条 + 外层一条）。选到系统预设时
+ * 多出的只读提示行、导入后的反馈行，都曾把总高顶过上限 —— 那正是"双竖直
+ * 滚动条"只在特定选择下出现的指纹。
  *
- * 【为什么必须封顶】对话框正文区自己是可滚动的；只要内容总高不超过它，正文区
- * 就不出现滚动条，于是页面上只有两个**并排**的面板滚动区（不是嵌套的两层）。
- * `min(46vh, 400px)` 让"预览 + 两栏 + 标题 + 页脚"落在对话框 86vh 的上限内。
+ * 定高之后语义反转：条件行不再"加高总内容"，而是**压缩栏高**（两栏是
+ * `flex-1 min-h-0`，被谁挤都只是各自变矮），外层永不溢出 —— 结构上不可能再
+ * 出现双层滚动，不依赖任何 vh 阈值的运气。
  */
-const PANE_MAX_HEIGHT = "min(46vh, 400px)";
+const CONTENT_HEIGHT = "min(60vh, 560px)";
 
 export function VibratoPresetDialog({
     open,
@@ -388,7 +390,13 @@ export function VibratoPresetDialog({
                     },
                 ]}
             >
-                <Flex direction="column" gap="3">
+                <Flex
+                    direction="column"
+                    gap="3"
+                    data-vibrato-content
+                    className="min-h-0"
+                    style={{ height: CONTENT_HEIGHT }}
+                >
                     {/* ---- 波形预览（整行置顶，不参与任何滚动） ----
                         放在两栏之上而不是塞进参数流的头部：整行宽度读波形更清楚，
                         且它不属于任何滚动区，调参数时**永远**不会滚出视野。 */}
@@ -454,15 +462,16 @@ export function VibratoPresetDialog({
                         </span>
                     ) : null}
 
-                    <Flex gap="4" align="start">
+                    <Flex gap="4" align="stretch" className="min-h-0 flex-1">
                         {/* ---- 预设列表 ---- */}
                         <Flex
                             direction="column"
                             gap="2"
+                            className="min-h-0"
                             style={{ width: LIST_WIDTH, flexShrink: 0 }}
                         >
                             <ScrollArea
-                                style={{ maxHeight: PANE_MAX_HEIGHT }}
+                                style={{ height: "100%" }}
                                 scrollbars="vertical"
                                 type="auto"
                             >
@@ -531,11 +540,11 @@ export function VibratoPresetDialog({
                         </Flex>
 
                         {/* ---- 编辑器 ---- */}
-                        <Box style={{ minWidth: 0, flex: 1 }}>
+                        <Box className="min-h-0 flex flex-col" style={{ minWidth: 0, flex: 1 }}>
                             {draft && previewSamples ? (
-                                <Flex direction="column" gap="3">
+                                <Flex direction="column" gap="3" className="min-h-0 flex-1">
                                     <ScrollArea
-                                        style={{ maxHeight: PANE_MAX_HEIGHT }}
+                                        className="min-h-0 flex-1"
                                         scrollbars="vertical"
                                         type="auto"
                                     >
