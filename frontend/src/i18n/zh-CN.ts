@@ -1889,6 +1889,16 @@ export const zhCN = {
 
     vibrato_manager_title: "颤音预设",
     vibrato_audition_play: "试听",
+    vibrato_io_export: "导出...",
+    vibrato_io_import: "导入...",
+    vibrato_io_imported: "已导入 {count} 个预设|已导入 {count} 个预设",
+    vibrato_io_skipped: "，跳过 {count} 个重复|，跳过 {count} 个重复",
+    vibrato_io_wrong_kind: "这不是颤音预设文件。",
+    vibrato_io_newer_version: "该文件由更新版本的应用导出。",
+    vibrato_io_read_failed: "无法读取预设文件。",
+    vibrato_io_empty: "文件里没有预设。",
+    vibrato_io_truncated:
+        "最多再容纳 {count} 个预设，其余已跳过|最多再容纳 {count} 个预设，其余已跳过",
     vibrato_audition_stop: "停止试听",
     menu_vibrato_presets: "颤音预设管理...",
     vibrato_manager_new: "新建",

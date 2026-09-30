@@ -136,3 +136,73 @@ test("参数表单里的并排控件行都允许换行（源码级约束）", ()
     const missing = rows.filter((row) => !row.includes('wrap="wrap"'));
     expect(missing, "这些并排控件行没有 wrap，放不下时会把面板撑出横向滚动条").toEqual([]);
 });
+
+/*
+ * 导入链路的端到端测试：页脚按钮 → 隐藏文件输入 → 解析 / 净化 / 去重 → 入库 →
+ * 列表出现新预设。走的是**真实 File 对象**（jsdom 支持 Blob.text()），因此
+ * parse / merge / store 之间的衔接是被真实执行的，不是 mock。
+ *
+ * 【为什么值得测】"点了没反应"是这条链路最可能的故障形态：任何一步静默失败
+ * （change 未触发、text() 抛、净化拒收），UI 上都毫无动静。
+ */
+test("导入：选中的文件经净化入库，列表出现新预设，反馈可见", async () => {
+    const store = await mountDialog();
+
+    const before = store.getState().session.vibratoPresets.length;
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]');
+    expect(input, "隐藏文件输入应已挂载").toBeTruthy();
+
+    const fileText = JSON.stringify({
+        kind: "hifishifter-vibrato-presets",
+        version: 1,
+        presets: [
+            {
+                id: "builtin.natural",
+                name: "Imported One",
+                depthCents: 33,
+                rateHz: 6,
+            },
+        ],
+    });
+    const file = new File([fileText], "presets.json", { type: "application/json" });
+    Object.defineProperty(input!, "files", { value: [file] });
+
+    await act(async () => {
+        input!.dispatchEvent(new Event("change", { bubbles: true }));
+        await Promise.resolve();
+    });
+
+    const after = store.getState().session.vibratoPresets;
+    expect(after.length).toBe(before + 1);
+    const added = after[after.length - 1];
+    // 文件里的 builtin. id 被重写为用户 id —— 否则 upsert 拒收、静默丢条目。
+    expect(added?.name).toBe("Imported One");
+    expect(added?.id.startsWith("custom_")).toBe(true);
+    expect(added?.builtin).toBe(false);
+    expect(added?.depthCents).toBe(33);
+
+    // 行内反馈可见，且不是危险色（成功）。
+    const notice = document.querySelector('[role="status"]');
+    expect(notice?.textContent ?? "").toContain("Imported 1 preset");
+
+    // 列表里真的出现了这个名字。
+    expect(document.body.textContent).toContain("Imported One");
+});
+
+test("导入拿错的文件（主题 / 布局 JSON）：拒收且给出明确反馈", async () => {
+    await mountDialog();
+
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]');
+    const file = new File([JSON.stringify({ name: "A", colors: {} })], "theme.json", {
+        type: "application/json",
+    });
+    Object.defineProperty(input!, "files", { value: [file] });
+
+    await act(async () => {
+        input!.dispatchEvent(new Event("change", { bubbles: true }));
+        await Promise.resolve();
+    });
+
+    const notice = document.querySelector('[role="status"]');
+    expect(notice?.textContent ?? "").toContain("not a vibrato preset file");
+});

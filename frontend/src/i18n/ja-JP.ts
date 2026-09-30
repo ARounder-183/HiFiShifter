@@ -1957,6 +1957,17 @@ export const jaJP = {
 
     vibrato_manager_title: "ビブラートプリセット",
     vibrato_audition_play: "試聴",
+    vibrato_io_export: "エクスポート...",
+    vibrato_io_import: "インポート...",
+    vibrato_io_imported:
+        "{count} 個のプリセットをインポートしました|{count} 個のプリセットをインポートしました",
+    vibrato_io_skipped: "、重複 {count} 件をスキップ|、重複 {count} 件をスキップ",
+    vibrato_io_wrong_kind: "ビブラートプリセットのファイルではありません。",
+    vibrato_io_newer_version: "このファイルは新しいバージョンのアプリで書き出されました。",
+    vibrato_io_read_failed: "プリセットファイルを読み込めませんでした。",
+    vibrato_io_empty: "ファイルにプリセットがありません。",
+    vibrato_io_truncated:
+        "あと {count} 件のプリセットしか収まりません。残りはスキップしました。|あと {count} 件のプリセットしか収まりません。残りはスキップしました。",
     vibrato_audition_stop: "試聴を停止",
     menu_vibrato_presets: "ビブラートプリセット管理...",
     vibrato_manager_new: "新規",

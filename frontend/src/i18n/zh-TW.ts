@@ -1891,6 +1891,16 @@ export const zhTW = {
 
     vibrato_manager_title: "顫音預設",
     vibrato_audition_play: "試聽",
+    vibrato_io_export: "匯出...",
+    vibrato_io_import: "匯入...",
+    vibrato_io_imported: "已匯入 {count} 個預設|已匯入 {count} 個預設",
+    vibrato_io_skipped: "，跳過 {count} 個重複|，跳過 {count} 個重複",
+    vibrato_io_wrong_kind: "這不是顫音預設檔案。",
+    vibrato_io_newer_version: "該檔案由更新版本的應用程式匯出。",
+    vibrato_io_read_failed: "無法讀取預設檔案。",
+    vibrato_io_empty: "檔案裡沒有預設。",
+    vibrato_io_truncated:
+        "最多再容納 {count} 個預設，其餘已跳過|最多再容納 {count} 個預設，其餘已跳過",
     vibrato_audition_stop: "停止試聽",
     menu_vibrato_presets: "顫音預設管理...",
     vibrato_manager_new: "新增",

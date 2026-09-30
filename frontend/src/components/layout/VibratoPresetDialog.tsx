@@ -13,7 +13,7 @@
  * 与失败恢复都变复杂。
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PlayIcon, StopIcon } from "@radix-ui/react-icons";
 import { Box, Flex, ScrollArea, TextField } from "@radix-ui/themes";
 
@@ -34,9 +34,16 @@ import {
     sanitizeVibratoPreset,
 } from "../../features/vibrato/vibratoPresets";
 import { resolveVibratoPresets } from "../../features/vibrato/vibratoPresetList";
+import {
+    mergeImportedPresets,
+    parseVibratoPresets,
+    serializeVibratoPresets,
+    vibratoPresetFileName,
+} from "../../features/vibrato/vibratoPresetFile";
 import { shapeUsesSkew } from "../../features/vibrato/vibratoCycle";
 import { depthStepUnitFor } from "../../features/vibrato/vibratoDepth";
 import { estimateCycles } from "../../features/vibrato/vibratoCurve";
+import { exportVibratoPresetsJson } from "../../services/api/jsonExport";
 import { buildAuditionCurve, vibratoAudition } from "../../features/vibrato/vibratoAudition";
 import type {
     BaselineMode,
@@ -61,6 +68,7 @@ import {
     AppSliderReadout,
     AppSwitchRow,
 } from "../../ui";
+import { AppFileInput } from "../../ui/FileInput";
 import { VibratoPreviewCanvas } from "./vibrato/VibratoPreviewCanvas";
 import {
     BASELINE_MODE_KEYS,
@@ -108,7 +116,7 @@ export function VibratoPresetDialog({
     paramRange,
 }: Props) {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
+    const { t, plural } = useI18n();
     const session = useAppSelector((state: RootState) => state.session);
 
     const resolved = useMemo(
@@ -125,6 +133,15 @@ export function VibratoPresetDialog({
     const [deleteTarget, setDeleteTarget] = useState<VibratoPreset | null>(null);
     /** 试听是否在响（驱动播放 / 停止按钮的图标与文案）。 */
     const [auditionPlaying, setAuditionPlaying] = useState(false);
+    /** 导入 / 导出用的隐藏文件输入（必须常驻挂载，见 `AppFileInput` 的说明）。 */
+    const fileInputRef = useRef<HTMLInputElement | null>(null);
+    /**
+     * 导入 / 导出后的一条行内反馈。
+     *
+     * 【为什么是行内而不是模态】导入是高频小操作，模态打断太重；而「什么都不说」
+     * 正是主题导入曾经的缺陷 —— 坏文件静默无反应，用户以为导入不起作用。
+     */
+    const [ioNotice, setIoNotice] = useState<{ text: string; danger: boolean } | null>(null);
 
     // 打开时播种：优先用活动预设，找不到就回落到列表首项。
     useEffect(() => {
@@ -204,6 +221,86 @@ export function VibratoPresetDialog({
         activatePreset(copy);
     }
 
+    /**
+     * 导出**当前选中的**预设。
+     *
+     * 系统预设也允许导出 —— 导出只是序列化，不改任何数据；顺带成了查看系统
+     * 预设原始参数的口子。
+     */
+    async function handleExport() {
+        if (!draft) return;
+        setIoNotice(null);
+        const text = serializeVibratoPresets([draft]);
+        const result = await exportVibratoPresetsJson(text, vibratoPresetFileName(draft));
+        // 用户在原生对话框里取消不是错误 —— 不提示（与其他导出一致）。
+        if (result.canceled) return;
+        if (!result.ok) {
+            setIoNotice({ text: t("vibrato_io_read_failed"), danger: true });
+        }
+    }
+
+    /** 导入预设文件：净化、去重、入库，并把草稿切到最后导入的那条。 */
+    async function handleImport(files: File[]) {
+        const file = files[0];
+        if (!file) return;
+        setIoNotice(null);
+        let text: string;
+        try {
+            text = await file.text();
+        } catch {
+            setIoNotice({ text: t("vibrato_io_read_failed"), danger: true });
+            return;
+        }
+        const parsed = parseVibratoPresets(text);
+        if (!parsed.ok) {
+            const key =
+                parsed.error === "newerVersion"
+                    ? "vibrato_io_newer_version"
+                    : parsed.error === "noPresets"
+                      ? "vibrato_io_empty"
+                      : // badJson 与 wrongKind 对用户是同一句话：这不是我们的文件 /
+                        // 读不出来 —— 分开说只会让人更困惑。
+                        "vibrato_io_wrong_kind";
+            setIoNotice({ text: t(key), danger: true });
+            return;
+        }
+        if (parsed.presets.length === 0) {
+            setIoNotice({ text: t("vibrato_io_empty"), danger: true });
+            return;
+        }
+
+        const capacity = MAX_VIBRATO_PRESETS - session.vibratoPresets.length;
+        const { imported, skipped } = mergeImportedPresets(
+            parsed.presets,
+            session.vibratoPresets,
+            capacity,
+        );
+        if (imported.length === 0) {
+            // 全部是重复：不写库，但要把"跳过 n 条"说出来 —— 否则同样是"点了没反应"。
+            setIoNotice({
+                text: `${plural("vibrato_io_imported", 0)}${plural("vibrato_io_skipped", skipped)}`,
+                danger: false,
+            });
+            return;
+        }
+
+        for (const preset of imported) {
+            dispatch(upsertVibratoPreset(preset));
+        }
+        const last = imported[imported.length - 1];
+        if (last) {
+            dispatch(setActiveVibratoPreset(last.id));
+            setDraft(last);
+        }
+        void dispatch(persistUiSettings());
+        setIoNotice({
+            text:
+                plural("vibrato_io_imported", imported.length) +
+                (skipped > 0 ? plural("vibrato_io_skipped", skipped) : ""),
+            danger: false,
+        });
+    }
+
     function handleCreate() {
         const created = sanitizeVibratoPreset({
             id: createVibratoPresetId(),
@@ -255,6 +352,19 @@ export function VibratoPresetDialog({
                         // 异步包装：删除走二次确认，不关闭主对话框。
                         onClick: async () => {
                             setDeleteTarget(draft);
+                        },
+                    },
+                    {
+                        id: "import",
+                        label: t("vibrato_io_import"),
+                        onClick: () => fileInputRef.current?.click(),
+                    },
+                    {
+                        id: "export",
+                        label: t("vibrato_io_export"),
+                        disabled: !draft,
+                        onClick: async () => {
+                            await handleExport();
                         },
                     },
                     {
@@ -328,6 +438,20 @@ export function VibratoPresetDialog({
                                 </span>
                             ) : null}
                         </>
+                    ) : null}
+
+                    {ioNotice ? (
+                        <span
+                            className="hs-type-caption"
+                            style={{
+                                color: ioNotice.danger
+                                    ? "var(--qt-danger-text)"
+                                    : "var(--qt-text-muted)",
+                            }}
+                            role="status"
+                        >
+                            {ioNotice.text}
+                        </span>
                     ) : null}
 
                     <Flex gap="4" align="start">
@@ -825,6 +949,15 @@ export function VibratoPresetDialog({
                     </Flex>
                 </Flex>
             </AppDialog>
+
+            {/* 文件输入必须由**常驻**组件渲染：文件选择期间 change 的接收方要活着
+                （用户第一次选 a.json、第二次又选同一文件时，不清空 value 就不会再
+                触发 —— 这条由原语处理，这里只保证宿主不随菜单卸载）。 */}
+            <AppFileInput
+                inputRef={fileInputRef}
+                accept=".json,application/json"
+                onFiles={(files) => void handleImport(files)}
+            />
 
             <AppConfirmDialog
                 open={deleteTarget !== null}

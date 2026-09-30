@@ -1945,6 +1945,16 @@ export const enUS = {
 
     vibrato_manager_title: "Vibrato Presets",
     vibrato_audition_play: "Audition",
+    vibrato_io_export: "Export...",
+    vibrato_io_import: "Import...",
+    vibrato_io_imported: "Imported {count} preset|Imported {count} presets",
+    vibrato_io_skipped: ", skipped {count} duplicate|, skipped {count} duplicates",
+    vibrato_io_wrong_kind: "This is not a vibrato preset file.",
+    vibrato_io_newer_version: "This file was written by a newer version of the app.",
+    vibrato_io_read_failed: "Could not read the preset file.",
+    vibrato_io_empty: "The file contains no presets.",
+    vibrato_io_truncated:
+        "Room for {count} more preset only; the rest were skipped.|Room for {count} more presets only; the rest were skipped.",
     vibrato_audition_stop: "Stop audition",
     menu_vibrato_presets: "Vibrato Preset Manager...",
     vibrato_manager_new: "New",

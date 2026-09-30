@@ -1930,6 +1930,16 @@ export const koKR = {
 
     vibrato_manager_title: "비브라토 프리셋",
     vibrato_audition_play: "들어보기",
+    vibrato_io_export: "내보내기...",
+    vibrato_io_import: "가져오기...",
+    vibrato_io_imported: "프리셋 {count}개를 가져왔습니다|프리셋 {count}개를 가져왔습니다",
+    vibrato_io_skipped: ", 중복 {count}개 건너뜀|, 중복 {count}개 건너뜀",
+    vibrato_io_wrong_kind: "비브라토 프리셋 파일이 아닙니다.",
+    vibrato_io_newer_version: "이 파일은 더 새 버전의 앱에서 작성되었습니다.",
+    vibrato_io_read_failed: "프리셋 파일을 읽을 수 없습니다.",
+    vibrato_io_empty: "파일에 프리셋이 없습니다.",
+    vibrato_io_truncated:
+        "프리셋 {count}개만 더 수용할 수 있어 나머지는 건너뛰었습니다.|프리셋 {count}개만 더 수용할 수 있어 나머지는 건너뛰었습니다.",
     vibrato_audition_stop: "들어보기 중지",
     menu_vibrato_presets: "비브라토 프리셋 관리...",
     vibrato_manager_new: "새로 만들기",
