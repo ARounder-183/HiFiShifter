@@ -74,7 +74,13 @@ export interface PreviewGestureSnapshot {
     widthPx: number;
     /** 一个可见周期的像素宽度（相位换算用）。 */
     cycleWidthPx: number;
-    /** 纵向每像素对应的 cents（与绘制同一套换算）。 */
+    /**
+     * 纵向**每像素对应多少 cents**（与绘制同一套换算）。
+     *
+     * 【单位陷阱】它是 cents/px，所以"像素位移 → cents 位移"要**乘**它，不是除。
+     * 反过来用会让灵敏度随深度反比变化：深度越小、每像素走过的 cents 越多，
+     * 拖一点点就把幅度拉飞。
+     */
     centsPerPx: number;
 }
 
@@ -98,6 +104,9 @@ export function wrapPhaseDeg(value: number): number {
  * | 渐入 | 水平位移 → `attackMs`（`dx/width × windowMs`），钳 `0..windowMs/2` |
  * | 渐出 | 同上但**取反**（手柄画在斜坡起点，向右拖即缩短渐出）→ `releaseMs` |
  * | 主体 | `dx → startPhaseDeg`（一个可见周期 = 360°）；`dy → depthCents`（向上加深） |
+ *
+ * 纵向是**与画布 1:1** 的：画布把深度按自身峰值放大，`centsPerPx` 正是那套标尺的
+ * 斜率，所以"把波峰拖到中线"恰好把深度拖到 0。这正是用户对"波形就是旋钮"的预期。
  */
 export function applyPreviewGesture(
     zone: PreviewZone,
@@ -122,12 +131,31 @@ export function applyPreviewGesture(
     const cycleWidthPx = snapshot.cycleWidthPx > 0 ? snapshot.cycleWidthPx : width;
     const phase = wrapPhaseDeg(snapshot.startPhaseDeg + (deltaX / cycleWidthPx) * 360);
     const centsPerPx = snapshot.centsPerPx > 0 ? snapshot.centsPerPx : 1;
+    // 像素 × (cents/像素) = cents。向上拖（deltaY < 0）即加深。
     const depthCents = clamp(
-        snapshot.depthCents - deltaY / centsPerPx,
+        snapshot.depthCents - deltaY * centsPerPx,
         VIBRATO_LIMITS.depthCents.min,
         VIBRATO_LIMITS.depthCents.max,
     );
     return { startPhaseDeg: phase, depthCents };
+}
+
+/** 按住「精细调整」时位移缩到 1/10（与滚轮的精细调整同一比例）。 */
+export const PREVIEW_FINE_SCALE = 0.1;
+
+/**
+ * 按修饰键缩放一次手势的位移。
+ *
+ * 抽成纯函数是为了让"精细调整到底生效没有"可单测 —— 这类修饰键失效不会抛错，
+ * 只会让手感变得不可控。
+ */
+export function scalePreviewGestureDeltas(
+    deltaX: number,
+    deltaY: number,
+    fine: boolean,
+): { deltaX: number; deltaY: number } {
+    const scale = fine ? PREVIEW_FINE_SCALE : 1;
+    return { deltaX: deltaX * scale, deltaY: deltaY * scale };
 }
 
 /**

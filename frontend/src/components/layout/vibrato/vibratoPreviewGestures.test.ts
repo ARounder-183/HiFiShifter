@@ -2,11 +2,13 @@ import { describe, expect, test } from "vitest";
 
 import { sanitizeVibratoPreset, VIBRATO_LIMITS } from "../../../features/vibrato/vibratoPresets";
 import {
+    PREVIEW_FINE_SCALE,
     applyPreviewGesture,
     cursorForZone,
     cycleWidthPxFor,
     handleLayoutFor,
     hitTestPreviewZone,
+    scalePreviewGestureDeltas,
     wrapPhaseDeg,
     type PreviewGestureSnapshot,
 } from "./vibratoPreviewGestures";
@@ -121,15 +123,60 @@ describe("applyPreviewGesture", () => {
     });
 
     test("主体：向上拖动加深，向下拖动变浅（可为负，即反相）", () => {
-        // centsPerPx = 0.5 → 向上 20px = +40 cents。
+        // centsPerPx = 0.5：像素位移**乘以**它才是 cents 位移。
+        // 向上 20px → 30 + 20*0.5 = 40。
         const deeper = applyPreviewGesture({ kind: "body" }, snapshot(), 0, -20);
-        expect(deeper.depthCents).toBeCloseTo(70, 9);
-        // 30 - 200/0.5 = -370：负值合法（波形反相）。
+        expect(deeper.depthCents).toBeCloseTo(40, 9);
+        // 30 - 200*0.5 = -70：负值合法（波形反相）。
         const shallow = applyPreviewGesture({ kind: "body" }, snapshot(), 0, 200);
-        expect(shallow.depthCents).toBeCloseTo(-370, 9);
+        expect(shallow.depthCents).toBeCloseTo(-70, 9);
         // 越过下界才钳住。
         const floored = applyPreviewGesture({ kind: "body" }, snapshot(), 0, 100_000);
         expect(floored.depthCents).toBe(VIBRATO_LIMITS.depthCents.min);
+    });
+
+    /*
+     * 回归：纵向必须**乘** centsPerPx，不能除。
+     *
+     * 【为什么单测这条】除反了会让灵敏度随深度反比变化 —— 深度越小，每像素走过的
+     * cents 越多，拖一点点就把幅度拉飞（"起始深度很小却变化特别大"）。而且它不会
+     * 抛错，只会让手感不可控。这里把"与画布 1:1"这条不变量钉住：把波峰从中线附近
+     * 拖到中线，深度应当归零。
+     */
+    test("纵向与画布 1:1：拖动等于画布半高的距离即把深度清零", () => {
+        // 模拟画布：reach = 54px、halfCents = 1.15 × 深度。
+        const depth = 40;
+        const reach = 54;
+        const centsPerPx = (depth * 1.15) / reach;
+        // 波峰画在 midY - depth/halfCents*reach 处，即距中线 0.87*reach 像素。
+        const peakOffsetPx = (depth / (depth * 1.15)) * reach;
+        const next = applyPreviewGesture(
+            { kind: "body" },
+            snapshot({ depthCents: depth, centsPerPx }),
+            0,
+            peakOffsetPx,
+        );
+        expect(Math.abs(next.depthCents as number)).toBeLessThan(0.5);
+    });
+
+    test("小深度：每像素走过的 cents 更少（灵敏度与深度同向，而非反比）", () => {
+        const reach = 54;
+        const shallow = applyPreviewGesture(
+            { kind: "body" },
+            snapshot({ depthCents: 5, centsPerPx: (5 * 1.15) / reach }),
+            0,
+            -10,
+        );
+        const deep = applyPreviewGesture(
+            { kind: "body" },
+            snapshot({ depthCents: 100, centsPerPx: (100 * 1.15) / reach }),
+            0,
+            -10,
+        );
+        const shallowDelta = (shallow.depthCents as number) - 5;
+        const deepDelta = (deep.depthCents as number) - 100;
+        expect(shallowDelta).toBeGreaterThan(0);
+        expect(shallowDelta).toBeLessThan(deepDelta);
     });
 
     test("退化几何不产生 NaN", () => {
@@ -170,5 +217,35 @@ describe("handleLayoutFor", () => {
         const layout = handleLayoutFor({ attackMs: 5000, releaseMs: 5000 }, 1600);
         expect(layout.attackFrac).toBe(1);
         expect(layout.releaseFrac).toBe(0);
+    });
+});
+
+describe("scalePreviewGestureDeltas（精细调整）", () => {
+    test("未按修饰键：位移原样", () => {
+        expect(scalePreviewGestureDeltas(10, -20, false)).toEqual({ deltaX: 10, deltaY: -20 });
+    });
+
+    test("按住修饰键：位移缩到 1/10", () => {
+        expect(scalePreviewGestureDeltas(10, -20, true)).toEqual({
+            deltaX: 10 * PREVIEW_FINE_SCALE,
+            deltaY: -20 * PREVIEW_FINE_SCALE,
+        });
+        expect(PREVIEW_FINE_SCALE).toBeLessThan(1);
+    });
+
+    test("精细调整确实减小了深度变化量（拖同样的距离只走一小步）", () => {
+        const snapshotValue = snapshot({ depthCents: 30, centsPerPx: 0.5 });
+        const coarse = applyPreviewGesture({ kind: "body" }, snapshotValue, 0, -20);
+        const fine = scalePreviewGestureDeltas(0, -20, true);
+        const fineResult = applyPreviewGesture(
+            { kind: "body" },
+            snapshotValue,
+            fine.deltaX,
+            fine.deltaY,
+        );
+        const coarseDelta = (coarse.depthCents as number) - 30;
+        const fineDelta = (fineResult.depthCents as number) - 30;
+        expect(fineDelta).toBeGreaterThan(0);
+        expect(fineDelta).toBeCloseTo(coarseDelta * PREVIEW_FINE_SCALE, 9);
     });
 });

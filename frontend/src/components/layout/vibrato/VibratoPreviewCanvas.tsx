@@ -33,6 +33,14 @@ export interface VibratoPreviewGestureInfo {
     centsPerPx: number;
 }
 
+/** 手势开始时的修饰键状态（用于「精细调整」这类按修饰键缩放的手势）。 */
+export interface VibratoPreviewModifiers {
+    ctrlKey: boolean;
+    shiftKey: boolean;
+    altKey: boolean;
+    metaKey: boolean;
+}
+
 export interface VibratoPreviewCanvasProps {
     samples: VibratoPreviewSamples;
     /** CSS 像素高度。 */
@@ -42,8 +50,8 @@ export interface VibratoPreviewCanvasProps {
     handles?: PreviewHandleLayout;
     /** 手势开始。 */
     onGestureStart?: (zone: PreviewZone, info: VibratoPreviewGestureInfo) => void;
-    /** 手势移动：自起点累计的像素位移。 */
-    onGestureMove?: (deltaX: number, deltaY: number) => void;
+    /** 手势移动：自起点累计的像素位移，以及当前的修饰键状态。 */
+    onGestureMove?: (deltaX: number, deltaY: number, modifiers: VibratoPreviewModifiers) => void;
     /** 手势结束。 */
     onGestureEnd?: () => void;
 }
@@ -232,7 +240,12 @@ export function VibratoPreviewCanvas({
             );
             return;
         }
-        onGestureMove?.(x - gesture.x, y - gesture.y);
+        onGestureMove?.(x - gesture.x, y - gesture.y, {
+            ctrlKey: event.ctrlKey,
+            shiftKey: event.shiftKey,
+            altKey: event.altKey,
+            metaKey: event.metaKey,
+        });
     };
 
     const endGesture = (event: React.PointerEvent<HTMLDivElement>) => {

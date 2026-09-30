@@ -355,3 +355,34 @@ test("切换预设时把未保存的改动写回库（编辑途中可换预设�
     const saved = store.getState().session.vibratoPresets.find((p) => p.id === "custom_edit");
     expect(saved?.cycle.kind).toBe("table");
 });
+
+/*
+ * 关闭入口：保存不再关闭窗口之后，页脚必须有一个显式的「关闭」按钮 ——
+ * 否则用户只剩 Esc / 点外部两条不显眼的路。
+ */
+test("页脚有「关闭」按钮，点击请求关闭窗口", async () => {
+    const custom = sanitizeVibratoPreset({ id: "custom_close", name: "Close Me", depthCents: 40 });
+    const onOpenChange = vi.fn();
+    await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(custom));
+        store.dispatch(setActiveVibratoPreset(custom.id));
+    }, onOpenChange);
+
+    const closeButton = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Close",
+    );
+    expect(closeButton, "关闭按钮应已渲染").toBeTruthy();
+    await act(async () => {
+        closeButton!.click();
+    });
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+});
+
+test("导入 / 导出按钮文案不带省略号（省空间）", async () => {
+    await mountDialog();
+    const labels = [...document.querySelectorAll("button")].map((b) => b.textContent?.trim() ?? "");
+    expect(labels).toContain("Import");
+    expect(labels).toContain("Export");
+    expect(labels.some((label) => label === "Import...")).toBe(false);
+    expect(labels.some((label) => label === "Export...")).toBe(false);
+});

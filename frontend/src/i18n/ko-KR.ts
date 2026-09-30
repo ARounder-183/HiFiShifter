@@ -1934,8 +1934,8 @@ export const koKR = {
 
     vibrato_manager_title: "비브라토 프리셋",
     vibrato_audition_play: "들어보기",
-    vibrato_io_export: "내보내기...",
-    vibrato_io_import: "가져오기...",
+    vibrato_io_export: "내보내기",
+    vibrato_io_import: "가져오기",
     vibrato_io_imported: "프리셋 {count}개를 가져왔습니다|프리셋 {count}개를 가져왔습니다",
     vibrato_io_skipped: ", 중복 {count}개 건너뜀|, 중복 {count}개 건너뜀",
     vibrato_io_wrong_kind: "비브라토 프리셋 파일이 아닙니다.",

@@ -19,6 +19,7 @@ import { Box, Flex, ScrollArea, TextField } from "@radix-ui/themes";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
+import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
     persistUiSettings,
@@ -77,6 +78,7 @@ import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
 import {
     VibratoPreviewCanvas,
     type VibratoPreviewGestureInfo,
+    type VibratoPreviewModifiers,
 } from "./vibrato/VibratoPreviewCanvas";
 import {
     BASELINE_MODE_KEYS,
@@ -99,6 +101,7 @@ import {
     applyPreviewGesture,
     cycleWidthPxFor,
     handleLayoutFor,
+    scalePreviewGestureDeltas,
     type PreviewGestureSnapshot,
     type PreviewZone,
 } from "./vibrato/vibratoPreviewGestures";
@@ -138,6 +141,10 @@ export function VibratoPresetDialog({
     const dispatch = useAppDispatch();
     const { t, plural } = useI18n();
     const session = useAppSelector((state: RootState) => state.session);
+    /** 「精细调整」修饰键（默认 `Ctrl` / macOS `Command`）：预览拖拽时缩到 1/10。 */
+    const paramFineAdjustKb = useAppSelector((state: RootState) =>
+        selectKeybinding(state, "modifier.paramFineAdjust"),
+    );
 
     const resolved = useMemo(
         () => resolveVibratoPresets(session.vibratoPresets),
@@ -250,10 +257,21 @@ export function VibratoPresetDialog({
     }
 
     /** 画布手势移动：位移 → 草稿字段（换算规则见 `vibratoPreviewGestures`）。 */
-    function handlePreviewGestureMove(deltaX: number, deltaY: number) {
+    function handlePreviewGestureMove(
+        deltaX: number,
+        deltaY: number,
+        modifiers: VibratoPreviewModifiers,
+    ) {
         const gesture = previewGestureRef.current;
         if (!gesture) return;
-        patch(applyPreviewGesture(gesture.zone, gesture.snapshot, deltaX, deltaY));
+        // 按住「精细调整」时位移缩到 1/10 —— 与滚轮调参的精细调整同一比例，
+        // 大深度预设也能一像素一像素地捏。
+        const scaled = scalePreviewGestureDeltas(
+            deltaX,
+            deltaY,
+            isModifierActive(paramFineAdjustKb, modifiers),
+        );
+        patch(applyPreviewGesture(gesture.zone, gesture.snapshot, scaled.deltaX, scaled.deltaY));
     }
 
     /** 画布手势结束。 */
@@ -495,11 +513,22 @@ export function VibratoPresetDialog({
                         intent: "primary",
                         disabled: !draft || isBuiltin,
                         // 保存**不关闭**对话框：用户常要"先存一版、接着调"，
-                        // 存完就把窗口收掉等于逼他重新打开。关闭交给 Esc / 右上角。
+                        // 存完就把窗口收掉等于逼他重新打开。
                         autoClose: false,
                         onClick: handleSave,
                     },
+                    {
+                        // 显式关闭按钮：保存不再关闭窗口之后，页脚里没有"退出"的
+                        // 去处，只剩 Esc / 点外部 —— 两者都不显眼。
+                        id: "close",
+                        label: t("close"),
+                        autoClose: false,
+                        onClick: () => handleOpenChange(false),
+                    },
                 ]}
+                // 默认动作仍是「保存」：关闭排在它右边（页脚最右是关闭的常见排布），
+                // 但 Enter 不该变成"关掉窗口"。
+                defaultActionId="save"
             >
                 <Flex
                     direction="column"

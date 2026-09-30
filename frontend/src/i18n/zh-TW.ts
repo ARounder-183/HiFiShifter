@@ -1895,8 +1895,8 @@ export const zhTW = {
 
     vibrato_manager_title: "顫音預設",
     vibrato_audition_play: "試聽",
-    vibrato_io_export: "匯出...",
-    vibrato_io_import: "匯入...",
+    vibrato_io_export: "匯出",
+    vibrato_io_import: "匯入",
     vibrato_io_imported: "已匯入 {count} 個預設|已匯入 {count} 個預設",
     vibrato_io_skipped: "，跳過 {count} 個重複|，跳過 {count} 個重複",
     vibrato_io_wrong_kind: "這不是顫音預設檔案。",

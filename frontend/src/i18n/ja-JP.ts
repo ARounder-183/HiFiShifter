@@ -1961,8 +1961,8 @@ export const jaJP = {
 
     vibrato_manager_title: "ビブラートプリセット",
     vibrato_audition_play: "試聴",
-    vibrato_io_export: "エクスポート...",
-    vibrato_io_import: "インポート...",
+    vibrato_io_export: "エクスポート",
+    vibrato_io_import: "インポート",
     vibrato_io_imported:
         "{count} 個のプリセットをインポートしました|{count} 個のプリセットをインポートしました",
     vibrato_io_skipped: "、重複 {count} 件をスキップ|、重複 {count} 件をスキップ",

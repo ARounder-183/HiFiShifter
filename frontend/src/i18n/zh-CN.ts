@@ -1893,8 +1893,8 @@ export const zhCN = {
 
     vibrato_manager_title: "颤音预设",
     vibrato_audition_play: "试听",
-    vibrato_io_export: "导出...",
-    vibrato_io_import: "导入...",
+    vibrato_io_export: "导出",
+    vibrato_io_import: "导入",
     vibrato_io_imported: "已导入 {count} 个预设|已导入 {count} 个预设",
     vibrato_io_skipped: "，跳过 {count} 个重复|，跳过 {count} 个重复",
     vibrato_io_wrong_kind: "这不是颤音预设文件。",

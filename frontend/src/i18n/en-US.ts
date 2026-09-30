@@ -1949,8 +1949,8 @@ export const enUS = {
 
     vibrato_manager_title: "Vibrato Presets",
     vibrato_audition_play: "Audition",
-    vibrato_io_export: "Export...",
-    vibrato_io_import: "Import...",
+    vibrato_io_export: "Export",
+    vibrato_io_import: "Import",
     vibrato_io_imported: "Imported {count} preset|Imported {count} presets",
     vibrato_io_skipped: ", skipped {count} duplicate|, skipped {count} duplicates",
     vibrato_io_wrong_kind: "This is not a vibrato preset file.",
