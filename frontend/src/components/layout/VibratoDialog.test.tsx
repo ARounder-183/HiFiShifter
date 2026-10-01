@@ -144,6 +144,22 @@ async function clickButton(text: string): Promise<void> {
     });
 }
 
+/** 往数字输入框里打字（`AppNumberField` 的实时回调每次输入都会触发）。 */
+async function typeNumber(ariaLabel: string, value: number): Promise<void> {
+    const input = document.querySelector<HTMLInputElement>(`input[aria-label="${ariaLabel}"]`);
+    expect(input, `输入框「${ariaLabel}」应已渲染`).toBeTruthy();
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    await act(async () => {
+        setter?.call(input, String(value));
+        input!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+}
+
+/** 库里当前的自定义预设（不含系统预设 —— 它们不在 store 里）。 */
+function userPresets(store: Awaited<ReturnType<typeof mountDialog>>) {
+    return store.getState().session.vibratoPresets;
+}
+
 /**
  * 一段真实的音高曲线：C4 附近 ±0.5 个半音。
  *
@@ -317,8 +333,8 @@ test("导入拿错的文件（主题 / 布局 JSON）：拒收且给出明确反
 /*
  * R6a：预览画布的可编辑性。
  *
- * 【契约】用户预设的预览可拖（画手柄、接受手势），系统预设的预览只读 ——
- * 与参数表单"系统预设禁用一切字段"一致，避免"为什么别的能拖这里不能"的歧义。
+ * 【契约】预览可拖（画手柄、接受手势）—— 对系统预设**也一样**：拖的是本地草稿，
+ * 落盘时变成一份自定义副本（见"保存 = 另存为副本"那几条），出厂预设本身不会被碰。
  * 交互性由 `data-testid` 暴露：它只在可拖时出现。
  */
 test("用户预设：预览画布可编辑（渲染交互层）", async () => {
@@ -330,10 +346,10 @@ test("用户预设：预览画布可编辑（渲染交互层）", async () => {
     expect(document.querySelector('[data-testid="vibrato-preview-interactive"]')).toBeTruthy();
 });
 
-test("系统预设：预览画布只读（不渲染交互层）", async () => {
+test("系统预设：预览画布同样可编辑（改的是本地草稿）", async () => {
     await mountDialog();
-    // 默认活动预设是系统预设「自然」。
-    expect(document.querySelector('[data-testid="vibrato-preview-interactive"]')).toBeNull();
+    // 默认活动预设是系统预设；它一样能拖 —— 拖出来的是草稿，不是出厂参数。
+    expect(document.querySelector('[data-testid="vibrato-preview-interactive"]')).toBeTruthy();
 });
 
 /*
@@ -438,14 +454,17 @@ test("用户预设：点「手绘…」展开周期编辑器", async () => {
     expect(document.querySelector('[data-testid="vibrato-cycle-editor"]')).toBeTruthy();
 });
 
-test("系统预设：手绘入口禁用", async () => {
+test("系统预设：手绘入口同样可用", async () => {
     await mountDialog();
     const drawButton = [...document.querySelectorAll("button")].find(
         (button) => button.textContent?.trim() === "Draw...",
     ) as HTMLButtonElement | undefined;
     expect(drawButton, "手绘入口应已渲染").toBeTruthy();
-    expect(drawButton!.disabled).toBe(true);
-    expect(document.querySelector('[data-testid="vibrato-cycle-editor"]')).toBeNull();
+    expect(drawButton!.disabled, "系统预设也能手绘（改的是草稿）").toBe(false);
+    await act(async () => {
+        drawButton!.click();
+    });
+    expect(document.querySelector('[data-testid="vibrato-cycle-editor"]')).toBeTruthy();
 });
 
 /*
@@ -472,6 +491,98 @@ test("保存不关闭对话框（可先存一版接着调）", async () => {
         saveButton!.click();
     });
     expect(onOpenChange).not.toHaveBeenCalled();
+});
+
+/*
+ * 系统预设：参数可以改，但**保存 = 另存为一份自定义副本**。
+ *
+ * 【为什么值得测】这是"系统预设只读"这条旧规矩的替代品：出厂预设必须永远可复原
+ * （不能被覆盖），而用户又常常是"基于「自然」改两个参数就够用了"。两条都要满足，
+ * 唯一的办法就是"改草稿、存副本"。
+ *
+ * 同时钉住三件事：
+ * 1. 副本是一条**新**预设（新 id、`builtin: false`），库里绝不出现系统预设的 id；
+ * 2. 草稿切到副本上 —— 否则再按一次保存会又生成一条（那是"每次都新建"，不是保存）；
+ * 3. 没有改动时保存是空操作（不能按一下就凭空多一条）。
+ */
+test("系统预设：保存后另存为自定义副本，草稿切到副本上", async () => {
+    const store = await mountDialog((s) => {
+        s.dispatch(setActiveVibratoPreset("builtin.natural"));
+    });
+    expect(userPresets(store).length, "起手库里不该有自定义预设").toBe(0);
+
+    // 没改动时按保存：空操作。
+    await clickButton("Save");
+    expect(userPresets(store).length, "没有改动时保存不该凭空造一条").toBe(0);
+
+    // 改深度（改的是草稿）。
+    await typeNumber("Depth", 55);
+
+    await clickButton("Save");
+
+    const afterFirst = userPresets(store);
+    expect(afterFirst.length).toBe(1);
+    const copy = afterFirst[0];
+    expect(copy.id.startsWith("builtin."), "副本必须是用户预设").toBe(false);
+    expect(copy.builtin).toBe(false);
+    expect(copy.depthCents, "副本带着刚才的改动").toBe(55);
+    expect(copy.name, "名字按显示名预填").toBe("Natural 2");
+
+    // 再按一次保存：更新的是**同一份**副本，而不是又造一条。
+    await clickButton("Save");
+    expect(userPresets(store).length, "第二次保存不该再新建").toBe(1);
+});
+
+/*
+ * 系统预设：改完直接切走 —— 改动落成副本，而不是被丢掉或覆盖出厂预设。
+ *
+ * 与"切换预设时把未保存的改动写回库"是同一条规矩（离开这条预设 = 落盘），只是系统
+ * 预设落盘的去处是副本。丢掉才是真的糟：界面刚刚还显示着用户改过的值。
+ */
+test("系统预设：改完切走时，改动落成副本", async () => {
+    const store = await mountDialog((s) => {
+        s.dispatch(setActiveVibratoPreset("builtin.natural"));
+    });
+
+    await typeNumber("Depth", 55);
+
+    const rows = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    const straightRow = rows.find((row) => row.textContent?.includes("Straight"));
+    expect(straightRow, "系统预设行应已渲染").toBeTruthy();
+    await act(async () => {
+        straightRow!.click();
+    });
+
+    const saved = userPresets(store);
+    expect(saved.length, "改动应当落成一条副本").toBe(1);
+    expect(saved[0].depthCents).toBe(55);
+    expect(saved[0].id.startsWith("builtin.")).toBe(false);
+});
+
+/*
+ * 系统预设 + 「添加颤音」：调完只按「应用」—— 库里不留任何东西。
+ *
+ * 【为什么单独一条】这正是用户要的"基于系统预设调两个参数然后应用"：草稿里的改动
+ * 落到选区上，而预设库保持原样（既不覆盖出厂预设，也不生成副本 —— 生成副本是
+ * 「保存」的事）。
+ */
+test("系统预设：只应用不保存时，库里不留痕迹", async () => {
+    const onApply = vi.fn();
+    const store = await mountDialog(
+        (s) => {
+            s.dispatch(setActiveVibratoPreset("builtin.natural"));
+        },
+        () => undefined,
+        { applyTarget: { onApply } },
+    );
+
+    await typeNumber("Depth", 55);
+    await clickButton("Apply");
+
+    expect(onApply).toHaveBeenCalledTimes(1);
+    expect(onApply.mock.calls[0][0].id, "应用的还是系统预设那条（带改动）").toBe("builtin.natural");
+    expect(onApply.mock.calls[0][0].depthCents).toBe(55);
+    expect(userPresets(store).length, "只应用不该写库").toBe(0);
 });
 
 test("切换预设时把未保存的改动写回库（编辑途中可换预设）", async () => {

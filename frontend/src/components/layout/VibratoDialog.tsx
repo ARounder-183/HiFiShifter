@@ -67,6 +67,7 @@ import {
     findVibratoPreset,
     resolveVibratoPresets,
 } from "../../features/vibrato/vibratoPresetList";
+import { SYSTEM_VIBRATO_PRESETS } from "../../features/vibrato/systemPresets";
 import {
     mergeImportedPresets,
     parseVibratoPresets,
@@ -568,9 +569,14 @@ export function VibratoDialog({
         fine: PreviewFineDragState;
     } | null>(null);
 
-    /** 画布手势开始：登记起点快照（窗口时长取预览默认几何）。 */
+    /**
+     * 画布手势开始：登记起点快照（窗口时长取预览默认几何）。
+     *
+     * 系统预设同样可拖：拖改的是**本地草稿**，落盘时变成一份副本（见 `commitDraft`）——
+     * 出厂预设本身不会被碰。
+     */
     function handlePreviewGestureStart(zone: PreviewZone, info: VibratoPreviewGestureInfo) {
-        if (!draft || isBuiltin) return;
+        if (!draft) return;
         const windowMs = (PREVIEW_DEFAULT.frameCount - 1) * PREVIEW_DEFAULT.framePeriodMs;
         const fineActive = isModifierActive(paramFineAdjustKb, info.modifiers);
         previewGestureRef.current = {
@@ -618,31 +624,96 @@ export function VibratoDialog({
     }
 
     /**
-     * 草稿相对库中同 id 预设是否有未保存的改动。
+     * 草稿相对"它该等于什么"是否有未保存的改动。
      *
-     * 系统预设永远不算"可保存的改动"（只读）；列表里找不到同 id，说明是刚新建、
-     * 还没入库的预设，也算有改动。
+     * - 用户预设：与库里同 id 的那条比；列表里找不到同 id，说明是刚新建、还没入库的
+     *   预设，也算有改动。
+     * - 系统预设：与**出厂定义**比。
+     *
+     * 【为什么系统预设也有"改动"】参数是可以改的（改的是本地草稿），只是落盘时不能
+     * 覆盖出厂预设 —— 于是"有改动"的含义变成"存下去要生成一份副本"。签名忽略 `id`
+     * 与 `builtin`（见 `vibratoPresetSignature`），因此没动过的草稿与定义完全相同，
+     * 保存就是个空操作。
      */
     function draftHasUnsavedChanges(): boolean {
-        if (!draft || isBuiltin) return false;
+        if (!draft) return false;
+        const normalized = sanitizeVibratoPreset(draft);
+        if (isBuiltin) {
+            const definition = SYSTEM_VIBRATO_PRESETS.find((preset) => preset.id === draft.id);
+            if (!definition) return false;
+            return (
+                vibratoPresetSignature(normalized) !==
+                vibratoPresetSignature(sanitizeVibratoPreset(definition))
+            );
+        }
         const stored = resolved.user.find((preset) => preset.id === draft.id);
         if (!stored) return true;
-        return (
-            vibratoPresetSignature(sanitizeVibratoPreset(draft)) !== vibratoPresetSignature(stored)
+        return vibratoPresetSignature(normalized) !== vibratoPresetSignature(stored);
+    }
+
+    /**
+     * 把一条预设另存为自定义副本。
+     *
+     * 名字按**显示名**预填，并避开已占用的名字：系统预设的 `name` 是空的（名字走
+     * 词条），拿它当基底会得到一个无名副本；编号避开现有全部显示名，连点两次才不会
+     * 叠成"名字 2 2"。
+     *
+     * @returns 已达上限（`MAX_VIBRATO_PRESETS`）时返回 `null`，由调用方给出提示 ——
+     *          静默失败会让用户以为"保存没反应"。
+     */
+    function duplicateAsCustom(source: VibratoPreset): VibratoPreset | null {
+        if (resolved.user.length >= MAX_VIBRATO_PRESETS) return null;
+        return duplicateVibratoPreset(
+            source,
+            nextDuplicatePresetName(
+                vibratoPresetLabel(source, t) || t("vibrato_manager_new"),
+                resolved.all.map((preset) => vibratoPresetLabel(preset, t)),
+            ),
         );
+    }
+
+    /**
+     * 把草稿的未保存改动落盘，返回落盘后的那条预设（没有可落的东西时返回 `null`）。
+     *
+     * 【系统预设的落盘 = 另存为副本】出厂预设永远不能被覆盖（要可复原），因此对它的
+     * 改动落到一份**副本**上：新 id、`builtin: false`、名字按显示名预填。这就是
+     * "基于系统预设改一版、存成自己的"那条路 —— 参数表单因此对系统预设也可编辑，
+     * 而「保存」按钮对它同样可用。
+     *
+     * 【只应用、不保存】「应用」走的是另一条路（`handleApply` 直接把草稿交给编辑
+     * 管线），因此"基于系统预设调两个参数然后应用"不会在库里留下任何东西。
+     */
+    function commitDraft(): VibratoPreset | null {
+        if (!draft || !draftHasUnsavedChanges()) return null;
+        const normalized = sanitizeVibratoPreset(draft);
+        if (!isBuiltin) {
+            persistPreset(normalized);
+            return normalized;
+        }
+        const copy = duplicateAsCustom(normalized);
+        if (!copy) {
+            setIoNotice({ text: t("vibrato_manager_at_cap"), danger: true });
+            return null;
+        }
+        persistPreset(copy);
+        // 说明这份副本从哪来：用户在列表里会看到多出一条，不解释就不知道是自己刚才
+        // 那次改动落下来的。
+        setIoNotice({
+            text: t("vibrato_builtin_saved_as").replace("{name}", vibratoPresetLabel(copy, t)),
+            danger: false,
+        });
+        return copy;
     }
 
     /**
      * 选中一个预设进行编辑。
      *
      * 【切走时先落盘】用户在 A 上改了一半、切到 B 看看，若改动被直接丢弃，
-     * "编辑途中不能换预设"就成了硬伤。因此切换前先把 A 的未保存改动写回库 ——
-     * 与「保存」同一套净化 / 入库路径。没有改动（或系统预设）时什么都不做。
+     * "编辑途中不能换预设"就成了硬伤。因此切换前先把 A 的未保存改动落盘（系统预设
+     * 落成一份副本）—— 与「保存」同一套路径。
      */
     function selectPreset(preset: VibratoPreset) {
-        if (draft && draft.id !== preset.id && draftHasUnsavedChanges()) {
-            persistPreset(sanitizeVibratoPreset(draft));
-        }
+        if (draft && draft.id !== preset.id) commitDraft();
         setHandDraw(null);
         setDraft(preset);
         // 换预设 = 换一段波形，纵轴跟着重新拟合（编辑期间则保持不动）。
@@ -651,7 +722,7 @@ export function VibratoDialog({
 
     /** 进入手绘：把当前波形采样成表作为起点（改形比从零画顺手）。 */
     function openHandDraw() {
-        if (!draft || isBuiltin) return;
+        if (!draft) return;
         const baseline = draft.cycle;
         // 记下"当前形状"：来自参数式就用它，来自表（提取 / 上次手绘）则兜底正弦 ——
         // 与形状下拉的显示口径一致。
@@ -679,29 +750,36 @@ export function VibratoDialog({
         void dispatch(persistUiSettings());
     }
 
-    /** 复制一份预设（管理器页脚与列表右键菜单共用）。 */
+    /** 复制一份预设（页脚与列表右键菜单共用）。复制的是**入库的那条**，不是草稿。 */
     function duplicatePreset(source: VibratoPreset) {
-        /*
-         * 名字按**显示名**预填：系统预设的 `name` 是空的（名字走词条），拿它当基底会
-         * 得到一个无名副本。编号还要避开现有全部显示名，否则连点两次就是"名字 2 2"。
-         */
-        const name = nextDuplicatePresetName(
-            vibratoPresetLabel(source, t) || t("vibrato_manager_new"),
-            resolved.all.map((preset) => vibratoPresetLabel(preset, t)),
-        );
-        const copy = duplicateVibratoPreset(source, name);
+        const copy = duplicateAsCustom(source);
+        if (!copy) {
+            setIoNotice({ text: t("vibrato_manager_at_cap"), danger: true });
+            return;
+        }
         persistPreset(copy);
         selectPreset(copy);
         activatePreset(copy);
     }
 
+    /**
+     * 「保存」：把草稿的改动落盘（系统预设落成一份副本），并让草稿跟着落到那份上。
+     *
+     * 【为什么草稿要跟着切】对系统预设来说，落盘产生的是**另一条**预设（新 id）。
+     * 草稿若还停在原来的 id 上，用户接着调、再按保存就会又生成一份副本 —— 那不是
+     * "保存"，是"每次都新建"。切过去之后，第二次保存就是更新那一份。
+     *
+     * 【为什么顺手设为当前使用】与「复制为自定义」同一套：用户按保存表达的是
+     * "我要这一版"，把它设为当前使用才符合意图（拖拽 / 菜单都用当前使用的那条）。
+     */
     function handleSave() {
-        if (!draft || isBuiltin) return;
-        const normalized = sanitizeVibratoPreset(draft);
-        persistPreset(normalized);
-        setDraft(normalized);
+        if (!draft) return;
+        const saved = commitDraft();
+        if (!saved) return;
+        setDraft(saved);
+        if (isBuiltin) activatePreset(saved);
         // 保存是"这段波形定稿了"的时机：顺势把纵轴重新拟合回六成上下。
-        fitPreviewAxis(normalized);
+        fitPreviewAxis(saved);
     }
 
     /**
@@ -1092,9 +1170,12 @@ export function VibratoDialog({
     const cycleEstimate = draft ? estimateCycles(draft, 320, 5) : 0;
     /** 预览窗口时长（ms）：与 `buildVibratoPreview` 的默认几何一致。 */
     const previewWindowMs = (PREVIEW_DEFAULT.frameCount - 1) * PREVIEW_DEFAULT.framePeriodMs;
-    /** 渐入 / 渐出手柄的归一化位置。系统预设只读，不画手柄。 */
-    const previewHandles =
-        draft && !isBuiltin ? handleLayoutFor(draft, previewWindowMs) : undefined;
+    /**
+     * 渐入 / 渐出手柄的归一化位置。
+     *
+     * 系统预设也画：手柄可拖，拖的是本地草稿（保存时落成副本）。
+     */
+    const previewHandles = draft ? handleLayoutFor(draft, previewWindowMs) : undefined;
 
     const customCount = resolved.user.length;
     const atCap = customCount >= MAX_VIBRATO_PRESETS;
@@ -1270,7 +1351,7 @@ export function VibratoDialog({
                          * 没有宿主时它就是唯一的主按钮（见 defaultActionId）。
                          */
                         intent: applyTarget ? "default" : "primary",
-                        disabled: !draft || isBuiltin,
+                        disabled: !draft,
                         // 保存**不关闭**对话框：用户常要"先存一版、接着调"，
                         // 存完就把窗口收掉等于逼他重新打开。
                         autoClose: false,
@@ -1345,14 +1426,13 @@ export function VibratoDialog({
                                         fitPreviewAxis(draft);
                                     }
                                 }}
-                                fitDisabled={isBuiltin}
                                 audition={audition}
                                 onAudition={toggleAudition}
                                 appliedAuditionDisabled={!auditionCurves}
                             />
                             {isBuiltin ? (
                                 <span className="hs-type-caption">
-                                    {t("vibrato_manager_readonly")}
+                                    {t("vibrato_manager_builtin_save_note")}
                                 </span>
                             ) : null}
                         </>
@@ -1574,7 +1654,6 @@ export function VibratoDialog({
                                                         <Flex align="center" gap="2" wrap="wrap">
                                                             <AppSelect
                                                                 value={selectedWaveShape}
-                                                                disabled={isBuiltin}
                                                                 onValueChange={(value) => {
                                                                     const shape =
                                                                         value as WaveShape;
@@ -1627,7 +1706,6 @@ export function VibratoDialog({
                                                             <AppButton
                                                                 size="sm"
                                                                 emphasis="soft"
-                                                                disabled={isBuiltin}
                                                                 onClick={openHandDraw}
                                                             >
                                                                 {t("vibrato_handdraw_open")}
@@ -1650,7 +1728,6 @@ export function VibratoDialog({
                                                                  * 留着能拖会让用户以为拖了会变，实际毫无反应。
                                                                  */
                                                                 disabled={
-                                                                    isBuiltin ||
                                                                     draft.cycle.kind !== "shape" ||
                                                                     !shapeUsesSkew(
                                                                         selectedWaveShape,
@@ -1679,7 +1756,6 @@ export function VibratoDialog({
                                                     {handDraw && draft.cycle.kind === "table" ? (
                                                         <VibratoCycleEditor
                                                             table={draft.cycle.table}
-                                                            disabled={isBuiltin}
                                                             // 画布的 aria-label 讲"这块画布能干什么"，
                                                             // 与展开按钮的"手绘…"（讲动作）分开两个键。
                                                             ariaLabel={t("vibrato_handdraw_canvas")}
@@ -1742,7 +1818,6 @@ export function VibratoDialog({
                                                         <AppNumberField
                                                             value={depthValue}
                                                             unit={depthUnit}
-                                                            disabled={isBuiltin}
                                                             min={VIBRATO_LIMITS.depthCents.min}
                                                             ariaLabel={t("vibrato_depth_label")}
                                                             onChange={(next) =>
@@ -1762,7 +1837,6 @@ export function VibratoDialog({
                                                             <AppNumberField
                                                                 value={draft.depthRamp.start}
                                                                 unit="percentFine"
-                                                                disabled={isBuiltin}
                                                                 min={0}
                                                                 max={2}
                                                                 suffix={t(
@@ -1781,7 +1855,6 @@ export function VibratoDialog({
                                                             <AppNumberField
                                                                 value={draft.depthRamp.end}
                                                                 unit="percentFine"
-                                                                disabled={isBuiltin}
                                                                 min={0}
                                                                 max={2}
                                                                 suffix={t("vibrato_depth_ramp_end")}
@@ -1801,7 +1874,6 @@ export function VibratoDialog({
                                                         <AppNumberField
                                                             value={draft.biasCents}
                                                             unit="cents"
-                                                            disabled={isBuiltin}
                                                             ariaLabel={t("vibrato_bias")}
                                                             onCommit={(next) =>
                                                                 patch({ biasCents: next })
@@ -1814,7 +1886,6 @@ export function VibratoDialog({
                                                                 unit="percent"
                                                                 min={0}
                                                                 max={100}
-                                                                disabled={isBuiltin}
                                                                 value={Math.round(
                                                                     draft.irregularity,
                                                                 )}
@@ -1842,10 +1913,7 @@ export function VibratoDialog({
                                                                               "vibrato_seed_roll_needs_irregularity",
                                                                           )
                                                                 }
-                                                                disabled={
-                                                                    isBuiltin ||
-                                                                    !(draft.irregularity > 0)
-                                                                }
+                                                                disabled={!(draft.irregularity > 0)}
                                                                 onClick={() =>
                                                                     patch({
                                                                         seed: randomVibratoSeed(),
@@ -1858,32 +1926,25 @@ export function VibratoDialog({
 
                                                 <AppFormSection title={t("vibrato_section_rate")}>
                                                     <AppField label={t("vibrato_rate_mode")}>
-                                                        {isBuiltin ? (
-                                                            <span className="hs-type-label">
-                                                                {t(RATE_MODE_KEYS[draft.rateMode])}
-                                                            </span>
-                                                        ) : (
-                                                            <AppSegmentedControl<VibratoRateMode>
-                                                                value={draft.rateMode}
-                                                                ariaLabel={t("vibrato_rate_mode")}
-                                                                onChange={(next) =>
-                                                                    patch({ rateMode: next })
-                                                                }
-                                                                options={(
-                                                                    ["hz", "cycles"] as const
-                                                                ).map((mode) => ({
-                                                                    value: mode,
-                                                                    label: t(RATE_MODE_KEYS[mode]),
-                                                                }))}
-                                                            />
-                                                        )}
+                                                        <AppSegmentedControl<VibratoRateMode>
+                                                            value={draft.rateMode}
+                                                            ariaLabel={t("vibrato_rate_mode")}
+                                                            onChange={(next) =>
+                                                                patch({ rateMode: next })
+                                                            }
+                                                            options={(
+                                                                ["hz", "cycles"] as const
+                                                            ).map((mode) => ({
+                                                                value: mode,
+                                                                label: t(RATE_MODE_KEYS[mode]),
+                                                            }))}
+                                                        />
                                                     </AppField>
                                                     {draft.rateMode === "hz" ? (
                                                         <AppField label={t("vibrato_rate_label")}>
                                                             <AppNumberField
                                                                 value={draft.rateHz}
                                                                 unit="vibratoHz"
-                                                                disabled={isBuiltin}
                                                                 min={0.1}
                                                                 max={20}
                                                                 ariaLabel={t("vibrato_rate_label")}
@@ -1897,7 +1958,6 @@ export function VibratoDialog({
                                                             <AppNumberField
                                                                 value={draft.cycles}
                                                                 unit="integer"
-                                                                disabled={isBuiltin}
                                                                 min={0.5}
                                                                 max={128}
                                                                 ariaLabel={t("vibrato_cycles")}
@@ -1911,7 +1971,6 @@ export function VibratoDialog({
                                                         <AppNumberField
                                                             value={draft.rateRampEnd}
                                                             unit="percentFine"
-                                                            disabled={isBuiltin}
                                                             min={0.25}
                                                             max={4}
                                                             ariaLabel={t("vibrato_rate_ramp")}
@@ -1923,7 +1982,6 @@ export function VibratoDialog({
                                                     <AppSwitchRow
                                                         label={t("vibrato_align_cycles")}
                                                         checked={draft.alignCycles}
-                                                        disabled={isBuiltin}
                                                         onCheckedChange={(checked) =>
                                                             patch({ alignCycles: checked })
                                                         }
@@ -1938,7 +1996,6 @@ export function VibratoDialog({
                                                             <AppNumberField
                                                                 value={draft.attackMs}
                                                                 unit="milliseconds"
-                                                                disabled={isBuiltin}
                                                                 min={0}
                                                                 ariaLabel={t("vibrato_attack")}
                                                                 onCommit={(next) =>
@@ -1947,7 +2004,6 @@ export function VibratoDialog({
                                                             />
                                                             <AppSelect
                                                                 value={draft.attackCurve}
-                                                                disabled={isBuiltin}
                                                                 ariaLabel={t("vibrato_curve")}
                                                                 onValueChange={(value) =>
                                                                     patch({
@@ -1973,7 +2029,6 @@ export function VibratoDialog({
                                                             <AppNumberField
                                                                 value={draft.releaseMs}
                                                                 unit="milliseconds"
-                                                                disabled={isBuiltin}
                                                                 min={0}
                                                                 ariaLabel={t("vibrato_release")}
                                                                 onCommit={(next) =>
@@ -1982,7 +2037,6 @@ export function VibratoDialog({
                                                             />
                                                             <AppSelect
                                                                 value={draft.releaseCurve}
-                                                                disabled={isBuiltin}
                                                                 ariaLabel={t("vibrato_curve")}
                                                                 onValueChange={(value) =>
                                                                     patch({
@@ -2007,7 +2061,6 @@ export function VibratoDialog({
                                                         <AppNumberField
                                                             value={draft.startPhaseDeg}
                                                             unit="integer"
-                                                            disabled={isBuiltin}
                                                             min={0}
                                                             max={360}
                                                             ariaLabel={t("vibrato_phase")}
@@ -2024,7 +2077,6 @@ export function VibratoDialog({
                                                     <AppField label={t("vibrato_baseline")}>
                                                         <AppSelect
                                                             value={draft.baseline}
-                                                            disabled={isBuiltin}
                                                             onValueChange={(value) =>
                                                                 patch({
                                                                     baseline: value as BaselineMode,
@@ -2047,7 +2099,6 @@ export function VibratoDialog({
                                                                 min={0}
                                                                 max={100}
                                                                 disabled={
-                                                                    isBuiltin ||
                                                                     draft.baseline !== "existing"
                                                                 }
                                                                 value={Math.round(draft.blend)}

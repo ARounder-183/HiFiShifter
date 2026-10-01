@@ -1979,7 +1979,11 @@ export const koKR = {
     vibrato_manager_group_system: "내장 프리셋",
     vibrato_manager_group_user: "내 프리셋",
     vibrato_manager_empty: "사용자 프리셋이 아직 없습니다. 내장 프리셋을 복제해 시작하세요.",
-    vibrato_manager_readonly: "내장 프리셋은 읽기 전용입니다. 복제한 뒤 편집하세요.",
+    vibrato_manager_readonly:
+        "내장 프리셋은 이름 변경·삭제가 안 됩니다. 복제하면 편집할 수 있습니다.",
+    vibrato_manager_builtin_save_note:
+        "내장 프리셋은 덮어쓰지 않습니다. 저장하면 사용자 프리셋으로 복제됩니다.",
+    vibrato_builtin_saved_as: '내장 프리셋의 변경을 "{name}"(으)로 저장했습니다',
     vibrato_manager_enable: "사용",
     vibrato_manager_disable: "사용 안 함",
     vibrato_manager_disabled: "사용 안 함",

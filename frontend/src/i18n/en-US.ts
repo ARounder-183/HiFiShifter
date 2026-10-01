@@ -1993,7 +1993,11 @@ export const enUS = {
     vibrato_manager_group_system: "Built-in",
     vibrato_manager_group_user: "Mine",
     vibrato_manager_empty: "No custom presets yet. Duplicate a built-in one to start.",
-    vibrato_manager_readonly: "Built-in presets are read-only. Duplicate one to edit it.",
+    vibrato_manager_readonly:
+        "Built-in presets can't be renamed or deleted; duplicate one to your own.",
+    vibrato_manager_builtin_save_note:
+        "Built-in presets are never overwritten: saving stores a custom copy.",
+    vibrato_builtin_saved_as: 'Saved the built-in\'s changes as "{name}".',
     vibrato_manager_enable: "Enable",
     vibrato_manager_disable: "Disable",
     vibrato_manager_disabled: "disabled",

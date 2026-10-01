@@ -63,8 +63,6 @@ export interface VibratoPreviewPaneProps {
 
     /** 纵轴重新拟合（两个页签各自的那把）。 */
     onFit: () => void;
-    /** 「适应」是否禁用（系统预设只读时不可拖，拟合也就没有意义）。 */
-    fitDisabled: boolean;
 
     /** 正在试听的那一条；`onAudition` 收到同一条表示"再点一次 = 停"。 */
     audition: VibratoAuditionKind | null;
@@ -88,7 +86,6 @@ export function VibratoPreviewPane({
     appliedHalfCents,
     appliedStatus,
     onFit,
-    fitDisabled,
     audition,
     onAudition,
     appliedAuditionDisabled,
@@ -172,12 +169,7 @@ export function VibratoPreviewPane({
                         <Flex gap="1" align="center" wrap="wrap">
                             {/* 适应：把纵轴重新拟合到**当前页签**的内容。标尺在编辑期间刻意
                                 保持不动（这样高度才等于深度），拖到超出量程或想重新看清形状时点它。 */}
-                            <AppButton
-                                size="sm"
-                                emphasis="soft"
-                                disabled={fitDisabled}
-                                onClick={onFit}
-                            >
+                            <AppButton size="sm" emphasis="soft" onClick={onFit}>
                                 {t("vibrato_preview_fit")}
                             </AppButton>
                             {onAppliedTab ? (
