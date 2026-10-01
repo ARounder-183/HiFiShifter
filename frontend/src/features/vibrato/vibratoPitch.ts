@@ -127,8 +127,14 @@ function medianOf(values: readonly number[], start: number, end: number): number
     return slice.length % 2 === 1 ? slice[mid] : (slice[mid - 1] + slice[mid]) / 2;
 }
 
-/** 切出音符段（只对哨兵参数有意义）。 */
-function noteRuns(
+/**
+ * 切出音符段（只对哨兵参数有意义）。
+ *
+ * 【为什么导出】"哪些帧算一个音符"不止颤音套用需要：从选区**提取**预设时，未检测帧
+ * 与浊清边界的过渡帧同样不能参与拟合（它们会把去趋势拉偏、把深度抬成假值）。两个
+ * 消费者问的是同一个问题，判定必须只有一处。
+ */
+export function vibratoNoteRuns(
     param: string,
     values: readonly number[],
     framePeriodMs: number,
@@ -179,7 +185,7 @@ export function planVibratoTarget(
         };
     }
 
-    const runs = noteRuns(param, values, framePeriodMs);
+    const runs = vibratoNoteRuns(param, values, framePeriodMs);
     if (runs.length === 0) return null;
 
     const modulatable = new Array<boolean>(values.length).fill(false);

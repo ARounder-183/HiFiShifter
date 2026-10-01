@@ -17,6 +17,7 @@
 import { smoothCurveGaussian } from "../../components/layout/pianoRoll/paramSmoothing";
 import { CYCLE_TABLE_DEFAULT_LEN } from "./vibratoCycle";
 import { depthFamilyOf, fallbackRangeFor, PITCH_PARAM_ID } from "./vibratoDepth";
+import { usesUnsetValue, vibratoNoteRuns, type VibratoNoteRun } from "./vibratoPitch";
 import { createVibratoPresetId } from "./vibratoPresets";
 import { vibratoSeedForPreset } from "./vibratoSeed";
 import type { VibratoParamRange } from "./vibratoDepth";
@@ -27,7 +28,15 @@ export type VibratoExtractFailure =
     /** 选区太短，放不下两个周期。 */
     | "tooShort"
     /** 残差里没有稳定的周期性成分。 */
-    | "noVibrato";
+    | "noVibrato"
+    /**
+     * 选区里没有可拟合的音符帧。
+     *
+     * 音高参数里 0 是"未检测"哨兵，浊清边界上还有跟踪器给的**低而非零**过渡帧 ——
+     * 两类都不是音符（见 `vibratoPitch.ts` 的音符段判定）。整段都是这类帧时，
+     * "再选长一点"与"这段不是颤音"都不对，用户需要的是知道这段里根本没有音高。
+     */
+    | "noPitch";
 
 export interface VibratoExtractInput {
     /** 选区内的曲线值（参数原生单位）。 */
@@ -188,14 +197,95 @@ export function estimateVibratoPeriod(
     return { periodFrames: refined, confidence: bestValue };
 }
 
-/** 均值为 0 的残差。 */
+/**
+ * 均值为 0 的残差。
+ *
+ * 【无数据帧（NaN）不参与趋势拟合】`valueFilter` 让 `smoothCurveGaussian` 跳过它们
+ * 并且**不改写**这些帧（该函数本就是为"未浊帧不能混进平滑"写的，见 `paramSmoothing`
+ * 的说明）；残差在无数据帧上直接记 0 —— 对自相关是中性项，对各项统计量则会被
+ * `trusted` 掩码跳过。整条链路上没有任何一处需要伪造数据。
+ */
 function detrend(values: readonly number[], framePeriodMs: number): number[] {
-    const list = Array.from(values, (value) => Number(value) || 0);
+    const list = Array.from(values, (value) => {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric : Number.NaN;
+    });
     const baseline = smoothCurveGaussian(list, {
         sigmaMs: DETREND_SIGMA_MS,
         framePeriodMs,
+        valueFilter: Number.isFinite,
     });
-    return list.map((value, index) => value - (baseline[index] ?? value));
+    return list.map((value, index) => {
+        const center = baseline[index];
+        return Number.isFinite(value) && Number.isFinite(center) ? value - center : 0;
+    });
+}
+
+/**
+ * 拟合前的输入准备：把**不是音符**的帧标成"无数据"，并给出逐帧权重。
+ *
+ * 【为什么必须跳过】音高参数里 0 是"未检测"哨兵，浊清边界上还有跟踪器给的**低而非零**
+ * 过渡帧（见 `vibratoPitch.ts`）。它们既不是音高也不是噪声：直接参与拟合会把去趋势
+ * 拉偏、把 RMS 抬成几十个半音的假深度、把折叠出的周期表冲平 —— 提取出的预设于是
+ * 又深又乱，用户完全无法用。
+ *
+ * 【为什么标成 NaN 而不是删掉或插值】周期估计靠自相关，它要求**等间隔采样**：删帧
+ * 之后"滞后 k 个样本"不再等于"k 帧"，测出的周期直接失去意义。插值补洞同样不行 ——
+ * 补出来的直线与真实音高之间的落差会被去趋势放大成上千分的假残差（试过，周期估计
+ * 因此彻底失效）。标成 NaN 让趋势拟合**跳过**这些帧（`valueFilter`），残差在那里记 0，
+ * 于是它对自相关是中性项、对统计量被 `trusted` 掩码排除：全链路没有一处需要伪造数据。
+ *
+ * @param runs 可信段。`null` = **整段都可信**（非哨兵参数没有音符概念，也不该走这条路）。
+ */
+function prepareAnalysisSeries(
+    values: readonly number[],
+    runs: readonly VibratoNoteRun[] | null,
+): { series: number[]; trusted: boolean[] } {
+    const trusted = new Array<boolean>(values.length).fill(runs === null);
+    if (runs) {
+        for (const run of runs) {
+            for (let i = run.startIndex; i < run.endIndex; i += 1) trusted[i] = true;
+        }
+    }
+    return {
+        series: values.map((value, index) => (trusted[index] ? value : Number.NaN)),
+        trusted,
+    };
+}
+
+/**
+ * 残差里"不像颤音"的帧：稳健地剔掉（就地改写 `residual` 与 `trusted`）。
+ *
+ * 【为什么音符段判定还不够】它只排得掉"未检测"与"值域之外"的帧；而跟踪器在浊清
+ * 边界还常给出一段**落在值域之内**的滑音（例如从 60 一路滑到 24 才掉出值域），它
+ * 紧贴音符、因此并进了同一个音符段。这类帧在去趋势之后会留下几十个半音的残差，
+ * 把深度抬成假值、把折叠出的周期表冲平 —— 比"整段按 0 算"好不了多少。
+ *
+ * 【判据为什么是相对量级】颤音的残差本身就是一个有界振荡：正弦的峰值 / 中位绝对值
+ * ≈ 1.57，方波类接近 1。取"中位绝对值 × 系数"当门限是**无量纲**的，因此与颤音自己的
+ * 深度无关；换成绝对音分阈值就得先知道深度，循环了。
+ *
+ * 系数取 4：既容得下深度渐强（`depthRamp` 上限 2 → 峰值 / 中位 ≈ 3），又能把滑音那种
+ * 高出一个数量级的残差清掉。
+ */
+const RESIDUAL_OUTLIER_FACTOR = 4;
+
+function dropNonVibratoResiduals(residual: number[], trusted: boolean[]): void {
+    const magnitudes: number[] = [];
+    for (let i = 0; i < residual.length; i += 1) {
+        if (trusted[i]) magnitudes.push(Math.abs(residual[i]));
+    }
+    if (magnitudes.length === 0) return;
+    magnitudes.sort((a, b) => a - b);
+    const median = magnitudes[magnitudes.length >> 1];
+    if (!(median > 0)) return;
+    const limit = median * RESIDUAL_OUTLIER_FACTOR;
+    for (let i = 0; i < residual.length; i += 1) {
+        if (!trusted[i]) continue;
+        if (Math.abs(residual[i]) <= limit) continue;
+        trusted[i] = false;
+        residual[i] = 0;
+    }
 }
 
 /** 长度可变的滑动平均（边界处窗口收缩）。 */
@@ -225,11 +315,18 @@ function movingAverage(values: readonly number[], halfWidth: number): number[] {
  * 那些格子被填 0 之后，相邻格之间会出现接近满幅的跳变，波形变成刺。把每个样本
  * 按小数部分分摊到相邻两格，就不存在空格子。
  */
-function foldCycleTable(residual: readonly number[], periodFrames: number, bins: number): number[] {
+function foldCycleTable(
+    residual: readonly number[],
+    periodFrames: number,
+    bins: number,
+    trusted?: readonly boolean[],
+): number[] {
     const table = new Array<number>(bins).fill(0);
     const weights = new Array<number>(bins).fill(0);
 
     for (let i = 0; i < residual.length; i += 1) {
+        // 非音符帧不参与：它们要么是插值出来的直线，要么根本就不是音高。
+        if (trusted && !trusted[i]) continue;
         const phase = (i / periodFrames) % 1;
         const pos = phase * bins;
         const i0 = Math.floor(pos) % bins;
@@ -414,7 +511,19 @@ export function extractVibratoPreset(input: VibratoExtractInput): VibratoExtract
     const framePeriodMs = input.framePeriodMs > 0 ? input.framePeriodMs : 5;
     if (values.length < 8) return { ok: false, reason: "tooShort" };
 
-    const residual = detrend(values, framePeriodMs);
+    /*
+     * 先按**音符帧**筛一遍：未检测帧与浊清边界的过渡帧不参与拟合。
+     * 见 `prepareAnalysisSeries` 的说明（为什么补洞、哪些统计量只看真实帧）。
+     */
+    const runs = usesUnsetValue(input.param)
+        ? vibratoNoteRuns(input.param, values, framePeriodMs)
+        : null;
+    if (runs && runs.length === 0) return { ok: false, reason: "noPitch" };
+    const { series, trusted } = prepareAnalysisSeries(values, runs);
+
+    const residual = detrend(series, framePeriodMs);
+    // 滑音等"不像颤音"的帧在这里退场，之后的周期估计与统计量都只看留下来的帧。
+    dropNonVibratoResiduals(residual, trusted);
     const estimate = estimateVibratoPeriod(residual, framePeriodMs);
     if (!estimate) return { ok: false, reason: "tooShort" };
 
@@ -430,11 +539,14 @@ export function extractVibratoPreset(input: VibratoExtractInput): VibratoExtract
     }
 
     // 深度取中段（充分发展区）的 RMS：首尾的渐入渐出会把整段 RMS 拉低。
+    // 只统计**真实音符帧**：把补洞出来的插值帧算进去，等于用一条直线去稀释幅度，
+    // 深度会被系统性低估（反过来，把未检测帧按 0 算则会抬成几十个半音的假深度）。
     const from = Math.floor(residual.length * 0.2);
     const to = Math.ceil(residual.length * 0.8);
     let sumSquares = 0;
     let count = 0;
     for (let i = from; i < to; i += 1) {
+        if (!trusted[i]) continue;
         sumSquares += residual[i] * residual[i];
         count += 1;
     }
@@ -446,9 +558,9 @@ export function extractVibratoPreset(input: VibratoExtractInput): VibratoExtract
         return { ok: false, reason: "noVibrato" };
     }
 
-    // 折叠出单周期波形。
+    // 折叠出单周期波形（只折叠真实音符帧）。
     const bins = CYCLE_TABLE_DEFAULT_LEN;
-    const folded = foldCycleTable(residual, estimate.periodFrames, bins);
+    const folded = foldCycleTable(residual, estimate.periodFrames, bins, trusted);
     // 低通：折叠出的表仍带着观测噪声与逐周期抖动，直接存成波形会"坑坑洼洼"。
     // 真实颤音的周期形状由少数几个谐波就能表达（正弦只要 1 个，三角 / 梯形也就
     // 几个），截断高次谐波等于一次理想低通 —— 形状保留、毛刺消失，且因为是环形
@@ -457,25 +569,32 @@ export function extractVibratoPreset(input: VibratoExtractInput): VibratoExtract
     const normalized = normalizeTable(smoothed);
     const shapeHint = bestShapeMatch(normalized);
 
-    // 不规则度：折叠时的周期内离散度相对幅值的比例。
+    // 不规则度：折叠时的周期内离散度相对幅值的比例（同样只看真实音符帧）。
     //
     // 参考值按**精确相位**在环形表上插值取得，而不是取最近的格子 —— 后者在相邻
     // 两格之间会引入最多半格的插值误差，那部分误差与"真实的逐周期抖动"混在一起，
     // 会把不规则度系统性抬高，进而让提取出的预设在应用时抖得比原曲线还厉害。
     let variance = 0;
+    let varianceCount = 0;
     for (let i = 0; i < residual.length; i += 1) {
+        if (!trusted[i]) continue;
         const phase = (i / estimate.periodFrames) % 1;
         const diff = residual[i] - sampleTableCircular(folded, phase);
         variance += diff * diff;
+        varianceCount += 1;
     }
     const irregularity = Math.min(
         100,
         Math.round(
-            (Math.sqrt(variance / Math.max(1, residual.length)) / Math.max(1e-9, amplitude)) * 100,
+            (Math.sqrt(variance / Math.max(1, varianceCount)) / Math.max(1e-9, amplitude)) * 100,
         ),
     );
 
     // 包络：平滑后的 |残差|。窗长取半个周期，恰好滤掉周期内起伏、保留渐入渐出。
+    //
+    // 这里**不**排除非音符帧：补洞出来的插值段残差近乎为 0，于是气口处包络自然落到
+    // 谷底，`envelopeEdgesMs` 取到的渐入 / 渐出正好落在真实音符的起止上 —— 比硬性
+    // 排除更贴合"这段音是从哪开始、到哪结束"。
     const envelope = movingAverage(
         residual.map((value) => Math.abs(value)),
         (estimate.periodFrames * ENVELOPE_SMOOTH_PERIODS) / 2,
@@ -489,8 +608,8 @@ export function extractVibratoPreset(input: VibratoExtractInput): VibratoExtract
         builtin: false,
         cycle: { kind: "table", table: normalized },
         depthCents,
-        // 用"整段周期数"而不是 Hz：用户提取的就是"这一段里的这几个周期"，
-        // 换个长度时保持同一听感由预设编辑器里的 Hz 模式负责。
+        // 按 Hz 存：提取出的音色要能在别的长度上复现同一个听感。`cycles` 只是
+        // 顺手记下"这一段里大约有几个周期"，供读数参考（Hz 模式下不参与渲染）。
         rateMode: "hz",
         rateHz,
         cycles: cycleCount,

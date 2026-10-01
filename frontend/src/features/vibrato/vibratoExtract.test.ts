@@ -303,3 +303,85 @@ describe("提取结果的预设形态", () => {
         }
     });
 });
+
+/*
+ * 拟合必须跳过「不是音符」的帧。
+ *
+ * 【为什么值得测】音高参数里 0 是"未检测"哨兵，浊清边界上还有跟踪器给的**低而非零**
+ * 过渡帧（见 `vibratoPitch.ts`）。它们直接参与拟合会把去趋势拉偏、把 RMS 抬成几十个
+ * 半音的假深度 —— 提取出的预设又深又乱，用户完全没法用。这里钉住"有气口与过渡段的
+ * 输入，拟合结果与干净输入一致"。
+ */
+describe("extractVibratoPreset：跳过未检测 / 过渡帧", () => {
+    /** 一段干净的颤音（6 Hz / 40 分）：作为真值。 */
+    const clean = render({ depthCents: 40, rateHz: 6 }, 2);
+
+    test("首尾气口 + 过渡缓升不影响深度与速率", () => {
+        // 头部 20 帧气口 + 10 帧 0→60 的过渡缓升（跟踪器在浊清边界的爬升），尾部 20 帧气口。
+        const gap = new Array<number>(20).fill(0);
+        const ramp = Array.from({ length: 10 }, (_, i) => (i / 9) * 60);
+        const withGaps = [...gap, ...ramp, ...clean, ...gap];
+
+        const cleanFit = extractVibratoPreset({ values: clean, framePeriodMs: FP, param: "pitch" });
+        const gapFit = extractVibratoPreset({
+            values: withGaps,
+            framePeriodMs: FP,
+            param: "pitch",
+        });
+        expect(cleanFit.ok, "干净输入应当能拟合").toBe(true);
+        expect(gapFit.ok, "带气口的输入同样应当能拟合").toBe(true);
+        if (!cleanFit.ok || !gapFit.ok) return;
+        // 旧实现会被那 10 帧缓升抬成几十个半音的假深度。
+        expect(gapFit.depthCents).toBeCloseTo(cleanFit.depthCents, 0);
+        expect(gapFit.rateHz).toBeCloseTo(cleanFit.rateHz, 0);
+    });
+
+    /*
+     * 值域**之内**的那一段滑音同样要退场。
+     *
+     * 音符段判定只排得掉"未检测"与"值域之外"：跟踪器在浊清边界的缓降（60 → 20）
+     * 里，60 → 24 这一段既在值域内、又紧贴音符，会并进同一个音符段。它在去趋势后
+     * 留下几十个半音的残差，把深度抬成假值 —— 靠"残差相对量级"的稳健剔除清掉。
+     */
+    test("跟踪器在浊清边界的缓降（值域之内那一段）也不抬深度", () => {
+        const decay = Array.from({ length: 30 }, (_, i) => 60 - (i / 29) * 40);
+        const tail = [...clean, ...decay, ...new Array<number>(20).fill(0)];
+        const cleanFit = extractVibratoPreset({ values: clean, framePeriodMs: FP, param: "pitch" });
+        const tailFit = extractVibratoPreset({ values: tail, framePeriodMs: FP, param: "pitch" });
+        expect(tailFit.ok, "带尾音滑降的输入仍应能拟合").toBe(true);
+        if (!cleanFit.ok || !tailFit.ok) return;
+        expect(tailFit.depthCents).toBeCloseTo(cleanFit.depthCents, 0);
+        expect(tailFit.rateHz).toBeCloseTo(cleanFit.rateHz, 0);
+    });
+
+    test("整段都是未检测帧：报 noPitch，而不是含糊的失败", () => {
+        const result = extractVibratoPreset({
+            values: new Array<number>(200).fill(0),
+            framePeriodMs: FP,
+            param: "pitch",
+        });
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.reason).toBe("noPitch");
+    });
+
+    test("只有够不上音符的过渡抹痕：同样算没有音高", () => {
+        const values = [
+            ...new Array<number>(50).fill(0),
+            3,
+            8,
+            15,
+            20,
+            22,
+            ...new Array<number>(50).fill(0),
+        ];
+        const result = extractVibratoPreset({ values, framePeriodMs: FP, param: "pitch" });
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.reason).toBe("noPitch");
+    });
+
+    test("非哨兵参数不受影响：没有「未检测」概念，整段都参与拟合", () => {
+        const dyn = render({ depthCents: 30, rateHz: 6 }, 2, "dyn", 0.8);
+        const result = extractVibratoPreset({ values: dyn, framePeriodMs: FP, param: "dyn" });
+        expect(result.ok).toBe(true);
+    });
+});
