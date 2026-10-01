@@ -23,9 +23,17 @@
  * 落盘**（切换预设、删除、导入都先写回库），只有关闭窗口才丢弃未保存的改动 —— 这
  * 一条与合并前一致，是"用户改了一半去看看别的"不会丢东西的保证。
  *
- * 【应用】「应用」把**当前草稿**（含未保存的微调）交给编辑管线，不写库、不关窗口：
- * 多段选区逐个应用是真实工作流，用户也可以应用完接着调、再应用一次。它与「保存」是
- * 两件事（写选区 vs 写库），因此两个按钮并存，`defaultActionId` 选「应用」。
+ * 【一体两面】窗口有两副面孔，由 `applyTarget` 一票决定：
+ *
+ * - **有宿主**（「添加颤音」）：多出「套用到选区」页签、「从选区提取」与「应用」——
+ *   既能改库，也能看着选区把这份参数落下去。
+ * - **没有宿主**（工具栏 / 菜单栏的「管理预设…」）：只有「预设波形」一页，页脚也只
+ *   有改库的动作 —— 与合并前的预设管理器完全一致。改库这件事不该因为窗口变大了就
+ *   多出一堆用不上的按钮。
+ *
+ * 【应用】「应用」把**当前草稿**（含未保存的微调）交给编辑管线，不写库，然后**关窗**：
+ * 它是「添加颤音」这次打开的终点。它与「保存」是两件事（写选区 vs 写库），因此两个
+ * 按钮并存，`defaultActionId` 在有宿主时选「应用」。
  */
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -192,9 +200,16 @@ interface Props {
      * 从选区提取出来的那条预设走这里：用户刚把它提出来，当然是要接着编辑它。
      */
     initialPresetId?: string;
-    /** 打开时落在哪个预览页签（默认「预设波形」）。 */
-    initialTab?: VibratoPreviewTab;
-    /** 选区宿主；省略 = 纯预设库（菜单栏那条路径）。 */
+    /**
+     * 选区宿主；省略 = 纯预设库。
+     *
+     * 【这一个 prop 决定窗口的两副面孔】给了它才有「套用到选区」页签、「从选区提取」
+     * 与「应用」—— 也就是「添加颤音」那一次打开的全部专属能力；不给就是"改库"那一面
+     * （工具栏 / 菜单栏的「管理预设…」），与合并前的预设管理器一致。
+     *
+     * 打开时落在哪个预览页签也由它决定：有宿主就落在「套用到选区」（那次打开的目的
+     * 就是"看套上去什么样、然后应用"），没有就落在「预设波形」。
+     */
     applyTarget?: VibratoApplyTarget;
 }
 
@@ -229,7 +244,6 @@ export function VibratoDialog({
     editParam = "pitch",
     paramRange,
     initialPresetId,
-    initialTab = "preset",
     applyTarget,
 }: Props) {
     const dispatch = useAppDispatch();
@@ -280,8 +294,15 @@ export function VibratoDialog({
         skew: number;
     } | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<VibratoPreset | null>(null);
-    /** 预览页签。初始值由宿主决定（"添加颤音"入口直接落在套用页）。 */
-    const [previewTab, setPreviewTab] = useState<VibratoPreviewTab>(initialTab);
+    /**
+     * 预览页签。
+     *
+     * 初值跟着 `applyTarget` 走：「添加颤音」那一次打开的目的就是"看套上去什么样、
+     * 然后应用"，直接落在套用页；"管理预设"那一面根本没有这一页。
+     */
+    const [previewTab, setPreviewTab] = useState<VibratoPreviewTab>(
+        applyTarget ? "applied" : "preset",
+    );
     /**
      * 选区帧值（套用页签的输入）。
      *
@@ -684,21 +705,22 @@ export function VibratoDialog({
     }
 
     /**
-     * 「应用」：把当前草稿交给编辑管线。
+     * 「应用」：把当前草稿交给编辑管线，然后**关窗**。
      *
      * 【为什么传完整预设而不是 id】本地微调（深度 / 速率 / 波形）必须跟着过去 ——
      * 只传 id 的话落盘的还是库里的旧参数，用户看到的与得到的不一致。
      *
-     * 【为什么不写库、不关窗】写库是「保存」的事（两个动作语义不同，见文件头）；
-     * 不关窗是为了多段选区逐个应用，以及"应用完接着调再应用一次"。落盘的是一次
-     * 离散的编辑操作，窗口留着不产生任何副作用。
+     * 【为什么不写库】写库是「保存」的事（两个动作语义不同，见文件头）。应用落下的
+     * 是一次离散的编辑操作，不该顺手改掉库里的预设。
      *
-     * 【为什么不禁用未保存的草稿】用户看到的就是会落下去的那份 —— 这正是"预览"
-     * 的意义；把未保存的改动挡在门外会让预览与结果不一致。
+     * 【为什么关窗】「应用」是「添加颤音」这次打开的终点 —— 用户点它就是表达"就这样，
+     * 落到选区上"。留着窗口等于把"完成"变成"又一次操作"，用户还得再找一次关闭。
+     * （"管理预设"那一面没有这个动作，也就没有这条路径。）
      */
     function handleApply() {
         if (!draft || !applyTarget) return;
         applyTarget.onApply(sanitizeVibratoPreset(draft));
+        handleOpenChange(false);
     }
 
     /**
@@ -1262,9 +1284,9 @@ export function VibratoDialog({
                                   intent: "primary" as const,
                                   disabled: !draft,
                                   /*
-                                   * 【应用也不关窗】多段选区逐个应用是真实工作流；
-                                   * 关掉窗口只会逼用户重新打开、重新找到那条预设。
-                                   * 窗口的退出交给「关闭」/ Esc。
+                                   * 关窗在 `handleApply` 里显式做（而不是靠 `autoClose`
+                                   * 的默认值）：先落到选区、再关，两步的顺序是这段
+                                   * 逻辑的一部分，不该藏在"同步动作默认关窗"这条规则里。
                                    */
                                   autoClose: false,
                                   onClick: handleApply,

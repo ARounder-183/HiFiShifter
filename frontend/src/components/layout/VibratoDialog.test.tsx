@@ -74,8 +74,6 @@ interface ApplyTargetOptions {
 interface MountOptions {
     /** 打开时编辑哪一条（提取出来的那条走这里）。 */
     initialPresetId?: string;
-    /** 打开时落在哪个页签。 */
-    initialTab?: "preset" | "applied";
     /** 选区宿主；省略 = 纯预设库。 */
     applyTarget?: ApplyTargetOptions;
     editParam?: string;
@@ -103,7 +101,6 @@ async function mountDialog(
                             editParam={options.editParam ?? "pitch"}
                             paramRange={options.paramRange}
                             initialPresetId={options.initialPresetId}
-                            initialTab={options.initialTab}
                             applyTarget={
                                 target
                                     ? {
@@ -1305,12 +1302,14 @@ test("initialPresetId 决定打开时编辑哪一条（优先于当前活动预�
 });
 
 /*
- * 没有选区宿主时：只有「预设波形」一页，页脚也没有「应用」「提取」。
+ * 一面：没有选区宿主（「管理预设…」）—— 只有「预设波形」一页，页脚也没有
+ * 「应用」「提取」，与合并前的预设管理器一致。
  *
- * 【为什么值得钉】这是菜单栏那条路径。多画一个点不动的页签、或给一个指向不存在
- * 选区的「应用」，都会让用户以为窗口坏了。
+ * 【为什么值得钉】这是"改库"那一面。多画一个点不动的页签、或给一个指向不存在选区的
+ * 「应用」，都会让用户以为窗口坏了；而"改库"这件事也不该因为窗口变大了就多出一堆
+ * 用不上的按钮。
  */
-test("没有选区宿主：不画页签，也没有「应用」「提取」（菜单栏那条路径）", async () => {
+test("管理预设那一面：不画页签，也没有「应用」「提取」", async () => {
     await mountDialog();
 
     expect(findButton("Preset waveform"), "没有宿主时不该出现页签").toBeFalsy();
@@ -1320,22 +1319,24 @@ test("没有选区宿主：不画页签，也没有「应用」「提取」（�
         findButton("Create vibrato preset from selection"),
         "没有宿主时不该有「从选区提取」",
     ).toBeFalsy();
+    // 落在「预设波形」页：周期估算是这一页独有的读数。
+    expect(document.body.textContent ?? "", "应落在预设波形页").toContain("cycles");
     // 纯预设库路径的主动作仍是「保存」。
     expect(findButton("Save")).toBeTruthy();
 });
 
 /*
- * 有选区宿主时：两个页签、页脚多出「应用」与「提取」。
+ * 另一面：有选区宿主（「添加颤音」）—— 两个页签、页脚多出「应用」与「提取」，
+ * 且**直接落在套用页**（那次打开的目的就是"看套上去什么样、然后应用"）。
  *
  * 页签标签用「预设波形 / 套用到选区」把两个问题分开：一个问"这个预设摆多少"，
  * 一个问"套到这段上与原参数线差多少"。
  */
-test("有选区宿主：两个页签 + 「应用」「提取」都在", async () => {
+test("添加颤音那一面：两个页签 + 「应用」「提取」都在，且直接落在套用页", async () => {
     await mountDialog(undefined, () => undefined, {
         // 「提取」跟着 `onExtract` 出现：没有它就没有可提取的东西，画一个点不动的
         // 按钮不如不画（宿主总是会给 —— 见 PianoRollPanel 的 applyTarget）。
         applyTarget: { onExtract: async () => null },
-        initialTab: "applied",
     });
 
     expect(findButton("Preset waveform"), "应有两个页签").toBeTruthy();
@@ -1353,16 +1354,29 @@ test("有选区宿主：两个页签 + 「应用」「提取」都在", async ()
  * 同时钉住另一半：**应用不写库**。预设是"调完再定"的东西，应用只是把这份参数写进
  * 选区；顺手改掉库里的预设是这类工具最恼人的错法。
  */
-test("应用：把（含未保存微调的）完整草稿交给编辑管线，且不写库", async () => {
+/*
+ * 「应用」把**当前草稿**交给编辑管线 —— 包括还没保存的微调 —— 然后关窗。
+ *
+ * 【为什么必须测】落盘侧从"按 id 解析预设"改成"吃完整预设对象"就是为了这个：只传 id
+ * 的话，用户刚拖出来的深度会被静默丢弃，听到的与得到的不是一回事。
+ *
+ * 同时钉住另外两半：
+ * - **应用不写库**：预设是"调完再定"的东西，应用只是把这份参数写进选区；顺手改掉
+ *   库里的预设是这类工具最恼人的错法。
+ * - **应用关窗**：它是「添加颤音」这次打开的终点。留着窗口等于把"完成"变成"又一次
+ *   操作"，用户还得再找一次关闭。
+ */
+test("应用：把（含未保存微调的）完整草稿交给编辑管线、不写库、并关窗", async () => {
     const custom = sanitizeVibratoPreset({ id: "custom_apply", name: "Mine", depthCents: 40 });
     const onApply = vi.fn();
+    const onOpenChange = vi.fn();
     const store = await mountDialog(
         (s) => {
             s.dispatch(upsertVibratoPreset(custom));
             s.dispatch(setActiveVibratoPreset(custom.id));
         },
-        () => undefined,
-        { applyTarget: { onApply }, initialTab: "applied" },
+        onOpenChange,
+        { applyTarget: { onApply } },
     );
 
     // 改深度但不保存。
@@ -1379,6 +1393,7 @@ test("应用：把（含未保存微调的）完整草稿交给编辑管线，�
     expect(onApply).toHaveBeenCalledTimes(1);
     expect(onApply.mock.calls[0][0].id).toBe("custom_apply");
     expect(onApply.mock.calls[0][0].depthCents, "本地微调必须传过去").toBe(77);
+    expect(onOpenChange, "应用之后应当请求关闭窗口").toHaveBeenCalledWith(false);
     const stored = store
         .getState()
         .session.vibratoPresets.find((preset) => preset.id === "custom_apply");
@@ -1400,7 +1415,6 @@ test("从选区提取：成功后选中新提取的那条", async () => {
     const onExtract = vi.fn(async () => extracted);
     await mountDialog(undefined, () => undefined, {
         applyTarget: { onExtract },
-        initialTab: "applied",
     });
 
     await clickButton("Create vibrato preset from selection");
@@ -1418,7 +1432,6 @@ test("从选区提取失败：给出行内提示，且不改选中", async () =>
     const onExtract = vi.fn(async () => null);
     await mountDialog(undefined, () => undefined, {
         applyTarget: { onExtract },
-        initialTab: "applied",
     });
 
     await clickButton("Create vibrato preset from selection");
@@ -1434,7 +1447,7 @@ test("从选区提取失败：给出行内提示，且不改选中", async () =>
  * 因为多出一块而含糊。
  */
 test("套用页签复用同一块画布（有数据时画出来）", async () => {
-    await mountDialog(undefined, () => undefined, { applyTarget: {}, initialTab: "applied" });
+    await mountDialog(undefined, () => undefined, { applyTarget: {} });
 
     const canvases = document.querySelectorAll("canvas[role=img]");
     expect(canvases.length, "预览画布应当只有一块").toBe(1);
@@ -1460,7 +1473,7 @@ test("切页签不重置草稿（两页共用同一份草稿）", async () => {
             s.dispatch(setActiveVibratoPreset(custom.id));
         },
         () => undefined,
-        { applyTarget: {}, initialTab: "applied" },
+        { applyTarget: {} },
     );
 
     const depth = document.querySelector<HTMLInputElement>('input[aria-label="Depth"]');
@@ -1483,7 +1496,7 @@ test("切页签不重置草稿（两页共用同一份草稿）", async () => {
  * 播放态改由强调色 + `aria-pressed` 表达。
  */
 test("套用页签带两个 A/B 试听按钮（文案恒定）", async () => {
-    await mountDialog(undefined, () => undefined, { applyTarget: {}, initialTab: "applied" });
+    await mountDialog(undefined, () => undefined, { applyTarget: {} });
 
     expect(findButton("Audition original")).toBeTruthy();
     expect(findButton("Audition result")).toBeTruthy();
@@ -1500,7 +1513,6 @@ test("套用页签带两个 A/B 试听按钮（文案恒定）", async () => {
 test("取不到选区数据时显示占位提示（连读数行一起省掉）", async () => {
     await mountDialog(undefined, () => undefined, {
         applyTarget: { loadOriginal: () => Promise.resolve(null) },
-        initialTab: "applied",
     });
 
     expect(document.body.textContent ?? "").toContain("Select a range to preview the result.");
@@ -1524,7 +1536,6 @@ test("音高全未检测时说明原因，而不是画一条直线", async () =>
             loadOriginal: () =>
                 Promise.resolve({ values: new Array(64).fill(0), framePeriodMs: 5 }),
         },
-        initialTab: "applied",
     });
 
     expect(document.body.textContent ?? "").toContain(

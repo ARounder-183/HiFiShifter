@@ -1019,8 +1019,15 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const [vibratoDialogOpen, setVibratoDialogOpen] = useState(false);
     /** 打开时要编辑哪一条；`null` = 按当前活动预设播种。 */
     const [vibratoInitialPresetId, setVibratoInitialPresetId] = useState<string | null>(null);
-    /** 打开时落在哪个预览页签。 */
-    const [vibratoInitialTab, setVibratoInitialTab] = useState<"preset" | "applied">("preset");
+    /**
+     * 这次打开是哪一面：`"apply"` = 「添加颤音」（带套用预览 / 提取 / 应用），
+     * `"manage"` = 「管理预设…」（纯预设库）。
+     *
+     * 【为什么必须有它】窗口有两副面孔，而"从哪个入口进来的"只有宿主知道。窗口自己
+     * 不该去猜"我是被打开发动机是什么"—— 于是宿主把结论（有没有选区宿主）直接告诉它：
+     * `apply` 才传 `applyTarget`，`manage` 不传，窗口据此收起全部套用专属能力。
+     */
+    const [vibratoDialogMode, setVibratoDialogMode] = useState<"apply" | "manage">("manage");
     /**
      * 窗口的"会话号"：每次打开自增并作为组件的 `key`。
      *
@@ -1033,15 +1040,13 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     /**
      * 打开颤音窗口。
      *
-     * @param initialPresetId 打开时编辑哪一条（提取出来的那条走这里）；省略 = 当前活动预设。
-     * @param initialTab 落在哪个预览页签：「添加颤音」入口直接落在「套用到选区」，
-     *   因为那次打开的目的就是"看套上去什么样、然后应用"；「管理预设」入口落在
-     *   「预设波形」（改库）。
+     * @param mode 哪一面（决定要不要给选区宿主，见 `vibratoDialogMode`）。
+     * @param initialPresetId 打开时编辑哪一条；省略 = 当前活动预设。
      */
     const openVibratoDialog = useCallback(
-        (initialPresetId?: string, initialTab: "preset" | "applied" = "preset") => {
+        (mode: "apply" | "manage" = "manage", initialPresetId?: string) => {
+            setVibratoDialogMode(mode);
             setVibratoInitialPresetId(initialPresetId ?? null);
-            setVibratoInitialTab(initialTab);
             setVibratoDialogSession((session) => session + 1);
             setVibratoDialogOpen(true);
         },
@@ -6701,7 +6706,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     useEffect(() => {
         const handler = (e: Event) => {
             if ((e as CustomEvent).detail?.dialog === "addVibrato") {
-                openVibratoDialog(undefined, "applied");
+                openVibratoDialog("apply");
             }
         };
         window.addEventListener("hifi:openEditDialog", handler);
@@ -7399,7 +7404,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     onContextMenu={(event) => {
                                         event.preventDefault();
                                         setVibratoPresetMenuOpen(false);
-                                        openVibratoDialog();
+                                        openVibratoDialog("manage");
                                     }}
                                     icon={
                                         // 图标即**活动预设的波形缩略图**：切预设即换图，
@@ -7462,7 +7467,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             className="w-full shrink-0 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-hover"
                                             onClick={() => {
                                                 setVibratoPresetMenuOpen(false);
-                                                openVibratoDialog();
+                                                openVibratoDialog("manage");
                                             }}
                                             onPointerDown={(e) => e.stopPropagation()}
                                         >
@@ -8832,7 +8837,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     onSetPitch={() => openEditDialog("setPitch")}
                     onAverage={() => openEditDialog("average")}
                     onSmooth={() => openEditDialog("smooth")}
-                    onAddVibrato={() => openVibratoDialog(undefined, "applied")}
+                    onAddVibrato={() => openVibratoDialog("apply")}
                     onQuantize={() => openEditDialog("quantize")}
                     onMeanQuantize={() => openEditDialog("meanQuantize")}
                     onSaveAsPitchRef={() => void handleSaveAsPitchRef()}
@@ -8856,7 +8861,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             {/*
              * 颤音窗口：预设库 + 套用到选区，同一个窗口（右键菜单 / 快捷键 / 工具栏 /
              * 菜单栏共用这一个组件）。宿主在本面板是因为"套用预览"要选区真实帧值。
+             *
              * 每次打开换 key → 重新挂载，草稿按当前活动预设播种、页签与纵轴复位。
+             * 两副面孔由 `vibratoDialogMode` 决定：只有「添加颤音」那一次才把选区宿主
+             * 交出去（于是才有套用页签 / 提取 / 应用）；「管理预设…」是纯改库，与合并
+             * 前的预设管理器一致。
              */}
             <VibratoDialog
                 key={vibratoDialogSession}
@@ -8865,8 +8874,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 editParam={editParam}
                 paramRange={currentParamRange}
                 initialPresetId={vibratoInitialPresetId ?? undefined}
-                initialTab={vibratoInitialTab}
-                applyTarget={vibratoApplyTarget}
+                applyTarget={vibratoDialogMode === "apply" ? vibratoApplyTarget : undefined}
             />
         </Flex>
     );
