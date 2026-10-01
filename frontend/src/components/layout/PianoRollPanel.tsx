@@ -7383,7 +7383,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         style={{ maxHeight: vibratoPresetMenuMaxHeight }}
                                     >
                                         <ScrollArea
-                                            className="min-h-0"
+                                            className="hs-scroll-area min-h-0"
                                             style={{ flex: "1 1 auto" }}
                                             scrollbars="vertical"
                                             type="auto"

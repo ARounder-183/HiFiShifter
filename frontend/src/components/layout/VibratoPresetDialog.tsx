@@ -1104,6 +1104,7 @@ export function VibratoPresetDialog({
                             style={{ width: LIST_WIDTH, flexShrink: 0 }}
                         >
                             <ScrollArea
+                                className="hs-scroll-area"
                                 style={{ height: "100%" }}
                                 scrollbars="vertical"
                                 type="auto"
@@ -1273,7 +1274,7 @@ export function VibratoPresetDialog({
                             {draft && previewSamples ? (
                                 <Flex direction="column" gap="3" className="min-h-0 flex-1">
                                     <ScrollArea
-                                        className="min-h-0 flex-1"
+                                        className="hs-scroll-area min-h-0 flex-1"
                                         scrollbars="vertical"
                                         type="auto"
                                     >

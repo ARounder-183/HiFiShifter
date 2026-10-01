@@ -853,7 +853,7 @@ export const FileBrowserPanel: React.FC = () => {
             )}
 
             {/* 文件列表 */}
-            <ScrollArea className="flex-1 min-h-0" scrollbars="vertical">
+            <ScrollArea className="hs-scroll-area flex-1 min-h-0" scrollbars="vertical">
                 <div
                     className="py-1"
                     role={showEntries ? "listbox" : undefined}

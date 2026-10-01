@@ -179,7 +179,12 @@ export function VibratoApplyDialog({
                         style={{ width: LIST_WIDTH, flexShrink: 0 }}
                     >
                         <span className="hs-type-muted">{t("vibrato_apply_presets")}</span>
-                        <ScrollArea style={{ height: "100%" }} scrollbars="vertical" type="auto">
+                        <ScrollArea
+                            className="hs-scroll-area"
+                            style={{ height: "100%" }}
+                            scrollbars="vertical"
+                            type="auto"
+                        >
                             <Flex direction="column" gap="1" pr="2" role="listbox">
                                 {presets.map((preset) => (
                                     <AppListRow
@@ -214,7 +219,11 @@ export function VibratoApplyDialog({
 
                     {/* ---- 套用预览 + 快捷旋钮 ---- */}
                     <Box className="min-h-0 flex flex-col" style={{ minWidth: 0, flex: 1 }}>
-                        <ScrollArea className="min-h-0 flex-1" scrollbars="vertical" type="auto">
+                        <ScrollArea
+                            className="hs-scroll-area min-h-0 flex-1"
+                            scrollbars="vertical"
+                            type="auto"
+                        >
                             <Flex direction="column" gap="3" pr="2">
                                 <span className="hs-type-muted">{t("vibrato_apply_preview")}</span>
                                 {previewSamples ? (
