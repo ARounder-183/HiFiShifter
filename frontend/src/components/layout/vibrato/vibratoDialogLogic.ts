@@ -25,6 +25,11 @@ import {
     paramUnitToDepth,
     type VibratoParamRange,
 } from "../../../features/vibrato/vibratoDepth";
+import {
+    isUnsetValue,
+    resolveVibratoAnchors,
+    suppressUnsetValues,
+} from "../../../features/vibrato/vibratoPitch";
 import type {
     BaselineMode,
     CycleSource,
@@ -349,11 +354,21 @@ export function buildAppliedPreview(args: {
             ? args.framePeriodMs
             : DEFAULT_FRAME_PERIOD_MS;
 
+    /*
+     * 基线锚点只从**已检测帧**里取，整段未检测则没有可预览的对象。
+     *
+     * pitch 的 0 是"未检测到音高"的哨兵；取首末帧当锚点时，选区两端只要落在气口上
+     * 就会把整段算成 0（见 `vibratoPitch.ts`）。落盘侧用同一对函数，因此这里画的
+     * 就是"应用"真正会写出来的东西 —— 预览与结果共用一套判定，不会各说各话。
+     */
+    const anchors = resolveVibratoAnchors(args.param, values);
+    if (!anchors) return null;
+
     const result = buildVibratoCurve({
         startFrame: 0,
-        startValue: values[0],
+        startValue: anchors.startValue,
         endFrame: values.length - 1,
-        endValue: values[values.length - 1],
+        endValue: anchors.endValue,
         original: values,
         preset: args.preset,
         param: args.param,
@@ -361,21 +376,53 @@ export function buildAppliedPreview(args: {
         range: args.range,
         collectEnvelope: true,
     });
+    // 哨兵帧还原：未检测音高的帧保持"无数据"，不被颤音物化成一个具体音高。
+    suppressUnsetValues(args.param, result.dense, values);
 
     const toCents = (value: number) => paramUnitToDepth(value, args.param, args.range);
+    /*
+     * 中心只按**已检测**帧求。
+     *
+     * 把哨兵帧当成 0 参与平均，会把中心整体拽下几十个半音（真实音高在 MIDI 60
+     * 附近，而哨兵是 0），画出来的颤音随之被挤出画面或压成一条直线 —— 与锚点那个
+     * bug 是同一个根的两种表现。
+     */
     const originalCents = values.map(toCents);
-    const center = originalCents.reduce((sum, value) => sum + value, 0) / originalCents.length;
-    const original = originalCents.map((value) => value - center);
-    const wave = result.dense.map((value) => toCents(value) - center);
-    const envelope = (result.envelope ?? new Array(values.length).fill(0)).map((value) =>
-        Math.abs(value),
+    let centerSum = 0;
+    let centerCount = 0;
+    for (let i = 0; i < originalCents.length; i += 1) {
+        if (isUnsetValue(args.param, values[i])) continue;
+        centerSum += originalCents[i];
+        centerCount += 1;
+    }
+    const center = centerCount > 0 ? centerSum / centerCount : 0;
+
+    /*
+     * 未检测帧画成**断口**（NaN，画布抬笔）：它既不是一个音高，也不是"停在中心"。
+     * 让两种含义在图上可区分，用户才不会把"这里没数据"读成"这里被拉平了"。
+     */
+    const original = originalCents.map((value, index) =>
+        isUnsetValue(args.param, values[index]) ? Number.NaN : value - center,
+    );
+    const wave = result.dense.map((value, index) =>
+        isUnsetValue(args.param, values[index]) ? Number.NaN : toCents(value) - center,
+    );
+    const envelope = (result.envelope ?? new Array(values.length).fill(0)).map((value, index) =>
+        isUnsetValue(args.param, values[index]) ? Number.NaN : Math.abs(value),
     );
 
     // 真实峰值（与 `buildVibratoPreview` 同一约定）：读数据此显示，尺度由调用方兜底。
+    // 断口不参与 —— 否则一个 NaN 就能把整条纵轴撑爆。
     let peak = 0;
-    for (const value of original) peak = Math.max(peak, Math.abs(value));
-    for (const value of wave) peak = Math.max(peak, Math.abs(value));
-    for (const value of envelope) peak = Math.max(peak, Math.abs(value));
+    for (const value of original) {
+        if (Number.isFinite(value)) peak = Math.max(peak, Math.abs(value));
+    }
+    for (const value of wave) {
+        if (Number.isFinite(value)) peak = Math.max(peak, Math.abs(value));
+    }
+    for (const value of envelope) {
+        if (Number.isFinite(value)) peak = Math.max(peak, Math.abs(value));
+    }
     return { wave, envelope, original, peakCents: peak };
 }
 

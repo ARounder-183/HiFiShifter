@@ -343,8 +343,11 @@ describe("previewScaleCents", () => {
 });
 
 describe("buildAppliedPreview（套用到选区的预览）", () => {
-    // 一段音高曲线（半音）：0 → 2 的上行，叠加 30 分正弦颤音。
-    const ramp = Array.from({ length: 200 }, (_, i) => (i / 199) * 2);
+    // 一段音高曲线（半音）：C4 → D4 的上行，叠加 30 分正弦颤音。
+    //
+    // 【为什么从 60 起而不是从 0 起】音高参数里 **0 = 未检测到音高**，不是"音高 0"
+    // （见 `vibratoPitch.ts`）。拿 0 当数据写进夹具，测的就是一个不存在的情形。
+    const ramp = Array.from({ length: 200 }, (_, i) => 60 + (i / 199) * 2);
     const preset = sanitizeVibratoPreset({
         id: "custom_a",
         depthCents: 30,
@@ -404,16 +407,110 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
         ).toBeNull();
     });
 
-    test("非有限的帧值被当作 0，不产生 NaN 曲线", () => {
-        const preview = buildAppliedPreview({
-            preset,
-            original: [0, Number.NaN, 1, 2],
-            param: "pitch",
-            framePeriodMs: 5,
-        })!;
-        for (const value of [...preview.wave, ...preview.original]) {
-            expect(Number.isFinite(value)).toBe(true);
-        }
+    /*
+     * 本组最重要的一条：选区首尾落在气口上时，锚点绝不能取哨兵 0。
+     *
+     * 旧实现取首末帧当锚点（`baseline: "line"` 于是把整段拉直成 0），中间真实唱出来
+     * 的音高被整段抹掉 —— 用户看到的就是"加了个颤音，音高全没了"。
+     */
+    describe("音高哨兵（0 = 未检测）", () => {
+        // 两头气口（0）、中间一句真实音高的唱段（C4 → E4）。
+        const withGaps = [0, 0, 0, 60, 61, 62, 63, 64, 0, 0];
+        const line = sanitizeVibratoPreset({
+            id: "custom_line",
+            depthCents: 0,
+            rateHz: 5.5,
+            attackMs: 0,
+            releaseMs: 0,
+            baseline: "line",
+        });
+
+        test("首尾未检测不再把整段拉平：锚点取自中间的已检测帧", () => {
+            const preview = buildAppliedPreview({
+                preset: line,
+                original: withGaps,
+                param: "pitch",
+                framePeriodMs: 5,
+            })!;
+            const voiced = [3, 4, 5, 6, 7].map((i) => preview.wave[i]);
+            // 关键断言：已检测帧仍在中心附近（几百 cents 之内）。
+            // 旧实现把锚点取成哨兵 0，这几帧会变成 (0 − 6200) ≈ −6200 分。
+            for (const value of voiced) expect(Math.abs(value)).toBeLessThan(1000);
+            // 而且原来的上行运动被保留，没有被拉成一条平线。
+            for (let k = 1; k < voiced.length; k += 1) {
+                expect(voiced[k]).toBeGreaterThan(voiced[k - 1]);
+            }
+        });
+
+        test("未检测帧画成断口（NaN），且不参与中心与峰值", () => {
+            const preview = buildAppliedPreview({
+                preset: line,
+                original: withGaps,
+                param: "pitch",
+                framePeriodMs: 5,
+            })!;
+            for (const i of [0, 1, 2, 8, 9]) {
+                expect(Number.isNaN(preview.wave[i])).toBe(true);
+                expect(Number.isNaN(preview.original[i])).toBe(true);
+            }
+            // 中心只按已检测帧求：60..64 半音 → 6200 分。若把两个 0 也算进去，
+            // 中心会被拽到 4640 分，画出来的颤音直接出画。
+            expect(preview.original[3]).toBeCloseTo(6000 - 6200, 6);
+            // 峰值不因断口爆掉。
+            expect(preview.peakCents).toBeLessThan(500);
+        });
+
+        test("未检测帧的包络也是断口（不在气口上画出一条颤音带）", () => {
+            const deep = sanitizeVibratoPreset({
+                id: "custom_deep",
+                depthCents: 40,
+                rateHz: 5.5,
+                attackMs: 0,
+                releaseMs: 0,
+                baseline: "existing",
+            });
+            const preview = buildAppliedPreview({
+                preset: deep,
+                original: withGaps,
+                param: "pitch",
+                framePeriodMs: 5,
+            })!;
+            expect(Number.isNaN(preview.envelope[0])).toBe(true);
+            expect(Number.isFinite(preview.envelope[5])).toBe(true);
+        });
+
+        test("整段都未检测：没有可调制的对象，返回 null", () => {
+            expect(
+                buildAppliedPreview({
+                    preset: line,
+                    original: [0, 0, 0, 0],
+                    param: "pitch",
+                    framePeriodMs: 5,
+                }),
+            ).toBeNull();
+            // 非有限值一并算作未检测。
+            expect(
+                buildAppliedPreview({
+                    preset: line,
+                    original: [Number.NaN, 0, Number.NaN],
+                    param: "pitch",
+                    framePeriodMs: 5,
+                }),
+            ).toBeNull();
+        });
+
+        test("非哨兵参数不受影响：0 仍是合法值，也不产生断口", () => {
+            const values = [0, Number.NaN, 1, 2, 3];
+            const preview = buildAppliedPreview({
+                preset,
+                original: values,
+                param: "volume",
+                framePeriodMs: 5,
+            })!;
+            for (const value of [...preview.wave, ...preview.original]) {
+                expect(Number.isFinite(value)).toBe(true);
+            }
+        });
     });
 
     test("乘性参数（dyn）也给出可辨的偏离（换算到分后仍围绕中心）", () => {
