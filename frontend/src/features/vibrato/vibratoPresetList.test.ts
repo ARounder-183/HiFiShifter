@@ -89,8 +89,17 @@ describe("系统预设表", () => {
         expect(systemVibratoPreset("straight").depthCents).toBe(0);
     });
 
-    test("气息预设叠在已有曲线上（不替换原曲线）", () => {
-        expect(systemVibratoPreset("breath").baseline).toBe("existing");
+    /*
+     * 出厂预设**不再携带**「摆放方式」。
+     *
+     * 它已抽离成添加颤音时的参数（存在设置里，见 `BaselineMode`）：同一个预设在
+     * 不同摆放方式下都该能用，因此"某个预设天生就叠在原曲线上"这种绑定不存在了。
+     */
+    test("出厂预设不携带摆放方式（它是添加颤音的参数）", () => {
+        for (const preset of SYSTEM_VIBRATO_PRESETS) {
+            expect("baseline" in preset, `${preset.id} 不该带 baseline`).toBe(false);
+        }
+        expect(systemVibratoPreset("breath").depthCents).toBeGreaterThan(0);
     });
 
     test("系统预设被冻结：就地改写会抛错", () => {

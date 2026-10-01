@@ -50,6 +50,7 @@ import {
     reorderBuiltinVibratoPreset,
     reorderVibratoPreset,
     setActiveVibratoPreset,
+    setVibratoBaseline,
     toggleVibratoPresetEnabled,
     upsertVibratoPreset,
 } from "../../features/session/sessionSlice";
@@ -87,7 +88,6 @@ import {
     vibratoAudition,
 } from "../../features/vibrato/vibratoAudition";
 import type {
-    BaselineMode,
     CycleSource,
     EnvelopeCurve,
     VibratoPreset,
@@ -125,8 +125,6 @@ import {
     type VibratoPreviewTab,
 } from "./vibrato/VibratoPreviewPane";
 import {
-    BASELINE_MODE_KEYS,
-    BASELINE_MODE_ORDER,
     ENVELOPE_CURVE_KEYS,
     ENVELOPE_CURVE_ORDER,
     PREVIEW_DEFAULT,
@@ -449,8 +447,9 @@ export function VibratoDialog({
             param: editParam,
             framePeriodMs: original.framePeriodMs,
             range: paramRange,
+            baseline: session.vibratoBaseline,
         });
-    }, [applyTarget, draft, original, editParam, paramRange]);
+    }, [applyTarget, draft, original, editParam, paramRange, session.vibratoBaseline]);
 
     /**
      * 套用页签的纵轴半幅（cents）。
@@ -1460,11 +1459,19 @@ export function VibratoDialog({
                                 appliedHalfCents={appliedHalfCents}
                                 appliedHandles={appliedHandles}
                                 appliedStatus={appliedStatus}
-                                // 「摆放方式」在波形右上角就地可改：它决定颤音挂在
-                                // 素材的哪条线上，是套用时最常调的参数。表单里同一个
-                                // 字段仍在，两处改的都是这份草稿。
-                                baseline={draft.baseline}
-                                onBaselineChange={(mode) => patch({ baseline: mode })}
+                                /*
+                                 * 「摆放方式」在波形右上角就地可改。
+                                 *
+                                 * 【为什么读写的不是草稿】它是**添加颤音的参数**，不属于
+                                 * 任何预设：用户先定摆放方式、再挑预设，换预设不该把它
+                                 * 换掉（见 `BaselineMode` 的说明）。因此它进设置、本机
+                                 * 记忆，下次打开还是这个。
+                                 */
+                                baseline={session.vibratoBaseline}
+                                onBaselineChange={(mode) => {
+                                    dispatch(setVibratoBaseline(mode));
+                                    void dispatch(persistUiSettings());
+                                }}
                                 onGestureStart={handlePreviewGestureStart}
                                 onGestureMove={handlePreviewGestureMove}
                                 onGestureEnd={handlePreviewGestureEnd}
@@ -2114,49 +2121,6 @@ export function VibratoDialog({
                                                                 patch({ startPhaseDeg: next })
                                                             }
                                                         />
-                                                    </AppField>
-                                                </AppFormSection>
-
-                                                <AppFormSection
-                                                    title={t("vibrato_section_baseline")}
-                                                >
-                                                    <AppField label={t("vibrato_baseline")}>
-                                                        <AppSelect
-                                                            value={draft.baseline}
-                                                            onValueChange={(value) =>
-                                                                patch({
-                                                                    baseline: value as BaselineMode,
-                                                                })
-                                                            }
-                                                            options={BASELINE_MODE_ORDER.map(
-                                                                (mode) => ({
-                                                                    value: mode,
-                                                                    label: t(
-                                                                        BASELINE_MODE_KEYS[mode],
-                                                                    ),
-                                                                }),
-                                                            )}
-                                                        />
-                                                    </AppField>
-                                                    <AppField label={t("vibrato_blend")}>
-                                                        <Flex align="center" gap="2" wrap="wrap">
-                                                            <AppSlider
-                                                                unit="percent"
-                                                                min={0}
-                                                                max={100}
-                                                                disabled={
-                                                                    draft.baseline !== "existing"
-                                                                }
-                                                                value={Math.round(draft.blend)}
-                                                                ariaLabel={t("vibrato_blend")}
-                                                                onChange={(next) =>
-                                                                    patch({ blend: next })
-                                                                }
-                                                            />
-                                                            <AppSliderReadout>
-                                                                {`${formatNumber(draft.blend)}%`}
-                                                            </AppSliderReadout>
-                                                        </Flex>
                                                     </AppField>
                                                 </AppFormSection>
                                             </AppForm>

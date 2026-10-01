@@ -25,7 +25,7 @@
 import { sampleCycle, wrap01 } from "./vibratoCycle";
 import { clampDepthCentsForParam, depthMappingFor, type VibratoParamRange } from "./vibratoDepth";
 import { vibratoSeedForPreset } from "./vibratoSeed";
-import type { EnvelopeCurve, VibratoPreset } from "./vibratoTypes";
+import type { BaselineMode, EnvelopeCurve, VibratoPreset } from "./vibratoTypes";
 
 /** 默认的帧周期，与后端 `state.rs::default_frame_period_ms` 一致。 */
 export const DEFAULT_FRAME_PERIOD_MS = 5;
@@ -44,11 +44,15 @@ export interface VibratoRenderInput {
     startValue: number;
     endFrame: number;
     endValue: number;
-    /**
-     * 整段原值（按帧索引，`original[k]` 对应 `minF + k`）。
-     * `baseline === "existing"` 时必需；`blend < 100` 时也必需。
-     */
+    /** 整段原值（按帧索引，`original[k]` 对应 `minF + k`）。`baseline === "existing"` 时必需。 */
     original?: ArrayLike<number>;
+    /**
+     * 摆放方式：颤音围绕哪条曲线摆。
+     *
+     * 【为什么是输入而不是预设的字段】它是**这一次操作**的参数，与预设无关：
+     * 同一个预设可以挂在不同的线上（见 `BaselineMode` 的说明）。省略 = 保持现有曲线。
+     */
+    baseline?: BaselineMode;
     preset: VibratoPreset;
     param: string;
     framePeriodMs?: number;
@@ -152,13 +156,8 @@ function effectiveRateHz(preset: VibratoPreset, durationSec: number): number {
 }
 
 /** 取基线：`baseline` 模式决定颤音围绕什么摆动。 */
-function baselineAt(
-    preset: VibratoPreset,
-    t: number,
-    i: number,
-    input: VibratoRenderInput,
-): number {
-    switch (preset.baseline) {
+function baselineAt(t: number, i: number, input: VibratoRenderInput): number {
+    switch (input.baseline ?? "existing") {
         case "holdStart":
             return input.startValue;
         case "holdEnd":
@@ -262,10 +261,6 @@ export function buildVibratoCurve(input: VibratoRenderInput): VibratoRenderResul
     }
 
     // ---- 第二趟：合成 -----------------------------------------------------
-    const blend = Number.isFinite(preset.blend)
-        ? Math.min(100, Math.max(0, preset.blend)) / 100
-        : 1;
-    const useOriginalBlend = blend < 1 && Boolean(input.original);
     const snap = input.snapFinalValue;
     const envelope = input.collectEnvelope ? new Array<number>(len) : undefined;
     const baselineOut = input.collectBaseline ? new Array<number>(len) : undefined;
@@ -276,7 +271,7 @@ export function buildVibratoCurve(input: VibratoRenderInput): VibratoRenderResul
         const t = span === 0 ? 1 : (frame - input.startFrame) / span;
         const tc = i / denom;
 
-        const base = baselineAt(preset, t, i, input);
+        const base = baselineAt(t, i, input);
 
         // 相位抖动：让周期长短不一，像真人而不是机器。
         const phaseJitter =
@@ -319,11 +314,6 @@ export function buildVibratoCurve(input: VibratoRenderInput): VibratoRenderResul
             value = Math.max(0, base * (1 + delta));
         } else {
             value = base + bias + delta;
-        }
-
-        if (useOriginalBlend) {
-            const original = Number(input.original?.[i]);
-            if (Number.isFinite(original)) value = original + (value - original) * blend;
         }
 
         dense[i] = snap ? snap(value, frame) : value;

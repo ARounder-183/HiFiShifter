@@ -371,32 +371,46 @@ describe("buildContourAuditionPair", () => {
     /*
      * 报告过的缺陷：试听原参数线时听到"超低频"。
      *
-     * 根因：试听直接吃画出来的轮廓，而轮廓**照画**音符帧 —— 跟踪器在音符内部给的
-     * 异常段（八度跳、从无声区爬上来的 20~40 Hz 低估）按原值合成出来是几十赫兹的
-     * 闷响。那不是这段素材的音高：试听是合成人声，没有"唱 30 Hz"这回事。
+     * 试听是**合成人声**，基准固定 C4；跟踪器在音符内部给出的异常（八度跳、持续的
+     * 几十赫兹低估）按原值合成出来就是一段闷响。两道闸门各自负责一类：
      *
-     * 修法：不可信的帧（`trusted=false`）与断口一样按最近的音高**持续**。画面上它们
-     * 照旧可见（那是数据本身），但耳朵只听到音高。
+     * 1. **幅度闸门**：偏离旋律中心超过两个八度的一律按最近的音高持续
+     *    （持续的低估不离群，只有量级判得出来）；
+     * 2. **可信掩码**：`refineNoteFrames` 判出的局部离群帧同样持续
+     *    （量级还在范围内、但显然不是这一段音高的那些）。
+     *
+     * 两条都带"不设闸门会怎样"的反面对照 —— 否则断言可能在测一个恒真的东西。
      */
-    it("不可信的帧不发声：不出现几十赫兹的超低频", () => {
-        const note = Array.from({ length: 200 }, (_, i) => 6000 + Math.sin(i / 6) * 40);
-        const contour = [...note];
-        const trusted = note.map(() => true);
-        // 音符内部 40 帧八度跳（MIDI 72 → 相对中心是 +1200 分，反过来则是超低频）。
-        for (let i = 80; i < 120; i += 1) {
-            contour[i] = 2400; // MIDI 24：跟踪器在浊清边界的典型低估
+    it("持续低估的帧不发声（幅度闸门）", () => {
+        const contour = Array.from({ length: 200 }, (_, i) => 6000 + Math.sin(i / 6) * 40);
+        // 音符内部 40 帧**持续**低估（跟踪器卡在 20 Hz 附近那类），且不离群。
+        for (let i = 80; i < 120; i += 1) contour[i] = 2000;
+        // 反面对照：那 40 帧若按原值发声，中心约 5200 分 → 它们落在 41 Hz 上下。
+        const centerIfRaw = (160 * 6000 + 40 * 2000) / 200;
+        expect(hzAt(2000 - centerIfRaw)).toBeLessThan(60);
+
+        const pair = buildContourAuditionPair(preview(contour))!;
+        expect(Math.min(...pair.source.freqHz), "不该出现超低频").toBeGreaterThan(200);
+        expect(Math.max(...pair.source.freqHz)).toBeLessThan(350);
+    });
+
+    it("量级在范围内、但不可信的帧同样不发声（可信掩码）", () => {
+        const contour = Array.from({ length: 200 }, (_, i) => 6000 + Math.sin(i / 6) * 40);
+        const trusted = contour.map(() => true);
+        // 音符内部 30 帧八度跳：量级只偏离 1200 分（幅度闸门放行），但不可信。
+        for (let i = 80; i < 110; i += 1) {
+            contour[i] = 7200;
             trusted[i] = false;
         }
 
         const withMask = buildContourAuditionPair(preview(contour, contour, trusted))!;
         const withoutMask = buildContourAuditionPair(preview(contour))!;
 
-        // 不带掩码：那 40 帧落在 50 Hz 上下（G1 附近）——"超低频"正是这么来的，
-        // 任何歌手都唱不到那里。
-        expect(Math.min(...withoutMask.source.freqHz)).toBeLessThan(60);
-        // 带掩码：全程都在音符自己的音高附近（C4 ± 一点颤音）。
-        expect(Math.min(...withMask.source.freqHz), "不该出现超低频").toBeGreaterThan(200);
+        // 不带掩码：那 30 帧被当成音高发出来（比音符高一个八度）。
+        expect(Math.max(...withoutMask.source.freqHz)).toBeGreaterThan(400);
+        // 带掩码：全程都在音符自己的音高附近。
         expect(Math.max(...withMask.source.freqHz)).toBeLessThan(350);
+        expect(Math.min(...withMask.source.freqHz)).toBeGreaterThan(150);
     });
 
     it("全部帧都不可信时返回 null（没有可发声的音高）", () => {

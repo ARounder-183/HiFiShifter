@@ -595,9 +595,11 @@ export function extractVibratoPreset(input: VibratoExtractInput): VibratoExtract
         irregularity,
         seed: vibratoSeedForPreset({ id: presetId }),
         biasCents: 0,
-        // 提取出来的是"一段曲线上的颤音"，套回曲线时自然应当叠在已有曲线上。
-        baseline: "existing",
-        blend: 100,
+        /*
+         * 【提取结果不携带摆放方式】它抽离成添加颤音时的参数（存在设置里，见
+         * `BaselineMode`）：同一条提取出来的颤音，用户既可以叠在已有曲线上、也可以
+         * 拉直成一条线，那由他在窗口右上角选，而不是由"它是提取来的"决定。
+         */
     };
 
     return {

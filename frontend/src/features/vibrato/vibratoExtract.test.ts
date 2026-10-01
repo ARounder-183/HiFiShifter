@@ -116,7 +116,7 @@ describe("extractVibratoPreset：往返", () => {
     });
 
     test("深度换算按参数族：dyn 上还原的是百分比深度", () => {
-        const values = render({ depthCents: 30, rateHz: 5, baseline: "holdStart" }, 2, "dyn", 1);
+        const values = render({ depthCents: 30, rateHz: 5 }, 2, "dyn", 1);
         const result = extractVibratoPreset({ values, framePeriodMs: FP, param: "dyn" });
         expect(result.ok).toBe(true);
         if (!result.ok) return;
@@ -273,7 +273,8 @@ describe("提取结果的预设形态", () => {
         const result = extractVibratoPreset({ values, framePeriodMs: FP, param: "pitch" });
         expect(result.ok).toBe(true);
         if (!result.ok) return;
-        expect(result.preset.baseline).toBe("existing");
+        // 摆放方式已抽离成添加颤音的参数（存在设置里），提取结果不携带它。
+        expect("baseline" in result.preset).toBe(false);
         expect(result.preset.cycle.kind).toBe("table");
         expect(result.preset.builtin).toBe(false);
         expect(result.preset.id.startsWith("custom_")).toBe(true);

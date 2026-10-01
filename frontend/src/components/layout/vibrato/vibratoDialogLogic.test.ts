@@ -7,6 +7,9 @@ import {
     SYSTEM_VIBRATO_PRESETS,
 } from "../../../features/vibrato/systemPresets";
 import { sanitizeVibratoPreset } from "../../../features/vibrato/vibratoPresets";
+import { buildVibratoCurve } from "../../../features/vibrato/vibratoCurve";
+import type { BaselineMode, VibratoPreset } from "../../../features/vibrato/vibratoTypes";
+import type { VibratoParamRange } from "../../../features/vibrato/vibratoDepth";
 import {
     BASELINE_MODE_KEYS,
     BASELINE_MODE_ORDER,
@@ -30,6 +33,27 @@ import {
     vibratoPresetLabel,
     vibratoPresetSummary,
 } from "./vibratoDialogLogic";
+
+/**
+ * `buildAppliedPreview` 的测试包装：省掉每个用例都写一遍摆放方式。
+ *
+ * 【默认值】`line` —— 抽取成设置**之前**的既有行为（预设的 `baseline` 一直兜底为
+ * `line`），因此不需要摆放方式的用例读起来与从前一致。
+ *
+ * 【摆放方式从哪来】它是「添加颤音」这一次操作的参数，不再是预设字段（见
+ * `BaselineMode`）：想改就**在调用处**传 `baseline`，别往 `sanitizeVibratoPreset`
+ * 里写 —— 那里已经收不到这个字段了（写了会被静默忽略）。
+ */
+function buildPreview(args: {
+    preset: VibratoPreset;
+    original: readonly number[];
+    param: string;
+    framePeriodMs: number;
+    baseline?: BaselineMode;
+    range?: VibratoParamRange;
+}) {
+    return buildAppliedPreview({ ...args, baseline: args.baseline ?? "line" });
+}
 
 /** 用参考语系的真实词条当翻译函数：这样"键写错了"会当场暴露成缺键。 */
 const t = (key: MessageKey): string => enUS[key];
@@ -308,11 +332,23 @@ describe("buildVibratoPreview", () => {
         expect(again.wave).toEqual(one.wave);
     });
 
-    test("baseline 为 existing 也被强制按 line 预览（无原曲线时才有确定形状）", () => {
-        const preset = sanitizeVibratoPreset({ depthCents: 40, baseline: "existing" });
+    test("预设波形预览恒按「起点 → 终点」摆（与素材无关，形状才可比）", () => {
+        const preset = sanitizeVibratoPreset({ depthCents: 40 });
         const samples = buildVibratoPreview(preset, { frameCount: 64, framePeriodMs: 5 });
-        const peak = Math.max(...samples.wave.map((value) => Math.abs(value)));
-        expect(peak).toBeGreaterThan(1);
+        // 逐点等于显式用 line 摆出来的那条曲线 —— 摆放方式已从预设里抽离，
+        // 这条断言守的是"预览自己钉死了哪一种"。
+        const reference = buildVibratoCurve({
+            startFrame: 0,
+            startValue: 0,
+            endFrame: 63,
+            endValue: 0,
+            preset,
+            param: "pitch",
+            framePeriodMs: 5,
+            baseline: "line",
+            collectEnvelope: true,
+        });
+        expect(samples.wave).toEqual(reference.dense.map((value) => value * 100));
     });
 
     test("极短请求不会崩（至少两点）", () => {
@@ -354,8 +390,9 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
         rateHz: 5.5,
         attackMs: 0,
         releaseMs: 0,
-        baseline: "existing",
     });
+    /** 这个夹具要的是"保留素材的走向"，因此摆放方式固定为 `existing`。 */
+    const EXISTING = "existing" as const;
 
     /*
      * 两条参数线共用一套纵轴。
@@ -366,11 +403,12 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
      * （用户报过："原参数线不也应该跟着动吗"）。
      */
     test("原线相对共同中心取值（形状保留），结果线与它之差就是颤音", () => {
-        const preview = buildAppliedPreview({
+        const preview = buildPreview({
             preset,
             original: ramp,
             param: "pitch",
             framePeriodMs: 5,
+            baseline: EXISTING,
         })!;
         expect(preview.contour.length).toBe(ramp.length);
         expect(preview.wave.length).toBe(ramp.length);
@@ -388,11 +426,12 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
     });
 
     test("读数用的颤音幅度与素材轮廓宽度无关", () => {
-        const preview = buildAppliedPreview({
+        const preview = buildPreview({
             preset,
             original: ramp,
             param: "pitch",
             framePeriodMs: 5,
+            baseline: EXISTING,
         })!;
         // 30 分深度：读数只跟包络有关，不该被素材自身的音高起伏撑大。
         expect(preview.vibratoPeakCents).toBeGreaterThan(28);
@@ -400,12 +439,13 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
     });
 
     test("深度为 0：结果线与原线重合（不改动音高）", () => {
-        const flat = sanitizeVibratoPreset({ id: "custom_b", depthCents: 0, baseline: "existing" });
-        const preview = buildAppliedPreview({
+        const flat = sanitizeVibratoPreset({ id: "custom_b", depthCents: 0 });
+        const preview = buildPreview({
             preset: flat,
             original: ramp,
             param: "pitch",
             framePeriodMs: 5,
+            baseline: EXISTING,
         })!;
         for (let i = 0; i < ramp.length; i += 1) {
             expect(preview.wave[i]).toBeCloseTo(preview.contour[i], 6);
@@ -415,11 +455,9 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
 
     test("数据不足两点时返回 null（由调用方显示占位提示）", () => {
         expect(
-            buildAppliedPreview({ preset, original: [0], param: "pitch", framePeriodMs: 5 }),
+            buildPreview({ preset, original: [0], param: "pitch", framePeriodMs: 5 }),
         ).toBeNull();
-        expect(
-            buildAppliedPreview({ preset, original: [], param: "pitch", framePeriodMs: 5 }),
-        ).toBeNull();
+        expect(buildPreview({ preset, original: [], param: "pitch", framePeriodMs: 5 })).toBeNull();
     });
 
     /*
@@ -456,15 +494,15 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             rateHz: 5.5,
             attackMs: 0,
             releaseMs: 0,
-            baseline: "line",
         });
 
         test("边界过渡帧不再把整段拉平：锚点是音符本身的音高", () => {
-            const preview = buildAppliedPreview({
+            const preview = buildPreview({
                 preset: line,
                 original: withGaps,
                 param: "pitch",
                 framePeriodMs: 5,
+                baseline: "existing",
             })!;
             /*
              * 直线预设把选区拉直成一条线，而这条线锚在**音符两端的音高**上
@@ -506,11 +544,11 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
                         attackMs: 0,
                         releaseMs: 0,
                         irregularity: 0,
-                        baseline,
                     }),
                     original: note,
                     param: "pitch",
                     framePeriodMs: 5,
+                    baseline,
                 })!;
                 // 取音符中段的几帧（避开两端的过渡），代表这条线摆在哪。
                 return preview.wave[55] as number;
@@ -550,7 +588,7 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
                 ...Array.from({ length: 40 }, (_, i) => 72 + Math.sin(i / 6) * 0.3),
                 ...Array.from({ length: 260 }, (_, i) => 60 + Math.sin(i / 6) * 0.3),
             ];
-            const preview = buildAppliedPreview({
+            const preview = buildPreview({
                 preset: sanitizeVibratoPreset({
                     id: "custom_glitch",
                     depthCents: 40,
@@ -576,7 +614,7 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
         });
 
         test("不受颤音影响的帧画成断口（NaN），且不参与纵轴", () => {
-            const preview = buildAppliedPreview({
+            const preview = buildPreview({
                 preset: line,
                 original: withGaps,
                 param: "pitch",
@@ -609,13 +647,13 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
                 rateHz: 5.5,
                 attackMs: 0,
                 releaseMs: 0,
-                baseline: "existing",
             });
-            const preview = buildAppliedPreview({
+            const preview = buildPreview({
                 preset: deep,
                 original: withGaps,
                 param: "pitch",
                 framePeriodMs: 5,
+                baseline: "existing",
             })!;
             expect(Number.isNaN(preview.envelope[0])).toBe(true);
             expect(Number.isNaN(preview.envelope[GAP])).toBe(true);
@@ -625,7 +663,7 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
         test("没有够长的音符段：没有可调制的对象，返回 null", () => {
             // 整段未检测（含非有限值混排）。
             expect(
-                buildAppliedPreview({
+                buildPreview({
                     preset: line,
                     original: [0, 0, 0, 0],
                     param: "pitch",
@@ -633,7 +671,7 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
                 }),
             ).toBeNull();
             expect(
-                buildAppliedPreview({
+                buildPreview({
                     preset: line,
                     original: [Number.NaN, 0, Number.NaN],
                     param: "pitch",
@@ -642,7 +680,7 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             ).toBeNull();
             // 有音高但只有 3 帧（15ms）—— 够不上一个音符。
             expect(
-                buildAppliedPreview({
+                buildPreview({
                     preset: line,
                     original: [
                         ...new Array<number>(10).fill(0),
@@ -659,11 +697,12 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
 
         test("非哨兵参数不受影响：0 仍是合法值，也不产生断口", () => {
             const values = [0, Number.NaN, 1, 2, 3];
-            const preview = buildAppliedPreview({
+            const preview = buildPreview({
                 preset,
                 original: values,
                 param: "volume",
                 framePeriodMs: 5,
+                baseline: EXISTING,
             })!;
             for (const value of preview.wave) {
                 expect(Number.isFinite(value)).toBe(true);
@@ -692,7 +731,6 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             rateHz: 5.5,
             attackMs: 0,
             releaseMs: 0,
-            baseline: "existing",
         });
         const finite = (values: number[]) => values.filter(Number.isFinite);
 
@@ -716,17 +754,19 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
          * 这正是"读得出颤音大小"的落点（读数用的就是它）。
          */
         test("读数用的颤音幅度与素材轮廓宽度无关", () => {
-            const a = buildAppliedPreview({
+            const a = buildPreview({
                 preset: deep,
                 original: steadyNote,
                 param: "pitch",
                 framePeriodMs: 5,
+                baseline: "existing",
             })!;
-            const b = buildAppliedPreview({
+            const b = buildPreview({
                 preset: deep,
                 original: rampedNote,
                 param: "pitch",
                 framePeriodMs: 5,
+                baseline: "existing",
             })!;
             for (const preview of [a, b]) {
                 expect(preview.vibratoPeakCents).toBeGreaterThan(38);
@@ -747,9 +787,8 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
                 rateHz: 5.5,
                 attackMs: 0,
                 releaseMs: 0,
-                baseline: "line",
             });
-            const preview = buildAppliedPreview({
+            const preview = buildPreview({
                 preset: lineWithDepth,
                 original: rampedNote,
                 param: "pitch",
@@ -772,11 +811,12 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
          */
         describe("两条线共用一套标尺", () => {
             test("原线保留素材的音高走向；结果线与它之差就是颤音", () => {
-                const preview = buildAppliedPreview({
+                const preview = buildPreview({
                     preset: deep,
                     original: rampedNote,
                     param: "pitch",
                     framePeriodMs: 5,
+                    baseline: "existing",
                 })!;
                 // 素材是 40→60 的缓升 + 稳定音：原线把这段走向完整带过来（千分级）。
                 // 【注】300ms 的缓升属于**真实音高运动**，不是要剔掉的过渡段 ——
@@ -791,11 +831,12 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             });
 
             test("断口两条线一起断（气口与过渡帧都不画）", () => {
-                const preview = buildAppliedPreview({
+                const preview = buildPreview({
                     preset: deep,
                     original: rampedNote,
                     param: "pitch",
                     framePeriodMs: 5,
+                    baseline: "existing",
                 })!;
                 for (let i = 0; i < 100; i += 1) {
                     expect(Number.isNaN(preview.contour[i])).toBe(true);
@@ -821,7 +862,6 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
                     attackMs: 0,
                     releaseMs: 0,
                     irregularity: 0,
-                    baseline: "line",
                 });
                 // 一段**拱形**素材：起止同高（都是 60）、中间隆起 2 个半音。
                 // 它必须是一段"音符"（快滑音会被判成过渡段），所以用缓慢的正弦拱。
@@ -834,6 +874,7 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
                     original: phrase,
                     param: "pitch",
                     framePeriodMs: 5,
+                    baseline: "line",
                 })!;
                 const result = finite(preview.wave);
                 const contour = finite(preview.contour);
@@ -849,8 +890,8 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
 
     test("乘性参数（dyn）也给出可辨的偏离（换算到分后仍围绕中心）", () => {
         const dyn = Array.from({ length: 120 }, () => 80);
-        const preview = buildAppliedPreview({
-            preset: sanitizeVibratoPreset({ id: "custom_c", depthCents: 30, baseline: "existing" }),
+        const preview = buildPreview({
+            preset: sanitizeVibratoPreset({ id: "custom_c", depthCents: 30 }),
             original: dyn,
             param: "dyn",
             framePeriodMs: 5,

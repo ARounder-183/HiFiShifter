@@ -187,7 +187,8 @@ describe("深度按参数族换算", () => {
 
     test("乘性增益：静音帧保持静音（历史实现用加性，会把静音抬起来）", () => {
         const zeros = new Array<number>(201).fill(0);
-        const values = render(steady({ depthCents: 60, baseline: "existing" }), 1, {
+        const values = render(steady({ depthCents: 60 }), 1, {
+            baseline: "existing",
             param: "dyn",
             original: zeros,
         });
@@ -196,7 +197,8 @@ describe("深度按参数族换算", () => {
 
     test("乘性增益：深度 100 = ±100% 倍率", () => {
         const ones = new Array<number>(201).fill(1);
-        const values = render(steady({ depthCents: 100, baseline: "existing" }), 1, {
+        const values = render(steady({ depthCents: 100 }), 1, {
+            baseline: "existing",
             param: "dyn",
             original: ones,
         });
@@ -206,7 +208,8 @@ describe("深度按参数族换算", () => {
 
     test("乘性增益：负半周钳到 0，不产生负增益", () => {
         const ones = new Array<number>(201).fill(1);
-        const values = render(steady({ depthCents: 200, baseline: "existing" }), 1, {
+        const values = render(steady({ depthCents: 200 }), 1, {
+            baseline: "existing",
             param: "volume",
             original: ones,
         });
@@ -236,7 +239,8 @@ describe("基线模式", () => {
             startValue: 58,
             endFrame: 200,
             endValue: 62,
-            preset: steady({ depthCents: 20, baseline: "existing" }),
+            preset: steady({ depthCents: 20 }),
+            baseline: "existing",
             param: "pitch",
             framePeriodMs: FP,
             original,
@@ -254,9 +258,10 @@ describe("基线模式", () => {
             startValue: 58,
             endFrame: 200,
             endValue: 62,
-            preset: steady({ depthCents: 20, baseline: "average" }),
+            preset: steady({ depthCents: 20 }),
             param: "pitch",
             framePeriodMs: FP,
+            baseline: "average",
         }).dense;
         const mean = (Math.max(...values) + Math.min(...values)) / 2;
         expect(mean).toBeCloseTo(60, 2);
@@ -268,7 +273,8 @@ describe("基线模式", () => {
             startValue: 60,
             endFrame: 200,
             endValue: 72,
-            preset: steady({ depthCents: 20, baseline: "holdStart" }),
+            preset: steady({ depthCents: 20 }),
+            baseline: "holdStart",
             param: "pitch",
             framePeriodMs: FP,
         }).dense;
@@ -281,7 +287,8 @@ describe("基线模式", () => {
             startValue: 60,
             endFrame: 200,
             endValue: 72,
-            preset: steady({ depthCents: 20, baseline: "line" }),
+            preset: steady({ depthCents: 20 }),
+            baseline: "line",
             param: "pitch",
             framePeriodMs: FP,
         }).dense;
@@ -290,21 +297,6 @@ describe("基线模式", () => {
         // 末帧附近围绕 72 摆动。
         const tail = values.slice(-3);
         expect(tail.reduce((a, b) => a + b, 0) / tail.length).toBeCloseTo(72, 1);
-    });
-
-    test("干湿比 0 时输出与原始曲线逐值一致", () => {
-        const original = Array.from({ length: 201 }, (_, i) => 60 + Math.sin(i / 9) * 2);
-        const values = buildVibratoCurve({
-            startFrame: 0,
-            startValue: 60,
-            endFrame: 200,
-            endValue: 60,
-            preset: steady({ depthCents: 80, baseline: "existing", blend: 0 }),
-            param: "pitch",
-            framePeriodMs: FP,
-            original,
-        }).dense;
-        for (let i = 0; i < values.length; i += 1) expect(values[i]).toBeCloseTo(original[i], 12);
     });
 });
 
@@ -542,7 +534,7 @@ describe("estimateCycles", () => {
  */
 describe("collectBaseline", () => {
     test("缺省不返回；开启后与 dense 同长", () => {
-        const p = steady({ depthCents: 40, baseline: "existing" });
+        const p = steady({ depthCents: 40 });
         const base = {
             startFrame: 0,
             startValue: 60,
@@ -565,7 +557,8 @@ describe("collectBaseline", () => {
             endFrame: original.length - 1,
             endValue: original[original.length - 1],
             original,
-            preset: steady({ depthCents: 40, baseline: "existing" }),
+            preset: steady({ depthCents: 40 }),
+            baseline: "existing",
             param: "pitch",
             framePeriodMs: FP,
             collectBaseline: true,
@@ -582,7 +575,8 @@ describe("collectBaseline", () => {
             startValue: 58,
             endFrame: 99,
             endValue: 62,
-            preset: steady({ depthCents: 0, baseline: "line" }),
+            preset: steady({ depthCents: 0 }),
+            baseline: "line",
             param: "pitch",
             framePeriodMs: FP,
             collectBaseline: true,

@@ -366,6 +366,11 @@ export function buildDragVibratoCurve(input: {
 }): { minF: number; maxF: number; dense: number[] } {
     const { working } = input;
     return buildVibratoCurve({
+        /*
+         * 拖拽工具自己就是"从起点画到终点"：基线永远是两端之间的那条直线，
+         * 与「添加颤音」的摆放方式设置无关（那是另一个动作的参数）。
+         */
+        baseline: "line",
         startFrame: input.startFrame,
         startValue: input.startValue,
         endFrame: input.endFrame,

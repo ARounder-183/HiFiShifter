@@ -163,8 +163,6 @@ const BUILTIN_SPECS: Record<BuiltinVibratoId, VibratoPresetInput> = {
         attackCurve: "linear",
         releaseMs: 80,
         irregularity: 10,
-        baseline: "existing",
-        blend: 100,
     },
     // 摇曳：慢速 + 高不规则度，做出"不稳"的人味。
     drift: {
@@ -196,7 +194,6 @@ const BUILTIN_SPECS: Record<BuiltinVibratoId, VibratoPresetInput> = {
         attackMs: 0,
         releaseMs: 0,
         irregularity: 0,
-        baseline: "line",
     },
 };
 

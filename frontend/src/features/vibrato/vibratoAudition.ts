@@ -28,6 +28,19 @@ import { DEFAULT_FRAME_PERIOD_MS } from "./vibratoCurve";
 /** 试听的基音：C4。 */
 export const AUDITION_BASE_MIDI = 60;
 
+/**
+ * 试听能接受的**最大偏离**（cents，相对旋律自身的中心）。
+ *
+ * 两个八度：试听把旋律中心合成到 C4，于是 ±2400 分 = 65 Hz ~ 1046 Hz —— 再往外
+ * 就不是人声了。跟踪器在音符内部偶尔给出的持续低估（几十赫兹）正落在外面：按原值
+ * 合成出来是一段闷响，而不是音高。
+ *
+ * 【为什么用相对量】试听故意把"旋律中心"映射到 C4（这样同一个预设在任何素材上
+ * 听感一致），所以绝对频率由相对偏离唯一决定 —— 判据也就只能用相对量表达。
+ * 两个八度足够宽：一段跨四个八度的旋律（人声里不可能）才用满。
+ */
+const AUDITION_MAX_CENTS = 2400;
+
 /** 与 `PianoKeySound` 相同的起音 / 释放整形参数（防咔哒）。 */
 const ATTACK_SEC = 0.008;
 const SUSTAIN_TAU = 0.05;
@@ -117,11 +130,36 @@ export function buildContourAuditionPair(
     const sourceContour = preview.contour;
     const resultContour = preview.wave;
     const trusted = preview.stableFrames;
-    const isUsable = (values: readonly number[], index: number) =>
-        Number.isFinite(values[index]) && (!trusted || trusted[index]);
-    const finite = sourceContour.filter((_value, index) => isUsable(sourceContour, index));
-    if (finite.length < 2) return null;
-    const center = finite.reduce((sum, value) => sum + value, 0) / finite.length;
+    /**
+     * 这一帧能不能拿去发声。
+     *
+     * 【为什么除了"可信"还要看量级】`trusted` 判的是"这一帧相对邻近的走向像不像
+     * 音符"（局部离群），而跟踪器还会给出**持续**的低估（一整段都在几十赫兹）——
+     * 它不离群，却显然不是这段素材的音高。试听是合成人声，于是再加一道"人声音域"
+     * 的闸：偏离旋律中心超过两个八度的一律按最近的音高持续。
+     */
+    const isUsable = (values: readonly number[], index: number, center: number) => {
+        const value = values[index];
+        if (!Number.isFinite(value) || (trusted && !trusted[index])) return false;
+        return Math.abs((value as number) - center) <= AUDITION_MAX_CENTS;
+    };
+    /*
+     * 中心分两遍算（闸门要用中心，中心又要用闸门，先拿一个种子中心起步）。
+     *
+     * 【为什么第二遍必须把离谱的帧剔出中心】一段**持续**的低估会把均值拽下去，
+     * 于是音符本身被算成"偏高"、整条试听跟着整体升高 —— 实测一个 40 帧的持续低估
+     * 能把音符抬到 415 Hz。中心要代表的是**旋律**的音高，不是"所有有限帧的平均"。
+     */
+    const usableValue = (index: number) =>
+        Number.isFinite(sourceContour[index]) && (!trusted || trusted[index]);
+    const seed = sourceContour.filter((_value, index) => usableValue(index));
+    if (seed.length < 2) return null;
+    const centerSeed = seed.reduce((sum, value) => sum + value, 0) / seed.length;
+    const inRange = sourceContour.filter(
+        (value, index) => usableValue(index) && Math.abs(value - centerSeed) <= AUDITION_MAX_CENTS,
+    );
+    if (inRange.length < 2) return null;
+    const center = inRange.reduce((sum, value) => sum + value, 0) / inRange.length;
     /**
      * 断口与**不可信的帧**都保持最近的音高（首尾也各自向最近的那个值靠）。
      *
@@ -132,10 +170,10 @@ export function buildContourAuditionPair(
      */
     const holdNearest = (values: readonly number[]): number[] => {
         const out = new Array<number>(values.length);
-        const firstIndex = values.findIndex((_value, index) => isUsable(values, index));
+        const firstIndex = values.findIndex((_value, index) => isUsable(values, index, center));
         let held = firstIndex >= 0 ? (values[firstIndex] as number) : center;
         for (let i = 0; i < values.length; i += 1) {
-            if (isUsable(values, i)) held = values[i] as number;
+            if (isUsable(values, i, center)) held = values[i] as number;
             out[i] = held - center;
         }
         return out;

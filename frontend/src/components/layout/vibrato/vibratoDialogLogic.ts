@@ -317,9 +317,12 @@ export function buildVibratoPreview(
         startValue: 0,
         endFrame: frameCount - 1,
         endValue: 0,
-        // 强制 `line` 基线：预览要展示波形本身，`existing` 在没有原曲线时
-        // 会退化成端点插值，画出来与用户看到的不一致。
-        preset: { ...preset, baseline: "line", blend: 100 },
+        /*
+         * 预设波形预览一律按「起点 → 终点」摆：它回答的是"这个预设的波形长什么样"，
+         * 拿素材的曲线去摆会让同一个预设每次看起来都不一样（形状没法横向比较）。
+         */
+        baseline: "line",
+        preset,
         param: "pitch",
         framePeriodMs: geometry.framePeriodMs,
         collectEnvelope: true,
@@ -388,6 +391,13 @@ export function buildAppliedPreview(args: {
     param: string;
     framePeriodMs: number;
     range?: VibratoParamRange;
+    /**
+     * 摆放方式：颤音围绕哪条曲线摆。
+     *
+     * 【为什么由调用方给】它是「添加颤音」这一次操作的参数，存在设置里（与预设无关），
+     * 窗口从设置里读出来再交给这里 —— 于是"换预设"不会把它换掉。
+     */
+    baseline: BaselineMode;
 }): VibratoAppliedPreview | null {
     const values = args.original.map((value) => (Number.isFinite(value) ? Number(value) : 0));
     if (values.length < 2) return null;
@@ -418,6 +428,7 @@ export function buildAppliedPreview(args: {
         param: args.param,
         framePeriodMs,
         range: args.range,
+        baseline: args.baseline,
         collectEnvelope: true,
         // 基线要一并拿回来：下面按"相对基线的偏移"作图（见下）。
         collectBaseline: true,

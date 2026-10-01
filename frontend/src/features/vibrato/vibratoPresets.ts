@@ -41,13 +41,28 @@ const WAVE_SHAPES: readonly WaveShape[] = [
     "trapezoid",
     "trill",
 ];
-const BASELINE_MODES: readonly BaselineMode[] = [
+/**
+ * 「摆放方式」的合法取值（颤音围绕哪条曲线摆）。
+ *
+ * 【为什么留在这里而不是预设里】它是**添加颤音时的一个参数**，与具体预设无关
+ * （见 `BaselineMode` 的说明）。放这里是因为"合法取值集合"与其它字段的值域是同一类
+ * 东西 —— 设置的读取侧要用它做校验。
+ */
+export const BASELINE_MODES: readonly BaselineMode[] = [
     "line",
     "holdStart",
     "holdEnd",
     "average",
     "existing",
 ];
+/**
+ * 「摆放方式」的默认值：**起点 → 终点**。
+ *
+ * 【为什么是它】它等于抽取成设置**之前**的既有行为（预设的 `baseline` 一直兜底为
+ * `line`）—— 改设置默认值等于替所有用户改一次行为，不该顺手做。用户想要"保留歌手
+ * 原本的音高运动"时，在窗口右上角换成「保持现有曲线」即可，且会被记住。
+ */
+export const DEFAULT_VIBRATO_BASELINE: BaselineMode = "line";
 const ENVELOPE_CURVES: readonly EnvelopeCurve[] = ["linear", "exp", "s"];
 const RATE_MODES: readonly VibratoRateMode[] = ["hz", "cycles"];
 
@@ -65,7 +80,6 @@ export const VIBRATO_LIMITS = {
     irregularity: { min: 0, max: 100 },
     seed: { min: 0, max: 99999 },
     biasCents: { min: -200, max: 200 },
-    blend: { min: 0, max: 100 },
 } as const;
 
 /** 预设的出厂默认值（`sanitizeVibratoPreset` 的兜底来源）。 */
@@ -89,8 +103,6 @@ export const DEFAULT_VIBRATO_PRESET: VibratoPreset = {
     irregularity: 0,
     seed: 0,
     biasCents: 0,
-    baseline: "line",
-    blend: 100,
 };
 
 /** 新建用户预设的 id。 */
@@ -228,13 +240,6 @@ export function sanitizeVibratoPreset(input: VibratoPresetInput | null | undefin
             VIBRATO_LIMITS.biasCents.min,
             VIBRATO_LIMITS.biasCents.max,
             DEFAULT_VIBRATO_PRESET.biasCents,
-        ),
-        baseline: pickEnum(raw.baseline, BASELINE_MODES, DEFAULT_VIBRATO_PRESET.baseline),
-        blend: clampNumber(
-            raw.blend,
-            VIBRATO_LIMITS.blend.min,
-            VIBRATO_LIMITS.blend.max,
-            DEFAULT_VIBRATO_PRESET.blend,
         ),
     };
 }

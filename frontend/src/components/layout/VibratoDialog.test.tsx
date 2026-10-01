@@ -224,9 +224,9 @@ function withCanvasLayout(width: number): () => void {
     };
 }
 
-/** 预览里的「摆放方式」下拉（表单里那个没有 aria-label，因此这个选择器是唯一的）。 */
+/** 预览右上角的「摆放方式」下拉（表单里没有第二个，因此这个选择器是唯一的）。 */
 function findBaselineTrigger(): HTMLButtonElement | null {
-    return document.querySelector<HTMLButtonElement>('button[aria-label="Oscillate around"]');
+    return document.querySelector<HTMLButtonElement>('button[aria-label="Placement"]');
 }
 
 /** 画布容器（手势回调挂在它上面，因此事件要派发到它而不是 window）。 */
@@ -471,7 +471,7 @@ test("套用页签：预览同样可拖（与预设波形共用一套手势）",
  *
  * 【为什么它该在波形旁边】它决定的是"颤音挂在素材的哪条线上" —— 对「添加颤音」来说
  * 是要**边看边定**的参数（换一下，颤音就从"保持歌手原曲线"变成"拉成一条直线"），
- * 让用户去右下角表单里翻太远。表单里同一个字段仍在：两处改的是同一份草稿。
+ * 让用户去右下角表单里翻太远。
  *
  * 它只出现在套用页：预设波形页没有素材，也就无从判断该挂在哪条线上。
  */
@@ -480,8 +480,8 @@ test("套用页签：波形右上角有「摆放方式」，且只在这一页�
 
     const trigger = findBaselineTrigger();
     expect(trigger, "套用页签应当有摆放方式").toBeTruthy();
-    // 显示草稿当前的值（系统预设「自然」默认「起点 → 终点」）。
-    expect(trigger!.textContent, "应回显草稿当前值").toContain("Start → End");
+    // 显示**设置**里当前的值（默认「起点 → 终点」= 抽取成设置之前的既有行为）。
+    expect(trigger!.textContent, "应回显设置里的值").toContain("Start → End");
 
     await clickButton("Preset waveform");
     expect(findBaselineTrigger(), "预设波形页不该有摆放方式").toBeFalsy();
@@ -512,9 +512,16 @@ test("管理预设那一面：没有「摆放方式」（那是添加颤音的�
     expect(findBaselineTrigger()).toBeFalsy();
 });
 
-test("摆放方式就地改：改的是同一份草稿，应用时带出去", async () => {
+/*
+ * 摆放方式就地改：写进**设置**（不是草稿）。
+ *
+ * 【为什么这条测试变了】它原来是"改草稿、应用时带出去"。抽离成设置之后，它既不该
+ * 随预设走，也不该进预设载荷 —— 提交侧（`addVibrato`）自己从设置里读。因此这里断言
+ * 两件事：设置被改了（下次打开还是它），而**预设载荷里没有** baseline 这个字段。
+ */
+test("摆放方式就地改：写进设置，且不进预设载荷", async () => {
     const onApply = vi.fn();
-    await mountDialog(undefined, () => undefined, { applyTarget: { onApply } });
+    const store = await mountDialog(undefined, () => undefined, { applyTarget: { onApply } });
 
     const trigger = findBaselineTrigger()!;
     // Radix 为表单兼容渲染一个隐藏的原生 select，它就是"改这个受控值"的入口
@@ -527,10 +534,14 @@ test("摆放方式就地改：改的是同一份草稿，应用时带出去", as
         native!.dispatchEvent(new Event("change", { bubbles: true }));
     });
 
+    expect(store.getState().session.vibratoBaseline, "应当写进设置").toBe("holdStart");
     expect(trigger.textContent, "选完立刻回显").toContain("Hold start");
 
     await clickButton("Apply");
-    expect(onApply.mock.calls[0][0].baseline, "草稿里的改动应当带出去").toBe("holdStart");
+    expect(onApply).toHaveBeenCalledTimes(1);
+    expect("baseline" in onApply.mock.calls[0][0], "摆放方式不是预设的一部分，不该进载荷").toBe(
+        false,
+    );
 });
 
 /*

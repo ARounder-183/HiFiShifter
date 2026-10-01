@@ -38,7 +38,6 @@ describe("sanitizeVibratoPreset", () => {
         expect(preset.builtin).toBe(false);
         expect(preset.depthCents).toBe(DEFAULT_VIBRATO_PRESET.depthCents);
         expect(preset.rateHz).toBe(DEFAULT_VIBRATO_PRESET.rateHz);
-        expect(preset.baseline).toBe(DEFAULT_VIBRATO_PRESET.baseline);
     });
 
     test("builtin 前缀的 id 会被认成系统预设", () => {
@@ -62,7 +61,6 @@ describe("sanitizeVibratoPreset", () => {
             releaseMs: 1e9,
             irregularity: 500,
             biasCents: -9999,
-            blend: 500,
         });
         expect(preset.depthCents).toBe(VIBRATO_LIMITS.depthCents.max);
         expect(preset.rateHz).toBe(VIBRATO_LIMITS.rateHz.min);
@@ -71,7 +69,6 @@ describe("sanitizeVibratoPreset", () => {
         expect(preset.releaseMs).toBe(VIBRATO_LIMITS.releaseMs.max);
         expect(preset.irregularity).toBe(VIBRATO_LIMITS.irregularity.max);
         expect(preset.biasCents).toBe(VIBRATO_LIMITS.biasCents.min);
-        expect(preset.blend).toBe(VIBRATO_LIMITS.blend.max);
     });
 
     test("非有限数值回退到默认而不是变成 NaN", () => {
@@ -88,12 +85,10 @@ describe("sanitizeVibratoPreset", () => {
     test("非法枚举值回退到默认", () => {
         const preset = sanitizeVibratoPreset({
             rateMode: "wobble" as never,
-            baseline: "diagonal" as never,
             attackCurve: "bounce" as never,
             releaseCurve: "bounce" as never,
         });
         expect(preset.rateMode).toBe(DEFAULT_VIBRATO_PRESET.rateMode);
-        expect(preset.baseline).toBe(DEFAULT_VIBRATO_PRESET.baseline);
         expect(preset.attackCurve).toBe(DEFAULT_VIBRATO_PRESET.attackCurve);
     });
 

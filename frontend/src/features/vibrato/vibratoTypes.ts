@@ -39,7 +39,18 @@ export type DepthFamily = "cents" | "ratio" | "raw";
 /** 包络段的形状。 */
 export type EnvelopeCurve = "linear" | "exp" | "s";
 
-/** 基线模式：颤音围绕什么上下摆动。 */
+/**
+ * 摆放方式：颤音围绕哪条曲线上下摆动。
+ *
+ * 【为什么不是预设的字段】它回答的是"这一次要把颤音**挂到**什么上面"，与"颤音长
+ * 什么样"（波形 / 深度 / 速率 / 包络）是两件事：
+ *
+ * 1. 用户的心智是先定摆放方式、再挑预设 —— 换预设不该把摆放方式也换掉（曾经是
+ *    预设字段，切一次预设就得重选一次）；
+ * 2. 它只在「添加颤音」里起作用：预设库、拖拽工具、预设文件都与它无关。
+ *
+ * 因此它存在**设置**里（本机记忆，见 `session.vibratoBaseline`），随窗口一起打开。
+ */
 export type BaselineMode =
     /** 起点 → 终点线性插值（拖拽的既有行为）。 */
     | "line"
@@ -106,10 +117,6 @@ export interface VibratoPreset {
     seed: number;
     /** 基线偏移（cents）：整体偏高 / 偏低。 */
     biasCents: number;
-
-    baseline: BaselineMode;
-    /** `baseline === "existing"` 时的干湿比 0..100。 */
-    blend: number;
 }
 
 /** 预设的最小必要字段（用于默认值合并）。 */

@@ -261,6 +261,13 @@ export interface UiSettings {
     /** 当前活动颤音预设的 id（系统预设的 `builtin.*` 也合法）。 */
     activeVibratoPresetId?: string;
     /**
+     * 「摆放方式」：添加颤音时颤音围绕哪条曲线摆（本机记忆）。
+     *
+     * 它不是预设的一部分：用户先定摆放方式、再挑预设（见 `BaselineMode`）。
+     * 未知取值在读取时回落默认，因此不需要迁移。
+     */
+    vibratoBaseline?: string;
+    /**
      * 被停用的颤音预设 id（系统与用户预设共用一份名单）。
      *
      * 停用只影响本机的工具栏列表与拖拽中的循环切换，因此不进预设文件、只进设置。

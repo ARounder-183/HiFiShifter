@@ -972,6 +972,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     );
     const vibratoPresetUserList = useAppSelector((state) => state.session.vibratoPresets);
     const activeVibratoPresetId = useAppSelector((state) => state.session.activeVibratoPresetId);
+    /** 「摆放方式」：添加颤音的参数（存在设置里，与预设无关）。 */
+    const vibratoBaseline = useAppSelector((state) => state.session.vibratoBaseline);
     const disabledVibratoPresetIds = useAppSelector(
         (state) => state.session.disabledVibratoPresetIds,
     );
@@ -6470,8 +6472,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                          * pitch 的 0 是"未检测"哨兵，而浊清边界上还会有**低而非零**的
                          * 过渡帧（跟踪器给的 20~40 Hz 低估）—— 两类都不是音符。拿首末帧
                          * 当锚点时，选区两端只要落在气口上（选一整句几乎必然如此），
-                         * `baseline: "line"` 就会把整段拉向那个错值，中间真实唱出来的音高
-                         * 被整段抹掉。整段都没有音符段时没有可调制的对象，放弃。
+                         * 直线摆放就会把整段拉向那个错值，中间真实唱出来的音高被整段
+                         * 抹掉。整段都没有音符段时没有可调制的对象，放弃。
                          */
                         const plan = planVibratoTarget(editParam, vals, fpMs);
                         if (!plan) return false;
@@ -6485,6 +6487,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             param: editParam,
                             framePeriodMs: fpMs,
                             range: currentParamRange,
+                            // 摆放方式是**这次操作的参数**（存在设置里），与预设无关：
+                            // 换预设不该把它换掉。
+                            baseline: vibratoBaseline,
                         });
                         const result = built.dense;
                         // 非音符帧写回哨兵（"不改这一帧"，与 dyn 的哨兵还原同位）。
@@ -6673,6 +6678,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             // 漏掉它们会让闭包拿到旧列表，表现为"点了新预设却套用了旧的"。
             resolvedVibratoPresets,
             activeVibratoPresetId,
+            vibratoBaseline,
         ],
     );
 

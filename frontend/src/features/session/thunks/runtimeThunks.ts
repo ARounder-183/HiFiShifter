@@ -108,6 +108,7 @@ export const persistUiSettings = createAsyncThunk(
             // 但缺席更贴合"用户从没调过"的语义）。
             vibratoPresets: s.vibratoPresets,
             activeVibratoPresetId: s.activeVibratoPresetId,
+            vibratoBaseline: s.vibratoBaseline,
             disabledVibratoPresetIds: s.disabledVibratoPresetIds,
             builtinVibratoPresetOrder: s.builtinVibratoPresetOrder,
         });

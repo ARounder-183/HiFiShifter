@@ -2,6 +2,7 @@ import { test } from "vitest";
 
 import reducer, {
     cycleActiveVibratoPreset,
+    setVibratoBaseline,
     removeVibratoPreset,
     reorderBuiltinVibratoPreset,
     reorderVibratoPreset,
@@ -14,6 +15,8 @@ import {
     DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
 } from "../vibrato/systemPresets.ts";
 import { resolveVibratoPresets } from "../vibrato/vibratoPresetList.ts";
+import { loadUiSettings } from "./thunks/runtimeThunks.ts";
+import type { UiSettings } from "../../services/api/settings.ts";
 import { MAX_VIBRATO_PRESETS, sanitizeVibratoPreset } from "../vibrato/vibratoPresets.ts";
 import type { VibratoPreset } from "../vibrato/vibratoTypes.ts";
 
@@ -199,4 +202,37 @@ test("features/session/sessionSlice.vibratoPresets.test.ts builtin preset order"
         natural.id,
         "解析出的系统段按自定义顺序",
     );
+});
+
+/**
+ * 「摆放方式」是**设置**，不是预设字段。
+ *
+ * 【为什么单独钉】它决定"添加颤音时颤音围绕哪条线摆"，与具体预设无关：用户先定摆放
+ * 方式、再挑预设，换预设不该把它换掉。因此它只存在设置里（本机记忆），下次打开
+ * 「添加颤音」还是上次选的那个。
+ */
+test("features/session/sessionSlice.vibratoPresets.test.ts vibrato baseline setting", () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+    const base = reducer(undefined, { type: "@@INIT" });
+    // 默认 = 抽取成设置**之前**的既有行为（预设的 baseline 一直兜底为 line）。
+    assertEqual(base.vibratoBaseline, "line", "默认是起点→终点");
+
+    const set = reducer(base, setVibratoBaseline("holdStart"));
+    assertEqual(set.vibratoBaseline, "holdStart", "切换生效");
+    assertEqual(set.vibratoPresets.length, base.vibratoPresets.length, "不碰任何预设数据");
+
+    // 水合：从设置里读回来 —— 下次打开窗口用的就是它。
+    // （这里只关心 `vibratoBaseline` 一个字段，其余字段与这条断言无关。）
+    const hydrate = (vibratoBaseline: unknown) =>
+        reducer(
+            base,
+            loadUiSettings.fulfilled({ vibratoBaseline } as UiSettings, "req", undefined),
+        );
+    assertEqual(hydrate("average").vibratoBaseline, "average", "从设置读回");
+    // 手改配置里的野值一律忽略，回落默认。
+    assertEqual(hydrate("sideways").vibratoBaseline, "line", "未知取值回落默认");
 });

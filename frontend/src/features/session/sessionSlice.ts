@@ -155,6 +155,8 @@ import {
     MAX_VIBRATO_PRESETS,
     isBuiltinVibratoPresetId,
     sanitizeVibratoPreset,
+    BASELINE_MODES,
+    DEFAULT_VIBRATO_BASELINE,
 } from "../../features/vibrato/vibratoPresets";
 import {
     activeIdAfterRemoval,
@@ -169,7 +171,7 @@ import {
     DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
     SYSTEM_VIBRATO_PRESETS,
 } from "../../features/vibrato/systemPresets";
-import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
+import type { BaselineMode, VibratoPreset } from "../../features/vibrato/vibratoTypes";
 import type { TempoMap } from "../../utils/tempoMap";
 import {
     clampDenominator,
@@ -666,6 +668,15 @@ export interface SessionState {
      * 工具栏列表与循环切换，因此单独记一份 id 名单最干净。
      */
     disabledVibratoPresetIds: string[];
+    /**
+     * 「摆放方式」：添加颤音时，颤音围绕哪条曲线摆。
+     *
+     * 【为什么在设置里，而不是预设字段】它回答的是"这一次把颤音挂到哪条线上"，
+     * 与"颤音长什么样"无关：用户先定摆放方式、再挑预设，换预设不该把它换掉；
+     * 预设库、拖拽工具、预设文件也都用不到它（见 `BaselineMode` 的说明）。
+     * 于是它作为**本机记忆**存在设置里，下次打开「添加颤音」还是上次选的那个。
+     */
+    vibratoBaseline: BaselineMode;
     /**
      * 系统预设的自定义顺序（id 列表）。
      *
@@ -2210,6 +2221,7 @@ const initialState: SessionState = {
     vibratoPresets: [],
     activeVibratoPresetId: DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
     disabledVibratoPresetIds: [],
+    vibratoBaseline: DEFAULT_VIBRATO_BASELINE,
     builtinVibratoPresetOrder: [],
     project: {
         name: "Untitled",
@@ -2701,6 +2713,14 @@ const sessionSlice = createSlice({
          * 停用只影响本机的工具栏列表与循环切换，预设本身、以及"当前使用"的选择都
          * 不受影响 —— 停用正在用的那一条是允许的，它仍然是当前预设。
          */
+        /**
+         * 设置「摆放方式」（添加颤音时的参数）。
+         *
+         * 与预设无关，因此不碰任何预设数据；调用方随后 `persistUiSettings()` 落盘。
+         */
+        setVibratoBaseline(state, action: PayloadAction<BaselineMode>) {
+            state.vibratoBaseline = action.payload;
+        },
         toggleVibratoPresetEnabled(state, action: PayloadAction<string>) {
             const id = action.payload;
             const index = state.disabledVibratoPresetIds.indexOf(id);
@@ -3738,6 +3758,13 @@ const sessionSlice = createSlice({
                 }
                 if (typeof s.activeVibratoPresetId === "string" && s.activeVibratoPresetId) {
                     state.activeVibratoPresetId = s.activeVibratoPresetId;
+                }
+                // 摆放方式：只认已知取值（手改配置里的野值一律忽略，回落默认）。
+                if (
+                    typeof s.vibratoBaseline === "string" &&
+                    (BASELINE_MODES as readonly string[]).includes(s.vibratoBaseline)
+                ) {
+                    state.vibratoBaseline = s.vibratoBaseline as BaselineMode;
                 }
                 // 停用名单：只收字符串，去重；未知 id 留着无害（过滤时按 id 比对）。
                 if (Array.isArray(s.disabledVibratoPresetIds)) {
@@ -6512,6 +6539,7 @@ export const {
     reorderBuiltinVibratoPreset,
     setActiveVibratoPreset,
     cycleActiveVibratoPreset,
+    setVibratoBaseline,
     toggleVibratoPresetEnabled,
     toggleLockParamLines,
     setMetronomeConfig,
