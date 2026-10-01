@@ -30,8 +30,12 @@ import { radixSizeFor, useDensity, type AppDensity } from "./density";
  * 由 Radix 的两条公式推出（`@radix-ui/themes/src/components/slider.css`）：
  *   `--slider-track-size`：size 1 = `space-2 × 0.75` = 6px，size 2 = `space-2` = 8px
  *   `--slider-thumb-size` = track + `space-1`  → size 1 = 10px，size 2 = 12px
- *   焦点环（`::after`）盒 = thumb + 2 × (0.25 × track) → size 1 = 13px，size 2 = 16px
- * 即 `thumb + 0.5 × track`。盒高必须 ≥ 焦点环盒，否则键盘聚焦时环会被裁掉。
+ *   可见滑块头（`::after`）= thumb + 2 × (0.25 × track) → size 1 = 13px，size 2 = 16px
+ * 即 `thumb + 0.5 × track`。盒高必须 ≥ 可见滑块头，否则滑块头上下会被裁平。
+ *
+ * 盒高同时也是**行高**（同一行里的读数文字也是 16px），因此不能再往上加：
+ * 横向的余量走 `padding-inline`，纵向的焦点环走内嵌（见 `index.css` 的
+ * `.hs-slider-box`）。
  */
 const DECORATION_BOX_PX: Record<"1" | "2", number> = { "1": 13, "2": 16 };
 
@@ -113,18 +117,18 @@ export function AppSlider({
     return (
         // Radix Slider 的根是 span；滚轮监听挂在它上面，指针落在滑块任意位置都生效。
         //
-        // 【为什么要自带盒高并收住溢出】Radix 的滑块头是**绝对定位的装饰**：本体
-        // 比轨道高（size 2 是 12px / 8px），另有放大命中区（`::before`，滑块头 × 3）
-        // 与焦点环（`::after`，滑块头 + 0.5 × 轨道）。这份溢出**不会**被任何内在
-        // 尺寸计算算进去（CSS 的 intrinsic sizing 从不含 scrollable overflow），
-        // 却会被祖先的滚动容器算成"可滚动" —— 于是每一个含滑块的对话框都恒定挂着
-        // 一条滚不动的竖直滚动条（实测正文 20px 高、scrollHeight 26px；参数编辑器
-        // 右键菜单里的 8 个对话框有 7 个如此，唯一没有滑块的「添加颤音」没有）。
+        // 【为什么要自带盒高并收住溢出】Radix 的滑块头是**绝对定位的装饰**：可见
+        // 部分比轨道高（size 2 是 16px / 8px），另有放大命中区（`::before`，滑块头 × 3）。
+        // 这份溢出**不会**被任何内在尺寸计算算进去（CSS 的 intrinsic sizing 从不含
+        // scrollable overflow），却会被祖先的滚动容器算成"可滚动" —— 于是每一个含滑块的
+        // 对话框都恒定挂着一条滚不动的竖直滚动条（实测正文 20px 高、scrollHeight 26px；
+        // 参数编辑器右键菜单里的 8 个对话框有 7 个如此，唯一没有滑块的「添加颤音」没有）。
         //
-        // 修法只能是把这份装饰溢出**收在自己的盒子里**：给足焦点环需要的高度
+        // 修法只能是把这份装饰溢出**收在自己的盒子里**：给足可见装饰需要的高度
         // （见 `DECORATION_BOX_PX`），再由 `index.css` 的 `.hs-slider-box` 裁掉多余
-        // 部分。可见部分（轨道、滑块头、焦点环）全部在盒内，被裁掉的只有那个
-        // 36px 命中区在纵向的余量 —— 它在 16px 高的行里本来就与相邻行重叠。
+        // 部分（纵向的命中区余量）并留出横向余量（可见滑块头在 0% / 100% 时会越过
+        // 轨道两端 2px）。被裁掉的只有那个 36px 命中区在纵向的余量 —— 它在 16px 高的
+        // 行里本来就与相邻行重叠。
         <span
             ref={setWheelTarget}
             // 行高不变：盒高 ≤ 同一行里读数文字的 16px（紧凑表面里更是如此）。

@@ -621,12 +621,13 @@ describe("抽象层不能空转（采用率）", () => {
         /*
          * 【为什么】`overflow-clip-margin` 划定的不是"容差"，而是**仍然会绘制**的
          * 区域；绘制出来的溢出会被祖先滚动容器算成可滚内容。滑块原语正是靠
-         * `overflow: clip` 把装饰性溢出（超大的透明命中区、焦点环）收在盒内 ——
+         * `overflow: clip` 把装饰性溢出（超大的透明命中区）收在盒内 ——
          * 一旦留出哪怕 3px 余量，每个含滑块的对话框都会挂上一条滚不动的竖直滚动条
          * （实测：正文 `clientHeight 18 / scrollHeight 20`，唯一的子元素是 16px 的盒）。
          *
-         * 该盒高本就等于装饰盒（滑块头 + 半个轨道，size 2 为 16px），裁切线贴齐盒边
-         * **不会**裁掉任何可见部分。这条门禁把"绘制区不得超出裁切盒"钉成不变量。
+         * 该盒高本就等于可见装饰（滑块头 + 半个轨道，size 2 为 16px），所以纵向
+         * 不需要余量。**横向需要**，但那条余量由 `padding-inline` 提供（内边距在
+         * 裁切边之内），不能用 clip-margin：见下一条门禁。
          */
         const offenders: string[] = [];
         for (const file of sourceFiles(/\.css$/)) {
@@ -646,6 +647,36 @@ describe("抽象层不能空转（采用率）", () => {
                       ...offenders.map((line) => `  ${line}`),
                   ].join("\n"),
         ).toEqual([]);
+    });
+
+    test("滑块盒必须给可见装饰留出横向余量，且焦点环内嵌", () => {
+        /*
+         * 【为什么钉这两条】Radix 的可见滑块头（`::after`）比滑块头本体每边大
+         * 0.25 × 轨道（size 2 = 2px），所以在 0% / 100% 时越过轨道两端 ——
+         * 裁切线贴齐盒边就会把那 2px 削平，表现是「滑块头滑到最右时右边像被切了
+         * 一刀」（实测 dpr 2 下 16px 的圆只画出 14px，中间位置正常）。
+         * 横向余量只能来自 `padding-inline`（裁切边 = padding box，内边距在它之内）。
+         *
+         * 焦点环同理：Radix 的环是 `::after` 向外 3px + 5px 的 box-shadow，需要
+         * 26px 高，而盒高只有 16px（= 行高，不能涨）—— 外扩的环会被整条裁掉，
+         * 只剩左右两段竖边，看上去像给滑块头套了个方框。因此环必须画成 `inset`。
+         */
+        const css = stripCommentsAndStrings(readFileSync(join("src", "index.css"), "utf8"), true);
+        const box = css.match(/\.hs-slider-box\s*\{([^}]*)\}/)?.[1] ?? "";
+        const padInline = box.match(/padding-inline:\s*([\d.]+)px/);
+        expect(
+            padInline ? Number(padInline[1]) : 0,
+            "`.hs-slider-box` 缺少横向内边距 —— 可见滑块头在 0% / 100% 时会被裁平",
+        ).toBeGreaterThanOrEqual(2);
+
+        const ring =
+            css.match(
+                /\.hs-slider-box\s+\.rt-SliderThumb:focus-visible::after\s*\{([^}]*)\}/,
+            )?.[1] ?? "";
+        expect(
+            ring,
+            "滑块的焦点环必须改写成 `inset`（Radix 默认的外扩环在 16px 盒高里会被裁成方框）",
+        ).toContain("inset");
     });
 
     test("滚动容器必须带让位类（或显式豁免）", () => {
