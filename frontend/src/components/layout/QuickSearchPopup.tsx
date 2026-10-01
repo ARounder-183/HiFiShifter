@@ -518,69 +518,68 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                     ) : sortedResults.length === 0 ? (
                         <AppEmptyState>{t("fb_no_results")}</AppEmptyState>
                     ) : (
-                        sortedResults.map((entry, index) => (
-                            <div
-                                key={entry.path}
-                                data-qs-item
-                                className={[
-                                    "flex items-center gap-1.5 px-2 py-[4px] cursor-pointer text-qt-xs",
-                                    index === selectedIndex
-                                        ? "bg-[color-mix(in_oklab,var(--qt-highlight)_25%,transparent)]"
-                                        : "hover:bg-[color-mix(in_oklab,var(--qt-highlight)_10%,transparent)]",
-                                    previewingPath === entry.path
-                                        ? "text-qt-highlight"
-                                        : "text-qt-text",
-                                ]
-                                    .filter(Boolean)
-                                    .join(" ")}
-                                onClick={() => handleConfirm(entry)}
-                                onMouseEnter={() => setSelectedIndex(index)}
-                            >
-                                {/* 音频图标 */}
-                                <svg
-                                    width="12"
-                                    height="12"
-                                    viewBox="0 0 15 15"
-                                    fill="none"
-                                    className="shrink-0"
+                        sortedResults.map((entry, index) => {
+                            const reason = matchReasonOf(
+                                entry.matchInfo,
+                                searchSettings.showMatchReason,
+                            );
+                            return (
+                                <div
+                                    key={entry.path}
+                                    data-qs-item
+                                    className={[
+                                        "flex items-center gap-1.5 px-2 py-[4px] cursor-pointer text-qt-xs",
+                                        index === selectedIndex
+                                            ? "bg-[color-mix(in_oklab,var(--qt-highlight)_25%,transparent)]"
+                                            : "hover:bg-[color-mix(in_oklab,var(--qt-highlight)_10%,transparent)]",
+                                        previewingPath === entry.path
+                                            ? "text-qt-highlight"
+                                            : "text-qt-text",
+                                    ]
+                                        .filter(Boolean)
+                                        .join(" ")}
+                                    onClick={() => handleConfirm(entry)}
+                                    onMouseEnter={() => setSelectedIndex(index)}
                                 >
-                                    <path
-                                        d="M7.5 0.75L7.5 14.25M10.5 3L10.5 12M4.5 3L4.5 12M13.5 5.5L13.5 9.5M1.5 5.5L1.5 9.5"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                    />
-                                </svg>
-                                {/* 文件名 + 命中原因 */}
-                                <span
-                                    className="truncate flex-1 flex items-baseline gap-1"
-                                    data-tooltip={entry.name}
-                                >
-                                    <span className="truncate">{entry.name}</span>
-                                    {(() => {
-                                        const reason = matchReasonOf(
-                                            entry.matchInfo,
-                                            searchSettings.showMatchReason,
-                                        );
-                                        if (!reason) return null;
-                                        return (
+                                    {/* 音频图标 */}
+                                    <svg
+                                        width="12"
+                                        height="12"
+                                        viewBox="0 0 15 15"
+                                        fill="none"
+                                        className="shrink-0"
+                                    >
+                                        <path
+                                            d="M7.5 0.75L7.5 14.25M10.5 3L10.5 12M4.5 3L4.5 12M13.5 5.5L13.5 9.5M1.5 5.5L1.5 9.5"
+                                            stroke="currentColor"
+                                            strokeWidth="1.2"
+                                            strokeLinecap="round"
+                                        />
+                                    </svg>
+                                    {/* 文件名 + 命中原因 */}
+                                    <span
+                                        className="truncate flex-1 flex items-baseline gap-1"
+                                        data-tooltip={entry.name}
+                                    >
+                                        <span className="truncate">{entry.name}</span>
+                                        {reason && (
                                             <span
                                                 className="shrink-0 text-qt-text-muted"
                                                 style={{ fontSize: "var(--qt-fs-micro)" }}
                                             >
                                                 {tVars(reason.key, reason.vars)}
                                             </span>
-                                        );
-                                    })()}
-                                </span>
-                                {/* 预览指示 */}
-                                {previewingPath === entry.path && (
-                                    <span className="shrink-0 text-qt-micro text-qt-highlight animate-pulse">
-                                        ♫
+                                        )}
                                     </span>
-                                )}
-                            </div>
-                        ))
+                                    {/* 预览指示 */}
+                                    {previewingPath === entry.path && (
+                                        <span className="shrink-0 text-qt-micro text-qt-highlight animate-pulse">
+                                            ♫
+                                        </span>
+                                    )}
+                                </div>
+                            );
+                        })
                     )}
                 </div>
 
