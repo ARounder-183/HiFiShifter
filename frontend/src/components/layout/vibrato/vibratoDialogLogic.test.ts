@@ -769,6 +769,91 @@ describe("contourRangeCents（轮廓条纵轴）", () => {
     });
 });
 
+/*
+ * 轮廓的断口：只在**真的没有音高**的地方断。
+ *
+ * 【为什么值得测】轮廓是"原参数线往哪走"的读物，断口的意思是"这里没有音高"。两处
+ * 会把它误断：
+ * 1. 跟踪器在辅音 / 喉塞音上掉几帧点 —— 掉点不是"音没了"，画成断口就是"在不应该断
+ *    的地方断了"（用户报过的现象）；
+ * 2. "残差离群"的统计判定把颤音最深的那几帧剔掉（一段渐强的颤音，最深的几帧最像
+ *    离群值）。
+ * 前者靠接上短断口解决，后者靠"轮廓与落笔掩码分开"解决 —— 这一组把它们钉住。
+ */
+describe("轮廓的断口", () => {
+    const preset = sanitizeVibratoPreset({
+        id: "custom_breaks",
+        depthCents: 40,
+        rateHz: 5.5,
+        attackMs: 0,
+        releaseMs: 0,
+        baseline: "existing",
+    });
+    const note = (count: number, from: number) =>
+        Array.from({ length: count }, (_, i) => from + Math.sin(i / 6) * 0.4);
+    const zeros = (count: number) => new Array<number>(count).fill(0);
+
+    /** 逐段量出断口长度（按出现顺序）。 */
+    const breakLengths = (contour: readonly number[]): number[] => {
+        const lengths: number[] = [];
+        let run = 0;
+        for (const value of contour) {
+            if (Number.isFinite(value)) {
+                if (run > 0) lengths.push(run);
+                run = 0;
+            } else run += 1;
+        }
+        if (run > 0) lengths.push(run);
+        return lengths;
+    };
+
+    test("音中间掉几帧点不产生断口（只留首尾气口）", () => {
+        const values = [...zeros(50), ...note(200, 60), 0, 0, 0, ...note(200, 60), ...zeros(50)];
+        const preview = buildAppliedPreview({
+            preset,
+            original: values,
+            param: "pitch",
+            framePeriodMs: 5,
+        })!;
+        expect(breakLengths(preview.sourceContour)).toEqual([50, 50]);
+    });
+
+    test("颤音渐强时最深的那几帧也不算断口", () => {
+        const values = [
+            ...zeros(50),
+            ...Array.from(
+                { length: 400 },
+                (_, i) => 60 + Math.sin(i / 6) * (0.02 + (i / 400) * 0.6),
+            ),
+            ...zeros(50),
+        ];
+        const preview = buildAppliedPreview({
+            preset,
+            original: values,
+            param: "pitch",
+            framePeriodMs: 5,
+        })!;
+        expect(breakLengths(preview.sourceContour)).toEqual([50, 50]);
+    });
+
+    test("真正的气口仍然断开（否则会凭空画出一条穿过静音的线）", () => {
+        const values = [
+            ...zeros(50),
+            ...note(200, 60),
+            ...zeros(40),
+            ...note(200, 64),
+            ...zeros(50),
+        ];
+        const preview = buildAppliedPreview({
+            preset,
+            original: values,
+            param: "pitch",
+            framePeriodMs: 5,
+        })!;
+        expect(breakLengths(preview.sourceContour)).toEqual([50, 40, 50]);
+    });
+});
+
 describe("fitPreviewRangeCents（一次性拟合纵轴）", () => {
     test("落在阶梯档位上，且比峰值大出余量", () => {
         for (const peak of [0, 3, 5, 12, 30, 40, 70, 100, 150, 300, 700, 1200]) {

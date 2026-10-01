@@ -5,6 +5,7 @@ import {
     PLAUSIBLE_PITCH_MAX,
     PLAUSIBLE_PITCH_MIN,
     isUnsetValue,
+    bridgeShortGaps,
     planVibratoTarget,
     refineNoteFrames,
     suppressNonTargetFrames,
@@ -209,5 +210,45 @@ describe("refineNoteFrames", () => {
         expect(mask[0]).toBe(false);
         expect(mask[mask.length - 1]).toBe(false);
         expect(mask[30]).toBe(true);
+    });
+});
+
+/*
+ * 短断口接上、长断口断开。
+ *
+ * 【为什么值得测】跟踪器在辅音、喉塞音上会掉几帧点。掉点不是"音没了" —— 画成断口
+ * 就是"原参数线在不应该断的地方断了"（用户报过）。而真正的气口 / 换气必须断开，
+ * 否则会凭空画出一条穿过静音的直线，轮廓条的纵轴也会被它撑开。
+ */
+describe("bridgeShortGaps", () => {
+    test("短于最短音符的断口接上，并线性插值", () => {
+        // 中间 3 帧断口（15ms << 100ms）。
+        const out = bridgeShortGaps(
+            [6000, 6100, Number.NaN, Number.NaN, Number.NaN, 6200, 6300],
+            FP,
+        );
+        expect(out.every(Number.isFinite)).toBe(true);
+        // 两端 6100 → 6200 之间等距填三格。
+        expect(out[2]).toBeCloseTo(6100 + 100 / 4, 6);
+        expect(out[3]).toBeCloseTo(6100 + 200 / 4, 6);
+        expect(out[4]).toBeCloseTo(6100 + 300 / 4, 6);
+        // 原有值不动。
+        expect(out[0]).toBe(6000);
+        expect(out[6]).toBe(6300);
+    });
+
+    test("长断口保持断开（气口 / 换气）", () => {
+        const values = [6000, 6100, ...new Array<number>(40).fill(Number.NaN), 6200];
+        const out = bridgeShortGaps(values, FP);
+        expect(Number.isNaN(out[20])).toBe(true);
+        expect(out[0]).toBe(6000);
+        expect(out[out.length - 1]).toBe(6200);
+    });
+
+    test("首尾断口不接：外面没有可插值的邻居", () => {
+        const out = bridgeShortGaps([Number.NaN, Number.NaN, 6000, 6100, Number.NaN], FP);
+        expect(Number.isNaN(out[0])).toBe(true);
+        expect(Number.isNaN(out[1])).toBe(true);
+        expect(Number.isNaN(out[4])).toBe(true);
     });
 });

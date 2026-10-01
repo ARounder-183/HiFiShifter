@@ -238,6 +238,47 @@ export function refineNoteFrames(values: readonly number[], framePeriodMs: numbe
 }
 
 /**
+ * 把**短于最短音符**的断口接上（线性插值），更长的断口保持断开。
+ *
+ * 【为什么需要】音高跟踪器在辅音、喉塞音这类地方会掉几帧点。掉点不是"音没了"：把
+ * 它画成断口，用户看到的就是"原参数线在不应该断的地方断了"。而**长**断口（气口、
+ * 换气、两段之间）确实没有音高，必须断开 —— 否则会凭空画出一条穿过静音的直线，
+ * 轮廓条的纵轴也会被它撑开。
+ *
+ * 【阈值为什么是"最短音符时长"】这是唯一一个不新造常数的分界：比最短的音符还短的
+ * 空档，按 {@link MIN_NOTE_MS} 的定义就不成其为一个音乐事件，接上它不会掩盖任何东西。
+ *
+ * 首尾的断口不接（外面没有可插值的邻居）。
+ */
+export function bridgeShortGaps(values: readonly number[], framePeriodMs: number): number[] {
+    const n = values.length;
+    const out = Array.from(values, (value) => Number(value));
+    const fp = Number.isFinite(framePeriodMs) && framePeriodMs > 0 ? framePeriodMs : 5;
+    const maxGapFrames = Math.max(1, Math.round(MIN_NOTE_MS / fp));
+
+    let i = 0;
+    while (i < n) {
+        if (Number.isFinite(out[i])) {
+            i += 1;
+            continue;
+        }
+        let end = i;
+        while (end < n && !Number.isFinite(out[end])) end += 1;
+        const gap = end - i;
+        // 首尾断口（一侧没有邻居）与过长的断口都不接。
+        if (i > 0 && end < n && gap < maxGapFrames) {
+            const before = out[i - 1];
+            const after = out[end];
+            for (let k = i; k < end; k += 1) {
+                out[k] = before + ((after - before) * (k - i + 1)) / (gap + 1);
+            }
+        }
+        i = end;
+    }
+    return out;
+}
+
+/**
  * 规划一次颤音的落点。
  *
  * - 非哨兵参数：整段都可调制，锚点 = 首末帧（与既有行为逐字一致）；
@@ -264,21 +305,20 @@ export function planVibratoTarget(
     const runs = vibratoNoteRuns(param, values, framePeriodMs);
     if (runs.length === 0) return null;
 
-    const noteFrames = new Array<boolean>(values.length).fill(false);
-    for (const run of runs) {
-        for (let i = run.startIndex; i < run.endIndex; i += 1) noteFrames[i] = true;
-    }
     /*
-     * 音符段内部再剔一次滑音 / 过渡段。放在这里而不是各调用方各做一次，是因为
-     * **预览与落盘必须用同一套判定**：若只有预览剔、落盘不剔，"看到的不加颤音"与
-     * 实际写下去的结果就会不一致。
+     * 掩码就是**音符帧**本身，不再在这里剔滑音。
+     *
+     * 【为什么把滑音剔除移出去】那是"这些帧稳不稳、值不值得拿去拟合 / 试听"的统计
+     * 判断，不是"这里有没有音高"的数据判断。混在一起会连累两件事：
+     * 1. 落盘掩码一旦带上它，颤音就会在音符**内部**留下小洞（实测一段渐强的颤音，
+     *    最深的几帧被判成离群，于是颤音在那里断一下）；
+     * 2. 显示用的轮廓也会跟着断开 —— 用户看到的正是"在不应该断的地方断了"。
+     * 需要它的消费者（拟合统计、轮廓与试听）各自调用 {@link refineNoteFrames}。
      */
-    const modulatable = refineNoteFrames(
-        values.map((value, index) => (noteFrames[index] ? value : Number.NaN)),
-        framePeriodMs,
-    );
-    // 剔完之后一个音符帧都不剩：同样算"没有可调制的对象"。
-    if (!modulatable.some(Boolean)) return null;
+    const modulatable = new Array<boolean>(values.length).fill(false);
+    for (const run of runs) {
+        for (let i = run.startIndex; i < run.endIndex; i += 1) modulatable[i] = true;
+    }
 
     return {
         anchors: { startValue: runs[0].pitch, endValue: runs[runs.length - 1].pitch },

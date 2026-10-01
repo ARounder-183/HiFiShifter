@@ -25,7 +25,12 @@ import {
     paramUnitToDepth,
     type VibratoParamRange,
 } from "../../../features/vibrato/vibratoDepth";
-import { planVibratoTarget, suppressNonTargetFrames } from "../../../features/vibrato/vibratoPitch";
+import {
+    bridgeShortGaps,
+    planVibratoTarget,
+    refineNoteFrames,
+    suppressNonTargetFrames,
+} from "../../../features/vibrato/vibratoPitch";
 import type {
     BaselineMode,
     CycleSource,
@@ -417,19 +422,33 @@ export function buildAppliedPreview(args: {
     );
 
     /*
-     * 轮廓条用的两条**绝对**曲线。
+     * 轮廓用的两条**绝对**曲线（背景那一条，以及试听要的那一对）。
      *
-     * 【为什么必须单独一条带】轮廓与颤音差两个数量级：同轴并列时要么颤音被压成
-     * 一条直线（这是修过两轮的缺陷），要么轮廓被裁掉。分成两条带、各用自己的标尺，
-     * 两者就都能读；共享时间轴保住"此刻音高在哪 / 此刻颤音怎么走"的对应关系。
+     * 【为什么单独一套标尺】轮廓与颤音差两个数量级：同轴并列时要么颤音被压成一条
+     * 直线（这是修过两轮的缺陷），要么轮廓被裁掉。轮廓按自身范围铺满画布、颤音按
+     * cents 标尺画在前景，两者共享时间轴，"此刻音高在哪 / 此刻颤音怎么走"仍可对着读。
      *
-     * 断口同样按 `plan.modulatable` 判定 —— 气口与跟踪器的过渡帧在这里也是断口，
-     * 否则它们会把轮廓条的标尺拉到 0（那正是主图当初被压扁的原因）。
+     * 【轮廓的断口规则与颤音不同】这里要的是"音高往哪走"，所以：
+     * 1. 先剔掉滑音 / 过渡段（{@link refineNoteFrames}）—— 它们会把曲线拽出几千分，
+     *    轮廓条的纵轴跟着被撑开；
+     * 2. 再把**短于最短音符**的断口接上（{@link bridgeShortGaps}）—— 跟踪器在辅音上
+     *    掉几帧点不是"音没了"，画成断口就是"在不应该断的地方断了"；而真正的气口、
+     *    换气仍然断开（否则会凭空画出一条穿过静音的直线）。
      */
-    const contourAt = (value: number, index: number) =>
-        plan.modulatable[index] ? toCents(value) : Number.NaN;
-    const sourceContour = values.map(contourAt);
-    const resultContour = result.dense.map(contourAt);
+    const noteFrameSeries = values.map((value, index) =>
+        plan.modulatable[index] ? value : Number.NaN,
+    );
+    const stableFrames = refineNoteFrames(noteFrameSeries, framePeriodMs);
+    const contourAt = (source: readonly number[], index: number) =>
+        stableFrames[index] ? toCents(source[index]) : Number.NaN;
+    const sourceContour = bridgeShortGaps(
+        values.map((_, index) => contourAt(values, index)),
+        framePeriodMs,
+    );
+    const resultContour = bridgeShortGaps(
+        result.dense.map((_, index) => contourAt(result.dense, index)),
+        framePeriodMs,
+    );
 
     // 真实峰值（与 `buildVibratoPreview` 同一约定）：读数据此显示，尺度由调用方兜底。
     // 只统计**画出来的两条**，断口不参与 —— 否则一个 NaN 就能把整条纵轴撑爆。
