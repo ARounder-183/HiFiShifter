@@ -1358,6 +1358,25 @@ export const zhCN = {
     fb_regex_error: "无效的正则表达式",
     fb_audio_only: "仅显示媒体文件",
 
+    // ── 搜索匹配（拼音 / 罗马音 / 韩文初声）──
+    search_match_mode: "匹配方式",
+    search_mode_off: "关闭（仅字面匹配）",
+    search_mode_smart: "智能（含拼音/罗马音）",
+    search_mode_fuzzy: "模糊（含跳字匹配）",
+    search_translit_heteronym: "多音字",
+    search_translit_long_vowel: "日文长音",
+    search_translit_choseong: "韩文初声",
+    search_show_match_reason: "显示匹配原因",
+    search_open_settings: "在设置中管理...",
+    search_regex_disables_translit: "正则模式下不启用转写匹配",
+    search_matched_literal: "匹配原文 {form}",
+    search_matched_pinyin: "匹配拼音 {form}",
+    search_matched_romaji: "匹配罗马音 {form}",
+    search_matched_choseong: "匹配初声 {form}",
+    search_matched_fuzzy: "模糊匹配 {form}",
+    search_settings_section: "搜索与匹配",
+    search_settings_hint: "拼音、罗马音、韩文初声匹配的开关。关闭后搜索只做字面匹配。",
+
     // Edit menu new items
     menu_deselect: "取消选择",
     menu_initialize: "初始化",
@@ -1491,6 +1510,7 @@ export const zhCN = {
     appearance_section_colors: "自定义颜色",
     appearance_tab_basic: "基础",
     appearance_tab_font: "字体",
+    appearance_tab_search: "搜索",
     appearance_tab_colors: "颜色",
     appearance_tab_theme: "主题",
     appearance_color_group_base: "背景与表面",

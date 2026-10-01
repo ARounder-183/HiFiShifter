@@ -130,6 +130,43 @@ describe("matchKeybindingEntries — 分词与 AND 语义", () => {
     });
 });
 
+describe("转写词条（拼音 / 罗马音 / 初声）", () => {
+    /*
+     * 转写形态由后端产出（`transliterate` 命令），这里注入一个假的映射，
+     * 好把「转写词条如何参与匹配」与「转写规则」分开测。
+     */
+    const withTranslit = buildKeybindingSearchEntries(identity, (text) =>
+        text === "kb_clip_delete" ? ["jianjishanchu", "jsc"] : [],
+    );
+
+    it("拼音全拼命中（字面标签里没有这段文本）", () => {
+        const hits = idsOf(matchKeybindingEntries(withTranslit, "jianjishanchu"));
+        expect(hits[0]).toBe("clip.delete");
+    });
+
+    it("初声缩写命中", () => {
+        expect(idsOf(matchKeybindingEntries(withTranslit, "jsc"))).toContain("clip.delete");
+    });
+
+    it("单字符 token 不参与转写匹配（否则会冲散字面结果）", () => {
+        expect(idsOf(matchKeybindingEntries(withTranslit, "j"))).not.toContain("clip.delete");
+    });
+
+    it("没有转写词条时行为与改动前一致", () => {
+        const without = buildKeybindingSearchEntries(identity);
+        expect(idsOf(matchKeybindingEntries(without, "clip"))).toEqual(
+            idsOf(matchKeybindingEntries(ENTRIES, "clip")),
+        );
+    });
+
+    it("转写命中与字面命中同档（同分时保持原分组顺序）", () => {
+        const literal = matchKeybindingEntries(ENTRIES, "kb_clip_delete")[0];
+        const translit = matchKeybindingEntries(withTranslit, "jianjishanchu")[0];
+        expect(literal.id).toBe("clip.delete");
+        expect(translit.id).toBe("clip.delete");
+    });
+});
+
 describe("matchKeybindingEntries — 排序与稳定性", () => {
     it("操作名前缀命中排在按键命中之前", () => {
         // "delete" 既是 clip.delete 的名字、也是它的按键；这里验证存在明确的序：

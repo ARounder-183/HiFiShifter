@@ -635,7 +635,18 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             };
 
         case "search_files_recursive":
-            return { dirPath: args[0], query: args[1] };
+            return {
+                dirPath: args[0],
+                query: args[1],
+                // 条件展开：老后端不认这个字段，未传时就不要凭空造一个 undefined。
+                ...(args[2] !== undefined ? { options: args[2] } : {}),
+            };
+
+        case "transliterate":
+            return {
+                texts: args[0],
+                ...(args[1] !== undefined ? { options: args[1] } : {}),
+            };
 
         case "get_processor_params":
             return { algo: args[0] };

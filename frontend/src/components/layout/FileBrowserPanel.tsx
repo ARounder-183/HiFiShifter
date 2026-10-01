@@ -10,7 +10,7 @@ import {
     PlayIcon,
     StopIcon,
 } from "@radix-ui/react-icons";
-import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import { useAppDispatch, useAppSelector, useAppStore } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -25,6 +25,12 @@ import {
 } from "../../features/fileBrowser/fileBrowserSlice";
 import { audioPreview } from "../../features/fileBrowser/audioPreview";
 import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
+import { searchOptionsPayload } from "../../features/search/searchSettings";
+import { SearchModeMenu } from "./search/SearchModeMenu";
+import { matchReasonOf } from "./search/matchReason";
+import { persistUiSettings, setSearchSettings } from "../../features/session/sessionSlice";
+import { togglePanelVisible } from "../../features/dock/dockApi";
+import { PANEL_APPEARANCE } from "../dock/registerBuiltinPanels";
 import { PanelToolbar, PanelToolbarButton } from "./shared/PanelToolbar";
 import { fileBrowserApi, type FileEntry } from "../../services/api/fileBrowser";
 import {
@@ -248,10 +254,33 @@ function ProjectIcon({ className }: { className?: string }) {
 
 export const FileBrowserPanel: React.FC = () => {
     const dispatch = useAppDispatch();
-    const { tf } = useI18n();
+    const store = useAppStore();
+    const { tf, tVars } = useI18n();
     const fb = useAppSelector((state: RootState) => state.fileBrowser);
+    const searchSettings = useAppSelector((state: RootState) => state.session.searchSettings);
     const searchInputRef = useRef<HTMLInputElement>(null);
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    /*
+     * 下发给后端的匹配参数。
+     *
+     * 【为什么正则模式下强制 off】正则作用于**原文**，与转写互斥：把 `zhuge` 当正则
+     * 去匹配「主歌」没有任何意义。前端仍然把 query 传空串（沿用旧行为：后端不过滤，
+     * 由前端做正则过滤），匹配模式一并降为 off，让后端走最便宜的路径。
+     */
+    const searchOptions = useMemo(() => {
+        const payload = searchOptionsPayload(searchSettings);
+        return fb.regexEnabled ? { ...payload, mode: "off" as const } : payload;
+    }, [searchSettings, fb.regexEnabled]);
+
+    /** 把后端的命中信息格式化成「匹配拼音 zhuge」；不需要解释时返回 undefined。 */
+    const formatMatchReason = useCallback(
+        (entry: FileEntry): string | undefined => {
+            const reason = matchReasonOf(entry.matchInfo, searchSettings.showMatchReason);
+            return reason ? tVars(reason.key, reason.vars) : undefined;
+        },
+        [searchSettings.showMatchReason, tVars],
+    );
 
     // 清除 debounce
     useEffect(
@@ -279,6 +308,38 @@ export const FileBrowserPanel: React.FC = () => {
     // 根据搜索模式决定展示配表
     const isSearchMode = fb.searchQuery.trim().length > 0;
     const trimmedSearchQuery = fb.searchQuery.trim();
+
+    /*
+     * 匹配方式变化 → 用新参数重跑一次搜索。
+     *
+     * 【为什么必须重跑】结果是后端算好的：用户把「智能」改成「模糊」，不重跑就什么
+     * 都不会变，看起来像开关坏了。用字符串键做守卫，避免把「输入框内容变化」也算成
+     * 一次设置变化。
+     */
+    const searchOptionsKey = `${searchOptions.mode}|${searchOptions.heteronym}|${searchOptions.japaneseLongVowel}|${searchOptions.koreanChoseong}`;
+    const lastSearchOptionsKeyRef = useRef(searchOptionsKey);
+    useEffect(() => {
+        if (lastSearchOptionsKeyRef.current === searchOptionsKey) return;
+        lastSearchOptionsKeyRef.current = searchOptionsKey;
+        // 正则模式下后端不过滤（query 传空串），重跑没有意义。
+        if (fb.regexEnabled) return;
+        if (!trimmedSearchQuery || !fb.currentPath) return;
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        void dispatch(
+            searchFilesRecursive({
+                dirPath: fb.currentPath,
+                query: trimmedSearchQuery,
+                options: searchOptions,
+            }),
+        );
+    }, [
+        searchOptionsKey,
+        searchOptions,
+        trimmedSearchQuery,
+        fb.currentPath,
+        fb.regexEnabled,
+        dispatch,
+    ]);
 
     const hasRegexError = useMemo(() => {
         if (!isSearchMode || !fb.regexEnabled || !trimmedSearchQuery) {
@@ -745,6 +806,7 @@ export const FileBrowserPanel: React.FC = () => {
                                     searchFilesRecursive({
                                         dirPath: fb.currentPath,
                                         query: backendQuery,
+                                        options: searchOptions,
                                     }),
                                 );
                             }, 300);
@@ -788,6 +850,9 @@ export const FileBrowserPanel: React.FC = () => {
                                     searchFilesRecursive({
                                         dirPath: fb.currentPath,
                                         query: nextRegexEnabled ? "" : trimmedSearchQuery,
+                                        options: nextRegexEnabled
+                                            ? { ...searchOptions, mode: "off" }
+                                            : searchOptions,
                                     }),
                                 );
                             }
@@ -799,6 +864,17 @@ export const FileBrowserPanel: React.FC = () => {
                             height: 22,
                         }}
                         icon=".*"
+                    />
+                    <SearchModeMenu
+                        settings={searchSettings}
+                        onChange={(patch) => {
+                            dispatch(setSearchSettings(patch));
+                            void dispatch(persistUiSettings());
+                        }}
+                        regexActive={fb.regexEnabled}
+                        onOpenSettings={() =>
+                            togglePanelVisible(dispatch, store.getState, PANEL_APPEARANCE)
+                        }
                     />
                     <AppIconButton
                         active={fb.audioOnly}
@@ -895,6 +971,7 @@ export const FileBrowserPanel: React.FC = () => {
                                     dragState.allFilePaths.includes(entry.path)
                                 }
                                 pathHint={isSearchMode ? getRelativeDirHint(entry.path) : undefined}
+                                matchReason={formatMatchReason(entry)}
                             />
                         ))
                     )}
@@ -966,6 +1043,11 @@ interface FileEntryRowProps {
     onPointerDownForDrag: (e: React.PointerEvent<HTMLDivElement>, entry: FileEntry) => void;
     isDragging: boolean;
     pathHint?: string;
+    /**
+     * 命中原因文案（「匹配拼音 zhuge」）。由调用方格式化好再传进来，
+     * 行组件保持纯展示，不认识 i18n 键与匹配类型。
+     */
+    matchReason?: string;
 }
 
 const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
@@ -982,6 +1064,7 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
         onPointerDownForDrag,
         isDragging,
         pathHint,
+        matchReason,
     }) => {
         const isAudio = isAudioFile(entry);
         const isMidi = isMidiFile(entry);
@@ -1044,12 +1127,14 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                         {entry.name}
                         {entry.isDir ? "/" : ""}
                     </span>
-                    {pathHint && (
+                    {(pathHint || matchReason) && (
                         <span
                             className="hs-type-caption truncate leading-none"
                             style={{ fontSize: "var(--qt-fs-micro)" }}
                         >
                             {pathHint}
+                            {pathHint && matchReason ? " · " : ""}
+                            {matchReason}
                         </span>
                     )}
                 </div>

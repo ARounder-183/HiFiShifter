@@ -1411,6 +1411,26 @@ export const jaJP = {
     fb_regex_error: "無効な正規表現",
     fb_audio_only: "メディアファイルのみ表示",
 
+    // ── 検索マッチング（拼音 / ローマ字 / 韓国語初声）──
+    search_match_mode: "マッチ方法",
+    search_mode_off: "オフ（文字列のみ）",
+    search_mode_smart: "スマート（拼音・ローマ字対応）",
+    search_mode_fuzzy: "あいまい（文字飛ばし対応）",
+    search_translit_heteronym: "多音字",
+    search_translit_long_vowel: "日本語の長音",
+    search_translit_choseong: "韓国語の初声",
+    search_show_match_reason: "一致理由を表示",
+    search_open_settings: "設定で管理...",
+    search_regex_disables_translit: "正規表現モードでは変換マッチを無効にします",
+    search_matched_literal: "原文に一致 {form}",
+    search_matched_pinyin: "拼音に一致 {form}",
+    search_matched_romaji: "ローマ字に一致 {form}",
+    search_matched_choseong: "初声に一致 {form}",
+    search_matched_fuzzy: "あいまい一致 {form}",
+    search_settings_section: "検索とマッチング",
+    search_settings_hint:
+        "拼音・ローマ字・韓国語初声のマッチング設定です。オフにすると文字列のみの一致になります。",
+
     // 編集メニュー新規項目
     menu_deselect: "選択解除",
     menu_initialize: "初期化",
@@ -1545,6 +1565,7 @@ export const jaJP = {
     appearance_section_colors: "カスタムカラー",
     appearance_tab_basic: "基本",
     appearance_tab_font: "フォント",
+    appearance_tab_search: "検索",
     appearance_tab_colors: "カラー",
     appearance_tab_theme: "テーマ",
     appearance_color_group_base: "背景・サーフェス",

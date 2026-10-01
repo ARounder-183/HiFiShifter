@@ -31,6 +31,11 @@ import type {
 } from "./sessionTypes";
 import { normalizeSplitTransitionCurve } from "./sessionTypes";
 import { SILENCE_DETECT_DEFAULTS } from "./sessionTypes";
+import {
+    DEFAULT_SEARCH_SETTINGS,
+    normalizeSearchSettings,
+    type SearchSettings,
+} from "../search/searchSettings";
 import { modEuclid, resolveLoopMediaDurationSec } from "../../utils/loopRender";
 import { normalizeChannelMode } from "../../utils/channelMode";
 
@@ -480,6 +485,8 @@ export interface SessionState {
     _silencePreviewRequestId: string | null;
     /** 静音检测对话框的上次使用参数（持久化到 UiSettings） */
     silenceDetectOptions: SilenceDetectSettings;
+    /** 搜索匹配设置（转写 / 宽严 / 各语言子开关，持久化到 UiSettings.search） */
+    searchSettings: SearchSettings;
     /** 快速搜索放置音频时自动规格化 */
     quickSearchAutoNormalizeEnabled: boolean;
     /**
@@ -2129,6 +2136,7 @@ const initialState: SessionState = {
     _silencePreviewRequestId: null,
     silencePreviewSegments: null,
     silenceDetectOptions: { ...SILENCE_DETECT_DEFAULTS },
+    searchSettings: { ...DEFAULT_SEARCH_SETTINGS },
     quickSearchAutoNormalizeEnabled: false,
     saveUndoHistoryByDefault: false,
     visibleReferenceRootTrackIds: [],
@@ -2801,6 +2809,18 @@ const sessionSlice = createSlice({
                 ...state.silenceDetectOptions,
                 ...action.payload,
             };
+        },
+        /**
+         * 更新搜索匹配设置（部分字段；持久化由调用方走 persistUiSettings）。
+         *
+         * 合并后统一过一遍 `normalizeSearchSettings`：调用点只传改动的那一项，
+         * 未传的项保持不变，非法值（旧配置 / 手改文件）在这里被收敛。
+         */
+        setSearchSettings(state, action: PayloadAction<Partial<SearchSettings>>) {
+            state.searchSettings = normalizeSearchSettings({
+                ...state.searchSettings,
+                ...action.payload,
+            });
         },
         toggleQuickSearchAutoNormalize(state) {
             state.quickSearchAutoNormalizeEnabled = !state.quickSearchAutoNormalizeEnabled;
@@ -3681,6 +3701,7 @@ const sessionSlice = createSlice({
                     const o = s.silenceDetectOptions as Partial<SilenceDetectSettings>;
                     state.silenceDetectOptions = { ...state.silenceDetectOptions, ...o };
                 }
+                if (s.search != null) state.searchSettings = normalizeSearchSettings(s.search);
                 if (s.quickSearchAutoNormalize != null)
                     state.quickSearchAutoNormalizeEnabled = Boolean(s.quickSearchAutoNormalize);
                 if (s.saveUndoHistoryByDefault != null)
@@ -6545,6 +6566,7 @@ export const {
     setMetronomeConfig,
     setSilencePreview,
     setSilenceDetectOptions,
+    setSearchSettings,
     toggleQuickSearchAutoNormalize,
     setSaveUndoHistoryByDefault,
     setDefaultStretchAlgorithm,

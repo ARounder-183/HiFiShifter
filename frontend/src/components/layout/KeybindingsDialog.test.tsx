@@ -18,6 +18,7 @@ import { configureStore } from "@reduxjs/toolkit";
 import { KeybindingsDialog } from "./KeybindingsDialog";
 import { I18nProvider } from "../../i18n/I18nProvider";
 import keybindingsReducer from "../../features/keybindings/keybindingsSlice";
+import sessionReducer from "../../features/session/sessionSlice";
 import { ALL_ACTION_IDS } from "../../features/keybindings/defaultKeybindings";
 
 /*
@@ -32,14 +33,17 @@ class ResizeObserverStub {
 (globalThis as { ResizeObserver?: unknown }).ResizeObserver ??= ResizeObserverStub;
 
 /**
- * 极简 store：只挂 keybindings reducer。
+ * 极简 store：只挂本组件真正读的两个切片。
  *
  * 【为什么不复用真实 store】真实 store 要拉起 playback / project 等一整套设备状态
  * 与副作用；本测试只关心"绑定 → 行"这一段，用最小 store 才是诚实的依赖。
+ *
+ * `session` 是搜索匹配设置（转写开关与宽严）的所在 —— 搜索框要把动作名交给后端
+ * 转写，这份设置决定转写成什么形态，所以它是本组件的**真实依赖**，不是顺手加的。
  */
 function createTestStore() {
     return configureStore({
-        reducer: { keybindings: keybindingsReducer },
+        reducer: { keybindings: keybindingsReducer, session: sessionReducer },
     });
 }
 

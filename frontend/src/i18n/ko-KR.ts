@@ -145,6 +145,7 @@ export const koKR = {
     appearance_tab_colors: "색상",
     appearance_tab_theme: "테마",
     appearance_tab_font: "글꼴",
+    appearance_tab_search: "검색",
     appearance_color_group_base: "배경 및 표면",
     appearance_color_group_text: "텍스트",
     appearance_color_group_ui: "UI 요소",
@@ -1485,6 +1486,25 @@ export const koKR = {
     fb_sort_label: "정렬",
     fb_regex_error: "잘못된 정규 표현식",
     fb_audio_only: "미디어 파일만 표시",
+
+    // ── 검색 일치(병음 / 로마자 / 한국어 초성) ──
+    search_match_mode: "일치 방식",
+    search_mode_off: "끄기(문자열만)",
+    search_mode_smart: "스마트(병음·로마자 포함)",
+    search_mode_fuzzy: "퍼지(건너뛰기 허용)",
+    search_translit_heteronym: "다음자",
+    search_translit_long_vowel: "일본어 장음",
+    search_translit_choseong: "한국어 초성",
+    search_show_match_reason: "일치 이유 표시",
+    search_open_settings: "설정에서 관리...",
+    search_regex_disables_translit: "정규식 모드에서는 변환 일치를 사용하지 않습니다",
+    search_matched_literal: "원문 일치 {form}",
+    search_matched_pinyin: "병음 일치 {form}",
+    search_matched_romaji: "로마자 일치 {form}",
+    search_matched_choseong: "초성 일치 {form}",
+    search_matched_fuzzy: "퍼지 일치 {form}",
+    search_settings_section: "검색 및 일치",
+    search_settings_hint: "병음, 로마자, 한국어 초성 일치 설정입니다. 끄면 문자열만 일치합니다.",
 
     // 편집 메뉴 새 항목
     menu_deselect: "선택 해제",

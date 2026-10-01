@@ -1537,6 +1537,26 @@ export const enUS = {
     fb_regex_error: "Invalid regex",
     fb_audio_only: "Show media files only",
 
+    // ── Search matching (pinyin / romaji / Korean choseong) ──
+    search_match_mode: "Matching",
+    search_mode_off: "Off (literal only)",
+    search_mode_smart: "Smart (pinyin and romaji)",
+    search_mode_fuzzy: "Fuzzy (allows skipped characters)",
+    search_translit_heteronym: "Heteronyms",
+    search_translit_long_vowel: "Japanese long vowels",
+    search_translit_choseong: "Korean choseong",
+    search_show_match_reason: "Show why a result matched",
+    search_open_settings: "Manage in settings...",
+    search_regex_disables_translit: "Transliteration is off in regex mode",
+    search_matched_literal: "Matched text {form}",
+    search_matched_pinyin: "Matched pinyin {form}",
+    search_matched_romaji: "Matched romaji {form}",
+    search_matched_choseong: "Matched choseong {form}",
+    search_matched_fuzzy: "Fuzzy match {form}",
+    search_settings_section: "Search and matching",
+    search_settings_hint:
+        "Toggles for pinyin, romaji and Korean choseong matching. Turned off, search only matches literal text.",
+
     // Edit menu new items
     menu_deselect: "Deselect",
     menu_initialize: "Initialize",
@@ -1671,6 +1691,7 @@ export const enUS = {
     appearance_section_colors: "Custom Colors",
     appearance_tab_basic: "Basic",
     appearance_tab_font: "Font",
+    appearance_tab_search: "Search",
     appearance_tab_colors: "Colors",
     appearance_tab_theme: "Theme",
     appearance_color_group_base: "Background & Surface",

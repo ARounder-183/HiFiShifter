@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
-import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import { useAppDispatch, useAppSelector, useAppStore } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -11,10 +11,16 @@ import {
 } from "../../features/keybindings";
 import type { Keybinding } from "../../features/keybindings";
 import { searchFilesRecursive } from "../../features/fileBrowser/fileBrowserSlice";
+import { searchOptionsPayload } from "../../features/search/searchSettings";
+import { SearchModeMenu } from "./search/SearchModeMenu";
+import { togglePanelVisible } from "../../features/dock/dockApi";
+import { PANEL_APPEARANCE } from "../dock/registerBuiltinPanels";
+import { matchReasonOf } from "./search/matchReason";
 import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
 import { importAudioAtPosition } from "../../features/session/thunks/importThunks";
 import {
     persistUiSettings,
+    setSearchSettings,
     toggleQuickSearchAutoNormalize,
 } from "../../features/session/sessionSlice";
 import type { FileEntry } from "../../services/api/fileBrowser";
@@ -86,7 +92,8 @@ interface QuickSearchPopupProps {
  */
 export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClose }) => {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
+    const store = useAppStore();
+    const { t, tVars } = useI18n();
 
     const keybindings = useAppSelector(selectMergedKeybindings);
 
@@ -96,6 +103,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
     const quickSearchAutoNormalizeEnabled = useAppSelector(
         (state: RootState) => state.session.quickSearchAutoNormalizeEnabled,
     );
+    const searchSettings = useAppSelector((state: RootState) => state.session.searchSettings);
 
     const [query, setQuery] = useState("");
     const [results, setResults] = useState<FileEntry[]>([]);
@@ -174,6 +182,15 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
 
     // 点击外部关闭由全屏遮罩层处理，见 render 部分
 
+    /*
+     * 下发给后端的匹配参数。正则模式下强制 `off`：正则作用于**原文**，与转写互斥
+     * （把 `zhuge` 当正则去匹配「主歌」没有意义）。
+     */
+    const searchOptions = useMemo(() => {
+        const payload = searchOptionsPayload(searchSettings);
+        return regexEnabled ? { ...payload, mode: "off" as const } : payload;
+    }, [searchSettings, regexEnabled]);
+
     // 搜索逻辑（带防抖）
     const doSearch = useCallback(
         (q: string) => {
@@ -191,6 +208,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         searchFilesRecursive({
                             dirPath: currentPath,
                             query: regexEnabled ? "" : q.trim(),
+                            options: searchOptions,
                         }),
                     );
                     if (searchFilesRecursive.fulfilled.match(action)) {
@@ -220,7 +238,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                 }
             }, 200);
         },
-        [dispatch, currentPath, regexEnabled],
+        [dispatch, currentPath, regexEnabled, searchOptions],
     );
 
     // 输入变化
@@ -239,6 +257,15 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
             doSearch(query);
         }
     }, [regexEnabled, query, doSearch]);
+
+    // 匹配方式变化时同样重跑：结果是后端算好的，不重跑就看不到任何变化。
+    const searchOptionsKey = `${searchOptions.mode}|${searchOptions.heteronym}|${searchOptions.japaneseLongVowel}|${searchOptions.koreanChoseong}`;
+    const lastSearchOptionsKeyRef = useRef(searchOptionsKey);
+    useEffect(() => {
+        if (lastSearchOptionsKeyRef.current === searchOptionsKey) return;
+        lastSearchOptionsKeyRef.current = searchOptionsKey;
+        if (query.trim()) doSearch(query);
+    }, [searchOptionsKey, query, doSearch]);
 
     // 排序后的结果
     const sortedResults = useMemo(() => {
@@ -443,6 +470,20 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         }}
                         icon=".*"
                     />
+                    {/* 匹配方式（转写 / 宽严） */}
+                    <SearchModeMenu
+                        settings={searchSettings}
+                        onChange={(patch) => {
+                            dispatch(setSearchSettings(patch));
+                            void dispatch(persistUiSettings());
+                            focusSearchInput();
+                        }}
+                        regexActive={regexEnabled}
+                        onOpenSettings={() => {
+                            onClose();
+                            togglePanelVisible(dispatch, store.getState, PANEL_APPEARANCE);
+                        }}
+                    />
                     {/* 排序 */}
                     <AppSelect
                         fullWidth={false}
@@ -510,9 +551,27 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                                         strokeLinecap="round"
                                     />
                                 </svg>
-                                {/* 文件名 */}
-                                <span className="truncate flex-1" data-tooltip={entry.name}>
-                                    {entry.name}
+                                {/* 文件名 + 命中原因 */}
+                                <span
+                                    className="truncate flex-1 flex items-baseline gap-1"
+                                    data-tooltip={entry.name}
+                                >
+                                    <span className="truncate">{entry.name}</span>
+                                    {(() => {
+                                        const reason = matchReasonOf(
+                                            entry.matchInfo,
+                                            searchSettings.showMatchReason,
+                                        );
+                                        if (!reason) return null;
+                                        return (
+                                            <span
+                                                className="shrink-0 text-qt-text-muted"
+                                                style={{ fontSize: "var(--qt-fs-micro)" }}
+                                            >
+                                                {tVars(reason.key, reason.vars)}
+                                            </span>
+                                        );
+                                    })()}
                                 </span>
                                 {/* 预览指示 */}
                                 {previewingPath === entry.path && (

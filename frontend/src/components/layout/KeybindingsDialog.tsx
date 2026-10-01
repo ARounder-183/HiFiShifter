@@ -16,6 +16,7 @@ import { Flex, TextField, IconButton, Button } from "@radix-ui/themes";
 import { Cross2Icon, MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import type { RootState } from "../../app/store";
 import { IS_MAC } from "../../utils/platform";
 import {
     selectMergedKeybindings,
@@ -36,6 +37,7 @@ import {
     buildKeybindingSearchEntries,
     matchKeybindingEntries,
 } from "../../features/keybindings/keybindingSearch";
+import { translitTermsOf, useTranslitIndex } from "../../features/search/useTranslitIndex";
 import type { ActionId, ActionMeta, Keybinding } from "../../features/keybindings/types";
 import { canonicalKeyFromEvent } from "../../features/keybindings/keybindingMatch";
 import { useShortcutSuppression } from "../../ui/shortcutScope";
@@ -118,6 +120,9 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
     // 打开时抑制全局快捷键与工程编辑。走统一作用域（src/ui/shortcutScope.ts），
     // 取代此前各自的 `data-keybindings-dialog-open` body 属性。
     useShortcutSuppression(open);
+
+    // 搜索匹配设置（转写开关与宽严），与文件浏览器、快速搜索共用同一份。
+    const searchSettings = useAppSelector((state: RootState) => state.session.searchSettings);
 
     // 当前处于"录入模式"的 actionId
     const [recordingId, setRecordingId] = useState<ActionId | null>(null);
@@ -349,7 +354,23 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
      * 【为什么依赖 `tf` 而不是直接在模块顶层构建】索引里装的是**本地化后的**文本，
      * 语系一变就要重建。`tf` 由 Provider 提供，引用随语系切换而变，正好作为依赖。
      */
-    const searchEntries = useMemo(() => buildKeybindingSearchEntries(tf), [tf]);
+    /*
+     * 转写索引：把动作名批量交给后端转写一次（拼音 / 罗马字 / 谚文），之后击键
+     * 仍然走纯 JS 的索引匹配 —— 每次击键都 IPC 会让输入变粘滞。
+     *
+     * 后端不可用时 `useTranslitIndex` 会停在「只折叠」的降级形态，搜索退化为
+     * 字面匹配，功能不中断。
+     */
+    const translitTexts = useMemo(
+        () => ALL_ACTION_IDS.map((id) => tf(ACTION_META[id].labelKey)),
+        [tf],
+    );
+    const translitIndex = useTranslitIndex(translitTexts, searchSettings);
+
+    const searchEntries = useMemo(
+        () => buildKeybindingSearchEntries(tf, (text) => translitTermsOf(translitIndex.get(text))),
+        [tf, translitIndex],
+    );
 
     /** 命中 query 的全部条目（有查询时按相关度降序，无查询时为原顺序）。 */
     const matchedEntries = useMemo(

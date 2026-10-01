@@ -41,6 +41,17 @@ export interface KeybindingSearchEntry {
         primaryKeys: string[];
         /** 修饰键名及其别名（`ctrl` / `cmd` / `alt` / `shift`）。**弱信号**。 */
         modifiers: string[];
+        /**
+         * 操作名的转写形态（拼音全拼 / 初声 / 罗马字 / 谚文分解）。
+         *
+         * 【为什么要单独成桶而不是并进 `label`】并进 label 就无法对「转写命中」单独
+         * 设门槛 —— 单字符 token（`z`）会命中所有拼音以 z 开头的条目，把原本按字面
+         * 匹配得到的结果冲散。分桶后可以要求 token 长度 ≥ 2 才参与转写匹配。
+         *
+         * 【分桶不会让「词条多」取胜】`scoreToken` 对**每个 token** 取各来源的最高档
+         * （`Math.max`），不是累加；多一个桶只是多一个候选档位，不会叠加。
+         */
+        translit: string[];
     };
     /** 排序与展示用的主名称（已本地化）。 */
     label: string;
@@ -97,6 +108,21 @@ const SCORE_LABEL_SUBSTRING = 2;
 const SCORE_MODIFIER_OR_ID = 1;
 
 /*
+ * 【转写命中与标签同档】拼音/罗马字就是「这条操作名的另一种写法」，用户为它付出的
+ * 输入成本与打原文相同（`chexiao` 与「撤销」都是 5~7 次击键），因此同档而非降档。
+ * 同档时由原有的「同分保持原分组顺序」兜底，结果仍然稳定。
+ */
+const SCORE_TRANSLIT_PREFIX = 3;
+const SCORE_TRANSLIT_SUBSTRING = 2;
+
+/*
+ * 【转写匹配的最小 token 长度】单字符 token 不该参与转写匹配：`z` 会命中所有拼音
+ * 含 z 的操作名（几十条），把用户真正想找的那条冲散。字面匹配不受此限 ——
+ * 单字符的字面命中与转写功能上线前一致。
+ */
+const MIN_TRANSLIT_TOKEN_LEN = 2;
+
+/*
  * 【每个 token 内部不许多个来源累加 —— 只取最高一档】
  *
  * 累加会让词条多的条目靠**数量**取胜：`edit.quantize`（`Ctrl+P`）的标签
@@ -106,6 +132,10 @@ const SCORE_MODIFIER_OR_ID = 1;
  */
 function hasAnyMatch(source: string[], token: string): boolean {
     return source.some((term) => term.includes(token));
+}
+/** 与 `hasAnyMatch` 同形，但要求词条以 token 开头。 */
+function hasAnyPrefix(source: string[], token: string): boolean {
+    return source.some((term) => term.startsWith(token));
 }
 /**
  * 查询分隔符：空白、`+`、`,`。
@@ -202,9 +232,13 @@ function termsFromKeybinding(binding: Keybinding): {
  * @param resolveLabel 把 i18n 词典键解析成本地化文案。注入而非直接 import
  *   `useI18n()`，使本函数是纯函数（测试里传恒等映射即可），也让索引的重建时机
  *   由调用方按语系控制。
+ * @param translitTermsOf 取一段文案的**转写形态**（拼音全拼 / 初声 / 罗马字）。
+ *   同样注入：转写规则在后端（`transliterate` 命令），本函数不认识任何语言。
+ *   缺省（或后端不可用）时该来源为空，匹配退化为纯字面 —— 功能不中断。
  */
 export function buildKeybindingSearchEntries(
     resolveLabel: (key: string) => string,
+    translitTermsOf?: (text: string) => readonly string[],
 ): KeybindingSearchEntry[] {
     return ALL_ACTION_IDS.map((id) => {
         const meta = ACTION_META[id];
@@ -217,15 +251,26 @@ export function buildKeybindingSearchEntries(
          */
         const idParts = normalize(id).split(".").filter(Boolean);
 
+        const label = resolveLabel(meta.labelKey);
+        /*
+         * 转写只索引**操作名**，不索引分组名。
+         *
+         * 【为什么不做分组】分组名是「播放与导航」这类场景词，同一分组下几十条
+         * 动作共享它 —— 索引它等于给这几十条同时加一个共同词条，对「找到某一条」
+         * 没有帮助，只会让按分组词搜出来的结果更拥挤。分组的定位由左侧导航栏承担。
+         */
+        const translit = translitTermsOf ? [...new Set(translitTermsOf(label))] : [];
+
         return {
             id,
             sources: {
-                label: tokenizeText(resolveLabel(meta.labelKey)),
+                label: tokenizeText(label),
                 group: tokenizeText(resolveLabel(GROUP_LABEL_KEYS[meta.group])),
                 idParts,
+                translit,
                 ...termsFromKeybinding(DEFAULT_KEYBINDINGS[id]),
             },
-            label: resolveLabel(meta.labelKey),
+            label,
             group: meta.group,
         };
     });
@@ -241,6 +286,14 @@ export function buildKeybindingSearchEntries(
  */
 function scoreToken(entry: KeybindingSearchEntry, token: string): number {
     const { sources } = entry;
+    const translitScore =
+        token.length >= MIN_TRANSLIT_TOKEN_LEN
+            ? hasAnyPrefix(sources.translit, token)
+                ? SCORE_TRANSLIT_PREFIX
+                : hasAnyMatch(sources.translit, token)
+                  ? SCORE_TRANSLIT_SUBSTRING
+                  : 0
+            : 0;
     return Math.max(
         normalize(entry.label).startsWith(token) ||
             sources.label.some((term) => term.startsWith(token))
@@ -252,6 +305,7 @@ function scoreToken(entry: KeybindingSearchEntry, token: string): number {
         hasAnyMatch(sources.idParts, token) ? SCORE_MODIFIER_OR_ID : 0,
         hasAnyMatch(sources.group, token) ? SCORE_MODIFIER_OR_ID : 0,
         hasAnyMatch(sources.modifiers, token) ? SCORE_MODIFIER_OR_ID : 0,
+        translitScore,
     );
 }
 

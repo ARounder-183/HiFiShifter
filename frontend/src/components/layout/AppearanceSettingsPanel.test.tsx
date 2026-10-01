@@ -18,6 +18,7 @@ import { Provider } from "react-redux";
 import { expect, test } from "vitest";
 
 import { I18nProvider } from "../../i18n/I18nProvider";
+import sessionReducer from "../../features/session/sessionSlice";
 import { AppThemeProvider } from "../../theme/AppThemeProvider";
 import { AppearanceSettingsPanel } from "./AppearanceSettingsPanel";
 
@@ -33,9 +34,13 @@ import { AppearanceSettingsPanel } from "./AppearanceSettingsPanel";
 async function mountPanel() {
     const originalGetContext = HTMLCanvasElement.prototype.getContext;
     HTMLCanvasElement.prototype.getContext = () => null;
-    // 面板只在"关闭自己"时 dispatch（冒烟测试点不到），一个哑 reducer 足够。
+    /*
+     * 面板只在"关闭自己"时 dispatch（冒烟测试点不到），但「搜索」页签要读
+     * `session.searchSettings` —— 那是它渲染匹配方式控件的真值来源，
+     * 因此挂上真实的 session 切片而不是哑 reducer。
+     */
     const store = configureStore({
-        reducer: (state: unknown = {}) => state,
+        reducer: { session: sessionReducer },
     });
     const host = document.createElement("div");
     document.body.append(host);

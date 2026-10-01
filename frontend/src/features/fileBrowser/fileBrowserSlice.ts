@@ -1,5 +1,6 @@
 import { createSlice, createAsyncThunk, type PayloadAction } from "@reduxjs/toolkit";
 import { fileBrowserApi, type FileEntry } from "../../services/api/fileBrowser";
+import type { SearchOptionsPayload } from "../search/searchSettings";
 
 export type SortMode = "name" | "date" | "size";
 
@@ -66,9 +67,16 @@ export const loadDirectory = createAsyncThunk(
 
 export const searchFilesRecursive = createAsyncThunk(
     "fileBrowser/searchFilesRecursive",
-    async ({ dirPath, query }: { dirPath: string; query: string }, { rejectWithValue }) => {
+    async (
+        {
+            dirPath,
+            query,
+            options,
+        }: { dirPath: string; query: string; options?: SearchOptionsPayload },
+        { rejectWithValue },
+    ) => {
         try {
-            const entries = await fileBrowserApi.searchFilesRecursive(dirPath, query);
+            const entries = await fileBrowserApi.searchFilesRecursive(dirPath, query, options);
             return entries;
         } catch (err) {
             return rejectWithValue(err instanceof Error ? err.message : "Search failed");
