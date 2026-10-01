@@ -532,3 +532,65 @@ describe("estimateCycles", () => {
         expect(estimateCycles(p, 201, FP)).toBe(5);
     });
 });
+
+/*
+ * 逐帧基线（预览的纵轴定标要用它）。
+ *
+ * 【为什么值得测】预览画的是"相对基线的偏移"。基线模式（`line` / `holdStart` /
+ * `holdEnd` / `average` / `existing`）的判定只在内核里，调用方重算必然与渲染分叉 ——
+ * 所以这个输出必须与 `dense` 出自同一次计算，且能被独立核对。
+ */
+describe("collectBaseline", () => {
+    test("缺省不返回；开启后与 dense 同长", () => {
+        const p = steady({ depthCents: 40, baseline: "existing" });
+        const base = {
+            startFrame: 0,
+            startValue: 60,
+            endFrame: 99,
+            endValue: 60,
+            preset: p,
+            param: "pitch",
+            framePeriodMs: FP,
+        };
+        expect(buildVibratoCurve(base).baseline).toBeUndefined();
+        const withBaseline = buildVibratoCurve({ ...base, collectBaseline: true });
+        expect(withBaseline.baseline?.length).toBe(withBaseline.dense.length);
+    });
+
+    test("existing 基线逐帧等于原曲线", () => {
+        const original = Array.from({ length: 100 }, (_, i) => 60 + i * 0.1);
+        const result = buildVibratoCurve({
+            startFrame: 0,
+            startValue: original[0],
+            endFrame: original.length - 1,
+            endValue: original[original.length - 1],
+            original,
+            preset: steady({ depthCents: 40, baseline: "existing" }),
+            param: "pitch",
+            framePeriodMs: FP,
+            collectBaseline: true,
+        });
+        for (let i = 0; i < original.length; i += 1) {
+            expect(result.baseline![i]).toBeCloseTo(original[i], 9);
+        }
+    });
+
+    test("line 基线就是端点之间的直线（与渲染输出互相印证）", () => {
+        // 深度 0 时 `dense` 即基线本身：用它来核对 `baseline`，不是另写一份公式。
+        const result = buildVibratoCurve({
+            startFrame: 0,
+            startValue: 58,
+            endFrame: 99,
+            endValue: 62,
+            preset: steady({ depthCents: 0, baseline: "line" }),
+            param: "pitch",
+            framePeriodMs: FP,
+            collectBaseline: true,
+        });
+        expect(result.baseline![0]).toBeCloseTo(58, 9);
+        expect(result.baseline![result.dense.length - 1]).toBeCloseTo(62, 9);
+        for (let i = 0; i < result.dense.length; i += 1) {
+            expect(result.baseline![i]).toBeCloseTo(result.dense[i], 9);
+        }
+    });
+});

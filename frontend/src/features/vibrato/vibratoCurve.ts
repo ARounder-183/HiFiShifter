@@ -80,6 +80,17 @@ export interface VibratoRenderInput {
      * 多一次分配；而只有预设编辑器的波形预览需要把包络画出来。默认关闭。
      */
     collectEnvelope?: boolean;
+    /**
+     * 一并返回逐帧的**基线**（参数原生单位）。
+     *
+     * 【用途】预览要展示"颤音相对它所围绕的那条曲线偏移多少"，就得知道那条曲线在哪。
+     * 基线模式（`line` / `holdStart` / `holdEnd` / `average` / `existing`）的判定只
+     * 存在于这里，调用方自行重算必然与渲染分叉，所以由内核给出。
+     *
+     * 【为什么同样 opt-in】与 `collectEnvelope` 同理：只有预览需要，逐帧多一个数组
+     * 就是每帧多一次分配，而拖拽预览每帧都重建整段曲线。
+     */
+    collectBaseline?: boolean;
 }
 
 export interface VibratoRenderResult {
@@ -89,6 +100,8 @@ export interface VibratoRenderResult {
     dense: number[];
     /** 仅在 `collectEnvelope` 为 true 时给出：`|depthCents| * env`，逐帧对应 `dense`。 */
     envelope?: number[];
+    /** 仅在 `collectBaseline` 为 true 时给出：逐帧基线（参数原生单位）。 */
+    baseline?: number[];
 }
 
 /** 整数哈希 → `[0,1)`。确定性、无浮点、跨调用稳定。 */
@@ -255,6 +268,7 @@ export function buildVibratoCurve(input: VibratoRenderInput): VibratoRenderResul
     const useOriginalBlend = blend < 1 && Boolean(input.original);
     const snap = input.snapFinalValue;
     const envelope = input.collectEnvelope ? new Array<number>(len) : undefined;
+    const baselineOut = input.collectBaseline ? new Array<number>(len) : undefined;
 
     for (let i = 0; i < len; i += 1) {
         const frame = minF + i;
@@ -295,6 +309,7 @@ export function buildVibratoCurve(input: VibratoRenderInput): VibratoRenderResul
         // 包络恒为非负：深度可能为负（波形反相），取绝对值后包络带仍是上下对称的
         // 幅度边界，不会被负号翻到基线下方。
         if (envelope) envelope[i] = Math.abs(depthCents) * env;
+        if (baselineOut) baselineOut[i] = base;
 
         const delta = depthCents * mapping.factor * env * wave;
 
@@ -314,7 +329,10 @@ export function buildVibratoCurve(input: VibratoRenderInput): VibratoRenderResul
         dense[i] = snap ? snap(value, frame) : value;
     }
 
-    return envelope ? { minF, maxF, dense, envelope } : { minF, maxF, dense };
+    const result: VibratoRenderResult = { minF, maxF, dense };
+    if (envelope) result.envelope = envelope;
+    if (baselineOut) result.baseline = baselineOut;
+    return result;
 }
 
 /**
