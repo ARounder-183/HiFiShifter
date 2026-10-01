@@ -115,32 +115,57 @@ export function AppField({
 }: AppFieldProps) {
     const inherited = useContext(LabelWidthContext);
     const width = labelWidth ?? inherited;
+    /** 提示/错误要缩进到**控件列**起点（与控件左缘对齐）。 */
+    const gutterStyle =
+        width === "auto" ? undefined : `calc(${LABEL_WIDTH_PX[width]} + var(--qt-space-4))`;
 
+    /*
+     * 【结构：内层行做居中，提示移出那一行】
+     *
+     * 此前整行是 `items-start`，标签只补了 `pt-0.5`（2px）—— 而标签 19px、
+     * 控件 31px，实测每行中心差 6px（用户报告的"参数名与输入框不居中对齐"）。
+     *
+     * 不能把整行改成 `items-center`：提示/错误挂在控件下方，多行错误会把标签
+     * 一起拖下去（原注释记下的约束）。也**不能**给标签一个"控件那么高"的
+     * min-height：控件高度并不统一（AppSelect 32px、AppSlider 只有 16px），
+     * 写死任何一个都会让另一类反向偏移。
+     *
+     * 因此拆成两层：
+     *   - 内层行只放 [标签][控件]，`items-center` —— 无论控件多高，标签都与其
+     *     垂直居中（高度可比性来自同一行的 flex 交叉轴，不需要知道具体数值）；
+     *   - 提示/错误移到外层列，按 `gutterStyle` 缩进到控件列起点 —— 位置与
+     *     改动前一致，且**标签因此永远不会被多行提示/错误带偏**（比"约束"更强）。
+     */
     return (
-        <div className={cx("flex items-start gap-2", className)}>
-            {/*
-             * 标签用 `hs-type-label`（12px、正文色），不是 `text-qt-sm` + muted。
-             * 原实现 11px + muted 让标签比它自己的提示（12px）和取值（12px）都小、
-             * 还更淡 —— 主次完全反了。现在：label(12) > caption(11) 且同为正文色系。
-             */}
-            <label
-                className="hs-type-label shrink-0 pt-0.5"
-                htmlFor={htmlFor}
-                style={width === "auto" ? undefined : { minWidth: LABEL_WIDTH_PX[width] }}
-            >
-                {label}
-            </label>
-            <div className="app-field__control flex min-w-0 flex-1 flex-col gap-1">
-                {children}
-                {error ? (
-                    // 错误用 caption 的尺寸但换成危险色（保留语义区分）
-                    <span className="hs-type-caption" style={{ color: "var(--qt-danger-text)" }}>
-                        {error}
-                    </span>
-                ) : hint ? (
-                    <span className="hs-type-caption">{hint}</span>
-                ) : null}
+        <div className={cx("flex flex-col gap-1", className)}>
+            <div className="flex items-center gap-2">
+                {/*
+                 * 标签用 `hs-type-label`（12px、正文色），不是 `text-qt-sm` + muted。
+                 * 原实现 11px + muted 让标签比它自己的提示（12px）和取值（12px）都小、
+                 * 还更淡 —— 主次完全反了。现在：label(12) > caption(11) 且同为正文色系。
+                 */}
+                <label
+                    className="hs-type-label shrink-0"
+                    htmlFor={htmlFor}
+                    style={width === "auto" ? undefined : { minWidth: LABEL_WIDTH_PX[width] }}
+                >
+                    {label}
+                </label>
+                <div className="app-field__control flex min-w-0 flex-1">{children}</div>
             </div>
+            {error ? (
+                // 错误用 caption 的尺寸但换成危险色（保留语义区分）
+                <span
+                    className="hs-type-caption"
+                    style={{ marginLeft: gutterStyle, color: "var(--qt-danger-text)" }}
+                >
+                    {error}
+                </span>
+            ) : hint ? (
+                <span className="hs-type-caption" style={{ marginLeft: gutterStyle }}>
+                    {hint}
+                </span>
+            ) : null}
         </div>
     );
 }
@@ -246,25 +271,39 @@ export function AppSwitchRow({
     }
 
     // aligned：标签占 `AppField` 那一列，控件落在同一列起点 —— 与同表单的字段行对齐。
+    // 结构与 `AppField` 同款（内层行居中、提示移出），理由见 `AppField` 的说明。
     return (
-        <div className={cx("flex items-start gap-2", className)}>
-            {label != null ? (
-                <label
-                    htmlFor={controlId}
-                    className={cx("hs-type-label shrink-0 pt-0.5", labelClass)}
+        <div className={cx("flex flex-col gap-1", className)}>
+            <div className="flex items-center gap-2">
+                {label != null ? (
+                    <label
+                        htmlFor={controlId}
+                        className={cx("hs-type-label shrink-0", labelClass)}
+                        style={
+                            inheritedLabelWidth === "auto"
+                                ? undefined
+                                : { minWidth: LABEL_WIDTH_PX[inheritedLabelWidth] }
+                        }
+                    >
+                        {label}
+                    </label>
+                ) : null}
+                <div className="flex min-w-0 flex-1 items-center gap-2">{controlNode}</div>
+            </div>
+            {hint ? (
+                <span
+                    className="hs-type-caption"
                     style={
                         inheritedLabelWidth === "auto"
                             ? undefined
-                            : { minWidth: LABEL_WIDTH_PX[inheritedLabelWidth] }
+                            : {
+                                  marginLeft: `calc(${LABEL_WIDTH_PX[inheritedLabelWidth]} + var(--qt-space-4))`,
+                              }
                     }
                 >
-                    {label}
-                </label>
+                    {hint}
+                </span>
             ) : null}
-            <div className="flex min-w-0 flex-1 flex-col gap-1">
-                {controlNode}
-                {hint ? <span className="hs-type-caption">{hint}</span> : null}
-            </div>
         </div>
     );
 }

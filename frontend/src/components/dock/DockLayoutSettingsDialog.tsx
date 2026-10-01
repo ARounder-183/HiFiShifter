@@ -43,7 +43,10 @@ export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSetti
         >
             {/* 混排表单：字段与开关共用标签列，因此显式声明 aligned */}
             <AppForm booleanRow="aligned">
-                <AppField label={tf("layout_setting_dock_modifier")}>
+                <AppField
+                    label={tf("layout_setting_dock_modifier")}
+                    hint={tf("layout_setting_dock_modifier_hint")}
+                >
                     <AppSelect
                         value={settings.dockModifier}
                         onValueChange={(value) =>
@@ -57,7 +60,6 @@ export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSetti
                         ]}
                     />
                 </AppField>
-                <span className="hs-type-caption">{tf("layout_setting_dock_modifier_hint")}</span>
 
                 <AppField label={tf("layout_setting_edge_band")}>
                     <AppNumberField
