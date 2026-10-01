@@ -70,6 +70,7 @@ mod recording;
 mod render_cache;
 mod render_key;
 mod renderer;
+mod search;
 mod synth_clip_cache;
 
 #[cfg(feature = "onnx")]
@@ -808,6 +809,7 @@ pub fn run() {
             commands::get_audio_file_info,
             commands::read_audio_preview,
             commands::search_files_recursive,
+            commands::transliterate,
             commands::open_vocalshifter_dialog,
             commands::import_vocalshifter_project,
             commands::paste_vocalshifter_clipboard,

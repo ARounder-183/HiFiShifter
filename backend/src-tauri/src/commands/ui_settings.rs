@@ -54,6 +54,7 @@ const DEEP_MERGE_KEYS: &[&str] = &[
     "channelImportPolicy",
     "notebook",
     "dock",
+    "search",
 ];
 
 /// 以现有设置为基底合并前端发来的部分补丁（纯函数，便于测试）。

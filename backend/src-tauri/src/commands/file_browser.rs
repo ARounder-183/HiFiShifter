@@ -1,3 +1,8 @@
+use crate::search::{
+    match_translit, translit, MatchInfo, MatchOptions, Query, SearchMode, SearchOptions,
+    TranslitOptions,
+};
+use std::cmp::Ordering;
 use std::path::Path;
 
 /// 目录条目
@@ -10,6 +15,12 @@ pub struct FileEntry {
     pub size: Option<u64>,
     pub extension: Option<String>,
     pub modified_time: Option<f64>,
+    /// 搜索命中说明（仅搜索路径产出；目录列表为 `None`）。
+    ///
+    /// 【为什么要回传】转写匹配最大的风险不是误命中，而是「用户不知道为什么这条
+    /// 会出来」—— 打 `zge` 冒出「主歌.wav」时，界面需要能说明「匹配拼音 zhuge」。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_info: Option<MatchInfo>,
 }
 
 /// 音频文件元信息
@@ -75,6 +86,7 @@ pub(crate) fn list_directory(dir_path: String) -> Result<Vec<FileEntry>, String>
             size,
             extension,
             modified_time,
+            match_info: None,
         });
     }
 
@@ -88,24 +100,121 @@ pub(crate) fn list_directory(dir_path: String) -> Result<Vec<FileEntry>, String>
     Ok(entries)
 }
 
-/// 在指定目录下递归搜索文件（中间匹配，不区分大小写，忽略隐藏文件和目录）。
-/// 最多返回 500 条结果，按文件名排序。
+/// 命中候选：档位分值 + 排序键 + 条目。
+struct Scored {
+    score: u8,
+    name_lower: String,
+    entry: FileEntry,
+}
+
+impl PartialEq for Scored {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for Scored {}
+impl PartialOrd for Scored {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// 「更大」= 更该排在前面：分数高的在前；同分按名称字典序（不区分大小写）；
+/// 再同则按路径 —— 路径在同一棵目录树里唯一，因此这是全序，排序结果可复现。
+impl Ord for Scored {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.score
+            .cmp(&other.score)
+            .then_with(|| other.name_lower.cmp(&self.name_lower))
+            .then_with(|| other.entry.path.cmp(&self.entry.path))
+    }
+}
+
+/// 一条文件名与查询串的匹配器。
+///
+/// 【为什么分成三态而不是一个函数】「关闭转写」承诺与旧行为一致，就应当走旧代码
+/// 路径本身（`to_lowercase().contains()`），而不是「转写实现恰好退化成的样子」——
+/// 后者会在某次转写改动里悄悄偏离承诺。
+enum NameMatcher {
+    /// 空查询：不过滤。前端正则模式就是这样调用的（过滤在前端做）。
+    All,
+    /// `mode = off`：与转写功能上线前逐字节一致的小写子串匹配。
+    Legacy { query_lower: String },
+    /// 转写 + 分档匹配。
+    Translit {
+        query: Query,
+        mode: SearchMode,
+        opts: TranslitOptions,
+    },
+}
+
+impl NameMatcher {
+    fn new(raw_query: &str, options: &MatchOptions) -> Self {
+        let trimmed = raw_query.trim();
+        if trimmed.is_empty() {
+            return Self::All;
+        }
+        if options.mode == SearchMode::Off {
+            return Self::Legacy {
+                query_lower: raw_query.to_lowercase(),
+            };
+        }
+        Self::Translit {
+            query: Query::new(trimmed, options),
+            mode: options.mode,
+            opts: options.translit,
+        }
+    }
+
+    /// 命中则返回 `(档位分值, 命中说明)`。
+    fn score(&self, stem: &str) -> Option<(u8, Option<MatchInfo>)> {
+        match self {
+            Self::All => Some((0, None)),
+            Self::Legacy { query_lower } => stem
+                .to_lowercase()
+                .contains(query_lower.as_str())
+                .then_some((crate::search::SCORE_LITERAL, None)),
+            Self::Translit { query, mode, opts } => {
+                let forms = translit(stem, opts);
+                match_translit(&forms, query, *mode).map(|info| (info.score, Some(info)))
+            }
+        }
+    }
+}
+
+/// 命中数的超采样倍数：见 `search_files_recursive` 的注释。
+const SEARCH_OVERSCAN: usize = 4;
+
+/// 在指定目录下递归搜索文件。
+///
+/// 匹配文件名 stem（忽略扩展名）、跳过隐藏项；`options` 缺省或 `mode = off` 时与
+/// 转写功能上线前的行为一致（小写子串、按名称排序）。
 pub(crate) fn search_files_recursive(
     dir_path: String,
     query: String,
+    options: Option<SearchOptions>,
 ) -> Result<Vec<FileEntry>, String> {
     let path = Path::new(&dir_path);
     if !path.is_dir() {
         return Err(format!("Not a directory: {}", dir_path));
     }
 
-    let query_lower = query.to_lowercase();
-    let mut results = Vec::new();
-    let mut visited = std::collections::HashSet::new();
-    collect_matching_files(path, &query_lower, &mut results, 500, &mut visited, 0);
+    let options = options.unwrap_or_default();
+    let match_options = options.match_options();
+    let max = options.max_results();
+    let matcher = NameMatcher::new(&query, &match_options);
 
-    results.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    Ok(results)
+    // 【为什么要「多收几倍再截断」】旧实现遇到第 500 个命中就停止遍历，于是返回
+    // 哪 500 条取决于目录遍历顺序 —— 真正最像的那条可能排在后面。这里把停止阈值
+    // 放宽到 4 倍（遍历成本仍有界：命中数达到 4×上限即停），再按相关度取前 N。
+    let stop_at = max.saturating_mul(SEARCH_OVERSCAN);
+    let mut hits: Vec<Scored> = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    collect_matching_files(path, &matcher, &mut hits, stop_at, &mut visited, 0);
+
+    hits.sort_by(|a, b| b.cmp(a));
+    hits.truncate(max);
+    Ok(hits.into_iter().map(|scored| scored.entry).collect())
 }
 
 /// 递归深度上限：防止在极深目录树上无界遍历。
@@ -113,13 +222,13 @@ const MAX_SEARCH_DEPTH: usize = 32;
 
 fn collect_matching_files(
     dir: &Path,
-    query: &str,
-    results: &mut Vec<FileEntry>,
-    max: usize,
+    matcher: &NameMatcher,
+    hits: &mut Vec<Scored>,
+    stop_at: usize,
     visited: &mut std::collections::HashSet<std::path::PathBuf>,
     depth: usize,
 ) {
-    if results.len() >= max || depth >= MAX_SEARCH_DEPTH {
+    if hits.len() >= stop_at || depth >= MAX_SEARCH_DEPTH {
         return;
     }
     // 环防护：junction/符号链接目录环会让无防护的递归栈溢出崩溃。
@@ -134,7 +243,7 @@ fn collect_matching_files(
         return;
     };
     for entry in read_dir.flatten() {
-        if results.len() >= max {
+        if hits.len() >= stop_at {
             break;
         }
         // file_type() 不跟随符号链接/junction，避免把链接目录当作真实目录深入。
@@ -146,36 +255,42 @@ fn collect_matching_files(
             continue;
         }
         if file_type.is_dir() {
-            collect_matching_files(&entry.path(), query, results, max, visited, depth + 1);
+            collect_matching_files(&entry.path(), matcher, hits, stop_at, visited, depth + 1);
         } else {
-            // 匹配文件名的 stem（不包含后缀），中间匹配、不区分大小写 → 忽略扩展名
+            // 匹配文件名的 stem（不包含后缀）→ 忽略扩展名，与旧实现一致。
             let path = entry.path();
-            let stem_lower = path
+            let stem = path
                 .file_stem()
-                .map(|s| s.to_string_lossy().to_lowercase())
+                .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if stem_lower.contains(query) {
-                let extension = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.to_lowercase());
-                let modified_time = entry.metadata().ok().and_then(|m| {
-                    m.modified().ok().and_then(|t| {
-                        t.duration_since(std::time::UNIX_EPOCH)
-                            .ok()
-                            .map(|d| d.as_secs_f64())
-                    })
-                });
-                let size = entry.metadata().ok().map(|m| m.len());
-                results.push(FileEntry {
+            let Some((score, match_info)) = matcher.score(&stem) else {
+                continue;
+            };
+            let extension = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase());
+            let modified_time = entry.metadata().ok().and_then(|m| {
+                m.modified().ok().and_then(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs_f64())
+                })
+            });
+            let size = entry.metadata().ok().map(|m| m.len());
+            hits.push(Scored {
+                score,
+                name_lower: name.to_lowercase(),
+                entry: FileEntry {
                     name,
                     path: path.to_string_lossy().into_owned(),
                     is_dir: false,
                     size,
                     extension,
                     modified_time,
-                });
-            }
+                    match_info,
+                },
+            });
         }
     }
 }

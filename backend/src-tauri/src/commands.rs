@@ -1988,13 +1988,26 @@ pub fn read_audio_preview(
 pub async fn search_files_recursive(
     dir_path: String,
     query: String,
+    options: Option<crate::search::SearchOptions>,
 ) -> Result<Vec<file_browser::FileEntry>, String> {
     // 深层目录树的递归遍历可能耗时较长，放到阻塞线程池避免冻结主线程。
     tauri::async_runtime::spawn_blocking(move || {
-        file_browser::search_files_recursive(dir_path, query)
+        file_browser::search_files_recursive(dir_path, query, options)
     })
     .await
     .unwrap_or_else(|error| Err(format!("search task failed: {error}")))
+}
+
+/// 批量把文本转写成可检索的拉丁形态（拼音 / 罗马字 / 谚文分解）。
+///
+/// 前端在**建索引时**调用一次（快捷键面板的动作名、字体名），不在每次击键的
+/// 路径上 —— 击键仍然走前端纯 JS 的索引匹配，保持即时性。
+#[tauri::command(rename_all = "camelCase")]
+pub fn transliterate(
+    texts: Vec<String>,
+    options: Option<crate::search::SearchOptions>,
+) -> Vec<crate::search::TranslitResult> {
+    crate::search::transliterate_batch(&texts, &options.unwrap_or_default())
 }
 
 // ===================== vocalshifter =====================

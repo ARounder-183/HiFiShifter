@@ -239,6 +239,55 @@ fn default_silence_action() -> String {
 fn default_true_value() -> bool {
     true
 }
+fn default_search_mode() -> String {
+    "smart".to_string()
+}
+
+/// 搜索匹配设置（持久化到 `app_config.json` 的 `ui.search`）。
+///
+/// 【为什么「总开关 + 模式」是两个字段】用户说「我想关掉」和「我想收紧」是两件事。
+/// 合成一个三态枚举会让两者互相干扰：把宽严从 fuzzy 调回 smart 会顺带把功能打开，
+/// 而用户上次明明是关掉的。分开之后，总开关负责「这个功能存不存在」，模式负责
+/// 「匹配得多宽」。
+///
+/// 【为什么 mode 用字符串而不是枚举】手改坏的配置值（`"offf"`）必须能被规范化回
+/// 默认；枚举反序列化失败会让**整份** `UiSettings` 回退成默认值 —— 用户的其他设置
+/// 会被一起清掉。取值合法性由前端收口（与 `param_axis_units` 同一策略）。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchSettings {
+    /// 转写匹配总开关（默认开启）。关闭等价于 `mode = "off"`。
+    #[serde(default = "default_true_value")]
+    pub translit: bool,
+    /// `"off"` / `"smart"`（默认）/ `"fuzzy"`。
+    #[serde(default = "default_search_mode")]
+    pub mode: String,
+    /// 多音字展开（默认开启）。
+    #[serde(default = "default_true_value")]
+    pub heteronym: bool,
+    /// 日文长音宽松匹配（默认开启）：`bokaru` 也命中「ボーカル」。
+    #[serde(default = "default_true_value")]
+    pub japanese_long_vowel: bool,
+    /// 韩文初声匹配（默认开启）：`hg` 也命中「한국어」。
+    #[serde(default = "default_true_value")]
+    pub korean_choseong: bool,
+    /// 结果里显示「为什么命中」（默认开启）。
+    #[serde(default = "default_true_value")]
+    pub show_match_reason: bool,
+}
+
+impl Default for SearchSettings {
+    fn default() -> Self {
+        Self {
+            translit: true,
+            mode: default_search_mode(),
+            heteronym: true,
+            japanese_long_vowel: true,
+            korean_choseong: true,
+            show_match_reason: true,
+        }
+    }
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -335,6 +384,14 @@ pub struct UiSettings {
     /// 静音检测对话框的上次使用参数。
     #[serde(default)]
     pub silence_detect_options: SilenceDetectSettings,
+
+    /// 搜索匹配设置（转写 / 宽严 / 各语言子开关）。
+    ///
+    /// 【为什么必须在这里有字段】`save_ui_settings` 是「读-改-写整个配置文件」：
+    /// 它把合并后的 JSON 反序列化成 `UiSettings` 再落盘。若本结构没有这个字段，
+    /// 前端每次保存都会把 `ui.search` **静默丢弃** —— 用户改完设置重开就回到默认。
+    #[serde(default)]
+    pub search: SearchSettings,
 
     #[serde(default)]
     pub quick_search_auto_normalize: bool,
@@ -1454,6 +1511,7 @@ impl Default for UiSettings {
             metronome_accent: true,
             metronome_sound: default_metronome_sound(),
             silence_detect_options: SilenceDetectSettings::default(),
+            search: SearchSettings::default(),
             quick_search_auto_normalize: false,
             save_undo_history_by_default: false,
             visible_reference_root_track_ids: Vec::new(),
