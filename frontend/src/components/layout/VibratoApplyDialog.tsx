@@ -36,6 +36,7 @@ import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
 import { VibratoPreviewCanvas } from "./vibrato/VibratoPreviewCanvas";
 import {
     buildAppliedPreview,
+    fitPreviewRangeCents,
     depthForParam,
     depthToCents,
     formatNumber,
@@ -152,6 +153,31 @@ export function VibratoApplyDialog({
      * 时刻只允许一路声音（新的会抢占旧的）。
      */
     const [audition, setAudition] = useState<"source" | "result" | null>(null);
+
+    /**
+     * 「适应」的令牌：每点一次自增，让下面的 `useMemo` 重算纵轴。
+     *
+     * 用令牌而不是"拟合函数 + state"，是为了把**什么时候重算**直接写在依赖数组里
+     * （见下），读的人不必去追 effect 的触发条件。
+     */
+    const [refitToken, setRefitToken] = useState(0);
+
+    /**
+     * 预览纵轴的半幅（cents）。
+     *
+     * 【为什么必须固定住】与预设管理器同一套逻辑：标尺若跟着当前深度自适应，波形
+     * 永远填满画布 —— 调深度时看到的只是整幅在竖直方向"抖一下"，读不出幅度大小。
+     * 标尺固定下来，波形高度才等于深度，配合画布上的刻度标签可以直读。
+     *
+     * 【什么时候重算】依赖数组就是答案：**换选区**（`original`）、**换预设**
+     * （`draft?.id`）、**点「适应」**（令牌）。深度 / 速率的改动刻意不在其中 ——
+     * `previewSamples` 的内容会变，但那是"编辑期间"，标尺不动。
+     */
+    const previewHalfCents = useMemo(
+        () => fitPreviewRangeCents(previewSamples ? previewSamples.peakCents : 0),
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- 内容变化（深度 / 速率）刻意不重算标尺，见上
+        [original, draft?.id, refitToken],
+    );
 
     /** A/B 试听的两条曲线：同一中心、同一基音，差异只来自颤音。 */
     const auditionCurves = useMemo(() => {
@@ -356,6 +382,7 @@ export function VibratoApplyDialog({
                                             <VibratoPreviewCanvas
                                                 samples={previewSamples}
                                                 contour={previewSamples.sourceContour}
+                                                halfCents={previewHalfCents}
                                                 ariaLabel={t("vibrato_apply_preview")}
                                             />
                                             <Flex
@@ -376,6 +403,14 @@ export function VibratoApplyDialog({
                                                     wrap="wrap"
                                                     style={{ minWidth: 0 }}
                                                 >
+                                                    {/* 重新拟合纵轴：与预设管理器同款按钮。 */}
+                                                    <AppButton
+                                                        size="sm"
+                                                        emphasis="soft"
+                                                        onClick={() => setRefitToken((t) => t + 1)}
+                                                    >
+                                                        {t("vibrato_preview_fit")}
+                                                    </AppButton>
                                                     {/*
                                                      * 试听 A/B：原参数线与新参数线各一个按钮。
                                                      * 两条曲线共用同一个中心与基音，因此听感差异

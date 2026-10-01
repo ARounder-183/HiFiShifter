@@ -353,3 +353,23 @@ test("initialPresetId 决定打开时选中哪一条（优先于当前活动预�
     });
     expect((onApply.mock.calls[0][0] as VibratoPreset).id).toBe("builtin.natural");
 });
+
+/*
+ * 预览纵轴由「适应」控制，编辑期间保持不动（与预设管理器同一套逻辑）。
+ *
+ * 【为什么值得测】标尺若跟着深度自适应，波形永远填满画布 —— 调深度时看到的只是整幅
+ * 在竖直方向"抖一下"，读不出幅度大小。标尺固定住，波形高度才等于深度。
+ *
+ * 【测到哪一步】纵轴画在画布上，jsdom 里读不到；这里钉的是"入口在"（与预设管理器
+ * 的同类测试一致）—— 稳定性由依赖数组保证：换选区 / 换预设 / 点适应才重算。
+ */
+test("预览有「适应」按钮（重新拟合纵轴）", async () => {
+    await mountDialog();
+    const fit = findButton("Fit");
+    expect(fit, "适应按钮应已渲染").toBeTruthy();
+    await act(async () => {
+        fit!.click();
+    });
+    // 点完画布还在（重算标尺不该把预览弄没）。
+    expect(document.querySelector("canvas[role=img]")).toBeTruthy();
+});
