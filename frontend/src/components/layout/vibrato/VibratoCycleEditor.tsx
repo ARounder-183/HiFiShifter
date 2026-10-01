@@ -17,6 +17,7 @@ import { readDevicePixelRatio } from "../../../utils/devicePixelLine";
 import { AppButton, useRepeatPress } from "../../../ui";
 import {
     cycleEditorPoint,
+    cycleEditorY,
     paintCycleBin,
     paintCycleSegment,
     smoothCycleTable,
@@ -111,9 +112,9 @@ export function VibratoCycleEditor({
             const muted = tokenColor("--qt-text-muted", "#8a8a8a");
             const divider = tokenColor("--qt-divider", "#3a3a3a");
 
-            const midY = height / 2;
-            const reach = height / 2 - 4;
-            const valueToY = (value: number) => midY - value * reach;
+            // 值 → y 的换算与命中测试共用 `cycleEditorY`（内缩量同源，见其注释）：
+            // 各写一套就会让"看到的峰顶"与"能画到 1.0 的那一行"错开。
+            const valueToY = (value: number) => cycleEditorY(value, height);
 
             // 网格：中线 + 四分线（横），四分位置（纵）。
             ctx.strokeStyle = divider;

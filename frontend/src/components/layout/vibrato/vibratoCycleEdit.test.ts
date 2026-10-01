@@ -3,7 +3,10 @@ import { describe, expect, test } from "vitest";
 import { sampleCycle } from "../../../features/vibrato/vibratoCycle";
 import {
     CYCLE_EDIT_BINS,
+    EDITOR_VALUE_REACH_INSET,
     cycleEditorPoint,
+    cycleEditorY,
+    editorValueReach,
     paintCycleBin,
     paintCycleSegment,
     smoothCycleTable,
@@ -133,5 +136,29 @@ describe("cycleEditorPoint", () => {
         const point = cycleEditorPoint(0, 0, 0, 0, 64);
         expect(Number.isFinite(point.bin)).toBe(true);
         expect(Number.isFinite(point.value)).toBe(true);
+    });
+
+    test("纵轴量程与绘制内缩同源：值 ±1 恰在内缩处", () => {
+        const height = 120;
+        // 峰顶画在离边缘 INSET 处；那里恰好是 1.0。
+        expect(cycleEditorY(1, height)).toBeCloseTo(EDITOR_VALUE_REACH_INSET, 9);
+        expect(cycleEditorY(-1, height)).toBeCloseTo(height - EDITOR_VALUE_REACH_INSET, 9);
+        // 反过来：落在峰顶那一行读到 1.0（旧实现只有 0.93）。
+        expect(cycleEditorPoint(0, EDITOR_VALUE_REACH_INSET, 640, height, 64).value).toBe(1);
+        // 边带内（越过峰顶）钳在 1，不随像素继续上飘。
+        expect(cycleEditorPoint(0, 0, 640, height, 64).value).toBe(1);
+    });
+
+    test("点与 y 互为逆运算", () => {
+        const height = 120;
+        for (const value of [-1, -0.5, 0, 0.5, 1]) {
+            const y = cycleEditorY(value, height);
+            expect(cycleEditorPoint(0, y, 640, height, 64).value).toBeCloseTo(value, 9);
+        }
+    });
+
+    test("退化的纵轴量程保持为正（顶端不会翻转成 -1）", () => {
+        expect(editorValueReach(0)).toBeGreaterThan(0);
+        expect(editorValueReach(1)).toBeGreaterThan(0);
     });
 });

@@ -15,6 +15,29 @@ import type { CycleSource } from "../../../features/vibrato/vibratoTypes";
 /** 手绘表的默认格数（与提取路径同一长度，便于互换）。 */
 export const CYCLE_EDIT_BINS = CYCLE_TABLE_DEFAULT_LEN;
 
+/**
+ * 纵轴上下各留的内缩量（CSS 像素）。
+ *
+ * 【为什么必须与绘制共用】值 `±1` 若正好落在画布上下边缘，1.5px 的描边会被裁掉
+ * 一半，所以绘制把 `±1` 放在离边缘 `INSET` 处。命中测试曾经用整幅高度换算
+ * （`value = 1 - (y/h) * 2`），于是"画出来的峰顶"与"能画到 1.0 的那一行"相差
+ * 约 6.7% —— 用户在看到的峰顶落笔，写进去的却只有 `0.93`。整体缩放的手势映射
+ * （`cycleRightDragTransform`）以这里为基准，偏差会被放大成"拖满一屏不等于
+ * 一个八度"，所以两边必须共用同一个内缩量。
+ */
+export const EDITOR_VALUE_REACH_INSET = 4;
+
+/**
+ * 编辑器纵轴的半量程（值 `±1` 到中线的像素距离）。
+ *
+ * 退化尺寸（高度小于两倍内缩量）下退到 `1e-6` 而不是负数 —— 命测试只要求不产生
+ * `NaN`，负量程会让"顶端为 +1"翻转成"顶端为 −1"。
+ */
+export function editorValueReach(height: number): number {
+    const h = height > 0 ? height : 1;
+    return Math.max(1e-6, h / 2 - EDITOR_VALUE_REACH_INSET);
+}
+
 function clamp(value: number, min: number, max: number): number {
     return Math.min(max, Math.max(min, value));
 }
@@ -93,7 +116,19 @@ export function smoothCycleTable(table: readonly number[]): number[] {
     return out;
 }
 
-/** 画布坐标 →（格号, 值）。顶端是 `+1`，底端是 `-1`。 */
+/** 值 → 画布纵向像素。与 `cycleEditorPoint` 互为逆运算（同一套量程）。 */
+export function cycleEditorY(value: number, height: number): number {
+    const h = height > 0 ? height : 1;
+    return h / 2 - clampValue(value) * editorValueReach(h);
+}
+
+/**
+ * 画布坐标 →（格号, 值）。顶端是 `+1`，底端是 `-1`，量程 = `editorValueReach`。
+ *
+ * 【为什么值要钳制】内缩意味着 `y` 进入上下各 `INSET` 像素的边带时算出来会超过
+ * `±1`；那不是"更响的颤音"，只是指针越过了峰顶。钳住才能让"把波峰拖到顶点"
+ * 稳定地停在 `1.0`，而不是随边带内的像素继续往上飘。
+ */
 export function cycleEditorPoint(
     x: number,
     y: number,
@@ -104,8 +139,9 @@ export function cycleEditorPoint(
     const n = Math.max(1, Math.round(bins));
     const w = width > 0 ? width : 1;
     const h = height > 0 ? height : 1;
+    const reach = editorValueReach(h);
     return {
         bin: clamp(Math.floor((x / w) * n), 0, n - 1),
-        value: clampValue(1 - (y / h) * 2),
+        value: clampValue((h / 2 - y) / reach),
     };
 }
