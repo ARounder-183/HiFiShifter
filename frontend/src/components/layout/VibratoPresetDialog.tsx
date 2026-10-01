@@ -968,6 +968,19 @@ export function VibratoPresetDialog({
                                   autoClose: false,
                                   onClick: () => {
                                       if (!draft) return;
+                                      /*
+                                       * 返回前把未保存的改动落盘。
+                                       *
+                                       * 用户是"改完就去应用"，返回正是他表达"改完了"的方式 ——
+                                       * 在这里丢掉改动，他回到应用弹窗看到的还是旧参数，而
+                                       * 界面刚刚还显示着他改过的值。这与"切换预设时先把改动
+                                       * 写回库"是同一条规矩：**离开这条预设 = 落盘**。
+                                       * （`draftHasUnsavedChanges` 对系统预设恒为 false，
+                                       * 所以只读的那类不会在这里被写库。）
+                                       */
+                                      if (draftHasUnsavedChanges()) {
+                                          persistPreset(sanitizeVibratoPreset(draft));
+                                      }
                                       handleOpenChange(false);
                                       onBackToApply(draft.id);
                                   },

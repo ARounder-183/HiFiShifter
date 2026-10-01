@@ -1258,3 +1258,46 @@ test("未提供 onBackToApply 时没有「返回添加颤音」（菜单栏那�
     );
     expect(labels).not.toContain("Back to Add Vibrato");
 });
+
+/*
+ * 返回添加颤音前，未保存的改动要落盘。
+ *
+ * 【为什么】用户是"改完就去应用"，返回正是他表达"改完了"的方式。若这时把改动丢掉，
+ * 他回到应用弹窗看到的还是旧参数 —— 而界面刚刚还显示着他改过的值。这与"切换预设时
+ * 先把改动写回库"是同一条规矩：离开这条预设 = 落盘。
+ */
+test("返回添加颤音前把未保存的改动落盘", async () => {
+    const custom = sanitizeVibratoPreset({ id: "custom_dirty", name: "Dirty", depthCents: 40 });
+    const onBackToApply = vi.fn();
+    const store = await mountDialog(
+        (s) => {
+            s.dispatch(upsertVibratoPreset(custom));
+            s.dispatch(setActiveVibratoPreset(custom.id));
+        },
+        () => undefined,
+        onBackToApply,
+        custom.id,
+    );
+
+    // 改名字，但不点保存。
+    const nameInput = document.querySelector<HTMLInputElement>('input[aria-label="Preset name"]');
+    expect(nameInput, "名字输入框应已渲染").toBeTruthy();
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    await act(async () => {
+        setter?.call(nameInput, "Renamed");
+        nameInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const back = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Back to Add Vibrato",
+    );
+    await act(async () => {
+        back!.click();
+    });
+
+    const saved = store
+        .getState()
+        .session.vibratoPresets.find((preset) => preset.id === "custom_dirty");
+    expect(saved?.name, "返回时应当把未保存的改动落盘").toBe("Renamed");
+    expect(onBackToApply).toHaveBeenCalledWith("custom_dirty");
+});
