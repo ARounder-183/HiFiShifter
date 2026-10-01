@@ -347,6 +347,16 @@ export interface VibratoAppliedPreview extends VibratoPreviewSamples {
      * 音高起伏撑大；读数要的是"这个预设会摆多少"，只跟包络有关。
      */
     vibratoPeakCents: number;
+    /**
+     * **可信帧**掩码（与 `contour` / `wave` 等长）。
+     *
+     * 【为什么单独交出来】两条线**照画**音符帧（断口只留给真正的气口），但试听是
+     * 合成人声 —— 跟踪器在音符内部给出的异常帧（八度跳、从无声区爬上来的过渡段）
+     * 按原值合成是几十赫兹的超低频，听感上是一声闷响，那不是这段素材的音高。
+     * 试听据此把不可信的帧按最近的音高持续（见 `buildContourAuditionPair`），
+     * 而画面上它们照旧可见（用户要看得见"这里有点怪"）。
+     */
+    stableFrames: boolean[];
 }
 
 /**
@@ -516,6 +526,7 @@ export function buildAppliedPreview(args: {
         contour,
         envelopeCenter,
         vibratoPeakCents: vibratoPeak,
+        stableFrames,
     };
 }
 

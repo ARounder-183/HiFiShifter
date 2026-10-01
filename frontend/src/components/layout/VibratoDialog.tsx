@@ -468,11 +468,9 @@ export function VibratoDialog({
     /** A/B 试听的两条曲线：同一中心、同一基音，差异只来自颤音。 */
     const auditionCurves = useMemo(() => {
         if (!appliedPreview || !original) return null;
-        return buildContourAuditionPair(
-            appliedPreview.contour,
-            appliedPreview.wave,
-            original.framePeriodMs,
-        );
+        // 整包传进去：不可信的帧（八度跳 / 过渡段）由它自己按最近的音高持续 ——
+        // 按原值合成出来是超低频，试听是合成人声，没有"唱 30 Hz"这回事。
+        return buildContourAuditionPair(appliedPreview, original.framePeriodMs);
     }, [appliedPreview, original]);
 
     /**

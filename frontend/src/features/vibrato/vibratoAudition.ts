@@ -19,7 +19,10 @@
  *    静默退出，不把异常抛给调用方 —— 试听是锦上添花，不能因为它报错。
  */
 
-import type { VibratoPreviewSamples } from "../../components/layout/vibrato/vibratoDialogLogic";
+import type {
+    VibratoAppliedPreview,
+    VibratoPreviewSamples,
+} from "../../components/layout/vibrato/vibratoDialogLogic";
 import { DEFAULT_FRAME_PERIOD_MS } from "./vibratoCurve";
 
 /** 试听的基音：C4。 */
@@ -93,7 +96,7 @@ export interface VibratoAuditionPair {
  * 各自减去**同一个**中心，于是听感差异只来自颤音本身；若各减各的中心，基准音高会
  * 差一截，A/B 听到的就不再只是颤音。
  *
- * 【中心取哪】取原参数线**已检测帧**的均值：稳定、对称，且不随预设切换而变 ——
+ * 【中心取哪】取原参数线**可信帧**的均值：稳定、对称，且不随预设切换而变 ——
  * 换预设时基准音高不跳，对比才成立。
  *
  * 【断口怎么处理】未检测帧、以及被剔掉的滑音 / 过渡帧，在这条曲线上都是 NaN。
@@ -101,24 +104,38 @@ export interface VibratoAuditionPair {
  * 掉中心会在气口边界上产生一个几千分的大跳，听感是一声"咔"（实测相邻帧差过 3400 分）。
  * 这也与渲染端对孤立未设置帧的处理一致（`edit_midi_at_time_or_none` 取邻近有效值）。
  *
+ * @param preview 套用预览的采样（原 / 新参数线 + 可信帧掩码）。
+ *   【为什么整包收下而不是收两条数组】可信掩码是这个函数的**必需品**（见下），
+ *   收数组就得让每个调用方自己记得多传一个参数 —— 漏掉它不会报错，只会让试听
+ *   又开始发出超低频。
  * @returns 原参数线不足两点（无数据）时返回 `null`，调用方据此禁用按钮。
  */
 export function buildContourAuditionPair(
-    sourceContour: readonly number[],
-    resultContour: readonly number[],
+    preview: Pick<VibratoAppliedPreview, "contour" | "wave" | "stableFrames">,
     framePeriodMs: number = DEFAULT_FRAME_PERIOD_MS,
 ): VibratoAuditionPair | null {
-    const finite = sourceContour.filter((value) => Number.isFinite(value));
+    const sourceContour = preview.contour;
+    const resultContour = preview.wave;
+    const trusted = preview.stableFrames;
+    const isUsable = (values: readonly number[], index: number) =>
+        Number.isFinite(values[index]) && (!trusted || trusted[index]);
+    const finite = sourceContour.filter((_value, index) => isUsable(sourceContour, index));
     if (finite.length < 2) return null;
     const center = finite.reduce((sum, value) => sum + value, 0) / finite.length;
-    /** 断口保持最近的音符音高（首尾也各自向最近的那个值靠）。 */
+    /**
+     * 断口与**不可信的帧**都保持最近的音高（首尾也各自向最近的那个值靠）。
+     *
+     * 【为什么不可信的帧也要持续】试听是**合成人声**：跟踪器在浊清边界给出的
+     * 20~40 Hz 低估、以及音符内部偶发的八度跳，按原值合成出来是几十赫兹的超低频 ——
+     * 那不是这段素材的音高，听感上是一声闷响。画面上它们照旧画出来（那是数据本身，
+     * 用户要看得见"这里有点怪"），但**耳朵**只该听到音高。
+     */
     const holdNearest = (values: readonly number[]): number[] => {
         const out = new Array<number>(values.length);
-        const first = values.find((value) => Number.isFinite(value));
-        let held = Number.isFinite(first) ? (first as number) : center;
+        const firstIndex = values.findIndex((_value, index) => isUsable(values, index));
+        let held = firstIndex >= 0 ? (values[firstIndex] as number) : center;
         for (let i = 0; i < values.length; i += 1) {
-            const value = values[i];
-            if (Number.isFinite(value)) held = value;
+            if (isUsable(values, i)) held = values[i] as number;
             out[i] = held - center;
         }
         return out;

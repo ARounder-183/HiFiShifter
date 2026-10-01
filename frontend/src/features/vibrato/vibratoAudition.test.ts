@@ -312,11 +312,26 @@ describe("buildContourAuditionPair", () => {
     const baseHz = 440 * Math.pow(2, (AUDITION_BASE_MIDI - 69) / 12);
     const hzAt = (cents: number) => baseHz * Math.pow(2, cents / 1200);
 
+    /**
+     * 造一份"套用预览"：本文件只关心原 / 新两条线与可信掩码，
+     * 其余字段（包络、读数）试听用不到。
+     */
+    const preview = (
+        contour: readonly number[],
+        wave: readonly number[] = contour,
+        stableFrames?: readonly boolean[],
+    ) =>
+        ({
+            contour,
+            wave,
+            stableFrames: stableFrames ?? contour.map(() => true),
+        }) as Parameters<typeof buildContourAuditionPair>[0];
+
     it("两条线共用同一个中心：差异只来自加进去的那部分", () => {
         const source = [6000, 6100, 6200, 6300];
         // 整体抬高 40 分（等价于"加了一点偏置"）。
         const result = source.map((value) => value + 40);
-        const pair = buildContourAuditionPair(source, result, 5);
+        const pair = buildContourAuditionPair(preview(source, result), 5);
         expect(pair).not.toBeNull();
         // 中心 = 6150 → 原线是 ±150 分，新线在此基础上再高 40 分。
         expect(pair!.source.freqHz[0]).toBeCloseTo(hzAt(-150), 4);
@@ -325,7 +340,7 @@ describe("buildContourAuditionPair", () => {
 
     it("断口保持**最近的音符音高**，不掉到中心", () => {
         const values = [Number.NaN, 6000, 6200, Number.NaN];
-        const pair = buildContourAuditionPair(values, values, 5);
+        const pair = buildContourAuditionPair(preview(values), 5);
         // 中心 = 6100：首帧保持第一个音符（6000 → −100 分），末帧保持最后一个（+100 分）。
         expect(pair!.source.freqHz[0]).toBeCloseTo(hzAt(-100), 3);
         expect(pair!.source.freqHz[3]).toBeCloseTo(hzAt(100), 3);
@@ -341,11 +356,7 @@ describe("buildContourAuditionPair", () => {
     it("气口边界不产生大跳（相邻帧差保持在颤音量级）", () => {
         const gap = new Array<number>(20).fill(Number.NaN);
         const note = Array.from({ length: 40 }, (_, i) => 6000 + Math.sin(i / 6) * 40);
-        const pair = buildContourAuditionPair(
-            [...gap, ...note, ...gap],
-            [...gap, ...note, ...gap],
-            5,
-        );
+        const pair = buildContourAuditionPair(preview([...gap, ...note, ...gap]), 5);
         const centsOf = (hz: number) => 1200 * Math.log2(hz / baseHz);
         let maxJump = 0;
         for (let i = 1; i < pair!.source.freqHz.length; i += 1) {
@@ -357,20 +368,57 @@ describe("buildContourAuditionPair", () => {
         expect(maxJump).toBeLessThan(100);
     });
 
+    /*
+     * 报告过的缺陷：试听原参数线时听到"超低频"。
+     *
+     * 根因：试听直接吃画出来的轮廓，而轮廓**照画**音符帧 —— 跟踪器在音符内部给的
+     * 异常段（八度跳、从无声区爬上来的 20~40 Hz 低估）按原值合成出来是几十赫兹的
+     * 闷响。那不是这段素材的音高：试听是合成人声，没有"唱 30 Hz"这回事。
+     *
+     * 修法：不可信的帧（`trusted=false`）与断口一样按最近的音高**持续**。画面上它们
+     * 照旧可见（那是数据本身），但耳朵只听到音高。
+     */
+    it("不可信的帧不发声：不出现几十赫兹的超低频", () => {
+        const note = Array.from({ length: 200 }, (_, i) => 6000 + Math.sin(i / 6) * 40);
+        const contour = [...note];
+        const trusted = note.map(() => true);
+        // 音符内部 40 帧八度跳（MIDI 72 → 相对中心是 +1200 分，反过来则是超低频）。
+        for (let i = 80; i < 120; i += 1) {
+            contour[i] = 2400; // MIDI 24：跟踪器在浊清边界的典型低估
+            trusted[i] = false;
+        }
+
+        const withMask = buildContourAuditionPair(preview(contour, contour, trusted))!;
+        const withoutMask = buildContourAuditionPair(preview(contour))!;
+
+        // 不带掩码：那 40 帧落在 50 Hz 上下（G1 附近）——"超低频"正是这么来的，
+        // 任何歌手都唱不到那里。
+        expect(Math.min(...withoutMask.source.freqHz)).toBeLessThan(60);
+        // 带掩码：全程都在音符自己的音高附近（C4 ± 一点颤音）。
+        expect(Math.min(...withMask.source.freqHz), "不该出现超低频").toBeGreaterThan(200);
+        expect(Math.max(...withMask.source.freqHz)).toBeLessThan(350);
+    });
+
+    it("全部帧都不可信时返回 null（没有可发声的音高）", () => {
+        const contour = new Array<number>(50).fill(3000);
+        const trusted = new Array<boolean>(50).fill(false);
+        expect(buildContourAuditionPair(preview(contour, contour, trusted))).toBeNull();
+    });
+
     it("时长按真实帧周期折算（不是写死的 5ms）", () => {
         const values = [6000, 6100, 6200];
-        expect(buildContourAuditionPair(values, values, 5)!.source.durationSec).toBeCloseTo(
+        expect(buildContourAuditionPair(preview(values), 5)!.source.durationSec).toBeCloseTo(
             0.01,
             9,
         );
-        expect(buildContourAuditionPair(values, values, 10)!.source.durationSec).toBeCloseTo(
+        expect(buildContourAuditionPair(preview(values), 10)!.source.durationSec).toBeCloseTo(
             0.02,
             9,
         );
     });
 
     it("原参数线不足两点时返回 null（调用方据此禁用按钮）", () => {
-        expect(buildContourAuditionPair([Number.NaN, Number.NaN], [1, 2], 5)).toBeNull();
-        expect(buildContourAuditionPair([6000], [6000], 5)).toBeNull();
+        expect(buildContourAuditionPair(preview([Number.NaN, Number.NaN], [1, 2]), 5)).toBeNull();
+        expect(buildContourAuditionPair(preview([6000]), 5)).toBeNull();
     });
 });
