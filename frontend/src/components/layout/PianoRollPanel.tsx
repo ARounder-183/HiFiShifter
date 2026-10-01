@@ -206,7 +206,7 @@ import { pointerOverlayStyle } from "./pointerOverlayStyle";
 import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
 import { buildVibratoCurve } from "../../features/vibrato/vibratoCurve";
 import { extractVibratoPreset } from "../../features/vibrato/vibratoExtract";
-import { resolveVibratoAnchors, suppressUnsetValues } from "../../features/vibrato/vibratoPitch";
+import { planVibratoTarget, suppressNonTargetFrames } from "../../features/vibrato/vibratoPitch";
 import { sanitizeVibratoPreset } from "../../features/vibrato/vibratoPresets";
 import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
 import { upsertVibratoPreset } from "../../features/session/sessionSlice";
@@ -6451,21 +6451,21 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         if (vals.length === 0) return false;
                         const fpMs = Number(payload.frame_period_ms ?? fp) || fp;
                         /*
-                         * 基线锚点取自**已检测帧**，而不是选区首末帧。
+                         * 锚点与"哪些帧可调制"一次规划出来（见 `vibratoPitch.ts`）。
                          *
-                         * pitch 的 0 是"未检测到音高"的哨兵。拿首末帧当锚点时，只要
-                         * 选区两端落在气口 / 静音上（选一整句几乎必然如此），锚点就是
-                         * 0 —— `baseline: "line"` 会据此把整段拉直成 0，中间真实唱出来
-                         * 的音高被整段抹掉。整段都没有已检测帧时没有可调制的对象，放弃。
-                         * 见 `features/vibrato/vibratoPitch.ts`。
+                         * pitch 的 0 是"未检测"哨兵，而浊清边界上还会有**低而非零**的
+                         * 过渡帧（跟踪器给的 20~40 Hz 低估）—— 两类都不是音符。拿首末帧
+                         * 当锚点时，选区两端只要落在气口上（选一整句几乎必然如此），
+                         * `baseline: "line"` 就会把整段拉向那个错值，中间真实唱出来的音高
+                         * 被整段抹掉。整段都没有音符段时没有可调制的对象，放弃。
                          */
-                        const anchors = resolveVibratoAnchors(editParam, vals);
-                        if (!anchors) return false;
+                        const plan = planVibratoTarget(editParam, vals, fpMs);
+                        if (!plan) return false;
                         const built = buildVibratoCurve({
                             startFrame: range.startFrame,
-                            startValue: anchors.startValue,
+                            startValue: plan.anchors.startValue,
                             endFrame: range.startFrame + vals.length - 1,
-                            endValue: anchors.endValue,
+                            endValue: plan.anchors.endValue,
                             original: vals,
                             preset,
                             param: editParam,
@@ -6473,8 +6473,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             range: currentParamRange,
                         });
                         const result = built.dense;
-                        // 哨兵帧还原：未检测音高绝不被物化成一个具体音高（与 dyn 同位）。
-                        suppressUnsetValues(editParam, result, vals);
+                        // 非音符帧写回哨兵（"不改这一帧"，与 dyn 的哨兵还原同位）。
+                        suppressNonTargetFrames(result, plan);
                         // dyn：未画帧写回哨兵（"沿用原声"不被颤音物化）。
                         if (isDynParam(editParam)) {
                             restoreDynSentinels(result, payload.edit_sentinel);

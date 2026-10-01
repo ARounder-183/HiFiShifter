@@ -6,23 +6,37 @@
  * （`paramRanges.clampParamWriteValue`）都以此为准，参数编辑器里每个变换也都遵守
  * 「0 进 0 出」。
  *
- * 【为什么颤音必须单独适配】颤音的基线锚点是**从选区两端读出来的**
- * （`startValue` = 选区首帧、`endValue` = 末帧）。首 / 末帧一旦是未检测帧，锚点就
- * 成了 0：`baseline: "line"` 会把整条选区拉直成 0，中间真实唱出来的音高被整段抹掉。
- * 那不是"颤音加得不对"，是把一段音高删了 —— 而"选中一整句"几乎必然包含句首句尾
- * 的气口 / 静音，所以这是常态而不是边角。
+ * 【为什么颤音必须单独适配】颤音的基线锚点是**从选区两端读出来的**。首 / 末帧
+ * 一旦不是真正的音符，锚点就被它带偏：`baseline: "line"` 会把整条选区拉向那个错值，
+ * 中间真实唱出来的音高被整段抹掉。而"选一整句"几乎必然包含句首句尾的气口，所以
+ * 这是常态而不是边角。
  *
- * 本模块给出「读数据 → 变换 → 写回」要成对使用的三件事：
+ * 【"不是真正的音符"有两种，只判 `== 0` 会漏掉第二种】
  *
- * 1. {@link isUnsetValue} —— 判定某帧是不是哨兵；
- * 2. {@link resolveVibratoAnchors} —— 锚点只从**已检测帧**里取；整段都未检测时返回
- *    `null`（没有可调制的对象，调用方应当放弃，而不是照着一片 0 写出 0）；
- * 3. {@link suppressUnsetValues} —— 写回前把哨兵帧还原成 0，绝不把"未检测"物化成
- *    一个具体音高（那会在气口上凭空造出一个音）。
+ * 1. **未检测**：值为 0。判据是 `> 0`（后端四处一致：`renderer/utils.rs`、
+ *    `pitch_editing.rs::is_voiced_at_time`、`params.rs`、`midi_export.rs`）。
+ * 2. **浊清边界的过渡帧**：音高跟踪器在起声 / 收声处常给出**低而非零**的 f0 估计
+ *    （20~40 Hz → MIDI 15~28）。它们既躲过 `== 0`，又通过写入口的 `1..127`
+ *    合法性检查，于是被当成"正常音高"。只加 `> 0` 也治不了它们。
  *
- * 第 3 件事与 `restoreDynSentinels` 对 dyn 做的是同一件事。区别只在数据来源：dyn
- * 的"未画"是相对基线的，只能靠后端回传的位图识别；pitch 的哨兵就在值本身（0），
- * 从原曲线直接推得出来，因此不需要新增协议字段。
+ * 因此这里不逐帧判断，而是**按音符段**判断，判据取自 MIDI 导出的既有做法
+ * （`commands/midi_export.rs::pitch_curve_to_track_events` 的"候选音符"阶段）：
+ * 一段连续有声帧要**够长**才算一个音符，短抹痕一律不成其为音符。导出那边用它决定
+ * "哪些段值得导成一个 MIDI 音符"，这里用它决定"哪些段值得加颤音" —— 同一个问题的
+ * 两种消费。
+ *
+ * 【刻意不抄导出的两条】导出还会按"跨度超过 1 半音"和"在某个半音上稳定 8 帧"把
+ * 连续段切成多个音符**事件**。那对锚点只有坏处：颤音选区常跨几个音、本身还可能带
+ * 大颤音（摆动幅度轻松超过 1 半音），照抄会把锚点切进颤音内部。
+ *
+ * 【锚点为什么取音符段的代表值（中位数）】音符的**边界帧**恰恰是跟踪器最不可靠的
+ * 地方（起声 / 收声的衰减尾巴就贴着气口）。取代表值，锚点才会稳定落在音符本身上；
+ * 导出侧同样是取中心值（`round((min+max)/2)`）而不是边界采样。一个可见的推论：
+ * `baseline: "line"` 落在**单个**音符上时两端锚点相同，于是把这段拉平到该音符的
+ * 代表音高 —— 这正是"直线"该有的意思（把音高拉直），而不是"跟随音头到音尾"。
+ *
+ * 调用方只需一对函数：{@link planVibratoTarget} 规划落点，
+ * {@link suppressNonTargetFrames} 在写回前把不该动的帧还原成哨兵。
  */
 
 import { PITCH_PARAM_ID } from "./vibratoDepth";
@@ -40,12 +54,45 @@ export function usesUnsetValue(param: string): boolean {
 /**
  * 该帧是否为「未设置」。
  *
- * 非有限值一并算作未设置：静音 / 未分析帧在上游可能以 `NaN` 出现，把它当成一个
- * 具体音高写回去比丢掉它更糟。
+ * 判据是 `> 0` 而不是 `== 0`：后端一律用 `is_finite() && > 0.0` 表示"有音高"
+ * （`renderer/utils.rs` 的插值、`pitch_editing.rs` 的 `is_voiced_at_time`、
+ * `compute_clip_export_pitch_offsets` 的"`≤ 0` 不做修正"），负值与 0 同义。
+ * 非有限值一并算未设置 —— 静音 / 未分析帧在上游可能以 `NaN` 出现。
  */
 export function isUnsetValue(param: string, value: number): boolean {
     if (!usesUnsetValue(param)) return false;
-    return !Number.isFinite(value) || value === 0;
+    return !(Number.isFinite(value) && value > 0);
+}
+
+/**
+ * 连续有声帧要够长才算一个音符（毫秒）。
+ *
+ * ⚠ 与后端 `commands/midi_export.rs::MIN_NOTE_DURATION_MS` 同源（同一套
+ * 前后端常量镜像的惯例，见 `paramRanges.ts` 的 `DYN_FOLLOW_ORIG` ↔
+ * `renderer/common_params.rs`）。改动其一必须同步另一处，否则"导出里有这个音、
+ * 加颤音时却当它不存在"会成为很难归因的不一致。
+ */
+export const MIN_NOTE_MS = 100;
+
+/**
+ * 音高值域（MIDI 半音）。
+ *
+ * ⚠ 与 `PianoRollPanel` 的 `currentParamRange`（音高：`24..108`）一致 —— 那是参数
+ * 编辑器自己认定的"有意义的音高值域"。这一条专治上面第 2 类过渡帧里**持续时间够长**
+ * 的那种：跟踪器把一段 30~40 Hz 的低估坚持上百毫秒时，"够长"这道关拦不住它，但
+ * MIDI 24（C1，32.7 Hz）以下不可能是人声基频，值域这道关能拦。
+ */
+export const PLAUSIBLE_PITCH_MIN = 24;
+export const PLAUSIBLE_PITCH_MAX = 108;
+
+/** 一个音符段。 */
+export interface VibratoNoteRun {
+    /** 起帧（含）。 */
+    startIndex: number;
+    /** 止帧（不含）。 */
+    endIndex: number;
+    /** 该段的稳健代表音高（中位数）。 */
+    pitch: number;
 }
 
 /** 基线锚点：曲线首尾的**有效**值。 */
@@ -55,53 +102,110 @@ export interface VibratoAnchors {
 }
 
 /**
- * 取基线锚点。
+ * 一次颤音套用的目标规划。
  *
- * - 非哨兵参数：与既有行为逐字一致（首帧 / 末帧）；
- * - 哨兵参数：取**已检测帧**里的首值与末值；一段都没有时返回 `null`。
- *
- * 【为什么只换锚点就够】`buildVibratoCurve` 的 `line` / `holdStart` / `holdEnd` /
- * `average` 四种基线全部由这两个值决定（`average` 是两端均值）；把它们换成已检测帧的
- * 端点，四种模式就同时正确了，不需要在曲线内核里再开一条按参数分岔的路径。
- * `existing` 模式逐帧读原曲线，本来就与锚点无关。
- *
- * 【只有首末两帧未检测时也正确吗】是。中间已检测的帧仍落在正确的直线上；首尾那些
- * 未检测帧的取值随后由 {@link suppressUnsetValues} 还原成哨兵，不会写出直线在端点
- * 外的外推值。
+ * 【为什么要连掩码一起给】锚点回答"基线摆在哪"，掩码回答"哪些帧该被改写"。
+ * 两者必须出自**同一次**音符段切分，否则会出现"按音符 A 的锚点画线、却把线写进
+ * 不是音符的帧里"这种自相矛盾的结果。
  */
-export function resolveVibratoAnchors(
+export interface VibratoTargetPlan {
+    anchors: VibratoAnchors;
+    /** 与 `values` 等长；`true` = 这一帧参与颤音。 */
+    modulatable: boolean[];
+}
+
+/** 该帧是否"像个音符"：有音高，且落在有意义的音高值域内。 */
+function isNoteFrame(param: string, value: number): boolean {
+    if (isUnsetValue(param, value)) return false;
+    return value >= PLAUSIBLE_PITCH_MIN && value <= PLAUSIBLE_PITCH_MAX;
+}
+
+/** 中位数（稳健代表值：抗边界衰减尾巴，也抗单帧离群）。 */
+function medianOf(values: readonly number[], start: number, end: number): number {
+    const slice = values.slice(start, end).sort((a, b) => a - b);
+    const mid = slice.length >> 1;
+    return slice.length % 2 === 1 ? slice[mid] : (slice[mid - 1] + slice[mid]) / 2;
+}
+
+/** 切出音符段（只对哨兵参数有意义）。 */
+function noteRuns(
     param: string,
     values: readonly number[],
-): VibratoAnchors | null {
-    if (values.length === 0) return null;
-    if (!usesUnsetValue(param)) {
-        return { startValue: values[0], endValue: values[values.length - 1] };
-    }
-    let first = -1;
-    let last = -1;
+    framePeriodMs: number,
+): VibratoNoteRun[] {
+    const fp = Number.isFinite(framePeriodMs) && framePeriodMs > 0 ? framePeriodMs : 5;
+    // 门槛按**实际帧周期**折算，不写死帧数：帧周期是可配的（默认 5ms → 20 帧）。
+    const minFrames = Math.max(1, Math.round(MIN_NOTE_MS / fp));
+    const runs: VibratoNoteRun[] = [];
+    let start = -1;
+    const flush = (end: number) => {
+        if (start < 0) return;
+        if (end - start >= minFrames) {
+            runs.push({ startIndex: start, endIndex: end, pitch: medianOf(values, start, end) });
+        }
+        start = -1;
+    };
     for (let i = 0; i < values.length; i += 1) {
-        if (isUnsetValue(param, values[i])) continue;
-        if (first < 0) first = i;
-        last = i;
+        if (isNoteFrame(param, values[i])) {
+            if (start < 0) start = i;
+        } else {
+            flush(i);
+        }
     }
-    if (first < 0) return null;
-    return { startValue: values[first], endValue: values[last] };
+    flush(values.length);
+    return runs;
 }
 
 /**
- * 把「未设置」帧还原成哨兵（**就地**修改 `result`；与 `original` 按较短者对齐）。
+ * 规划一次颤音的落点。
  *
- * 幂等：对已经还原过的结果再调用一次不会变。调用时机是"变换之后、写回之前" ——
- * 与 dyn 的 `restoreDynSentinels` 完全同位。
+ * - 非哨兵参数：整段都可调制，锚点 = 首末帧（与既有行为逐字一致）；
+ * - 音高：只有**音符帧**可调制；锚点 = 首 / 末个音符段的稳健代表值。
+ *
+ * @returns 没有任何音符段时 `null` —— 没有可调制的对象，调用方应当放弃，
+ *          而不是照着一片 0 写出 0（那会把气口当成"要加颤音的音高"）。
  */
-export function suppressUnsetValues(
+export function planVibratoTarget(
     param: string,
-    result: number[],
-    original: readonly number[],
-): void {
-    if (!usesUnsetValue(param)) return;
-    const count = Math.min(result.length, original.length);
+    values: readonly number[],
+    framePeriodMs: number,
+): VibratoTargetPlan | null {
+    if (values.length === 0) return null;
+
+    if (!usesUnsetValue(param)) {
+        return {
+            anchors: { startValue: values[0], endValue: values[values.length - 1] },
+            modulatable: new Array<boolean>(values.length).fill(true),
+        };
+    }
+
+    const runs = noteRuns(param, values, framePeriodMs);
+    if (runs.length === 0) return null;
+
+    const modulatable = new Array<boolean>(values.length).fill(false);
+    for (const run of runs) {
+        for (let i = run.startIndex; i < run.endIndex; i += 1) modulatable[i] = true;
+    }
+    return {
+        anchors: { startValue: runs[0].pitch, endValue: runs[runs.length - 1].pitch },
+        modulatable,
+    };
+}
+
+/**
+ * 把「不受颤音影响」的帧写回 0（**就地**修改 `result`；按较短者与掩码对齐）。
+ *
+ * 【为什么写 0 就是"不改这一帧"】后端读侧对 pitch 有 `e_raw == 0 && o != 0 → o`
+ * 的折叠，渲染侧 `edit_midi_at_time_or_none` 对整段未设置的帧也回落到原曲线 ——
+ * 所以 0 的含义是"这一帧不做编辑"，不是"把音高删掉"。这与
+ * `compute_clip_export_pitch_offsets` 的"`≤ 0` 的帧一律不做音高修正、**不得用邻近
+ * 帧桥接**"是同一条规则，也与这个仓库里其它每个变换的"0 进 0 出"一致。
+ *
+ * 幂等：对已经还原过的结果再调用一次不会变。调用时机是"变换之后、写回之前"。
+ */
+export function suppressNonTargetFrames(result: number[], plan: VibratoTargetPlan): void {
+    const count = Math.min(result.length, plan.modulatable.length);
     for (let i = 0; i < count; i += 1) {
-        if (isUnsetValue(param, original[i])) result[i] = 0;
+        if (!plan.modulatable[i]) result[i] = 0;
     }
 }

@@ -2023,7 +2023,7 @@ export const jaJP = {
     vibrato_apply_presets: "プリセット",
     vibrato_apply_preview: "選択範囲に適用",
     vibrato_apply_preview_empty: "範囲を選択すると結果をプレビューできます。",
-    vibrato_apply_preview_no_pitch: "この範囲にはピッチが検出されていません。",
+    vibrato_apply_preview_no_pitch: "この範囲にビブラートをかけられるピッチがありません。",
     vibrato_apply_save_preset: "この調整をプリセットにも保存",
     vibrato_apply_apply: "適用",
     vibrato_extract_action: "選択範囲からビブラートプリセットを作成...",

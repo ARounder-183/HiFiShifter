@@ -1951,7 +1951,7 @@ export const zhCN = {
     vibrato_apply_presets: "预设",
     vibrato_apply_preview: "套用到选区",
     vibrato_apply_preview_empty: "选中一段后可在此预览效果。",
-    vibrato_apply_preview_no_pitch: "这段选区没有检测到音高。",
+    vibrato_apply_preview_no_pitch: "这段选区里没有可加颤音的音高。",
     vibrato_apply_save_preset: "同时把这些调整保存到预设",
     vibrato_apply_apply: "应用",
     vibrato_extract_action: "从选区提取颤音预设...",

@@ -204,18 +204,39 @@ test("无选区数据时显示占位提示而不是空画布", async () => {
 });
 
 /*
- * 音高全未检测：说清原因，而不是复用"选一段"那句提示。
+ * 音高不可调制：说清原因，而不是复用"选一段"那句提示。
  *
- * 【为什么值得测】音高参数里 0 = 未检测。若沿用同一句"选中一段后可在此预览效果"，
- * 用户会以为是自己没选对区域，反复重选 —— 而真正的原因是这段里没有音高可调。
- * 同时必须没有画布：一条"平在 0"的曲线会被读成"结果把音高拉平了"。
+ * 【为什么值得测】音高参数里 0 = 未检测；此外浊清边界上还有"低而非零"的过渡帧，
+ * 以及短得不成其为音符的碎片（见 `vibratoPitch.ts`）。若沿用同一句"选中一段后可在此
+ * 预览效果"，用户会以为是自己没选对区域，反复重选 —— 而真正的原因是这段里没有可
+ * 加颤音的音高。同时必须没有画布：一条"平在 0"的曲线会被读成"结果把音高拉平了"。
  */
-test("音高全未检测时：说明没有可调制的音高，且不画曲线", async () => {
+test("音高不可调制时（未检测 / 没有够长的音符）：说明原因，且不画曲线", async () => {
+    // 整段未检测。
     await mountDialog({
         loadOriginal: () => Promise.resolve({ values: [0, 0, 0, 0], framePeriodMs: 5 }),
     });
     expect(document.querySelector("canvas[role=img]")).toBeNull();
-    const text = document.body.textContent ?? "";
-    expect(text).toContain("No pitch detected");
-    expect(text).not.toContain("Select a range");
+    expect(document.body.textContent ?? "").toContain("No pitch to apply vibrato to");
+    expect(document.body.textContent ?? "").not.toContain("Select a range");
+});
+
+test("音高有值但短得不成音符时，同样给出原因而不是画一条直线", async () => {
+    // 3 帧（15ms）的真实音高夹在气口之间 —— 够不上 `MIN_NOTE_MS` 的门槛。
+    await mountDialog({
+        loadOriginal: () =>
+            Promise.resolve({
+                values: [
+                    ...new Array<number>(10).fill(0),
+                    60,
+                    61,
+                    62,
+                    ...new Array<number>(10).fill(0),
+                ],
+                framePeriodMs: 5,
+            }),
+    });
+    expect(document.querySelector("canvas[role=img]")).toBeNull();
+    expect(document.body.textContent ?? "").toContain("No pitch to apply vibrato to");
+    expect(document.body.textContent ?? "").not.toContain("Select a range");
 });

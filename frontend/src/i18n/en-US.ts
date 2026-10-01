@@ -2008,7 +2008,7 @@ export const enUS = {
     vibrato_apply_presets: "Preset",
     vibrato_apply_preview: "Applied to selection",
     vibrato_apply_preview_empty: "Select a range to preview the result.",
-    vibrato_apply_preview_no_pitch: "No pitch detected in this range.",
+    vibrato_apply_preview_no_pitch: "No pitch to apply vibrato to in this range.",
     vibrato_apply_save_preset: "Also save these tweaks to the preset",
     vibrato_apply_apply: "Apply",
     vibrato_extract_action: "Create vibrato preset from selection...",

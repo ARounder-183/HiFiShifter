@@ -408,14 +408,35 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
     });
 
     /*
-     * 本组最重要的一条：选区首尾落在气口上时，锚点绝不能取哨兵 0。
+     * 本组最重要的一条：选区首尾落在气口上时，锚点绝不能取哨兵 0，也不能取到
+     * 浊清边界上"低而非零"的过渡帧。
      *
-     * 旧实现取首末帧当锚点（`baseline: "line"` 于是把整段拉直成 0），中间真实唱出来
-     * 的音高被整段抹掉 —— 用户看到的就是"加了个颤音，音高全没了"。
+     * 判据不是逐帧的（`> 0` 只挡住第一类），而是**按音符段**：一段连续有声帧要够长
+     * （`MIN_NOTE_MS`）且落在音高值域内才算一个音符。见 `vibratoPitch.ts`。
      */
-    describe("音高哨兵（0 = 未检测）", () => {
-        // 两头气口（0）、中间一句真实音高的唱段（C4 → E4）。
-        const withGaps = [0, 0, 0, 60, 61, 62, 63, 64, 0, 0];
+    describe("音高哨兵与音符段", () => {
+        /*
+         * 报告场景：两头气口（0），紧挨气口还有 5 帧**低而非零**的过渡帧
+         * （音高跟踪器在浊清边界给出的 20~40 Hz 低估 → MIDI 3~22），中间是一句真实
+         * 音高的唱段（C4 → E4，300ms）。
+         *
+         * 旧实现取首末帧当锚点（锚到 0），再往前的实现取首个非零帧（锚到 3）——
+         * 两者都会把中间真实唱出来的音高拖向那个错值。
+         */
+        const GAP = 20;
+        const BLIP = [3, 8, 15, 20, 22];
+        const NOTE_LEN = 60;
+        const noteStart = GAP + BLIP.length;
+        const noteEnd = noteStart + NOTE_LEN;
+        const withGaps = [
+            ...new Array<number>(GAP).fill(0),
+            ...BLIP,
+            ...Array.from({ length: NOTE_LEN }, (_, i) => 60 + (i / (NOTE_LEN - 1)) * 4),
+            ...new Array<number>(GAP).fill(0),
+        ];
+        /** 音符段的代表音高（60..64 的中位数）。 */
+        const NOTE_PITCH = 62;
+
         const line = sanitizeVibratoPreset({
             id: "custom_line",
             depthCents: 0,
@@ -425,42 +446,45 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             baseline: "line",
         });
 
-        test("首尾未检测不再把整段拉平：锚点取自中间的已检测帧", () => {
+        test("边界过渡帧不再把整段拉平：锚点是音符本身", () => {
             const preview = buildAppliedPreview({
                 preset: line,
                 original: withGaps,
                 param: "pitch",
                 framePeriodMs: 5,
             })!;
-            const voiced = [3, 4, 5, 6, 7].map((i) => preview.wave[i]);
-            // 关键断言：已检测帧仍在中心附近（几百 cents 之内）。
-            // 旧实现把锚点取成哨兵 0，这几帧会变成 (0 − 6200) ≈ −6200 分。
-            for (const value of voiced) expect(Math.abs(value)).toBeLessThan(1000);
-            // 而且原来的上行运动被保留，没有被拉成一条平线。
-            for (let k = 1; k < voiced.length; k += 1) {
-                expect(voiced[k]).toBeGreaterThan(voiced[k - 1]);
+            // 直线预设把选区拉直成一条线，而这条线现在锚在**音符**上：
+            // 结果 = 音符的代表音高，于是音符帧相对中心恰好是 0 分。
+            for (let i = noteStart; i < noteEnd; i += 1) {
+                expect(preview.wave[i]).toBeCloseTo(0, 6);
             }
+            // 反面对照：若锚点仍取到哨兵 0（或边界上的 3/8/15），这几帧会是
+            // (0 − 6200) ≈ −6200 分，而不是 0。
+            expect(Math.abs(preview.wave[noteStart])).toBeLessThan(1000);
         });
 
-        test("未检测帧画成断口（NaN），且不参与中心与峰值", () => {
+        test("不受颤音影响的帧画成断口（NaN），且不参与中心与峰值", () => {
             const preview = buildAppliedPreview({
                 preset: line,
                 original: withGaps,
                 param: "pitch",
                 framePeriodMs: 5,
             })!;
-            for (const i of [0, 1, 2, 8, 9]) {
+            // 气口与边界过渡帧都要断开 —— 后者是"低而非零"，只判 == 0 会漏掉。
+            for (let i = 0; i < noteStart; i += 1) {
                 expect(Number.isNaN(preview.wave[i])).toBe(true);
                 expect(Number.isNaN(preview.original[i])).toBe(true);
             }
-            // 中心只按已检测帧求：60..64 半音 → 6200 分。若把两个 0 也算进去，
-            // 中心会被拽到 4640 分，画出来的颤音直接出画。
-            expect(preview.original[3]).toBeCloseTo(6000 - 6200, 6);
-            // 峰值不因断口爆掉。
+            for (let i = noteEnd; i < withGaps.length; i += 1) {
+                expect(Number.isNaN(preview.wave[i])).toBe(true);
+            }
+            // 中心只按音符帧求：60..64 半音 → 6200 分。若把哨兵 0 与那 5 帧低值也算
+            // 进去，中心会被拽下上千分，画出来的颤音直接出画。
+            expect(preview.original[noteStart]).toBeCloseTo(6000 - NOTE_PITCH * 100, 6);
             expect(preview.peakCents).toBeLessThan(500);
         });
 
-        test("未检测帧的包络也是断口（不在气口上画出一条颤音带）", () => {
+        test("不受颤音影响的帧，包络也是断口（不在气口上画出一条颤音带）", () => {
             const deep = sanitizeVibratoPreset({
                 id: "custom_deep",
                 depthCents: 40,
@@ -476,10 +500,12 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
                 framePeriodMs: 5,
             })!;
             expect(Number.isNaN(preview.envelope[0])).toBe(true);
-            expect(Number.isFinite(preview.envelope[5])).toBe(true);
+            expect(Number.isNaN(preview.envelope[GAP])).toBe(true);
+            expect(Number.isFinite(preview.envelope[noteStart])).toBe(true);
         });
 
-        test("整段都未检测：没有可调制的对象，返回 null", () => {
+        test("没有够长的音符段：没有可调制的对象，返回 null", () => {
+            // 整段未检测（含非有限值混排）。
             expect(
                 buildAppliedPreview({
                     preset: line,
@@ -488,11 +514,25 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
                     framePeriodMs: 5,
                 }),
             ).toBeNull();
-            // 非有限值一并算作未检测。
             expect(
                 buildAppliedPreview({
                     preset: line,
                     original: [Number.NaN, 0, Number.NaN],
+                    param: "pitch",
+                    framePeriodMs: 5,
+                }),
+            ).toBeNull();
+            // 有音高但只有 3 帧（15ms）—— 够不上一个音符。
+            expect(
+                buildAppliedPreview({
+                    preset: line,
+                    original: [
+                        ...new Array<number>(10).fill(0),
+                        60,
+                        61,
+                        62,
+                        ...new Array<number>(10).fill(0),
+                    ],
                     param: "pitch",
                     framePeriodMs: 5,
                 }),

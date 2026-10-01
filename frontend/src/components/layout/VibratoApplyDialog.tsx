@@ -26,7 +26,7 @@ import {
     sanitizeVibratoPreset,
 } from "../../features/vibrato/vibratoPresets";
 import { depthStepUnitFor } from "../../features/vibrato/vibratoDepth";
-import { resolveVibratoAnchors } from "../../features/vibrato/vibratoPitch";
+import { planVibratoTarget } from "../../features/vibrato/vibratoPitch";
 import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
 import { AppDialog, AppField, AppListRow, AppNumberField, AppSwitchRow } from "../../ui";
 import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
@@ -121,20 +121,21 @@ export function VibratoApplyDialog({
     const isBuiltin = draft ? isBuiltinVibratoPresetId(draft.id) : false;
     const depthUnit = depthStepUnitFor(editParam);
     /**
-     * 选区里**一段已检测音高都没有**。
+     * 选区里**没有可调制的音符段**。
      *
-     * 音高参数下这意味着无从调制：预览为空，应用也不会改动任何帧（提交侧对每个
-     * 选区段各自判定，见 `vibratoPitch.resolveVibratoAnchors`）。这里只负责把
-     * "为什么没有预览"说清楚 —— 把"没数据"和"未检测到音高"混成同一句提示，用户
-     * 会以为是自己没选对区域。
+     * 音高参数下这意味着无从调制：值为 0 的未检测帧、以及浊清边界上低而非零的过渡帧
+     * （跟踪器给的 20~40 Hz 低估）都不是音符；连续有声帧还要够长（见
+     * `vibratoPitch.ts`）。预览为空，应用也不会改动任何帧 —— 提交侧对每个选区段
+     * 各自判定。这里只负责把"为什么没有预览"说清楚：把"没数据"和"这段没有音高"
+     * 混成同一句提示，用户会以为是自己没选对区域。
      *
      * 【为什么不在这里禁用「应用」】预览只取**第一个**选区段；多选区时其余段可能
-     * 有音高，按第一段禁用会把本来能应用的选区挡掉。
+     * 有音符，按第一段禁用会把本来能应用的选区挡掉。
      */
     const unvoicedPitch =
         editParam === "pitch" &&
         original !== null &&
-        resolveVibratoAnchors(editParam, original.values) === null;
+        planVibratoTarget(editParam, original.values, original.framePeriodMs) === null;
 
     const patch = (partial: Partial<VibratoPreset>) =>
         setDraft((current) => (current ? { ...current, ...partial } : current));
