@@ -553,6 +553,76 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
         });
     });
 
+    /*
+     * 纵轴定标：必须跟着**颤音自己的幅度**走，而不是跟着音高轮廓的宽度走。
+     *
+     * 【这条锁的是报告过的缺陷】纵轴按峰值自适应。旧实现画的是"相对选区均值的绝对
+     * 音高"，于是纵轴得容下整条音高轮廓 —— 一段 40→60 的过渡斜坡（跟踪器在浊清边界
+     * 的缓升）就把峰值撑到 1840 分，40 分的颤音只剩不到 2% 的画布高度，用户完全看不
+     * 出颤音趋势。改成"相对基线的偏移"作图后，峰值恒等于颤音幅度。
+     */
+    describe("纵轴按颤音幅度定标", () => {
+        const deep = sanitizeVibratoPreset({
+            id: "custom_axis",
+            depthCents: 40,
+            rateHz: 5.5,
+            attackMs: 0,
+            releaseMs: 0,
+            baseline: "existing",
+        });
+        const finite = (values: number[]) => values.filter(Number.isFinite);
+
+        /** 稳定长音：没有轮廓可言。 */
+        const steadyNote = [
+            ...new Array<number>(100).fill(0),
+            ...new Array<number>(300).fill(60),
+            ...new Array<number>(100).fill(0),
+        ];
+        /** 同样的长音，但前面挂一段 40→60 的缓升（帧数与 `steadyNote` 一致）。 */
+        const rampedNote = [
+            ...new Array<number>(100).fill(0),
+            ...Array.from({ length: 60 }, (_, i) => 40 + (i / 59) * 20),
+            ...new Array<number>(240).fill(60),
+            ...new Array<number>(100).fill(0),
+        ];
+
+        test("素材轮廓再宽也不压缩颤音：峰值恒等于深度", () => {
+            const a = buildAppliedPreview({
+                preset: deep,
+                original: steadyNote,
+                param: "pitch",
+                framePeriodMs: 5,
+            })!;
+            const b = buildAppliedPreview({
+                preset: deep,
+                original: rampedNote,
+                param: "pitch",
+                framePeriodMs: 5,
+            })!;
+            // 两种素材下的峰值都应当 ≈ 40 分，而不是被那段缓升撑到上千。
+            for (const preview of [a, b]) {
+                expect(preview.peakCents).toBeGreaterThan(38);
+                expect(preview.peakCents).toBeLessThan(42);
+            }
+            // 轮廓的有无完全不影响纵轴 —— 这正是"看得清颤音"的前提。
+            expect(b.peakCents).toBeCloseTo(a.peakCents, 9);
+        });
+
+        test("existing 基线就是原曲线本身：参考线恒为 0，实线即颤音偏移", () => {
+            const preview = buildAppliedPreview({
+                preset: deep,
+                original: rampedNote,
+                param: "pitch",
+                framePeriodMs: 5,
+            })!;
+            for (const value of finite(preview.original)) {
+                expect(Math.abs(value)).toBeLessThan(1e-9);
+            }
+            const peak = Math.max(...finite(preview.wave).map(Math.abs));
+            expect(peak).toBeCloseTo(preview.peakCents, 9);
+        });
+    });
+
     test("乘性参数（dyn）也给出可辨的偏离（换算到分后仍围绕中心）", () => {
         const dyn = Array.from({ length: 120 }, () => 80);
         const preview = buildAppliedPreview({

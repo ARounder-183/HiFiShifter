@@ -327,13 +327,15 @@ export interface VibratoAppliedPreview extends VibratoPreviewSamples {
  *
  * 【与管理器预览的区别】管理器预览拿 `buildVibratoPreview`（无原曲线、基线强制
  * `line`），回答"波形长什么样"；这里喂入选区的**真实帧值**，走同一条
- * `buildVibratoCurve`，回答"套到这段上长什么样" —— 原曲线被保留（`baseline:
- * "existing"`）还是被拉直，一眼可见。
+ * `buildVibratoCurve`，回答"套到这段上长什么样" —— 原曲线相对基线的偏移、以及
+ * 结果相对基线的偏移，两条线并置。
  *
- * 两条曲线都换算成 cents 并减去原曲线均值再画：否则音高上整段的上行运动会把
- * 颤音挤出画面（绝对值域是几十个半音）。减中心之后"摆动"始终居中可辨。
+ * 【纵轴为什么按基线而不是按选区均值】见函数体内那段注释：按均值作图时纵轴必须
+ * 容下整条音高轮廓，一段过渡斜坡就能把 40 分的颤音压到不足 2% 的画布高度。按基线
+ * 作图后纵轴只跟颤音自己的幅度走，与素材轮廓多宽无关。
  *
- * @returns 原值不足两点（无数据）时返回 `null`，由调用方显示占位提示。
+ * @returns 没有可调制的音符段（音高全未检测 / 没有够长的音符）或原值不足两点时
+ *          返回 `null`，由调用方显示占位提示。
  */
 export function buildAppliedPreview(args: {
     preset: VibratoPreset;
@@ -372,38 +374,41 @@ export function buildAppliedPreview(args: {
         framePeriodMs,
         range: args.range,
         collectEnvelope: true,
+        // 基线要一并拿回来：下面按"相对基线的偏移"作图（见下）。
+        collectBaseline: true,
     });
     // 非音符帧写回哨兵：它们不受颤音影响（"不改这一帧"，与落盘侧同一语义）。
     suppressNonTargetFrames(result.dense, plan);
 
     const toCents = (value: number) => paramUnitToDepth(value, args.param, args.range);
     /*
-     * 中心只按**可调制帧**求。
+     * 两条曲线都画成**相对基线的偏移**，而不是相对选区均值的绝对音高。
      *
-     * 把哨兵帧当成 0 参与平均，会把中心整体拽下几十个半音（真实音高在 MIDI 60
-     * 附近，而哨兵是 0），画出来的颤音随之被挤出画面或压成一条直线 —— 与锚点那个
-     * bug 是同一个根的两种表现。
+     * 【为什么必须这样】纵轴是按峰值自适应的。若画绝对音高，纵轴就必须容下整条
+     * 音高轮廓 —— 而"轮廓有多宽"与"颤音有多深"是两个量级：一段 40→60 的过渡斜坡
+     * 会把纵轴撑到两千多分，40 分的颤音只剩不到 2% 的画布高度，用户根本看不出颤音
+     * 趋势（这正是要修的问题）。相对基线作图之后：
+     *
+     * - `existing` 基线（除「直线」外所有预设）下基线**就是**原曲线，于是虚线恒为 0，
+     *   实线就是颤音本身的偏移量，幅度上界即包络 —— 纵轴自动贴合颤音；
+     * - `line` / `hold*` / `average` 下，虚线显示原曲线偏离所选基线多少（那正是这类
+     *   预设会改动音高的量），实线 = 该偏离 + 颤音，两者同轴同零点，都不撒谎。
+     *
+     * 于是"能不能看清颤音"不再取决于素材的轮廓宽度，而只取决于颤音自己的幅度。
      */
-    const originalCents = values.map(toCents);
-    let centerSum = 0;
-    let centerCount = 0;
-    for (let i = 0; i < originalCents.length; i += 1) {
-        if (!plan.modulatable[i]) continue;
-        centerSum += originalCents[i];
-        centerCount += 1;
-    }
-    const center = centerCount > 0 ? centerSum / centerCount : 0;
+    const baselineCents = (result.baseline ?? values).map(toCents);
+    const centsAt = (index: number, value: number) => toCents(value) - baselineCents[index];
 
     /*
      * 不受颤音影响的帧画成**断口**（NaN，画布抬笔）：它既不是一个音高，也不是
      * "停在中心"。让两种含义在图上可区分，用户才不会把"这里没数据 / 这里不加颤音"
      * 读成"这里被拉平了"。
      */
-    const original = originalCents.map((value, index) =>
-        plan.modulatable[index] ? value - center : Number.NaN,
+    const original = values.map((value, index) =>
+        plan.modulatable[index] ? centsAt(index, value) : Number.NaN,
     );
     const wave = result.dense.map((value, index) =>
-        plan.modulatable[index] ? toCents(value) - center : Number.NaN,
+        plan.modulatable[index] ? centsAt(index, value) : Number.NaN,
     );
     const envelope = (result.envelope ?? new Array(values.length).fill(0)).map((value, index) =>
         plan.modulatable[index] ? Math.abs(value) : Number.NaN,
