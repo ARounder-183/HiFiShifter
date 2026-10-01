@@ -323,12 +323,38 @@ describe("buildContourAuditionPair", () => {
         expect(pair!.result.freqHz[0]).toBeCloseTo(hzAt(-110), 4);
     });
 
-    it("断口按中心音高持续（合成音没有「没有音高」可言）", () => {
+    it("断口保持**最近的音符音高**，不掉到中心", () => {
         const values = [Number.NaN, 6000, 6200, Number.NaN];
         const pair = buildContourAuditionPair(values, values, 5);
-        // `freqHz` 是 Float32Array：比较精度按单精度来（下同）。
-        expect(pair!.source.freqHz[0]).toBeCloseTo(baseHz, 3);
-        expect(pair!.source.freqHz[3]).toBeCloseTo(baseHz, 3);
+        // 中心 = 6100：首帧保持第一个音符（6000 → −100 分），末帧保持最后一个（+100 分）。
+        expect(pair!.source.freqHz[0]).toBeCloseTo(hzAt(-100), 3);
+        expect(pair!.source.freqHz[3]).toBeCloseTo(hzAt(100), 3);
+    });
+
+    /*
+     * 报告过的缺陷：选区含气口 / 过渡帧时，试听原参数线会"咔"一声。
+     *
+     * 旧实现把断口映射到**中心**音高，于是边界上相邻两帧能差三千多分（实测 3424 分），
+     * 听感是爆音而不是音高。断口改为保持最近音符音高之后，相邻帧的变化只应来自颤音本身
+     * （±40 分 / 6 Hz ≈ 每帧 8 分）。
+     */
+    it("气口边界不产生大跳（相邻帧差保持在颤音量级）", () => {
+        const gap = new Array<number>(20).fill(Number.NaN);
+        const note = Array.from({ length: 40 }, (_, i) => 6000 + Math.sin(i / 6) * 40);
+        const pair = buildContourAuditionPair(
+            [...gap, ...note, ...gap],
+            [...gap, ...note, ...gap],
+            5,
+        );
+        const centsOf = (hz: number) => 1200 * Math.log2(hz / baseHz);
+        let maxJump = 0;
+        for (let i = 1; i < pair!.source.freqHz.length; i += 1) {
+            maxJump = Math.max(
+                maxJump,
+                Math.abs(centsOf(pair!.source.freqHz[i]) - centsOf(pair!.source.freqHz[i - 1])),
+            );
+        }
+        expect(maxJump).toBeLessThan(100);
     });
 
     it("时长按真实帧周期折算（不是写死的 5ms）", () => {

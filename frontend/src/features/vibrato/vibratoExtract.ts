@@ -17,7 +17,12 @@
 import { smoothCurveGaussian } from "../../components/layout/pianoRoll/paramSmoothing";
 import { CYCLE_TABLE_DEFAULT_LEN } from "./vibratoCycle";
 import { depthFamilyOf, fallbackRangeFor, PITCH_PARAM_ID } from "./vibratoDepth";
-import { usesUnsetValue, vibratoNoteRuns, type VibratoNoteRun } from "./vibratoPitch";
+import {
+    refineNoteFrames,
+    usesUnsetValue,
+    vibratoNoteRuns,
+    type VibratoNoteRun,
+} from "./vibratoPitch";
 import { createVibratoPresetId } from "./vibratoPresets";
 import { vibratoSeedForPreset } from "./vibratoSeed";
 import type { VibratoParamRange } from "./vibratoDepth";
@@ -222,70 +227,29 @@ function detrend(values: readonly number[], framePeriodMs: number): number[] {
 }
 
 /**
- * 拟合前的输入准备：把**不是音符**的帧标成"无数据"，并给出逐帧权重。
+ * 把**不是音符**的帧标成"无数据"（`NaN`）。
  *
- * 【为什么必须跳过】音高参数里 0 是"未检测"哨兵，浊清边界上还有跟踪器给的**低而非零**
- * 过渡帧（见 `vibratoPitch.ts`）。它们既不是音高也不是噪声：直接参与拟合会把去趋势
- * 拉偏、把 RMS 抬成几十个半音的假深度、把折叠出的周期表冲平 —— 提取出的预设于是
- * 又深又乱，用户完全无法用。
- *
- * 【为什么标成 NaN 而不是删掉或插值】周期估计靠自相关，它要求**等间隔采样**：删帧
+ * 【为什么标 NaN 而不是删掉或插值】周期估计靠自相关，它要求**等间隔采样**：删帧
  * 之后"滞后 k 个样本"不再等于"k 帧"，测出的周期直接失去意义。插值补洞同样不行 ——
  * 补出来的直线与真实音高之间的落差会被去趋势放大成上千分的假残差（试过，周期估计
- * 因此彻底失效）。标成 NaN 让趋势拟合**跳过**这些帧（`valueFilter`），残差在那里记 0，
- * 于是它对自相关是中性项、对统计量被 `trusted` 掩码排除：全链路没有一处需要伪造数据。
+ * 因此彻底失效）。标成 NaN 之后：趋势拟合跳过它们（`valueFilter`），残差在那里记 0，
+ * 于是对自相关是中性项、对统计量被掩码排除 —— 全链路没有一处需要伪造数据。
  *
- * @param runs 可信段。`null` = **整段都可信**（非哨兵参数没有音符概念，也不该走这条路）。
+ * 滑音 / 过渡段的剔除不在这里，而是复用 `vibratoPitch.ts` 的 {@link refineNoteFrames}：
+ * "哪些帧算音符"只有一处定义，加颤音、提取预设、试听三条路径才不会各说各话。
+ *
+ * @param runs 可信段。`null` = 整段都是有效数据（非哨兵参数没有"未检测"这个概念）。
  */
-function prepareAnalysisSeries(
+function markNonNoteFrames(
     values: readonly number[],
     runs: readonly VibratoNoteRun[] | null,
-): { series: number[]; trusted: boolean[] } {
-    const trusted = new Array<boolean>(values.length).fill(runs === null);
-    if (runs) {
-        for (const run of runs) {
-            for (let i = run.startIndex; i < run.endIndex; i += 1) trusted[i] = true;
-        }
+): number[] {
+    if (runs === null) return Array.from(values, (value) => Number(value));
+    const trusted = new Array<boolean>(values.length).fill(false);
+    for (const run of runs) {
+        for (let i = run.startIndex; i < run.endIndex; i += 1) trusted[i] = true;
     }
-    return {
-        series: values.map((value, index) => (trusted[index] ? value : Number.NaN)),
-        trusted,
-    };
-}
-
-/**
- * 残差里"不像颤音"的帧：稳健地剔掉（就地改写 `residual` 与 `trusted`）。
- *
- * 【为什么音符段判定还不够】它只排得掉"未检测"与"值域之外"的帧；而跟踪器在浊清
- * 边界还常给出一段**落在值域之内**的滑音（例如从 60 一路滑到 24 才掉出值域），它
- * 紧贴音符、因此并进了同一个音符段。这类帧在去趋势之后会留下几十个半音的残差，
- * 把深度抬成假值、把折叠出的周期表冲平 —— 比"整段按 0 算"好不了多少。
- *
- * 【判据为什么是相对量级】颤音的残差本身就是一个有界振荡：正弦的峰值 / 中位绝对值
- * ≈ 1.57，方波类接近 1。取"中位绝对值 × 系数"当门限是**无量纲**的，因此与颤音自己的
- * 深度无关；换成绝对音分阈值就得先知道深度，循环了。
- *
- * 系数取 4：既容得下深度渐强（`depthRamp` 上限 2 → 峰值 / 中位 ≈ 3），又能把滑音那种
- * 高出一个数量级的残差清掉。
- */
-const RESIDUAL_OUTLIER_FACTOR = 4;
-
-function dropNonVibratoResiduals(residual: number[], trusted: boolean[]): void {
-    const magnitudes: number[] = [];
-    for (let i = 0; i < residual.length; i += 1) {
-        if (trusted[i]) magnitudes.push(Math.abs(residual[i]));
-    }
-    if (magnitudes.length === 0) return;
-    magnitudes.sort((a, b) => a - b);
-    const median = magnitudes[magnitudes.length >> 1];
-    if (!(median > 0)) return;
-    const limit = median * RESIDUAL_OUTLIER_FACTOR;
-    for (let i = 0; i < residual.length; i += 1) {
-        if (!trusted[i]) continue;
-        if (Math.abs(residual[i]) <= limit) continue;
-        trusted[i] = false;
-        residual[i] = 0;
-    }
+    return values.map((value, index) => (trusted[index] ? value : Number.NaN));
 }
 
 /** 长度可变的滑动平均（边界处窗口收缩）。 */
@@ -519,11 +483,18 @@ export function extractVibratoPreset(input: VibratoExtractInput): VibratoExtract
         ? vibratoNoteRuns(input.param, values, framePeriodMs)
         : null;
     if (runs && runs.length === 0) return { ok: false, reason: "noPitch" };
-    const { series, trusted } = prepareAnalysisSeries(values, runs);
+    const noteSeries = markNonNoteFrames(values, runs);
+    // 音符帧判定 + 滑音剔除，与加颤音 / 试听同一套（`vibratoPitch.ts`）。
+    const trusted = refineNoteFrames(noteSeries, framePeriodMs);
+    if (!trusted.some(Boolean)) return { ok: false, reason: "noPitch" };
+    /*
+     * 用**最终**掩码再标一次：滑音帧必须从趋势拟合里也退场。只把它们排除出统计量是
+     * 不够的 —— 它们仍会把高斯趋势拽偏，残差随之被污染，周期估计直接塌掉（实测：
+     * 不标这一步，6 Hz 的输入被估成 98 帧 / 置信度 0.03）。
+     */
+    const series = noteSeries.map((value, index) => (trusted[index] ? value : Number.NaN));
 
     const residual = detrend(series, framePeriodMs);
-    // 滑音等"不像颤音"的帧在这里退场，之后的周期估计与统计量都只看留下来的帧。
-    dropNonVibratoResiduals(residual, trusted);
     const estimate = estimateVibratoPeriod(residual, framePeriodMs);
     if (!estimate) return { ok: false, reason: "tooShort" };
 

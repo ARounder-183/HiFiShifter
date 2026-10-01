@@ -331,8 +331,9 @@ describe("extractVibratoPreset：跳过未检测 / 过渡帧", () => {
         expect(cleanFit.ok, "干净输入应当能拟合").toBe(true);
         expect(gapFit.ok, "带气口的输入同样应当能拟合").toBe(true);
         if (!cleanFit.ok || !gapFit.ok) return;
-        // 旧实现会被那 10 帧缓升抬成几十个半音的假深度。
-        expect(gapFit.depthCents).toBeCloseTo(cleanFit.depthCents, 0);
+        // 旧实现会被那 10 帧缓升抬成几十个半音的假深度（几千分）；这里要求两者
+        // 相差不到 2 分 —— 剩下的零头来自"取中段 60% 做 RMS"的窗口位置略有不同。
+        expect(Math.abs(gapFit.depthCents - cleanFit.depthCents)).toBeLessThan(2);
         expect(gapFit.rateHz).toBeCloseTo(cleanFit.rateHz, 0);
     });
 
@@ -350,7 +351,7 @@ describe("extractVibratoPreset：跳过未检测 / 过渡帧", () => {
         const tailFit = extractVibratoPreset({ values: tail, framePeriodMs: FP, param: "pitch" });
         expect(tailFit.ok, "带尾音滑降的输入仍应能拟合").toBe(true);
         if (!cleanFit.ok || !tailFit.ok) return;
-        expect(tailFit.depthCents).toBeCloseTo(cleanFit.depthCents, 0);
+        expect(Math.abs(tailFit.depthCents - cleanFit.depthCents)).toBeLessThan(2);
         expect(tailFit.rateHz).toBeCloseTo(cleanFit.rateHz, 0);
     });
 

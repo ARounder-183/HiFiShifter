@@ -96,9 +96,10 @@ export interface VibratoAuditionPair {
  * 【中心取哪】取原参数线**已检测帧**的均值：稳定、对称，且不随预设切换而变 ——
  * 换预设时基准音高不跳，对比才成立。
  *
- * 【断口怎么处理】未检测帧在这条曲线上是 NaN。试听是合成音，没有"没有音高"可言，
- * 因此按中心音高持续（`buildAuditionCurve` 把非有限值当 0，即中心）。这让节奏保持
- * 连续，代价是气口处会有一个稳定的音 —— 试听只是听"颤音长什么样"，不承担还原气口。
+ * 【断口怎么处理】未检测帧、以及被剔掉的滑音 / 过渡帧，在这条曲线上都是 NaN。
+ * 试听是合成音，没有"没有音高"可言，于是**按最近的音符音高持续** —— 而不是掉到中心：
+ * 掉中心会在气口边界上产生一个几千分的大跳，听感是一声"咔"（实测相邻帧差过 3400 分）。
+ * 这也与渲染端对孤立未设置帧的处理一致（`edit_midi_at_time_or_none` 取邻近有效值）。
  *
  * @returns 原参数线不足两点（无数据）时返回 `null`，调用方据此禁用按钮。
  */
@@ -110,8 +111,19 @@ export function buildContourAuditionPair(
     const finite = sourceContour.filter((value) => Number.isFinite(value));
     if (finite.length < 2) return null;
     const center = finite.reduce((sum, value) => sum + value, 0) / finite.length;
-    const asWave = (values: readonly number[]) =>
-        values.map((value) => (Number.isFinite(value) ? value - center : Number.NaN));
+    /** 断口保持最近的音符音高（首尾也各自向最近的那个值靠）。 */
+    const holdNearest = (values: readonly number[]): number[] => {
+        const out = new Array<number>(values.length);
+        const first = values.find((value) => Number.isFinite(value));
+        let held = Number.isFinite(first) ? (first as number) : center;
+        for (let i = 0; i < values.length; i += 1) {
+            const value = values[i];
+            if (Number.isFinite(value)) held = value;
+            out[i] = held - center;
+        }
+        return out;
+    };
+    const asWave = (values: readonly number[]) => holdNearest(values);
     return {
         source: buildAuditionCurve(
             { wave: asWave(sourceContour) },

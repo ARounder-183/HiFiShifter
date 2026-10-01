@@ -6,6 +6,7 @@ import {
     PLAUSIBLE_PITCH_MIN,
     isUnsetValue,
     planVibratoTarget,
+    refineNoteFrames,
     suppressNonTargetFrames,
     usesUnsetValue,
 } from "./vibratoPitch";
@@ -174,5 +175,39 @@ describe("suppressNonTargetFrames", () => {
         const result = [5, 6];
         suppressNonTargetFrames(result, plan);
         expect(result).toEqual([0, 0]);
+    });
+});
+
+/*
+ * 音符段内部再剔滑音 / 过渡段。
+ *
+ * 【为什么值得测】`vibratoNoteRuns` 只排得掉"未检测"与"值域之外"的帧；而跟踪器在
+ * 浊清边界的滑音常常**落在值域之内**（60 一路滑到 24 才掉出去），因此会并进同一个
+ * 音符段。这类帧会被加颤音、会把提取的深度抬成假值、会让试听"嗖"地滑过去 ——
+ * 三处都靠这一步挡住。
+ */
+describe("refineNoteFrames", () => {
+    test("滑音帧退场，颤音帧留下", () => {
+        const glide = Array.from({ length: 20 }, (_, i) => 60 - (i / 19) * 36);
+        const note = Array.from({ length: 200 }, (_, i) => 60 + Math.sin(i / 6) * 0.4);
+        const mask = refineNoteFrames([...glide, ...note], FP);
+        // 滑音的后段明显偏离趋势（几十个半音）→ 剔掉。
+        for (let i = 5; i < 20; i += 1) expect(mask[i]).toBe(false);
+        // 音符帧的"偏离"只有颤音的量级（±40 分）→ 留下。
+        expect(mask[60]).toBe(true);
+        expect(mask[150]).toBe(true);
+        expect(mask[mask.length - 1]).toBe(true);
+    });
+
+    test("平直的线没有离群可言：全部保留", () => {
+        expect(refineNoteFrames(flat(100, 60), FP).every(Boolean)).toBe(true);
+    });
+
+    test("NaN 帧不参与判定，也不返回", () => {
+        const values = [Number.NaN, ...flat(60, 60), Number.NaN];
+        const mask = refineNoteFrames(values, FP);
+        expect(mask[0]).toBe(false);
+        expect(mask[mask.length - 1]).toBe(false);
+        expect(mask[30]).toBe(true);
     });
 });
