@@ -2008,11 +2008,6 @@ export const jaJP = {
     vibrato_manager_group_user: "マイプリセット",
     vibrato_manager_empty:
         "カスタムプリセットはまだありません。内蔵プリセットを複製するところから始められます。",
-    vibrato_manager_readonly:
-        "内蔵プリセットは名前変更・削除ができません。複製すると編集できます。",
-    vibrato_manager_builtin_save_note:
-        "内蔵プリセットは上書きされません。保存するとカスタムプリセットとして複製されます。",
-    vibrato_builtin_saved_as: "内蔵プリセットの変更を「{name}」として保存しました",
     vibrato_manager_enable: "有効にする",
     vibrato_manager_disable: "無効にする",
     vibrato_manager_disabled: "無効",

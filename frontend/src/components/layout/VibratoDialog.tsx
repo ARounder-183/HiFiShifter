@@ -673,36 +673,39 @@ export function VibratoDialog({
     }
 
     /**
-     * 把草稿的未保存改动落盘，返回落盘后的那条预设（没有可落的东西时返回 `null`）。
+     * 把一条预设**入库为自定义副本**，返回那份副本（已达上限时返回 `null` 并给出提示）。
      *
-     * 【系统预设的落盘 = 另存为副本】出厂预设永远不能被覆盖（要可复原），因此对它的
-     * 改动落到一份**副本**上：新 id、`builtin: false`、名字按显示名预填。这就是
-     * "基于系统预设改一版、存成自己的"那条路 —— 参数表单因此对系统预设也可编辑，
-     * 而「保存」按钮对它同样可用。
-     *
-     * 【只应用、不保存】「应用」走的是另一条路（`handleApply` 直接把草稿交给编辑
-     * 管线），因此"基于系统预设调两个参数然后应用"不会在库里留下任何东西。
+     * 出厂预设永远不能被覆盖（要可复原），所以"存成自己的"这件事只有这一条路。
      */
-    function commitDraft(): VibratoPreset | null {
-        if (!draft || !draftHasUnsavedChanges()) return null;
-        const normalized = sanitizeVibratoPreset(draft);
-        if (!isBuiltin) {
-            persistPreset(normalized);
-            return normalized;
-        }
-        const copy = duplicateAsCustom(normalized);
+    function saveAsCustom(source: VibratoPreset): VibratoPreset | null {
+        const copy = duplicateAsCustom(sanitizeVibratoPreset(source));
         if (!copy) {
             setIoNotice({ text: t("vibrato_manager_at_cap"), danger: true });
             return null;
         }
         persistPreset(copy);
-        // 说明这份副本从哪来：用户在列表里会看到多出一条，不解释就不知道是自己刚才
-        // 那次改动落下来的。
-        setIoNotice({
-            text: t("vibrato_builtin_saved_as").replace("{name}", vibratoPresetLabel(copy, t)),
-            danger: false,
-        });
         return copy;
+    }
+
+    /**
+     * 把草稿的**未保存改动**落盘，返回落盘后的那条预设（没有改动时返回 `null`）。
+     *
+     * 【系统预设的落盘 = 另存为副本】对它的改动落到一份副本上（新 id、`builtin: false`、
+     * 名字按显示名预填），出厂预设本身不会被碰。
+     *
+     * 【只应用、不保存】「应用」走的是另一条路（`handleApply` 直接把草稿交给编辑
+     * 管线），因此"基于系统预设调两个参数然后应用"不会在库里留下任何东西。
+     *
+     * 【"没有改动"时为什么什么都不做】这条路是"离开这条预设 = 落盘"用的：在列表里
+     * 点着看一遍就凭空多出十几条副本，比丢掉改动更糟。「保存」不走这条判断 ——
+     * 见 `handleSave`。
+     */
+    function commitDraft(): VibratoPreset | null {
+        if (!draft || !draftHasUnsavedChanges()) return null;
+        if (isBuiltin) return saveAsCustom(draft);
+        const normalized = sanitizeVibratoPreset(draft);
+        persistPreset(normalized);
+        return normalized;
     }
 
     /**
@@ -763,7 +766,12 @@ export function VibratoDialog({
     }
 
     /**
-     * 「保存」：把草稿的改动落盘（系统预设落成一份副本），并让草稿跟着落到那份上。
+     * 「保存」：把草稿落盘，并让草稿跟着落到那份上。
+     *
+     * 【系统预设：改没改过都另存为副本】用户按下保存就是想要一份**自己能改的**副本 ——
+     * "没动过就不给存"只会让人以为按钮坏了（而它明明是可点的）。于是这条路不看
+     * `draftHasUnsavedChanges`：按下就存。用户预设仍然只在有改动时写回库（没有改动
+     * 就没有可写的东西）。
      *
      * 【为什么草稿要跟着切】对系统预设来说，落盘产生的是**另一条**预设（新 id）。
      * 草稿若还停在原来的 id 上，用户接着调、再按保存就会又生成一份副本 —— 那不是
@@ -774,7 +782,7 @@ export function VibratoDialog({
      */
     function handleSave() {
         if (!draft) return;
-        const saved = commitDraft();
+        const saved = isBuiltin ? saveAsCustom(draft) : commitDraft();
         if (!saved) return;
         setDraft(saved);
         if (isBuiltin) activatePreset(saved);
@@ -1221,7 +1229,6 @@ export function VibratoDialog({
                       key: "rename",
                       label: t("vibrato_manager_rename"),
                       disabled: targetIsBuiltin,
-                      tooltip: targetIsBuiltin ? t("vibrato_manager_readonly") : undefined,
                       onSelect: () =>
                           setRenameTarget({ id: target.id, value: vibratoPresetLabel(target, t) }),
                   },
@@ -1256,9 +1263,8 @@ export function VibratoDialog({
                       key: "delete",
                       label: t("vibrato_manager_delete"),
                       danger: true,
-                      // 系统预设只读：要删只能删副本。
+                      // 出厂预设不能删：它是"永远可复原"的锚点。
                       disabled: targetIsBuiltin,
-                      tooltip: targetIsBuiltin ? t("vibrato_manager_readonly") : undefined,
                       onSelect: () => setDeleteTarget(target),
                   },
               ];
@@ -1430,11 +1436,6 @@ export function VibratoDialog({
                                 onAudition={toggleAudition}
                                 appliedAuditionDisabled={!auditionCurves}
                             />
-                            {isBuiltin ? (
-                                <span className="hs-type-caption">
-                                    {t("vibrato_manager_builtin_save_note")}
-                                </span>
-                            ) : null}
                         </>
                     ) : null}
 

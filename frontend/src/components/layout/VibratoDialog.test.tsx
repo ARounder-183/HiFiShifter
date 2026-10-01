@@ -28,6 +28,7 @@ import sessionReducer, {
     upsertVibratoPreset,
 } from "../../features/session/sessionSlice";
 import { sanitizeVibratoPreset } from "../../features/vibrato/vibratoPresets";
+import { SYSTEM_VIBRATO_PRESETS } from "../../features/vibrato/systemPresets";
 import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
 import { I18nProvider } from "../../i18n/I18nProvider";
 import { AppThemeProvider } from "../../theme/AppThemeProvider";
@@ -494,43 +495,57 @@ test("保存不关闭对话框（可先存一版接着调）", async () => {
 });
 
 /*
- * 系统预设：参数可以改，但**保存 = 另存为一份自定义副本**。
+ * 系统预设：**保存 = 另存为一份自定义副本**，改没改过都一样。
  *
  * 【为什么值得测】这是"系统预设只读"这条旧规矩的替代品：出厂预设必须永远可复原
- * （不能被覆盖），而用户又常常是"基于「自然」改两个参数就够用了"。两条都要满足，
+ * （不能被覆盖），而用户又常常是"「自然」就挺好，先存一份我自己的"。两条都要满足，
  * 唯一的办法就是"改草稿、存副本"。
  *
  * 同时钉住三件事：
  * 1. 副本是一条**新**预设（新 id、`builtin: false`），库里绝不出现系统预设的 id；
  * 2. 草稿切到副本上 —— 否则再按一次保存会又生成一条（那是"每次都新建"，不是保存）；
- * 3. 没有改动时保存是空操作（不能按一下就凭空多一条）。
+ * 3. **没编辑过也能存**：按钮是可点的，按下去就该有结果 —— "没动过就不给存"只会让
+ *    人以为按钮坏了（旧实现把它做成了空操作）。
  */
-test("系统预设：保存后另存为自定义副本，草稿切到副本上", async () => {
+test("系统预设：未编辑也能保存为副本，草稿切到副本上", async () => {
+    const factory = SYSTEM_VIBRATO_PRESETS.find((preset) => preset.id === "builtin.natural");
+    expect(factory, "出厂预设「自然」应存在").toBeTruthy();
+
     const store = await mountDialog((s) => {
         s.dispatch(setActiveVibratoPreset("builtin.natural"));
     });
     expect(userPresets(store).length, "起手库里不该有自定义预设").toBe(0);
 
-    // 没改动时按保存：空操作。
-    await clickButton("Save");
-    expect(userPresets(store).length, "没有改动时保存不该凭空造一条").toBe(0);
-
-    // 改深度（改的是草稿）。
-    await typeNumber("Depth", 55);
-
     await clickButton("Save");
 
-    const afterFirst = userPresets(store);
-    expect(afterFirst.length).toBe(1);
-    const copy = afterFirst[0];
-    expect(copy.id.startsWith("builtin."), "副本必须是用户预设").toBe(false);
-    expect(copy.builtin).toBe(false);
-    expect(copy.depthCents, "副本带着刚才的改动").toBe(55);
-    expect(copy.name, "名字按显示名预填").toBe("Natural 2");
+    const created = userPresets(store);
+    expect(created.length, "没编辑过也应当存出一份副本").toBe(1);
+    expect(created[0].id.startsWith("builtin."), "副本必须是用户预设").toBe(false);
+    expect(created[0].builtin).toBe(false);
+    expect(created[0].name, "名字按显示名预填").toBe("Natural 2");
+    expect(created[0].depthCents, "没改过就带着出厂参数").toBe(factory!.depthCents);
 
-    // 再按一次保存：更新的是**同一份**副本，而不是又造一条。
+    // 再按一次保存：更新的是**同一份**副本（草稿已经切过去了），而不是又造一条。
     await clickButton("Save");
     expect(userPresets(store).length, "第二次保存不该再新建").toBe(1);
+});
+
+/*
+ * 系统预设：改过再保存 —— 副本带着改动（而不是出厂值）。
+ */
+test("系统预设：改过再保存，副本带着改动", async () => {
+    const store = await mountDialog((s) => {
+        s.dispatch(setActiveVibratoPreset("builtin.natural"));
+    });
+
+    await typeNumber("Depth", 55);
+    await clickButton("Save");
+
+    const saved = userPresets(store);
+    expect(saved.length).toBe(1);
+    expect(saved[0].depthCents, "副本带着刚才的改动").toBe(55);
+    expect(saved[0].name).toBe("Natural 2");
+    expect(saved[0].id.startsWith("builtin.")).toBe(false);
 });
 
 /*
