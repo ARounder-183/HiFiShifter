@@ -39,8 +39,6 @@ interface EditContextMenuProps {
     onConvertVolumeToDyn?: () => void;
     /** 动态 → 音量（源参数归位到「沿用原声」）。 */
     onConvertDynToVolume?: () => void;
-    /** 从选区提取预设（作用于当前选区，与预设选择无关，故留在菜单）。 */
-    onExtractVibratoPreset?: () => void;
 }
 
 export function EditContextMenu({
@@ -68,7 +66,6 @@ export function EditContextMenu({
     onExportMidi,
     onConvertVolumeToDyn,
     onConvertDynToVolume,
-    onExtractVibratoPreset,
 }: EditContextMenuProps) {
     const { tf } = useI18n();
 
@@ -169,21 +166,13 @@ export function EditContextMenu({
             onSelect: () => onSmooth?.(),
         },
         // 颤音：唯一入口是弹窗 —— 选预设、微调、看套用预览都在那里。
+        // 「从选区提取预设」也收在弹窗页脚（它作用于当前选区，与预设选择相邻）。
         {
             key: "addVibrato",
             label: tf("menu_add_vibrato"),
             shortcut: addVibratoShortcut,
             onSelect: () => onAddVibrato?.(),
         },
-        ...(onExtractVibratoPreset
-            ? ([
-                  {
-                      key: "extractVibratoPreset",
-                      label: tf("vibrato_extract_action"),
-                      onSelect: onExtractVibratoPreset,
-                  },
-              ] satisfies AppMenuItemSpec[])
-            : []),
         {
             key: "quantize",
             label: tf("menu_quantize"),

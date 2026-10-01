@@ -8812,7 +8812,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     onAddVibrato={openVibratoApplyDialog}
                     onQuantize={() => openEditDialog("quantize")}
                     onMeanQuantize={() => openEditDialog("meanQuantize")}
-                    onExtractVibratoPreset={() => void handleExtractVibratoPreset()}
                     onSaveAsPitchRef={() => void handleSaveAsPitchRef()}
                     onExportMidi={() => void handleExportMidiFromEditor()}
                     // 音量 ↔ 动态 互转：参数本身就是这两个之一时始终可用。
