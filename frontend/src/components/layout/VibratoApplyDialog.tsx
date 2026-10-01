@@ -67,6 +67,13 @@ export interface VibratoApplyDialogProps {
     onApply: (preset: VibratoPreset) => void;
     /** 从选区提取预设（页脚 start 位，作用于当前选区，与本弹窗的预设选择无关）。 */
     onExtract?: () => void;
+    /**
+     * 「编辑预设…」：跳到预设管理器去改库（捏预设、改名字、导入导出）。
+     *
+     * 与「应用」的关系：这里只负责"去改"，改完怎么回来由宿主安排 —— 管理器那边会
+     * 出现「返回添加颤音」。跳转前先走本弹窗的关闭路径（停试听）。
+     */
+    onEditPresets?: () => void;
 }
 
 export function VibratoApplyDialog({
@@ -79,6 +86,7 @@ export function VibratoApplyDialog({
     loadOriginal,
     onApply,
     onExtract,
+    onEditPresets,
 }: VibratoApplyDialogProps) {
     const { t } = useI18n();
     const dispatch = useAppDispatch();
@@ -234,6 +242,19 @@ export function VibratoApplyDialog({
                               onClick: () => {
                                   handleOpenChange(false);
                                   onExtract();
+                              },
+                          },
+                      ]
+                    : []),
+                ...(onEditPresets
+                    ? [
+                          {
+                              id: "editPresets",
+                              label: t("vibrato_apply_edit_presets"),
+                              align: "start" as const,
+                              onClick: () => {
+                                  handleOpenChange(false);
+                                  onEditPresets();
                               },
                           },
                       ]

@@ -1916,6 +1916,7 @@ export const zhTW = {
     vibrato_cycles_estimate: "約 {count} 個週期",
 
     vibrato_manager_title: "顫音預設",
+    vibrato_preset_back_to_apply: "返回新增顫音",
     vibrato_audition_play: "試聽",
     vibrato_io_export: "匯出",
     vibrato_io_import: "匯入",
@@ -1954,6 +1955,7 @@ export const zhTW = {
     vibrato_apply_preview: "套用到選區",
     vibrato_apply_audition_source: "試聽原參數線",
     vibrato_apply_audition_result: "試聽新參數線",
+    vibrato_apply_edit_presets: "編輯預設...",
     vibrato_apply_preview_empty: "選取一段後可在此預覽效果。",
     vibrato_apply_preview_no_pitch: "這段選區裡沒有可加顫音的音高。",
     vibrato_apply_save_preset: "同時把這些調整儲存到預設",

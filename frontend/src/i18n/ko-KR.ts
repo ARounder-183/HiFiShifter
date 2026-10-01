@@ -1957,6 +1957,7 @@ export const koKR = {
     vibrato_cycles_estimate: "약 {count} 주기",
 
     vibrato_manager_title: "비브라토 프리셋",
+    vibrato_preset_back_to_apply: "비브라토 추가로 돌아가기",
     vibrato_audition_play: "들어보기",
     vibrato_io_export: "내보내기",
     vibrato_io_import: "가져오기",
@@ -1995,6 +1996,7 @@ export const koKR = {
     vibrato_apply_preview: "선택 범위에 적용",
     vibrato_apply_audition_source: "원본 파라미터 라인 듣기",
     vibrato_apply_audition_result: "적용 후 파라미터 라인 듣기",
+    vibrato_apply_edit_presets: "프리셋 편집...",
     vibrato_apply_preview_empty: "범위를 선택하면 결과를 미리 볼 수 있습니다.",
     vibrato_apply_preview_no_pitch: "이 범위에 비브라토를 적용할 피치가 없습니다.",
     vibrato_apply_save_preset: "이 조정을 프리셋에도 저장",

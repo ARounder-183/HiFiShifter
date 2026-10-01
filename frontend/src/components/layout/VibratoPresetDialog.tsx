@@ -133,6 +133,14 @@ interface Props {
     /** 预设编辑时的"当前参数"：深度按它换算成原生单位显示与编辑。 */
     editParam?: string;
     paramRange?: { min: number; max: number };
+    /**
+     * 「返回添加颤音」。
+     *
+     * 【为什么是可选回调而不是自己开窗口】管理器有两个宿主（参数编辑器与菜单栏）：
+     * 只有从「添加颤音」跳过来的那一次才该有返回按钮 —— 菜单栏那条路径背后没有待应用
+     * 的弹窗。因此"从哪来、回哪去"由宿主决定，管理器只管把动作画出来。
+     */
+    onBackToApply?: () => void;
 }
 
 /** 列表列的宽度（CSS 像素）。 */
@@ -165,6 +173,7 @@ export function VibratoPresetDialog({
     onOpenChange,
     editParam = "pitch",
     paramRange,
+    onBackToApply,
 }: Props) {
     const dispatch = useAppDispatch();
     const { t, plural } = useI18n();
@@ -933,6 +942,25 @@ export function VibratoPresetDialog({
                 title={t("vibrato_manager_title")}
                 size="xl"
                 actions={[
+                    /*
+                     * 【返回添加颤音】排在页脚最左：它是"离开这个窗口去别处"，与右边
+                     * 那些"改库"的动作不同类。先走本窗口的关闭路径（停试听），再由宿主
+                     * 决定接下来开哪个窗口。
+                     */
+                    ...(onBackToApply
+                        ? [
+                              {
+                                  id: "backToApply",
+                                  label: t("vibrato_preset_back_to_apply"),
+                                  align: "start" as const,
+                                  autoClose: false,
+                                  onClick: () => {
+                                      handleOpenChange(false);
+                                      onBackToApply();
+                                  },
+                              },
+                          ]
+                        : []),
                     /*
                      * 【为什么每个动作都显式写 `autoClose: false`】
                      * `AppDialog` 对**同步**动作默认 `autoClose: true`（异步动作默认

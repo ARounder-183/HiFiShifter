@@ -61,6 +61,7 @@ afterEach(async () => {
 async function mountDialog(
     prepare?: (store: ReturnType<typeof configureStore>) => void,
     onOpenChange: (open: boolean) => void = () => undefined,
+    onBackToApply?: () => void,
 ) {
     const store = configureStore({
         reducer: { session: sessionReducer, keybindings: keybindingsReducer },
@@ -71,7 +72,11 @@ async function mountDialog(
             <Provider store={store}>
                 <AppThemeProvider>
                     <I18nProvider>
-                        <VibratoPresetDialog open onOpenChange={onOpenChange} />
+                        <VibratoPresetDialog
+                            open
+                            onOpenChange={onOpenChange}
+                            onBackToApply={onBackToApply}
+                        />
                     </I18nProvider>
                 </AppThemeProvider>
             </Provider>,
@@ -1207,4 +1212,32 @@ test("删除正在编辑的预设：草稿切到迁移后的预设", async () =>
     expect(selected).toHaveLength(1);
     expect(selected[0].textContent ?? "").toContain("Del A");
     expect(document.body.textContent ?? "").not.toContain("No custom presets yet");
+});
+
+/*
+ * 「返回添加颤音」：只有从「添加颤音」跳过来时才有。
+ *
+ * 【为什么是可选回调】管理器有两个宿主：参数编辑器（从「添加颤音」跳过来，背后有待
+ * 应用的弹窗）与菜单栏（背后没有）。返回按钮必须跟着宿主走，否则菜单那条路径会给出
+ * 一个指向不存在去处的按钮。
+ */
+test("提供 onBackToApply 时页脚出现「返回添加颤音」，点击即回调", async () => {
+    const onBackToApply = vi.fn();
+    await mountDialog(undefined, () => undefined, onBackToApply);
+    const back = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Back to Add Vibrato",
+    );
+    expect(back, "返回按钮应已渲染").toBeTruthy();
+    await act(async () => {
+        back!.click();
+    });
+    expect(onBackToApply).toHaveBeenCalledTimes(1);
+});
+
+test("未提供 onBackToApply 时没有「返回添加颤音」（菜单栏那条路径）", async () => {
+    await mountDialog();
+    const labels = [...document.querySelectorAll("button")].map((button) =>
+        button.textContent?.trim(),
+    );
+    expect(labels).not.toContain("Back to Add Vibrato");
 });

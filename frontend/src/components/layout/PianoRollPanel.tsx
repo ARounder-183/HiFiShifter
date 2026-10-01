@@ -1019,6 +1019,14 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
      */
     const [vibratoPresetDialogOpen, setVibratoPresetDialogOpen] = useState(false);
     /**
+     * 管理器是不是**从「添加颤音」跳过来**的。
+     *
+     * 决定要不要在管理器页脚画「返回添加颤音」：菜单栏那条路径背后没有待应用的弹窗，
+     * 给它一个"返回"会指向不存在的去处。两个窗口都宿主在本面板，所以这层往返不需要
+     * 走 `hifi:openEditDialog` —— 那是给跨组件的一次性对话框用的。
+     */
+    const [vibratoPresetReturnToApply, setVibratoPresetReturnToApply] = useState(false);
+    /**
      * 「添加颤音」应用弹窗是否打开。
      *
      * 与预设管理器分开：管理器改库（常驻），本弹窗用库（一次性确认）。宿主放在
@@ -1037,6 +1045,34 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         setVibratoApplyDialogSession((session) => session + 1);
         setVibratoApplyDialogOpen(true);
     }, []);
+
+    /**
+     * 「添加颤音」→「编辑预设…」：关掉应用弹窗，开管理器，并记住"能返回"。
+     *
+     * 应用弹窗带着会话号重挂载，因此跳转前调好的旋钮不会带过去 —— 这是刻意的：用户
+     * 去管理器就是为了改预设本身，回来时应当看到**改过的**活动预设，而不是一份夹在
+     * 中间的旧草稿。
+     */
+    const openPresetManagerFromApply = useCallback(() => {
+        setVibratoApplyDialogOpen(false);
+        setVibratoPresetReturnToApply(true);
+        setVibratoPresetDialogOpen(true);
+    }, []);
+
+    /** 「返回添加颤音」：关掉管理器，重新打开应用弹窗。 */
+    const returnToVibratoApplyDialog = useCallback(() => {
+        setVibratoPresetDialogOpen(false);
+        setVibratoPresetReturnToApply(false);
+        openVibratoApplyDialog();
+    }, [openVibratoApplyDialog]);
+
+    /** 管理器关闭（无论走哪条路）：顺手清掉"能返回"的标记，免得下次从菜单打开时
+     *  页脚还挂着一个指向不存在的应用弹窗的按钮。 */
+    const handleVibratoPresetDialogOpenChange = useCallback((open: boolean) => {
+        setVibratoPresetDialogOpen(open);
+        if (!open) setVibratoPresetReturnToApply(false);
+    }, []);
+
     /** 提取失败提示（选区太短 / 找不到稳定颤音）。 */
     const [vibratoExtractFailure, setVibratoExtractFailure] = useState(false);
     /** 工具栏的颤音预设下拉是否展开。 */
@@ -8833,9 +8869,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             {/* 颤音预设管理器：右键菜单与菜单栏共用同一个对话框组件。 */}
             <VibratoPresetDialog
                 open={vibratoPresetDialogOpen}
-                onOpenChange={setVibratoPresetDialogOpen}
+                onOpenChange={handleVibratoPresetDialogOpenChange}
                 editParam={editParam}
                 paramRange={currentParamRange}
+                onBackToApply={vibratoPresetReturnToApply ? returnToVibratoApplyDialog : undefined}
             />
 
             {/* 「添加颤音」应用弹窗：选预设 + 选区实时预览 + 快捷旋钮。
@@ -8851,6 +8888,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 loadOriginal={loadVibratoApplyOriginal}
                 onApply={handleApplyVibrato}
                 onExtract={() => void handleExtractVibratoPreset()}
+                onEditPresets={openPresetManagerFromApply}
             />
 
             <AppNoticeDialog

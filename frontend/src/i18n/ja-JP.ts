@@ -1984,6 +1984,7 @@ export const jaJP = {
     vibrato_cycles_estimate: "約 {count} 周期",
 
     vibrato_manager_title: "ビブラートプリセット",
+    vibrato_preset_back_to_apply: "ビブラート追加に戻る",
     vibrato_audition_play: "試聴",
     vibrato_io_export: "エクスポート",
     vibrato_io_import: "インポート",
@@ -2024,6 +2025,7 @@ export const jaJP = {
     vibrato_apply_preview: "選択範囲に適用",
     vibrato_apply_audition_source: "元のパラメータ線を試聴",
     vibrato_apply_audition_result: "適用後のパラメータ線を試聴",
+    vibrato_apply_edit_presets: "プリセットを編集...",
     vibrato_apply_preview_empty: "範囲を選択すると結果をプレビューできます。",
     vibrato_apply_preview_no_pitch: "この範囲にビブラートをかけられるピッチがありません。",
     vibrato_apply_save_preset: "この調整をプリセットにも保存",

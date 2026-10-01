@@ -1971,6 +1971,7 @@ export const enUS = {
     vibrato_cycles_estimate: "About {count} cycles",
 
     vibrato_manager_title: "Vibrato Presets",
+    vibrato_preset_back_to_apply: "Back to Add Vibrato",
     vibrato_audition_play: "Audition",
     vibrato_io_export: "Export",
     vibrato_io_import: "Import",
@@ -2009,6 +2010,7 @@ export const enUS = {
     vibrato_apply_preview: "Applied to selection",
     vibrato_apply_audition_source: "Audition original",
     vibrato_apply_audition_result: "Audition result",
+    vibrato_apply_edit_presets: "Edit presets...",
     vibrato_apply_preview_empty: "Select a range to preview the result.",
     vibrato_apply_preview_no_pitch: "No pitch to apply vibrato to in this range.",
     vibrato_apply_save_preset: "Also save these tweaks to the preset",

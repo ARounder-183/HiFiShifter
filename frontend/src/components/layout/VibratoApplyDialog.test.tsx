@@ -74,6 +74,8 @@ async function mountDialog(
     overrides: {
         onApply?: (preset: VibratoPreset) => void;
         onExtract?: () => void;
+        onEditPresets?: () => void;
+        onOpenChange?: (open: boolean) => void;
         loadOriginal?: () => Promise<{ values: number[]; framePeriodMs: number } | null>;
     } = {},
 ) {
@@ -90,7 +92,7 @@ async function mountDialog(
                     <I18nProvider>
                         <VibratoApplyDialog
                             open
-                            onOpenChange={() => undefined}
+                            onOpenChange={overrides.onOpenChange ?? (() => undefined)}
                             presets={PRESETS}
                             activePresetId="custom_a"
                             editParam="pitch"
@@ -98,6 +100,7 @@ async function mountDialog(
                             loadOriginal={loadOriginal}
                             onApply={onApply}
                             onExtract={overrides.onExtract}
+                            onEditPresets={overrides.onEditPresets}
                         />
                     </I18nProvider>
                 </AppThemeProvider>
@@ -308,4 +311,26 @@ test("系统预设勾选保存到预设：自动另存为自定义副本，且�
     // 应用的就是存下的那一份（同一个 id）。
     expect(onApply).toHaveBeenCalledTimes(1);
     expect((onApply.mock.calls[0][0] as VibratoPreset).id).toBe(saved[0]?.id);
+});
+
+/*
+ * 「编辑预设…」：跳到预设管理器去改库，改完由管理器那边「返回添加颤音」送回来。
+ *
+ * 【为什么先关窗再跳】跳转前要走本弹窗的关闭路径 —— 否则试听会一直响着，而用户已经
+ * 在看另一个窗口了。
+ */
+test("点「编辑预设…」：先关掉本弹窗，再交给宿主去开管理器", async () => {
+    const onEditPresets = vi.fn();
+    const onOpenChange = vi.fn();
+    await mountDialog({ onEditPresets, onOpenChange });
+    const edit = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Edit presets...",
+    );
+    expect(edit, "编辑预设按钮应已渲染").toBeTruthy();
+    await act(async () => {
+        edit!.click();
+    });
+    // 跳转前先关窗（否则试听会一直响着，而用户已经去看另一个窗口了）。
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(onEditPresets).toHaveBeenCalledTimes(1);
 });
