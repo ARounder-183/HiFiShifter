@@ -204,6 +204,21 @@ test("无选区数据时显示占位提示而不是空画布", async () => {
 });
 
 /*
+ * 预览分两条带，各有自己的标尺。
+ *
+ * 【为什么值得测】轮廓与颤音差两个数量级，共轴时必然压扁其中一个 —— 拆成两条带
+ * 正是这个问题的解法本身，所以"两条都在、各带标签"是契约而不是实现细节。
+ */
+test("预览分两条带：上为原参数线轮廓，下为颤音偏移", async () => {
+    await mountDialog();
+    const canvases = [...document.querySelectorAll("canvas[role=img]")];
+    expect(canvases.length).toBe(2);
+    const labels = canvases.map((canvas) => canvas.getAttribute("aria-label"));
+    expect(labels).toContain("Source parameter line");
+    expect(labels).toContain("Vibrato offset (from baseline)");
+});
+
+/*
  * 音高不可调制：说清原因，而不是复用"选一段"那句提示。
  *
  * 【为什么值得测】音高参数里 0 = 未检测；此外浊清边界上还有"低而非零"的过渡帧，

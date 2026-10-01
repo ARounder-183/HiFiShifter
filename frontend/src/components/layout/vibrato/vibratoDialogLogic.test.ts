@@ -10,6 +10,7 @@ import { sanitizeVibratoPreset } from "../../../features/vibrato/vibratoPresets"
 import {
     BASELINE_MODE_KEYS,
     BASELINE_MODE_ORDER,
+    MIN_CONTOUR_SPAN_CENTS,
     ENVELOPE_CURVE_KEYS,
     ENVELOPE_CURVE_ORDER,
     RATE_MODE_KEYS,
@@ -18,6 +19,7 @@ import {
     WAVE_SHAPE_ORDER,
     buildAppliedPreview,
     buildVibratoPreview,
+    contourRangeCents,
     builtinIdOf,
     cycleShapeLabelKey,
     depthForParam,
@@ -653,6 +655,70 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             expect(preview.peakCents).toBeGreaterThan(43);
             expect(preview.peakCents).toBeLessThan(47);
         });
+
+        /*
+         * 轮廓条：与主图**分带**，因此"轮廓形状"与"颤音可读"可以同时成立 ——
+         * 这正是把两条线拆到两套标尺的目的。
+         */
+        describe("轮廓条（原参数线形状）", () => {
+            test("轮廓以绝对值给出，形状完整；主图仍是只跟颤音走的紧标尺", () => {
+                const preview = buildAppliedPreview({
+                    preset: deep,
+                    original: rampedNote,
+                    param: "pitch",
+                    framePeriodMs: 5,
+                })!;
+                const contour = finite(preview.sourceContour);
+                // 40→60 半音的缓升 + 稳定音：轮廓跨 4000..6000 分，一个半音都没丢。
+                expect(Math.min(...contour)).toBeCloseTo(4000, 6);
+                expect(Math.max(...contour)).toBeCloseTo(6000, 6);
+                // 同一次预览里，主图的标尺仍只跟颤音走（差了两个数量级）。
+                expect(preview.peakCents).toBeLessThan(50);
+            });
+
+            test("轮廓的断口与主图一致（气口与过渡帧都不画）", () => {
+                const preview = buildAppliedPreview({
+                    preset: deep,
+                    original: rampedNote,
+                    param: "pitch",
+                    framePeriodMs: 5,
+                })!;
+                for (let i = 0; i < 100; i += 1) {
+                    expect(Number.isNaN(preview.sourceContour[i])).toBe(true);
+                    expect(Number.isNaN(preview.resultContour[i])).toBe(true);
+                }
+                expect(Number.isFinite(preview.sourceContour[150])).toBe(true);
+                expect(Number.isFinite(preview.resultContour[150])).toBe(true);
+            });
+
+            /*
+             * 这条是"轮廓条值得存在"的核心证据：`line` 基线会把轮廓搬成一条直线，
+             * 只看颤音偏移（深度 0 → 一条平线）根本看不出预设做了什么。
+             */
+            test("直线基线：套用后的轮廓是一条直线（一眼看出被搬平）", () => {
+                const straight = sanitizeVibratoPreset({
+                    id: "custom_straight",
+                    depthCents: 0,
+                    rateHz: 5.5,
+                    attackMs: 0,
+                    releaseMs: 0,
+                    irregularity: 0,
+                    baseline: "line",
+                });
+                const preview = buildAppliedPreview({
+                    preset: straight,
+                    original: rampedNote,
+                    param: "pitch",
+                    framePeriodMs: 5,
+                })!;
+                const result = finite(preview.resultContour);
+                // 首末音符的代表值都是 60（单段的中位数）→ 结果轮廓恒为 6000 分。
+                expect(Math.max(...result) - Math.min(...result)).toBeLessThan(1e-6);
+                expect(result[0]).toBeCloseTo(6000, 6);
+                // 原轮廓仍完整保留，两条线在轮廓条里形成对照。
+                expect(Math.min(...finite(preview.sourceContour))).toBeCloseTo(4000, 6);
+            });
+        });
     });
 
     test("乘性参数（dyn）也给出可辨的偏离（换算到分后仍围绕中心）", () => {
@@ -665,6 +731,41 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
         })!;
         const peak = Math.max(...preview.wave.map((value) => Math.abs(value)));
         expect(peak).toBeGreaterThan(1);
+    });
+});
+
+/*
+ * 轮廓条的标尺：按数据自适应，但要防住两个退化。
+ *
+ * 【为什么要下限】一段长音的轮廓几乎是平的；跨度趋近 0 时任何一点抖动都会被放大成
+ * 满屏锯齿，读起来像"音高在剧烈晃动"。
+ */
+describe("contourRangeCents（轮廓条纵轴）", () => {
+    test("按有限值拟合，断口不参与，两侧留余量", () => {
+        const range = contourRangeCents([[Number.NaN, 4000, 6000, Number.NaN]]);
+        expect(range.min).toBeCloseTo(4000 - 2000 * 0.06, 6);
+        expect(range.max).toBeCloseTo(6000 + 2000 * 0.06, 6);
+    });
+
+    test("跨度不足一个半音时撑到下限，并保持中点不动", () => {
+        const range = contourRangeCents([[6000, 6000, 6000]]);
+        expect(range.max - range.min).toBeCloseTo(MIN_CONTOUR_SPAN_CENTS, 6);
+        expect((range.min + range.max) / 2).toBeCloseTo(6000, 6);
+    });
+
+    test("全是断口时退化为零跨度，不产生 NaN", () => {
+        const range = contourRangeCents([[Number.NaN, Number.NaN]]);
+        expect(Number.isFinite(range.min)).toBe(true);
+        expect(Number.isFinite(range.max)).toBe(true);
+    });
+
+    test("多条线一起拟合：原线与结果线都要装得下", () => {
+        const range = contourRangeCents([
+            [6000, 6000],
+            [6000, 6400],
+        ]);
+        expect(range.min).toBeLessThanOrEqual(6000);
+        expect(range.max).toBeGreaterThan(6400);
     });
 });
 

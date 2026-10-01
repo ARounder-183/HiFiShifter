@@ -16,6 +16,7 @@
 import { useEffect, useRef } from "react";
 import { readDevicePixelRatio } from "../../../utils/devicePixelLine";
 import { previewScaleCents, type VibratoPreviewSamples } from "./vibratoDialogLogic";
+import { finiteRuns, strokeFinitePolyline } from "./vibratoPreviewDraw";
 import {
     cursorForZone,
     hitTestPreviewZone,
@@ -99,29 +100,6 @@ function tokenColor(name: string, fallback: string): string {
 /** 手柄方块边长（CSS 像素）。 */
 const HANDLE_SIZE = 7;
 
-/**
- * 把 `[0, count)` 按"该点是否有值"切成若干连续段。
- *
- * 【为什么需要】音高曲线里的「未检测」帧以 `NaN` 给出（见 `vibratoDialogLogic` 的
- * `buildAppliedPreview`）。不切段的话，Canvas 会把断口两侧直接连起来 / 填起来 ——
- * "这里没有数据"就被画成了"这里有一条线"，正是要避免的误读。
- */
-function finiteRuns(values: readonly number[], count: number): Array<[number, number]> {
-    const runs: Array<[number, number]> = [];
-    let start = -1;
-    for (let i = 0; i < count; i += 1) {
-        const ok = Number.isFinite(values[Math.min(i, values.length - 1)]);
-        if (ok) {
-            if (start < 0) start = i;
-        } else if (start >= 0) {
-            runs.push([start, i - 1]);
-            start = -1;
-        }
-    }
-    if (start >= 0) runs.push([start, count - 1]);
-    return runs;
-}
-
 /** 轴标签的紧凑写法：整数不带小数点，非整数最多一位。 */
 function formatAxisCents(value: number): string {
     return String(Math.round(value * 10) / 10);
@@ -188,33 +166,6 @@ export function VibratoPreviewCanvas({
             const count = Math.max(2, samples.wave.length);
             const toX = (index: number) => (index / (count - 1)) * width;
 
-            /**
-             * 折线：遇到无值的采样点**抬笔**，下一个有效点重新起笔。
-             *
-             * 直接 `lineTo(NaN)` 在 Canvas2D 里等价于"跳过这一点"，断口两侧仍会被连成
-             * 一条直线 —— 那正好把"这里没有数据"画成了"这里有一条线"。显式抬笔才能
-             * 让断口真的断开。
-             */
-            const drawPolyline = (values: readonly number[], xAt: (index: number) => number) => {
-                ctx.beginPath();
-                let pen = false;
-                for (let i = 0; i < values.length; i += 1) {
-                    const value = values[i];
-                    if (!Number.isFinite(value)) {
-                        pen = false;
-                        continue;
-                    }
-                    const x = xAt(i);
-                    const y = toY(value);
-                    if (pen) ctx.lineTo(x, y);
-                    else {
-                        ctx.moveTo(x, y);
-                        pen = true;
-                    }
-                }
-                ctx.stroke();
-            };
-
             // 刻度网格 + 读数：没有它，"波形占画布多少"仍然只是相对量；有了它，
             // 用户能直接把波峰高度读成 cents。上下边缘各标一次，中间画到 1/4 的细线。
             ctx.strokeStyle = divider;
@@ -271,7 +222,7 @@ export function VibratoPreviewCanvas({
             ctx.strokeStyle = accent;
             ctx.lineWidth = 1.5;
             ctx.lineJoin = "round";
-            drawPolyline(samples.wave, toX);
+            strokeFinitePolyline(ctx, samples.wave, toX, toY);
 
             // 渐入 / 渐出手柄：小方块落在包络斜坡的起止处，语言与时间轴 clip 的
             // fade 手柄一致 —— 用户已经学会在那里拖。

@@ -314,8 +314,19 @@ export function buildVibratoPreview(
     return { wave, envelope, peakCents: peak };
 }
 
-/** "套用到选区"预览的采样结果：波形 + 包络，全部相对基线（cents）。 */
-export type VibratoAppliedPreview = VibratoPreviewSamples;
+/** "套用到选区"预览的采样结果：颤音偏移 + 包络 + 原/后参数线轮廓。 */
+export interface VibratoAppliedPreview extends VibratoPreviewSamples {
+    /**
+     * 原参数线的轮廓（cents，**绝对**值；断口为 NaN）。
+     *
+     * 与 `wave` 是两个数量级的东西（轮廓可以跨十几个半音，颤音只有几十分），因此
+     * 各自占一条带、各用一套标尺：这条画在上方的轮廓条里，`wave` 画在下方的主图里。
+     * 两者共享时间轴，于是"此刻音高在哪"与"此刻颤音怎么走"可以对着读。
+     */
+    sourceContour: number[];
+    /** 套用后的参数线轮廓（cents，绝对值；断口为 NaN）—— 与 `sourceContour` 同带对照。 */
+    resultContour: number[];
+}
 
 /**
  * 生成"套用到选区"的预览采样。
@@ -405,6 +416,21 @@ export function buildAppliedPreview(args: {
         plan.modulatable[index] ? Math.abs(value) : Number.NaN,
     );
 
+    /*
+     * 轮廓条用的两条**绝对**曲线。
+     *
+     * 【为什么必须单独一条带】轮廓与颤音差两个数量级：同轴并列时要么颤音被压成
+     * 一条直线（这是修过两轮的缺陷），要么轮廓被裁掉。分成两条带、各用自己的标尺，
+     * 两者就都能读；共享时间轴保住"此刻音高在哪 / 此刻颤音怎么走"的对应关系。
+     *
+     * 断口同样按 `plan.modulatable` 判定 —— 气口与跟踪器的过渡帧在这里也是断口，
+     * 否则它们会把轮廓条的标尺拉到 0（那正是主图当初被压扁的原因）。
+     */
+    const contourAt = (value: number, index: number) =>
+        plan.modulatable[index] ? toCents(value) : Number.NaN;
+    const sourceContour = values.map(contourAt);
+    const resultContour = result.dense.map(contourAt);
+
     // 真实峰值（与 `buildVibratoPreview` 同一约定）：读数据此显示，尺度由调用方兜底。
     // 只统计**画出来的两条**，断口不参与 —— 否则一个 NaN 就能把整条纵轴撑爆。
     let peak = 0;
@@ -414,7 +440,7 @@ export function buildAppliedPreview(args: {
     for (const value of envelope) {
         if (Number.isFinite(value)) peak = Math.max(peak, Math.abs(value));
     }
-    return { wave, envelope, peakCents: peak };
+    return { wave, envelope, peakCents: peak, sourceContour, resultContour };
 }
 
 /**
@@ -461,6 +487,54 @@ export function fitPreviewRangeCents(peakCents: number): number {
 
 /** 缩略图专用采样数：64 点足够表达形状，path 缓存也便宜。 */
 export const GLYPH_FRAME_COUNT = 64;
+
+/**
+ * 轮廓条纵轴的最小跨度（cents，= 1 个半音）。
+ *
+ * 【为什么需要下限】轮廓条按数据自适应标尺，而一段长音的轮廓几乎是平的 ——
+ * 跨度趋近 0 时任何一点抖动都会被放大成满屏锯齿，读起来像"音高在剧烈晃动"。
+ * 给一个半音的底线，平直的轮廓就老老实实画成一条直线。
+ */
+export const MIN_CONTOUR_SPAN_CENTS = 100;
+
+/** 轮廓条的纵轴范围（cents）。 */
+export interface ContourRange {
+    min: number;
+    max: number;
+}
+
+/**
+ * 由轮廓数据拟合轮廓条的纵轴范围。
+ *
+ * 只统计**有限值**（断口不参与，否则一个 NaN 就能把标尺撑爆或压没）。两侧各留
+ * 6% 余量，线条不会贴着上下边缘。跨度不足 {@link MIN_CONTOUR_SPAN_CENTS} 时以
+ * 中点为心撑到该下限。
+ *
+ * 【为什么按"画出来的全部"拟合】与主图同一原则：标尺要容得下画的东西，否则线会
+ * 被裁掉。调用方把原参数线与套用后的参数线一起喂进来即可 —— 两者通常几乎重合
+ * （`existing` 基线），因此切换预设时这条标尺基本不动。
+ */
+export function contourRangeCents(series: ReadonlyArray<readonly number[]>): ContourRange {
+    let min = Number.POSITIVE_INFINITY;
+    let max = Number.NEGATIVE_INFINITY;
+    for (const values of series) {
+        for (const value of values) {
+            if (!Number.isFinite(value)) continue;
+            min = Math.min(min, value);
+            max = Math.max(max, value);
+        }
+    }
+    if (!Number.isFinite(min) || !Number.isFinite(max)) return { min: 0, max: 0 };
+
+    const span = max - min;
+    if (span < MIN_CONTOUR_SPAN_CENTS) {
+        const center = (min + max) / 2;
+        const half = MIN_CONTOUR_SPAN_CENTS / 2;
+        return { min: center - half, max: center + half };
+    }
+    const pad = span * 0.06;
+    return { min: min - pad, max: max + pad };
+}
 
 /** 形状比对用的采样数（摘要标签）。 */
 const SHAPE_MATCH_SAMPLES = 64;

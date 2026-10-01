@@ -29,6 +29,7 @@ import { depthStepUnitFor } from "../../features/vibrato/vibratoDepth";
 import { planVibratoTarget } from "../../features/vibrato/vibratoPitch";
 import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
 import { AppDialog, AppField, AppListRow, AppNumberField, AppSwitchRow } from "../../ui";
+import { VibratoContourStrip } from "./vibrato/VibratoContourStrip";
 import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
 import { VibratoPreviewCanvas } from "./vibrato/VibratoPreviewCanvas";
 import {
@@ -246,9 +247,26 @@ export function VibratoApplyDialog({
                                 {previewSamples ? (
                                     <>
                                         <Box className="rounded border border-qt-border bg-qt-panel p-2">
+                                            {/*
+                                             * 上方：原参数线轮廓（自己的标尺）。
+                                             * 下方：颤音偏移（自己的标尺）。
+                                             * 两者差两个数量级，因此分带而不共轴 ——
+                                             * 见 `VibratoContourStrip` 的说明。
+                                             */}
+                                            <span className="hs-type-caption">
+                                                {t("vibrato_apply_contour")}
+                                            </span>
+                                            <VibratoContourStrip
+                                                source={previewSamples.sourceContour}
+                                                result={previewSamples.resultContour}
+                                                ariaLabel={t("vibrato_apply_contour")}
+                                            />
+                                            <span className="hs-type-caption">
+                                                {t("vibrato_apply_offset")}
+                                            </span>
                                             <VibratoPreviewCanvas
                                                 samples={previewSamples}
-                                                ariaLabel={t("vibrato_apply_preview")}
+                                                ariaLabel={t("vibrato_apply_offset")}
                                             />
                                             <Flex justify="between" align="center" mt="1">
                                                 <span className="hs-type-caption">
