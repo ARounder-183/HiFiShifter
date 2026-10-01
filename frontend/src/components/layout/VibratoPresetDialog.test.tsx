@@ -61,7 +61,8 @@ afterEach(async () => {
 async function mountDialog(
     prepare?: (store: ReturnType<typeof configureStore>) => void,
     onOpenChange: (open: boolean) => void = () => undefined,
-    onBackToApply?: () => void,
+    onBackToApply?: (presetId: string) => void,
+    initialPresetId?: string,
 ) {
     const store = configureStore({
         reducer: { session: sessionReducer, keybindings: keybindingsReducer },
@@ -76,6 +77,7 @@ async function mountDialog(
                             open
                             onOpenChange={onOpenChange}
                             onBackToApply={onBackToApply}
+                            initialPresetId={initialPresetId}
                         />
                     </I18nProvider>
                 </AppThemeProvider>
@@ -1221,9 +1223,23 @@ test("删除正在编辑的预设：草稿切到迁移后的预设", async () =>
  * 应用的弹窗）与菜单栏（背后没有）。返回按钮必须跟着宿主走，否则菜单那条路径会给出
  * 一个指向不存在去处的按钮。
  */
-test("提供 onBackToApply 时页脚出现「返回添加颤音」，点击即回调", async () => {
+test("initialPresetId 决定打开时编辑哪一条，返回时把**选中的**那条带回去", async () => {
+    const custom = sanitizeVibratoPreset({ id: "custom_seeded", name: "Seeded", depthCents: 40 });
     const onBackToApply = vi.fn();
-    await mountDialog(undefined, () => undefined, onBackToApply);
+    await mountDialog(
+        (store) => {
+            store.dispatch(upsertVibratoPreset(custom));
+            // 活动预设**不是**要编辑的那条：管理器应当听 initialPresetId，而不是活动预设。
+            store.dispatch(setActiveVibratoPreset("builtin.straight"));
+        },
+        () => undefined,
+        onBackToApply,
+        custom.id,
+    );
+
+    const selected = document.querySelector('[role="option"][data-selected]');
+    expect(selected?.textContent, "打开时应选中 initialPresetId 指定的那条").toContain("Seeded");
+
     const back = [...document.querySelectorAll("button")].find(
         (button) => button.textContent?.trim() === "Back to Add Vibrato",
     );
@@ -1231,7 +1247,8 @@ test("提供 onBackToApply 时页脚出现「返回添加颤音」，点击即�
     await act(async () => {
         back!.click();
     });
-    expect(onBackToApply).toHaveBeenCalledTimes(1);
+    // 带回去的是**选中**的那条（不是当前使用的那条）。
+    expect(onBackToApply).toHaveBeenCalledWith("custom_seeded");
 });
 
 test("未提供 onBackToApply 时没有「返回添加颤音」（菜单栏那条路径）", async () => {

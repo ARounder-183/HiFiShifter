@@ -74,7 +74,8 @@ async function mountDialog(
     overrides: {
         onApply?: (preset: VibratoPreset) => void;
         onExtract?: () => void;
-        onEditPresets?: () => void;
+        onEditPresets?: (presetId: string) => void;
+        initialPresetId?: string;
         onOpenChange?: (open: boolean) => void;
         loadOriginal?: () => Promise<{ values: number[]; framePeriodMs: number } | null>;
     } = {},
@@ -95,6 +96,7 @@ async function mountDialog(
                             onOpenChange={overrides.onOpenChange ?? (() => undefined)}
                             presets={PRESETS}
                             activePresetId="custom_a"
+                            initialPresetId={overrides.initialPresetId}
                             editParam="pitch"
                             paramRange={{ min: -24, max: 24 }}
                             loadOriginal={loadOriginal}
@@ -193,7 +195,7 @@ test("选中系统预设时，保存开关仍可用（保存即另存为自定�
     expect(checkbox?.disabled).toBe(false);
 });
 
-test("页脚「从选区提取…」可用（有 onExtract 时）", async () => {
+test("页脚「从选区提取颤音预设」可用（有 onExtract 时）", async () => {
     const onExtract = vi.fn();
     await mountDialog({ onExtract });
     const extract = [...document.querySelectorAll("button")].find((button) =>
@@ -314,17 +316,17 @@ test("系统预设勾选保存到预设：自动另存为自定义副本，且�
 });
 
 /*
- * 「编辑预设…」：跳到预设管理器去改库，改完由管理器那边「返回添加颤音」送回来。
+ * 「编辑预设」：跳到预设管理器去改库，改完由管理器那边「返回添加颤音」送回来。
  *
  * 【为什么先关窗再跳】跳转前要走本弹窗的关闭路径 —— 否则试听会一直响着，而用户已经
  * 在看另一个窗口了。
  */
-test("点「编辑预设…」：先关掉本弹窗，再交给宿主去开管理器", async () => {
+test("点「编辑预设」：先关掉本弹窗，再带着选中项交给宿主", async () => {
     const onEditPresets = vi.fn();
     const onOpenChange = vi.fn();
     await mountDialog({ onEditPresets, onOpenChange });
     const edit = [...document.querySelectorAll("button")].find(
-        (button) => button.textContent?.trim() === "Edit presets...",
+        (button) => button.textContent?.trim() === "Edit presets",
     );
     expect(edit, "编辑预设按钮应已渲染").toBeTruthy();
     await act(async () => {
@@ -332,5 +334,22 @@ test("点「编辑预设…」：先关掉本弹窗，再交给宿主去开管�
     });
     // 跳转前先关窗（否则试听会一直响着，而用户已经去看另一个窗口了）。
     expect(onOpenChange).toHaveBeenCalledWith(false);
-    expect(onEditPresets).toHaveBeenCalledTimes(1);
+    // 带过去的是**选中的**那条（默认是活动预设 custom_a）。
+    expect(onEditPresets).toHaveBeenCalledWith("custom_a");
+});
+
+/*
+ * initialPresetId 决定应用弹窗打开时**选中**哪一条。
+ *
+ * 从管理器返回时带上用户在那边编辑的那条 —— 接着应用的就是它，而不是"当前使用"的
+ * 那条（用户刚在管理器里挑了半天，回来又要重新挑一次是不能接受的）。
+ */
+test("initialPresetId 决定打开时选中哪一条（优先于当前活动预设）", async () => {
+    const onApply = vi.fn();
+    await mountDialog({ onApply, initialPresetId: "builtin.natural" });
+    const apply = findButton("Apply");
+    await act(async () => {
+        apply!.click();
+    });
+    expect((onApply.mock.calls[0][0] as VibratoPreset).id).toBe("builtin.natural");
 });

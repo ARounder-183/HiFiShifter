@@ -54,6 +54,14 @@ export interface VibratoApplyDialogProps {
     /** 可用预设（系统 + 用户），打开时预选 `activePresetId`。 */
     presets: readonly VibratoPreset[];
     activePresetId: string;
+    /**
+     * 打开时**预选**哪个预设；省略则用当前活动预设。
+     *
+     * 从预设管理器返回时带上它 —— 用户刚才在管理器里点选的那一条（**不是**当前使用
+     * 的那条）就是他要接着应用的。弹窗每次打开都换 key 重挂载，所以这个值只需在
+     * 挂载那一刻对得上。
+     */
+    initialPresetId?: string;
     editParam: string;
     paramRange?: { min: number; max: number };
     /**
@@ -68,12 +76,13 @@ export interface VibratoApplyDialogProps {
     /** 从选区提取预设（页脚 start 位，作用于当前选区，与本弹窗的预设选择无关）。 */
     onExtract?: () => void;
     /**
-     * 「编辑预设…」：跳到预设管理器去改库（捏预设、改名字、导入导出）。
+     * 「编辑预设」：跳到预设管理器去改库（捏预设、改名字、导入导出）。
      *
-     * 与「应用」的关系：这里只负责"去改"，改完怎么回来由宿主安排 —— 管理器那边会
-     * 出现「返回添加颤音」。跳转前先走本弹窗的关闭路径（停试听）。
+     * 参数是**当前选中**的预设 id：管理器要用它继续编辑，而不是回到"当前使用"的那条。
+     * 改完怎么回来由宿主安排 —— 管理器那边会出现「返回添加颤音」。跳转前先走本弹窗的
+     * 关闭路径（停试听）。
      */
-    onEditPresets?: () => void;
+    onEditPresets?: (presetId: string) => void;
 }
 
 export function VibratoApplyDialog({
@@ -81,6 +90,7 @@ export function VibratoApplyDialog({
     onOpenChange,
     presets,
     activePresetId,
+    initialPresetId,
     editParam,
     paramRange,
     loadOriginal,
@@ -95,7 +105,10 @@ export function VibratoApplyDialog({
     // "打开即预选当前活动预设、勾选复位"由**重新挂载**完成 —— 不需要在 effect
     // 里同步 setState（那会触发级联渲染，也被 lint 禁止）。
     const [draft, setDraft] = useState<VibratoPreset | null>(
-        () => presets.find((preset) => preset.id === activePresetId) ?? presets[0] ?? null,
+        () =>
+            presets.find((preset) => preset.id === (initialPresetId ?? activePresetId)) ??
+            presets[0] ??
+            null,
     );
     const [original, setOriginal] = useState<{ values: number[]; framePeriodMs: number } | null>(
         null,
@@ -253,8 +266,9 @@ export function VibratoApplyDialog({
                               label: t("vibrato_apply_edit_presets"),
                               align: "start" as const,
                               onClick: () => {
+                                  if (!draft) return;
                                   handleOpenChange(false);
-                                  onEditPresets();
+                                  onEditPresets(draft.id);
                               },
                           },
                       ]

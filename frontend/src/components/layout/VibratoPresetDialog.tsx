@@ -134,13 +134,22 @@ interface Props {
     editParam?: string;
     paramRange?: { min: number; max: number };
     /**
+     * 打开时**编辑**哪个预设；省略则用当前活动预设。
+     *
+     * 从「添加颤音」跳过来时带上它：用户在那边选中的是哪一条，这边就接着编辑哪一条
+     * —— 而不是回到"当前使用"的那条，让用户重新找一遍。
+     */
+    initialPresetId?: string;
+    /**
      * 「返回添加颤音」。
      *
      * 【为什么是可选回调而不是自己开窗口】管理器有两个宿主（参数编辑器与菜单栏）：
      * 只有从「添加颤音」跳过来的那一次才该有返回按钮 —— 菜单栏那条路径背后没有待应用
      * 的弹窗。因此"从哪来、回哪去"由宿主决定，管理器只管把动作画出来。
+     *
+     * 参数是**当前编辑中**的预设 id：应用弹窗要用它接着选中，而不是回到当前使用的那条。
      */
-    onBackToApply?: () => void;
+    onBackToApply?: (presetId: string) => void;
 }
 
 /** 列表列的宽度（CSS 像素）。 */
@@ -173,6 +182,7 @@ export function VibratoPresetDialog({
     onOpenChange,
     editParam = "pitch",
     paramRange,
+    initialPresetId,
     onBackToApply,
 }: Props) {
     const dispatch = useAppDispatch();
@@ -302,17 +312,19 @@ export function VibratoPresetDialog({
         }
         if (seededForOpenRef.current) return;
         seededForOpenRef.current = true;
+        // 播种优先级：调用方指定的那条（从「添加颤音」跳过来）→ 当前活动预设 → 列表首项。
         const active =
+            resolved.all.find((preset) => preset.id === (initialPresetId ?? "")) ??
             resolved.all.find((preset) => preset.id === session.activeVibratoPresetId) ??
             resolved.all[0];
         if (active) {
-            // 对话框打开是一次离散动作：按当前活动预设播种局部草稿，并把预览纵轴
-            // 拟合一次（编辑期间保持不动）。
+            // 对话框打开是一次离散动作：播种局部草稿，并把预览纵轴拟合一次
+            // （编辑期间保持不动）。
             // eslint-disable-next-line react-hooks/set-state-in-effect -- 打开时按活动预设播种草稿（既有模式）
             setDraft(active);
             fitPreviewAxis(active);
         }
-    }, [open, resolved.all, session.activeVibratoPresetId, fitPreviewAxis]);
+    }, [open, resolved.all, session.activeVibratoPresetId, initialPresetId, fitPreviewAxis]);
 
     const isBuiltin = Boolean(draft?.builtin);
     const previewSamples = useMemo(() => (draft ? buildVibratoPreview(draft) : null), [draft]);
@@ -955,8 +967,9 @@ export function VibratoPresetDialog({
                                   align: "start" as const,
                                   autoClose: false,
                                   onClick: () => {
+                                      if (!draft) return;
                                       handleOpenChange(false);
-                                      onBackToApply();
+                                      onBackToApply(draft.id);
                                   },
                               },
                           ]
