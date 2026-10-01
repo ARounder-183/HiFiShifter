@@ -434,6 +434,80 @@ test("切换预设时把未保存的改动写回库（编辑途中可换预设�
 });
 
 /*
+ * 右键整体变换要一路走到草稿（不只是编辑器内部的事）。
+ *
+ * 【契约】右键拖拽改的是**同一个** `cycle: { kind: "table", table }` ——
+ * 与画笔、与"从选区提取"完全同源，因此预览 / 试听 / 应用无需任何特殊处理。
+ * 这条测试同时钉住"手势的位移真的落进了草稿"，而不只是 `onChange` 被调用过。
+ */
+test("右键拖拽整体旋转手绘曲线，落地仍是 table 波形", async () => {
+    const custom = sanitizeVibratoPreset({
+        id: "custom_rotate",
+        name: "Rotate Me",
+        depthCents: 40,
+    });
+    const store = await mountDialog((store) => {
+        store.dispatch(upsertVibratoPreset(custom));
+        store.dispatch(setActiveVibratoPreset(custom.id));
+    });
+
+    const drawButton = [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Draw...",
+    );
+    await act(async () => {
+        drawButton!.click();
+    });
+
+    const canvas = document.querySelector<HTMLCanvasElement>(
+        '[data-testid="vibrato-cycle-editor"] canvas',
+    );
+    expect(canvas, "周期画布的 canvas 应已渲染").toBeTruthy();
+    const container = canvas!.parentElement as HTMLDivElement;
+    // jsdom 没有排版：手工给出几何，手势的换算才有的算（宽 640 / 64 格 → 每格 10px）。
+    const width = 640;
+    container.getBoundingClientRect = () =>
+        ({
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: 120,
+            width,
+            height: 120,
+            x: 0,
+            y: 0,
+            toJSON: () => ({}),
+        }) as DOMRect;
+    Object.defineProperty(container, "clientWidth", { value: width, configurable: true });
+
+    const pointer = (type: string, init: PointerEventInit) =>
+        new PointerEvent(type, { bubbles: true, cancelable: true, ...init });
+    // 向右拖 160px = 1/4 周期 = 16 格。
+    await act(async () => {
+        canvas!.dispatchEvent(pointer("pointerdown", { button: 2, clientX: 100, clientY: 60 }));
+    });
+    await act(async () => {
+        canvas!.dispatchEvent(pointer("pointermove", { clientX: 260, clientY: 60 }));
+    });
+    await act(async () => {
+        canvas!.dispatchEvent(pointer("pointerup", { button: 2, clientX: 260, clientY: 60 }));
+    });
+
+    // 切到系统预设：未保存的改动会被写回库（既有行为），从库里读最终落地的波形。
+    const rows = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    const straightRow = rows.find((row) => row.textContent?.includes("Straight"));
+    await act(async () => {
+        straightRow!.click();
+    });
+
+    const saved = store.getState().session.vibratoPresets.find((p) => p.id === "custom_rotate");
+    expect(saved?.cycle.kind).toBe("table");
+    const table = (saved!.cycle as { kind: "table"; table: number[] }).table;
+    expect(table.length).toBe(64);
+    // 正弦的峰原在第 16 格，转过 1/4 周期后落到第 32 格。
+    expect(table.indexOf(Math.max(...table))).toBe(32);
+});
+
+/*
  * 关闭入口：保存不再关闭窗口之后，页脚必须有一个显式的「关闭」按钮 ——
  * 否则用户只剩 Esc / 点外部两条不显眼的路。
  */

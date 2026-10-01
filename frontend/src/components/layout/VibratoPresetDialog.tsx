@@ -1419,7 +1419,16 @@ export function VibratoPresetDialog({
                                                         <VibratoCycleEditor
                                                             table={draft.cycle.table}
                                                             disabled={isBuiltin}
-                                                            ariaLabel={t("vibrato_handdraw_open")}
+                                                            // 画布的 aria-label 讲"这块画布能干什么"，
+                                                            // 与展开按钮的"手绘…"（讲动作）分开两个键。
+                                                            ariaLabel={t("vibrato_handdraw_canvas")}
+                                                            hint={t("vibrato_handdraw_hint")}
+                                                            readoutLabels={{
+                                                                phase: t("vibrato_handdraw_phase"),
+                                                                scale: t("vibrato_handdraw_scale"),
+                                                            }}
+                                                            // 「精细调整」与预览画布同一个键位。
+                                                            fineAdjustKb={paramFineAdjustKb}
                                                             smoothLabel={t(
                                                                 "vibrato_handdraw_smooth",
                                                             )}

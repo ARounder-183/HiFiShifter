@@ -1920,6 +1920,12 @@ export const koKR = {
     vibrato_handdraw_smooth: "부드럽게",
     vibrato_handdraw_reset: "이전 모양으로",
     vibrato_handdraw_reset_shape: "{shape}(으)로 초기화",
+    vibrato_handdraw_hint:
+        "왼쪽 드래그로 그리기 · 오른쪽 드래그로 전체 회전 / 크기 조절 · 보조키로 미세 조정",
+    vibrato_handdraw_canvas:
+        "직접 그린 주기 캔버스: 왼쪽 버튼으로 그리기, 오른쪽 드래그로 전체 회전 / 크기 조절",
+    vibrato_handdraw_phase: "위상",
+    vibrato_handdraw_scale: "크기",
     vibrato_skew: "치우침",
     vibrato_depth_label: "깊이",
     vibrato_rate_label: "속도",
