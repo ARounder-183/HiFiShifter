@@ -17,7 +17,12 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { buildAuditionCurve, VibratoAuditionPlayer, AUDITION_BASE_MIDI } from "./vibratoAudition";
+import {
+    AUDITION_BASE_MIDI,
+    buildAuditionCurve,
+    buildContourAuditionPair,
+    VibratoAuditionPlayer,
+} from "./vibratoAudition";
 
 /** 假振荡器：记录 start/stop 与音高调度，便于断言孤儿与包络。 */
 function makeFakeOsc() {
@@ -294,5 +299,52 @@ describe("VibratoAuditionPlayer", () => {
             player.play({ freqHz: new Float32Array([440, 880]), durationSec: 0, peakHz: 880 }),
         ).toBe(false);
         expect(player.isPlaying).toBe(false);
+    });
+});
+
+/*
+ * A/B 试听：原参数线 vs 新参数线。
+ *
+ * 【契约】两条曲线必须**共用同一个中心与同一个基音** —— 否则听感差异里混进了基准音高
+ * 的偏移，用户听到的就不再只是"加了颤音之后的差别"，对比失去意义。
+ */
+describe("buildContourAuditionPair", () => {
+    const baseHz = 440 * Math.pow(2, (AUDITION_BASE_MIDI - 69) / 12);
+    const hzAt = (cents: number) => baseHz * Math.pow(2, cents / 1200);
+
+    it("两条线共用同一个中心：差异只来自加进去的那部分", () => {
+        const source = [6000, 6100, 6200, 6300];
+        // 整体抬高 40 分（等价于"加了一点偏置"）。
+        const result = source.map((value) => value + 40);
+        const pair = buildContourAuditionPair(source, result, 5);
+        expect(pair).not.toBeNull();
+        // 中心 = 6150 → 原线是 ±150 分，新线在此基础上再高 40 分。
+        expect(pair!.source.freqHz[0]).toBeCloseTo(hzAt(-150), 4);
+        expect(pair!.result.freqHz[0]).toBeCloseTo(hzAt(-110), 4);
+    });
+
+    it("断口按中心音高持续（合成音没有「没有音高」可言）", () => {
+        const values = [Number.NaN, 6000, 6200, Number.NaN];
+        const pair = buildContourAuditionPair(values, values, 5);
+        // `freqHz` 是 Float32Array：比较精度按单精度来（下同）。
+        expect(pair!.source.freqHz[0]).toBeCloseTo(baseHz, 3);
+        expect(pair!.source.freqHz[3]).toBeCloseTo(baseHz, 3);
+    });
+
+    it("时长按真实帧周期折算（不是写死的 5ms）", () => {
+        const values = [6000, 6100, 6200];
+        expect(buildContourAuditionPair(values, values, 5)!.source.durationSec).toBeCloseTo(
+            0.01,
+            9,
+        );
+        expect(buildContourAuditionPair(values, values, 10)!.source.durationSec).toBeCloseTo(
+            0.02,
+            9,
+        );
+    });
+
+    it("原参数线不足两点时返回 null（调用方据此禁用按钮）", () => {
+        expect(buildContourAuditionPair([Number.NaN, Number.NaN], [1, 2], 5)).toBeNull();
+        expect(buildContourAuditionPair([6000], [6000], 5)).toBeNull();
     });
 });

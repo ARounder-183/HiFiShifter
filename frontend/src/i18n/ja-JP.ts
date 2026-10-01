@@ -2022,7 +2022,8 @@ export const jaJP = {
 
     vibrato_apply_presets: "プリセット",
     vibrato_apply_preview: "選択範囲に適用",
-    vibrato_apply_contour: "破線：元のパラメータ線",
+    vibrato_apply_audition_source: "元のパラメータ線を試聴",
+    vibrato_apply_audition_result: "適用後のパラメータ線を試聴",
     vibrato_apply_preview_empty: "範囲を選択すると結果をプレビューできます。",
     vibrato_apply_preview_no_pitch: "この範囲にビブラートをかけられるピッチがありません。",
     vibrato_apply_save_preset: "この調整をプリセットにも保存",

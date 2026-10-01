@@ -204,19 +204,24 @@ test("无选区数据时显示占位提示而不是空画布", async () => {
 });
 
 /*
- * 预览是**一张图**：轮廓叠在颤音偏移之上。
+ * 预览是**一张图**：轮廓叠在颤音偏移之上，右侧是 A/B 试听。
  *
- * 【为什么值得测】轮廓与颤音差两个数量级，早先拆成上下两条带（各有各的标尺）。
+ * 【为什么值得测】轮廓与颤音差两个数量级，早先拆成上下两条带（各有各的标尺），
  * 但那样要对比"颤音走在音高的哪一段上"就得上下看 —— 用户明确要求叠起来。
- * 现在同图叠放：轮廓按自身范围铺满画布做背景虚线，颤音偏移按 cents 标尺画在前景。
- * 所以"只有一张画布"是契约，不是实现细节。
+ * 现在同图叠放：轮廓按自身范围铺满画布做背景虚线，颤音偏移按 cents 标尺画在前景；
+ * 试听按同一条时间轴、同一个中心给出原参数线 / 新参数线两条，供 A/B。
  */
-test("预览是一张图：轮廓叠在颤音偏移之上，而不是上下两条带", async () => {
+test("预览是一张图：轮廓叠在颤音偏移之上，并带 A/B 试听按钮", async () => {
     await mountDialog();
     const canvases = [...document.querySelectorAll("canvas[role=img]")];
     expect(canvases.length).toBe(1);
-    // 背景是什么由读数行说明（否则那条虚线会被误读成同一标尺下的另一条数据）。
-    expect(document.body.textContent ?? "").toContain("Dashed: source parameter line");
+    // 图例文案已按要求移除（那条虚线由试听按钮的文字承担说明）。
+    expect(document.body.textContent ?? "").not.toContain("Dashed");
+    const labels = [...document.querySelectorAll("button")].map((button) =>
+        button.textContent?.trim(),
+    );
+    expect(labels).toContain("Audition original");
+    expect(labels).toContain("Audition result");
 });
 
 /*

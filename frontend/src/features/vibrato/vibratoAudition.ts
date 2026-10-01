@@ -55,10 +55,13 @@ export interface VibratoAuditionCurve {
  * 30 cents 在 C4（≈262Hz）上是 ±7.6Hz，听感明确。
  *
  * @param baseMidi 基音（MIDI 音高）。默认 C4。
+ * @param framePeriodMs 曲线每点的时间步长（毫秒）。默认与预览几何一致（5ms）——
+ *   套用到选区时要用**真实数据的帧周期**，否则时长不对、听感快慢会错。
  */
 export function buildAuditionCurve(
     preview: Pick<VibratoPreviewSamples, "wave">,
     baseMidi: number = AUDITION_BASE_MIDI,
+    framePeriodMs: number = DEFAULT_FRAME_PERIOD_MS,
 ): VibratoAuditionCurve {
     const baseHz = 440 * Math.pow(2, (baseMidi - 69) / 12);
     const wave = preview.wave;
@@ -69,8 +72,58 @@ export function buildAuditionCurve(
         freqHz[i] = baseHz * Math.pow(2, cents / 1200);
         peakHz = Math.max(peakHz, freqHz[i]);
     }
-    const durationSec = ((freqHz.length - 1) * DEFAULT_FRAME_PERIOD_MS) / 1000;
+    const step =
+        Number.isFinite(framePeriodMs) && framePeriodMs > 0
+            ? framePeriodMs
+            : DEFAULT_FRAME_PERIOD_MS;
+    const durationSec = ((freqHz.length - 1) * step) / 1000;
     return { freqHz, durationSec, peakHz };
+}
+
+/** A/B 试听的一对曲线：原参数线 vs 新参数线。 */
+export interface VibratoAuditionPair {
+    source: VibratoAuditionCurve;
+    result: VibratoAuditionCurve;
+}
+
+/**
+ * 由"原 / 新参数线轮廓"构建一对试听曲线。
+ *
+ * 【为什么要一对、且共用同一个中心】对比的前提是"除了颤音，别的都一样"。两条曲线
+ * 各自减去**同一个**中心，于是听感差异只来自颤音本身；若各减各的中心，基准音高会
+ * 差一截，A/B 听到的就不再只是颤音。
+ *
+ * 【中心取哪】取原参数线**已检测帧**的均值：稳定、对称，且不随预设切换而变 ——
+ * 换预设时基准音高不跳，对比才成立。
+ *
+ * 【断口怎么处理】未检测帧在这条曲线上是 NaN。试听是合成音，没有"没有音高"可言，
+ * 因此按中心音高持续（`buildAuditionCurve` 把非有限值当 0，即中心）。这让节奏保持
+ * 连续，代价是气口处会有一个稳定的音 —— 试听只是听"颤音长什么样"，不承担还原气口。
+ *
+ * @returns 原参数线不足两点（无数据）时返回 `null`，调用方据此禁用按钮。
+ */
+export function buildContourAuditionPair(
+    sourceContour: readonly number[],
+    resultContour: readonly number[],
+    framePeriodMs: number = DEFAULT_FRAME_PERIOD_MS,
+): VibratoAuditionPair | null {
+    const finite = sourceContour.filter((value) => Number.isFinite(value));
+    if (finite.length < 2) return null;
+    const center = finite.reduce((sum, value) => sum + value, 0) / finite.length;
+    const asWave = (values: readonly number[]) =>
+        values.map((value) => (Number.isFinite(value) ? value - center : Number.NaN));
+    return {
+        source: buildAuditionCurve(
+            { wave: asWave(sourceContour) },
+            AUDITION_BASE_MIDI,
+            framePeriodMs,
+        ),
+        result: buildAuditionCurve(
+            { wave: asWave(resultContour) },
+            AUDITION_BASE_MIDI,
+            framePeriodMs,
+        ),
+    };
 }
 
 export class VibratoAuditionPlayer {

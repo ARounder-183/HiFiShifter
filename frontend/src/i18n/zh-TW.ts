@@ -1952,7 +1952,8 @@ export const zhTW = {
 
     vibrato_apply_presets: "預設",
     vibrato_apply_preview: "套用到選區",
-    vibrato_apply_contour: "虛線：原參數線輪廓",
+    vibrato_apply_audition_source: "試聽原參數線",
+    vibrato_apply_audition_result: "試聽新參數線",
     vibrato_apply_preview_empty: "選取一段後可在此預覽效果。",
     vibrato_apply_preview_no_pitch: "這段選區裡沒有可加顫音的音高。",
     vibrato_apply_save_preset: "同時把這些調整儲存到預設",

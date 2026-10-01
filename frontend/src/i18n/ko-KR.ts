@@ -1993,7 +1993,8 @@ export const koKR = {
 
     vibrato_apply_presets: "프리셋",
     vibrato_apply_preview: "선택 범위에 적용",
-    vibrato_apply_contour: "점선: 원본 파라미터 라인",
+    vibrato_apply_audition_source: "원본 파라미터 라인 듣기",
+    vibrato_apply_audition_result: "적용 후 파라미터 라인 듣기",
     vibrato_apply_preview_empty: "범위를 선택하면 결과를 미리 볼 수 있습니다.",
     vibrato_apply_preview_no_pitch: "이 범위에 비브라토를 적용할 피치가 없습니다.",
     vibrato_apply_save_preset: "이 조정을 프리셋에도 저장",

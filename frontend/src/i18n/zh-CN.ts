@@ -1950,7 +1950,8 @@ export const zhCN = {
 
     vibrato_apply_presets: "预设",
     vibrato_apply_preview: "套用到选区",
-    vibrato_apply_contour: "虚线：原参数线轮廓",
+    vibrato_apply_audition_source: "试听原参数线",
+    vibrato_apply_audition_result: "试听新参数线",
     vibrato_apply_preview_empty: "选中一段后可在此预览效果。",
     vibrato_apply_preview_no_pitch: "这段选区里没有可加颤音的音高。",
     vibrato_apply_save_preset: "同时把这些调整保存到预设",

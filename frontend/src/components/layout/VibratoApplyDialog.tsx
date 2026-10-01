@@ -25,10 +25,11 @@ import {
     isBuiltinVibratoPresetId,
     sanitizeVibratoPreset,
 } from "../../features/vibrato/vibratoPresets";
+import { buildContourAuditionPair, vibratoAudition } from "../../features/vibrato/vibratoAudition";
 import { depthStepUnitFor } from "../../features/vibrato/vibratoDepth";
 import { planVibratoTarget } from "../../features/vibrato/vibratoPitch";
 import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
-import { AppDialog, AppField, AppListRow, AppNumberField, AppSwitchRow } from "../../ui";
+import { AppButton, AppDialog, AppField, AppListRow, AppNumberField, AppSwitchRow } from "../../ui";
 import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
 import { VibratoPreviewCanvas } from "./vibrato/VibratoPreviewCanvas";
 import {
@@ -120,6 +121,52 @@ export function VibratoApplyDialog({
 
     const isBuiltin = draft ? isBuiltinVibratoPresetId(draft.id) : false;
     const depthUnit = depthStepUnitFor(editParam);
+
+    /**
+     * 正在试听的是哪一条（`null` = 没在响）。
+     *
+     * 用"哪一条"而不是布尔量：两个按钮各自要显示自己的播放 / 停止态，而试听器同一
+     * 时刻只允许一路声音（新的会抢占旧的）。
+     */
+    const [audition, setAudition] = useState<"source" | "result" | null>(null);
+
+    /** A/B 试听的两条曲线：同一中心、同一基音，差异只来自颤音。 */
+    const auditionCurves = useMemo(() => {
+        if (!previewSamples || !original) return null;
+        return buildContourAuditionPair(
+            previewSamples.sourceContour,
+            previewSamples.resultContour,
+            original.framePeriodMs,
+        );
+    }, [previewSamples, original]);
+
+    // 卸载兜底：窗口消失了声音不能继续响。这里不含 setState —— 按钮状态复位在
+    // `handleOpenChange`（事件处理器）里做，不违反 effect 的规则（与预设管理器同款）。
+    useEffect(() => () => vibratoAudition.stop(), []);
+    // 父级把 `open` 置 false（不是经本组件关闭）时也要停掉声音。
+    useEffect(() => {
+        if (!open) vibratoAudition.stop();
+    }, [open]);
+
+    /** 关闭对话框：先停试听、复位按钮，再向上传播。 */
+    function handleOpenChange(next: boolean) {
+        if (!next) {
+            vibratoAudition.stop();
+            setAudition(null);
+        }
+        onOpenChange(next);
+    }
+
+    /** 播放 / 停止某一条试听。自然结束后引擎回调把按钮切回「播放」。 */
+    function toggleAudition(kind: "source" | "result") {
+        if (audition === kind || !auditionCurves) {
+            vibratoAudition.stop();
+            setAudition(null);
+            return;
+        }
+        const started = vibratoAudition.play(auditionCurves[kind], () => setAudition(null));
+        setAudition(started ? kind : null);
+    }
     /**
      * 选区里**没有可调制的音符段**。
      *
@@ -148,13 +195,13 @@ export function VibratoApplyDialog({
             void dispatch(persistUiSettings());
         }
         onApply(normalized);
-        onOpenChange(false);
+        handleOpenChange(false);
     };
 
     return (
         <AppDialog
             open={open}
-            onOpenChange={onOpenChange}
+            onOpenChange={handleOpenChange}
             title={t("menu_add_vibrato")}
             size="xl"
             defaultActionId="apply"
@@ -166,7 +213,7 @@ export function VibratoApplyDialog({
                               label: t("vibrato_extract_action"),
                               align: "start" as const,
                               onClick: () => {
-                                  onOpenChange(false);
+                                  handleOpenChange(false);
                                   onExtract();
                               },
                           },
@@ -175,7 +222,7 @@ export function VibratoApplyDialog({
                 {
                     id: "cancel",
                     label: t("cancel"),
-                    onClick: () => onOpenChange(false),
+                    onClick: () => handleOpenChange(false),
                 },
                 {
                     id: "apply",
@@ -257,18 +304,56 @@ export function VibratoApplyDialog({
                                                 contour={previewSamples.sourceContour}
                                                 ariaLabel={t("vibrato_apply_preview")}
                                             />
-                                            <Flex justify="between" align="center" mt="1" gap="2">
+                                            <Flex
+                                                justify="between"
+                                                align="center"
+                                                mt="1"
+                                                gap="2"
+                                                wrap="wrap"
+                                            >
+                                                {/* 纵轴读数：它属于前景那条颤音偏移曲线，
+                                                    因此贴着左侧 —— 与刻度标签同侧。 */}
                                                 <span className="hs-type-caption">
-                                                    {t("vibrato_apply_contour")}
+                                                    {`±${formatNumber(previewSamples.peakCents)} ${t("vibrato_unit_cents")}`}
                                                 </span>
                                                 <Flex
                                                     align="center"
                                                     gap="2"
+                                                    wrap="wrap"
                                                     style={{ minWidth: 0 }}
                                                 >
-                                                    <span className="hs-type-caption">
-                                                        {`±${formatNumber(previewSamples.peakCents)} ${t("vibrato_unit_cents")}`}
-                                                    </span>
+                                                    {/*
+                                                     * 试听 A/B：原参数线与新参数线各一个按钮。
+                                                     * 两条曲线共用同一个中心与基音，因此听感差异
+                                                     * 只来自颤音本身 —— 这正是"对比"要的。
+                                                     */}
+                                                    {(
+                                                        [
+                                                            [
+                                                                "source",
+                                                                "vibrato_apply_audition_source",
+                                                            ],
+                                                            [
+                                                                "result",
+                                                                "vibrato_apply_audition_result",
+                                                            ],
+                                                        ] as const
+                                                    ).map(([kind, labelKey]) => (
+                                                        <AppButton
+                                                            key={kind}
+                                                            size="sm"
+                                                            emphasis={
+                                                                audition === kind ? "solid" : "soft"
+                                                            }
+                                                            aria-pressed={audition === kind}
+                                                            disabled={!auditionCurves}
+                                                            onClick={() => toggleAudition(kind)}
+                                                        >
+                                                            {audition === kind
+                                                                ? t("vibrato_audition_stop")
+                                                                : t(labelKey)}
+                                                        </AppButton>
+                                                    ))}
                                                     {isBuiltin ? (
                                                         <span className="hs-type-caption">
                                                             {t("vibrato_manager_readonly")}
