@@ -183,8 +183,8 @@ export function VibratoApplyDialog({
     const auditionCurves = useMemo(() => {
         if (!previewSamples || !original) return null;
         return buildContourAuditionPair(
-            previewSamples.sourceContour,
-            previewSamples.resultContour,
+            previewSamples.contour,
+            previewSamples.wave,
             original.framePeriodMs,
         );
     }, [previewSamples, original]);
@@ -381,7 +381,6 @@ export function VibratoApplyDialog({
                                              */}
                                             <VibratoPreviewCanvas
                                                 samples={previewSamples}
-                                                contour={previewSamples.sourceContour}
                                                 halfCents={previewHalfCents}
                                                 ariaLabel={t("vibrato_apply_preview")}
                                             />
@@ -395,7 +394,7 @@ export function VibratoApplyDialog({
                                                 {/* 纵轴读数：它属于前景那条颤音偏移曲线，
                                                     因此贴着左侧 —— 与刻度标签同侧。 */}
                                                 <span className="hs-type-caption">
-                                                    {`±${formatNumber(previewSamples.peakCents)} ${t("vibrato_unit_cents")}`}
+                                                    {`±${formatNumber(previewSamples.vibratoPeakCents)} ${t("vibrato_unit_cents")}`}
                                                 </span>
                                                 <Flex
                                                     align="center"

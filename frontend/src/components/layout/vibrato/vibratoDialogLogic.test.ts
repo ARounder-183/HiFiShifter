@@ -10,7 +10,6 @@ import { sanitizeVibratoPreset } from "../../../features/vibrato/vibratoPresets"
 import {
     BASELINE_MODE_KEYS,
     BASELINE_MODE_ORDER,
-    MIN_CONTOUR_SPAN_CENTS,
     ENVELOPE_CURVE_KEYS,
     ENVELOPE_CURVE_ORDER,
     RATE_MODE_KEYS,
@@ -19,7 +18,6 @@ import {
     WAVE_SHAPE_ORDER,
     buildAppliedPreview,
     buildVibratoPreview,
-    contourRangeCents,
     builtinIdOf,
     cycleShapeLabelKey,
     depthForParam,
@@ -359,40 +357,49 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
         baseline: "existing",
     });
 
-    test("波形与包络同长；波形横跨 0（是相对基线的偏移，不是绝对音高）", () => {
-        const preview = buildAppliedPreview({
-            preset,
-            original: ramp,
-            param: "pitch",
-            framePeriodMs: 5,
-        });
-        expect(preview).not.toBeNull();
-        expect(preview!.wave.length).toBe(ramp.length);
-        expect(preview!.envelope.length).toBe(ramp.length);
-        const finite = preview!.wave.filter(Number.isFinite);
-        const max = Math.max(...finite);
-        const min = Math.min(...finite);
-        // 素材在 MIDI 60 附近（6000 分），若画的是绝对音高，这两个值会是 6000 上下。
-        expect(min).toBeLessThan(0);
-        expect(max).toBeGreaterThan(0);
-        // 对称地围绕 0 摆动（整周期采样下正负峰值应当几乎相等）。
-        expect(Math.abs(max + min)).toBeLessThan(1);
-    });
-
-    test("baseline existing：波形的峰值就是深度", () => {
+    /*
+     * 两条参数线共用一套纵轴。
+     *
+     * 【为什么必须共用】用户要对比的是"新参数线相对原参数线差多少"。两条线相差两个
+     * 数量级（轮廓可以跨十几个半音、颤音只有几十分），各自减掉**同一个**中心之后，
+     * 它们才落在同一根标尺上 —— 按「适应」换比例尺时两条一起缩放，而不是只有一条动
+     * （用户报过："原参数线不也应该跟着动吗"）。
+     */
+    test("原线相对共同中心取值（形状保留），结果线与它之差就是颤音", () => {
         const preview = buildAppliedPreview({
             preset,
             original: ramp,
             param: "pitch",
             framePeriodMs: 5,
         })!;
-        const peak = Math.max(...preview.wave.filter(Number.isFinite).map(Math.abs));
-        // 30 分深度：音高按分换算，偏移峰值应当在 30 附近（不规则度为 0 的解析值）。
-        expect(peak).toBeGreaterThan(28);
-        expect(peak).toBeLessThan(32);
+        expect(preview.contour.length).toBe(ramp.length);
+        expect(preview.wave.length).toBe(ramp.length);
+        expect(preview.envelope.length).toBe(ramp.length);
+        // 素材是 60 → 62 的上行，中心 = 均值 61 分音 → 原线围绕 0 摆动 ±100 分。
+        const contour = preview.contour.filter(Number.isFinite);
+        expect(Math.min(...contour)).toBeCloseTo(-100, 6);
+        expect(Math.max(...contour)).toBeCloseTo(100, 6);
+        // 结果线 − 原线 = 颤音：两条线在图上只差一点点，这正是要看的对比。
+        const diff = preview.wave
+            .map((value, index) => value - preview.contour[index])
+            .filter(Number.isFinite);
+        expect(Math.max(...diff.map(Math.abs))).toBeGreaterThan(28);
+        expect(Math.max(...diff.map(Math.abs))).toBeLessThan(32);
     });
 
-    test("深度为 0：波形恒为 0（不改动音高）", () => {
+    test("读数用的颤音幅度与素材轮廓宽度无关", () => {
+        const preview = buildAppliedPreview({
+            preset,
+            original: ramp,
+            param: "pitch",
+            framePeriodMs: 5,
+        })!;
+        // 30 分深度：读数只跟包络有关，不该被素材自身的音高起伏撑大。
+        expect(preview.vibratoPeakCents).toBeGreaterThan(28);
+        expect(preview.vibratoPeakCents).toBeLessThan(32);
+    });
+
+    test("深度为 0：结果线与原线重合（不改动音高）", () => {
         const flat = sanitizeVibratoPreset({ id: "custom_b", depthCents: 0, baseline: "existing" });
         const preview = buildAppliedPreview({
             preset: flat,
@@ -400,9 +407,10 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             param: "pitch",
             framePeriodMs: 5,
         })!;
-        for (const value of preview.wave.filter(Number.isFinite)) {
-            expect(Math.abs(value)).toBeLessThan(1e-9);
+        for (let i = 0; i < ramp.length; i += 1) {
+            expect(preview.wave[i]).toBeCloseTo(preview.contour[i], 6);
         }
+        expect(preview.vibratoPeakCents).toBe(0);
     });
 
     test("数据不足两点时返回 null（由调用方显示占位提示）", () => {
@@ -483,12 +491,13 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             for (let i = noteEnd; i < withGaps.length; i += 1) {
                 expect(Number.isNaN(preview.wave[i])).toBe(true);
             }
-            // 音符帧有值：直线预设（深度 0）下结果就是那条线本身，波形恒为 0。
-            for (let i = noteStart; i < noteEnd; i += 1) {
-                expect(preview.wave[i]).toBeCloseTo(0, 6);
-            }
-            // 纵轴不会被气口与过渡帧撑大。
-            expect(preview.peakCents).toBeLessThan(1e-9);
+            // 音符帧有值：直线预设（深度 0）下结果就是那条线本身 —— 在"相对共同中心"
+            // 的坐标里它是一个常量（不是 0：中心是原参数线的均值，而线画在音符的音高上）。
+            const lineValues = preview.wave.slice(noteStart, noteEnd).filter(Number.isFinite);
+            expect(Math.max(...lineValues) - Math.min(...lineValues)).toBeLessThan(1e-9);
+            // 纵轴只按画出来的值拟合：气口与过渡帧是断口，不参与。
+            expect(preview.peakCents).toBeGreaterThan(0);
+            expect(preview.peakCents).toBeLessThan(500);
         });
 
         test("不受颤音影响的帧，包络也是断口（不在气口上画出一条颤音带）", () => {
@@ -599,7 +608,12 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             ...new Array<number>(100).fill(0),
         ];
 
-        test("素材轮廓再宽也不压缩颤音：峰值恒等于深度", () => {
+        /*
+         * 纵轴按**画出来的全部**拟合（两条线 + 包络带），因此素材轮廓越宽、纵轴越大；
+         * 而"这个预设会摆多少"单独由 `vibratoPeakCents` 表达 —— 它与轮廓宽度无关。
+         * 这正是"读得出颤音大小"的落点（读数用的就是它）。
+         */
+        test("读数用的颤音幅度与素材轮廓宽度无关", () => {
             const a = buildAppliedPreview({
                 preset: deep,
                 original: steadyNote,
@@ -612,32 +626,19 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
                 param: "pitch",
                 framePeriodMs: 5,
             })!;
-            // 两种素材下的峰值都应当 ≈ 40 分，而不是被那段缓升撑到上千。
             for (const preview of [a, b]) {
-                expect(preview.peakCents).toBeGreaterThan(38);
-                expect(preview.peakCents).toBeLessThan(42);
+                expect(preview.vibratoPeakCents).toBeGreaterThan(38);
+                expect(preview.vibratoPeakCents).toBeLessThan(42);
             }
-            // 轮廓的有无完全不影响纵轴 —— 这正是"看得清颤音"的前提。
-            expect(b.peakCents).toBeCloseTo(a.peakCents, 9);
-        });
-
-        test("existing 基线下波形即颤音偏移，峰值与纵轴读数一致", () => {
-            const preview = buildAppliedPreview({
-                preset: deep,
-                original: rampedNote,
-                param: "pitch",
-                framePeriodMs: 5,
-            })!;
-            const peak = Math.max(...finite(preview.wave).map(Math.abs));
-            expect(peak).toBeCloseTo(preview.peakCents, 9);
+            // 两种素材的颤音幅度完全一致 —— 轮廓的有无不影响它。
+            expect(b.vibratoPeakCents).toBeCloseTo(a.vibratoPeakCents, 9);
         });
 
         /*
          * 默认预设就是「直线」（列表首位），它的基线是 `line`：一条从首音符到末音符
-         * 的直线。选区里那段 0→60 的过渡缓升离这条线可以有上千分 —— 旧实现把这个
-         * 量算进峰值，45 分的颤音只剩 1% 的画布高度。纵轴只能跟颤音自己的幅度走。
+         * 的直线。纵轴要同时容得下那条直线与素材原线，而读数只报颤音自己的幅度。
          */
-        test("line 基线（默认「直线」预设）下，素材偏离基线也不影响纵轴", () => {
+        test("line 基线（默认「直线」预设）下，纵轴容得下两条线，颤音幅度仍等于深度", () => {
             const lineWithDepth = sanitizeVibratoPreset({
                 id: "custom_line_depth",
                 depthCents: 45,
@@ -652,31 +653,42 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
                 param: "pitch",
                 framePeriodMs: 5,
             })!;
-            expect(preview.peakCents).toBeGreaterThan(43);
-            expect(preview.peakCents).toBeLessThan(47);
+            // 结果线与原线都在纵轴之内（否则会被画布裁掉）。
+            const drawn = [preview.wave, preview.contour]
+                .flatMap((series) => finite(series))
+                .map(Math.abs);
+            expect(preview.peakCents).toBeGreaterThanOrEqual(Math.max(...drawn));
+            // 读数只跟颤音有关。
+            expect(preview.vibratoPeakCents).toBeGreaterThan(43);
+            expect(preview.vibratoPeakCents).toBeLessThan(47);
         });
 
         /*
-         * 轮廓条：与主图**分带**，因此"轮廓形状"与"颤音可读"可以同时成立 ——
-         * 这正是把两条线拆到两套标尺的目的。
+         * 两条线共用一套标尺：原线保留素材的形状，结果线 = 基线 + 颤音，两者之差就是
+         * "这个预设改动了多少"。按「适应」换比例尺时两条一起缩放 —— 这是"新参数线相对
+         * 原参数线差多少"读得出来的前提。
          */
-        describe("轮廓条（原参数线形状）", () => {
-            test("轮廓以绝对值给出，形状完整；主图仍是只跟颤音走的紧标尺", () => {
+        describe("两条线共用一套标尺", () => {
+            test("原线保留素材的音高走向；结果线与它之差就是颤音", () => {
                 const preview = buildAppliedPreview({
                     preset: deep,
                     original: rampedNote,
                     param: "pitch",
                     framePeriodMs: 5,
                 })!;
-                const contour = finite(preview.sourceContour);
-                // 40→60 半音的缓升 + 稳定音：轮廓跨 4000..6000 分，一个半音都没丢。
-                expect(Math.min(...contour)).toBeCloseTo(4000, 6);
-                expect(Math.max(...contour)).toBeCloseTo(6000, 6);
-                // 同一次预览里，主图的标尺仍只跟颤音走（差了两个数量级）。
-                expect(preview.peakCents).toBeLessThan(50);
+                // 素材是 40→60 的缓升 + 稳定音：原线把这段走向完整带过来（千分级）。
+                // 【注】300ms 的缓升属于**真实音高运动**，不是要剔掉的过渡段 ——
+                // 只有比局部趋势快一个数量级的滑音才算过渡帧（见 `refineNoteFrames`）。
+                const contour = finite(preview.contour);
+                expect(Math.max(...contour) - Math.min(...contour)).toBeGreaterThan(1500);
+                // 结果线 − 原线 = 颤音（`existing` 基线下基线就是原线）。
+                const diff = preview.wave
+                    .map((value, index) => value - preview.contour[index])
+                    .filter(Number.isFinite);
+                expect(Math.max(...diff.map(Math.abs))).toBeCloseTo(preview.vibratoPeakCents, 6);
             });
 
-            test("轮廓的断口与主图一致（气口与过渡帧都不画）", () => {
+            test("断口两条线一起断（气口与过渡帧都不画）", () => {
                 const preview = buildAppliedPreview({
                     preset: deep,
                     original: rampedNote,
@@ -684,18 +696,18 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
                     framePeriodMs: 5,
                 })!;
                 for (let i = 0; i < 100; i += 1) {
-                    expect(Number.isNaN(preview.sourceContour[i])).toBe(true);
-                    expect(Number.isNaN(preview.resultContour[i])).toBe(true);
+                    expect(Number.isNaN(preview.contour[i])).toBe(true);
+                    expect(Number.isNaN(preview.wave[i])).toBe(true);
                 }
-                expect(Number.isFinite(preview.sourceContour[150])).toBe(true);
-                expect(Number.isFinite(preview.resultContour[150])).toBe(true);
+                expect(Number.isFinite(preview.contour[150])).toBe(true);
+                expect(Number.isFinite(preview.wave[150])).toBe(true);
             });
 
             /*
-             * 这条是"轮廓条值得存在"的核心证据：`line` 基线会把轮廓搬成一条直线，
-             * 只看颤音偏移（深度 0 → 一条平线）根本看不出预设做了什么。
+             * "两条线共用标尺"最直观的证据：`line` 基线把结果线搬成一条水平线，而原线
+             * 保留素材的起伏 —— 同一个坐标系里一眼就能看出预设做了什么。
              */
-            test("直线基线：套用后的轮廓是一条直线（一眼看出被搬平）", () => {
+            test("直线基线：结果线被搬成水平线，原线保留起伏", () => {
                 const straight = sanitizeVibratoPreset({
                     id: "custom_straight",
                     depthCents: 0,
@@ -705,18 +717,20 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
                     irregularity: 0,
                     baseline: "line",
                 });
+                // 一段**缓慢上行**的素材（快滑音会被判成过渡段剔掉，这里要的是音符本身的走向）。
+                const phrase = Array.from({ length: 300 }, (_, i) => 60 + (i / 299) * 4);
                 const preview = buildAppliedPreview({
                     preset: straight,
-                    original: rampedNote,
+                    original: phrase,
                     param: "pitch",
                     framePeriodMs: 5,
                 })!;
-                const result = finite(preview.resultContour);
-                // 首末音符的代表值都是 60（单段的中位数）→ 结果轮廓恒为 6000 分。
+                const result = finite(preview.wave);
+                const contour = finite(preview.contour);
+                // 结果线：直线预设把它搬平（同一坐标里是常数）。
                 expect(Math.max(...result) - Math.min(...result)).toBeLessThan(1e-6);
-                expect(result[0]).toBeCloseTo(6000, 6);
-                // 原轮廓仍完整保留，两条线在轮廓条里形成对照。
-                expect(Math.min(...finite(preview.sourceContour))).toBeCloseTo(4000, 6);
+                // 原线：素材的四度上行完整保留（相对共同中心是 −200..+200 分）。
+                expect(Math.max(...contour) - Math.min(...contour)).toBeCloseTo(400, 6);
             });
         });
     });
@@ -731,126 +745,6 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
         })!;
         const peak = Math.max(...preview.wave.map((value) => Math.abs(value)));
         expect(peak).toBeGreaterThan(1);
-    });
-});
-
-/*
- * 轮廓条的标尺：按数据自适应，但要防住两个退化。
- *
- * 【为什么要下限】一段长音的轮廓几乎是平的；跨度趋近 0 时任何一点抖动都会被放大成
- * 满屏锯齿，读起来像"音高在剧烈晃动"。
- */
-describe("contourRangeCents（轮廓条纵轴）", () => {
-    test("按有限值拟合，断口不参与，两侧留余量", () => {
-        const range = contourRangeCents([[Number.NaN, 4000, 6000, Number.NaN]]);
-        expect(range.min).toBeCloseTo(4000 - 2000 * 0.06, 6);
-        expect(range.max).toBeCloseTo(6000 + 2000 * 0.06, 6);
-    });
-
-    test("跨度不足一个半音时撑到下限，并保持中点不动", () => {
-        const range = contourRangeCents([[6000, 6000, 6000]]);
-        expect(range.max - range.min).toBeCloseTo(MIN_CONTOUR_SPAN_CENTS, 6);
-        expect((range.min + range.max) / 2).toBeCloseTo(6000, 6);
-    });
-
-    test("全是断口时退化为零跨度，不产生 NaN", () => {
-        const range = contourRangeCents([[Number.NaN, Number.NaN]]);
-        expect(Number.isFinite(range.min)).toBe(true);
-        expect(Number.isFinite(range.max)).toBe(true);
-    });
-
-    test("多条线一起拟合：原线与结果线都要装得下", () => {
-        const range = contourRangeCents([
-            [6000, 6000],
-            [6000, 6400],
-        ]);
-        expect(range.min).toBeLessThanOrEqual(6000);
-        expect(range.max).toBeGreaterThan(6400);
-    });
-});
-
-/*
- * 轮廓的断口：只在**真的没有音高**的地方断。
- *
- * 【为什么值得测】轮廓是"原参数线往哪走"的读物，断口的意思是"这里没有音高"。两处
- * 会把它误断：
- * 1. 跟踪器在辅音 / 喉塞音上掉几帧点 —— 掉点不是"音没了"，画成断口就是"在不应该断
- *    的地方断了"（用户报过的现象）；
- * 2. "残差离群"的统计判定把颤音最深的那几帧剔掉（一段渐强的颤音，最深的几帧最像
- *    离群值）。
- * 前者靠接上短断口解决，后者靠"轮廓与落笔掩码分开"解决 —— 这一组把它们钉住。
- */
-describe("轮廓的断口", () => {
-    const preset = sanitizeVibratoPreset({
-        id: "custom_breaks",
-        depthCents: 40,
-        rateHz: 5.5,
-        attackMs: 0,
-        releaseMs: 0,
-        baseline: "existing",
-    });
-    const note = (count: number, from: number) =>
-        Array.from({ length: count }, (_, i) => from + Math.sin(i / 6) * 0.4);
-    const zeros = (count: number) => new Array<number>(count).fill(0);
-
-    /** 逐段量出断口长度（按出现顺序）。 */
-    const breakLengths = (contour: readonly number[]): number[] => {
-        const lengths: number[] = [];
-        let run = 0;
-        for (const value of contour) {
-            if (Number.isFinite(value)) {
-                if (run > 0) lengths.push(run);
-                run = 0;
-            } else run += 1;
-        }
-        if (run > 0) lengths.push(run);
-        return lengths;
-    };
-
-    test("音中间掉几帧点不产生断口（只留首尾气口）", () => {
-        const values = [...zeros(50), ...note(200, 60), 0, 0, 0, ...note(200, 60), ...zeros(50)];
-        const preview = buildAppliedPreview({
-            preset,
-            original: values,
-            param: "pitch",
-            framePeriodMs: 5,
-        })!;
-        expect(breakLengths(preview.sourceContour)).toEqual([50, 50]);
-    });
-
-    test("颤音渐强时最深的那几帧也不算断口", () => {
-        const values = [
-            ...zeros(50),
-            ...Array.from(
-                { length: 400 },
-                (_, i) => 60 + Math.sin(i / 6) * (0.02 + (i / 400) * 0.6),
-            ),
-            ...zeros(50),
-        ];
-        const preview = buildAppliedPreview({
-            preset,
-            original: values,
-            param: "pitch",
-            framePeriodMs: 5,
-        })!;
-        expect(breakLengths(preview.sourceContour)).toEqual([50, 50]);
-    });
-
-    test("真正的气口仍然断开（否则会凭空画出一条穿过静音的线）", () => {
-        const values = [
-            ...zeros(50),
-            ...note(200, 60),
-            ...zeros(40),
-            ...note(200, 64),
-            ...zeros(50),
-        ];
-        const preview = buildAppliedPreview({
-            preset,
-            original: values,
-            param: "pitch",
-            framePeriodMs: 5,
-        })!;
-        expect(breakLengths(preview.sourceContour)).toEqual([50, 40, 50]);
     });
 });
 

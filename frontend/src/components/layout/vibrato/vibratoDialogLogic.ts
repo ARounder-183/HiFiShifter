@@ -267,22 +267,37 @@ export const PREVIEW_DEFAULT: VibratoPreviewGeometry = {
 /** 预览采样结果，单位一律是 **cents**（与参数无关，便于画布定标）。 */
 export interface VibratoPreviewSamples {
     /**
-     * 逐点波形（cents，**相对颤音所围绕的那条曲线**摆动）。
+     * 逐点波形（cents）。
      *
-     * 【为什么是偏移量而不是绝对音高】见 `buildAppliedPreview` 里那段注释：绝对音高
-     * 会把纵轴绑在"素材轮廓有多宽"上，而轮廓与颤音可以差两个数量级。
+     * 管理器预览里它是**预设波形本身**（围绕 0）；"套用到选区"预览里它是**套用后的
+     * 参数线**（相对下面那个共同中心）—— 两种用法都只做单位换算，不另写公式。
      */
     wave: number[];
     /** 逐点包络上界（cents，恒非负）—— 渐入 / 渐强 / 渐出入画就靠它。 */
     envelope: number[];
     /**
-     * 纵轴半幅（cents）：波形与包络的绝对值上界。
+     * 纵轴半幅（cents）：画出来的东西的绝对值上界。
      *
      * 【为什么不在这里保底为 1】它是**读数**（"±N 分"）的来源，直线预设就该报 0 ——
      * 曾经在这里保底 1，于是完全平直的颤音线一直显示"±1 分"。需要非零尺度的地方
      * （`previewScaleCents` / `fitPreviewRangeCents`）各自兜底，不必让读数替它们背锅。
      */
     peakCents: number;
+    /**
+     * 背景参考线（"套用到选区"预览里的原参数线；断口为 NaN）。
+     *
+     * 与 `wave` **共用同一套纵轴**（同一个原点、同一套比例尺），因此按「适应」换比例尺
+     * 时两条线一起缩放。管理器预览不提供它 —— 那里只画波形本身。
+     */
+    contour?: number[];
+    /**
+     * 包络带的**中心线**（省略 = 围绕 0）。
+     *
+     * 【为什么需要】带子表示"颤音摆动的幅度"，而摆动是围绕**它所在的那条基线**的，
+     * 不是围绕图上的零点。少了这条中心线，`baseline: "line"` 这类预设的带子会画在
+     * 一条与波形无关的横线上。
+     */
+    envelopeCenter?: number[];
 }
 
 /**
@@ -321,16 +336,17 @@ export function buildVibratoPreview(
 
 /** "套用到选区"预览的采样结果：颤音偏移 + 包络 + 原/后参数线轮廓。 */
 export interface VibratoAppliedPreview extends VibratoPreviewSamples {
+    /** 原参数线（背景，弱化虚线；断口为 NaN）。 */
+    contour: number[];
+    /** 包络带的中心线（断口为 NaN）。 */
+    envelopeCenter: number[];
     /**
-     * 原参数线的轮廓（cents，**绝对**值；断口为 NaN）。
+     * 颤音本身的峰值幅度（cents）—— 读数用它。
      *
-     * 与 `wave` 是两个数量级的东西（轮廓可以跨十几个半音，颤音只有几十分），因此
-     * 各自占一条带、各用一套标尺：这条画在上方的轮廓条里，`wave` 画在下方的主图里。
-     * 两者共享时间轴，于是"此刻音高在哪"与"此刻颤音怎么走"可以对着读。
+     * 与 `peakCents` 的区别：那个是"画出来的全部"的峰值（纵轴拟合用），会被素材自身的
+     * 音高起伏撑大；读数要的是"这个预设会摆多少"，只跟包络有关。
      */
-    sourceContour: number[];
-    /** 套用后的参数线轮廓（cents，绝对值；断口为 NaN）—— 与 `sourceContour` 同带对照。 */
-    resultContour: number[];
+    vibratoPeakCents: number;
 }
 
 /**
@@ -400,17 +416,44 @@ export function buildAppliedPreview(args: {
     suppressNonTargetFrames(result.dense, plan);
 
     const toCents = (value: number) => paramUnitToDepth(value, args.param, args.range);
+
     /*
-     * 波形画成**相对基线的偏移**：`结果 − 基线` = 偏置 + 颤音。
-     *
-     * 幅度上界即包络，于是纵轴只跟颤音自己的幅度走 —— 与素材轮廓多宽、基线模式是
-     * 哪种都无关。这正是"看不清颤音趋势"的根治点：画绝对音高时，纵轴得容下整条
-     * 轮廓（含气口与跟踪器从无声区缓升出来的过渡帧），一句 0→60 的缓升就能把
-     * 40 分的颤音压到 1% 的画布高度。
+     * 稳定音符帧：先剔掉滑音 / 过渡段（它们会把曲线拽出几千分），再接上短于最短音符
+     * 的断口 —— 跟踪器在辅音上掉几帧点不是"音没了"。两条线共用这一套掩码。
      */
-    const baselineCents = (result.baseline ?? values).map(toCents);
-    const wave = result.dense.map((value, index) =>
-        plan.modulatable[index] ? toCents(value) - baselineCents[index] : Number.NaN,
+    const stableFrames = refineNoteFrames(
+        values.map((value, index) => (plan.modulatable[index] ? value : Number.NaN)),
+        framePeriodMs,
+    );
+
+    /*
+     * 共同中心：稳定帧上原参数线的均值。
+     *
+     * 【为什么两条线都要相对它】它们必须**共用一套纵轴**：按「适应」换比例尺时两条线
+     * 一起缩放，而不是只有一条动。共用的前提是同一个原点 —— 轮廓是绝对音高（几千分）、
+     * 颤音只有几十分，各自减掉**同一个**中心之后，两者才落在同一根标尺上，"新参数线
+     * 与原参数线差多少"才读得出来。
+     */
+    const stableCents: number[] = [];
+    for (let i = 0; i < values.length; i += 1) {
+        if (stableFrames[i]) stableCents.push(toCents(values[i]));
+    }
+    const centerCents =
+        stableCents.length > 0
+            ? stableCents.reduce((sum, value) => sum + value, 0) / stableCents.length
+            : 0;
+    const deviationAt = (source: readonly number[], index: number) =>
+        stableFrames[index] ? toCents(source[index]) - centerCents : Number.NaN;
+    const baselineSource = result.baseline ?? values;
+
+    // 原参数线（背景）与套用后的参数线（前景）—— 同一原点、同一标尺。
+    const contour = bridgeShortGaps(
+        values.map((_, index) => deviationAt(values, index)),
+        framePeriodMs,
+    );
+    const wave = bridgeShortGaps(
+        result.dense.map((_, index) => deviationAt(result.dense, index)),
+        framePeriodMs,
     );
     /*
      * 不受颤音影响的帧画成**断口**（NaN，画布抬笔）：它既不是一个音高，也不是
@@ -418,48 +461,41 @@ export function buildAppliedPreview(args: {
      * 读成"这里被拉平了"。
      */
     const envelope = (result.envelope ?? new Array(values.length).fill(0)).map((value, index) =>
-        plan.modulatable[index] ? Math.abs(value) : Number.NaN,
+        stableFrames[index] ? Math.abs(value) : Number.NaN,
+    );
+    /** 带子的中心：颤音所围绕的那条基线（与两条线同一原点）。 */
+    const envelopeCenter = bridgeShortGaps(
+        baselineSource.map((_, index) =>
+            stableFrames[index] ? toCents(baselineSource[index]) - centerCents : Number.NaN,
+        ),
+        framePeriodMs,
     );
 
     /*
-     * 轮廓用的两条**绝对**曲线（背景那一条，以及试听要的那一对）。
-     *
-     * 【为什么单独一套标尺】轮廓与颤音差两个数量级：同轴并列时要么颤音被压成一条
-     * 直线（这是修过两轮的缺陷），要么轮廓被裁掉。轮廓按自身范围铺满画布、颤音按
-     * cents 标尺画在前景，两者共享时间轴，"此刻音高在哪 / 此刻颤音怎么走"仍可对着读。
-     *
-     * 【轮廓的断口规则与颤音不同】这里要的是"音高往哪走"，所以：
-     * 1. 先剔掉滑音 / 过渡段（{@link refineNoteFrames}）—— 它们会把曲线拽出几千分，
-     *    轮廓条的纵轴跟着被撑开；
-     * 2. 再把**短于最短音符**的断口接上（{@link bridgeShortGaps}）—— 跟踪器在辅音上
-     *    掉几帧点不是"音没了"，画成断口就是"在不应该断的地方断了"；而真正的气口、
-     *    换气仍然断开（否则会凭空画出一条穿过静音的直线）。
+     * 纵轴按**画出来的全部**拟合：两条线 + 包络带的两缘。断口不参与 —— 否则一个 NaN
+     * 就能把整条纵轴撑爆。`vibratoPeakCents` 另算（只跟包络有关），供读数使用。
      */
-    const noteFrameSeries = values.map((value, index) =>
-        plan.modulatable[index] ? value : Number.NaN,
-    );
-    const stableFrames = refineNoteFrames(noteFrameSeries, framePeriodMs);
-    const contourAt = (source: readonly number[], index: number) =>
-        stableFrames[index] ? toCents(source[index]) : Number.NaN;
-    const sourceContour = bridgeShortGaps(
-        values.map((_, index) => contourAt(values, index)),
-        framePeriodMs,
-    );
-    const resultContour = bridgeShortGaps(
-        result.dense.map((_, index) => contourAt(result.dense, index)),
-        framePeriodMs,
-    );
-
-    // 真实峰值（与 `buildVibratoPreview` 同一约定）：读数据此显示，尺度由调用方兜底。
-    // 只统计**画出来的两条**，断口不参与 —— 否则一个 NaN 就能把整条纵轴撑爆。
     let peak = 0;
-    for (const value of wave) {
-        if (Number.isFinite(value)) peak = Math.max(peak, Math.abs(value));
+    let vibratoPeak = 0;
+    for (let i = 0; i < values.length; i += 1) {
+        for (const value of [contour[i], wave[i]]) {
+            if (Number.isFinite(value)) peak = Math.max(peak, Math.abs(value));
+        }
+        if (Number.isFinite(envelope[i])) {
+            vibratoPeak = Math.max(vibratoPeak, envelope[i]);
+            if (Number.isFinite(envelopeCenter[i])) {
+                peak = Math.max(peak, Math.abs(envelopeCenter[i]) + envelope[i]);
+            }
+        }
     }
-    for (const value of envelope) {
-        if (Number.isFinite(value)) peak = Math.max(peak, Math.abs(value));
-    }
-    return { wave, envelope, peakCents: peak, sourceContour, resultContour };
+    return {
+        wave,
+        envelope,
+        peakCents: peak,
+        contour,
+        envelopeCenter,
+        vibratoPeakCents: vibratoPeak,
+    };
 }
 
 /**
@@ -506,54 +542,6 @@ export function fitPreviewRangeCents(peakCents: number): number {
 
 /** 缩略图专用采样数：64 点足够表达形状，path 缓存也便宜。 */
 export const GLYPH_FRAME_COUNT = 64;
-
-/**
- * 轮廓条纵轴的最小跨度（cents，= 1 个半音）。
- *
- * 【为什么需要下限】轮廓条按数据自适应标尺，而一段长音的轮廓几乎是平的 ——
- * 跨度趋近 0 时任何一点抖动都会被放大成满屏锯齿，读起来像"音高在剧烈晃动"。
- * 给一个半音的底线，平直的轮廓就老老实实画成一条直线。
- */
-export const MIN_CONTOUR_SPAN_CENTS = 100;
-
-/** 轮廓条的纵轴范围（cents）。 */
-export interface ContourRange {
-    min: number;
-    max: number;
-}
-
-/**
- * 由轮廓数据拟合轮廓条的纵轴范围。
- *
- * 只统计**有限值**（断口不参与，否则一个 NaN 就能把标尺撑爆或压没）。两侧各留
- * 6% 余量，线条不会贴着上下边缘。跨度不足 {@link MIN_CONTOUR_SPAN_CENTS} 时以
- * 中点为心撑到该下限。
- *
- * 【为什么按"画出来的全部"拟合】与主图同一原则：标尺要容得下画的东西，否则线会
- * 被裁掉。调用方把原参数线与套用后的参数线一起喂进来即可 —— 两者通常几乎重合
- * （`existing` 基线），因此切换预设时这条标尺基本不动。
- */
-export function contourRangeCents(series: ReadonlyArray<readonly number[]>): ContourRange {
-    let min = Number.POSITIVE_INFINITY;
-    let max = Number.NEGATIVE_INFINITY;
-    for (const values of series) {
-        for (const value of values) {
-            if (!Number.isFinite(value)) continue;
-            min = Math.min(min, value);
-            max = Math.max(max, value);
-        }
-    }
-    if (!Number.isFinite(min) || !Number.isFinite(max)) return { min: 0, max: 0 };
-
-    const span = max - min;
-    if (span < MIN_CONTOUR_SPAN_CENTS) {
-        const center = (min + max) / 2;
-        const half = MIN_CONTOUR_SPAN_CENTS / 2;
-        return { min: center - half, max: center + half };
-    }
-    const pad = span * 0.06;
-    return { min: min - pad, max: max + pad };
-}
 
 /** 形状比对用的采样数（摘要标签）。 */
 const SHAPE_MATCH_SAMPLES = 64;
