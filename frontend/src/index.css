@@ -503,7 +503,7 @@ textarea {
  */
 .hs-slider-box {
     overflow: clip;
-    overflow-clip-margin: 3px;
+    overflow-clip-margin: 0;
 }
 
 /* 隐藏纵向滚动条（保留滚动功能）用于左侧轨道头。

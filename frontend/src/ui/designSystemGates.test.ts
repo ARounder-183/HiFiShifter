@@ -617,6 +617,37 @@ describe("抽象层不能空转（采用率）", () => {
         ).toEqual([]);
     });
 
+    test("裁切盒不许留绘制余量（`overflow-clip-margin` 必须为 0）", () => {
+        /*
+         * 【为什么】`overflow-clip-margin` 划定的不是"容差"，而是**仍然会绘制**的
+         * 区域；绘制出来的溢出会被祖先滚动容器算成可滚内容。滑块原语正是靠
+         * `overflow: clip` 把装饰性溢出（超大的透明命中区、焦点环）收在盒内 ——
+         * 一旦留出哪怕 3px 余量，每个含滑块的对话框都会挂上一条滚不动的竖直滚动条
+         * （实测：正文 `clientHeight 18 / scrollHeight 20`，唯一的子元素是 16px 的盒）。
+         *
+         * 该盒高本就等于装饰盒（滑块头 + 半个轨道，size 2 为 16px），裁切线贴齐盒边
+         * **不会**裁掉任何可见部分。这条门禁把"绘制区不得超出裁切盒"钉成不变量。
+         */
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.css$/)) {
+            const source = stripCommentsAndStrings(readFileSync(file, "utf8"), true);
+            for (const m of source.matchAll(/overflow-clip-margin:\s*([^;}]+)/g)) {
+                const value = m[1].trim();
+                if (!/^0(px)?$/.test(value)) {
+                    offenders.push(`${file}: overflow-clip-margin: ${value}`);
+                }
+            }
+        }
+        expect(
+            offenders.length === 0
+                ? []
+                : [
+                      "以下位置给裁切盒留了绘制余量 —— 它会以「滚不动的滚动条」泄漏到祖先滚动容器：",
+                      ...offenders.map((line) => `  ${line}`),
+                  ].join("\n"),
+        ).toEqual([]);
+    });
+
     test("滚动容器必须带让位类（或显式豁免）", () => {
         /*
          * 【为什么】本引擎的滚动条占 10px 布局宽（实测：`offsetWidth - clientWidth`）。
