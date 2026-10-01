@@ -14,7 +14,9 @@ pub mod translit;
 
 // 只重导出被模块外真正消费的项；其余（各档分值常量等）通过 `matcher::` 路径取，
 // 免得留下没人用的重导出。
-pub use matcher::{match_translit, MatchInfo, MatchOptions, Query, SearchMode, SCORE_LITERAL};
+pub use matcher::{
+    match_translit, MatchInfo, MatchKind, MatchOptions, Query, SearchMode, SCORE_LITERAL,
+};
 pub use translit::{translit, Translit, TranslitOptions};
 
 /// 默认结果上限。与转写功能上线前 `search_files_recursive` 的硬编码值一致。

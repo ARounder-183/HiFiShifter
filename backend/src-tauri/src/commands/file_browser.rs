@@ -390,3 +390,135 @@ pub(crate) fn list_media_audio_streams(
     }
     crate::media::list_audio_streams(path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::search::{SearchMode, SearchOptions};
+
+    /// 建一个带固定文件的临时目录。文件名刻意混合中 / 日 / 韩 / 拉丁，
+    /// 因为本模块的职责正是「遍历 + 匹配」，只测纯拉丁会漏掉整条转写路径。
+    fn fixture() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hifishifter_search_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(dir.join("子目录")).expect("temp dir");
+        for name in [
+            "主歌_vocal01.wav",
+            "主歌_vocal02.wav",
+            "副歌.wav",
+            "ボーカル.wav",
+            "한국어.wav",
+            "vocal_take.wav",
+            "readme.txt",
+        ] {
+            std::fs::write(dir.join(name), b"x").expect("write file");
+        }
+        // 隐藏文件必须被跳过（与改动前一致）。
+        std::fs::write(dir.join(".hidden.wav"), b"x").expect("write hidden");
+        std::fs::write(dir.join("子目录").join("深处的主歌.wav"), b"x").expect("write nested");
+        dir
+    }
+
+    fn names(entries: &[FileEntry]) -> Vec<&str> {
+        entries.iter().map(|entry| entry.name.as_str()).collect()
+    }
+
+    fn search(dir: &std::path::Path, query: &str, options: Option<SearchOptions>) -> Vec<FileEntry> {
+        search_files_recursive(dir.to_string_lossy().into_owned(), query.to_string(), options)
+            .expect("search")
+    }
+
+    #[test]
+    fn default_options_match_pinyin() {
+        let dir = fixture();
+        let hits = search(&dir, "zhuge", None);
+        // 主形态命中优先：两条「主歌」都在，嵌套的那条也算。
+        assert!(names(&hits).contains(&"主歌_vocal01.wav"), "命中: {:?}", names(&hits));
+        assert!(names(&hits).contains(&"深处的主歌.wav"), "命中: {:?}", names(&hits));
+        // 不含「主歌」读音的文件不得混进来。
+        assert!(!names(&hits).contains(&"readme.txt"));
+    }
+
+    #[test]
+    fn initials_and_romaji_and_choseong() {
+        let dir = fixture();
+        assert!(names(&search(&dir, "zg", None)).contains(&"主歌_vocal01.wav"));
+        assert!(names(&search(&dir, "bokaru", None)).contains(&"ボーカル.wav"));
+        assert!(names(&search(&dir, "hg", None)).contains(&"한국어.wav"));
+    }
+
+    #[test]
+    fn literal_still_wins_and_hidden_files_are_skipped() {
+        let dir = fixture();
+        let hits = search(&dir, "vocal", None);
+        assert!(names(&hits).contains(&"vocal_take.wav"));
+        assert!(names(&hits).contains(&"主歌_vocal01.wav"));
+        assert!(!names(&hits).contains(&".hidden.wav"));
+        // 匹配的是 stem：扩展名不参与。
+        assert!(!names(&search(&dir, "txt", None)).contains(&"readme.txt"));
+    }
+
+    #[test]
+    fn match_info_is_reported_for_explainability() {
+        let dir = fixture();
+        let hits = search(&dir, "zhuge", None);
+        let entry = hits
+            .iter()
+            .find(|entry| entry.name == "主歌_vocal01.wav")
+            .expect("命中");
+        let info = entry.match_info.as_ref().expect("转写命中应带说明");
+        assert_eq!(info.kind, crate::search::MatchKind::Pinyin);
+        assert_eq!(info.form, "zhuge");
+    }
+
+    #[test]
+    fn off_mode_is_literal_only() {
+        let dir = fixture();
+        let options = Some(SearchOptions {
+            mode: Some(SearchMode::Off),
+            ..SearchOptions::default()
+        });
+        assert!(search(&dir, "zhuge", options.clone()).is_empty());
+        assert!(!search(&dir, "vocal", options).is_empty());
+    }
+
+    #[test]
+    fn empty_query_returns_files_only() {
+        let dir = fixture();
+        let hits = search(&dir, "", None);
+        assert!(names(&hits).contains(&"readme.txt"));
+        // 递归搜索只返回**文件**：目录只被用来深入遍历，不进结果集
+        // （与改动前一致，也是「搜到的东西都能拖进时间轴」的前提）。
+        assert!(!names(&hits).contains(&"子目录"));
+        assert!(names(&hits).contains(&"深处的主歌.wav"));
+    }
+
+    #[test]
+    fn relevance_order_puts_the_prefix_match_first() {
+        let dir = fixture();
+        let hits = search(&dir, "zhuge", None);
+        // 「主歌…」开头的两条走全拼前缀档；嵌套的「深处的主歌」只走子串档，
+        // 因此必须排在其后。
+        let first_nested = hits.iter().position(|entry| entry.name == "深处的主歌.wav");
+        let last_prefix = hits
+            .iter()
+            .rposition(|entry| entry.name.starts_with("主歌"));
+        assert!(last_prefix < first_nested, "命中顺序: {:?}", names(&hits));
+    }
+
+    #[test]
+    fn max_results_is_respected() {
+        let dir = fixture();
+        let options = Some(SearchOptions {
+            max_results: Some(2),
+            ..SearchOptions::default()
+        });
+        assert_eq!(search(&dir, "zhuge", options).len(), 2);
+    }
+}

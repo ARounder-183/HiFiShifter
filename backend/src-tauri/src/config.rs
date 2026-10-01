@@ -1925,6 +1925,36 @@ mod tests {
     }
 
     #[test]
+    fn search_settings_default_to_smart_and_all_translit_on() {
+        let settings = UiSettings::default();
+        assert!(settings.search.translit);
+        assert_eq!(settings.search.mode, "smart");
+        assert!(settings.search.heteronym);
+        assert!(settings.search.japanese_long_vowel);
+        assert!(settings.search.korean_choseong);
+        assert!(settings.search.show_match_reason);
+    }
+
+    #[test]
+    fn search_settings_round_trip_and_tolerate_partial_json() {
+        // 前端总是发全量，但旧配置里没有这一项 —— 缺省必须补成默认值而不是报错
+        // （报错会让整份 UiSettings 回退成默认，用户的其他设置一起被清掉）。
+        let settings: UiSettings = serde_json::from_value(serde_json::json!({
+            "search": { "mode": "fuzzy", "koreanChoseong": false }
+        }))
+        .expect("partial search settings must deserialize");
+        assert_eq!(settings.search.mode, "fuzzy");
+        assert!(!settings.search.korean_choseong);
+        // 未发送的子键取默认。
+        assert!(settings.search.translit);
+        assert!(settings.search.heteronym);
+
+        // 回写后仍能读回（`save_ui_settings` 是读-改-写整个结构）。
+        let encoded = serde_json::to_value(&settings).expect("serialize");
+        assert_eq!(encoded["search"]["mode"], serde_json::json!("fuzzy"));
+    }
+
+    #[test]
     fn ui_settings_defaults_to_signalsmith_and_hifigan_mel_stretch_on() {
         let settings = UiSettings::default();
         assert_eq!(
