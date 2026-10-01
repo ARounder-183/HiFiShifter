@@ -204,18 +204,19 @@ test("无选区数据时显示占位提示而不是空画布", async () => {
 });
 
 /*
- * 预览分两条带，各有自己的标尺。
+ * 预览是**一张图**：轮廓叠在颤音偏移之上。
  *
- * 【为什么值得测】轮廓与颤音差两个数量级，共轴时必然压扁其中一个 —— 拆成两条带
- * 正是这个问题的解法本身，所以"两条都在、各带标签"是契约而不是实现细节。
+ * 【为什么值得测】轮廓与颤音差两个数量级，早先拆成上下两条带（各有各的标尺）。
+ * 但那样要对比"颤音走在音高的哪一段上"就得上下看 —— 用户明确要求叠起来。
+ * 现在同图叠放：轮廓按自身范围铺满画布做背景虚线，颤音偏移按 cents 标尺画在前景。
+ * 所以"只有一张画布"是契约，不是实现细节。
  */
-test("预览分两条带：上为原参数线轮廓，下为颤音偏移", async () => {
+test("预览是一张图：轮廓叠在颤音偏移之上，而不是上下两条带", async () => {
     await mountDialog();
     const canvases = [...document.querySelectorAll("canvas[role=img]")];
-    expect(canvases.length).toBe(2);
-    const labels = canvases.map((canvas) => canvas.getAttribute("aria-label"));
-    expect(labels).toContain("Source parameter line");
-    expect(labels).toContain("Vibrato offset (from baseline)");
+    expect(canvases.length).toBe(1);
+    // 背景是什么由读数行说明（否则那条虚线会被误读成同一标尺下的另一条数据）。
+    expect(document.body.textContent ?? "").toContain("Dashed: source parameter line");
 });
 
 /*

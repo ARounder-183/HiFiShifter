@@ -2007,8 +2007,7 @@ export const enUS = {
 
     vibrato_apply_presets: "Preset",
     vibrato_apply_preview: "Applied to selection",
-    vibrato_apply_contour: "Source parameter line",
-    vibrato_apply_offset: "Vibrato offset (from baseline)",
+    vibrato_apply_contour: "Dashed: source parameter line",
     vibrato_apply_preview_empty: "Select a range to preview the result.",
     vibrato_apply_preview_no_pitch: "No pitch to apply vibrato to in this range.",
     vibrato_apply_save_preset: "Also save these tweaks to the preset",

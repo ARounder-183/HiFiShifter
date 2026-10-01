@@ -29,7 +29,6 @@ import { depthStepUnitFor } from "../../features/vibrato/vibratoDepth";
 import { planVibratoTarget } from "../../features/vibrato/vibratoPitch";
 import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
 import { AppDialog, AppField, AppListRow, AppNumberField, AppSwitchRow } from "../../ui";
-import { VibratoContourStrip } from "./vibrato/VibratoContourStrip";
 import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
 import { VibratoPreviewCanvas } from "./vibrato/VibratoPreviewCanvas";
 import {
@@ -248,35 +247,34 @@ export function VibratoApplyDialog({
                                     <>
                                         <Box className="rounded border border-qt-border bg-qt-panel p-2">
                                             {/*
-                                             * 上方：原参数线轮廓（自己的标尺）。
-                                             * 下方：颤音偏移（自己的标尺）。
-                                             * 两者差两个数量级，因此分带而不共轴 ——
-                                             * 见 `VibratoContourStrip` 的说明。
+                                             * 一张图里叠两条：背景虚线是原参数线轮廓
+                                             * （按自身范围铺满，形状可见），前景是颤音偏移
+                                             * 与其包络（按 cents 标尺）。两者差两个数量级，
+                                             * 因此各用各的标尺 —— 见画布的说明。
                                              */}
-                                            <span className="hs-type-caption">
-                                                {t("vibrato_apply_contour")}
-                                            </span>
-                                            <VibratoContourStrip
-                                                source={previewSamples.sourceContour}
-                                                result={previewSamples.resultContour}
-                                                ariaLabel={t("vibrato_apply_contour")}
-                                            />
-                                            <span className="hs-type-caption">
-                                                {t("vibrato_apply_offset")}
-                                            </span>
                                             <VibratoPreviewCanvas
                                                 samples={previewSamples}
-                                                ariaLabel={t("vibrato_apply_offset")}
+                                                contour={previewSamples.sourceContour}
+                                                ariaLabel={t("vibrato_apply_preview")}
                                             />
-                                            <Flex justify="between" align="center" mt="1">
+                                            <Flex justify="between" align="center" mt="1" gap="2">
                                                 <span className="hs-type-caption">
-                                                    {`±${formatNumber(previewSamples.peakCents)} ${t("vibrato_unit_cents")}`}
+                                                    {t("vibrato_apply_contour")}
                                                 </span>
-                                                {isBuiltin ? (
+                                                <Flex
+                                                    align="center"
+                                                    gap="2"
+                                                    style={{ minWidth: 0 }}
+                                                >
                                                     <span className="hs-type-caption">
-                                                        {t("vibrato_manager_readonly")}
+                                                        {`±${formatNumber(previewSamples.peakCents)} ${t("vibrato_unit_cents")}`}
                                                     </span>
-                                                ) : null}
+                                                    {isBuiltin ? (
+                                                        <span className="hs-type-caption">
+                                                            {t("vibrato_manager_readonly")}
+                                                        </span>
+                                                    ) : null}
+                                                </Flex>
                                             </Flex>
                                         </Box>
                                     </>

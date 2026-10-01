@@ -15,7 +15,11 @@
 
 import { useEffect, useRef } from "react";
 import { readDevicePixelRatio } from "../../../utils/devicePixelLine";
-import { previewScaleCents, type VibratoPreviewSamples } from "./vibratoDialogLogic";
+import {
+    contourRangeCents,
+    previewScaleCents,
+    type VibratoPreviewSamples,
+} from "./vibratoDialogLogic";
 import { finiteRuns, strokeFinitePolyline } from "./vibratoPreviewDraw";
 import {
     cursorForZone,
@@ -75,6 +79,19 @@ export interface VibratoPreviewCanvasProps {
     height?: number;
     ariaLabel?: string;
     /**
+     * 原参数线轮廓（cents，绝对值；断口为 NaN）—— 画成**背景**参考线。
+     *
+     * 【为什么要叠在同一张图上】用户要对比的是"颤音走在音高的哪一段上"，两条线放在
+     * 两个框里就得上下来回看。所以叠起来，共享时间轴。
+     *
+     * 【为什么它用另一套标尺】轮廓与颤音差两个数量级（一句可以跨二十个半音，颤音只
+     * 有几十音分）。同轴时必然压扁其中一个 —— 这是修过两轮的缺陷。因此轮廓按**自身
+     * 范围**铺满画布高度（形状可见，但不参与主图的 cents 标尺），主图的刻度与读数
+     * 只描述颤音偏移。两者的视觉分工也据此定：背景是弱化虚线，前景是强调色实线 +
+     * 包络带。
+     */
+    contour?: readonly number[];
+    /**
      * 纵轴半幅（cents）。由调用方**一次性拟合**并保持稳定时，波形高度就等于深度，
      * 用户能直接判断幅度大小；省略时按峰值自适应（只读预览够用，但深度一变整幅
      * 就被重新缩放，看不出大小）。
@@ -107,6 +124,7 @@ function formatAxisCents(value: number): string {
 
 export function VibratoPreviewCanvas({
     samples,
+    contour,
     height = 120,
     ariaLabel,
     halfCents: explicitHalfCents,
@@ -165,6 +183,29 @@ export function VibratoPreviewCanvas({
 
             const count = Math.max(2, samples.wave.length);
             const toX = (index: number) => (index / (count - 1)) * width;
+
+            /*
+             * 背景：原参数线轮廓。
+             *
+             * 按**自身范围**铺满画布高度（形状可见），因此它不参与上面那套 cents 标尺 ——
+             * 轮廓可以跨二十个半音，而颤音只有几十音分，同轴必然压扁一个。画在最底层、
+             * 弱化成虚线，视觉上明确是"背景参照"，前景的强调色实线 + 包络带才是主角。
+             */
+            if (contour && contour.length >= 2) {
+                const range = contourRangeCents([contour]);
+                const contourSpan = Math.max(1e-6, range.max - range.min);
+                const contourReach = height / 2 - 3;
+                const contourMid = (range.min + range.max) / 2;
+                const contourToY = (cents: number) =>
+                    height / 2 - ((cents - contourMid) / contourSpan) * 2 * contourReach;
+                ctx.save();
+                ctx.globalAlpha = 0.45;
+                ctx.strokeStyle = muted;
+                ctx.lineWidth = 1;
+                ctx.setLineDash([4, 3]);
+                strokeFinitePolyline(ctx, contour, toX, contourToY);
+                ctx.restore();
+            }
 
             // 刻度网格 + 读数：没有它，"波形占画布多少"仍然只是相对量；有了它，
             // 用户能直接把波峰高度读成 cents。上下边缘各标一次，中间画到 1/4 的细线。
@@ -254,7 +295,7 @@ export function VibratoPreviewCanvas({
         const observer = new ResizeObserver(draw);
         observer.observe(container);
         return () => observer.disconnect();
-    }, [samples, height, handles, explicitHalfCents]);
+    }, [samples, contour, height, handles, explicitHalfCents]);
 
     const localPoint = (event: React.PointerEvent<HTMLDivElement>) => {
         const rect = event.currentTarget.getBoundingClientRect();
