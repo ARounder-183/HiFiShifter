@@ -60,8 +60,6 @@ export interface VibratoCycleEditorProps {
      * 没有数字，用户无从判断"精细"到底有多细。只在手势期间显示。
      */
     readoutLabels?: { phase: string; scale: string };
-    /** 画布下方的操作提示（会话语言）。省略则不显示。 */
-    hint?: string;
     /**
      * 「精细调整」修饰键（默认 `Ctrl` / macOS `Command`），作用于右键整体变换。
      *
@@ -129,7 +127,6 @@ export function VibratoCycleEditor({
     resetShapeLabel,
     ariaLabel,
     readoutLabels,
-    hint,
     fineAdjustKb,
 }: VibratoCycleEditorProps) {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -444,7 +441,6 @@ export function VibratoCycleEditor({
                     style={{ height: EDITOR_HEIGHT }}
                 />
             </div>
-            {hint ? <p className="mt-1 text-qt-xs text-qt-text-muted">{hint}</p> : null}
             <Flex align="center" gap="2" mt="2" wrap="wrap">
                 <AppButton
                     size="sm"

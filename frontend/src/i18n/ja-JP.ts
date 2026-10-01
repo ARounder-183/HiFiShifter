@@ -1947,8 +1947,6 @@ export const jaJP = {
     vibrato_handdraw_smooth: "なめらか",
     vibrato_handdraw_reset: "元の形状に戻す",
     vibrato_handdraw_reset_shape: "{shape}に戻す",
-    vibrato_handdraw_hint:
-        "左ドラッグで描画 · 右ドラッグで全体を回転 / 拡大縮小 · 修飾キーで微調整",
     vibrato_handdraw_canvas:
         "手描き周期キャンバス：左ボタンで描画、右ドラッグで全体を回転 / 拡大縮小",
     vibrato_handdraw_phase: "位相",

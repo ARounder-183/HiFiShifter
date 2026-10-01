@@ -1935,8 +1935,6 @@ export const enUS = {
     vibrato_handdraw_smooth: "Smooth",
     vibrato_handdraw_reset: "Reset to previous",
     vibrato_handdraw_reset_shape: "Reset to {shape}",
-    vibrato_handdraw_hint:
-        "Left-drag draws · Right-drag rotates / scales as a whole · modifier for fine control",
     vibrato_handdraw_canvas:
         "Hand-drawn cycle canvas: hold the left button to draw, right-drag to rotate / scale as a whole",
     vibrato_handdraw_phase: "Phase",

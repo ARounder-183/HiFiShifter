@@ -1363,10 +1363,18 @@ export function VibratoPresetDialog({
                                                                 unit="percent"
                                                                 min={2}
                                                                 max={98}
+                                                                /*
+                                                                 * 偏斜只对**参数式形状**有效：手绘（以及从选区提取）
+                                                                 * 出来的表波形里没有"上升段占比"这个东西 —— 表就是
+                                                                 * 用户画的那条曲线本身。
+                                                                 *
+                                                                 * 【为什么必须禁用而不是"允许调但没效果"】参数式形状的
+                                                                 * 偏斜在 `sampleCycle` 里参与取样；表的取样完全不看它。
+                                                                 * 留着能拖会让用户以为拖了会变，实际毫无反应。
+                                                                 */
                                                                 disabled={
                                                                     isBuiltin ||
-                                                                    (draft.cycle.kind !== "shape" &&
-                                                                        !handDraw) ||
+                                                                    draft.cycle.kind !== "shape" ||
                                                                     !shapeUsesSkew(
                                                                         selectedWaveShape,
                                                                     )
@@ -1375,39 +1383,15 @@ export function VibratoPresetDialog({
                                                                     selectedWaveSkew * 100,
                                                                 )}
                                                                 ariaLabel={t("vibrato_skew")}
-                                                                onChange={(next) => {
-                                                                    const skew = next / 100;
-                                                                    if (handDraw) {
-                                                                        // 与形状下拉同一套：改的是"当前形状"的参数，
-                                                                        // 记进手绘状态并即时套用，**不**退出编辑器。
-                                                                        // 少了这一步，滑块写的是草稿里的形状、显示的却是
-                                                                        // `handDraw.skew`，于是拖了不动。
-                                                                        setHandDraw({
-                                                                            ...handDraw,
-                                                                            skew,
-                                                                        });
-                                                                        patch({
-                                                                            cycle: {
-                                                                                kind: "table",
-                                                                                table: tableFromCycle(
-                                                                                    {
-                                                                                        kind: "shape",
-                                                                                        shape: handDraw.shape,
-                                                                                        skew,
-                                                                                    },
-                                                                                ),
-                                                                            },
-                                                                        });
-                                                                        return;
-                                                                    }
+                                                                onChange={(next) =>
                                                                     patch({
                                                                         cycle: {
                                                                             kind: "shape",
                                                                             shape: selectedWaveShape,
-                                                                            skew,
+                                                                            skew: next / 100,
                                                                         },
-                                                                    });
-                                                                }}
+                                                                    })
+                                                                }
                                                             />
                                                             <AppSliderReadout>
                                                                 {`${formatNumber(selectedWaveSkew * 100)}%`}
@@ -1422,7 +1406,6 @@ export function VibratoPresetDialog({
                                                             // 画布的 aria-label 讲"这块画布能干什么"，
                                                             // 与展开按钮的"手绘…"（讲动作）分开两个键。
                                                             ariaLabel={t("vibrato_handdraw_canvas")}
-                                                            hint={t("vibrato_handdraw_hint")}
                                                             readoutLabels={{
                                                                 phase: t("vibrato_handdraw_phase"),
                                                                 scale: t("vibrato_handdraw_scale"),

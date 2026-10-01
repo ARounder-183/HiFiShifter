@@ -1039,12 +1039,17 @@ test("复制为自定义：按显示名预填编号，且不会叠成「2 2」",
 });
 
 /*
- * 手绘中偏斜滑块仍要能调。
+ * 偏斜滑块：参数式形状可调，手绘中必须禁用。
  *
- * 【为什么值得测】手绘状态下"当前形状"存在 `handDraw` 里而不是草稿里；滑块若只写草稿、
- * 显示却读 `handDraw`，拖动就会立刻弹回原位 —— 表现为"拖了不动"。
+ * 【为什么手绘中要禁用】偏斜只对**参数式形状**有效 —— `sampleCycle` 只在
+ * `kind: "shape"` 分支里读它，表波形完全不看这个值。手绘（以及从选区提取）出来的
+ * 表就是用户画的那条曲线本身，没有"上升段占比"可言；留着能拖会让用户以为拖了会变，
+ * 实际毫无反应。
+ *
+ * 【为什么反面对照同样重要】只断言"手绘中禁用"会漏掉"把功能整个关掉"这种改法，
+ * 所以同一条测试里先钉住三角波下它仍然可调。
  */
-test("手绘中偏斜滑块仍可调整", async () => {
+test("偏斜滑块：参数式形状可调，进入手绘后禁用", async () => {
     const custom = sanitizeVibratoPreset({
         id: "custom_skew",
         name: "Skew Me",
@@ -1055,6 +1060,26 @@ test("手绘中偏斜滑块仍可调整", async () => {
         store.dispatch(setActiveVibratoPreset(custom.id));
     });
 
+    // 偏斜是波形分区里的第一个滑块（Radix 把 aria-label 挂在 Root 上，这里按顺序取）。
+    const skewThumb = () => document.querySelectorAll<HTMLElement>('[role="slider"]')[0];
+    // 偏斜读数是第一个 `.hs-type-mono`。
+    const skewReadout = () =>
+        [...document.querySelectorAll(".hs-type-mono")].map((el) => el.textContent)[0];
+    const step = async () => {
+        await act(async () => {
+            skewThumb().dispatchEvent(
+                new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+            );
+        });
+    };
+
+    expect(skewReadout()).toBe("50%");
+    // Radix 的禁用标记落在 thumb 上（`data-disabled` 空属性，并移出 tab 序）。
+    expect(skewThumb().hasAttribute("data-disabled")).toBe(false);
+    await step();
+    expect(skewReadout()).toBe("51%");
+
+    // 进入手绘：草稿的波形变成表，偏斜随之失去意义。
     const drawButton = [...document.querySelectorAll("button")].find(
         (button) => button.textContent?.trim() === "Draw...",
     );
@@ -1062,20 +1087,11 @@ test("手绘中偏斜滑块仍可调整", async () => {
         drawButton!.click();
     });
 
-    // 偏斜是波形分区里的第一个滑块（Radix 把 aria-label 挂在 Root 上，这里按顺序取）。
-    const thumb = document.querySelectorAll<HTMLElement>('[role="slider"]')[0];
-    expect(thumb, "偏斜滑块应已渲染").toBeTruthy();
-    // 偏斜读数是第一个 `.hs-type-mono`：键盘步进 +1，应当从 50% 变成 51%。
-    // 修复前它写的是草稿里的形状、显示的却是 `handDraw.skew`，拖了会弹回 50%。
-    const readouts = () =>
-        [...document.querySelectorAll(".hs-type-mono")].map((el) => el.textContent);
-    expect(readouts()[0]).toBe("50%");
-
-    await act(async () => {
-        thumb!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
-    });
-
-    expect(readouts()[0]).toBe("51%");
+    expect(skewThumb().hasAttribute("data-disabled")).toBe(true);
+    expect(skewThumb().getAttribute("tabindex")).toBeNull();
+    // 键盘步进不再改变读数 —— 是真的禁用了，而不是"能拖但没效果"。
+    await step();
+    expect(skewReadout()).toBe("51%");
 });
 
 /*

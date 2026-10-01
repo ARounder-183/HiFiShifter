@@ -77,7 +77,6 @@ async function mountEditor(
                         resetLabel="复位"
                         ariaLabel={ARIA}
                         readoutLabels={{ phase: "相位", scale: "幅度" }}
-                        hint="左键绘制 · 右键整体旋转 / 缩放"
                     />
                 </I18nProvider>
             </AppThemeProvider>,
@@ -254,9 +253,4 @@ test("disabled（系统预设）下右键拖拽不改草稿", async () => {
     const { onChange, canvas } = await mountEditor({ disabled: true });
     await drag(canvas, { from: { x: 100, y: 60 }, to: { x: 260, y: 60 } });
     expect(onChange).not.toHaveBeenCalled();
-});
-
-test("提示行常驻渲染", async () => {
-    await mountEditor();
-    expect(host.textContent).toContain("左键绘制");
 });
