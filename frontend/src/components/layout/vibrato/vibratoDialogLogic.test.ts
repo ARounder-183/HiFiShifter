@@ -459,21 +459,120 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             baseline: "line",
         });
 
-        test("边界过渡帧不再把整段拉平：锚点是音符本身", () => {
+        test("边界过渡帧不再把整段拉平：锚点是音符本身的音高", () => {
             const preview = buildAppliedPreview({
                 preset: line,
                 original: withGaps,
                 param: "pitch",
                 framePeriodMs: 5,
             })!;
-            // 直线预设把选区拉直成一条线，而这条线现在锚在**音符**上：
-            // 结果 = 音符的代表音高，于是音符帧相对中心恰好是 0 分。
-            for (let i = noteStart; i < noteEnd; i += 1) {
-                expect(preview.wave[i]).toBeCloseTo(0, 6);
+            /*
+             * 直线预设把选区拉直成一条线，而这条线锚在**音符两端的音高**上
+             * （这一段素材本身就是 60 → 64 的四度上行，见夹具注释）。
+             */
+            const values: number[] = [];
+            for (let i = noteStart; i < noteEnd; i += 1) values.push(preview.wave[i] as number);
+            // 一条直线：相邻差恒定。
+            const steps = values.slice(1).map((v, i) => v - values[i]);
+            expect(Math.max(...steps) - Math.min(...steps), "结果线应当是一条直线").toBeLessThan(
+                1e-6,
+            );
+            // 且它就在音符音高附近、且是**上行**的。
+            expect(Math.abs(values[0]), "锚点不得被那 5 帧 3..22 拽走").toBeLessThan(250);
+            expect(values[values.length - 1]).toBeGreaterThan(values[0]);
+        });
+
+        /*
+         * 段内的音高走向必须体现在锚点上 —— 否则四种「摆放方式」里三种会撞在一起。
+         *
+         * 【报告场景】"只有全程均值和保持现有曲线正常工作，其他和全程均值一模一样"。
+         * 根因：锚点原本取**首 / 末音符段的整段中位数**，而一段连奏乐句只有一个音符段
+         * → 两个锚点必然相等 → 「起点 → 终点」「起点水平」「终点水平」全部退化成
+         * 同一条水平线（= 全程均值）。
+         *
+         * 这条用"一段 60 → 64 的音符"钉住：四种模式的**终点值**必须互不相同。
+         */
+        test("段内的走向进得了锚点：四种摆放方式互不相同", () => {
+            const note = [
+                ...new Array<number>(20).fill(0),
+                ...Array.from({ length: 60 }, (_, i) => 60 + (i / 59) * 4),
+                ...new Array<number>(20).fill(0),
+            ];
+            const at = (baseline: "line" | "holdStart" | "holdEnd" | "average") => {
+                const preview = buildAppliedPreview({
+                    preset: sanitizeVibratoPreset({
+                        id: `custom_${baseline}`,
+                        depthCents: 0,
+                        attackMs: 0,
+                        releaseMs: 0,
+                        irregularity: 0,
+                        baseline,
+                    }),
+                    original: note,
+                    param: "pitch",
+                    framePeriodMs: 5,
+                })!;
+                // 取音符中段的几帧（避开两端的过渡），代表这条线摆在哪。
+                return preview.wave[55] as number;
+            };
+            const line = at("line");
+            const holdStart = at("holdStart");
+            const holdEnd = at("holdEnd");
+            const average = at("average");
+            const values = [line, holdStart, holdEnd, average];
+            for (let i = 0; i < values.length; i += 1) {
+                for (let j = i + 1; j < values.length; j += 1) {
+                    expect(
+                        Math.abs(values[i] - values[j]),
+                        `两种摆放方式不该给出同一个结果（${i} vs ${j}）`,
+                    ).toBeGreaterThan(10);
+                }
             }
-            // 反面对照：若锚点仍取到哨兵 0（或边界上的 3/8/15），这几帧会是
-            // (0 − 6200) ≈ −6200 分，而不是 0。
-            expect(Math.abs(preview.wave[noteStart])).toBeLessThan(1000);
+            // 起点水平应当比终点水平低（素材是上行的）。
+            expect(holdStart).toBeLessThan(holdEnd);
+        });
+
+        /*
+         * 跟踪器在音符**内部**给出的异常段（八度跳、快滑）不得在轮廓上打洞。
+         *
+         * 【报告场景】"对原参数线的识别有问题，在不应该断的地方断了"。根因：画图用的
+         * 掩码是 `refineNoteFrames` 的结果 —— 那是"值不值得拿去拟合"的统计判断，
+         * 一段残差很大的帧（八度跳 40 帧）会被整段剔掉，轮廓于是断开。
+         *
+         * 现在画图认**音符帧**（`plan.modulatable`，也就是落盘掩码），断口只留给
+         * 真正的气口；异常段照画，但**不参与纵轴定标**（否则 40 分的颤音会被压成
+         * 一条直线）。
+         */
+        test("音符内部的异常段照画（不断开），但不参与纵轴定标", () => {
+            const glitch = [
+                ...new Array<number>(50).fill(0),
+                ...Array.from({ length: 300 }, (_, i) => 60 + Math.sin(i / 6) * 0.3),
+                ...Array.from({ length: 40 }, (_, i) => 72 + Math.sin(i / 6) * 0.3),
+                ...Array.from({ length: 260 }, (_, i) => 60 + Math.sin(i / 6) * 0.3),
+            ];
+            const preview = buildAppliedPreview({
+                preset: sanitizeVibratoPreset({
+                    id: "custom_glitch",
+                    depthCents: 40,
+                    rateHz: 5.5,
+                    attackMs: 0,
+                    releaseMs: 0,
+                    irregularity: 0,
+                }),
+                original: glitch,
+                param: "pitch",
+                framePeriodMs: 5,
+            })!;
+
+            // 轮廓从第一个音符帧到最后一个音符帧**连续**（异常段不断开）。
+            for (let i = 50; i < 650; i += 1) {
+                expect(Number.isFinite(preview.contour[i]), `第 ${i} 帧不该断`).toBe(true);
+                expect(Number.isFinite(preview.wave[i]), `第 ${i} 帧不该断`).toBe(true);
+            }
+            // 但纵轴不认那个八度跳：量程仍按"稳的那部分"来。
+            expect(preview.peakCents, "异常段不得把纵轴撑到上千分").toBeLessThan(300);
+            // 读数报的是颤音自身幅度，与纵轴的取舍无关。
+            expect(preview.vibratoPeakCents).toBeGreaterThan(20);
         });
 
         test("不受颤音影响的帧画成断口（NaN），且不参与纵轴", () => {
@@ -491,10 +590,13 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             for (let i = noteEnd; i < withGaps.length; i += 1) {
                 expect(Number.isNaN(preview.wave[i])).toBe(true);
             }
-            // 音符帧有值：直线预设（深度 0）下结果就是那条线本身 —— 在"相对共同中心"
-            // 的坐标里它是一个常量（不是 0：中心是原参数线的均值，而线画在音符的音高上）。
+            // 音符帧有值：直线预设（深度 0）下结果就是那条线本身 —— 一条连接音符两端
+            // 音高的**直线**（不是"全段一个常数"：那样只有把锚点取成整段中位数才会出现，
+            // 而那正好抹掉了段内本来有的音高走向）。
             const lineValues = preview.wave.slice(noteStart, noteEnd).filter(Number.isFinite);
-            expect(Math.max(...lineValues) - Math.min(...lineValues)).toBeLessThan(1e-9);
+            expect(lineValues.length, "音符帧应当都画出来").toBe(noteEnd - noteStart);
+            const lineSteps = lineValues.slice(1).map((v, i) => v - lineValues[i]);
+            expect(Math.max(...lineSteps) - Math.min(...lineSteps)).toBeLessThan(1e-6);
             // 纵轴只按画出来的值拟合：气口与过渡帧是断口，不参与。
             expect(preview.peakCents).toBeGreaterThan(0);
             expect(preview.peakCents).toBeLessThan(500);
@@ -704,10 +806,14 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             });
 
             /*
-             * "两条线共用标尺"最直观的证据：`line` 基线把结果线搬成一条水平线，而原线
+             * "两条线共用标尺"最直观的证据：`line` 基线把结果线搬成一条直线，而原线
              * 保留素材的起伏 —— 同一个坐标系里一眼就能看出预设做了什么。
+             *
+             * 【素材为什么是拱形】`line` 的含义是"起点音高 → 终点音高"，所以**单调
+             * 上行**的素材被它拉直后与素材本身重合（那是对的行为，但演示不出对比）。
+             * 拱形（起止同高、中间隆起）才看得出"预设把起伏抹掉了"。
              */
-            test("直线基线：结果线被搬成水平线，原线保留起伏", () => {
+            test("直线基线：结果线被搬成直线，原线保留起伏", () => {
                 const straight = sanitizeVibratoPreset({
                     id: "custom_straight",
                     depthCents: 0,
@@ -717,8 +823,12 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
                     irregularity: 0,
                     baseline: "line",
                 });
-                // 一段**缓慢上行**的素材（快滑音会被判成过渡段剔掉，这里要的是音符本身的走向）。
-                const phrase = Array.from({ length: 300 }, (_, i) => 60 + (i / 299) * 4);
+                // 一段**拱形**素材：起止同高（都是 60）、中间隆起 2 个半音。
+                // 它必须是一段"音符"（快滑音会被判成过渡段），所以用缓慢的正弦拱。
+                const phrase = Array.from(
+                    { length: 300 },
+                    (_, i) => 60 + Math.sin((Math.PI * i) / 299) * 2,
+                );
                 const preview = buildAppliedPreview({
                     preset: straight,
                     original: phrase,
@@ -727,10 +837,12 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
                 })!;
                 const result = finite(preview.wave);
                 const contour = finite(preview.contour);
-                // 结果线：直线预设把它搬平（同一坐标里是常数）。
-                expect(Math.max(...result) - Math.min(...result)).toBeLessThan(1e-6);
-                // 原线：素材的四度上行完整保留（相对共同中心是 −200..+200 分）。
-                expect(Math.max(...contour) - Math.min(...contour)).toBeCloseTo(400, 6);
+                // 结果线：直线预设把它搬平（两端锚点同高 → 一条水平线；留几分容差，
+                // 两端锚点是各自 100ms 窗口的中位数，不会逐位相等）。
+                expect(Math.max(...result) - Math.min(...result)).toBeLessThan(5);
+                // 原线：素材的拱形完整保留（相对共同中心是 0..+200 分）。
+                // 拱顶落在两帧之间，峰值取到 199.998 分 —— 容差给到整分。
+                expect(Math.max(...contour) - Math.min(...contour)).toBeCloseTo(200, 0);
             });
         });
     });

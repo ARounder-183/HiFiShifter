@@ -181,6 +181,14 @@ const NOTE_TREND_HALF_WINDOW_MS = 200;
 const NOTE_RESIDUAL_FACTOR = 4;
 
 /**
+ * 取锚点时在区域两端各看多长一段（毫秒）。
+ *
+ * 约一个颤音周期：长到能把颤音本身的摆动平均掉（不然锚点会跟着某一帧的相位跑），
+ * 短到仍然算"起点 / 终点附近的音高"。见 {@link vibratoAnchors}。
+ */
+const ANCHOR_WINDOW_MS = 100;
+
+/**
  * 在音符段内部再剔掉"不像音符"的帧：滑音 / 浊清过渡段。
  *
  * 【为什么音符段判定还不够】{@link vibratoNoteRuns} 只排得掉"未检测"与"值域之外"的
@@ -279,11 +287,60 @@ export function bridgeShortGaps(values: readonly number[], framePeriodMs: number
 }
 
 /**
+ * 锚点：区域**起点 / 终点附近**的音高，各取一小段的中位数。
+ *
+ * 【为什么不是"首 / 末音符段的代表值（整段中位数）"】那样在**只有一个音符段**时
+ * 必然得到两个相等的值 —— 于是「起点 → 终点」「起点水平」「终点水平」三种摆放方式
+ * 全部退化成同一条水平线（实测：一段连奏乐句的两个锚点都是 60.3，无论它在段内
+ * 走了两个半音）。而一个音符段**内部**的音高移动（连奏、滑音、长音收尾）正是这
+ * 三种模式要表达的东西：起点水平 = 守住开头的音，终点水平 = 守住结尾的音，
+ * 起点→终点 = 两者之间拉一条直线。
+ *
+ * 【为什么窗口要先 refine 一遍】稳定帧已经把跟踪器从无声区爬上来的过渡段剔掉了。
+ * 直接取"区域开头那一小段"会取到那段爬升 —— 实测锚点会落在 15.3（而不是真正的
+ * 60），整条颤音被拖到沟里。窗口长度取 {@link ANCHOR_WINDOW_MS}：约一个颤音周期，
+ * 长到能把颤音本身平均掉，短到仍算"起点附近"。
+ */
+function vibratoAnchors(
+    values: readonly number[],
+    modulatable: readonly boolean[],
+    runs: readonly VibratoNoteRun[],
+    framePeriodMs: number,
+): VibratoAnchors {
+    const fallback = { startValue: runs[0].pitch, endValue: runs[runs.length - 1].pitch };
+    const stable = refineNoteFrames(
+        values.map((value, index) => (modulatable[index] ? value : Number.NaN)),
+        framePeriodMs,
+    );
+    const stableIndices: number[] = [];
+    for (let i = 0; i < values.length; i += 1) {
+        if (stable[i]) stableIndices.push(i);
+    }
+    if (stableIndices.length === 0) return fallback;
+
+    const fp = Number.isFinite(framePeriodMs) && framePeriodMs > 0 ? framePeriodMs : 5;
+    const windowFrames = Math.max(1, Math.round(ANCHOR_WINDOW_MS / fp));
+    const pick = (indices: number[]) => medianOfList(indices.map((index) => Number(values[index])));
+    return {
+        startValue: pick(stableIndices.slice(0, windowFrames)),
+        endValue: pick(stableIndices.slice(-windowFrames)),
+    };
+}
+
+/** 一组值的中位数（空数组返回 NaN，调用方自行兜底）。 */
+function medianOfList(list: number[]): number {
+    if (list.length === 0) return Number.NaN;
+    const sorted = [...list].sort((a, b) => a - b);
+    const mid = sorted.length >> 1;
+    return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/**
  * 规划一次颤音的落点。
  *
  * - 非哨兵参数：整段都可调制，锚点 = 首末帧（与既有行为逐字一致）；
- * - 音高：只有**音符帧**可调制；锚点 = 首 / 末个音符段的稳健代表值。音符段内部
- *   还会再剔掉滑音 / 过渡段（见 {@link refineNoteFrames}）。
+ * - 音高：只有**音符帧**可调制；锚点 = 区域**起点 / 终点附近**的音高（见
+ *   {@link vibratoAnchors}）。
  *
  * @returns 没有任何音符段时 `null` —— 没有可调制的对象，调用方应当放弃，
  *          而不是照着一片 0 写出 0（那会把气口当成"要加颤音的音高"）。
@@ -321,7 +378,7 @@ export function planVibratoTarget(
     }
 
     return {
-        anchors: { startValue: runs[0].pitch, endValue: runs[runs.length - 1].pitch },
+        anchors: vibratoAnchors(values, modulatable, runs, framePeriodMs),
         modulatable,
     };
 }

@@ -418,11 +418,22 @@ export function buildAppliedPreview(args: {
     const toCents = (value: number) => paramUnitToDepth(value, args.param, args.range);
 
     /*
-     * 稳定音符帧：先剔掉滑音 / 过渡段（它们会把曲线拽出几千分），再接上短于最短音符
-     * 的断口 —— 跟踪器在辅音上掉几帧点不是"音没了"。两条线共用这一套掩码。
+     * 两条线画在**音符帧**上（`plan.modulatable`），断口只在"这里没有音高"处出现。
+     *
+     * 【为什么不是 refine 之后的稳定帧】refine 回答的是"这些帧稳不稳、值不值得
+     * 拿去拟合"，不是"这里有没有音高"（见 `planVibratoTarget` 的说明）。用它当画图
+     * 掩码，轮廓就会在音符**内部**断开 —— 用户看到的是"在不应该断的地方断了"
+     * （跟踪器给一段连奏 / 一个八度跳时残差很大，那段就被剔掉）。
+     *
+     * 画音符帧还有一个更硬的理由：**落盘掩码就是它**。预览画的必须就是"应用会写出来
+     * 的东西"，否则预览与结果各说各话。
+     */
+    const noteFrames = plan.modulatable;
+    /*
+     * 稳定帧只用于**统计**：共同中心取它，免得一段滑音把中心拽偏。
      */
     const stableFrames = refineNoteFrames(
-        values.map((value, index) => (plan.modulatable[index] ? value : Number.NaN)),
+        values.map((value, index) => (noteFrames[index] ? value : Number.NaN)),
         framePeriodMs,
     );
 
@@ -443,7 +454,7 @@ export function buildAppliedPreview(args: {
             ? stableCents.reduce((sum, value) => sum + value, 0) / stableCents.length
             : 0;
     const deviationAt = (source: readonly number[], index: number) =>
-        stableFrames[index] ? toCents(source[index]) - centerCents : Number.NaN;
+        noteFrames[index] ? toCents(source[index]) - centerCents : Number.NaN;
     const baselineSource = result.baseline ?? values;
 
     // 原参数线（背景）与套用后的参数线（前景）—— 同一原点、同一标尺。
@@ -461,31 +472,41 @@ export function buildAppliedPreview(args: {
      * 读成"这里被拉平了"。
      */
     const envelope = (result.envelope ?? new Array(values.length).fill(0)).map((value, index) =>
-        stableFrames[index] ? Math.abs(value) : Number.NaN,
+        noteFrames[index] ? Math.abs(value) : Number.NaN,
     );
     /** 带子的中心：颤音所围绕的那条基线（与两条线同一原点）。 */
     const envelopeCenter = bridgeShortGaps(
         baselineSource.map((_, index) =>
-            stableFrames[index] ? toCents(baselineSource[index]) - centerCents : Number.NaN,
+            noteFrames[index] ? toCents(baselineSource[index]) - centerCents : Number.NaN,
         ),
         framePeriodMs,
     );
 
     /*
-     * 纵轴按**画出来的全部**拟合：两条线 + 包络带的两缘。断口不参与 —— 否则一个 NaN
-     * 就能把整条纵轴撑爆。`vibratoPeakCents` 另算（只跟包络有关），供读数使用。
+     * 纵轴按**稳定帧上画出来的东西**拟合：两条线 + 包络带的两缘。
+     *
+     * 【为什么定标只认稳定帧，而画图认音符帧】两者回答的问题不同：
+     * - **画图**问"这里有没有音高"—— 有就画，断口只留给真正的气口；
+     * - **定标**问"这段素材的音高大致在哪个范围"—— 跟踪器的八度跳、从无声区爬上来的
+     *   过渡段会把量程撑到上千分，40 分的颤音随即被压成一条直线（这正是修过几轮的
+     *   "看不清颤音"）。
+     *
+     * 于是极端帧**照画**（线不断），但不参与定标（线会跑出画框）。宁可让用户看到
+     * "这里有一下很怪"，也不要让整条颤音被它压扁 —— 读数 `vibratoPeakCents` 另行给出
+     * 颤音自身的幅度，不受这个取舍影响。
      */
     let peak = 0;
     let vibratoPeak = 0;
     for (let i = 0; i < values.length; i += 1) {
+        if (Number.isFinite(envelope[i])) {
+            vibratoPeak = Math.max(vibratoPeak, envelope[i]);
+        }
+        if (!stableFrames[i]) continue;
         for (const value of [contour[i], wave[i]]) {
             if (Number.isFinite(value)) peak = Math.max(peak, Math.abs(value));
         }
-        if (Number.isFinite(envelope[i])) {
-            vibratoPeak = Math.max(vibratoPeak, envelope[i]);
-            if (Number.isFinite(envelopeCenter[i])) {
-                peak = Math.max(peak, Math.abs(envelopeCenter[i]) + envelope[i]);
-            }
+        if (Number.isFinite(envelope[i]) && Number.isFinite(envelopeCenter[i])) {
+            peak = Math.max(peak, Math.abs(envelopeCenter[i]) + envelope[i]);
         }
     }
     return {
