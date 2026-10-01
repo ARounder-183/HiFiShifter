@@ -224,6 +224,11 @@ function withCanvasLayout(width: number): () => void {
     };
 }
 
+/** 预览里的「摆放方式」下拉（表单里那个没有 aria-label，因此这个选择器是唯一的）。 */
+function findBaselineTrigger(): HTMLButtonElement | null {
+    return document.querySelector<HTMLButtonElement>('button[aria-label="Oscillate around"]');
+}
+
 /** 画布容器（手势回调挂在它上面，因此事件要派发到它而不是 window）。 */
 function previewInteractive(): HTMLElement {
     const container = document.querySelector<HTMLElement>(
@@ -459,6 +464,53 @@ test("套用页签：预览同样可拖（与预设波形共用一套手势）",
     await mountDialog(undefined, () => undefined, { applyTarget: {} });
     // 有选区数据时套用页签画的是真实曲线，它同样接受手柄与主体拖拽。
     expect(document.querySelector('[data-testid="vibrato-preview-interactive"]')).toBeTruthy();
+});
+
+/*
+ * 「摆放方式」就地可选：套用页签的波形右上角一个下拉。
+ *
+ * 【为什么它该在波形旁边】它决定的是"颤音挂在素材的哪条线上" —— 对「添加颤音」来说
+ * 是要**边看边定**的参数（换一下，颤音就从"保持歌手原曲线"变成"拉成一条直线"），
+ * 让用户去右下角表单里翻太远。表单里同一个字段仍在：两处改的是同一份草稿。
+ *
+ * 它只出现在套用页：预设波形页没有素材，也就无从判断该挂在哪条线上。
+ */
+test("套用页签：波形右上角有「摆放方式」，且只在这一页出现", async () => {
+    await mountDialog(undefined, () => undefined, { applyTarget: {} });
+
+    const trigger = findBaselineTrigger();
+    expect(trigger, "套用页签应当有摆放方式").toBeTruthy();
+    // 显示草稿当前的值（系统预设「自然」默认「起点 → 终点」）。
+    expect(trigger!.textContent, "应回显草稿当前值").toContain("Start → End");
+
+    await clickButton("Preset waveform");
+    expect(findBaselineTrigger(), "预设波形页不该有摆放方式").toBeFalsy();
+});
+
+test("管理预设那一面：没有「摆放方式」（那是添加颤音的专属）", async () => {
+    await mountDialog();
+    expect(findBaselineTrigger()).toBeFalsy();
+});
+
+test("摆放方式就地改：改的是同一份草稿，应用时带出去", async () => {
+    const onApply = vi.fn();
+    await mountDialog(undefined, () => undefined, { applyTarget: { onApply } });
+
+    const trigger = findBaselineTrigger()!;
+    // Radix 为表单兼容渲染一个隐藏的原生 select，它就是"改这个受控值"的入口
+    // （与 `Select.test.tsx` 同一手法）。
+    const native = trigger.parentElement?.querySelector("select");
+    expect(native, "隐藏的原生 select 应存在").toBeTruthy();
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+    await act(async () => {
+        setter?.call(native, "holdStart");
+        native!.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    expect(trigger.textContent, "选完立刻回显").toContain("Hold start");
+
+    await clickButton("Apply");
+    expect(onApply.mock.calls[0][0].baseline, "草稿里的改动应当带出去").toBe("holdStart");
 });
 
 /*

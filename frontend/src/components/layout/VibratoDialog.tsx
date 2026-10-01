@@ -1462,6 +1462,11 @@ export function VibratoDialog({
                                 appliedHalfCents={appliedHalfCents}
                                 appliedHandles={appliedHandles}
                                 appliedStatus={appliedStatus}
+                                // 「摆放方式」在波形右上角就地可改：它决定颤音挂在
+                                // 素材的哪条线上，是套用时最常调的参数。表单里同一个
+                                // 字段仍在，两处改的都是这份草稿。
+                                baseline={draft.baseline}
+                                onBaselineChange={(mode) => patch({ baseline: mode })}
                                 onGestureStart={handlePreviewGestureStart}
                                 onGestureMove={handlePreviewGestureMove}
                                 onGestureEnd={handlePreviewGestureEnd}

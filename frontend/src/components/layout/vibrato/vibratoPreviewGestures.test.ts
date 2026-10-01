@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import { sanitizeVibratoPreset, VIBRATO_LIMITS } from "../../../features/vibrato/vibratoPresets";
+import { buildVibratoPreview } from "./vibratoDialogLogic";
 import {
     advancePreviewFineDrag,
     applyPreviewGesture,
@@ -133,13 +134,42 @@ describe("applyPreviewGesture", () => {
         expect(after.releaseFrac).toBeGreaterThan(before.releaseFrac);
     });
 
-    test("主体：水平位移改相位（一个可见周期 = 360°）", () => {
+    test("主体：向右拖 → 相位**减小**（波形才会跟着手指往右走）", () => {
         // cycleWidthPx = 40 → 40px = 360°。
         const next = applyPreviewGesture({ kind: "body" }, snapshot(), 10, 0);
-        expect(next.startPhaseDeg).toBeCloseTo(90, 9);
+        expect(next.startPhaseDeg).toBeCloseTo(270, 9);
         // 反向并取模。
         const back = applyPreviewGesture({ kind: "body" }, snapshot(), -10, 0);
-        expect(back.startPhaseDeg).toBeCloseTo(270, 9);
+        expect(back.startPhaseDeg).toBeCloseTo(90, 9);
+    });
+
+    /*
+     * 上面那条只钉住"字段怎么变"，而用户报的缺陷恰恰是"字段变了、画面却往反方向跑"。
+     * 这条把方向钉在**画出来的东西**上：波峰在画布上往哪边移。
+     *
+     * 【为什么能这么算】波形取 `sampleCycle(u + φ)`（见 `vibratoCurve.ts`），所以 φ
+     * 变大会让同一个特征出现在**更早**的时刻 —— 画面上向左。因此"向右拖"必须让波峰
+     * 的下标**变大**。
+     */
+    test("主体：向右拖 → 波峰在画布上向右移（不是向左）", () => {
+        const peakIndex = (phaseDeg: number): number => {
+            const preset = sanitizeVibratoPreset({
+                id: "custom_phase_probe",
+                depthCents: 40,
+                rateHz: 5,
+                attackMs: 0,
+                releaseMs: 0,
+                irregularity: 0,
+                startPhaseDeg: phaseDeg,
+            });
+            const { wave } = buildVibratoPreview(preset, { frameCount: 320, framePeriodMs: 5 });
+            return wave.indexOf(Math.max(...wave));
+        };
+
+        const before = peakIndex(0);
+        const dragged = applyPreviewGesture({ kind: "body" }, snapshot(), 10, 0);
+        const after = peakIndex(dragged.startPhaseDeg as number);
+        expect(after, "向右拖，波峰应当往右移").toBeGreaterThan(before);
     });
 
     test("主体：向上拖动加深，向下拖动变浅（可为负，即反相）", () => {

@@ -112,7 +112,10 @@ export function wrapPhaseDeg(value: number): number {
  * | - | - |
  * | 渐入 | 水平位移 → `attackMs`（`dx/width × windowMs`），钳 `0..windowMs` |
  * | 渐出 | 同上但**取反**（手柄画在斜坡起点，向右拖即缩短渐出）→ `releaseMs` |
- * | 主体 | `dx → startPhaseDeg`（一个可见周期 = 360°）；`dy → depthCents`（向上加深） |
+ * | 主体 | `dx → startPhaseDeg`（一个可见周期 = 360°，**取反**使波形跟手）；`dy → depthCents`（向上加深） |
+ *
+ * 【三个水平映射里有两个是反的，这不是笔误】符号一律由"看得见的东西往哪动"决定：
+ * 手柄 / 波形都要跟着指针走。渐出与相位的字段定义方向恰好与屏幕方向相反，于是取反。
  *
  * 【渐入 / 渐出为什么以整段时长为上限】它们各自都能铺满整条颤音线：渐入拉满 =
  * 整条线由弱到强，渐出拉满 = 整条线由强到弱。上限曾经是"时长的一半"（为了让
@@ -144,7 +147,17 @@ export function applyPreviewGesture(
     }
 
     const cycleWidthPx = snapshot.cycleWidthPx > 0 ? snapshot.cycleWidthPx : width;
-    const phase = wrapPhaseDeg(snapshot.startPhaseDeg + (deltaX / cycleWidthPx) * 360);
+    /*
+     * 相位：向右拖 → 波形**向右**走（跟手）。
+     *
+     * 【为什么是减号】波形取 `sampleCycle(u + φ)`，`φ` 变大意味着同一个波形特征
+     * （比如波峰）出现在**更早**的时刻 —— 画面上整条波形向左跑。而用户是"抓住波形
+     * 往右拖"，所以映射必须取负号，让画出来的东西跟着指针走。
+     *
+     * 与渐出手柄同一个理由（见上）：符号由"看得见的东西往哪动"决定，不由字段名的
+     * 字面方向决定。
+     */
+    const phase = wrapPhaseDeg(snapshot.startPhaseDeg - (deltaX / cycleWidthPx) * 360);
     const centsPerPx = snapshot.centsPerPx > 0 ? snapshot.centsPerPx : 1;
     // 像素 × (cents/像素) = cents。向上拖（deltaY < 0）即加深。
     const depthCents = clamp(

@@ -19,12 +19,13 @@ import { Box, Flex } from "@radix-ui/themes";
 import { PlayIcon, StopIcon } from "@radix-ui/react-icons";
 
 import { useI18n } from "../../../i18n/I18nProvider";
-import { AppButton, AppIconButton, AppSegmentedControl } from "../../../ui";
+import { AppButton, AppIconButton, AppSegmentedControl, AppSelect } from "../../../ui";
+import type { BaselineMode } from "../../../features/vibrato/vibratoTypes";
 import { VibratoPreviewCanvas } from "./VibratoPreviewCanvas";
 import type { PreviewHandleLayout, PreviewZone } from "./vibratoPreviewGestures";
 import type { VibratoPreviewGestureInfo, VibratoPreviewModifiers } from "./VibratoPreviewCanvas";
 import type { VibratoAppliedPreview, VibratoPreviewSamples } from "./vibratoDialogLogic";
-import { formatNumber } from "./vibratoDialogLogic";
+import { BASELINE_MODE_KEYS, BASELINE_MODE_ORDER, formatNumber } from "./vibratoDialogLogic";
 
 /** 预览区的两个页签。 */
 export type VibratoPreviewTab = "preset" | "applied";
@@ -63,6 +64,18 @@ export interface VibratoPreviewPaneProps {
     appliedHandles?: PreviewHandleLayout;
     appliedStatus: VibratoAppliedStatus;
 
+    /**
+     * 「摆放方式」（颤音围绕哪条曲线摆）。
+     *
+     * 【为什么在预览里也放一个】它决定的是"颤音挂在素材的哪条线上"，对「添加颤音」
+     * 这个动作来说是要边看边定的参数 —— 放在波形右上角就地可改，用户不必去右下角的
+     * 表单里翻（那里的同一个字段仍然保留：两处改的是同一个草稿）。
+     *
+     * 省略 `onBaselineChange` 时不渲染这个下拉。
+     */
+    baseline?: BaselineMode;
+    onBaselineChange?: (mode: BaselineMode) => void;
+
     /*
      * 手势：两个页签共用同一套（命中与换算规则见 `vibratoPreviewGestures`）。
      * 拖的是同一个草稿 —— 在套用预览里拖渐入，与在预设波形里拖是同一件事，
@@ -94,6 +107,8 @@ export function VibratoPreviewPane({
     appliedHalfCents,
     appliedHandles,
     appliedStatus,
+    baseline,
+    onBaselineChange,
     onGestureStart,
     onGestureMove,
     onGestureEnd,
@@ -116,21 +131,44 @@ export function VibratoPreviewPane({
     return (
         <Box className="rounded border border-qt-border bg-qt-panel p-2">
             {/*
+             * 头部一行：左边是页签段控（"看哪个问题"），右上角是**摆放方式**。
+             *
              * 两个页签 = 这扇窗能回答的两个问题。段控而不是页签条：只有两个选项、
              * 且切换是"看的角度"而非"换一屏内容"，段控更轻。
+             *
+             * 摆放方式只出现在套用页：它决定"颤音挂在素材的哪条线上"，只有看着真实
+             * 素材才谈得上选它；预设波形页没有素材，那个字段仍在右下角表单里。
              */}
             {hasSelection ? (
-                <AppSegmentedControl<VibratoPreviewTab>
-                    className="mb-2"
-                    value={tab}
-                    size="sm"
-                    ariaLabel={t("vibrato_preview_tabs")}
-                    onChange={onTabChange}
-                    options={[
-                        { value: "preset", label: t("vibrato_preview_tab_preset") },
-                        { value: "applied", label: t("vibrato_apply_preview") },
-                    ]}
-                />
+                <Flex mb="2" justify="between" align="center" gap="2" wrap="wrap">
+                    <AppSegmentedControl<VibratoPreviewTab>
+                        value={tab}
+                        size="sm"
+                        ariaLabel={t("vibrato_preview_tabs")}
+                        onChange={onTabChange}
+                        options={[
+                            { value: "preset", label: t("vibrato_preview_tab_preset") },
+                            { value: "applied", label: t("vibrato_apply_preview") },
+                        ]}
+                    />
+                    {onAppliedTab && baseline !== undefined && onBaselineChange ? (
+                        <Flex align="center" gap="2">
+                            <span className="hs-type-caption">{t("vibrato_baseline")}</span>
+                            <AppSelect
+                                value={baseline}
+                                // 定宽：选项文案长短差得远（"起点 → 终点" vs
+                                // "保持现有曲线"），不定宽时切一下整行就跳。
+                                minWidth={150}
+                                ariaLabel={t("vibrato_baseline")}
+                                onValueChange={(value) => onBaselineChange(value as BaselineMode)}
+                                options={BASELINE_MODE_ORDER.map((mode) => ({
+                                    value: mode,
+                                    label: t(BASELINE_MODE_KEYS[mode]),
+                                }))}
+                            />
+                        </Flex>
+                    ) : null}
+                </Flex>
             ) : null}
 
             {/*
