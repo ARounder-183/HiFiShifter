@@ -487,6 +487,26 @@ test("套用页签：波形右上角有「摆放方式」，且只在这一页�
     expect(findBaselineTrigger(), "预设波形页不该有摆放方式").toBeFalsy();
 });
 
+/*
+ * 摆放方式**不能铺满整行**。
+ *
+ * 【为什么单独一条】`AppSelect` 默认 `fullWidth`（表单里那样是对的），放进预览的
+ * 头部一行就会把同一行的标题挤成一字一行、自己撑到整行宽 —— 实机截图里那一列竖排的
+ * "围绕什么摆动"就是这么来的。jsdom 没有排版，量不出"挤没挤"，但可以钉住那个根因：
+ * 这个下拉不得带 `w-full`，且要有定宽。
+ */
+test("摆放方式不抢整行宽度（否则标题会被挤成竖排）", async () => {
+    await mountDialog(undefined, () => undefined, { applyTarget: {} });
+
+    const trigger = findBaselineTrigger();
+    expect(trigger, "套用页签应当有摆放方式").toBeTruthy();
+    expect(
+        trigger!.className,
+        "下拉不得铺满整行：它会把自己撑到整行宽、并把旁边的标题挤成一字一行",
+    ).not.toContain("w-full");
+    expect(trigger!.style.minWidth, "定宽避免切选项时整行跳动").toBe("150px");
+});
+
 test("管理预设那一面：没有「摆放方式」（那是添加颤音的专属）", async () => {
     await mountDialog();
     expect(findBaselineTrigger()).toBeFalsy();

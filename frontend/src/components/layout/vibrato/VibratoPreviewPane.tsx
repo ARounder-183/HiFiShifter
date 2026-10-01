@@ -152,10 +152,15 @@ export function VibratoPreviewPane({
                         ]}
                     />
                     {onAppliedTab && baseline !== undefined && onBaselineChange ? (
-                        <Flex align="center" gap="2">
+                        // `flexShrink: 0` + `fullWidth={false}`：这一组必须**按内容宽**
+                        // 待着。`AppSelect` 默认铺满容器（表单里是对的），在这里会把
+                        // 同一行的标题挤成一字一行 —— 而且它自己会撑到整行宽，看着像是
+                        // 整个头部都是这个下拉。
+                        <Flex align="center" gap="2" style={{ flexShrink: 0 }}>
                             <span className="hs-type-caption">{t("vibrato_baseline")}</span>
                             <AppSelect
                                 value={baseline}
+                                fullWidth={false}
                                 // 定宽：选项文案长短差得远（"起点 → 终点" vs
                                 // "保持现有曲线"），不定宽时切一下整行就跳。
                                 minWidth={150}
