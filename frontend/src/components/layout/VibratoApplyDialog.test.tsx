@@ -172,7 +172,13 @@ test("勾选「保存到预设」后才 upsert（并且仍然应用）", async (
     expect(onApply).toHaveBeenCalledTimes(1);
 });
 
-test("选中系统预设时，保存开关被禁用（系统预设只读）", async () => {
+/*
+ * 选中系统预设时，保存开关**仍然可用**（勾上会自动另存为自定义副本）。
+ *
+ * 【为什么改了】系统预设只读指的是"改不了库里那一条"，不是"用户的调整不能留"。
+ * 禁用开关等于把"调完留住"这条路堵死，用户只能手动去管理器复制一遍。
+ */
+test("选中系统预设时，保存开关仍可用（保存即另存为自定义）", async () => {
     await mountDialog();
     const rows = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
     const builtinRow = rows.find((row) => row.textContent?.includes("Natural"));
@@ -181,7 +187,7 @@ test("选中系统预设时，保存开关被禁用（系统预设只读）", as
         builtinRow!.click();
     });
     const checkbox = document.querySelector<HTMLButtonElement>('[role="checkbox"]');
-    expect(checkbox?.disabled).toBe(true);
+    expect(checkbox?.disabled).toBe(false);
 });
 
 test("页脚「从选区提取…」可用（有 onExtract 时）", async () => {
@@ -260,4 +266,46 @@ test("音高有值但短得不成音符时，同样给出原因而不是画一�
     expect(document.querySelector("canvas[role=img]")).toBeNull();
     expect(document.body.textContent ?? "").toContain("No pitch to apply vibrato to");
     expect(document.body.textContent ?? "").not.toContain("Select a range");
+});
+
+/*
+ * 系统预设也能"把这些调整保存到预设"：自动另存为一份自定义副本。
+ *
+ * 【为什么值得测】系统预设本身只读，但用户调完旋钮想留住结果。旧行为是静默跳过保存
+ * （勾了等于没勾），用户会以为存下了 —— 这是这类工具最恼人的错法之一。而且**存下的
+ * 那份必须就是应用的那份**：否则"保存"与"应用"分叉，用户回头找预设会发现对不上。
+ */
+test("系统预设勾选保存到预设：自动另存为自定义副本，且应用的就是它", async () => {
+    const onApply = vi.fn();
+    const { store } = await mountDialog({ onApply });
+
+    // 切到系统预设「Natural」。
+    const naturalRow = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((row) =>
+        row.textContent?.includes("Natural"),
+    );
+    expect(naturalRow, "系统预设行应已渲染").toBeTruthy();
+    await act(async () => {
+        naturalRow!.click();
+    });
+    // 只读提示已按要求移除；保存开关对系统预设同样可用。
+    expect(document.body.textContent ?? "").not.toContain("read-only");
+
+    const saveBox = document.querySelector<HTMLElement>('[role="checkbox"]');
+    expect(saveBox, "保存开关应已渲染").toBeTruthy();
+    await act(async () => {
+        saveBox!.click();
+    });
+
+    const apply = findButton("Apply");
+    expect(apply, "应用按钮应已渲染").toBeTruthy();
+    await act(async () => {
+        apply!.click();
+    });
+
+    const saved = store.getState().session.vibratoPresets.filter((preset) => !preset.builtin);
+    // 名字按显示名预填编号（与管理器里「复制为自定义」同一套规则）。
+    expect(saved.map((preset) => preset.name)).toContain("Natural 2");
+    // 应用的就是存下的那一份（同一个 id）。
+    expect(onApply).toHaveBeenCalledTimes(1);
+    expect((onApply.mock.calls[0][0] as VibratoPreset).id).toBe(saved[0]?.id);
 });

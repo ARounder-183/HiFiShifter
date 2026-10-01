@@ -22,7 +22,9 @@ import { useI18n } from "../../i18n/I18nProvider";
 import { persistUiSettings, upsertVibratoPreset } from "../../features/session/sessionSlice";
 import {
     VIBRATO_LIMITS,
+    duplicateVibratoPreset,
     isBuiltinVibratoPresetId,
+    nextDuplicatePresetName,
     sanitizeVibratoPreset,
 } from "../../features/vibrato/vibratoPresets";
 import { buildContourAuditionPair, vibratoAudition } from "../../features/vibrato/vibratoAudition";
@@ -190,11 +192,28 @@ export function VibratoApplyDialog({
     const handleApply = () => {
         if (!draft) return;
         const normalized = sanitizeVibratoPreset(draft);
-        if (saveToPreset && !isBuiltin) {
-            dispatch(upsertVibratoPreset(normalized));
+        /*
+         * 「保存到预设」对**系统预设**同样成立：系统预设本身只读，于是自动另存为一份
+         * 自定义副本（与管理器里「复制为自定义」同一套命名规则：按显示名预填编号，
+         * 并避开已占用的名字），并把这份副本作为应用对象 —— 用户存下的和听到的是同一个
+         * 东西，而不是"存了一份、应用了另一份"。
+         */
+        const saved = saveToPreset
+            ? isBuiltin
+                ? duplicateVibratoPreset(
+                      normalized,
+                      nextDuplicatePresetName(
+                          vibratoPresetLabel(draft, t) || t("vibrato_manager_new"),
+                          presets.map((preset) => vibratoPresetLabel(preset, t)),
+                      ),
+                  )
+                : normalized
+            : null;
+        if (saved) {
+            dispatch(upsertVibratoPreset(saved));
             void dispatch(persistUiSettings());
         }
-        onApply(normalized);
+        onApply(saved ?? normalized);
         handleOpenChange(false);
     };
 
@@ -346,19 +365,24 @@ export function VibratoApplyDialog({
                                                                 audition === kind ? "solid" : "soft"
                                                             }
                                                             aria-pressed={audition === kind}
+                                                            /*
+                                                             * 文案**恒定**，不随播放状态换成
+                                                             * "停止试听"：那样按钮宽度会变，整行
+                                                             * 跟着跳（用户报过）。播放态改由强调色
+                                                             * + `aria-pressed` 表达，点击的后果写在
+                                                             * `title` 里。
+                                                             */
+                                                            title={
+                                                                audition === kind
+                                                                    ? t("vibrato_audition_stop")
+                                                                    : t(labelKey)
+                                                            }
                                                             disabled={!auditionCurves}
                                                             onClick={() => toggleAudition(kind)}
                                                         >
-                                                            {audition === kind
-                                                                ? t("vibrato_audition_stop")
-                                                                : t(labelKey)}
+                                                            {t(labelKey)}
                                                         </AppButton>
                                                     ))}
-                                                    {isBuiltin ? (
-                                                        <span className="hs-type-caption">
-                                                            {t("vibrato_manager_readonly")}
-                                                        </span>
-                                                    ) : null}
                                                 </Flex>
                                             </Flex>
                                         </Box>
@@ -417,7 +441,7 @@ export function VibratoApplyDialog({
                                     control="checkbox"
                                     label={t("vibrato_apply_save_preset")}
                                     checked={saveToPreset}
-                                    disabled={!draft || isBuiltin}
+                                    disabled={!draft}
                                     onCheckedChange={setSaveToPreset}
                                 />
                             </Flex>
