@@ -54,15 +54,9 @@ import {
     AppSegmentedControl,
     AppStatusChip,
 } from "../../ui";
-import { AppForm, AppSwitchRow } from "../../ui/Field";
-import {
-    effectiveSearchMode,
-    type SearchMode,
-    type SearchSettings,
-} from "../../features/search/searchSettings";
+import { effectiveSearchMode } from "../../features/search/searchSettings";
 import { useTranslitIndex } from "../../features/search/useTranslitIndex";
 import { buildQuery, fallbackTranslit, matchTranslit } from "../../features/search/translit";
-import { persistUiSettings, setSearchSettings } from "../../features/session/sessionSlice";
 import { exportThemeJson } from "../../services/api/jsonExport";
 import {
     loadCustomThemes,
@@ -140,7 +134,7 @@ function getAutoGray(accent: RadixAccentColor): RadixGrayColor {
 }
 
 /* Tab 类型 */
-type SettingsTab = "theme" | "font" | "search";
+type SettingsTab = "theme" | "font";
 
 /** 稳定的空数组引用：避免每次渲染都触发转写索引的重建判定。 */
 const NO_FONT_TEXTS: readonly string[] = [];
@@ -473,15 +467,11 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
     const { t, tf, plural } = useI18n();
     const theme = useAppTheme();
     const dispatch = useAppDispatch();
+    /*
+     * 字体列表的过滤要读搜索设置（转写开关与宽严）。设置本身在**独立的
+     * 「搜索与匹配设置」对话框**里改 —— 它不是外观的一部分。
+     */
     const searchSettings = useAppSelector((state: RootState) => state.session.searchSettings);
-    /** 搜索设置不属于外观草稿：改动即写入全局设置并持久化。 */
-    const updateSearchSettings = useCallback(
-        (patch: Partial<SearchSettings>) => {
-            dispatch(setSearchSettings(patch));
-            void dispatch(persistUiSettings());
-        },
-        [dispatch],
-    );
 
     /**
      * 关闭本面板。
@@ -1002,7 +992,6 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
         () => [
             { id: "theme", label: tf("appearance_tab_theme") },
             { id: "font", label: tf("appearance_tab_font") },
-            { id: "search", label: tf("appearance_tab_search") },
         ],
         [tf],
     );
@@ -1511,76 +1500,6 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                 )}
                             </AppFormSection>
                         </>
-                    )}
-
-                    {/* ======= Tab: 搜索与匹配 ======= */}
-                    {activeTab === "search" && (
-                        <AppFormSection
-                            title={tf("search_settings_section")}
-                            description={tf("search_settings_hint")}
-                        >
-                            <AppField label={tf("search_match_mode")}>
-                                <AppSegmentedControl
-                                    size="md"
-                                    value={effectiveSearchMode(searchSettings)}
-                                    options={[
-                                        { value: "off", label: tf("search_mode_off") },
-                                        { value: "smart", label: tf("search_mode_smart") },
-                                        { value: "fuzzy", label: tf("search_mode_fuzzy") },
-                                    ]}
-                                    onChange={(value) =>
-                                        updateSearchSettings(
-                                            value === "off"
-                                                ? { translit: false }
-                                                : { translit: true, mode: value as SearchMode },
-                                        )
-                                    }
-                                    ariaLabel={tf("search_match_mode")}
-                                />
-                            </AppField>
-                            {/*
-                              三个子开关各自独立：韩文初声对中文用户是纯噪音，
-                              日文长音对韩文用户是纯噪音。让它们各自可关，比一个
-                              「宽松匹配」总开关更精确。
-                            */}
-                            <AppForm booleanRow="leading">
-                                <AppSwitchRow
-                                    control="checkbox"
-                                    label={tf("search_translit_heteronym")}
-                                    checked={searchSettings.heteronym}
-                                    disabled={!searchSettings.translit}
-                                    onCheckedChange={(checked) =>
-                                        updateSearchSettings({ heteronym: checked })
-                                    }
-                                />
-                                <AppSwitchRow
-                                    control="checkbox"
-                                    label={tf("search_translit_long_vowel")}
-                                    checked={searchSettings.japaneseLongVowel}
-                                    disabled={!searchSettings.translit}
-                                    onCheckedChange={(checked) =>
-                                        updateSearchSettings({ japaneseLongVowel: checked })
-                                    }
-                                />
-                                <AppSwitchRow
-                                    control="checkbox"
-                                    label={tf("search_translit_choseong")}
-                                    checked={searchSettings.koreanChoseong}
-                                    disabled={!searchSettings.translit}
-                                    onCheckedChange={(checked) =>
-                                        updateSearchSettings({ koreanChoseong: checked })
-                                    }
-                                />
-                                <AppSwitchRow
-                                    control="checkbox"
-                                    label={tf("search_show_match_reason")}
-                                    checked={searchSettings.showMatchReason}
-                                    onCheckedChange={(checked) =>
-                                        updateSearchSettings({ showMatchReason: checked })
-                                    }
-                                />
-                            </AppForm>
-                        </AppFormSection>
                     )}
                 </div>
             </div>

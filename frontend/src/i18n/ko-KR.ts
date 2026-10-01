@@ -145,7 +145,6 @@ export const koKR = {
     appearance_tab_colors: "색상",
     appearance_tab_theme: "테마",
     appearance_tab_font: "글꼴",
-    appearance_tab_search: "검색",
     appearance_color_group_base: "배경 및 표면",
     appearance_color_group_text: "텍스트",
     appearance_color_group_ui: "UI 요소",
@@ -1503,7 +1502,9 @@ export const koKR = {
     search_matched_romaji: "로마자 일치 {form}",
     search_matched_choseong: "초성 일치 {form}",
     search_matched_fuzzy: "퍼지 일치 {form}",
-    search_settings_section: "검색 및 일치",
+    search_settings_title: "검색 및 일치",
+    search_settings_desc:
+        "병음, 로마자, 한국어 초성 일치. 파일 탐색기, 빠른 검색, 단축키, 글꼴 목록에 적용됩니다.",
     search_settings_hint: "병음, 로마자, 한국어 초성 일치 설정입니다. 끄면 문자열만 일치합니다.",
 
     // 편집 메뉴 새 항목

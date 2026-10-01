@@ -4,7 +4,9 @@ import {
     DEFAULT_SEARCH_SETTINGS,
     effectiveSearchMode,
     normalizeSearchSettings,
+    searchModePatch,
     searchOptionsPayload,
+    type SearchSettings,
 } from "./searchSettings";
 
 describe("normalizeSearchSettings", () => {
@@ -46,6 +48,28 @@ describe("effectiveSearchMode", () => {
 
     it("总开关打开时取 mode", () => {
         expect(effectiveSearchMode({ ...DEFAULT_SEARCH_SETTINGS, mode: "fuzzy" })).toBe("fuzzy");
+    });
+});
+
+describe("searchModePatch", () => {
+    it("选「关闭」只关总开关，保留宽严（再打开时回到上次的模式）", () => {
+        const patch = searchModePatch("off");
+        expect(patch).toEqual({ translit: false });
+        // 关键：补丁里没有 mode —— 用户上次选的「模糊」不会被清成默认。
+        expect("mode" in patch).toBe(false);
+    });
+
+    it("选「智能」/「模糊」同时打开总开关", () => {
+        expect(searchModePatch("smart")).toEqual({ translit: true, mode: "smart" });
+        expect(searchModePatch("fuzzy")).toEqual({ translit: true, mode: "fuzzy" });
+    });
+
+    it("关掉再打开能回到原来的模式", () => {
+        let settings: SearchSettings = { ...DEFAULT_SEARCH_SETTINGS, mode: "fuzzy" };
+        settings = { ...settings, ...searchModePatch("off") };
+        expect(effectiveSearchMode(settings)).toBe("off");
+        settings = { ...settings, ...searchModePatch("fuzzy") };
+        expect(effectiveSearchMode(settings)).toBe("fuzzy");
     });
 });
 

@@ -487,6 +487,14 @@ export interface SessionState {
     silenceDetectOptions: SilenceDetectSettings;
     /** 搜索匹配设置（转写 / 宽严 / 各语言子开关，持久化到 UiSettings.search） */
     searchSettings: SearchSettings;
+    /**
+     * 「搜索与匹配设置」对话框是否打开。
+     *
+     * 【为什么放在切片里而不是某个组件的 useState】这份设置同时作用于文件浏览器、
+     * 快速搜索与快捷键面板，三处都要能把它打开 —— 各自持一份状态就会出现三个
+     * 实例，且「选项」菜单里再开一个就成了第四个。单一标志位 + 单一实例。
+     */
+    searchSettingsDialogOpen: boolean;
     /** 快速搜索放置音频时自动规格化 */
     quickSearchAutoNormalizeEnabled: boolean;
     /**
@@ -2137,6 +2145,7 @@ const initialState: SessionState = {
     silencePreviewSegments: null,
     silenceDetectOptions: { ...SILENCE_DETECT_DEFAULTS },
     searchSettings: { ...DEFAULT_SEARCH_SETTINGS },
+    searchSettingsDialogOpen: false,
     quickSearchAutoNormalizeEnabled: false,
     saveUndoHistoryByDefault: false,
     visibleReferenceRootTrackIds: [],
@@ -2821,6 +2830,9 @@ const sessionSlice = createSlice({
                 ...state.searchSettings,
                 ...action.payload,
             });
+        },
+        setSearchSettingsDialogOpen(state, action: PayloadAction<boolean>) {
+            state.searchSettingsDialogOpen = action.payload;
         },
         toggleQuickSearchAutoNormalize(state) {
             state.quickSearchAutoNormalizeEnabled = !state.quickSearchAutoNormalizeEnabled;
@@ -6567,6 +6579,7 @@ export const {
     setSilencePreview,
     setSilenceDetectOptions,
     setSearchSettings,
+    setSearchSettingsDialogOpen,
     toggleQuickSearchAutoNormalize,
     setSaveUndoHistoryByDefault,
     setDefaultStretchAlgorithm,

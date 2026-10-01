@@ -1427,7 +1427,9 @@ export const jaJP = {
     search_matched_romaji: "ローマ字に一致 {form}",
     search_matched_choseong: "初声に一致 {form}",
     search_matched_fuzzy: "あいまい一致 {form}",
-    search_settings_section: "検索とマッチング",
+    search_settings_title: "検索とマッチング",
+    search_settings_desc:
+        "拼音・ローマ字・韓国語初声のマッチング。ファイルブラウザー、クイック検索、キーボードショートカット、フォント一覧に適用されます。",
     search_settings_hint:
         "拼音・ローマ字・韓国語初声のマッチング設定です。オフにすると文字列のみの一致になります。",
 
@@ -1565,7 +1567,6 @@ export const jaJP = {
     appearance_section_colors: "カスタムカラー",
     appearance_tab_basic: "基本",
     appearance_tab_font: "フォント",
-    appearance_tab_search: "検索",
     appearance_tab_colors: "カラー",
     appearance_tab_theme: "テーマ",
     appearance_color_group_base: "背景・サーフェス",

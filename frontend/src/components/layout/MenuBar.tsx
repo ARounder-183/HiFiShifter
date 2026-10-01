@@ -23,6 +23,7 @@ import {
     setOrtDeviceId,
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
+    setSearchSettingsDialogOpen,
     toggleAutoBackgroundRender,
     toggleShowAllTakes,
     toggleSyncEditsAcrossTakes,
@@ -81,6 +82,7 @@ import { AutoBackupDialog } from "./AutoBackupDialog";
 import { RenderCacheDialog } from "./RenderCacheDialog";
 import { VibratoDialog } from "./VibratoDialog";
 import { ChannelImportDialog } from "./ChannelImportDialog";
+import { SearchSettingsDialog } from "./SearchSettingsDialog";
 import { RecordingSettingsDialog } from "./RecordingSettingsDialog";
 import { BenchmarkDialog } from "./BenchmarkDialog";
 import { AboutDialog } from "./AboutDialog";
@@ -149,6 +151,7 @@ const selectMenuBarSession = (state: RootState) => {
         primaryTimeUnit: session.primaryTimeUnit,
         project: session.project,
         projectSec: session.projectSec,
+        searchSettingsDialogOpen: session.searchSettingsDialogOpen,
         secondaryTimeUnit: session.secondaryTimeUnit,
         selectedClipId: session.selectedClipId,
         selectedTrackId: session.selectedTrackId,
@@ -1250,6 +1253,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {tf("snap_grid_settings_title")}
                     </DropdownMenu.Item>
 
+                    {/* Search matching settings — 作用于全部搜索面，因此与
+                        吸附/网格同级，而不是塞进某个面板自己的设置页。 */}
+                    <DropdownMenu.Item onSelect={() => dispatch(setSearchSettingsDialogOpen(true))}>
+                        {tf("search_settings_title")}
+                    </DropdownMenu.Item>
+
                     <DropdownMenu.Separator />
 
                     {/* Render cache manager — above Keyboard Shortcuts */}
@@ -1367,6 +1376,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 settings={autoBackupSettings}
                 onOpenChange={setAutoBackupDialogOpen}
                 onSettingsSaved={onAutoBackupSettingsSaved}
+            />
+
+            <SearchSettingsDialog
+                open={s.searchSettingsDialogOpen}
+                onOpenChange={(open) => dispatch(setSearchSettingsDialogOpen(open))}
             />
 
             <ChannelImportDialog

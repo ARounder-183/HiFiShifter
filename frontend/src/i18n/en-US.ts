@@ -1553,7 +1553,9 @@ export const enUS = {
     search_matched_romaji: "Matched romaji {form}",
     search_matched_choseong: "Matched choseong {form}",
     search_matched_fuzzy: "Fuzzy match {form}",
-    search_settings_section: "Search and matching",
+    search_settings_title: "Search and matching",
+    search_settings_desc:
+        "Pinyin, romaji and Korean choseong matching. Applies to the file browser, quick search, keybindings and the font list.",
     search_settings_hint:
         "Toggles for pinyin, romaji and Korean choseong matching. Turned off, search only matches literal text.",
 
@@ -1691,7 +1693,6 @@ export const enUS = {
     appearance_section_colors: "Custom Colors",
     appearance_tab_basic: "Basic",
     appearance_tab_font: "Font",
-    appearance_tab_search: "Search",
     appearance_tab_colors: "Colors",
     appearance_tab_theme: "Theme",
     appearance_color_group_base: "Background & Surface",

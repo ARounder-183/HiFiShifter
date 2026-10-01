@@ -18,6 +18,8 @@ import { useI18n } from "../../../i18n/I18nProvider";
 import {
     SEARCH_MODE_LABEL_KEY,
     effectiveSearchMode,
+    searchModePatch,
+    type SearchMode,
     type SearchSettings,
 } from "../../../features/search/searchSettings";
 import { AppIconButton } from "../../../ui";
@@ -70,14 +72,7 @@ export function SearchModeMenu({
                 )}
                 <DropdownMenu.RadioGroup
                     value={activeMode}
-                    onValueChange={(value) => {
-                        // 「关闭」只动总开关，保留 `mode` —— 再打开时回到上次的宽严。
-                        if (value === "off") {
-                            onChange({ translit: false });
-                            return;
-                        }
-                        onChange({ translit: true, mode: value as SearchSettings["mode"] });
-                    }}
+                    onValueChange={(value) => onChange(searchModePatch(value as SearchMode))}
                 >
                     {(["off", "smart", "fuzzy"] as const).map((mode) => (
                         <DropdownMenu.RadioItem key={mode} value={mode} disabled={regexActive}>

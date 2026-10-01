@@ -75,6 +75,20 @@ export function effectiveSearchMode(settings: SearchSettings): SearchMode {
     return settings.translit ? settings.mode : "off";
 }
 
+/**
+ * 「匹配方式」控件的取值 → 设置补丁。
+ *
+ * 【为什么要有这个函数】总开关与宽严是两个字段，但界面上只有一个三选一控件。
+ * 「选关闭时只关总开关、保留 mode」这条规则如果写在每个控件里，菜单与设置对话框
+ * 各写一遍，改一次就得记得改两处。这里定义一次，两处共用。
+ *
+ * 保留 `mode` 的用意：用户把「模糊」关掉再打开时，回到的是模糊，而不是被重置成
+ * 默认的智能。
+ */
+export function searchModePatch(mode: SearchMode): Partial<SearchSettings> {
+    return mode === "off" ? { translit: false } : { translit: true, mode };
+}
+
 /** 下发给后端 `search_files_recursive` / `transliterate` 的参数。 */
 export interface SearchOptionsPayload {
     mode: SearchMode;

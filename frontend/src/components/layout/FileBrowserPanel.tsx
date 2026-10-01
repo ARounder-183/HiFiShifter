@@ -10,7 +10,7 @@ import {
     PlayIcon,
     StopIcon,
 } from "@radix-ui/react-icons";
-import { useAppDispatch, useAppSelector, useAppStore } from "../../app/hooks";
+import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -28,9 +28,11 @@ import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
 import { searchOptionsPayload } from "../../features/search/searchSettings";
 import { SearchModeMenu } from "./search/SearchModeMenu";
 import { matchReasonOf } from "./search/matchReason";
-import { persistUiSettings, setSearchSettings } from "../../features/session/sessionSlice";
-import { togglePanelVisible } from "../../features/dock/dockApi";
-import { PANEL_APPEARANCE } from "../dock/registerBuiltinPanels";
+import {
+    persistUiSettings,
+    setSearchSettings,
+    setSearchSettingsDialogOpen,
+} from "../../features/session/sessionSlice";
 import { PanelToolbar, PanelToolbarButton } from "./shared/PanelToolbar";
 import { fileBrowserApi, type FileEntry } from "../../services/api/fileBrowser";
 import {
@@ -254,7 +256,6 @@ function ProjectIcon({ className }: { className?: string }) {
 
 export const FileBrowserPanel: React.FC = () => {
     const dispatch = useAppDispatch();
-    const store = useAppStore();
     const { tf, tVars } = useI18n();
     const fb = useAppSelector((state: RootState) => state.fileBrowser);
     const searchSettings = useAppSelector((state: RootState) => state.session.searchSettings);
@@ -872,9 +873,7 @@ export const FileBrowserPanel: React.FC = () => {
                             void dispatch(persistUiSettings());
                         }}
                         regexActive={fb.regexEnabled}
-                        onOpenSettings={() =>
-                            togglePanelVisible(dispatch, store.getState, PANEL_APPEARANCE)
-                        }
+                        onOpenSettings={() => dispatch(setSearchSettingsDialogOpen(true))}
                     />
                     <AppIconButton
                         active={fb.audioOnly}

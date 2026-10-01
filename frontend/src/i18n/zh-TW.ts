@@ -1376,7 +1376,9 @@ export const zhTW = {
     search_matched_romaji: "匹配羅馬拼音 {form}",
     search_matched_choseong: "匹配初聲 {form}",
     search_matched_fuzzy: "模糊匹配 {form}",
-    search_settings_section: "搜尋與匹配",
+    search_settings_title: "搜尋與匹配",
+    search_settings_desc:
+        "拼音、羅馬拼音、韓文初聲匹配。作用於檔案瀏覽器、快速搜尋、快速鍵與字型清單。",
     search_settings_hint: "拼音、羅馬拼音、韓文初聲匹配的開關。關閉後搜尋只做字面匹配。",
 
     // 編輯選單新項目
@@ -1512,7 +1514,6 @@ export const zhTW = {
     appearance_section_colors: "自訂顏色",
     appearance_tab_basic: "基礎",
     appearance_tab_font: "字型",
-    appearance_tab_search: "搜尋",
     appearance_tab_colors: "顏色",
     appearance_tab_theme: "主題",
     appearance_color_group_base: "背景與表面",

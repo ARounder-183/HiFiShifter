@@ -1374,7 +1374,9 @@ export const zhCN = {
     search_matched_romaji: "匹配罗马音 {form}",
     search_matched_choseong: "匹配初声 {form}",
     search_matched_fuzzy: "模糊匹配 {form}",
-    search_settings_section: "搜索与匹配",
+    search_settings_title: "搜索与匹配",
+    search_settings_desc:
+        "拼音、罗马音、韩文初声匹配。作用于文件浏览器、快速搜索、快捷键与字体列表。",
     search_settings_hint: "拼音、罗马音、韩文初声匹配的开关。关闭后搜索只做字面匹配。",
 
     // Edit menu new items
@@ -1510,7 +1512,6 @@ export const zhCN = {
     appearance_section_colors: "自定义颜色",
     appearance_tab_basic: "基础",
     appearance_tab_font: "字体",
-    appearance_tab_search: "搜索",
     appearance_tab_colors: "颜色",
     appearance_tab_theme: "主题",
     appearance_color_group_base: "背景与表面",

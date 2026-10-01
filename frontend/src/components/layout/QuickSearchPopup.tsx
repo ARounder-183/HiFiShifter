@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
-import { useAppDispatch, useAppSelector, useAppStore } from "../../app/hooks";
+import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -13,14 +13,13 @@ import type { Keybinding } from "../../features/keybindings";
 import { searchFilesRecursive } from "../../features/fileBrowser/fileBrowserSlice";
 import { searchOptionsPayload } from "../../features/search/searchSettings";
 import { SearchModeMenu } from "./search/SearchModeMenu";
-import { togglePanelVisible } from "../../features/dock/dockApi";
-import { PANEL_APPEARANCE } from "../dock/registerBuiltinPanels";
 import { matchReasonOf } from "./search/matchReason";
 import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
 import { importAudioAtPosition } from "../../features/session/thunks/importThunks";
 import {
     persistUiSettings,
     setSearchSettings,
+    setSearchSettingsDialogOpen,
     toggleQuickSearchAutoNormalize,
 } from "../../features/session/sessionSlice";
 import type { FileEntry } from "../../services/api/fileBrowser";
@@ -92,7 +91,6 @@ interface QuickSearchPopupProps {
  */
 export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClose }) => {
     const dispatch = useAppDispatch();
-    const store = useAppStore();
     const { t, tVars } = useI18n();
 
     const keybindings = useAppSelector(selectMergedKeybindings);
@@ -481,7 +479,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         regexActive={regexEnabled}
                         onOpenSettings={() => {
                             onClose();
-                            togglePanelVisible(dispatch, store.getState, PANEL_APPEARANCE);
+                            dispatch(setSearchSettingsDialogOpen(true));
                         }}
                     />
                     {/* 排序 */}
