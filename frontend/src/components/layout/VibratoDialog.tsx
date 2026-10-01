@@ -570,14 +570,43 @@ export function VibratoDialog({
     } | null>(null);
 
     /**
-     * 画布手势开始：登记起点快照（窗口时长取预览默认几何）。
+     * 预设波形页签的可见窗口时长（ms）：与 `buildVibratoPreview` 的默认几何一致。
+     */
+    const presetWindowMs = (PREVIEW_DEFAULT.frameCount - 1) * PREVIEW_DEFAULT.framePeriodMs;
+    /**
+     * 套用页签的可见窗口时长（ms）：**选区自己的时长**。
+     *
+     * 【为什么不能沿用预设窗口】渐入 / 渐出与相位都以"整段时长"为基准：手柄画在
+     * `attackMs / windowMs` 处，水平拖动按 `dx/width × windowMs` 换算。套用预览画的是
+     * 选区真实帧数（最多 400 帧、帧周期也来自工程），与预设的 320 帧 × 5ms 不是一回事
+     * —— 拿预设窗口去换算，手柄会画错位置，拖一下改的毫秒数也是错的。
+     */
+    const appliedWindowMs =
+        original && original.values.length >= 2
+            ? (original.values.length - 1) * original.framePeriodMs
+            : presetWindowMs;
+    /**
+     * **当前页签**的窗口时长 —— 手势换算按它取。
+     *
+     * 取一次就够：快照在手势起点建立（见 `handlePreviewGestureStart`），整段手势沿用
+     * 同一个窗口；而切页签必须先松手（段控在画布之外）。
+     */
+    const activeWindowMs =
+        previewTab === "applied" && applyTarget ? appliedWindowMs : presetWindowMs;
+
+    /**
+     * 画布手势开始：登记起点快照。
      *
      * 系统预设同样可拖：拖改的是**本地草稿**，落盘时变成一份副本（见 `commitDraft`）——
      * 出厂预设本身不会被碰。
+     *
+     * 【窗口时长按当前页签取】渐入 / 渐出的换算是"位移占整段时长的比例"，而两个页签的
+     * 时间轴不是一回事：预设波形是固定的 320 帧窗口，套用预览画的是**选区真实帧数**。
+     * 用错窗口会让手柄画错位置、拖一下改的毫秒数也是错的（见 `activeWindowMs`）。
      */
     function handlePreviewGestureStart(zone: PreviewZone, info: VibratoPreviewGestureInfo) {
         if (!draft) return;
-        const windowMs = (PREVIEW_DEFAULT.frameCount - 1) * PREVIEW_DEFAULT.framePeriodMs;
+        const windowMs = activeWindowMs;
         const fineActive = isModifierActive(paramFineAdjustKb, info.modifiers);
         previewGestureRef.current = {
             zone,
@@ -589,6 +618,15 @@ export function VibratoDialog({
                 windowMs,
                 widthPx: info.width,
                 cycleWidthPx: cycleWidthPxFor(draft, info.width, windowMs),
+                /*
+                 * 纵向灵敏度取**画布自己的**标尺（`info.centsPerPx`），于是两个页签
+                 * 遵守同一条规则："拖多少像素，线就走多少像素"。
+                 *
+                 * 【为什么不改成统一按预设的幅度定标】套用页签的标尺要容下素材轮廓，
+                 * 通常比预设波形宽一两个数量级 —— 换算法会让同一次拖动在两个页签里
+                 * 改出完全不同的幅度，而"看到的那条线跟着手指走"才是用户预期的手感。
+                 * 觉得太粗时按「精细调整」修饰键（1/10），或先点「适应」。
+                 */
                 centsPerPx: info.centsPerPx,
             },
             fine: createPreviewFineDragState(fineActive),
@@ -1176,14 +1214,17 @@ export function VibratoDialog({
     const depthUnit = depthStepUnitFor(editParam);
     const depthValue = draft ? depthForParam(draft.depthCents, editParam, paramRange) : 0;
     const cycleEstimate = draft ? estimateCycles(draft, 320, 5) : 0;
-    /** 预览窗口时长（ms）：与 `buildVibratoPreview` 的默认几何一致。 */
-    const previewWindowMs = (PREVIEW_DEFAULT.frameCount - 1) * PREVIEW_DEFAULT.framePeriodMs;
     /**
-     * 渐入 / 渐出手柄的归一化位置。
+     * 两个页签各自的渐入 / 渐出手柄位置（归一化 0..1）。
+     *
+     * 【为什么两把】手柄的横向位置是"占**该页签**整段时长的比例"：预设波形用固定窗口，
+     * 套用预览用选区真实时长。同一对 `attackMs` / `releaseMs`，在两个时间轴上落在不同
+     * 的像素处 —— 画错位置的手柄比没有手柄更糟（用户会去拖一个不在斜坡上的点）。
      *
      * 系统预设也画：手柄可拖，拖的是本地草稿（保存时落成副本）。
      */
-    const previewHandles = draft ? handleLayoutFor(draft, previewWindowMs) : undefined;
+    const previewHandles = draft ? handleLayoutFor(draft, presetWindowMs) : undefined;
+    const appliedHandles = draft ? handleLayoutFor(draft, appliedWindowMs) : undefined;
 
     const customCount = resolved.user.length;
     const atCap = customCount >= MAX_VIBRATO_PRESETS;
@@ -1416,13 +1457,14 @@ export function VibratoDialog({
                                 presetSamples={previewSamples}
                                 presetHalfCents={previewHalfCents}
                                 presetHandles={previewHandles}
-                                onGestureStart={handlePreviewGestureStart}
-                                onGestureMove={handlePreviewGestureMove}
-                                onGestureEnd={handlePreviewGestureEnd}
                                 cyclesEstimate={cycleEstimate}
                                 appliedSamples={appliedPreview}
                                 appliedHalfCents={appliedHalfCents}
+                                appliedHandles={appliedHandles}
                                 appliedStatus={appliedStatus}
+                                onGestureStart={handlePreviewGestureStart}
+                                onGestureMove={handlePreviewGestureMove}
+                                onGestureEnd={handlePreviewGestureEnd}
                                 onFit={() => {
                                     // 「适应」作用于**当前页签**：两页各有一把标尺，
                                     // 一次点击只该动用户正看着的那把。

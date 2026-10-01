@@ -170,6 +170,108 @@ function userPresets(store: Awaited<ReturnType<typeof mountDialog>>) {
  */
 const ORIGINAL = Array.from({ length: 64 }, (_, i) => 60 + Math.sin(i / 8) * 0.5);
 
+/** 选区窗口时长（ms）：`ORIGINAL` 的 64 帧 × 5ms。 */
+const SELECTION_WINDOW_MS = (ORIGINAL.length - 1) * 5;
+/** 预设波形页签的窗口时长（ms）：与 `buildVibratoPreview` 的默认几何一致。 */
+const PRESET_WINDOW_MS = 320 * 5 - 5;
+
+/** 测试里给画布铺的宽度（CSS 像素）—— 与 `withCanvasLayout` 配套。 */
+const CANVAS_WIDTH = 400;
+
+/** 渐入 / 渐出手柄在画布上的横向位置（与 `handleLayoutFor` 同一套换算）。 */
+function handleXFor(ms: number, windowMs: number): number {
+    return Math.min(1, Math.max(0, ms / windowMs)) * CANVAS_WIDTH;
+}
+
+/**
+ * 让预览画布在 jsdom 里"有排版"。
+ *
+ * 【为什么需要它】jsdom 没有排版引擎：`clientWidth` 恒为 0、`getContext("2d")` 返回
+ * null，而画布的几何（宽度、cents/px）正是**绘制时**算出来存进 `geometryRef` 的。
+ * 宽度为 0 时命中测试一律判成"主体"，渐入 / 渐出手柄根本抓不到。
+ *
+ * 【为什么值得铺这层脚手架】"手柄按哪个时间轴换算"正是套用页签这次改动最容易错
+ * 的地方：它的时间轴是**选区真实帧数**，预设波形是固定窗口。只有真的抓到那个手柄，
+ * 才能证明两个页签各自用了自己的窗口。
+ *
+ * @returns 还原函数 —— 用例结束必须调用，别把全局原型留给下一条用例。
+ */
+function withCanvasLayout(width: number): () => void {
+    const canvasProto = HTMLCanvasElement.prototype as unknown as { getContext: unknown };
+    const originalGetContext = canvasProto.getContext;
+    // 绘制只写不读，所以"任何属性都是空函数"的代理足够当 2D 上下文。
+    const fakeCtx = new Proxy(
+        {},
+        {
+            get: (_target, prop) => (prop === "canvas" ? undefined : () => undefined),
+            set: () => true,
+        },
+    );
+    canvasProto.getContext = () => fakeCtx;
+    const originalClientWidth = Object.getOwnPropertyDescriptor(
+        HTMLElement.prototype,
+        "clientWidth",
+    );
+    Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+        configurable: true,
+        get: () => width,
+    });
+    return () => {
+        canvasProto.getContext = originalGetContext;
+        if (originalClientWidth) {
+            Object.defineProperty(HTMLElement.prototype, "clientWidth", originalClientWidth);
+        }
+    };
+}
+
+/** 画布容器（手势回调挂在它上面，因此事件要派发到它而不是 window）。 */
+function previewInteractive(): HTMLElement {
+    const container = document.querySelector<HTMLElement>(
+        '[data-testid="vibrato-preview-interactive"]',
+    );
+    expect(container, "预览交互层应已渲染").toBeTruthy();
+    // jsdom 没有指针捕获 API（画布按下时会调）。
+    container!.setPointerCapture = () => undefined;
+    container!.releasePointerCapture = () => undefined;
+    container!.hasPointerCapture = () => false;
+    return container!;
+}
+
+/** 从 `fromX` 按住并水平拖 `dx` 像素（一次完整手势）。 */
+async function dragHorizontally(fromX: number, dx: number): Promise<void> {
+    const container = previewInteractive();
+    await act(async () => {
+        container.dispatchEvent(
+            new PointerEvent("pointerdown", {
+                bubbles: true,
+                button: 0,
+                clientX: fromX,
+                clientY: 0,
+            }),
+        );
+    });
+    await act(async () => {
+        container.dispatchEvent(
+            new PointerEvent("pointermove", {
+                bubbles: true,
+                clientX: fromX + dx,
+                clientY: 0,
+            }),
+        );
+    });
+    await act(async () => {
+        container.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+}
+
+/** 读一个数字输入框当前显示的值。 */
+function numberFieldValue(ariaLabel: string): number {
+    return Number(
+        document.querySelector<HTMLInputElement>(`input[aria-label="${ariaLabel}"]`)?.value ??
+            "NaN",
+    );
+}
+
 /** Radix ScrollArea 的视口节点：滚动就发生在这里。 */
 const SCROLL_VIEWPORT = "[data-radix-scroll-area-viewport]";
 
@@ -351,6 +453,78 @@ test("系统预设：预览画布同样可编辑（改的是本地草稿）", as
     await mountDialog();
     // 默认活动预设是系统预设；它一样能拖 —— 拖出来的是草稿，不是出厂参数。
     expect(document.querySelector('[data-testid="vibrato-preview-interactive"]')).toBeTruthy();
+});
+
+test("套用页签：预览同样可拖（与预设波形共用一套手势）", async () => {
+    await mountDialog(undefined, () => undefined, { applyTarget: {} });
+    // 有选区数据时套用页签画的是真实曲线，它同样接受手柄与主体拖拽。
+    expect(document.querySelector('[data-testid="vibrato-preview-interactive"]')).toBeTruthy();
+});
+
+/*
+ * 手柄按**哪个时间轴**换算：两个页签各用各的。
+ *
+ * 【为什么值得单独两条】这是套用页签接入手势时最容易错的一处：手柄的横向位置与
+ * 水平拖动都是"占整段时长的比例"，而两个页签的时间轴不是一回事 ——
+ * 预设波形是固定的 320 帧窗口（1595ms），套用预览画的是**选区真实帧数**
+ * （这里 64 帧 × 5ms = 315ms）。
+ *
+ * 同一对手柄、同一个 100px 位移，在两条时间轴上该改出**不同**的毫秒数：
+ *
+ * - 预设窗口：90 + 100/400 × 1595 ≈ 489
+ * - 选区窗口：90 + 100/400 × 315  ≈ 169
+ *
+ * 若把窗口取错（例如套用页签沿用预设窗口），这里的数字会差 3 倍多 —— 而"手柄画在
+ * 错误的位置"更糟：用户会去拖一个不在斜坡上的点。
+ */
+test("预设波形页签：拖渐入手柄按预设窗口换算", async () => {
+    const restore = withCanvasLayout(CANVAS_WIDTH);
+    try {
+        const natural = SYSTEM_VIBRATO_PRESETS.find((preset) => preset.id === "builtin.natural");
+        expect(natural, "出厂预设「自然」应存在").toBeTruthy();
+        await mountDialog((s) => {
+            s.dispatch(setActiveVibratoPreset("builtin.natural"));
+        });
+
+        await dragHorizontally(handleXFor(natural!.attackMs, PRESET_WINDOW_MS), 100);
+
+        const expected = natural!.attackMs + (100 / CANVAS_WIDTH) * PRESET_WINDOW_MS;
+        expect(
+            Math.abs(numberFieldValue("Fade in") - expected),
+            "渐入应按预设窗口（1595ms）换算",
+        ).toBeLessThan(1.5);
+    } finally {
+        restore();
+    }
+});
+
+test("套用页签：拖渐入手柄按**选区**窗口换算", async () => {
+    const restore = withCanvasLayout(CANVAS_WIDTH);
+    try {
+        const natural = SYSTEM_VIBRATO_PRESETS.find((preset) => preset.id === "builtin.natural");
+        expect(natural, "出厂预设「自然」应存在").toBeTruthy();
+        await mountDialog(
+            (s) => {
+                s.dispatch(setActiveVibratoPreset("builtin.natural"));
+            },
+            () => undefined,
+            { applyTarget: {} },
+        );
+
+        // 手柄按**选区**时长摆位（315ms），与预设页签的位置不是同一处。
+        await dragHorizontally(handleXFor(natural!.attackMs, SELECTION_WINDOW_MS), 100);
+
+        const expected = natural!.attackMs + (100 / CANVAS_WIDTH) * SELECTION_WINDOW_MS;
+        expect(
+            Math.abs(numberFieldValue("Fade in") - expected),
+            "渐入应按选区窗口（315ms）换算",
+        ).toBeLessThan(1.5);
+        // 反向对照：按预设窗口算出来的值离得很远（差 3 倍多）。
+        const presetWindowResult = natural!.attackMs + (100 / CANVAS_WIDTH) * PRESET_WINDOW_MS;
+        expect(Math.abs(numberFieldValue("Fade in") - presetWindowResult)).toBeGreaterThan(100);
+    } finally {
+        restore();
+    }
 });
 
 /*

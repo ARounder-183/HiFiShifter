@@ -50,16 +50,27 @@ export interface VibratoPreviewPaneProps {
     presetSamples: VibratoPreviewSamples;
     presetHalfCents: number;
     presetHandles?: PreviewHandleLayout;
-    onGestureStart?: (zone: PreviewZone, info: VibratoPreviewGestureInfo) => void;
-    onGestureMove?: (deltaX: number, deltaY: number, modifiers: VibratoPreviewModifiers) => void;
-    onGestureEnd?: () => void;
     /** 周期估算读数（只对预设页签有意义：它的窗口时长是固定的）。 */
     cyclesEstimate: number;
 
-    /** 套用页签：采样（`null` = 画不出来，看 `appliedStatus`）、标尺、占位原因。 */
+    /** 套用页签：采样（`null` = 画不出来，看 `appliedStatus`）、标尺、手柄、占位原因。 */
     appliedSamples: VibratoAppliedPreview | null;
     appliedHalfCents: number;
+    /**
+     * 套用页签的手柄 —— 与 `presetHandles` **不是同一对**：手柄位置是"占该页签整段
+     * 时长的比例"，而套用页签的时间轴是选区真实帧数（见窗口里的 `appliedWindowMs`）。
+     */
+    appliedHandles?: PreviewHandleLayout;
     appliedStatus: VibratoAppliedStatus;
+
+    /*
+     * 手势：两个页签共用同一套（命中与换算规则见 `vibratoPreviewGestures`）。
+     * 拖的是同一个草稿 —— 在套用预览里拖渐入，与在预设波形里拖是同一件事，
+     * 只是画布上的时间轴不同。
+     */
+    onGestureStart?: (zone: PreviewZone, info: VibratoPreviewGestureInfo) => void;
+    onGestureMove?: (deltaX: number, deltaY: number, modifiers: VibratoPreviewModifiers) => void;
+    onGestureEnd?: () => void;
 
     /** 纵轴重新拟合（两个页签各自的那把）。 */
     onFit: () => void;
@@ -78,13 +89,14 @@ export function VibratoPreviewPane({
     presetSamples,
     presetHalfCents,
     presetHandles,
-    onGestureStart,
-    onGestureMove,
-    onGestureEnd,
     cyclesEstimate,
     appliedSamples,
     appliedHalfCents,
+    appliedHandles,
     appliedStatus,
+    onGestureStart,
+    onGestureMove,
+    onGestureEnd,
     onFit,
     audition,
     onAudition,
@@ -137,10 +149,10 @@ export function VibratoPreviewPane({
                         samples={onAppliedTab ? appliedSamples! : presetSamples}
                         ariaLabel={onAppliedTab ? t("vibrato_apply_preview") : t("vibrato_preview")}
                         halfCents={onAppliedTab ? appliedHalfCents : presetHalfCents}
-                        handles={onAppliedTab ? undefined : presetHandles}
-                        onGestureStart={onAppliedTab ? undefined : onGestureStart}
-                        onGestureMove={onAppliedTab ? undefined : onGestureMove}
-                        onGestureEnd={onAppliedTab ? undefined : onGestureEnd}
+                        handles={onAppliedTab ? appliedHandles : presetHandles}
+                        onGestureStart={onGestureStart}
+                        onGestureMove={onGestureMove}
+                        onGestureEnd={onGestureEnd}
                     />
 
                     <Flex justify="between" align="center" mt="1" gap="2" wrap="wrap">

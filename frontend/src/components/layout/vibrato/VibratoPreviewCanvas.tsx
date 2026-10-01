@@ -219,18 +219,26 @@ export function VibratoPreviewCanvas({
             ctx.lineTo(width, midY + 0.5);
             ctx.stroke();
 
+            /*
+             * 包络的两个取样器（带子的填充与渐入 / 渐出手柄共用）。
+             *
+             * 带子围绕**它所在的那条基线**摆动：省略中心线时是 0（管理器预览的用法），
+             * 套用页签给的是那条基线本身（通常不在 0 上）。
+             */
+            const envelopeAt = (i: number) =>
+                samples.envelope.length
+                    ? samples.envelope[Math.min(i, samples.envelope.length - 1)]
+                    : 0;
+            const centerAt = (i: number) => {
+                const center = samples.envelopeCenter;
+                if (!center || center.length === 0) return 0;
+                const value = center[Math.min(i, center.length - 1)];
+                return Number.isFinite(value) ? value : 0;
+            };
+
             // 包络带：±envelope 的填充区间，渐入 / 渐强 / 渐出入画就靠它。
             // 按连续段分别填充 —— 未检测帧处留空，而不是横着连成一条带。
             if (samples.envelope.length > 0) {
-                const envelopeAt = (i: number) =>
-                    samples.envelope[Math.min(i, samples.envelope.length - 1)];
-                // 带子围绕**它所在的那条基线**（省略中心线时围绕 0，管理器的用法）。
-                const center = samples.envelopeCenter;
-                const centerAt = (i: number) => {
-                    if (!center || center.length === 0) return 0;
-                    const value = center[Math.min(i, center.length - 1)];
-                    return Number.isFinite(value) ? value : 0;
-                };
                 ctx.globalAlpha = 0.16;
                 ctx.fillStyle = muted;
                 for (const [from, to] of finiteRuns(samples.envelope, count)) {
@@ -262,7 +270,10 @@ export function VibratoPreviewCanvas({
                         ? samples.envelope[Math.min(index, samples.envelope.length - 1)]
                         : 0;
                     const x = toX(index);
-                    const y = toY(envValue);
+                    // 手柄落在**包络带的上缘**：带子围绕 `envelopeCenter` 摆动时，
+                    // 只按 envelope 取值会把它画到带子外面去（套用页签的带子中心是
+                    // 基线，通常不在 0 上）。
+                    const y = toY(centerAt(index) + envValue);
                     const half = HANDLE_SIZE / 2;
                     ctx.fillStyle = panel;
                     ctx.strokeStyle = accent;
