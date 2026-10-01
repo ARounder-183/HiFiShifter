@@ -199,8 +199,7 @@ import {
     rulerLayerTranslatePx,
 } from "./renderKernel/timelineAxis.js";
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
-import { VibratoPresetDialog } from "./VibratoPresetDialog";
-import { VibratoApplyDialog } from "./VibratoApplyDialog";
+import { VibratoDialog } from "./VibratoDialog";
 import { resolveMenuMaxHeight } from "./menuPlacement";
 import { pointerOverlayStyle } from "./pointerOverlayStyle";
 import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
@@ -274,7 +273,7 @@ import { settingsApi } from "../../services/api/settings";
 import { EditContextMenu } from "../editDialogs/EditContextMenu";
 import { resolveScrollableProjectSec } from "../../features/session/projectBoundary";
 import { parseCustomScaleToken } from "../../utils/scaleSelection";
-import { AppIconButton, AppNoticeDialog, AppSelect } from "../../ui";
+import { AppIconButton, AppSelect } from "../../ui";
 import {
     centerFromVerticalScrollTop,
     verticalScrollTopFromCenter,
@@ -1011,90 +1010,44 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         clientY: number;
     } | null>(null);
     /**
-     * 预设管理器是否打开。
+     * 颤音窗口是否打开。
      *
      * 参数编辑器自己持有这个状态（不走 `hifi:openEditDialog`）：那个通道是给
-     * 「一次性参数对话框」用的，而管理器是常驻的预设库，菜单栏的「管理预设…」
-     * 与这里的右键入口共用同一个对话框组件。
+     * 「一次性参数对话框」用的，而颤音窗口是常驻的预设库，菜单栏的「管理预设…」
+     * 与这里的右键 / 工具栏入口共用同一个对话框组件。
      */
-    const [vibratoPresetDialogOpen, setVibratoPresetDialogOpen] = useState(false);
+    const [vibratoDialogOpen, setVibratoDialogOpen] = useState(false);
+    /** 打开时要编辑哪一条；`null` = 按当前活动预设播种。 */
+    const [vibratoInitialPresetId, setVibratoInitialPresetId] = useState<string | null>(null);
+    /** 打开时落在哪个预览页签。 */
+    const [vibratoInitialTab, setVibratoInitialTab] = useState<"preset" | "applied">("preset");
     /**
-     * 管理器这次是不是**从「添加颤音」跳过来**的，以及要接着编辑哪一条。
+     * 窗口的"会话号"：每次打开自增并作为组件的 `key`。
      *
-     * 非 `null` 决定两件事：页脚画「返回添加颤音」（菜单栏那条路径背后没有待应用的
-     * 弹窗，给它一个"返回"会指向不存在的去处），以及**打开时选中哪一条** —— 用户在
-     * 应用弹窗里选中的那条，而不是"当前使用"的那条。
-     *
-     * 两个窗口都宿主在本面板，所以这层往返不需要走 `hifi:openEditDialog` —— 那是给
-     * 跨组件的一次性对话框用的。
+     * 窗口借此**重新挂载** —— 草稿回到播种值、预览页签与两把纵轴复位、选区帧值重取。
+     * 用 key 而不是 effect 内重置，是为了不在 effect 里同步 setState（那会级联渲染，
+     * 也被 lint 禁止）。这一条替代了合并前"应用弹窗的会话号 + 管理器的播种闸"两套机制。
      */
-    const [vibratoPresetFromApply, setVibratoPresetFromApply] = useState<{
-        presetId: string;
-    } | null>(null);
-    /** 应用弹窗打开时要预选哪一条（从管理器返回时带上；其余入口为 `null`）。 */
-    const [vibratoApplyInitialPresetId, setVibratoApplyInitialPresetId] = useState<string | null>(
-        null,
-    );
-    /**
-     * 「添加颤音」应用弹窗是否打开。
-     *
-     * 与预设管理器分开：管理器改库（常驻），本弹窗用库（一次性确认）。宿主放在
-     * 面板而不是菜单栏 —— 预览要选区真实数据，只有面板手里有。
-     */
-    const [vibratoApplyDialogOpen, setVibratoApplyDialogOpen] = useState(false);
-    /**
-     * 应用弹窗的"会话号"。
-     *
-     * 每次打开自增并作为组件的 `key`：弹窗借此**重新挂载**，草稿回到当前活动预设、
-     * 保存勾选复位。用 key 而不是 effect 内重置，是为了不在 effect 里同步 setState
-     * （那会级联渲染，也被 lint 禁止）。
-     */
-    const [vibratoApplyDialogSession, setVibratoApplyDialogSession] = useState(0);
-    const openVibratoApplyDialog = useCallback((initialPresetId?: string) => {
-        // 每次打开都重设：从工具栏 / 菜单进来时预选当前活动预设，从管理器返回时才带上指定项。
-        setVibratoApplyInitialPresetId(initialPresetId ?? null);
-        setVibratoApplyDialogSession((session) => session + 1);
-        setVibratoApplyDialogOpen(true);
-    }, []);
-
-    /** 「管理预设…」入口（工具栏 / 菜单 / 快捷键）：不带交接，按当前活动预设播种。 */
-    const openVibratoPresetManager = useCallback(() => {
-        setVibratoPresetFromApply(null);
-        setVibratoPresetDialogOpen(true);
-    }, []);
+    const [vibratoDialogSession, setVibratoDialogSession] = useState(0);
 
     /**
-     * 「添加颤音」→「编辑预设」：关掉应用弹窗，开管理器，并记住"从哪来、编辑哪一条"。
+     * 打开颤音窗口。
      *
-     * 带过去的是**选中的那一条**（不是当前使用的那条），管理器打开即接着编辑它。
-     * 应用弹窗带着会话号重挂载，所以跳转前调好的旋钮不会带过去 —— 这是刻意的：用户
-     * 去管理器是为了改预设本身，回来时应当看到改过的预设，而不是一份夹在中间的旧草稿。
+     * @param initialPresetId 打开时编辑哪一条（提取出来的那条走这里）；省略 = 当前活动预设。
+     * @param initialTab 落在哪个预览页签：「添加颤音」入口直接落在「套用到选区」，
+     *   因为那次打开的目的就是"看套上去什么样、然后应用"；「管理预设」入口落在
+     *   「预设波形」（改库）。
      */
-    const openPresetManagerFromApply = useCallback((presetId: string) => {
-        setVibratoApplyDialogOpen(false);
-        setVibratoPresetFromApply({ presetId });
-        setVibratoPresetDialogOpen(true);
-    }, []);
-
-    /** 「返回添加颤音」：关掉管理器，重新打开应用弹窗，并预选刚才在管理器里编辑的那条。 */
-    const returnToVibratoApplyDialog = useCallback(
-        (presetId: string) => {
-            setVibratoPresetDialogOpen(false);
-            setVibratoPresetFromApply(null);
-            openVibratoApplyDialog(presetId);
+    const openVibratoDialog = useCallback(
+        (initialPresetId?: string, initialTab: "preset" | "applied" = "preset") => {
+            setVibratoInitialPresetId(initialPresetId ?? null);
+            setVibratoInitialTab(initialTab);
+            setVibratoDialogSession((session) => session + 1);
+            setVibratoDialogOpen(true);
         },
-        [openVibratoApplyDialog],
+        [],
     );
 
-    /** 管理器关闭（无论走哪条路）：顺手清掉交接标记，免得下次从菜单打开时页脚还挂着
-     *  一个指向不存在的应用弹窗的按钮。 */
-    const handleVibratoPresetDialogOpenChange = useCallback((open: boolean) => {
-        setVibratoPresetDialogOpen(open);
-        if (!open) setVibratoPresetFromApply(null);
-    }, []);
-
-    /** 提取失败提示（选区太短 / 找不到稳定颤音）。 */
-    const [vibratoExtractFailure, setVibratoExtractFailure] = useState(false);
     /** 工具栏的颤音预设下拉是否展开。 */
     const [vibratoPresetMenuOpen, setVibratoPresetMenuOpen] = useState(false);
     /**
@@ -6739,21 +6692,21 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     }, [handleEditOp]);
 
     /**
-     * 快捷键「添加颤音」→ 打开应用弹窗。
+     * 快捷键「添加颤音」→ 打开颤音窗口（落在「套用到选区」页签）。
      *
      * `edit.addVibrato` 在交互层被归入"需要弹窗"的一类（派发 `hifi:openEditDialog`），
-     * 但该事件由菜单栏消费，而应用弹窗宿主在本面板（预览要选区数据）。这里补上
-     * 本面板的消费分支，快捷键与右键菜单才走同一个入口。
+     * 但该事件由菜单栏消费，而窗口宿主在本面板（预览要选区数据）。这里补上本面板的
+     * 消费分支，快捷键与右键菜单才走同一个入口。
      */
     useEffect(() => {
         const handler = (e: Event) => {
             if ((e as CustomEvent).detail?.dialog === "addVibrato") {
-                openVibratoApplyDialog();
+                openVibratoDialog(undefined, "applied");
             }
         };
         window.addEventListener("hifi:openEditDialog", handler);
         return () => window.removeEventListener("hifi:openEditDialog", handler);
-    }, [openVibratoApplyDialog]);
+    }, [openVibratoDialog]);
 
     // 单剪贴板纪律：槽位被别的表面整体替换后（时间轴复制/剪切，或记事本暂存块
     // 的「恢复到剪贴板」），内部剪贴板缓存必须**重新对齐槽位** —— 否则
@@ -6799,23 +6752,24 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
      * 「从选区提取颤音预设」。
      *
      * 把用户手绘（或导入）的一段颤音拟合成预设：去趋势 → 自相关测周期 →
-     * 折叠出单周期波形 → 测包络与不规则度。成功后直接入库并打开预设编辑器，
-     * 用户在那里改名字、微调参数。
+     * 折叠出单周期波形 → 测包络与不规则度。成功后入库、设为当前使用，并把这条
+     * **返回给调用方**（颤音窗口随即选中它，用户在那里改名字、微调参数）。
+     *
+     * 【为什么返回预设而不是自己开窗口】合并之后提取就发生在颤音窗口里，宿主只负责
+     * "读帧 + 拟合 + 入库"这三件只有它做得了的事；窗口怎么显示结果由窗口决定。
+     * 失败返回 `null`，由窗口给出行内提示（弹一层模态会盖住刚刚那个窗口）。
      *
      * 【为什么用第一段选区】多种选区下"提取一个预设"的语义是模糊的；取第一段
      * 最符合直觉（也是 `runPerRange` 之外唯一不需要用户再做选择的解释）。
      */
-    const handleExtractVibratoPreset = useCallback(async () => {
-        if (!rootTrackId) return;
+    const handleExtractVibratoPreset = useCallback(async (): Promise<VibratoPreset | null> => {
+        if (!rootTrackId) return null;
         if (!selectionRef.current || selectionRef.current.length === 0) {
             selectAllParamRange();
         }
         const ranges = selectionRef.current ? selectionToFrameRanges(selectionRef.current) : [];
         const range = ranges[0];
-        if (!range || range.frameCount < 8) {
-            setVibratoExtractFailure(true);
-            return;
-        }
+        if (!range || range.frameCount < 8) return null;
 
         const fp = paramView?.framePeriodMs ?? 5;
         const res = await paramsApi.getParamFrames(
@@ -6827,7 +6781,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             true,
             isDynParam(editParam),
         );
-        if (!res?.ok) return;
+        if (!res?.ok) return null;
         const payload = res as ParamFramesPayload;
         const values = (payload.edit ?? []).map((value) => Number(value) || 0);
         const fpMs = Number(payload.frame_period_ms ?? fp) || fp;
@@ -6837,10 +6791,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             param: editParam,
             range: currentParamRange,
         });
-        if (!extracted.ok) {
-            setVibratoExtractFailure(true);
-            return;
-        }
+        if (!extracted.ok) return null;
 
         const preset = {
             ...extracted.preset,
@@ -6849,14 +6800,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         dispatch(upsertVibratoPreset(preset));
         dispatch(setActiveVibratoPreset(preset.id));
         void dispatch(persistUiSettings());
-        /*
-         * 直接打开管理器：提取出来的参数几乎总还要微调（名字、深度、速率）。
-         *
-         * 与「编辑预设」同款交接：这条路径也是从应用弹窗进来的，因此管理器同样给出
-         * 「返回添加颤音」，回去时预选刚提取出来的那一条。
-         */
-        setVibratoPresetFromApply({ presetId: preset.id });
-        setVibratoPresetDialogOpen(true);
+        return preset;
     }, [
         rootTrackId,
         selectionRef,
@@ -6869,7 +6813,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     ]);
 
     /**
-     * 取「添加颤音」应用弹窗的预览数据：首个选区段的前 400 帧（≈2s）。
+     * 取颤音窗口「套用到选区」页签的预览数据：首个选区段的前 400 帧（≈2s）。
      *
      * 无选区时取曲线头部 —— 与 `handleEditOp` 的"隐式全选"口径一致（那里的作用域
      * 是整条曲线，这里只取开头一段来预览，避免为预览拉整条曲线）。400 帧足够看清
@@ -6900,12 +6844,29 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         return { values, framePeriodMs };
     }, [rootTrackId, selectionRef, paramView?.framePeriodMs, editParam]);
 
-    /** 应用弹窗的「应用」：把完整预设交给编辑管线（本地微调随之传入）。 */
+    /** 颤音窗口的「应用」：把完整预设交给编辑管线（本地微调随之传入）。 */
     const handleApplyVibrato = useCallback(
         (preset: VibratoPreset) => {
             void handleEditOp("addVibrato", { preset });
         },
         [handleEditOp],
+    );
+
+    /**
+     * 交给颤音窗口的选区宿主。
+     *
+     * 【为什么 memo】窗口用它判断"有没有选区上下文"（页签、页脚动作），并在取数据
+     * 的 effect 里盯住 `loadOriginal`。每次渲染新建一个对象会让下游的比较全部失效 ——
+     * 窗口里那句"依赖 `loadOriginal` 本身而不是这个对象"正是为了兜住这一层，但这里
+     * 仍然应当稳定它：宿主传给子组件的对象不该每帧换新。
+     */
+    const vibratoApplyTarget = useMemo(
+        () => ({
+            loadOriginal: loadVibratoApplyOriginal,
+            onApply: handleApplyVibrato,
+            onExtract: handleExtractVibratoPreset,
+        }),
+        [loadVibratoApplyOriginal, handleApplyVibrato, handleExtractVibratoPreset],
     );
 
     /**
@@ -7438,7 +7399,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     onContextMenu={(event) => {
                                         event.preventDefault();
                                         setVibratoPresetMenuOpen(false);
-                                        openVibratoPresetManager();
+                                        openVibratoDialog();
                                     }}
                                     icon={
                                         // 图标即**活动预设的波形缩略图**：切预设即换图，
@@ -7501,7 +7462,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             className="w-full shrink-0 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-hover"
                                             onClick={() => {
                                                 setVibratoPresetMenuOpen(false);
-                                                openVibratoPresetManager();
+                                                openVibratoDialog();
                                             }}
                                             onPointerDown={(e) => e.stopPropagation()}
                                         >
@@ -8871,7 +8832,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     onSetPitch={() => openEditDialog("setPitch")}
                     onAverage={() => openEditDialog("average")}
                     onSmooth={() => openEditDialog("smooth")}
-                    onAddVibrato={openVibratoApplyDialog}
+                    onAddVibrato={() => openVibratoDialog(undefined, "applied")}
                     onQuantize={() => openEditDialog("quantize")}
                     onMeanQuantize={() => openEditDialog("meanQuantize")}
                     onSaveAsPitchRef={() => void handleSaveAsPitchRef()}
@@ -8892,39 +8853,20 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 />
             )}
 
-            {/* 颤音预设管理器：右键菜单与菜单栏共用同一个对话框组件。 */}
-            <VibratoPresetDialog
-                open={vibratoPresetDialogOpen}
-                onOpenChange={handleVibratoPresetDialogOpenChange}
+            {/*
+             * 颤音窗口：预设库 + 套用到选区，同一个窗口（右键菜单 / 快捷键 / 工具栏 /
+             * 菜单栏共用这一个组件）。宿主在本面板是因为"套用预览"要选区真实帧值。
+             * 每次打开换 key → 重新挂载，草稿按当前活动预设播种、页签与纵轴复位。
+             */}
+            <VibratoDialog
+                key={vibratoDialogSession}
+                open={vibratoDialogOpen}
+                onOpenChange={setVibratoDialogOpen}
                 editParam={editParam}
                 paramRange={currentParamRange}
-                initialPresetId={vibratoPresetFromApply?.presetId}
-                onBackToApply={vibratoPresetFromApply ? returnToVibratoApplyDialog : undefined}
-            />
-
-            {/* 「添加颤音」应用弹窗：选预设 + 选区实时预览 + 快捷旋钮。
-                每次打开换 key → 重新挂载，草稿回到当前活动预设。 */}
-            <VibratoApplyDialog
-                key={vibratoApplyDialogSession}
-                open={vibratoApplyDialogOpen}
-                onOpenChange={setVibratoApplyDialogOpen}
-                presets={resolvedVibratoPresets}
-                activePresetId={activeVibratoPresetId}
-                initialPresetId={vibratoApplyInitialPresetId ?? undefined}
-                editParam={editParam}
-                paramRange={currentParamRange}
-                loadOriginal={loadVibratoApplyOriginal}
-                onApply={handleApplyVibrato}
-                onExtract={() => void handleExtractVibratoPreset()}
-                onEditPresets={openPresetManagerFromApply}
-            />
-
-            <AppNoticeDialog
-                open={vibratoExtractFailure}
-                onOpenChange={setVibratoExtractFailure}
-                title={t("vibrato_extract_title")}
-                message={t("vibrato_extract_failed")}
-                closeLabel={t("close")}
+                initialPresetId={vibratoInitialPresetId ?? undefined}
+                initialTab={vibratoInitialTab}
+                applyTarget={vibratoApplyTarget}
             />
         </Flex>
     );

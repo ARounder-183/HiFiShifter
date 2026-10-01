@@ -28,9 +28,10 @@ import sessionReducer, {
     upsertVibratoPreset,
 } from "../../features/session/sessionSlice";
 import { sanitizeVibratoPreset } from "../../features/vibrato/vibratoPresets";
+import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
 import { I18nProvider } from "../../i18n/I18nProvider";
 import { AppThemeProvider } from "../../theme/AppThemeProvider";
-import { VibratoPresetDialog } from "./VibratoPresetDialog";
+import { VibratoDialog } from "./VibratoDialog";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -58,26 +59,66 @@ afterEach(async () => {
     document.body.innerHTML = "";
 });
 
+/**
+ * 选区宿主（可选）。
+ *
+ * 给了它，窗口就多出「套用到选区」页签与「应用」「提取」两个动作 —— 与参数编辑器
+ * 里那条路径一致；不给就是菜单栏那条纯预设库路径。
+ */
+interface ApplyTargetOptions {
+    loadOriginal?: () => Promise<{ values: number[]; framePeriodMs: number } | null>;
+    onApply?: (preset: VibratoPreset) => void;
+    onExtract?: () => Promise<VibratoPreset | null>;
+}
+
+interface MountOptions {
+    /** 打开时编辑哪一条（提取出来的那条走这里）。 */
+    initialPresetId?: string;
+    /** 打开时落在哪个页签。 */
+    initialTab?: "preset" | "applied";
+    /** 选区宿主；省略 = 纯预设库。 */
+    applyTarget?: ApplyTargetOptions;
+    editParam?: string;
+    paramRange?: { min: number; max: number };
+}
+
 async function mountDialog(
     prepare?: (store: ReturnType<typeof configureStore>) => void,
     onOpenChange: (open: boolean) => void = () => undefined,
-    onBackToApply?: (presetId: string) => void,
-    initialPresetId?: string,
+    options: MountOptions = {},
 ) {
     const store = configureStore({
         reducer: { session: sessionReducer, keybindings: keybindingsReducer },
     });
     prepare?.(store);
+    const target = options.applyTarget;
     await act(async () => {
         root.render(
             <Provider store={store}>
                 <AppThemeProvider>
                     <I18nProvider>
-                        <VibratoPresetDialog
+                        <VibratoDialog
                             open
                             onOpenChange={onOpenChange}
-                            onBackToApply={onBackToApply}
-                            initialPresetId={initialPresetId}
+                            editParam={options.editParam ?? "pitch"}
+                            paramRange={options.paramRange}
+                            initialPresetId={options.initialPresetId}
+                            initialTab={options.initialTab}
+                            applyTarget={
+                                target
+                                    ? {
+                                          loadOriginal:
+                                              target.loadOriginal ??
+                                              (() =>
+                                                  Promise.resolve({
+                                                      values: ORIGINAL,
+                                                      framePeriodMs: 5,
+                                                  })),
+                                          onApply: target.onApply ?? (() => undefined),
+                                          onExtract: target.onExtract,
+                                      }
+                                    : undefined
+                            }
                         />
                     </I18nProvider>
                 </AppThemeProvider>
@@ -89,6 +130,31 @@ async function mountDialog(
     });
     return store;
 }
+
+/** 页脚 / 页签上的按钮：按文案找。 */
+function findButton(text: string): HTMLButtonElement | undefined {
+    return [...document.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === text,
+    ) as HTMLButtonElement | undefined;
+}
+
+/** 点一个按钮（找不到就抛，避免"点了没反应"被误当成通过）。 */
+async function clickButton(text: string): Promise<void> {
+    const button = findButton(text);
+    expect(button, `按钮「${text}」应已渲染`).toBeTruthy();
+    await act(async () => {
+        button!.click();
+    });
+}
+
+/**
+ * 一段真实的音高曲线：C4 附近 ±0.5 个半音。
+ *
+ * 【为什么从 60 起而不是从 0 起】音高参数里 **0 = 未检测到音高**（见
+ * `vibratoPitch.ts`）。用 `sin(i/8) * 0.5` 当音高夹具既不是真实音高，i=0 处又恰好
+ * 落在 0 上 —— 那是在测一个不存在的情形，新契约还会把那一帧画成断口。
+ */
+const ORIGINAL = Array.from({ length: 64 }, (_, i) => 60 + Math.sin(i / 8) * 0.5);
 
 /** Radix ScrollArea 的视口节点：滚动就发生在这里。 */
 const SCROLL_VIEWPORT = "[data-radix-scroll-area-viewport]";
@@ -167,7 +233,7 @@ test("布局：定高 wrapper + 两栏 flex 填充，且不再依赖 maxHeight�
  * 验证浏览器行为，但能在"下一次重构去掉 wrap"时立刻失败。
  */
 test("参数表单里的并排控件行都允许换行（源码级约束）", () => {
-    const source = readFileSync("src/components/layout/VibratoPresetDialog.tsx", "utf8");
+    const source = readFileSync("src/components/layout/VibratoDialog.tsx", "utf8");
     // 只扫**参数表单**区域：约束的对象是"两个以上表单控件并排"的行；列表行
     // （glyph + 名称）同样用 Flex，但不属于这条约束。
     const formStart = source.indexOf("<AppForm>");
@@ -1217,87 +1283,251 @@ test("删除正在编辑的预设：草稿切到迁移后的预设", async () =>
 });
 
 /*
- * 「返回添加颤音」：只有从「添加颤音」跳过来时才有。
+ * `initialPresetId`：打开时编辑哪一条。
  *
- * 【为什么是可选回调】管理器有两个宿主：参数编辑器（从「添加颤音」跳过来，背后有待
- * 应用的弹窗）与菜单栏（背后没有）。返回按钮必须跟着宿主走，否则菜单那条路径会给出
- * 一个指向不存在去处的按钮。
+ * 【为什么它还在】提取出来的那条预设由它带进来 —— 用户刚把一条颤音提成预设，
+ * 当然是要接着编辑它，而不是回到"当前使用"的那条重新找一遍。
  */
-test("initialPresetId 决定打开时编辑哪一条，返回时把**选中的**那条带回去", async () => {
+test("initialPresetId 决定打开时编辑哪一条（优先于当前活动预设）", async () => {
     const custom = sanitizeVibratoPreset({ id: "custom_seeded", name: "Seeded", depthCents: 40 });
-    const onBackToApply = vi.fn();
     await mountDialog(
         (store) => {
             store.dispatch(upsertVibratoPreset(custom));
-            // 活动预设**不是**要编辑的那条：管理器应当听 initialPresetId，而不是活动预设。
+            // 活动预设**不是**要编辑的那条：窗口应当听 initialPresetId，而不是活动预设。
             store.dispatch(setActiveVibratoPreset("builtin.straight"));
         },
         () => undefined,
-        onBackToApply,
-        custom.id,
+        { initialPresetId: custom.id },
     );
 
     const selected = document.querySelector('[role="option"][data-selected]');
     expect(selected?.textContent, "打开时应选中 initialPresetId 指定的那条").toContain("Seeded");
-
-    const back = [...document.querySelectorAll("button")].find(
-        (button) => button.textContent?.trim() === "Back to Add Vibrato",
-    );
-    expect(back, "返回按钮应已渲染").toBeTruthy();
-    await act(async () => {
-        back!.click();
-    });
-    // 带回去的是**选中**的那条（不是当前使用的那条）。
-    expect(onBackToApply).toHaveBeenCalledWith("custom_seeded");
-});
-
-test("未提供 onBackToApply 时没有「返回添加颤音」（菜单栏那条路径）", async () => {
-    await mountDialog();
-    const labels = [...document.querySelectorAll("button")].map((button) =>
-        button.textContent?.trim(),
-    );
-    expect(labels).not.toContain("Back to Add Vibrato");
 });
 
 /*
- * 返回添加颤音前，未保存的改动要落盘。
+ * 没有选区宿主时：只有「预设波形」一页，页脚也没有「应用」「提取」。
  *
- * 【为什么】用户是"改完就去应用"，返回正是他表达"改完了"的方式。若这时把改动丢掉，
- * 他回到应用弹窗看到的还是旧参数 —— 而界面刚刚还显示着他改过的值。这与"切换预设时
- * 先把改动写回库"是同一条规矩：离开这条预设 = 落盘。
+ * 【为什么值得钉】这是菜单栏那条路径。多画一个点不动的页签、或给一个指向不存在
+ * 选区的「应用」，都会让用户以为窗口坏了。
  */
-test("返回添加颤音前把未保存的改动落盘", async () => {
-    const custom = sanitizeVibratoPreset({ id: "custom_dirty", name: "Dirty", depthCents: 40 });
-    const onBackToApply = vi.fn();
+test("没有选区宿主：不画页签，也没有「应用」「提取」（菜单栏那条路径）", async () => {
+    await mountDialog();
+
+    expect(findButton("Preset waveform"), "没有宿主时不该出现页签").toBeFalsy();
+    expect(findButton("Applied to selection")).toBeFalsy();
+    expect(findButton("Apply"), "没有宿主时不该有「应用」").toBeFalsy();
+    expect(
+        findButton("Create vibrato preset from selection"),
+        "没有宿主时不该有「从选区提取」",
+    ).toBeFalsy();
+    // 纯预设库路径的主动作仍是「保存」。
+    expect(findButton("Save")).toBeTruthy();
+});
+
+/*
+ * 有选区宿主时：两个页签、页脚多出「应用」与「提取」。
+ *
+ * 页签标签用「预设波形 / 套用到选区」把两个问题分开：一个问"这个预设摆多少"，
+ * 一个问"套到这段上与原参数线差多少"。
+ */
+test("有选区宿主：两个页签 + 「应用」「提取」都在", async () => {
+    await mountDialog(undefined, () => undefined, {
+        // 「提取」跟着 `onExtract` 出现：没有它就没有可提取的东西，画一个点不动的
+        // 按钮不如不画（宿主总是会给 —— 见 PianoRollPanel 的 applyTarget）。
+        applyTarget: { onExtract: async () => null },
+        initialTab: "applied",
+    });
+
+    expect(findButton("Preset waveform"), "应有两个页签").toBeTruthy();
+    expect(findButton("Applied to selection")).toBeTruthy();
+    expect(findButton("Apply"), "有宿主时应有「应用」").toBeTruthy();
+    expect(findButton("Create vibrato preset from selection")).toBeTruthy();
+});
+
+/*
+ * 「应用」把**当前草稿**交给编辑管线 —— 包括还没保存的微调。
+ *
+ * 【为什么必须测】落盘侧从"按 id 解析预设"改成"吃完整预设对象"就是为了这个：只传 id
+ * 的话，用户刚拖出来的深度会被静默丢弃，听到的与得到的不是一回事。
+ *
+ * 同时钉住另一半：**应用不写库**。预设是"调完再定"的东西，应用只是把这份参数写进
+ * 选区；顺手改掉库里的预设是这类工具最恼人的错法。
+ */
+test("应用：把（含未保存微调的）完整草稿交给编辑管线，且不写库", async () => {
+    const custom = sanitizeVibratoPreset({ id: "custom_apply", name: "Mine", depthCents: 40 });
+    const onApply = vi.fn();
     const store = await mountDialog(
         (s) => {
             s.dispatch(upsertVibratoPreset(custom));
             s.dispatch(setActiveVibratoPreset(custom.id));
         },
         () => undefined,
-        onBackToApply,
-        custom.id,
+        { applyTarget: { onApply }, initialTab: "applied" },
     );
 
-    // 改名字，但不点保存。
-    const nameInput = document.querySelector<HTMLInputElement>('input[aria-label="Preset name"]');
-    expect(nameInput, "名字输入框应已渲染").toBeTruthy();
+    // 改深度但不保存。
+    const depth = document.querySelector<HTMLInputElement>('input[aria-label="Depth"]');
+    expect(depth, "深度输入框应已渲染").toBeTruthy();
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
     await act(async () => {
-        setter?.call(nameInput, "Renamed");
-        nameInput!.dispatchEvent(new Event("input", { bubbles: true }));
+        setter?.call(depth, "77");
+        depth!.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
-    const back = [...document.querySelectorAll("button")].find(
-        (button) => button.textContent?.trim() === "Back to Add Vibrato",
-    );
-    await act(async () => {
-        back!.click();
-    });
+    await clickButton("Apply");
 
-    const saved = store
+    expect(onApply).toHaveBeenCalledTimes(1);
+    expect(onApply.mock.calls[0][0].id).toBe("custom_apply");
+    expect(onApply.mock.calls[0][0].depthCents, "本地微调必须传过去").toBe(77);
+    const stored = store
         .getState()
-        .session.vibratoPresets.find((preset) => preset.id === "custom_dirty");
-    expect(saved?.name, "返回时应当把未保存的改动落盘").toBe("Renamed");
-    expect(onBackToApply).toHaveBeenCalledWith("custom_dirty");
+        .session.vibratoPresets.find((preset) => preset.id === "custom_apply");
+    expect(stored?.depthCents, "应用不该顺手改库").toBe(40);
+});
+
+/*
+ * 「从选区提取」：宿主做重活并返回入库后的那条，窗口随即选中它。
+ *
+ * 【为什么由宿主提取】要读参数帧（选区 + 轨道 + 参数），只有宿主够得着。窗口只负责
+ * 把结果显示出来 —— 合并前提取完要开一次管理器，现在同窗，提取 = 列表里多一条并选中。
+ */
+test("从选区提取：成功后选中新提取的那条", async () => {
+    const extracted = sanitizeVibratoPreset({
+        id: "custom_extracted",
+        name: "From selection",
+        depthCents: 55,
+    });
+    const onExtract = vi.fn(async () => extracted);
+    await mountDialog(undefined, () => undefined, {
+        applyTarget: { onExtract },
+        initialTab: "applied",
+    });
+
+    await clickButton("Create vibrato preset from selection");
+
+    expect(onExtract).toHaveBeenCalledTimes(1);
+    /*
+     * 断言的是**草稿**而不是列表里的选中行：窗口的职责正是"把草稿切到返回的那条"，
+     * 入库是宿主的活儿（真实宿主在 `onExtract` 里 upsert，这里不必假装）。
+     */
+    const nameInput = document.querySelector<HTMLInputElement>('input[aria-label="Preset name"]');
+    expect(nameInput?.value, "应选中刚提取出来的那条").toBe("From selection");
+});
+
+test("从选区提取失败：给出行内提示，且不改选中", async () => {
+    const onExtract = vi.fn(async () => null);
+    await mountDialog(undefined, () => undefined, {
+        applyTarget: { onExtract },
+        initialTab: "applied",
+    });
+
+    await clickButton("Create vibrato preset from selection");
+
+    expect(document.body.textContent ?? "").toContain("No clear vibrato found in the selection.");
+});
+
+/*
+ * 拿到选区数据后，套用页签画在同一块画布上（不是另开一张、也不是空白）。
+ *
+ * 【为什么钉"同一块"】两页共用画布是"切页签不跳高、不闪"的前提；若各自渲染一张，
+ * 切页签会重新挂载画布（尺寸动画重来），而且下面那条"预览不落在滚动区"的契约也会
+ * 因为多出一块而含糊。
+ */
+test("套用页签复用同一块画布（有数据时画出来）", async () => {
+    await mountDialog(undefined, () => undefined, { applyTarget: {}, initialTab: "applied" });
+
+    const canvases = document.querySelectorAll("canvas[role=img]");
+    expect(canvases.length, "预览画布应当只有一块").toBe(1);
+
+    await clickButton("Preset waveform");
+    expect(document.querySelectorAll("canvas[role=img]").length, "切页签不该再长出一块画布").toBe(
+        1,
+    );
+});
+
+/*
+ * 切页签不重置草稿。
+ *
+ * 【为什么这是合并的关键契约】两页共用同一个草稿：用户正是在"预设波形"里拖出形状、
+ * 切到"套用到选区"看它在真实素材上的样子。若切页签把草稿复位，"一边调一边看"就不成立，
+ * 合并也就退化成两个窗口并排。
+ */
+test("切页签不重置草稿（两页共用同一份草稿）", async () => {
+    const custom = sanitizeVibratoPreset({ id: "custom_tab", name: "Tabbed", depthCents: 40 });
+    await mountDialog(
+        (s) => {
+            s.dispatch(upsertVibratoPreset(custom));
+            s.dispatch(setActiveVibratoPreset(custom.id));
+        },
+        () => undefined,
+        { applyTarget: {}, initialTab: "applied" },
+    );
+
+    const depth = document.querySelector<HTMLInputElement>('input[aria-label="Depth"]');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    await act(async () => {
+        setter?.call(depth, "66");
+        depth!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    await clickButton("Preset waveform");
+
+    const after = document.querySelector<HTMLInputElement>('input[aria-label="Depth"]');
+    expect(Number(after?.value), "切页签后深度应当还是刚才改的值").toBe(66);
+});
+
+/*
+ * 套用页签的 A/B 试听：两个按钮，文案恒定。
+ *
+ * 【为什么文案恒定】曾经播放态把按钮换成"停止试听"，按钮宽度随之变化、整行跟着跳。
+ * 播放态改由强调色 + `aria-pressed` 表达。
+ */
+test("套用页签带两个 A/B 试听按钮（文案恒定）", async () => {
+    await mountDialog(undefined, () => undefined, { applyTarget: {}, initialTab: "applied" });
+
+    expect(findButton("Audition original")).toBeTruthy();
+    expect(findButton("Audition result")).toBeTruthy();
+    // 预设页签只有一个播放按钮，没有这两个。
+    await clickButton("Preset waveform");
+    expect(findButton("Audition original")).toBeFalsy();
+});
+
+/*
+ * 取不到选区数据时：给出占位提示，而不是一块空画布。
+ *
+ * 空画布与"这段没有数据"在视觉上无法区分，用户会以为窗口坏了。
+ */
+test("取不到选区数据时显示占位提示（连读数行一起省掉）", async () => {
+    await mountDialog(undefined, () => undefined, {
+        applyTarget: { loadOriginal: () => Promise.resolve(null) },
+        initialTab: "applied",
+    });
+
+    expect(document.body.textContent ?? "").toContain("Select a range to preview the result.");
+    /*
+     * 画不出曲线时读数行整行不画：那里的 "±N cents" 与「适应」都是"对着一条曲线"
+     * 才有意义的动作，留着它们只会把**预设波形**的峰值冒充成选区的幅度。
+     */
+    expect(document.body.textContent ?? "", "不该留下预设波形的读数").not.toContain("±");
+    expect(findButton("Fit"), "没有曲线时不该留一个空转的「适应」").toBeFalsy();
+});
+
+/*
+ * 音高全未检测（哨兵 0）：说明"这段没有可加颤音的音高"，而不是画一条直线。
+ *
+ * 【为什么单独一条】把"没数据"与"这段没有音高"混成同一句话，用户会以为是自己没选对
+ * 区域 —— 而这两种情况的处置完全不同（前者去选一段，后者这段本来就没有音高）。
+ */
+test("音高全未检测时说明原因，而不是画一条直线", async () => {
+    await mountDialog(undefined, () => undefined, {
+        applyTarget: {
+            loadOriginal: () =>
+                Promise.resolve({ values: new Array(64).fill(0), framePeriodMs: 5 }),
+        },
+        initialTab: "applied",
+    });
+
+    expect(document.body.textContent ?? "").toContain(
+        "No pitch to apply vibrato to in this range.",
+    );
 });

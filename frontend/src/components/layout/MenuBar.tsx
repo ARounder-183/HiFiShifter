@@ -79,7 +79,7 @@ import { SCALE_LABELS } from "../../utils/musicalScales";
 import { ExportAudioDialog } from "./ExportAudioDialog";
 import { AutoBackupDialog } from "./AutoBackupDialog";
 import { RenderCacheDialog } from "./RenderCacheDialog";
-import { VibratoPresetDialog } from "./VibratoPresetDialog";
+import { VibratoDialog } from "./VibratoDialog";
 import { ChannelImportDialog } from "./ChannelImportDialog";
 import { RecordingSettingsDialog } from "./RecordingSettingsDialog";
 import { BenchmarkDialog } from "./BenchmarkDialog";
@@ -235,7 +235,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [setPitchOpen, setSetPitchOpen] = useState(false);
     const [averageOpen, setAverageOpen] = useState(false);
     const [smoothOpen, setSmoothOpen] = useState(false);
-    const [vibratoPresetDialogOpen, setVibratoPresetDialogOpen] = useState(false);
+    const [vibratoDialogOpen, setVibratoDialogOpen] = useState(false);
     const [quantizeOpen, setQuantizeOpen] = useState(false);
     const [meanQuantizeOpen, setMeanQuantizeOpen] = useState(false);
     const [menuImportMode, setMenuImportMode] = useState<{
@@ -1259,7 +1259,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                     {/* 颤音预设库。与上下文菜单用**不同**的文案：选项菜单这一层
                         没有"颤音"语境，只写"管理预设"没人知道管的是哪一种。 */}
-                    <DropdownMenu.Item onSelect={() => setVibratoPresetDialogOpen(true)}>
+                    <DropdownMenu.Item onSelect={() => setVibratoDialogOpen(true)}>
                         {tf("menu_vibrato_presets")}
                     </DropdownMenu.Item>
 
@@ -1379,9 +1379,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             />
 
             {/* 颤音预设库：与右键菜单的「管理预设…」共用同一个对话框 */}
-            <VibratoPresetDialog
-                open={vibratoPresetDialogOpen}
-                onOpenChange={setVibratoPresetDialogOpen}
+            <VibratoDialog
+                open={vibratoDialogOpen}
+                onOpenChange={setVibratoDialogOpen}
                 editParam={s.editParam}
             />
 

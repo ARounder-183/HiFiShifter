@@ -1,20 +1,35 @@
 /**
- * 颤音预设管理器。
+ * 颤音窗口 —— 预设库 + 套用到选区，**同一个窗口**。
  *
- * 【结构】左侧预设列表、右侧编辑器（波形预览 + 参数），照 `CustomScaleDialog`
- * 的分工：列表负责"选哪一个"，编辑器负责"捏成什么样"。
+ * 【为什么合并成一个】曾经是两扇窗：「颤音预设管理」回答"这个预设长什么样"（改库），
+ * 「添加颤音」回答"套到这段选区上长什么样"（用库）。它们各有一份预设列表、一块预览
+ * 画布、一套试听，中间靠宿主侧一层跳转（把选中的 id 带过去、返回时再带回来）缝合。
+ * 那层缝合的代价是真实的：跳转即重新挂载 —— 纵轴重拟合、试听停掉、滚动回到顶部；
+ * 而且"改预设"与"看选区效果"分成两处，用户要"提取 → 改名 → 应用"必须跨窗口走一圈。
+ *
+ * 合并的关键是：两者本来就在算同一件事（同一条 `buildVibratoCurve`、同一条
+ * `planVibratoTarget`、同一条试听链），分裂的只是外壳。于是外壳合成一个，内核一行
+ * 不改 —— 这也是这次合并最有力的证据（见 `vibratoDialogLogic.ts`）。
+ *
+ * 【结构】左列预设列表、右侧预览 + 编辑器（照 `CustomScaleDialog` 的分工：列表负责
+ * "选哪一个"，编辑器负责"捏成什么样"）。预览区有两页（`VibratoPreviewPane`）：
+ * 「预设波形」与「套用到选区」；后者只在宿主给了选区数据入口（`applyTarget`）时才出现。
  *
  * 【只读系统预设】系统预设禁用一切字段，只有「复制为自定义」可用。这样出厂
  * 预设永远可复原，而"改坏了"不会变成不可逆 —— 比"允许改但提供重置"更简单，
  * 也不会让用户对着一个与出厂说明不符的"自然"预设困惑。
  *
- * 【草稿-保存】编辑改的是局部草稿，点「保存」才 dispatch + 落盘。与自动备份 /
- * 录音 / 渲染缓存几个对话框一致；预设是"调完再定"的东西，逐键落盘只会让撤销
- * 与失败恢复都变复杂。
+ * 【草稿-保存】编辑改的是局部草稿，点「保存」才 dispatch + 落盘。**离开这条预设 =
+ * 落盘**（切换预设、删除、导入都先写回库），只有关闭窗口才丢弃未保存的改动 —— 这
+ * 一条与合并前一致，是"用户改了一半去看看别的"不会丢东西的保证。
+ *
+ * 【应用】「应用」把**当前草稿**（含未保存的微调）交给编辑管线，不写库、不关窗口：
+ * 多段选区逐个应用是真实工作流，用户也可以应用完接着调、再应用一次。它与「保存」是
+ * 两件事（写选区 vs 写库），因此两个按钮并存，`defaultActionId` 选「应用」。
  */
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PlayIcon, ShuffleIcon, StopIcon, EyeNoneIcon, EyeOpenIcon } from "@radix-ui/react-icons";
+import { ShuffleIcon, EyeNoneIcon, EyeOpenIcon } from "@radix-ui/react-icons";
 import { Box, Flex, ScrollArea, TextField } from "@radix-ui/themes";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -55,8 +70,13 @@ import { shapeUsesSkew } from "../../features/vibrato/vibratoCycle";
 import { randomVibratoSeed } from "../../features/vibrato/vibratoSeed";
 import { depthStepUnitFor } from "../../features/vibrato/vibratoDepth";
 import { estimateCycles } from "../../features/vibrato/vibratoCurve";
+import { planVibratoTarget } from "../../features/vibrato/vibratoPitch";
 import { exportVibratoPresetsJson } from "../../services/api/jsonExport";
-import { buildAuditionCurve, vibratoAudition } from "../../features/vibrato/vibratoAudition";
+import {
+    buildAuditionCurve,
+    buildContourAuditionPair,
+    vibratoAudition,
+} from "../../features/vibrato/vibratoAudition";
 import type {
     BaselineMode,
     CycleSource,
@@ -68,12 +88,12 @@ import type {
 import {
     AppButton,
     AppContextMenu,
-    AppIconButton,
     AppConfirmDialog,
     AppDialog,
     AppField,
     AppForm,
     AppFormSection,
+    AppIconButton,
     AppListRow,
     AppNumberField,
     AppSegmentedControl,
@@ -86,10 +106,15 @@ import {
 import { AppFileInput } from "../../ui/FileInput";
 import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
 import {
-    VibratoPreviewCanvas,
     type VibratoPreviewGestureInfo,
     type VibratoPreviewModifiers,
 } from "./vibrato/VibratoPreviewCanvas";
+import {
+    VibratoPreviewPane,
+    type VibratoAppliedStatus,
+    type VibratoAuditionKind,
+    type VibratoPreviewTab,
+} from "./vibrato/VibratoPreviewPane";
 import {
     BASELINE_MODE_KEYS,
     BASELINE_MODE_ORDER,
@@ -99,6 +124,7 @@ import {
     RATE_MODE_KEYS,
     WAVE_SHAPE_KEYS,
     WAVE_SHAPE_ORDER,
+    buildAppliedPreview,
     buildVibratoPreview,
     depthToCents,
     depthForParam,
@@ -127,6 +153,33 @@ import {
     reorderTargetIndex,
 } from "./dragReorder";
 
+/**
+ * 选区宿主：给了这三样，窗口就多出「套用到选区」页签与「应用」「提取」两个动作。
+ *
+ * 【为什么合成一个 prop 而不是三个可选的】它们同生共死 —— 能画套用预览的地方就能
+ * 应用，反之亦然。三个独立的可选 prop 允许"只给一个"的中间状态，而那个状态没有
+ * 意义（预览画得出来却应用不了？），却要在组件里到处判空。
+ */
+export interface VibratoApplyTarget {
+    /**
+     * 取选区（无选区时取曲线头部）的原始帧值。
+     *
+     * 由宿主提供：只有面板手里有 `rootTrackId` / `editParam` / 选区。返回 `null`
+     * 表示取不到数据（例如刚打开还没有参数曲线）。
+     */
+    loadOriginal: () => Promise<{ values: number[]; framePeriodMs: number } | null>;
+    /** 应用：把（可能已微调的）完整预设交给编辑管线。 */
+    onApply: (preset: VibratoPreset) => void;
+    /**
+     * 从选区提取颤音预设。
+     *
+     * 【为什么由宿主做】提取要读参数帧（选区 + 轨道 + 参数），只有宿主够得着。成功
+     * 返回**已入库**的那条预设（本窗口随即选中它），失败返回 `null`（本窗口给出
+     * 行内提示）。入库动作留在宿主，是因为它还要顺带更新"当前使用"。
+     */
+    onExtract?: () => Promise<VibratoPreset | null>;
+}
+
 interface Props {
     open: boolean;
     onOpenChange: (open: boolean) => void;
@@ -136,20 +189,13 @@ interface Props {
     /**
      * 打开时**编辑**哪个预设；省略则用当前活动预设。
      *
-     * 从「添加颤音」跳过来时带上它：用户在那边选中的是哪一条，这边就接着编辑哪一条
-     * —— 而不是回到"当前使用"的那条，让用户重新找一遍。
+     * 从选区提取出来的那条预设走这里：用户刚把它提出来，当然是要接着编辑它。
      */
     initialPresetId?: string;
-    /**
-     * 「返回添加颤音」。
-     *
-     * 【为什么是可选回调而不是自己开窗口】管理器有两个宿主（参数编辑器与菜单栏）：
-     * 只有从「添加颤音」跳过来的那一次才该有返回按钮 —— 菜单栏那条路径背后没有待应用
-     * 的弹窗。因此"从哪来、回哪去"由宿主决定，管理器只管把动作画出来。
-     *
-     * 参数是**当前编辑中**的预设 id：应用弹窗要用它接着选中，而不是回到当前使用的那条。
-     */
-    onBackToApply?: (presetId: string) => void;
+    /** 打开时落在哪个预览页签（默认「预设波形」）。 */
+    initialTab?: VibratoPreviewTab;
+    /** 选区宿主；省略 = 纯预设库（菜单栏那条路径）。 */
+    applyTarget?: VibratoApplyTarget;
 }
 
 /** 列表列的宽度（CSS 像素）。 */
@@ -177,13 +223,14 @@ type PresetGroup = "system" | "user";
  */
 const CONTENT_HEIGHT = "min(60vh, 560px)";
 
-export function VibratoPresetDialog({
+export function VibratoDialog({
     open,
     onOpenChange,
     editParam = "pitch",
     paramRange,
     initialPresetId,
-    onBackToApply,
+    initialTab = "preset",
+    applyTarget,
 }: Props) {
     const dispatch = useAppDispatch();
     const { t, plural } = useI18n();
@@ -197,13 +244,23 @@ export function VibratoPresetDialog({
         () => resolveVibratoPresets(session.vibratoPresets, session.builtinVibratoPresetOrder),
         [session.vibratoPresets, session.builtinVibratoPresetOrder],
     );
+
     /**
-     * 编辑中的草稿。`null` 表示尚未选过 —— 打开时按活动预设播种。
+     * 播种用的那条预设：调用方指定的（提取出来的）→ 当前活动预设 → 列表首项。
      *
-     * 【为什么不用 `useDialogDraft`】那个钩子播种的是"打开那一刻的值"，而这里
-     * 草稿会随列表点选反复替换；用普通 state + 打开时的 effect 更直白。
+     * 【为什么在渲染里算一次、而不是在 effect 里播种】宿主每次打开都给本组件换一个
+     * `key`（见 PianoRollPanel），于是"打开即播种"由**重新挂载**完成 —— 惰性初值就
+     * 够了，不需要 effect 内 setState（那会级联渲染，也被 lint 禁止），也不需要
+     * "这次打开是否播种过"的 ref（那个 ref 存在的唯一理由，是"保存 / 切换预设会重算
+     * `resolved.all`、从而误触发播种"；重挂载下不存在这种误触发）。
      */
-    const [draft, setDraft] = useState<VibratoPreset | null>(null);
+    const seedPreset =
+        resolved.all.find((preset) => preset.id === (initialPresetId ?? "")) ??
+        resolved.all.find((preset) => preset.id === session.activeVibratoPresetId) ??
+        resolved.all[0] ??
+        null;
+    /** 编辑中的草稿。`null` 表示库里一条预设都没有（`resolved.all` 为空）。 */
+    const [draft, setDraft] = useState<VibratoPreset | null>(seedPreset);
     /**
      * 手绘周期编辑器的展开状态。
      *
@@ -223,6 +280,32 @@ export function VibratoPresetDialog({
         skew: number;
     } | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<VibratoPreset | null>(null);
+    /** 预览页签。初始值由宿主决定（"添加颤音"入口直接落在套用页）。 */
+    const [previewTab, setPreviewTab] = useState<VibratoPreviewTab>(initialTab);
+    /**
+     * 选区帧值（套用页签的输入）。
+     *
+     * `null` = 还没取到（或取不到）：前者显示"载入中"，后者显示"这段选区里没有…"。
+     */
+    const [original, setOriginal] = useState<{ values: number[]; framePeriodMs: number } | null>(
+        null,
+    );
+    /**
+     * 是否正在取选区帧值。
+     *
+     * 初值就按"有宿主 = 正在载入"来定：取数据是异步的，若初值为 `false`，第一帧会
+     * 先画一句"选中一段后可在此预览效果"，再被结果替换掉 —— 一次可见的闪烁。
+     */
+    const [originalLoading, setOriginalLoading] = useState(Boolean(applyTarget?.loadOriginal));
+    /**
+     * 套用预览的纵轴拟合令牌：每点一次「适应」自增，让下面的 `useMemo` 重算标尺。
+     *
+     * 用令牌而不是"拟合函数 + state"，是为了把**什么时候重算**直接写在依赖数组里
+     * （见下），读的人不必去追 effect 的触发条件。预设页签那把标尺是 state
+     * （`previewHalfCents`），因为它由离散动作显式拟合；两者形态不同只是因为历史，
+     * 语义是同一条："编辑期间标尺不动"。
+     */
+    const [appliedRefitToken, setAppliedRefitToken] = useState(0);
     /**
      * 预设列表行的右键菜单（视口坐标 + 目标预设）。
      *
@@ -267,26 +350,37 @@ export function VibratoPresetDialog({
     /** 两组列表各自的容器：拖拽落点只看**同组**的行。 */
     const systemListRef = useRef<HTMLDivElement | null>(null);
     const userListRef = useRef<HTMLDivElement | null>(null);
-    /** 试听是否在响（驱动播放 / 停止按钮的图标与文案）。 */
-    const [auditionPlaying, setAuditionPlaying] = useState(false);
+    /**
+     * 正在试听的是哪一条（`null` = 没在响）。
+     *
+     * 用"哪一条"而不是布尔量：三个按钮（预设 / 原参数线 / 新参数线）各自要显示自己的
+     * 播放态，而试听器同一时刻只允许一路声音。一个三值 state 与那条**唯一**的不变量
+     * 同形；用两个独立 state 会允许"两个按钮同时显示正在播放"这种不可能的状态。
+     */
+    const [audition, setAudition] = useState<VibratoAuditionKind | null>(null);
     /** 导入 / 导出用的隐藏文件输入（必须常驻挂载，见 `AppFileInput` 的说明）。 */
     const fileInputRef = useRef<HTMLInputElement | null>(null);
     /**
-     * 导入 / 导出后的一条行内反馈。
+     * 导入 / 导出 / 提取后的一条行内反馈。
      *
      * 【为什么是行内而不是模态】导入是高频小操作，模态打断太重；而「什么都不说」
-     * 正是主题导入曾经的缺陷 —— 坏文件静默无反应，用户以为导入不起作用。
+     * 正是主题导入曾经的缺陷 —— 坏文件静默无反应，用户以为导入不起作用。提取失败
+     * 同样走这里：它就在窗口里发生，弹一层模态只会盖住刚刚那个窗口。
      */
     const [ioNotice, setIoNotice] = useState<{ text: string; danger: boolean } | null>(null);
     /**
-     * 预览纵轴的半幅（cents）—— **一次性拟合，编辑期间不动**。
+     * 预设波形页签的纵轴半幅（cents）—— **一次性拟合，编辑期间不动**。
      *
      * 【为什么要稳定】若标尺跟着当前深度自适应，波形永远填满画布：调深度时看到的
      * 只是整幅在竖直方向"抖一下"，读不出幅度大小。把标尺固定下来，波形高度就等于
      * 深度，配合轴上的刻度标签可以直读。换预设 / 打开 / 点「适应」/ 保存时才重新
      * 拟合（那是离散动作，不是每帧都在跳）。
      */
-    const [previewHalfCents, setPreviewHalfCents] = useState<number>(() => fitPreviewRangeCents(0));
+    const [previewHalfCents, setPreviewHalfCents] = useState<number>(() =>
+        seedPreset
+            ? fitPreviewRangeCents(buildVibratoPreview(seedPreset).peakCents)
+            : fitPreviewRangeCents(0),
+    );
 
     /** 按给定草稿重新拟合纵轴。 */
     const fitPreviewAxis = useCallback((preset: VibratoPreset | null) => {
@@ -294,43 +388,97 @@ export function VibratoPresetDialog({
         setPreviewHalfCents(fitPreviewRangeCents(buildVibratoPreview(preset).peakCents));
     }, []);
 
-    /**
-     * 本次"打开"是否已经播种过草稿。
-     *
-     * 【为什么需要它】这个 effect 依赖 `resolved.all`，而它会在**保存 / 切换预设**时
-     * 变化（切换前会先把未保存的改动写回库）。若不设闸，保存动作触发的重算会把草稿
-     * 重新播种回"当前活动预设"—— 于是用户点了另一条预设，改动保存了、选中却跳了回去，
-     * 得再点一次。播种只在"打开"这一沿做一次即可。
-     */
-    const seededForOpenRef = useRef(false);
-
-    // 打开时播种：优先用活动预设，找不到就回落到列表首项。
-    useEffect(() => {
-        if (!open) {
-            seededForOpenRef.current = false;
-            return;
-        }
-        if (seededForOpenRef.current) return;
-        seededForOpenRef.current = true;
-        // 播种优先级：调用方指定的那条（从「添加颤音」跳过来）→ 当前活动预设 → 列表首项。
-        const active =
-            resolved.all.find((preset) => preset.id === (initialPresetId ?? "")) ??
-            resolved.all.find((preset) => preset.id === session.activeVibratoPresetId) ??
-            resolved.all[0];
-        if (active) {
-            // 对话框打开是一次离散动作：播种局部草稿，并把预览纵轴拟合一次
-            // （编辑期间保持不动）。
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- 打开时按活动预设播种草稿（既有模式）
-            setDraft(active);
-            fitPreviewAxis(active);
-        }
-    }, [open, resolved.all, session.activeVibratoPresetId, initialPresetId, fitPreviewAxis]);
-
     const isBuiltin = Boolean(draft?.builtin);
     const previewSamples = useMemo(() => (draft ? buildVibratoPreview(draft) : null), [draft]);
 
+    /**
+     * 取选区帧值 —— 只在有选区宿主时做，且只取一次（每次打开重挂载）。
+     *
+     * 依赖的是 `applyTarget?.loadOriginal` 本身而不是 `applyTarget` 对象：后者由宿主
+     * 每次渲染新建时，这个 effect 会跟着重跑 → `setOriginal` → 再渲染 → 无限循环。
+     * 盯住那个函数（宿主用 `useCallback` 稳定它）才是真正的"数据源变了"。
+     */
+    const loadOriginal = applyTarget?.loadOriginal;
+    useEffect(() => {
+        if (!open || !loadOriginal) return;
+        let cancelled = false;
+        // 异步回调里的 setState 不受"effect 内同步 setState"约束（同应用弹窗旧实现）。
+        void loadOriginal().then((result) => {
+            if (cancelled) return;
+            setOriginal(result);
+            setOriginalLoading(false);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [open, loadOriginal]);
+
+    /**
+     * 套用预览采样：喂**选区真实帧值**，走与落盘同一条 `buildVibratoCurve`。
+     *
+     * 只画"相对共同中心的偏移"，不画绝对音高 —— 理由见 `buildAppliedPreview` 的
+     * 注释（素材轮廓与颤音幅度差两个数量级，同轴会互相压扁）。
+     */
+    const appliedPreview = useMemo(() => {
+        if (!applyTarget || !draft || !original) return null;
+        return buildAppliedPreview({
+            preset: draft,
+            original: original.values,
+            param: editParam,
+            framePeriodMs: original.framePeriodMs,
+            range: paramRange,
+        });
+    }, [applyTarget, draft, original, editParam, paramRange]);
+
+    /**
+     * 套用页签的纵轴半幅（cents）。
+     *
+     * 【什么时候重算】依赖数组就是答案：**换选区**（`original`）、**换预设**
+     * （`draft?.id`）、**点「适应」**（令牌）。深度 / 速率的改动刻意不在其中 ——
+     * 内容会变，但那是"编辑期间"，标尺不动（否则深度一调整幅就重新缩放）。
+     */
+    const appliedHalfCents = useMemo(
+        () => fitPreviewRangeCents(appliedPreview ? appliedPreview.peakCents : 0),
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- 内容变化（深度 / 速率）刻意不重算标尺，见上
+        [original, draft?.id, appliedRefitToken],
+    );
+
+    /** A/B 试听的两条曲线：同一中心、同一基音，差异只来自颤音。 */
+    const auditionCurves = useMemo(() => {
+        if (!appliedPreview || !original) return null;
+        return buildContourAuditionPair(
+            appliedPreview.contour,
+            appliedPreview.wave,
+            original.framePeriodMs,
+        );
+    }, [appliedPreview, original]);
+
+    /**
+     * 选区里**没有可调制的音符段**。
+     *
+     * 音高参数下这意味着无从调制：值为 0 的未检测帧、以及浊清边界上低而非零的过渡帧
+     * （跟踪器给的 20~40 Hz 低估）都不是音符；连续有声帧还要够长（见 `vibratoPitch.ts`）。
+     * 预览为空，应用也不会改动任何帧 —— 提交侧对每个选区段各自判定。这里只负责把
+     * "为什么没有预览"说清楚：把"没数据"和"这段没有音高"混成同一句提示，用户会以为
+     * 是自己没选对区域。
+     *
+     * 【为什么不据此禁用「应用」】预览只取**第一个**选区段；多选区时其余段可能有音符，
+     * 按第一段禁用会把本来能应用的选区挡掉。
+     */
+    const unvoicedPitch =
+        editParam === "pitch" &&
+        original !== null &&
+        planVibratoTarget(editParam, original.values, original.framePeriodMs) === null;
+
+    /** 套用页签画不出东西时的原因（决定占位文案）。 */
+    const appliedStatus: VibratoAppliedStatus = originalLoading
+        ? "loading"
+        : unvoicedPitch
+          ? "unvoiced"
+          : "empty";
+
     // 卸载兜底：整个组件被卸载（而不只是关闭）时也要停 —— 否则试听会在
-    // 管理器消失之后继续响。这里不含 setState；关闭时的按钮状态复位在
+    // 窗口消失之后继续响。这里不含 setState；关闭时的按钮状态复位在
     // `handleOpenChange`（事件处理器）里做，不违反 effect 的规则。
     useEffect(() => () => vibratoAudition.stop(), []);
 
@@ -338,23 +486,43 @@ export function VibratoPresetDialog({
     function handleOpenChange(next: boolean) {
         if (!next) {
             vibratoAudition.stop();
-            setAuditionPlaying(false);
+            setAudition(null);
         }
         onOpenChange(next);
     }
 
-    /** 播放 / 停止当前草稿的试听。自然结束后引擎回调把按钮切回「播放」。 */
-    function toggleAudition() {
-        if (auditionPlaying || !previewSamples) {
+    /**
+     * 播放 / 停止某一条试听。自然结束后引擎回调把按钮切回「播放」。
+     *
+     * 【为什么切页签也要停】声音与按钮是两处状态，只切页签不停声会出现"看不见的
+     * 播放中"—— 用户在新页签上找不到停止按钮，只能靠关窗口。
+     */
+    function toggleAudition(kind: VibratoAuditionKind) {
+        if (audition === kind) {
             vibratoAudition.stop();
-            setAuditionPlaying(false);
+            setAudition(null);
             return;
         }
-        // 不变量「听到的 = 看到的」：直接吃预览的同一份数据，不重算。
-        const started = vibratoAudition.play(buildAuditionCurve(previewSamples), () =>
-            setAuditionPlaying(false),
-        );
-        setAuditionPlaying(started);
+        if (kind === "preset") {
+            if (!previewSamples) return;
+            // 不变量「听到的 = 看到的」：直接吃预览的同一份数据，不重算。
+            const started = vibratoAudition.play(buildAuditionCurve(previewSamples), () =>
+                setAudition(null),
+            );
+            setAudition(started ? kind : null);
+            return;
+        }
+        if (!auditionCurves) return;
+        const started = vibratoAudition.play(auditionCurves[kind], () => setAudition(null));
+        setAudition(started ? kind : null);
+    }
+
+    /** 切换预览页签：先停声（见 `toggleAudition` 的说明），再换页。 */
+    function handlePreviewTabChange(next: VibratoPreviewTab) {
+        if (next === previewTab) return;
+        vibratoAudition.stop();
+        setAudition(null);
+        setPreviewTab(next);
     }
 
     /** 草稿的局部更新（不落盘）。 */
@@ -513,6 +681,54 @@ export function VibratoPresetDialog({
         setDraft(normalized);
         // 保存是"这段波形定稿了"的时机：顺势把纵轴重新拟合回六成上下。
         fitPreviewAxis(normalized);
+    }
+
+    /**
+     * 「应用」：把当前草稿交给编辑管线。
+     *
+     * 【为什么传完整预设而不是 id】本地微调（深度 / 速率 / 波形）必须跟着过去 ——
+     * 只传 id 的话落盘的还是库里的旧参数，用户看到的与得到的不一致。
+     *
+     * 【为什么不写库、不关窗】写库是「保存」的事（两个动作语义不同，见文件头）；
+     * 不关窗是为了多段选区逐个应用，以及"应用完接着调再应用一次"。落盘的是一次
+     * 离散的编辑操作，窗口留着不产生任何副作用。
+     *
+     * 【为什么不禁用未保存的草稿】用户看到的就是会落下去的那份 —— 这正是"预览"
+     * 的意义；把未保存的改动挡在门外会让预览与结果不一致。
+     */
+    function handleApply() {
+        if (!draft || !applyTarget) return;
+        applyTarget.onApply(sanitizeVibratoPreset(draft));
+    }
+
+    /**
+     * 「从选区提取颤音预设」。
+     *
+     * 【为什么由宿主做重活】提取要读参数帧（选区 + 轨道 + 参数），只有宿主够得着；
+     * 本窗口只负责"把结果显示出来"：成功就选中刚入库的那条（用户接着在这儿改名 /
+     * 微调），失败给一条行内提示。
+     *
+     * 【为什么不再跳窗口】合并前提取完要开一次管理器（因为提取的结果属于"改库"那
+     * 一侧）；现在两侧同窗，提取 = 列表里多一条并选中它。
+     */
+    async function handleExtractFromSelection() {
+        if (!applyTarget?.onExtract) return;
+        setIoNotice(null);
+        const extracted = await applyTarget.onExtract();
+        if (!extracted) {
+            setIoNotice({ text: t("vibrato_extract_failed"), danger: true });
+            return;
+        }
+        /*
+         * 选中新提取的那条。
+         *
+         * 不走 `selectPreset`：那个函数会先把**当前草稿**的未保存改动落盘（"离开这条
+         * 预设 = 落盘"）—— 这里用户并没有离开，是列表多了一条。于是直接换草稿，并把
+         * 纵轴按新波形拟合一次（换预设的既定动作）。
+         */
+        setHandDraw(null);
+        setDraft(extracted);
+        fitPreviewAxis(extracted);
     }
 
     function handleDuplicate() {
@@ -955,34 +1171,20 @@ export function VibratoPresetDialog({
                 size="xl"
                 actions={[
                     /*
-                     * 【返回添加颤音】排在页脚最左：它是"离开这个窗口去别处"，与右边
-                     * 那些"改库"的动作不同类。先走本窗口的关闭路径（停试听），再由宿主
-                     * 决定接下来开哪个窗口。
+                     * 【「从选区提取」排在页脚最左】它是作用于**选区**的动作，与右边
+                     * 那些"改这条预设 / 改这个库"的动作不同类；而且它与「删除」同属
+                     * 低频、非主动作的那一类（`align: "start"` 的既有语义）。
+                     * 只在有选区宿主时出现 —— 菜单栏那条路径背后没有选区。
                      */
-                    ...(onBackToApply
+                    ...(applyTarget?.onExtract
                         ? [
                               {
-                                  id: "backToApply",
-                                  label: t("vibrato_preset_back_to_apply"),
+                                  id: "extract",
+                                  label: t("vibrato_extract_action"),
                                   align: "start" as const,
                                   autoClose: false,
-                                  onClick: () => {
-                                      if (!draft) return;
-                                      /*
-                                       * 返回前把未保存的改动落盘。
-                                       *
-                                       * 用户是"改完就去应用"，返回正是他表达"改完了"的方式 ——
-                                       * 在这里丢掉改动，他回到应用弹窗看到的还是旧参数，而
-                                       * 界面刚刚还显示着他改过的值。这与"切换预设时先把改动
-                                       * 写回库"是同一条规矩：**离开这条预设 = 落盘**。
-                                       * （`draftHasUnsavedChanges` 对系统预设恒为 false，
-                                       * 所以只读的那类不会在这里被写库。）
-                                       */
-                                      if (draftHasUnsavedChanges()) {
-                                          persistPreset(sanitizeVibratoPreset(draft));
-                                      }
-                                      handleOpenChange(false);
-                                      onBackToApply(draft.id);
+                                  onClick: async () => {
+                                      await handleExtractFromSelection();
                                   },
                               },
                           ]
@@ -1039,13 +1241,36 @@ export function VibratoPresetDialog({
                     {
                         id: "save",
                         label: t("vibrato_manager_save"),
-                        intent: "primary",
+                        /*
+                         * 【为什么「保存」不再是 primary】有选区宿主时页脚有两个
+                         * "往前走"的动作（保存写库、应用写选区），而一张对话框里
+                         * 只该有一个主按钮 —— 主的是「应用」（用户开这扇窗的目的）。
+                         * 没有宿主时它就是唯一的主按钮（见 defaultActionId）。
+                         */
+                        intent: applyTarget ? "default" : "primary",
                         disabled: !draft || isBuiltin,
                         // 保存**不关闭**对话框：用户常要"先存一版、接着调"，
                         // 存完就把窗口收掉等于逼他重新打开。
                         autoClose: false,
                         onClick: handleSave,
                     },
+                    ...(applyTarget
+                        ? [
+                              {
+                                  id: "apply",
+                                  label: t("vibrato_apply_apply"),
+                                  intent: "primary" as const,
+                                  disabled: !draft,
+                                  /*
+                                   * 【应用也不关窗】多段选区逐个应用是真实工作流；
+                                   * 关掉窗口只会逼用户重新打开、重新找到那条预设。
+                                   * 窗口的退出交给「关闭」/ Esc。
+                                   */
+                                  autoClose: false,
+                                  onClick: handleApply,
+                              },
+                          ]
+                        : []),
                     {
                         // 显式关闭按钮：保存不再关闭窗口之后，页脚里没有"退出"的
                         // 去处，只剩 Esc / 点外部 —— 两者都不显眼。
@@ -1055,9 +1280,12 @@ export function VibratoPresetDialog({
                         onClick: () => handleOpenChange(false),
                     },
                 ]}
-                // 默认动作仍是「保存」：关闭排在它右边（页脚最右是关闭的常见排布），
-                // 但 Enter 不该变成"关掉窗口"。
-                defaultActionId="save"
+                /*
+                 * 默认动作：有选区宿主时是「应用」（用户开这扇窗的目的就是应用它），
+                 * 否则是「保存」（与合并前一致）。关闭排在它们右边（页脚最右是关闭的
+                 * 常见排布），但 Enter 不该变成"关掉窗口"。
+                 */
+                defaultActionId={applyTarget ? "apply" : "save"}
             >
                 <Flex
                     direction="column"
@@ -1066,67 +1294,40 @@ export function VibratoPresetDialog({
                     className="min-h-0"
                     style={{ height: CONTENT_HEIGHT }}
                 >
-                    {/* ---- 波形预览（整行置顶，不参与任何滚动） ----
+                    {/* ---- 预览（整行置顶，不参与任何滚动） ----
                         放在两栏之上而不是塞进参数流的头部：整行宽度读波形更清楚，
-                        且它不属于任何滚动区，调参数时**永远**不会滚出视野。 */}
+                        且它不属于任何滚动区，调参数时**永远**不会滚出视野。
+                        两个页签共用这一块（见 `VibratoPreviewPane`）。 */}
                     {draft && previewSamples ? (
                         <>
-                            <Box className="rounded border border-qt-border bg-qt-panel p-2">
-                                <VibratoPreviewCanvas
-                                    samples={previewSamples}
-                                    ariaLabel={t("vibrato_preview")}
-                                    halfCents={previewHalfCents}
-                                    handles={previewHandles}
-                                    onGestureStart={handlePreviewGestureStart}
-                                    onGestureMove={handlePreviewGestureMove}
-                                    onGestureEnd={handlePreviewGestureEnd}
-                                />
-                                <Flex justify="between" align="center" mt="1" gap="2">
-                                    <Flex gap="2" align="center" style={{ minWidth: 0 }}>
-                                        <span className="hs-type-caption">
-                                            {`±${formatNumber(previewSamples.peakCents)} ${t("vibrato_unit_cents")}`}
-                                        </span>
-                                        <span className="hs-type-caption">
-                                            {t("vibrato_cycles_estimate").replace(
-                                                "{count}",
-                                                formatNumber(cycleEstimate),
-                                            )}
-                                        </span>
-                                    </Flex>
-                                    <Flex gap="1" align="center">
-                                        {/* 适应：把纵轴重新拟合到当前波形。标尺在编辑期间
-                                            刻意保持不动（这样高度才等于深度），拖到超出量程
-                                            或想重新看清形状时点它。 */}
-                                        <AppButton
-                                            size="sm"
-                                            emphasis="soft"
-                                            disabled={isBuiltin}
-                                            onClick={() => fitPreviewAxis(draft)}
-                                        >
-                                            {t("vibrato_preview_fit")}
-                                        </AppButton>
-                                        {/* 试听：合成音色（钢琴卷帘琴键同款），不跑声码器。
-                                            系统预设也能试听 —— 试听是只读操作。 */}
-                                        <AppIconButton
-                                            tooltip={
-                                                auditionPlaying
-                                                    ? t("vibrato_audition_stop")
-                                                    : t("vibrato_audition_play")
-                                            }
-                                            size="sm"
-                                            aria-pressed={auditionPlaying}
-                                            onClick={toggleAudition}
-                                            icon={
-                                                auditionPlaying ? (
-                                                    <StopIcon width="15" height="15" />
-                                                ) : (
-                                                    <PlayIcon width="15" height="15" />
-                                                )
-                                            }
-                                        />
-                                    </Flex>
-                                </Flex>
-                            </Box>
+                            <VibratoPreviewPane
+                                tab={previewTab}
+                                onTabChange={handlePreviewTabChange}
+                                hasSelection={Boolean(applyTarget)}
+                                presetSamples={previewSamples}
+                                presetHalfCents={previewHalfCents}
+                                presetHandles={previewHandles}
+                                onGestureStart={handlePreviewGestureStart}
+                                onGestureMove={handlePreviewGestureMove}
+                                onGestureEnd={handlePreviewGestureEnd}
+                                cyclesEstimate={cycleEstimate}
+                                appliedSamples={appliedPreview}
+                                appliedHalfCents={appliedHalfCents}
+                                appliedStatus={appliedStatus}
+                                onFit={() => {
+                                    // 「适应」作用于**当前页签**：两页各有一把标尺，
+                                    // 一次点击只该动用户正看着的那把。
+                                    if (previewTab === "applied" && applyTarget) {
+                                        setAppliedRefitToken((token) => token + 1);
+                                    } else {
+                                        fitPreviewAxis(draft);
+                                    }
+                                }}
+                                fitDisabled={isBuiltin}
+                                audition={audition}
+                                onAudition={toggleAudition}
+                                appliedAuditionDisabled={!auditionCurves}
+                            />
                             {isBuiltin ? (
                                 <span className="hs-type-caption">
                                     {t("vibrato_manager_readonly")}
