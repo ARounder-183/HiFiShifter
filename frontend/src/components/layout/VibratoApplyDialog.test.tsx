@@ -41,7 +41,14 @@ const PRESETS: VibratoPreset[] = [
     sanitizeVibratoPreset({ id: "custom_a", name: "Mine", depthCents: 42, rateHz: 6.5 }),
 ];
 
-const ORIGINAL = Array.from({ length: 64 }, (_, i) => Math.sin(i / 8) * 0.5);
+/*
+ * 一段真实的音高曲线：C4 附近 ±0.5 个半音。
+ *
+ * 【为什么从 60 起而不是从 0 起】音高参数里 **0 = 未检测到音高**（见
+ * `vibratoPitch.ts`）。用 `sin(i/8) * 0.5` 当音高夹具既不是真实音高，i=0 处又恰好
+ * 落在 0 上 —— 那是在测一个不存在的情形，新契约还会把那一帧画成断口。
+ */
+const ORIGINAL = Array.from({ length: 64 }, (_, i) => 60 + Math.sin(i / 8) * 0.5);
 
 let host: HTMLDivElement;
 let root: Root;
@@ -194,4 +201,21 @@ test("无选区数据时显示占位提示而不是空画布", async () => {
     await mountDialog({ loadOriginal: () => Promise.resolve(null) });
     expect(document.querySelector("canvas[role=img]")).toBeNull();
     expect(document.body.textContent ?? "").toContain("Select a range");
+});
+
+/*
+ * 音高全未检测：说清原因，而不是复用"选一段"那句提示。
+ *
+ * 【为什么值得测】音高参数里 0 = 未检测。若沿用同一句"选中一段后可在此预览效果"，
+ * 用户会以为是自己没选对区域，反复重选 —— 而真正的原因是这段里没有音高可调。
+ * 同时必须没有画布：一条"平在 0"的曲线会被读成"结果把音高拉平了"。
+ */
+test("音高全未检测时：说明没有可调制的音高，且不画曲线", async () => {
+    await mountDialog({
+        loadOriginal: () => Promise.resolve({ values: [0, 0, 0, 0], framePeriodMs: 5 }),
+    });
+    expect(document.querySelector("canvas[role=img]")).toBeNull();
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("No pitch detected");
+    expect(text).not.toContain("Select a range");
 });
