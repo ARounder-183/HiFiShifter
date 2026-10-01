@@ -617,6 +617,81 @@ describe("抽象层不能空转（采用率）", () => {
         ).toEqual([]);
     });
 
+    test("滚动容器必须带让位类（或显式豁免）", () => {
+        /*
+         * 【为什么】本引擎的滚动条占 10px 布局宽（实测：`offsetWidth - clientWidth`）。
+         * 而全仓滚动容器此前普遍没有右侧留白 —— 内容右缘直接贴着滑块，用户报告的
+         * "右侧看上去很挤"即此。
+         *
+         * 让位由三条类承担：
+         *   - `.hs-scroll-gutter`：槽位 + 8px 呼吸（容器自己没有右侧留白时用）；
+         *   - `.hs-scroll-gutter-flush`：只留槽位（容器本来就有留白）；
+         *   - `.hs-scroll-area`：Radix `ScrollArea` 自绘滑块，需要 root 留出那条带子。
+         * 前两条是前缀关系（`-flush` 含 `hs-scroll-gutter`），因此文本检查只需匹配前缀。
+         *
+         * 【豁免】这两处**故意隐藏滚动条**（`hide-v-scrollbar`），没有滑块要让位。
+         * 清单必须写明理由，且下面的自检要求它们确实还在滚动。
+         */
+        const ALLOWED = new Set([
+            // 轨道头：hide-v-scrollbar（内核模式下滚动位置由渲染内核持有）
+            join("src", "components", "layout", "timeline", "TrackList.tsx"),
+            // 快捷键导航轨：hide-v-scrollbar（自带拖拽滚动，原生条只是噪音）
+            join("src", "components", "layout", "keybindings", "KeybindingsNavRail.tsx"),
+        ]);
+        /*
+         * 只认**纵向**可滚的容器：`overflow-y-auto` 与两轴的 `overflow-auto`。
+         * `overflow-x-auto`（菜单栏那种只横向滚动的条）不需要纵向让位 —— 早期把
+         * 它也纳入，直接误报了两处工具条。
+         */
+        const SCROLL_CLASS = /["'`](?=[^"'`]*overflow-(?:y-)?auto)(?=[^"'`]*)[^"'`]*["'`]/g;
+
+        const offenders: string[] = [];
+        let nativeScanned = 0;
+        let areaScanned = 0;
+        for (const file of sourceFiles(/\.tsx?$/)) {
+            if (ALLOWED.has(file)) continue;
+            const source = stripCommentsAndStrings(readFileSync(file, "utf8"), true);
+            for (const hit of source.match(SCROLL_CLASS) ?? []) {
+                nativeScanned += 1;
+                if (!hit.includes("hs-scroll-gutter")) {
+                    offenders.push(`${file}: ${hit.slice(0, 60)}…`);
+                }
+            }
+            for (const m of source.matchAll(/<ScrollArea\b/g)) {
+                areaScanned += 1;
+                const window = source.slice(m.index, m.index + 260);
+                if (!window.includes("hs-scroll-area")) {
+                    offenders.push(`${file}: <ScrollArea> 缺少 hs-scroll-area`);
+                }
+            }
+        }
+
+        // 自检：扫描本身必须真的扫到东西，否则"0 处违规"毫无意义。
+        expect(nativeScanned, "没有扫到任何滚动容器，正则已失效").toBeGreaterThan(5);
+        expect(areaScanned, "没有扫到 ScrollArea，选择器已失效").toBeGreaterThan(4);
+        expect(
+            offenders.length === 0
+                ? []
+                : [
+                      "以下滚动容器没有让位类 —— 内容会被滚动条压住：",
+                      ...offenders.map((line) => `  ${line}`),
+                  ].join("\n"),
+        ).toEqual([]);
+    });
+
+    test("豁免的滚动容器确实还在滚动（豁免前提自检）", () => {
+        // 豁免的前提是"它隐藏了滚动条但仍在滚动"。若哪天它不再滚动，豁免就该删掉。
+        for (const file of [
+            join("src", "components", "layout", "timeline", "TrackList.tsx"),
+            join("src", "components", "layout", "keybindings", "KeybindingsNavRail.tsx"),
+        ]) {
+            const source = readFileSync(file, "utf8");
+            expect(source, `${file} 已不再隐藏滚动条，请从让位门禁的豁免清单移除`).toContain(
+                "hide-v-scrollbar",
+            );
+        }
+    });
+
     test("排版角色在 src/ui 之外的采用率只增不减（棘轮）", () => {
         /*
          * 【目标与现状】目标是 ≥ 50（把 130 处 `<Text size="N">` 收敛到角色层）。
