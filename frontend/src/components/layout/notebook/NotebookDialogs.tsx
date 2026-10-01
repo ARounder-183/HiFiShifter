@@ -88,7 +88,7 @@ export function NotebookAttachmentsDialog({
              * 结果是 body 在滚、这层 `overflow-auto` 永不触发）。这里把外层补上。
              */}
             <div className="flex h-full min-h-0 flex-col pt-2">
-                <div className="min-h-0 flex-1 overflow-auto">
+                <div className="hs-scroll-gutter min-h-0 flex-1 overflow-auto">
                     {entries.length === 0 ? (
                         <span className="hs-type-muted">{t("notebook_attachments_empty")}</span>
                     ) : (

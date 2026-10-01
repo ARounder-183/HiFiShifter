@@ -644,7 +644,10 @@ export function NotebookPanel() {
                 {mode !== "source" ? (
                     /* 内边距归可编辑区自己（见 notebook.css 的 .hs-notebook-rich）：
                        容器留白会变成一圈点不动的死边。 */
-                    <div ref={richScrollRef} className="min-w-0 flex-1 overflow-auto bg-qt-base">
+                    <div
+                        ref={richScrollRef}
+                        className="hs-scroll-gutter min-w-0 flex-1 overflow-auto bg-qt-base"
+                    >
                         {editor ? (
                             <EditorContent editor={editor} className="hs-notebook-rich" />
                         ) : null}

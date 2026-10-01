@@ -59,7 +59,7 @@ export class AppRootErrorBoundary extends Component<
                 {error.stack ? (
                     <pre
                         data-hs-selectable="true"
-                        className="max-h-64 w-full max-w-2xl overflow-auto rounded border border-qt-border bg-qt-base p-3 text-left text-qt-xs leading-4 text-qt-text-muted"
+                        className="hs-scroll-gutter-flush max-h-64 w-full max-w-2xl overflow-auto rounded border border-qt-border bg-qt-base p-3 text-left text-qt-xs leading-4 text-qt-text-muted"
                     >
                         {error.stack}
                     </pre>

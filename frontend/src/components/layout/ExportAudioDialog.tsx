@@ -1802,7 +1802,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                              * 表单的 flex 布局（AppForm 已是 flex 列），让它吃掉
                              * 剩余高度。
                              */}
-                            <div className="min-h-0 flex-1 overflow-y-auto rounded border border-qt-border bg-qt-base p-2">
+                            <div className="hs-scroll-gutter min-h-0 flex-1 overflow-y-auto rounded border border-qt-border bg-qt-base p-2">
                                 <span className="hs-type-label font-semibold">
                                     {tf("export_dialog_targets")}
                                 </span>

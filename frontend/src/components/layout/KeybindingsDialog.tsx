@@ -649,7 +649,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                      */}
                     <div
                         ref={resultListRef}
-                        className="min-h-0 min-w-0 flex-1 overflow-y-auto custom-scrollbar"
+                        className="hs-scroll-gutter min-h-0 min-w-0 flex-1 overflow-y-auto custom-scrollbar"
                     >
                         {hasQuery ? (
                             visibleEntries.length > 0 ? (

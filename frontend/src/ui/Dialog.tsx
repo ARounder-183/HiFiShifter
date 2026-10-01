@@ -474,7 +474,7 @@ export function AppDialog({
                                 "app-dialog__body mt-3 min-h-0 flex-1",
                                 bodyLayout === "pane"
                                     ? "flex flex-col overflow-hidden"
-                                    : "overflow-y-auto",
+                                    : "hs-scroll-gutter overflow-y-auto",
                             )}
                         >
                             {children}

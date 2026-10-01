@@ -203,6 +203,13 @@
     --qt-ctl-md: 24px; /* 主工具栏按钮、对话框按钮（对齐 Radix size="1"） */
     --qt-ctl-lg: 32px; /* 菜单栏 / ActionBar 容器高 */
 
+    /*
+     * 滚动条让位：内容与滚动条槽位之间的呼吸（槽位本身由 `scrollbar-gutter`
+     * 预留，实测 10px）。见 `.hs-scroll-y` 的说明 —— 此前全仓 51 个滚动容器里
+     * 只有 2 个有右侧留白，内容右缘紧贴滑块，用户报的"右侧很挤"即此。
+     */
+    --qt-scrollbar-gutter: 8px;
+
     /* chrome 条高度：与上面的控件高度解耦（条要容纳 1px 边框与内边距） */
     --qt-bar-title: 28px; /* 浮动窗标题栏 */
     --qt-bar-compact: 26px; /* PanelToolbar / dock 标签栏 */
@@ -433,6 +440,54 @@ textarea {
 .custom-scrollbar {
     scrollbar-width: thin;
     scrollbar-color: var(--qt-scrollbar-thumb, #555555) transparent;
+}
+
+/*
+ * 滚动让位：让滚动条拥有自己的位置，而不是紧贴内容。
+ *
+ * 【实测（本引擎：WebView2/Chromium + `scrollbar-width: thin`）】
+ *   - `overflow-y: auto` 且内容溢出时，滚动条**占 10px 布局宽**（并非覆盖式）；
+ *   - `scrollbar-gutter: stable` 在**不溢出时也预留**这 10px（实测 clientWidth
+ *     200 → 190），因此内容宽度不会在滚动条出现/消失时跳 10px；
+ *   - 全仓 51 个滚动容器里只有 2 个写了右侧留白 —— 其余容器的内容右缘直接贴着
+ *     滚动条，这正是用户报告的"右侧看上去很挤"。
+ *
+ * 【为什么既留 gutter 又给 padding】gutter 是滚动条自己的槽位（10px），padding 是
+ * 内容与槽位之间的呼吸（8px）。只做前者，内容仍紧贴滑块；只做后者，滚动条会画在
+ * padding 上但内容宽度仍会跳。
+ *
+ * 【为什么**不**接管 `overflow`】本类只负责让位，滚动轴由调用方自己的
+ * `overflow-y-auto` / `overflow-auto` 决定 —— 否则 `overflow-auto`（两轴）会被
+ * 悄悄收窄成只纵向可滚。两者是正交的，叠加即用。
+ *
+ * 【与 `.custom-scrollbar` 的分工】那条只负责配色（透明轨道），本类负责让位；两者可叠加。
+ */
+.hs-scroll-gutter {
+    scrollbar-gutter: stable;
+    padding-right: var(--qt-scrollbar-gutter);
+}
+
+/* 容器自身已有右侧留白（本来就与滚动条保持距离）：只预留槽位，不再叠加 padding。 */
+.hs-scroll-gutter-flush {
+    scrollbar-gutter: stable;
+}
+
+/*
+ * Radix `ScrollArea`：它**自绘滑块**（原生滚动条被隐藏），因此 `scrollbar-gutter`
+ * 对它无效 —— 滑块绝对定位在 root 的 padding box 右缘，给 root 留出右侧内边距，
+ * 滑块就落在那条带子里，内容自然让开。
+ */
+.hs-scroll-area {
+    padding-right: var(--qt-scrollbar-gutter);
+}
+
+/*
+ * Radix `ScrollArea`：它**自绘滑块**（原生滚动条被隐藏），因此 `scrollbar-gutter`
+ * 对它无效 —— 滑块绝对定位在 root 的 padding box 右缘，给 root 留出右侧内边距，
+ * 滑块就落在那条带子里，内容自然让开。
+ */
+.hs-scroll-area {
+    padding-right: var(--qt-scrollbar-gutter);
 }
 
 /*

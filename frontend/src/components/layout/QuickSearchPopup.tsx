@@ -465,7 +465,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                 {/* 候选列表 */}
                 <div
                     ref={listRef}
-                    className="flex-1 overflow-y-auto min-h-0"
+                    className="hs-scroll-gutter flex-1 overflow-y-auto min-h-0"
                     style={{ maxHeight: 340 }}
                 >
                     {noFolder ? (

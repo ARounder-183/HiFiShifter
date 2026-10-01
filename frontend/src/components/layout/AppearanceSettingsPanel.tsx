@@ -1000,7 +1000,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
             </div>
 
             {/* ═══════ 内容区 ═══════ */}
-            <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar px-3">
+            <div className="hs-scroll-gutter-flush min-h-0 flex-1 overflow-y-auto custom-scrollbar px-3">
                 <div className="pb-3">
                     {/* ═══════ Tab: 主题 ═══════ */}
                     {activeTab === "theme" && (
@@ -1420,7 +1420,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                          * 不同 —— 那种已按"外层不滚、内层滚"改掉（见
                                          * AppDialog 的滚动契约）。这里保留。
                                          */}
-                                        <div className="max-h-[320px] overflow-y-auto rounded border border-qt-border bg-qt-base p-1 custom-scrollbar">
+                                        <div className="hs-scroll-gutter max-h-[320px] overflow-y-auto rounded border border-qt-border bg-qt-base p-1 custom-scrollbar">
                                             {filteredFonts.length > 0 ? (
                                                 filteredFonts.map((f) => {
                                                     const isActive = extractFontFamilies(

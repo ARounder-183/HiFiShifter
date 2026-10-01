@@ -3535,7 +3535,7 @@ function AppInner() {
                  * 容器的 100%，又造出溢出。
                  */}
                 <div className="flex h-full min-h-0 flex-col pt-2">
-                    <div className="min-h-0 flex-1 overflow-auto rounded border border-qt-border bg-qt-base p-2 text-qt-xs">
+                    <div className="hs-scroll-gutter-flush min-h-0 flex-1 overflow-auto rounded border border-qt-border bg-qt-base p-2 text-qt-xs">
                         {(vocalShifterSkippedFilesDialog ?? []).map((file) => (
                             <div key={file} className="truncate" data-tooltip={file}>
                                 • {file}
@@ -3579,7 +3579,7 @@ function AppInner() {
                  * 容器的 100%，又造出溢出。
                  */}
                 <div className="flex h-full min-h-0 flex-col pt-2">
-                    <div className="min-h-0 flex-1 overflow-auto rounded border border-qt-border bg-qt-base p-2 text-qt-xs">
+                    <div className="hs-scroll-gutter-flush min-h-0 flex-1 overflow-auto rounded border border-qt-border bg-qt-base p-2 text-qt-xs">
                         {(reaperSkippedFilesDialog ?? []).map((file) => (
                             <div key={file} className="truncate" data-tooltip={file}>
                                 • {file}
@@ -3897,7 +3897,7 @@ function AppInner() {
                      * 也看不到。改为参与上面的 flex 列：`flex-1 min-h-0` 让列表吃
                      * 掉剩余高度，body 因此永不溢出，只剩一条滚动条。
                      */}
-                    <div className="mt-2 min-h-0 flex-1 overflow-auto rounded border border-qt-border bg-qt-base p-1">
+                    <div className="hs-scroll-gutter-flush mt-2 min-h-0 flex-1 overflow-auto rounded border border-qt-border bg-qt-base p-1">
                         <div className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1 text-qt-micro font-semibold text-qt-text-muted">
                             <div>{t("recapture_missing_media_col_file_status")}</div>
                             <div>{t("recapture_missing_media_col_file")}</div>

@@ -72,7 +72,7 @@ export function NotebookReadonlyPreview({
     return (
         <div
             ref={containerRef}
-            className="h-full min-w-0 flex-1 overflow-auto border-l border-qt-border bg-qt-base px-3 py-3"
+            className="hs-scroll-gutter-flush h-full min-w-0 flex-1 overflow-auto border-l border-qt-border bg-qt-base px-3 py-3"
         >
             <EditorContent editor={editor} />
         </div>

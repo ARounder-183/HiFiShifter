@@ -89,7 +89,10 @@ export const UndoHistoryPanel: React.FC = () => {
             onContextMenu={(event) => event.preventDefault()}
         >
             {/* 条目列表：最新在最上（与 REAPER 一致），当前状态高亮 */}
-            <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto py-0.5 custom-scrollbar">
+            <div
+                ref={listRef}
+                className="hs-scroll-gutter min-h-0 flex-1 overflow-y-auto py-0.5 custom-scrollbar"
+            >
                 {rows.map((row) => {
                     const isCurrent = row.index === s.position;
                     const isFuture = row.index > s.position;
