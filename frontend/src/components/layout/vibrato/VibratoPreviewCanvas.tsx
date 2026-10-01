@@ -267,19 +267,7 @@ export function VibratoPreviewCanvas({
                 ctx.globalAlpha = 1;
             }
 
-            // 套用前的原曲线：弱化的虚线，"颤音叠在哪条运动之上"一眼可见。
-            // 只在"套用到选区"预览里出现（管理器预览没有原曲线）。
-            const original = samples.original;
-            if (original && original.length >= 2) {
-                ctx.save();
-                ctx.strokeStyle = muted;
-                ctx.lineWidth = 1;
-                ctx.setLineDash([4, 3]);
-                drawPolyline(original, (i) => (i / (original.length - 1)) * width);
-                ctx.restore();
-            }
-
-            // 波形本体。
+            // 波形本体（相对它所围绕的那条曲线的偏移量）。
             ctx.strokeStyle = accent;
             ctx.lineWidth = 1.5;
             ctx.lineJoin = "round";

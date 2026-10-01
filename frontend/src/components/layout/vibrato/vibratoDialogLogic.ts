@@ -261,7 +261,12 @@ export const PREVIEW_DEFAULT: VibratoPreviewGeometry = {
 
 /** 预览采样结果，单位一律是 **cents**（与参数无关，便于画布定标）。 */
 export interface VibratoPreviewSamples {
-    /** 逐点波形（cents，围绕 0 摆动）。 */
+    /**
+     * 逐点波形（cents，**相对颤音所围绕的那条曲线**摆动）。
+     *
+     * 【为什么是偏移量而不是绝对音高】见 `buildAppliedPreview` 里那段注释：绝对音高
+     * 会把纵轴绑在"素材轮廓有多宽"上，而轮廓与颤音可以差两个数量级。
+     */
     wave: number[];
     /** 逐点包络上界（cents，恒非负）—— 渐入 / 渐强 / 渐出入画就靠它。 */
     envelope: number[];
@@ -273,13 +278,6 @@ export interface VibratoPreviewSamples {
      * （`previewScaleCents` / `fitPreviewRangeCents`）各自兜底，不必让读数替它们背锅。
      */
     peakCents: number;
-    /**
-     * 套用前的原曲线（cents，与 `wave` 同轴）。
-     *
-     * 仅"套用到选区"预览提供：管理器预览回答"波形长什么样"，这里回答
-     * "套到这段上长什么样"，两条线并置才看得出颤音叠在哪条运动之上。
-     */
-    original?: number[];
 }
 
 /**
@@ -316,23 +314,28 @@ export function buildVibratoPreview(
     return { wave, envelope, peakCents: peak };
 }
 
-/** "套用到选区"预览的采样结果：波形 + 原曲线 + 包络，全部同轴（cents）。 */
-export interface VibratoAppliedPreview extends VibratoPreviewSamples {
-    /** 套用前的原曲线（cents，已减去中心）。 */
-    original: number[];
-}
+/** "套用到选区"预览的采样结果：波形 + 包络，全部相对基线（cents）。 */
+export type VibratoAppliedPreview = VibratoPreviewSamples;
 
 /**
  * 生成"套用到选区"的预览采样。
  *
- * 【与管理器预览的区别】管理器预览拿 `buildVibratoPreview`（无原曲线、基线强制
- * `line`），回答"波形长什么样"；这里喂入选区的**真实帧值**，走同一条
- * `buildVibratoCurve`，回答"套到这段上长什么样" —— 原曲线相对基线的偏移、以及
- * 结果相对基线的偏移，两条线并置。
+ * 【与管理器预览的区别】管理器预览拿 `buildVibratoPreview`（无真实数据、基线强制
+ * `line`），回答"这个预设的波形长什么样"；这里喂入选区的**真实帧值**，走同一条
+ * `buildVibratoCurve`，回答"套到这段上，颤音会怎么走"。
  *
- * 【纵轴为什么按基线而不是按选区均值】见函数体内那段注释：按均值作图时纵轴必须
- * 容下整条音高轮廓，一段过渡斜坡就能把 40 分的颤音压到不足 2% 的画布高度。按基线
- * 作图后纵轴只跟颤音自己的幅度走，与素材轮廓多宽无关。
+ * 【只画"相对基线的偏移"，不画绝对音高】这是纵轴定标的关键，也是这个弹窗唯一
+ * 该回答的问题：
+ *
+ * - 画绝对音高时，纵轴必须容下整条音高轮廓。而轮廓与颤音可以差**两个数量级** ——
+ *   选一整句必然包含句首句尾的气口与跟踪器从无声区缓升出来的过渡帧（它们在值域
+ *   之内，因此属于音符段），一句 0→60 的缓升就把峰值撑到几千分，40 分的颤音只剩
+ *   1% 的画布高度。
+ * - 相对基线作图后，`结果 − 基线` = 偏置 + 颤音，幅度上界即包络 —— 纵轴**只跟
+ *   颤音自己的幅度走**，与素材轮廓多宽、基线模式是哪种都无关，切换预设也不会
+ *   重新缩放，因此可以横向比较不同预设。
+ * - 相对基线的**原曲线**（早先版本里那条虚线参考）刻意不再提供：它就是那个被
+ *   撑大的量，画出来只会把纵轴重新拉走。素材的绝对轮廓在钢琴卷帘里本来就看得见。
  *
  * @returns 没有可调制的音符段（音高全未检测 / 没有够长的音符）或原值不足两点时
  *          返回 `null`，由调用方显示占位提示。
@@ -382,51 +385,36 @@ export function buildAppliedPreview(args: {
 
     const toCents = (value: number) => paramUnitToDepth(value, args.param, args.range);
     /*
-     * 两条曲线都画成**相对基线的偏移**，而不是相对选区均值的绝对音高。
+     * 波形画成**相对基线的偏移**：`结果 − 基线` = 偏置 + 颤音。
      *
-     * 【为什么必须这样】纵轴是按峰值自适应的。若画绝对音高，纵轴就必须容下整条
-     * 音高轮廓 —— 而"轮廓有多宽"与"颤音有多深"是两个量级：一段 40→60 的过渡斜坡
-     * 会把纵轴撑到两千多分，40 分的颤音只剩不到 2% 的画布高度，用户根本看不出颤音
-     * 趋势（这正是要修的问题）。相对基线作图之后：
-     *
-     * - `existing` 基线（除「直线」外所有预设）下基线**就是**原曲线，于是虚线恒为 0，
-     *   实线就是颤音本身的偏移量，幅度上界即包络 —— 纵轴自动贴合颤音；
-     * - `line` / `hold*` / `average` 下，虚线显示原曲线偏离所选基线多少（那正是这类
-     *   预设会改动音高的量），实线 = 该偏离 + 颤音，两者同轴同零点，都不撒谎。
-     *
-     * 于是"能不能看清颤音"不再取决于素材的轮廓宽度，而只取决于颤音自己的幅度。
+     * 幅度上界即包络，于是纵轴只跟颤音自己的幅度走 —— 与素材轮廓多宽、基线模式是
+     * 哪种都无关。这正是"看不清颤音趋势"的根治点：画绝对音高时，纵轴得容下整条
+     * 轮廓（含气口与跟踪器从无声区缓升出来的过渡帧），一句 0→60 的缓升就能把
+     * 40 分的颤音压到 1% 的画布高度。
      */
     const baselineCents = (result.baseline ?? values).map(toCents);
-    const centsAt = (index: number, value: number) => toCents(value) - baselineCents[index];
-
+    const wave = result.dense.map((value, index) =>
+        plan.modulatable[index] ? toCents(value) - baselineCents[index] : Number.NaN,
+    );
     /*
      * 不受颤音影响的帧画成**断口**（NaN，画布抬笔）：它既不是一个音高，也不是
      * "停在中心"。让两种含义在图上可区分，用户才不会把"这里没数据 / 这里不加颤音"
      * 读成"这里被拉平了"。
      */
-    const original = values.map((value, index) =>
-        plan.modulatable[index] ? centsAt(index, value) : Number.NaN,
-    );
-    const wave = result.dense.map((value, index) =>
-        plan.modulatable[index] ? centsAt(index, value) : Number.NaN,
-    );
     const envelope = (result.envelope ?? new Array(values.length).fill(0)).map((value, index) =>
         plan.modulatable[index] ? Math.abs(value) : Number.NaN,
     );
 
     // 真实峰值（与 `buildVibratoPreview` 同一约定）：读数据此显示，尺度由调用方兜底。
-    // 断口不参与 —— 否则一个 NaN 就能把整条纵轴撑爆。
+    // 只统计**画出来的两条**，断口不参与 —— 否则一个 NaN 就能把整条纵轴撑爆。
     let peak = 0;
-    for (const value of original) {
-        if (Number.isFinite(value)) peak = Math.max(peak, Math.abs(value));
-    }
     for (const value of wave) {
         if (Number.isFinite(value)) peak = Math.max(peak, Math.abs(value));
     }
     for (const value of envelope) {
         if (Number.isFinite(value)) peak = Math.max(peak, Math.abs(value));
     }
-    return { wave, envelope, original, peakCents: peak };
+    return { wave, envelope, peakCents: peak };
 }
 
 /**

@@ -357,7 +357,7 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
         baseline: "existing",
     });
 
-    test("原曲线与结果同长，且都围绕中心（均值≈0）", () => {
+    test("波形与包络同长；波形横跨 0（是相对基线的偏移，不是绝对音高）", () => {
         const preview = buildAppliedPreview({
             preset,
             original: ramp,
@@ -365,27 +365,32 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             framePeriodMs: 5,
         });
         expect(preview).not.toBeNull();
-        expect(preview!.original.length).toBe(ramp.length);
         expect(preview!.wave.length).toBe(ramp.length);
-        const mean = preview!.original.reduce((sum, value) => sum + value, 0) / ramp.length;
-        expect(Math.abs(mean)).toBeLessThan(1e-6);
+        expect(preview!.envelope.length).toBe(ramp.length);
+        const finite = preview!.wave.filter(Number.isFinite);
+        const max = Math.max(...finite);
+        const min = Math.min(...finite);
+        // 素材在 MIDI 60 附近（6000 分），若画的是绝对音高，这两个值会是 6000 上下。
+        expect(min).toBeLessThan(0);
+        expect(max).toBeGreaterThan(0);
+        // 对称地围绕 0 摆动（整周期采样下正负峰值应当几乎相等）。
+        expect(Math.abs(max + min)).toBeLessThan(1);
     });
 
-    test("baseline existing：结果 = 原曲线 + 颤音，因此偏离原曲线的幅度约等于深度", () => {
+    test("baseline existing：波形的峰值就是深度", () => {
         const preview = buildAppliedPreview({
             preset,
             original: ramp,
             param: "pitch",
             framePeriodMs: 5,
         })!;
-        const deviation = preview.wave.map((value, i) => value - preview.original[i]);
-        const peak = Math.max(...deviation.map((value) => Math.abs(value)));
-        // 30 分深度：音高按分换算，偏离峰值应当在 30 附近（允许不规则度为 0 的解析值）。
+        const peak = Math.max(...preview.wave.filter(Number.isFinite).map(Math.abs));
+        // 30 分深度：音高按分换算，偏移峰值应当在 30 附近（不规则度为 0 的解析值）。
         expect(peak).toBeGreaterThan(28);
         expect(peak).toBeLessThan(32);
     });
 
-    test("深度为 0：结果与原曲线重合（直线预设不改动选区）", () => {
+    test("深度为 0：波形恒为 0（不改动音高）", () => {
         const flat = sanitizeVibratoPreset({ id: "custom_b", depthCents: 0, baseline: "existing" });
         const preview = buildAppliedPreview({
             preset: flat,
@@ -393,8 +398,8 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             param: "pitch",
             framePeriodMs: 5,
         })!;
-        for (let i = 0; i < ramp.length; i += 1) {
-            expect(preview.wave[i]).toBeCloseTo(preview.original[i], 6);
+        for (const value of preview.wave.filter(Number.isFinite)) {
+            expect(Math.abs(value)).toBeLessThan(1e-9);
         }
     });
 
@@ -434,8 +439,6 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             ...Array.from({ length: NOTE_LEN }, (_, i) => 60 + (i / (NOTE_LEN - 1)) * 4),
             ...new Array<number>(GAP).fill(0),
         ];
-        /** 音符段的代表音高（60..64 的中位数）。 */
-        const NOTE_PITCH = 62;
 
         const line = sanitizeVibratoPreset({
             id: "custom_line",
@@ -463,7 +466,7 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             expect(Math.abs(preview.wave[noteStart])).toBeLessThan(1000);
         });
 
-        test("不受颤音影响的帧画成断口（NaN），且不参与中心与峰值", () => {
+        test("不受颤音影响的帧画成断口（NaN），且不参与纵轴", () => {
             const preview = buildAppliedPreview({
                 preset: line,
                 original: withGaps,
@@ -473,15 +476,17 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             // 气口与边界过渡帧都要断开 —— 后者是"低而非零"，只判 == 0 会漏掉。
             for (let i = 0; i < noteStart; i += 1) {
                 expect(Number.isNaN(preview.wave[i])).toBe(true);
-                expect(Number.isNaN(preview.original[i])).toBe(true);
+                expect(Number.isNaN(preview.envelope[i])).toBe(true);
             }
             for (let i = noteEnd; i < withGaps.length; i += 1) {
                 expect(Number.isNaN(preview.wave[i])).toBe(true);
             }
-            // 中心只按音符帧求：60..64 半音 → 6200 分。若把哨兵 0 与那 5 帧低值也算
-            // 进去，中心会被拽下上千分，画出来的颤音直接出画。
-            expect(preview.original[noteStart]).toBeCloseTo(6000 - NOTE_PITCH * 100, 6);
-            expect(preview.peakCents).toBeLessThan(500);
+            // 音符帧有值：直线预设（深度 0）下结果就是那条线本身，波形恒为 0。
+            for (let i = noteStart; i < noteEnd; i += 1) {
+                expect(preview.wave[i]).toBeCloseTo(0, 6);
+            }
+            // 纵轴不会被气口与过渡帧撑大。
+            expect(preview.peakCents).toBeLessThan(1e-9);
         });
 
         test("不受颤音影响的帧，包络也是断口（不在气口上画出一条颤音带）", () => {
@@ -547,19 +552,25 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
                 param: "volume",
                 framePeriodMs: 5,
             })!;
-            for (const value of [...preview.wave, ...preview.original]) {
+            for (const value of preview.wave) {
                 expect(Number.isFinite(value)).toBe(true);
             }
         });
     });
 
     /*
-     * 纵轴定标：必须跟着**颤音自己的幅度**走，而不是跟着音高轮廓的宽度走。
+     * 纵轴定标：只能跟着**颤音自己的幅度**走，不能跟着音高轮廓的宽度走。
      *
-     * 【这条锁的是报告过的缺陷】纵轴按峰值自适应。旧实现画的是"相对选区均值的绝对
-     * 音高"，于是纵轴得容下整条音高轮廓 —— 一段 40→60 的过渡斜坡（跟踪器在浊清边界
-     * 的缓升）就把峰值撑到 1840 分，40 分的颤音只剩不到 2% 的画布高度，用户完全看不
-     * 出颤音趋势。改成"相对基线的偏移"作图后，峰值恒等于颤音幅度。
+     * 【这条锁的是报告过两次的缺陷】纵轴按峰值自适应，所以**凡是参与峰值的东西都会
+     * 决定纵轴**。两次都栽在这上面：
+     * 1. 早先画的是"相对选区均值的绝对音高"，纵轴得容下整条轮廓 —— 一段 40→60 的
+     *    过渡缓升（跟踪器在浊清边界的爬升）就把峰值撑到 1840 分；
+     * 2. 改成"相对基线的偏移"后，**参考线**（原曲线相对基线的偏移）仍在峰值里 ——
+     *    对 `line` / `hold*` / `average` 基线，素材可以离基线几千分（默认预设「直线」
+     *    正是 `line`），45 分的颤音只剩 1% 的画布高度。
+     *
+     * 现在参与峰值的只有画出来的颤音偏移与包络，两者上界都是深度 —— 于是纵轴恒等于
+     * 颤音幅度，与素材轮廓多宽、基线模式是哪种都无关。
      */
     describe("纵轴按颤音幅度定标", () => {
         const deep = sanitizeVibratoPreset({
@@ -608,18 +619,39 @@ describe("buildAppliedPreview（套用到选区的预览）", () => {
             expect(b.peakCents).toBeCloseTo(a.peakCents, 9);
         });
 
-        test("existing 基线就是原曲线本身：参考线恒为 0，实线即颤音偏移", () => {
+        test("existing 基线下波形即颤音偏移，峰值与纵轴读数一致", () => {
             const preview = buildAppliedPreview({
                 preset: deep,
                 original: rampedNote,
                 param: "pitch",
                 framePeriodMs: 5,
             })!;
-            for (const value of finite(preview.original)) {
-                expect(Math.abs(value)).toBeLessThan(1e-9);
-            }
             const peak = Math.max(...finite(preview.wave).map(Math.abs));
             expect(peak).toBeCloseTo(preview.peakCents, 9);
+        });
+
+        /*
+         * 默认预设就是「直线」（列表首位），它的基线是 `line`：一条从首音符到末音符
+         * 的直线。选区里那段 0→60 的过渡缓升离这条线可以有上千分 —— 旧实现把这个
+         * 量算进峰值，45 分的颤音只剩 1% 的画布高度。纵轴只能跟颤音自己的幅度走。
+         */
+        test("line 基线（默认「直线」预设）下，素材偏离基线也不影响纵轴", () => {
+            const lineWithDepth = sanitizeVibratoPreset({
+                id: "custom_line_depth",
+                depthCents: 45,
+                rateHz: 5.5,
+                attackMs: 0,
+                releaseMs: 0,
+                baseline: "line",
+            });
+            const preview = buildAppliedPreview({
+                preset: lineWithDepth,
+                original: rampedNote,
+                param: "pitch",
+                framePeriodMs: 5,
+            })!;
+            expect(preview.peakCents).toBeGreaterThan(43);
+            expect(preview.peakCents).toBeLessThan(47);
         });
     });
 
