@@ -11,7 +11,11 @@ import { PlayIcon, StopIcon } from "@radix-ui/react-icons";
 
 import { AppListRow, type AppListRowDensity } from "../../../ui";
 import type { FileEntry } from "../../../services/api/fileBrowser";
-import { isAudioFile, isMidiFile, isProjectFile } from "../../../features/fileBrowser/fileKinds";
+import {
+    isAudioFile,
+    isDraggableFile,
+    isProjectFile,
+} from "../../../features/fileBrowser/fileKinds";
 import { FileKindIcon } from "./fileIcons";
 
 export interface FileEntryRowProps {
@@ -61,6 +65,16 @@ export interface FileEntryRowProps {
      * 等高，换算精确；顺带让列表纵向对齐。
      */
     reserveSecondLine?: boolean;
+    /**
+     * 该行能否作为拖拽源。
+     *
+     * 【为什么由面板决定】"此电脑"层列出的每一行都是盘符（`isDir: true`、
+     * `path: "C:\"`）。目录如今可拖（拖入时间轴 = 目录导入），若在这一层也放行，
+     * 用户就能把整个盘拖进工程 —— 递归开启时等于全盘扫描。面板已有
+     * `isComputerLevel` 判据，传 `false` 即可。后端另有一道 `drive_root` 拒绝，
+     * 两道防线：UI 不提供，后端不接受。
+     */
+    allowDrag?: boolean;
 }
 
 export const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
@@ -85,10 +99,12 @@ export const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
         matchReason,
         detailText,
         reserveSecondLine = false,
+        allowDrag = true,
     }) => {
         const isAudio = isAudioFile(entry);
-        // 可拖拽 = 音频/视频 + MIDI + 工程文件（与时间轴、参数编辑器的拖放准入一致）。
-        const isDraggable = isAudio || isMidiFile(entry) || isProjectFile(entry);
+        // 可拖拽 = 媒体文件 + MIDI + 工程文件（与时间轴、参数编辑器的拖放准入一致）
+        // + 目录（拖入时间轴 = 目录导入，见 FolderImportDialog）。
+        const isDraggable = allowDrag && (isDraggableFile(entry) || entry.isDir);
 
         return (
             <AppListRow
@@ -124,7 +140,11 @@ export const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                     )}
                 </span>
 
-                {/* 文件名 + 路径提示 */}
+                {/* 文件名 + 路径提示。
+                    目录名后**不加**尾随 `/`：`isDir` 已由图标、foldersFirst 排序与
+                    属性对话框的类型行表达，再加一个斜杠是第四个冗余通道，而且它是
+                    唯一会污染别处的 —— tooltip、正则过滤、type-ahead、复制文件名
+                    四处消费的都是裸 `name`，只有渲染带斜杠，于是「名字」有了两种取值。 */}
                 <div className="flex flex-col min-w-0 flex-1">
                     <span
                         className={`hs-type-label ${
@@ -133,7 +153,6 @@ export const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                         data-tooltip={entry.name}
                     >
                         {entry.name}
-                        {entry.isDir ? "/" : ""}
                     </span>
                     {(pathHint || matchReason || reserveSecondLine) && (
                         <span

@@ -350,8 +350,9 @@ fn list_logical_drives() -> Result<Vec<FileEntry>, String> {
             .map(|p| start + p)
             .unwrap_or(len);
         let root: String = String::from_utf16_lossy(&buffer[start..end]);
-        // 行展示走 `{name}{isDir ? "/" : ""}`，用 `C:` 作名字得到「C:/」；
-        // path 必须带反斜杠，`Path::is_dir()` 对裸 `C:` 的解释依赖进程当前目录。
+        // `name` 去掉尾随反斜杠得到 `C:`，行上直接显示为「C:」（与资源管理器的
+        // 「此电脑」一致）；`path` 必须保留反斜杠 —— `Path::is_dir()` 对裸 `C:`
+        // 的解释依赖进程当前目录，去掉就解析不到盘根。
         let path = root;
         entries.push(FileEntry {
             name: path.trim_end_matches('\\').to_string(),

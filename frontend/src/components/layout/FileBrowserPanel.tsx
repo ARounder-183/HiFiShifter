@@ -1913,6 +1913,7 @@ export const FileBrowserPanel: React.FC = () => {
                                                     matchReason={formatMatchReason(entry)}
                                                     detailText={detailTextOf(entry)}
                                                     reserveSecondLine={reserveSecondLine}
+                                                    allowDrag={!isComputerLevel}
                                                 />
                                             );
                                         })}
