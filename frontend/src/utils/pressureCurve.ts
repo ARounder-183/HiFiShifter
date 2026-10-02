@@ -110,7 +110,9 @@ export function pressureCeiling(
     config: PressureConfig = DEFAULT_PRESSURE_CONFIG,
 ): number {
     const observed = calibration.observedMax * 1.05;
-    const configured = Number.isFinite(config.ceiling) ? config.ceiling : DEFAULT_PRESSURE_CONFIG.ceiling;
+    const configured = Number.isFinite(config.ceiling)
+        ? config.ceiling
+        : DEFAULT_PRESSURE_CONFIG.ceiling;
     return Math.max(configured, observed);
 }
 
@@ -141,11 +143,16 @@ export function pressureToGain(
     const deadZone = Number.isFinite(config.deadZone)
         ? config.deadZone
         : DEFAULT_PRESSURE_CONFIG.deadZone;
-    const minGain = Number.isFinite(config.minGain) ? config.minGain : DEFAULT_PRESSURE_CONFIG.minGain;
-    const maxGain = Number.isFinite(config.maxGain) ? config.maxGain : DEFAULT_PRESSURE_CONFIG.maxGain;
-    const gamma = Number.isFinite(config.gamma) && config.gamma > 0
-        ? config.gamma
-        : DEFAULT_PRESSURE_CONFIG.gamma;
+    const minGain = Number.isFinite(config.minGain)
+        ? config.minGain
+        : DEFAULT_PRESSURE_CONFIG.minGain;
+    const maxGain = Number.isFinite(config.maxGain)
+        ? config.maxGain
+        : DEFAULT_PRESSURE_CONFIG.maxGain;
+    const gamma =
+        Number.isFinite(config.gamma) && config.gamma > 0
+            ? config.gamma
+            : DEFAULT_PRESSURE_CONFIG.gamma;
     const ceiling = calibration
         ? pressureCeiling(calibration, config)
         : Number.isFinite(config.ceiling)
@@ -191,9 +198,10 @@ export function pressureToWeight(
     const deadZone = Number.isFinite(config.deadZone)
         ? config.deadZone
         : DEFAULT_PRESSURE_CONFIG.deadZone;
-    const gamma = Number.isFinite(config.gamma) && config.gamma > 0
-        ? config.gamma
-        : DEFAULT_PRESSURE_CONFIG.gamma;
+    const gamma =
+        Number.isFinite(config.gamma) && config.gamma > 0
+            ? config.gamma
+            : DEFAULT_PRESSURE_CONFIG.gamma;
     const ceiling = calibration
         ? pressureCeiling(calibration, config)
         : Number.isFinite(config.ceiling)
@@ -210,6 +218,38 @@ export function pressureToWeight(
 }
 
 /**
+ * 一段手势里压感的极值分布（增量维护，O(1) 每次采样）。
+ *
+ * 【为什么不用数组】手势可能持续十几秒、采样 250Hz，那就是几千个样本；每次判定
+ * 都扫一遍整段序列是 O(n²)。这里只记极值与个数，判定等价而开销恒定。
+ */
+export interface PressureSpread {
+    count: number;
+    min: number;
+    max: number;
+}
+
+/** 新建一份分布。 */
+export function createPressureSpread(): PressureSpread {
+    return { count: 0, min: Number.POSITIVE_INFINITY, max: Number.NEGATIVE_INFINITY };
+}
+
+/** 记入一个采样（非有限值忽略）。 */
+export function observePressureSpread(spread: PressureSpread, raw: number): void {
+    if (!Number.isFinite(raw)) return;
+    spread.count += 1;
+    if (raw < spread.min) spread.min = raw;
+    if (raw > spread.max) spread.max = raw;
+}
+
+/** 该分布是否"毫无变化"（样本不足 2 个时按"没有变化"处理）。 */
+export function spreadLooksConstant(spread: PressureSpread, epsilon = 1e-3): boolean {
+    if (spread.count < 2) return true;
+    if (!Number.isFinite(spread.min) || !Number.isFinite(spread.max)) return true;
+    return spread.max - spread.min <= epsilon;
+}
+
+/**
  * 一段手势的压感采样是否"毫无变化"。
  *
  * 【为什么需要】某些设备 / 驱动会上报恒定压力（恒 0、恒 1、或恒某个常数）。
@@ -217,18 +257,14 @@ export function pressureToWeight(
  * 莫名其妙地慢 / 快"，而且完全不知道为什么。判定为常数后调用方按 `1` 处理，
  * 等价于该设备没有压感通道。
  *
+ * 需要逐次判定时请改用 `createPressureSpread` / `observePressureSpread` /
+ * `spreadLooksConstant`：本函数会遍历整段序列，只适合一次性查询。
+ *
  * @param samples 本段手势观察到的原始压力序列。
  * @param epsilon 视为"没有变化"的阈值。
  */
 export function pressureLooksConstant(samples: readonly number[], epsilon = 1e-3): boolean {
-    if (samples.length < 2) return true;
-    let min = Number.POSITIVE_INFINITY;
-    let max = Number.NEGATIVE_INFINITY;
-    for (const sample of samples) {
-        if (!Number.isFinite(sample)) continue;
-        if (sample < min) min = sample;
-        if (sample > max) max = sample;
-    }
-    if (!Number.isFinite(min) || !Number.isFinite(max)) return true;
-    return max - min <= epsilon;
+    const spread = createPressureSpread();
+    for (const sample of samples) observePressureSpread(spread, sample);
+    return spreadLooksConstant(spread, epsilon);
 }

@@ -114,11 +114,7 @@ export function createPinchStepState(): PinchStepState {
  * 设计的。触控板捏合吐出的是**一串**连续的小 delta，每个都 `max(1, …)` 会让
  * 深度/缩放以事件频率飞走。累积到满一格才走一步，与滚轮同速。
  */
-export function accumulatePinchSteps(
-    state: PinchStepState,
-    delta: number,
-    now: number,
-): number {
+export function accumulatePinchSteps(state: PinchStepState, delta: number, now: number): number {
     if (!Number.isFinite(delta)) return 0;
     if (!Number.isFinite(now)) now = state.lastAt;
     if (now - state.lastAt > PINCH_GESTURE_GAP_MS) {

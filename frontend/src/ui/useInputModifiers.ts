@@ -34,12 +34,15 @@ import {
 } from "../utils/inputProfile";
 import {
     createPressureCalibration,
+    createPressureSpread,
     observePressure,
-    pressureLooksConstant,
+    observePressureSpread,
     pressureToGain,
     pressureToWeight,
+    spreadLooksConstant,
     type PressureCalibration,
     type PressureConfig,
+    type PressureSpread,
 } from "../utils/pressureCurve";
 
 /** 倍率计算所需的指针事件字段（原生与 React 事件都满足）。 */
@@ -137,22 +140,49 @@ export function useInputModifiers(): InputGainController {
      * 触发一次渲染 —— 正是本方案要消除的那类开销。
      */
     const calibrationRef = useRef<PressureCalibration>(createPressureCalibration());
-    const samplesRef = useRef<number[]>([]);
+    /** 本段手势的压力极值分布（增量维护，判定"是否恒定"用）。 */
+    const spreadRef = useRef<PressureSpread>(createPressureSpread());
     /** 该设备是否仍然可信地提供压感（恒定压力会被判为不可信）。 */
     const trustPressureRef = useRef(true);
 
     return useMemo<InputGainController>(() => {
         const reset = () => {
             calibrationRef.current = createPressureCalibration();
-            samplesRef.current = [];
+            spreadRef.current = createPressureSpread();
             trustPressureRef.current = true;
         };
 
-        const gainFor = (
-            event: InputGainEvent,
-            travelledPx: number,
-            deltaPx: number,
-        ): number => {
+        /**
+         * 记录一次压力采样并判定该设备是否可信。
+         *
+         * 【为什么抽出来】拖拽倍率与画笔权重都要做同一件事：喂样本、抬标定上界、
+         * 在"恒定压力"出现后停止相信它。分开写两遍必然有一遍漏掉某个环节。
+         *
+         * @returns 是否应当**采用**压力（false = 该设备没在报压感，按 1 处理）。
+         */
+        const samplePressure = (event: InputGainEvent, profile: InputProfile): boolean => {
+            const current = settingsRef.current;
+            if (!current.pressureEnabled || !profile.hasPressure) return false;
+            if (!trustPressureRef.current) return false;
+            const raw = typeof event.pressure === "number" ? event.pressure : 0;
+            observePressureSpread(spreadRef.current, raw);
+            observePressure(calibrationRef.current, raw);
+            if (
+                spreadRef.current.count >= CONSTANT_PRESSURE_SAMPLE_LIMIT &&
+                spreadLooksConstant(spreadRef.current)
+            ) {
+                /*
+                 * 恒定压力 = 这台设备根本没在报压感（或驱动被禁用）。继续按它映射
+                 * 会把整段手势钉在一个非 1 的倍率上，用户只觉得"这次拖得莫名其妙
+                 * 地慢/快"。本段余下按 1 处理。
+                 */
+                trustPressureRef.current = false;
+                return false;
+            }
+            return true;
+        };
+
+        const gainFor = (event: InputGainEvent, travelledPx: number, deltaPx: number): number => {
             const current = settingsRef.current;
             const profile: InputProfile = profileForDeclared(current.device, event);
 
@@ -185,37 +215,6 @@ export function useInputModifiers(): InputGainController {
         ) => {
             const travelled = Math.hypot(nextX, nextY);
             return advanceAxisGain2D(state, nextX, nextY, gainFor(event, travelled, deltaPx));
-        };
-
-        /**
-         * 记录一次压力采样并判定该设备是否可信。
-         *
-         * 【为什么抽出来】拖拽倍率与画笔权重都要做同一件事：喂样本、抬标定上界、
-         * 在"恒定压力"出现后停止相信它。分开写两遍必然有一遍漏掉某个环节。
-         *
-         * @returns 是否应当**采用**压力（false = 该设备没在报压感，按 1 处理）。
-         */
-        const samplePressure = (event: InputGainEvent, profile: InputProfile): boolean => {
-            const current = settingsRef.current;
-            if (!current.pressureEnabled || !profile.hasPressure) return false;
-            if (!trustPressureRef.current) return false;
-            const raw = typeof event.pressure === "number" ? event.pressure : 0;
-            const samples = samplesRef.current;
-            samples.push(raw);
-            observePressure(calibrationRef.current, raw);
-            if (
-                samples.length >= CONSTANT_PRESSURE_SAMPLE_LIMIT &&
-                pressureLooksConstant(samples)
-            ) {
-                /*
-                 * 恒定压力 = 这台设备根本没在报压感（或驱动被禁用）。继续按它映射
-                 * 会把整段手势钉在一个非 1 的倍率上，用户只觉得"这次拖得莫名其妙
-                 * 地慢/快"。本段余下按 1 处理。
-                 */
-                trustPressureRef.current = false;
-                return false;
-            }
-            return true;
         };
 
         const paintWeightFor = (event: InputGainEvent): number => {

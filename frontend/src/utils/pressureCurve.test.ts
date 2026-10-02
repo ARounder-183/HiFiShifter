@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
     createPressureCalibration,
+    createPressureSpread,
+    observePressureSpread,
+    spreadLooksConstant,
     DEFAULT_PRESSURE_CONFIG,
     observePressure,
     pressureCeiling,
@@ -165,5 +168,50 @@ describe("pressureLooksConstant", () => {
     it("ignores non-finite samples when judging", () => {
         expect(pressureLooksConstant([0.5, Number.NaN, 0.5])).toBe(true);
         expect(pressureLooksConstant([Number.NaN, Number.NaN])).toBe(true);
+    });
+});
+
+/*
+ * 增量极值分布：与一次性的数组版本必须给出同一个判定。
+ *
+ * 【为什么要有两套】手势可能持续十几秒、采样 250Hz（几千个样本），每次都扫整段
+ * 序列是 O(n²)。hook 里用增量版，数组版留给一次性查询与测试 —— 两者若判定不一致，
+ * "这台设备到底算不算在报压感"就会在两条路径上给出不同答案。
+ */
+describe("PressureSpread", () => {
+    it("agrees with the array version on every case", () => {
+        const cases: number[][] = [
+            [],
+            [0.5],
+            [0.5, 0.5, 0.5],
+            [0, 0, 0],
+            [1, 1, 1, 1],
+            [0.1, 0.4, 0.9, 0.3],
+            [0.5, Number.NaN, 0.5],
+            [Number.NaN, Number.NaN],
+        ];
+        for (const samples of cases) {
+            const spread = createPressureSpread();
+            for (const sample of samples) observePressureSpread(spread, sample);
+            expect(spreadLooksConstant(spread)).toBe(pressureLooksConstant(samples));
+        }
+    });
+
+    it("tracks the extremes and the count", () => {
+        const spread = createPressureSpread();
+        observePressureSpread(spread, 0.7);
+        observePressureSpread(spread, 0.2);
+        observePressureSpread(spread, 0.5);
+        expect(spread.count).toBe(3);
+        expect(spread.min).toBe(0.2);
+        expect(spread.max).toBe(0.7);
+    });
+
+    it("ignores non-finite samples without counting them", () => {
+        const spread = createPressureSpread();
+        observePressureSpread(spread, Number.NaN);
+        observePressureSpread(spread, Number.POSITIVE_INFINITY);
+        expect(spread.count).toBe(0);
+        expect(spreadLooksConstant(spread)).toBe(true);
     });
 });

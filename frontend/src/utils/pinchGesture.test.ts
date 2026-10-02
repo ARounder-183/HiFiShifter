@@ -29,12 +29,12 @@ describe("pinchDeltaFromWheel", () => {
 
     it("normalizes line and page delta modes", () => {
         // deltaMode 1 = 行（16px/行），2 = 页（400px/页），与 normalizeWheel 同约定。
-        expect(pinchDeltaFromWheel({ deltaY: -3, deltaMode: 1, ctrlKey: true, metaKey: false })).toBe(
-            48,
-        );
-        expect(pinchDeltaFromWheel({ deltaY: -1, deltaMode: 2, ctrlKey: true, metaKey: false })).toBe(
-            400,
-        );
+        expect(
+            pinchDeltaFromWheel({ deltaY: -3, deltaMode: 1, ctrlKey: true, metaKey: false }),
+        ).toBe(48);
+        expect(
+            pinchDeltaFromWheel({ deltaY: -1, deltaMode: 2, ctrlKey: true, metaKey: false }),
+        ).toBe(400);
     });
 
     it("ignores zero and non-finite deltas", () => {

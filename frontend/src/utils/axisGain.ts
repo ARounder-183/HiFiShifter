@@ -42,11 +42,7 @@ export function createAxisGainState(): AxisGainState {
  * @param nextRaw 本帧的**原始累计**位移（相对手势起点）。
  * @param gain 本帧的倍率；非有限或非正值按 `1` 处理（宁可不动，不可反向）。
  */
-export function advanceAxisGain(
-    state: AxisGainState,
-    nextRaw: number,
-    gain: number,
-): number {
+export function advanceAxisGain(state: AxisGainState, nextRaw: number, gain: number): number {
     if (!Number.isFinite(nextRaw)) return state.adjusted;
     const safeGain = Number.isFinite(gain) && gain > 0 ? gain : 1;
     const delta = nextRaw - state.raw;
