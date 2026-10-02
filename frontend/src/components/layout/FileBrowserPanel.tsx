@@ -757,6 +757,13 @@ export const FileBrowserPanel: React.FC = () => {
                     setEditing({ kind: "newFolder" });
                     return;
                 }
+                // Ctrl+L：把路径栏切成可编辑并聚焦（资源管理器 / 访达的"定位到"）。
+                // 「计算机」虚拟层没有可编辑的真实路径，跳过。
+                if (key === "l" && fb.currentPath && !isComputerLevel) {
+                    event.preventDefault();
+                    setPathDraft(fb.currentPath);
+                    return;
+                }
                 return;
             }
             if (event.altKey || mod) return;
@@ -818,6 +825,8 @@ export const FileBrowserPanel: React.FC = () => {
             entryNames,
             selectedPaths,
             isComputerLevel,
+            // Ctrl+L 要读当前路径：漏了它，回调会捕获到过期的那一条。
+            fb.currentPath,
             focusRow,
             goBack,
             goForward,
@@ -1685,6 +1694,22 @@ export const FileBrowserPanel: React.FC = () => {
                  */
                 tabIndex={showEntries ? -1 : undefined}
                 onKeyDown={showEntries ? handleListKeyDown : undefined}
+                /*
+                 * 声明"本表面自己实现输入式快速跳转"：全局快捷键分发器据此让出
+                 * 未修饰的可打印字符与 Enter。否则打字会被 `d`（参数拖拽方向）、
+                 * `s`（分割片段）、`k`（节拍器）这类单键全局绑定先截走，Enter 也会
+                 * 去停播放而不是打开文件夹 —— 因为分发器在 window 捕获阶段就
+                 * `stopPropagation()` 了。
+                 * 见 `features/keybindings/useKeybindings.ts` 的 TYPEAHEAD_OWNER_SELECTOR。
+                 */
+                data-hs-typeahead="1"
+                /*
+                 * 登记为"活动编辑表面"：分发器除了看按键落在哪，还要确认**用户此刻
+                 * 就在这个表面里**。时间轴 / 参数编辑器刻意保留 DOM 焦点，点击它们之后
+                 * 焦点会滞留在文件列表的某一行上 —— 只按焦点判断会把时间轴的按键抢过来。
+                 * 见 `features/uiFocus/focusSurface.ts`。
+                 */
+                data-hs-surface="fileBrowser"
             >
                 <div
                     className="py-1"
