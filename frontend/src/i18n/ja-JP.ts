@@ -1413,6 +1413,7 @@ export const jaJP = {
 
     // ── 検索マッチング（拼音 / ローマ字 / 韓国語初声）──
     search_match_mode: "マッチ方法",
+    search_right_click_hint: "右クリックで詳細オプション",
     search_mode_off: "オフ（文字列のみ）",
     search_mode_smart: "スマート（拼音・ローマ字対応）",
     search_mode_fuzzy: "あいまい（文字飛ばし対応）",

@@ -1360,6 +1360,7 @@ export const zhCN = {
 
     // ── 搜索匹配（拼音 / 罗马音 / 韩文初声）──
     search_match_mode: "匹配方式",
+    search_right_click_hint: "右键查看更多选项",
     search_mode_off: "关闭（仅字面匹配）",
     search_mode_smart: "智能（含拼音/罗马音）",
     search_mode_fuzzy: "模糊（含跳字匹配）",

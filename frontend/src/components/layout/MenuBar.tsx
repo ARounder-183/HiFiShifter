@@ -23,6 +23,7 @@ import {
     setOrtDeviceId,
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
+    setSearchSettingsDialogOpen,
     toggleAutoBackgroundRender,
     toggleShowAllTakes,
     toggleSyncEditsAcrossTakes,
@@ -150,6 +151,7 @@ const selectMenuBarSession = (state: RootState) => {
         primaryTimeUnit: session.primaryTimeUnit,
         project: session.project,
         projectSec: session.projectSec,
+        searchSettingsDialogOpen: session.searchSettingsDialogOpen,
         secondaryTimeUnit: session.secondaryTimeUnit,
         selectedClipId: session.selectedClipId,
         selectedTrackId: session.selectedTrackId,
@@ -206,7 +208,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     /** 清空波形缓存确认框。缓存重建代价高，且下拉菜单关闭即卸载，故由常驻菜单栏托管。 */
     const [waveformCacheConfirmOpen, setWaveformCacheConfirmOpen] = useState(false);
     const [channelImportDialogOpen, setChannelImportDialogOpen] = useState(false);
-    const [searchSettingsOpen, setSearchSettingsOpen] = useState(false);
     const [dmlAdapters, setDmlAdapters] = useState<
         { deviceId: number; name: string; memoryMb: number }[]
     >([]);
@@ -1254,7 +1255,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                     {/* Search matching settings — 作用于全部搜索面，因此与
                         吸附/网格同级，而不是塞进某个面板自己的设置页。 */}
-                    <DropdownMenu.Item onSelect={() => setSearchSettingsOpen(true)}>
+                    <DropdownMenu.Item onSelect={() => dispatch(setSearchSettingsDialogOpen(true))}>
                         {tf("search_settings_title")}
                     </DropdownMenu.Item>
 
@@ -1377,7 +1378,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onSettingsSaved={onAutoBackupSettingsSaved}
             />
 
-            <SearchSettingsDialog open={searchSettingsOpen} onOpenChange={setSearchSettingsOpen} />
+            <SearchSettingsDialog
+                open={s.searchSettingsDialogOpen}
+                onOpenChange={(open) => dispatch(setSearchSettingsDialogOpen(open))}
+            />
 
             <ChannelImportDialog
                 open={channelImportDialogOpen}

@@ -19,6 +19,7 @@ import { importAudioAtPosition } from "../../features/session/thunks/importThunk
 import {
     persistUiSettings,
     setSearchSettings,
+    setSearchSettingsDialogOpen,
     toggleQuickSearchAutoNormalize,
 } from "../../features/session/sessionSlice";
 import type { FileEntry } from "../../services/api/fileBrowser";
@@ -477,6 +478,10 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                             focusSearchInput();
                         }}
                         regexActive={regexEnabled}
+                        onOpenSettings={() => {
+                            onClose();
+                            dispatch(setSearchSettingsDialogOpen(true));
+                        }}
                     />
                     {/* 排序 */}
                     <AppSelect

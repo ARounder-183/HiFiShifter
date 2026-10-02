@@ -1488,6 +1488,7 @@ export const koKR = {
 
     // ── 검색 일치(병음 / 로마자 / 한국어 초성) ──
     search_match_mode: "일치 방식",
+    search_right_click_hint: "오른쪽 클릭으로 추가 옵션",
     search_mode_off: "끄기(문자열만)",
     search_mode_smart: "스마트(병음·로마자 포함)",
     search_mode_fuzzy: "퍼지(건너뛰기 허용)",

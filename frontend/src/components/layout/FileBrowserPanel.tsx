@@ -28,7 +28,11 @@ import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
 import { searchOptionsPayload } from "../../features/search/searchSettings";
 import { SearchTranslitToggle } from "./search/SearchTranslitToggle";
 import { matchReasonOf } from "./search/matchReason";
-import { persistUiSettings, setSearchSettings } from "../../features/session/sessionSlice";
+import {
+    persistUiSettings,
+    setSearchSettings,
+    setSearchSettingsDialogOpen,
+} from "../../features/session/sessionSlice";
 import { PanelToolbar, PanelToolbarButton } from "./shared/PanelToolbar";
 import { fileBrowserApi, type FileEntry } from "../../services/api/fileBrowser";
 import {
@@ -869,6 +873,7 @@ export const FileBrowserPanel: React.FC = () => {
                             void dispatch(persistUiSettings());
                         }}
                         regexActive={fb.regexEnabled}
+                        onOpenSettings={() => dispatch(setSearchSettingsDialogOpen(true))}
                     />
                     <AppIconButton
                         active={fb.audioOnly}

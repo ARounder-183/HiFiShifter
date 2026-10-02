@@ -7,7 +7,7 @@
  *   2. 点击就是开/关，且关掉之后 `mode` 不被清掉。
  */
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -20,7 +20,15 @@ import {
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-function mount(settings: Partial<SearchSettings>, regexActive = false) {
+// 每个用例都往 body 里挂一个新的根，不清掉的话上一次留下的菜单会先被查到。
+beforeEach(() => {
+    document.body.replaceChildren();
+});
+
+function mount(
+    settings: Partial<SearchSettings>,
+    options: { regexActive?: boolean; onOpenSettings?: () => void } = {},
+) {
     const onChange = vi.fn();
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -31,14 +39,35 @@ function mount(settings: Partial<SearchSettings>, regexActive = false) {
                 <SearchTranslitToggle
                     settings={{ ...DEFAULT_SEARCH_SETTINGS, ...settings }}
                     onChange={onChange}
-                    regexActive={regexActive}
+                    regexActive={options.regexActive ?? false}
+                    onOpenSettings={options.onOpenSettings}
                 />
             </I18nProvider>,
         );
     });
     const button = container.querySelector<HTMLButtonElement>(".search-translit-toggle");
     expect(button, "开关按钮未渲染").not.toBeNull();
-    return { button: button!, onChange, root };
+
+    /** 在按钮上右键，返回渲染出来的菜单项（按可见文本）。 */
+    const openMenu = () => {
+        act(() => {
+            button!.dispatchEvent(
+                new MouseEvent("contextmenu", { bubbles: true, clientX: 40, clientY: 40 }),
+            );
+        });
+        // 只在本次挂载的容器里找：菜单不是 portal，就在按钮旁边。
+        const menu = container.querySelector('[data-hs-context-menu="1"]');
+        expect(menu, "右键未打开菜单").not.toBeNull();
+        const items = Array.from(menu!.querySelectorAll<HTMLButtonElement>("button"));
+        const byLabel = (label: string) => {
+            const found = items.find((item) => (item.textContent ?? "").includes(label));
+            expect(found, `菜单里没有「${label}」`).not.toBeUndefined();
+            return found!;
+        };
+        return { menu: menu!, items, byLabel };
+    };
+
+    return { button: button!, onChange, root, openMenu };
 }
 
 describe("SearchTranslitToggle", () => {
@@ -69,7 +98,9 @@ describe("SearchTranslitToggle", () => {
     it("激活态直接反映设置，不被正则模式改写", () => {
         expect(mount({ translit: true }).button.getAttribute("aria-pressed")).toBe("true");
         // 正则开着时它仍然显示「开」：点它切换的确实是那个设置，显示成「关」会是假话。
-        expect(mount({ translit: true }, true).button.getAttribute("aria-pressed")).toBe("true");
+        expect(
+            mount({ translit: true }, { regexActive: true }).button.getAttribute("aria-pressed"),
+        ).toBe("true");
         expect(mount({ translit: false }).button.getAttribute("aria-pressed")).toBeNull();
     });
 
@@ -85,8 +116,68 @@ describe("SearchTranslitToggle", () => {
         );
     });
 
+    it("悬停提示告诉用户右键还有更多选项（否则右键菜单无从发现）", () => {
+        expect(mount({}).button.dataset.tooltip).toContain("Right-click for more options");
+    });
+
+    it("右键打开完整菜单：三档宽严 + 三个子开关 + 匹配原因", () => {
+        const mounted = mount({ translit: true, mode: "smart" });
+        const { byLabel } = mounted.openMenu();
+        byLabel("Off (literal only)");
+        byLabel("Smart (pinyin and romaji)");
+        byLabel("Fuzzy (allows skipped characters)");
+        byLabel("Heteronyms");
+        byLabel("Japanese long vowels");
+        byLabel("Korean choseong");
+        byLabel("Show why a result matched");
+    });
+
+    it("右键菜单里选档位走的是同一套补丁规则", () => {
+        const fuzzy = mount({ translit: true, mode: "smart" });
+        // 注意：`openMenu()` 自带 `act`，必须在它**外面**再开一层 act 才点得到 ——
+        // 套在里面时 React 还没把菜单刷进 DOM。
+        const fuzzyItems = fuzzy.openMenu();
+        act(() => {
+            fuzzyItems.byLabel("Fuzzy (allows skipped characters)").click();
+        });
+        expect(fuzzy.onChange).toHaveBeenCalledWith({ translit: true, mode: "fuzzy" });
+
+        const off = mount({ translit: true, mode: "smart" });
+        const offItems = off.openMenu();
+        act(() => {
+            offItems.byLabel("Off (literal only)").click();
+        });
+        // 选「关闭」同样只关总开关、保留 mode。
+        expect(off.onChange).toHaveBeenCalledWith({ translit: false });
+    });
+
+    it("右键菜单里切换子开关", () => {
+        const mounted = mount({ translit: true, heteronym: true });
+        const { byLabel } = mounted.openMenu();
+        act(() => {
+            byLabel("Heteronyms").click();
+        });
+        expect(mounted.onChange).toHaveBeenCalledWith({ heteronym: false });
+    });
+
+    it("右键菜单里可以进设置（传了回调才有这一项）", () => {
+        const onOpenSettings = vi.fn();
+        const withSettings = mount({}, { onOpenSettings });
+        const { byLabel } = withSettings.openMenu();
+        act(() => {
+            byLabel("Search and matching").click();
+        });
+        expect(onOpenSettings).toHaveBeenCalled();
+
+        // 没传回调时不出现这一项（菜单里不该有指向空气的入口）。
+        const { items } = mount({}).openMenu();
+        expect(items.some((item) => (item.textContent ?? "").includes("Search and matching"))).toBe(
+            false,
+        );
+    });
+
     it("正则模式下提示说明此刻不生效", () => {
-        const { button } = mount({ translit: true, mode: "fuzzy" }, true);
+        const { button } = mount({ translit: true, mode: "fuzzy" }, { regexActive: true });
         expect(button.dataset.tooltip).toContain("Transliteration is off in regex mode");
     });
 });

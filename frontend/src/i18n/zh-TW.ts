@@ -1362,6 +1362,7 @@ export const zhTW = {
 
     // ── 搜尋匹配（拼音 / 羅馬拼音 / 韓文初聲）──
     search_match_mode: "匹配方式",
+    search_right_click_hint: "右鍵查看更多選項",
     search_mode_off: "關閉（僅字面匹配）",
     search_mode_smart: "智慧（含拼音／羅馬拼音）",
     search_mode_fuzzy: "模糊（含跳字匹配）",
