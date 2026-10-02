@@ -145,7 +145,11 @@ mod tests {
 
     #[test]
     fn batch_transliterate_keeps_input_order() {
-        let texts = vec!["撤销".to_string(), "vocal01".to_string(), "ボーカル".to_string()];
+        let texts = vec![
+            "撤销".to_string(),
+            "vocal01".to_string(),
+            "ボーカル".to_string(),
+        ];
         let out = transliterate_batch(&texts, &SearchOptions::default());
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].compact, "chexiao");

@@ -812,7 +812,10 @@ pub fn render_mixdown_interleaved(
                     if debug {
                         log::error!(
                             "mixdown: decode failed; clip_id={} track_id={} path={} err={}",
-                            clip.id, clip.track_id, source_path, e
+                            clip.id,
+                            clip.track_id,
+                            source_path,
+                            e
                         );
                     }
                     continue;
@@ -998,7 +1001,9 @@ pub fn render_mixdown_interleaved(
                     if debug {
                         log::error!(
                             "mixdown: formant morph failed; clip_id={} path={} err={}",
-                            clip.id, source_path, err
+                            clip.id,
+                            source_path,
+                            err
                         );
                     }
                 }
@@ -1646,8 +1651,6 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-
 
     /// 【QualityPreset 惰性契约】`MixdownOptions::quality_preset` 目前是"写入但
     /// 忽略"的占位（见 `QualityPreset` 的文档：让它生效必须先定义两档差异并用
@@ -2464,7 +2467,8 @@ mod tests {
             for i in 0..frames {
                 let t = i as f64 / sample_rate as f64;
                 let v = (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 0.6;
-                w.write_sample((v * i16::MAX as f64).round() as i16).unwrap();
+                w.write_sample((v * i16::MAX as f64).round() as i16)
+                    .unwrap();
             }
             w.finalize().unwrap();
             path
@@ -2474,8 +2478,13 @@ mod tests {
         fn clip_timeline(source: &std::path::Path, clip_len: f64) -> TimelineState {
             let mut tl = TimelineState::default();
             let track_id = tl.tracks[0].id.clone();
-            let clip_id =
-                tl.add_clip(Some(track_id), Some("T".into()), Some(0.0), Some(clip_len), None);
+            let clip_id = tl.add_clip(
+                Some(track_id),
+                Some("T".into()),
+                Some(0.0),
+                Some(clip_len),
+                None,
+            );
             {
                 let c = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
                 c.source_path = Some(source.to_string_lossy().to_string());
@@ -2505,7 +2514,9 @@ mod tests {
         }
 
         fn tmp_dir(name: &str) -> PathBuf {
-            let dir = std::env::temp_dir().join("hifishifter_encode_tests").join(name);
+            let dir = std::env::temp_dir()
+                .join("hifishifter_encode_tests")
+                .join(name);
             std::fs::create_dir_all(&dir).unwrap();
             dir
         }
@@ -2531,10 +2542,7 @@ mod tests {
             let reader = hound::WavReader::open(&out16).unwrap();
             assert_eq!(reader.spec().bits_per_sample, 16);
             assert_eq!(reader.spec().sample_format, hound::SampleFormat::Int);
-            assert_eq!(
-                reader.duration(),
-                (SRC_SEC * RATE as f64).round() as u32
-            );
+            assert_eq!(reader.duration(), (SRC_SEC * RATE as f64).round() as u32);
 
             let out32 = dir.join("out32f.wav");
             let result32 = render_mixdown_to_file(&tl, &out32, opts(base_spec(OutputFormat::Wav)))
@@ -2572,10 +2580,7 @@ mod tests {
             // 整体能量非零（确实编码了音频内容）。
             let energy: f64 = planes[0].iter().map(|&s| (s as f64 / half).powi(2)).sum();
             let rms = (energy / frames as f64).sqrt();
-            assert!(
-                rms > 0.3,
-                "0.6 幅值正弦的 RMS 应明显高于量化噪声：{rms}"
-            );
+            assert!(rms > 0.3, "0.6 幅值正弦的 RMS 应明显高于量化噪声：{rms}");
         }
 
         #[test]

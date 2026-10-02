@@ -154,7 +154,6 @@ for (const action of actions) {
             break;
         }
         case "eval": {
-            // eslint-disable-next-line no-eval
             const result = await page.evaluate(new Function(action.js));
             console.log("EVAL:", JSON.stringify(result));
             break;

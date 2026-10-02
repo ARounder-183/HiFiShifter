@@ -26,7 +26,7 @@ import type { ReactNode } from "react";
 
 import { EDGE_GAP, clampAxisPosition } from "../components/appTooltipPosition";
 import { cx } from "./cx";
-import { useMenuKeyboard } from "./useMenuKeyboard";
+import { ownsArrowKeys, useMenuKeyboard } from "./useMenuKeyboard";
 
 export interface AppMenuItemSpec {
     key: string;
@@ -210,6 +210,12 @@ export function AppContextMenu({
             // 内层表面（`AppSubMenu` 的子面板）用捕获阶段先处理并 preventDefault；
             // 这里必须让路，否则外层高亮会跟着内层一起动，出现两处高亮。
             if (event.defaultPrevented) return;
+            // 焦点在 header 槽的输入框 / 滑杆里时，方向键与 Home/End 属于它们
+            // 自己（移动光标 / 改值），不得劫持成菜单导航。Escape 不在其列：
+            // 文本控件不消费它，任何位置按 Esc 都应关闭菜单。
+            if (event.key !== "Escape" && ownsArrowKeys(document.activeElement)) {
+                return;
+            }
             switch (event.key) {
                 case "Escape":
                     event.preventDefault();
@@ -247,6 +253,11 @@ export function AppContextMenu({
     useEffect(() => {
         function onKeyActivate(event: KeyboardEvent) {
             if (event.key !== "Enter" && event.key !== " ") return;
+            // 内层表面先处理的激活让路；焦点在输入框里时，Enter/Space 是在
+            // 打字 —— 悬停残留的 activeIndex 不得把打字劫持成"激活菜单项"
+            // （表现为输入一个空格反而触发了某条菜单并关掉整窗）。
+            if (event.defaultPrevented) return;
+            if (ownsArrowKeys(document.activeElement)) return;
             const index = activeIndex;
             if (index < 0) return;
             const item = items[index];

@@ -39,7 +39,8 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use tauri::State;
 
-const B64: base64::engine::general_purpose::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+const B64: base64::engine::general_purpose::GeneralPurpose =
+    base64::engine::general_purpose::STANDARD;
 
 /// `read_file_base64` 允许读取的扩展名白名单。
 ///
@@ -217,7 +218,9 @@ pub(super) fn read_file_base64(path: String, max_bytes: Option<u64>) -> serde_js
     if !path.is_file() {
         return json!({ "ok": false, "error": format!("notebook_not_a_file: {}", path.display()) });
     }
-    let limit = max_bytes.unwrap_or(READ_FILE_MAX_BYTES).min(READ_FILE_MAX_BYTES);
+    let limit = max_bytes
+        .unwrap_or(READ_FILE_MAX_BYTES)
+        .min(READ_FILE_MAX_BYTES);
     let ext = path
         .extension()
         .and_then(|s| s.to_str())
@@ -413,8 +416,7 @@ pub(super) fn write_clipboard_payload(
                             fragment.timeline.tracks.len() as u64,
                             Some(fragment.source_project_name.clone()),
                         )
-                    } else if super::timeline_clipboard::param_payload_value(&bytes).is_some()
-                    {
+                    } else if super::timeline_clipboard::param_payload_value(&bytes).is_some() {
                         (Some("param".to_string()), 0, 0, None)
                     } else {
                         (None, 0, 0, None)
@@ -478,10 +480,7 @@ fn sanitize_export_file_name(raw: &str, fallback: &str) -> String {
     let cleaned: String = raw
         .chars()
         .filter(|c| {
-            !matches!(
-                c,
-                '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
-            ) && !c.is_control()
+            !matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') && !c.is_control()
         })
         .collect();
     let trimmed = cleaned.trim();
@@ -600,7 +599,9 @@ pub(super) fn save_asset_as(
         return json!({ "ok": true, "canceled": true });
     };
     match std::fs::write(&output_path, &bytes) {
-        Ok(()) => json!({ "ok": true, "canceled": false, "path": output_path.display().to_string() }),
+        Ok(()) => {
+            json!({ "ok": true, "canceled": false, "path": output_path.display().to_string() })
+        }
         Err(error) => json!({ "ok": false, "error": error.to_string() }),
     }
 }

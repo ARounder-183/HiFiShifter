@@ -330,14 +330,13 @@ impl HiFiGanStage {
         cc: &crate::renderer::traits::ClipProcessContext<'_>,
         formant_curve: Option<&[f32]>,
     ) -> Result<Vec<f32>, String> {
-        let (harmonic, noise) =
-            crate::hnsep_onnx::infer_harmonic_noise_mono(
-                cc.clip_id,
-                &input_pcm,
-                cc.sample_rate,
-                cc.channel_index,
-                cc.source_fingerprint,
-            )?;
+        let (harmonic, noise) = crate::hnsep_onnx::infer_harmonic_noise_mono(
+            cc.clip_id,
+            &input_pcm,
+            cc.sample_rate,
+            cc.channel_index,
+            cc.source_fingerprint,
+        )?;
 
         // 谐波分支：有 F0（clip_midi）时走 HiFiGAN mel 拉伸/渲染；无 F0 时
         // 回退外部算法拉伸 —— 两种情况输出都是时间轴长度 out_frames。

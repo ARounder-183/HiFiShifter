@@ -56,6 +56,10 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
             order: number,
         ): () => void;
     };
+    /** 调用方承诺本轨道窗口已含数据模型的最后一行（透传给
+     * `WaveformSurface`，解锁竖直复用的底边判定让位，见
+     * `geometryCache.canReuseGeometry`）。 */
+    rowsEndAtContentBottom?: boolean;
 }) {
     const { mode } = useAppTheme();
     // 与内核 clip 面（host 的 buildSparseClipRenderModel 参数）同一份持久化设置：
@@ -116,6 +120,7 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
                的关键。⚠ 若上游将来改成按时间窗裁剪 rows，这里必须改回缺省
                （false），否则波形会缺内容；判定细节见 `geometryCache`。 */
             rowsCoverViewport
+            rowsEndAtContentBottom={props.rowsEndAtContentBottom === true}
         />
     );
 });

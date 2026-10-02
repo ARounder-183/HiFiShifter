@@ -240,7 +240,11 @@ pub fn roots_to_poles(roots: &[Complex32], sr: f32) -> FramePoles {
             radius: z.norm(),
         });
     }
-    pairs.sort_by(|a, b| a.freq_hz.partial_cmp(&b.freq_hz).unwrap_or(std::cmp::Ordering::Equal));
+    pairs.sort_by(|a, b| {
+        a.freq_hz
+            .partial_cmp(&b.freq_hz)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     FramePoles { pairs, real_roots }
 }
 
@@ -258,9 +262,7 @@ pub fn poles_to_coeffs(pairs: &[Pole], real_roots: &[f32], sr: f32) -> Vec<f32> 
     let mut poly: Vec<f32> = vec![1.0];
     for pair in pairs {
         let bandwidth = pair.bandwidth_hz.max(1.0);
-        let radius = (-(std::f32::consts::PI * bandwidth) / sr)
-            .exp()
-            .min(0.9995);
+        let radius = (-(std::f32::consts::PI * bandwidth) / sr).exp().min(0.9995);
         let theta = 2.0 * std::f32::consts::PI * pair.freq_hz / sr;
         // 共轭对因子：(z − re^{iθ})(z − re^{−iθ}) = z² − 2r·cosθ·z + r²
         poly = poly_mul(&poly, &[radius * radius, -2.0 * radius * theta.cos(), 1.0]);
@@ -506,8 +508,16 @@ mod tests {
         assert_eq!(coeffs.len(), 5, "两对共轭极点 → 4 阶多项式");
         let poles = roots_to_poles(&poly_roots(&coeffs).unwrap(), sr);
         assert_eq!(poles.pairs.len(), 2);
-        assert!((poles.pairs[0].freq_hz - 800.0).abs() < 1.0, "got {:?}", poles.pairs);
-        assert!((poles.pairs[1].freq_hz - 1_200.0).abs() < 1.0, "got {:?}", poles.pairs);
+        assert!(
+            (poles.pairs[0].freq_hz - 800.0).abs() < 1.0,
+            "got {:?}",
+            poles.pairs
+        );
+        assert!(
+            (poles.pairs[1].freq_hz - 1_200.0).abs() < 1.0,
+            "got {:?}",
+            poles.pairs
+        );
         assert!((poles.pairs[0].bandwidth_hz - 80.0).abs() < 1.0);
         assert!((poles.pairs[1].bandwidth_hz - 120.0).abs() < 1.0);
     }

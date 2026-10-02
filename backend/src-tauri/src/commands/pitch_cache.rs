@@ -75,9 +75,7 @@ pub(super) fn clear_pitch_cache(_state: tauri::State<'_, AppState>) -> serde_jso
     })
 }
 
-pub(super) fn get_pitch_cache_stats(
-    _state: tauri::State<'_, AppState>,
-) -> PitchCacheStatsPayload {
+pub(super) fn get_pitch_cache_stats(_state: tauri::State<'_, AppState>) -> PitchCacheStatsPayload {
     let stats = crate::pitch_clip::pitch_cache_memory_stats();
     PitchCacheStatsPayload {
         cached_clips: stats.entries,

@@ -137,9 +137,7 @@ pub fn match_frame_energy(dry: &[f32], wet: &mut [f32]) {
     if n == 0 {
         return;
     }
-    let rms = |x: &[f32]| -> f32 {
-        (x.iter().map(|s| s * s).sum::<f32>() / n as f32).sqrt()
-    };
+    let rms = |x: &[f32]| -> f32 { (x.iter().map(|s| s * s).sum::<f32>() / n as f32).sqrt() };
     let dry_rms = rms(&dry[..n]).max(1.0e-9);
     let wet_rms = rms(&wet[..n]).max(1.0e-9);
     let gain = (dry_rms / wet_rms).clamp(RMS_MATCH_MIN, RMS_MATCH_MAX);
@@ -156,7 +154,10 @@ pub fn match_frame_energy(dry: &[f32], wet: &mut [f32]) {
 /// f(x) = k + (1−k)·tanh((|x|−k)/(1−k))，拐点处斜率连续，渐近 1.0。
 pub fn soft_limit(out: &mut [f32], input: &[f32]) {
     // 1. 整体峰值保护
-    let in_peak = input.iter().fold(0.0_f32, |p, s| p.max(s.abs())).max(1.0e-6);
+    let in_peak = input
+        .iter()
+        .fold(0.0_f32, |p, s| p.max(s.abs()))
+        .max(1.0e-6);
     let out_peak = out.iter().fold(0.0_f32, |p, s| p.max(s.abs())).max(1.0e-6);
     let limit = in_peak * super::OUTPUT_PEAK_RATIO_LIMIT;
     if out_peak > limit {
@@ -215,11 +216,7 @@ mod tests {
             "目标位置应为正峰，got {} dB",
             h_at(300.0)
         );
-        assert!(
-            h_at(800.0) < -3.0,
-            "原位置应为负谷，got {} dB",
-            h_at(800.0)
-        );
+        assert!(h_at(800.0) < -3.0, "原位置应为负谷，got {} dB", h_at(800.0));
         // 远离两个极点的频段（2 kHz）应接近恒等（极点裙摆内如 50 Hz 本就
         // 会随共振峰迁移而变化，属于物理正确行为，不作恒等断言）
         assert!(

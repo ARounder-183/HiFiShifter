@@ -755,12 +755,12 @@ pub fn compute_rendered_clip_hash_excluding(
     } else {
         input_pitch_curve
     };
-    let (source_file_mtime, source_file_fingerprint, source_file_size) = if exclusions.source_identity
-    {
-        (None, None, None)
-    } else {
-        (source_file_mtime, source_file_fingerprint, source_file_size)
-    };
+    let (source_file_mtime, source_file_fingerprint, source_file_size) =
+        if exclusions.source_identity {
+            (None, None, None)
+        } else {
+            (source_file_mtime, source_file_fingerprint, source_file_size)
+        };
 
     let mut h: u64 = 14695981039346656037u64;
 

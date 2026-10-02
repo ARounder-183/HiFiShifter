@@ -286,6 +286,12 @@ export function AppDialog({
         try {
             await result;
             if (action.autoClose ?? false) onOpenChange(false);
+        } catch (err) {
+            // 本 shell 是全部对话框异步动作的唯一入口：动作拒绝（典型是 invoke
+            // 抛 BackendInvokeError）若无接住，会变成 unhandled rejection —— 按钮
+            // pending 复位、对话框停在原地、失败原因只进控制台。统一兜底：记录
+            // 并保持对话框打开（不自动关闭），让用户能重试或取消。
+            console.error("[AppDialog] action failed:", action.id, err);
         } finally {
             setPendingActionId(null);
         }

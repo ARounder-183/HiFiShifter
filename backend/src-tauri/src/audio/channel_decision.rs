@@ -105,7 +105,11 @@ impl ChannelDecisionRecord {
     }
 
     /// 一条「本次读不到，下次重试」的占位结论。
-    pub fn pending(fingerprint: Option<u64>, policy_sig: u64, region_q: Option<(i64, i64)>) -> Self {
+    pub fn pending(
+        fingerprint: Option<u64>,
+        policy_sig: u64,
+        region_q: Option<(i64, i64)>,
+    ) -> Self {
         Self::auto(VERDICT_PENDING, fingerprint, policy_sig, region_q)
     }
 
@@ -118,9 +122,7 @@ impl ChannelDecisionRecord {
         Self {
             origin: ORIGIN_USER,
             verdict: VERDICT_USER,
-            chosen_mode: Some(
-                crate::channel_mode::TakeChannelMode::from_raw(chosen_mode).raw(),
-            ),
+            chosen_mode: Some(crate::channel_mode::TakeChannelMode::from_raw(chosen_mode).raw()),
             fingerprint: None,
             policy_sig: 0,
             region_q: None,
@@ -191,8 +193,10 @@ pub fn needs_auto_scan(
 ) -> bool {
     match record {
         None => true,
-        Some(record) => !record.is_trusted_user_seal()
-            && !record.is_authoritative_for(fingerprint, policy_sig, region_q),
+        Some(record) => {
+            !record.is_trusted_user_seal()
+                && !record.is_authoritative_for(fingerprint, policy_sig, region_q)
+        }
     }
 }
 
@@ -223,7 +227,12 @@ mod tests {
         // 抽样策略变化
         assert!(needs_auto_scan(Some(record), Some(FP), SIG + 1, REGION));
         // 消费区间变化（trim / 拆分）
-        assert!(needs_auto_scan(Some(record), Some(FP), SIG, Some((0, 9_000))));
+        assert!(needs_auto_scan(
+            Some(record),
+            Some(FP),
+            SIG,
+            Some((0, 9_000))
+        ));
     }
 
     #[test]

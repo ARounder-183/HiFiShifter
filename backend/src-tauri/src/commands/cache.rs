@@ -52,9 +52,7 @@ pub(super) fn clear_render_cache(
     let scope = match scope.as_str() {
         "currentProject" => ClearScope::CurrentProject,
         "olderThan" => ClearScope::OlderThan(u64::from(days.unwrap_or(30))),
-        "otherSampleRates" => {
-            ClearScope::OtherSampleRates(state.audio_engine.sample_rate_hz())
-        }
+        "otherSampleRates" => ClearScope::OtherSampleRates(state.audio_engine.sample_rate_hz()),
         _ => ClearScope::All,
     };
     let report = render_cache::clear(scope);

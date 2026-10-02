@@ -49,9 +49,7 @@ impl RenderCancelToken {
     /// 数据同步，因此不需要与临界区建立 happens-before 关系。
     pub(crate) fn is_cancelled(&self) -> bool {
         match self {
-            Self::Background => {
-                crate::commands::playback::BG_RENDER_CANCEL.load(Ordering::Relaxed)
-            }
+            Self::Background => crate::commands::playback::BG_RENDER_CANCEL.load(Ordering::Relaxed),
         }
     }
 }

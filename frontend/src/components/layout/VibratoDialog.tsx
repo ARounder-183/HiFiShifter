@@ -41,6 +41,7 @@ import { ShuffleIcon, EyeNoneIcon, EyeOpenIcon } from "@radix-ui/react-icons";
 import { Box, Flex, ScrollArea, TextField } from "@radix-ui/themes";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import { shallowEqual } from "react-redux";
 import type { RootState } from "../../app/store";
 import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -239,6 +240,20 @@ type PresetGroup = "system" | "user";
  */
 const CONTENT_HEIGHT = "min(60vh, 560px)";
 
+/** VibratoDialog 实际消费的 session 字段子集（配合 shallowEqual 阻断播放轮询的重渲染）。
+ *  新增消费字段时必须同步补充到这里。 */
+const selectVibratoDialogSession = (state: RootState) => {
+    const session = state.session;
+    return {
+        activeVibratoPresetId: session.activeVibratoPresetId,
+        builtinVibratoPresetOrder: session.builtinVibratoPresetOrder,
+        disabledVibratoPresetIds: session.disabledVibratoPresetIds,
+        penInput: session.penInput,
+        vibratoBaseline: session.vibratoBaseline,
+        vibratoPresets: session.vibratoPresets,
+    };
+};
+
 export function VibratoDialog({
     open,
     onOpenChange,
@@ -249,7 +264,10 @@ export function VibratoDialog({
 }: Props) {
     const dispatch = useAppDispatch();
     const { t, plural } = useI18n();
-    const session = useAppSelector((state: RootState) => state.session);
+    // 只选取本组件实际消费的字段子集并以 shallowEqual 比较：播放期间 playheadSec
+    // 每 ~33ms 变一次、session 对象引用随之失效，直接订阅 state.session 会让整个
+    // 对话框（含预设列表 / 周期编辑器 / 预览画布）以 ≥30Hz 空转重渲。
+    const session = useAppSelector(selectVibratoDialogSession, shallowEqual);
     /** 「精细调整」修饰键（默认 `Ctrl` / macOS `Command`）：预览拖拽时缩到 1/10。 */
     const paramFineAdjustKb = useAppSelector((state: RootState) =>
         selectKeybinding(state, "modifier.paramFineAdjust"),
@@ -694,11 +712,7 @@ export function VibratoDialog({
          * `shapeUsesSkew` 是"会不会用到"的唯一出处。
          */
         const skew = inputModifiers.tiltSkewFor(modifiers);
-        if (
-            skew != null &&
-            draft?.cycle.kind === "shape" &&
-            shapeUsesSkew(draft.cycle.shape)
-        ) {
+        if (skew != null && draft?.cycle.kind === "shape" && shapeUsesSkew(draft.cycle.shape)) {
             patch({ ...next, cycle: { ...draft.cycle, skew } });
             return;
         }
@@ -938,7 +952,17 @@ export function VibratoDialog({
     async function handleExtractFromSelection() {
         if (!applyTarget?.onExtract) return;
         setIoNotice(null);
-        const extracted = await applyTarget.onExtract();
+        let extracted: VibratoPreset | null;
+        try {
+            extracted = await applyTarget.onExtract();
+        } catch (err) {
+            // 宿主提取走 IPC（读参数帧），失败此前会变成 unhandled rejection：
+            // 按钮复位、对话框停在原地、错误只进控制台。与"提取到空结果"同路
+            // 反馈给用户（行内提示，不弹窗）。
+            console.error("[VibratoDialog] extract from selection failed", err);
+            setIoNotice({ text: t("vibrato_extract_failed"), danger: true });
+            return;
+        }
         if (!extracted) {
             setIoNotice({ text: t("vibrato_extract_failed"), danger: true });
             return;
@@ -1904,8 +1928,7 @@ export function VibratoDialog({
                                                             // 于是"多用力 = 多写一点"与
                                                             // "多用力 = 走得快一点"是同一个手感。
                                                             pressurePaint={{
-                                                                begin: () =>
-                                                                    inputModifiers.reset(),
+                                                                begin: () => inputModifiers.reset(),
                                                                 weightFor: (pointerEvent) =>
                                                                     inputModifiers.paintWeightFor(
                                                                         pointerEvent,

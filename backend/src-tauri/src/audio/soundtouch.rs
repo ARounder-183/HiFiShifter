@@ -237,7 +237,10 @@ impl RealtimeStretcher {
             if let Some(version) = version_string() {
                 log::warn!(
                     "[SoundTouch] Created realtime stretcher: sr={} ch={} ratio={:.6} version={}",
-                    sample_rate, channels, time_ratio, version
+                    sample_rate,
+                    channels,
+                    time_ratio,
+                    version
                 );
             }
         }

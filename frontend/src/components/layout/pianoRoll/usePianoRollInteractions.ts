@@ -1263,11 +1263,49 @@ export function usePianoRollInteractions(args: {
         ],
     );
 
+    // 选区 UI 状态合帧：拖拽路径逐事件调用 updateSelectionUi，而 setSelectionUi
+    // 会让整个面板重渲。画布侧读 selectionRef（逐事件、无延迟），React 状态只喂
+    // 非画布消费方（菜单 / 选区激活标记 / 总线发布），滞后一帧不可感知。
+    const selectionUiRafRef = useRef<number | null>(null);
+    const selectionUiPendingRef = useRef<{ value: ParamSelection | null } | null>(null);
+    useEffect(() => {
+        return () => {
+            if (selectionUiRafRef.current != null) {
+                cancelAnimationFrame(selectionUiRafRef.current);
+                selectionUiRafRef.current = null;
+            }
+            selectionUiPendingRef.current = null;
+        };
+    }, []);
+
     const updateSelectionUi = useCallback(
         (next: ParamSelection | null) => {
-            setSelectionUi(next);
-            if (morphModifierDownRef.current && !morphDragRef.current) {
-                setMorphOverlay(buildMorphOverlaysFromSelection());
+            if (next === null) {
+                // 清除必须立即生效并取消挂起设置：手势收尾后，过期选区不得在
+                // 下一帧"复活"。
+                if (selectionUiRafRef.current != null) {
+                    cancelAnimationFrame(selectionUiRafRef.current);
+                    selectionUiRafRef.current = null;
+                }
+                selectionUiPendingRef.current = null;
+                setSelectionUi(null);
+                if (morphModifierDownRef.current && !morphDragRef.current) {
+                    setMorphOverlay(buildMorphOverlaysFromSelection());
+                }
+                return;
+            }
+            selectionUiPendingRef.current = { value: next };
+            if (selectionUiRafRef.current == null) {
+                selectionUiRafRef.current = requestAnimationFrame(() => {
+                    selectionUiRafRef.current = null;
+                    const pending = selectionUiPendingRef.current;
+                    selectionUiPendingRef.current = null;
+                    if (!pending) return;
+                    setSelectionUi(pending.value);
+                    if (morphModifierDownRef.current && !morphDragRef.current) {
+                        setMorphOverlay(buildMorphOverlaysFromSelection());
+                    }
+                });
             }
         },
         [buildMorphOverlaysFromSelection, setMorphOverlay, setSelectionUi],
@@ -2584,10 +2622,7 @@ export function usePianoRollInteractions(args: {
             // 那一段，其余段不动。同段左缘优先、跨段取先出现者，与原实现一致。
             // 带宽按设备剖面缩放：手指够不到 8px 的边缘。
             const localXPx = e.clientX - rect.left;
-            const edgeHitWidth = scaledHitRadius(
-                SELECTION_EDGE_HIT_PX,
-                profileFor(e.nativeEvent),
-            );
+            const edgeHitWidth = scaledHitRadius(SELECTION_EDGE_HIT_PX, profileFor(e.nativeEvent));
             let best: { rangeIndex: number; edge: "left" | "right" } | null = null;
             let bestDistance = Number.POSITIVE_INFINITY;
             for (let i = 0; i < sel.length; i += 1) {
@@ -2942,6 +2977,34 @@ export function usePianoRollInteractions(args: {
                             });
                         }
 
+                        // 预览重算合帧到下一渲染帧（与拉伸 / 选区拖拽的
+                        // schedulePreview 同一模式）：pointermove 在高刷鼠标 / pen
+                        // 上可达数百 Hz，而 setMorphOverlay（整面板重渲）与
+                        // applyMorphOverlayPreview（每条 overlay 一次 buildMorphDense）
+                        // 逐事件执行纯属浪费。ref 同步保持逐事件（下一次 move 与
+                        // onUp 都要读到最新控制点），只有 React 状态 / live 预览 /
+                        // 浮窗延后到 rAF。
+                        let previewRafId: number | null = null;
+                        let pendingOverlays: ParamMorphOverlay[] | null = null;
+                        let pendingPopup: {
+                            clientX: number;
+                            clientY: number;
+                            value: number;
+                        } | null = null;
+                        const flushPreview = () => {
+                            previewRafId = null;
+                            if (pendingOverlays != null) {
+                                const overlays = pendingOverlays;
+                                pendingOverlays = null;
+                                setMorphOverlay(overlays);
+                                applyMorphOverlayPreview(overlays);
+                            }
+                            if (pendingPopup != null) {
+                                onParamValuePreviewChange?.(pendingPopup);
+                                pendingPopup = null;
+                            }
+                        };
+
                         const onMove = (ev: globalThis.PointerEvent) => {
                             if ((ev.buttons & 1) !== 1) {
                                 onUp();
@@ -2986,18 +3049,22 @@ export function usePianoRollInteractions(args: {
                                         ? { ...overlay, points: nextPoints }
                                         : overlay,
                             );
-                            setMorphOverlay(nextOverlays);
-                            applyMorphOverlayPreview(nextOverlays);
+                            morphOverlayRef.current = nextOverlays;
+                            pendingOverlays = nextOverlays;
 
                             if (paramValuePopupEnabled) {
                                 const movedPoint = nextPoints.find(
                                     (pt) => pt.kind === drag.pointKind,
                                 );
-                                onParamValuePreviewChange?.({
+                                pendingPopup = {
                                     clientX: ev.clientX,
                                     clientY: ev.clientY,
                                     value: movedPoint?.value ?? pointerValue(adjusted.clientY),
-                                });
+                                };
+                            }
+
+                            if (previewRafId == null) {
+                                previewRafId = requestAnimationFrame(flushPreview);
                             }
                         };
 
@@ -3011,6 +3078,14 @@ export function usePianoRollInteractions(args: {
                             window.removeEventListener("pointercancel", onUp);
                             disposeFineAdjustedPointerState(finePointerState);
                             clearActivePointerGestureEnd(onUp);
+                            // 最后一次 move 的预览若还在 rAF 队列里，必须在提交前
+                            // 同步冲刷：提交读 overlayNow / live 层，漏冲刷会把
+                            // 末段位移丢掉（与选区拖拽"松手即取消"不同——这里
+                            // 提交数据就来自挂起的预览状态）。
+                            if (previewRafId != null) {
+                                cancelAnimationFrame(previewRafId);
+                                flushPreview();
+                            }
 
                             if (!drag || !overlayNow || !pvNow || !rootTrackId) {
                                 // 早退同样必须复位 liveEdit（否则曲线刷新被永久搁置，
@@ -5289,7 +5364,7 @@ export function usePianoRollInteractions(args: {
                     disposeFineAdjustedPointerState(finePointerState);
                     window.removeEventListener("pointermove", onMove);
                     window.removeEventListener("pointerup", onUp);
-                    window.removeEventListener("pointercancel", onUp);
+                    window.removeEventListener("pointercancel", onCancel);
                     window.removeEventListener("contextmenu", onContextMenuDuringDraw, true);
                     window.removeEventListener("mousedown", onMouseDownDuringDraw, true);
                     clearActivePointerGestureEnd(onUp);

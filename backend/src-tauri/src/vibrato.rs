@@ -155,8 +155,8 @@ mod tests {
     #[test]
     fn missing_fields_fall_back_to_defaults() {
         // 旧配置里没有这些键时，反序列化必须成功并给出可用默认值。
-        let preset: VibratoPreset = serde_json::from_value(serde_json::json!({}))
-            .expect("空对象应能反序列化");
+        let preset: VibratoPreset =
+            serde_json::from_value(serde_json::json!({})).expect("空对象应能反序列化");
         assert_eq!(preset.rate_mode, "hz");
         assert_eq!(preset.rate_hz, 5.5);
         assert_eq!(preset.attack_curve, "exp");

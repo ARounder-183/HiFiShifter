@@ -480,9 +480,9 @@ export function normalizePenInputSettings(input: PenInputSettings): PenInputSett
     ).includes(input.device)
         ? input.device
         : DEFAULT_PEN_INPUT_SETTINGS.device;
-    const contactReadout: ContactReadoutMode = (
-        ["off", "touchOnly", "always"] as const
-    ).includes(input.contactReadout)
+    const contactReadout: ContactReadoutMode = (["off", "touchOnly", "always"] as const).includes(
+        input.contactReadout,
+    )
         ? input.contactReadout
         : DEFAULT_PEN_INPUT_SETTINGS.contactReadout;
     // 死区与上界必须留出可用的跨度，否则映射会退化成一条水平线。

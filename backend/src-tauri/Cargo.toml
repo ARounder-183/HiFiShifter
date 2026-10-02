@@ -158,7 +158,11 @@ ort-tract = { version = "0.4.0", optional = true }
 codegen-units = 16
 strip = true
 opt-level = 3
-panic = "abort"
+# 【不能用 panic = "abort"】代码库围绕 unwind 建了一整套 panic 遏制：音频回调的
+# catch_unwind（engine.rs）、后台渲染线程的恢复（playback.rs，否则 BG_RENDER_ACTIVE
+# 永久卡 true）、IPC 命令守卫（commands/common.rs）。abort 下这些守卫在 release
+# 构建里全部失效 —— 任意一处 panic 直接杀死整个进程（正是它们要阻止的故障）。
+# 代价只是二进制略大、运行时略慢（无表展开优化），换来遏制的实际生效。
 
 # Distribution builds: full-fat LTO for the best final-artifact
 # optimization. Used ONLY by the CI pipeline (`cargo tauri build

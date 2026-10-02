@@ -173,7 +173,10 @@ pub(crate) fn is_common_mix_param(param_id: &str) -> bool {
 /// 电平），而「该帧无数据」应表达为沿用原声，即 `DYN_FOLLOW_ORIG`。若沿用
 /// 描述符默认值，移动/拉伸/复制片段会给新范围凭空写入 1.0，把原本的音量包络
 /// 整段压平 —— 这是静默的响度损坏。
-pub(crate) fn automation_curve_pad_value(kind: crate::state::SynthPipelineKind, param_id: &str) -> f32 {
+pub(crate) fn automation_curve_pad_value(
+    kind: crate::state::SynthPipelineKind,
+    param_id: &str,
+) -> f32 {
     if param_id == DYN_PARAM_ID {
         return DYN_FOLLOW_ORIG;
     }
@@ -422,7 +425,10 @@ mod tests {
     #[test]
     fn pad_value_follows_orig_for_dyn() {
         let kind = SynthPipelineKind::WorldVocoder;
-        assert_eq!(automation_curve_pad_value(kind, DYN_PARAM_ID), DYN_FOLLOW_ORIG);
+        assert_eq!(
+            automation_curve_pad_value(kind, DYN_PARAM_ID),
+            DYN_FOLLOW_ORIG
+        );
         // 其它参数仍用描述符默认值。
         assert_eq!(automation_curve_pad_value(kind, VOLUME_PARAM_ID), 1.0);
         assert_eq!(automation_curve_pad_value(kind, PAN_PARAM_ID), 0.0);
@@ -477,7 +483,10 @@ mod tests {
         // 带内单调递增、带宽之下恒 0、带之上（= 下限）恢复满值并受上限钳制。
         assert_eq!(compute_dyn_gain(1.0, DYN_SILENCE_FLOOR * 0.5), 0.0);
         let mid = compute_dyn_gain(1.0, DYN_SILENCE_FLOOR * 0.75);
-        assert!(mid > 0.0 && mid < DYN_MAX_GAIN, "带内应部分淡出，实测 {mid}");
+        assert!(
+            mid > 0.0 && mid < DYN_MAX_GAIN,
+            "带内应部分淡出，实测 {mid}"
+        );
         assert_eq!(compute_dyn_gain(1.0, DYN_SILENCE_FLOOR), DYN_MAX_GAIN);
         // 提升被上限钳制（目标远超值域时也一样）。
         assert_eq!(

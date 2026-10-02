@@ -149,7 +149,9 @@ pub fn read_bitmap_dib() -> Result<Option<ClipboardBitmap>, String> {
 pub fn clipboard_seq_num() -> Option<u64> {
     #[cfg(target_os = "windows")]
     {
-        Some(u64::from(clipboard_win::seq_num().map(|n| n.get()).unwrap_or(0)))
+        Some(u64::from(
+            clipboard_win::seq_num().map(|n| n.get()).unwrap_or(0),
+        ))
     }
     #[cfg(target_os = "macos")]
     {

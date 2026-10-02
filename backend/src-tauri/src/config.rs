@@ -615,9 +615,8 @@ pub fn set_sync_edits_across_takes(enabled: bool) {
 /// 与 `LOOP_NEW_CLIPS_DEFAULT` / `SYNC_EDITS_ACROSS_TAKES` 同款：由
 /// `commands::ui_settings` 在加载与保存设置时同步；供 `TimelineState::add_clip`、
 /// 各格式 importer、旧工程迁移等无法访问 `AppState` 的创建点读取。
-static CHANNEL_IMPORT_POLICY: std::sync::OnceLock<
-    std::sync::RwLock<ChannelImportPolicy>,
-> = std::sync::OnceLock::new();
+static CHANNEL_IMPORT_POLICY: std::sync::OnceLock<std::sync::RwLock<ChannelImportPolicy>> =
+    std::sync::OnceLock::new();
 
 fn channel_import_policy_cell() -> &'static std::sync::RwLock<ChannelImportPolicy> {
     CHANNEL_IMPORT_POLICY.get_or_init(|| std::sync::RwLock::new(ChannelImportPolicy::default()))
@@ -1601,8 +1600,8 @@ impl UiSettings {
         // 在此迁移到等价预设：exponential→lateSlight、logarithmic→convexSlight、
         // sine/scurve→sSlight、linear→linear；其余未知值回退默认 "keep"。
         self.split_transition_curve = match self.split_transition_curve.as_str() {
-            "keep" | "linear" | "convexSlight" | "lateSlight" | "convexSharp"
-            | "lateSharp" | "sSlight" | "sSharp" => self.split_transition_curve.clone(),
+            "keep" | "linear" | "convexSlight" | "lateSlight" | "convexSharp" | "lateSharp"
+            | "sSlight" | "sSharp" => self.split_transition_curve.clone(),
             "exponential" => "lateSlight".to_string(),
             "logarithmic" => "convexSlight".to_string(),
             "sine" | "scurve" => "sSlight".to_string(),
@@ -1766,7 +1765,10 @@ mod tests {
             }
         }))
         .expect("legacy ui settings must parse");
-        assert_eq!(ui.channel_import_policy.tolerance_version, 0, "旧配置无标记");
+        assert_eq!(
+            ui.channel_import_policy.tolerance_version, 0,
+            "旧配置无标记"
+        );
         let mut cfg = super::AppConfig::default();
         cfg.ui = ui;
         // `migrated` 是私有的读取边界钩子，这里直接调策略层的迁移（同一副作用）。
@@ -1780,7 +1782,8 @@ mod tests {
 
     /// 出厂默认本身就是"不设时长下限"。
     #[test]
-    fn factory_default_has_no_duration_floor() {        let s = super::RenderCacheSettings::default();
+    fn factory_default_has_no_duration_floor() {
+        let s = super::RenderCacheSettings::default();
         assert_eq!(s.min_clip_secs, 0.0);
         assert_eq!(s.min_entry_kb, 4);
         assert_eq!(s.min_entry_bytes(), 4 * 1024);

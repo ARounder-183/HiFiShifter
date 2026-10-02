@@ -144,7 +144,10 @@ fn hangul_full(c: char) -> String {
     let lead = (base / (21 * 28)) as usize;
     let vowel = ((base % (21 * 28)) / 28) as usize;
     let tail = (base % 28) as usize;
-    format!("{}{}{}", HANGUL_LEAD[lead], HANGUL_VOWEL[vowel], HANGUL_TAIL[tail])
+    format!(
+        "{}{}{}",
+        HANGUL_LEAD[lead], HANGUL_VOWEL[vowel], HANGUL_TAIL[tail]
+    )
 }
 
 /// 谚文音节 → 初声（声母）。
@@ -430,7 +433,11 @@ fn roman_alternatives(ch: char) -> Vec<String> {
         out
     } else if is_kana(ch) {
         let normalized: String = ch.to_string().nfkc().collect();
-        vec![normalized.to_romaji().chars().filter(|c| c.is_alphanumeric()).collect()]
+        vec![normalized
+            .to_romaji()
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect()]
     } else if is_hangul(ch) {
         // 谚文没有多音字；初声是**独立的检索形态**（`initials`），不能混进全拼变体 ——
         // 混进去会让 `hg` 这类两字符缩写以「全拼前缀」的高档命中，与它实际的
@@ -478,7 +485,11 @@ mod tests {
     fn umlaut_gets_both_spellings() {
         let out = t("绿");
         assert_eq!(out.compact, "lv");
-        assert!(out.variants.iter().any(|v| v == "lu"), "变体: {:?}", out.variants);
+        assert!(
+            out.variants.iter().any(|v| v == "lu"),
+            "变体: {:?}",
+            out.variants
+        );
     }
 
     #[test]

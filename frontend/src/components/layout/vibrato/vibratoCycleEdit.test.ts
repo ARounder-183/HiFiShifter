@@ -326,7 +326,9 @@ describe("paintCycleBinWeighted", () => {
     test("权重 1 与既有覆盖式落笔逐位一致", () => {
         const table = [0, 0.25, -0.5, 0.75];
         for (const value of [0, 0.1, 0.2, -0.3, 0.7, 1, -1]) {
-            expect(paintCycleBinWeighted(table, 1, value, 1)).toEqual(paintCycleBin(table, 1, value));
+            expect(paintCycleBinWeighted(table, 1, value, 1)).toEqual(
+                paintCycleBin(table, 1, value),
+            );
             // 逐位相等（不是"接近"）：鼠标路径不允许有任何漂移。
             expect(Object.is(paintCycleBinWeighted(table, 1, value, 1)[1], value)).toBe(true);
         }
@@ -434,6 +436,8 @@ describe("paintCycleSegmentWeighted", () => {
             { bin: 0, value: 0.3 },
             { bin: 3, value: 0.9 },
         );
-        expect(next).toEqual(paintCycleSegment(table, { bin: 0, value: 0.3 }, { bin: 3, value: 0.9 }));
+        expect(next).toEqual(
+            paintCycleSegment(table, { bin: 0, value: 0.3 }, { bin: 3, value: 0.9 }),
+        );
     });
 });

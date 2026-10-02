@@ -28,6 +28,8 @@ mod midi;
 #[path = "commands/midi_export.rs"]
 mod midi_export;
 pub(crate) use midi_export::TempoTickConverter;
+#[path = "commands/formant.rs"]
+mod formant;
 #[path = "commands/notebook.rs"]
 mod notebook;
 #[path = "commands/onnx_status.rs"]
@@ -40,12 +42,8 @@ mod params;
 mod pitch_cache;
 #[path = "commands/pitch_progress.rs"]
 mod pitch_progress;
-#[path = "commands/formant.rs"]
-mod formant;
 #[path = "commands/playback.rs"]
 pub(crate) mod playback;
-#[path = "commands/silence.rs"]
-mod silence;
 #[path = "commands/processor_caps.rs"]
 mod processor_caps;
 #[path = "commands/project.rs"]
@@ -62,6 +60,8 @@ mod recording;
 pub(crate) mod render_cancel;
 #[path = "commands/render_summary.rs"]
 pub(crate) mod render_summary;
+#[path = "commands/silence.rs"]
+mod silence;
 #[path = "commands/synth.rs"]
 mod synth;
 #[path = "commands/timeline.rs"]
@@ -254,10 +254,7 @@ pub fn open_project(
 
 /// 写入记事本内容并登记为一步可撤销操作（连续写入在后端按历史结构合并）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn set_project_notes(
-    state: State<'_, AppState>,
-    notes_markdown: String,
-) -> serde_json::Value {
+pub fn set_project_notes(state: State<'_, AppState>, notes_markdown: String) -> serde_json::Value {
     project::set_project_notes(state, notes_markdown)
 }
 
@@ -371,7 +368,6 @@ pub fn notebook_save_asset_as(
 ) -> serde_json::Value {
     notebook::save_asset_as(state, asset_id, suggested_name)
 }
-
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn save_project_as(
@@ -1526,7 +1522,14 @@ pub fn get_param_frames(
     with_sentinel: Option<bool>,
 ) -> crate::models::ParamFramesPayload {
     params::get_param_frames(
-        state, track_id, param, start_frame, frame_count, stride, binary, with_sentinel,
+        state,
+        track_id,
+        param,
+        start_frame,
+        frame_count,
+        stride,
+        binary,
+        with_sentinel,
     )
 }
 
@@ -1857,12 +1860,7 @@ pub async fn export_diagnostics(
 /// 的 `<a download>` 被拦截，见 `commands/json_export.rs` 的模块说明）。
 #[tauri::command(rename_all = "camelCase")]
 pub fn export_layout_json(json: String) -> serde_json::Value {
-    json_export::export_json_file(
-        json,
-        "hifishifter-layout.json",
-        "Export layout",
-        "layout",
-    )
+    json_export::export_json_file(json, "hifishifter-layout.json", "Export layout", "layout")
 }
 
 /// 视图 → 外观设置 → 「导出」：把当前外观主题存成 JSON。

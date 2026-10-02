@@ -214,10 +214,11 @@ impl AdmissionCounters {
     /// 两快照之差（`self` 为较早的一份）。
     pub fn since(&self, earlier: &AdmissionCounters) -> AdmissionCounters {
         let mut skipped_by_reason = [0u64; SkipReason::ALL.len()];
-        for (slot, (now, before)) in skipped_by_reason
-            .iter_mut()
-            .zip(self.skipped_by_reason.iter().zip(earlier.skipped_by_reason.iter()))
-        {
+        for (slot, (now, before)) in skipped_by_reason.iter_mut().zip(
+            self.skipped_by_reason
+                .iter()
+                .zip(earlier.skipped_by_reason.iter()),
+        ) {
             *slot = now.saturating_sub(*before);
         }
         AdmissionCounters {
@@ -939,7 +940,10 @@ mod tests {
         let mut rt = snapshot();
         rt.min_clip_secs = 0.5;
         // 用户显式设了时长下限时才生效。
-        assert_eq!(admit(&rt, 12_000, 48_000, 96_000), Err(SkipReason::TooShort));
+        assert_eq!(
+            admit(&rt, 12_000, 48_000, 96_000),
+            Err(SkipReason::TooShort)
+        );
         assert_eq!(admit(&rt, 48_000, 48_000, 384_000), Ok(()));
         // 关掉（默认）即不再拒绝短片段。
         rt.min_clip_secs = 0.0;
@@ -951,7 +955,10 @@ mod tests {
         let mut rt = snapshot();
         rt.max_entry_bytes = 1_000;
         rt.min_entry_bytes = 0;
-        assert_eq!(admit(&rt, 48_000, 48_000, 384_000), Err(SkipReason::TooLarge));
+        assert_eq!(
+            admit(&rt, 48_000, 48_000, 384_000),
+            Err(SkipReason::TooLarge)
+        );
         assert_eq!(admit(&rt, 48_000, 48_000, 999), Ok(()));
     }
 
@@ -959,7 +966,10 @@ mod tests {
     fn disabled_cache_never_admits() {
         let mut rt = snapshot();
         rt.enabled = false;
-        assert_eq!(admit(&rt, 48_000, 48_000, 384_000), Err(SkipReason::Disabled));
+        assert_eq!(
+            admit(&rt, 48_000, 48_000, 384_000),
+            Err(SkipReason::Disabled)
+        );
     }
 
     #[test]

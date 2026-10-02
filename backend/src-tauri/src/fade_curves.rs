@@ -66,10 +66,7 @@ fn resolve_shape(shape: f64) -> ShapeSpec {
     if has_fraction {
         return match base {
             1 => ShapeSpec::EqualPower,
-            5 | 6 => ShapeSpec::SmoothS {
-                a0: 7.0,
-                ks: 1.3,
-            },
+            5 | 6 => ShapeSpec::SmoothS { a0: 7.0, ks: 1.3 },
             _ => ShapeSpec::LinearPower,
         };
     }
@@ -113,8 +110,16 @@ fn core_ascending(spec: &ShapeSpec, u: f64, x: f64) -> f64 {
 /// - 端点着陆：淡出在末尾 `FADE_LANDING_FRAC` 区间、淡入在开头同长度区间
 ///   乘 raised-cosine 着陆窗，保证端部零斜率、逐帧增益步长有界（防 Click）。
 pub fn fade_gain_signed(shape: f64, dir: f64, mode_out: bool, t: f64) -> f64 {
-    let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
-    let dir = if dir.is_finite() { dir.clamp(-1.0, 1.0) } else { 0.0 };
+    let t = if t.is_finite() {
+        t.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let dir = if dir.is_finite() {
+        dir.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
     if mode_out {
         if t <= 0.0 {
             return 1.0;
@@ -187,9 +192,7 @@ fn landing_window(t: f64, mode_out: bool) -> f64 {
 /// 剩余比例作为索引进度即可得到正确的时间镜像轨迹（见 mix.rs/mixdown.rs）。
 pub fn build_fade_lut(shape: f64, dir: f64, mode_out: bool) -> Vec<f32> {
     (0..=FADE_LUT_SIZE)
-        .map(|i| {
-            fade_gain_signed(shape, dir, mode_out, i as f64 / FADE_LUT_SIZE as f64) as f32
-        })
+        .map(|i| fade_gain_signed(shape, dir, mode_out, i as f64 / FADE_LUT_SIZE as f64) as f32)
         .collect()
 }
 
@@ -239,7 +242,9 @@ impl Default for FadeLutCache {
 pub fn global_fade_lut(shape: f64, dir: f64, mode_out: bool) -> Arc<Vec<f32>> {
     use std::sync::OnceLock;
     static CACHE: OnceLock<FadeLutCache> = OnceLock::new();
-    CACHE.get_or_init(FadeLutCache::new).lut(shape, dir, mode_out)
+    CACHE
+        .get_or_init(FadeLutCache::new)
+        .lut(shape, dir, mode_out)
 }
 
 /// 从 LUT 取增益（index 为浮点帧位置，线性插值；越界返回边界值）。
@@ -270,8 +275,16 @@ mod tests {
         for &s in &SHAPES {
             for &d in &[-1.0, -0.35, 0.0, 0.35, 1.0] {
                 for out in [false, true] {
-                    assert_eq!(fade_gain_signed(s, d, out, 0.0), if out { 1.0 } else { 0.0 }, "s={s} d={d} out={out}");
-                    assert_eq!(fade_gain_signed(s, d, out, 1.0), if out { 0.0 } else { 1.0 }, "s={s} d={d} out={out}");
+                    assert_eq!(
+                        fade_gain_signed(s, d, out, 0.0),
+                        if out { 1.0 } else { 0.0 },
+                        "s={s} d={d} out={out}"
+                    );
+                    assert_eq!(
+                        fade_gain_signed(s, d, out, 1.0),
+                        if out { 0.0 } else { 1.0 },
+                        "s={s} d={d} out={out}"
+                    );
                 }
             }
         }
@@ -288,15 +301,9 @@ mod tests {
                         let t = step as f64 / 200.0;
                         let g = fade_gain_signed(s, d, out, t);
                         if out {
-                            assert!(
-                                g <= p + 1e-9,
-                                "out must be nonincreasing s={s} d={d} t={t}"
-                            );
+                            assert!(g <= p + 1e-9, "out must be nonincreasing s={s} d={d} t={t}");
                         } else {
-                            assert!(
-                                g >= p - 1e-9,
-                                "in must be nondecreasing s={s} d={d} t={t}"
-                            );
+                            assert!(g >= p - 1e-9, "in must be nondecreasing s={s} d={d} t={t}");
                         }
                         p = g;
                     }
@@ -331,7 +338,8 @@ mod tests {
             assert!(
                 (got - expected).abs() < 1e-9,
                 "golden mismatch shape={shape} out={out} dir={dir} t={t}: got {} want {}",
-                got, expected
+                got,
+                expected
             );
         }
     }
@@ -342,8 +350,7 @@ mod tests {
             let table = global_fade_lut(3.0, 0.35, out);
             for step in 0..=100 {
                 let idx = FADE_LUT_SIZE as f64 * step as f64 / 100.0;
-                let want =
-                    fade_gain_signed(3.0, 0.35, out, idx / FADE_LUT_SIZE as f64) as f32;
+                let want = fade_gain_signed(3.0, 0.35, out, idx / FADE_LUT_SIZE as f64) as f32;
                 let got = sample_fade_lut(&table, idx);
                 assert!((got - want).abs() < 5e-3, "idx={idx} out={out}");
             }

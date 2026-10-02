@@ -1690,6 +1690,22 @@ function clearTakeRollback(clipIds: readonly string[]): void {
 }
 
 /**
+ * take 族异步操作的「过期响应守卫」。
+ *
+ * 与 `setClipStateRemote.fulfilled` 的 `_latestEditRequestId` 同一机制、同一动机：
+ * 后端命令在线程池上并发执行，响应可能乱序到达；用户打开/新建工程时
+ * `openProject/newProject.pending` 会把 `_latestEditRequestId` 置空作废一切在途
+ * 编辑响应。take 族的权威回包是**整份 TimelineState 覆写**，不做守卫的话：
+ * (a) 工程切换在途的 take 响应会把旧工程的时间线整体压回新工程上；
+ * (b) 快速连续切换时旧响应后到，把 UI 回滚到过期 take（后端却持更新状态）。
+ * 每个 take 族 thunk 在 `.pending` 登记 `requestId`，`.fulfilled`/`.rejected`
+ * 只采纳仍是最新的那份。
+ */
+function takeRequestIsStale(state: SessionState, requestId: string): boolean {
+    return state._latestEditRequestId !== requestId;
+}
+
+/**
  * 将后端返回的 TimelineState 全量覆写到前端 Redux state。
  *
  * @param force  默认 false。当 `_interactionLockCount > 0`（用户正在拖动/滑动等连续交互）
@@ -1716,7 +1732,11 @@ function applyTimelineState(
     applyTimelineTracksOnly(state, timeline);
 
     // 静音检测预览覆盖层锚定在旧时间线上，任何全量快照应用即失效。
+    // 请求 id 必须随之作废：否则在途分析的 fulfilled 只比对 id（ id 未变），
+    // 会把按**旧剪辑布局**算出的静音段重新画回时间线（甚至画到切除后的新剪辑上）
+    // —— 与 `setSilencePreview` 手动清空时的口径一致。
     state.silencePreviewSegments = null;
+    state._silencePreviewRequestId = null;
 
     // 旧 clips 的 id 索引：playback_rate 缺失时的回退查询需要 O(1) 命中，
     // 否则 per-clip find 会让千级 clip 工程的全量快照应用退化为 O(n²)。
@@ -1821,19 +1841,21 @@ function applyTimelineState(
                     : (takes[0]?.id ?? `${clip.id}_take_1`),
         };
     });
+    // 剪枝孤儿条目：先建一次 Set（O(clips)），逐条 O(1) 查询 —— `.some()` 内层
+    // 线性扫描是 O(entries × clips)，本函数在每个编辑 / 撤销 / 保存回包上都会跑，
+    // 千级 clip 下那是每次数百万次比较。
+    const availableClipIds = new Set(state.clips.map((clip) => clip.id));
     state.clipFormantStatus = Object.fromEntries(
-        Object.entries(state.clipFormantStatus).filter(([clipId]) =>
-            state.clips.some((clip) => clip.id === clipId),
-        ),
+        Object.entries(state.clipFormantStatus).filter(([clipId]) => availableClipIds.has(clipId)),
     ) as Record<string, "ready" | "rebuilding" | "failed">;
     state.clipFormantAnalysis = Object.fromEntries(
         Object.entries(state.clipFormantAnalysis).filter(([clipId]) =>
-            state.clips.some((clip) => clip.id === clipId),
+            availableClipIds.has(clipId),
         ),
     );
     if (
         state.clipFormantToolWindow.clipId &&
-        !state.clips.some((clip) => clip.id === state.clipFormantToolWindow.clipId)
+        !availableClipIds.has(state.clipFormantToolWindow.clipId)
     ) {
         state.clipFormantToolWindow.open = false;
         state.clipFormantToolWindow.clipId = null;
@@ -1974,7 +1996,7 @@ function applyTimelineState(
         }
     }
 
-    const availableClipIds = new Set(state.clips.map((clip) => clip.id));
+    // availableClipIds 已在上方 formant 剪枝处构建（同一次剪枝共用），此处直接复用。
     for (const clipId of Object.keys(state.clipAutomation)) {
         if (!availableClipIds.has(clipId)) {
             delete state.clipAutomation[clipId];
@@ -6025,6 +6047,7 @@ const sessionSlice = createSlice({
             })
 
             .addCase(setClipActiveTakeRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
                 const clip = state.clips.find((entry) => entry.id === action.meta.arg.clipId);
                 if (!clip) return;
                 const takes = clip.takes ?? [];
@@ -6035,6 +6058,9 @@ const sessionSlice = createSlice({
                 applyActiveTakeToFlat(clip, take);
             })
             .addCase(setClipActiveTakeRemote.fulfilled, (state, action) => {
+                // 过期守卫：过期回包（含 !ok 的回滚）一律整份丢弃 —— 回滚的是
+                // 更新一次的乐观切换，等于把新切换撤销掉。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     // 后端拒绝：回滚乐观切换并给出可见反馈。
@@ -6047,11 +6073,13 @@ const sessionSlice = createSlice({
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
             .addCase(setClipActiveTakeRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 restoreTakeRollback(state, [action.meta.arg.clipId]);
                 setRejected(state, action);
             })
 
             .addCase(cycleClipTakesRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
                 for (const clipId of action.meta.arg.clipIds) {
                     const clip = state.clips.find((entry) => entry.id === clipId);
                     const takes = clip?.takes ?? [];
@@ -6072,6 +6100,8 @@ const sessionSlice = createSlice({
                 }
             })
             .addCase(cycleClipTakesRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     restoreTakeRollback(state, action.meta.arg.clipIds);
@@ -6083,11 +6113,13 @@ const sessionSlice = createSlice({
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
             .addCase(cycleClipTakesRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 restoreTakeRollback(state, action.meta.arg.clipIds);
                 setRejected(state, action);
             })
 
             .addCase(setClipTakeReversedRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
                 // 乐观翻转单个 Take：与后端 flip_take_playback_direction 同口径
                 // 换算该 Take 的源窗口/锚点（保持消费内容不变）。active take
                 // 需物化到 flat 投影；inactive take 只动自身条目。
@@ -6109,6 +6141,8 @@ const sessionSlice = createSlice({
                 }
             })
             .addCase(setClipTakeReversedRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     state.error = "Take reverse rejected";
@@ -6117,9 +6151,13 @@ const sessionSlice = createSlice({
                 }
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
-            .addCase(setClipTakeReversedRemote.rejected, setRejected)
+            .addCase(setClipTakeReversedRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                setRejected(state, action);
+            })
 
             .addCase(setClipTakeChannelModeRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
                 // 乐观切换单个 Take 的声道模式；active take 物化到 flat 投影，
                 // inactive take 只动自身条目（与 reversed 同模式）。
                 const clip = state.clips.find((entry) => entry.id === action.meta.arg.clipId);
@@ -6133,6 +6171,8 @@ const sessionSlice = createSlice({
                 }
             })
             .addCase(setClipTakeChannelModeRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     state.error = "Take channel mode rejected";
@@ -6141,18 +6181,44 @@ const sessionSlice = createSlice({
                 }
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
-            .addCase(setClipTakeChannelModeRemote.rejected, setRejected)
+            .addCase(setClipTakeChannelModeRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                setRejected(state, action);
+            })
 
-            .addCase(packClipsIntoTakesRemote.rejected, setRejected)
+            .addCase(packClipsIntoTakesRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                setRejected(state, action);
+            })
 
-            .addCase(explodeClipTakesRemote.rejected, setRejected)
+            .addCase(explodeClipTakesRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                setRejected(state, action);
+            })
 
-            .addCase(duplicateClipTakeRemote.rejected, setRejected)
-            .addCase(removeClipTakeRemote.rejected, setRejected)
-            .addCase(renameClipTakeRemote.rejected, setRejected)
-            .addCase(addClipTakeFromMediaRemote.rejected, setRejected)
+            .addCase(duplicateClipTakeRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                setRejected(state, action);
+            })
+            .addCase(removeClipTakeRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                setRejected(state, action);
+            })
+            .addCase(renameClipTakeRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                setRejected(state, action);
+            })
+            .addCase(addClipTakeFromMediaRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                setRejected(state, action);
+            })
 
+            .addCase(packClipsIntoTakesRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(packClipsIntoTakesRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     state.error = "Pack into takes failed";
@@ -6162,7 +6228,12 @@ const sessionSlice = createSlice({
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
 
+            .addCase(explodeClipTakesRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(explodeClipTakesRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     state.error = "Explode takes failed";
@@ -6172,7 +6243,12 @@ const sessionSlice = createSlice({
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
 
+            .addCase(duplicateClipTakeRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(duplicateClipTakeRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     state.error = "Duplicate take failed";
@@ -6181,7 +6257,12 @@ const sessionSlice = createSlice({
                 }
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
+            .addCase(removeClipTakeRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(removeClipTakeRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     state.error = "Remove take failed";
@@ -6190,7 +6271,12 @@ const sessionSlice = createSlice({
                 }
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
+            .addCase(renameClipTakeRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(renameClipTakeRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     state.error = "Rename take failed";
@@ -6199,7 +6285,12 @@ const sessionSlice = createSlice({
                 }
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
+            .addCase(addClipTakeFromMediaRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(addClipTakeFromMediaRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     state.error = "Add take from media failed";

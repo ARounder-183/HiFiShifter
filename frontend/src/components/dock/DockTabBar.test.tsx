@@ -75,11 +75,11 @@ function seedLayout(store: ReturnType<typeof createTestStore>): void {
             schema: 2,
             roots: {
                 main: {
-                t: "tabset",
-                id: "ts1",
-                tabs: [...TAB_IDS],
-                active: TAB_IDS[0],
-                collapsed: false,
+                    t: "tabset",
+                    id: "ts1",
+                    tabs: [...TAB_IDS],
+                    active: TAB_IDS[0],
+                    collapsed: false,
                 },
             },
             forms: Object.fromEntries(

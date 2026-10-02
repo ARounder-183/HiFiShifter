@@ -429,9 +429,17 @@ mod tests {
         entries.iter().map(|entry| entry.name.as_str()).collect()
     }
 
-    fn search(dir: &std::path::Path, query: &str, options: Option<SearchOptions>) -> Vec<FileEntry> {
-        search_files_recursive(dir.to_string_lossy().into_owned(), query.to_string(), options)
-            .expect("search")
+    fn search(
+        dir: &std::path::Path,
+        query: &str,
+        options: Option<SearchOptions>,
+    ) -> Vec<FileEntry> {
+        search_files_recursive(
+            dir.to_string_lossy().into_owned(),
+            query.to_string(),
+            options,
+        )
+        .expect("search")
     }
 
     #[test]
@@ -439,8 +447,16 @@ mod tests {
         let dir = fixture();
         let hits = search(&dir, "zhuge", None);
         // 主形态命中优先：两条「主歌」都在，嵌套的那条也算。
-        assert!(names(&hits).contains(&"主歌_vocal01.wav"), "命中: {:?}", names(&hits));
-        assert!(names(&hits).contains(&"深处的主歌.wav"), "命中: {:?}", names(&hits));
+        assert!(
+            names(&hits).contains(&"主歌_vocal01.wav"),
+            "命中: {:?}",
+            names(&hits)
+        );
+        assert!(
+            names(&hits).contains(&"深处的主歌.wav"),
+            "命中: {:?}",
+            names(&hits)
+        );
         // 不含「主歌」读音的文件不得混进来。
         assert!(!names(&hits).contains(&"readme.txt"));
     }

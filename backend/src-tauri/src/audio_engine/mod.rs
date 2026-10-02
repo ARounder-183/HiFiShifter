@@ -1,8 +1,8 @@
 pub(crate) mod byte_budget_cache;
 mod engine;
 mod io;
-mod mix;
 pub(crate) mod metronome;
+mod mix;
 mod resource_manager;
 pub(crate) mod snapshot;
 pub(crate) mod types;

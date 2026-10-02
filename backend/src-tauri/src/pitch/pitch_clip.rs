@@ -6,6 +6,10 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Instant;
 
+/// pitch 分析 worker 池的最大并发数。分析瓶颈是共享 FCPE 会话锁，池再大也只是
+/// 多占内存工作集；取 4 足以在锁间隙重叠 IO 与 CPU 阶段。
+const PITCH_ANALYSIS_WORKER_CAP: usize = 4;
+
 // ── 全局 clip pitch 分析进度状态 ─────────────────────────────────────────────
 
 /// 当前批次的进度状态（供前端轮询）
@@ -184,11 +188,9 @@ fn clip_pitch_cache_budget_bytes() -> u64 {
             .filter(|v| *v > 0);
         match mb {
             Some(mb) => mb.saturating_mul(1024 * 1024),
-            None => {
-                (crate::audio_engine::byte_budget_cache::env_cache_budget_bytes()
-                    / CLIP_PITCH_CACHE_BUDGET_DIVISOR)
-                    .max(1024 * 1024)
-            }
+            None => (crate::audio_engine::byte_budget_cache::env_cache_budget_bytes()
+                / CLIP_PITCH_CACHE_BUDGET_DIVISOR)
+                .max(1024 * 1024),
         }
     })
 }
@@ -337,7 +339,11 @@ fn hz_to_midi(hz: f64) -> f32 {
 /// `round(220.5) = 221` 会让每帧多走 0.5 样本，累积成 2.27 ms/s 的漂移 ——
 /// 30 s 处已达 68 ms（≈ "检测值比真实值左偏 0.07 s"），且随时间线性增长，
 /// 与真实音频逐帧错位。取整只发生在换算**该帧的窗口边界**这一步。
-pub(crate) fn compute_frame_levels(mono: &[f32], sample_rate: u32, frame_period_ms: f64) -> Vec<f32> {
+pub(crate) fn compute_frame_levels(
+    mono: &[f32],
+    sample_rate: u32,
+    frame_period_ms: f64,
+) -> Vec<f32> {
     const WINDOW_MS: f64 = 20.0;
     let fp = frame_period_ms.max(0.1);
     let sr = sample_rate.max(1) as f64;
@@ -689,7 +695,8 @@ pub fn schedule_clip_pitch_jobs(
         if !file_exists_cached(Path::new(source_path)) {
             debug_eprintln!(
                 "[pitch_clip] clip '{}' skipped: file not found: {}",
-                clip.id, source_path
+                clip.id,
+                source_path
             );
             continue;
         }
@@ -739,13 +746,15 @@ pub fn schedule_clip_pitch_jobs(
             if cache.contains_key(&ck.key) {
                 debug_eprintln!(
                     "[pitch_clip] clip '{}' ({}) cache HIT (shared key), skipping",
-                    clip.name, clip.id
+                    clip.name,
+                    clip.id
                 );
                 continue;
             }
             debug_eprintln!(
                 "[pitch_clip] clip '{}' ({}) cache MISS, will analyze",
-                clip.name, clip.id
+                clip.name,
+                clip.id
             );
         }
 
@@ -756,7 +765,8 @@ pub fn schedule_clip_pitch_jobs(
             if set.contains(&inflight_key) {
                 debug_eprintln!(
                     "[pitch_clip] clip '{}' ({}) already inflight, skipping",
-                    clip.name, clip.id
+                    clip.name,
+                    clip.id
                 );
                 false
             } else {
@@ -815,7 +825,8 @@ pub fn schedule_clip_pitch_jobs(
         let first_clip_name = pending_jobs.first().map(|j| j.clip.name.clone());
         log::warn!(
             "[pitch_clip] emitting initial progress 0/{}, first_clip={:?}",
-            total, first_clip_name
+            total,
+            first_clip_name
         );
         let r2 = app.emit(
             "pitch_orig_analysis_progress",
@@ -839,138 +850,181 @@ pub fn schedule_clip_pitch_jobs(
     let tl_shared = Arc::new(tl.clone());
     let generation = current_pitch_generation();
 
-    for job in pending_jobs {
+    // 【并发上界】此前逐 job `std::thread::spawn`：大工程（数百 clip 待分析）会
+    // 一口气开出数百条线程，而所有分析最终都要在同一把共享 FCPE 会话互斥锁上
+    // 串行化（fcpe_onnx::SHARED_SESSION），扇出既不增加并行度，还会同时发起
+    // 数百份"两次全文件扫描"的磁盘 / CPU 风暴。改为固定大小的 worker 池从共享
+    // 队列取 job：有效并发由会话锁天然钳住，池大小只决定同时持有分析工作集的
+    // 上限（内存峰值的边界）。
+    let worker_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(1, PITCH_ANALYSIS_WORKER_CAP);
+    let job_queue = Arc::new(Mutex::new(std::collections::VecDeque::from(pending_jobs)));
+    for _ in 0..worker_count {
+        let queue = Arc::clone(&job_queue);
         let tx = engine_tx.clone();
         let app_handle_clone = app_handle.cloned();
         let tl_shared = Arc::clone(&tl_shared);
 
-        std::thread::spawn(move || {
-            // 通知进度：开始分析此 clip
+        std::thread::spawn(move || loop {
+            // 锁毒化沿用全库约定（into_inner 继续）：队列状态由 pop_front 的
+            // 原子性保证，毒化不影响其中剩余 job 的有效性。
+            let job = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+            let Some(job) = job else { break }; // 队列空：本 worker 退出
+            run_pitch_analysis_job(
+                &job,
+                &tx,
+                app_handle_clone.as_ref(),
+                &tl_shared,
+                generation,
+                total,
+                frame_period_ms,
+            );
+        });
+    }
+
+    /// 单个分析 job 的完整生命周期（从原 per-job 线程闭包原样搬来，仅 app_handle
+    /// 改为引用传参）：跑分析 → 推进度 → 释放 inflight → 写缓存 → 通知引擎。
+    fn run_pitch_analysis_job(
+        job: &PendingJob,
+        tx: &mpsc::Sender<crate::audio_engine::types::EngineCommand>,
+        app_handle: Option<&tauri::AppHandle>,
+        tl_shared: &Arc<TimelineState>,
+        generation: u64,
+        total: u32,
+        frame_period_ms: f64,
+    ) {
+        use crate::pitch_analysis::PitchOrigAnalysisProgressEvent;
+        use tauri::Emitter;
+
+        // 通知进度：开始分析此 clip
+        log::warn!(
+            "[pitch_clip] thread: starting analysis for clip '{}'",
+            job.clip.name
+        );
+        global_batch_state().set_current(Some(job.clip.name.clone()));
+
+        // 块间取消：工程一旦切换就尽早退出，否则旧素材还要占着分析期的工作集
+        // 一直跑到结束（那正是内存峰值的来源）。
+        let cancelled = || current_pitch_generation() != generation;
+        let analysis = analyze_clip_pitch_and_level_cancellable(
+            &tl_shared,
+            &job.clip,
+            &job.root_track_id,
+            frame_period_ms,
+            &cancelled,
+        );
+
+        // 取消检查：分析期间工程可能已切换（或缓存已被清空）。此时结果属于
+        // 旧工程 —— 既不该写进新工程的全局缓存，也不该再推进旧批次的进度。
+        if current_pitch_generation() != generation {
             log::warn!(
-                "[pitch_clip] thread: starting analysis for clip '{}'",
+                "[pitch_clip] thread: discarding result for clip '{}' (generation changed)",
                 job.clip.name
             );
-            global_batch_state().set_current(Some(job.clip.name.clone()));
+            release_inflight(&job.inflight_key);
+            return;
+        }
 
-            // 块间取消：工程一旦切换就尽早退出，否则旧素材还要占着分析期的工作集
-            // 一直跑到结束（那正是内存峰值的来源）。
-            let cancelled = || current_pitch_generation() != generation;
-            let analysis = analyze_clip_pitch_and_level_cancellable(
-                &tl_shared,
-                &job.clip,
-                &job.root_track_id,
-                frame_period_ms,
-                &cancelled,
+        // 只要拿到电平（或音高）就值得写缓存：DYN 的原声基线独立于声码器。
+        let has_data = analysis
+            .as_ref()
+            .map(|a| !a.midi.is_empty() || !a.level.is_empty())
+            .unwrap_or(false);
+
+        // 完成一个 clip，更新进度
+        let completed = global_batch_state().complete_one();
+        global_batch_state().set_current(None);
+        log::warn!(
+            "[pitch_clip] thread: clip '{}' analysis done, has_data={}, completed={}/{}",
+            job.clip.name,
+            has_data,
+            completed,
+            total
+        );
+
+        // 发送进度事件
+        if let Some(app) = app_handle {
+            let progress = if total == 0 {
+                1.0
+            } else {
+                completed as f32 / total as f32
+            };
+            let r = app.emit(
+                "pitch_orig_analysis_progress",
+                PitchOrigAnalysisProgressEvent {
+                    root_track_id: job.root_track_id.clone(),
+                    progress: progress.clamp(0.0, 1.0),
+                    current_clip_name: None,
+                    completed_clips: completed,
+                    total_clips: total,
+                },
             );
-
-            // 取消检查：分析期间工程可能已切换（或缓存已被清空）。此时结果属于
-            // 旧工程 —— 既不该写进新工程的全局缓存，也不该再推进旧批次的进度。
-            if current_pitch_generation() != generation {
-                log::warn!(
-                    "[pitch_clip] thread: discarding result for clip '{}' (generation changed)",
-                    job.clip.name
-                );
-                release_inflight(&job.inflight_key);
-                return;
-            }
-
-            // 只要拿到电平（或音高）就值得写缓存：DYN 的原声基线独立于声码器。
-            let has_data = analysis
-                .as_ref()
-                .map(|a| !a.midi.is_empty() || !a.level.is_empty())
-                .unwrap_or(false);
-
-            // 完成一个 clip，更新进度
-            let completed = global_batch_state().complete_one();
-            global_batch_state().set_current(None);
-            log::warn!(
-                "[pitch_clip] thread: clip '{}' analysis done, has_data={}, completed={}/{}",
-                job.clip.name,
-                has_data,
+            debug_eprintln!(
+                "[pitch_clip] thread: progress emit {}/{} result: {:?}",
                 completed,
+                total,
+                r
+            );
+        } else {
+            log::warn!("[pitch_clip] thread: WARNING app_handle is None, cannot emit progress!");
+        }
+
+        // 无论成功与否，先清除 inflight 标记
+        release_inflight(&job.inflight_key);
+
+        // 写缓存前再确认一次代次：进度事件与缓存写入之间仍可能发生工程切换，
+        // 而写入是不可回滚的 —— 一旦写进全局缓存，条目在新工程里既不可达
+        // 也无人清理。
+        if current_pitch_generation() != generation {
+            log::warn!(
+                "[pitch_clip] thread: skipping cache store for clip '{}' (generation changed)",
+                job.clip.name
+            );
+            return;
+        }
+
+        if let Some(analysis) = analysis.filter(|_| has_data) {
+            let cached = CachedClipPitch {
+                key: job.ck.key.clone(),
+                midi: analysis.midi,
+                level: analysis.level,
+            };
+            store_clip_pitch_cache(cached);
+            // 通知引擎缓存已就绪，触发 snapshot rebuild。
+            // 以内容哈希查找所有共享该源文件的 clip，逐一发送通知。
+            let sharing_clip_ids: Vec<String> = tl_shared
+                .clips
+                .iter()
+                .filter_map(|c| {
+                    let root = tl_shared
+                        .resolve_root_track_id(&c.track_id)
+                        .unwrap_or_default();
+                    build_clip_pitch_key(&tl_shared, c, &root, frame_period_ms)
+                        .filter(|other_ck| other_ck.key == job.ck.key)
+                        .map(|_| c.id.clone())
+                })
+                .collect();
+            log::warn!(
+                "[pitch_clip] thread: notifying {} clip(s) sharing content key",
+                sharing_clip_ids.len()
+            );
+            for cid in sharing_clip_ids {
+                let _ = tx.send(crate::audio_engine::types::EngineCommand::ClipPitchReady {
+                    clip_id: cid,
+                });
+            }
+        }
+
+        // 所有 clip 完成后，重置全局进度状态
+        if completed >= total {
+            log::warn!(
+                "[pitch_clip] thread: all {} clips done, resetting batch state",
                 total
             );
-
-            // 发送进度事件
-            if let Some(app) = &app_handle_clone {
-                let progress = if total == 0 {
-                    1.0
-                } else {
-                    completed as f32 / total as f32
-                };
-                let r = app.emit(
-                    "pitch_orig_analysis_progress",
-                    PitchOrigAnalysisProgressEvent {
-                        root_track_id: job.root_track_id.clone(),
-                        progress: progress.clamp(0.0, 1.0),
-                        current_clip_name: None,
-                        completed_clips: completed,
-                        total_clips: total,
-                    },
-                );
-                debug_eprintln!(
-                    "[pitch_clip] thread: progress emit {}/{} result: {:?}",
-                    completed, total, r
-                );
-            } else {
-                log::warn!("[pitch_clip] thread: WARNING app_handle is None, cannot emit progress!");
-            }
-
-            // 无论成功与否，先清除 inflight 标记
-            release_inflight(&job.inflight_key);
-
-            // 写缓存前再确认一次代次：进度事件与缓存写入之间仍可能发生工程切换，
-            // 而写入是不可回滚的 —— 一旦写进全局缓存，条目在新工程里既不可达
-            // 也无人清理。
-            if current_pitch_generation() != generation {
-                log::warn!(
-                    "[pitch_clip] thread: skipping cache store for clip '{}' (generation changed)",
-                    job.clip.name
-                );
-                return;
-            }
-
-            if let Some(analysis) = analysis.filter(|_| has_data) {
-                let cached = CachedClipPitch {
-                    key: job.ck.key.clone(),
-                    midi: analysis.midi,
-                    level: analysis.level,
-                };
-                store_clip_pitch_cache(cached);
-                // 通知引擎缓存已就绪，触发 snapshot rebuild。
-                // 以内容哈希查找所有共享该源文件的 clip，逐一发送通知。
-                let sharing_clip_ids: Vec<String> = tl_shared
-                    .clips
-                    .iter()
-                    .filter_map(|c| {
-                        let root = tl_shared
-                            .resolve_root_track_id(&c.track_id)
-                            .unwrap_or_default();
-                        build_clip_pitch_key(&tl_shared, c, &root, frame_period_ms)
-                            .filter(|other_ck| other_ck.key == job.ck.key)
-                            .map(|_| c.id.clone())
-                    })
-                    .collect();
-                log::warn!(
-                    "[pitch_clip] thread: notifying {} clip(s) sharing content key",
-                    sharing_clip_ids.len()
-                );
-                for cid in sharing_clip_ids {
-                    let _ = tx.send(crate::audio_engine::types::EngineCommand::ClipPitchReady {
-                        clip_id: cid,
-                    });
-                }
-            }
-
-            // 所有 clip 完成后，重置全局进度状态
-            if completed >= total {
-                log::warn!(
-                    "[pitch_clip] thread: all {} clips done, resetting batch state",
-                    total
-                );
-                global_batch_state().reset(0);
-            }
-        });
+            global_batch_state().reset(0);
+        }
     }
 }
 
@@ -1007,43 +1061,47 @@ pub fn analyze_clip_pitch_and_level_cancellable(
     let source_path = clip.source_path.as_deref()?;
     let want_pitch = crate::fcpe_onnx::is_available();
 
-    let (f0_hz, level, was_cancelled) =
-        if crate::pitch_config::PitchAnalysisConfig::global().chunking_enabled {
-            let mut source =
-                crate::streaming_pitch::MediaFileSource::new(Path::new(source_path));
-            let params = crate::streaming_pitch::StreamParams {
-                analysis_rate: ck.sample_rate,
-                frame_period_ms: ck.frame_period_ms,
-                want_pitch,
-                chunking: crate::streaming_pitch::Chunking::from_config(),
-                estimator: &crate::streaming_pitch::FcpeEstimator,
-                cancelled,
-            };
-            match crate::streaming_pitch::analyze_streaming(&mut source, &params) {
-                Ok(streamed) => {
-                    log::debug!(
+    let (f0_hz, level, was_cancelled) = if crate::pitch_config::PitchAnalysisConfig::global()
+        .chunking_enabled
+    {
+        let mut source = crate::streaming_pitch::MediaFileSource::new(Path::new(source_path));
+        let params = crate::streaming_pitch::StreamParams {
+            analysis_rate: ck.sample_rate,
+            frame_period_ms: ck.frame_period_ms,
+            want_pitch,
+            chunking: crate::streaming_pitch::Chunking::from_config(),
+            estimator: &crate::streaming_pitch::FcpeEstimator,
+            cancelled,
+        };
+        match crate::streaming_pitch::analyze_streaming(&mut source, &params) {
+            Ok(streamed) => {
+                log::debug!(
                         "[pitch_clip] streamed analysis for clip '{}': {} pitch frames, {} level frames",
                         clip.name,
                         streamed.f0_hz.len(),
                         streamed.level.len()
                     );
-                    (streamed.f0_hz, streamed.level, streamed.cancelled)
-                }
-                Err(e) => {
-                    log::error!(
-                        "[pitch_clip] streaming analysis failed for clip '{}' ({}): {}",
-                        clip.name,
-                        clip.id,
-                        e
-                    );
-                    return None;
-                }
+                (streamed.f0_hz, streamed.level, streamed.cancelled)
             }
-        } else {
-            let (f0_hz, level) =
-                analyze_whole_source(Path::new(source_path), ck.sample_rate, ck.frame_period_ms, want_pitch)?;
-            (f0_hz, level, false)
-        };
+            Err(e) => {
+                log::error!(
+                    "[pitch_clip] streaming analysis failed for clip '{}' ({}): {}",
+                    clip.name,
+                    clip.id,
+                    e
+                );
+                return None;
+            }
+        }
+    } else {
+        let (f0_hz, level) = analyze_whole_source(
+            Path::new(source_path),
+            ck.sample_rate,
+            ck.frame_period_ms,
+            want_pitch,
+        )?;
+        (f0_hz, level, false)
+    };
 
     if was_cancelled {
         log::warn!(
@@ -1681,12 +1739,12 @@ mod tests {
         let mut offsets: Vec<f64> = Vec::new();
         for &t in &pulses {
             let expect = (t * 1000.0 / fp) as f64; // 例：5 s → 帧 1000
-            // 电平重心（在期望帧附近的窗口内按电平加权）。
-            //
-            // 不能用"取最大值的那一帧"：20 ms 的窗比 5 ms 的帧宽，脉冲会在
-            // 相邻若干帧上形成平顶，argmax 只能反映遍历顺序，不能反映栅格。
-            // 重心是对称窗口下的无偏估计，且**若栅格有累积漂移，重心偏移会
-            // 随 t 线性增长** —— 这正是要钉住的性质。
+                                                   // 电平重心（在期望帧附近的窗口内按电平加权）。
+                                                   //
+                                                   // 不能用"取最大值的那一帧"：20 ms 的窗比 5 ms 的帧宽，脉冲会在
+                                                   // 相邻若干帧上形成平顶，argmax 只能反映遍历顺序，不能反映栅格。
+                                                   // 重心是对称窗口下的无偏估计，且**若栅格有累积漂移，重心偏移会
+                                                   // 随 t 线性增长** —— 这正是要钉住的性质。
             let lo = ((expect - 8.0).max(0.0)) as usize;
             let hi = ((expect + 8.0) as usize).min(levels.len() - 1);
             let mut wsum = 0.0f64;
@@ -1849,7 +1907,9 @@ mod tests {
         // 4) 面板打开（前端登记）→ 必须分析，哪怕一个点都还没画。
         //    这是虚线基线与 dB 波形能在切到动态面板后立刻显示的前提。
         {
-            let mut roots = dyn_panel_open_roots().lock().unwrap_or_else(|e| e.into_inner());
+            let mut roots = dyn_panel_open_roots()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             roots.insert("root".to_string());
         }
         assert!(
@@ -1858,7 +1918,9 @@ mod tests {
         );
         // 清理，避免污染同进程内的其它测试。
         {
-            let mut roots = dyn_panel_open_roots().lock().unwrap_or_else(|e| e.into_inner());
+            let mut roots = dyn_panel_open_roots()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             roots.remove("root");
         }
         assert!(
@@ -1932,9 +1994,8 @@ mod tests {
             // 0.5 s 440 Hz 正弦，左右相同。
             for i in 0..(sr as usize / 2) {
                 let t = i as f32 / sr as f32;
-                let v = (0.5
-                    * (2.0 * std::f32::consts::PI * 440.0 * t).sin()
-                    * i16::MAX as f32) as i16;
+                let v =
+                    (0.5 * (2.0 * std::f32::consts::PI * 440.0 * t).sin() * i16::MAX as f32) as i16;
                 writer.write_sample(v).expect("write L");
                 writer.write_sample(v).expect("write R");
             }

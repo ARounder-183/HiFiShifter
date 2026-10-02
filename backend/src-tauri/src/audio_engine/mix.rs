@@ -231,7 +231,11 @@ fn apply_mix_automation(clip: &EngineClip, abs_frame: u64, l: f32, r: f32) -> (f
 /// Take 声道模式的实时采样映射（与离线 `condition_take_channels` 语义一致）。
 /// 仅用于**源 PCM** 读取路径；Swap/MonoLeft/MonoRight 是纯平面选择，
 /// MonoMix 为每样本一次加法 —— 均为零分配。
-fn apply_take_channel_mode(left: f32, right: f32, mode: crate::channel_mode::TakeChannelMode) -> (f32, f32) {
+fn apply_take_channel_mode(
+    left: f32,
+    right: f32,
+    mode: crate::channel_mode::TakeChannelMode,
+) -> (f32, f32) {
     match mode {
         crate::channel_mode::TakeChannelMode::Normal => (left, right),
         crate::channel_mode::TakeChannelMode::Swap => (right, left),
@@ -1014,7 +1018,7 @@ mod tests {
             src_start_frame: 0,
             src_end_frame: 4,
             reversed: false,
-        channel_mode: crate::channel_mode::TakeChannelMode::Normal,
+            channel_mode: crate::channel_mode::TakeChannelMode::Normal,
             playback_rate: 1.0,
             local_src_offset_frames: 0,
             repeat: false,

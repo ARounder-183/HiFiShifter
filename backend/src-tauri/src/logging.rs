@@ -124,7 +124,10 @@ pub fn init_logging(choice: LogFileChoice) {
             log_path.display()
         );
     } else {
-        log::warn!("failed to open log file, continuing console-only: {}", log_path.display());
+        log::warn!(
+            "failed to open log file, continuing console-only: {}",
+            log_path.display()
+        );
     }
 }
 
@@ -145,7 +148,12 @@ fn default_log_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var_os("HOME")?;
-        Some(PathBuf::from(home).join("Library").join("Logs").join(APP_IDENTIFIER))
+        Some(
+            PathBuf::from(home)
+                .join("Library")
+                .join("Logs")
+                .join(APP_IDENTIFIER),
+        )
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -170,9 +178,9 @@ struct StderrLogger;
 const DEMOTED_TARGETS: &[(&str, log::LevelFilter)] = &[("symphonia", log::LevelFilter::Warn)];
 
 fn is_demoted(target: &str, level: log::Level) -> bool {
-    DEMOTED_TARGETS
-        .iter()
-        .any(|(prefix, min_level)| target.starts_with(prefix) && level_filter_of(level) > *min_level)
+    DEMOTED_TARGETS.iter().any(|(prefix, min_level)| {
+        target.starts_with(prefix) && level_filter_of(level) > *min_level
+    })
 }
 
 impl log::Log for StderrLogger {
@@ -233,9 +241,7 @@ fn install_panic_hook() {
         let location = info.location().map(|l| l.to_string()).unwrap_or_default();
         let payload = panic_payload_as_str(info.payload());
         let backtrace = std::backtrace::Backtrace::force_capture();
-        log::error!(
-            "PANIC: thread '{thread_name}' panicked at {location}: {payload}\n{backtrace}"
-        );
+        log::error!("PANIC: thread '{thread_name}' panicked at {location}: {payload}\n{backtrace}");
         // `panic = "abort"` 下 hook 返回后进程立即中止；短暂等待让 tee 线程
         // 把上面的错误行从管道落盘。
         std::thread::sleep(std::time::Duration::from_millis(150));
@@ -291,7 +297,9 @@ fn limited_decision(state: &mut RateLimitState, now: Instant, window: Duration) 
         _ => {
             let previously_suppressed = std::mem::take(&mut state.suppressed);
             state.last_emit = Some(now);
-            EmitDecision::Emit { previously_suppressed }
+            EmitDecision::Emit {
+                previously_suppressed,
+            }
         }
     }
 }
@@ -324,13 +332,17 @@ pub fn emit_limited(
 
     let decision = {
         let mut map = rate_limiter().lock().unwrap_or_else(|e| e.into_inner());
-        let state = map
-            .entry((file, line))
-            .or_insert_with(|| RateLimitState { last_emit: None, suppressed: 0 });
+        let state = map.entry((file, line)).or_insert_with(|| RateLimitState {
+            last_emit: None,
+            suppressed: 0,
+        });
         limited_decision(state, Instant::now(), RATE_LIMIT_WINDOW)
     };
 
-    if let EmitDecision::Emit { previously_suppressed } = decision {
+    if let EmitDecision::Emit {
+        previously_suppressed,
+    } = decision
+    {
         if previously_suppressed > 0 {
             log::log!(
                 level,
@@ -450,15 +462,26 @@ impl RotatingLog {
         // 追加模式下文件可能已接近上限（上次会话遗留）：按真实长度初始化
         // 计数，否则本轮要再写满一个 MAX 才会触发轮转，文件可超出上限近一倍。
         let bytes_written = file.metadata().map(|m| m.len()).unwrap_or(0);
-        Ok(Self { path, file, bytes_written, lines_since_check: 0 })
+        Ok(Self {
+            path,
+            file,
+            bytes_written,
+            lines_since_check: 0,
+        })
     }
 
     /// 打开（必要时先轮转）日志文件并写入会话头。
     fn open_with_rotation(path: &Path) -> std::io::Result<std::fs::File> {
-        if std::fs::metadata(path).map(|m| m.len() >= MAX_LOG_FILE_BYTES).unwrap_or(false) {
+        if std::fs::metadata(path)
+            .map(|m| m.len() >= MAX_LOG_FILE_BYTES)
+            .unwrap_or(false)
+        {
             Self::shift_files(path);
         }
-        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
         let _ = writeln!(
             file,
             "==== HiFiShifter v{} ({} {}) log started at {} ====",
@@ -525,10 +548,15 @@ mod tests {
 
     #[test]
     fn limited_decision_first_call_emits() {
-        let mut state = RateLimitState { last_emit: None, suppressed: 0 };
+        let mut state = RateLimitState {
+            last_emit: None,
+            suppressed: 0,
+        };
         let now = Instant::now();
         match limited_decision(&mut state, now, RATE_LIMIT_WINDOW) {
-            EmitDecision::Emit { previously_suppressed } => {
+            EmitDecision::Emit {
+                previously_suppressed,
+            } => {
                 assert_eq!(previously_suppressed, 0);
             }
             EmitDecision::Suppress => panic!("first call must emit"),
@@ -537,7 +565,10 @@ mod tests {
 
     #[test]
     fn limited_decision_suppresses_within_window() {
-        let mut state = RateLimitState { last_emit: None, suppressed: 0 };
+        let mut state = RateLimitState {
+            last_emit: None,
+            suppressed: 0,
+        };
         let now = Instant::now();
         assert!(matches!(
             limited_decision(&mut state, now, RATE_LIMIT_WINDOW),
@@ -555,7 +586,10 @@ mod tests {
 
     #[test]
     fn limited_decision_flushes_suppressed_count_after_window() {
-        let mut state = RateLimitState { last_emit: None, suppressed: 0 };
+        let mut state = RateLimitState {
+            last_emit: None,
+            suppressed: 0,
+        };
         let now = Instant::now();
         assert!(matches!(
             limited_decision(&mut state, now, RATE_LIMIT_WINDOW),
@@ -571,7 +605,9 @@ mod tests {
         // 窗口过期后的下一条：放行，并携带上一窗口累计的抑制条数。
         let after_window = now + RATE_LIMIT_WINDOW + Duration::from_secs(1);
         match limited_decision(&mut state, after_window, RATE_LIMIT_WINDOW) {
-            EmitDecision::Emit { previously_suppressed } => {
+            EmitDecision::Emit {
+                previously_suppressed,
+            } => {
                 assert_eq!(previously_suppressed, 3);
             }
             EmitDecision::Suppress => panic!("call after window must emit"),
@@ -581,7 +617,10 @@ mod tests {
 
     #[test]
     fn limited_decision_re_arms_window_after_flush() {
-        let mut state = RateLimitState { last_emit: None, suppressed: 0 };
+        let mut state = RateLimitState {
+            last_emit: None,
+            suppressed: 0,
+        };
         let now = Instant::now();
         assert!(matches!(
             limited_decision(&mut state, now, RATE_LIMIT_WINDOW),
@@ -589,7 +628,11 @@ mod tests {
         ));
         // 放行后重新进入窗口期：紧随其后的调用再次被抑制。
         assert!(matches!(
-            limited_decision(&mut state, now + Duration::from_millis(1), RATE_LIMIT_WINDOW),
+            limited_decision(
+                &mut state,
+                now + Duration::from_millis(1),
+                RATE_LIMIT_WINDOW
+            ),
             EmitDecision::Suppress
         ));
     }
@@ -597,18 +640,30 @@ mod tests {
     #[test]
     fn short_source_strips_paths() {
         assert_eq!(short_source("src\\commands\\playback.rs"), "playback.rs");
-        assert_eq!(short_source("src/renderer/vslib_processor.rs"), "vslib_processor.rs");
+        assert_eq!(
+            short_source("src/renderer/vslib_processor.rs"),
+            "vslib_processor.rs"
+        );
         assert_eq!(short_source("plain.rs"), "plain.rs");
     }
 
     #[test]
     fn third_party_info_is_demoted() {
         // symphonia 的 info/debug 被丢弃
-        assert!(is_demoted("symphonia_bundle_mp3::demuxer", log::Level::Info));
+        assert!(is_demoted(
+            "symphonia_bundle_mp3::demuxer",
+            log::Level::Info
+        ));
         assert!(is_demoted("symphonia_core::io", log::Level::Debug));
         // symphonia 的 warn/error 保留
-        assert!(!is_demoted("symphonia_bundle_mp3::demuxer", log::Level::Warn));
-        assert!(!is_demoted("symphonia_bundle_mp3::demuxer", log::Level::Error));
+        assert!(!is_demoted(
+            "symphonia_bundle_mp3::demuxer",
+            log::Level::Warn
+        ));
+        assert!(!is_demoted(
+            "symphonia_bundle_mp3::demuxer",
+            log::Level::Error
+        ));
         // 其他 target 不受影响
         assert!(!is_demoted("audio_engine", log::Level::Info));
         assert!(!is_demoted("symphonicax::noisy", log::Level::Info)); // 前缀不匹配

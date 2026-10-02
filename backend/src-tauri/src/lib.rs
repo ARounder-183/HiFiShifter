@@ -23,11 +23,11 @@ macro_rules! log_error_limited {
     };
 }
 
-pub mod logging;
-mod zip_util;
-mod build_info;
 #[cfg(test)]
 mod build_git;
+mod build_info;
+pub mod logging;
+mod zip_util;
 
 mod audio_engine;
 #[path = "audio/audio_utils.rs"]
@@ -36,14 +36,14 @@ mod audio_utils;
 pub(crate) mod channel_decision;
 #[path = "audio/channel_mode.rs"]
 pub(crate) mod channel_mode;
-#[path = "audio/stereo_detect.rs"]
-pub(crate) mod stereo_detect;
 #[path = "import/channel_policy.rs"]
 pub(crate) mod channel_policy;
 #[path = "pitch/clip_rendering_state.rs"]
 mod clip_rendering_state;
-mod fade_curves;
 pub(crate) mod commands;
+#[path = "audio/encode/mod.rs"]
+mod encode;
+mod fade_curves;
 mod formant_cache;
 #[path = "audio/formant_morph/mod.rs"]
 mod formant_morph;
@@ -53,16 +53,10 @@ mod launch_args;
 mod media;
 #[path = "audio/mixdown.rs"]
 mod mixdown;
-#[path = "audio/encode/mod.rs"]
-mod encode;
-#[path = "audio/silence_detect.rs"]
-mod silence_detect;
 mod models;
 mod pitch_analysis;
 #[path = "pitch/pitch_clip.rs"]
 mod pitch_clip;
-#[path = "pitch/streaming_pitch.rs"]
-mod streaming_pitch;
 #[path = "pitch/pitch_config.rs"]
 mod pitch_config;
 mod pitch_editing;
@@ -71,6 +65,12 @@ mod render_cache;
 mod render_key;
 mod renderer;
 mod search;
+#[path = "audio/silence_detect.rs"]
+mod silence_detect;
+#[path = "audio/stereo_detect.rs"]
+pub(crate) mod stereo_detect;
+#[path = "pitch/streaming_pitch.rs"]
+mod streaming_pitch;
 mod synth_clip_cache;
 
 #[cfg(feature = "onnx")]

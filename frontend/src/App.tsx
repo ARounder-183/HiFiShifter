@@ -71,6 +71,8 @@ import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
 import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
 import { PitchAnalysisProvider, usePitchAnalysis } from "./contexts/PitchAnalysisContext";
 import { ParamDataLoadingChip } from "./components/layout/ParamDataLoadingChip";
+import { AppStatusProgressChips } from "./components/layout/AppStatusProgressChips";
+import { appStatusProgressBus } from "./utils/appStatusProgressBus";
 import { FileBrowserPanel } from "./components/layout/FileBrowserPanel";
 import { AppearanceSettingsPanel } from "./components/layout/AppearanceSettingsPanel";
 import { UndoHistoryPanel } from "./components/layout/UndoHistoryPanel";
@@ -1028,25 +1030,11 @@ function AppInner() {
     const renderingActive = useAppSelector((state) => state.session.playbackRenderingActive);
     const renderingTarget = useAppSelector((state) => state.session.playbackRenderingTarget);
     const renderingBlocking = useAppSelector((state) => state.session.playbackBlockingRenderActive);
-    const [renderingProgress, setRenderingProgress] = useState<number | null>(null);
     const rendering = {
         active: renderingActive,
-        progress: renderingProgress,
         target: renderingTarget,
         blocking: renderingBlocking,
     };
-
-    const [stretching, setStretching] = useState<{
-        active: boolean;
-        clipName: string | null;
-    }>({ active: false, clipName: null });
-
-    // 波形分析进度状态
-    const [waveformAnalysis, setWaveformAnalysis] = useState<{
-        active: boolean;
-        sourcePath: string | null;
-        progress: number | null;
-    }>({ active: false, sourcePath: null, progress: null });
 
     // ── 导入等待提示（延迟点亮）────────────────────────────────────────────
     // 导入走的是盘 IO + 容器探测 + 声道判定，正常只在毫秒级结束，因此**不能**
@@ -1083,7 +1071,7 @@ function AppInner() {
                         const active = Boolean(payload?.active);
                         const clipName =
                             typeof payload?.clipName === "string" ? payload.clipName : null;
-                        setStretching({ active, clipName });
+                        appStatusProgressBus.setStretching({ active, clipName });
                     },
                 );
                 // cleanup 可能发生在 await resolve 之前：已卸载则立即反注册，
@@ -1222,7 +1210,7 @@ function AppInner() {
                                 }
                                 currentProgress = -1;
                                 currentComputingPath = null;
-                                setWaveformAnalysis({
+                                appStatusProgressBus.setWaveformAnalysis({
                                     active: false,
                                     sourcePath: null,
                                     progress: null,
@@ -1259,7 +1247,7 @@ function AppInner() {
                                       .pop()
                                       ?.replace(/\.[^.]+$/, "") ?? sourcePath)
                                 : null;
-                            setWaveformAnalysis({
+                            appStatusProgressBus.setWaveformAnalysis({
                                 active: true,
                                 sourcePath: fileName,
                                 progress: p,
@@ -1275,7 +1263,7 @@ function AppInner() {
                             if (status === "done") {
                                 currentProgress = 1.0;
                                 currentComputingPath = null;
-                                setWaveformAnalysis({
+                                appStatusProgressBus.setWaveformAnalysis({
                                     active: true,
                                     sourcePath: null,
                                     progress: 1.0,
@@ -1283,7 +1271,7 @@ function AppInner() {
                                 fadeOutTimer = setTimeout(() => {
                                     if (!disposed) {
                                         currentProgress = -1;
-                                        setWaveformAnalysis({
+                                        appStatusProgressBus.setWaveformAnalysis({
                                             active: false,
                                             sourcePath: null,
                                             progress: null,
@@ -1298,7 +1286,7 @@ function AppInner() {
                                 }
                                 currentProgress = -1;
                                 currentComputingPath = null;
-                                setWaveformAnalysis({
+                                appStatusProgressBus.setWaveformAnalysis({
                                     active: false,
                                     sourcePath: null,
                                     progress: null,
@@ -1315,7 +1303,7 @@ function AppInner() {
                                 }
                                 currentProgress = -1;
                                 currentComputingPath = null;
-                                setWaveformAnalysis({
+                                appStatusProgressBus.setWaveformAnalysis({
                                     active: false,
                                     sourcePath: null,
                                     progress: null,
@@ -1408,7 +1396,7 @@ function AppInner() {
                                 blocking: originalRenderActiveRef.current,
                             }),
                         );
-                        setRenderingProgress(p);
+                        appStatusProgressBus.setRenderingProgress(p);
 
                         // 渲染从 active→inactive（完成）时，延迟同步一次播放状态，
                         // 使前端能感知后端已真正开始播放。跃迁按 target 判定：
@@ -4196,35 +4184,15 @@ function AppInner() {
                     {importBusy ? (
                         <AppStatusChip tone="accent">{t("status_importing")}</AppStatusChip>
                     ) : null}
-                    {stretching.active ? (
-                        <AppStatusChip tone="accent">
-                            {t("status_stretching")}
-                            {stretching.clipName ? ` "${stretching.clipName}"` : ""}
-                        </AppStatusChip>
-                    ) : null}
-                    {waveformAnalysis.active ? (
-                        <AppStatusChip tone="accent">
-                            {t("status_analyzing_waveform")}
-                            {waveformAnalysis.sourcePath ? ` "${waveformAnalysis.sourcePath}"` : ""}
-                            {waveformAnalysis.progress != null
-                                ? ` ${Math.round(waveformAnalysis.progress * 100)}%`
-                                : ""}
-                        </AppStatusChip>
-                    ) : null}
                     {pitchAnalysisText ? (
                         <AppStatusChip tone="accent">{pitchAnalysisText}</AppStatusChip>
                     ) : null}
                     {/* 参数曲线取数提示：**独立订阅**外部 store，不参与本组件重渲染
                         （见 ParamDataLoadingChip 的说明）。 */}
                     <ParamDataLoadingChip />
-                    {rendering.active ? (
-                        <AppStatusChip tone="accent">
-                            {t("common_rendering")}
-                            {rendering.progress != null
-                                ? ` ${Math.round(rendering.progress * 100)}%`
-                                : ""}
-                        </AppStatusChip>
-                    ) : null}
+                    {/* 高频进度三片（拉伸 / 波形分析 / 渲染进度）：**独立订阅**外部
+                        store，不参与本组件重渲染（见 AppStatusProgressChips 的说明）。 */}
+                    <AppStatusProgressChips />
                     <span
                         className="hs-type-label truncate"
                         style={error ? { color: "var(--qt-danger-text)" } : undefined}

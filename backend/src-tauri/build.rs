@@ -1586,11 +1586,7 @@ fn emit_git_info() {
     let git_dir = git_output(&["rev-parse", "--absolute-git-dir"]);
     // packed-refs 存放在 common dir（主仓库与 gitdir 相同；worktree 下为主 .git）。
     // `--path-format=absolute` 需要 git ≥ 2.31，失败则跳过该指令。
-    let common_dir = git_output(&[
-        "rev-parse",
-        "--path-format=absolute",
-        "--git-common-dir",
-    ]);
+    let common_dir = git_output(&["rev-parse", "--path-format=absolute", "--git-common-dir"]);
 
     if let Some(dir) = &git_dir {
         let dir_path = std::path::Path::new(dir);

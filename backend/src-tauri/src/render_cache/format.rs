@@ -355,7 +355,14 @@ pub fn read_header_only<R: Read>(
     let param_hash = u64::from_le_bytes(head[24..32].try_into().unwrap());
     let project_id = u64::from_le_bytes(head[32..40].try_into().unwrap());
     let pipeline_version = u32::from_le_bytes(head[40..44].try_into().unwrap());
-    Ok((kind, sample_rate, frames, param_hash, project_id, pipeline_version))
+    Ok((
+        kind,
+        sample_rate,
+        frames,
+        param_hash,
+        project_id,
+        pipeline_version,
+    ))
 }
 
 fn invalid(message: &str) -> io::Error {

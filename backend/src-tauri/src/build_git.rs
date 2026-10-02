@@ -24,10 +24,8 @@ pub fn normalize_github_remote_url(raw: &str) -> Option<String> {
         rest
     } else if let Some(rest) = without_suffix.strip_prefix("git@github.com:") {
         rest
-    } else if let Some(rest) = without_suffix.strip_prefix("ssh://git@github.com/") {
-        rest
     } else {
-        return None;
+        without_suffix.strip_prefix("ssh://git@github.com/")?
     };
     let path = path.trim_end_matches('/');
     if path.is_empty() || !path.contains('/') {
@@ -70,9 +68,18 @@ mod tests {
 
     #[test]
     fn rejects_non_github_and_invalid_remotes() {
-        assert_eq!(normalize_github_remote_url("git@gitlab.com:owner/repo.git"), None);
-        assert_eq!(normalize_github_remote_url("https://gitlab.com/owner/repo.git"), None);
-        assert_eq!(normalize_github_remote_url("https://github.com/only-owner"), None);
+        assert_eq!(
+            normalize_github_remote_url("git@gitlab.com:owner/repo.git"),
+            None
+        );
+        assert_eq!(
+            normalize_github_remote_url("https://gitlab.com/owner/repo.git"),
+            None
+        );
+        assert_eq!(
+            normalize_github_remote_url("https://github.com/only-owner"),
+            None
+        );
         assert_eq!(normalize_github_remote_url(""), None);
         assert_eq!(normalize_github_remote_url("   "), None);
     }

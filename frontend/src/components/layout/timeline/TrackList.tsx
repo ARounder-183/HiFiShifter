@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { registerDragAbort } from "./gestureFocusGuard";
 import { formatEditNumber } from "./math";
 import { measureTextWidth } from "./runtime/timelineCanvasStyle";
@@ -474,6 +474,30 @@ const TrackListInner: React.FC<TrackListProps> = ({
     const volumeCommitTimersRef = useRef<Record<string, number>>({});
     const [volumeHoveredTrackId, setVolumeHoveredTrackId] = useState<string | null>(null);
     const [volumeTooltipPos, setVolumeTooltipPos] = useState<{ x: number; y: number } | null>(null);
+    // tooltip 位置合帧：setVolumeTooltipPos 每次都会让整个 TrackList（含全部轨道
+    // 行）重渲，悬停 onPointerMove 在高刷鼠标上逐事件执行纯属浪费（拖拽路径的
+    // 同款问题已在 beginVolumeKnobDrag 内局部合帧）。
+    const volumeTooltipRafRef = useRef<number | null>(null);
+    const volumeTooltipQueuedRef = useRef<{ x: number; y: number } | null>(null);
+    useEffect(() => {
+        return () => {
+            if (volumeTooltipRafRef.current != null) {
+                cancelAnimationFrame(volumeTooltipRafRef.current);
+                volumeTooltipRafRef.current = null;
+            }
+            volumeTooltipQueuedRef.current = null;
+        };
+    }, []);
+    const queueVolumeTooltipPos = useCallback((pos: { x: number; y: number }) => {
+        volumeTooltipQueuedRef.current = pos;
+        if (volumeTooltipRafRef.current != null) return;
+        volumeTooltipRafRef.current = requestAnimationFrame(() => {
+            volumeTooltipRafRef.current = null;
+            const queued = volumeTooltipQueuedRef.current;
+            volumeTooltipQueuedRef.current = null;
+            if (queued) setVolumeTooltipPos(queued);
+        });
+    }, []);
     const [volumeDrag, setVolumeDrag] = useState<{ trackId: string; baseDb: number } | null>(null);
     const [editingGainTrackId, setEditingGainTrackId] = useState<string | null>(null);
     const editingGainTrackIdRef = useRef<string | null>(null);
@@ -1964,7 +1988,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 });
                                                             }}
                                                             onPointerMove={(e) => {
-                                                                setVolumeTooltipPos({
+                                                                queueVolumeTooltipPos({
                                                                     x: e.clientX,
                                                                     y: e.clientY,
                                                                 });

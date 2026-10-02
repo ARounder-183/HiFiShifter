@@ -228,14 +228,13 @@ pub(crate) fn assemble_pitch_orig_from_cache(
 
         // ── 音频 clip 路径：从缓存获取 FCPE 分析结果 ──
         let root = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
-        let midi_curve =
-            match crate::pitch_clip::get_clip_pitch_midi_global(tl, clip, &root, fp) {
-                Some(c) => c,
-                None => {
-                    all_cache_hit = false;
-                    continue;
-                }
-            };
+        let midi_curve = match crate::pitch_clip::get_clip_pitch_midi_global(tl, clip, &root, fp) {
+            Some(c) => c,
+            None => {
+                all_cache_hit = false;
+                continue;
+            }
+        };
 
         // 判断是否为全量源音频缓存（playback_rate == 1）
         let pr = clip.playback_rate as f64;

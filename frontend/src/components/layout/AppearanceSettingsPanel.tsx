@@ -466,6 +466,10 @@ export interface AppearanceSettingsPanelProps {
 export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = ({ formId }) => {
     const { t, tf, plural } = useI18n();
     const theme = useAppTheme();
+    // 解构出稳定引用供下面的实时预览 effect 使用：effect 只依赖具体成员、
+    // 不依赖整个 context 对象（对象身份随 provider 任意更新翻转，见该 effect 处说明）。
+    const applyThemeSettings = theme.applySettings;
+    const themeModeSetting = theme.modeSetting;
     const dispatch = useAppDispatch();
     /*
      * 字体列表的过滤要读搜索设置（转写开关与宽严）。设置本身在**独立的
@@ -706,7 +710,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
         localStorage.setItem(
             PREVIEW_SETTINGS_KEY,
             JSON.stringify({
-                mode: theme.modeSetting,
+                mode: themeModeSetting,
                 accentColor,
                 grayColor,
                 radius,
@@ -714,15 +718,28 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
             }),
         );
         localStorage.setItem(PREVIEW_COLORS_KEY, JSON.stringify(editColors));
-        theme.applySettings({
-            mode: theme.modeSetting,
+        applyThemeSettings({
+            mode: themeModeSetting,
             accentColor,
             grayColor,
             radius,
             fontFamily,
             activeCustomThemeId: null,
         });
-    }, [theme, theme.modeSetting, accentColor, grayColor, radius, fontFamily, editColors]);
+        // 依赖只列具体成员、不含 `theme` 对象：context 对象身份随 provider 的任何
+        // 更新翻转（如 auto 模式下的系统深浅色切换会重建 toggleMode），把它放进
+        // 依赖会让本 effect 在用户未触碰面板时重跑，把**正激活的自定义主题静默
+        // 写回为已停用**（applySettings 会持久化）。`theme.applySettings` 是
+        // useCallback([]) 的稳定引用，列进来只为满足 lint，不引入额外触发。
+    }, [
+        applyThemeSettings,
+        themeModeSetting,
+        accentColor,
+        grayColor,
+        radius,
+        fontFamily,
+        editColors,
+    ]);
 
     /* ── 应用 & 关闭 ── */
     const handleApply = useCallback(() => {

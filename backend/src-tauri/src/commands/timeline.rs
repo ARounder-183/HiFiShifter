@@ -236,7 +236,10 @@ pub(super) fn import_audio_item(
     if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
         log::warn!(
             "import_audio_item(audio_path={}, track_id={:?}, start_sec={:?}, stream={:?})",
-            audio_path, track_id, start_sec, media_audio_stream_index
+            audio_path,
+            track_id,
+            start_sec,
+            media_audio_stream_index
         );
     }
 
@@ -1581,9 +1584,8 @@ pub(super) fn scan_and_convert_fake_stereo(
     // ── 阶段 1（短暂持锁）：取候选快照 ──
     let (targets, eligibility) = {
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        let filter: Option<std::collections::HashSet<String>> = clip_ids
-            .as_ref()
-            .map(|ids| ids.iter().cloned().collect());
+        let filter: Option<std::collections::HashSet<String>> =
+            clip_ids.as_ref().map(|ids| ids.iter().cloned().collect());
         // 显式命令：用户的声道模式选择不否决本次扫描（见 `collect_targets`）。
         let selection = crate::commands::channel_scan::collect_targets(
             &tl,
@@ -1610,9 +1612,9 @@ pub(super) fn scan_and_convert_fake_stereo(
                 }
             }
         }
-        let detail = item.detail.filter(|detail| {
-            detail.verdict == crate::stereo_detect::ChannelVerdict::TrueStereo
-        });
+        let detail = item
+            .detail
+            .filter(|detail| detail.verdict == crate::stereo_detect::ChannelVerdict::TrueStereo);
         entries.push(crate::models::FakeStereoScanEntry {
             clip_id: item.target.clip_id.clone(),
             take_id: item.target.take_id.clone(),
@@ -1623,7 +1625,10 @@ pub(super) fn scan_and_convert_fake_stereo(
             max_abs_diff: detail.map(|detail| detail.max_abs_diff),
         });
     }
-    let pending = planned.iter().filter(|item| item.outcome.is_pending()).count();
+    let pending = planned
+        .iter()
+        .filter(|item| item.outcome.is_pending())
+        .count();
     // `dry_run` 时为"将会被折叠"的数量；实际写回路径以阶段 3 的真实改动数为准。
     let will_convert = planned
         .iter()
@@ -1777,7 +1782,11 @@ pub(super) fn add_clip_take_from_media(
         reversed: false,
         loop_enabled: crate::config::loop_new_clips_default(),
         channel_mode: 0,
-        source_channels: if info.channels > 0 { Some(info.channels) } else { None },
+        source_channels: if info.channels > 0 {
+            Some(info.channels)
+        } else {
+            None
+        },
         channel_decision: None,
         midi_note_data: None,
         midi_fill_gaps: false,
@@ -1848,7 +1857,11 @@ pub(super) fn import_media_files_as_takes(
             reversed: false,
             loop_enabled: crate::config::loop_new_clips_default(),
             channel_mode: 0,
-            source_channels: if info.channels > 0 { Some(info.channels) } else { None },
+            source_channels: if info.channels > 0 {
+                Some(info.channels)
+            } else {
+                None
+            },
             channel_decision: None,
             midi_note_data: None,
             midi_fill_gaps: false,

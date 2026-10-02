@@ -1185,6 +1185,21 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         value: number;
         displayText?: string;
     } | null>(null);
+    // 浮窗更新合帧（见 onParamValuePreviewChange 处的说明）：pointermove 在高刷
+    // 设备上可达数百 Hz，逐事件 setState 会让整个面板以事件频率重渲。
+    const paramValuePreviewRafRef = useRef<number | null>(null);
+    const paramValuePreviewPendingRef = useRef<{
+        payload: { clientX: number; clientY: number; value: number; displayText?: string } | null;
+    } | null>(null);
+    useEffect(() => {
+        return () => {
+            if (paramValuePreviewRafRef.current != null) {
+                cancelAnimationFrame(paramValuePreviewRafRef.current);
+                paramValuePreviewRafRef.current = null;
+            }
+            paramValuePreviewPendingRef.current = null;
+        };
+    }, []);
     /**
      * 纵轴标尺的悬浮读数（`弹出展示参数` 在左轴上的形态）。
      *
@@ -2790,6 +2805,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             if (zoomRafRef.current != null) {
                 cancelAnimationFrame(zoomRafRef.current);
                 zoomRafRef.current = null;
+            }
+            if (rafRef.current != null) {
+                cancelAnimationFrame(rafRef.current);
+                rafRef.current = null;
             }
         };
     }, []);
@@ -5069,7 +5088,17 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     displayText?: string;
                 } | null,
             ) => {
-                setParamValuePreview(next);
+                // 合帧提交：只记最新载荷、每渲染帧至多 setState 一次（与交互层
+                // 各手势的 schedulePreview 同一动机）。浮窗是纯读数 UI，滞后一帧
+                // 不可感知；不合帧时每次 move 的新对象都无法让 React 跳过重渲。
+                paramValuePreviewPendingRef.current = { payload: next };
+                if (paramValuePreviewRafRef.current != null) return;
+                paramValuePreviewRafRef.current = requestAnimationFrame(() => {
+                    paramValuePreviewRafRef.current = null;
+                    const pending = paramValuePreviewPendingRef.current;
+                    paramValuePreviewPendingRef.current = null;
+                    if (pending) setParamValuePreview(pending.payload);
+                });
             },
             [],
         ),
@@ -5556,21 +5585,33 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             return formatParamValuePreview(yToValue(editParam, y, h));
         };
 
+        // 读数合帧：pointermove 高频触发，且 describe 内含 getBoundingClientRect
+        // （布局读取）。每帧至多计算 + setState 一次，滞后一帧不可感知。
+        let previewRafId: number | null = null;
+        let pending: { clientX: number; clientY: number; text: string } | null | undefined;
+        const flushPreview = () => {
+            previewRafId = null;
+            if (pending === undefined) return;
+            setAxisValuePreview(pending);
+            pending = undefined;
+        };
+
         const onPointerMove = (e: PointerEvent) => {
             const text = describe(e.clientY);
-            if (text.length === 0) {
-                setAxisValuePreview(null);
-                return;
-            }
-            setAxisValuePreview({ clientX: e.clientX, clientY: e.clientY, text });
+            pending = text.length === 0 ? null : { clientX: e.clientX, clientY: e.clientY, text };
+            if (previewRafId == null) previewRafId = requestAnimationFrame(flushPreview);
         };
-        const onPointerLeave = () => setAxisValuePreview(null);
+        const onPointerLeave = () => {
+            pending = null;
+            if (previewRafId == null) previewRafId = requestAnimationFrame(flushPreview);
+        };
 
         el.addEventListener("pointermove", onPointerMove);
         el.addEventListener("pointerleave", onPointerLeave);
         return () => {
             el.removeEventListener("pointermove", onPointerMove);
             el.removeEventListener("pointerleave", onPointerLeave);
+            if (previewRafId != null) cancelAnimationFrame(previewRafId);
             setAxisValuePreview(null);
         };
     }, [s.showParamValuePopup, editParam, yToValue, formatParamValuePreview]);

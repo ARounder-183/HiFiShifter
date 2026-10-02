@@ -165,7 +165,13 @@ pub(crate) fn assemble_dyn_orig_from_cache(
     // −4.7 dB（0.582）会被读成另一个数（历史实现读成 1.126）。
     let curve: Vec<f32> = fused
         .iter()
-        .map(|&v| if v.is_finite() { v.clamp(0.0, DYN_ORIG_MAX) } else { 0.0 })
+        .map(|&v| {
+            if v.is_finite() {
+                v.clamp(0.0, DYN_ORIG_MAX)
+            } else {
+                0.0
+            }
+        })
         .collect();
     (curve, all_cache_hit)
 }
@@ -181,10 +187,7 @@ pub(crate) fn assemble_dyn_orig_from_cache(
 ///   并把重叠区基线低估 √N 倍；
 /// - 输出是**绝对电平**，不做任何归一化 —— 归一化会让倍率失去绝对意义，
 ///   与 DAW 的电平表对不上（历史实现即错在这里）。
-fn fuse_level_energy(
-    target_frames: usize,
-    entries: Vec<(usize, f64, Vec<f32>)>,
-) -> Vec<f32> {
+fn fuse_level_energy(target_frames: usize, entries: Vec<(usize, f64, Vec<f32>)>) -> Vec<f32> {
     let mut energy = vec![0.0f64; target_frames];
     for (start, gain, levels) in entries {
         for (i, &level) in levels.iter().enumerate() {
@@ -200,7 +203,11 @@ fn fuse_level_energy(
         .iter()
         .map(|&e| {
             let v = e.sqrt();
-            if v.is_finite() { v as f32 } else { 0.0 }
+            if v.is_finite() {
+                v as f32
+            } else {
+                0.0
+            }
         })
         .collect()
 }
@@ -286,12 +293,17 @@ fn fade_weight_at(
     }
 
     let mut g = 1.0f64;
-    let fade_in_frames = (clip.effective_fade_in_sec().max(0.0) * fps).round().max(0.0);
+    let fade_in_frames = (clip.effective_fade_in_sec().max(0.0) * fps)
+        .round()
+        .max(0.0);
     if fade_in_frames > 0.0 && (local_in_clip as f64) < fade_in_frames {
         g *= (local_in_clip as f64 / fade_in_frames).clamp(0.0, 1.0);
     }
-    let fade_out_frames = (clip.effective_fade_out_sec().max(0.0) * fps).round().max(0.0);
-    if fade_out_frames > 0.0 && (local_in_clip as f64) + fade_out_frames > clip_total_frames as f64 {
+    let fade_out_frames = (clip.effective_fade_out_sec().max(0.0) * fps)
+        .round()
+        .max(0.0);
+    if fade_out_frames > 0.0 && (local_in_clip as f64) + fade_out_frames > clip_total_frames as f64
+    {
         let remain = clip_total_frames.saturating_sub(local_in_clip);
         g *= (remain as f64 / fade_out_frames).clamp(0.0, 1.0);
     }
@@ -368,9 +380,7 @@ pub fn maybe_schedule_dyn_orig(state: &AppState, root_track_id: &str) -> bool {
     // 分析结果（基线恒为占位值）。必须在锁外发起：命令层的调用点持有着
     // timeline 锁，`std::sync::Mutex` 不可重入。
     if !all_cache_hit {
-        state
-            .audio_engine
-            .request_dyn_level_analysis();
+        state.audio_engine.request_dyn_level_analysis();
     }
 
     !all_cache_hit
@@ -410,12 +420,17 @@ pub(crate) fn build_root_dyn_key(tl: &TimelineState, root_track_id: &str) -> Str
         hasher.update(
             &crate::pitch_analysis::quantize_i64(clip.source_start_sec, 1000.0).to_le_bytes(),
         );
-        hasher.update(&crate::pitch_analysis::quantize_i64(clip.source_end_sec, 1000.0).to_le_bytes());
-        hasher.update(&crate::pitch_analysis::quantize_u32(clip.playback_rate as f64, 1000.0).to_le_bytes());
+        hasher.update(
+            &crate::pitch_analysis::quantize_i64(clip.source_end_sec, 1000.0).to_le_bytes(),
+        );
+        hasher.update(
+            &crate::pitch_analysis::quantize_u32(clip.playback_rate as f64, 1000.0).to_le_bytes(),
+        );
         hasher.update(&crate::pitch_analysis::quantize_u32(clip.gain as f64, 1000.0).to_le_bytes());
         hasher.update(&[u8::from(clip.reversed), u8::from(clip.loop_enabled)]);
         hasher.update(
-            &crate::pitch_analysis::quantize_u32(clip.effective_fade_in_sec(), 1000.0).to_le_bytes(),
+            &crate::pitch_analysis::quantize_u32(clip.effective_fade_in_sec(), 1000.0)
+                .to_le_bytes(),
         );
         hasher.update(
             &crate::pitch_analysis::quantize_u32(clip.effective_fade_out_sec(), 1000.0)
@@ -527,10 +542,7 @@ mod tests {
     fn fuse_energy_includes_clip_gain_and_overlaps_as_energy_sum() {
         use super::fuse_level_energy;
         // 单 clip，电平恒 0.5、增益 0.25 → fused = 0.125（不是 0.5）。
-        let fused = fuse_level_energy(
-            4,
-            vec![(0usize, 0.25f64, vec![0.5f32, 0.5, 0.5, 0.5])],
-        );
+        let fused = fuse_level_energy(4, vec![(0usize, 0.25f64, vec![0.5f32, 0.5, 0.5, 0.5])]);
         for v in &fused {
             assert!((v - 0.125).abs() < 1e-6, "got {v}");
         }
@@ -544,7 +556,10 @@ mod tests {
             ],
         );
         for v in &fused {
-            assert!((v - (0.5f32 * std::f64::consts::SQRT_2 as f32)).abs() < 1e-6, "got {v}");
+            assert!(
+                (v - (0.5f32 * std::f64::consts::SQRT_2 as f32)).abs() < 1e-6,
+                "got {v}"
+            );
         }
 
         // 相邻不重叠：各自贡献自己的能量。
@@ -577,9 +592,7 @@ mod tests {
         // 同组里夹一段满量程（0 dBFS）的响段：归一化实现会把 quiet 段抬到 ~1.72。
         let fused = fuse_level_energy(
             4,
-            vec![
-                (0usize, 1.0f64, vec![level, level, 1.0f32, 1.0f32]),
-            ],
+            vec![(0usize, 1.0f64, vec![level, level, 1.0f32, 1.0f32])],
         );
         assert!(
             (fused[0] - level).abs() < 1e-6,

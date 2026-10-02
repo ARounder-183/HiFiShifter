@@ -132,7 +132,7 @@ pub(super) fn get_root_mix_waveform_peaks_segment(
                     ok: false,
                     min: vec![],
                     max: vec![],
-                }
+                };
             }
         };
 
@@ -278,7 +278,7 @@ pub(super) fn get_track_mix_waveform_peaks_segment(
                     ok: false,
                     min: vec![],
                     max: vec![],
-                }
+                };
             }
         };
 
@@ -427,5 +427,3 @@ pub(super) fn batch_get_waveform_mipmap(
 
     result
 }
-
-

@@ -155,8 +155,7 @@ const RENDER_SUMMARY_SETTLE_MS: u64 = 3_000;
 ///
 /// 兜底窗口用它判断"等待期间是否又有新一轮完成"：有则重新计时，避免在加载
 /// 尚未收敛时抢先上报中途值。
-static BG_RENDER_PASS_EPOCH: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static BG_RENDER_PASS_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// 兜底上报线程是否已在等待窗口结束（同一窗口内的重复请求合流）。
 static BG_RENDER_SETTLE_TIMER_ACTIVE: std::sync::atomic::AtomicBool =
@@ -328,12 +327,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         // 因此已在播放（且目标为时间线）时直接返回：只确保渲染需求被覆盖，
         // 绝不再 seek / update_timeline / set_playing。
         if state.audio_engine.is_playing()
-            && state
-                .audio_engine
-                .snapshot_state()
-                .target
-                .as_deref()
-                == Some("original")
+            && state.audio_engine.snapshot_state().target.as_deref() == Some("original")
         {
             if need_prerender && !BG_RENDER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
                 if let Some(app) = state.app_handle.get() {
@@ -490,7 +484,11 @@ fn ensure_hifigan_tension_cache(
 ///
 /// 仅在 `HIFISHIFTER_RENDER_CACHE_LOG=1` 下调用：每个 miss 要多算若干次哈希
 /// （含曲线切片），不能进常规路径。
-fn log_render_key_drift(timeline: &crate::state::TimelineState, clip: &crate::state::Clip, sr: u32) {
+fn log_render_key_drift(
+    timeline: &crate::state::TimelineState,
+    clip: &crate::state::Clip,
+    sr: u32,
+) {
     use crate::synth_clip_cache::{compute_rendered_clip_hash_excluding, HashExclusions};
 
     let scale_signature = timeline.render_scale_signature();
@@ -541,7 +539,8 @@ fn collect_clips_needing_render(
         else {
             continue;
         };
-        let kind = crate::state::SynthPipelineKind::from_track_algo(&material.track.pitch_analysis_algo);
+        let kind =
+            crate::state::SynthPipelineKind::from_track_algo(&material.track.pitch_analysis_algo);
         let renderer_id = crate::renderer::get_renderer(kind).id();
 
         // 渲染参数哈希：与渲染线程、快照回退共用同一份输入口径。
@@ -651,7 +650,9 @@ fn retain_clips_needing_work(clips: &mut Vec<ClipRenderInfo>) -> usize {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let completed = completed_clip_ids(
-        clips.iter().map(|info| (info.clip.id.as_str(), &info.cache_key)),
+        clips
+            .iter()
+            .map(|info| (info.clip.id.as_str(), &info.cache_key)),
         &registered,
         |key| cache.contains_key(key),
     );
@@ -1175,7 +1176,13 @@ fn render_single_clip(
         };
         let mut planes = Vec::with_capacity(channels_mono.len());
         for (ch_idx, ch_mono) in channels_mono.iter().enumerate() {
-            match crate::hnsep_onnx::infer_noise_mono(&clip.id, ch_mono, out_rate, ch_idx as u16, clip.source_file_fingerprint) {
+            match crate::hnsep_onnx::infer_noise_mono(
+                &clip.id,
+                ch_mono,
+                out_rate,
+                ch_idx as u16,
+                clip.source_file_fingerprint,
+            ) {
                 Ok(noise) => planes.push(noise),
                 Err(e) => {
                     log::warn!(
@@ -1531,7 +1538,8 @@ fn start_background_render_inner(
     crate::commands::render_summary::set_project_total(unfiltered_total);
     // 渲染输入稳定性卫兵（按根记忆收敛判定，见 root_pitch_assembly_pending）：
     // 未收敛根的 clip 跳过并计入 pending，由完成回调链条在收敛后补触发渲染。
-    let mut root_settled: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    let mut root_settled: std::collections::HashMap<String, bool> =
+        std::collections::HashMap::new();
     clips_to_render.retain(|info| {
         let root_key = timeline
             .resolve_root_track_id(&info.clip.track_id)
@@ -1864,9 +1872,7 @@ fn schedule_settled_render_cache_summary(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         loop {
             let seen = BG_RENDER_PASS_EPOCH.load(Ordering::Acquire);
-            std::thread::sleep(std::time::Duration::from_millis(
-                RENDER_SUMMARY_SETTLE_MS,
-            ));
+            std::thread::sleep(std::time::Duration::from_millis(RENDER_SUMMARY_SETTLE_MS));
             // 又有 pass 完成（含工程切换）→ 重新计时，并让本轮改判新的工程状态。
             if BG_RENDER_PASS_EPOCH.load(Ordering::Acquire) != seen {
                 continue;
@@ -2159,10 +2165,7 @@ fn render_background_pass(
 
                         // 【持久化】渲染产物异步落盘（不阻塞渲染线程）。总开关、
                         // 片段时长下限、单条上限、磁盘保留空间等过滤在 store_* 内。
-                        crate::render_cache::store_rendered(
-                            &clip_render_info.cache_key,
-                            &entry,
-                        );
+                        crate::render_cache::store_rendered(&clip_render_info.cache_key, &entry);
 
                         base_entry = Some(entry);
                         render_success_count += 1;
@@ -2224,9 +2227,7 @@ fn render_background_pass(
                                 "playback_rendering_state",
                                 PlaybackRenderingStateEvent {
                                     active: true,
-                                    progress: Some(
-                                        crate::renderer::progress::current_fraction(),
-                                    ),
+                                    progress: Some(crate::renderer::progress::current_fraction()),
                                     target: Some("background".to_string()),
                                 },
                             );

@@ -155,9 +155,8 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     // 等待有界，绝不永久卡死。
     // 有界等待（20s）：持有者的构建挂起时不再让渲染线程永久阻塞 ——
     // 超时返回 Err，本次会话加载失败 → 该 Clip 失败但 pass 继续推进。
-    let _build_flight = crate::vocoder_ort_session::acquire_session_build_lock(
-        std::time::Duration::from_secs(20),
-    )?;
+    let _build_flight =
+        crate::vocoder_ort_session::acquire_session_build_lock(std::time::Duration::from_secs(20))?;
     // 双重检查：等待期间其他线程（设备切换的异步预热）可能已完成构建。
     if let Some(session) = mutex
         .lock()
@@ -173,7 +172,9 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
         let onnx_path = resolve_model_path()?;
         let session = build_session_with_ep(&onnx_path)?;
         if crate::vocoder_ort_session::ep_settings_generation() != generation_before {
-            log::warn!("[fcpe] inference device changed during session build — rebuilding with the new EP");
+            log::warn!(
+                "[fcpe] inference device changed during session build — rebuilding with the new EP"
+            );
             continue;
         }
         let mut guard = mutex
@@ -202,7 +203,9 @@ pub fn drop_shared_session() {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        log::error!("[fcpe] WARNING: could not acquire SHARED_SESSION lock at shutdown — giving up");
+        log::error!(
+            "[fcpe] WARNING: could not acquire SHARED_SESSION lock at shutdown — giving up"
+        );
     }
 }
 
@@ -1093,7 +1096,8 @@ mod tests {
         let n_mels = 128usize;
 
         let (reference, ref_frames) = reference_mel_two_pass(&waveform, sr, n_mels);
-        let (freq_major, fm_frames) = build_mel_from_waveform(&waveform, sr, n_mels, false).unwrap();
+        let (freq_major, fm_frames) =
+            build_mel_from_waveform(&waveform, sr, n_mels, false).unwrap();
 
         assert_eq!(ref_frames, fm_frames);
         assert_eq!(reference.len(), freq_major.len());

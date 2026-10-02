@@ -149,13 +149,58 @@ function trySerialize(value: unknown): unknown | null {
 }
 
 /**
+ * 主窗口当前是否真的存在卫星窗口（独立窗口承载的窗体）。
+ *
+ * 【为什么在派发路径上查】`trySerialize` 是一次完整的 JSON 往返，主窗口每一次
+ * 可广播的派发都要付一遍（包括 ~30Hz 的播放轮询、逐帧拖拽乐观动作、整份
+ * TimelineState 的编辑回包），而卫星不存在时（绝大多数会话的全部时间）广播
+ * 通道空无一物，序列化纯属浪费。dock 布局里 `floatMode === "osWindow"` 的浮动
+ * 窗体就是卫星 —— 这份状态就在本窗口的 store 里，同步可查，零新协议。
+ *
+ * 【查不到时按 true 处理】dock 状态缺失（测试桩 / 未知宿主）时宁可白序列化，
+ * 也不能把广播吞掉 —— 桥静默断开的表现是"卫星窗口空白"，比慢更糟。
+ */
+function hasLiveSatellites(getState: () => unknown): boolean {
+    let state: unknown;
+    try {
+        state = getState();
+    } catch {
+        return true;
+    }
+    if (!state || typeof state !== "object") return true;
+    const dock = (state as Record<string, unknown>).dock;
+    if (!dock || typeof dock !== "object") return true;
+    const layout = (dock as Record<string, unknown>).layout;
+    if (!layout || typeof layout !== "object") return true;
+    const order = (layout as Record<string, unknown>).order;
+    const forms = (layout as Record<string, unknown>).forms;
+    if (!Array.isArray(order) || !forms || typeof forms !== "object") return true;
+    const formMap = forms as Record<string, unknown>;
+    for (const formId of order) {
+        const form = formMap[formId];
+        if (
+            form !== null &&
+            typeof form === "object" &&
+            (form as Record<string, unknown>).floating === true &&
+            (form as Record<string, unknown>).floatMode === "osWindow"
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
  * 快照投影：剔掉**重载荷**字段。
  *
  * 【为什么要瘦身】`session` 切片携带逐 clip 的波形数组（`waveform` /
- * `waveformPreview`），一个真实工程的快照轻易到几 MB —— 跨窗口事件传这么大的
- * JSON 又慢又容易被序列化问题绊倒，而独立窗口承载的只有文件浏览器 / 记事本 /
- * 撤销历史，**不需要波形**。整份 `JSON.stringify` 一旦抛错，主窗口此前会静默
- * 不应答，卫星就永久停在占位符上（用户报告的"完全没实现"）。
+ * `waveformPreview`）、逐 clip 的检测音高曲线（`clipPitchCurves[*].midiCurve`，
+ * 每 clip 数百到上千个浮点）与静音预览段，一个真实工程的快照轻易到几 MB ——
+ * 跨窗口事件传这么大的 JSON 又慢又容易被序列化问题绊倒，而独立窗口承载的只有
+ * 文件浏览器 / 记事本 / 撤销历史，**不需要波形与曲线**。整份 `JSON.stringify`
+ * 一旦抛错，主窗口此前会静默不应答，卫星就永久停在占位符上（用户报告的
+ * "完全没实现"）。请求方每 500ms 重试一次，投影不彻底会把大快照的代价变成
+ * 周期性的。
  *
  * 投影是**结构性**的（按已知字段名剔除），不做深拷贝：拷贝由随后的 stringify 完成。
  */
@@ -175,10 +220,24 @@ export function projectSnapshot(state: unknown): unknown {
               return rest;
           })
         : clips;
-    return {
-        ...root,
-        session: { ...sessionRecord, clips: projectedClips },
+    const projectedSession: Record<string, unknown> = {
+        ...sessionRecord,
+        clips: projectedClips,
+        // 检测音高曲线（每 clip 一条大数组）：卫星面板不消费，整表置空。
+        clipPitchCurves: {},
+        // 静音预览段：同样只有主窗口的轨道区消费。
+        silencePreviewSegments: null,
     };
+    if (
+        sessionRecord.selectedTrackSummary &&
+        typeof sessionRecord.selectedTrackSummary === "object"
+    ) {
+        projectedSession.selectedTrackSummary = {
+            ...(sessionRecord.selectedTrackSummary as Record<string, unknown>),
+            waveformPreview: null,
+        };
+    }
+    return { ...root, session: projectedSession };
 }
 
 /** 动态导入 Tauri 事件 API（非 Tauri 环境返回 null）。 */
@@ -245,9 +304,12 @@ export function createStoreBridgeMiddleware(role: BridgeRole): Middleware {
         if (pending.length > 0) flush();
     });
 
-    return () => (next) => (action) => {
+    return (api) => (next) => (action) => {
         const result = next(action);
         if (!isBroadcastable(action)) return result;
+        // 主窗口在没有任何卫星时跳过整条序列化 / 排队路径（见 hasLiveSatellites）。
+        // 卫星侧不做此判定：它派发的动作必须送回主窗口，否则状态永久分叉。
+        if (role === "main" && !hasLiveSatellites(api.getState)) return result;
         const serialized = trySerialize(action);
         if (serialized === null) return result;
         pending.push(serialized as UnknownAction);

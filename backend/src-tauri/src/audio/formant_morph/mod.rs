@@ -194,7 +194,8 @@ pub fn apply_formant_morph_mono(
 
     let mut ola = vec![0.0_f32; padded.len()];
     let mut win_sum = vec![0.0_f32; padded.len()];
-    let mut frame_buf: Vec<num_complex::Complex32> = vec![num_complex::Complex32::new(0.0, 0.0); fft_size];
+    let mut frame_buf: Vec<num_complex::Complex32> =
+        vec![num_complex::Complex32::new(0.0, 0.0); fft_size];
     let mut gate = VoicingGate::new();
     let tracks_max = (tracks.len() - 1) as f32;
     let mut dry_windowed = vec![0.0_f32; fft_size];
@@ -229,13 +230,14 @@ pub fn apply_formant_morph_mono(
         let af = (af_f.round() as usize).min(frame_coeffs.len() - 1);
 
         let gate_val = gate.advance(
-            track::interpolate_at(&tracks, af_f).map(|t| t.voiced).unwrap_or(0.0),
+            track::interpolate_at(&tracks, af_f)
+                .map(|t| t.voiced)
+                .unwrap_or(0.0),
             hop_sec,
         );
 
-        let can_process = gate_val > STRENGTH_EPS
-            && candidates[af].is_some()
-            && !frame_coeffs[af].is_empty();
+        let can_process =
+            gate_val > STRENGTH_EPS && candidates[af].is_some() && !frame_coeffs[af].is_empty();
 
         if can_process {
             fft_forward.process(&mut frame_buf);
@@ -246,13 +248,18 @@ pub fn apply_formant_morph_mono(
             let mut moved_pairs = poles.pairs.clone();
             for p in moved_pairs.iter_mut() {
                 if (p.freq_hz - cand.f1.freq_hz).abs() < 1.0 {
-                    p.freq_hz = correction::moved_pole_freq(tp_f1(&tracks, af_f), target_f1, strength);
+                    p.freq_hz =
+                        correction::moved_pole_freq(tp_f1(&tracks, af_f), target_f1, strength);
                 } else if (p.freq_hz - cand.f2.freq_hz).abs() < 1.0 {
-                    p.freq_hz = correction::moved_pole_freq(tp_f2(&tracks, af_f), target_f2, strength);
+                    p.freq_hz =
+                        correction::moved_pole_freq(tp_f2(&tracks, af_f), target_f2, strength);
                 }
             }
-            let coeffs_target =
-                monic_to_analysis(&lpc::poles_to_coeffs(&moved_pairs, &poles.real_roots, analysis_rate));
+            let coeffs_target = monic_to_analysis(&lpc::poles_to_coeffs(
+                &moved_pairs,
+                &poles.real_roots,
+                analysis_rate,
+            ));
 
             // H(k) = |A_orig / A_target|（限幅 + 模型奈奎斯特外衰减）
             let h_db = correction::h_ratio_db(
@@ -315,12 +322,16 @@ pub fn apply_formant_morph_mono(
 
 /// 取平滑轨迹上 af_f 处的 F1（失败回退 0，调用方以 candidates 判空保护）。
 fn tp_f1(tracks: &[track::TrackPoint], af_f: f32) -> f32 {
-    track::interpolate_at(tracks, af_f).map(|t| t.f1_hz).unwrap_or(0.0)
+    track::interpolate_at(tracks, af_f)
+        .map(|t| t.f1_hz)
+        .unwrap_or(0.0)
 }
 
 /// 取平滑轨迹上 af_f 处的 F2。
 fn tp_f2(tracks: &[track::TrackPoint], af_f: f32) -> f32 {
-    track::interpolate_at(tracks, af_f).map(|t| t.f2_hz).unwrap_or(0.0)
+    track::interpolate_at(tracks, af_f)
+        .map(|t| t.f2_hz)
+        .unwrap_or(0.0)
 }
 
 /// z 的升幂首一多项式 → 分析约定系数 a[1..=p]。
@@ -601,7 +612,8 @@ mod tests {
         let mut got: Vec<(f32, f32)> = Vec::new();
         let mut start = 0usize;
         while start + frame_len <= analysis.len() {
-            if let Some(l) = lpc::analyze_frame(&analysis[start..start + frame_len], a_rate, LPC_ORDER)
+            if let Some(l) =
+                lpc::analyze_frame(&analysis[start..start + frame_len], a_rate, LPC_ORDER)
             {
                 if let Some(roots) = lpc::poly_roots(&lpc::coeffs_to_monic(&l.coeffs)) {
                     let poles = lpc::roots_to_poles(&roots, a_rate);
@@ -690,9 +702,11 @@ mod tests {
     #[test]
     fn pathological_inputs_stay_bounded() {
         let cases: Vec<Vec<f32>> = vec![
-            vec![0.9_f32; 8_192],                            // 直流
-            (0..8_192).map(|i| if i % 2 == 0 { 0.8 } else { -0.8 }).collect(), // 方波
-            (0..513).map(|i| (i as f32 * 0.05).sin() * 0.5).collect(),         // 极短
+            vec![0.9_f32; 8_192], // 直流
+            (0..8_192)
+                .map(|i| if i % 2 == 0 { 0.8 } else { -0.8 })
+                .collect(), // 方波
+            (0..513).map(|i| (i as f32 * 0.05).sin() * 0.5).collect(), // 极短
         ];
         for input in cases {
             let params = default_params(true, 1.0);

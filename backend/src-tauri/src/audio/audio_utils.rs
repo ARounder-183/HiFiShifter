@@ -40,8 +40,12 @@ fn decode_wav_f32_interleaved_hound(path: &Path) -> Result<(u32, u16, Vec<f32>),
     let file_bound = std::fs::metadata(path)
         .map(|m| (m.len() as usize).saturating_div(min_bytes_per_sample))
         .unwrap_or(1 << 22);
-    let mut out: Vec<f32> =
-        Vec::with_capacity(reader.duration().min(file_bound.min(u32::MAX as usize) as u32) as usize * channels as usize);
+    let mut out: Vec<f32> = Vec::with_capacity(
+        reader
+            .duration()
+            .min(file_bound.min(u32::MAX as usize) as u32) as usize
+            * channels as usize,
+    );
 
     match (spec.sample_format, spec.bits_per_sample) {
         (SampleFormat::Int, 16) => {

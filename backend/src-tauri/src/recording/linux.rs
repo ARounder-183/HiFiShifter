@@ -173,13 +173,16 @@ fn node_process_id(node: &Value) -> Option<u32> {
 }
 
 fn node_display_name(node: &Value) -> String {
-    ["application.name", "node.description", "application.process.binary", "node.name"]
-        .iter()
-        .find_map(|key| {
-            node_props(node).and_then(|props| props.get(*key).and_then(Value::as_str))
-        })
-        .map(str::to_string)
-        .unwrap_or_else(|| "Application".to_string())
+    [
+        "application.name",
+        "node.description",
+        "application.process.binary",
+        "node.name",
+    ]
+    .iter()
+    .find_map(|key| node_props(node).and_then(|props| props.get(*key).and_then(Value::as_str)))
+    .map(str::to_string)
+    .unwrap_or_else(|| "Application".to_string())
 }
 
 fn node_process_binary(node: &Value) -> Option<String> {

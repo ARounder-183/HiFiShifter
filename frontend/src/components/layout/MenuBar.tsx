@@ -148,7 +148,6 @@ const selectMenuBarSession = (state: RootState) => {
         ortEp: session.ortEp,
         paramSelectionActive: session.paramSelectionActive,
         pitchSnapToleranceCents: session.pitchSnapToleranceCents,
-        playheadSec: session.playheadSec,
         primaryTimeUnit: session.primaryTimeUnit,
         project: session.project,
         projectSec: session.projectSec,
@@ -457,7 +456,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     streams: res.mediaAudioStreams ?? [],
                     trackId: res.trackId ?? s.selectedTrackId ?? null,
                     startSec:
-                        typeof res.startSec === "number" ? res.startSec : (s.playheadSec ?? 0),
+                        typeof res.startSec === "number"
+                            ? res.startSec
+                            : (store.getState().session.playheadSec ?? 0),
                 });
                 return;
             }
@@ -470,12 +471,15 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             setMenuImportMode({
                 audioPaths: res.audioPaths,
                 trackId: res.trackId ?? s.selectedTrackId ?? null,
-                startSec: typeof res.startSec === "number" ? res.startSec : (s.playheadSec ?? 0),
+                startSec:
+                    typeof res.startSec === "number"
+                        ? res.startSec
+                        : (store.getState().session.playheadSec ?? 0),
             });
         } catch {
             // Error state is already handled by session thunk reducers.
         }
-    }, [dispatch, s.playheadSec, s.selectedTrackId]);
+    }, [dispatch, s.selectedTrackId]);
 
     const handleImportMidiFromMenu = useCallback(() => {
         onImportMidiFromMenu();
@@ -1394,10 +1398,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 open={channelImportDialogOpen}
                 onOpenChange={setChannelImportDialogOpen}
             />
-            <PenInputDialog
-                open={penInputDialogOpen}
-                onOpenChange={setPenInputDialogOpen}
-            />
+            <PenInputDialog open={penInputDialogOpen} onOpenChange={setPenInputDialogOpen} />
             <RenderCacheDialog
                 open={renderCacheDialogOpen}
                 onOpenChange={setRenderCacheDialogOpen}

@@ -119,7 +119,8 @@ impl DetectOptions {
                 DEFAULT_TOLERANCE
             },
             container_budget_sec: if self.container_budget_sec.is_finite() {
-                self.container_budget_sec.clamp(0.0, DEFAULT_CONTAINER_BUDGET_SEC)
+                self.container_budget_sec
+                    .clamp(0.0, DEFAULT_CONTAINER_BUDGET_SEC)
             } else {
                 DEFAULT_CONTAINER_BUDGET_SEC
             },
@@ -301,7 +302,11 @@ fn sample_windows(frames: usize, sample_rate: u32, opts: &DetectOptions) -> Vec<
         return vec![(0, frames)];
     }
 
-    let sr = if sample_rate == 0 { 44_100 } else { sample_rate } as f64;
+    let sr = if sample_rate == 0 {
+        44_100
+    } else {
+        sample_rate
+    } as f64;
     let win = ((opts.window_sec * sr).round() as usize).max(1);
     let count = opts.window_count.max(1);
 
@@ -506,7 +511,9 @@ pub fn verdict_for_regions_detailed(
         crate::audio_utils::try_read_audio_header_only(path),
         crate::audio_utils::compute_file_fingerprint(path),
     ) {
-        (Some(header), Some(fingerprint)) => Some((header.channels, header.sample_rate, fingerprint)),
+        (Some(header), Some(fingerprint)) => {
+            Some((header.channels, header.sample_rate, fingerprint))
+        }
         _ => None,
     };
 
@@ -516,7 +523,14 @@ pub fn verdict_for_regions_detailed(
     for (i, region) in regions.iter().enumerate() {
         let mut hit = None;
         if let Some((channels, sample_rate, fingerprint)) = key_base {
-            let key = VerdictKey::new(path, Some(fingerprint), channels, sample_rate, *region, &opts);
+            let key = VerdictKey::new(
+                path,
+                Some(fingerprint),
+                channels,
+                sample_rate,
+                *region,
+                &opts,
+            );
             hit = verdict_cache_get(&key);
         }
         match hit {
@@ -553,7 +567,14 @@ pub fn verdict_for_regions_detailed(
         if detail.verdict != ChannelVerdict::Unknown {
             if let Some((channels, sample_rate, fingerprint)) = key_base {
                 verdict_cache_put(
-                    VerdictKey::new(path, Some(fingerprint), channels, sample_rate, pending_regions[k], &opts),
+                    VerdictKey::new(
+                        path,
+                        Some(fingerprint),
+                        channels,
+                        sample_rate,
+                        pending_regions[k],
+                        &opts,
+                    ),
                     detail,
                 );
             }
@@ -600,12 +621,18 @@ fn analyze_wav_regions(
         return None;
     }
     if spec.channels < 2 {
-        return Some(vec![VerdictDetail::bare(ChannelVerdict::Mono); regions.len()]);
+        return Some(vec![
+            VerdictDetail::bare(ChannelVerdict::Mono);
+            regions.len()
+        ]);
     }
 
     let total_frames = reader.duration() as u64;
     if total_frames == 0 {
-        return Some(vec![VerdictDetail::bare(ChannelVerdict::Unknown); regions.len()]);
+        return Some(vec![
+            VerdictDetail::bare(ChannelVerdict::Unknown);
+            regions.len()
+        ]);
     }
     let sample_rate = spec.sample_rate;
 
@@ -657,17 +684,23 @@ fn analyze_wav_region(
         let read_ok = match (spec.sample_format, spec.bits_per_sample) {
             (SampleFormat::Int, 16) => {
                 let scale = 1.0 / (i16::MAX as f32);
-                read_window(reader, len, spec.channels, &mut scratch, |s: i16| s as f32 * scale)
+                read_window(reader, len, spec.channels, &mut scratch, |s: i16| {
+                    s as f32 * scale
+                })
             }
             (SampleFormat::Int, 24) => {
                 // hound 把 24-bit 作为符号扩展的 i32 返回，按 i32::MAX 归一化会
                 // 缩小约 256 倍（波形与音频近乎无声）。
                 let scale = 1.0 / ((1u32 << 23) as f32);
-                read_window(reader, len, spec.channels, &mut scratch, |s: i32| s as f32 * scale)
+                read_window(reader, len, spec.channels, &mut scratch, |s: i32| {
+                    s as f32 * scale
+                })
             }
             (SampleFormat::Int, 32) => {
                 let scale = 1.0 / (i32::MAX as f32);
-                read_window(reader, len, spec.channels, &mut scratch, |s: i32| s as f32 * scale)
+                read_window(reader, len, spec.channels, &mut scratch, |s: i32| {
+                    s as f32 * scale
+                })
             }
             (SampleFormat::Float, 32) => {
                 read_window(reader, len, spec.channels, &mut scratch, |s: f32| s)
@@ -940,9 +973,14 @@ fn analyze_other_container_regions(
     let budget_frames = ((opts.container_budget_sec * sample_rate as f64).round() as u64).max(1);
 
     // ① 先试 seek 采样：代价与文件长度无关，且能覆盖全长。不适用时返回 None。
-    if let Some(details) =
-        analyze_container_regions_by_seek(path, regions, opts, total_frames, sample_rate, budget_frames)
-    {
+    if let Some(details) = analyze_container_regions_by_seek(
+        path,
+        regions,
+        opts,
+        total_frames,
+        sample_rate,
+        budget_frames,
+    ) {
         return details;
     }
 
@@ -1083,11 +1121,7 @@ where
 }
 
 /// 把源域秒区间解析为帧下标区间；越界部分钳制到 `[0, total_frames)`。
-fn resolve_region(
-    region: Option<(f64, f64)>,
-    total_frames: u64,
-    sample_rate: u32,
-) -> (u64, u64) {
+fn resolve_region(region: Option<(f64, f64)>, total_frames: u64, sample_rate: u32) -> (u64, u64) {
     let sr = sample_rate.max(1) as f64;
     let (start_sec, end_sec) = region.unwrap_or((0.0, total_frames as f64 / sr));
     let to_frame = |sec: f64| -> u64 {
@@ -1410,10 +1444,7 @@ mod tests {
     #[test]
     fn quantize_region_is_millisecond_and_none_preserving() {
         assert_eq!(quantize_region(None), None);
-        assert_eq!(
-            quantize_region(Some((1.0004, 2.9996))),
-            Some((1000, 3000))
-        );
+        assert_eq!(quantize_region(Some((1.0004, 2.9996))), Some((1000, 3000)));
         // 非有限值不 panic。
         assert_eq!(
             quantize_region(Some((f64::NAN, f64::INFINITY))),
@@ -1435,8 +1466,7 @@ mod tests {
         let total = sr as u64 * 300; // 5 分钟
         let start = sr as u64 * 60; // 从第 60 秒开始消费
         let end = sr as u64 * 70;
-        let (windows, truncated) =
-            plan_region_windows(start, end, total, total, sr, &opts);
+        let (windows, truncated) = plan_region_windows(start, end, total, total, sr, &opts);
 
         assert!(!truncated, "预算充足时不得截断");
         assert_eq!(windows.len(), 12, "12 个抽样窗口一个都不能少");
@@ -1452,7 +1482,11 @@ mod tests {
             );
         }
         // 首尾都要锚定在区间内：只看开头正是"该判没判"的成因。
-        assert_eq!(windows.first().unwrap().0, start, "首个窗口必须锚定区间起点");
+        assert_eq!(
+            windows.first().unwrap().0,
+            start,
+            "首个窗口必须锚定区间起点"
+        );
         assert_eq!(
             windows.last().unwrap().0 + windows.last().unwrap().1 as u64,
             end,
@@ -1478,8 +1512,7 @@ mod tests {
         assert!(truncated, "预算外必须报告截断（上层据此不下折叠结论）");
 
         // 区间横跨预算边界：只收预算内的窗口，仍然报告截断。
-        let (windows, truncated) =
-            plan_region_windows(0, total, total, budget, sr, &opts);
+        let (windows, truncated) = plan_region_windows(0, total, total, budget, sr, &opts);
         assert!(truncated, "横跨预算边界必须报告截断");
         assert!(!windows.is_empty(), "预算内的窗口仍应被收割");
         for (window_start, len) in &windows {
@@ -1623,7 +1656,8 @@ mod tests {
         let budget_frames = ((opts.container_budget_sec * sr as f64).round() as u64).max(1);
 
         let sequential = verdicts_via_sequential_path(&path, &regions, &opts);
-        let by_seek = analyze_container_regions_by_seek(&path, &regions, &opts, total, sr, budget_frames);
+        let by_seek =
+            analyze_container_regions_by_seek(&path, &regions, &opts, total, sr, budget_frames);
 
         let by_seek = by_seek.expect("默认预算下 seek 采样应当可用（mp3 demuxer 支持 seek）");
         for (index, (lhs, rhs)) in by_seek.iter().zip(sequential.iter()).enumerate() {
@@ -1903,8 +1937,8 @@ mod tests {
         verdict_cache_clear();
         let with_bad = verdict_for_regions_detailed(&path, &[good, bad], &opts)[0].verdict;
         verdict_cache_clear();
-        let with_good = verdict_for_regions_detailed(&path, &[good, Some((2.0, 3.0))], &opts)[0]
-            .verdict;
+        let with_good =
+            verdict_for_regions_detailed(&path, &[good, Some((2.0, 3.0))], &opts)[0].verdict;
 
         assert_eq!(alone, ChannelVerdict::FakeStereo);
         assert_eq!(with_bad, alone, "和读不到的区间同批，结论不得改变");
@@ -1930,9 +1964,9 @@ mod tests {
         };
 
         let slices = vec![
-            Some((0.0, 1.0)),                                  // 开头
-            Some((total_sec * 0.5, total_sec * 0.5 + 1.0)),     // 中段
-            Some((total_sec - 1.0, total_sec)),                 // 结尾
+            Some((0.0, 1.0)),                               // 开头
+            Some((total_sec * 0.5, total_sec * 0.5 + 1.0)), // 中段
+            Some((total_sec - 1.0, total_sec)),             // 结尾
         ];
         let details = verdict_for_regions_detailed(&path, &slices, &opts);
         for (index, detail) in details.iter().enumerate() {
@@ -1989,17 +2023,12 @@ mod tests {
         let start = total / 3;
         let end = total / 3 * 2;
         let budget = total;
-        let (windows, truncated) =
-            plan_region_windows(start, end, total, budget, sr, &opts);
+        let (windows, truncated) = plan_region_windows(start, end, total, budget, sr, &opts);
         assert!(!truncated);
         assert_eq!(windows.len(), opts.window_count);
         assert_eq!(windows.first().unwrap().0, start, "首个窗口锚定区间起点");
         let last = windows.last().unwrap();
-        assert_eq!(
-            last.0 + last.1 as u64,
-            end,
-            "末个窗口右对齐到区间终点"
-        );
+        assert_eq!(last.0 + last.1 as u64, end, "末个窗口右对齐到区间终点");
     }
 
     #[test]
@@ -2086,7 +2115,10 @@ mod tests {
         // 越界钳制。
         assert_eq!(resolve_region(Some((-5.0, 1e9)), 44_100, SR), (0, 44_100));
         // 正常区间。
-        assert_eq!(resolve_region(Some((0.5, 1.0)), 44_100, SR), (22_050, 44_100));
+        assert_eq!(
+            resolve_region(Some((0.5, 1.0)), 44_100, SR),
+            (22_050, 44_100)
+        );
         // 反向区间 → 空区间（起点与终点相同），不 panic。
         let (s, e) = resolve_region(Some((2.0, 1.0)), 44_100, SR);
         assert_eq!(s, e);

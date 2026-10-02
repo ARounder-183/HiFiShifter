@@ -25,10 +25,7 @@ import { Suspense, useCallback, useEffect, useMemo } from "react";
 import { useAppSelector } from "../../app/hooks";
 import { translateOutsideReact } from "../../i18n/I18nProvider";
 import { getPanel } from "../../features/dock/panelRegistry";
-import {
-    satelliteFormId,
-    subscribeRemoteAppearance,
-} from "../../features/dock/detachBridge";
+import { satelliteFormId, subscribeRemoteAppearance } from "../../features/dock/detachBridge";
 import { collectSubtreeRootIds } from "../../features/dock/dockPanel";
 import { isPanelForm, rootOfForm } from "../../features/dock/dockTree";
 import { useAppTheme } from "../../theme/AppThemeProvider";
@@ -89,7 +86,8 @@ export function DetachedRoot() {
     const layout = useAppSelector((state) => state.dock.layout);
     const isPanel = isPanelForm(form ?? undefined);
     const subtreeRootIds = useMemo(
-        () => (isPanel && form?.childRootId ? collectSubtreeRootIds(layout, form.childRootId) : null),
+        () =>
+            isPanel && form?.childRootId ? collectSubtreeRootIds(layout, form.childRootId) : null,
         [isPanel, form, layout],
     );
     const hostedForms = useMemo(() => {

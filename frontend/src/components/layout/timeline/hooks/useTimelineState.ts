@@ -11,7 +11,7 @@
  * - startPanPointer 中键平移
  * - setPlayheadFromClientX / startDeferredPlayheadSeek 播放头拖拽
  * - altPressed (stretch modifier) 键盘监听
- * - bars / clipsByTrackId / contentWidth/Height 派生计算
+ * - bars / contentWidth/Height 派生计算
  * - Mipmap 预加载
  */
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -211,7 +211,6 @@ export interface TimelineStateResult {
      * 全部刻度 DOM 与 BackgroundGrid 的 SVG 路径每帧重建。
      */
     rulerScrollLeft: number;
-    clipsByTrackId: Map<string, RootState["session"]["clips"]>;
     viewportStartSec: number;
     viewportEndSec: number;
 
@@ -455,6 +454,17 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         };
     }, []);
 
+    // ── rowHeight ────────────────────────────────────────────
+    const [rowHeight, setRowHeight] = useState(() => {
+        const stored = Number(localStorage.getItem("hifishifter.rowHeight"));
+        return Number.isFinite(stored)
+            ? Math.min(MAX_ROW_HEIGHT, Math.max(MIN_ROW_HEIGHT, stored))
+            : DEFAULT_ROW_HEIGHT;
+    });
+    const rowHeightRef = useRef(rowHeight);
+    useEffect(() => {
+        rowHeightRef.current = rowHeight;
+    }, [rowHeight]);
     // ── ResizeObserver → viewportWidth ────────────────────────
     useEffect(() => {
         const scroller = scrollRef.current;
@@ -819,18 +829,6 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     const secPerBeat = 60 / Math.max(1, s.bpm);
     const pxPerBeat = pxPerSec * secPerBeat;
 
-    // ── rowHeight ────────────────────────────────────────────
-    const [rowHeight, setRowHeight] = useState(() => {
-        const stored = Number(localStorage.getItem("hifishifter.rowHeight"));
-        return Number.isFinite(stored)
-            ? Math.min(MAX_ROW_HEIGHT, Math.max(MIN_ROW_HEIGHT, stored))
-            : DEFAULT_ROW_HEIGHT;
-    });
-    const rowHeightRef = useRef(rowHeight);
-    useEffect(() => {
-        rowHeightRef.current = rowHeight;
-    }, [rowHeight]);
-
     // ── pan ref ──────────────────────────────────────────────
     const panRef = useRef<{
         pointerId: number | null;
@@ -999,30 +997,6 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         s.tempoMap,
         tickAxis,
     ]);
-
-    // ── clipsByTrackId ───────────────────────────────────────
-    const clipsByTrackId = useMemo(() => {
-        const map = new Map<string, typeof s.clips>();
-        for (const clip of s.clips) {
-            const arr = map.get(clip.trackId);
-            if (arr) {
-                arr.push(clip);
-            } else {
-                map.set(clip.trackId, [clip]);
-            }
-        }
-
-        for (const arr of map.values()) {
-            arr.sort((a, b) => {
-                const d = (a.startSec ?? 0) - (b.startSec ?? 0);
-                if (Math.abs(d) > 1e-9) return d;
-                return String(a.id).localeCompare(String(b.id));
-            });
-        }
-
-        return map;
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- s 为 shallowEqual 每次渲染重建引用的 session 派生对象，加入依赖会让 clipsByTrackId 每次渲染重算（既有 memo 语义）
-    }, [s.clips]);
 
     // ── Mipmap 预加载 ────────────────────────────────────────
     const preloadedPathsRef = useRef(new Set<string>());
@@ -1459,7 +1433,6 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         dynamicProjectSec,
         timelineTicks,
         rulerScrollLeft: tickAnchorPx,
-        clipsByTrackId,
         viewportStartSec,
         viewportEndSec,
 

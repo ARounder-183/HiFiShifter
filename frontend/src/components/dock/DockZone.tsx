@@ -75,7 +75,12 @@ export function DockZone({ node }: DockZoneProps) {
                     <DockSubRoot rootId={activeForm.childRootId} kind="panel" />
                 </div>
             ) : (
-                <div ref={slotRef} className="hs-dock-slot" data-dock-slot={node.id} style={slotStyle} />
+                <div
+                    ref={slotRef}
+                    className="hs-dock-slot"
+                    data-dock-slot={node.id}
+                    style={slotStyle}
+                />
             )}
         </div>
     );

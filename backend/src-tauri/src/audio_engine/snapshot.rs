@@ -777,9 +777,7 @@ pub(crate) fn build_snapshot(
                                 // 同一口径：Compose 开关与生效音阶都会改变渲染输出。
                                 compose_enabled: root_track_id
                                     .as_ref()
-                                    .and_then(|root| {
-                                        timeline.tracks.iter().find(|t| &t.id == root)
-                                    })
+                                    .and_then(|root| timeline.tracks.iter().find(|t| &t.id == root))
                                     .map(|t| t.compose_enabled)
                                     .unwrap_or(false),
                                 scale_signature: scale_signature.as_str(),
@@ -888,8 +886,7 @@ pub(crate) fn build_snapshot(
                         // （原地等待 + 自动恢复），绝不让用户先听到上一版参数的
                         // 结果再中途切换。抑制条目在本 clip 当前渲染命中时移除
                         //（见下方 else 分支），因此只覆盖"武装时未就绪"的窗口。
-                        let pad_suppressed =
-                            crate::synth_clip_cache::is_pad_suppressed(&clip.id);
+                        let pad_suppressed = crate::synth_clip_cache::is_pad_suppressed(&clip.id);
                         let mut fallback_pcm = None;
                         let mut fallback_breath = None;
                         if !pad_suppressed {
@@ -915,19 +912,22 @@ pub(crate) fn build_snapshot(
                             );
 
                             if needs_tension {
-                                fallback_pcm = crate::synth_clip_cache::get_latest_tension_rendered_pcm(
-                                    &clip.id,
-                                    clip.active_take_id.as_deref(),
-                                    Some(length_frames),
-                                );
+                                fallback_pcm =
+                                    crate::synth_clip_cache::get_latest_tension_rendered_pcm(
+                                        &clip.id,
+                                        clip.active_take_id.as_deref(),
+                                        Some(length_frames),
+                                    );
                             }
 
                             if fallback_pcm.is_none() {
-                                if let Some((p, b)) = crate::synth_clip_cache::get_latest_rendered_pcm(
-                                    &clip.id,
-                                    clip.active_take_id.as_deref(),
-                                    Some(length_frames),
-                                ) {
+                                if let Some((p, b)) =
+                                    crate::synth_clip_cache::get_latest_rendered_pcm(
+                                        &clip.id,
+                                        clip.active_take_id.as_deref(),
+                                        Some(length_frames),
+                                    )
+                                {
                                     fallback_pcm = Some(p);
                                     fallback_breath = b;
                                 }
@@ -1245,7 +1245,9 @@ mod tests {
             clip.name = "pad clip".to_string();
             clip.source_path = Some("/tmp/hifishifter-pad-test.aiff".to_string());
         }
-        let root = tl.resolve_root_track_id(&tl.clips[0].track_id).expect("root");
+        let root = tl
+            .resolve_root_track_id(&tl.clips[0].track_id)
+            .expect("root");
         tl.tracks
             .iter_mut()
             .find(|t| t.id == root)
@@ -1271,7 +1273,8 @@ mod tests {
             frames: pcm.len() / 2,
             pcm: Arc::new(pcm),
         };
-        let cache: Arc<Mutex<DecodeCache>> = Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
+        let cache: Arc<Mutex<DecodeCache>> =
+            Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
         cache
             .lock()
             .unwrap()
@@ -1291,13 +1294,16 @@ mod tests {
             sample_rate: 44_100,
             rendered_take_id: None,
         };
-        crate::synth_clip_cache::global_rendered_clip_cache().lock().unwrap().insert(
-            crate::synth_clip_cache::RenderedClipCacheKey {
-                clip_id: clip_id.to_string(),
-                param_hash,
-            },
-            entry,
-        );
+        crate::synth_clip_cache::global_rendered_clip_cache()
+            .lock()
+            .unwrap()
+            .insert(
+                crate::synth_clip_cache::RenderedClipCacheKey {
+                    clip_id: clip_id.to_string(),
+                    param_hash,
+                },
+                entry,
+            );
     }
 
     #[test]

@@ -24,7 +24,10 @@ pub fn remove_old_synth_temp(old_path: Option<&str>) {
         if path.exists() {
             match fs::remove_file(path) {
                 Ok(()) => {
-                    log::warn!("[temp_manager] removed stale synth temp file: {}", path.display());
+                    log::warn!(
+                        "[temp_manager] removed stale synth temp file: {}",
+                        path.display()
+                    );
                 }
                 Err(e) => {
                     log::warn!(

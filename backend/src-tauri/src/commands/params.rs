@@ -194,7 +194,16 @@ pub(super) fn get_param_frames(
     }
     // 二进制模式：orig/edit 以 Base64 单条返回，JSON 里不再展开成 number[]。
     let binary = binary.unwrap_or(false);
-    let (root, fp, entry, compose_enabled, pitch_algo, param_reference_value, param_kind, param_frame_target) = {
+    let (
+        root,
+        fp,
+        entry,
+        compose_enabled,
+        pitch_algo,
+        param_reference_value,
+        param_kind,
+        param_frame_target,
+    ) = {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
         let root = match tl.resolve_root_track_id(&track_id) {
@@ -309,7 +318,9 @@ pub(super) fn get_param_frames(
         if let Ok(mut roots) = crate::pitch_clip::dyn_panel_open_roots().lock() {
             roots.insert(root.clone());
         }
-        Some(crate::pitch_analysis::maybe_schedule_dyn_orig(&state, &root))
+        Some(crate::pitch_analysis::maybe_schedule_dyn_orig(
+            &state, &root,
+        ))
     } else {
         None
     };
@@ -475,7 +486,6 @@ fn encode_param_frames_binary(orig: &[f32], edit: &[f32]) -> String {
     }
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
-
 
 pub(super) fn set_param_frames(
     state: State<'_, AppState>,
@@ -1238,8 +1248,12 @@ mod mix_conversion_tests {
         let volumes = [1.0f32, 0.5, 2.0, 0.0, 3.0];
         for baseline in baselines {
             for v in volumes {
-                let (new_volume, new_dyn) =
-                    convert_mix_frame_value(MixConversionDirection::VolumeToDyn, Some(v), None, baseline);
+                let (new_volume, new_dyn) = convert_mix_frame_value(
+                    MixConversionDirection::VolumeToDyn,
+                    Some(v),
+                    None,
+                    baseline,
+                );
                 assert_eq!(new_volume, 1.0, "源音量必须归位 1.0");
                 let after = GAIN(new_dyn, baseline);
                 if v * baseline <= 1.0 {
@@ -1268,8 +1282,12 @@ mod mix_conversion_tests {
         let targets = [1.0f32, 0.5, 2.0, 0.0];
         for baseline in baselines {
             for target in targets {
-                let (new_volume, new_dyn) =
-                    convert_mix_frame_value(MixConversionDirection::DynToVolume, None, Some(target), baseline);
+                let (new_volume, new_dyn) = convert_mix_frame_value(
+                    MixConversionDirection::DynToVolume,
+                    None,
+                    Some(target),
+                    baseline,
+                );
                 assert_eq!(new_dyn, crate::renderer::common_params::DYN_FOLLOW_ORIG);
                 let before = GAIN(target, baseline);
                 if before <= 2.0 {
@@ -1295,27 +1313,23 @@ mod mix_conversion_tests {
         // 于是换算出的音量也是 0（而不是旧的"分母钳到下限 ⇒ t/下限 = 1000 ⇒ 钳到 2"）。
         // 这正是互转一致性的要求：把动态换成音量，听感必须不变。
         let floor = crate::renderer::common_params::DYN_SILENCE_FLOOR;
-        let (vol, new_dyn) =
-            convert_mix_frame_value(MixConversionDirection::DynToVolume, None, Some(1.0), floor * 0.5);
+        let (vol, new_dyn) = convert_mix_frame_value(
+            MixConversionDirection::DynToVolume,
+            None,
+            Some(1.0),
+            floor * 0.5,
+        );
         assert_eq!(vol, 0.0, "无内容帧（−66 dBFS 以下）换算后必须仍然不放大");
         assert_eq!(new_dyn, crate::renderer::common_params::DYN_FOLLOW_ORIG);
 
         // 下限处（有内容的下界）：增益 = 1/下限 = 上限 ×1000 → 被音量值域钳到 2。
-        let (vol_at_floor, _) = convert_mix_frame_value(
-            MixConversionDirection::DynToVolume,
-            None,
-            Some(1.0),
-            floor,
-        );
+        let (vol_at_floor, _) =
+            convert_mix_frame_value(MixConversionDirection::DynToVolume, None, Some(1.0), floor);
         assert_eq!(vol_at_floor, 2.0);
 
         // 超出了值域：同样钳到 2（与 compute_dyn_gain 的增益保持一致）。
-        let (vol, _) = convert_mix_frame_value(
-            MixConversionDirection::DynToVolume,
-            None,
-            Some(1.0),
-            0.01,
-        );
+        let (vol, _) =
+            convert_mix_frame_value(MixConversionDirection::DynToVolume, None, Some(1.0), 0.01);
         assert_eq!(vol, 2.0);
         // 与增益公式逐帧一致（互转的定义就是"等效"）。
         let gain = crate::renderer::common_params::compute_dyn_gain(1.0, 0.01);
@@ -1327,21 +1341,13 @@ mod mix_conversion_tests {
     fn dyn_to_volume_converts_quiet_content() {
         // −40 dBFS 的素材画了目标 0.5 → 需 ×50，被音量值域钳到 2.0
         //（等效性破缺属文档化边界），但**绝不能**被当成保护帧写 1.0。
-        let (vol, _) = convert_mix_frame_value(
-            MixConversionDirection::DynToVolume,
-            None,
-            Some(0.5),
-            0.01,
-        );
+        let (vol, _) =
+            convert_mix_frame_value(MixConversionDirection::DynToVolume, None, Some(0.5), 0.01);
         assert_eq!(vol, 2.0, "安静内容必须参与换算，而非被当作保护帧");
 
         // 值域内的正常换算：−40 dBFS 画目标 0.01（= 原声）→ ×1。
-        let (vol, _) = convert_mix_frame_value(
-            MixConversionDirection::DynToVolume,
-            None,
-            Some(0.01),
-            0.01,
-        );
+        let (vol, _) =
+            convert_mix_frame_value(MixConversionDirection::DynToVolume, None, Some(0.01), 0.01);
         assert!((vol - 1.0).abs() < 1e-6, "got {vol}");
     }
 
@@ -1428,12 +1434,8 @@ mod mix_conversion_tests {
     fn volume_to_dyn_clamps_target_at_full_scale() {
         // 把一段安静素材（0.1）抬到 1.0 需要 ×10 → 目标 1.0，正好是天花板；
         // 再大的音量（2.0）也只能得到 1.0，不能写出削顶之外的目标电平。
-        let (_, loud) = convert_mix_frame_value(
-            MixConversionDirection::VolumeToDyn,
-            Some(10.0),
-            None,
-            0.1,
-        );
+        let (_, loud) =
+            convert_mix_frame_value(MixConversionDirection::VolumeToDyn, Some(10.0), None, 0.1);
         assert_eq!(loud, 1.0);
         let (_, loud) =
             convert_mix_frame_value(MixConversionDirection::VolumeToDyn, Some(2.0), None, 0.8);

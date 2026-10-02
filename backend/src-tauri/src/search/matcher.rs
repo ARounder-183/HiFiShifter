@@ -290,12 +290,22 @@ mod tests {
         assert_eq!(info.kind, MatchKind::Pinyin);
         assert_eq!(info.form, "zhuge");
 
-        expect_score("主歌01.wav", "zhuge01", SearchMode::Smart, SCORE_FULL_PREFIX);
+        expect_score(
+            "主歌01.wav",
+            "zhuge01",
+            SearchMode::Smart,
+            SCORE_FULL_PREFIX,
+        );
     }
 
     #[test]
     fn pinyin_substring_is_one_band_below_prefix() {
-        expect_score("翻唱主歌01.wav", "zhuge", SearchMode::Smart, SCORE_FULL_SUBSTRING);
+        expect_score(
+            "翻唱主歌01.wav",
+            "zhuge",
+            SearchMode::Smart,
+            SCORE_FULL_SUBSTRING,
+        );
         expect_score("主歌01.wav", "zhuge", SearchMode::Smart, SCORE_FULL_PREFIX);
     }
 
@@ -310,23 +320,43 @@ mod tests {
 
     #[test]
     fn initials_prefix_when_name_is_longer() {
-        expect_score("撤销并重做.wav", "cx", SearchMode::Smart, SCORE_INITIALS_PREFIX);
+        expect_score(
+            "撤销并重做.wav",
+            "cx",
+            SearchMode::Smart,
+            SCORE_INITIALS_PREFIX,
+        );
     }
 
     #[test]
     fn initials_subsequence() {
         // `fy` 不是初声串 `fgypk` 的前缀，但按顺序出现 —— 这一档专门收留
         // 「记不全中间几个字」的缩写。
-        let info = expect_score("分割音频块.wav", "fy", SearchMode::Smart, SCORE_INITIALS_SUBSEQ);
+        let info = expect_score(
+            "分割音频块.wav",
+            "fy",
+            SearchMode::Smart,
+            SCORE_INITIALS_SUBSEQ,
+        );
         assert_eq!(info.kind, MatchKind::Pinyin);
         assert_eq!(info.form, "fy");
         // 前缀命中仍然走更高的那一档。
-        expect_score("分割音频块.wav", "fg", SearchMode::Smart, SCORE_INITIALS_PREFIX);
+        expect_score(
+            "分割音频块.wav",
+            "fg",
+            SearchMode::Smart,
+            SCORE_INITIALS_PREFIX,
+        );
     }
 
     #[test]
     fn separators_are_ignored_by_pinyin_band() {
-        expect_score("主歌_01_take.wav", "zhuge01", SearchMode::Smart, SCORE_FULL_PREFIX);
+        expect_score(
+            "主歌_01_take.wav",
+            "zhuge01",
+            SearchMode::Smart,
+            SCORE_FULL_PREFIX,
+        );
         // 纯拉丁文本忽略分隔符时也走全拼档，但语义上仍是字面命中。
         let info = expect_score(
             "vocal_take_01.wav",
@@ -347,10 +377,20 @@ mod tests {
 
     #[test]
     fn japanese_kana_matches_romaji() {
-        let info = expect_score("ボーカル.wav", "bokaru", SearchMode::Smart, SCORE_FULL_PREFIX);
+        let info = expect_score(
+            "ボーカル.wav",
+            "bokaru",
+            SearchMode::Smart,
+            SCORE_FULL_PREFIX,
+        );
         assert_eq!(info.kind, MatchKind::Romaji);
 
-        let info = expect_score("ボーカル.wav", "bkr", SearchMode::Smart, SCORE_INITIALS_EXACT);
+        let info = expect_score(
+            "ボーカル.wav",
+            "bkr",
+            SearchMode::Smart,
+            SCORE_INITIALS_EXACT,
+        );
         assert_eq!(info.kind, MatchKind::Romaji);
         assert_eq!(info.form, "bkr");
     }
@@ -358,7 +398,12 @@ mod tests {
     #[test]
     fn japanese_kana_matches_long_vowel_form() {
         // 主形态 bookaru 不含 bokaru；长音变体让后者也能命中。
-        expect_score("ボーカル.wav", "bokaru", SearchMode::Smart, SCORE_FULL_PREFIX);
+        expect_score(
+            "ボーカル.wav",
+            "bokaru",
+            SearchMode::Smart,
+            SCORE_FULL_PREFIX,
+        );
     }
 
     #[test]
@@ -370,7 +415,12 @@ mod tests {
 
     #[test]
     fn korean_full_romaji_matches() {
-        expect_score("한국어.wav", "hangukeo", SearchMode::Smart, SCORE_FULL_PREFIX);
+        expect_score(
+            "한국어.wav",
+            "hangukeo",
+            SearchMode::Smart,
+            SCORE_FULL_PREFIX,
+        );
     }
 
     #[test]
@@ -410,7 +460,12 @@ mod tests {
     #[test]
     fn chinese_query_matches_latin_text_via_romanization() {
         // 查询侧转写成 romaji 后对拉丁文件名命中（跨语系素材包的常见情形）。
-        expect_score("bokaru_take.wav", "ボーカル", SearchMode::Smart, SCORE_FULL_PREFIX);
+        expect_score(
+            "bokaru_take.wav",
+            "ボーカル",
+            SearchMode::Smart,
+            SCORE_FULL_PREFIX,
+        );
     }
 
     #[test]

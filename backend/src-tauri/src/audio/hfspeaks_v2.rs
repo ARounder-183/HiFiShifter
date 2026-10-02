@@ -29,7 +29,6 @@
 
 use std::io::{Read, Write};
 
-
 // ============== 常量定义 ==============
 
 /// 文件魔数
@@ -516,10 +515,17 @@ impl WaveformPeakCache {
     }
 
     pub fn get(&mut self, source_path: &str) -> Option<std::sync::Arc<HfsPeakFile>> {
-        let index = self.entries.iter().position(|(key, _, _)| key == source_path)?;
+        let index = self
+            .entries
+            .iter()
+            .position(|(key, _, _)| key == source_path)?;
         let value = self.entries[index].1.clone();
         self.entries.remove(index);
-        self.entries.push((source_path.to_string(), value.clone(), value.estimated_byte_size()));
+        self.entries.push((
+            source_path.to_string(),
+            value.clone(),
+            value.estimated_byte_size(),
+        ));
         Some(value)
     }
 
@@ -532,7 +538,11 @@ impl WaveformPeakCache {
     }
 
     pub fn remove(&mut self, source_path: &str) -> bool {
-        if let Some(index) = self.entries.iter().position(|(key, _, _)| key == source_path) {
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|(key, _, _)| key == source_path)
+        {
             let (_, _, weight) = self.entries.remove(index);
             self.total_bytes = self.total_bytes.saturating_sub(weight);
             return true;
@@ -546,7 +556,7 @@ impl WaveformPeakCache {
     }
 
     // Cache introspection accessors: used by unit tests and diagnostics;
-        // no callers in non-test builds.
+    // no callers in non-test builds.
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -910,7 +920,12 @@ fn compute_mipmap_peaks_hound<F: FnMut(f32)>(
                 i += 1;
                 if i >= ch_usize {
                     i = 0;
-                    frame_channel_extremes_i32(&buf, i32::MAX as f32, &mut frame_min, &mut frame_max);
+                    frame_channel_extremes_i32(
+                        &buf,
+                        i32::MAX as f32,
+                        &mut frame_min,
+                        &mut frame_max,
+                    );
                     calculator.process_frame(&frame_min, &frame_max, &mut output_callback);
                     frames_processed += 1;
                     if frames_processed % progress_interval == 0 {
@@ -1079,7 +1094,6 @@ fn frame_channel_extremes_f32(buf: &[f32], out_min: &mut [f32], out_max: &mut [f
         out_max[c] = v;
     }
 }
-
 
 // ============== 文件存储与加载 ==============
 
@@ -1492,7 +1506,6 @@ mod waveform_tile_tests {
         assert!(cache.is_empty());
     }
 
-
     #[test]
     fn mipmap_data_channel_slices_and_envelope() {
         let data = MipmapData {
@@ -1556,7 +1569,13 @@ mod waveform_tile_tests {
         let loaded = HfsPeakFile::load(&tmp).expect("load hsp");
         let _ = std::fs::remove_file(&tmp);
 
-        assert_eq!({ let c = loaded.header.channels; c }, 2);
+        assert_eq!(
+            {
+                let c = loaded.header.channels;
+                c
+            },
+            2
+        );
         assert_eq!(loaded.mipmap_data[0].channels, 2);
         assert_eq!(loaded.mipmap_data[0].len(), 2);
         assert_eq!(loaded.mipmap_data[0].channel_min(0), &[-1.0, -0.3][..]);
@@ -1579,7 +1598,10 @@ mod waveform_tile_tests {
         let bytes = file.to_binary_level(0);
 
         assert_eq!(&bytes[0..4], b"WFPK");
-        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), WFPK_FORMAT_VERSION);
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            WFPK_FORMAT_VERSION
+        );
         assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 48000);
         assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 1);
         assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), 2);
@@ -1629,13 +1651,28 @@ mod waveform_tile_tests {
         let file = compute_mipmap_peaks(&path).expect("compute peaks");
         let _ = std::fs::remove_file(&path);
 
-        assert_eq!({ let c = file.header.channels; c }, 2);
+        assert_eq!(
+            {
+                let c = file.header.channels;
+                c
+            },
+            2
+        );
         let l0 = &file.mipmap_data[0];
         assert_eq!(l0.channels, 2);
         // L 声道最大值应为正、R 声道最小值应为负。
-        let l_max = l0.channel_max(0).iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-        let r_min = l0.channel_min(1).iter().fold(f32::INFINITY, |a, &b| a.min(b));
+        let l_max = l0
+            .channel_max(0)
+            .iter()
+            .fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+        let r_min = l0
+            .channel_min(1)
+            .iter()
+            .fold(f32::INFINITY, |a, &b| a.min(b));
         assert!(l_max > 0.2, "L channel max should be positive, got {l_max}");
-        assert!(r_min < -0.2, "R channel min should be negative, got {r_min}");
+        assert!(
+            r_min < -0.2,
+            "R channel min should be negative, got {r_min}"
+        );
     }
 }

@@ -68,8 +68,13 @@ function shouldRespond(container: HTMLElement, focused: Element | null): boolean
     );
 }
 
-/** 焦点落在这些元素上时，方向键属于它们自己（文本光标、滑杆取值）。 */
-function ownsArrowKeys(element: Element | null): boolean {
+/**
+ * 焦点落在这些元素上时，方向键属于它们自己（文本光标、滑杆取值）。
+ *
+ * 导出供同层的全局菜单（`AppContextMenu`）共用同一判定，两处口径必须一致：
+ * 一处加守卫另一处不加，会出现"输入框里打字时这条菜单还跟着动"的分裂行为。
+ */
+export function ownsArrowKeys(element: Element | null): boolean {
     if (!(element instanceof HTMLElement)) return false;
     if (element.isContentEditable) return true;
     return ["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName);

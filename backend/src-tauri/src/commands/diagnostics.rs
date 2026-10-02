@@ -74,7 +74,10 @@ pub(super) fn export_diagnostics(
     frontend_settings: Option<serde_json::Value>,
 ) -> serde_json::Value {
     let out = PathBuf::from(&output_path);
-    log::info!("[diagnostics] exporting diagnostics package to {}", out.display());
+    log::info!(
+        "[diagnostics] exporting diagnostics package to {}",
+        out.display()
+    );
 
     let settings = build_settings_info(&state, frontend_settings);
     let result = write_base_zip(&out, &build_system_info(&state), &settings)
@@ -204,8 +207,11 @@ fn write_base_zip(
         // 流式写入（避免整文件读入内存），并保留日志文件的修改时间。
         match std::fs::File::open(&path) {
             Ok(mut src) => {
-                zip.start_file(format!("logs/{name}"), crate::zip_util::options_for_source(&path))
-                    .map_err(|e| format!("zip add {name} failed: {e}"))?;
+                zip.start_file(
+                    format!("logs/{name}"),
+                    crate::zip_util::options_for_source(&path),
+                )
+                .map_err(|e| format!("zip add {name} failed: {e}"))?;
                 std::io::copy(&mut src, &mut zip)
                     .map_err(|e| format!("write {name} failed: {e}"))?;
             }
@@ -213,7 +219,8 @@ fn write_base_zip(
         }
     }
 
-    zip.finish().map_err(|e| format!("finish zip failed: {e}"))?;
+    zip.finish()
+        .map_err(|e| format!("finish zip failed: {e}"))?;
     Ok(())
 }
 
@@ -232,13 +239,14 @@ fn append_benchmark(zip_path: &Path) -> Result<(), String> {
         .write(true)
         .open(zip_path)
         .map_err(|e| format!("reopen zip failed: {e}"))?;
-    let mut zip = zip::ZipWriter::new_append(file)
-        .map_err(|e| format!("append zip failed: {e}"))?;
+    let mut zip =
+        zip::ZipWriter::new_append(file).map_err(|e| format!("append zip failed: {e}"))?;
     zip.start_file("benchmark.json", crate::zip_util::options_now())
         .map_err(|e| format!("zip add benchmark failed: {e}"))?;
     zip.write_all(benchmark.as_bytes())
         .map_err(|e| format!("write benchmark failed: {e}"))?;
-    zip.finish().map_err(|e| format!("finish zip failed: {e}"))?;
+    zip.finish()
+        .map_err(|e| format!("finish zip failed: {e}"))?;
     Ok(())
 }
 

@@ -145,6 +145,22 @@ describe("canReuseGeometry", () => {
         expect(canReuseGeometry(a, query(a, { scrollTopPx: 2000 }))).toBe(true);
     });
 
+    it("★ 承诺 rows 已含末行时，底边越出几何 → 仍复用（内容终点之外是正确留白）", () => {
+        // 场景：少轨道 + 高窗口的工程。末行波形带底边（2900）恒在视口底边之上，
+        // 视口垂直滚动被钳制在内容末尾（scrollTop=2000 为最大值），若仍按底部
+        // 包含判定拒绝复用，波形层会**每帧**全量重建 —— 正是本缓存要消灭的
+        // ~10 ms/400-clip 路径。此时越出的留白是内容终点之外的正确内容，
+        // 平移复用与重建逐像素一致。
+        const a = anchor();
+        const q = query(a, { scrollTopPx: 2000, rowsEndAtContentBottom: true });
+        expect(canReuseGeometry(a, q)).toBe(true);
+        // 顶边判定不受承诺影响：向上滚出几何覆盖顶端（越出新行）仍然必须重建。
+        const high = anchor({ windowTopPx: 100 });
+        expect(
+            canReuseGeometry(high, query(high, { scrollTopPx: 50, rowsEndAtContentBottom: true })),
+        ).toBe(false);
+    });
+
     it("视口越出窗口左边界 → 必须重建", () => {
         const a = anchor();
         // windowStartPx = 9488：视口左缘正好贴上窗口边时仍可复用。
