@@ -41,12 +41,33 @@ export interface FileBrowserState {
 
 const STORAGE_KEY = "hifishifter.fileBrowser.lastPath";
 
-function getInitialPath(): string {
-    return localStorage.getItem(STORAGE_KEY) || "";
+/*
+ * 存储访问全部包在 try/catch 里。
+ *
+ * 【为什么不能直接调 localStorage】分片在**模块加载期**就要读一次初始路径；在没有
+ * localStorage 的环境（node 环境的单测、未来的非浏览器宿主）里，直接调用会在
+ * `import` 那一刻抛错 —— 于是"只想引用一个常量"的模块也被连坐（本模块的
+ * `FILE_BROWSER_COMPUTER_PATH` 正是被路径工具模块引用的）。存储不可用只应意味着
+ * "没有记住上次的目录"，不是加载失败。
+ */
+function readStoredPath(): string {
+    try {
+        return localStorage.getItem(STORAGE_KEY) || "";
+    } catch {
+        return "";
+    }
+}
+
+function writeStoredPath(path: string): void {
+    try {
+        localStorage.setItem(STORAGE_KEY, path);
+    } catch {
+        /* 存储不可用：本次会话仍然正常工作，只是下次启动不记得 */
+    }
 }
 
 const initialState: FileBrowserState = {
-    currentPath: getInitialPath(),
+    currentPath: readStoredPath(),
     entries: [],
     loading: false,
     error: null,
@@ -142,7 +163,7 @@ const fileBrowserSlice = createSlice({
                 state.loading = false;
                 state.currentPath = action.payload.dirPath;
                 state.entries = action.payload.entries;
-                localStorage.setItem(STORAGE_KEY, action.payload.dirPath);
+                writeStoredPath(action.payload.dirPath);
             })
             .addCase(loadDirectory.rejected, (state, action) => {
                 if (action.meta.requestId !== state.latestLoadRequestId) return;

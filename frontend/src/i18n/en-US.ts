@@ -1582,6 +1582,11 @@ export const enUS = {
     fb_details_size: "Size",
     fb_details_date: "Date Modified",
     fb_details_none: "None",
+    fb_locations: "Locations",
+    fb_pinned_locations: "Pinned",
+    fb_recent_locations: "Recent",
+    fb_pin_current: "Pin Current Folder",
+    fb_unpin_current: "Unpin Current Folder",
     // ── File browser: navigation ────────────────────────────────────────
     fb_nav_back: "Back",
     fb_nav_forward: "Forward",

@@ -10,6 +10,7 @@ import {
     MagnifyingGlassIcon,
     ReloadIcon,
     SpeakerLoudIcon,
+    StarIcon,
 } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
@@ -38,6 +39,7 @@ import {
 } from "../../features/fileBrowser/fileBrowserMenu";
 import type { FileBrowserViewOptions } from "../../features/fileBrowser/fileBrowserViewOptions";
 import { rowDensityOf } from "../../features/fileBrowser/fileBrowserViewOptions";
+import { locationLabel, parentDirOf } from "../../features/fileBrowser/fileBrowserPaths";
 import {
     emitExternalFileAction,
     emitImportMidiRequest,
@@ -52,6 +54,7 @@ import { SearchTranslitToggle } from "./search/SearchTranslitToggle";
 import { matchReasonOf } from "./search/matchReason";
 import {
     persistUiSettings,
+    setFileBrowserFavorites,
     setFileBrowserView,
     setSearchSettings,
     setSearchSettingsDialogOpen,
@@ -66,6 +69,7 @@ import {
     AppSelect,
     AppSlider,
     AppSliderReadout,
+    type AppMenuItemSpec,
 } from "../../ui";
 import { isPrimaryModifierDown } from "../../utils/platform";
 import { copyTextToClipboard } from "../../utils/copyText";
@@ -108,6 +112,7 @@ export const FileBrowserPanel: React.FC = () => {
     const fb = useAppSelector((state: RootState) => state.fileBrowser);
     const searchSettings = useAppSelector((state: RootState) => state.session.searchSettings);
     const view = useAppSelector((state: RootState) => state.session.fileBrowserView);
+    const favorites = useAppSelector((state: RootState) => state.session.fileBrowserFavorites);
     const selectedTrackId = useAppSelector((state: RootState) => state.session.selectedTrackId);
     const playheadSec = useAppSelector((state: RootState) => state.session.playheadSec);
 
@@ -710,6 +715,81 @@ export const FileBrowserPanel: React.FC = () => {
         setMenu({ x: event.clientX, y: event.clientY, entry: null });
     }, []);
 
+    // ── 常用位置（固定 + 最近访问） ─────────────────────────────────────────
+    const locationsButtonRef = useRef<HTMLButtonElement | null>(null);
+    const [locationsAt, setLocationsAt] = useState<{ x: number; y: number } | null>(null);
+    const isCurrentPinned = favorites.includes(fb.currentPath);
+
+    /** 最近访问：历史倒序、去掉当前目录与重复项，最多 10 条。 */
+    const recentLocations = useMemo(() => {
+        const seen = new Set<string>([fb.currentPath]);
+        const out: string[] = [];
+        for (let i = history.entries.length - 1; i >= 0 && out.length < 10; i--) {
+            const path = history.entries[i];
+            if (seen.has(path)) continue;
+            seen.add(path);
+            out.push(path);
+        }
+        return out;
+    }, [history.entries, fb.currentPath]);
+
+    const locationItems: AppMenuItemSpec[] = useMemo(() => {
+        const items: AppMenuItemSpec[] = [];
+        if (fb.currentPath && !isComputerLevel) {
+            items.push({
+                key: "pin-toggle",
+                label: isCurrentPinned ? t("fb_unpin_current") : t("fb_pin_current"),
+                icon: <StarIcon />,
+                onSelect: () => {
+                    const next = isCurrentPinned
+                        ? favorites.filter((path) => path !== fb.currentPath)
+                        : [...favorites, fb.currentPath];
+                    dispatch(setFileBrowserFavorites(next));
+                    void dispatch(persistUiSettings());
+                },
+            });
+        }
+        if (favorites.length > 0) {
+            items.push({ key: "pinned-heading", label: t("fb_pinned_locations"), heading: true });
+            for (const path of favorites) {
+                items.push({
+                    key: `pinned:${path}`,
+                    label: locationLabel(path, tf("fb_computer")),
+                    tooltip: path,
+                    checked: path === fb.currentPath,
+                    onSelect: () => navigateTo(path),
+                });
+            }
+        }
+        if (recentLocations.length > 0) {
+            items.push({
+                key: "recent-heading",
+                label: t("fb_recent_locations"),
+                heading: true,
+                separatorBefore: favorites.length > 0,
+            });
+            for (const path of recentLocations) {
+                items.push({
+                    key: `recent:${path}`,
+                    label: locationLabel(path, tf("fb_computer")),
+                    tooltip: path,
+                    onSelect: () => navigateTo(path),
+                });
+            }
+        }
+        return items;
+    }, [
+        dispatch,
+        favorites,
+        fb.currentPath,
+        isComputerLevel,
+        isCurrentPinned,
+        navigateTo,
+        recentLocations,
+        t,
+        tf,
+    ]);
+
     // ── 对话框与行内编辑 ───────────────────────────────────────────────────
     const [propertiesEntry, setPropertiesEntry] = useState<FileEntry | null>(null);
     const [viewOptionsOpen, setViewOptionsOpen] = useState(false);
@@ -1173,6 +1253,17 @@ export const FileBrowserPanel: React.FC = () => {
                 trailing={
                     <>
                         <PanelToolbarButton
+                            icon={<StarIcon />}
+                            tooltip={t("fb_locations")}
+                            buttonRef={locationsButtonRef}
+                            onClick={() => {
+                                const rect = locationsButtonRef.current?.getBoundingClientRect();
+                                setLocationsAt(
+                                    rect ? { x: rect.left, y: rect.bottom + 2 } : { x: 40, y: 40 },
+                                );
+                            }}
+                        />
+                        <PanelToolbarButton
                             icon={<FolderIcon />}
                             tooltip={tf("fb_open_folder")}
                             onClick={() => void handleOpenFolder()}
@@ -1567,6 +1658,18 @@ export const FileBrowserPanel: React.FC = () => {
                 />
             )}
 
+            {/* 常用位置 */}
+            {locationsAt && (
+                <AppContextMenu
+                    x={locationsAt.x}
+                    y={locationsAt.y}
+                    minWidth={220}
+                    ariaLabel={t("fb_locations")}
+                    items={locationItems}
+                    onClose={() => setLocationsAt(null)}
+                />
+            )}
+
             {/* 属性。key 让换条目时重新挂载 —— 探测结果（音频信息 / 目录条目数）
                 随之重置，不必在对话框内部用 effect 清 state。 */}
             <FilePropertiesDialog
@@ -1614,15 +1717,3 @@ export const FileBrowserPanel: React.FC = () => {
         </Flex>
     );
 };
-
-/** 取所在目录；没有上级（盘符根 / `/`）时返回 `null`。 */
-function parentDirOf(path: string): string | null {
-    const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
-    const cut = normalized.lastIndexOf("/");
-    if (cut <= 0) return null;
-    const parent = normalized.slice(0, cut);
-    if (/^[A-Za-z]:$/.test(parent)) {
-        return path.includes("\\") ? `${parent}\\` : `${parent}/`;
-    }
-    return path.includes("\\") ? parent.replace(/\//g, "\\") : parent;
-}

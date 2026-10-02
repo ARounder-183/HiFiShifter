@@ -474,6 +474,13 @@ pub struct UiSettings {
     #[serde(default)]
     pub file_browser: FileBrowserViewSettings,
 
+    /// 文件浏览器的常用位置（用户固定的目录，按固定顺序）。
+    ///
+    /// 单独一个字段而不是塞进 `file_browser`：那是"视图怎么画"，这是"常去哪里"，
+    /// 两者的变更原因与校验规则都不同（前者是受白名单约束的枚举，后者是任意路径）。
+    #[serde(default)]
+    pub file_browser_favorites: Vec<String>,
+
     #[serde(default)]
     pub quick_search_auto_normalize: bool,
     /// 新建工程默认是否保存 UNDO 操作记录数据（工程级开关的初值）。
@@ -1606,6 +1613,7 @@ impl Default for UiSettings {
             silence_detect_options: SilenceDetectSettings::default(),
             search: SearchSettings::default(),
             file_browser: FileBrowserViewSettings::default(),
+            file_browser_favorites: Vec::new(),
             quick_search_auto_normalize: false,
             save_undo_history_by_default: false,
             visible_reference_root_track_ids: Vec::new(),

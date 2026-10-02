@@ -1403,6 +1403,11 @@ export const zhCN = {
     fb_details_size: "大小",
     fb_details_date: "修改日期",
     fb_details_none: "无",
+    fb_locations: "位置",
+    fb_pinned_locations: "已固定",
+    fb_recent_locations: "最近访问",
+    fb_pin_current: "固定当前文件夹",
+    fb_unpin_current: "取消固定当前文件夹",
     // ── 文件浏览器：导航 ────────────────────────────────────────────────
     fb_nav_back: "后退",
     fb_nav_forward: "前进",

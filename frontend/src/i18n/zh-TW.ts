@@ -1405,6 +1405,11 @@ export const zhTW = {
     fb_details_size: "大小",
     fb_details_date: "修改日期",
     fb_details_none: "無",
+    fb_locations: "位置",
+    fb_pinned_locations: "已固定",
+    fb_recent_locations: "最近瀏覽",
+    fb_pin_current: "固定目前資料夾",
+    fb_unpin_current: "取消固定目前資料夾",
     // ── 檔案瀏覽器：導覽 ────────────────────────────────────────────────
     fb_nav_back: "上一頁",
     fb_nav_forward: "下一頁",

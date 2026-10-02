@@ -1456,6 +1456,11 @@ export const jaJP = {
     fb_details_size: "サイズ",
     fb_details_date: "更新日時",
     fb_details_none: "なし",
+    fb_locations: "場所",
+    fb_pinned_locations: "ピン留め",
+    fb_recent_locations: "最近使った場所",
+    fb_pin_current: "現在のフォルダをピン留め",
+    fb_unpin_current: "ピン留めを解除",
     // ── ファイルブラウザ：ナビゲーション ────────────────────────────────
     fb_nav_back: "戻る",
     fb_nav_forward: "進む",

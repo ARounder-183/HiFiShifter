@@ -1531,6 +1531,11 @@ export const koKR = {
     fb_details_size: "크기",
     fb_details_date: "수정한 날짜",
     fb_details_none: "없음",
+    fb_locations: "위치",
+    fb_pinned_locations: "고정됨",
+    fb_recent_locations: "최근 위치",
+    fb_pin_current: "현재 폴더 고정",
+    fb_unpin_current: "현재 폴더 고정 해제",
     // ── 파일 브라우저: 탐색 ─────────────────────────────────────────────
     fb_nav_back: "뒤로",
     fb_nav_forward: "앞으로",

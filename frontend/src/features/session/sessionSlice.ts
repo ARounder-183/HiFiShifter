@@ -524,6 +524,14 @@ export interface SessionState {
      */
     fileBrowserView: FileBrowserViewOptions;
     /**
+     * 文件浏览器的常用位置（用户固定的目录）。
+     *
+     * 【为什么与视图选项分开存】前者是"视图怎么画"（受白名单约束的枚举），
+     * 这是"常去哪里"（任意路径）。变更原因与校验规则都不同，混在一个对象里会让
+     * `normalizeFileBrowserViewOptions` 同时管两件不相干的事。
+     */
+    fileBrowserFavorites: string[];
+    /**
      * 「搜索与匹配设置」对话框是否打开。
      *
      * 【为什么放在切片里】三个地方都要能把它打开：选项菜单、文件浏览器与快速搜索
@@ -2206,6 +2214,7 @@ const initialState: SessionState = {
     silenceDetectOptions: { ...SILENCE_DETECT_DEFAULTS },
     searchSettings: { ...DEFAULT_SEARCH_SETTINGS },
     fileBrowserView: { ...DEFAULT_FILE_BROWSER_VIEW_OPTIONS },
+    fileBrowserFavorites: [],
     searchSettingsDialogOpen: false,
     quickSearchAutoNormalizeEnabled: false,
     saveUndoHistoryByDefault: false,
@@ -2915,6 +2924,17 @@ const sessionSlice = createSlice({
                 next.sortDescending = DEFAULT_SORT_DESCENDING[patch.sortMode];
             }
             state.fileBrowserView = next;
+        },
+        /** 覆盖常用位置列表（顺序即显示顺序；去重与去空白在此收口）。 */
+        setFileBrowserFavorites(state, action: PayloadAction<string[]>) {
+            const seen = new Set<string>();
+            state.fileBrowserFavorites = action.payload
+                .map((path) => path.trim())
+                .filter((path) => {
+                    if (!path || seen.has(path)) return false;
+                    seen.add(path);
+                    return true;
+                });
         },
         toggleQuickSearchAutoNormalize(state) {
             state.quickSearchAutoNormalizeEnabled = !state.quickSearchAutoNormalizeEnabled;
@@ -3810,6 +3830,12 @@ const sessionSlice = createSlice({
                 state.fileBrowserView = normalizeFileBrowserViewOptions(
                     migrateLegacyMediaOnly(s.fileBrowser, readLegacyMediaOnly()),
                 );
+                if (Array.isArray(s.fileBrowserFavorites)) {
+                    state.fileBrowserFavorites = s.fileBrowserFavorites
+                        .filter((path: unknown): path is string => typeof path === "string")
+                        .map((path: string) => path.trim())
+                        .filter((path: string) => path.length > 0);
+                }
                 if (s.quickSearchAutoNormalize != null)
                     state.quickSearchAutoNormalizeEnabled = Boolean(s.quickSearchAutoNormalize);
                 if (s.saveUndoHistoryByDefault != null)
@@ -6751,6 +6777,7 @@ export const {
     setSilenceDetectOptions,
     setSearchSettings,
     setFileBrowserView,
+    setFileBrowserFavorites,
     setSearchSettingsDialogOpen,
     toggleQuickSearchAutoNormalize,
     setSaveUndoHistoryByDefault,

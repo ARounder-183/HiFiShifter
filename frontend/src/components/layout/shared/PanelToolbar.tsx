@@ -35,22 +35,28 @@ export function PanelToolbar({ leading, trailing }: { leading?: ReactNode; trail
  * @param icon 图标节点（Radix 图标；尺寸由本组件统一覆盖）。
  * @param tooltip 悬停提示文本，走项目自定义 tooltip（`data-tooltip`）。
  * @param active 是否为激活态（用于可切换的按钮）。
+ * @param buttonRef 按钮元素引用。给需要**按按钮位置定位浮层**的调用方用
+ *   （例如文件浏览器的"常用位置"菜单）—— 没有它，调用方只能在外面套一层
+ *   `onClick` 容器来读坐标，那会让按钮的点击语义变成两个嵌套处理器。
  */
 export function PanelToolbarButton({
     icon,
     tooltip,
     active = false,
     disabled = false,
+    buttonRef,
     onClick,
 }: {
     icon: ReactNode;
     tooltip: string;
     active?: boolean;
     disabled?: boolean;
+    buttonRef?: React.Ref<HTMLButtonElement>;
     onClick: () => void;
 }) {
     return (
         <button
+            ref={buttonRef}
             type="button"
             data-tooltip={tooltip}
             aria-label={tooltip}
