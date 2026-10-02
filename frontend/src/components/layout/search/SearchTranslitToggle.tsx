@@ -48,8 +48,13 @@ export interface SearchTranslitToggleProps {
      * 让按钮显示成「关」会是假话：用户点一下它反而打开了转写。
      */
     regexActive?: boolean;
-    /** 按钮边长（px）。同一行里的按钮应取同一尺寸。 */
-    size?: number;
+    /**
+     * 按钮边长。同一行里的按钮应取同一尺寸。
+     *
+     * 接受 CSS 长度而不只是数字：调用方通常希望写 `var(--qt-ctl-md)` 这类**令牌**
+     * 而不是再抄一遍 `24`，否则同一个尺寸会在两处各有一个来源。
+     */
+    size?: number | string;
     /** 「在设置中管理…」的跳转；省略则菜单里不出现该项。 */
     onOpenSettings?: () => void;
 }

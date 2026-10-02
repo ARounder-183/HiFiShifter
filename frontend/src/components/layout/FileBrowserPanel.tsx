@@ -1434,15 +1434,22 @@ export const FileBrowserPanel: React.FC = () => {
                 }
             />
 
-            {/* 搜索栏 */}
-            {/* 第一排：搜索框 + 正则 + 匹配方式 —— 三个控件都在回答"怎么搜"。
-                正则与匹配方式是**搜索的修饰**，放在搜索框同一排才读得出来；
-                此前它们和排序挤在第二排，与排序（"怎么排"）混在一起。 */}
+            {/* 搜索栏。
+                两排，按"回答哪个问题"分组，并按**主次**分层：
+                  第一排 = 搜索框 + 正则 + 匹配方式（"怎么搜"）——搜索框是本面板的
+                    主要动作，因此它是这一屏里**最大**的控件（Radix size 2 = 32px），
+                    两侧的正则 / 匹配方式按钮是它的修饰，统一 24px 退居次位；
+                  第二排 = 排序方式 + 升降序 + 仅显示媒体文件（"列什么、怎么排"），
+                    整排 24px。
+                此前排序下拉比搜索框还大：`AppSelect` 的密度是从**容器**继承的，而
+                这两排不在 `PanelToolbar` 里（只有它下发 compact），于是下拉落到默认
+                的 form 密度、渲染成 32px，搜索框却按 `size="1"` 是 24px —— 次要控件
+                反而更抢眼。现在下拉显式声明 `density="compact"`。 */}
             <div className="px-2 py-1 border-b border-qt-border shrink-0">
                 <Flex align="center" gap="1">
                     <TextField.Root
                         ref={searchInputRef}
-                        size="1"
+                        size="2"
                         className="flex-1"
                         placeholder={tf("fb_search_placeholder")}
                         value={fb.searchQuery}
@@ -1508,13 +1515,14 @@ export const FileBrowserPanel: React.FC = () => {
                         style={{
                             fontFamily: "monospace",
                             fontSize: "var(--qt-fs-micro)",
-                            width: 22,
-                            height: 22,
+                            width: "var(--qt-ctl-md)",
+                            height: "var(--qt-ctl-md)",
                             flexShrink: 0,
                         }}
                         icon=".*"
                     />
                     <SearchTranslitToggle
+                        size="var(--qt-ctl-md)"
                         settings={searchSettings}
                         onChange={(patch) => {
                             dispatch(setSearchSettings(patch));
@@ -1530,6 +1538,9 @@ export const FileBrowserPanel: React.FC = () => {
                     <AppSelect
                         fullWidth={false}
                         className="flex-1"
+                        // 本面板的这两排不在 PanelToolbar 内，继承不到 compact 密度；
+                        // 不声明就会落到 form（32px），比搜索框还大。
+                        density="compact"
                         value={view.sortMode}
                         onValueChange={(value) => {
                             dispatch(
@@ -1555,7 +1566,7 @@ export const FileBrowserPanel: React.FC = () => {
                             dispatch(setFileBrowserView({ sortDescending: !view.sortDescending }));
                             void dispatch(persistUiSettings());
                         }}
-                        style={{ width: 22, height: 22 }}
+                        style={{ width: "var(--qt-ctl-md)", height: "var(--qt-ctl-md)" }}
                         icon={view.sortDescending ? <ChevronDownIcon /> : <ChevronUpIcon />}
                     />
                     <AppIconButton
@@ -1566,8 +1577,8 @@ export const FileBrowserPanel: React.FC = () => {
                             void dispatch(persistUiSettings());
                         }}
                         style={{
-                            width: 22,
-                            height: 22,
+                            width: "var(--qt-ctl-md)",
+                            height: "var(--qt-ctl-md)",
                         }}
                         icon={<MediaIcon />}
                     />
