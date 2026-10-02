@@ -655,6 +655,18 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 ...(args[2] !== undefined ? { options: args[2] } : {}),
             };
 
+        case "stat_paths":
+            return { paths: args[0] };
+
+        case "collect_folder_media":
+            return {
+                dirs: args[0],
+                ...(args[1] !== undefined ? { options: args[1] } : {}),
+            };
+
+        case "add_track_tree":
+            return { nodes: args[0], insertIndex: args[1] ?? null };
+
         case "transliterate":
             return {
                 texts: args[0],

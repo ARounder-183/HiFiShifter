@@ -115,6 +115,7 @@ export const webApi = {
 
     addTrack: timelineApi.addTrack,
     addTrackNested: timelineApi.addTrackNested,
+    addTrackTree: timelineApi.addTrackTree,
     removeTrack: timelineApi.removeTrack,
     duplicateTrack: timelineApi.duplicateTrack,
     moveTrack: timelineApi.moveTrack,

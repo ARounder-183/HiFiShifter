@@ -1081,6 +1081,19 @@ fn split_clip_take_window(
     }
 }
 
+/// 批量建轨道的一项请求（`add_track_tree` 的输入）。
+///
+/// 【为什么父用下标而不是 id】调用方在建之前不可能知道新轨道的 id；用下标描述整棵
+/// 树，一次调用就能描述完。代价：**父必须排在子之前**（DFS 先序）。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackTreeNode {
+    pub name: String,
+    /// 父节点在**本次调用内**的下标；`None` = 根轨道。
+    #[serde(default)]
+    pub parent_index: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
     pub id: String,
@@ -4228,6 +4241,104 @@ mod tests {
             tl.tracks.iter().find(|t| t.id == ids[9]).unwrap().color,
             "#4a8fd1"
         );
+    }
+
+    // ── 批量建轨道（目录导入的"为每个文件夹创建轨道组"）──────────────────
+
+    fn node(name: &str, parent_index: Option<usize>) -> TrackTreeNode {
+        TrackTreeNode {
+            name: name.to_string(),
+            parent_index,
+        }
+    }
+
+    /// 新建工程自带一条 Main 根轨道，测试里先清空以便下标可预期。
+    fn empty_timeline() -> TimelineState {
+        let mut tl = TimelineState::default();
+        tl.tracks.clear();
+        tl
+    }
+
+    fn name_of(tl: &TimelineState, id: &str) -> String {
+        tl.tracks
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| panic!("轨道不存在: {id}"))
+    }
+
+    fn parent_of(tl: &TimelineState, id: &str) -> Option<String> {
+        tl.tracks
+            .iter()
+            .find(|t| t.id == id)
+            .and_then(|t| t.parent_id.clone())
+    }
+
+    #[test]
+    fn add_track_tree_builds_the_nested_tree_in_dfs_order() {
+        let mut tl = empty_timeline();
+        // Takes 是根；take_01 挂在它下面；Sub 也挂在它下面；deep 挂在 Sub 下面。
+        let ids = tl.add_track_tree(
+            &[
+                node("Takes", None),
+                node("take_01", Some(0)),
+                node("Sub", Some(0)),
+                node("deep", Some(2)),
+            ],
+            None,
+        );
+        assert_eq!(ids.len(), 4);
+        assert_eq!(name_of(&tl, &ids[0]), "Takes");
+        assert_eq!(parent_of(&tl, &ids[0]), None);
+        assert_eq!(parent_of(&tl, &ids[1]), Some(ids[0].clone()));
+        assert_eq!(parent_of(&tl, &ids[2]), Some(ids[0].clone()));
+        assert_eq!(parent_of(&tl, &ids[3]), Some(ids[2].clone()));
+
+        // Vec 顺序 == DFS 显示顺序：Takes → take_01 → Sub → deep。
+        let order: Vec<String> = tl.tracks.iter().map(|t| t.name.clone()).collect();
+        assert_eq!(order, vec!["Takes", "take_01", "Sub", "deep"]);
+        // 选中第一条根轨道（而不是"最后建的那条"）。
+        assert_eq!(tl.selected_track_id, Some(ids[0].clone()));
+    }
+
+    #[test]
+    fn add_track_tree_inserts_roots_at_the_requested_position() {
+        let mut tl = empty_timeline();
+        let first = tl.add_track(Some("A".into()), None, None);
+        let second = tl.add_track(Some("B".into()), None, None);
+        // 在 A 之后（根级下标 1）插入两棵新树。
+        let ids = tl.add_track_tree(
+            &[
+                node("F1", None),
+                node("f1_child", Some(0)),
+                node("F2", None),
+            ],
+            Some(1),
+        );
+        let order: Vec<String> = tl.tracks.iter().map(|t| t.name.clone()).collect();
+        // F1 的整棵子树在 F2 之前 —— 第二条根轨道紧随第一条，而不是被插进它的子树里。
+        assert_eq!(order, vec!["A", "F1", "f1_child", "F2", "B"]);
+        assert_eq!(name_of(&tl, &first), "A");
+        assert_eq!(name_of(&tl, &second), "B");
+        assert_eq!(parent_of(&tl, &ids[1]), Some(ids[0].clone()));
+        assert_eq!(parent_of(&tl, &ids[2]), None);
+    }
+
+    #[test]
+    fn add_track_tree_treats_forward_parent_reference_as_root() {
+        let mut tl = empty_timeline();
+        // 父下标指向自己之后（悬空）：必须退化成根轨道，而不是建出断链。
+        // `normalize_track_vec` 的孤儿修复会兜住，但这里从源头就不该产生悬空。
+        let ids = tl.add_track_tree(&[node("orphan", Some(3)), node("real", None)], None);
+        assert_eq!(parent_of(&tl, &ids[0]), None);
+        assert_eq!(parent_of(&tl, &ids[1]), None);
+    }
+
+    #[test]
+    fn add_track_tree_on_empty_input_is_a_noop() {
+        let mut tl = empty_timeline();
+        assert!(tl.add_track_tree(&[], None).is_empty());
+        assert!(tl.tracks.is_empty());
     }
 
     #[test]
@@ -8230,6 +8341,73 @@ impl TimelineState {
 
         self.selected_track_id = Some(id.clone());
         id
+    }
+
+    /// 批量建出一整棵轨道子树，返回新建轨道的 id（按输入下标）。
+    ///
+    /// 【为什么必须批量】`add_track` 每建一条都跑一次 `normalize_track_vec`，而它要
+    /// 重排整个 Vec、重写全部 order —— 建 N 条就是 O(N²) 次比较，外加 N 次
+    /// `TimelineStatePayload` 全量快照的 IPC 往返（前端只能串行 await，因为
+    /// `normalize_track_vec` 的孤儿修复要求父先于子存在）。建 48 条轨道因此是 48 次
+    /// 全量快照。本方法在整棵树建完后只归一化一次，往返降到 1 次。
+    ///
+    /// 【为什么用下标而不是 id 描述父】调用方在建之前不可能知道新轨道的 id。用
+    /// 下标描述整棵树，一次调用就能描述完。代价：**父必须排在子之前**（DFS 先序），
+    /// 否则 `parent_index` 指向尚未创建的下标，会被当作根轨道。
+    ///
+    /// 【落点】`insert_index` 是整棵树的第一条根轨道在**根级**的目标位置，后续根轨道
+    /// 依次紧随其后（`place_track_among_siblings` 的语义是"同级第 index 位"）。
+    pub fn add_track_tree(
+        &mut self,
+        nodes: &[TrackTreeNode],
+        insert_index: Option<usize>,
+    ) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::with_capacity(nodes.len());
+        let mut root_indices: Vec<usize> = Vec::new();
+        for (index, node) in nodes.iter().enumerate() {
+            let id = new_id("track");
+            let order = self.next_track_order;
+            self.next_track_order += 1;
+            let parent_id = match node.parent_index {
+                Some(parent) if parent < index => ids.get(parent).cloned(),
+                _ => None,
+            };
+            if parent_id.is_none() {
+                root_indices.push(index);
+            }
+            let color = track_palette_color(self.tracks.len());
+            self.tracks.push(Track {
+                id: id.clone(),
+                name: node.name.clone(),
+                parent_id,
+                order,
+                muted: false,
+                solo: false,
+                volume: 1.0,
+                compose_enabled: false,
+                pitch_analysis_algo: PitchAnalysisAlgo::default(),
+                color,
+            });
+            ids.push(id);
+        }
+
+        // 一次归一化（见方法头注释）。根轨道此时按输入顺序排在末尾。
+        self.normalize_track_vec();
+
+        // 整棵树的根级落点：把根轨道按顺序安插到 `insert_index` 起的位置。
+        if let Some(base) = insert_index {
+            for (offset, node_index) in root_indices.iter().enumerate() {
+                let id = ids[*node_index].clone();
+                self.place_track_among_siblings(&id, base + offset);
+            }
+        }
+
+        // 选中第一条根轨道。`add_track` 会把选中设成"最后建的那条"（通常是某个
+        // 子轨道），对"我刚导入的东西在哪"这个问题给不出答案。
+        if let Some(first_root) = root_indices.first() {
+            self.selected_track_id = Some(ids[*first_root].clone());
+        }
+        ids
     }
 
     /// 克隆轨道：

@@ -64,6 +64,15 @@ export function resolveStatusText(status: string, statusKey: StatusKeyMap, t: Tr
             .replace("{n}", scan[2] ?? "0");
     }
 
+    // 目录导入的收尾汇总：两个数量（成功 / 失败）。失败数让用户知道"有东西没进来"，
+    // 而单数量模板（下面的通用形态）表达不了它，所以单独一条。
+    const folderImport = status.match(/^Folder import: (\d+) imported, (\d+) failed$/);
+    if (folderImport) {
+        return t("status_folder_import_summary")
+            .replace("{m}", folderImport[1] ?? "0")
+            .replace("{n}", folderImport[2] ?? "0");
+    }
+
     // 带数量的状态：提取数字回填占位符模板（如 "Waveform cache cleared (3 files)"）。
     const counted = status.match(/^(.+?)\s*\((\d+)\s*\w+\)$/);
     if (counted) {

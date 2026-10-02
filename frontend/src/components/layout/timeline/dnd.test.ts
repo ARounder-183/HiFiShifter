@@ -202,3 +202,60 @@ describe("partitionDroppedPaths：多文件按类型分类", () => {
         expect(result.rejectedPaths).toEqual([]);
     });
 });
+
+// ── 目录准入 ────────────────────────────────────────────────────────────
+//
+// 【为什么 isDir 必须优先于扩展名】目录名可以带任何后缀。一个叫 `take.wav` 的
+// 文件夹不是音频，一个叫 `song.hshp` 的文件夹不是工程。判据本身是纯字符串函数，
+// 无法 stat，所以目录信息由调用方提供；提供时它压过所有扩展名判断。
+
+describe("目录准入：isDir 优先于扩展名", () => {
+    it("同一路径，作为目录一律是 importFolder", () => {
+        expect(detectExternalPathAction("C:/audio/take.wav")).toBe("importAudio");
+        expect(detectExternalPathAction("C:/audio/take.wav", { isDir: true })).toBe(
+            "importFolder",
+        );
+        // 工程后缀同理：不能因为目录叫 song.hshp 就去打开它。
+        expect(detectExternalPathAction("C:/proj/song.hshp", { isDir: true })).toBe(
+            "importFolder",
+        );
+    });
+
+    it("没有扩展名的目录也能被认出来（这正是扩展名判据的盲区）", () => {
+        expect(detectExternalPathAction("C:/misc/noextension")).toBeNull();
+        expect(detectExternalPathAction("C:/misc/noextension", { isDir: true })).toBe(
+            "importFolder",
+        );
+    });
+
+    it("不提供 isDir 时行为与改动前逐字节一致（目录仍被拒）", () => {
+        for (const path of ["C:/music/Takes", "C:/misc/noextension", "C:/audio/take.wav/"]) {
+            expect(isAcceptedDropPath(path), `应被拒：${path}`).toBe(false);
+        }
+    });
+});
+
+describe("partitionDroppedPaths：目录单独成类", () => {
+    it("已知是目录的路径进 folderPaths，不再落进 rejectedPaths", () => {
+        const result = partitionDroppedPaths(["C:/music/Takes", "a.wav"], {
+            directories: new Set(["C:/music/Takes"]),
+        });
+        expect(result.folderPaths).toEqual(["C:/music/Takes"]);
+        expect(result.mediaPaths).toEqual(["a.wav"]);
+        expect(result.rejectedPaths).toEqual([]);
+    });
+
+    it("不传 directories 时目录仍被拒（既有调用方行为不变）", () => {
+        const result = partitionDroppedPaths(["C:/music/Takes", "a.wav"]);
+        expect(result.folderPaths).toEqual([]);
+        expect(result.rejectedPaths).toEqual(["C:/music/Takes"]);
+    });
+
+    it("目录与媒体混拖时各自保持拖放顺序", () => {
+        const result = partitionDroppedPaths(["C:/c", "x.wav", "C:/a", "y.wav", "C:/b"], {
+            directories: new Set(["C:/a", "C:/b", "C:/c"]),
+        });
+        expect(result.folderPaths).toEqual(["C:/c", "C:/a", "C:/b"]);
+        expect(result.mediaPaths).toEqual(["x.wav", "y.wav"]);
+    });
+});

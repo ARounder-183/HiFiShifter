@@ -2,12 +2,13 @@ import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
 import { fileBrowserApi } from "../../../services/api";
 import { isVideoFilePath } from "../../../components/layout/timeline/dnd";
-import { checkpointHistory, type SessionState } from "../sessionSlice";
+import { checkpointHistory, applyTimelinePayload, type SessionState } from "../sessionSlice";
 
 import { addTrackRemote, setClipStateRemote } from "./timelineThunks";
 import { computeAutoCrossfadeFromPayload } from "../../../components/layout/timeline/hooks/autoCrossfade";
 import { computeClipNormalizationGain } from "../clipNormalization";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
+import { appStatusProgressBus } from "../../../utils/appStatusProgressBus";
 
 type RawTimelineClip = {
     id?: string;
@@ -596,6 +597,197 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
 
             return { ok: true, imported: importedResult, newClipIds, playheadSec: startSec };
         } finally {
+            void webApi.endUndoGroup();
+        }
+    },
+);
+
+/** 目录导入计划里的一棵子树（`FolderImportPlanNode` 去掉 `dir`：导入不需要它）。 */
+export interface FolderImportTreeNode {
+    /** 轨道名（目录名的最后一段）。 */
+    name: string;
+    /** 该目录**直属**的媒体文件（已排序）。 */
+    files: string[];
+    children: FolderImportTreeNode[];
+}
+
+export interface ImportFolderAtPositionPayload {
+    /** 目录树（仅"创建轨道组"模式需要）。 */
+    roots: FolderImportTreeNode[];
+    /** 直接拖入的散文件（不属于任何目录）。 */
+    looseFiles: string[];
+    /** 扁平文件顺序（其余三种落位方式用）。 */
+    orderedFiles: string[];
+    mode: "across-time" | "across-tracks" | "as-takes";
+    /** 为每个文件夹创建轨道组（仅 `across-tracks` 有效）。 */
+    createFolderTracks: boolean;
+    trackId?: string | null;
+    startSec?: number;
+    /** 新建根轨道的落点（根级下标）。 */
+    insertIndex?: number | null;
+}
+
+/** 文件名（不含目录与扩展名）——用作"每个媒体文件一条子轨道"的轨道名。 */
+function fileStem(path: string): string {
+    const base = path.split(/[\\/]/).pop() ?? path;
+    const dot = base.lastIndexOf(".");
+    return dot > 0 ? base.slice(0, dot) : base;
+}
+
+/**
+ * 目录导入进度条的出现阈值（文件数）。
+ *
+ * 【为什么需要阈值】单个文件导入几十毫秒，为一个 3 个文件的目录闪一下状态栏只是噪音。
+ * 超过这个量级才值得让用户看到"还要多久"。
+ */
+const FOLDER_IMPORT_PROGRESS_THRESHOLD = 12;
+
+/**
+ * 目录导入。
+ *
+ * 【与 `importMultipleAudioAtPosition` 的关系】不创建轨道组时**直接委托**给它 ——
+ * 目录的贡献就是"它里面的媒体文件"，三种排布方式的语义、撤销分组、自动交叉淡化
+ * 全部照旧，一行都不用重写。只有"创建轨道组"是一条新路径。
+ *
+ * 【为什么"创建轨道组"必须自己走一遍】它要求：每个文件夹一条**空白**的根轨道、
+ * 每个媒体文件一条挂在它下面的子轨道。这与 `across-tracks` 的"复用已有轨道、
+ * 不够才新建"是相反的语义（用户明确要求"必定新建，不要利用旧轨道"），没法用
+ * 参数表达，只能另写。
+ */
+export const importFolderAtPosition = createAsyncThunk(
+    "session/importFolderAtPosition",
+    async (
+        payload: ImportFolderAtPositionPayload,
+        { dispatch, rejectWithValue, getState },
+    ) => {
+        const { roots, looseFiles, orderedFiles, mode, createFolderTracks, startSec = 0 } = payload;
+        const useFolderTracks = mode === "across-tracks" && createFolderTracks && roots.length > 0;
+
+        if (!useFolderTracks) {
+            return dispatch(
+                importMultipleAudioAtPosition({
+                    audioPaths: orderedFiles,
+                    mode,
+                    trackId: payload.trackId,
+                    startSec,
+                }),
+            ).unwrap();
+        }
+
+        if (orderedFiles.length === 0) {
+            return { ok: true, imported: null, newClipIds: [] as string[], playheadSec: startSec };
+        }
+
+        // 展平成"父在子前"的下标序列（`add_track_tree` 的要求）。
+        interface TreeSpec {
+            name: string;
+            parentIndex: number | null;
+            files: string[];
+        }
+        const specs: TreeSpec[] = [];
+        const walk = (node: FolderImportTreeNode, parentIndex: number | null) => {
+            const index = specs.length;
+            // 文件夹轨道自身**空白** —— 它代表这个文件夹，媒体文件挂在它的子轨道上。
+            specs.push({ name: node.name, parentIndex, files: [] });
+            // 子目录整棵在前，然后才是本目录的媒体文件：与文件浏览器的
+            // `foldersFirst` 默认一致（列表里看到的顺序就是导入后的顺序）。
+            for (const child of node.children) walk(child, index);
+            for (const file of node.files) {
+                specs.push({ name: fileStem(file), parentIndex: index, files: [file] });
+            }
+        };
+        for (const root of roots) walk(root, null);
+        // 散文件各建一条根轨道：与"每个目录一条根轨道"同构，不引入第三种规则。
+        for (const file of looseFiles) {
+            specs.push({ name: fileStem(file), parentIndex: null, files: [file] });
+        }
+
+        dispatch(checkpointHistory());
+        await webApi.beginUndoGroup("import_folder");
+        // 进度：逐个文件导入，含上千个文件的目录会有肉眼可见的等待。低于阈值时不显示，
+        // 免得为一次 200ms 的操作闪一下状态栏。走总线而不是 Redux —— 见其文件头。
+        const totalFiles = specs.reduce((count, spec) => count + spec.files.length, 0);
+        let processed = 0;
+        const reportProgress = (active: boolean) =>
+            appStatusProgressBus.setFolderImport({
+                active: active && totalFiles >= FOLDER_IMPORT_PROGRESS_THRESHOLD,
+                done: processed,
+                total: totalFiles,
+            });
+        reportProgress(true);
+        try {
+            const beforeClipIds = new Set(
+                (getState() as { session: SessionState }).session.clips.map((c) => c.id),
+            );
+
+            const created = await webApi.addTrackTree({
+                nodes: specs.map((spec) => ({
+                    name: spec.name,
+                    parentIndex: spec.parentIndex,
+                })),
+                insertIndex: payload.insertIndex ?? null,
+            });
+            const trackIds = created.createdTrackIds ?? [];
+            if (trackIds.length !== specs.length) {
+                // 轨道树没建全就继续导入，会把 clip 落到错误的轨道上 —— 宁可不导。
+                return rejectWithValue("add_track_tree_failed");
+            }
+            // 轨道树先落地：即使随后一个文件都没导成（全部不可解码），用户也该看到
+            // 自己刚建出来的轨道组，而不是一片空白。
+            if (created.timeline) {
+                dispatch(applyTimelinePayload(created.timeline));
+            }
+
+            const accumulatedNewClipIds: string[] = [];
+            const failedFiles: string[] = [];
+            let attempted = 0;
+            let lastImported: unknown = null;
+            for (let index = 0; index < specs.length; index += 1) {
+                const trackId = trackIds[index];
+                for (const file of specs[index].files) {
+                    attempted += 1;
+                    try {
+                        const imported = await webApi.importAudioItem(file, trackId, startSec);
+                        if (!(imported as { ok?: boolean }).ok) {
+                            // 不可解码 / 文件已消失：记下来汇总报告，不中断整批。
+                            failedFiles.push(file);
+                            continue;
+                        }
+                        lastImported = imported;
+                        const result = imported as { clips?: Array<{ id?: string }> };
+                        for (const clip of result.clips ?? []) {
+                            if (clip.id) accumulatedNewClipIds.push(clip.id);
+                        }
+                    } catch {
+                        failedFiles.push(file);
+                    } finally {
+                        processed += 1;
+                        reportProgress(true);
+                    }
+                }
+            }
+
+            const newClipIds = accumulatedNewClipIds.filter((id) => !!id && !beforeClipIds.has(id));
+            const latestTimeline = await syncAutoCrossfadeFromLatestTimeline({
+                dispatch: dispatch as unknown as (
+                    action: unknown,
+                ) => Promise<unknown> & { unwrap: () => Promise<unknown> },
+                getState,
+                newClipIds,
+            });
+
+            return {
+                ok: true,
+                imported: latestTimeline ?? lastImported,
+                newClipIds,
+                playheadSec: startSec,
+                /** 未成功导入的文件（汇总报告用；空数组表示全部成功）。 */
+                failedFiles,
+                /** 尝试导入的媒体文件总数（成功数 = 它减去失败数）。 */
+                attempted,
+            };
+        } finally {
+            reportProgress(false);
             void webApi.endUndoGroup();
         }
     },

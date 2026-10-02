@@ -712,6 +712,7 @@ pub fn run() {
             commands::import_audio_item,
             commands::import_audio_bytes,
             commands::add_track,
+            commands::add_track_tree,
             commands::remove_track,
             commands::duplicate_track,
             commands::move_track,

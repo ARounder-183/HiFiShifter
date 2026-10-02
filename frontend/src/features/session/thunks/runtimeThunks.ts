@@ -89,6 +89,7 @@ export const persistUiSettings = createAsyncThunk(
             search: s.searchSettings,
             fileBrowser: s.fileBrowserView,
             fileBrowserFavorites: s.fileBrowserFavorites,
+            folderImport: s.folderImportOptions,
             quickSearchAutoNormalize: s.quickSearchAutoNormalizeEnabled,
             saveUndoHistoryByDefault: s.saveUndoHistoryByDefault,
             visibleReferenceRootTrackIds: s.visibleReferenceRootTrackIds,

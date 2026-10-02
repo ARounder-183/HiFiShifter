@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeInsertBelowPlacement, type TrackParentRef } from "./trackUtils";
+import { computeInsertBelowPlacement, rootIndexAtDrop, type TrackParentRef } from "./trackUtils";
 
 /**
  * 场景树（DFS 显示顺序，与后端 build_track_payload 一致）：
@@ -84,5 +84,33 @@ describe("computeInsertBelowPlacement — 添加轨道紧贴选中轨道下方",
             parentTrackId: null,
             index: 1,
         });
+    });
+});
+
+describe("rootIndexAtDrop — 目录导入的新根轨道落在哪一行", () => {
+    it("没落在具体轨道上：追加到根轨道末尾", () => {
+        expect(rootIndexAtDrop(TRACKS, null)).toBe(3);
+    });
+
+    it("落在根轨道上：就在那一行（已有轨道整体下移）", () => {
+        expect(rootIndexAtDrop(TRACKS, "A")).toBe(0);
+        expect(rootIndexAtDrop(TRACKS, "B")).toBe(1);
+        expect(rootIndexAtDrop(TRACKS, "C")).toBe(2);
+    });
+
+    it("落在子轨道上：上溯到它所属的根，而不是插进那个组里", () => {
+        // 用户把文件夹拖到 A1a 上，语义是"在 A 这个轨道组这里"。
+        expect(rootIndexAtDrop(TRACKS, "A1")).toBe(0);
+        expect(rootIndexAtDrop(TRACKS, "A1a")).toBe(0);
+        expect(rootIndexAtDrop(TRACKS, "B1")).toBe(1);
+    });
+
+    it("落点轨道不存在：退化为追加到末尾，而不是 -1", () => {
+        expect(rootIndexAtDrop(TRACKS, "nope")).toBe(3);
+    });
+
+    it("空工程：下标 0", () => {
+        expect(rootIndexAtDrop([], null)).toBe(0);
+        expect(rootIndexAtDrop([], "ghost")).toBe(0);
     });
 });

@@ -24,6 +24,13 @@ export interface CheckSourceFilesChangedResult {
     changed: SourceFileChange[];
 }
 
+/** `add_track_tree` 的返回：时间轴快照 + 新建轨道 id（按输入下标）。 */
+export interface AddTrackTreeResult {
+    /** 后端 `TimelineStatePayload`（`ok` / `tracks` / `clips` …）。 */
+    timeline?: TimelineResult;
+    createdTrackIds?: string[];
+}
+
 export interface SourceFileMatchCandidate {
     path: string;
     exact_hash: boolean;
@@ -192,6 +199,24 @@ export const timelineApi = {
             payload.parentTrackId ?? null,
             payload.index,
         ),
+
+    /**
+     * 批量建出一整棵轨道子树（目录导入的"为每个文件夹创建轨道组"）。
+     *
+     * 【为什么需要它】`add_track` 每次都跑 `normalize_track_vec`（重排整个 Vec、
+     * 重写全部 order），而它的孤儿修复要求父轨道先存在 —— 前端只能串行 await N 次，
+     * 每次拿回一份全量时间轴快照。建 48 条轨道因此是 48 次全量快照往返。批量命令在
+     * 整棵树建完后只归一化一次，往返降到 1 次。
+     *
+     * @param nodes `parentIndex` 是**本次调用内**的下标；父必须排在子之前（DFS 先序）。
+     * @returns 时间轴快照 + 新建轨道 id（按输入下标）—— 调用方据此把媒体文件导到
+     *   对应的子轨道上。
+     */
+    addTrackTree: (payload: {
+        nodes: { name: string; parentIndex: number | null }[];
+        insertIndex?: number | null;
+    }) =>
+        invoke<AddTrackTreeResult>("add_track_tree", payload.nodes, payload.insertIndex ?? null),
 
     removeTrack: (trackId: string) => invoke<TimelineResult>("remove_track", trackId),
 

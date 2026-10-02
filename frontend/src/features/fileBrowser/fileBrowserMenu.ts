@@ -29,6 +29,16 @@ export interface FileBrowserMenuActions {
     insertAtPlayhead(entries: FileEntry[]): void;
     insertOnNewTrack(entries: FileEntry[]): void;
     insertMultiple(entries: FileEntry[], mode: MultiInsertMode): void;
+    /**
+     * 把一批**目录**展开后导入（打开选项对话框）。
+     *
+     * 【为什么目录只有一条菜单项，而文件有三条】文件那三条（依次排列 / 分到多轨 /
+     * 叠成 Take）就是全部的排布选择，列在菜单里省一次点击。目录还多出两个**正交**的
+     * 问题（要不要下钻子目录、要不要为文件夹建轨道组），塞不进菜单项；列三条模式
+     * 只会变成"点了之后还要再选一次"或者"静默用记住的选项"。所以目录走对话框，
+     * 三个模式在对话框里选 —— 与 REAPER 在这件事上的做法一致。
+     */
+    importFolder(entries: FileEntry[]): void;
     togglePreview(entry: FileEntry): void;
     reveal(paths: string[]): void;
     /** 用系统默认程序打开一个路径。 */
@@ -115,6 +125,16 @@ function entryMenu(targets: FileEntry[], ctx: FileBrowserMenuContext): AppMenuIt
 
     // ── 插入到时间轴（只有音频/视频能直接插入；MIDI 与工程各有自己的入口）──
     const insertable = targets.filter(isAudioFile);
+    // 目录：整批（可含散文件）交给目录导入的选项对话框。
+    const folders = targets.filter((entry) => entry.isDir);
+    if (folders.length > 0) {
+        items.push({
+            key: "import-folder",
+            label: t("fb_ctx_import_folder"),
+            onSelect: () => actions.importFolder(folders),
+            separatorBefore: items.length > 0,
+        });
+    }
     if (insertable.length > 0) {
         if (single) {
             // 单个文件：两种落点直接列出来，不必先选"排布方式"。

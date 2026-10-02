@@ -1603,6 +1603,7 @@ export const enUS = {
     fb_ctx_insert_across_time: "Sequential on One Track",
     fb_ctx_insert_across_tracks: "Across Tracks",
     fb_ctx_insert_as_takes: "As Takes",
+    fb_ctx_import_folder: "Import Folder...",
     fb_ctx_open_containing_folder: "Go to Containing Folder",
     fb_ctx_open_with_default_app: "Open with Default App",
     fb_ctx_reveal: "Show in File Manager",
@@ -1789,6 +1790,23 @@ export const enUS = {
     import_button: "Import",
     import_across_tracks: "Add Across Tracks",
     import_as_takes: "Add as Takes",
+    folder_import_title: "Import Folder",
+    folder_import_import: "Import",
+    folder_import_mode: "Arrangement",
+    folder_import_recursive: "Include files in subfolders",
+    folder_import_create_tracks: "Create a track group per folder",
+    folder_import_create_tracks_hint:
+        "Each folder becomes an empty parent track; its media files become child tracks.",
+    folder_import_create_tracks_unavailable: "Only available with Add Across Tracks.",
+    folder_import_summary_folders: "{count} folder|{count} folders",
+    folder_import_summary_files: "{count} media file|{count} media files",
+    folder_import_truncated:
+        "More files than the limit allows: only the first {count} are imported",
+    folder_import_rejected: "{count} item was skipped|{count} items were skipped",
+    folder_import_no_media: "No media files in the selected folders",
+    folder_import_scanning: "Scanning folders...",
+    status_folder_import_summary: "{m} imported, {n} failed",
+    status_importing_folder: "Importing folder",
     // Overlapping clips context menu
     overlapping_clips_header: "Overlapping clips ({n})",
 

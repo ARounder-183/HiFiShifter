@@ -46,6 +46,14 @@ export function AppStatusProgressChips() {
                         : ""}
                 </AppStatusChip>
             ) : null}
+            {status.folderImport.active ? (
+                <AppStatusChip tone="accent">
+                    {t("status_importing_folder")}
+                    {status.folderImport.total > 0
+                        ? ` ${status.folderImport.done}/${status.folderImport.total}`
+                        : ""}
+                </AppStatusChip>
+            ) : null}
             {renderingActive ? (
                 <AppStatusChip tone="accent">
                     {t("common_rendering")}

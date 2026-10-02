@@ -124,6 +124,7 @@ import { ImportProjectDialog } from "./components/layout/ImportProjectDialog";
 import { AppDialog } from "./ui/Dialog";
 import { AppStatusChip } from "./ui";
 import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
+import { FolderImportHost } from "./components/layout/FolderImportHost";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
 import { selectMergedKeybindings } from "./features/keybindings/keybindingsSlice";
 import { beginHoldRepeat } from "./features/keybindings/holdRepeat";
@@ -490,7 +491,9 @@ function detectExternalActionKindFromPath(path: string): ExternalFileActionKind 
     // `importMidi` 不属于本事件通道的动作集合（`ExternalFileActionKind` 没有它）：
     // MIDI 走"导入 MIDI clip"的独立流程，而不是"打开/导入工程"。这里显式排除，
     // 而不是用类型断言硬转——否则 MIDI 路径会被当成工程打开。
-    if (kind === null || kind === "importMidi") return null;
+    // `importFolder` 同理：目录导入有自己的入口（拖放 / 右键菜单 → 选项对话框），
+    // 而这条通道只带一个路径，表达不了落点与导入选项。
+    if (kind === null || kind === "importMidi" || kind === "importFolder") return null;
     return kind;
 }
 
@@ -4190,6 +4193,12 @@ function AppInner() {
             <DockRoot />
             {/* Quick Search Popup */}
             <QuickSearchPopup open={quickSearchOpen} onClose={() => setQuickSearchOpen(false)} />
+            {/*
+              目录导入的宿主：监听"导入文件夹"请求、扫描、必要时弹选项对话框。
+              挂在最外层是因为三个入口（系统拖放 / 文件浏览器拖拽 / 右键菜单）分散在
+              不同位置 —— 只有一份对话框状态，才不会出现"两个面板各弹一个"。
+            */}
+            <FolderImportHost />
 
             {/* Status Bar */}
             <Flex

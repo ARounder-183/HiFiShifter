@@ -5672,7 +5672,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 return;
             }
             if (actionKind !== "importAudio") {
-                emitExternalFileAction(actionKind, resolvedPath);
+                // 目录不经这条通道：`ExternalFileActionKind` 表达不了"导入目录"
+                // （它只带一个路径，没有落点与选项），而且 HTML5 的 dataTransfer
+                // 拿不到目录信息 —— 目录由 Tauri 原生拖放通道处理。
+                if (actionKind !== "importFolder") emitExternalFileAction(actionKind, resolvedPath);
                 return;
             }
             void dispatch(
@@ -5702,7 +5705,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     return;
                 }
                 if (actionKind !== "importAudio") {
-                    emitExternalFileAction(actionKind, p);
+                    // 同上：目录不走这条通道。
+                    if (actionKind !== "importFolder") emitExternalFileAction(actionKind, p);
                     return;
                 }
                 void dispatch(

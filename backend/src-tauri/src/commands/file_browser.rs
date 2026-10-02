@@ -776,9 +776,8 @@ pub(crate) fn stat_paths(paths: Vec<String>) -> Vec<PathStat> {
 /// 批量管线会引入半配置状态。见设计文档 §8.6。
 pub(crate) const MEDIA_EXTENSIONS: &[&str] = &[
     // 音频
-    "wav", "mp3", "flac", "ogg", "oga", "opus", "aac", "m4a", "aif", "aiff", "wma", "ac3",
-    "eac3", "ape", "wv", "mp2", "mpa", "dts", "amr",
-    // 视频容器（按音轨导入）
+    "wav", "mp3", "flac", "ogg", "oga", "opus", "aac", "m4a", "aif", "aiff", "wma", "ac3", "eac3",
+    "ape", "wv", "mp2", "mpa", "dts", "amr", // 视频容器（按音轨导入）
     "mp4", "m4v", "mov", "mkv", "webm", "avi", "flv", "wmv", "ts", "mts", "m2ts", "vob", "mpg",
     "mpeg", "3gp", "3g2", "ogv", "rm", "rmvb",
 ];
@@ -1478,15 +1477,15 @@ mod tests {
         dir
     }
 
-    fn scan(
-        dirs: Vec<String>,
-        options: CollectFolderMediaOptions,
-    ) -> FolderMediaScan {
+    fn scan(dirs: Vec<String>, options: CollectFolderMediaOptions) -> FolderMediaScan {
         collect_folder_media(dirs, Some(options))
     }
 
     fn labels(scan: &FolderMediaScan) -> Vec<&str> {
-        scan.groups.iter().map(|group| group.label.as_str()).collect()
+        scan.groups
+            .iter()
+            .map(|group| group.label.as_str())
+            .collect()
     }
 
     #[test]
@@ -1637,7 +1636,9 @@ mod tests {
 
     /// 从 `export const NAME = new Set([ ... ]);` 里取出字符串字面量。
     fn extract_string_set(source: &str, marker: &str) -> Vec<String> {
-        let start = source.find(marker).unwrap_or_else(|| panic!("找不到 {marker}"));
+        let start = source
+            .find(marker)
+            .unwrap_or_else(|| panic!("找不到 {marker}"));
         let rest = &source[start..];
         let open = rest.find('[').expect("缺少 [");
         let close = rest[open..].find(']').expect("缺少 ]");
@@ -1652,7 +1653,9 @@ mod tests {
 
     /// 从 `const NAME =\n    /\.(a|b|c)$/i;` 里取出竖线分隔的扩展名。
     fn extract_regex_alternation(source: &str, marker: &str) -> Vec<String> {
-        let start = source.find(marker).unwrap_or_else(|| panic!("找不到 {marker}"));
+        let start = source
+            .find(marker)
+            .unwrap_or_else(|| panic!("找不到 {marker}"));
         let rest = &source[start..];
         let open = rest.find(r"/\.(").expect("缺少正则前缀") + 4;
         let close = rest[open..].find(')').expect("缺少正则后缀");

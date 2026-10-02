@@ -56,3 +56,25 @@ export function computeInsertBelowPlacement(
     }
     return { parentTrackId: parentId, index: before + 1 };
 }
+
+/**
+ * 落点轨道 → 新根轨道应插入的**根级**下标（目录导入用）。
+ *
+ * 【为什么上溯到根】用户把文件夹拖到某个子轨道上，语义是"在这个轨道组这里"，
+ * 而不是"插到这个组的内部" —— 新建的文件夹轨道必须是根轨道。
+ *
+ * 【为什么落在它当前位置而不是它后面】拖放时高亮的就是那一行，用户的预期是
+ * "我放这儿，它就在这儿"，已有轨道整体下移。没有落点轨道时追加到末尾，与
+ * `computeInsertBelowPlacement` 的无选中分支一致。
+ *
+ * @param tracks 后端返回的 DFS 显示顺序数组。
+ * @param dropTrackId 拖放命中的轨道 id；`null` 表示没落在具体轨道上。
+ */
+export function rootIndexAtDrop(tracks: TrackParentRef[], dropTrackId: string | null): number {
+    const roots = tracks.filter((t) => !t.parentId);
+    if (!dropTrackId) return roots.length;
+    const rootId = resolveRootTrackId(tracks, dropTrackId);
+    if (!rootId) return roots.length;
+    const index = roots.findIndex((t) => t.id === rootId);
+    return index < 0 ? roots.length : index;
+}

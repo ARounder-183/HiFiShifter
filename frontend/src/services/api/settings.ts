@@ -2,6 +2,7 @@ import { invoke } from "../invoke";
 import type { NotebookSettings } from "../../components/layout/notebook/notebookSettings";
 import type { SearchSettings } from "../../features/search/searchSettings";
 import type { FileBrowserViewOptions } from "../../features/fileBrowser/fileBrowserViewOptions";
+import type { FolderImportOptions } from "../../features/fileBrowser/folderImportOptions";
 import type { DockPersistedSettings } from "../../features/dock/dockSettings";
 import type { TimelineSnapSettings } from "../../features/session/sessionTypes";
 import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
@@ -191,6 +192,8 @@ export interface UiSettings {
     fileBrowser?: FileBrowserViewOptions;
     /** 文件浏览器的常用位置（用户固定的目录，按固定顺序）。 */
     fileBrowserFavorites?: string[];
+    /** 目录导入选项（排布方式 / 递归 / 建轨道组）。缺省由前端归一化补默认值。 */
+    folderImport?: FolderImportOptions;
     quickSearchAutoNormalize?: boolean;
     /**
      * **新建工程**默认是否保存 UNDO 操作记录数据（默认开启）。

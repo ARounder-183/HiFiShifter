@@ -36,6 +36,7 @@ function makeActions(): FileBrowserMenuActions {
         insertAtPlayhead: vi.fn(),
         insertOnNewTrack: vi.fn(),
         insertMultiple: vi.fn(),
+        importFolder: vi.fn(),
         togglePreview: vi.fn(),
         reveal: vi.fn(),
         openWithDefaultApp: vi.fn(),
@@ -129,6 +130,27 @@ describe("条目菜单", () => {
         expect(items.find((item) => item.key === "primary")?.label).toBe("fb_ctx_open");
         expect(keys(items)).not.toContain("insert-playhead");
         expect(keys(items)).not.toContain("preview");
+    });
+
+    it("目录：给出「导入文件夹」，且它打开的是选项对话框", () => {
+        const actions = makeActions();
+        const items = buildFileBrowserContextMenu(DIR, makeContext({ actions }));
+        const item = items.find((candidate) => candidate.key === "import-folder");
+        expect(item?.label).toBe("fb_ctx_import_folder");
+        item?.onSelect?.();
+        expect(actions.importFolder).toHaveBeenCalledWith([DIR]);
+    });
+
+    it("目录：没有三种排布方式的条目（目录走对话框，模式在里面选）", () => {
+        const items = buildFileBrowserContextMenu(DIR, makeContext());
+        expect(keys(items)).not.toContain("insert-across-time");
+        expect(keys(items)).not.toContain("insert-as-takes");
+    });
+
+    it("文件 + 目录混选：两边的入口各自都在", () => {
+        const items = buildFileBrowserContextMenu(WAV, makeContext({ selected: [WAV, DIR] }));
+        expect(keys(items)).toContain("import-folder");
+        expect(keys(items)).toContain("insert-across-time");
     });
 
     it("MIDI：主操作是导入 MIDI，不出现音频插入项", () => {

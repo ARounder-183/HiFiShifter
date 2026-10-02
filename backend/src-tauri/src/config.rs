@@ -334,6 +334,44 @@ pub struct FileBrowserViewSettings {
     pub status_bar_visible: bool,
 }
 
+/// 目录导入的选项。
+///
+/// 字段与前端 `features/fileBrowser/folderImportOptions.ts` 一一对应（camelCase
+/// 序列化后同名）。与 `FileBrowserViewSettings` 同样的分工：后端只做透传存储，
+/// 取值合法性由前端的 `normalizeFolderImportOptions` 收口。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderImportSettings {
+    /// 排布方式：`"across-time"` / `"across-tracks"`（默认）/ `"as-takes"`。
+    #[serde(default = "default_folder_import_mode")]
+    pub mode: String,
+    /// 递归导入子目录中的文件（默认否，与 REAPER 的默认一致）。
+    #[serde(default = "default_false_value")]
+    pub recursive: bool,
+    /// 为每个文件夹创建轨道组（默认是；仅 `across-tracks` 时有效）。
+    #[serde(default = "default_true_value")]
+    pub create_folder_tracks: bool,
+}
+
+fn default_folder_import_mode() -> String {
+    // 与前端 `DEFAULT_FOLDER_IMPORT_OPTIONS.mode` 一致：它是唯一能让
+    // `createFolderTracks` 生效的模式，默认值之间必须自洽。
+    "across-tracks".to_string()
+}
+
+/// 手写 `Default` 而不是派生：派生会给 `mode` 一个空串、给 `create_folder_tracks`
+/// 一个 `false`，与前端默认值不一致 —— 配置里缺这一项时（老用户首次升级），
+/// 后端读出来的默认值就成了"排布方式未知、不建轨道组"。
+impl Default for FolderImportSettings {
+    fn default() -> Self {
+        Self {
+            mode: default_folder_import_mode(),
+            recursive: false,
+            create_folder_tracks: true,
+        }
+    }
+}
+
 fn default_file_browser_density() -> String {
     "compact".to_string()
 }
@@ -480,6 +518,13 @@ pub struct UiSettings {
     /// 两者的变更原因与校验规则都不同（前者是受白名单约束的枚举，后者是任意路径）。
     #[serde(default)]
     pub file_browser_favorites: Vec<String>,
+
+    /// 目录导入的选项（排布方式 / 递归 / 建轨道组）。
+    ///
+    /// 【为什么必须在这里有字段】同 `file_browser`：`save_ui_settings` 是「读-改-写
+    /// 整个配置文件」，本结构缺字段时前端每次保存都会把它**静默丢弃**。
+    #[serde(default)]
+    pub folder_import: FolderImportSettings,
 
     #[serde(default)]
     pub quick_search_auto_normalize: bool,
@@ -1614,6 +1659,7 @@ impl Default for UiSettings {
             search: SearchSettings::default(),
             file_browser: FileBrowserViewSettings::default(),
             file_browser_favorites: Vec::new(),
+            folder_import: FolderImportSettings::default(),
             quick_search_auto_normalize: false,
             save_undo_history_by_default: false,
             visible_reference_root_track_ids: Vec::new(),

@@ -51,6 +51,8 @@ import {
     emitImportProjectPick,
     emitOpenProjectPath,
 } from "../../features/session/projectOpenEvents";
+import { emitFolderImportRequest } from "../../features/fileBrowser/folderImportEvents";
+import { rootIndexAtDrop } from "../../features/session/trackUtils";
 import {
     importAudioAtPosition,
     importMultipleAudioAtPosition,
@@ -114,6 +116,8 @@ export const FileBrowserPanel: React.FC = () => {
     const favorites = useAppSelector((state: RootState) => state.session.fileBrowserFavorites);
     const selectedTrackId = useAppSelector((state: RootState) => state.session.selectedTrackId);
     const playheadSec = useAppSelector((state: RootState) => state.session.playheadSec);
+    /** 轨道列表（DFS 显示顺序）：算目录导入的落点用。 */
+    const tracks = useAppSelector((state: RootState) => state.session.tracks);
 
     const searchInputRef = useRef<HTMLInputElement>(null);
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1190,6 +1194,20 @@ export const FileBrowserPanel: React.FC = () => {
                 );
             },
             togglePreview: (entry) => previewToggle.toggle(entry.path),
+            importFolder: (entries) => {
+                const dirs = entries.filter((entry) => entry.isDir).map((entry) => entry.path);
+                if (dirs.length === 0) return;
+                // 右键入口一律弹对话框（`force`）：用户是**主动**选"导入文件夹"的，
+                // 这时候替他用记住的选项直接执行，等于把选择权收走。
+                emitFolderImportRequest({
+                    dirs,
+                    looseFiles: [],
+                    trackId: selectedTrackId,
+                    startSec: playheadSec,
+                    insertIndex: rootIndexAtDrop(tracks, selectedTrackId),
+                    force: true,
+                });
+            },
             reveal: (paths) => {
                 void fileBrowserApi.revealPaths(paths);
             },
@@ -1247,6 +1265,7 @@ export const FileBrowserPanel: React.FC = () => {
             previewToggle,
             selectAll,
             selectedTrackId,
+            tracks,
         ],
     );
 
@@ -1284,6 +1303,8 @@ export const FileBrowserPanel: React.FC = () => {
         filePath: string;
         fileName: string;
         allFilePaths: string[];
+        /** 其中是目录的那些路径（拖入时间轴 = 目录导入）。 */
+        dirPaths: string[];
         startX: number;
         startY: number;
         active: boolean; // 超过阈值后才真正激活拖拽
@@ -1301,23 +1322,27 @@ export const FileBrowserPanel: React.FC = () => {
         (e: React.PointerEvent<HTMLDivElement>, entry: FileEntry) => {
             // 允许左键(0)和右键(2)拖拽
             if (e.button !== 0 && e.button !== 2) return;
-            // Collect all selected paths (include current entry)
-            const paths =
+            // 拖拽顺序取**列表显示顺序**，与右键菜单的 `selectedEntries` 同源。
+            // 此前用 `Array.from(selectedPaths)` —— 那是**点击顺序**，于是同一份
+            // 选区在"右键插入"和"拖拽插入"下给出两种顺序。目录导入时顺序决定
+            // 轨道顺序，这种分叉会变成"轨道顺序和我看到的不一样"。
+            const dragged =
                 selectedPaths.size > 0 && selectedPaths.has(entry.path)
-                    ? Array.from(selectedPaths)
-                    : [entry.path];
+                    ? displayEntries.filter((item) => selectedPaths.has(item.path))
+                    : [entry];
             // 不拦截 pointer，让 click 事件仍能触发预览
             setDragState({
                 filePath: entry.path,
                 fileName: entry.name,
-                allFilePaths: paths,
+                allFilePaths: dragged.map((item) => item.path),
+                dirPaths: dragged.filter((item) => item.isDir).map((item) => item.path),
                 startX: e.clientX,
                 startY: e.clientY,
                 active: false,
                 isRightDrag: e.button === 2,
             });
         },
-        [selectedPaths],
+        [displayEntries, selectedPaths],
     );
 
     useEffect(() => {
@@ -1342,6 +1367,7 @@ export const FileBrowserPanel: React.FC = () => {
                             filePath: ds.filePath,
                             fileName: ds.fileName,
                             filePaths: ds.allFilePaths,
+                            dirPaths: ds.dirPaths,
                             clientX: e.clientX,
                             clientY: e.clientY,
                             isRightDrag: ds.isRightDrag,
@@ -1394,6 +1420,7 @@ export const FileBrowserPanel: React.FC = () => {
                         filePath: dragStateRef.current!.filePath,
                         fileName: dragStateRef.current!.fileName,
                         filePaths: dragStateRef.current!.allFilePaths,
+                        dirPaths: dragStateRef.current!.dirPaths,
                         clientX: e.clientX,
                         clientY: e.clientY,
                         isRightDrag: dragStateRef.current!.isRightDrag,
@@ -1413,6 +1440,7 @@ export const FileBrowserPanel: React.FC = () => {
                             filePath: ds.filePath,
                             fileName: ds.fileName,
                             filePaths: ds.allFilePaths,
+                            dirPaths: ds.dirPaths,
                             clientX: e.clientX,
                             clientY: e.clientY,
                             isRightDrag: ds.isRightDrag,

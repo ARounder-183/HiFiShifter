@@ -43,6 +43,11 @@ import {
     normalizeFileBrowserViewOptions,
     type FileBrowserViewOptions,
 } from "../fileBrowser/fileBrowserViewOptions";
+import {
+    DEFAULT_FOLDER_IMPORT_OPTIONS,
+    normalizeFolderImportOptions,
+    type FolderImportOptions,
+} from "../fileBrowser/folderImportOptions";
 import { modEuclid, resolveLoopMediaDurationSec } from "../../utils/loopRender";
 import { normalizeChannelMode } from "../../utils/channelMode";
 
@@ -201,6 +206,7 @@ import {
     importAudioFileAtPosition,
     importAudioFromDialog,
     importAudioFromPath,
+    importFolderAtPosition,
     importMidiAsClip,
     importMultipleAudioAtPosition,
     importMultipleAudioFilesAtPosition,
@@ -523,6 +529,16 @@ export interface SessionState {
      * `persistUiSettings` 的大 payload 分家，保存路径变成两条。
      */
     fileBrowserView: FileBrowserViewOptions;
+    /**
+     * 目录导入的选项（排布方式 / 递归 / 建轨道组）。
+     *
+     * 【为什么放在这里而不是 fileBrowser 切片】与 `fileBrowserView` 同一条理由：
+     * 它随 `app_config.json` 一起备份与迁移，保存路径也只有一条。
+     *
+     * 【为什么"记住上次的选择"是必要的】没有子目录的目录直接按这些值执行、不弹窗
+     * （见 `shouldPromptFolderImport`）；记不住的话，用户每次拖入都要面对一次弹窗。
+     */
+    folderImportOptions: FolderImportOptions;
     /**
      * 文件浏览器的常用位置（用户固定的目录）。
      *
@@ -2214,6 +2230,7 @@ const initialState: SessionState = {
     silenceDetectOptions: { ...SILENCE_DETECT_DEFAULTS },
     searchSettings: { ...DEFAULT_SEARCH_SETTINGS },
     fileBrowserView: { ...DEFAULT_FILE_BROWSER_VIEW_OPTIONS },
+    folderImportOptions: { ...DEFAULT_FOLDER_IMPORT_OPTIONS },
     fileBrowserFavorites: [],
     searchSettingsDialogOpen: false,
     quickSearchAutoNormalizeEnabled: false,
@@ -2924,6 +2941,18 @@ const sessionSlice = createSlice({
                 next.sortDescending = DEFAULT_SORT_DESCENDING[patch.sortMode];
             }
             state.fileBrowserView = next;
+        },
+        /**
+         * 目录导入选项（部分覆盖）。
+         *
+         * 【为什么与视图选项一样"改动即生效"】它们是**下次导入的默认值**，没有
+         * "应用"这一步可言 —— 用户改完就关掉对话框，不该还需要再点一次确定。
+         */
+        setFolderImportOptions(state, action: PayloadAction<Partial<FolderImportOptions>>) {
+            state.folderImportOptions = normalizeFolderImportOptions({
+                ...state.folderImportOptions,
+                ...action.payload,
+            });
         },
         /** 覆盖常用位置列表（顺序即显示顺序；去重与去空白在此收口）。 */
         setFileBrowserFavorites(state, action: PayloadAction<string[]>) {
@@ -3830,6 +3859,7 @@ const sessionSlice = createSlice({
                 state.fileBrowserView = normalizeFileBrowserViewOptions(
                     migrateLegacyMediaOnly(s.fileBrowser, readLegacyMediaOnly()),
                 );
+                state.folderImportOptions = normalizeFolderImportOptions(s.folderImport);
                 if (Array.isArray(s.fileBrowserFavorites)) {
                     state.fileBrowserFavorites = s.fileBrowserFavorites
                         .filter((path: unknown): path is string => typeof path === "string")
@@ -4184,6 +4214,56 @@ const sessionSlice = createSlice({
                 }
             })
             .addCase(importMultipleAudioAtPosition.rejected, setRejected)
+
+            /*
+             * 目录导入。与 `importMultipleAudioAtPosition` 同一套收尾 —— 不创建
+             * 轨道组时它就是被委托过去的那条路径，payload 形状完全一致；创建轨道组
+             * 时多带回 `failedFiles` / `attempted`，由调用方汇总提示（状态栏 + 临时提示）。
+             */
+            .addCase(importFolderAtPosition.pending, (state) =>
+                setPending(state, "Importing folder..."),
+            )
+            .addCase(importFolderAtPosition.fulfilled, (state, action) => {
+                state.busy = false;
+                state.lastResult = action.payload;
+                const payload = action.payload as {
+                    ok?: boolean;
+                    imported?: TimelineState;
+                    newClipIds?: string[];
+                    playheadSec?: number;
+                };
+                const ok = Boolean(payload.ok);
+                if (ok) {
+                    state.status = "Import done";
+                } else {
+                    state.status = "Import failed";
+                    state.error = "import_audio_failed";
+                }
+                // 目录导入的汇总：成功数 / 失败数。状态行按这个格式翻译
+                // （见 `resolveStatusText` 的 "Folder import:" 分支）。
+                const summary = action.payload as {
+                    attempted?: number;
+                    failedFiles?: string[];
+                };
+                if (ok && typeof summary.attempted === "number" && summary.failedFiles) {
+                    const failed = summary.failedFiles.length;
+                    state.status = `Folder import: ${summary.attempted - failed} imported, ${failed} failed`;
+                }
+                if (ok && payload.imported && payload.imported.tracks) {
+                    applyTimelineStatePreservingPitchVisuals(state, payload.imported);
+                    if (typeof payload.playheadSec === "number") {
+                        state.playheadSec = Math.max(0, payload.playheadSec);
+                        state.pendingPlayheadRevealSec = state.playheadSec;
+                    }
+                    if (payload.newClipIds && payload.newClipIds.length > 0) {
+                        applyAutoCrossfadeInReducer(state, payload.newClipIds);
+                        state.multiSelectedClipIds = payload.newClipIds;
+                        state.multiSelectionIntentional = false;
+                        state.selectedClipId = payload.newClipIds[0] ?? null;
+                    }
+                }
+            })
+            .addCase(importFolderAtPosition.rejected, setRejected)
 
             .addCase(importMultipleAudioFilesAtPosition.pending, (state) =>
                 setPending(state, "Importing multiple audio files..."),
@@ -6777,6 +6857,7 @@ export const {
     setSilenceDetectOptions,
     setSearchSettings,
     setFileBrowserView,
+    setFolderImportOptions,
     setFileBrowserFavorites,
     setSearchSettingsDialogOpen,
     toggleQuickSearchAutoNormalize,

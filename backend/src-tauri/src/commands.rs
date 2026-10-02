@@ -809,6 +809,29 @@ pub fn add_track(
     timeline::add_track(state, name, parent_track_id, index)
 }
 
+/// 批量建出一整棵轨道子树（目录导入的"为每个文件夹创建轨道组"）。
+///
+/// 【为什么返回 `Value` 而不是 `TimelineStatePayload`】除了时间轴快照，还要回传
+/// 新建轨道的 id —— 前端要把每个媒体文件导到对应的子轨道上，而 `add_track` 系列
+/// 向来不回传 id（前端只能靠"前后 id 集合求差"反推，那在批量场景里是 O(N²)）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn add_track_tree(
+    state: State<'_, AppState>,
+    nodes: Vec<crate::state::TrackTreeNode>,
+    insert_index: Option<usize>,
+) -> serde_json::Value {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::AddTrack);
+    let created_track_ids = tl.add_track_tree(&nodes, insert_index);
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    serde_json::json!({
+        "timeline": payload,
+        "createdTrackIds": created_track_ids,
+    })
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn remove_track(
     state: State<'_, AppState>,

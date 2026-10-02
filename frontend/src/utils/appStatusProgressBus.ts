@@ -22,16 +22,30 @@ export interface WaveformAnalysisState {
     progress: number | null;
 }
 
+/**
+ * 目录导入的进度（已处理的媒体文件数 / 总数）。
+ *
+ * 【为什么走总线而不是 Redux】一个含上千个文件的目录会逐个导入，进度每导入一个
+ * 就变一次 —— 放进 Redux 会让整棵应用树跟着重渲染。这里与另外三路同源。
+ */
+export interface FolderImportState {
+    active: boolean;
+    done: number;
+    total: number;
+}
+
 interface StatusProgressState {
     stretching: StretchingState;
     waveformAnalysis: WaveformAnalysisState;
     renderingProgress: number | null;
+    folderImport: FolderImportState;
 }
 
 let state: StatusProgressState = {
     stretching: { active: false, clipName: null },
     waveformAnalysis: { active: false, sourcePath: null, progress: null },
     renderingProgress: null,
+    folderImport: { active: false, done: 0, total: 0 },
 };
 
 const listeners = new Set<() => void>();
@@ -75,6 +89,15 @@ export const appStatusProgressBus = {
     setRenderingProgress(progress: number | null): void {
         if (state.renderingProgress === progress) return;
         state = { ...state, renderingProgress: progress };
+        emit();
+    },
+
+    setFolderImport(next: FolderImportState): void {
+        const prev = state.folderImport;
+        if (prev.active === next.active && prev.done === next.done && prev.total === next.total) {
+            return;
+        }
+        state = { ...state, folderImport: next };
         emit();
     },
 };
