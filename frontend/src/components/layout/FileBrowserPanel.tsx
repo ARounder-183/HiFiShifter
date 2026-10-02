@@ -82,7 +82,7 @@ import { formatModified, formatSize } from "./fileBrowser/formatFile";
 import { FileKindIcon, FolderIcon, MediaIcon } from "./fileBrowser/fileIcons";
 import { FilePropertiesDialog } from "./fileBrowser/FilePropertiesDialog";
 import { FileBrowserViewOptionsDialog } from "./fileBrowser/FileBrowserViewOptionsDialog";
-import { shouldPanelTakeFocus } from "./fileBrowserPanelFocus";
+import { takePanelFocus } from "./fileBrowserPanelFocus";
 import {
     TYPE_AHEAD_RESET_MS,
     isFileListActivationKey,
@@ -743,18 +743,20 @@ export const FileBrowserPanel: React.FC = () => {
      * 点击面板里的**非交互区域**时，把焦点收回列表容器。
      *
      * 【要修的问题】工具条背景、搜索栏留白、路径栏留白这些地方没有可聚焦元素，
-     * 浏览器会把焦点丢回 `<body>` —— 于是键盘模型整个失效：面板的 keydown 处理器
-     * 挂在面板根上，而 `body` 不是它的后代，事件根本不经过它。用户点一下工具条
-     * 背景再打字，既不会跳转、也不触发任何面板快捷键。
+     * 浏览器的默认动作会把焦点挪到 `<body>` —— 于是键盘模型整个失效：面板的
+     * keydown 处理器挂在面板根上，而 `body` 不是它的后代，事件根本不经过它。
+     * 用户点一下搜索栏的留白再打字，既不会跳转、也不触发任何面板快捷键。
      *
-     * 【为什么按"目标是否可交互"判断，而不是等浏览器聚焦完再看 activeElement】
-     * 后者要延到下一帧（浏览器在 pointerdown 之后才执行默认聚焦动作），既引入
-     * 时序依赖也不好测。这里显式列出"自己管焦点"的元素：输入框、按钮、下拉、
-     * 列表行、滑杆…只有点在它们之外的留白上才收回焦点。
+     * 【为什么必须 preventDefault，以及为什么接两个事件】见 `takePanelFocus`：
+     * 只 `focus()` 不阻止默认动作的话，浏览器紧接着就把焦点收走了 —— 这正是上一版
+     * 没修好的地方。`pointerdown` 与 `mousedown` 都接，是为了不依赖"取消 pointerdown
+     * 会不会连带取消 mousedown"这一引擎差异。
      */
     const handlePanelPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-        if (!shouldPanelTakeFocus(event.target as Element | null)) return;
-        listScrollRef.current?.focus({ preventScroll: true });
+        takePanelFocus(event, listScrollRef.current);
+    }, []);
+    const handlePanelMouseDown = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+        takePanelFocus(event, listScrollRef.current);
     }, []);
 
     // Clear selection when directory changes
@@ -1493,6 +1495,7 @@ export const FileBrowserPanel: React.FC = () => {
             className="h-full bg-qt-window text-qt-text select-none"
             onKeyDown={handlePanelKeyDown}
             onPointerDown={handlePanelPointerDown}
+            onMouseDown={handlePanelMouseDown}
             /*
              * 这两个属性挂在**面板根**而不是列表容器上：面板的键盘模型（
              * `handlePanelKeyDown`）本来就覆盖整个面板 —— 焦点在工具条按钮、路径栏
@@ -1785,7 +1788,10 @@ export const FileBrowserPanel: React.FC = () => {
                 全仓统一的主题滚动条（见 index.css 的滚动条说明）。 */}
             <div
                 ref={listScrollRef}
-                className="hs-scroll-gutter flex-1 min-h-0 overflow-y-auto"
+                // `focus:outline-none`：容器只是"焦点落点"，视觉指示由**活动行**的
+                // 描边负责（`index.css` 的 `[data-active]:focus`）。不关掉的话，浏览器
+                // 会给这个可聚焦的 div 画一圈默认的黑色描边 —— 那不是本应用的焦点样式。
+                className="hs-scroll-gutter flex-1 min-h-0 overflow-y-auto focus:outline-none"
                 onScroll={handleListScroll}
                 /*
                  * listbox 角色挂在**滚动容器**上（内层只是 `role="presentation"` 的

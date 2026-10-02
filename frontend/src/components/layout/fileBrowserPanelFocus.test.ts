@@ -10,7 +10,7 @@
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { shouldPanelTakeFocus } from "./fileBrowserPanelFocus";
+import { shouldPanelTakeFocus, takePanelFocus } from "./fileBrowserPanelFocus";
 
 const host = document.createElement("div");
 document.body.append(host);
@@ -74,5 +74,126 @@ describe("shouldPanelTakeFocus", () => {
 
     test("没有目标时不抢", () => {
         expect(shouldPanelTakeFocus(null)).toBe(false);
+    });
+});
+
+describe("takePanelFocus", () => {
+    /** 记录 preventDefault / focus 是否发生。 */
+    function spyTarget() {
+        let focused = false;
+        const node = el("div", { tabindex: "-1" });
+        node.focus = () => {
+            focused = true;
+        };
+        return { node, wasFocused: () => focused };
+    }
+
+    function eventFor(target: Element | null, button = 0) {
+        const state = { prevented: false };
+        return {
+            event: {
+                target,
+                button,
+                preventDefault: () => {
+                    state.prevented = true;
+                },
+            },
+            wasPrevented: () => state.prevented,
+        };
+    }
+
+    test("点留白：阻止默认聚焦动作，并把焦点交给列表", () => {
+        const { node, wasFocused } = spyTarget();
+        const { event, wasPrevented } = eventFor(el("div"));
+
+        expect(takePanelFocus(event, node)).toBe(true);
+        // 关键：必须 preventDefault —— 否则浏览器紧接着把焦点挪到 <body>，
+        // 刚设好的焦点立刻被收走（上一版没修好的原因）。
+        expect(wasPrevented()).toBe(true);
+        expect(wasFocused()).toBe(true);
+    });
+
+    test("点自己管焦点的控件：既不阻止默认动作，也不抢焦点", () => {
+        const { node, wasFocused } = spyTarget();
+        const { event, wasPrevented } = eventFor(el("input"));
+
+        expect(takePanelFocus(event, node)).toBe(false);
+        expect(wasPrevented()).toBe(false);
+        expect(wasFocused()).toBe(false);
+    });
+
+    test("非主键不参与：右键点留白要留给背景菜单", () => {
+        const { node, wasFocused } = spyTarget();
+        for (const button of [1, 2]) {
+            const { event, wasPrevented } = eventFor(el("div"), button);
+            expect(takePanelFocus(event, node)).toBe(false);
+            // 对右键 preventDefault 有可能连带抑制 contextmenu，所以不碰。
+            expect(wasPrevented()).toBe(false);
+            expect(wasFocused()).toBe(false);
+        }
+    });
+
+    test("没有目标时不接手", () => {
+        const { node, wasFocused } = spyTarget();
+        const { event, wasPrevented } = eventFor(null);
+        expect(takePanelFocus(event, node)).toBe(false);
+        expect(wasPrevented()).toBe(false);
+        expect(wasFocused()).toBe(false);
+    });
+});
+
+describe("takePanelFocus：带插槽的文本框", () => {
+    /** 建一个与 Radix 同形的字段：`.rt-TextFieldRoot` > input + 插槽。 */
+    function buildField() {
+        const root = el("div", { class: "rt-TextFieldRoot" });
+        const input = document.createElement("input");
+        root.append(input);
+        const slot = document.createElement("div");
+        slot.setAttribute("class", "rt-TextFieldSlot");
+        root.append(slot);
+        let inputFocused = false;
+        input.focus = () => {
+            inputFocused = true;
+        };
+        return { root, input, slot, wasInputFocused: () => inputFocused };
+    }
+
+    function eventFor(target: Element | null) {
+        const state = { prevented: false };
+        return {
+            event: {
+                target,
+                button: 0,
+                preventDefault: () => {
+                    state.prevented = true;
+                },
+            },
+            wasPrevented: () => state.prevented,
+        };
+    }
+
+    test("点插槽 / 内边距：光标进输入框，不抢去列表", () => {
+        const { slot, wasInputFocused } = buildField();
+        let listFocused = false;
+        const list = el("div", { tabindex: "-1" });
+        list.focus = () => {
+            listFocused = true;
+        };
+
+        const { event, wasPrevented } = eventFor(slot);
+        expect(takePanelFocus(event, list)).toBe(true);
+        expect(wasInputFocused()).toBe(true);
+        expect(listFocused).toBe(false);
+        expect(wasPrevented()).toBe(true);
+    });
+
+    test("点输入框本身：照旧归它自己", () => {
+        const { input, wasInputFocused } = buildField();
+        const list = el("div", { tabindex: "-1" });
+
+        const { event, wasPrevented } = eventFor(input);
+        expect(takePanelFocus(event, list)).toBe(false);
+        expect(wasInputFocused()).toBe(false);
+        expect(wasPrevented()).toBe(false);
     });
 });
