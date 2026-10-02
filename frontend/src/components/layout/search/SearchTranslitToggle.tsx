@@ -66,7 +66,7 @@ export function SearchTranslitToggle({
     const mode = effectiveSearchMode(settings);
     const tooltip = `${t("search_match_mode")}: ${
         regexActive ? t("search_regex_disables_translit") : t(SEARCH_MODE_LABEL_KEY[mode])
-    } · ${t("search_right_click_hint")}`;
+    }`;
 
     const items: AppMenuItemSpec[] = [
         ...MODES.map((candidate) => ({

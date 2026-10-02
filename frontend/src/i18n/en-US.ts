@@ -918,6 +918,7 @@ export const enUS = {
     fb_open_folder: "Open Folder",
     fb_refresh: "Refresh",
     fb_parent_dir: "Parent Directory",
+    fb_computer: "This PC",
     fb_preview_volume: "Preview Volume",
     fb_no_folder: "No folder selected",
     fb_empty_folder: "Empty folder",
@@ -1571,7 +1572,6 @@ export const enUS = {
 
     // ── Search matching (pinyin / romaji / Korean choseong) ──
     search_match_mode: "Matching",
-    search_right_click_hint: "Right-click for more options",
     search_mode_off: "Off (literal only)",
     search_mode_smart: "Smart (pinyin and romaji)",
     search_mode_fuzzy: "Fuzzy (allows skipped characters)",

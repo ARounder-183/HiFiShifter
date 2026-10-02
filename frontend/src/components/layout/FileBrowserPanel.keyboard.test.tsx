@@ -20,9 +20,11 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { AppListRow } from "../../ui/ListRow";
 import {
+    findTypeAheadIndex,
     isFileListActivationKey,
     isFileListNavKey,
     nextActiveIndex,
+    nextTypeAhead,
 } from "./fileBrowserKeyboardNav";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -71,6 +73,54 @@ test("按键分类：导航键与激活键", () => {
     expect(isFileListNavKey("Enter")).toBe(false);
 });
 
+// ── 纯函数：输入字母快速跳转（type-ahead） ────────────────────────────────
+
+const NAMES = ["apple.txt", "banana.wav", "fa1.wav", "fa2.wav", "melon.wav"];
+
+test("type-ahead：无选中时跳到第一个前缀匹配", () => {
+    expect(nextTypeAhead(NAMES, "", "f", -1)).toEqual({ index: 2, buffer: "f" });
+    expect(nextTypeAhead(NAMES, "", "b", -1)).toEqual({ index: 1, buffer: "b" });
+});
+
+test("type-ahead：有选中时从下一行找，末尾绕回开头", () => {
+    // 选中 fa1（下标 2），输入 f → 下一个 f 开头的是 fa2。
+    expect(nextTypeAhead(NAMES, "", "f", 2)).toEqual({ index: 3, buffer: "f" });
+    // 选中 melon（末行），输入 a → 后面没有 a 开头，绕回 apple。
+    expect(nextTypeAhead(NAMES, "", "a", 4)).toEqual({ index: 0, buffer: "a" });
+});
+
+test("type-ahead：连续输入累积前缀（f → fa）", () => {
+    // 第一击 f 落在 fa1；第二击 a 用 fa 从 fa1 之后找 → fa2。
+    expect(nextTypeAhead(NAMES, "f", "a", 2)).toEqual({ index: 3, buffer: "fa" });
+    // 只有一个 fa 候选时，从它自己之后找会绕回它自己。
+    expect(nextTypeAhead(["fab.wav"], "f", "a", 0)).toEqual({ index: 0, buffer: "fa" });
+});
+
+test("type-ahead：同字母连按在前缀匹配项之间循环", () => {
+    // 已在 fa1（f 的缓冲），再按 f →「ff」无匹配 → 退回单字母 f 从下一行找。
+    expect(nextTypeAhead(NAMES, "f", "f", 2)).toEqual({ index: 3, buffer: "f" });
+});
+
+test("type-ahead：无匹配不跳转，失败的前缀不污染缓冲", () => {
+    expect(nextTypeAhead(NAMES, "", "z", -1)).toEqual({ index: null, buffer: "" });
+    // 扩展成无匹配前缀（fa 不存在）同样不跳转，缓冲回退到 f。
+    expect(nextTypeAhead(["fb.wav"], "f", "a", 0)).toEqual({ index: null, buffer: "f" });
+    // fa 无匹配则 fab 亦不可能存在，失败后的下一键从 f 重新组合：f+b 命中。
+    expect(nextTypeAhead(["fb.wav"], "f", "b", 0)).toEqual({ index: 0, buffer: "fb" });
+});
+
+test("type-ahead：大小写不敏感", () => {
+    expect(nextTypeAhead(NAMES, "", "F", -1)).toEqual({ index: 2, buffer: "F" });
+    expect(findTypeAheadIndex(["README.md"], "read", 0)).toBe(0);
+});
+
+test("type-ahead：空列表与空查询不产生跳转", () => {
+    expect(findTypeAheadIndex([], "f", 0)).toBe(-1);
+    expect(findTypeAheadIndex(NAMES, "", 0)).toBe(-1);
+    // start 超界自动回绕。
+    expect(findTypeAheadIndex(NAMES, "a", 99)).toBe(0);
+});
+
 // ── DOM：listbox + 行原语的接线 ─────────────────────────────────────────
 
 let container: HTMLDivElement;
@@ -89,7 +139,8 @@ afterEach(() => {
 
 /**
  * 复现 `FileBrowserPanel` listbox 的接线：同一 helper、同一 `AppListRow` 行原语、
- * 同样的 roving tabindex 与键盘分支。只把"进入目录 / 试听"替换成回调。
+ * 同样的 roving tabindex 与键盘分支（含 `nextTypeAhead` 的 type-ahead 接线）。
+ * 只把"进入目录 / 试听"替换成回调。
  */
 function ListboxHarness({
     entries,
@@ -100,6 +151,7 @@ function ListboxHarness({
 }) {
     const [activeIndex, setActiveIndex] = useState(-1);
     const rowRefs = useRef<(HTMLDivElement | null)[]>([]);
+    const typeAheadBufferRef = useRef("");
 
     const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
         if (isFileListNavKey(event.key)) {
@@ -113,7 +165,18 @@ function ListboxHarness({
         if (isFileListActivationKey(event.key) && activeIndex >= 0) {
             event.preventDefault();
             onActivate(activeIndex);
+            return;
         }
+        // 与 FileBrowserPanel.handlePanelKeyDown 相同的 type-ahead 接线：
+        // 可打印单字符进入增量搜索，命中即移动活动行并聚焦。
+        const key = event.key;
+        if (key.length !== 1 || key === " ") return;
+        const result = nextTypeAhead(entries, typeAheadBufferRef.current, key, activeIndex);
+        typeAheadBufferRef.current = result.buffer;
+        if (result.index == null) return;
+        event.preventDefault();
+        setActiveIndex(result.index);
+        rowRefs.current[result.index]?.focus();
     };
 
     return (
@@ -204,4 +267,27 @@ test("无活动行时 Enter 不激活任何行", () => {
 
     press("Enter");
     expect(onActivate).not.toHaveBeenCalled();
+});
+
+test("listbox 接线：输入字母跳到前缀匹配的行，无匹配不动", () => {
+    act(() => {
+        root.render(
+            <ListboxHarness
+                entries={["apple.txt", "banana.wav", "fa1.wav", "fa2.wav"]}
+                onActivate={vi.fn()}
+            />,
+        );
+    });
+
+    // 输入 f：跳到第一个 f 开头的行并聚焦（focus 会同步活动行）。
+    expect(press("f")).toBe(true);
+    expect(document.activeElement).toBe(rows()[2]);
+
+    // 无匹配（fz）不跳转，也不消费按键。
+    expect(press("z")).toBe(false);
+    expect(document.activeElement).toBe(rows()[2]);
+
+    // 再按 f：同字母连按 → 退回单字母从下一行找 → fa2。
+    expect(press("f")).toBe(true);
+    expect(document.activeElement).toBe(rows()[3]);
 });

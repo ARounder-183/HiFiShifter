@@ -751,6 +751,7 @@ export const zhCN = {
     fb_open_folder: "打开文件夹",
     fb_refresh: "刷新",
     fb_parent_dir: "上级目录",
+    fb_computer: "计算机",
     fb_preview_volume: "预览音量",
     fb_no_folder: "未选择文件夹",
     fb_empty_folder: "空文件夹",
@@ -1392,7 +1393,6 @@ export const zhCN = {
 
     // ── 搜索匹配（拼音 / 罗马音 / 韩文初声）──
     search_match_mode: "匹配方式",
-    search_right_click_hint: "右键查看更多选项",
     search_mode_off: "关闭（仅字面匹配）",
     search_mode_smart: "智能（含拼音/罗马音）",
     search_mode_fuzzy: "模糊（含跳字匹配）",

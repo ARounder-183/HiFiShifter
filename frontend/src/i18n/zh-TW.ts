@@ -752,6 +752,7 @@ export const zhTW = {
     fb_open_folder: "開啟資料夾",
     fb_refresh: "重新整理",
     fb_parent_dir: "上層目錄",
+    fb_computer: "電腦",
     fb_preview_volume: "預覽音量",
     fb_no_folder: "未選擇資料夾",
     fb_empty_folder: "空資料夾",
@@ -1394,7 +1395,6 @@ export const zhTW = {
 
     // ── 搜尋匹配（拼音 / 羅馬拼音 / 韓文初聲）──
     search_match_mode: "匹配方式",
-    search_right_click_hint: "右鍵查看更多選項",
     search_mode_off: "關閉（僅字面匹配）",
     search_mode_smart: "智慧（含拼音／羅馬拼音）",
     search_mode_fuzzy: "模糊（含跳字匹配）",

@@ -10,7 +10,7 @@ import {
 } from "./searchSettings";
 
 describe("normalizeSearchSettings", () => {
-    it("缺省 / 非法输入回落到默认（转写全开、模式 smart）", () => {
+    it("缺省 / 非法输入回落到默认（转写全开、模式 smart、命中说明关闭）", () => {
         for (const input of [undefined, null, 42, "nope", {}]) {
             const out = normalizeSearchSettings(input);
             expect(out.translit).toBe(true);
@@ -18,7 +18,7 @@ describe("normalizeSearchSettings", () => {
             expect(out.heteronym).toBe(true);
             expect(out.japaneseLongVowel).toBe(true);
             expect(out.koreanChoseong).toBe(true);
-            expect(out.showMatchReason).toBe(true);
+            expect(out.showMatchReason).toBe(false);
         }
     });
 

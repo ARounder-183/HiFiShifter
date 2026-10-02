@@ -116,8 +116,8 @@ describe("SearchTranslitToggle", () => {
         );
     });
 
-    it("悬停提示告诉用户右键还有更多选项（否则右键菜单无从发现）", () => {
-        expect(mount({}).button.dataset.tooltip).toContain("Right-click for more options");
+    it("悬停提示只承载档位信息（右键提示已按设计移除，右键菜单行为另行覆盖）", () => {
+        expect(mount({}).button.dataset.tooltip).not.toContain("Right-click");
     });
 
     it("右键打开完整菜单：三档宽严 + 三个子开关 + 匹配原因", () => {

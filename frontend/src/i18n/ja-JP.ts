@@ -785,6 +785,7 @@ export const jaJP = {
     fb_open_folder: "フォルダを開く",
     fb_refresh: "更新",
     fb_parent_dir: "上の階層",
+    fb_computer: "PC",
     fb_preview_volume: "プレビュー音量",
     fb_no_folder: "フォルダが選択されていません",
     fb_empty_folder: "空のフォルダ",
@@ -1445,7 +1446,6 @@ export const jaJP = {
 
     // ── 検索マッチング（拼音 / ローマ字 / 韓国語初声）──
     search_match_mode: "マッチ方法",
-    search_right_click_hint: "右クリックで詳細オプション",
     search_mode_off: "オフ（文字列のみ）",
     search_mode_smart: "スマート（拼音・ローマ字対応）",
     search_mode_fuzzy: "あいまい（文字飛ばし対応）",

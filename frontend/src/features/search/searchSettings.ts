@@ -27,7 +27,7 @@ export interface SearchSettings {
     japaneseLongVowel: boolean;
     /** 韩文初声：`hg` 也能命中「한국어」。 */
     koreanChoseong: boolean;
-    /** 结果里显示「为什么命中」。 */
+    /** 结果里显示「为什么命中」（默认关闭）。 */
     showMatchReason: boolean;
 }
 
@@ -37,7 +37,7 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
     heteronym: true,
     japaneseLongVowel: true,
     koreanChoseong: true,
-    showMatchReason: true,
+    showMatchReason: false,
 };
 
 const SEARCH_MODES: readonly SearchMode[] = ["off", "smart", "fuzzy"];
@@ -55,6 +55,9 @@ function asMode(value: unknown, fallback: SearchMode): SearchMode {
  * 而用户往往意识不到少打一个键就能找到，只会以为文件不在。它的代价（误命中）由
  * 分档排序兜住 —— 真正像的那条永远排第一。唯一例外是 `fuzzy`，它召回增益小而误命中
  * 代价大，因此默认停在 `smart`。
+ *
+ * `showMatchReason` 是唯一的例外：它是纯展示偏好，开关不影响召回结果，只是每条
+ * 结果多一行说明文字。默认关掉让结果列表保持紧凑，需要解释时再打开。
  */
 export function normalizeSearchSettings(input: unknown): SearchSettings {
     if (!input || typeof input !== "object") return { ...DEFAULT_SEARCH_SETTINGS };
@@ -66,7 +69,7 @@ export function normalizeSearchSettings(input: unknown): SearchSettings {
         japaneseLongVowel:
             typeof raw.japaneseLongVowel === "boolean" ? raw.japaneseLongVowel : true,
         koreanChoseong: typeof raw.koreanChoseong === "boolean" ? raw.koreanChoseong : true,
-        showMatchReason: typeof raw.showMatchReason === "boolean" ? raw.showMatchReason : true,
+        showMatchReason: typeof raw.showMatchReason === "boolean" ? raw.showMatchReason : false,
     };
 }
 

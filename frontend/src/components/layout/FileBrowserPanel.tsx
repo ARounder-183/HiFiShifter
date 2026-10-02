@@ -21,6 +21,7 @@ import {
     toggleRegex,
     setSortMode,
     toggleAudioOnly,
+    FILE_BROWSER_COMPUTER_PATH,
     type SortMode,
 } from "../../features/fileBrowser/fileBrowserSlice";
 import { audioPreview } from "../../features/fileBrowser/audioPreview";
@@ -45,9 +46,11 @@ import {
 } from "../../ui";
 import { isPrimaryModifierDown } from "../../utils/platform";
 import {
+    TYPE_AHEAD_RESET_MS,
     isFileListActivationKey,
     isFileListNavKey,
     nextActiveIndex,
+    nextTypeAhead,
 } from "./fileBrowserKeyboardNav";
 
 /** 支持的音频与视频媒体扩展名（视频按音轨导入） */
@@ -309,6 +312,8 @@ export const FileBrowserPanel: React.FC = () => {
     // 根据搜索模式决定展示配表
     const isSearchMode = fb.searchQuery.trim().length > 0;
     const trimmedSearchQuery = fb.searchQuery.trim();
+    // 「计算机」虚拟层（盘符列表）：目录不存在，递归搜索在这里没有意义。
+    const isComputerLevel = fb.currentPath === FILE_BROWSER_COMPUTER_PATH;
 
     /*
      * 匹配方式变化 → 用新参数重跑一次搜索。
@@ -324,7 +329,7 @@ export const FileBrowserPanel: React.FC = () => {
         lastSearchOptionsKeyRef.current = searchOptionsKey;
         // 正则模式下后端不过滤（query 传空串），重跑没有意义。
         if (fb.regexEnabled) return;
-        if (!trimmedSearchQuery || !fb.currentPath) return;
+        if (!trimmedSearchQuery || !fb.currentPath || isComputerLevel) return;
         if (debounceRef.current) clearTimeout(debounceRef.current);
         void dispatch(
             searchFilesRecursive({
@@ -339,6 +344,7 @@ export const FileBrowserPanel: React.FC = () => {
         trimmedSearchQuery,
         fb.currentPath,
         fb.regexEnabled,
+        isComputerLevel,
         dispatch,
     ]);
 
@@ -429,9 +435,16 @@ export const FileBrowserPanel: React.FC = () => {
     // 返回上级目录
     const handleParentDir = useCallback(() => {
         if (!fb.currentPath) return;
+        if (fb.currentPath === FILE_BROWSER_COMPUTER_PATH) return; // 已是顶层
         // 处理 Windows 和 Unix 路径
         const normalized = fb.currentPath.replace(/\\/g, "/");
         const parts = normalized.split("/").filter(Boolean);
+        // Windows 盘符根（C:\）的上一级是「计算机」（列出全部盘符）；Unix 的 /
+        // 已是文件系统顶端（parts 为空），再往上没有这一层，原地不动。
+        if (parts.length === 1 && /^[A-Za-z]:$/.test(parts[0])) {
+            void dispatch(loadDirectory(FILE_BROWSER_COMPUTER_PATH));
+            return;
+        }
         if (parts.length <= 1) return; // 已经是根目录
         parts.pop();
         // Windows 路径恢复
@@ -559,6 +572,55 @@ export const FileBrowserPanel: React.FC = () => {
         lastClickedIndexRef.current = -1;
         setActiveIndex(-1);
     }, [fb.currentPath]);
+
+    // ── 输入字母快速跳转（type-ahead，与资源管理器一致） ─────────────────────
+    // 名单与 displayEntries 同步，供增量搜索逐键匹配。
+    const entryNames = useMemo(() => displayEntries.map((e) => e.name), [displayEntries]);
+    const typeAheadBufferRef = useRef("");
+    const typeAheadLastKeyAtRef = useRef(0);
+    const panelRootRef = useRef<HTMLDivElement>(null);
+
+    /**
+     * 面板级键盘捕获：焦点在面板内（列表行、工具栏按钮、滑块……）且不在输入框时，
+     * 可打印字符进入「输入字母快速跳转」的增量搜索。方向键 / Enter / 空格由行容器
+     * 的 `handleListKeyDown` 与各控件自己处理，这里一律不碰。
+     */
+    const handlePanelKeyDown = useCallback(
+        (event: React.KeyboardEvent<HTMLDivElement>) => {
+            // 子组件已经处理过的按键不重复消费（行容器对方向键 preventDefault）。
+            if (event.defaultPrevented) return;
+            if (event.ctrlKey || event.altKey || event.metaKey) return;
+            if (event.nativeEvent.isComposing) return;
+            const key = event.key;
+            // 只接可打印单字符：空格留给激活/滚动，多字符键（方向键、Enter、F 键）
+            // 不属于 type-ahead。
+            if (key.length !== 1 || key === " ") return;
+            const target = event.target as HTMLElement | null;
+            // 输入框（搜索框等）里打字属于文本输入；Radix 弹层（Select 菜单等）
+            // 挂在 portal 上、不在面板 DOM 内 —— 两者都排除。
+            if (
+                !target ||
+                !panelRootRef.current?.contains(target) ||
+                target.tagName === "INPUT" ||
+                target.tagName === "TEXTAREA" ||
+                target.isContentEditable
+            ) {
+                return;
+            }
+            const now = Date.now();
+            if (now - typeAheadLastKeyAtRef.current > TYPE_AHEAD_RESET_MS) {
+                typeAheadBufferRef.current = "";
+            }
+            const result = nextTypeAhead(entryNames, typeAheadBufferRef.current, key, activeIndex);
+            typeAheadBufferRef.current = result.buffer;
+            typeAheadLastKeyAtRef.current = now;
+            if (result.index == null) return;
+            event.preventDefault();
+            setActiveIndex(result.index);
+            rowRefs.current[result.index]?.focus();
+        },
+        [entryNames, activeIndex],
+    );
 
     // 列表内容变化（搜索、排序、过滤）后，活动行可能越界：收回为"无活动行"。
     useEffect(() => {
@@ -767,7 +829,12 @@ export const FileBrowserPanel: React.FC = () => {
     const tabbableIndex = activeIndex >= 0 ? activeIndex : 0;
 
     return (
-        <Flex direction="column" className="h-full bg-qt-window text-qt-text select-none">
+        <Flex
+            ref={panelRootRef}
+            direction="column"
+            className="h-full bg-qt-window text-qt-text select-none"
+            onKeyDown={handlePanelKeyDown}
+        >
             {/* 工具条：只放本面板**独有**的功能按钮。
                 标题与关闭属于窗框（停靠时是标签行、浮动时是浮动标题栏、独立窗口时
                 是系统标题栏），在这里再画一遍就是重复展示 —— 用户看到两个标题、两个
@@ -800,7 +867,7 @@ export const FileBrowserPanel: React.FC = () => {
                         const q = e.target.value;
                         dispatch(setSearchQuery(q));
                         if (debounceRef.current) clearTimeout(debounceRef.current);
-                        if (q.trim() && fb.currentPath) {
+                        if (q.trim() && fb.currentPath && !isComputerLevel) {
                             const backendQuery = fb.regexEnabled ? "" : q.trim();
                             debounceRef.current = setTimeout(() => {
                                 void dispatch(
@@ -846,7 +913,7 @@ export const FileBrowserPanel: React.FC = () => {
                                 clearTimeout(debounceRef.current);
                             }
 
-                            if (trimmedSearchQuery && fb.currentPath) {
+                            if (trimmedSearchQuery && fb.currentPath && !isComputerLevel) {
                                 void dispatch(
                                     searchFilesRecursive({
                                         dirPath: fb.currentPath,
@@ -921,8 +988,11 @@ export const FileBrowserPanel: React.FC = () => {
                     >
                         <ChevronUpIcon />
                     </IconButton>
-                    <span className="hs-type-label truncate flex-1" data-tooltip={fb.currentPath}>
-                        {fb.currentPath}
+                    <span
+                        className="hs-type-label truncate flex-1"
+                        data-tooltip={isComputerLevel ? tf("fb_computer") : fb.currentPath}
+                    >
+                        {isComputerLevel ? tf("fb_computer") : fb.currentPath}
                     </span>
                 </Flex>
             )}

@@ -42,8 +42,17 @@ pub struct AudioPreviewData {
     pub pcm_base64: String,
 }
 
+/// 「计算机」虚拟路径：前端用它表示盘符根的上一级（Windows 的「此电脑」层）。
+///
+/// 必须与前端 `fileBrowserSlice.ts` 的 `FILE_BROWSER_COMPUTER_PATH` 一字不差 ——
+/// 这是跨进程约定的哨兵值，不是磁盘上真实存在的路径。
+pub(crate) const COMPUTER_VIRTUAL_PATH: &str = "computer://";
+
 /// 列出指定目录下的文件和子目录
 pub(crate) fn list_directory(dir_path: String) -> Result<Vec<FileEntry>, String> {
+    if dir_path == COMPUTER_VIRTUAL_PATH {
+        return list_logical_drives();
+    }
     let path = Path::new(&dir_path);
     if !path.is_dir() {
         return Err(format!("Not a directory: {}", dir_path));
@@ -98,6 +107,57 @@ pub(crate) fn list_directory(dir_path: String) -> Result<Vec<FileEntry>, String>
     });
 
     Ok(entries)
+}
+
+/// 列出全部逻辑盘符（「计算机」虚拟层的内容）。
+///
+/// Windows 用 `GetLogicalDriveStringsW` 枚举，它**只读系统卷信息、不触碰磁盘**：
+/// 断开的网络映射盘也会被列出（与资源管理器一致），逐个探测反而会让命令卡在
+/// 已失效的网络路径上数秒。非 Windows 没有「计算机」层 —— `/` 已是文件系统
+/// 顶端，前端永远不会导航到这里；返回空列表兜底。
+#[cfg(windows)]
+fn list_logical_drives() -> Result<Vec<FileEntry>, String> {
+    use windows::Win32::Storage::FileSystem::GetLogicalDriveStringsW;
+
+    // 每个盘符形如 `C:\`（4 个 u16 + 分隔 NUL），26 个字母加结尾双 NUL 足够。
+    let mut buffer = [0u16; 26 * 4 + 1];
+    // SAFETY: buffer 以可写切片传入；函数只填缓冲、不保留指针，返回写入长度。
+    let len = unsafe { GetLogicalDriveStringsW(Some(&mut buffer)) } as usize;
+    if len == 0 {
+        return Err("Failed to enumerate logical drives".to_string());
+    }
+    let len = len.min(buffer.len());
+
+    let mut entries = Vec::new();
+    let mut start = 0;
+    while start < len && buffer[start] != 0 {
+        let end = buffer[start..len]
+            .iter()
+            .position(|&c| c == 0)
+            .map(|p| start + p)
+            .unwrap_or(len);
+        let root: String = String::from_utf16_lossy(&buffer[start..end]);
+        // 行展示走 `{name}{isDir ? "/" : ""}`，用 `C:` 作名字得到「C:/」；
+        // path 必须带反斜杠，`Path::is_dir()` 对裸 `C:` 的解释依赖进程当前目录。
+        let path = root;
+        entries.push(FileEntry {
+            name: path.trim_end_matches('\\').to_string(),
+            path,
+            is_dir: true,
+            size: None,
+            extension: None,
+            modified_time: None,
+            match_info: None,
+        });
+        start = end + 1;
+    }
+
+    Ok(entries)
+}
+
+#[cfg(not(windows))]
+fn list_logical_drives() -> Result<Vec<FileEntry>, String> {
+    Ok(Vec::new())
 }
 
 /// 命中候选：档位分值 + 排序键 + 条目。
@@ -536,5 +596,26 @@ mod tests {
             ..SearchOptions::default()
         });
         assert_eq!(search(&dir, "zhuge", options).len(), 2);
+    }
+
+    #[test]
+    fn computer_virtual_path_lists_drives() {
+        // 「计算机」哨兵不落在真实文件系统上，list_directory 必须拦截并返回盘符。
+        let entries = list_directory(COMPUTER_VIRTUAL_PATH.to_string()).expect("computer level");
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        #[cfg(windows)]
+        assert!(
+            !names.is_empty(),
+            "Windows 必须至少列出一个盘符，实际: {names:?}"
+        );
+        for entry in &entries {
+            assert!(entry.is_dir, "盘符应表现为目录: {}", entry.name);
+            // path 必须能被再次 list_directory（从「计算机」进入盘符）。
+            assert!(
+                Path::new(&entry.path).is_dir(),
+                "盘符路径应有效: {}",
+                entry.path
+            );
+        }
     }
 }

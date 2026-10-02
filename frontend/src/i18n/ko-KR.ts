@@ -866,6 +866,7 @@ export const koKR = {
     fb_open_folder: "폴더 열기",
     fb_refresh: "새로고침",
     fb_parent_dir: "상위 디렉토리",
+    fb_computer: "내 PC",
     fb_preview_volume: "미리듣기 볼륨",
     fb_no_folder: "폴더가 선택되지 않았습니다",
     fb_empty_folder: "빈 폴더",
@@ -1520,7 +1521,6 @@ export const koKR = {
 
     // ── 검색 일치(병음 / 로마자 / 한국어 초성) ──
     search_match_mode: "일치 방식",
-    search_right_click_hint: "오른쪽 클릭으로 추가 옵션",
     search_mode_off: "끄기(문자열만)",
     search_mode_smart: "스마트(병음·로마자 포함)",
     search_mode_fuzzy: "퍼지(건너뛰기 허용)",

@@ -10,7 +10,10 @@ import {
     formatKeybinding,
 } from "../../features/keybindings";
 import type { Keybinding } from "../../features/keybindings";
-import { searchFilesRecursive } from "../../features/fileBrowser/fileBrowserSlice";
+import {
+    searchFilesRecursive,
+    FILE_BROWSER_COMPUTER_PATH,
+} from "../../features/fileBrowser/fileBrowserSlice";
 import { searchOptionsPayload } from "../../features/search/searchSettings";
 import { SearchTranslitToggle } from "./search/SearchTranslitToggle";
 import { matchReasonOf } from "./search/matchReason";
@@ -193,7 +196,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
     const doSearch = useCallback(
         (q: string) => {
             if (debounceRef.current) clearTimeout(debounceRef.current);
-            if (!q.trim() || !currentPath) {
+            if (!q.trim() || !currentPath || currentPath === FILE_BROWSER_COMPUTER_PATH) {
                 setResults([]);
                 setSelectedIndex(0);
                 setLoading(false);
@@ -403,7 +406,8 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
 
     if (!open) return null;
 
-    const noFolder = !currentPath;
+    // 「计算机」虚拟层（盘符列表）没有可递归搜索的目录，与未选文件夹同样对待。
+    const noFolder = !currentPath || currentPath === FILE_BROWSER_COMPUTER_PATH;
 
     return (
         <>

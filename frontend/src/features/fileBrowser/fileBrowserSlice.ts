@@ -5,6 +5,15 @@ import type { SearchOptionsPayload } from "../search/searchSettings";
 export type SortMode = "name" | "date" | "size";
 
 /**
+ * 「计算机」虚拟路径：Windows 盘符根（`C:\`）的上一级，列表内容是全部盘符。
+ *
+ * 后端 `list_directory` 识别这个哨兵值并返回盘符清单，其余命令不应收到它 ——
+ * 递归搜索在「计算机」层没有意义，调用方需先做守卫。非 Windows 平台没有
+ * 这一层（`/` 已是文件系统顶端），永远不会导航到它。
+ */
+export const FILE_BROWSER_COMPUTER_PATH = "computer://";
+
+/**
  * 本分片的状态类型。
  *
  * 导出是因为 `RootState` 由它组合而成 —— SDK 的声明产出需要能命名它

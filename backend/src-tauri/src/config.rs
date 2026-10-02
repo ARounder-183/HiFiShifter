@@ -239,6 +239,9 @@ fn default_silence_action() -> String {
 fn default_true_value() -> bool {
     true
 }
+fn default_false_value() -> bool {
+    false
+}
 fn default_search_mode() -> String {
     "smart".to_string()
 }
@@ -271,8 +274,8 @@ pub struct SearchSettings {
     /// 韩文初声匹配（默认开启）：`hg` 也命中「한국어」。
     #[serde(default = "default_true_value")]
     pub korean_choseong: bool,
-    /// 结果里显示「为什么命中」（默认开启）。
-    #[serde(default = "default_true_value")]
+    /// 结果里显示「为什么命中」（默认关闭：纯展示偏好，列表默认保持紧凑）。
+    #[serde(default = "default_false_value")]
     pub show_match_reason: bool,
 }
 
@@ -284,7 +287,7 @@ impl Default for SearchSettings {
             heteronym: true,
             japanese_long_vowel: true,
             korean_choseong: true,
-            show_match_reason: true,
+            show_match_reason: false,
         }
     }
 }
@@ -1949,7 +1952,7 @@ mod tests {
         assert!(settings.search.heteronym);
         assert!(settings.search.japanese_long_vowel);
         assert!(settings.search.korean_choseong);
-        assert!(settings.search.show_match_reason);
+        assert!(!settings.search.show_match_reason);
     }
 
     #[test]
