@@ -126,8 +126,18 @@ export function I18nProvider({ children }: PropsWithChildren) {
             },
             t: lookup,
             tVars: (key, vars) => formatTemplate(lookup(key), vars),
+            /*
+             * 复数文案里的 `{count}` 走**语系数字格式**，而不是 `String(count)`。
+             *
+             * 【为什么】"20000 项"读起来要一位一位数；"20,000 项"一眼就知道量级。
+             * 分组符号本身也是语系差异（en-US 逗号、部分语系用窄不换行空格），
+             * 交给 `Intl.NumberFormat` 才对 —— 与 `number()` / `unit()` 同一套。
+             * 复数形态的选择仍用原始数字（`Intl.PluralRules` 要的是数值，不是字符串）。
+             */
             plural: (key, count) =>
-                formatTemplate(selectPluralForm(localeState, count, lookup(key)), { count }),
+                formatTemplate(selectPluralForm(localeState, count, lookup(key)), {
+                    count: formatNumber(localeState, count),
+                }),
             shortcut: (key) => formatShortcutLabel(lookup(key)),
             number: (value, options) => formatNumber(localeState, value, options),
             unit: (value, unit, options) => formatUnit(localeState, value, unit, options),

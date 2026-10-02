@@ -1953,12 +1953,20 @@ pub fn get_pitch_cache_stats(state: State<'_, AppState>) -> pitch_cache::PitchCa
 
 // ===================== file_browser =====================
 
+/// 列出目录内容。
+///
+/// 【为什么是 async + spawn_blocking】读目录要逐项取元数据，成本与**条目数**成正比：
+/// 实测一个两万文件的目录约需 400ms。同步命令在 Tauri 里跑在主线程上，那 400ms
+/// 就是整个应用的卡死（不只是面板）。与 `search_files_recursive` 同一条理由、
+/// 同一种做法。
 #[tauri::command(rename_all = "camelCase")]
-pub fn list_directory(
+pub async fn list_directory(
     dir_path: String,
     options: Option<file_browser::ListDirectoryOptions>,
 ) -> Result<Vec<file_browser::FileEntry>, String> {
-    file_browser::list_directory(dir_path, options)
+    tauri::async_runtime::spawn_blocking(move || file_browser::list_directory(dir_path, options))
+        .await
+        .unwrap_or_else(|error| Err(format!("list directory task failed: {error}")))
 }
 
 /// 在 `parentDir` 下新建目录，返回新目录的绝对路径。
@@ -1986,17 +1994,26 @@ pub fn rename_path(
 }
 
 /// 把一批路径移入回收站（`permanent` 为真时永久删除）。
+///
+/// 【为什么是 async + spawn_blocking】移入回收站要走系统 shell 接口，删一个大目录
+/// 可能耗时数秒；同步命令会把这数秒算在应用主线程上。
+///
+/// 【为什么返回 `Result<Value, String>` 而不是裸 `Value`】Tauri 要求 async 命令必须
+/// 返回 `Result`。逐条失败仍放在 JSON 里（`ok:false` + `error`）—— 那属于"命令执行
+/// 成功但结果有失败项"，不是命令本身失败；只有线程池 join 失败才走 `Err`。
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_paths(
+pub async fn delete_paths(
     state: State<'_, AppState>,
     paths: Vec<String>,
     permanent: bool,
-) -> serde_json::Value {
-    file_browser::delete_paths(
-        paths,
-        permanent,
-        state.config_dir.get().map(|p| p.as_path()),
-    )
+) -> Result<serde_json::Value, String> {
+    // `State` 不能跨线程，先把配置目录取成拥有所有权的 PathBuf。
+    let config_dir = state.config_dir.get().cloned();
+    tauri::async_runtime::spawn_blocking(move || {
+        file_browser::delete_paths(paths, permanent, config_dir.as_deref())
+    })
+    .await
+    .map_err(|error| format!("delete task failed: {error}"))
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Flex, IconButton, TextField, ScrollArea } from "@radix-ui/themes";
+import { Flex, IconButton, TextField } from "@radix-ui/themes";
 import {
     ChevronDownIcon,
     ChevronLeftIcon,
@@ -40,6 +40,7 @@ import {
 import type { FileBrowserViewOptions } from "../../features/fileBrowser/fileBrowserViewOptions";
 import { rowDensityOf } from "../../features/fileBrowser/fileBrowserViewOptions";
 import { locationLabel, parentDirOf } from "../../features/fileBrowser/fileBrowserPaths";
+import { computeListWindow } from "../../features/fileBrowser/listWindow";
 import {
     emitExternalFileAction,
     emitImportMidiRequest,
@@ -108,7 +109,7 @@ type EditingState =
 
 export const FileBrowserPanel: React.FC = () => {
     const dispatch = useAppDispatch();
-    const { t, tf, tVars, plural } = useI18n();
+    const { t, tf, tVars, plural, number } = useI18n();
     const fb = useAppSelector((state: RootState) => state.fileBrowser);
     const searchSettings = useAppSelector((state: RootState) => state.session.searchSettings);
     const view = useAppSelector((state: RootState) => state.session.fileBrowserView);
@@ -387,6 +388,127 @@ export const FileBrowserPanel: React.FC = () => {
     const registerRowRef = useCallback((index: number, el: HTMLDivElement | null) => {
         rowRefs.current[index] = el;
     }, []);
+
+    // ── 列表窗口化 ─────────────────────────────────────────────────────────
+    // 一个两万文件的目录若全量渲染，DOM 会到十几万个节点，首次挂载要数秒、整机
+    // 跟着卡。窗口化后 DOM 规模只与视口有关，与目录大小脱钩（见 listWindow.ts）。
+    const listScrollRef = useRef<HTMLDivElement | null>(null);
+    const [viewport, setViewport] = useState({ scrollTop: 0, height: 0 });
+    /** 实测行高（0 = 还没测到，用估值）。 */
+    const [measuredRowHeight, setMeasuredRowHeight] = useState(0);
+    /** 键盘跳到窗口之外的行时，等它渲染出来再聚焦。 */
+    const pendingFocusRef = useRef<number | null>(null);
+
+    /**
+     * 这一模式下是否可能出现第二行（所在目录 / 命中原因）。
+     *
+     * 一处定义、两处使用：既决定行高的**估值**，也决定每行是否**预留**第二行 ——
+     * 两者必须一致，否则窗口换算与真实高度对不上（见 FileEntryRow 的
+     * `reserveSecondLine`）。
+     */
+    const reserveSecondLine = view.showPathHint || isSearchMode || searchSettings.showMatchReason;
+
+    /**
+     * 行高估值：按密度取基准，第二行存在时再加一行。
+     *
+     * 【为什么需要估值】首帧还没有 DOM 可测；没有行高就无法换算下标。估值只用来
+     * 决定首帧渲染多少行，随后被实测值取代（下面的 ResizeObserver）。
+     */
+    const estimatedRowHeight = useMemo(() => {
+        const base = rowDensityOf(view.density) === "default" ? 24 : 22;
+        return base + (reserveSecondLine ? 14 : 0);
+    }, [view.density, reserveSecondLine]);
+    const rowHeight = measuredRowHeight || estimatedRowHeight;
+
+    const listWindow = useMemo(
+        () =>
+            computeListWindow({
+                total: displayEntries.length,
+                rowHeight,
+                scrollTop: viewport.scrollTop,
+                viewportHeight: viewport.height,
+            }),
+        [displayEntries.length, rowHeight, viewport.scrollTop, viewport.height],
+    );
+
+    const handleListScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
+        const el = event.currentTarget;
+        setViewport({ scrollTop: el.scrollTop, height: el.clientHeight });
+    }, []);
+
+    // 视口尺寸：滚动事件不会为"首次布局 / 面板被拖宽"触发，另用 ResizeObserver 兜。
+    useEffect(() => {
+        const el = listScrollRef.current;
+        if (!el) return;
+        const sync = () => setViewport({ scrollTop: el.scrollTop, height: el.clientHeight });
+        // 首帧同步放到下一帧：effect 体内同步 setState 会触发级联渲染（React 明确
+        // 不建议），而一帧的延迟在这里不可感知。
+        const raf = requestAnimationFrame(sync);
+        const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(sync) : null;
+        observer?.observe(el);
+        return () => {
+            cancelAnimationFrame(raf);
+            observer?.disconnect();
+        };
+    }, []);
+
+    /*
+     * 实测行高。
+     *
+     * 【为什么用 ResizeObserver 而不是"每次渲染后读一次"】后者要在 effect 体里
+     * 同步 setState（React 明确不建议，lint 也会拦）。ResizeObserver 在**回调**里
+     * 给出尺寸，没有级联渲染问题；它还会在开始观察时立刻回调一次，正是需要的"首测"。
+     * 密度变化导致行高变化时也会再次回调。
+     *
+     * 【为什么订阅随 first 变化重建】窗口滑动时首行换了 key，React 换掉的是另一个
+     * DOM 节点，旧节点上的观察不再有意义。重建一次观察是微秒级开销，远小于
+     * "行高失准导致整列错位"的代价。
+     *
+     * 无 ResizeObserver 的环境（jsdom）退化为使用估值 —— 那里本来也不测布局。
+     */
+    useEffect(() => {
+        const el = rowRefs.current[listWindow.first];
+        if (!el || typeof ResizeObserver === "undefined") return;
+        const observer = new ResizeObserver(() => {
+            const height = el.offsetHeight;
+            if (height > 0) setMeasuredRowHeight((prev) => (prev === height ? prev : height));
+        });
+        observer.observe(el);
+        return () => observer.disconnect();
+    }, [listWindow.first, estimatedRowHeight, displayEntries.length]);
+
+    // 窗口重算后补上"跳到窗口外的行"的聚焦。
+    useEffect(() => {
+        const index = pendingFocusRef.current;
+        if (index == null) return;
+        const el = rowRefs.current[index];
+        if (!el) return;
+        pendingFocusRef.current = null;
+        try {
+            el.scrollIntoView({ block: "nearest" });
+        } catch {
+            /* jsdom 无布局 */
+        }
+        el.focus({ preventScroll: true });
+    });
+
+    /*
+     * 焦点兜底：窗口滑动把**正在聚焦的行**移出 DOM 时，浏览器把焦点丢回 `<body>`，
+     * 此后方向键再也到不了列表（面板级处理器要求目标在面板内），用户看到的是
+     * "列表突然按不动了"。此时把焦点收到滚动容器上 —— 它在面板内，键盘模型照常。
+     *
+     * 只在"焦点确实已经落到 body"时接管：用户主动点到别处（工具栏、搜索框）时
+     * `activeElement` 不是 body，这里不会去抢。
+     */
+    useEffect(() => {
+        if (activeIndex < 0) return;
+        const container = listScrollRef.current;
+        if (!container) return;
+        if (document.activeElement === document.body && !rowRefs.current[activeIndex]) {
+            container.focus({ preventScroll: true });
+        }
+    }, [activeIndex, listWindow.first, listWindow.last]);
+
     const handleRowFocus = useCallback((index: number) => {
         setActiveIndex(index);
     }, []);
@@ -395,9 +517,9 @@ export const FileBrowserPanel: React.FC = () => {
      * 把键盘光标移到第 `index` 行并聚焦它。
      *
      * 【为什么要显式滚动】裸 `focus()` 会让浏览器用自己的算法把行滚进视口，
-     * 在 Radix ScrollArea 里表现为整块跳变。`block: "nearest"` 是最小滚动 ——
-     * 行已在视口内就完全不动。这是全仓既有做法（QuickSearchPopup / UndoHistoryPanel
-     * / KeybindingsDialog 三处），文件浏览器此前是唯一没接的。
+     * 在滚动容器里表现为整块跳变。`block: "nearest"` 是最小滚动 —— 行已在视口内
+     * 就完全不动。这是全仓既有做法（QuickSearchPopup / UndoHistoryPanel /
+     * KeybindingsDialog 三处），文件浏览器此前是唯一没接的。
      *
      * 【为什么滚动要包 try/catch】jsdom 没有布局实现，`scrollIntoView` 在单测里
      * 会抛（KeybindingsDialog 同样处理）。焦点移动才是语义要求，滚动只是观感，
@@ -405,17 +527,45 @@ export const FileBrowserPanel: React.FC = () => {
      *
      * 【为什么 focus 带 preventScroll】滚动已由上一行显式完成，再让浏览器在聚焦时
      * 滚一次会与它抢，产生二次跳动。
+     *
+     * 【窗口化带来的第三态】目标行可能**根本没被渲染**（在窗口之外）。此时不能
+     * 直接聚焦：先把容器滚到它附近，记下待办，等窗口重算并渲染出该行后再聚焦
+     * （见下面的 `pendingFocusRef` effect）。键盘"End 跳到末行"走的正是这条路。
      */
-    const focusRow = useCallback((index: number) => {
-        const el = rowRefs.current[index];
-        if (!el) return;
-        try {
-            el.scrollIntoView({ block: "nearest" });
-        } catch {
-            /* jsdom 无布局：滚动不是语义要求，忽略 */
-        }
-        el.focus({ preventScroll: true });
-    }, []);
+    const focusRow = useCallback(
+        (index: number) => {
+            if (index < 0) return;
+            const el = rowRefs.current[index];
+            if (el) {
+                try {
+                    el.scrollIntoView({ block: "nearest" });
+                } catch {
+                    /* jsdom 无布局：滚动不是语义要求，忽略 */
+                }
+                el.focus({ preventScroll: true });
+                return;
+            }
+            const container = listScrollRef.current;
+            if (container && rowHeight > 0) {
+                const rowTop = index * rowHeight;
+                const margin = rowHeight * 2;
+                if (rowTop < container.scrollTop + margin) {
+                    container.scrollTop = Math.max(0, rowTop - margin);
+                } else if (
+                    rowTop + rowHeight >
+                    container.scrollTop + container.clientHeight - margin
+                ) {
+                    container.scrollTop = rowTop + rowHeight - container.clientHeight + margin;
+                }
+                setViewport({
+                    scrollTop: container.scrollTop,
+                    height: container.clientHeight,
+                });
+            }
+            pendingFocusRef.current = index;
+        },
+        [rowHeight],
+    );
 
     /**
      * 键盘移动后按需自动试听。
@@ -1230,13 +1380,19 @@ export const FileBrowserPanel: React.FC = () => {
         [view.detailsColumn],
     );
 
+    /*
+     * 状态行的数量按**当前语系**格式化（`20,000` 而不是 `20000`）。
+     *
+     * 项数走 `plural` —— 它内部已用 `Intl.NumberFormat` 回填 `{count}`；
+     * 选中数走 `tVars`，它只做字符串替换、不认识数字，所以要在这里先格式化。
+     */
     const statusText = useMemo(() => {
         const parts = [plural("fb_status_items", displayEntries.length)];
         if (selectedPaths.size > 0) {
-            parts.push(tVars("fb_status_selected", { count: selectedPaths.size }));
+            parts.push(tVars("fb_status_selected", { count: number(selectedPaths.size) }));
         }
         return parts.join(" · ");
-    }, [displayEntries.length, selectedPaths.size, plural, tVars]);
+    }, [displayEntries.length, selectedPaths.size, plural, tVars, number]);
 
     return (
         <Flex
@@ -1501,15 +1657,33 @@ export const FileBrowserPanel: React.FC = () => {
                 </Flex>
             )}
 
-            {/* 文件列表 */}
-            <ScrollArea className="hs-scroll-area flex-1 min-h-0" scrollbars="vertical">
+            {/* 文件列表。
+                用原生滚动容器而不是 Radix ScrollArea：窗口化需要**自己**读写
+                `scrollTop` / `clientHeight`，而 ScrollArea 的滚动元素是它内部
+                自绘的（要靠 `[data-radix-scroll-area-viewport]` 这种内部属性去找，
+                一旦上游改名，窗口就永远不动、列表看起来卡死）。原生容器还给回
+                全仓统一的主题滚动条（见 index.css 的滚动条说明）。 */}
+            <div
+                ref={listScrollRef}
+                className="hs-scroll-gutter flex-1 min-h-0 overflow-y-auto"
+                onScroll={handleListScroll}
+                /*
+                 * 键盘模型挂在这一层而不是内层 listbox 上。
+                 *
+                 * 【为什么】窗口滑动会把正在聚焦的行移出 DOM，浏览器随之把焦点丢回
+                 * `<body>`。下面的恢复逻辑把焦点收到**本容器**（`tabIndex={-1}`），
+                 * 于是方向键仍然需要在这里被接住 —— 若处理器留在内层 div 上，事件
+                 * 从容器发出时根本不会经过它，列表会显得"突然按不动了"。
+                 */
+                tabIndex={showEntries ? -1 : undefined}
+                onKeyDown={showEntries ? handleListKeyDown : undefined}
+            >
                 <div
                     className="py-1"
                     role={showEntries ? "listbox" : undefined}
                     aria-label={showEntries ? tf("fb_file_list") : undefined}
                     // 列表本就支持 Ctrl/Shift 多选，声明多选语义以免读屏按单选播报。
                     aria-multiselectable={showEntries ? true : undefined}
-                    onKeyDown={showEntries ? handleListKeyDown : undefined}
                     onContextMenu={handleBackgroundContextMenu}
                 >
                     {fb.loading ? (
@@ -1544,58 +1718,79 @@ export const FileBrowserPanel: React.FC = () => {
                                     />
                                 </Flex>
                             )}
-                            {displayEntries.map((entry, index) =>
-                                editing?.kind === "rename" && editing.path === entry.path ? (
-                                    <Flex
-                                        key={entry.path}
-                                        align="center"
-                                        gap="1.5"
-                                        className="px-2 py-qt-1 min-h-[22px]"
-                                    >
-                                        <FileKindIcon entry={entry} />
-                                        <DockInlineRename
-                                            initial={editing.initial}
-                                            ariaLabel={t("fb_ctx_rename")}
-                                            onCommit={(name) =>
-                                                void handleRenameCommit(entry, name)
-                                            }
-                                            onCancel={() => setEditing(null)}
-                                        />
-                                    </Flex>
-                                ) : (
-                                    <FileEntryRow
-                                        key={entry.path}
-                                        entry={entry}
-                                        index={index}
-                                        tabIndex={index === tabbableIndex ? 0 : -1}
-                                        active={index === activeIndex}
-                                        density={rowDensityOf(view.density)}
-                                        onFocus={handleRowFocus}
-                                        registerRowRef={registerRowRef}
-                                        isPlaying={fb.previewingFile === entry.path}
-                                        isSelected={selectedPaths.has(entry.path)}
-                                        onDoubleClickDir={handleEnterDir}
-                                        onRowClick={handleRowClick}
-                                        onPointerDownForDrag={handlePointerDownForDrag}
-                                        onContextMenu={handleRowContextMenu}
-                                        isDragging={
-                                            dragState?.active === true &&
-                                            dragState.allFilePaths.includes(entry.path)
-                                        }
-                                        pathHint={
-                                            view.showPathHint || isSearchMode
-                                                ? getRelativeDirHint(entry.path)
-                                                : undefined
-                                        }
-                                        matchReason={formatMatchReason(entry)}
-                                        detailText={detailTextOf(entry)}
-                                    />
-                                ),
-                            )}
+                            {/* 全量高度撑起滚动条，窗口内容整体偏移到对应位置。 */}
+                            <div
+                                style={{
+                                    position: "relative",
+                                    height: listWindow.totalHeight,
+                                }}
+                            >
+                                <div
+                                    style={{
+                                        transform: `translateY(${listWindow.offsetTop}px)`,
+                                    }}
+                                >
+                                    {displayEntries
+                                        .slice(listWindow.first, listWindow.last)
+                                        .map((entry, offset) => {
+                                            const index = listWindow.first + offset;
+                                            return editing?.kind === "rename" &&
+                                                editing.path === entry.path ? (
+                                                <Flex
+                                                    key={entry.path}
+                                                    align="center"
+                                                    gap="1.5"
+                                                    className="px-2 py-qt-1 min-h-[22px]"
+                                                >
+                                                    <FileKindIcon entry={entry} />
+                                                    <DockInlineRename
+                                                        initial={editing.initial}
+                                                        ariaLabel={t("fb_ctx_rename")}
+                                                        onCommit={(name) =>
+                                                            void handleRenameCommit(entry, name)
+                                                        }
+                                                        onCancel={() => setEditing(null)}
+                                                    />
+                                                </Flex>
+                                            ) : (
+                                                <FileEntryRow
+                                                    key={entry.path}
+                                                    entry={entry}
+                                                    index={index}
+                                                    tabIndex={index === tabbableIndex ? 0 : -1}
+                                                    ariaPosInSet={index + 1}
+                                                    ariaSetSize={displayEntries.length}
+                                                    active={index === activeIndex}
+                                                    density={rowDensityOf(view.density)}
+                                                    onFocus={handleRowFocus}
+                                                    registerRowRef={registerRowRef}
+                                                    isPlaying={fb.previewingFile === entry.path}
+                                                    isSelected={selectedPaths.has(entry.path)}
+                                                    onDoubleClickDir={handleEnterDir}
+                                                    onRowClick={handleRowClick}
+                                                    onPointerDownForDrag={handlePointerDownForDrag}
+                                                    onContextMenu={handleRowContextMenu}
+                                                    isDragging={
+                                                        dragState?.active === true &&
+                                                        dragState.allFilePaths.includes(entry.path)
+                                                    }
+                                                    pathHint={
+                                                        view.showPathHint || isSearchMode
+                                                            ? getRelativeDirHint(entry.path)
+                                                            : undefined
+                                                    }
+                                                    matchReason={formatMatchReason(entry)}
+                                                    detailText={detailTextOf(entry)}
+                                                    reserveSecondLine={reserveSecondLine}
+                                                />
+                                            );
+                                        })}
+                                </div>
+                            </div>
                         </>
                     )}
                 </div>
-            </ScrollArea>
+            </div>
 
             {/* 状态行：项数 / 选中数 */}
             {view.statusBarVisible && (

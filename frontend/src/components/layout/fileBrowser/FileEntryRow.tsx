@@ -20,6 +20,9 @@ export interface FileEntryRowProps {
     index: number;
     /** roving tabindex：活动行为 0，其余为 -1。 */
     tabIndex: number;
+    /** 全量列表中的位置（1 起）与总数。窗口化列表必须显式给出，否则读屏只看到窗口内的几十项。 */
+    ariaPosInSet: number;
+    ariaSetSize: number;
     /** 该行是否是键盘光标所在行（走描边通道，与 `isSelected` 的背景通道正交）。 */
     active: boolean;
     onFocus: (index: number) => void;
@@ -49,6 +52,15 @@ export interface FileEntryRowProps {
     matchReason?: string;
     /** 右侧详情列文本（大小 / 修改日期）。同样由调用方格式化。 */
     detailText?: string;
+    /**
+     * 即使没有提示文案也**占住**第二行的高度。
+     *
+     * 【为什么必须有】窗口化按"所有行等高"换算下标与滚动高度。搜索模式下，
+     * 直接位于搜索根目录的结果没有所在目录提示、子目录里的有 —— 两类行差一行高，
+     * 于是窗口底部的行会互相重叠、滚动条长度也不对。预留一行后同类模式下所有行
+     * 等高，换算精确；顺带让列表纵向对齐。
+     */
+    reserveSecondLine?: boolean;
 }
 
 export const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
@@ -56,6 +68,8 @@ export const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
         entry,
         index,
         tabIndex,
+        ariaPosInSet,
+        ariaSetSize,
         active,
         onFocus,
         registerRowRef,
@@ -70,6 +84,7 @@ export const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
         pathHint,
         matchReason,
         detailText,
+        reserveSecondLine = false,
     }) => {
         const isAudio = isAudioFile(entry);
         // 可拖拽 = 音频/视频 + MIDI + 工程文件（与时间轴、参数编辑器的拖放准入一致）。
@@ -81,6 +96,8 @@ export const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                 role="option"
                 selected={isSelected}
                 active={active}
+                ariaPosInSet={ariaPosInSet}
+                ariaSetSize={ariaSetSize}
                 density={density}
                 tabIndex={tabIndex}
                 onFocus={() => onFocus(index)}
@@ -118,7 +135,7 @@ export const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                         {entry.name}
                         {entry.isDir ? "/" : ""}
                     </span>
-                    {(pathHint || matchReason) && (
+                    {(pathHint || matchReason || reserveSecondLine) && (
                         <span
                             className="hs-type-caption truncate leading-none"
                             style={{ fontSize: "var(--qt-fs-micro)" }}
@@ -126,6 +143,9 @@ export const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                             {pathHint}
                             {pathHint && matchReason ? " · " : ""}
                             {matchReason}
+                            {/* 没有文案时用不换行空格占位：空的行内元素高度为 0，
+                                占不住这一行，窗口化的等高假设就会失效。 */}
+                            {!pathHint && !matchReason ? "\u00A0" : ""}
                         </span>
                     )}
                 </div>
