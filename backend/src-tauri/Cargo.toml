@@ -67,6 +67,7 @@ rustfft = "6"
 num-complex = "0.4"
 aberth = "0.4"
 ndarray = { version = "0.16", optional = true }
+trash = "5.2.9"
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5"

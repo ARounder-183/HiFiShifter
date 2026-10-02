@@ -86,57 +86,9 @@ pub(super) fn open_render_cache_dir(app: tauri::AppHandle) -> serde_json::Value 
 /// 在系统文件管理器中定位导出音频的产物：优先**选中所有已渲染的文件**（多选），
 /// 没有任何现存文件时退化为打开目标文件夹。
 ///
-/// 与「导出布局 / 导出诊断」同一 `tauri_plugin_opener` 通道。`reveal_items_in_dir`
-/// 会打开父目录并高亮选中给定文件——Windows 走 `SHOpenFolderAndSelectItems`、
-/// macOS 走 Finder 的多选、Linux 走 `FileManager1.ShowItems`，因此分轨导出的多个
-/// 文件能一次性全部选中。
+/// 实现已下沉到 `common::reveal_paths_in_file_manager` —— 文件浏览器右键菜单的
+/// 「在文件管理器中显示」要的是同一件事，两处不该各写一遍：过滤缺失项与
+/// "多选失败退回打开父目录"的降级策略都是有细节的。这里只负责本场景的空结果文案。
 pub(super) fn reveal_export_paths(app: tauri::AppHandle, paths: Vec<String>) -> serde_json::Value {
-    use tauri_plugin_opener::OpenerExt;
-
-    let mut files: Vec<std::path::PathBuf> = Vec::new();
-    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-    for raw in paths {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let path = std::path::PathBuf::from(trimmed);
-        // 只收集真实存在的项：`reveal_items_in_dir` 内部会 canonicalize，
-        // 缺失路径会让整批 reveal 失败（分轨时个别目标可能被跳过 / 写入失败）。
-        if path.is_file() {
-            files.push(path);
-        } else if path.is_dir() {
-            dirs.push(path);
-        }
-    }
-
-    if !files.is_empty() {
-        return match app.opener().reveal_items_in_dir(files.iter()) {
-            Ok(()) => serde_json::json!({ "ok": true, "count": files.len() }),
-            Err(e) => {
-                // 多选失败（个别文件管理器不支持）→ 至少打开首个文件的所在目录。
-                if let Some(parent) = files[0].parent() {
-                    let _ = app
-                        .opener()
-                        .open_path(parent.to_string_lossy(), None::<&str>);
-                }
-                serde_json::json!({
-                    "ok": false,
-                    "error": format!("reveal export files failed: {e}"),
-                })
-            }
-        };
-    }
-
-    if let Some(dir) = dirs.first() {
-        return match app.opener().open_path(dir.to_string_lossy(), None::<&str>) {
-            Ok(()) => serde_json::json!({ "ok": true, "path": dir.to_string_lossy() }),
-            Err(e) => serde_json::json!({
-                "ok": false,
-                "error": format!("open export folder failed: {e}"),
-            }),
-        };
-    }
-
-    serde_json::json!({ "ok": false, "error": "no export paths found" })
+    crate::commands::common::reveal_paths_in_file_manager(&app, paths, "no export paths found")
 }

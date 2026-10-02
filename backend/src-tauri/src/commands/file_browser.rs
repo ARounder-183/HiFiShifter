@@ -48,11 +48,52 @@ pub struct AudioPreviewData {
 /// 这是跨进程约定的哨兵值，不是磁盘上真实存在的路径。
 pub(crate) const COMPUTER_VIRTUAL_PATH: &str = "computer://";
 
+/// `list_directory` 的选项。
+#[derive(serde::Deserialize, Default, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ListDirectoryOptions {
+    /// 是否列出隐藏项。默认否（与系统文件管理器一致）。
+    #[serde(default)]
+    pub include_hidden: bool,
+}
+
+/// 该条目是否应被当作"隐藏"而不列出。
+///
+/// 【Windows 为什么不能只看点开头】Windows 的隐藏是一个文件属性
+/// （`FILE_ATTRIBUTE_HIDDEN`），`desktop.ini` / `Thumbs.db` 这类都不以点开头。
+/// 只判前缀等于对 Windows 用户完全没生效。
+///
+/// 【系统文件为什么不随开关显示】`System Volume Information` / `$RECYCLE.BIN` 带
+/// `FILE_ATTRIBUTE_SYSTEM`，即使用户打开"显示隐藏文件"也不该看到 —— 资源管理器
+/// 为此另有一个默认关闭的"隐藏受保护的操作系统文件"选项。与其再加一个开关，
+/// 这里直接始终隐藏：显示它们只会让人误删。
+#[cfg(windows)]
+fn is_hidden_entry(metadata: &std::fs::Metadata, name: &str) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+    let attributes = metadata.file_attributes();
+    if attributes & FILE_ATTRIBUTE_SYSTEM != 0 {
+        return true;
+    }
+    name.starts_with('.') || attributes & FILE_ATTRIBUTE_HIDDEN != 0
+}
+
+/// 非 Windows：点开头即隐藏（macOS / Linux 的惯例）。
+#[cfg(not(windows))]
+fn is_hidden_entry(_metadata: &std::fs::Metadata, name: &str) -> bool {
+    name.starts_with('.')
+}
+
 /// 列出指定目录下的文件和子目录
-pub(crate) fn list_directory(dir_path: String) -> Result<Vec<FileEntry>, String> {
+pub(crate) fn list_directory(
+    dir_path: String,
+    options: Option<ListDirectoryOptions>,
+) -> Result<Vec<FileEntry>, String> {
     if dir_path == COMPUTER_VIRTUAL_PATH {
         return list_logical_drives();
     }
+    let include_hidden = options.unwrap_or_default().include_hidden;
     let path = Path::new(&dir_path);
     if !path.is_dir() {
         return Err(format!("Not a directory: {}", dir_path));
@@ -66,8 +107,7 @@ pub(crate) fn list_directory(dir_path: String) -> Result<Vec<FileEntry>, String>
         let metadata = entry.metadata().map_err(|e| e.to_string())?;
         let name = entry.file_name().to_string_lossy().into_owned();
 
-        // 跳过隐藏文件（以 . 开头）
-        if name.starts_with('.') {
+        if !include_hidden && is_hidden_entry(&metadata, &name) {
             continue;
         }
 
@@ -107,6 +147,179 @@ pub(crate) fn list_directory(dir_path: String) -> Result<Vec<FileEntry>, String>
     });
 
     Ok(entries)
+}
+
+// ===================== 写操作（新建 / 重命名 / 删除） =====================
+
+/// 校验一个用户输入的文件/目录名。
+///
+/// 【为什么要显式校验而不是交给文件系统】`fs::rename` 对非法名会给出平台相关的
+/// 错误串（Windows 是"文件名、目录名或卷标语法不正确。"），直接弹给用户没有信息量；
+/// 而"含路径分隔符"这种情况更危险 —— 允许 `..\..\x` 就等于把重命名变成移动。
+/// 在调用点之前拦下来，错误才是可读且可控的。
+fn validate_entry_name(name: &str) -> Result<&str, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("empty_name".to_string());
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err("invalid_name".to_string());
+    }
+    // 路径分隔符与 Windows 非法字符。`/` 与 `\` 必须挡：否则重命名等价于移动。
+    if trimmed.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) || trimmed.contains('\0') {
+        return Err("invalid_name".to_string());
+    }
+    // Windows 保留设备名（含带扩展名的形态，如 `CON.txt`）。
+    let stem = trimmed.split('.').next().unwrap_or(trimmed);
+    let upper = stem.to_ascii_uppercase();
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if RESERVED.contains(&upper.as_str()) {
+        return Err("invalid_name".to_string());
+    }
+    // 尾随点/空格在 Windows 上会被静默吞掉，导致"改完名字不对"。
+    if trimmed.ends_with('.') || trimmed.ends_with(' ') {
+        return Err("invalid_name".to_string());
+    }
+    Ok(trimmed)
+}
+
+/// 应用自身拥有的目录（配置 / 日志 / 渲染缓存 / 临时）。
+///
+/// 【为什么需要】这些目录对用户没有意义，删掉只会让应用以奇怪的方式坏掉；而它们
+/// 又常常正好出现在用户浏览的路径附近（便携版的 exe 同级）。
+fn app_owned_dirs(config_dir: Option<&Path>) -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(dir) = config_dir {
+        dirs.push(dir.to_path_buf());
+    }
+    if let Some(dir) = crate::logging::log_dir() {
+        dirs.push(dir.to_path_buf());
+    }
+    dirs.push(crate::render_cache::current_dir());
+    dirs.push(std::env::temp_dir().join("hifishifter"));
+    dirs
+}
+
+/// 目标路径是否落在应用自身目录之内（含其本身）。
+fn is_inside_app_dirs(path: &Path, config_dir: Option<&Path>) -> bool {
+    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    for candidate in app_owned_dirs(config_dir) {
+        let dir = candidate.canonicalize().unwrap_or(candidate);
+        if target.starts_with(&dir) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 在 `parent_dir` 下新建目录，返回新目录的绝对路径。
+pub(crate) fn create_directory(
+    parent_dir: String,
+    name: String,
+    config_dir: Option<&Path>,
+) -> Result<String, String> {
+    if parent_dir == COMPUTER_VIRTUAL_PATH {
+        return Err("virtual_path".to_string());
+    }
+    let name = validate_entry_name(&name)?;
+    let parent = Path::new(&parent_dir);
+    if !parent.is_dir() {
+        return Err(format!("Not a directory: {}", parent_dir));
+    }
+    if is_inside_app_dirs(parent, config_dir) {
+        return Err("protected_path".to_string());
+    }
+    let target = parent.join(name);
+    if target.exists() {
+        return Err("name_exists".to_string());
+    }
+    std::fs::create_dir(&target).map_err(|e| e.to_string())?;
+    Ok(target.to_string_lossy().into_owned())
+}
+
+/// 把 `path` 重命名为同目录下的 `new_name`，返回新路径。
+pub(crate) fn rename_path(
+    path: String,
+    new_name: String,
+    config_dir: Option<&Path>,
+) -> Result<String, String> {
+    let source = Path::new(&path);
+    if !source.exists() {
+        return Err("not_found".to_string());
+    }
+    if is_inside_app_dirs(source, config_dir) {
+        return Err("protected_path".to_string());
+    }
+    let new_name = validate_entry_name(&new_name)?;
+    let parent = source
+        .parent()
+        .ok_or_else(|| "cannot rename a root path".to_string())?;
+    let target = parent.join(new_name);
+    if target == source {
+        // 名字没变：当作成功（用户可能只改了大小写，Windows 上这两者相同）。
+        return Ok(path);
+    }
+    if target.exists() {
+        return Err("name_exists".to_string());
+    }
+    std::fs::rename(source, &target).map_err(|e| e.to_string())?;
+    Ok(target.to_string_lossy().into_owned())
+}
+
+/// 把一批路径移入系统回收站 / 废纸篓。
+///
+/// 【为什么默认是回收站而不是永久删除】文件浏览器里删掉的是**用户素材**，不在本
+/// 应用的撤销栈里 —— 永久删除不可逆。要永久删除需显式传 `permanent: true`
+/// （前端对应 Shift+Delete）。
+///
+/// 【为什么用 `trash` crate】回收站是各平台差异极大的系统集成：Windows 是
+/// `IFileOperation`、macOS 是 `NSFileManager`、Linux 是 XDG trash 规范（含跨挂载点
+/// 的 `.Trash-$uid`）。自己实现等于把三个平台各写一遍且难以验证。
+pub(crate) fn delete_paths(
+    paths: Vec<String>,
+    permanent: bool,
+    config_dir: Option<&Path>,
+) -> serde_json::Value {
+    let mut deleted = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+
+    for raw in paths {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed == COMPUTER_VIRTUAL_PATH {
+            continue;
+        }
+        let path = Path::new(trimmed);
+        if !path.exists() {
+            errors.push(format!("not found: {trimmed}"));
+            continue;
+        }
+        if is_inside_app_dirs(path, config_dir) {
+            errors.push(format!("protected path: {trimmed}"));
+            continue;
+        }
+        let result = if permanent {
+            if path.is_dir() {
+                std::fs::remove_dir_all(path)
+            } else {
+                std::fs::remove_file(path)
+            }
+        } else {
+            trash::delete(path).map_err(|e| std::io::Error::other(e.to_string()))
+        };
+        match result {
+            Ok(()) => deleted += 1,
+            Err(e) => errors.push(format!("{trimmed}: {e}")),
+        }
+    }
+
+    if errors.is_empty() {
+        serde_json::json!({ "ok": true, "deleted": deleted })
+    } else {
+        serde_json::json!({ "ok": false, "deleted": deleted, "error": errors.join("; ") })
+    }
 }
 
 /// 列出全部逻辑盘符（「计算机」虚拟层的内容）。
@@ -601,7 +814,8 @@ mod tests {
     #[test]
     fn computer_virtual_path_lists_drives() {
         // 「计算机」哨兵不落在真实文件系统上，list_directory 必须拦截并返回盘符。
-        let entries = list_directory(COMPUTER_VIRTUAL_PATH.to_string()).expect("computer level");
+        let entries =
+            list_directory(COMPUTER_VIRTUAL_PATH.to_string(), None).expect("computer level");
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
         #[cfg(windows)]
         assert!(
@@ -617,5 +831,115 @@ mod tests {
                 entry.path
             );
         }
+    }
+
+    #[test]
+    fn hidden_files_are_listed_only_when_asked() {
+        let dir = fixture();
+        let visible = list_directory(dir.to_string_lossy().into_owned(), None).expect("list");
+        assert!(
+            !names(&visible).contains(&".hidden.wav"),
+            "默认不列出隐藏文件"
+        );
+
+        let all = list_directory(
+            dir.to_string_lossy().into_owned(),
+            Some(ListDirectoryOptions {
+                include_hidden: true,
+            }),
+        )
+        .expect("list with hidden");
+        assert!(names(&all).contains(&".hidden.wav"), "开启后应列出隐藏文件");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn entry_name_validation_rejects_paths_and_reserved_names() {
+        assert_eq!(
+            validate_entry_name("  take 01.wav  ").unwrap(),
+            "take 01.wav"
+        );
+        // 首尾空格是**修掉**而不是拒绝：用户从别处粘贴过来的名字常带尾随空格，
+        // 而 Windows 本来就会把尾随空格吞掉 —— 拒绝它只会让人困惑。
+        assert_eq!(validate_entry_name("trailing ").unwrap(), "trailing");
+        for bad in [
+            "",
+            "   ",
+            ".",
+            "..",
+            "a/b.wav",
+            "a\\b.wav",
+            "a:b.wav",
+            "a*b.wav",
+            "a?b.wav",
+            "a|b.wav",
+            "trailing.",
+            "CON",
+            "con.txt",
+            "LPT9",
+        ] {
+            assert!(validate_entry_name(bad).is_err(), "应拒绝非法名: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn create_and_rename_and_delete_round_trip() {
+        let dir = fixture();
+        let root = dir.to_string_lossy().into_owned();
+
+        // 新建：成功，且拒绝重名。
+        let created = create_directory(root.clone(), "新目录".to_string(), None).expect("create");
+        assert!(Path::new(&created).is_dir());
+        assert_eq!(
+            create_directory(root.clone(), "新目录".to_string(), None),
+            Err("name_exists".to_string())
+        );
+
+        // 重命名：文件换名后旧路径消失、新路径存在。
+        let source = dir.join("readme.txt").to_string_lossy().into_owned();
+        let renamed = rename_path(source.clone(), "README.md".to_string(), None).expect("rename");
+        assert!(Path::new(&renamed).is_file());
+        assert!(!Path::new(&source).exists());
+
+        // 重命名到已存在的名字必须被拒（否则会静默覆盖）。
+        let other = dir.join("副歌.wav").to_string_lossy().into_owned();
+        assert_eq!(
+            rename_path(other, "README.md".to_string(), None),
+            Err("name_exists".to_string())
+        );
+
+        // 删除（永久，避免测试往用户回收站里塞东西）。
+        let result = delete_paths(vec![renamed.clone()], true, None);
+        assert_eq!(result["ok"], serde_json::json!(true));
+        assert_eq!(result["deleted"], serde_json::json!(1));
+        assert!(!Path::new(&renamed).exists());
+
+        // 不存在的路径计入失败，但其余项仍然照常删除。
+        let result = delete_paths(
+            vec![
+                dir.join("副歌.wav").to_string_lossy().into_owned(),
+                dir.join("does-not-exist.wav")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
+            true,
+            None,
+        );
+        assert_eq!(result["ok"], serde_json::json!(false));
+        assert_eq!(result["deleted"], serde_json::json!(1));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_operations_refuse_the_computer_sentinel() {
+        assert!(
+            create_directory(COMPUTER_VIRTUAL_PATH.to_string(), "x".to_string(), None).is_err()
+        );
+        assert!(rename_path(COMPUTER_VIRTUAL_PATH.to_string(), "x".to_string(), None).is_err());
+        // 哨兵不是真实路径，删除时直接跳过、不报成功也不报失败。
+        let result = delete_paths(vec![COMPUTER_VIRTUAL_PATH.to_string()], true, None);
+        assert_eq!(result["ok"], serde_json::json!(true));
+        assert_eq!(result["deleted"], serde_json::json!(0));
     }
 }

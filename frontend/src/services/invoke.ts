@@ -620,7 +620,20 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             };
 
         case "list_directory":
-            return { dirPath: args[0] };
+            return {
+                dirPath: args[0],
+                // 条件展开：不传 options 时后端走默认（不列出隐藏项）。
+                ...(args[1] !== undefined ? { options: args[1] } : {}),
+            };
+
+        case "create_directory":
+            return { parentDir: args[0], name: args[1] };
+
+        case "rename_path":
+            return { path: args[0], newName: args[1] };
+
+        case "delete_paths":
+            return { paths: args[0], permanent: args[1] ?? false };
 
         case "get_audio_file_info":
             return { filePath: args[0] };
@@ -747,6 +760,13 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
 
         case "reveal_export_paths":
             return { paths: args[0] };
+
+        // ── 文件浏览器（系统集成）──
+        case "reveal_paths_in_file_manager":
+            return { paths: args[0] };
+
+        case "open_path_with_default_app":
+            return { path: args[0] };
 
         // ── 记事本（附件 / 剪贴板暂存 / 导出）──
         case "notebook_put_asset":

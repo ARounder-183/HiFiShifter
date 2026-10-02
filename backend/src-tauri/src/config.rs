@@ -292,6 +292,77 @@ impl Default for SearchSettings {
     }
 }
 
+/// 文件浏览器的视图选项。
+///
+/// 字段与前端 `features/fileBrowser/fileBrowserViewOptions.ts` 一一对应（camelCase
+/// 序列化后同名）。取值合法性由前端的 `normalizeFileBrowserViewOptions` 收口 ——
+/// 后端只做透传存储，不重复校验枚举（否则"支持哪些取值"这个业务知识要在两处各写
+/// 一遍，正是 `param_axis_units` 注释里说明过的理由）。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBrowserViewSettings {
+    /// 行密度：`"compact"`（默认）/ `"comfortable"`。
+    #[serde(default = "default_file_browser_density")]
+    pub density: String,
+    /// 排序依据：`"name"`（默认）/ `"date"` / `"size"`。
+    #[serde(default = "default_file_browser_sort_mode")]
+    pub sort_mode: String,
+    /// 是否降序。默认 false —— 与前端"名称升序"的自然方向一致；切到日期/大小时
+    /// 由前端改成 true（`DEFAULT_SORT_DESCENDING`）。
+    #[serde(default)]
+    pub sort_descending: bool,
+    /// 目录是否始终排在文件之前（默认是）。
+    #[serde(default = "default_true_value")]
+    pub folders_first: bool,
+    /// 是否显示隐藏文件（默认否）。
+    #[serde(default = "default_false_value")]
+    pub show_hidden_files: bool,
+    /// 详情列：`"size"`（默认）/ `"date"` / `"none"`。
+    #[serde(default = "default_file_browser_details_column")]
+    pub details_column: String,
+    /// 非搜索模式下是否也显示文件所在目录（默认否）。
+    #[serde(default = "default_false_value")]
+    pub show_path_hint: bool,
+    /// 仅显示可导入的媒体文件（默认否）。
+    #[serde(default = "default_false_value")]
+    pub media_only: bool,
+    /// 键盘光标移动时自动试听（默认否）。
+    #[serde(default = "default_false_value")]
+    pub preview_on_navigate: bool,
+    /// 显示底部状态行（默认是）。
+    #[serde(default = "default_true_value")]
+    pub status_bar_visible: bool,
+}
+
+fn default_file_browser_density() -> String {
+    "compact".to_string()
+}
+
+fn default_file_browser_sort_mode() -> String {
+    "name".to_string()
+}
+
+fn default_file_browser_details_column() -> String {
+    "size".to_string()
+}
+
+impl Default for FileBrowserViewSettings {
+    fn default() -> Self {
+        Self {
+            density: default_file_browser_density(),
+            sort_mode: default_file_browser_sort_mode(),
+            sort_descending: false,
+            folders_first: true,
+            show_hidden_files: false,
+            details_column: default_file_browser_details_column(),
+            show_path_hint: false,
+            media_only: false,
+            preview_on_navigate: false,
+            status_bar_visible: true,
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct UiSettings {
@@ -395,6 +466,13 @@ pub struct UiSettings {
     /// 前端每次保存都会把 `ui.search` **静默丢弃** —— 用户改完设置重开就回到默认。
     #[serde(default)]
     pub search: SearchSettings,
+
+    /// 文件浏览器的视图选项（排序 / 密度 / 隐藏文件 / 详情列 …）。
+    ///
+    /// 【为什么必须在这里有字段】同 `search`：`save_ui_settings` 是「读-改-写整个
+    /// 配置文件」，本结构缺字段时前端每次保存都会把它**静默丢弃**。
+    #[serde(default)]
+    pub file_browser: FileBrowserViewSettings,
 
     #[serde(default)]
     pub quick_search_auto_normalize: bool,
@@ -1527,6 +1605,7 @@ impl Default for UiSettings {
             metronome_sound: default_metronome_sound(),
             silence_detect_options: SilenceDetectSettings::default(),
             search: SearchSettings::default(),
+            file_browser: FileBrowserViewSettings::default(),
             quick_search_auto_normalize: false,
             save_undo_history_by_default: false,
             visible_reference_root_track_ids: Vec::new(),

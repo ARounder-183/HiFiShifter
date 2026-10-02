@@ -1954,8 +1954,49 @@ pub fn get_pitch_cache_stats(state: State<'_, AppState>) -> pitch_cache::PitchCa
 // ===================== file_browser =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn list_directory(dir_path: String) -> Result<Vec<file_browser::FileEntry>, String> {
-    file_browser::list_directory(dir_path)
+pub fn list_directory(
+    dir_path: String,
+    options: Option<file_browser::ListDirectoryOptions>,
+) -> Result<Vec<file_browser::FileEntry>, String> {
+    file_browser::list_directory(dir_path, options)
+}
+
+/// 在 `parentDir` 下新建目录，返回新目录的绝对路径。
+#[tauri::command(rename_all = "camelCase")]
+pub fn create_directory(
+    state: State<'_, AppState>,
+    parent_dir: String,
+    name: String,
+) -> Result<String, String> {
+    file_browser::create_directory(
+        parent_dir,
+        name,
+        state.config_dir.get().map(|p| p.as_path()),
+    )
+}
+
+/// 把 `path` 重命名为同目录下的 `newName`，返回新路径。
+#[tauri::command(rename_all = "camelCase")]
+pub fn rename_path(
+    state: State<'_, AppState>,
+    path: String,
+    new_name: String,
+) -> Result<String, String> {
+    file_browser::rename_path(path, new_name, state.config_dir.get().map(|p| p.as_path()))
+}
+
+/// 把一批路径移入回收站（`permanent` 为真时永久删除）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_paths(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    permanent: bool,
+) -> serde_json::Value {
+    file_browser::delete_paths(
+        paths,
+        permanent,
+        state.config_dir.get().map(|p| p.as_path()),
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1994,6 +2035,24 @@ pub async fn search_files_recursive(
     })
     .await
     .unwrap_or_else(|error| Err(format!("search task failed: {error}")))
+}
+
+/// 在系统文件管理器中定位一批路径（文件多选高亮；全是目录时打开第一个）。
+///
+/// 与 `reveal_export_paths` 共用同一实现 —— 后者是"导出产物"场景的入口，本命令是
+/// 文件浏览器右键菜单的入口。名字不同是因为调用点想读起来是对的，行为必须一致。
+#[tauri::command(rename_all = "camelCase")]
+pub fn reveal_paths_in_file_manager(
+    app: tauri::AppHandle,
+    paths: Vec<String>,
+) -> serde_json::Value {
+    common::reveal_paths_in_file_manager(&app, paths, "no paths given")
+}
+
+/// 用系统默认程序打开一个路径。
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_path_with_default_app(app: tauri::AppHandle, path: String) -> serde_json::Value {
+    common::open_path_with_default_app(&app, &path)
 }
 
 /// 批量把文本转写成可检索的拉丁形态（拼音 / 罗马字 / 谚文分解）。
