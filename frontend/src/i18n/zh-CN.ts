@@ -693,6 +693,38 @@ export const zhCN = {
     clip_channel_import_tolerance_hint:
         "左右声道的允许差异（满幅百分比）。0 = 完全一致；1%（默认）≈ -40 dBFS。有损编码解码后左右会有微小差异，容差太严会漏判。可调范围 0~100%。",
     clip_channel_import_save: "保存",
+    pen_input_dialog_title: "指针与触控笔输入",
+    pen_input_dialog_desc:
+        "触控板、数位板与触摸屏如何驱动拖拽。每一项都可以关闭，关掉后行为与鼠标一致。",
+    pen_input_device: "设备",
+    pen_input_device_hint:
+        "触控板在系统层面就是上报为鼠标，无法自动识别。在这里声明它会启用低速补偿；选择「自动」则沿用既有的启发式判定。",
+    pen_input_device_auto: "自动",
+    pen_input_device_mouse: "鼠标",
+    pen_input_device_trackpad: "触控板",
+    pen_input_device_pen: "触控笔",
+    pen_input_device_touch: "触摸",
+    pen_input_pressure_enabled: "笔压控制拖拽速度",
+    pen_input_pressure_hint:
+        "轻按走得细、重按走得快，握笔的那只手因此不必再去够键盘修饰键。没有压感通道的设备不受影响。",
+    pen_input_pressure_curve: "压感响应",
+    pen_input_pressure_dead_zone: "死区",
+    pen_input_pressure_ceiling: "满力点",
+    pen_input_pressure_min_gain: "最慢倍率",
+    pen_input_pressure_max_gain: "最快倍率",
+    pen_input_pressure_gamma: "轻压段细腻度",
+    pen_input_tilt_enabled: "笔杆倾斜控制波形偏斜",
+    pen_input_tilt_hint:
+        "在预览画布上拖动时倾斜笔杆，波形会向左或向右偏斜。只有存在偏斜参数的形状会响应；大量数位板不上报倾斜，因此默认关闭。",
+    pen_input_trackpad_pinch: "捏合缩放",
+    pen_input_touch_ramp: "触摸前置精细斜坡",
+    pen_input_touch_ramp_hint:
+        "手指拖动的最初几像素走得更细，于是触屏无需修饰键也有进入精细模式的途径。",
+    pen_input_contact_readout: "接触读数",
+    pen_input_contact_readout_off: "关闭",
+    pen_input_contact_readout_touch_only: "仅触摸",
+    pen_input_contact_readout_always: "总是",
+    pen_input_save: "保存",
     clip_take_remove: "删除 Take",
     clip_take_explode: "将 Take 展开为独立音频块",
     clip_take_rename: "重命名 Take",
@@ -1624,6 +1656,7 @@ export const zhCN = {
     // ── 渲染缓存（持久化合成结果）────────────────────────────────────────
     menu_render_cache_manager: "渲染缓存管理...",
     menu_channel_import_settings: "导入声道处理...",
+    menu_pen_input_settings: "指针与触控笔输入...",
     menu_clear_render_cache: "清除渲染缓存",
     render_cache_dialog_title: "渲染缓存管理",
     render_cache_dialog_desc:

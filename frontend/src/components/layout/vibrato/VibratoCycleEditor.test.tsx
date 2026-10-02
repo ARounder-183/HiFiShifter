@@ -254,3 +254,95 @@ test("disabled（系统预设）下右键拖拽不改草稿", async () => {
     await drag(canvas, { from: { x: 100, y: 60 }, to: { x: 260, y: 60 } });
     expect(onChange).not.toHaveBeenCalled();
 });
+
+/*
+ * 键盘可达性。
+ *
+ * 【为什么必须有】这块画布此前唯一的输入方式是"拖"（`role="img"`）。任何丢失
+ * 拖拽能力的环境 —— 触屏 ergonomics 差到不实用、辅助设备、远程桌面传不住拖拽
+ * —— 都因此完全无法编辑波形。契约是：方向键能改值、左右能移笔位、Escape 能
+ * 整体回退，且角色是"可交互控件"而不是图片。
+ */
+async function pressKey(canvas: Element, key: string, modifiers: KeyboardEventInit = {}) {
+    await act(async () => {
+        canvas.dispatchEvent(
+            new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...modifiers }),
+        );
+    });
+}
+
+test("画布声明为可交互控件而不是图片（键盘可达的前提）", async () => {
+    const { canvas } = await mountEditor();
+    expect(canvas.getAttribute("role")).toBe("slider");
+    // 不可聚焦的元素收不到键盘事件。
+    expect(canvas.getAttribute("tabindex")).toBe("0");
+    // 标量语义：屏幕阅读器据此朗读当前格的值。
+    expect(canvas.getAttribute("aria-valuemin")).toBe("-1");
+    expect(canvas.getAttribute("aria-valuemax")).toBe("1");
+});
+
+test("方向键改值：上加深、下降低，且只改当前格", async () => {
+    const { onChange, canvas } = await mountEditor();
+    await pressKey(canvas, "ArrowUp");
+    expect(onChange).toHaveBeenCalledTimes(1);
+    const up = onChange.mock.calls[0][0] as number[];
+    expect(up.length).toBe(SINE.length);
+    // 第 0 格从 0 抬到 0.1；其余格不动。
+    expect(up[0]).toBeCloseTo(0.1, 6);
+    for (let i = 1; i < up.length; i += 1) expect(up[i]).toBe(SINE[i]);
+
+    onChange.mockClear();
+    await pressKey(canvas, "ArrowDown");
+    const down = onChange.mock.calls[0][0] as number[];
+    expect(down[0]).toBeCloseTo(-0.1, 6);
+});
+
+test("左右方向键移动笔位，到边界循环（周期首尾相接）", async () => {
+    const { onChange, canvas } = await mountEditor();
+    // 左移一格（0 → 末格，因为表是循环的），再改值：应当落在**末格**上。
+    await pressKey(canvas, "ArrowLeft");
+    await pressKey(canvas, "ArrowUp");
+    const moved = onChange.mock.calls[0][0] as number[];
+    expect(moved.length).toBe(SINE.length);
+    expect(moved[moved.length - 1]).not.toBe(SINE[SINE.length - 1]);
+    // 第 0 格没被碰过。
+    expect(moved[0]).toBe(SINE[0]);
+});
+
+test("Shift 让改值更细", async () => {
+    const { onChange, canvas } = await mountEditor();
+    await pressKey(canvas, "ArrowUp", { shiftKey: true });
+    const fine = onChange.mock.calls[0][0] as number[];
+    expect(Math.abs(fine[0])).toBeLessThan(0.1);
+    expect(Math.abs(fine[0])).toBeGreaterThan(0);
+});
+
+test("Escape 回退整段键盘编辑", async () => {
+    const { onChange, canvas } = await mountEditor();
+    // 聚焦建立基线（jsdom 里 dispatchEvent 不会触发 React 的 onFocus，故显式派发）。
+    await act(async () => {
+        canvas.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    });
+    await pressKey(canvas, "ArrowUp");
+    await pressKey(canvas, "ArrowUp");
+    expect(onChange).toHaveBeenCalled();
+
+    onChange.mockClear();
+    await pressKey(canvas, "Escape");
+    expect(onChange).toHaveBeenCalledTimes(1);
+    // 回退到进入键盘编辑前的那张表。
+    expect(onChange.mock.calls[0][0]).toEqual(SINE);
+});
+
+test("方向键不会冒泡出去（避免同时触发全局的播放头 seek）", async () => {
+    const { canvas } = await mountEditor();
+    const seen: string[] = [];
+    const spy = (e: KeyboardEvent) => seen.push(e.key);
+    document.addEventListener("keydown", spy);
+    try {
+        await pressKey(canvas, "ArrowUp");
+    } finally {
+        document.removeEventListener("keydown", spy);
+    }
+    expect(seen).toEqual([]);
+});

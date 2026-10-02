@@ -860,6 +860,38 @@ export const enUS = {
     clip_channel_import_tolerance_hint:
         "Allowed difference between channels, as a percentage of full scale. 0 = sample-exact; 1% (default) ≈ -40 dBFS. Lossy codecs leave tiny differences after decoding, so too strict a tolerance misses folds. Adjustable range: 0-100%.",
     clip_channel_import_save: "Save",
+    pen_input_dialog_title: "Pointer & Pen Input",
+    pen_input_dialog_desc:
+        "How trackpads, pen tablets and touchscreens drive dragging. Every option can be turned off to fall back to plain mouse behaviour.",
+    pen_input_device: "Device",
+    pen_input_device_hint:
+        "A trackpad reports itself as a mouse at the platform level, so it cannot be detected. Declaring it here enables the low-speed compensation; Auto keeps the existing heuristics.",
+    pen_input_device_auto: "Auto",
+    pen_input_device_mouse: "Mouse",
+    pen_input_device_trackpad: "Trackpad",
+    pen_input_device_pen: "Pen",
+    pen_input_device_touch: "Touch",
+    pen_input_pressure_enabled: "Pen pressure controls drag speed",
+    pen_input_pressure_hint:
+        "Pressing lightly drags finely and pressing hard drags quickly, so the pen hand never has to reach for a keyboard modifier. Devices without pressure are unaffected.",
+    pen_input_pressure_curve: "Pressure response",
+    pen_input_pressure_dead_zone: "Dead zone",
+    pen_input_pressure_ceiling: "Full-force point",
+    pen_input_pressure_min_gain: "Lightest speed",
+    pen_input_pressure_max_gain: "Strongest speed",
+    pen_input_pressure_gamma: "Light-touch resolution",
+    pen_input_tilt_enabled: "Pen tilt controls wave skew",
+    pen_input_tilt_hint:
+        "Tilting the pen while dragging the preview bends the waveform left or right. Only shapes that have a skew respond, and many tablets never report tilt, so this stays off by default.",
+    pen_input_trackpad_pinch: "Pinch to zoom",
+    pen_input_touch_ramp: "Touch precision ramp",
+    pen_input_touch_ramp_hint:
+        "The first few pixels of a finger drag move finely, so a touchscreen has a way into precision without a modifier key.",
+    pen_input_contact_readout: "Contact readout",
+    pen_input_contact_readout_off: "Off",
+    pen_input_contact_readout_touch_only: "Touch only",
+    pen_input_contact_readout_always: "Always",
+    pen_input_save: "Save",
     clip_take_remove: "Delete Take",
     clip_take_explode: "Explode Takes into Clips",
     clip_take_rename: "Rename Take",
@@ -1806,6 +1838,7 @@ export const enUS = {
     // ── Render cache (persistent synth results)────────────────────────────
     menu_render_cache_manager: "Render Cache Manager...",
     menu_channel_import_settings: "Import Channel Handling...",
+    menu_pen_input_settings: "Pointer & Pen Input...",
     menu_clear_render_cache: "Clear Render Cache",
     render_cache_dialog_title: "Render Cache",
     render_cache_dialog_desc:

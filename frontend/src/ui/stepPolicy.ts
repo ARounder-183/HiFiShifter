@@ -104,7 +104,18 @@ export type StepUnit =
      * 子轨的音级偏移参数允许小数音级（做微分音与揉弦深度），取整的步长
      * 会把 0.35 音级直接吃成 0。
      */
-    | "scaleDegree";
+    | "scaleDegree"
+    /**
+     * 压感映射的无量纲系数（死区、上界、倍率、响应指数）。粗调 0.1，精调 0.01。
+     *
+     * 【为什么不复用 `rate` / `percentFine`】这些系数跨越两个量级：死区是
+     * `0..0.5`，倍率是 `0.02..8`，响应指数是 `0.2..4`。`percentFine` 是百分比
+     * 语义（界面上是 0–100，写回去要除以 100），`rate` 是**播放速率**语义
+     * （围绕 1.0 的倍率）—— 套用任何一个都会让"显示的数值"与"它代表什么"对不上，
+     * 而这类设置最怕的正是"看到的数和存下的数不是一回事"。粗调 0.1 在 0..0.5 的
+     * 死区上已经够细，精调 0.01 则能精确摆到出厂值附近。
+     */
+    | "pressureFactor";
 
 export interface StepSpec {
     /** 无修饰键时的步长。 */
@@ -139,6 +150,7 @@ const STEPS: Record<StepUnit, StepSpec> = {
     clipSeconds: { coarse: 0.5, fine: 0.05, decimals: 2 },
     vibratoHz: { coarse: 0.5, fine: 0.1, decimals: 2 },
     scaleDegree: { coarse: 0.5, fine: 0.1, decimals: 2 },
+    pressureFactor: { coarse: 0.1, fine: 0.01, decimals: 3 },
 };
 
 export function stepFor(unit: StepUnit): StepSpec {

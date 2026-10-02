@@ -95,7 +95,13 @@ const EDITOR_HEIGHT = 120;
  * 位移不足阈值前不写草稿：右键在画布上还有一个常见用途是"点一下看看光标在哪"，
  * 若按下即写入，一次没有位移的右键单击也会产生一次等值重算与重绘。
  */
+/** 右键整体变换的位移阈值（CSS 像素）：纯右键单击不该写入草稿。 */
 const TRANSFORM_DRAG_THRESHOLD_PX = 3;
+
+/** 键盘改值的粗步长（表值域是 `[-1,1]`，0.1 约等于 5% 的满幅）。 */
+const KEY_VALUE_STEP = 0.1;
+/** 按住 Shift 的精细步长。 */
+const KEY_VALUE_FINE_STEP = 0.02;
 
 /**
  * 读数里的百分比：留一位小数，整数则省掉 `.0`。
@@ -161,6 +167,65 @@ export function VibratoCycleEditor({
     /** 权重来源；缺省恒为 1（完全覆盖），即无压感设备的既有行为。 */
     const weightFor = (event: { pointerType?: string | null; pressure?: number }): number =>
         pressurePaint ? pressurePaint.weightFor(event) : 1;
+
+    /*
+     * ── 键盘编辑 ──────────────────────────────────────────────────────
+     *
+     * 【为什么必须有】这块画布此前唯一的输入方式是"拖"（`role="img"`，没有键盘
+     * 路径）。任何丢失拖拽能力的环境 —— 触屏 ergonomics 差到不实用、辅助设备、
+     * 远程桌面传不住拖拽 —— 都因此完全无法编辑波形。
+     *
+     * 语义取"方向键 = 移动笔位 / 改值"这套最标准的做法（与 Radix 滑块的箭头行为
+     * 同源），Escape 撤销整段键盘编辑。之所以不做"Enter 才写入"的两步式：方向键
+     * 即时写入更流畅，也少一次需要学习的操作 —— 而 Escape 已经提供了回退。
+     */
+    const [keyboardBin, setKeyboardBin] = useState(0);
+    const [keyboardActive, setKeyboardActive] = useState(false);
+    /** 获得焦点那一刻的表：Escape 整体回退到它。 */
+    const keyboardBaselineRef = useRef<number[] | null>(null);
+    /** 键盘光标所在格（取模到合法范围）与那一格的当前值。 */
+    const binCount = Math.max(1, table.length);
+    const keyboardIndex = ((keyboardBin % binCount) + binCount) % binCount;
+    const keyboardValue = table[keyboardIndex] ?? 0;
+
+    const handleKeyDown = (event: React.KeyboardEvent<HTMLCanvasElement>) => {
+        if (disabled) return;
+        const bins = Math.max(1, table.length);
+        let handled = true;
+        switch (event.key) {
+            case "ArrowLeft":
+                setKeyboardBin((bin) => (bin - 1 + bins) % bins);
+                break;
+            case "ArrowRight":
+                setKeyboardBin((bin) => (bin + 1) % bins);
+                break;
+            case "ArrowUp":
+            case "ArrowDown": {
+                const step = event.shiftKey ? KEY_VALUE_FINE_STEP : KEY_VALUE_STEP;
+                const direction = event.key === "ArrowUp" ? 1 : -1;
+                const current = table[((keyboardBin % bins) + bins) % bins] ?? 0;
+                // 权重 1 = 直接覆盖（与鼠标落笔逐位一致）。
+                onChange(paintCycleBinWeighted(table, keyboardBin, current + direction * step, 1));
+                break;
+            }
+            case "Escape": {
+                const baseline = keyboardBaselineRef.current;
+                if (baseline) {
+                    onChange(baseline);
+                    // 回退后以当前状态为新基线，连按两次不会"回退到更早的版本"。
+                    keyboardBaselineRef.current = baseline.slice();
+                }
+                break;
+            }
+            default:
+                handled = false;
+        }
+        if (handled) {
+            // 阻止冒泡：否则方向键会同时触发全局的播放头 seek。
+            event.preventDefault();
+            event.stopPropagation();
+        }
+    };
     /**
      * 当前手势占用的指针。
      *
@@ -297,13 +362,39 @@ export function VibratoCycleEditor({
                 }
                 ctx.stroke();
             }
+
+            /*
+             * 键盘笔位标记。
+             *
+             * 只有用键盘时才画：鼠标 / 笔用户不需要它，而常驻的竖线会与"首尾相接"
+             * 的左右缘高亮混在一起。没有这个标记，键盘用户按方向键改的是哪一格
+             * 完全不可见 —— 而"看不见改了什么"比"改不了"更糟。
+             */
+            if (keyboardActive && !disabled && n >= 1) {
+                const bin = ((keyboardBin % n) + n) % n;
+                const x = ((bin + 0.5) / n) * width;
+                const value = table[bin] ?? 0;
+                ctx.strokeStyle = accent;
+                ctx.lineWidth = 1;
+                ctx.globalAlpha = 0.75;
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, height);
+                ctx.stroke();
+                // 当前值上的实心点：一眼看出"这一格被改到哪儿了"。
+                ctx.globalAlpha = 1;
+                ctx.fillStyle = accent;
+                ctx.beginPath();
+                ctx.arc(x, valueToY(value), 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
         };
 
         draw();
         const observer = new ResizeObserver(draw);
         observer.observe(container);
         return () => observer.disconnect();
-    }, [table, disabled]);
+    }, [table, disabled, keyboardActive, keyboardBin]);
 
     const pointAt = (event: { clientX: number; clientY: number }) => {
         const container = containerRef.current;
@@ -476,8 +567,33 @@ export function VibratoCycleEditor({
             >
                 <canvas
                     ref={canvasRef}
-                    role="img"
+                    /*
+                     * `role="slider"` 而不是 `"img"`：键盘光标停在一格上，而那一格的
+                     * 幅度就是一个 `[-1, 1]` 的标量 —— 这正是 slider 的语义，屏幕
+                     * 阅读器因此能朗读"第几格、当前值多少"（见 `aria-valuetext`）。
+                     *
+                     * 顺带的好处：`useKeybindings` 的 `ARROW_OWNING_SELECTOR` 收录了
+                     * `[role="slider"]`，方向键因此**自动**豁免全局绑定 —— 不必再手写
+                     * 一层 stopPropagation 去和播放头 seek 抢按键。
+                     */
+                    role="slider"
+                    tabIndex={disabled ? -1 : 0}
                     aria-label={ariaLabel}
+                    aria-valuemin={-1}
+                    aria-valuemax={1}
+                    aria-valuenow={keyboardValue}
+                    aria-valuetext={`${keyboardIndex + 1}/${binCount}`}
+                    aria-disabled={disabled || undefined}
+                    onKeyDown={handleKeyDown}
+                    onFocus={() => {
+                        // 以"获得焦点那一刻"为基线：Escape 回到这里。
+                        keyboardBaselineRef.current = table.slice();
+                        setKeyboardActive(true);
+                    }}
+                    onBlur={() => {
+                        keyboardBaselineRef.current = null;
+                        setKeyboardActive(false);
+                    }}
                     className="block w-full rounded border border-qt-border"
                     style={{ height: EDITOR_HEIGHT }}
                 />

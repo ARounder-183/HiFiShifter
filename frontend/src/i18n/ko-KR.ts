@@ -807,6 +807,38 @@ export const koKR = {
     clip_channel_import_tolerance_hint:
         "좌우 채널에 허용할 차이(풀 스케일 비율). 0 = 완전 일치, 1%(기본) ≈ -40 dBFS. 손실 압축은 디코딩 후 미세한 차이가 남으므로 너무 엄격하면 놓칩니다. 조정 범위는 0~100%입니다.",
     clip_channel_import_save: "저장",
+    pen_input_dialog_title: "포인터 및 펜 입력",
+    pen_input_dialog_desc:
+        "트랙패드, 펜 태블릿, 터치스크린이 드래그를 어떻게 다룰지 정합니다. 각 항목을 끄면 마우스와 같은 동작으로 돌아갑니다.",
+    pen_input_device: "장치",
+    pen_input_device_hint:
+        "트랙패드는 OS 수준에서 마우스로 보고되어 자동 판별할 수 없습니다. 여기서 선언하면 저속 보정이 켜집니다. 자동은 기존 판정을 그대로 사용합니다.",
+    pen_input_device_auto: "자동",
+    pen_input_device_mouse: "마우스",
+    pen_input_device_trackpad: "트랙패드",
+    pen_input_device_pen: "펜",
+    pen_input_device_touch: "터치",
+    pen_input_pressure_enabled: "필압으로 드래그 속도 조절",
+    pen_input_pressure_hint:
+        "약하게 누르면 정밀하게, 세게 누르면 빠르게 움직입니다. 펜을 쥔 손이 키보드 보조키까지 갈 필요가 없습니다. 필압이 없는 장치는 영향을 받지 않습니다.",
+    pen_input_pressure_curve: "필압 응답",
+    pen_input_pressure_dead_zone: "데드 존",
+    pen_input_pressure_ceiling: "최대 압력 지점",
+    pen_input_pressure_min_gain: "가장 느린 배율",
+    pen_input_pressure_max_gain: "가장 빠른 배율",
+    pen_input_pressure_gamma: "약한 압력의 정밀도",
+    pen_input_tilt_enabled: "펜 기울기로 파형 기울임 조절",
+    pen_input_tilt_hint:
+        "미리보기를 드래그하는 동안 펜을 기울이면 파형이 좌우로 기울어집니다. 기울임 매개변수가 있는 파형만 반응하며, 기울기를 보고하지 않는 태블릿이 많아 기본값은 꺼짐입니다.",
+    pen_input_trackpad_pinch: "핀치로 확대/축소",
+    pen_input_touch_ramp: "터치 정밀 램프",
+    pen_input_touch_ramp_hint:
+        "손가락 드래그의 처음 몇 픽셀은 더 정밀하게 움직여, 터치에서도 보조키 없이 정밀 조절에 들어갈 수 있습니다.",
+    pen_input_contact_readout: "접촉 값 표시",
+    pen_input_contact_readout_off: "끔",
+    pen_input_contact_readout_touch_only: "터치만",
+    pen_input_contact_readout_always: "항상",
+    pen_input_save: "저장",
     clip_take_remove: "테이크 삭제",
     clip_take_explode: "테이크를 개별 클립으로 분리",
     clip_take_rename: "테이크 이름 바꾸기",
@@ -1657,6 +1689,7 @@ export const koKR = {
     // ── 렌더 캐시(합성 결과 영구 저장)────────────────────────────────────
     menu_render_cache_manager: "렌더 캐시 관리...",
     menu_channel_import_settings: "가져오기 채널 처리...",
+    menu_pen_input_settings: "포인터 및 펜 입력...",
     menu_clear_render_cache: "렌더 캐시 지우기",
     render_cache_dialog_title: "렌더 캐시 관리",
     render_cache_dialog_desc:

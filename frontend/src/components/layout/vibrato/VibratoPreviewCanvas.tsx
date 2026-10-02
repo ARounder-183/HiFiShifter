@@ -74,6 +74,8 @@ export interface VibratoPreviewInputState {
     pointerType?: string | null;
     /** `PointerEvent.pressure`；鼠标 / 触摸恒为 0.5。 */
     pressure?: number;
+    /** `PointerEvent.tiltX`（度）；不报倾斜的设备恒为 0。 */
+    tiltX?: number;
 }
 
 /** 从指针事件读出完整状态（修饰键 + 设备通道）。 */
@@ -84,6 +86,7 @@ function readInputState(event: {
     metaKey: boolean;
     pointerType?: string;
     pressure?: number;
+    tiltX?: number;
 }): VibratoPreviewInputState {
     return {
         ctrlKey: event.ctrlKey,
@@ -92,6 +95,7 @@ function readInputState(event: {
         metaKey: event.metaKey,
         pointerType: event.pointerType,
         pressure: event.pressure,
+        tiltX: event.tiltX,
     };
 }
 

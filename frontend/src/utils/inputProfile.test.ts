@@ -9,6 +9,7 @@ import {
     SECONDARY_LONG_PRESS_MS,
     TOUCH_PRECISION_RAMP_GAIN,
     TOUCH_PRECISION_RAMP_PX,
+    tiltToSkew,
     trackpadInertiaGain,
 } from "./inputProfile";
 
@@ -150,6 +151,51 @@ describe("precisionRampGain", () => {
         expect(precisionRampGain(INPUT_PROFILES.mouse, 0)).toBe(1);
         expect(precisionRampGain(INPUT_PROFILES.pen, 0)).toBe(1);
         expect(precisionRampGain(INPUT_PROFILES.unknown, 0)).toBe(1);
+    });
+});
+
+describe("tiltToSkew", () => {
+    it("is symmetric at a vertical pen", () => {
+        expect(tiltToSkew(0)).toBe(0.5);
+    });
+
+    it("maps the full tilt range onto the skew range", () => {
+        expect(tiltToSkew(90)).toBeCloseTo(0.98, 6);
+        expect(tiltToSkew(-90)).toBeCloseTo(0.02, 6);
+    });
+
+    it("leaning right raises the skew and leaning left lowers it", () => {
+        expect(tiltToSkew(45)).toBeGreaterThan(0.5);
+        expect(tiltToSkew(-45)).toBeLessThan(0.5);
+    });
+
+    it("is monotonic across the whole range", () => {
+        let previous = Number.NEGATIVE_INFINITY;
+        for (let tilt = -90; tilt <= 90; tilt += 5) {
+            const skew = tiltToSkew(tilt);
+            expect(skew).toBeGreaterThan(previous);
+            previous = skew;
+        }
+    });
+
+    it("clamps beyond the hardware range instead of leaving the valid skew band", () => {
+        // 某些驱动会给出略超 ±90 的值。
+        expect(tiltToSkew(180)).toBeCloseTo(0.98, 6);
+        expect(tiltToSkew(-180)).toBeCloseTo(0.02, 6);
+    });
+
+    it("falls back to the symmetric skew for non-finite input", () => {
+        expect(tiltToSkew(Number.NaN)).toBe(0.5);
+        expect(tiltToSkew(Number.POSITIVE_INFINITY)).toBe(0.5);
+    });
+
+    it("never returns a skew the renderer would reject", () => {
+        // `clampSkew` 的有效带是 0.02..0.98；越界会被静默钳回，值看起来"拖不动"。
+        for (let tilt = -360; tilt <= 360; tilt += 7) {
+            const skew = tiltToSkew(tilt);
+            expect(skew).toBeGreaterThanOrEqual(0.02);
+            expect(skew).toBeLessThanOrEqual(0.98);
+        }
     });
 });
 

@@ -28,6 +28,7 @@ import { createAxisGainState2D, advanceAxisGain2D, type AxisGainState2D } from "
 import {
     precisionRampGain,
     profileForDeclared,
+    tiltToSkew,
     trackpadInertiaGain,
     type InputProfile,
 } from "../utils/inputProfile";
@@ -45,6 +46,8 @@ import {
 export interface InputGainEvent {
     pointerType?: string | null;
     pressure?: number;
+    /** `PointerEvent.tiltX`（度，`-90..90`）。 */
+    tiltX?: number;
 }
 
 /**
@@ -74,6 +77,13 @@ export interface InputGainController {
      * 且无压感设备在两条路径上都会退化成 1。
      */
     paintWeightFor(event: InputGainEvent): number;
+    /**
+     * 笔杆倾斜对应的目标 `skew`；未启用倾斜 / 设备不报倾斜时为 `null`。
+     *
+     * 返回 `null` 而不是一个默认值是有意的：调用方据此决定"要不要写这个字段"，
+     * 而 `0.5` 之类的默认值会让每个不报倾斜的设备在每次拖拽时都改一次偏斜。
+     */
+    tiltSkewFor(event: InputGainEvent): number | null;
     /**
      * 便利方法：两轴累计位移一次过倍率。
      *
@@ -219,7 +229,19 @@ export function useInputModifiers(): InputGainController {
             );
         };
 
-        return { reset, gainFor, advanceXY, paintWeightFor };
+        const tiltSkewFor = (event: InputGainEvent): number | null => {
+            const current = settingsRef.current;
+            if (!current.tiltEnabled) return null;
+            const profile = profileForDeclared(current.device, event);
+            if (!profile.hasTilt) return null;
+            // 不报倾斜的设备会一直给 0（= 竖直握笔），那是"没有这个通道"而不是
+            // "用户想要对称"。只认非零值，避免每次拖拽都把偏斜归到 0.5。
+            const tiltX = typeof event.tiltX === "number" ? event.tiltX : 0;
+            if (!Number.isFinite(tiltX) || tiltX === 0) return null;
+            return tiltToSkew(tiltX);
+        };
+
+        return { reset, gainFor, advanceXY, paintWeightFor, tiltSkewFor };
     }, []);
 }
 

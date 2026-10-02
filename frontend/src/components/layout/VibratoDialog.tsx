@@ -679,7 +679,30 @@ export function VibratoDialog({
             gained.y,
             isModifierActive(paramFineAdjustKb, modifiers),
         );
-        patch(applyPreviewGesture(gesture.zone, gesture.snapshot, scaled.deltaX, scaled.deltaY));
+        const next = applyPreviewGesture(
+            gesture.zone,
+            gesture.snapshot,
+            scaled.deltaX,
+            scaled.deltaY,
+        );
+        /*
+         * 笔杆倾斜 → 波形偏斜。
+         *
+         * 【为什么只在形状真的用偏斜时才写】`skew` 字段对所有形状都存在，但
+         * `sine` / `saw` / 手绘表完全忽略它。若无条件写入，用户在一个正弦预设上
+         * 拖一下就会把偏斜悄悄改掉 —— 直到他之后换成三角波才会发现形状不对。
+         * `shapeUsesSkew` 是"会不会用到"的唯一出处。
+         */
+        const skew = inputModifiers.tiltSkewFor(modifiers);
+        if (
+            skew != null &&
+            draft?.cycle.kind === "shape" &&
+            shapeUsesSkew(draft.cycle.shape)
+        ) {
+            patch({ ...next, cycle: { ...draft.cycle, skew } });
+            return;
+        }
+        patch(next);
     }
 
     /** 画布手势结束。 */

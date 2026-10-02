@@ -252,6 +252,27 @@ export function precisionRampGain(profile: InputProfile, travelledPx: number): n
 }
 
 /**
+ * 笔杆倾斜 → 波形偏斜（`skew ∈ [0.02, 0.98]`，0.5 = 不偏）。
+ *
+ * 【为什么是绝对映射而不是增量】偏斜是一个"摆放姿态"式的量（0.5 = 对称），
+ * 与相位、深度不同：它没有"从某个起点走多远"的自然含义，用户看着波形说"往右偏
+ * 一点"时心里想的就是一个绝对形状。因此直接由倾斜角度定值。
+ *
+ * 【为什么默认关】倾斜是三维输入里最不可靠的一轴：大量设备不报，且握笔姿势一变
+ * 值就漂。绑一个会漂移的语义比留白更糟，所以只在用户显式打开时生效。
+ *
+ * 【调用方还要再判一次"形状是否用偏斜"】本函数只回答"倾斜说该偏多少"，不问
+ * 当前波形认不认这个字段 —— 那是 `vibratoCycle.shapeUsesSkew` 的事。两者分开
+ * 才能让"正弦预设上拖一下"不会把偏斜悄悄改掉。
+ */
+export function tiltToSkew(tiltX: number): number {
+    if (!Number.isFinite(tiltX)) return 0.5;
+    // ±90° 映射到 0.02..0.98，中位 0.5。
+    const normalized = Math.max(-1, Math.min(1, tiltX / 90));
+    return Math.max(0.02, Math.min(0.98, 0.5 + normalized * 0.48));
+}
+
+/**
  * 触控板的"低速段补偿"倍率。
  *
  * 【为什么需要】触控板拖拽的 delta 带操作系统级加速度曲线：快速划动时像素/毫米

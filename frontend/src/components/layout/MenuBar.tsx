@@ -82,6 +82,7 @@ import { AutoBackupDialog } from "./AutoBackupDialog";
 import { RenderCacheDialog } from "./RenderCacheDialog";
 import { VibratoDialog } from "./VibratoDialog";
 import { ChannelImportDialog } from "./ChannelImportDialog";
+import { PenInputDialog } from "./PenInputDialog";
 import { SearchSettingsDialog } from "./SearchSettingsDialog";
 import { RecordingSettingsDialog } from "./RecordingSettingsDialog";
 import { BenchmarkDialog } from "./BenchmarkDialog";
@@ -208,6 +209,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     /** 清空波形缓存确认框。缓存重建代价高，且下拉菜单关闭即卸载，故由常驻菜单栏托管。 */
     const [waveformCacheConfirmOpen, setWaveformCacheConfirmOpen] = useState(false);
     const [channelImportDialogOpen, setChannelImportDialogOpen] = useState(false);
+    const [penInputDialogOpen, setPenInputDialogOpen] = useState(false);
     const [dmlAdapters, setDmlAdapters] = useState<
         { deviceId: number; name: string; memoryMb: number }[]
     >([]);
@@ -1277,6 +1279,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {tf("menu_channel_import_settings")}
                     </DropdownMenu.Item>
 
+                    {/* 指针设备（触控板 / 数位板 / 触控笔 / 触摸）输入偏好 */}
+                    <DropdownMenu.Item onSelect={() => setPenInputDialogOpen(true)}>
+                        {tf("menu_pen_input_settings")}
+                    </DropdownMenu.Item>
+
                     <DropdownMenu.Separator />
 
                     {/* Keyboard Shortcuts — at the bottom */}
@@ -1386,6 +1393,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             <ChannelImportDialog
                 open={channelImportDialogOpen}
                 onOpenChange={setChannelImportDialogOpen}
+            />
+            <PenInputDialog
+                open={penInputDialogOpen}
+                onOpenChange={setPenInputDialogOpen}
             />
             <RenderCacheDialog
                 open={renderCacheDialogOpen}

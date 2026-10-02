@@ -727,6 +727,38 @@ export const jaJP = {
     clip_channel_import_tolerance_hint:
         "左右チャンネルに許容する差（フルスケール比）。0 = 完全一致、1%（既定）≈ -40 dBFS。非可逆圧縮はデコード後に微小な差が残るため、厳しすぎると見逃します。調整範囲は 0〜100% です。",
     clip_channel_import_save: "保存",
+    pen_input_dialog_title: "ポインターとペン入力",
+    pen_input_dialog_desc:
+        "トラックパッド・ペンタブレット・タッチスクリーンでドラッグをどう扱うか。各項目はオフにでき、オフにするとマウスと同じ動作に戻ります。",
+    pen_input_device: "デバイス",
+    pen_input_device_hint:
+        "トラックパッドは OS レベルではマウスとして報告されるため自動判別できません。ここで宣言すると低速補正が有効になります。「自動」は既存の判定をそのまま使います。",
+    pen_input_device_auto: "自動",
+    pen_input_device_mouse: "マウス",
+    pen_input_device_trackpad: "トラックパッド",
+    pen_input_device_pen: "ペン",
+    pen_input_device_touch: "タッチ",
+    pen_input_pressure_enabled: "筆圧でドラッグ速度を変える",
+    pen_input_pressure_hint:
+        "軽く押せば細かく、強く押せば速く動きます。ペンを持つ手でキーボードの修飾キーに手を伸ばす必要がなくなります。筆圧のないデバイスには影響しません。",
+    pen_input_pressure_curve: "筆圧の応答",
+    pen_input_pressure_dead_zone: "不感帯",
+    pen_input_pressure_ceiling: "最大圧の位置",
+    pen_input_pressure_min_gain: "最遅倍率",
+    pen_input_pressure_max_gain: "最速倍率",
+    pen_input_pressure_gamma: "軽圧域の細かさ",
+    pen_input_tilt_enabled: "ペンの傾きで波形の偏りを操作",
+    pen_input_tilt_hint:
+        "プレビューをドラッグ中にペンを傾けると、波形が左右に偏ります。偏りパラメーターを持つ波形だけが反応し、傾きを報告しないタブレットも多いため既定ではオフです。",
+    pen_input_trackpad_pinch: "ピンチでズーム",
+    pen_input_touch_ramp: "タッチの微調整ランプ",
+    pen_input_touch_ramp_hint:
+        "指でドラッグし始めの数ピクセルは細かく動くので、タッチでも修飾キーなしで微調整に入れます。",
+    pen_input_contact_readout: "接触値の表示",
+    pen_input_contact_readout_off: "オフ",
+    pen_input_contact_readout_touch_only: "タッチのみ",
+    pen_input_contact_readout_always: "常に",
+    pen_input_save: "保存",
     clip_take_remove: "テイクを削除",
     clip_take_explode: "テイクを個別クリップに展開",
     clip_take_rename: "テイク名を変更",
@@ -1681,6 +1713,7 @@ export const jaJP = {
     // ── レンダーキャッシュ（合成結果の永続化）────────────────────────────
     menu_render_cache_manager: "レンダーキャッシュ管理...",
     menu_channel_import_settings: "取り込み時のチャンネル処理...",
+    menu_pen_input_settings: "ポインターとペン入力...",
     menu_clear_render_cache: "レンダーキャッシュを削除",
     render_cache_dialog_title: "レンダーキャッシュ管理",
     render_cache_dialog_desc:
