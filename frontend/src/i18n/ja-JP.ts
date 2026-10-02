@@ -1487,7 +1487,7 @@ export const jaJP = {
     fb_ctx_rename: "名前を変更",
     fb_ctx_delete: "削除",
     fb_ctx_delete_items: "{count} 件を削除|{count} 件を削除",
-    fb_ctx_properties: "プロパティ...",
+    fb_ctx_properties: "プロパティ",
     fb_ctx_new_folder: "新しいフォルダ",
     fb_ctx_refresh: "更新",
     fb_ctx_select_all: "すべて選択",
@@ -1540,7 +1540,7 @@ export const jaJP = {
     search_matched_romaji: "ローマ字に一致 {form}",
     search_matched_choseong: "初声に一致 {form}",
     search_matched_fuzzy: "あいまい一致 {form}",
-    search_settings_title: "検索とマッチング",
+    search_settings_title: "検索とマッチング...",
     search_settings_desc:
         "拼音・ローマ字・韓国語初声のマッチング。ファイルブラウザー、クイック検索、キーボードショートカット、フォント一覧に適用されます。",
     search_settings_hint:

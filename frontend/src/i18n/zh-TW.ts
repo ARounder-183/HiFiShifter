@@ -1436,7 +1436,7 @@ export const zhTW = {
     fb_ctx_rename: "重新命名",
     fb_ctx_delete: "刪除",
     fb_ctx_delete_items: "刪除 {count} 個項目|刪除 {count} 個項目",
-    fb_ctx_properties: "屬性...",
+    fb_ctx_properties: "屬性",
     fb_ctx_new_folder: "新增資料夾",
     fb_ctx_refresh: "重新整理",
     fb_ctx_select_all: "全選",
@@ -1489,7 +1489,7 @@ export const zhTW = {
     search_matched_romaji: "匹配羅馬拼音 {form}",
     search_matched_choseong: "匹配初聲 {form}",
     search_matched_fuzzy: "模糊匹配 {form}",
-    search_settings_title: "搜尋與匹配",
+    search_settings_title: "搜尋與匹配...",
     search_settings_desc:
         "拼音、羅馬拼音、韓文初聲匹配。作用於檔案瀏覽器、快速搜尋、快速鍵與字型清單。",
     search_settings_hint: "拼音、羅馬拼音、韓文初聲匹配的開關。關閉後搜尋只做字面匹配。",

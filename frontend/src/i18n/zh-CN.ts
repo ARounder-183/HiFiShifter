@@ -1434,7 +1434,7 @@ export const zhCN = {
     fb_ctx_rename: "重命名",
     fb_ctx_delete: "删除",
     fb_ctx_delete_items: "删除 {count} 项|删除 {count} 项",
-    fb_ctx_properties: "属性...",
+    fb_ctx_properties: "属性",
     fb_ctx_new_folder: "新建文件夹",
     fb_ctx_refresh: "刷新",
     fb_ctx_select_all: "全选",
@@ -1486,7 +1486,7 @@ export const zhCN = {
     search_matched_romaji: "匹配罗马音 {form}",
     search_matched_choseong: "匹配初声 {form}",
     search_matched_fuzzy: "模糊匹配 {form}",
-    search_settings_title: "搜索与匹配",
+    search_settings_title: "搜索与匹配...",
     search_settings_desc:
         "拼音、罗马音、韩文初声匹配。作用于文件浏览器、快速搜索、快捷键与字体列表。",
     search_settings_hint: "拼音、罗马音、韩文初声匹配的开关。关闭后搜索只做字面匹配。",

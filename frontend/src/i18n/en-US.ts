@@ -1613,7 +1613,7 @@ export const enUS = {
     fb_ctx_rename: "Rename",
     fb_ctx_delete: "Delete",
     fb_ctx_delete_items: "Delete {count} item|Delete {count} items",
-    fb_ctx_properties: "Properties...",
+    fb_ctx_properties: "Properties",
     fb_ctx_new_folder: "New Folder",
     fb_ctx_refresh: "Refresh",
     fb_ctx_select_all: "Select All",
@@ -1666,7 +1666,7 @@ export const enUS = {
     search_matched_romaji: "Matched romaji {form}",
     search_matched_choseong: "Matched choseong {form}",
     search_matched_fuzzy: "Fuzzy match {form}",
-    search_settings_title: "Search and matching",
+    search_settings_title: "Search and matching...",
     search_settings_desc:
         "Pinyin, romaji and Korean choseong matching. Applies to the file browser, quick search, keybindings and the font list.",
     search_settings_hint:

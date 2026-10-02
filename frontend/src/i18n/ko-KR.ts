@@ -1562,7 +1562,7 @@ export const koKR = {
     fb_ctx_rename: "이름 바꾸기",
     fb_ctx_delete: "삭제",
     fb_ctx_delete_items: "{count}개 삭제|{count}개 삭제",
-    fb_ctx_properties: "속성...",
+    fb_ctx_properties: "속성",
     fb_ctx_new_folder: "새 폴더",
     fb_ctx_refresh: "새로 고침",
     fb_ctx_select_all: "모두 선택",
@@ -1615,7 +1615,7 @@ export const koKR = {
     search_matched_romaji: "로마자 일치 {form}",
     search_matched_choseong: "초성 일치 {form}",
     search_matched_fuzzy: "퍼지 일치 {form}",
-    search_settings_title: "검색 및 일치",
+    search_settings_title: "검색 및 일치...",
     search_settings_desc:
         "병음, 로마자, 한국어 초성 일치. 파일 탐색기, 빠른 검색, 단축키, 글꼴 목록에 적용됩니다.",
     search_settings_hint: "병음, 로마자, 한국어 초성 일치 설정입니다. 끄면 문자열만 일치합니다.",
