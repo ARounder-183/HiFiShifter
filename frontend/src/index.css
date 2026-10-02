@@ -410,6 +410,13 @@ textarea {
  *
  * 仅在 `:focus-visible` 触发（键盘导航），鼠标点击不会画出焦点环，
  * 因此不影响现有的点按手感。第三方控件只要不显式移除 outline，即自动继承。
+ *
+ * 【为什么 Radix 的输入内层要单独排除】`input` / `textarea` 这两个通用选择器同样
+ * 命中 Radix 文本字段与多行文本的**内层**元素（`.rt-TextFieldInput` /
+ * `.rt-TextAreaInput`）。而 Radix 已经把环画在**外层容器**上
+ * （`.rt-TextFieldRoot:focus-within`，内嵌 2px）—— 两者叠加，带插槽的搜索框会同时
+ * 出现两个环：一个套住整块（对），另一个只套住中间那段输入（错，看起来就是
+ * "输入框那一段的高亮明显更粗"）。带插槽的字段是**一个**控件，环由外层表达。
  */
 :where(
     button,
@@ -422,11 +429,28 @@ textarea {
     select
 ):focus-visible,
 .rt-BaseButton:focus-visible,
-.rt-TextFieldInput:focus-visible,
-.rt-TextArea:focus-visible,
 .rt-SelectTrigger:focus-visible {
     outline: var(--qt-focus-ring-width) solid var(--qt-focus-ring);
     outline-offset: 1px;
+}
+
+/* Radix 字段的内层不画自己的环：外层容器已经画了（见上）。 */
+.rt-TextFieldInput:focus-visible,
+.rt-TextAreaInput:focus-visible {
+    outline: none;
+}
+
+/*
+ * Radix 的字段容器自己画环（内嵌 2px），这里只把**颜色**对齐到本应用的焦点令牌 ——
+ * 否则同一屏里搜索框（Radix 的 `--focus-8`）与其余控件（`--accent-9`）是两个色阶，
+ * 看起来像两套焦点样式。宽度与内嵌偏移沿用 Radix 的取值。
+ *
+ * `:not(:has(...))` 让不可编辑字段继续用 Radix 的灰色环。这条 `:has()` 若不被引擎
+ * 支持，规则整体失效、退回 Radix 自己的颜色 —— 降级是"颜色没对齐"，不是"没有环"。
+ */
+.rt-TextFieldRoot:where(:focus-within):not(:has(:disabled)):not(:has([readonly])),
+.rt-TextAreaRoot:where(:focus-within):not(:has(:disabled)):not(:has([readonly])) {
+    outline-color: var(--qt-focus-ring);
 }
 
 /* 实心按钮底色与强调色同系，焦点环紧贴会糊成一团：外挪 2px 拉开 */

@@ -868,3 +868,42 @@ describe("列表行键盘光标环", () => {
         expect(listRow).toContain("data-active");
     });
 });
+
+describe("Radix 字段的焦点环", () => {
+    /*
+     * 【要钉死什么】Radix 把文本字段 / 多行文本的焦点环画在**外层容器**上
+     * （`.rt-TextFieldRoot:focus-within`，内嵌 2px）。而本文件的通用焦点环规则里有
+     * `input` / `textarea` 两个选择器，同样命中它的**内层** `.rt-TextFieldInput` ——
+     * 于是带插槽的搜索框会同时出现两个环：一个套住整块，另一个只套住中间那段输入，
+     * 看上去就是"输入框那一段的高亮明显更粗"。环应当只由外层容器表达。
+     */
+    const readCss = (): string =>
+        readFileSync(join("src", "index.css"), "utf8")
+            .replace(/\/\*[\s\S]*?\*\//g, "")
+            .replace(/^[ \t]*\/\/.*$/gm, "");
+
+    test("通用焦点环规则不再命中 Radix 字段的内层元素", () => {
+        // 这条规则是**多选择器共用一条声明块**，所以匹配到第一个 `{` 为止，
+        // 而不是要求 `):focus-visible` 后面紧跟 `{`。
+        const rule = readCss().match(/:where\([\s\S]*?\):focus-visible[\s\S]*?\{[^}]*\}/);
+        expect(rule, "找不到通用焦点环规则").toBeTruthy();
+        for (const inner of [".rt-TextFieldInput", ".rt-TextAreaInput", ".rt-TextArea"]) {
+            expect(rule![0], `${inner} 不该出现在通用焦点环规则里`).not.toContain(inner);
+        }
+    });
+
+    test("Radix 字段的内层显式不画自己的环", () => {
+        const rule = readCss().match(
+            /\.rt-TextFieldInput:focus-visible[^{}]*\{[^}]*outline:\s*none[^}]*\}/,
+        );
+        expect(rule, "缺少「内层输入不画环」的规则").toBeTruthy();
+    });
+
+    test("字段容器的环取本应用的焦点令牌（不是 Radix 自己的色阶）", () => {
+        const rule = readCss().match(
+            /\.rt-TextFieldRoot:where\(:focus-within\)[^{}]*\{[^}]*outline-color:[^}]*\}/,
+        );
+        expect(rule, "缺少字段容器焦点环的对齐规则").toBeTruthy();
+        expect(rule![0]).toContain("--qt-focus-ring");
+    });
+});
