@@ -25,10 +25,12 @@ import {
 } from "../../features/fileBrowser/fileBrowserSlice";
 import { audioPreview } from "../../features/fileBrowser/audioPreview";
 import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
-import { searchOptionsPayload } from "../../features/search/searchSettings";
+import {
+    fileBrowserSearchOptions,
+    visibleFileBrowserEntries,
+} from "../../features/fileBrowser/fileBrowserSearchOptions";
 import {
     isAudioFile,
-    isMediaFile,
     isMidiFile,
     isProjectFile,
     isReaperFile,
@@ -123,11 +125,21 @@ export const FileBrowserPanel: React.FC = () => {
      * 【为什么正则模式下强制 off】正则作用于**原文**，与转写互斥：把 `zhuge` 当正则
      * 去匹配「主歌」没有任何意义。前端仍然把 query 传空串（沿用旧行为：后端不过滤，
      * 由前端做正则过滤），匹配模式一并降为 off，让后端走最便宜的路径。
+     *
+     * 【为什么 includeDirs 绑 mediaOnly】见 `fileBrowserSearchOptions` 的文件头：
+     * 关掉「仅显示媒体文件」= 我要在这个目录下找东西（子目录是合法命中），
+     * 打开 = 我只要可导入的媒体（目录不是媒体文件）。
      */
-    const searchOptions = useMemo(() => {
-        const payload = searchOptionsPayload(searchSettings);
-        return fb.regexEnabled ? { ...payload, mode: "off" as const } : payload;
-    }, [searchSettings, fb.regexEnabled]);
+    const searchOptions = useMemo(
+        () =>
+            fileBrowserSearchOptions({
+                settings: searchSettings,
+                regexEnabled: fb.regexEnabled,
+                mediaOnly: view.mediaOnly,
+                showHiddenFiles: view.showHiddenFiles,
+            }),
+        [searchSettings, fb.regexEnabled, view.mediaOnly, view.showHiddenFiles],
+    );
 
     /** 把后端的命中信息格式化成「匹配拼音 zhuge」；不需要解释时返回 undefined。 */
     const formatMatchReason = useCallback(
@@ -224,8 +236,12 @@ export const FileBrowserPanel: React.FC = () => {
      * 【为什么必须重跑】结果是后端算好的：用户把「智能」改成「模糊」，不重跑就什么
      * 都不会变，看起来像开关坏了。用字符串键做守卫，避免把「输入框内容变化」也算成
      * 一次设置变化。
+     *
+     * 【为什么键里含 includeDirs / includeHidden】这两个也是后端算结果时的输入：
+     * 搜索途中切「仅显示媒体文件」，目录该出现或该消失；切「显示隐藏文件」同理。
+     * 漏掉它们，开关就会变成"点了没反应"。
      */
-    const searchOptionsKey = `${searchOptions.mode}|${searchOptions.heteronym}|${searchOptions.japaneseLongVowel}|${searchOptions.koreanChoseong}`;
+    const searchOptionsKey = `${searchOptions.mode}|${searchOptions.heteronym}|${searchOptions.japaneseLongVowel}|${searchOptions.koreanChoseong}|${searchOptions.includeDirs}|${searchOptions.includeHidden}`;
     const lastSearchOptionsKeyRef = useRef(searchOptionsKey);
     useEffect(() => {
         if (lastSearchOptionsKeyRef.current === searchOptionsKey) return;
@@ -278,13 +294,11 @@ export const FileBrowserPanel: React.FC = () => {
         }
     }, [isSearchMode, fb.entries, fb.searchResults, fb.regexEnabled, trimmedSearchQuery]);
 
-    // 媒体过滤
-    const mediaFilteredEntries = useMemo(() => {
-        if (!view.mediaOnly) return regexFilteredEntries;
-        // “仅显示媒体文件”：音频/视频 + MIDI（MIDI 可导入时间轴/参数编辑器）。
-        // 判据与快速搜索共用 `isMediaFile`，两处不会分叉。
-        return regexFilteredEntries.filter((e) => e.isDir || isMediaFile(e));
-    }, [regexFilteredEntries, view.mediaOnly]);
+    // 媒体过滤（搜索模式下由后端的 includeDirs 承担，见 fileBrowserSearchOptions）
+    const mediaFilteredEntries = useMemo(
+        () => visibleFileBrowserEntries(regexFilteredEntries, { isSearchMode, mediaOnly: view.mediaOnly }),
+        [regexFilteredEntries, isSearchMode, view.mediaOnly],
+    );
 
     // 排序
     const displayEntries = useMemo(() => {

@@ -34,7 +34,27 @@ pub struct SearchOptions {
     pub japanese_long_vowel: Option<bool>,
     pub korean_choseong: Option<bool>,
     pub max_results: Option<usize>,
+    /// 是否把**目录**也作为结果产出（默认否，保持既有调用方行为不变）。
+    ///
+    /// 【为什么是每次查询的参数而不是持久化偏好】它由调用点从"仅显示媒体文件"
+    /// 这个视图选项推导出来（文件浏览器传 `!mediaOnly`，快速搜索不传）。
+    /// 放进 `SearchSettings` 会让一个视图开关变成两个可独立漂移的真相。
+    pub include_dirs: Option<bool>,
+    /// 是否包含点开头的隐藏项（默认否）。
+    ///
+    /// 【为什么要补这个】此前 `search_files_recursive` 无条件跳过点开头名字，
+    /// 与 `list_directory` 的 `include_hidden` 口径不一致 —— 同一个目录在列表里
+    /// 看得到、在搜索里搜不到。本字段让两处对齐。
+    pub include_hidden: Option<bool>,
 }
+
+/// 目录结果的单独上限。
+///
+/// 【为什么目录不占 `max_results` 的名额】文件侧有 `stop_at = max × 超采样倍数`
+/// 再按相关度截断。目录若与文件混在同一个 `hits` 里竞争名额，一个含数百个子目录
+/// 的目录树会把文件结果整个挤掉 —— 而用户搜的是文件。两个通道各自截断，
+/// 目录侧只需够用即可（没人会在搜索结果里翻第 50 个文件夹）。
+pub const MAX_DIR_RESULTS: usize = 50;
 
 impl SearchOptions {
     /// 解析成无 `Option` 的匹配参数。
@@ -59,6 +79,16 @@ impl SearchOptions {
         self.max_results
             .unwrap_or(DEFAULT_MAX_RESULTS)
             .clamp(1, MAX_MAX_RESULTS)
+    }
+
+    /// 目录结果是否参与。缺省否（既有调用方行为不变）。
+    pub fn include_dirs(&self) -> bool {
+        self.include_dirs.unwrap_or(false)
+    }
+
+    /// 是否列出点开头的隐藏项。缺省否。
+    pub fn include_hidden(&self) -> bool {
+        self.include_hidden.unwrap_or(false)
     }
 }
 

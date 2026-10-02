@@ -1969,6 +1969,36 @@ pub async fn list_directory(
         .unwrap_or_else(|error| Err(format!("list directory task failed: {error}")))
 }
 
+/// 批量查询路径的存在性与类型（拖放时判断"拖进来的是不是目录"）。
+///
+/// 【为什么是 async + spawn_blocking】`stat` 在慢盘 / 网络盘上可能数十毫秒一条，
+/// 一次拖入二十项就是数百毫秒。同步命令会把这算在应用主线程上。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn stat_paths(paths: Vec<String>) -> Vec<file_browser::PathStat> {
+    tauri::async_runtime::spawn_blocking(move || file_browser::stat_paths(paths))
+        .await
+        .unwrap_or_default()
+}
+
+/// 把一个或一批目录展开成"按目录分组的媒体文件清单"。
+///
+/// 【为什么是 async + spawn_blocking】递归枚举一个大目录树要遍历成千上万个条目；
+/// 与 `list_directory` 同一条理由 —— 同步命令跑在主线程上就是整个应用卡死。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn collect_folder_media(
+    dirs: Vec<String>,
+    options: Option<file_browser::CollectFolderMediaOptions>,
+) -> file_browser::FolderMediaScan {
+    tauri::async_runtime::spawn_blocking(move || file_browser::collect_folder_media(dirs, options))
+        .await
+        .unwrap_or_else(|_| file_browser::FolderMediaScan {
+            groups: Vec::new(),
+            total_files: 0,
+            truncated: false,
+            rejected: Vec::new(),
+        })
+}
+
 /// 在 `parentDir` 下新建目录，返回新目录的绝对路径。
 #[tauri::command(rename_all = "camelCase")]
 pub fn create_directory(

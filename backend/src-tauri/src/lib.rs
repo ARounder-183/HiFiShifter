@@ -806,6 +806,8 @@ pub fn run() {
             commands::clear_pitch_cache,
             commands::get_pitch_cache_stats,
             commands::list_directory,
+            commands::stat_paths,
+            commands::collect_folder_media,
             commands::create_directory,
             commands::rename_path,
             commands::delete_paths,

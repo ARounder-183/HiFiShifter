@@ -98,6 +98,16 @@ export interface SearchOptionsPayload {
     heteronym: boolean;
     japaneseLongVowel: boolean;
     koreanChoseong: boolean;
+    /**
+     * 是否把**目录**也作为搜索结果产出。
+     *
+     * 【为什么可选】它是**每次查询的参数**，不是持久化偏好：由调用点从视图状态
+     * 推导（文件浏览器传 `!mediaOnly`，快速搜索不传）。缺省即后端默认的 `false`，
+     * 既有调用方行为逐字节不变。
+     */
+    includeDirs?: boolean;
+    /** 是否包含隐藏项；缺省 `false`（与 `list_directory` 的默认口径一致）。 */
+    includeHidden?: boolean;
 }
 
 export function searchOptionsPayload(settings: SearchSettings): SearchOptionsPayload {

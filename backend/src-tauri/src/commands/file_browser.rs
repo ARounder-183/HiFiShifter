@@ -1,6 +1,6 @@
 use crate::search::{
     match_translit, translit, MatchInfo, MatchOptions, Query, SearchMode, SearchOptions,
-    TranslitOptions,
+    TranslitOptions, MAX_DIR_RESULTS,
 };
 use std::cmp::Ordering;
 use std::path::Path;
@@ -55,6 +55,75 @@ pub struct ListDirectoryOptions {
     /// 是否列出隐藏项。默认否（与系统文件管理器一致）。
     #[serde(default)]
     pub include_hidden: bool,
+}
+
+/// 一个路径的存在性与类型（`stat_paths` 的产出）。
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PathStat {
+    pub path: String,
+    pub exists: bool,
+    pub is_dir: bool,
+}
+
+/// `collect_folder_media` 的选项。
+#[derive(serde::Deserialize, Default, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectFolderMediaOptions {
+    /// 是否递归下钻子目录。默认否（与 REAPER 的默认一致）。
+    #[serde(default)]
+    pub recursive: bool,
+    /// 是否包含隐藏项。默认否（与 `list_directory` 同口径）。
+    #[serde(default)]
+    pub include_hidden: bool,
+    /// 媒体文件总数上限；缺省取 [`DEFAULT_MAX_COLLECT_FILES`]。
+    #[serde(default)]
+    pub max_files: Option<usize>,
+}
+
+/// 单次目录导入的媒体文件数上限。
+///
+/// 【为什么是两万】与用户实测的"一个目录两万多个文件"这一已知量级对齐：它既能让
+/// 正常的大目录一次导入完，又能挡住"误拖 `C:\Users`"这类把应用拖死的情形。
+/// 触顶时**不静默截断**，而是回传 `truncated` 让前端确认。
+pub(crate) const DEFAULT_MAX_COLLECT_FILES: usize = 20_000;
+
+/// 一个目录（及其直属媒体文件）在导入时的分组。
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderMediaGroup {
+    /// 该组的源目录绝对路径。
+    pub dir: String,
+    /// 建议的轨道名：顶层目录 = 目录名；子目录 = 相对路径（`Takes/Sub`）。
+    pub label: String,
+    /// 该目录**直属**的媒体文件绝对路径。
+    pub paths: Vec<String>,
+    /// 该目录是否含有子目录。
+    ///
+    /// 【为什么在非递归时也要给】前端用它决定"递归导入"这个选项要不要展示 ——
+    /// 展示与否不能取决于"这次有没有真的递归"。
+    pub has_subdirs: bool,
+}
+
+/// 一次目录扫描的结果。
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderMediaScan {
+    pub groups: Vec<FolderMediaGroup>,
+    pub total_files: usize,
+    /// 是否因上限提前收手。为真时前端必须让用户确认，而不是当作完整结果导入。
+    pub truncated: bool,
+    /// 被拒绝的顶层路径及原因（`drive_root` / `not_found` / `not_a_directory` /
+    /// `virtual_path`）。
+    pub rejected: Vec<RejectedPath>,
+}
+
+/// 一条被拒绝的顶层路径。
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RejectedPath {
+    pub path: String,
+    pub reason: String,
 }
 
 /// 该条目是否应被当作"隐藏"而不列出。
@@ -459,10 +528,14 @@ impl NameMatcher {
 /// 命中数的超采样倍数：见 `search_files_recursive` 的注释。
 const SEARCH_OVERSCAN: usize = 4;
 
-/// 在指定目录下递归搜索文件。
+/// 在指定目录下递归搜索文件（可选包含目录）。
 ///
-/// 匹配文件名 stem（忽略扩展名）、跳过隐藏项；`options` 缺省或 `mode = off` 时与
-/// 转写功能上线前的行为一致（小写子串、按名称排序）。
+/// 匹配文件名 stem（忽略扩展名）；`options` 缺省或 `mode = off` 时与转写功能上线前
+/// 的行为一致（小写子串、按名称排序）。
+///
+/// 目录结果与文件结果**各占一条独立通道**：目录不参与文件的超采样与 `max_results`
+/// 截断（见 [`MAX_DIR_RESULTS`]），否则一个含数百个子目录的树会把文件结果整个挤掉，
+/// 而用户搜的是文件。
 pub(crate) fn search_files_recursive(
     dir_path: String,
     query: String,
@@ -481,28 +554,83 @@ pub(crate) fn search_files_recursive(
     // 【为什么要「多收几倍再截断」】旧实现遇到第 500 个命中就停止遍历，于是返回
     // 哪 500 条取决于目录遍历顺序 —— 真正最像的那条可能排在后面。这里把停止阈值
     // 放宽到 4 倍（遍历成本仍有界：命中数达到 4×上限即停），再按相关度取前 N。
-    let stop_at = max.saturating_mul(SEARCH_OVERSCAN);
-    let mut hits: Vec<Scored> = Vec::new();
+    let mut collector = SearchCollector {
+        matcher: &matcher,
+        files: Vec::new(),
+        dirs: Vec::new(),
+        file_stop_at: max.saturating_mul(SEARCH_OVERSCAN),
+        dir_stop_at: MAX_DIR_RESULTS,
+        // 遍历预算 = 文件停止阈值的 4 倍（默认 500 上限 → 8000 条目）。
+        //
+        // 【为什么必须有】文件通道收满后，若目录通道还没收满，遍历会继续走 ——
+        // 这是为了让"搜一个目录名"不被海量文件命中提前打断。但若不设上限，
+        // 在一个巨大目录树里搜一个几乎不存在的目录名就会退化成**全树遍历**，
+        // 正是本项目已经修过一次的那类卡顿。预算与结果规模成比例，既够用又有界。
+        visit_budget: max
+            .saturating_mul(SEARCH_OVERSCAN)
+            .saturating_mul(SEARCH_OVERSCAN),
+        visits: 0,
+        include_dirs: options.include_dirs(),
+        include_hidden: options.include_hidden(),
+    };
     let mut visited = std::collections::HashSet::new();
-    collect_matching_files(path, &matcher, &mut hits, stop_at, &mut visited, 0);
+    collect_matching_files(path, &mut collector, &mut visited, 0);
 
-    hits.sort_by(|a, b| b.cmp(a));
-    hits.truncate(max);
-    Ok(hits.into_iter().map(|scored| scored.entry).collect())
+    collector.files.sort_by(|a, b| b.cmp(a));
+    collector.files.truncate(max);
+    collector.dirs.sort_by(|a, b| b.cmp(a));
+    collector.dirs.truncate(MAX_DIR_RESULTS);
+
+    // 目录排在文件之前：与文件浏览器 `foldersFirst` 的默认一致，也让"跳到某个
+    // 子目录"这类动作落在结果顶部。
+    let mut out: Vec<FileEntry> = Vec::with_capacity(collector.dirs.len() + collector.files.len());
+    out.extend(collector.dirs.into_iter().map(|scored| scored.entry));
+    out.extend(collector.files.into_iter().map(|scored| scored.entry));
+    Ok(out)
 }
 
 /// 递归深度上限：防止在极深目录树上无界遍历。
 const MAX_SEARCH_DEPTH: usize = 32;
 
+/// 搜索遍历的收集器：文件与目录各一条通道。
+///
+/// 【为什么两条通道共用一个结构而不是走两趟】截断阈值不同（文件走超采样、目录走
+/// [`MAX_DIR_RESULTS`]），但**遍历必须是同一趟** —— 拆成两次会让 junction 环防护
+/// 各做一份 `visited`，同一棵物理目录被走两遍，`visited` 也就白设了。
+struct SearchCollector<'a> {
+    matcher: &'a NameMatcher,
+    files: Vec<Scored>,
+    dirs: Vec<Scored>,
+    file_stop_at: usize,
+    dir_stop_at: usize,
+    /// 已检视的目录条目总数上限（见 `search_files_recursive` 的注释）。
+    visit_budget: usize,
+    visits: usize,
+    include_dirs: bool,
+    include_hidden: bool,
+}
+
+impl SearchCollector<'_> {
+    /// 该停了：要么预算用尽，要么两条通道都收满。
+    ///
+    /// 【注意这是"上界"而不是"下界"】`include_dirs` 为假时（快速搜索等既有调用方），
+    /// 文件通道一满即停，预算不会让遍历多走一步。
+    fn saturated(&self) -> bool {
+        if self.visits >= self.visit_budget {
+            return true;
+        }
+        self.files.len() >= self.file_stop_at
+            && (!self.include_dirs || self.dirs.len() >= self.dir_stop_at)
+    }
+}
+
 fn collect_matching_files(
     dir: &Path,
-    matcher: &NameMatcher,
-    hits: &mut Vec<Scored>,
-    stop_at: usize,
+    collector: &mut SearchCollector<'_>,
     visited: &mut std::collections::HashSet<std::path::PathBuf>,
     depth: usize,
 ) {
-    if hits.len() >= stop_at || depth >= MAX_SEARCH_DEPTH {
+    if collector.saturated() || depth >= MAX_SEARCH_DEPTH {
         return;
     }
     // 环防护：junction/符号链接目录环会让无防护的递归栈溢出崩溃。
@@ -516,23 +644,63 @@ fn collect_matching_files(
     let Ok(read_dir) = std::fs::read_dir(dir) else {
         return;
     };
+    // 复制出引用（`&NameMatcher` 是 Copy），后面的 `collector.dirs.push` 才能拿到
+    // `&mut collector` 而不与之冲突。
+    let matcher = collector.matcher;
     for entry in read_dir.flatten() {
-        if hits.len() >= stop_at {
+        if collector.saturated() {
             break;
         }
+        collector.visits += 1;
         // file_type() 不跟随符号链接/junction，避免把链接目录当作真实目录深入。
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
+        // 元数据只取一次：隐藏判定（Windows 要看文件属性）、大小、修改时间都要它。
+        let metadata = entry.metadata().ok();
+        if !collector.include_hidden {
+            let hidden = match metadata.as_ref() {
+                Some(meta) => is_hidden_entry(meta, &name),
+                // 取不到元数据时退回点开头规则（非 Windows 的 is_hidden_entry 即如此）。
+                None => name.starts_with('.'),
+            };
+            if hidden {
+                continue;
+            }
         }
+        let modified_time = metadata.as_ref().and_then(|m| {
+            m.modified().ok().and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_secs_f64())
+            })
+        });
+        let path = entry.path();
         if file_type.is_dir() {
-            collect_matching_files(&entry.path(), matcher, hits, stop_at, visited, depth + 1);
+            // 目录命中匹配**全名**而不是 stem：目录没有"扩展名"这个概念，
+            // `项目.备份` 里的 `.备份` 是名字的一部分。文件侧继续用 stem 是为了让
+            // `vocal` 命中 `vocal.wav`。这条不一致是有意的。
+            if collector.include_dirs && collector.dirs.len() < collector.dir_stop_at {
+                if let Some((score, match_info)) = matcher.score(&name) {
+                    collector.dirs.push(Scored {
+                        score,
+                        name_lower: name.to_lowercase(),
+                        entry: FileEntry {
+                            name,
+                            path: path.to_string_lossy().into_owned(),
+                            is_dir: true,
+                            size: None,
+                            extension: None,
+                            modified_time,
+                            match_info,
+                        },
+                    });
+                }
+            }
+            collect_matching_files(&path, collector, visited, depth + 1);
         } else {
             // 匹配文件名的 stem（不包含后缀）→ 忽略扩展名，与旧实现一致。
-            let path = entry.path();
             let stem = path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -544,28 +712,276 @@ fn collect_matching_files(
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(|e| e.to_lowercase());
-            let modified_time = entry.metadata().ok().and_then(|m| {
-                m.modified().ok().and_then(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .ok()
-                        .map(|d| d.as_secs_f64())
-                })
-            });
-            let size = entry.metadata().ok().map(|m| m.len());
-            hits.push(Scored {
+            collector.files.push(Scored {
                 score,
                 name_lower: name.to_lowercase(),
                 entry: FileEntry {
                     name,
                     path: path.to_string_lossy().into_owned(),
                     is_dir: false,
-                    size,
+                    size: metadata.as_ref().map(|m| m.len()),
                     extension,
                     modified_time,
                     match_info,
                 },
             });
         }
+    }
+}
+
+// ===================== 目录导入：枚举与探测 =====================
+
+/// 批量查询路径的存在性与类型。
+///
+/// 【为什么需要它】拖放时前端只拿到**路径字符串**：Tauri 的原生拖放事件不带类型，
+/// HTML5 的 `dataTransfer` 更不带。判断"用户拖进来的是不是文件夹"必须问文件系统，
+/// 而逐个路径各发一次 IPC 在拖入 20 项时就是 20 次往返 —— 所以这里一次问完。
+///
+/// 【为什么不跟随符号链接】与 `list_directory` 同口径（它用
+/// `DirEntry::metadata()`，对符号链接不跟随）。同一个路径在列表里和拖放判定里
+/// 必须是同一个答案，否则会出现"列表里看着是目录、拖进去却按文件处理"。
+pub(crate) fn stat_paths(paths: Vec<String>) -> Vec<PathStat> {
+    paths
+        .into_iter()
+        .map(|raw| {
+            let trimmed = raw.trim().to_string();
+            match std::fs::symlink_metadata(&trimmed) {
+                Ok(metadata) => PathStat {
+                    path: trimmed,
+                    exists: true,
+                    is_dir: metadata.is_dir(),
+                },
+                Err(_) => PathStat {
+                    path: trimmed,
+                    exists: false,
+                    is_dir: false,
+                },
+            }
+        })
+        .collect()
+}
+
+/// 目录导入可枚举的媒体扩展名（音频 + 视频容器，视频按音轨导入）。
+///
+/// 【为什么这里必须有一份】`import_audio_item` 的可解码性靠**内容嗅探**
+/// （`try_read_audio_header_only`），但枚举一个目录时不能逐个解码 —— 两万个文件会
+/// 把"导入前的等待"变成卡死。只能按扩展名先筛。
+///
+/// 【为什么必须与前端一致】筛出来的路径随后交给 `importAudioItem`。这份名单比前端
+/// 宽，用户就会"导入一个不认识的格式然后失败"；比前端窄，文件浏览器里能拖的文件、
+/// 拖文件夹时却被漏掉。`media_extensions_match_frontend` 测试直接读 `fileKinds.ts`
+/// 的源码比对，漂移会当场失败。
+///
+/// MIDI 不在其中：它走独立的导入对话框（`IMPORT_MIDI_PATH_EVENT`），塞进同一条
+/// 批量管线会引入半配置状态。见设计文档 §8.6。
+pub(crate) const MEDIA_EXTENSIONS: &[&str] = &[
+    // 音频
+    "wav", "mp3", "flac", "ogg", "oga", "opus", "aac", "m4a", "aif", "aiff", "wma", "ac3",
+    "eac3", "ape", "wv", "mp2", "mpa", "dts", "amr",
+    // 视频容器（按音轨导入）
+    "mp4", "m4v", "mov", "mkv", "webm", "avi", "flv", "wmv", "ts", "mts", "m2ts", "vob", "mpg",
+    "mpeg", "3gp", "3g2", "ogv", "rm", "rmvb",
+];
+
+fn is_media_extension(extension: &str) -> bool {
+    let lower = extension.to_ascii_lowercase();
+    MEDIA_EXTENSIONS.contains(&lower.as_str())
+}
+
+/// 单次扫描检视的目录条目总数上限（防病态目录树，与文件数上限是两道不同的闸）。
+const MAX_COLLECT_ENTRIES: usize = 200_000;
+/// 递归深度上限。与搜索遍历同一个数量级：轨道树再深也没有意义。
+const MAX_COLLECT_DEPTH: usize = 32;
+
+/// 顶层路径为什么不能被扫描。
+///
+/// 【为什么必须挡盘符根】`list_logical_drives()` 返回的盘符条目 `is_dir` 为真
+/// （`file_browser.rs` 的 `list_logical_drives`），于是"目录可拖"会让 `C:\` 变成
+/// 可拖对象 —— 递归开启时等于全盘扫描。
+///
+/// 【为什么用"父目录为空"而不是匹配盘符形状】`C:` 只是恰好像盘符的路径；UNC
+/// （`\\server\share`）与其它平台的根写法会让形状匹配漏判。结构化判据更稳：
+/// 任何根都没有父目录。
+fn reject_reason(path: &Path) -> Option<&'static str> {
+    if path.to_string_lossy() == COMPUTER_VIRTUAL_PATH {
+        return Some("virtual_path");
+    }
+    if !path.exists() {
+        return Some("not_found");
+    }
+    if !path.is_dir() {
+        return Some("not_a_directory");
+    }
+    if path.parent().is_none() {
+        return Some("drive_root");
+    }
+    None
+}
+
+/// 目录扫描的累积状态。
+struct FolderScanState {
+    groups: Vec<FolderMediaGroup>,
+    total_files: usize,
+    truncated: bool,
+    max_files: usize,
+    include_hidden: bool,
+    recursive: bool,
+    entries_visited: usize,
+    visited: std::collections::HashSet<std::path::PathBuf>,
+}
+
+impl FolderScanState {
+    /// 是否已经收满（文件数或条目预算任一用尽）。
+    fn full(&self) -> bool {
+        self.total_files >= self.max_files || self.entries_visited >= MAX_COLLECT_ENTRIES
+    }
+}
+
+/// 递归枚举一个目录，按目录分组产出媒体文件。
+///
+/// 【为什么不排序文件】排序用前端的 `compareFileNames`（手写的资源管理器序）。
+/// 在后端再写一份必然与前端漂移，而"同一份目录在两个界面给出两种顺序"正是本项目
+/// 已经踩过的坑。这里只保证**遍历确定**（子目录按小写名排序），组内文件的顺序
+/// 交给前端。
+fn collect_folder_group(dir: &Path, label: String, depth: usize, state: &mut FolderScanState) {
+    if state.full() {
+        state.truncated = true;
+        return;
+    }
+    if depth >= MAX_COLLECT_DEPTH {
+        state.truncated = true;
+        return;
+    }
+    // 环防护：junction / 符号链接目录环会让无防护递归栈溢出崩溃。
+    let Ok(key) = dir.canonicalize() else {
+        return;
+    };
+    if !state.visited.insert(key) {
+        return;
+    }
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    let mut paths: Vec<String> = Vec::new();
+    let mut subdirs: Vec<(String, std::path::PathBuf)> = Vec::new();
+    for entry in read_dir.flatten() {
+        if state.full() {
+            state.truncated = true;
+            break;
+        }
+        state.entries_visited += 1;
+        // 不跟随符号链接：与 `list_directory` 同口径。
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !state.include_hidden {
+            let metadata = entry.metadata().ok();
+            let hidden = match metadata.as_ref() {
+                Some(meta) => is_hidden_entry(meta, &name),
+                None => name.starts_with('.'),
+            };
+            if hidden {
+                continue;
+            }
+        }
+        if file_type.is_dir() {
+            subdirs.push((name, entry.path()));
+        } else if let Some(extension) = entry.path().extension().and_then(|e| e.to_str()) {
+            if is_media_extension(extension) {
+                paths.push(entry.path().to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    // 文件数上限要在**这里**收口，而不是等所有组收完 —— 否则截断的粒度会是"整组"，
+    // 一个含 3 万文件的目录会先把 total 顶穿再被丢弃。
+    let remaining = state.max_files.saturating_sub(state.total_files);
+    if paths.len() > remaining {
+        paths.truncate(remaining);
+        state.truncated = true;
+    }
+    state.total_files += paths.len();
+
+    // 子目录按小写名排序：`read_dir` 的顺序由文件系统决定，不排序会让"哪些组先
+    // 建轨道"随机器而变，导入结果不可复现。
+    subdirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+
+    let has_subdirs = !subdirs.is_empty();
+    state.groups.push(FolderMediaGroup {
+        dir: dir.to_string_lossy().into_owned(),
+        label: label.clone(),
+        paths,
+        has_subdirs,
+    });
+
+    if !state.recursive {
+        return;
+    }
+    for (name, path) in subdirs {
+        // 子目录的 label 是**相对路径**（`Takes/Sub`）：前端按它建轨道树，
+        // 名称里也就自带"这个目录从哪来"的全部信息。
+        collect_folder_group(&path, format!("{label}/{name}"), depth + 1, state);
+    }
+}
+
+/// 把一个或一批目录展开成"按目录分组的媒体文件清单"。
+///
+/// 【为什么它不是 `search_files_recursive` 的一个选项】后者是"找东西"：带相关性
+/// 排序与 `max_results` 截断 —— 截断在搜索里是对的（用户看前 N 条），在导入里是
+/// **数据丢失**（用户以为全进来了）。本命令只做枚举与分组，不排序、不按相关度截断，
+/// 唯一的截断是总量上限且必须回传 `truncated` 让前端确认。
+pub(crate) fn collect_folder_media(
+    dirs: Vec<String>,
+    options: Option<CollectFolderMediaOptions>,
+) -> FolderMediaScan {
+    let options = options.unwrap_or_default();
+    let max_files = options
+        .max_files
+        .unwrap_or(DEFAULT_MAX_COLLECT_FILES)
+        .clamp(1, MAX_COLLECT_ENTRIES);
+    let mut state = FolderScanState {
+        groups: Vec::new(),
+        total_files: 0,
+        truncated: false,
+        max_files,
+        include_hidden: options.include_hidden,
+        recursive: options.recursive,
+        entries_visited: 0,
+        visited: std::collections::HashSet::new(),
+    };
+    let mut rejected: Vec<RejectedPath> = Vec::new();
+
+    for raw in dirs {
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let path = std::path::PathBuf::from(&trimmed);
+        if let Some(reason) = reject_reason(&path) {
+            rejected.push(RejectedPath {
+                path: trimmed,
+                reason: reason.to_string(),
+            });
+            continue;
+        }
+        // 顶层组的 label 就是目录名（根轨道名）；子目录用相对路径，前端据此建树。
+        let label = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| trimmed.clone());
+        // 每个被拖入的目录各自一份 visited：同一个物理目录被两个不同的拖入项覆盖时
+        // 不该互相吞掉（用户明确拖了两个，就该看到两组）。
+        state.visited.clear();
+        collect_folder_group(&path, label, 0, &mut state);
+    }
+
+    FolderMediaScan {
+        groups: state.groups,
+        total_files: state.total_files,
+        truncated: state.truncated,
+        rejected,
     }
 }
 
@@ -682,6 +1098,9 @@ mod tests {
                 .unwrap_or(0)
         ));
         std::fs::create_dir_all(dir.join("子目录")).expect("temp dir");
+        // 两个名字含 "vocal" 的子目录：用来验证"目录结果不挤占文件结果名额"。
+        std::fs::create_dir_all(dir.join("vocal_takes")).expect("temp dir");
+        std::fs::create_dir_all(dir.join("vocal_alt")).expect("temp dir");
         for name in [
             "主歌_vocal01.wav",
             "主歌_vocal02.wav",
@@ -810,6 +1229,93 @@ mod tests {
             ..SearchOptions::default()
         });
         assert_eq!(search(&dir, "zhuge", options).len(), 2);
+    }
+
+    #[test]
+    fn dirs_are_returned_only_when_asked() {
+        let dir = fixture();
+        // 缺省（含所有既有调用方）：结果里没有目录 —— 既有行为不得回退。
+        assert!(!names(&search(&dir, "vocal", None)).contains(&"vocal_takes"));
+
+        let with_dirs = search(
+            &dir,
+            "vocal",
+            Some(SearchOptions {
+                include_dirs: Some(true),
+                ..SearchOptions::default()
+            }),
+        );
+        assert!(
+            names(&with_dirs).contains(&"vocal_takes"),
+            "开启后应出现目录: {:?}",
+            names(&with_dirs)
+        );
+        assert!(names(&with_dirs).contains(&"vocal_alt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dir_results_carry_dir_shaped_metadata() {
+        let dir = fixture();
+        let hits = search(
+            &dir,
+            "vocal",
+            Some(SearchOptions {
+                include_dirs: Some(true),
+                ..SearchOptions::default()
+            }),
+        );
+        let folder = hits
+            .iter()
+            .find(|entry| entry.name == "vocal_takes")
+            .expect("目录命中");
+        assert!(folder.is_dir);
+        // 与 list_directory 对目录的产出逐字段一致：没有大小、没有扩展名。
+        assert!(folder.size.is_none());
+        assert!(folder.extension.is_none());
+        assert!(Path::new(&folder.path).is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dir_results_do_not_consume_the_file_budget() {
+        let dir = fixture();
+        let hits = search(
+            &dir,
+            "vocal",
+            Some(SearchOptions {
+                max_results: Some(2),
+                include_dirs: Some(true),
+                ..SearchOptions::default()
+            }),
+        );
+        // 文件仍拿满 2 个名额；目录另占一条通道（上限 MAX_DIR_RESULTS）。
+        assert_eq!(hits.iter().filter(|entry| !entry.is_dir).count(), 2);
+        assert_eq!(hits.iter().filter(|entry| entry.is_dir).count(), 2);
+        // 目录排在文件之前（与 foldersFirst 的默认一致）。
+        assert!(hits[0].is_dir, "目录应排在结果前面: {:?}", names(&hits));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn include_hidden_aligns_search_with_directory_listing() {
+        let dir = fixture();
+        // 默认与 list_directory 同口径：点开头的隐藏项不出现在结果里。
+        assert!(!names(&search(&dir, "hidden", None)).contains(&".hidden.wav"));
+        let all = search(
+            &dir,
+            "hidden",
+            Some(SearchOptions {
+                include_hidden: Some(true),
+                ..SearchOptions::default()
+            }),
+        );
+        assert!(
+            names(&all).contains(&".hidden.wav"),
+            "开启后应能搜到隐藏项: {:?}",
+            names(&all)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -942,5 +1448,268 @@ mod tests {
         let result = delete_paths(vec![COMPUTER_VIRTUAL_PATH.to_string()], true, None);
         assert_eq!(result["ok"], serde_json::json!(true));
         assert_eq!(result["deleted"], serde_json::json!(0));
+    }
+
+    // ── 目录导入：枚举 ──────────────────────────────────────────────────
+
+    /// 目录枚举用的临时树：
+    /// ```text
+    /// root/
+    ///   a.wav  b.mp3  notes.txt  .hidden.wav
+    ///   Sub/  c.flac  Deep/  d.wav
+    ///   Empty/
+    /// ```
+    fn folder_fixture() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hifishifter_collect_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(dir.join("Sub").join("Deep")).expect("temp dir");
+        std::fs::create_dir_all(dir.join("Empty")).expect("temp dir");
+        for name in ["a.wav", "b.mp3", "notes.txt", ".hidden.wav"] {
+            std::fs::write(dir.join(name), b"x").expect("write");
+        }
+        std::fs::write(dir.join("Sub").join("c.flac"), b"x").expect("write");
+        std::fs::write(dir.join("Sub").join("Deep").join("d.wav"), b"x").expect("write");
+        dir
+    }
+
+    fn scan(
+        dirs: Vec<String>,
+        options: CollectFolderMediaOptions,
+    ) -> FolderMediaScan {
+        collect_folder_media(dirs, Some(options))
+    }
+
+    fn labels(scan: &FolderMediaScan) -> Vec<&str> {
+        scan.groups.iter().map(|group| group.label.as_str()).collect()
+    }
+
+    #[test]
+    fn non_recursive_scan_takes_only_direct_media() {
+        let dir = folder_fixture();
+        let result = scan(
+            vec![dir.to_string_lossy().into_owned()],
+            CollectFolderMediaOptions::default(),
+        );
+        assert_eq!(result.groups.len(), 1, "非递归只产出顶层一组");
+        let group = &result.groups[0];
+        assert_eq!(group.label, dir.file_name().unwrap().to_string_lossy());
+        let mut found: Vec<&str> = group
+            .paths
+            .iter()
+            .map(|p| Path::new(p).file_name().unwrap().to_str().unwrap())
+            .collect();
+        found.sort();
+        // 只收媒体文件：`notes.txt` 与点开头的隐藏项都不在内。
+        assert_eq!(found, vec!["a.wav", "b.mp3"]);
+        assert_eq!(result.total_files, 2);
+        // has_subdirs 在**非递归**时也要给出 —— 前端据此决定要不要展示递归选项。
+        assert!(group.has_subdirs);
+        assert!(!result.truncated);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recursive_scan_nests_labels_by_relative_path() {
+        let dir = folder_fixture();
+        let root_name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let result = scan(
+            vec![dir.to_string_lossy().into_owned()],
+            CollectFolderMediaOptions {
+                recursive: true,
+                ..Default::default()
+            },
+        );
+        let found = labels(&result);
+        // 子目录用相对路径作 label（前端据此建轨道树），并保持 DFS 顺序。
+        assert!(found.contains(&root_name.as_str()), "顶层组: {found:?}");
+        assert!(
+            found.contains(&format!("{root_name}/Sub").as_str()),
+            "子目录组: {found:?}"
+        );
+        assert!(
+            found.contains(&format!("{root_name}/Sub/Deep").as_str()),
+            "更深一层用完整相对路径: {found:?}"
+        );
+        // 空目录也成组（它自己有 has_subdirs=false，但仍是"这个文件夹存在"的事实）。
+        assert!(found.contains(&format!("{root_name}/Empty").as_str()));
+        assert_eq!(result.total_files, 4);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_respects_max_files_and_reports_truncation() {
+        let dir = folder_fixture();
+        let result = scan(
+            vec![dir.to_string_lossy().into_owned()],
+            CollectFolderMediaOptions {
+                recursive: true,
+                max_files: Some(1),
+                include_hidden: false,
+            },
+        );
+        assert_eq!(result.total_files, 1);
+        // 截断必须显式回传：静默截断在导入场景里等于数据丢失。
+        assert!(result.truncated);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_includes_hidden_only_when_asked() {
+        let dir = folder_fixture();
+        let root = dir.to_string_lossy().into_owned();
+        let hidden = |recursive: bool| {
+            scan(
+                vec![root.clone()],
+                CollectFolderMediaOptions {
+                    recursive,
+                    include_hidden: true,
+                    max_files: None,
+                },
+            )
+            .total_files
+        };
+        assert_eq!(hidden(false), 3, "开启后应多出 .hidden.wav");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_rejects_drive_roots_and_non_directories() {
+        let dir = folder_fixture();
+        let file = dir.join("a.wav").to_string_lossy().into_owned();
+        let missing = dir.join("nope").to_string_lossy().into_owned();
+        #[cfg(windows)]
+        let roots = vec!["C:\\".to_string()];
+        #[cfg(not(windows))]
+        let roots = vec!["/".to_string()];
+        let result = scan(
+            vec![
+                file.clone(),
+                missing.clone(),
+                COMPUTER_VIRTUAL_PATH.to_string(),
+            ]
+            .into_iter()
+            .chain(roots)
+            .collect(),
+            CollectFolderMediaOptions::default(),
+        );
+        assert!(result.groups.is_empty(), "全部应被拒绝");
+        let reasons: Vec<(&str, &str)> = result
+            .rejected
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry.reason.as_str()))
+            .collect();
+        assert!(reasons.contains(&(file.as_str(), "not_a_directory")));
+        assert!(reasons.contains(&(missing.as_str(), "not_found")));
+        assert!(reasons.contains(&(COMPUTER_VIRTUAL_PATH, "virtual_path")));
+        // 盘符根：递归开启时扫整个盘，必须挡在最前面。
+        assert!(
+            reasons.iter().any(|(_, reason)| *reason == "drive_root"),
+            "盘符根应被拒: {reasons:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stat_paths_reports_type_and_existence() {
+        let dir = folder_fixture();
+        let dir_path = dir.to_string_lossy().into_owned();
+        let file_path = dir.join("a.wav").to_string_lossy().into_owned();
+        let missing_path = dir.join("nope").to_string_lossy().into_owned();
+        let stats = stat_paths(vec![
+            dir_path.clone(),
+            file_path.clone(),
+            missing_path.clone(),
+        ]);
+        assert_eq!(stats.len(), 3);
+        assert!(stats[0].exists && stats[0].is_dir, "目录");
+        assert!(stats[1].exists && !stats[1].is_dir, "文件");
+        assert!(!stats[2].exists, "不存在的路径");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── 扩展名白名单：三处对齐 ──────────────────────────────────────────
+
+    /// 从 `export const NAME = new Set([ ... ]);` 里取出字符串字面量。
+    fn extract_string_set(source: &str, marker: &str) -> Vec<String> {
+        let start = source.find(marker).unwrap_or_else(|| panic!("找不到 {marker}"));
+        let rest = &source[start..];
+        let open = rest.find('[').expect("缺少 [");
+        let close = rest[open..].find(']').expect("缺少 ]");
+        rest[open + 1..open + close]
+            .split(',')
+            .filter_map(|piece| {
+                let piece = piece.trim().strip_prefix('"')?;
+                Some(piece[..piece.find('"')?].to_string())
+            })
+            .collect()
+    }
+
+    /// 从 `const NAME =\n    /\.(a|b|c)$/i;` 里取出竖线分隔的扩展名。
+    fn extract_regex_alternation(source: &str, marker: &str) -> Vec<String> {
+        let start = source.find(marker).unwrap_or_else(|| panic!("找不到 {marker}"));
+        let rest = &source[start..];
+        let open = rest.find(r"/\.(").expect("缺少正则前缀") + 4;
+        let close = rest[open..].find(')').expect("缺少正则后缀");
+        rest[open..open + close]
+            .split('|')
+            .map(|piece| piece.trim().to_string())
+            .collect()
+    }
+
+    fn sorted(mut values: Vec<String>) -> Vec<String> {
+        values.sort();
+        values.dedup();
+        values
+    }
+
+    /// Rust 的媒体扩展名表必须与前端**唯一来源**一致。
+    ///
+    /// 【为什么值得一个跨语言测试】枚举出的路径随后交给前端的导入流程。这份名单比
+    /// 前端宽，用户就会"导入一个不认识的格式然后失败"；比前端窄，文件浏览器里能拖的
+    /// 文件、拖文件夹时却被漏掉。直接读 TS 源码比对是唯一能挡住漂移的办法。
+    #[test]
+    fn media_extensions_match_frontend() {
+        let source = include_str!("../../../../frontend/src/features/fileBrowser/fileKinds.ts");
+        let expected = sorted(
+            extract_string_set(source, "export const AUDIO_EXTENSIONS")
+                .into_iter()
+                .chain(extract_string_set(source, "export const VIDEO_EXTENSIONS"))
+                .collect(),
+        );
+        let actual = sorted(MEDIA_EXTENSIONS.iter().map(|s| s.to_string()).collect());
+        assert_eq!(
+            actual, expected,
+            "Rust MEDIA_EXTENSIONS 与 fileKinds.ts 的 AUDIO_EXTENSIONS ∪ VIDEO_EXTENSIONS 漂移了"
+        );
+    }
+
+    /// `fileKinds.ts` 是唯一来源，但 `timeline/dnd.ts` 另抄了一份正则。
+    /// 这条断言挡住那份副本悄悄漂移。
+    #[test]
+    fn frontend_kind_lists_agree_with_drop_admission() {
+        let kinds = include_str!("../../../../frontend/src/features/fileBrowser/fileKinds.ts");
+        let dnd = include_str!("../../../../frontend/src/components/layout/timeline/dnd.ts");
+        let from_kinds = sorted(
+            extract_string_set(kinds, "export const AUDIO_EXTENSIONS")
+                .into_iter()
+                .chain(extract_string_set(kinds, "export const VIDEO_EXTENSIONS"))
+                .collect(),
+        );
+        let from_dnd = sorted(
+            extract_regex_alternation(dnd, "const AUDIO_FILE_RE")
+                .into_iter()
+                .chain(extract_regex_alternation(dnd, "const VIDEO_FILE_RE"))
+                .collect(),
+        );
+        assert_eq!(
+            from_kinds, from_dnd,
+            "fileKinds.ts 与 timeline/dnd.ts 的媒体扩展名白名单漂移了"
+        );
     }
 }
