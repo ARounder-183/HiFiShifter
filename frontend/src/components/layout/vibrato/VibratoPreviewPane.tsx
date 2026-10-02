@@ -84,6 +84,8 @@ export interface VibratoPreviewPaneProps {
     onGestureStart?: (zone: PreviewZone, info: VibratoPreviewGestureInfo) => void;
     onGestureMove?: (deltaX: number, deltaY: number, modifiers: VibratoPreviewInputState) => void;
     onGestureEnd?: () => void;
+    /** 触控板捏合调深度（`deltaCents` 为正 = 加深）；见 `VibratoPreviewCanvas`。 */
+    onPinchDepth?: (deltaCents: number) => void;
 
     /** 纵轴重新拟合（两个页签各自的那把）。 */
     onFit: () => void;
@@ -112,6 +114,7 @@ export function VibratoPreviewPane({
     onGestureStart,
     onGestureMove,
     onGestureEnd,
+    onPinchDepth,
     onFit,
     audition,
     onAudition,
@@ -196,6 +199,7 @@ export function VibratoPreviewPane({
                         onGestureStart={onGestureStart}
                         onGestureMove={onGestureMove}
                         onGestureEnd={onGestureEnd}
+                        onPinchDepth={onPinchDepth}
                     />
 
                     <Flex justify="between" align="center" mt="1" gap="2" wrap="wrap">

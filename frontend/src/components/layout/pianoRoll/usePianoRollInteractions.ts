@@ -86,6 +86,12 @@ import {
 } from "../../../utils/penInput";
 import { profileFor, scaledHitRadius } from "../../../utils/inputProfile";
 import {
+    accumulatePinchSteps,
+    createPinchStepState,
+    pinchDeltaFromWheel,
+    type PinchStepState,
+} from "../../../utils/pinchGesture";
+import {
     getParamEditorWheelAction,
     getVibratoDragWheelTarget,
     type ScrollbarZone,
@@ -882,6 +888,15 @@ export function usePianoRollInteractions(args: {
      * 让后续的单击被误判成"双键"。
      */
     const vibratoResetSlotsRef = useRef<Set<VibratoDragResetSlot>>(new Set());
+    /**
+     * 颤音拖拽期间捏合的整步累积器。
+     *
+     * 【为什么必须累积】触控板捏合吐出的是一串连续的小 delta，而 `steps` 的算法是
+     * `Math.max(1, Math.round(|delta| / 100))` —— 那是给"一格一个事件"的机械滚轮
+     * 写的。若不累积，每个小 delta 都会 `max(1, …)` 算作一整步，深度会以事件频率
+     * 飞走（这正是一个既有缺陷）。累积到满一格才走一步，与滚轮同速。
+     */
+    const vibratoPinchRef = useRef<PinchStepState>(createPinchStepState());
     // Track last pointer position so we can synthesize pointermove when modifiers change
     const lastPointerPosRef = useRef<{
         clientX: number;
@@ -2022,6 +2037,35 @@ export function usePianoRollInteractions(args: {
 
             const vib = vibratoStateRef.current;
             if (vib) {
+                e.preventDefault();
+                /*
+                 * 捏合（`ctrl`/`meta` + wheel）在拖拽期间 = **连续**调深度。
+                 *
+                 * 【为什么放在最前】它必须先于下面那套"按轴向与修饰键判定深度/速率"
+                 * 的离散逻辑被拦下：捏合是一串高频小 delta，走离散路径会被
+                 * `Math.max(1, …)` 放大成"深度飞走"。累积成整步后与滚轮同速，
+                 * 且因为是连续的，手感比一格一格的滚轮平滑得多。
+                 */
+                const pinchDelta = pinchDeltaFromWheel(e);
+                if (pinchDelta != null) {
+                    const steps = accumulatePinchSteps(
+                        vibratoPinchRef.current,
+                        pinchDelta,
+                        performance.now(),
+                    );
+                    if (steps !== 0) {
+                        applyVibratoDragAdjustment({
+                            target: "depth",
+                            direction: steps > 0 ? 1 : -1,
+                            steps: Math.abs(steps),
+                            shiftHeld: e.shiftKey,
+                            fineEvent: e,
+                            clientX: e.clientX,
+                            clientY: e.clientY,
+                        });
+                    }
+                    return;
+                }
                 const ampRequested =
                     isNoneBinding(vibratoAmplitudeAdjustKb) ||
                     isModifierActive(vibratoAmplitudeAdjustKb, e);

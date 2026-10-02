@@ -687,6 +687,30 @@ export function VibratoDialog({
         previewGestureRef.current = null;
     }
 
+    /**
+     * 预览画布捏合调深度。
+     *
+     * 画布已经把"格"折算成 cents（与纵向拖拽同一条换算，见 `VibratoPreviewCanvas`
+     * 的 `PINCH_DRAG_PX_PER_NOTCH`），这里只负责钳制与写入。
+     *
+     * 【为什么用函数式 `setDraft`】捏合是一串高频事件，可能在同一帧内到达多次；
+     * 读闭包里的 `draft` 会拿到同一份旧值，增量因此互相覆盖（表现为"捏了没反应"）。
+     */
+    function handlePreviewPinchDepth(deltaCents: number) {
+        if (!Number.isFinite(deltaCents) || deltaCents === 0) return;
+        setDraft((prev) =>
+            prev
+                ? {
+                      ...prev,
+                      depthCents: Math.min(
+                          VIBRATO_LIMITS.depthCents.max,
+                          Math.max(VIBRATO_LIMITS.depthCents.min, prev.depthCents + deltaCents),
+                      ),
+                  }
+                : prev,
+        );
+    }
+
     function persistPreset(preset: VibratoPreset) {
         dispatch(upsertVibratoPreset(preset));
         void dispatch(persistUiSettings());
@@ -1509,6 +1533,7 @@ export function VibratoDialog({
                                 onGestureStart={handlePreviewGestureStart}
                                 onGestureMove={handlePreviewGestureMove}
                                 onGestureEnd={handlePreviewGestureEnd}
+                                onPinchDepth={handlePreviewPinchDepth}
                                 onFit={() => {
                                     // 「适应」作用于**当前页签**：两页各有一把标尺，
                                     // 一次点击只该动用户正看着的那把。

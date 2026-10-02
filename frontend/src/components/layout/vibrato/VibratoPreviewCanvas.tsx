@@ -17,6 +17,11 @@ import { useEffect, useRef } from "react";
 import { readDevicePixelRatio } from "../../../utils/devicePixelLine";
 import { coalescedEventsOf } from "../../../utils/penInput";
 import { profileFor, scaledHitRadius } from "../../../utils/inputProfile";
+import {
+    accumulatePinchSteps,
+    createPinchStepState,
+    subscribePinch,
+} from "../../../utils/pinchGesture";
 import { previewScaleCents, type VibratoPreviewSamples } from "./vibratoDialogLogic";
 import { finiteRuns, strokeFinitePolyline } from "./vibratoPreviewDraw";
 import {
@@ -105,10 +110,22 @@ export interface VibratoPreviewCanvasProps {
     handles?: PreviewHandleLayout;
     /** 手势开始。 */
     onGestureStart?: (zone: PreviewZone, info: VibratoPreviewGestureInfo) => void;
-    /** 手势移动：自起点累计的像素位移，以及当前的修饰键状态。 */
+    /** 手势移动：自起点累计的像素位移，以及当前的指针状态。 */
     onGestureMove?: (deltaX: number, deltaY: number, modifiers: VibratoPreviewInputState) => void;
     /** 手势结束。 */
     onGestureEnd?: () => void;
+    /**
+     * 触控板捏合调深度（`deltaCents` 为正 = 加深）。
+     *
+     * 【为什么是深度而不是"缩放纵轴"】本画布在编辑时就是**另一组滑杆**（见文件头），
+     * 而纵轴是自动拟合的显示量 —— 缩放它不改变任何参数，只会让波形变大变小。深度
+     * 才是用户真正想调的那个量。
+     *
+     * 【灵敏度与拖拽同源】一格捏合按"相当于纵向拖 20px"折算，再乘本画布的
+     * `centsPerPx` —— 于是"捏一格"与"往上拖 20px"改出的深度完全一致，两套输入
+     * 共用同一条换算，不会出现"捏合比拖拽灵敏得多"的分裂手感。
+     */
+    onPinchDepth?: (deltaCents: number) => void;
 }
 
 /** 读取语义色令牌；缺失（测试 / 非浏览器环境）时回退到中性色。 */
@@ -120,6 +137,15 @@ function tokenColor(name: string, fallback: string): string {
 
 /** 手柄方块边长（CSS 像素）。 */
 const HANDLE_SIZE = 7;
+
+/**
+ * 一格捏合折算成多少像素的**纵向拖拽**。
+ *
+ * 【为什么是"拖拽像素"而不是直接写一个 cents 值】本画布的纵轴是按峰值自动拟合的
+ * （`centsPerPx` 随之变化），写死一个 cents 步长会在不同深度下给出截然不同的手感。
+ * 折算成像素后乘本画布自己的标尺，"捏一格"与"往上拖 20px"就永远改出同样的深度。
+ */
+const PINCH_DRAG_PX_PER_NOTCH = 20;
 
 /** 轴标签的紧凑写法：整数不带小数点，非整数最多一位。 */
 function formatAxisCents(value: number): string {
@@ -135,6 +161,7 @@ export function VibratoPreviewCanvas({
     onGestureStart,
     onGestureMove,
     onGestureEnd,
+    onPinchDepth,
 }: VibratoPreviewCanvasProps) {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -189,6 +216,47 @@ export function VibratoPreviewCanvas({
         },
         [],
     );
+
+    /**
+     * 捏合调深度：一格按"纵向拖 `PINCH_DRAG_PX_PER_NOTCH` 像素"折算。
+     *
+     * 【为什么订阅总线而不是自己挂 wheel 监听】全局"禁用浏览器缩放"的守卫只有一处
+     * （`App.tsx` 的 capture 监听），它已经拿到了全部捏合事件；各表面再各挂一个
+     * capture 监听会重复，触发顺序也不确定。总线让 App 做唯一的识别点。
+     */
+    const onPinchDepthRef = useRef(onPinchDepth);
+    useEffect(() => {
+        onPinchDepthRef.current = onPinchDepth;
+    });
+    /** 捏合的整步累积器（跨渲染保留，否则每次都从零开始凑不满一格）。 */
+    const pinchStepRef = useRef(createPinchStepState());
+    useEffect(() => {
+        if (!interactive) return;
+        return subscribePinch((event) => {
+            const handler = onPinchDepthRef.current;
+            const container = containerRef.current;
+            if (!handler || !container) return;
+            // 同一窗口可能有多个可捏合表面：只处理落在本画布上的。
+            const rect = container.getBoundingClientRect();
+            if (
+                event.clientX < rect.left ||
+                event.clientX > rect.right ||
+                event.clientY < rect.top ||
+                event.clientY > rect.bottom
+            ) {
+                return;
+            }
+            const steps = accumulatePinchSteps(
+                pinchStepRef.current,
+                event.delta,
+                performance.now(),
+            );
+            if (steps === 0) return;
+            const centsPerPx = geometryRef.current.centsPerPx;
+            if (!Number.isFinite(centsPerPx) || centsPerPx <= 0) return;
+            handler(steps * PINCH_DRAG_PX_PER_NOTCH * centsPerPx);
+        });
+    }, [interactive]);
 
     useEffect(() => {
         const canvas = canvasRef.current;

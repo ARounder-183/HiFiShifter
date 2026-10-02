@@ -65,6 +65,7 @@ import {
     installRightDragContextMenuGuard,
     disposeRightDragContextMenuGuard,
 } from "./utils/rightDragContextMenuGuard";
+import { emitPinch, pinchDeltaFromWheel } from "./utils/pinchGesture";
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
 import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
@@ -776,6 +777,18 @@ function AppInner() {
     // 改用 useRef，取消重绘
     const isModifierRef = useRef(false);
 
+    /**
+     * 触控板捏合是否接管缩放（设置项）。
+     *
+     * 【为什么用 ref】下面的全局监听只挂载一次（`useEffect(..., [])`），直接闭包
+     * 会永远读到初始值。经 ref 转发后设置一改即生效，不必重挂监听器。
+     */
+    const pinchZoomEnabled = useAppSelector((state) => state.session.penInput.trackpadPinchZoom);
+    const pinchZoomEnabledRef = useRef(pinchZoomEnabled);
+    useEffect(() => {
+        pinchZoomEnabledRef.current = pinchZoomEnabled;
+    });
+
     useEffect(() => {
         // WebKitGTK fires `contextmenu` on right-button press instead of
         // release. Track the right-button state on Linux and re-dispatch the
@@ -862,6 +875,16 @@ function AppInner() {
             if (isEditableTarget(e.target)) return;
             // 禁用 Ctrl/Cmd+滚轮的 WebView 页面缩放；应用内的缩放滚轮绑定仍可正常执行。
             e.preventDefault();
+            /*
+             * 同一批事件正是 Web 平台上报**触控板捏合**的唯一方式（`WheelEvent`
+             * 不带 `pointerType`，没有别的信号可用）。此前这里只是把它吞掉，于是
+             * 触控板用户既没有浏览器缩放、也没有应用内缩放 —— 手势完全没反应。
+             * 现在继续阻止页面缩放，但把同一批事件识别成捏合派发给当前表面。
+             */
+            if (!pinchZoomEnabledRef.current) return;
+            const delta = pinchDeltaFromWheel(e);
+            if (delta == null) return;
+            emitPinch({ clientX: e.clientX, clientY: e.clientY, delta });
         }
 
         function preventBrowserFind(e: KeyboardEvent) {
