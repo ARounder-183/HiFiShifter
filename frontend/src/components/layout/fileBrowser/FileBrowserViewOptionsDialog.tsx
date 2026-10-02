@@ -78,7 +78,13 @@ export function FileBrowserViewOptionsDialog({ open, onOpenChange }: Props) {
                     onCheckedChange={(checked) => update({ foldersFirst: checked })}
                 />
 
-                <AppField label={t("fb_details_size")}>
+                {/*
+                  字段标签说明"这一项在设置什么"，选项标签才是"取哪个值"。
+                  此前这里错把第一个选项当成了字段标签，界面上于是出现
+                  「大小：大小 / 修改日期 / 无」与「紧凑：紧凑 / 舒适」——
+                  同一句话里既当问题又当答案。
+                */}
+                <AppField label={t("fb_details_column")}>
                     <AppSelect
                         value={view.detailsColumn}
                         onValueChange={(value) =>
@@ -91,7 +97,7 @@ export function FileBrowserViewOptionsDialog({ open, onOpenChange }: Props) {
                     />
                 </AppField>
 
-                <AppField label={t("fb_density_compact")}>
+                <AppField label={t("fb_density")}>
                     <AppSelect
                         value={view.density}
                         onValueChange={(value) => update({ density: value as FileBrowserDensity })}

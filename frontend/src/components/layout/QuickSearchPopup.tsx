@@ -19,6 +19,7 @@ import { SearchTranslitToggle } from "./search/SearchTranslitToggle";
 import { matchReasonOf } from "./search/matchReason";
 import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
 import { isAudioFile } from "../../features/fileBrowser/fileKinds";
+import { compareFileNames } from "../../features/fileBrowser/fileNameCompare";
 import { importAudioAtPosition } from "../../features/session/thunks/importThunks";
 import {
     persistUiSettings,
@@ -228,7 +229,10 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
         const sorted = [...results];
         switch (sortMode) {
             case "name":
-                sorted.sort((a, b) => a.name.localeCompare(b.name));
+                // 与文件浏览器同一个比较器：裸 `localeCompare` 既不认数字（take10
+                // 会排在 take2 前面），也把汉字排在拉丁之前 —— 同一个目录在两个
+                // 界面里给出两种顺序，是没理由的。
+                sorted.sort((a, b) => compareFileNames(a.name, b.name));
                 break;
             case "date":
                 sorted.sort((a, b) => (b.modifiedTime ?? 0) - (a.modifiedTime ?? 0));

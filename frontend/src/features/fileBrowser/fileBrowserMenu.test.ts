@@ -64,6 +64,9 @@ function makeContext(overrides: Partial<FileBrowserMenuContext> = {}): FileBrows
     return {
         // 测试只关心"哪些项存在"，标签直接用键名，断言时读起来就是键名。
         t: (key: MessageKey) => key,
+        // 复数形式带上数量：这样能断言"数量确实被回填了" —— 只传 t 的写法
+        // 会把 `{count}` 模板原样漏到界面上（此前正是如此）。
+        plural: (key: MessageKey, count: number) => `${key}:${count}`,
         view: { ...DEFAULT_FILE_BROWSER_VIEW_OPTIONS },
         isComputerLevel: false,
         isSearchMode: false,
@@ -174,7 +177,7 @@ describe("条目菜单", () => {
                 "insert-as-takes",
             ]),
         );
-        expect(items.find((item) => item.key === "delete")?.label).toBe("fb_ctx_delete_n");
+        expect(items.find((item) => item.key === "delete")?.label).toBe("fb_ctx_delete_items:2");
         // 多选时"复制文件名"没有唯一目标。
         expect(keys(items)).not.toContain("copy-name");
     });

@@ -57,6 +57,13 @@ export interface FileBrowserMenuActions {
 export interface FileBrowserMenuContext {
     /** 已本地化的翻译函数。 */
     t: (key: MessageKey) => string;
+    /**
+     * 带数量文案的复数形式（`{count}` 由它回填，并按语系格式化数字）。
+     *
+     * 【为什么菜单也需要它】"删除 N 项"是**带数量**的条目：只传 `t` 会把模板原样
+     * 渲染出来 —— 界面上出现的就是 `Delete {n} Items` 这种带花括号的文案。
+     */
+    plural: (key: MessageKey, count: number) => string;
     view: FileBrowserViewOptions;
     /** 是否在「计算机」虚拟层（盘符列表）—— 写操作与"新建文件夹"在此无意义。 */
     isComputerLevel: boolean;
@@ -219,7 +226,7 @@ function entryMenu(targets: FileEntry[], ctx: FileBrowserMenuContext): AppMenuIt
         }
         items.push({
             key: "delete",
-            label: single ? t("fb_ctx_delete") : t("fb_ctx_delete_n"),
+            label: single ? t("fb_ctx_delete") : ctx.plural("fb_ctx_delete_items", targets.length),
             danger: true,
             separatorBefore: single ? false : true,
             onSelect: () => actions.remove(targets),

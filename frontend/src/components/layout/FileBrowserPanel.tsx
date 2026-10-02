@@ -41,6 +41,7 @@ import type { FileBrowserViewOptions } from "../../features/fileBrowser/fileBrow
 import { rowDensityOf } from "../../features/fileBrowser/fileBrowserViewOptions";
 import { locationLabel, parentDirOf } from "../../features/fileBrowser/fileBrowserPaths";
 import { computeListWindow } from "../../features/fileBrowser/listWindow";
+import { compareFileNames } from "../../features/fileBrowser/fileNameCompare";
 import {
     emitExternalFileAction,
     emitImportMidiRequest,
@@ -89,16 +90,7 @@ import {
 } from "./fileBrowserKeyboardNav";
 
 /**
- * 自然序排序器：`take2` 排在 `take10` 之前。
- *
- * 【为什么不用裸 `localeCompare`】默认比较是纯字典序，`take10` 会排在 `take2`
- * 前面 —— 音频素材几乎总是带序号（take01…take12），这是每天都会撞上的错序。
- * `numeric: true` 打开数字分段比较，`sensitivity: "base"` 让大小写与变音符号
- * 不参与排序（"Apple" 与 "apple" 相邻）。构造一次即可，Collator 本身可复用。
- */
-const NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-
-/** 键盘移动后自动试听的防抖（毫秒）。 */
+ * 键盘移动后自动试听的防抖（毫秒）。 */
 const PREVIEW_NAV_DEBOUNCE_MS = 160;
 
 /** 面板内的行内编辑状态。 */
@@ -295,7 +287,7 @@ export const FileBrowserPanel: React.FC = () => {
         const direction = view.sortDescending ? -1 : 1;
         switch (view.sortMode) {
             case "name":
-                sorted.sort((a, b) => direction * NAME_COLLATOR.compare(a.name, b.name));
+                sorted.sort((a, b) => direction * compareFileNames(a.name, b.name));
                 break;
             case "date":
                 sorted.sort((a, b) => direction * ((a.modifiedTime ?? 0) - (b.modifiedTime ?? 0)));
@@ -1149,6 +1141,7 @@ export const FileBrowserPanel: React.FC = () => {
             menu
                 ? buildFileBrowserContextMenu(menu.entry, {
                       t,
+                      plural,
                       view,
                       isComputerLevel,
                       isSearchMode,
@@ -1161,6 +1154,7 @@ export const FileBrowserPanel: React.FC = () => {
         [
             menu,
             t,
+            plural,
             view,
             isComputerLevel,
             isSearchMode,
