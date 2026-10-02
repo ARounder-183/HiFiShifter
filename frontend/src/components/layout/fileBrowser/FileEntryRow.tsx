@@ -7,17 +7,12 @@
  */
 
 import React from "react";
-import { FileIcon, PlayIcon, StopIcon } from "@radix-ui/react-icons";
+import { PlayIcon, StopIcon } from "@radix-ui/react-icons";
 
 import { AppListRow, type AppListRowDensity } from "../../../ui";
 import type { FileEntry } from "../../../services/api/fileBrowser";
-import {
-    isAudioFile,
-    isMidiFile,
-    isProjectFile,
-    isVideoFile,
-} from "../../../features/fileBrowser/fileKinds";
-import { AudioIcon, FolderIcon, MidiIcon, ProjectIcon, VideoIcon } from "./fileIcons";
+import { isAudioFile, isMidiFile, isProjectFile } from "../../../features/fileBrowser/fileKinds";
+import { FileKindIcon } from "./fileIcons";
 
 export interface FileEntryRowProps {
     entry: FileEntry;
@@ -32,7 +27,15 @@ export interface FileEntryRowProps {
     isPlaying: boolean;
     isSelected?: boolean;
     onDoubleClickDir: (dirPath: string) => void;
-    onClickAudio: (entry: FileEntry, ev?: React.MouseEvent) => void;
+    /**
+     * 单击一行。
+     *
+     * 【为什么所有行都要有】此前只有音频行接了 `onClick`，于是左键点一个 `.txt`
+     * 既不选中也不做任何事 —— 随后的 Ctrl+C / Delete / F2 就没有作用对象，而右键
+     * 菜单却能对它操作。行的左键语义应当是"选中它"，由调用方再按类型决定是否
+     * 额外触发试听。
+     */
+    onRowClick: (entry: FileEntry, ev: React.MouseEvent) => void;
     onPointerDownForDrag: (e: React.PointerEvent<HTMLDivElement>, entry: FileEntry) => void;
     onContextMenu: (e: React.MouseEvent, entry: FileEntry) => void;
     isDragging: boolean;
@@ -59,7 +62,7 @@ export const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
         isPlaying,
         isSelected,
         onDoubleClickDir,
-        onClickAudio,
+        onRowClick,
         onPointerDownForDrag,
         onContextMenu,
         isDragging,
@@ -69,14 +72,8 @@ export const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
         detailText,
     }) => {
         const isAudio = isAudioFile(entry);
-        const isMidi = isMidiFile(entry);
-        const isProject = isProjectFile(entry);
-        const isDraggable = isAudio || isMidi || isProject;
-        // 既不能打开、也不能拖拽的行（例如 .txt）此前被标成 disabled（50% 透明 +
-        // aria-disabled）。那在语义上是错的：右键菜单仍可对它复制路径 / 重命名 /
-        // 删除 / 查看属性 —— "什么都不能做"是假话。现在只把图标调暗表示"不是可导入
-        // 的媒体"，行本身保持正常对比度与可交互性。
-        const isInert = !entry.isDir && !isDraggable;
+        // 可拖拽 = 音频/视频 + MIDI + 工程文件（与时间轴、参数编辑器的拖放准入一致）。
+        const isDraggable = isAudio || isMidiFile(entry) || isProjectFile(entry);
 
         return (
             <AppListRow
@@ -99,40 +96,23 @@ export const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                 onPointerDown={isDraggable ? (e) => onPointerDownForDrag(e, entry) : undefined}
                 onContextMenu={(e) => onContextMenu(e, entry)}
                 onDoubleClick={entry.isDir ? () => onDoubleClickDir(entry.path) : undefined}
-                onClick={isAudio ? (ev) => onClickAudio(entry, ev) : undefined}
+                onClick={(ev) => onRowClick(entry, ev)}
             >
-                {/* 图标 */}
+                {/* 图标。播放中换成停止图标（这是行的状态，不属于类型）。 */}
                 <span className="shrink-0 w-[14px] flex items-center justify-center">
-                    {entry.isDir ? (
-                        <FolderIcon className="text-yellow-500" />
-                    ) : isAudio ? (
-                        isPlaying ? (
-                            <StopIcon width="12" height="12" className="text-qt-highlight" />
-                        ) : isVideoFile(entry) ? (
-                            <VideoIcon className="text-purple-400" />
-                        ) : (
-                            <AudioIcon className="text-blue-400" />
-                        )
-                    ) : isMidi ? (
-                        <MidiIcon className="text-qt-highlight" />
-                    ) : isProject ? (
-                        // 工程文件高亮：橙色星标文档图标（备份文件如 .hshp-bak 不在此列）。
-                        <ProjectIcon className="text-amber-400" />
+                    {isAudio && isPlaying ? (
+                        <StopIcon width="12" height="12" className="text-qt-highlight" />
                     ) : (
-                        <FileIcon
-                            width="12"
-                            height="12"
-                            className={
-                                isInert ? "text-qt-text-muted opacity-60" : "text-qt-text-muted"
-                            }
-                        />
+                        <FileKindIcon entry={entry} />
                     )}
                 </span>
 
                 {/* 文件名 + 路径提示 */}
                 <div className="flex flex-col min-w-0 flex-1">
                     <span
-                        className={`hs-type-label ${isProject ? "truncate text-amber-300" : "truncate"}`}
+                        className={`hs-type-label ${
+                            isProjectFile(entry) ? "truncate text-amber-300" : "truncate"
+                        }`}
                         data-tooltip={entry.name}
                     >
                         {entry.name}

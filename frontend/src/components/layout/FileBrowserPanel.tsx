@@ -72,7 +72,7 @@ import { copyTextToClipboard } from "../../utils/copyText";
 import { DockInlineRename } from "../dock/DockInlineRename";
 import { FileEntryRow } from "./fileBrowser/FileEntryRow";
 import { formatModified, formatSize } from "./fileBrowser/formatFile";
-import { FolderIcon } from "./fileBrowser/fileIcons";
+import { FileKindIcon, FolderIcon } from "./fileBrowser/fileIcons";
 import { FilePropertiesDialog } from "./fileBrowser/FilePropertiesDialog";
 import { FileBrowserViewOptionsDialog } from "./fileBrowser/FileBrowserViewOptionsDialog";
 import {
@@ -429,47 +429,56 @@ export const FileBrowserPanel: React.FC = () => {
         [view.previewOnNavigate, previewToggle],
     );
 
-    // 获取仅音频的列表用于 shift-range 选择
-    const audioEntries = useMemo(() => displayEntries.filter(isAudioFile), [displayEntries]);
+    /**
+     * 单击一行。
+     *
+     * 【为什么选中与试听分开】行的左键语义是"选中它"（让 Ctrl+C / Delete / F2 /
+     * 拖拽有作用对象）；音频文件在此之上**额外**试听。此前只有音频行接了点击，
+     * 点一个 `.txt` 什么都不发生 —— 而右键菜单却能对它操作，两条路径的可用性
+     * 不一致。
+     *
+     * 【为什么下标空间必须统一】此前 `lastClickedIndexRef` 记的是 **audioEntries**
+     * 的下标，而键盘光标用的是 displayEntries 的下标；Shift 范围选择因此只在音频
+     * 之间连线，与列表里看到的顺序不是一回事。现在统一用 displayEntries。
+     */
+    const handleRowClick = useCallback(
+        (entry: FileEntry, ev: React.MouseEvent) => {
+            const index = displayEntries.findIndex((candidate) => candidate.path === entry.path);
 
-    const handleClickAudio = useCallback(
-        (entry: FileEntry, ev?: React.MouseEvent) => {
-            const idx = audioEntries.findIndex((e) => e.path === entry.path);
-
-            if (ev && isPrimaryModifierDown(ev)) {
-                // macOS: Command+click / Windows: Ctrl+click — toggle selection
+            if (isPrimaryModifierDown(ev)) {
+                // macOS: Command+click / Windows: Ctrl+click — 加选 / 减选
                 setSelectedPaths((prev) => {
                     const next = new Set(prev);
                     if (next.has(entry.path)) next.delete(entry.path);
                     else next.add(entry.path);
                     return next;
                 });
-                lastClickedIndexRef.current = idx;
+                lastClickedIndexRef.current = index;
                 return;
             }
 
-            if (ev?.shiftKey && lastClickedIndexRef.current >= 0) {
-                // Shift+click: range selection
-                const start = Math.min(lastClickedIndexRef.current, idx);
-                const end = Math.max(lastClickedIndexRef.current, idx);
+            if (ev.shiftKey && lastClickedIndexRef.current >= 0) {
+                // Shift+click：从锚点到这一行的范围选择（含目录，与列表所见一致）
+                const start = Math.min(lastClickedIndexRef.current, index);
+                const end = Math.max(lastClickedIndexRef.current, index);
                 setSelectedPaths((prev) => {
                     const next = new Set(prev);
                     for (let i = start; i <= end; i++) {
-                        next.add(audioEntries[i].path);
+                        next.add(displayEntries[i].path);
                     }
                     return next;
                 });
                 return;
             }
 
-            // Normal click: clear selection, toggle preview
+            // 普通点击：单选这一行；音频文件再切换试听
             // （"再点一次停止"由 `usePreviewToggle` 统一实现：此前这里只有播放
             // 分支，重复点击会从头重放并与在播的旧音源叠加。）
-            setSelectedPaths(new Set());
-            lastClickedIndexRef.current = idx;
-            previewToggle.toggle(entry.path);
+            setSelectedPaths(new Set([entry.path]));
+            lastClickedIndexRef.current = index;
+            if (isAudioFile(entry)) previewToggle.toggle(entry.path);
         },
-        [audioEntries, previewToggle],
+        [displayEntries, previewToggle],
     );
 
     /**
@@ -481,10 +490,10 @@ export const FileBrowserPanel: React.FC = () => {
             if (entry.isDir) {
                 handleEnterDir(entry.path);
             } else if (isAudioFile(entry)) {
-                handleClickAudio(entry);
+                previewToggle.toggle(entry.path);
             }
         },
-        [handleEnterDir, handleClickAudio],
+        [handleEnterDir, previewToggle],
     );
 
     /**
@@ -518,6 +527,8 @@ export const FileBrowserPanel: React.FC = () => {
         lastClickedIndexRef.current = -1;
         setActiveIndex(-1);
         setEditing(null);
+        // 上一次目录里的失败提示（重名 / 非法名）不该跟着走进新目录。
+        setError(null);
     }, [fb.currentPath]);
 
     // ── 输入字母快速跳转（type-ahead，与资源管理器一致） ─────────────────────
@@ -837,7 +848,7 @@ export const FileBrowserPanel: React.FC = () => {
                     importMultipleAudioAtPosition({
                         audioPaths: paths,
                         mode,
-                        trackId: mode === "as-takes" ? selectedTrackId : selectedTrackId,
+                        trackId: selectedTrackId,
                         startSec: playheadSec,
                     }),
                 );
@@ -1450,7 +1461,7 @@ export const FileBrowserPanel: React.FC = () => {
                                         gap="1.5"
                                         className="px-2 py-qt-1 min-h-[22px]"
                                     >
-                                        <FolderIcon className="text-yellow-500 shrink-0" />
+                                        <FileKindIcon entry={entry} />
                                         <DockInlineRename
                                             initial={editing.initial}
                                             ariaLabel={t("fb_ctx_rename")}
@@ -1473,7 +1484,7 @@ export const FileBrowserPanel: React.FC = () => {
                                         isPlaying={fb.previewingFile === entry.path}
                                         isSelected={selectedPaths.has(entry.path)}
                                         onDoubleClickDir={handleEnterDir}
-                                        onClickAudio={handleClickAudio}
+                                        onRowClick={handleRowClick}
                                         onPointerDownForDrag={handlePointerDownForDrag}
                                         onContextMenu={handleRowContextMenu}
                                         isDragging={

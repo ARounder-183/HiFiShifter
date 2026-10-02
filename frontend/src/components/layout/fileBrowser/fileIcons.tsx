@@ -6,6 +6,16 @@
  * 把纯展示的部分搬走，面板才只留"编排"。
  */
 
+import { FileIcon } from "@radix-ui/react-icons";
+
+import type { FileEntry } from "../../../services/api/fileBrowser";
+import {
+    isAudioFile,
+    isMidiFile,
+    isProjectFile,
+    isVideoFile,
+} from "../../../features/fileBrowser/fileKinds";
+
 /** 文件夹图标。 */
 export function FolderIcon({ className }: { className?: string }) {
     return (
@@ -82,4 +92,20 @@ export function ProjectIcon({ className }: { className?: string }) {
             />
         </svg>
     );
+}
+
+/**
+ * 按文件类型挑图标。
+ *
+ * 【为什么单独一个组件】行组件与"重命名中的行"都要画它；两处各写一遍类型判断，
+ * 迟早会漏掉一种（例如重命名一个 .wav 时画成文件夹）。这里只有"类型 → 图标"
+ * 一条规则；播放中的停止图标属于行的状态，由行组件自己在外面套一层。
+ */
+export function FileKindIcon({ entry }: { entry: FileEntry }) {
+    if (entry.isDir) return <FolderIcon className="text-yellow-500" />;
+    if (isVideoFile(entry)) return <VideoIcon className="text-purple-400" />;
+    if (isAudioFile(entry)) return <AudioIcon className="text-blue-400" />;
+    if (isMidiFile(entry)) return <MidiIcon className="text-qt-highlight" />;
+    if (isProjectFile(entry)) return <ProjectIcon className="text-amber-400" />;
+    return <FileIcon width="12" height="12" className="text-qt-text-muted opacity-60" />;
 }
