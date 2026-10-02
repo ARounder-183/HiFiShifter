@@ -15,10 +15,13 @@
 
 import { useEffect, useRef } from "react";
 import { readDevicePixelRatio } from "../../../utils/devicePixelLine";
+import { coalescedEventsOf } from "../../../utils/penInput";
+import { profileFor, scaledHitRadius } from "../../../utils/inputProfile";
 import { previewScaleCents, type VibratoPreviewSamples } from "./vibratoDialogLogic";
 import { finiteRuns, strokeFinitePolyline } from "./vibratoPreviewDraw";
 import {
     cursorForZone,
+    HANDLE_HIT_PX,
     hitTestPreviewZone,
     type PreviewHandleLayout,
     type PreviewZone,
@@ -121,7 +124,53 @@ export function VibratoPreviewCanvas({
     const geometryRef = useRef<VibratoPreviewGeometry>({ width: 0, height, centsPerPx: 1 });
     /** 手势起点（未按下时为 null）。 */
     const gestureRef = useRef<{ zone: PreviewZone; x: number; y: number } | null>(null);
+    /**
+     * 待提交的一帧位移（合并事件批处理用）。
+     *
+     * 【为什么需要】笔的采样率常见 133–266Hz（高端 500Hz+），远高于渲染帧率。
+     * 若每个 pointermove 都走一次 `onGestureMove` → `patch` → `setDraft` + 全画布
+     * 重绘，一秒内会做数百次 React 渲染 —— 而其中绝大多数中间帧在下一帧就被覆盖。
+     * 只保留"本帧最后一个采样点"，与钢琴卷帘线工具的既有做法同源
+     * （`usePianoRollInteractions` 的 `pendingLineEvent`）。
+     *
+     * 【为什么可以只留最后一个】预览手势是**基于起点的端点映射**（`applyPreviewGesture`
+     * 从按下快照重算），中间帧不是轨迹的一部分，丢掉不损失信息。
+     */
+    const pendingMoveRef = useRef<{
+        x: number;
+        y: number;
+        modifiers: VibratoPreviewModifiers;
+    } | null>(null);
+    /** 已排程的 rAF 句柄；`null` 表示当前没有待提交帧。 */
+    const rafRef = useRef<number | null>(null);
+    /** 最近一次设置的悬停光标，避免每个 move 都写一次 style（笔悬停会高频触发）。 */
+    const hoverCursorRef = useRef<string>("");
+    /**
+     * 最新的 `onGestureMove`。
+     *
+     * 【为什么用 ref 而不是直接闭包】rAF 回调在**下一帧**执行，那时本次渲染的闭包
+     * 可能已经过期；而调用方每次渲染都会重建内联箭头函数。经 ref 转发保证提交的
+     * 永远是当前那一份，与 `useFrameCommit` 转发 commit 的做法同源。
+     *
+     * 写入发生在 effect 里（不是渲染期）：React Compiler 的引用规则会拒绝
+     * "渲染期把读 ref 的闭包传给函数"这一类写法，`useFrameCommit.ts:44-49` 记录了
+     * 同一条约束。
+     */
+    const onGestureMoveRef = useRef(onGestureMove);
+    useEffect(() => {
+        onGestureMoveRef.current = onGestureMove;
+    });
     const interactive = Boolean(handles && (onGestureStart || onGestureMove));
+
+    // 卸载时丢弃挂起帧：此刻提交会打到已卸载的父组件上。
+    useEffect(
+        () => () => {
+            if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+            rafRef.current = null;
+            pendingMoveRef.current = null;
+        },
+        [],
+    );
 
     useEffect(() => {
         const canvas = canvasRef.current;
@@ -301,31 +350,95 @@ export function VibratoPreviewCanvas({
         return { x: event.clientX - rect.left, y: event.clientY - rect.top };
     };
 
+    /** 手柄的命中半径：按设备剖面缩放（手指 9mm 的接触面抓不住 9px 的方块）。 */
+    const hitRadiusFor = (event: { pointerType?: string | null }) =>
+        scaledHitRadius(HANDLE_HIT_PX, profileFor(event));
+
+    /**
+     * 把待提交的一帧位移落到手势回调。
+     *
+     * 【为什么单独抽出来】它同时被 rAF 与 `endGesture` 调用 —— 后者必须在松手时
+     * **同步**补一次，否则最后一帧（也是最终值所在的那一帧）会被取消掉，
+     * 表现为"松手后停在上一帧的位置"。
+     */
+    const flushPendingMove = () => {
+        if (rafRef.current !== null) {
+            cancelAnimationFrame(rafRef.current);
+            rafRef.current = null;
+        }
+        const pending = pendingMoveRef.current;
+        pendingMoveRef.current = null;
+        const gesture = gestureRef.current;
+        if (!pending || !gesture) return;
+        onGestureMoveRef.current?.(pending.x - gesture.x, pending.y - gesture.y, pending.modifiers);
+    };
+
     const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
         if (!interactive || !handles || event.button !== 0) return;
         const { x, y } = localPoint(event);
-        const zone = hitTestPreviewZone(x, geometryRef.current.width, handles);
+        const zone = hitTestPreviewZone(
+            x,
+            geometryRef.current.width,
+            handles,
+            hitRadiusFor(event.nativeEvent),
+        );
         gestureRef.current = { zone, x, y };
+        pendingMoveRef.current = null;
         event.currentTarget.setPointerCapture(event.pointerId);
         onGestureStart?.(zone, { ...geometryRef.current, modifiers: readModifiers(event) });
     };
 
     const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
         if (!interactive || !handles) return;
-        const { x, y } = localPoint(event);
         const gesture = gestureRef.current;
         if (!gesture) {
             // 未按下时只更新光标，给出"这里能拖"的提示。
-            event.currentTarget.style.cursor = cursorForZone(
-                hitTestPreviewZone(x, geometryRef.current.width, handles),
+            // 只在区域真的变了时才写 style：笔悬停会以 100Hz+ 上报 pointermove，
+            // 每次都写一遍是无谓的布局失效。
+            const next = cursorForZone(
+                hitTestPreviewZone(
+                    event.clientX - event.currentTarget.getBoundingClientRect().left,
+                    geometryRef.current.width,
+                    handles,
+                    hitRadiusFor(event.nativeEvent),
+                ),
             );
+            if (next !== hoverCursorRef.current) {
+                hoverCursorRef.current = next;
+                event.currentTarget.style.cursor = next;
+            }
             return;
         }
-        onGestureMove?.(x - gesture.x, y - gesture.y, readModifiers(event));
+        // 合并事件只留最后一个采样点（端点映射，中间帧无信息量），并推迟到
+        // 下一帧统一提交 —— 笔的高采样率不该变成同等数量的 React 渲染。
+        const samples = coalescedEventsOf(event.nativeEvent);
+        const latest = samples[samples.length - 1];
+        const rect = event.currentTarget.getBoundingClientRect();
+        pendingMoveRef.current = {
+            x: latest.clientX - rect.left,
+            y: latest.clientY - rect.top,
+            modifiers: readModifiers(event),
+        };
+        if (rafRef.current === null) {
+            rafRef.current = requestAnimationFrame(() => {
+                rafRef.current = null;
+                const pending = pendingMoveRef.current;
+                pendingMoveRef.current = null;
+                const active = gestureRef.current;
+                if (!pending || !active) return;
+                onGestureMoveRef.current?.(
+                    pending.x - active.x,
+                    pending.y - active.y,
+                    pending.modifiers,
+                );
+            });
+        }
     };
 
     const endGesture = (event: React.PointerEvent<HTMLDivElement>) => {
         if (!gestureRef.current) return;
+        // 先把挂起的那一帧补上，再清手势 —— 顺序反了会丢掉松手前的最后一个采样点。
+        flushPendingMove();
         gestureRef.current = null;
         if (event.currentTarget.hasPointerCapture(event.pointerId)) {
             event.currentTarget.releasePointerCapture(event.pointerId);
@@ -345,7 +458,10 @@ export function VibratoPreviewCanvas({
             onPointerUp={endGesture}
             onPointerCancel={endGesture}
             onPointerLeave={(event) => {
-                if (!gestureRef.current) event.currentTarget.style.cursor = "";
+                if (!gestureRef.current) {
+                    hoverCursorRef.current = "";
+                    event.currentTarget.style.cursor = "";
+                }
             }}
             data-testid={interactive ? "vibrato-preview-interactive" : undefined}
         >

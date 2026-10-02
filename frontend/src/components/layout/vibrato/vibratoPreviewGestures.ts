@@ -39,19 +39,30 @@ export const EDGE_ZONE_FRAC = 0.12;
  * 【两个手柄重叠时取更近的那个】渐入 / 渐出各自都能拖满整条线，因此它们完全可能
  * 落在同一处（例如渐入拉满、渐出归零，两个手柄都贴到右缘）。此时"渐入优先"会让
  * 渐出手柄永远抓不到 —— 按距离取近的，只有真正等距（同一个像素）时才退回渐入。
+ *
+ * 【命中半径为什么可传参】手指的接触面约 9mm，用鼠标的 9px 半径根本抓不住手柄。
+ * 调用方按设备剖面（`utils/inputProfile.ts`）传入缩放后的半径；缺省保持 `HANDLE_HIT_PX`，
+ * 于是既有调用与单测的行为逐字节不变。
+ *
+ * 【为什么外缘带不跟着缩放】`EDGE_ZONE_FRAC` 是**比例**（画布宽度的 12%），与像素
+ * 无关；只有手柄的绝对命中半径需要随设备放大。
+ *
+ * @param hitRadiusPx 手柄命中半径（CSS 像素）；缺省为 `HANDLE_HIT_PX`。
  */
 export function hitTestPreviewZone(
     x: number,
     width: number,
     layout: PreviewHandleLayout,
+    hitRadiusPx: number = HANDLE_HIT_PX,
 ): PreviewZone {
     // 画布尚未布局（宽度为 0）时没有可抓手柄，一律当主体 —— 也避免用 1px 的
     // 假宽度去比 9px 的命中半径（那会把整条轴都判成手柄）。
     if (!(width > 0)) return { kind: "body" };
+    const radius = Number.isFinite(hitRadiusPx) && hitRadiusPx > 0 ? hitRadiusPx : HANDLE_HIT_PX;
     const attackDist = Math.abs(x - layout.attackFrac * width);
     const releaseDist = Math.abs(x - layout.releaseFrac * width);
-    const attackHit = attackDist <= HANDLE_HIT_PX;
-    const releaseHit = releaseDist <= HANDLE_HIT_PX;
+    const attackHit = attackDist <= radius;
+    const releaseHit = releaseDist <= radius;
     if (attackHit || releaseHit) {
         return releaseHit && releaseDist < attackDist ? { kind: "release" } : { kind: "attack" };
     }

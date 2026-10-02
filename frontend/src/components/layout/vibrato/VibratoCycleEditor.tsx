@@ -24,6 +24,7 @@ import type { Keybinding } from "../../../features/keybindings/types";
 import { advanceFineAxisDrag, createFineAxisDragState } from "../../../utils/fineAxisDrag";
 import type { FineAxisDragState } from "../../../utils/fineAxisDrag";
 import { readDevicePixelRatio } from "../../../utils/devicePixelLine";
+import { coalescedEventsOf } from "../../../utils/penInput";
 import { AppButton, useRepeatPress } from "../../../ui";
 import {
     cycleEditorPoint,
@@ -375,14 +376,13 @@ export function VibratoCycleEditor({
         const last = lastPointRef.current;
         if (!last) return;
         // 用合并事件补齐快笔：一次 pointermove 里可能有多个采样点。
-        const native = event.nativeEvent;
-        const points =
-            typeof native.getCoalescedEvents === "function"
-                ? native.getCoalescedEvents()
-                : [native];
+        // 取采样点的入口统一走 `penInput.coalescedEventsOf`（它已处理"合成事件 /
+        // 旧 WebView 没有 getCoalescedEvents"的回退）—— 这里此前内联了一份同样的
+        // 判断，绕开了那个唯一出处，异常路径因此与别处不一致。
+        const points = coalescedEventsOf(event.nativeEvent);
         let next = table;
         let cursor = last;
-        for (const sample of points.length > 0 ? points : [native]) {
+        for (const sample of points) {
             const point = pointAt(sample);
             if (!point) continue;
             next = paintCycleSegment(next, cursor, point);
@@ -447,6 +447,10 @@ export function VibratoCycleEditor({
                     emphasis="soft"
                     disabled={disabled}
                     // 短按平滑一次，按住连续平滑（`useRepeatPress`）。
+                    // `hs-touch-none`：按住重复靠"指针始终不离开元素"成立，触摸上
+                    // 必须收回手势所有权，否则手指一漂就被浏览器当成滚动并
+                    // pointercancel，重复中断。见 `useRepeatPress.ts` 的说明。
+                    className="hs-touch-none"
                     {...smoothPress}
                 >
                     {smoothLabel}

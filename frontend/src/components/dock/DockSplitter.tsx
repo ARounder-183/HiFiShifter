@@ -112,7 +112,9 @@ export function DockSplitter({
 
     return (
         <div
-            className="hs-dock-splitter"
+            // `hs-touch-none`：分隔条按下即拖，触摸上必须收回手势所有权，
+            // 否则浏览器会把它解释成滚动并派发 pointercancel（拖到一半就断）。
+            className="hs-dock-splitter hs-touch-none"
             data-dir={dir}
             data-dragging={dragging ? "true" : "false"}
             role="separator"

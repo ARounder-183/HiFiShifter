@@ -133,7 +133,12 @@ export function AppSlider({
             ref={setWheelTarget}
             // 行高不变：盒高 ≤ 同一行里读数文字的 16px（紧凑表面里更是如此）。
             style={{ minHeight: DECORATION_BOX_PX[size] }}
-            className={cx("hs-slider-box inline-flex min-w-0 flex-1 items-center", className)}
+            // `hs-touch-none`：滑块自己实现拖拽，触摸设备上必须收回手势所有权，
+            // 否则浏览器会把拖动解释成页面滚动并派发 pointercancel（拖到一半就断）。
+            className={cx(
+                "hs-slider-box hs-touch-none inline-flex min-w-0 flex-1 items-center",
+                className,
+            )}
         >
             <Slider
                 value={[value]}

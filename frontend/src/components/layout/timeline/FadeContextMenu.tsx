@@ -18,6 +18,7 @@
 import React, { useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
+import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import { registerDragAbort } from "./gestureFocusGuard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
@@ -83,6 +84,24 @@ const CurvatureSlider: React.FC<{
     );
     const svgRef = useRef<SVGSVGElement | null>(null);
     const draggingRef = useRef(false);
+    /*
+     * 曲率滑块的滚轮步进必须走**原生非被动**监听。
+     *
+     * 【为什么不能写在 JSX 的 onWheel 里】React 17+ 在 root 上把 `wheel` 注册为
+     * passive，合成事件里的 `preventDefault()` 是空操作（浏览器打干预警告），
+     * 于是滚轮**同时**改了曲率、又滚了底下的面板。`useNonPassiveWheel` 的文件头
+     * 记录了这条；与 `PianoRollPanel` 的边缘平滑度滑块同因同解。
+     */
+    const attachCurvatureWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        // 原生事件本身就是事件对象，修饰键直接读它（不是 `e.nativeEvent`）。
+        const fine = isModifierActive(fineAdjustKb, e);
+        const step = fine ? CURVATURE_FINE_STEP : CURVATURE_WHEEL_STEP;
+        const direction = e.deltaY < 0 ? 1 : -1;
+        const next = Math.max(-1, Math.min(1, dir + direction * step));
+        onChange(Number(next.toFixed(2)));
+    });
     /** 失焦守卫注销函数（拖拽期间非空；blur/抬起/取消/卸载时清理）。 */
     const unregisterAbortRef = useRef<(() => void) | null>(null);
     // 卸载兜底：菜单被外部关闭时（如点击外部）不能残留失焦注册。
@@ -189,21 +208,13 @@ const CurvatureSlider: React.FC<{
                 />
             </svg>
             <input
+                ref={attachCurvatureWheel}
                 type="range"
                 className="qt-range"
                 min={-1}
                 max={1}
                 step={0.01}
                 value={dir}
-                onWheel={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    const fine = isModifierActive(fineAdjustKb, e.nativeEvent);
-                    const step = fine ? CURVATURE_FINE_STEP : CURVATURE_WHEEL_STEP;
-                    const direction = e.deltaY < 0 ? 1 : -1;
-                    const next = Math.max(-1, Math.min(1, dir + direction * step));
-                    onChange(Number(next.toFixed(2)));
-                }}
                 onChange={(e) => onChange(Number(e.currentTarget.value))}
                 style={{ flex: 1 }}
             />

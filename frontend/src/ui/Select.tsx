@@ -145,6 +145,11 @@ export function AppSelect({
             <Select.Trigger
                 ref={setWheelTarget}
                 aria-label={ariaLabel}
+                /*
+                 * 【刻意不设 `hs-touch-none`】下拉没有拖拽手势（只有点按与滚轮），
+                 * 收回手势所有权只会让"从触发器上起手滑动"不再能滚动面板，
+                 * 没有任何收益。该类的适用范围是**自己实现拖拽**的表面。
+                 */
                 className={cx(fullWidth && "w-full", className)}
                 style={minWidth === undefined ? undefined : { minWidth }}
             />

@@ -646,12 +646,29 @@ test("预览画布拖拽：中途按下 / 松开精细调整都不闪回", async
             document.querySelector<HTMLInputElement>('input[aria-label="Depth"]')?.value ?? "NaN",
         );
 
+    /**
+     * 等一帧。
+     *
+     * 【为什么必须等】预览画布把一帧内的多个 pointermove **合并**成一次提交
+     * （笔 133–266Hz 的采样率不该变成同等数量的 React 渲染，与钢琴卷帘线工具
+     * 的 `pendingLineEvent` 同源）。因此派发事件后要等 rAF 跑完才观察得到结果。
+     */
+    const nextFrame = () =>
+        new Promise<void>((resolve) => {
+            if (typeof requestAnimationFrame === "function") {
+                requestAnimationFrame(() => resolve());
+            } else {
+                setTimeout(resolve, 0);
+            }
+        });
+
     const dragTo = async (clientY: number, ctrlKey: boolean) => {
         // 手势回调挂在画布容器上（React 合成事件），因此要派发到容器而不是 window。
         await act(async () => {
             container!.dispatchEvent(
                 new PointerEvent("pointermove", { bubbles: true, clientY, ctrlKey }),
             );
+            await nextFrame();
         });
         return depthValue();
     };

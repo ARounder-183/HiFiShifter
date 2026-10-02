@@ -42,10 +42,12 @@ import {
     shiftValueForDrag,
 } from "./paramRanges";
 import {
+    CURVE_HIT_RADIUS_PX,
     curvePointAtPointer,
     hitTestSelectionBody,
     hitTestSelectionEdge,
     isPointerNearCurve,
+    SELECTION_EDGE_HIT_PX,
     SELECTION_EDGE_MIN_WIDTH_PX,
 } from "./kernel/gestureHitTest";
 import { edgeAutoScrollDeltaPx, selectionIndexRange } from "./kernel/dragArithmetic";
@@ -82,6 +84,7 @@ import {
     PEN_ERASER_BUTTONS_MASK,
     shouldRejectConcurrentPointer,
 } from "../../../utils/penInput";
+import { profileFor, scaledHitRadius } from "../../../utils/inputProfile";
 import {
     getParamEditorWheelAction,
     getVibratoDragWheelTarget,
@@ -2404,7 +2407,7 @@ export function usePianoRollInteractions(args: {
     );
 
     const getCurveValueNearPointer = useCallback(
-        (clientX: number, clientY: number): number | null => {
+        (clientX: number, clientY: number, pointerType?: string | null): number | null => {
             const point = getCurvePointAtPointer(clientX);
             if (point == null) return null;
 
@@ -2413,9 +2416,11 @@ export function usePianoRollInteractions(args: {
             const rect = canvas.getBoundingClientRect();
             // 邻域判定抽到 `kernel/gestureHitTest`（纯函数，有单测）：只比纵向距离，
             // 曲线的位置由 `getCurvePointAtPointer` 一次算定。
+            // 命中半径按设备剖面缩放：手指接触面约 9mm，10px 的半径抓不住曲线。
             return isPointerNearCurve({
                 pointerY: clientY - rect.top,
                 curveY: point.y,
+                hitRadiusPx: scaledHitRadius(CURVE_HIT_RADIUS_PX, profileFor({ pointerType })),
             })
                 ? point.value
                 : null;
@@ -2470,7 +2475,7 @@ export function usePianoRollInteractions(args: {
     ]);
 
     const isPointerNearDraggableSelection = useCallback(
-        (clientX: number, clientY: number): boolean => {
+        (clientX: number, clientY: number, pointerType?: string | null): boolean => {
             if (toolMode !== "select") return false;
             const sel = selectionRef.current;
             const canvas = canvasRef.current;
@@ -2486,7 +2491,7 @@ export function usePianoRollInteractions(args: {
             // 同一套坐标口径，不再有两份换算。
             //
             // 多选区：落在**任一段**内且靠近曲线即可拖动（拖动会带起所有段）。
-            const nearCurve = getCurveValueNearPointer(clientX, clientY) != null;
+            const nearCurve = getCurveValueNearPointer(clientX, clientY, pointerType) != null;
             if (!nearCurve) return false;
             const rect = canvas.getBoundingClientRect();
             const localXPx = clientX - rect.left;
@@ -2533,14 +2538,24 @@ export function usePianoRollInteractions(args: {
             // `hitTestSelectionEdge`（阈值 `SELECTION_EDGE_HIT_PX`，与原内联的
             // 8px 一致），在所有段中取**最近**的边缘——拉伸只作用于被抓住的
             // 那一段，其余段不动。同段左缘优先、跨段取先出现者，与原实现一致。
+            // 带宽按设备剖面缩放：手指够不到 8px 的边缘。
             const localXPx = e.clientX - rect.left;
+            const edgeHitWidth = scaledHitRadius(
+                SELECTION_EDGE_HIT_PX,
+                profileFor(e.nativeEvent),
+            );
             let best: { rangeIndex: number; edge: "left" | "right" } | null = null;
             let bestDistance = Number.POSITIVE_INFINITY;
             for (let i = 0; i < sel.length; i += 1) {
                 // 两条边界的像素位置取自**切点**（与绘制同一口径）。
                 const leftXPx = frameToViewportPx(frameRangeStartCut(sel[i]));
                 const rightXPx = frameToViewportPx(frameRangeEndCut(sel[i]));
-                const edge = hitTestSelectionEdge({ leftXPx, rightXPx, localXPx });
+                const edge = hitTestSelectionEdge({
+                    leftXPx,
+                    rightXPx,
+                    localXPx,
+                    hitWidthPx: edgeHitWidth,
+                });
                 if (edge === null) continue;
                 const edgeXPx =
                     edge === "left" ? Math.min(leftXPx, rightXPx) : Math.max(leftXPx, rightXPx);
@@ -2597,7 +2612,11 @@ export function usePianoRollInteractions(args: {
                         value: dragPreviewValue,
                     });
                 } else {
-                    const nearCurveValue = getCurveValueNearPointer(e.clientX, e.clientY);
+                    const nearCurveValue = getCurveValueNearPointer(
+                        e.clientX,
+                        e.clientY,
+                        e.nativeEvent.pointerType,
+                    );
                     // 记录悬停激活状态：数据刷新（refreshParamValuePreview）
                     // 只续显已激活的浮窗。
                     hoverPreviewNearCurveRef.current = nearCurveValue != null;
@@ -2626,7 +2645,7 @@ export function usePianoRollInteractions(args: {
             //   3. 多选修饰键提示框选 / 切换段（同样让位给参数线，否则按住修饰键就
             //      再也拖不动选区内的曲线）；
             //   4. 无修饰键的边缘 → 调整边界。
-            if (isPointerNearDraggableSelection(e.clientX, e.clientY)) {
+            if (isPointerNearDraggableSelection(e.clientX, e.clientY, e.nativeEvent.pointerType)) {
                 setCanvasCursor("grab");
                 return;
             }
@@ -3147,7 +3166,11 @@ export function usePianoRollInteractions(args: {
                 //
                 // 下面每一处选区交互都显式让位（`!onSelectedCurve` / 各自的修饰键
                 // 取反），因为这里的分支顺序本身就编码了优先级。
-                const onSelectedCurve = isPointerNearDraggableSelection(e.clientX, e.clientY);
+                const onSelectedCurve = isPointerNearDraggableSelection(
+                    e.clientX,
+                    e.clientY,
+                    e.nativeEvent.pointerType,
+                );
 
                 // ── 多选区追加：⌘/Ctrl + 左键，**或右键落在未选中区域** ─────────
                 // 拖动 = 在已有选区上**追加**一段（并集；重叠/相接自动合并）；
@@ -3945,6 +3968,10 @@ export function usePianoRollInteractions(args: {
                                     ? e.clientY - canvas.getBoundingClientRect().top
                                     : 0,
                                 curveY: curvePoint?.y ?? Number.NaN,
+                                hitRadiusPx: scaledHitRadius(
+                                    CURVE_HIT_RADIUS_PX,
+                                    profileFor(e.nativeEvent),
+                                ),
                             });
 
                             if (near) {

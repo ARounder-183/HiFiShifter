@@ -93,7 +93,9 @@ export function DockGutter({
 
     return (
         <div
-            className="hs-dock-gutter"
+            // `hs-touch-none`：与 `DockSplitter` 同因 —— 按下即拖，触摸上要收回
+            // 手势所有权，否则会被浏览器当成滚动并中断拖拽。
+            className="hs-dock-gutter hs-touch-none"
             data-dir={dir}
             data-dragging={dragging ? "true" : "false"}
             role="separator"
