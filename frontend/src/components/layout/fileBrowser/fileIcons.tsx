@@ -60,6 +60,16 @@ export function AudioIcon({ className }: { className?: string }) {
     );
 }
 
+/**
+ * 「仅显示媒体文件」开关的图标。
+ *
+ * 与 `AudioIcon` 同一图形，单独命名是为了让**两个**调用点（文件浏览器与快速搜索）
+ * 指向同一个来源，而不是各自内联一份 SVG —— 之前快速搜索的开关就是自己内联的。
+ */
+export function MediaIcon() {
+    return <AudioIcon />;
+}
+
 /** MIDI 文件图标（双音符）。 */
 export function MidiIcon({ className }: { className?: string }) {
     return (

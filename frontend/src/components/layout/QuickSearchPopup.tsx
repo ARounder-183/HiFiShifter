@@ -1,14 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
+import { ChevronDownIcon, ChevronUpIcon, MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
-import {
-    selectMergedKeybindings,
-    matchesKeybinding,
-    formatKeybinding,
-} from "../../features/keybindings";
+import { selectMergedKeybindings, matchesKeybinding } from "../../features/keybindings";
 import type { Keybinding } from "../../features/keybindings";
 import {
     searchFilesRecursive,
@@ -18,8 +14,11 @@ import { searchOptionsPayload } from "../../features/search/searchSettings";
 import { SearchTranslitToggle } from "./search/SearchTranslitToggle";
 import { matchReasonOf } from "./search/matchReason";
 import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
-import { isAudioFile } from "../../features/fileBrowser/fileKinds";
+import { isAudioFile, isMediaFile, isMidiFile } from "../../features/fileBrowser/fileKinds";
 import { compareFileNames } from "../../features/fileBrowser/fileNameCompare";
+import { DEFAULT_SORT_DESCENDING } from "../../features/fileBrowser/fileBrowserViewOptions";
+import { emitImportMidiRequest } from "../../features/session/projectOpenEvents";
+import { FileKindIcon } from "./fileBrowser/fileIcons";
 import { importAudioAtPosition } from "../../features/session/thunks/importThunks";
 import {
     persistUiSettings,
@@ -68,6 +67,8 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
     const [loading, setLoading] = useState(false);
     const [regexEnabled, setRegexEnabled] = useState(false);
     const [sortMode, setSortMode] = useState<"name" | "date" | "size">("name");
+    // 初值与文件浏览器一致：名称升序（切换依据时按该依据的自然方向重置）。
+    const [sortDescending, setSortDescending] = useState(DEFAULT_SORT_DESCENDING.name);
     const [position, setPosition] = useState<{ x: number; y: number }>(() =>
         getQuickSearchInitialPosition({
             viewportWidth:
@@ -169,12 +170,15 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         }),
                     );
                     if (searchFilesRecursive.fulfilled.match(action)) {
-                        let audioResults = (action.payload as FileEntry[]).filter(isAudioFile);
+                        // 与文件浏览器开启「仅显示媒体文件」时**同一判据**
+                        // （`isMediaFile` = 音频/视频 + MIDI）：两个界面对同一份目录
+                        // 必须给出同一批候选。
+                        let mediaResults = (action.payload as FileEntry[]).filter(isMediaFile);
                         // 正则模式下进行客户端过滤
                         if (regexEnabled) {
                             try {
                                 const re = new RegExp(q.trim(), "i");
-                                audioResults = audioResults.filter((e) => {
+                                mediaResults = mediaResults.filter((e) => {
                                     const name = e.name || "";
                                     const dot = name.lastIndexOf(".");
                                     const stem = dot > 0 ? name.substring(0, dot) : name;
@@ -182,10 +186,10 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                                 });
                             } catch {
                                 // 正则无效，返回空结果
-                                audioResults = [];
+                                mediaResults = [];
                             }
                         }
-                        setResults(audioResults);
+                        setResults(mediaResults);
                         setSelectedIndex(0);
                     }
                 } catch {
@@ -227,36 +231,55 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
     // 排序后的结果
     const sortedResults = useMemo(() => {
         const sorted = [...results];
+        const direction = sortDescending ? -1 : 1;
         switch (sortMode) {
             case "name":
                 // 与文件浏览器同一个比较器：裸 `localeCompare` 既不认数字（take10
                 // 会排在 take2 前面），也把汉字排在拉丁之前 —— 同一个目录在两个
                 // 界面里给出两种顺序，是没理由的。
-                sorted.sort((a, b) => compareFileNames(a.name, b.name));
+                sorted.sort((a, b) => direction * compareFileNames(a.name, b.name));
                 break;
             case "date":
-                sorted.sort((a, b) => (b.modifiedTime ?? 0) - (a.modifiedTime ?? 0));
+                sorted.sort((a, b) => direction * ((a.modifiedTime ?? 0) - (b.modifiedTime ?? 0)));
                 break;
             case "size":
-                sorted.sort((a, b) => (b.size ?? 0) - (a.size ?? 0));
+                sorted.sort((a, b) => direction * ((a.size ?? 0) - (b.size ?? 0)));
                 break;
         }
         return sorted;
-    }, [results, sortMode]);
+    }, [results, sortMode, sortDescending]);
 
-    // 预览播放（始终从头重新播放）
+    /**
+     * 预览播放（始终从头重新播放）。
+     *
+     * 【为什么只对音频生效】试听引擎解码的是音频流；候选列表现在也包含 MIDI，
+     * 而 MIDI 没有可解码的音频 —— 送进去只会失败并弹一条前端错误日志。
+     * 不试听、不报错，静默跳过是对"这条不能试听"最不打扰的表达。
+     */
     const handlePreview = useCallback(
-        (filePath: string) => {
-            playPreview(filePath);
+        (entry: FileEntry) => {
+            if (!isAudioFile(entry)) return;
+            playPreview(entry.path);
         },
         [playPreview],
     );
 
-    // 确认放置音频
+    // 确认放置：音频直接放到时间轴；MIDI 交给导入对话框（它需要选轨与 BPM 处理，
+    // 不能按音频那样直接放）。候选列表现在与文件浏览器一致地包含 MIDI，
+    // 因此这条分支是必需的 —— 否则选中一条 MIDI 会走音频导入并失败。
     const handleConfirm = useCallback(
         (entry: FileEntry) => {
-            if (!selectedTrackId) return;
             stopPreview();
+            if (isMidiFile(entry)) {
+                emitImportMidiRequest({
+                    path: entry.path,
+                    startSec: playheadSec ?? 0,
+                    trackId: selectedTrackId,
+                });
+                onClose();
+                return;
+            }
+            if (!selectedTrackId) return;
             void dispatch(
                 importAudioAtPosition({
                     audioPath: entry.path,
@@ -321,7 +344,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                 if (sortedResults.length > 0) {
                     e.preventDefault();
                     const entry = sortedResults[selectedIndex];
-                    if (entry) handlePreview(entry.path);
+                    if (entry) handlePreview(entry);
                 }
             } else if (matchKey(e, keybindings["quickSearch.confirm"])) {
                 e.preventDefault();
@@ -453,7 +476,11 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         density="compact"
                         value={sortMode}
                         onValueChange={(v) => {
-                            setSortMode(v as "name" | "date" | "size");
+                            const next = v as "name" | "date" | "size";
+                            setSortMode(next);
+                            // 与文件浏览器同一规则：切换排序依据时采用该依据的自然方向
+                            // （名称升序、日期/大小降序），而不是沿用上一次的方向。
+                            setSortDescending(DEFAULT_SORT_DESCENDING[next]);
                             focusSearchInput();
                         }}
                         options={[
@@ -461,6 +488,17 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                             { value: "date", label: t("fb_sort_date") },
                             { value: "size", label: t("fb_sort_size") },
                         ]}
+                    />
+                    {/* 升降序：箭头与提示都表达**当前**方向 */}
+                    <AppIconButton
+                        active={sortDescending}
+                        tooltip={sortDescending ? t("fb_sort_descending") : t("fb_sort_ascending")}
+                        onClick={() => {
+                            setSortDescending((v) => !v);
+                            focusSearchInput();
+                        }}
+                        style={{ width: 20, height: 20, flexShrink: 0 }}
+                        icon={sortDescending ? <ChevronDownIcon /> : <ChevronUpIcon />}
                     />
                     {loading && <AppBusy className="shrink-0" />}
                 </div>
@@ -503,21 +541,11 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                                     onClick={() => handleConfirm(entry)}
                                     onMouseEnter={() => setSelectedIndex(index)}
                                 >
-                                    {/* 音频图标 */}
-                                    <svg
-                                        width="12"
-                                        height="12"
-                                        viewBox="0 0 15 15"
-                                        fill="none"
-                                        className="shrink-0"
-                                    >
-                                        <path
-                                            d="M7.5 0.75L7.5 14.25M10.5 3L10.5 12M4.5 3L4.5 12M13.5 5.5L13.5 9.5M1.5 5.5L1.5 9.5"
-                                            stroke="currentColor"
-                                            strokeWidth="1.2"
-                                            strokeLinecap="round"
-                                        />
-                                    </svg>
+                                    {/* 图标按类型区分（音频 / 视频 / MIDI）——
+                                        与文件浏览器同一份图标来源，不在这里再内联一份 */}
+                                    <span className="shrink-0 flex items-center justify-center">
+                                        <FileKindIcon entry={entry} />
+                                    </span>
                                     {/* 文件名 + 命中原因 */}
                                     <span
                                         className="truncate flex-1 flex items-baseline gap-1"
@@ -545,8 +573,11 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                     )}
                 </div>
 
-                {/* 底部提示栏 */}
-                <div className="px-2 py-1 border-t border-qt-border flex items-center gap-2 justify-between">
+                {/* 底部：放置时自动规格化。
+                    快捷键提示此前放在这里，已移除 —— 它是常驻的噪音：用户已经打开
+                    了这个弹窗，方向键/回车的行为在第一次使用时就会建立，不需要每次
+                    都读一遍；而且它把底栏撑得很宽，把开关挤到左边。 */}
+                <div className="px-2 py-1 border-t border-qt-border flex items-center gap-2">
                     <AppForm booleanRow="leading">
                         <AppSwitchRow
                             control="checkbox"
@@ -559,25 +590,6 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                             }}
                         />
                     </AppForm>
-                    {sortedResults.length > 0 && (
-                        <span
-                            className="hs-type-caption"
-                            style={{ fontSize: "var(--qt-fs-micro)" }}
-                        >
-                            {formatKeybinding(keybindings["quickSearch.navigate.up"])}/
-                            {formatKeybinding(keybindings["quickSearch.navigate.down"])}{" "}
-                            {t("qs_hint_nav")}
-                            {"  "}
-                            {formatKeybinding(keybindings["quickSearch.preview"])}{" "}
-                            {t("qs_hint_preview")}
-                            {"  "}
-                            {formatKeybinding(keybindings["quickSearch.confirm"])}{" "}
-                            {t("qs_hint_place")}
-                            {"  "}
-                            {formatKeybinding(keybindings["quickSearch.close"])}{" "}
-                            {t("qs_hint_close")}
-                        </span>
-                    )}
                 </div>
             </div>
         </>

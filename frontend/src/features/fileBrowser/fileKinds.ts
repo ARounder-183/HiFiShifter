@@ -159,6 +159,17 @@ export function isDraggableFile(entry: FileEntry): boolean {
 }
 
 /**
+ * 媒体文件：音频/视频 + MIDI。
+ *
+ * 【为什么要单独一个判据】文件浏览器的「仅显示媒体文件」与快速搜索的候选列表
+ * 必须是**同一件事** —— 两边各写一遍 `isAudioFile || isMidiFile`，迟早会分叉成
+ * "文件浏览器里看得到、快速搜索里搜不到"。
+ */
+export function isMediaFile(entry: FileEntry): boolean {
+    return isAudioFile(entry) || isMidiFile(entry);
+}
+
+/**
  * 可"插入到时间轴"的文件：音频/视频走 `importAudioAtPosition`，
  * MIDI 走导入对话框，工程文件走"打开/导入工程"。
  */

@@ -28,6 +28,7 @@ import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
 import { searchOptionsPayload } from "../../features/search/searchSettings";
 import {
     isAudioFile,
+    isMediaFile,
     isMidiFile,
     isProjectFile,
     isReaperFile,
@@ -78,7 +79,7 @@ import { copyTextToClipboard } from "../../utils/copyText";
 import { DockInlineRename } from "../dock/DockInlineRename";
 import { FileEntryRow } from "./fileBrowser/FileEntryRow";
 import { formatModified, formatSize } from "./fileBrowser/formatFile";
-import { FileKindIcon, FolderIcon } from "./fileBrowser/fileIcons";
+import { FileKindIcon, FolderIcon, MediaIcon } from "./fileBrowser/fileIcons";
 import { FilePropertiesDialog } from "./fileBrowser/FilePropertiesDialog";
 import { FileBrowserViewOptionsDialog } from "./fileBrowser/FileBrowserViewOptionsDialog";
 import {
@@ -278,7 +279,8 @@ export const FileBrowserPanel: React.FC = () => {
     const mediaFilteredEntries = useMemo(() => {
         if (!view.mediaOnly) return regexFilteredEntries;
         // “仅显示媒体文件”：音频/视频 + MIDI（MIDI 可导入时间轴/参数编辑器）。
-        return regexFilteredEntries.filter((e) => e.isDir || isAudioFile(e) || isMidiFile(e));
+        // 判据与快速搜索共用 `isMediaFile`，两处不会分叉。
+        return regexFilteredEntries.filter((e) => e.isDir || isMediaFile(e));
     }, [regexFilteredEntries, view.mediaOnly]);
 
     // 排序
@@ -1433,51 +1435,53 @@ export const FileBrowserPanel: React.FC = () => {
             />
 
             {/* 搜索栏 */}
+            {/* 第一排：搜索框 + 正则 + 匹配方式 —— 三个控件都在回答"怎么搜"。
+                正则与匹配方式是**搜索的修饰**，放在搜索框同一排才读得出来；
+                此前它们和排序挤在第二排，与排序（"怎么排"）混在一起。 */}
             <div className="px-2 py-1 border-b border-qt-border shrink-0">
-                <TextField.Root
-                    ref={searchInputRef}
-                    size="1"
-                    placeholder={tf("fb_search_placeholder")}
-                    value={fb.searchQuery}
-                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
-                        const q = e.target.value;
-                        dispatch(setSearchQuery(q));
-                        if (debounceRef.current) clearTimeout(debounceRef.current);
-                        if (q.trim() && fb.currentPath && !isComputerLevel) {
-                            const backendQuery = fb.regexEnabled ? "" : q.trim();
-                            debounceRef.current = setTimeout(() => {
-                                void dispatch(
-                                    searchFilesRecursive({
-                                        dirPath: fb.currentPath,
-                                        query: backendQuery,
-                                        options: searchOptions,
-                                    }),
-                                );
-                            }, 300);
-                        }
-                    }}
-                    style={{ backgroundColor: "var(--qt-base)" }}
-                >
-                    <TextField.Slot>
-                        <MagnifyingGlassIcon height="12" width="12" />
-                    </TextField.Slot>
-                    {fb.searchQuery && (
+                <Flex align="center" gap="1">
+                    <TextField.Root
+                        ref={searchInputRef}
+                        size="1"
+                        className="flex-1"
+                        placeholder={tf("fb_search_placeholder")}
+                        value={fb.searchQuery}
+                        onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                            const q = e.target.value;
+                            dispatch(setSearchQuery(q));
+                            if (debounceRef.current) clearTimeout(debounceRef.current);
+                            if (q.trim() && fb.currentPath && !isComputerLevel) {
+                                const backendQuery = fb.regexEnabled ? "" : q.trim();
+                                debounceRef.current = setTimeout(() => {
+                                    void dispatch(
+                                        searchFilesRecursive({
+                                            dirPath: fb.currentPath,
+                                            query: backendQuery,
+                                            options: searchOptions,
+                                        }),
+                                    );
+                                }, 300);
+                            }
+                        }}
+                        style={{ backgroundColor: "var(--qt-base)" }}
+                    >
                         <TextField.Slot>
-                            <IconButton
-                                size="1"
-                                variant="ghost"
-                                color="gray"
-                                onClick={() => dispatch(setSearchQuery(""))}
-                                style={{ width: 16, height: 16 }}
-                            >
-                                <Cross2Icon width="10" height="10" />
-                            </IconButton>
+                            <MagnifyingGlassIcon height="12" width="12" />
                         </TextField.Slot>
-                    )}
-                </TextField.Root>
-
-                {/* 正则切换 + 转写 + 媒体过滤 + 排序 */}
-                <Flex align="center" gap="1" mt="1">
+                        {fb.searchQuery && (
+                            <TextField.Slot>
+                                <IconButton
+                                    size="1"
+                                    variant="ghost"
+                                    color="gray"
+                                    onClick={() => dispatch(setSearchQuery(""))}
+                                    style={{ width: 16, height: 16 }}
+                                >
+                                    <Cross2Icon width="10" height="10" />
+                                </IconButton>
+                            </TextField.Slot>
+                        )}
+                    </TextField.Root>
                     <AppIconButton
                         active={fb.regexEnabled}
                         tooltip={tf("fb_regex")}
@@ -1506,6 +1510,7 @@ export const FileBrowserPanel: React.FC = () => {
                             fontSize: "var(--qt-fs-micro)",
                             width: 22,
                             height: 22,
+                            flexShrink: 0,
                         }}
                         icon=".*"
                     />
@@ -1518,28 +1523,10 @@ export const FileBrowserPanel: React.FC = () => {
                         regexActive={fb.regexEnabled}
                         onOpenSettings={() => dispatch(setSearchSettingsDialogOpen(true))}
                     />
-                    <AppIconButton
-                        active={view.mediaOnly}
-                        tooltip={tf("fb_audio_only")}
-                        onClick={() => {
-                            dispatch(setFileBrowserView({ mediaOnly: !view.mediaOnly }));
-                            void dispatch(persistUiSettings());
-                        }}
-                        style={{
-                            width: 22,
-                            height: 22,
-                        }}
-                        icon={
-                            <svg width="14" height="14" viewBox="0 0 15 15" fill="none">
-                                <path
-                                    d="M7.5 0.75L7.5 14.25M10.5 3L10.5 12M4.5 3L4.5 12M13.5 5.5L13.5 9.5M1.5 5.5L1.5 9.5"
-                                    stroke="currentColor"
-                                    strokeWidth="1.2"
-                                    strokeLinecap="round"
-                                />
-                            </svg>
-                        }
-                    />
+                </Flex>
+
+                {/* 第二排：排序方式 + 升降序 + 仅显示媒体文件 —— 都在回答"列什么、怎么排"。 */}
+                <Flex align="center" gap="1" mt="1">
                     <AppSelect
                         fullWidth={false}
                         className="flex-1"
@@ -1558,15 +1545,31 @@ export const FileBrowserPanel: React.FC = () => {
                             { value: "size", label: tf("fb_sort_size") },
                         ]}
                     />
+                    {/* 方向按钮：箭头与提示都表达**当前**方向，不必点开才知道。 */}
                     <AppIconButton
                         active={view.sortDescending}
-                        tooltip={t("fb_sort_descending")}
+                        tooltip={
+                            view.sortDescending ? t("fb_sort_descending") : t("fb_sort_ascending")
+                        }
                         onClick={() => {
                             dispatch(setFileBrowserView({ sortDescending: !view.sortDescending }));
                             void dispatch(persistUiSettings());
                         }}
                         style={{ width: 22, height: 22 }}
-                        icon={<ChevronDownIcon />}
+                        icon={view.sortDescending ? <ChevronDownIcon /> : <ChevronUpIcon />}
+                    />
+                    <AppIconButton
+                        active={view.mediaOnly}
+                        tooltip={tf("fb_audio_only")}
+                        onClick={() => {
+                            dispatch(setFileBrowserView({ mediaOnly: !view.mediaOnly }));
+                            void dispatch(persistUiSettings());
+                        }}
+                        style={{
+                            width: 22,
+                            height: 22,
+                        }}
+                        icon={<MediaIcon />}
                     />
                 </Flex>
 
