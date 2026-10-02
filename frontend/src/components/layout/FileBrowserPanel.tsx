@@ -1448,8 +1448,9 @@ export const FileBrowserPanel: React.FC = () => {
                   第一排 = 搜索框 + 正则 + 匹配方式（"怎么搜"）——搜索框是本面板的
                     主要动作，因此它是这一屏里**最大**的控件（Radix size 2 = 32px），
                     两侧的正则 / 匹配方式按钮是它的修饰，统一 24px 退居次位；
-                  第二排 = 排序方式 + 升降序 + 仅显示媒体文件（"列什么、怎么排"），
-                    整排 24px。
+                  第二排 = 仅显示媒体文件 + 排序方式 + 升降序（"列什么、怎么排"），
+                    整排 24px。过滤在最左：先筛出哪些行、再决定怎么排，与用户的心智
+                    顺序一致。
                 此前排序下拉比搜索框还大：`AppSelect` 的密度是从**容器**继承的，而
                 这两排不在 `PanelToolbar` 里（只有它下发 compact），于是下拉落到默认
                 的 form 密度、渲染成 32px，搜索框却按 `size="1"` 是 24px —— 次要控件
@@ -1542,8 +1543,24 @@ export const FileBrowserPanel: React.FC = () => {
                     />
                 </Flex>
 
-                {/* 第二排：排序方式 + 升降序 + 仅显示媒体文件 —— 都在回答"列什么、怎么排"。 */}
+                {/* 第二排：仅显示媒体文件 + 排序方式 + 升降序 —— 都在回答"列什么、怎么排"。
+                    过滤开关放在最左：它决定"有哪些行"，排序决定"这些行怎么排" ——
+                    先筛后排，顺序与用户的心智顺序一致。 */}
                 <Flex align="center" gap="1" mt="1">
+                    <AppIconButton
+                        active={view.mediaOnly}
+                        tooltip={tf("fb_audio_only")}
+                        onClick={() => {
+                            dispatch(setFileBrowserView({ mediaOnly: !view.mediaOnly }));
+                            void dispatch(persistUiSettings());
+                        }}
+                        style={{
+                            width: "var(--qt-ctl-md)",
+                            height: "var(--qt-ctl-md)",
+                            flexShrink: 0,
+                        }}
+                        icon={<MediaIcon />}
+                    />
                     <AppSelect
                         fullWidth={false}
                         className="flex-1"
@@ -1575,21 +1592,12 @@ export const FileBrowserPanel: React.FC = () => {
                             dispatch(setFileBrowserView({ sortDescending: !view.sortDescending }));
                             void dispatch(persistUiSettings());
                         }}
-                        style={{ width: "var(--qt-ctl-md)", height: "var(--qt-ctl-md)" }}
-                        icon={view.sortDescending ? <ChevronDownIcon /> : <ChevronUpIcon />}
-                    />
-                    <AppIconButton
-                        active={view.mediaOnly}
-                        tooltip={tf("fb_audio_only")}
-                        onClick={() => {
-                            dispatch(setFileBrowserView({ mediaOnly: !view.mediaOnly }));
-                            void dispatch(persistUiSettings());
-                        }}
                         style={{
                             width: "var(--qt-ctl-md)",
                             height: "var(--qt-ctl-md)",
+                            flexShrink: 0,
                         }}
-                        icon={<MediaIcon />}
+                        icon={view.sortDescending ? <ChevronDownIcon /> : <ChevronUpIcon />}
                     />
                 </Flex>
 
