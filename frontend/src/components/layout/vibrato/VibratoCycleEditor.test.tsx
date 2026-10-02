@@ -61,7 +61,12 @@ afterEach(async () => {
 });
 
 async function mountEditor(
-    overrides: { table?: number[]; disabled?: boolean; fineAdjustKb?: Keybinding } = {},
+    overrides: {
+        table?: number[];
+        disabled?: boolean;
+        fineAdjustKb?: Keybinding;
+        contactReadout?: "off" | "touchOnly" | "always";
+    } = {},
 ) {
     const onChange = vi.fn();
     await act(async () => {
@@ -72,6 +77,7 @@ async function mountEditor(
                         table={overrides.table ?? SINE}
                         disabled={overrides.disabled}
                         fineAdjustKb={overrides.fineAdjustKb}
+                        contactReadout={overrides.contactReadout}
                         onChange={onChange}
                         smoothLabel="平滑"
                         resetLabel="复位"
@@ -345,4 +351,66 @@ test("方向键不会冒泡出去（避免同时触发全局的播放头 seek）
         document.removeEventListener("keydown", spy);
     }
     expect(seen).toEqual([]);
+});
+
+/*
+ * 接触读数。
+ *
+ * 【为什么必须有】手指落下时**恰好盖住**它正在改的那一格，用户看不见自己在画
+ * 什么。读数把"第几格、写成多少"挪到不会被手挡住的地方。默认只对触摸开启：
+ * 数位笔笔尖细、还有悬停预览，不需要它。
+ */
+function readoutNode(): HTMLElement | null {
+    return host.querySelector('[data-testid="vibrato-cycle-readout"]');
+}
+
+test("触摸落笔时显示接触读数（格号 + 写入值）", async () => {
+    const { canvas } = await mountEditor({ contactReadout: "touchOnly" });
+    await dispatch(
+        canvas,
+        pointerEvent("pointerdown", {
+            button: 0,
+            clientX: 25,
+            clientY: 60,
+            pointerType: "touch",
+        }),
+    );
+    const node = readoutNode();
+    expect(node).not.toBeNull();
+    // 内容是"格号/总格数 · 值"，不含需要翻译的词。
+    expect(node!.textContent).toMatch(/^\d+\/64 · /);
+});
+
+test("鼠标落笔不显示接触读数（默认只对触摸开）", async () => {
+    const { canvas } = await mountEditor({ contactReadout: "touchOnly" });
+    await dispatch(
+        canvas,
+        pointerEvent("pointerdown", { button: 0, clientX: 25, clientY: 60, pointerType: "mouse" }),
+    );
+    expect(readoutNode()).toBeNull();
+});
+
+test("读数在松手后消失", async () => {
+    const { canvas } = await mountEditor({ contactReadout: "always" });
+    await dispatch(
+        canvas,
+        pointerEvent("pointerdown", { button: 0, clientX: 25, clientY: 60, pointerType: "pen" }),
+    );
+    expect(readoutNode()).not.toBeNull();
+    await dispatch(canvas, pointerEvent("pointerup", { button: 0, pointerType: "pen" }));
+    expect(readoutNode()).toBeNull();
+});
+
+test("关闭时任何设备都不显示读数", async () => {
+    const { canvas } = await mountEditor({ contactReadout: "off" });
+    await dispatch(
+        canvas,
+        pointerEvent("pointerdown", {
+            button: 0,
+            clientX: 25,
+            clientY: 60,
+            pointerType: "touch",
+        }),
+    );
+    expect(readoutNode()).toBeNull();
 });

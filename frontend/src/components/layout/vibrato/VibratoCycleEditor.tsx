@@ -24,7 +24,8 @@ import type { Keybinding } from "../../../features/keybindings/types";
 import { advanceFineAxisDrag, createFineAxisDragState } from "../../../utils/fineAxisDrag";
 import type { FineAxisDragState } from "../../../utils/fineAxisDrag";
 import { readDevicePixelRatio } from "../../../utils/devicePixelLine";
-import { coalescedEventsOf } from "../../../utils/penInput";
+import { coalescedEventsOf, pointerKindOf } from "../../../utils/penInput";
+import type { ContactReadoutMode } from "../../../services/api/settings";
 import { AppButton, useRepeatPress } from "../../../ui";
 import {
     cycleEditorPoint,
@@ -84,6 +85,15 @@ export interface VibratoCycleEditorProps {
         /** 给定采样点的写入权重（1 = 完全覆盖）。 */
         weightFor(event: { pointerType?: string | null; pressure?: number }): number;
     };
+    /**
+     * 接触读数的显示时机（`penInput.contactReadout`）。
+     *
+     * 【为什么需要】手指落下时**恰好盖住**它正在改的那一格 —— 用户看不见自己在
+     * 画什么。数位笔没有这个问题（笔尖细、有悬停），所以默认只对触摸开启。
+     *
+     * 由宿主解析后注入（与本组件其余设备相关能力同因：叶子组件不读 store）。
+     */
+    contactReadout?: ContactReadoutMode;
 }
 
 /** 画布高度（CSS 像素）。 */
@@ -152,6 +162,7 @@ export function VibratoCycleEditor({
     readoutLabels,
     fineAdjustKb,
     pressurePaint,
+    contactReadout,
 }: VibratoCycleEditorProps) {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -187,6 +198,13 @@ export function VibratoCycleEditor({
     const binCount = Math.max(1, table.length);
     const keyboardIndex = ((keyboardBin % binCount) + binCount) % binCount;
     const keyboardValue = table[keyboardIndex] ?? 0;
+
+    /** 该设备的落笔是否要显示接触读数。 */
+    const shouldShowContactReadout = (pointerType?: string | null): boolean => {
+        if (contactReadout === "always") return true;
+        if (contactReadout === "touchOnly") return pointerKindOf(pointerType) === "touch";
+        return false;
+    };
 
     const handleKeyDown = (event: React.KeyboardEvent<HTMLCanvasElement>) => {
         if (disabled) return;
@@ -257,6 +275,14 @@ export function VibratoCycleEditor({
     } | null>(null);
     /** 手势读数（相位百分比 / 幅度百分比）；仅在右键手势期间非空。 */
     const [readout, setReadout] = useState<{ phasePct: number; scalePct: number } | null>(null);
+    /**
+     * 落笔时的接触读数（格号 + 写入值）。
+     *
+     * 【为什么与上面的 `readout` 分开】那个是右键整体变换的读数（相位 / 幅度），
+     * 这个是画笔的落点读数；两者互斥（同一时刻只有一种手势），但语义不同，
+     * 混成一个类型会让两边都要做无意义的判别。
+     */
+    const [paintReadout, setPaintReadout] = useState<{ bin: number; value: number } | null>(null);
     /** 右键手势是否进行中 —— 只用来切换光标（右键没有悬停态，按下才谈得上反馈）。 */
     const [transforming, setTransforming] = useState(false);
 
@@ -450,6 +476,9 @@ export function VibratoCycleEditor({
             weight: weightFor(event.nativeEvent),
         };
         lastPointRef.current = weighted;
+        if (shouldShowContactReadout(event.nativeEvent.pointerType)) {
+            setPaintReadout({ bin: weighted.bin, value: weighted.value });
+        }
         capturePointer(event.currentTarget, event.pointerId);
         onChange(paintCycleBinWeighted(table, weighted.bin, weighted.value, weighted.weight ?? 1));
     };
@@ -521,6 +550,9 @@ export function VibratoCycleEditor({
             cursor = point;
         }
         lastPointRef.current = cursor;
+        if (shouldShowContactReadout(event.nativeEvent.pointerType)) {
+            setPaintReadout({ bin: cursor.bin, value: cursor.value });
+        }
         onChange(next);
     };
 
@@ -531,6 +563,7 @@ export function VibratoCycleEditor({
         transformRef.current = null;
         drawingRef.current = false;
         lastPointRef.current = null;
+        setPaintReadout(null);
         setTransforming(false);
         setReadout(null);
         releasePointer(event.currentTarget, event.pointerId);
@@ -551,7 +584,9 @@ export function VibratoCycleEditor({
     const readoutText =
         readout && readoutLabels
             ? `${readoutLabels.phase} ${formatPercent(readout.phasePct)} · ${readoutLabels.scale} ${formatPercent(readout.scalePct)}`
-            : null;
+            : paintReadout
+              ? `${paintReadout.bin + 1}/${binCount} · ${formatPercent(paintReadout.value * 100)}`
+              : null;
 
     return (
         <div data-testid="vibrato-cycle-editor">

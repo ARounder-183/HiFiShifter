@@ -1911,6 +1911,10 @@ export function VibratoDialog({
                                                                         pointerEvent,
                                                                     ),
                                                             }}
+                                                            // 接触读数：手指落下时恰好盖住正在改的那一格。
+                                                            contactReadout={
+                                                                session.penInput.contactReadout
+                                                            }
                                                             smoothLabel={t(
                                                                 "vibrato_handdraw_smooth",
                                                             )}
