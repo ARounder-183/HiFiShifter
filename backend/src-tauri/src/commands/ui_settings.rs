@@ -55,6 +55,10 @@ const DEEP_MERGE_KEYS: &[&str] = &[
     "notebook",
     "dock",
     "search",
+    // 指针设备偏好：前端会把压感、捏合、读数等**逐项**部分保存
+    // （如只改 `pressureMaxGain`）。漏登记这一项，用户改一个滑块就会把其余
+    // 指针偏好整个抹掉 —— 而这一处没有编译保护，只能靠这条注释与下面的测试。
+    "penInput",
 ];
 
 /// 以现有设置为基底合并前端发来的部分补丁（纯函数，便于测试）。
@@ -263,6 +267,30 @@ mod tests {
             assert_eq!(merged[key]["kept"], json!(1), "{key} 的兄弟子键丢失");
             assert_eq!(merged[key]["changed"], json!(2), "{key} 的补丁未生效");
         }
+    }
+
+    #[test]
+    fn deep_merge_keeps_sibling_pen_input_keys() {
+        // 具体场景：用户只改压感上界，其余指针偏好（捏合、读数、设备声明）必须留存。
+        // 这一处没有编译保护 —— `DEEP_MERGE_KEYS` 漏登记时本测试会失败，
+        // 而线上表现只是"改一个滑块，别的偏好全丢"，很难被注意到。
+        let base = json!({
+            "penInput": {
+                "device": "trackpad",
+                "pressureEnabled": true,
+                "pressureMaxGain": 1.6,
+                "trackpadPinchZoom": true,
+                "contactReadout": "touchOnly",
+            }
+        });
+        let patch = json!({ "penInput": { "pressureMaxGain": 2.5 } });
+        let merged = merge_ui_settings_patch(base, &patch);
+        let pen = &merged["penInput"];
+        assert_eq!(pen["pressureMaxGain"], json!(2.5));
+        assert_eq!(pen["device"], json!("trackpad"), "兄弟子键不得丢失");
+        assert_eq!(pen["pressureEnabled"], json!(true));
+        assert_eq!(pen["trackpadPinchZoom"], json!(true));
+        assert_eq!(pen["contactReadout"], json!("touchOnly"));
     }
 
     #[test]

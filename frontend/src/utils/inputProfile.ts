@@ -179,6 +179,45 @@ export function profileFor(event: { pointerType?: string | null }): InputProfile
     return INPUT_PROFILES[pointerKindOf(event.pointerType)];
 }
 
+/**
+ * 用户可显式声明的指针设备。
+ *
+ * 【为什么需要人工声明】Web 平台在"这块板是触控板还是鼠标"这件事上没有可靠信号：
+ * `WheelEvent` 不带 `pointerType`，触控板在指针层就是 `"mouse"`。`auto` 走既有
+ * 启发式（行为不变），显式设定后跳过猜测。项目里已有同类先例（键位预设的
+ * `trackpad`）。类型定义在本模块，`settings.ts` 再导出 —— 让"有哪些设备"只有
+ * 一个出处。
+ */
+export type PointerDeviceDeclaration = "auto" | "mouse" | "trackpad" | "pen" | "touch";
+
+/**
+ * 取剖面的**声明感知**版本：用户显式声明了设备时以声明为准，否则按事件推断。
+ *
+ * 【触控板为什么只能这样】它不是一种 `pointerType`（指针层就是 `"mouse"`），
+ * 因此只能靠声明；声明为触控板时使用 mouse 剖面（它有鼠标的全部能力），
+ * 低速补偿另由 `trackpadInertiaGain` 提供。
+ *
+ * @param declared 设置里的显式声明。
+ * @param event 触发本次判定的指针事件。
+ */
+export function profileForDeclared(
+    declared: PointerDeviceDeclaration | null | undefined,
+    event: { pointerType?: string | null },
+): InputProfile {
+    switch (declared) {
+        case "mouse":
+            return INPUT_PROFILES.mouse;
+        case "trackpad":
+            return INPUT_PROFILES.mouse;
+        case "pen":
+            return INPUT_PROFILES.pen;
+        case "touch":
+            return INPUT_PROFILES.touch;
+        default:
+            return profileFor(event);
+    }
+}
+
 /** 按设备剖面缩放一个基准命中半径。 */
 export function scaledHitRadius(basePx: number, profile: InputProfile): number {
     return basePx * profile.hitRadiusScale;

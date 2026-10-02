@@ -140,8 +140,10 @@ import {
 
 import {
     DEFAULT_CHANNEL_IMPORT_POLICY,
+    DEFAULT_PEN_INPUT_SETTINGS,
     DEFAULT_RENDER_CACHE_SETTINGS,
     type ChannelImportPolicy,
+    type PenInputSettings,
     type RenderCacheSettings,
 } from "../../services/api/settings";
 
@@ -519,6 +521,8 @@ export interface SessionState {
     renderCache: RenderCacheSettings;
     /** 导入媒体时的声道处理策略（假立体声 → 单声道）。 */
     channelImportPolicy: ChannelImportPolicy;
+    /** 指针设备（触控板 / 数位板 / 触控笔 / 触摸）的输入偏好。 */
+    penInput: PenInputSettings;
     /**
      * 在途的导入任务数（>0 = 正在导入）。
      *
@@ -2157,6 +2161,7 @@ const initialState: SessionState = {
     autoBackgroundRender: true,
     renderCache: { ...DEFAULT_RENDER_CACHE_SETTINGS },
     channelImportPolicy: { ...DEFAULT_CHANNEL_IMPORT_POLICY },
+    penInput: { ...DEFAULT_PEN_INPUT_SETTINGS },
     importInFlight: 0,
     playbackRenderingActive: false,
     playbackRenderingTarget: null,
@@ -2865,6 +2870,10 @@ const sessionSlice = createSlice({
         /** 覆盖整块导入声道策略（对话框保存时调用）。 */
         setChannelImportPolicy(state, action: PayloadAction<Partial<ChannelImportPolicy>>) {
             state.channelImportPolicy = { ...state.channelImportPolicy, ...action.payload };
+        },
+        /** 覆盖整块指针设备偏好（设置面板保存时调用）。 */
+        setPenInputSettings(state, action: PayloadAction<Partial<PenInputSettings>>) {
+            state.penInput = { ...state.penInput, ...action.payload };
         },
         /** 镜像后端 `playback_rendering_state` 事件的 active/target（进度走 App 本地状态）。
          *  `blocking` 为阻塞式前台预渲染（target="original"）的独立镜像；缺省时按
@@ -3759,6 +3768,12 @@ const sessionSlice = createSlice({
                     state.channelImportPolicy = {
                         ...DEFAULT_CHANNEL_IMPORT_POLICY,
                         ...s.channelImportPolicy,
+                    };
+                }
+                if (s.penInput) {
+                    state.penInput = {
+                        ...DEFAULT_PEN_INPUT_SETTINGS,
+                        ...s.penInput,
                     };
                 }
                 const selectDir = s.selectDragDirection;
@@ -6590,6 +6605,7 @@ export const {
     toggleAutoBackgroundRender,
     setRenderCacheSettings,
     setChannelImportPolicy,
+    setPenInputSettings,
     setVisibleReferenceRootTrackIds,
     toggleVisibleReferenceRootTrackId,
     setSelectedClip,

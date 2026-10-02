@@ -30,10 +30,11 @@ import {
     cycleEditorPoint,
     cycleEditorY,
     cycleRightDragTransform,
-    paintCycleBin,
-    paintCycleSegment,
+    paintCycleBinWeighted,
+    paintCycleSegmentWeighted,
     smoothCycleTable,
     transformCycleTable,
+    type CyclePaintPoint,
 } from "./vibratoCycleEdit";
 
 export interface VibratoCycleEditorProps {
@@ -68,6 +69,21 @@ export interface VibratoCycleEditorProps {
      * 叶子组件不自己读 keybindings 切片，免得把这个小组件变成又一个 store 消费者。
      */
     fineAdjustKb?: Keybinding;
+    /**
+     * 压感画笔（把笔的压力换算成"这一点写多深"）。
+     *
+     * 与 `fineAdjustKb` 同因：由宿主解析后注入，叶子组件不自己读 store ——
+     * 否则这个小组件会变成又一个 store 消费者，而它的单测也就不再需要 Provider。
+     *
+     * 省略时权重恒为 1，即**完全覆盖**（鼠标的既有行为逐位不变）。压感设备上
+     * 轻按只把该格向目标值推一部分，可以来回涂叠 —— 与绘画软件的画笔同源。
+     */
+    pressurePaint?: {
+        /** 手势开始：重置压感标定。 */
+        begin(): void;
+        /** 给定采样点的写入权重（1 = 完全覆盖）。 */
+        weightFor(event: { pointerType?: string | null; pressure?: number }): number;
+    };
 }
 
 /** 画布高度（CSS 像素）。 */
@@ -129,11 +145,22 @@ export function VibratoCycleEditor({
     ariaLabel,
     readoutLabels,
     fineAdjustKb,
+    pressurePaint,
 }: VibratoCycleEditorProps) {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const containerRef = useRef<HTMLDivElement | null>(null);
     const drawingRef = useRef(false);
-    const lastPointRef = useRef<{ bin: number; value: number } | null>(null);
+    /**
+     * 上一个落点。
+     *
+     * 【为什么带 `weight`】压感画笔的"写入权重"要沿线段插值（见
+     * `paintCycleSegmentWeighted`），因此必须记住上一点的权重；只存 bin/value 会让
+     * 一笔之内出现"一段深一段浅"的台阶。鼠标的权重恒为 1，行为与从前逐位一致。
+     */
+    const lastPointRef = useRef<CyclePaintPoint | null>(null);
+    /** 权重来源；缺省恒为 1（完全覆盖），即无压感设备的既有行为。 */
+    const weightFor = (event: { pointerType?: string | null; pressure?: number }): number =>
+        pressurePaint ? pressurePaint.weightFor(event) : 1;
     /**
      * 当前手势占用的指针。
      *
@@ -324,10 +351,16 @@ export function VibratoCycleEditor({
         const point = pointAt(event);
         if (!point) return;
         beginGesture(event.pointerId);
+        // 手势开始：重置压感标定（每段手势重新观察，不固化上一次的极端值）。
+        pressurePaint?.begin();
         drawingRef.current = true;
-        lastPointRef.current = point;
+        const weighted: CyclePaintPoint = {
+            ...point,
+            weight: weightFor(event.nativeEvent),
+        };
+        lastPointRef.current = weighted;
         capturePointer(event.currentTarget, event.pointerId);
-        onChange(paintCycleBin(table, point.bin, point.value));
+        onChange(paintCycleBinWeighted(table, weighted.bin, weighted.value, weighted.weight ?? 1));
     };
 
     /** 右键整体变换的一帧：位移 → 变换量 → 对快照重算 → 上报。 */
@@ -385,7 +418,15 @@ export function VibratoCycleEditor({
         for (const sample of points) {
             const point = pointAt(sample);
             if (!point) continue;
-            next = paintCycleSegment(next, cursor, point);
+            /*
+             * 逐采样点取权重：一次 pointermove 里合并了多个采样点，而压力在这些
+             * 采样点之间是变化的 —— 只按最后一个采样点算，笔画会丢掉压力的变化。
+             * 无压感设备返回 1，退化为原来的"逐格覆盖"。
+             */
+            next = paintCycleSegmentWeighted(next, cursor, {
+                ...point,
+                weight: weightFor(sample),
+            });
             cursor = point;
         }
         lastPointRef.current = cursor;

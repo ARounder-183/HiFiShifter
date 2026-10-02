@@ -11,7 +11,9 @@ import {
     cycleRightDragTransform,
     editorValueReach,
     paintCycleBin,
+    paintCycleBinWeighted,
     paintCycleSegment,
+    paintCycleSegmentWeighted,
     rotateCycleTable,
     scaleCycleTable,
     smoothCycleTable,
@@ -309,5 +311,129 @@ describe("cycleRightDragTransform", () => {
         const spec = cycleRightDragTransform(Number.NaN, Number.NaN, 640, 120, 64);
         expect(spec.rotateBins).toBe(0);
         expect(spec.scale).toBe(1);
+    });
+});
+
+/*
+ * 压感画笔：写入权重。
+ *
+ * 【为什么必须钉住 weight = 1 的等价性】鼠标没有压力通道，权重恒为 1，此时必须
+ * 与既有的 `paintCycleBin` / `paintCycleSegment` **逐位一致**。若走
+ * `current + (target - current) * 1` 的混合公式，IEEE754 下未必精确等于 `target`
+ * （例如 `0.1 + (0.2 - 0.1) !== 0.2`），鼠标的手感会因此发生肉眼不可见的漂移。
+ */
+describe("paintCycleBinWeighted", () => {
+    test("权重 1 与既有覆盖式落笔逐位一致", () => {
+        const table = [0, 0.25, -0.5, 0.75];
+        for (const value of [0, 0.1, 0.2, -0.3, 0.7, 1, -1]) {
+            expect(paintCycleBinWeighted(table, 1, value, 1)).toEqual(paintCycleBin(table, 1, value));
+            // 逐位相等（不是"接近"）：鼠标路径不允许有任何漂移。
+            expect(Object.is(paintCycleBinWeighted(table, 1, value, 1)[1], value)).toBe(true);
+        }
+    });
+
+    test("轻涂只向目标靠近一部分，且可反复叠加以逼近", () => {
+        let table = [0, 0, 0, 0];
+        table = paintCycleBinWeighted(table, 1, 1, 0.2);
+        expect(table[1]).toBeCloseTo(0.2, 9);
+        table = paintCycleBinWeighted(table, 1, 1, 0.2);
+        expect(table[1]).toBeCloseTo(0.36, 9);
+        // 反复涂最终逼近但不超过目标。
+        for (let i = 0; i < 50; i += 1) table = paintCycleBinWeighted(table, 1, 1, 0.2);
+        expect(table[1]).toBeLessThanOrEqual(1);
+        expect(table[1]).toBeGreaterThan(0.99);
+    });
+
+    test("只改被点的格，其余原样", () => {
+        const table = [0.1, 0.2, 0.3];
+        const next = paintCycleBinWeighted(table, 1, 1, 0.5);
+        expect(next[0]).toBe(0.1);
+        expect(next[2]).toBe(0.3);
+    });
+
+    test("权重 0 是完全不动（而不是抹平）", () => {
+        const table = [0.4, -0.2];
+        expect(paintCycleBinWeighted(table, 0, 1, 0)).toEqual(table);
+    });
+
+    test("越界 / 非有限的权重不会产生 NaN", () => {
+        const table = [0, 0];
+        expect(paintCycleBinWeighted(table, 0, 1, Number.NaN)).toEqual([1, 0]);
+        expect(paintCycleBinWeighted(table, 0, 1, -5)).toEqual([0, 0]);
+        expect(paintCycleBinWeighted(table, 0, 1, 99)).toEqual([1, 0]);
+    });
+
+    test("钳到 [-1,1]，与既有落笔同一约定", () => {
+        expect(paintCycleBinWeighted([0], 0, 5, 1)).toEqual([1]);
+        expect(paintCycleBinWeighted([0], 0, -5, 1)).toEqual([-1]);
+    });
+
+    test("空格子表返回空", () => {
+        expect(paintCycleBinWeighted([], 0, 1, 0.5)).toEqual([]);
+    });
+});
+
+describe("paintCycleSegmentWeighted", () => {
+    test("权重 1 与既有补间逐位一致", () => {
+        const table = new Array(8).fill(0);
+        const from = { bin: 1, value: -0.5 };
+        const to = { bin: 6, value: 0.9 };
+        expect(
+            paintCycleSegmentWeighted(table, { ...from, weight: 1 }, { ...to, weight: 1 }),
+        ).toEqual(paintCycleSegment(table, from, to));
+    });
+
+    test("轻涂的补间只走一部分", () => {
+        const table = new Array(8).fill(0);
+        const next = paintCycleSegmentWeighted(
+            table,
+            { bin: 0, value: 0, weight: 0.5 },
+            { bin: 7, value: 1, weight: 0.5 },
+        );
+        // 目标值沿线段插值（i=4 处为 4/7），再按 0.5 权重写入。
+        expect(next[4]).toBeCloseTo((4 / 7) * 0.5, 9);
+        expect(next[7]).toBeCloseTo(0.5, 9);
+    });
+
+    test("权重沿线段插值，避免一笔之内出现深浅台阶", () => {
+        const table = new Array(11).fill(0);
+        const next = paintCycleSegmentWeighted(
+            table,
+            { bin: 0, value: 1, weight: 0 },
+            { bin: 10, value: 1, weight: 1 },
+        );
+        // 权重从 0 线性升到 1：中点的写入量应约为端点的一半。
+        expect(next[0]).toBe(0);
+        expect(next[5]).toBeCloseTo(0.5, 9);
+        expect(next[10]).toBeCloseTo(1, 9);
+        // 单调递增（没有台阶式的忽深忽浅）。
+        for (let i = 1; i <= 10; i += 1) {
+            expect(next[i]).toBeGreaterThanOrEqual(next[i - 1] - 1e-12);
+        }
+    });
+
+    test("反向拖拽（to 在 from 左侧）与正向等价", () => {
+        const table = new Array(8).fill(0);
+        const forward = paintCycleSegmentWeighted(
+            table,
+            { bin: 1, value: 0.2, weight: 0.5 },
+            { bin: 6, value: 0.8, weight: 0.5 },
+        );
+        const backward = paintCycleSegmentWeighted(
+            table,
+            { bin: 6, value: 0.8, weight: 0.5 },
+            { bin: 1, value: 0.2, weight: 0.5 },
+        );
+        expect(backward).toEqual(forward);
+    });
+
+    test("缺省权重按完全覆盖处理（调用方漏传时退化为旧行为）", () => {
+        const table = new Array(4).fill(0);
+        const next = paintCycleSegmentWeighted(
+            table,
+            { bin: 0, value: 0.3 },
+            { bin: 3, value: 0.9 },
+        );
+        expect(next).toEqual(paintCycleSegment(table, { bin: 0, value: 0.3 }, { bin: 3, value: 0.9 }));
     });
 });

@@ -247,6 +247,8 @@ export interface UiSettings {
     dock?: DockPersistedSettings;
     /** 导入媒体时的声道处理策略（假立体声 → 单声道）。 */
     channelImportPolicy?: ChannelImportPolicy;
+    /** 指针设备（触控板 / 数位板 / 触控笔 / 触摸）的输入偏好。 */
+    penInput?: PenInputSettings;
     customScalePresets?: Array<{
         id: string;
         name: string;
@@ -382,6 +384,155 @@ export function normalizeChannelImportPolicy(input: ChannelImportPolicy): Channe
         monoTargetMode: [2, 3, 4].includes(input.monoTargetMode)
             ? input.monoTargetMode
             : DEFAULT_CHANNEL_IMPORT_POLICY.monoTargetMode,
+    };
+}
+
+/**
+ * 指针设备的显式声明；`auto` = 保持既有启发式判定。
+ *
+ * 类型本身定义在 `utils/inputProfile.ts`（"有哪些设备"的唯一出处），这里只做转出，
+ * 让设置模块的调用方不必多引一个模块。
+ */
+export type { PointerDeviceDeclaration } from "../../utils/inputProfile";
+
+import type { PointerDeviceDeclaration } from "../../utils/inputProfile";
+
+/** 接触读数的显示时机。 */
+export type ContactReadoutMode = "off" | "touchOnly" | "always";
+
+/**
+ * 指针设备（触控板 / 数位板 / 触控笔 / 触摸）的输入偏好
+ * （持久化到 app_config.json 的 `ui.penInput`）。
+ *
+ * 背景：手势层原先只按"鼠标 + 键盘修饰键"设计 —— 精细调整必须另一只手按 Ctrl、
+ * 次级手势只能靠右键、连续调节只有滚轮。这在触控板（没有侧键 / 中键）、数位笔
+ * （另一只手扶着板子）、触屏（根本没有修饰键）上分别是难用、不实用、不存在。
+ *
+ * 本块集中这些设备的偏好，使它们**可关**：任何一项关掉后，行为退回"和鼠标一样"。
+ * 能力判定（有没有压力通道）不在这里，而在 `utils/inputProfile.ts`。
+ */
+export interface PenInputSettings {
+    /**
+     * 显式设备声明。
+     *
+     * 【为什么需要人工声明】Web 平台在这件事上没有可靠信号：`WheelEvent` 不带
+     * `pointerType`，触控板在指针层就是 `"mouse"`。`auto` 走既有启发式，行为不变；
+     * 显式设定后跳过猜测。项目里已有同类先例（键位预设的 `touchpad`）。
+     */
+    device: PointerDeviceDeclaration;
+    /** 压感是否作为连续的强度通道（拖拽位移倍率 / 画笔权重）。 */
+    pressureEnabled: boolean;
+    /** 死区：低于此压力视为"未用力"。 */
+    pressureDeadZone: number;
+    /** 物理下界。 */
+    pressureFloor: number;
+    /** 物理上界（自动标定只向上抬，见 `utils/pressureCurve.ts`）。 */
+    pressureCeiling: number;
+    /** 输出倍率下界。 */
+    pressureMinGain: number;
+    /** 输出倍率上界。 */
+    pressureMaxGain: number;
+    /** 响应指数：> 1 让轻压段更细腻。 */
+    pressureGamma: number;
+    /**
+     * 倾斜是否参与映射。
+     *
+     * 【为什么默认关】倾斜是三维输入里最不可靠的一轴：大量设备不报，且握笔姿势
+     * 一变值就漂。留白比绑一个会漂移的语义安全。
+     */
+    tiltEnabled: boolean;
+    /** 触控板捏合是否接管缩放（否则捏合被全局吞掉、什么也不做）。 */
+    trackpadPinchZoom: boolean;
+    /** 触摸的"前置精细斜坡"（前 12px 按 0.35 倍走）。 */
+    touchPrecisionRamp: boolean;
+    /** 接触读数浮标：关闭 / 仅触摸 / 总是。 */
+    contactReadout: ContactReadoutMode;
+}
+
+/** 指针设备偏好的出厂默认值（与后端 `config::PenInputSettings::default` 对齐）。 */
+export const DEFAULT_PEN_INPUT_SETTINGS: PenInputSettings = {
+    device: "auto",
+    // 默认开：无压感设备（鼠标 / 触摸）会自动退化，因此开着不会误伤。
+    pressureEnabled: true,
+    pressureDeadZone: 0.06,
+    pressureFloor: 0.05,
+    pressureCeiling: 0.9,
+    pressureMinGain: 0.25,
+    pressureMaxGain: 1.6,
+    pressureGamma: 1.6,
+    tiltEnabled: false,
+    trackpadPinchZoom: true,
+    touchPrecisionRamp: true,
+    contactReadout: "touchOnly",
+};
+
+/**
+ * 规范化指针设备偏好（钳制越界值、回退非法枚举），保存前调用。
+ * 与后端 `PenInputSettings::normalized` 保持同口径。
+ */
+export function normalizePenInputSettings(input: PenInputSettings): PenInputSettings {
+    const clampNumber = (value: number, min: number, max: number, fallback: number) => {
+        if (!Number.isFinite(value)) return fallback;
+        return Math.min(max, Math.max(min, value));
+    };
+    const device: PointerDeviceDeclaration = (
+        ["auto", "mouse", "trackpad", "pen", "touch"] as const
+    ).includes(input.device)
+        ? input.device
+        : DEFAULT_PEN_INPUT_SETTINGS.device;
+    const contactReadout: ContactReadoutMode = (
+        ["off", "touchOnly", "always"] as const
+    ).includes(input.contactReadout)
+        ? input.contactReadout
+        : DEFAULT_PEN_INPUT_SETTINGS.contactReadout;
+    // 死区与上界必须留出可用的跨度，否则映射会退化成一条水平线。
+    const deadZone = clampNumber(
+        input.pressureDeadZone,
+        0,
+        0.5,
+        DEFAULT_PEN_INPUT_SETTINGS.pressureDeadZone,
+    );
+    const ceiling = clampNumber(
+        input.pressureCeiling,
+        deadZone + 0.1,
+        4,
+        DEFAULT_PEN_INPUT_SETTINGS.pressureCeiling,
+    );
+    const minGain = clampNumber(
+        input.pressureMinGain,
+        0.02,
+        4,
+        DEFAULT_PEN_INPUT_SETTINGS.pressureMinGain,
+    );
+    const maxGain = clampNumber(
+        input.pressureMaxGain,
+        minGain,
+        8,
+        DEFAULT_PEN_INPUT_SETTINGS.pressureMaxGain,
+    );
+    return {
+        device,
+        pressureEnabled: Boolean(input.pressureEnabled),
+        pressureDeadZone: deadZone,
+        pressureFloor: clampNumber(
+            input.pressureFloor,
+            0,
+            deadZone,
+            DEFAULT_PEN_INPUT_SETTINGS.pressureFloor,
+        ),
+        pressureCeiling: ceiling,
+        pressureMinGain: minGain,
+        pressureMaxGain: maxGain,
+        pressureGamma: clampNumber(
+            input.pressureGamma,
+            0.2,
+            4,
+            DEFAULT_PEN_INPUT_SETTINGS.pressureGamma,
+        ),
+        tiltEnabled: Boolean(input.tiltEnabled),
+        trackpadPinchZoom: Boolean(input.trackpadPinchZoom),
+        touchPrecisionRamp: Boolean(input.touchPrecisionRamp),
+        contactReadout,
     };
 }
 

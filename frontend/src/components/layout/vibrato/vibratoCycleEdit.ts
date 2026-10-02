@@ -98,6 +98,80 @@ export function paintCycleSegment(
 }
 
 /**
+ * 带**写入权重**的落点：`weight = 1` 完全覆盖，`< 1` 只向目标值靠近一部分。
+ *
+ * 权重来自笔的压力（`utils/pressureCurve.ts` 的 `pressureToWeight`）。它不是
+ * "笔宽"：表是相位轴上的 64 格，一格就是一个采样位置，加宽只会把相邻相位抹平成
+ * 同一个值、丢掉波形细节；而"轻涂慢慢靠近"保留了笔触级的连续控制，且来回涂能
+ * 叠上去 —— 与绘画软件的画笔手感同源。
+ *
+ * `weight >= 1` 时**直接赋值**而不是走混合公式：`a + (b - a) * 1` 在 IEEE754 下
+ * 未必精确等于 `b`（例如 `0.1 + (0.2 - 0.1) !== 0.2`），而鼠标必须保持"逐格覆盖"
+ * 的既有行为逐位不变。
+ */
+export interface CyclePaintPoint {
+    bin: number;
+    value: number;
+    /** 写入权重；缺省 1（= 鼠标的完全覆盖）。 */
+    weight?: number;
+}
+
+/** 把一格按权重向 `value` 混合。 */
+export function paintCycleBinWeighted(
+    table: readonly number[],
+    bin: number,
+    value: number,
+    weight: number,
+): number[] {
+    const n = table.length;
+    if (n === 0) return [];
+    const index = clamp(Math.round(bin), 0, n - 1);
+    const target = clampValue(value);
+    const out = table.slice();
+    out[index] = paintMix(out[index], target, weight);
+    return out;
+}
+
+/** 权重混合：`>= 1` 直接取目标值（保证鼠标路径逐位不变）。 */
+function paintMix(current: number, target: number, weight: number): number {
+    if (!Number.isFinite(weight) || weight >= 1) return target;
+    if (weight <= 0) return current;
+    return clampValue(current + (target - current) * weight);
+}
+
+/**
+ * 带权重的笔画补间：值与权重都沿线段线性插值。
+ *
+ * 权重也插值是有意的：一次采样到下一次采样之间压力通常是连续变化的，只在端点上
+ * 用不同权重会让笔画出现"一段深一段浅"的台阶。
+ */
+export function paintCycleSegmentWeighted(
+    table: readonly number[],
+    from: CyclePaintPoint,
+    to: CyclePaintPoint,
+): number[] {
+    const n = table.length;
+    if (n === 0) return [];
+    const a = clamp(Math.round(from.bin), 0, n - 1);
+    const b = clamp(Math.round(to.bin), 0, n - 1);
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+    const startValue = a === lo ? from.value : to.value;
+    const endValue = a === lo ? to.value : from.value;
+    const startWeight = (a === lo ? from.weight : to.weight) ?? 1;
+    const endWeight = (a === lo ? to.weight : from.weight) ?? 1;
+    const span = hi - lo;
+    const out = table.slice();
+    for (let i = lo; i <= hi; i += 1) {
+        const t = span === 0 ? 0 : (i - lo) / span;
+        const target = clampValue(startValue + (endValue - startValue) * t);
+        const weight = startWeight + (endWeight - startWeight) * t;
+        out[i] = paintMix(out[i], target, weight);
+    }
+    return out;
+}
+
+/**
  * 三点循环滑动平均（可连点）。
  *
  * 【为什么循环】表本身是首尾相接的周期，端点若不参与邻居平均，接缝处会出现

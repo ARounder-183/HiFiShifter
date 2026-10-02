@@ -113,10 +113,12 @@ import {
     type AppMenuItemSpec,
 } from "../../ui";
 import { AppFileInput } from "../../ui/FileInput";
+import { useInputModifiers } from "../../ui/useInputModifiers";
+import { createAxisGainState2D, type AxisGainState2D } from "../../utils/axisGain";
 import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
 import {
     type VibratoPreviewGestureInfo,
-    type VibratoPreviewModifiers,
+    type VibratoPreviewInputState,
 } from "./vibrato/VibratoPreviewCanvas";
 import {
     VibratoPreviewPane,
@@ -252,6 +254,13 @@ export function VibratoDialog({
     const paramFineAdjustKb = useAppSelector((state: RootState) =>
         selectKeybinding(state, "modifier.paramFineAdjust"),
     );
+    /**
+     * 设备手感倍率（压感 / 触摸斜坡 / 触控板补偿）。
+     *
+     * 与上面的修饰键互补：那个是用户按下的离散键盘信号，这个是设备自带的连续
+     * 信号。两者串联，因此"按着 Ctrl 的同时压感也在起作用"是自然成立的。
+     */
+    const inputModifiers = useInputModifiers();
 
     const resolved = useMemo(
         () => resolveVibratoPresets(session.vibratoPresets, session.builtinVibratoPresetOrder),
@@ -564,6 +573,15 @@ export function VibratoDialog({
         zone: PreviewZone;
         snapshot: PreviewGestureSnapshot;
         fine: PreviewFineDragState;
+        /**
+         * 设备手感倍率的累计状态（压感 / 触摸斜坡 / 触控板补偿）。
+         *
+         * 【为什么与 `fine` 分开】两者都是"按增量缩放"，但来源不同：`fine` 是用户
+         * 按下的键盘修饰键（离散），这里是设备自带的连续信号。串联两级（先设备、
+         * 后修饰键）即可，各自都满足"只乘增量"，因此整体也满足 —— 见
+         * `utils/axisGain.ts` 的论证。
+         */
+        device: AxisGainState2D;
     } | null>(null);
 
     /**
@@ -627,22 +645,38 @@ export function VibratoDialog({
                 centsPerPx: info.centsPerPx,
             },
             fine: createPreviewFineDragState(fineActive),
+            device: createAxisGainState2D(),
         };
+        // 手势开始：重置压感标定（每段手势重新观察，不把上一次的极端值固化下来）。
+        inputModifiers.reset();
     }
 
     /** 画布手势移动：位移 → 草稿字段（换算规则见 `vibratoPreviewGestures`）。 */
     function handlePreviewGestureMove(
         deltaX: number,
         deltaY: number,
-        modifiers: VibratoPreviewModifiers,
+        modifiers: VibratoPreviewInputState,
     ) {
         const gesture = previewGestureRef.current;
         if (!gesture) return;
+        /*
+         * 两级增量缩放，顺序固定：**先设备倍率、后修饰键**。
+         *
+         * 设备倍率（压感 / 触摸斜坡）由 `useInputModifiers` 给出，它内部维护了
+         * "上一帧的原始累计值"，因此换倍率时已累计的部分原封不动。
+         */
+        const gained = inputModifiers.advanceXY(
+            gesture.device,
+            deltaX,
+            deltaY,
+            modifiers,
+            Math.hypot(deltaX - gesture.device.x.raw, deltaY - gesture.device.y.raw),
+        );
         // 「精细调整」按增量缩放位移：中途按下 / 松开只改变此后的速度，累计量连续。
         const scaled = advancePreviewFineDrag(
             gesture.fine,
-            deltaX,
-            deltaY,
+            gained.x,
+            gained.y,
             isModifierActive(paramFineAdjustKb, modifiers),
         );
         patch(applyPreviewGesture(gesture.zone, gesture.snapshot, scaled.deltaX, scaled.deltaY));
@@ -1818,6 +1852,17 @@ export function VibratoDialog({
                                                             }}
                                                             // 「精细调整」与预览画布同一个键位。
                                                             fineAdjustKb={paramFineAdjustKb}
+                                                            // 压感画笔：与预览画布共用同一份标定，
+                                                            // 于是"多用力 = 多写一点"与
+                                                            // "多用力 = 走得快一点"是同一个手感。
+                                                            pressurePaint={{
+                                                                begin: () =>
+                                                                    inputModifiers.reset(),
+                                                                weightFor: (pointerEvent) =>
+                                                                    inputModifiers.paintWeightFor(
+                                                                        pointerEvent,
+                                                                    ),
+                                                            }}
                                                             smoothLabel={t(
                                                                 "vibrato_handdraw_smooth",
                                                             )}

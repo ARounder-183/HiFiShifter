@@ -565,6 +565,19 @@ pub struct UiSettings {
     /// 否则"只保存行为选项"的部分写入会把 `layout` 子键整个清掉。
     #[serde(default)]
     pub dock: serde_json::Value,
+    /// 指针设备（触控板 / 数位板 / 触控笔 / 触摸）的输入偏好。
+    ///
+    /// 与 `notebook` / `dock` 同理：**后端只做透传存储**，字段语义、取值范围与
+    /// 默认值都在前端收口（`services/api/settings.ts` 的
+    /// `DEFAULT_PEN_INPUT_SETTINGS` 与 `normalizePenInputSettings`）。
+    ///
+    /// 用 `serde_json::Value` 而非具体结构体：这是一批纯前端手感参数，未来会随
+    /// 设备测试反复增删字段，强类型会让每次微调都触发后端改动与迁移代码。
+    ///
+    /// 注意：`"penInput"` 同样必须在 `commands/ui_settings.rs` 的深度合并白名单里，
+    /// 否则"只改压感一项"的部分写入会把其余子键整个清掉。
+    #[serde(default)]
+    pub pen_input: serde_json::Value,
 }
 
 /// "为新的音频块启用循环"的进程级生效值（默认 true）。
@@ -1558,6 +1571,7 @@ impl Default for UiSettings {
             channel_import_policy: ChannelImportPolicy::default(),
             notebook: serde_json::Value::Null,
             dock: serde_json::Value::Null,
+            pen_input: serde_json::Value::Null,
         }
     }
 }

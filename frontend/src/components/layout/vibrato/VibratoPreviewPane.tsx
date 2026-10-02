@@ -23,7 +23,7 @@ import { AppButton, AppIconButton, AppSegmentedControl, AppSelect } from "../../
 import type { BaselineMode } from "../../../features/vibrato/vibratoTypes";
 import { VibratoPreviewCanvas } from "./VibratoPreviewCanvas";
 import type { PreviewHandleLayout, PreviewZone } from "./vibratoPreviewGestures";
-import type { VibratoPreviewGestureInfo, VibratoPreviewModifiers } from "./VibratoPreviewCanvas";
+import type { VibratoPreviewGestureInfo, VibratoPreviewInputState } from "./VibratoPreviewCanvas";
 import type { VibratoAppliedPreview, VibratoPreviewSamples } from "./vibratoDialogLogic";
 import { BASELINE_MODE_KEYS, BASELINE_MODE_ORDER, formatNumber } from "./vibratoDialogLogic";
 
@@ -82,7 +82,7 @@ export interface VibratoPreviewPaneProps {
      * 只是画布上的时间轴不同。
      */
     onGestureStart?: (zone: PreviewZone, info: VibratoPreviewGestureInfo) => void;
-    onGestureMove?: (deltaX: number, deltaY: number, modifiers: VibratoPreviewModifiers) => void;
+    onGestureMove?: (deltaX: number, deltaY: number, modifiers: VibratoPreviewInputState) => void;
     onGestureEnd?: () => void;
 
     /** 纵轴重新拟合（两个页签各自的那把）。 */

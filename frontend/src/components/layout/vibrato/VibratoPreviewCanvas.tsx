@@ -37,38 +37,56 @@ export interface VibratoPreviewGeometry {
     centsPerPx: number;
 }
 
-/** 手势开始时上报的几何 + 按下瞬间的修饰键状态。 */
+/** 手势开始时上报的几何 + 按下瞬间的指针状态。 */
 export interface VibratoPreviewGestureInfo extends VibratoPreviewGeometry {
     /**
-     * 按下瞬间的修饰键状态。
+     * 按下瞬间的指针状态。
      *
      * 【为什么起点就要给】「精细调整」按增量缩放位移（见 `utils/fineAxisDrag.ts`），
      * 起手时修饰键是否已按下决定了首帧走哪个比例 —— 起手就按住时不该按"刚按下"
      * 的过渡比例处理。
      */
-    modifiers: VibratoPreviewModifiers;
+    modifiers: VibratoPreviewInputState;
 }
 
-/** 手势开始时的修饰键状态（用于「精细调整」这类按修饰键缩放的手势）。 */
-export interface VibratoPreviewModifiers {
+/**
+ * 一次指针事件的完整状态快照。
+ *
+ * 【为什么不止是修饰键】设备适配后，手感还取决于**是哪台设备在按**：
+ * 数位笔的压感决定本帧走多快（`utils/pressureCurve.ts`），触摸的前 12px 要走
+ * 精细斜坡（`utils/inputProfile.ts`）。这两者都只能从指针事件本身读到，
+ * 因此随修饰键一起上报，而不是让画布自己去猜。
+ *
+ * 全部字段都可缺省：合成事件（测试桩 / 键盘重放的 pointermove）没有它们，
+ * 缺省即"按鼠标处理"，与 `penInput.ts` 的宽松回退同口径。
+ */
+export interface VibratoPreviewInputState {
     ctrlKey: boolean;
     shiftKey: boolean;
     altKey: boolean;
     metaKey: boolean;
+    /** `PointerEvent.pointerType`；缺省表示合成事件。 */
+    pointerType?: string | null;
+    /** `PointerEvent.pressure`；鼠标 / 触摸恒为 0.5。 */
+    pressure?: number;
 }
 
-/** 从指针事件读出修饰键状态。 */
-function readModifiers(event: {
+/** 从指针事件读出完整状态（修饰键 + 设备通道）。 */
+function readInputState(event: {
     ctrlKey: boolean;
     shiftKey: boolean;
     altKey: boolean;
     metaKey: boolean;
-}): VibratoPreviewModifiers {
+    pointerType?: string;
+    pressure?: number;
+}): VibratoPreviewInputState {
     return {
         ctrlKey: event.ctrlKey,
         shiftKey: event.shiftKey,
         altKey: event.altKey,
         metaKey: event.metaKey,
+        pointerType: event.pointerType,
+        pressure: event.pressure,
     };
 }
 
@@ -88,7 +106,7 @@ export interface VibratoPreviewCanvasProps {
     /** 手势开始。 */
     onGestureStart?: (zone: PreviewZone, info: VibratoPreviewGestureInfo) => void;
     /** 手势移动：自起点累计的像素位移，以及当前的修饰键状态。 */
-    onGestureMove?: (deltaX: number, deltaY: number, modifiers: VibratoPreviewModifiers) => void;
+    onGestureMove?: (deltaX: number, deltaY: number, modifiers: VibratoPreviewInputState) => void;
     /** 手势结束。 */
     onGestureEnd?: () => void;
 }
@@ -139,7 +157,7 @@ export function VibratoPreviewCanvas({
     const pendingMoveRef = useRef<{
         x: number;
         y: number;
-        modifiers: VibratoPreviewModifiers;
+        modifiers: VibratoPreviewInputState;
     } | null>(null);
     /** 已排程的 rAF 句柄；`null` 表示当前没有待提交帧。 */
     const rafRef = useRef<number | null>(null);
@@ -385,7 +403,7 @@ export function VibratoPreviewCanvas({
         gestureRef.current = { zone, x, y };
         pendingMoveRef.current = null;
         event.currentTarget.setPointerCapture(event.pointerId);
-        onGestureStart?.(zone, { ...geometryRef.current, modifiers: readModifiers(event) });
+        onGestureStart?.(zone, { ...geometryRef.current, modifiers: readInputState(event) });
     };
 
     const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -417,7 +435,7 @@ export function VibratoPreviewCanvas({
         pendingMoveRef.current = {
             x: latest.clientX - rect.left,
             y: latest.clientY - rect.top,
-            modifiers: readModifiers(event),
+            modifiers: readInputState(event),
         };
         if (rafRef.current === null) {
             rafRef.current = requestAnimationFrame(() => {

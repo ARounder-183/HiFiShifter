@@ -98,6 +98,7 @@ export const persistUiSettings = createAsyncThunk(
             autoBackgroundRender: s.autoBackgroundRender,
             renderCache: s.renderCache,
             channelImportPolicy: s.channelImportPolicy,
+            penInput: s.penInput,
             selectDragDirection: s.selectDragDirection,
             drawDragDirection: s.drawDragDirection,
 

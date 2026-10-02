@@ -7,12 +7,15 @@ vi.mock("../invoke", () => ({
 
 import {
     DEFAULT_CHANNEL_IMPORT_POLICY,
+    DEFAULT_PEN_INPUT_SETTINGS,
     TOLERANCE_PERCENT_MAX,
     normalizeChannelImportPolicy,
+    normalizePenInputSettings,
     percentToTolerance,
     settingsApi,
     toleranceToPercent,
     type ChannelImportPolicy,
+    type PenInputSettings,
 } from "./settings";
 
 /**
@@ -126,6 +129,91 @@ describe("channel import policy", () => {
             });
             expect(normalized.monoTargetMode).toBe(mode);
         }
+    });
+});
+
+describe("pen input settings", () => {
+    it("ships defaults that leave every device on the legacy path", () => {
+        // `auto` 必须等价于"和引入本块之前完全一样"，否则升级即改手感。
+        expect(DEFAULT_PEN_INPUT_SETTINGS.device).toBe("auto");
+        // 压感默认开，但无压感设备（鼠标 / 触摸）会自动退化，因此不会误伤。
+        expect(DEFAULT_PEN_INPUT_SETTINGS.pressureEnabled).toBe(true);
+        // 倾斜默认关：它是最不可靠的一轴，绑一个会漂移的语义比留白更糟。
+        expect(DEFAULT_PEN_INPUT_SETTINGS.tiltEnabled).toBe(false);
+    });
+
+    it("keeps every valid value untouched", () => {
+        const settings: PenInputSettings = {
+            ...DEFAULT_PEN_INPUT_SETTINGS,
+            device: "trackpad",
+            pressureDeadZone: 0.1,
+            pressureCeiling: 0.8,
+            pressureMinGain: 0.3,
+            pressureMaxGain: 2,
+            pressureGamma: 2,
+            contactReadout: "always",
+        };
+        expect(normalizePenInputSettings(settings)).toEqual(settings);
+    });
+
+    it("falls back on an unknown device or readout enum", () => {
+        const normalized = normalizePenInputSettings({
+            ...DEFAULT_PEN_INPUT_SETTINGS,
+            device: "joystick" as PenInputSettings["device"],
+            contactReadout: "sometimes" as PenInputSettings["contactReadout"],
+        });
+        expect(normalized.device).toBe(DEFAULT_PEN_INPUT_SETTINGS.device);
+        expect(normalized.contactReadout).toBe(DEFAULT_PEN_INPUT_SETTINGS.contactReadout);
+    });
+
+    it("keeps the dead zone strictly below the ceiling", () => {
+        // 跨度归零会让映射退化成一条水平线 —— 压感彻底失效且无从察觉。
+        const normalized = normalizePenInputSettings({
+            ...DEFAULT_PEN_INPUT_SETTINGS,
+            pressureDeadZone: 0.9,
+            pressureCeiling: 0.2,
+        });
+        expect(normalized.pressureCeiling).toBeGreaterThan(normalized.pressureDeadZone);
+    });
+
+    it("keeps the max gain at or above the min gain", () => {
+        const normalized = normalizePenInputSettings({
+            ...DEFAULT_PEN_INPUT_SETTINGS,
+            pressureMinGain: 2,
+            pressureMaxGain: 0.5,
+        });
+        expect(normalized.pressureMaxGain).toBeGreaterThanOrEqual(normalized.pressureMinGain);
+    });
+
+    it("clamps out-of-range numbers and survives non-finite input", () => {
+        const normalized = normalizePenInputSettings({
+            ...DEFAULT_PEN_INPUT_SETTINGS,
+            pressureDeadZone: Number.NaN,
+            pressureGamma: -5,
+            pressureMinGain: 999,
+        });
+        expect(normalized.pressureDeadZone).toBe(DEFAULT_PEN_INPUT_SETTINGS.pressureDeadZone);
+        expect(normalized.pressureGamma).toBeGreaterThan(0);
+        expect(normalized.pressureMinGain).toBeLessThanOrEqual(4);
+    });
+
+    it("never lets the floor exceed the dead zone", () => {
+        const normalized = normalizePenInputSettings({
+            ...DEFAULT_PEN_INPUT_SETTINGS,
+            pressureDeadZone: 0.05,
+            pressureFloor: 0.4,
+        });
+        expect(normalized.pressureFloor).toBeLessThanOrEqual(normalized.pressureDeadZone);
+    });
+
+    it("coerces the boolean switches rather than trusting the wire", () => {
+        const normalized = normalizePenInputSettings({
+            ...DEFAULT_PEN_INPUT_SETTINGS,
+            pressureEnabled: 1 as unknown as boolean,
+            trackpadPinchZoom: 0 as unknown as boolean,
+        });
+        expect(normalized.pressureEnabled).toBe(true);
+        expect(normalized.trackpadPinchZoom).toBe(false);
     });
 });
 
