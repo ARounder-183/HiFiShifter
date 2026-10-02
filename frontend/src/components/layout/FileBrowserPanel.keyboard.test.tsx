@@ -296,11 +296,10 @@ test("键盘光标与多选选中是两条独立通道，互不覆盖", () => {
     expect(activeFlags()).toEqual([false, true, false]);
     expect(rows().map((row) => row.dataset.selected === "true")).toEqual([true, false, true]);
 
-    // 光标行的视觉来自描边通道（outline），而不是再叠一层背景色。
-    expect(rows()[1].className).toContain("outline");
-    expect(rows()[1].className).toContain("focus:outline-none");
-    // 未成为光标的选中行不应被误加描边。
-    expect(rows()[0].className).not.toContain("outline-[color:var(--qt-focus-ring)]");
+    // 光标行的视觉来自描边通道（`index.css` 的 `[data-active]:focus`），而不是
+    // 再叠一层背景色；未成为光标的选中行不应带光标标记。
+    expect(rows()[1].dataset.active).toBe("true");
+    expect(rows()[0].dataset.active).toBeUndefined();
 });
 
 test("listbox 接线：End 跳到末行后 Enter 激活末行", () => {

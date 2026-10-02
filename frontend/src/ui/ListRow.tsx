@@ -47,6 +47,13 @@ export interface AppListRowProps {
      * 【为什么用描边而不是再挤一档背景色】背景通道已经被 hover(10%) /
      * selected(22%) / playing(20%) 占满，再挤一档就分不出来。描边走**边框通道**，
      * 与背景正交，可以叠加且各自可辨。
+     *
+     * 【描边的实际规则在 `index.css`】见那里的 `[data-active]:focus`。放在 CSS
+     * 而不是这里，是因为 Tailwind 的 `focus:outline-none`（用于关掉浏览器默认
+     * 描边）编译成 `outline: 2px solid transparent` 的**简写**，带 `:focus` 的
+     * 选择器优先级又高于本组类 —— 两者叠在一起时，我们画的环会被整体改写成透明，
+     * 表现就是"键盘移动完全不显示高亮"。这类"工具类互相覆盖"的坑，只有在
+     * 一条显式规则里才看得见。
      */
     active?: boolean;
     /** 悬停/选中时的强调基调，`danger` 用于破坏性目标的悬停反馈。 */
@@ -67,6 +74,17 @@ export interface AppListRowProps {
     onFocus?: () => void;
     /** roving tabindex：活动行为 `0`，其余为 `-1`；省略则不可聚焦（旧行为）。 */
     tabIndex?: number;
+    /**
+     * 列表项在**全量**列表中的位置（1 起）。
+     *
+     * 【为什么需要】窗口化列表只把视口附近的行放进 DOM，读屏看到的选项数量因此
+     * 与真实条数不符 —— 两万项会被念成几十项。`aria-posinset` / `aria-setsize`
+     * 是 ARIA 为此提供的表达：告诉读屏"这是第 N 项、共 M 项"。
+     * 非窗口化列表可以省略（默认语义已经正确）。
+     */
+    ariaPosInSet?: number;
+    /** 全量列表的项数，与 `ariaPosInSet` 成对使用。 */
+    ariaSetSize?: number;
     /**
      * 显式列表项角色。
      *
@@ -118,6 +136,8 @@ export const AppListRow = forwardRef<HTMLDivElement, AppListRowProps>(function A
         onPointerDown,
         onFocus,
         tabIndex,
+        ariaPosInSet,
+        ariaSetSize,
         role,
         tooltip,
         title,
@@ -137,6 +157,8 @@ export const AppListRow = forwardRef<HTMLDivElement, AppListRowProps>(function A
             ref={ref}
             role={isOption ? "option" : undefined}
             aria-selected={isOption ? selected : undefined}
+            aria-posinset={isOption ? ariaPosInSet : undefined}
+            aria-setsize={isOption ? ariaSetSize : undefined}
             aria-disabled={disabled || undefined}
             tabIndex={tabIndex}
             data-selected={selected || undefined}
@@ -155,11 +177,6 @@ export const AppListRow = forwardRef<HTMLDivElement, AppListRowProps>(function A
                 DENSITY_CLASS[density],
                 interactive && !disabled && "cursor-pointer",
                 disabled && "cursor-default opacity-50",
-                // 键盘光标走描边通道：先关掉浏览器给可聚焦元素的默认 outline
-                // （在 22px 行上那是一圈与内边距不对齐的脏 halo），再画自己的。
-                "focus:outline-none",
-                active &&
-                    "outline outline-1 outline-offset-[-1px] outline-[color:var(--qt-focus-ring)]",
                 intent === "danger"
                     ? "hover:bg-qt-danger-bg hover:text-qt-danger-text"
                     : "hover:bg-[color-mix(in_oklab,var(--qt-highlight)_10%,transparent)]",

@@ -730,7 +730,15 @@ describe("抽象层不能空转（采用率）", () => {
 
         // 自检：扫描本身必须真的扫到东西，否则"0 处违规"毫无意义。
         expect(nativeScanned, "没有扫到任何滚动容器，正则已失效").toBeGreaterThan(5);
-        expect(areaScanned, "没有扫到 ScrollArea，选择器已失效").toBeGreaterThan(4);
+        /*
+         * 阈值随"文件浏览器改用原生滚动容器"下调 1（5 → 4）。
+         *
+         * 那个面板要做窗口化，需要自己读写 `scrollTop` / `clientHeight`，而 Radix
+         * ScrollArea 的滚动元素是它内部自绘的（只能靠 `[data-radix-scroll-area-viewport]`
+         * 这种内部属性去找）。它换成了 `overflow-y-auto` + `hs-scroll-gutter` ——
+         * 仍然受本门禁的第一条（原生容器的让位类）约束，只是不再计入 ScrollArea 计数。
+         */
+        expect(areaScanned, "没有扫到 ScrollArea，选择器已失效").toBeGreaterThanOrEqual(4);
         expect(
             offenders.length === 0
                 ? []
@@ -821,5 +829,42 @@ describe("禁止浏览器原生 affordance", () => {
             offenders,
             '请用 AppSwitchRow（control="checkbox"）—— 系统默认复选框与 Radix 控件高度不一致',
         ).toEqual([]);
+    });
+});
+
+describe("列表行键盘光标环", () => {
+    /*
+     * 【要钉死什么】上一版把光标环写成行原语上的一组 Tailwind 工具类，同时用
+     * `focus:outline-none` 关掉浏览器默认描边。后者编译成
+     * `outline: 2px solid transparent` 这个**简写**，而它带 `:focus`、优先级高于
+     * 那四个单类 —— 光标行的环被整体改写成透明，键盘移动**完全看不到高亮**。
+     *
+     * 这两条断言分别检查"环真的存在"与"没有东西能把它抹成透明"。它们必须成对，
+     * 只查前者会漏掉这次的回归（环写了，但被覆盖）。
+     *
+     * 【为什么不用本文件的 `stripCommentsAndStrings`】它会把字符串内容一并剥掉，
+     * 而这里要找的类名就写在字符串里 —— 用它做检查会得到一条**永远通过**的断言
+     * （实测：把 `focus:outline-none` 加回去，断言仍然是绿的）。这里只去注释。
+     */
+    function stripCommentsOnly(source: string): string {
+        return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+    }
+
+    test("光标环由 index.css 的 [data-active] 规则提供", () => {
+        const css = stripCommentsOnly(readFileSync(join("src", "index.css"), "utf8"));
+        const blocks = css.match(/\[data-active\][^{}]*\{[^}]*\}/g) ?? [];
+        const ring = blocks.find((block) => block.includes("outline"));
+        expect(ring, "index.css 里没有给 [data-active] 画描边的规则").toBeTruthy();
+        expect(ring, "光标环必须取语义令牌，不能写死颜色").toContain("--qt-focus-ring");
+    });
+
+    test("行原语不得用 outline-none 抹掉自己画的环", () => {
+        const listRow = stripCommentsOnly(readFileSync(join(UI_DIR, "ListRow.tsx"), "utf8"));
+        expect(
+            listRow.includes("outline-none"),
+            "outline-none 会以更高优先级把 [data-active] 的环改成透明（本回归的成因）",
+        ).toBe(false);
+        // 环挂在 data-active 上；行必须继续暴露这个状态，否则规则无从命中。
+        expect(listRow).toContain("data-active");
     });
 });

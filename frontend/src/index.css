@@ -435,6 +435,30 @@ textarea {
 }
 
 /*
+ * 列表行的键盘光标（`AppListRow` 的 `active` → `[data-active]`）。
+ *
+ * 【为什么是一条独立规则，而不是行原语上的 Tailwind 工具类】
+ * 上一版把环写成 `outline outline-1 outline-offset-[-1px] outline-[color:…]`，
+ * 同时用 `focus:outline-none` 关掉浏览器默认描边。问题在于后者编译成
+ * `outline: 2px solid transparent` 这个**简写**，而它带 `:focus`，优先级高于
+ * 那四个单类 —— 于是光标行的描边被整体改写成透明，键盘移动**完全看不到高亮**。
+ * 一条显式规则不存在这种相互覆盖。
+ *
+ * 【为什么是 `:focus` 而不是 `:focus-visible`】行是通过脚本 `.focus()` 拿到焦点的，
+ * `:focus-visible` 是否命中取决于"上一次交互是不是键盘"这一浏览器启发式：在
+ * "先点一下行、再按方向键"这类混合序列里并不确定，一旦不命中，键盘用户就又失去
+ * 位置提示。`:focus` 是确定性的 —— 有焦点就画、焦点离开就收，没有猜测。
+ *
+ * 【为什么内嵌（负偏移）】行是整宽的、彼此紧贴，外扩的环会压到相邻行上、
+ * 也会被滚动容器裁掉。负偏移把环画在行自己的盒内 —— 与
+ * `.hs-slider-box` 滑块拇指的内嵌环、notebook 的 `outline-offset: -3px` 同一手法。
+ */
+[data-active]:focus {
+    outline: var(--qt-focus-ring-width) solid var(--qt-focus-ring);
+    outline-offset: calc(-1 * var(--qt-focus-ring-width));
+}
+
+/*
  * Qt/DAW 风格滚动条（标准 CSS 滚动条属性）。
  *
  * 不用 ::-webkit-scrollbar 自绘：WebView2/Chromium 在分数设备缩放
