@@ -1367,7 +1367,6 @@ export const zhCN = {
     search_translit_long_vowel: "日文长音",
     search_translit_choseong: "韩文初声",
     search_show_match_reason: "显示匹配原因",
-    search_open_settings: "在设置中管理...",
     search_regex_disables_translit: "正则模式下不启用转写匹配",
     search_matched_literal: "匹配原文 {form}",
     search_matched_pinyin: "匹配拼音 {form}",

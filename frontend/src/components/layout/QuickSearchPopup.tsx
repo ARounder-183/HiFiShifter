@@ -12,14 +12,13 @@ import {
 import type { Keybinding } from "../../features/keybindings";
 import { searchFilesRecursive } from "../../features/fileBrowser/fileBrowserSlice";
 import { searchOptionsPayload } from "../../features/search/searchSettings";
-import { SearchModeMenu } from "./search/SearchModeMenu";
+import { SearchTranslitToggle } from "./search/SearchTranslitToggle";
 import { matchReasonOf } from "./search/matchReason";
 import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
 import { importAudioAtPosition } from "../../features/session/thunks/importThunks";
 import {
     persistUiSettings,
     setSearchSettings,
-    setSearchSettingsDialogOpen,
     toggleQuickSearchAutoNormalize,
 } from "../../features/session/sessionSlice";
 import type { FileEntry } from "../../services/api/fileBrowser";
@@ -468,8 +467,9 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         }}
                         icon=".*"
                     />
-                    {/* 匹配方式（转写 / 宽严） */}
-                    <SearchModeMenu
+                    {/* 拼音匹配开关（与两侧的正则 / 仅媒体同为「点击 = 开/关」） */}
+                    <SearchTranslitToggle
+                        size={20}
                         settings={searchSettings}
                         onChange={(patch) => {
                             dispatch(setSearchSettings(patch));
@@ -477,10 +477,6 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                             focusSearchInput();
                         }}
                         regexActive={regexEnabled}
-                        onOpenSettings={() => {
-                            onClose();
-                            dispatch(setSearchSettingsDialogOpen(true));
-                        }}
                     />
                     {/* 排序 */}
                     <AppSelect

@@ -1546,7 +1546,6 @@ export const enUS = {
     search_translit_long_vowel: "Japanese long vowels",
     search_translit_choseong: "Korean choseong",
     search_show_match_reason: "Show why a result matched",
-    search_open_settings: "Manage in settings...",
     search_regex_disables_translit: "Transliteration is off in regex mode",
     search_matched_literal: "Matched text {form}",
     search_matched_pinyin: "Matched pinyin {form}",

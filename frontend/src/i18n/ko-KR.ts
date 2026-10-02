@@ -1495,7 +1495,6 @@ export const koKR = {
     search_translit_long_vowel: "일본어 장음",
     search_translit_choseong: "한국어 초성",
     search_show_match_reason: "일치 이유 표시",
-    search_open_settings: "설정에서 관리...",
     search_regex_disables_translit: "정규식 모드에서는 변환 일치를 사용하지 않습니다",
     search_matched_literal: "원문 일치 {form}",
     search_matched_pinyin: "병음 일치 {form}",

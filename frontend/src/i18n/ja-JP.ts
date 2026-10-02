@@ -1420,7 +1420,6 @@ export const jaJP = {
     search_translit_long_vowel: "日本語の長音",
     search_translit_choseong: "韓国語の初声",
     search_show_match_reason: "一致理由を表示",
-    search_open_settings: "設定で管理...",
     search_regex_disables_translit: "正規表現モードでは変換マッチを無効にします",
     search_matched_literal: "原文に一致 {form}",
     search_matched_pinyin: "拼音に一致 {form}",

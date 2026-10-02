@@ -1369,7 +1369,6 @@ export const zhTW = {
     search_translit_long_vowel: "日文長音",
     search_translit_choseong: "韓文初聲",
     search_show_match_reason: "顯示匹配原因",
-    search_open_settings: "在設定中管理...",
     search_regex_disables_translit: "正規表示式模式下不啟用轉寫匹配",
     search_matched_literal: "匹配原文 {form}",
     search_matched_pinyin: "匹配拼音 {form}",
