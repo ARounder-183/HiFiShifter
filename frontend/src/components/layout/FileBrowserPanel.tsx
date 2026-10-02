@@ -300,7 +300,11 @@ export const FileBrowserPanel: React.FC = () => {
 
     // 媒体过滤（搜索模式下由后端的 includeDirs 承担，见 fileBrowserSearchOptions）
     const mediaFilteredEntries = useMemo(
-        () => visibleFileBrowserEntries(regexFilteredEntries, { isSearchMode, mediaOnly: view.mediaOnly }),
+        () =>
+            visibleFileBrowserEntries(regexFilteredEntries, {
+                isSearchMode,
+                mediaOnly: view.mediaOnly,
+            }),
         [regexFilteredEntries, isSearchMode, view.mediaOnly],
     );
 

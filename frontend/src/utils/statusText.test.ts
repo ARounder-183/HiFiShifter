@@ -15,11 +15,8 @@ const t = (key: string, _count?: number) => key;
 
 describe("目录导入的汇总状态行", () => {
     it("解析成两个数量的模板", () => {
-        const text = resolveStatusText(
-            "Folder import: 47 imported, 3 failed",
-            {},
-            (key) =>
-                key === "status_folder_import_summary" ? "已导入 {m} 个，{n} 个无法导入" : key,
+        const text = resolveStatusText("Folder import: 47 imported, 3 failed", {}, (key) =>
+            key === "status_folder_import_summary" ? "已导入 {m} 个，{n} 个无法导入" : key,
         );
         expect(text).toBe("已导入 47 个，3 个无法导入");
     });
@@ -38,8 +35,6 @@ describe("目录导入的汇总状态行", () => {
     });
 
     it("认不出的状态原样返回，不猜", () => {
-        expect(resolveStatusText("Something odd happened", {}, t)).toBe(
-            "Something odd happened",
-        );
+        expect(resolveStatusText("Something odd happened", {}, t)).toBe("Something odd happened");
     });
 });

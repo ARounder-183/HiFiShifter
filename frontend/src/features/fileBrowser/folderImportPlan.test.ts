@@ -9,10 +9,7 @@
 import { describe, expect, test } from "vitest";
 
 import type { FolderMediaGroup } from "../../services/api/fileBrowser";
-import {
-    buildFolderImportPlan,
-    shouldPromptFolderImport,
-} from "./folderImportPlan";
+import { buildFolderImportPlan, shouldPromptFolderImport } from "./folderImportPlan";
 import {
     DEFAULT_FOLDER_IMPORT_OPTIONS,
     FOLDER_IMPORT_MODES,
@@ -33,9 +30,7 @@ function shape(node: {
     return {
         name: node.name,
         files: node.files,
-        children: node.children.map((child) =>
-            shape(child as Parameters<typeof shape>[0]),
-        ),
+        children: node.children.map((child) => shape(child as Parameters<typeof shape>[0])),
     };
 }
 
@@ -168,9 +163,9 @@ describe("shouldPromptFolderImport", () => {
     });
 
     test("显式要求 → 必弹", () => {
-        expect(
-            shouldPromptFolderImport({ hasSubdirs: false, truncated: false, force: true }),
-        ).toBe(true);
+        expect(shouldPromptFolderImport({ hasSubdirs: false, truncated: false, force: true })).toBe(
+            true,
+        );
     });
 });
 

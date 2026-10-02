@@ -656,10 +656,7 @@ const FOLDER_IMPORT_PROGRESS_THRESHOLD = 12;
  */
 export const importFolderAtPosition = createAsyncThunk(
     "session/importFolderAtPosition",
-    async (
-        payload: ImportFolderAtPositionPayload,
-        { dispatch, rejectWithValue, getState },
-    ) => {
+    async (payload: ImportFolderAtPositionPayload, { dispatch, rejectWithValue, getState }) => {
         const { roots, looseFiles, orderedFiles, mode, createFolderTracks, startSec = 0 } = payload;
         const useFolderTracks = mode === "across-tracks" && createFolderTracks && roots.length > 0;
 
@@ -672,10 +669,6 @@ export const importFolderAtPosition = createAsyncThunk(
                     startSec,
                 }),
             ).unwrap();
-        }
-
-        if (orderedFiles.length === 0) {
-            return { ok: true, imported: null, newClipIds: [] as string[], playheadSec: startSec };
         }
 
         // 展平成"父在子前"的下标序列（`add_track_tree` 的要求）。
@@ -700,6 +693,11 @@ export const importFolderAtPosition = createAsyncThunk(
         // 散文件各建一条根轨道：与"每个目录一条根轨道"同构，不引入第三种规则。
         for (const file of looseFiles) {
             specs.push({ name: fileStem(file), parentIndex: null, files: [file] });
+        }
+
+        // 没有任何可建的轨道（既无目录也无散文件）：没什么可做。
+        if (specs.length === 0) {
+            return { ok: true, imported: null, newClipIds: [] as string[], playheadSec: startSec };
         }
 
         dispatch(checkpointHistory());

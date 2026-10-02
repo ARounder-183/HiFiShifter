@@ -13,10 +13,7 @@
 
 import { describe, expect, test } from "vitest";
 
-import {
-    fileBrowserSearchOptions,
-    visibleFileBrowserEntries,
-} from "./fileBrowserSearchOptions";
+import { fileBrowserSearchOptions, visibleFileBrowserEntries } from "./fileBrowserSearchOptions";
 import { DEFAULT_SEARCH_SETTINGS } from "../search/searchSettings";
 import type { FileEntry } from "../../services/api/fileBrowser";
 
@@ -82,7 +79,9 @@ describe("目录列表的媒体过滤", () => {
     ];
 
     test("关闭媒体开关：全部可见", () => {
-        expect(visibleFileBrowserEntries(entries, { isSearchMode: false, mediaOnly: false })).toHaveLength(4);
+        expect(
+            visibleFileBrowserEntries(entries, { isSearchMode: false, mediaOnly: false }),
+        ).toHaveLength(4);
     });
 
     test("开启媒体开关：目录仍在，非媒体文件被滤掉", () => {

@@ -1742,7 +1742,8 @@ export const koKR = {
     folder_import_mode: "배치 방식",
     folder_import_recursive: "하위 폴더의 파일 포함",
     folder_import_create_tracks: "폴더마다 트랙 그룹 만들기",
-    folder_import_create_tracks_hint: "각 폴더가 빈 상위 트랙이 되고, 그 미디어 파일이 하위 트랙이 됩니다.",
+    folder_import_create_tracks_hint:
+        "각 폴더가 빈 상위 트랙이 되고, 그 미디어 파일이 하위 트랙이 됩니다.",
     folder_import_create_tracks_unavailable: "'트랙 간 추가'에서만 사용할 수 있습니다.",
     folder_import_summary_folders: "폴더 {count}개|폴더 {count}개",
     folder_import_summary_files: "미디어 파일 {count}개|미디어 파일 {count}개",

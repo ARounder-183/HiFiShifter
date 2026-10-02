@@ -215,8 +215,7 @@ export const timelineApi = {
     addTrackTree: (payload: {
         nodes: { name: string; parentIndex: number | null }[];
         insertIndex?: number | null;
-    }) =>
-        invoke<AddTrackTreeResult>("add_track_tree", payload.nodes, payload.insertIndex ?? null),
+    }) => invoke<AddTrackTreeResult>("add_track_tree", payload.nodes, payload.insertIndex ?? null),
 
     removeTrack: (trackId: string) => invoke<TimelineResult>("remove_track", trackId),
 

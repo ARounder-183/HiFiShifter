@@ -36,9 +36,7 @@ export interface FileBrowserSearchInput {
  */
 export function fileBrowserSearchOptions(input: FileBrowserSearchInput): SearchOptionsPayload {
     const payload = searchOptionsPayload(input.settings);
-    const base: SearchOptionsPayload = input.regexEnabled
-        ? { ...payload, mode: "off" }
-        : payload;
+    const base: SearchOptionsPayload = input.regexEnabled ? { ...payload, mode: "off" } : payload;
     return {
         ...base,
         includeDirs: !input.mediaOnly,

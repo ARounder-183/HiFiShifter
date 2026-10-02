@@ -212,13 +212,9 @@ describe("partitionDroppedPaths：多文件按类型分类", () => {
 describe("目录准入：isDir 优先于扩展名", () => {
     it("同一路径，作为目录一律是 importFolder", () => {
         expect(detectExternalPathAction("C:/audio/take.wav")).toBe("importAudio");
-        expect(detectExternalPathAction("C:/audio/take.wav", { isDir: true })).toBe(
-            "importFolder",
-        );
+        expect(detectExternalPathAction("C:/audio/take.wav", { isDir: true })).toBe("importFolder");
         // 工程后缀同理：不能因为目录叫 song.hshp 就去打开它。
-        expect(detectExternalPathAction("C:/proj/song.hshp", { isDir: true })).toBe(
-            "importFolder",
-        );
+        expect(detectExternalPathAction("C:/proj/song.hshp", { isDir: true })).toBe("importFolder");
     });
 
     it("没有扩展名的目录也能被认出来（这正是扩展名判据的盲区）", () => {

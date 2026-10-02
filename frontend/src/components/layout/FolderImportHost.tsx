@@ -33,10 +33,7 @@ import {
     importFolderAtPosition,
     type FolderImportTreeNode,
 } from "../../features/session/thunks/importThunks";
-import {
-    persistUiSettings,
-    setFolderImportOptions,
-} from "../../features/session/sessionSlice";
+import { persistUiSettings, setFolderImportOptions } from "../../features/session/sessionSlice";
 import { FolderImportDialog } from "./FolderImportDialog";
 
 /** 计划节点 → thunk 载荷（去掉 `dir`：导入不需要它）。 */

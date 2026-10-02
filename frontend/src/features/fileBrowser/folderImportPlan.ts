@@ -61,7 +61,10 @@ function parentOf(path: string): string | null {
 
 /** 用于比较的路径键：分隔符与大小写归一（Windows 路径不区分大小写）。 */
 function dirKey(path: string): string {
-    return path.replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
+    return path
+        .replace(/[\\/]+$/, "")
+        .replace(/\\/g, "/")
+        .toLowerCase();
 }
 
 function collectOrdered(node: FolderImportPlanNode, out: string[]): void {

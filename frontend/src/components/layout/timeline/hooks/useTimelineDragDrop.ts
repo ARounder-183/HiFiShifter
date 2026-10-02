@@ -283,7 +283,12 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                             tauriDraggedPathRef.current = null;
                             tauriLastDropPathRef.current = null;
                             const kind = detectExternalPathAction(partition.projectPath);
-                            if (kind !== null && kind !== "importAudio" && kind !== "importMidi" && kind !== "importFolder") {
+                            if (
+                                kind !== null &&
+                                kind !== "importAudio" &&
+                                kind !== "importMidi" &&
+                                kind !== "importFolder"
+                            ) {
                                 emitExternalFileAction(kind, partition.projectPath);
                             }
                             return;
@@ -604,7 +609,11 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                                 trackId,
                                 startSec: beat,
                             });
-                        } else if (actionKind && actionKind !== "importAudio" && actionKind !== "importFolder") {
+                        } else if (
+                            actionKind &&
+                            actionKind !== "importAudio" &&
+                            actionKind !== "importFolder"
+                        ) {
                             // rpp / vshp / vsp 工程文件：直接视为对应格式的导入。
                             emitExternalFileAction(actionKind, filePath);
                         } else {
