@@ -1,6 +1,7 @@
 import { invoke } from "../invoke";
 import type { NotebookSettings } from "../../components/layout/notebook/notebookSettings";
 import type { SearchSettings } from "../../features/search/searchSettings";
+import type { FileBrowserViewOptions } from "../../features/fileBrowser/fileBrowserViewOptions";
 import type { DockPersistedSettings } from "../../features/dock/dockSettings";
 import type { TimelineSnapSettings } from "../../features/session/sessionTypes";
 import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
@@ -186,6 +187,8 @@ export interface UiSettings {
     };
     /** 搜索匹配设置（转写 / 宽严 / 各语言子开关）。缺省由前端归一化补默认值。 */
     search?: SearchSettings;
+    /** 文件浏览器视图选项。缺省由前端归一化补默认值。 */
+    fileBrowser?: FileBrowserViewOptions;
     quickSearchAutoNormalize?: boolean;
     /**
      * **新建工程**默认是否保存 UNDO 操作记录数据（默认开启）。

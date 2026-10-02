@@ -36,6 +36,13 @@ import {
     normalizeSearchSettings,
     type SearchSettings,
 } from "../search/searchSettings";
+import {
+    DEFAULT_FILE_BROWSER_VIEW_OPTIONS,
+    DEFAULT_SORT_DESCENDING,
+    migrateLegacyMediaOnly,
+    normalizeFileBrowserViewOptions,
+    type FileBrowserViewOptions,
+} from "../fileBrowser/fileBrowserViewOptions";
 import { modEuclid, resolveLoopMediaDurationSec } from "../../utils/loopRender";
 import { normalizeChannelMode } from "../../utils/channelMode";
 
@@ -235,6 +242,24 @@ const VALID_TIME_UNITS = new Set<TimeUnit>(["barBeats", "barDivisions", "seconds
 const DEFAULT_PRIMARY_TIME_UNIT: TimeUnit = "barBeats";
 const DEFAULT_SECONDARY_TIME_UNIT: TimeUnitChoice = "clock";
 const DEFAULT_RULER_LABEL_SPACING_PX = 110;
+
+/**
+ * 旧的"仅显示媒体文件"存储位置。
+ *
+ * 该键由 `fileBrowserSlice` 写入（`hifishifter.fileBrowser.audioOnly`）。视图选项
+ * 迁到 `UiSettings.fileBrowser` 之后，老用户的偏好在旧键里 —— 读取一次用于迁移，
+ * 之后以配置为准（见 `migrateLegacyMediaOnly`）。
+ */
+const LEGACY_MEDIA_ONLY_KEY = "hifishifter.fileBrowser.audioOnly";
+
+function readLegacyMediaOnly(): string | null {
+    try {
+        return localStorage.getItem(LEGACY_MEDIA_ONLY_KEY);
+    } catch {
+        // 无 localStorage 的环境（node 环境的单测）→ 没有可迁移的旧值。
+        return null;
+    }
+}
 
 export function createDefaultTimelineSnapSettings(): TimelineSnapSettings {
     return {
@@ -489,6 +514,15 @@ export interface SessionState {
     silenceDetectOptions: SilenceDetectSettings;
     /** 搜索匹配设置（转写 / 宽严 / 各语言子开关，持久化到 UiSettings.search） */
     searchSettings: SearchSettings;
+    /**
+     * 文件浏览器视图选项（排序 / 密度 / 隐藏文件 / 详情列 …，持久化到
+     * UiSettings.fileBrowser）。
+     *
+     * 【为什么在 session 而不在 fileBrowser 切片】它随 `app_config.json` 一起备份
+     * 与迁移，与 `searchSettings` 同类；放进 fileBrowser 切片会与
+     * `persistUiSettings` 的大 payload 分家，保存路径变成两条。
+     */
+    fileBrowserView: FileBrowserViewOptions;
     /**
      * 「搜索与匹配设置」对话框是否打开。
      *
@@ -2171,6 +2205,7 @@ const initialState: SessionState = {
     silencePreviewSegments: null,
     silenceDetectOptions: { ...SILENCE_DETECT_DEFAULTS },
     searchSettings: { ...DEFAULT_SEARCH_SETTINGS },
+    fileBrowserView: { ...DEFAULT_FILE_BROWSER_VIEW_OPTIONS },
     searchSettingsDialogOpen: false,
     quickSearchAutoNormalizeEnabled: false,
     saveUndoHistoryByDefault: false,
@@ -2860,6 +2895,26 @@ const sessionSlice = createSlice({
         },
         setSearchSettingsDialogOpen(state, action: PayloadAction<boolean>) {
             state.searchSettingsDialogOpen = action.payload;
+        },
+        /**
+         * 更新文件浏览器视图选项（部分字段；持久化由调用方走 `persistUiSettings`）。
+         *
+         * 合并后统一过一遍 `normalizeFileBrowserViewOptions`：调用点只传改动的那一项，
+         * 非法值（旧配置 / 手改文件）在这里被收敛。
+         *
+         * 【切换排序依据时为什么要连带改方向】"按日期"几乎总是想看最新的，
+         * 沿用上一次的方向会让它默认排成最旧在前。见 `DEFAULT_SORT_DESCENDING`。
+         */
+        setFileBrowserView(state, action: PayloadAction<Partial<FileBrowserViewOptions>>) {
+            const patch = action.payload;
+            const next = normalizeFileBrowserViewOptions({
+                ...state.fileBrowserView,
+                ...patch,
+            });
+            if (patch.sortMode !== undefined && patch.sortDescending === undefined) {
+                next.sortDescending = DEFAULT_SORT_DESCENDING[patch.sortMode];
+            }
+            state.fileBrowserView = next;
         },
         toggleQuickSearchAutoNormalize(state) {
             state.quickSearchAutoNormalizeEnabled = !state.quickSearchAutoNormalizeEnabled;
@@ -3745,6 +3800,16 @@ const sessionSlice = createSlice({
                     state.silenceDetectOptions = { ...state.silenceDetectOptions, ...o };
                 }
                 if (s.search != null) state.searchSettings = normalizeSearchSettings(s.search);
+                /*
+                 * 视图选项：先补一次旧 localStorage 的迁移，再归一化。
+                 *
+                 * 迁移只在配置里**没有** `mediaOnly` 时生效（见
+                 * `migrateLegacyMediaOnly`）—— 否则用户改过新设置后，旧键还在，
+                 * 下次启动又被打回旧值。
+                 */
+                state.fileBrowserView = normalizeFileBrowserViewOptions(
+                    migrateLegacyMediaOnly(s.fileBrowser, readLegacyMediaOnly()),
+                );
                 if (s.quickSearchAutoNormalize != null)
                     state.quickSearchAutoNormalizeEnabled = Boolean(s.quickSearchAutoNormalize);
                 if (s.saveUndoHistoryByDefault != null)
@@ -6685,6 +6750,7 @@ export const {
     setSilencePreview,
     setSilenceDetectOptions,
     setSearchSettings,
+    setFileBrowserView,
     setSearchSettingsDialogOpen,
     toggleQuickSearchAutoNormalize,
     setSaveUndoHistoryByDefault,

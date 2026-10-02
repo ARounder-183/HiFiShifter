@@ -18,6 +18,7 @@ import { searchOptionsPayload } from "../../features/search/searchSettings";
 import { SearchTranslitToggle } from "./search/SearchTranslitToggle";
 import { matchReasonOf } from "./search/matchReason";
 import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
+import { isAudioFile } from "../../features/fileBrowser/fileKinds";
 import { importAudioAtPosition } from "../../features/session/thunks/importThunks";
 import {
     persistUiSettings,
@@ -34,52 +35,6 @@ import {
 import { AppBusy, AppEmptyState, AppIconButton, AppSelect } from "../../ui";
 import { AppForm, AppSwitchRow } from "../../ui/Field";
 import { useShortcutSuppression } from "../../ui/shortcutScope";
-
-/** 支持的音频与视频媒体扩展名（视频按音轨导入） */
-const AUDIO_EXTENSIONS = new Set([
-    "wav",
-    "mp3",
-    "flac",
-    "ogg",
-    "oga",
-    "opus",
-    "aac",
-    "m4a",
-    "aif",
-    "aiff",
-    "wma",
-    "ac3",
-    "eac3",
-    "ape",
-    "wv",
-    "mp2",
-    "mpa",
-    "dts",
-    "amr",
-    "mp4",
-    "m4v",
-    "mov",
-    "mkv",
-    "webm",
-    "avi",
-    "flv",
-    "wmv",
-    "ts",
-    "mts",
-    "m2ts",
-    "vob",
-    "mpg",
-    "mpeg",
-    "3gp",
-    "3g2",
-    "ogv",
-    "rm",
-    "rmvb",
-]);
-
-function isAudioFile(entry: FileEntry): boolean {
-    return !entry.isDir && !!entry.extension && AUDIO_EXTENSIONS.has(entry.extension);
-}
 
 interface QuickSearchPopupProps {
     open: boolean;

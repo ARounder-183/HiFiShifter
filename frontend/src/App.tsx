@@ -149,9 +149,12 @@ import { waveformMipmapStore } from "./utils/waveformMipmapStore";
 import { projectApi, type AutoBackupSettings } from "./services/api/project";
 import type { ParamFramesPayload, ProcessorParamDescriptor } from "./types/api";
 import {
+    IMPORT_MIDI_PATH_EVENT,
+    IMPORT_PROJECT_PICK_EVENT,
     OPEN_PROJECT_PATH_EVENT,
     type ExternalFileActionDetail,
     type ExternalFileActionKind,
+    type ImportMidiRequestDetail,
 } from "./features/session/projectOpenEvents";
 import { detectExternalPathAction } from "./components/layout/timeline/dnd";
 import type { MessageKey } from "./i18n/messages";
@@ -1977,12 +1980,35 @@ function AppInner() {
             setProjectImportPick({ open: true, path });
         }
 
-        window.addEventListener("hifi:importProjectPick", onImportProjectPick as EventListener);
+        window.addEventListener(IMPORT_PROJECT_PICK_EVENT, onImportProjectPick as EventListener);
         return () => {
             window.removeEventListener(
-                "hifi:importProjectPick",
+                IMPORT_PROJECT_PICK_EVENT,
                 onImportProjectPick as EventListener,
             );
+        };
+    }, []);
+
+    /*
+     * 文件浏览器右键「导入 MIDI…」：MIDI 导入对话框的十余项选项状态都由本组件持有
+     * （见 `midiClip*` 一组 state），只有它能在任何面板布局下渲染那个对话框。
+     * 文件浏览器因此只发一条请求，这里接住并用自己的默认值打开。
+     */
+    useEffect(() => {
+        function onImportMidi(event: Event) {
+            const detail = (event as CustomEvent<ImportMidiRequestDetail>).detail;
+            const path = String(detail?.path ?? "").trim();
+            if (!path) return;
+            setMidiClipPath(path);
+            setMidiClipStartSec(detail?.startSec ?? 0);
+            setMidiClipTrackId(detail?.trackId ?? null);
+            setMidiClipClipboardGuid(null);
+            setMidiClipDialogOpen(true);
+        }
+
+        window.addEventListener(IMPORT_MIDI_PATH_EVENT, onImportMidi as EventListener);
+        return () => {
+            window.removeEventListener(IMPORT_MIDI_PATH_EVENT, onImportMidi as EventListener);
         };
     }, []);
 

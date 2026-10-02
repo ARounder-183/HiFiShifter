@@ -87,6 +87,7 @@ export const persistUiSettings = createAsyncThunk(
             metronomeSound: s.metronomeSound,
             silenceDetectOptions: s.silenceDetectOptions,
             search: s.searchSettings,
+            fileBrowser: s.fileBrowserView,
             quickSearchAutoNormalize: s.quickSearchAutoNormalizeEnabled,
             saveUndoHistoryByDefault: s.saveUndoHistoryByDefault,
             visibleReferenceRootTrackIds: s.visibleReferenceRootTrackIds,
