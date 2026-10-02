@@ -12,7 +12,12 @@
  * 以及行内边距三种：`py-[3px]`、`py-[4px]`、Radix `py="1"`。
  *
  * 本原语把这两个状态各归一为一档：悬停 10%、选中 22%，行高与内边距取令牌。
- * 选中态额外加 `data-selected` 供外部的键盘导航样式挂钩。
+ * 选中态额外加 `data-selected` 供外部样式挂钩。
+ *
+ * 【键盘光标是第三个状态，走另一条通道】`active` 表示"键盘现在停在哪一行"
+ * （roving tabindex 的活动行），它**不是**选中态：选中可能是 0..N 个，光标恒为
+ * 一个。背景通道已被 hover/selected/playing 占满，再挤一档就分不出来，因此
+ * 光标用 1px 内嵌强调色描边（边框通道）表达 —— 与背景正交，可叠加且各自可辨。
  */
 import { forwardRef } from "react";
 import type {
@@ -30,6 +35,20 @@ export interface AppListRowProps {
     children: ReactNode;
     /** 选中态。 */
     selected?: boolean;
+    /**
+     * 键盘光标所在行（listbox 的 "active option"）。
+     *
+     * 【为什么与 `selected` 分开】两者是独立的两件事：`selected` 是"哪些被选中"
+     * （可能 0..N 个，由鼠标 Ctrl/Shift 决定），`active` 是"键盘现在停在哪一行"
+     * （恒为 0 或 1 个）。文件浏览器此前把 `selected` 接给鼠标多选、键盘光标没有
+     * 表达，于是 ↑↓ 只能借用浏览器给 `<div tabindex>` 画的默认 outline ——
+     * 一圈紧贴内容盒、与行内边距不对齐的深色 halo。
+     *
+     * 【为什么用描边而不是再挤一档背景色】背景通道已经被 hover(10%) /
+     * selected(22%) / playing(20%) 占满，再挤一档就分不出来。描边走**边框通道**，
+     * 与背景正交，可以叠加且各自可辨。
+     */
+    active?: boolean;
     /** 悬停/选中时的强调基调，`danger` 用于破坏性目标的悬停反馈。 */
     intent?: "default" | "danger";
     density?: AppListRowDensity;
@@ -89,6 +108,7 @@ export const AppListRow = forwardRef<HTMLDivElement, AppListRowProps>(function A
     {
         children,
         selected = false,
+        active = false,
         intent = "default",
         density = "compact",
         disabled = false,
@@ -120,6 +140,7 @@ export const AppListRow = forwardRef<HTMLDivElement, AppListRowProps>(function A
             aria-disabled={disabled || undefined}
             tabIndex={tabIndex}
             data-selected={selected || undefined}
+            data-active={active || undefined}
             data-tooltip={tooltip}
             title={title}
             style={style}
@@ -134,6 +155,11 @@ export const AppListRow = forwardRef<HTMLDivElement, AppListRowProps>(function A
                 DENSITY_CLASS[density],
                 interactive && !disabled && "cursor-pointer",
                 disabled && "cursor-default opacity-50",
+                // 键盘光标走描边通道：先关掉浏览器给可聚焦元素的默认 outline
+                // （在 22px 行上那是一圈与内边距不对齐的脏 halo），再画自己的。
+                "focus:outline-none",
+                active &&
+                    "outline outline-1 outline-offset-[-1px] outline-[color:var(--qt-focus-ring)]",
                 intent === "danger"
                     ? "hover:bg-qt-danger-bg hover:text-qt-danger-text"
                     : "hover:bg-[color-mix(in_oklab,var(--qt-highlight)_10%,transparent)]",

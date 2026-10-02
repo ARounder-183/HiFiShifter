@@ -484,6 +484,32 @@ export const FileBrowserPanel: React.FC = () => {
         setActiveIndex(index);
     }, []);
 
+    /**
+     * 把键盘光标移到第 `index` 行并聚焦它。
+     *
+     * 【为什么要显式滚动】裸 `focus()` 会让浏览器用自己的算法把行滚进视口，
+     * 在 Radix ScrollArea 里表现为整块跳变。`block: "nearest"` 是最小滚动 ——
+     * 行已在视口内就完全不动。这是全仓既有做法（QuickSearchPopup / UndoHistoryPanel
+     * / KeybindingsDialog 三处），文件浏览器此前是唯一没接的。
+     *
+     * 【为什么滚动要包 try/catch】jsdom 没有布局实现，`scrollIntoView` 在单测里
+     * 会抛（KeybindingsDialog 同样处理）。焦点移动才是语义要求，滚动只是观感，
+     * 因此让滚动失败不阻断聚焦。
+     *
+     * 【为什么 focus 带 preventScroll】滚动已由上一行显式完成，再让浏览器在聚焦时
+     * 滚一次会与它抢，产生二次跳动。
+     */
+    const focusRow = useCallback((index: number) => {
+        const el = rowRefs.current[index];
+        if (!el) return;
+        try {
+            el.scrollIntoView({ block: "nearest" });
+        } catch {
+            /* jsdom 无布局：滚动不是语义要求，忽略 */
+        }
+        el.focus({ preventScroll: true });
+    }, []);
+
     // 获取仅音频的列表用于 shift-range 选择
     const audioEntries = useMemo(() => displayEntries.filter(isAudioFile), [displayEntries]);
 
@@ -553,7 +579,7 @@ export const FileBrowserPanel: React.FC = () => {
                 const next = nextActiveIndex(activeIndex, event.key, displayEntries.length);
                 if (next < 0) return;
                 setActiveIndex(next);
-                rowRefs.current[next]?.focus();
+                focusRow(next);
                 return;
             }
             if (isFileListActivationKey(event.key)) {
@@ -617,9 +643,9 @@ export const FileBrowserPanel: React.FC = () => {
             if (result.index == null) return;
             event.preventDefault();
             setActiveIndex(result.index);
-            rowRefs.current[result.index]?.focus();
+            focusRow(result.index);
         },
-        [entryNames, activeIndex],
+        [entryNames, activeIndex, focusRow],
     );
 
     // 列表内容变化（搜索、排序、过滤）后，活动行可能越界：收回为"无活动行"。
@@ -1028,6 +1054,7 @@ export const FileBrowserPanel: React.FC = () => {
                                 entry={entry}
                                 index={index}
                                 tabIndex={index === tabbableIndex ? 0 : -1}
+                                active={index === activeIndex}
                                 onFocus={handleRowFocus}
                                 registerRowRef={registerRowRef}
                                 isPlaying={fb.previewingFile === entry.path}
@@ -1103,6 +1130,8 @@ interface FileEntryRowProps {
     index: number;
     /** roving tabindex：活动行为 0，其余为 -1。 */
     tabIndex: number;
+    /** 该行是否是键盘光标所在行（走描边通道，与 `isSelected` 的背景通道正交）。 */
+    active: boolean;
     onFocus: (index: number) => void;
     registerRowRef: (index: number, el: HTMLDivElement | null) => void;
     isPlaying: boolean;
@@ -1124,6 +1153,7 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
         entry,
         index,
         tabIndex,
+        active,
         onFocus,
         registerRowRef,
         isPlaying,
@@ -1149,6 +1179,7 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                 ref={(el) => registerRowRef(index, el)}
                 role="option"
                 selected={isSelected}
+                active={active}
                 disabled={isInert}
                 tabIndex={tabIndex}
                 onFocus={() => onFocus(index)}

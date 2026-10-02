@@ -139,19 +139,34 @@ afterEach(() => {
 
 /**
  * 复现 `FileBrowserPanel` listbox 的接线：同一 helper、同一 `AppListRow` 行原语、
- * 同样的 roving tabindex 与键盘分支（含 `nextTypeAhead` 的 type-ahead 接线）。
+ * 同样的 roving tabindex 与键盘分支（含 `nextTypeAhead` 的 type-ahead 接线），
+ * 以及同样的 `focusRow`（`scrollIntoView` + `focus({preventScroll})`）。
  * 只把"进入目录 / 试听"替换成回调。
  */
 function ListboxHarness({
     entries,
     onActivate,
+    selectedIndexes = [],
 }: {
     entries: string[];
     onActivate: (index: number) => void;
+    /** 模拟鼠标多选集合：与键盘光标是两条独立通道，用于断言两者互不覆盖。 */
+    selectedIndexes?: number[];
 }) {
     const [activeIndex, setActiveIndex] = useState(-1);
     const rowRefs = useRef<(HTMLDivElement | null)[]>([]);
     const typeAheadBufferRef = useRef("");
+
+    const focusRow = (index: number) => {
+        const el = rowRefs.current[index];
+        if (!el) return;
+        try {
+            el.scrollIntoView({ block: "nearest" });
+        } catch {
+            /* jsdom 无布局 */
+        }
+        el.focus({ preventScroll: true });
+    };
 
     const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
         if (isFileListNavKey(event.key)) {
@@ -159,7 +174,7 @@ function ListboxHarness({
             const next = nextActiveIndex(activeIndex, event.key, entries.length);
             if (next < 0) return;
             setActiveIndex(next);
-            rowRefs.current[next]?.focus();
+            focusRow(next);
             return;
         }
         if (isFileListActivationKey(event.key) && activeIndex >= 0) {
@@ -176,7 +191,7 @@ function ListboxHarness({
         if (result.index == null) return;
         event.preventDefault();
         setActiveIndex(result.index);
-        rowRefs.current[result.index]?.focus();
+        focusRow(result.index);
     };
 
     return (
@@ -185,7 +200,8 @@ function ListboxHarness({
                 <AppListRow
                     key={name}
                     role="option"
-                    selected={index === activeIndex}
+                    selected={selectedIndexes.includes(index)}
+                    active={index === activeIndex}
                     tabIndex={index === (activeIndex >= 0 ? activeIndex : 0) ? 0 : -1}
                     onFocus={() => setActiveIndex(index)}
                     ref={(el) => {
@@ -220,6 +236,17 @@ function tabIndexes(): number[] {
     return rows().map((row) => row.tabIndex);
 }
 
+/**
+ * 每行是否携带键盘光标标记。
+ *
+ * 【为什么断言 `data-active` 而不是 `aria-selected`】多选 listbox 里"键盘光标行"
+ * 与"选中行"是两件事：光标恒为一个、选中可为 0..N 个。把光标行报成
+ * `aria-selected="true"` 会让读屏把未选中的行念成已选中。光标有自己的属性。
+ */
+function activeFlags(): boolean[] {
+    return rows().map((row) => row.dataset.active === "true");
+}
+
 test("listbox 接线：ArrowDown 移动活动行，Enter 激活该行", () => {
     const onActivate = vi.fn();
     act(() => {
@@ -229,22 +256,51 @@ test("listbox 接线：ArrowDown 移动活动行，Enter 激活该行", () => {
     expect(rows()).toHaveLength(3);
     // 无活动行时首行可 Tab 进入（roving tabindex 的起点）。
     expect(tabIndexes()).toEqual([0, -1, -1]);
+    expect(activeFlags()).toEqual([false, false, false]);
 
     // 方向键必须 preventDefault，否则容器会跟着滚动。
     expect(press("ArrowDown")).toBe(true);
     expect(tabIndexes()).toEqual([0, -1, -1]);
-    expect(rows()[0].getAttribute("aria-selected")).toBe("true");
+    expect(activeFlags()).toEqual([true, false, false]);
 
     // 再下移一格：活动行移到第二行。
     press("ArrowDown");
     expect(tabIndexes()).toEqual([-1, 0, -1]);
-    expect(rows()[1].getAttribute("aria-selected")).toBe("true");
-    expect(rows()[0].getAttribute("aria-selected")).toBe("false");
+    expect(activeFlags()).toEqual([false, true, false]);
 
     // Enter 激活当前活动行（第二行）。
     expect(press("Enter")).toBe(true);
     expect(onActivate).toHaveBeenCalledTimes(1);
     expect(onActivate).toHaveBeenCalledWith(1);
+});
+
+test("键盘光标与多选选中是两条独立通道，互不覆盖", () => {
+    act(() => {
+        root.render(
+            <ListboxHarness
+                entries={["a", "b", "c"]}
+                onActivate={vi.fn()}
+                // 鼠标 Ctrl+点击选了首末两行。
+                selectedIndexes={[0, 2]}
+            />,
+        );
+    });
+
+    // 选中态由 `data-selected` 表达，光标态由 `data-active` 表达。
+    expect(rows().map((row) => row.dataset.selected === "true")).toEqual([true, false, true]);
+    expect(activeFlags()).toEqual([false, false, false]);
+
+    // 光标移到第二行：它既不是选中行、也不影响已选中的两行。
+    press("ArrowDown");
+    press("ArrowDown");
+    expect(activeFlags()).toEqual([false, true, false]);
+    expect(rows().map((row) => row.dataset.selected === "true")).toEqual([true, false, true]);
+
+    // 光标行的视觉来自描边通道（outline），而不是再叠一层背景色。
+    expect(rows()[1].className).toContain("outline");
+    expect(rows()[1].className).toContain("focus:outline-none");
+    // 未成为光标的选中行不应被误加描边。
+    expect(rows()[0].className).not.toContain("outline-[color:var(--qt-focus-ring)]");
 });
 
 test("listbox 接线：End 跳到末行后 Enter 激活末行", () => {
@@ -255,6 +311,7 @@ test("listbox 接线：End 跳到末行后 Enter 激活末行", () => {
 
     press("End");
     expect(tabIndexes()).toEqual([-1, -1, 0]);
+    expect(activeFlags()).toEqual([false, false, true]);
     press("Enter");
     expect(onActivate).toHaveBeenCalledWith(2);
 });
@@ -282,12 +339,33 @@ test("listbox 接线：输入字母跳到前缀匹配的行，无匹配不动", 
     // 输入 f：跳到第一个 f 开头的行并聚焦（focus 会同步活动行）。
     expect(press("f")).toBe(true);
     expect(document.activeElement).toBe(rows()[2]);
+    expect(activeFlags()).toEqual([false, false, true, false]);
 
-    // 无匹配（fz）不跳转，也不消费按键。
+    // 无匹配（fz）不跳转，也不消费按键，光标停在原地。
     expect(press("z")).toBe(false);
     expect(document.activeElement).toBe(rows()[2]);
+    expect(activeFlags()).toEqual([false, false, true, false]);
 
     // 再按 f：同字母连按 → 退回单字母从下一行找 → fa2。
     expect(press("f")).toBe(true);
     expect(document.activeElement).toBe(rows()[3]);
+    expect(activeFlags()).toEqual([false, false, false, true]);
+});
+
+test("focusRow 在无布局环境下不抛（jsdom 没有 scrollIntoView 实现）", () => {
+    const scrollIntoView = Element.prototype.scrollIntoView;
+    // 模拟 jsdom：`scrollIntoView` 未实现 / 抛错。
+    Element.prototype.scrollIntoView = () => {
+        throw new Error("not implemented");
+    };
+    try {
+        act(() => {
+            root.render(<ListboxHarness entries={["a", "b"]} onActivate={vi.fn()} />);
+        });
+        // 滚动失败不得阻断聚焦 —— 焦点移动才是语义要求。
+        expect(() => press("ArrowDown")).not.toThrow();
+        expect(document.activeElement).toBe(rows()[0]);
+    } finally {
+        Element.prototype.scrollIntoView = scrollIntoView;
+    }
 });
