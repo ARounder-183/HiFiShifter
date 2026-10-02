@@ -82,16 +82,19 @@ import { formatModified, formatSize } from "./fileBrowser/formatFile";
 import { FileKindIcon, FolderIcon, MediaIcon } from "./fileBrowser/fileIcons";
 import { FilePropertiesDialog } from "./fileBrowser/FilePropertiesDialog";
 import { FileBrowserViewOptionsDialog } from "./fileBrowser/FileBrowserViewOptionsDialog";
+import { shouldPanelTakeFocus } from "./fileBrowserPanelFocus";
 import {
     TYPE_AHEAD_RESET_MS,
     isFileListActivationKey,
     isFileListNavKey,
     nextActiveIndex,
     nextTypeAhead,
+    rangeIndexes,
+    selectionIntentOf,
+    type FileListSelectionIntent,
 } from "./fileBrowserKeyboardNav";
 
-/**
- * 键盘移动后自动试听的防抖（毫秒）。 */
+/** 键盘移动后自动试听的防抖（毫秒）。 */
 const PREVIEW_NAV_DEBOUNCE_MS = 160;
 
 /** 面板内的行内编辑状态。 */
@@ -372,7 +375,13 @@ export const FileBrowserPanel: React.FC = () => {
 
     // ── 多选状态 ───────────────────────────────────────────────────────────
     const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
-    const lastClickedIndexRef = useRef<number>(-1);
+    /**
+     * 选区锚点：Shift 扩展与 Shift + 点击都从这里算起。
+     *
+     * 普通点击 / 普通方向键会把锚点移到光标处；带 Shift 的操作只读不动它 ——
+     * 这正是资源管理器里「连续 Shift 扩展」的语义。
+     */
+    const selectionAnchorRef = useRef<number>(-1);
 
     // ── 键盘导航（roving tabindex） ─────────────────────────────────────────
     // activeIndex 指向当前活动行（-1 = 尚无）。只有活动行可 Tab 进入（tabIndex=0），
@@ -578,6 +587,17 @@ export const FileBrowserPanel: React.FC = () => {
         [view.previewOnNavigate, previewToggle],
     );
 
+    /** 选区落在闭区间 `[a, b]` 内的全部路径。 */
+    const selectedPathsInRange = useCallback(
+        (a: number, b: number) =>
+            new Set(
+                rangeIndexes(a, b)
+                    .map((i) => displayEntries[i]?.path)
+                    .filter((path): path is string => Boolean(path)),
+            ),
+        [displayEntries],
+    );
+
     /**
      * 单击一行。
      *
@@ -586,9 +606,9 @@ export const FileBrowserPanel: React.FC = () => {
      * 点一个 `.txt` 什么都不发生 —— 而右键菜单却能对它操作，两条路径的可用性
      * 不一致。
      *
-     * 【为什么下标空间必须统一】此前 `lastClickedIndexRef` 记的是 **audioEntries**
-     * 的下标，而键盘光标用的是 displayEntries 的下标；Shift 范围选择因此只在音频
-     * 之间连线，与列表里看到的顺序不是一回事。现在统一用 displayEntries。
+     * 【为什么下标空间必须统一】锚点此前记的是 **audioEntries** 的下标，而键盘
+     * 光标用的是 displayEntries 的下标；Shift 范围选择因此只在音频之间连线，与
+     * 列表里看到的顺序不是一回事。现在统一用 displayEntries。
      */
     const handleRowClick = useCallback(
         (entry: FileEntry, ev: React.MouseEvent) => {
@@ -602,21 +622,13 @@ export const FileBrowserPanel: React.FC = () => {
                     else next.add(entry.path);
                     return next;
                 });
-                lastClickedIndexRef.current = index;
+                selectionAnchorRef.current = index;
                 return;
             }
 
-            if (ev.shiftKey && lastClickedIndexRef.current >= 0) {
+            if (ev.shiftKey && selectionAnchorRef.current >= 0) {
                 // Shift+click：从锚点到这一行的范围选择（含目录，与列表所见一致）
-                const start = Math.min(lastClickedIndexRef.current, index);
-                const end = Math.max(lastClickedIndexRef.current, index);
-                setSelectedPaths((prev) => {
-                    const next = new Set(prev);
-                    for (let i = start; i <= end; i++) {
-                        next.add(displayEntries[i].path);
-                    }
-                    return next;
-                });
+                setSelectedPaths(selectedPathsInRange(selectionAnchorRef.current, index));
                 return;
             }
 
@@ -624,10 +636,10 @@ export const FileBrowserPanel: React.FC = () => {
             // （"再点一次停止"由 `usePreviewToggle` 统一实现：此前这里只有播放
             // 分支，重复点击会从头重放并与在播的旧音源叠加。）
             setSelectedPaths(new Set([entry.path]));
-            lastClickedIndexRef.current = index;
+            selectionAnchorRef.current = index;
             if (isAudioFile(entry)) previewToggle.toggle(entry.path);
         },
-        [displayEntries, previewToggle],
+        [displayEntries, previewToggle, selectedPathsInRange],
     );
 
     /**
@@ -646,11 +658,54 @@ export const FileBrowserPanel: React.FC = () => {
     );
 
     /**
-     * 列表容器的键盘模型：方向键 / Home / End 移动活动行（夹紧，不环绕），
-     * Enter 与空格激活。方向键必须 `preventDefault`，否则 ScrollArea 会跟着滚动。
+     * 把一次按键的**选区意图**应用到当前光标行上。
+     *
+     * 规则见 `selectionIntentOf`：普通方向键替换选区（资源管理器模型）、`Shift`
+     * 从锚点扩展、`Ctrl` 只移动光标、`Ctrl`+空格加/减选。
+     */
+    const applySelectionIntent = useCallback(
+        (intent: FileListSelectionIntent | null, index: number) => {
+            const entry = displayEntries[index];
+            if (!entry || intent === null || intent === "moveOnly") return;
+            if (intent === "extend") {
+                const anchor = selectionAnchorRef.current >= 0 ? selectionAnchorRef.current : index;
+                setSelectedPaths(selectedPathsInRange(anchor, index));
+                return;
+            }
+            if (intent === "toggle") {
+                setSelectedPaths((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(entry.path)) next.delete(entry.path);
+                    else next.add(entry.path);
+                    return next;
+                });
+                selectionAnchorRef.current = index;
+                return;
+            }
+            // replace
+            selectionAnchorRef.current = index;
+            setSelectedPaths(new Set([entry.path]));
+        },
+        [displayEntries, selectedPathsInRange],
+    );
+
+    /**
+     * 列表容器的键盘模型。
+     *
+     * 移动：方向键 / Home / End（夹紧，不环绕）。方向键必须 `preventDefault`，
+     * 否则滚动容器会跟着滚。
+     * 选区：普通方向键 = 移动并选中该行，`Shift` + 方向键 = 从锚点扩展，
+     * `Ctrl` + 方向键 = 只移动光标，`Ctrl` + 空格 = 加/减选（均见 `selectionIntentOf`）。
+     * 激活：Enter / 空格（不带修饰键时）。
      */
     const handleListKeyDown = useCallback(
         (event: React.KeyboardEvent<HTMLDivElement>) => {
+            const intent = selectionIntentOf(event.key, {
+                shift: event.shiftKey,
+                ctrl: event.ctrlKey,
+                meta: event.metaKey,
+            });
+
             if (isFileListNavKey(event.key)) {
                 event.preventDefault();
                 const next = nextActiveIndex(activeIndex, event.key, displayEntries.length);
@@ -658,6 +713,13 @@ export const FileBrowserPanel: React.FC = () => {
                 setActiveIndex(next);
                 focusRow(next);
                 maybePreviewOnNavigate(displayEntries[next]);
+                applySelectionIntent(intent, next);
+                return;
+            }
+            // Ctrl+空格先于激活分支：它带修饰键，语义是"加/减选"而不是"试听"。
+            if (intent === "toggle" && activeIndex >= 0) {
+                event.preventDefault();
+                applySelectionIntent(intent, activeIndex);
                 return;
             }
             if (isFileListActivationKey(event.key)) {
@@ -667,13 +729,38 @@ export const FileBrowserPanel: React.FC = () => {
                 activateEntry(entry);
             }
         },
-        [activeIndex, displayEntries, activateEntry, focusRow, maybePreviewOnNavigate],
+        [
+            activeIndex,
+            displayEntries,
+            activateEntry,
+            applySelectionIntent,
+            focusRow,
+            maybePreviewOnNavigate,
+        ],
     );
+
+    /**
+     * 点击面板里的**非交互区域**时，把焦点收回列表容器。
+     *
+     * 【要修的问题】工具条背景、搜索栏留白、路径栏留白这些地方没有可聚焦元素，
+     * 浏览器会把焦点丢回 `<body>` —— 于是键盘模型整个失效：面板的 keydown 处理器
+     * 挂在面板根上，而 `body` 不是它的后代，事件根本不经过它。用户点一下工具条
+     * 背景再打字，既不会跳转、也不触发任何面板快捷键。
+     *
+     * 【为什么按"目标是否可交互"判断，而不是等浏览器聚焦完再看 activeElement】
+     * 后者要延到下一帧（浏览器在 pointerdown 之后才执行默认聚焦动作），既引入
+     * 时序依赖也不好测。这里显式列出"自己管焦点"的元素：输入框、按钮、下拉、
+     * 列表行、滑杆…只有点在它们之外的留白上才收回焦点。
+     */
+    const handlePanelPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+        if (!shouldPanelTakeFocus(event.target as Element | null)) return;
+        listScrollRef.current?.focus({ preventScroll: true });
+    }, []);
 
     // Clear selection when directory changes
     useEffect(() => {
         setSelectedPaths(new Set());
-        lastClickedIndexRef.current = -1;
+        selectionAnchorRef.current = -1;
         setActiveIndex(-1);
         setEditing(null);
         // 上一次目录里的失败提示（重名 / 非法名）不该跟着走进新目录。
@@ -1405,6 +1492,14 @@ export const FileBrowserPanel: React.FC = () => {
             direction="column"
             className="h-full bg-qt-window text-qt-text select-none"
             onKeyDown={handlePanelKeyDown}
+            onPointerDown={handlePanelPointerDown}
+            /*
+             * 这两个属性挂在**面板根**而不是列表容器上：面板的键盘模型（
+             * `handlePanelKeyDown`）本来就覆盖整个面板 —— 焦点在工具条按钮、路径栏
+             * 留白上时打字同样应该跳转。声明在列表上会让"点过工具条背景之后打不了字"。
+             */
+            data-hs-typeahead="1"
+            data-hs-surface="fileBrowser"
         >
             {/* 工具条：只放本面板**独有**的功能按钮。
                 标题与关闭属于窗框（停靠时是标签行、浮动时是浮动标题栏、独立窗口时
@@ -1693,38 +1788,27 @@ export const FileBrowserPanel: React.FC = () => {
                 className="hs-scroll-gutter flex-1 min-h-0 overflow-y-auto"
                 onScroll={handleListScroll}
                 /*
-                 * 键盘模型挂在这一层而不是内层 listbox 上。
+                 * listbox 角色挂在**滚动容器**上（内层只是 `role="presentation"` 的
+                 * 排版壳）。
                  *
-                 * 【为什么】窗口滑动会把正在聚焦的行移出 DOM，浏览器随之把焦点丢回
-                 * `<body>`。下面的恢复逻辑把焦点收到**本容器**（`tabIndex={-1}`），
-                 * 于是方向键仍然需要在这里被接住 —— 若处理器留在内层 div 上，事件
-                 * 从容器发出时根本不会经过它，列表会显得"突然按不动了"。
+                 * 【为什么】`listbox` 同时是"这个表面拥有方向键"的判据
+                 * （`useKeybindings` 的 ARROW_OWNING_SELECTOR）与"焦点落点"。
+                 * 角色挂在里层时，焦点在容器上（点面板留白后就是这样）就找不到
+                 * 归属，方向键会漏给全局绑定。挂在容器上则两种焦点位置都成立；
+                 * `presentation` 让里层壳在无障碍树里透明，选项仍是 listbox 的直接子项。
                  */
-                tabIndex={showEntries ? -1 : undefined}
+                role={showEntries ? "listbox" : undefined}
+                aria-label={showEntries ? tf("fb_file_list") : undefined}
+                // 列表本就支持 Ctrl/Shift 多选，声明多选语义以免读屏按单选播报。
+                aria-multiselectable={showEntries ? true : undefined}
+                // 始终可聚焦：面板里点在没有焦点的空白处时，焦点要落回这里
+                // （见 handlePanelPointerDown），键盘模型才活得起来。
+                tabIndex={-1}
                 onKeyDown={showEntries ? handleListKeyDown : undefined}
-                /*
-                 * 声明"本表面自己实现输入式快速跳转"：全局快捷键分发器据此让出
-                 * 未修饰的可打印字符与 Enter。否则打字会被 `d`（参数拖拽方向）、
-                 * `s`（分割片段）、`k`（节拍器）这类单键全局绑定先截走，Enter 也会
-                 * 去停播放而不是打开文件夹 —— 因为分发器在 window 捕获阶段就
-                 * `stopPropagation()` 了。
-                 * 见 `features/keybindings/useKeybindings.ts` 的 TYPEAHEAD_OWNER_SELECTOR。
-                 */
-                data-hs-typeahead="1"
-                /*
-                 * 登记为"活动编辑表面"：分发器除了看按键落在哪，还要确认**用户此刻
-                 * 就在这个表面里**。时间轴 / 参数编辑器刻意保留 DOM 焦点，点击它们之后
-                 * 焦点会滞留在文件列表的某一行上 —— 只按焦点判断会把时间轴的按键抢过来。
-                 * 见 `features/uiFocus/focusSurface.ts`。
-                 */
-                data-hs-surface="fileBrowser"
             >
                 <div
                     className="py-1"
-                    role={showEntries ? "listbox" : undefined}
-                    aria-label={showEntries ? tf("fb_file_list") : undefined}
-                    // 列表本就支持 Ctrl/Shift 多选，声明多选语义以免读屏按单选播报。
-                    aria-multiselectable={showEntries ? true : undefined}
+                    role={showEntries ? "presentation" : undefined}
                     onContextMenu={handleBackgroundContextMenu}
                 >
                     {fb.loading ? (

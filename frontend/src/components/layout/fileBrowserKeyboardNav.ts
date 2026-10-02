@@ -53,6 +53,58 @@ export function nextActiveIndex(current: number, key: string, count: number): nu
     }
 }
 
+// ── 选区意图（与资源管理器一致） ─────────────────────────────────────────
+
+/**
+ * 一次列表按键对**选区**的意图。
+ *
+ * - `replace`：把选区换成光标那一行（资源管理器里普通方向键就是这样）
+ * - `extend`：从锚点扩展到光标（`Shift` + 方向键）
+ * - `moveOnly`：只移动光标，选区不动（`Ctrl` + 方向键）
+ * - `toggle`：把光标那一行加入 / 移出选区（`Ctrl` + 空格）
+ * - `null`：这个按键不改变选区
+ */
+export type FileListSelectionIntent = "replace" | "extend" | "moveOnly" | "toggle";
+
+/**
+ * 计算按键对选区的意图。
+ *
+ * 【为什么普通方向键是 `replace` 而不是"不动"】此前刻意让方向键只移动光标、不碰
+ * 选区，理由是"用户 Shift 选了 5 条准备批量导入，按一下 ↓ 选区就没了"。但那让面板
+ * 与资源管理器不一致，而且有实际后果：**光标移到某一行后按 Delete / F2 / Ctrl+C
+ * 作用的是旧选区**（甚至是空选区）—— 用户看着光标停在那里，操作却落在别处。
+ * 资源管理器的模型（方向键 = 移动并选中，`Ctrl` + 方向键 = 只移动）没有这个问题，
+ * 也让下面两条修饰键有了明确含义。
+ */
+export function selectionIntentOf(
+    key: string,
+    modifiers: { shift: boolean; ctrl: boolean; meta: boolean },
+): FileListSelectionIntent | null {
+    const isNav = isFileListNavKey(key);
+    if (modifiers.ctrl || modifiers.meta) {
+        if (isNav) return "moveOnly";
+        return key === " " ? "toggle" : null;
+    }
+    if (!isNav) return null;
+    return modifiers.shift ? "extend" : "replace";
+}
+
+/**
+ * 闭区间 `[a, b]` 内的全部下标（顺序无关）。
+ *
+ * 供 `Shift` 扩展选区用 —— 锚点可能在光标之上或之下。
+ * 任一端为负（尚无锚点 / 尚无光标）时返回空数组：调用方在这种情况下应当先取
+ * 一个有效锚点，而不是把 `-1` 当成第 0 行。
+ */
+export function rangeIndexes(a: number, b: number): number[] {
+    if (a < 0 || b < 0) return [];
+    const start = Math.min(a, b);
+    const end = Math.max(a, b);
+    const out: number[] = [];
+    for (let i = start; i <= end; i += 1) out.push(i);
+    return out;
+}
+
 // ── 输入字母快速跳转（type-ahead，与资源管理器一致） ─────────────────────
 
 /**

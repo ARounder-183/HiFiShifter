@@ -25,6 +25,8 @@ import {
     isFileListNavKey,
     nextActiveIndex,
     nextTypeAhead,
+    rangeIndexes,
+    selectionIntentOf,
 } from "./fileBrowserKeyboardNav";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -71,6 +73,50 @@ test("按键分类：导航键与激活键", () => {
     expect(isFileListActivationKey(" ")).toBe(true);
     expect(isFileListActivationKey("Escape")).toBe(false);
     expect(isFileListNavKey("Enter")).toBe(false);
+});
+
+// ── 纯函数：选区意图（与资源管理器一致） ─────────────────────────────────
+
+const NO_MODS = { shift: false, ctrl: false, meta: false };
+
+test("普通方向键替换选区（资源管理器模型）", () => {
+    for (const key of ["ArrowDown", "ArrowUp", "Home", "End"]) {
+        expect(selectionIntentOf(key, NO_MODS)).toBe("replace");
+    }
+});
+
+test("Shift + 方向键从锚点扩展", () => {
+    for (const key of ["ArrowDown", "ArrowUp", "Home", "End"]) {
+        expect(selectionIntentOf(key, { ...NO_MODS, shift: true })).toBe("extend");
+    }
+});
+
+test("Ctrl / Cmd + 方向键只移动光标，不动选区", () => {
+    for (const key of ["ArrowDown", "ArrowUp", "Home", "End"]) {
+        expect(selectionIntentOf(key, { ...NO_MODS, ctrl: true })).toBe("moveOnly");
+        expect(selectionIntentOf(key, { ...NO_MODS, meta: true })).toBe("moveOnly");
+    }
+});
+
+test("Ctrl + 空格是加/减选；裸空格与字母不改变选区", () => {
+    expect(selectionIntentOf(" ", { ...NO_MODS, ctrl: true })).toBe("toggle");
+    expect(selectionIntentOf(" ", { ...NO_MODS, meta: true })).toBe("toggle");
+    // 裸空格是"试听"、字母是快速跳转，都不该动选区。
+    expect(selectionIntentOf(" ", NO_MODS)).toBeNull();
+    expect(selectionIntentOf("a", NO_MODS)).toBeNull();
+    expect(selectionIntentOf("Enter", NO_MODS)).toBeNull();
+    // Ctrl + 字母（全选 / 复制路径）由面板的组合键分支处理，不属于选区意图。
+    expect(selectionIntentOf("a", { ...NO_MODS, ctrl: true })).toBeNull();
+});
+
+test("rangeIndexes：闭区间，两个方向都成立", () => {
+    expect(rangeIndexes(2, 5)).toEqual([2, 3, 4, 5]);
+    expect(rangeIndexes(5, 2)).toEqual([2, 3, 4, 5]);
+    expect(rangeIndexes(3, 3)).toEqual([3]);
+    // 任一端为负（尚无锚点 / 尚无光标）返回空数组 —— 不能把 -1 当成第 0 行。
+    expect(rangeIndexes(-1, 2)).toEqual([]);
+    expect(rangeIndexes(2, -1)).toEqual([]);
+    expect(rangeIndexes(-1, -1)).toEqual([]);
 });
 
 // ── 纯函数：输入字母快速跳转（type-ahead） ────────────────────────────────
@@ -150,10 +196,12 @@ function ListboxHarness({
 }: {
     entries: string[];
     onActivate: (index: number) => void;
-    /** 模拟鼠标多选集合：与键盘光标是两条独立通道，用于断言两者互不覆盖。 */
+    /** 初始选区（模拟"鼠标已经点过这些行"）。 */
     selectedIndexes?: number[];
 }) {
     const [activeIndex, setActiveIndex] = useState(-1);
+    const [selected, setSelected] = useState<Set<number>>(() => new Set(selectedIndexes));
+    const anchorRef = useRef(-1);
     const rowRefs = useRef<(HTMLDivElement | null)[]>([]);
     const typeAheadBufferRef = useRef("");
 
@@ -168,13 +216,46 @@ function ListboxHarness({
         el.focus({ preventScroll: true });
     };
 
+    /** 与 FileBrowserPanel.applySelectionIntent 同一套规则。 */
+    const applyIntent = (intent: ReturnType<typeof selectionIntentOf>, index: number) => {
+        if (intent === null || intent === "moveOnly") return;
+        if (intent === "extend") {
+            const anchor = anchorRef.current >= 0 ? anchorRef.current : index;
+            setSelected(new Set(rangeIndexes(anchor, index)));
+            return;
+        }
+        if (intent === "toggle") {
+            setSelected((prev) => {
+                const next = new Set(prev);
+                if (next.has(index)) next.delete(index);
+                else next.add(index);
+                return next;
+            });
+            anchorRef.current = index;
+            return;
+        }
+        anchorRef.current = index;
+        setSelected(new Set([index]));
+    };
+
     const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+        const intent = selectionIntentOf(event.key, {
+            shift: event.shiftKey,
+            ctrl: event.ctrlKey,
+            meta: event.metaKey,
+        });
         if (isFileListNavKey(event.key)) {
             event.preventDefault();
             const next = nextActiveIndex(activeIndex, event.key, entries.length);
             if (next < 0) return;
             setActiveIndex(next);
             focusRow(next);
+            applyIntent(intent, next);
+            return;
+        }
+        if (intent === "toggle" && activeIndex >= 0) {
+            event.preventDefault();
+            applyIntent(intent, activeIndex);
             return;
         }
         if (isFileListActivationKey(event.key) && activeIndex >= 0) {
@@ -200,7 +281,7 @@ function ListboxHarness({
                 <AppListRow
                     key={name}
                     role="option"
-                    selected={selectedIndexes.includes(index)}
+                    selected={selected.has(index)}
                     active={index === activeIndex}
                     tabIndex={index === (activeIndex >= 0 ? activeIndex : 0) ? 0 : -1}
                     onFocus={() => setActiveIndex(index)}
@@ -216,12 +297,27 @@ function ListboxHarness({
     );
 }
 
-/** 向 listbox 派发一次按键，返回该事件是否被 `preventDefault`。 */
-function press(key: string): boolean {
+/**
+ * 向 listbox 派发一次按键，返回该事件是否被 `preventDefault`。
+ *
+ * 修饰键与"行焦点"可指定：`Shift` / `Ctrl` 扩展选区时事件必须落在列表容器内
+ * （真实场景里焦点在行上，事件冒泡到容器）。
+ */
+function press(
+    key: string,
+    modifiers: { shift?: boolean; ctrl?: boolean; meta?: boolean } = {},
+): boolean {
     const listbox = container.querySelector('[role="listbox"]')!;
     let prevented = false;
     act(() => {
-        const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+        const event = new KeyboardEvent("keydown", {
+            key,
+            bubbles: true,
+            cancelable: true,
+            shiftKey: modifiers.shift ?? false,
+            ctrlKey: modifiers.ctrl ?? false,
+            metaKey: modifiers.meta ?? false,
+        });
         listbox.dispatchEvent(event);
         prevented = event.defaultPrevented;
     });
@@ -274,7 +370,7 @@ test("listbox 接线：ArrowDown 移动活动行，Enter 激活该行", () => {
     expect(onActivate).toHaveBeenCalledWith(1);
 });
 
-test("键盘光标与多选选中是两条独立通道，互不覆盖", () => {
+test("键盘光标与多选选中是两条独立通道（各自有独立属性）", () => {
     act(() => {
         root.render(
             <ListboxHarness
@@ -286,13 +382,16 @@ test("键盘光标与多选选中是两条独立通道，互不覆盖", () => {
         );
     });
 
-    // 选中态由 `data-selected` 表达，光标态由 `data-active` 表达。
+    // 选中态由 `data-selected` 表达，光标态由 `data-active` 表达 —— 两个独立通道。
     expect(rows().map((row) => row.dataset.selected === "true")).toEqual([true, false, true]);
     expect(activeFlags()).toEqual([false, false, false]);
 
-    // 光标移到第二行：它既不是选中行、也不影响已选中的两行。
-    press("ArrowDown");
-    press("ArrowDown");
+    /*
+     * 用 `Ctrl` + 方向键移动光标：这是"只移动光标、不动选区"的那一条。
+     * （普通方向键会替换选区 —— 资源管理器模型，见下面的选区测试。）
+     */
+    press("ArrowDown", { ctrl: true });
+    press("ArrowDown", { ctrl: true });
     expect(activeFlags()).toEqual([false, true, false]);
     expect(rows().map((row) => row.dataset.selected === "true")).toEqual([true, false, true]);
 
@@ -367,4 +466,69 @@ test("focusRow 在无布局环境下不抛（jsdom 没有 scrollIntoView 实现�
     } finally {
         Element.prototype.scrollIntoView = scrollIntoView;
     }
+});
+
+// ── DOM：键盘选区模型（与资源管理器一致） ─────────────────────────────────
+
+/** 每行是否被选中（读 `aria-selected`，即 AppListRow 的 `selected`）。 */
+function selectedFlags(): boolean[] {
+    return rows().map((row) => row.getAttribute("aria-selected") === "true");
+}
+
+test("普通方向键：移动光标并选中该行（资源管理器模型）", () => {
+    act(() => {
+        root.render(<ListboxHarness entries={["a", "b", "c"]} onActivate={vi.fn()} />);
+    });
+
+    press("ArrowDown");
+    expect(activeFlags()).toEqual([true, false, false]);
+    expect(selectedFlags()).toEqual([true, false, false]);
+
+    press("ArrowDown");
+    expect(activeFlags()).toEqual([false, true, false]);
+    // 关键：选区跟着光标走，因此随后 Delete / F2 / Ctrl+C 作用的就是这一行，
+    // 而不是"之前用鼠标选过的那一行"。
+    expect(selectedFlags()).toEqual([false, true, false]);
+});
+
+test("Shift + 方向键：从锚点扩展选区", () => {
+    act(() => {
+        root.render(<ListboxHarness entries={["a", "b", "c"]} onActivate={vi.fn()} />);
+    });
+
+    press("ArrowDown"); // 光标与锚点都到第 0 行
+    press("ArrowDown", { shift: true });
+    press("ArrowDown", { shift: true });
+
+    expect(activeFlags()).toEqual([false, false, true]);
+    expect(selectedFlags()).toEqual([true, true, true]);
+});
+
+test("Ctrl + 方向键：只移动光标，选区不动", () => {
+    act(() => {
+        root.render(<ListboxHarness entries={["a", "b", "c"]} onActivate={vi.fn()} />);
+    });
+
+    press("ArrowDown"); // 选中第 0 行
+    press("ArrowDown", { shift: true }); // 选区扩到 0..1
+    press("ArrowDown", { ctrl: true }); // 光标到第 2 行，选区仍是 0..1
+
+    expect(activeFlags()).toEqual([false, false, true]);
+    expect(selectedFlags()).toEqual([true, true, false]);
+});
+
+test("Ctrl + 空格：把光标行加入 / 移出选区", () => {
+    act(() => {
+        root.render(<ListboxHarness entries={["a", "b", "c"]} onActivate={vi.fn()} />);
+    });
+
+    press("ArrowDown");
+    press("ArrowDown", { ctrl: true }); // 光标到第 1 行，选区仍是第 0 行
+    expect(selectedFlags()).toEqual([true, false, false]);
+
+    press(" ", { ctrl: true }); // 加入第 1 行
+    expect(selectedFlags()).toEqual([true, true, false]);
+
+    press(" ", { ctrl: true }); // 再按一次移出
+    expect(selectedFlags()).toEqual([true, false, false]);
 });
