@@ -190,11 +190,94 @@ pub(crate) fn hifigan_tension_curve_for_clip<'a>(
         .map(|v| v.as_slice())
 }
 
+/// 张力曲线在该 clip 区间内是否"活跃"（**决策侧**判据）。
+///
+/// # 作用
+/// 决定是否**预渲染**、是否跳过外部时间拉伸、以及导出能否复用渲染缓存。
+/// 它不负责施加张力 —— 施加发生在 `renderer::chain::HiFiGanStage::apply_rd_tension`。
+///
+/// # 为什么这里要判开关
+/// `breath_enabled`（UI 名「气声分离」）是张力的前提：关闭时该曲线已在
+/// `ClipProcessContext` 的构造点被剥离，实际不会参与合成。若此处不判，
+/// `audio/mixdown.rs` 会因本函数返回 `true` 而放弃缓存复用、做一次**结果正确
+/// 但完全白费**的重渲染。
+///
+/// # 与合成侧的分工
+/// - **决策侧**（本函数）：避免无谓的重渲染与拉伸决策偏差。
+/// - **合成侧**（`ClipProcessContext` 构造点的曲线剥离）：保证真的不生效。
+/// 两侧都需要，且都以 `extra_param_enabled(.., "breath_enabled")` 为同源判据。
+///
+/// # 参数
+/// - `entry`：clip 所属 root track 的参数状态（提供轨道级曲线与帧周期）
+/// - `clip`：目标 clip（其 `extra_curves` / `extra_params` 为 clip 级覆盖）
+/// - `clip_start_sec`：clip 在时间轴上的起点（秒）
+/// 气声分离开关闭时，需要从下发数据中剥离的曲线键。
+///
+/// # 为什么是这两个
+/// - `breath_gain`：噪声支的混入增益。噪声支只存在于 HNSEP 分离路径。
+/// - `hifigan_tension`：Rd 张力。它只重塑**谐波**支，同样依赖分离。
+///
+/// `formant_shift_cents` **不在**其中：共振峰走 mel 阶段的 `keyShift`，
+/// 与 HNSEP 无关，关闭分离时照常可用。
+///
+/// # 命名
+/// 键名与 `renderer::chain` 的参数描述符 id 一致；常量在此集中定义，
+/// 避免两处字符串字面量漂移。
+pub(crate) const HIFIGAN_SEPARATION_GATED_CURVES: [&str; 2] = ["breath_gain", "hifigan_tension"];
+
+/// 按开关状态剥离被门禁的曲线，返回需要**下发**给处理器的曲线集合。
+///
+/// # 作用
+/// 实现需求「开关关闭 ⇒ 气声与张力**不参与合成**」的**合成侧**落地。
+///
+/// # 流程
+/// 1. 开关开启（含曲线本就不存在）⇒ 原样返回借用，**零克隆**（常态路径）。
+/// 2. 开关关闭且确有被门禁的键 ⇒ 克隆一次并移除这些键。
+///
+/// # 为什么必须剥离而不是传零值
+/// 曲线**缺失**是本项目既有的"未编辑"语义：`breath_gain` 缺失 ⇒ 默认增益 1.0
+/// （噪声原样混回），`hifigan_tension` 缺失 ⇒ 无张力。
+/// 而 `breath_gain = 0` 表示"噪声整条静音"——那是**另一种行为**，听感不同。
+///
+/// # 参数
+/// - `curves`：已合并 clip/track 覆盖后的生效曲线
+/// - `extra_params`：同源的生效静态参数（用于读取开关）
+///
+/// # 返回
+/// 应当下发的曲线集合。返回值可能借用入参（未剥离时），
+/// 也可能借用内部克隆（`Cow` 语义由调用方的局部变量承载）。
+pub(crate) fn gate_separation_curves<'a>(
+    curves: &'a HashMap<String, Vec<f32>>,
+    extra_params: &HashMap<String, f64>,
+) -> std::borrow::Cow<'a, HashMap<String, Vec<f32>>> {
+    let separation_on =
+        extra_param_enabled(extra_params, crate::renderer::HIFIGAN_SEPARATION_PARAM_ID);
+    if separation_on
+        || !HIFIGAN_SEPARATION_GATED_CURVES
+            .iter()
+            .any(|k| curves.contains_key(*k))
+    {
+        return std::borrow::Cow::Borrowed(curves);
+    }
+    let mut stripped = curves.clone();
+    for key in HIFIGAN_SEPARATION_GATED_CURVES {
+        stripped.remove(key);
+    }
+    std::borrow::Cow::Owned(stripped)
+}
+
 pub(crate) fn hifigan_tension_active_for_clip(
     entry: &crate::state::TrackParamsState,
     clip: &crate::state::Clip,
     clip_start_sec: f64,
 ) -> bool {
+    // 开关关闭 ⇒ 张力不参与合成，也就不存在"活跃"。
+    // clip 级 extra_params 覆盖优先，与其它判定口径一致。
+    let extra_params = clip.extra_params.as_ref().unwrap_or(&entry.extra_params);
+    if !extra_param_enabled(extra_params, crate::renderer::HIFIGAN_SEPARATION_PARAM_ID) {
+        return false;
+    }
+
     let curve = hifigan_tension_curve_for_clip(entry, clip);
     curve_differs_from_default_in_range(
         curve,
@@ -481,7 +564,7 @@ mod tests {
     use super::{
         active_child_formant_offset_config, build_clip_effective_formant_shift_curve,
         child_formant_offset_curve_key, common_pan_curve_for_clip, common_volume_curve_for_clip,
-        does_clip_need_processor_render, extra_curve_for_clip,
+        does_clip_need_processor_render, extra_curve_for_clip, gate_separation_curves,
         hifigan_formant_shift_active_for_clip, maybe_apply_pitch_edit_to_clip_segment,
         processor_should_handle_stretch,
     };
@@ -846,6 +929,118 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── 气声分离开关的曲线门禁（需求：关闭时气声与张力不参与合成）──────────
+
+    fn params_with_separation(on: bool) -> HashMap<String, f64> {
+        let mut m = HashMap::new();
+        m.insert("breath_enabled".to_string(), if on { 1.0 } else { 0.0 });
+        m
+    }
+
+    /// 关闭开关必须剥掉 `breath_gain` 与 `hifigan_tension`。
+    ///
+    /// 这是需求「不参与合成」的**合成侧**核心断言：处理器收不到这两条曲线，
+    /// 无论其内部逻辑如何都不会生效，分离路径也不会被触发。
+    #[test]
+    fn separation_off_strips_both_gated_curves() {
+        let mut curves = HashMap::new();
+        curves.insert("breath_gain".to_string(), vec![0.5f32, 0.8]);
+        curves.insert("hifigan_tension".to_string(), vec![80.0f32, -40.0]);
+        // 对照项：共振峰与分离无关，必须保留
+        curves.insert("formant_shift_cents".to_string(), vec![120.0f32]);
+
+        let gated = gate_separation_curves(&curves, &params_with_separation(false));
+
+        assert!(
+            !gated.contains_key("breath_gain"),
+            "switch off must strip breath_gain so the noise gain cannot apply"
+        );
+        assert!(
+            !gated.contains_key("hifigan_tension"),
+            "switch off must strip hifigan_tension so Rd tension cannot apply"
+        );
+        assert_eq!(
+            gated.get("formant_shift_cents").map(|v| v.as_slice()),
+            Some([120.0f32].as_slice()),
+            "formant shift goes through the mel stage and must NOT be gated"
+        );
+    }
+
+    /// 开启开关必须**原样保留**两条曲线（不得误剥）。
+    #[test]
+    fn separation_on_keeps_both_curves() {
+        let mut curves = HashMap::new();
+        curves.insert("breath_gain".to_string(), vec![0.5f32]);
+        curves.insert("hifigan_tension".to_string(), vec![80.0f32]);
+
+        let gated = gate_separation_curves(&curves, &params_with_separation(true));
+
+        assert_eq!(gated.get("breath_gain").map(|v| v.as_slice()), Some([0.5f32].as_slice()));
+        assert_eq!(
+            gated.get("hifigan_tension").map(|v| v.as_slice()),
+            Some([80.0f32].as_slice())
+        );
+    }
+
+    /// 剥离必须是"键缺失"，**不能**退化成"传零值"。
+    ///
+    /// `breath_gain = 0` 表示"噪声整条静音"，而缺失表示"未编辑 ⇒ 默认增益 1.0
+    /// （原样混回）"。两者听感不同，混淆会让关闭开关时齿音/气声消失。
+    #[test]
+    fn stripping_removes_the_key_rather_than_zeroing_it() {
+        let mut curves = HashMap::new();
+        curves.insert("breath_gain".to_string(), vec![0.5f32]);
+
+        let gated = gate_separation_curves(&curves, &params_with_separation(false));
+
+        assert!(
+            gated.get("breath_gain").is_none(),
+            "must remove the key, not replace the curve with zeros"
+        );
+    }
+
+    /// 常态路径（开关开启、或没有相关曲线）必须**借用**、零克隆。
+    ///
+    /// 关闭开关是少数情况；若为了它让每次渲染都克隆整张曲线表，
+    /// 就为了一个边界情况牺牲了主路径。
+    #[test]
+    fn common_path_borrows_without_cloning() {
+        use std::borrow::Cow;
+
+        // 开关开启
+        let mut curves = HashMap::new();
+        curves.insert("breath_gain".to_string(), vec![0.5f32]);
+        assert!(matches!(
+            gate_separation_curves(&curves, &params_with_separation(true)),
+            Cow::Borrowed(_)
+        ));
+
+        // 开关关闭但没有被门禁的键（无需克隆）
+        let empty: HashMap<String, Vec<f32>> = HashMap::new();
+        assert!(matches!(
+            gate_separation_curves(&empty, &params_with_separation(false)),
+            Cow::Borrowed(_)
+        ));
+
+        // 开关关闭且确有被门禁的键 ⇒ 此时才克隆
+        assert!(matches!(
+            gate_separation_curves(&curves, &params_with_separation(false)),
+            Cow::Owned(_)
+        ));
+    }
+
+    /// 开关**缺失**等同关闭（`extra_param_enabled` 的既有语义）。
+    #[test]
+    fn missing_switch_behaves_as_off() {
+        let mut curves = HashMap::new();
+        curves.insert("hifigan_tension".to_string(), vec![80.0f32]);
+        let gated = gate_separation_curves(&curves, &HashMap::new());
+        assert!(
+            !gated.contains_key("hifigan_tension"),
+            "a missing switch key means off, so curves must be stripped"
+        );
     }
 }
 
@@ -2022,7 +2217,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
                 None
             };
             let effective_extra_curves_storage;
-            let extra_curves_for_ctx: &std::collections::HashMap<String, Vec<f32>> =
+            let mut extra_curves_for_ctx: &std::collections::HashMap<String, Vec<f32>> =
                 if let Some(curve) = child_formant_curve {
                     effective_extra_curves_storage = {
                         let mut cloned = extra_curves.clone();
@@ -2033,6 +2228,25 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
                 } else {
                     extra_curves
                 };
+
+            // ── 气声分离开关闭时，把被门禁的曲线从下发数据中剥离 ──────────────
+            //
+            // 【为什么必须在这里做】需求是「开关关闭 ⇒ 气声与张力**不参与合成**」。
+            // 仅靠 UI 置灰或决策侧判定都不够 —— 真正施加张力的是
+            // `renderer::chain::HiFiGanStage::apply_rd_tension`，它直接读
+            // `cc.extra_curves["hifigan_tension"]`；`process_breath` 也直接读
+            // `breath_gain`。两者都不看开关。若不下发这两条曲线，
+            // 处理器**根本收不到**它们，无论其内部逻辑如何都不会生效，
+            // 分离路径也不会被触发（即不进 HNSEP）。
+            //
+            // 【为什么选这个位置】`ClipProcessContext` 全仓库只有这一处构造，
+            // 在这里剥离可一次覆盖张力与气声两个消费点（以及将来新增的消费点），
+            // 避免"每个消费点各判一次"带来的漂移 —— 本项目已经出现过
+            // "以为有单一实现、实际存在第 2 份"的教训。
+            //
+            // 【性能】开关开启（常态）时返回借用、零克隆；详见 `gate_separation_curves`。
+            let gated_curves = gate_separation_curves(extra_curves_for_ctx, extra_params);
+            let extra_curves_for_ctx: &std::collections::HashMap<String, Vec<f32>> = &gated_curves;
 
             // 若处理器自己处理时间拉伸（如 vslib 使用 Timing 控制点），传递实际 playback_rate；
             // 否则 PCM 已由外部时间拉伸预处理，rate=1.0。

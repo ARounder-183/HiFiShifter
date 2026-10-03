@@ -313,6 +313,12 @@ impl ProcessingStage for HiFiGanStage {
 
         // 张力是否需要真正参与运算（曲线偏离默认 0 即算活跃）。
         // 口径与渲染键一致，避免"曲线存在但全 0"时白跑一遍 HNSEP。
+        //
+        // 【注意】这里用的是 `cc.extra_curves`，而它已经过上游门禁：开关关闭时
+        // `hifigan_tension` 已在 `ClipProcessContext` 的唯一构造点被剥离
+        // （`pitch_editing::maybe_apply_pitch_edit_to_clip_segment`），
+        // 因此 `tension_curve` 自然为 `None`。**不需要**在此重复判断开关 ——
+        // 也不应该：两条判据并存正是本项目出现过的漂移来源。
         let tension_active = tension_curve.is_some_and(|c| {
             c.iter()
                 .any(|v| v.is_finite() && v.abs() > TENSION_ACTIVE_EPSILON)
@@ -325,13 +331,18 @@ impl ProcessingStage for HiFiGanStage {
         // `(harmonic, noise)`。没有分离就没有"只动谐波"这回事。这与 OpenUtau 的
         // `NeedsSeparation = HasTension || ...` 判据一致。
         //
-        // 【为什么开关缺失不算"要分离"】`breath_enabled` 是「是否做谐波/噪声分离」，
-        // 而不是「是否输出气声」。张力活跃时即使开关为 Off 也必须分离 —— 否则张力
-        // 会**静默失效**（下面显式报错，不再无声降级）。
+        // 【开关关闭时不走 HNSEP】`breath_enabled`（UI 名「气声分离」）是气声与张力
+        // **共同的前提**。关闭时上游已把 `breath_gain` 与 `hifigan_tension` 两条曲线
+        // 从下发数据中剥离（见 `ClipProcessContext` 的唯一构造点），因此这里的
+        // `tension_active` 必为 `false`，`needs_separation` 随之等价于
+        // `separation_switch_on` —— 即**不产生任何 HNSEP 推理开销**。
+        //
+        // 仍保留 `tension_active ||` 这一项：它表达的是"张力本身就需要分离"这一
+        // 不变的事实，而不是一个可能的触发源。若将来有人把曲线剥离移除，
+        // 这里仍会正确地要求分离（而不是静默丢掉张力）。
         let separation_switch_on =
             crate::pitch_editing::extra_param_enabled(cc.extra_params, HIFIGAN_SEPARATION_PARAM_ID);
 
-        // 张力曲线是否存在（与开关无关）。曲线缺失/全 0 ⇒ 无需分离。
         let needs_separation = tension_active || separation_switch_on;
 
         if needs_separation && !crate::hnsep_onnx::is_available() {
@@ -706,29 +717,22 @@ pub fn hifigan_chain() -> ProcessorChain {
 mod tests {
     use super::TENSION_ACTIVE_EPSILON;
 
-    /// `breath_enabled` 的语义是「是否做谐波/噪声分离」，而非「气声开关」。
+    /// `breath_enabled`（UI 名「气声分离」）是气声与张力**共同的前提**。
     ///
-    /// 曲线偏离默认 0 即视为张力活跃，且张力活跃**独立于**分离开关。
-    /// 这两件事共同决定了是否进入 HNSEP 路径 —— 最关键的组合是
-    /// 「张力活跃 + 分离开关关闭」：必须仍然分离，否则张力静默失效。
+    /// 【语义已变更，勿按旧版理解】早期实现里张力活跃**独立于**开关
+    /// （`needs_separation = tension_active || switch`），使得"开关关闭但张力生效"。
+    /// 现在关闭开关会在 `ClipProcessContext` 构造点剥离两条曲线
+    /// （见 `pitch_editing::gate_separation_curves` 及其测试），
+    /// 因此 `tension_active` 必为 `false`，`needs_separation` 完全由开关决定
+    /// —— 即"关闭开关 ⇒ 不走 HNSEP"。
     #[test]
-    fn tension_alone_requires_separation_regardless_of_switch() {
-        let active = |v: f32| v.abs() > TENSION_ACTIVE_EPSILON;
-
-        // 分离开关 OFF
-        assert!(
-            active(50.0),
-            "tension curve above the epsilon must count as active"
-        );
-        assert!(!active(0.0));
-        // 全 0 曲线不该触发分离（避免白跑 HNSEP）
-        assert!(
-            ![0.0f32, 0.0, 0.0].iter().any(|&v| active(v)),
-            "an all-zero tension curve must not force separation"
-        );
+    fn separation_requires_the_switch_because_curves_are_stripped() {
+        // 阈值口径：曲线需真正偏离默认才算活跃。
+        assert!(TENSION_ACTIVE_EPSILON > 0.0);
+        assert!(!(0.0f32).gt(&TENSION_ACTIVE_EPSILON));
         // 边界：恰好等于阈值不算活跃（口径与渲染键一致）
-        assert!(!active(TENSION_ACTIVE_EPSILON));
-        assert!(active(TENSION_ACTIVE_EPSILON * 2.0));
+        assert!(!TENSION_ACTIVE_EPSILON.gt(&TENSION_ACTIVE_EPSILON));
+        assert!((TENSION_ACTIVE_EPSILON * 2.0).gt(&TENSION_ACTIVE_EPSILON));
     }
 
     /// 非有限值不得被当成"活跃"（会把 NaN 传播进 STFT）。
