@@ -9,7 +9,7 @@
 import { describe, expect, test } from "vitest";
 
 import type { FolderMediaGroup } from "../../services/api/fileBrowser";
-import { buildFolderImportPlan, hasImportableMedia } from "./folderImportPlan";
+import { buildFolderImportPlan, hasImportableMedia, needsRecursiveAdmissionProbe } from "./folderImportPlan";
 import {
     DEFAULT_FOLDER_IMPORT_OPTIONS,
     FOLDER_IMPORT_MODES,
@@ -180,6 +180,20 @@ describe("hasImportableMedia", () => {
             group("C:\\music\\Takes\\Sub", ["C:\\music\\Takes\\Sub\\inner.wav"]),
         ]);
         expect(hasImportableMedia(recursive)).toBe(true);
+    });
+});
+
+describe("needsRecursiveAdmissionProbe", () => {
+    test("非递归 + 有子目录 → 需要再递归扫一次（媒体可能全在子目录里）", () => {
+        expect(needsRecursiveAdmissionProbe({ hasSubdirs: true, recursive: false })).toBe(true);
+    });
+
+    test("递归已开启 → 当前扫描结果就是递归的，不必再扫", () => {
+        expect(needsRecursiveAdmissionProbe({ hasSubdirs: true, recursive: true })).toBe(false);
+    });
+
+    test("没有子目录 → 再扫也不会多出文件", () => {
+        expect(needsRecursiveAdmissionProbe({ hasSubdirs: false, recursive: false })).toBe(false);
     });
 });
 

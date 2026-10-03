@@ -157,3 +157,22 @@ export function buildFolderImportPlan(
 export function hasImportableMedia(plan: FolderImportPlan): boolean {
     return plan.totalFiles > 0;
 }
+
+/**
+ * 非递归扫描没有找到媒体时，要不要为了"这个文件夹到底能不能导"再递归扫一次。
+ *
+ * 【为什么准入判定必须递归】媒体文件可能全在子目录里，而 `recursive` 选项默认
+ * 关闭 —— 只看当前扫描结果会把这种文件夹挡在对话框之外，用户连"递归导入"都选不到。
+ * 需求正是"除非该文件夹的子文件夹（递归判定）包含媒体文件，否则不可导入"。
+ *
+ * 【为什么只在必要时多扫一次】递归扫描更贵（要下钻整棵子树）。当前范围已有媒体、
+ * 递归本来就开着、或压根没有子目录时，判定已经是确定的，不必再扫。
+ */
+export function needsRecursiveAdmissionProbe(input: {
+    /** 被拖入的目录里是否有子目录（后端在非递归时也会给出）。 */
+    hasSubdirs: boolean;
+    /** 当前的"递归导入子目录"选项。 */
+    recursive: boolean;
+}): boolean {
+    return !input.recursive && input.hasSubdirs;
+}

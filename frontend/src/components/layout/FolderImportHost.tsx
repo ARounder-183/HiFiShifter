@@ -31,6 +31,7 @@ import {
 import {
     buildFolderImportPlan,
     hasImportableMedia,
+    needsRecursiveAdmissionProbe,
 } from "../../features/fileBrowser/folderImportPlan";
 import {
     normalizeFolderImportOptions,
@@ -124,12 +125,39 @@ export function FolderImportHost() {
                     // 扫描失败（IPC 异常）：什么都不做，而不是拿半截结果去导入。
                     return;
                 }
+                /*
+                 * 准入判定必须**递归**。
+                 *
+                 * 【为什么不能直接用当前扫描结果】`recursive` 选项默认关闭，而一个
+                 * 文件夹的媒体文件可能全在子目录里 —— 用非递归的扫描结果判定会把这种
+                 * 文件夹挡在对话框之外，用户连"递归导入"都选不到。需求正是"除非该
+                 * 文件夹的子文件夹（递归判定）包含媒体文件，否则不可导入"。
+                 *
+                 * 【为什么只在必要时多扫一次】非递归扫描已找到媒体、或递归本来就开着、
+                 * 或压根没有子目录时，都不需要第二趟。
+                 */
+                let admitted = hasImportableMedia(
+                    buildFolderImportPlan(result.groups, detail.looseFiles),
+                );
+                if (
+                    !admitted &&
+                    needsRecursiveAdmissionProbe({
+                        hasSubdirs: result.groups.some((group) => group.hasSubdirs),
+                        recursive: opts.recursive,
+                    })
+                ) {
+                    try {
+                        const deep = await collect(detail.dirs, true);
+                        admitted = hasImportableMedia(
+                            buildFolderImportPlan(deep.groups, detail.looseFiles),
+                        );
+                    } catch {
+                        // 递归扫描失败：保守当作"没有媒体"（与扫描失败同一种处理）。
+                    }
+                }
                 // 无媒体可导：显式请求仍然弹窗（让用户看见"没有媒体文件"这句解释，
                 // 比什么都不发生更好），隐式拖入直接返回 —— 否则会静默建出一条空轨道。
-                if (
-                    !hasImportableMedia(buildFolderImportPlan(result.groups, detail.looseFiles)) &&
-                    !detail.fromExplicitRequest
-                ) {
+                if (!admitted && !detail.fromExplicitRequest) {
                     return;
                 }
                 setDraft(opts);
