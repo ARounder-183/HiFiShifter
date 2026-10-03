@@ -476,7 +476,11 @@ pub fn selected_pitch_edit_algorithm(timeline: &TimelineState) -> PitchEditAlgor
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "vslib")]
+    // 这两项本身与 `vslib` feature 无关：`processor_bakes_common_mix_curves`
+    // 是无条件定义的，`SynthPipelineKind` 也只是**变体**受 feature 门控。
+    // 此前它们被错误地门控在 `feature = "vslib"` 下，于是关闭 vslib 的构建
+    // 整个测试模块编译不过（`cargo test --no-default-features` 报
+    // "cannot find function / type"）—— 而那正是没有 vslib DLL 时的构建方式。
     use super::processor_bakes_common_mix_curves;
     use super::{
         active_child_formant_offset_config, build_clip_effective_formant_shift_curve,
@@ -485,7 +489,6 @@ mod tests {
         hifigan_formant_shift_active_for_clip, maybe_apply_pitch_edit_to_clip_segment,
         processor_should_handle_stretch,
     };
-    #[cfg(feature = "vslib")]
     use crate::state::SynthPipelineKind;
     use crate::state::{Clip, TimelineState, TrackParamsState};
     use std::collections::HashMap;

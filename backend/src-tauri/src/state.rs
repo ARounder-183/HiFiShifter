@@ -178,6 +178,54 @@ pub(crate) fn clip_pitch_trim_window_sec(clip: &Clip) -> (f64, f64) {
     }
 }
 
+/// 音符重映射所需的**源域上下文**：`(src_start, src_end, loop_cycle)`。
+///
+/// `loop_cycle = Some((周期D, 正放锚点, 倒放锚点末端))`，None = 非 Loop。
+///
+/// 【为什么必须是共享函数】写 `midi_note_data` 的路径有两条
+/// （`convert_clips_to_pitch_reference` 与
+/// `update_pitch_reference_from_track_params`），它们必须与
+/// `build_fallback_pitch_from_midi`、`remap_midi_note_times`、
+/// `place_note_occurrence_in_loop` 使用**逐字段一致**的坐标系 —— 否则
+/// 音符会被写进另一个域，渲染端按窗口求交时整体错位。此前这段计算内联在
+/// `update_pitch_reference_from_track_params` 里，转换路径只能自己重写一份
+/// （并且写错了，见不变式 PN）。
+pub(crate) fn midi_remap_context(clip: &Clip) -> (f64, f64, Option<(f64, f64, f64)>) {
+    let src_end = if clip.source_end_sec > 0.0 {
+        clip.source_end_sec
+    } else {
+        clip.length_sec
+    };
+    // 消费窗口（非 Loop 倒放锚定 se：win=[se−len·r, se]，可为负，域外为静音）
+    // —— fallback 曲线与 remap 写回共用同一坐标系。
+    let src_start = if !clip.loop_enabled && clip.reversed {
+        let r = if clip.playback_rate.is_finite() && clip.playback_rate > 1e-6 {
+            clip.playback_rate as f64
+        } else {
+            1.0
+        };
+        src_end - clip.length_sec.max(0.0) * r
+    } else {
+        clip.source_start_sec
+    };
+    // 倒放锚点 clamp 规则与 place_note_occurrence_in_loop 一致：周期来自媒体
+    // 时长时 clamp 到媒体时长；周期退化为窗口跨度时保持原始 source_end
+    //（否则 slip 窗口的倒放相位被错误平移）。
+    let media_total = clip_source_media_duration_sec(clip).filter(|d| *d > 1e-9);
+    let loop_cycle = clip_loop_cycle_span_sec(clip).map(|cycle| {
+        (
+            cycle,
+            clip.source_start_sec,
+            match media_total {
+                Some(d) => clip.source_end_sec.min(d),
+                None => clip.source_end_sec,
+            }
+            .max(0.0),
+        )
+    });
+    (src_start, src_end, loop_cycle)
+}
+
 /// 非 Loop Clip 存储字段的**加载期规范化**：使存储窗口 == 消费窗口。
 ///
 ///   正放：source_end := source_start + len·r
@@ -792,6 +840,18 @@ pub struct ClipTake {
     pub channel_decision: Option<crate::channel_decision::ChannelDecisionRecord>,
 
     // ── MIDI 内容（无音频源时） ──
+    /// 音高线：音符事件列表（音高参考块 / MIDI 块的内容层）。
+    ///
+    /// **不变式 PN —— 音符是 Take 的媒体内容，坐标位于源域。**
+    /// 它跨越 `[0, D)`，其中 `D = clip_take_media_duration_sec(take)`
+    /// （纯音高参考块即"音符最大结束时间"，见 `clip_source_media_duration_sec`）；
+    /// 可见的那一段由消费窗口 `[source_start_sec, source_end_sec)` 选出 ——
+    /// 与选出音频的是同一个窗口。
+    ///
+    /// 因此**任何分割 / 修剪 / 变速都不得改写音符**：改的只能是窗口。
+    /// 对一个音频 Clip 分割时改的是窗口、媒体文件一个字节都不动，音高参考块
+    /// 必须与之同构。凡是写音符的路径，都必须写出源域坐标
+    /// （见 `remap_midi_note_times` 与 `midi_remap_context`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -995,8 +1055,12 @@ pub(crate) fn flip_take_playback_direction(take: &mut ClipTake, length_sec: f64,
 /// 对单个 Take 应用分割几何。
 ///
 /// `clip_rate` 是 Clip 级倍率；每个 Take 的实际消费速率为
-/// `clip_rate × take.playback_rate`。音频源窗口与 MIDI 音符都会按切割点
-/// 分成左右两段；该函数总是执行，不受“同步编辑所有 Take”设置影响。
+/// `clip_rate × take.playback_rate`。**只改消费窗口**（源域 `[source_start,
+/// source_end)` 与 Loop 锚点），不改任何媒体内容；该函数总是执行，不受
+/// "同步编辑所有 Take"设置影响。
+///
+/// 音高线（`midi_note_data`）同样属于"媒体内容"，因此这里**不触碰**它 ——
+/// 见函数末尾的说明与不变式 PN。
 fn split_clip_take_window(
     take: &mut ClipTake,
     clip_rate: f64,
@@ -1058,27 +1122,22 @@ fn split_clip_take_window(
         }
     }
 
-    // MIDI 音符坐标相对 Clip 起点；按对应侧保留并重定基。
-    if let Some(notes) = take.midi_note_data.as_mut() {
-        if is_right_side {
-            for note in notes.iter_mut() {
-                note.start_sec -= left_len_sec;
-                note.end_sec -= left_len_sec;
-            }
-            notes.retain(|note| note.end_sec > 1e-9 && note.start_sec < right_len_sec - 1e-9);
-        } else {
-            notes.retain(|note| note.start_sec < left_len_sec - 1e-9 && note.end_sec > 1e-9);
-        }
-        let bound = if is_right_side {
-            right_len_sec
-        } else {
-            left_len_sec
-        };
-        for note in notes.iter_mut() {
-            note.start_sec = note.start_sec.max(0.0);
-            note.end_sec = note.end_sec.min(bound.max(0.0));
-        }
-    }
+    // ── 音高线（MIDI 音符）**刻意不动** ──────────────────────────────────
+    //
+    // 不变式 PN（详见 `ClipTake::midi_note_data` 的文档）：音符是 Take 的
+    // **媒体内容**，坐标位于源域；可见的那一段由上面的消费窗口选出 —— 与
+    // 选出音频的是同一个窗口。
+    //
+    // 所以分割**只能改窗口，不能改音符**。旧实现在这里把音符平移到时间线
+    // 域（右段 `-= left_len`）并裁剪/丢弃越界音符，与同一函数前半段按源域
+    // 派生的窗口坐标系不一致：右段的音符整体落在自己的窗口之外，音高线
+    // 直接消失；Loop 下 `place_note_occurrence_in_loop` 的锚点回绕也随之
+    // 错相。此外内容时长 D（纯音高参考块 = 音符最大结束时间）会随裁剪变化，
+    // 分割一次就把 Loop 周期永久改一次；胶合也无法还原。
+    //
+    // 交给下游的窗口求交即可：`generateMidiCurveFromNotes`（前端）、
+    // `assemble_pitch_orig_from_cache` 的 MIDI 路径、`midi_export` 都按
+    // 「音符 ∩ 消费窗口」取可见内容 —— 这正是本函数前半段已经为音频做好的事。
 }
 
 /// 批量建轨道的一项请求（`add_track_tree` 的输入）。
@@ -1265,7 +1324,10 @@ pub struct Clip {
     pub formant_morph: Option<ClipFormantMorph>,
 
     /// MIDI 音符数据（active take 投影；仅用于 MIDI clip，无音频源）。
-    /// 音符时间相对于 clip 起点（0 = clip 起点）。
+    ///
+    /// 坐标语义见 [`ClipTake::midi_note_data`] 的不变式 PN：**源域**坐标，
+    /// 由消费窗口选出可见段。**不是**"相对 clip 起点"的局部坐标 ——
+    /// 只有当 `source_start_sec == 0` 且速率为 1 时两者才恰好重合。
     #[serde(default, skip_serializing)]
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
 
@@ -6436,8 +6498,136 @@ mod tests {
         assert_eq!(clip_loop_cycle_span_sec(&clip), Some(4.25));
     }
 
-    // ── split_clips_at tests ──────────────────────────────────────
+    // ── 音高参考块（Pitch Reference）的分割：不变式 PN ──────────────
 
+    /// 造一个纯音高参考块（无源媒体），音符铺满 `[0, length_sec]`。
+    /// 返回 `(timeline, clip_id, 原始音符)`。
+    fn make_pitch_reference_clip(length_sec: f64) -> (TimelineState, String, Vec<MidiNoteEvent>) {
+        let mut tl = TimelineState::default();
+        let tid = tl.add_track(Some("T1".into()), None, None);
+        let id = tl.add_clip(
+            Some(tid),
+            Some("ref".into()),
+            Some(0.0),
+            Some(length_sec),
+            None,
+        );
+        // 四个逐秒音符：60 / 61 / 62 / 63 —— 分割后能一眼看出左右两段各显示哪一半。
+        let notes: Vec<MidiNoteEvent> = (0..4)
+            .map(|i| MidiNoteEvent {
+                start_sec: i as f64,
+                end_sec: i as f64 + 1.0,
+                note: 60.0 + i as f32,
+                velocity: 100,
+                channel: 0,
+            })
+            .collect();
+        let clip = tl.clips.iter_mut().find(|c| c.id == id).unwrap();
+        clip.midi_note_data = Some(notes.clone());
+        clip.midi_fill_gaps = true;
+        clip.color = "cyan".into();
+        clip.pitch_range = Some(PitchRange {
+            min: 0.0,
+            max: 127.0,
+        });
+        // 不变式 PN 的基准形态：窗口 == 音符内容域。
+        clip.source_start_sec = 0.0;
+        clip.source_end_sec = length_sec;
+        clip.playback_rate = 1.0;
+        clip.reversed = false;
+        clip.loop_enabled = false;
+        clip.sync_take_from_flat();
+        (tl, id, notes)
+    }
+
+    /// 分割音高参考块后，**两段都保留完整音符**，只有窗口按常规 Clip 的规则派生。
+    ///
+    /// 回归背景：旧实现在 `split_clip_take_window` 里把右段音符平移 `-left_len`
+    /// 并裁剪/丢弃越界音符，与同一函数按**源域**派生的窗口坐标系不一致 ——
+    /// 右段的音符整体落在自己的窗口之外，音高线直接消失；Loop 下还会让内容
+    /// 时长 D 漂移，永久改变回绕周期。
+    #[test]
+    fn split_pitch_reference_keeps_full_notes_in_both_halves() {
+        let (mut tl, clip_id, original) = make_pitch_reference_clip(4.0);
+        let right_id = tl
+            .split_clip(&clip_id, 2.0)
+            .expect("splitting inside the clip must succeed");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).expect("left half");
+        let right = tl.clips.iter().find(|c| c.id == right_id).expect("right half");
+
+        // 音符一个字节都没动（这是"完全不影响音高线数据"的字面含义）。
+        assert_eq!(left.midi_note_data.as_deref(), Some(original.as_slice()));
+        assert_eq!(right.midi_note_data.as_deref(), Some(original.as_slice()));
+
+        // 窗口/几何按常规 Clip 的规则派生。
+        assert!((left.length_sec - 2.0).abs() < 1e-9);
+        assert!((left.source_start_sec - 0.0).abs() < 1e-9);
+        assert!((left.source_end_sec - 2.0).abs() < 1e-9);
+        assert!((right.start_sec - 2.0).abs() < 1e-9);
+        assert!((right.length_sec - 2.0).abs() < 1e-9);
+        assert!((right.source_start_sec - 2.0).abs() < 1e-9);
+        assert!((right.source_end_sec - 4.0).abs() < 1e-9);
+    }
+
+    /// 右段显示的必须是音高线的**后半段**（而不是空白、也不是整条线）。
+    ///
+    /// 用生产路径 `build_fallback_pitch_from_midi`（引擎 / assemble / export
+    /// 共用的音符 → 可见曲线映射）来判定，避免在测试里复刻一份渲染数学。
+    #[test]
+    fn split_pitch_reference_right_half_shows_second_half_of_curve() {
+        let (mut tl, clip_id, _) = make_pitch_reference_clip(4.0);
+        let right_id = tl.split_clip(&clip_id, 2.0).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+
+        let fp = 5.0;
+        let (src_start, src_end, loop_cycle) = midi_remap_context(right);
+        let curve = TimelineState::build_fallback_pitch_from_midi(
+            right.length_sec,
+            fp,
+            right.midi_note_data.as_deref().unwrap_or(&[]),
+            right.playback_rate,
+            right.reversed,
+            src_start,
+            src_end,
+            loop_cycle,
+        );
+
+        // 右段窗口 [2,4] → 只应出现 62 / 63；左半段的 60 / 61 一律不得出现。
+        assert!(
+            curve.iter().all(|&v| v == 0.0 || v >= 62.0),
+            "left-half pitches leaked into the right half: {:?}",
+            curve
+        );
+        assert_eq!(curve.first().copied(), Some(62.0));
+        assert_eq!(curve.get(200).copied(), Some(63.0));
+        // 4s 的音高线在右段里应当铺满 2s，而不是只剩零头。
+        assert!(curve.iter().filter(|&&v| v > 0.0).count() >= 380);
+    }
+
+    /// Loop 下分割不得改变内容时长 D（= 音符最大结束时间），否则回绕周期漂移。
+    #[test]
+    fn split_pitch_reference_loop_keeps_content_duration() {
+        let (mut tl, clip_id, _) = make_pitch_reference_clip(4.0);
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.loop_enabled = true;
+            clip.sync_take_from_flat();
+        }
+        let right_id = tl.split_clip(&clip_id, 2.0).unwrap();
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+
+        // 两段的内容时长仍是完整音符跨度 —— 裁剪音符会让它掉到 2.0。
+        assert_eq!(clip_source_media_duration_sec(left), Some(4.0));
+        assert_eq!(clip_source_media_duration_sec(right), Some(4.0));
+        // Loop 左段保留原锚点；右段锚点按左段消费量对 D 回绕。
+        assert!((left.source_start_sec - 0.0).abs() < 1e-9);
+        assert!((right.source_start_sec - 2.0).abs() < 1e-9);
+    }
+
+    // ── split_clips_at tests ──────────────────────────────────────
     /// Split a grouped clip: left half keeps original group_id, right half gets new group_id.
     #[test]
     fn split_clips_at_basic() {
@@ -11256,8 +11446,24 @@ impl TimelineState {
                     _ => continue,
                 };
 
-            // 将 pitch 曲线转换为 midiNoteData（合并相邻的相同音符）
+            // 将 pitch 曲线转换为 midiNoteData（合并相邻的相同音符）。
+            //
+            // 曲线是**时间线域**的（`compute_clip_pitch_midi` 返回可见区间），
+            // 而音符按不变式 PN 必须存**源域**坐标 —— 因此用与
+            // `update_pitch_reference_from_track_params` 完全相同的映射写回。
+            // 少了这一步，带速率 / 倒放 / Loop 的音频 Clip 转换出来的音高线
+            // 会落在错误的域里，渲染端按窗口求交时整体错位。
             let midi_notes = Self::pitch_curve_to_midi_notes(&pitch_midi, fp_sec, clip.length_sec);
+            let (src_start, src_end, loop_cycle) = midi_remap_context(clip);
+            let midi_notes = Self::remap_midi_note_times(
+                midi_notes,
+                clip.length_sec,
+                src_start,
+                src_end,
+                clip.playback_rate,
+                clip.reversed,
+                loop_cycle,
+            );
 
             // 更新 clip
             if let Some(clip) = self.clips.iter_mut().find(|c| c.id == *clip_id) {
@@ -11317,38 +11523,9 @@ impl TimelineState {
                     return None;
                 }
                 let root = self.resolve_root_track_id(&clip.track_id)?;
-                let src_end = if clip.source_end_sec > 0.0 {
-                    clip.source_end_sec
-                } else {
-                    clip.length_sec
-                };
-                // 消费窗口（非 Loop 倒放锚定 se：win=[se−len·r, se]，可为负，
-                // 域外为静音）—— fallback 曲线与 remap 写回共用同一坐标系。
-                let src_start = if !clip.loop_enabled && clip.reversed {
-                    let r = if clip.playback_rate.is_finite() && clip.playback_rate > 1e-6 {
-                        clip.playback_rate as f64
-                    } else {
-                        1.0
-                    };
-                    src_end - clip.length_sec.max(0.0) * r
-                } else {
-                    clip.source_start_sec
-                };
-                // 倒放锚点 clamp 规则与 place_note_occurrence_in_loop 一致：
-                // 周期来自媒体时长时 clamp 到媒体时长；周期退化为窗口跨度时
-                // 保持原始 source_end（否则 slip 窗口的倒放相位被错误平移）。
-                let clip_media_total = clip_source_media_duration_sec(clip).filter(|d| *d > 1e-9);
-                let loop_cycle = clip_loop_cycle_span_sec(clip).map(|cycle| {
-                    (
-                        cycle,
-                        clip.source_start_sec,
-                        match clip_media_total {
-                            Some(d) => clip.source_end_sec.min(d),
-                            None => clip.source_end_sec,
-                        }
-                        .max(0.0),
-                    )
-                });
+                // 源域上下文（消费窗口 + Loop 回绕描述）与转换路径共用同一份
+                // 实现，保证两条写音符的路径落在同一个坐标系里。
+                let (src_start, src_end, loop_cycle) = midi_remap_context(clip);
                 Some(ClipMeta {
                     clip_id: clip_id.clone(),
                     root,
