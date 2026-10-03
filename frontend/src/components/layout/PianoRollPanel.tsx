@@ -85,9 +85,11 @@ import {
     isNoneBinding,
 } from "../../features/keybindings/keybindingsSlice";
 import {
+    SEPARATION_GATED_PARAMS,
     SEPARATION_PARAM_ID,
     findBlockedEditParam,
     firstGatedParamId,
+    isGatedBySeparation,
     paramNeedingVisibilityOnGate,
     isEffectParamGated,
     isSeparationEnabled,
@@ -142,6 +144,8 @@ import {
     listReferenceRootTracks,
 } from "./pianoRoll/referenceRootTracks";
 import { buildReferenceRootTrackTriggerElement } from "./pianoRoll/referenceRootTrackTrigger";
+import { TOOLBAR_MAX_TIER } from "./pianoRoll/toolbarOverflow";
+import { useToolbarOverflowTier } from "./pianoRoll/useToolbarOverflowTier";
 import {
     averageSelectionValues,
     smoothSelectionValues,
@@ -2551,6 +2555,48 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         [separationDesc, orderedProcessorParams],
     );
 
+    // ── 工具栏横向不足时的分级隐藏 ──────────────────────────────────────────
+    //
+    // 参数编辑器工具栏是**一整行**（标题 / 工具 / 平滑度在左，参数药丸 / 算法在右，
+    // 同属 `h-qt-bar-main` 这一个容器），因此只观察这一个容器：任一处放不下即升级。
+    // 完整层级见 `toolbarOverflow.ts` 的 `TOOLBAR_MAX_TIER`：
+    //   1 标题 · 2 算法文本 · 3 被门禁药丸（分离关闭时）· 4 平滑度文本 ·
+    //   5 平滑度滑块 · 6 平滑度数值 · 7 导入 MIDI · 8 参考轨道组文本
+    // 原则是**只砍冗余、不砍入口**：被隐藏项要么是纯装饰文字（旁边控件已表达同一信息），
+    // 要么功能另有入口；唯一入口（如参考轨道组、分离开关）只瘦身、不隐藏。
+    const toolbarRowRef = useRef<HTMLDivElement | null>(null);
+    // ref 恒定，故数组引用稳定（hook 依赖它做订阅，不能每次渲染都新建）。
+    const toolbarRows = useMemo(() => [toolbarRowRef], []);
+    const toolbarTier = useToolbarOverflowTier(toolbarRows, TOOLBAR_MAX_TIER);
+
+    // 被门禁的药丸**逐个**让位（第 3 / 4 级各让一个），且**从右往左**让：
+    // 气声药丸左侧挂着分离开关，先让气声会让开关独自悬空。
+    // 【为什么逐个而不是一次让两个】一次让两个约 212px，超过回落余量（130px），
+    // 会在同一宽度下反复"隐藏 ↔ 恢复"（理由见 TOOLBAR_OVERFLOW_HYSTERESIS_PX）。
+    const gatedPillHideOrder = useMemo(
+        () =>
+            orderedProcessorParams
+                .filter((p) => isGatedBySeparation(p.id, false))
+                .map((p) => p.id)
+                .reverse(),
+        [orderedProcessorParams],
+    );
+    const gatedPillsHidden = separationEnabled
+        ? 0
+        : Math.max(0, Math.min(toolbarTier - 2, gatedPillHideOrder.length));
+
+    // 分离关闭时，气声 / 张力的药丸已在第 3 级让位 —— 用户此刻点不到它们的"眼睛"。
+    // 但"关闭分离时曲线保持可见、只是不可编辑"是既有契约，因此这里在**渲染口径**上
+    // 强制把它们视为可见。不动真实 state：横向恢复后眼睛回到用户原先的设置。
+    const effectiveSecondaryParamVisible = useMemo(() => {
+        if (toolbarTier < 3 || separationEnabled) return secondaryParamVisible;
+        const next = { ...secondaryParamVisible };
+        for (const paramId of SEPARATION_GATED_PARAMS) {
+            next[paramId as ParamName] = true;
+        }
+        return next;
+    }, [toolbarTier, separationEnabled, secondaryParamVisible]);
+
     // 所属轨道组的 Compose 开关。它与分离开关是**两道独立门禁**，但都决定
     // 轨道级"合成"参数（共振峰/气声/张力）是否生效 —— Compose 关闭时必须
     // 完全静默（需求：听到未经任何改动的原音频）。
@@ -2675,9 +2721,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         return getVisibleSecondaryParamIds({
             editParam,
             processorParamIds: processorParams.map((p) => p.id as ParamName),
-            secondaryParamVisible,
+            // 用"渲染口径"的可见性（见 `effectiveSecondaryParamVisible`）：
+            // 药丸被第 3 级隐藏时也要让曲线继续绘制。
+            secondaryParamVisible: effectiveSecondaryParamVisible,
         });
-    }, [editParam, secondaryParamVisible, processorParams]);
+    }, [editParam, effectiveSecondaryParamVisible, processorParams]);
 
     const updateVisibleReferenceRootTrackIds = useCallback(
         (nextTrackIds: string[]) => {
@@ -7427,7 +7475,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             <Flex
                 align="center"
                 justify="between"
-                className="h-qt-bar-main bg-qt-base border-b border-qt-border px-2 shrink-0"
+                className="h-qt-bar-main bg-qt-base border-b border-qt-border px-2 shrink-0 overflow-hidden"
+                ref={toolbarRowRef}
+                /* 当前隐藏层级（0 = 全部显示）：观测与调试出口，见 toolbarOverflow.ts。 */
+                data-toolbar-tier={toolbarTier}
             >
                 <Flex align="center" gap="2" style={{ flex: "1 1 auto", minWidth: 0 }}>
                     <AppIconButton
@@ -7443,7 +7494,13 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         }}
                         icon={s.paramEditorSyncTimeline ? <Link2Icon /> : <LinkBreak2Icon />}
                     />
-                    <span className="hs-type-label font-semibold">{tf("param_editor_short")}</span>
+                    {/* 第 1 级隐藏：面板身份已由 dock 标签 / 浮窗标题表达，
+                        这里是重复提示，横向不足时最先让位。 */}
+                    {toolbarTier < 1 ? (
+                        <span className="hs-type-label font-semibold">
+                            {tf("param_editor_short")}
+                        </span>
+                    ) : null}
                     {/* 工具按钮组（音高吸附等）+ 平滑度滑块。`marginLeft: 8` 是紧邻
                         `参数编辑器` 标题留出的空白。
                         【minWidth 必须显式置 0】flex 项默认 `min-width: auto`（= min-content），
@@ -8037,63 +8094,73 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             {/* 标签允许被压缩裁切（完整名称在悬停提示里）：横向极窄时
                                 应当由它先让位，而不是把整行撑到溢出。省略号让"让位"
                                 看起来是有意的降级，而不是渲染出错的半截字。 */}
-                            <span
-                                className="hs-type-label"
-                                data-tooltip={tf("edge_smoothness")}
-                                style={{
-                                    minWidth: 0,
-                                    whiteSpace: "nowrap",
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
-                                }}
-                            >
-                                {tf("edge_smoothness_short")}:
-                            </span>
-                            <input
-                                ref={attachEdgeSmoothnessWheel}
-                                className="qt-range"
-                                type="range"
-                                min={0}
-                                max={100}
-                                step={1}
-                                value={Math.round(s.edgeSmoothnessPercent)}
-                                onChange={(e) => {
-                                    const next = Number(e.currentTarget.value);
-                                    dispatch(setEdgeSmoothnessPercent(next));
-                                }}
-                                onPointerUp={() => {
-                                    void dispatch(persistUiSettings());
-                                }}
-                                onKeyUp={() => {
-                                    void dispatch(persistUiSettings());
-                                }}
-                                style={{
-                                    // 【flex-basis 必须取 0，而不是 `auto`（= width: 120）】
-                                    // 基准为 120 时，横向不足的收缩量会**按基准比例分摊**给
-                                    // 同排所有项 —— 实测窄容器下它只缩到 102px，仍占着大头。
-                                    // 基准为 0 时，它先让出空间、只取"别人用剩下的"，宽裕时再由
-                                    // `maxWidth` 封顶在 120px。它是低频调节项，理应最先让步。
-                                    //
-                                    // 【下限取 16】基准为 0 的项在收缩阶段分摊到的是 0（0 × shrink
-                                    // 恒为 0），因此**它的下限就是它实际能到的最小宽度**：下限多大，
-                                    // 拥挤时它就让出多少。16 = 12px 滑块 + 两侧各 2px，是仍能拖动的
-                                    // 最小值；再窄就只剩滑块本身、看不到轨道了。极窄时它本就该让位
-                                    // （数值仍可读，滚轮调值照常可用）。
-                                    flex: "1 1 0",
-                                    // 非 flex 上下文（理论上不会发生）时的兜底宽度。
-                                    width: 120,
-                                    minWidth: 16,
-                                    maxWidth: 120,
-                                }}
-                            />
+                            {/* 第 5 级隐藏：滑块与百分比数值仍在，全称在 ToolTip 里。 */}
+                            {toolbarTier < 5 ? (
+                                <span
+                                    className="hs-type-label"
+                                    data-tooltip={tf("edge_smoothness")}
+                                    style={{
+                                        minWidth: 0,
+                                        whiteSpace: "nowrap",
+                                        overflow: "hidden",
+                                        textOverflow: "ellipsis",
+                                    }}
+                                >
+                                    {tf("edge_smoothness_short")}:
+                                </span>
+                            ) : null}
+                            {/* 第 6 级隐藏滑块：此时只剩百分比数值（只读）。
+                                第 7 级连数值一起隐藏，整组退场。 */}
+                            {toolbarTier < 6 ? (
+                                <input
+                                    ref={attachEdgeSmoothnessWheel}
+                                    className="qt-range"
+                                    type="range"
+                                    min={0}
+                                    max={100}
+                                    step={1}
+                                    value={Math.round(s.edgeSmoothnessPercent)}
+                                    onChange={(e) => {
+                                        const next = Number(e.currentTarget.value);
+                                        dispatch(setEdgeSmoothnessPercent(next));
+                                    }}
+                                    onPointerUp={() => {
+                                        void dispatch(persistUiSettings());
+                                    }}
+                                    onKeyUp={() => {
+                                        void dispatch(persistUiSettings());
+                                    }}
+                                    style={{
+                                        // 【flex-basis 必须取 0，而不是 `auto`（= width: 120）】
+                                        // 基准为 120 时，横向不足的收缩量会**按基准比例分摊**给
+                                        // 同排所有项 —— 实测窄容器下它只缩到 102px，仍占着大头。
+                                        // 基准为 0 时，它先让出空间、只取"别人用剩下的"，宽裕时再由
+                                        // `maxWidth` 封顶在 120px。它是低频调节项，理应最先让步。
+                                        //
+                                        // 【下限取 16】基准为 0 的项在收缩阶段分摊到的是 0（0 × shrink
+                                        // 恒为 0），因此**它的下限就是它实际能到的最小宽度**：下限多大，
+                                        // 拥挤时它就让出多少。16 = 12px 滑块 + 两侧各 2px，是仍能拖动的
+                                        // 最小值；再窄就只剩滑块本身、看不到轨道了。极窄时它本就该让位
+                                        // （数值仍可读，滚轮调值照常可用）。
+                                        flex: "1 1 0",
+                                        // 非 flex 上下文（理论上不会发生）时的兜底宽度。
+                                        width: 120,
+                                        minWidth: 16,
+                                        maxWidth: 120,
+                                    }}
+                                />
+                            ) : null}
                             {/* 数值需要完整可读（"100%"），因此给它一个较小的固定下限，
-                                但不再是 36px 那种"宁可溢出也不缩"的宽度。 */}
-                            <span
-                                className="hs-type-label"
-                                style={{ minWidth: 28, textAlign: "right" }}
-                            >
-                                {Math.round(s.edgeSmoothnessPercent)}%
-                            </span>
+                                但不再是 36px 那种"宁可溢出也不缩"的宽度。
+                                第 7 级隐藏：整组退场，平滑度等面板变宽后再调。 */}
+                            {toolbarTier < 7 ? (
+                                <span
+                                    className="hs-type-label"
+                                    style={{ minWidth: 28, textAlign: "right" }}
+                                >
+                                    {Math.round(s.edgeSmoothnessPercent)}%
+                                </span>
+                            ) : null}
                         </Flex>
                     </Flex>
                 </Flex>
@@ -8119,13 +8186,18 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             color="gray"
                                             style={{ cursor: "pointer" }}
                                         >
-                                            {buildReferenceRootTrackTriggerElement(
-                                                `${tf("reference_root_tracks_short")}${
-                                                    visibleReferenceRootTrackIds.length > 0
-                                                        ? ` (${visibleReferenceRootTrackIds.length})`
-                                                        : ""
-                                                }`,
-                                            )}
+                                            {/* 第 9 级只保留下拉箭头：参考轨道组没有菜单 /
+                                                快捷键入口，是**唯一入口**，不能整块隐藏，
+                                                只能瘦身；全称仍在按钮的 ToolTip 里。 */}
+                                            {toolbarTier < 9
+                                                ? buildReferenceRootTrackTriggerElement(
+                                                      `${tf("reference_root_tracks_short")}${
+                                                          visibleReferenceRootTrackIds.length > 0
+                                                              ? ` (${visibleReferenceRootTrackIds.length})`
+                                                              : ""
+                                                      }`,
+                                                  )
+                                                : null}
                                             <ChevronDownIcon width="12" height="12" />
                                         </Button>
                                     </DropdownMenu.Trigger>
@@ -8191,21 +8263,25 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         )}
                                     </DropdownMenu.Content>
                                 </DropdownMenu.Root>
-                                <span
-                                    className="inline-flex"
-                                    data-tooltip={pitchHardDisableReason ?? tf("midi_import")}
-                                >
-                                    <Button
-                                        size="1"
-                                        /* 跟随全局强调色（原独立 blue 与播放键的 iris 是两种蓝） */
-                                        variant="soft"
-                                        onClick={handleOpenMidiDialog}
-                                        disabled={!pitchEnabled}
-                                        style={{ cursor: "pointer" }}
+                                {/* 第 8 级隐藏「导入 MIDI」：时间轴上同样能导入 MIDI
+                                    （`TimelinePanel` 也有入口），这里不是唯一路径。 */}
+                                {toolbarTier < 8 ? (
+                                    <span
+                                        className="inline-flex"
+                                        data-tooltip={pitchHardDisableReason ?? tf("midi_import")}
                                     >
-                                        {tf("midi_import")}
-                                    </Button>
-                                </span>
+                                        <Button
+                                            size="1"
+                                            /* 跟随全局强调色（原独立 blue 与播放键的 iris 是两种蓝） */
+                                            variant="soft"
+                                            onClick={handleOpenMidiDialog}
+                                            disabled={!pitchEnabled}
+                                            style={{ cursor: "pointer" }}
+                                        >
+                                            {tf("midi_import")}
+                                        </Button>
+                                    </span>
+                                ) : null}
                             </React.Fragment>
                         ) : null}
                         {selectedIsChildTrack &&
@@ -8297,6 +8373,16 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         )}
                         {/* 由后端 processorParams 驱动的动态参数按钮（按算法排列后的顺序） */}
                         {orderedProcessorParams.map((p) => {
+                            // 第 3 / 4 级：分离关闭时，气声与张力本就置灰、不可编辑，
+                            // 横向不足时逐个让位。**组首的药丸除外** —— 它旁边挂着分离
+                            // 开关，那是重新开启的唯一入口（见下方组首分支）。
+                            // 曲线仍会继续绘制：见 `effectiveSecondaryParamVisible`。
+                            const gatedHideIndex = gatedPillHideOrder.indexOf(p.id);
+                            const hideGatedPill =
+                                gatedHideIndex >= 0 && gatedHideIndex < gatedPillsHidden;
+                            if (hideGatedPill && p.id !== separationSwitchAnchorParamId) {
+                                return null;
+                            }
                             if (p.id === "formant_shift_cents") {
                                 return (
                                     <ParamGroupButton
@@ -8489,7 +8575,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             <BreathAirIcon off={!separationEnabled} />
                                         </button>
                                     </span>
-                                    {paramPill}
+                                    {/* 第 4 级：组首的药丸也让位，但**开关保留** ——
+                                        它是重新开启气声 / 张力的唯一入口。 */}
+                                    {hideGatedPill ? null : paramPill}
                                 </React.Fragment>
                             );
                         })}
@@ -8580,9 +8668,13 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     </Flex>
                                 );
                             })}
-                            <span className="hs-type-label" data-tooltip={tf("algo_label")}>
-                                {tf("algo_label_short")}
-                            </span>
+                            {/* 第 2 级隐藏：紧邻的下拉本身就显示当前算法名，
+                                "算法"二字只是重复提示（全称在 ToolTip 里）。 */}
+                            {toolbarTier < 2 ? (
+                                <span className="hs-type-label" data-tooltip={tf("algo_label")}>
+                                    {tf("algo_label_short")}
+                                </span>
+                            ) : null}
                             <AppSelect
                                 // 同上：头部紧凑条内的控件
                                 density="compact"
