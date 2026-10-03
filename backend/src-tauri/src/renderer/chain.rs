@@ -188,6 +188,19 @@ impl ProcessingStage for WorldVocoderStage {
 /// Stage 1b：NSF-HiFiGAN ONNX 合成。
 pub struct HiFiGanStage;
 
+/// 在绝对时间处采样一条自动化曲线（首点对应时间轴 0，帧周期 `frame_period_ms`）。
+///
+/// **越界语义 = hold-last**：超出曲线末点后恒取末值，与
+/// `audio_engine/mix.rs::sample_automation_curve` 一致。
+///
+/// 【为什么必须是 hold-last】预览与导出共用同一条曲线，但走不同的采样函数：
+/// 预览经 `mix.rs`（hold-last），导出经本函数。历史上本函数在越界处回退
+/// `default_value`，于是**同一条 `breath_gain` 曲线在预览与导出下听感不同**——
+/// 用户画到的段落之后，预览保持末值、导出却突然弹回默认增益。统一为 hold-last
+/// 后两者一致，也符合"画到哪就保持到哪"的直觉。
+///
+/// 【为什么不插值到 default】早期实现让 `i1` 钳到末元素后继续插值，得到
+/// `default … 末值` 之间的衰减/振荡值；hold-last 是常量，天然规避该问题。
 fn sample_curve_at_abs_sec(
     curve: Option<&[f32]>,
     abs_sec: f64,
@@ -200,6 +213,7 @@ fn sample_curve_at_abs_sec(
     if curve.is_empty() {
         return default_value;
     }
+    let last = curve.len() - 1;
 
     let fp = frame_period_ms.max(0.1);
     let idx_f = (abs_sec.max(0.0) * 1000.0) / fp;
@@ -207,16 +221,14 @@ fn sample_curve_at_abs_sec(
         return default_value;
     }
     let i0 = idx_f.floor().max(0.0) as usize;
-    // 越界（超出曲线末点）直接返回默认值：i1 会被钳制到最后一个元素，
-    // 若继续插值会得到 default 与末值之间的错误衰减/振荡值（与
-    // hifigan / vslib 的末点越界修复保持一致）。
-    if i0 >= curve.len() {
-        return default_value;
+    // 越界：保持末值（hold-last），不回退 default。
+    if i0 >= last {
+        return curve[last];
     }
-    let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
+    let i1 = i0 + 1;
     let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
-    let a = curve.get(i0).copied().unwrap_or(default_value);
-    let b = curve.get(i1).copied().unwrap_or(a);
+    let a = curve[i0];
+    let b = curve[i1];
     a + (b - a) * frac
 }
 
@@ -570,29 +582,67 @@ mod tests {
         );
     }
 
+    /// 越界语义 = **hold-last**（保持末值），不得回退 default。
+    ///
+    /// 【为什么钉住】预览（`audio_engine/mix.rs::sample_automation_curve`）用的就是
+    /// hold-last，而导出走本函数。历史上本函数在越界处回退 `default_value`，
+    /// 导致同一条 `breath_gain` 曲线**预览与导出听感不同**：画到的段落之后，
+    /// 预览保持末值、导出弹回默认增益。
+    ///
+    /// 同时保留早期修复的意图：越界区段必须是**常量**，不得是
+    /// `default … 末值` 之间的衰减/振荡值。
     #[test]
-    fn sample_curve_beyond_end_returns_default() {
-        // 回归：末点之后必须回退 default，而不是与末值插值出 0..末值 的振荡。
-        // 复现场景 = 共振峰偏移点 359.15 画在曲线末点（fp=5ms，idx 6470），
-        // 之后任意采样都应得到默认值 0。
+    fn sample_curve_beyond_end_holds_last_value() {
         let curve = vec![0.0f32, 0.0, 0.0, 359.15]; // 末点 359.15 @ idx 3
         let fp = 5.0;
-        // idx 3.0（末点本身）→ 359.15
-        let at_last = super::sample_curve_at_abs_sec(Some(&curve), 3.0 * fp / 1000.0, fp, 0.0);
+        let default = 0.0;
+
+        // 末点本身 → 末值
+        let at_last = super::sample_curve_at_abs_sec(Some(&curve), 3.0 * fp / 1000.0, fp, default);
         assert!((at_last - 359.15).abs() < 1e-4);
-        // idx ∈ [3.0, 4.0)：最后一个元素的保持区间（i0=3 在界内，
-        // i1 钳到自身）→ 仍为末值，与 pitch 采样语义一致
-        let hold = super::sample_curve_at_abs_sec(Some(&curve), 3.5 * fp / 1000.0, fp, 0.0);
-        assert!((hold - 359.15).abs() < 1e-4);
-        // idx >= 4.0（超出数组末尾）→ default 0.0（修复前为 0..末值 的振荡）
-        let frac_beyond = super::sample_curve_at_abs_sec(Some(&curve), 4.5 * fp / 1000.0, fp, 0.0);
-        assert_eq!(frac_beyond, 0.0);
-        // 大越界同样归零（修复前 frac 小数部分导致任意非零值）
-        let far = super::sample_curve_at_abs_sec(Some(&curve), 100.0, fp, 0.0);
-        assert_eq!(far, 0.0);
-        // 空曲线 / None → default
-        assert_eq!(super::sample_curve_at_abs_sec(Some(&[]), 1.0, fp, 0.0), 0.0);
-        assert_eq!(super::sample_curve_at_abs_sec(None, 1.0, fp, 0.0), 0.0);
+
+        // 末点之后任意位置 → 仍为末值（hold-last）
+        let just_after =
+            super::sample_curve_at_abs_sec(Some(&curve), 3.5 * fp / 1000.0, fp, default);
+        assert!(
+            (just_after - 359.15).abs() < 1e-4,
+            "expected hold-last 359.15, got {just_after}"
+        );
+        let beyond = super::sample_curve_at_abs_sec(Some(&curve), 4.5 * fp / 1000.0, fp, default);
+        assert!(
+            (beyond - 359.15).abs() < 1e-4,
+            "expected hold-last 359.15, got {beyond}"
+        );
+        // 大越界同样是末值，且不得出现振荡
+        let far = super::sample_curve_at_abs_sec(Some(&curve), 100.0, fp, default);
+        assert!(
+            (far - 359.15).abs() < 1e-4,
+            "expected hold-last 359.15, got {far}"
+        );
+
+        // 空曲线 / None → default（"没有曲线"仍表示用默认值，与 hold-last 不冲突）
+        assert_eq!(
+            super::sample_curve_at_abs_sec(Some(&[]), 1.0, fp, default),
+            default
+        );
+        assert_eq!(
+            super::sample_curve_at_abs_sec(None, 1.0, fp, default),
+            default
+        );
+    }
+
+    /// hold-last 必须对 breath_gain 的实际默认值（1.0）同样成立 ——
+    /// 否则"画了一半的曲线"之后会从末值弹回 1.0（原缺陷的听感表现）。
+    #[test]
+    fn sample_curve_hold_last_uses_curve_not_default() {
+        let curve = vec![0.0f32, 0.25, 0.5];
+        let fp = 5.0;
+        // 越界处 default 是 1.0，但结果必须是末值 0.5
+        let v = super::sample_curve_at_abs_sec(Some(&curve), 10.0, fp, 1.0);
+        assert!(
+            (v - 0.5).abs() < 1e-6,
+            "must hold last curve value 0.5, not default 1.0; got {v}"
+        );
     }
 
     #[test]
@@ -605,5 +655,62 @@ mod tests {
         // 负时间 → idx 0 → 第一个元素
         let neg = super::sample_curve_at_abs_sec(Some(&curve), -2.0, fp, 0.0);
         assert_eq!(neg, 0.0);
+        // 区间内插值仍保留（idx 1.5 → 150）
+        let mid2 = super::sample_curve_at_abs_sec(Some(&curve), 1.5 * fp / 1000.0, fp, 0.0);
+        assert!((mid2 - 150.0).abs() < 1e-4);
+    }
+
+    /// **预览与导出必须一致**：同一曲线、同一时刻，渲染侧采样器
+    /// （本模块，导出走它）与混音侧采样器（`audio_engine::mix`，预览走它）
+    /// 必须给出相同的值 —— 包括越界区段。
+    ///
+    /// 这是本模块越界语义修复的**跨模块判据**：单看任一侧的测试都无法发现
+    /// "两侧各自自洽、彼此不同"这一缺陷形态。
+    ///
+    /// 注意两个采样器的入参口径不同：
+    /// - 本模块收**绝对秒**；
+    /// - 混音侧收 `abs_frame`，它是**绝对采样点序号**（不是曲线帧号），
+    ///   内部按 `abs_frame / sample_rate` 换成秒（见 `mix.rs` 的
+    ///   `volume_curve_samples_at_timeline_absolute_frame`）。
+    /// 因此这里用同一个「绝对秒」推出两者的入参，而不是直接传同一个整数。
+    #[test]
+    fn sample_curve_agrees_with_preview_mixer() {
+        let fp = 5.0;
+        let sr = 44_100u32;
+        let curves: Vec<Option<Vec<f32>>> = vec![
+            // 末值非默认值 —— 最能暴露 hold-last vs default 的分歧
+            Some(vec![0.0, 0.25, 0.5]),
+            // 单点曲线
+            Some(vec![0.75]),
+            // 全默认值
+            Some(vec![1.0, 1.0, 1.0]),
+            // 零值末点
+            Some(vec![1.0, 0.0]),
+            None,
+            Some(vec![]),
+        ];
+
+        // 覆盖曲线内、末点、末点之后、以及很远的位置（单位：曲线帧）
+        for &curve_frame in &[0.0f64, 1.0, 2.0, 3.0, 4.0, 10.0, 100.0, 10_000.0] {
+            let abs_sec = curve_frame * fp / 1000.0;
+            // 同一时刻换算成绝对采样点（四舍五入到最近的采样点）
+            let abs_frame = (abs_sec * sr as f64).round() as u64;
+
+            for curve in &curves {
+                let export = super::sample_curve_at_abs_sec(curve.as_deref(), abs_sec, fp, 1.0);
+                let preview = crate::audio_engine::mix::sample_automation_curve(
+                    curve.as_deref(),
+                    abs_frame,
+                    sr,
+                    fp,
+                    1.0,
+                );
+                assert!(
+                    (export - preview).abs() < 1e-3,
+                    "preview/export disagree at {abs_sec}s (frame {abs_frame}) \
+                     for curve {curve:?}: preview={preview}, export={export}"
+                );
+            }
+        }
     }
 }
