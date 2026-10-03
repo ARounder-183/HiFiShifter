@@ -2672,6 +2672,33 @@ mod tests {
         );
     }
 
+
+    /// 端到端：非零 keyShift 时 mel 帧数必须与快速路径一致。
+    ///
+    /// `mel_from_audio_shifted` 依赖"帧数与 keyShift 无关"这一契约；若它不成立，
+    /// mel 与 f0 的时间轴会错位（输出整体变速/静音）。这里用真实配置对比两条路径。
+    #[test]
+    fn shifted_and_fast_paths_agree_on_frame_count() {
+        let cfg = test_cfg();
+        let basis = test_basis(&cfg);
+        for &n in &[0usize, 100, 512, 513, 4096, 44_100, 48_000] {
+            let audio = sine(n.max(1), 440.0, 44_100.0);
+            let want = super::mel_frame_count(audio.len(), cfg.hop_size);
+
+            for key_shift in [-12.0f32, -3.0, 0.0, 3.0, 12.0] {
+                let shifts = vec![super::quantize_key_shift(key_shift); want];
+                let mut plans = std::collections::HashMap::new();
+                let mel =
+                    super::compute_shifted_mel(&audio, &shifts, &cfg, &basis, &mut plans).unwrap();
+                assert_eq!(
+                    mel.len(),
+                    cfg.num_mels * want,
+                    "frames drifted at n={n}, keyShift={key_shift}"
+                );
+            }
+        }
+    }
+
     /// 窗口长度必须等于 FFT 长度 —— 这是帧数与 keyShift 无关的前提。
     #[test]
     fn shift_plan_window_equals_fft_length() {
