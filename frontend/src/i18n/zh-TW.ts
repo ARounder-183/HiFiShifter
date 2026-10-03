@@ -916,6 +916,7 @@ export const zhTW = {
     pitch_analyzing_clips: "正在分析{clipName}{clipCount} {percentage}%",
     algo_label: "演算法",
     algo_label_short: "演算法",
+    algo_unavailable_suffix: "（不可用）",
     child_pitch_mode_cents: "音分差",
     child_pitch_mode_degrees: "度數差",
     child_formant_mode: "共振峰差",

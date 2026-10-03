@@ -53,6 +53,10 @@ import {
     setParamSelectionActive,
 } from "../../features/session/sessionSlice";
 import { resolveRootTrackId } from "../../features/session/trackUtils";
+import {
+    buildPitchAlgoOptions,
+    resolvePitchAlgoSelectValue,
+} from "../../features/tracks/pitchAlgoOptions";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { getWaveformColors } from "../../theme/waveformColors";
 import type { ProcessorParamDescriptor } from "../../types/api";
@@ -2115,6 +2119,20 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         if (!rootTrackId) return null;
         return s.tracks.find((tr) => tr.id === rootTrackId) ?? null;
     }, [s.tracks, rootTrackId]);
+
+    // 算法下拉的选项与取值：唯一来源（见 pitchAlgoOptions.ts）。不可用时
+    // vslib 从列表消失；当前值已是 vslib 时保留并标注"不可用"，避免下拉框
+    // 回退显示成 nsf-hifigan 而谎报轨道真实算法。
+    const pitchAlgoOptions = useMemo(
+        () =>
+            buildPitchAlgoOptions({
+                noneLabel: t("common_none"),
+                vslibAvailable: s.vslibAvailable,
+                unavailableSuffix: t("algo_unavailable_suffix"),
+                currentValue: rootTrack?.pitchAnalysisAlgo,
+            }),
+        [t, s.vslibAvailable, rootTrack?.pitchAnalysisAlgo],
+    );
 
     const childFormantOffsetParam = useMemo(() => {
         if (!effectiveSelectedTrackId || !selectedIsChildTrack) return null;
@@ -8421,13 +8439,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             <AppSelect
                                 // 同上：头部紧凑条内的控件
                                 density="compact"
-                                value={
-                                    ["nsf_hifigan_onnx", "world_dll", "vslib", "none"].includes(
-                                        rootTrack.pitchAnalysisAlgo,
-                                    )
-                                        ? rootTrack.pitchAnalysisAlgo
-                                        : "nsf_hifigan_onnx"
-                                }
+                                value={resolvePitchAlgoSelectValue(
+                                    rootTrack.pitchAnalysisAlgo,
+                                    pitchAlgoOptions,
+                                )}
                                 onValueChange={(v) => {
                                     if (!rootTrackId) return;
                                     dispatch(
@@ -8440,12 +8455,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 fullWidth={false}
                                 className="min-w-[140px]"
                                 ariaLabel={tf("algo_label")}
-                                options={[
-                                    { value: "nsf_hifigan_onnx", label: "nsf-hifigan" },
-                                    { value: "world_dll", label: "world" },
-                                    { value: "vslib", label: "vslib" },
-                                    { value: "none", label: t("common_none") },
-                                ]}
+                                options={pitchAlgoOptions}
                             />
                         </Flex>
                     ) : null}

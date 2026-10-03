@@ -950,6 +950,7 @@ export const jaJP = {
     pitch_analyzing_clips: "分析中{clipName}{clipCount} {percentage}%",
     algo_label: "アルゴリズム",
     algo_label_short: "アルゴ",
+    algo_unavailable_suffix: "（利用不可）",
     child_pitch_mode_cents: "セント差",
     child_pitch_mode_degrees: "度数差",
     child_formant_mode: "フォルマント差",

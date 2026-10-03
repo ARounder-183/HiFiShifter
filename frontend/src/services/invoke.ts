@@ -881,6 +881,7 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "get_runtime_info",
     "get_timeline_state",
     "get_ui_settings",
+    "get_vslib_status",
     "has_reaper_clipboard",
     "has_timeline_clipboard",
     "import_project_dialog",

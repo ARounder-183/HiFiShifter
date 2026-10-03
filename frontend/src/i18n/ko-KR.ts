@@ -1030,6 +1030,7 @@ export const koKR = {
     pitch_analyzing_clips: "분석 중{clipName}{clipCount} {percentage}%",
     algo_label: "알고리즘",
     algo_label_short: "알고",
+    algo_unavailable_suffix: " (사용 불가)",
     child_pitch_mode_cents: "센트 차",
     child_pitch_mode_degrees: "도수 차",
     child_formant_mode: "포먼트 차",

@@ -122,7 +122,7 @@ export type { Locale } from "../i18n/messages";
 export { reportFrontendError } from "../services/frontendErrorLog";
 
 // ── 平台工具 ────────────────────────────────────────────────────────
-export { IS_LINUX, IS_MAC } from "../utils/platform";
+export { IS_LINUX, IS_MAC, IS_WINDOWS } from "../utils/platform";
 
 /**
  * 扩展契约版本。

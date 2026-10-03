@@ -64,6 +64,7 @@ import {
     resolveEditOpRoute,
     resolvePasteRoute,
 } from "../../features/keybindings/focusRouting";
+import { IS_WINDOWS } from "../../utils/platform";
 import { getActiveSurface } from "../../features/uiFocus/focusSurface";
 import { webApi } from "../../services/webviewApi";
 import { KeybindingsDialog } from "./KeybindingsDialog";
@@ -714,14 +715,26 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             {shortcutLabel("edit.pasteTracks")}
                         </div>
                     </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    {/* 外部剪贴板交换 */}
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteVocalShifter")}>
-                        {t("menu_paste_vocalshifter_clipboard")}
-                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                            {shortcutLabel("edit.pasteVocalShifter")}
-                        </div>
-                    </DropdownMenu.Item>
+                    {/*
+                        外部剪贴板交换：VocalShifter 只在 Windows 上写
+                        %TEMP%/vocalshifter_tmp，其它平台点了必然 clipboard_not_found。
+                        分隔线收进条件块内部 —— 否则隐藏后会留下一条孤立的分隔线
+                        （与下方 `ortEp === "gpu"` 处的写法同一约定）。
+                        快捷键绑定保持不变：隐藏菜单项 ≠ 移除功能。
+                    */}
+                    {IS_WINDOWS && (
+                        <>
+                            <DropdownMenu.Separator />
+                            <DropdownMenu.Item
+                                onSelect={() => dispatchEditOp("pasteVocalShifter")}
+                            >
+                                {t("menu_paste_vocalshifter_clipboard")}
+                                <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                    {shortcutLabel("edit.pasteVocalShifter")}
+                                </div>
+                            </DropdownMenu.Item>
+                        </>
+                    )}
                     <DropdownMenu.Separator />
                     {/* 选择 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("selectAll")}>

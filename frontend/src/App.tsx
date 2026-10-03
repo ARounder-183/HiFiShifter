@@ -50,6 +50,7 @@ import {
     saveProjectToPathRemote,
     setTrackMeters,
     setToolMode,
+    setVslibAvailable,
     setPlaybackRenderingState,
     checkpointHistory,
     addTrackRemote,
@@ -675,6 +676,29 @@ function AppInner() {
             })
             .catch(() => {
                 // 读不到设置时保持出厂默认；sessionSlice 的 reducer 同样不会执行。
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [dispatch]);
+
+    /*
+     * vslib 能力探测：启动时问一次后端，供算法列表过滤掉不可用的 vslib。
+     *
+     * 【为什么是"一次"而不是轮询】可用性是编译期 + 链接期决定的静态事实，
+     * 运行期不会变（DLL 缺失会让进程根本起不来）。探测失败时保持 `null`
+     * （未知），算法列表按"不可用"处理 —— 详见 pitchAlgoOptions.ts。
+     */
+    useEffect(() => {
+        let cancelled = false;
+        void webApi
+            .getVslibStatus()
+            .then((status) => {
+                if (cancelled) return;
+                dispatch(setVslibAvailable(Boolean(status?.available)));
+            })
+            .catch(() => {
+                // 取不到状态：保持 null（未知 → 隐藏 vslib）。
             });
         return () => {
             cancelled = true;

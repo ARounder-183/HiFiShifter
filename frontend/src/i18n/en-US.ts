@@ -1083,6 +1083,7 @@ export const enUS = {
     pitch_analyzing_clips: "Analyzing{clipName}{clipCount} {percentage}%",
     algo_label: "Algo",
     algo_label_short: "Algo",
+    algo_unavailable_suffix: " (unavailable)",
     child_pitch_mode_cents: "Cents",
     child_pitch_mode_degrees: "Degrees",
     child_formant_mode: "Formant",

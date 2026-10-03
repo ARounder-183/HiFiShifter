@@ -573,6 +573,13 @@ export interface SessionState {
     ortEp: string;
     gpuDeviceId: number;
     ortDeviceId: number | null;
+    /**
+     * vslib 是否可用（启动时经 `get_vslib_status` 探测）。
+     *
+     * `null` = 尚未取到后端状态 —— 算法列表按"不可用"处理（隐藏 vslib），
+     * 详见 `features/tracks/pitchAlgoOptions.ts` 的说明。
+     */
+    vslibAvailable: boolean | null;
     /** 后台预渲染：编辑后立即在后台渲染，无需等待播放触发 */
     autoBackgroundRender: boolean;
     /** 渲染缓存设置：把合成结果落盘，重新打开工程时直接复用。 */
@@ -2241,6 +2248,7 @@ const initialState: SessionState = {
     ortEp: "auto",
     gpuDeviceId: 0,
     ortDeviceId: null,
+    vslibAvailable: null,
     autoBackgroundRender: true,
     renderCache: { ...DEFAULT_RENDER_CACHE_SETTINGS },
     channelImportPolicy: { ...DEFAULT_CHANNEL_IMPORT_POLICY },
@@ -2979,6 +2987,10 @@ const sessionSlice = createSlice({
         },
         setOrtEp(state, action: PayloadAction<string>) {
             state.ortEp = action.payload;
+        },
+        /** 记录 vslib 可用性（启动探测一次）。null = 未知，按不可用处理。 */
+        setVslibAvailable(state, action: PayloadAction<boolean | null>) {
+            state.vslibAvailable = action.payload;
         },
         setGpuDeviceId(state, action: PayloadAction<number>) {
             state.gpuDeviceId = action.payload;
@@ -6894,6 +6906,7 @@ export const {
     setDefaultStretchAlgorithm,
     setDefaultHifiganMelStretch,
     setOrtEp,
+    setVslibAvailable,
     setGpuDeviceId,
     setOrtDeviceId,
     toggleAutoBackgroundRender,
