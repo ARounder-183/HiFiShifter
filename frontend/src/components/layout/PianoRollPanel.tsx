@@ -2148,7 +2148,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         (param: ProcessorParamDescriptor) => {
             switch (param.id) {
                 case "breath_enabled":
-                    return t("breath_mode_label");
+                    // 语义是「是否做谐波/噪声分离」，不是「气声开关」——
+                    // 气声与张力都依赖它。见 `breath_separation_tooltip`。
+                    return t("breath_separation_label");
                 case "breath_gain":
                     return t("breath_gain_label");
                 case "hifigan_tension":
@@ -2179,9 +2181,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const getProcessorParamShortLabel = useCallback(
         (param: ProcessorParamDescriptor) => {
             switch (param.id) {
-                case "breath_enabled":
                 case "breath_gain":
                     return t("param_btn_breath");
+                // `breath_enabled`（谐波/噪声分离）已独立成开关按钮，
+                // 不再走药丸的短标签路径 —— 它有自己的专用渲染分支。
                 case "hifigan_tension":
                 case "tension":
                     return t("param_btn_tension");
@@ -7791,45 +7794,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             const paramActive = editParam === p.id;
                             const paramEyeVisible = secondaryParamVisible[p.id] ?? false;
 
-                            // nsf-hifigan：把“气声开关”以图标片段融合进“气声音量”药丸。
-                            let breathTrailing: React.ReactNode = null;
-                            if (p.id === "breath_gain") {
-                                const breathDesc = processorStaticParams.find(
-                                    (sp) => sp.id === "breath_enabled",
-                                );
-                                const breathDefault =
-                                    breathDesc && breathDesc.kind.type === "static_enum"
-                                        ? breathDesc.kind.default_value
-                                        : 0;
-                                const breathOn =
-                                    (processorStaticValues["breath_enabled"] ?? breathDefault) ===
-                                    1;
-                                breathTrailing = (
-                                    <button
-                                        type="button"
-                                        tabIndex={-1}
-                                        className="param-pill__seg param-pill__seg--breath"
-                                        data-tooltip={
-                                            breathOn
-                                                ? t("breath_tooltip_on")
-                                                : t("breath_tooltip_off")
-                                        }
-                                        aria-label={`${t("breath_mode_label")}: ${
-                                            breathOn ? t("switch_on") : t("switch_off")
-                                        }`}
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            void handleStaticParamChange(
-                                                "breath_enabled",
-                                                breathOn ? 0 : 1,
-                                            );
-                                        }}
-                                    >
-                                        <BreathAirIcon off={!breathOn} />
-                                    </button>
-                                );
-                            }
-
+                            // 气声分离开关已独立成工具栏上的按钮组（见下方
+                            // processorStaticParams 渲染块）。这里不再把它融合进
+                            // breath_gain 药丸 —— 融合会让"分离"这一**全局前提**
+                            // 看起来像"气声音量"的附属属性，而张力同样依赖它。
                             return (
                                 <ParamToolbarPill
                                     key={p.id}
@@ -7849,7 +7817,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             ? t("hide_secondary_param")
                                             : t("show_secondary_param")
                                     }
-                                    trailing={breathTrailing}
                                 />
                             );
                         })}
@@ -7862,10 +7829,43 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 const currentValue =
                                     processorStaticValues[param.id] ?? param.kind.default_value;
 
-                                // 气声开关已融合进“气声音量”参数的药丸中（见下方
-                                // breath_gain 的 trailing 片段），此处不再单独渲染。
+                                // 气声分离（breath_enabled）：**独立**渲染，不融合进
+                                // 任何参数药丸。它是"是否做谐波/噪声分离"的全局前提，
+                                // 气声与张力都依赖它（见 getStaticOptionLabel 的图标化
+                                // 与下方 tooltip 说明），因此必须在 UI 上可见且独立。
                                 if (param.id === "breath_enabled") {
-                                    return null;
+                                    const breathOn = currentValue === 1;
+                                    return (
+                                        <Flex key={param.id} align="center" gap="1">
+                                            <span
+                                                className="hs-type-label"
+                                                data-tooltip={t("breath_separation_tooltip")}
+                                            >
+                                                {t("breath_separation_label")}
+                                            </span>
+                                            <Button
+                                                size="1"
+                                                variant={breathOn ? "solid" : "soft"}
+                                                color={breathOn ? "blue" : "gray"}
+                                                data-tooltip={t("breath_separation_tooltip")}
+                                                aria-label={`${t("breath_separation_label")}: ${
+                                                    breathOn ? t("switch_on") : t("switch_off")
+                                                }`}
+                                                onClick={() => {
+                                                    void handleStaticParamChange(
+                                                        "breath_enabled",
+                                                        breathOn ? 0 : 1,
+                                                    );
+                                                }}
+                                                style={{ cursor: "pointer" }}
+                                            >
+                                                <BreathAirIcon off={!breathOn} />
+                                                <span className="ml-1">
+                                                    {breathOn ? t("switch_on") : t("switch_off")}
+                                                </span>
+                                            </Button>
+                                        </Flex>
+                                    );
                                 }
 
                                 // vslib 的合成模式：改为支持滚轮切换的下拉栏。

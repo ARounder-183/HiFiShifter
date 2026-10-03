@@ -588,6 +588,9 @@ export const koKR = {
     pitch_label: "피치 (반음)",
     tension_label: "텐션 (0-1)",
     breath_mode_label: "브레스",
+    breath_separation_label: "하모닉 분리",
+    breath_separation_tooltip:
+        "오디오 블록을 하모닉과 노이즈로 분리합니다(HNSEP).\n브레스 게인과 텐션 모두 이에 의존합니다: 브레스 게인은 노이즈 성분의 혼합량을, 텐션은 하모닉 성분만 조형합니다.\n처음 켤 때 시간이 걸립니다.",
     breath_gain_label: "브레스 게인",
     hifigan_tension_label: "텐션",
     formant_shift_label: "포먼트 시프트",

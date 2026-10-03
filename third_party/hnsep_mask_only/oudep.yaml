@@ -1,0 +1,5 @@
+id: "hnsep_240512"
+name: "hnsep_240512"
+version: "240512"
+description: "Harmonic/noise separation (yxlllc/vocal-remover hnsep_240512), used by Worldline-R1.1"
+class: Hnsep

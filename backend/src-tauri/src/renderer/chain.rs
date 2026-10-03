@@ -16,6 +16,9 @@ use super::traits::{
 
 static HIFIGAN_BREATH_OPTIONS: [(&str, i32); 2] = [("Off", 0), ("On", 1)];
 
+/// 谐波/噪声分离开关的 id。语义见 `HIFIGAN_PARAM_DESCRIPTORS` 中该参数的说明。
+pub(crate) const HIFIGAN_SEPARATION_PARAM_ID: &str = "breath_enabled";
+
 /// 判定张力曲线"是否活跃"的阈值。
 ///
 /// 与 `pitch_editing::hifigan_tension_active_for_clip`（容差 1e-3）同量级：
@@ -27,7 +30,10 @@ const TENSION_ACTIVE_EPSILON: f32 = 1.0e-3;
 static HIFIGAN_PARAM_DESCRIPTORS: [ParamDescriptor; 4] = [
     ParamDescriptor {
         id: "breath_enabled",
-        display_name: "Breath",
+        // 语义是「是否做谐波/噪声分离」，而**不是**「气声开关」：
+        // 气声曲线与张力曲线都依赖这次分离（Rd 张力只作用于谐波支）。
+        // 改名是为了让 UI 不再把这一全局前提呈现成 breath_gain 的附属属性。
+        display_name: "Harmonic Separation",
         group: "NSF-HiFiGAN",
         kind: super::traits::ParamKind::StaticEnum {
             options: &HIFIGAN_BREATH_OPTIONS,
@@ -298,8 +304,7 @@ impl ProcessingStage for HiFiGanStage {
             return Ok(input_pcm);
         }
 
-        let breath_enabled =
-            crate::pitch_editing::extra_param_enabled(cc.extra_params, "breath_enabled");
+        // ── 曲线解析 ────────────────────────────────────────────────────
         let formant_curve = cc
             .extra_curves
             .get("formant_shift_cents")
@@ -313,23 +318,44 @@ impl ProcessingStage for HiFiGanStage {
                 .any(|v| v.is_finite() && v.abs() > TENSION_ACTIVE_EPSILON)
         });
 
-        // HNSEP 不可用时降级为非 Breath 路径：调用方已因气声跳过外部拉伸，
-        // 硬错误会让整个 clip 以源速率输出（被截断/补零），比"没有气声"
-        // 严重得多。
+        // ── 分离路径的门禁 ──────────────────────────────────────────────
         //
-        // 张力同样走 HNSEP 路径 —— 它**只作用于谐波支**，与 OpenUtau 的
-        // `NeedsSeparation = HasTension || ...` 判据一致。因此把"气声开"与
-        // "张力活跃"一并作为进入分离路径的条件。
-        let needs_separation = breath_enabled || tension_active;
-        if needs_separation && crate::hnsep_onnx::is_available() {
-            return self.process_breath(input_pcm, cc, formant_curve, tension_curve);
-        }
-        if needs_separation {
-            log::warn!(
-                "HiFiGanStage: breath/tension requested but HNSEP unavailable, \
-                 falling back to non-breath rendering (clip_id={})",
+        // 【为什么张力也要求分离】Rd 张力只重塑**谐波**结构（`audio/rd_tension.rs`），
+        // 而谐波/噪声的分支只存在于 `process_breath` 里 —— 它调用 HNSEP 拿到
+        // `(harmonic, noise)`。没有分离就没有"只动谐波"这回事。这与 OpenUtau 的
+        // `NeedsSeparation = HasTension || ...` 判据一致。
+        //
+        // 【为什么开关缺失不算"要分离"】`breath_enabled` 是「是否做谐波/噪声分离」，
+        // 而不是「是否输出气声」。张力活跃时即使开关为 Off 也必须分离 —— 否则张力
+        // 会**静默失效**（下面显式报错，不再无声降级）。
+        let separation_switch_on =
+            crate::pitch_editing::extra_param_enabled(cc.extra_params, HIFIGAN_SEPARATION_PARAM_ID);
+
+        // 张力曲线是否存在（与开关无关）。曲线缺失/全 0 ⇒ 无需分离。
+        let needs_separation = tension_active || separation_switch_on;
+
+        if needs_separation && !crate::hnsep_onnx::is_available() {
+            // 【绝不静默降级】历史实现只打一条日志然后走非分离路径，而那条路径
+            // **根本不读张力曲线** —— 用户画了张力却听不到任何效果，界面上也无
+            // 任何提示，属于最难排查的一类缺陷。这里返回错误：本次 clip 渲染失败、
+            // 不写缓存，`render_background_pass` 会记录并保持等待（与
+            // "pitch processor failed" 同一约定），HNSEP 恢复后重试即成功。
+            let what = if tension_active && separation_switch_on {
+                "气声分离与张力"
+            } else if tension_active {
+                "张力"
+            } else {
+                "气声分离"
+            };
+            return Err(format!(
+                "{what}需要谐波/噪声分离，但 HNSEP 模型不可用；\
+                 请检查 models/hnsep 是否存在，或改用其他音高算法 (clip_id={})",
                 cc.clip_id
-            );
+            ));
+        }
+
+        if needs_separation {
+            return self.process_breath(input_pcm, cc, formant_curve, tension_curve);
         }
 
         // ── 非 Breath 路径 ──────────────────────────────────────────────
@@ -678,6 +704,43 @@ pub fn hifigan_chain() -> ProcessorChain {
 
 #[cfg(test)]
 mod tests {
+    use super::TENSION_ACTIVE_EPSILON;
+
+    /// `breath_enabled` 的语义是「是否做谐波/噪声分离」，而非「气声开关」。
+    ///
+    /// 曲线偏离默认 0 即视为张力活跃，且张力活跃**独立于**分离开关。
+    /// 这两件事共同决定了是否进入 HNSEP 路径 —— 最关键的组合是
+    /// 「张力活跃 + 分离开关关闭」：必须仍然分离，否则张力静默失效。
+    #[test]
+    fn tension_alone_requires_separation_regardless_of_switch() {
+        let active = |v: f32| v.abs() > TENSION_ACTIVE_EPSILON;
+
+        // 分离开关 OFF
+        assert!(
+            active(50.0),
+            "tension curve above the epsilon must count as active"
+        );
+        assert!(!active(0.0));
+        // 全 0 曲线不该触发分离（避免白跑 HNSEP）
+        assert!(
+            ![0.0f32, 0.0, 0.0].iter().any(|&v| active(v)),
+            "an all-zero tension curve must not force separation"
+        );
+        // 边界：恰好等于阈值不算活跃（口径与渲染键一致）
+        assert!(!active(TENSION_ACTIVE_EPSILON));
+        assert!(active(TENSION_ACTIVE_EPSILON * 2.0));
+    }
+
+    /// 非有限值不得被当成"活跃"（会把 NaN 传播进 STFT）。
+    #[test]
+    fn non_finite_tension_is_not_active() {
+        let curve = [f32::NAN, f32::INFINITY, 0.0];
+        let active = curve
+            .iter()
+            .any(|&v| v.is_finite() && v.abs() > TENSION_ACTIVE_EPSILON);
+        assert!(!active, "NaN/Inf must not be treated as an active tension");
+    }
+
     #[test]
     fn hifigan_chain_no_longer_handles_time_stretch() {
         let chain = super::hifigan_chain();

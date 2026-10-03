@@ -1,0 +1,4 @@
+model: model.onnx
+sample_rate: 44100
+n_fft: 2048
+hop_length: 512

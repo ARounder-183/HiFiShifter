@@ -641,6 +641,9 @@ export const enUS = {
     pitch_label: "Pitch (semitones)",
     tension_label: "Tension (0-1)",
     breath_mode_label: "Breath",
+    breath_separation_label: "Harmonic Separation",
+    breath_separation_tooltip:
+        "Split the clip into harmonic and noise parts (HNSEP).\nRequired by both Breath Gain and Tension: Breath Gain mixes the noise part back, Tension reshapes only the harmonic part.\nThe first enable takes a while.",
     breath_gain_label: "Breath Gain",
     hifigan_tension_label: "Tension",
     formant_shift_label: "Formant Shift",
