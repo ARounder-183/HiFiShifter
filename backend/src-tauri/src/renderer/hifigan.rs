@@ -27,7 +27,20 @@ pub struct ChunkCacheEntry {
     pub waveform: Vec<f32>,
 }
 
-static CHUNK_CACHE: OnceLock<Mutex<HashMap<(String, usize), ChunkCacheEntry>>> = OnceLock::new();
+/// 分块缓存的键：`(clip_id, 声道位, 块起点的 mel 帧号)`。
+///
+/// 【为什么必须含声道位】真立体声（Normal/Swap + 双声道源）会以
+/// `channel_index = 0/1` 把同一 clip **交错**送进处理器两次（见
+/// `pitch_editing::maybe_apply_pitch_edit_to_clip_segment` 的逐声道扇出），
+/// 而参数哈希**含** `channel_index`（契约见 [`crate::renderer::traits`] 中
+/// `ClipProcessContext::channel_index` 的说明）。键里缺声道位时，第二次访问
+/// 只能看到第一次留下的条目：哈希必然不等 ⇒ 走 STALE 分支并被 `remove` ⇒
+/// 两个声道每次渲染都全量重推理（实测：参数完全未变的 ch0/ch1 交替，
+/// 命中恒为 0）。这与缺了声道位就"第二个声道命中第一个声道的推理结果"是
+/// 同一处契约的两个方向。
+type Key = (String, u16, usize);
+
+static CHUNK_CACHE: OnceLock<Mutex<HashMap<Key, ChunkCacheEntry>>> = OnceLock::new();
 
 /// 曲线编辑对**本块之外**音频的影响半径（秒）。
 ///
@@ -39,15 +52,16 @@ static CHUNK_CACHE: OnceLock<Mutex<HashMap<(String, usize), ChunkCacheEntry>>> =
 /// 取 0.1s 覆盖上述两者并留余量。只多算几个 f32，局部性不受影响。
 const CURVE_INFLUENCE_MARGIN_SEC: f64 = 0.1;
 
-pub fn global_chunk_cache_ref() -> &'static Mutex<HashMap<(String, usize), ChunkCacheEntry>> {
+pub fn global_chunk_cache_ref() -> &'static Mutex<HashMap<Key, ChunkCacheEntry>> {
     CHUNK_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// 清空整个 chunk 推理缓存。
 ///
-/// 缓存 key 只含 `(clip_id, mel_start)`，**没有任何容量或字节上限** —— 一个长 clip
-/// 可以产生数百个约 21 s 的波形 chunk。按 clip 失效只在 clip 被编辑时发生，工程
-/// 切换后旧 clip_id 不会再收到失效请求，条目因此永久常驻。切换工程时必须整体清空。
+/// 缓存 key 只含 `(clip_id, 声道位, mel_start)`，**没有任何容量或字节上限** —— 一个
+/// 长 clip 可以产生数百个约 6 s 的波形 chunk（双声道真立体声再翻一倍）。按 clip
+/// 失效只在 clip 被编辑时发生，工程切换后旧 clip_id 不会再收到失效请求，条目因此
+/// 永久常驻。切换工程时必须整体清空。
 pub fn clear_chunk_cache() {
     if let Ok(mut cache) = global_chunk_cache_ref().lock() {
         let dropped = cache.len();
@@ -71,9 +85,9 @@ pub fn clear_chunk_cache() {
 /// 当源文件被替换时调用，避免 HiFiGAN 推理复用旧文件的输出。
 pub fn invalidate_chunk_cache_for_clip(clip_id: &str) {
     if let Ok(mut cache) = global_chunk_cache_ref().lock() {
-        let keys: Vec<(String, usize)> = cache
+        let keys: Vec<Key> = cache
             .keys()
-            .filter(|(id, _)| id == clip_id)
+            .filter(|(id, _, _)| id == clip_id)
             .cloned()
             .collect();
         for k in &keys {
@@ -341,7 +355,7 @@ impl HiFiGanRenderer {
                 // （已实测）。改为按"曲线在本块区间内的取值"判等后，只有与编辑
                 // 区间相交的块失效，未相交的块保持命中。
                 let hash = chunk_hash(c0, c1);
-                let cache_key = (clip_id.clone(), mel_start);
+                let cache_key = (clip_id.clone(), ctx.channel_index, mel_start);
 
                 let mut cache = global_chunk_cache_ref()
                     .lock()
@@ -349,30 +363,36 @@ impl HiFiGanRenderer {
                 match cache.get(&cache_key) {
                     Some(entry) if entry.param_hash == hash => {
                         chunk_debug(&format!(
-                            "  chunk [{mel_start}..{mel_end}) HIT (hash={hash:016x})",
+                            "  chunk [{mel_start}..{mel_end}) ch={} HIT (hash={hash:016x})",
+                            ctx.channel_index,
                         ));
                         Some(entry.waveform.clone())
                     }
                     Some(entry) => {
                         chunk_debug(&format!(
-                            "  chunk [{mel_start}..{mel_end}) STALE (cached={:016x} current={hash:016x})",
+                            "  chunk [{mel_start}..{mel_end}) ch={} STALE (cached={:016x} current={hash:016x})",
+                            ctx.channel_index,
                             entry.param_hash,
                         ));
                         cache.remove(&cache_key);
                         None
                     }
                     None => {
-                        chunk_debug(&format!("  chunk [{mel_start}..{mel_end}) MISS",));
+                        chunk_debug(&format!(
+                            "  chunk [{mel_start}..{mel_end}) ch={} MISS",
+                            ctx.channel_index,
+                        ));
                         None
                     }
                 }
             },
             &|mel_start: usize, mel_end: usize, c0: f64, c1: f64, wf: Vec<f32>| {
                 let hash = chunk_hash(c0, c1);
-                let cache_key = (clip_id.clone(), mel_start);
+                let cache_key = (clip_id.clone(), ctx.channel_index, mel_start);
 
                 chunk_debug(&format!(
-                    "  chunk [{mel_start}..{mel_end}) PUT (hash={hash:016x} samples={})",
+                    "  chunk [{mel_start}..{mel_end}) ch={} PUT (hash={hash:016x} samples={})",
+                    ctx.channel_index,
                     wf.len(),
                 ));
 
@@ -468,5 +488,92 @@ impl HiFiGanRenderer {
             chunk_sec,
             overlap_sec,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一次 chunk 缓存的访问键。
+    ///
+    /// 生产 get/put 两个回调都经此取键。
+    fn cache_key(clip_id: &str, channel_index: u16, mel_start: usize) -> Key {
+        (clip_id.to_string(), channel_index, mel_start)
+    }
+
+    /// 逐声道扇出时，两个声道必须各自保有独立的 chunk 缓存条目。
+    ///
+    /// 【为什么这条测试至关重要】真立体声（Normal/Swap + 双声道源）会以
+    /// `channel_index = 0/1` 把同一 clip 送进处理器两次（见
+    /// `pitch_editing::maybe_apply_pitch_edit_to_clip_segment` 的扇出），而
+    /// 参数哈希**含** `channel_index`（`compute_param_hash` 混入声道位，见
+    /// `traits.rs` 的契约说明）。键里缺声道位时，第二次访问只能看到第一次留下
+    /// 的条目：哈希必然不等 ⇒ 判为 STALE 并**删除** ⇒ 每次渲染两个声道都全量
+    /// 重推理。实测（真模型、3 块、参数完全未变）ch0/ch1 交替命中恒为 0。
+    ///
+    /// 契约：两次访问的输入相同（同 clip、同声道位、同块起点、同哈希）就必须
+    /// 命中；不同声道位不得看到对方的条目，也不得驱逐对方的条目。
+    #[test]
+    fn chunk_cache_keeps_one_entry_per_channel() {
+        let mut cache: HashMap<Key, u64> = HashMap::new();
+        let clip_id = "clip-stereo";
+        let chunks = [(0usize, 0xA0u64), (512, 0xA1)];
+
+        // ── L 平面渲染：两块都写缓存 ──
+        for &(mel_start, hash) in &chunks {
+            cache.insert(cache_key(clip_id, 0, mel_start), hash);
+        }
+
+        // ── R 平面渲染：不得看到 L 的条目（键不同 ⇒ 必须 MISS） ──
+        for &mel_start in &[0usize, 512] {
+            assert_eq!(
+                cache.get(&cache_key(clip_id, 1, mel_start)),
+                None,
+                "声道 1 不得命中声道 0 的条目（mel_start={mel_start}）"
+            );
+        }
+
+        // ── 但 L 的条目必须原样保留：这正是"互相驱逐"的判据 ──
+        assert_eq!(
+            cache.get(&cache_key(clip_id, 0, 0)),
+            Some(&0xA0),
+            "访问声道 1 不得驱逐声道 0 的条目"
+        );
+        assert_eq!(
+            cache.get(&cache_key(clip_id, 0, 512)),
+            Some(&0xA1),
+            "访问声道 1 不得驱逐声道 0 的条目"
+        );
+
+        // ── 与生产同构的完整回归形状：两声道交错渲染两轮，全部命中 ──
+        for &(mel_start, hash) in &chunks {
+            cache.insert(cache_key(clip_id, 1, mel_start), hash + 1);
+        }
+        for &(mel_start, hash) in &chunks {
+            assert_eq!(
+                cache.get(&cache_key(clip_id, 0, mel_start)),
+                Some(&hash),
+                "第二轮 ch0 必须命中（mel_start={mel_start}）"
+            );
+            assert_eq!(
+                cache.get(&cache_key(clip_id, 1, mel_start)),
+                Some(&(hash + 1)),
+                "第二轮 ch1 必须命中（mel_start={mel_start}）"
+            );
+        }
+    }
+
+    /// 键含声道位之后，两个声道的条目互不可见 —— 用同一块起点写不同波形验证。
+    #[test]
+    fn chunk_cache_entries_are_distinct_per_channel() {
+        let mut cache: HashMap<Key, u64> = HashMap::new();
+        cache.insert(cache_key("c", 0, 0), 1);
+        cache.insert(cache_key("c", 1, 0), 2);
+        assert_eq!(cache.len(), 2, "同一块的两个声道必须是两条独立条目");
+        assert_eq!(cache.get(&cache_key("c", 0, 0)), Some(&1));
+        assert_eq!(cache.get(&cache_key("c", 1, 0)), Some(&2));
+        // 不同 clip 之间同样隔离
+        assert_eq!(cache.get(&cache_key("other", 0, 0)), None);
     }
 }
