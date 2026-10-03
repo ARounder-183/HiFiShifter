@@ -558,7 +558,11 @@ pub fn clear_pad_suppressed_clips() {
 /// **命令式**失效调用点传导，漏掉一个调用点就会"参数已变、仍播上一版 PCM"，
 /// 而磁盘缓存会让这种错配跨会话持续存在。纳入按键后，正确性不再依赖调用点是
 /// 否记得失效。
-pub const RENDER_PIPELINE_VERSION: u32 = 4;
+/// v5：共振峰偏移（`formant_shift_cents`）的实现从"mel 域 bin 线性插值"换成
+/// OpenUtau hifisampler 的 `PitchAdjustableMelSpectrogram`（按 keyShift 伸缩
+/// FFT/窗长后用原始 mel 基投影）。同一曲线值产出不同 PCM，且值域扩到 ±1200，
+/// 必须整体失效。
+pub const RENDER_PIPELINE_VERSION: u32 = 5;
 
 /// [`compute_rendered_clip_hash`] 的输入集合。
 ///

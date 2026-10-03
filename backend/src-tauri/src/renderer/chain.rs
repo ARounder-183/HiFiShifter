@@ -55,10 +55,16 @@ static HIFIGAN_PARAM_DESCRIPTORS: [ParamDescriptor; 4] = [
         display_name: "Formant Shift",
         group: "NSF-HiFiGAN",
         kind: super::traits::ParamKind::AutomationCurve {
+            // ±1200 cents（±1 八度），对齐 OpenUtau hifisampler 的 gender
+            // （gender ±100 = ±1200 cents）。
+            //
+            // 【符号】正值 = 共振峰**上移**（声音变细），与 OpenUtau 的 gender 相反：
+            // `gender = -formant_shift_cents / 12`。曲线语义与扩域前完全一致，
+            // 只是允许的范围更大，因此既有工程不受影响。
             unit: "cents",
             default_value: 0.0,
-            min_value: -500.0,
-            max_value: 500.0,
+            min_value: -1200.0,
+            max_value: 1200.0,
         },
     },
 ];
