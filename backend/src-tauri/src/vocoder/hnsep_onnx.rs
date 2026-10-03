@@ -293,26 +293,70 @@ pub fn is_available() -> bool {
     }
 }
 
+/// 加载自检：建会话并跑一次**真实形态**的推理，用于诊断面板/人工排查。
+///
+/// 【为什么要跑真实形态】历史实现喂的是波形 `[1, N]` 并断言"至少 2 个输出" ——
+/// 那是**波形域**模型的接口。换成 mask-only 模型后，那段代码若被调用会立刻失败
+/// （输入名/形状不符、输出只有 1 个），表现为"模型坏了"的错误结论。
+/// 自检必须走与生产一致的路径（`hnsep_dsp` 的 STFT + mask 网络），否则它证明不了
+/// 任何事。这里刻意只跑一个最小 segment（32 帧）以保持自检轻量。
 #[allow(dead_code)]
 pub fn probe_load() -> Result<String, String> {
     ensure_ort_init()?;
     let onnx_path = resolve_model_path()?;
-    let mut session = build_session_with_ep(&onnx_path)?;
+    let session = std::sync::Arc::new(std::sync::Mutex::new(build_session_with_ep(&onnx_path)?));
 
-    let waveform = vec![0.0f32; HNSEP_MODEL_SR as usize / 10];
-    let waveform_tensor =
-        Tensor::from_array(([1usize, waveform.len()], waveform.into_boxed_slice()))
-            .map_err(|e| format!("build waveform tensor failed: {e}"))?;
-    let outputs = session
-        .run(ort::inputs![waveform_tensor])
-        .map_err(|e| format!("hnsep ort session run failed: {e}"))?;
-    if outputs.len() < 2 {
-        return Err("hnsep ort returned fewer than 2 outputs".to_string());
+    // 一个 segment 的静音：长度 = SEGMENT_FRAMES * hop，足够走完整流水线。
+    let samples = crate::hnsep_dsp::SEGMENT_FRAMES * HNSEP_HOP;
+    let audio = vec![0.0f32; samples];
+    let window = crate::hnsep_dsp::periodic_hann(HNSEP_N_FFT);
+    let bins = HNSEP_N_FFT / 2 + 1;
+
+    let harmonic = crate::hnsep_dsp::separate(
+        &audio,
+        HNSEP_N_FFT,
+        HNSEP_HOP,
+        &window,
+        |mask_input| {
+            let frames = mask_input.len() / 2 / bins;
+            let tensor = Tensor::from_array((
+                [1usize, 2, bins, frames],
+                mask_input.to_vec().into_boxed_slice(),
+            ))
+            .map_err(|e| format!("build spec tensor failed: {e}"))?;
+            let mut guard = session
+                .lock()
+                .map_err(|e| format!("hnsep session lock poisoned: {e}"))?;
+            let outputs = guard
+                .run(ort::inputs![tensor])
+                .map_err(|e| format!("hnsep ort session run failed: {e}"))?;
+            let output = outputs
+                .into_iter()
+                .next()
+                .ok_or_else(|| "hnsep ort returned no output".to_string())?;
+            let (_, mask) = output
+                .1
+                .try_extract_tensor::<f32>()
+                .map_err(|e| format!("hnsep mask extract failed: {e}"))?;
+            Ok(mask.to_vec())
+        },
+    )?;
+
+    if harmonic.len() != samples {
+        return Err(format!(
+            "hnsep probe: expected {samples} samples, got {}",
+            harmonic.len()
+        ));
+    }
+    if !harmonic.iter().all(|v| v.is_finite()) {
+        return Err("hnsep probe: non-finite output".to_string());
     }
     Ok(format!(
-        "hnsep_onnx: OK\n  onnx: {}\n  sr={}",
+        "hnsep_onnx: OK (mask-only)\n  onnx: {}\n  sr={} n_fft={} hop={}",
         onnx_path.display(),
-        HNSEP_MODEL_SR
+        HNSEP_MODEL_SR,
+        HNSEP_N_FFT,
+        HNSEP_HOP
     ))
 }
 
