@@ -72,8 +72,12 @@ beforeEach(() => {
 });
 
 describe("打点时机", () => {
-    test("begin_undo_group 在 add_track_tree 之后（撤销落点 = 有轨道树、无 clip）", async () => {
+    test("begin_undo_group 在 add_track_tree **之前**（一次撤销撤掉整个导入，含新轨道）", async () => {
         const order: string[] = [];
+        beginUndoGroup.mockImplementation(async () => {
+            order.push("beginUndoGroup");
+            return { ok: true };
+        });
         addTrackTree.mockImplementation(async () => {
             order.push("addTrackTree");
             return {
@@ -81,14 +85,11 @@ describe("打点时机", () => {
                 timeline: { ok: true, tracks: [], clips: [] },
             };
         });
-        beginUndoGroup.mockImplementation(async () => {
-            order.push("beginUndoGroup");
-            return { ok: true };
-        });
 
         const store = createStore();
         await store.dispatch(importFolderAtPosition(payload));
-        expect(order).toEqual(["addTrackTree", "beginUndoGroup"]);
+        // 打点在建树之前 = 撤销落点是"导入前"，因导入新建的轨道随之一起被撤销。
+        expect(order).toEqual(["beginUndoGroup", "addTrackTree"]);
     });
 });
 
@@ -128,5 +129,26 @@ describe("取消闸门", () => {
         expect(result.canceled).toBeUndefined();
         expect(result.attempted).toBe(3);
         expect(result.failedFiles).toEqual([]);
+    });
+
+    test("撤销落在「建树在途」窗口里 → 不再继续导入任何文件", async () => {
+        // 用户按下 Ctrl+Z 的瞬间 add_track_tree 正在途中。`notifyHistoryJump` 会等
+        // 这一步收尾后才真正跳转（因此那棵树随后被这次撤销一并还原），这里只需
+        // 停止继续导入。
+        addTrackTree.mockImplementation(async () => {
+            cancelActiveImports();
+            return {
+                createdTrackIds: ["t-folder", "t-a", "t-b", "t-c"],
+                timeline: { ok: true, tracks: [], clips: [] },
+            };
+        });
+
+        const store = createStore();
+        const result = (await store.dispatch(importFolderAtPosition(payload))).payload as {
+            canceled?: boolean;
+        };
+
+        expect(result.canceled).toBe(true);
+        expect(importAudioItem).not.toHaveBeenCalled();
     });
 });

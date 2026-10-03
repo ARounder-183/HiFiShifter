@@ -40,7 +40,48 @@ export function isImportCancelled(gen: number): boolean {
     return gen !== generation;
 }
 
-/** 仅测试用：把代次复位，避免用例之间互相污染。 */
+/** 在途的"多步骤导入"（见 `registerImportRun`）。 */
+const inFlightRuns = new Set<Promise<unknown>>();
+
+/** 一次多步骤导入的登记句柄；`finish()` 必须在其 `finally` 里调用。 */
+export interface ImportRunRegistration {
+    finish(): void;
+}
+
+/**
+ * 登记一次"多步骤导入"，直到 `finish()` 为止都算在途。
+ *
+ * 【为什么需要】导入循环里的每条后端命令（建树 / 导 clip）都是独立的 IPC。若用户在
+ * 某一条**在途期间**按下撤销，那条命令会在撤销**之后**才落地：建树会让轨道组重新
+ * 出现，导 clip 会往已消失的轨道上写（后端 `add_clip` 会在轨道不存在时凭空造一条
+ * "Track"）。前后端就此分叉，而用户看到的正是"撤销了，轨道却还在"。
+ * 登记之后，`cancelActiveImportsAndDrain` 能等到这些命令全部收尾再跳转历史。
+ */
+export function registerImportRun(): ImportRunRegistration {
+    let finish!: () => void;
+    const settled = new Promise<void>((resolve) => {
+        finish = resolve;
+    });
+    const tracked = settled.finally(() => {
+        inFlightRuns.delete(tracked);
+    });
+    inFlightRuns.add(tracked);
+    return { finish };
+}
+
+/**
+ * 否决所有在途导入，并**等它们收尾**。
+ *
+ * 历史跳转前必须调用它（而不是裸的 `cancelActiveImports`）：等收尾之后才跳转，
+ * 就不会有"撤销之后又落地一条导入命令"的交错。
+ */
+export async function cancelActiveImportsAndDrain(): Promise<void> {
+    cancelActiveImports();
+    await Promise.allSettled([...inFlightRuns]);
+}
+
+/** 仅测试用：把代次与在途登记复位，避免用例之间互相污染。 */
 export function resetImportCancellationForTests(): void {
     generation = 0;
+    inFlightRuns.clear();
 }
