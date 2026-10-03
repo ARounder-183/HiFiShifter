@@ -213,7 +213,7 @@ import {
 import { computeEffectiveSnap } from "../../utils/timelineSnapping";
 import { store } from "../../app/store";
 import { applyBulkFadeValue, applyBulkGainDeltaDb } from "./timeline/hooks/bulkClipEdit";
-import { advanceFineAxisDrag, type FineAxisDragState } from "./timeline/fineAxisDrag";
+import { advanceFineAxisDrag, type FineAxisDragState } from "../../utils/fineAxisDrag";
 import { CLIP_GAIN_DRAG_DB_PER_PX } from "./timeline/constants";
 import { isLegacyMouseEventFromStylus } from "../../utils/penInput";
 import {
@@ -953,6 +953,112 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         }
     }, [s.primaryTimeUnit, s.secondaryTimeUnit, sessionRef, timeContext]);
 
+    // TimeRuler 是 React.memo 组件：传给它的 handler 必须是稳定引用，内联箭头
+    // 函数会让 memo 每次渲染都失效（拖拽 / 滚动期间标尺子树整棵重渲）。
+    const handleRulerOpenSettings = React.useCallback(() => {
+        setTimeDisplaySettingsOpen(true);
+    }, []);
+    const handleRulerCopyPlayheadTime = React.useCallback(() => {
+        void handleCopyPlayheadTime();
+    }, [handleCopyPlayheadTime]);
+    const handleRulerMouseDown = React.useCallback(
+        (e: React.MouseEvent<HTMLDivElement>) => {
+            // 数位笔 / 触摸不触发标尺 seek：pen 的兼容 mouse 事件（无
+            // pointerType）会让悬停画线起笔误定位播放头。
+            if (isLegacyMouseEventFromStylus()) return;
+            if (e.button !== 0) return;
+            // 水平滚动位置取自内核视口。取值的「实时性」是硬要求——拖拽期间滚动
+            // 位置可能被自动滚动改变，因此每次换算都重新读，不缓存。
+            // 读滚动真值：内核宿主是唯一来源（旧的原生 scroller 分支已删除：
+            // `scrollRef` 无 JSX 挂载点，恒为 null）。
+            const readScrollLeft = (): number | null => {
+                const host = kernelHostRef.current;
+                return host != null ? host.getViewport().scrollLeft : null;
+            };
+            if (readScrollLeft() === null) return;
+            const ruler = e.currentTarget as HTMLDivElement;
+
+            const updateAt = (clientX: number, commit: boolean): number =>
+                setPlayheadFromClientX(
+                    clientX,
+                    ruler.getBoundingClientRect(),
+                    readScrollLeft() ?? 0,
+                    commit,
+                );
+
+            // 播放态实时判定（store，而非滞后的镜像）：与轨道空白区共用同一
+            // 套阶段策略（`planSeekGesture`）—— 播放中按下与拖拽都不写播放头，
+            // 只有松手才提交落点并延续播放。标尺若不共用，从标尺开始拖拽仍会
+            // 出现完全相同的闪回（按下把光标拉到指针处、下一帧被播放轮询拽回）。
+            const isPlayingNow = (): boolean => Boolean(store.getState().session.runtime.isPlaying);
+
+            // 标尺没有其他编辑操作需要区分：未播放时按下立即提交一次 seek
+            // （既有行为）；播放中按下不写播放头，落点延后到松手那一拍。
+            const pressCommitted = planSeekGesture("press", isPlayingNow()).playhead === "commit";
+            if (pressCommitted) {
+                updateAt(e.clientX, true);
+            }
+            let moved = false;
+            let lastClientX = e.clientX;
+
+            const onMove = (ev: MouseEvent) => {
+                moved = true;
+                lastClientX = ev.clientX;
+                // 播放中的拖拽帧不写播放头（闪回防护）。
+                if (planSeekGesture("move", isPlayingNow()).playhead === "preview") {
+                    updateAt(ev.clientX, false);
+                }
+            };
+
+            // 拖拽期间**视口变化**（滚轮滚动/缩放、键盘滚动、跨面板同步）后按最后
+            // 指针位置重放一次落点。
+            //
+            // 【为什么必须重放】落点 = 指针客户端 X 换算出的时间，而换算依赖当前
+            // 视口（`readScrollLeft` 是实时的）。滚轮**不产生任何 mousemove**，视口
+            // 变了而指针没动时若不重放，播放头就停在旧落点上、与光标脱开，直到用户
+            // 再动一下鼠标才归位（用户报告的"拖拽中滚动/缩放导致偏移"）。订阅总线
+            // 而非 React 属性：总线在每次视口提交时**同步**广播，重放与绘制同帧。
+            const unsubscribeViewport = timelineViewportBus.subscribe(() => {
+                if (planSeekGesture("move", isPlayingNow()).playhead === "preview") {
+                    updateAt(lastClientX, false);
+                }
+            });
+
+            // 失焦取消：切屏期间 mouseup 不送达本窗口，blur 时以
+            // 最后一次已知位置收尾（提交 seek + 清吸附高亮），
+            // 防止监听器泄漏：否则下次点击会被旧的 onEnd 消费。
+            const finish = () => {
+                unregisterAbort();
+                unsubscribeViewport();
+                window.removeEventListener("mousemove", onMove, true);
+                window.removeEventListener("mouseup", onEnd, true);
+                window.removeEventListener("mouseleave", onEnd, true);
+                // 拖拽松手提交最终落点：播放中这是**唯一**写播放头的一拍
+                // （后端 seek 不改 is_playing —— 即"延续播放状态"）。
+                // 未拖动的单击在未播放时已由按下那一拍提交，此处不重复提交
+                // （重复提交是多余的一次后端 seek）。
+                const releaseCommits =
+                    planSeekGesture("release", isPlayingNow()).playhead === "commit";
+                if (releaseCommits && (moved || !pressCommitted)) {
+                    updateAt(lastClientX, true);
+                }
+                // 拖拽中间帧可能发布过吸附高亮，必须在此清除：否则拖拽标尺后
+                // 网格吸附的竖线会冻结在画面上，且任何单击跳转都不再清理它。
+                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            };
+            const onEnd = (ev: MouseEvent) => {
+                lastClientX = ev.clientX;
+                finish();
+            };
+            const unregisterAbort = registerDragAbort(finish);
+
+            window.addEventListener("mousemove", onMove, true);
+            window.addEventListener("mouseup", onEnd, true);
+            window.addEventListener("mouseleave", onEnd, true);
+        },
+        [kernelHostRef, setPlayheadFromClientX],
+    );
+
     // ── 记录最近点击的 clientX，用于 Shift 范围选择的锚点位置
     const lastClickedClientXRef = React.useRef<number | null>(null);
 
@@ -1516,6 +1622,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         },
         [deselectAllTrackLaneClips, dispatch, resolveKernelSeekSec, sessionRef],
     );
+
+    // 面板卸载时取消挂起的 seek 预览帧：拖拽中（空白区 seek）卸载（视图切换 /
+    // dock 关闭）会让 rAF 在卸载后仍向 store 派发一次过期落点。
+    React.useEffect(() => {
+        return () => {
+            if (kernelSeekRafRef.current != null) {
+                cancelAnimationFrame(kernelSeekRafRef.current);
+                kernelSeekRafRef.current = null;
+            }
+        };
+    }, []);
 
     /**
      * 内核选中回调：点击 clip 选中。
@@ -2759,7 +2876,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     if (
                         snappedOffset != null &&
                         Math.abs(snappedOffset - rawOffset) <=
-                            loopSnapThresholdSec(timelineSnap.snapDistancePx, pxPerSec) + 1e-12
+                            loopSnapThresholdSec(timelineSnap.snapDistancePx, pxPerSecRef.current) +
+                                1e-12
                     ) {
                         const snappedEdgeSec = origin.startSec + snappedOffset;
                         if (args.edge === "left") {
@@ -2867,11 +2985,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 );
             }
         },
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- pxPerSec 随缩放变化，加入会让 trim 预览回调在缩放期间反复重建（既有热路径口径，弧长换算读创建时快照）
         [
             applyKernelTrimRipplePreview,
             beginKernelGestureInteraction,
             dispatch,
+            // 阈值换算读实时值：创建时快照会在缩放后把吸附容差算错（px→sec 的
+            // 比例尺过期），ref 读取既新鲜又不让回调随缩放重建。
+            pxPerSecRef,
             sessionRef,
             s.autoCrossfadeEnabled,
             s.snapEnabled,
@@ -2881,9 +3001,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 参与集合在按下时解析，必须读到**最新**的多选集合：漏这个依赖会让
             // 回调闭包停在挂载时的空选择上（表现为"框选多个后仍只裁切一个"）。
             multiSelectedClipIds,
-            setClipFades,
-            setClipPlaybackRate,
-            setClipSnapOffset,
         ],
     );
 
@@ -3619,7 +3736,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     mode: args.side,
                     pointerX01: pt.t,
                     pointerY01: pt.gain,
-                    aspectYOverX: args.curveEnv.bodyHeightPx / Math.max(1, widthSec * pxPerSec),
+                    aspectYOverX:
+                        args.curveEnv.bodyHeightPx / Math.max(1, widthSec * pxPerSecRef.current),
                 }).dir;
                 dispatch(
                     args.side === "in"
@@ -3663,11 +3781,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 }
             });
         },
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- pxPerSec 随缩放变化，加入会让淡变预览回调在缩放期间反复重建（既有热路径口径，曲率换算读创建时快照）
         [
             beginKernelGestureInteraction,
             dispatch,
             fadeCurvatureKb,
+            // 曲率纵横比换算读实时 pxPerSec：创建时快照会在缩放后把曲率解算
+            // 权重算错；ref 读取既新鲜又不让回调随缩放重建。
+            pxPerSecRef,
             multiSelectedClipIds,
             sessionRef,
         ],
@@ -4605,7 +4725,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     pointerX01: ptA.t,
                     pointerY01: ptA.gain,
                     aspectYOverX:
-                        args.curveEnv.bodyHeightPx / Math.max(1, sides.a.widthSec * pxPerSec),
+                        args.curveEnv.bodyHeightPx /
+                        Math.max(1, sides.a.widthSec * pxPerSecRef.current),
                 }).dir;
                 const dirB = solveNearestCurveDir({
                     shape: sides.b.shape,
@@ -4614,7 +4735,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     pointerX01: ptB.t,
                     pointerY01: ptB.gain,
                     aspectYOverX:
-                        args.curveEnv.bodyHeightPx / Math.max(1, sides.b.widthSec * pxPerSec),
+                        args.curveEnv.bodyHeightPx /
+                        Math.max(1, sides.b.widthSec * pxPerSecRef.current),
                 }).dir;
                 sides.a.baseDir = dirA;
                 sides.b.baseDir = dirB;
@@ -4770,7 +4892,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 曲率分支用它把归一化 t 换算回屏幕距离权重。
             fadeCurvatureKb,
             noSnapKb,
-            pxPerSec,
+            // 曲率纵横比换算读实时 pxPerSec（缩放后创建时快照会算错）。
+            pxPerSecRef,
             sessionRef,
             snapTimelineDetailed,
         ],
@@ -5425,8 +5548,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             secondaryUnit={s.secondaryTimeUnit}
             onPrimaryUnitChange={handlePrimaryUnitChange}
             onSecondaryUnitChange={handleSecondaryUnitChange}
-            onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
-            onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
+            onOpenSettings={handleRulerOpenSettings}
+            onCopyPlayheadTime={handleRulerCopyPlayheadTime}
             t={tf}
             tempoMap={s.tempoMap}
             tempoMapVisible={s.tempoMapVisible}
@@ -5443,102 +5566,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onTempoMapChange={handleTempoMapChange}
             onTempoMapCommit={handleTempoMapCommit}
             subscribeViewport={timelineViewportBus.subscribe}
-            onMouseDown={(e) => {
-                // 数位笔 / 触摸不触发标尺 seek：pen 的兼容 mouse 事件（无
-                // pointerType）会让悬停画线起笔误定位播放头。
-                if (isLegacyMouseEventFromStylus()) return;
-                if (e.button !== 0) return;
-                // 水平滚动位置取自内核视口。取值的「实时性」是硬要求——拖拽期间滚动
-                // 位置可能被自动滚动改变，因此每次换算都重新读，不缓存。
-                // 读滚动真值：内核宿主是唯一来源（旧的原生 scroller 分支已删除：
-                // `scrollRef` 无 JSX 挂载点，恒为 null）。
-                const readScrollLeft = (): number | null => {
-                    const host = kernelHostRef.current;
-                    return host != null ? host.getViewport().scrollLeft : null;
-                };
-                if (readScrollLeft() === null) return;
-                const ruler = e.currentTarget as HTMLDivElement;
-
-                const updateAt = (clientX: number, commit: boolean): number =>
-                    setPlayheadFromClientX(
-                        clientX,
-                        ruler.getBoundingClientRect(),
-                        readScrollLeft() ?? 0,
-                        commit,
-                    );
-
-                // 播放态实时判定（store，而非滞后的镜像）：与轨道空白区共用同一
-                // 套阶段策略（`planSeekGesture`）—— 播放中按下与拖拽都不写播放头，
-                // 只有松手才提交落点并延续播放。标尺若不共用，从标尺开始拖拽仍会
-                // 出现完全相同的闪回（按下把光标拉到指针处、下一帧被播放轮询拽回）。
-                const isPlayingNow = (): boolean =>
-                    Boolean(store.getState().session.runtime.isPlaying);
-
-                // 标尺没有其他编辑操作需要区分：未播放时按下立即提交一次 seek
-                // （既有行为）；播放中按下不写播放头，落点延后到松手那一拍。
-                const pressCommitted =
-                    planSeekGesture("press", isPlayingNow()).playhead === "commit";
-                if (pressCommitted) {
-                    updateAt(e.clientX, true);
-                }
-                let moved = false;
-                let lastClientX = e.clientX;
-
-                const onMove = (ev: MouseEvent) => {
-                    moved = true;
-                    lastClientX = ev.clientX;
-                    // 播放中的拖拽帧不写播放头（闪回防护）。
-                    if (planSeekGesture("move", isPlayingNow()).playhead === "preview") {
-                        updateAt(ev.clientX, false);
-                    }
-                };
-
-                // 拖拽期间**视口变化**（滚轮滚动/缩放、键盘滚动、跨面板同步）后按最后
-                // 指针位置重放一次落点。
-                //
-                // 【为什么必须重放】落点 = 指针客户端 X 换算出的时间，而换算依赖当前
-                // 视口（`readScrollLeft` 是实时的）。滚轮**不产生任何 mousemove**，视口
-                // 变了而指针没动时若不重放，播放头就停在旧落点上、与光标脱开，直到用户
-                // 再动一下鼠标才归位（用户报告的"拖拽中滚动/缩放导致偏移"）。订阅总线
-                // 而非 React 属性：总线在每次视口提交时**同步**广播，重放与绘制同帧。
-                const unsubscribeViewport = timelineViewportBus.subscribe(() => {
-                    if (planSeekGesture("move", isPlayingNow()).playhead === "preview") {
-                        updateAt(lastClientX, false);
-                    }
-                });
-
-                // 失焦取消：切屏期间 mouseup 不送达本窗口，blur 时以
-                // 最后一次已知位置收尾（提交 seek + 清吸附高亮），
-                // 防止监听器泄漏：否则下次点击会被旧的 onEnd 消费。
-                const finish = () => {
-                    unregisterAbort();
-                    unsubscribeViewport();
-                    window.removeEventListener("mousemove", onMove, true);
-                    window.removeEventListener("mouseup", onEnd, true);
-                    window.removeEventListener("mouseleave", onEnd, true);
-                    // 拖拽松手提交最终落点：播放中这是**唯一**写播放头的一拍
-                    // （后端 seek 不改 is_playing —— 即"延续播放状态"）。
-                    // 未拖动的单击在未播放时已由按下那一拍提交，此处不重复提交
-                    // （重复提交是多余的一次后端 seek）。
-                    const releaseCommits =
-                        planSeekGesture("release", isPlayingNow()).playhead === "commit";
-                    if (releaseCommits && (moved || !pressCommitted)) {
-                        updateAt(lastClientX, true);
-                    }
-                    // 拖拽中间帧可能发布过吸附高亮，必须在此清除：否则拖拽标尺后
-                    // 网格吸附的竖线会冻结在画面上，且任何单击跳转都不再清理它。
-                    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
-                };
-                const onEnd = (ev: MouseEvent) => {
-                    lastClientX = ev.clientX;
-                    finish();
-                };
-                const unregisterAbort = registerDragAbort(finish);
-
-                window.addEventListener("mousemove", onMove, true);
-                window.addEventListener("mouseup", onEnd, true);
-                window.addEventListener("mouseleave", onEnd, true);
-            }}
+            onMouseDown={handleRulerMouseDown}
         />
     );
 
@@ -5566,11 +5594,24 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         // 准入判据：未知扩展名**不再**显示落点预览。此前这里只挡"已知的非音频种类"，
         // 未知类型（`dragAction === null`）会一路穿透到音频导入分支并建出 Clip。
         if (path && !isAcceptedDropPath(path)) {
-            setDropPreview(null);
+            if (dropPreview !== null) setDropPreview(null);
             return;
         }
         if (path && dragAction !== "importAudio" && dragAction !== "importMidi") {
-            setDropPreview(null);
+            if (dropPreview !== null) setDropPreview(null);
+            return;
+        }
+        // dragover 在文件悬停期间高频连发；落点各字段都没变时不 setState（新对象
+        // 无法让 React 跳过重渲，逐事件重渲整个面板纯属浪费）。
+        const nextDurationSec = dragAction === "importMidi" ? 2 : 0;
+        if (
+            dropPreview !== null &&
+            dropPreview.path === path &&
+            dropPreview.fileName === fileName &&
+            dropPreview.trackId === trackId &&
+            dropPreview.startSec === beat &&
+            dropPreview.durationSec === nextDurationSec
+        ) {
             return;
         }
         if (dragAction === "importMidi") {
@@ -5631,7 +5672,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 return;
             }
             if (actionKind !== "importAudio") {
-                emitExternalFileAction(actionKind, resolvedPath);
+                // 目录不经这条通道：`ExternalFileActionKind` 表达不了"导入目录"
+                // （它只带一个路径，没有落点与选项），而且 HTML5 的 dataTransfer
+                // 拿不到目录信息 —— 目录由 Tauri 原生拖放通道处理。
+                if (actionKind !== "importFolder") emitExternalFileAction(actionKind, resolvedPath);
                 return;
             }
             void dispatch(
@@ -5661,7 +5705,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     return;
                 }
                 if (actionKind !== "importAudio") {
-                    emitExternalFileAction(actionKind, p);
+                    // 同上：目录不走这条通道。
+                    if (actionKind !== "importFolder") emitExternalFileAction(actionKind, p);
                     return;
                 }
                 void dispatch(

@@ -1,18 +1,30 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Flex, Button, ScrollArea, Separator } from "@radix-ui/themes";
-import { Cross2Icon } from "@radix-ui/react-icons";
+/**
+ * 快捷键设置面板。
+ *
+ * 打开时阻塞所有下层交互（通过 `AppDialog` overlay）。
+ *
+ * 【布局】搜索框横跨全窗口；下面分左右两栏 —— 左栏是常驻的分类导航（兼作搜索
+ * 的范围过滤器），右栏是结果。有查询时右栏按相关度打平排列（每条附分组名作路标），
+ * 无查询时按分组排列且组标题粘性吸顶。
+ *
+ * 数据本身（默认值、录入、冲突、预设）仍在 `features/keybindings` 里；本文件只负责
+ * 呈现与编排。检索为什么要单独一栏的设计见
+ * `docs/plans/2026-09-30-keybindings-search-design.md`。
+ */
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Flex, TextField, IconButton, Button } from "@radix-ui/themes";
+import { Cross2Icon, MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import type { RootState } from "../../app/store";
 import { IS_MAC } from "../../utils/platform";
 import {
     selectMergedKeybindings,
     setKeybinding,
     resetKeybinding,
     resetAllKeybindings,
-    formatKeybinding,
     findConflicts,
     createModifierOnlyBinding,
-    // isNoneBinding, // 已删除未使用变量
 } from "../../features/keybindings/keybindingsSlice";
 import {
     DEFAULT_KEYBINDINGS,
@@ -21,11 +33,15 @@ import {
     ACTION_GROUP_ORDER,
     GROUP_LABEL_KEYS,
 } from "../../features/keybindings/defaultKeybindings";
+import {
+    buildKeybindingSearchEntries,
+    matchKeybindingEntries,
+} from "../../features/keybindings/keybindingSearch";
+import { translitTermsOf, useTranslitIndex } from "../../features/search/useTranslitIndex";
 import type { ActionId, ActionMeta, Keybinding } from "../../features/keybindings/types";
 import { canonicalKeyFromEvent } from "../../features/keybindings/keybindingMatch";
 import { useShortcutSuppression } from "../../ui/shortcutScope";
-import { AppDialog } from "../../ui/Dialog";
-import { AppSelect, AppStatusChip, type AppStatusTone } from "../../ui";
+import { AppDialog, AppSelect } from "../../ui";
 import type { MessageKey } from "../../i18n/messages";
 import {
     KEYBINDING_PRESET_SELECTION_IDS,
@@ -33,6 +49,13 @@ import {
     isKeybindingPresetId,
     type KeybindingPresetSelectionId,
 } from "../../features/keybindings/keybindingPresets";
+import { KeybindingsActionRow } from "./keybindings/KeybindingsActionRow";
+import {
+    GESTURE_BADGES,
+    isDefaultBinding,
+    resolveGroupNavLabel,
+} from "./keybindings/keybindingRowShared";
+import { KeybindingsNavRail, type KeybindingsNavItem } from "./keybindings/KeybindingsNavRail";
 
 /**
  * 预设名 → 词典键的**显式**映射。
@@ -61,17 +84,6 @@ const NONE_BINDING: Keybinding = { key: "__none__" };
 
 type ModifierToken = "control" | "shift" | "alt";
 
-/** 修饰键手势徽章的 i18n key 与色调（四档互不相同，仍可区分手势类型） */
-const GESTURE_BADGES: Record<
-    NonNullable<ActionMeta["modifierOperationType"]>,
-    { labelKey: string; tone: AppStatusTone }
-> = {
-    drag: { labelKey: "kb_gesture_drag", tone: "accent" },
-    click: { labelKey: "kb_gesture_click", tone: "warning" },
-    wheel: { labelKey: "kb_gesture_wheel", tone: "success" },
-    hold: { labelKey: "kb_gesture_hold", tone: "neutral" },
-};
-
 function isPhysicalModifierKey(key: string): boolean {
     const lower = key.toLowerCase();
     return lower === "control" || lower === "shift" || lower === "alt" || lower === "meta";
@@ -99,19 +111,18 @@ interface KeybindingsDialogProps {
     onOpenChange: (open: boolean) => void;
 }
 
-/**
- * 快捷键设置面板
- * 打开时阻塞所有下层交互（通过 Dialog overlay）
- */
 export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOpenChange }) => {
     const dispatch = useAppDispatch();
-    const { tf } = useI18n();
+    const { tf, plural } = useI18n();
     const keybindings = useAppSelector(selectMergedKeybindings);
     const overrides = useAppSelector((s) => s.keybindings.overrides);
 
     // 打开时抑制全局快捷键与工程编辑。走统一作用域（src/ui/shortcutScope.ts），
     // 取代此前各自的 `data-keybindings-dialog-open` body 属性。
     useShortcutSuppression(open);
+
+    // 搜索匹配设置（转写开关与宽严），与文件浏览器、快速搜索共用同一份。
+    const searchSettings = useAppSelector((state: RootState) => state.session.searchSettings);
 
     // 当前处于"录入模式"的 actionId
     const [recordingId, setRecordingId] = useState<ActionId | null>(null);
@@ -122,6 +133,36 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
         conflictWith: ActionId[];
     } | null>(null);
     const [selectedPreset, setSelectedPreset] = useState<KeybindingPresetSelectionId>("custom");
+    /** 搜索查询。空串表示不过滤。 */
+    const [query, setQuery] = useState("");
+    /** 选中的分类；`null` 为"全部"。 */
+    const [activeGroup, setActiveGroup] = useState<ActionMeta["group"] | null>(null);
+
+    /*
+     * 每次打开都从"不过滤、不选分类"开始。
+     *
+     * 【为什么在渲染期做，而不是放 effect】这是 React 官方的「按 props 变化调整
+     * state」写法：上一次的 `open` 存在 state 里，渲染时与本次比较，变化就**同步**
+     * 重置。写在 effect 里会先渲染出带旧查询的一帧、再由第二轮渲染纠正 ——
+     * 级联渲染，也正是 `react-hooks/set-state-in-effect` 要拦的写法。
+     */
+    const [prevOpen, setPrevOpen] = useState(open);
+    if (prevOpen !== open) {
+        setPrevOpen(open);
+        if (open) {
+            setQuery("");
+            setActiveGroup(null);
+        }
+    }
+
+    const searchInputRef = useRef<HTMLInputElement | null>(null);
+    /** 聚焦搜索框属于"与外部系统同步"（操作 DOM），可以留在 effect 里。 */
+    useEffect(() => {
+        if (!open) return;
+        // Radix 会把焦点交给第一个可聚焦元素；等它完成再夺过来。
+        const timer = window.setTimeout(() => searchInputRef.current?.focus(), 0);
+        return () => window.clearTimeout(timer);
+    }, [open]);
 
     const recordingRef = useRef(recordingId);
     useEffect(() => {
@@ -307,13 +348,217 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
         [dispatch],
     );
 
-    // 按分组组织操作
-    const groups = React.useMemo(() => {
-        return ACTION_GROUP_ORDER.map((group) => ({
-            group,
-            actions: ALL_ACTION_IDS.filter((id) => ACTION_META[id].group === group),
-        }));
+    /*
+     * 检索索引：只在语系变化时重建。
+     *
+     * 【为什么依赖 `tf` 而不是直接在模块顶层构建】索引里装的是**本地化后的**文本，
+     * 语系一变就要重建。`tf` 由 Provider 提供，引用随语系切换而变，正好作为依赖。
+     */
+    /*
+     * 转写索引：把动作名批量交给后端转写一次（拼音 / 罗马字 / 谚文），之后击键
+     * 仍然走纯 JS 的索引匹配 —— 每次击键都 IPC 会让输入变粘滞。
+     *
+     * 后端不可用时 `useTranslitIndex` 会停在「只折叠」的降级形态，搜索退化为
+     * 字面匹配，功能不中断。
+     */
+    const translitTexts = useMemo(
+        () => ALL_ACTION_IDS.map((id) => tf(ACTION_META[id].labelKey)),
+        [tf],
+    );
+    const translitIndex = useTranslitIndex(translitTexts, searchSettings);
+
+    const searchEntries = useMemo(
+        () => buildKeybindingSearchEntries(tf, (text) => translitTermsOf(translitIndex.get(text))),
+        [tf, translitIndex],
+    );
+
+    /** 命中 query 的全部条目（有查询时按相关度降序，无查询时为原顺序）。 */
+    const matchedEntries = useMemo(
+        () => matchKeybindingEntries(searchEntries, query),
+        [searchEntries, query],
+    );
+
+    /** 再按选中的分类收窄。 */
+    const visibleEntries = useMemo(
+        () =>
+            activeGroup === null
+                ? matchedEntries
+                : matchedEntries.filter((entry) => entry.group === activeGroup),
+        [matchedEntries, activeGroup],
+    );
+
+    /** 每组是否被改过 —— 用于导航栏的小圆点。 */
+    const customizedGroups = useMemo(() => {
+        const set = new Set<ActionMeta["group"]>();
+        for (const id of ALL_ACTION_IDS) {
+            if (!isDefaultBinding(keybindings[id], DEFAULT_KEYBINDINGS[id])) {
+                set.add(ACTION_META[id].group);
+            }
+        }
+        return set;
+    }, [keybindings]);
+
+    /** 导航栏条目。 */
+    const navItems = useMemo<KeybindingsNavItem[]>(() => {
+        const countsByGroup = new Map<ActionMeta["group"], number>();
+        const totalsByGroup = new Map<ActionMeta["group"], number>();
+        for (const id of ALL_ACTION_IDS) {
+            const group = ACTION_META[id].group;
+            totalsByGroup.set(group, (totalsByGroup.get(group) ?? 0) + 1);
+        }
+        if (query.trim()) {
+            for (const entry of matchedEntries) {
+                countsByGroup.set(entry.group, (countsByGroup.get(entry.group) ?? 0) + 1);
+            }
+        }
+
+        return [
+            {
+                group: null,
+                label: tf("kb_group_all"),
+                total: ALL_ACTION_IDS.length,
+                matchCount: query.trim() ? matchedEntries.length : undefined,
+                customized: customizedGroups.size > 0,
+            },
+            ...ACTION_GROUP_ORDER.map((group) => ({
+                group,
+                label: resolveGroupNavLabel(group, tf),
+                total: totalsByGroup.get(group) ?? 0,
+                matchCount: query.trim() ? (countsByGroup.get(group) ?? 0) : undefined,
+                customized: customizedGroups.has(group),
+            })),
+        ];
+    }, [tf, query, matchedEntries, customizedGroups]);
+
+    /** 无查询时按分组展示；选中某一组时只展示该组。 */
+    const groupsToRender = useMemo(
+        () =>
+            ACTION_GROUP_ORDER.filter((group) => activeGroup === null || group === activeGroup)
+                .map((group) => ({
+                    group,
+                    actions: ALL_ACTION_IDS.filter((id) => ACTION_META[id].group === group),
+                }))
+                .filter((entry) => entry.actions.length > 0),
+        [activeGroup],
+    );
+
+    /** 单行渲染所需的回调与文案。抽出来避免每行重建闭包。 */
+    const noneLabel = tf("kb_none");
+    const pressKeyLabel = tf("kb_press_key");
+    const pressModifierLabel = tf("kb_press_modifier");
+
+    const resultListRef = useRef<HTMLDivElement | null>(null);
+
+    /** 把某一行滚进视野并聚焦它的按键按钮。 */
+    const focusRow = useCallback((index: number) => {
+        const rows = resultListRef.current?.querySelectorAll<HTMLElement>("[data-hs-kb-row]");
+        const target = rows?.[index];
+        if (!target) return;
+        /*
+         * 【为什么把 `scrollIntoView` 包在 try 里】jsdom 没实现它（缺少 layout），
+         * 直接调用会抛。真实浏览器不受影响，但即便哪天滚动这一步失败，用户也应该
+         * 拿到正确的键盘焦点 —— 焦点移动优先于滚动。
+         */
+        try {
+            target.scrollIntoView({ block: "nearest" });
+        } catch {
+            // 环境不支持滚动定位；焦点仍然移动。
+        }
+        // 行内可能还有手势徽章里的按钮，只认 `data-hs-kb-bind` 这一个。
+        target.querySelector<HTMLButtonElement>("[data-hs-kb-bind]")?.focus();
     }, []);
+
+    const handleSearchKeyDown = useCallback(
+        (event: React.KeyboardEvent<HTMLInputElement>) => {
+            if (event.key === "Escape") {
+                /*
+                 * Esc 分级：**有查询先清空查询**，没有才让窗口关闭。
+                 *
+                 * 【为什么这里只用 `preventDefault`】Radix 在 `document` 上监听 Esc，
+                 * React 的 `stopPropagation()` 拦不住已经走到原生的事件；真正决定窗口
+                 * 生死的开关在 `beforeClose`（见下）—— Esc 在这里只负责清空查询。
+                 */
+                event.preventDefault();
+                setQuery("");
+                return;
+            }
+            /*
+             * ↓ / ↑：从搜索框跳到结果行。
+             *
+             * 【为什么只在无查询时启用】有查询时结果顺序由相关度决定、用户还没看清，
+             * 方向键直接落进行内反而容易误触录入按钮；此时需要的是继续输入，而不是
+             * 移动焦点。无查询时列表是稳定的场景分组，跳进去才是无歧义的。
+             */
+            if ((event.key === "ArrowDown" || event.key === "ArrowUp") && !query.trim()) {
+                const rows =
+                    resultListRef.current?.querySelectorAll<HTMLElement>("[data-hs-kb-row]");
+                if (!rows?.length) return;
+                event.preventDefault();
+                focusRow(event.key === "ArrowDown" ? 0 : rows.length - 1);
+                return;
+            }
+            if (event.key === "Enter") {
+                /*
+                 * 【为什么必须 `preventDefault`】`AppDialog` 的 `<form>` 会把输入框里的
+                 * Enter 交给默认动作（这里的默认动作是"关闭"）。不拦的话，搜完按回车
+                 * 等于关掉整个窗口 —— 而用户只是想确认搜索。见 `Dialog.tsx` 里
+                 * 「Enter 的归属」那段注释。
+                 */
+                event.preventDefault();
+                searchInputRef.current?.blur();
+            }
+        },
+        [query, focusRow],
+    );
+
+    const renderRow = useCallback(
+        (actionId: ActionId, groupLabel?: string) => {
+            const meta = ACTION_META[actionId];
+            const currentKb = keybindings[actionId];
+            const defaultKb = DEFAULT_KEYBINDINGS[actionId];
+            const gesture = meta.modifierOperationType
+                ? GESTURE_BADGES[meta.modifierOperationType]
+                : undefined;
+
+            return (
+                <KeybindingsActionRow
+                    key={actionId}
+                    label={tf(meta.labelKey)}
+                    meta={meta}
+                    binding={currentKb}
+                    isDefault={isDefaultBinding(currentKb, defaultKb)}
+                    isRecording={recordingId === actionId}
+                    gestureLabel={gesture ? tf(gesture.labelKey) : undefined}
+                    isDefaultModifierOnly={Boolean(defaultKb.modifierOnly)}
+                    noneLabel={noneLabel}
+                    pressKeyLabel={pressKeyLabel}
+                    pressModifierLabel={pressModifierLabel}
+                    groupLabel={groupLabel}
+                    onStartRecording={() => {
+                        setConflict(null);
+                        setRecordingId(actionId);
+                    }}
+                    onClearBinding={() => {
+                        // 录入中左键点击 → 设为"无"
+                        dispatch(setKeybinding({ actionId, binding: NONE_BINDING }));
+                        setSelectedPreset("custom");
+                        setRecordingId(null);
+                        setConflict(null);
+                    }}
+                    onResetBinding={() => {
+                        // 右键点击 → 直接重置为默认
+                        dispatch(resetKeybinding(actionId));
+                        setSelectedPreset("custom");
+                        setRecordingId(null);
+                        setConflict(null);
+                    }}
+                />
+            );
+        },
+        [keybindings, recordingId, dispatch, tf, noneLabel, pressKeyLabel, pressModifierLabel],
+    );
+
+    const hasQuery = query.trim().length > 0;
 
     return (
         <AppDialog
@@ -321,7 +566,13 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
             onOpenChange={onOpenChange}
             title={tf("kb_dialog_title")}
             description={tf("kb_dialog_desc")}
-            size="lg"
+            size="xl"
+            /*
+             * 两栏布局的前提：让 body 成为**不滚动的 flex 列容器**，由内部的两个
+             * pane 各自滚动。默认的 `"scroll"` 会让 body 自己滚，内层的 `flex-1`
+             * 就退化为按内容高度排布 —— 详见 `Dialog.tsx` 里 `bodyLayout` 的注释。
+             */
+            bodyLayout="pane"
             actions={[
                 {
                     id: "close",
@@ -332,148 +583,132 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                 },
             ]}
             /*
-             * 正在录入时不允许 Esc / 外部点击关闭：按下的那个键正是要录入的
-             * 内容，关掉对话框等于把用户的操作丢掉。
+             * Esc / 外部点击的护栏。两条：
+             *   1. 正在录入时不关 —— 按下的那个键正是要录入的内容，关掉等于丢弃；
+             *   2. **有搜索查询时先让这一次 Esc 去清空查询**，窗口保持打开。
+             *      Radix 在 document 级处理 Esc，React 侧拦不住；这里是唯一的否决点。
              */
-            beforeClose={() => recordingId === null}
+            beforeClose={() => {
+                if (recordingId !== null) return false;
+                if (query.trim()) {
+                    setQuery("");
+                    return false;
+                }
+                return true;
+            }}
         >
-            <span className="hs-type-muted" style={{ marginBottom: 4, display: "block" }}>
-                {tf("kb_dialog_hint_click")}
-            </span>
+            <Flex direction="column" className="min-h-0 flex-1 gap-2">
+                <span className="hs-type-muted shrink-0">{tf("kb_dialog_hint_click")}</span>
 
-            <Flex align="center" gap="2" mt="2" mb="2">
-                <span className="hs-type-muted" style={{ whiteSpace: "nowrap" }}>
-                    {tf("kb_preset_label")}
-                </span>
-                <AppSelect
-                    fullWidth={false}
-                    value={selectedPreset}
-                    onValueChange={handleApplyPreset}
-                    options={KEYBINDING_PRESET_SELECTION_IDS.map((presetId) => ({
-                        value: presetId,
-                        label: tf(PRESET_LABEL_KEY[presetId]),
-                    }))}
-                />
-            </Flex>
-
-            <ScrollArea style={{ maxHeight: "56vh", marginTop: 8 }} scrollbars="vertical">
-                <Flex direction="column" gap="3" py="3">
-                    {groups.map(({ group, actions }) => (
-                        <Flex direction="column" gap="1" key={group}>
-                            <span
-                                className="hs-type-label font-semibold"
-                                style={{
-                                    textTransform: "uppercase",
-                                    letterSpacing: "0.05em",
-                                    padding: "4px 0",
+                {/*
+                 * 搜索框单独一行、铺满宽度。
+                 *
+                 * 【为什么不给它和预设下拉同一行】搜索是这个窗口的主入口，和结果列表
+                 * 上下对齐比与下拉框左右相邻更可读；挤在一行里它只能拿到剩余宽度
+                 * （实测 608/750），视觉重心还被左侧的下拉抢走。
+                 */}
+                <TextField.Root
+                    ref={searchInputRef}
+                    size="1"
+                    className="shrink-0"
+                    placeholder={tf("kb_search_placeholder")}
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    onKeyDown={handleSearchKeyDown}
+                    style={{ backgroundColor: "var(--qt-base)" }}
+                >
+                    <TextField.Slot>
+                        <MagnifyingGlassIcon height="12" width="12" />
+                    </TextField.Slot>
+                    {query && (
+                        <TextField.Slot>
+                            <IconButton
+                                size="1"
+                                variant="ghost"
+                                color="gray"
+                                aria-label={tf("kb_clear_search")}
+                                onClick={() => {
+                                    setQuery("");
+                                    searchInputRef.current?.focus();
                                 }}
+                                style={{ width: 16, height: 16 }}
                             >
-                                {tf(GROUP_LABEL_KEYS[group])}
-                            </span>
-                            <Separator size="4" />
-                            {actions.map((actionId) => {
-                                const meta = ACTION_META[actionId];
-                                const currentKb = keybindings[actionId];
-                                const defaultKb = DEFAULT_KEYBINDINGS[actionId];
-                                const isDefault =
-                                    currentKb.key === defaultKb.key &&
-                                    Boolean(currentKb.ctrl) === Boolean(defaultKb.ctrl) &&
-                                    Boolean(currentKb.shift) === Boolean(defaultKb.shift) &&
-                                    Boolean(currentKb.alt) === Boolean(defaultKb.alt) &&
-                                    Boolean(currentKb.modifierOnly) ===
-                                        Boolean(defaultKb.modifierOnly);
-                                const isRecording = recordingId === actionId;
+                                <Cross2Icon width="10" height="10" />
+                            </IconButton>
+                        </TextField.Slot>
+                    )}
+                </TextField.Root>
 
-                                return (
-                                    <Flex
-                                        key={actionId}
-                                        align="center"
-                                        justify="between"
-                                        px="2"
-                                        py="1"
-                                        style={{
-                                            borderRadius: "var(--qt-radius-sm)",
-                                            background: isRecording ? "var(--accent-3)" : undefined,
-                                            minHeight: 36,
-                                        }}
-                                    >
-                                        <Flex align="center" gap="2" minWidth="0">
-                                            {/* 修饰键手势徽章：区分拖拽 / 点击 / 滚轮 / 按住 */}
-                                            {meta.modifierOperationType && (
-                                                <AppStatusChip
-                                                    tone={
-                                                        GESTURE_BADGES[meta.modifierOperationType]
-                                                            .tone
-                                                    }
-                                                >
-                                                    {tf(
-                                                        GESTURE_BADGES[meta.modifierOperationType]
-                                                            .labelKey,
-                                                    )}
-                                                </AppStatusChip>
-                                            )}
-                                            <span className="hs-type-body" style={{ minWidth: 0 }}>
-                                                {tf(meta.labelKey)}
-                                            </span>
-                                        </Flex>
-                                        <Flex align="center" gap="2">
-                                            {/* 快捷键显示 / 录入按钮 */}
-                                            <Button
-                                                variant={isRecording ? "solid" : "soft"}
-                                                color={
-                                                    isRecording
-                                                        ? "blue"
-                                                        : !isDefault
-                                                          ? "green"
-                                                          : "gray"
-                                                }
-                                                size="1"
-                                                style={{
-                                                    minWidth: 120,
-                                                    fontFamily: "monospace",
-                                                }}
-                                                onClick={() => {
-                                                    if (isRecording) {
-                                                        // 录入中左键点击 → 设为"无"
-                                                        dispatch(
-                                                            setKeybinding({
-                                                                actionId,
-                                                                binding: NONE_BINDING,
-                                                            }),
-                                                        );
-                                                        setSelectedPreset("custom");
-                                                        setRecordingId(null);
-                                                        setConflict(null);
-                                                    } else {
-                                                        setConflict(null);
-                                                        setRecordingId(actionId);
-                                                    }
-                                                }}
-                                                onContextMenu={(e) => {
-                                                    e.preventDefault();
-                                                    // 右键点击 → 直接重置为默认
-                                                    dispatch(resetKeybinding(actionId));
-                                                    setSelectedPreset("custom");
-                                                    setRecordingId(null);
-                                                    setConflict(null);
-                                                }}
-                                            >
-                                                {isRecording
-                                                    ? tf(
-                                                          defaultKb.modifierOnly
-                                                              ? "kb_press_modifier"
-                                                              : "kb_press_key",
-                                                      )
-                                                    : formatKeybinding(currentKb, tf("kb_none"))}
-                                            </Button>
-                                        </Flex>
-                                    </Flex>
-                                );
-                            })}
-                        </Flex>
-                    ))}
+                <Flex align="center" gap="2" className="shrink-0">
+                    <span className="hs-type-muted" style={{ whiteSpace: "nowrap" }}>
+                        {tf("kb_preset_label")}
+                    </span>
+                    <AppSelect
+                        fullWidth={false}
+                        value={selectedPreset}
+                        onValueChange={handleApplyPreset}
+                        options={KEYBINDING_PRESET_SELECTION_IDS.map((presetId) => ({
+                            value: presetId,
+                            label: tf(PRESET_LABEL_KEY[presetId]),
+                        }))}
+                    />
                 </Flex>
-            </ScrollArea>
+
+                <Flex className="min-h-0 flex-1 gap-3">
+                    <KeybindingsNavRail
+                        items={navItems}
+                        activeGroup={activeGroup}
+                        onSelect={setActiveGroup}
+                        ariaLabel={tf("kb_nav_label")}
+                        customizedHint={tf("kb_group_customized_hint")}
+                    />
+
+                    {/*
+                     * 右栏：唯一的滚动区。用 `min-h-0 flex-1` 参与外层 flex 布局，
+                     * 而不是写 `max-h-[Npx]` —— 后者会在滚动瓶颈里叠出第二条滚动条
+                     * （见 `designSystemGates.test.ts` 的"有界滚动盒"门禁）。
+                     */}
+                    <div
+                        ref={resultListRef}
+                        className="hs-scroll-gutter min-h-0 min-w-0 flex-1 overflow-y-auto custom-scrollbar"
+                    >
+                        {hasQuery ? (
+                            visibleEntries.length > 0 ? (
+                                <Flex direction="column" gap="1">
+                                    {visibleEntries.map((entry) =>
+                                        renderRow(entry.id, resolveGroupNavLabel(entry.group, tf)),
+                                    )}
+                                </Flex>
+                            ) : (
+                                <span className="hs-type-muted block px-2 py-4 text-center">
+                                    {tf("kb_no_results")}
+                                </span>
+                            )
+                        ) : (
+                            <Flex direction="column" gap="3">
+                                {groupsToRender?.map(({ group, actions }) => (
+                                    <section key={group} className="flex flex-col gap-1">
+                                        {/*
+                                         * 粘性组标题：需要一个不透明背景，否则滚动时行
+                                         * 文字会从标题下面透出来。
+                                         */}
+                                        <h3 className="hs-type-section sticky top-0 z-10 m-0 bg-qt-panel py-1">
+                                            {tf(GROUP_LABEL_KEYS[group])}
+                                        </h3>
+                                        {actions.map((actionId) => renderRow(actionId))}
+                                    </section>
+                                ))}
+                            </Flex>
+                        )}
+                    </div>
+                </Flex>
+
+                {hasQuery && (
+                    <span className="hs-type-caption shrink-0">
+                        {plural("kb_result_count", visibleEntries.length)}
+                    </span>
+                )}
+            </Flex>
 
             {/* 冲突提示：按所属场景分组展示冲突项 */}
             {conflict && (
@@ -482,6 +717,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                     gap="2"
                     py="2"
                     px="3"
+                    className="shrink-0"
                     style={{
                         background: "var(--red-3)",
                         borderRadius: "var(--qt-radius-md)",

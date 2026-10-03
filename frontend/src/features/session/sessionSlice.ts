@@ -31,6 +31,23 @@ import type {
 } from "./sessionTypes";
 import { normalizeSplitTransitionCurve } from "./sessionTypes";
 import { SILENCE_DETECT_DEFAULTS } from "./sessionTypes";
+import {
+    DEFAULT_SEARCH_SETTINGS,
+    normalizeSearchSettings,
+    type SearchSettings,
+} from "../search/searchSettings";
+import {
+    DEFAULT_FILE_BROWSER_VIEW_OPTIONS,
+    DEFAULT_SORT_DESCENDING,
+    migrateLegacyMediaOnly,
+    normalizeFileBrowserViewOptions,
+    type FileBrowserViewOptions,
+} from "../fileBrowser/fileBrowserViewOptions";
+import {
+    DEFAULT_FOLDER_IMPORT_OPTIONS,
+    normalizeFolderImportOptions,
+    type FolderImportOptions,
+} from "../fileBrowser/folderImportOptions";
 import { modEuclid, resolveLoopMediaDurationSec } from "../../utils/loopRender";
 import { normalizeChannelMode } from "../../utils/channelMode";
 
@@ -135,8 +152,10 @@ import {
 
 import {
     DEFAULT_CHANNEL_IMPORT_POLICY,
+    DEFAULT_PEN_INPUT_SETTINGS,
     DEFAULT_RENDER_CACHE_SETTINGS,
     type ChannelImportPolicy,
+    type PenInputSettings,
     type RenderCacheSettings,
 } from "../../services/api/settings";
 
@@ -151,6 +170,27 @@ import {
 } from "../../components/layout/pianoRoll/paramAxisUnits";
 import type { CustomScalePreset } from "../../utils/customScales";
 import { sanitizeCustomScalePreset } from "../../utils/customScales";
+import {
+    MAX_VIBRATO_PRESETS,
+    isBuiltinVibratoPresetId,
+    sanitizeVibratoPreset,
+    BASELINE_MODES,
+    DEFAULT_VIBRATO_BASELINE,
+} from "../../features/vibrato/vibratoPresets";
+import {
+    activeIdAfterRemoval,
+    cycleVibratoPresetId,
+    effectiveBuiltinPresetOrder,
+    enabledVibratoPresets,
+    reorderBuiltinPresetIds,
+    reorderUserVibratoPresets,
+    resolveVibratoPresets,
+} from "../../features/vibrato/vibratoPresetList";
+import {
+    DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
+    SYSTEM_VIBRATO_PRESETS,
+} from "../../features/vibrato/systemPresets";
+import type { BaselineMode, VibratoPreset } from "../../features/vibrato/vibratoTypes";
 import type { TempoMap } from "../../utils/tempoMap";
 import {
     clampDenominator,
@@ -166,6 +206,7 @@ import {
     importAudioFileAtPosition,
     importAudioFromDialog,
     importAudioFromPath,
+    importFolderAtPosition,
     importMidiAsClip,
     importMultipleAudioAtPosition,
     importMultipleAudioFilesAtPosition,
@@ -207,6 +248,24 @@ const VALID_TIME_UNITS = new Set<TimeUnit>(["barBeats", "barDivisions", "seconds
 const DEFAULT_PRIMARY_TIME_UNIT: TimeUnit = "barBeats";
 const DEFAULT_SECONDARY_TIME_UNIT: TimeUnitChoice = "clock";
 const DEFAULT_RULER_LABEL_SPACING_PX = 110;
+
+/**
+ * 旧的"仅显示媒体文件"存储位置。
+ *
+ * 该键由 `fileBrowserSlice` 写入（`hifishifter.fileBrowser.audioOnly`）。视图选项
+ * 迁到 `UiSettings.fileBrowser` 之后，老用户的偏好在旧键里 —— 读取一次用于迁移，
+ * 之后以配置为准（见 `migrateLegacyMediaOnly`）。
+ */
+const LEGACY_MEDIA_ONLY_KEY = "hifishifter.fileBrowser.audioOnly";
+
+function readLegacyMediaOnly(): string | null {
+    try {
+        return localStorage.getItem(LEGACY_MEDIA_ONLY_KEY);
+    } catch {
+        // 无 localStorage 的环境（node 环境的单测）→ 没有可迁移的旧值。
+        return null;
+    }
+}
 
 export function createDefaultTimelineSnapSettings(): TimelineSnapSettings {
     return {
@@ -459,6 +518,43 @@ export interface SessionState {
     _silencePreviewRequestId: string | null;
     /** 静音检测对话框的上次使用参数（持久化到 UiSettings） */
     silenceDetectOptions: SilenceDetectSettings;
+    /** 搜索匹配设置（转写 / 宽严 / 各语言子开关，持久化到 UiSettings.search） */
+    searchSettings: SearchSettings;
+    /**
+     * 文件浏览器视图选项（排序 / 密度 / 隐藏文件 / 详情列 …，持久化到
+     * UiSettings.fileBrowser）。
+     *
+     * 【为什么在 session 而不在 fileBrowser 切片】它随 `app_config.json` 一起备份
+     * 与迁移，与 `searchSettings` 同类；放进 fileBrowser 切片会与
+     * `persistUiSettings` 的大 payload 分家，保存路径变成两条。
+     */
+    fileBrowserView: FileBrowserViewOptions;
+    /**
+     * 目录导入的选项（排布方式 / 递归 / 建轨道组）。
+     *
+     * 【为什么放在这里而不是 fileBrowser 切片】与 `fileBrowserView` 同一条理由：
+     * 它随 `app_config.json` 一起备份与迁移，保存路径也只有一条。
+     *
+     * 【为什么"记住上次的选择"是必要的】它是**对话框的预填**：目录导入一律弹窗
+     * （见 `FolderImportHost`），每次都从上次的选择起手，用户多数时候只需按回车。
+     */
+    folderImportOptions: FolderImportOptions;
+    /**
+     * 文件浏览器的常用位置（用户固定的目录）。
+     *
+     * 【为什么与视图选项分开存】前者是"视图怎么画"（受白名单约束的枚举），
+     * 这是"常去哪里"（任意路径）。变更原因与校验规则都不同，混在一个对象里会让
+     * `normalizeFileBrowserViewOptions` 同时管两件不相干的事。
+     */
+    fileBrowserFavorites: string[];
+    /**
+     * 「搜索与匹配设置」对话框是否打开。
+     *
+     * 【为什么放在切片里】三个地方都要能把它打开：选项菜单、文件浏览器与快速搜索
+     * 各自的「文A」右键菜单。各自持一份 `useState` 就会出现三个窗口实例 ——
+     * 对话框是单例，开关状态也只能有一份。
+     */
+    searchSettingsDialogOpen: boolean;
     /** 快速搜索放置音频时自动规格化 */
     quickSearchAutoNormalizeEnabled: boolean;
     /**
@@ -483,6 +579,8 @@ export interface SessionState {
     renderCache: RenderCacheSettings;
     /** 导入媒体时的声道处理策略（假立体声 → 单声道）。 */
     channelImportPolicy: ChannelImportPolicy;
+    /** 指针设备（触控板 / 数位板 / 触控笔 / 触摸）的输入偏好。 */
+    penInput: PenInputSettings;
     /**
      * 在途的导入任务数（>0 = 正在导入）。
      *
@@ -629,6 +727,42 @@ export interface SessionState {
     };
 
     customScalePresets: CustomScalePreset[];
+
+    /**
+     * 用户自定义颤音预设。系统预设在代码里（`features/vibrato/systemPresets.ts`），
+     * 不在这份列表里 —— 两者合成"可用预设列表"的逻辑见
+     * `features/vibrato/vibratoPresetList.ts`。
+     */
+    vibratoPresets: VibratoPreset[];
+    /** 当前活动颤音预设的 id（系统预设的 `builtin.*` 也合法）。 */
+    activeVibratoPresetId: string;
+    /**
+     * 被停用的颤音预设 id（系统与用户预设共用一份名单）。
+     *
+     * 【为什么单独存一份名单，而不是给预设加 `enabled` 字段】系统预设在代码里、
+     * 用户预设在设置里，两者都要能被停用；而预设对象还会被导出成预设文件，往里塞
+     * 一个"本机是否启用"的字段会让文件携带与它无关的本地状态。停用只影响本机的
+     * 工具栏列表与循环切换，因此单独记一份 id 名单最干净。
+     */
+    disabledVibratoPresetIds: string[];
+    /**
+     * 「摆放方式」：添加颤音时，颤音围绕哪条曲线摆。
+     *
+     * 【为什么在设置里，而不是预设字段】它回答的是"这一次把颤音挂到哪条线上"，
+     * 与"颤音长什么样"无关：用户先定摆放方式、再挑预设，换预设不该把它换掉；
+     * 预设库、拖拽工具、预设文件也都用不到它（见 `BaselineMode` 的说明）。
+     * 于是它作为**本机记忆**存在设置里，下次打开「添加颤音」还是上次选的那个。
+     */
+    vibratoBaseline: BaselineMode;
+    /**
+     * 系统预设的自定义顺序（id 列表）。
+     *
+     * 【为什么单独存】系统预设在代码里（`systemPresets.ts` 的出厂顺序），要允许用户
+     * 排序就只能把顺序记在设置里。空数组 = 用出厂顺序；缺项（新版本新增的出厂预设）
+     * 与无效项（旧版本删过的）由 `effectiveBuiltinPresetOrder` 兜底，因此不需要迁移。
+     */
+    builtinVibratoPresetOrder: string[];
+
     project: {
         name: string;
         path: string | null;
@@ -1614,6 +1748,22 @@ function clearTakeRollback(clipIds: readonly string[]): void {
 }
 
 /**
+ * take 族异步操作的「过期响应守卫」。
+ *
+ * 与 `setClipStateRemote.fulfilled` 的 `_latestEditRequestId` 同一机制、同一动机：
+ * 后端命令在线程池上并发执行，响应可能乱序到达；用户打开/新建工程时
+ * `openProject/newProject.pending` 会把 `_latestEditRequestId` 置空作废一切在途
+ * 编辑响应。take 族的权威回包是**整份 TimelineState 覆写**，不做守卫的话：
+ * (a) 工程切换在途的 take 响应会把旧工程的时间线整体压回新工程上；
+ * (b) 快速连续切换时旧响应后到，把 UI 回滚到过期 take（后端却持更新状态）。
+ * 每个 take 族 thunk 在 `.pending` 登记 `requestId`，`.fulfilled`/`.rejected`
+ * 只采纳仍是最新的那份。
+ */
+function takeRequestIsStale(state: SessionState, requestId: string): boolean {
+    return state._latestEditRequestId !== requestId;
+}
+
+/**
  * 将后端返回的 TimelineState 全量覆写到前端 Redux state。
  *
  * @param force  默认 false。当 `_interactionLockCount > 0`（用户正在拖动/滑动等连续交互）
@@ -1640,7 +1790,11 @@ function applyTimelineState(
     applyTimelineTracksOnly(state, timeline);
 
     // 静音检测预览覆盖层锚定在旧时间线上，任何全量快照应用即失效。
+    // 请求 id 必须随之作废：否则在途分析的 fulfilled 只比对 id（ id 未变），
+    // 会把按**旧剪辑布局**算出的静音段重新画回时间线（甚至画到切除后的新剪辑上）
+    // —— 与 `setSilencePreview` 手动清空时的口径一致。
     state.silencePreviewSegments = null;
+    state._silencePreviewRequestId = null;
 
     // 旧 clips 的 id 索引：playback_rate 缺失时的回退查询需要 O(1) 命中，
     // 否则 per-clip find 会让千级 clip 工程的全量快照应用退化为 O(n²)。
@@ -1745,19 +1899,21 @@ function applyTimelineState(
                     : (takes[0]?.id ?? `${clip.id}_take_1`),
         };
     });
+    // 剪枝孤儿条目：先建一次 Set（O(clips)），逐条 O(1) 查询 —— `.some()` 内层
+    // 线性扫描是 O(entries × clips)，本函数在每个编辑 / 撤销 / 保存回包上都会跑，
+    // 千级 clip 下那是每次数百万次比较。
+    const availableClipIds = new Set(state.clips.map((clip) => clip.id));
     state.clipFormantStatus = Object.fromEntries(
-        Object.entries(state.clipFormantStatus).filter(([clipId]) =>
-            state.clips.some((clip) => clip.id === clipId),
-        ),
+        Object.entries(state.clipFormantStatus).filter(([clipId]) => availableClipIds.has(clipId)),
     ) as Record<string, "ready" | "rebuilding" | "failed">;
     state.clipFormantAnalysis = Object.fromEntries(
         Object.entries(state.clipFormantAnalysis).filter(([clipId]) =>
-            state.clips.some((clip) => clip.id === clipId),
+            availableClipIds.has(clipId),
         ),
     );
     if (
         state.clipFormantToolWindow.clipId &&
-        !state.clips.some((clip) => clip.id === state.clipFormantToolWindow.clipId)
+        !availableClipIds.has(state.clipFormantToolWindow.clipId)
     ) {
         state.clipFormantToolWindow.open = false;
         state.clipFormantToolWindow.clipId = null;
@@ -1898,7 +2054,7 @@ function applyTimelineState(
         }
     }
 
-    const availableClipIds = new Set(state.clips.map((clip) => clip.id));
+    // availableClipIds 已在上方 formant 剪枝处构建（同一次剪枝共用），此处直接复用。
     for (const clipId of Object.keys(state.clipAutomation)) {
         if (!availableClipIds.has(clipId)) {
             delete state.clipAutomation[clipId];
@@ -2072,6 +2228,11 @@ const initialState: SessionState = {
     _silencePreviewRequestId: null,
     silencePreviewSegments: null,
     silenceDetectOptions: { ...SILENCE_DETECT_DEFAULTS },
+    searchSettings: { ...DEFAULT_SEARCH_SETTINGS },
+    fileBrowserView: { ...DEFAULT_FILE_BROWSER_VIEW_OPTIONS },
+    folderImportOptions: { ...DEFAULT_FOLDER_IMPORT_OPTIONS },
+    fileBrowserFavorites: [],
+    searchSettingsDialogOpen: false,
     quickSearchAutoNormalizeEnabled: false,
     saveUndoHistoryByDefault: false,
     visibleReferenceRootTrackIds: [],
@@ -2083,6 +2244,7 @@ const initialState: SessionState = {
     autoBackgroundRender: true,
     renderCache: { ...DEFAULT_RENDER_CACHE_SETTINGS },
     channelImportPolicy: { ...DEFAULT_CHANNEL_IMPORT_POLICY },
+    penInput: { ...DEFAULT_PEN_INPUT_SETTINGS },
     importInFlight: 0,
     playbackRenderingActive: false,
     playbackRenderingTarget: null,
@@ -2161,6 +2323,11 @@ const initialState: SessionState = {
     },
 
     customScalePresets: [],
+    vibratoPresets: [],
+    activeVibratoPresetId: DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
+    disabledVibratoPresetIds: [],
+    vibratoBaseline: DEFAULT_VIBRATO_BASELINE,
+    builtinVibratoPresetOrder: [],
     project: {
         name: "Untitled",
         path: null,
@@ -2585,6 +2752,104 @@ const sessionSlice = createSlice({
                 (preset) => preset.id !== presetId,
             );
         },
+        /** 新增或覆盖一个用户颤音预设（按 id 匹配）。 */
+        upsertVibratoPreset(state, action: PayloadAction<VibratoPreset>) {
+            const incoming = sanitizeVibratoPreset(action.payload);
+            // 系统预设只能来自代码；混进用户列表会让"只读"失效。
+            if (isBuiltinVibratoPresetId(incoming.id)) return;
+            const idx = state.vibratoPresets.findIndex((preset) => preset.id === incoming.id);
+            if (idx >= 0) {
+                state.vibratoPresets[idx] = incoming;
+                return;
+            }
+            if (state.vibratoPresets.length >= MAX_VIBRATO_PRESETS) return;
+            state.vibratoPresets.push(incoming);
+        },
+        /**
+         * 删除一个用户颤音预设，并把活动 id 迁移到一个仍然存在的预设上。
+         *
+         * 【为什么在这里迁移】活动 id 指向被删的预设会让"当前预设"悬空。迁移
+         * 规则收在 `activeIdAfterRemoval` 里（纯函数、可单测），与预设编辑器
+         * 各自维护一份相比不会漂移。
+         */
+        removeVibratoPreset(state, action: PayloadAction<string>) {
+            const presetId = action.payload;
+            const all = [...SYSTEM_VIBRATO_PRESETS, ...state.vibratoPresets];
+            state.vibratoPresets = state.vibratoPresets.filter((preset) => preset.id !== presetId);
+            state.activeVibratoPresetId = activeIdAfterRemoval(
+                all,
+                state.activeVibratoPresetId,
+                presetId,
+            );
+            // 顺手把停用名单里的这条清掉：id 是随机生成的，留着不会误伤别的预设，
+            // 但会让持久化的名单随着"建了又删"一直变长。
+            state.disabledVibratoPresetIds = state.disabledVibratoPresetIds.filter(
+                (id) => id !== presetId,
+            );
+        },
+        /** 移动用户颤音预设的位置（仅用户段内部）。 */
+        reorderVibratoPreset(state, action: PayloadAction<{ id: string; toIndex: number }>) {
+            state.vibratoPresets = reorderUserVibratoPresets(
+                state.vibratoPresets,
+                action.payload.id,
+                action.payload.toIndex,
+            );
+        },
+        /**
+         * 移动**系统预设**的位置。
+         *
+         * 顺序以 id 列表持久化：先取当前有效顺序（含出厂顺序兜底），再移动一项后整体
+         * 写回 —— 这样"从未排过序"与"排过序"最终都落在同一份完整列表上。
+         */
+        reorderBuiltinVibratoPreset(state, action: PayloadAction<{ id: string; toIndex: number }>) {
+            state.builtinVibratoPresetOrder = reorderBuiltinPresetIds(
+                effectiveBuiltinPresetOrder(state.builtinVibratoPresetOrder),
+                action.payload.id,
+                action.payload.toIndex,
+            );
+        },
+        /** 设定当前活动颤音预设。 */
+        setActiveVibratoPreset(state, action: PayloadAction<string>) {
+            state.activeVibratoPresetId = action.payload;
+        },
+        /**
+         * 启用 / 停用一条颤音预设。
+         *
+         * 停用只影响本机的工具栏列表与循环切换，预设本身、以及"当前使用"的选择都
+         * 不受影响 —— 停用正在用的那一条是允许的，它仍然是当前预设。
+         */
+        /**
+         * 设置「摆放方式」（添加颤音时的参数）。
+         *
+         * 与预设无关，因此不碰任何预设数据；调用方随后 `persistUiSettings()` 落盘。
+         */
+        setVibratoBaseline(state, action: PayloadAction<BaselineMode>) {
+            state.vibratoBaseline = action.payload;
+        },
+        toggleVibratoPresetEnabled(state, action: PayloadAction<string>) {
+            const id = action.payload;
+            const index = state.disabledVibratoPresetIds.indexOf(id);
+            if (index >= 0) state.disabledVibratoPresetIds.splice(index, 1);
+            else state.disabledVibratoPresetIds.push(id);
+        },
+        /**
+         * 环绕切换活动颤音预设。
+         *
+         * `delta` 的语义与 `clip.cycleTake`、`layout.focusNext` 一致：一个实现
+         * 同时服务"上一个"与"下一个"。被停用的预设**跳过**。
+         */
+        cycleActiveVibratoPreset(state, action: PayloadAction<1 | -1>) {
+            const all = resolveVibratoPresets(
+                state.vibratoPresets,
+                state.builtinVibratoPresetOrder,
+            ).all;
+            const next = cycleVibratoPresetId(
+                enabledVibratoPresets(all, state.disabledVibratoPresetIds),
+                state.activeVibratoPresetId,
+                action.payload,
+            );
+            if (next) state.activeVibratoPresetId = next;
+        },
         togglePlayheadZoom(state) {
             state.playheadZoomEnabled = !state.playheadZoomEnabled;
         },
@@ -2642,6 +2907,64 @@ const sessionSlice = createSlice({
                 ...action.payload,
             };
         },
+        /**
+         * 更新搜索匹配设置（部分字段；持久化由调用方走 persistUiSettings）。
+         *
+         * 合并后统一过一遍 `normalizeSearchSettings`：调用点只传改动的那一项，
+         * 未传的项保持不变，非法值（旧配置 / 手改文件）在这里被收敛。
+         */
+        setSearchSettings(state, action: PayloadAction<Partial<SearchSettings>>) {
+            state.searchSettings = normalizeSearchSettings({
+                ...state.searchSettings,
+                ...action.payload,
+            });
+        },
+        setSearchSettingsDialogOpen(state, action: PayloadAction<boolean>) {
+            state.searchSettingsDialogOpen = action.payload;
+        },
+        /**
+         * 更新文件浏览器视图选项（部分字段；持久化由调用方走 `persistUiSettings`）。
+         *
+         * 合并后统一过一遍 `normalizeFileBrowserViewOptions`：调用点只传改动的那一项，
+         * 非法值（旧配置 / 手改文件）在这里被收敛。
+         *
+         * 【切换排序依据时为什么要连带改方向】"按日期"几乎总是想看最新的，
+         * 沿用上一次的方向会让它默认排成最旧在前。见 `DEFAULT_SORT_DESCENDING`。
+         */
+        setFileBrowserView(state, action: PayloadAction<Partial<FileBrowserViewOptions>>) {
+            const patch = action.payload;
+            const next = normalizeFileBrowserViewOptions({
+                ...state.fileBrowserView,
+                ...patch,
+            });
+            if (patch.sortMode !== undefined && patch.sortDescending === undefined) {
+                next.sortDescending = DEFAULT_SORT_DESCENDING[patch.sortMode];
+            }
+            state.fileBrowserView = next;
+        },
+        /**
+         * 目录导入选项（部分覆盖）。
+         *
+         * 【为什么与视图选项一样"改动即生效"】它们是**下次导入的默认值**，没有
+         * "应用"这一步可言 —— 用户改完就关掉对话框，不该还需要再点一次确定。
+         */
+        setFolderImportOptions(state, action: PayloadAction<Partial<FolderImportOptions>>) {
+            state.folderImportOptions = normalizeFolderImportOptions({
+                ...state.folderImportOptions,
+                ...action.payload,
+            });
+        },
+        /** 覆盖常用位置列表（顺序即显示顺序；去重与去空白在此收口）。 */
+        setFileBrowserFavorites(state, action: PayloadAction<string[]>) {
+            const seen = new Set<string>();
+            state.fileBrowserFavorites = action.payload
+                .map((path) => path.trim())
+                .filter((path) => {
+                    if (!path || seen.has(path)) return false;
+                    seen.add(path);
+                    return true;
+                });
+        },
         toggleQuickSearchAutoNormalize(state) {
             state.quickSearchAutoNormalizeEnabled = !state.quickSearchAutoNormalizeEnabled;
         },
@@ -2673,6 +2996,10 @@ const sessionSlice = createSlice({
         /** 覆盖整块导入声道策略（对话框保存时调用）。 */
         setChannelImportPolicy(state, action: PayloadAction<Partial<ChannelImportPolicy>>) {
             state.channelImportPolicy = { ...state.channelImportPolicy, ...action.payload };
+        },
+        /** 覆盖整块指针设备偏好（设置面板保存时调用）。 */
+        setPenInputSettings(state, action: PayloadAction<Partial<PenInputSettings>>) {
+            state.penInput = { ...state.penInput, ...action.payload };
         },
         /** 镜像后端 `playback_rendering_state` 事件的 active/target（进度走 App 本地状态）。
          *  `blocking` 为阻塞式前台预渲染（target="original"）的独立镜像；缺省时按
@@ -3521,6 +3848,24 @@ const sessionSlice = createSlice({
                     const o = s.silenceDetectOptions as Partial<SilenceDetectSettings>;
                     state.silenceDetectOptions = { ...state.silenceDetectOptions, ...o };
                 }
+                if (s.search != null) state.searchSettings = normalizeSearchSettings(s.search);
+                /*
+                 * 视图选项：先补一次旧 localStorage 的迁移，再归一化。
+                 *
+                 * 迁移只在配置里**没有** `mediaOnly` 时生效（见
+                 * `migrateLegacyMediaOnly`）—— 否则用户改过新设置后，旧键还在，
+                 * 下次启动又被打回旧值。
+                 */
+                state.fileBrowserView = normalizeFileBrowserViewOptions(
+                    migrateLegacyMediaOnly(s.fileBrowser, readLegacyMediaOnly()),
+                );
+                state.folderImportOptions = normalizeFolderImportOptions(s.folderImport);
+                if (Array.isArray(s.fileBrowserFavorites)) {
+                    state.fileBrowserFavorites = s.fileBrowserFavorites
+                        .filter((path: unknown): path is string => typeof path === "string")
+                        .map((path: string) => path.trim())
+                        .filter((path: string) => path.length > 0);
+                }
                 if (s.quickSearchAutoNormalize != null)
                     state.quickSearchAutoNormalizeEnabled = Boolean(s.quickSearchAutoNormalize);
                 if (s.saveUndoHistoryByDefault != null)
@@ -3568,6 +3913,12 @@ const sessionSlice = createSlice({
                         ...s.channelImportPolicy,
                     };
                 }
+                if (s.penInput) {
+                    state.penInput = {
+                        ...DEFAULT_PEN_INPUT_SETTINGS,
+                        ...s.penInput,
+                    };
+                }
                 const selectDir = s.selectDragDirection;
                 if (selectDir != null && ["free", "x-only", "y-only"].includes(selectDir)) {
                     state.selectDragDirection = selectDir as DragDirection;
@@ -3587,6 +3938,41 @@ const sessionSlice = createSlice({
                 if (Array.isArray(s.customScalePresets)) {
                     state.customScalePresets = s.customScalePresets.map((preset: unknown) =>
                         sanitizeCustomScalePreset(preset as Partial<CustomScalePreset>),
+                    );
+                }
+                // 逐项规整：手改过的配置不能让内核拿到越界或缺失的字段。
+                if (Array.isArray(s.vibratoPresets)) {
+                    state.vibratoPresets = s.vibratoPresets
+                        .map((preset: unknown) => sanitizeVibratoPreset(preset as VibratoPreset))
+                        .filter((preset) => !isBuiltinVibratoPresetId(preset.id))
+                        .slice(0, MAX_VIBRATO_PRESETS);
+                }
+                if (typeof s.activeVibratoPresetId === "string" && s.activeVibratoPresetId) {
+                    state.activeVibratoPresetId = s.activeVibratoPresetId;
+                }
+                // 摆放方式：只认已知取值（手改配置里的野值一律忽略，回落默认）。
+                if (
+                    typeof s.vibratoBaseline === "string" &&
+                    (BASELINE_MODES as readonly string[]).includes(s.vibratoBaseline)
+                ) {
+                    state.vibratoBaseline = s.vibratoBaseline as BaselineMode;
+                }
+                // 停用名单：只收字符串，去重；未知 id 留着无害（过滤时按 id 比对）。
+                if (Array.isArray(s.disabledVibratoPresetIds)) {
+                    state.disabledVibratoPresetIds = [
+                        ...new Set(
+                            s.disabledVibratoPresetIds.filter(
+                                (id: unknown): id is string =>
+                                    typeof id === "string" && id.length > 0,
+                            ),
+                        ),
+                    ];
+                }
+                // 系统预设的自定义顺序：同样只收字符串；缺项 / 无效项由
+                // `effectiveBuiltinPresetOrder` 兜底，这里不必校验成员合法性。
+                if (Array.isArray(s.builtinVibratoPresetOrder)) {
+                    state.builtinVibratoPresetOrder = s.builtinVibratoPresetOrder.filter(
+                        (id: unknown): id is string => typeof id === "string" && id.length > 0,
                     );
                 }
             })
@@ -3800,10 +4186,18 @@ const sessionSlice = createSlice({
                 state.lastResult = action.payload;
                 const payload = action.payload as {
                     ok?: boolean;
+                    canceled?: boolean;
                     imported?: TimelineState;
                     newClipIds?: string[];
                     playheadSec?: number;
                 };
+                // 用户在导入进行中撤销 / 跳转历史 → 循环提前退出，且不带时间线快照。
+                // 必须早返回：否则会显示"Import done"，而且 `imported` 为空虽会跳过
+                // 套用，状态栏却在骗人。
+                if (payload.canceled) {
+                    state.status = "Import canceled";
+                    return;
+                }
                 const ok = Boolean(payload.ok);
                 if (ok) {
                     state.status = "Import done";
@@ -3829,6 +4223,69 @@ const sessionSlice = createSlice({
             })
             .addCase(importMultipleAudioAtPosition.rejected, setRejected)
 
+            /*
+             * 目录导入。与 `importMultipleAudioAtPosition` 同一套收尾 —— 不创建
+             * 轨道组时它就是被委托过去的那条路径，payload 形状完全一致；创建轨道组
+             * 时多带回 `failedFiles` / `attempted`，由调用方汇总提示（状态栏 + 临时提示）。
+             */
+            .addCase(importFolderAtPosition.pending, (state) =>
+                setPending(state, "Importing folder..."),
+            )
+            .addCase(importFolderAtPosition.fulfilled, (state, action) => {
+                state.busy = false;
+                state.lastResult = action.payload;
+                const payload = action.payload as {
+                    ok?: boolean;
+                    canceled?: boolean;
+                    imported?: TimelineState;
+                    newClipIds?: string[];
+                    playheadSec?: number;
+                };
+                // 用户在导入进行中撤销 / 跳转历史 → 循环提前退出并回一个取消结果。
+                // 必须在这里早返回：否则会落进下面的 `ok` 分支显示"Import done"，
+                // 而且 `imported` 为空会跳过时间线套用 —— 但状态栏会骗人。
+                if (payload.canceled) {
+                    state.status = "Import canceled";
+                    return;
+                }
+                const ok = Boolean(payload.ok);
+                if (ok) {
+                    state.status = "Import done";
+                } else {
+                    state.status = "Import failed";
+                    state.error = "import_audio_failed";
+                }
+                // 目录导入的汇总：成功数 / 失败数。状态行按这个格式翻译
+                // （见 `resolveStatusText` 的 "Folder import:" 分支）。
+                const summary = action.payload as {
+                    attempted?: number;
+                    failedFiles?: string[];
+                };
+                if (
+                    ok &&
+                    typeof summary.attempted === "number" &&
+                    summary.failedFiles &&
+                    summary.attempted > 0
+                ) {
+                    const failed = summary.failedFiles.length;
+                    state.status = `Folder import: ${summary.attempted - failed} imported, ${failed} failed`;
+                }
+                if (ok && payload.imported && payload.imported.tracks) {
+                    applyTimelineStatePreservingPitchVisuals(state, payload.imported);
+                    if (typeof payload.playheadSec === "number") {
+                        state.playheadSec = Math.max(0, payload.playheadSec);
+                        state.pendingPlayheadRevealSec = state.playheadSec;
+                    }
+                    if (payload.newClipIds && payload.newClipIds.length > 0) {
+                        applyAutoCrossfadeInReducer(state, payload.newClipIds);
+                        state.multiSelectedClipIds = payload.newClipIds;
+                        state.multiSelectionIntentional = false;
+                        state.selectedClipId = payload.newClipIds[0] ?? null;
+                    }
+                }
+            })
+            .addCase(importFolderAtPosition.rejected, setRejected)
+
             .addCase(importMultipleAudioFilesAtPosition.pending, (state) =>
                 setPending(state, "Importing multiple audio files..."),
             )
@@ -3837,10 +4294,15 @@ const sessionSlice = createSlice({
                 state.lastResult = action.payload;
                 const payload = action.payload as {
                     ok?: boolean;
+                    canceled?: boolean;
                     imported?: TimelineState;
                     newClipIds?: string[];
                     playheadSec?: number;
                 };
+                if (payload.canceled) {
+                    state.status = "Import canceled";
+                    return;
+                }
                 const ok = Boolean(payload.ok);
                 if (ok) {
                     state.status = "Import done";
@@ -5782,6 +6244,7 @@ const sessionSlice = createSlice({
             })
 
             .addCase(setClipActiveTakeRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
                 const clip = state.clips.find((entry) => entry.id === action.meta.arg.clipId);
                 if (!clip) return;
                 const takes = clip.takes ?? [];
@@ -5792,6 +6255,9 @@ const sessionSlice = createSlice({
                 applyActiveTakeToFlat(clip, take);
             })
             .addCase(setClipActiveTakeRemote.fulfilled, (state, action) => {
+                // 过期守卫：过期回包（含 !ok 的回滚）一律整份丢弃 —— 回滚的是
+                // 更新一次的乐观切换，等于把新切换撤销掉。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     // 后端拒绝：回滚乐观切换并给出可见反馈。
@@ -5804,11 +6270,13 @@ const sessionSlice = createSlice({
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
             .addCase(setClipActiveTakeRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 restoreTakeRollback(state, [action.meta.arg.clipId]);
                 setRejected(state, action);
             })
 
             .addCase(cycleClipTakesRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
                 for (const clipId of action.meta.arg.clipIds) {
                     const clip = state.clips.find((entry) => entry.id === clipId);
                     const takes = clip?.takes ?? [];
@@ -5829,6 +6297,8 @@ const sessionSlice = createSlice({
                 }
             })
             .addCase(cycleClipTakesRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     restoreTakeRollback(state, action.meta.arg.clipIds);
@@ -5840,11 +6310,13 @@ const sessionSlice = createSlice({
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
             .addCase(cycleClipTakesRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 restoreTakeRollback(state, action.meta.arg.clipIds);
                 setRejected(state, action);
             })
 
             .addCase(setClipTakeReversedRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
                 // 乐观翻转单个 Take：与后端 flip_take_playback_direction 同口径
                 // 换算该 Take 的源窗口/锚点（保持消费内容不变）。active take
                 // 需物化到 flat 投影；inactive take 只动自身条目。
@@ -5866,6 +6338,8 @@ const sessionSlice = createSlice({
                 }
             })
             .addCase(setClipTakeReversedRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     state.error = "Take reverse rejected";
@@ -5874,9 +6348,13 @@ const sessionSlice = createSlice({
                 }
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
-            .addCase(setClipTakeReversedRemote.rejected, setRejected)
+            .addCase(setClipTakeReversedRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                setRejected(state, action);
+            })
 
             .addCase(setClipTakeChannelModeRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
                 // 乐观切换单个 Take 的声道模式；active take 物化到 flat 投影，
                 // inactive take 只动自身条目（与 reversed 同模式）。
                 const clip = state.clips.find((entry) => entry.id === action.meta.arg.clipId);
@@ -5890,6 +6368,8 @@ const sessionSlice = createSlice({
                 }
             })
             .addCase(setClipTakeChannelModeRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     state.error = "Take channel mode rejected";
@@ -5898,18 +6378,44 @@ const sessionSlice = createSlice({
                 }
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
-            .addCase(setClipTakeChannelModeRemote.rejected, setRejected)
+            .addCase(setClipTakeChannelModeRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                setRejected(state, action);
+            })
 
-            .addCase(packClipsIntoTakesRemote.rejected, setRejected)
+            .addCase(packClipsIntoTakesRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                setRejected(state, action);
+            })
 
-            .addCase(explodeClipTakesRemote.rejected, setRejected)
+            .addCase(explodeClipTakesRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                setRejected(state, action);
+            })
 
-            .addCase(duplicateClipTakeRemote.rejected, setRejected)
-            .addCase(removeClipTakeRemote.rejected, setRejected)
-            .addCase(renameClipTakeRemote.rejected, setRejected)
-            .addCase(addClipTakeFromMediaRemote.rejected, setRejected)
+            .addCase(duplicateClipTakeRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                setRejected(state, action);
+            })
+            .addCase(removeClipTakeRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                setRejected(state, action);
+            })
+            .addCase(renameClipTakeRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                setRejected(state, action);
+            })
+            .addCase(addClipTakeFromMediaRemote.rejected, (state, action) => {
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                setRejected(state, action);
+            })
 
+            .addCase(packClipsIntoTakesRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(packClipsIntoTakesRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     state.error = "Pack into takes failed";
@@ -5919,7 +6425,12 @@ const sessionSlice = createSlice({
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
 
+            .addCase(explodeClipTakesRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(explodeClipTakesRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     state.error = "Explode takes failed";
@@ -5929,7 +6440,12 @@ const sessionSlice = createSlice({
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
 
+            .addCase(duplicateClipTakeRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(duplicateClipTakeRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     state.error = "Duplicate take failed";
@@ -5938,7 +6454,12 @@ const sessionSlice = createSlice({
                 }
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
+            .addCase(removeClipTakeRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(removeClipTakeRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     state.error = "Remove take failed";
@@ -5947,7 +6468,12 @@ const sessionSlice = createSlice({
                 }
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
+            .addCase(renameClipTakeRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(renameClipTakeRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     state.error = "Rename take failed";
@@ -5956,7 +6482,12 @@ const sessionSlice = createSlice({
                 }
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
+            .addCase(addClipTakeFromMediaRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(addClipTakeFromMediaRemote.fulfilled, (state, action) => {
+                // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
+                if (takeRequestIsStale(state, action.meta.requestId)) return;
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     state.error = "Add take from media failed";
@@ -6249,6 +6780,9 @@ const sessionSlice = createSlice({
             importAudioFromPath.typePrefix,
             importMultipleAudioAtPosition.typePrefix,
             importMultipleAudioFilesAtPosition.typePrefix,
+            // 目录导入是**最需要**这个提示的一条（逐文件循环可能持续数秒），
+            // 此前恰恰漏了它。
+            importFolderAtPosition.typePrefix,
         ];
         const isAudioImportStep = (action: { type?: string }, step: string) =>
             audioImportPrefixes.some((prefix) => action.type === `${prefix}/${step}`);
@@ -6338,10 +6872,23 @@ export const {
     setScaleHighlightMode,
     upsertCustomScalePreset,
     removeCustomScalePreset,
+    upsertVibratoPreset,
+    removeVibratoPreset,
+    reorderVibratoPreset,
+    reorderBuiltinVibratoPreset,
+    setActiveVibratoPreset,
+    cycleActiveVibratoPreset,
+    setVibratoBaseline,
+    toggleVibratoPresetEnabled,
     toggleLockParamLines,
     setMetronomeConfig,
     setSilencePreview,
     setSilenceDetectOptions,
+    setSearchSettings,
+    setFileBrowserView,
+    setFolderImportOptions,
+    setFileBrowserFavorites,
+    setSearchSettingsDialogOpen,
     toggleQuickSearchAutoNormalize,
     setSaveUndoHistoryByDefault,
     setDefaultStretchAlgorithm,
@@ -6352,6 +6899,7 @@ export const {
     toggleAutoBackgroundRender,
     setRenderCacheSettings,
     setChannelImportPolicy,
+    setPenInputSettings,
     setVisibleReferenceRootTrackIds,
     toggleVisibleReferenceRootTrackId,
     setSelectedClip,

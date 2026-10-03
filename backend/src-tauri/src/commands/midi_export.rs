@@ -109,9 +109,16 @@ fn cents_to_bend_raw(cents_diff: f32) -> u16 {
 
 // ── Pitch 曲线 → MIDI 轨道事件（滑音合并 + 弯音轮） ──────────────────────────
 
-/// 弯音轮覆盖范围（半音数）。
+/// 单个候选音符允许的音高跨度（半音）。超过就断开当前候选。
+///
+/// 这是"滑音合并"的粒度，**不是**弯音轮量程（后者见 `PITCH_BEND_RANGE_CENTS`，
+/// 是 ±200 分 = ±2 半音）。两者曾被注释混为一谈，读的时候容易误解。
 const MAX_NOTE_SPAN_SEMITONES: f32 = 1.0;
 /// 最小音符时长（毫秒），短于此值的音符会被丢弃。
+///
+/// ⚠ 前端 `features/vibrato/vibratoPitch.ts::MIN_NOTE_MS` 是同一门槛的镜像
+/// （那边用它决定"加颤音时哪些连续有声段算一个音符"）。改动其一必须同步另一处，
+/// 否则"导出里有这个音、加颤音时却当它不存在"会成为很难归因的不一致。
 const MIN_NOTE_DURATION_MS: f64 = 100.0;
 /// 平滑窗口大小（帧数），用于减少逐帧抖动。
 const SMOOTH_WINDOW: usize = 3;
@@ -123,11 +130,12 @@ const STABILITY_FRAMES: usize = 8;
 /// 将一帧音高数据转为 MIDI 轨道事件。
 ///
 /// 算法（弯音轮滑音合并）：
-/// - 先用移动平均平滑曲线，减少逐帧抖动
-/// - 扫描有声音段，跟踪当前候选音符内的 min/max 音高
-/// - 当音高跨度超过 MAX_NOTE_SPAN_SEMITONES（4 半音）时，关闭当前候选并开始新候选
-/// - 当音高在某个半音附近稳定（|cents| < 15 且连续 ≥ STABILITY_FRAMES 帧）且该半音
-///   与当前候选的基准半音不同时，关闭候选并开始新候选——保证稳定音高处产生干净音符
+/// - 先用移动平均平滑曲线，减少逐帧抖动（只对正值邻居求平均，不跨越无声段）
+/// - 扫描有声音段（`finite && > 0`），跟踪当前候选音符内的 min/max 音高
+/// - 当音高跨度超过 MAX_NOTE_SPAN_SEMITONES 时，关闭当前候选并开始新候选
+/// - 当音高在某个半音附近稳定（|cents| < STABLE_CENTS_THRESHOLD 且连续
+///   ≥ STABILITY_FRAMES 帧）且该半音与当前候选的基准半音不同时，关闭候选并开始
+///   新候选——保证稳定音高处产生干净音符
 /// - 每个候选音符的基准半音 = round((min+max)/2)，弯音轮按帧跟随实际音高
 /// - 丢弃短于 MIN_NOTE_DURATION_MS 的音符
 fn pitch_curve_to_track_events(

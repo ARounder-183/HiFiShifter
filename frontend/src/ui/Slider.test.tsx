@@ -2,11 +2,11 @@
 /*
  * 滑块包装盒的契约：把 Radix 滑块头的**装饰溢出**收在自己的盒子里。
  *
- * 【为什么必须有】Radix 的滑块头是绝对定位的装饰：本体比轨道高（size 2 是 12 / 8），
- * 另有放大命中区（`::before`，滑块头 × 3）与焦点环（`::after`，滑块头 + 0.5 × 轨道）。
- * 这份溢出**不会**被任何内在尺寸计算算进去（CSS 的 intrinsic sizing 从不含
- * scrollable overflow），却会被祖先的滚动容器算成"可滚动" —— 表现是每个含滑块的
- * 对话框都恒定挂着一条**滚不动**的竖直滚动条。
+ * 【为什么必须有】Radix 的滑块头是绝对定位的装饰：可见部分比轨道高（size 2 是
+ * 16 / 8），另有放大命中区（`::before`，滑块头 × 3）与焦点环。这份溢出**不会**
+ * 被任何内在尺寸计算算进去（CSS 的 intrinsic sizing 从不含 scrollable overflow），
+ * 却会被祖先的滚动容器算成"可滚动" —— 表现是每个含滑块的对话框都恒定挂着一条
+ * **滚不动**的竖直滚动条。
  *
  * 用户报告的正是这个：参数编辑器右键菜单里"所有功能的弹窗都出现了竖直滚动条"。
  * 实测 8 个编辑对话框里，**有滑块的 7 个全部如此**，唯一没有滑块的「添加颤音」没有 ——
@@ -14,7 +14,9 @@
  *
  * 【为什么钉契约而不是现象】jsdom 量不出 `scrollHeight`（没有布局引擎），因此这里
  * 断言的是两件可静态核对的事：包装盒带 `.hs-slider-box`（`index.css` 里的裁切规则
- * 挂在它上面）、以及按密度算出的盒高足够容下焦点环。现象由浏览器里实测确认。
+ * 挂在它上面）、以及按密度算出的盒高足够容下可见滑块头。现象由浏览器里实测确认。
+ * 横向余量（可见滑块头在 0% / 100% 会越过轨道两端 2px）与内嵌焦点环同样在
+ * `index.css`，由 `designSystemGates.test.ts` 门禁钉住 —— jsdom 读不到样式表。
  */
 
 import { configureStore } from "@reduxjs/toolkit";
@@ -74,7 +76,7 @@ function renderSlider(density: "form" | "compact") {
     return box!;
 }
 
-test("包装盒带 hs-slider-box，且盒高容得下 size 2 的焦点环（16px）", () => {
+test("包装盒带 hs-slider-box，且盒高容得下 size 2 的可见滑块头（16px）", () => {
     const box = renderSlider("form");
     // 16 = 滑块头 12 + 0.5 × 轨道 8（Radix 的尺寸公式，见 Slider.tsx 的推导注释）。
     expect(box.style.minHeight).toBe("16px");

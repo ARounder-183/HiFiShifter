@@ -648,7 +648,7 @@ fn save_project_archive_to_zip_inner(
         for (source_path, zip_entry) in &source_to_entry {
             if !written_entries.insert(zip_entry.clone()) {
                 continue;
-            }            // 使用流式写入，避免将整个文件读入内存。
+            } // 使用流式写入，避免将整个文件读入内存。
             let mut src_file = fs::File::open(source_path).map_err(|e| e.to_string())?;
             // 保留媒体文件的修改时间等元数据（并允许 >4GiB 的大录音走 ZIP64）。
             zip.start_file(
@@ -804,9 +804,9 @@ pub(crate) fn save_project_to_path_inner(
     save_recent_projects(state);
 
     // 工程身份（缓存归属）+ "仅保存工程时落盘"模式的批量提交。
-    crate::render_cache::set_current_project_id(crate::render_cache::project_id_for_path(
-        Some(&project_path),
-    ));
+    crate::render_cache::set_current_project_id(crate::render_cache::project_id_for_path(Some(
+        &project_path,
+    )));
     crate::render_cache::flush_pending();
 
     Ok(get_timeline_state_from_ref(state))
@@ -915,9 +915,7 @@ pub(super) fn new_project(
         p.stretch_algorithm_override = None;
         p.hifigan_mel_stretch_override = None;
         // 新工程取全局默认（默认开启）；打开工程时总是尝试读取 UNDO 数据。
-        p.save_undo_history = state
-            .ui_settings_snapshot()
-            .save_undo_history_by_default;
+        p.save_undo_history = state.ui_settings_snapshot().save_undo_history_by_default;
     }
     // 记事本附件随工程一起清空：登记表归零、落点退回暂存目录、暂存目录清空。
     // 必须在上面的锁释放之后调用（reset 内部自己加锁）。
@@ -1079,11 +1077,7 @@ pub(super) fn open_project(
     // 【必须传工程自身的版本号】历史快照的版本迁移（v4→v5 的假立体声折叠）按
     // 工程版本执行，不能一律按当前版本 —— 否则恢复出的记录跳过迁移，第一次
     // 撤销会把未折叠的 take 写回时间线。
-    let _ = crate::commands::undo_history_file::load_undo_history(
-        state.inner(),
-        &path,
-        pf.version,
-    );
+    let _ = crate::commands::undo_history_file::load_undo_history(state.inner(), &path, pf.version);
     {
         let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
         p.name = project_name_from_path(&path);
@@ -1120,9 +1114,9 @@ pub(super) fn open_project(
     // 记事本附件：装载登记表（字节随工程文件一起读入，锁已释放）。
     crate::commands::notebook::bind_assets_on_open(state.inner(), pf.notebook_assets.clone());
     // 渲染缓存的工程归属：用于"仅清理当前工程的缓存"。
-    crate::render_cache::set_current_project_id(crate::render_cache::project_id_for_path(
-        Some(&project_path),
-    ));
+    crate::render_cache::set_current_project_id(crate::render_cache::project_id_for_path(Some(
+        &project_path,
+    )));
     // 防御性修复旧版本工程文件可能存在的“工程音阶与 Tempo Map 初始点分叉”
     // （早期撤销路径不回写工程记录，保存的文件可能带有不一致的 base_scale）：
     // 初始点即工程基准记录，加载后以它为准同步工程记录（含 BPM/拍号/音阶）。
@@ -1302,7 +1296,10 @@ pub(super) fn close_window(window: Window) -> serde_json::Value {
 /// `AppState::set_notes_markdown`），不依赖任何前端时序。记事本不在时间线
 /// 上，因此这里既不触碰音频引擎，也不返回时间线载荷 —— 只回工程元信息供
 /// 前端同步。
-pub(super) fn set_project_notes(state: State<'_, AppState>, notes_markdown: String) -> serde_json::Value {
+pub(super) fn set_project_notes(
+    state: State<'_, AppState>,
+    notes_markdown: String,
+) -> serde_json::Value {
     state.set_notes_markdown(notes_markdown);
     serde_json::json!({
         "ok": true,
@@ -1561,10 +1558,8 @@ mod tests {
             state.checkpoint_timeline(&tl, HistoryOp::AddClip);
         }
 
-        let dir = std::env::temp_dir().join(format!(
-            "hifishifter_zip_undo_test_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("hifishifter_zip_undo_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let zip_path = dir.join("My Song.zip");
         save_project_archive_to_zip_inner(&state, &zip_path).expect("archive save");

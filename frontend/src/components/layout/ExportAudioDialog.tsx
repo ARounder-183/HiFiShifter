@@ -7,6 +7,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } f
 import { Flex, TextField } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import { shallowEqual } from "react-redux";
+import type { RootState } from "../../app/store";
 import { exportAudioAdvanced } from "../../features/session/sessionSlice";
 import { fileBrowserApi } from "../../services/api/fileBrowser";
 import {
@@ -239,10 +241,25 @@ function buildTargetGroups(
         .filter((item): item is TargetGroup => Boolean(item));
 }
 
+/** ExportAudioDialog 实际消费的 session 字段子集（配合 shallowEqual 阻断播放轮询的重渲染）。
+ *  新增消费字段时必须同步补充到这里。 */
+const selectExportDialogSession = (state: RootState) => {
+    const session = state.session;
+    return {
+        busy: session.busy,
+        clips: session.clips,
+        projectSec: session.projectSec,
+        tracks: session.tracks,
+    };
+};
+
 export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps) {
     const { tf } = useI18n();
     const dispatch = useAppDispatch();
-    const session = useAppSelector((state) => state.session);
+    // 只选取本组件实际消费的字段子集并以 shallowEqual 比较：播放期间 playheadSec
+    // 每 ~33ms 变一次、session 对象引用随之失效，直接订阅 state.session 会让整个
+    // 导出对话框（常驻挂载、关闭时不卸载）以 ≥30Hz 空转重渲。
+    const session = useAppSelector(selectExportDialogSession, shallowEqual);
 
     const [mode, setMode] = useState<ExportMode>("project");
     const [rangeKind, setRangeKind] = useState<ExportRangeKind>("all");
@@ -1802,7 +1819,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                              * 表单的 flex 布局（AppForm 已是 flex 列），让它吃掉
                              * 剩余高度。
                              */}
-                            <div className="min-h-0 flex-1 overflow-y-auto rounded border border-qt-border bg-qt-base p-2">
+                            <div className="hs-scroll-gutter min-h-0 flex-1 overflow-y-auto rounded border border-qt-border bg-qt-base p-2">
                                 <span className="hs-type-label font-semibold">
                                     {tf("export_dialog_targets")}
                                 </span>

@@ -122,8 +122,7 @@ pub fn select_f1_f2(
     let f2 = **f2_cands
         .iter()
         .filter(|p| {
-            p.freq_hz - f1.freq_hz >= MIN_F1_F2_GAP_HZ
-                && prominence(p.freq_hz) >= PROMINENCE_MIN_DB
+            p.freq_hz - f1.freq_hz >= MIN_F1_F2_GAP_HZ && prominence(p.freq_hz) >= PROMINENCE_MIN_DB
         })
         .min_by(|a, b| {
             a.bandwidth_hz
@@ -304,8 +303,16 @@ mod tests {
         ];
         let coeffs = coeffs_from(&pairs);
         let cand = select_f1_f2(&fp(pairs), &coeffs, SR, 0.1).expect("应选出候选");
-        assert!((cand.f1.freq_hz - 800.0).abs() < 1.0, "got {}", cand.f1.freq_hz);
-        assert!((cand.f2.freq_hz - 1_200.0).abs() < 1.0, "got {}", cand.f2.freq_hz);
+        assert!(
+            (cand.f1.freq_hz - 800.0).abs() < 1.0,
+            "got {}",
+            cand.f1.freq_hz
+        );
+        assert!(
+            (cand.f2.freq_hz - 1_200.0).abs() < 1.0,
+            "got {}",
+            cand.f2.freq_hz
+        );
     }
 
     #[test]

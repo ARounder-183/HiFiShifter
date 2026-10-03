@@ -9,7 +9,7 @@ import {
     ACTION_TO_EDIT_OP,
     type KeybindingFocusDomain,
 } from "./focusRouting";
-import { getActiveSurface } from "../uiFocus/focusSurface";
+import { getActiveSurface, resolveSurfaceFromTarget } from "../uiFocus/focusSurface";
 import { consumeHoldRepeatKeyDown } from "./holdRepeat";
 import { isShortcutSuppressed } from "../../ui/shortcutScope";
 import {
@@ -30,6 +30,9 @@ const VIBRATO_DRAG_KEYBOARD_ACTIONS: ActionId[] = [
     "pianoRoll.vibratoDragAmplitudeDecrease",
     "pianoRoll.vibratoDragFrequencyIncrease",
     "pianoRoll.vibratoDragFrequencyDecrease",
+    // 预设切换同样只在拖拽期间有意义：全局派发器放行，交由参数编辑器本地监听。
+    "pianoRoll.vibratoPresetPrev",
+    "pianoRoll.vibratoPresetNext",
 ];
 /**
  * 判断当前焦点是否在可编辑元素上（输入框等），此时不拦截快捷键
@@ -99,6 +102,65 @@ function ownsArrowKeys(target: EventTarget | null): boolean {
 }
 
 /**
+ * 「本表面自己实现输入式快速跳转」的标记属性。
+ *
+ * 【为什么需要】全局绑定里有**无修饰的单键**（`d` 切参数拖拽方向、`s` 分割片段、
+ * `k` 节拍器、`enter` 停止播放、`space` 播放/暂停…共 15 个）。全局分发器挂在
+ * window 的**捕获**阶段，匹配成功后会 `stopPropagation()` —— 于是焦点在文件列表里
+ * 打字母时，按键被全局绑定先吃掉，列表根本收不到，"输入字母快速跳转"永远进不来；
+ * 按 Enter 也不会打开文件夹，而是停了播放。
+ *
+ * 这与 `ownsArrowKeys` 是同一个思路（**谁实现谁拥有**），只是覆盖的键不同：
+ * 方向键属于复合控件，而**可打印字符与激活键**属于实现了输入式跳转的列表。
+ * 用显式标记属性而不是 `role="listbox"`：Radix 的 Select 弹层也是 listbox，
+ * 把"拥有可打印字符"扩大过去会连带改动那些表面，超出本次要修的范围。
+ */
+const TYPEAHEAD_OWNER_SELECTOR = "[data-hs-typeahead]";
+
+/** 该元素是否位于一个"自己实现输入式跳转"的表面内。 */
+function ownsTypeAhead(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    if (!el?.closest) return false;
+    return el.closest(TYPEAHEAD_OWNER_SELECTOR) !== null;
+}
+
+/**
+ * 「输入式快速跳转」表面自己拥有的**非打印**按键。
+ *
+ * 【与 `FileBrowserPanel` 的键盘模型一一对应】面板实现了哪些键，这里就要列哪些：
+ * 分发器在捕获阶段命中后会 `stopPropagation()`，没列进来的键面板**永远收不到**
+ * （`Enter` 被 `playback.stop` 截走、`Backspace` 被 `edit.initialize` 截走、
+ * `Delete` 被 `clip.delete` 截走，都是这一条造成的）。新增面板快捷键时**两处一起改**；
+ * `useKeybindings.compositeKeys.test.tsx` 钉住了每一条。
+ *
+ * 只列"面板自己实现了语义"的键。没列到的（Ctrl+S 保存、Ctrl+Z 撤销…）继续走全局 ——
+ * 面板没有对应动作，让它们失效反而是新问题。
+ *
+ * 可打印字符（含空格）不在此表：由 `e.key.length === 1` 统一覆盖。
+ */
+const TYPEAHEAD_OWNED_KEYS = new Set([
+    "enter", // 打开 / 进入目录
+    "backspace", // 上级目录
+    "delete", // 删除所选
+    "escape", // 取消选择
+]);
+
+/**
+ * 该按键是否归"输入式快速跳转"表面所有。
+ *
+ * 未修饰时：可打印字符（打字跳转，空格也在内）+ 上表。
+ * 带修饰时：**只让出面板实现了的那三个组合**（全选 / 复制路径 / 新建文件夹），
+ * 其余组合（Ctrl+S、Ctrl+Z、Ctrl+Shift+S…）照常走全局。
+ */
+function isOwnedByTypeAhead(e: KeyboardEvent, key: string): boolean {
+    if (e.altKey || e.metaKey) return false;
+    if (!e.ctrlKey) return e.key.length === 1 || TYPEAHEAD_OWNED_KEYS.has(key);
+    const letter = e.key.toLowerCase();
+    if (letter === "a" || letter === "c") return !e.shiftKey;
+    return letter === "n" && e.shiftKey;
+}
+
+/**
  * 弹出式复合表面（菜单 / 下拉列表）当前是否**打开**。
  *
  * 【为什么不能只看焦点】右键菜单打开时**焦点并不在菜单里** —— 它还在被右键
@@ -116,7 +178,13 @@ function hasOpenPopupSurface(): boolean {
  * 可聚焦元素上，曾导致复制/剪切/粘贴被路由到错误的编辑器。
  */
 function computeFocusDomain(): KeybindingFocusDomain {
-    return getActiveSurface();
+    const surface = getActiveSurface();
+    /*
+     * `fileBrowser` 登记在活动表面里，只为回答"用户此刻在哪个表面工作"（见下面
+     * 输入式跳转的归属判断）。它没有编辑动作，因此对**编辑 op 的焦点域路由**而言
+     * 等同"无域" —— 否则这里会把一个路由不认识的域交给 `resolveActionByFocus`。
+     */
+    return surface === "fileBrowser" ? null : surface;
 }
 
 export type KeybindingActionHandler = (actionId: ActionId) => void;
@@ -188,6 +256,31 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
                     // 右键菜单打开时焦点仍在触发元素上，只能靠"表面是否打开"判断。
                     hasOpenPopupSurface();
                 if (owned) return;
+            }
+
+            /*
+             * 输入式快速跳转：标记了 `data-hs-typeahead` 的列表拥有**它自己实现了的**
+             * 那些键（见 `TYPEAHEAD_OWNER_SELECTOR` / `isOwnedByTypeAhead`）。
+             *
+             * 必须在 `resolveActionByFocus` 之前返回：那条路径会 `stopPropagation()`，
+             * 列表就再也收不到这个按键了 —— 打字跳转、Enter 进入、Delete 删除全部失效。
+             *
+             * 【为什么还要比对"活动表面"】时间轴与参数编辑器刻意在 pointerdown 里
+             * `preventDefault()` 自管焦点，点击它们之后 **DOM 焦点会滞留在上一次聚焦的
+             * 元素上**（例如文件列表里刚点过的行）。此时 keydown 的 target 仍是那一行，
+             * 只看 target/activeElement 会把时间轴的 `s`（分割）、`d`、Enter 抢到文件
+             * 列表里。`getActiveSurface()` 记录的是"用户最后一次交互落在哪个表面"，
+             * 两者一致才说明用户此刻确实在这个列表里工作。
+             */
+            if (ownsTypeAhead(e.target) || ownsTypeAhead(document.activeElement)) {
+                const targetSurface = resolveSurfaceFromTarget(e.target);
+                if (
+                    targetSurface !== null &&
+                    targetSurface === getActiveSurface() &&
+                    isOwnedByTypeAhead(e, key)
+                ) {
+                    return;
+                }
             }
 
             // 直线/颤音拖拽期间，命中振幅/频率方向键时，交给参数编辑器本地监听处理。

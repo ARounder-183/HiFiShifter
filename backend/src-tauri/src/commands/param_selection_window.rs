@@ -68,7 +68,10 @@ impl ParamSelectionWindow {
             }
         }
         let origin = merged.first().map(|(start, _)| *start);
-        Self { origin, ranges: merged }
+        Self {
+            origin,
+            ranges: merged,
+        }
     }
 
     /// 偏移基准（首段起点）；None = 不参与选区对齐。
@@ -149,7 +152,8 @@ mod tests {
 
     #[test]
     fn overlapping_and_touching_ranges_are_merged() {
-        let window = ParamSelectionWindow::new(ranges(&[(200, 50), (0, 100), (100, 50)]), None, None);
+        let window =
+            ParamSelectionWindow::new(ranges(&[(200, 50), (0, 100), (100, 50)]), None, None);
         assert_eq!(window.origin(), Some(0));
         // [0,150) 与 [200,250) 各自独立；相邻的 [0,100) + [100,50) 合并
         assert!(window.allows(149));

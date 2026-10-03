@@ -24,6 +24,12 @@ interface EditContextMenuProps {
     onSetPitch?: () => void;
     onAverage?: () => void;
     onSmooth?: () => void;
+    /**
+     * 打开「添加颤音」弹窗（`Ctrl+B`）：在弹窗里选预设、调旋钮、看套用预览。
+     *
+     * 【为什么菜单里不再直接铺预设列表】预设的选择与微调是弹窗的事 —— 那里有
+     * 波形缩略图与套用预览，菜单行给不了。菜单只保留这一个入口。
+     */
     onAddVibrato?: () => void;
     onQuantize?: () => void;
     onMeanQuantize?: () => void;
@@ -159,6 +165,8 @@ export function EditContextMenu({
             shortcut: smoothShortcut,
             onSelect: () => onSmooth?.(),
         },
+        // 颤音：唯一入口是弹窗 —— 选预设、微调、看套用预览都在那里。
+        // 「从选区提取预设」也收在弹窗页脚（它作用于当前选区，与预设选择相邻）。
         {
             key: "addVibrato",
             label: tf("menu_add_vibrato"),
@@ -169,6 +177,7 @@ export function EditContextMenu({
             key: "quantize",
             label: tf("menu_quantize"),
             shortcut: quantizeShortcut,
+            separatorBefore: true,
             onSelect: () => onQuantize?.(),
         },
         {

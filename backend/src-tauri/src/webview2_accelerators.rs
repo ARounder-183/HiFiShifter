@@ -14,7 +14,7 @@
 //! 全局 keydown 路由（useKeybindings）正常处理。
 
 use tauri::WebviewWindow;
-use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2Settings3};
+use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
 use windows_core_webview2::Interface;
 
 /// 禁用主窗口 WebView2 的浏览器级快捷键。失败仅记录警告，不影响启动。

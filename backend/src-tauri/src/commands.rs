@@ -28,6 +28,8 @@ mod midi;
 #[path = "commands/midi_export.rs"]
 mod midi_export;
 pub(crate) use midi_export::TempoTickConverter;
+#[path = "commands/formant.rs"]
+mod formant;
 #[path = "commands/notebook.rs"]
 mod notebook;
 #[path = "commands/onnx_status.rs"]
@@ -40,12 +42,8 @@ mod params;
 mod pitch_cache;
 #[path = "commands/pitch_progress.rs"]
 mod pitch_progress;
-#[path = "commands/formant.rs"]
-mod formant;
 #[path = "commands/playback.rs"]
 pub(crate) mod playback;
-#[path = "commands/silence.rs"]
-mod silence;
 #[path = "commands/processor_caps.rs"]
 mod processor_caps;
 #[path = "commands/project.rs"]
@@ -62,6 +60,8 @@ mod recording;
 pub(crate) mod render_cancel;
 #[path = "commands/render_summary.rs"]
 pub(crate) mod render_summary;
+#[path = "commands/silence.rs"]
+mod silence;
 #[path = "commands/synth.rs"]
 mod synth;
 #[path = "commands/timeline.rs"]
@@ -254,10 +254,7 @@ pub fn open_project(
 
 /// 写入记事本内容并登记为一步可撤销操作（连续写入在后端按历史结构合并）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn set_project_notes(
-    state: State<'_, AppState>,
-    notes_markdown: String,
-) -> serde_json::Value {
+pub fn set_project_notes(state: State<'_, AppState>, notes_markdown: String) -> serde_json::Value {
     project::set_project_notes(state, notes_markdown)
 }
 
@@ -371,7 +368,6 @@ pub fn notebook_save_asset_as(
 ) -> serde_json::Value {
     notebook::save_asset_as(state, asset_id, suggested_name)
 }
-
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn save_project_as(
@@ -811,6 +807,29 @@ pub fn add_track(
     index: Option<usize>,
 ) -> crate::models::TimelineStatePayload {
     timeline::add_track(state, name, parent_track_id, index)
+}
+
+/// 批量建出一整棵轨道子树（目录导入的"为每个文件夹创建轨道组"）。
+///
+/// 【为什么返回 `Value` 而不是 `TimelineStatePayload`】除了时间轴快照，还要回传
+/// 新建轨道的 id —— 前端要把每个媒体文件导到对应的子轨道上，而 `add_track` 系列
+/// 向来不回传 id（前端只能靠"前后 id 集合求差"反推，那在批量场景里是 O(N²)）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn add_track_tree(
+    state: State<'_, AppState>,
+    nodes: Vec<crate::state::TrackTreeNode>,
+    insert_index: Option<usize>,
+) -> serde_json::Value {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::AddTrack);
+    let created_track_ids = tl.add_track_tree(&nodes, insert_index);
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    serde_json::json!({
+        "timeline": payload,
+        "createdTrackIds": created_track_ids,
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1526,7 +1545,14 @@ pub fn get_param_frames(
     with_sentinel: Option<bool>,
 ) -> crate::models::ParamFramesPayload {
     params::get_param_frames(
-        state, track_id, param, start_frame, frame_count, stride, binary, with_sentinel,
+        state,
+        track_id,
+        param,
+        start_frame,
+        frame_count,
+        stride,
+        binary,
+        with_sentinel,
     )
 }
 
@@ -1857,12 +1883,7 @@ pub async fn export_diagnostics(
 /// 的 `<a download>` 被拦截，见 `commands/json_export.rs` 的模块说明）。
 #[tauri::command(rename_all = "camelCase")]
 pub fn export_layout_json(json: String) -> serde_json::Value {
-    json_export::export_json_file(
-        json,
-        "hifishifter-layout.json",
-        "Export layout",
-        "layout",
-    )
+    json_export::export_json_file(json, "hifishifter-layout.json", "Export layout", "layout")
 }
 
 /// 视图 → 外观设置 → 「导出」：把当前外观主题存成 JSON。
@@ -1880,6 +1901,20 @@ pub fn export_theme_json(json: String, default_file_name: String) -> serde_json:
 }
 
 /// 前端把 invoke 失败 / 全局异常回传到后端统一日志（fire-and-forget）。
+/// 颤音预设管理器 → 「导出...」：把当前预设存成 JSON。
+///
+/// 与布局 / 主题导出共用 `json_export::export_json_file` —— 命令名是 invoke 的
+/// 稳定契约，因此**每处一个命令**（标题与日志前缀随业务变化），实现只有一份。
+#[tauri::command(rename_all = "camelCase")]
+pub fn export_vibrato_presets_json(json: String, default_file_name: String) -> serde_json::Value {
+    let file_name = if default_file_name.trim().is_empty() {
+        "hifishifter-vibrato-preset.json".to_string()
+    } else {
+        default_file_name
+    };
+    json_export::export_json_file(json, &file_name, "Export vibrato preset", "vibrato_presets")
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn log_frontend_error(message: String, detail: Option<String>) -> serde_json::Value {
     diagnostics::log_frontend_error(message, detail)
@@ -1941,9 +1976,97 @@ pub fn get_pitch_cache_stats(state: State<'_, AppState>) -> pitch_cache::PitchCa
 
 // ===================== file_browser =====================
 
+/// 列出目录内容。
+///
+/// 【为什么是 async + spawn_blocking】读目录要逐项取元数据，成本与**条目数**成正比：
+/// 实测一个两万文件的目录约需 400ms。同步命令在 Tauri 里跑在主线程上，那 400ms
+/// 就是整个应用的卡死（不只是面板）。与 `search_files_recursive` 同一条理由、
+/// 同一种做法。
 #[tauri::command(rename_all = "camelCase")]
-pub fn list_directory(dir_path: String) -> Result<Vec<file_browser::FileEntry>, String> {
-    file_browser::list_directory(dir_path)
+pub async fn list_directory(
+    dir_path: String,
+    options: Option<file_browser::ListDirectoryOptions>,
+) -> Result<Vec<file_browser::FileEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || file_browser::list_directory(dir_path, options))
+        .await
+        .unwrap_or_else(|error| Err(format!("list directory task failed: {error}")))
+}
+
+/// 批量查询路径的存在性与类型（拖放时判断"拖进来的是不是目录"）。
+///
+/// 【为什么是 async + spawn_blocking】`stat` 在慢盘 / 网络盘上可能数十毫秒一条，
+/// 一次拖入二十项就是数百毫秒。同步命令会把这算在应用主线程上。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn stat_paths(paths: Vec<String>) -> Vec<file_browser::PathStat> {
+    tauri::async_runtime::spawn_blocking(move || file_browser::stat_paths(paths))
+        .await
+        .unwrap_or_default()
+}
+
+/// 把一个或一批目录展开成"按目录分组的媒体文件清单"。
+///
+/// 【为什么是 async + spawn_blocking】递归枚举一个大目录树要遍历成千上万个条目；
+/// 与 `list_directory` 同一条理由 —— 同步命令跑在主线程上就是整个应用卡死。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn collect_folder_media(
+    dirs: Vec<String>,
+    options: Option<file_browser::CollectFolderMediaOptions>,
+) -> file_browser::FolderMediaScan {
+    tauri::async_runtime::spawn_blocking(move || file_browser::collect_folder_media(dirs, options))
+        .await
+        .unwrap_or_else(|_| file_browser::FolderMediaScan {
+            groups: Vec::new(),
+            total_files: 0,
+            truncated: false,
+            rejected: Vec::new(),
+        })
+}
+
+/// 在 `parentDir` 下新建目录，返回新目录的绝对路径。
+#[tauri::command(rename_all = "camelCase")]
+pub fn create_directory(
+    state: State<'_, AppState>,
+    parent_dir: String,
+    name: String,
+) -> Result<String, String> {
+    file_browser::create_directory(
+        parent_dir,
+        name,
+        state.config_dir.get().map(|p| p.as_path()),
+    )
+}
+
+/// 把 `path` 重命名为同目录下的 `newName`，返回新路径。
+#[tauri::command(rename_all = "camelCase")]
+pub fn rename_path(
+    state: State<'_, AppState>,
+    path: String,
+    new_name: String,
+) -> Result<String, String> {
+    file_browser::rename_path(path, new_name, state.config_dir.get().map(|p| p.as_path()))
+}
+
+/// 把一批路径移入回收站（`permanent` 为真时永久删除）。
+///
+/// 【为什么是 async + spawn_blocking】移入回收站要走系统 shell 接口，删一个大目录
+/// 可能耗时数秒；同步命令会把这数秒算在应用主线程上。
+///
+/// 【为什么返回 `Result<Value, String>` 而不是裸 `Value`】Tauri 要求 async 命令必须
+/// 返回 `Result`。逐条失败仍放在 JSON 里（`ok:false` + `error`）—— 那属于"命令执行
+/// 成功但结果有失败项"，不是命令本身失败；只有线程池 join 失败才走 `Err`。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn delete_paths(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    permanent: bool,
+) -> Result<serde_json::Value, String> {
+    // `State` 不能跨线程，先把配置目录取成拥有所有权的 PathBuf。
+    let config_dir = state.config_dir.get().cloned();
+    tauri::async_runtime::spawn_blocking(move || {
+        file_browser::delete_paths(paths, permanent, config_dir.as_deref())
+    })
+    .await
+    .map_err(|error| format!("delete task failed: {error}"))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1974,13 +2097,44 @@ pub fn read_audio_preview(
 pub async fn search_files_recursive(
     dir_path: String,
     query: String,
+    options: Option<crate::search::SearchOptions>,
 ) -> Result<Vec<file_browser::FileEntry>, String> {
     // 深层目录树的递归遍历可能耗时较长，放到阻塞线程池避免冻结主线程。
     tauri::async_runtime::spawn_blocking(move || {
-        file_browser::search_files_recursive(dir_path, query)
+        file_browser::search_files_recursive(dir_path, query, options)
     })
     .await
     .unwrap_or_else(|error| Err(format!("search task failed: {error}")))
+}
+
+/// 在系统文件管理器中定位一批路径（文件多选高亮；全是目录时打开第一个）。
+///
+/// 与 `reveal_export_paths` 共用同一实现 —— 后者是"导出产物"场景的入口，本命令是
+/// 文件浏览器右键菜单的入口。名字不同是因为调用点想读起来是对的，行为必须一致。
+#[tauri::command(rename_all = "camelCase")]
+pub fn reveal_paths_in_file_manager(
+    app: tauri::AppHandle,
+    paths: Vec<String>,
+) -> serde_json::Value {
+    common::reveal_paths_in_file_manager(&app, paths, "no paths given")
+}
+
+/// 用系统默认程序打开一个路径。
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_path_with_default_app(app: tauri::AppHandle, path: String) -> serde_json::Value {
+    common::open_path_with_default_app(&app, &path)
+}
+
+/// 批量把文本转写成可检索的拉丁形态（拼音 / 罗马字 / 谚文分解）。
+///
+/// 前端在**建索引时**调用一次（快捷键面板的动作名、字体名），不在每次击键的
+/// 路径上 —— 击键仍然走前端纯 JS 的索引匹配，保持即时性。
+#[tauri::command(rename_all = "camelCase")]
+pub fn transliterate(
+    texts: Vec<String>,
+    options: Option<crate::search::SearchOptions>,
+) -> Vec<crate::search::TranslitResult> {
+    crate::search::transliterate_batch(&texts, &options.unwrap_or_default())
 }
 
 // ===================== vocalshifter =====================

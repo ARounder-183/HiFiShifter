@@ -1,5 +1,6 @@
 use crate::project::CustomScale;
 use crate::time_stretch::UserStretchAlgorithm;
+use crate::vibrato::VibratoPreset;
 use std::fs;
 use std::path::Path;
 
@@ -238,6 +239,171 @@ fn default_silence_action() -> String {
 fn default_true_value() -> bool {
     true
 }
+fn default_false_value() -> bool {
+    false
+}
+fn default_search_mode() -> String {
+    "smart".to_string()
+}
+
+/// 搜索匹配设置（持久化到 `app_config.json` 的 `ui.search`）。
+///
+/// 【为什么「总开关 + 模式」是两个字段】用户说「我想关掉」和「我想收紧」是两件事。
+/// 合成一个三态枚举会让两者互相干扰：把宽严从 fuzzy 调回 smart 会顺带把功能打开，
+/// 而用户上次明明是关掉的。分开之后，总开关负责「这个功能存不存在」，模式负责
+/// 「匹配得多宽」。
+///
+/// 【为什么 mode 用字符串而不是枚举】手改坏的配置值（`"offf"`）必须能被规范化回
+/// 默认；枚举反序列化失败会让**整份** `UiSettings` 回退成默认值 —— 用户的其他设置
+/// 会被一起清掉。取值合法性由前端收口（与 `param_axis_units` 同一策略）。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchSettings {
+    /// 转写匹配总开关（默认开启）。关闭等价于 `mode = "off"`。
+    #[serde(default = "default_true_value")]
+    pub translit: bool,
+    /// `"off"` / `"smart"`（默认）/ `"fuzzy"`。
+    #[serde(default = "default_search_mode")]
+    pub mode: String,
+    /// 多音字展开（默认开启）。
+    #[serde(default = "default_true_value")]
+    pub heteronym: bool,
+    /// 日文长音宽松匹配（默认开启）：`bokaru` 也命中「ボーカル」。
+    #[serde(default = "default_true_value")]
+    pub japanese_long_vowel: bool,
+    /// 韩文初声匹配（默认开启）：`hg` 也命中「한국어」。
+    #[serde(default = "default_true_value")]
+    pub korean_choseong: bool,
+    /// 结果里显示「为什么命中」（默认关闭：纯展示偏好，列表默认保持紧凑）。
+    #[serde(default = "default_false_value")]
+    pub show_match_reason: bool,
+}
+
+impl Default for SearchSettings {
+    fn default() -> Self {
+        Self {
+            translit: true,
+            mode: default_search_mode(),
+            heteronym: true,
+            japanese_long_vowel: true,
+            korean_choseong: true,
+            show_match_reason: false,
+        }
+    }
+}
+
+/// 文件浏览器的视图选项。
+///
+/// 字段与前端 `features/fileBrowser/fileBrowserViewOptions.ts` 一一对应（camelCase
+/// 序列化后同名）。取值合法性由前端的 `normalizeFileBrowserViewOptions` 收口 ——
+/// 后端只做透传存储，不重复校验枚举（否则"支持哪些取值"这个业务知识要在两处各写
+/// 一遍，正是 `param_axis_units` 注释里说明过的理由）。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBrowserViewSettings {
+    /// 行密度：`"compact"`（默认）/ `"comfortable"`。
+    #[serde(default = "default_file_browser_density")]
+    pub density: String,
+    /// 排序依据：`"name"`（默认）/ `"date"` / `"size"`。
+    #[serde(default = "default_file_browser_sort_mode")]
+    pub sort_mode: String,
+    /// 是否降序。默认 false —— 与前端"名称升序"的自然方向一致；切到日期/大小时
+    /// 由前端改成 true（`DEFAULT_SORT_DESCENDING`）。
+    #[serde(default)]
+    pub sort_descending: bool,
+    /// 目录是否始终排在文件之前（默认是）。
+    #[serde(default = "default_true_value")]
+    pub folders_first: bool,
+    /// 是否显示隐藏文件（默认否）。
+    #[serde(default = "default_false_value")]
+    pub show_hidden_files: bool,
+    /// 详情列：`"size"`（默认）/ `"date"` / `"none"`。
+    #[serde(default = "default_file_browser_details_column")]
+    pub details_column: String,
+    /// 非搜索模式下是否也显示文件所在目录（默认否）。
+    #[serde(default = "default_false_value")]
+    pub show_path_hint: bool,
+    /// 仅显示可导入的媒体文件（默认否）。
+    #[serde(default = "default_false_value")]
+    pub media_only: bool,
+    /// 点击（左键单击 / 键盘回车）媒体文件时试听（默认是）。
+    #[serde(default = "default_true_value")]
+    pub preview_on_click: bool,
+    /// 键盘光标移动时自动试听（默认否）。
+    #[serde(default = "default_false_value")]
+    pub preview_on_navigate: bool,
+    /// 显示底部状态行（默认是）。
+    #[serde(default = "default_true_value")]
+    pub status_bar_visible: bool,
+}
+
+/// 目录导入的选项。
+///
+/// 字段与前端 `features/fileBrowser/folderImportOptions.ts` 一一对应（camelCase
+/// 序列化后同名）。与 `FileBrowserViewSettings` 同样的分工：后端只做透传存储，
+/// 取值合法性由前端的 `normalizeFolderImportOptions` 收口。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderImportSettings {
+    /// 排布方式：`"across-time"` / `"across-tracks"`（默认）/ `"as-takes"`。
+    #[serde(default = "default_folder_import_mode")]
+    pub mode: String,
+    /// 递归导入子目录中的文件（默认否，与 REAPER 的默认一致）。
+    #[serde(default = "default_false_value")]
+    pub recursive: bool,
+    /// 为每个文件夹创建轨道组（默认是；仅 `across-tracks` 时有效）。
+    #[serde(default = "default_true_value")]
+    pub create_folder_tracks: bool,
+}
+
+fn default_folder_import_mode() -> String {
+    // 与前端 `DEFAULT_FOLDER_IMPORT_OPTIONS.mode` 一致：它是唯一能让
+    // `createFolderTracks` 生效的模式，默认值之间必须自洽。
+    "across-tracks".to_string()
+}
+
+/// 手写 `Default` 而不是派生：派生会给 `mode` 一个空串、给 `create_folder_tracks`
+/// 一个 `false`，与前端默认值不一致 —— 配置里缺这一项时（老用户首次升级），
+/// 后端读出来的默认值就成了"排布方式未知、不建轨道组"。
+impl Default for FolderImportSettings {
+    fn default() -> Self {
+        Self {
+            mode: default_folder_import_mode(),
+            recursive: false,
+            create_folder_tracks: true,
+        }
+    }
+}
+
+fn default_file_browser_density() -> String {
+    "compact".to_string()
+}
+
+fn default_file_browser_sort_mode() -> String {
+    "name".to_string()
+}
+
+fn default_file_browser_details_column() -> String {
+    "size".to_string()
+}
+
+impl Default for FileBrowserViewSettings {
+    fn default() -> Self {
+        Self {
+            density: default_file_browser_density(),
+            sort_mode: default_file_browser_sort_mode(),
+            sort_descending: false,
+            folders_first: true,
+            show_hidden_files: false,
+            details_column: default_file_browser_details_column(),
+            show_path_hint: false,
+            media_only: false,
+            preview_on_click: true,
+            preview_on_navigate: false,
+            status_bar_visible: true,
+        }
+    }
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -335,6 +501,35 @@ pub struct UiSettings {
     #[serde(default)]
     pub silence_detect_options: SilenceDetectSettings,
 
+    /// 搜索匹配设置（转写 / 宽严 / 各语言子开关）。
+    ///
+    /// 【为什么必须在这里有字段】`save_ui_settings` 是「读-改-写整个配置文件」：
+    /// 它把合并后的 JSON 反序列化成 `UiSettings` 再落盘。若本结构没有这个字段，
+    /// 前端每次保存都会把 `ui.search` **静默丢弃** —— 用户改完设置重开就回到默认。
+    #[serde(default)]
+    pub search: SearchSettings,
+
+    /// 文件浏览器的视图选项（排序 / 密度 / 隐藏文件 / 详情列 …）。
+    ///
+    /// 【为什么必须在这里有字段】同 `search`：`save_ui_settings` 是「读-改-写整个
+    /// 配置文件」，本结构缺字段时前端每次保存都会把它**静默丢弃**。
+    #[serde(default)]
+    pub file_browser: FileBrowserViewSettings,
+
+    /// 文件浏览器的常用位置（用户固定的目录，按固定顺序）。
+    ///
+    /// 单独一个字段而不是塞进 `file_browser`：那是"视图怎么画"，这是"常去哪里"，
+    /// 两者的变更原因与校验规则都不同（前者是受白名单约束的枚举，后者是任意路径）。
+    #[serde(default)]
+    pub file_browser_favorites: Vec<String>,
+
+    /// 目录导入的选项（排布方式 / 递归 / 建轨道组）。
+    ///
+    /// 【为什么必须在这里有字段】同 `file_browser`：`save_ui_settings` 是「读-改-写
+    /// 整个配置文件」，本结构缺字段时前端每次保存都会把它**静默丢弃**。
+    #[serde(default)]
+    pub folder_import: FolderImportSettings,
+
     #[serde(default)]
     pub quick_search_auto_normalize: bool,
     /// 新建工程默认是否保存 UNDO 操作记录数据（工程级开关的初值）。
@@ -364,6 +559,28 @@ pub struct UiSettings {
     pub scale_highlight_mode: String,
     #[serde(default)]
     pub custom_scale_presets: Vec<CustomScale>,
+    /// 用户自定义颤音预设。
+    ///
+    /// 系统预设（`builtin.*` 前缀）只存在于前端代码，不会写进这里 —— 因此这份
+    /// 列表只是"用户自己捏出来的那些"。形状、取值范围与默认值由前端收口，
+    /// 后端只做透传存储（与 `custom_scale_presets` 同一约定）。
+    #[serde(default)]
+    pub vibrato_presets: Vec<VibratoPreset>,
+    /// 当前活动颤音预设的 id（`builtin.natural` 一类的系统预设 id 也合法）。
+    ///
+    /// 存 id 而不是"用户列表里的下标"：预设被删除或重排后，下标会静默指向
+    /// 另一个预设；而 id 失效只会回落到出厂默认（见前端
+    /// `resolveActiveVibratoPreset`），不存在"指向了别的音色"这种错法。
+    #[serde(default)]
+    pub active_vibrato_preset_id: Option<String>,
+    /// 被停用的颤音预设 id（系统与用户预设共用一份名单）。
+    ///
+    /// 只影响前端的工具栏列表与拖拽中的循环切换，后端同样只做透传存储。
+    #[serde(default)]
+    pub disabled_vibrato_preset_ids: Vec<String>,
+    /// 系统预设的自定义顺序（id 列表）。空 = 出厂顺序。
+    #[serde(default)]
+    pub builtin_vibrato_preset_order: Vec<String>,
     #[serde(default)]
     pub ignore_grouping: bool,
     /// 波纹编辑（自动跟进）模式：off / track / all（对应 REAPER 的 Ripple Editing）。
@@ -485,6 +702,19 @@ pub struct UiSettings {
     /// 否则"只保存行为选项"的部分写入会把 `layout` 子键整个清掉。
     #[serde(default)]
     pub dock: serde_json::Value,
+    /// 指针设备（触控板 / 数位板 / 触控笔 / 触摸）的输入偏好。
+    ///
+    /// 与 `notebook` / `dock` 同理：**后端只做透传存储**，字段语义、取值范围与
+    /// 默认值都在前端收口（`services/api/settings.ts` 的
+    /// `DEFAULT_PEN_INPUT_SETTINGS` 与 `normalizePenInputSettings`）。
+    ///
+    /// 用 `serde_json::Value` 而非具体结构体：这是一批纯前端手感参数，未来会随
+    /// 设备测试反复增删字段，强类型会让每次微调都触发后端改动与迁移代码。
+    ///
+    /// 注意：`"penInput"` 同样必须在 `commands/ui_settings.rs` 的深度合并白名单里，
+    /// 否则"只改压感一项"的部分写入会把其余子键整个清掉。
+    #[serde(default)]
+    pub pen_input: serde_json::Value,
 }
 
 /// "为新的音频块启用循环"的进程级生效值（默认 true）。
@@ -522,9 +752,8 @@ pub fn set_sync_edits_across_takes(enabled: bool) {
 /// 与 `LOOP_NEW_CLIPS_DEFAULT` / `SYNC_EDITS_ACROSS_TAKES` 同款：由
 /// `commands::ui_settings` 在加载与保存设置时同步；供 `TimelineState::add_clip`、
 /// 各格式 importer、旧工程迁移等无法访问 `AppState` 的创建点读取。
-static CHANNEL_IMPORT_POLICY: std::sync::OnceLock<
-    std::sync::RwLock<ChannelImportPolicy>,
-> = std::sync::OnceLock::new();
+static CHANNEL_IMPORT_POLICY: std::sync::OnceLock<std::sync::RwLock<ChannelImportPolicy>> =
+    std::sync::OnceLock::new();
 
 fn channel_import_policy_cell() -> &'static std::sync::RwLock<ChannelImportPolicy> {
     CHANNEL_IMPORT_POLICY.get_or_init(|| std::sync::RwLock::new(ChannelImportPolicy::default()))
@@ -1431,6 +1660,10 @@ impl Default for UiSettings {
             metronome_accent: true,
             metronome_sound: default_metronome_sound(),
             silence_detect_options: SilenceDetectSettings::default(),
+            search: SearchSettings::default(),
+            file_browser: FileBrowserViewSettings::default(),
+            file_browser_favorites: Vec::new(),
+            folder_import: FolderImportSettings::default(),
             quick_search_auto_normalize: false,
             save_undo_history_by_default: false,
             visible_reference_root_track_ids: Vec::new(),
@@ -1443,6 +1676,11 @@ impl Default for UiSettings {
             smoothness_percent: 0,
             scale_highlight_mode: default_scale_highlight_mode(),
             custom_scale_presets: Vec::new(),
+            vibrato_presets: Vec::new(),
+            // None = "还没选过"，由前端回落到出厂默认（直线）。
+            active_vibrato_preset_id: None,
+            disabled_vibrato_preset_ids: Vec::new(),
+            builtin_vibrato_preset_order: Vec::new(),
             ignore_grouping: false,
             ripple_mode: default_ripple_mode(),
 
@@ -1472,6 +1710,7 @@ impl Default for UiSettings {
             channel_import_policy: ChannelImportPolicy::default(),
             notebook: serde_json::Value::Null,
             dock: serde_json::Value::Null,
+            pen_input: serde_json::Value::Null,
         }
     }
 }
@@ -1501,8 +1740,8 @@ impl UiSettings {
         // 在此迁移到等价预设：exponential→lateSlight、logarithmic→convexSlight、
         // sine/scurve→sSlight、linear→linear；其余未知值回退默认 "keep"。
         self.split_transition_curve = match self.split_transition_curve.as_str() {
-            "keep" | "linear" | "convexSlight" | "lateSlight" | "convexSharp"
-            | "lateSharp" | "sSlight" | "sSharp" => self.split_transition_curve.clone(),
+            "keep" | "linear" | "convexSlight" | "lateSlight" | "convexSharp" | "lateSharp"
+            | "sSlight" | "sSharp" => self.split_transition_curve.clone(),
             "exponential" => "lateSlight".to_string(),
             "logarithmic" => "convexSlight".to_string(),
             "sine" | "scurve" => "sSlight".to_string(),
@@ -1666,7 +1905,10 @@ mod tests {
             }
         }))
         .expect("legacy ui settings must parse");
-        assert_eq!(ui.channel_import_policy.tolerance_version, 0, "旧配置无标记");
+        assert_eq!(
+            ui.channel_import_policy.tolerance_version, 0,
+            "旧配置无标记"
+        );
         let mut cfg = super::AppConfig::default();
         cfg.ui = ui;
         // `migrated` 是私有的读取边界钩子，这里直接调策略层的迁移（同一副作用）。
@@ -1680,7 +1922,8 @@ mod tests {
 
     /// 出厂默认本身就是"不设时长下限"。
     #[test]
-    fn factory_default_has_no_duration_floor() {        let s = super::RenderCacheSettings::default();
+    fn factory_default_has_no_duration_floor() {
+        let s = super::RenderCacheSettings::default();
         assert_eq!(s.min_clip_secs, 0.0);
         assert_eq!(s.min_entry_kb, 4);
         assert_eq!(s.min_entry_bytes(), 4 * 1024);
@@ -1836,6 +2079,36 @@ mod tests {
         assert!(read.window_sec <= 5.0, "写入时即规范化");
         // 还原，避免影响同进程其它测试。
         super::set_channel_import_policy(&original);
+    }
+
+    #[test]
+    fn search_settings_default_to_smart_and_all_translit_on() {
+        let settings = UiSettings::default();
+        assert!(settings.search.translit);
+        assert_eq!(settings.search.mode, "smart");
+        assert!(settings.search.heteronym);
+        assert!(settings.search.japanese_long_vowel);
+        assert!(settings.search.korean_choseong);
+        assert!(!settings.search.show_match_reason);
+    }
+
+    #[test]
+    fn search_settings_round_trip_and_tolerate_partial_json() {
+        // 前端总是发全量，但旧配置里没有这一项 —— 缺省必须补成默认值而不是报错
+        // （报错会让整份 UiSettings 回退成默认，用户的其他设置一起被清掉）。
+        let settings: UiSettings = serde_json::from_value(serde_json::json!({
+            "search": { "mode": "fuzzy", "koreanChoseong": false }
+        }))
+        .expect("partial search settings must deserialize");
+        assert_eq!(settings.search.mode, "fuzzy");
+        assert!(!settings.search.korean_choseong);
+        // 未发送的子键取默认。
+        assert!(settings.search.translit);
+        assert!(settings.search.heteronym);
+
+        // 回写后仍能读回（`save_ui_settings` 是读-改-写整个结构）。
+        let encoded = serde_json::to_value(&settings).expect("serialize");
+        assert_eq!(encoded["search"]["mode"], serde_json::json!("fuzzy"));
     }
 
     #[test]

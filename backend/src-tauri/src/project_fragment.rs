@@ -6,7 +6,9 @@
 //! for native cross-process timeline copy/paste, whole-track copy/paste, and
 //! merging another project into the current one.
 
-use crate::state::{new_id, Clip, LinkedParamCurvesPayload, SynthPipelineKind, TimelineState, Track};
+use crate::state::{
+    new_id, Clip, LinkedParamCurvesPayload, SynthPipelineKind, TimelineState, Track,
+};
 
 /// 批量参数（Tracks/Project fragment 整体携带的全局曲线）随粘贴锚点平移：
 /// merge 会把 clips 平移 `time_offset_sec`，曲线必须同步平移——否则粘贴后
@@ -424,8 +426,7 @@ fn apply_shifted_params_range(
         0.0,
     );
     for (key, curve) in entry.extra_curves.iter_mut() {
-        let default_value =
-            crate::renderer::common_params::automation_curve_pad_value(kind, key);
+        let default_value = crate::renderer::common_params::automation_curve_pad_value(kind, key);
         let src = shifted
             .extra_curves
             .get(key)
@@ -438,10 +439,15 @@ fn apply_shifted_params_range(
         if entry.extra_curves.contains_key(key) {
             continue;
         }
-        let default_value =
-            crate::renderer::common_params::automation_curve_pad_value(kind, key);
+        let default_value = crate::renderer::common_params::automation_curve_pad_value(kind, key);
         let mut curve = Vec::new();
-        write_shifted_range(&mut curve, src_curve, start_frame, frame_count, default_value);
+        write_shifted_range(
+            &mut curve,
+            src_curve,
+            start_frame,
+            frame_count,
+            default_value,
+        );
         entry.extra_curves.insert(key.clone(), curve);
     }
 }
@@ -517,12 +523,7 @@ fn clip_tracks_in_display_order(source_timeline: &TimelineState) -> Vec<&Track> 
     display_track_order(source_timeline)
         .into_iter()
         .filter(|id| clip_track_ids.contains(id.as_str()))
-        .filter_map(|id| {
-            source_timeline
-                .tracks
-                .iter()
-                .find(|track| track.id == id)
-        })
+        .filter_map(|id| source_timeline.tracks.iter().find(|track| track.id == id))
         .collect()
 }
 
@@ -708,8 +709,8 @@ pub fn merge_project_fragment(
                 .find(|track| &track.id == source_root_id)
                 .map(|track| SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo))
                 .unwrap_or(SynthPipelineKind::WorldVocoder);
-            let delta_frames = (time_offset_sec * 1000.0 / params.frame_period_ms.max(0.1))
-                .round() as isize;
+            let delta_frames =
+                (time_offset_sec * 1000.0 / params.frame_period_ms.max(0.1)).round() as isize;
             let shifted = shift_track_params_for_merge(params, delta_frames, kind);
             if pre_existing_track_ids.contains(mapped_root_id) {
                 // 粘贴进既有轨道：范围受限合并（复制语义）——只覆盖本次粘贴
@@ -991,7 +992,10 @@ mod tests {
             .params_by_root_track
             .get(&track_id)
             .expect("track fragment carries params wholesale");
-        let vol = wholesale.extra_curves.get("volume").expect("volume payload");
+        let vol = wholesale
+            .extra_curves
+            .get("volume")
+            .expect("volume payload");
         assert!(
             (vol[9000] - 0.5).abs() < 1e-6,
             "批量参数保持全局帧基（帧 9000 = 45s 处 0.5），实际 {}",
@@ -1026,8 +1030,16 @@ mod tests {
                 .copied()
                 .unwrap_or(f32::NAN)
         };
-        assert!((at(entry, 100.0) - 0.5).abs() < 1e-6, "@100s 期望 0.5，实际 {}", at(entry, 100.0));
-        assert!((at(entry, 101.0) - 0.5).abs() < 1e-6, "@101s 期望 0.5，实际 {}", at(entry, 101.0));
+        assert!(
+            (at(entry, 100.0) - 0.5).abs() < 1e-6,
+            "@100s 期望 0.5，实际 {}",
+            at(entry, 100.0)
+        );
+        assert!(
+            (at(entry, 101.0) - 0.5).abs() < 1e-6,
+            "@101s 期望 0.5，实际 {}",
+            at(entry, 101.0)
+        );
         assert!(
             (at(entry, 99.0) - 1.0).abs() < 1e-6,
             "@99s 期望默认 1.0，实际 {}",
@@ -1053,12 +1065,17 @@ mod tests {
             .cloned()
             .unwrap();
         assert!((pasted2.start_sec - 100.0).abs() < 1e-9);
-        let entry2 = same_tl
-            .params_by_root_track
-            .get(&track_id)
-            .expect("params");
-        assert!((at(entry2, 45.0) - 0.5).abs() < 1e-6, "源区间保持：@45s 期望 0.5，实际 {}", at(entry2, 45.0));
-        assert!((at(entry2, 100.0) - 0.5).abs() < 1e-6, "粘贴区间写入：@100s 期望 0.5，实际 {}", at(entry2, 100.0));
+        let entry2 = same_tl.params_by_root_track.get(&track_id).expect("params");
+        assert!(
+            (at(entry2, 45.0) - 0.5).abs() < 1e-6,
+            "源区间保持：@45s 期望 0.5，实际 {}",
+            at(entry2, 45.0)
+        );
+        assert!(
+            (at(entry2, 100.0) - 0.5).abs() < 1e-6,
+            "粘贴区间写入：@100s 期望 0.5，实际 {}",
+            at(entry2, 100.0)
+        );
     }
 
     #[test]
@@ -1254,7 +1271,11 @@ mod tests {
         let display = display_track_order(&target);
         assert_ne!(
             display,
-            target.tracks.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
+            target
+                .tracks
+                .iter()
+                .map(|t| t.id.clone())
+                .collect::<Vec<_>>(),
             "前置条件：显示顺序与 Vec 顺序不同"
         );
         // 选中显示序列末尾的轨道（Vec 下标 1、显示下标 2）。
@@ -1323,7 +1344,11 @@ mod tests {
         let mut ordered: Vec<&crate::state::Track> = target.tracks.iter().collect();
         ordered.sort_by_key(|track| track.order);
         let names: Vec<&str> = ordered.iter().map(|track| track.name.as_str()).collect();
-        assert_eq!(names, ["Main", "Child", "Sibling"], "新建轨道按显示顺序铺在下方");
+        assert_eq!(
+            names,
+            ["Main", "Child", "Sibling"],
+            "新建轨道按显示顺序铺在下方"
+        );
         assert!(ordered.iter().all(|track| track.parent_id.is_none()));
         // 每个新建轨道的 order 都严格大于前一轨道（不与既有 order 冲突）。
         for pair in ordered.windows(2) {

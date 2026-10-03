@@ -798,7 +798,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
 
                         <ScrollArea
                             style={{ maxHeight: 200 }}
-                            className="mt-2 rounded border border-qt-border"
+                            className="hs-scroll-area mt-2 rounded border border-qt-border"
                         >
                             <Flex direction="column" gap="0">
                                 {/* 各个轨道选项（多选） */}

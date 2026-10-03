@@ -46,6 +46,13 @@ rayon = "1.7"
 lru = "0.12"
 encoding_rs = "0.8"
 midly = "0.5"
+# 搜索的 CJK 转写（见 src/search/）。三个都是纯数据/纯算法库，无 C 依赖、不参与启动路径：
+#   pinyin               汉字→拼音（含多音字）；关掉 with_tone 系列只保留无声调形态
+#   wana_kana            假名↔罗马字；关掉 default（=tokenize，会拉 itertools）
+#   unicode-normalization 全角/连字/变音符号归一（idna 已传递引入，此处改为直接引用）
+pinyin = { version = "0.11", default-features = false, features = ["plain", "heteronym"] }
+wana_kana = { version = "5.0", default-features = false }
+unicode-normalization = "0.1"
 zip = { version = "0.6", default-features = false, features = ["deflate", "time"] }
 # zip 的 time feature 使其依赖 time；此处直接引用以完成 SystemTime → zip::DateTime 转换
 time = { version = "0.3", default-features = false, features = ["std"] }
@@ -60,6 +67,7 @@ rustfft = "6"
 num-complex = "0.4"
 aberth = "0.4"
 ndarray = { version = "0.16", optional = true }
+trash = "5.2.9"
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5"
@@ -151,7 +159,11 @@ ort-tract = { version = "0.4.0", optional = true }
 codegen-units = 16
 strip = true
 opt-level = 3
-panic = "abort"
+# 【不能用 panic = "abort"】代码库围绕 unwind 建了一整套 panic 遏制：音频回调的
+# catch_unwind（engine.rs）、后台渲染线程的恢复（playback.rs，否则 BG_RENDER_ACTIVE
+# 永久卡 true）、IPC 命令守卫（commands/common.rs）。abort 下这些守卫在 release
+# 构建里全部失效 —— 任意一处 panic 直接杀死整个进程（正是它们要阻止的故障）。
+# 代价只是二进制略大、运行时略慢（无表展开优化），换来遏制的实际生效。
 
 # Distribution builds: full-fat LTO for the best final-artifact
 # optimization. Used ONLY by the CI pipeline (`cargo tauri build

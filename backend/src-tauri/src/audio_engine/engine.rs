@@ -22,6 +22,10 @@ const MAX_STRETCH_CACHE_ENTRIES: usize = 128;
 /// 用它触发电平条回落（见 meter 线程内的注释）。
 const METER_STALL_FALLBACK: Duration = Duration::from_millis(150);
 
+/// 电平表总线槽位数 = 电平表可覆盖的轨道上限（见 TrackMeterBus）。
+/// 每槽 4 字节，取宽裕值让"死表"远离现实工程规模；越界时 meter 线程告警一次。
+const METER_BUS_CAPACITY: usize = 512;
+
 use super::metronome;
 use super::mix::{
     render_callback_f32, render_callback_i16, render_callback_u16, SnapshotTransitionState,
@@ -157,8 +161,11 @@ impl AudioEngine {
         let meter_shutdown = Arc::new(AtomicBool::new(false));
         let meter_shutdown_for_thread = meter_shutdown.clone();
         // Lock-free per-track peak handoff between the audio callback and the
-        // meter thread (see mix::TrackMeterBus).
-        let meter_bus = Arc::new(TrackMeterBus::with_capacity(64));
+        // meter thread (see mix::TrackMeterBus). 槽位数即电平表可覆盖的轨道上限：
+        // 超出容量的轨道混音与播放完全正常，但电平表恒为 0（静默失效），因此容量
+        // 取宽裕值（每槽 4 字节，512 槽仅 2 KB），并在 meter 线程对越界做一次性告警
+        // （见下方 meter loop）。
+        let meter_bus = Arc::new(TrackMeterBus::with_capacity(METER_BUS_CAPACITY));
         let meter_bus_for_meter = meter_bus.clone();
 
         // 节拍器：命令线程写配置/响点表，音频回调无锁读取（见 metronome.rs）。
@@ -209,6 +216,8 @@ impl AudioEngine {
                 let mut last_transport_heartbeat = Instant::now();
                 // 总线最后一次前进的时刻（播放中每块都前进）。
                 let mut last_bus_advance = Instant::now();
+                // 越界告警只发一次的标志（meter 线程私有，无需跨线程）。
+                let meter_over_capacity_warned = AtomicBool::new(false);
                 loop {
                     if meter_shutdown.load(Ordering::Relaxed) {
                         break;
@@ -304,6 +313,17 @@ impl AudioEngine {
                     if bus_advanced {
                         last_bus_advance = Instant::now();
                         let snap = snapshot_for_meter.load_full();
+                        // 轨道数超出总线容量：电平表对越界轨道静默失效（slot_peak
+                        // 返回 0）。这是"看不见的半失效"，必须至少说一次——否则
+                        // 用户只会报告"轨道 65+ 的电平表不动了"而无人能归因。
+                        if snap.track_ids.len() > METER_BUS_CAPACITY
+                            && !meter_over_capacity_warned.swap(true, Ordering::Relaxed)
+                        {
+                            log::warn!(
+                                "[engine] track count {} exceeds meter bus capacity {METER_BUS_CAPACITY}: meters dead beyond capacity (audio unaffected)",
+                                snap.track_ids.len()
+                            );
+                        }
                         let Ok(mut state) = meter_state.lock() else {
                             continue;
                         };
@@ -1996,8 +2016,7 @@ fn emit_clip_pitch_data_for_clip(
     }
 
     // ── 音频 clip 路径：从 FCPE 缓存获取音高曲线 ──
-    let Some(cached_midi) = get_clip_pitch_midi_global(tl, clip, &root, frame_period_ms)
-    else {
+    let Some(cached_midi) = get_clip_pitch_midi_global(tl, clip, &root, frame_period_ms) else {
         debug_eprintln!("[pitch:emit] clip_id={} → cache miss, skipping", clip.id);
         return;
     };
@@ -2209,7 +2228,6 @@ mod tests {
             crate::time_stretch::StretchAlgorithm::SignalsmithStretch
         ));
     }
-
 
     /// 渲染结果推送（`RenderedClipsChanged`）必须换入新快照 —— 这是"原地
     /// 等待渲染"解除的唯一机制：产出者发布 → worker 换入包含最新 rendered_pcm

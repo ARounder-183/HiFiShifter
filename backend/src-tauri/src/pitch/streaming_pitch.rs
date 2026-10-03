@@ -274,13 +274,7 @@ pub(crate) fn analyze_streaming<S: SampleSource>(
             }
             analyzer.push(frame, rate, channels, params.cancelled)
         })
-        .or_else(|e| {
-            if e == CANCEL_SENTINEL {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        })?;
+        .or_else(|e| if e == CANCEL_SENTINEL { Ok(()) } else { Err(e) })?;
 
     analyzer.finish(params.cancelled);
 
@@ -344,13 +338,18 @@ impl ChunkAnalyzer<'_> {
         self.frame_src = source_frames_per_analysis_frame(self.in_rate, self.fp);
         self.step = alignment_step(self.frame_src);
 
-        let chunk_frames = ((self.chunking.chunk_sec * 1000.0) / self.fp).round().max(1.0);
-        let ctx_frames = ((self.chunking.ctx_sec * 1000.0) / self.fp).round().max(0.0);
+        let chunk_frames = ((self.chunking.chunk_sec * 1000.0) / self.fp)
+            .round()
+            .max(1.0);
+        let ctx_frames = ((self.chunking.ctx_sec * 1000.0) / self.fp)
+            .round()
+            .max(0.0);
         self.chunk_src = round_up_to_multiple(chunk_frames * self.frame_src, self.step);
         self.ctx_src = round_up_to_multiple(ctx_frames * self.frame_src, self.step);
         // `chunk_src` 是 `step` 的整数倍、`step` 是 `frame_src` 的整数倍，因此
         // 这个除法的结果是整数 —— 块的帧数与源坐标严格一致，不会逐块漂移。
-        self.frames_per_chunk = ((self.chunk_src as f64) / self.frame_src).round().max(1.0) as usize;
+        self.frames_per_chunk =
+            ((self.chunk_src as f64) / self.frame_src).round().max(1.0) as usize;
     }
 
     fn push(
@@ -441,7 +440,8 @@ impl ChunkAnalyzer<'_> {
         }
 
         let from = ((win_start - self.staged_start) as usize) * self.in_channels;
-        let to = (((win_end - self.staged_start) as usize) * self.in_channels).min(self.staged.len());
+        let to =
+            (((win_end - self.staged_start) as usize) * self.in_channels).min(self.staged.len());
         if to <= from {
             return;
         }
@@ -482,8 +482,10 @@ impl ChunkAnalyzer<'_> {
         // 用**去直流但未归一化**的信号：归一化是为音高检测准备的动态范围拉伸，
         // 若把它算进电平，响度就会随"这一片段有多响"被反复改写。
         {
-            let dc_removed: Vec<f32> =
-                mono.iter().map(|&v| (v as f64 - self.mean) as f32).collect();
+            let dc_removed: Vec<f32> = mono
+                .iter()
+                .map(|&v| (v as f64 - self.mean) as f32)
+                .collect();
             let lv =
                 crate::pitch_clip::compute_frame_levels(&dc_removed, self.analysis_rate, self.fp);
             let end = local_end.min(lv.len());
@@ -623,10 +625,7 @@ mod tests {
             analysis_rate: rate,
             frame_period_ms: 5.0,
             want_pitch,
-            chunking: Chunking {
-                chunk_sec,
-                ctx_sec,
-            },
+            chunking: Chunking { chunk_sec, ctx_sec },
             estimator: &estimator,
             cancelled: &|| false,
         };
@@ -647,7 +646,10 @@ mod tests {
             mono.push(acc / ch as f32);
         }
         let mean = mono.iter().map(|&v| v as f64).sum::<f64>() / mono.len().max(1) as f64;
-        let peak = mono.iter().map(|&v| (v as f64).abs()).fold(0.0f64, f64::max);
+        let peak = mono
+            .iter()
+            .map(|&v| (v as f64).abs())
+            .fold(0.0f64, f64::max);
         let max_abs = (peak - mean).abs().max(peak.abs());
         let scale = if max_abs > 1.0 { 1.0 / max_abs } else { 1.0 };
 
@@ -861,7 +863,10 @@ mod tests {
         };
         let err = analyze_streaming(&mut ChangingSource, &params)
             .expect_err("rate change should be rejected");
-        assert!(err.contains("changed mid-stream"), "unexpected error: {err}");
+        assert!(
+            err.contains("changed mid-stream"),
+            "unexpected error: {err}"
+        );
     }
 
     // ── Phase 4：峰值工作集必须与素材长度解耦 ──────────────────────────────

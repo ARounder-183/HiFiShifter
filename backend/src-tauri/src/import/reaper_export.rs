@@ -395,7 +395,9 @@ fn slice_curve_with_default(
 /// `clip.extra_curves[key]` 按 key 覆盖根轨道曲线）。
 pub fn build_clip_export_curves(timeline: &TimelineState, clip: &Clip) -> ClipExportCurves {
     let root = timeline.resolve_root_track_id(&clip.track_id);
-    let root_entry = root.as_deref().and_then(|id| timeline.params_by_root_track.get(id));
+    let root_entry = root
+        .as_deref()
+        .and_then(|id| timeline.params_by_root_track.get(id));
     // Compose（合成）门控，与渲染端同语义：根轨道未开启 Compose 时音高
     // 曲线不参与渲染，REAPER 剪贴板同样不做音高参数的转换与输出 —— 否则
     // 导出的是渲染中根本不生效的陈旧数据。子轨道沿 parent 链回溯**根轨
@@ -412,13 +414,18 @@ pub fn build_clip_export_curves(timeline: &TimelineState, clip: &Clip) -> ClipEx
     let start_frame = ((clip.start_sec.max(0.0) * 1000.0) / frame_period_ms)
         .floor()
         .max(0.0) as usize;
-    let frame_count =
-        (((clip.length_sec.max(0.0) * 1000.0) / frame_period_ms).ceil().max(1.0)) as usize;
+    let frame_count = (((clip.length_sec.max(0.0) * 1000.0) / frame_period_ms)
+        .ceil()
+        .max(1.0)) as usize;
 
     let merged_curve = |key: &str| -> Option<Vec<f32>> {
         // 渲染同款合并：clip.extra_curves[key] 覆盖 root[key]（整 key 覆盖）；
         // volume 兼容旧 `hifigan_volume` key（common_volume_curve_for_clip 同款）。
-        let legacy_key = if key == "volume" { Some("hifigan_volume") } else { None };
+        let legacy_key = if key == "volume" {
+            Some("hifigan_volume")
+        } else {
+            None
+        };
         let clip_override = clip
             .extra_curves
             .as_ref()
@@ -638,10 +645,7 @@ fn build_take_pitch_envelope(
             ]
         })
         .collect();
-    let max_abs = points
-        .iter()
-        .map(|p| p[1].abs())
-        .fold(0.0_f64, f64::max);
+    let max_abs = points.iter().map(|p| p[1].abs()).fold(0.0_f64, f64::max);
     let display_range = (max_abs.ceil() as i64).clamp(3, 96) as f64;
 
     Some(ReaperEnvelope {
@@ -769,10 +773,7 @@ fn build_envseg_for_key(
         let (start, end) = (*group_start, *group_end);
         let mut samples: Vec<(f64, f64)> = group.drain(..).flatten().collect();
         samples.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let relative: Vec<(f64, f64)> = samples
-            .into_iter()
-            .map(|(t, v)| (t - start, v))
-            .collect();
+        let relative: Vec<(f64, f64)> = samples.into_iter().map(|(t, v)| (t - start, v)).collect();
         let span_end = end - start;
         let breakpoints = simplify_breakpoints(&relative, 0.0, span_end, default_value, tolerance);
         if !breakpoints.is_empty() {
@@ -787,18 +788,7 @@ fn build_envseg_for_key(
             let end_qn = qn_at(start + span_end);
             let points = breakpoints
                 .iter()
-                .map(|(t, v)| {
-                    vec![
-                        start + t,
-                        *v,
-                        0.0,
-                        0.0,
-                        0.0,
-                        0.0,
-                        0.0,
-                        qn_at(start + t),
-                    ]
-                })
+                .map(|(t, v)| vec![start + t, *v, 0.0, 0.0, 0.0, 0.0, 0.0, qn_at(start + t)])
                 .collect();
             out.push(ReaperEnvelope {
                 env_type: env_type.to_string(),
@@ -1184,7 +1174,8 @@ mod tests {
             clip.sync_take_from_flat();
         }
 
-        let export = build_reaper_clipboard(&timeline, &[clip_id.clone()], &BTreeMap::new()).unwrap();
+        let export =
+            build_reaper_clipboard(&timeline, &[clip_id.clone()], &BTreeMap::new()).unwrap();
         let parsed = parse_for_test(&export.bytes);
         let item = &parsed.tracks[0].items[0];
         assert!(item.is_loop, "loop flag must be exported");
@@ -1206,7 +1197,8 @@ mod tests {
             // 同步纪律：改写投影后必须写回 Take 权威数据。
             clip.sync_take_from_flat();
         }
-        let export2 = build_reaper_clipboard(&timeline, &[clip_id.clone()], &BTreeMap::new()).unwrap();
+        let export2 =
+            build_reaper_clipboard(&timeline, &[clip_id.clone()], &BTreeMap::new()).unwrap();
         let parsed2 = parse_for_test(&export2.bytes);
         let item2 = &parsed2.tracks[0].items[0];
         assert!(!item2.is_loop, "short non-loop clip must not infer loop");
@@ -1330,8 +1322,8 @@ mod tests {
         timeline.move_track(&track_b, 0, None);
         assert_eq!(timeline.tracks[0].id, track_b, "Vec 顺序反映拖拽");
 
-        let export = build_reaper_clipboard(&timeline, &[clip_a, clip_b], &BTreeMap::new())
-            .expect("export");
+        let export =
+            build_reaper_clipboard(&timeline, &[clip_a, clip_b], &BTreeMap::new()).expect("export");
         let parsed = parse_for_test(&export.bytes);
         assert_eq!(parsed.tracks.len(), 2);
         // 第一条 TRACK = 显示顺序第一的 B 轨道。
@@ -1363,8 +1355,7 @@ mod tests {
     fn simplify_breakpoints_rules() {
         let fp = 0.005f64;
         // 全默认（样本 == 默认值 1.0）→ 空表。
-        let default_samples: Vec<(f64, f64)> =
-            (0..400).map(|i| (i as f64 * fp, 1.0)).collect();
+        let default_samples: Vec<(f64, f64)> = (0..400).map(|i| (i as f64 * fp, 1.0)).collect();
         assert!(simplify_breakpoints(&default_samples, 0.0, 2.0, 1.0, 0.005).is_empty());
         // 平坦非默认 → 恰 2 端点。
         let flat: Vec<(f64, f64)> = (0..400).map(|i| (i as f64 * fp, 0.8)).collect();
@@ -1391,7 +1382,9 @@ mod tests {
         let out = simplify_breakpoints(&bent, 0.0, 2.0, 1.0, 0.005);
         // 斜率在 t=1 处翻转：应产生 (0,0) (≈1,≈1) (2,≈0)（端点强制）。
         assert!(out.len() <= 4, "折点数量应精简，实际 {:?}", out);
-        assert!(out.iter().any(|(t, v)| (t - 1.0).abs() < 0.02 && (v - 1.0).abs() < 0.02));
+        assert!(out
+            .iter()
+            .any(|(t, v)| (t - 1.0).abs() < 0.02 && (v - 1.0).abs() < 0.02));
     }
 
     #[test]
@@ -1447,9 +1440,8 @@ mod tests {
             },
         );
         let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
-        let result =
-            crate::pitch_editing::compute_clip_export_pitch_offsets(&timeline, clip)
-                .expect("offsets");
+        let result = crate::pitch_editing::compute_clip_export_pitch_offsets(&timeline, clip)
+            .expect("offsets");
         assert_eq!(result.offsets, vec![2.0, 0.0, 0.0]);
     }
 
@@ -1647,9 +1639,8 @@ mod tests {
             },
         );
         let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
-        let result =
-            crate::pitch_editing::compute_clip_export_pitch_offsets(&timeline, clip)
-                .expect("offsets");
+        let result = crate::pitch_editing::compute_clip_export_pitch_offsets(&timeline, clip)
+            .expect("offsets");
         assert_eq!(result.offsets, vec![2.5, 2.5]);
     }
 
@@ -1753,7 +1744,10 @@ mod tests {
             build_take_pitch_envelope(&make_curves(pitch_values(&[1.0; 400])), 2.0, 1.0)
                 .expect("envelope at 45");
         assert_eq!(env_at_0.points, env_at_45.points, "u 域与工程位置无关");
-        assert!((env_at_45.points[0][0]).abs() < 1e-9, "起点 = item 起点 u=0");
+        assert!(
+            (env_at_45.points[0][0]).abs() < 1e-9,
+            "起点 = item 起点 u=0"
+        );
         assert!(
             (env_at_45.points[1][0] - 2.0).abs() < 1e-9,
             "终点 = item 终点 u=len×rate"
@@ -1793,7 +1787,9 @@ mod tests {
         let item = &parsed.tracks[0].items[0];
         assert!((item.position - 45.0).abs() < 1e-9, "item POSITION 绝对");
         assert!(
-            item.position_qn.map(|qn| (qn - 90.0).abs() < 1e-9).unwrap_or(false),
+            item.position_qn
+                .map(|qn| (qn - 90.0).abs() < 1e-9)
+                .unwrap_or(false),
             "双时基 POSITION QN（bpm 120 → 45s = 90 QN）"
         );
         let seg = &parsed.tracks[0].envelopes[0];
@@ -1901,17 +1897,28 @@ mod tests {
             "首个时间位置对齐光标（45 → 10），实际 {}",
             clip.start_sec
         );
-        let params = result.timeline.params_by_root_track.values().next().unwrap();
+        let params = result
+            .timeline
+            .params_by_root_track
+            .values()
+            .next()
+            .unwrap();
         let fp = 0.005f64;
         let volume = params.extra_curves.get("volume").expect("volume");
-        assert!((volume[(10.0 / fp) as usize] - 0.8).abs() < 1e-3, "包络随 item 平移");
+        assert!(
+            (volume[(10.0 / fp) as usize] - 0.8).abs() < 1e-3,
+            "包络随 item 平移"
+        );
         assert!((volume[(12.0 / fp) as usize] - 0.8).abs() < 1e-3);
         assert!(
             (volume[(5.0 / fp) as usize] - 1.0).abs() < 1e-6,
             "段外保持默认"
         );
         let pending = params.pending_pitch_offset.as_ref().expect("pending");
-        assert!((pending[(10.0 / fp) as usize] - 1.0).abs() < 1e-3, "音高包络随 item 平移");
+        assert!(
+            (pending[(10.0 / fp) as usize] - 1.0).abs() < 1e-3,
+            "音高包络随 item 平移"
+        );
     }
 
     #[test]
@@ -1961,10 +1968,7 @@ mod tests {
         let export =
             build_reaper_clipboard(&timeline, &[clip_id], &curves_by_clip).expect("export");
         let parsed = parse_for_test(&export.bytes);
-        let range = parsed.tracks[0].envelopes[0]
-            .seg_range
-            .as_ref()
-            .unwrap();
+        let range = parsed.tracks[0].envelopes[0].seg_range.as_ref().unwrap();
         assert!((range[0] - 10.0).abs() < 1e-9);
         assert!((range[1] - 12.0).abs() < 1e-9, "终点 = 10+2");
         assert!(
@@ -2142,8 +2146,8 @@ mod tests {
         let parsed = parse_for_test(&export.bytes);
 
         // 导入端（目标轨推子 1.0 → 除法不变）。
-        let result = crate::reaper_import::test_import_items_for_round_trip(parsed, 0.0)
-            .expect("re-import");
+        let result =
+            crate::reaper_import::test_import_items_for_round_trip(parsed, 0.0).expect("re-import");
         let params = result
             .timeline
             .params_by_root_track

@@ -21,7 +21,7 @@
 //!   承接（换表时按世代整体清理，绝无新旧叠加）；
 //! - 混音导出（离线 mixdown）不含节拍器 —— 本模块仅存在于实时回调路径。
 
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -164,14 +164,38 @@ struct ClickTimbre {
 fn click_timbre(sound: MetronomeSound, accent: bool) -> ClickTimbre {
     match (sound, accent) {
         // 短促点击：重音高、非重音低。
-        (MetronomeSound::Click, true) => ClickTimbre { freq: 1800.0, tau: 0.012, harm2: 0.0 },
-        (MetronomeSound::Click, false) => ClickTimbre { freq: 1200.0, tau: 0.012, harm2: 0.0 },
+        (MetronomeSound::Click, true) => ClickTimbre {
+            freq: 1800.0,
+            tau: 0.012,
+            harm2: 0.0,
+        },
+        (MetronomeSound::Click, false) => ClickTimbre {
+            freq: 1200.0,
+            tau: 0.012,
+            harm2: 0.0,
+        },
         // 木鱼：更短促、带少量二次谐波增加"木质感"。
-        (MetronomeSound::Woodblock, true) => ClickTimbre { freq: 1900.0, tau: 0.008, harm2: 0.35 },
-        (MetronomeSound::Woodblock, false) => ClickTimbre { freq: 1250.0, tau: 0.008, harm2: 0.35 },
+        (MetronomeSound::Woodblock, true) => ClickTimbre {
+            freq: 1900.0,
+            tau: 0.008,
+            harm2: 0.35,
+        },
+        (MetronomeSound::Woodblock, false) => ClickTimbre {
+            freq: 1250.0,
+            tau: 0.008,
+            harm2: 0.35,
+        },
         // 蜂鸣：长尾、双音高。
-        (MetronomeSound::Beep, true) => ClickTimbre { freq: 880.0, tau: 0.06, harm2: 0.2 },
-        (MetronomeSound::Beep, false) => ClickTimbre { freq: 660.0, tau: 0.06, harm2: 0.2 },
+        (MetronomeSound::Beep, true) => ClickTimbre {
+            freq: 880.0,
+            tau: 0.06,
+            harm2: 0.2,
+        },
+        (MetronomeSound::Beep, false) => ClickTimbre {
+            freq: 660.0,
+            tau: 0.06,
+            harm2: 0.2,
+        },
     }
 }
 
@@ -362,7 +386,11 @@ pub(crate) fn build_tempo_segments(
     _project_denominator: u32,
     end_sec: f64,
 ) -> Vec<MetroSegment> {
-    let end_sec = if end_sec.is_finite() && end_sec > 0.0 { end_sec } else { 0.0 };
+    let end_sec = if end_sec.is_finite() && end_sec > 0.0 {
+        end_sec
+    } else {
+        0.0
+    };
     let fallback_spb = 60.0 / bpm.clamp(10.0, 960.0).max(1.0);
     let fallback_bpb = project_bar_beats(project_beats_per_bar);
 
@@ -423,7 +451,11 @@ pub(crate) fn build_tempo_segments(
             _ => end_sec,
         };
         let seg_end = seg_end.max(start_sec);
-        let point_bpm = if point.bpm.is_finite() { point.bpm.clamp(10.0, 960.0) } else { 120.0 };
+        let point_bpm = if point.bpm.is_finite() {
+            point.bpm.clamp(10.0, 960.0)
+        } else {
+            120.0
+        };
         let bpb = carry.0 as f64 * 4.0 / carry.1.max(1) as f64;
         segments.push(MetroSegment {
             start_sec,
@@ -540,7 +572,10 @@ pub(crate) fn build_click_schedule(
                 break;
             }
             let frame = (t * sr).round().max(0.0) as u64;
-            clicks.push(MetronomeClick { frame, accent: true });
+            clicks.push(MetronomeClick {
+                frame,
+                accent: true,
+            });
             if clicks.len() >= MAX_SCHEDULE_CLICKS {
                 truncated = true;
                 break 'segments;
@@ -820,7 +855,10 @@ mod tests {
         // 播放推进到 4000 帧：块 [0,1024) 起振 frame 0 的 click（尾音到 ~4876）。
         let mut scratch = vec![0.0f32; 2048];
         voices.mix(&mut scratch, &metro, 0, 1024, 44100);
-        assert!(scratch.iter().any(|v| v.abs() > 0.0), "block 0 should click");
+        assert!(
+            scratch.iter().any(|v| v.abs() > 0.0),
+            "block 0 should click"
+        );
         assert_eq!(voices.active.len(), 1);
         let stale_end = voices.active[0].end_frame;
         assert!(stale_end > 4000, "voice must still be ringing at 4000");

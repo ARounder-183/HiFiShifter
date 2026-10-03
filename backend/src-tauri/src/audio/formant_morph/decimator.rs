@@ -139,8 +139,7 @@ fn design_lowpass(in_rate: f32, decim: f32, taps: usize) -> Vec<f32> {
     for (i, tap) in out.iter_mut().enumerate() {
         let m = i as f32 - center;
         // Blackman 窗
-        let w = 0.42
-            - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (taps - 1) as f32).cos()
+        let w = 0.42 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (taps - 1) as f32).cos()
             + 0.08 * (4.0 * std::f32::consts::PI * i as f32 / (taps - 1) as f32).cos();
         let sinc = if m.abs() < 1.0e-9 {
             omega / std::f32::consts::PI

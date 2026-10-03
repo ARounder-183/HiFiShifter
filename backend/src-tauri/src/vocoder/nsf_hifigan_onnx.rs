@@ -660,9 +660,8 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     // 等待有界，绝不永久卡死。
     // 有界等待（20s）：持有者的构建挂起时不再让渲染线程永久阻塞 ——
     // 超时返回 Err，本次会话加载失败 → 该 Clip 失败但 pass 继续推进。
-    let _build_flight = crate::vocoder_ort_session::acquire_session_build_lock(
-        std::time::Duration::from_secs(20),
-    )?;
+    let _build_flight =
+        crate::vocoder_ort_session::acquire_session_build_lock(std::time::Duration::from_secs(20))?;
     // 双重检查：等待期间其他线程（设备切换的异步预热）可能已完成构建。
     if let Some(session) = mutex
         .lock()
@@ -2247,7 +2246,10 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     );
     log::warn!(
         "[benchmark] model_sr={} num_mels={} hop={} n_fft={}",
-        cfg.sampling_rate, cfg.num_mels, cfg.hop_size, cfg.n_fft
+        cfg.sampling_rate,
+        cfg.num_mels,
+        cfg.hop_size,
+        cfg.n_fft
     );
     log::warn!("[benchmark] cpu_cores={cpu_cores} ort={ort_build_info}");
     log::warn!("[benchmark] providers={available_providers:?}");
@@ -2393,7 +2395,10 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     // Log diagnostic info for debugging
     log::warn!(
         "[benchmark] Providers: {:?} | GPU device_id: {} | GPU works: {} | DirectML available: {}",
-        available_providers, gpu_device_id, gpu_actually_working, dml_available
+        available_providers,
+        gpu_device_id,
+        gpu_actually_working,
+        dml_available
     );
 
     let gpu_backend_name = match gpu_ep_name.as_str() {

@@ -23,11 +23,11 @@ macro_rules! log_error_limited {
     };
 }
 
-pub mod logging;
-mod zip_util;
-mod build_info;
 #[cfg(test)]
 mod build_git;
+mod build_info;
+pub mod logging;
+mod zip_util;
 
 mod audio_engine;
 #[path = "audio/audio_utils.rs"]
@@ -36,14 +36,14 @@ mod audio_utils;
 pub(crate) mod channel_decision;
 #[path = "audio/channel_mode.rs"]
 pub(crate) mod channel_mode;
-#[path = "audio/stereo_detect.rs"]
-pub(crate) mod stereo_detect;
 #[path = "import/channel_policy.rs"]
 pub(crate) mod channel_policy;
 #[path = "pitch/clip_rendering_state.rs"]
 mod clip_rendering_state;
-mod fade_curves;
 pub(crate) mod commands;
+#[path = "audio/encode/mod.rs"]
+mod encode;
+mod fade_curves;
 mod formant_cache;
 #[path = "audio/formant_morph/mod.rs"]
 mod formant_morph;
@@ -53,16 +53,10 @@ mod launch_args;
 mod media;
 #[path = "audio/mixdown.rs"]
 mod mixdown;
-#[path = "audio/encode/mod.rs"]
-mod encode;
-#[path = "audio/silence_detect.rs"]
-mod silence_detect;
 mod models;
 mod pitch_analysis;
 #[path = "pitch/pitch_clip.rs"]
 mod pitch_clip;
-#[path = "pitch/streaming_pitch.rs"]
-mod streaming_pitch;
 #[path = "pitch/pitch_config.rs"]
 mod pitch_config;
 mod pitch_editing;
@@ -70,6 +64,13 @@ mod recording;
 mod render_cache;
 mod render_key;
 mod renderer;
+mod search;
+#[path = "audio/silence_detect.rs"]
+mod silence_detect;
+#[path = "audio/stereo_detect.rs"]
+pub(crate) mod stereo_detect;
+#[path = "pitch/streaming_pitch.rs"]
+mod streaming_pitch;
 mod synth_clip_cache;
 
 #[cfg(feature = "onnx")]
@@ -126,6 +127,7 @@ use fcpe_onnx_stub as fcpe_onnx;
 mod config;
 #[path = "audio/hfspeaks_v2.rs"]
 mod hfspeaks_v2;
+mod vibrato;
 
 // ── 测试专用的分配计量 ───────────────────────────────────────────────────────
 //
@@ -710,6 +712,7 @@ pub fn run() {
             commands::import_audio_item,
             commands::import_audio_bytes,
             commands::add_track,
+            commands::add_track_tree,
             commands::remove_track,
             commands::duplicate_track,
             commands::move_track,
@@ -794,6 +797,7 @@ pub fn run() {
             commands::export_diagnostics,
             commands::export_layout_json,
             commands::export_theme_json,
+            commands::export_vibrato_presets_json,
             commands::log_frontend_error,
             commands::get_onnx_status,
             commands::get_onnx_diagnostic,
@@ -803,9 +807,17 @@ pub fn run() {
             commands::clear_pitch_cache,
             commands::get_pitch_cache_stats,
             commands::list_directory,
+            commands::stat_paths,
+            commands::collect_folder_media,
+            commands::create_directory,
+            commands::rename_path,
+            commands::delete_paths,
             commands::get_audio_file_info,
             commands::read_audio_preview,
             commands::search_files_recursive,
+            commands::reveal_paths_in_file_manager,
+            commands::open_path_with_default_app,
+            commands::transliterate,
             commands::open_vocalshifter_dialog,
             commands::import_vocalshifter_project,
             commands::paste_vocalshifter_clipboard,

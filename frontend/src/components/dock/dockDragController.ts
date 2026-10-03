@@ -314,7 +314,8 @@ function resolveTarget(x: number, y: number): DockDropTargetState | null {
         if (!floatFormId) continue;
         const rect = element.getBoundingClientRect();
         if (rect.width < 1 || rect.height < 1) continue;
-        if (x < rect.x || x > rect.x + rect.width || y < rect.y || y > rect.y + rect.height) continue;
+        if (x < rect.x || x > rect.x + rect.width || y < rect.y || y > rect.y + rect.height)
+            continue;
         // DOM 顺序后者更高；不断覆盖即可取到最上层。
         topmostFloatId = floatFormId;
     }
@@ -322,8 +323,7 @@ function resolveTarget(x: number, y: number): DockDropTargetState | null {
     const candidates = topmostFloatId
         ? zoneRects.filter(
               (zone) =>
-                  zone.floatFormId === topmostFloatId ||
-                  zone.floatOwnerFormId === topmostFloatId,
+                  zone.floatFormId === topmostFloatId || zone.floatOwnerFormId === topmostFloatId,
           )
         : zoneRects.filter((zone) => !zone.floatFormId && !zone.floatOwnerFormId);
 
@@ -334,7 +334,7 @@ function resolveTarget(x: number, y: number): DockDropTargetState | null {
     // 感应带逐边给定，与根缘重合的侧边用的是向外扩展过的厚度（见 `tabsetSideBands`）。
     const band = store.getState().dock.settings.edgeBandPx;
     const zone: DockDropZone =
-        hit.fixedZone ?? (resolveDropZone(hit.rect, { x, y }, band, hit.sideBands) ?? "center");
+        hit.fixedZone ?? resolveDropZone(hit.rect, { x, y }, band, hit.sideBands) ?? "center";
     // 根级带的提交/预览基准是整个停靠区矩形（"贯通整侧"），不是那条细带。
     return {
         zoneId: hit.zoneId,

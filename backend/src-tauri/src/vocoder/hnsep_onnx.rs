@@ -135,9 +135,8 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     // 等待有界，绝不永久卡死。
     // 有界等待（20s）：持有者的构建挂起时不再让渲染线程永久阻塞 ——
     // 超时返回 Err，本次会话加载失败 → 该 Clip 失败但 pass 继续推进。
-    let _build_flight = crate::vocoder_ort_session::acquire_session_build_lock(
-        std::time::Duration::from_secs(20),
-    )?;
+    let _build_flight =
+        crate::vocoder_ort_session::acquire_session_build_lock(std::time::Duration::from_secs(20))?;
     // 双重检查：等待期间其他线程（设备切换的异步预热）可能已完成构建。
     if let Some(session) = mutex
         .lock()
@@ -182,7 +181,9 @@ pub fn drop_shared_session() {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        log::error!("[hnsep] WARNING: could not acquire SHARED_SESSION lock at shutdown — giving up");
+        log::error!(
+            "[hnsep] WARNING: could not acquire SHARED_SESSION lock at shutdown — giving up"
+        );
     }
 }
 
@@ -393,8 +394,14 @@ pub fn infer_noise_mono(
     channel_index: u16,
     source_fingerprint: Option<u64>,
 ) -> Result<Arc<Vec<f32>>, String> {
-    infer_harmonic_noise_mono(clip_id, audio_mono, sample_rate, channel_index, source_fingerprint)
-        .map(|(_, noise)| noise)
+    infer_harmonic_noise_mono(
+        clip_id,
+        audio_mono,
+        sample_rate,
+        channel_index,
+        source_fingerprint,
+    )
+    .map(|(_, noise)| noise)
 }
 
 /// Pre-populate the HNSEP cache with a harmonic+noise pair for a given clip.
@@ -412,8 +419,13 @@ pub fn cache_separation(
     harmonic: Arc<Vec<f32>>,
     noise: Arc<Vec<f32>>,
 ) {
-    let cache_key =
-        separation_cache_key(clip_id, sample_rate, audio_len, channel_index, source_fingerprint);
+    let cache_key = separation_cache_key(
+        clip_id,
+        sample_rate,
+        audio_len,
+        channel_index,
+        source_fingerprint,
+    );
     let entry = HnsepCacheEntry { harmonic, noise };
     let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
     cache.put(cache_key, entry);
@@ -433,8 +445,13 @@ pub fn infer_harmonic_noise_mono(
     }
 
     let audio_len = audio_mono.len();
-    let cache_key =
-        separation_cache_key(clip_id, sample_rate, audio_len, channel_index, source_fingerprint);
+    let cache_key = separation_cache_key(
+        clip_id,
+        sample_rate,
+        audio_len,
+        channel_index,
+        source_fingerprint,
+    );
     {
         let mut cache = global_cache()
             .lock()

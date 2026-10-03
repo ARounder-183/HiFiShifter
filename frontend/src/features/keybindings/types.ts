@@ -84,6 +84,8 @@ export type ActionId =
     | "pianoRoll.vibratoDragAmplitudeDecrease" // 直线/颤音拖拽时减小振幅
     | "pianoRoll.vibratoDragFrequencyIncrease" // 直线/颤音拖拽时增大频率
     | "pianoRoll.vibratoDragFrequencyDecrease" // 直线/颤音拖拽时减小频率
+    | "pianoRoll.vibratoPresetPrev" // 拖拽颤音时切换到上一个预设
+    | "pianoRoll.vibratoPresetNext" // 拖拽颤音时切换到下一个预设
     | "pianoRoll.cycleDragDirection" // 循环切换当前工具的拖动方向（拖拽中同样生效）
     // 模式切换
     | "mode.toggle" // 模式切换（正向）

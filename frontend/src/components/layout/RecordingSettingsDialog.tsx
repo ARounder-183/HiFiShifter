@@ -250,7 +250,10 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
 
                 {draft.captureMode === "application" ? (
                     <>
-                        <AppField label={tf("recording_application")}>
+                        <AppField
+                            label={tf("recording_application")}
+                            hint={tf("recording_application_hint")}
+                        >
                             <Flex align="center" gap="2">
                                 <AppSelect
                                     fullWidth={false}
@@ -286,9 +289,6 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                 </AppButton>
                             </Flex>
                         </AppField>
-                        <span className="hs-type-caption" style={{ paddingLeft: 20 }}>
-                            {tf("recording_application_hint")}
-                        </span>
                     </>
                 ) : null}
 

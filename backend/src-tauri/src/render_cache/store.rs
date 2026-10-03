@@ -76,11 +76,7 @@ impl Store {
 
     /// 确保三类目录存在。
     pub fn ensure_dirs(&self) -> io::Result<()> {
-        for kind in [
-            EntryKind::Rendered,
-            EntryKind::Tension,
-            EntryKind::Noise,
-        ] {
+        for kind in [EntryKind::Rendered, EntryKind::Tension, EntryKind::Noise] {
             fs::create_dir_all(self.kind_dir(kind))?;
         }
         Ok(())
@@ -200,11 +196,7 @@ impl Store {
     /// 只在统计/容量回收/清理这些低频路径调用；命中热路径只做定点读取。
     pub fn scan(&self) -> ScanReport {
         let mut report = ScanReport::default();
-        for kind in [
-            EntryKind::Rendered,
-            EntryKind::Tension,
-            EntryKind::Noise,
-        ] {
+        for kind in [EntryKind::Rendered, EntryKind::Tension, EntryKind::Noise] {
             self.scan_kind_dir(kind, &mut report);
         }
         report
@@ -271,11 +263,7 @@ impl Store {
     /// 目录当前占用字节数（不读头部，仅元数据；用于写盘线程的水位维护）。
     pub fn total_bytes(&self) -> u64 {
         let mut total = 0u64;
-        for kind in [
-            EntryKind::Rendered,
-            EntryKind::Tension,
-            EntryKind::Noise,
-        ] {
+        for kind in [EntryKind::Rendered, EntryKind::Tension, EntryKind::Noise] {
             total += dir_bytes(&self.kind_dir(kind));
         }
         total
@@ -285,11 +273,7 @@ impl Store {
     pub fn clear_all(&self) -> (u64, u64) {
         let mut files = 0u64;
         let mut bytes = 0u64;
-        for kind in [
-            EntryKind::Rendered,
-            EntryKind::Tension,
-            EntryKind::Noise,
-        ] {
+        for kind in [EntryKind::Rendered, EntryKind::Tension, EntryKind::Noise] {
             let (f, b) = clear_dir(&self.kind_dir(kind));
             files += f;
             bytes += b;
@@ -298,10 +282,7 @@ impl Store {
     }
 
     /// 按谓词删除条目，返回 `(文件数, 字节数)`。
-    pub fn clear_matching(
-        &self,
-        mut predicate: impl FnMut(&ScannedEntry) -> bool,
-    ) -> (u64, u64) {
+    pub fn clear_matching(&self, mut predicate: impl FnMut(&ScannedEntry) -> bool) -> (u64, u64) {
         let report = self.scan();
         let mut files = 0u64;
         let mut bytes = 0u64;
@@ -463,7 +444,9 @@ mod tests {
         assert!(path.to_string_lossy().contains("ab"), "{path:?}");
         assert!(path.exists());
 
-        let loaded = store.load(EntryKind::Rendered, hash, 48_000, true).expect("load");
+        let loaded = store
+            .load(EntryKind::Rendered, hash, 48_000, true)
+            .expect("load");
         assert_eq!(loaded.primary, primary);
         assert_eq!(loaded.secondary.as_deref(), Some(secondary.as_slice()));
         assert_eq!(loaded.header.take_id.as_deref(), Some("take-a"));
@@ -476,7 +459,9 @@ mod tests {
         assert!(report.dropped_corrupt == 0 && report.dropped_tmp == 0);
 
         // 采样率错配 → miss（不会跨采样率误用）。
-        assert!(store.load(EntryKind::Rendered, hash, 44_100, true).is_none());
+        assert!(store
+            .load(EntryKind::Rendered, hash, 44_100, true)
+            .is_none());
         // 类别错配 → miss 并自愈删除。
         assert!(store.load(EntryKind::Tension, hash, 48_000, true).is_none());
 
@@ -497,7 +482,9 @@ mod tests {
         let path = store.path_for(EntryKind::Rendered, hash);
         fs::write(&path, b"garbage-not-hsrc").expect("corrupt");
 
-        assert!(store.load(EntryKind::Rendered, hash, 48_000, true).is_none());
+        assert!(store
+            .load(EntryKind::Rendered, hash, 48_000, true)
+            .is_none());
         assert!(!path.exists(), "corrupt entry must self-heal (removed)");
 
         let report = store.scan();

@@ -159,6 +159,45 @@ describe("detachBridge（跨窗口状态桥）", () => {
         await flushFrame();
         expect(emitted.filter((item) => item.event === BRIDGE_ACTION_EVENT)).toHaveLength(0);
     });
+
+    it("★ 卫星不存在时主窗口跳过广播序列化（派发热路径零 JSON 往返）", async () => {
+        const store = makeStore("main");
+        // 注入 dock 布局但**没有** osWindow 浮动窗体（全部在主窗口内）：
+        // hasLiveSatellites 返回 false，动作只走本地派发、不做 JSON 序列化。
+        const state = store.getState() as { dock?: unknown };
+        state.dock = {
+            layout: {
+                order: ["formA", "formB"],
+                forms: {
+                    formA: { floating: false, floatMode: "inApp" },
+                    formB: { floating: true, floatMode: "inApp" },
+                },
+            },
+        };
+        await flushFrame();
+        emitted.length = 0;
+        store.dispatch({ type: "noop" } as never);
+        await flushFrame();
+        expect(emitted.filter((item) => item.event === BRIDGE_ACTION_EVENT)).toHaveLength(0);
+    });
+
+    it("★ dock 布局含 osWindow 浮动窗体时主窗口照常广播", async () => {
+        const store = makeStore("main");
+        // 注入一个「已拆出」的窗体记录（与 dockSlice 的字段口径一致）。makeStore
+        // 的 state 是闭包内的同一对象（`set` 动作才会整体替换它），直接改写即可。
+        const state = store.getState() as { dock?: unknown };
+        state.dock = {
+            layout: {
+                order: ["formA"],
+                forms: { formA: { floating: true, floatMode: "osWindow" } },
+            },
+        };
+        await flushFrame();
+        emitted.length = 0;
+        store.dispatch({ type: "noop" } as never);
+        await flushFrame();
+        expect(emitted.filter((item) => item.event === BRIDGE_ACTION_EVENT)).toHaveLength(1);
+    });
 });
 
 describe("快照投影（detachBridge 的重载荷裁剪）", () => {
@@ -189,8 +228,10 @@ describe("快照投影（detachBridge 的重载荷裁剪）", () => {
     it("结构异常时不抛错（投影是尽力而为）", () => {
         expect(projectSnapshot(null)).toBeNull();
         expect(projectSnapshot({ session: null })).toEqual({ session: null });
+        // 已知重载荷字段即使输入结构异常也会被归一化（clipPitchCurves 置空、
+        // 静音预览清空）——投影从不抛错，多余字段无害。
         expect(projectSnapshot({ session: { clips: "nope" } })).toEqual({
-            session: { clips: "nope" },
+            session: { clips: "nope", clipPitchCurves: {}, silencePreviewSegments: null },
         });
     });
 });

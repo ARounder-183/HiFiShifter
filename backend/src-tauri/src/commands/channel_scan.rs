@@ -104,7 +104,6 @@ pub struct TargetSelection {
     pub eligibility: ScanEligibility,
 }
 
-
 /// Take 的音频源路径 —— 与**渲染路径**读的是同一份数据。
 ///
 /// # 为什么必须与渲染路径对齐
@@ -373,10 +372,8 @@ pub fn apply_planned(
                         }
                         None => None,
                     };
-                    take.map(|take| {
-                        channel_policy::resolution_changes_mode(take, item.resolution)
-                    })
-                    .unwrap_or(false)
+                    take.map(|take| channel_policy::resolution_changes_mode(take, item.resolution))
+                        .unwrap_or(false)
                 })
             };
             if needs_checkpoint {
@@ -448,7 +445,9 @@ pub fn apply_planned(
             for (clip_id, is_active) in &mode_changed_clips {
                 crate::commands::timeline::invalidate_take_related_caches(clip_id);
                 if *is_active {
-                    crate::commands::timeline::maybe_schedule_formant_rebuild(state, &timeline, clip_id);
+                    crate::commands::timeline::maybe_schedule_formant_rebuild(
+                        state, &timeline, clip_id,
+                    );
                 }
             }
             state.audio_engine.update_timeline(timeline.clone());
@@ -817,7 +816,9 @@ mod tests {
         let targets = collect_targets(&tl, None, &policy, false, true).targets;
         assert!(targets.is_empty(), "用户封印的 Take 不得进入候选");
         // 手动重扫（include_settled）也照样跳过。
-        assert!(collect_targets(&tl, None, &policy, true, true).targets.is_empty());
+        assert!(collect_targets(&tl, None, &policy, true, true)
+            .targets
+            .is_empty());
     }
 
     #[test]
@@ -832,7 +833,11 @@ mod tests {
         };
 
         // 自动路径：off 就是不判定（符合"不自动转换"的语义）。
-        let auto = plan(collect_targets(&tl, None, &stored, false, true).targets, &stored, false);
+        let auto = plan(
+            collect_targets(&tl, None, &stored, false, true).targets,
+            &stored,
+            false,
+        );
         assert!(
             auto.iter().all(|p| p.resolution.mode.is_none()),
             "off 时自动扫描不得折叠"
@@ -879,7 +884,9 @@ mod tests {
         let policy = ChannelImportPolicy::default();
         let tl = timeline_with_take(None);
         assert!(
-            collect_targets(&tl, None, &policy, false, true).targets.is_empty(),
+            collect_targets(&tl, None, &policy, false, true)
+                .targets
+                .is_empty(),
             "无源 Take（MIDI / 空白 Clip）不属于声道折叠的适用范围"
         );
     }
@@ -905,7 +912,9 @@ mod tests {
         // 第二轮：仍然进候选（对比"已定论"的真立体声会被跳过）。
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(
-            collect_targets(&tl, None, &policy, false, true).targets.len(),
+            collect_targets(&tl, None, &policy, false, true)
+                .targets
+                .len(),
             1,
             "pending 的 Take 必须保持可重试"
         );
@@ -929,7 +938,9 @@ mod tests {
 
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         assert!(
-            collect_targets(&tl, None, &policy, false, true).targets.is_empty(),
+            collect_targets(&tl, None, &policy, false, true)
+                .targets
+                .is_empty(),
             "已定论的 Take 不该再进候选（否则每次打开都重解码）"
         );
         let _ = std::fs::remove_file(&path);
@@ -992,7 +1003,9 @@ mod tests {
 
         {
             let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-            assert!(collect_targets(&tl, None, &policy, false, true).targets.is_empty());
+            assert!(collect_targets(&tl, None, &policy, false, true)
+                .targets
+                .is_empty());
         }
         {
             let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
@@ -1002,7 +1015,9 @@ mod tests {
         }
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(
-            collect_targets(&tl, None, &policy, false, true).targets.len(),
+            collect_targets(&tl, None, &policy, false, true)
+                .targets
+                .len(),
             1,
             "消费区间变了 ⇒ 旧结论失效，必须重判"
         );
@@ -1088,7 +1103,9 @@ mod tests {
         let only_first: std::collections::HashSet<String> =
             [tl.clips[0].id.clone()].into_iter().collect();
         assert_eq!(
-            collect_targets(&tl, Some(&only_first), &policy, false, true).targets.len(),
+            collect_targets(&tl, Some(&only_first), &policy, false, true)
+                .targets
+                .len(),
             1
         );
     }

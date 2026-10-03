@@ -460,9 +460,13 @@ const dockSlice = createSlice({
                     tabs: node.tabs,
                     active: node.active,
                 });
-                if (node.collapsed) tree = setTabsetCollapsed(tree, created.id, true, node.collapsedPx);
+                if (node.collapsed)
+                    tree = setTabsetCollapsed(tree, created.id, true, node.collapsedPx);
             }
-            updateLayout(state, { ...state.layout, roots: { ...state.layout.roots, [rootId]: tree } });
+            updateLayout(state, {
+                ...state.layout,
+                roots: { ...state.layout.roots, [rootId]: tree },
+            });
             state.activeFormId = node.active;
         },
         setSplitRatioOf(
@@ -685,20 +689,22 @@ const dockSlice = createSlice({
             // 位置交给**居中锚点**按当前视口推导（用户移动后锚点自然清除）；
             // 级联偏移让连续新建的面板错开 28px，不会完全叠在一起。
             const cascadeIndex = layout.floatOrder.length;
-            const geometry: DockFloatGeometry =
-                float ?? {
-                    x: 0,
-                    y: 0,
-                    w: PANEL_DEFAULT_WIDTH,
-                    h: PANEL_DEFAULT_HEIGHT,
-                    anchor: "center",
-                    anchorMarginPx: 24,
-                    anchorOffsetX: cascadeIndex * 28,
-                    anchorOffsetY: cascadeIndex * 28,
-                };
+            const geometry: DockFloatGeometry = float ?? {
+                x: 0,
+                y: 0,
+                w: PANEL_DEFAULT_WIDTH,
+                h: PANEL_DEFAULT_HEIGHT,
+                anchor: "center",
+                anchorMarginPx: 24,
+                anchorOffsetX: cascadeIndex * 28,
+                anchorOffsetY: cascadeIndex * 28,
+            };
             state.layout = {
                 ...layout,
-                forms: { ...layout.forms, [newFormId]: { ...form, float: geometry, floating: true } },
+                forms: {
+                    ...layout.forms,
+                    [newFormId]: { ...form, float: geometry, floating: true },
+                },
                 order: [...layout.order, newFormId],
                 floatOrder: [...layout.floatOrder, newFormId],
             };
@@ -748,11 +754,7 @@ const dockSlice = createSlice({
                 // 深度上限：往面板里塞面板（源是面板时）要先过这一关。
                 if (
                     isPanelForm(source) &&
-                    !panelDepthFits(
-                        state.layout,
-                        target.childRootId,
-                        state.settings.maxPanelDepth,
-                    )
+                    !panelDepthFits(state.layout, target.childRootId, state.settings.maxPanelDepth)
                 ) {
                     return;
                 }
@@ -799,7 +801,13 @@ const dockSlice = createSlice({
             tree =
                 zone === "center"
                     ? addFormToTabset(tree, seedId, sourceFormId)
-                    : splitTabsetWith(tree, seedId, sourceFormId, dropZoneToSideKind(zone), allocate);
+                    : splitTabsetWith(
+                          tree,
+                          seedId,
+                          sourceFormId,
+                          dropZoneToSideKind(zone),
+                          allocate,
+                      );
             const pruned = pruneTree(tree);
             if (!pruned) return;
 
@@ -1034,9 +1042,12 @@ function dissolvePanelForm(state: DockState, formId: string): string[] {
             for (const memberId of collectDockedForms(panelTree)) {
                 const member = forms[memberId];
                 if (!member) continue;
-                const remembered =
-                    member.float ??
-                    { x: 140 + order.length * 28, y: 120 + order.length * 28, w: 640, h: 440 };
+                const remembered = member.float ?? {
+                    x: 140 + order.length * 28,
+                    y: 120 + order.length * 28,
+                    w: 640,
+                    h: 440,
+                };
                 forms = { ...forms, [memberId]: { ...member, floating: true, float: remembered } };
                 floatOrder = [...floatOrder.filter((id) => id !== memberId), memberId];
             }

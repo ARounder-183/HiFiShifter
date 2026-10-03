@@ -122,7 +122,14 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                 <Separator size="4" />
 
                 {/* ── 总策略 ─────────────────────────────────────────── */}
-                <AppField label={tf("clip_channel_import_mode")}>
+                <AppField
+                    label={tf("clip_channel_import_mode")}
+                    hint={
+                        isOff
+                            ? tf("clip_channel_import_mode_off_hint")
+                            : tf("clip_channel_import_mode_hint")
+                    }
+                >
                     <AppSelect
                         value={draft.mode}
                         onValueChange={(value) => patch({ mode: value as ChannelImportMode })}
@@ -132,11 +139,6 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                         }))}
                     />
                 </AppField>
-                <span className="hs-type-caption">
-                    {isOff
-                        ? tf("clip_channel_import_mode_off_hint")
-                        : tf("clip_channel_import_mode_hint")}
-                </span>
 
                 {/* ── 目标模式 ───────────────────────────────────────── */}
                 {!isOff && (
@@ -160,7 +162,10 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                             {tf("clip_channel_import_advanced")}
                         </span>
 
-                        <AppField label={tf("clip_channel_import_tolerance")}>
+                        <AppField
+                            label={tf("clip_channel_import_tolerance")}
+                            hint={tf("clip_channel_import_tolerance_hint")}
+                        >
                             <Flex align="center" gap="2">
                                 <AppNumberField
                                     value={toleranceToPercent(draft.tolerance)}
@@ -176,11 +181,11 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                                 />
                             </Flex>
                         </AppField>
-                        <span className="hs-type-caption">
-                            {tf("clip_channel_import_tolerance_hint")}
-                        </span>
 
-                        <AppField label={tf("clip_channel_import_window_sec")}>
+                        <AppField
+                            label={tf("clip_channel_import_window_sec")}
+                            hint={tf("clip_channel_import_window_hint")}
+                        >
                             <AppNumberField
                                 value={draft.windowSec}
                                 unit="seconds"
@@ -203,9 +208,6 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                                 onCommit={(next) => patch({ windowCount: next })}
                             />
                         </AppField>
-                        <span className="hs-type-caption">
-                            {tf("clip_channel_import_window_hint")}
-                        </span>
                     </>
                 )}
 

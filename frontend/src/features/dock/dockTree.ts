@@ -119,11 +119,7 @@ export function collectReachableRootIds(layout: DockLayout): Set<string> {
 }
 
 /** 窗体是否停靠在 `roots` 列出的某一棵树里（不含浮动态）。 */
-function formInRoots(
-    layout: DockLayout,
-    formId: string,
-    rootIds: ReadonlySet<string>,
-): boolean {
+function formInRoots(layout: DockLayout, formId: string, rootIds: ReadonlySet<string>): boolean {
     for (const rootId of rootIds) {
         const tree = layout.roots[rootId];
         if (tree && findTabsetOfForm(tree, formId)) return true;
@@ -517,7 +513,12 @@ export function findParentSplit(node: DockNode, zoneId: string): DockSplitNode |
  */
 export type DockInsertTarget =
     | { kind: "tab"; rootId?: string; tabsetId: string; index?: number }
-    | { kind: "split"; rootId?: string; tabsetId: string; side: "left" | "right" | "top" | "bottom" }
+    | {
+          kind: "split";
+          rootId?: string;
+          tabsetId: string;
+          side: "left" | "right" | "top" | "bottom";
+      }
     | { kind: "root"; rootId?: string; side: "left" | "right" | "top" | "bottom" };
 
 export function insertForm(

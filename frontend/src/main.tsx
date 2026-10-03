@@ -8,6 +8,7 @@ import "./index.css";
 import App from "./App.tsx";
 import { store } from "./app/store";
 import { getDockDragState } from "./features/dock/dockDragStore";
+import { isFileBrowserDragActive } from "./features/fileBrowser/fileBrowserDragStore";
 import { AppTooltipProvider } from "./components/AppTooltip";
 import { AppRootErrorBoundary } from "./components/AppRootErrorBoundary";
 import { fadeToolTipSuppress } from "./components/layout/timeline/FadeContextMenu";
@@ -56,7 +57,12 @@ createRoot(document.getElementById("root")!).render(
                         isSuppressedExternal={() =>
                             // 停靠拖拽期间必须抑制悬停提示：它不再是原生 tooltip，
                             // 不会自己消失，会正好盖住拖拽时给用户看的落点提示。
-                            fadeToolTipSuppress.isSuppressed || getDockDragState()?.started === true
+                            //
+                            // 文件浏览器拖拽同理：行既带 `data-tooltip` 又是拖拽源，
+                            // 不抑制的话气泡会被钉住并一路跟着鼠标飘到时间轴上方。
+                            fadeToolTipSuppress.isSuppressed ||
+                            getDockDragState()?.started === true ||
+                            isFileBrowserDragActive()
                         }
                     >
                         <GlobalGestureServices />

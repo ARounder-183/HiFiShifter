@@ -14,6 +14,7 @@ import {
 export const HS_TOOLTIP_CONTENT_EVENT = "hs-tooltip-content";
 import { createPortal } from "react-dom";
 
+import { shouldSuppressHoverSideEffects } from "../utils/penInput";
 import { clampTooltipPosition, type AppTooltipPosition } from "./appTooltipPosition";
 
 export type { AppTooltipPosition } from "./appTooltipPosition";
@@ -350,7 +351,25 @@ export function AppTooltipProvider({
             subtree: true,
         });
 
-        const onPointerOver = (event: PointerEvent) => updateFromEvent(event);
+        const onPointerOver = (event: PointerEvent) => {
+            /*
+             * 笔 / 触摸不弹浮标。
+             *
+             * 【为什么】数位笔在**笔尖未接触**时就以 100Hz+ 上报 pointerover /
+             * pointermove（见 `penInput.ts:11-14`），若照鼠标处理，用户还没打算
+             * 操作，浮标就已经在一串元素上乱跳；触摸同理，手指划过屏幕不是"悬停"。
+             * 判定收在 `penInput.ts` 一处，与其余悬停副作用同口径 —— 合成事件
+             * （pointerType 缺失）仍走鼠标路径，既有测试不受影响。
+             */
+            if (shouldSuppressHoverSideEffects(event)) {
+                if (!pinned && currentElement) {
+                    currentElement = null;
+                    setTooltip(null);
+                }
+                return;
+            }
+            updateFromEvent(event);
+        };
 
         const onPointerMove = (event: PointerEvent) => {
             lastEvent = event;

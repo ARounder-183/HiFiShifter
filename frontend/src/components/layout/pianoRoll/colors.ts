@@ -225,23 +225,46 @@ export function resolvePianoRollColors(isDark: boolean): PianoRollColors {
  * 直接解析会让整个键盘变成洋红（曾实际发生）。
  *
  * 特殊说明 1：借浏览器做归一化（挂一个游离 `span` 读 `getComputedStyle`）。这条
- * 路径会触发样式重算，**不能进渲染热路径**——调用方必须在低频时机（镜像更新 /
- * 主题变化）解析并按值缓存。
+ * 路径会触发样式重算，因此**自带进程级缓存**（与 `resolveThemeColor` 同一模式）：
+ * 同一输入串稳态下只探针一次；`data-theme` 参与缓存键保证切主题当帧不命中旧色，
+ * documentElement 内联样式变化（自定义主题色等）由 MutationObserver 整体失效。
+ * 缓存条目数以"去重后的颜色字符串"为上界（配色表 + 少量叠加色），不会无界增长。
  *
  * 特殊说明 2：无 DOM 环境（node 单测）原样返回，由调用方的有限性校验兜底。
  *
  * @param css CSS 颜色字符串（任意写法）。
  * @returns `rgb()/rgba()` 字符串；无 DOM 时原样返回。
  */
+const normalizedColorCache = new Map<string, string>();
+let normalizedColorObserverInstalled = false;
+
+/** 安装主题变更监听：documentElement 的属性变化（主题 / 内联变量）清空缓存。 */
+function installNormalizedColorInvalidation(): void {
+    if (normalizedColorObserverInstalled || typeof MutationObserver === "undefined") return;
+    normalizedColorObserverInstalled = true;
+    new MutationObserver(() => {
+        normalizedColorCache.clear();
+    }).observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["data-theme", "style"],
+    });
+}
+
 export function normalizeCssColor(css: string): string {
     if (typeof document === "undefined") return css;
+    installNormalizedColorInvalidation();
+    const cacheKey = `${document.documentElement.dataset.theme ?? ""}\u0000${css}`;
+    const cached = normalizedColorCache.get(cacheKey);
+    if (cached !== undefined) return cached;
     const probe = document.createElement("span");
     probe.style.color = css;
     probe.style.display = "none";
     document.body.appendChild(probe);
     const computed = getComputedStyle(probe).color;
     probe.remove();
-    return computed.length > 0 ? computed : css;
+    const normalized = computed.length > 0 ? computed : css;
+    normalizedColorCache.set(cacheKey, normalized);
+    return normalized;
 }
 
 /**

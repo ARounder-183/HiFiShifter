@@ -455,9 +455,7 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
                 .tracks
                 .iter()
                 .find(|t| &t.id == track_id)
-                .map(|t| {
-                    crate::state::SynthPipelineKind::from_track_algo(&t.pitch_analysis_algo)
-                })
+                .map(|t| crate::state::SynthPipelineKind::from_track_algo(&t.pitch_analysis_algo))
                 .unwrap_or(crate::state::SynthPipelineKind::NsfHifiganOnnx);
             if let Some(existing) = tl.params_by_root_track.get_mut(track_id) {
                 // 轨道已有 pitch 数据 → 合并非零区域
@@ -478,10 +476,8 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
                 for (key, new_curve) in &new_params.extra_curves {
                     // 参考值 = 「该帧无数据」的语义值：对 dyn 是沿用原声哨兵，
                     // 而不是描述符默认值 1.0（那会压平电平）。
-                    let default_val = crate::renderer::common_params::automation_curve_pad_value(
-                        merge_kind,
-                        key,
-                    );
+                    let default_val =
+                        crate::renderer::common_params::automation_curve_pad_value(merge_kind, key);
                     let existing_curve = existing
                         .extra_curves
                         .entry(key.clone())
@@ -541,22 +537,18 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
 
     // 粘贴需求 3/4：与 REAPER 剪贴板粘贴一致，前端依据 created_clip_ids
     // 完成选区整体替换与播放光标定位。导入产生的 Clip/轨道 id 全部为新生成。
-    json["created_clip_ids"] = serde_json::json!(
-        result
-            .timeline
-            .clips
-            .iter()
-            .map(|clip| clip.id.clone())
-            .collect::<Vec<_>>()
-    );
-    json["created_track_ids"] = serde_json::json!(
-        result
-            .timeline
-            .tracks
-            .iter()
-            .map(|track| track.id.clone())
-            .collect::<Vec<_>>()
-    );
+    json["created_clip_ids"] = serde_json::json!(result
+        .timeline
+        .clips
+        .iter()
+        .map(|clip| clip.id.clone())
+        .collect::<Vec<_>>());
+    json["created_track_ids"] = serde_json::json!(result
+        .timeline
+        .tracks
+        .iter()
+        .map(|track| track.id.clone())
+        .collect::<Vec<_>>());
 
     if !result.skipped_files.is_empty() {
         json["skipped_files"] = serde_json::json!(result.skipped_files);

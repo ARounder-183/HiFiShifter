@@ -214,11 +214,19 @@ struct FormantAnalysisKey {
 /// 分析缓存容量上限（条目极小，仅防无限增长）。
 const FORMANT_ANALYSIS_CACHE_CAP: usize = 256;
 
-fn global_formant_analysis_cache()
--> &'static Mutex<std::collections::HashMap<FormantAnalysisKey, crate::formant_morph::analysis::FormantAnalysisSummary>>
-{
+fn global_formant_analysis_cache() -> &'static Mutex<
+    std::collections::HashMap<
+        FormantAnalysisKey,
+        crate::formant_morph::analysis::FormantAnalysisSummary,
+    >,
+> {
     static CACHE: OnceLock<
-        Mutex<std::collections::HashMap<FormantAnalysisKey, crate::formant_morph::analysis::FormantAnalysisSummary>>,
+        Mutex<
+            std::collections::HashMap<
+                FormantAnalysisKey,
+                crate::formant_morph::analysis::FormantAnalysisSummary,
+            >,
+        >,
     > = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }

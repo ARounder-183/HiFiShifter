@@ -128,6 +128,29 @@ export interface AppDialogProps {
      */
     tone?: AppDialogTone;
     size?: AppDialogSize;
+    /**
+     * 正文区的布局模式。
+     *
+     * - `"scroll"`（默认）：body 自己滚动（`overflow-y-auto`），children 按内容
+     *   高度排布 —— 现有全部对话框的行为。
+     * - `"pane"`：body 变成**不滚动的 flex 列容器**（`flex flex-col
+     *   overflow-hidden`），高度由对话框的 `maxHeight` 裁决，由 children 自己用
+     *   `flex-1 min-h-0` 划分出一个或多个滚动区。
+     *
+     * 【为什么 `"pane"` 是必需的】body 默认只是 flex **item**，不是 flex
+     * **container**。写在 children 里的 `<div className="flex min-h-0 flex-1">`
+     * 上的那个 `flex-1` 因此等于空转 —— 父级不是 flex 容器，子元素高度仍由内容
+     * 决定，结果是 body 在滚、内层的 `overflow-auto` 永不触发。要做「工具条吸顶 +
+     * 左右两栏各自独立滚动」，必须让 body 提供一个**确定的高度**。（这一陷阱在
+     * `NotebookDialogs.tsx` 的注释里已有记录。）
+     *
+     * 【为什么是枚举而不是 `bodyClassName`】`.app-dialog` /
+     * `.app-dialog__body` 的滚动契约（见 `src/index.css` 的 `.app-dialog` 注释）
+     * 是踩过两次「两层竖直滚动条」才定下来的。给调用方一个任意覆盖 body 布局类
+     * 的口子，等于把「内容框永不滚动、只有 body 滚动」这条规则变成可选项。
+     * 枚举把选择收敛成两个经过验证的形态。
+     */
+    bodyLayout?: "scroll" | "pane";
     /** 页脚动作。省略则渲染无页脚（例如纯进度对话框）。 */
     actions?: AppDialogAction[];
     /**
@@ -193,6 +216,7 @@ export function AppDialog({
     description,
     tone = "default",
     size = "md",
+    bodyLayout = "scroll",
     actions,
     defaultActionId,
     beforeClose,
@@ -262,6 +286,12 @@ export function AppDialog({
         try {
             await result;
             if (action.autoClose ?? false) onOpenChange(false);
+        } catch (err) {
+            // 本 shell 是全部对话框异步动作的唯一入口：动作拒绝（典型是 invoke
+            // 抛 BackendInvokeError）若无接住，会变成 unhandled rejection —— 按钮
+            // pending 复位、对话框停在原地、失败原因只进控制台。统一兜底：记录
+            // 并保持对话框打开（不自动关闭），让用户能重试或取消。
+            console.error("[AppDialog] action failed:", action.id, err);
         } finally {
             setPendingActionId(null);
         }
@@ -445,7 +475,14 @@ export function AppDialog({
                      * "谁和谁是一组"，28px 比 4px 大 7 倍等于把分组说反了。
                      */}
                     {children ? (
-                        <div className="app-dialog__body mt-3 min-h-0 flex-1 overflow-y-auto">
+                        <div
+                            className={cx(
+                                "app-dialog__body mt-3 min-h-0 flex-1",
+                                bodyLayout === "pane"
+                                    ? "flex flex-col overflow-hidden"
+                                    : "hs-scroll-gutter overflow-y-auto",
+                            )}
+                        >
                             {children}
                         </div>
                     ) : null}

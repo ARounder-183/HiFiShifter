@@ -203,6 +203,13 @@
     --qt-ctl-md: 24px; /* 主工具栏按钮、对话框按钮（对齐 Radix size="1"） */
     --qt-ctl-lg: 32px; /* 菜单栏 / ActionBar 容器高 */
 
+    /*
+     * 滚动条让位：内容与滚动条槽位之间的呼吸（槽位本身由 `scrollbar-gutter`
+     * 预留，实测 10px）。见 `.hs-scroll-y` 的说明 —— 此前全仓 51 个滚动容器里
+     * 只有 2 个有右侧留白，内容右缘紧贴滑块，用户报的"右侧很挤"即此。
+     */
+    --qt-scrollbar-gutter: 8px;
+
     /* chrome 条高度：与上面的控件高度解耦（条要容纳 1px 边框与内边距） */
     --qt-bar-title: 28px; /* 浮动窗标题栏 */
     --qt-bar-compact: 26px; /* PanelToolbar / dock 标签栏 */
@@ -353,6 +360,30 @@ body {
     font-family: var(--qt-font-family);
 }
 
+/*
+ * 「这个表面自己实现拖拽」的显式声明。
+ *
+ * 触摸设备上，浏览器默认会把一次手指拖动解释成页面滚动 / 捏合，并在它接管手势
+ * 的那一刻给元素派发 `pointercancel` —— 自定义拖拽因此会**中途静默中断**，
+ * 表现为"拖到一半就不动了"。`touch-action: none` 把该元素的手势所有权收回来。
+ *
+ * 【为什么必须是"逐个显式声明"而不是全局 `*`】
+ * 设成 `none` 的表面同时也失去了原生的单指滚动。`PianoRollPanel.tsx` 的滚动容器
+ * 就因此**刻意不设**（见那里的注释）：一旦连滚动容器也设成 `none`，单指滚动整个
+ * 面板就废了。所以正确的默认是"不设"，由真正实现拖拽的能力层（滑块 / 分隔条 /
+ * 画布 / 按住重复的按钮）显式登记。
+ *
+ * 【为什么下拉与数值框不登记】它们只有点按与滚轮，没有拖拽手势；设成 `none` 只会
+ * 让"从控件上起手滑动"不再能滚动面板，没有任何收益。
+ *
+ * 【为什么用工具类而不是 Tailwind 的 `touch-none`】
+ * 与上面的 `-webkit-user-select` 同一考虑：这是**行为**约定，需要一段 rationale
+ * 与唯一的定义处；散落的 `touch-none` 会让"为什么这里要设"无从追溯。
+ */
+.hs-touch-none {
+    touch-action: none;
+}
+
 * {
     box-sizing: border-box;
 }
@@ -379,6 +410,13 @@ textarea {
  *
  * 仅在 `:focus-visible` 触发（键盘导航），鼠标点击不会画出焦点环，
  * 因此不影响现有的点按手感。第三方控件只要不显式移除 outline，即自动继承。
+ *
+ * 【为什么 Radix 的输入内层要单独排除】`input` / `textarea` 这两个通用选择器同样
+ * 命中 Radix 文本字段与多行文本的**内层**元素（`.rt-TextFieldInput` /
+ * `.rt-TextAreaInput`）。而 Radix 已经把环画在**外层容器**上
+ * （`.rt-TextFieldRoot:focus-within`，内嵌 2px）—— 两者叠加，带插槽的搜索框会同时
+ * 出现两个环：一个套住整块（对），另一个只套住中间那段输入（错，看起来就是
+ * "输入框那一段的高亮明显更粗"）。带插槽的字段是**一个**控件，环由外层表达。
  */
 :where(
     button,
@@ -391,16 +429,57 @@ textarea {
     select
 ):focus-visible,
 .rt-BaseButton:focus-visible,
-.rt-TextFieldInput:focus-visible,
-.rt-TextArea:focus-visible,
 .rt-SelectTrigger:focus-visible {
     outline: var(--qt-focus-ring-width) solid var(--qt-focus-ring);
     outline-offset: 1px;
 }
 
+/* Radix 字段的内层不画自己的环：外层容器已经画了（见上）。 */
+.rt-TextFieldInput:focus-visible,
+.rt-TextAreaInput:focus-visible {
+    outline: none;
+}
+
+/*
+ * Radix 的字段容器自己画环（内嵌 2px），这里只把**颜色**对齐到本应用的焦点令牌 ——
+ * 否则同一屏里搜索框（Radix 的 `--focus-8`）与其余控件（`--accent-9`）是两个色阶，
+ * 看起来像两套焦点样式。宽度与内嵌偏移沿用 Radix 的取值。
+ *
+ * `:not(:has(...))` 让不可编辑字段继续用 Radix 的灰色环。这条 `:has()` 若不被引擎
+ * 支持，规则整体失效、退回 Radix 自己的颜色 —— 降级是"颜色没对齐"，不是"没有环"。
+ */
+.rt-TextFieldRoot:where(:focus-within):not(:has(:disabled)):not(:has([readonly])),
+.rt-TextAreaRoot:where(:focus-within):not(:has(:disabled)):not(:has([readonly])) {
+    outline-color: var(--qt-focus-ring);
+}
+
 /* 实心按钮底色与强调色同系，焦点环紧贴会糊成一团：外挪 2px 拉开 */
 .rt-variant-solid:focus-visible {
     outline-offset: 2px;
+}
+
+/*
+ * 列表行的键盘光标（`AppListRow` 的 `active` → `[data-active]`）。
+ *
+ * 【为什么是一条独立规则，而不是行原语上的 Tailwind 工具类】
+ * 上一版把环写成 `outline outline-1 outline-offset-[-1px] outline-[color:…]`，
+ * 同时用 `focus:outline-none` 关掉浏览器默认描边。问题在于后者编译成
+ * `outline: 2px solid transparent` 这个**简写**，而它带 `:focus`，优先级高于
+ * 那四个单类 —— 于是光标行的描边被整体改写成透明，键盘移动**完全看不到高亮**。
+ * 一条显式规则不存在这种相互覆盖。
+ *
+ * 【为什么是 `:focus` 而不是 `:focus-visible`】行是通过脚本 `.focus()` 拿到焦点的，
+ * `:focus-visible` 是否命中取决于"上一次交互是不是键盘"这一浏览器启发式：在
+ * "先点一下行、再按方向键"这类混合序列里并不确定，一旦不命中，键盘用户就又失去
+ * 位置提示。`:focus` 是确定性的 —— 有焦点就画、焦点离开就收，没有猜测。
+ *
+ * 【为什么内嵌（负偏移）】行是整宽的、彼此紧贴，外扩的环会压到相邻行上、
+ * 也会被滚动容器裁掉。负偏移把环画在行自己的盒内 —— 与
+ * `.hs-slider-box` 滑块拇指的内嵌环、notebook 的 `outline-offset: -3px` 同一手法。
+ */
+[data-active]:focus {
+    outline: var(--qt-focus-ring-width) solid var(--qt-focus-ring);
+    outline-offset: calc(-1 * var(--qt-focus-ring-width));
 }
 
 /*
@@ -436,19 +515,84 @@ textarea {
 }
 
 /*
+ * 滚动让位：让滚动条拥有自己的位置，而不是紧贴内容。
+ *
+ * 【实测（本引擎：WebView2/Chromium + `scrollbar-width: thin`）】
+ *   - `overflow-y: auto` 且内容溢出时，滚动条**占 10px 布局宽**（并非覆盖式）；
+ *   - `scrollbar-gutter: stable` 在**不溢出时也预留**这 10px（实测 clientWidth
+ *     200 → 190），因此内容宽度不会在滚动条出现/消失时跳 10px；
+ *   - 全仓 51 个滚动容器里只有 2 个写了右侧留白 —— 其余容器的内容右缘直接贴着
+ *     滚动条，这正是用户报告的"右侧看上去很挤"。
+ *
+ * 【为什么既留 gutter 又给 padding】gutter 是滚动条自己的槽位（10px），padding 是
+ * 内容与槽位之间的呼吸（8px）。只做前者，内容仍紧贴滑块；只做后者，滚动条会画在
+ * padding 上但内容宽度仍会跳。
+ *
+ * 【为什么**不**接管 `overflow`】本类只负责让位，滚动轴由调用方自己的
+ * `overflow-y-auto` / `overflow-auto` 决定 —— 否则 `overflow-auto`（两轴）会被
+ * 悄悄收窄成只纵向可滚。两者是正交的，叠加即用。
+ *
+ * 【与 `.custom-scrollbar` 的分工】那条只负责配色（透明轨道），本类负责让位；两者可叠加。
+ */
+.hs-scroll-gutter {
+    scrollbar-gutter: stable;
+    padding-right: var(--qt-scrollbar-gutter);
+}
+
+/* 容器自身已有右侧留白（本来就与滚动条保持距离）：只预留槽位，不再叠加 padding。 */
+.hs-scroll-gutter-flush {
+    scrollbar-gutter: stable;
+}
+
+/*
+ * Radix `ScrollArea`：它**自绘滑块**（原生滚动条被隐藏），因此 `scrollbar-gutter`
+ * 对它无效 —— 滑块绝对定位在 root 的 padding box 右缘，给 root 留出右侧内边距，
+ * 滑块就落在那条带子里，内容自然让开。
+ */
+.hs-scroll-area {
+    padding-right: var(--qt-scrollbar-gutter);
+}
+
+/*
+ * Radix `ScrollArea`：它**自绘滑块**（原生滚动条被隐藏），因此 `scrollbar-gutter`
+ * 对它无效 —— 滑块绝对定位在 root 的 padding box 右缘，给 root 留出右侧内边距，
+ * 滑块就落在那条带子里，内容自然让开。
+ */
+.hs-scroll-area {
+    padding-right: var(--qt-scrollbar-gutter);
+}
+
+/*
  * 滑块包装盒：把 Radix 滑块头的**装饰溢出**收在自己的盒子里（见 `ui/Slider.tsx`
- * 的说明）。盒高由组件的 `style.minHeight` 按 Radix 尺寸下发，这里只负责裁切。
+ * 的说明）。盒高由组件的 `style.minHeight` 按 Radix 尺寸下发，这里负责裁切，
+ * 并为**可见**装饰留出横向余量。
  *
- * 【为什么是 clip 而不是 hidden】`overflow: hidden` 会把裁切盒卡在 `minHeight`
- * 上，而焦点环的盒高正好等于它（0 余量，分数 DPR 下可能削掉 1px）；`clip-margin`
- * 给出 3px 余量，可见部分（轨道 / 滑块头 / 焦点环）全部保留。
- *
- * 【删掉这条规则的后果】含滑块的对话框会重新长出那条滚不动的竖直滚动条 ——
+ * 【删掉裁切的后果】含滑块的对话框会重新长出那条滚不动的竖直滚动条 ——
  * 滑块头的装饰是绝对定位的，会被祖先的滚动容器算成可滚动溢出。
+ *
+ * 【为什么还需要横向内边距】盒高按「滑块头 + 半个轨道」下发，但滑块头**可见**的
+ * 部分是 `::after`，它比滑块头本体大：每边多 0.25 × 轨道（size 2 = 2px，size 1 =
+ * 1.5px）。于是滑块头在 0% / 100% 时向外越过轨道两端，而裁切线贴齐盒边 ——
+ * 那 2px 被削平，表现是「滑块头滑到最右时右边像被切了一刀」（实测 dpr 2 下
+ * 16px 的圆只画出 14px）。留 3px 横向内边距后，轨道两端各内缩 3px，整圆落在盒内 ——
+ * 代价是滑块的左缘比同一表单里其它控件的左缘内缩 3px（小于同一行的行内间隙）。
+ *
+ * 【为什么焦点环改成内嵌】Radix 的环是 `::after` 向外 3px + 5px 的 box-shadow，
+ * 需要 26px 高，而盒高只有 16px（= 行高，见 `DECORATION_BOX_PX`）—— 外扩的环被
+ * 整条裁掉，只剩左右两段竖边，看上去像给滑块头套了个方框。盒高不能涨（涨了每行
+ * 滑块都会变高、整页行距跟着变），所以把环画进滑块头内部；宽度与颜色取应用令牌，
+ * 与按钮 / 输入框的焦点环同源。
  */
 .hs-slider-box {
     overflow: clip;
-    overflow-clip-margin: 3px;
+    overflow-clip-margin: 0;
+    padding-inline: 3px;
+}
+
+.hs-slider-box .rt-SliderThumb:focus-visible::after {
+    box-shadow:
+        var(--slider-thumb-box-shadow),
+        inset 0 0 0 var(--qt-focus-ring-width) var(--qt-focus-ring);
 }
 
 /* 隐藏纵向滚动条（保留滚动功能）用于左侧轨道头。

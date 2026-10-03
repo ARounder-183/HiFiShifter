@@ -18,14 +18,22 @@ import { configureStore } from "@reduxjs/toolkit";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Provider } from "react-redux";
-import { afterEach, expect, test } from "vitest";
+import { afterAll, afterEach, expect, test } from "vitest";
 
 import keybindingsReducer from "./keybindingsSlice";
 import sessionReducer from "../session/sessionSlice";
 import { useKeybindings } from "./useKeybindings";
 import type { ActionId } from "./types";
+import {
+    installFocusSurfaceTracking,
+    resetActiveSurfaceForTests,
+    setActiveSurfaceExplicit,
+} from "../uiFocus/focusSurface";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+// 活动表面的跟踪由 App 安装；这里装上，才能覆盖"焦点归属"的真实链路。
+const disposeFocusSurface = installFocusSurfaceTracking();
 
 function createTestStore() {
     return configureStore({
@@ -43,7 +51,12 @@ function Harness() {
 const mounted: Array<() => Promise<void>> = [];
 afterEach(async () => {
     fired.length = 0;
+    resetActiveSurfaceForTests();
     while (mounted.length) await mounted.pop()?.();
+});
+
+afterAll(() => {
+    disposeFocusSurface();
 });
 
 async function mount() {
@@ -215,4 +228,137 @@ test("非方向键的全局快捷键在标签条里照常生效", async () => {
     // 其余全局快捷键不受影响 —— `k` 默认绑定在节拍器上。
     press(tab, "k");
     expect(fired).toEqual(["playback.metronome"]);
+});
+
+// ── 输入式快速跳转（`data-hs-typeahead`）的表面 ────────────────────────────
+
+/*
+ * 【为什么要有这一组】全局绑定里有 15 个**无修饰的单键**（`d` 切参数拖拽方向、
+ * `s` 分割片段、`k` 节拍器…）以及 Enter / Space / Backspace / Delete 等。分发器在
+ * window **捕获**阶段命中后就 `preventDefault()` + `stopPropagation()`，于是焦点在
+ * 文件列表里时：打字母被全局绑定截走（"输入字母快速跳转"永远进不来），Enter 去停
+ * 播放而不是打开文件夹，Backspace 去初始化参数而不是回上级目录。
+ *
+ * 契约：**声明了 `data-hs-typeahead` 的表面拥有它自己实现了的那些键**，且事件必须
+ * 保持"未被消费"，否则面板自己的处理器也收不到。
+ */
+
+/**
+ * 建一个与文件列表同形的表面：`data-hs-surface` + `data-hs-typeahead` 容器 + 可聚焦的行。
+ *
+ * 两个属性缺一不可：前者让分发器知道"用户此刻在这个表面里工作"，后者声明
+ * "这个表面自己拥有输入式跳转的按键"。
+ */
+function buildTypeAheadList(): { list: HTMLElement; row: HTMLElement } {
+    const list = document.createElement("div");
+    list.setAttribute("data-hs-surface", "fileBrowser");
+    list.setAttribute("data-hs-typeahead", "1");
+    const row = document.createElement("div");
+    row.setAttribute("role", "option");
+    row.tabIndex = 0;
+    list.append(row);
+    document.body.append(list);
+    mounted.push(async () => {
+        list.remove();
+    });
+    return { list, row };
+}
+
+/** 带修饰键的按键（`press` 只发 key，这里需要 ctrl/shift）。 */
+function pressWith(
+    target: EventTarget,
+    key: string,
+    modifiers: { ctrl?: boolean; shift?: boolean; alt?: boolean } = {},
+): { defaultPrevented: boolean } {
+    const event = new KeyboardEvent("keydown", {
+        key,
+        bubbles: true,
+        cancelable: true,
+        ctrlKey: modifiers.ctrl ?? false,
+        shiftKey: modifiers.shift ?? false,
+        altKey: modifiers.alt ?? false,
+    });
+    target.dispatchEvent(event);
+    return { defaultPrevented: event.defaultPrevented };
+}
+
+test("列表里打字不被全局单键绑定截走（`d` 不再切参数拖拽方向）", async () => {
+    await mount();
+    const { row } = buildTypeAheadList();
+    row.focus();
+
+    const result = press(row, "d");
+
+    expect(fired).toEqual([]);
+    // 事件必须保持未消费：面板的输入式跳转就挂在这条链路上。
+    expect(result.defaultPrevented).toBe(false);
+});
+
+test("列表里 Enter / Space / Backspace / Delete / Escape 都归列表自己", async () => {
+    await mount();
+    const { row } = buildTypeAheadList();
+    row.focus();
+
+    for (const key of ["Enter", " ", "Backspace", "Delete", "Escape"]) {
+        fired.length = 0;
+        const result = press(row, key);
+        expect(fired, `${key} 被全局绑定截走了`).toEqual([]);
+        expect(result.defaultPrevented, `${key} 被消费了`).toBe(false);
+    }
+});
+
+test("列表里 Ctrl+A / Ctrl+C / Ctrl+Shift+N 归列表自己", async () => {
+    await mount();
+    const { row } = buildTypeAheadList();
+    row.focus();
+
+    for (const [key, mods] of [
+        ["a", { ctrl: true }],
+        ["c", { ctrl: true }],
+        ["n", { ctrl: true, shift: true }],
+    ] as const) {
+        fired.length = 0;
+        const result = pressWith(row, key, mods);
+        expect(fired, `Ctrl+${key} 被全局绑定截走了`).toEqual([]);
+        expect(result.defaultPrevented).toBe(false);
+    }
+});
+
+test("列表里没实现语义的全局快捷键照常生效（Ctrl+S 保存）", async () => {
+    /*
+     * 让路只覆盖"面板实现了语义"的键。Ctrl+S（保存工程）面板没有对应动作，
+     * 若一并吞掉，用户在文件列表里按保存会毫无反应 —— 那是新问题，不是修复。
+     */
+    await mount();
+    const { row } = buildTypeAheadList();
+    row.focus();
+
+    pressWith(row, "s", { ctrl: true });
+    expect(fired).toEqual(["project.save"]);
+});
+
+test("焦点不在列表里时，单键全局绑定不受影响", async () => {
+    // 对照：让路必须以"焦点在该表面内"为条件，否则时间轴的 `s`（分割）等会整体失效。
+    await mount();
+    buildTypeAheadList(); // 存在但未聚焦
+
+    press(document.body, "d");
+    press(document.body, "Enter");
+    expect(fired).toEqual(["pianoRoll.cycleDragDirection", "playback.stop"]);
+});
+
+test("DOM 焦点滞留在列表里、但活动表面是时间轴时，按键仍归时间轴", async () => {
+    /*
+     * 时间轴 / 参数编辑器刻意在 pointerdown 里 `preventDefault()` 自管焦点，点击它们
+     * 之后 DOM 焦点会**滞留在上一次聚焦的元素**上（例如刚在文件列表里点过的行）。
+     * 只按 target / activeElement 判断，时间轴的 `s`（分割）会被抢到文件列表里 ——
+     * 用户点一下时间轴再按分割键，什么都不会发生。
+     */
+    await mount();
+    const { row } = buildTypeAheadList();
+    row.focus(); // 焦点确实在列表的行上
+    setActiveSurfaceExplicit("timeline"); // ……但用户随后点的是时间轴
+
+    press(row, "s");
+    expect(fired).toEqual(["clip.split"]);
 });

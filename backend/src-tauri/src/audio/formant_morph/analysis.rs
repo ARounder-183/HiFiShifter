@@ -70,12 +70,19 @@ pub fn analyze_clip_formants(mono: &[f32], sr: u32) -> FormantAnalysisSummary {
     let mut start = 0usize;
     while start + frame_len <= analysis.len() {
         total_frames += 1;
-        if let Some(lpc_res) = lpc::analyze_frame(&analysis[start..start + frame_len], analysis_rate, LPC_ORDER) {
+        if let Some(lpc_res) = lpc::analyze_frame(
+            &analysis[start..start + frame_len],
+            analysis_rate,
+            LPC_ORDER,
+        ) {
             if let Some(roots) = lpc::poly_roots(&lpc::coeffs_to_monic(&lpc_res.coeffs)) {
                 let poles = lpc::roots_to_poles(&roots, analysis_rate);
-                if let Some(cand) =
-                    track::select_f1_f2(&poles, &lpc_res.coeffs, analysis_rate, lpc_res.residual_ratio)
-                {
+                if let Some(cand) = track::select_f1_f2(
+                    &poles,
+                    &lpc_res.coeffs,
+                    analysis_rate,
+                    lpc_res.residual_ratio,
+                ) {
                     let t = (start + frame_len / 2) as f32 / analysis_rate;
                     detected.push((t, cand.f1.freq_hz, cand.f2.freq_hz));
                 }
@@ -160,7 +167,11 @@ mod tests {
             "F2 统计 {} 偏离真值过大",
             summary.source_f2_hz
         );
-        assert!(summary.voiced_ratio > 0.8, "voiced_ratio={}", summary.voiced_ratio);
+        assert!(
+            summary.voiced_ratio > 0.8,
+            "voiced_ratio={}",
+            summary.voiced_ratio
+        );
         assert!(!summary.track.is_empty());
         assert!(summary.track.len() <= TRACK_MAX_POINTS);
         // t 归一化严格递增

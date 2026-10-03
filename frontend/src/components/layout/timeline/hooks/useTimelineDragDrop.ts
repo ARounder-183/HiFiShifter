@@ -20,6 +20,9 @@ import {
     importMultipleAudioAtPosition,
 } from "../../../../features/session/sessionSlice";
 import { emitExternalFileAction } from "../../../../features/session/projectOpenEvents";
+import { emitFolderImportRequest } from "../../../../features/fileBrowser/folderImportEvents";
+import { rootIndexAtDrop } from "../../../../features/session/trackUtils";
+import { fileBrowserApi } from "../../../../services/api";
 import { detectExternalPathAction, isAcceptedDropPath, partitionDroppedPaths } from "../";
 import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../../../utils/snapHighlight";
 import type { SnapTimelineFn } from "./useTimelineState";
@@ -134,7 +137,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
 
                 type TauriDragDropEvent = { payload?: TauriDragDropPayload } | TauriDragDropPayload;
 
-                unlisten = await win.onDragDropEvent((event: TauriDragDropEvent) => {
+                unlisten = await win.onDragDropEvent(async (event: TauriDragDropEvent) => {
                     if (disposed) return;
                     const payload = ("payload" in event ? event.payload : event) as
                         | TauriDragDropPayload
@@ -252,8 +255,21 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                         // 音频导入默认分支；多文件更是把全部路径无差别转发，MIDI /
                         // 工程 / 无关文件都被当成 Clip 导入。
                         // 现在：先按 `partitionDroppedPaths` 分类，只放行白名单内的
-                        // 类型（媒体 / 工程含 -bak / 外部工程 / MIDI），其余整体丢弃。
-                        const partition = partitionDroppedPaths(paths);
+                        // 类型（媒体 / 工程含 -bak / 外部工程 / MIDI / 目录），其余整体丢弃。
+                        //
+                        // 目录类型只能问文件系统：路径字符串看不出它是不是目录。一次
+                        // 批量查询，拖入 20 项也只发一次 IPC。查询失败按"都不是目录"
+                        // 处理 —— 与改动前的行为一致，不会凭空建轨道。
+                        let directories: ReadonlySet<string> = new Set<string>();
+                        try {
+                            const stats = await fileBrowserApi.statPaths(paths);
+                            directories = new Set(
+                                stats.filter((stat) => stat.isDir).map((stat) => stat.path),
+                            );
+                        } catch {
+                            /* 见上：降级为"没有目录" */
+                        }
+                        const partition = partitionDroppedPaths(paths, { directories });
                         if (partition.rejectedPaths.length > 0 && debugDnd) {
                             console.info(
                                 "[dnd] 已拒绝拖放（类型不在准入白名单）:",
@@ -267,9 +283,34 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                             tauriDraggedPathRef.current = null;
                             tauriLastDropPathRef.current = null;
                             const kind = detectExternalPathAction(partition.projectPath);
-                            if (kind !== null && kind !== "importAudio" && kind !== "importMidi") {
+                            if (
+                                kind !== null &&
+                                kind !== "importAudio" &&
+                                kind !== "importMidi" &&
+                                kind !== "importFolder"
+                            ) {
                                 emitExternalFileAction(kind, partition.projectPath);
                             }
+                            return;
+                        }
+
+                        // 目录：展开成媒体文件后按所选模式导入。选项对话框与默认值的
+                        // 决定权在 `FolderImportHost`（只有一个对话框状态）。
+                        // 目录里的散文件（同时拖入的媒体文件）一并交给它，避免
+                        // "目录进对话框、文件走另一条路"这种分叉。
+                        if (partition.folderPaths.length > 0) {
+                            tauriDropHandledAtRef.current = Date.now();
+                            tauriDraggedPathRef.current = null;
+                            tauriLastDropPathRef.current = null;
+                            setDropPreview(null);
+                            emitFolderImportRequest({
+                                dirs: [...partition.folderPaths],
+                                looseFiles: [...partition.mediaPaths],
+                                trackId,
+                                startSec: beat,
+                                insertIndex: rootIndexAtDrop(sessionRef.current.tracks, trackId),
+                            });
+                            clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                             return;
                         }
 
@@ -390,6 +431,13 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                 durationSec: number;
                 filePaths: string[];
                 isRightDrag: boolean;
+                /**
+                 * 本次拖拽里**是目录**的路径（面板拖拽时类型已知，无需再问文件系统）。
+                 *
+                 * 【为什么不在拖拽开始时 stat】面板手里就有 `FileEntry.isDir`，而
+                 * 拖拽移动每几毫秒就发一次事件 —— 在这里 stat 等于把 I/O 放进热路径。
+                 */
+                dirPaths?: string[];
             };
             if (!detail) return;
 
@@ -467,6 +515,15 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                 return;
             }
 
+            // 用户中途放弃了这次拖拽（反向键点击打断 / 指针取消）：只做清理，
+            // 不执行任何导入。与 `drop` 各走一条直路，不靠 `canceled` 标志在
+            // 同一个分支里分叉。
+            if (detail.type === "cancel") {
+                setDropPreview(null);
+                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                return;
+            }
+
             if (detail.type === "drop") {
                 setDropPreview(null);
                 if (isOverTimeline) {
@@ -491,6 +548,29 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                         ev.stopImmediatePropagation();
                         window.removeEventListener("contextmenu", suppressCtx, true);
                     };
+
+                    // 目录：面板拖拽时**类型是已知的**（`dirPaths` 由行的 `isDir` 得来），
+                    // 不需要再去问文件系统 —— 这是与系统拖放的关键差别。
+                    const dirPaths = new Set(detail.dirPaths ?? []);
+                    const folderPaths = filePaths.filter((path) => dirPaths.has(path));
+                    if (folderPaths.length > 0) {
+                        if (isRightDrag) window.addEventListener("contextmenu", suppressCtx, true);
+                        emitFolderImportRequest({
+                            dirs: folderPaths,
+                            // 同时拖入的媒体文件一并交给宿主，别让它们走另一条路。
+                            looseFiles: filePaths.filter(
+                                (path) =>
+                                    !dirPaths.has(path) &&
+                                    detectExternalPathAction(path) === "importAudio",
+                            ),
+                            trackId,
+                            startSec: beat,
+                            insertIndex: rootIndexAtDrop(sessionRef.current.tracks, trackId),
+                            fromExplicitRequest: isRightDrag,
+                        });
+                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                        return;
+                    }
 
                     if (actionKind === "openProject") {
                         // 拖入 HiFiShifter 工程（hshp/hsp）：始终弹出
@@ -538,7 +618,11 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                                 trackId,
                                 startSec: beat,
                             });
-                        } else if (actionKind && actionKind !== "importAudio") {
+                        } else if (
+                            actionKind &&
+                            actionKind !== "importAudio" &&
+                            actionKind !== "importFolder"
+                        ) {
                             // rpp / vshp / vsp 工程文件：直接视为对应格式的导入。
                             emitExternalFileAction(actionKind, filePath);
                         } else {

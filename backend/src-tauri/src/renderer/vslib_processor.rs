@@ -442,7 +442,8 @@ impl ClipProcessor for VslibProcessor {
             if debug {
                 log::warn!(
                     "[vslib] project_info: master_volume={:.3} samp_freq={}",
-                    prj_info.masterVolume, prj_info.sampFreq,
+                    prj_info.masterVolume,
+                    prj_info.sampFreq,
                 );
             }
         }
@@ -507,7 +508,8 @@ impl ClipProcessor for VslibProcessor {
             .map_err(|e| format!("VslibSetItemInfo: {e}"))?;
         debug_eprintln!(
             "[vslib] synth_mode_applied: item_num={} synth_mode={}",
-            item_num, synth_mode,
+            item_num,
+            synth_mode,
         );
 
         // ── 6. （已移除 VslibSetPitchArray）──────────────────────────────────
@@ -595,7 +597,9 @@ impl ClipProcessor for VslibProcessor {
             if has_pitch {
                 debug_eprintln!(
                     "[vslib] pitch_via_ctrl_pnt: clip_id={} total_ctrl_pnts={} pitch_applied={}",
-                    ctx.clip_id, ctrl_pnt_num, pitch_applied_count,
+                    ctx.clip_id,
+                    ctrl_pnt_num,
+                    pitch_applied_count,
                 );
             }
         }
@@ -629,14 +633,18 @@ impl ClipProcessor for VslibProcessor {
                     if let Err(e) =
                         check(unsafe { VslibSetTimeCtrlPnt(proj.0, item_num, 0, time1, time2) })
                     {
-                        log_warn_limited!("[vslib] WARNING: VslibSetTimeCtrlPnt(0, {time1}, {time2}): {e}");
+                        log_warn_limited!(
+                            "[vslib] WARNING: VslibSetTimeCtrlPnt(0, {time1}, {time2}): {e}"
+                        );
                     }
                 } else {
                     let (time1, time2) = stretch_points[0];
                     if let Err(e) =
                         check(unsafe { VslibAddTimeCtrlPnt(proj.0, item_num, time1, time2) })
                     {
-                        log_warn_limited!("[vslib] WARNING: VslibAddTimeCtrlPnt({time1}, {time2}): {e}");
+                        log_warn_limited!(
+                            "[vslib] WARNING: VslibAddTimeCtrlPnt({time1}, {time2}): {e}"
+                        );
                     } else {
                         stretch_pnt_num += 1;
                     }
@@ -658,7 +666,9 @@ impl ClipProcessor for VslibProcessor {
                     if let Err(e) =
                         check(unsafe { VslibAddTimeCtrlPnt(proj.0, item_num, time1, time2) })
                     {
-                        log_warn_limited!("[vslib] WARNING: VslibAddTimeCtrlPnt({time1}, {time2}): {e}");
+                        log_warn_limited!(
+                            "[vslib] WARNING: VslibAddTimeCtrlPnt({time1}, {time2}): {e}"
+                        );
                     } else {
                         stretch_pnt_num += 1;
                     }
@@ -669,7 +679,8 @@ impl ClipProcessor for VslibProcessor {
                 });
                 debug_eprintln!(
                     "[vslib] time_stretch_ctrl_points: clip_id={} count={}",
-                    ctx.clip_id, stretch_pnt_num
+                    ctx.clip_id,
+                    stretch_pnt_num
                 );
                 for pnt in 0..stretch_pnt_num.min(4) {
                     let mut time1: c_int = 0;
@@ -681,7 +692,9 @@ impl ClipProcessor for VslibProcessor {
                     {
                         debug_eprintln!(
                             "[vslib] time_stretch_ctrl_point[{}]: time1={} time2={}",
-                            pnt, time1, time2
+                            pnt,
+                            time1,
+                            time2
                         );
                     }
                 }
@@ -697,7 +710,9 @@ impl ClipProcessor for VslibProcessor {
             {
                 debug_eprintln!(
                     "[vslib] stretch_verify_edit: time1={:.3} -> time2={:.3} expected={:.3}",
-                    end_time1, mapped_edit_sample, end_time2_f64
+                    end_time1,
+                    mapped_edit_sample,
+                    end_time2_f64
                 );
             }
 
@@ -709,7 +724,9 @@ impl ClipProcessor for VslibProcessor {
             {
                 debug_eprintln!(
                     "[vslib] stretch_verify_org: time2={:.3} -> time1={:.3} expected={:.3}",
-                    end_time2_f64, mapped_org_sample, end_time1
+                    end_time2_f64,
+                    mapped_org_sample,
+                    end_time1
                 );
             }
         }
@@ -774,7 +791,9 @@ impl ClipProcessor for VslibProcessor {
                 "[vslib] WARNING: left channel is silent while right channel has audio; downmix will use right channel"
             );
         } else if right_stats.nonzero == 0 && left_stats.nonzero > 0 {
-            log_warn_limited!("[vslib] WARNING: right channel is silent while left channel has audio");
+            log_warn_limited!(
+                "[vslib] WARNING: right channel is silent while left channel has audio"
+            );
         } else if left_stats.nonzero == 0 && right_stats.nonzero == 0 {
             log_warn_limited!(
                 "[vslib] WARNING: mix output is fully silent despite successful VslibGetMixData"

@@ -123,9 +123,8 @@ mod tests {
         assert_eq!(dt.datepart(), expected_datepart);
         // 秒按 2 秒量化。
         let quantized_second = (local.second() as u16 / 2) * 2;
-        let expected_timepart = (quantized_second / 2)
-            | ((local.minute() as u16) << 5)
-            | ((local.hour() as u16) << 11);
+        let expected_timepart =
+            (quantized_second / 2) | ((local.minute() as u16) << 5) | ((local.hour() as u16) << 11);
         assert_eq!(dt.timepart(), expected_timepart);
     }
 
@@ -133,10 +132,8 @@ mod tests {
     fn options_preserve_source_mtime_end_to_end() {
         // 端到端：源文件设置 26 小时前的修改时间 → 打包 → 回读 ZipArchive，
         // 条目的 DOS 时间位域应与源文件 mtime 一致（修复前恒为 1980-01-01）。
-        let dir = std::env::temp_dir().join(format!(
-            "hifishifter_zip_util_test_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("hifishifter_zip_util_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let source = dir.join("source.bin");
         std::fs::write(&source, b"payload").expect("write source");
@@ -156,8 +153,7 @@ mod tests {
             let mut zip = zip::ZipWriter::new(f);
             zip.start_file("source.bin", options_for_source(&source))
                 .expect("start_file");
-            std::io::copy(&mut std::fs::File::open(&source).unwrap(), &mut zip)
-                .expect("copy");
+            std::io::copy(&mut std::fs::File::open(&source).unwrap(), &mut zip).expect("copy");
             zip.finish().expect("finish");
         }
 

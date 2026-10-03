@@ -636,9 +636,7 @@ export function importLayoutJson(dispatch: AppDispatch, json: string): boolean {
     const normalized = normalizeDockLayout(parsed);
     // 归一化一定会产出可用布局，所以"是否导入成功"由调用方通过布局是否变化
     // 之外的信息判断 —— 这里额外校验至少有一棵根非空，避免把垃圾 JSON 当成成功。
-    const hasTree = Object.values(normalized.roots).some(
-        (tree) => collectTabsets(tree).length > 0,
-    );
+    const hasTree = Object.values(normalized.roots).some((tree) => collectTabsets(tree).length > 0);
     if (!hasTree) return false;
     dispatch(setDockLayout(normalized));
     return true;

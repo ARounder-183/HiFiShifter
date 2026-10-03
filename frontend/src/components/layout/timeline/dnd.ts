@@ -115,13 +115,32 @@ export type ExternalPathActionKind =
     | "importReaper"
     | "importVocalShifter"
     | "importAudio"
-    | "importMidi";
+    | "importMidi"
+    /** 目录：拖入时间轴 = 目录导入（展开后按模式排布）。 */
+    | "importFolder";
+
+/** `detectExternalPathAction` 的补充判据。 */
+export interface DetectPathOptions {
+    /**
+     * 该路径是否是一个目录。
+     *
+     * 【为什么必须由调用方提供】判据本身是纯字符串函数，无法 `stat`。目录**没有**
+     * 可用的扩展名线索 —— 而扩展名判据在这里恰好会误判：一个名叫 `take.wav` 的
+     * 文件夹会被当成音频。所以 `isDir` 一旦给出就**优先于**所有扩展名判断。
+     *
+     * 缺省 `false`：拿不到目录信息时行为与改动前逐字节一致（目录仍被拒）。
+     */
+    isDir?: boolean;
+}
 
 export function detectExternalPathAction(
     path: string | null | undefined,
+    options?: DetectPathOptions,
 ): ExternalPathActionKind | null {
     const normalized = String(path ?? "").trim();
     if (!normalized) return null;
+    // 目录优先：目录名可以带任何后缀，扩展名判据对它是错的。
+    if (options?.isDir) return "importFolder";
     if (isProjectFilePath(normalized)) return "openProject";
     if (isReaperProjectFilePath(normalized)) return "importReaper";
     if (isVocalShifterProjectFilePath(normalized)) return "importVocalShifter";
@@ -147,7 +166,8 @@ export function detectExternalPathAction(
  *    （见 {@link isProjectFilePath}）；
  * 3. 本项目可导入的外部工程格式（REAPER `.rpp`、VocalShifter `.vshp` / `.vsp`），
  *    含 REAPER 的 `-bak` 备份；
- * 4. MIDI 文件（`.mid` / `.midi` / `.smf`）。
+ * 4. MIDI 文件（`.mid` / `.midi` / `.smf`）；
+ * 5. **目录**（需调用方提供 `isDir`，见 {@link DetectPathOptions}）。
  *
  * 其余一律拒绝拖放（不建 Clip、不弹预览）。
  *
@@ -155,10 +175,14 @@ export function detectExternalPathAction(
  * 分叉，就会出现"预览接受但落下被拒"（或反之）这类只能靠肉眼发现的不一致。
  *
  * @param path 文件路径（可为空 / null）。
+ * @param options 目录信息（缺省时目录被拒，行为与改动前一致）。
  * @returns 是否接受该路径的拖放。
  */
-export function isAcceptedDropPath(path: string | null | undefined): boolean {
-    return detectExternalPathAction(path) !== null;
+export function isAcceptedDropPath(
+    path: string | null | undefined,
+    options?: DetectPathOptions,
+): boolean {
+    return detectExternalPathAction(path, options) !== null;
 }
 
 /**
@@ -200,8 +224,22 @@ export interface DroppedPathPartition {
     readonly midiPaths: readonly string[];
     /** 媒体文件（按音频导入为 Clip）。 */
     readonly mediaPaths: readonly string[];
+    /** 目录（拖入 = 目录导入，展开后按所选模式排布）。 */
+    readonly folderPaths: readonly string[];
     /** 不接受、已丢弃的路径（仅用于日志 / 诊断）。 */
     readonly rejectedPaths: readonly string[];
+}
+
+/** `partitionDroppedPaths` 的补充信息。 */
+export interface PartitionDroppedPathsOptions {
+    /**
+     * 已知是目录的路径集合（来自 `stat_paths` 或文件浏览器的 `FileEntry.isDir`）。
+     *
+     * 【为什么用集合而不是"每个路径都问一遍"】调用方往往只知道其中一部分的
+     * 类型（文件浏览器拖拽时只有被拖的那几个条目）；未列出的路径按"不是目录"
+     * 处理，于是既有调用方不传这个参数时行为完全不变。
+     */
+    directories?: ReadonlySet<string>;
 }
 
 /**
@@ -214,25 +252,35 @@ export interface DroppedPathPartition {
  *
  * 特殊说明 1：工程文件只取**第一个**——一次拖放多个工程没有明确语义，打开多个会互相
  * 覆盖当前会话。
- * 特殊说明 2：媒体文件的相对顺序保留原样（用户拖放顺序即期望的落点顺序）。
+ * 特殊说明 2：媒体文件的相对顺序保留原样（用户拖放顺序即期望的落点顺序）；目录同理。
  *
  * @param paths 拖放路径序列（可为空）。
+ * @param options 已知的目录信息；省略时目录按未知类型处理（被拒）。
  * @returns 分类结果；`rejectedPaths` 仅含未通过准入判据的项。
  */
 export function partitionDroppedPaths(
     paths: readonly (string | null | undefined)[],
+    options?: PartitionDroppedPathsOptions,
 ): DroppedPathPartition {
     let projectPath: string | null = null;
     const midiPaths: string[] = [];
     const mediaPaths: string[] = [];
+    const folderPaths: string[] = [];
     const rejectedPaths: string[] = [];
+    const directories = options?.directories;
 
     for (const raw of paths) {
         const normalized = String(raw ?? "").trim();
         if (!normalized) continue;
-        const kind = detectExternalPathAction(normalized);
+        const kind = detectExternalPathAction(normalized, {
+            isDir: directories?.has(normalized) ?? false,
+        });
         if (kind === null) {
             rejectedPaths.push(normalized);
+            continue;
+        }
+        if (kind === "importFolder") {
+            folderPaths.push(normalized);
             continue;
         }
         if (kind === "openProject" || kind === "importReaper" || kind === "importVocalShifter") {
@@ -246,7 +294,7 @@ export function partitionDroppedPaths(
         mediaPaths.push(normalized);
     }
 
-    return { projectPath, midiPaths, mediaPaths, rejectedPaths };
+    return { projectPath, midiPaths, mediaPaths, folderPaths, rejectedPaths };
 }
 
 export function findFirstProjectFilePath(paths: Array<string | null | undefined>): string | null {

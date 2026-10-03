@@ -79,9 +79,7 @@ pub(super) fn import_vocalshifter_project(
     // UI 轮询的串行点。REAPER 导入自带 CHANMODE 权威字段，**不走这里**。
     let converted_takes = crate::channel_policy::apply_policy_to_clips(&mut result.timeline.clips);
     if converted_takes > 0 {
-        log::info!(
-            "[import_vocalshifter] channel policy folded {converted_takes} take(s) to mono"
-        );
+        log::info!("[import_vocalshifter] channel policy folded {converted_takes} take(s) to mono");
     }
 
     // 应用到 AppState —— 合并到现有工程（不替换）

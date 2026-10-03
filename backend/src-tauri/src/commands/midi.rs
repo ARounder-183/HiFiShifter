@@ -436,12 +436,12 @@ pub(super) fn import_midi_to_pitch(
     };
 
     // 多选区掩码回滚用的导入前快照（仅在确实存在多段约束时才需要）
-    let mask_before: Option<Vec<f32>> = if selection_ranges.is_some() && !selection_window.is_empty()
-    {
-        Some(entry.pitch_edit.clone())
-    } else {
-        None
-    };
+    let mask_before: Option<Vec<f32>> =
+        if selection_ranges.is_some() && !selection_window.is_empty() {
+            Some(entry.pitch_edit.clone())
+        } else {
+            None
+        };
 
     let target_slice = if let Some(clamp_len) = clamp_range_end {
         &mut entry.pitch_edit[..clamp_len]

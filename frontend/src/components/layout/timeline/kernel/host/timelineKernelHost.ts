@@ -3336,6 +3336,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let lastClipHoverKey = "";
 
     /**
+     * 上一次 hover 命中的**指针签名**（坐标 + 按键 + 修饰键）。
+     *
+     * `pointermove` 在同一坐标可连续触发（部分平台在捕获/按键状态变化后补发），
+     * 而悬停命中测试要走完整管线（`getBoundingClientRect` + hitTest + 淡变 /
+     * 重叠控件 + `resolveHeaderControl` 内的样式构建）。签名不变则悬停结果必然
+     * 不变——光标、命中分区、浮标身份全部只依赖这组输入——直接跳过整条链。
+     */
+    let lastHoverPointerKey = "";
+
+    /**
      * 是否需要抑制下一次 `contextmenu`。
      *
      * 右键按下即进入「待框选」，若不做抑制，框选松手时浏览器会补发 contextmenu
@@ -4115,7 +4125,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * @returns 无返回值。
      */
     function updateHoverCursor(event: PointerEvent): void {
-        if (gesture.kind !== "none" || panPointerId !== null) return;
+        if (gesture.kind !== "none" || panPointerId !== null) {
+            // 手势期间的移动不进悬停链；顺手清空指针签名，让手势结束后的第一次
+            // 移动必然重算（手势已改变场景，旧签名对应的悬停结果是过期的）。
+            lastHoverPointerKey = "";
+            return;
+        }
+        const pointerKey = `${event.clientX},${event.clientY},${event.buttons},${event.altKey},${event.ctrlKey},${event.metaKey},${event.shiftKey}`;
+        if (pointerKey === lastHoverPointerKey) return;
+        lastHoverPointerKey = pointerKey;
         // 【滚动条区域不是内容】轨道 / thumb 是容器子元素，指针事件会冒泡到这里；
         // 按坐标命中测试会把滚动条底下的 clip / 淡变控件当成命中对象 —— 光标变
         // 手势、浮标跟着弹出，而这块区域此刻只该与滚动条交互。指针落在滚动条
@@ -4127,11 +4145,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 { kind: "empty", sec: 0, trackId: null, trackIndex: -1 },
                 event.clientX,
                 event.clientY,
+                null,
             );
             if (container.style.cursor !== "default") container.style.cursor = "default";
             return;
         }
         const hit = hitAt(event.clientX, event.clientY);
+        // header 控件只解析一次：`resolveHeaderControl` 内部要构建 clip 头部样式
+        //（含 `measureText`），光标判定与浮标发布共用同一结果，不重复算。
+        const headerControl = hit.kind === "clip" ? resolveHeaderControl(hit) : null;
         // 默认分区（body / header）**不设抓取光标**。
         //
         // 旧实现的 clip 本体（`ClipItem` 根元素）与 header（名称 / 徽标）都没有
@@ -4142,7 +4164,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         let cursor = "default";
         if (hit.kind === "clip") {
             const kb = data().keybindings;
-            const headerControl = resolveHeaderControl(hit);
             switch (hit.region) {
                 case "left-edge":
                 case "right-edge":
@@ -4184,7 +4205,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             }
         }
         if (container.style.cursor !== cursor) container.style.cursor = cursor;
-        publishFadeHover(hit, event.clientX, event.clientY);
+        publishFadeHover(hit, event.clientX, event.clientY, headerControl);
     }
 
     /**
@@ -4199,9 +4220,17 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      *
      * @param hit 命中结果。
      * @param clientX 指针视口坐标 x。@param clientY 指针视口坐标 y。
+     * @param headerControl 调用方已解析的 header 控件（`updateHoverCursor` 里
+     *   光标判定已经算过一次，避免 `resolveHeaderControl` 的样式构建重复执行；
+     *   命中不是 clip 时传 null）。
      * @returns 无返回值。
      */
-    function publishFadeHover(hit: KernelHit, clientX: number, clientY: number): void {
+    function publishFadeHover(
+        hit: KernelHit,
+        clientX: number,
+        clientY: number,
+        headerControl: ClipHeaderControl,
+    ): void {
         const isFadeTarget =
             hit.kind === "clip" &&
             (hit.region === "fade-in-corner" ||
@@ -4211,7 +4240,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         // ── 非淡变：按需发布 clip 浮标内容 ──
         // 分区 + header 控件 + clip 三者共同决定文案，任一变化才重发（理由见
         // `onClipHover` 的说明：逐帧重发会让浮标重建、位置抖动）。
-        const hoverControl = hit.kind === "clip" ? resolveHeaderControl(hit) : null;
+        const hoverControl = hit.kind === "clip" ? headerControl : null;
         const clipKey =
             hit.kind !== "clip" ? "" : `${hit.clip.id}:${hit.region}:${hoverControl ?? ""}`;
         if (!isFadeTarget) {

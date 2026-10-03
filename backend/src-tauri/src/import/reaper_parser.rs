@@ -342,7 +342,11 @@ pub fn stretch_segments_full_cover(
     // 窗口外的标记保留（take 属性，先于裁断存在）。take 源坐标系随 u
     // 单调递增，几何全部在该坐标系内计算，仅在输出时镜像。
     let mut ordered: Vec<&ReaperStretchMarker> = markers.iter().collect();
-    ordered.sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap_or(std::cmp::Ordering::Equal));
+    ordered.sort_by(|a, b| {
+        a.offset
+            .partial_cmp(&b.offset)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut anchors: Vec<(f64, f64, f64)> = Vec::with_capacity(ordered.len() + 1);
     for marker in ordered {
         if !marker.offset.is_finite() || !marker.position.is_finite() {
@@ -368,34 +372,33 @@ pub fn stretch_segments_full_cover(
     // 输出：正放直接取存储坐标；倒放把段源窗口镜像回原始媒体坐标
     // （时间线推进时源位置自 end 向 start 递减）。速率坡为坐标无关量，
     // 两种情况同形。
-    let emit =
-        |offset_start: f64,
-         offset_end: f64,
-         s_lo: f64,
-         s_hi: f64,
-         velocity_start: f64,
-         velocity_end: f64| {
-            if !reversed {
-                ReaperStretchSegment {
-                    offset_start,
-                    offset_end,
-                    src_start: s_lo,
-                    src_end: s_hi,
-                    velocity_start,
-                    velocity_end,
-                }
-            } else {
-                let len = media_length_sec.unwrap_or(0.0);
-                ReaperStretchSegment {
-                    offset_start,
-                    offset_end,
-                    src_start: len - s_hi,
-                    src_end: len - s_lo,
-                    velocity_start,
-                    velocity_end,
-                }
+    let emit = |offset_start: f64,
+                offset_end: f64,
+                s_lo: f64,
+                s_hi: f64,
+                velocity_start: f64,
+                velocity_end: f64| {
+        if !reversed {
+            ReaperStretchSegment {
+                offset_start,
+                offset_end,
+                src_start: s_lo,
+                src_end: s_hi,
+                velocity_start,
+                velocity_end,
             }
-        };
+        } else {
+            let len = media_length_sec.unwrap_or(0.0);
+            ReaperStretchSegment {
+                offset_start,
+                offset_end,
+                src_start: len - s_hi,
+                src_end: len - s_lo,
+                velocity_start,
+                velocity_end,
+            }
+        }
+    };
 
     let mut segments = Vec::with_capacity(anchors.len());
     for pair in anchors.windows(2) {
@@ -1943,12 +1946,8 @@ PT 4 100 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
     // item 起点（有前导段），末标记在窗口终点之前（有尾段）。
     // 段 1 速率 2 × (1 − vc 0.5) = 1，与前导段的基准速率衔接。
     const SM_TEST_TOKENS: &[&str] = &[
-        "SM",
-        "1", "1", "0.5", "+",
-        "2", "3", "+",
-        "4", "5", "0.25", "+",
-        "6", "11", "+",
-        "10", "12",
+        "SM", "1", "1", "0.5", "+", "2", "3", "+", "4", "5", "0.25", "+", "6", "11", "+", "10",
+        "12",
     ];
 
     #[test]
@@ -2003,8 +2002,16 @@ PT 4 100 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
     fn stretch_marker_at_item_start_merges_with_base_anchor() {
         // 首标记钉在 item 开头（源位置 = SOFFS）：不产生前导段。
         let markers = vec![
-            ReaperStretchMarker { offset: 0.0, position: 5.0, velocity_change: 0.0 },
-            ReaperStretchMarker { offset: 4.0, position: 7.0, velocity_change: 0.0 },
+            ReaperStretchMarker {
+                offset: 0.0,
+                position: 5.0,
+                velocity_change: 0.0,
+            },
+            ReaperStretchMarker {
+                offset: 4.0,
+                position: 7.0,
+                velocity_change: 0.0,
+            },
         ];
         let segments = stretch_segments_full_cover(&markers, 5.0, 1.0, 10.0, None, false);
         assert_eq!(segments.len(), 2);
@@ -2036,7 +2043,11 @@ PT 4 100 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
     fn stretch_full_cover_without_markers_or_length_is_empty() {
         assert!(stretch_segments_full_cover(&[], 0.0, 1.0, 10.0, None, false).is_empty());
         assert!(stretch_segments_full_cover(
-            &[ReaperStretchMarker { offset: 1.0, position: 1.0, velocity_change: 0.0 }],
+            &[ReaperStretchMarker {
+                offset: 1.0,
+                position: 1.0,
+                velocity_change: 0.0
+            }],
             0.0,
             1.0,
             0.0,
@@ -2069,8 +2080,16 @@ PT 4 100 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
         // （s = 媒体全长 − 原始位置）；输出时用媒体全长把各段源窗口
         // 镜像回原始坐标（start ≤ end），速率坡保持不变。
         let markers = vec![
-            ReaperStretchMarker { offset: 0.0, position: 5.0, velocity_change: 0.5 },
-            ReaperStretchMarker { offset: 4.0, position: 9.0, velocity_change: 0.0 },
+            ReaperStretchMarker {
+                offset: 0.0,
+                position: 5.0,
+                velocity_change: 0.5,
+            },
+            ReaperStretchMarker {
+                offset: 4.0,
+                position: 9.0,
+                velocity_change: 0.0,
+            },
         ];
         let segments = stretch_segments_full_cover(&markers, 5.0, 1.0, 10.0, Some(20.0), true);
         assert_eq!(segments.len(), 2);
@@ -2211,7 +2230,10 @@ PT 4 100 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
         assert_eq!(item.default_take.envelopes.len(), 1);
         assert_eq!(item.default_take.envelopes[0].env_type, "PITCHENV");
         assert_eq!(
-            item.default_take.envelopes[0].def_shape.as_ref().map(|s| s[1]),
+            item.default_take.envelopes[0]
+                .def_shape
+                .as_ref()
+                .map(|s| s[1]),
             Some(3.0)
         );
         assert_eq!(item.takes[0].envelopes.len(), 1);

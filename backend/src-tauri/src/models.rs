@@ -726,7 +726,15 @@ mod tests {
         let value = serde_json::to_value(&payload).expect("serialize");
 
         // 顶层：前端读 `scanned` / `converted` / `pending` / `pending_files`。
-        for key in ["ok", "scanned", "converted", "pending", "entries", "pending_files", "eligibility"] {
+        for key in [
+            "ok",
+            "scanned",
+            "converted",
+            "pending",
+            "entries",
+            "pending_files",
+            "eligibility",
+        ] {
             assert!(value.get(key).is_some(), "载荷必须带 `{key}` 键");
         }
         assert_eq!(value["scanned"], serde_json::json!(3));
@@ -734,7 +742,15 @@ mod tests {
 
         // 逐条明细：前端读 `max_abs_diff` / `applied_mode`（snake_case！）。
         let entry = &value["entries"][0];
-        for key in ["clip_id", "take_id", "name", "verdict", "applied_mode", "violating_ratio", "max_abs_diff"] {
+        for key in [
+            "clip_id",
+            "take_id",
+            "name",
+            "verdict",
+            "applied_mode",
+            "violating_ratio",
+            "max_abs_diff",
+        ] {
             assert!(entry.get(key).is_some(), "明细必须带 `{key}` 键");
         }
 

@@ -10,7 +10,7 @@ import React, {
     useState,
 } from "react";
 import { flushSync } from "react-dom";
-import { Flex, Button, Box, DropdownMenu } from "@radix-ui/themes";
+import { Flex, Button, Box, DropdownMenu, ScrollArea } from "@radix-ui/themes";
 import {
     ChevronDownIcon,
     CursorArrowIcon,
@@ -39,6 +39,7 @@ import {
     cycleDragDirection,
     setToolMode,
     persistUiSettings,
+    setActiveVibratoPreset,
     toggleParamAxisUnit,
     setParamEditorSyncTimeline,
     setPrimaryTimeUnit,
@@ -198,6 +199,28 @@ import {
     rulerLayerTranslatePx,
 } from "./renderKernel/timelineAxis.js";
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
+import { VibratoDialog } from "./VibratoDialog";
+import { resolveMenuMaxHeight } from "./menuPlacement";
+import { pointerOverlayStyle } from "./pointerOverlayStyle";
+import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
+import { buildVibratoCurve } from "../../features/vibrato/vibratoCurve";
+import { extractVibratoPreset } from "../../features/vibrato/vibratoExtract";
+import { planVibratoTarget, suppressNonTargetFrames } from "../../features/vibrato/vibratoPitch";
+import { sanitizeVibratoPreset } from "../../features/vibrato/vibratoPresets";
+import type { VibratoPreset } from "../../features/vibrato/vibratoTypes";
+import { upsertVibratoPreset } from "../../features/session/sessionSlice";
+import {
+    enabledVibratoPresets,
+    resolveActiveVibratoPreset,
+    resolveVibratoPresets,
+    findVibratoPreset,
+} from "../../features/vibrato/vibratoPresetList";
+import {
+    depthForParam,
+    depthUnitLabelKey,
+    formatNumber,
+    vibratoPresetLabel,
+} from "./vibrato/vibratoDialogLogic";
 import { useLiveParamEditing } from "./pianoRoll/useLiveParamEditing";
 import { getParamShiftStep, parseParamShiftMagnitude } from "./pianoRoll/paramShiftStep";
 import {
@@ -281,6 +304,9 @@ import { parseRgbaColor } from "./timeline/runtime/timelineClipGlRenderer";
 
 const NOTE_NAMES_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX = PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX;
+
+/** 「添加颤音」预览抓取的帧数上限（≈2s，够看清若干周期与渐入）。 */
+const VIBRATO_APPLY_PREVIEW_FRAMES = 400;
 
 /**
  * **不参与「无选区时先全选」** 的操作（见 `handleEditOp` 开头的隐式全选）。
@@ -936,6 +962,109 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const vibratoDragFrequencyDecreaseKb = useAppSelector((state) =>
         selectKeybinding(state, "pianoRoll.vibratoDragFrequencyDecrease"),
     );
+    // 拖拽颤音时切换预设（默认 `,` / `.`）。只在拖拽期间生效 —— 这两个动作的
+    // `scopedContext` 是 `pianoRollVibratoDrag`，全局派发器不会执行它们。
+    const vibratoPresetPrevKb = useAppSelector((state) =>
+        selectKeybinding(state, "pianoRoll.vibratoPresetPrev"),
+    );
+    const vibratoPresetNextKb = useAppSelector((state) =>
+        selectKeybinding(state, "pianoRoll.vibratoPresetNext"),
+    );
+    const vibratoPresetUserList = useAppSelector((state) => state.session.vibratoPresets);
+    const activeVibratoPresetId = useAppSelector((state) => state.session.activeVibratoPresetId);
+    /** 「摆放方式」：添加颤音的参数（存在设置里，与预设无关）。 */
+    const vibratoBaseline = useAppSelector((state) => state.session.vibratoBaseline);
+    const disabledVibratoPresetIds = useAppSelector(
+        (state) => state.session.disabledVibratoPresetIds,
+    );
+    const builtinVibratoPresetOrder = useAppSelector(
+        (state) => state.session.builtinVibratoPresetOrder,
+    );
+    const resolvedVibratoPresets = useMemo(
+        () => resolveVibratoPresets(vibratoPresetUserList, builtinVibratoPresetOrder).all,
+        [vibratoPresetUserList, builtinVibratoPresetOrder],
+    );
+    /**
+     * 可选（未被停用）的预设：工具栏下拉只列这些，拖拽中的循环切换也只在这些里绕。
+     *
+     * 停用名单之外的用途仍走全量 `resolvedVibratoPresets` —— HUD 要按 id 找到
+     * 正在用的预设（它可能已被停用），「重置到直线」也要能找到直线预设。
+     */
+    const enabledVibratoPresetList = useMemo(
+        () => enabledVibratoPresets(resolvedVibratoPresets, disabledVibratoPresetIds),
+        [resolvedVibratoPresets, disabledVibratoPresetIds],
+    );
+    const activeVibratoPreset = useMemo(
+        () => resolveActiveVibratoPreset(resolvedVibratoPresets, activeVibratoPresetId),
+        [resolvedVibratoPresets, activeVibratoPresetId],
+    );
+    /**
+     * 拖拽 HUD 的内容。`null` = 没在拖。
+     *
+     * 用一个本地 state 而不是 ref：HUD 要跟着切换预设 / 滚轮调参实时刷新。
+     */
+    const [vibratoDragHud, setVibratoDragHud] = useState<{
+        presetId: string;
+        depthCents: number;
+        rateHz: number;
+        adjusted: boolean;
+        clientX: number;
+        clientY: number;
+    } | null>(null);
+    /**
+     * 颤音窗口是否打开。
+     *
+     * 参数编辑器自己持有这个状态（不走 `hifi:openEditDialog`）：那个通道是给
+     * 「一次性参数对话框」用的，而颤音窗口是常驻的预设库，菜单栏的「管理预设…」
+     * 与这里的右键 / 工具栏入口共用同一个对话框组件。
+     */
+    const [vibratoDialogOpen, setVibratoDialogOpen] = useState(false);
+    /** 打开时要编辑哪一条；`null` = 按当前活动预设播种。 */
+    const [vibratoInitialPresetId, setVibratoInitialPresetId] = useState<string | null>(null);
+    /**
+     * 这次打开是哪一面：`"apply"` = 「添加颤音」（带套用预览 / 提取 / 应用），
+     * `"manage"` = 「管理预设…」（纯预设库）。
+     *
+     * 【为什么必须有它】窗口有两副面孔，而"从哪个入口进来的"只有宿主知道。窗口自己
+     * 不该去猜"我是被打开发动机是什么"—— 于是宿主把结论（有没有选区宿主）直接告诉它：
+     * `apply` 才传 `applyTarget`，`manage` 不传，窗口据此收起全部套用专属能力。
+     */
+    const [vibratoDialogMode, setVibratoDialogMode] = useState<"apply" | "manage">("manage");
+    /**
+     * 窗口的"会话号"：每次打开自增并作为组件的 `key`。
+     *
+     * 窗口借此**重新挂载** —— 草稿回到播种值、预览页签与两把纵轴复位、选区帧值重取。
+     * 用 key 而不是 effect 内重置，是为了不在 effect 里同步 setState（那会级联渲染，
+     * 也被 lint 禁止）。这一条替代了合并前"应用弹窗的会话号 + 管理器的播种闸"两套机制。
+     */
+    const [vibratoDialogSession, setVibratoDialogSession] = useState(0);
+
+    /**
+     * 打开颤音窗口。
+     *
+     * @param mode 哪一面（决定要不要给选区宿主，见 `vibratoDialogMode`）。
+     * @param initialPresetId 打开时编辑哪一条；省略 = 当前活动预设。
+     */
+    const openVibratoDialog = useCallback(
+        (mode: "apply" | "manage" = "manage", initialPresetId?: string) => {
+            setVibratoDialogMode(mode);
+            setVibratoInitialPresetId(initialPresetId ?? null);
+            setVibratoDialogSession((session) => session + 1);
+            setVibratoDialogOpen(true);
+        },
+        [],
+    );
+
+    /** 工具栏的颤音预设下拉是否展开。 */
+    const [vibratoPresetMenuOpen, setVibratoPresetMenuOpen] = useState(false);
+    /**
+     * 颤音预设下拉的最大高度。
+     *
+     * 按锚点在**本面板内**的位置算（见 `resolveMenuMaxHeight`）：面板可停靠在窗口
+     * 任意高度，菜单只在面板内向下铺开，既不会伸出面板、也不会向上翻转盖住工具栏。
+     */
+    const [vibratoPresetMenuMaxHeight, setVibratoPresetMenuMaxHeight] = useState(320);
+    const vibratoPresetMenuRef = useRef<HTMLDivElement | null>(null);
     // 拖动方向循环切换键：拖拽进行中按下可即时切换本次拖拽方向（触控板替代右键）。
     const cycleDragDirectionKb = useAppSelector((state) =>
         selectKeybinding(state, "pianoRoll.cycleDragDirection"),
@@ -1056,6 +1185,21 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         value: number;
         displayText?: string;
     } | null>(null);
+    // 浮窗更新合帧（见 onParamValuePreviewChange 处的说明）：pointermove 在高刷
+    // 设备上可达数百 Hz，逐事件 setState 会让整个面板以事件频率重渲。
+    const paramValuePreviewRafRef = useRef<number | null>(null);
+    const paramValuePreviewPendingRef = useRef<{
+        payload: { clientX: number; clientY: number; value: number; displayText?: string } | null;
+    } | null>(null);
+    useEffect(() => {
+        return () => {
+            if (paramValuePreviewRafRef.current != null) {
+                cancelAnimationFrame(paramValuePreviewRafRef.current);
+                paramValuePreviewRafRef.current = null;
+            }
+            paramValuePreviewPendingRef.current = null;
+        };
+    }, []);
     /**
      * 纵轴标尺的悬浮读数（`弹出展示参数` 在左轴上的形态）。
      *
@@ -1127,18 +1271,21 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
               : ("vibrato" as const);
 
     useEffect(() => {
-        if (!drawToolMenuOpen && !pitchSnapMenuOpen) return;
+        if (!drawToolMenuOpen && !pitchSnapMenuOpen && !vibratoPresetMenuOpen) return;
         const onPointerDown = (e: PointerEvent) => {
             const target = e.target as Node | null;
             if (drawToolMenuRef.current?.contains(target)) return;
             if (pitchSnapMenuRef.current?.contains(target)) return;
+            if (vibratoPresetMenuRef.current?.contains(target)) return;
             setDrawToolMenuOpen(false);
             setPitchSnapMenuOpen(false);
+            setVibratoPresetMenuOpen(false);
         };
         const onKeyDown = (e: KeyboardEvent) => {
             if (e.key === "Escape") {
                 setDrawToolMenuOpen(false);
                 setPitchSnapMenuOpen(false);
+                setVibratoPresetMenuOpen(false);
             }
         };
         window.addEventListener("pointerdown", onPointerDown, true);
@@ -1147,7 +1294,45 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             window.removeEventListener("pointerdown", onPointerDown, true);
             window.removeEventListener("keydown", onKeyDown, true);
         };
-    }, [drawToolMenuOpen, pitchSnapMenuOpen]);
+    }, [drawToolMenuOpen, pitchSnapMenuOpen, vibratoPresetMenuOpen]);
+
+    /** 量一次颤音预设下拉的最大高度（锚点 / 面板缺失时返回 null）。 */
+    const measureVibratoPresetMenuMaxHeight = useCallback((): number | null => {
+        const anchor = vibratoPresetMenuRef.current;
+        const container = paramEditorRef.current;
+        if (!anchor || !container) return null;
+        const anchorRect = anchor.getBoundingClientRect();
+        const containerRect = container.getBoundingClientRect();
+        return resolveMenuMaxHeight({
+            anchorBottom: anchorRect.bottom,
+            containerTop: containerRect.top,
+            containerBottom: containerRect.bottom,
+        });
+    }, []);
+
+    /** 展开颤音预设下拉：先算好可用高度再展开，避免菜单伸出面板。 */
+    const openVibratoPresetMenu = useCallback(() => {
+        const maxHeight = measureVibratoPresetMenuMaxHeight();
+        if (maxHeight != null) setVibratoPresetMenuMaxHeight(maxHeight);
+        setVibratoPresetMenuOpen(true);
+    }, [measureVibratoPresetMenuMaxHeight]);
+
+    // 菜单开着时窗口缩放、或面板被拖动分隔条改变大小，都要重算高度。setState 放在
+    // 回调里（而不是 effect 体内同步调用），避免级联渲染。
+    useEffect(() => {
+        if (!vibratoPresetMenuOpen) return;
+        const update = () => {
+            const maxHeight = measureVibratoPresetMenuMaxHeight();
+            if (maxHeight != null) setVibratoPresetMenuMaxHeight(maxHeight);
+        };
+        window.addEventListener("resize", update);
+        const observer = new ResizeObserver(update);
+        if (paramEditorRef.current) observer.observe(paramEditorRef.current);
+        return () => {
+            window.removeEventListener("resize", update);
+            observer.disconnect();
+        };
+    }, [vibratoPresetMenuOpen, measureVibratoPresetMenuMaxHeight]);
 
     /** 打开“导入到参数编辑器”的 MIDI 导入对话框（编辑器按钮 / 拖放到编辑器内共用）。
      *  midiPath 为 null 时由用户在文件选择器中挑选文件；非 null 时直接导入该文件。 */
@@ -1221,6 +1406,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 setParamEditorMidiDragOver(
                     Boolean(over && firstMidiPath(detail.filePaths, detail.filePath)),
                 );
+                return;
+            }
+            if (detail.type === "cancel") {
+                // 拖拽被打断 / 取消：清掉落点高亮，不触发任何导入。
+                setParamEditorMidiDragOver(false);
                 return;
             }
             if (detail.type === "drop") {
@@ -2620,6 +2810,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             if (zoomRafRef.current != null) {
                 cancelAnimationFrame(zoomRafRef.current);
                 zoomRafRef.current = null;
+            }
+            if (rafRef.current != null) {
+                cancelAnimationFrame(rafRef.current);
+                rafRef.current = null;
             }
         };
     }, []);
@@ -4850,6 +5044,15 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         vibratoDragAmplitudeDecreaseKb,
         vibratoDragFrequencyIncreaseKb,
         vibratoDragFrequencyDecreaseKb,
+        vibratoPresetPrevKb,
+        vibratoPresetNextKb,
+        vibratoPreset: activeVibratoPreset,
+        vibratoPresetList: resolvedVibratoPresets,
+        vibratoPresetCycleList: enabledVibratoPresetList,
+        onVibratoDragStateChange: setVibratoDragHud,
+        onVibratoDragEnd: useCallback(() => {
+            setVibratoDragHud(null);
+        }, []),
         cycleDragDirectionKb,
         paramFineAdjustKb,
         onContextMenu: useCallback((x: number, y: number) => {
@@ -4890,7 +5093,17 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     displayText?: string;
                 } | null,
             ) => {
-                setParamValuePreview(next);
+                // 合帧提交：只记最新载荷、每渲染帧至多 setState 一次（与交互层
+                // 各手势的 schedulePreview 同一动机）。浮窗是纯读数 UI，滞后一帧
+                // 不可感知；不合帧时每次 move 的新对象都无法让 React 跳过重渲。
+                paramValuePreviewPendingRef.current = { payload: next };
+                if (paramValuePreviewRafRef.current != null) return;
+                paramValuePreviewRafRef.current = requestAnimationFrame(() => {
+                    paramValuePreviewRafRef.current = null;
+                    const pending = paramValuePreviewPendingRef.current;
+                    paramValuePreviewPendingRef.current = null;
+                    if (pending) setParamValuePreview(pending.payload);
+                });
             },
             [],
         ),
@@ -5377,21 +5590,33 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             return formatParamValuePreview(yToValue(editParam, y, h));
         };
 
+        // 读数合帧：pointermove 高频触发，且 describe 内含 getBoundingClientRect
+        // （布局读取）。每帧至多计算 + setState 一次，滞后一帧不可感知。
+        let previewRafId: number | null = null;
+        let pending: { clientX: number; clientY: number; text: string } | null | undefined;
+        const flushPreview = () => {
+            previewRafId = null;
+            if (pending === undefined) return;
+            setAxisValuePreview(pending);
+            pending = undefined;
+        };
+
         const onPointerMove = (e: PointerEvent) => {
             const text = describe(e.clientY);
-            if (text.length === 0) {
-                setAxisValuePreview(null);
-                return;
-            }
-            setAxisValuePreview({ clientX: e.clientX, clientY: e.clientY, text });
+            pending = text.length === 0 ? null : { clientX: e.clientX, clientY: e.clientY, text };
+            if (previewRafId == null) previewRafId = requestAnimationFrame(flushPreview);
         };
-        const onPointerLeave = () => setAxisValuePreview(null);
+        const onPointerLeave = () => {
+            pending = null;
+            if (previewRafId == null) previewRafId = requestAnimationFrame(flushPreview);
+        };
 
         el.addEventListener("pointermove", onPointerMove);
         el.addEventListener("pointerleave", onPointerLeave);
         return () => {
             el.removeEventListener("pointermove", onPointerMove);
             el.removeEventListener("pointerleave", onPointerLeave);
+            if (previewRafId != null) cancelAnimationFrame(previewRafId);
             setAxisValuePreview(null);
         };
     }, [s.showParamValuePopup, editParam, yToValue, formatParamValuePreview]);
@@ -6251,13 +6476,27 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     break;
                 }
                 case "addVibrato": {
-                    const amplitude = Number(data?.amplitude ?? 30);
-                    const rateHz = Number(data?.rate ?? 5.5);
-                    const period = rateHz > 0 ? 1000 / rateHz : 200;
-                    const attack = Number(data?.attack ?? 50);
-                    const release = Number(data?.release ?? 50);
-                    const phase = Number(data?.phase ?? 0);
-                    // 多选区：咬合/释放包络按**每段自身时长**定标，各段独立。
+                    /**
+                     * 套用颤音预设。
+                     *
+                     * 【与旧实现的区别】旧版把整段替换成「起点→终点的直线 + 正弦」，
+                     * 会抹平歌手原本的音高运动。现在预设默认 `baseline: "existing"`
+                     * （见系统预设表），在**已有曲线**上叠加颤音，原曲线被保留。
+                     * 波形、包络、速率渐变、不规则度全部来自预设。
+                     */
+                    const rawPreset = data?.preset;
+                    // 应用弹窗直接给完整预设对象（本地微调的深度 / 速率要传过来）；
+                    // 菜单 / 快捷键路径仍可只给 presetId，缺失时回落到活动预设。
+                    const preset: VibratoPreset =
+                        rawPreset && typeof rawPreset === "object"
+                            ? sanitizeVibratoPreset(rawPreset as Partial<VibratoPreset>)
+                            : resolveActiveVibratoPreset(
+                                  resolvedVibratoPresets,
+                                  typeof data?.presetId === "string"
+                                      ? data.presetId
+                                      : activeVibratoPresetId,
+                              );
+                    // 多选区：包络按**每段自身时长**定标，各段独立。
                     await runPerRange(async (range, _index, isFirstWrite) => {
                         const res = await paramsApi.getParamFrames(
                             rootTrackId,
@@ -6271,38 +6510,36 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         if (!res?.ok) return false;
                         const payload = res as ParamFramesPayload;
                         const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
+                        if (vals.length === 0) return false;
                         const fpMs = Number(payload.frame_period_ms ?? fp) || fp;
-                        const totalMs = vals.length * fpMs;
-                        const attackMs = Math.min(attack, totalMs / 2);
-                        const releaseMs = Math.min(release, totalMs / 2);
-                        // For pitch: amplitude in cents → divide by 100 to get semitones
-                        // For dyn: amplitude is a **depth percentage** (±N% ratio
-                        // modulation) — multiplicative so drawn silence stays silent.
-                        // For other params: amplitude is a raw value used directly as max deviation
-                        const isPitchVib = editParam === "pitch";
-                        const isDynVib = isDynParam(editParam);
-                        const ampFactor = isPitchVib
-                            ? amplitude / 100
-                            : isDynVib
-                              ? amplitude / 100
-                              : amplitude;
-                        const result = vals.map((v, i) => {
-                            const tMs = i * fpMs;
-                            let env = 1;
-                            if (tMs < attackMs) env = tMs / Math.max(1, attackMs);
-                            else if (tMs > totalMs - releaseMs)
-                                env = (totalMs - tMs) / Math.max(1, releaseMs);
-                            const phaseRad = (phase * Math.PI) / 180;
-                            const vib = Math.sin(
-                                (2 * Math.PI * tMs) / Math.max(1, period) + phaseRad,
-                            );
-                            // dyn：乘性调制（v × (1 + 深度·包络·正弦)）—— 静音帧
-                            // （v = 0）保持 0；深度 > 100% 时负半周钳到 0 = 静音。
-                            const next = isDynVib
-                                ? v * (1 + ampFactor * env * vib)
-                                : v + ampFactor * env * vib;
-                            return isDynVib ? Math.max(0, next) : next;
+                        /*
+                         * 锚点与"哪些帧可调制"一次规划出来（见 `vibratoPitch.ts`）。
+                         *
+                         * pitch 的 0 是"未检测"哨兵，而浊清边界上还会有**低而非零**的
+                         * 过渡帧（跟踪器给的 20~40 Hz 低估）—— 两类都不是音符。拿首末帧
+                         * 当锚点时，选区两端只要落在气口上（选一整句几乎必然如此），
+                         * 直线摆放就会把整段拉向那个错值，中间真实唱出来的音高被整段
+                         * 抹掉。整段都没有音符段时没有可调制的对象，放弃。
+                         */
+                        const plan = planVibratoTarget(editParam, vals, fpMs);
+                        if (!plan) return false;
+                        const built = buildVibratoCurve({
+                            startFrame: range.startFrame,
+                            startValue: plan.anchors.startValue,
+                            endFrame: range.startFrame + vals.length - 1,
+                            endValue: plan.anchors.endValue,
+                            original: vals,
+                            preset,
+                            param: editParam,
+                            framePeriodMs: fpMs,
+                            range: currentParamRange,
+                            // 摆放方式是**这次操作的参数**（存在设置里），与预设无关：
+                            // 换预设不该把它换掉。
+                            baseline: vibratoBaseline,
                         });
+                        const result = built.dense;
+                        // 非音符帧写回哨兵（"不改这一帧"，与 dyn 的哨兵还原同位）。
+                        suppressNonTargetFrames(result, plan);
                         // dyn：未画帧写回哨兵（"沿用原声"不被颤音物化）。
                         if (isDynParam(editParam)) {
                             restoreDynSentinels(result, payload.edit_sentinel);
@@ -6483,6 +6720,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             invalidate,
             dispatch,
             selectAllParamRange,
+            // 颤音预设：`case "addVibrato"` 读这两个值来决定"套用哪个预设"。
+            // 漏掉它们会让闭包拿到旧列表，表现为"点了新预设却套用了旧的"。
+            resolvedVibratoPresets,
+            activeVibratoPresetId,
+            vibratoBaseline,
         ],
     );
 
@@ -6505,6 +6747,23 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         window.addEventListener("hifi:editOp", handler);
         return () => window.removeEventListener("hifi:editOp", handler);
     }, [handleEditOp]);
+
+    /**
+     * 快捷键「添加颤音」→ 打开颤音窗口（落在「套用到选区」页签）。
+     *
+     * `edit.addVibrato` 在交互层被归入"需要弹窗"的一类（派发 `hifi:openEditDialog`），
+     * 但该事件由菜单栏消费，而窗口宿主在本面板（预览要选区数据）。这里补上本面板的
+     * 消费分支，快捷键与右键菜单才走同一个入口。
+     */
+    useEffect(() => {
+        const handler = (e: Event) => {
+            if ((e as CustomEvent).detail?.dialog === "addVibrato") {
+                openVibratoDialog("apply");
+            }
+        };
+        window.addEventListener("hifi:openEditDialog", handler);
+        return () => window.removeEventListener("hifi:openEditDialog", handler);
+    }, [openVibratoDialog]);
 
     // 单剪贴板纪律：槽位被别的表面整体替换后（时间轴复制/剪切，或记事本暂存块
     // 的「恢复到剪贴板」），内部剪贴板缓存必须**重新对齐槽位** —— 否则
@@ -6538,26 +6797,133 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     }, [invalidate]);
 
     // Dispatch helper: context menu dialog ops → open MenuBar dialogs
-    const openEditDialog = useCallback(
-        (dialog: string) => {
-            // 为颤音对话框附带当前参数范围信息
-            let paramRange: { min: number; max: number } | undefined;
-            if (dialog === "addVibrato") {
-                const desc = processorParamsRef.current.find((d) => d.id === editParam);
-                if (desc?.kind.type === "automation_curve") {
-                    paramRange = {
-                        min: desc.kind.min_value,
-                        max: desc.kind.max_value,
-                    };
-                }
-            }
-            window.dispatchEvent(
-                new CustomEvent("hifi:openEditDialog", {
-                    detail: { dialog, paramRange },
-                }),
-            );
+    const openEditDialog = useCallback((dialog: string) => {
+        window.dispatchEvent(
+            new CustomEvent("hifi:openEditDialog", {
+                detail: { dialog },
+            }),
+        );
+    }, []);
+
+    /**
+     * 「从选区提取颤音预设」。
+     *
+     * 把用户手绘（或导入）的一段颤音拟合成预设：去趋势 → 自相关测周期 →
+     * 折叠出单周期波形 → 测包络与不规则度。成功后入库、设为当前使用，并把这条
+     * **返回给调用方**（颤音窗口随即选中它，用户在那里改名字、微调参数）。
+     *
+     * 【为什么返回预设而不是自己开窗口】合并之后提取就发生在颤音窗口里，宿主只负责
+     * "读帧 + 拟合 + 入库"这三件只有它做得了的事；窗口怎么显示结果由窗口决定。
+     * 失败返回 `null`，由窗口给出行内提示（弹一层模态会盖住刚刚那个窗口）。
+     *
+     * 【为什么用第一段选区】多种选区下"提取一个预设"的语义是模糊的；取第一段
+     * 最符合直觉（也是 `runPerRange` 之外唯一不需要用户再做选择的解释）。
+     */
+    const handleExtractVibratoPreset = useCallback(async (): Promise<VibratoPreset | null> => {
+        if (!rootTrackId) return null;
+        if (!selectionRef.current || selectionRef.current.length === 0) {
+            selectAllParamRange();
+        }
+        const ranges = selectionRef.current ? selectionToFrameRanges(selectionRef.current) : [];
+        const range = ranges[0];
+        if (!range || range.frameCount < 8) return null;
+
+        const fp = paramView?.framePeriodMs ?? 5;
+        const res = await paramsApi.getParamFrames(
+            rootTrackId,
+            editParam,
+            range.startFrame,
+            range.frameCount,
+            1,
+            true,
+            isDynParam(editParam),
+        );
+        if (!res?.ok) return null;
+        const payload = res as ParamFramesPayload;
+        const values = (payload.edit ?? []).map((value) => Number(value) || 0);
+        const fpMs = Number(payload.frame_period_ms ?? fp) || fp;
+        const extracted = extractVibratoPreset({
+            values,
+            framePeriodMs: fpMs,
+            param: editParam,
+            range: currentParamRange,
+        });
+        if (!extracted.ok) return null;
+
+        const preset = {
+            ...extracted.preset,
+            name: t("vibrato_from_selection"),
+        };
+        dispatch(upsertVibratoPreset(preset));
+        dispatch(setActiveVibratoPreset(preset.id));
+        void dispatch(persistUiSettings());
+        return preset;
+    }, [
+        rootTrackId,
+        selectionRef,
+        selectAllParamRange,
+        paramView?.framePeriodMs,
+        editParam,
+        currentParamRange,
+        dispatch,
+        t,
+    ]);
+
+    /**
+     * 取颤音窗口「套用到选区」页签的预览数据：首个选区段的前 400 帧（≈2s）。
+     *
+     * 无选区时取曲线头部 —— 与 `handleEditOp` 的"隐式全选"口径一致（那里的作用域
+     * 是整条曲线，这里只取开头一段来预览，避免为预览拉整条曲线）。400 帧足够看清
+     * 若干周期与渐入，开销可忽略。
+     */
+    const loadVibratoApplyOriginal = useCallback(async () => {
+        if (!rootTrackId) return null;
+        const ranges = selectionRef.current ? selectionToFrameRanges(selectionRef.current) : [];
+        const range = ranges[0] ?? { startFrame: 0, frameCount: VIBRATO_APPLY_PREVIEW_FRAMES };
+        const frameCount = Math.min(range.frameCount, VIBRATO_APPLY_PREVIEW_FRAMES);
+        if (frameCount < 2) return null;
+
+        const fp = paramView?.framePeriodMs ?? 5;
+        const res = await paramsApi.getParamFrames(
+            rootTrackId,
+            editParam,
+            range.startFrame,
+            frameCount,
+            1,
+            true,
+            isDynParam(editParam),
+        );
+        if (!res?.ok) return null;
+        const payload = res as ParamFramesPayload;
+        const values = (payload.edit ?? []).map((value) => Number(value) || 0);
+        if (values.length < 2) return null;
+        const framePeriodMs = Number(payload.frame_period_ms ?? fp) || fp;
+        return { values, framePeriodMs };
+    }, [rootTrackId, selectionRef, paramView?.framePeriodMs, editParam]);
+
+    /** 颤音窗口的「应用」：把完整预设交给编辑管线（本地微调随之传入）。 */
+    const handleApplyVibrato = useCallback(
+        (preset: VibratoPreset) => {
+            void handleEditOp("addVibrato", { preset });
         },
-        [editParam],
+        [handleEditOp],
+    );
+
+    /**
+     * 交给颤音窗口的选区宿主。
+     *
+     * 【为什么 memo】窗口用它判断"有没有选区上下文"（页签、页脚动作），并在取数据
+     * 的 effect 里盯住 `loadOriginal`。每次渲染新建一个对象会让下游的比较全部失效 ——
+     * 窗口里那句"依赖 `loadOriginal` 本身而不是这个对象"正是为了兜住这一层，但这里
+     * 仍然应当稳定它：宿主传给子组件的对象不该每帧换新。
+     */
+    const vibratoApplyTarget = useMemo(
+        () => ({
+            loadOriginal: loadVibratoApplyOriginal,
+            onApply: handleApplyVibrato,
+            onExtract: handleExtractVibratoPreset,
+        }),
+        [loadVibratoApplyOriginal, handleApplyVibrato, handleExtractVibratoPreset],
     );
 
     /**
@@ -7064,6 +7430,105 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             )}
                         </Box>
 
+                        {/* 颤音预设选择器：紧贴颤音工具图标右侧 —— 同属"绘制工具"这一组，
+                            因此与它之间不放分隔线。样式按周围的图标按钮来做
+                            （15×15 波形图标 + tooltip），不再占一截文字宽度。 */}
+                        {activeDragDirectionTool === "vibrato" && (
+                            <Box
+                                ref={vibratoPresetMenuRef}
+                                style={{ position: "relative" }}
+                                data-hs-context-menu
+                            >
+                                <AppIconButton
+                                    active={vibratoPresetMenuOpen}
+                                    tooltip={`${tf("vibrato_toolbar_label")}: ${vibratoPresetLabel(activeVibratoPreset, tf)}`}
+                                    aria-haspopup="menu"
+                                    aria-expanded={vibratoPresetMenuOpen}
+                                    tabIndex={-1}
+                                    onClick={() =>
+                                        vibratoPresetMenuOpen
+                                            ? setVibratoPresetMenuOpen(false)
+                                            : openVibratoPresetMenu()
+                                    }
+                                    // 右键一步直达管理器：左键的下拉是"快速切换"，
+                                    // 右键的"进设置"与其它工具按钮的右键习惯一致，
+                                    // 不必先开下拉再点其中的「管理预设…」。
+                                    onContextMenu={(event) => {
+                                        event.preventDefault();
+                                        setVibratoPresetMenuOpen(false);
+                                        openVibratoDialog("manage");
+                                    }}
+                                    icon={
+                                        // 图标即**活动预设的波形缩略图**：切预设即换图，
+                                        // 看一眼工具栏就知道接下来画出来的会是什么。
+                                        <VibratoPresetGlyph
+                                            preset={activeVibratoPreset}
+                                            width={15}
+                                            height={15}
+                                        />
+                                    }
+                                />
+                                {vibratoPresetMenuOpen && (
+                                    <Box
+                                        data-hs-context-menu
+                                        // 永远向下展开：参数编辑器是停靠窗口，上方没有
+                                        // 展示区，翻上去只会盖住自己的工具栏。
+                                        className="absolute left-0 top-[calc(100%+4px)] z-30 flex min-w-[190px] flex-col rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg"
+                                        style={{ maxHeight: vibratoPresetMenuMaxHeight }}
+                                    >
+                                        <ScrollArea
+                                            className="hs-scroll-area min-h-0"
+                                            style={{ flex: "1 1 auto" }}
+                                            scrollbars="vertical"
+                                            type="auto"
+                                        >
+                                            {enabledVibratoPresetList.map((preset) => (
+                                                <button
+                                                    key={preset.id}
+                                                    type="button"
+                                                    className="flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-hover"
+                                                    onClick={() => {
+                                                        dispatch(setActiveVibratoPreset(preset.id));
+                                                        void dispatch(persistUiSettings());
+                                                        setVibratoPresetMenuOpen(false);
+                                                    }}
+                                                    onPointerDown={(e) => e.stopPropagation()}
+                                                >
+                                                    <span className="flex items-center gap-2">
+                                                        <VibratoPresetGlyph
+                                                            preset={preset}
+                                                            width={26}
+                                                            height={10}
+                                                        />
+                                                        <span>
+                                                            {vibratoPresetLabel(preset, tf)}
+                                                        </span>
+                                                    </span>
+                                                    {preset.id === activeVibratoPresetId ? (
+                                                        <CheckIcon />
+                                                    ) : null}
+                                                </button>
+                                            ))}
+                                        </ScrollArea>
+                                        <Box
+                                            className="my-1 shrink-0"
+                                            style={{ height: 1, background: "var(--qt-divider)" }}
+                                        />
+                                        <button
+                                            type="button"
+                                            className="w-full shrink-0 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-hover"
+                                            onClick={() => {
+                                                setVibratoPresetMenuOpen(false);
+                                                openVibratoDialog("manage");
+                                            }}
+                                            onPointerDown={(e) => e.stopPropagation()}
+                                        >
+                                            {tf("vibrato_manager_open")}
+                                        </button>
+                                    </Box>
+                                )}
+                            </Box>
+                        )}
                         <Box
                             style={{
                                 width: 1,
@@ -7138,6 +7603,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 )
                             }
                         />
+
                         <Box style={{ position: "relative" }} data-hs-context-menu>
                             <AppIconButton
                                 active={effectivePitchSnapVisual}
@@ -8043,9 +8509,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                       <div
                                           className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-qt-xs leading-none text-qt-text"
                                           style={{
-                                              left: axisValuePreview.clientX - rect.left,
-                                              top: axisValuePreview.clientY - rect.top,
-                                              transform: "translate(0, -100%)",
+                                              // 位移走合成层 transform：`left/top` 上的小数坐标会让
+                                              // 文字逐帧重栅格化而抖动（见 `pointerOverlayStyle`）。
+                                              ...pointerOverlayStyle(axisValuePreview, rect),
                                               whiteSpace: "nowrap",
                                           }}
                                       >
@@ -8225,25 +8691,80 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         className="absolute inset-0 pointer-events-none"
                                         aria-hidden
                                     />
+                                    {/* 指针旁的实时读数：**参数值 + 颤音拖拽状态合成一个
+                                        气泡**。两者曾经各弹一个，颤音那个还压在值上面，
+                                        用户只能看到后弹出的那个 —— 合成之后第一行是参数值
+                                        （"这一笔落在什么值上"），其下才是预设 / 深度 / 速率。
+                                        共用「弹出展示参数」开关。 */}
                                     {s.showParamValuePopup &&
-                                        paramValuePreview &&
+                                        (paramValuePreview || vibratoDragHud) &&
                                         (() => {
                                             const rect = canvasRef.current?.getBoundingClientRect();
                                             if (!rect) return null;
+                                            // 位置以值读数为准（它本就贴着指针）；只有 HUD
+                                            // 时（例如不产生值读数的路径）用 HUD 的位置。
+                                            const anchor = paramValuePreview ?? vibratoDragHud;
+                                            if (!anchor) return null;
+                                            const hudPreset = vibratoDragHud
+                                                ? findVibratoPreset(
+                                                      resolvedVibratoPresets,
+                                                      vibratoDragHud.presetId,
+                                                  )
+                                                : undefined;
+                                            const depthUnitKey = depthUnitLabelKey(editParam);
                                             return (
                                                 <div
                                                     className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-qt-xs leading-none text-qt-text"
                                                     style={{
-                                                        left: paramValuePreview.clientX - rect.left,
-                                                        top: paramValuePreview.clientY - rect.top,
-                                                        transform: "translate(0, -100%)",
+                                                        // 位移走合成层 transform：`clientX/Y` 在 HiDPI 屏上
+                                                        // 带小数，直接当 `left/top` 会让气泡里的文字每帧换一个
+                                                        // 次像素相位、被反复重栅格化 —— 看起来就是"文字在抖"
+                                                        // （见 `pointerOverlayStyle`）。
+                                                        ...pointerOverlayStyle(anchor, rect),
                                                         whiteSpace: "nowrap",
                                                     }}
                                                 >
-                                                    {paramValuePreview.displayText ??
-                                                        formatParamValuePreview(
-                                                            paramValuePreview.value,
-                                                        )}
+                                                    {paramValuePreview ? (
+                                                        <div>
+                                                            {paramValuePreview.displayText ??
+                                                                formatParamValuePreview(
+                                                                    paramValuePreview.value,
+                                                                )}
+                                                        </div>
+                                                    ) : null}
+                                                    {vibratoDragHud ? (
+                                                        <div
+                                                            className={
+                                                                paramValuePreview
+                                                                    ? "mt-1"
+                                                                    : undefined
+                                                            }
+                                                        >
+                                                            <div className="flex items-center gap-1.5">
+                                                                {hudPreset ? (
+                                                                    <VibratoPresetGlyph
+                                                                        preset={hudPreset}
+                                                                        width={20}
+                                                                        height={10}
+                                                                    />
+                                                                ) : null}
+                                                                <span>
+                                                                    {hudPreset
+                                                                        ? vibratoPresetLabel(
+                                                                              hudPreset,
+                                                                              t,
+                                                                          )
+                                                                        : ""}
+                                                                </span>
+                                                                {vibratoDragHud.adjusted
+                                                                    ? ` · ${t("vibrato_adjusted")}`
+                                                                    : ""}
+                                                            </div>
+                                                            <div className="text-qt-text-muted tabular-nums">
+                                                                {`${formatNumber(depthForParam(vibratoDragHud.depthCents, editParam, currentParamRange))}${depthUnitKey ? ` ${t(depthUnitKey)}` : ""} · ${formatNumber(vibratoDragHud.rateHz)} ${t("vibrato_unit_hz")}`}
+                                                            </div>
+                                                        </div>
+                                                    ) : null}
                                                 </div>
                                             );
                                         })()}
@@ -8368,7 +8889,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     onSetPitch={() => openEditDialog("setPitch")}
                     onAverage={() => openEditDialog("average")}
                     onSmooth={() => openEditDialog("smooth")}
-                    onAddVibrato={() => openEditDialog("addVibrato")}
+                    onAddVibrato={() => openVibratoDialog("apply")}
                     onQuantize={() => openEditDialog("quantize")}
                     onMeanQuantize={() => openEditDialog("meanQuantize")}
                     onSaveAsPitchRef={() => void handleSaveAsPitchRef()}
@@ -8388,6 +8909,25 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     onConvertDynToVolume={() => void handleEditOp("convertDynToVolume")}
                 />
             )}
+
+            {/*
+             * 颤音窗口：预设库 + 套用到选区，同一个窗口（右键菜单 / 快捷键 / 工具栏 /
+             * 菜单栏共用这一个组件）。宿主在本面板是因为"套用预览"要选区真实帧值。
+             *
+             * 每次打开换 key → 重新挂载，草稿按当前活动预设播种、页签与纵轴复位。
+             * 两副面孔由 `vibratoDialogMode` 决定：只有「添加颤音」那一次才把选区宿主
+             * 交出去（于是才有套用页签 / 提取 / 应用）；「管理预设…」是纯改库，与合并
+             * 前的预设管理器一致。
+             */}
+            <VibratoDialog
+                key={vibratoDialogSession}
+                open={vibratoDialogOpen}
+                onOpenChange={setVibratoDialogOpen}
+                editParam={editParam}
+                paramRange={currentParamRange}
+                initialPresetId={vibratoInitialPresetId ?? undefined}
+                applyTarget={vibratoDialogMode === "apply" ? vibratoApplyTarget : undefined}
+            />
         </Flex>
     );
 };

@@ -12,7 +12,12 @@
  * 以及行内边距三种：`py-[3px]`、`py-[4px]`、Radix `py="1"`。
  *
  * 本原语把这两个状态各归一为一档：悬停 10%、选中 22%，行高与内边距取令牌。
- * 选中态额外加 `data-selected` 供外部的键盘导航样式挂钩。
+ * 选中态额外加 `data-selected` 供外部样式挂钩。
+ *
+ * 【键盘光标是第三个状态，走另一条通道】`active` 表示"键盘现在停在哪一行"
+ * （roving tabindex 的活动行），它**不是**选中态：选中可能是 0..N 个，光标恒为
+ * 一个。背景通道已被 hover/selected/playing 占满，再挤一档就分不出来，因此
+ * 光标用 1px 内嵌强调色描边（边框通道）表达 —— 与背景正交，可叠加且各自可辨。
  */
 import { forwardRef } from "react";
 import type {
@@ -30,6 +35,27 @@ export interface AppListRowProps {
     children: ReactNode;
     /** 选中态。 */
     selected?: boolean;
+    /**
+     * 键盘光标所在行（listbox 的 "active option"）。
+     *
+     * 【为什么与 `selected` 分开】两者是独立的两件事：`selected` 是"哪些被选中"
+     * （可能 0..N 个，由鼠标 Ctrl/Shift 决定），`active` 是"键盘现在停在哪一行"
+     * （恒为 0 或 1 个）。文件浏览器此前把 `selected` 接给鼠标多选、键盘光标没有
+     * 表达，于是 ↑↓ 只能借用浏览器给 `<div tabindex>` 画的默认 outline ——
+     * 一圈紧贴内容盒、与行内边距不对齐的深色 halo。
+     *
+     * 【为什么用描边而不是再挤一档背景色】背景通道已经被 hover(10%) /
+     * selected(22%) / playing(20%) 占满，再挤一档就分不出来。描边走**边框通道**，
+     * 与背景正交，可以叠加且各自可辨。
+     *
+     * 【描边的实际规则在 `index.css`】见那里的 `[data-active]:focus`。放在 CSS
+     * 而不是这里，是因为 Tailwind 的 `focus:outline-none`（用于关掉浏览器默认
+     * 描边）编译成 `outline: 2px solid transparent` 的**简写**，带 `:focus` 的
+     * 选择器优先级又高于本组类 —— 两者叠在一起时，我们画的环会被整体改写成透明，
+     * 表现就是"键盘移动完全不显示高亮"。这类"工具类互相覆盖"的坑，只有在
+     * 一条显式规则里才看得见。
+     */
+    active?: boolean;
     /** 悬停/选中时的强调基调，`danger` 用于破坏性目标的悬停反馈。 */
     intent?: "default" | "danger";
     density?: AppListRowDensity;
@@ -49,12 +75,31 @@ export interface AppListRowProps {
     /** roving tabindex：活动行为 `0`，其余为 `-1`；省略则不可聚焦（旧行为）。 */
     tabIndex?: number;
     /**
+     * 列表项在**全量**列表中的位置（1 起）。
+     *
+     * 【为什么需要】窗口化列表只把视口附近的行放进 DOM，读屏看到的选项数量因此
+     * 与真实条数不符 —— 两万项会被念成几十项。`aria-posinset` / `aria-setsize`
+     * 是 ARIA 为此提供的表达：告诉读屏"这是第 N 项、共 M 项"。
+     * 非窗口化列表可以省略（默认语义已经正确）。
+     */
+    ariaPosInSet?: number;
+    /** 全量列表的项数，与 `ariaPosInSet` 成对使用。 */
+    ariaSetSize?: number;
+    /**
      * 显式列表项角色。
      *
      * 仅凭 `onClick` / `onDoubleClick` 推导会让"只能拖拽"与"暂不可用"的行在
      * listbox 里没有角色。文件浏览器对所有行显式传 `"option"`。
      */
     role?: "option";
+    /**
+     * 悬停提示（项目自定义气泡，走 `data-tooltip` 通道）。
+     *
+     * 【为什么与 `title` 并存】`title` 是浏览器原生提示：延迟长、样式不可控、
+     * 深色主题下常与页面撞色。需要与全应用一致的气泡时用本字段。
+     */
+    tooltip?: string;
+    /** 原生浏览器提示。新代码优先用 `tooltip`。 */
     title?: string;
     className?: string;
     /** 供虚拟化列表用；普通列表省略。 */
@@ -81,6 +126,7 @@ export const AppListRow = forwardRef<HTMLDivElement, AppListRowProps>(function A
     {
         children,
         selected = false,
+        active = false,
         intent = "default",
         density = "compact",
         disabled = false,
@@ -90,7 +136,10 @@ export const AppListRow = forwardRef<HTMLDivElement, AppListRowProps>(function A
         onPointerDown,
         onFocus,
         tabIndex,
+        ariaPosInSet,
+        ariaSetSize,
         role,
+        tooltip,
         title,
         className,
         style,
@@ -108,9 +157,13 @@ export const AppListRow = forwardRef<HTMLDivElement, AppListRowProps>(function A
             ref={ref}
             role={isOption ? "option" : undefined}
             aria-selected={isOption ? selected : undefined}
+            aria-posinset={isOption ? ariaPosInSet : undefined}
+            aria-setsize={isOption ? ariaSetSize : undefined}
             aria-disabled={disabled || undefined}
             tabIndex={tabIndex}
             data-selected={selected || undefined}
+            data-active={active || undefined}
+            data-tooltip={tooltip}
             title={title}
             style={style}
             data-testid={testId}

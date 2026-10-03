@@ -848,6 +848,13 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                         heightPx={viewportSize.height}
                         axis={waveformAxis}
                         viewportSource={kernelViewportSource}
+                        /* 窗口已含末行时向波形层承诺「纵向到底」：末行之下没有更多
+                           轨道，视口底边越出几何底端是内容终点之外的正确留白——
+                           否则少轨道 + 高窗口的工程会让底部包含判定每帧失败、
+                           波形层退化成每帧全量重建（见 geometryCache）。 */
+                        rowsEndAtContentBottom={
+                            visibleRows.firstRow + visibleRows.rowCount >= tracks.length
+                        }
                     />
                 </div>
             ) : null}

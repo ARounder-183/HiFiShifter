@@ -687,9 +687,7 @@ fn convert_reaper_items_to_existing_tracks(
             let track_pitch_accum = pitch_offset_by_track
                 .entry(target_track_id.clone())
                 .or_default();
-            let track_curves_accum = curves_by_track
-                .entry(target_track_id.clone())
-                .or_default();
+            let track_curves_accum = curves_by_track.entry(target_track_id.clone()).or_default();
 
             for item in &reaper_track.items {
                 process_item(
@@ -764,8 +762,8 @@ fn convert_reaper_items_to_existing_tracks(
                     // M1（回退，旧/第三方形态）：点 < seg_start → 点为段内
                     // 相对时间，段起点 = seg_range[0]。
                     let seg_start = range.first().copied().unwrap_or(0.0).max(0.0);
-                    let absolute = seg_start > 1e-6
-                        && points.iter().all(|(p, _, _)| *p >= seg_start - 1e-6);
+                    let absolute =
+                        seg_start > 1e-6 && points.iter().all(|(p, _, _)| *p >= seg_start - 1e-6);
                     let points = if absolute {
                         points
                             .into_iter()
@@ -778,9 +776,7 @@ fn convert_reaper_items_to_existing_tracks(
                     // SEG_RANGE[1]：> seg_start → 终点（原生）；≤ seg_start →
                     // 长度（旧形态回退）。缺省回退到点跨度。
                     let span_end = match range.get(1).copied() {
-                        Some(end) if end.is_finite() && end > seg_start + 1e-9 => {
-                            end + time_offset
-                        }
+                        Some(end) if end.is_finite() && end > seg_start + 1e-9 => end + time_offset,
                         Some(len) if len.is_finite() && len > 0.0 => span_start + len,
                         _ => span_start + points.last().map(|(p, _, _)| *p).unwrap_or(0.0),
                     };
@@ -788,9 +784,8 @@ fn convert_reaper_items_to_existing_tracks(
                 }
                 None => {
                     // 无 SEG_RANGE：绝对工程秒（+ 光标对齐偏移）。
-                    let span_start = (points.first().map(|(p, _, _)| *p).unwrap_or(0.0)
-                        + time_offset)
-                        .max(0.0);
+                    let span_start =
+                        (points.first().map(|(p, _, _)| *p).unwrap_or(0.0) + time_offset).max(0.0);
                     let span_end = points.last().map(|(p, _, _)| *p).unwrap_or(0.0) + time_offset;
                     overwrite_accum_span(curves, key, &points, span_start, span_end, 0.0);
                 }
@@ -1029,7 +1024,11 @@ fn convert_reaper_data(
     // track_id → 轨道包络（vol, pan, mute gate），待 total_frames 已知后覆写
     let mut track_envs_by_track: std::collections::HashMap<
         String,
-        (Option<ReaperEnvelope>, Option<ReaperEnvelope>, Option<ReaperEnvelope>),
+        (
+            Option<ReaperEnvelope>,
+            Option<ReaperEnvelope>,
+            Option<ReaperEnvelope>,
+        ),
     > = std::collections::HashMap::new();
 
     // 从解析的 TEMPO 中获取 BPM（无则用 fallback），后续 MIDI 转换需要
@@ -1111,7 +1110,14 @@ fn convert_reaper_data(
 
         // 轨道包络（绝对语义 + hold 全程覆盖）暂存，待 total_frames 已知后
         // 统一覆写 take 晋升数据（见下方轨道包络覆写段）。
-        track_envs_by_track.insert(track_id.clone(), (track_vol_envs[i].clone(), track_pan_envs[i].clone(), track_gate_envs[i].clone()));
+        track_envs_by_track.insert(
+            track_id.clone(),
+            (
+                track_vol_envs[i].clone(),
+                track_pan_envs[i].clone(),
+                track_gate_envs[i].clone(),
+            ),
+        );
 
         if !track_pitch_accum.is_empty() {
             pitch_data_by_track.insert(track_id.clone(), track_pitch_accum);
@@ -1142,13 +1148,27 @@ fn convert_reaper_data(
         }
         let accum = curves_by_track.entry(track_id.clone()).or_default();
         if let Some(env) = vol_env {
-            overwrite_accum_span(accum, "volume", &reaper_env_points(env), 0.0, project_end, 0.0);
+            overwrite_accum_span(
+                accum,
+                "volume",
+                &reaper_env_points(env),
+                0.0,
+                project_end,
+                0.0,
+            );
         }
         if let Some(env) = pan_env {
             overwrite_accum_span(accum, "pan", &reaper_env_points(env), 0.0, project_end, 0.0);
         }
         if let Some(env) = gate_env {
-            overwrite_accum_span(accum, MUTE_GATE_KEY, &reaper_env_points(env), 0.0, project_end, 0.0);
+            overwrite_accum_span(
+                accum,
+                MUTE_GATE_KEY,
+                &reaper_env_points(env),
+                0.0,
+                project_end,
+                0.0,
+            );
         }
     }
 
@@ -1369,8 +1389,8 @@ fn process_item(
     let item_reversed = raw_play_rate < 0.0 || source_section_reversed;
     let play_rate = raw_play_rate.abs().max(0.01);
     let item_pitch_semitones = take.play_rate.get(2).copied().unwrap_or(0.0); // 整体音高偏移
-    // 活跃 take 存在激活 VOLENV 时其音量钮被取代（绝对包络语义），
-    // 包络本身由 write_take_envelope_frames 晋升为轨道音量曲线。
+                                                                              // 活跃 take 存在激活 VOLENV 时其音量钮被取代（绝对包络语义），
+                                                                              // 包络本身由 write_take_envelope_frames 晋升为轨道音量曲线。
     let take_volume_overridden = take_volume_envelope_active(take);
     let take_gain = take_linear_gain(item, take, take_volume_overridden);
     let item_muted = item.mute.first().copied().unwrap_or(0) != 0;
@@ -1824,7 +1844,10 @@ fn envelope_is_active(env: &ReaperEnvelope) -> bool {
 /// 注意只匹配精确类型别名：旧实现的 `contains("PITCH") || == "ENVSEG"`
 /// 会把 ENVSEG 误判为音高包络（ENVSEG 是剪贴板轨道包络段的块名，不是
 /// 音高包络）。
-fn find_active_envelope<'a>(envs: &'a [ReaperEnvelope], kinds: &[&str]) -> Option<&'a ReaperEnvelope> {
+fn find_active_envelope<'a>(
+    envs: &'a [ReaperEnvelope],
+    kinds: &[&str],
+) -> Option<&'a ReaperEnvelope> {
     envs.iter().find(|env| {
         env_type_matches(&env.env_type, kinds) && envelope_is_active(env) && !env.points.is_empty()
     })
@@ -1912,7 +1935,10 @@ fn overwrite_accum_span(
         if frame_idx >= entry.len() {
             entry.resize(frame_idx + 1, CurveFrameAccumulator::default());
         }
-        entry[frame_idx] = CurveFrameAccumulator { sum: value, weight: 1.0 };
+        entry[frame_idx] = CurveFrameAccumulator {
+            sum: value,
+            weight: 1.0,
+        };
     }
 }
 
@@ -1967,13 +1993,31 @@ fn write_take_envelope_frames(
         mute_env.map(reaper_env_points),
     );
     if let Some(points) = vol_points.as_ref().filter(|p| !p.is_empty()) {
-        accumulate_take_env(accum_for(curves_accum, "volume"), points, item_start_tl, item_end_tl, take_rate);
+        accumulate_take_env(
+            accum_for(curves_accum, "volume"),
+            points,
+            item_start_tl,
+            item_end_tl,
+            take_rate,
+        );
     }
     if let Some(points) = pan_points.as_ref().filter(|p| !p.is_empty()) {
-        accumulate_take_env(accum_for(curves_accum, "pan"), points, item_start_tl, item_end_tl, take_rate);
+        accumulate_take_env(
+            accum_for(curves_accum, "pan"),
+            points,
+            item_start_tl,
+            item_end_tl,
+            take_rate,
+        );
     }
     if let Some(points) = gate_points.as_ref().filter(|p| !p.is_empty()) {
-        accumulate_take_env(accum_for(curves_accum, MUTE_GATE_KEY), points, item_start_tl, item_end_tl, take_rate);
+        accumulate_take_env(
+            accum_for(curves_accum, MUTE_GATE_KEY),
+            points,
+            item_start_tl,
+            item_end_tl,
+            take_rate,
+        );
     }
 }
 
@@ -2013,7 +2057,9 @@ fn accumulate_take_env(
     for frame_idx in start_frame..=end_frame {
         let t = frame_idx as f64 * FRAME_PERIOD;
         let time_in_item = t - item_start_tl;
-        if time_in_item < 0.0 || (item_end_tl > item_start_tl && time_in_item > item_end_tl - item_start_tl) {
+        if time_in_item < 0.0
+            || (item_end_tl > item_start_tl && time_in_item > item_end_tl - item_start_tl)
+        {
             continue;
         }
         let u = item_time_to_take_env_u(time_in_item, take_rate);
@@ -2423,10 +2469,7 @@ mod tests {
         ReaperEnvelope {
             env_type: env_type.to_string(),
             act: vec![1, -1],
-            points: points
-                .into_iter()
-                .map(|(p, v)| vec![p, v, 0.0])
-                .collect(),
+            points: points.into_iter().map(|(p, v)| vec![p, v, 0.0]).collect(),
             ..ReaperEnvelope::default()
         }
     }
@@ -2459,11 +2502,7 @@ mod tests {
         (clips, pitch, curves, skipped)
     }
 
-    fn curve_value_at(
-        curves: &CurveAccum,
-        key: &str,
-        frame: usize,
-    ) -> f64 {
+    fn curve_value_at(curves: &CurveAccum, key: &str, frame: usize) -> f64 {
         curves
             .get(key)
             .and_then(|slots| slots.get(frame))
@@ -2570,7 +2609,8 @@ mod tests {
         inverted.default_take.vol_pan = vec![1.0, 0.0, -0.8, -1.0];
         assert!((take_linear_gain(&inverted, &inverted.default_take, false) - -0.8).abs() < 1e-9);
         assert!(
-            (convert_volume(take_linear_gain(&inverted, &inverted.default_take, false)) - 0.8).abs()
+            (convert_volume(take_linear_gain(&inverted, &inverted.default_take, false)) - 0.8)
+                .abs()
                 < 1e-6
         );
 
@@ -2742,15 +2782,18 @@ mod tests {
         let second = &clips[1];
         let expected_rate = (3.902976163 - 2.05) / (2.971878688 - 2.05);
         assert!((second.playback_rate - expected_rate).abs() < 1e-6);
-        assert!(second.source_start_sec < 2.05 && second.source_end_sec > 3.902976163,
-            "源窗口必须锚定标记的绝对源位置（允许段间重叠外扩）");
+        assert!(
+            second.source_start_sec < 2.05 && second.source_end_sec > 3.902976163,
+            "源窗口必须锚定标记的绝对源位置（允许段间重叠外扩）"
+        );
 
         // 中间段抽查：压缩段速率 < 1。
         let compressed = &clips[2];
-        assert!((compressed.playback_rate - (6.240799448 - 3.902976163)
-            / (8.142757375 - 2.971878688))
-        .abs()
-            < 1e-6);
+        assert!(
+            (compressed.playback_rate - (6.240799448 - 3.902976163) / (8.142757375 - 2.971878688))
+                .abs()
+                < 1e-6
+        );
 
         // 尾段：基准速率外推，且 clips 链一直铺到 item 末端
         //（旧实现丢失末标记之后的 25s）。
@@ -2809,12 +2852,18 @@ mod tests {
 
         let (_, pitch, _, _) = run_process_item(&item);
         let frames = build_pitch_frames(&pitch, 401);
-        assert!((frames[0] - 1.0).abs() < 1e-6, "无 SEL → default take 的包络");
+        assert!(
+            (frames[0] - 1.0).abs() < 1e-6,
+            "无 SEL → default take 的包络"
+        );
 
         item.takes[0].selected = true;
         let (_, pitch, _, _) = run_process_item(&item);
         let frames = build_pitch_frames(&pitch, 401);
-        assert!((frames[0] - 5.0).abs() < 1e-6, "TAKE SEL → 显式 take 的包络");
+        assert!(
+            (frames[0] - 5.0).abs() < 1e-6,
+            "TAKE SEL → 显式 take 的包络"
+        );
     }
 
     #[test]
@@ -2886,7 +2935,9 @@ mod tests {
         data.is_track_data = true;
         let mut track = ReaperTrack::default();
         track.vol_pan = vec![0.5, 0.8, -1.0, -1.0, 1.0];
-        track.envelopes.push(env("VOLENV2", vec![(0.0, 2.0), (4.0, 1.0)]));
+        track
+            .envelopes
+            .push(env("VOLENV2", vec![(0.0, 2.0), (4.0, 1.0)]));
         track.envelopes.push(env("PANENV2", vec![(0.0, 0.5)]));
         track.envelopes.push(ReaperEnvelope {
             env_type: "MUTEENV".to_string(),
@@ -2906,7 +2957,12 @@ mod tests {
             (hs_track.volume - 1.0).abs() < 1e-9,
             "VOLENV2 取代推子 → Track.volume 中性化"
         );
-        let params = result.timeline.params_by_root_track.values().next().unwrap();
+        let params = result
+            .timeline
+            .params_by_root_track
+            .values()
+            .next()
+            .unwrap();
         let volume = params.extra_curves.get("volume").unwrap();
         let pan = params.extra_curves.get("pan").unwrap();
         let fp = FRAME_PERIOD;
@@ -2933,16 +2989,8 @@ mod tests {
         track.envelopes.push(ReaperEnvelope {
             env_type: "VOLENV2".to_string(),
             act: vec![1, -1],
-            seg_range: Some(vec![
-                seg_start,
-                seg_len,
-                seg_start * 2.0,
-                seg_len * 2.0,
-            ]),
-            points: points
-                .into_iter()
-                .map(|(p, v)| vec![p, v, 0.0])
-                .collect(),
+            seg_range: Some(vec![seg_start, seg_len, seg_start * 2.0, seg_len * 2.0]),
+            points: points.into_iter().map(|(p, v)| vec![p, v, 0.0]).collect(),
             ..ReaperEnvelope::default()
         });
         data.tracks.push(track);
@@ -2972,11 +3020,7 @@ mod tests {
     fn envseg_clipboard_segment_imports_to_target_track_curves() {
         // <ENVSEG VOLENV2 SEG_RANGE 10 2 ...>，段内相对点 (0, 0.8) (2, 0.4)。
         // M1（段内相对）：项目位置 = seg_range[0] + PT → t=10..12s。
-        let params = run_envseg_import(envseg_data(
-            10.0,
-            2.0,
-            vec![(0.0, 0.8), (2.0, 0.4)],
-        ));
+        let params = run_envseg_import(envseg_data(10.0, 2.0, vec![(0.0, 0.8), (2.0, 0.4)]));
         let volume = params.extra_curves.get("volume").unwrap();
         let fp = FRAME_PERIOD;
         assert!((volume[(10.0 / fp) as usize] - 0.8).abs() < 1e-3);
@@ -2989,11 +3033,7 @@ mod tests {
     fn envseg_absolute_points_fall_back_to_absolute_interpretation() {
         // seg_range[0]=10 且所有点 ≥ 10（相对解释下不可能出现的形态）→
         // M2 判别：点为绝对工程秒，相对化后段同样落在 t=10..12s。
-        let params = run_envseg_import(envseg_data(
-            10.0,
-            2.0,
-            vec![(10.0, 0.8), (12.0, 0.4)],
-        ));
+        let params = run_envseg_import(envseg_data(10.0, 2.0, vec![(10.0, 0.8), (12.0, 0.4)]));
         let volume = params.extra_curves.get("volume").unwrap();
         let fp = FRAME_PERIOD;
         assert!((volume[(10.0 / fp) as usize] - 0.8).abs() < 1e-3);
@@ -3017,8 +3057,10 @@ mod tests {
             env_type: "VOLENV2".to_string(),
             act: vec![1, -1],
             seg_range: Some(vec![0.0, 2.0, 0.0, 4.0]),
-            points: vec![vec![0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                         vec![2.0, 1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0]],
+            points: vec![
+                vec![0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                vec![2.0, 1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0],
+            ],
             ..ReaperEnvelope::default()
         });
         let mut track1 = ReaperTrack::default();
@@ -3027,8 +3069,19 @@ mod tests {
             env_type: "VOLENV2".to_string(),
             act: vec![1, -1],
             seg_range: Some(vec![77.0, 80.824479166667, 154.0, 161.648958333334]),
-            points: vec![vec![77.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 154.0],
-                         vec![80.824479166667, 1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 161.648958333334]],
+            points: vec![
+                vec![77.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 154.0],
+                vec![
+                    80.824479166667,
+                    1.5,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    161.648958333334,
+                ],
+            ],
             ..ReaperEnvelope::default()
         });
         data.tracks.push(track0);
@@ -3070,7 +3123,10 @@ mod tests {
         // 相对解释拉到光标附近。
         let params_t2 = result.timeline.params_by_root_track.get("track_2").unwrap();
         let volume_t2 = params_t2.extra_curves.get("volume").unwrap();
-        assert!((volume_t2[(87.0 / fp) as usize] - 0.5).abs() < 1e-3, "轨 2 包络起点 = item 起点");
+        assert!(
+            (volume_t2[(87.0 / fp) as usize] - 0.5).abs() < 1e-3,
+            "轨 2 包络起点 = item 起点"
+        );
         // 段末（80.824+10 = 90.824s）为端点值 1.5；t=90 处为线性中间值 ≈1.284。
         let end_frame = (90.824479166667f64 / fp).floor() as usize;
         assert!(
@@ -3080,11 +3136,7 @@ mod tests {
             volume_t2[end_frame]
         );
         let mid = volume_t2[(90.0 / fp) as usize];
-        assert!(
-            (mid - 1.2845).abs() < 5e-3,
-            "线性插值中间值，实际 {}",
-            mid
-        );
+        assert!((mid - 1.2845).abs() < 5e-3, "线性插值中间值，实际 {}", mid);
         assert!(
             (volume_t2[(10.0 / fp) as usize] - 1.0).abs() < 1e-6,
             "轨 2 的段不得出现在光标附近"

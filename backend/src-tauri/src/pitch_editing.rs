@@ -1310,8 +1310,7 @@ pub(crate) fn compute_clip_export_pitch_offsets(
     let clip_start = clip.start_sec.max(0.0);
     let clip_length = clip.length_sec.max(0.0);
     let start_frame = ((clip_start * 1000.0) / frame_period_ms).floor().max(0.0) as usize;
-    let frame_count =
-        (((clip_length * 1000.0) / frame_period_ms).ceil().max(1.0)) as usize;
+    let frame_count = (((clip_length * 1000.0) / frame_period_ms).ceil().max(1.0)) as usize;
     let end_frame = start_frame + frame_count;
 
     let child_cfg = active_child_pitch_offset_config(timeline, &clip.track_id);
@@ -2110,10 +2109,16 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         .map(|c| c.len())
         .min()
         .unwrap_or(0);
-    if processed_channels.iter().any(|c| c.len() != expected_out_frames) {
+    if processed_channels
+        .iter()
+        .any(|c| c.len() != expected_out_frames)
+    {
         log_warn_limited!(
             "pitch_edit: output length mismatch (got {:?}, expected {}), adjusting",
-            processed_channels.iter().map(|c| c.len()).collect::<Vec<_>>(),
+            processed_channels
+                .iter()
+                .map(|c| c.len())
+                .collect::<Vec<_>>(),
             expected_out_frames
         );
     }

@@ -76,7 +76,8 @@ pub(crate) fn analyze_take_silence(
         1.0
     };
 
-    let (sample_rate, channels, pcm) = crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path))?;
+    let (sample_rate, channels, pcm) =
+        crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path))?;
     let channels = channels.max(1) as usize;
     let frames = pcm.len() / channels;
     if frames == 0 || sample_rate == 0 {
@@ -85,8 +86,16 @@ pub(crate) fn analyze_take_silence(
     let media_dur_sec = frames as f64 / sample_rate as f64;
     let sr = sample_rate as f64;
 
-    let ss = if source_start_sec.is_finite() { source_start_sec } else { 0.0 };
-    let se = if source_end_sec.is_finite() { source_end_sec } else { media_dur_sec };
+    let ss = if source_start_sec.is_finite() {
+        source_start_sec
+    } else {
+        0.0
+    };
+    let se = if source_end_sec.is_finite() {
+        source_end_sec
+    } else {
+        media_dur_sec
+    };
 
     // ── 时间线 local 秒 → 源帧索引（None = 该位置为静音）──────────────────
     // 与 sample_clip_pcm 的取数语义一致（Loop 整文件回绕 / 非循环越界静音 /
@@ -192,13 +201,21 @@ pub(crate) fn analyze_take_silence(
             levels_db.push(f64::NEG_INFINITY);
             continue;
         }
-        let level = if options.use_peak { peak } else { (sum_sq / n as f64).sqrt() };
+        let level = if options.use_peak {
+            peak
+        } else {
+            (sum_sq / n as f64).sqrt()
+        };
         levels_db.push(20.0 * level.max(1e-10).log10());
     }
 
     // ── 阈值（固定 / 自适应噪底）──────────────────────────────────────────
     let threshold_db = if options.adaptive {
-        let mut finite: Vec<f64> = levels_db.iter().copied().filter(|v| v.is_finite()).collect();
+        let mut finite: Vec<f64> = levels_db
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
         if finite.is_empty() {
             // 整段无内容 → 全静音，交给下方分段逻辑输出整段区间。
             f64::NEG_INFINITY
@@ -308,10 +325,7 @@ pub(crate) fn analyze_take_silence(
         if end_t - start_t <= 1e-4 {
             continue;
         }
-        regions.push((
-            (clip_start_sec + start_t).max(0.0),
-            clip_start_sec + end_t,
-        ));
+        regions.push(((clip_start_sec + start_t).max(0.0), clip_start_sec + end_t));
     }
 
     // 合并相邻（精修 / padding 后可能产生的重叠或贴近段）。
@@ -474,7 +488,9 @@ mod tests {
     fn fully_silent_clip_returns_single_region() {
         let dir = std::env::temp_dir();
         let sr = 44100.0f64;
-        let path = write_test_wav(&dir, "hsd_silent.wav", 44100, (2.0 * sr) as usize, |_| 0.0f32);
+        let path = write_test_wav(&dir, "hsd_silent.wav", 44100, (2.0 * sr) as usize, |_| {
+            0.0f32
+        });
         let regions =
             analyze_take_silence(&path, 0.0, 2.0, 1.0, false, false, 0.0, 2.0, &opts()).unwrap();
         assert_eq!(regions.len(), 1, "regions: {regions:?}");

@@ -86,6 +86,10 @@ export const persistUiSettings = createAsyncThunk(
             metronomeAccent: s.metronomeAccent,
             metronomeSound: s.metronomeSound,
             silenceDetectOptions: s.silenceDetectOptions,
+            search: s.searchSettings,
+            fileBrowser: s.fileBrowserView,
+            fileBrowserFavorites: s.fileBrowserFavorites,
+            folderImport: s.folderImportOptions,
             quickSearchAutoNormalize: s.quickSearchAutoNormalizeEnabled,
             saveUndoHistoryByDefault: s.saveUndoHistoryByDefault,
             visibleReferenceRootTrackIds: s.visibleReferenceRootTrackIds,
@@ -97,12 +101,21 @@ export const persistUiSettings = createAsyncThunk(
             autoBackgroundRender: s.autoBackgroundRender,
             renderCache: s.renderCache,
             channelImportPolicy: s.channelImportPolicy,
+            penInput: s.penInput,
             selectDragDirection: s.selectDragDirection,
             drawDragDirection: s.drawDragDirection,
 
             lineVibratoDragDirection: s.lineVibratoDragDirection,
             smoothnessPercent: s.edgeSmoothnessPercent,
             customScalePresets: s.customScalePresets,
+            // `null` 在线上格式里表示"没设过"，因此转成 `undefined` 让字段整个
+            // 缺席，而不是写一个 `null` 回去（后端那两个字段是 Option<f64>，
+            // 但缺席更贴合"用户从没调过"的语义）。
+            vibratoPresets: s.vibratoPresets,
+            activeVibratoPresetId: s.activeVibratoPresetId,
+            vibratoBaseline: s.vibratoBaseline,
+            disabledVibratoPresetIds: s.disabledVibratoPresetIds,
+            builtinVibratoPresetOrder: s.builtinVibratoPresetOrder,
         });
     },
 );

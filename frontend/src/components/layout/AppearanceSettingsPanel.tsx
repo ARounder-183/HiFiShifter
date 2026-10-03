@@ -23,7 +23,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { AppFileInput } from "../../ui/FileInput";
-import { useAppDispatch } from "../../app/hooks";
+import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import type { RootState } from "../../app/store";
 import { closeForm } from "../../features/dock/dockSlice";
 import { broadcastAppearanceToSatellites } from "../../features/dock/detachBridge";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -53,6 +54,9 @@ import {
     AppSegmentedControl,
     AppStatusChip,
 } from "../../ui";
+import { effectiveSearchMode } from "../../features/search/searchSettings";
+import { useTranslitIndex } from "../../features/search/useTranslitIndex";
+import { buildQuery, fallbackTranslit, matchTranslit } from "../../features/search/translit";
 import { exportThemeJson } from "../../services/api/jsonExport";
 import {
     loadCustomThemes,
@@ -131,6 +135,9 @@ function getAutoGray(accent: RadixAccentColor): RadixGrayColor {
 
 /* Tab 类型 */
 type SettingsTab = "theme" | "font";
+
+/** 稳定的空数组引用：避免每次渲染都触发转写索引的重建判定。 */
+const NO_FONT_TEXTS: readonly string[] = [];
 
 const PALETTE_GROUPS: Array<{ labelKey: string; tokens: QtColorToken[] }> = [
     {
@@ -459,7 +466,16 @@ export interface AppearanceSettingsPanelProps {
 export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = ({ formId }) => {
     const { t, tf, plural } = useI18n();
     const theme = useAppTheme();
+    // 解构出稳定引用供下面的实时预览 effect 使用：effect 只依赖具体成员、
+    // 不依赖整个 context 对象（对象身份随 provider 任意更新翻转，见该 effect 处说明）。
+    const applyThemeSettings = theme.applySettings;
+    const themeModeSetting = theme.modeSetting;
     const dispatch = useAppDispatch();
+    /*
+     * 字体列表的过滤要读搜索设置（转写开关与宽严）。设置本身在**独立的
+     * 「搜索与匹配设置」对话框**里改 —— 它不是外观的一部分。
+     */
+    const searchSettings = useAppSelector((state: RootState) => state.session.searchSettings);
 
     /**
      * 关闭本面板。
@@ -694,7 +710,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
         localStorage.setItem(
             PREVIEW_SETTINGS_KEY,
             JSON.stringify({
-                mode: theme.modeSetting,
+                mode: themeModeSetting,
                 accentColor,
                 grayColor,
                 radius,
@@ -702,15 +718,28 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
             }),
         );
         localStorage.setItem(PREVIEW_COLORS_KEY, JSON.stringify(editColors));
-        theme.applySettings({
-            mode: theme.modeSetting,
+        applyThemeSettings({
+            mode: themeModeSetting,
             accentColor,
             grayColor,
             radius,
             fontFamily,
             activeCustomThemeId: null,
         });
-    }, [theme, theme.modeSetting, accentColor, grayColor, radius, fontFamily, editColors]);
+        // 依赖只列具体成员、不含 `theme` 对象：context 对象身份随 provider 的任何
+        // 更新翻转（如 auto 模式下的系统深浅色切换会重建 toggleMode），把它放进
+        // 依赖会让本 effect 在用户未触碰面板时重跑，把**正激活的自定义主题静默
+        // 写回为已停用**（applySettings 会持久化）。`theme.applySettings` 是
+        // useCallback([]) 的稳定引用，列进来只为满足 lint，不引入额外触发。
+    }, [
+        applyThemeSettings,
+        themeModeSetting,
+        accentColor,
+        grayColor,
+        radius,
+        fontFamily,
+        editColors,
+    ]);
 
     /* ── 应用 & 关闭 ── */
     const handleApply = useCallback(() => {
@@ -953,11 +982,28 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
         [fontFamily, systemFonts.fonts],
     );
 
+    /*
+     * 字体过滤也走同一套匹配：中文字体名（「微软雅黑」）能被打成 `yahei` 搜到，
+     * 而拉丁字体名的行为与改动前一致（字面匹配）。
+     *
+     * 转写索引只在**字体页签可见时**才取：字体列表可能有几百项，没打开这一页
+     * 就发起一次 IPC 是白费。
+     */
+    const fontTranslitTexts = useMemo(
+        () => (activeTab === "font" ? availableFonts : NO_FONT_TEXTS),
+        [activeTab, availableFonts],
+    );
+    const fontTranslitIndex = useTranslitIndex(fontTranslitTexts, searchSettings);
+
     const filteredFonts = useMemo(() => {
         if (!fontSearch) return availableFonts;
-        const q = fontSearch.toLowerCase();
-        return availableFonts.filter((f) => f.toLowerCase().includes(q));
-    }, [availableFonts, fontSearch]);
+        const query = buildQuery(fontSearch);
+        const mode = effectiveSearchMode(searchSettings);
+        return availableFonts.filter((font) => {
+            const forms = fontTranslitIndex.get(font) ?? fallbackTranslit(font);
+            return matchTranslit(forms, query, mode) !== null;
+        });
+    }, [availableFonts, fontSearch, fontTranslitIndex, searchSettings]);
 
     const tabItems = useMemo(
         () => [
@@ -1000,7 +1046,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
             </div>
 
             {/* ═══════ 内容区 ═══════ */}
-            <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar px-3">
+            <div className="hs-scroll-gutter-flush min-h-0 flex-1 overflow-y-auto custom-scrollbar px-3">
                 <div className="pb-3">
                     {/* ═══════ Tab: 主题 ═══════ */}
                     {activeTab === "theme" && (
@@ -1420,7 +1466,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                          * 不同 —— 那种已按"外层不滚、内层滚"改掉（见
                                          * AppDialog 的滚动契约）。这里保留。
                                          */}
-                                        <div className="max-h-[320px] overflow-y-auto rounded border border-qt-border bg-qt-base p-1 custom-scrollbar">
+                                        <div className="hs-scroll-gutter max-h-[320px] overflow-y-auto rounded border border-qt-border bg-qt-base p-1 custom-scrollbar">
                                             {filteredFonts.length > 0 ? (
                                                 filteredFonts.map((f) => {
                                                     const isActive = extractFontFamilies(

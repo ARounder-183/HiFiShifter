@@ -8,7 +8,7 @@ import { webApi } from "../../../../services/webviewApi";
 import type { ClipInfo } from "../../../../features/session/sessionTypes";
 import type { Keybinding } from "../../../../features/keybindings/types";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
-import { advanceFineAxisDrag, type FineAxisDragState } from "../fineAxisDrag";
+import { advanceFineAxisDrag, type FineAxisDragState } from "../../../../utils/fineAxisDrag";
 import { computePitchDragCents, shiftPitchFrames } from "../clipPitchDrag";
 
 /** 后端预览下发节流间隔（与淡化拖拽的远程同步节奏一致）。 */

@@ -1,13 +1,26 @@
 import { createSlice, createAsyncThunk, type PayloadAction } from "@reduxjs/toolkit";
 import { fileBrowserApi, type FileEntry } from "../../services/api/fileBrowser";
+import type { SearchOptionsPayload } from "../search/searchSettings";
 
-export type SortMode = "name" | "date" | "size";
+/**
+ * 「计算机」虚拟路径：Windows 盘符根（`C:\`）的上一级，列表内容是全部盘符。
+ *
+ * 后端 `list_directory` 识别这个哨兵值并返回盘符清单，其余命令不应收到它 ——
+ * 递归搜索在「计算机」层没有意义，调用方需先做守卫。非 Windows 平台没有
+ * 这一层（`/` 已是文件系统顶端），永远不会导航到它。
+ */
+export const FILE_BROWSER_COMPUTER_PATH = "computer://";
 
 /**
  * 本分片的状态类型。
  *
  * 导出是因为 `RootState` 由它组合而成 —— SDK 的声明产出需要能命名它
  * （否则 `tsc --emitDeclarationOnly` 报 TS4023「cannot be named」）。
+ *
+ * 【为什么这里没有排序 / 仅媒体 / 隐藏文件】它们是**用户偏好**，随
+ * `app_config.json` 一起备份与迁移，因此住在 `session.fileBrowserView`
+ * （见 `features/fileBrowser/fileBrowserViewOptions.ts`）。本分片只保留
+ * "当前这一次浏览"的状态：在哪个目录、列表内容、搜索词、试听对象。
  */
 export interface FileBrowserState {
     currentPath: string;
@@ -20,8 +33,6 @@ export interface FileBrowserState {
     searchResults: FileEntry[] | null; // null = 非搜索模式
     searchLoading: boolean;
     regexEnabled: boolean;
-    sortMode: SortMode;
-    audioOnly: boolean; // 仅显示音频文件
     // 最近一次目录/搜索请求的 requestId：快速连续导航/搜索时，迟到的旧
     // 响应若不丢弃，会把面板拉回用户已离开的目录或过期的搜索结果。
     latestLoadRequestId: string | null;
@@ -29,14 +40,34 @@ export interface FileBrowserState {
 }
 
 const STORAGE_KEY = "hifishifter.fileBrowser.lastPath";
-const AUDIO_ONLY_KEY = "hifishifter.fileBrowser.audioOnly";
 
-function getInitialPath(): string {
-    return localStorage.getItem(STORAGE_KEY) || "";
+/*
+ * 存储访问全部包在 try/catch 里。
+ *
+ * 【为什么不能直接调 localStorage】分片在**模块加载期**就要读一次初始路径；在没有
+ * localStorage 的环境（node 环境的单测、未来的非浏览器宿主）里，直接调用会在
+ * `import` 那一刻抛错 —— 于是"只想引用一个常量"的模块也被连坐（本模块的
+ * `FILE_BROWSER_COMPUTER_PATH` 正是被路径工具模块引用的）。存储不可用只应意味着
+ * "没有记住上次的目录"，不是加载失败。
+ */
+function readStoredPath(): string {
+    try {
+        return localStorage.getItem(STORAGE_KEY) || "";
+    } catch {
+        return "";
+    }
+}
+
+function writeStoredPath(path: string): void {
+    try {
+        localStorage.setItem(STORAGE_KEY, path);
+    } catch {
+        /* 存储不可用：本次会话仍然正常工作，只是下次启动不记得 */
+    }
 }
 
 const initialState: FileBrowserState = {
-    currentPath: getInitialPath(),
+    currentPath: readStoredPath(),
     entries: [],
     loading: false,
     error: null,
@@ -46,17 +77,31 @@ const initialState: FileBrowserState = {
     searchResults: null,
     searchLoading: false,
     regexEnabled: false,
-    sortMode: "name" as SortMode,
-    audioOnly: localStorage.getItem(AUDIO_ONLY_KEY) === "true",
     latestLoadRequestId: null,
     latestSearchRequestId: null,
 };
 
+/**
+ * 加载目录。
+ *
+ * 【为什么从 state 里读"是否显示隐藏文件"而不是由调用方传参】它是全局视图选项，
+ * 每个调用点都传一遍等于把同一个决定抄六份；而这里只需要一个布尔量，走
+ * `getState()` 读一次比给六个调用点各加一个参数更不容易漏。
+ *
+ * 用结构化类型而不是 `RootState`，避免分片与 store 之间产生类型环。
+ */
 export const loadDirectory = createAsyncThunk(
     "fileBrowser/loadDirectory",
-    async (dirPath: string, { rejectWithValue }) => {
+    async (dirPath: string, { rejectWithValue, getState }) => {
+        const state = getState() as {
+            session?: { fileBrowserView?: { showHiddenFiles?: boolean } };
+        };
+        const includeHidden = state.session?.fileBrowserView?.showHiddenFiles === true;
         try {
-            const entries = await fileBrowserApi.listDirectory(dirPath);
+            const entries = await fileBrowserApi.listDirectory(
+                dirPath,
+                includeHidden ? { includeHidden } : undefined,
+            );
             return { dirPath, entries };
         } catch (err) {
             return rejectWithValue(err instanceof Error ? err.message : "Failed to load directory");
@@ -66,9 +111,16 @@ export const loadDirectory = createAsyncThunk(
 
 export const searchFilesRecursive = createAsyncThunk(
     "fileBrowser/searchFilesRecursive",
-    async ({ dirPath, query }: { dirPath: string; query: string }, { rejectWithValue }) => {
+    async (
+        {
+            dirPath,
+            query,
+            options,
+        }: { dirPath: string; query: string; options?: SearchOptionsPayload },
+        { rejectWithValue },
+    ) => {
         try {
-            const entries = await fileBrowserApi.searchFilesRecursive(dirPath, query);
+            const entries = await fileBrowserApi.searchFilesRecursive(dirPath, query, options);
             return entries;
         } catch (err) {
             return rejectWithValue(err instanceof Error ? err.message : "Search failed");
@@ -96,13 +148,6 @@ const fileBrowserSlice = createSlice({
         toggleRegex(state) {
             state.regexEnabled = !state.regexEnabled;
         },
-        setSortMode(state, action: PayloadAction<SortMode>) {
-            state.sortMode = action.payload;
-        },
-        toggleAudioOnly(state) {
-            state.audioOnly = !state.audioOnly;
-            localStorage.setItem(AUDIO_ONLY_KEY, String(state.audioOnly));
-        },
     },
     extraReducers: (builder) => {
         builder
@@ -118,7 +163,7 @@ const fileBrowserSlice = createSlice({
                 state.loading = false;
                 state.currentPath = action.payload.dirPath;
                 state.entries = action.payload.entries;
-                localStorage.setItem(STORAGE_KEY, action.payload.dirPath);
+                writeStoredPath(action.payload.dirPath);
             })
             .addCase(loadDirectory.rejected, (state, action) => {
                 if (action.meta.requestId !== state.latestLoadRequestId) return;
@@ -144,13 +189,7 @@ const fileBrowserSlice = createSlice({
     },
 });
 
-export const {
-    setPreviewVolume,
-    setPreviewingFile,
-    setSearchQuery,
-    toggleRegex,
-    setSortMode,
-    toggleAudioOnly,
-} = fileBrowserSlice.actions;
+export const { setPreviewVolume, setPreviewingFile, setSearchQuery, toggleRegex } =
+    fileBrowserSlice.actions;
 
 export default fileBrowserSlice.reducer;

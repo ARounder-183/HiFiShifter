@@ -71,8 +71,21 @@ export function createAppStore() {
                 // 参数曲线），序列化检查只在 dev 下运行，但整切片逐字段深检在高频
                 // 播放轮询下开销可观，故按路径豁免。新增非序列化字段前请三思。
                 serializableCheck: {
-                    ignoredPaths: ["session"],
+                    ignoredPaths: [
+                        "session",
+                        // 目录列表与搜索结果：一次列出两万个文件时，这两个数组
+                        // 本身就是两万个对象。dev 下两条检查中间件**每个 action**
+                        // 都要深走一遍状态 —— 播放时每秒几十个 action，于是一次
+                        // "打开一个大目录"就让整个应用卡住（不只是面板）。
+                        // 数据来自后端 IPC 的 JSON，天生可序列化，豁免不损失什么。
+                        "fileBrowser.entries",
+                        "fileBrowser.searchResults",
+                    ],
                     ignoredActions: ["session/setTimelineState", BRIDGE_SNAPSHOT_ACTION],
+                },
+                // 同一组路径也要豁免不可变性检查：它同样是 dev 下的**每 action 深走**。
+                immutableCheck: {
+                    ignoredPaths: ["session", "fileBrowser.entries", "fileBrowser.searchResults"],
                 },
                 // 注意：此前豁免的 "session.timeline" 并不存在于 SessionState
                 // （状态是 tracks/clips 等平铺字段），属死配置，已移除。

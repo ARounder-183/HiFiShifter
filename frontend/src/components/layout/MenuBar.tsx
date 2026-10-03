@@ -23,6 +23,7 @@ import {
     setOrtDeviceId,
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
+    setSearchSettingsDialogOpen,
     toggleAutoBackgroundRender,
     toggleShowAllTakes,
     toggleSyncEditsAcrossTakes,
@@ -72,7 +73,6 @@ import {
     SetPitchDialog,
     AverageDialog,
     SmoothDialog,
-    VibratoDialog,
     QuantizeDialog,
     MeanQuantizeDialog,
 } from "../editDialogs/EditDialogs";
@@ -80,7 +80,10 @@ import { SCALE_LABELS } from "../../utils/musicalScales";
 import { ExportAudioDialog } from "./ExportAudioDialog";
 import { AutoBackupDialog } from "./AutoBackupDialog";
 import { RenderCacheDialog } from "./RenderCacheDialog";
+import { VibratoDialog } from "./VibratoDialog";
 import { ChannelImportDialog } from "./ChannelImportDialog";
+import { PenInputDialog } from "./PenInputDialog";
+import { SearchSettingsDialog } from "./SearchSettingsDialog";
 import { RecordingSettingsDialog } from "./RecordingSettingsDialog";
 import { BenchmarkDialog } from "./BenchmarkDialog";
 import { AboutDialog } from "./AboutDialog";
@@ -145,10 +148,10 @@ const selectMenuBarSession = (state: RootState) => {
         ortEp: session.ortEp,
         paramSelectionActive: session.paramSelectionActive,
         pitchSnapToleranceCents: session.pitchSnapToleranceCents,
-        playheadSec: session.playheadSec,
         primaryTimeUnit: session.primaryTimeUnit,
         project: session.project,
         projectSec: session.projectSec,
+        searchSettingsDialogOpen: session.searchSettingsDialogOpen,
         secondaryTimeUnit: session.secondaryTimeUnit,
         selectedClipId: session.selectedClipId,
         selectedTrackId: session.selectedTrackId,
@@ -205,6 +208,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     /** 清空波形缓存确认框。缓存重建代价高，且下拉菜单关闭即卸载，故由常驻菜单栏托管。 */
     const [waveformCacheConfirmOpen, setWaveformCacheConfirmOpen] = useState(false);
     const [channelImportDialogOpen, setChannelImportDialogOpen] = useState(false);
+    const [penInputDialogOpen, setPenInputDialogOpen] = useState(false);
     const [dmlAdapters, setDmlAdapters] = useState<
         { deviceId: number; name: string; memoryMb: number }[]
     >([]);
@@ -235,10 +239,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [setPitchOpen, setSetPitchOpen] = useState(false);
     const [averageOpen, setAverageOpen] = useState(false);
     const [smoothOpen, setSmoothOpen] = useState(false);
-    const [vibratoOpen, setVibratoOpen] = useState(false);
-    const [vibratoParamRange, setVibratoParamRange] = useState<
-        { min: number; max: number } | undefined
-    >(undefined);
+    const [vibratoDialogOpen, setVibratoDialogOpen] = useState(false);
     const [quantizeOpen, setQuantizeOpen] = useState(false);
     const [meanQuantizeOpen, setMeanQuantizeOpen] = useState(false);
     const [menuImportMode, setMenuImportMode] = useState<{
@@ -369,10 +370,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 case "smooth":
                     setSmoothOpen(true);
                     break;
-                case "addVibrato":
-                    setVibratoParamRange((e as CustomEvent).detail?.paramRange);
-                    setVibratoOpen(true);
-                    break;
                 case "quantize":
                     setQuantizeOpen(true);
                     break;
@@ -459,7 +456,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     streams: res.mediaAudioStreams ?? [],
                     trackId: res.trackId ?? s.selectedTrackId ?? null,
                     startSec:
-                        typeof res.startSec === "number" ? res.startSec : (s.playheadSec ?? 0),
+                        typeof res.startSec === "number"
+                            ? res.startSec
+                            : (store.getState().session.playheadSec ?? 0),
                 });
                 return;
             }
@@ -472,12 +471,15 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             setMenuImportMode({
                 audioPaths: res.audioPaths,
                 trackId: res.trackId ?? s.selectedTrackId ?? null,
-                startSec: typeof res.startSec === "number" ? res.startSec : (s.playheadSec ?? 0),
+                startSec:
+                    typeof res.startSec === "number"
+                        ? res.startSec
+                        : (store.getState().session.playheadSec ?? 0),
             });
         } catch {
             // Error state is already handled by session thunk reducers.
         }
-    }, [dispatch, s.playheadSec, s.selectedTrackId]);
+    }, [dispatch, s.selectedTrackId]);
 
     const handleImportMidiFromMenu = useCallback(() => {
         onImportMidiFromMenu();
@@ -1257,6 +1259,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {tf("snap_grid_settings_title")}
                     </DropdownMenu.Item>
 
+                    {/* Search matching settings — 作用于全部搜索面，因此与
+                        吸附/网格同级，而不是塞进某个面板自己的设置页。 */}
+                    <DropdownMenu.Item onSelect={() => dispatch(setSearchSettingsDialogOpen(true))}>
+                        {tf("search_settings_title")}
+                    </DropdownMenu.Item>
+
                     <DropdownMenu.Separator />
 
                     {/* Render cache manager — above Keyboard Shortcuts */}
@@ -1264,9 +1272,20 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {tf("menu_render_cache_manager")}
                     </DropdownMenu.Item>
 
+                    {/* 颤音预设库。与上下文菜单用**不同**的文案：选项菜单这一层
+                        没有"颤音"语境，只写"管理预设"没人知道管的是哪一种。 */}
+                    <DropdownMenu.Item onSelect={() => setVibratoDialogOpen(true)}>
+                        {tf("menu_vibrato_presets")}
+                    </DropdownMenu.Item>
+
                     {/* Import channel policy（假立体声 → 单声道） */}
                     <DropdownMenu.Item onSelect={() => setChannelImportDialogOpen(true)}>
                         {tf("menu_channel_import_settings")}
+                    </DropdownMenu.Item>
+
+                    {/* 指针设备（触控板 / 数位板 / 触控笔 / 触摸）输入偏好 */}
+                    <DropdownMenu.Item onSelect={() => setPenInputDialogOpen(true)}>
+                        {tf("menu_pen_input_settings")}
                     </DropdownMenu.Item>
 
                     <DropdownMenu.Separator />
@@ -1370,13 +1389,26 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onSettingsSaved={onAutoBackupSettingsSaved}
             />
 
+            <SearchSettingsDialog
+                open={s.searchSettingsDialogOpen}
+                onOpenChange={(open) => dispatch(setSearchSettingsDialogOpen(open))}
+            />
+
             <ChannelImportDialog
                 open={channelImportDialogOpen}
                 onOpenChange={setChannelImportDialogOpen}
             />
+            <PenInputDialog open={penInputDialogOpen} onOpenChange={setPenInputDialogOpen} />
             <RenderCacheDialog
                 open={renderCacheDialogOpen}
                 onOpenChange={setRenderCacheDialogOpen}
+            />
+
+            {/* 颤音预设库：与右键菜单的「管理预设…」共用同一个对话框 */}
+            <VibratoDialog
+                open={vibratoDialogOpen}
+                onOpenChange={setVibratoDialogOpen}
+                editParam={s.editParam}
             />
 
             <RecordingSettingsDialog
@@ -1587,15 +1619,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onOpenChange={setSmoothOpen}
                 defaultSmoothness={s.edgeSmoothnessPercent}
                 onConfirm={(strength) => dispatchEditOp("smooth", { strength })}
-            />
-            <VibratoDialog
-                open={vibratoOpen}
-                onOpenChange={setVibratoOpen}
-                editParam={s.editParam}
-                paramRange={vibratoParamRange}
-                onConfirm={(amplitude, rate, attack, release, phase) =>
-                    dispatchEditOp("addVibrato", { amplitude, rate, attack, release, phase })
-                }
             />
             <QuantizeDialog
                 open={quantizeOpen}

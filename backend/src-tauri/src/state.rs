@@ -1081,6 +1081,19 @@ fn split_clip_take_window(
     }
 }
 
+/// 批量建轨道的一项请求（`add_track_tree` 的输入）。
+///
+/// 【为什么父用下标而不是 id】调用方在建之前不可能知道新轨道的 id；用下标描述整棵
+/// 树，一次调用就能描述完。代价：**父必须排在子之前**（DFS 先序）。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackTreeNode {
+    pub name: String,
+    /// 父节点在**本次调用内**的下标；`None` = 根轨道。
+    #[serde(default)]
+    pub parent_index: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
     pub id: String,
@@ -1304,7 +1317,6 @@ pub fn split_transition_curve_spec(curve: &str) -> Option<(f64, f64, f64)> {
 }
 
 impl Clip {
-
     /// 给本 Clip 的 Take 盖"用户显式设置声道模式"的封印。
     ///
     /// `all_takes` 为真时覆盖全部 Take（跟随"同步编辑所有 Take"设置），否则只盖
@@ -1317,9 +1329,9 @@ impl Clip {
         for take in self.takes.iter_mut() {
             let is_active = active_id.as_deref() == Some(take.id.as_str());
             if all_takes || is_active {
-                take.channel_decision = Some(
-                    crate::channel_decision::ChannelDecisionRecord::user(take.channel_mode),
-                );
+                take.channel_decision = Some(crate::channel_decision::ChannelDecisionRecord::user(
+                    take.channel_mode,
+                ));
             }
         }
     }
@@ -1424,7 +1436,8 @@ impl Clip {
     pub fn normalize_takes(&mut self) {
         // 声道模式原始值先规范化（越界 → Normal），再物化投影。
         for take in &mut self.takes {
-            take.channel_mode = crate::channel_mode::TakeChannelMode::normalize_raw(take.channel_mode);
+            take.channel_mode =
+                crate::channel_mode::TakeChannelMode::normalize_raw(take.channel_mode);
         }
         if self.takes.is_empty() {
             self.sync_take_from_flat();
@@ -1888,7 +1901,9 @@ fn param_selection_restore_for(
     intent: HistoryJumpIntent,
 ) -> Option<Vec<[f32; 2]>> {
     let step_at = |position: usize| -> Option<&ParamSelectionStep> {
-        h.records.get(position).and_then(|r| r.param_selection.as_ref())
+        h.records
+            .get(position)
+            .and_then(|r| r.param_selection.as_ref())
     };
     match intent {
         HistoryJumpIntent::Undo => step_at(target + 1).map(|s| s.before.clone()),
@@ -2409,7 +2424,12 @@ impl TimelineState {
     fn curve_slice(curve: &[f32], start: usize, count: usize, pad: f32) -> Vec<f32> {
         let mut out = Vec::with_capacity(count);
         for offset in 0..count {
-            out.push(curve.get(start.saturating_add(offset)).copied().unwrap_or(pad));
+            out.push(
+                curve
+                    .get(start.saturating_add(offset))
+                    .copied()
+                    .unwrap_or(pad),
+            );
         }
         out
     }
@@ -2422,12 +2442,20 @@ impl TimelineState {
             return out;
         }
         let old_max_idx = values.len() - 1;
-        let new_max_idx: f32 = if target_len > 1 { (target_len - 1) as f32 } else { 1.0 };
+        let new_max_idx: f32 = if target_len > 1 {
+            (target_len - 1) as f32
+        } else {
+            1.0
+        };
         let ratio = old_max_idx as f32 / new_max_idx;
         for (i, slot) in out.iter_mut().enumerate() {
             let old_idxf = i as f32 * ratio;
             let lo = (old_idxf as usize).min(old_max_idx);
-            let hi = if lo < old_max_idx { lo + 1 } else { old_max_idx };
+            let hi = if lo < old_max_idx {
+                lo + 1
+            } else {
+                old_max_idx
+            };
             let frac = old_idxf - lo as f32;
             let lo_val = values[lo];
             let hi_val = values[hi];
@@ -2455,9 +2483,7 @@ impl TimelineState {
     /// 计算"旧范围中不被任何新范围覆盖"的帧段（闭区间），用于恢复参考值。
     /// 与前端旧 subtractIntervals 的批量语义一致：先写全部新范围，再恢复
     /// 未被覆盖的旧帧，避免相邻剪辑的恢复互相擦除新写入的值。
-    fn uncovered_old_segments(
-        mappings: &[(usize, usize, usize, usize)],
-    ) -> Vec<(usize, usize)> {
+    fn uncovered_old_segments(mappings: &[(usize, usize, usize, usize)]) -> Vec<(usize, usize)> {
         // (old_start, old_count, new_start, new_count)
         let mut segments: Vec<(usize, usize)> = Vec::new();
         for &(old_start, old_count, _, _) in mappings {
@@ -2465,7 +2491,10 @@ impl TimelineState {
             let mut excluded: Vec<(usize, usize)> = mappings
                 .iter()
                 .map(|&(_, _, new_start, new_count)| {
-                    (new_start, new_start.saturating_add(new_count).saturating_sub(1))
+                    (
+                        new_start,
+                        new_start.saturating_add(new_count).saturating_sub(1),
+                    )
                 })
                 .filter(|&(s, e)| e >= old_start && s <= old_end)
                 .collect();
@@ -2514,8 +2543,12 @@ impl TimelineState {
         // 秒 → 帧；跳过几何没有变化的映射。
         let mut frame_mappings: Vec<(usize, usize, usize, usize)> = Vec::new();
         for m in mappings {
-            let (old_start_sec, old_len, new_start_sec, new_len) =
-                (m.old_start_sec, m.old_length_sec, m.new_start_sec, m.new_length_sec);
+            let (old_start_sec, old_len, new_start_sec, new_len) = (
+                m.old_start_sec,
+                m.old_length_sec,
+                m.new_start_sec,
+                m.new_length_sec,
+            );
             if !old_len.is_finite() || !new_len.is_finite() {
                 continue;
             }
@@ -2901,8 +2934,7 @@ pub struct AppState {
     pub waveform_cache_dir: std::sync::Mutex<PathBuf>,
 
     /// V2 多级 mipmap 波形缓存 (key = source_path)
-    pub waveform_cache_v2:
-        std::sync::Mutex<crate::hfspeaks_v2::WaveformPeakCache>,
+    pub waveform_cache_v2: std::sync::Mutex<crate::hfspeaks_v2::WaveformPeakCache>,
 
     /// Inflight deduplication for waveform peak computation.
     /// When a file is being computed, its source_path is in this set.
@@ -2933,7 +2965,6 @@ pub struct AppState {
     // Clip-level pitch analysis cache for performance optimization
 
     // Timeline snapshot for incremental pitch refresh (keyed by root_track_id)
-
     pub audio_engine: AudioEngine,
 
     /// 传输命令串行化锁（叶子锁：先取它再取 timeline，绝无反向持有）。
@@ -3686,11 +3717,7 @@ impl AppState {
         if !merged_into_existing {
             let before = self.current_notes_markdown();
             let tl = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
-            self.push_checkpoint_with_notes(
-                &tl,
-                HistoryOp::EditNotes.key().to_string(),
-                before,
-            );
+            self.push_checkpoint_with_notes(&tl, HistoryOp::EditNotes.key().to_string(), before);
         }
         let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
         if p.notes_markdown != markdown {
@@ -4214,6 +4241,104 @@ mod tests {
             tl.tracks.iter().find(|t| t.id == ids[9]).unwrap().color,
             "#4a8fd1"
         );
+    }
+
+    // ── 批量建轨道（目录导入的"为每个文件夹创建轨道组"）──────────────────
+
+    fn node(name: &str, parent_index: Option<usize>) -> TrackTreeNode {
+        TrackTreeNode {
+            name: name.to_string(),
+            parent_index,
+        }
+    }
+
+    /// 新建工程自带一条 Main 根轨道，测试里先清空以便下标可预期。
+    fn empty_timeline() -> TimelineState {
+        let mut tl = TimelineState::default();
+        tl.tracks.clear();
+        tl
+    }
+
+    fn name_of(tl: &TimelineState, id: &str) -> String {
+        tl.tracks
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| panic!("轨道不存在: {id}"))
+    }
+
+    fn parent_of(tl: &TimelineState, id: &str) -> Option<String> {
+        tl.tracks
+            .iter()
+            .find(|t| t.id == id)
+            .and_then(|t| t.parent_id.clone())
+    }
+
+    #[test]
+    fn add_track_tree_builds_the_nested_tree_in_dfs_order() {
+        let mut tl = empty_timeline();
+        // Takes 是根；take_01 挂在它下面；Sub 也挂在它下面；deep 挂在 Sub 下面。
+        let ids = tl.add_track_tree(
+            &[
+                node("Takes", None),
+                node("take_01", Some(0)),
+                node("Sub", Some(0)),
+                node("deep", Some(2)),
+            ],
+            None,
+        );
+        assert_eq!(ids.len(), 4);
+        assert_eq!(name_of(&tl, &ids[0]), "Takes");
+        assert_eq!(parent_of(&tl, &ids[0]), None);
+        assert_eq!(parent_of(&tl, &ids[1]), Some(ids[0].clone()));
+        assert_eq!(parent_of(&tl, &ids[2]), Some(ids[0].clone()));
+        assert_eq!(parent_of(&tl, &ids[3]), Some(ids[2].clone()));
+
+        // Vec 顺序 == DFS 显示顺序：Takes → take_01 → Sub → deep。
+        let order: Vec<String> = tl.tracks.iter().map(|t| t.name.clone()).collect();
+        assert_eq!(order, vec!["Takes", "take_01", "Sub", "deep"]);
+        // 选中第一条根轨道（而不是"最后建的那条"）。
+        assert_eq!(tl.selected_track_id, Some(ids[0].clone()));
+    }
+
+    #[test]
+    fn add_track_tree_inserts_roots_at_the_requested_position() {
+        let mut tl = empty_timeline();
+        let first = tl.add_track(Some("A".into()), None, None);
+        let second = tl.add_track(Some("B".into()), None, None);
+        // 在 A 之后（根级下标 1）插入两棵新树。
+        let ids = tl.add_track_tree(
+            &[
+                node("F1", None),
+                node("f1_child", Some(0)),
+                node("F2", None),
+            ],
+            Some(1),
+        );
+        let order: Vec<String> = tl.tracks.iter().map(|t| t.name.clone()).collect();
+        // F1 的整棵子树在 F2 之前 —— 第二条根轨道紧随第一条，而不是被插进它的子树里。
+        assert_eq!(order, vec!["A", "F1", "f1_child", "F2", "B"]);
+        assert_eq!(name_of(&tl, &first), "A");
+        assert_eq!(name_of(&tl, &second), "B");
+        assert_eq!(parent_of(&tl, &ids[1]), Some(ids[0].clone()));
+        assert_eq!(parent_of(&tl, &ids[2]), None);
+    }
+
+    #[test]
+    fn add_track_tree_treats_forward_parent_reference_as_root() {
+        let mut tl = empty_timeline();
+        // 父下标指向自己之后（悬空）：必须退化成根轨道，而不是建出断链。
+        // `normalize_track_vec` 的孤儿修复会兜住，但这里从源头就不该产生悬空。
+        let ids = tl.add_track_tree(&[node("orphan", Some(3)), node("real", None)], None);
+        assert_eq!(parent_of(&tl, &ids[0]), None);
+        assert_eq!(parent_of(&tl, &ids[1]), None);
+    }
+
+    #[test]
+    fn add_track_tree_on_empty_input_is_a_noop() {
+        let mut tl = empty_timeline();
+        assert!(tl.add_track_tree(&[], None).is_empty());
+        assert!(tl.tracks.is_empty());
     }
 
     #[test]
@@ -5492,7 +5617,13 @@ mod tests {
     fn bulk_patch_channel_mode_applies_to_every_selected_clip() {
         let mut tl = TimelineState::default();
         let track_id = tl.tracks[0].id.clone();
-        let a = tl.add_clip(Some(track_id.clone()), Some("A".into()), Some(0.0), Some(1.0), None);
+        let a = tl.add_clip(
+            Some(track_id.clone()),
+            Some("A".into()),
+            Some(0.0),
+            Some(1.0),
+            None,
+        );
         let b = tl.add_clip(Some(track_id), Some("B".into()), Some(2.0), Some(1.0), None);
         tl.patch_clips_state(&[
             BulkClipStatePatch {
@@ -5645,12 +5776,42 @@ mod tests {
         let mut timeline = TimelineState::default();
         let track = timeline.add_track(Some("A".into()), None, None);
         let other = timeline.add_track(Some("B".into()), None, None);
-        let _a0 = timeline.add_clip(Some(track.clone()), Some("a0".into()), Some(1.0), Some(2.0), None);
-        let _a1 = timeline.add_clip(Some(track.clone()), Some("a1".into()), Some(8.0), Some(1.0), None);
-        let _a2 = timeline.add_clip(Some(track.clone()), Some("a2".into()), Some(12.0), Some(2.0), None);
-        let _a3 = timeline.add_clip(Some(track.clone()), Some("a3".into()), Some(14.5), Some(0.5), None);
+        let _a0 = timeline.add_clip(
+            Some(track.clone()),
+            Some("a0".into()),
+            Some(1.0),
+            Some(2.0),
+            None,
+        );
+        let _a1 = timeline.add_clip(
+            Some(track.clone()),
+            Some("a1".into()),
+            Some(8.0),
+            Some(1.0),
+            None,
+        );
+        let _a2 = timeline.add_clip(
+            Some(track.clone()),
+            Some("a2".into()),
+            Some(12.0),
+            Some(2.0),
+            None,
+        );
+        let _a3 = timeline.add_clip(
+            Some(track.clone()),
+            Some("a3".into()),
+            Some(14.5),
+            Some(0.5),
+            None,
+        );
         // 其他轨道不受影响。
-        let _b0 = timeline.add_clip(Some(other.clone()), Some("b0".into()), Some(8.0), Some(1.0), None);
+        let _b0 = timeline.add_clip(
+            Some(other.clone()),
+            Some("b0".into()),
+            Some(8.0),
+            Some(1.0),
+            None,
+        );
 
         let start_of = |tl: &TimelineState, name: &str| {
             tl.clips
@@ -5680,8 +5841,20 @@ mod tests {
     fn close_gaps_without_previous_clip_anchors_at_project_start() {
         let mut timeline = TimelineState::default();
         let track = timeline.add_track(Some("A".into()), None, None);
-        let a0 = timeline.add_clip(Some(track.clone()), Some("a0".into()), Some(10.0), Some(2.0), None);
-        let a1 = timeline.add_clip(Some(track.clone()), Some("a1".into()), Some(15.0), Some(1.0), None);
+        let a0 = timeline.add_clip(
+            Some(track.clone()),
+            Some("a0".into()),
+            Some(10.0),
+            Some(2.0),
+            None,
+        );
+        let a1 = timeline.add_clip(
+            Some(track.clone()),
+            Some("a1".into()),
+            Some(15.0),
+            Some(1.0),
+            None,
+        );
 
         // 前方无 Clip：第一个受影响 Clip 对齐工程最开头（0）。
         let moves = timeline.close_track_gaps_moves(&track, 5.0);
@@ -5696,11 +5869,41 @@ mod tests {
         let track = timeline.add_track(Some("A".into()), None, None);
         // a1 重叠在 a0 尾部上（不动）；a3 与 a2 原本重叠（跟随 a2 的位移，
         // 保持交叠）；a4 与 a3 之间有正向间隙（闭合到重叠群末端）。
-        let a0 = timeline.add_clip(Some(track.clone()), Some("a0".into()), Some(1.0), Some(3.0), None);
-        let a1 = timeline.add_clip(Some(track.clone()), Some("a1".into()), Some(3.5), Some(1.0), None);
-        let a2 = timeline.add_clip(Some(track.clone()), Some("a2".into()), Some(6.0), Some(2.0), None);
-        let a3 = timeline.add_clip(Some(track.clone()), Some("a3".into()), Some(7.0), Some(1.0), None);
-        let a4 = timeline.add_clip(Some(track.clone()), Some("a4".into()), Some(20.0), Some(1.0), None);
+        let a0 = timeline.add_clip(
+            Some(track.clone()),
+            Some("a0".into()),
+            Some(1.0),
+            Some(3.0),
+            None,
+        );
+        let a1 = timeline.add_clip(
+            Some(track.clone()),
+            Some("a1".into()),
+            Some(3.5),
+            Some(1.0),
+            None,
+        );
+        let a2 = timeline.add_clip(
+            Some(track.clone()),
+            Some("a2".into()),
+            Some(6.0),
+            Some(2.0),
+            None,
+        );
+        let a3 = timeline.add_clip(
+            Some(track.clone()),
+            Some("a3".into()),
+            Some(7.0),
+            Some(1.0),
+            None,
+        );
+        let a4 = timeline.add_clip(
+            Some(track.clone()),
+            Some("a4".into()),
+            Some(20.0),
+            Some(1.0),
+            None,
+        );
 
         // T0=2.0 落在 a0 内：a0/a1 不动；a2 闭合 a1 尾后的间隙（→4.5）；
         // a3 与 a2 原本重叠 → 继承 a2 的 -1.5 位移（→5.5）；a4 闭合到
@@ -5718,7 +5921,13 @@ mod tests {
     fn silence_removal_close_splits_removes_and_compacts() {
         let mut timeline = TimelineState::default();
         let track = timeline.add_track(Some("A".into()), None, None);
-        let clip_id = timeline.add_clip(Some(track.clone()), Some("a".into()), Some(0.0), Some(10.0), None);
+        let clip_id = timeline.add_clip(
+            Some(track.clone()),
+            Some("a".into()),
+            Some(0.0),
+            Some(10.0),
+            None,
+        );
 
         let outcome = timeline.apply_silence_removal(
             &[(clip_id.clone(), vec![(2.0, 4.0), (6.0, 8.0)])],
@@ -5751,7 +5960,13 @@ mod tests {
     fn silence_removal_keep_preserves_gaps() {
         let mut timeline = TimelineState::default();
         let track = timeline.add_track(Some("A".into()), None, None);
-        let clip_id = timeline.add_clip(Some(track.clone()), Some("a".into()), Some(0.0), Some(10.0), None);
+        let clip_id = timeline.add_clip(
+            Some(track.clone()),
+            Some("a".into()),
+            Some(0.0),
+            Some(10.0),
+            None,
+        );
 
         let outcome = timeline.apply_silence_removal(
             &[(clip_id.clone(), vec![(2.0, 4.0), (6.0, 8.0)])],
@@ -5771,7 +5986,13 @@ mod tests {
     fn silence_removal_split_keeps_silent_pieces() {
         let mut timeline = TimelineState::default();
         let track = timeline.add_track(Some("A".into()), None, None);
-        let clip_id = timeline.add_clip(Some(track.clone()), Some("a".into()), Some(0.0), Some(10.0), None);
+        let clip_id = timeline.add_clip(
+            Some(track.clone()),
+            Some("a".into()),
+            Some(0.0),
+            Some(10.0),
+            None,
+        );
 
         let outcome = timeline.apply_silence_removal(
             &[(clip_id.clone(), vec![(2.0, 4.0)])],
@@ -5790,7 +6011,13 @@ mod tests {
     fn silence_removal_fully_silent_clip_is_removed_or_kept() {
         let mut timeline = TimelineState::default();
         let track = timeline.add_track(Some("A".into()), None, None);
-        let clip_id = timeline.add_clip(Some(track.clone()), Some("a".into()), Some(1.0), Some(4.0), None);
+        let clip_id = timeline.add_clip(
+            Some(track.clone()),
+            Some("a".into()),
+            Some(1.0),
+            Some(4.0),
+            None,
+        );
 
         // 删除全静音 Clip。
         let outcome = timeline.apply_silence_removal(
@@ -5804,7 +6031,13 @@ mod tests {
         assert!(timeline.clips.is_empty());
 
         // delete_silent_clips = false → 保留原样。
-        let clip_id2 = timeline.add_clip(Some(track.clone()), Some("b".into()), Some(1.0), Some(4.0), None);
+        let clip_id2 = timeline.add_clip(
+            Some(track.clone()),
+            Some("b".into()),
+            Some(1.0),
+            Some(4.0),
+            None,
+        );
         let outcome = timeline.apply_silence_removal(
             &[(clip_id2.clone(), vec![(1.0, 5.0)])],
             SilenceRemovalAction::Close,
@@ -5820,7 +6053,13 @@ mod tests {
     fn close_gaps_click_after_last_clip_is_noop() {
         let mut timeline = TimelineState::default();
         let track = timeline.add_track(Some("A".into()), None, None);
-        let _a0 = timeline.add_clip(Some(track.clone()), Some("a0".into()), Some(1.0), Some(2.0), None);
+        let _a0 = timeline.add_clip(
+            Some(track.clone()),
+            Some("a0".into()),
+            Some(1.0),
+            Some(2.0),
+            None,
+        );
         // 点击位置在所有 Clip 之后 → 无受影响 Clip。
         assert!(timeline.close_track_gaps_moves(&track, 10.0).is_empty());
     }
@@ -7054,7 +7293,8 @@ mod tests {
         // 新范围帧 0..200 应有映射后的值；旧范围帧 200..600 中不再被覆盖的
         // 部分应恢复参考值（tension→0、volume→1.0、pitch→pitch_orig=0）。
         assert!(
-            (entry.tension_edit[0] - 10.0).abs() < 1e-4 && (entry.tension_edit[100] - 10.0).abs() < 1e-4,
+            (entry.tension_edit[0] - 10.0).abs() < 1e-4
+                && (entry.tension_edit[100] - 10.0).abs() < 1e-4,
             "tension must follow the stretched clip"
         );
         assert!(
@@ -7195,7 +7435,10 @@ mod tests {
 
         let entry = tl.params_by_root_track.get(&root).unwrap();
         // 源范围保持不变。
-        assert!((entry.tension_edit[0] - 10.0).abs() < 1e-4, "source tension intact");
+        assert!(
+            (entry.tension_edit[0] - 10.0).abs() < 1e-4,
+            "source tension intact"
+        );
         // 新范围（3s → 帧 600）携带副本曲线。
         assert!(
             (entry.tension_edit[600] - 10.0).abs() < 1e-4,
@@ -7203,13 +7446,7 @@ mod tests {
             entry.tension_edit[600]
         );
         assert!(
-            (entry
-                .extra_curves
-                .get("volume")
-                .expect("volume must exist")[600]
-                - 0.8)
-                .abs()
-                < 1e-4,
+            (entry.extra_curves.get("volume").expect("volume must exist")[600] - 0.8).abs() < 1e-4,
             "duplicate must carry volume curve"
         );
     }
@@ -7299,7 +7536,10 @@ mod tests {
         let a = tl.tracks[0].id.clone();
         let b = tl.add_track(Some("B".into()), None, None);
         let c = tl.add_track(Some("C".into()), None, None);
-        assert_eq!(track_ids_in_vec_order(&tl), vec![a.clone(), b.clone(), c.clone()]);
+        assert_eq!(
+            track_ids_in_vec_order(&tl),
+            vec![a.clone(), b.clone(), c.clone()]
+        );
 
         // 把 C 拖到第一位（同级 index 0，不含自身计数）。
         tl.move_track(&c, 0, None);
@@ -7325,7 +7565,10 @@ mod tests {
         let b = tl.add_track(Some("B".into()), None, None);
         let a1 = tl.add_track(Some("A1".into()), Some(a.clone()), None);
         // DFS：A, A1, B。
-        assert_eq!(track_ids_in_vec_order(&tl), vec![a.clone(), a1.clone(), b.clone()]);
+        assert_eq!(
+            track_ids_in_vec_order(&tl),
+            vec![a.clone(), a1.clone(), b.clone()]
+        );
 
         // 把 A1 拖到 B 之下（B 的子级末尾）。
         tl.move_track(&a1, 0, Some(b.clone()));
@@ -7341,7 +7584,10 @@ mod tests {
         let root = tl.tracks[0].id.clone();
         let s1 = tl.add_track(Some("S1".into()), Some(root.clone()), None);
         let s2 = tl.add_track(Some("S2".into()), Some(root.clone()), None);
-        assert_eq!(track_ids_in_vec_order(&tl), vec![root.clone(), s1.clone(), s2.clone()]);
+        assert_eq!(
+            track_ids_in_vec_order(&tl),
+            vec![root.clone(), s1.clone(), s2.clone()]
+        );
 
         let clone = tl.duplicate_track(&s1);
         assert_eq!(clone.len(), 1);
@@ -7574,7 +7820,8 @@ impl TimelineState {
                 fade_in_shape: Some(c.fade_in_shape),
                 fade_out_shape: Some(c.fade_out_shape),
                 fade_in_dir: Some(c.fade_in_dir),
-                fade_out_dir: Some(c.fade_out_dir),                auto_fade_in_sec: Some(c.auto_fade_in_sec),
+                fade_out_dir: Some(c.fade_out_dir),
+                auto_fade_in_sec: Some(c.auto_fade_in_sec),
                 auto_fade_out_sec: Some(c.auto_fade_out_sec),
                 formant_morph: c
                     .formant_morph
@@ -7667,7 +7914,8 @@ impl TimelineState {
                 fade_in_shape: Some(c.fade_in_shape),
                 fade_out_shape: Some(c.fade_out_shape),
                 fade_in_dir: Some(c.fade_in_dir),
-                fade_out_dir: Some(c.fade_out_dir),                auto_fade_in_sec: Some(c.auto_fade_in_sec),
+                fade_out_dir: Some(c.fade_out_dir),
+                auto_fade_in_sec: Some(c.auto_fade_in_sec),
                 auto_fade_out_sec: Some(c.auto_fade_out_sec),
                 formant_morph: c
                     .formant_morph
@@ -7912,7 +8160,10 @@ impl TimelineState {
         // 1) 同级分组：parent_id → 归一化前的 Vec 下标列表。
         let mut children_of: HashMap<Option<String>, Vec<usize>> = HashMap::new();
         for (idx, t) in self.tracks.iter().enumerate() {
-            children_of.entry(t.parent_id.clone()).or_default().push(idx);
+            children_of
+                .entry(t.parent_id.clone())
+                .or_default()
+                .push(idx);
         }
         // 2) 同级排序键 = (order, 归一化前 Vec 下标)。
         for siblings in children_of.values_mut() {
@@ -8090,6 +8341,73 @@ impl TimelineState {
 
         self.selected_track_id = Some(id.clone());
         id
+    }
+
+    /// 批量建出一整棵轨道子树，返回新建轨道的 id（按输入下标）。
+    ///
+    /// 【为什么必须批量】`add_track` 每建一条都跑一次 `normalize_track_vec`，而它要
+    /// 重排整个 Vec、重写全部 order —— 建 N 条就是 O(N²) 次比较，外加 N 次
+    /// `TimelineStatePayload` 全量快照的 IPC 往返（前端只能串行 await，因为
+    /// `normalize_track_vec` 的孤儿修复要求父先于子存在）。建 48 条轨道因此是 48 次
+    /// 全量快照。本方法在整棵树建完后只归一化一次，往返降到 1 次。
+    ///
+    /// 【为什么用下标而不是 id 描述父】调用方在建之前不可能知道新轨道的 id。用
+    /// 下标描述整棵树，一次调用就能描述完。代价：**父必须排在子之前**（DFS 先序），
+    /// 否则 `parent_index` 指向尚未创建的下标，会被当作根轨道。
+    ///
+    /// 【落点】`insert_index` 是整棵树的第一条根轨道在**根级**的目标位置，后续根轨道
+    /// 依次紧随其后（`place_track_among_siblings` 的语义是"同级第 index 位"）。
+    pub fn add_track_tree(
+        &mut self,
+        nodes: &[TrackTreeNode],
+        insert_index: Option<usize>,
+    ) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::with_capacity(nodes.len());
+        let mut root_indices: Vec<usize> = Vec::new();
+        for (index, node) in nodes.iter().enumerate() {
+            let id = new_id("track");
+            let order = self.next_track_order;
+            self.next_track_order += 1;
+            let parent_id = match node.parent_index {
+                Some(parent) if parent < index => ids.get(parent).cloned(),
+                _ => None,
+            };
+            if parent_id.is_none() {
+                root_indices.push(index);
+            }
+            let color = track_palette_color(self.tracks.len());
+            self.tracks.push(Track {
+                id: id.clone(),
+                name: node.name.clone(),
+                parent_id,
+                order,
+                muted: false,
+                solo: false,
+                volume: 1.0,
+                compose_enabled: false,
+                pitch_analysis_algo: PitchAnalysisAlgo::default(),
+                color,
+            });
+            ids.push(id);
+        }
+
+        // 一次归一化（见方法头注释）。根轨道此时按输入顺序排在末尾。
+        self.normalize_track_vec();
+
+        // 整棵树的根级落点：把根轨道按顺序安插到 `insert_index` 起的位置。
+        if let Some(base) = insert_index {
+            for (offset, node_index) in root_indices.iter().enumerate() {
+                let id = ids[*node_index].clone();
+                self.place_track_among_siblings(&id, base + offset);
+            }
+        }
+
+        // 选中第一条根轨道。`add_track` 会把选中设成"最后建的那条"（通常是某个
+        // 子轨道），对"我刚导入的东西在哪"这个问题给不出答案。
+        if let Some(first_root) = root_indices.first() {
+            self.selected_track_id = Some(ids[*first_root].clone());
+        }
+        ids
     }
 
     /// 克隆轨道：
@@ -8698,10 +9016,9 @@ impl TimelineState {
         let mut cleared = 0usize;
         for clip in &mut self.clips {
             for take in &mut clip.takes {
-                if take
-                    .channel_decision
-                    .is_some_and(crate::channel_decision::ChannelDecisionRecord::is_untrusted_user_seal)
-                {
+                if take.channel_decision.is_some_and(
+                    crate::channel_decision::ChannelDecisionRecord::is_untrusted_user_seal,
+                ) {
                     take.channel_decision = None;
                     cleared += 1;
                 }
@@ -8970,7 +9287,11 @@ impl TimelineState {
                         .unwrap_or(false);
                     for (rs, re) in &regions {
                         self.clear_linked_params_in_root_range(
-                            &root, *rs, re - rs, had_user_pitch, None,
+                            &root,
+                            *rs,
+                            re - rs,
+                            had_user_pitch,
+                            None,
                         );
                     }
                 }
@@ -9355,9 +9676,9 @@ impl TimelineState {
             // active take 的权威），再在下方按"同步所有 Take"决定是否扩散。
             if let Some(v) = patch.channel_mode {
                 c.channel_mode = crate::channel_mode::TakeChannelMode::normalize_raw(v);
-            }            // “同步编辑所有 Take”：内容级编辑（源偏移/速率/倒放/Loop/增益/
-            // 声道模式）同步到该 Clip 的全部 Take；容器级属性（位置/长度/
-            // fade/颜色等）保持 Clip 级语义，不参与同步。
+            } // “同步编辑所有 Take”：内容级编辑（源偏移/速率/倒放/Loop/增益/
+              // 声道模式）同步到该 Clip 的全部 Take；容器级属性（位置/长度/
+              // fade/颜色等）保持 Clip 级语义，不参与同步。
             if crate::config::sync_edits_across_takes() {
                 // playback_rate 请求的是“组合有效速率”（clip 倍率 × take 速率），
                 // 写入各 Take 自身速率前必须按当前倍率反推 —— 否则 inactive take
@@ -10037,13 +10358,14 @@ impl TimelineState {
             Vec::with_capacity(source_clips.len());
         for source in &source_clips {
             let linked = if payload.copy_linked_params && source.length_sec > 0.0 {
-                self.resolve_root_track_id(&source.track_id).and_then(|root_track_id| {
-                    self.extract_linked_params_from_root_range(
-                        &root_track_id,
-                        source.start_sec,
-                        source.length_sec,
-                    )
-                })
+                self.resolve_root_track_id(&source.track_id)
+                    .and_then(|root_track_id| {
+                        self.extract_linked_params_from_root_range(
+                            &root_track_id,
+                            source.start_sec,
+                            source.length_sec,
+                        )
+                    })
             } else {
                 None
             };

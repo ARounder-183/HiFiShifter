@@ -15,8 +15,16 @@
  * 子元素的 preventDefault / stopPropagation，任何点击都逃不过解析。
  */
 
-/** 编辑表面的规范类型；与 keybindings/focusRouting 的焦点域一一对应。 */
-export type EditSurfaceId = "timeline" | "pianoRoll" | "trackHeader";
+/**
+ * 编辑表面的规范类型；与 keybindings/focusRouting 的焦点域一一对应。
+ *
+ * `fileBrowser` 不参与编辑 op 的路由（`resolveEditOpRoute` 对未收录的表面返回
+ * `null`，与"无表面"同义），它登记在这里是为了另一件事：**判断"用户现在到底在哪个
+ * 表面工作"**。文件列表自己实现输入式跳转，全局分发器要据此让出按键；而时间轴/
+ * 参数编辑器刻意在 pointerdown 里 preventDefault 自管焦点，只按 `document.activeElement`
+ * 判断会把它们的按键抢到文件列表里。
+ */
+export type EditSurfaceId = "timeline" | "pianoRoll" | "trackHeader" | "fileBrowser";
 
 /** 各编辑表面根元素声明的规范属性（closest 就近解析，允许嵌套）。 */
 export const EDIT_SURFACE_ATTR = "data-hs-surface";
@@ -41,7 +49,12 @@ export function setActiveSurfaceExplicit(surface: EditSurfaceId): void {
 export function resolveSurfaceFromTarget(target: EventTarget | null): EditSurfaceId | null {
     const el = target as HTMLElement | null;
     const value = el?.closest?.(`[${EDIT_SURFACE_ATTR}]`)?.getAttribute(EDIT_SURFACE_ATTR);
-    if (value === "timeline" || value === "pianoRoll" || value === "trackHeader") {
+    if (
+        value === "timeline" ||
+        value === "pianoRoll" ||
+        value === "trackHeader" ||
+        value === "fileBrowser"
+    ) {
         return value;
     }
     return null;

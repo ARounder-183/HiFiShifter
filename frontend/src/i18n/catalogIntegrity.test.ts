@@ -201,6 +201,31 @@ describe("文本风格", () => {
     });
 
     /*
+     * 省略号只允许 ASCII 三点 `...`。
+     *
+     * 【为什么必须有这条断言】`docs/i18n/style-guide.md` §2.2 早已写明这条约定，
+     * 但它是**唯一一条只写在文档里、没有测试守着**的排版规则 —— 于是实测出现
+     * 了 102 个键用 `...`、2 个键用 U+2026 `…` 的分裂（新增文案时作者按中文
+     * 排版直觉写了 `…`）。文档不会让人停下来，断言才会。
+     *
+     * 【为什么不是"两种都行"】`…` 与 `...` 在同一份词典里并存时，视觉宽度与
+     * 换行行为都不同（CJK 字体的 `…` 是等宽全角），同一列菜单项会在这一格
+     * 比别的宽出一个字符。统一比"好看"重要。
+     */
+    test("省略号一律用 ASCII 三点，不用 U+2026", () => {
+        const violations: string[] = [];
+        for (const locale of LOCALES) {
+            for (const [key, value] of entriesOf(locale)) {
+                if (value.includes("\u2026")) violations.push(`${locale}.${key} = ${value}`);
+            }
+        }
+        expect(
+            violations,
+            "菜单项打开对话框时以 `...` 结尾，不要用 `…`（见 style-guide §2.2）",
+        ).toEqual([]);
+    });
+
+    /*
      * 全大写英文标签。en-US 里 `tracks: "TRACKS"`、`recapture_missing_media_col_*`
      * 用全大写，而 zh-CN / ja-JP / ko-KR 都是正常大小写 —— 只有英文在喊。
      *

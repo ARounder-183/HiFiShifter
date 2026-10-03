@@ -89,10 +89,7 @@ pub(super) fn get_timeline_state_lite(
     // to_payload_lite 接受引用：直接在锁内构建 payload，
     // 省掉整棵 TimelineState（含全部参数曲线）的深克隆。
     let mut payload = {
-        let tl = state
-            .timeline
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         tl.to_payload_lite()
     };
     payload.project = Some(state.project_meta_payload());
@@ -107,7 +104,8 @@ pub(super) fn set_transport(
     if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
         log::warn!(
             "set_transport(playhead_sec={:?}, bpm={:?})",
-            playhead_sec, bpm
+            playhead_sec,
+            bpm
         );
     }
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());

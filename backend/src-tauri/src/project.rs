@@ -190,8 +190,6 @@ fn default_grid_size() -> String {
     "1/4".to_string()
 }
 
-
-
 // ─── 序列化 / 反序列化 ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -719,10 +717,8 @@ mod tests {
             crate::channel_policy::ChannelScanOutcome::FakeStereo
         );
         let resolution = planned[0].resolution;
-        let applied = crate::channel_policy::apply_resolution(
-            &mut finalized.clips[0].takes[0],
-            resolution,
-        );
+        let applied =
+            crate::channel_policy::apply_resolution(&mut finalized.clips[0].takes[0], resolution);
         assert!(applied.mode_changed, "假立体声应被折叠");
         assert_eq!(finalized.clips[0].takes[0].channel_mode, 2);
         // 折叠后档案权威 ⇒ 下一次打开不必再判（零解码）。
@@ -942,16 +938,21 @@ mod tests {
                 .map(|t| (t.source_start_sec, t.source_end_sec))
         );
         let policy = crate::config::channel_import_policy().for_explicit_scan();
-        let filter: std::collections::HashSet<String> =
-            [clip.id.clone()].into_iter().collect();
+        let filter: std::collections::HashSet<String> = [clip.id.clone()].into_iter().collect();
         println!(
             "V4FLAT TARGETS(filtered)={} TARGETS(all)={}",
-            crate::commands::channel_scan::collect_targets(&fin, Some(&filter), &policy, true, true)
+            crate::commands::channel_scan::collect_targets(
+                &fin,
+                Some(&filter),
+                &policy,
+                true,
+                true
+            )
             .targets
             .len(),
             crate::commands::channel_scan::collect_targets(&fin, None, &policy, true, true)
-            .targets
-            .len()
+                .targets
+                .len()
         );
         let _ = std::fs::remove_file(&wav);
     }

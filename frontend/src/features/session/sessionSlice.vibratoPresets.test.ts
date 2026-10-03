@@ -1,0 +1,238 @@
+import { test } from "vitest";
+
+import reducer, {
+    cycleActiveVibratoPreset,
+    setVibratoBaseline,
+    removeVibratoPreset,
+    reorderBuiltinVibratoPreset,
+    reorderVibratoPreset,
+    setActiveVibratoPreset,
+    toggleVibratoPresetEnabled,
+    upsertVibratoPreset,
+} from "./sessionSlice.ts";
+import {
+    SYSTEM_VIBRATO_PRESETS,
+    DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
+} from "../vibrato/systemPresets.ts";
+import { resolveVibratoPresets } from "../vibrato/vibratoPresetList.ts";
+import { loadUiSettings } from "./thunks/runtimeThunks.ts";
+import type { UiSettings } from "../../services/api/settings.ts";
+import { MAX_VIBRATO_PRESETS, sanitizeVibratoPreset } from "../vibrato/vibratoPresets.ts";
+import type { VibratoPreset } from "../vibrato/vibratoTypes.ts";
+
+/**
+ * 颤音预设的切片行为：
+ * - 系统预设（`builtin.*`）不许混进用户列表，否则"系统预设只读"失效；
+ * - 删除预设后活动 id 必须迁移到仍然存在的预设上，不能悬空；
+ * - 数量上限在手改配置的情况下也要守住。
+ */
+test("features/session/sessionSlice.vibratoPresets.test.ts vibrato preset reducers", () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+
+    const userPreset = (id: string, extra: Partial<VibratoPreset> = {}) =>
+        sanitizeVibratoPreset({ id, name: id, ...extra });
+
+    const base = reducer(undefined, { type: "@@INIT" });
+    assertEqual(base.vibratoPresets.length, 0, "初始没有用户预设");
+    assertEqual(
+        base.activeVibratoPresetId,
+        DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
+        "初始活动预设是出厂默认",
+    );
+
+    // 新增
+    const added = reducer(base, upsertVibratoPreset(userPreset("custom_a")));
+    assertEqual(added.vibratoPresets.length, 1, "新增一项");
+    assertEqual(added.vibratoPresets[0]?.id, "custom_a", "新增的 id");
+
+    // 同 id 覆盖而不是追加
+    const overwritten = reducer(
+        added,
+        upsertVibratoPreset(userPreset("custom_a", { depthCents: 77 })),
+    );
+    assertEqual(overwritten.vibratoPresets.length, 1, "同 id 覆盖不追加");
+    assertEqual(overwritten.vibratoPresets[0]?.depthCents, 77, "覆盖后的深度");
+
+    // 系统预设 id 被拒（用户列表里混进 builtin. 会让只读保证失效）
+    const rejected = reducer(added, upsertVibratoPreset(userPreset("builtin.natural")));
+    assertEqual(rejected.vibratoPresets.length, 1, "builtin 前缀被拒绝");
+
+    // 活动预设切换与环绕
+    const withTwo = reducer(added, upsertVibratoPreset(userPreset("custom_b")));
+    // 起点是默认活动预设（自然），"下一个"是它在出厂顺序里的下一项 —— 按索引算，
+    // 不写死下标（出厂顺序调整过，"自然"已不再是首项）。
+    const defaultIndex = SYSTEM_VIBRATO_PRESETS.findIndex(
+        (preset) => preset.id === DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
+    );
+    const cycled = reducer(withTwo, cycleActiveVibratoPreset(1));
+    assertEqual(
+        cycled.activeVibratoPresetId,
+        SYSTEM_VIBRATO_PRESETS[defaultIndex + 1]?.id,
+        "下一个预设",
+    );
+    const cycledBack = reducer(cycled, cycleActiveVibratoPreset(-1));
+    assertEqual(
+        cycledBack.activeVibratoPresetId,
+        DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
+        "上一个预设回到默认活动预设",
+    );
+
+    // 从列表首项向前环绕到末尾（用户段最后一项）—— 首项用系统预设表的第 0 项，
+    // 不假设它就是默认活动预设。
+    const atHead = reducer(withTwo, setActiveVibratoPreset(SYSTEM_VIBRATO_PRESETS[0]!.id));
+    const wrapped = reducer(atHead, cycleActiveVibratoPreset(-1));
+    assertEqual(wrapped.activeVibratoPresetId, "custom_b", "首项向前环绕到末尾");
+
+    const explicit = reducer(withTwo, setActiveVibratoPreset("custom_a"));
+    assertEqual(explicit.activeVibratoPresetId, "custom_a", "显式设定活动预设");
+
+    // 删除活动预设 → id 迁移到滑进同一位置的那一项，不悬空
+    const afterRemoval = reducer(explicit, removeVibratoPreset("custom_a"));
+    assertEqual(afterRemoval.vibratoPresets.length, 1, "删除后剩一项");
+    assertEqual(afterRemoval.activeVibratoPresetId, "custom_b", "活动 id 迁移到剩余项");
+    assertEqual(
+        afterRemoval.vibratoPresets.some((preset) => preset.id === "custom_a"),
+        false,
+        "被删的预设不再存在",
+    );
+
+    // 删除非活动预设不影响活动 id
+    const keepActive = reducer(withTwo, removeVibratoPreset("custom_b"));
+    assertEqual(
+        keepActive.activeVibratoPresetId,
+        DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
+        "删非活动项时活动 id 不变",
+    );
+
+    // 排序
+    const three = reducer(
+        reducer(added, upsertVibratoPreset(userPreset("custom_b"))),
+        upsertVibratoPreset(userPreset("custom_c")),
+    );
+    const reordered = reducer(three, reorderVibratoPreset({ id: "custom_c", toIndex: 0 }));
+    assertEqual(
+        reordered.vibratoPresets.map((preset) => preset.id).join(","),
+        "custom_c,custom_a,custom_b",
+        "排序结果",
+    );
+
+    // 上限：手改配置塞进超量预设时不再追加
+    let capped = reducer(undefined, { type: "@@INIT" });
+    for (let i = 0; i < MAX_VIBRATO_PRESETS + 5; i += 1) {
+        capped = reducer(capped, upsertVibratoPreset(userPreset(`custom_${i}`)));
+    }
+    assertEqual(capped.vibratoPresets.length, MAX_VIBRATO_PRESETS, "用户预设数量被上限截住");
+
+    // 冗余：往用户列表里塞 builtin 前缀的项不会被采纳
+    const guarded = reducer(
+        base,
+        upsertVibratoPreset(sanitizeVibratoPreset({ id: "builtin.deep" })),
+    );
+    assertEqual(guarded.vibratoPresets.length, 0, "builtin 前缀不写入用户列表");
+});
+
+/**
+ * 停用名单：切换、循环切换跳过、删除时清理。
+ *
+ * 停用只影响"本机怎么挑预设"（工具栏列表 + 拖拽中循环切换），不影响活动预设本身。
+ */
+test("features/session/sessionSlice.vibratoPresets.test.ts disabled preset ids", () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+    const userPreset = (id: string) => sanitizeVibratoPreset({ id, name: id });
+
+    const base = reducer(undefined, { type: "@@INIT" });
+    assertEqual(base.disabledVibratoPresetIds.length, 0, "初始没有停用项");
+
+    const withPresets = reducer(base, upsertVibratoPreset(userPreset("custom_a")));
+    const toggled = reducer(withPresets, toggleVibratoPresetEnabled("custom_a"));
+    assertEqual(toggled.disabledVibratoPresetIds.includes("custom_a"), true, "停用后进入名单");
+
+    const untoggled = reducer(toggled, toggleVibratoPresetEnabled("custom_a"));
+    assertEqual(untoggled.disabledVibratoPresetIds.includes("custom_a"), false, "再次切换即恢复");
+
+    // 循环切换跳过被停用的预设：把「自然」停用后，从直线向后一步应到「柔和」。
+    const natural = SYSTEM_VIBRATO_PRESETS.find((preset) => preset.id === "builtin.natural")!;
+    const soft = SYSTEM_VIBRATO_PRESETS.find((preset) => preset.id === "builtin.soft")!;
+    const straight = SYSTEM_VIBRATO_PRESETS.find((preset) => preset.id === "builtin.straight")!;
+    const disabled = reducer(
+        reducer(base, setActiveVibratoPreset(straight.id)),
+        toggleVibratoPresetEnabled(natural.id),
+    );
+    const cycled = reducer(disabled, cycleActiveVibratoPreset(1));
+    assertEqual(cycled.activeVibratoPresetId, soft.id, "循环切换跳过停用项");
+
+    // 删除预设时把它的停用记录一并清掉（否则名单会随着"建了又删"一直变长）。
+    const removed = reducer(toggled, removeVibratoPreset("custom_a"));
+    assertEqual(removed.disabledVibratoPresetIds.includes("custom_a"), false, "删除后清掉停用记录");
+});
+
+/**
+ * 系统预设的自定义顺序：以 id 列表持久化，缺项 / 无效项由读取侧兜底。
+ */
+test("features/session/sessionSlice.vibratoPresets.test.ts builtin preset order", () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+    const natural = SYSTEM_VIBRATO_PRESETS.find((preset) => preset.id === "builtin.natural")!;
+    const base = reducer(undefined, { type: "@@INIT" });
+    assertEqual(base.builtinVibratoPresetOrder.length, 0, "初始没有自定义顺序");
+
+    // 把「自然」拖到最前。
+    const moved = reducer(base, reorderBuiltinVibratoPreset({ id: natural.id, toIndex: 0 }));
+    assertEqual(moved.builtinVibratoPresetOrder[0], natural.id, "顺序首位变成自然");
+    // 写回的是**完整**列表：之后新增出厂预设也能靠兜底补齐，不必迁移。
+    assertEqual(
+        moved.builtinVibratoPresetOrder.length,
+        SYSTEM_VIBRATO_PRESETS.length,
+        "写回完整顺序",
+    );
+    // 解析出来也按这个顺序。
+    assertEqual(
+        resolveVibratoPresets([], moved.builtinVibratoPresetOrder).system[0]?.id,
+        natural.id,
+        "解析出的系统段按自定义顺序",
+    );
+});
+
+/**
+ * 「摆放方式」是**设置**，不是预设字段。
+ *
+ * 【为什么单独钉】它决定"添加颤音时颤音围绕哪条线摆"，与具体预设无关：用户先定摆放
+ * 方式、再挑预设，换预设不该把它换掉。因此它只存在设置里（本机记忆），下次打开
+ * 「添加颤音」还是上次选的那个。
+ */
+test("features/session/sessionSlice.vibratoPresets.test.ts vibrato baseline setting", () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+    const base = reducer(undefined, { type: "@@INIT" });
+    // 默认 = 抽取成设置**之前**的既有行为（预设的 baseline 一直兜底为 line）。
+    assertEqual(base.vibratoBaseline, "line", "默认是起点→终点");
+
+    const set = reducer(base, setVibratoBaseline("holdStart"));
+    assertEqual(set.vibratoBaseline, "holdStart", "切换生效");
+    assertEqual(set.vibratoPresets.length, base.vibratoPresets.length, "不碰任何预设数据");
+
+    // 水合：从设置里读回来 —— 下次打开窗口用的就是它。
+    // （这里只关心 `vibratoBaseline` 一个字段，其余字段与这条断言无关。）
+    const hydrate = (vibratoBaseline: unknown) =>
+        reducer(
+            base,
+            loadUiSettings.fulfilled({ vibratoBaseline } as UiSettings, "req", undefined),
+        );
+    assertEqual(hydrate("average").vibratoBaseline, "average", "从设置读回");
+    // 手改配置里的野值一律忽略，回落默认。
+    assertEqual(hydrate("sideways").vibratoBaseline, "line", "未知取值回落默认");
+});

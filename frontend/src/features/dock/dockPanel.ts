@@ -64,7 +64,9 @@ export function panelTitleOf(
     const members = collectDockedForms(tree);
     const firstTabset = collectTabsets(tree)[0];
     const activeId = firstTabset?.active ?? firstTabset?.tabs[0];
-    const base = activeId ? displayTitleOf(layout, activeId, translate) : translate("dock_panel_title");
+    const base = activeId
+        ? displayTitleOf(layout, activeId, translate)
+        : translate("dock_panel_title");
     return members.length > 1 ? `${base} (${members.length})` : base;
 }
 

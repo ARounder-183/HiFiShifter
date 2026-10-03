@@ -73,7 +73,6 @@ fn creation_timeout(ep_name: &str) -> std::time::Duration {
     }
 }
 
-
 /// Set once a CoreML smoke test times out or fails hard.  The CoreML EP is
 /// then skipped for the rest of the process (WebGPU/CPU take over) so a
 /// hung CoreML inference can never block the benchmark or rendering again.
@@ -271,7 +270,8 @@ fn now_ms() -> u64 {
 }
 
 fn make_ticket() -> u64 {
-    ((now_ms() & 0x0000_FFFF_FFFF_FFFF) << 16) | (LEASE_SEQ.fetch_add(1, Ordering::Relaxed) & 0xFFFF)
+    ((now_ms() & 0x0000_FFFF_FFFF_FFFF) << 16)
+        | (LEASE_SEQ.fetch_add(1, Ordering::Relaxed) & 0xFFFF)
 }
 
 fn ticket_ms(ticket: u64) -> u64 {
@@ -323,7 +323,12 @@ pub(crate) fn acquire_session_build_lock(
                         LEASE_STEAL_AFTER
                     );
                     // 抢占；若恰好被释放/被他人抢占，下一轮重试即可。
-                    let _ = lease().compare_exchange(current, ticket, Ordering::AcqRel, Ordering::Acquire);
+                    let _ = lease().compare_exchange(
+                        current,
+                        ticket,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
                     continue;
                 }
             }
@@ -386,7 +391,8 @@ fn resolve_dml_device_id() -> Option<i32> {
         let device_id = best.device_id as i32;
         log::warn!(
             "ort_session: auto-detected DML device_id={device_id} name='{}' vram={}MB",
-            best.name, best.dedicated_video_memory_mb
+            best.name,
+            best.dedicated_video_memory_mb
         );
         return Some(device_id);
     }
@@ -825,17 +831,19 @@ pub fn build_ort_session(
         // SLOWER than the CPU EP (see the module docs).
         if choice != "webgpu" && !coreml_disabled() {
             match Session::builder() {
-                Ok(builder) => match try_register_coreml_ep(builder) {
-                    Ok((b, ep)) => {
-                        match build_gpu_session_finalize(b, onnx_path, role, "CoreML") {
+                Ok(builder) => {
+                    match try_register_coreml_ep(builder) {
+                        Ok((b, ep)) => {
+                            match build_gpu_session_finalize(b, onnx_path, role, "CoreML") {
                             Ok(session) => return Ok((session, ep.to_string())),
                             Err(e) => log::error!(
                                 "ort_session[{role:?}]: CoreML session creation failed (will try WebGPU): {e}"
                             ),
                         }
+                        }
+                        Err(e) => log::error!("ort_session[{role:?}]: CoreML unavailable: {e}"),
                     }
-                    Err(e) => log::error!("ort_session[{role:?}]: CoreML unavailable: {e}"),
-                },
+                }
                 Err(e) => log::error!(
                     "ort_session[{role:?}]: failed to create session builder for CoreML: {e}"
                 ),
@@ -852,7 +860,9 @@ pub fn build_ort_session(
                 Err(e) => log::error!("ort_session[{role:?}]: WebGPU unavailable: {e}"),
             },
             Err(e) => {
-                log::error!("ort_session[{role:?}]: failed to create session builder for WebGPU: {e}")
+                log::error!(
+                    "ort_session[{role:?}]: failed to create session builder for WebGPU: {e}"
+                )
             }
         }
     }

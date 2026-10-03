@@ -26,6 +26,7 @@ import type { ReactNode } from "react";
 
 import { EDGE_GAP, clampAxisPosition } from "../components/appTooltipPosition";
 import { cx } from "./cx";
+import { ownsArrowKeys, useMenuKeyboard } from "./useMenuKeyboard";
 
 export interface AppMenuItemSpec {
     key: string;
@@ -206,6 +207,15 @@ export function AppContextMenu({
             if (ref.current && !ref.current.contains(event.target as Node)) onClose();
         }
         function onKeyDown(event: KeyboardEvent) {
+            // 内层表面（`AppSubMenu` 的子面板）用捕获阶段先处理并 preventDefault；
+            // 这里必须让路，否则外层高亮会跟着内层一起动，出现两处高亮。
+            if (event.defaultPrevented) return;
+            // 焦点在 header 槽的输入框 / 滑杆里时，方向键与 Home/End 属于它们
+            // 自己（移动光标 / 改值），不得劫持成菜单导航。Escape 不在其列：
+            // 文本控件不消费它，任何位置按 Esc 都应关闭菜单。
+            if (event.key !== "Escape" && ownsArrowKeys(document.activeElement)) {
+                return;
+            }
             switch (event.key) {
                 case "Escape":
                     event.preventDefault();
@@ -243,6 +253,11 @@ export function AppContextMenu({
     useEffect(() => {
         function onKeyActivate(event: KeyboardEvent) {
             if (event.key !== "Enter" && event.key !== " ") return;
+            // 内层表面先处理的激活让路；焦点在输入框里时，Enter/Space 是在
+            // 打字 —— 悬停残留的 activeIndex 不得把打字劫持成"激活菜单项"
+            // （表现为输入一个空格反而触发了某条菜单并关掉整窗）。
+            if (event.defaultPrevented) return;
+            if (ownsArrowKeys(document.activeElement)) return;
             const index = activeIndex;
             if (index < 0) return;
             const item = items[index];
@@ -354,5 +369,139 @@ function AppContextMenuItem({
                 {item.shortcut ? <span className="text-qt-text-muted">{item.shortcut}</span> : null}
             </span>
         </button>
+    );
+}
+
+export interface AppSubMenuProps {
+    /** 触发项文案。 */
+    label: ReactNode;
+    /** 触发项右侧的计数角标（如 Take 数量）。 */
+    badge?: string;
+    disabled?: boolean;
+    /**
+     * 子面板内容。
+     *
+     * 【为什么是 children 而不是 items】子面板里经常要放 `AppContextMenu` 装不下的
+     * 东西 —— 带尾随按钮的行、滑杆、内联输入框。这与本文件顶部"手写菜单存在
+     * 的理由"是同一条。
+     */
+    children: ReactNode;
+}
+
+/**
+ * 一级菜单里的二级子菜单（悬停或点击展开）。
+ *
+ * 【为什么收进本文件】它原本是 `ClipContextMenu` 的局部组件，而"菜单里要有
+ * 子菜单"并不是 Clip 特有的需求 —— 颤音预设列表同样需要（十几个预设平铺会把
+ * 菜单撑得比屏幕高）。放进原语层，第二次需要它的人不必再写一遍定位夹紧与
+ * 键盘导航，也顺带让 `useMenuKeyboard` 的嵌套菜单支持有了第二个消费者。
+ *
+ * 【导航】`useMenuKeyboard` 按 `closest('[role="menu"]')` 分层，因此外层菜单与
+ * 子面板各按各的方向键走，互不串门。
+ */
+export function AppSubMenu({ label, badge, disabled = false, children }: AppSubMenuProps) {
+    const [open, setOpen] = useState(false);
+    const panelRef = useRef<HTMLDivElement>(null);
+    useMenuKeyboard(panelRef);
+
+    useLayoutEffect(() => {
+        if (!open) return;
+        const panel = panelRef.current;
+        if (!panel) return;
+        panel.style.left = "calc(100% - 4px)";
+        panel.style.right = "auto";
+        panel.style.top = "-5px";
+        panel.style.bottom = "auto";
+        // 宽度随内容展开：绝对定位面板的宽度默认被包含块（触发项宽度）封顶，
+        // 长文本会因此换行。max-content 展开后若超出视口，按最终锚定侧的可用
+        // 空间收口 —— 行内标签以 truncate 兜底。
+        panel.style.width = "max-content";
+        panel.style.maxWidth = "none";
+
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        let rect = panel.getBoundingClientRect();
+        // 右侧放不下就翻到左侧（菜单贴着视口右缘时必然如此）。
+        if (rect.right > vw - 4) {
+            panel.style.left = "auto";
+            panel.style.right = "calc(100% - 4px)";
+        }
+        rect = panel.getBoundingClientRect();
+        const anchoredLeft = panel.style.left !== "auto";
+        const availableWidth = anchoredLeft ? vw - 8 - rect.left : rect.right - 8;
+        if (rect.width > availableWidth) {
+            panel.style.maxWidth = `${Math.max(160, Math.floor(availableWidth))}px`;
+        }
+        // 下方放不下就向上对齐（与触发项底边齐平）。
+        rect = panel.getBoundingClientRect();
+        if (rect.bottom > vh - 4) {
+            panel.style.top = "auto";
+            panel.style.bottom = "-5px";
+        }
+    }, [open]);
+
+    return (
+        <div
+            className="relative"
+            onMouseEnter={() => {
+                if (!disabled) setOpen(true);
+            }}
+            onMouseLeave={() => setOpen(false)}
+        >
+            <button
+                type="button"
+                role="menuitem"
+                className={cx(
+                    "flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors",
+                    disabled ? "cursor-default opacity-40" : "hover:bg-qt-hover",
+                )}
+                style={{ paddingLeft: "var(--qt-space-5)", paddingRight: "var(--qt-space-5)" }}
+                disabled={disabled}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    if (!disabled) setOpen((value) => !value);
+                }}
+                aria-haspopup="menu"
+                aria-expanded={open}
+            >
+                <span className="flex min-w-0 items-center gap-2">
+                    <span className="truncate">{label}</span>
+                    {badge ? (
+                        <span className="text-qt-micro leading-none rounded bg-black/20 px-1 py-0.5 opacity-70">
+                            {badge}
+                        </span>
+                    ) : null}
+                </span>
+                <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 15 15"
+                    fill="none"
+                    aria-hidden="true"
+                    className="shrink-0 opacity-50"
+                >
+                    <path
+                        d="M6 3.5L10 7.5L6 11.5"
+                        stroke="currentColor"
+                        strokeWidth="1.2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                    />
+                </svg>
+            </button>
+            {open && !disabled ? (
+                <div
+                    ref={panelRef}
+                    role="menu"
+                    data-hs-context-menu="1"
+                    className="absolute z-qt-menu min-w-[190px] rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    {children}
+                </div>
+            ) : null}
+        </div>
     );
 }

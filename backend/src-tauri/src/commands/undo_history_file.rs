@@ -116,7 +116,10 @@ pub fn save_undo_history(state: &AppState, project_path: &Path) -> bool {
     match fs::write(&target, bytes) {
         Ok(()) => true,
         Err(error) => {
-            log::warn!("[undo-history] write failed ({}): {error}", target.display());
+            log::warn!(
+                "[undo-history] write failed ({}): {error}",
+                target.display()
+            );
             false
         }
     }
@@ -382,7 +385,10 @@ mod tests {
             let found = find_undo_file(&project).unwrap_or_else(|| {
                 panic!("variant {variant} should be found in {}", dir.display())
             });
-            assert!(found.is_file(), "variant {variant}: {found:?} is not a file");
+            assert!(
+                found.is_file(),
+                "variant {variant}: {found:?} is not a file"
+            );
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
@@ -442,7 +448,11 @@ mod tests {
         // 全新状态读回：注记原样回来，且**不做任何单位换算**（写进去是帧，读出来还是帧）。
         let restored = AppState::default();
         assert!(
-            super::load_undo_history(&restored, &project, crate::project::CURRENT_PROJECT_FILE_VERSION),
+            super::load_undo_history(
+                &restored,
+                &project,
+                crate::project::CURRENT_PROJECT_FILE_VERSION
+            ),
             "应能从伴生文件恢复历史"
         );
         {
@@ -494,7 +504,11 @@ mod tests {
 
         let restored = AppState::default();
         assert!(
-            super::load_undo_history(&restored, &project, crate::project::CURRENT_PROJECT_FILE_VERSION),
+            super::load_undo_history(
+                &restored,
+                &project,
+                crate::project::CURRENT_PROJECT_FILE_VERSION
+            ),
             "v1 文件仍应被接受（否则用户整份撤销历史作废）"
         );
         {
@@ -537,7 +551,11 @@ mod tests {
 
         let restored = AppState::default();
         assert!(
-            !super::load_undo_history(&restored, &project, crate::project::CURRENT_PROJECT_FILE_VERSION),
+            !super::load_undo_history(
+                &restored,
+                &project,
+                crate::project::CURRENT_PROJECT_FILE_VERSION
+            ),
             "更高版本的文件不得被当成当前格式读入"
         );
         let _ = std::fs::remove_dir_all(&dir);

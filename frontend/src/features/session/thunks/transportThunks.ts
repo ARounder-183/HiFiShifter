@@ -138,8 +138,7 @@ export interface SyncPlaybackStateArgs {
 export const syncPlaybackState = createAsyncThunk(
     "session/syncPlaybackState",
     // 纪元/时戳仅通过 meta.arg 传递给 fulfilled reducer，payload creator
-    // 本身不需要读取它们。
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    // 本身不需要读取它们（`_` 前缀即表示有意不用的参数，eslint 已配置忽略）。
     async (_args: SyncPlaybackStateArgs) => {
         return webApi.getPlaybackState();
     },

@@ -617,6 +617,151 @@ describe("抽象层不能空转（采用率）", () => {
         ).toEqual([]);
     });
 
+    test("裁切盒不许留绘制余量（`overflow-clip-margin` 必须为 0）", () => {
+        /*
+         * 【为什么】`overflow-clip-margin` 划定的不是"容差"，而是**仍然会绘制**的
+         * 区域；绘制出来的溢出会被祖先滚动容器算成可滚内容。滑块原语正是靠
+         * `overflow: clip` 把装饰性溢出（超大的透明命中区）收在盒内 ——
+         * 一旦留出哪怕 3px 余量，每个含滑块的对话框都会挂上一条滚不动的竖直滚动条
+         * （实测：正文 `clientHeight 18 / scrollHeight 20`，唯一的子元素是 16px 的盒）。
+         *
+         * 该盒高本就等于可见装饰（滑块头 + 半个轨道，size 2 为 16px），所以纵向
+         * 不需要余量。**横向需要**，但那条余量由 `padding-inline` 提供（内边距在
+         * 裁切边之内），不能用 clip-margin：见下一条门禁。
+         */
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.css$/)) {
+            const source = stripCommentsAndStrings(readFileSync(file, "utf8"), true);
+            for (const m of source.matchAll(/overflow-clip-margin:\s*([^;}]+)/g)) {
+                const value = m[1].trim();
+                if (!/^0(px)?$/.test(value)) {
+                    offenders.push(`${file}: overflow-clip-margin: ${value}`);
+                }
+            }
+        }
+        expect(
+            offenders.length === 0
+                ? []
+                : [
+                      "以下位置给裁切盒留了绘制余量 —— 它会以「滚不动的滚动条」泄漏到祖先滚动容器：",
+                      ...offenders.map((line) => `  ${line}`),
+                  ].join("\n"),
+        ).toEqual([]);
+    });
+
+    test("滑块盒必须给可见装饰留出横向余量，且焦点环内嵌", () => {
+        /*
+         * 【为什么钉这两条】Radix 的可见滑块头（`::after`）比滑块头本体每边大
+         * 0.25 × 轨道（size 2 = 2px），所以在 0% / 100% 时越过轨道两端 ——
+         * 裁切线贴齐盒边就会把那 2px 削平，表现是「滑块头滑到最右时右边像被切了
+         * 一刀」（实测 dpr 2 下 16px 的圆只画出 14px，中间位置正常）。
+         * 横向余量只能来自 `padding-inline`（裁切边 = padding box，内边距在它之内）。
+         *
+         * 焦点环同理：Radix 的环是 `::after` 向外 3px + 5px 的 box-shadow，需要
+         * 26px 高，而盒高只有 16px（= 行高，不能涨）—— 外扩的环会被整条裁掉，
+         * 只剩左右两段竖边，看上去像给滑块头套了个方框。因此环必须画成 `inset`。
+         */
+        const css = stripCommentsAndStrings(readFileSync(join("src", "index.css"), "utf8"), true);
+        const box = css.match(/\.hs-slider-box\s*\{([^}]*)\}/)?.[1] ?? "";
+        const padInline = box.match(/padding-inline:\s*([\d.]+)px/);
+        expect(
+            padInline ? Number(padInline[1]) : 0,
+            "`.hs-slider-box` 缺少横向内边距 —— 可见滑块头在 0% / 100% 时会被裁平",
+        ).toBeGreaterThanOrEqual(2);
+
+        const ring =
+            css.match(
+                /\.hs-slider-box\s+\.rt-SliderThumb:focus-visible::after\s*\{([^}]*)\}/,
+            )?.[1] ?? "";
+        expect(
+            ring,
+            "滑块的焦点环必须改写成 `inset`（Radix 默认的外扩环在 16px 盒高里会被裁成方框）",
+        ).toContain("inset");
+    });
+
+    test("滚动容器必须带让位类（或显式豁免）", () => {
+        /*
+         * 【为什么】本引擎的滚动条占 10px 布局宽（实测：`offsetWidth - clientWidth`）。
+         * 而全仓滚动容器此前普遍没有右侧留白 —— 内容右缘直接贴着滑块，用户报告的
+         * "右侧看上去很挤"即此。
+         *
+         * 让位由三条类承担：
+         *   - `.hs-scroll-gutter`：槽位 + 8px 呼吸（容器自己没有右侧留白时用）；
+         *   - `.hs-scroll-gutter-flush`：只留槽位（容器本来就有留白）；
+         *   - `.hs-scroll-area`：Radix `ScrollArea` 自绘滑块，需要 root 留出那条带子。
+         * 前两条是前缀关系（`-flush` 含 `hs-scroll-gutter`），因此文本检查只需匹配前缀。
+         *
+         * 【豁免】这两处**故意隐藏滚动条**（`hide-v-scrollbar`），没有滑块要让位。
+         * 清单必须写明理由，且下面的自检要求它们确实还在滚动。
+         */
+        const ALLOWED = new Set([
+            // 轨道头：hide-v-scrollbar（内核模式下滚动位置由渲染内核持有）
+            join("src", "components", "layout", "timeline", "TrackList.tsx"),
+            // 快捷键导航轨：hide-v-scrollbar（自带拖拽滚动，原生条只是噪音）
+            join("src", "components", "layout", "keybindings", "KeybindingsNavRail.tsx"),
+        ]);
+        /*
+         * 只认**纵向**可滚的容器：`overflow-y-auto` 与两轴的 `overflow-auto`。
+         * `overflow-x-auto`（菜单栏那种只横向滚动的条）不需要纵向让位 —— 早期把
+         * 它也纳入，直接误报了两处工具条。
+         */
+        const SCROLL_CLASS = /["'`](?=[^"'`]*overflow-(?:y-)?auto)(?=[^"'`]*)[^"'`]*["'`]/g;
+
+        const offenders: string[] = [];
+        let nativeScanned = 0;
+        let areaScanned = 0;
+        for (const file of sourceFiles(/\.tsx?$/)) {
+            if (ALLOWED.has(file)) continue;
+            const source = stripCommentsAndStrings(readFileSync(file, "utf8"), true);
+            for (const hit of source.match(SCROLL_CLASS) ?? []) {
+                nativeScanned += 1;
+                if (!hit.includes("hs-scroll-gutter")) {
+                    offenders.push(`${file}: ${hit.slice(0, 60)}…`);
+                }
+            }
+            for (const m of source.matchAll(/<ScrollArea\b/g)) {
+                areaScanned += 1;
+                const window = source.slice(m.index, m.index + 260);
+                if (!window.includes("hs-scroll-area")) {
+                    offenders.push(`${file}: <ScrollArea> 缺少 hs-scroll-area`);
+                }
+            }
+        }
+
+        // 自检：扫描本身必须真的扫到东西，否则"0 处违规"毫无意义。
+        expect(nativeScanned, "没有扫到任何滚动容器，正则已失效").toBeGreaterThan(5);
+        /*
+         * 阈值随"文件浏览器改用原生滚动容器"下调 1（5 → 4）。
+         *
+         * 那个面板要做窗口化，需要自己读写 `scrollTop` / `clientHeight`，而 Radix
+         * ScrollArea 的滚动元素是它内部自绘的（只能靠 `[data-radix-scroll-area-viewport]`
+         * 这种内部属性去找）。它换成了 `overflow-y-auto` + `hs-scroll-gutter` ——
+         * 仍然受本门禁的第一条（原生容器的让位类）约束，只是不再计入 ScrollArea 计数。
+         */
+        expect(areaScanned, "没有扫到 ScrollArea，选择器已失效").toBeGreaterThanOrEqual(4);
+        expect(
+            offenders.length === 0
+                ? []
+                : [
+                      "以下滚动容器没有让位类 —— 内容会被滚动条压住：",
+                      ...offenders.map((line) => `  ${line}`),
+                  ].join("\n"),
+        ).toEqual([]);
+    });
+
+    test("豁免的滚动容器确实还在滚动（豁免前提自检）", () => {
+        // 豁免的前提是"它隐藏了滚动条但仍在滚动"。若哪天它不再滚动，豁免就该删掉。
+        for (const file of [
+            join("src", "components", "layout", "timeline", "TrackList.tsx"),
+            join("src", "components", "layout", "keybindings", "KeybindingsNavRail.tsx"),
+        ]) {
+            const source = readFileSync(file, "utf8");
+            expect(source, `${file} 已不再隐藏滚动条，请从让位门禁的豁免清单移除`).toContain(
+                "hide-v-scrollbar",
+            );
+        }
+    });
+
     test("排版角色在 src/ui 之外的采用率只增不减（棘轮）", () => {
         /*
          * 【目标与现状】目标是 ≥ 50（把 130 处 `<Text size="N">` 收敛到角色层）。
@@ -684,5 +829,81 @@ describe("禁止浏览器原生 affordance", () => {
             offenders,
             '请用 AppSwitchRow（control="checkbox"）—— 系统默认复选框与 Radix 控件高度不一致',
         ).toEqual([]);
+    });
+});
+
+describe("列表行键盘光标环", () => {
+    /*
+     * 【要钉死什么】上一版把光标环写成行原语上的一组 Tailwind 工具类，同时用
+     * `focus:outline-none` 关掉浏览器默认描边。后者编译成
+     * `outline: 2px solid transparent` 这个**简写**，而它带 `:focus`、优先级高于
+     * 那四个单类 —— 光标行的环被整体改写成透明，键盘移动**完全看不到高亮**。
+     *
+     * 这两条断言分别检查"环真的存在"与"没有东西能把它抹成透明"。它们必须成对，
+     * 只查前者会漏掉这次的回归（环写了，但被覆盖）。
+     *
+     * 【为什么不用本文件的 `stripCommentsAndStrings`】它会把字符串内容一并剥掉，
+     * 而这里要找的类名就写在字符串里 —— 用它做检查会得到一条**永远通过**的断言
+     * （实测：把 `focus:outline-none` 加回去，断言仍然是绿的）。这里只去注释。
+     */
+    function stripCommentsOnly(source: string): string {
+        return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+    }
+
+    test("光标环由 index.css 的 [data-active] 规则提供", () => {
+        const css = stripCommentsOnly(readFileSync(join("src", "index.css"), "utf8"));
+        const blocks = css.match(/\[data-active\][^{}]*\{[^}]*\}/g) ?? [];
+        const ring = blocks.find((block) => block.includes("outline"));
+        expect(ring, "index.css 里没有给 [data-active] 画描边的规则").toBeTruthy();
+        expect(ring, "光标环必须取语义令牌，不能写死颜色").toContain("--qt-focus-ring");
+    });
+
+    test("行原语不得用 outline-none 抹掉自己画的环", () => {
+        const listRow = stripCommentsOnly(readFileSync(join(UI_DIR, "ListRow.tsx"), "utf8"));
+        expect(
+            listRow.includes("outline-none"),
+            "outline-none 会以更高优先级把 [data-active] 的环改成透明（本回归的成因）",
+        ).toBe(false);
+        // 环挂在 data-active 上；行必须继续暴露这个状态，否则规则无从命中。
+        expect(listRow).toContain("data-active");
+    });
+});
+
+describe("Radix 字段的焦点环", () => {
+    /*
+     * 【要钉死什么】Radix 把文本字段 / 多行文本的焦点环画在**外层容器**上
+     * （`.rt-TextFieldRoot:focus-within`，内嵌 2px）。而本文件的通用焦点环规则里有
+     * `input` / `textarea` 两个选择器，同样命中它的**内层** `.rt-TextFieldInput` ——
+     * 于是带插槽的搜索框会同时出现两个环：一个套住整块，另一个只套住中间那段输入，
+     * 看上去就是"输入框那一段的高亮明显更粗"。环应当只由外层容器表达。
+     */
+    const readCss = (): string =>
+        readFileSync(join("src", "index.css"), "utf8")
+            .replace(/\/\*[\s\S]*?\*\//g, "")
+            .replace(/^[ \t]*\/\/.*$/gm, "");
+
+    test("通用焦点环规则不再命中 Radix 字段的内层元素", () => {
+        // 这条规则是**多选择器共用一条声明块**，所以匹配到第一个 `{` 为止，
+        // 而不是要求 `):focus-visible` 后面紧跟 `{`。
+        const rule = readCss().match(/:where\([\s\S]*?\):focus-visible[\s\S]*?\{[^}]*\}/);
+        expect(rule, "找不到通用焦点环规则").toBeTruthy();
+        for (const inner of [".rt-TextFieldInput", ".rt-TextAreaInput", ".rt-TextArea"]) {
+            expect(rule![0], `${inner} 不该出现在通用焦点环规则里`).not.toContain(inner);
+        }
+    });
+
+    test("Radix 字段的内层显式不画自己的环", () => {
+        const rule = readCss().match(
+            /\.rt-TextFieldInput:focus-visible[^{}]*\{[^}]*outline:\s*none[^}]*\}/,
+        );
+        expect(rule, "缺少「内层输入不画环」的规则").toBeTruthy();
+    });
+
+    test("字段容器的环取本应用的焦点令牌（不是 Radix 自己的色阶）", () => {
+        const rule = readCss().match(
+            /\.rt-TextFieldRoot:where\(:focus-within\)[^{}]*\{[^}]*outline-color:[^}]*\}/,
+        );
+        expect(rule, "缺少字段容器焦点环的对齐规则").toBeTruthy();
+        expect(rule![0]).toContain("--qt-focus-ring");
     });
 });

@@ -95,6 +95,15 @@ export interface WaveformSurfaceProps {
      * `false`（或让裁剪余量 ≥ 几何余量 + React 提交滞后），否则波形会缺内容。
      */
     rowsCoverViewport?: boolean;
+    /**
+     * 调用方承诺「rows 已含数据模型的**最后一行**」。
+     *
+     * 为真时，视口底边越出几何底端的部分是内容终点之外的正确留白，竖直复用
+     * 判定的底边检查让位（`geometryCache.canReuseGeometry`）。缺省 false：
+     * 纵向窗口化的调用方在滚动提交滞后期间，末行之下可能真有新行要进视口，
+     * 底边检查必须保留。
+     */
+    rowsEndAtContentBottom?: boolean;
 }
 
 export const WaveformSurface = React.memo(function WaveformSurface(props: WaveformSurfaceProps) {
@@ -253,6 +262,7 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             scrollLeftPx,
             scrollTopPx,
             rowsCoverViewport: props.rowsCoverViewport === true,
+            rowsEndAtContentBottom: props.rowsEndAtContentBottom === true,
         };
 
         if (canReuseGeometry(cache, reuseQuery) && cache !== null) {

@@ -138,17 +138,27 @@ export function curvePointAtPointer(args: {
  * 里一次算完 —— 参数线的位置只该有一个定义处，否则"浮窗显示的值"与"命中判定用的
  * 位置"会各自漂移（本模块文件头约束 1 的同一教训）。
  *
+ * 特殊说明 3：命中半径可传参，调用方按设备剖面（`utils/inputProfile.ts`）传入缩放值
+ * （手指的接触面约 9mm，10px 的半径抓不住）。缺省保持 `CURVE_HIT_RADIUS_PX`，既有
+ * 调用与单测行为不变。
+ *
  * @param args.pointerY 指针的画布局部 y（CSS px）。
  * @param args.curveY 参数线在指针 x 处的 y（沿折线插值）。
+ * @param args.hitRadiusPx 命中半径；缺省 `CURVE_HIT_RADIUS_PX`。
  * @returns 是否命中。
  */
 export function isPointerNearCurve(args: {
     readonly pointerY: number;
     readonly curveY: number;
+    readonly hitRadiusPx?: number;
 }): boolean {
     const { pointerY, curveY } = args;
     if (!Number.isFinite(pointerY) || !Number.isFinite(curveY)) return false;
-    return Math.abs(pointerY - curveY) < CURVE_HIT_RADIUS_PX;
+    const radius =
+        Number.isFinite(args.hitRadiusPx) && (args.hitRadiusPx as number) > 0
+            ? (args.hitRadiusPx as number)
+            : CURVE_HIT_RADIUS_PX;
+    return Math.abs(pointerY - curveY) < radius;
 }
 
 /**
@@ -167,6 +177,9 @@ export function isPointerNearCurve(args: {
  * 零宽 / 亚像素选区在画面上没有可见区域（随机单击就会留下一个），却会因为两条
  * 边缘重合而始终落在命中带内，表现为"光标变成可拉伸、但看不到任何选区"。
  *
+ * 特殊说明 4：命中带宽可传参（调用方按设备剖面缩放）；`SELECTION_EDGE_MIN_WIDTH_PX`
+ * **不参与缩放** —— 它约束的是"选区是否可见到值得拖"，与手指接触面无关。
+ *
  * @param args 判定参数。
  * @returns `"left"` / `"right"` / `null`（未命中边缘）。
  */
@@ -177,16 +190,22 @@ export function hitTestSelectionEdge(args: {
     readonly rightXPx: number;
     /** 指针的画布局部 x。 */
     readonly localXPx: number;
+    /** 命中带宽；缺省 `SELECTION_EDGE_HIT_PX`。 */
+    readonly hitWidthPx?: number;
 }): "left" | "right" | null {
     const { leftXPx, rightXPx, localXPx } = args;
     if (!Number.isFinite(localXPx)) return null;
     if (!Number.isFinite(leftXPx) || !Number.isFinite(rightXPx)) return null;
+    const band =
+        Number.isFinite(args.hitWidthPx) && (args.hitWidthPx as number) > 0
+            ? (args.hitWidthPx as number)
+            : SELECTION_EDGE_HIT_PX;
     const left = Math.min(leftXPx, rightXPx);
     const right = Math.max(leftXPx, rightXPx);
     // 不可见的选区（零宽 / 亚像素）没有可抓的边缘：见 SELECTION_EDGE_MIN_WIDTH_PX。
     if (right - left < SELECTION_EDGE_MIN_WIDTH_PX) return null;
-    if (Math.abs(localXPx - left) <= SELECTION_EDGE_HIT_PX) return "left";
-    if (Math.abs(localXPx - right) <= SELECTION_EDGE_HIT_PX) return "right";
+    if (Math.abs(localXPx - left) <= band) return "left";
+    if (Math.abs(localXPx - right) <= band) return "right";
     return null;
 }
 

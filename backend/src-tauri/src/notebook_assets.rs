@@ -209,7 +209,10 @@ fn is_id_byte(b: u8) -> bool {
 /// - 图片：`hifi-asset://<id>[.<ext>]`（见 `scan_asset_refs`）
 /// - 剪贴板暂存块：```hifi-clip 围栏里的 `id: <id>`
 pub fn referenced_asset_ids(markdown: &str) -> HashSet<String> {
-    let mut ids: HashSet<String> = scan_asset_refs(markdown).into_iter().map(|r| r.id).collect();
+    let mut ids: HashSet<String> = scan_asset_refs(markdown)
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
 
     for line in markdown.lines() {
         let trimmed = line.trim();
@@ -353,5 +356,4 @@ mod tests {
         assert_eq!(map["abc"].data, "");
         assert_eq!(map["abc"].ext, "png");
     }
-
 }

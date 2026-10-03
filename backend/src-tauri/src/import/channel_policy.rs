@@ -64,10 +64,7 @@ impl DecisionContext {
     /// 签名取自 `opts` 而非 policy：容器解码预算也是签名的一部分，短预算
     /// （导入路径）与长预算（后台扫描）必须产出不同的上下文，否则短预算的
     /// 结论会被当成权威结论而跳过重判。
-    pub fn for_take(
-        take: &ClipTake,
-        opts: &stereo_detect::DetectOptions,
-    ) -> Self {
+    pub fn for_take(take: &ClipTake, opts: &stereo_detect::DetectOptions) -> Self {
         Self {
             fingerprint: take.source_file_fingerprint,
             policy_sig: opts.signature(),
@@ -185,9 +182,14 @@ impl ChannelScanOutcome {
         let target = policy.mono_target_mode;
         match self {
             ChannelScanOutcome::PolicyOff | ChannelScanOutcome::NoSource => ChannelResolution::NOOP,
-            ChannelScanOutcome::MonoSource => ChannelResolution::record_only(
-                ChannelDecisionRecord::auto(VERDICT_MONO, ctx.fingerprint, ctx.policy_sig, ctx.region_q),
-            ),
+            ChannelScanOutcome::MonoSource => {
+                ChannelResolution::record_only(ChannelDecisionRecord::auto(
+                    VERDICT_MONO,
+                    ctx.fingerprint,
+                    ctx.policy_sig,
+                    ctx.region_q,
+                ))
+            }
             ChannelScanOutcome::ForcedMono => ChannelResolution {
                 mode: Some(target),
                 record: Some(ChannelDecisionRecord::auto(
@@ -206,14 +208,14 @@ impl ChannelScanOutcome {
                     ctx.region_q,
                 )),
             },
-            ChannelScanOutcome::TrueStereo => ChannelResolution::record_only(
-                ChannelDecisionRecord::auto(
+            ChannelScanOutcome::TrueStereo => {
+                ChannelResolution::record_only(ChannelDecisionRecord::auto(
                     VERDICT_TRUE_STEREO,
                     ctx.fingerprint,
                     ctx.policy_sig,
                     ctx.region_q,
-                ),
-            ),
+                ))
+            }
             ChannelScanOutcome::Pending => ChannelResolution::record_only(
                 ChannelDecisionRecord::pending(ctx.fingerprint, ctx.policy_sig, ctx.region_q),
             ),
@@ -328,7 +330,8 @@ pub fn precompute_decision_with_opts(
     opts: &stereo_detect::DetectOptions,
 ) -> ChannelResolution {
     let ctx = DecisionContext::for_region(None, region, opts);
-    scan_source_with_opts(source_path, source_channels, region, policy, opts).resolution(policy, ctx)
+    scan_source_with_opts(source_path, source_channels, region, policy, opts)
+        .resolution(policy, ctx)
 }
 
 /// 交互式：按策略为一批源文件算出落点（**按路径分组去重**）。
@@ -365,7 +368,10 @@ pub fn precompute_decisions_grouped_with_opts(
 
 /// 锁外：为一个 Take 算出落点（区间取自该 Take 的消费窗口，上下文取自该 Take
 /// 持久化的指纹 —— 跨会话稳定，正是判定档案要比对的那一份）。
-pub fn precompute_take_decision(take: &ClipTake, policy: &ChannelImportPolicy) -> ChannelResolution {
+pub fn precompute_take_decision(
+    take: &ClipTake,
+    policy: &ChannelImportPolicy,
+) -> ChannelResolution {
     let opts = policy.detect_options();
     let ctx = DecisionContext::for_take(take, &opts);
     scan_take(take, policy).resolution(policy, ctx)
@@ -645,10 +651,7 @@ mod tests {
     }
 
     /// 同上，但返回完整落点（用于断言判定档案）。
-    fn resolve_full(
-        take: &mut ClipTake,
-        policy: &ChannelImportPolicy,
-    ) -> AppliedResolution {
+    fn resolve_full(take: &mut ClipTake, policy: &ChannelImportPolicy) -> AppliedResolution {
         let resolution = precompute_take_decision(take, policy);
         apply_resolution(take, resolution)
     }
@@ -703,11 +706,10 @@ mod tests {
             None,
             &policy,
         );
-        let record = resolution.record.expect("Pending 也必须记账（否则无法重试）");
-        assert_eq!(
-            record.policy_sig, short_sig,
-            "交互式判定必须带短预算签名"
-        );
+        let record = resolution
+            .record
+            .expect("Pending 也必须记账（否则无法重试）");
+        assert_eq!(record.policy_sig, short_sig, "交互式判定必须带短预算签名");
     }
 
     #[test]
@@ -965,7 +967,11 @@ mod tests {
     #[test]
     fn apply_resolution_is_idempotent() {
         let mut take = take_with(None, Some(2));
-        let ctx = DecisionContext::for_region(None, None, &crate::stereo_detect::DetectOptions::default());
+        let ctx = DecisionContext::for_region(
+            None,
+            None,
+            &crate::stereo_detect::DetectOptions::default(),
+        );
         let fold = ChannelScanOutcome::FakeStereo.resolution(&ChannelImportPolicy::default(), ctx);
         assert!(apply_resolution(&mut take, fold).mode_changed);
         assert_eq!(take.channel_mode, 2);
@@ -1106,7 +1112,15 @@ mod tests {
         let missing = std::path::Path::new("C:/definitely/missing.wav");
         // 策略关闭：不做判定。
         assert_eq!(
-            scan_source(Some(missing), Some(2), None, &ChannelImportPolicy { mode: "off".into(), ..Default::default() }),
+            scan_source(
+                Some(missing),
+                Some(2),
+                None,
+                &ChannelImportPolicy {
+                    mode: "off".into(),
+                    ..Default::default()
+                }
+            ),
             ChannelScanOutcome::PolicyOff
         );
         // 无源（MIDI / 空白 Clip）：不适用，且**不是**"读不到"。
@@ -1116,17 +1130,35 @@ mod tests {
         );
         // 单声道源：无需判定。
         assert_eq!(
-            scan_source(Some(missing), Some(1), None, &ChannelImportPolicy::default()),
+            scan_source(
+                Some(missing),
+                Some(1),
+                None,
+                &ChannelImportPolicy::default()
+            ),
             ChannelScanOutcome::MonoSource
         );
         // 强制转换：不判定内容。
         assert_eq!(
-            scan_source(Some(missing), Some(2), None, &ChannelImportPolicy { mode: "alwaysMono".into(), ..Default::default() }),
+            scan_source(
+                Some(missing),
+                Some(2),
+                None,
+                &ChannelImportPolicy {
+                    mode: "alwaysMono".into(),
+                    ..Default::default()
+                }
+            ),
             ChannelScanOutcome::ForcedMono
         );
         // 智能模式但源不可读 → Pending（不折叠，且下次重试）。
         assert_eq!(
-            scan_source(Some(missing), Some(2), None, &ChannelImportPolicy::default()),
+            scan_source(
+                Some(missing),
+                Some(2),
+                None,
+                &ChannelImportPolicy::default()
+            ),
             ChannelScanOutcome::Pending
         );
     }
@@ -1224,10 +1256,8 @@ mod tests {
             &[slice(Some((0.0, 1.0))), slice(Some((90.0, 120.0)))],
             &policy,
         );
-        let pair = scan_sources_grouped(
-            &[slice(Some((0.0, 1.0))), slice(Some((1.0, 2.0)))],
-            &policy,
-        );
+        let pair =
+            scan_sources_grouped(&[slice(Some((0.0, 1.0))), slice(Some((1.0, 2.0)))], &policy);
         assert_eq!(solo[0], ChannelScanOutcome::FakeStereo);
         assert_eq!(
             mixed[0], solo[0],
@@ -1315,7 +1345,11 @@ mod tests {
         let outcomes = scan_sources_grouped(&requests, &policy);
         assert_eq!(outcomes.len(), requests.len());
         assert_eq!(outcomes[0], ChannelScanOutcome::FakeStereo);
-        assert_eq!(outcomes[1], ChannelScanOutcome::FakeStereo, "相同区间去重共享判定");
+        assert_eq!(
+            outcomes[1],
+            ChannelScanOutcome::FakeStereo,
+            "相同区间去重共享判定"
+        );
         assert_eq!(outcomes[2], ChannelScanOutcome::FakeStereo);
         assert_eq!(
             outcomes[3],
@@ -1333,7 +1367,12 @@ mod tests {
         // 与逐条 scan_source 逐条对拍（同样输入、独立实现路径）。
         for (request, expected) in requests.iter().zip(&outcomes) {
             assert_eq!(
-                scan_source(request.source_path, request.source_channels, request.region, &policy),
+                scan_source(
+                    request.source_path,
+                    request.source_channels,
+                    request.region,
+                    &policy
+                ),
                 *expected,
                 "分组判定必须与逐条判定一致"
             );

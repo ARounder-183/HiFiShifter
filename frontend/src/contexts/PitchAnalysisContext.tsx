@@ -10,6 +10,7 @@ import {
     type ReactNode,
 } from "react";
 import { coreApi } from "../services/api";
+import { HISTORY_JUMP_EVENT } from "../features/session/historyJump";
 
 // ─── 状态类型 ────────────────────────────────────────────────────────────────
 
@@ -68,6 +69,24 @@ export function PitchAnalysisProvider({ children }: { children: ReactNode }) {
         let unlistenProgress: (() => void) | null = null;
         let unlistenUpdated: (() => void) | null = null;
 
+        /*
+         * 历史跳转（撤销 / 重做 / 跳步 / 打开或新建工程）之后，在途的旧批次进度
+         * 必须被忽略，直到下一次 `pitch_orig_analysis_started`。
+         *
+         * 【为什么需要这个标记】撤销会把时间线整体换成另一份快照 —— 被导入的 clip
+         * 已经不在时间线上了，但后端在途的分析线程只认工程代次、不认"clip 还在不在"，
+         * 于是它仍会陆续发来进度事件。若不忽略，状态栏会在用户撤销之后重新亮起
+         * "正在分析音高"并长时间不退（分析对象已不存在）；若只复位不忽略，则下一次
+         * 进度事件又会把它点亮。真正的下一批分析必定先发 `started`，因此以它为准。
+         */
+        let ignoreStaleProgress = false;
+
+        const onHistoryJump = () => {
+            ignoreStaleProgress = true;
+            setStateRaw(DEFAULT_STATE);
+        };
+        window.addEventListener(HISTORY_JUMP_EVENT, onHistoryJump);
+
         async function setup() {
             // ① 先做一次初始查询，防止分析在 Provider 挂载前就已开始
             try {
@@ -115,6 +134,8 @@ export function PitchAnalysisProvider({ children }: { children: ReactNode }) {
                     (event) => {
                         if (disposed) return;
                         void event.payload;
+                        // 新批次开始：此前被忽略的旧批次进度不再有影响。
+                        ignoreStaleProgress = false;
                         setStateRaw({
                             pending: true,
                             progress: 0,
@@ -134,6 +155,9 @@ export function PitchAnalysisProvider({ children }: { children: ReactNode }) {
                     "pitch_orig_analysis_progress",
                     (event) => {
                         if (disposed) return;
+                        // 历史跳转之后的进度属于已消失的时间线：忽略，直到下一批
+                        // `started`（见上面 ignoreStaleProgress 的说明）。
+                        if (ignoreStaleProgress) return;
                         const payload = event.payload ?? {};
                         const p = Number(payload?.progress);
                         if (!Number.isFinite(p)) return;
@@ -185,6 +209,7 @@ export function PitchAnalysisProvider({ children }: { children: ReactNode }) {
 
         return () => {
             disposed = true;
+            window.removeEventListener(HISTORY_JUMP_EVENT, onHistoryJump);
             unlistenStarted?.();
             unlistenProgress?.();
             unlistenUpdated?.();

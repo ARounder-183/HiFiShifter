@@ -819,9 +819,9 @@ where
 
         // Coarse：允许落在请求点附近。对抽样判定足够了 —— 我们随后按实际时间戳
         // 对齐，宁可少收也不错位。
-        let Some(target_time) =
-            symphonia::core::units::Time::try_from_secs_f64(*start_frame as f64 / rate_for_seek as f64)
-        else {
+        let Some(target_time) = symphonia::core::units::Time::try_from_secs_f64(
+            *start_frame as f64 / rate_for_seek as f64,
+        ) else {
             return Err("seek target out of range".to_string());
         };
         let Ok(seeked) = format.seek(
@@ -885,7 +885,11 @@ where
             }
             let spec = decoded.spec();
             let channels = spec.channels().count().max(1) as u16;
-            let rate = if rate_for_seek > 0 { rate_for_seek } else { codec_rate };
+            let rate = if rate_for_seek > 0 {
+                rate_for_seek
+            } else {
+                codec_rate
+            };
             let mut frame_buf: Vec<f32> = Vec::new();
             decoded.copy_to_vec_interleaved::<f32>(&mut frame_buf);
             let ch = channels.max(1) as usize;
@@ -1075,8 +1079,16 @@ mod tests {
         assert_eq!(harvest(&[b]).len(), 1);
 
         // 单独取与一起取，内容必须逐样本一致。
-        assert_eq!(together[0].1, harvest(&[a])[0].1, "窗口 a 的内容不得受 b 影响");
-        assert_eq!(together[1].1, harvest(&[b])[0].1, "窗口 b 的内容不得受 a 影响");
+        assert_eq!(
+            together[0].1,
+            harvest(&[a])[0].1,
+            "窗口 a 的内容不得受 b 影响"
+        );
+        assert_eq!(
+            together[1].1,
+            harvest(&[b])[0].1,
+            "窗口 b 的内容不得受 a 影响"
+        );
         // 重叠段确实重叠（否则上面的断言会因为两个窗口都在读同一段而失去意义）。
         let half = len / 2;
         let ch = header.channels.max(1) as usize;
@@ -1097,15 +1109,17 @@ mod tests {
         // 起点在文件之外：收不到，但也不报错（调用方据此判定覆盖不完整）。
         let windows = vec![(total + 100_000, 1_000usize)];
         let mut count = 0usize;
-        let harvested =
-            visit_media_audio_windows(&path, None, &windows, total as usize, &mut |_i,
-                                                                                   _pcm,
-                                                                                   _ch,
-                                                                                   _rate| {
+        let harvested = visit_media_audio_windows(
+            &path,
+            None,
+            &windows,
+            total as usize,
+            &mut |_i, _pcm, _ch, _rate| {
                 count += 1;
                 Ok(())
-            })
-            .expect("harvest");
+            },
+        )
+        .expect("harvest");
         assert_eq!(harvested, 0);
         assert_eq!(count, 0);
     }

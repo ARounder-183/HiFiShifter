@@ -32,9 +32,7 @@ fn done_slot() -> &'static std::sync::atomic::AtomicUsize {
 
 /// 设置/清除进度回调。每轮渲染 pass 启动时注册，收尾时清除。
 pub fn set_callback(cb: Option<ProgressCallback>) {
-    *callback_slot()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = cb;
+    *callback_slot().lock().unwrap_or_else(|e| e.into_inner()) = cb;
 }
 
 /// 开始新一轮 pass：记录 clip 总数并把已完成计数归零。

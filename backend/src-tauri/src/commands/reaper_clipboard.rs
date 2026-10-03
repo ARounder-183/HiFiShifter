@@ -60,8 +60,7 @@ pub(super) fn read_reaper_clipboard() -> Result<Vec<u8>, String> {
         register_format("REAPERMedia").ok_or_else(|| "clipboard_format_not_found".to_string())?;
 
     crate::system_clipboard::clipboard_session(|_clip| {
-        let size =
-            raw::size(format.get()).ok_or_else(|| "clipboard_empty".to_string())?;
+        let size = raw::size(format.get()).ok_or_else(|| "clipboard_empty".to_string())?;
 
         let mut buf = vec![0u8; size.get()];
         let bytes_read = raw::get(format.get(), &mut buf)
@@ -165,8 +164,7 @@ pub(crate) fn read_midi_clipboard() -> Result<Vec<u8>, String> {
         .ok_or_else(|| "midi_clipboard_format_not_found".to_string())?;
 
     crate::system_clipboard::clipboard_session(|_clip| {
-        let size =
-            raw::size(format.get()).ok_or_else(|| "midi_clipboard_empty".to_string())?;
+        let size = raw::size(format.get()).ok_or_else(|| "midi_clipboard_empty".to_string())?;
 
         let mut buf = vec![0u8; size.get()];
         let bytes_read = raw::get(format.get(), &mut buf)
@@ -279,7 +277,14 @@ pub(super) fn paste_reaper_clipboard(
     };
 
     // 从当前 timeline 读取光标位置、选中轨道、轨道顺序、BPM
-    let (playhead_sec, selected_track_idx, ordered_track_ids, ordered_track_volumes, project_bpm, next_track_order) = {
+    let (
+        playhead_sec,
+        selected_track_idx,
+        ordered_track_ids,
+        ordered_track_volumes,
+        project_bpm,
+        next_track_order,
+    ) = {
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
         // 轨道显示顺序 = Vec 顺序（normalize_track_vec 不变式，DFS）。
@@ -350,7 +355,9 @@ pub(super) fn paste_reaper_clipboard(
         .collect();
 
     // 应用到 AppState
-    state.begin_undo_group(Some(crate::state::HistoryOp::PasteObjects.key().to_string()));
+    state.begin_undo_group(Some(
+        crate::state::HistoryOp::PasteObjects.key().to_string(),
+    ));
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -428,22 +435,18 @@ pub(super) fn paste_reaper_clipboard(
     // Clip/轨道 id 全部为新生成，因此 result.timeline 即"新建集合"。
     // 该字段同时覆盖两条前端路径：剪贴板回退（paste_timeline_clipboard
     // 无 HiFiShifter 数据时转走本命令）与钢琴卷帘的 REAPERMedia 直接粘贴。
-    json["created_clip_ids"] = serde_json::json!(
-        result
-            .timeline
-            .clips
-            .iter()
-            .map(|clip| clip.id.clone())
-            .collect::<Vec<_>>()
-    );
-    json["created_track_ids"] = serde_json::json!(
-        result
-            .timeline
-            .tracks
-            .iter()
-            .map(|track| track.id.clone())
-            .collect::<Vec<_>>()
-    );
+    json["created_clip_ids"] = serde_json::json!(result
+        .timeline
+        .clips
+        .iter()
+        .map(|clip| clip.id.clone())
+        .collect::<Vec<_>>());
+    json["created_track_ids"] = serde_json::json!(result
+        .timeline
+        .tracks
+        .iter()
+        .map(|track| track.id.clone())
+        .collect::<Vec<_>>());
 
     if !result.skipped_files.is_empty() {
         json["skipped_files"] = serde_json::json!(result.skipped_files);

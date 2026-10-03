@@ -65,11 +65,14 @@ import {
     installRightDragContextMenuGuard,
     disposeRightDragContextMenuGuard,
 } from "./utils/rightDragContextMenuGuard";
+import { emitPinch, pinchDeltaFromWheel } from "./utils/pinchGesture";
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
 import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
 import { PitchAnalysisProvider, usePitchAnalysis } from "./contexts/PitchAnalysisContext";
 import { ParamDataLoadingChip } from "./components/layout/ParamDataLoadingChip";
+import { AppStatusProgressChips } from "./components/layout/AppStatusProgressChips";
+import { appStatusProgressBus } from "./utils/appStatusProgressBus";
 import { FileBrowserPanel } from "./components/layout/FileBrowserPanel";
 import { AppearanceSettingsPanel } from "./components/layout/AppearanceSettingsPanel";
 import { UndoHistoryPanel } from "./components/layout/UndoHistoryPanel";
@@ -121,6 +124,7 @@ import { ImportProjectDialog } from "./components/layout/ImportProjectDialog";
 import { AppDialog } from "./ui/Dialog";
 import { AppStatusChip } from "./ui";
 import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
+import { FolderImportHost } from "./components/layout/FolderImportHost";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
 import { selectMergedKeybindings } from "./features/keybindings/keybindingsSlice";
 import { beginHoldRepeat } from "./features/keybindings/holdRepeat";
@@ -146,9 +150,12 @@ import { waveformMipmapStore } from "./utils/waveformMipmapStore";
 import { projectApi, type AutoBackupSettings } from "./services/api/project";
 import type { ParamFramesPayload, ProcessorParamDescriptor } from "./types/api";
 import {
+    IMPORT_MIDI_PATH_EVENT,
+    IMPORT_PROJECT_PICK_EVENT,
     OPEN_PROJECT_PATH_EVENT,
     type ExternalFileActionDetail,
     type ExternalFileActionKind,
+    type ImportMidiRequestDetail,
 } from "./features/session/projectOpenEvents";
 import { detectExternalPathAction } from "./components/layout/timeline/dnd";
 import type { MessageKey } from "./i18n/messages";
@@ -484,7 +491,9 @@ function detectExternalActionKindFromPath(path: string): ExternalFileActionKind 
     // `importMidi` 不属于本事件通道的动作集合（`ExternalFileActionKind` 没有它）：
     // MIDI 走"导入 MIDI clip"的独立流程，而不是"打开/导入工程"。这里显式排除，
     // 而不是用类型断言硬转——否则 MIDI 路径会被当成工程打开。
-    if (kind === null || kind === "importMidi") return null;
+    // `importFolder` 同理：目录导入有自己的入口（拖放 / 右键菜单 → 选项对话框），
+    // 而这条通道只带一个路径，表达不了落点与导入选项。
+    if (kind === null || kind === "importMidi" || kind === "importFolder") return null;
     return kind;
 }
 
@@ -776,6 +785,18 @@ function AppInner() {
     // 改用 useRef，取消重绘
     const isModifierRef = useRef(false);
 
+    /**
+     * 触控板捏合是否接管缩放（设置项）。
+     *
+     * 【为什么用 ref】下面的全局监听只挂载一次（`useEffect(..., [])`），直接闭包
+     * 会永远读到初始值。经 ref 转发后设置一改即生效，不必重挂监听器。
+     */
+    const pinchZoomEnabled = useAppSelector((state) => state.session.penInput.trackpadPinchZoom);
+    const pinchZoomEnabledRef = useRef(pinchZoomEnabled);
+    useEffect(() => {
+        pinchZoomEnabledRef.current = pinchZoomEnabled;
+    });
+
     useEffect(() => {
         // WebKitGTK fires `contextmenu` on right-button press instead of
         // release. Track the right-button state on Linux and re-dispatch the
@@ -862,6 +883,16 @@ function AppInner() {
             if (isEditableTarget(e.target)) return;
             // 禁用 Ctrl/Cmd+滚轮的 WebView 页面缩放；应用内的缩放滚轮绑定仍可正常执行。
             e.preventDefault();
+            /*
+             * 同一批事件正是 Web 平台上报**触控板捏合**的唯一方式（`WheelEvent`
+             * 不带 `pointerType`，没有别的信号可用）。此前这里只是把它吞掉，于是
+             * 触控板用户既没有浏览器缩放、也没有应用内缩放 —— 手势完全没反应。
+             * 现在继续阻止页面缩放，但把同一批事件识别成捏合派发给当前表面。
+             */
+            if (!pinchZoomEnabledRef.current) return;
+            const delta = pinchDeltaFromWheel(e);
+            if (delta == null) return;
+            emitPinch({ clientX: e.clientX, clientY: e.clientY, delta });
         }
 
         function preventBrowserFind(e: KeyboardEvent) {
@@ -1005,25 +1036,11 @@ function AppInner() {
     const renderingActive = useAppSelector((state) => state.session.playbackRenderingActive);
     const renderingTarget = useAppSelector((state) => state.session.playbackRenderingTarget);
     const renderingBlocking = useAppSelector((state) => state.session.playbackBlockingRenderActive);
-    const [renderingProgress, setRenderingProgress] = useState<number | null>(null);
     const rendering = {
         active: renderingActive,
-        progress: renderingProgress,
         target: renderingTarget,
         blocking: renderingBlocking,
     };
-
-    const [stretching, setStretching] = useState<{
-        active: boolean;
-        clipName: string | null;
-    }>({ active: false, clipName: null });
-
-    // 波形分析进度状态
-    const [waveformAnalysis, setWaveformAnalysis] = useState<{
-        active: boolean;
-        sourcePath: string | null;
-        progress: number | null;
-    }>({ active: false, sourcePath: null, progress: null });
 
     // ── 导入等待提示（延迟点亮）────────────────────────────────────────────
     // 导入走的是盘 IO + 容器探测 + 声道判定，正常只在毫秒级结束，因此**不能**
@@ -1060,7 +1077,7 @@ function AppInner() {
                         const active = Boolean(payload?.active);
                         const clipName =
                             typeof payload?.clipName === "string" ? payload.clipName : null;
-                        setStretching({ active, clipName });
+                        appStatusProgressBus.setStretching({ active, clipName });
                     },
                 );
                 // cleanup 可能发生在 await resolve 之前：已卸载则立即反注册，
@@ -1199,7 +1216,7 @@ function AppInner() {
                                 }
                                 currentProgress = -1;
                                 currentComputingPath = null;
-                                setWaveformAnalysis({
+                                appStatusProgressBus.setWaveformAnalysis({
                                     active: false,
                                     sourcePath: null,
                                     progress: null,
@@ -1236,7 +1253,7 @@ function AppInner() {
                                       .pop()
                                       ?.replace(/\.[^.]+$/, "") ?? sourcePath)
                                 : null;
-                            setWaveformAnalysis({
+                            appStatusProgressBus.setWaveformAnalysis({
                                 active: true,
                                 sourcePath: fileName,
                                 progress: p,
@@ -1252,7 +1269,7 @@ function AppInner() {
                             if (status === "done") {
                                 currentProgress = 1.0;
                                 currentComputingPath = null;
-                                setWaveformAnalysis({
+                                appStatusProgressBus.setWaveformAnalysis({
                                     active: true,
                                     sourcePath: null,
                                     progress: 1.0,
@@ -1260,7 +1277,7 @@ function AppInner() {
                                 fadeOutTimer = setTimeout(() => {
                                     if (!disposed) {
                                         currentProgress = -1;
-                                        setWaveformAnalysis({
+                                        appStatusProgressBus.setWaveformAnalysis({
                                             active: false,
                                             sourcePath: null,
                                             progress: null,
@@ -1275,7 +1292,7 @@ function AppInner() {
                                 }
                                 currentProgress = -1;
                                 currentComputingPath = null;
-                                setWaveformAnalysis({
+                                appStatusProgressBus.setWaveformAnalysis({
                                     active: false,
                                     sourcePath: null,
                                     progress: null,
@@ -1292,7 +1309,7 @@ function AppInner() {
                                 }
                                 currentProgress = -1;
                                 currentComputingPath = null;
-                                setWaveformAnalysis({
+                                appStatusProgressBus.setWaveformAnalysis({
                                     active: false,
                                     sourcePath: null,
                                     progress: null,
@@ -1385,7 +1402,7 @@ function AppInner() {
                                 blocking: originalRenderActiveRef.current,
                             }),
                         );
-                        setRenderingProgress(p);
+                        appStatusProgressBus.setRenderingProgress(p);
 
                         // 渲染从 active→inactive（完成）时，延迟同步一次播放状态，
                         // 使前端能感知后端已真正开始播放。跃迁按 target 判定：
@@ -1966,12 +1983,35 @@ function AppInner() {
             setProjectImportPick({ open: true, path });
         }
 
-        window.addEventListener("hifi:importProjectPick", onImportProjectPick as EventListener);
+        window.addEventListener(IMPORT_PROJECT_PICK_EVENT, onImportProjectPick as EventListener);
         return () => {
             window.removeEventListener(
-                "hifi:importProjectPick",
+                IMPORT_PROJECT_PICK_EVENT,
                 onImportProjectPick as EventListener,
             );
+        };
+    }, []);
+
+    /*
+     * 文件浏览器右键「导入 MIDI…」：MIDI 导入对话框的十余项选项状态都由本组件持有
+     * （见 `midiClip*` 一组 state），只有它能在任何面板布局下渲染那个对话框。
+     * 文件浏览器因此只发一条请求，这里接住并用自己的默认值打开。
+     */
+    useEffect(() => {
+        function onImportMidi(event: Event) {
+            const detail = (event as CustomEvent<ImportMidiRequestDetail>).detail;
+            const path = String(detail?.path ?? "").trim();
+            if (!path) return;
+            setMidiClipPath(path);
+            setMidiClipStartSec(detail?.startSec ?? 0);
+            setMidiClipTrackId(detail?.trackId ?? null);
+            setMidiClipClipboardGuid(null);
+            setMidiClipDialogOpen(true);
+        }
+
+        window.addEventListener(IMPORT_MIDI_PATH_EVENT, onImportMidi as EventListener);
+        return () => {
+            window.removeEventListener(IMPORT_MIDI_PATH_EVENT, onImportMidi as EventListener);
         };
     }, []);
 
@@ -3535,7 +3575,7 @@ function AppInner() {
                  * 容器的 100%，又造出溢出。
                  */}
                 <div className="flex h-full min-h-0 flex-col pt-2">
-                    <div className="min-h-0 flex-1 overflow-auto rounded border border-qt-border bg-qt-base p-2 text-qt-xs">
+                    <div className="hs-scroll-gutter-flush min-h-0 flex-1 overflow-auto rounded border border-qt-border bg-qt-base p-2 text-qt-xs">
                         {(vocalShifterSkippedFilesDialog ?? []).map((file) => (
                             <div key={file} className="truncate" data-tooltip={file}>
                                 • {file}
@@ -3579,7 +3619,7 @@ function AppInner() {
                  * 容器的 100%，又造出溢出。
                  */}
                 <div className="flex h-full min-h-0 flex-col pt-2">
-                    <div className="min-h-0 flex-1 overflow-auto rounded border border-qt-border bg-qt-base p-2 text-qt-xs">
+                    <div className="hs-scroll-gutter-flush min-h-0 flex-1 overflow-auto rounded border border-qt-border bg-qt-base p-2 text-qt-xs">
                         {(reaperSkippedFilesDialog ?? []).map((file) => (
                             <div key={file} className="truncate" data-tooltip={file}>
                                 • {file}
@@ -3897,7 +3937,7 @@ function AppInner() {
                      * 也看不到。改为参与上面的 flex 列：`flex-1 min-h-0` 让列表吃
                      * 掉剩余高度，body 因此永不溢出，只剩一条滚动条。
                      */}
-                    <div className="mt-2 min-h-0 flex-1 overflow-auto rounded border border-qt-border bg-qt-base p-1">
+                    <div className="hs-scroll-gutter-flush mt-2 min-h-0 flex-1 overflow-auto rounded border border-qt-border bg-qt-base p-1">
                         <div className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1 text-qt-micro font-semibold text-qt-text-muted">
                             <div>{t("recapture_missing_media_col_file_status")}</div>
                             <div>{t("recapture_missing_media_col_file")}</div>
@@ -4153,6 +4193,12 @@ function AppInner() {
             <DockRoot />
             {/* Quick Search Popup */}
             <QuickSearchPopup open={quickSearchOpen} onClose={() => setQuickSearchOpen(false)} />
+            {/*
+              目录导入的宿主：监听"导入文件夹"请求、扫描、必要时弹选项对话框。
+              挂在最外层是因为三个入口（系统拖放 / 文件浏览器拖拽 / 右键菜单）分散在
+              不同位置 —— 只有一份对话框状态，才不会出现"两个面板各弹一个"。
+            */}
+            <FolderImportHost />
 
             {/* Status Bar */}
             <Flex
@@ -4173,35 +4219,15 @@ function AppInner() {
                     {importBusy ? (
                         <AppStatusChip tone="accent">{t("status_importing")}</AppStatusChip>
                     ) : null}
-                    {stretching.active ? (
-                        <AppStatusChip tone="accent">
-                            {t("status_stretching")}
-                            {stretching.clipName ? ` "${stretching.clipName}"` : ""}
-                        </AppStatusChip>
-                    ) : null}
-                    {waveformAnalysis.active ? (
-                        <AppStatusChip tone="accent">
-                            {t("status_analyzing_waveform")}
-                            {waveformAnalysis.sourcePath ? ` "${waveformAnalysis.sourcePath}"` : ""}
-                            {waveformAnalysis.progress != null
-                                ? ` ${Math.round(waveformAnalysis.progress * 100)}%`
-                                : ""}
-                        </AppStatusChip>
-                    ) : null}
                     {pitchAnalysisText ? (
                         <AppStatusChip tone="accent">{pitchAnalysisText}</AppStatusChip>
                     ) : null}
                     {/* 参数曲线取数提示：**独立订阅**外部 store，不参与本组件重渲染
                         （见 ParamDataLoadingChip 的说明）。 */}
                     <ParamDataLoadingChip />
-                    {rendering.active ? (
-                        <AppStatusChip tone="accent">
-                            {t("common_rendering")}
-                            {rendering.progress != null
-                                ? ` ${Math.round(rendering.progress * 100)}%`
-                                : ""}
-                        </AppStatusChip>
-                    ) : null}
+                    {/* 高频进度三片（拉伸 / 波形分析 / 渲染进度）：**独立订阅**外部
+                        store，不参与本组件重渲染（见 AppStatusProgressChips 的说明）。 */}
+                    <AppStatusProgressChips />
                     <span
                         className="hs-type-label truncate"
                         style={error ? { color: "var(--qt-danger-text)" } : undefined}

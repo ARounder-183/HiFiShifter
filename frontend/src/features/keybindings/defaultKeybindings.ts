@@ -119,6 +119,12 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "pianoRoll.vibratoDragAmplitudeDecrease": { key: "arrowdown" },
     "pianoRoll.vibratoDragFrequencyIncrease": { key: "arrowleft" },
     "pianoRoll.vibratoDragFrequencyDecrease": { key: "arrowright" },
+    // 拖拽颤音时切换预设：`,` / `.` 是绘图软件里最常见的"上/下一个"位置，
+    // 落在右手小指与无名指的静止位上，按住左键拖拽时也能顺手按到。
+    // 只在拖拽期间生效（`scopedContext: "pianoRollVibratoDrag"`），因此不会
+    // 与任何全局动作抢键。
+    "pianoRoll.vibratoPresetPrev": { key: "," },
+    "pianoRoll.vibratoPresetNext": { key: "." },
     // 拖动方向循环切换：默认 `D`（Direction）。除切换设置外，左键拖拽参数线
     // 期间按下同一键可即时切换本次拖拽的方向 —— 触控板用户无法在按住左键
     // 的同时按下右键，这条键位是「右键拖拽中切换方向」的等价替代。
@@ -445,6 +451,16 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         group: "pianoRoll",
         scopedContext: "pianoRollVibratoDrag",
     },
+    "pianoRoll.vibratoPresetPrev": {
+        labelKey: "kb_pianoroll_vibrato_preset_prev",
+        group: "pianoRoll",
+        scopedContext: "pianoRollVibratoDrag",
+    },
+    "pianoRoll.vibratoPresetNext": {
+        labelKey: "kb_pianoroll_vibrato_preset_next",
+        group: "pianoRoll",
+        scopedContext: "pianoRollVibratoDrag",
+    },
     "pianoRoll.cycleDragDirection": {
         labelKey: "kb_pianoroll_cycle_drag_direction",
         group: "pianoRoll",
@@ -706,6 +722,32 @@ export const GROUP_LABEL_KEYS: Record<ActionMeta["group"], string> = {
     modParam: "kb_group_mod_param",
     modWheel: "kb_group_mod_wheel",
     modFine: "kb_group_mod_fine",
+};
+
+/**
+ * 分组的**短**标签 i18n key（导航栏与搜索结果路标专用）。
+ *
+ * 【为什么需要两套标签】`GROUP_LABEL_KEYS` 里那些是**完整描述句**
+ * （英文 `Piano Roll · Param Edit Commands`、日文 `ピアノロール · パラメータ編集コマンド`），
+ * 写的时候是给**内容区里的分组标题**用的 —— 那里有整栏宽度（实测 562px）。
+ * 同一份文本放进窄导航栏（实测需要 205–214px，而栏内只有 155px）必然被截断：
+ * 中文恰好够（142px），英日韩全部溢出。
+ *
+ * 【为什么是"可选"表而不是必填】只有真正冗长的组才需要短版；`编辑` / `布局` /
+ * `钢琴卷帘` 这类本来就短的，短版会和长版重复 —— 而 `catalogIntegrity.test.ts`
+ * 明确禁止同一命名族内出现相同文案。缺哪一组就自动回落长版（见
+ * `resolveGroupNavLabel`），因此这张表**不需要覆盖全部 14 组**。
+ */
+export const GROUP_NAV_LABEL_KEYS: Partial<Record<ActionMeta["group"], string>> = {
+    playback: "kb_group_playback_nav",
+    project: "kb_group_project_nav",
+    clip: "kb_group_clip_nav",
+    paramEditor: "kb_group_param_editor_nav",
+    modClip: "kb_group_mod_clip_nav",
+    modFade: "kb_group_mod_fade_nav",
+    modParam: "kb_group_mod_param_nav",
+    modWheel: "kb_group_mod_wheel_nav",
+    modFine: "kb_group_mod_fine_nav",
 };
 
 /**

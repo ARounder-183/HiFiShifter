@@ -5,7 +5,9 @@
 //! 取消或失败时半成品文件的删除由上层错误路径统一负责（与重构前行为一致）。
 
 use super::quantize;
-use super::{DitherMode, EncodeError, EncodeSummary, FileAudioEncoder, WavBitDepth, WavEncodeOptions};
+use super::{
+    DitherMode, EncodeError, EncodeSummary, FileAudioEncoder, WavBitDepth, WavEncodeOptions,
+};
 use crate::encode::is_cancelled;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use std::path::{Path, PathBuf};
@@ -80,8 +82,12 @@ impl FileAudioEncoder for WavFileEncoder {
             SampleFormat::Int => {
                 let bits = u32::from(self.spec.bits_per_sample);
                 for &sample in interleaved {
-                    let quantized =
-                        quantize::quantize_sample(sample, bits, self.dither, &mut self.dither_state);
+                    let quantized = quantize::quantize_sample(
+                        sample,
+                        bits,
+                        self.dither,
+                        &mut self.dither_state,
+                    );
                     writer.write_sample(quantized).map_err(map_hound_error)?;
                 }
             }
@@ -98,7 +104,9 @@ impl FileAudioEncoder for WavFileEncoder {
             .take()
             .ok_or_else(|| EncodeError::invalid("wav_writer_closed"))?;
         writer.finalize().map_err(map_hound_error)?;
-        let bytes_written = std::fs::metadata(&self.path).map(|meta| meta.len()).unwrap_or(0);
+        let bytes_written = std::fs::metadata(&self.path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
         Ok(EncodeSummary { bytes_written })
     }
 }

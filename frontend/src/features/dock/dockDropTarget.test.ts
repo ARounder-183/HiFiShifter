@@ -420,9 +420,17 @@ test("features/dock/dockDropTarget.test.ts scripted checks", async () => {
             "the expanded band restores the local side split",
         );
         // 同一点用统一 28 厚度仍是中央 —— 扩展只发生在重合侧。
-        assertEqual(resolveDropZone(RECT, { x: 960, y: 200 }, 28), "center", "uniform stays center");
+        assertEqual(
+            resolveDropZone(RECT, { x: 960, y: 200 }, 28),
+            "center",
+            "uniform stays center",
+        );
         // 超出扩展带 → 中央并入。
-        assertEqual(resolveDropZone(RECT, { x: 900, y: 200 }, 28, bands), "center", "past the band");
+        assertEqual(
+            resolveDropZone(RECT, { x: 900, y: 200 }, 28, bands),
+            "center",
+            "past the band",
+        );
         // 左侧带没有扩展时（比如标签组只贴着根的右缘）……
         const onlyRight = tabsetSideBands(
             { x: 640, y: 0, w: 360, h: 400 },
