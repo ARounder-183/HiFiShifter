@@ -498,7 +498,92 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod e2e_hnsep {
+    /// 端到端：走真实的 [`crate::hnsep_onnx::infer_harmonic_noise_mono`]
+    /// （mask-only 模型 + Rust STFT/ISTFT），验证 (harmonic, noise) 契约。
+    ///
+    /// 【为什么值得留在默认测试集里】它覆盖的是**装配**而非纯数学：张量形状、
+    /// 输出名、bins/frames 的推导、以及 h/n 的长度与能量。DSP 单测用常量掩码
+    /// 绕过网络，本测试用真模型跑通全链路 —— 换模型时最先坏的就是这一层。
+    /// 模型缺失时自动跳过（不阻塞无模型环境）。
+    #[test]
+    fn real_path_produces_valid_separation() {
+        if !crate::hnsep_onnx::is_available() {
+            println!("SKIP: hnsep model unavailable");
+            return;
+        }
+        let sr = 44_100u32;
+        let n = sr as usize; // 1 s
+        let mut state = 777u64;
+        let x: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f64 / sr as f64;
+                let mut s = 0.0;
+                for k in 1..=20 {
+                    s += (0.2 / k as f64) * (2.0 * std::f64::consts::PI * 200.0 * k as f64 * t).sin();
+                }
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let noise = ((state >> 33) as f64 / (1u64 << 31) as f64 - 0.5) * 0.3;
+                (s + noise) as f32
+            })
+            .collect();
 
+        // 48 kHz 路径必须传**真正的 48 kHz 信号**（时长相同、样本数不同），
+        // 否则重采样会改变信号本身，h+n==x 这条契约在重采样域本就不成立。
+        let n48 = 48_000usize;
+        let mut state48 = 777u64;
+        let x48: Vec<f32> = (0..n48)
+            .map(|i| {
+                let t = i as f64 / 48_000.0;
+                let mut s = 0.0;
+                for k in 1..=20 {
+                    s += (0.2 / k as f64) * (2.0 * std::f64::consts::PI * 200.0 * k as f64 * t).sin();
+                }
+                state48 = state48.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let noise = ((state48 >> 33) as f64 / (1u64 << 31) as f64 - 0.5) * 0.3;
+                (s + noise) as f32
+            })
+            .collect();
 
+        for (label, input, rate) in [
+            ("mono@44.1k", x.clone(), sr),
+            ("mono@48k", x48, 48_000u32),
+        ] {
+            let (h, noise) = crate::hnsep_onnx::infer_harmonic_noise_mono(
+                &format!("e2e-test-{label}"), &input, rate, 0, None,
+            ).expect("separation must succeed");
 
+            assert_eq!(h.len(), input.len(), "{label}: harmonic length");
+            assert_eq!(noise.len(), input.len(), "{label}: noise length");
+            assert!(h.iter().all(|v| v.is_finite()), "{label}: harmonic finite");
+            assert!(noise.iter().all(|v| v.is_finite()), "{label}: noise finite");
 
+            let max_res = h.iter().zip(noise.iter()).zip(input.iter())
+                .map(|((a,b),c)| (a + b - c).abs()).fold(0.0f32, f32::max);
+            let rms = |v: &[f32]| (v.iter().map(|&a| (a as f64).powi(2)).sum::<f64>()/v.len() as f64).sqrt();
+            println!("{label}: h_rms={:.6} n_rms={:.6} x_rms={:.6} max|h+n-x|={:.3e}",
+                     rms(&h), rms(&noise), rms(&input), max_res);
+
+            // 44.1 kHz 是模型原生采样率，走直通路径 ⇒ `h + n == x` 必须**精确**成立。
+            //
+            // 非 44100 时该等式**本就不成立**，且非本次改动引入：输入先重采样到
+            // 44100，分离后 h 与 n **各自**再重采样回去 —— 线性重采样不可加，
+            // 故 resample(h) + resample(n) ≠ x。此时只断言输出规模合理。
+            if rate == 44_100 {
+                assert!(
+                    max_res < 1e-3,
+                    "{label}: h+n must reconstruct x exactly at the native rate, got {max_res}"
+                );
+            }
+            // 分离必须有意义：谐波能量占主导，但噪声非零
+            assert!(rms(&h) > rms(&noise), "{label}: harmonic should dominate");
+            assert!(rms(&noise) > 1e-6, "{label}: noise must not be empty");
+            // 不得放大能量（重采样路径同样适用）
+            assert!(
+                rms(&h) + rms(&noise) < rms(&input) * 3.0,
+                "{label}: separation must not amplify energy"
+            );
+        }
+    }
+}

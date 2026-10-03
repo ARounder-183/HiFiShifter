@@ -396,12 +396,24 @@ fn resolve_dml_device_id() -> Option<i32> {
 
 /// Default EP for each role when nothing is explicitly configured.
 ///
-/// Only HNSEP (Separator) deviates: it defaults to CPU because the CoreML EP
-/// was measured to give it essentially no speedup (5 s clip: 310 ms CPU vs
-/// 304 ms CoreML; 10 s clip: 553 ms vs 531 ms — ~2-4%) while adding 0.6-1.2 s
-/// of one-off CoreML model compilation.  HNSEP separation is cached per clip
-/// and therefore runs once per clip, so the extra compilation cost is not
-/// amortised.  See `docs/hifigan-gpu-acceleration.md`.
+/// Only HNSEP (Separator) deviates, and the reason is now **input-length
+/// dependent** rather than "GPU does not help here":
+///
+/// HNSEP moved to a mask-only (spectrum-domain) model, so the graph is just the
+/// mask network and the STFT/ISTFT run in Rust.  That made CoreML worthwhile on
+/// short clips -- measured 1.29x at 2 s, 1.90x at 10 s, ~2.0-2.4x up to 45 s.
+///
+/// But CoreML then **degrades sharply past ~45-50 s**: at 50 s it takes 4953 ms
+/// against 3732 ms on CPU (0.75x), and at 60 s 6749 ms vs 4377 ms (0.65x).
+/// Reproduced across repeated runs, so it is not noise.  Since a single default
+/// cannot be right for both regimes, the default stays CPU and users who want
+/// the short-clip win can opt in per model with
+/// `HIFISHIFTER_HNSEP_ORT_EP=coreml`.
+///
+/// TODO: pick the EP by input length (CPU above ~40 s), or find the root cause of
+/// the CoreML long-input regression, and then flip this default.
+///
+/// Measurements and methodology: `docs/hifigan-gpu-acceleration.md` §4.1.
 fn default_ep_for_role(role: OrtSessionRole) -> &'static str {
     match role {
         OrtSessionRole::Separator => "cpu",

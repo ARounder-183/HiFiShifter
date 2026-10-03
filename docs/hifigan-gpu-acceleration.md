@@ -85,23 +85,88 @@ GPU 收益评估。
 |---|---|---|---|---|---|
 | FCPE | mel `[1,1000,128]`（10 s） | 22.7 ms | 7.7 ms | **2.95x** | `max_abs` 1e-6 |
 | FCPE | mel `[1,4000,128]`（40 s） | 79.2 ms | 27.4 ms | **2.89x** | `max_abs` 5e-6 |
-| HNSEP | wav `[1,220500]`（5 s） | 310 ms | 304 ms | 1.02x | 完全一致 |
-| HNSEP | wav `[1,441000]`（10 s） | 553 ms | 531 ms | 1.04x | 完全一致 |
-| HNSEP（`All` 计算单元，5 s） | — | 310 ms | 304 ms | 1.02x | — |
-| HNSEP（`CPUAndNeuralEngine`，5 s） | — | 306 ms | 301 ms | 1.02x | — |
+| HNSEP（**波形域旧模型**） | wav `[1,220500]`（5 s） | 310 ms | 304 ms | 1.02x | 完全一致 |
+| HNSEP（**波形域旧模型**） | wav `[1,441000]`（10 s） | 553 ms | 531 ms | 1.04x | 完全一致 |
+| HNSEP（旧模型，`All` 计算单元，5 s） | — | 310 ms | 304 ms | 1.02x | — |
+| HNSEP（旧模型，`CPUAndNeuralEngine`，5 s） | — | 306 ms | 301 ms | 1.02x | — |
+
+> ⚠ 上表是**波形域旧模型**的数据，已被下面的 mask-only 模型取代，见 §4.1。
 
 - **FCPE 本来就已经在跑 CoreML。** `ep_choice_for_role()` 对 PitchDetector 同样返回
   CoreML，而且因为 `pinned = matches!(role, Vocoder)`，它一直用的是**未固定维度**配置
   ——恰好就是实测最快的那一套。本次没有改它的 EP 策略，只是把 EP 纳入了状态上报。
-- **HNSEP 上 GPU 基本无收益（1.5%~4%），保持 CPU 默认。** 三个理由：
-  1. 各种 CoreML 计算单元都试过，提升都在噪声范围内；
-  2. CoreML 会话创建额外要 0.6~1.2 s（CPU 只要 ~50 ms），而 HNSEP 结果有 clip 级
-     LRU 缓存、每个 clip 只跑一次，编译成本摊不掉；
-  3. 与声码器争抢 GPU 资源会拖慢真正的热点路径。
+- **旧模型上 GPU 基本无收益（1.5%~4%）。** 原因是**模型形态**而非 EP 配置：
+  旧模型是波形域版，ONNX 图内含 STFT + 编码器 + 24 个 LSTM + 解码器 + ISTFT。
+  LSTM 串行递归不可并行，图内的 STFT/ISTFT（ConvTranspose）又要么不被 EP 支持
+  而回退 CPU，要么把图切成碎片。已换用 mask-only 模型，见 §4.1。
 - **顺带修掉一个真 bug：** 原代码里 `ep_choice_for_role()` 把 Separator 的
   `return "cpu"` 写在环境变量判断**之前**，导致 `HIFISHIFTER_HNSEP_ORT_EP` 这个
   环境变量完全失效（死代码）。现在改成「按角色默认值兜底」，显式指定优先，
   需要的人可以用 `HIFISHIFTER_HNSEP_ORT_EP=coreml` 把 HNSEP 手动放到 GPU 上。
+
+### 4.1 HNSEP 换用 mask-only 模型（频谱域）
+
+旧模型是**波形域**版：ONNX 图内含 STFT、编码器、**24 个 LSTM**、解码器与 ISTFT，
+输入输出都是波形 `[1, N]`。这解释了 §4 里 GPU 无收益的观测 —— 瓶颈是模型形态：
+
+1. **LSTM 是串行递归结构**，逐帧依赖，GPU 无法并行化；
+2. **STFT/ISTFT 在图内**（以 ConvTranspose 实现），这些算子要么不被 CoreML/DirectML
+   支持而回退 CPU，要么把图切成大量碎片，kernel launch 开销吃掉收益。
+
+已换用 mask-only 导出（`third_party/hnsep_mask_only/`）：ONNX 里**只有 mask 网络**
+（输入 `spec [1,2,1025,T]`、输出 `mask [1,2,1025,T]`），STFT/ISTFT 回到 Rust
+（`vocoder/hnsep_dsp.rs`）。这与 OpenUtau 的做法一致，其 `Hnsep.cs` 同样把 STFT
+留在宿主、只把网络交给 ONNX。
+
+**等价性已验证**（同一 1 秒合成信号，两模型各自的 harmonic 输出）：
+
+```
+|h_old - h_new| RMS / input RMS = 0.0000   (-122.9 dB)
+correlation(h_old, h_new)      = 1.000000
+[old] h + n 残差                = 0.000e0
+```
+
+差值在浮点噪声量级，LSTM 节点数两版均为 24 —— 是**同一个网络**，只是 I/O 边界不同。
+模型体积也从 88 MB 降到 56 MB。
+
+**分段计时**（release，5 s 音频，448 帧）：
+
+| 阶段 | 耗时 |
+|---|---|
+| STFT（Rust） | 6.3 ms |
+| mask 网络（CPU） | 255.6 ms |
+| ISTFT（Rust） | 5.6 ms |
+
+DSP 只占约 4.5%，成本几乎全在网络 —— 所以"把 STFT 移出图外"本身不省时间，
+它的价值是**让 EP 能接手那个网络**。
+
+**CoreML vs CPU 随输入长度变化**（release，仅网络推理）：
+
+| 音频时长 | CPU | CoreML | 加速比 |
+|---|---|---|---|
+| 2 s | 154.9 ms | 119.6 ms | 1.29x |
+| 5 s | 368.1 ms | 211.6 ms | 1.74x |
+| 10 s | 698.9 ms | 368.2 ms | 1.90x |
+| 20 s | 1378.8 ms | 681.2 ms | 2.02x |
+| 30 s | 2130.0 ms | 880.7 ms | 2.42x |
+| **45 s** | 3356.7 ms | 1640.4 ms | **2.05x ← 拐点** |
+| **50 s** | 3731.9 ms | 4953.2 ms | **0.75x（反而更慢）** |
+| 60 s | 4377.2 ms | 6749.4 ms | 0.65x（更慢） |
+
+两点结论：
+
+1. **短音频上 GPU 收益有限**（2 s 时仅 1.29x），因为 CoreML 每次推理有固定开销，
+   而 HNSEP 有 clip 级缓存、每个 clip 只跑一次，固定开销摊不掉。
+2. **约 45~50 s 处有拐点，超过之后 CoreML 反而显著更慢**（50 s 时是 CPU 的 0.75x，
+   60 s 时 0.65x）。这是 CoreML 在长输入上的已知退化行为，**不是噪声**：
+   45 s 与 50 s 各复测两次，结果稳定（45 s: 1625/1640 ms；50 s: 4953/5064 ms）。
+
+因此**不能简单把 HNSEP 默认切到 GPU**。当前策略保持 `Separator` 默认 CPU
+（见 `default_ep_for_role`），需要的人可用 `HIFISHIFTER_HNSEP_ORT_EP=coreml` 手动开启
+—— 该路径在 45 s 以内的 clip 上确有约 2x 收益。
+
+> **待办**：若要默认启用 GPU，需要一个按输入长度选择的策略（例如 >40 s 走 CPU），
+> 或先查清 CoreML 长输入退化的根因（可能与 CoreML 对超长序列的分块/内存策略有关）。
 
 ## 5. 修复内容
 
