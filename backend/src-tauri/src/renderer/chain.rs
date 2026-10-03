@@ -16,6 +16,12 @@ use super::traits::{
 
 static HIFIGAN_BREATH_OPTIONS: [(&str, i32); 2] = [("Off", 0), ("On", 1)];
 
+/// 判定张力曲线"是否活跃"的阈值。
+///
+/// 与 `pitch_editing::hifigan_tension_active_for_clip`（容差 1e-3）同量级：
+/// 曲线整体接近 0 时视为未编辑，避免为此白跑一遍 HNSEP 分离与逐帧 Rd 拟合。
+const TENSION_ACTIVE_EPSILON: f32 = 1.0e-3;
+
 /// 仅 NSF-HiFiGAN 专有的参数；共通混音级参数（volume / pan / dyn）**不在此处**
 /// —— 它们由 `renderer::common_params` 统一提供，见 `renderer::all_param_descriptors`。
 static HIFIGAN_PARAM_DESCRIPTORS: [ParamDescriptor; 4] = [
@@ -287,15 +293,29 @@ impl ProcessingStage for HiFiGanStage {
             .extra_curves
             .get("formant_shift_cents")
             .map(|v| v.as_slice());
+        let tension_curve = cc.extra_curves.get("hifigan_tension").map(|v| v.as_slice());
+
+        // 张力是否需要真正参与运算（曲线偏离默认 0 即算活跃）。
+        // 口径与渲染键一致，避免"曲线存在但全 0"时白跑一遍 HNSEP。
+        let tension_active = tension_curve.is_some_and(|c| {
+            c.iter()
+                .any(|v| v.is_finite() && v.abs() > TENSION_ACTIVE_EPSILON)
+        });
+
         // HNSEP 不可用时降级为非 Breath 路径：调用方已因气声跳过外部拉伸，
         // 硬错误会让整个 clip 以源速率输出（被截断/补零），比"没有气声"
         // 严重得多。
-        if breath_enabled && crate::hnsep_onnx::is_available() {
-            return self.process_breath(input_pcm, cc, formant_curve);
+        //
+        // 张力同样走 HNSEP 路径 —— 它**只作用于谐波支**，与 OpenUtau 的
+        // `NeedsSeparation = HasTension || ...` 判据一致。因此把"气声开"与
+        // "张力活跃"一并作为进入分离路径的条件。
+        let needs_separation = breath_enabled || tension_active;
+        if needs_separation && crate::hnsep_onnx::is_available() {
+            return self.process_breath(input_pcm, cc, formant_curve, tension_curve, breath_enabled);
         }
-        if breath_enabled {
+        if needs_separation {
             log::warn!(
-                "HiFiGanStage: breath enabled but HNSEP unavailable, \
+                "HiFiGanStage: breath/tension requested but HNSEP unavailable, \
                  falling back to non-breath rendering (clip_id={})",
                 cc.clip_id
             );
@@ -340,13 +360,32 @@ impl ProcessingStage for HiFiGanStage {
 }
 
 impl HiFiGanStage {
-    /// Breath 路径：HNSEP 分离谐波/噪声 → 谐波走 HiFiGAN（mel 拉伸或外部
-    /// 算法回退）→ 噪声对齐到时间轴长度后按 breath_gain 混合。
+    /// 分离路径：HNSEP 分离谐波/噪声 → 谐波支施加 Rd 张力 → 谐波走 HiFiGAN
+    /// （mel 拉伸或外部算法回退）→ 噪声对齐到时间轴长度后按 breath_gain 混合。
+    ///
+    /// # 为什么张力放在这里
+    /// Rd 张力**只重塑谐波结构**：噪声支（齿音、气声、嘶声）必须原样保留，
+    /// 否则 1 kHz 以上被无差别提升，听感就是"刺耳/金属感"。而 harmonic/noise
+    /// 分支只在本函数内存在，因此张力必须在此处施加（与 OpenUtau 的
+    /// `HifiFeatures.Generate` 一致：先分离，再对 voiced 施加 Rd，最后混合）。
+    ///
+    /// # 顺序
+    /// 张力在 **mel 分析之前**、作用于**波形域**（STFT→改谱→ISTFT 得到新波形），
+    /// 随后才由 `render_with_formant` 提取 mel 并交给声码器重合成。
+    /// 不能把张力挪到 mel 域：Rd 的增益是施加在**目标音高**的谐波位置上的，
+    /// 而 mel 分析本身还要按 gender 伸缩频率轴，两者混在一起会互相污染。
+    ///
+    /// # 参数
+    /// - `tension_curve`：张力曲线（-100..100），可按 clip 级 / 轨道级解析后传入
+    /// - `breath_enabled`：气声开关。**仅**影响噪声支是否混入；张力不依赖它
+    ///   （张力活跃时同样会进入本路径，见 `HiFiGanStage::process`）
     fn process_breath(
         &self,
         input_pcm: Vec<f32>,
         cc: &crate::renderer::traits::ClipProcessContext<'_>,
         formant_curve: Option<&[f32]>,
+        tension_curve: Option<&[f32]>,
+        breath_enabled: bool,
     ) -> Result<Vec<f32>, String> {
         let (harmonic, noise) =
             crate::hnsep_onnx::infer_harmonic_noise_mono(
@@ -357,23 +396,26 @@ impl HiFiGanStage {
                 cc.source_fingerprint,
             )?;
 
+        // ── 谐波支施加 Rd 张力（在 mel 分析之前，只动谐波）──────────────
+        let tensioned_harmonic = Self::apply_rd_tension(&harmonic, cc, tension_curve);
+
         // 谐波分支：有 F0（clip_midi）时走 HiFiGAN mel 拉伸/渲染；无 F0 时
         // 回退外部算法拉伸 —— 两种情况输出都是时间轴长度 out_frames。
         let processed_harmonic = if cc.clip_midi.is_empty() {
             if (cc.playback_rate - 1.0).abs() > 1.0e-6 {
                 crate::time_stretch::time_stretch_interleaved(
-                    &harmonic,
+                    &tensioned_harmonic,
                     1,
                     cc.sample_rate,
                     cc.out_frames,
                     crate::time_stretch::resolved_external_stretch_algorithm(),
                 )
             } else {
-                (*harmonic).clone()
+                tensioned_harmonic
             }
         } else {
             let render_ctx = RenderContext {
-                mono_pcm: &harmonic,
+                mono_pcm: &tensioned_harmonic,
                 channel_index: cc.channel_index,
                 sample_rate: cc.sample_rate,
                 seg_start_sec: cc.seg_start_sec,
@@ -395,6 +437,12 @@ impl HiFiGanStage {
                 renderer.render_with_formant(&render_ctx, formant_curve)?
             }
         };
+
+        // 张力活跃但本 clip 未开气声：噪声支不参与混音（张力只改音色，
+        // 不应把气声顺带带进来）。此处直接返回处理后的谐波。
+        if !breath_enabled {
+            return Ok(processed_harmonic);
+        }
 
         let breath_curve = cc.extra_curves.get("breath_gain").map(|v| v.as_slice());
 
@@ -468,6 +516,121 @@ impl HiFiGanStage {
         };
 
         Ok(mixed)
+    }
+
+    /// 在谐波支上施加 Rd 张力（波形域，mel 分析之前）。
+    ///
+    /// # 流程
+    /// 1. 按 [`crate::rd_tension::HOP`] 的帧步长，为整段谐波采样出**源 f0** 与
+    ///    **目标 f0**；
+    /// 2. 交给 [`crate::rd_tension::RdTension::apply`] 做 STFT→逐帧 Rd 拟合→
+    ///    按张力重塑→ISTFT；
+    /// 3. 张力不活跃、或无源 f0 时**原样返回**输入（不做任何变换）。
+    ///
+    /// # 源 f0 与目标 f0 的时间基
+    /// - 源 f0 取自 `cc.clip_midi`（FCPE 对**源文件**的分析结果，已按
+    ///   `playback_rate` 重采样到时间线帧网格）；
+    /// - 目标 f0 取自 `cc.pitch_edit`（用户编辑的目标音高），无编辑处回退源音高；
+    /// - 处理器收到的 PCM 是**源速率**的，因此第 `i` 个样本对应的时间线绝对时间为
+    ///   `seg_start_sec + i / sample_rate / playback_rate`
+    ///   （与 `nsf_hifigan_onnx` 的分块时间映射同构）。
+    ///
+    /// Rd 的增益要落在**目标音高**的谐波上（变调后音色才正确），而谐波峰定位
+    /// 用的是**源 f0** —— 两者缺一不可，这是本函数同时取两条曲线的原因。
+    ///
+    /// # 参数
+    /// - `harmonic`：HNSEP 分离出的谐波支（与输入同采样率）
+    /// - `cc`：处理器上下文（提供 `clip_midi` / `pitch_edit` / 时间基）
+    /// - `tension_curve`：张力曲线（-100..100），`None` 或全 0 时不做处理
+    ///
+    /// # 特殊说明
+    /// 未浊音帧（源 f0 <= 0）不参与；张力为 0 的帧跳过；两者都不会引入伪影。
+    fn apply_rd_tension(
+        harmonic: &[f32],
+        cc: &crate::renderer::traits::ClipProcessContext<'_>,
+        tension_curve: Option<&[f32]>,
+    ) -> Vec<f32> {
+        let Some(curve) = tension_curve else {
+            return harmonic.to_vec();
+        };
+        if curve.is_empty() || harmonic.is_empty() {
+            return harmonic.to_vec();
+        }
+        // 曲线整体接近 0 → 未编辑，直接跳过（省掉 STFT 与 Rd 拟合）。
+        if !curve
+            .iter()
+            .any(|v| v.is_finite() && v.abs() > TENSION_ACTIVE_EPSILON)
+        {
+            return harmonic.to_vec();
+        }
+        // 无源音高（分析未完成）时无法定位谐波峰，跳过而非退化处理。
+        if cc.clip_midi.is_empty() {
+            return harmonic.to_vec();
+        }
+
+        let sr = cc.sample_rate;
+        if sr == 0 {
+            return harmonic.to_vec();
+        }
+        let rate = if cc.playback_rate.is_finite() && cc.playback_rate > 1e-6 {
+            cc.playback_rate
+        } else {
+            1.0
+        };
+        let frames = harmonic.len().div_ceil(crate::rd_tension::HOP) + 1;
+
+        // 逐帧采样源 f0（Hz）与目标 f0（Hz）。
+        // 帧 m 的中心样本 ≈ m * HOP，对应时间线绝对秒见上方说明。
+        let mut source_f0 = Vec::with_capacity(frames);
+        let mut target_f0 = Vec::with_capacity(frames);
+        for m in 0..frames {
+            let abs_sec = cc.seg_start_sec
+                + (m * crate::rd_tension::HOP) as f64 / (sr as f64) / rate;
+            let src = crate::renderer::utils::clip_midi_at_time(
+                cc.frame_period_ms,
+                cc.clip_start_sec,
+                cc.clip_midi,
+                abs_sec,
+            );
+            source_f0.push(if src > 0.0 {
+                440.0 * 2.0f64.powf((src - 69.0) / 12.0)
+            } else {
+                0.0
+            });
+            // 目标音高：用户编辑优先，缺编辑处回退源音高（与 hifigan 的
+            // `midi_fn` 同一语义）。
+            let target = crate::renderer::utils::edit_midi_at_time_or_none(
+                cc.frame_period_ms,
+                cc.pitch_edit,
+                abs_sec,
+            )
+            .unwrap_or(src);
+            target_f0.push(if target > 0.0 {
+                440.0 * 2.0f64.powf((target - 69.0) / 12.0)
+            } else {
+                0.0
+            });
+        }
+
+        // 张力曲线：按样本位置查询（帧 m 的样本位置 = m * HOP）。
+        let fp = cc.frame_period_ms.max(0.1);
+        let tension_at = |sample_idx: usize| -> f64 {
+            let abs_sec =
+                cc.seg_start_sec + (sample_idx as f64) / (sr as f64) / rate;
+            sample_curve_at_abs_sec(Some(curve), abs_sec, fp, 0.0) as f64
+        };
+        let target_at = |sample_idx: usize| -> f64 {
+            let m = sample_idx / crate::rd_tension::HOP;
+            target_f0.get(m).copied().unwrap_or(0.0)
+        };
+
+        crate::rd_tension::RdTension::apply(
+            harmonic,
+            &source_f0,
+            sr,
+            tension_at,
+            target_at,
+        )
     }
 }
 

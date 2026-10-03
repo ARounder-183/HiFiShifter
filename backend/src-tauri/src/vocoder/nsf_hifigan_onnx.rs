@@ -1420,7 +1420,7 @@ pub fn infer_pitch_edit_chunked_optimized(
         // 共振峰（gender）在 **mel 提取阶段** 生效（伸缩分析窗），因此必须先算出
         // 帧数 → 采样出逐帧 keyShift → 再提取 mel。帧数只由 `hop` 与音频长度决定
         // （与 keyShift 无关），顺序调整不改变 `t`。
-        let mut mel_full = {
+        let mel_full = {
             let mut resample_buf = std::mem::take(&mut sess.audio_resample_buf);
             let model_audio: &[f32] = if sample_rate == model_sr {
                 mono_pcm

@@ -381,106 +381,6 @@ struct RenderedClipOutput {
     breath_noise_stereo: Option<Vec<f32>>,
 }
 
-fn ensure_hifigan_tension_cache(
-    timeline: &crate::state::TimelineState,
-    clip: &crate::state::Clip,
-    out_rate: u32,
-    base_param_hash: u64,
-    base_pcm_stereo: &[f32],
-) -> Result<
-    (
-        Option<crate::synth_clip_cache::TensionRenderedClipCacheKey>,
-        bool,
-    ),
-    String,
-> {
-    let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
-        return Ok((None, false));
-    };
-    let Some(entry) = timeline.params_by_root_track.get(&root) else {
-        return Ok((None, false));
-    };
-    let Some(track) = timeline.tracks.iter().find(|track| track.id == root) else {
-        return Ok((None, false));
-    };
-
-    let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
-    if !matches!(kind, crate::state::SynthPipelineKind::NsfHifiganOnnx) {
-        return Ok((None, false));
-    }
-    let clip_start_sec = clip.start_sec.max(0.0);
-    if !crate::pitch_editing::hifigan_tension_active_for_clip(entry, clip, clip_start_sec) {
-        return Ok((None, false));
-    }
-
-    let start_frame = (clip_start_sec * out_rate as f64).round() as u64;
-    let end_frame = start_frame
-        + (clip.length_sec.max(0.0) * out_rate as f64)
-            .round()
-            .max(1.0) as u64;
-    let frame_period_ms = entry.frame_period_ms.max(0.1);
-    let tension_curve = crate::pitch_editing::hifigan_tension_curve_for_clip(entry, clip);
-    let tension_hash = crate::synth_clip_cache::compute_hifigan_tension_hash(
-        &clip.id,
-        base_param_hash,
-        start_frame,
-        end_frame,
-        out_rate,
-        frame_period_ms,
-        &entry.pitch_orig,
-        tension_curve,
-    );
-    let cache_key = crate::synth_clip_cache::TensionRenderedClipCacheKey {
-        clip_id: clip.id.clone(),
-        base_param_hash,
-        tension_hash,
-    };
-
-    {
-        let mut cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if cache.get(&cache_key).is_some() {
-            return Ok((Some(cache_key), false));
-        }
-    }
-
-    // 【持久化缓存读回】张力变体：内存未命中时回退磁盘（渲染线程内）。
-    if crate::render_cache::enabled() {
-        if let Some(loaded) = crate::render_cache::load_tension(&cache_key, out_rate) {
-            let mut cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            cache.insert(cache_key.clone(), loaded);
-            return Ok((Some(cache_key), false));
-        }
-    }
-
-    let tensioned = crate::hifigan_tension::apply_tension_to_stereo(
-        base_pcm_stereo,
-        out_rate,
-        clip_start_sec,
-        frame_period_ms,
-        &entry.pitch_orig,
-        &entry.pitch_edit,
-        tension_curve,
-    )?;
-    let frames = (tensioned.len() / 2) as u64;
-    let entry = crate::synth_clip_cache::TensionRenderedClipCacheEntry {
-        pcm_stereo: std::sync::Arc::new(tensioned),
-        frames,
-        sample_rate: out_rate,
-        rendered_take_id: clip.active_take_id.clone(),
-    };
-    // 【持久化】张力变体异步落盘。
-    crate::render_cache::store_tension(&cache_key, &entry);
-    let mut cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    cache.insert(cache_key.clone(), entry);
-    Ok((Some(cache_key), true))
-}
-
 /// miss 归因：逐个排除最易漂移的输入后重算哈希，并探测磁盘上是否存在该变体。
 ///
 /// 渲染键是不可逆的摘要，单看两个哈希无法知道"哪个输入变了"。但排除某项后重算
@@ -1635,12 +1535,6 @@ fn start_background_render_inner(
         rendered_cache.ensure_capacity(required);
     }
     {
-        let mut tension_cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        tension_cache.ensure_capacity(total.max(1));
-    }
-    {
         let breath_clips = total;
         let required = (breath_clips + breath_clips / 4).max(128);
         crate::hnsep_onnx::ensure_cache_capacity(required);
@@ -1939,7 +1833,6 @@ fn render_background_pass(
         let mut disk_load_elapsed = std::time::Duration::ZERO;
         let mut cache_probe_elapsed = std::time::Duration::ZERO;
         let mut render_elapsed = std::time::Duration::ZERO;
-        let mut tension_elapsed = std::time::Duration::ZERO;
         let mut cancelled = false;
         let mut pending_clip_ids_written: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -2207,59 +2100,19 @@ fn render_background_pass(
                 }
             }
 
-            if let Some(base_entry) = base_entry.as_ref() {
-                let tension_started_at = std::time::Instant::now();
-                match ensure_hifigan_tension_cache(
-                    &timeline,
-                    &clip_render_info.clip,
-                    clip_render_info.sr,
-                    clip_render_info.cache_key.param_hash,
-                    base_entry.pcm_stereo.as_slice(),
-                ) {
-                    Ok((_, tension_generated)) => {
-                        tension_elapsed += tension_started_at.elapsed();
-                        if tension_generated && !rendering_started {
-                            rendering_started = true;
-                            let _ = app.emit(
-                                "playback_rendering_state",
-                                PlaybackRenderingStateEvent {
-                                    active: true,
-                                    progress: Some(
-                                        crate::renderer::progress::current_fraction(),
-                                    ),
-                                    target: Some("background".to_string()),
-                                },
-                            );
-                        }
-                        if let Ok(mut state_mgr) =
-                            crate::clip_rendering_state::global_clip_rendering_state().lock()
-                        {
-                            state_mgr.set_state(
-                                &clip_render_info.clip.id,
-                                crate::clip_rendering_state::ClipRenderingState::Ready,
-                                1.0,
-                                None,
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tension_elapsed += tension_started_at.elapsed();
-                        log::error!(
-                            "[bg_render] tension render failed: clip_id={} err={}",
-                            clip_render_info.clip.id,
-                            e
-                        );
-                        if let Ok(mut state_mgr) =
-                            crate::clip_rendering_state::global_clip_rendering_state().lock()
-                        {
-                            state_mgr.set_state(
-                                &clip_render_info.clip.id,
-                                crate::clip_rendering_state::ClipRenderingState::Failed,
-                                0.0,
-                                Some(e.clone()),
-                            );
-                        }
-                    }
+            // 张力不再有独立的缓存变体：它已迁移为声码器内部的 mel 域操作
+            //（`audio/rd_tension.rs`），随 `RenderedClipCache` 一起产出，
+            // 因此这里无需额外的渲染 pass。
+            if base_entry.is_some() {
+                if let Ok(mut state_mgr) =
+                    crate::clip_rendering_state::global_clip_rendering_state().lock()
+                {
+                    state_mgr.set_state(
+                        &clip_render_info.clip.id,
+                        crate::clip_rendering_state::ClipRenderingState::Ready,
+                        1.0,
+                        None,
+                    );
                 }
             }
 
@@ -2374,7 +2227,7 @@ fn render_background_pass(
 
         if cache_log {
             log::warn!(
-                "[bg_render][cache] DONE total={} hit={} disk_hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} disk_load_ms={:.2} render_ms={:.2} tension_ms={:.2} total_ms={:.2}",
+                "[bg_render][cache] DONE total={} hit={} disk_hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} disk_load_ms={:.2} render_ms={:.2} total_ms={:.2}",
                 total,
                 cache_hit_count,
                 disk_hit_count,
@@ -2384,7 +2237,6 @@ fn render_background_pass(
                 cache_probe_elapsed.as_secs_f64() * 1000.0,
                 disk_load_elapsed.as_secs_f64() * 1000.0,
                 render_elapsed.as_secs_f64() * 1000.0,
-                tension_elapsed.as_secs_f64() * 1000.0,
                 started_at.elapsed().as_secs_f64() * 1000.0
             );
         }

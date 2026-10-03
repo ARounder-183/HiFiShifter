@@ -396,17 +396,20 @@ mod tests {
 
     /// 反向契约：**刻意不参与**本键的输入必须留在键外。
     ///
-    /// 【为什么也要钉住】`breath_gain` / `hifigan_tension` 有各自的缓存键（噪声 stem /
-    /// 张力变体，见 `synth_clip_cache::include_rendered_extra_curve`），把它们并进渲染键
-    /// 会让"只调了气声"也触发整段重渲染 —— 那是本缓存设计里被明确避免的开销。
+    /// 【为什么也要钉住】`breath_gain` 有独立的缓存键（噪声 stem，见
+    /// `synth_clip_cache::include_rendered_extra_curve`），把它并进渲染键会让
+    /// "只调了气声"也触发整段重渲染 —— 那是本缓存设计里被明确避免的开销。
     /// 反过来，`volume` / `pan` / `dyn` 在混音阶段实时应用，同样不该进键。
+    ///
+    /// 【`hifigan_tension` 已**移出**本清单】张力不再是"渲染后处理 + 独立缓存变体"，
+    /// 而是声码器内部的 mel 域操作（`audio/rd_tension.rs`），随渲染一起产出。
+    /// 它因此**必须**参与渲染键 —— 见 `tension_participates_in_the_key`。
     #[test]
     fn deliberately_excluded_inputs_stay_out_of_the_key() {
         let base = hash_of(&base_clip(), &base_entry());
 
         for excluded in [
             "breath_gain",
-            "hifigan_tension",
             // 共通混音参数：实时应用，不烘焙进渲染。
             "volume",
             "pan",
@@ -420,6 +423,25 @@ mod tests {
                 "`{excluded}` 必须留在渲染键外（它有独立缓存键或在混音阶段实时应用）"
             );
         }
+    }
+
+    /// 正向契约：`hifigan_tension` **必须**参与渲染键。
+    ///
+    /// 【为什么必须钉住】张力迁移为声码器内部的 mel 域操作后，它的独立性消失了：
+    /// 不再有 `TensionRenderedClipCache`，也没有任何后处理步骤会在快照阶段按张力
+    /// 曲线重新加工 PCM。若它仍被排除在键外，"改张力 → 命中同一 hash → 播旧音频"
+    /// 就会静默发生，且磁盘缓存会让这种错配跨会话持续。
+    #[test]
+    fn tension_participates_in_the_key() {
+        let base = hash_of(&base_clip(), &base_entry());
+
+        let mut e = base_entry();
+        e.extra_curves = HashMap::from([("hifigan_tension".to_string(), vec![0.0, 50.0])]);
+        assert_ne!(
+            base,
+            hash_of(&base_clip(), &e),
+            "`hifigan_tension` 必须参与渲染键：它已不再是独立的渲染后处理"
+        );
     }
 
     #[test]

@@ -78,7 +78,9 @@ impl Store {
     pub fn ensure_dirs(&self) -> io::Result<()> {
         for kind in [
             EntryKind::Rendered,
-            EntryKind::Tension,
+            // 已废弃但仍参与目录清理/统计：旧版本写入的张力变体文件
+            // 需要能被回收，否则会永久占用磁盘。
+            EntryKind::DeprecatedTension,
             EntryKind::Noise,
         ] {
             fs::create_dir_all(self.kind_dir(kind))?;
@@ -202,7 +204,9 @@ impl Store {
         let mut report = ScanReport::default();
         for kind in [
             EntryKind::Rendered,
-            EntryKind::Tension,
+            // 已废弃但仍参与目录清理/统计：旧版本写入的张力变体文件
+            // 需要能被回收，否则会永久占用磁盘。
+            EntryKind::DeprecatedTension,
             EntryKind::Noise,
         ] {
             self.scan_kind_dir(kind, &mut report);
@@ -273,7 +277,9 @@ impl Store {
         let mut total = 0u64;
         for kind in [
             EntryKind::Rendered,
-            EntryKind::Tension,
+            // 已废弃但仍参与目录清理/统计：旧版本写入的张力变体文件
+            // 需要能被回收，否则会永久占用磁盘。
+            EntryKind::DeprecatedTension,
             EntryKind::Noise,
         ] {
             total += dir_bytes(&self.kind_dir(kind));
@@ -287,7 +293,9 @@ impl Store {
         let mut bytes = 0u64;
         for kind in [
             EntryKind::Rendered,
-            EntryKind::Tension,
+            // 已废弃但仍参与目录清理/统计：旧版本写入的张力变体文件
+            // 需要能被回收，否则会永久占用磁盘。
+            EntryKind::DeprecatedTension,
             EntryKind::Noise,
         ] {
             let (f, b) = clear_dir(&self.kind_dir(kind));
@@ -478,7 +486,8 @@ mod tests {
         // 采样率错配 → miss（不会跨采样率误用）。
         assert!(store.load(EntryKind::Rendered, hash, 44_100, true).is_none());
         // 类别错配 → miss 并自愈删除。
-        assert!(store.load(EntryKind::Tension, hash, 48_000, true).is_none());
+        // （张力变体已废弃，改用 `Noise` 验证同一条自愈路径。）
+        assert!(store.load(EntryKind::Noise, hash, 48_000, true).is_none());
 
         let _ = fs::remove_dir_all(&base);
     }

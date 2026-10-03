@@ -47,8 +47,10 @@ pub(crate) mod commands;
 mod formant_cache;
 #[path = "audio/formant_morph/mod.rs"]
 mod formant_morph;
-#[path = "audio/hifigan_tension.rs"]
-mod hifigan_tension;
+#[path = "audio/glottal_rd.rs"]
+mod glottal_rd;
+#[path = "audio/rd_tension.rs"]
+mod rd_tension;
 mod launch_args;
 mod media;
 #[path = "audio/mixdown.rs"]

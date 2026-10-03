@@ -774,9 +774,13 @@ pub fn compute_rendered_clip_hash_excluding(
         if crate::renderer::common_params::is_common_mix_param(param_id) {
             return false;
         }
-        // nsf-hifigan 的气声与张力属于渲染后处理，有独立缓存 key。
-        !(_renderer_id == "nsf_hifigan_onnx"
-            && matches!(param_id, "breath_gain" | "hifigan_tension"))
+        // nsf-hifigan 的**气声**是渲染后处理：预览靠 `breath_noise_stereo` +
+        // `audio_engine/mix.rs` 实时混音，把它混进底层哈希会让每次拖曲线都重合成。
+        //
+        // `hifigan_tension` **不再**排除：张力已迁移为声码器内部的 mel 域操作
+        //（`audio/rd_tension.rs`），是渲染流程的一部分 —— 必须参与哈希，
+        // 否则改张力会命中旧渲染（这正是它能取代独立张力缓存变体的原因）。
+        !(_renderer_id == "nsf_hifigan_onnx" && matches!(param_id, "breath_gain"))
     }
 
     macro_rules! mix_bytes {
@@ -992,135 +996,6 @@ fn curve_slice_bounds(
     (start_idx.min(len), end_idx.min(len))
 }
 
-pub fn compute_hifigan_tension_hash(
-    clip_id: &str,
-    base_param_hash: u64,
-    start_frame: u64,
-    end_frame: u64,
-    sr: u32,
-    frame_period_ms: f64,
-    pitch_orig: &[f32],
-    tension_curve: Option<&[f32]>,
-) -> u64 {
-    let mut h: u64 = 14695981039346656037u64;
-
-    macro_rules! mix_bytes {
-        ($bytes:expr) => {
-            for &b in $bytes {
-                h ^= b as u64;
-                h = h.wrapping_mul(1099511628211u64);
-            }
-        };
-    }
-
-    mix_bytes!(clip_id.as_bytes());
-    mix_bytes!(b"hifigan_tension");
-    mix_bytes!(&base_param_hash.to_le_bytes());
-    mix_bytes!(&start_frame.to_le_bytes());
-    mix_bytes!(&end_frame.to_le_bytes());
-    mix_bytes!(&sr.to_le_bytes());
-
-    let (pitch_lo, pitch_hi) = curve_slice_bounds(
-        start_frame,
-        end_frame,
-        sr,
-        frame_period_ms,
-        pitch_orig.len(),
-    );
-    for &value in &pitch_orig[pitch_lo..pitch_hi] {
-        mix_bytes!(&value.to_bits().to_le_bytes());
-    }
-
-    if let Some(curve) = tension_curve {
-        let (curve_lo, curve_hi) =
-            curve_slice_bounds(start_frame, end_frame, sr, frame_period_ms, curve.len());
-        for &value in &curve[curve_lo..curve_hi] {
-            mix_bytes!(&value.to_bits().to_le_bytes());
-        }
-    }
-
-    h
-}
-
-/// HiFiGAN tension 后处理缓存 key。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TensionRenderedClipCacheKey {
-    pub clip_id: String,
-    pub base_param_hash: u64,
-    pub tension_hash: u64,
-}
-
-/// HiFiGAN tension 后处理缓存 entry。
-#[derive(Debug, Clone)]
-pub struct TensionRenderedClipCacheEntry {
-    pub pcm_stereo: Arc<Vec<f32>>,
-    pub frames: u64,
-    pub sample_rate: u32,
-    /// 渲染时该 Clip 的 active take id；语义同
-    /// [`RenderedClipCacheEntry::rendered_take_id`]（垫音防跨 Take 复用）。
-    pub rendered_take_id: Option<String>,
-}
-
-pub struct TensionRenderedClipCache {
-    inner: ByteBudgetCache<TensionRenderedClipCacheKey, TensionRenderedClipCacheEntry>,
-}
-
-impl TensionRenderedClipCache {
-    pub fn new(capacity: usize, budget_bytes: u64) -> Self {
-        Self {
-            inner: ByteBudgetCache::new(capacity, budget_bytes),
-        }
-    }
-
-    pub fn get(
-        &mut self,
-        key: &TensionRenderedClipCacheKey,
-    ) -> Option<&TensionRenderedClipCacheEntry> {
-        self.inner.get(key)
-    }
-
-    pub fn insert(
-        &mut self,
-        key: TensionRenderedClipCacheKey,
-        entry: TensionRenderedClipCacheEntry,
-    ) {
-        let weight = entry.pcm_stereo.len() as u64 * 4;
-        self.inner.insert(key, entry, weight);
-    }
-
-    pub fn invalidate(&mut self, clip_id: &str) {
-        self.inner.invalidate_where(|k| k.clip_id == clip_id);
-    }
-
-    /// 当前缓存条目数。
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    /// 确保缓存容量不小于给定值（仅增不减）。
-    pub fn ensure_capacity(&mut self, min_capacity: usize) {
-        self.inner.ensure_capacity(min_capacity);
-    }
-
-    /// 当前缓存总字节数。
-    pub fn total_bytes(&self) -> u64 {
-        self.inner.total_bytes()
-    }
-}
-
-static GLOBAL_TENSION_RENDERED_CLIP_CACHE: OnceLock<Mutex<TensionRenderedClipCache>> =
-    OnceLock::new();
-
-pub fn global_tension_rendered_clip_cache() -> &'static Mutex<TensionRenderedClipCache> {
-    GLOBAL_TENSION_RENDERED_CLIP_CACHE.get_or_init(|| {
-        let budget = crate::audio_engine::byte_budget_cache::env_cache_budget_bytes() / 4;
-        Mutex::new(TensionRenderedClipCache::new(
-            rendered_clip_capacity(),
-            budget,
-        ))
-    })
-}
-
 // ─── Breath Noise 独立缓存（formant 变化时可复用，避免重复 HNSEP 分离）─────────
 
 /// Breath Noise 缓存的 key：使用不含 formant 的 base hash。
@@ -1199,7 +1074,7 @@ pub fn global_breath_noise_cache() -> &'static Mutex<BreathNoiseCache> {
     })
 }
 
-/// 使指定 clip 的所有渲染缓存失效（SynthClipCache + RenderedClipCache + TensionRenderedClipCache + BreathNoiseCache）。
+/// 使指定 clip 的所有渲染缓存失效（SynthClipCache + RenderedClipCache + BreathNoiseCache）。
 ///
 /// 此函数应在 pitch_edit 或其他影响合成的参数发生变化时调用，
 /// 确保旧的预渲染结果不会被错误复用。
@@ -1247,22 +1122,7 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
         }
     }
 
-    // 3. TensionRenderedClipCache 失效（HiFiGAN tension 专用缓存）
-    {
-        let mut cache = global_tension_rendered_clip_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let before = cache.len();
-        cache.invalidate(clip_id);
-        if cache.len() < before {
-            debug_eprintln!(
-                "[cache:invalidate] clip_id={} TensionRenderedClipCache invalidated",
-                clip_id
-            );
-        }
-    }
-
-    // 4. BreathNoiseCache 失效（Breath Noise 独立缓存）
+    // 3. BreathNoiseCache 失效（Breath Noise 独立缓存）
     {
         let mut cache = global_breath_noise_cache()
             .lock()
@@ -1371,28 +1231,6 @@ pub fn get_latest_rendered_pcm(
         })
         .map(|(_, v)| v)?;
     Some((entry.pcm_stereo.clone(), entry.breath_noise_stereo.clone()))
-}
-
-/// 获取指定 clip 最近一次成功的 Tension 渲染结果（用作平滑过渡的垫音）
-pub fn get_latest_tension_rendered_pcm(
-    clip_id: &str,
-    active_take_id: Option<&str>,
-    expected_frames: Option<u64>,
-) -> Option<Arc<Vec<f32>>> {
-    let cache = global_tension_rendered_clip_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let entry = cache
-        .inner
-        .iter()
-        .find(|(k, v)| {
-            k.clip_id == clip_id
-                && take_identity_matches(v.rendered_take_id.as_deref(), active_take_id)
-                // 与 `get_latest_rendered_pcm` 同一长度守卫理由。
-                && expected_frames.map_or(true, |want| v.frames == want)
-        })
-        .map(|(_, v)| v)?;
-    Some(entry.pcm_stereo.clone())
 }
 
 #[cfg(test)]
