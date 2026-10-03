@@ -14,6 +14,7 @@ import {
     SEPARATION_PARAM_ID,
     findBlockedEditParam,
     firstGatedParamId,
+    gatedParamHideOrder,
     paramNeedingVisibilityOnGate,
     isGatedByCompose,
     isEffectParamGated,
@@ -177,6 +178,32 @@ describe("separationGate", () => {
             // 音量 / 声像 / 动态永远排在右侧固定序列里，不能被当成组首。
             expect(firstGatedParamId(["volume", "dyn", "pan"])).toBeNull();
             expect(firstGatedParamId(["volume", "breath_gain"])).toBe("breath_gain");
+        });
+    });
+
+    describe("gatedParamHideOrder（逐个让位的顺序：先张力后气声）", () => {
+        it("按工具栏顺序取逆序 —— 先隐藏右侧的张力，再隐藏气声", () => {
+            // 气声药丸左侧挂着分离开关（不能隐藏），先让气声会让开关独自悬空。
+            const ordered = [
+                "formant_shift_cents",
+                "breath_gain",
+                "hifigan_tension",
+                "volume",
+                "pan",
+            ];
+            expect(gatedParamHideOrder(ordered)).toEqual(["hifigan_tension", "breath_gain"]);
+        });
+
+        it("只有一个被门禁参数时就是它自己", () => {
+            expect(gatedParamHideOrder(["breath_gain", "volume"])).toEqual(["breath_gain"]);
+            expect(gatedParamHideOrder(["formant_shift_cents", "hifigan_tension"])).toEqual([
+                "hifigan_tension",
+            ]);
+        });
+
+        it("没有可门禁参数时为空数组", () => {
+            expect(gatedParamHideOrder(["formant_shift_cents", "volume", "pan"])).toEqual([]);
+            expect(gatedParamHideOrder([])).toEqual([]);
         });
     });
 });

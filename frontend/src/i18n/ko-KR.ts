@@ -1265,6 +1265,7 @@ export const koKR = {
     lock_param_lines: "파라미터 라인 잠금",
     edge_smoothness: "스무딩",
     edge_smoothness_short: "스무딩",
+    edge_smoothness_adjust_hint: "드래그 또는 스크롤로 조정",
 
     // 그리드 음표 유형 라벨
     grid_note_normal: "보통",

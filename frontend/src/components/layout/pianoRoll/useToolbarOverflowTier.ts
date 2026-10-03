@@ -3,62 +3,62 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import { TOOLBAR_MAX_TIER, nextToolbarTier } from "./toolbarOverflow";
 
 /**
- * 测量"自然宽度"时把行临时撑到的宽度（px）。
+ * 量出一行工具栏的「可见宽度」与「内容**最小**宽度」。
  *
- * 只要大于任何可能的内容宽度即可：目的是让所有子项都回到**不受挤压**的自然尺寸。
- */
-const NATURAL_MEASURE_WIDTH_PX = 10000;
-
-/**
- * 量出一行工具栏的「可见宽度」与「内容自然宽度」。
+ * # 为什么量"最小"而不是"自然"宽度
+ * 工具栏里的平滑度滑块是**故意设计成先让步**的（`flex: 1 1 0` + 16px 下限，见
+ * `PianoRollPanel` 的既有注释）：横向不足时它先变窄，真的压无可压才轮到隐藏其它项。
+ * 若按"自然宽度"判断，滑块永远轮不到收缩 —— 一窄就直接隐藏，等于把它的伸缩逻辑
+ * 废掉（用户报告："伸缩逻辑几乎完全失效"）。
  *
- * # 为什么必须量"与当前宽度无关"的自然宽度
- * 工具栏里有个**可伸缩**的元素（平滑度滑块 `flex: 1 1 0; minWidth: 16`）：可用宽度
- * 一变，它就被挤窄，于是按当前布局量到的"内容宽度"也跟着变（实测 1600px 时 1202、
- * 1150px 时 1134、1060px 时 1058）。这样的量值**不能**当判据：
- * - 同一层级在两次测量里数值不同 ⇒ 被误判成"内容变了"，缓存反复失效、层级反复归零；
- * - 恢复判据拿到的"上一级宽度"会随拖拽漂移 ⇒ 固定点不存在，拖拽时来回切换。
+ * 因此判据取"所有可压缩项都压到下限时的宽度"：可用宽度在这个值以上时靠**收缩**
+ * 消化（滑块变窄），跌破它才按优先级隐藏。
  *
- * # 做法
- * 1. 把行宽临时撑大（`NATURAL_MEASURE_WIDTH_PX`），让所有子项回到自然尺寸 ——
- *    滑块回到 120px 上限，不再随可用宽度伸缩；
- * 2. 关掉带 `flex-grow` 的子项：否则"填充剩余空间"的那个子项会吃掉余量，
- *    量到的是可用宽度而不是内容宽度；
- * 3. 内容需求 = Σ max(子项 `scrollWidth`, `clientWidth`) + 间距。
+ * # 为什么这个量值与可用宽度无关
+ * 做法是把行宽压到 0，并临时清掉子树上所有 `min-width: 0`（那是"允许压到 0"的
+ * 声明，会让容器塌成 0、量不到内容下限）。此时行的 `scrollWidth` 就是内容再也压不
+ * 下去的宽度 —— 它只取决于**当前显示了哪些项**，不随可用宽度漂移。
+ * 这一点是判据能有稳定不动点（不来回切换）的前提。
  *
- * 两步都只改行的内联样式、同一帧内还原，浏览器不会绘制中间态。
+ * 只改内联样式、同一帧内还原，浏览器不会绘制中间态。
  *
  * 前提：工具栏内的文字**不折行**（容器带 `whitespace-nowrap`）。否则中文标签会被
  * 压成逐字折行、"内容宽度"随之消失，量到的永远是"放得下"。
  */
 function measureRow(row: HTMLElement): { available: number; needed: number } {
     const available = row.clientWidth;
-    const children = Array.from(row.children).filter(
-        (child): child is HTMLElement => child instanceof HTMLElement,
-    );
-    if (children.length === 0) return { available, needed: available };
 
-    const gap = Number.parseFloat(getComputedStyle(row).columnGap) || 0;
-
-    const previousWidth = row.style.width;
-    row.style.width = `${NATURAL_MEASURE_WIDTH_PX}px`;
-
-    const grown: Array<{ el: HTMLElement; previous: string }> = [];
-    for (const child of children) {
-        if ((Number.parseFloat(getComputedStyle(child).flexGrow) || 0) > 0) {
-            grown.push({ el: child, previous: child.style.flexGrow });
-            child.style.flexGrow = "0";
+    const restore: Array<() => void> = [];
+    const candidates: HTMLElement[] = [row];
+    for (const el of Array.from(row.querySelectorAll<HTMLElement>("*"))) candidates.push(el);
+    for (const el of candidates) {
+        const computed = getComputedStyle(el);
+        // `min-width: 0` 是"允许压到 0"的声明：留着它容器会塌成 0、量不到内容下限。
+        // 而 `min-width: 16px` 这类**真实下限**必须保留，否则会把滑块量成可以压到 0。
+        if (computed.minWidth === "0px") {
+            const previous = el.style.minWidth;
+            el.style.minWidth = "auto";
+            restore.push(() => {
+                el.style.minWidth = previous;
+            });
+        }
+        // 同时关掉 `flex-grow`：否则行宽压到 0 时，行会被自己的 min-content 撑住
+        // （实测 1218 > 自然宽度 1202），量出来的根本不是下限。
+        if ((Number.parseFloat(computed.flexGrow) || 0) > 0) {
+            const previous = el.style.flexGrow;
+            el.style.flexGrow = "0";
+            restore.push(() => {
+                el.style.flexGrow = previous;
+            });
         }
     }
 
-    let needed = 0;
-    children.forEach((child, index) => {
-        if (index > 0) needed += gap;
-        needed += Math.max(child.scrollWidth, child.clientWidth);
-    });
-
-    for (const { el, previous } of grown) el.style.flexGrow = previous;
+    const previousWidth = row.style.width;
+    row.style.width = "0px";
+    const needed = row.scrollWidth;
     row.style.width = previousWidth;
+
+    for (const undo of restore) undo();
 
     return { available, needed };
 }

@@ -1165,6 +1165,7 @@ export const zhTW = {
     lock_param_lines: "鎖定參數線",
     edge_smoothness: "平滑度",
     edge_smoothness_short: "平滑度",
+    edge_smoothness_adjust_hint: "拖曳或滾輪調整",
 
     // 格線音符類型標籤
     grid_note_normal: "標準",

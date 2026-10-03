@@ -1163,6 +1163,7 @@ export const zhCN = {
     lock_param_lines: "锁定参数线",
     edge_smoothness: "平滑度",
     edge_smoothness_short: "平滑度",
+    edge_smoothness_adjust_hint: "拖动或滚轮调整",
 
     // Grid note type labels
     grid_note_normal: "标准",

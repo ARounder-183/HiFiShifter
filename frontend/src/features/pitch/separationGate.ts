@@ -169,3 +169,18 @@ export function firstGatedParamId(orderedParamIds: readonly string[]): string | 
     }
     return null;
 }
+
+/**
+ * 被门禁参数**逐个让位**时的隐藏顺序（先隐藏的排在前）。
+ *
+ * # 为什么是工具栏顺序的逆序
+ * 气声药丸左侧挂着分离开关，而开关**不能**隐藏（它是重新开启的唯一入口）。
+ * 若先隐藏气声，开关会独自悬空、看不出它管着什么；先隐藏它右侧的张力，
+ * 再隐藏气声，观感才是"这一组从右往左收拢"。
+ *
+ * @param orderedParamIds 已按工具栏顺序排好的参数 id（`orderedProcessorParams`）
+ * @returns 隐藏顺序下的被门禁参数 id；无可门禁参数时为空数组
+ */
+export function gatedParamHideOrder(orderedParamIds: readonly string[]): string[] {
+    return orderedParamIds.filter((id) => SEPARATION_GATED_PARAMS.includes(id)).reverse();
+}
