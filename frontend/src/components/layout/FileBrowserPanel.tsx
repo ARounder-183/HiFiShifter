@@ -28,6 +28,7 @@ import { audioPreview } from "../../features/fileBrowser/audioPreview";
 import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
 import {
     fileBrowserSearchOptions,
+    fileBrowserSearchRequest,
     visibleFileBrowserEntries,
 } from "../../features/fileBrowser/fileBrowserSearchOptions";
 import {
@@ -373,12 +374,44 @@ export const FileBrowserPanel: React.FC = () => {
         }
     }, [navigateTo]);
 
+    /**
+     * 重新拉取**列表当前显示的内容**（刷新按钮 / 写操作之后）。
+     *
+     * 【为什么不能只 reload 当前目录】搜索模式下列表来自 `fb.searchResults`，
+     * 而 `loadDirectory` 只更新 `fb.entries` —— 被删掉的项会**继续留在列表里**，
+     * 用户看到的就是"确认了删除，但文件夹还在"（再点一次才报"找不到"），
+     * 甚至按了刷新也还在。因此搜索模式下必须用同一个查询重跑一次搜索。
+     */
+    const refreshListing = useCallback(async () => {
+        // 没有当前目录（首次启动、还没选过文件夹）时什么都不做 —— 直接
+        // `loadDirectory("")` 会被后端拒绝，把面板推进错误态。
+        if (!fb.currentPath) return;
+        await dispatch(loadDirectory(fb.currentPath));
+        if (!isSearchMode || isComputerLevel) return;
+        await dispatch(
+            searchFilesRecursive(
+                fileBrowserSearchRequest({
+                    dirPath: fb.currentPath,
+                    query: trimmedSearchQuery,
+                    regexEnabled: fb.regexEnabled,
+                    options: searchOptions,
+                }),
+            ),
+        );
+    }, [
+        dispatch,
+        fb.currentPath,
+        fb.regexEnabled,
+        isComputerLevel,
+        isSearchMode,
+        searchOptions,
+        trimmedSearchQuery,
+    ]);
+
     // 刷新当前目录
     const handleRefresh = useCallback(() => {
-        if (fb.currentPath) {
-            void dispatch(loadDirectory(fb.currentPath));
-        }
-    }, [dispatch, fb.currentPath]);
+        void refreshListing();
+    }, [refreshListing]);
 
     // 返回上级目录
     const handleParentDir = useCallback(() => {
@@ -1108,13 +1141,13 @@ export const FileBrowserPanel: React.FC = () => {
             try {
                 const newPath = await fileBrowserApi.renamePath(entry.path, trimmed);
                 setSelectedPaths(new Set([newPath]));
-                await dispatch(loadDirectory(fb.currentPath));
+                await refreshListing();
             } catch {
                 // 后端已把非法名 / 重名 / 受保护路径拒绝掉了，这里只需让用户看到结果。
                 setError(tf("fb_rename_failed"));
             }
         },
-        [dispatch, fb.currentPath, tf],
+        [refreshListing, tf],
     );
 
     const handleNewFolderCommit = useCallback(
@@ -1125,12 +1158,12 @@ export const FileBrowserPanel: React.FC = () => {
             try {
                 const created = await fileBrowserApi.createDirectory(fb.currentPath, trimmed);
                 setSelectedPaths(new Set([created]));
-                await dispatch(loadDirectory(fb.currentPath));
+                await refreshListing();
             } catch {
                 setError(tf("fb_create_folder_failed"));
             }
         },
-        [dispatch, fb.currentPath, tf],
+        [refreshListing, fb.currentPath, tf],
     );
 
     const handleDelete = useCallback(
@@ -1140,14 +1173,26 @@ export const FileBrowserPanel: React.FC = () => {
             if (!paths || paths.length === 0) return;
             try {
                 const result = await fileBrowserApi.deletePaths(paths, permanent);
-                if (!result.ok) setError(tf("fb_delete_failed"));
+                if (!result.ok) {
+                    /*
+                     * 把后端的**具体原因**带出来。后端逐条汇总失败原因
+                     * （`protected path: …` / `not found: …` / 系统错误原文），
+                     * 只显示"删除失败"会让用户无从判断是权限、占用还是路径不对 ——
+                     * 而这三者的处理方式完全不同。
+                     */
+                    setError(
+                        result.error
+                            ? `${tf("fb_delete_failed")}：${result.error}`
+                            : tf("fb_delete_failed"),
+                    );
+                }
             } catch {
                 setError(tf("fb_delete_failed"));
             }
             setSelectedPaths(new Set());
-            await dispatch(loadDirectory(fb.currentPath));
+            await refreshListing();
         },
-        [deleteRequest, dispatch, fb.currentPath, tf],
+        [deleteRequest, refreshListing, tf],
     );
 
     /** 菜单动作集合：菜单只决定"显示什么"，这里决定"做什么"。 */
@@ -1680,15 +1725,14 @@ export const FileBrowserPanel: React.FC = () => {
                             dispatch(setSearchQuery(q));
                             if (debounceRef.current) clearTimeout(debounceRef.current);
                             if (q.trim() && fb.currentPath && !isComputerLevel) {
-                                const backendQuery = fb.regexEnabled ? "" : q.trim();
+                                const request = fileBrowserSearchRequest({
+                                    dirPath: fb.currentPath,
+                                    query: q.trim(),
+                                    regexEnabled: fb.regexEnabled,
+                                    options: searchOptions,
+                                });
                                 debounceRef.current = setTimeout(() => {
-                                    void dispatch(
-                                        searchFilesRecursive({
-                                            dirPath: fb.currentPath,
-                                            query: backendQuery,
-                                            options: searchOptions,
-                                        }),
-                                    );
+                                    void dispatch(searchFilesRecursive(request));
                                 }, 300);
                             }
                         }}
@@ -1724,13 +1768,18 @@ export const FileBrowserPanel: React.FC = () => {
 
                             if (trimmedSearchQuery && fb.currentPath && !isComputerLevel) {
                                 void dispatch(
-                                    searchFilesRecursive({
-                                        dirPath: fb.currentPath,
-                                        query: nextRegexEnabled ? "" : trimmedSearchQuery,
-                                        options: nextRegexEnabled
-                                            ? { ...searchOptions, mode: "off" }
-                                            : searchOptions,
-                                    }),
+                                    searchFilesRecursive(
+                                        fileBrowserSearchRequest({
+                                            dirPath: fb.currentPath,
+                                            query: trimmedSearchQuery,
+                                            regexEnabled: nextRegexEnabled,
+                                            // 正则模式下匹配模式降为 off（与 searchOptions 同源，
+                                            // 但这里用的是**切换后**的取值，所以显式给一份）。
+                                            options: nextRegexEnabled
+                                                ? { ...searchOptions, mode: "off" }
+                                                : searchOptions,
+                                        }),
+                                    ),
                                 );
                             }
                         }}
@@ -1819,7 +1868,13 @@ export const FileBrowserPanel: React.FC = () => {
                     </span>
                 )}
                 {transientError && (
-                    <span className="hs-type-label" style={{ color: "var(--qt-danger-text)" }}>
+                    /* 失败原因可能很长（后端逐条汇总路径 + 系统错误原文）：
+                       单行截断显示，完整内容走 tooltip，避免把这一屏撑破。 */
+                    <span
+                        className="hs-type-label truncate block"
+                        style={{ color: "var(--qt-danger-text)" }}
+                        data-tooltip={transientError}
+                    >
                         {transientError}
                     </span>
                 )}

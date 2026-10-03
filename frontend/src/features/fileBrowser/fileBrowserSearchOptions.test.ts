@@ -13,7 +13,7 @@
 
 import { describe, expect, test } from "vitest";
 
-import { fileBrowserSearchOptions, visibleFileBrowserEntries } from "./fileBrowserSearchOptions";
+import { fileBrowserSearchOptions, fileBrowserSearchRequest, visibleFileBrowserEntries } from "./fileBrowserSearchOptions";
 import { DEFAULT_SEARCH_SETTINGS } from "../search/searchSettings";
 import type { FileEntry } from "../../services/api/fileBrowser";
 
@@ -101,5 +101,43 @@ describe("目录列表的媒体过滤", () => {
             mediaOnly: true,
         });
         expect(visible).toHaveLength(4);
+    });
+});
+
+describe("fileBrowserSearchRequest", () => {
+    const options = fileBrowserSearchOptions({ ...BASE_INPUT, mediaOnly: false });
+
+    test("普通模式下原文下发（后端负责匹配）", () => {
+        const request = fileBrowserSearchRequest({
+            dirPath: "C:\\music",
+            query: "vocal",
+            regexEnabled: false,
+            options,
+        });
+        expect(request).toEqual({ dirPath: "C:\\music", query: "vocal", options });
+    });
+
+    test("正则模式下 query 传空串（后端不过滤，前端自己筛）", () => {
+        const request = fileBrowserSearchRequest({
+            dirPath: "C:\\music",
+            query: "^vocal\\d+$",
+            regexEnabled: true,
+            options,
+        });
+        // 把正则原文发给后端会得到"另一批结果"，而前端再按正则筛一次 ——
+        // 列表于是与输入时看到的不一致。
+        expect(request.query).toBe("");
+        expect(request.dirPath).toBe("C:\\music");
+    });
+
+    test("options 原样透传（调用方按切换后的模式决定它）", () => {
+        const regexOptions = { ...options, mode: "off" as const };
+        const request = fileBrowserSearchRequest({
+            dirPath: "C:\\music",
+            query: "abc",
+            regexEnabled: true,
+            options: regexOptions,
+        });
+        expect(request.options).toBe(regexOptions);
     });
 });
