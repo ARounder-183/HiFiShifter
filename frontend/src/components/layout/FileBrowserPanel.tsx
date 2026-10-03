@@ -1866,13 +1866,38 @@ export const FileBrowserPanel: React.FC = () => {
                             <ChevronUpIcon />
                         </IconButton>
                         {pathDraft === null ? (
-                            <span
-                                className="hs-type-label truncate flex-1 cursor-text"
+                            /*
+                             * 路径过长时显示**末尾**（`…\assets\audio\takes`），而不是
+                             * 开头：辨认一条路径靠的是最后几段，`C:\Users\…` 几乎没有
+                             * 信息量。
+                             *
+                             * 做法：`row-reverse` 的 flex 容器 + 子元素 `margin-right: auto`。
+                             * - 文本装得下时，auto 边距吃掉剩余空间 → 子元素被推到左边
+                             *   （与普通左对齐一样）；
+                             * - 文本装不下时，负剩余空间让 auto 边距归零 → 子元素贴住容器
+                             *   右侧、向左溢出，容器裁掉左侧 → 露出的正是路径末尾。
+                             *
+                             * 【为什么不用 `direction: rtl`】那是同类需求最常见的写法，
+                             * 但它会让路径里的中性字符（`:` `\`）按双向文本规则重排 ——
+                             * 例如 `D:\` 会被渲染成 `\D:`。
+                             */
+                            <div
+                                className="flex min-w-0 flex-1 overflow-hidden cursor-text"
+                                style={{
+                                    flexDirection: "row-reverse",
+                                    justifyContent: "flex-start",
+                                }}
                                 data-tooltip={isComputerLevel ? tf("fb_computer") : fb.currentPath}
                                 onClick={() => setPathDraft(isComputerLevel ? "" : fb.currentPath)}
                             >
-                                {isComputerLevel ? tf("fb_computer") : fb.currentPath}
-                            </span>
+                                {/* `flex: none`：不让它被压缩，否则文本会退回"从开头显示"。 */}
+                                <span
+                                    className="hs-type-label whitespace-nowrap"
+                                    style={{ flex: "none", marginRight: "auto" }}
+                                >
+                                    {isComputerLevel ? tf("fb_computer") : fb.currentPath}
+                                </span>
+                            </div>
                         ) : (
                             <input
                                 autoFocus
