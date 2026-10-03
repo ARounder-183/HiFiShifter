@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 
-import { TOOLBAR_MAX_TIER, nextToolbarTier, type ToolbarRowMeasurement } from "./toolbarOverflow";
+import { TOOLBAR_MAX_TIER, nextToolbarTier } from "./toolbarOverflow";
 
 /**
  * 量出一行工具栏的「可见宽度」与「内容自然宽度」。
@@ -17,10 +17,10 @@ import { TOOLBAR_MAX_TIER, nextToolbarTier, type ToolbarRowMeasurement } from ".
  * 2. 内容需求 = Σ max(子项 `scrollWidth`, `clientWidth`) + 间距：
  *    被压缩的子项由 `scrollWidth` 给出**内容**宽度，未被压缩的两者相等。
  *
- * 这样得到的 `needed` 与"当前隐藏到第几级"无关地反映真实需求，配合
- * `nextToolbarTier` 的滞后带，隐藏与恢复才都能收敛。
+ * 前提：工具栏内的文字**不折行**（容器带 `whitespace-nowrap`）。否则中文标签会被
+ * 压成逐字折行、"内容宽度"随之消失，量到的永远是"放得下"。
  */
-function measureRow(row: HTMLElement): ToolbarRowMeasurement {
+function measureRow(row: HTMLElement): { available: number; needed: number } {
     const available = row.clientWidth;
     const children = Array.from(row.children).filter(
         (child): child is HTMLElement => child instanceof HTMLElement,
@@ -65,36 +65,54 @@ function measureRow(row: HTMLElement): ToolbarRowMeasurement {
  * （`PianoRollPanel` 里已有同类事故的注释记录）。这里统一用
  * `requestAnimationFrame` 合帧，同帧内多次触发只测一次。
  *
- * @param rows 待观察的行容器 ref 列表（**调用方需保证数组引用稳定**，如 `useMemo`）
+ * @param rowRef 工具栏行容器的 ref
  * @param maxTier 最大隐藏层级
  * @returns 当前隐藏层级；`0` = 全部显示
  */
 export function useToolbarOverflowTier(
-    rows: readonly RefObject<HTMLElement | null>[],
+    rowRef: RefObject<HTMLElement | null>,
     maxTier: number = TOOLBAR_MAX_TIER,
 ): number {
     const [tier, setTier] = useState(0);
-    /** 最近一次由观察器安装的测量函数；层级变化后用它再测一轮，保证收敛。 */
-    const measureRef = useRef<() => void>(() => {});
+
+    /**
+     * 各层级**实测**的内容自然宽度。恢复判据用的是"少隐藏一级"时的实测值
+     * （见 `nextToolbarTier`），因此需要把走过每一级时量到的宽度留下来。
+     */
+    const neededByTierRef = useRef(new Map<number, number>());
 
     useEffect(() => {
         let frame = 0;
 
         const measure = () => {
             frame = 0;
-            const measured: ToolbarRowMeasurement[] = [];
-            for (const row of rows) {
-                const el = row.current;
-                if (el) measured.push(measureRow(el));
+            const row = rowRef.current;
+            if (!row) return;
+
+            const { available, needed } = measureRow(row);
+            const cache = neededByTierRef.current;
+
+            // 同一层级两次量到的宽度不一致 ⇒ 内容变了（参数增删 / 语系切换）。
+            // 已缓存各级的宽度随之作废；退回 0 级重新走一遍，避免拿过期宽度做恢复判据。
+            const cached = cache.get(tier);
+            if (cached !== undefined && Math.abs(cached - needed) > 1) {
+                cache.clear();
+                if (tier !== 0) {
+                    setTier(0);
+                    return;
+                }
             }
-            if (measured.length === 0) return;
-            // 函数式更新：effect 因此不必依赖 `tier`，也就不会因层级变化重订阅。
-            setTier((current) => {
-                const next = nextToolbarTier({ currentTier: current, maxTier, rows: measured });
-                return next === current ? current : next;
+
+            cache.set(tier, needed);
+            const next = nextToolbarTier({
+                currentTier: tier,
+                maxTier,
+                available,
+                needed,
+                neededAtLowerTier: tier > 0 ? cache.get(tier - 1) : undefined,
             });
+            if (next !== tier) setTier(next);
         };
-        measureRef.current = measure;
 
         const schedule = () => {
             if (frame !== 0) return;
@@ -102,16 +120,14 @@ export function useToolbarOverflowTier(
         };
 
         const cleanups: Array<() => void> = [];
-        for (const row of rows) {
-            const el = row.current;
-            if (!el) continue;
-
+        const row = rowRef.current;
+        if (row) {
             const resizeObserver = new ResizeObserver(schedule);
-            resizeObserver.observe(el);
+            resizeObserver.observe(row);
             cleanups.push(() => resizeObserver.disconnect());
 
             const mutationObserver = new MutationObserver(schedule);
-            mutationObserver.observe(el, {
+            mutationObserver.observe(row, {
                 childList: true,
                 subtree: true,
                 characterData: true,
@@ -119,28 +135,16 @@ export function useToolbarOverflowTier(
             cleanups.push(() => mutationObserver.disconnect());
         }
 
-        // 首帧：此时 DOM 已提交，可以量到真实尺寸。
+        // 首帧（或层级变化后）：DOM 已提交，可以量到真实尺寸。
+        // 层级变化会重跑本 effect，因此"隐藏一级 → 再测一轮"的收敛链是显式接上的，
+        // 不依赖"自身渲染引发的 DOM 变动恰好被观察到"。
         schedule();
 
         return () => {
             if (frame !== 0) cancelAnimationFrame(frame);
             for (const cleanup of cleanups) cleanup();
-            measureRef.current = () => {};
         };
-    }, [rows, maxTier]);
-
-    // 每次层级变化后再测一轮。
-    //
-    // 【为什么不能只靠 MutationObserver】隐藏一级会让内容变窄，于是可能还挤
-    // （需要继续隐藏）或已有多余空间（需要把上一级放回来）—— 这个"再决定一次"
-    // 必须发生，否则层级会停在半路：实测只依赖 DOM 变动观察时，收窄后回不到原位，
-    // 每次改宽只回落一级。这里显式接上这一环。
-    //
-    // 收敛性由滞后带保证：`nextToolbarTier` 的回落余量大于单级最大隐藏量，
-    // 因此不会出现"升级 ↔ 降级"自我维持的来回切换。
-    useEffect(() => {
-        measureRef.current();
-    }, [tier]);
+    }, [rowRef, maxTier, tier]);
 
     return tier;
 }

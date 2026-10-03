@@ -1,134 +1,96 @@
 import { describe, expect, it } from "vitest";
 
-import {
-    TOOLBAR_MAX_TIER,
-    TOOLBAR_OVERFLOW_HYSTERESIS_PX,
-    nextToolbarTier,
-    type ToolbarRowMeasurement,
-} from "./toolbarOverflow";
+import { TOOLBAR_MAX_TIER, nextToolbarTier } from "./toolbarOverflow";
 
-/** 便捷构造：`available` 固定、`needed` 可调。 */
-function row(available: number, needed: number): ToolbarRowMeasurement {
-    return { available, needed };
+const MAX = TOOLBAR_MAX_TIER;
+
+/** 便捷调用：只关心 available/needed。 */
+function tier(params: {
+    currentTier: number;
+    available: number;
+    needed: number;
+    neededAtLowerTier?: number;
+}): number {
+    return nextToolbarTier({ maxTier: MAX, ...params });
 }
 
 describe("nextToolbarTier", () => {
-    it("没有测量结果时保持不动（首帧/未挂载）", () => {
-        expect(nextToolbarTier({ currentTier: 0, maxTier: TOOLBAR_MAX_TIER, rows: [] })).toBe(0);
-        expect(nextToolbarTier({ currentTier: 3, maxTier: TOOLBAR_MAX_TIER, rows: [] })).toBe(3);
-    });
-
-    it("内容放得下且未达回落余量时保持不动", () => {
-        // available 1000、needed 990：没有溢出，但余量只有 10px（< 24px 滞后带）→ 停在原级。
+    it("放得下且上一级放不下时保持不动（不动点）", () => {
         expect(
-            nextToolbarTier({ currentTier: 2, maxTier: TOOLBAR_MAX_TIER, rows: [row(1000, 990)] }),
+            tier({ currentTier: 2, available: 1000, needed: 900, neededAtLowerTier: 1100 }),
         ).toBe(2);
     });
 
-    it("任一行溢出即升级一级", () => {
-        expect(
-            nextToolbarTier({ currentTier: 0, maxTier: TOOLBAR_MAX_TIER, rows: [row(500, 620)] }),
-        ).toBe(1);
-        // 两行里只要有一行溢出就升级（另一行宽裕不影响判据）。
-        expect(
-            nextToolbarTier({
-                currentTier: 1,
-                maxTier: TOOLBAR_MAX_TIER,
-                rows: [row(900, 300), row(500, 620)],
-            }),
-        ).toBe(2);
+    it("放不下就多隐藏一级", () => {
+        expect(tier({ currentTier: 0, available: 900, needed: 1000 })).toBe(1);
     });
 
     it("每次最多升一级（不跳级），保证收敛而不震荡", () => {
-        // 极端溢出也只 +1：隐藏一级后内容需求会下降，下一轮再决定。
-        expect(
-            nextToolbarTier({ currentTier: 0, maxTier: TOOLBAR_MAX_TIER, rows: [row(100, 9000)] }),
-        ).toBe(1);
+        expect(tier({ currentTier: 0, available: 100, needed: 9000 })).toBe(1);
     });
 
-    it("升到最大层级后不再升级", () => {
-        expect(
-            nextToolbarTier({
-                currentTier: TOOLBAR_MAX_TIER,
-                maxTier: TOOLBAR_MAX_TIER,
-                rows: [row(100, 9000)],
-            }),
-        ).toBe(TOOLBAR_MAX_TIER);
+    it("到最大级后不再升级", () => {
+        expect(tier({ currentTier: MAX, available: 100, needed: 9000 })).toBe(MAX);
     });
 
-    it("所有行都留出余量才降一级", () => {
-        expect(
-            nextToolbarTier({ currentTier: 3, maxTier: TOOLBAR_MAX_TIER, rows: [row(1000, 400)] }),
-        ).toBe(2);
+    it("少隐藏一级也放得下就恢复一级", () => {
+        expect(tier({ currentTier: 3, available: 1000, needed: 900, neededAtLowerTier: 950 })).toBe(
+            2,
+        );
     });
 
-    it("只要有一行不够余量就不降级（避免来回切换）", () => {
+    it("上一级放不下时不恢复", () => {
         expect(
-            nextToolbarTier({
-                currentTier: 3,
-                maxTier: TOOLBAR_MAX_TIER,
-                rows: [row(1000, 400), row(1000, 990)],
-            }),
+            tier({ currentTier: 3, available: 1000, needed: 900, neededAtLowerTier: 1001 }),
         ).toBe(3);
     });
 
-    it("已是最外层时不会降到负数", () => {
+    it("上一级恰好等于可见宽度时恢复（判据是 `<=`）", () => {
         expect(
-            nextToolbarTier({ currentTier: 0, maxTier: TOOLBAR_MAX_TIER, rows: [row(1000, 400)] }),
+            tier({ currentTier: 3, available: 1000, needed: 900, neededAtLowerTier: 1000 }),
+        ).toBe(2);
+    });
+
+    it("未测过上一级需求宽度时不恢复（保守）", () => {
+        expect(tier({ currentTier: 3, available: 2000, needed: 900 })).toBe(3);
+    });
+
+    it("已在最外层时不会降到负数", () => {
+        expect(
+            tier({ currentTier: 0, available: 2000, needed: 900, neededAtLowerTier: 1000 }),
         ).toBe(0);
     });
 
-    it("滞后带内不动作：既不溢出、也不够余量 → 稳定", () => {
-        // 滞后带 = (available - 24, available]；needed 落在这里时两个条件都不成立。
+    it("同一宽度下压缩与恢复收敛到同一层级（对称）", () => {
+        // 各层级的内容需求宽度（隐藏越多越窄），与"宽度"无关地固定。
+        const neededByTier = [1200, 1140, 1110, 1004, 954, 834, 794, 724, 664];
         const available = 1000;
-        for (const needed of [available - 20, available - 1, available]) {
-            expect(
-                nextToolbarTier({
-                    currentTier: 2,
-                    maxTier: TOOLBAR_MAX_TIER,
-                    rows: [row(available, needed)],
-                }),
-                `needed=${needed} 应停在原级`,
-            ).toBe(2);
+        // 该宽度下"刚好放得下"的最小层级。
+        const expected = neededByTier.findIndex((n) => n <= available);
+        expect(expected).toBeGreaterThan(0);
+
+        // 压缩：从 0 出发，反复"放不下就藏"。
+        let down = 0;
+        for (let i = 0; i < 20; i += 1) {
+            down = tier({
+                currentTier: down,
+                available,
+                needed: neededByTier[down],
+                neededAtLowerTier: down > 0 ? neededByTier[down - 1] : undefined,
+            });
         }
-    });
+        expect(down).toBe(expected);
 
-    it("刚好越过滞后带边界才降级", () => {
-        const available = 1000;
-        // needed = available - hysteresis 恰好命中 `<=` → 降级。
-        expect(
-            nextToolbarTier({
-                currentTier: 2,
-                maxTier: TOOLBAR_MAX_TIER,
-                rows: [row(available, available - TOOLBAR_OVERFLOW_HYSTERESIS_PX)],
-            }),
-        ).toBe(1);
-    });
-
-    it("可自定义滞后余量", () => {
-        expect(
-            nextToolbarTier({
-                currentTier: 2,
-                maxTier: TOOLBAR_MAX_TIER,
-                rows: [row(1000, 990)],
-                hysteresisPx: 0,
-            }),
-        ).toBe(1);
-    });
-
-    it("模拟一次收窄—放宽往返：层级单调进出且回到原点", () => {
-        const maxTier = TOOLBAR_MAX_TIER;
-        let tier = 0;
-        // 收窄：内容需求逐步超过可见宽度。
-        for (const needed of [700, 900, 1200, 1600]) {
-            tier = nextToolbarTier({ currentTier: tier, maxTier, rows: [row(800, needed)] });
+        // 恢复：从最深层出发，反复"上一级放得下就恢复"。
+        let up = MAX;
+        for (let i = 0; i < 20; i += 1) {
+            up = tier({
+                currentTier: up,
+                available,
+                needed: neededByTier[up],
+                neededAtLowerTier: up > 0 ? neededByTier[up - 1] : undefined,
+            });
         }
-        expect(tier).toBeGreaterThan(0);
-
-        // 放宽：内容需求逐步回落，最终必须回到 0（不会卡在某一级）。
-        for (let i = 0; i < 40; i += 1) {
-            tier = nextToolbarTier({ currentTier: tier, maxTier, rows: [row(2000, 400)] });
-        }
-        expect(tier).toBe(0);
+        expect(up).toBe(expected);
     });
 });

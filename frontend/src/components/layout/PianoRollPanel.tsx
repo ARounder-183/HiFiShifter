@@ -2565,25 +2565,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     // 原则是**只砍冗余、不砍入口**：被隐藏项要么是纯装饰文字（旁边控件已表达同一信息），
     // 要么功能另有入口；唯一入口（如参考轨道组、分离开关）只瘦身、不隐藏。
     const toolbarRowRef = useRef<HTMLDivElement | null>(null);
-    // ref 恒定，故数组引用稳定（hook 依赖它做订阅，不能每次渲染都新建）。
-    const toolbarRows = useMemo(() => [toolbarRowRef], []);
-    const toolbarTier = useToolbarOverflowTier(toolbarRows, TOOLBAR_MAX_TIER);
+    const toolbarTier = useToolbarOverflowTier(toolbarRowRef, TOOLBAR_MAX_TIER);
 
-    // 被门禁的药丸**逐个**让位（第 3 / 4 级各让一个），且**从右往左**让：
-    // 气声药丸左侧挂着分离开关，先让气声会让开关独自悬空。
-    // 【为什么逐个而不是一次让两个】一次让两个约 212px，超过回落余量（130px），
-    // 会在同一宽度下反复"隐藏 ↔ 恢复"（理由见 TOOLBAR_OVERFLOW_HYSTERESIS_PX）。
-    const gatedPillHideOrder = useMemo(
-        () =>
-            orderedProcessorParams
-                .filter((p) => isGatedBySeparation(p.id, false))
-                .map((p) => p.id)
-                .reverse(),
-        [orderedProcessorParams],
-    );
-    const gatedPillsHidden = separationEnabled
-        ? 0
-        : Math.max(0, Math.min(toolbarTier - 2, gatedPillHideOrder.length));
+    // 第 3 级：分离关闭时，气声与张力本就置灰、不可编辑，整组让位。
+    // 组首的药丸旁边挂着分离开关，那是重新开启的唯一入口 —— 它**不隐藏**（见下方组首分支）。
+    // 曲线仍会继续绘制：见 `effectiveSecondaryParamVisible`。
+    const gatedPillsHidden = !separationEnabled && toolbarTier >= 3;
 
     // 分离关闭时，气声 / 张力的药丸已在第 3 级让位 —— 用户此刻点不到它们的"眼睛"。
     // 但"关闭分离时曲线保持可见、只是不可编辑"是既有契约，因此这里在**渲染口径**上
@@ -7475,7 +7462,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             <Flex
                 align="center"
                 justify="between"
-                className="h-qt-bar-main bg-qt-base border-b border-qt-border px-2 shrink-0 overflow-hidden"
+                className="h-qt-bar-main bg-qt-base border-b border-qt-border px-2 shrink-0 overflow-hidden whitespace-nowrap"
                 ref={toolbarRowRef}
                 /* 当前隐藏层级（0 = 全部显示）：观测与调试出口，见 toolbarOverflow.ts。 */
                 data-toolbar-tier={toolbarTier}
@@ -8094,8 +8081,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             {/* 标签允许被压缩裁切（完整名称在悬停提示里）：横向极窄时
                                 应当由它先让位，而不是把整行撑到溢出。省略号让"让位"
                                 看起来是有意的降级，而不是渲染出错的半截字。 */}
-                            {/* 第 5 级隐藏：滑块与百分比数值仍在，全称在 ToolTip 里。 */}
-                            {toolbarTier < 5 ? (
+                            {/* 第 4 级隐藏：滑块与百分比数值仍在，全称在 ToolTip 里。 */}
+                            {toolbarTier < 4 ? (
                                 <span
                                     className="hs-type-label"
                                     data-tooltip={tf("edge_smoothness")}
@@ -8109,9 +8096,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     {tf("edge_smoothness_short")}:
                                 </span>
                             ) : null}
-                            {/* 第 6 级隐藏滑块：此时只剩百分比数值（只读）。
-                                第 7 级连数值一起隐藏，整组退场。 */}
-                            {toolbarTier < 6 ? (
+                            {/* 第 5 级隐藏滑块：此时只剩百分比数值（只读）。
+                                第 6 级连数值一起隐藏，整组退场。 */}
+                            {toolbarTier < 5 ? (
                                 <input
                                     ref={attachEdgeSmoothnessWheel}
                                     className="qt-range"
@@ -8152,8 +8139,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             ) : null}
                             {/* 数值需要完整可读（"100%"），因此给它一个较小的固定下限，
                                 但不再是 36px 那种"宁可溢出也不缩"的宽度。
-                                第 7 级隐藏：整组退场，平滑度等面板变宽后再调。 */}
-                            {toolbarTier < 7 ? (
+                                第 6 级隐藏：整组退场，平滑度等面板变宽后再调。 */}
+                            {toolbarTier < 6 ? (
                                 <span
                                     className="hs-type-label"
                                     style={{ minWidth: 28, textAlign: "right" }}
@@ -8186,10 +8173,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             color="gray"
                                             style={{ cursor: "pointer" }}
                                         >
-                                            {/* 第 9 级只保留下拉箭头：参考轨道组没有菜单 /
+                                            {/* 第 8 级只保留下拉箭头：参考轨道组没有菜单 /
                                                 快捷键入口，是**唯一入口**，不能整块隐藏，
                                                 只能瘦身；全称仍在按钮的 ToolTip 里。 */}
-                                            {toolbarTier < 9
+                                            {toolbarTier < 8
                                                 ? buildReferenceRootTrackTriggerElement(
                                                       `${tf("reference_root_tracks_short")}${
                                                           visibleReferenceRootTrackIds.length > 0
@@ -8263,9 +8250,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         )}
                                     </DropdownMenu.Content>
                                 </DropdownMenu.Root>
-                                {/* 第 8 级隐藏「导入 MIDI」：时间轴上同样能导入 MIDI
+                                {/* 第 7 级隐藏「导入 MIDI」：时间轴上同样能导入 MIDI
                                     （`TimelinePanel` 也有入口），这里不是唯一路径。 */}
-                                {toolbarTier < 8 ? (
+                                {toolbarTier < 7 ? (
                                     <span
                                         className="inline-flex"
                                         data-tooltip={pitchHardDisableReason ?? tf("midi_import")}
@@ -8373,13 +8360,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         )}
                         {/* 由后端 processorParams 驱动的动态参数按钮（按算法排列后的顺序） */}
                         {orderedProcessorParams.map((p) => {
-                            // 第 3 / 4 级：分离关闭时，气声与张力本就置灰、不可编辑，
-                            // 横向不足时逐个让位。**组首的药丸除外** —— 它旁边挂着分离
-                            // 开关，那是重新开启的唯一入口（见下方组首分支）。
-                            // 曲线仍会继续绘制：见 `effectiveSecondaryParamVisible`。
-                            const gatedHideIndex = gatedPillHideOrder.indexOf(p.id);
+                            // 第 3 级：被门禁的药丸整组让位（见 `gatedPillsHidden`）。
+                            // 组首除外 —— 它旁边挂着分离开关，那是唯一入口。
                             const hideGatedPill =
-                                gatedHideIndex >= 0 && gatedHideIndex < gatedPillsHidden;
+                                gatedPillsHidden && isGatedBySeparation(p.id, false);
                             if (hideGatedPill && p.id !== separationSwitchAnchorParamId) {
                                 return null;
                             }
@@ -8575,7 +8559,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             <BreathAirIcon off={!separationEnabled} />
                                         </button>
                                     </span>
-                                    {/* 第 4 级：组首的药丸也让位，但**开关保留** ——
+                                    {/* 第 3 级：组首的药丸也让位，但**开关保留** ——
                                         它是重新开启气声 / 张力的唯一入口。 */}
                                     {hideGatedPill ? null : paramPill}
                                 </React.Fragment>
