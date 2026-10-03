@@ -13,6 +13,7 @@ import {
     SEPARATION_GATED_PARAMS,
     SEPARATION_PARAM_ID,
     findBlockedEditParam,
+    firstGatedParamId,
     paramNeedingVisibilityOnGate,
     isGatedByCompose,
     isEffectParamGated,
@@ -139,6 +140,43 @@ describe("separationGate", () => {
             // 共振峰走 mel 阶段，不依赖 HNSEP 分离。
             expect(isEffectParamGated("formant_shift_cents", false, true)).toBe(false);
             expect(isEffectParamGated("formant_shift_cents", true, false)).toBe(true);
+        });
+    });
+
+    describe("firstGatedParamId（分离开关渲染在被门禁组的组首）", () => {
+        it("按工具栏顺序取最左的被门禁参数", () => {
+            // nsf-hifigan 的实际顺序：音高、共振峰、气声、张力、音量、声像。
+            // 开关应落在「气声」之前 —— 即这一组的组首，而不是算法下拉之前。
+            const ordered = [
+                "formant_shift_cents",
+                "breath_gain",
+                "hifigan_tension",
+                "volume",
+                "dyn",
+                "pan",
+            ];
+            expect(firstGatedParamId(ordered)).toBe("breath_gain");
+        });
+
+        it("组内顺序变化时跟随最左者（而非写死 breath_gain）", () => {
+            expect(firstGatedParamId(["hifigan_tension", "breath_gain"])).toBe("hifigan_tension");
+        });
+
+        it("组内只剩一个参数时取它", () => {
+            expect(firstGatedParamId(["formant_shift_cents", "hifigan_tension"])).toBe(
+                "hifigan_tension",
+            );
+        });
+
+        it("没有可门禁参数时返回 null（world / vslib 下开关不渲染）", () => {
+            expect(firstGatedParamId(["formant_shift_cents", "volume", "dyn", "pan"])).toBeNull();
+            expect(firstGatedParamId([])).toBeNull();
+        });
+
+        it("只认被门禁的参数，混音级参数不参与", () => {
+            // 音量 / 声像 / 动态永远排在右侧固定序列里，不能被当成组首。
+            expect(firstGatedParamId(["volume", "dyn", "pan"])).toBeNull();
+            expect(firstGatedParamId(["volume", "breath_gain"])).toBe("breath_gain");
         });
     });
 });

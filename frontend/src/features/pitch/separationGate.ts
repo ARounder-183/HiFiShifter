@@ -147,3 +147,25 @@ export function isEffectParamGated(
         isGatedBySeparation(paramId, separationEnabled) || isGatedByCompose(paramId, composeEnabled)
     );
 }
+
+/**
+ * 被分离门禁的参数组中**排在最左**的参数 id —— 分离开关应渲染在它之前。
+ *
+ * # 为什么需要它
+ * 开关是「气声 + 张力」两个参数**共同**的前提，因此在工具栏上应位于这一组的
+ * **组首（左端）**：既不是挂在某一个参数上（会让人误以为只属于气声），
+ * 也不是插到最右端的算法下拉之前 —— 后者会让切换算法（开关随描述符消失/出现）
+ * 把音量 / 声像 / 算法整段推移，破坏「音量 → 声像 → 算法」的右侧固定序列。
+ *
+ * 位置由**门禁列表 + 当前排序**推导，而非写死某个 id：将来新增一个排序更靠前的
+ * 被门禁参数时，开关会自动前移，不会留在原处与新组首脱节。
+ *
+ * @param orderedParamIds 已按工具栏顺序排好的参数 id（`orderedProcessorParams`）
+ * @returns 组首参数 id；该组为空时返回 `null`
+ */
+export function firstGatedParamId(orderedParamIds: readonly string[]): string | null {
+    for (const id of orderedParamIds) {
+        if (SEPARATION_GATED_PARAMS.includes(id)) return id;
+    }
+    return null;
+}
