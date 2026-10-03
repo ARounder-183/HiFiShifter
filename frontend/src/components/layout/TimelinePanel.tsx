@@ -6421,6 +6421,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                   // 有选区时看选区，**无选区**时看播放头处有没有
                                   // 可分割的 Clip —— 否则这条菜单项会在"能切但
                                   // 没选东西"时被误判为不可用。
+                                  //
+                                  // 这里按**未吸附**的播放头判断（与改动前的谓词
+                                  // 同口径）：razor 吸附只在执行时发生，把整条吸附
+                                  // 管线搬进渲染只为消除"播放头偏离网格半格且跨过
+                                  // Clip 边缘"这一种罕见情形的可用性误差，不划算。
                                   canSplit={
                                       resolveSplitTargetsAtSec({
                                           clips: sessionRef.current.clips,

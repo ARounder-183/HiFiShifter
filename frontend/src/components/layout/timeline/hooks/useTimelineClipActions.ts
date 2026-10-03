@@ -45,7 +45,7 @@ import { computeAutoCrossfadeFromPayload } from "./autoCrossfade";
 import { useTimelineSelectionRect } from "../";
 import { getBulkEditableClipIds } from "./bulkClipEdit";
 import { getGroupClipIds } from "./useGroupExpansion";
-import { isClipSplittableAtSec, resolveSplitTargetsAtSec } from "../splitTargets";
+import { isClipSplittableAtSec, resolveSplitTargetsWithSnap } from "../splitTargets";
 import { buildBulkClipStateUpdates } from "./bulkClipRemotePayloads";
 import { computeClipNormalizationGain } from "../../../../features/session/clipNormalization";
 import type { TimelineViewportAccess } from "./timelineViewportAccess";
@@ -552,8 +552,15 @@ export function useTimelineClipActions(
     );
 
     // ── splitClipIdsAtPlayhead ────────────────────────────────
-    const splitClipIdsAtPlayhead = React.useCallback(
-        (clipIds: string[]) => {
+
+    /**
+     * 本次分割在时间线上的落点（秒）：播放头位置，按需应用 razor 吸附。
+     *
+     * `selectedClipIds` 参与吸附候选的过滤（`snapTimelinePosition` 的入参），
+     * 因此由调用方给出"这次要切哪些 Clip"。
+     */
+    const resolveSplitSec = React.useCallback(
+        (selectedClipIds: readonly string[]) => {
             const session = sessionRef.current;
             let splitSec = Math.max(0, Number(session.playheadSec ?? 0) || 0);
             if (session.timelineSnap.enabled && session.timelineSnap.snapRazorEdits) {
@@ -567,7 +574,7 @@ export function useTimelineClipActions(
                         pxPerSec: Math.max(1e-9, pxPerSec),
                         clips: session.clips,
                         tracks: session.tracks,
-                        selectedClipIds: clipIds,
+                        selectedClipIds,
                         playheadSec: splitSec,
                         object: "cursor",
                         anchorTrackId: session.selectedTrackId,
@@ -576,6 +583,14 @@ export function useTimelineClipActions(
                 );
                 splitSec = snapped.sec;
             }
+            return splitSec;
+        },
+        [pxPerSec, sessionRef],
+    );
+
+    const splitClipIdsAtPlayhead = React.useCallback(
+        (clipIds: string[], splitSecOverride?: number) => {
+            const splitSec = splitSecOverride ?? resolveSplitSec(clipIds);
 
             // Expand to include all group members of any input clip
             const expandedIds = new Set(clipIds);
@@ -602,36 +617,34 @@ export function useTimelineClipActions(
             }
             return eligibleIds;
         },
-        [dispatch, pxPerSec, ignoreGrouping, disabledGroupIds, sessionRef],
+        [dispatch, resolveSplitSec, ignoreGrouping, disabledGroupIds, sessionRef],
     );
 
     /**
      * 「在播放头处分割」。
      *
-     * 操作数由 `resolveSplitTargetsAtSec` 统一解析：有选区时与既有行为
-     * 完全一致；**无选区**时分割播放头处的所有可分割 Clip —— 此前这里是
-     * 一个静默 no-op，用户按 `S` 或点菜单都没有任何反馈。
+     * 操作数由 `resolveSplitTargetsWithSnap` 统一解析：有选区时与既有行为完全
+     * 一致；**无选区**时分割播放头处的所有可分割 Clip —— 此前这里是一个静默
+     * no-op，用户按 `S` 或点菜单都没有任何反馈。
      *
-     * 注意这里用的是**未吸附**的播放头位置：吸附发生在 `splitClipIdsAtPlayhead`
-     * 内部。目标解析与最终切割位置因此可能略有出入（吸附后某段不再可切），
-     * 但那由 `splitClipIdsAtPlayhead` 的 `eligibleIds` 兜底 —— 它本来就是
-     * "给定候选，挑出真正能切的"这一形状，过滤是幂等的。
+     * 两趟解析（先取吸附上下文、再按落点重取操作数）的原因见该函数的注释。
      */
     const splitSelectedAtPlayhead = React.useCallback(() => {
         const session = sessionRef.current;
-        const { ids } = resolveSplitTargetsAtSec({
+        const { ids, splitSec } = resolveSplitTargetsWithSnap({
             clips: session.clips,
-            splitSec: Math.max(0, Number(session.playheadSec ?? 0) || 0),
+            playheadSec: session.playheadSec,
             selectedIds:
                 multiSelectedClipIdsRef.current.length > 0
                     ? multiSelectedClipIdsRef.current
                     : session.selectedClipId
                       ? [session.selectedClipId]
                       : [],
+            snap: resolveSplitSec,
         });
         if (ids.length === 0) return;
-        splitClipIdsAtPlayhead(ids);
-    }, [splitClipIdsAtPlayhead, sessionRef]);
+        splitClipIdsAtPlayhead(ids, splitSec);
+    }, [resolveSplitSec, splitClipIdsAtPlayhead, sessionRef]);
 
     // ── recordLastClickPosition ──────────────────────────────
     const recordLastClickPosition = React.useCallback(

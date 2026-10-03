@@ -53,9 +53,7 @@ export function resolveSplitTargetsAtSec(args: {
     splitSec: number;
     selectedIds: readonly string[];
 }): SplitTargets {
-    const liveSelected = args.selectedIds.filter((id) =>
-        args.clips.some((clip) => clip.id === id),
-    );
+    const liveSelected = args.selectedIds.filter((id) => args.clips.some((clip) => clip.id === id));
     if (liveSelected.length > 0) {
         return { ids: [...liveSelected], source: "selection" };
     }
@@ -65,4 +63,44 @@ export function resolveSplitTargetsAtSec(args: {
             .map((clip) => clip.id),
         source: "playhead",
     };
+}
+
+/**
+ * 解析分割操作数，并给出**真正落点**（含 razor 吸附）。
+ *
+ * 【为什么要两趟】吸附会移动落点，而吸附本身又需要知道"这次要切哪些 Clip"
+ * （`snapTimelinePosition` 的 `selectedClipIds` 参与候选过滤）。于是：
+ *   1. 用**未吸附**位置的候选做吸附上下文 → 得到真正落点；
+ *   2. 按落点**重新解析**操作数 —— 否则网格把播放头挪过半格、落进一个原本
+ *      不含播放头的 Clip 时，会出现"剃刀线画在这个 Clip 上却没有切它"。
+ *
+ * 有选区时第 2 步原样返回选区，因此这条路径与"吸附只在执行时发生"的既有
+ * 行为完全一致。
+ *
+ * @param args.snap 吸附器：入参是第一趟的候选 id（作为吸附上下文），返回落点秒。
+ *   注入而非直接调用 `snapTimelinePosition`，是为了让本函数保持纯函数可测。
+ * @returns `ids` 为最终要分割的 Clip（可能为空）；`splitSec` 为落点。
+ */
+export function resolveSplitTargetsWithSnap(args: {
+    clips: ReadonlyArray<{ id: string; startSec: number; lengthSec: number }>;
+    playheadSec: number;
+    selectedIds: readonly string[];
+    snap: (contextIds: readonly string[]) => number;
+}): SplitTargets & { splitSec: number } {
+    const rawSplitSec = Math.max(0, Number(args.playheadSec ?? 0) || 0);
+    const firstPass = resolveSplitTargetsAtSec({
+        clips: args.clips,
+        splitSec: rawSplitSec,
+        selectedIds: args.selectedIds,
+    });
+    if (firstPass.ids.length === 0) {
+        return { ids: [], splitSec: rawSplitSec, source: firstPass.source };
+    }
+    const splitSec = args.snap(firstPass.ids);
+    const secondPass = resolveSplitTargetsAtSec({
+        clips: args.clips,
+        splitSec,
+        selectedIds: args.selectedIds,
+    });
+    return { ids: secondPass.ids, splitSec, source: secondPass.source };
 }
