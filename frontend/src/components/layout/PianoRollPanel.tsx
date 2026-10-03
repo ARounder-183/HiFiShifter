@@ -1408,6 +1408,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 );
                 return;
             }
+            if (detail.type === "cancel") {
+                // 拖拽被打断 / 取消：清掉落点高亮，不触发任何导入。
+                setParamEditorMidiDragOver(false);
+                return;
+            }
             if (detail.type === "drop") {
                 const midiPath = firstMidiPath(detail.filePaths, detail.filePath);
                 setParamEditorMidiDragOver(false);

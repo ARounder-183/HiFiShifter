@@ -1446,6 +1446,7 @@ export const jaJP = {
     fb_folders_first: "フォルダを先頭に",
     fb_show_hidden: "隠しファイルを表示",
     fb_show_path_hint: "保存先フォルダを表示",
+    fb_preview_on_click: "クリック時に試聴",
     fb_preview_on_navigate: "移動時に試聴",
     fb_status_bar: "ステータス行を表示",
     fb_density_compact: "コンパクト",

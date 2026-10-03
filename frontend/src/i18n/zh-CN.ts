@@ -1393,6 +1393,7 @@ export const zhCN = {
     fb_folders_first: "文件夹优先",
     fb_show_hidden: "显示隐藏文件",
     fb_show_path_hint: "显示所在文件夹",
+    fb_preview_on_click: "点击时试听",
     fb_preview_on_navigate: "移动选择时试听",
     fb_status_bar: "显示状态行",
     fb_density_compact: "紧凑",

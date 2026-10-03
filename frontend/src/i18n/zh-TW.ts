@@ -1395,6 +1395,7 @@ export const zhTW = {
     fb_folders_first: "資料夾優先",
     fb_show_hidden: "顯示隱藏檔案",
     fb_show_path_hint: "顯示所在資料夾",
+    fb_preview_on_click: "點擊時試聽",
     fb_preview_on_navigate: "移動選取時試聽",
     fb_status_bar: "顯示狀態列",
     fb_density_compact: "緊湊",

@@ -1572,6 +1572,7 @@ export const enUS = {
     fb_folders_first: "Folders First",
     fb_show_hidden: "Show Hidden Files",
     fb_show_path_hint: "Show Containing Folder",
+    fb_preview_on_click: "Preview on Click",
     fb_preview_on_navigate: "Preview While Navigating",
     fb_status_bar: "Show Status Bar",
     fb_density_compact: "Compact",

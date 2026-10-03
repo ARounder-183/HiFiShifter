@@ -326,6 +326,9 @@ pub struct FileBrowserViewSettings {
     /// 仅显示可导入的媒体文件（默认否）。
     #[serde(default = "default_false_value")]
     pub media_only: bool,
+    /// 点击（左键单击 / 键盘回车）媒体文件时试听（默认是）。
+    #[serde(default = "default_true_value")]
+    pub preview_on_click: bool,
     /// 键盘光标移动时自动试听（默认否）。
     #[serde(default = "default_false_value")]
     pub preview_on_navigate: bool,
@@ -395,6 +398,7 @@ impl Default for FileBrowserViewSettings {
             details_column: default_file_browser_details_column(),
             show_path_hint: false,
             media_only: false,
+            preview_on_click: true,
             preview_on_navigate: false,
             status_bar_visible: true,
         }

@@ -1521,6 +1521,7 @@ export const koKR = {
     fb_folders_first: "폴더 먼저",
     fb_show_hidden: "숨김 파일 표시",
     fb_show_path_hint: "포함된 폴더 표시",
+    fb_preview_on_click: "클릭할 때 미리 듣기",
     fb_preview_on_navigate: "이동할 때 미리 듣기",
     fb_status_bar: "상태 표시줄 표시",
     fb_density_compact: "좁게",

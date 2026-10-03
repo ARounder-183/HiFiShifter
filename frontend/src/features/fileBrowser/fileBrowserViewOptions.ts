@@ -49,6 +49,17 @@ export interface FileBrowserViewOptions {
     /** 仅显示可导入的媒体文件（音频/视频 + MIDI）。 */
     mediaOnly: boolean;
     /**
+     * 点击（左键单击 / 键盘回车）音频文件时试听。
+     *
+     * 【为什么默认开启】它是文件浏览器的招牌动作 —— 挑素材时"点一下听一下"是
+     * 最自然的路径，关掉应当是"我明确不想要"，而不是默认。
+     *
+     * 【为什么与 `previewOnNavigate` 分成两个字段】两者回答的是不同的问题：
+     * 这是"点它会发生什么"，那是"光标移到它会发生什么"。默认值也正交
+     * （点击默认开、移动默认关）—— 合成一个枚举就无法表达"点要响、移不响"。
+     */
+    previewOnClick: boolean;
+    /**
      * 键盘光标移动时自动试听。
      *
      * 【为什么默认关闭】浏览素材时每一次方向键都出声是打扰；但挑 take 时它是最
@@ -81,6 +92,7 @@ export const DEFAULT_FILE_BROWSER_VIEW_OPTIONS: FileBrowserViewOptions = {
     detailsColumn: "size",
     showPathHint: false,
     mediaOnly: false,
+    previewOnClick: true,
     previewOnNavigate: false,
     statusBarVisible: true,
 };
@@ -122,6 +134,7 @@ export function normalizeFileBrowserViewOptions(input: unknown): FileBrowserView
         detailsColumn: asMember(raw.detailsColumn, DETAILS_COLUMNS, d.detailsColumn),
         showPathHint: asBool(raw.showPathHint, d.showPathHint),
         mediaOnly: asBool(raw.mediaOnly, d.mediaOnly),
+        previewOnClick: asBool(raw.previewOnClick, d.previewOnClick),
         previewOnNavigate: asBool(raw.previewOnNavigate, d.previewOnNavigate),
         statusBarVisible: asBool(raw.statusBarVisible, d.statusBarVisible),
     };

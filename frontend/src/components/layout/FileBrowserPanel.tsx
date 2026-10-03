@@ -8,6 +8,7 @@ import {
     Cross2Icon,
     GearIcon,
     MagnifyingGlassIcon,
+    PlayIcon,
     ReloadIcon,
     SpeakerLoudIcon,
     StarIcon,
@@ -52,6 +53,17 @@ import {
     emitOpenProjectPath,
 } from "../../features/session/projectOpenEvents";
 import { emitFolderImportRequest } from "../../features/fileBrowser/folderImportEvents";
+import { setFileBrowserDragActive } from "../../features/fileBrowser/fileBrowserDragStore";
+import {
+    FILE_DRAG_THRESHOLD_PX,
+    buildFileDragFinishDetail,
+    dragButtonOf,
+    interruptCandidateMoved,
+    interruptCandidateOnDown,
+    isInterruptRelease,
+    type DragInterruptCandidate,
+    type FileDragSource,
+} from "../../features/fileBrowser/fileBrowserDragGesture";
 import { rootIndexAtDrop } from "../../features/session/trackUtils";
 import {
     importAudioAtPosition,
@@ -106,6 +118,13 @@ type EditingState =
     | { kind: "rename"; path: string; initial: string }
     | { kind: "newFolder" }
     | null;
+
+/** 一次进行中的文件拖拽（自定义 pointer 事件，替代 HTML5 drag API）。 */
+interface FileDragState extends FileDragSource {
+    startX: number;
+    startY: number;
+    active: boolean; // 超过阈值后才真正激活拖拽
+}
 
 export const FileBrowserPanel: React.FC = () => {
     const dispatch = useAppDispatch();
@@ -609,6 +628,19 @@ export const FileBrowserPanel: React.FC = () => {
         [view.previewOnNavigate, previewToggle],
     );
 
+    /**
+     * 本次"激活一个音频文件"要不要出声。
+     *
+     * 【为什么收口到一处】点击试听此前散在 handleRowClick 与 activateEntry 两处，
+     * 各自判 `isAudioFile`。开关若只加在其中一处，另一处仍会出声 —— 用户看到的
+     * 是"我关掉了，但它有时响"。右键菜单的「试听」是**显式命令**（用户点名要听），
+     * 不受这个开关管辖，因此 openEntry 不经过这里。
+     */
+    const shouldPreviewOnActivate = useCallback(
+        (entry: FileEntry) => view.previewOnClick && isAudioFile(entry),
+        [view.previewOnClick],
+    );
+
     /** 选区落在闭区间 `[a, b]` 内的全部路径。 */
     const selectedPathsInRange = useCallback(
         (a: number, b: number) =>
@@ -659,9 +691,9 @@ export const FileBrowserPanel: React.FC = () => {
             // 分支，重复点击会从头重放并与在播的旧音源叠加。）
             setSelectedPaths(new Set([entry.path]));
             selectionAnchorRef.current = index;
-            if (isAudioFile(entry)) previewToggle.toggle(entry.path);
+            if (shouldPreviewOnActivate(entry)) previewToggle.toggle(entry.path);
         },
-        [displayEntries, previewToggle, selectedPathsInRange],
+        [displayEntries, previewToggle, selectedPathsInRange, shouldPreviewOnActivate],
     );
 
     /**
@@ -672,11 +704,11 @@ export const FileBrowserPanel: React.FC = () => {
         (entry: FileEntry) => {
             if (entry.isDir) {
                 handleEnterDir(entry.path);
-            } else if (isAudioFile(entry)) {
+            } else if (shouldPreviewOnActivate(entry)) {
                 previewToggle.toggle(entry.path);
             }
         },
-        [handleEnterDir, previewToggle],
+        [handleEnterDir, previewToggle, shouldPreviewOnActivate],
     );
 
     /**
@@ -1125,6 +1157,8 @@ export const FileBrowserPanel: React.FC = () => {
                 if (entry.isDir) {
                     handleEnterDir(entry.path);
                 } else if (isAudioFile(entry)) {
+                    // 菜单里的「试听」是**显式命令**：用户点名要听，就不受
+                    // `previewOnClick`（管的是"点一下行会不会顺手出声"）管辖。
                     previewToggle.toggle(entry.path);
                 } else if (isMidiFile(entry)) {
                     emitImportMidiRequest({
@@ -1303,24 +1337,14 @@ export const FileBrowserPanel: React.FC = () => {
     );
 
     // ── 拖拽（自定义 pointer 事件，替代 HTML5 drag API）────────────────────
-    const [dragState, setDragState] = useState<{
-        filePath: string;
-        fileName: string;
-        allFilePaths: string[];
-        /** 其中是目录的那些路径（拖入时间轴 = 目录导入）。 */
-        dirPaths: string[];
-        startX: number;
-        startY: number;
-        active: boolean; // 超过阈值后才真正激活拖拽
-        isRightDrag: boolean; // 右键拖拽标记
-    } | null>(null);
+    const [dragState, setDragState] = useState<FileDragState | null>(null);
     const dragStateRef = useRef(dragState);
     dragStateRef.current = dragState;
 
     // ghost 元素跟随鼠标
     const ghostRef = useRef<HTMLDivElement | null>(null);
 
-    const DRAG_THRESHOLD = 5; // 像素阈值，防止误触
+    const DRAG_THRESHOLD = FILE_DRAG_THRESHOLD_PX; // 越过它才算拖拽（与打断的"点击"判定同一阈值）
 
     const handlePointerDownForDrag = useCallback(
         (e: React.PointerEvent<HTMLDivElement>, entry: FileEntry) => {
@@ -1352,9 +1376,69 @@ export const FileBrowserPanel: React.FC = () => {
     useEffect(() => {
         if (!dragState) return;
 
+        /**
+         * 反向键的一次**点击**（按下后没越过阈值就松开）= 放弃本次拖拽。
+         *
+         * 【为什么判据是"点击"而不是"按下"】右键拖拽中按下左键（不松开）是
+         * "再加一个键"，不是"我后悔了"。判定见 `fileBrowserDragGesture`。
+         */
+        let interrupt: DragInterruptCandidate | null = null;
+
+        /**
+         * 结束一次拖拽：派发 `drop`（在此处放下）或 `cancel`（放弃），并清干净本地状态。
+         */
+        function finishDrag(
+            ds: FileDragState,
+            type: "drop" | "cancel",
+            clientX: number,
+            clientY: number,
+        ) {
+            window.dispatchEvent(
+                new CustomEvent("hifi-file-drag", {
+                    detail: buildFileDragFinishDetail(ds, type, clientX, clientY),
+                }),
+            );
+            interrupt = null;
+            setFileBrowserDragActive(false);
+            setDragState(null);
+        }
+
+        /**
+         * 吞掉紧随打断（右键点击）之后的那一次原生 `contextmenu`。
+         *
+         * 左键拖拽中按右键打断时，平台随后会派发 contextmenu；不吞掉的话，
+         * "打断"就换来了一个菜单。命中一次即自卸（与 `useTimelineDragDrop`
+         * 的 `suppressCtx` 同款）。
+         */
+        function suppressNextContextMenu() {
+            const swallow = (ev: Event) => {
+                ev.preventDefault();
+                ev.stopImmediatePropagation();
+                window.removeEventListener("contextmenu", swallow, true);
+            };
+            window.addEventListener("contextmenu", swallow, true);
+        }
+
+        function onInterruptPointerDown(e: PointerEvent) {
+            const ds = dragStateRef.current;
+            if (!ds) return;
+            interrupt = interruptCandidateOnDown({
+                active: ds.active,
+                isRightDrag: ds.isRightDrag,
+                button: e.button,
+                x: e.clientX,
+                y: e.clientY,
+            });
+        }
+
         function onPointerMove(e: PointerEvent) {
             const ds = dragStateRef.current;
             if (!ds) return;
+
+            // 反向键按下后指针又移动超过阈值 → 那不是一次点击，取消打断意图。
+            if (interrupt && interruptCandidateMoved(interrupt, e.clientX, e.clientY)) {
+                interrupt = null;
+            }
 
             if (!ds.active) {
                 const dx = e.clientX - ds.startX;
@@ -1363,6 +1447,8 @@ export const FileBrowserPanel: React.FC = () => {
                 // 激活拖拽
                 dragStateRef.current = { ...ds, active: true };
                 setDragState(dragStateRef.current);
+                // 越过阈值：指针已离开源行，浮标应当消失（见 fileBrowserDragStore）。
+                setFileBrowserDragActive(true);
                 // 发送拖拽开始事件
                 window.dispatchEvent(
                     new CustomEvent("hifi-file-drag", {
@@ -1435,23 +1521,20 @@ export const FileBrowserPanel: React.FC = () => {
 
         function onPointerUp(e: PointerEvent) {
             const ds = dragStateRef.current;
-            if (ds?.active) {
-                // 发送拖拽结束（drop）事件
-                window.dispatchEvent(
-                    new CustomEvent("hifi-file-drag", {
-                        detail: {
-                            type: "drop",
-                            filePath: ds.filePath,
-                            fileName: ds.fileName,
-                            filePaths: ds.allFilePaths,
-                            dirPaths: ds.dirPaths,
-                            clientX: e.clientX,
-                            clientY: e.clientY,
-                            isRightDrag: ds.isRightDrag,
-                        },
-                    }),
-                );
+            if (!ds) return;
+            // 反向键的一次点击 = 打断：放弃本次拖拽，不做 drop。
+            if (ds.active && isInterruptRelease(interrupt, e.button)) {
+                if (e.button === 2) suppressNextContextMenu();
+                finishDrag(ds, "cancel", e.clientX, e.clientY);
+                return;
             }
+            // 反向键的松开（未构成点击）不结束拖拽：发起键还按着。
+            if (e.button !== dragButtonOf(ds.isRightDrag)) return;
+            if (ds.active) {
+                finishDrag(ds, "drop", e.clientX, e.clientY);
+                return;
+            }
+            // 未越过阈值：这只是一次点击（选中 / 试听），收掉待定的拖拽态。
             setDragState(null);
         }
 
@@ -1461,20 +1544,8 @@ export const FileBrowserPanel: React.FC = () => {
         function onPointerCancel() {
             const ds = dragStateRef.current;
             if (ds?.active) {
-                window.dispatchEvent(
-                    new CustomEvent("hifi-file-drag", {
-                        detail: {
-                            type: "drop",
-                            filePath: ds.filePath,
-                            fileName: ds.fileName,
-                            filePaths: ds.allFilePaths,
-                            clientX: ds.startX,
-                            clientY: ds.startY,
-                            isRightDrag: ds.isRightDrag,
-                            canceled: true,
-                        },
-                    }),
-                );
+                finishDrag(ds, "cancel", ds.startX, ds.startY);
+                return;
             }
             setDragState(null);
         }
@@ -1486,12 +1557,14 @@ export const FileBrowserPanel: React.FC = () => {
             }
         }
 
+        window.addEventListener("pointerdown", onInterruptPointerDown, true);
         window.addEventListener("pointermove", onPointerMove);
         window.addEventListener("pointerup", onPointerUp);
         window.addEventListener("pointercancel", onPointerCancel);
         window.addEventListener("blur", onPointerCancel);
         window.addEventListener("contextmenu", onContextMenu, true);
         return () => {
+            window.removeEventListener("pointerdown", onInterruptPointerDown, true);
             window.removeEventListener("pointermove", onPointerMove);
             window.removeEventListener("pointerup", onPointerUp);
             window.removeEventListener("pointercancel", onPointerCancel);
@@ -1977,7 +2050,8 @@ export const FileBrowserPanel: React.FC = () => {
                 </div>
             )}
 
-            {/* 底部音量滑块 */}
+            {/* 底部音量滑块 + 点击试听开关 —— 两者回答同一个问题（"点一下会发生什么"），
+                所以同一行。开关放行末：滑块是 flex-1，放它前面会压缩滑块。 */}
             <Flex align="center" gap="2" className="px-2 py-1.5 border-t border-qt-border shrink-0">
                 <SpeakerLoudIcon width="14" height="14" className="text-qt-text-muted shrink-0" />
                 <AppSlider
@@ -1991,6 +2065,19 @@ export const FileBrowserPanel: React.FC = () => {
                     }}
                 />
                 <AppSliderReadout>{Math.round(fb.previewVolume * 100)}%</AppSliderReadout>
+                <AppIconButton
+                    active={view.previewOnClick}
+                    // 表达"这个功能开着"，必须显式声明 accent（默认 neutral 是灰的）。
+                    emphasis="accent"
+                    tooltip={tf("fb_preview_on_click")}
+                    size="sm"
+                    onClick={() => {
+                        dispatch(setFileBrowserView({ previewOnClick: !view.previewOnClick }));
+                        void dispatch(persistUiSettings());
+                    }}
+                    style={{ width: "var(--qt-ctl-sm)", height: "var(--qt-ctl-sm)", flexShrink: 0 }}
+                    icon={<PlayIcon />}
+                />
             </Flex>
 
             {/* 拖拽 ghost 元素 */}

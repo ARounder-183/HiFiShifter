@@ -515,6 +515,15 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                 return;
             }
 
+            // 用户中途放弃了这次拖拽（反向键点击打断 / 指针取消）：只做清理，
+            // 不执行任何导入。与 `drop` 各走一条直路，不靠 `canceled` 标志在
+            // 同一个分支里分叉。
+            if (detail.type === "cancel") {
+                setDropPreview(null);
+                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                return;
+            }
+
             if (detail.type === "drop") {
                 setDropPreview(null);
                 if (isOverTimeline) {

@@ -54,6 +54,34 @@ describe("normalizeFileBrowserViewOptions", () => {
             "none",
         );
     });
+
+    it("点击试听默认开启（老配置缺这一项时升级后应当出声）", () => {
+        expect(DEFAULT_FILE_BROWSER_VIEW_OPTIONS.previewOnClick).toBe(true);
+        // 缺键的旧配置：回落到默认（开），而不是被当成 false。
+        expect(normalizeFileBrowserViewOptions({ mediaOnly: true }).previewOnClick).toBe(true);
+    });
+
+    it("点击试听：显式关闭被保留，非法值回落默认", () => {
+        expect(normalizeFileBrowserViewOptions({ previewOnClick: false }).previewOnClick).toBe(
+            false,
+        );
+        expect(normalizeFileBrowserViewOptions({ previewOnClick: true }).previewOnClick).toBe(true);
+        // 类型不对（字符串 / 数字）一律回落，而不是被真值化。
+        expect(normalizeFileBrowserViewOptions({ previewOnClick: "false" }).previewOnClick).toBe(
+            true,
+        );
+        expect(normalizeFileBrowserViewOptions({ previewOnClick: 0 }).previewOnClick).toBe(true);
+    });
+
+    it("点击试听与移动试听正交（各自的默认互不影响）", () => {
+        expect(DEFAULT_FILE_BROWSER_VIEW_OPTIONS.previewOnNavigate).toBe(false);
+        const options = normalizeFileBrowserViewOptions({
+            previewOnClick: false,
+            previewOnNavigate: true,
+        });
+        expect(options.previewOnClick).toBe(false);
+        expect(options.previewOnNavigate).toBe(true);
+    });
 });
 
 describe("排序方向的自然默认", () => {

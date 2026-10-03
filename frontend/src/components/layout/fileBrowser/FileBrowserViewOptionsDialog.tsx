@@ -128,6 +128,12 @@ export function FileBrowserViewOptionsDialog({ open, onOpenChange }: Props) {
                 />
                 <AppSwitchRow
                     control="checkbox"
+                    label={t("fb_preview_on_click")}
+                    checked={view.previewOnClick}
+                    onCheckedChange={(checked) => update({ previewOnClick: checked })}
+                />
+                <AppSwitchRow
+                    control="checkbox"
                     label={t("fb_preview_on_navigate")}
                     checked={view.previewOnNavigate}
                     onCheckedChange={(checked) => update({ previewOnNavigate: checked })}
