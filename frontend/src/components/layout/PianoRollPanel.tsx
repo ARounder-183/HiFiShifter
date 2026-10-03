@@ -7379,7 +7379,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             {drawToolMenuOpen && (
                                 <Box
                                     ref={drawToolMenuRef}
-                                    data-hs-context-menu
+                                    data-hs-context-menu="1"
                                     // 锚定在触发按钮下方的下拉：与右键菜单共用同一个
                                     // 表面与条目样式，只有定位方式不同。
                                     className="hs-menu hs-menu--anchored"
@@ -7470,7 +7470,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 />
                                 {vibratoPresetMenuOpen && (
                                     <Box
-                                        data-hs-context-menu
+                                        data-hs-context-menu="1"
                                         // 永远向下展开：参数编辑器是停靠窗口，上方没有
                                         // 展示区，翻上去只会盖住自己的工具栏。
                                         // `--no-scroll`：滚动由下面的 `ScrollArea`
@@ -7706,7 +7706,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             {pitchSnapMenuOpen && (
                                 <Box
                                     ref={pitchSnapMenuRef}
-                                    data-hs-context-menu
+                                    data-hs-context-menu="1"
                                     className="hs-menu hs-menu--anchored"
                                 >
                                     <button

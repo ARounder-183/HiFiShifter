@@ -27,6 +27,12 @@
  * 「上下文菜单样式模型」块决定 —— 手写菜单（需要内联滑杆 / 输入框 / 双列的那些）
  * 挂同一套类，因此两边不可能再漂移。这也是 `ITEM_BASE` 常量被删掉的原因：
  * 它把取值复制到了 TypeScript 里，CSS 那份改不到它。
+ *
+ * 【两个 data 标记的分工】`data-hs-context-menu` 有**两种**写法，含义不同：
+ *   - `="1"`：这是一个**已打开**的菜单表面。时间轴的关闭逻辑据此判断"点在菜单
+ *     里面"，别处不得用它当"菜单开着"的判据（常驻元素带这个值会让判据永远为真）。
+ *   - 无值：常驻的**锚点**容器（工具栏按钮的 `position: relative` 外壳），只表示
+ *     "这里会长出菜单"。`AppTooltip` 的注释记录了为什么不能把两者混为一谈。
  */
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";

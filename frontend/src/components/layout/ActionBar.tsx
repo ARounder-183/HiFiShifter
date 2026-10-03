@@ -662,7 +662,7 @@ export function ActionBar() {
                     {metronomeMenuPos && (
                         <div
                             ref={metronomeMenuRef}
-                            data-hs-context-menu
+                            data-hs-context-menu="1"
                             className="hs-menu hs-menu--no-scroll"
                             style={{ left: metronomeMenuPos.x, top: metronomeMenuPos.y }}
                         >
