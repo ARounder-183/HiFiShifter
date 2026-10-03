@@ -168,6 +168,45 @@ DSP 只占约 4.5%，成本几乎全在网络 —— 所以"把 STFT 移出图�
 > **待办**：若要默认启用 GPU，需要一个按输入长度选择的策略（例如 >40 s 走 CPU），
 > 或先查清 CoreML 长输入退化的根因（可能与 CoreML 对超长序列的分块/内存策略有关）。
 
+#### DirectML（Windows）注意事项
+
+Windows 侧的 GPU 路径是 **DirectML**（`or` 平台条件编译，无法在 macOS 上运行验证）。
+换模型时审查出两处**平台相关**问题，均已修：
+
+1. **烟测探针张量膨胀 2000 倍。** `SMOKE_TEST_FRAMES = 4096` 原本是为声码器的
+   1-D `time` 轴选的，但烟测会把**每个**动态维都替换成该值。HNSEP 的 mask-only
+   输入是 `[batch, 2, 1025, n_frames]`，于是探针会变成 `[1, 2, 1025, 4096]`
+   = **32 MB**（旧波形域模型只要 16 KB）。已改为按角色取值
+   （`smoke_probe_frames`：Separator 用 32 帧 = 一个 segment；声码器/音高检测沿用
+   4096），并加了三条回归测试防止再次膨胀。
+   注意：HNSEP 默认走 CPU，而 **CPU 路径不做烟测**，所以这个膨胀只在用户显式
+   `HIFISHIFTER_HNSEP_ORT_EP=directml` 时才会发生 —— 属于"手动开 GPU 才踩到"的坑。
+
+2. **维度覆盖按名字匹配，对 HNSEP 是 no-op。** DirectML 构建器里：
+   ```rust
+   .with_dimension_override("batch", 1)                        // 按维度名
+   .with_dimension_override_by_denotation("time", 4096)        // 按 denotation
+   ```
+   实测三个模型的导出维度名：
+
+   | 模型 | 维度名 |
+   |---|---|
+   | NSF-HiFiGAN | `batch`, `time` |
+   | FCPE | `batch`, `time` |
+   | **HNSEP（mask-only）** | **`batch_size`, `n_frames`** |
+
+   对 HNSEP 两条覆盖都不匹配 —— 不报错，但也固定不住任何维度（DML 仍走通用
+   kernel，性能略差）。已把 `time` 覆盖**按角色门控**只用于声码器/音高检测：
+   这既如实反映"该优化不适用于 HNSEP"，也避免将来 HNSEP 维度若被改名成 `time`
+   时，把 4096 静默套到一个真实帧数与 32 整除约束都无关的 4-D 输入上。
+
+**Windows 上仍需实测确认的一点**：DirectML 的 **strict 模式**
+（`with_disable_cpu_fallback()`）要求**图里每个算子都被 DML 支持**，否则会话创建
+直接失败。HNSEP 图含 `LSTM`，这一算子在部分 DML 版本上支持情况不一 ——
+旧波形域模型同样含 LSTM，所以这不是本次引入的风险，但换模型后**应回归确认**
+`HIFISHIFTER_HNSEP_ORT_EP=directml` 能建会话；失败时既有逻辑会回退
+（strict 失败 → 非 strict 重试 → 仍失败则 CPU），不会卡住渲染。
+
 ## 5. 修复内容
 
 ### P0 — 让 GPU 真正可用

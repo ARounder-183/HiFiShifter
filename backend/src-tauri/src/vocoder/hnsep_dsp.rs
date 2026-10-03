@@ -319,7 +319,6 @@ mod tests {
     const N_FFT: usize = 2048;
     const HOP: usize = 512;
 
-
     /// 构造 `[1, 2, bins, frames]` 布局的**复数**掩码。
     ///
     /// 【为什么必须用这个辅助函数】布局是「实部整块 + 虚部整块」，
@@ -587,3 +586,4 @@ mod e2e_hnsep {
         }
     }
 }
+
