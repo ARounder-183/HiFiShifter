@@ -7475,6 +7475,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         // 展示区，翻上去只会盖住自己的工具栏。
                                         // `--no-scroll`：滚动由下面的 `ScrollArea`
                                         // 负责（页脚要钉住），壳不接管。
+                                        //
+                                        // 高度**不用** `--qt-menu-max-h`（60vh）：参数
+                                        // 编辑器是停靠面板，可能只有 200px 高，按视口取
+                                        // 上限会让菜单伸出面板之外。这里按锚点在面板内的
+                                        // 位置算（`resolveMenuMaxHeight`）。
                                         className="hs-menu hs-menu--anchored hs-menu--no-scroll flex flex-col"
                                         style={{ maxHeight: vibratoPresetMenuMaxHeight }}
                                     >
