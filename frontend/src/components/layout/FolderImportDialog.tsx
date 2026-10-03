@@ -51,7 +51,9 @@ export function FolderImportDialog({
 }: Props) {
     const { t, plural } = useI18n();
 
-    const folderCount = scan?.groups.length ?? 0;
+    // 文件夹数取自**计划**（已剔除空目录），而不是扫描结果的组数 —— 后者会把
+    // 不会建出轨道的空目录也算进去，汇总文案于是与实际导入结果不符。
+    const folderCount = plan.totalFolders;
     const fileCount = plan.totalFiles;
     const hasSubdirs = scan?.groups.some((group) => group.hasSubdirs) ?? false;
     const rejectedCount = scan?.rejected.length ?? 0;

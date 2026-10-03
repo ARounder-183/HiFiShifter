@@ -40,6 +40,13 @@ export interface FolderImportPlan {
     orderedFiles: string[];
     /** 展开出的媒体文件总数（含散文件，已去重）。 */
     totalFiles: number;
+    /**
+     * 保留下来的目录节点总数（含各级子目录）。
+     *
+     * 【为什么要单独给】对话框的汇总文案（"N 个文件夹 · M 个文件"）必须与真正会
+     * 建出来的轨道一致 —— 用扫描结果的组数会把它算多（空目录已被剔除）。
+     */
+    totalFolders: number;
 }
 
 /** 把路径拆成段（同时接受 `/` 与 `\`，并忽略尾随分隔符）。 */
@@ -70,6 +77,24 @@ function dirKey(path: string): string {
 function collectOrdered(node: FolderImportPlanNode, out: string[]): void {
     for (const child of node.children) collectOrdered(child, out);
     out.push(...node.files);
+}
+
+/**
+ * 递归丢弃"整棵子树都没有媒体文件"的节点；返回该节点是否保留。
+ *
+ * 【为什么】空目录不该被导入 —— 在"为文件夹创建轨道组"模式下，每个目录节点都会
+ * 变成一条轨道，空目录于是变成一条空轨道（用户明确要求：空文件夹不导入、不为它
+ * 建轨道）。一个目录只有在**自己或后代**含媒体文件时才有意义：自己没媒体但后代
+ * 有的目录必须保留（它是后代的父轨道）。
+ */
+function pruneMediaLessNodes(node: FolderImportPlanNode): boolean {
+    node.children = node.children.filter(pruneMediaLessNodes);
+    return node.files.length > 0 || node.children.length > 0;
+}
+
+/** 统计一棵树里的节点数（含各级子目录）。 */
+function countNodes(nodes: readonly FolderImportPlanNode[]): number {
+    return nodes.reduce((sum, node) => sum + 1 + countNodes(node.children), 0);
 }
 
 /**
@@ -110,8 +135,12 @@ export function buildFolderImportPlan(
         }
     }
 
+    // 剔除"整棵子树都没有媒体文件"的目录（空目录）：它们只会变成空轨道。
+    // 自己没媒体但后代有的目录会保留下来（它是后代的父轨道）。
+    const keptRoots = roots.filter(pruneMediaLessNodes);
+
     const orderedFiles: string[] = [];
-    for (const root of roots) collectOrdered(root, orderedFiles);
+    for (const root of keptRoots) collectOrdered(root, orderedFiles);
 
     // 全局去重（不同被拖入项可能展开出同一个文件），并接上散文件。
     const seen = new Set<string>();
@@ -131,10 +160,11 @@ export function buildFolderImportPlan(
     }
 
     return {
-        roots,
+        roots: keptRoots,
         looseFiles: dedupedLoose,
         orderedFiles: [...deduped, ...dedupedLoose],
         totalFiles: deduped.length + dedupedLoose.length,
+        totalFolders: countNodes(keptRoots),
     };
 }
 

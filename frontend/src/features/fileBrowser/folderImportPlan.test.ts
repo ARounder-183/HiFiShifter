@@ -142,10 +142,56 @@ describe("buildFolderImportPlan：目录树", () => {
             looseFiles: [],
             orderedFiles: [],
             totalFiles: 0,
+            totalFolders: 0,
         });
         const plan = buildFolderImportPlan([group("C:\\music\\Empty", [])]);
-        expect(plan.roots).toHaveLength(1);
+        expect(plan.roots).toHaveLength(0);
         expect(plan.totalFiles).toBe(0);
+        expect(plan.totalFolders).toBe(0);
+    });
+
+    test("空目录被剔除：不为它建轨道", () => {
+        const plan = buildFolderImportPlan([
+            group("C:\\music\\Takes", ["C:\\music\\Takes\\a.wav"], true),
+            group("C:\\music\\Takes\\Empty", []),
+        ]);
+        expect(plan.roots).toHaveLength(1);
+        expect(plan.roots[0].children).toHaveLength(0);
+        expect(plan.totalFolders).toBe(1);
+        expect(plan.orderedFiles).toEqual(["C:\\music\\Takes\\a.wav"]);
+    });
+
+    test("只含空子目录的目录同样被剔除（整棵子树都没有媒体）", () => {
+        const plan = buildFolderImportPlan([
+            group("C:\\music\\Takes", [], true),
+            group("C:\\music\\Takes\\Empty", [], true),
+            group("C:\\music\\Takes\\Empty\\Deeper", []),
+        ]);
+        expect(plan.roots).toHaveLength(0);
+        expect(plan.totalFolders).toBe(0);
+    });
+
+    test("自己没媒体但后代有的目录必须保留（它是后代的父轨道）", () => {
+        const plan = buildFolderImportPlan([
+            group("C:\\music\\Takes", [], true),
+            group("C:\\music\\Takes\\Sub", ["C:\\music\\Takes\\Sub\\b.wav"]),
+        ]);
+        expect(plan.roots).toHaveLength(1);
+        expect(plan.roots[0].name).toBe("Takes");
+        expect(plan.roots[0].files).toEqual([]);
+        expect(plan.roots[0].children.map((node) => node.name)).toEqual(["Sub"]);
+        expect(plan.totalFolders).toBe(2);
+    });
+
+    test("totalFolders 统计保留下来的全部节点（含各级子目录）", () => {
+        const plan = buildFolderImportPlan([
+            group("C:\\music\\Takes", ["C:\\music\\Takes\\a.wav"], true),
+            group("C:\\music\\Takes\\Sub", ["C:\\music\\Takes\\Sub\\b.wav"], true),
+            group("C:\\music\\Takes\\Sub\\Deep", ["C:\\music\\Takes\\Sub\\Deep\\c.wav"]),
+            group("C:\\music\\Takes\\Empty", []),
+        ]);
+        expect(plan.totalFolders).toBe(3);
+        expect(plan.totalFiles).toBe(3);
     });
 });
 
