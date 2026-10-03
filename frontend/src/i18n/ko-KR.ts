@@ -587,10 +587,9 @@ export const koKR = {
     pitch_status_unavailable: "사용 불가",
     pitch_label: "피치 (반음)",
     tension_label: "텐션 (0-1)",
-    breath_mode_label: "브레스",
     breath_separation_label: "하모닉 분리",
-    separation_required_tooltip:
-        "사용할 수 없음: 먼저 「하모닉 분리」를 켜세요. 브레스 게인과 텐션 모두 이에 의존합니다.",
+    breath_gain_requires_separation: "「하모닉 분리」를 켜야 브레스 게인을 편집할 수 있습니다",
+    hifigan_tension_requires_separation: "「하모닉 분리」를 켜야 텐션을 편집할 수 있습니다",
     breath_gain_label: "브레스 게인",
     hifigan_tension_label: "텐션",
     formant_shift_label: "포먼트 시프트",
@@ -853,8 +852,8 @@ export const koKR = {
     hide_secondary_param: "보조 파라미터 오버레이 숨기기",
     secondary_overlay_tooltip_visible: "보조 파라미터 오버레이: 표시\n클릭하여 숨기기",
     secondary_overlay_tooltip_hidden: "보조 파라미터 오버레이: 숨김\n클릭하여 표시",
-    breath_tooltip_on: "브레스: 켜짐\n클릭하여 끄기",
-    breath_tooltip_off: "브레스: 꺼짐\n클릭하여 켜기",
+    breath_tooltip_on: "하모닉 분리: 켜짐\n클릭하여 끄기",
+    breath_tooltip_off: "하모닉 분리: 꺼짐\n클릭하여 켜기",
     onnx_compile_required:
         "ONNX 모델이 컴파일되지 않았습니다. 실행: cargo tauri dev --features onnx",
     onnx_unavailable_label: " (사용 불가)",

@@ -8416,9 +8416,14 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 composeEnabled,
                             );
                             // 提示文案要指出**真正**的原因，否则用户会去开错开关。
+                            // 分离门禁按参数各给一句（与 `pitch_requires_compose`
+                            // 同一体裁：祈使句点名"开启什么、就能编辑什么"）；
+                            // 只有被分离门禁的两个参数会走到这里，故二选一即可。
                             const gateTooltip = !composeEnabled
                                 ? t("pitch_requires_compose")
-                                : t("separation_required_tooltip");
+                                : p.id === "hifigan_tension"
+                                  ? t("hifigan_tension_requires_separation")
+                                  : t("breath_gain_requires_separation");
 
                             const paramPill = (
                                 <ParamToolbarPill
@@ -8471,7 +8476,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                     ? t("breath_tooltip_on")
                                                     : t("breath_tooltip_off")
                                             }
-                                            aria-label={`${t("breath_mode_label")}: ${
+                                            aria-label={`${t("breath_separation_label")}: ${
                                                 separationEnabled ? t("switch_on") : t("switch_off")
                                             }`}
                                             onClick={() =>
