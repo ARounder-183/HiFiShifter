@@ -269,6 +269,22 @@ where
     let start_idx = ((start_sec * 1000.0) / fp).floor().max(0.0) as usize;
     let end_idx = ((end_sec * 1000.0) / fp).ceil().max(0.0) as usize;
 
+    // `pitch_orig`（源 F0 / clip_midi）同样**按时间范围切片**哈希。
+    //
+    // 【为什么必须纳入】渲染时 `midi_fn` 在 `pitch_edit` 无编辑处回落到
+    // `clip_midi`，所以它参与声码器输入。而重跑音高分析会改 `pitch_orig`
+    // 却**保持** `pitch_edit` 不变（用户已编辑的曲线不被覆盖）—— 若不纳入，
+    // 该 clip 的推理块会以"参数未变"为由命中用旧 F0 渲染的音频。
+    // 切片而非整条，与 `pitch_edit` 同理：保证编辑局部性。
+    {
+        let orig = &curves.pitch_orig;
+        let lo = start_idx.min(orig.len());
+        let hi = end_idx.min(orig.len());
+        for &v in &orig[lo..hi] {
+            mix_bytes!(&v.to_bits().to_le_bytes());
+        }
+    }
+
     let edit = &curves.pitch_edit;
     let lo = start_idx.min(edit.len());
     let hi = end_idx.min(edit.len());
@@ -276,12 +292,31 @@ where
         mix_bytes!(&v.to_bits().to_le_bytes());
     }
 
-    // 混入 extra_curves（AutomationCurve 类型参数），按 key 排序保证确定性
+    // 混入 extra_curves（AutomationCurve 类型参数），按 key 排序保证确定性。
+    //
+    // ★ 与 `pitch_edit` 同样是**按时间范围切片**，不是整条曲线。
+    //
+    // 【为什么必须切片，否则编辑延迟极高】分块推理缓存以本哈希判等；若把整条
+    // 曲线纳入，则**改动任意一段都会让所有 chunk 的哈希同时变化** —— 用户改
+    // 一个小节，整条 clip 的所有块全部重推理。实测（30s、4096 帧/块）：改 1 秒
+    // 张力会使全部块失效。切片后只有**时间范围相交的块**失效，未相交的块保持
+    // 命中，编辑延迟与"改动长度"而非"clip 长度"成正比。
+    //
+    // 【索引换算与 `pitch_edit` 完全一致】曲线按 `frame_period_ms` 逐点采样，
+    // 点的索引 = `绝对秒 * 1000 / frame_period_ms`。此处沿用同一换算，
+    // 保证"哈希覆盖的曲线区间"与"渲染实际读取的曲线区间"对齐。
+    //
+    // 【越界钳制】曲线可能比 clip 短（用户只画了前面一段）或长（撤销后的残留）。
+    // 两端都用 `.min(len)` 钳制，与 `pitch_edit` 的处理相同。曲线为空时
+    // `lo == hi == 0`，只混入 key 名 —— 语义是"该参数未编辑"，与缺失等价。
     let mut sorted_curves: Vec<(K, V)> = extra_curves.into_iter().collect();
     sorted_curves.sort_by(|(k1, _), (k2, _)| k1.as_ref().cmp(k2.as_ref()));
     for (k, v) in sorted_curves {
         mix_bytes!(k.as_ref().as_bytes());
-        for &val in v.as_ref().iter() {
+        let curve = v.as_ref();
+        let lo = start_idx.min(curve.len());
+        let hi = end_idx.min(curve.len());
+        for &val in &curve[lo..hi] {
             mix_bytes!(&val.to_bits().to_le_bytes());
         }
     }
@@ -558,7 +593,20 @@ pub fn clear_pad_suppressed_clips() {
 /// **命令式**失效调用点传导，漏掉一个调用点就会"参数已变、仍播上一版 PCM"，
 /// 而磁盘缓存会让这种错配跨会话持续存在。纳入按键后，正确性不再依赖调用点是
 /// 否记得失效。
-pub const RENDER_PIPELINE_VERSION: u32 = 4;
+/// v5：共振峰偏移（`formant_shift_cents`）的实现从"mel 域 bin 线性插值"换成
+/// OpenUtau hifisampler 的 `PitchAdjustableMelSpectrogram`（按 keyShift 伸缩
+/// FFT/窗长后用原始 mel 基投影）。同一曲线值产出不同 PCM，且值域扩到 ±1200，
+/// 必须整体失效。
+/// v7：修复 HNSEP 在非 44100 输出率下**没有把 stem 重采样回原采样率**的缺陷。
+/// 此前只做 truncate/zero-pad，48000 下谐波/噪声内容被时间压缩 8.1%、尾部 8.1%
+/// 为纯静音，听感"跑调 / 整体不对"。同一工程在 44100 设备上渲染正确、在 48000
+/// 设备上错误，因此必须整体失效，避免按设备采样率混用两套结果。
+/// v6：HiFiGAN 分块粒度从 4096 mel 帧（≈47.6s）改为 512 帧（≈5.9s）。
+/// 分块位置改变会改变输出波形 —— 实测不同块大小的差异是**纯相位/时移**性质
+/// （幅度谱余弦相似度 1.000000、逐块 RMS 比 1.002~1.008），音色与能量不变，
+/// 但 PCM 逐样本不同。若不失效，磁盘上的旧 PCM 会与新块粒度长期混用
+/// （同一工程新旧 clip 相位基准不一致）。
+pub const RENDER_PIPELINE_VERSION: u32 = 7;
 
 /// [`compute_rendered_clip_hash`] 的输入集合。
 ///
@@ -770,9 +818,13 @@ pub fn compute_rendered_clip_hash_excluding(
         if crate::renderer::common_params::is_common_mix_param(param_id) {
             return false;
         }
-        // nsf-hifigan 的气声与张力属于渲染后处理，有独立缓存 key。
-        !(_renderer_id == "nsf_hifigan_onnx"
-            && matches!(param_id, "breath_gain" | "hifigan_tension"))
+        // nsf-hifigan 的**气声**是渲染后处理：预览靠 `breath_noise_stereo` +
+        // `audio_engine/mix.rs` 实时混音，把它混进底层哈希会让每次拖曲线都重合成。
+        //
+        // `hifigan_tension` **不再**排除：张力已迁移为声码器内部的 mel 域操作
+        //（`audio/rd_tension.rs`），是渲染流程的一部分 —— 必须参与哈希，
+        // 否则改张力会命中旧渲染（这正是它能取代独立张力缓存变体的原因）。
+        !(_renderer_id == "nsf_hifigan_onnx" && matches!(param_id, "breath_gain"))
     }
 
     macro_rules! mix_bytes {
@@ -954,13 +1006,19 @@ pub fn compute_rendered_clip_hash_excluding(
 }
 
 pub fn compute_breath_noise_hash(input: &RenderedClipHashInput<'_>) -> u64 {
-    // 气声噪声 stem 与 formant 无关（formant 只作用于谐波分量），因此显式排除
-    // 曲线级 `formant_shift_cents` 与 clip 级 `formant_morph`：任一共振峰设置
-    // 变化时都可直接复用噪声 stem，省掉一次 HNSEP。
+    // 气声噪声 stem 与"只作用于谐波分量"的参数无关，因此显式排除它们，
+    // 使这些参数变化时可直接复用噪声 stem，省掉一次 HNSEP：
+    // - 曲线级 `formant_shift_cents`（gender / 共振峰：只改谐波支的 mel）
+    // - clip 级 `formant_morph`（同上）
+    // - `hifigan_tension`（Rd 张力：只重塑谐波结构，噪声支原样保留）
+    //
+    // 【张力为什么也要排除】张力迁入声码器后已参与**渲染键**（见
+    // `include_rendered_extra_curve`），但噪声 stem 本身与张力无关 ——
+    // HNSEP 的输出只取决于源音频。不排除会让"只调张力"白跑一次 HNSEP 分离。
     let filtered_curves: std::collections::HashMap<String, Vec<f32>> = input
         .extra_curves
         .iter()
-        .filter(|(k, _)| k.as_str() != "formant_shift_cents")
+        .filter(|(k, _)| !matches!(k.as_str(), "formant_shift_cents" | "hifigan_tension"))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     compute_rendered_clip_hash(&RenderedClipHashInput {
@@ -986,135 +1044,6 @@ fn curve_slice_bounds(
     let start_idx = ((start_sec * 1000.0) / fp).floor().max(0.0) as usize;
     let end_idx = ((end_sec * 1000.0) / fp).ceil().max(0.0) as usize;
     (start_idx.min(len), end_idx.min(len))
-}
-
-pub fn compute_hifigan_tension_hash(
-    clip_id: &str,
-    base_param_hash: u64,
-    start_frame: u64,
-    end_frame: u64,
-    sr: u32,
-    frame_period_ms: f64,
-    pitch_orig: &[f32],
-    tension_curve: Option<&[f32]>,
-) -> u64 {
-    let mut h: u64 = 14695981039346656037u64;
-
-    macro_rules! mix_bytes {
-        ($bytes:expr) => {
-            for &b in $bytes {
-                h ^= b as u64;
-                h = h.wrapping_mul(1099511628211u64);
-            }
-        };
-    }
-
-    mix_bytes!(clip_id.as_bytes());
-    mix_bytes!(b"hifigan_tension");
-    mix_bytes!(&base_param_hash.to_le_bytes());
-    mix_bytes!(&start_frame.to_le_bytes());
-    mix_bytes!(&end_frame.to_le_bytes());
-    mix_bytes!(&sr.to_le_bytes());
-
-    let (pitch_lo, pitch_hi) = curve_slice_bounds(
-        start_frame,
-        end_frame,
-        sr,
-        frame_period_ms,
-        pitch_orig.len(),
-    );
-    for &value in &pitch_orig[pitch_lo..pitch_hi] {
-        mix_bytes!(&value.to_bits().to_le_bytes());
-    }
-
-    if let Some(curve) = tension_curve {
-        let (curve_lo, curve_hi) =
-            curve_slice_bounds(start_frame, end_frame, sr, frame_period_ms, curve.len());
-        for &value in &curve[curve_lo..curve_hi] {
-            mix_bytes!(&value.to_bits().to_le_bytes());
-        }
-    }
-
-    h
-}
-
-/// HiFiGAN tension 后处理缓存 key。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TensionRenderedClipCacheKey {
-    pub clip_id: String,
-    pub base_param_hash: u64,
-    pub tension_hash: u64,
-}
-
-/// HiFiGAN tension 后处理缓存 entry。
-#[derive(Debug, Clone)]
-pub struct TensionRenderedClipCacheEntry {
-    pub pcm_stereo: Arc<Vec<f32>>,
-    pub frames: u64,
-    pub sample_rate: u32,
-    /// 渲染时该 Clip 的 active take id；语义同
-    /// [`RenderedClipCacheEntry::rendered_take_id`]（垫音防跨 Take 复用）。
-    pub rendered_take_id: Option<String>,
-}
-
-pub struct TensionRenderedClipCache {
-    inner: ByteBudgetCache<TensionRenderedClipCacheKey, TensionRenderedClipCacheEntry>,
-}
-
-impl TensionRenderedClipCache {
-    pub fn new(capacity: usize, budget_bytes: u64) -> Self {
-        Self {
-            inner: ByteBudgetCache::new(capacity, budget_bytes),
-        }
-    }
-
-    pub fn get(
-        &mut self,
-        key: &TensionRenderedClipCacheKey,
-    ) -> Option<&TensionRenderedClipCacheEntry> {
-        self.inner.get(key)
-    }
-
-    pub fn insert(
-        &mut self,
-        key: TensionRenderedClipCacheKey,
-        entry: TensionRenderedClipCacheEntry,
-    ) {
-        let weight = entry.pcm_stereo.len() as u64 * 4;
-        self.inner.insert(key, entry, weight);
-    }
-
-    pub fn invalidate(&mut self, clip_id: &str) {
-        self.inner.invalidate_where(|k| k.clip_id == clip_id);
-    }
-
-    /// 当前缓存条目数。
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    /// 确保缓存容量不小于给定值（仅增不减）。
-    pub fn ensure_capacity(&mut self, min_capacity: usize) {
-        self.inner.ensure_capacity(min_capacity);
-    }
-
-    /// 当前缓存总字节数。
-    pub fn total_bytes(&self) -> u64 {
-        self.inner.total_bytes()
-    }
-}
-
-static GLOBAL_TENSION_RENDERED_CLIP_CACHE: OnceLock<Mutex<TensionRenderedClipCache>> =
-    OnceLock::new();
-
-pub fn global_tension_rendered_clip_cache() -> &'static Mutex<TensionRenderedClipCache> {
-    GLOBAL_TENSION_RENDERED_CLIP_CACHE.get_or_init(|| {
-        let budget = crate::audio_engine::byte_budget_cache::env_cache_budget_bytes() / 4;
-        Mutex::new(TensionRenderedClipCache::new(
-            rendered_clip_capacity(),
-            budget,
-        ))
-    })
 }
 
 // ─── Breath Noise 独立缓存（formant 变化时可复用，避免重复 HNSEP 分离）─────────
@@ -1195,7 +1124,7 @@ pub fn global_breath_noise_cache() -> &'static Mutex<BreathNoiseCache> {
     })
 }
 
-/// 使指定 clip 的所有渲染缓存失效（SynthClipCache + RenderedClipCache + TensionRenderedClipCache + BreathNoiseCache）。
+/// 使指定 clip 的所有渲染缓存失效（SynthClipCache + RenderedClipCache + BreathNoiseCache）。
 ///
 /// 此函数应在 pitch_edit 或其他影响合成的参数发生变化时调用，
 /// 确保旧的预渲染结果不会被错误复用。
@@ -1243,22 +1172,7 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
         }
     }
 
-    // 3. TensionRenderedClipCache 失效（HiFiGAN tension 专用缓存）
-    {
-        let mut cache = global_tension_rendered_clip_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let before = cache.len();
-        cache.invalidate(clip_id);
-        if cache.len() < before {
-            debug_eprintln!(
-                "[cache:invalidate] clip_id={} TensionRenderedClipCache invalidated",
-                clip_id
-            );
-        }
-    }
-
-    // 4. BreathNoiseCache 失效（Breath Noise 独立缓存）
+    // 3. BreathNoiseCache 失效（Breath Noise 独立缓存）
     {
         let mut cache = global_breath_noise_cache()
             .lock()
@@ -1369,33 +1283,11 @@ pub fn get_latest_rendered_pcm(
     Some((entry.pcm_stereo.clone(), entry.breath_noise_stereo.clone()))
 }
 
-/// 获取指定 clip 最近一次成功的 Tension 渲染结果（用作平滑过渡的垫音）
-pub fn get_latest_tension_rendered_pcm(
-    clip_id: &str,
-    active_take_id: Option<&str>,
-    expected_frames: Option<u64>,
-) -> Option<Arc<Vec<f32>>> {
-    let cache = global_tension_rendered_clip_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let entry = cache
-        .inner
-        .iter()
-        .find(|(k, v)| {
-            k.clip_id == clip_id
-                && take_identity_matches(v.rendered_take_id.as_deref(), active_take_id)
-                // 与 `get_latest_rendered_pcm` 同一长度守卫理由。
-                && expected_frames.map_or(true, |want| v.frames == want)
-        })
-        .map(|(_, v)| v)?;
-    Some(entry.pcm_stereo.clone())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_rendered_clip_hash, compute_rendered_clip_hash_excluding, HashExclusions,
-        RenderedClipHashInput,
+        compute_param_hash, compute_rendered_clip_hash, compute_rendered_clip_hash_excluding,
+        HashExclusions, RenderedClipHashInput,
     };
 
     // 运行时拉伸设置是**进程级全局**，而渲染键会把它混进哈希：算键的测试必须持读锁，
@@ -1691,5 +1583,99 @@ mod tests {
         });
 
         assert_eq!(base, fixture.hash());
+    }
+
+    // ── extra_curves 必须按帧区间切片（编辑局部性回归）───────────────────
+
+    /// 曲线改动若落在**查询区间之外**，哈希必须不变。
+    ///
+    /// 【为什么这条测试至关重要】`extra_curves` 曾经把**整条曲线**混入哈希
+    /// （`pitch_edit` 则是按区间切片的）。后果是：改动任意一小段张力，
+    /// 所有分块（以及段级缓存）的哈希同时变化 ⇒ 整条 clip 重新推理 ——
+    /// 用户改一个小节要等整段渲染。实测 30s clip 改 1 秒会令全部块失效。
+    ///
+    /// 切片后，只有与查询区间相交的块失效，未相交的块保持命中，
+    /// 编辑延迟与"改动长度"而非"clip 长度"成正比。
+    #[test]
+    fn curve_edits_outside_the_range_do_not_change_the_hash() {
+        let snapshot = crate::pitch_editing::PitchCurvesSnapshot {
+            frame_period_ms: 5.0,
+            pitch_orig: &[],
+            pitch_edit: &[],
+        };
+        // 曲线按 frame_period_ms=5ms 采样：索引 i 对应 5*i 毫秒。
+        // 区间取 [0s, 1s) ⇒ 覆盖索引 0..200。
+        let hash_with_curve = |curve: &[f32]| {
+            let extra = vec![("hifigan_tension", curve)];
+            compute_param_hash(
+                "clip-x",
+                0,
+                44_100, // 0..1s
+                44_100,
+                0,
+                "nsf_hifigan_onnx",
+                &snapshot,
+                extra.into_iter(),
+                &std::collections::HashMap::new(),
+            )
+        };
+
+        let mut a = vec![0.0f32; 400];
+        let mut b = a.clone();
+        // 在索引 300（= 1.5s，**区间外**）改动
+        b[300] = 80.0;
+        assert_eq!(
+            hash_with_curve(&a),
+            hash_with_curve(&b),
+            "an edit outside the queried range must NOT invalidate this chunk"
+        );
+
+        // 在索引 100（= 0.5s，**区间内**）改动 ⇒ 必须失效
+        a[100] = 80.0;
+        assert_ne!(
+            hash_with_curve(&a),
+            hash_with_curve(&b),
+            "an edit inside the queried range MUST invalidate this chunk"
+        );
+    }
+
+    /// 同一区间的哈希必须稳定（否则缓存永不命中，白做优化）。
+    #[test]
+    fn curve_hash_is_deterministic() {
+        let snapshot = crate::pitch_editing::PitchCurvesSnapshot {
+            frame_period_ms: 5.0,
+            pitch_orig: &[],
+            pitch_edit: &[],
+        };
+        let curve = vec![10.0f32, 20.0, 30.0];
+        let h = || {
+            let extra = vec![("hifigan_tension", curve.as_slice())];
+            compute_param_hash(
+                "clip-x", 0, 44_100, 44_100, 0, "nsf_hifigan_onnx", &snapshot,
+                extra.into_iter(), &std::collections::HashMap::new(),
+            )
+        };
+        assert_eq!(h(), h());
+    }
+
+    /// 曲线比查询区间短（用户只画了前面一段）时不得 panic，且长度差异应改变哈希。
+    #[test]
+    fn curve_shorter_than_range_is_safe() {
+        let snapshot = crate::pitch_editing::PitchCurvesSnapshot {
+            frame_period_ms: 5.0,
+            pitch_orig: &[],
+            pitch_edit: &[],
+        };
+        let hash = |curve: &[f32]| {
+            let extra = vec![("hifigan_tension", curve)];
+            compute_param_hash(
+                "clip-x", 0, 44_100 * 10, 44_100, 0, "nsf_hifigan_onnx", &snapshot,
+                extra.into_iter(), &std::collections::HashMap::new(),
+            )
+        };
+        // 远超区间末端的查询区间 + 极短曲线：不得 panic
+        let _ = hash(&[]);
+        let _ = hash(&[1.0]);
+        assert_ne!(hash(&[]), hash(&[1.0]), "curve content must matter");
     }
 }

@@ -127,8 +127,8 @@ pub fn infer_pitch_edit_chunked_optimized(
     _start_sec: f64,
     _midi_at_time: impl Fn(f64) -> f64 + Clone,
     _formant_shift_at_time: impl Fn(f64) -> f32 + Clone,
-    _chunk_cache_get: &dyn Fn(usize, usize) -> Option<Vec<f32>>,
-    _chunk_cache_put: &dyn Fn(usize, usize, Vec<f32>),
+    _chunk_cache_get: &dyn Fn(usize, usize, f64, f64) -> Option<Vec<f32>>,
+    _chunk_cache_put: &dyn Fn(usize, usize, f64, f64, Vec<f32>),
 ) -> Result<Vec<f32>, String> {
     Ok(mono_pcm.to_vec())
 }

@@ -51,8 +51,17 @@ const CHUNK_BYTES: usize = CHUNK_FRAMES * 4;
 pub enum EntryKind {
     /// 整 clip 渲染结果（可含气声 stem）。
     Rendered = 0,
-    /// HiFiGAN tension 后处理变体。
-    Tension = 1,
+    /// **已废弃**：HiFiGAN tension 后处理变体。
+    ///
+    /// 张力已迁移为声码器内部的 mel 域操作（见 `audio/rd_tension.rs`），
+    /// 不再需要独立的缓存变体 —— 它现在由 `Rendered` 条目连同
+    /// `hifigan_tension` 曲线一起参与渲染键哈希。
+    ///
+    /// 该判别值**保留占位**：磁盘格式里 `1` 曾是张力变体，直接删掉这个变体
+    /// 会让 `from_u8(1)` 变成"未知类别"，旧缓存文件（可能残留数月）会被判为
+    /// 损坏而不是被静默忽略。保留占位后旧文件仍可解析，只是永远不再写入；
+    /// `from_u8` 返回 `None`，读取方按"无此缓存"处理。
+    DeprecatedTension = 1,
     /// 独立的气声噪声 stem（formant 变化时可复用）。
     Noise = 2,
 }
@@ -62,7 +71,7 @@ impl EntryKind {
     pub fn dir_name(self) -> &'static str {
         match self {
             EntryKind::Rendered => "rendered",
-            EntryKind::Tension => "tension",
+            EntryKind::DeprecatedTension => "tension",
             EntryKind::Noise => "noise",
         }
     }
@@ -71,7 +80,7 @@ impl EntryKind {
     pub fn display_name(self) -> &'static str {
         match self {
             EntryKind::Rendered => "合成渲染",
-            EntryKind::Tension => "张力变体",
+            EntryKind::DeprecatedTension => "张力变体（已废弃）",
             EntryKind::Noise => "气声噪声",
         }
     }
@@ -79,7 +88,9 @@ impl EntryKind {
     fn from_u8(value: u8) -> Option<Self> {
         match value {
             0 => Some(EntryKind::Rendered),
-            1 => Some(EntryKind::Tension),
+            // 1 曾为张力变体，现已废弃：按"未知类别"返回 None，
+            // 旧文件被静默忽略而不是当成损坏。
+            1 => None,
             2 => Some(EntryKind::Noise),
             _ => None,
         }

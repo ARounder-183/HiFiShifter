@@ -777,7 +777,9 @@ pub(crate) fn build_snapshot(
                                 // 同一口径：Compose 开关与生效音阶都会改变渲染输出。
                                 compose_enabled: root_track_id
                                     .as_ref()
-                                    .and_then(|root| timeline.tracks.iter().find(|t| &t.id == root))
+                                    .and_then(|root| {
+                                        timeline.tracks.iter().find(|t| &t.id == root)
+                                    })
                                     .map(|t| t.compose_enabled)
                                     .unwrap_or(false),
                                 scale_signature: scale_signature.as_str(),
@@ -800,7 +802,9 @@ pub(crate) fn build_snapshot(
                 };
                 if let Some(key) = cache_key {
                     // 【缩小锁范围，防止死锁】
-                    let (mut pcm, breath_noise) = {
+                    // 不再需要 `mut`：张力迁移进声码器后，这里没有"用张力变体
+                    // 覆盖 pcm"的二次查询了。
+                    let (pcm, breath_noise) = {
                         let mut rendered_cache =
                             crate::synth_clip_cache::global_rendered_clip_cache()
                                 .lock()
@@ -812,61 +816,11 @@ pub(crate) fn build_snapshot(
                         )
                     };
 
-                    if let Some((
-                        pitch_orig,
-                        _pitch_edit,
-                        frame_period_ms,
-                        renderer_id,
-                        entry,
-                        _,
-                        _,
-                    )) = processor_params
-                    {
-                        if renderer_id == "nsf_hifigan_onnx"
-                            && crate::pitch_editing::hifigan_tension_active_for_clip(
-                                entry, clip, start_sec,
-                            )
-                        {
-                            let tension_curve =
-                                crate::pitch_editing::hifigan_tension_curve_for_clip(entry, clip);
-                            let tension_hash =
-                                crate::synth_clip_cache::compute_hifigan_tension_hash(
-                                    &clip.id,
-                                    key.param_hash,
-                                    start_frame,
-                                    start_frame.saturating_add(length_frames),
-                                    out_rate,
-                                    frame_period_ms,
-                                    pitch_orig,
-                                    tension_curve,
-                                );
-                            let tension_key =
-                                crate::synth_clip_cache::TensionRenderedClipCacheKey {
-                                    clip_id: clip.id.clone(),
-                                    base_param_hash: key.param_hash,
-                                    tension_hash,
-                                };
-
-                            // 同样缩小 tension 缓存的锁范围
-                            pcm = {
-                                let mut tension_cache =
-                                    crate::synth_clip_cache::global_tension_rendered_clip_cache()
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner());
-                                tension_cache
-                                    .get(&tension_key)
-                                    .map(|entry| entry.pcm_stereo.clone())
-                            };
-
-                            if debug {
-                                log::warn!(
-                                    "[snapshot] clip_id={} tension_hash={:#018x} tension_cache_hit={}",
-                                    clip.id, tension_hash, pcm.is_some()
-                                );
-                            }
-                        }
-                    }
-
+                    // 张力不再有独立的缓存变体：它已迁移为声码器内部的 mel 域
+                    // 操作（见 `audio/rd_tension.rs`），因此直接由
+                    // `RenderedClipCache` 连同 `hifigan_tension` 曲线一起体现
+                    //（该曲线已参与渲染键哈希，不再被 `include_rendered_extra_curve`
+                    // 排除）。
                     if debug {
                         log::warn!(
                             "[snapshot] clip_id={} hash={:#018x} rendered_cache_hit={} needs_synthesis=true",
@@ -886,7 +840,8 @@ pub(crate) fn build_snapshot(
                         // （原地等待 + 自动恢复），绝不让用户先听到上一版参数的
                         // 结果再中途切换。抑制条目在本 clip 当前渲染命中时移除
                         //（见下方 else 分支），因此只覆盖"武装时未就绪"的窗口。
-                        let pad_suppressed = crate::synth_clip_cache::is_pad_suppressed(&clip.id);
+                        let pad_suppressed =
+                            crate::synth_clip_cache::is_pad_suppressed(&clip.id);
                         let mut fallback_pcm = None;
                         let mut fallback_breath = None;
                         if !pad_suppressed {
@@ -901,33 +856,15 @@ pub(crate) fn build_snapshot(
                                 },
                             );
 
-                            let needs_tension = processor_params.map_or(
-                                false,
-                                |(_, _, _, renderer_id, entry, _, _)| {
-                                    renderer_id == "nsf_hifigan_onnx"
-                                        && crate::pitch_editing::hifigan_tension_active_for_clip(
-                                            entry, clip, start_sec,
-                                        )
-                                },
-                            );
-
-                            if needs_tension {
-                                fallback_pcm =
-                                    crate::synth_clip_cache::get_latest_tension_rendered_pcm(
-                                        &clip.id,
-                                        clip.active_take_id.as_deref(),
-                                        Some(length_frames),
-                                    );
-                            }
-
+                            // 张力不再需要单独的垫音来源：它已成为渲染键的一部分，
+                            // `get_latest_rendered_pcm` 返回的就是按当前张力渲染的
+                            // 结果（或上一版，供过渡使用）。
                             if fallback_pcm.is_none() {
-                                if let Some((p, b)) =
-                                    crate::synth_clip_cache::get_latest_rendered_pcm(
-                                        &clip.id,
-                                        clip.active_take_id.as_deref(),
-                                        Some(length_frames),
-                                    )
-                                {
+                                if let Some((p, b)) = crate::synth_clip_cache::get_latest_rendered_pcm(
+                                    &clip.id,
+                                    clip.active_take_id.as_deref(),
+                                    Some(length_frames),
+                                ) {
                                     fallback_pcm = Some(p);
                                     fallback_breath = b;
                                 }
@@ -1245,9 +1182,7 @@ mod tests {
             clip.name = "pad clip".to_string();
             clip.source_path = Some("/tmp/hifishifter-pad-test.aiff".to_string());
         }
-        let root = tl
-            .resolve_root_track_id(&tl.clips[0].track_id)
-            .expect("root");
+        let root = tl.resolve_root_track_id(&tl.clips[0].track_id).expect("root");
         tl.tracks
             .iter_mut()
             .find(|t| t.id == root)
@@ -1273,8 +1208,7 @@ mod tests {
             frames: pcm.len() / 2,
             pcm: Arc::new(pcm),
         };
-        let cache: Arc<Mutex<DecodeCache>> =
-            Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
+        let cache: Arc<Mutex<DecodeCache>> = Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
         cache
             .lock()
             .unwrap()
@@ -1294,16 +1228,13 @@ mod tests {
             sample_rate: 44_100,
             rendered_take_id: None,
         };
-        crate::synth_clip_cache::global_rendered_clip_cache()
-            .lock()
-            .unwrap()
-            .insert(
-                crate::synth_clip_cache::RenderedClipCacheKey {
-                    clip_id: clip_id.to_string(),
-                    param_hash,
-                },
-                entry,
-            );
+        crate::synth_clip_cache::global_rendered_clip_cache().lock().unwrap().insert(
+            crate::synth_clip_cache::RenderedClipCacheKey {
+                clip_id: clip_id.to_string(),
+                param_hash,
+            },
+            entry,
+        );
     }
 
     #[test]

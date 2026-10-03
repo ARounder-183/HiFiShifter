@@ -47,8 +47,10 @@ mod fade_curves;
 mod formant_cache;
 #[path = "audio/formant_morph/mod.rs"]
 mod formant_morph;
-#[path = "audio/hifigan_tension.rs"]
-mod hifigan_tension;
+#[path = "audio/glottal_rd.rs"]
+mod glottal_rd;
+#[path = "audio/rd_tension.rs"]
+mod rd_tension;
 mod launch_args;
 mod media;
 #[path = "audio/mixdown.rs"]
@@ -106,6 +108,9 @@ mod nsf_hifigan_onnx_stub;
 #[cfg(not(feature = "onnx"))]
 use nsf_hifigan_onnx_stub as nsf_hifigan_onnx;
 
+#[cfg(feature = "onnx")]
+#[path = "vocoder/hnsep_dsp.rs"]
+mod hnsep_dsp;
 #[cfg(feature = "onnx")]
 #[path = "vocoder/hnsep_onnx.rs"]
 mod hnsep_onnx;

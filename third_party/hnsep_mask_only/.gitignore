@@ -1,0 +1,13 @@
+# 本目录只放导出说明与许可，不放模型二进制。
+#
+# 原因：这里的 model.onnx 与运行时加载的
+# `backend/src-tauri/resources/models/hnsep/hnsep.onnx` 逐字节相同
+# （sha256 见 README.md「模型标识」），等于把同一份 56 MiB 数据存两遍，
+# 而只有 resources/ 那份会被加载。
+#
+# 下面两条同时忽略，避免将来重新导出/解包时又把大文件误提交进来。
+model.onnx
+
+# 上游原始归档：内容同样与 model.onnx 重复。
+# 重新获取见 README.md 的「来源与许可」。
+*.oudep
