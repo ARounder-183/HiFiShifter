@@ -3,19 +3,30 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import { TOOLBAR_MAX_TIER, nextToolbarTier } from "./toolbarOverflow";
 
 /**
+ * 测量"自然宽度"时把行临时撑到的宽度（px）。
+ *
+ * 只要大于任何可能的内容宽度即可：目的是让所有子项都回到**不受挤压**的自然尺寸。
+ */
+const NATURAL_MEASURE_WIDTH_PX = 10000;
+
+/**
  * 量出一行工具栏的「可见宽度」与「内容自然宽度」。
  *
- * # 为什么不能用 `row.scrollWidth` 当内容需求
- * 行里有一个**填充剩余空间**的子项（`flex: 1 1 auto`，见 `PianoRollPanel` 的
- * `参数编辑器` 组）。它会把余量吃光，于是 `scrollWidth` 恒等于 `clientWidth` ——
- * 无论内容多少都量不出差别，判据永远认为"刚好放得下"，也就永远不会隐藏、
- * 更永远不会把隐藏的东西放回来。
+ * # 为什么必须量"与当前宽度无关"的自然宽度
+ * 工具栏里有个**可伸缩**的元素（平滑度滑块 `flex: 1 1 0; minWidth: 16`）：可用宽度
+ * 一变，它就被挤窄，于是按当前布局量到的"内容宽度"也跟着变（实测 1600px 时 1202、
+ * 1150px 时 1134、1060px 时 1058）。这样的量值**不能**当判据：
+ * - 同一层级在两次测量里数值不同 ⇒ 被误判成"内容变了"，缓存反复失效、层级反复归零；
+ * - 恢复判据拿到的"上一级宽度"会随拖拽漂移 ⇒ 固定点不存在，拖拽时来回切换。
  *
  * # 做法
- * 1. 测量期间把带 `flex-grow` 的子项临时置 0（同一帧内还原，浏览器不会绘制中间态），
- *    让每个子项都回到自己的自然宽度；
- * 2. 内容需求 = Σ max(子项 `scrollWidth`, `clientWidth`) + 间距：
- *    被压缩的子项由 `scrollWidth` 给出**内容**宽度，未被压缩的两者相等。
+ * 1. 把行宽临时撑大（`NATURAL_MEASURE_WIDTH_PX`），让所有子项回到自然尺寸 ——
+ *    滑块回到 120px 上限，不再随可用宽度伸缩；
+ * 2. 关掉带 `flex-grow` 的子项：否则"填充剩余空间"的那个子项会吃掉余量，
+ *    量到的是可用宽度而不是内容宽度；
+ * 3. 内容需求 = Σ max(子项 `scrollWidth`, `clientWidth`) + 间距。
+ *
+ * 两步都只改行的内联样式、同一帧内还原，浏览器不会绘制中间态。
  *
  * 前提：工具栏内的文字**不折行**（容器带 `whitespace-nowrap`）。否则中文标签会被
  * 压成逐字折行、"内容宽度"随之消失，量到的永远是"放得下"。
@@ -28,6 +39,9 @@ function measureRow(row: HTMLElement): { available: number; needed: number } {
     if (children.length === 0) return { available, needed: available };
 
     const gap = Number.parseFloat(getComputedStyle(row).columnGap) || 0;
+
+    const previousWidth = row.style.width;
+    row.style.width = `${NATURAL_MEASURE_WIDTH_PX}px`;
 
     const grown: Array<{ el: HTMLElement; previous: string }> = [];
     for (const child of children) {
@@ -44,6 +58,7 @@ function measureRow(row: HTMLElement): { available: number; needed: number } {
     });
 
     for (const { el, previous } of grown) el.style.flexGrow = previous;
+    row.style.width = previousWidth;
 
     return { available, needed };
 }
