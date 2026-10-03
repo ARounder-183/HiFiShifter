@@ -108,6 +108,9 @@ mod nsf_hifigan_onnx_stub;
 use nsf_hifigan_onnx_stub as nsf_hifigan_onnx;
 
 #[cfg(feature = "onnx")]
+#[path = "vocoder/hnsep_dsp.rs"]
+mod hnsep_dsp;
+#[cfg(feature = "onnx")]
 #[path = "vocoder/hnsep_onnx.rs"]
 mod hnsep_onnx;
 #[cfg(not(feature = "onnx"))]
