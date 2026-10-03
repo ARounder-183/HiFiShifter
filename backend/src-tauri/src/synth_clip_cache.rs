@@ -297,6 +297,70 @@ where
     h
 }
 
+/// 计算**分块级**推理缓存用的哈希，覆盖 [`compute_param_hash`] 的全部输入
+/// **外加输入波形本身的内容指纹**。
+///
+/// # 为什么必须额外混入输入波形
+/// [`compute_param_hash`] 只覆盖"参数"（pitch_edit / formant / extra_curves），
+/// 不覆盖**送进声码器的波形**。这在引入 Rd 张力之前是安全的：
+/// 那时张力是渲染后处理，改变张力不影响 HiFiGAN 的输入。
+///
+/// 张力迁入声码器后不再成立 —— `apply_rd_tension` 在 mel 分析**之前**重塑谐波，
+/// 因此张力曲线改变会改变 `mono_pcm`，而参数哈希**不变**。若分块缓存仍只看参数哈希，
+/// 就会出现"改了张力、chunk 命中旧波形"，用户看不到效果（实测复现：
+/// 两份输入 maxdiff 0.256，输出却逐样本相同）。
+///
+/// # 为什么不用"把张力曲线加进哈希"
+/// 治标不治本：任何将来改变送入波形的处理（新增前置效果）都会再次踩坑。
+/// 指纹直接绑定**实际输入**，与上游做了什么都无关。
+///
+/// # 参数
+/// - `pcm`：本次真正送入推理的波形（分块时传对应片段，见调用方）
+/// - 其余参数同 [`compute_param_hash`]
+///
+/// # 性能
+/// 对 `pcm` 做一次线性 FNV-1a（每样本约 2 次操作），相对推理可忽略。
+/// 为避免浮点表示差异导致误判失效，按 `to_bits()` 逐位混入 ——
+/// 这里要的是"输入是否逐位相同"，而非数值近似。
+pub fn compute_chunk_hash_with_pcm<K, V, I>(
+    pcm: &[f32],
+    clip_id: &str,
+    start_frame: u64,
+    end_frame: u64,
+    sr: u32,
+    channel_index: u16,
+    renderer_id: &str,
+    curves: &PitchCurvesSnapshot<'_>,
+    extra_curves: I,
+    extra_params: &std::collections::HashMap<String, f64>,
+) -> u64
+where
+    K: AsRef<str>,
+    V: AsRef<[f32]>,
+    I: IntoIterator<Item = (K, V)>,
+{
+    let base = compute_param_hash(
+        clip_id,
+        start_frame,
+        end_frame,
+        sr,
+        channel_index,
+        renderer_id,
+        curves,
+        extra_curves,
+        extra_params,
+    );
+    // 以 base 为种子继续 FNV-1a，避免再走一遍全部参数。
+    let mut h = base;
+    for &v in pcm {
+        for &b in &v.to_bits().to_le_bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(1099511628211u64);
+        }
+    }
+    h
+}
+
 // ─── 整 Clip 渲染缓存（Phase 2: Clip 级预渲染 + 实时混音）────────────────────
 
 /// 整 Clip 渲染缓存默认容量。
@@ -1242,8 +1306,8 @@ pub fn get_latest_rendered_pcm(
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_rendered_clip_hash, compute_rendered_clip_hash_excluding, HashExclusions,
-        RenderedClipHashInput,
+        compute_chunk_hash_with_pcm, compute_rendered_clip_hash,
+        compute_rendered_clip_hash_excluding, HashExclusions, RenderedClipHashInput,
     };
 
     // 运行时拉伸设置是**进程级全局**，而渲染键会把它混进哈希：算键的测试必须持读锁，
@@ -1539,5 +1603,83 @@ mod tests {
         });
 
         assert_eq!(base, fixture.hash());
+    }
+
+    // ── 分块缓存必须绑定输入波形（张力回归）─────────────────────────────
+
+    /// 输入波形不同 ⇒ 哈希必须不同。
+    ///
+    /// 【为什么这条测试必须存在】`compute_param_hash` 只看参数
+    /// （pitch_edit / formant / extra_curves），**不看送进声码器的波形**。
+    /// 在 Rd 张力迁入声码器之前这是安全的（张力曾是渲染后处理）；
+    /// 现在 `apply_rd_tension` 在 mel 之前改变输入波形，张力曲线变化时
+    /// 参数哈希不变 —— 分块缓存会命中**陈旧波形**，用户改张力看不到效果。
+    /// 这是实测复现过的回归（两份输入 maxdiff 0.256，输出却逐样本相同），
+    /// 故用测试钉死。
+    #[test]
+    fn chunk_hash_changes_when_input_waveform_changes() {
+        let snapshot = crate::pitch_editing::PitchCurvesSnapshot {
+            frame_period_ms: 5.0,
+            pitch_orig: &[],
+            pitch_edit: &[],
+        };
+        let extra: Vec<(&str, &[f32])> = vec![];
+        let hash_of = |pcm: &[f32]| {
+            compute_chunk_hash_with_pcm(
+                pcm,
+                "clip-x",
+                0,
+                1024,
+                44_100,
+                0,
+                "nsf_hifigan_onnx",
+                &snapshot,
+                extra.iter().map(|(k, v)| (*k, *v)),
+                &std::collections::HashMap::new(),
+            )
+        };
+
+        // 两份**只有幅度不同**的波形，模拟"改了张力"（Rd 重塑谐波结构）
+        let a: Vec<f32> = (0..2048).map(|i| (i as f32 * 0.01).sin() * 0.2).collect();
+        let b: Vec<f32> = (0..2048).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+
+        assert_ne!(
+            hash_of(&a),
+            hash_of(&b),
+            "different input waveforms must not share a chunk hash"
+        );
+        // 同一波形必须稳定（否则缓存永不命中，白做优化）
+        assert_eq!(hash_of(&a), hash_of(&a), "hash must be deterministic");
+    }
+
+    /// 该哈希仍然包含 `compute_param_hash` 的全部输入（不能因加波形而漏参数）。
+    #[test]
+    fn chunk_hash_still_covers_params() {
+        let pcm: Vec<f32> = (0..512).map(|i| (i as f32 * 0.02).sin()).collect();
+        let extra: Vec<(&str, &[f32])> = vec![];
+        let hash_with_edit = |edit: &[f32]| {
+            let snapshot = crate::pitch_editing::PitchCurvesSnapshot {
+                frame_period_ms: 5.0,
+                pitch_orig: &[],
+                pitch_edit: edit,
+            };
+            compute_chunk_hash_with_pcm(
+                &pcm,
+                "clip-x",
+                0,
+                512,
+                44_100,
+                0,
+                "nsf_hifigan_onnx",
+                &snapshot,
+                extra.iter().map(|(k, v)| (*k, *v)),
+                &std::collections::HashMap::new(),
+            )
+        };
+        assert_ne!(
+            hash_with_edit(&[]),
+            hash_with_edit(&[60.0, 64.0]),
+            "pitch_edit must still participate in the chunk hash"
+        );
     }
 }

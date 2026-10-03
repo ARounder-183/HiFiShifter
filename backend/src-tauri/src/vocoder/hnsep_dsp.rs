@@ -587,3 +587,46 @@ mod e2e_hnsep {
     }
 }
 
+#[cfg(test)]
+mod cache_probe {
+    /// 实测：同一 clip 连续两次分离（模拟"改了张力再渲染"）是否命中缓存。
+    #[test]
+    #[ignore]
+    fn second_separation_hits_cache() {
+        if !crate::hnsep_onnx::is_available() {
+            println!("SKIP: model unavailable"); return;
+        }
+        let secs = 3usize;
+        let n = 44_100 * secs;
+        let mut st = 7u64;
+        let x: Vec<f32> = (0..n).map(|i| {
+            let t = i as f64/44100.0;
+            let mut s = 0.0;
+            for k in 1..=20 { s += (0.2/k as f64)*(2.0*std::f64::consts::PI*200.0*k as f64*t).sin(); }
+            st = st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (s + ((st>>33) as f64/(1u64<<31) as f64 - 0.5)*0.3) as f32
+        }).collect();
+
+        // 第一次：冷（含会话预热/推理）
+        let t0 = std::time::Instant::now();
+        let _ = crate::hnsep_onnx::infer_harmonic_noise_mono("cache-probe-clip", &x, 44_100, 0, Some(42)).unwrap();
+        let first = t0.elapsed();
+
+        // 第二、三次：应为缓存命中（键不含张力，故等价于"只改了张力"）
+        let mut later = Vec::new();
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            let _ = crate::hnsep_onnx::infer_harmonic_noise_mono("cache-probe-clip", &x, 44_100, 0, Some(42)).unwrap();
+            later.push(t.elapsed());
+        }
+        println!("clip={secs}s  FIRST={:.1}ms  then={:?}ms",
+                 first.as_secs_f64()*1000.0,
+                 later.iter().map(|d| (d.as_secs_f64()*1000.0*100.0).round()/100.0).collect::<Vec<_>>());
+
+        // 换一个 source_fingerprint ⇒ 应当未命中（不同源）
+        let t = std::time::Instant::now();
+        let _ = crate::hnsep_onnx::infer_harmonic_noise_mono("cache-probe-clip", &x, 44_100, 0, Some(99)).unwrap();
+        println!("  different fingerprint = {:.1}ms (should be slow: cache miss)", t.elapsed().as_secs_f64()*1000.0);
+    }
+}
+

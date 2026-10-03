@@ -175,7 +175,11 @@ impl HiFiGanRenderer {
             .map(|c| vec![("formant_shift_cents", c)])
             .unwrap_or_default();
 
-        let param_hash = crate::synth_clip_cache::compute_param_hash(
+        // 必须用带输入波形指纹的哈希：张力（`apply_rd_tension`）在 mel 之前
+        // 改变了 `ctx.mono_pcm`，而参数哈希感知不到 —— 用纯参数哈希会让
+        // "改了张力"命中旧缓存。详见 `compute_chunk_hash_with_pcm` 的说明。
+        let param_hash = crate::synth_clip_cache::compute_chunk_hash_with_pcm(
+            ctx.mono_pcm,
             ctx.clip_id,
             seg_start_frame,
             seg_end_frame,
@@ -279,7 +283,14 @@ impl HiFiGanRenderer {
             &|mel_start: usize, mel_end: usize| -> Option<Vec<f32>> {
                 let chunk_start = seg_start + mel_start as u64 * model_hop;
                 let chunk_end = seg_start + mel_end as u64 * model_hop;
-                let hash = crate::synth_clip_cache::compute_param_hash(
+                // 同站点 1：chunk 的哈希必须绑定**实际送入推理的波形片段**。
+                // 张力改变会改变 `ctx.mono_pcm`（进而改变每个 chunk 的输入），
+                // 而参数哈希不变 —— 不绑定波形就会命中陈旧 chunk。
+                // 该 mel 窗口对应的样本区间为 [mel_start, mel_end) × model_hop。
+                let pcm_lo = (mel_start * model_hop as usize).min(ctx.mono_pcm.len());
+                let pcm_hi = (mel_end * model_hop as usize).min(ctx.mono_pcm.len());
+                let hash = crate::synth_clip_cache::compute_chunk_hash_with_pcm(
+                    &ctx.mono_pcm[pcm_lo..pcm_hi],
                     &clip_id,
                     chunk_start,
                     chunk_end,
@@ -319,7 +330,14 @@ impl HiFiGanRenderer {
             &|mel_start: usize, mel_end: usize, wf: Vec<f32>| {
                 let chunk_start = seg_start + mel_start as u64 * model_hop;
                 let chunk_end = seg_start + mel_end as u64 * model_hop;
-                let hash = crate::synth_clip_cache::compute_param_hash(
+                // 同站点 1：chunk 的哈希必须绑定**实际送入推理的波形片段**。
+                // 张力改变会改变 `ctx.mono_pcm`（进而改变每个 chunk 的输入），
+                // 而参数哈希不变 —— 不绑定波形就会命中陈旧 chunk。
+                // 该 mel 窗口对应的样本区间为 [mel_start, mel_end) × model_hop。
+                let pcm_lo = (mel_start * model_hop as usize).min(ctx.mono_pcm.len());
+                let pcm_hi = (mel_end * model_hop as usize).min(ctx.mono_pcm.len());
+                let hash = crate::synth_clip_cache::compute_chunk_hash_with_pcm(
+                    &ctx.mono_pcm[pcm_lo..pcm_hi],
                     &clip_id,
                     chunk_start,
                     chunk_end,
