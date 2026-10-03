@@ -15,6 +15,7 @@ import {
     importAudioFileAtPosition,
     importAudioFromDialog,
     importAudioFromPath,
+    importFolderAtPosition,
     importMultipleAudioAtPosition,
     importMultipleAudioFilesAtPosition,
 } from "./thunks/importThunks.js";
@@ -81,11 +82,13 @@ test("features/session/sessionSlice.importInFlight.test.ts scripted checks", () 
     assertEqual(inFlight(state), 0, "两层都结束后归零");
 
     // 每个导入 thunk 都要被覆盖到：漏一个就会出现"正在导入却不提示"。
+    // 目录导入此前正是被漏掉的那一个 —— 而它是最需要提示的（逐文件循环可能持续数秒）。
     const covered = [
         importAudioFileAtPosition,
         importAudioFromPath,
         importMultipleAudioAtPosition,
         importMultipleAudioFilesAtPosition,
+        importFolderAtPosition,
     ];
     for (const thunk of covered) {
         const opened = reducer(createState(), thunk.pending("req-x", undefined as never));

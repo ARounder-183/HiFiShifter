@@ -4186,10 +4186,18 @@ const sessionSlice = createSlice({
                 state.lastResult = action.payload;
                 const payload = action.payload as {
                     ok?: boolean;
+                    canceled?: boolean;
                     imported?: TimelineState;
                     newClipIds?: string[];
                     playheadSec?: number;
                 };
+                // 用户在导入进行中撤销 / 跳转历史 → 循环提前退出，且不带时间线快照。
+                // 必须早返回：否则会显示"Import done"，而且 `imported` 为空虽会跳过
+                // 套用，状态栏却在骗人。
+                if (payload.canceled) {
+                    state.status = "Import canceled";
+                    return;
+                }
                 const ok = Boolean(payload.ok);
                 if (ok) {
                     state.status = "Import done";
@@ -4228,10 +4236,18 @@ const sessionSlice = createSlice({
                 state.lastResult = action.payload;
                 const payload = action.payload as {
                     ok?: boolean;
+                    canceled?: boolean;
                     imported?: TimelineState;
                     newClipIds?: string[];
                     playheadSec?: number;
                 };
+                // 用户在导入进行中撤销 / 跳转历史 → 循环提前退出并回一个取消结果。
+                // 必须在这里早返回：否则会落进下面的 `ok` 分支显示"Import done"，
+                // 而且 `imported` 为空会跳过时间线套用 —— 但状态栏会骗人。
+                if (payload.canceled) {
+                    state.status = "Import canceled";
+                    return;
+                }
                 const ok = Boolean(payload.ok);
                 if (ok) {
                     state.status = "Import done";
@@ -4278,10 +4294,15 @@ const sessionSlice = createSlice({
                 state.lastResult = action.payload;
                 const payload = action.payload as {
                     ok?: boolean;
+                    canceled?: boolean;
                     imported?: TimelineState;
                     newClipIds?: string[];
                     playheadSec?: number;
                 };
+                if (payload.canceled) {
+                    state.status = "Import canceled";
+                    return;
+                }
                 const ok = Boolean(payload.ok);
                 if (ok) {
                     state.status = "Import done";
@@ -6759,6 +6780,9 @@ const sessionSlice = createSlice({
             importAudioFromPath.typePrefix,
             importMultipleAudioAtPosition.typePrefix,
             importMultipleAudioFilesAtPosition.typePrefix,
+            // 目录导入是**最需要**这个提示的一条（逐文件循环可能持续数秒），
+            // 此前恰恰漏了它。
+            importFolderAtPosition.typePrefix,
         ];
         const isAudioImportStep = (action: { type?: string }, step: string) =>
             audioImportPrefixes.some((prefix) => action.type === `${prefix}/${step}`);

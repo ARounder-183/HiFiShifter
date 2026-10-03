@@ -2,6 +2,7 @@ import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
 import { coreApi } from "../../../services/api/core";
 import type { SessionState } from "../sessionSlice";
+import { cancelActiveImports } from "./importCancellation";
 
 export interface ProjectVersionConfirmation {
     ok: true;
@@ -25,11 +26,19 @@ export interface SaveVersionConflict {
 
 export type SaveProjectResponse = SaveVersionConflict | Record<string, unknown>;
 
+/*
+ * 【为什么三个历史跳转入口都要先取消在途导入】目录导入的逐文件循环会持续数秒，
+ * 而撤销/重做/历史跳转会把时间线整体替换成历史快照 —— 循环若继续往已经消失的
+ * trackId 上导 clip，后端 `add_clip` 会凭空造出一条 "Track"，撤销栈就此被写坏
+ * （见 `importCancellation`）。在这里取消，循环的下一轮就会退出。
+ */
 export const undoRemote = createAsyncThunk("session/undoRemote", async () => {
+    cancelActiveImports();
     return webApi.undoTimeline();
 });
 
 export const redoRemote = createAsyncThunk("session/redoRemote", async () => {
+    cancelActiveImports();
     return webApi.redoTimeline();
 });
 
@@ -42,6 +51,7 @@ export const redoRemote = createAsyncThunk("session/redoRemote", async () => {
 export const setHistoryPositionRemote = createAsyncThunk(
     "session/setHistoryPositionRemote",
     async (position: number) => {
+        cancelActiveImports();
         return webApi.setHistoryPosition(position);
     },
 );
@@ -51,6 +61,8 @@ export const setHistoryPositionRemote = createAsyncThunk(
 export const newProjectRemote = createAsyncThunk("session/newProjectRemote", async () => {
     // 新建工程前先取消旧工程的后台预渲染，避免旧渲染继续占用资源。
     await coreApi.cancelBackgroundRender();
+    // 历史即将被清空：在途的目录导入循环没有继续的意义。
+    cancelActiveImports();
     return webApi.newProject();
 });
 
@@ -64,6 +76,9 @@ export const openProjectFromDialog = createAsyncThunk(
         }
         // 打开新工程前先取消旧工程的后台预渲染。
         await coreApi.cancelBackgroundRender();
+        // 历史即将被清空：在途的目录导入循环没有继续的意义（放在确认打开之后，
+        // 用户取消对话框时不该打断仍在跑的导入）。
+        cancelActiveImports();
         const timeline = await webApi.openProject(picked.path);
         if (timeline.project_version_too_new) {
             return {
@@ -83,6 +98,8 @@ export const openProjectFromPath = createAsyncThunk(
     "session/openProjectFromPath",
     async (projectPath: string) => {
         await coreApi.cancelBackgroundRender();
+        // 历史即将被清空：在途的目录导入循环没有继续的意义。
+        cancelActiveImports();
         const timeline = await webApi.openProject(projectPath);
         if (timeline.project_version_too_new) {
             return {
@@ -103,6 +120,7 @@ export const openProjectFromPathForced = createAsyncThunk(
     "session/openProjectFromPathForced",
     async (projectPath: string) => {
         await coreApi.cancelBackgroundRender();
+        cancelActiveImports();
         return webApi.openProject(projectPath, true);
     },
 );

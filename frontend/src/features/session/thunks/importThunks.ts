@@ -5,6 +5,7 @@ import { isVideoFilePath } from "../../../components/layout/timeline/dnd";
 import { checkpointHistory, applyTimelinePayload, type SessionState } from "../sessionSlice";
 
 import { addTrackRemote, setClipStateRemote } from "./timelineThunks";
+import { currentImportGeneration, isImportCancelled } from "./importCancellation";
 import { computeAutoCrossfadeFromPayload } from "../../../components/layout/timeline/hooks/autoCrossfade";
 import { computeClipNormalizationGain } from "../clipNormalization";
 import { trackNameForMedia } from "../mediaTrackName";
@@ -492,6 +493,8 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
         dispatch(checkpointHistory());
 
         await webApi.beginUndoGroup("import_media");
+        // 取消闸门：本批可能是目录导入委托过来的长循环（见 importCancellation）。
+        const importGen = currentImportGeneration();
         try {
             const beforeClipIds = new Set(
                 (getState() as { session: SessionState }).session.clips.map((c) => c.id),
@@ -541,6 +544,7 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
                 }
 
                 for (const audioPath of audioPaths) {
+                    if (isImportCancelled(importGen)) break;
                     const imported = await webApi.importAudioItem(audioPath, targetTrackId, cursor);
                     if (!(imported as { ok?: boolean }).ok) continue;
                     lastImported = imported;
@@ -578,6 +582,7 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
                 }
 
                 for (let i = 0; i < audioPaths.length; i++) {
+                    if (isImportCancelled(importGen)) break;
                     const audioPath = audioPaths[i];
                     const trackIdx = startIdx + i;
                     let targetTrackId: string | undefined;
@@ -620,6 +625,12 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
                         // Continue with remaining files
                     }
                 }
+            }
+
+            // 用户撤销 / 跳转历史 → 循环提前退出。**不带**时间线快照：带回去会把
+            // 用户刚撤销掉的东西又画回来（`imported: null` 让 reducer 跳过套用）。
+            if (isImportCancelled(importGen)) {
+                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
             }
 
             // Detect new clips from all import responses
@@ -736,7 +747,6 @@ export const importFolderAtPosition = createAsyncThunk(
         }
 
         dispatch(checkpointHistory());
-        await webApi.beginUndoGroup("import_folder");
         // 进度：逐个文件导入，含上千个文件的目录会有肉眼可见的等待。低于阈值时不显示，
         // 免得为一次 200ms 的操作闪一下状态栏。走总线而不是 Redux —— 见其文件头。
         const totalFiles = specs.reduce((count, spec) => count + spec.files.length, 0);
@@ -748,6 +758,8 @@ export const importFolderAtPosition = createAsyncThunk(
                 total: totalFiles,
             });
         reportProgress(true);
+        // 取消闸门：用户在本循环进行中撤销 / 跳转历史 / 打开别的工程时，下一轮就退出。
+        const importGen = currentImportGeneration();
         try {
             const beforeClipIds = new Set(
                 (getState() as { session: SessionState }).session.clips.map((c) => c.id),
@@ -770,6 +782,22 @@ export const importFolderAtPosition = createAsyncThunk(
             if (created.timeline) {
                 dispatch(applyTimelinePayload(created.timeline));
             }
+            // 建树之后再退出：树已经建出来了，此刻用户看到的就是"轨道在、clip 无"。
+            if (isImportCancelled(importGen)) {
+                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
+            }
+
+            /*
+             * 打点移到**第一份真实修改之前**（建树之后、导文件之前）。
+             *
+             * 【为什么不能放在建树之前】`begin_undo_group` 打下的快照会成为
+             * "撤销一步"的落点。放在建树之前时，那个快照里没有轨道树 —— 用户按一次
+             * Ctrl+Z 就把轨道组一起撤掉了，而逐文件循环还在往已消失的 trackId 上灌
+             * clip（后端 `add_clip` 在轨道不存在时会凭空造一条 "Track"），撤销栈被
+             * 写坏。放在建树之后，落点正好是"有轨道树、还没有 clip"，与上面
+             * "轨道树先落地"的意图一致。
+             */
+            await webApi.beginUndoGroup("import_folder");
 
             const accumulatedNewClipIds: string[] = [];
             const failedFiles: string[] = [];
@@ -778,6 +806,9 @@ export const importFolderAtPosition = createAsyncThunk(
             for (let index = 0; index < specs.length; index += 1) {
                 const trackId = trackIds[index];
                 for (const file of specs[index].files) {
+                    // 每一轮先问一句"我还在被期待吗"：用户撤销后历史已跳到
+                    // "有轨道树、无 clip"，继续灌只会把撤销栈写坏。
+                    if (isImportCancelled(importGen)) break;
                     attempted += 1;
                     try {
                         const imported = await webApi.importAudioItem(file, trackId, startSec);
@@ -798,6 +829,14 @@ export const importFolderAtPosition = createAsyncThunk(
                         reportProgress(true);
                     }
                 }
+                if (isImportCancelled(importGen)) break;
+            }
+
+            if (isImportCancelled(importGen)) {
+                // 取消：**不带**时间线快照 —— 带回去会把用户刚撤销掉的东西又画回来。
+                // 复用既有取消语义（`sessionSlice` 翻成"已取消导入"），不走 rejectWithValue
+                // （那会把状态栏写成"导入失败"，而用户做的是撤销）。
+                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
             }
 
             const newClipIds = accumulatedNewClipIds.filter((id) => !!id && !beforeClipIds.has(id));
@@ -850,6 +889,8 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
         dispatch(checkpointHistory());
 
         await webApi.beginUndoGroup();
+        // 取消闸门：本批可能是目录导入委托过来的长循环（见 importCancellation）。
+        const importGen = currentImportGeneration();
         try {
             const beforeClipIds = new Set(
                 (getState() as { session: SessionState }).session.clips.map((c) => c.id),
@@ -879,6 +920,7 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
                 }
 
                 for (const file of files) {
+                    if (isImportCancelled(importGen)) break;
                     const fileName = String(file.name ?? "dropped-audio");
                     const dataUrl = await new Promise<string>((resolve, reject) => {
                         const reader = new FileReader();
@@ -924,6 +966,7 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
                 }
 
                 for (let i = 0; i < files.length; i++) {
+                    if (isImportCancelled(importGen)) break;
                     const file = files[i];
                     const trackIdx = startIdx + i;
                     let targetTrackId: string | undefined;
@@ -975,6 +1018,11 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
                         // continue
                     }
                 }
+            }
+
+            // 用户撤销 / 跳转历史 → 循环提前退出，且**不带**时间线快照。
+            if (isImportCancelled(importGen)) {
+                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
             }
 
             const newClipIds = accumulatedNewClipIds.filter((id) => !!id && !beforeClipIds.has(id));
