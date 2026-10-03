@@ -106,7 +106,11 @@ impl RdTension {
             if !(f0 > 0.0) {
                 continue;
             }
-            let harmonics = ((GlottalRd::MAX_FIT_HZ / f0) as usize).min(MAX_HARMONICS);
+            // 与参考实现一致：这里只按 `MAX_FIT_HZ / f0` 取谐波，**不在本层封顶** ——
+            // 谐波数上限由 `GlottalRd::fit` 内部的 `MAX_FIT_HARMONICS` 施加
+            //（对应 C# 的 `GlottalRd.Fit` 里 `Math.Min(amplitudes.Length, MaxFitHarmonics)`）。
+            // 两处都封顶会让上限语义分散在两个模块里。
+            let harmonics = (GlottalRd::MAX_FIT_HZ / f0) as usize;
             if harmonics < 2 {
                 continue;
             }
@@ -136,8 +140,16 @@ impl RdTension {
             if !(target > 0.0) {
                 continue;
             }
-            // 目标 f0 到 Nyquist 的谐波数
-            let n = ((sample_rate as f64 / 2.0 / target) as usize).clamp(1, MAX_HARMONICS);
+            // 目标 f0 到 Nyquist 的谐波数。
+            //
+            // 【不要在这里加 MAX_HARMONICS 上限】参考实现（`HifiRdTension.cs:57`）
+            // 传的是**不设上限**的 `(int)(sampleRate / 2.0 / f0)`，且 `GlottalRd.Gains`
+            // 内部也没有上限。低音区 n 会明显超过 80（220 Hz → 100、110 Hz → 200），
+            // 若在此钳到 80，`GlottalRd::gain_at` 会对第 80 次以上的谐波一律返回
+            // **末值**（它按 `gains[len-1]` 处理越界），高频段被压成一条平的增益，
+            // 与参考的逐谐波曲线不符 —— 听感上低音会缺少高频细节。
+            // `MAX_HARMONICS` 只用于**拟合**路径（与 `MaxFitHarmonics` 对应）。
+            let n = ((sample_rate as f64 / 2.0 / target) as usize).max(1);
             let gains = GlottalRd::gains(rd[m], GlottalRd::tense_rd(rd[m], t), target, n);
             let frame = &mut spec[m];
             for (k, bin) in frame.iter_mut().enumerate() {
@@ -221,10 +233,6 @@ impl RdTension {
         peaks
     }
 }
-
-/// 谐波数的硬上限：防止极低 f0（如 40 Hz）下按 Nyquist 展开到数百个谐波而
-/// 拖慢拟合。与 `GlottalRd::MAX_FIT_HARMONICS` 同量级。
-const MAX_HARMONICS: usize = 80;
 
 /// 周期 Hann 窗 `0.5(1 - cos(2πn/N))`。
 ///
@@ -552,59 +560,88 @@ mod tests {
 
 use super::*;
 
-/// 更接近真实人声的检验：多个谐波 + 逐次谐波衰减 + 轻微失谐，
-/// 验证拟合出的 Rd 落在合理区间、且张力方向正确、输出无 NaN。
-#[test]
-fn works_on_a_more_vocal_like_signal() {
-    let sr = 44_100u32;
-    let f0 = 196.0f64; // G3
-    let n = sr as usize / 2;
-    // 25 个谐波，幅度按 1/k^1.1 衰减，并加一点噪声模拟气声
-    let sig: Vec<f32> = (0..n)
-        .map(|i| {
-            let t = i as f64 / sr as f64;
-            let mut s = 0.0;
-            for k in 1..=25 {
-                let amp = 0.15 / (k as f64).powf(1.1);
-                s += amp * (2.0 * std::f64::consts::PI * f0 * k as f64 * t).sin();
-            }
-            s += 0.002 * ((i as f64 * 12.9898).sin() * 43758.5453).fract();
-            s as f32
-        })
-        .collect();
-    let f0v = vec![f0; n / HOP + 2];
+    /// 更接近真实人声的检验：多个谐波 + 逐次谐波衰减 + 轻微失谐，
+    /// 验证拟合出的 Rd 落在合理区间、且张力方向正确、输出无 NaN。
+    #[test]
+    fn works_on_a_more_vocal_like_signal() {
+        let sr = 44_100u32;
+        let f0 = 196.0f64; // G3
+        let n = sr as usize / 2;
+        // 25 个谐波，幅度按 1/k^1.1 衰减，并加一点噪声模拟气声
+        let sig: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f64 / sr as f64;
+                let mut s = 0.0;
+                for k in 1..=25 {
+                    let amp = 0.15 / (k as f64).powf(1.1);
+                    s += amp * (2.0 * std::f64::consts::PI * f0 * k as f64 * t).sin();
+                }
+                s += 0.002 * ((i as f64 * 12.9898).sin() * 43758.5453).fract();
+                s as f32
+            })
+            .collect();
+        let f0v = vec![f0; n / HOP + 2];
 
-    let y = RdTension::apply(&sig, &f0v, sr, |_| 60.0, |_| f0);
-    assert_eq!(y.len(), sig.len());
-    assert!(y.iter().all(|v| v.is_finite()), "output must be finite");
+        let y = RdTension::apply(&sig, &f0v, sr, |_| 60.0, |_| f0);
+        assert_eq!(y.len(), sig.len());
+        assert!(y.iter().all(|v| v.is_finite()), "output must be finite");
 
-    // 输出不应静音，也不应爆音
-    let rms = |s: &[f32]| (s.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt();
-    let ratio = rms(&y) / rms(&sig);
-    assert!(ratio > 0.3 && ratio < 3.0, "energy ratio {ratio} out of range");
-}
-
-/// 极短输入（不足一帧 / 不足一个 N_FFT）不得 panic。
-#[test]
-fn very_short_inputs_do_not_panic() {
-    let sr = 44_100u32;
-    for len in [1usize, 2, 100, HOP, HOP + 1, N_FFT - 1, N_FFT] {
-        let x = vec![0.1f32; len];
-        let f0 = vec![220.0f64; 4];
-        let y = RdTension::apply(&x, &f0, sr, |_| 100.0, |_| 220.0);
-        assert_eq!(y.len(), len, "length must be preserved for len {len}");
-        assert!(y.iter().all(|v| v.is_finite()));
+        // 输出不应静音，也不应爆音
+        let rms = |s: &[f32]| (s.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt();
+        let ratio = rms(&y) / rms(&sig);
+        assert!(ratio > 0.3 && ratio < 3.0, "energy ratio {ratio} out of range");
     }
-}
 
-/// 静音输入不得产生 NaN（log(0) 路径）。
-#[test]
-fn silence_input_is_safe() {
-    let sr = 44_100u32;
-    let x = vec![0.0f32; 8192];
-    let f0 = vec![220.0f64; 8192 / HOP + 2];
-    let y = RdTension::apply(&x, &f0, sr, |_| 100.0, |_| 220.0);
-    assert!(y.iter().all(|v| v.is_finite()), "silence must not produce NaN");
-    assert!(y.iter().all(|v| v.abs() < 1e-6), "silence in, silence out");
-}
-}
+    /// 低音目标 f0 的谐波数**不得**被封顶 —— 参考实现按 Nyquist 展开到数百个。
+    ///
+    /// 【为什么钉住】若把目标谐波数钳到拟合用的 80，`GlottalRd::gain_at` 会对
+    /// 第 80 次以上的谐波一律返回末值，高频段被压成平的增益曲线，低音因此失去
+    /// 高频细节（与 `HifiRdTension.cs:57` 的不设限口径不符）。
+    #[test]
+    fn low_target_pitch_uses_many_harmonics() {
+        let sr = 44_100u32;
+        let f0 = 55.0f64; // A1：Nyquist 处约 400 次谐波，远超 80
+        let n = sr as usize / 4;
+        let sig: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f64 / sr as f64;
+                let mut s = 0.0;
+                for k in 1..=40 {
+                    s += (0.2 / k as f64) * (2.0 * std::f64::consts::PI * f0 * k as f64 * t).sin();
+                }
+                s as f32
+            })
+            .collect();
+        let f0v = vec![f0; n / HOP + 2];
+        let y = RdTension::apply(&sig, &f0v, sr, |_| 80.0, |_| f0);
+        assert!(y.iter().all(|v| v.is_finite()));
+        let rms =
+            |s: &[f32]| (s.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt();
+        let ratio = rms(&y) / rms(&sig);
+        assert!(ratio > 0.2, "low-pitch output collapsed, ratio {ratio}");
+    }
+
+    /// 极短输入（不足一帧 / 不足一个 N_FFT）不得 panic。
+    #[test]
+    fn very_short_inputs_do_not_panic() {
+        let sr = 44_100u32;
+        for len in [1usize, 2, 100, HOP, HOP + 1, N_FFT - 1, N_FFT] {
+            let x = vec![0.1f32; len];
+            let f0 = vec![220.0f64; 4];
+            let y = RdTension::apply(&x, &f0, sr, |_| 100.0, |_| 220.0);
+            assert_eq!(y.len(), len, "length must be preserved for len {len}");
+            assert!(y.iter().all(|v| v.is_finite()));
+        }
+    }
+
+    /// 静音输入不得产生 NaN（log(0) 路径）。
+    #[test]
+    fn silence_input_is_safe() {
+        let sr = 44_100u32;
+        let x = vec![0.0f32; 8192];
+        let f0 = vec![220.0f64; 8192 / HOP + 2];
+        let y = RdTension::apply(&x, &f0, sr, |_| 100.0, |_| 220.0);
+        assert!(y.iter().all(|v| v.is_finite()), "silence must not produce NaN");
+        assert!(y.iter().all(|v| v.abs() < 1e-6), "silence in, silence out");
+    }
+    }
