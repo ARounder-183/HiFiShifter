@@ -372,7 +372,11 @@ if !extra_param_enabled(extra_params, "breath_enabled") {
 - [x] `setEditParam` 是否存在绕过 reducer 的直接写入点 → **无**，且门禁不能放
       reducer（读不到开关状态），落在既有回退 effect（见 §4.2 第 3 点）
 - [ ] clip 级 `extra_params` 覆盖在迁移中的遍历方式
-- [x] 前端"参数下拉"是否也列出被门禁参数 → **列出**：下拉由
-      `processorParams`（= `kind.type === "automation_curve"` 的过滤结果，
-      `PianoRollPanel.tsx:2065/2231`）驱动，含 `breath_gain` 与 `hifigan_tension`。
-      因两者在关闭时仍**可见**（需求 2），下拉中保留条目但需置灰不可选。
+- [x] 前端"参数下拉"是否也列出被门禁参数 → **不需要处理**。
+      实现时核对：唯一按参数列出条目的下拉是"音高组"的子参数菜单
+      （`PianoRollPanel.tsx:7688-7706`），其中只有 `pitch` 与子轨音高偏移参数，
+      **不含** processor 参数。
+      `processorParams` 的两个消费点是 `available` 集合（第 2259 行，用于
+      `editParam` 失效回退）与 `processorParamIds`（第 2418 行，传给副参数叠加
+      选择逻辑）—— 两者都不是"可点选的下拉条目"，因此无需置灰。
+      初稿的"下拉中也需置灰"是基于未核实的假设，特此更正。

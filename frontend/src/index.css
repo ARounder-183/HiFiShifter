@@ -855,6 +855,22 @@ textarea {
 .param-pill__seg--inert {
     cursor: default;
 }
+/*
+ * 被门禁的参数（气声分离开关闭时的「气声音量」与「张力」）：置灰且不可选中。
+ *
+ * 半透明 + not-allowed 指针，与 `--inert`（光标 default）区分开：
+ * `--inert` 是"本来就不可点"，这里是"暂时不可用，开启开关后即可"。
+ * 注意只作用于标签片段 —— 眼睛（曲线显隐）仍可点击，因为曲线要保持可见。
+ */
+.param-pill__seg--disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+/* 置灰后不得再有悬停高亮（否则看起来仍可点） */
+.param-pill__seg--disabled:hover,
+.param-pill[data-active] .param-pill__seg--disabled:hover {
+    background: transparent;
+}
 .param-pill__seg--eye {
     min-width: 24px;
     padding-inline: 4px;

@@ -75,6 +75,12 @@ import {
     timelineViewportStateToNative,
 } from "../../utils/timelineViewportSync";
 import { isModifierActive, isNoneBinding } from "../../features/keybindings/keybindingsSlice";
+import {
+    SEPARATION_PARAM_ID,
+    findBlockedEditParam,
+    isGatedBySeparation,
+    isSeparationEnabled,
+} from "../../features/pitch/separationGate";
 import { useNonPassiveWheel } from "../../utils/useNonPassiveWheel";
 import { getActiveSurface, setActiveSurfaceExplicit } from "../../features/uiFocus/focusSurface";
 import { findFirstExternalPathAction } from "./timeline/dnd";
@@ -542,12 +548,26 @@ type ParamToolbarPillProps = {
     trailing?: React.ReactNode;
     /** 可选片段：子参数下拉菜单的触发按钮（已含 param-pill__seg 样式类） */
     dropdown?: React.ReactNode;
+    /**
+     * 参数是否不可用（置灰、不可选中）。
+     *
+     * 当前用途：气声分离开关闭时，`breath_gain` 与 `hifigan_tension` 都依赖分离，
+     * 因此不可编辑、也不参与合成。注意**只禁用标签的选中**，眼睛（曲线显隐）
+     * 仍然可用 —— 曲线需要保持可见，见下方 `disabled` 分支的说明。
+     */
+    disabled?: boolean;
+    /** 禁用原因（ToolTip）。未提供时沿用 `labelTooltip`。 */
+    disabledTooltip?: string;
 };
 
 /**
  * 参数编辑器工具栏的“参数分组药丸”：眼睛 → 参数名 →（气声开关/子参数下拉）。
  * 各片段共享一块连续背景；激活参数统一铺全局强调色（--accent-9），
  * 片段间用细分隔线区分；悬停时只高亮当前片段，提示其独立可点击。
+ *
+ * `disabled` 只作用于**标签片段**（选中该参数），不影响眼睛片段：
+ * 被门禁的参数曲线仍需保持可见（用户要能看到自己画过什么），
+ * 而"能否编辑"由父组件的 `editParam` 回退负责。
  */
 const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
     label,
@@ -560,6 +580,8 @@ const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
     eyeLabel,
     trailing,
     dropdown,
+    disabled = false,
+    disabledTooltip,
 }) => {
     const eyeInert = eyeMode === "main";
     const eyeIcon = eyeMode === "off" ? <EyeClosedIcon /> : <EyeOpenIcon />;
@@ -588,9 +610,15 @@ const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
             </button>
             <button
                 type="button"
-                className="param-pill__seg param-pill__seg--label"
-                data-tooltip={labelTooltip}
-                onClick={onSelect}
+                tabIndex={disabled ? -1 : undefined}
+                className={
+                    disabled
+                        ? "param-pill__seg param-pill__seg--label param-pill__seg--disabled"
+                        : "param-pill__seg param-pill__seg--label"
+                }
+                data-tooltip={disabled ? (disabledTooltip ?? labelTooltip) : labelTooltip}
+                aria-disabled={disabled || undefined}
+                onClick={disabled ? undefined : onSelect}
             >
                 {label}
             </button>
@@ -2274,6 +2302,32 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         effectiveSelectedTrackId,
         selectedIsChildTrack,
     ]);
+
+    // ── 气声分离开关状态 ────────────────────────────────────────────────────
+    //
+    // 开关值为 1 表示"做谐波/噪声分离"。它是气声音量与张力共同的前提：
+    // 关闭时两者置灰、不可编辑，且不参与合成（后端在 `ClipProcessContext`
+    // 构造点剥离这两条曲线，因此也不会走 HNSEP）。
+    // 阈值语义见 `separationGate.ts`（与后端 `extra_param_enabled` 同口径）。
+    const separationEnabled = useMemo(() => {
+        const desc = processorStaticParams.find((sp) => sp.id === SEPARATION_PARAM_ID);
+        const defaultValue =
+            desc && desc.kind.type === "static_enum" ? desc.kind.default_value : 0;
+        return isSeparationEnabled(processorStaticValues[SEPARATION_PARAM_ID], defaultValue);
+    }, [processorStaticParams, processorStaticValues]);
+
+    // 开关刚被关闭时，若当前正在编辑被门禁的参数，把 `editParam` 移开。
+    //
+    // 【为什么必须回退而不是仅仅置灰】曲线编辑的唯一闸门是 `editParam`
+    // （画布绘制路径经 `usePianoRollInteractions` 读同一状态）。若不移开，
+    // 用户仍能在画布上继续画该参数的曲线 —— 与"不可编辑"矛盾。
+    // 移开后曲线仍然**可见**（照常绘制），只是不再接受编辑。
+    //
+    // 该 effect 是**收敛**的：回退到 `pitch` 后判据不再成立，不会反复 dispatch。
+    useEffect(() => {
+        const fallback = findBlockedEditParam(editParam, separationEnabled, "pitch");
+        if (fallback) dispatch(setEditParam(fallback as typeof editParam));
+    }, [editParam, separationEnabled, dispatch]);
 
     // 收集轨道组内所有 trackId（root + 递归所有子轨道）
     const groupTrackIds = useMemo(() => {
@@ -7794,6 +7848,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             const paramActive = editParam === p.id;
                             const paramEyeVisible = secondaryParamVisible[p.id] ?? false;
 
+                            // 气声分离开关闭时，依赖分离的参数（气声音量/张力）置灰：
+                            // 不可选中，其曲线保持可见但不可编辑，且不参与合成。
+                            const paramGated = isGatedBySeparation(p.id, separationEnabled);
+
                             // 气声分离开关已独立成工具栏上的按钮组（见下方
                             // processorStaticParams 渲染块）。这里不再把它融合进
                             // breath_gain 药丸 —— 融合会让"分离"这一**全局前提**
@@ -7805,6 +7863,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     labelTooltip={getProcessorParamLabel(p)}
                                     active={paramActive}
                                     onSelect={() => dispatch(setEditParam(p.id))}
+                                    disabled={paramGated}
+                                    disabledTooltip={t("separation_required_tooltip")}
                                     eyeMode={paramActive ? "main" : paramEyeVisible ? "on" : "off"}
                                     onToggleEye={() => toggleSecondaryParam(p.id)}
                                     eyeTooltip={
