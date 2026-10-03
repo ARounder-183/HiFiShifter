@@ -13,7 +13,11 @@
 
 import { describe, expect, test } from "vitest";
 
-import { fileBrowserSearchOptions, fileBrowserSearchRequest, visibleFileBrowserEntries } from "./fileBrowserSearchOptions";
+import {
+    fileBrowserSearchOptions,
+    fileBrowserSearchRequest,
+    visibleFileBrowserEntries,
+} from "./fileBrowserSearchOptions";
 import { DEFAULT_SEARCH_SETTINGS } from "../search/searchSettings";
 import type { FileEntry } from "../../services/api/fileBrowser";
 

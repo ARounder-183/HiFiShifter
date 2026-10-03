@@ -36,7 +36,8 @@ function cssBlocks(source: string): CssBlock[] {
             selectorStart = i + 1;
         } else if (ch === "}") {
             const frame = open.pop();
-            if (frame) blocks.push({ selector: frame.selector, body: css.slice(frame.bodyStart, i) });
+            if (frame)
+                blocks.push({ selector: frame.selector, body: css.slice(frame.bodyStart, i) });
             selectorStart = i + 1;
         }
     }
@@ -159,9 +160,7 @@ describe("菜单样式模型的形状", () => {
     });
 
     test("分隔线两侧外边距对称（不把高度转嫁给相邻项）", () => {
-        const separator = menuBlocks().find(
-            (block) => block.selector === ".hs-menu__separator",
-        );
+        const separator = menuBlocks().find((block) => block.selector === ".hs-menu__separator");
         expect(separator, "找不到 `.hs-menu__separator` 规则").toBeTruthy();
         // `margin: <上> <右> <下> <左>` 的上与下必须相等。
         const margin = declaredValue(separator!, "margin");
@@ -196,9 +195,6 @@ describe("菜单样式模型不能空转", () => {
         const unadopted = classes.filter(
             (name) => !(name in NO_CONSUMER_ALLOWED) && !sources.some((s) => s.includes(name)),
         );
-        expect(
-            unadopted,
-            "以下菜单类没有任何消费者 —— 抽象层在空转，删掉或接上：",
-        ).toEqual([]);
+        expect(unadopted, "以下菜单类没有任何消费者 —— 抽象层在空转，删掉或接上：").toEqual([]);
     });
 });

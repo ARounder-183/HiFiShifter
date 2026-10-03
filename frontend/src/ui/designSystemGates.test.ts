@@ -973,7 +973,8 @@ describe("上下文菜单共用同一个样式模型", () => {
             for (const literal of classLiterals(source)) {
                 if (!literal.includes(SHELL)) continue;
                 const redeclared = literal.match(/\b(bg-qt-window|rounded|shadow-\w+)\b/);
-                if (redeclared) offenders.push(`${file}: 「${literal.trim()}」重写了 ${redeclared[1]}`);
+                if (redeclared)
+                    offenders.push(`${file}: 「${literal.trim()}」重写了 ${redeclared[1]}`);
             }
         }
         expect(
@@ -1015,20 +1016,16 @@ describe("上下文菜单共用同一个样式模型", () => {
         // 定义本身（`--qt-menu-x:`）不算消费者，否则令牌层空转也查不出来。
         const defined = [
             ...new Set(
-                (readFileSync(TOKEN_CSS, "utf8").match(/--qt-menu-[a-z0-9-]+(?=\s*:)/g) ?? []),
+                readFileSync(TOKEN_CSS, "utf8").match(/--qt-menu-[a-z0-9-]+(?=\s*:)/g) ?? [],
             ),
         ];
         expect(defined.length, "没有找到任何 --qt-menu-* 令牌，正则已失效").toBeGreaterThan(5);
 
         const files = sourceFiles(/\.(tsx?|css)$/);
         const missing = defined.filter(
-            (token) =>
-                !files.some((file) => readFileSync(file, "utf8").includes(`var(${token}`)),
+            (token) => !files.some((file) => readFileSync(file, "utf8").includes(`var(${token}`)),
         );
-        expect(
-            missing,
-            "以下菜单令牌没有任何消费者 —— 令牌层在空转，删掉或接上：",
-        ).toEqual([]);
+        expect(missing, "以下菜单令牌没有任何消费者 —— 令牌层在空转，删掉或接上：").toEqual([]);
     });
 
     test(".hs-menu* 的取值只来自令牌层", () => {
@@ -1045,7 +1042,11 @@ describe("上下文菜单共用同一个样式模型", () => {
                 const text = declaration.trim();
                 if (!text) continue;
                 const property = text.slice(0, text.indexOf(":")).trim();
-                if (!/^(font-size|border-radius|color|background|background-color|box-shadow|border|border-color)$/.test(property)) {
+                if (
+                    !/^(font-size|border-radius|color|background|background-color|box-shadow|border|border-color)$/.test(
+                        property,
+                    )
+                ) {
                     continue;
                 }
                 // `border-radius: 0` 是形状不是风格；`inherit` / `none` / `transparent`
