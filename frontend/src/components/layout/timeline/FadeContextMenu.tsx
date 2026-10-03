@@ -23,10 +23,10 @@ import { registerDragAbort } from "./gestureFocusGuard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
 import {
-    formatKeybinding,
+    formatKeybindingList,
     isModifierActive,
-    isNoneBinding,
     selectKeybinding,
+    selectKeybindings,
 } from "../../../features/keybindings/keybindingsSlice";
 import { useAppSelector } from "../../../app/hooks";
 import {
@@ -302,10 +302,9 @@ export const FadeContextMenu: React.FC<{
     useMenuKeyboard(menuRef);
     // 底部提示展示用户实际配置的曲率修饰键（如 "Alt"）。
     const curvatureKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.fadeCurvatureDrag"),
+        selectKeybindings(state, "modifier.fadeCurvatureDrag"),
     );
-    const keysText =
-        curvatureKb && !isNoneBinding(curvatureKb) ? formatKeybinding(curvatureKb, "") : "";
+    const keysText = formatKeybindingList(curvatureKb, "");
     const curvatureHint = (t("fade_menu_curvature_hint") as string).replace("{keys}", keysText);
 
     // 视口夹紧（同 ClipContextMenu 规则）。

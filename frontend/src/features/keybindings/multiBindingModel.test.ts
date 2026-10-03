@@ -97,17 +97,20 @@ describe("列表读取辅助", () => {
         expect(keybindingsEqual([a], [a, b])).toBe(false);
     });
 
-    it("formatKeybindingList 用 / 连接全部绑定，跳过「无」", () => {
+    it("formatKeybindingList 用 ; 连接全部绑定，跳过「无」", () => {
         const text = formatKeybindingList([
             { key: "z", ctrl: true, shift: true },
             { key: "y", ctrl: true },
         ]);
         expect(text).toBe(
-            `${formatKeybinding({ key: "z", ctrl: true, shift: true })} / ${formatKeybinding({
+            `${formatKeybinding({ key: "z", ctrl: true, shift: true })};${formatKeybinding({
                 key: "y",
                 ctrl: true,
             })}`,
         );
+        // 分隔符无空格，且不与组合键自身的 `+` 混淆。
+        expect(text).toContain(";");
+        expect(text).not.toContain(" / ");
         expect(formatKeybindingList([{ key: "a" }, NONE])).toBe(formatKeybinding({ key: "a" }));
         expect(formatKeybindingList([NONE], "none")).toBe("none");
         expect(formatKeybindingList([], "none")).toBe("none");

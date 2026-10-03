@@ -230,12 +230,15 @@ export function keybindingsEqual(a: readonly Keybinding[], b: readonly Keybindin
     return a.every((binding, index) => keybindingEqual(binding, b[index]));
 }
 
+/** 多绑定在一行里的分隔符。`;` 无空格：紧凑，且不与组合键自身的 `+` 混淆。 */
+export const KEYBINDING_LIST_SEPARATOR = ";";
+
 /**
- * 把一个动作的全部绑定格式化为一行（`"Ctrl+Shift+Z / Ctrl+Y"`）。
+ * 把一个动作的全部绑定格式化为一行（`"Ctrl+Shift+Z;Ctrl+Y"`）。
  *
- * 全部为"无"时返回 `noneLabel`（缺省 `—`）。调用方（设置面板的摘要、
- * 按钮 tooltip）用它展示**完整**配置；菜单栏那种宽度受限的位置请用
- * `formatKeybinding(firstBinding(...))` 只显示主绑定。
+ * 全部为"无"时返回 `noneLabel`（缺省 `—`）。**这是"展示快捷键文本"的统一
+ * 入口**：菜单栏、右键菜单、按钮 tooltip 都走它 —— 只显示主绑定会让用户
+ * 以为备用键没生效（他明明在设置里绑了两个）。
  */
 export function formatKeybindingList(
     bindings: readonly Keybinding[] | undefined,
@@ -243,7 +246,7 @@ export function formatKeybindingList(
 ): string {
     const parts = (bindings ?? []).filter((binding) => !isNoneBinding(binding));
     if (parts.length === 0) return noneLabel ?? "—";
-    return parts.map((binding) => formatKeybinding(binding)).join(" / ");
+    return parts.map((binding) => formatKeybinding(binding)).join(KEYBINDING_LIST_SEPARATOR);
 }
 
 // ─── Slice ───────────────────────────────────────────────────────

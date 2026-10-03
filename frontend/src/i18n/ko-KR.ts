@@ -1686,8 +1686,8 @@ export const koKR = {
     kb_edit_quantize: "퀀타이즈",
     kb_edit_mean_quantize: "평균 퀀타이즈",
     kb_edit_paste_tracks: "새 트랙으로 붙여넣기",
-    kb_edit_add_clips_to_param_selection: "선택한 클립 범위를 파라미터 선택 범위에 추가",
-    kb_edit_remove_clips_from_param_selection: "선택한 클립 범위를 파라미터 선택 범위에서 제거",
+    kb_edit_add_clips_to_param_selection: "클립 범위를 파라미터 선택에 추가",
+    kb_edit_remove_clips_from_param_selection: "클립 범위를 파라미터 선택에서 제거",
     kb_edit_paste_vocalshifter: "VocalShifter 클립보드 붙여넣기",
 
     // 스크롤 수정 키바인딩

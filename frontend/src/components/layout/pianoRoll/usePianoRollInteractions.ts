@@ -56,10 +56,11 @@ import {
     firstBinding,
     isModifierActive,
     isNoneBinding,
+    isNoneBindingList,
 } from "../../../features/keybindings/keybindingsSlice";
 import {
     matchesAnyKeybinding,
-    matchesKeybindingAllowingFineModifier,
+    matchKeybindingAllowingFineModifier,
 } from "../../../features/keybindings/useKeybindings";
 import { ACTION_META } from "../../../features/keybindings/defaultKeybindings";
 import type { Keybinding } from "../../../features/keybindings/types";
@@ -503,7 +504,7 @@ export function usePianoRollInteractions(args: {
     /** 切换拖动方向的回调 */
     onCycleDragDirection?: (tool: "select" | "draw" | "vibrato") => void;
     /** 拖拽期间切换拖动方向的快捷键（触控板用户替代「拖拽中右键」） */
-    cycleDragDirectionKb?: Keybinding;
+    cycleDragDirectionKb?: readonly Keybinding[];
     /**
      * 撤销栈深度读取器（后端权威镜像）。仅「边缘拉伸」手势在提交成功后
      * 用它登记选区步骤（撤销/重做恢复对应选区），其余操作不消费。
@@ -961,14 +962,14 @@ export function usePianoRollInteractions(args: {
      */
     const installDragDirectionKeyCycler = useCallback(
         (cycleLocalDragDir: () => void) => {
-            const kb = cycleDragDirectionKb;
-            if (!kb || isNoneBinding(kb)) {
+            const bindings = cycleDragDirectionKb;
+            if (!bindings || isNoneBindingList(bindings)) {
                 return () => {};
             }
             document.body.setAttribute(PARAM_DRAG_ATTR, "true");
             const onKeyDown = (e: globalThis.KeyboardEvent) => {
                 if (e.repeat) return;
-                if (!matchesKeybindingAllowingFineModifier(e, kb, paramFineAdjustKb)) return;
+                if (!matchKeybindingAllowingFineModifier(e, bindings, paramFineAdjustKb)) return;
                 e.preventDefault();
                 e.stopPropagation();
                 cycleLocalDragDir();

@@ -298,3 +298,60 @@ describe("多绑定：一行的 chip 列表与追加按钮", () => {
         }
     });
 });
+
+/**
+ * 行的布局稳定性：录入态不得移动任何已有元素。
+ *
+ * 【回归背景】chip 的文字会在录入时变成"请按键…"，`+` 也会因为不能追加而消失 ——
+ * 两者都会让整行左右跳动（用户报告的"按钮不对齐"）。修法是 chip 固定宽度 +
+ * `+` 的槽位常驻。jsdom 没有布局引擎，因此这里锁**结构性保证**：
+ * 行内元素数量在进入录入态前后不变、`+` 仍在（只是禁用）、chip 宽度是固定值。
+ */
+describe("布局稳定性：录入态不移动已有元素", () => {
+    it("进入录入态不改变行内元素数量，且追加按钮仍占位（禁用）", () => {
+        const { cleanup } = renderDialog();
+        try {
+            const chip = document.body.querySelector<HTMLElement>('[data-hs-kb-slot="0"]');
+            expect(chip).not.toBeNull();
+            const row = chip!.closest<HTMLElement>("[data-hs-kb-row]");
+            expect(row).not.toBeNull();
+            const before = row!.querySelectorAll("[data-hs-kb-slot], [data-hs-kb-add]").length;
+
+            act(() => {
+                chip!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+            });
+
+            const rowAfter = document.body
+                .querySelector<HTMLElement>('[data-hs-kb-slot="0"]')!
+                .closest<HTMLElement>("[data-hs-kb-row]")!;
+            expect(rowAfter.querySelectorAll("[data-hs-kb-slot], [data-hs-kb-add]").length).toBe(
+                before,
+            );
+            const add = rowAfter.querySelector<HTMLButtonElement>("[data-hs-kb-add]");
+            expect(add).not.toBeNull();
+            expect(add!.disabled).toBe(true);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it("每个 chip 都是固定宽度 + 省略号（文字长短不改变布局）", () => {
+        const { cleanup } = renderDialog();
+        try {
+            const chips = Array.from(
+                document.body.querySelectorAll<HTMLElement>("[data-hs-kb-slot]"),
+            );
+            expect(chips.length).toBeGreaterThan(0);
+            const widths = new Set<string>();
+            for (const chip of chips) {
+                expect(chip.style.width).not.toBe("");
+                expect(chip.style.textOverflow).toBe("ellipsis");
+                widths.add(chip.style.width);
+            }
+            // 全表同一个宽度 —— 跨行也齐。
+            expect(widths.size).toBe(1);
+        } finally {
+            cleanup();
+        }
+    });
+});

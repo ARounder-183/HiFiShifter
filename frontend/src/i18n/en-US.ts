@@ -1738,9 +1738,8 @@ export const enUS = {
     kb_edit_quantize: "Quantize",
     kb_edit_mean_quantize: "Mean Quantize",
     kb_edit_paste_tracks: "Paste as New Tracks",
-    kb_edit_add_clips_to_param_selection: "Add Selected Clips' Ranges to the Parameter Selection",
-    kb_edit_remove_clips_from_param_selection:
-        "Remove Selected Clips' Ranges from the Parameter Selection",
+    kb_edit_add_clips_to_param_selection: "Add Clip Ranges to Param Selection",
+    kb_edit_remove_clips_from_param_selection: "Remove Clip Ranges from Param Selection",
     kb_edit_paste_vocalshifter: "Paste VocalShifter Clipboard",
 
     // Scroll modifier keybindings

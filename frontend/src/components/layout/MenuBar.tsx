@@ -55,9 +55,7 @@ import { useAppTheme } from "../../theme/AppThemeProvider";
 import { GlobeIcon } from "@radix-ui/react-icons";
 import {
     selectMergedKeybindings,
-    formatKeybinding,
-    firstBinding,
-    isNoneBinding,
+    formatKeybindingList,
 } from "../../features/keybindings/keybindingsSlice";
 import type { ActionId } from "../../features/keybindings/types";
 import {
@@ -390,15 +388,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     /**
      * 获取某个操作的快捷键显示文本（未绑定 / 无绑定时返回空字符串，不显示）。
      *
-     * 【只显示主绑定】一个动作可以绑多个键，但菜单项的快捷键列宽度固定，
-     * `Ctrl+Shift+Z / Ctrl+Y` 这种整串会把菜单标签挤变形。菜单显示主绑定
-     * （下标 0，与 DAW 惯例一致），完整配置在「快捷键设置」里看。
+     * 【绑了多个键就显示多个】用户既然绑了 `Ctrl+Shift+Z` 与 `Ctrl+Y` 两个，
+     * 菜单里就必须让他看见两个 —— 只显示主绑定会让他以为备用键没生效。
+     * 多个文本用 `;` 连接（与右键菜单、tooltip 走同一个 `formatKeybindingList`）。
      */
     function shortcutLabel(actionId: ActionId): string {
-        const bindings = keybindings[actionId];
-        const primary = firstBinding(bindings);
-        if (!bindings || isNoneBinding(primary)) return "";
-        return formatKeybinding(primary, "");
+        return formatKeybindingList(keybindings[actionId], "");
     }
 
     /**

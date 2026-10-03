@@ -1612,8 +1612,8 @@ export const jaJP = {
     kb_edit_quantize: "クオンタイズ",
     kb_edit_mean_quantize: "平均クオンタイズ",
     kb_edit_paste_tracks: "新しいトラックとしてペースト",
-    kb_edit_add_clips_to_param_selection: "選択クリップの範囲をパラメーター選択範囲に追加",
-    kb_edit_remove_clips_from_param_selection: "選択クリップの範囲をパラメーター選択範囲から削除",
+    kb_edit_add_clips_to_param_selection: "クリップ範囲をパラメーター選択に追加",
+    kb_edit_remove_clips_from_param_selection: "クリップ範囲をパラメーター選択から削除",
     kb_edit_paste_vocalshifter: "VocalShifter クリップボードをペースト",
 
     // スクロール修飾キーバインド

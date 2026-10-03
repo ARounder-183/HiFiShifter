@@ -40,7 +40,6 @@ import {
 } from "../../features/keybindings/keybindingSearch";
 import { translitTermsOf, useTranslitIndex } from "../../features/search/useTranslitIndex";
 import type { ActionId, ActionMeta, Keybinding } from "../../features/keybindings/types";
-import { MAX_BINDINGS_PER_ACTION } from "../../features/keybindings/types";
 import { canonicalKeyFromEvent } from "../../features/keybindings/keybindingMatch";
 import { useShortcutSuppression } from "../../ui/shortcutScope";
 import { AppDialog, AppSelect } from "../../ui";
@@ -544,18 +543,11 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                     isDefault={isDefaultBindings(currentBindings, defaultBindings)}
                     recordingSlot={recording?.actionId === actionId ? recording.slot : null}
                     gestureLabel={gesture ? tf(gesture.labelKey) : undefined}
-                    isDefaultModifierOnly={isModifierOnlyAction}
+                    isModifierOnly={isModifierOnlyAction}
                     noneLabel={noneLabel}
                     pressKeyLabel={pressKeyLabel}
                     pressModifierLabel={pressModifierLabel}
                     addBindingLabel={tf("kb_add_binding")}
-                    /*
-                     * 修饰键手势只有一个槽位：它的"键"就是修饰键本身，
-                     * 绑两个修饰键组合没有可解释的语义（按下哪一个算触发？）。
-                     */
-                    canAddBinding={
-                        !isModifierOnlyAction && currentBindings.length < MAX_BINDINGS_PER_ACTION
-                    }
                     groupLabel={groupLabel}
                     onStartRecording={(slot) => {
                         setConflict(null);

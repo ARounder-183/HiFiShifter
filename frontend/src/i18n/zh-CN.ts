@@ -1557,8 +1557,8 @@ export const zhCN = {
     kb_edit_quantize: "量化",
     kb_edit_mean_quantize: "均值量化",
     kb_edit_paste_tracks: "作为新轨道组粘贴",
-    kb_edit_add_clips_to_param_selection: "把选中音频块的范围加入参数选区",
-    kb_edit_remove_clips_from_param_selection: "从参数选区中移除选中音频块的范围",
+    kb_edit_add_clips_to_param_selection: "音频块范围加入参数选区",
+    kb_edit_remove_clips_from_param_selection: "音频块范围移出参数选区",
     kb_edit_paste_vocalshifter: "粘贴 VocalShifter 剪贴板",
 
     // Scroll modifier keybindings

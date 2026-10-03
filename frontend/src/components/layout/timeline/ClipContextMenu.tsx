@@ -6,9 +6,8 @@ import { AppSubMenu } from "../../../ui";
 import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
-import { useAppDispatch, useAppSelector } from "../../../app/hooks";
-import { selectKeybinding, formatKeybinding } from "../../../features/keybindings/keybindingsSlice";
-import type { ActionId } from "../../../features/keybindings/types";
+import { useAppDispatch } from "../../../app/hooks";
+import { useMenuShortcut } from "../../../ui/useMenuShortcut";
 import {
     addClipTakeFromMediaRemote,
     cycleClipTakesRemote,
@@ -57,22 +56,11 @@ const MenuItem: React.FC<{
         }}
     >
         <span className="hs-menu__label-text">{label}</span>
-        <span className="hs-menu__trail">
-            {shortcut ? <span>{shortcut}</span> : null}
-        </span>
+        <span className="hs-menu__trail">{shortcut ? <span>{shortcut}</span> : null}</span>
     </button>
 );
 
 const Divider: React.FC = () => <div className="hs-menu__separator" role="separator" />;
-
-/**
- * 读取动作当前生效的快捷键文本（跟随用户在快捷键设置中的自定义绑定）。
- * 未绑定（None binding）时返回 undefined，菜单项不显示快捷键。
- */
-function useMenuShortcut(actionId: ActionId): string | undefined {
-    const kb = useAppSelector((state) => selectKeybinding(state, actionId));
-    return formatKeybinding(kb, "") || undefined;
-}
 
 /**
  * Take 行菜单项：点击行切换 active take；行尾“倒放”小按钮翻转**该 Take

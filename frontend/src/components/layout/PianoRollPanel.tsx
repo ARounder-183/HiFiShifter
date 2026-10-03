@@ -269,8 +269,10 @@ import type {
     ValueViewport,
 } from "./pianoRoll/types";
 import {
-    formatKeybinding,
+    formatKeybindingList,
+    isNoneBindingList,
     selectKeybinding,
+    selectKeybindings,
     selectMergedKeybindings,
 } from "../../features/keybindings/keybindingsSlice";
 
@@ -1075,7 +1077,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const vibratoPresetMenuRef = useRef<HTMLDivElement | null>(null);
     // 拖动方向循环切换键：拖拽进行中按下可即时切换本次拖拽方向（触控板替代右键）。
     const cycleDragDirectionKb = useAppSelector((state) =>
-        selectKeybinding(state, "pianoRoll.cycleDragDirection"),
+        selectKeybindings(state, "pianoRoll.cycleDragDirection"),
     );
     const mergedKeybindings = useAppSelector(selectMergedKeybindings);
     // 是否按住切换吸附的修饰键（临时切换吸附时用于高亮显示）
@@ -7573,9 +7575,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         <AppIconButton
                             active={activeDragDirection !== "free"}
                             tooltip={`${tf("drag_direction")}: ${tf(activeDragDirection === "free" ? "drag_direction_free" : activeDragDirection === "x-only" ? "drag_direction_x_only" : "drag_direction_y_only")}${
-                                isNoneBinding(cycleDragDirectionKb)
+                                isNoneBindingList(cycleDragDirectionKb)
                                     ? ""
-                                    : ` (${formatKeybinding(cycleDragDirectionKb, "")})`
+                                    : ` (${formatKeybindingList(cycleDragDirectionKb, "")})`
                             }`}
                             tabIndex={-1}
                             onClick={() => {
