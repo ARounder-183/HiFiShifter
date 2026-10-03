@@ -941,6 +941,7 @@ export const zhCN = {
     kb_dialog_title: "快捷键设置",
     kb_dialog_desc: "点击快捷键可重新绑定，按 Esc 取消录入。",
     kb_press_key: "请按键...",
+    kb_add_binding: "添加另一个快捷键",
     kb_reset_default: "恢复默认",
     kb_reset_all: "全部恢复默认",
     kb_close: "关闭",

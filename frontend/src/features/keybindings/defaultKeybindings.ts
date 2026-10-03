@@ -1,5 +1,4 @@
 import type { ActionId, ActionMeta, KeybindingMap } from "./types";
-import { IS_MAC } from "../../utils/platform";
 
 /**
  * 默认快捷键映射表
@@ -8,213 +7,232 @@ import { IS_MAC } from "../../utils/platform";
  */
 export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // 模式切换
-    "mode.toggle": { key: "tab" },
-    "mode.selectTool": { key: "f7" },
-    "mode.drawTool": { key: "f8" },
-    "mode.lineTool": { key: "f9" },
+    "mode.toggle": [{ key: "tab" }],
+    "mode.selectTool": [{ key: "f7" }],
+    "mode.drawTool": [{ key: "f8" }],
+    "mode.lineTool": [{ key: "f9" }],
 
     // 播放 / 暂停：播放中暂停（光标留在当前位置），空闲时起播。
-    "playback.toggle": { key: "space" },
+    "playback.toggle": [{ key: "space" }],
     // 播放 / 停止：播放中停止并回到本次起播点；空闲时起播（与 toggle 同为起播，
-    "playback.stop": { key: "enter" },
+    "playback.stop": [{ key: "enter" }],
     // 节拍器开关：默认 `K`（对齐 Logic Pro 的节拍器键位惯例），不占用 `M`、`R`。
-    "playback.metronome": { key: "k" },
-    "recording.toggle": { key: "r", ctrl: true },
-    "playback.focusCursor": { key: "'" }, // 聚焦播放光标
-    "playback.seekLeft": { key: "arrowleft" },
-    "playback.seekRight": { key: "arrowright" },
-    "timeline.zoomIn": { key: "__none__" },
-    "timeline.zoomOut": { key: "__none__" },
+    "playback.metronome": [{ key: "k" }],
+    "recording.toggle": [{ key: "r", ctrl: true }],
+    "playback.focusCursor": [{ key: "'" }], // 聚焦播放光标
+    "playback.seekLeft": [{ key: "arrowleft" }],
+    "playback.seekRight": [{ key: "arrowright" }],
+    "timeline.zoomIn": [{ key: "__none__" }],
+    "timeline.zoomOut": [{ key: "__none__" }],
 
     // 编辑
-    "edit.undo": { key: "z", ctrl: true },
-    "edit.redo": IS_MAC ? { key: "z", ctrl: true, shift: true } : { key: "y", ctrl: true },
-    "edit.selectAll": { key: "a", ctrl: true },
-    "edit.deselect": { key: "__none__" },
-    "edit.initialize": { key: "backspace" },
-    "edit.transposeCents": { key: "f", ctrl: true },
-    "edit.transposeDegrees": { key: "i", ctrl: true },
-    "edit.setPitch": { key: "0", ctrl: true },
-    "edit.average": { key: "e", ctrl: true },
-    "edit.smooth": { key: "m", ctrl: true },
-    "edit.addVibrato": { key: "b", ctrl: true },
-    "edit.quantize": { key: "p", ctrl: true },
-    "edit.meanQuantize": { key: "q", ctrl: true },
-    "edit.pasteVocalShifter": { key: "v", shift: true },
-    "edit.pasteTracks": { key: "v", ctrl: true, alt: true },
+    "edit.undo": [{ key: "z", ctrl: true }],
+    // 重做：两个绑定都默认生效 —— `Ctrl+Shift+Z` 与 `Ctrl+Y` 是两套通行的
+    // 重做惯例，用户往往两套都按。主绑定（下标 0）放 `Ctrl+Shift+Z`：它更
+    // 通用，也是菜单显示与长按重复的基准。macOS 上 `ctrl` 自动渲染为 ⌘
+    //（见 formatKeybinding），因此 Mac 侧显示为 ⌘⇧Z / ⌘Y。
+    "edit.redo": [
+        { key: "z", ctrl: true, shift: true },
+        { key: "y", ctrl: true },
+    ],
+    "edit.selectAll": [{ key: "a", ctrl: true }],
+    "edit.deselect": [{ key: "__none__" }],
+    "edit.initialize": [{ key: "backspace" }],
+    "edit.transposeCents": [{ key: "f", ctrl: true }],
+    "edit.transposeDegrees": [{ key: "i", ctrl: true }],
+    "edit.setPitch": [{ key: "0", ctrl: true }],
+    "edit.average": [{ key: "e", ctrl: true }],
+    "edit.smooth": [{ key: "m", ctrl: true }],
+    "edit.addVibrato": [{ key: "b", ctrl: true }],
+    "edit.quantize": [{ key: "p", ctrl: true }],
+    "edit.meanQuantize": [{ key: "q", ctrl: true }],
+    "edit.pasteVocalShifter": [{ key: "v", shift: true }],
+    "edit.pasteTracks": [{ key: "v", ctrl: true, alt: true }],
     // 音频块范围 → 参数编辑器选区（批量入口；手势见 modifier.clipRangeToParamSelection）。
     // Ctrl+Shift+A 与 Ctrl+A（全选音频块）成对，语义即「把选中的音频块范围也纳入
     // 参数编辑器选区」；只作用于当前参数编辑器所属根轨道组内的音频块。
-    "edit.addClipsToParamSelection": { key: "a", ctrl: true, shift: true },
+    "edit.addClipsToParamSelection": [{ key: "a", ctrl: true, shift: true }],
     // 反向操作默认不占键位（手势已覆盖单个音频块的取消场景）
-    "edit.removeClipsFromParamSelection": { key: "__none__" },
+    "edit.removeClipsFromParamSelection": [{ key: "__none__" }],
 
     // 布局（停靠窗体）
     // Ctrl/Cmd+Shift+F 与"浮起来"语义相称，且不与编辑快捷键冲突。
-    "layout.toggleFloat": { key: "f", ctrl: true, shift: true },
-    "layout.focusNext": { key: "f6" },
-    "layout.focusPrev": { key: "f6", shift: true },
-    "layout.maximize": { key: "m", ctrl: true, shift: true },
+    "layout.toggleFloat": [{ key: "f", ctrl: true, shift: true }],
+    "layout.focusNext": [{ key: "f6" }],
+    "layout.focusPrev": [{ key: "f6", shift: true }],
+    "layout.maximize": [{ key: "m", ctrl: true, shift: true }],
     // 面板：新建/解散不设默认键 —— 低频操作，菜单入口即可；可在此绑定。
-    "layout.newPanel": { key: "__none__" },
-    "layout.dissolvePanel": { key: "__none__" },
+    "layout.newPanel": [{ key: "__none__" }],
+    "layout.dissolvePanel": [{ key: "__none__" }],
 
     // 工程
-    "project.new": { key: "n", ctrl: true },
-    "project.open": { key: "o", ctrl: true, shift: true },
-    "project.save": { key: "s", ctrl: true },
-    "project.saveAs": { key: "s", ctrl: true, shift: true },
-    "project.export": { key: "e", ctrl: true },
-    "project.importMedia": { key: "o", ctrl: true },
-    "project.importMidi": { key: "__none__" },
-    "project.importHifishifter": { key: "__none__" },
-    "project.importReaper": { key: "__none__" },
-    "project.importVocalShifter": { key: "__none__" },
+    "project.new": [{ key: "n", ctrl: true }],
+    "project.open": [{ key: "o", ctrl: true, shift: true }],
+    "project.save": [{ key: "s", ctrl: true }],
+    "project.saveAs": [{ key: "s", ctrl: true, shift: true }],
+    "project.export": [{ key: "e", ctrl: true }],
+    "project.importMedia": [{ key: "o", ctrl: true }],
+    "project.importMidi": [{ key: "__none__" }],
+    "project.importHifishifter": [{ key: "__none__" }],
+    "project.importReaper": [{ key: "__none__" }],
+    "project.importVocalShifter": [{ key: "__none__" }],
 
     // 轨道
-    "track.add": { key: "t", ctrl: true },
-    "track.clone": { key: "d", ctrl: true },
-    "track.delete": { key: "delete", ctrl: true },
-    "track.selectUp": { key: "arrowup" },
-    "track.selectDown": { key: "arrowdown" },
+    "track.add": [{ key: "t", ctrl: true }],
+    "track.clone": [{ key: "d", ctrl: true }],
+    "track.delete": [{ key: "delete", ctrl: true }],
+    "track.selectUp": [{ key: "arrowup" }],
+    "track.selectDown": [{ key: "arrowdown" }],
     // 静音/独奏默认不占键位，用户可在快捷键设置中自行绑定。
-    "track.toggleMute": { key: "__none__" },
-    "track.toggleSolo": { key: "__none__" },
+    "track.toggleMute": [{ key: "__none__" }],
+    "track.toggleSolo": [{ key: "__none__" }],
 
     // Clip 操作
-    "clip.delete": { key: "delete" },
-    "clip.copy": { key: "c", ctrl: true },
-    "clip.cut": { key: "x", ctrl: true },
-    "clip.paste": { key: "v", ctrl: true },
-    "clip.split": { key: "s" },
-    "clip.normalize": { key: "n", ctrl: true, shift: true },
-    "clip.group": { key: "g" },
-    "clip.ungroup": { key: "u" },
-    "clip.cycleTake": { key: "t" },
-    "clip.cycleTakePrev": { key: "t", shift: true },
+    "clip.delete": [{ key: "delete" }],
+    "clip.copy": [{ key: "c", ctrl: true }],
+    "clip.cut": [{ key: "x", ctrl: true }],
+    "clip.paste": [{ key: "v", ctrl: true }],
+    "clip.split": [{ key: "s" }],
+    "clip.normalize": [{ key: "n", ctrl: true, shift: true }],
+    "clip.group": [{ key: "g" }],
+    "clip.ungroup": [{ key: "u" }],
+    "clip.cycleTake": [{ key: "t" }],
+    "clip.cycleTakePrev": [{ key: "t", shift: true }],
 
     // PianoRoll 操作
-    "pianoRoll.copy": { key: "c", ctrl: true },
-    "pianoRoll.cut": { key: "x", ctrl: true },
-    "pianoRoll.paste": { key: "v", ctrl: true },
+    "pianoRoll.copy": [{ key: "c", ctrl: true }],
+    "pianoRoll.cut": [{ key: "x", ctrl: true }],
+    "pianoRoll.paste": [{ key: "v", ctrl: true }],
     // 参数线平移三档变化幅度：
     // - 默认（无修饰键）：每参数的常规步长（音高 ±1 半音等）；
     // - Shift：大幅步长（音高 ±1200 音分 = 一个八度等）；
     // - Ctrl：微调步长（音高 ±1 音分等）。
     // 注意：Shift 按下时 e.key 是上档字符（US 布局 Shift+= 产出 "+"），
     // 匹配时按 e.code 物理键位归位（见 keybindingMatch.ts）。
-    "pianoRoll.shiftParamUp": { key: "=" },
-    "pianoRoll.shiftParamDown": { key: "-" },
-    "pianoRoll.shiftParamUpSelection": { key: "]" },
-    "pianoRoll.shiftParamDownSelection": { key: "[" },
-    "pianoRoll.shiftParamUpLarge": { key: "=", shift: true },
-    "pianoRoll.shiftParamDownLarge": { key: "-", shift: true },
-    "pianoRoll.shiftParamUpSelectionLarge": { key: "]", shift: true },
-    "pianoRoll.shiftParamDownSelectionLarge": { key: "[", shift: true },
-    "pianoRoll.shiftParamUpSmall": { key: "=", ctrl: true },
-    "pianoRoll.shiftParamDownSmall": { key: "-", ctrl: true },
-    "pianoRoll.shiftParamUpSelectionSmall": { key: "]", ctrl: true },
-    "pianoRoll.shiftParamDownSelectionSmall": { key: "[", ctrl: true },
-    "pianoRoll.vibratoDragAmplitudeIncrease": { key: "arrowup" },
-    "pianoRoll.vibratoDragAmplitudeDecrease": { key: "arrowdown" },
-    "pianoRoll.vibratoDragFrequencyIncrease": { key: "arrowleft" },
-    "pianoRoll.vibratoDragFrequencyDecrease": { key: "arrowright" },
+    "pianoRoll.shiftParamUp": [{ key: "=" }],
+    "pianoRoll.shiftParamDown": [{ key: "-" }],
+    "pianoRoll.shiftParamUpSelection": [{ key: "]" }],
+    "pianoRoll.shiftParamDownSelection": [{ key: "[" }],
+    "pianoRoll.shiftParamUpLarge": [{ key: "=", shift: true }],
+    "pianoRoll.shiftParamDownLarge": [{ key: "-", shift: true }],
+    "pianoRoll.shiftParamUpSelectionLarge": [{ key: "]", shift: true }],
+    "pianoRoll.shiftParamDownSelectionLarge": [{ key: "[", shift: true }],
+    "pianoRoll.shiftParamUpSmall": [{ key: "=", ctrl: true }],
+    "pianoRoll.shiftParamDownSmall": [{ key: "-", ctrl: true }],
+    "pianoRoll.shiftParamUpSelectionSmall": [{ key: "]", ctrl: true }],
+    "pianoRoll.shiftParamDownSelectionSmall": [{ key: "[", ctrl: true }],
+    "pianoRoll.vibratoDragAmplitudeIncrease": [{ key: "arrowup" }],
+    "pianoRoll.vibratoDragAmplitudeDecrease": [{ key: "arrowdown" }],
+    "pianoRoll.vibratoDragFrequencyIncrease": [{ key: "arrowleft" }],
+    "pianoRoll.vibratoDragFrequencyDecrease": [{ key: "arrowright" }],
     // 拖拽颤音时切换预设：`,` / `.` 是绘图软件里最常见的"上/下一个"位置，
     // 落在右手小指与无名指的静止位上，按住左键拖拽时也能顺手按到。
     // 只在拖拽期间生效（`scopedContext: "pianoRollVibratoDrag"`），因此不会
     // 与任何全局动作抢键。
-    "pianoRoll.vibratoPresetPrev": { key: "," },
-    "pianoRoll.vibratoPresetNext": { key: "." },
+    "pianoRoll.vibratoPresetPrev": [{ key: "," }],
+    "pianoRoll.vibratoPresetNext": [{ key: "." }],
     // 拖动方向循环切换：默认 `D`（Direction）。除切换设置外，左键拖拽参数线
     // 期间按下同一键可即时切换本次拖拽的方向 —— 触控板用户无法在按住左键
     // 的同时按下右键，这条键位是「右键拖拽中切换方向」的等价替代。
-    "pianoRoll.cycleDragDirection": { key: "d" },
+    "pianoRoll.cycleDragDirection": [{ key: "d" }],
 
     // 修饰键行为
     // 多选切换默认为主修饰键（Windows: Ctrl / macOS: ⌘），对齐文件管理器
     // 与 DAW 的"按住主修饰键点击追加选择"惯例；ctrl 字段在 macOS 上自动
     // 映射为 ⌘（isModifierActive 走 isPrimaryModifierDown）。
-    "modifier.clipMultiSelectToggle": {
-        key: "control",
-        modifierOnly: true,
-        ctrl: true,
-    },
+    "modifier.clipMultiSelectToggle": [
+        {
+            key: "control",
+            modifierOnly: true,
+            ctrl: true,
+        },
+    ],
     // 范围选择默认 Shift（按住并点击 = 从上次锚点到点击处范围选择）。
-    "modifier.clipRangeSelect": { key: "shift", modifierOnly: true, shift: true },
+    "modifier.clipRangeSelect": [{ key: "shift", modifierOnly: true, shift: true }],
     // 音高调整默认 Alt+Shift：避免与 Slip/拉伸（Alt）、临时关吸附（Shift）
     // 的单修饰键语义重叠，同时保留 Shift+点击范围选择/⌘+点击多选等点击行为。
-    "modifier.clipPitchDrag": {
-        key: "alt",
-        modifierOnly: true,
-        alt: true,
-        shift: true,
-    },
-    "modifier.clipSlipEdit": { key: "alt", modifierOnly: true, alt: true },
+    "modifier.clipPitchDrag": [
+        {
+            key: "alt",
+            modifierOnly: true,
+            alt: true,
+            shift: true,
+        },
+    ],
+    "modifier.clipSlipEdit": [{ key: "alt", modifierOnly: true, alt: true }],
     // 轨道视图：clip 边缘拖动时从 trim 变为 stretch（改播放速率、内容不被裁掉）。
-    "modifier.clipStretch": { key: "alt", modifierOnly: true, alt: true },
+    "modifier.clipStretch": [{ key: "alt", modifierOnly: true, alt: true }],
     // 参数编辑器：拖动参数选区边缘时拉伸选区。与上面**分离**——两个表面各自的
     // 拉伸语义独立可改绑（此前共用一个 action，改一处会同时改另一处）。
-    "modifier.paramStretch": { key: "alt", modifierOnly: true, alt: true },
-    "modifier.clipNoSnap": { key: "shift", modifierOnly: true, shift: true },
+    "modifier.paramStretch": [{ key: "alt", modifierOnly: true, alt: true }],
+    "modifier.clipNoSnap": [{ key: "shift", modifierOnly: true, shift: true }],
     // macOS 上 ctrl 字段会自动映射为 Command（⌘），因此默认复制拖动为 ⌘+拖动；
     // 避免占用 Option，Option 保留给拉伸/滑动编辑等交替操作。
-    "modifier.clipCopyDrag": { key: "control", modifierOnly: true, ctrl: true },
-    "modifier.clipCrossfadeGrip": {
-        key: "control",
-        modifierOnly: true,
-        ctrl: true,
-    },
+    "modifier.clipCopyDrag": [{ key: "control", modifierOnly: true, ctrl: true }],
+    "modifier.clipCrossfadeGrip": [
+        {
+            key: "control",
+            modifierOnly: true,
+            ctrl: true,
+        },
+    ],
     // 按住并右键单击音频块：把该块范围并入参数编辑器选区（再右键一次取消）。
     // 默认 Alt —— 时间轴的选择类修饰键已被占用（Ctrl=多选切换/复制拖动、
     // Shift=范围选择/临时关吸附），而 Alt 在时间轴上只有拖拽语义
     // （slip/拉伸/淡化曲率），点击层是空的（见 clipSelectionModifiers：
     // 物理 Alt 按下时会绕过两个选择修饰键，点击退回普通选择预备）。
-    "modifier.clipRangeToParamSelection": { key: "alt", modifierOnly: true, alt: true },
+    "modifier.clipRangeToParamSelection": [{ key: "alt", modifierOnly: true, alt: true }],
     // 淡化包络曲率：对齐 REAPER “Alt 拖动调整张力”惯例；Alt 在
     // 包络线/交叉点目标上无其他绑定，语义干净。
-    "modifier.fadeCurvatureDrag": { key: "alt", modifierOnly: true, alt: true },
+    "modifier.fadeCurvatureDrag": [{ key: "alt", modifierOnly: true, alt: true }],
     // 参数线点击循环切换曲线类型：默认 Ctrl。macOS 上 ctrl 字段自动映射
     // 为 ⌘（与 copyDrag/crossfadeGrip 同一约定）；operationType 用独立
     // "click"，与既有 Ctrl+drag 系键位不构成同类型冲突。
-    "modifier.fadeShapeCycleClick": {
-        key: "control",
-        modifierOnly: true,
-        ctrl: true,
-    },
-    "modifier.horizontalZoom": { key: "__none__", modifierOnly: true },
-    "modifier.pianoRollVerticalZoom": {
-        key: "control",
-        modifierOnly: true,
-        ctrl: true,
-    },
-    "modifier.scrollHorizontal": {
-        key: "shift",
-        modifierOnly: true,
-        shift: true,
-    },
-    "modifier.scrollVertical": { key: "alt", modifierOnly: true, alt: true },
+    "modifier.fadeShapeCycleClick": [
+        {
+            key: "control",
+            modifierOnly: true,
+            ctrl: true,
+        },
+    ],
+    "modifier.horizontalZoom": [{ key: "__none__", modifierOnly: true }],
+    "modifier.pianoRollVerticalZoom": [
+        {
+            key: "control",
+            modifierOnly: true,
+            ctrl: true,
+        },
+    ],
+    "modifier.scrollHorizontal": [
+        {
+            key: "shift",
+            modifierOnly: true,
+            shift: true,
+        },
+    ],
+    "modifier.scrollVertical": [{ key: "alt", modifierOnly: true, alt: true }],
     // 悬停在原生滚动条上滚轮时的"缩放"修饰键（无修饰键时滚轮 = 该轴滚动）。
     // 默认 Alt：与 REAPER 等对齐；仅在滚动条悬停语境生效，不与全局
     // scrollVertical（同为 Alt）冲突 —— 悬停滚动条时本键位优先。
-    "modifier.scrollbarZoom": { key: "alt", modifierOnly: true, alt: true },
-    "modifier.pianoKeysVerticalScroll": { key: "__none__", modifierOnly: true },
-    "modifier.pianoKeysVerticalZoom": { key: "alt", modifierOnly: true, alt: true },
-    "modifier.paramMorph": { key: "alt", modifierOnly: true, alt: true },
+    "modifier.scrollbarZoom": [{ key: "alt", modifierOnly: true, alt: true }],
+    "modifier.pianoKeysVerticalScroll": [{ key: "__none__", modifierOnly: true }],
+    "modifier.pianoKeysVerticalZoom": [{ key: "alt", modifierOnly: true, alt: true }],
+    "modifier.paramMorph": [{ key: "alt", modifierOnly: true, alt: true }],
     // 参数编辑器多选区：按住 + 拖动 = 追加一段选区，按住 + 点击已有段 = 取消该段
     // （与时间轴 ⌘/Ctrl + 点击的多选切换同源语义）。默认主修饰键，macOS 上
     // 由 ctrl 字段自动映射为 ⌘（见 platform.ts）。
-    "modifier.paramMultiSelect": { key: "control", modifierOnly: true, ctrl: true },
-    "modifier.paramFineAdjust": { key: "control", modifierOnly: true, ctrl: true },
-    "modifier.vibratoAmplitudeAdjust": { key: "__none__", modifierOnly: true },
-    "modifier.vibratoFrequencyAdjust": { key: "alt", modifierOnly: true, alt: true },
+    "modifier.paramMultiSelect": [{ key: "control", modifierOnly: true, ctrl: true }],
+    "modifier.paramFineAdjust": [{ key: "control", modifierOnly: true, ctrl: true }],
+    "modifier.vibratoAmplitudeAdjust": [{ key: "__none__", modifierOnly: true }],
+    "modifier.vibratoFrequencyAdjust": [{ key: "alt", modifierOnly: true, alt: true }],
 
     // 快速搜索
-    "quickSearch.open": { key: "f", ctrl: true },
-    "quickSearch.navigate.up": { key: "arrowup" },
-    "quickSearch.navigate.down": { key: "arrowdown" },
-    "quickSearch.preview": { key: "space" },
-    "quickSearch.confirm": { key: "enter" },
-    "quickSearch.close": { key: "escape" },
+    "quickSearch.open": [{ key: "f", ctrl: true }],
+    "quickSearch.navigate.up": [{ key: "arrowup" }],
+    "quickSearch.navigate.down": [{ key: "arrowdown" }],
+    "quickSearch.preview": [{ key: "space" }],
+    "quickSearch.confirm": [{ key: "enter" }],
+    "quickSearch.close": [{ key: "escape" }],
 };
 
 /**

@@ -4,7 +4,7 @@ import { ChevronDownIcon, ChevronUpIcon, MagnifyingGlassIcon } from "@radix-ui/r
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
-import { selectMergedKeybindings, matchesKeybinding } from "../../features/keybindings";
+import { selectMergedKeybindings, matchesAnyKeybinding } from "../../features/keybindings";
 import type { Keybinding } from "../../features/keybindings";
 import {
     searchFilesRecursive,
@@ -310,8 +310,8 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
 
     // 将原生 React.KeyboardEvent 适配为 DOM KeyboardEvent 进行匹配
     const matchKey = useCallback(
-        (e: React.KeyboardEvent<HTMLInputElement>, kb: Keybinding): boolean => {
-            return matchesKeybinding(e.nativeEvent, kb);
+        (e: React.KeyboardEvent<HTMLInputElement>, bindings: readonly Keybinding[]): boolean => {
+            return matchesAnyKeybinding(e.nativeEvent, bindings);
         },
         [],
     );

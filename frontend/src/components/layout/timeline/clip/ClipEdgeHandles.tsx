@@ -2,6 +2,7 @@ import React from "react";
 import { registerDragAbort } from "../gestureFocusGuard";
 import { resolveClipSelectionModifiers } from "../../../../features/keybindings/clipSelectionModifiers";
 import { DEFAULT_KEYBINDINGS } from "../../../../features/keybindings/defaultKeybindings";
+import { firstBinding } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
 import { CLIP_HEADER_HEIGHT, fadeCornerReservePx } from "../constants";
 
@@ -41,8 +42,9 @@ export const ClipEdgeHandles: React.FC<{
     ensureSelected,
     selectClipRemote,
     onCtrlToggleSelect,
-    multiSelectToggleKb = DEFAULT_KEYBINDINGS["modifier.clipMultiSelectToggle"],
-    rangeSelectKb = DEFAULT_KEYBINDINGS["modifier.clipRangeSelect"],
+    // 修饰键手势只有一个绑定，取主绑定即可（见 types.ts 的 KeybindingMap）。
+    multiSelectToggleKb = firstBinding(DEFAULT_KEYBINDINGS["modifier.clipMultiSelectToggle"]),
+    rangeSelectKb = firstBinding(DEFAULT_KEYBINDINGS["modifier.clipRangeSelect"]),
     onShiftRangeSelect,
     rangeSelectAnchorClipId,
     recordLastClickPosition,

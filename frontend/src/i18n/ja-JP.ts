@@ -976,6 +976,7 @@ export const jaJP = {
     kb_dialog_title: "キーボードショートカット",
     kb_dialog_desc: "ショートカットをクリックして再設定。Esc で取消。",
     kb_press_key: "キーを押してください...",
+    kb_add_binding: "別のショートカットを追加",
     kb_reset_default: "デフォルトに戻す",
     kb_reset_all: "すべてデフォルトに戻す",
     kb_close: "閉じる",

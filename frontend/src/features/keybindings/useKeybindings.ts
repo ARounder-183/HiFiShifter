@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useAppSelector } from "../../app/hooks";
-import { selectMergedKeybindings } from "./keybindingsSlice";
+import { firstBinding, selectMergedKeybindings } from "./keybindingsSlice";
 import { ACTION_META } from "./defaultKeybindings";
 import type { ActionId } from "./types";
 import type { RootState } from "../../app/store";
@@ -14,7 +14,10 @@ import { consumeHoldRepeatKeyDown } from "./holdRepeat";
 import { isShortcutSuppressed } from "../../ui/shortcutScope";
 import {
     matchesKeybinding,
+    matchesAnyKeybinding,
+    matchKeybinding,
     matchesKeybindingAllowingFineModifier,
+    matchKeybindingAllowingFineModifier,
     normalizeEventKey,
 } from "./keybindingMatch";
 const REPEATABLE_ACTIONS = new Set<ActionId>([
@@ -285,11 +288,13 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
 
             // 直线/颤音拖拽期间，命中振幅/频率方向键时，交给参数编辑器本地监听处理。
             if (document.body.hasAttribute("data-piano-roll-vibrato-drag-active")) {
-                const fineAdjustKb = keybindingsRef.current["modifier.paramFineAdjust"];
+                const fineAdjustKb = firstBinding(
+                    keybindingsRef.current["modifier.paramFineAdjust"],
+                );
                 for (const actionId of VIBRATO_DRAG_KEYBOARD_ACTIONS) {
-                    const kb = keybindingsRef.current[actionId];
-                    if (!kb || kb.modifierOnly) continue;
-                    if (matchesKeybindingAllowingFineModifier(e, kb, fineAdjustKb)) {
+                    const bindings = keybindingsRef.current[actionId];
+                    if (!bindings || firstBinding(bindings).modifierOnly) continue;
+                    if (matchKeybindingAllowingFineModifier(e, bindings, fineAdjustKb)) {
                         return;
                     }
                 }
@@ -300,12 +305,14 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
             // - 避免同一按键既走全局派发（重复步进设置）、又在本地再切一次；
             // - 避免叠按「精细调整」修饰键时命中其它全局兜底（如 Ctrl+D 克隆轨道）。
             if (document.body.hasAttribute("data-piano-roll-param-drag-active")) {
-                const cycleKb = keybindingsRef.current["pianoRoll.cycleDragDirection"];
-                const fineAdjustKb = keybindingsRef.current["modifier.paramFineAdjust"];
+                const cycleBindings = keybindingsRef.current["pianoRoll.cycleDragDirection"];
+                const fineAdjustKb = firstBinding(
+                    keybindingsRef.current["modifier.paramFineAdjust"],
+                );
                 if (
-                    cycleKb &&
-                    !cycleKb.modifierOnly &&
-                    matchesKeybindingAllowingFineModifier(e, cycleKb, fineAdjustKb)
+                    cycleBindings &&
+                    !firstBinding(cycleBindings).modifierOnly &&
+                    matchKeybindingAllowingFineModifier(e, cycleBindings, fineAdjustKb)
                 ) {
                     return;
                 }
@@ -373,6 +380,9 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
 export {
     isEditableTarget,
     matchesKeybinding,
+    matchesAnyKeybinding,
+    matchKeybinding,
     normalizeEventKey,
     matchesKeybindingAllowingFineModifier,
+    matchKeybindingAllowingFineModifier,
 };

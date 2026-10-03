@@ -242,3 +242,59 @@ describe("KeybindingsDialog — 分类导航", () => {
         }
     });
 });
+
+/**
+ * 一个功能可以绑多个快捷键（见 `features/keybindings/types.ts` 的 `KeybindingMap`）。
+ *
+ * 这里只钉住**接线**：默认表里重做有两个绑定 → 界面上就该有两颗 chip；
+ * 能追加槽位的动作要有 `+` 按钮，不能追加的（修饰键手势）不能有。
+ */
+describe("多绑定：一行的 chip 列表与追加按钮", () => {
+    it("「重做」行渲染两颗 chip（默认绑了 Ctrl+Shift+Z 与 Ctrl+Y）", () => {
+        const { cleanup } = renderDialog();
+        try {
+            // 默认表里只有 edit.redo 有第二个槽位，因此 slot=1 全窗口唯一。
+            const secondSlots =
+                document.body.querySelectorAll<HTMLElement>('[data-hs-kb-slot="1"]');
+            expect(secondSlots).toHaveLength(1);
+            const row = secondSlots[0].closest("[data-hs-kb-row]");
+            expect(row).not.toBeNull();
+            expect(row!.querySelectorAll("[data-hs-kb-slot]")).toHaveLength(2);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it("普通动作行有追加按钮，修饰键手势行没有", () => {
+        const { cleanup } = renderDialog();
+        try {
+            expect(document.body.querySelectorAll("[data-hs-kb-add]").length).toBeGreaterThan(0);
+            // 修饰键手势只有一个槽位：按下哪一个组合算触发无法解释，因此不提供追加。
+            const modifierRows = Array.from(
+                document.body.querySelectorAll<HTMLElement>('[data-hs-kb-row="modClip"]'),
+            );
+            expect(modifierRows.length).toBeGreaterThan(0);
+            for (const row of modifierRows) {
+                expect(row.querySelector("[data-hs-kb-add]")).toBeNull();
+            }
+        } finally {
+            cleanup();
+        }
+    });
+
+    it("点击 chip 进入录入态（chip 变成按键提示）", () => {
+        const { cleanup } = renderDialog();
+        try {
+            const chip = document.body.querySelector<HTMLElement>('[data-hs-kb-slot="0"]');
+            expect(chip).not.toBeNull();
+            const before = chip!.textContent;
+            act(() => {
+                chip!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+            });
+            const after = document.body.querySelector<HTMLElement>('[data-hs-kb-slot="0"]');
+            expect(after!.textContent).not.toBe(before);
+        } finally {
+            cleanup();
+        }
+    });
+});

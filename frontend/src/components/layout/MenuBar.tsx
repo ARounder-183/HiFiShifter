@@ -56,6 +56,7 @@ import { GlobeIcon } from "@radix-ui/react-icons";
 import {
     selectMergedKeybindings,
     formatKeybinding,
+    firstBinding,
     isNoneBinding,
 } from "../../features/keybindings/keybindingsSlice";
 import type { ActionId } from "../../features/keybindings/types";
@@ -386,11 +387,18 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         return () => window.removeEventListener("hifi:openEditDialog", handler);
     }, []);
 
-    /** 获取某个操作的快捷键显示文本（"None" 绑定时返回空字符串，不显示） */
+    /**
+     * 获取某个操作的快捷键显示文本（未绑定 / 无绑定时返回空字符串，不显示）。
+     *
+     * 【只显示主绑定】一个动作可以绑多个键，但菜单项的快捷键列宽度固定，
+     * `Ctrl+Shift+Z / Ctrl+Y` 这种整串会把菜单标签挤变形。菜单显示主绑定
+     * （下标 0，与 DAW 惯例一致），完整配置在「快捷键设置」里看。
+     */
     function shortcutLabel(actionId: ActionId): string {
-        const kb = keybindings[actionId];
-        if (!kb || isNoneBinding(kb)) return "";
-        return formatKeybinding(kb, "");
+        const bindings = keybindings[actionId];
+        const primary = firstBinding(bindings);
+        if (!bindings || isNoneBinding(primary)) return "";
+        return formatKeybinding(primary, "");
     }
 
     /**
@@ -725,9 +733,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     {IS_WINDOWS && (
                         <>
                             <DropdownMenu.Separator />
-                            <DropdownMenu.Item
-                                onSelect={() => dispatchEditOp("pasteVocalShifter")}
-                            >
+                            <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteVocalShifter")}>
                                 {t("menu_paste_vocalshifter_clipboard")}
                                 <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
                                     {shortcutLabel("edit.pasteVocalShifter")}

@@ -20,7 +20,7 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 
 import keybindingsReducer, {
     formatKeybinding,
-    setKeybinding,
+    setKeybindings,
 } from "../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../features/keybindings/types";
 import { I18nProvider } from "../../../i18n/I18nProvider";
@@ -61,8 +61,12 @@ async function mountMenu(options?: {
         ...options?.bindings,
     };
     await act(async () => {
-        store.dispatch(setKeybinding({ actionId: "clip.paste", binding: bindings["clip.paste"] }));
-        store.dispatch(setKeybinding({ actionId: "clip.split", binding: bindings["clip.split"] }));
+        store.dispatch(
+            setKeybindings({ actionId: "clip.paste", bindings: [bindings["clip.paste"]] }),
+        );
+        store.dispatch(
+            setKeybindings({ actionId: "clip.split", bindings: [bindings["clip.split"]] }),
+        );
         root.render(
             <Provider store={store}>
                 <I18nProvider>

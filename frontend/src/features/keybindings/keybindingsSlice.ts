@@ -176,21 +176,102 @@ function prettifyKey(key: string): string {
     return map[key.toLowerCase()] ?? key.charAt(0).toUpperCase() + key.slice(1);
 }
 
+// ─── 绑定列表（`readonly Keybinding[]`）的读写辅助 ────────────────
+//
+// 模型见 types.ts 的 `KeybindingMap`：一个动作持有一**列表**绑定，下标 0 即
+// 主绑定。下面这些函数是该列表的**唯一**读写口径 —— 数组形状的不变式只在
+// `normalizeBindings` 里实现一次，其余地方一律通过它。
+
+/** "无绑定"的单元素列表。 */
+const NONE_BINDING_LIST: readonly Keybinding[] = [{ key: "__none__" }];
+
+/** 取主绑定（下标 0）；列表为空时退化为"无"。 */
+export function firstBinding(bindings: readonly Keybinding[] | undefined): Keybinding {
+    return bindings?.[0] ?? NONE_BINDING_LIST[0];
+}
+
+/** 列表是否与"无绑定"等价（空，或唯一元素是 `__none__`）。 */
+export function isNoneBindingList(bindings: readonly Keybinding[] | undefined): boolean {
+    return !bindings || bindings.length === 0 || bindings.every(isNoneBinding);
+}
+
+/**
+ * 规范化绑定列表，使其满足 `KeybindingMap` 声明的不变式。
+ *
+ * 规则（顺序即语义，不要重排）：
+ * 1. 剔除 `null` / `undefined`（localStorage 与预设都可能带进来）；
+ * 2. 去重（保留首次出现的位置 —— 下标 0 的主绑定身份因此稳定）；
+ * 3. `__none__` 只允许作为**唯一**元素存在；出现在其它位置的一律删除
+ *    （"第 2 个键是无"没有意义，只有"整个动作无绑定"才有）；
+ * 4. 空列表回退为 `[{ key: "__none__" }]`。
+ */
+export function normalizeBindings(
+    bindings: readonly (Keybinding | null | undefined)[],
+): Keybinding[] {
+    const seen: Keybinding[] = [];
+    for (const binding of bindings) {
+        if (!binding) continue;
+        if (isNoneBinding(binding)) continue;
+        if (seen.some((existing) => keybindingEqual(existing, binding))) continue;
+        seen.push(binding);
+    }
+    if (seen.length === 0) return [...NONE_BINDING_LIST];
+    return seen;
+}
+
+/**
+ * 两个绑定列表是否相等（**顺序敏感**）。
+ *
+ * 顺序即语义（下标 0 是主绑定、菜单显示与长按重复都以它为准），因此
+ * `[A, B]` 与 `[B, A]` 是两次不同的配置，不能判等。
+ */
+export function keybindingsEqual(a: readonly Keybinding[], b: readonly Keybinding[]): boolean {
+    if (a.length !== b.length) return false;
+    return a.every((binding, index) => keybindingEqual(binding, b[index]));
+}
+
+/**
+ * 把一个动作的全部绑定格式化为一行（`"Ctrl+Shift+Z / Ctrl+Y"`）。
+ *
+ * 全部为"无"时返回 `noneLabel`（缺省 `—`）。调用方（设置面板的摘要、
+ * 按钮 tooltip）用它展示**完整**配置；菜单栏那种宽度受限的位置请用
+ * `formatKeybinding(firstBinding(...))` 只显示主绑定。
+ */
+export function formatKeybindingList(
+    bindings: readonly Keybinding[] | undefined,
+    noneLabel?: string,
+): string {
+    const parts = (bindings ?? []).filter((binding) => !isNoneBinding(binding));
+    if (parts.length === 0) return noneLabel ?? "—";
+    return parts.map((binding) => formatKeybinding(binding)).join(" / ");
+}
+
 // ─── Slice ───────────────────────────────────────────────────────
 
 const keybindingsSlice = createSlice({
     name: "keybindings",
     initialState,
     reducers: {
-        /** 设置某个操作的快捷键绑定 */
-        setKeybinding(state, action: PayloadAction<{ actionId: ActionId; binding: Keybinding }>) {
-            const { actionId, binding } = action.payload;
-            const defaultBinding = DEFAULT_KEYBINDINGS[actionId];
-            if (defaultBinding && keybindingEqual(defaultBinding, binding)) {
-                // 与默认值相同，移除覆盖
+        /**
+         * 用一份**完整**的绑定列表替换某个操作的绑定。
+         *
+         * 【为什么只有一个写入口】"改某一个槽位 / 追加一个 / 删掉一个 / 套用
+         * 预设"在数据上都只是"这个动作现在绑这些"—— 让调用方（设置面板）算出
+         * 目标数组，规范化与"是否等于默认"的判断就只需在这里写一次。多开几个
+         * 粒度更细的 reducer 只会让同一套不变式散到四处。
+         */
+        setKeybindings(
+            state,
+            action: PayloadAction<{ actionId: ActionId; bindings: readonly Keybinding[] }>,
+        ) {
+            const { actionId, bindings } = action.payload;
+            const normalized = normalizeBindings(bindings);
+            const defaults = DEFAULT_KEYBINDINGS[actionId];
+            if (defaults && keybindingsEqual(defaults, normalized)) {
+                // 与默认一致 → 不保留覆盖（改回默认即"没有自定义"）。
                 delete state.overrides[actionId];
             } else {
-                state.overrides[actionId] = binding;
+                state.overrides[actionId] = normalized;
             }
         },
 
@@ -206,7 +287,7 @@ const keybindingsSlice = createSlice({
     },
 });
 
-export const { setKeybinding, resetKeybinding, resetAllKeybindings } = keybindingsSlice.actions;
+export const { setKeybindings, resetKeybinding, resetAllKeybindings } = keybindingsSlice.actions;
 
 /**
  * 持久化收口：覆盖项落盘统一由 listener middleware 完成。
@@ -218,7 +299,7 @@ export const keybindingsPersistenceMiddleware = createListenerMiddleware<{
 }>();
 keybindingsPersistenceMiddleware.startListening({
     matcher: isAnyOf(
-        keybindingsSlice.actions.setKeybinding,
+        keybindingsSlice.actions.setKeybindings,
         keybindingsSlice.actions.resetKeybinding,
         keybindingsSlice.actions.resetAllKeybindings,
     ),
@@ -256,12 +337,45 @@ export function selectMergedKeybindings(state: { keybindings: KeybindingsState }
     return selectMergedKeybindingsCache.merged;
 }
 
-/** 获取某个操作的当前快捷键 */
+/** 获取某个操作当前生效的**全部**绑定（已合并用户覆盖）。 */
+export function selectKeybindings(
+    state: { keybindings: KeybindingsState },
+    actionId: ActionId,
+): readonly Keybinding[] {
+    return state.keybindings.overrides[actionId] ?? DEFAULT_KEYBINDINGS[actionId];
+}
+
+/**
+ * 获取某个操作的**主绑定**（列表下标 0）。
+ *
+ * 【为什么保留单绑定形态的选择器】大量调用点只关心"这一个键"：菜单栏与
+ * 右键菜单的快捷键文案、修饰键手势的读取（`modifier.*` 永远只有一个绑定）、
+ * 长按重复的默认基准。给它们一个单绑定入口，就不必在十几处各自写
+ * `[0]`/`firstBinding`，多绑定的语义也不会渗进不需要它的地方。
+ */
 export function selectKeybinding(
     state: { keybindings: KeybindingsState },
     actionId: ActionId,
 ): Keybinding {
-    return state.keybindings.overrides[actionId] ?? DEFAULT_KEYBINDINGS[actionId];
+    return firstBinding(selectKeybindings(state, actionId));
+}
+
+/**
+ * 该动作的绑定列表里是否已存在候选绑定（可排除某个槽位）。
+ *
+ * 用于录入时拦截"把同一个键重复绑到同一动作的另一个槽位" —— 那既没有意义，
+ * 又会让规范化把它悄悄去掉、用户看不到任何反馈。跨动作的冲突另由
+ * `findConflicts` 负责。
+ */
+export function hasDuplicateBinding(
+    bindings: readonly Keybinding[],
+    candidate: Keybinding,
+    excludeIndex = -1,
+): boolean {
+    if (isNoneBinding(candidate)) return false;
+    return bindings.some(
+        (binding, index) => index !== excludeIndex && keybindingEqual(binding, candidate),
+    );
 }
 
 /** 检测冲突：给定新绑定，返回与之冲突的 actionId 列表（排除自身） */
@@ -274,12 +388,12 @@ export function findConflicts(
         // 颤音滚轮修饰键允许配置为 None，但两者同时为 None 会冲突。
         if (VIBRATO_WHEEL_MODIFIERS.has(actionId)) {
             const merged = mergeKeybindings(overrides);
-            const conflicts = (Object.entries(merged) as [ActionId, Keybinding][])
+            const conflicts = (Object.entries(merged) as [ActionId, readonly Keybinding[]][])
                 .filter(
-                    ([id, binding]) =>
+                    ([id, bindings]) =>
                         id !== actionId &&
                         VIBRATO_WHEEL_MODIFIERS.has(id) &&
-                        isNoneBinding(binding),
+                        isNoneBindingList(bindings),
                 )
                 .map(([id]) => id);
             return conflicts;
@@ -289,10 +403,14 @@ export function findConflicts(
     const merged = mergeKeybindings(overrides);
     const conflicts: ActionId[] = [];
     const selfMeta = ACTION_META[actionId];
-    for (const [id, binding] of Object.entries(merged)) {
+    for (const [id, bindings] of Object.entries(merged) as [ActionId, readonly Keybinding[]][]) {
         if (id === actionId) continue;
-        if (isNoneBinding(binding)) continue;
-        if (keybindingEqual(binding, newBinding)) {
+        // 一个动作只要**任一**槽位与候选相同即构成冲突；同一个动作最多记一次。
+        const hit = bindings.some(
+            (binding) => !isNoneBinding(binding) && keybindingEqual(binding, newBinding),
+        );
+        if (!hit) continue;
+        {
             const otherMeta = ACTION_META[id as ActionId];
             if (isModifierMeta(selfMeta) && isModifierMeta(otherMeta)) {
                 // 修饰键 vs 修饰键：需要「手势类型相同 + 生效场景有交集」才算冲突。

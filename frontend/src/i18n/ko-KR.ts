@@ -1056,6 +1056,7 @@ export const koKR = {
     kb_dialog_title: "키보드 단축키",
     kb_dialog_desc: "단축키를 클릭하여 재설정. Esc 키로 취소.",
     kb_press_key: "키를 누르세요...",
+    kb_add_binding: "다른 단축키 추가",
     kb_reset_default: "기본값으로 복원",
     kb_reset_all: "모두 기본값으로 복원",
     kb_close: "닫기",

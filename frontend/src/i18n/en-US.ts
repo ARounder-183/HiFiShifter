@@ -1104,6 +1104,7 @@ export const enUS = {
     kb_dialog_title: "Keyboard Shortcuts",
     kb_dialog_desc: "Click a shortcut to rebind. Press Escape to cancel.",
     kb_press_key: "Press key...",
+    kb_add_binding: "Add another shortcut",
     kb_reset_default: "Reset to default",
     kb_reset_all: "Reset All",
     kb_close: "Close",

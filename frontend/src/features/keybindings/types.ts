@@ -251,8 +251,27 @@ export interface ActionMeta {
     scopedContext?: string;
 }
 
-/** 完整的快捷键映射：actionId → Keybinding */
-export type KeybindingMap = Record<ActionId, Keybinding>;
+/**
+ * 一个操作可以拥有的绑定数量上限。
+ *
+ * 有界即可枚举、UI 不失控。DAW 惯例是 1~2 个（主键 + 备用键），4 已足够宽松。
+ */
+export const MAX_BINDINGS_PER_ACTION = 4;
+
+/**
+ * 完整的快捷键映射：actionId → 绑定**列表**。
+ *
+ * 【为什么是数组而不是「主绑定 + 附加绑定」】后者会让同一个动作有两套读取
+ * 路径（`kb` 与 `[kb, ...extra]`），每处调用都要记得合并 —— bug 的温床，
+ * 且"哪一个是默认"变得模糊。统一成数组后只有一套形状：**下标 0 即主绑定**
+ * （菜单显示、长按重复的判定基准），其余是等价替补。顺序即语义。
+ *
+ * 数组内容的不变式（由 `normalizeBindings` 强制）：
+ * - 非空；
+ * - 无重复绑定；
+ * - `__none__` 至多一个，且仅当它是唯一元素时存在（"无绑定"的表达）。
+ */
+export type KeybindingMap = Record<ActionId, readonly Keybinding[]>;
 
 /** 用户覆盖项（只存储与默认不同的部分） */
-export type KeybindingOverrides = Partial<KeybindingMap>;
+export type KeybindingOverrides = Partial<Record<ActionId, readonly Keybinding[]>>;

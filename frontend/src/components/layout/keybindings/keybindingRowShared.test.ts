@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { isDefaultBinding, resolveGroupNavLabel } from "./keybindingRowShared";
+import { isDefaultBinding, isDefaultBindings, resolveGroupNavLabel } from "./keybindingRowShared";
 import {
     ACTION_GROUP_ORDER,
     GROUP_LABEL_KEYS,
@@ -97,5 +97,29 @@ describe("resolveGroupNavLabel — 窄位标签与回落", () => {
         for (const key of Object.values(GROUP_NAV_LABEL_KEYS)) {
             expect(typeof dict[key], `${key} 不在 en-US 词典里`).toBe("string");
         }
+    });
+});
+
+describe("isDefaultBindings — 绑定列表的默认判定", () => {
+    const CTRL_Z = { key: "z", ctrl: true };
+
+    it("长度与逐槽位都一致才算默认", () => {
+        expect(isDefaultBindings([CTRL_Z], [CTRL_Z])).toBe(true);
+        expect(isDefaultBindings([CTRL_Z], [CTRL_Z, { key: "y", ctrl: true }])).toBe(false);
+        expect(isDefaultBindings([CTRL_Z, { key: "y", ctrl: true }], [CTRL_Z])).toBe(false);
+    });
+
+    it("顺序敏感（下标 0 是主绑定，顺序即语义）", () => {
+        const Y = { key: "y", ctrl: true };
+        expect(isDefaultBindings([CTRL_Z, Y], [CTRL_Z, Y])).toBe(true);
+        expect(isDefaultBindings([Y, CTRL_Z], [CTRL_Z, Y])).toBe(false);
+    });
+
+    it("可选布尔仍按等价判定（缺失 == false）", () => {
+        expect(isDefaultBindings([{ key: "z", ctrl: true, shift: false }], [CTRL_Z])).toBe(true);
+    });
+
+    it("空列表与非空默认不等", () => {
+        expect(isDefaultBindings([], [CTRL_Z])).toBe(false);
     });
 });

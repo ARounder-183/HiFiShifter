@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findConflicts } from "./keybindingsSlice";
+import { findConflicts, firstBinding } from "./keybindingsSlice";
 import { DEFAULT_KEYBINDINGS } from "./defaultKeybindings";
 import type { KeybindingOverrides } from "./types";
 import { createModifierOnlyBinding } from "./keybindingsSlice";
@@ -71,7 +71,7 @@ describe("findConflicts — 修饰键按场景检测", () => {
 
     it("颤音滚轮修饰键同时为“无”仍视为冲突", () => {
         const overrides: KeybindingOverrides = {
-            "modifier.vibratoFrequencyAdjust": { key: "__none__", modifierOnly: true },
+            "modifier.vibratoFrequencyAdjust": [{ key: "__none__", modifierOnly: true }],
         };
         const conflicts = findConflicts(overrides, "modifier.vibratoAmplitudeAdjust", {
             key: "__none__",
@@ -135,7 +135,7 @@ describe("findConflicts — 键盘快捷键按作用域检测", () => {
         const conflicts = findConflicts(
             {},
             "quickSearch.confirm",
-            DEFAULT_KEYBINDINGS["playback.stop"],
+            firstBinding(DEFAULT_KEYBINDINGS["playback.stop"]),
         );
         expect(conflicts).not.toContain("playback.stop");
     });
@@ -149,12 +149,16 @@ describe("findConflicts — 键盘快捷键按作用域检测", () => {
         // 参数编辑器内的参数帧复制/粘贴与时间轴音频块复制/粘贴共绑
         // Ctrl+C/V，由焦点决定期望目标 —— 与「添加轨道 vs 音高设置到」
         // 的焦点路由同构，不视为冲突。
-        const copyConflicts = findConflicts({}, "pianoRoll.copy", DEFAULT_KEYBINDINGS["clip.copy"]);
+        const copyConflicts = findConflicts(
+            {},
+            "pianoRoll.copy",
+            firstBinding(DEFAULT_KEYBINDINGS["clip.copy"]),
+        );
         expect(copyConflicts).not.toContain("clip.copy");
         const pasteConflicts = findConflicts(
             {},
             "pianoRoll.paste",
-            DEFAULT_KEYBINDINGS["clip.paste"],
+            firstBinding(DEFAULT_KEYBINDINGS["clip.paste"]),
         );
         expect(pasteConflicts).not.toContain("clip.paste");
     });
@@ -169,5 +173,42 @@ describe("findConflicts — 键盘快捷键按作用域检测", () => {
     it("相同作用域内键值相同仍为冲突（paramEditorSelect 内两个操作共用按键）", () => {
         const conflicts = findConflicts({}, "edit.quantize", { key: "q", ctrl: true });
         expect(conflicts).toContain("edit.meanQuantize");
+    });
+});
+
+describe("findConflicts — 绑定列表逐槽位检测", () => {
+    it("命中另一个动作的**第二个**槽位也算冲突", () => {
+        const overrides: KeybindingOverrides = {
+            // 用户把 clip.group 绑成两个键，第二个才是裸 G。
+            "clip.group": [{ key: "g", ctrl: true }, { key: "g" }],
+        };
+        expect(findConflicts(overrides, "clip.split", { key: "g" })).toContain("clip.group");
+    });
+
+    it("一个动作最多记一次冲突（多个槽位命中同一键）", () => {
+        const overrides: KeybindingOverrides = {
+            "clip.group": [{ key: "g" }, { key: "g" }],
+        };
+        const conflicts = findConflicts(overrides, "clip.split", { key: "g" });
+        expect(conflicts.filter((id) => id === "clip.group")).toHaveLength(1);
+    });
+
+    it("列表里的「无」槽位不构成冲突", () => {
+        const overrides: KeybindingOverrides = {
+            "clip.group": [{ key: "__none__" }],
+        };
+        expect(findConflicts(overrides, "clip.split", { key: "g" })).not.toContain("clip.group");
+    });
+
+    it("列表里的备用槽位与另一动作同键且同作用域 → 仍报冲突（与主绑定同规则）", () => {
+        const overrides: KeybindingOverrides = {
+            "edit.meanQuantize": [
+                { key: "w", ctrl: true },
+                { key: "q", ctrl: true },
+            ],
+        };
+        expect(findConflicts(overrides, "edit.quantize", { key: "q", ctrl: true })).toContain(
+            "edit.meanQuantize",
+        );
     });
 });

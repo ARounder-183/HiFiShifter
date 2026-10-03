@@ -79,7 +79,11 @@ import {
     timelineViewportNativeToState,
     timelineViewportStateToNative,
 } from "../../utils/timelineViewportSync";
-import { isModifierActive, isNoneBinding } from "../../features/keybindings/keybindingsSlice";
+import {
+    firstBinding,
+    isModifierActive,
+    isNoneBinding,
+} from "../../features/keybindings/keybindingsSlice";
 import { useNonPassiveWheel } from "../../utils/useNonPassiveWheel";
 import { getActiveSurface, setActiveSurfaceExplicit } from "../../features/uiFocus/focusSurface";
 import { findFirstExternalPathAction } from "./timeline/dnd";
@@ -1083,8 +1087,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     );
 
     useEffect(() => {
-        const kb = mergedKeybindings["modifier.clipNoSnap"];
-        if (!kb) return;
+        // 修饰键手势只有一个绑定，取主绑定（见 types.ts 的 KeybindingMap）。
+        const kb = firstBinding(mergedKeybindings["modifier.clipNoSnap"]);
+        if (!kb || isNoneBinding(kb)) return;
         const onKey = (e: KeyboardEvent) => {
             const active = isModifierActive(kb, e);
             setSnapToggleHeld(active);
@@ -7427,9 +7432,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                 onPointerDown={(e) => e.stopPropagation()}
                                             >
                                                 <span className="flex min-w-0 items-center gap-2">
-                                                    <Box className="hs-menu__icon">
-                                                        {item.icon}
-                                                    </Box>
+                                                    <Box className="hs-menu__icon">{item.icon}</Box>
                                                     <span className="hs-menu__label-text">
                                                         {item.label}
                                                     </span>

@@ -942,6 +942,7 @@ export const zhTW = {
     kb_dialog_title: "鍵盤快捷鍵",
     kb_dialog_desc: "點擊快捷鍵可重新綁定，按 Esc 取消輸入。",
     kb_press_key: "請按鍵...",
+    kb_add_binding: "新增另一個快速鍵",
     kb_reset_default: "恢復預設",
     kb_reset_all: "全部恢復預設",
     kb_close: "關閉",

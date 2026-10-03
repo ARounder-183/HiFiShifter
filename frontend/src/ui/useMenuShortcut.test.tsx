@@ -18,7 +18,8 @@ import { createRoot } from "react-dom/client";
 import { Provider } from "react-redux";
 import { afterEach, expect, test } from "vitest";
 
-import keybindingsReducer, { setKeybinding } from "../features/keybindings/keybindingsSlice";
+import keybindingsReducer, { setKeybindings } from "../features/keybindings/keybindingsSlice";
+import type { Keybinding } from "../features/keybindings/types";
 import { useMenuShortcut } from "./useMenuShortcut";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -52,9 +53,9 @@ function renderShortcut(actionId: "clip.paste" | "clip.split" | "edit.deselect")
 
     return {
         read: () => host?.querySelector('[data-testid="out"]')?.textContent ?? "",
-        rebind: (binding: Parameters<typeof setKeybinding>[0]["binding"]) =>
+        rebind: (binding: Keybinding) =>
             act(() => {
-                store.dispatch(setKeybinding({ actionId, binding }));
+                store.dispatch(setKeybindings({ actionId, bindings: [binding] }));
             }),
         unmount: () => act(() => root.unmount()),
     };

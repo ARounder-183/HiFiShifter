@@ -52,9 +52,13 @@ import {
 } from "./kernel/gestureHitTest";
 import { edgeAutoScrollDeltaPx, selectionIndexRange } from "./kernel/dragArithmetic";
 import type { MutableRefObject as MutRef } from "react";
-import { isModifierActive, isNoneBinding } from "../../../features/keybindings/keybindingsSlice";
 import {
-    matchesKeybinding,
+    firstBinding,
+    isModifierActive,
+    isNoneBinding,
+} from "../../../features/keybindings/keybindingsSlice";
+import {
+    matchesAnyKeybinding,
     matchesKeybindingAllowingFineModifier,
 } from "../../../features/keybindings/useKeybindings";
 import { ACTION_META } from "../../../features/keybindings/defaultKeybindings";
@@ -710,8 +714,9 @@ export function usePianoRollInteractions(args: {
 
     const isSnapToggleModifierHeld = useCallback(
         (ev: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey?: boolean }) => {
-            const noSnapKb = keybindingMap?.["modifier.clipNoSnap" as ActionId];
-            if (noSnapKb) {
+            // 修饰键手势只有一个绑定，取主绑定（见 types.ts 的 KeybindingMap）。
+            const noSnapKb = firstBinding(keybindingMap?.["modifier.clipNoSnap" as ActionId]);
+            if (noSnapKb && !isNoneBinding(noSnapKb)) {
                 return Boolean(isModifierActive(noSnapKb, ev));
             }
             return Boolean(ev.shiftKey);
@@ -1916,7 +1921,7 @@ export function usePianoRollInteractions(args: {
             // (must be before the selectionRef guard since selectAll/deselect work without selection)
             if (keybindingMap && onEditAction) {
                 const editActionEntries = (
-                    Object.entries(keybindingMap) as [ActionId, Keybinding][]
+                    Object.entries(keybindingMap) as [ActionId, readonly Keybinding[]][]
                 ).filter(([id]) => id.startsWith("edit."));
                 // 需要弹出对话框的操作列表
                 const dialogOps = new Set([
@@ -1929,9 +1934,11 @@ export function usePianoRollInteractions(args: {
                     "quantize",
                     "meanQuantize",
                 ]);
-                for (const [actionId, kb] of editActionEntries) {
-                    if (kb.modifierOnly) continue;
-                    if (matchesKeybinding(e.nativeEvent, kb)) {
+                for (const [actionId, bindings] of editActionEntries) {
+                    // 动作可绑多个键：任一槽位命中即触发（与全局路由同一约定）。
+                    if (bindings.some((kb) => kb.modifierOnly)) continue;
+                    if (!matchesAnyKeybinding(e.nativeEvent, bindings)) continue;
+                    {
                         const meta = ACTION_META[actionId];
                         // paramEditorSelect-scoped actions only work with "select" tool
                         if (meta?.scopedContext === "paramEditorSelect" && toolMode !== "select") {
