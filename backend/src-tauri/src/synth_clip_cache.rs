@@ -581,7 +581,12 @@ pub fn clear_pad_suppressed_clips() {
 /// OpenUtau hifisampler 的 `PitchAdjustableMelSpectrogram`（按 keyShift 伸缩
 /// FFT/窗长后用原始 mel 基投影）。同一曲线值产出不同 PCM，且值域扩到 ±1200，
 /// 必须整体失效。
-pub const RENDER_PIPELINE_VERSION: u32 = 5;
+/// v6：HiFiGAN 分块粒度从 4096 mel 帧（≈47.6s）改为 512 帧（≈5.9s）。
+/// 分块位置改变会改变输出波形 —— 实测不同块大小的差异是**纯相位/时移**性质
+/// （幅度谱余弦相似度 1.000000、逐块 RMS 比 1.002~1.008），音色与能量不变，
+/// 但 PCM 逐样本不同。若不失效，磁盘上的旧 PCM 会与新块粒度长期混用
+/// （同一工程新旧 clip 相位基准不一致）。
+pub const RENDER_PIPELINE_VERSION: u32 = 6;
 
 /// [`compute_rendered_clip_hash`] 的输入集合。
 ///
