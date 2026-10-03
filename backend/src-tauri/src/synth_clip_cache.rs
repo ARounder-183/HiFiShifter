@@ -962,13 +962,19 @@ pub fn compute_rendered_clip_hash_excluding(
 }
 
 pub fn compute_breath_noise_hash(input: &RenderedClipHashInput<'_>) -> u64 {
-    // 气声噪声 stem 与 formant 无关（formant 只作用于谐波分量），因此显式排除
-    // 曲线级 `formant_shift_cents` 与 clip 级 `formant_morph`：任一共振峰设置
-    // 变化时都可直接复用噪声 stem，省掉一次 HNSEP。
+    // 气声噪声 stem 与"只作用于谐波分量"的参数无关，因此显式排除它们，
+    // 使这些参数变化时可直接复用噪声 stem，省掉一次 HNSEP：
+    // - 曲线级 `formant_shift_cents`（gender / 共振峰：只改谐波支的 mel）
+    // - clip 级 `formant_morph`（同上）
+    // - `hifigan_tension`（Rd 张力：只重塑谐波结构，噪声支原样保留）
+    //
+    // 【张力为什么也要排除】张力迁入声码器后已参与**渲染键**（见
+    // `include_rendered_extra_curve`），但噪声 stem 本身与张力无关 ——
+    // HNSEP 的输出只取决于源音频。不排除会让"只调张力"白跑一次 HNSEP 分离。
     let filtered_curves: std::collections::HashMap<String, Vec<f32>> = input
         .extra_curves
         .iter()
-        .filter(|(k, _)| k.as_str() != "formant_shift_cents")
+        .filter(|(k, _)| !matches!(k.as_str(), "formant_shift_cents" | "hifigan_tension"))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     compute_rendered_clip_hash(&RenderedClipHashInput {

@@ -194,6 +194,17 @@ impl ProcessingStage for WorldVocoderStage {
 /// Stage 1b：NSF-HiFiGAN ONNX 合成。
 pub struct HiFiGanStage;
 
+/// 解析噪声支的（常量）混合增益。
+///
+/// **曲线缺失时返回 1.0**，即把噪声原样相加。这不是"默认关闭"而是"默认不变"：
+/// 张力活跃但未开气声时也会走到混音路径（见 `HiFiGanStage::process` 的
+/// `needs_separation`），此时若把缺失当成 0，整条噪声支（齿音、气声、嘶声）
+/// 会被静默删除 —— 听感是"咬字发闷、辅音消失"。
+/// 与 OpenUtau 的 `NoiseGain(breathiness=0) == 1.0` 语义一致。
+fn resolve_noise_gain(breath_curve: Option<&[f32]>) -> f32 {
+    breath_curve.and_then(|c| c.first().copied()).unwrap_or(1.0)
+}
+
 /// 在绝对时间处采样一条自动化曲线（首点对应时间轴 0，帧周期 `frame_period_ms`）。
 ///
 /// **越界语义 = hold-last**：超出曲线末点后恒取末值，与
@@ -311,7 +322,7 @@ impl ProcessingStage for HiFiGanStage {
         // "张力活跃"一并作为进入分离路径的条件。
         let needs_separation = breath_enabled || tension_active;
         if needs_separation && crate::hnsep_onnx::is_available() {
-            return self.process_breath(input_pcm, cc, formant_curve, tension_curve, breath_enabled);
+            return self.process_breath(input_pcm, cc, formant_curve, tension_curve);
         }
         if needs_separation {
             log::warn!(
@@ -377,15 +388,18 @@ impl HiFiGanStage {
     ///
     /// # 参数
     /// - `tension_curve`：张力曲线（-100..100），可按 clip 级 / 轨道级解析后传入
-    /// - `breath_enabled`：气声开关。**仅**影响噪声支是否混入；张力不依赖它
-    ///   （张力活跃时同样会进入本路径，见 `HiFiGanStage::process`）
+    ///
+    /// # 气声开关为什么不作为参数
+    /// 噪声支**总是**混回（曲线缺失时取默认增益 1.0，即原样相加）。气声开关只决定
+    /// 调用方是否解析并下发 `breath_gain` 曲线，不影响本函数的混合逻辑 —— 无论
+    /// 进入本路径的是"开了气声"还是"只开了张力"，噪声都必须以单位增益归还，
+    /// 否则张力一开就会把齿音/气声整条删掉（详见下方混音处的说明）。
     fn process_breath(
         &self,
         input_pcm: Vec<f32>,
         cc: &crate::renderer::traits::ClipProcessContext<'_>,
         formant_curve: Option<&[f32]>,
         tension_curve: Option<&[f32]>,
-        breath_enabled: bool,
     ) -> Result<Vec<f32>, String> {
         let (harmonic, noise) =
             crate::hnsep_onnx::infer_harmonic_noise_mono(
@@ -438,12 +452,14 @@ impl HiFiGanStage {
             }
         };
 
-        // 张力活跃但本 clip 未开气声：噪声支不参与混音（张力只改音色，
-        // 不应把气声顺带带进来）。此处直接返回处理后的谐波。
-        if !breath_enabled {
-            return Ok(processed_harmonic);
-        }
-
+        // 气声未开时，噪声支仍必须按**单位增益**混回。
+        //
+        // 【为什么不能直接返回谐波】张力活跃时也会进入本路径（见
+        // `HiFiGanStage::process` 的 `needs_separation`）。此时若只返回谐波，
+        // 就等于把整条噪声支（齿音、气声、嘶声）**整个删掉** —— 听感是"咬字发闷、
+        // 辅音消失"。OpenUtau 的处理是 `x = NoiseGain(breath)*(wave-h) + voiced`，
+        // 而 breath 默认 0 对应 `NoiseGain(0) = 1.0`，即**原样混回**。
+        // 因此这里取默认增益 1.0 继续走下面的混音路径，而不是提前返回。
         let breath_curve = cc.extra_curves.get("breath_gain").map(|v| v.as_slice());
 
         // Fast path: only when a curve is present **and** uniformly zero (e.g. when
@@ -453,6 +469,10 @@ impl HiFiGanStage {
         // 参数线即"整体使用默认增益"，而预览路径的 breath stem 也是按默认 1.0 混入
         // 的（见 `audio_engine/mix.rs`）。此处若把缺失当成 0 直接返回谐波，导出就
         // 会丢掉整条气声 —— 预览正常、导出无气声正是这个分支造成的。
+        //
+        // 【气声未开时不得走这条 fast path】`breath_gain` 曲线缺失 → `map_or(false)`
+        // 为假 → 不会提前返回，正好落到下方"gain = 1.0"的常量分支，实现原样混回。
+        // 若把"气声未开"也当成"跳过噪声"，就会重现上面那个缺陷。
         let gain_is_zero = breath_curve.map_or(false, |c| {
             c.is_empty() || c.iter().all(|&v| v.abs() < f32::EPSILON)
         });
@@ -496,7 +516,7 @@ impl HiFiGanStage {
                 .collect()
         } else {
             // Constant gain (typically 1.0): use uniform multiplier, auto-vectorizable
-            let gain = breath_curve.and_then(|c| c.first().copied()).unwrap_or(1.0);
+            let gain = resolve_noise_gain(breath_curve);
             if (gain - 1.0).abs() < f32::EPSILON {
                 // gain == 1.0: simple addition, most common case for unity_breath
                 processed_harmonic
@@ -743,6 +763,22 @@ mod tests {
             super::align_noise_stem_to_len(&[0.5], 44_100, 3, SignalsmithStretch),
             vec![0.5, 0.5, 0.5]
         );
+    }
+
+    /// 噪声支的常量增益：**曲线缺失 → 1.0（原样混回）**。
+    ///
+    /// 【为什么钉住】张力活跃但未开气声时也会进入 HNSEP 分离路径。若"曲线缺失"
+    /// 被当成增益 0，张力一开就会把整条噪声支删掉（齿音/气声/嘶声消失）。
+    /// 这是本模块实际踩过的缺陷：`process_breath` 曾在 `!breath_enabled` 时提前
+    /// 返回谐波，等价于把噪声静音。
+    #[test]
+    fn missing_breath_curve_means_unity_noise_gain() {
+        assert_eq!(super::resolve_noise_gain(None), 1.0);
+        assert_eq!(super::resolve_noise_gain(Some(&[])), 1.0);
+        // 曲线存在时取首值
+        assert_eq!(super::resolve_noise_gain(Some(&[0.25, 0.5])), 0.25);
+        // 显式 0 才是"静音噪声"（用于 harmonic_only 计算）
+        assert_eq!(super::resolve_noise_gain(Some(&[0.0, 0.0])), 0.0);
     }
 
     /// 越界语义 = **hold-last**（保持末值），不得回退 default。
