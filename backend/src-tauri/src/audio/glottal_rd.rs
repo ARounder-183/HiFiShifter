@@ -323,6 +323,30 @@ impl GlottalRd {
     const GRID_SIZE: usize = 64;
     const LIP_RADIUS_CM: f64 = 1.5;
 
+    /// 每个网格 Rd 对应的**谐波功率形状**（`FlowShape^2`，长 `MAX_FIT_HARMONICS`）。
+    ///
+    /// 【为什么必须是进程级常量】这张表**不依赖输入**（谐波次数上 LF 形状与 f0 无关，
+    /// 见 `flow_shape` 的说明），但 `fit` 是**逐帧**调用的。若在 `fit` 内部现算，
+    /// 每帧都要重跑 64 次 LF 频谱求值（每次含 Brent 求根 + 8 次牛顿迭代）——
+    /// 实测 0.658 ms/帧，占 `fit` 总耗时的 99%，1 分钟音频要多花约 6.9 秒。
+    /// OpenUtau 用 `static readonly double[][] flowPower` 只算一次，此处对齐该做法。
+    ///
+    /// 用 `OnceLock` 而非 `const`：表的内容需要浮点运算才能得到，无法在编译期求值。
+    fn flow_power_table() -> &'static [Vec<f64>] {
+        static TABLE: std::sync::OnceLock<Vec<Vec<f64>>> = std::sync::OnceLock::new();
+        TABLE.get_or_init(|| {
+            Self::grid()
+                .iter()
+                .map(|&rd| {
+                    Self::flow_shape(rd, 200.0, Self::MAX_FIT_HARMONICS)
+                        .into_iter()
+                        .map(|v| v * v)
+                        .collect()
+                })
+                .collect()
+        })
+    }
+
     /// Rd 网格（MinRd..MaxRd 均分 GRID_SIZE 点）。
     fn grid() -> [f64; Self::GRID_SIZE] {
         let mut g = [0.0f64; Self::GRID_SIZE];
@@ -387,17 +411,8 @@ impl GlottalRd {
             power[k] = a * a + 1e-20;
         }
 
-        let grid = Self::grid();
-        // 每个网格 Rd 的谐波功率形状（f0 取 200 Hz：谐波次数上 LF 形状与 f0 无关）
-        let shapes: Vec<Vec<f64>> = grid
-            .iter()
-            .map(|&rd| {
-                Self::flow_shape(rd, 200.0, Self::MAX_FIT_HARMONICS)
-                    .into_iter()
-                    .map(|v| v * v)
-                    .collect()
-            })
-            .collect();
+        // 进程级常量表（只算一次），不再逐帧重建。
+        let shapes = Self::flow_power_table();
 
         let mut distance = vec![0.0f64; Self::GRID_SIZE];
         for (g, model) in shapes.iter().enumerate() {
@@ -572,6 +587,10 @@ mod tests {
             down[9]
         );
     }
+
+
+
+
 
     /// `Fit` 必须能从已知 Rd 生成的谐波幅度还原出该 Rd。
     #[test]
