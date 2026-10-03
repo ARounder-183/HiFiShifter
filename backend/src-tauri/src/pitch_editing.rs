@@ -2217,7 +2217,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
                 None
             };
             let effective_extra_curves_storage;
-            let mut extra_curves_for_ctx: &std::collections::HashMap<String, Vec<f32>> =
+            let extra_curves_for_ctx: &std::collections::HashMap<String, Vec<f32>> =
                 if let Some(curve) = child_formant_curve {
                     effective_extra_curves_storage = {
                         let mut cloned = extra_curves.clone();
