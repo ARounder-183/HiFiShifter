@@ -357,3 +357,153 @@ test("AppSubMenu：子面板自身是独立的 role=menu 表面（键盘导航�
     // 外层只有子菜单触发项；子项一个都不属于它 —— 否则方向键会在两层之间串门。
     expect(outerLabels).toEqual(["Presets"]);
 });
+
+test("AppSubMenu：展开后方向键在子面板内导航（条件渲染不丢键盘钩子）", async () => {
+    /*
+     * 【回归】子面板是条件渲染的：`useMenuKeyboard(panelRef)` 在挂载瞬间
+     * `panelRef.current === null`，effect 命中早退且 deps 只有 ref 对象本身，
+     * 面板真正出现后**不会重跑** —— 子面板的导航从未注册，方向键被外层菜单
+     * （或无响应）吞掉。修复是把它条件渲染的 `open` 作为 `active` 传入。
+     */
+    await renderSubMenu(
+        <AppSubMenu label="Presets">
+            <button type="button" role="menuitem">
+                Natural
+            </button>
+            <button type="button" role="menuitem">
+                Soft
+            </button>
+        </AppSubMenu>,
+    );
+
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')!;
+    await act(async () => {
+        trigger.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+    const submenu = container.querySelectorAll<HTMLElement>('[role="menu"]')[1];
+    const items = [...submenu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+    expect(items.map((item) => item.textContent)).toEqual(["Natural", "Soft"]);
+
+    await act(async () => {
+        items[0].focus();
+    });
+    await act(async () => {
+        items[0].dispatchEvent(
+            new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
+        );
+    });
+
+    // 子面板自己的钩子接管：焦点走到下一项，而不是留在原处 / 被外层抢走。
+    expect(document.activeElement).toBe(items[1]);
+});
+
+/*
+ * 样式模型的 DOM 契约。
+ *
+ * 【为什么在原语层钉这些】门禁（`designSystemGates.test.ts`）守的是"每个菜单都挂
+ * 共享壳"，样式表测试守的是"模型的取值来自令牌"。这里补的是**结构**：一行菜单项
+ * 由哪些元素组成、分组标题与分隔线各长什么样、图标列何时占位。这些是调用方看得见
+ * 的契约（手写菜单要照着拼），改坏了不会有编译错误。
+ */
+test("AppContextMenu：菜单项挂共享类，标签与尾部区各就各位", async () => {
+    await render(
+        <AppContextMenu
+            x={10}
+            y={10}
+            items={[
+                { key: "a", label: "Alpha", shortcut: "Ctrl+A", checked: true },
+                { key: "b", label: "Beta", danger: true, disabled: true },
+            ]}
+            onClose={() => {}}
+        />,
+    );
+
+    const items = [...container.querySelectorAll<HTMLElement>(".hs-menu__item")];
+    expect(items.length).toBe(2);
+
+    // 文字与尾部区：标签走 `__label-text`（可截断），快捷键与勾选在 `__trail` 里。
+    expect(items[0].querySelector(".hs-menu__label-text")?.textContent).toBe("Alpha");
+    const trail = items[0].querySelector(".hs-menu__trail");
+    expect(trail?.textContent).toContain("Ctrl+A");
+    expect(items[0].querySelector(".hs-menu__check")).not.toBeNull();
+
+    // 危险态与禁用态是**数据属性**（由 CSS 决定外观），不是调用方拼的类名。
+    expect(items[1].getAttribute("data-danger")).toBe("1");
+    expect(items[1].hasAttribute("disabled")).toBe(true);
+    expect(items[1].querySelector(".hs-menu__check")).toBeNull();
+});
+
+test("AppContextMenu：分组标题是非交互标签行，不是禁用项", async () => {
+    await render(
+        <AppContextMenu
+            x={10}
+            y={10}
+            items={[
+                { key: "h", label: "Section", heading: true },
+                { key: "a", label: "Alpha", onSelect: () => {} },
+            ]}
+            onClose={() => {}}
+        />,
+    );
+
+    /*
+     * 此前有菜单用 `disabled: true` 冒充标题 —— 那对屏幕阅读器是"一个禁用的菜单项"、
+     * 对键盘是不可达项，语义是错的。标题必须是 `role="menuitem"` 之外的东西。
+     */
+    const heading = container.querySelector(".hs-menu__label");
+    expect(heading?.textContent).toBe("Section");
+    expect(heading?.getAttribute("role")).toBeNull();
+    expect(container.querySelectorAll('[role="menuitem"]').length).toBe(1);
+});
+
+test("AppContextMenu：分隔线是独立元素，不给相邻项加高", async () => {
+    await render(
+        <AppContextMenu
+            x={10}
+            y={10}
+            items={[
+                { key: "a", label: "Alpha", onSelect: () => {} },
+                { key: "b", label: "Beta", separatorBefore: true, onSelect: () => {} },
+            ]}
+            onClose={() => {}}
+        />,
+    );
+
+    const separators = [...container.querySelectorAll('[role="separator"]')];
+    expect(separators.length).toBe(1);
+    expect(separators[0].classList.contains("hs-menu__separator")).toBe(true);
+    // 分隔线**不属于**任何菜单项：否则它那一项会比别的项高一截。
+    expect(separators[0].closest(".hs-menu__item")).toBeNull();
+    // 两项本身没有分隔线相关的类。
+    for (const item of container.querySelectorAll(".hs-menu__item")) {
+        expect(item.className).not.toContain("border-t");
+    }
+});
+
+test("AppContextMenu：任一项有图标时，所有项都预留图标列", async () => {
+    await render(
+        <AppContextMenu
+            x={10}
+            y={10}
+            items={[
+                { key: "a", label: "Alpha", icon: <span>★</span>, onSelect: () => {} },
+                { key: "b", label: "Beta", onSelect: () => {} },
+            ]}
+            onClose={() => {}}
+        />,
+    );
+
+    /*
+     * 图标列是定宽的。若只让"有图标的项"占位，两类项的文字左缘会差一个列宽 ——
+     * 文件浏览器的位置列表就是混合的（只有收藏那一项带星标）。
+     */
+    const columns = container.querySelectorAll(".hs-menu__icon");
+    expect(columns.length).toBe(2);
+    expect(columns[1].textContent).toBe("");
+});
+
+test("AppContextMenu：没有图标时不占图标列", async () => {
+    await render(<AppContextMenu x={10} y={10} items={ITEMS} onClose={() => {}} />);
+    expect(container.querySelectorAll(".hs-menu__icon").length).toBe(0);
+});

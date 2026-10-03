@@ -907,3 +907,161 @@ describe("Radix 字段的焦点环", () => {
         expect(rule![0]).toContain("--qt-focus-ring");
     });
 });
+
+/*
+ * 上下文菜单样式模型的门禁（G3）。
+ *
+ * 【它防的是什么】菜单的视觉一致性此前靠"每个作者照着旁边的菜单抄"维持，结果
+ * 实测出 5 档最小宽度、3 档层级、2 套悬停令牌、2 种禁用态、3 种分组标题写法。
+ * 上一轮的排版角色层证明了同一件事：**靠自觉的一致性一定会散**，必须由机制
+ * 兜住。本组规则把"壳与项只有一个来源"从约定变成可判定的事实。
+ *
+ * 【为什么用结构事实而不是文本事实】与文件头同一条原则：判据取自"这个文件声明了
+ * 一个菜单表面"（`role="menu"` / `data-hs-context-menu="1"`）这样的结构标记，
+ * 而不是"某个类名在文件里出现过"—— 后者会被注释与字符串绕过。
+ */
+describe("上下文菜单共用同一个样式模型", () => {
+    const SHELL = "hs-menu";
+
+    /**
+     * 字符串字面量（**保留内容**）。
+     *
+     * 【为什么必须保留字符串】类名就写在字符串里。用剥字符串的版本做检查会得到
+     * 一条永远通过的断言 —— 本文件末尾「Radix 字段的焦点环」一节记录过同一个坑。
+     */
+    function classLiterals(source: string): string[] {
+        const kept = stripCommentsAndStrings(source, true);
+        return [...kept.matchAll(/"([^"\n]*)"|'([^'\n]*)'|`([^`]*)`/g)].map(
+            (m) => m[1] ?? m[2] ?? m[3] ?? "",
+        );
+    }
+
+    test("每个菜单表面都挂共享壳", () => {
+        /*
+         * 判据分两条，各自独立成立：
+         *   - 声明了 `role="menu"`（菜单的 ARIA 契约，`useKeybindings` 也依赖它）；
+         *   - 或带 `data-hs-context-menu="1"`（**已打开**的菜单表面的标记）。
+         * 命中任一条就必须挂 `hs-menu` —— 走 `AppContextMenu` 的文件不含这两个
+         * 标记（原语在内部加），因此不会被误报。
+         */
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.tsx$/)) {
+            const source = readFileSync(file, "utf8");
+            const stripped = stripCommentsAndStrings(source);
+            const declaresSurface =
+                /role="menu"/.test(stripped) || /data-hs-context-menu="1"/.test(stripped);
+            if (!declaresSurface) continue;
+            if (!source.includes(SHELL)) offenders.push(file);
+        }
+        expect(
+            offenders,
+            "以下文件声明了菜单表面，却没有挂 `hs-menu` —— 它的外观会与其它菜单分叉。" +
+                "请改挂 `hs-menu`（手写菜单）或改用 `AppContextMenu`（扁平项列表）",
+        ).toEqual([]);
+    });
+
+    test("菜单壳的外观不得被调用方重新声明", () => {
+        /*
+         * 挂着 `hs-menu` 的同时再写 `rounded` / `bg-qt-window` / `shadow-*`，等于
+         * 把壳的取值又复制了一份到调用点 —— 改 CSS 那份时这里不会跟着变，正是本次
+         * 要消除的漂移。允许并存的只有布局类（`flex` / `w-[248px]` 这类）与
+         * `hs-menu--*` 变体。
+         */
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.tsx$/)) {
+            const source = readFileSync(file, "utf8");
+            for (const literal of classLiterals(source)) {
+                if (!literal.includes(SHELL)) continue;
+                const redeclared = literal.match(/\b(bg-qt-window|rounded|shadow-\w+)\b/);
+                if (redeclared)
+                    offenders.push(`${file}: 「${literal.trim()}」重写了 ${redeclared[1]}`);
+            }
+        }
+        expect(
+            offenders,
+            "壳的底色 / 圆角 / 阴影由 `.hs-menu` 提供。调用方只写布局类与 `hs-menu--*` 变体",
+        ).toEqual([]);
+    });
+
+    test("手写菜单项的那套 class 不得回来", () => {
+        /*
+         * 统一前，每个手写菜单都自己写一遍这一行：
+         *   `w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm …`
+         * 三个特征同时出现即认定是它（单独任一个都可能是别的控件：参数编辑器的
+         * 吸附提示浮标也带 `px-3 py-1.5`，但它没有 `justify-between`）。
+         */
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.tsx$/)) {
+            const source = readFileSync(file, "utf8");
+            if (!source.includes(SHELL)) continue;
+            for (const literal of classLiterals(source)) {
+                if (
+                    literal.includes("justify-between") &&
+                    literal.includes("px-3 py-1.5") &&
+                    literal.includes("text-left")
+                ) {
+                    offenders.push(`${file}: 「${literal.trim().slice(0, 60)}…」`);
+                }
+            }
+        }
+        expect(
+            offenders,
+            "菜单项请挂 `hs-menu__item`（行高 / 内边距 / 悬停 / 禁用态由它提供），" +
+                "内部的文字与尾部区用 `hs-menu__label-text` / `hs-menu__trail`",
+        ).toEqual([]);
+    });
+
+    test("每个 --qt-menu-* 令牌都有真实消费者", () => {
+        // 与 `--qt-bar-*` 那条同一判据：只认 `var(--qt-menu-x)` 形式的**使用**，
+        // 定义本身（`--qt-menu-x:`）不算消费者，否则令牌层空转也查不出来。
+        const defined = [
+            ...new Set(
+                readFileSync(TOKEN_CSS, "utf8").match(/--qt-menu-[a-z0-9-]+(?=\s*:)/g) ?? [],
+            ),
+        ];
+        expect(defined.length, "没有找到任何 --qt-menu-* 令牌，正则已失效").toBeGreaterThan(5);
+
+        const files = sourceFiles(/\.(tsx?|css)$/);
+        const missing = defined.filter(
+            (token) => !files.some((file) => readFileSync(file, "utf8").includes(`var(${token}`)),
+        );
+        expect(missing, "以下菜单令牌没有任何消费者 —— 令牌层在空转，删掉或接上：").toEqual([]);
+    });
+
+    test(".hs-menu* 的取值只来自令牌层", () => {
+        /*
+         * 字号与圆角有各自的门禁，但**颜色**没有一条是专门看菜单的：`#484848`
+         * 这类字面量在样式表里不会被"调色板门禁"（那条只看 Tailwind 类）拦下。
+         * 这里补上菜单这一块：壳与项的色值、字号、圆角必须取 `var(--qt-*)`，
+         * 否则用户在外观设置里换主题/圆角时菜单不跟随。
+         */
+        const offenders: string[] = [];
+        for (const block of cssBlocks(readFileSync(TOKEN_CSS, "utf8"))) {
+            if (!/(^|[\s,])\.hs-menu/.test(block.selector)) continue;
+            for (const declaration of block.body.split(";")) {
+                const text = declaration.trim();
+                if (!text) continue;
+                const property = text.slice(0, text.indexOf(":")).trim();
+                if (
+                    !/^(font-size|border-radius|color|background|background-color|box-shadow|border|border-color)$/.test(
+                        property,
+                    )
+                ) {
+                    continue;
+                }
+                // `border-radius: 0` 是形状不是风格；`inherit` / `none` / `transparent`
+                // 这类关键字由 CSS 自身定义，不携带主题取值；其余必须走令牌。
+                const value = text.slice(text.indexOf(":") + 1).trim();
+                const KEYWORD =
+                    /^(0|inherit|initial|unset|revert|none|transparent|currentcolor|auto|normal)$/i;
+                if (KEYWORD.test(value)) continue;
+                if (value.includes("var(--qt-")) continue;
+                offenders.push(`${block.selector} → ${text}`);
+            }
+        }
+        expect(
+            offenders,
+            "菜单壳与菜单项的取值必须来自 `var(--qt-*)` —— 写死值不会跟随主题与圆角风格",
+        ).toEqual([]);
+    });
+});

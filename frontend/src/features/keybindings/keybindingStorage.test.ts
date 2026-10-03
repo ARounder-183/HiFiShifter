@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
     loadKeybindingOverrides,
     migrateStretchSplit,
+    normalizeStoredBindingShape,
     saveKeybindingOverrides,
 } from "./keybindingStorage";
 import type { KeybindingOverrides } from "./types";
@@ -116,10 +117,10 @@ describe("loadKeybindingOverrides / saveKeybindingOverrides", () => {
         store.set(STORAGE_KEY, JSON.stringify({ "modifier.clipStretch": { key: "control" } }));
         loadKeybindingOverrides(); // 触发迁移 + 回写
         // 模拟用户随后改绑另一个动作（中间件保存路径）。
-        saveKeybindingOverrides({ "playback.toggle": { key: "enter" } });
+        saveKeybindingOverrides({ "playback.toggle": [{ key: "enter" }] });
         const persisted = JSON.parse(store.get(STORAGE_KEY) ?? "{}");
         expect(persisted[FLAG]).toBe(true);
-        expect(persisted["playback.toggle"]).toEqual({ key: "enter" });
+        expect(persisted["playback.toggle"]).toEqual([{ key: "enter" }]);
     });
 
     it("空覆盖项且未迁移过 → 移除存储键", () => {
@@ -138,10 +139,76 @@ describe("loadKeybindingOverrides / saveKeybindingOverrides", () => {
         expect(reloaded["modifier.paramStretch"]).toBeUndefined();
     });
 
+    it("加载时把老存储里的单对象覆盖项归一为列表", () => {
+        store.set(
+            STORAGE_KEY,
+            JSON.stringify({
+                [FLAG]: true,
+                "playback.toggle": { key: "enter" },
+            }),
+        );
+        const loaded = loadKeybindingOverrides();
+        expect(loaded["playback.toggle"]).toEqual([{ key: "enter" }]);
+    });
+
     it("解析失败 / 非对象载荷 → 空覆盖项且不抛错", () => {
         store.set(STORAGE_KEY, "not json");
         expect(loadKeybindingOverrides()).toEqual({});
         store.set(STORAGE_KEY, JSON.stringify([1, 2, 3]));
         expect(loadKeybindingOverrides()).toEqual({});
+    });
+});
+
+describe("normalizeStoredBindingShape（v1 单对象 → v2 列表）", () => {
+    // 纯函数：不依赖 localStorage 桩。
+    it("单个绑定对象被包装成单元素列表", () => {
+        expect(
+            normalizeStoredBindingShape({
+                "clip.split": { key: "g" },
+            }),
+        ).toEqual({ "clip.split": [{ key: "g" }] });
+    });
+
+    it("已是列表的原样保留（迁移幂等）", () => {
+        const stored = {
+            "edit.redo": [
+                { key: "z", ctrl: true },
+                { key: "y", ctrl: true },
+            ],
+        };
+        expect(normalizeStoredBindingShape(stored)).toEqual(stored);
+    });
+
+    it("列表里形状不合法的元素被逐项剔除，其余保留", () => {
+        expect(
+            normalizeStoredBindingShape({
+                "clip.split": [{ key: "g" }, 42, "nope", { noKey: true }],
+            }),
+        ).toEqual({ "clip.split": [{ key: "g" }] });
+    });
+
+    it("非首位的 __none__ 被剔除（不变式：它只能作为唯一元素）", () => {
+        expect(
+            normalizeStoredBindingShape({
+                "clip.split": [{ key: "g" }, { key: "__none__" }],
+            }),
+        ).toEqual({ "clip.split": [{ key: "g" }] });
+    });
+
+    it("整条都是「无」时保留一个，且保留其形状（modifierOnly）", () => {
+        expect(
+            normalizeStoredBindingShape({
+                "modifier.scrollHorizontal": [{ key: "__none__", modifierOnly: true }],
+            }),
+        ).toEqual({ "modifier.scrollHorizontal": [{ key: "__none__", modifierOnly: true }] });
+    });
+
+    it("整条都写坏的键被丢弃（回落默认），不牵连其它键", () => {
+        expect(
+            normalizeStoredBindingShape({
+                "clip.split": 42,
+                "clip.copy": { key: "c", ctrl: true },
+            }),
+        ).toEqual({ "clip.copy": [{ key: "c", ctrl: true }] });
     });
 });

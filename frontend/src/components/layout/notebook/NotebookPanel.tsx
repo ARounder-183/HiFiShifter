@@ -147,6 +147,39 @@ export function NotebookPanel() {
         });
     }, []);
 
+    // 源码视图的写入同样要去抖：每次按键都调 `webApi.setProjectNotes` 会在后端
+    // 登记一条可撤销历史，撤销栈瞬间被按键塞满。富文本路径由
+    // `useNotebookEditor` 按 `autosaveDebounceMs` 去抖，这里为 textarea 复制
+    // 同一套节流，并在失焦 / 切模式 / 卸载时把最后值冲刷出去（不丢编辑）。
+    const sourcePersistTimerRef = useRef<number | null>(null);
+    const sourcePendingRef = useRef<string | null>(null);
+
+    const flushSourcePersist = useCallback(() => {
+        if (sourcePersistTimerRef.current !== null) {
+            window.clearTimeout(sourcePersistTimerRef.current);
+            sourcePersistTimerRef.current = null;
+        }
+        const pending = sourcePendingRef.current;
+        sourcePendingRef.current = null;
+        if (pending !== null) persist(pending);
+    }, [persist]);
+
+    const scheduleSourcePersist = useCallback(
+        (value: string) => {
+            sourcePendingRef.current = value;
+            if (sourcePersistTimerRef.current !== null) {
+                window.clearTimeout(sourcePersistTimerRef.current);
+            }
+            sourcePersistTimerRef.current = window.setTimeout(() => {
+                sourcePersistTimerRef.current = null;
+                const pending = sourcePendingRef.current;
+                sourcePendingRef.current = null;
+                if (pending !== null) persist(pending);
+            }, settings.autosaveDebounceMs);
+        },
+        [persist, settings.autosaveDebounceMs],
+    );
+
     const onMarkdownChange = useCallback(
         (value: string) => {
             dispatch(setProjectNotesMarkdown(value));
@@ -470,12 +503,14 @@ export function NotebookPanel() {
         (next: NotebookMode) => {
             if (next === mode) return;
             seal();
+            // 源码视图的待写内容也要在切模式前落盘（seal 只收编辑器那一侧）。
+            flushSourcePersist();
             dispatch(setNotebookMode(next));
             void settingsApi
                 .saveUiSettings({ notebook: { ...settings, defaultMode: next } })
                 .catch(() => {});
         },
-        [dispatch, mode, seal, settings],
+        [dispatch, flushSourcePersist, mode, seal, settings],
     );
 
     /**
@@ -498,10 +533,14 @@ export function NotebookPanel() {
     }, []);
 
     // 保存前收尾：工程保存会把当前正文一并带上，但待写内容也要落盘，
-    // 否则"刚打完字就保存"会出现后端与工程文件不一致。
+    // 否则"刚打完字就保存"会出现后端与工程文件不一致。源码视图的待写值
+    // 走自己的定时器，同样在这里冲刷。
     useEffect(() => {
-        return () => flush();
-    }, [flush]);
+        return () => {
+            flush();
+            flushSourcePersist();
+        };
+    }, [flush, flushSourcePersist]);
 
     const usedAssetIds = useMemo(() => referencedAssetIds(markdown), [markdown]);
 
@@ -635,9 +674,11 @@ export function NotebookPanel() {
                         value={markdown}
                         spellCheck={settings.spellCheck}
                         onChange={(event) => {
-                            dispatch(setProjectNotesMarkdown(event.target.value));
-                            persist(event.target.value);
+                            const value = event.target.value;
+                            dispatch(setProjectNotesMarkdown(value));
+                            scheduleSourcePersist(value);
                         }}
+                        onBlur={flushSourcePersist}
                     />
                 ) : null}
 

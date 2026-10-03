@@ -99,11 +99,17 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
     const onMarkdownChangeRef = useRef(onMarkdownChange);
     const persistRef = useRef(persist);
     const onIdleSplitRef = useRef(onIdleSplit);
+    // 运行时设置也必须走 ref：`useEditor` 的依赖只有 extensions / undoBridge
+    // （稳定），`onUpdate` 闭包只捕获**首次渲染**的 settings —— 直接在闭包里读
+    // `settings.autosaveDebounceMs` / `historySplitIdleMs` 会让设置对话框里改的
+    // 值直到应用重启才生效。
+    const settingsRef = useRef(settings);
     useEffect(() => {
         onMarkdownChangeRef.current = onMarkdownChange;
         persistRef.current = persist;
         onIdleSplitRef.current = onIdleSplit;
-    }, [onIdleSplit, onMarkdownChange, persist]);
+        settingsRef.current = settings;
+    }, [onIdleSplit, onMarkdownChange, persist, settings]);
 
     /** 最近一次"由本编辑器写出"的 Markdown，用于识别外来更新。 */
     const lastEmittedRef = useRef(markdown);
@@ -183,7 +189,7 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
                 onMarkdownChangeRef.current(next);
                 pendingRef.current = next;
 
-                const delay = settings.autosaveDebounceMs;
+                const delay = settingsRef.current.autosaveDebounceMs;
                 if (debounceTimerRef.current !== null) {
                     window.clearTimeout(debounceTimerRef.current);
                 }
@@ -195,12 +201,13 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
                 }, delay);
 
                 // 停顿分节：连续打字时不触发，停手一段时间后让下一步另起。
-                if (settings.historySplitIdleMs > 0) {
+                const idleDelay = settingsRef.current.historySplitIdleMs;
+                if (idleDelay > 0) {
                     if (idleTimerRef.current !== null) window.clearTimeout(idleTimerRef.current);
                     idleTimerRef.current = window.setTimeout(() => {
                         idleTimerRef.current = null;
                         onIdleSplitRef.current();
-                    }, settings.historySplitIdleMs);
+                    }, idleDelay);
                 }
             },
             onBlur: () => {

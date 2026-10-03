@@ -9,7 +9,7 @@
  * 注意：右键框选**刻意不做吸附、也不显示吸附高亮** —— 它是 Clip 框选
  * 手势，不与时间轴网格/候选直接交互（吸附仅服务于移动/编辑类拖拽）。
  */
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { registerDragAbort } from "./gestureFocusGuard";
 import type * as React from "react";
 
@@ -104,6 +104,41 @@ export function useTimelineSelectionRect(params: {
         y2: number;
     } | null>(null);
 
+    // 框选矩形每帧最多提交一次：pointermove 是数百 Hz，逐事件 setState 会让
+    // 整个 TimelinePanel 子树随每次移动重渲（与 TrackList 的 scheduleDragUi
+    // 同因同解）。这里只保留最新矩形、每帧提交一次，不改变选择语义。
+    const selectionRectRafRef = useRef<number | null>(null);
+    const queuedSelectionRectRef = useRef<{
+        x1: number;
+        y1: number;
+        x2: number;
+        y2: number;
+    } | null>(null);
+
+    function scheduleSelectionRect(rect: { x1: number; y1: number; x2: number; y2: number }) {
+        queuedSelectionRectRef.current = rect;
+        if (selectionRectRafRef.current != null) return;
+        selectionRectRafRef.current = requestAnimationFrame(() => {
+            selectionRectRafRef.current = null;
+            const pending = queuedSelectionRectRef.current;
+            queuedSelectionRectRef.current = null;
+            if (pending != null) setSelectionRect(pending);
+        });
+    }
+
+    /** 取消待提交帧并丢弃排队矩形（手势结束 / 卸载）。 */
+    function cancelScheduledSelectionRect() {
+        if (selectionRectRafRef.current != null) {
+            cancelAnimationFrame(selectionRectRafRef.current);
+            selectionRectRafRef.current = null;
+        }
+        queuedSelectionRectRef.current = null;
+    }
+
+    useEffect(() => {
+        return () => cancelScheduledSelectionRect();
+    }, []);
+
     function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
         if (!shouldStartTimelineSelectionRect(e.button)) return;
         e.preventDefault();
@@ -182,7 +217,7 @@ export function useTimelineSelectionRect(params: {
             if (!drag.hasSelectionDrag) return;
 
             // 右键框选不做吸附：矩形边界即原始指针位置。
-            setSelectionRect({
+            scheduleSelectionRect({
                 x1: Math.min(drag.startX, cx),
                 y1: Math.min(drag.startY, cy),
                 x2: Math.max(drag.startX, cx),
@@ -210,6 +245,7 @@ export function useTimelineSelectionRect(params: {
                 x2: Math.max(drag.startX, drag.curX),
                 y2: Math.max(drag.startY, drag.curY),
             };
+            cancelScheduledSelectionRect();
             setSelectionRect(null);
 
             if (!hasSelectionDrag) {

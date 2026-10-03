@@ -50,6 +50,7 @@ import {
     saveProjectToPathRemote,
     setTrackMeters,
     setToolMode,
+    setVslibAvailable,
     setPlaybackRenderingState,
     checkpointHistory,
     addTrackRemote,
@@ -549,6 +550,7 @@ function AppInner() {
     const dockLayout = useAppSelector((state) => state.dock.layout);
     const dockSettings = useAppSelector((state) => state.dock.settings);
     const dockHydrated = useAppSelector((state) => state.dock.hydrated);
+    const dockMaximized = useAppSelector((state) => Boolean(state.dock.maximized));
     const [autoBackupSettings, setAutoBackupSettings] = useState<AutoBackupSettings>(
         DEFAULT_AUTO_BACKUP_SETTINGS,
     );
@@ -675,6 +677,29 @@ function AppInner() {
             })
             .catch(() => {
                 // 读不到设置时保持出厂默认；sessionSlice 的 reducer 同样不会执行。
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [dispatch]);
+
+    /*
+     * vslib 能力探测：启动时问一次后端，供算法列表过滤掉不可用的 vslib。
+     *
+     * 【为什么是"一次"而不是轮询】可用性是编译期 + 链接期决定的静态事实，
+     * 运行期不会变（DLL 缺失会让进程根本起不来）。探测失败时保持 `null`
+     * （未知），算法列表按"不可用"处理 —— 详见 pitchAlgoOptions.ts。
+     */
+    useEffect(() => {
+        let cancelled = false;
+        void webApi
+            .getVslibStatus()
+            .then((status) => {
+                if (cancelled) return;
+                dispatch(setVslibAvailable(Boolean(status?.available)));
+            })
+            .catch(() => {
+                // 取不到状态：保持 null（未知 → 隐藏 vslib）。
             });
         return () => {
             cancelled = true;
@@ -1657,7 +1682,11 @@ function AppInner() {
     const runOrPromptUnsavedAction = useCallback(
         (mode: "switch" | "exit", action: () => Promise<void>) => {
             if (!projectDirty) {
-                void action();
+                // action 可能 reject（如 openProjectFromDialog().unwrap() 后端失败、
+                // closeWindowNow 双双失败）：干净工程这一支没有弹窗，若不接住，
+                // 拒绝会变成 unhandledrejection 被全局上报当成崩溃。错误状态已由
+                // Redux 呈现给用户，这里只需静默吞掉。
+                void action().catch(() => {});
                 return;
             }
             promptUnsavedAction(mode, action);
@@ -3464,13 +3493,19 @@ function AppInner() {
     // 【闸门】必须等 `hydrated` 为真：切片初始状态是出厂布局，若在读到磁盘
     // 内容之前就写回，用户的布局会被默认值覆盖 —— 也就是"打开应用发现界面
     // 被重置"这类最恼人的故障。
+    //
+    // 【最大化时也必须跳过】最大化把 `state.layout` 的某个根临时换成单组树，
+    // 而 `maximized` 本身刻意不持久化（重启后回到用户排好的布局）。若此刻仍
+    // 落盘，写下的就是那棵临时树；用户没还原就退出，原排布被永久覆盖且无从
+    // 恢复。`dockMaximized` 进入依赖：还原时它变回 false，effect 重新运行，
+    // 恢复后的真实布局随即被保存，去抖不会永久失效。
     useEffect(() => {
-        if (!dockHydrated) return;
+        if (!dockHydrated || dockMaximized) return;
         const timer = window.setTimeout(() => {
             void dispatch(persistDockSettings());
         }, dockSettings.saveDebounceMs);
         return () => window.clearTimeout(timer);
-    }, [dockLayout, dockSettings, dockHydrated, dispatch]);
+    }, [dockLayout, dockSettings, dockHydrated, dockMaximized, dispatch]);
 
     // ── 面板渲染函数登记 ─────────────────────────────────────────────
     //

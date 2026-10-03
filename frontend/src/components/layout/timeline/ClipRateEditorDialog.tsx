@@ -16,6 +16,7 @@ import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { AppForm, AppSwitchRow } from "../../../ui/Field";
 import { useAppSelector } from "../../../app/hooks";
+import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
 import { tempoAtSec, clampBpm } from "../../../utils/tempoMap";
 import type { TempoMap } from "../../../utils/tempoMap";
@@ -229,13 +230,46 @@ function ClipRateEditorFields({
         };
     }, [onClose]);
 
+    // 滚轮步进必须挂非被动原生监听：React root 上的 wheel 是 passive 的，
+    // 合成事件里的 preventDefault() 是空操作，调值会同时滚动祖先容器
+    // （与 FadeContextMenu 的曲率滑块同因同解）。
+    const attachRateWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setRateEdited(true);
+        const fine = isModifierActive(fineAdjustKb, e);
+        const step = fine ? RATE_FINE_STEP : RATE_WHEEL_STEP;
+        const current = parsePlaybackRateInput(rateText) ?? clip.playbackRate;
+        updateRateValue(current + step * (e.deltaY < 0 ? 1 : -1));
+    });
+    const attachOldBpmWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const fine = isModifierActive(fineAdjustKb, e);
+        const step = fine ? BPM_FINE_STEP : BPM_WHEEL_STEP;
+        const current = parseBpmText(oldBpmText) ?? currentBpm;
+        updateOldBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
+    });
+    const attachNewBpmWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const fine = isModifierActive(fineAdjustKb, e);
+        const step = fine ? BPM_FINE_STEP : BPM_WHEEL_STEP;
+        const current = parseBpmText(newBpmText) ?? currentBpm;
+        updateNewBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
+    });
+
     return (
         <div
             ref={menuRef}
             role="menu"
             data-hs-floating-menu="1"
             data-hs-context-menu="1"
-            className="fixed z-qt-menu w-[248px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-2 px-3 flex flex-col gap-2"
+            // `--form`：这是表单型菜单（一列带标签的输入框），只有壳的内边距与
+            // 条目型菜单不同；`--no-scroll`：内容紧凑、不滚动，避免壳的滚动容器
+            // 被内部绝对定位的 Radix 隐藏元素撑出一条滚不动的滚动条。
+            // 宽度是**表单宽度**（248px），不是菜单最小宽度 —— 后者统一取令牌。
+            className="hs-menu hs-menu--form hs-menu--no-scroll w-[248px] flex flex-col gap-2"
             style={{ left: position.x, top: position.y }}
             onPointerDown={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}
@@ -271,15 +305,7 @@ function ClipRateEditorFields({
                             onClose();
                         }
                     }}
-                    onWheel={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setRateEdited(true);
-                        const fine = isModifierActive(fineAdjustKb, e.nativeEvent);
-                        const step = fine ? RATE_FINE_STEP : RATE_WHEEL_STEP;
-                        const current = parsePlaybackRateInput(rateText) ?? clip.playbackRate;
-                        updateRateValue(current + step * (e.deltaY < 0 ? 1 : -1));
-                    }}
+                    ref={attachRateWheel}
                 />
             </label>
 
@@ -300,14 +326,7 @@ function ClipRateEditorFields({
                                 applyRate(newBpm / oldBpm);
                             }
                         }}
-                        onWheel={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            const fine = isModifierActive(fineAdjustKb, e.nativeEvent);
-                            const step = fine ? BPM_FINE_STEP : BPM_WHEEL_STEP;
-                            const current = parseBpmText(oldBpmText) ?? currentBpm;
-                            updateOldBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
-                        }}
+                        ref={attachOldBpmWheel}
                     />
                 </label>
                 <label className="flex-1 flex flex-col gap-1">
@@ -326,14 +345,7 @@ function ClipRateEditorFields({
                                 applyRate(newBpm / oldBpm);
                             }
                         }}
-                        onWheel={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            const fine = isModifierActive(fineAdjustKb, e.nativeEvent);
-                            const step = fine ? BPM_FINE_STEP : BPM_WHEEL_STEP;
-                            const current = parseBpmText(newBpmText) ?? currentBpm;
-                            updateNewBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
-                        }}
+                        ref={attachNewBpmWheel}
                     />
                 </label>
             </div>

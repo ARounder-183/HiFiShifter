@@ -351,6 +351,17 @@ export function makeLoudnessAmplitudeMap(
     /** 每帧的**无内容淡出系数**（判据用平滑原声；与 `factorAt` 的合成一致）。 */
     let lutContentFade = new Float64Array(0);
     /**
+     * 每**格**（相邻两帧之间）内，无内容淡出从 i0 切到 i1 的帧内阈值 frac。
+     *
+     * 【为什么不是线性插值】逐值路径的 `contentFadeAt(frameF)` 先把原声基线
+     * **就近取整到采样帧**（`contentBaselineAt` 的 `Math.round`），再套 smoothstep
+     * —— 因此它是 frameF 的**阶跃**函数，而非连续函数。查表若对 `lutContentFade`
+     * 线性插值，就会在淡出带内产出逐值路径永不产生的中间值（两条路径不再逐值
+     * 等价）。这里预存阶跃点：`frac < 阈值` 用 i0 的淡出，否则用 i1 的
+     * （`Number.POSITIVE_INFINITY` = 该格两端同属一个采样帧，恒用 i0）。
+     */
+    let lutFadeCross = new Float64Array(0);
+    /**
      * 每**格**（相邻两帧之间）是否可安全线性插值：三个通道的来源都一致才为 1。
      *
      * 把「三次 2 位字段比较」提前成一次数组读 + 一次判零 —— 查询侧是热路径，
@@ -399,6 +410,7 @@ export function makeLoudnessAmplitudeMap(
             lutTag = new Uint8Array(count);
             lutCellOk = new Uint8Array(count > 0 ? count - 1 : 0);
             lutContentFade = new Float64Array(count);
+            lutFadeCross = new Float64Array(count > 0 ? count - 1 : 0);
         }
         // live 覆盖只解析一次：此前它在**每个查询点**都被重新解析（一次重建数万次）。
         const liveVolume = live.volume();
@@ -450,8 +462,20 @@ export function makeLoudnessAmplitudeMap(
         lutCount = count;
         lutCoverStart = fLo;
         lutCoverEnd = fHi;
+        // 无内容淡出的阶跃点：逐值路径 `contentBaselineAt` 把 frameF 就近取整到
+        // 采样帧（步长 stride），故同一格内淡出值最多切换一次。阈值由"取整跨越
+        // 半帧边界"的时刻解出：frame0 + frac 使 (frame0+frac-startFrame)/stride
+        // 命中 knot0 + 0.5。两端同属一个采样帧时恒用 i0（阈值 +∞）。
+        const fadeStride = stride > 0 ? stride : 1;
         for (let i = 0; i + 1 < count; i += 1) {
             lutCellOk[i] = ((lutTag[i] as number) ^ (lutTag[i + 1] as number)) & 0x3f ? 0 : 1;
+            const frame0 = fLo + i;
+            const knot0 = Math.round((frame0 - startFrame) / fadeStride);
+            const knot1 = Math.round((frame0 + 1 - startFrame) / fadeStride);
+            lutFadeCross[i] =
+                knot1 > knot0
+                    ? (knot0 + 0.5) * fadeStride - (frame0 - startFrame)
+                    : Number.POSITIVE_INFINITY;
         }
         lutReady = true;
     };
@@ -488,12 +512,18 @@ export function makeLoudnessAmplitudeMap(
                         const tA = lutTarget[i0] as number;
                         const bA = lutBase[i0] as number;
                         const fA = lutContentFade[i0] as number;
+                        // 淡出是 frameF 的阶跃函数（逐值路径先就近取整原声再套
+                        // smoothstep），按预存的阶跃点选 i0 / i1，**不做线性插值**
+                        // —— 否则会在淡出带内产出逐值路径不存在的中间值。
+                        const fFade =
+                            frac < (lutFadeCross[i0] as number)
+                                ? fA
+                                : (lutContentFade[i1] as number);
                         dynGain =
                             dynLevelTargetingGain(
                                 tA + ((lutTarget[i1] as number) - tA) * frac,
                                 bA + ((lutBase[i1] as number) - bA) * frac,
-                            ) *
-                            (fA + ((lutContentFade[i1] as number) - fA) * frac);
+                            ) * fFade;
                     }
                 }
             }

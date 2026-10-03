@@ -85,23 +85,29 @@ function TempoActiveIcon() {
 export const TempoMapCornerButton: React.FC = () => {
     const dispatch = useAppDispatch();
     const { tf } = useI18n();
-    const s = useAppSelector((state) => state.session);
+    // 只订阅本组件真正消费的字段：整片 session 切片会在播放期间（约 30Hz 提交
+    // playhead）以及每次 clip/表计更新时触发本叶子按钮重渲。
+    const tempoMap = useAppSelector((state) => state.session.tempoMap);
+    const tempoMapVisible = useAppSelector((state) => state.session.tempoMapVisible);
+    const bpm = useAppSelector((state) => state.session.bpm);
+    const beats = useAppSelector((state) => state.session.beats);
+    const project = useAppSelector((state) => state.session.project);
     const [dialogOpen, setDialogOpen] = useState(false);
 
-    const hasMap = s.tempoMap != null && s.tempoMap.points.length > 0;
+    const hasMap = tempoMap != null && tempoMap.points.length > 0;
     /** 是否存在 0 位置初始点以外的实际速度映射变化点。 */
-    const hasChangePoints = s.tempoMap != null && s.tempoMap.points.length > 1;
+    const hasChangePoints = tempoMap != null && tempoMap.points.length > 1;
     /** 存在 Tempo Map 且正在显示（红色提醒模式）。 */
-    const active = hasMap && s.tempoMapVisible;
+    const active = hasMap && tempoMapVisible;
     /** 图标按钮的无障碍名称（与悬浮提示共用同一份文案）。 */
     const buttonLabel = active ? tf("tempo_map_active_tooltip") : tf("tempo_map_show_tooltip");
 
     const projectScaleLike = useMemo<ScaleLike | null>(
         () =>
-            s.project.useCustomScale && s.project.customScale
-                ? s.project.customScale.notes
-                : s.project.baseScale,
-        [s.project],
+            project.useCustomScale && project.customScale
+                ? project.customScale.notes
+                : project.baseScale,
+        [project],
     );
 
     /** 确保工程存在 Tempo Map（仅 0 位置初始点 = 工程基准记录），并显示速度映射。 */
@@ -112,15 +118,15 @@ export const TempoMapCornerButton: React.FC = () => {
                     {
                         id: createTempoPointId(),
                         positionSec: 0,
-                        bpm: clampBpm(s.bpm || 120),
+                        bpm: clampBpm(bpm || 120),
                         timeSignature: {
-                            numerator: clampNumerator(s.beats || 4),
-                            denominator: clampDenominator(s.project.timeSignatureDenominator ?? 4),
+                            numerator: clampNumerator(beats || 4),
+                            denominator: clampDenominator(project.timeSignatureDenominator ?? 4),
                         },
                         scale: scaleLikeToScaleData(
                             projectScaleLike ?? undefined,
-                            s.project.useCustomScale
-                                ? (s.project.customScale?.name ?? undefined)
+                            project.useCustomScale
+                                ? (project.customScale?.name ?? undefined)
                                 : undefined,
                         ),
                     },
@@ -131,7 +137,7 @@ export const TempoMapCornerButton: React.FC = () => {
         }
         dispatch(setTempoMapVisible(true));
         void dispatch(persistUiSettings());
-    }, [dispatch, hasMap, s.bpm, s.beats, s.project, projectScaleLike]);
+    }, [dispatch, hasMap, bpm, beats, project, projectScaleLike]);
 
     const clearMap = useCallback(() => {
         dispatch(setTempoMap(null));

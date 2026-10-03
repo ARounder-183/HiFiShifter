@@ -1436,6 +1436,46 @@ function shouldWrite(next: number, previous: number, epsilon = 0.01): boolean {
 }
 
 /**
+ * 「元素身份 + 值」双键去重的 DOM 写入器。
+ *
+ * 【为什么不能只按值去重】被同步的图层 / 滚动容器可能在宿主创建之后被 React
+ * 重建（面板停靠重排会搬动 DOM、标尺随视图出现）。若元素被重建而值未变，纯值
+ * 去重会判定「不必写」—— 新元素就停在静态位置（例如吸附高亮整层没有 transform、
+ * 轨道头容器 scrollTop 仍是 0），直到值下一次变化为止。键加入元素身份后，元素一换
+ * 就无条件写一次。与 `createPlayheadElementWriter` 同一契约，这里按值类型泛化。
+ *
+ * @param equals 值的相等判定（缺省 `Object.is`）。
+ * @returns `(slot, element, value, apply)`；element 为 null 时丢弃该槽位，
+ *          元素回来时无条件写一次。
+ */
+function createElementValueWriter<T>(
+    equals: (a: T, b: T) => boolean = Object.is,
+): (
+    slot: string,
+    element: HTMLElement | null,
+    value: T,
+    apply: (target: HTMLElement, value: T) => void,
+) => void {
+    const slots = new Map<string, { element: HTMLElement; value: T }>();
+    return (slot, element, value, apply) => {
+        if (element === null) {
+            slots.delete(slot);
+            return;
+        }
+        const previous = slots.get(slot);
+        if (
+            previous !== undefined &&
+            previous.element === element &&
+            equals(previous.value, value)
+        ) {
+            return;
+        }
+        slots.set(slot, { element, value });
+        apply(element, value);
+    };
+}
+
+/**
  * 创建内核宿主。
  *
  * 流程：
@@ -2156,10 +2196,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     }
 
     // ── 外部 DOM 同步（标尺 / 轨道头 / 播放头）─────────────────────────
-    // 全部在 rAF 内命令式写入并做值去重：一次样式写入的成本与内容规模无关，
+    // 全部在 rAF 内命令式写入并做去重：一次样式写入的成本与内容规模无关，
     // 但重复写同一个值会白白触发样式重算，因此只在跨过阈值时写。
+    // 去重键必须含**元素身份**——这些目标可能被 React 重建（面板停靠重排），
+    // 只用值会漏掉"新元素没收到过写入"（见 `createElementValueWriter`）。
     let lastRulerTranslateX = Number.NaN;
+    /** 上一次写入标尺平移的元素（身份变化时强制写一次）。 */
+    let lastRulerTranslateEl: HTMLElement | null = null;
     let lastTrackListScrollTop = Number.NaN;
+    /** 上一次写入 scrollTop 的轨道头容器（身份变化时强制写一次）。 */
+    let lastTrackListEl: HTMLElement | null = null;
     /**
      * 已提出、但 React 还没落地的竖直缩放请求（`null` = 没有待定请求）。
      *
@@ -2202,14 +2248,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * `createPlayheadElementWriter`。
      */
     const playheadWriter = createPlayheadElementWriter();
-    /** 吸附高亮内容层的整层变换（字符串去重：同时含两轴）。 */
-    let lastSnapTransform = "";
-    /** copy ghost 内容层的整层变换（去重方式同上）。 */
-    let lastGhostTransform = "";
-    /** 拖入预览内容层的整层变换（去重方式同上）。 */
-    let lastDropPreviewTransform = "";
-    /** 新建轨道幽灵行内容层的整层变换（去重方式同上）。 */
-    let lastNewTrackDropTransform = "";
+    /**
+     * 四个内容层（吸附高亮 / copy ghost / 拖入预览 / 新建轨道幽灵行）的整层变换
+     * 写入器。去重键 = 元素身份 + 变换字符串（同时含两轴，天然规避 NaN 初值问题）
+     * —— 只用字符串会漏掉"层被 React 重建而滚动值没变"，新层就停在静态位置。
+     */
+    const layerTransformWriter = createElementValueWriter<string>();
     /** 上一次绘制的视口（引用比较：`ScrollKernel.get()` 的引用在未变化时稳定）。 */
     let lastDrawnView: TimelineViewportState | null = null;
     /** 上一次绘制的播放头位置（秒），用于判断是否需要继续自驱动。 */
@@ -2350,7 +2394,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // `draw()` 传入的 view 已经过 `snapRenderView`，这里用同一助手显式表达
             // 契约，避免以后有人把实参换成未吸附的值。
             const translateX = -rulerLayerTranslatePx(view.scrollLeft, readDpr());
-            if (shouldWrite(translateX, lastRulerTranslateX)) {
+            if (ruler !== lastRulerTranslateEl || shouldWrite(translateX, lastRulerTranslateX)) {
+                lastRulerTranslateEl = ruler;
                 lastRulerTranslateX = translateX;
                 ruler.style.transform = `translateX(${translateX}px)`;
             }
@@ -2362,9 +2407,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 旧行高，写入会被钳制并触发回声反灌。等 `settleVerticalZoom` 补写。
             if (verticalZoomInFlight == null) {
                 // 容差 0.5px：与调用方的回灌判定同量级，避免「内核 → DOM → 内核」循环。
-                if (shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)) {
+                // 元素身份参与去重：轨道头容器被 React 重建后 scrollTop 归零，
+                // 即使值没变也必须补写一次。
+                if (
+                    trackList !== lastTrackListEl ||
+                    shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)
+                ) {
                     trackList.scrollTop = view.scrollTop;
                     // 读回值作回声基准（与 `mirrorTrackListScrollTop` 同一约定）。
+                    lastTrackListEl = trackList;
                     lastTrackListScrollTop = trackList.scrollTop;
                 }
             }
@@ -2372,44 +2423,56 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
         // 吸附高亮内容层：整层平移（内容坐标 → 视口坐标）。
         // 与细节层同一策略——层内元素全用内容坐标布局，滚动只写一次 transform。
-        // 用字符串去重（同时含两轴，天然规避 NaN 初值问题）。
+        // 去重键 = 元素身份 + 字符串（同时含两轴，天然规避 NaN 初值问题）。
         const snapContent = dom.snapHighlightContent;
         if (snapContent != null) {
-            const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
-            if (transform !== lastSnapTransform) {
-                lastSnapTransform = transform;
-                snapContent.style.transform = transform;
-            }
+            layerTransformWriter(
+                "snap",
+                snapContent,
+                `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`,
+                (target, value) => {
+                    target.style.transform = value;
+                },
+            );
         }
 
         // copy ghost 内容层：与吸附高亮同一机制（内容坐标 + 整层平移）。
         const ghostContent = dom.ghostContent;
         if (ghostContent != null) {
-            const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
-            if (transform !== lastGhostTransform) {
-                lastGhostTransform = transform;
-                ghostContent.style.transform = transform;
-            }
+            layerTransformWriter(
+                "ghost",
+                ghostContent,
+                `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`,
+                (target, value) => {
+                    target.style.transform = value;
+                },
+            );
         }
 
         // 拖入预览内容层：同上。
         const dropPreviewContent = dom.dropPreviewContent;
         if (dropPreviewContent != null) {
-            const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
-            if (transform !== lastDropPreviewTransform) {
-                lastDropPreviewTransform = transform;
-                dropPreviewContent.style.transform = transform;
-            }
+            layerTransformWriter(
+                "drop-preview",
+                dropPreviewContent,
+                `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`,
+                (target, value) => {
+                    target.style.transform = value;
+                },
+            );
         }
 
         // 新建轨道幽灵行内容层：同上。
         const newTrackDropContent = dom.newTrackDropContent;
         if (newTrackDropContent != null) {
-            const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
-            if (transform !== lastNewTrackDropTransform) {
-                lastNewTrackDropTransform = transform;
-                newTrackDropContent.style.transform = transform;
-            }
+            layerTransformWriter(
+                "new-track-drop",
+                newTrackDropContent,
+                `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`,
+                (target, value) => {
+                    target.style.transform = value;
+                },
+            );
         }
 
         // 播放头：两条线**同为视口坐标**，且由同一个函数取左缘。
@@ -2581,12 +2644,17 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         const trackList = sync?.trackListScroller?.() ?? null;
         if (trackList == null) return;
         const view = scroll.get();
-        if (shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)) {
+        if (
+            trackList !== lastTrackListEl ||
+            shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)
+        ) {
             trackList.scrollTop = view.scrollTop;
             // 记录**读回值**而非请求值：浏览器可能在内容高未及时更新时钳制写入
             // （轨道头 DOM 的内容高由 React 行渲染决定，未必与内核上限逐像素相等）。
             // 以读回值为回声基准，这次钳制就不会被误判成用户输入而把内核拽回 ——
             // 这是"防拽回"的最后一道防线（见 `timeline/scrollEcho`）。
+            // 元素身份同样参与去重：容器被重建后 scrollTop 归零，值没变也要补写。
+            lastTrackListEl = trackList;
             lastTrackListScrollTop = trackList.scrollTop;
         }
     }
@@ -4885,10 +4953,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * 【为什么失焦必须走这里而不是取消路径】见 `onWindowBlur` 的说明：旧实现
      * `gestureFocusGuard` 的收尾与 pointerup **完全相同**（提交当前值），取消会把
      * 用户已完成的拖动回滚掉。pointerup 与 pointercancel 传入真实事件与各自的
-     * `cancelled`；失焦没有事件，传全 false 修饰键与零坐标（收尾不用坐标）。
+     * `cancelled`；失焦没有事件，传全 false 修饰键、零坐标，并置 `synthetic`
+     * （坐标是合成的，seek 类提交必须跳过）。
      *
      * @param event 抬起 / 取消的真实指针事件；失焦时为形状兼容的最小对象。
      * @param cancelled true = 回滚乐观值（pointercancel / Esc），false = 提交。
+     * @param synthetic true = 无真实指针事件（失焦 / 页面隐藏），坐标不可信。
      */
     function finalizeActiveGesture(
         event: {
@@ -4902,6 +4972,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         cancelled = false,
         /** 真实指针事件才有：失焦收尾没有，释放 pointer capture 时跳过。 */
         pointerId: number | null = null,
+        /**
+         * true = 失焦 / 页面隐藏等**无真实指针事件**的收尾（`event` 的坐标是合成
+         * 的 0，见 `onWindowBlur`）。此类收尾只能保留拖拽 / 修剪 / 淡变等"按下时
+         * 已定死语义、收尾不读坐标"的提交；**seek 类提交必须跳过** —— `secAt(0)`
+         * 会把播放头错误地拖到视口起点（或任意已滚动时间）。
+         */
+        synthetic = false,
     ): void {
         if (gesture.kind === "clip-drag") {
             interactions?.onDragCommit?.({
@@ -5038,9 +5115,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             //
             // 播放中这是**唯一**会写播放头的一拍（按下与拖拽都被面板按阶段挡掉），
             // 提交后引擎 seek 到该处且传输层保持播放 —— 即"延续播放状态"。
-            // 失焦 / 页面隐藏也走本函数（`onWindowBlur`，坐标传 0），语义与旧实现
-            // 一致地按松手提交。
-            if (!cancelled) interactions?.onSeek?.(secAt(event.clientX), "release");
+            // 失焦 / 页面隐藏也走本函数（`onWindowBlur`），但那时没有真实指针事件：
+            // 坐标是合成的 0（`synthetic`），跳过提交，否则 `secAt(0)` 会把播放头
+            // 拖到视口起点。只有真实 pointerup 才按松手位置提交。
+            if (!cancelled && !synthetic) {
+                interactions?.onSeek?.(secAt(event.clientX), "release");
+            }
         }
         if (gesture.kind === "pending-select" && !cancelled) {
             if (gesture.headerControl !== null) {
@@ -5114,7 +5194,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 // 单击 = 同时把播放头带到该控件对应的位置（旧实现每个交互层都这么做）。
                 // 循环点击（`cycleHeld`）与 SnapOffset 手柄不进这个分支——它们的单击
                 // 不是"移动播放头"的语义。
-                const seekSec = resolveClickSeekSec(gesture, event);
+                // 失焦 / 页面隐藏收尾（`synthetic`）没有真实坐标：跳过 seek，否则
+                // `secAt(0)` 会把播放头拖到视口起点；选中 / Take 语义照常。
+                const seekSec = synthetic ? null : resolveClickSeekSec(gesture, event);
                 if (seekSec !== null) {
                     interactions?.onSeekTo?.(seekSec);
                 }
@@ -5695,18 +5777,25 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * 后续所有远程快照被交互锁挡掉（旧 `gestureFocusGuard` 文件头记录的同一问题）。
      *
      * 失焦没有 PointerEvent 可读：提交路径只在 copy/slip 等按下时定死语义、
-     * 收尾不读修饰键，传全 false 即可；clientX/Y 只被 seek 分支使用，而失焦
-     * 时挂起的手势不可能是 seek（见下方过滤）。
+     * 收尾不读修饰键，传全 false 即可；clientX/Y 只被 seek 分支使用，但失焦时
+     * 挂起的手势**可能**正是 seek / pending-select（按下空白或 clip 后 Alt+Tab、
+     * 最小化）—— 合成坐标 0 不能当作用户意图，因此传 `synthetic = true` 让
+     * `finalizeActiveGesture` 跳过 seek 提交（见该参数说明）。
      */
     function onWindowBlur(): void {
-        finalizeActiveGesture({
-            clientX: 0,
-            clientY: 0,
-            ctrlKey: false,
-            shiftKey: false,
-            altKey: false,
-            metaKey: false,
-        });
+        finalizeActiveGesture(
+            {
+                clientX: 0,
+                clientY: 0,
+                ctrlKey: false,
+                shiftKey: false,
+                altKey: false,
+                metaKey: false,
+            },
+            false,
+            null,
+            true,
+        );
     }
 
     /** 页面切到后台（切换标签 / 最小化）按失焦处理。 */

@@ -23,10 +23,10 @@ import { registerDragAbort } from "./gestureFocusGuard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
 import {
-    formatKeybinding,
+    formatKeybindingList,
     isModifierActive,
-    isNoneBinding,
     selectKeybinding,
+    selectKeybindings,
 } from "../../../features/keybindings/keybindingsSlice";
 import { useAppSelector } from "../../../app/hooks";
 import {
@@ -154,7 +154,7 @@ const CurvatureSlider: React.FC<{
     };
 
     return (
-        <div className="flex items-center gap-2 px-2 py-1">
+        <div className="hs-menu__body flex items-center gap-2">
             <svg
                 ref={svgRef}
                 width={34}
@@ -232,7 +232,7 @@ const ShapeRow: React.FC<{
     onSelectShape: (shape: number) => void;
     t: FadeLabelLookup;
 }> = ({ currentShape, isOut = false, onSelectShape, t }) => (
-    <div className="px-2 py-1.5 flex items-center gap-1">
+    <div className="hs-menu__body flex items-center gap-1">
         {FADE_PRESETS.map((preset) => {
             const key = SHAPE_LABEL_KEYS[preset.shape];
             const selected = Math.trunc(currentShape) === preset.shape;
@@ -302,10 +302,9 @@ export const FadeContextMenu: React.FC<{
     useMenuKeyboard(menuRef);
     // 底部提示展示用户实际配置的曲率修饰键（如 "Alt"）。
     const curvatureKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.fadeCurvatureDrag"),
+        selectKeybindings(state, "modifier.fadeCurvatureDrag"),
     );
-    const keysText =
-        curvatureKb && !isNoneBinding(curvatureKb) ? formatKeybinding(curvatureKb, "") : "";
+    const keysText = formatKeybindingList(curvatureKb, "");
     const curvatureHint = (t("fade_menu_curvature_hint") as string).replace("{keys}", keysText);
 
     // 视口夹紧（同 ClipContextMenu 规则）。
@@ -349,7 +348,10 @@ export const FadeContextMenu: React.FC<{
             {...{ [FADE_CONTEXT_MENU_ATTR]: "1" }}
             data-hs-floating-menu="1"
             data-hs-context-menu="1"
-            className="fixed z-qt-menu min-w-[220px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+            // 与其它右键菜单共用同一个表面与条目样式（`hs-menu*`，见 index.css）。
+            // `--no-scroll`：内容是一张紧凑面板（每侧一行形状 + 一个曲率滑杆），
+            // 不滚动 —— 与迁移前一致，也避免滚动容器干扰曲率预览的指针捕获。
+            className="hs-menu hs-menu--no-scroll"
             style={{ left: x, top: y }}
             onContextMenu={(e) => e.preventDefault()}
             onPointerDown={(e) => e.stopPropagation()}
@@ -357,9 +359,7 @@ export const FadeContextMenu: React.FC<{
             {secondary ? (
                 // 交叉点：双列 —— 先前者淡出、后后者淡入。
                 <>
-                    <div className="px-2 py-1 text-qt-micro text-qt-text/50 select-none">
-                        {labelFor(primary)}
-                    </div>
+                    <div className="hs-menu__label">{labelFor(primary)}</div>
                     <SideColumn
                         side={primary}
                         isOut={primary.isOut}
@@ -367,10 +367,8 @@ export const FadeContextMenu: React.FC<{
                         onDirChange={onDirChange}
                         t={(key) => t(key as MessageKey)}
                     />
-                    <div className="my-1 border-t border-qt-divider" />
-                    <div className="px-2 py-1 text-qt-micro text-qt-text/50 select-none">
-                        {labelFor(secondary)}
-                    </div>
+                    <div className="hs-menu__separator" role="separator" />
+                    <div className="hs-menu__label">{labelFor(secondary)}</div>
                     <SideColumn
                         side={secondary}
                         isOut={secondary.isOut}
@@ -381,9 +379,7 @@ export const FadeContextMenu: React.FC<{
                 </>
             ) : (
                 <>
-                    <div className="px-2 py-1 text-qt-micro text-qt-text/50 select-none">
-                        {labelFor(primary)}
-                    </div>
+                    <div className="hs-menu__label">{labelFor(primary)}</div>
                     <SideColumn
                         side={primary}
                         isOut={primary.isOut}
@@ -394,9 +390,7 @@ export const FadeContextMenu: React.FC<{
                 </>
             )}
             {/* 形状切换重置曲率的语义提示（与 Clip 菜单一致的行为说明）。 */}
-            <div className="px-2 pt-1 pb-0.5 text-qt-3xs text-qt-text/40 select-none">
-                {curvatureHint}
-            </div>
+            <div className="hs-menu__hint">{curvatureHint}</div>
         </div>,
         document.body,
     );

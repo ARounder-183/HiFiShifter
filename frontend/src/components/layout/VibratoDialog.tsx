@@ -450,11 +450,24 @@ export function VibratoDialog({
         if (!open || !loadOriginal) return;
         let cancelled = false;
         // 异步回调里的 setState 不受"effect 内同步 setState"约束（同应用弹窗旧实现）。
-        void loadOriginal().then((result) => {
-            if (cancelled) return;
-            setOriginal(result);
-            setOriginalLoading(false);
-        });
+        void loadOriginal()
+            .then((result) => {
+                if (cancelled) return;
+                setOriginal(result);
+                setOriginalLoading(false);
+            })
+            .catch((err) => {
+                /*
+                 * 取选区帧值走 IPC（`getParamFrames`），失败此前没有 catch：`then` 永不
+                 * 执行，`originalLoading` 永远停在 true —— 「套用到选区」页签显示一句
+                 * 永久的「载入中」，且是一个 unhandled rejection。这里与"取不到数据"
+                 * 同路：清掉 loading、`original` 置 null，落到既有的空占位提示。
+                 */
+                if (cancelled) return;
+                console.error("[VibratoDialog] load selection frames failed", err);
+                setOriginal(null);
+                setOriginalLoading(false);
+            });
         return () => {
             cancelled = true;
         };

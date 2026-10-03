@@ -426,6 +426,25 @@ export class WebGl2WaveformRenderer implements WaveformSurfaceRenderer {
     dispose(): void {
         this.gl.deleteBuffer(this.buffer);
         this.gl.deleteProgram(this.program);
+        /*
+         * 释放 WebGL2 上下文本身 —— **仅当画布已脱离文档**（真正的卸载）。
+         *
+         * 【为什么不能无条件 loseContext】`WaveformSurface` 的
+         * `webglcontextrestored` 恢复路径会先 `dispose()` 旧渲染器、再在**同一个**
+         * 画布上新建渲染器；React StrictMode 双挂载 / HMR 也是"dispose 后立即
+         * 复用同一画布重建"。规范规定同一 canvas 的 `getContext` 永远返回同一个
+         * context，一旦这里无条件丢失，重建时会拿到已丢失的 context，
+         * `createShader` 返回 null —— 正是 renderKernel/gl/glContext.ts 明确记录
+         * 并刻意规避的失败模式。画布已脱离文档则说明它不会再被复用，此时丢失
+         * 上下文是安全的：否则反复开关波形面板会累积上下文，逼近浏览器上限后
+         * 把**仍在用**的上下文（如无 Canvas2D 回退的钢琴卷帘 GL 层）挤掉。
+         *
+         * 幂等：`deleteBuffer` / `deleteProgram` 对已删除对象是 no-op；上下文丢失
+         * 后 `getExtension` 返回 null，`?.` 兜住，重复调用不会抛错。
+         */
+        if (!this.canvas.isConnected) {
+            this.gl.getExtension("WEBGL_lose_context")?.loseContext();
+        }
     }
 }
 

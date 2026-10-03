@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { registerDragAbort } from "../gestureFocusGuard";
 import type { AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
@@ -69,6 +69,14 @@ export function useClipPitchDrag(deps: {
     const { sessionRef, dispatch, fineAdjustKb, formatDragTooltip } = deps;
     const [pitchDragTooltip, setPitchDragTooltip] = useState<PitchDragTooltip | null>(null);
     const dragRef = useRef<ClipPitchDragState | null>(null);
+    /** 挂起中的 ToolTips rAF 取消器（手势收尾 / 卸载兜底）。 */
+    const cancelTooltipRafRef = useRef<(() => void) | null>(null);
+
+    useEffect(() => {
+        return () => {
+            cancelTooltipRafRef.current?.();
+        };
+    }, []);
 
     const startClipPitchDrag = useCallback(
         (e: React.PointerEvent, clipId: string) => {
@@ -122,6 +130,36 @@ export function useClipPitchDrag(deps: {
 
             let finalized = false;
 
+            // 指针事件频率（125-1000Hz）远高于显示刷新率；ToolTips 状态提升在
+            // TimelinePanel（数千行）里，逐事件 setState 会让整面板每帧多次重渲染。
+            // 与 useClipDrag 的 scheduleMove / useEditDrag 的 ticking 同一口径：
+            // 只保留最后一个事件，rAF 合并到每帧一次。
+            let tooltipRaf = 0;
+            let latestTooltipCents = 0;
+            let latestTooltipX = 0;
+            let latestTooltipY = 0;
+            const scheduleTooltip = (cents: number, clientX: number, clientY: number) => {
+                latestTooltipCents = cents;
+                latestTooltipX = clientX;
+                latestTooltipY = clientY;
+                if (tooltipRaf !== 0) return;
+                tooltipRaf = requestAnimationFrame(() => {
+                    tooltipRaf = 0;
+                    if (dragRef.current !== state) return;
+                    setPitchDragTooltip({
+                        text: formatDragTooltip(latestTooltipCents),
+                        position: { x: latestTooltipX, y: latestTooltipY },
+                    });
+                });
+            };
+            const cancelTooltipRaf = () => {
+                if (tooltipRaf !== 0) {
+                    cancelAnimationFrame(tooltipRaf);
+                    tooltipRaf = 0;
+                }
+            };
+            cancelTooltipRafRef.current = cancelTooltipRaf;
+
             // ── undo group（惰性开启）────────────────────────────────
             // 预览写入（checkpoint:false）会**真实改动后端参数帧**；若最终
             // 提交才 checkpoint:true，压入的快照是"已预览后"的状态 → 撤销
@@ -165,6 +203,7 @@ export function useClipPitchDrag(deps: {
             };
 
             const teardown = () => {
+                cancelTooltipRaf();
                 window.removeEventListener("pointermove", onMove, true);
                 window.removeEventListener("pointerup", onUp, true);
                 window.removeEventListener("pointercancel", onUp, true);
@@ -203,10 +242,7 @@ export function useClipPitchDrag(deps: {
                 );
                 const cents = computePitchDragCents(adjustedY - st.startClientY);
                 st.currentCents = cents;
-                setPitchDragTooltip({
-                    text: formatDragTooltip(cents),
-                    position: { x: ev.clientX, y: ev.clientY },
-                });
+                scheduleTooltip(cents, ev.clientX, ev.clientY);
                 // 拖拽发生：把参数编辑器选区定在 Clip 首尾（与时间轴右键手势同一
                 // 操作），交互焦点（复制/剪切路由与活动表面）随之切到参数侧。
                 if (!st.selectionApplied) {
@@ -252,19 +288,28 @@ export function useClipPitchDrag(deps: {
                 // 基准帧未就绪（获取失败）时以 0 偏移收尾：清除预览、回到
                 // 基准，后端未被写入，保持一致。
                 publishCommit(st.base ? st.currentCents : 0);
-                // 未产生偏移或基准帧未就绪：无变更，不落盘（也未开组）。
-                if (!st.base || st.currentCents === 0) return;
+                // 基准帧未就绪：从未写入后端、也不可能开组，直接收尾。
+                //
+                // 【不能按 currentCents===0 早退】拖回原点（currentCents===0）
+                // 时后端仍停在最后一个非零预览，且惰性 undo group 已在首次预览
+                // 时打开——此时必须等待在途写入、写回最终值（含 0）并关闭组，
+                // 否则 suppress_checkpoints 永久置位，后续撤销点全被吞掉。
+                if (!st.base) return;
                 try {
                     await st.sendChain;
                     // 最终提交留在 undo group 内（checkpoint:false）：
                     // 组快照（拖拽前）+ 全部预览写入 = 单个撤销步。
-                    await webApi.setParamFrames(
-                        st.rootTrackId,
-                        "pitch",
-                        st.startFrame,
-                        shiftPitchFrames(st.base, st.currentCents / 100),
-                        false,
-                    );
+                    // 末次预览已等于最终值时无需重复写入；currentCents 为 0
+                    // （拖回原点）时必须显式写回，否则音频与 UI 分叉。
+                    if (st.currentCents !== st.sentCents) {
+                        await webApi.setParamFrames(
+                            st.rootTrackId,
+                            "pitch",
+                            st.startFrame,
+                            shiftPitchFrames(st.base, st.currentCents / 100),
+                            false,
+                        );
+                    }
                 } catch {
                     // 后端写入失败时保留现状；epoch 仍需推进以让编辑器回读。
                 } finally {

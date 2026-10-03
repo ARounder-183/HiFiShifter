@@ -11,6 +11,9 @@ import { useEffect, useMemo, useRef } from "react";
 
 import { buildNotebookExtensions } from "./notebookExtensions";
 
+/** 只读预览内容同步的去抖窗口（毫秒）。 */
+const PREVIEW_SYNC_DEBOUNCE_MS = 250;
+
 export interface NotebookReadonlyPreviewProps {
     markdown: string;
     /** 与左栏联动的滚动同步（比例同步）。 */
@@ -41,11 +44,18 @@ export function NotebookReadonlyPreview({
 
     useEffect(() => {
         if (!editor || editor.isDestroyed) return;
-        try {
-            editor.commands.setContent(markdown, { emitUpdate: false });
-        } catch {
-            // 编辑器正在重建：内容会在下次渲染时重新同步。
-        }
+        // 去抖：主编辑器每敲一键都会推新 markdown 进来，而一次同步要重跑
+        // markdown-it 解析 + ProseMirror 整篇替换。大笔记下这是肉眼可见的
+        // 打字卡顿；200-300ms 的延迟对滚动同步与内容一致性没有可感影响。
+        const timer = window.setTimeout(() => {
+            if (editor.isDestroyed) return;
+            try {
+                editor.commands.setContent(markdown, { emitUpdate: false });
+            } catch {
+                // 编辑器正在重建：内容会在下次渲染时重新同步。
+            }
+        }, PREVIEW_SYNC_DEBOUNCE_MS);
+        return () => window.clearTimeout(timer);
     }, [editor, markdown]);
 
     // 比例滚动同步：两侧排版一致，但行高与图片加载会带来高度差，因此按

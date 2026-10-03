@@ -450,6 +450,19 @@ export interface OnnxStatusResult {
     ep_choice: string;
 }
 
+/**
+ * vslib 可用性（`get_vslib_status`）。
+ *
+ * 供算法列表按能力过滤：`available === false` 时前端隐藏 vslib 选项 ——
+ * 否则用户选中它只会静默回退到别的算法。
+ */
+export interface VslibStatusResult {
+    compiled: boolean;
+    available: boolean;
+    version: number | null;
+    error: string | null;
+}
+
 export interface OnnxDiagnosticResult {
     compiled: boolean;
     available: boolean;

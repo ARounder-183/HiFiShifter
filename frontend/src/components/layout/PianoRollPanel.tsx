@@ -53,6 +53,10 @@ import {
     setParamSelectionActive,
 } from "../../features/session/sessionSlice";
 import { resolveRootTrackId } from "../../features/session/trackUtils";
+import {
+    buildPitchAlgoOptions,
+    resolvePitchAlgoSelectValue,
+} from "../../features/tracks/pitchAlgoOptions";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { getWaveformColors } from "../../theme/waveformColors";
 import type { ProcessorParamDescriptor } from "../../types/api";
@@ -75,10 +79,17 @@ import {
     timelineViewportNativeToState,
     timelineViewportStateToNative,
 } from "../../utils/timelineViewportSync";
-import { isModifierActive, isNoneBinding } from "../../features/keybindings/keybindingsSlice";
 import {
+    firstBinding,
+    isModifierActive,
+    isNoneBinding,
+} from "../../features/keybindings/keybindingsSlice";
+import {
+    SEPARATION_GATED_PARAMS,
     SEPARATION_PARAM_ID,
     findBlockedEditParam,
+    firstGatedParamId,
+    gatedParamHideOrder,
     paramNeedingVisibilityOnGate,
     isEffectParamGated,
     isSeparationEnabled,
@@ -133,6 +144,8 @@ import {
     listReferenceRootTracks,
 } from "./pianoRoll/referenceRootTracks";
 import { buildReferenceRootTrackTriggerElement } from "./pianoRoll/referenceRootTrackTrigger";
+import { TOOLBAR_MAX_TIER } from "./pianoRoll/toolbarOverflow";
+import { useToolbarOverflowTier } from "./pianoRoll/useToolbarOverflowTier";
 import {
     averageSelectionValues,
     smoothSelectionValues,
@@ -268,8 +281,10 @@ import type {
     ValueViewport,
 } from "./pianoRoll/types";
 import {
-    formatKeybinding,
+    formatKeybindingList,
+    isNoneBindingList,
     selectKeybinding,
+    selectKeybindings,
     selectMergedKeybindings,
 } from "../../features/keybindings/keybindingsSlice";
 
@@ -571,8 +586,6 @@ type ParamToolbarPillProps = {
     eyeTooltip?: string;
     /** 眼睛的无障碍标签（简短，如“显示/隐藏副参数叠加曲线”） */
     eyeLabel?: string;
-    /** 可选尾部片段（如气声开关）：渲染在参数名之后、子参数下拉之前 */
-    trailing?: React.ReactNode;
     /** 可选片段：子参数下拉菜单的触发按钮（已含 param-pill__seg 样式类） */
     dropdown?: React.ReactNode;
     /**
@@ -588,7 +601,7 @@ type ParamToolbarPillProps = {
 };
 
 /**
- * 参数编辑器工具栏的“参数分组药丸”：眼睛 → 参数名 →（气声开关/子参数下拉）。
+ * 参数编辑器工具栏的“参数分组药丸”：眼睛 → 参数名 → 子参数下拉。
  * 各片段共享一块连续背景；激活参数统一铺全局强调色（--accent-9），
  * 片段间用细分隔线区分；悬停时只高亮当前片段，提示其独立可点击。
  *
@@ -605,7 +618,6 @@ const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
     onToggleEye,
     eyeTooltip,
     eyeLabel,
-    trailing,
     dropdown,
     disabled = false,
     disabledTooltip,
@@ -649,7 +661,6 @@ const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
             >
                 {label}
             </button>
-            {trailing}
             {dropdown}
         </div>
     );
@@ -1096,7 +1107,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const vibratoPresetMenuRef = useRef<HTMLDivElement | null>(null);
     // 拖动方向循环切换键：拖拽进行中按下可即时切换本次拖拽方向（触控板替代右键）。
     const cycleDragDirectionKb = useAppSelector((state) =>
-        selectKeybinding(state, "pianoRoll.cycleDragDirection"),
+        selectKeybindings(state, "pianoRoll.cycleDragDirection"),
     );
     const mergedKeybindings = useAppSelector(selectMergedKeybindings);
     // 是否按住切换吸附的修饰键（临时切换吸附时用于高亮显示）
@@ -1108,8 +1119,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     );
 
     useEffect(() => {
-        const kb = mergedKeybindings["modifier.clipNoSnap"];
-        if (!kb) return;
+        // 修饰键手势只有一个绑定，取主绑定（见 types.ts 的 KeybindingMap）。
+        const kb = firstBinding(mergedKeybindings["modifier.clipNoSnap"]);
+        if (!kb || isNoneBinding(kb)) return;
         const onKey = (e: KeyboardEvent) => {
             const active = isModifierActive(kb, e);
             setSnapToggleHeld(active);
@@ -2145,6 +2157,20 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         return s.tracks.find((tr) => tr.id === rootTrackId) ?? null;
     }, [s.tracks, rootTrackId]);
 
+    // 算法下拉的选项与取值：唯一来源（见 pitchAlgoOptions.ts）。不可用时
+    // vslib 从列表消失；当前值已是 vslib 时保留并标注"不可用"，避免下拉框
+    // 回退显示成 nsf-hifigan 而谎报轨道真实算法。
+    const pitchAlgoOptions = useMemo(
+        () =>
+            buildPitchAlgoOptions({
+                noneLabel: t("common_none"),
+                vslibAvailable: s.vslibAvailable,
+                unavailableSuffix: t("algo_unavailable_suffix"),
+                currentValue: rootTrack?.pitchAnalysisAlgo,
+            }),
+        [t, s.vslibAvailable, rootTrack?.pitchAnalysisAlgo],
+    );
+
     const childFormantOffsetParam = useMemo(() => {
         if (!effectiveSelectedTrackId || !selectedIsChildTrack) return null;
         const algo = rootTrack?.pitchAnalysisAlgo;
@@ -2367,8 +2393,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         (param: ProcessorParamDescriptor) => {
             switch (param.id) {
                 case "breath_enabled":
-                    // 语义是「是否做谐波/噪声分离」，不是「气声开关」——
-                    // 气声与张力都依赖它。见 `breath_separation_tooltip`。
+                    // 完整参数名。语义是「是否做谐波/噪声分离」，不是「气声开关」
+                    // —— 气声与张力都依赖它。工具栏上开关以**纯图标**呈现（见渲染处），
+                    // 全称只在需要完整名字的场合使用。
                     return t("breath_separation_label");
                 case "breath_gain":
                     return t("breath_gain_label");
@@ -2402,8 +2429,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             switch (param.id) {
                 case "breath_gain":
                     return t("param_btn_breath");
-                // `breath_enabled`（谐波/噪声分离）已独立成开关按钮，
-                // 不再走药丸的短标签路径 —— 它有自己的专用渲染分支。
+                // `breath_enabled`（谐波/噪声分离）不在这条短标签路径上 ——
+                // 它以**纯图标分段**渲染在被门禁组的组首（见工具栏渲染处），
+                // 不显示任何文字，因此没有"短标签"可返回。
                 case "hifigan_tension":
                 case "tension":
                     return t("param_btn_tension");
@@ -2429,10 +2457,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
 
     const getStaticOptionLabel = useCallback(
         (paramId: string, label: string, value: number) => {
-            if (paramId === "breath_enabled") {
-                if (value === 0) return t("switch_off");
-                if (value === 1) return t("switch_on");
-            }
+            // `breath_enabled` 不在此列：它以纯图标分段渲染在参数组内，
+            // 不再走"静态选项 → 文本"的路径（见工具栏渲染处）。
             if (paramId === "synth_mode") {
                 if (value === 0) return t("vslib_synth_mode_mono");
                 if (value === 1) return t("vslib_synth_mode_mono_formant");
@@ -2500,12 +2526,71 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     // 关闭时两者置灰、不可编辑，且不参与合成（后端在 `ClipProcessContext`
     // 构造点剥离这两条曲线，因此也不会走 HNSEP）。
     // 阈值语义见 `separationGate.ts`（与后端 `extra_param_enabled` 同口径）。
+    //
+    // `separationDesc` 同时决定开关**是否存在**：该描述符只挂在 nsf-hifigan 的
+    // 描述符表里（见 `renderer/chain.rs` 的 `HIFIGAN_PARAM_DESCRIPTORS`），
+    // 因此 world / vslib 下开关不渲染 —— 那两种算法本就没有气声 / 张力参数。
+    const separationDesc = useMemo(
+        () => processorStaticParams.find((sp) => sp.id === SEPARATION_PARAM_ID) ?? null,
+        [processorStaticParams],
+    );
     const separationEnabled = useMemo(() => {
-        const desc = processorStaticParams.find((sp) => sp.id === SEPARATION_PARAM_ID);
         const defaultValue =
-            desc && desc.kind.type === "static_enum" ? desc.kind.default_value : 0;
+            separationDesc && separationDesc.kind.type === "static_enum"
+                ? separationDesc.kind.default_value
+                : 0;
         return isSeparationEnabled(processorStaticValues[SEPARATION_PARAM_ID], defaultValue);
-    }, [processorStaticParams, processorStaticValues]);
+    }, [separationDesc, processorStaticValues]);
+
+    // 分离开关在工具栏上的落点：被门禁组（气声 + 张力）的**组首**。
+    //
+    // 【为什么是组首而不是"算法下拉之前"】开关只随 nsf-hifigan 出现；若把它放在
+    // 工具栏最右端（算法下拉左侧），切换算法时它整块消失 / 出现，会把音量、声像、
+    // 算法选项一起推来推去。放在参数组内部后，它右侧紧邻的就是固定的
+    // 「音量 → 动态 → 声像」，消失时右侧纹丝不动。
+    //
+    // 位置由 `firstGatedParamId` 从门禁列表推导（见该函数说明），不写死具体 id。
+    const separationSwitchAnchorParamId = useMemo(
+        () => (separationDesc ? firstGatedParamId(orderedProcessorParams.map((p) => p.id)) : null),
+        [separationDesc, orderedProcessorParams],
+    );
+
+    // ── 工具栏横向不足时的分级隐藏 ──────────────────────────────────────────
+    //
+    // 参数编辑器工具栏是**一整行**（标题 / 工具 / 平滑度在左，参数药丸 / 算法在右，
+    // 同属 `h-qt-bar-main` 这一个容器），因此只观察这一个容器：任一处放不下即升级。
+    // 完整层级见 `toolbarOverflow.ts` 的 `TOOLBAR_MAX_TIER`：
+    //   1 标题 · 2 算法文本 · 3 张力药丸 · 4 气声药丸（开关保留）· 5 平滑度文本 ·
+    //   6 平滑度数值 · 7 平滑度滑块 · 8 导入 MIDI · 9 参考轨道组文本
+    // 原则是**只砍冗余、不砍入口**：被隐藏项要么是纯装饰文字（旁边控件已表达同一信息），
+    // 要么功能另有入口；唯一入口（如参考轨道组、分离开关）只瘦身、不隐藏。
+    // 平滑度滑块是**控件**、数值只是读数，故数值（6）先于滑块（7）让位。
+    const toolbarRowRef = useRef<HTMLDivElement | null>(null);
+    const toolbarTier = useToolbarOverflowTier(toolbarRowRef, TOOLBAR_MAX_TIER);
+
+    // 被门禁的药丸逐个让位（第 3 / 4 级各让一个），顺序**先张力后气声**：
+    // 气声药丸左侧挂着分离开关，先让气声会让开关独自悬空。
+    // 组首的药丸让位时开关保留（见下方组首分支）；曲线仍会绘制（见
+    // `effectiveSecondaryParamVisible`）。
+    const gatedPillHideOrder = useMemo(
+        () => gatedParamHideOrder(orderedProcessorParams.map((p) => p.id)),
+        [orderedProcessorParams],
+    );
+    const gatedPillsHidden = separationEnabled
+        ? 0
+        : Math.max(0, Math.min(toolbarTier - 2, gatedPillHideOrder.length));
+
+    // 分离关闭时，气声 / 张力的药丸会在第 3 / 4 级逐个让位 —— 用户此刻点不到它们的"眼睛"。
+    // 但"关闭分离时曲线保持可见、只是不可编辑"是既有契约，因此这里在**渲染口径**上
+    // 强制把它们视为可见。不动真实 state：横向恢复后眼睛回到用户原先的设置。
+    const effectiveSecondaryParamVisible = useMemo(() => {
+        if (toolbarTier < 3 || separationEnabled) return secondaryParamVisible;
+        const next = { ...secondaryParamVisible };
+        for (const paramId of SEPARATION_GATED_PARAMS) {
+            next[paramId as ParamName] = true;
+        }
+        return next;
+    }, [toolbarTier, separationEnabled, secondaryParamVisible]);
 
     // 所属轨道组的 Compose 开关。它与分离开关是**两道独立门禁**，但都决定
     // 轨道级"合成"参数（共振峰/气声/张力）是否生效 —— Compose 关闭时必须
@@ -2631,9 +2716,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         return getVisibleSecondaryParamIds({
             editParam,
             processorParamIds: processorParams.map((p) => p.id as ParamName),
-            secondaryParamVisible,
+            // 用"渲染口径"的可见性（见 `effectiveSecondaryParamVisible`）：
+            // 药丸被第 3 级隐藏时也要让曲线继续绘制。
+            secondaryParamVisible: effectiveSecondaryParamVisible,
         });
-    }, [editParam, secondaryParamVisible, processorParams]);
+    }, [editParam, effectiveSecondaryParamVisible, processorParams]);
 
     const updateVisibleReferenceRootTrackIds = useCallback(
         (nextTrackIds: string[]) => {
@@ -6008,7 +6095,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             if (selFrameRanges.length === 0) return;
             const firstRange = selFrameRanges[0];
             const startFrame = firstRange.startFrame;
-            const frameCount = firstRange.frameCount;
 
             /**
              * 逐段执行「取数 → 变换 → 回写」。
@@ -6111,10 +6197,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
 
             // 选区编辑统一入口：取数/编辑/边缘淡化/回写全部在
             // selectionEditApply 模块内完成（delta 空间交叉淡化 + 毫秒定标）。
-            // 多选区逐段独立执行，整批只打一个撤销点。
-            // 平滑度解析顺序保持旧语义：对话框显式传入 → store 全局设置。
+            // 多选区**逐段独立**执行，整批只打一个撤销点。
+            //
+            // 回调收到**当前段**：移调度数 / 量化 / 均值量化要按本段起始帧解析
+            // Tempo Map 音阶（见 applySelectionEditOverRanges 的说明）。
             const runSelectionEdit = async (
-                editSelection: (currentSelectionVals: number[]) => number[],
+                editSelection: (currentSelectionVals: number[], range: FrameRange) => number[],
                 extension?: SelectionEditExtension,
                 options?: { preserveDynSentinels?: boolean },
             ) => {
@@ -6360,31 +6448,37 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 case "average": {
                     const strengthPercent = clamp(Number(data?.strength ?? 100) || 0, 0, 100);
                     if (strengthPercent <= 0) return;
-                    const res = await paramsApi.getParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        frameCount,
-                        1,
-                        true,
-                        isDynParam(editParam),
-                    );
-                    if (!res?.ok) return;
-                    const payload = res as ParamFramesPayload;
-                    const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
-                    if (vals.length === 0) return;
-                    const result = averageSelectionValues(vals, editParam, strengthPercent);
-                    // dyn：未画帧写回哨兵（防止"沿用原声"被物化成显式目标电平）。
-                    if (isDynParam(editParam)) {
-                        restoreDynSentinels(result, payload.edit_sentinel);
-                    }
-                    await paramsApi.setParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        result,
-                        true,
-                    );
+                    // 多选区逐段独立：各段取自己的值、求自己的均值（与 smooth 同构），
+                    // 整批只打一个撤销点。旧实现只处理 selFrameRanges[0]，多段选区
+                    // 会静默地只拉平第一段。
+                    await runPerRange(async (range, _index, isFirstWrite) => {
+                        const res = await paramsApi.getParamFrames(
+                            rootTrackId,
+                            editParam,
+                            range.startFrame,
+                            range.frameCount,
+                            1,
+                            true,
+                            isDynParam(editParam),
+                        );
+                        if (!res?.ok) return false;
+                        const payload = res as ParamFramesPayload;
+                        const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
+                        if (vals.length === 0) return false;
+                        const result = averageSelectionValues(vals, editParam, strengthPercent);
+                        // dyn：未画帧写回哨兵（防止"沿用原声"被物化成显式目标电平）。
+                        if (isDynParam(editParam)) {
+                            restoreDynSentinels(result, payload.edit_sentinel);
+                        }
+                        const written = await paramsApi.setParamFrames(
+                            rootTrackId,
+                            editParam,
+                            range.startFrame,
+                            result,
+                            isFirstWrite,
+                        );
+                        return Boolean(written?.ok);
+                    });
                     bumpRefreshToken();
                     break;
                 }
@@ -6411,20 +6505,24 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     if (degreeSteps === 0) return;
                     const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
                     await runSelectionEdit(
-                        (vals) => {
+                        (vals, range) => {
                             return editParam === "pitch"
                                 ? vals.map((midi, i) => {
                                       if (midi === 0) return 0;
                                       const scale =
                                           fixedScale ??
-                                          projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
+                                          projectScaleAtSec(
+                                              ((range.startFrame + i) * fpMs) / 1000,
+                                          ) ??
                                           "C";
                                       return transposePitchByScaleSteps(midi, degreeSteps, scale);
                                   })
                                 : vals.map((midi, i) => {
                                       const scale =
                                           fixedScale ??
-                                          projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
+                                          projectScaleAtSec(
+                                              ((range.startFrame + i) * fpMs) / 1000,
+                                          ) ??
                                           "C";
                                       return transposePitchByScaleSteps(midi, degreeSteps, scale);
                                   });
@@ -6674,9 +6772,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     const toleranceSemitone = toleranceCents / 100;
                     // project base scale is controlled from toolbar; do not change it here
                     const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
-                    const scaleAt = (i: number): ScaleLike =>
-                        fixedScale ?? projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ?? "C";
-                    await runSelectionEdit((vals) =>
+                    const scaleAt = (i: number, range: FrameRange): ScaleLike =>
+                        fixedScale ??
+                        projectScaleAtSec(((range.startFrame + i) * fpMs) / 1000) ??
+                        "C";
+                    await runSelectionEdit((vals, range) =>
                         unit === "semitone"
                             ? vals.map((v) =>
                                   editParam === "pitch" && v === 0
@@ -6694,7 +6794,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                   editParam === "pitch" && v === 0
                                       ? 0
                                       : (() => {
-                                            const snapped = snapToScale(v, scaleAt(i));
+                                            const snapped = snapToScale(v, scaleAt(i, range));
                                             return Math.abs(v - snapped) <= toleranceSemitone
                                                 ? v
                                                 : snapped +
@@ -6750,7 +6850,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
                     let meanDelta = 0;
                     await runSelectionEdit(
-                        (vals) => {
+                        (vals, range) => {
                             // pitch=0 视为未编辑，不参与均值；全部未浊时 delta=0，
                             // 结果与输入逐帧相同（相比旧的直接 return 会多一个
                             // 无变化的撤销点，无副作用，可接受）。
@@ -6760,7 +6860,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             const midScale =
                                 fixedScale ??
                                 projectScaleAtSec(
-                                    ((startFrame + Math.floor(vals.length / 2)) * fpMs) / 1000,
+                                    ((range.startFrame + Math.floor(vals.length / 2)) * fpMs) /
+                                        1000,
                                 ) ??
                                 "C";
                             const quantizedAvg =
@@ -7369,7 +7470,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             <Flex
                 align="center"
                 justify="between"
-                className="h-qt-bar-main bg-qt-base border-b border-qt-border px-2 shrink-0"
+                className="h-qt-bar-main bg-qt-base border-b border-qt-border px-2 shrink-0 overflow-hidden whitespace-nowrap"
+                ref={toolbarRowRef}
+                /* 当前隐藏层级（0 = 全部显示）：观测与调试出口，见 toolbarOverflow.ts。 */
+                data-toolbar-tier={toolbarTier}
             >
                 <Flex align="center" gap="2" style={{ flex: "1 1 auto", minWidth: 0 }}>
                     <AppIconButton
@@ -7385,7 +7489,13 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         }}
                         icon={s.paramEditorSyncTimeline ? <Link2Icon /> : <LinkBreak2Icon />}
                     />
-                    <span className="hs-type-label font-semibold">{tf("param_editor_short")}</span>
+                    {/* 第 1 级隐藏：面板身份已由 dock 标签 / 浮窗标题表达，
+                        这里是重复提示，横向不足时最先让位。 */}
+                    {toolbarTier < 1 ? (
+                        <span className="hs-type-label font-semibold">
+                            {tf("param_editor_short")}
+                        </span>
+                    ) : null}
                     {/* 工具按钮组（音高吸附等）+ 平滑度滑块。`marginLeft: 8` 是紧邻
                         `参数编辑器` 标题留出的空白。
                         【minWidth 必须显式置 0】flex 项默认 `min-width: auto`（= min-content），
@@ -7461,8 +7571,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             {drawToolMenuOpen && (
                                 <Box
                                     ref={drawToolMenuRef}
-                                    data-hs-context-menu
-                                    className="absolute left-0 top-[calc(100%+4px)] z-30 min-w-[190px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+                                    data-hs-context-menu="1"
+                                    // 锚定在触发按钮下方的下拉：与右键菜单共用同一个
+                                    // 表面与条目样式，只有定位方式不同。
+                                    className="hs-menu hs-menu--anchored"
                                 >
                                     {[
                                         {
@@ -7481,30 +7593,26 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             <button
                                                 key={item.mode}
                                                 type="button"
-                                                className={`w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover`}
+                                                className="hs-menu__item"
                                                 onClick={() => {
                                                     dispatch(setToolMode(item.mode));
                                                     setDrawToolMenuOpen(false);
                                                 }}
                                                 onPointerDown={(e) => e.stopPropagation()}
                                             >
-                                                <Flex align="center" gap="2">
-                                                    <Box
-                                                        style={{
-                                                            display: "flex",
-                                                            width: 15,
-                                                            height: 15,
-                                                            alignItems: "center",
-                                                            justifyContent: "center",
-                                                        }}
-                                                    >
-                                                        {item.icon}
-                                                    </Box>
-                                                    <span className="hs-type-label">
+                                                <span className="flex min-w-0 items-center gap-2">
+                                                    <Box className="hs-menu__icon">{item.icon}</Box>
+                                                    <span className="hs-menu__label-text">
                                                         {item.label}
                                                     </span>
-                                                </Flex>
-                                                {active ? <CheckIcon /> : null}
+                                                </span>
+                                                <span className="hs-menu__trail">
+                                                    {active ? (
+                                                        <span className="hs-menu__check">
+                                                            <CheckIcon />
+                                                        </span>
+                                                    ) : null}
+                                                </span>
                                             </button>
                                         );
                                     })}
@@ -7552,10 +7660,17 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 />
                                 {vibratoPresetMenuOpen && (
                                     <Box
-                                        data-hs-context-menu
+                                        data-hs-context-menu="1"
                                         // 永远向下展开：参数编辑器是停靠窗口，上方没有
                                         // 展示区，翻上去只会盖住自己的工具栏。
-                                        className="absolute left-0 top-[calc(100%+4px)] z-30 flex min-w-[190px] flex-col rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg"
+                                        // `--no-scroll`：滚动由下面的 `ScrollArea`
+                                        // 负责（页脚要钉住），壳不接管。
+                                        //
+                                        // 高度**不用** `--qt-menu-max-h`（60vh）：参数
+                                        // 编辑器是停靠面板，可能只有 200px 高，按视口取
+                                        // 上限会让菜单伸出面板之外。这里按锚点在面板内的
+                                        // 位置算（`resolveMenuMaxHeight`）。
+                                        className="hs-menu hs-menu--anchored hs-menu--no-scroll flex flex-col"
                                         style={{ maxHeight: vibratoPresetMenuMaxHeight }}
                                     >
                                         <ScrollArea
@@ -7568,7 +7683,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                 <button
                                                     key={preset.id}
                                                     type="button"
-                                                    className="flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-hover"
+                                                    className="hs-menu__item"
                                                     onClick={() => {
                                                         dispatch(setActiveVibratoPreset(preset.id));
                                                         void dispatch(persistUiSettings());
@@ -7576,36 +7691,39 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                     }}
                                                     onPointerDown={(e) => e.stopPropagation()}
                                                 >
-                                                    <span className="flex items-center gap-2">
+                                                    <span className="flex min-w-0 items-center gap-2">
                                                         <VibratoPresetGlyph
                                                             preset={preset}
                                                             width={26}
                                                             height={10}
                                                         />
-                                                        <span>
+                                                        <span className="hs-menu__label-text">
                                                             {vibratoPresetLabel(preset, tf)}
                                                         </span>
                                                     </span>
-                                                    {preset.id === activeVibratoPresetId ? (
-                                                        <CheckIcon />
-                                                    ) : null}
+                                                    <span className="hs-menu__trail">
+                                                        {preset.id === activeVibratoPresetId ? (
+                                                            <span className="hs-menu__check">
+                                                                <CheckIcon />
+                                                            </span>
+                                                        ) : null}
+                                                    </span>
                                                 </button>
                                             ))}
                                         </ScrollArea>
-                                        <Box
-                                            className="my-1 shrink-0"
-                                            style={{ height: 1, background: "var(--qt-divider)" }}
-                                        />
+                                        <Box className="hs-menu__separator shrink-0" />
                                         <button
                                             type="button"
-                                            className="w-full shrink-0 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-hover"
+                                            className="hs-menu__item shrink-0"
                                             onClick={() => {
                                                 setVibratoPresetMenuOpen(false);
                                                 openVibratoDialog("manage");
                                             }}
                                             onPointerDown={(e) => e.stopPropagation()}
                                         >
-                                            {tf("vibrato_manager_open")}
+                                            <span className="hs-menu__label-text">
+                                                {tf("vibrato_manager_open")}
+                                            </span>
                                         </button>
                                     </Box>
                                 )}
@@ -7624,9 +7742,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         <AppIconButton
                             active={activeDragDirection !== "free"}
                             tooltip={`${tf("drag_direction")}: ${tf(activeDragDirection === "free" ? "drag_direction_free" : activeDragDirection === "x-only" ? "drag_direction_x_only" : "drag_direction_y_only")}${
-                                isNoneBinding(cycleDragDirectionKb)
+                                isNoneBindingList(cycleDragDirectionKb)
                                     ? ""
-                                    : ` (${formatKeybinding(cycleDragDirectionKb, "")})`
+                                    : ` (${formatKeybindingList(cycleDragDirectionKb, "")})`
                             }`}
                             tabIndex={-1}
                             onClick={() => {
@@ -7783,12 +7901,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             {pitchSnapMenuOpen && (
                                 <Box
                                     ref={pitchSnapMenuRef}
-                                    data-hs-context-menu
-                                    className="absolute left-0 top-[calc(100%+4px)] z-30 min-w-[190px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+                                    data-hs-context-menu="1"
+                                    className="hs-menu hs-menu--anchored"
                                 >
                                     <button
                                         type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
+                                        className="hs-menu__item"
                                         onClick={() => {
                                             dispatch(setPitchSnapUnit("semitone"));
                                             if (!s.pitchSnapEnabled) {
@@ -7799,25 +7917,25 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         }}
                                         onPointerDown={(e) => e.stopPropagation()}
                                     >
-                                        <Flex align="center" gap="2">
-                                            <Box
-                                                style={{
-                                                    display: "flex",
-                                                    width: 15,
-                                                    height: 15,
-                                                    alignItems: "center",
-                                                    justifyContent: "center",
-                                                }}
-                                            >
+                                        <span className="flex min-w-0 items-center gap-2">
+                                            <Box className="hs-menu__icon">
                                                 {pitchSnapSemitoneIcon}
                                             </Box>
-                                            <span>{tf("pitch_snap_menu_semitone")}</span>
-                                        </Flex>
-                                        {s.pitchSnapUnit === "semitone" ? <CheckIcon /> : null}
+                                            <span className="hs-menu__label-text">
+                                                {tf("pitch_snap_menu_semitone")}
+                                            </span>
+                                        </span>
+                                        <span className="hs-menu__trail">
+                                            {s.pitchSnapUnit === "semitone" ? (
+                                                <span className="hs-menu__check">
+                                                    <CheckIcon />
+                                                </span>
+                                            ) : null}
+                                        </span>
                                     </button>
                                     <button
                                         type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
+                                        className="hs-menu__item"
                                         onClick={() => {
                                             dispatch(setPitchSnapUnit("scale"));
                                             if (!s.pitchSnapEnabled) {
@@ -7828,33 +7946,35 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         }}
                                         onPointerDown={(e) => e.stopPropagation()}
                                     >
-                                        <Flex align="center" gap="2">
-                                            <Box
-                                                style={{
-                                                    display: "flex",
-                                                    width: 15,
-                                                    height: 15,
-                                                    alignItems: "center",
-                                                    justifyContent: "center",
-                                                }}
-                                            >
+                                        <span className="flex min-w-0 items-center gap-2">
+                                            <Box className="hs-menu__icon">
                                                 {pitchSnapScaleIcon}
                                             </Box>
-                                            <span>{tf("pitch_snap_menu_scale")}</span>
-                                        </Flex>
-                                        {s.pitchSnapUnit === "scale" ? <CheckIcon /> : null}
+                                            <span className="hs-menu__label-text">
+                                                {tf("pitch_snap_menu_scale")}
+                                            </span>
+                                        </span>
+                                        <span className="hs-menu__trail">
+                                            {s.pitchSnapUnit === "scale" ? (
+                                                <span className="hs-menu__check">
+                                                    <CheckIcon />
+                                                </span>
+                                            ) : null}
+                                        </span>
                                     </button>
-                                    <div className="my-1 border-t border-qt-border" />
+                                    <div className="hs-menu__separator" role="separator" />
                                     <button
                                         type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
+                                        className="hs-menu__item"
                                         onClick={() => {
                                             setPitchSnapMenuOpen(false);
                                             setPitchSnapOpen(true);
                                         }}
                                         onPointerDown={(e) => e.stopPropagation()}
                                     >
-                                        <span>{tf("pitch_snap_settings_action")}</span>
+                                        <span className="hs-menu__label-text">
+                                            {tf("pitch_snap_settings_action")}
+                                        </span>
                                     </button>
                                 </Box>
                             )}
@@ -7968,64 +8088,78 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         <Flex align="center" gap="1" ml="2" style={{ minWidth: 0, flexShrink: 1 }}>
                             {/* 标签允许被压缩裁切（完整名称在悬停提示里）：横向极窄时
                                 应当由它先让位，而不是把整行撑到溢出。省略号让"让位"
-                                看起来是有意的降级，而不是渲染出错的半截字。 */}
-                            <span
-                                className="hs-type-label"
-                                data-tooltip={tf("edge_smoothness")}
-                                style={{
-                                    minWidth: 0,
-                                    whiteSpace: "nowrap",
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
-                                }}
-                            >
-                                {tf("edge_smoothness_short")}:
-                            </span>
-                            <input
-                                ref={attachEdgeSmoothnessWheel}
-                                className="qt-range"
-                                type="range"
-                                min={0}
-                                max={100}
-                                step={1}
-                                value={Math.round(s.edgeSmoothnessPercent)}
-                                onChange={(e) => {
-                                    const next = Number(e.currentTarget.value);
-                                    dispatch(setEdgeSmoothnessPercent(next));
-                                }}
-                                onPointerUp={() => {
-                                    void dispatch(persistUiSettings());
-                                }}
-                                onKeyUp={() => {
-                                    void dispatch(persistUiSettings());
-                                }}
-                                style={{
-                                    // 【flex-basis 必须取 0，而不是 `auto`（= width: 120）】
-                                    // 基准为 120 时，横向不足的收缩量会**按基准比例分摊**给
-                                    // 同排所有项 —— 实测窄容器下它只缩到 102px，仍占着大头。
-                                    // 基准为 0 时，它先让出空间、只取"别人用剩下的"，宽裕时再由
-                                    // `maxWidth` 封顶在 120px。它是低频调节项，理应最先让步。
-                                    //
-                                    // 【下限取 16】基准为 0 的项在收缩阶段分摊到的是 0（0 × shrink
-                                    // 恒为 0），因此**它的下限就是它实际能到的最小宽度**：下限多大，
-                                    // 拥挤时它就让出多少。16 = 12px 滑块 + 两侧各 2px，是仍能拖动的
-                                    // 最小值；再窄就只剩滑块本身、看不到轨道了。极窄时它本就该让位
-                                    // （数值仍可读，滚轮调值照常可用）。
-                                    flex: "1 1 0",
-                                    // 非 flex 上下文（理论上不会发生）时的兜底宽度。
-                                    width: 120,
-                                    minWidth: 16,
-                                    maxWidth: 120,
-                                }}
-                            />
+                                看起来是有意的降级，而不是渲染出错的半截字。
+                                第 5 级隐藏：滑块与百分比数值仍在，全称在 ToolTip 里。 */}
+                            {toolbarTier < 5 ? (
+                                <span
+                                    className="hs-type-label"
+                                    data-tooltip={tf("edge_smoothness")}
+                                    style={{
+                                        minWidth: 0,
+                                        whiteSpace: "nowrap",
+                                        overflow: "hidden",
+                                        textOverflow: "ellipsis",
+                                    }}
+                                >
+                                    {tf("edge_smoothness_short")}:
+                                </span>
+                            ) : null}
+                            {/* 第 7 级才隐藏滑块：它是**控件**，比只读的百分比数值（第 6 级）
+                                更该留到最后。悬停时用 ToolTip 报出当前百分比 —— 数值被隐藏
+                                （第 6 级）之后仍能读到；第二行沿用本项目的"动作"提示体裁。 */}
+                            {toolbarTier < 7 ? (
+                                <input
+                                    ref={attachEdgeSmoothnessWheel}
+                                    className="qt-range"
+                                    type="range"
+                                    min={0}
+                                    max={100}
+                                    step={1}
+                                    value={Math.round(s.edgeSmoothnessPercent)}
+                                    data-tooltip={`${tf("edge_smoothness")}: ${Math.round(
+                                        s.edgeSmoothnessPercent,
+                                    )}%\n${tf("edge_smoothness_adjust_hint")}`}
+                                    onChange={(e) => {
+                                        const next = Number(e.currentTarget.value);
+                                        dispatch(setEdgeSmoothnessPercent(next));
+                                    }}
+                                    onPointerUp={() => {
+                                        void dispatch(persistUiSettings());
+                                    }}
+                                    onKeyUp={() => {
+                                        void dispatch(persistUiSettings());
+                                    }}
+                                    style={{
+                                        // 【flex-basis 必须取 0，而不是 `auto`（= width: 120）】
+                                        // 基准为 120 时，横向不足的收缩量会**按基准比例分摊**给
+                                        // 同排所有项 —— 实测窄容器下它只缩到 102px，仍占着大头。
+                                        // 基准为 0 时，它先让出空间、只取"别人用剩下的"，宽裕时再由
+                                        // `maxWidth` 封顶在 120px。它是低频调节项，理应最先让步。
+                                        //
+                                        // 【下限取 16】基准为 0 的项在收缩阶段分摊到的是 0（0 × shrink
+                                        // 恒为 0），因此**它的下限就是它实际能到的最小宽度**：下限多大，
+                                        // 拥挤时它就让出多少。16 = 12px 滑块 + 两侧各 2px，是仍能拖动的
+                                        // 最小值；再窄就只剩滑块本身、看不到轨道了。极窄时它本就该让位
+                                        // （数值仍可读，滚轮调值照常可用）。
+                                        flex: "1 1 0",
+                                        // 非 flex 上下文（理论上不会发生）时的兜底宽度。
+                                        width: 120,
+                                        minWidth: 16,
+                                        maxWidth: 120,
+                                    }}
+                                />
+                            ) : null}
                             {/* 数值需要完整可读（"100%"），因此给它一个较小的固定下限，
-                                但不再是 36px 那种"宁可溢出也不缩"的宽度。 */}
-                            <span
-                                className="hs-type-label"
-                                style={{ minWidth: 28, textAlign: "right" }}
-                            >
-                                {Math.round(s.edgeSmoothnessPercent)}%
-                            </span>
+                                但不再是 36px 那种"宁可溢出也不缩"的宽度。
+                                第 6 级隐藏：它只是**读数**，比滑块（第 7 级）先让位。 */}
+                            {toolbarTier < 6 ? (
+                                <span
+                                    className="hs-type-label"
+                                    style={{ minWidth: 28, textAlign: "right" }}
+                                >
+                                    {Math.round(s.edgeSmoothnessPercent)}%
+                                </span>
+                            ) : null}
                         </Flex>
                     </Flex>
                 </Flex>
@@ -8051,13 +8185,18 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             color="gray"
                                             style={{ cursor: "pointer" }}
                                         >
-                                            {buildReferenceRootTrackTriggerElement(
-                                                `${tf("reference_root_tracks_short")}${
-                                                    visibleReferenceRootTrackIds.length > 0
-                                                        ? ` (${visibleReferenceRootTrackIds.length})`
-                                                        : ""
-                                                }`,
-                                            )}
+                                            {/* 第 9 级只保留下拉箭头：参考轨道组没有菜单 /
+                                                快捷键入口，是**唯一入口**，不能整块隐藏，
+                                                只能瘦身；全称仍在按钮的 ToolTip 里。 */}
+                                            {toolbarTier < 9
+                                                ? buildReferenceRootTrackTriggerElement(
+                                                      `${tf("reference_root_tracks_short")}${
+                                                          visibleReferenceRootTrackIds.length > 0
+                                                              ? ` (${visibleReferenceRootTrackIds.length})`
+                                                              : ""
+                                                      }`,
+                                                  )
+                                                : null}
                                             <ChevronDownIcon width="12" height="12" />
                                         </Button>
                                     </DropdownMenu.Trigger>
@@ -8123,21 +8262,25 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         )}
                                     </DropdownMenu.Content>
                                 </DropdownMenu.Root>
-                                <span
-                                    className="inline-flex"
-                                    data-tooltip={pitchHardDisableReason ?? tf("midi_import")}
-                                >
-                                    <Button
-                                        size="1"
-                                        /* 跟随全局强调色（原独立 blue 与播放键的 iris 是两种蓝） */
-                                        variant="soft"
-                                        onClick={handleOpenMidiDialog}
-                                        disabled={!pitchEnabled}
-                                        style={{ cursor: "pointer" }}
+                                {/* 第 8 级隐藏「导入 MIDI」：时间轴上同样能导入 MIDI
+                                    （`TimelinePanel` 也有入口），这里不是唯一路径。 */}
+                                {toolbarTier < 8 ? (
+                                    <span
+                                        className="inline-flex"
+                                        data-tooltip={pitchHardDisableReason ?? tf("midi_import")}
                                     >
-                                        {tf("midi_import")}
-                                    </Button>
-                                </span>
+                                        <Button
+                                            size="1"
+                                            /* 跟随全局强调色（原独立 blue 与播放键的 iris 是两种蓝） */
+                                            variant="soft"
+                                            onClick={handleOpenMidiDialog}
+                                            disabled={!pitchEnabled}
+                                            style={{ cursor: "pointer" }}
+                                        >
+                                            {tf("midi_import")}
+                                        </Button>
+                                    </span>
+                                ) : null}
                             </React.Fragment>
                         ) : null}
                         {selectedIsChildTrack &&
@@ -8229,6 +8372,14 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         )}
                         {/* 由后端 processorParams 驱动的动态参数按钮（按算法排列后的顺序） */}
                         {orderedProcessorParams.map((p) => {
+                            // 第 3 / 4 级：被门禁的药丸逐个让位（见 `gatedPillsHidden`）。
+                            // 组首除外 —— 它旁边挂着分离开关，那是唯一入口。
+                            const gatedHideIndex = gatedPillHideOrder.indexOf(p.id);
+                            const hideGatedPill =
+                                gatedHideIndex >= 0 && gatedHideIndex < gatedPillsHidden;
+                            if (hideGatedPill && p.id !== separationSwitchAnchorParamId) {
+                                return null;
+                            }
                             if (p.id === "formant_shift_cents") {
                                 return (
                                     <ParamGroupButton
@@ -8348,15 +8499,16 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 composeEnabled,
                             );
                             // 提示文案要指出**真正**的原因，否则用户会去开错开关。
+                            // 分离门禁按参数各给一句（与 `pitch_requires_compose`
+                            // 同一体裁：祈使句点名"开启什么、就能编辑什么"）；
+                            // 只有被分离门禁的两个参数会走到这里，故二选一即可。
                             const gateTooltip = !composeEnabled
                                 ? t("pitch_requires_compose")
-                                : t("separation_required_tooltip");
+                                : p.id === "hifigan_tension"
+                                  ? t("hifigan_tension_requires_separation")
+                                  : t("breath_gain_requires_separation");
 
-                            // 气声分离开关已独立成工具栏上的按钮组（见下方
-                            // processorStaticParams 渲染块）。这里不再把它融合进
-                            // breath_gain 药丸 —— 融合会让"分离"这一**全局前提**
-                            // 看起来像"气声音量"的附属属性，而张力同样依赖它。
-                            return (
+                            const paramPill = (
                                 <ParamToolbarPill
                                     key={p.id}
                                     label={getProcessorParamShortLabel(p)}
@@ -8379,6 +8531,52 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     }
                                 />
                             );
+
+                            // 气声分离开关：渲染在被门禁组（气声 + 张力）的**组首**，
+                            // 即「气声」药丸的左侧。纯图标、无文本 —— 非中文语系的
+                            // `Harmonic Separation` 比整套三字母缩写（PIT/FRM/BRE…）
+                            // 长一个数量级，写进工具栏会把这一排撑爆；开关名改由 ToolTip
+                            // 与无障碍标签承载。宽度恒定（`--breath` 段 min-width 22px），
+                            // 切换只换图标与配色，因此不会引起整排重排。
+                            //
+                            // 【为什么不放在算法下拉之前】开关只随 nsf-hifigan 出现；
+                            // 若位于最右端，切换算法时它整块消失 / 出现会把音量、声像、
+                            // 算法一起推移。放在参数组内部后，它右侧紧邻的就是固定的
+                            // 「音量 → 动态 → 声像」，消失时右侧纹丝不动。
+                            //
+                            // 【为什么开关自身永不置灰】它是开启「气声 / 张力」的
+                            // 唯一入口；若随这两个参数一起置灰就会死锁（关了再开不回来）。
+                            // 置灰只作用于那两个参数药丸的标签段。
+                            if (p.id !== separationSwitchAnchorParamId) return paramPill;
+                            return (
+                                <React.Fragment key={p.id}>
+                                    <span className="param-pill">
+                                        <button
+                                            type="button"
+                                            className="param-pill__seg param-pill__seg--breath"
+                                            data-tooltip={
+                                                separationEnabled
+                                                    ? t("breath_tooltip_on")
+                                                    : t("breath_tooltip_off")
+                                            }
+                                            aria-label={`${t("breath_separation_label")}: ${
+                                                separationEnabled ? t("switch_on") : t("switch_off")
+                                            }`}
+                                            onClick={() =>
+                                                void handleStaticParamChange(
+                                                    SEPARATION_PARAM_ID,
+                                                    separationEnabled ? 0 : 1,
+                                                )
+                                            }
+                                        >
+                                            <BreathAirIcon off={!separationEnabled} />
+                                        </button>
+                                    </span>
+                                    {/* 第 4 级：组首的药丸也让位，但**开关保留** ——
+                                        它是重新开启气声 / 张力的唯一入口。 */}
+                                    {hideGatedPill ? null : paramPill}
+                                </React.Fragment>
+                            );
                         })}
                     </Flex>
 
@@ -8389,44 +8587,14 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 const currentValue =
                                     processorStaticValues[param.id] ?? param.kind.default_value;
 
-                                // 气声分离（breath_enabled）：**独立**渲染，不融合进
-                                // 任何参数药丸。它是"是否做谐波/噪声分离"的全局前提，
-                                // 气声与张力都依赖它（见 getStaticOptionLabel 的图标化
-                                // 与下方 tooltip 说明），因此必须在 UI 上可见且独立。
-                                if (param.id === "breath_enabled") {
-                                    const breathOn = currentValue === 1;
-                                    return (
-                                        <Flex key={param.id} align="center" gap="1">
-                                            <span
-                                                className="hs-type-label"
-                                                data-tooltip={t("breath_separation_tooltip")}
-                                            >
-                                                {t("breath_separation_label")}
-                                            </span>
-                                            <Button
-                                                size="1"
-                                                variant={breathOn ? "solid" : "soft"}
-                                                color={breathOn ? "blue" : "gray"}
-                                                data-tooltip={t("breath_separation_tooltip")}
-                                                aria-label={`${t("breath_separation_label")}: ${
-                                                    breathOn ? t("switch_on") : t("switch_off")
-                                                }`}
-                                                onClick={() => {
-                                                    void handleStaticParamChange(
-                                                        "breath_enabled",
-                                                        breathOn ? 0 : 1,
-                                                    );
-                                                }}
-                                                style={{ cursor: "pointer" }}
-                                            >
-                                                <BreathAirIcon off={!breathOn} />
-                                                <span className="ml-1">
-                                                    {breathOn ? t("switch_on") : t("switch_off")}
-                                                </span>
-                                            </Button>
-                                        </Flex>
-                                    );
-                                }
+                                // 气声分离（breath_enabled）**不在本段渲染**：它已改在
+                                // 第一段（动态参数区）以纯图标分段渲染在被门禁组
+                                // （气声 + 张力）的组首 —— 见上方 `orderedProcessorParams`
+                                // 循环里的说明。留在本段（算法下拉之前）会让切换算法时
+                                // 把音量 / 声像 / 算法整段推移，那正是本次要修的病根。
+                                // 这里必须显式 `return null`：否则会落到下方的通用分支，
+                                // 又渲染出一个带文本的按钮。
+                                if (param.id === "breath_enabled") return null;
 
                                 // vslib 的合成模式：改为支持滚轮切换的下拉栏。
                                 if (param.id === "synth_mode") {
@@ -8497,19 +8665,20 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     </Flex>
                                 );
                             })}
-                            <span className="hs-type-label" data-tooltip={tf("algo_label")}>
-                                {tf("algo_label_short")}
-                            </span>
+                            {/* 第 2 级隐藏：紧邻的下拉本身就显示当前算法名，
+                                "算法"二字只是重复提示（全称在 ToolTip 里）。 */}
+                            {toolbarTier < 2 ? (
+                                <span className="hs-type-label" data-tooltip={tf("algo_label")}>
+                                    {tf("algo_label_short")}
+                                </span>
+                            ) : null}
                             <AppSelect
                                 // 同上：头部紧凑条内的控件
                                 density="compact"
-                                value={
-                                    ["nsf_hifigan_onnx", "world_dll", "vslib", "none"].includes(
-                                        rootTrack.pitchAnalysisAlgo,
-                                    )
-                                        ? rootTrack.pitchAnalysisAlgo
-                                        : "nsf_hifigan_onnx"
-                                }
+                                value={resolvePitchAlgoSelectValue(
+                                    rootTrack.pitchAnalysisAlgo,
+                                    pitchAlgoOptions,
+                                )}
                                 onValueChange={(v) => {
                                     if (!rootTrackId) return;
                                     dispatch(
@@ -8522,12 +8691,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 fullWidth={false}
                                 className="min-w-[140px]"
                                 ariaLabel={tf("algo_label")}
-                                options={[
-                                    { value: "nsf_hifigan_onnx", label: "nsf-hifigan" },
-                                    { value: "world_dll", label: "world" },
-                                    { value: "vslib", label: "vslib" },
-                                    { value: "none", label: t("common_none") },
-                                ]}
+                                options={pitchAlgoOptions}
                             />
                         </Flex>
                     ) : null}

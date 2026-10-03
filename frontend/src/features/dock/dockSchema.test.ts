@@ -292,6 +292,36 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         assert(anonTabsets[0]!.id !== anonTabsets[1]!.id, "missing zone ids are minted distinctly");
     }
 
+    // ── 归一化：Zone id 的重复必须**跨根**判定，而不是每棵树各自判定 ──
+    //
+    // `rootIdOfZone` 与 DOM 全局的标签查找只认第一个同 id 的节点。主根与某个
+    // 面板根共用一个 id 时（手工编辑/导入的 JSON），面板根里的那个组永远改不到
+    // —— 所有"按 id 改树"都命中主根。归一化必须像处理同根重复一样重编其一。
+    {
+        const raw = {
+            schema: 2,
+            roots: {
+                main: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
+                panelRoot: {
+                    t: "tabset",
+                    id: "z2",
+                    tabs: ["fileBrowser"],
+                    active: "fileBrowser",
+                },
+            },
+            forms: {
+                timeline: { id: "timeline", panelId: "timeline" },
+                fileBrowser: { id: "fileBrowser", panelId: "fileBrowser" },
+                __panel: { id: "__panel", panelId: "__panel", childRootId: "panelRoot" },
+            },
+            order: ["timeline", "fileBrowser", "__panel"],
+        };
+        const layout = normalizeDockLayout(raw);
+        const mainTabsetId = collectTabsets(layout.roots.main)[0]!.id;
+        const panelTabsetId = collectTabsets(layout.roots.panelRoot!)[0]!.id;
+        assert(mainTabsetId !== panelTabsetId, "cross-root duplicate zone id re-minted");
+    }
+
     // ── 归一化：分割比例钳制 ────────────────────────────────────
     //
     // `pruneTree` 只在子树被修剪时才顺手钳一次 ratio，两侧都完好的树不会被它

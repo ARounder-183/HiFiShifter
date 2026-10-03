@@ -1,6 +1,10 @@
 import { test } from "vitest";
 
-import { getParamEditorWheelAction, getTimelineWheelAction } from "./wheelGesture.ts";
+import {
+    getParamEditorWheelAction,
+    getTimelineWheelAction,
+    getVibratoDragWheelTarget,
+} from "./wheelGesture.ts";
 
 test("components/layout/wheelGesture.test.ts scripted checks", async () => {
     let checks = 0;
@@ -249,4 +253,61 @@ test("components/layout/wheelGesture.test.ts scripted checks", async () => {
     );
 
     void checks;
+});
+
+test("getVibratoDragWheelTarget treats a discrete tilt-wheel deltaX as a mouse wheel", () => {
+    function assertEqual(actual: string, expected: string, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${expected}, received ${actual}`);
+        }
+    }
+
+    // 倾斜滚轮：离散 deltaX = ±120（无 deltaY）是鼠标滚轮而非触摸板手势，
+    // 未按修饰键时不应改任何量（修复前会误判为触摸板 → rate）。
+    assertEqual(
+        getVibratoDragWheelTarget({
+            deltaX: 120,
+            deltaY: 0,
+            deltaMode: 0,
+            depthRequested: false,
+            rateRequested: false,
+        }),
+        "none",
+        "tilt wheel (+120) without modifiers is not a touchpad gesture",
+    );
+    assertEqual(
+        getVibratoDragWheelTarget({
+            deltaX: -120,
+            deltaY: 0,
+            deltaMode: 0,
+            depthRequested: false,
+            rateRequested: false,
+        }),
+        "none",
+        "tilt wheel (-120) without modifiers is not a touchpad gesture",
+    );
+    // 倾斜滚轮 + 显式速率修饰键 → rate（鼠标分支照常响应修饰键）。
+    assertEqual(
+        getVibratoDragWheelTarget({
+            deltaX: 120,
+            deltaY: 0,
+            deltaMode: 0,
+            depthRequested: false,
+            rateRequested: true,
+        }),
+        "rate",
+        "tilt wheel with rate modifier still adjusts rate",
+    );
+    // 非离散的横向分量（触摸板）仍判为触摸板手势，无需修饰键 → rate。
+    assertEqual(
+        getVibratoDragWheelTarget({
+            deltaX: 150,
+            deltaY: 0,
+            deltaMode: 0,
+            depthRequested: false,
+            rateRequested: false,
+        }),
+        "rate",
+        "non-discrete horizontal deltaX remains a touchpad gesture",
+    );
 });

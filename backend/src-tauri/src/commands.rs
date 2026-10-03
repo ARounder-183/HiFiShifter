@@ -34,6 +34,8 @@ mod formant;
 mod notebook;
 #[path = "commands/onnx_status.rs"]
 mod onnx_status;
+#[path = "commands/vslib_status.rs"]
+mod vslib_status;
 #[path = "commands/param_selection_window.rs"]
 pub(crate) mod param_selection_window;
 #[path = "commands/params.rs"]
@@ -1939,6 +1941,12 @@ pub fn get_onnx_status() -> onnx_status::OnnxStatusPayload {
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_onnx_diagnostic() -> crate::nsf_hifigan_onnx::OnnxDiagnosticInfo {
     onnx_status::get_onnx_diagnostic_info()
+}
+
+/// vslib 是否可用 —— 供前端算法列表按能力过滤（不可用时隐藏 vslib）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_vslib_status() -> vslib_status::VslibStatusPayload {
+    vslib_status::get_vslib_status()
 }
 
 #[tauri::command(rename_all = "camelCase")]

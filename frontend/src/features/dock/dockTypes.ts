@@ -250,6 +250,8 @@ export interface DockPreset {
     order: string[];
     floatOrder: string[];
     gutters: DockGutterSizes;
+    /** 预设保存时的标签页位置：套用预设应还原整套工作区观感，含页签朝向。 */
+    tabPosition: DockTabPosition;
     /** 创建时间（Unix 毫秒），用于管理界面排序。 */
     createdAtMs: number;
 }

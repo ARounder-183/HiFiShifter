@@ -52,10 +52,15 @@ import {
 } from "./kernel/gestureHitTest";
 import { edgeAutoScrollDeltaPx, selectionIndexRange } from "./kernel/dragArithmetic";
 import type { MutableRefObject as MutRef } from "react";
-import { isModifierActive, isNoneBinding } from "../../../features/keybindings/keybindingsSlice";
 import {
-    matchesKeybinding,
-    matchesKeybindingAllowingFineModifier,
+    firstBinding,
+    isModifierActive,
+    isNoneBinding,
+    isNoneBindingList,
+} from "../../../features/keybindings/keybindingsSlice";
+import {
+    matchesAnyKeybinding,
+    matchKeybindingAllowingFineModifier,
 } from "../../../features/keybindings/useKeybindings";
 import { ACTION_META } from "../../../features/keybindings/defaultKeybindings";
 import type { Keybinding } from "../../../features/keybindings/types";
@@ -499,7 +504,7 @@ export function usePianoRollInteractions(args: {
     /** 切换拖动方向的回调 */
     onCycleDragDirection?: (tool: "select" | "draw" | "vibrato") => void;
     /** 拖拽期间切换拖动方向的快捷键（触控板用户替代「拖拽中右键」） */
-    cycleDragDirectionKb?: Keybinding;
+    cycleDragDirectionKb?: readonly Keybinding[];
     /**
      * 撤销栈深度读取器（后端权威镜像）。仅「边缘拉伸」手势在提交成功后
      * 用它登记选区步骤（撤销/重做恢复对应选区），其余操作不消费。
@@ -710,8 +715,9 @@ export function usePianoRollInteractions(args: {
 
     const isSnapToggleModifierHeld = useCallback(
         (ev: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey?: boolean }) => {
-            const noSnapKb = keybindingMap?.["modifier.clipNoSnap" as ActionId];
-            if (noSnapKb) {
+            // 修饰键手势只有一个绑定，取主绑定（见 types.ts 的 KeybindingMap）。
+            const noSnapKb = firstBinding(keybindingMap?.["modifier.clipNoSnap" as ActionId]);
+            if (noSnapKb && !isNoneBinding(noSnapKb)) {
                 return Boolean(isModifierActive(noSnapKb, ev));
             }
             return Boolean(ev.shiftKey);
@@ -956,14 +962,14 @@ export function usePianoRollInteractions(args: {
      */
     const installDragDirectionKeyCycler = useCallback(
         (cycleLocalDragDir: () => void) => {
-            const kb = cycleDragDirectionKb;
-            if (!kb || isNoneBinding(kb)) {
+            const bindings = cycleDragDirectionKb;
+            if (!bindings || isNoneBindingList(bindings)) {
                 return () => {};
             }
             document.body.setAttribute(PARAM_DRAG_ATTR, "true");
             const onKeyDown = (e: globalThis.KeyboardEvent) => {
                 if (e.repeat) return;
-                if (!matchesKeybindingAllowingFineModifier(e, kb, paramFineAdjustKb)) return;
+                if (!matchKeybindingAllowingFineModifier(e, bindings, paramFineAdjustKb)) return;
                 e.preventDefault();
                 e.stopPropagation();
                 cycleLocalDragDir();
@@ -1916,7 +1922,7 @@ export function usePianoRollInteractions(args: {
             // (must be before the selectionRef guard since selectAll/deselect work without selection)
             if (keybindingMap && onEditAction) {
                 const editActionEntries = (
-                    Object.entries(keybindingMap) as [ActionId, Keybinding][]
+                    Object.entries(keybindingMap) as [ActionId, readonly Keybinding[]][]
                 ).filter(([id]) => id.startsWith("edit."));
                 // 需要弹出对话框的操作列表
                 const dialogOps = new Set([
@@ -1929,9 +1935,11 @@ export function usePianoRollInteractions(args: {
                     "quantize",
                     "meanQuantize",
                 ]);
-                for (const [actionId, kb] of editActionEntries) {
-                    if (kb.modifierOnly) continue;
-                    if (matchesKeybinding(e.nativeEvent, kb)) {
+                for (const [actionId, bindings] of editActionEntries) {
+                    // 动作可绑多个键：任一槽位命中即触发（与全局路由同一约定）。
+                    if (bindings.some((kb) => kb.modifierOnly)) continue;
+                    if (!matchesAnyKeybinding(e.nativeEvent, bindings)) continue;
+                    {
                         const meta = ACTION_META[actionId];
                         // paramEditorSelect-scoped actions only work with "select" tool
                         if (meta?.scopedContext === "paramEditorSelect" && toolMode !== "select") {
@@ -2129,7 +2137,19 @@ export function usePianoRollInteractions(args: {
                     resolvedTarget === "rate" && Math.abs(e.deltaX) > Math.abs(e.deltaY)
                         ? e.deltaX
                         : e.deltaY;
-                const steps = Math.max(1, Math.round(Math.abs(controlDelta) / 100));
+                // 【与捏合分支同源】把 wheel 增量按 deltaMode 折算成像素（行 16 / 页
+                // 400，与 `pinchDeltaFromWheel` 同一约定），再交给整步累积器。
+                // 逐事件 `Math.max(1, …)` 是给"一格一个事件"的机械滚轮设计的；高分辨率
+                // / 触控板吐出的是一串小 delta，每个都放大成整步会让深度 / 速率以事件
+                // 频率飞走。累积到满一格（100 单位）才走一步，与滚轮同速。
+                const wheelMode = e.deltaMode ?? 0;
+                const wheelModeScale = wheelMode === 1 ? 16 : wheelMode === 2 ? 400 : 1;
+                const steps = accumulatePinchSteps(
+                    vibratoPinchRef.current,
+                    controlDelta * wheelModeScale,
+                    performance.now(),
+                );
+                if (steps === 0) return;
                 const direction =
                     resolvedTarget === "depth"
                         ? controlDelta < 0
@@ -2141,7 +2161,7 @@ export function usePianoRollInteractions(args: {
                 applyVibratoDragAdjustment({
                     target: resolvedTarget,
                     direction,
-                    steps,
+                    steps: Math.abs(steps),
                     shiftHeld: e.shiftKey,
                     fineEvent: e,
                     // 滚轮事件自带指针位置：用它当锚点，气泡不会因为"指针没动过"

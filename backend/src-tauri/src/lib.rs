@@ -239,7 +239,11 @@ mod time_stretch;
 mod vocalshifter_clipboard;
 #[path = "import/vocalshifter_import.rs"]
 mod vocalshifter_import;
-#[cfg(all(feature = "vslib", target_os = "windows"))]
+// `target_arch` 必须一并限定：`build.rs` 只对 x86_64-Windows 链接
+// `vslib_x64`，而 `vocoder/vslib.rs` 的 `#[link]` 是无条件的 —— Windows
+// ARM64 上把模块编进来只会链接失败。收紧后该平台能正常构建，并由
+// `get_vslib_status` 报告 `compiled = false`，前端据此隐藏 vslib。
+#[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
 #[path = "vocoder/vslib.rs"]
 mod vslib;
 #[path = "vocoder/world_vocoder.rs"]
@@ -806,6 +810,7 @@ pub fn run() {
             commands::log_frontend_error,
             commands::get_onnx_status,
             commands::get_onnx_diagnostic,
+            commands::get_vslib_status,
             commands::run_vocoder_benchmark,
             commands::get_gpu_devices,
             commands::get_dml_adapters,

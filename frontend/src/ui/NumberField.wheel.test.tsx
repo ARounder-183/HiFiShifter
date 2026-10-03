@@ -77,6 +77,13 @@ function input(container: HTMLElement): HTMLInputElement {
     return container.querySelector("input")!;
 }
 
+/** 受控输入：用原生 setter 写值再派发 input，React 才收得到。 */
+function setText(el: HTMLInputElement, value: string): void {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter?.call(el, value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 test("整数单位：滚轮走一格（±1），不会跳到 0", async () => {
     const onCommit = vi.fn();
     await render(<AppNumberField value={4096} unit="integer" min={0} onCommit={onCommit} />);
@@ -158,4 +165,44 @@ test("方向键 + 精细调整修饰键走 fine 一档", async () => {
     });
     await nextFrame();
     expect(onCommit.mock.calls.at(-1)?.[0]).toBe(3968);
+});
+
+/*
+ * 【回归】`Number("")` 与 `Number("  ")` 都是 0（有限值），因此"清空后回车/失焦"
+ * 曾走正常提交路径，把字段静默写成 `clamp(0, min, max)`（4096 MB 变 0，或变成 min）
+ * —— 正是 commitText 注释要防的那件事。实时 onChange 路径本就挡了空串，提交路径
+ * 必须同口径。
+ */
+test("清空后按 Enter：回退显示，不提交 0", async () => {
+    const onCommit = vi.fn();
+    await render(<AppNumberField value={4096} unit="integer" min={0} onCommit={onCommit} />);
+    const el = input(container);
+
+    await act(async () => {
+        setText(el, "");
+    });
+    await act(async () => {
+        el.dispatchEvent(
+            new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+        );
+    });
+
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(el.value).toBe("4096");
+});
+
+test("清空后失焦：回退显示，不提交 min（不被静默改成下界）", async () => {
+    const onCommit = vi.fn();
+    await render(<AppNumberField value={4096} unit="integer" min={100} onCommit={onCommit} />);
+    const el = input(container);
+
+    await act(async () => {
+        setText(el, "  ");
+    });
+    await act(async () => {
+        el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(el.value).toBe("4096");
 });

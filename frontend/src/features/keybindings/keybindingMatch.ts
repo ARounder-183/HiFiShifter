@@ -66,6 +66,32 @@ export function matchesKeybinding(e: KeyboardEvent, kb: Keybinding): boolean {
     return true;
 }
 
+/**
+ * 事件是否命中该动作绑定列表中的**任一**绑定；返回命中的那一个。
+ *
+ * 一个动作可以绑多个键（见 types.ts 的 `KeybindingMap`）。需要"命中与否"
+ * 的调用方用 `matchesAnyKeybinding`；需要知道"命中的是哪一种写法"的调用方
+ * （如把命中项交给长按重复管理器）用本函数。
+ */
+export function matchKeybinding(
+    e: KeyboardEvent,
+    bindings: readonly Keybinding[] | undefined,
+): Keybinding | null {
+    if (!bindings) return null;
+    for (const binding of bindings) {
+        if (matchesKeybinding(e, binding)) return binding;
+    }
+    return null;
+}
+
+/** 事件是否命中该动作绑定列表中的任一绑定。 */
+export function matchesAnyKeybinding(
+    e: KeyboardEvent,
+    bindings: readonly Keybinding[] | undefined,
+): boolean {
+    return matchKeybinding(e, bindings) !== null;
+}
+
 /** 修饰键状态快照（isModifierActive 等也接受该形状） */
 export type ModifierEventLike = {
     ctrlKey: boolean;
@@ -112,4 +138,21 @@ export function matchesKeybindingAllowingFineModifier(
         return false;
     }
     return matchesKeybinding(clearFineModifierState(e, fineAdjustKb), kb);
+}
+
+/**
+ * `matchesKeybindingAllowingFineModifier` 的列表版本：返回命中的绑定。
+ *
+ * 供"动作可绑多个键"的调用点使用（直线/颤音拖拽期间的振幅/频率键）。
+ */
+export function matchKeybindingAllowingFineModifier(
+    e: KeyboardEvent,
+    bindings: readonly Keybinding[] | undefined,
+    fineAdjustKb?: Keybinding,
+): Keybinding | null {
+    if (!bindings) return null;
+    for (const binding of bindings) {
+        if (matchesKeybindingAllowingFineModifier(e, binding, fineAdjustKb)) return binding;
+    }
+    return null;
 }

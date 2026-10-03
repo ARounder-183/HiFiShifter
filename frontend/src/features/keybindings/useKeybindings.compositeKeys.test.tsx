@@ -337,6 +337,22 @@ test("列表里没实现语义的全局快捷键照常生效（Ctrl+S 保存）"
     expect(fired).toEqual(["project.save"]);
 });
 
+test("列表里 Shift+T / Shift+V 仍走全局绑定（面板没有对应动作）", async () => {
+    /*
+     * Shift+字母会产出可打印字符（Shift+T → "T"），不能因此落进"打字跳转"那一类：
+     * 全局绑定里的 Shift+T（切换上一个 take）与 Shift+V（粘贴 vocal shifter）会被
+     * 面板无声截走。面板若没有对应绑定，事件仍会照常流到它（这里只决定分发器是否
+     * 提前让路），因此大小写不敏感的 type-ahead 不受影响。
+     */
+    await mount();
+    const { row } = buildTypeAheadList();
+    row.focus();
+
+    pressWith(row, "T", { shift: true });
+    pressWith(row, "V", { shift: true });
+    expect(fired).toEqual(["clip.cycleTakePrev", "edit.pasteVocalShifter"]);
+});
+
 test("焦点不在列表里时，单键全局绑定不受影响", async () => {
     // 对照：让路必须以"焦点在该表面内"为条件，否则时间轴的 `s`（分割）等会整体失效。
     await mount();

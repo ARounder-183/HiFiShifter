@@ -13,7 +13,11 @@
 import type { Editor } from "@tiptap/core";
 import { test } from "vitest";
 
-import { handleNotebookPaste, installClipboardFlavorWriter } from "./notebookClipboard.ts";
+import {
+    escapeMarkdownText,
+    handleNotebookPaste,
+    installClipboardFlavorWriter,
+} from "./notebookClipboard.ts";
 import type { PasteContext } from "./notebookClipboard.ts";
 
 function assertEqual<T>(actual: T, expected: T, label: string): void {
@@ -81,4 +85,16 @@ test("components/layout/notebook/notebookClipboard.test.ts scripted checks", () 
 
     remove();
     container.remove();
+
+    // ── 纯文本粘贴的转义：行首标记不能被解释成块级语法 ─────────────
+    // 有序列表标记要转义分隔符（`.` / `)`）而不是数字：`\1. ` 会留下可见的
+    // 反斜杠，只有 `1\. ` 才既压住列表语法又保留原文本。
+    assertEqual(
+        escapeMarkdownText("1. 甲\n2) 乙\n- 丙\n# 丁\n> 戊"),
+        "1\\. 甲\n2\\) 乙\n\\- 丙\n\\# 丁\n\\> 戊",
+        "line-leading markdown markers are escaped",
+    );
+    // 普通文本不受影响，且缩进保持不变。
+    assertEqual(escapeMarkdownText("普通文字"), "普通文字", "plain text untouched");
+    assertEqual(escapeMarkdownText("  1. 缩进"), "  1\\. 缩进", "indented ordered marker escaped");
 });

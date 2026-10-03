@@ -15,7 +15,10 @@ mod traits;
 mod utils;
 pub(crate) mod world;
 
-#[cfg(all(feature = "vslib", target_os = "windows"))]
+// vslib 处理器的编译条件必须与 `lib.rs` 的 `mod vslib` 逐字一致：模块内部
+// 直接引用 `crate::vslib` 的 FFI 声明，而那条 `#[link]` 只在 x86_64-Windows
+// 上被 `build.rs` 满足。少一个 `target_arch` 就会在 ARM64 上得到链接失败。
+#[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
 pub(crate) mod vslib_processor;
 
 pub use chain::ProcessingStage;
@@ -34,7 +37,7 @@ use crate::state::SynthPipelineKind;
 
 static WORLD_RENDERER: world::WorldRenderer = world::WorldRenderer;
 static HIFIGAN_RENDERER: hifigan::HiFiGanRenderer = hifigan::HiFiGanRenderer;
-#[cfg(all(feature = "vslib", target_os = "windows"))]
+#[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
 static VSLIB_RENDERER: vslib_processor::VslibRenderer = vslib_processor::VslibRenderer;
 
 // ─── 注册表 ────────────────────────────────────────────────────────────────────
@@ -47,9 +50,14 @@ pub fn get_renderer(kind: SynthPipelineKind) -> &'static dyn Renderer {
     match kind {
         SynthPipelineKind::WorldVocoder => &WORLD_RENDERER,
         SynthPipelineKind::NsfHifiganOnnx => &HIFIGAN_RENDERER,
-        #[cfg(all(feature = "vslib", target_os = "windows"))]
+        #[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
         SynthPipelineKind::VocalShifterVslib => &VSLIB_RENDERER,
-        #[cfg(all(feature = "vslib", not(target_os = "windows")))]
+        // 其余平台（含 Windows ARM64）：vslib 变体存在但无原生后端，回退
+        // HiFiGAN —— 与 `from_track_algo` 在 feature 关闭时的回退同一语义。
+        #[cfg(all(
+            feature = "vslib",
+            not(all(target_os = "windows", target_arch = "x86_64"))
+        ))]
         SynthPipelineKind::VocalShifterVslib => &HIFIGAN_RENDERER,
     }
 }
@@ -70,9 +78,12 @@ pub fn get_processor(kind: SynthPipelineKind) -> Box<dyn ClipProcessor> {
     match kind {
         SynthPipelineKind::WorldVocoder => Box::new(chain::world_chain()),
         SynthPipelineKind::NsfHifiganOnnx => Box::new(chain::hifigan_chain()),
-        #[cfg(all(feature = "vslib", target_os = "windows"))]
+        #[cfg(all(feature = "vslib", target_os = "windows", target_arch = "x86_64"))]
         SynthPipelineKind::VocalShifterVslib => Box::new(vslib_processor::VslibProcessor),
-        #[cfg(all(feature = "vslib", not(target_os = "windows")))]
+        #[cfg(all(
+            feature = "vslib",
+            not(all(target_os = "windows", target_arch = "x86_64"))
+        ))]
         SynthPipelineKind::VocalShifterVslib => Box::new(chain::hifigan_chain()),
     }
 }

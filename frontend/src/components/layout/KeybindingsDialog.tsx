@@ -20,10 +20,11 @@ import type { RootState } from "../../app/store";
 import { IS_MAC } from "../../utils/platform";
 import {
     selectMergedKeybindings,
-    setKeybinding,
+    setKeybindings,
     resetKeybinding,
     resetAllKeybindings,
     findConflicts,
+    hasDuplicateBinding,
     createModifierOnlyBinding,
 } from "../../features/keybindings/keybindingsSlice";
 import {
@@ -52,7 +53,7 @@ import {
 import { KeybindingsActionRow } from "./keybindings/KeybindingsActionRow";
 import {
     GESTURE_BADGES,
-    isDefaultBinding,
+    isDefaultBindings,
     resolveGroupNavLabel,
 } from "./keybindings/keybindingRowShared";
 import { KeybindingsNavRail, type KeybindingsNavItem } from "./keybindings/KeybindingsNavRail";
@@ -124,11 +125,13 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
     // 搜索匹配设置（转写开关与宽严），与文件浏览器、快速搜索共用同一份。
     const searchSettings = useAppSelector((state: RootState) => state.session.searchSettings);
 
-    // 当前处于"录入模式"的 actionId
-    const [recordingId, setRecordingId] = useState<ActionId | null>(null);
+    // 当前处于"录入模式"的槽位（动作 + 槽位下标）。一个动作可绑多个键，因此
+    // 录入必须指名道姓到槽位，不能只记 actionId。
+    const [recording, setRecording] = useState<{ actionId: ActionId; slot: number } | null>(null);
     // 冲突提示
     const [conflict, setConflict] = useState<{
         actionId: ActionId;
+        slot: number;
         newBinding: Keybinding;
         conflictWith: ActionId[];
     } | null>(null);
@@ -164,43 +167,61 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
         return () => window.clearTimeout(timer);
     }, [open]);
 
-    const recordingRef = useRef(recordingId);
+    const recordingRef = useRef(recording);
     useEffect(() => {
-        recordingRef.current = recordingId;
-    }, [recordingId]);
+        recordingRef.current = recording;
+    }, [recording]);
 
     // 录入模式的键盘监听
     useEffect(() => {
-        if (!recordingId) return;
+        if (!recording) return;
 
-        const currentIsModifierOnly = Boolean(DEFAULT_KEYBINDINGS[recordingId]?.modifierOnly);
+        const currentIsModifierOnly = Boolean(
+            DEFAULT_KEYBINDINGS[recording.actionId]?.[0]?.modifierOnly,
+        );
         const isMac = IS_MAC;
         const pressedModifierTokens = new Set<ModifierToken>();
 
-        function applyModifierTokens(tokens: Set<ModifierToken>) {
-            const currentId = recordingRef.current;
-            if (!currentId || tokens.size === 0) return;
-
-            const newBinding: Keybinding = createModifierOnlyBinding({
-                ctrl: tokens.has("control"),
-                shift: tokens.has("shift"),
-                alt: tokens.has("alt"),
-            });
-
-            const conflicts = findConflicts(overrides, currentId, newBinding);
-            if (conflicts.length > 0) {
-                setConflict({
-                    actionId: currentId,
-                    newBinding,
-                    conflictWith: conflicts,
-                });
+        /**
+         * 把候选绑定写进目标槽位。
+         *
+         * 三条前置判定，顺序即优先级：
+         * 1. **本动作内重复**：同一个键已经绑在这个动作的另一个槽位上 —— 静默
+         *    保持录入态，等用户换一个键（写入会被规范化去重，等于什么都没发生，
+         *    但保持录入态比"悄悄结束"更少困惑）；
+         * 2. **跨动作冲突**：交给冲突横幅裁决；
+         * 3. 通过 → 替换/追加该槽位。
+         */
+        function commit(binding: Keybinding) {
+            const target = recordingRef.current;
+            if (!target) return;
+            const current = overrides[target.actionId] ?? DEFAULT_KEYBINDINGS[target.actionId];
+            if (hasDuplicateBinding(current, binding, target.slot)) {
                 return;
             }
-
-            dispatch(setKeybinding({ actionId: currentId, binding: newBinding }));
+            const conflicts = findConflicts(overrides, target.actionId, binding);
+            if (conflicts.length > 0) {
+                setConflict({ ...target, newBinding: binding, conflictWith: conflicts });
+                return;
+            }
+            const next = [...current];
+            if (target.slot < next.length) next[target.slot] = binding;
+            else next.push(binding);
+            dispatch(setKeybindings({ actionId: target.actionId, bindings: next }));
             setSelectedPreset("custom");
             recordingRef.current = null;
-            setRecordingId(null);
+            setRecording(null);
+        }
+
+        function applyModifierTokens(tokens: Set<ModifierToken>) {
+            if (tokens.size === 0) return;
+            commit(
+                createModifierOnlyBinding({
+                    ctrl: tokens.has("control"),
+                    shift: tokens.has("shift"),
+                    alt: tokens.has("alt"),
+                }),
+            );
         }
 
         function onKeyDown(e: KeyboardEvent) {
@@ -210,7 +231,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
             // Escape 取消录入
             if (e.key === "Escape") {
                 recordingRef.current = null;
-                setRecordingId(null);
+                setRecording(null);
                 setConflict(null);
                 return;
             }
@@ -236,31 +257,12 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
             const key = canonicalKeyFromEvent(e);
             const ctrl = isMac ? e.metaKey : e.ctrlKey;
 
-            const newBinding: Keybinding = {
+            commit({
                 key,
                 ...(ctrl ? { ctrl: true } : {}),
                 ...(e.shiftKey ? { shift: true } : {}),
                 ...(e.altKey ? { alt: true } : {}),
-            };
-
-            const currentId = recordingRef.current;
-            if (!currentId) return;
-
-            // 检测冲突
-            const conflicts = findConflicts(overrides, currentId, newBinding);
-            if (conflicts.length > 0) {
-                setConflict({
-                    actionId: currentId,
-                    newBinding,
-                    conflictWith: conflicts,
-                });
-                return;
-            }
-
-            dispatch(setKeybinding({ actionId: currentId, binding: newBinding }));
-            setSelectedPreset("custom");
-            recordingRef.current = null;
-            setRecordingId(null);
+            });
         }
 
         function onKeyUp(e: KeyboardEvent) {
@@ -287,7 +289,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
             window.removeEventListener("keydown", onKeyDown, true);
             window.removeEventListener("keyup", onKeyUp, true);
         };
-    }, [recordingId, dispatch, overrides]);
+    }, [recording, dispatch, overrides]);
 
     const handleConfirmConflict = useCallback(() => {
         if (!conflict) return;
@@ -295,17 +297,16 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
         for (const cId of conflict.conflictWith) {
             dispatch(resetKeybinding(cId));
         }
-        // 再设置新绑定
-        dispatch(
-            setKeybinding({
-                actionId: conflict.actionId,
-                binding: conflict.newBinding,
-            }),
-        );
+        // 再把候选写进目标槽位
+        const current = overrides[conflict.actionId] ?? DEFAULT_KEYBINDINGS[conflict.actionId];
+        const next = [...current];
+        if (conflict.slot < next.length) next[conflict.slot] = conflict.newBinding;
+        else next.push(conflict.newBinding);
+        dispatch(setKeybindings({ actionId: conflict.actionId, bindings: next }));
         setSelectedPreset("custom");
         setConflict(null);
-        setRecordingId(null);
-    }, [conflict, dispatch]);
+        setRecording(null);
+    }, [conflict, dispatch, overrides]);
 
     const handleCancelConflict = useCallback(() => {
         setConflict(null);
@@ -322,7 +323,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                 dispatch(resetAllKeybindings());
                 setSelectedPreset("default");
                 setConflict(null);
-                setRecordingId(null);
+                setRecording(null);
                 return;
             }
 
@@ -332,18 +333,19 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
             }
 
             const preset = KEYBINDING_PRESETS[value];
-            for (const [actionId, binding] of Object.entries(preset)) {
+            for (const [actionId, bindings] of Object.entries(preset)) {
+                if (!bindings) continue;
                 dispatch(
-                    setKeybinding({
+                    setKeybindings({
                         actionId: actionId as ActionId,
-                        binding,
+                        bindings,
                     }),
                 );
             }
 
             setSelectedPreset(value);
             setConflict(null);
-            setRecordingId(null);
+            setRecording(null);
         },
         [dispatch],
     );
@@ -391,7 +393,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
     const customizedGroups = useMemo(() => {
         const set = new Set<ActionMeta["group"]>();
         for (const id of ALL_ACTION_IDS) {
-            if (!isDefaultBinding(keybindings[id], DEFAULT_KEYBINDINGS[id])) {
+            if (!isDefaultBindings(keybindings[id], DEFAULT_KEYBINDINGS[id])) {
                 set.add(ACTION_META[id].group);
             }
         }
@@ -514,48 +516,71 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
     const renderRow = useCallback(
         (actionId: ActionId, groupLabel?: string) => {
             const meta = ACTION_META[actionId];
-            const currentKb = keybindings[actionId];
-            const defaultKb = DEFAULT_KEYBINDINGS[actionId];
+            const currentBindings = keybindings[actionId];
+            const defaultBindings = DEFAULT_KEYBINDINGS[actionId];
+            const isModifierOnlyAction = Boolean(defaultBindings[0]?.modifierOnly);
             const gesture = meta.modifierOperationType
                 ? GESTURE_BADGES[meta.modifierOperationType]
                 : undefined;
+
+            /** 用给定绑定列表覆盖本动作的绑定（空列表回落到"无"）。 */
+            const applyBindings = (bindings: readonly Keybinding[]) => {
+                dispatch(
+                    setKeybindings({
+                        actionId,
+                        bindings: bindings.length > 0 ? bindings : [NONE_BINDING],
+                    }),
+                );
+                setSelectedPreset("custom");
+            };
 
             return (
                 <KeybindingsActionRow
                     key={actionId}
                     label={tf(meta.labelKey)}
                     meta={meta}
-                    binding={currentKb}
-                    isDefault={isDefaultBinding(currentKb, defaultKb)}
-                    isRecording={recordingId === actionId}
+                    bindings={currentBindings}
+                    isDefault={isDefaultBindings(currentBindings, defaultBindings)}
+                    recordingSlot={recording?.actionId === actionId ? recording.slot : null}
                     gestureLabel={gesture ? tf(gesture.labelKey) : undefined}
-                    isDefaultModifierOnly={Boolean(defaultKb.modifierOnly)}
+                    isModifierOnly={isModifierOnlyAction}
                     noneLabel={noneLabel}
                     pressKeyLabel={pressKeyLabel}
                     pressModifierLabel={pressModifierLabel}
+                    addBindingLabel={tf("kb_add_binding")}
                     groupLabel={groupLabel}
-                    onStartRecording={() => {
+                    onStartRecording={(slot) => {
                         setConflict(null);
-                        setRecordingId(actionId);
+                        setRecording({ actionId, slot });
                     }}
-                    onClearBinding={() => {
-                        // 录入中左键点击 → 设为"无"
-                        dispatch(setKeybinding({ actionId, binding: NONE_BINDING }));
-                        setSelectedPreset("custom");
-                        setRecordingId(null);
+                    onClearSlot={(slot) => {
+                        // 录入中左键点击 → 清空该槽位：还有别的槽位就删掉它，
+                        // 只剩这一个则设为"无"（与右键重置区分：这里不恢复默认）。
+                        applyBindings(currentBindings.filter((_, index) => index !== slot));
+                        setRecording(null);
                         setConflict(null);
                     }}
-                    onResetBinding={() => {
-                        // 右键点击 → 直接重置为默认
-                        dispatch(resetKeybinding(actionId));
-                        setSelectedPreset("custom");
-                        setRecordingId(null);
+                    onRemoveSlot={(slot) => {
+                        // 右键点击槽位 → 还有别的槽位就删掉它；只剩这一个时
+                        // 退化为既有的"重置为默认"（保持老手势的语义）。
+                        if (currentBindings.length > 1) {
+                            applyBindings(currentBindings.filter((_, index) => index !== slot));
+                        } else {
+                            dispatch(resetKeybinding(actionId));
+                            setSelectedPreset("custom");
+                        }
+                        setRecording(null);
                         setConflict(null);
+                    }}
+                    onAddBinding={() => {
+                        setConflict(null);
+                        // 追加的槽位下标 = 当前长度；行组件会为它渲染占位 chip。
+                        setRecording({ actionId, slot: currentBindings.length });
                     }}
                 />
             );
         },
-        [keybindings, recordingId, dispatch, tf, noneLabel, pressKeyLabel, pressModifierLabel],
+        [keybindings, recording, dispatch, tf, noneLabel, pressKeyLabel, pressModifierLabel],
     );
 
     const hasQuery = query.trim().length > 0;
@@ -589,7 +614,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
              *      Radix 在 document 级处理 Esc，React 侧拦不住；这里是唯一的否决点。
              */
             beforeClose={() => {
-                if (recordingId !== null) return false;
+                if (recording !== null) return false;
                 if (query.trim()) {
                     setQuery("");
                     return false;

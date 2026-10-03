@@ -386,6 +386,11 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
     // ── 根表：主根必在；其余只保留被面板引用的（孤儿根丢弃）────────
     const rawRoots = (input.roots ?? {}) as Record<string, unknown>;
     const seen = new Set<string>();
+    // Zone id 的唯一性必须**跨根**成立，而不是每棵树各自成立：`rootIdOfZone`
+    // 与 DOM 全局的标签查找只认第一个同 id 的节点。主根与某个面板根共用一个
+    // id 时（手工编辑/导入的 JSON），按 id 改树会命中错误的工作区。与 `seen`
+    // （窗体去重）同源，一份共享给下面每一次 normalizeTree。
+    const seenZoneIds = new Set<string>();
     const roots: Record<string, DockNode> = {};
     const defaultTree = createDefaultDockLayout().roots[MAIN_ROOT_ID] as DockNode;
     // 主根缺失或不可用 → 出厂布局。主是不可渲染的空缺，属于可以整体回退的一类。
@@ -393,14 +398,14 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
         rawRoots[MAIN_ROOT_ID] ?? defaultTree,
         knownForms,
         seen,
-        new Set<string>(),
+        seenZoneIds,
     );
     roots[MAIN_ROOT_ID] = pruneTree(mainNorm ?? defaultTree) ?? defaultTree;
     for (const [rootId, rawTree] of Object.entries(rawRoots)) {
         if (rootId === MAIN_ROOT_ID) continue;
         const owned = Object.values(forms).some((form) => form.childRootId === rootId);
         if (!owned) continue;
-        const norm = normalizeTree(rawTree, knownForms, seen, new Set<string>());
+        const norm = normalizeTree(rawTree, knownForms, seen, seenZoneIds);
         const pruned = norm ? pruneTree(norm) : null;
         // pruned === null = 面板的所有成员都不可用 → 空面板（根条目缺席即空）。
         if (pruned) roots[rootId] = pruned;
@@ -408,7 +413,7 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
     // 兼容直接传入的 v1 形状（未经迁移入口的调用方）：单棵 tree 视作主根。
     const legacyTree = (input as { tree?: unknown }).tree;
     if (!rawRoots[MAIN_ROOT_ID] && legacyTree && typeof legacyTree === "object") {
-        const norm = normalizeTree(legacyTree, knownForms, seen, new Set<string>());
+        const norm = normalizeTree(legacyTree, knownForms, seen, seenZoneIds);
         roots[MAIN_ROOT_ID] = pruneTree(norm ?? roots[MAIN_ROOT_ID]) ?? roots[MAIN_ROOT_ID];
     }
 
@@ -568,13 +573,11 @@ function normalizePresets(raw: unknown, knownForms: Set<string>): Record<string,
         const rawRoots = (legacy.roots ??
             (legacy.tree ? { [MAIN_ROOT_ID]: legacy.tree } : {})) as Record<string, unknown>;
         const seen = new Set<string>();
+        // 同 normalizeDockLayout：预设内的 Zone id 也必须在它的**所有根之间**
+        // 唯一，否则套用该预设后会复现"按 id 改树命中错误根"的问题。
+        const seenZoneIds = new Set<string>();
         const roots: Record<string, DockNode> = {};
-        const mainNorm = normalizeTree(
-            rawRoots[MAIN_ROOT_ID],
-            presetKnownForms,
-            seen,
-            new Set<string>(),
-        );
+        const mainNorm = normalizeTree(rawRoots[MAIN_ROOT_ID], presetKnownForms, seen, seenZoneIds);
         // 预设的主根不可用 = 整个预设作废（与今日"树不可用 → 丢弃预设"一致）：
         // 预设的语义是"换一套工作区"，没有主工作区的预设无从谈起。
         const mainPruned = mainNorm ? pruneTree(mainNorm) : null;
@@ -584,7 +587,7 @@ function normalizePresets(raw: unknown, knownForms: Set<string>): Record<string,
             if (rootId === MAIN_ROOT_ID) continue;
             const owned = Object.values(forms).some((form) => form.childRootId === rootId);
             if (!owned) continue;
-            const norm = normalizeTree(rawTree, presetKnownForms, seen, new Set<string>());
+            const norm = normalizeTree(rawTree, presetKnownForms, seen, seenZoneIds);
             const pruned = norm ? pruneTree(norm) : null;
             if (pruned) roots[rootId] = pruned;
         }
@@ -599,6 +602,7 @@ function normalizePresets(raw: unknown, knownForms: Set<string>): Record<string,
                 ? value.floatOrder.filter((id): id is string => typeof id === "string")
                 : [],
             gutters: normalizeGutters(value.gutters),
+            tabPosition: normalizeTabPosition((value as Record<string, unknown>).tabPosition),
             createdAtMs:
                 typeof value.createdAtMs === "number" && Number.isFinite(value.createdAtMs)
                     ? value.createdAtMs

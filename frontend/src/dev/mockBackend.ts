@@ -525,6 +525,14 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
         get_export_audio_defaults: () => ({ ok: true }),
         get_gpu_devices: () => ({ ok: true, devices: [] }),
         get_onnx_status: () => ({ ok: true, available: false }),
+        // 浏览器 mock 里 vslib 永远不可用 —— 与"没有 Windows 原生 DLL"一致，
+        // 也让算法列表的隐藏分支在 `?mock=1` 下始终可被看到。
+        get_vslib_status: () => ({
+            compiled: false,
+            available: false,
+            version: null,
+            error: "mock: vslib unavailable",
+        }),
         get_dml_adapters: () => ({ ok: true, adapters: [] }),
         // ── 波形（假数据）────────────────────────────────────────────
         get_waveform_mipmap_binary: (...args: unknown[]) => {

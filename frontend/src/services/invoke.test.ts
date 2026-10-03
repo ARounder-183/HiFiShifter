@@ -87,6 +87,8 @@ test("services/invoke.test.ts scripted checks", async () => {
 
     // get_param_frames 的 binary 参数曾漏映射：前端默认请求二进制，但 Tauri
     // 后端实际收到 false，返回 JSON；API 层又按二进制协议解码，破坏取数约定。
+    // withSentinel（第 7 个位置参数 → 后端 with_sentinel）是同一类漏映射：
+    // 漏掉后 edit_sentinel"未画帧"位图永远拿不到，未画帧被物化成显式电平。
     assertEqual(
         buildTauriArgs("get_param_frames", ["track-1", "volume", 100, 200, 2, true]),
         {
@@ -98,6 +100,27 @@ test("services/invoke.test.ts scripted checks", async () => {
             binary: true,
         },
         "get_param_frames binary mapping",
+    );
+    assertEqual(
+        buildTauriArgs("get_param_frames", ["track-1", "volume", 100, 200, 2, true, true]),
+        {
+            trackId: "track-1",
+            param: "volume",
+            startFrame: 100,
+            frameCount: 200,
+            stride: 2,
+            binary: true,
+            withSentinel: true,
+        },
+        "get_param_frames withSentinel mapping",
+    );
+    // 未传时不得凭空造出 undefined 字段（老后端 / 老调用方保持旧行为）。
+    assertEqual(
+        Object.keys(
+            buildTauriArgs("get_param_frames", ["track-1", "volume", 100, 200, 2, true]) ?? {},
+        ),
+        ["trackId", "param", "startFrame", "frameCount", "stride", "binary"],
+        "get_param_frames withSentinel omitted",
     );
 
     // Take 相关命令映射：这些命令曾经漏映射，导致前端乐观更新生效但后端调用

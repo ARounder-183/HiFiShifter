@@ -18,7 +18,8 @@ import { createRoot } from "react-dom/client";
 import { Provider } from "react-redux";
 import { afterEach, expect, test } from "vitest";
 
-import keybindingsReducer, { setKeybinding } from "../features/keybindings/keybindingsSlice";
+import keybindingsReducer, { setKeybindings } from "../features/keybindings/keybindingsSlice";
+import type { ActionId, Keybinding } from "../features/keybindings/types";
 import { useMenuShortcut } from "./useMenuShortcut";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -31,7 +32,7 @@ afterEach(() => {
 });
 
 /** 把 hook 的返回值渲染成一行文本，便于断言（`undefined` 渲染成空）。 */
-function renderShortcut(actionId: "clip.paste" | "clip.split" | "edit.deselect") {
+function renderShortcut(actionId: ActionId) {
     const store = configureStore({ reducer: { keybindings: keybindingsReducer } });
     host = document.createElement("div");
     document.body.append(host);
@@ -52,9 +53,9 @@ function renderShortcut(actionId: "clip.paste" | "clip.split" | "edit.deselect")
 
     return {
         read: () => host?.querySelector('[data-testid="out"]')?.textContent ?? "",
-        rebind: (binding: Parameters<typeof setKeybinding>[0]["binding"]) =>
+        rebind: (binding: Keybinding) =>
             act(() => {
-                store.dispatch(setKeybinding({ actionId, binding }));
+                store.dispatch(setKeybindings({ actionId, bindings: [binding] }));
             }),
         unmount: () => act(() => root.unmount()),
     };
@@ -78,5 +79,17 @@ test("未绑定返回空（调用方不渲染快捷键列，而不是显示占�
 
     probe.rebind({ key: "v", ctrl: true });
     expect(probe.read()).toContain("V");
+    probe.unmount();
+});
+
+test("一个动作绑了多个键时，菜单文案把全部键都写出来（`;` 连接）", () => {
+    // 「重做」默认绑 Ctrl+Shift+Z 与 Ctrl+Y —— 只显示主绑定会让用户以为
+    // 备用键没生效。
+    const probe = renderShortcut("edit.redo");
+    const text = probe.read();
+    expect(text).toContain(";");
+    expect(text.split(";")).toHaveLength(2);
+    expect(text).toContain("Z");
+    expect(text).toContain("Y");
     probe.unmount();
 });

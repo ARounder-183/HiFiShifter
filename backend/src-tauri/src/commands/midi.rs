@@ -1198,6 +1198,15 @@ pub(super) fn replace_midi_clip_data(
         clip.pitch_range = pitch_range;
         clip.source_path = None;
         clip.source_path_relative = None;
+        // 内容整体换成了"新文件的正序音符 [0, length_sec]"（不变式 PN 的源域
+        // 坐标），因此描述**旧内容**的消费参数必须一并归零：否则旧窗口
+        // （例如 `source_start_sec = 3.0`）会与新音符错位，渲染端按窗口求交
+        // 时音高线整体偏移或消失。取值与 `import_midi_as_clip` 的新建路径、
+        // 以及 `glue_pitch_clips` 重新谱写音符时的做法完全一致。
+        clip.source_start_sec = 0.0;
+        clip.source_end_sec = length_sec;
+        clip.playback_rate = 1.0;
+        clip.reversed = false;
     } else {
         midi_log(format!(
             "replace_midi_clip_data: clip_not_found clip_id={}",

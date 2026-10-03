@@ -42,18 +42,29 @@ const SNAPSHOT_FRAMES = 1000;
 const LIVE_START_FRAME = 100;
 const LIVE_FRAME_COUNT = 300;
 
-function makeCurves(): {
+function makeCurves(stride = 1): {
     volume: number[];
     dynTarget: number[];
     dynBaseline: number[];
 } {
-    const volume: number[] = new Array(SNAPSHOT_FRAMES);
-    const dynTarget: number[] = new Array(SNAPSHOT_FRAMES);
-    const dynBaseline: number[] = new Array(SNAPSHOT_FRAMES);
-    for (let i = 0; i < SNAPSHOT_FRAMES; i += 1) {
-        volume[i] = 0.5 + 0.5 * Math.sin(i * 0.031);
-        dynBaseline[i] = 0.02 + 0.4 * Math.abs(Math.sin(i * 0.017));
-        dynTarget[i] = dynBaseline[i] * (0.2 + 1.8 * Math.abs(Math.cos(i * 0.011)));
+    const count = Math.floor((SNAPSHOT_FRAMES - 1) / stride) + 1;
+    const volume: number[] = new Array(count);
+    const dynTarget: number[] = new Array(count);
+    const dynBaseline: number[] = new Array(count);
+    for (let i = 0; i < count; i += 1) {
+        const f = i * stride;
+        volume[i] = 0.5 + 0.5 * Math.sin(f * 0.031);
+        // 【为什么基线要有一段持续处于淡出带】`dynContentFade` 的 smoothstep 过渡带
+        // 是 [0.0005, 0.001]，但 `contentBaselineAt` 先做约 ±50ms 的平滑，**短于
+        // 平滑窗**的下探会被邻近的大基线拉回带外、淡出恒为 1。旧夹具最小 0.02，
+        // 因此"查表对淡出线性插值还是按就近采样帧阶跃"这一分歧永远不会被对拍发现。
+        // 这里让基线在 [140, 220] 帧（远宽于平滑窗）内处于带内并缓慢变化，使淡出
+        // 在 0..1 之间真实起伏。
+        const inBand = f >= 140 && f <= 220;
+        dynBaseline[i] = inBand
+            ? 0.0005 + 0.0005 * (Math.abs(f - 180) / 40)
+            : 0.02 + 0.4 * Math.abs(Math.sin(f * 0.017));
+        dynTarget[i] = dynBaseline[i] * (0.2 + 1.8 * Math.abs(Math.cos(f * 0.011)));
     }
     return { volume, dynTarget, dynBaseline };
 }
@@ -66,20 +77,23 @@ function makeInstrumentedMap(args: {
         dynBaseline: number[];
     };
     liveEdit: number[] | null;
+    /** 快照步长（默认 1；>1 时曲线数组按该步长解释绝对帧）。 */
+    stride?: number;
 }): { factors: WaveformAmplitudeFactors; calls: () => number } {
+    const stride = args.stride ?? 1;
     const reader = createLiveOverrideReader();
     const live =
         args.liveEdit === null
             ? null
             : {
-                  key: `v2|track-1|volume|${LIVE_START_FRAME}|${LIVE_FRAME_COUNT}|1`,
+                  key: `v2|track-1|volume|${LIVE_START_FRAME}|${LIVE_FRAME_COUNT}|${stride}`,
                   edit: args.liveEdit,
               };
     let calls = 0;
     const map = makeLoudnessAmplitudeMap(
         {
             startFrame: 0,
-            stride: 1,
+            stride,
             framePeriodMs: FRAME_MS,
             volume: args.snapshot.volume,
             dynTarget: args.snapshot.dynTarget,
@@ -201,6 +215,34 @@ describe("查表路径与逐值路径逐值等价", () => {
             expect(lutMap.factors.levelCeilingOverWindow?.(a, b)).toBe(
                 directMap.factors.levelCeilingOverWindow?.(a, b),
             );
+        }
+    });
+
+    test("★ 快照降采样（stride > 1）下同样全等 —— 淡出按就近采样帧阶跃", () => {
+        // 长工程快照会按 stride > 1 降采样。此时逐值路径的淡出仍是"就近取整到
+        // 采样帧再套 smoothstep"的阶跃函数，且阶跃点不落在格中点（如 stride=4
+        // 时落在格边界），只按 `frac < 0.5` 的简化实现会与逐值路径分叉。
+        for (const stride of [2, 3, 4]) {
+            const snapshot = makeCurves(stride);
+            const lutMap = makeInstrumentedMap({ snapshot, liveEdit: null, stride });
+            const directMap = makeInstrumentedMap({ snapshot, liveEdit: null, stride });
+            const times = queryTimes();
+            lutMap.factors.beginWindow?.(0.4, 2.1);
+            for (const t of times) {
+                // stride > 1 时查表在整数帧上再插值一次，与逐值的一次插值数学等价、
+                // 但浮点运算顺序不同（末位 ULP 级差异），故这里按精度对拍；淡出的
+                // 阶跃语义若写错（如简化为 `frac < 0.5`），差异远超该精度会立刻失败。
+                expect(lutMap.factors.factorAt(t), `stride=${stride} t=${t}`).toBeCloseTo(
+                    directMap.factors.factorAt(t) as number,
+                    12,
+                );
+            }
+            for (const [a, b] of ceilingWindows()) {
+                expect(
+                    lutMap.factors.levelCeilingOverWindow?.(a, b),
+                    `stride=${stride} window=[${a},${b}]`,
+                ).toBe(directMap.factors.levelCeilingOverWindow?.(a, b));
+            }
         }
     });
 

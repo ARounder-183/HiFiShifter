@@ -372,10 +372,12 @@ function TimeRulerContextMenu({
     }, [tempoMap, clickedSec, pxPerSec]);
     const hasMap = tempoMap != null && tempoMap.points.length > 0;
 
-    // 分区标题：原语没有「非交互标签行」，用 disabled 项承载（不可选、
-    // 方向键跳过、悬停无反应），保留原有分组文字与顺序。
+    // 分区标题走原语的 `heading`：它是**非交互标签行**（不可选、方向键跳过、
+    // 悬停无反应）。此前用 `disabled: true` 冒充 —— 那对屏幕阅读器是"一个禁用的
+    // 菜单项"、对键盘是不可达项，语义是错的，也和文件浏览器菜单的同类标题
+    // 长得不一样。
     const items: AppMenuItemSpec[] = [
-        { key: "tempoMapHeader", label: t("tempo_map"), disabled: true, onSelect: () => {} },
+        { key: "tempoMapHeader", label: t("tempo_map"), heading: true },
         {
             key: "addTempoPoint",
             label: t("tempo_map_add_point"),
@@ -411,9 +413,8 @@ function TimeRulerContextMenu({
         {
             key: "primaryHeader",
             label: t("time_unit_primary"),
-            disabled: true,
+            heading: true,
             separatorBefore: true,
-            onSelect: () => {},
         },
         ...TIME_UNITS.map((unit) => ({
             key: `primary-${unit}`,
@@ -424,9 +425,8 @@ function TimeRulerContextMenu({
         {
             key: "secondaryHeader",
             label: t("time_unit_secondary"),
-            disabled: true,
+            heading: true,
             separatorBefore: true,
-            onSelect: () => {},
         },
         ...TIME_UNIT_CHOICES.map((unit) => ({
             key: `secondary-${unit}`,

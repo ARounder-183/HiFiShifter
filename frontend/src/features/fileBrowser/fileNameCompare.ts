@@ -23,16 +23,21 @@
  */
 
 /**
- * 语系排序器：只用于**字母之间**的比较。
+ * 构造语系排序器：只用于**字母之间**的比较。
  *
  * `numeric` 在这里用不上（单字符比较），但保留它与面板的取值一致；
  * `sensitivity: "base"` 让大小写与变音符号不参与比较 —— 资源管理器同样忽略它们。
- * 语系取运行环境默认值（= 系统区域），与资源管理器"按系统区域排序"一致。
+ * 语系缺省取运行环境默认值（= 系统区域），与资源管理器"按系统区域排序"一致。
  */
-const LETTER_COLLATOR = new Intl.Collator(undefined, {
-    numeric: true,
-    sensitivity: "base",
-});
+function buildLetterCollator(locale?: string | string[]): Intl.Collator {
+    return new Intl.Collator(locale, {
+        numeric: true,
+        sensitivity: "base",
+    });
+}
+
+/** 文件名比较器签名（可直接交给 `Array.prototype.sort`）。 */
+export type FileNameComparator = (a: string, b: string) => number;
 
 /** 类别：0 = 符号/空白，1 = 数字，2 = 字母（含其它数字系统与组合记号）。 */
 const SYMBOL = 0;
@@ -80,10 +85,10 @@ function step(codePoint: number): number {
 }
 
 /**
- * 比较两个文件名。返回负数表示 `a` 在前，正数表示 `b` 在前，0 表示等价
- * （例如只有大小写不同 —— 与资源管理器一致，二者视为同级）。
+ * 用给定语系排序器比较两个文件名。返回负数表示 `a` 在前，正数表示 `b` 在前，
+ * 0 表示等价（例如只有大小写不同 —— 与资源管理器一致，二者视为同级）。
  */
-export function compareFileNames(a: string, b: string): number {
+function compareWithCollator(collator: Intl.Collator, a: string, b: string): number {
     let i = 0;
     let j = 0;
 
@@ -122,10 +127,7 @@ export function compareFileNames(a: string, b: string): number {
             const cjkA = isCjk(ca);
             const cjkB = isCjk(cb);
             if (cjkA !== cjkB) return cjkA ? 1 : -1;
-            const order = LETTER_COLLATOR.compare(
-                String.fromCodePoint(ca),
-                String.fromCodePoint(cb),
-            );
+            const order = collator.compare(String.fromCodePoint(ca), String.fromCodePoint(cb));
             if (order !== 0) return order < 0 ? -1 : 1;
             // 等价（例如只有大小写不同）：继续比后面的字符。
         }
@@ -137,3 +139,20 @@ export function compareFileNames(a: string, b: string): number {
     // 一方是另一方的前缀：短的在前（`a.wav` 在 `a_1.wav` 之前）。
     return a.length - i - (b.length - j);
 }
+
+/**
+ * 用指定区域构造文件名比较器。
+ *
+ * 生产代码请用下方的 `compareFileNames`（跟随系统区域，与资源管理器一致）。
+ * 本工厂用于让依赖语系的分支可被确定性测试：`"zh-CN"` 下 ICU 对汉字按拼音排序
+ * （甲 jiǎ 在 乙 yǐ 之前），`"en-US"` 下退化为码点序（乙 U+4E59 在 甲 U+7532
+ * 之前），两者结果相反 —— 不固定区域时，断言会随宿主默认区域漂移（CI runner
+ * 是 en-US，开发机常见 zh-CN）。
+ */
+export function createFileNameComparator(locale?: string | string[]): FileNameComparator {
+    const collator = buildLetterCollator(locale);
+    return (a, b) => compareWithCollator(collator, a, b);
+}
+
+/** 生产用比较器：跟随系统区域（与资源管理器一致）。 */
+export const compareFileNames: FileNameComparator = createFileNameComparator();

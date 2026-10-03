@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { resolveClipSelectionModifiers } from "./clipSelectionModifiers";
 import { DEFAULT_KEYBINDINGS } from "./defaultKeybindings";
+import { firstBinding } from "./keybindingsSlice";
 
 // macOS 环境模拟：IS_MAC=true 时 isPrimaryModifierDown 走 metaKey（⌘）。
 // ctrl 字段绑定的平台适配（Windows: Ctrl / macOS: ⌘）由
@@ -15,8 +16,9 @@ vi.mock("../../utils/platform", async (importOriginal) => {
     };
 });
 
-const MULTI = DEFAULT_KEYBINDINGS["modifier.clipMultiSelectToggle"];
-const RANGE = DEFAULT_KEYBINDINGS["modifier.clipRangeSelect"];
+// 修饰键手势只有一个绑定，取主绑定（见 types.ts 的 KeybindingMap）。
+const MULTI = firstBinding(DEFAULT_KEYBINDINGS["modifier.clipMultiSelectToggle"]);
+const RANGE = firstBinding(DEFAULT_KEYBINDINGS["modifier.clipRangeSelect"]);
 
 describe("resolveClipSelectionModifiers — macOS（⌘ 为主修饰键）", () => {
     it("⌘（metaKey）命中默认多选切换绑定", () => {

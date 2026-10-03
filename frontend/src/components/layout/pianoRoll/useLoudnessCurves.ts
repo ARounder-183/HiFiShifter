@@ -259,9 +259,12 @@ export function useLoudnessCurves(args: {
                 ]);
                 if (fetchReqIdRef.current !== reqId) return;
                 if (!volumeRes?.ok || !dynRes?.ok) {
-                    // 失败也走 land：笔画期间置空快照会让波形映射消失、笔画闪断，
-                    // 宁可让旧快照多留一会儿。
-                    land({ snapshot: null, fetchSeq: reqId, analysisPending: false });
+                    // 失败**不落地**：保留旧快照（数据与序号都不动）。
+                    // 【为什么不能落空快照】快照为 null 会让波形丢掉 volume×dyn
+                    // 幅度映射（笔画闪断）；【为什么不能给旧快照盖新序号】快照序号
+                    // 是「这份数据是否取自提交之后」的判据（见返回类型说明），
+                    // 给陈旧数据盖新序号会让提交侧提前撤下 live 覆盖层、闪回旧波形。
+                    // 因此这里只是静默保留，等下一次成功取数自然推进。
                     return;
                 }
                 const next = snapshotFromPayloads(
