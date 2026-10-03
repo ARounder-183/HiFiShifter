@@ -3201,6 +3201,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 origin.editSides,
                             );
                         }
+                        // 取消同样要归还交互锁：手势起手已 beginKernelGestureInteraction()
+                        // 增加锁计数，若不释放，锁计数长期 ≥1 会跳过非强制的
+                        // applyTimelineState（后端周期快照 / 普通命令响应停止落地）。
+                        endKernelGestureInteraction();
                         return;
                     }
                     dispatch(checkpointHistory());
@@ -4885,7 +4889,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 }
             });
         },
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- s.snapEnabled 为设置态，加入会让交叉抓手预览回调随设置切换重建（既有热路径口径，手势中读创建时快照）
+        // 吸附总开关是设置态，但交叉抓手预览在拖拽中实时读取它：若不进依赖，
+        // 回调只在挂载时创建一次，之后切换吸附开关再拖抓手仍按挂载时的快照
+        // 吸附/免吸附，与 clip 拖拽 / trim 的实时口径不一致（同源处理见
+        // handleKernelDragPreview / handleKernelTrimPreview 的依赖表）。
         [
             beginKernelGestureInteraction,
             crossfadeGripKb,
@@ -4896,6 +4903,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 曲率纵横比换算读实时 pxPerSec（缩放后创建时快照会算错）。
             pxPerSecRef,
             sessionRef,
+            s.snapEnabled,
             snapTimelineDetailed,
         ],
     );

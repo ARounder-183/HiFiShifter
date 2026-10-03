@@ -5951,7 +5951,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             if (selFrameRanges.length === 0) return;
             const firstRange = selFrameRanges[0];
             const startFrame = firstRange.startFrame;
-            const frameCount = firstRange.frameCount;
 
             /**
              * 逐段执行「取数 → 变换 → 回写」。
@@ -6054,10 +6053,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
 
             // 选区编辑统一入口：取数/编辑/边缘淡化/回写全部在
             // selectionEditApply 模块内完成（delta 空间交叉淡化 + 毫秒定标）。
-            // 多选区逐段独立执行，整批只打一个撤销点。
-            // 平滑度解析顺序保持旧语义：对话框显式传入 → store 全局设置。
+            // 多选区**逐段独立**执行，整批只打一个撤销点。
+            //
+            // 回调收到**当前段**：移调度数 / 量化 / 均值量化要按本段起始帧解析
+            // Tempo Map 音阶（见 applySelectionEditOverRanges 的说明）。
             const runSelectionEdit = async (
-                editSelection: (currentSelectionVals: number[]) => number[],
+                editSelection: (currentSelectionVals: number[], range: FrameRange) => number[],
                 extension?: SelectionEditExtension,
                 options?: { preserveDynSentinels?: boolean },
             ) => {
@@ -6303,31 +6304,37 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 case "average": {
                     const strengthPercent = clamp(Number(data?.strength ?? 100) || 0, 0, 100);
                     if (strengthPercent <= 0) return;
-                    const res = await paramsApi.getParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        frameCount,
-                        1,
-                        true,
-                        isDynParam(editParam),
-                    );
-                    if (!res?.ok) return;
-                    const payload = res as ParamFramesPayload;
-                    const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
-                    if (vals.length === 0) return;
-                    const result = averageSelectionValues(vals, editParam, strengthPercent);
-                    // dyn：未画帧写回哨兵（防止"沿用原声"被物化成显式目标电平）。
-                    if (isDynParam(editParam)) {
-                        restoreDynSentinels(result, payload.edit_sentinel);
-                    }
-                    await paramsApi.setParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        result,
-                        true,
-                    );
+                    // 多选区逐段独立：各段取自己的值、求自己的均值（与 smooth 同构），
+                    // 整批只打一个撤销点。旧实现只处理 selFrameRanges[0]，多段选区
+                    // 会静默地只拉平第一段。
+                    await runPerRange(async (range, _index, isFirstWrite) => {
+                        const res = await paramsApi.getParamFrames(
+                            rootTrackId,
+                            editParam,
+                            range.startFrame,
+                            range.frameCount,
+                            1,
+                            true,
+                            isDynParam(editParam),
+                        );
+                        if (!res?.ok) return false;
+                        const payload = res as ParamFramesPayload;
+                        const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
+                        if (vals.length === 0) return false;
+                        const result = averageSelectionValues(vals, editParam, strengthPercent);
+                        // dyn：未画帧写回哨兵（防止"沿用原声"被物化成显式目标电平）。
+                        if (isDynParam(editParam)) {
+                            restoreDynSentinels(result, payload.edit_sentinel);
+                        }
+                        const written = await paramsApi.setParamFrames(
+                            rootTrackId,
+                            editParam,
+                            range.startFrame,
+                            result,
+                            isFirstWrite,
+                        );
+                        return Boolean(written?.ok);
+                    });
                     bumpRefreshToken();
                     break;
                 }
@@ -6354,20 +6361,24 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     if (degreeSteps === 0) return;
                     const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
                     await runSelectionEdit(
-                        (vals) => {
+                        (vals, range) => {
                             return editParam === "pitch"
                                 ? vals.map((midi, i) => {
                                       if (midi === 0) return 0;
                                       const scale =
                                           fixedScale ??
-                                          projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
+                                          projectScaleAtSec(
+                                              ((range.startFrame + i) * fpMs) / 1000,
+                                          ) ??
                                           "C";
                                       return transposePitchByScaleSteps(midi, degreeSteps, scale);
                                   })
                                 : vals.map((midi, i) => {
                                       const scale =
                                           fixedScale ??
-                                          projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
+                                          projectScaleAtSec(
+                                              ((range.startFrame + i) * fpMs) / 1000,
+                                          ) ??
                                           "C";
                                       return transposePitchByScaleSteps(midi, degreeSteps, scale);
                                   });
@@ -6617,9 +6628,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     const toleranceSemitone = toleranceCents / 100;
                     // project base scale is controlled from toolbar; do not change it here
                     const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
-                    const scaleAt = (i: number): ScaleLike =>
-                        fixedScale ?? projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ?? "C";
-                    await runSelectionEdit((vals) =>
+                    const scaleAt = (i: number, range: FrameRange): ScaleLike =>
+                        fixedScale ??
+                        projectScaleAtSec(((range.startFrame + i) * fpMs) / 1000) ??
+                        "C";
+                    await runSelectionEdit((vals, range) =>
                         unit === "semitone"
                             ? vals.map((v) =>
                                   editParam === "pitch" && v === 0
@@ -6637,7 +6650,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                   editParam === "pitch" && v === 0
                                       ? 0
                                       : (() => {
-                                            const snapped = snapToScale(v, scaleAt(i));
+                                            const snapped = snapToScale(v, scaleAt(i, range));
                                             return Math.abs(v - snapped) <= toleranceSemitone
                                                 ? v
                                                 : snapped +
@@ -6693,7 +6706,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
                     let meanDelta = 0;
                     await runSelectionEdit(
-                        (vals) => {
+                        (vals, range) => {
                             // pitch=0 视为未编辑，不参与均值；全部未浊时 delta=0，
                             // 结果与输入逐帧相同（相比旧的直接 return 会多一个
                             // 无变化的撤销点，无副作用，可接受）。
@@ -6703,7 +6716,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             const midScale =
                                 fixedScale ??
                                 projectScaleAtSec(
-                                    ((startFrame + Math.floor(vals.length / 2)) * fpMs) / 1000,
+                                    ((range.startFrame + Math.floor(vals.length / 2)) * fpMs) /
+                                        1000,
                                 ) ??
                                 "C";
                             const quantizedAvg =

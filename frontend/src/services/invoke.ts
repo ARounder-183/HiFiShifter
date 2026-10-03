@@ -578,6 +578,12 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 frameCount: args[3],
                 stride: args[4],
                 binary: args[5],
+                // `withSentinel` 是 paramsApi.getParamFrames 的第 7 个位置参数，
+                // 对应后端 `with_sentinel: Option<bool>`（edit_sentinel"未画帧"
+                // 位图的开关）。漏映射会让 Tauri 侧永远收不到它，后端不返回
+                // edit_sentinel，下游把缺失标志当 false，把"未画"帧物化成显式
+                // 电平值（重分析后响度/基线漂移）。与 binary 同一类漏映射。
+                ...(args[6] !== undefined ? { withSentinel: args[6] } : {}),
             };
 
         case "set_param_frames":

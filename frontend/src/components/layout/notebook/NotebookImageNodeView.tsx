@@ -123,11 +123,16 @@ export function NotebookImageNodeView(props: NodeViewProps) {
             const onUp = () => {
                 window.removeEventListener("pointermove", onMove);
                 window.removeEventListener("pointerup", onUp);
+                window.removeEventListener("pointercancel", onUp);
                 setDragWidth(null);
                 updateAttributes({ width: latest });
             };
             window.addEventListener("pointermove", onMove);
             window.addEventListener("pointerup", onUp);
+            // 掌压拒绝、系统手势等会派发 pointercancel 而不是 pointerup：不接住
+            // 它，监听与 dragWidth 会一直挂着，之后任何一次零散 pointerup 都会把
+            // `latest` 当宽度提交（一次普通点击就悄悄改了图宽）。
+            window.addEventListener("pointercancel", onUp);
         },
         [updateAttributes, width],
     );

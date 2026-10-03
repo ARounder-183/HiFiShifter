@@ -16,6 +16,7 @@ import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { AppForm, AppSwitchRow } from "../../../ui/Field";
 import { useAppSelector } from "../../../app/hooks";
+import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
 import { tempoAtSec, clampBpm } from "../../../utils/tempoMap";
 import type { TempoMap } from "../../../utils/tempoMap";
@@ -229,6 +230,35 @@ function ClipRateEditorFields({
         };
     }, [onClose]);
 
+    // 滚轮步进必须挂非被动原生监听：React root 上的 wheel 是 passive 的，
+    // 合成事件里的 preventDefault() 是空操作，调值会同时滚动祖先容器
+    // （与 FadeContextMenu 的曲率滑块同因同解）。
+    const attachRateWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setRateEdited(true);
+        const fine = isModifierActive(fineAdjustKb, e);
+        const step = fine ? RATE_FINE_STEP : RATE_WHEEL_STEP;
+        const current = parsePlaybackRateInput(rateText) ?? clip.playbackRate;
+        updateRateValue(current + step * (e.deltaY < 0 ? 1 : -1));
+    });
+    const attachOldBpmWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const fine = isModifierActive(fineAdjustKb, e);
+        const step = fine ? BPM_FINE_STEP : BPM_WHEEL_STEP;
+        const current = parseBpmText(oldBpmText) ?? currentBpm;
+        updateOldBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
+    });
+    const attachNewBpmWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const fine = isModifierActive(fineAdjustKb, e);
+        const step = fine ? BPM_FINE_STEP : BPM_WHEEL_STEP;
+        const current = parseBpmText(newBpmText) ?? currentBpm;
+        updateNewBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
+    });
+
     return (
         <div
             ref={menuRef}
@@ -275,15 +305,7 @@ function ClipRateEditorFields({
                             onClose();
                         }
                     }}
-                    onWheel={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setRateEdited(true);
-                        const fine = isModifierActive(fineAdjustKb, e.nativeEvent);
-                        const step = fine ? RATE_FINE_STEP : RATE_WHEEL_STEP;
-                        const current = parsePlaybackRateInput(rateText) ?? clip.playbackRate;
-                        updateRateValue(current + step * (e.deltaY < 0 ? 1 : -1));
-                    }}
+                    ref={attachRateWheel}
                 />
             </label>
 
@@ -304,14 +326,7 @@ function ClipRateEditorFields({
                                 applyRate(newBpm / oldBpm);
                             }
                         }}
-                        onWheel={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            const fine = isModifierActive(fineAdjustKb, e.nativeEvent);
-                            const step = fine ? BPM_FINE_STEP : BPM_WHEEL_STEP;
-                            const current = parseBpmText(oldBpmText) ?? currentBpm;
-                            updateOldBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
-                        }}
+                        ref={attachOldBpmWheel}
                     />
                 </label>
                 <label className="flex-1 flex flex-col gap-1">
@@ -330,14 +345,7 @@ function ClipRateEditorFields({
                                 applyRate(newBpm / oldBpm);
                             }
                         }}
-                        onWheel={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            const fine = isModifierActive(fineAdjustKb, e.nativeEvent);
-                            const step = fine ? BPM_FINE_STEP : BPM_WHEEL_STEP;
-                            const current = parseBpmText(newBpmText) ?? currentBpm;
-                            updateNewBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
-                        }}
+                        ref={attachNewBpmWheel}
                     />
                 </label>
             </div>

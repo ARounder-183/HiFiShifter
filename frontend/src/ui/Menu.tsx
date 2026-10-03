@@ -34,7 +34,15 @@
  *   - 无值：常驻的**锚点**容器（工具栏按钮的 `position: relative` 外壳），只表示
  *     "这里会长出菜单"。`AppTooltip` 的注释记录了为什么不能把两者混为一谈。
  */
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+    Fragment,
+    useCallback,
+    useEffect,
+    useLayoutEffect,
+    useMemo,
+    useRef,
+    useState,
+} from "react";
 import type { ReactNode } from "react";
 import { CheckIcon } from "@radix-ui/react-icons";
 
@@ -426,7 +434,10 @@ export interface AppSubMenuProps {
 export function AppSubMenu({ label, badge, disabled = false, children }: AppSubMenuProps) {
     const [open, setOpen] = useState(false);
     const panelRef = useRef<HTMLDivElement>(null);
-    useMenuKeyboard(panelRef);
+    // 子面板是**条件渲染**的：挂载瞬间 `panelRef.current` 还是 null。把 `open`
+    // 作为钩子的 `active` 传下去，面板真正出现时 effect 才会重跑并注册导航
+    // （否则只跑一次就命中 `if (!container) return`，方向键永远由外层菜单响应）。
+    useMenuKeyboard(panelRef, open);
 
     useLayoutEffect(() => {
         if (!open) return;

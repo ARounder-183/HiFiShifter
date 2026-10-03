@@ -76,6 +76,14 @@ export function FolderImportHost() {
      */
     const optionsRef = useRef(options);
     const hiddenRef = useRef(showHiddenFiles);
+    /*
+     * 重新扫描的序号：递归开关每次切换都自增，在途的旧扫描据此作废。
+     *
+     * 【为什么必须有】来回切两次"递归"会并发两次 `collect`，而先发的（旧口径）结果
+     * 可能后到，把 `scan` 覆盖成与当前 `draft.recursive` 不符的列表 —— 摘要计数看着
+     * 自洽，「导入」却只进了顶层文件。只认最新序号的结果。
+     */
+    const scanSeqRef = useRef(0);
     useEffect(() => {
         optionsRef.current = options;
     }, [options]);
@@ -160,6 +168,8 @@ export function FolderImportHost() {
                 if (!admitted && !detail.fromExplicitRequest) {
                     return;
                 }
+                // 新请求落地：作废上一个请求可能还在途的递归重扫。
+                scanSeqRef.current += 1;
                 setDraft(opts);
                 setScan(result);
                 setScanning(false);
@@ -184,13 +194,20 @@ export function FolderImportHost() {
             void dispatch(persistUiSettings());
             if (patch.recursive === undefined || !request) return;
             // 递归与否决定"要导入的文件集合是什么"，只能重新枚举。
+            // 序号作废在途的旧扫描（快速来回切两次时旧口径可能后到）。
+            const seq = ++scanSeqRef.current;
             setScanning(true);
             void collect(request.dirs, next.recursive)
                 .then((result) => {
+                    if (seq !== scanSeqRef.current) return;
                     setScan(result);
                     setScanning(false);
                 })
-                .catch(() => setScanning(false));
+                .catch(() => {
+                    // 只有最新扫描能收敛 loading，否则 spinner 可能被旧请求提前关掉 / 卡住。
+                    if (seq !== scanSeqRef.current) return;
+                    setScanning(false);
+                });
         },
         [collect, dispatch, draft, request],
     );
@@ -203,6 +220,8 @@ export function FolderImportHost() {
 
     const handleOpenChange = useCallback((next: boolean) => {
         if (!next) {
+            // 关闭即作废在途扫描：否则它可能在下次打开后落地，覆盖新请求的 scan。
+            scanSeqRef.current += 1;
             setRequest(null);
             setScan(null);
             setScanning(false);

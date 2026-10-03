@@ -458,3 +458,128 @@ test("utils/timelineSnapping.test.ts scripted checks", async () => {
 
     void checks;
 });
+
+/**
+ * 跨轨吸附过滤（`snapAcrossTracks` / `snapTrackDistance` / `anchorTrackId`）。
+ *
+ * 【为什么钉这一条】`clipTrackDistance` 里锚点轨道的下标是循环不变量，此前每个
+ * clip 各 `findIndex` 两次；重构为一次 `Map` 索引后必须逐项保持"距离 > 阈值
+ * 的轨道不进候选"的旧语义。这里按轨道距离 1 / 2 与同轨模式分别验证。
+ */
+test("跨轨吸附：按轨道距离过滤候选（索引提升后行为不变）", () => {
+    const tracks: TrackInfo[] = [
+        {
+            id: "t0",
+            name: "A",
+            muted: false,
+            solo: false,
+            volume: 1,
+            composeEnabled: false,
+            pitchAnalysisAlgo: "nsf_hifigan_onnx",
+        },
+        {
+            id: "t1",
+            name: "B",
+            muted: false,
+            solo: false,
+            volume: 1,
+            composeEnabled: false,
+            pitchAnalysisAlgo: "nsf_hifigan_onnx",
+        },
+        {
+            id: "t2",
+            name: "C",
+            muted: false,
+            solo: false,
+            volume: 1,
+            composeEnabled: false,
+            pitchAnalysisAlgo: "nsf_hifigan_onnx",
+        },
+    ];
+    const mk = (id: string, trackId: string, startSec: number): ClipInfo => ({
+        id,
+        trackId,
+        name: id,
+        startSec,
+        lengthSec: 1,
+        color: "blue",
+        sourceStartSec: 0,
+        sourceEndSec: 1,
+        playbackRate: 1,
+        reversed: false,
+        loopEnabled: false,
+        channelMode: 0,
+        snapOffsetSec: 0,
+        fadeInSec: 0,
+        fadeOutSec: 0,
+        gain: 1,
+        muted: false,
+        fadeInShape: 0,
+        fadeInDir: 0,
+        fadeOutShape: 0,
+        fadeOutDir: 0,
+    });
+    const clipList = [mk("anchor", "t0", 0), mk("near", "t1", 10), mk("far", "t2", 20)];
+
+    const makeCtx = (
+        overrides: Partial<ReturnType<typeof createDefaultTimelineSnapSettings>> = {},
+    ): TimelineSnapContext =>
+        ({
+            settings: {
+                ...createDefaultTimelineSnapSettings(),
+                snapClipsToGrid: false,
+                snapClipsToSelectionMarkersCursor: false,
+                snapClipEdges: true,
+                snapClipSnapOffset: false,
+                snapClipsToSourceMedia: false,
+                snapAcrossTracks: true,
+                snapTrackDistance: 1,
+                snapDistancePx: 40,
+                ...overrides,
+            },
+            grid: "1/4",
+            bpm: 120,
+            beatsPerBar: 4,
+            tempoMap: null,
+            pxPerSec: 40,
+            clips: clipList,
+            tracks,
+            selectedClipIds: [],
+            playheadSec: 0,
+            object: "clip",
+            anchorTrackId: "t0",
+        }) as TimelineSnapContext;
+
+    // 距离 1（t1）在阈值内：吸附到 near 的起点 10。
+    const near = snapTimelinePosition(makeCtx(), 10.05);
+    if (!near.snapped || Math.abs(near.sec - 10) > 1e-9) {
+        throw new Error(
+            `adjacent track should snap to 10, got ${near.sec} (snapped=${near.snapped})`,
+        );
+    }
+    // 距离 2（t2）超出 snapTrackDistance=1：far 不生成候选，最近的合法候选
+    // 也在 10s 外（>1s 阈值），因此不吸附。
+    const far = snapTimelinePosition(makeCtx(), 20.05);
+    if (far.snapped)
+        throw new Error(`track beyond snapTrackDistance must not snap, got ${far.sec}`);
+
+    // 关闭跨轨：只有锚点轨（t0）自身参与。t0 上的 clip 仍可吸附…
+    const sameTrack = makeCtx({ snapAcrossTracks: false });
+    const sameTrackNear = snapTimelinePosition(sameTrack, 0.05);
+    if (!sameTrackNear.snapped || Math.abs(sameTrackNear.sec - 0) > 1e-9) {
+        throw new Error(`same-track anchor clip should snap, got ${sameTrackNear.sec}`);
+    }
+    // …t1 上的 near 不再是候选。
+    if (snapTimelinePosition(sameTrack, 10.05).snapped) {
+        throw new Error("same-track-only mode must ignore other tracks");
+    }
+
+    // 无锚点轨道：距离恒为 0，所有轨道都在阈值内（t2 的 far 也可吸附）。
+    const noAnchor = { ...makeCtx(), anchorTrackId: null } as TimelineSnapContext;
+    const noAnchorFar = snapTimelinePosition(noAnchor, 20.05);
+    if (!noAnchorFar.snapped || Math.abs(noAnchorFar.sec - 20) > 1e-9) {
+        throw new Error(
+            `null anchor should treat every track as distance 0, got ${noAnchorFar.sec}`,
+        );
+    }
+});

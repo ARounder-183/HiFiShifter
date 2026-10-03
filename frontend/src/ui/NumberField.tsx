@@ -141,7 +141,11 @@ export function AppNumberField({
 
     const commitText = () => {
         const parsed = Number(text);
-        if (!Number.isFinite(parsed)) {
+        // 空串（含纯空白）必须先挡下：`Number("")` / `Number("  ")` 是 0（有限），
+        // 放行会把"清空后回车/失焦"提交成 clamp(0, min, max) —— 正是相邻注释
+        // 要防的"静默写入 0"（4096 MB / BPM / 百分比字段变成 0 或 min）。
+        // 实时 onChange 路径已用 `raw.trim() !== ""` 同一口径挡住空串。
+        if (text.trim() === "" || !Number.isFinite(parsed)) {
             // 输入非法时回退显示，不提交 —— 静默写入 0 会悄悄改掉用户的数据。
             setDraft({ source: value, text: format(value, spec.decimals) });
             return;

@@ -1619,8 +1619,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                         }
 
                                         function finish() {
+                                            // 无条件收尾：组件卸载时 unmount effect 会把
+                                            // dragRef 置空，若仍以"drag 存在"为收尾前提，
+                                            // window 监听与 body 光标将永久残留。因此先做
+                                            // 与 drag 无关的清理（幂等），drag 提交逻辑再按需早退。
                                             const drag = dragRef.current;
-                                            if (!drag) return;
                                             dragRef.current = null;
                                             unregisterAbort(); // 收尾第一步注销失焦守卫
                                             window.removeEventListener("pointermove", onMove);
@@ -1634,6 +1637,10 @@ const TrackListInner: React.FC<TrackListProps> = ({
 
                                             document.body.style.cursor = prevCursor;
                                             document.body.style.userSelect = prevSelect;
+
+                                            if (!drag) {
+                                                return;
+                                            }
 
                                             const moved = drag.hasMoved;
                                             setDragUi(null);
@@ -1682,7 +1689,13 @@ const TrackListInner: React.FC<TrackListProps> = ({
 
                                         function end(ev: PointerEvent) {
                                             const drag = dragRef.current;
-                                            if (!drag || drag.pointerId !== e.pointerId) return;
+                                            if (!drag) {
+                                                // 组件已卸载：dragRef 被 unmount effect 清空，
+                                                // 但 window 监听仍在，这里兜底收尾摘除监听。
+                                                finish();
+                                                return;
+                                            }
+                                            if (drag.pointerId !== e.pointerId) return;
                                             lastClientX = ev.clientX;
                                             lastClientY = ev.clientY;
                                             finish();

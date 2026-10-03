@@ -165,28 +165,55 @@ export const ClipFormantToolWindow: React.FC<{
         };
     }, [clip.id, dispatch]);
 
-    /** 试听旁通：按下临时禁用（checkpoint:false 不产生撤销步），松开恢复。 */
-    const bypassHandlers = {
-        onPointerDown: (event: React.PointerEvent) => {
+    /**
+     * 试听旁通：按下临时禁用（checkpoint:false 不产生撤销步），松开恢复。
+     *
+     * 收尾监听挂在 **window** 上而非按钮本身：鼠标没有隐式指针捕获，按住后
+     * 移出按钮再松开时按钮的 React onPointerUp 不会触发——旁通会永久滞留
+     * （音频持续被旁通）。与 ClipHeader 音量旋钮的手势收尾同源，并用失焦
+     * 守卫兜底切屏。
+     */
+    const bypassCleanupRef = React.useRef<(() => void) | null>(null);
+
+    const handleBypassPointerDown = React.useCallback(
+        (event: React.PointerEvent) => {
             event.preventDefault();
             event.stopPropagation();
             if (bypassRef.current) return;
             bypassRef.current = true;
             onCommit(clip.id, { ...draft, enabled: false }, false);
+
+            let finished = false;
+            const cleanup = () => {
+                unregisterAbort();
+                window.removeEventListener("pointerup", onEnd, true);
+                window.removeEventListener("pointercancel", onEnd, true);
+                if (bypassCleanupRef.current === cleanup) {
+                    bypassCleanupRef.current = null;
+                }
+            };
+            const onEnd = () => {
+                if (finished) return;
+                finished = true;
+                cleanup();
+                if (!bypassRef.current) return;
+                bypassRef.current = false;
+                onCommit(clip.id, draft, false);
+            };
+            const unregisterAbort = registerDragAbort(onEnd);
+            bypassCleanupRef.current = cleanup;
+            window.addEventListener("pointerup", onEnd, true);
+            window.addEventListener("pointercancel", onEnd, true);
         },
-        onPointerUp: (event: React.PointerEvent) => {
-            event.preventDefault();
-            event.stopPropagation();
-            if (!bypassRef.current) return;
-            bypassRef.current = false;
-            onCommit(clip.id, draft, false);
-        },
-        onPointerCancel: () => {
-            if (!bypassRef.current) return;
-            bypassRef.current = false;
-            onCommit(clip.id, draft, false);
-        },
-    };
+        [clip.id, draft, onCommit],
+    );
+
+    // 卸载兜底：旁通手势未收尾就关窗时，window 监听必须解绑。
+    React.useEffect(() => {
+        return () => {
+            bypassCleanupRef.current?.();
+        };
+    }, []);
 
     React.useEffect(() => {
         document.body.setAttribute(CLIP_FORMANT_ACTIVE_ATTR, "true");
@@ -280,7 +307,11 @@ export const ClipFormantToolWindow: React.FC<{
                         />
                         <span className="hs-type-label">{t("clip_formant_enabled")}</span>
                     </Flex>
-                    <AppButton size="sm" disabled={!draft.enabled} {...bypassHandlers}>
+                    <AppButton
+                        size="sm"
+                        disabled={!draft.enabled}
+                        onPointerDown={handleBypassPointerDown}
+                    >
                         {t("clip_formant_bypass")}
                     </AppButton>
                 </Flex>

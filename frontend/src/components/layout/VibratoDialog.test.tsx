@@ -1925,6 +1925,23 @@ test("取不到选区数据时显示占位提示（连读数行一起省掉）",
 });
 
 /*
+ * 取选区数据**失败**（IPC 异常）时也必须收敛到占位提示。
+ *
+ * 此前 `loadOriginal()` 没有 catch：`then` 永不执行，`originalLoading` 永远停在
+ * true —— 页签显示一句永久的「Loading...」，同时抛出 unhandled rejection。
+ */
+test("取选区数据失败时落到占位提示，而不是永久载入中", async () => {
+    await mountDialog(undefined, () => undefined, {
+        applyTarget: {
+            loadOriginal: () => Promise.reject(new Error("ipc down")),
+        },
+    });
+
+    expect(document.body.textContent ?? "").toContain("Select a range to preview the result.");
+    expect(document.body.textContent ?? "", "失败后不该停在载入中").not.toContain("Loading...");
+});
+
+/*
  * 音高全未检测（哨兵 0）：说明"这段没有可加颤音的音高"，而不是画一条直线。
  *
  * 【为什么单独一条】把"没数据"与"这段没有音高"混成同一句话，用户会以为是自己没选对

@@ -542,9 +542,10 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
         };
         const onEnd = (ev: PointerEvent) => {
             if (ev.pointerId !== pointerId) return;
-            window.removeEventListener("pointermove", onMove, true);
-            window.removeEventListener("pointerup", onEnd, true);
-            window.removeEventListener("pointercancel", onEnd, true);
+            // 收尾统一走 finish()：注销失焦守卫、置 finished 并摘除监听。
+            // 否则每次未拖动的点击都会把本闭包残留在 activeAborts 里，
+            // 直到下一次 window blur 才被清理（与 FadeHitLayer 同因同解）。
+            finish();
             // 手势延后判定：未拖动即松开 = 点击语义（如 Ctrl 循环切换、单击寻址）。
             if (!dragStarted && deferredClick) {
                 deferredClick(ev);

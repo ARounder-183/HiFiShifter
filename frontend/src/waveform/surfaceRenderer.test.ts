@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { waveformColumnWidthDevicePx } from "./geometry.ts";
-import { expandLineSegmentsToQuads } from "./surfaceRenderer.ts";
+import { expandLineSegmentsToQuads, WebGl2WaveformRenderer } from "./surfaceRenderer.ts";
 
 /**
  * 栅格对齐契约（与 geometry.ts 的 `waveformColumnWidthDevicePx` 同源）：
@@ -267,5 +267,93 @@ describe("expandLineSegmentsToQuads 内联展开 ≡ 改前实现", () => {
                 }
             }
         }
+    });
+});
+
+/**
+ * `WebGl2WaveformRenderer.dispose()` 的上下文释放契约。
+ *
+ * 【为什么只在画布脱离文档时丢失上下文】`WaveformSurface` 的
+ * `webglcontextrestored` 恢复路径与 StrictMode / HMR 都会"dispose 后在同一画布
+ * 上立即重建"；同一 canvas 的 `getContext` 永远返回同一个 context，无条件
+ * `loseContext()` 会让重建拿到已丢失的 context（`createShader` 返回 null），
+ * 正是 renderKernel/gl/glContext.ts 明确规避的失败模式。因此本测试钉住：
+ * 仍连接在文档中的画布**不**丢上下文；已脱离文档的画布才丢。
+ */
+describe("WebGl2WaveformRenderer.dispose 上下文释放", () => {
+    function createFakeGl(extension: { loseContext(): void } | null) {
+        const shader = { kind: "shader" };
+        const program = { kind: "program" };
+        const buffer = { kind: "buffer" };
+        const uniform = { kind: "uniform" };
+        const calls = { deleteBuffer: 0, deleteProgram: 0, getExtension: 0 };
+        const gl = {
+            VERTEX_SHADER: 1,
+            FRAGMENT_SHADER: 2,
+            COMPILE_STATUS: 3,
+            LINK_STATUS: 4,
+            createShader: () => shader,
+            shaderSource: () => {},
+            compileShader: () => {},
+            getShaderParameter: () => true,
+            deleteShader: () => {},
+            createProgram: () => program,
+            attachShader: () => {},
+            linkProgram: () => {},
+            getProgramParameter: () => true,
+            deleteProgram: () => {
+                calls.deleteProgram += 1;
+            },
+            createBuffer: () => buffer,
+            deleteBuffer: () => {
+                calls.deleteBuffer += 1;
+            },
+            getUniformLocation: () => uniform,
+            getAttribLocation: () => 0,
+            getExtension: (name: string) => {
+                calls.getExtension += 1;
+                return name === "WEBGL_lose_context" ? extension : null;
+            },
+        };
+        return { gl, calls };
+    }
+
+    function fakeCanvas(gl: unknown, connected: boolean): HTMLCanvasElement {
+        return {
+            getContext: () => gl,
+            isConnected: connected,
+        } as unknown as HTMLCanvasElement;
+    }
+
+    it("画布仍在文档中：释放 GL 对象，但不丢失上下文（不干扰重建/恢复）", () => {
+        const loseContext = vi.fn();
+        const { gl, calls } = createFakeGl({ loseContext });
+        const renderer = new WebGl2WaveformRenderer(fakeCanvas(gl, true));
+
+        renderer.dispose();
+
+        expect(calls.deleteBuffer).toBe(1);
+        expect(calls.deleteProgram).toBe(1);
+        expect(loseContext).not.toHaveBeenCalled();
+        expect(calls.getExtension).toBe(0);
+    });
+
+    it("画布已脱离文档：丢失上下文，让浏览器立即回收额度", () => {
+        const loseContext = vi.fn();
+        const { gl } = createFakeGl({ loseContext });
+
+        new WebGl2WaveformRenderer(fakeCanvas(gl, false)).dispose();
+
+        expect(loseContext).toHaveBeenCalledTimes(1);
+    });
+
+    it("脱离文档但无 WEBGL_lose_context：重复 dispose 不抛错（幂等）", () => {
+        const { gl } = createFakeGl(null);
+        const renderer = new WebGl2WaveformRenderer(fakeCanvas(gl, false));
+
+        expect(() => {
+            renderer.dispose();
+            renderer.dispose();
+        }).not.toThrow();
     });
 });

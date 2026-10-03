@@ -1235,6 +1235,12 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         );
         for (const mark of marks) {
             const anchorY = mark.line.y + mark.line.h / 2 - 0.5;
+            // 【先判越界再夹取】夹取只该作用于"锚点本就落在绘图区内、但文字外缘会
+            // 出界"的边缘刻度。若锚点在绘图区**之外**（degrees 无条件补的 0 刻度
+            // 在视口不含 0 时正是如此：−14..14 的值域、视口 [5,12] 时 0 映射到画布
+            // 外），夹取会把一个幻影「0」标签钉在画布底/顶边 —— 而 legacy 的
+            // `fillText(0)` 会被画布裁掉、不可见。这里按 legacy 语义直接跳过。
+            if (anchorY < 0 || anchorY > viewportHeightPx) continue;
             requests.push({
                 text: mark.label,
                 fontKey: `${AXIS_TICK_LABEL_FONT_SIZE_PX}px ${family}`,

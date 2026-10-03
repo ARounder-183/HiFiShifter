@@ -264,7 +264,14 @@ export function looksLikeMarkdown(text: string): boolean {
 export function escapeMarkdownText(text: string): string {
     return text
         .split(/\r?\n/)
-        .map((line) => line.replace(/^(\s*)([#>|])/, "$1\\$2").replace(/^(\s*)([-*+]\s)/, "$1\\$2"))
+        .map((line) =>
+            line
+                .replace(/^(\s*)([#>|])/, "$1\\$2")
+                .replace(/^(\s*)([-*+]\s)/, "$1\\$2")
+                // 有序列表标记：转义**分隔符**（`.` / `)`）而不是数字 —— 反斜杠
+                // 只能转义 ASCII 标点，`\1` 会原样留下一个可见的反斜杠。
+                .replace(/^(\s*)(\d+)([.)]\s)/, "$1$2\\$3"),
+        )
         .join("\n");
 }
 

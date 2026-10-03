@@ -1057,17 +1057,40 @@ function applyTimelineTracksOnly(state: SessionState, timeline: TimelineState) {
     state.selectedTrackId = timeline.selected_track_id;
 }
 
+/**
+ * 把音高曲线快照按"当前仍存在的 clip"过滤后写回。
+ *
+ * applyTimelineState 会剪掉快照中缺失 clip 的曲线；但曲线是前端独有的检测
+ * 结果、并不随任何后端载荷返回，所以调用方必须先浅拷贝快照、应用快照后再
+ * 恢复。若直接整包恢复，被删除 clip 的曲线（midiCurve 可能很长）会永久滞留。
+ * 这里只保留仍在 state.clips 中的 id，其余随快照剪枝一起丢弃。
+ *
+ * 快照必须是浅拷贝（`{ ...state.clipPitchCurves }`）：在 Immer producer 内
+ * 直接持有 draft 代理会被随后的 prune 透过修改，"恢复"等于写回已删空的 map。
+ */
+function restoreClipPitchCurves(
+    state: SessionState,
+    snapshot: SessionState["clipPitchCurves"],
+): void {
+    const survivingClipIds = new Set(state.clips.map((clip) => clip.id));
+    const restored: SessionState["clipPitchCurves"] = {};
+    for (const [clipId, curve] of Object.entries(snapshot)) {
+        if (survivingClipIds.has(clipId)) {
+            restored[clipId] = curve;
+        }
+    }
+    state.clipPitchCurves = restored;
+}
+
 function applyTimelineStatePreservingPitchVisuals(state: SessionState, timeline: TimelineState) {
     const currentParamsEpoch = state.paramsEpoch;
     // 必须捕获浅拷贝快照：在 Immer producer 内直接持有 state.clipPitchCurves
     // 得到的是 draft 代理，applyTimelineState 随后的 prune（delete 缺失 clip）
     // 会透过代理可见，"恢复"赋值等于把已删空的 draft 原样写回。
-    // 注意：此处**整包恢复**是有意契约（见 clipCreation.test）——部分载荷
-    // 可能不含未变化的 clip，按新 clip 集过滤会误删仍然有效的曲线。
     const currentClipPitchCurves = { ...state.clipPitchCurves };
     applyTimelineState(state, timeline, { force: true });
     state.paramsEpoch = currentParamsEpoch;
-    state.clipPitchCurves = currentClipPitchCurves;
+    restoreClipPitchCurves(state, currentClipPitchCurves);
 }
 
 function applyOptimisticTrackState(
@@ -3259,6 +3282,31 @@ const sessionSlice = createSlice({
                 }
             }
         },
+        /**
+         * 批量起点平移（波纹实时预览用）。
+         *
+         * 与 `moveClipStart` 语义逐条一致（钳零 + 越界自动扩展工程时长），但
+         * 波纹 "all" 模式每帧要对 K 个跟随 clip 派发；逐条 `moveClipStart` 各自
+         * 跑一次 immer producer 并做 O(N) 的 `clips.find`，合计 O(K·N)/帧，大工程
+         * 拖拽明显卡顿。这里先建一次 id 索引，复杂度压回 O(N+K)（与
+         * `applyOptimisticBulkClipState` 同法）。
+         */
+        moveClipsStartBulk(
+            state,
+            action: PayloadAction<Array<{ clipId: string; startSec: number }>>,
+        ) {
+            const clipsById = new Map(state.clips.map((clip) => [clip.id, clip]));
+            for (const { clipId, startSec } of action.payload) {
+                const clip = clipsById.get(clipId);
+                if (!clip) continue;
+                clip.startSec = Math.max(0, startSec);
+                // 拖动超出边界时自动扩展工程时长
+                const clipEnd = clip.startSec + clip.lengthSec;
+                if (clipEnd > state.projectSec) {
+                    state.projectSec = Math.ceil(clipEnd);
+                }
+            }
+        },
         moveClipTrack(state, action: PayloadAction<{ clipId: string; trackId: string }>) {
             const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
             if (clip) {
@@ -4091,10 +4139,16 @@ const sessionSlice = createSlice({
                 state.busy = false;
                 state.lastResult = action.payload;
                 const payload = action.payload as {
+                    canceled?: boolean;
                     path?: string;
                     imported?: { ok?: boolean } & TimelineState;
                     newClipIds?: string[];
                 };
+                // 用户在导入在途时撤销 / 切换工程 → thunk 回取消结果且不带快照。
+                if (payload.canceled) {
+                    state.status = "Import canceled";
+                    return;
+                }
                 if (payload.path) {
                     state.audioPath = payload.path;
                     if (payload.imported?.ok) {
@@ -4123,10 +4177,16 @@ const sessionSlice = createSlice({
                 state.lastResult = action.payload;
                 const payload = action.payload as {
                     ok?: boolean;
+                    canceled?: boolean;
                     imported?: TimelineState;
                     newClipIds?: string[];
                     playheadSec?: number;
                 };
+                // 用户在导入在途时撤销 / 切换工程 → thunk 回取消结果且不带快照。
+                if (payload.canceled) {
+                    state.status = "Import canceled";
+                    return;
+                }
                 const ok = Boolean(payload.ok);
                 if (ok) {
                     state.status = "Import done";
@@ -4161,10 +4221,16 @@ const sessionSlice = createSlice({
                 state.lastResult = action.payload;
                 const payload = action.payload as {
                     ok?: boolean;
+                    canceled?: boolean;
                     imported?: TimelineState;
                     newClipIds?: string[];
                     playheadSec?: number;
                 };
+                // 用户在导入在途时撤销 / 切换工程 → thunk 回取消结果且不带快照。
+                if (payload.canceled) {
+                    state.status = "Import canceled";
+                    return;
+                }
                 const ok = Boolean(payload.ok);
                 if (ok) {
                     state.status = "Import done";
@@ -4351,10 +4417,16 @@ const sessionSlice = createSlice({
                 state.lastResult = action.payload;
                 const payload = action.payload as {
                     ok?: boolean;
+                    canceled?: boolean;
                     imported?: TimelineState;
                     newClipIds?: string[];
                     playheadSec?: number;
                 };
+                // 用户在导入在途时撤销 / 切换工程 → thunk 回取消结果且不带快照。
+                if (payload.canceled) {
+                    state.status = "Import canceled";
+                    return;
+                }
                 const ok = Boolean(payload.ok);
                 state.status = ok ? "MIDI clip created" : "MIDI import failed";
                 if (ok && payload.imported && payload.imported.tracks) {
@@ -5147,9 +5219,11 @@ const sessionSlice = createSlice({
                 state.status = "Open failed";
             })
 
-            .addCase(openProjectFromPathForced.pending, (state) =>
-                setPending(state, "Opening project..."),
-            )
+            .addCase(openProjectFromPathForced.pending, (state) => {
+                setPending(state, "Opening project...");
+                // 工程载入为权威替换：作废一切在途编辑响应（与其它 openProject* 一致）。
+                state._latestEditRequestId = null;
+            })
             .addCase(openProjectFromPathForced.fulfilled, (state, action) => {
                 state.busy = false;
                 const payload = action.payload as {
@@ -5441,7 +5515,7 @@ const sessionSlice = createSlice({
                     applyTimelineState(state, payload.timeline as TimelineState, { force: true });
                     state.playheadSec = currentPlayheadSec;
                     state.paramsEpoch = currentParamsEpoch;
-                    state.clipPitchCurves = currentClipPitchCurves;
+                    restoreClipPitchCurves(state, currentClipPitchCurves);
                     state.status = "Project saved";
                     return;
                 }
@@ -5450,7 +5524,7 @@ const sessionSlice = createSlice({
                     applyTimelineState(state, payload as TimelineState, { force: true });
                     state.playheadSec = currentPlayheadSec;
                     state.paramsEpoch = currentParamsEpoch;
-                    state.clipPitchCurves = currentClipPitchCurves;
+                    restoreClipPitchCurves(state, currentClipPitchCurves);
                     state.status = "Project saved";
                     return;
                 }
@@ -5502,7 +5576,7 @@ const sessionSlice = createSlice({
                     applyTimelineState(state, payload.timeline as TimelineState, { force: true });
                     state.playheadSec = currentPlayheadSec;
                     state.paramsEpoch = currentParamsEpoch;
-                    state.clipPitchCurves = currentClipPitchCurves;
+                    restoreClipPitchCurves(state, currentClipPitchCurves);
                     state.status = "Project saved";
                     return;
                 }
@@ -5511,7 +5585,7 @@ const sessionSlice = createSlice({
                     applyTimelineState(state, payload as TimelineState, { force: true });
                     state.playheadSec = currentPlayheadSec;
                     state.paramsEpoch = currentParamsEpoch;
-                    state.clipPitchCurves = currentClipPitchCurves;
+                    restoreClipPitchCurves(state, currentClipPitchCurves);
                     state.status = "Project saved";
                     return;
                 }
@@ -5564,7 +5638,7 @@ const sessionSlice = createSlice({
                     applyTimelineState(state, payload.timeline as TimelineState, { force: true });
                     state.playheadSec = currentPlayheadSec;
                     state.paramsEpoch = currentParamsEpoch;
-                    state.clipPitchCurves = currentClipPitchCurves;
+                    restoreClipPitchCurves(state, currentClipPitchCurves);
                     state.status = "Project saved";
                     return;
                 }
@@ -5573,7 +5647,7 @@ const sessionSlice = createSlice({
                     applyTimelineState(state, payload as TimelineState, { force: true });
                     state.playheadSec = currentPlayheadSec;
                     state.paramsEpoch = currentParamsEpoch;
-                    state.clipPitchCurves = currentClipPitchCurves;
+                    restoreClipPitchCurves(state, currentClipPitchCurves);
                     state.status = "Project saved";
                     return;
                 }
@@ -5835,7 +5909,14 @@ const sessionSlice = createSlice({
                 }
             })
 
+            .addCase(addClipOnTrack.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(addClipOnTrack.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled（撤销/打开工程会作废在途响应）。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -5856,7 +5937,14 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload, { force: true });
             })
 
+            .addCase(createClipsRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(createClipsRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -5867,11 +5955,17 @@ const sessionSlice = createSlice({
                 state.status = "Clips created";
             })
 
-            .addCase(pasteTimelineClipboardRemote.pending, (state) =>
-                setPending(state, "Pasting timeline clipboard..."),
-            )
+            .addCase(pasteTimelineClipboardRemote.pending, (state, action) => {
+                setPending(state, "Pasting timeline clipboard...");
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(pasteTimelineClipboardRemote.fulfilled, (state, action) => {
                 state.busy = false;
+                // 乱序守卫：粘贴含多次往返，窗口最宽；迟到的粘贴快照不得覆盖
+                // 更新的撤销/重做/工程切换结果（见 setClipStateRemote.fulfilled）。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                     timeline?: TimelineState;
@@ -5911,7 +6005,14 @@ const sessionSlice = createSlice({
                 state.status = "Paste timeline clipboard failed";
             })
 
+            .addCase(duplicateClipsBulkRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(duplicateClipsBulkRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -5922,7 +6023,14 @@ const sessionSlice = createSlice({
                 state.status = "Clips duplicated";
             })
 
+            .addCase(removeClipRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(removeClipRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -5932,7 +6040,14 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload, { force: true });
             })
 
+            .addCase(removeClipsRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(removeClipsRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -5942,7 +6057,14 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload, { force: true });
             })
 
+            .addCase(removeSelectedClipRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(removeSelectedClipRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -5988,7 +6110,14 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload, { force: true });
             })
 
+            .addCase(closeTrackGapsRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(closeTrackGapsRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -6027,7 +6156,14 @@ const sessionSlice = createSlice({
                 }
                 state.silencePreviewSegments = map;
             })
+            .addCase(removeSilenceRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(removeSilenceRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as unknown as {
                     ok?: boolean;
                     timeline?: TimelineState;
@@ -6048,7 +6184,14 @@ const sessionSlice = createSlice({
                 }
             })
 
+            .addCase(splitClipRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(splitClipRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                     created_clip_ids?: string[] | null;
@@ -6059,7 +6202,14 @@ const sessionSlice = createSlice({
                 applySplitSelection(state, action, payload);
             })
 
+            .addCase(splitClipsAtRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(splitClipsAtRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                     created_clip_ids?: string[] | null;
@@ -6070,7 +6220,14 @@ const sessionSlice = createSlice({
                 applySplitSelection(state, action, payload);
             })
 
+            .addCase(glueClipsRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(glueClipsRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -6081,7 +6238,14 @@ const sessionSlice = createSlice({
                 state.status = "Glue done";
             })
 
+            .addCase(groupClipsRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(groupClipsRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -6091,7 +6255,14 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload, { force: true });
             })
 
+            .addCase(ungroupClipsRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(ungroupClipsRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -6101,7 +6272,14 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload, { force: true });
             })
 
+            .addCase(toggleGroupDisabledRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(toggleGroupDisabledRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -6111,7 +6289,14 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload, { force: true });
             })
 
+            .addCase(convertClipsToPitchReferenceRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(convertClipsToPitchReferenceRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -6121,7 +6306,14 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload, { force: true });
             })
 
+            .addCase(updatePitchReferenceRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(updatePitchReferenceRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -6268,8 +6460,12 @@ const sessionSlice = createSlice({
             })
             .addCase(setClipActiveTakeRemote.fulfilled, (state, action) => {
                 // 过期守卫：过期回包（含 !ok 的回滚）一律整份丢弃 —— 回滚的是
-                // 更新一次的乐观切换，等于把新切换撤销掉。
-                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                // 更新一次的乐观切换，等于把新切换撤销掉。丢弃前释放本次登记
+                // 的回滚快照，否则它会永远滞留（见 pendingTakeRollbacks）。
+                if (takeRequestIsStale(state, action.meta.requestId)) {
+                    clearTakeRollback([action.meta.arg.clipId]);
+                    return;
+                }
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     // 后端拒绝：回滚乐观切换并给出可见反馈。
@@ -6282,7 +6478,10 @@ const sessionSlice = createSlice({
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
             .addCase(setClipActiveTakeRemote.rejected, (state, action) => {
-                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                if (takeRequestIsStale(state, action.meta.requestId)) {
+                    clearTakeRollback([action.meta.arg.clipId]);
+                    return;
+                }
                 restoreTakeRollback(state, [action.meta.arg.clipId]);
                 setRejected(state, action);
             })
@@ -6310,7 +6509,10 @@ const sessionSlice = createSlice({
             })
             .addCase(cycleClipTakesRemote.fulfilled, (state, action) => {
                 // 过期守卫：见 setClipActiveTakeRemote.fulfilled。
-                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                if (takeRequestIsStale(state, action.meta.requestId)) {
+                    clearTakeRollback(action.meta.arg.clipIds);
+                    return;
+                }
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) {
                     restoreTakeRollback(state, action.meta.arg.clipIds);
@@ -6322,7 +6524,10 @@ const sessionSlice = createSlice({
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
             .addCase(cycleClipTakesRemote.rejected, (state, action) => {
-                if (takeRequestIsStale(state, action.meta.requestId)) return;
+                if (takeRequestIsStale(state, action.meta.requestId)) {
+                    clearTakeRollback(action.meta.arg.clipIds);
+                    return;
+                }
                 restoreTakeRollback(state, action.meta.arg.clipIds);
                 setRejected(state, action);
             })
@@ -6509,7 +6714,14 @@ const sessionSlice = createSlice({
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
 
+            .addCase(replaceClipSourceRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(replaceClipSourceRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -6519,7 +6731,14 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload, { force: true });
             })
 
+            .addCase(replaceMidiClipDataRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(replaceMidiClipDataRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -6587,12 +6806,18 @@ const sessionSlice = createSlice({
                 const currentPlayheadSec = state.playheadSec;
                 // 保留 paramsEpoch 和 clipPitchCurves，避免触发钢琴窗音高曲线重新渲染
                 const currentParamsEpoch = state.paramsEpoch;
-                // 浅拷贝快照，防止 draft 代理被后续 prune 透过修改
+                // 浅拷贝快照：restoreClipPitchCurves 需遍历原始条目重建 map。
                 const currentClipPitchCurves = { ...state.clipPitchCurves };
                 applyTimelineTracksOnly(state, payload);
                 state.playheadSec = currentPlayheadSec;
                 state.paramsEpoch = currentParamsEpoch;
-                state.clipPitchCurves = currentClipPitchCurves;
+                restoreClipPitchCurves(state, currentClipPitchCurves);
+            })
+            .addCase(setTrackStateRemote.rejected, (state, action) => {
+                // 后端拒绝：保留乐观值（用户意图可见），给出非致命反馈 ——
+                // 与 setClipStateRemote.rejected 的 clip 侧策略一致。
+                applyOptimisticTrackState(state, action.meta.arg);
+                state.status = "Track edit rejected";
             })
 
             .addCase(updateTransportBpm.fulfilled, (state, action) => {
@@ -6743,7 +6968,14 @@ const sessionSlice = createSlice({
                 state.playheadSec = currentPlayheadSec;
             })
 
+            .addCase(setProjectLengthRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(setProjectLengthRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -6922,6 +7154,7 @@ export const {
     setParamSelectionActive,
     setClipboardOperationFailed,
     moveClipStart,
+    moveClipsStartBulk,
     moveClipTrack,
     setClipLength,
     setClipSnapOffset,

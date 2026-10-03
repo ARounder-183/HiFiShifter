@@ -153,11 +153,16 @@ const TYPEAHEAD_OWNED_KEYS = new Set([
  *
  * 未修饰时：可打印字符（打字跳转，空格也在内）+ 上表。
  * 带修饰时：**只让出面板实现了的那三个组合**（全选 / 复制路径 / 新建文件夹），
- * 其余组合（Ctrl+S、Ctrl+Z、Ctrl+Shift+S…）照常走全局。
+ * 其余组合（Ctrl+S、Ctrl+Z、Ctrl+Shift+S、Shift+T、Shift+V…）照常走全局。
  */
 function isOwnedByTypeAhead(e: KeyboardEvent, key: string): boolean {
     if (e.altKey || e.metaKey) return false;
-    if (!e.ctrlKey) return e.key.length === 1 || TYPEAHEAD_OWNED_KEYS.has(key);
+    // 只有**真正未修饰**的按键才是"打字跳转"。Shift+字母会产出可打印字符
+    // （Shift+T → "T"），但它属于"带修饰"的一类：全局绑定里的 Shift+T/Shift+V
+    // 不能被面板截走。若面板没有对应绑定，事件仍会照常流到面板（这里只决定
+    // 全局分发器是否提前让路），因此大小写不敏感的 type-ahead 不受影响。
+    if (!e.ctrlKey && !e.shiftKey && !e.altKey)
+        return e.key.length === 1 || TYPEAHEAD_OWNED_KEYS.has(key);
     const letter = e.key.toLowerCase();
     if (letter === "a" || letter === "c") return !e.shiftKey;
     return letter === "n" && e.shiftKey;

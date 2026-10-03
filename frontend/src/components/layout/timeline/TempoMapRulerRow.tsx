@@ -307,14 +307,45 @@ function TempoPointDialog({
         onConfirm,
     ]);
 
-    if (!point) return null;
-
     // 滚轮选项：音阶 = 继承 + 内置键 + 自定义预设；拍号分母 = TEMPO_DENOMINATORS。
     const scaleWheelOptions = [
         "inherit",
         ...SCALE_KEYS.map((k) => `key:${k}`),
         ...customScalePresets.map((p) => `custom:${p.id}`),
     ];
+
+    // 下拉滚轮换项必须挂非被动原生监听：React root 上的 wheel 是 passive 的，
+    // applySelectWheelChange 里的 preventDefault() 是空操作，换项会同时滚动
+    // 对话框内容（与同对话框 BPM 字段的原生监听同因同解）。
+    const attachDenominatorWheel = useNonPassiveWheel<HTMLButtonElement>((event) => {
+        applySelectWheelChange({
+            event,
+            currentValue: String(denominator),
+            options: TEMPO_DENOMINATORS.map((d) => String(d)),
+            onChange: (v) => {
+                setSigFollow(false);
+                setDenominator(Number(v) || 4);
+            },
+        });
+    });
+    const attachScaleWheel = useNonPassiveWheel<HTMLButtonElement>((event) => {
+        applySelectWheelChange({
+            event,
+            currentValue: scaleValue,
+            options: scaleWheelOptions,
+            onChange: (v) => {
+                if (v.startsWith("custom:")) {
+                    const presetId = v.slice(7);
+                    const preset = customScalePresets.find((p) => String(p.id) === presetId);
+                    setCustomNotes(preset ? [...preset.notes] : null);
+                    setCustomName(preset?.name ?? "");
+                }
+                setScaleValue(v);
+            },
+        });
+    });
+
+    if (!point) return null;
 
     return (
         <AppDialog
@@ -391,20 +422,7 @@ function TempoPointDialog({
                                 setDenominator(Number(v) || 4);
                             }}
                         >
-                            <Select.Trigger
-                                style={{ width: 56 }}
-                                onWheel={(event) => {
-                                    applySelectWheelChange({
-                                        event,
-                                        currentValue: String(denominator),
-                                        options: TEMPO_DENOMINATORS.map((d) => String(d)),
-                                        onChange: (v) => {
-                                            setSigFollow(false);
-                                            setDenominator(Number(v) || 4);
-                                        },
-                                    });
-                                }}
-                            />
+                            <Select.Trigger style={{ width: 56 }} ref={attachDenominatorWheel} />
                             <Select.Content>
                                 {TEMPO_DENOMINATORS.map((d) => (
                                     <Select.Item key={d} value={String(d)}>
@@ -444,27 +462,7 @@ function TempoPointDialog({
                             setScaleValue(v);
                         }}
                     >
-                        <Select.Trigger
-                            style={{ minWidth: 190 }}
-                            onWheel={(event) => {
-                                applySelectWheelChange({
-                                    event,
-                                    currentValue: scaleValue,
-                                    options: scaleWheelOptions,
-                                    onChange: (v) => {
-                                        if (v.startsWith("custom:")) {
-                                            const presetId = v.slice(7);
-                                            const preset = customScalePresets.find(
-                                                (p) => String(p.id) === presetId,
-                                            );
-                                            setCustomNotes(preset ? [...preset.notes] : null);
-                                            setCustomName(preset?.name ?? "");
-                                        }
-                                        setScaleValue(v);
-                                    },
-                                });
-                            }}
-                        />
+                        <Select.Trigger style={{ minWidth: 190 }} ref={attachScaleWheel} />
                         <Select.Content>
                             <Select.Item value="inherit">
                                 {t("tempo_map_scale_inherit")} ({previousScaleLabel})

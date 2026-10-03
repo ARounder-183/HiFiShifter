@@ -358,6 +358,46 @@ test("AppSubMenu：子面板自身是独立的 role=menu 表面（键盘导航�
     expect(outerLabels).toEqual(["Presets"]);
 });
 
+test("AppSubMenu：展开后方向键在子面板内导航（条件渲染不丢键盘钩子）", async () => {
+    /*
+     * 【回归】子面板是条件渲染的：`useMenuKeyboard(panelRef)` 在挂载瞬间
+     * `panelRef.current === null`，effect 命中早退且 deps 只有 ref 对象本身，
+     * 面板真正出现后**不会重跑** —— 子面板的导航从未注册，方向键被外层菜单
+     * （或无响应）吞掉。修复是把它条件渲染的 `open` 作为 `active` 传入。
+     */
+    await renderSubMenu(
+        <AppSubMenu label="Presets">
+            <button type="button" role="menuitem">
+                Natural
+            </button>
+            <button type="button" role="menuitem">
+                Soft
+            </button>
+        </AppSubMenu>,
+    );
+
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')!;
+    await act(async () => {
+        trigger.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+    const submenu = container.querySelectorAll<HTMLElement>('[role="menu"]')[1];
+    const items = [...submenu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+    expect(items.map((item) => item.textContent)).toEqual(["Natural", "Soft"]);
+
+    await act(async () => {
+        items[0].focus();
+    });
+    await act(async () => {
+        items[0].dispatchEvent(
+            new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
+        );
+    });
+
+    // 子面板自己的钩子接管：焦点走到下一项，而不是留在原处 / 被外层抢走。
+    expect(document.activeElement).toBe(items[1]);
+});
+
 /*
  * 样式模型的 DOM 契约。
  *

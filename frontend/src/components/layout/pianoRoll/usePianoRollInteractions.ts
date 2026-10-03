@@ -2137,7 +2137,19 @@ export function usePianoRollInteractions(args: {
                     resolvedTarget === "rate" && Math.abs(e.deltaX) > Math.abs(e.deltaY)
                         ? e.deltaX
                         : e.deltaY;
-                const steps = Math.max(1, Math.round(Math.abs(controlDelta) / 100));
+                // 【与捏合分支同源】把 wheel 增量按 deltaMode 折算成像素（行 16 / 页
+                // 400，与 `pinchDeltaFromWheel` 同一约定），再交给整步累积器。
+                // 逐事件 `Math.max(1, …)` 是给"一格一个事件"的机械滚轮设计的；高分辨率
+                // / 触控板吐出的是一串小 delta，每个都放大成整步会让深度 / 速率以事件
+                // 频率飞走。累积到满一格（100 单位）才走一步，与滚轮同速。
+                const wheelMode = e.deltaMode ?? 0;
+                const wheelModeScale = wheelMode === 1 ? 16 : wheelMode === 2 ? 400 : 1;
+                const steps = accumulatePinchSteps(
+                    vibratoPinchRef.current,
+                    controlDelta * wheelModeScale,
+                    performance.now(),
+                );
+                if (steps === 0) return;
                 const direction =
                     resolvedTarget === "depth"
                         ? controlDelta < 0
@@ -2149,7 +2161,7 @@ export function usePianoRollInteractions(args: {
                 applyVibratoDragAdjustment({
                     target: resolvedTarget,
                     direction,
-                    steps,
+                    steps: Math.abs(steps),
                     shiftHeld: e.shiftKey,
                     fineEvent: e,
                     // 滚轮事件自带指针位置：用它当锚点，气泡不会因为"指针没动过"

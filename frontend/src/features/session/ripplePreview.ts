@@ -18,7 +18,7 @@
  * - 平移量 = 右缘位移（对移动为 drag 位移量，对右缘重设为长度变化量）。
  */
 import type { AppDispatch } from "../../app/store";
-import { moveClipStart } from "./sessionSlice";
+import { moveClipsStartBulk } from "./sessionSlice";
 import type { SessionState } from "./sessionSlice";
 
 export type RippleMode = "off" | "track" | "all";
@@ -53,18 +53,21 @@ export function buildRippleFollowers(
 /**
  * 实时波纹预览：把跟随集按 `delta` 平移。
  *
- * `moveClipStart` 写入的是绝对位置，因此这里始终用“初始位置 + delta”计算，
- * 避免逐帧累加造成漂移；`delta = 0` 时等价于把跟随集恢复回初始位置。
+ * 写入的是绝对位置，因此这里始终用“初始位置 + delta”计算，避免逐帧累加造成
+ * 漂移；`delta = 0` 时等价于把跟随集恢复回初始位置。
+ *
+ * 每帧一次 `moveClipsStartBulk`（而非逐 clip `moveClipStart`）：后者在 "all"
+ * 模式下是 O(K·N)/帧的 immer 生产 + find，大工程拖拽会卡（见 sessionSlice）。
  */
 export function applyRippleFollowerShift(
     dispatch: AppDispatch,
     followers: RippleFollowerMap,
     delta: number,
 ): void {
-    const ids = Object.keys(followers);
-    if (ids.length === 0) return;
-    for (const clipId of ids) {
-        const start = followers[clipId];
-        dispatch(moveClipStart({ clipId, startSec: Math.max(0, start + delta) }));
-    }
+    const moves = Object.keys(followers).map((clipId) => ({
+        clipId,
+        startSec: Math.max(0, followers[clipId] + delta),
+    }));
+    if (moves.length === 0) return;
+    dispatch(moveClipsStartBulk(moves));
 }
