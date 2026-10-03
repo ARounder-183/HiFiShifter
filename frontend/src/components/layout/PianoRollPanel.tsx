@@ -7380,7 +7380,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 <Box
                                     ref={drawToolMenuRef}
                                     data-hs-context-menu
-                                    className="absolute left-0 top-[calc(100%+4px)] z-30 min-w-[190px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+                                    // 锚定在触发按钮下方的下拉：与右键菜单共用同一个
+                                    // 表面与条目样式，只有定位方式不同。
+                                    className="hs-menu hs-menu--anchored"
                                 >
                                     {[
                                         {
@@ -7399,30 +7401,28 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             <button
                                                 key={item.mode}
                                                 type="button"
-                                                className={`w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover`}
+                                                className="hs-menu__item"
                                                 onClick={() => {
                                                     dispatch(setToolMode(item.mode));
                                                     setDrawToolMenuOpen(false);
                                                 }}
                                                 onPointerDown={(e) => e.stopPropagation()}
                                             >
-                                                <Flex align="center" gap="2">
-                                                    <Box
-                                                        style={{
-                                                            display: "flex",
-                                                            width: 15,
-                                                            height: 15,
-                                                            alignItems: "center",
-                                                            justifyContent: "center",
-                                                        }}
-                                                    >
+                                                <span className="flex min-w-0 items-center gap-2">
+                                                    <Box className="hs-menu__icon">
                                                         {item.icon}
                                                     </Box>
-                                                    <span className="hs-type-label">
+                                                    <span className="hs-menu__label-text">
                                                         {item.label}
                                                     </span>
-                                                </Flex>
-                                                {active ? <CheckIcon /> : null}
+                                                </span>
+                                                <span className="hs-menu__trail">
+                                                    {active ? (
+                                                        <span className="hs-menu__check">
+                                                            <CheckIcon />
+                                                        </span>
+                                                    ) : null}
+                                                </span>
                                             </button>
                                         );
                                     })}
@@ -7473,7 +7473,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         data-hs-context-menu
                                         // 永远向下展开：参数编辑器是停靠窗口，上方没有
                                         // 展示区，翻上去只会盖住自己的工具栏。
-                                        className="absolute left-0 top-[calc(100%+4px)] z-30 flex min-w-[190px] flex-col rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg"
+                                        // `--no-scroll`：滚动由下面的 `ScrollArea`
+                                        // 负责（页脚要钉住），壳不接管。
+                                        className="hs-menu hs-menu--anchored hs-menu--no-scroll flex flex-col"
                                         style={{ maxHeight: vibratoPresetMenuMaxHeight }}
                                     >
                                         <ScrollArea
@@ -7486,7 +7488,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                 <button
                                                     key={preset.id}
                                                     type="button"
-                                                    className="flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-hover"
+                                                    className="hs-menu__item"
                                                     onClick={() => {
                                                         dispatch(setActiveVibratoPreset(preset.id));
                                                         void dispatch(persistUiSettings());
@@ -7494,36 +7496,39 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                     }}
                                                     onPointerDown={(e) => e.stopPropagation()}
                                                 >
-                                                    <span className="flex items-center gap-2">
+                                                    <span className="flex min-w-0 items-center gap-2">
                                                         <VibratoPresetGlyph
                                                             preset={preset}
                                                             width={26}
                                                             height={10}
                                                         />
-                                                        <span>
+                                                        <span className="hs-menu__label-text">
                                                             {vibratoPresetLabel(preset, tf)}
                                                         </span>
                                                     </span>
-                                                    {preset.id === activeVibratoPresetId ? (
-                                                        <CheckIcon />
-                                                    ) : null}
+                                                    <span className="hs-menu__trail">
+                                                        {preset.id === activeVibratoPresetId ? (
+                                                            <span className="hs-menu__check">
+                                                                <CheckIcon />
+                                                            </span>
+                                                        ) : null}
+                                                    </span>
                                                 </button>
                                             ))}
                                         </ScrollArea>
-                                        <Box
-                                            className="my-1 shrink-0"
-                                            style={{ height: 1, background: "var(--qt-divider)" }}
-                                        />
+                                        <Box className="hs-menu__separator shrink-0" />
                                         <button
                                             type="button"
-                                            className="w-full shrink-0 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-hover"
+                                            className="hs-menu__item shrink-0"
                                             onClick={() => {
                                                 setVibratoPresetMenuOpen(false);
                                                 openVibratoDialog("manage");
                                             }}
                                             onPointerDown={(e) => e.stopPropagation()}
                                         >
-                                            {tf("vibrato_manager_open")}
+                                            <span className="hs-menu__label-text">
+                                                {tf("vibrato_manager_open")}
+                                            </span>
                                         </button>
                                     </Box>
                                 )}
@@ -7702,11 +7707,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 <Box
                                     ref={pitchSnapMenuRef}
                                     data-hs-context-menu
-                                    className="absolute left-0 top-[calc(100%+4px)] z-30 min-w-[190px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+                                    className="hs-menu hs-menu--anchored"
                                 >
                                     <button
                                         type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
+                                        className="hs-menu__item"
                                         onClick={() => {
                                             dispatch(setPitchSnapUnit("semitone"));
                                             if (!s.pitchSnapEnabled) {
@@ -7717,25 +7722,25 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         }}
                                         onPointerDown={(e) => e.stopPropagation()}
                                     >
-                                        <Flex align="center" gap="2">
-                                            <Box
-                                                style={{
-                                                    display: "flex",
-                                                    width: 15,
-                                                    height: 15,
-                                                    alignItems: "center",
-                                                    justifyContent: "center",
-                                                }}
-                                            >
+                                        <span className="flex min-w-0 items-center gap-2">
+                                            <Box className="hs-menu__icon">
                                                 {pitchSnapSemitoneIcon}
                                             </Box>
-                                            <span>{tf("pitch_snap_menu_semitone")}</span>
-                                        </Flex>
-                                        {s.pitchSnapUnit === "semitone" ? <CheckIcon /> : null}
+                                            <span className="hs-menu__label-text">
+                                                {tf("pitch_snap_menu_semitone")}
+                                            </span>
+                                        </span>
+                                        <span className="hs-menu__trail">
+                                            {s.pitchSnapUnit === "semitone" ? (
+                                                <span className="hs-menu__check">
+                                                    <CheckIcon />
+                                                </span>
+                                            ) : null}
+                                        </span>
                                     </button>
                                     <button
                                         type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
+                                        className="hs-menu__item"
                                         onClick={() => {
                                             dispatch(setPitchSnapUnit("scale"));
                                             if (!s.pitchSnapEnabled) {
@@ -7746,33 +7751,35 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         }}
                                         onPointerDown={(e) => e.stopPropagation()}
                                     >
-                                        <Flex align="center" gap="2">
-                                            <Box
-                                                style={{
-                                                    display: "flex",
-                                                    width: 15,
-                                                    height: 15,
-                                                    alignItems: "center",
-                                                    justifyContent: "center",
-                                                }}
-                                            >
+                                        <span className="flex min-w-0 items-center gap-2">
+                                            <Box className="hs-menu__icon">
                                                 {pitchSnapScaleIcon}
                                             </Box>
-                                            <span>{tf("pitch_snap_menu_scale")}</span>
-                                        </Flex>
-                                        {s.pitchSnapUnit === "scale" ? <CheckIcon /> : null}
+                                            <span className="hs-menu__label-text">
+                                                {tf("pitch_snap_menu_scale")}
+                                            </span>
+                                        </span>
+                                        <span className="hs-menu__trail">
+                                            {s.pitchSnapUnit === "scale" ? (
+                                                <span className="hs-menu__check">
+                                                    <CheckIcon />
+                                                </span>
+                                            ) : null}
+                                        </span>
                                     </button>
-                                    <div className="my-1 border-t border-qt-border" />
+                                    <div className="hs-menu__separator" role="separator" />
                                     <button
                                         type="button"
-                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
+                                        className="hs-menu__item"
                                         onClick={() => {
                                             setPitchSnapMenuOpen(false);
                                             setPitchSnapOpen(true);
                                         }}
                                         onPointerDown={(e) => e.stopPropagation()}
                                     >
-                                        <span>{tf("pitch_snap_settings_action")}</span>
+                                        <span className="hs-menu__label-text">
+                                            {tf("pitch_snap_settings_action")}
+                                        </span>
                                     </button>
                                 </Box>
                             )}

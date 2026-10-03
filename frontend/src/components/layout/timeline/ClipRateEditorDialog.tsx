@@ -235,7 +235,11 @@ function ClipRateEditorFields({
             role="menu"
             data-hs-floating-menu="1"
             data-hs-context-menu="1"
-            className="fixed z-qt-menu w-[248px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-2 px-3 flex flex-col gap-2"
+            // `--form`：这是表单型菜单（一列带标签的输入框），只有壳的内边距与
+            // 条目型菜单不同；`--no-scroll`：内容紧凑、不滚动，避免壳的滚动容器
+            // 被内部绝对定位的 Radix 隐藏元素撑出一条滚不动的滚动条。
+            // 宽度是**表单宽度**（248px），不是菜单最小宽度 —— 后者统一取令牌。
+            className="hs-menu hs-menu--form hs-menu--no-scroll w-[248px] flex flex-col gap-2"
             style={{ left: position.x, top: position.y }}
             onPointerDown={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}

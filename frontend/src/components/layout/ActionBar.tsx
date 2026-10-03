@@ -663,13 +663,11 @@ export function ActionBar() {
                         <div
                             ref={metronomeMenuRef}
                             data-hs-context-menu
-                            className="fixed z-qt-popover min-w-[200px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+                            className="hs-menu hs-menu--no-scroll"
                             style={{ left: metronomeMenuPos.x, top: metronomeMenuPos.y }}
                         >
-                            <div className="px-3 py-1 text-qt-xs uppercase tracking-wide text-qt-text-muted">
-                                {t("metronome_volume")}
-                            </div>
-                            <div className="px-3 py-1.5 flex items-center gap-2">
+                            <div className="hs-menu__label">{t("metronome_volume")}</div>
+                            <div className="hs-menu__body flex items-center gap-2">
                                 <input
                                     type="range"
                                     ref={metronomeVolumeWheelGuard}
@@ -701,14 +699,12 @@ export function ActionBar() {
                                     onPointerDown={(e) => e.stopPropagation()}
                                     className="qt-range flex-1"
                                 />
-                                <span className="text-qt-xs tabular-nums w-8 text-right opacity-70">
+                                <span className="hs-type-caption w-8 text-right">
                                     {Math.round(s.metronomeGain * 100)}
                                 </span>
                             </div>
-                            <div className="my-1 border-t border-qt-border" />
-                            <div className="px-3 py-1 text-qt-xs uppercase tracking-wide text-qt-text-muted">
-                                {t("metronome_mode")}
-                            </div>
+                            <div className="hs-menu__separator" role="separator" />
+                            <div className="hs-menu__label">{t("metronome_mode")}</div>
                             {(
                                 [
                                     ["grid", "metronome_mode_grid"],
@@ -719,21 +715,25 @@ export function ActionBar() {
                                 <button
                                     key={mode}
                                     type="button"
-                                    className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
+                                    className="hs-menu__item"
                                     onClick={() => {
                                         void dispatch(updateMetronome({ metronomeMode: mode }));
                                         setMetronomeMenuPos(null);
                                     }}
                                     onPointerDown={(e) => e.stopPropagation()}
                                 >
-                                    <span>{t(key)}</span>
-                                    {s.metronomeMode === mode ? <CheckIcon /> : null}
+                                    <span className="hs-menu__label-text">{t(key)}</span>
+                                    <span className="hs-menu__trail">
+                                        {s.metronomeMode === mode ? (
+                                            <span className="hs-menu__check">
+                                                <CheckIcon />
+                                            </span>
+                                        ) : null}
+                                    </span>
                                 </button>
                             ))}
-                            <div className="my-1 border-t border-qt-border" />
-                            <div className="px-3 py-1 text-qt-xs uppercase tracking-wide text-qt-text-muted">
-                                {t("metronome_sound")}
-                            </div>
+                            <div className="hs-menu__separator" role="separator" />
+                            <div className="hs-menu__label">{t("metronome_sound")}</div>
                             {(
                                 [
                                     ["click", "metronome_sound_click"],
@@ -744,21 +744,27 @@ export function ActionBar() {
                                 <button
                                     key={sound}
                                     type="button"
-                                    className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
+                                    className="hs-menu__item"
                                     onClick={() => {
                                         void dispatch(updateMetronome({ metronomeSound: sound }));
                                         setMetronomeMenuPos(null);
                                     }}
                                     onPointerDown={(e) => e.stopPropagation()}
                                 >
-                                    <span>{t(key)}</span>
-                                    {s.metronomeSound === sound ? <CheckIcon /> : null}
+                                    <span className="hs-menu__label-text">{t(key)}</span>
+                                    <span className="hs-menu__trail">
+                                        {s.metronomeSound === sound ? (
+                                            <span className="hs-menu__check">
+                                                <CheckIcon />
+                                            </span>
+                                        ) : null}
+                                    </span>
                                 </button>
                             ))}
-                            <div className="my-1 border-t border-qt-border" />
+                            <div className="hs-menu__separator" role="separator" />
                             <button
                                 type="button"
-                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors hover:bg-qt-button-hover"
+                                className="hs-menu__item"
                                 onClick={() => {
                                     void dispatch(
                                         updateMetronome({ metronomeAccent: !s.metronomeAccent }),
@@ -766,8 +772,14 @@ export function ActionBar() {
                                 }}
                                 onPointerDown={(e) => e.stopPropagation()}
                             >
-                                <span>{t("metronome_accent")}</span>
-                                {s.metronomeAccent ? <CheckIcon /> : null}
+                                <span className="hs-menu__label-text">{t("metronome_accent")}</span>
+                                <span className="hs-menu__trail">
+                                    {s.metronomeAccent ? (
+                                        <span className="hs-menu__check">
+                                            <CheckIcon />
+                                        </span>
+                                    ) : null}
+                                </span>
                             </button>
                         </div>
                     )}
@@ -1203,7 +1215,6 @@ export function ActionBar() {
                         <AppContextMenu
                             x={recordingMenuPos.x}
                             y={recordingMenuPos.y}
-                            minWidth={220}
                             ariaLabel={tf("recording_source_mode")}
                             onClose={() => setRecordingMenuPos(null)}
                             items={[

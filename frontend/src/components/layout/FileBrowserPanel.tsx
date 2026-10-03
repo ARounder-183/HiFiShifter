@@ -2211,7 +2211,6 @@ export const FileBrowserPanel: React.FC = () => {
                 <AppContextMenu
                     x={locationsAt.x}
                     y={locationsAt.y}
-                    minWidth={220}
                     ariaLabel={t("fb_locations")}
                     items={locationItems}
                     onClose={() => setLocationsAt(null)}
