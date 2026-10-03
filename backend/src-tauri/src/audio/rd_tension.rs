@@ -549,4 +549,62 @@ mod tests {
             );
         }
     }
+
+use super::*;
+
+/// 更接近真实人声的检验：多个谐波 + 逐次谐波衰减 + 轻微失谐，
+/// 验证拟合出的 Rd 落在合理区间、且张力方向正确、输出无 NaN。
+#[test]
+fn works_on_a_more_vocal_like_signal() {
+    let sr = 44_100u32;
+    let f0 = 196.0f64; // G3
+    let n = sr as usize / 2;
+    // 25 个谐波，幅度按 1/k^1.1 衰减，并加一点噪声模拟气声
+    let sig: Vec<f32> = (0..n)
+        .map(|i| {
+            let t = i as f64 / sr as f64;
+            let mut s = 0.0;
+            for k in 1..=25 {
+                let amp = 0.15 / (k as f64).powf(1.1);
+                s += amp * (2.0 * std::f64::consts::PI * f0 * k as f64 * t).sin();
+            }
+            s += 0.002 * ((i as f64 * 12.9898).sin() * 43758.5453).fract();
+            s as f32
+        })
+        .collect();
+    let f0v = vec![f0; n / HOP + 2];
+
+    let y = RdTension::apply(&sig, &f0v, sr, |_| 60.0, |_| f0);
+    assert_eq!(y.len(), sig.len());
+    assert!(y.iter().all(|v| v.is_finite()), "output must be finite");
+
+    // 输出不应静音，也不应爆音
+    let rms = |s: &[f32]| (s.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt();
+    let ratio = rms(&y) / rms(&sig);
+    assert!(ratio > 0.3 && ratio < 3.0, "energy ratio {ratio} out of range");
+}
+
+/// 极短输入（不足一帧 / 不足一个 N_FFT）不得 panic。
+#[test]
+fn very_short_inputs_do_not_panic() {
+    let sr = 44_100u32;
+    for len in [1usize, 2, 100, HOP, HOP + 1, N_FFT - 1, N_FFT] {
+        let x = vec![0.1f32; len];
+        let f0 = vec![220.0f64; 4];
+        let y = RdTension::apply(&x, &f0, sr, |_| 100.0, |_| 220.0);
+        assert_eq!(y.len(), len, "length must be preserved for len {len}");
+        assert!(y.iter().all(|v| v.is_finite()));
+    }
+}
+
+/// 静音输入不得产生 NaN（log(0) 路径）。
+#[test]
+fn silence_input_is_safe() {
+    let sr = 44_100u32;
+    let x = vec![0.0f32; 8192];
+    let f0 = vec![220.0f64; 8192 / HOP + 2];
+    let y = RdTension::apply(&x, &f0, sr, |_| 100.0, |_| 220.0);
+    assert!(y.iter().all(|v| v.is_finite()), "silence must not produce NaN");
+    assert!(y.iter().all(|v| v.abs() < 1e-6), "silence in, silence out");
+}
 }
