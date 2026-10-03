@@ -20,12 +20,19 @@
  *
  * 本组件把这三件事各做一次：单一 class 来源、完整键盘模型、按实测尺寸夹紧 +
  * `--qt-z-menu` 层级。
+ *
+ * 【壳与项的样式来源】本文件的 className 只剩结构类：壳 `hs-menu`、项
+ * `hs-menu__item`、标题 `hs-menu__label`、分隔 `hs-menu__separator`。取值
+ * （底色 / 圆角 / 阴影 / 行高 / 悬停色 / 禁用色）全部由 `src/index.css` 的
+ * 「上下文菜单样式模型」块决定 —— 手写菜单（需要内联滑杆 / 输入框 / 双列的那些）
+ * 挂同一套类，因此两边不可能再漂移。这也是 `ITEM_BASE` 常量被删掉的原因：
+ * 它把取值复制到了 TypeScript 里，CSS 那份改不到它。
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { CheckIcon } from "@radix-ui/react-icons";
 
 import { EDGE_GAP, clampAxisPosition } from "../components/appTooltipPosition";
-import { cx } from "./cx";
 import { ownsArrowKeys, useMenuKeyboard } from "./useMenuKeyboard";
 
 export interface AppMenuItemSpec {
@@ -62,7 +69,10 @@ export interface AppContextMenuProps {
     y: number;
     items: AppMenuItemSpec[];
     onClose: () => void;
-    /** 最小宽度，默认 190px。各面板历史取值 140–220，新代码请省略以用默认值。 */
+    /**
+     * 最小宽度覆盖。**省略即用 `--qt-menu-min-w`（推荐）** —— 各面板历史取值
+     * 140–248 五档，统一后只有一档；只有内容确实更宽的表单型菜单才显式给值。
+     */
     minWidth?: number;
     /** 无障碍名称：菜单是弹出表面，需要有可读名称。 */
     ariaLabel?: string;
@@ -86,9 +96,6 @@ export interface AppContextMenuProps {
     floating?: boolean;
 }
 
-const ITEM_BASE =
-    "hs-type-body flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left outline-none";
-
 /**
  * 上下文菜单。
  *
@@ -111,7 +118,7 @@ export function AppContextMenu({
     y,
     items,
     onClose,
-    minWidth = 190,
+    minWidth,
     ariaLabel,
     header,
     floating = false,
@@ -152,6 +159,15 @@ export function AppContextMenu({
             ),
         [items],
     );
+
+    /**
+     * 是否有任一项带图标 —— 决定是否给**所有**项预留图标列。
+     *
+     * 【为什么要预留】图标列是定宽的。若只让"有图标的项"占位，同一张菜单里
+     * 两类项的文字左缘会差一个列宽（文件浏览器的位置列表就是混合的：只有
+     * "收藏/取消收藏"那一项带星标）。
+     */
+    const reserveIconColumn = useMemo(() => items.some((item) => item.icon), [items]);
 
     /**
      * 按实测尺寸夹紧。
@@ -277,9 +293,7 @@ export function AppContextMenu({
             aria-label={ariaLabel}
             data-hs-context-menu="1"
             data-hs-floating-menu={floating ? "1" : undefined}
-            className={cx(
-                "fixed z-qt-menu rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg",
-            )}
+            className="hs-menu"
             style={{
                 left: position.left,
                 top: position.top,
@@ -291,18 +305,29 @@ export function AppContextMenu({
             onPointerDown={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}
         >
-            {header ? <div className="border-b border-qt-border px-2 py-1">{header}</div> : null}
+            {header ? <div className="hs-menu__header">{header}</div> : null}
             {items.map((item, index) => (
-                <AppContextMenuItem
-                    key={item.key}
-                    item={item}
-                    active={index === activeIndex}
-                    onHover={() => setActiveIndex(item.disabled ? -1 : index)}
-                    onSelect={() => {
-                        item.onSelect?.();
-                        onClose();
-                    }}
-                />
+                <Fragment key={item.key}>
+                    {/*
+                      分组分隔线是**独立元素**，不是首项自己的上边框 —— 加在项上会
+                      让分隔处那一行比别的行高一截（见 `hs-menu__separator` 的说明）。
+                    */}
+                    {item.separatorBefore ? (
+                        <div className="hs-menu__separator" role="separator" />
+                    ) : null}
+                    <AppContextMenuItem
+                        item={item}
+                        active={index === activeIndex}
+                        // 只要有一项带图标就为**所有**项预留图标列，否则同一张菜单
+                        // 里"有图标的项"与"没图标的项"文字左缘不齐。
+                        reserveIcon={reserveIconColumn}
+                        onHover={() => setActiveIndex(item.disabled ? -1 : index)}
+                        onSelect={() => {
+                            item.onSelect?.();
+                            onClose();
+                        }}
+                    />
+                </Fragment>
             ))}
         </div>
     );
@@ -311,29 +336,19 @@ export function AppContextMenu({
 function AppContextMenuItem({
     item,
     active,
+    reserveIcon,
     onHover,
     onSelect,
 }: {
     item: AppMenuItemSpec;
     active: boolean;
+    reserveIcon: boolean;
     onHover: () => void;
     onSelect: () => void;
 }) {
     if (item.heading) {
-        return (
-            <div
-                className="hs-type-caption px-3 py-1 font-semibold uppercase tracking-wide"
-                style={{ paddingLeft: "var(--qt-space-5)" }}
-            >
-                {item.label}
-            </div>
-        );
+        return <div className="hs-menu__label">{item.label}</div>;
     }
-    const tone = item.disabled
-        ? "cursor-default text-qt-text-muted"
-        : item.danger
-          ? "hover:bg-qt-danger-bg hover:text-qt-danger-text"
-          : "hover:bg-qt-hover";
 
     return (
         <button
@@ -341,14 +356,11 @@ function AppContextMenuItem({
             role="menuitem"
             disabled={item.disabled}
             aria-checked={item.checked}
-            className={cx(
-                ITEM_BASE,
-                tone,
-                item.separatorBefore && "mt-1 border-t border-qt-border pt-2.5",
-                // 键盘焦点环与菜单自身的边框会叠在一起，改用底色表达高亮
-                active && !item.disabled && "bg-qt-hover",
-            )}
-            style={{ paddingLeft: "var(--qt-space-5)", paddingRight: "var(--qt-space-5)" }}
+            // 键盘高亮与鼠标悬停在 CSS 里是**同一条规则**（`[data-active]` 与
+            // `:hover` 并列），因此这里只需如实标出"当前高亮的是这一项"。
+            data-active={active && !item.disabled ? "1" : undefined}
+            data-danger={item.danger ? "1" : undefined}
+            className="hs-menu__item"
             data-tooltip={item.tooltip}
             onMouseEnter={onHover}
             onClick={() => {
@@ -358,15 +370,21 @@ function AppContextMenuItem({
         >
             <span className="flex min-w-0 items-center gap-2">
                 {item.icon ? (
-                    <span className="shrink-0" aria-hidden>
+                    <span className="hs-menu__icon" aria-hidden>
                         {item.icon}
                     </span>
+                ) : reserveIcon ? (
+                    <span className="hs-menu__icon" aria-hidden />
                 ) : null}
-                <span className="truncate">{item.label}</span>
+                <span className="hs-menu__label-text">{item.label}</span>
             </span>
-            <span className="flex shrink-0 items-center gap-2">
-                {item.checked ? <span aria-hidden>✓</span> : null}
-                {item.shortcut ? <span className="text-qt-text-muted">{item.shortcut}</span> : null}
+            <span className="hs-menu__trail">
+                {item.checked ? (
+                    <span className="hs-menu__check" aria-hidden>
+                        <CheckIcon width={12} height={12} />
+                    </span>
+                ) : null}
+                {item.shortcut ? <span>{item.shortcut}</span> : null}
             </span>
         </button>
     );
@@ -451,11 +469,7 @@ export function AppSubMenu({ label, badge, disabled = false, children }: AppSubM
             <button
                 type="button"
                 role="menuitem"
-                className={cx(
-                    "flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-qt-sm transition-colors",
-                    disabled ? "cursor-default opacity-40" : "hover:bg-qt-hover",
-                )}
-                style={{ paddingLeft: "var(--qt-space-5)", paddingRight: "var(--qt-space-5)" }}
+                className="hs-menu__item"
                 disabled={disabled}
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
@@ -466,7 +480,7 @@ export function AppSubMenu({ label, badge, disabled = false, children }: AppSubM
                 aria-expanded={open}
             >
                 <span className="flex min-w-0 items-center gap-2">
-                    <span className="truncate">{label}</span>
+                    <span className="hs-menu__label-text">{label}</span>
                     {badge ? (
                         <span className="text-qt-micro leading-none rounded bg-black/20 px-1 py-0.5 opacity-70">
                             {badge}
@@ -495,7 +509,10 @@ export function AppSubMenu({ label, badge, disabled = false, children }: AppSubM
                     ref={panelRef}
                     role="menu"
                     data-hs-context-menu="1"
-                    className="absolute z-qt-menu min-w-[190px] rounded border border-qt-border bg-qt-window py-1 text-qt-text shadow-lg"
+                    // 子面板与主菜单**共用同一个表面**；定位由上面的 layout effect
+                    // 逐条覆盖（翻左 / 对齐 / 收宽），因此只借 `--anchored` 的
+                    // `position: absolute`，不借它的默认偏移。
+                    className="hs-menu hs-menu--anchored"
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => e.stopPropagation()}
                 >
