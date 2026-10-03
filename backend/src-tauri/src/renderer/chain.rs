@@ -403,7 +403,9 @@ impl ProcessingStage for HiFiGanStage {
                 formant_curve,
             );
         }
-        renderer.render_with_formant(&render_ctx, formant_curve)
+        // 非分离路径：张力已在构造点被剥离（开关关闭）或本就不存在，
+        // 因此不传张力曲线（None）。若开关开启，张力走分离路径（见下方）。
+        renderer.render_with_formant(&render_ctx, formant_curve, None)
     }
 }
 
@@ -485,7 +487,7 @@ impl HiFiGanStage {
                     formant_curve,
                 )?
             } else {
-                renderer.render_with_formant(&render_ctx, formant_curve)?
+                renderer.render_with_formant(&render_ctx, formant_curve, tension_curve)?
             }
         };
 

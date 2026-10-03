@@ -1357,20 +1357,61 @@ pub fn env_overlap_sec() -> f64 {
 
 // ─── 帧级分块常量────────────────────────────────────────────
 
-/// 单块最大 mel 帧数：4096 帧（≈47s @ hop=512, sr=44100）。
-/// 覆盖大多数 clip 为单 chunk，最小化 GPU 启动开销。
-/// 每个 chunk 的 mel 输入约 2MB，波形输出约 8MB，12GB GPU 轻松容纳。
-const CHUNK_MAX_FRAMES: usize = 4096;
+/// 单块最大 mel 帧数默认值：4096 帧（≈47.6s @ hop=512, sr=44100）。
+///
+/// # 取值权衡（实测，30s clip、CoreML）
+/// 该值同时影响**冷渲染吞吐**与**编辑后的重渲染量**，两者方向相反：
+///
+/// | 块大小 | 冷渲染 | 改 1 秒后重渲染 |
+/// |---|---|---|
+/// | 4096 帧 | 527 ms | 525 ms（30s 只 1 块，无可复用） |
+/// | 512 帧 | 768 ms | 240 ms（5 块命中 / 1 块重算） |
+///
+/// 小块的优势仅在 clip **跨多块**时体现（块数 = 时长 / 47.6s）。
+/// 注意小块冷渲染更慢**不是**因为块本身慢，而是因为残余块长度不均会让
+/// `run_model_batch` 退化为逐块顺序推理（见该函数里的 `uniform_length`）。
+///
+/// # 为什么保留 4096 作为默认
+/// 改小它会让所有既有工程的渲染结果发生变化（接缝位置不同 → 实测 rel_l2
+/// 6~9%），属于需要用户知情的行为变更，不应擅自调整。需要更长 clip 的
+/// 编辑响应时可用环境变量覆盖。
+const CHUNK_MAX_FRAMES_DEFAULT: usize = 4096;
+
+static CHUNK_MAX_FRAMES_OVERRIDE: OnceLock<usize> = OnceLock::new();
+
+/// 单块最大 mel 帧数，可由 `HIFISHIFTER_ONNX_CHUNK_FRAMES` 覆盖。
+///
+/// 详见 [`CHUNK_MAX_FRAMES_DEFAULT`] 的取值权衡。
+fn chunk_max_frames() -> usize {
+    *CHUNK_MAX_FRAMES_OVERRIDE.get_or_init(|| {
+        std::env::var("HIFISHIFTER_ONNX_CHUNK_FRAMES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(CHUNK_MAX_FRAMES_DEFAULT)
+    })
+}
 
 // ─── 帧级分块推理优化──────────────────────────────────────
 
-/// 优化版长音频分块推理：预提取全段 mel 一次，按帧切片推理，线性 crossfade 拼接。
+/// 优化版长音频分块推理：预提取全段 mel 一次，按帧切片推理，按帧偏移顺序拼接。
 ///
 /// 与旧版秒级分块实现的区别：
 /// - mel 只提取一次，按帧切片（而非每块独立提取）
-/// - 使用帧级常量 `CHUNK_MAX_FRAMES` 分块
-/// - 线性 crossfade
+/// - 使用帧级常量 `chunk_max_frames()` 分块
 /// - 支持分块级缓存回调，参数变动时只重渲染脏 chunk
+///
+/// # ⚠ 拼接方式：直接覆盖，**没有** overlap / crossfade
+/// 旧版本注释在此处声称"线性 crossfade"，但代码执行的是
+/// `out[base_out + i] = sample` —— 块之间既不重叠也不加权。
+/// 块边界因此存在轻微不连续，实测其跳变约为信号自身相邻跳变的 p99 的 0.3 倍
+/// **低于**正常信号起伏，听感上不构成 click。
+///
+/// **不要照搬本函数修 crossfade**：块大小一变，接缝位置就变，输出随之改变
+/// （实测不同块大小之间 rel_l2 6~9%）。也就是说"补 crossfade"会改变所有既有
+/// 工程的渲染结果，属于需要用户知情的行为变更。
+/// 需要 crossfade 的实现可参考 [`infer_pitch_edit_chunked_mel_stretch`]
+/// （rate≠1 路径，用 sin/cos 等功率加权）。
 ///
 /// `chunk_cache_get(mel_start_frame, mel_end_frame)` → 命中时返回缓存的 mono PCM，
 /// `chunk_cache_put(mel_start_frame, mel_end_frame, waveform)` → 写入波形到缓存。
@@ -1468,7 +1509,7 @@ pub fn infer_pitch_edit_chunked_optimized(
 
         let mut frame_off = 0usize;
         while frame_off < t {
-            let chunk_end = (frame_off + CHUNK_MAX_FRAMES).min(t);
+            let chunk_end = (frame_off + chunk_max_frames()).min(t);
             if let Some(cached) = chunk_cache_get(frame_off, chunk_end) {
                 cached_chunks.push((frame_off, cached));
             } else {
@@ -1477,7 +1518,7 @@ pub fn infer_pitch_edit_chunked_optimized(
             frame_off = chunk_end;
         }
 
-        let total_chunks = (t + CHUNK_MAX_FRAMES - 1) / CHUNK_MAX_FRAMES;
+        let total_chunks = t.div_ceil(chunk_max_frames());
         let processed_before = cached_chunks.len();
         debug_eprintln!(
             "[nsf_hifigan] chunked_opt: t={} chunks={} cached={} infer={}",
@@ -1499,7 +1540,7 @@ pub fn infer_pitch_edit_chunked_optimized(
             let batch_items: Vec<(Vec<f32>, Vec<f32>, usize)> = needs_inference
                 .iter()
                 .map(|&fi| {
-                    let chunk_end = (fi + CHUNK_MAX_FRAMES).min(t);
+                    let chunk_end = (fi + chunk_max_frames()).min(t);
                     let chunk_t = chunk_end - fi;
                     let mut mel_seg = vec![0.0f32; sess.cfg.num_mels * chunk_t];
                     for m in 0..sess.cfg.num_mels {
@@ -1522,7 +1563,7 @@ pub fn infer_pitch_edit_chunked_optimized(
 
             for (i, wf) in batch_results.into_iter().enumerate() {
                 let fi = needs_inference[i];
-                let chunk_end = (fi + CHUNK_MAX_FRAMES).min(t);
+                let chunk_end = (fi + chunk_max_frames()).min(t);
                 chunk_cache_put(fi, chunk_end, wf.clone());
                 cached_chunks.push((fi, wf));
                 crate::renderer::progress::report_clip_progress(
@@ -2671,7 +2712,6 @@ mod tests {
             "zero-shift path must match the fast path, max err {max_err}"
         );
     }
-
 
     /// 端到端：非零 keyShift 时 mel 帧数必须与快速路径一致。
     ///

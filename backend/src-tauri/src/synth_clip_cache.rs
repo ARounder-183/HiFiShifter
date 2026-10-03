@@ -276,12 +276,31 @@ where
         mix_bytes!(&v.to_bits().to_le_bytes());
     }
 
-    // 混入 extra_curves（AutomationCurve 类型参数），按 key 排序保证确定性
+    // 混入 extra_curves（AutomationCurve 类型参数），按 key 排序保证确定性。
+    //
+    // ★ 与 `pitch_edit` 同样是**按时间范围切片**，不是整条曲线。
+    //
+    // 【为什么必须切片，否则编辑延迟极高】分块推理缓存以本哈希判等；若把整条
+    // 曲线纳入，则**改动任意一段都会让所有 chunk 的哈希同时变化** —— 用户改
+    // 一个小节，整条 clip 的所有块全部重推理。实测（30s、4096 帧/块）：改 1 秒
+    // 张力会使全部块失效。切片后只有**时间范围相交的块**失效，未相交的块保持
+    // 命中，编辑延迟与"改动长度"而非"clip 长度"成正比。
+    //
+    // 【索引换算与 `pitch_edit` 完全一致】曲线按 `frame_period_ms` 逐点采样，
+    // 点的索引 = `绝对秒 * 1000 / frame_period_ms`。此处沿用同一换算，
+    // 保证"哈希覆盖的曲线区间"与"渲染实际读取的曲线区间"对齐。
+    //
+    // 【越界钳制】曲线可能比 clip 短（用户只画了前面一段）或长（撤销后的残留）。
+    // 两端都用 `.min(len)` 钳制，与 `pitch_edit` 的处理相同。曲线为空时
+    // `lo == hi == 0`，只混入 key 名 —— 语义是"该参数未编辑"，与缺失等价。
     let mut sorted_curves: Vec<(K, V)> = extra_curves.into_iter().collect();
     sorted_curves.sort_by(|(k1, _), (k2, _)| k1.as_ref().cmp(k2.as_ref()));
     for (k, v) in sorted_curves {
         mix_bytes!(k.as_ref().as_bytes());
-        for &val in v.as_ref().iter() {
+        let curve = v.as_ref();
+        let lo = start_idx.min(curve.len());
+        let hi = end_idx.min(curve.len());
+        for &val in &curve[lo..hi] {
             mix_bytes!(&val.to_bits().to_le_bytes());
         }
     }
@@ -294,70 +313,6 @@ where
         mix_bytes!(&v.to_le_bytes());
     }
 
-    h
-}
-
-/// 计算**分块级**推理缓存用的哈希，覆盖 [`compute_param_hash`] 的全部输入
-/// **外加输入波形本身的内容指纹**。
-///
-/// # 为什么必须额外混入输入波形
-/// [`compute_param_hash`] 只覆盖"参数"（pitch_edit / formant / extra_curves），
-/// 不覆盖**送进声码器的波形**。这在引入 Rd 张力之前是安全的：
-/// 那时张力是渲染后处理，改变张力不影响 HiFiGAN 的输入。
-///
-/// 张力迁入声码器后不再成立 —— `apply_rd_tension` 在 mel 分析**之前**重塑谐波，
-/// 因此张力曲线改变会改变 `mono_pcm`，而参数哈希**不变**。若分块缓存仍只看参数哈希，
-/// 就会出现"改了张力、chunk 命中旧波形"，用户看不到效果（实测复现：
-/// 两份输入 maxdiff 0.256，输出却逐样本相同）。
-///
-/// # 为什么不用"把张力曲线加进哈希"
-/// 治标不治本：任何将来改变送入波形的处理（新增前置效果）都会再次踩坑。
-/// 指纹直接绑定**实际输入**，与上游做了什么都无关。
-///
-/// # 参数
-/// - `pcm`：本次真正送入推理的波形（分块时传对应片段，见调用方）
-/// - 其余参数同 [`compute_param_hash`]
-///
-/// # 性能
-/// 对 `pcm` 做一次线性 FNV-1a（每样本约 2 次操作），相对推理可忽略。
-/// 为避免浮点表示差异导致误判失效，按 `to_bits()` 逐位混入 ——
-/// 这里要的是"输入是否逐位相同"，而非数值近似。
-pub fn compute_chunk_hash_with_pcm<K, V, I>(
-    pcm: &[f32],
-    clip_id: &str,
-    start_frame: u64,
-    end_frame: u64,
-    sr: u32,
-    channel_index: u16,
-    renderer_id: &str,
-    curves: &PitchCurvesSnapshot<'_>,
-    extra_curves: I,
-    extra_params: &std::collections::HashMap<String, f64>,
-) -> u64
-where
-    K: AsRef<str>,
-    V: AsRef<[f32]>,
-    I: IntoIterator<Item = (K, V)>,
-{
-    let base = compute_param_hash(
-        clip_id,
-        start_frame,
-        end_frame,
-        sr,
-        channel_index,
-        renderer_id,
-        curves,
-        extra_curves,
-        extra_params,
-    );
-    // 以 base 为种子继续 FNV-1a，避免再走一遍全部参数。
-    let mut h = base;
-    for &v in pcm {
-        for &b in &v.to_bits().to_le_bytes() {
-            h ^= b as u64;
-            h = h.wrapping_mul(1099511628211u64);
-        }
-    }
     h
 }
 
@@ -1306,8 +1261,8 @@ pub fn get_latest_rendered_pcm(
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_chunk_hash_with_pcm, compute_rendered_clip_hash,
-        compute_rendered_clip_hash_excluding, HashExclusions, RenderedClipHashInput,
+        compute_param_hash, compute_rendered_clip_hash, compute_rendered_clip_hash_excluding,
+        HashExclusions, RenderedClipHashInput,
     };
 
     // 运行时拉伸设置是**进程级全局**，而渲染键会把它混进哈希：算键的测试必须持读锁，
@@ -1605,81 +1560,97 @@ mod tests {
         assert_eq!(base, fixture.hash());
     }
 
-    // ── 分块缓存必须绑定输入波形（张力回归）─────────────────────────────
+    // ── extra_curves 必须按帧区间切片（编辑局部性回归）───────────────────
 
-    /// 输入波形不同 ⇒ 哈希必须不同。
+    /// 曲线改动若落在**查询区间之外**，哈希必须不变。
     ///
-    /// 【为什么这条测试必须存在】`compute_param_hash` 只看参数
-    /// （pitch_edit / formant / extra_curves），**不看送进声码器的波形**。
-    /// 在 Rd 张力迁入声码器之前这是安全的（张力曾是渲染后处理）；
-    /// 现在 `apply_rd_tension` 在 mel 之前改变输入波形，张力曲线变化时
-    /// 参数哈希不变 —— 分块缓存会命中**陈旧波形**，用户改张力看不到效果。
-    /// 这是实测复现过的回归（两份输入 maxdiff 0.256，输出却逐样本相同），
-    /// 故用测试钉死。
+    /// 【为什么这条测试至关重要】`extra_curves` 曾经把**整条曲线**混入哈希
+    /// （`pitch_edit` 则是按区间切片的）。后果是：改动任意一小段张力，
+    /// 所有分块（以及段级缓存）的哈希同时变化 ⇒ 整条 clip 重新推理 ——
+    /// 用户改一个小节要等整段渲染。实测 30s clip 改 1 秒会令全部块失效。
+    ///
+    /// 切片后，只有与查询区间相交的块失效，未相交的块保持命中，
+    /// 编辑延迟与"改动长度"而非"clip 长度"成正比。
     #[test]
-    fn chunk_hash_changes_when_input_waveform_changes() {
+    fn curve_edits_outside_the_range_do_not_change_the_hash() {
         let snapshot = crate::pitch_editing::PitchCurvesSnapshot {
             frame_period_ms: 5.0,
             pitch_orig: &[],
             pitch_edit: &[],
         };
-        let extra: Vec<(&str, &[f32])> = vec![];
-        let hash_of = |pcm: &[f32]| {
-            compute_chunk_hash_with_pcm(
-                pcm,
+        // 曲线按 frame_period_ms=5ms 采样：索引 i 对应 5*i 毫秒。
+        // 区间取 [0s, 1s) ⇒ 覆盖索引 0..200。
+        let hash_with_curve = |curve: &[f32]| {
+            let extra = vec![("hifigan_tension", curve)];
+            compute_param_hash(
                 "clip-x",
                 0,
-                1024,
+                44_100, // 0..1s
                 44_100,
                 0,
                 "nsf_hifigan_onnx",
                 &snapshot,
-                extra.iter().map(|(k, v)| (*k, *v)),
+                extra.into_iter(),
                 &std::collections::HashMap::new(),
             )
         };
 
-        // 两份**只有幅度不同**的波形，模拟"改了张力"（Rd 重塑谐波结构）
-        let a: Vec<f32> = (0..2048).map(|i| (i as f32 * 0.01).sin() * 0.2).collect();
-        let b: Vec<f32> = (0..2048).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
-
-        assert_ne!(
-            hash_of(&a),
-            hash_of(&b),
-            "different input waveforms must not share a chunk hash"
+        let mut a = vec![0.0f32; 400];
+        let mut b = a.clone();
+        // 在索引 300（= 1.5s，**区间外**）改动
+        b[300] = 80.0;
+        assert_eq!(
+            hash_with_curve(&a),
+            hash_with_curve(&b),
+            "an edit outside the queried range must NOT invalidate this chunk"
         );
-        // 同一波形必须稳定（否则缓存永不命中，白做优化）
-        assert_eq!(hash_of(&a), hash_of(&a), "hash must be deterministic");
+
+        // 在索引 100（= 0.5s，**区间内**）改动 ⇒ 必须失效
+        a[100] = 80.0;
+        assert_ne!(
+            hash_with_curve(&a),
+            hash_with_curve(&b),
+            "an edit inside the queried range MUST invalidate this chunk"
+        );
     }
 
-    /// 该哈希仍然包含 `compute_param_hash` 的全部输入（不能因加波形而漏参数）。
+    /// 同一区间的哈希必须稳定（否则缓存永不命中，白做优化）。
     #[test]
-    fn chunk_hash_still_covers_params() {
-        let pcm: Vec<f32> = (0..512).map(|i| (i as f32 * 0.02).sin()).collect();
-        let extra: Vec<(&str, &[f32])> = vec![];
-        let hash_with_edit = |edit: &[f32]| {
-            let snapshot = crate::pitch_editing::PitchCurvesSnapshot {
-                frame_period_ms: 5.0,
-                pitch_orig: &[],
-                pitch_edit: edit,
-            };
-            compute_chunk_hash_with_pcm(
-                &pcm,
-                "clip-x",
-                0,
-                512,
-                44_100,
-                0,
-                "nsf_hifigan_onnx",
-                &snapshot,
-                extra.iter().map(|(k, v)| (*k, *v)),
-                &std::collections::HashMap::new(),
+    fn curve_hash_is_deterministic() {
+        let snapshot = crate::pitch_editing::PitchCurvesSnapshot {
+            frame_period_ms: 5.0,
+            pitch_orig: &[],
+            pitch_edit: &[],
+        };
+        let curve = vec![10.0f32, 20.0, 30.0];
+        let h = || {
+            let extra = vec![("hifigan_tension", curve.as_slice())];
+            compute_param_hash(
+                "clip-x", 0, 44_100, 44_100, 0, "nsf_hifigan_onnx", &snapshot,
+                extra.into_iter(), &std::collections::HashMap::new(),
             )
         };
-        assert_ne!(
-            hash_with_edit(&[]),
-            hash_with_edit(&[60.0, 64.0]),
-            "pitch_edit must still participate in the chunk hash"
-        );
+        assert_eq!(h(), h());
+    }
+
+    /// 曲线比查询区间短（用户只画了前面一段）时不得 panic，且长度差异应改变哈希。
+    #[test]
+    fn curve_shorter_than_range_is_safe() {
+        let snapshot = crate::pitch_editing::PitchCurvesSnapshot {
+            frame_period_ms: 5.0,
+            pitch_orig: &[],
+            pitch_edit: &[],
+        };
+        let hash = |curve: &[f32]| {
+            let extra = vec![("hifigan_tension", curve)];
+            compute_param_hash(
+                "clip-x", 0, 44_100 * 10, 44_100, 0, "nsf_hifigan_onnx", &snapshot,
+                extra.into_iter(), &std::collections::HashMap::new(),
+            )
+        };
+        // 远超区间末端的查询区间 + 极短曲线：不得 panic
+        let _ = hash(&[]);
+        let _ = hash(&[1.0]);
+        assert_ne!(hash(&[]), hash(&[1.0]), "curve content must matter");
     }
 }

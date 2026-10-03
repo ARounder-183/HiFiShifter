@@ -110,7 +110,7 @@ impl Renderer for HiFiGanRenderer {
     }
 
     fn render(&self, ctx: &RenderContext<'_>) -> Result<Vec<f32>, String> {
-        self.render_with_formant(ctx, None)
+        self.render_with_formant(ctx, None, None)
     }
 
     fn capabilities(&self) -> RendererCapabilities {
@@ -127,10 +127,18 @@ impl HiFiGanRenderer {
     ///
     /// `formant_shift_curve`：共振峰偏移曲线（cents），`None` 或空表示无偏移。
     /// 曲线按 `frame_period_ms` 采样，`curve[0]` 对应绝对时间 0。
+    ///
+    /// `tension_curve`：张力曲线（%）。**这里不施加它** —— 张力已由调用方在
+    /// mel 分析之前作用于波形（见 `chain.rs` 的 `apply_rd_tension`）。
+    /// 传入只为让它**参与分块哈希**：张力改变会改变送入声码器的波形，
+    /// 哈希必须能感知，否则会命中陈旧的分块缓存。该曲线由
+    /// `compute_param_hash` 按各分块的时间范围切片，因此只有与编辑区间
+    /// 相交的块失效（详见 `compute_param_hash` 的 extra_curves 说明）。
     pub fn render_with_formant(
         &self,
         ctx: &RenderContext<'_>,
         formant_shift_curve: Option<&[f32]>,
+        tension_curve: Option<&[f32]>,
     ) -> Result<Vec<f32>, String> {
         let fp = ctx.frame_period_ms;
         let clip_start = ctx.clip_start_sec;
@@ -170,16 +178,21 @@ impl HiFiGanRenderer {
             pitch_edit,
         };
 
-        // 构建元组数组，不再 new() HashMap 并 clone() 大数组
-        let extra_curves = formant_shift_curve
-            .map(|c| vec![("formant_shift_cents", c)])
-            .unwrap_or_default();
+        // 构建元组数组，不再 new() HashMap 并 clone() 大数组。
+        // 张力曲线一并纳入：它虽已在进入本函数前施加到波形上，但**分块缓存的
+        // 哈希必须知道它**，否则改张力会命中陈旧块（见函数文档）。
+        let mut extra_curves: Vec<(&str, &[f32])> = Vec::with_capacity(2);
+        if let Some(c) = formant_shift_curve {
+            extra_curves.push(("formant_shift_cents", c));
+        }
+        if let Some(c) = tension_curve {
+            extra_curves.push(("hifigan_tension", c));
+        }
 
-        // 必须用带输入波形指纹的哈希：张力（`apply_rd_tension`）在 mel 之前
-        // 改变了 `ctx.mono_pcm`，而参数哈希感知不到 —— 用纯参数哈希会让
-        // "改了张力"命中旧缓存。详见 `compute_chunk_hash_with_pcm` 的说明。
-        let param_hash = crate::synth_clip_cache::compute_chunk_hash_with_pcm(
-            ctx.mono_pcm,
+        // 参数哈希（**不含波形指纹**）：张力曲线作为 extra_curve 参与，
+        // 并由 `compute_param_hash` 按本段的时间范围切片 —— 因此只有与该范围
+        // 相交的改动才会让本键失效。详见 `compute_param_hash` 的 extra_curves 说明。
+        let param_hash = crate::synth_clip_cache::compute_param_hash(
             ctx.clip_id,
             seg_start_frame,
             seg_end_frame,
@@ -283,14 +296,14 @@ impl HiFiGanRenderer {
             &|mel_start: usize, mel_end: usize| -> Option<Vec<f32>> {
                 let chunk_start = seg_start + mel_start as u64 * model_hop;
                 let chunk_end = seg_start + mel_end as u64 * model_hop;
-                // 同站点 1：chunk 的哈希必须绑定**实际送入推理的波形片段**。
-                // 张力改变会改变 `ctx.mono_pcm`（进而改变每个 chunk 的输入），
-                // 而参数哈希不变 —— 不绑定波形就会命中陈旧 chunk。
-                // 该 mel 窗口对应的样本区间为 [mel_start, mel_end) × model_hop。
-                let pcm_lo = (mel_start * model_hop as usize).min(ctx.mono_pcm.len());
-                let pcm_hi = (mel_end * model_hop as usize).min(ctx.mono_pcm.len());
-                let hash = crate::synth_clip_cache::compute_chunk_hash_with_pcm(
-                    &ctx.mono_pcm[pcm_lo..pcm_hi],
+                // 同站点 1：用参数哈希（**不含波形指纹**），张力曲线按本块区间切片。
+                //
+                // 【为什么不再指纹化波形】波形指纹必须 bit-exact 才有意义，而
+                // Rd 张力对整段做 STFT/ISTFT，未编辑处的往返误差虽仅 2e-16，
+                // 却足以让**每个** chunk 的指纹都变化 ⇒ 改 1 秒也要整段重推理
+                // （已实测）。改为按"曲线在本块区间内的取值"判等后，只有与编辑
+                // 区间相交的块失效，未相交的块保持命中。
+                let hash = crate::synth_clip_cache::compute_param_hash(
                     &clip_id,
                     chunk_start,
                     chunk_end,
@@ -330,14 +343,14 @@ impl HiFiGanRenderer {
             &|mel_start: usize, mel_end: usize, wf: Vec<f32>| {
                 let chunk_start = seg_start + mel_start as u64 * model_hop;
                 let chunk_end = seg_start + mel_end as u64 * model_hop;
-                // 同站点 1：chunk 的哈希必须绑定**实际送入推理的波形片段**。
-                // 张力改变会改变 `ctx.mono_pcm`（进而改变每个 chunk 的输入），
-                // 而参数哈希不变 —— 不绑定波形就会命中陈旧 chunk。
-                // 该 mel 窗口对应的样本区间为 [mel_start, mel_end) × model_hop。
-                let pcm_lo = (mel_start * model_hop as usize).min(ctx.mono_pcm.len());
-                let pcm_hi = (mel_end * model_hop as usize).min(ctx.mono_pcm.len());
-                let hash = crate::synth_clip_cache::compute_chunk_hash_with_pcm(
-                    &ctx.mono_pcm[pcm_lo..pcm_hi],
+                // 同站点 1：用参数哈希（**不含波形指纹**），张力曲线按本块区间切片。
+                //
+                // 【为什么不再指纹化波形】波形指纹必须 bit-exact 才有意义，而
+                // Rd 张力对整段做 STFT/ISTFT，未编辑处的往返误差虽仅 2e-16，
+                // 却足以让**每个** chunk 的指纹都变化 ⇒ 改 1 秒也要整段重推理
+                // （已实测）。改为按"曲线在本块区间内的取值"判等后，只有与编辑
+                // 区间相交的块失效，未相交的块保持命中。
+                let hash = crate::synth_clip_cache::compute_param_hash(
                     &clip_id,
                     chunk_start,
                     chunk_end,
