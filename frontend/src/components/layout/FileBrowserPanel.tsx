@@ -1642,11 +1642,6 @@ export const FileBrowserPanel: React.FC = () => {
                             }}
                         />
                         <PanelToolbarButton
-                            icon={<FolderIcon />}
-                            tooltip={tf("fb_open_folder")}
-                            onClick={() => void handleOpenFolder()}
-                        />
-                        <PanelToolbarButton
                             icon={<ReloadIcon />}
                             tooltip={tf("fb_refresh")}
                             onClick={handleRefresh}
@@ -1830,74 +1825,87 @@ export const FileBrowserPanel: React.FC = () => {
                 )}
             </div>
 
-            {/* 路径栏：后退 / 前进 / 上级 + 可编辑路径 */}
-            {fb.currentPath && (
-                <Flex
-                    align="center"
-                    gap="1"
-                    className="px-2 py-1 border-b border-qt-border shrink-0 min-h-[28px]"
-                >
-                    <IconButton
-                        size="1"
-                        variant="ghost"
-                        color="gray"
-                        data-tooltip={t("fb_nav_back")}
-                        disabled={!canGoBack}
-                        onClick={goBack}
-                    >
-                        <ChevronLeftIcon />
-                    </IconButton>
-                    <IconButton
-                        size="1"
-                        variant="ghost"
-                        color="gray"
-                        data-tooltip={t("fb_nav_forward")}
-                        disabled={!canGoForward}
-                        onClick={goForward}
-                    >
-                        <ChevronRightIcon />
-                    </IconButton>
-                    <IconButton
-                        size="1"
-                        variant="ghost"
-                        color="gray"
-                        data-tooltip={tf("fb_parent_dir")}
-                        onClick={handleParentDir}
-                    >
-                        <ChevronUpIcon />
-                    </IconButton>
-                    {pathDraft === null ? (
-                        <span
-                            className="hs-type-label truncate flex-1 cursor-text"
-                            data-tooltip={isComputerLevel ? tf("fb_computer") : fb.currentPath}
-                            onClick={() => setPathDraft(isComputerLevel ? "" : fb.currentPath)}
+            {/* 导航栏：后退 / 前进 / 上级 + 可编辑路径 + 「打开文件夹」。
+                「打开文件夹」放在这里（路径输入框最右侧）：它回答的正是"去哪"，
+                与这一排的导航动作同属一件事 —— 放在顶部工具条里反而离它的语义最远。
+                整排**始终渲染**：路径为空时它是"打开一个文件夹"的唯一常驻入口。 */}
+            <Flex
+                align="center"
+                gap="1"
+                className="px-2 py-1 border-b border-qt-border shrink-0 min-h-[28px]"
+            >
+                {fb.currentPath && (
+                    <>
+                        <IconButton
+                            size="1"
+                            variant="ghost"
+                            color="gray"
+                            data-tooltip={t("fb_nav_back")}
+                            disabled={!canGoBack}
+                            onClick={goBack}
                         >
-                            {isComputerLevel ? tf("fb_computer") : fb.currentPath}
-                        </span>
-                    ) : (
-                        <input
-                            autoFocus
-                            className="hs-type-label flex-1 min-w-0 bg-qt-base rounded px-1 outline-none"
-                            style={{ border: "1px solid var(--qt-border)" }}
-                            value={pathDraft}
-                            aria-label={t("fb_path_edit_tooltip")}
-                            onChange={(e) => setPathDraft(e.target.value)}
-                            onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                    e.preventDefault();
-                                    const next = pathDraft.trim();
-                                    setPathDraft(null);
-                                    if (next) navigateTo(next);
-                                } else if (e.key === "Escape") {
-                                    e.preventDefault();
-                                    setPathDraft(null);
-                                }
-                            }}
-                            onBlur={() => setPathDraft(null)}
-                        />
-                    )}
-                </Flex>
-            )}
+                            <ChevronLeftIcon />
+                        </IconButton>
+                        <IconButton
+                            size="1"
+                            variant="ghost"
+                            color="gray"
+                            data-tooltip={t("fb_nav_forward")}
+                            disabled={!canGoForward}
+                            onClick={goForward}
+                        >
+                            <ChevronRightIcon />
+                        </IconButton>
+                        <IconButton
+                            size="1"
+                            variant="ghost"
+                            color="gray"
+                            data-tooltip={tf("fb_parent_dir")}
+                            onClick={handleParentDir}
+                        >
+                            <ChevronUpIcon />
+                        </IconButton>
+                        {pathDraft === null ? (
+                            <span
+                                className="hs-type-label truncate flex-1 cursor-text"
+                                data-tooltip={isComputerLevel ? tf("fb_computer") : fb.currentPath}
+                                onClick={() => setPathDraft(isComputerLevel ? "" : fb.currentPath)}
+                            >
+                                {isComputerLevel ? tf("fb_computer") : fb.currentPath}
+                            </span>
+                        ) : (
+                            <input
+                                autoFocus
+                                className="hs-type-label flex-1 min-w-0 bg-qt-base rounded px-1 outline-none"
+                                style={{ border: "1px solid var(--qt-border)" }}
+                                value={pathDraft}
+                                aria-label={t("fb_path_edit_tooltip")}
+                                onChange={(e) => setPathDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === "Enter") {
+                                        e.preventDefault();
+                                        const next = pathDraft.trim();
+                                        setPathDraft(null);
+                                        if (next) navigateTo(next);
+                                    } else if (e.key === "Escape") {
+                                        e.preventDefault();
+                                        setPathDraft(null);
+                                    }
+                                }}
+                                onBlur={() => setPathDraft(null)}
+                            />
+                        )}
+                    </>
+                )}
+                {/* `marginLeft: auto`：路径为空时这一排没有 `flex-1` 元素，
+                    按钮仍应贴在右侧（与路径非空时的位置一致）。 */}
+                <AppIconButton
+                    tooltip={tf("fb_open_folder")}
+                    onClick={() => void handleOpenFolder()}
+                    style={{ flexShrink: 0, marginLeft: "auto" }}
+                    icon={<FolderIcon />}
+                />
+            </Flex>
 
             {/* 文件列表。
                 用原生滚动容器而不是 Radix ScrollArea：窗口化需要**自己**读写
@@ -2050,21 +2058,9 @@ export const FileBrowserPanel: React.FC = () => {
                 </div>
             )}
 
-            {/* 底部音量滑块 + 点击试听开关 —— 两者回答同一个问题（"点一下会发生什么"），
-                所以同一行。开关放行末：滑块是 flex-1，放它前面会压缩滑块。 */}
+            {/* 底部：点击试听开关 + 音量滑块 —— 两者回答同一个问题（"点一下会发生什么"），
+                所以同一行。开关放行首（音量控件的最左侧）。 */}
             <Flex align="center" gap="2" className="px-2 py-1.5 border-t border-qt-border shrink-0">
-                <SpeakerLoudIcon width="14" height="14" className="text-qt-text-muted shrink-0" />
-                <AppSlider
-                    value={Math.round(fb.previewVolume * 100)}
-                    unit="percent"
-                    min={0}
-                    max={100}
-                    ariaLabel={tf("fb_preview_volume")}
-                    onChange={(next) => {
-                        dispatch(setPreviewVolume(next / 100));
-                    }}
-                />
-                <AppSliderReadout>{Math.round(fb.previewVolume * 100)}%</AppSliderReadout>
                 <AppIconButton
                     active={view.previewOnClick}
                     // 表达"这个功能开着"，必须显式声明 accent（默认 neutral 是灰的）。
@@ -2078,6 +2074,18 @@ export const FileBrowserPanel: React.FC = () => {
                     style={{ width: "var(--qt-ctl-sm)", height: "var(--qt-ctl-sm)", flexShrink: 0 }}
                     icon={<PlayIcon />}
                 />
+                <SpeakerLoudIcon width="14" height="14" className="text-qt-text-muted shrink-0" />
+                <AppSlider
+                    value={Math.round(fb.previewVolume * 100)}
+                    unit="percent"
+                    min={0}
+                    max={100}
+                    ariaLabel={tf("fb_preview_volume")}
+                    onChange={(next) => {
+                        dispatch(setPreviewVolume(next / 100));
+                    }}
+                />
+                <AppSliderReadout>{Math.round(fb.previewVolume * 100)}%</AppSliderReadout>
             </Flex>
 
             {/* 拖拽 ghost 元素 */}
