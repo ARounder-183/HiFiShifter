@@ -96,14 +96,6 @@ fn invalidate_rendered_clip_caches_for_child_track(
         }
     }
     {
-        let mut tension_cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        for clip_id in &clip_ids {
-            tension_cache.invalidate(clip_id);
-        }
-    }
-    {
         let mut noise_cache = crate::synth_clip_cache::global_breath_noise_cache()
             .lock()
             .unwrap_or_else(|e| e.into_inner());

@@ -155,7 +155,8 @@ const RENDER_SUMMARY_SETTLE_MS: u64 = 3_000;
 ///
 /// 兜底窗口用它判断"等待期间是否又有新一轮完成"：有则重新计时，避免在加载
 /// 尚未收敛时抢先上报中途值。
-static BG_RENDER_PASS_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BG_RENDER_PASS_EPOCH: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// 兜底上报线程是否已在等待窗口结束（同一窗口内的重复请求合流）。
 static BG_RENDER_SETTLE_TIMER_ACTIVE: std::sync::atomic::AtomicBool =
@@ -327,7 +328,12 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         // 因此已在播放（且目标为时间线）时直接返回：只确保渲染需求被覆盖，
         // 绝不再 seek / update_timeline / set_playing。
         if state.audio_engine.is_playing()
-            && state.audio_engine.snapshot_state().target.as_deref() == Some("original")
+            && state
+                .audio_engine
+                .snapshot_state()
+                .target
+                .as_deref()
+                == Some("original")
         {
             if need_prerender && !BG_RENDER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
                 if let Some(app) = state.app_handle.get() {
@@ -375,106 +381,6 @@ struct RenderedClipOutput {
     breath_noise_stereo: Option<Vec<f32>>,
 }
 
-fn ensure_hifigan_tension_cache(
-    timeline: &crate::state::TimelineState,
-    clip: &crate::state::Clip,
-    out_rate: u32,
-    base_param_hash: u64,
-    base_pcm_stereo: &[f32],
-) -> Result<
-    (
-        Option<crate::synth_clip_cache::TensionRenderedClipCacheKey>,
-        bool,
-    ),
-    String,
-> {
-    let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
-        return Ok((None, false));
-    };
-    let Some(entry) = timeline.params_by_root_track.get(&root) else {
-        return Ok((None, false));
-    };
-    let Some(track) = timeline.tracks.iter().find(|track| track.id == root) else {
-        return Ok((None, false));
-    };
-
-    let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
-    if !matches!(kind, crate::state::SynthPipelineKind::NsfHifiganOnnx) {
-        return Ok((None, false));
-    }
-    let clip_start_sec = clip.start_sec.max(0.0);
-    if !crate::pitch_editing::hifigan_tension_active_for_clip(entry, clip, clip_start_sec) {
-        return Ok((None, false));
-    }
-
-    let start_frame = (clip_start_sec * out_rate as f64).round() as u64;
-    let end_frame = start_frame
-        + (clip.length_sec.max(0.0) * out_rate as f64)
-            .round()
-            .max(1.0) as u64;
-    let frame_period_ms = entry.frame_period_ms.max(0.1);
-    let tension_curve = crate::pitch_editing::hifigan_tension_curve_for_clip(entry, clip);
-    let tension_hash = crate::synth_clip_cache::compute_hifigan_tension_hash(
-        &clip.id,
-        base_param_hash,
-        start_frame,
-        end_frame,
-        out_rate,
-        frame_period_ms,
-        &entry.pitch_orig,
-        tension_curve,
-    );
-    let cache_key = crate::synth_clip_cache::TensionRenderedClipCacheKey {
-        clip_id: clip.id.clone(),
-        base_param_hash,
-        tension_hash,
-    };
-
-    {
-        let mut cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if cache.get(&cache_key).is_some() {
-            return Ok((Some(cache_key), false));
-        }
-    }
-
-    // 【持久化缓存读回】张力变体：内存未命中时回退磁盘（渲染线程内）。
-    if crate::render_cache::enabled() {
-        if let Some(loaded) = crate::render_cache::load_tension(&cache_key, out_rate) {
-            let mut cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            cache.insert(cache_key.clone(), loaded);
-            return Ok((Some(cache_key), false));
-        }
-    }
-
-    let tensioned = crate::hifigan_tension::apply_tension_to_stereo(
-        base_pcm_stereo,
-        out_rate,
-        clip_start_sec,
-        frame_period_ms,
-        &entry.pitch_orig,
-        &entry.pitch_edit,
-        tension_curve,
-    )?;
-    let frames = (tensioned.len() / 2) as u64;
-    let entry = crate::synth_clip_cache::TensionRenderedClipCacheEntry {
-        pcm_stereo: std::sync::Arc::new(tensioned),
-        frames,
-        sample_rate: out_rate,
-        rendered_take_id: clip.active_take_id.clone(),
-    };
-    // 【持久化】张力变体异步落盘。
-    crate::render_cache::store_tension(&cache_key, &entry);
-    let mut cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    cache.insert(cache_key.clone(), entry);
-    Ok((Some(cache_key), true))
-}
-
 /// miss 归因：逐个排除最易漂移的输入后重算哈希，并探测磁盘上是否存在该变体。
 ///
 /// 渲染键是不可逆的摘要，单看两个哈希无法知道"哪个输入变了"。但排除某项后重算
@@ -484,11 +390,7 @@ fn ensure_hifigan_tension_cache(
 ///
 /// 仅在 `HIFISHIFTER_RENDER_CACHE_LOG=1` 下调用：每个 miss 要多算若干次哈希
 /// （含曲线切片），不能进常规路径。
-fn log_render_key_drift(
-    timeline: &crate::state::TimelineState,
-    clip: &crate::state::Clip,
-    sr: u32,
-) {
+fn log_render_key_drift(timeline: &crate::state::TimelineState, clip: &crate::state::Clip, sr: u32) {
     use crate::synth_clip_cache::{compute_rendered_clip_hash_excluding, HashExclusions};
 
     let scale_signature = timeline.render_scale_signature();
@@ -539,8 +441,7 @@ fn collect_clips_needing_render(
         else {
             continue;
         };
-        let kind =
-            crate::state::SynthPipelineKind::from_track_algo(&material.track.pitch_analysis_algo);
+        let kind = crate::state::SynthPipelineKind::from_track_algo(&material.track.pitch_analysis_algo);
         let renderer_id = crate::renderer::get_renderer(kind).id();
 
         // 渲染参数哈希：与渲染线程、快照回退共用同一份输入口径。
@@ -650,9 +551,7 @@ fn retain_clips_needing_work(clips: &mut Vec<ClipRenderInfo>) -> usize {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let completed = completed_clip_ids(
-        clips
-            .iter()
-            .map(|info| (info.clip.id.as_str(), &info.cache_key)),
+        clips.iter().map(|info| (info.clip.id.as_str(), &info.cache_key)),
         &registered,
         |key| cache.contains_key(key),
     );
@@ -1176,13 +1075,7 @@ fn render_single_clip(
         };
         let mut planes = Vec::with_capacity(channels_mono.len());
         for (ch_idx, ch_mono) in channels_mono.iter().enumerate() {
-            match crate::hnsep_onnx::infer_noise_mono(
-                &clip.id,
-                ch_mono,
-                out_rate,
-                ch_idx as u16,
-                clip.source_file_fingerprint,
-            ) {
+            match crate::hnsep_onnx::infer_noise_mono(&clip.id, ch_mono, out_rate, ch_idx as u16, clip.source_file_fingerprint) {
                 Ok(noise) => planes.push(noise),
                 Err(e) => {
                     log::warn!(
@@ -1538,8 +1431,7 @@ fn start_background_render_inner(
     crate::commands::render_summary::set_project_total(unfiltered_total);
     // 渲染输入稳定性卫兵（按根记忆收敛判定，见 root_pitch_assembly_pending）：
     // 未收敛根的 clip 跳过并计入 pending，由完成回调链条在收敛后补触发渲染。
-    let mut root_settled: std::collections::HashMap<String, bool> =
-        std::collections::HashMap::new();
+    let mut root_settled: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
     clips_to_render.retain(|info| {
         let root_key = timeline
             .resolve_root_track_id(&info.clip.track_id)
@@ -1641,12 +1533,6 @@ fn start_background_render_inner(
             .unwrap_or_else(|e| e.into_inner());
         let required = rendered_cache.len().saturating_add(total);
         rendered_cache.ensure_capacity(required);
-    }
-    {
-        let mut tension_cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        tension_cache.ensure_capacity(total.max(1));
     }
     {
         let breath_clips = total;
@@ -1872,7 +1758,9 @@ fn schedule_settled_render_cache_summary(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         loop {
             let seen = BG_RENDER_PASS_EPOCH.load(Ordering::Acquire);
-            std::thread::sleep(std::time::Duration::from_millis(RENDER_SUMMARY_SETTLE_MS));
+            std::thread::sleep(std::time::Duration::from_millis(
+                RENDER_SUMMARY_SETTLE_MS,
+            ));
             // 又有 pass 完成（含工程切换）→ 重新计时，并让本轮改判新的工程状态。
             if BG_RENDER_PASS_EPOCH.load(Ordering::Acquire) != seen {
                 continue;
@@ -1945,7 +1833,6 @@ fn render_background_pass(
         let mut disk_load_elapsed = std::time::Duration::ZERO;
         let mut cache_probe_elapsed = std::time::Duration::ZERO;
         let mut render_elapsed = std::time::Duration::ZERO;
-        let mut tension_elapsed = std::time::Duration::ZERO;
         let mut cancelled = false;
         let mut pending_clip_ids_written: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -2165,7 +2052,10 @@ fn render_background_pass(
 
                         // 【持久化】渲染产物异步落盘（不阻塞渲染线程）。总开关、
                         // 片段时长下限、单条上限、磁盘保留空间等过滤在 store_* 内。
-                        crate::render_cache::store_rendered(&clip_render_info.cache_key, &entry);
+                        crate::render_cache::store_rendered(
+                            &clip_render_info.cache_key,
+                            &entry,
+                        );
 
                         base_entry = Some(entry);
                         render_success_count += 1;
@@ -2210,57 +2100,19 @@ fn render_background_pass(
                 }
             }
 
-            if let Some(base_entry) = base_entry.as_ref() {
-                let tension_started_at = std::time::Instant::now();
-                match ensure_hifigan_tension_cache(
-                    &timeline,
-                    &clip_render_info.clip,
-                    clip_render_info.sr,
-                    clip_render_info.cache_key.param_hash,
-                    base_entry.pcm_stereo.as_slice(),
-                ) {
-                    Ok((_, tension_generated)) => {
-                        tension_elapsed += tension_started_at.elapsed();
-                        if tension_generated && !rendering_started {
-                            rendering_started = true;
-                            let _ = app.emit(
-                                "playback_rendering_state",
-                                PlaybackRenderingStateEvent {
-                                    active: true,
-                                    progress: Some(crate::renderer::progress::current_fraction()),
-                                    target: Some("background".to_string()),
-                                },
-                            );
-                        }
-                        if let Ok(mut state_mgr) =
-                            crate::clip_rendering_state::global_clip_rendering_state().lock()
-                        {
-                            state_mgr.set_state(
-                                &clip_render_info.clip.id,
-                                crate::clip_rendering_state::ClipRenderingState::Ready,
-                                1.0,
-                                None,
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tension_elapsed += tension_started_at.elapsed();
-                        log::error!(
-                            "[bg_render] tension render failed: clip_id={} err={}",
-                            clip_render_info.clip.id,
-                            e
-                        );
-                        if let Ok(mut state_mgr) =
-                            crate::clip_rendering_state::global_clip_rendering_state().lock()
-                        {
-                            state_mgr.set_state(
-                                &clip_render_info.clip.id,
-                                crate::clip_rendering_state::ClipRenderingState::Failed,
-                                0.0,
-                                Some(e.clone()),
-                            );
-                        }
-                    }
+            // 张力不再有独立的缓存变体：它已迁移为声码器内部的 mel 域操作
+            //（`audio/rd_tension.rs`），随 `RenderedClipCache` 一起产出，
+            // 因此这里无需额外的渲染 pass。
+            if base_entry.is_some() {
+                if let Ok(mut state_mgr) =
+                    crate::clip_rendering_state::global_clip_rendering_state().lock()
+                {
+                    state_mgr.set_state(
+                        &clip_render_info.clip.id,
+                        crate::clip_rendering_state::ClipRenderingState::Ready,
+                        1.0,
+                        None,
+                    );
                 }
             }
 
@@ -2375,7 +2227,7 @@ fn render_background_pass(
 
         if cache_log {
             log::warn!(
-                "[bg_render][cache] DONE total={} hit={} disk_hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} disk_load_ms={:.2} render_ms={:.2} tension_ms={:.2} total_ms={:.2}",
+                "[bg_render][cache] DONE total={} hit={} disk_hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} disk_load_ms={:.2} render_ms={:.2} total_ms={:.2}",
                 total,
                 cache_hit_count,
                 disk_hit_count,
@@ -2385,7 +2237,6 @@ fn render_background_pass(
                 cache_probe_elapsed.as_secs_f64() * 1000.0,
                 disk_load_elapsed.as_secs_f64() * 1000.0,
                 render_elapsed.as_secs_f64() * 1000.0,
-                tension_elapsed.as_secs_f64() * 1000.0,
                 started_at.elapsed().as_secs_f64() * 1000.0
             );
         }

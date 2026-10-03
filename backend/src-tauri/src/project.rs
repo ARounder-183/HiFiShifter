@@ -98,7 +98,13 @@ impl SynthConfig {
 /// （附件登记表 —— 图片与 HiFiShifter 剪贴板载荷，字节以 base64 **内嵌在
 /// 工程文件里**，因此工程自包含：拷走/分享/打包都不会丢图）。两者都带
 /// `serde(default)`，缺省为空，旧文件照常打开。
-pub const CURRENT_PROJECT_FILE_VERSION: u32 = 5;
+/// 当前工程文件格式版本。
+///
+/// v6：气声分离开关（`breath_enabled`）开始同时门控张力。为避免旧工程静默失去
+/// 张力，打开 v5 及更早的工程时会自动置位该开关（见
+/// [`crate::state::TimelineState::migrate_legacy_breath_separation`]）；
+/// 该迁移**仅对 < v6 生效**，因此用户此后手动关闭开关的选择会持久保留。
+pub const CURRENT_PROJECT_FILE_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -221,6 +227,7 @@ pub fn load_project_file(bytes: &[u8]) -> Result<ProjectFile, String> {
     if let Ok(mut pf) = rmp_serde::from_slice::<ProjectFile>(bytes) {
         pf.timeline.normalize_clip_takes();
         pf.timeline.migrate_legacy_common_param_curves();
+        pf.timeline.migrate_legacy_breath_separation(pf.version);
         pf.timeline.restore_derived_clip_fields();
         pf.timeline.sync_clip_takes_from_flat();
         return Ok(pf);
@@ -231,6 +238,7 @@ pub fn load_project_file(bytes: &[u8]) -> Result<ProjectFile, String> {
         .map(|mut pf: ProjectFile| {
             pf.timeline.normalize_clip_takes();
             pf.timeline.migrate_legacy_common_param_curves();
+            pf.timeline.migrate_legacy_breath_separation(pf.version);
             pf.timeline.restore_derived_clip_fields();
             pf.timeline.sync_clip_takes_from_flat();
             pf
@@ -591,6 +599,9 @@ pub fn finalize_timeline_for_session(
     // 指纹 / 波形等被序列化省略的字段），并顺带完成旧 Fade 字段迁移。
     tl.normalize_clip_takes();
     tl.migrate_legacy_common_param_curves();
+    // 张力/气声曲线存在但开关未开 ⇒ 自动置位开关（否则会静默失去效果，见该函数说明）。
+    // 传入版本号以**只跑一次**：见该函数的 one-shot 说明。
+    tl.migrate_legacy_breath_separation(project_file_version);
     // 归一化轨道顺序（Vec 顺序 == 显示顺序）与 Tempo Map（排序/钳制/补 0 点）。
     tl.normalize_track_vec();
     tl.normalize_tempo_map();
@@ -1065,17 +1076,25 @@ mod tests {
         let bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
         let text = std::str::from_utf8(&bytes).unwrap();
         assert!(!text.contains('\n'), "JSON project should be compact");
-        assert!(text.contains("\"version\":5"));
+        // 用常量而非字面量：版本号每 bump 一次都改测试是纯噪音，
+        // 这条测试要钉的是"输出是紧凑 JSON 且带 version 字段"。
+        assert!(text.contains(&format!("\"version\":{}", CURRENT_PROJECT_FILE_VERSION)));
     }
 
     #[test]
     fn project_file_version_can_be_read_without_full_timeline_parse() {
         let pf = project_file_with_clip(TimelineState::default());
         let json_bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
-        assert_eq!(read_project_file_version(&json_bytes), Some(5));
+        assert_eq!(
+            read_project_file_version(&json_bytes),
+            Some(CURRENT_PROJECT_FILE_VERSION)
+        );
 
         let msgpack_bytes = serialize_project_file_for_path(&pf, Path::new("test.hshp")).unwrap();
-        assert_eq!(read_project_file_version(&msgpack_bytes), Some(5));
+        assert_eq!(
+            read_project_file_version(&msgpack_bytes),
+            Some(CURRENT_PROJECT_FILE_VERSION)
+        );
     }
 
     #[test]

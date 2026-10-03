@@ -478,6 +478,11 @@ export const zhCN = {
     pitch_label: "音高（半音）",
     tension_label: "张力（0-1）",
     breath_mode_label: "气声",
+    breath_separation_label: "气声分离",
+    breath_separation_tooltip:
+        "把音频块分离为谐波与噪声两部分（HNSEP）。\n会增加额外的渲染成本：首次开启需要对每个音频块做一次分离，可能较慢。\n关闭时完全不走 HNSEP，气声音量与张力都不产生任何效果。\n两者都依赖它：气声音量控制噪声部分的混入量，张力只重塑谐波部分。",
+    separation_required_tooltip:
+        "不可用：请先开启「气声分离」。气声音量与张力都依赖它。",
     breath_gain_label: "气声音量",
     hifigan_tension_label: "张力",
     formant_shift_label: "共振峰偏移",

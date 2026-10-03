@@ -38,6 +38,24 @@ use std::sync::{Mutex, OnceLock};
 /// sessions themselves stay fully dynamic.
 pub const SMOKE_TEST_FRAMES: usize = 4096;
 
+/// 烟测探针里 `time`/`n_frames` 这类**帧轴**用的长度上限。
+///
+/// 【为什么不能对所有动态维都用 [`SMOKE_TEST_FRAMES`]】该值是为声码器的 1-D
+/// `time` 轴选的。HNSEP 的 mask-only 模型输入是 `[batch, 2, 1025, n_frames]`，
+/// 若把 4096 套到**每一个**动态维，探针张量会变成 `[1, 2, 1025, 4096]` ——
+/// **32 MB**，而波形域旧模型只要 16 KB（差 2000 倍）。烟测只需证明"EP 能跑通
+/// 一次推理"，不需要真实批量，故按角色给一个小而合法的帧数。
+///
+/// 取值须满足各模型对帧轴的整除约束：HNSEP 要求 `n_frames % 32 == 0`。
+fn smoke_probe_frames(role: OrtSessionRole) -> usize {
+    match role {
+        // 32 帧 = 一个完整 segment，是模型要求的最小合法长度。
+        OrtSessionRole::Separator => 32,
+        // 声码器/音高检测沿用原值：它们的中间形状依赖该长度才能与固定维对齐。
+        OrtSessionRole::Vocoder | OrtSessionRole::PitchDetector => SMOKE_TEST_FRAMES,
+    }
+}
+
 /// 烟测（首次推理预热）超时。
 ///
 /// 健康的首次推理只需 0.15~1.7s（含 DML 着色器编译）；超时意味着 EP 在
@@ -402,12 +420,24 @@ fn resolve_dml_device_id() -> Option<i32> {
 
 /// Default EP for each role when nothing is explicitly configured.
 ///
-/// Only HNSEP (Separator) deviates: it defaults to CPU because the CoreML EP
-/// was measured to give it essentially no speedup (5 s clip: 310 ms CPU vs
-/// 304 ms CoreML; 10 s clip: 553 ms vs 531 ms — ~2-4%) while adding 0.6-1.2 s
-/// of one-off CoreML model compilation.  HNSEP separation is cached per clip
-/// and therefore runs once per clip, so the extra compilation cost is not
-/// amortised.  See `docs/hifigan-gpu-acceleration.md`.
+/// Only HNSEP (Separator) deviates, and the reason is now **input-length
+/// dependent** rather than "GPU does not help here":
+///
+/// HNSEP moved to a mask-only (spectrum-domain) model, so the graph is just the
+/// mask network and the STFT/ISTFT run in Rust.  That made CoreML worthwhile on
+/// short clips -- measured 1.29x at 2 s, 1.90x at 10 s, ~2.0-2.4x up to 45 s.
+///
+/// But CoreML then **degrades sharply past ~45-50 s**: at 50 s it takes 4953 ms
+/// against 3732 ms on CPU (0.75x), and at 60 s 6749 ms vs 4377 ms (0.65x).
+/// Reproduced across repeated runs, so it is not noise.  Since a single default
+/// cannot be right for both regimes, the default stays CPU and users who want
+/// the short-clip win can opt in per model with
+/// `HIFISHIFTER_HNSEP_ORT_EP=coreml`.
+///
+/// TODO: pick the EP by input length (CPU above ~40 s), or find the root cause of
+/// the CoreML long-input regression, and then flip this default.
+///
+/// Measurements and methodology: `docs/hifigan-gpu-acceleration.md` §4.1.
 fn default_ep_for_role(role: OrtSessionRole) -> &'static str {
     match role {
         OrtSessionRole::Separator => "cpu",
@@ -902,11 +932,12 @@ fn smoke_test_gpu_session(
             continue; // scalar or zero-dim - skip
         }
         // Replace dynamic dimensions (-1) with realistic test values:
-        //   dim 0 -> 1 (batch),  other dims -> SMOKE_TEST_FRAMES.
+        //   dim 0 -> 1 (batch),  other dims -> the role's probe length.
         // Tiny values (e.g. 4) make ORT's buffer-reuse optimizer collide
         // with the model's fixed intermediate shapes ("{1,4,1} !=
-        // {1,2048,1}"), so use the same frame length the app actually runs.
-        let fallback_dim = SMOKE_TEST_FRAMES as i64;
+        // {1,2048,1}"), so use a length the model accepts;
+        // see `smoke_probe_frames` for why it is role-dependent.
+        let fallback_dim = smoke_probe_frames(role) as i64;
         let test_shape: Vec<usize> = shape
             .iter()
             .enumerate()
@@ -1228,10 +1259,34 @@ fn create_dml_session(
         // best when shapes are known at session creation time because it
         // can pre-compile shaders and optimize GPU memory layouts. Dynamic
         // dimensions force DML to use less-optimized generic kernels.
+        //
+        // 【只对声码器生效】这两个覆盖依赖模型**导出的维度名**：
+        //   - `with_dimension_override("batch", 1)` 按维度**名**匹配
+        //   - `with_dimension_override_by_denotation("time", 4096)` 按 denotation 匹配
+        // NSF-HiFiGAN / FCPE 用 `batch` / `time`，而 HNSEP 的 mask-only 模型用
+        // `batch_size` / `n_frames`（已实测确认）—— 对它两者都是 **no-op**：
+        // 不报错，但也固定不住任何维度，DML 仍走通用 kernel。
+        //
+        // 这不会造成失败，但也不能留着装作"已优化"：更危险的是**万一将来**
+        // HNSEP 的维度被改名成 `time`，4096 会被当成谱帧数套到一个
+        // `[batch, 2, 1025, n_frames]` 的 4-D 输入上 —— 那会把隐式
+        // `time` 维（若存在）固定成 4096，与 HNSEP 要求的 `n_frames % 32 == 0`
+        // 及真实帧数都无关，属于静默的语义错配。
+        // 因此显式按角色门控：只有声码器/音高检测固定 `time`。
         .with_dimension_override("batch", 1)
-        .map_err(|e| format!("override batch dim failed: {e}"))?
-        .with_dimension_override_by_denotation("time", 4096)
-        .map_err(|e| format!("override time dim failed: {e}"))?;
+        .map_err(|e| format!("override batch dim failed: {e}"))?;
+
+    // `time` 维的固定单独按角色施加（`builder` 在此处仍是不可变绑定，
+    // 需要一次可变重绑定才能追加这个条件性的构建器步骤）。
+    let mut builder = builder;
+    if matches!(
+        role,
+        OrtSessionRole::Vocoder | OrtSessionRole::PitchDetector
+    ) {
+        builder = builder
+            .with_dimension_override_by_denotation("time", 4096)
+            .map_err(|e| format!("override time dim failed: {e}"))?;
+    }
 
     if strict {
         // Disable CPU fallback: if ANY op can't run on DirectML, session
@@ -1561,5 +1616,68 @@ impl Drop for EpOverrideGuard {
     fn drop(&mut self) {
         // Restore runtime override
         set_runtime_ep_override(self.prev_override.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{smoke_probe_frames, OrtSessionRole, SMOKE_TEST_FRAMES};
+
+    /// 烟测探针的帧数必须按角色区分。
+    ///
+    /// 【为什么必须钉住】`SMOKE_TEST_FRAMES`(4096) 是为声码器的 1-D `time` 轴选的。
+    /// HNSEP 的 mask-only 模型输入是 `[batch, 2, 1025, n_frames]`；若把 4096 套到
+    /// **每个**动态维，探针张量是 `[1, 2, 1025, 4096]` = **32 MB**（旧波形域模型
+    /// 只要 16 KB）。烟测只为证明"EP 能跑通一次推理"，不该分配几十 MB。
+    #[test]
+    fn smoke_probe_frames_are_role_specific() {
+        assert_eq!(
+            smoke_probe_frames(OrtSessionRole::Separator),
+            32,
+            "HNSEP probe must stay small"
+        );
+        assert_eq!(
+            smoke_probe_frames(OrtSessionRole::Vocoder),
+            SMOKE_TEST_FRAMES
+        );
+        assert_eq!(
+            smoke_probe_frames(OrtSessionRole::PitchDetector),
+            SMOKE_TEST_FRAMES
+        );
+    }
+
+    /// HNSEP 探针长度必须满足模型对帧轴的整除约束（`n_frames % 32 == 0`）。
+    ///
+    /// 【为什么重要】该约束来自 `hnsep_dsp::SEGMENT_FRAMES`（网络要求帧数是 32 的
+    /// 倍数，见该常量说明）。探针若给出非法帧数，DML/CoreML 可能仅在烟测阶段失败，
+    /// 表现为"GPU 不可用"而实际是探针长度选错 —— 极难定位。
+    #[test]
+    fn hnsep_probe_frames_satisfy_model_divisibility() {
+        let f = smoke_probe_frames(OrtSessionRole::Separator);
+        assert_eq!(f % 32, 0, "HNSEP probe frames {f} must be a multiple of 32");
+        assert!(f >= 32, "must fit at least one segment, got {f}");
+    }
+
+    /// 探针张量规模必须保持在**千字节级**，不得因新增模型而膨胀到 MB 级。
+    ///
+    /// 用 HNSEP 的真实形状 `[1, 2, 1025, frames]` 计算并断言上界；
+    /// 这是防止"未来某个模型又套上 4096"的回归闸门。
+    #[test]
+    fn hnsep_probe_tensor_stays_small() {
+        let bins = 1025usize; // n_fft/2 + 1
+        let f = smoke_probe_frames(OrtSessionRole::Separator);
+        let bytes = 1 * 2 * bins * f * std::mem::size_of::<f32>();
+        assert!(
+            bytes <= 512 * 1024,
+            "HNSEP smoke probe would allocate {} KB; keep it small",
+            bytes / 1024
+        );
+        // 与旧值对比：若误用 4096 会是 32 MB
+        let wrong = 1 * 2 * bins * SMOKE_TEST_FRAMES * std::mem::size_of::<f32>();
+        assert!(
+            wrong > 16 * 1024 * 1024,
+            "sanity: the naive 4096 would indeed be huge ({})",
+            wrong
+        );
     }
 }

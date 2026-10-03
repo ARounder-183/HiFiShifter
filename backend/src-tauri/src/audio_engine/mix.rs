@@ -116,7 +116,14 @@ impl TrackMeterBus {
     }
 }
 
-fn sample_automation_curve(
+/// 在绝对帧处采样一条自动化曲线。
+///
+/// **越界语义 = hold-last**（保持末值）。这是渲染侧
+/// `renderer::chain::sample_curve_at_abs_sec` 的对照实现：两者处理同一条
+/// `breath_gain` 曲线（预览走本函数、导出走 chain 的那个），越界语义必须一致，
+/// 否则会出现"预览保持末值、导出弹回默认增益"的分裂听感。
+/// 由 `renderer::chain` 的一致性测试跨模块调用，故为 `pub(crate)`。
+pub(crate) fn sample_automation_curve(
     curve: Option<&[f32]>,
     abs_frame: u64,
     sample_rate: u32,

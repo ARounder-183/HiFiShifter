@@ -2913,6 +2913,119 @@ impl TimelineState {
             }
         }
     }
+
+    /// 旧工程迁移：曲线非默认却未开「气声分离」时，自动置位开关。
+    ///
+    /// # 为什么需要这一步
+    /// 在本次参数对齐之前，张力是**渲染后处理**，与 HNSEP 无关
+    /// （`ensure_hifigan_tension_cache` 独立于 `breath_enabled` 调用）。
+    /// 也就是说：**旧版即使开关关闭，张力曲线也照常生效**。
+    ///
+    /// 而现在张力改成了 Rd 声门模型（只重塑谐波支），必须经由分离；
+    /// 且开关关闭时曲线会被剥离、彻底不参与合成（见
+    /// `pitch_editing::gate_separation_curves`）。若不迁移，
+    /// 那些「画了张力但没开开关」的工程会**静默失去张力效果** ——
+    /// 用户会以为工程坏了。
+    ///
+    /// # 判据
+    /// 曲线**偏离默认值**才算"用户真的编辑过"：
+    /// - `hifigan_tension` 默认 `0.0`
+    /// - `breath_gain` 默认 `1.0`
+    ///
+    /// 刻意不用"曲线是否存在"作为判据：空曲线与全默认值曲线语义等价，
+    /// 按存在性判断会让仅被物化过、实际未编辑的曲线也触发开关，
+    /// 从而无端产生一次 HNSEP 分离开销。
+    ///
+    /// 开关**已开启**时不做任何事（保持用户既有选择）。
+    /// 非有限值（NaN/Inf）不算偏离，与 `TENSION_ACTIVE_EPSILON` 的口径一致。
+    ///
+    /// # 必须只跑一次（`project_file_version` 门控）
+    /// 本迁移是"把旧工程的开关打开"，而**不是**"保证开关是打开的"。
+    /// 二者差别在于：用户可以在打开旧工程后**手动关掉**开关 —— 那是合法且被
+    /// 设计支持的（关掉后曲线仍保留，只是不参与合成）。若每次打开工程都重跑，
+    /// 这个手动选择会在下次打开时被静默改回"开"，张力又出现、音频又变化。
+    ///
+    /// 因此仅在 `project_file_version < 6`（引入本开关语义的版本）时执行；
+    /// 工程一旦以 v6 保存，开关状态就完全由用户决定。
+    /// **不要**改用"开关键是否存在"判断：旧工程里用户把开关关掉时该键同样
+    /// 存在且为 0.0，而那恰是本迁移需要覆盖的情形。
+    pub fn migrate_legacy_breath_separation(&mut self, project_file_version: u32) {
+        use crate::pitch_editing::extra_param_enabled;
+
+        // v6 起开关状态由用户全权决定，不再迁移（见上方 one-shot 说明）。
+        if project_file_version >= 6 {
+            return;
+        }
+
+        /// 曲线是否偏离默认值（全区间）。非有限值不参与判定。
+        ///
+        /// 阈值用与其余"曲线是否生效"判定一致的 `TENSION_ACTIVE_EPSILON`（1e-3），
+        /// **不是** `f32::EPSILON`（1.19e-7）：后者会把肉眼不可见、且按全codebase
+        /// 口径都算"未编辑"的极小值也判为偏离，从而无端打开开关、触发一次
+        /// 昂贵的 HNSEP 渲染并改变音频。
+        fn curve_edited(curve: Option<&Vec<f32>>, default_value: f32) -> bool {
+            curve.is_some_and(|c| {
+                c.iter().any(|v| {
+                    v.is_finite()
+                        && (v - default_value).abs() > crate::renderer::chain::TENSION_ACTIVE_EPSILON
+                })
+            })
+        }
+
+        let has_edited_curves = |curves: &std::collections::HashMap<String, Vec<f32>>| {
+            curve_edited(curves.get("hifigan_tension"), 0.0)
+                || curve_edited(curves.get("breath_gain"), 1.0)
+        };
+
+        // ── 1. 轨道级：决定哪些 root track 需要置位 ────────────────────────
+        let mut needs_switch: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for (root_id, entry) in self.params_by_root_track.iter() {
+            if extra_param_enabled(&entry.extra_params, "breath_enabled") {
+                continue; // 已开启，尊重用户选择
+            }
+            if has_edited_curves(&entry.extra_curves) {
+                needs_switch.insert(root_id.clone());
+            }
+        }
+
+        // ── 2. clip 级覆盖：clip 自带曲线时，其所属 root track 也要置位 ────
+        for clip in &self.clips {
+            let Some(curves) = clip.extra_curves.as_ref() else {
+                continue;
+            };
+            if !has_edited_curves(curves) {
+                continue;
+            }
+            if let Some(root_id) = self.resolve_root_track_id(&clip.track_id) {
+                let already_on = self
+                    .params_by_root_track
+                    .get(&root_id)
+                    .is_some_and(|e| extra_param_enabled(&e.extra_params, "breath_enabled"));
+                if !already_on {
+                    needs_switch.insert(root_id);
+                }
+            }
+        }
+
+        // ── 3. 写入 ────────────────────────────────────────────────────────
+        //
+        // 必须用 `entry().or_default()` 而非 `get_mut()`：只有 clip 级曲线、
+        // 轨道级尚无参数记录的工程，`params_by_root_track` 里**没有**该 root 的条目，
+        // `get_mut` 会返回 `None` 从而**静默跳过**写入 —— 而那正是本迁移要覆盖的
+        // 场景之一（clip 自带曲线绕过轨道级设置）。
+        for root_id in needs_switch {
+            log::info!(
+                "migrate: enabling harmonic separation for root track {root_id} \
+                 (legacy project has non-default breath/tension curves)"
+            );
+            self.params_by_root_track
+                .entry(root_id)
+                .or_default()
+                .extra_params
+                .insert("breath_enabled".to_string(), 1.0);
+        }
+    }
 }
 
 pub struct AppState {
@@ -7681,6 +7794,285 @@ mod tests {
             track_ids_in_vec_order(&tl),
             vec![a, inserted, b],
             "指定插入位时新轨道落在该显示位"
+        );
+    }
+
+    // ── 旧工程迁移：气声/张力曲线非默认 ⇒ 自动置位分离开关 ──────────────
+    //
+    // 背景：旧版张力是渲染后处理，**开关关闭时也生效**。改版后张力依赖分离，
+    // 若不迁移，这些工程会静默失去张力效果。详见
+    // `TimelineState::migrate_legacy_breath_separation`。
+
+    /// 张力曲线非默认 + 开关未开 ⇒ 迁移后开关被置位。
+    #[test]
+    fn migration_enables_switch_for_non_default_tension() {
+        let mut tl = TimelineState::default();
+        let root = tl.tracks[0].id.clone();
+        {
+            let entry = tl.params_by_root_track.entry(root.clone()).or_default();
+            entry
+                .extra_curves
+                .insert("hifigan_tension".to_string(), vec![0.0, 80.0, 0.0]);
+        }
+
+        tl.migrate_legacy_breath_separation(5);
+
+        let on = tl
+            .params_by_root_track
+            .get(&root)
+            .map(|e| crate::pitch_editing::extra_param_enabled(&e.extra_params, "breath_enabled"))
+            .unwrap_or(false);
+        assert!(on, "a non-default tension curve must enable separation on migration");
+    }
+
+    /// 气声曲线非默认 + 开关未开 ⇒ 同样置位。
+    #[test]
+    fn migration_enables_switch_for_non_default_breath_gain() {
+        let mut tl = TimelineState::default();
+        let root = tl.tracks[0].id.clone();
+        {
+            let entry = tl.params_by_root_track.entry(root.clone()).or_default();
+            // breath_gain 默认 1.0，0.5 表示用户真的调过
+            entry
+                .extra_curves
+                .insert("breath_gain".to_string(), vec![1.0, 0.5, 1.0]);
+        }
+
+        tl.migrate_legacy_breath_separation(5);
+
+        let on = tl
+            .params_by_root_track
+            .get(&root)
+            .map(|e| crate::pitch_editing::extra_param_enabled(&e.extra_params, "breath_enabled"))
+            .unwrap_or(false);
+        assert!(on, "a non-default breath gain curve must enable separation on migration");
+    }
+
+    /// 曲线**存在但全为默认值** ⇒ **不得**置位。
+    ///
+    /// 这是"无端触发一次 HNSEP 分离"的防线：空曲线与全默认曲线语义等价，
+    /// 按存在性判断会让仅被物化过的曲线也打开开关，用户会莫名经历一次慢渲染。
+    #[test]
+    fn migration_ignores_curves_that_are_all_default() {
+        let mut tl = TimelineState::default();
+        let root = tl.tracks[0].id.clone();
+        {
+            let entry = tl.params_by_root_track.entry(root.clone()).or_default();
+            entry
+                .extra_curves
+                .insert("hifigan_tension".to_string(), vec![0.0, 0.0, 0.0]);
+            entry
+                .extra_curves
+                .insert("breath_gain".to_string(), vec![1.0, 1.0, 1.0]);
+        }
+
+        tl.migrate_legacy_breath_separation(5);
+
+        let on = tl
+            .params_by_root_track
+            .get(&root)
+            .map(|e| crate::pitch_editing::extra_param_enabled(&e.extra_params, "breath_enabled"))
+            .unwrap_or(false);
+        assert!(
+            !on,
+            "curves that exist but hold only default values must not enable separation"
+        );
+    }
+
+    /// 完全没有曲线 ⇒ 不置位（绝大多数工程的路径，须完全无感知）。
+    #[test]
+    fn migration_is_a_noop_without_curves() {
+        let mut tl = TimelineState::default();
+        let root = tl.tracks[0].id.clone();
+        tl.migrate_legacy_breath_separation(5);
+        let on = tl
+            .params_by_root_track
+            .get(&root)
+            .map(|e| crate::pitch_editing::extra_param_enabled(&e.extra_params, "breath_enabled"))
+            .unwrap_or(false);
+        assert!(!on, "a project with no curves must be untouched");
+    }
+
+    /// 开关**已开启**时迁移不得改动它（尊重用户选择，且结果幂等）。
+    #[test]
+    fn migration_keeps_an_already_enabled_switch() {
+        let mut tl = TimelineState::default();
+        let root = tl.tracks[0].id.clone();
+        {
+            let entry = tl.params_by_root_track.entry(root.clone()).or_default();
+            entry
+                .extra_params
+                .insert("breath_enabled".to_string(), 1.0);
+        }
+
+        tl.migrate_legacy_breath_separation(5);
+        tl.migrate_legacy_breath_separation(5); // 幂等
+
+
+        assert_eq!(
+            tl.params_by_root_track
+                .get(&root)
+                .and_then(|e| e.extra_params.get("breath_enabled"))
+                .copied(),
+            Some(1.0)
+        );
+    }
+
+    /// clip 级覆盖里有非默认张力曲线 ⇒ 其所属 root track 也要置位。
+    ///
+    /// 覆盖必须被考虑到：clip 可自带曲线并绕过轨道级设置，
+    /// 只看轨道级会漏掉这类工程。
+    #[test]
+    fn migration_considers_clip_level_overrides() {
+        let mut tl = TimelineState::default();
+        let root = tl.tracks[0].id.clone();
+        let clip_id = tl.add_clip(Some(root.clone()), None, None, None, None);
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.extra_curves = Some(
+                [("hifigan_tension".to_string(), vec![0.0, 60.0])]
+                    .into_iter()
+                    .collect(),
+            );
+        }
+
+        tl.migrate_legacy_breath_separation(5);
+
+        let on = tl
+            .params_by_root_track
+            .get(&root)
+            .map(|e| crate::pitch_editing::extra_param_enabled(&e.extra_params, "breath_enabled"))
+            .unwrap_or(false);
+        assert!(on, "a clip-level non-default tension curve must enable separation");
+    }
+
+    /// 非有限值（NaN/Inf）不算"非默认" —— 否则损坏的数据会无端打开开关。
+    #[test]
+    fn migration_ignores_non_finite_values() {
+        let mut tl = TimelineState::default();
+        let root = tl.tracks[0].id.clone();
+        {
+            let entry = tl.params_by_root_track.entry(root.clone()).or_default();
+            entry.extra_curves.insert(
+                "hifigan_tension".to_string(),
+                vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY],
+            );
+        }
+
+        tl.migrate_legacy_breath_separation(5);
+
+        let on = tl
+            .params_by_root_track
+            .get(&root)
+            .map(|e| crate::pitch_editing::extra_param_enabled(&e.extra_params, "breath_enabled"))
+            .unwrap_or(false);
+        assert!(!on, "NaN/Inf must not count as a user edit");
+    }
+
+    /// v6 工程里用户手动**关掉**的开关，必须在再次打开工程时保持关闭。
+    ///
+    /// 【为什么单独钉住】迁移的本意是"打开旧工程的开关"，一旦它变成
+    /// "保证开关是打开的"，用户关掉开关的选择就会在每次打开工程时被静默
+    /// 撤销：张力重新出现、音频变化、还要白跑一次 HNSEP。曾因缺少版本门控
+    /// 而真实存在此 bug。
+    #[test]
+    fn v6_project_keeps_user_disabled_separation_switch() {
+        let mut tl = TimelineState::default();
+        let track = tl.tracks[0].id.clone();
+        // 非默认张力曲线（迁移的触发条件）
+        tl.params_by_root_track
+            .entry(track.clone())
+            .or_default()
+            .extra_curves
+            .insert("hifigan_tension".to_string(), vec![0.0, 0.0, 0.6, 0.0]);
+        // 用户显式关闭
+        tl.params_by_root_track
+            .get_mut(&track)
+            .unwrap()
+            .extra_params
+            .insert("breath_enabled".to_string(), 0.0);
+
+        // 以 v6 打开：不得改写
+        tl.migrate_legacy_breath_separation(6);
+        let v = tl
+            .params_by_root_track
+            .get(&track)
+            .and_then(|e| e.extra_params.get("breath_enabled"))
+            .copied();
+        assert_eq!(
+            v,
+            Some(0.0),
+            "v6 project must keep the user's explicit OFF choice"
+        );
+
+        // 反复打开也不得漂移
+        tl.migrate_legacy_breath_separation(6);
+        tl.migrate_legacy_breath_separation(6);
+        let v2 = tl
+            .params_by_root_track
+            .get(&track)
+            .and_then(|e| e.extra_params.get("breath_enabled"))
+            .copied();
+        assert_eq!(v2, Some(0.0), "reopening a v6 project must stay OFF");
+    }
+
+    /// 旧工程（< v6）仍要被迁移打开，且只在此后的版本里不再重复。
+    #[test]
+    fn legacy_project_is_migrated_once_then_respects_user() {
+        let mut tl = TimelineState::default();
+        let track = tl.tracks[0].id.clone();
+        tl.params_by_root_track
+            .entry(track.clone())
+            .or_default()
+            .extra_curves
+            .insert("hifigan_tension".to_string(), vec![0.0, 0.5, 0.0]);
+
+        // v5 打开 ⇒ 迁移置位
+        tl.migrate_legacy_breath_separation(5);
+        assert_eq!(
+            tl.params_by_root_track
+                .get(&track)
+                .and_then(|e| e.extra_params.get("breath_enabled"))
+                .copied(),
+            Some(1.0),
+            "legacy v5 project with edited tension must be migrated ON"
+        );
+
+        // 用户随后关掉并保存为 v6 ⇒ 再次打开不得改回
+        tl.params_by_root_track
+            .get_mut(&track)
+            .unwrap()
+            .extra_params
+            .insert("breath_enabled".to_string(), 0.0);
+        tl.migrate_legacy_breath_separation(6);
+        assert_eq!(
+            tl.params_by_root_track
+                .get(&track)
+                .and_then(|e| e.extra_params.get("breath_enabled"))
+                .copied(),
+            Some(0.0),
+            "after the one-shot migration, the user's choice must stick"
+        );
+    }
+
+    /// 阈值需与 `TENSION_ACTIVE_EPSILON`（1e-3）同源：肉眼不可见、按全 codebase
+    /// 口径都算"未编辑"的极小值**不得**触发迁移（否则白跑一次 HNSEP）。
+    #[test]
+    fn migration_ignores_sub_threshold_curve_noise() {
+        let mut tl = TimelineState::default();
+        let track = tl.tracks[0].id.clone();
+        tl.params_by_root_track
+            .entry(track.clone())
+            .or_default()
+            .extra_curves
+            .insert("hifigan_tension".to_string(), vec![0.0, 1.0e-6, 0.0]);
+        tl.migrate_legacy_breath_separation(5);
+        assert!(
+            tl.params_by_root_track
+                .get(&track)
+                .and_then(|e| e.extra_params.get("breath_enabled"))
+                .is_none(),
+            "a curve below TENSION_ACTIVE_EPSILON must not be treated as edited"
         );
     }
 }

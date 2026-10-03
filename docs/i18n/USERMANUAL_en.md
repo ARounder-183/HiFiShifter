@@ -367,11 +367,12 @@ The current version of HiFiShifter supports three vocal tuning algorithms and th
 - **PC-NSF-HiFiGAN**: OpenVPI's open-source hifigan vocoder specialized for singing voices, also HiFiShifter's default algorithm.
     - `Pitch`: Adjust the pitch of the voice.
     - `Formant Shift`: Adjust the formant shift of the voice.
-    - `Breath Gain`: After enabling breath, allows adjusting the breath volume of the voice, based on the VR-hnsep model.
+    - `Breath Gain`: Allows adjusting the breath volume of the voice, based on the VR-hnsep model.
     - `Tension`: Adjust the tension of the voice.
     - `Volume`: Adjust the volume of the voice.
     - `Dynamics`: Adjust the loudness of the voice.
     - `Pan`: Adjust the pan of the voice.
+Note: both `Breath Gain` and `Tension` require the `Harmonic Separation` switch in the toolbar to be enabled first. Enabling it adds rendering cost (the first pass separates every audio clip and can take a while). While it is off, no separation runs at all: these two parameters are greyed out, their curves stay visible but cannot be edited, and they take no part in synthesis. `Formant Shift` is unaffected by this switch.
 - **World**: Open-source high-quality speech analysis and synthesis algorithm.
     - `Pitch`: Adjust the pitch of the voice.
     - `Volume`: Adjust the volume of the voice.

@@ -96,7 +96,7 @@ Supports only `Pitch` editing.
 
 OpenVPI's open-source hifigan vocoder specialized for singing voices.  
 Supports editing of `Pitch`, `Breath`, `Tension`, `Formant Shift`, and `Volume`.  
-Note that breath editing requires additional enabling; it uses the hnsep UVR model for breath separation, which may take a long time on first use. If you need to edit tension, ensure breath is enabled.
+Both `Breath` and `Tension` depend on the `Harmonic Separation` switch: enable it first, and it splits each audio clip into harmonic and noise parts (using the hnsep UVR model). **Enabling it adds rendering cost** — the first pass separates every clip and can take a while. While it is off, no separation runs at all: `Breath` and `Tension` are greyed out, their curves stay visible but cannot be edited, and they take no part in synthesis.
 
 #### Vslib
 

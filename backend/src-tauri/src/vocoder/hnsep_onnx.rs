@@ -1,3 +1,39 @@
+//! 谐波/噪声分离（HNSEP）的会话、缓存与推理编排。
+//!
+//! # 主要内容
+//! - 模型路径解析（env → `hnsep_model_dir()` → 开发树 → 可执行文件同级）
+//! - 全局共享 ORT 会话（`Separator` 角色）与 EP 选择
+//! - clip 级分离结果 LRU 缓存
+//! - [`infer_harmonic_noise_mono`]：重采样 → STFT → mask 网络 → ISTFT → 重采样回
+//!
+//! # 模型形态：频谱域（mask-only）
+//! 本模块使用**频谱域**模型：ONNX 里只有 mask 网络，输入 `spec [1,2,1025,T]`、
+//! 输出 `mask [1,2,1025,T]`；STFT/ISTFT 由 [`crate::hnsep_dsp`] 在 Rust 侧完成。
+//!
+//! 早期版本用的是**波形域**模型（图内含 STFT + 24 LSTM + ISTFT，输入输出都是
+//! `[1,N]`），它在 GPU 上几乎没有收益（实测 CoreML 1.02~1.04x）：LSTM 串行不可
+//! 并行，且图内的 STFT/ISTFT 要么不被 EP 支持而回退 CPU，要么把图切碎。
+//! 把 DSP 移出图外后，GPU 上剩下的是密集卷积网络，才有加速空间
+//! （与 OpenUtau 的 `Hnsep.cs` 同一做法）。
+//!
+//! # 与其他模块的关系
+//! - [`crate::hnsep_dsp`]：STFT / mask 施加 / ISTFT 的纯 DSP 实现。
+//! - `hnsep_onnx_stub.rs`：`onnx` feature 关闭时的空实现。
+//! - 上层调用方：`renderer::chain` 的 `HiFiGanStage::process_breath`。
+//!
+//! # 维护说明
+//! 模型的采样率/FFT 参数必须与 `hnsep_dsp` 的调用参数一致；
+//! 分离缓存的键**不含**任何曲线参数（分离只取决于源音频），
+//! 改动键的构成会让改参数时白跑一次推理，或更糟 —— 命中错源的 stem。
+//!
+//! ## 采样率契约（曾因违反而真实出错）
+//! [`infer_harmonic_noise_mono`] 的输入与两条 stem **必须都是调用方给的
+//! `sample_rate`**。模型只在 44100 上工作，所以中间要把输入重采样到 44100，
+//! 分离后**必须把 h 与 n 各自重采样回 `sample_rate`** —— 只做 truncate /
+//! zero-pad 是错的：48000 下内容会只占前 44100/48000 = 91.87%（时间压缩 8.1%），
+//! 尾部 8.1% 变成纯静音。
+//! 回归测试：`hnsep_dsp::e2e_hnsep::stems_are_resampled_back_to_the_output_rate`。
+
 use lru::LruCache;
 use ort::session::Session;
 use ort::value::Tensor;
@@ -13,6 +49,10 @@ static SELECTED_EP: OnceLock<String> = OnceLock::new();
 static LOGGED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
 const HNSEP_MODEL_SR: u32 = 44_100;
+/// STFT 长度：与 `hnsep.yaml` 的 `n_fft` 一致（模型固定 1025 个频点）。
+const HNSEP_N_FFT: usize = 2048;
+/// STFT 帧步长：与 `hnsep.yaml` 的 `hop_length` 一致。
+const HNSEP_HOP: usize = 512;
 /// HNSEP 分离缓存默认容量（可通过环境变量 HIFISHIFTER_HNSEP_CACHE_CAPACITY 覆盖）。
 const HNSEP_CACHE_CAPACITY_DEFAULT: usize = 128;
 
@@ -262,26 +302,70 @@ pub fn is_available() -> bool {
     }
 }
 
+/// 加载自检：建会话并跑一次**真实形态**的推理，用于诊断面板/人工排查。
+///
+/// 【为什么要跑真实形态】历史实现喂的是波形 `[1, N]` 并断言"至少 2 个输出" ——
+/// 那是**波形域**模型的接口。换成 mask-only 模型后，那段代码若被调用会立刻失败
+/// （输入名/形状不符、输出只有 1 个），表现为"模型坏了"的错误结论。
+/// 自检必须走与生产一致的路径（`hnsep_dsp` 的 STFT + mask 网络），否则它证明不了
+/// 任何事。这里刻意只跑一个最小 segment（32 帧）以保持自检轻量。
 #[allow(dead_code)]
 pub fn probe_load() -> Result<String, String> {
     ensure_ort_init()?;
     let onnx_path = resolve_model_path()?;
-    let mut session = build_session_with_ep(&onnx_path)?;
+    let session = std::sync::Arc::new(std::sync::Mutex::new(build_session_with_ep(&onnx_path)?));
 
-    let waveform = vec![0.0f32; HNSEP_MODEL_SR as usize / 10];
-    let waveform_tensor =
-        Tensor::from_array(([1usize, waveform.len()], waveform.into_boxed_slice()))
-            .map_err(|e| format!("build waveform tensor failed: {e}"))?;
-    let outputs = session
-        .run(ort::inputs![waveform_tensor])
-        .map_err(|e| format!("hnsep ort session run failed: {e}"))?;
-    if outputs.len() < 2 {
-        return Err("hnsep ort returned fewer than 2 outputs".to_string());
+    // 一个 segment 的静音：长度 = SEGMENT_FRAMES * hop，足够走完整流水线。
+    let samples = crate::hnsep_dsp::SEGMENT_FRAMES * HNSEP_HOP;
+    let audio = vec![0.0f32; samples];
+    let window = crate::hnsep_dsp::periodic_hann(HNSEP_N_FFT);
+    let bins = HNSEP_N_FFT / 2 + 1;
+
+    let harmonic = crate::hnsep_dsp::separate(
+        &audio,
+        HNSEP_N_FFT,
+        HNSEP_HOP,
+        &window,
+        |mask_input| {
+            let frames = mask_input.len() / 2 / bins;
+            let tensor = Tensor::from_array((
+                [1usize, 2, bins, frames],
+                mask_input.to_vec().into_boxed_slice(),
+            ))
+            .map_err(|e| format!("build spec tensor failed: {e}"))?;
+            let mut guard = session
+                .lock()
+                .map_err(|e| format!("hnsep session lock poisoned: {e}"))?;
+            let outputs = guard
+                .run(ort::inputs![tensor])
+                .map_err(|e| format!("hnsep ort session run failed: {e}"))?;
+            let output = outputs
+                .into_iter()
+                .next()
+                .ok_or_else(|| "hnsep ort returned no output".to_string())?;
+            let (_, mask) = output
+                .1
+                .try_extract_tensor::<f32>()
+                .map_err(|e| format!("hnsep mask extract failed: {e}"))?;
+            Ok(mask.to_vec())
+        },
+    )?;
+
+    if harmonic.len() != samples {
+        return Err(format!(
+            "hnsep probe: expected {samples} samples, got {}",
+            harmonic.len()
+        ));
+    }
+    if !harmonic.iter().all(|v| v.is_finite()) {
+        return Err("hnsep probe: non-finite output".to_string());
     }
     Ok(format!(
-        "hnsep_onnx: OK\n  onnx: {}\n  sr={}",
+        "hnsep_onnx: OK (mask-only)\n  onnx: {}\n  sr={} n_fft={} hop={}",
         onnx_path.display(),
-        HNSEP_MODEL_SR
+        HNSEP_MODEL_SR,
+        HNSEP_N_FFT,
+        HNSEP_HOP
     ))
 }
 
@@ -474,45 +558,75 @@ pub fn infer_harmonic_noise_mono(
         crate::mel_utils::linear_resample_mono(audio_mono, sample_rate, HNSEP_MODEL_SR)
     };
 
-    let waveform_tensor =
-        Tensor::from_array(([1usize, model_audio.len()], model_audio.into_boxed_slice()))
-            .map_err(|e| format!("build hnsep waveform tensor failed: {e}"))?;
-
+    // ── 频谱域分离：STFT → mask 网络 → ISTFT ─────────────────────────────
+    //
+    // 模型只做 mask；STFT/ISTFT 在 Rust 侧（`hnsep_dsp`）。这与 OpenUtau 的
+    // `Hnsep.cs` 一致，也是让 GPU 有可加速算子的前提（见模块头说明）。
+    let window = crate::hnsep_dsp::periodic_hann(HNSEP_N_FFT);
     let session = get_or_init_shared_session()?;
-    let (mut harmonic, mut noise): (Vec<f32>, Vec<f32>) = {
-        let mut session_guard = session
-            .lock()
-            .map_err(|e| format!("hnsep ort session lock poisoned: {e}"))?;
-        let outputs = session_guard
-            .run(ort::inputs![waveform_tensor])
-            .map_err(|e| format!("hnsep ort run failed: {e}"))?;
-        if outputs.len() < 2 {
-            return Err("hnsep ort returned fewer than 2 outputs".to_string());
-        }
+    let harmonic = crate::hnsep_dsp::separate(
+        &model_audio,
+        HNSEP_N_FFT,
+        HNSEP_HOP,
+        &window,
+        |mask_input| {
+            let sep_frames = mask_input.len() / 2 / (HNSEP_N_FFT / 2 + 1);
+            let spec_tensor = Tensor::from_array((
+                [1usize, 2, HNSEP_N_FFT / 2 + 1, sep_frames],
+                mask_input.to_vec().into_boxed_slice(),
+            ))
+            .map_err(|e| format!("build hnsep spec tensor failed: {e}"))?;
 
-        let mut iter = outputs.into_iter();
-        let harmonic_output = iter
-            .next()
-            .ok_or_else(|| "hnsep ort missing harmonic output".to_string())?
-            .1;
-        let (_, harmonic_tensor) = harmonic_output
-            .try_extract_tensor::<f32>()
-            .map_err(|e| format!("hnsep harmonic output extract failed: {e}"))?;
-        let noise_output = iter
-            .next()
-            .ok_or_else(|| "hnsep ort missing noise output".to_string())?
-            .1;
-        let (_, noise_tensor) = noise_output
-            .try_extract_tensor::<f32>()
-            .map_err(|e| format!("hnsep noise output extract failed: {e}"))?;
-        (harmonic_tensor.to_vec(), noise_tensor.to_vec())
+            let mut session_guard = session
+                .lock()
+                .map_err(|e| format!("hnsep ort session lock poisoned: {e}"))?;
+            let outputs = session_guard
+                .run(ort::inputs![spec_tensor])
+                .map_err(|e| format!("hnsep ort run failed: {e}"))?;
+            // 先取出拥有所有权的 output，再借用其中的张量（否则临时值提前释放）。
+            let output = outputs
+                .into_iter()
+                .next()
+                .ok_or_else(|| "hnsep ort returned no output".to_string())?;
+            let (_, mask_tensor) = output
+                .1
+                .try_extract_tensor::<f32>()
+                .map_err(|e| format!("hnsep mask output extract failed: {e}"))?;
+            Ok(mask_tensor.to_vec())
+        },
+    )?;
+
+    // 噪声 = 原信号 − 谐波（在**模型采样率**下相减，与波形域模型的定义一致）。
+    // 必须在重采样回输出采样率**之前**做：此处 model_audio 与 harmonic 同域同长，
+    // 相减结果精确满足 `h + n == model_audio`。
+    let noise: Vec<f32> = model_audio
+        .iter()
+        .zip(harmonic.iter())
+        .map(|(a, h)| a - h)
+        .collect();
+
+    // ── 重采样回输出采样率 ────────────────────────────────────────────────
+    //
+    // 【为什么必须重采样回去，而不是直接截断/补零】上面把输入重采样到了模型原生
+    // 的 44100；分离得到的 stem 因此也是 **44100** 的。若只按输出长度 truncate /
+    // zero-pad，就等于把 44100 的波形当成输出采样率的波形使用：
+    // 48000 下内容只占前 44100/48000 = 91.87%，**时间被压缩 8.1%**、尾部 8.1%
+    // 变成纯静音；再叠加声码器自身的 48k→44.1k 重采样，谐波包络与 F0 时间轴
+    // 错位，听感即"跑调 / 整体不对"。模块头注释一直写着"…→ ISTFT → 重采样回"，
+    // 但代码里缺了这一步（已有回归测试 `stems_are_resampled_back_to_the_output_rate`）。
+    //
+    // 线性重采样是**线性**算子，h 与 n 同长、用同一插值网格，故
+    // `resample(h) + resample(n) == resample(h+n) == resample(model_audio)`，
+    // 即 `h + n == x` 在非原生采样率下**同样成立**（仅差浮点误差）。
+    let (harmonic, noise) = if sample_rate == HNSEP_MODEL_SR {
+        (harmonic, noise)
+    } else {
+        (
+            crate::mel_utils::linear_resample_mono(&harmonic, HNSEP_MODEL_SR, sample_rate),
+            crate::mel_utils::linear_resample_mono(&noise, HNSEP_MODEL_SR, sample_rate),
+        )
     };
-    // Drop session lock before resampling (CPU work)
-
-    if sample_rate != HNSEP_MODEL_SR {
-        harmonic = crate::mel_utils::linear_resample_mono(&harmonic, HNSEP_MODEL_SR, sample_rate);
-        noise = crate::mel_utils::linear_resample_mono(&noise, HNSEP_MODEL_SR, sample_rate);
-    }
+    let (mut harmonic, mut noise) = (harmonic, noise);
 
     // Length normalization: ensure output matches input length exactly.
     // Resampling can produce ±1 sample drift; truncate or zero-pad as needed.

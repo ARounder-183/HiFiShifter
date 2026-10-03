@@ -506,6 +506,11 @@ export const jaJP = {
     pitch_label: "ピッチ（半音）",
     tension_label: "テンション（0-1）",
     breath_mode_label: "ブレス",
+    breath_separation_label: "ハーモニック分離",
+    breath_separation_tooltip:
+        "音声ブロックを倍音とノイズに分離します（HNSEP）。\nレンダリングコストが増加します：初回の有効化では各ブロックを分離するため時間がかかることがあります。\nオフの間は HNSEP を一切実行せず、ブレス量とテンションはどちらも効果を発揮しません。\n両方がこれに依存します：ブレス量はノイズ成分の混入量を、テンションは倍音成分のみを調整します。",
+    separation_required_tooltip:
+        "使用できません：先に「ハーモニック分離」をオンにしてください。ブレス量とテンションの両方がこれに依存します。",
     breath_gain_label: "ブレスゲイン",
     hifigan_tension_label: "テンション",
     formant_shift_label: "フォルマントシフト",

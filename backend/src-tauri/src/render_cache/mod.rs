@@ -1,8 +1,10 @@
 //! 渲染缓存持久化（Render Cache Persistence）。
 //!
-//! 把进程内的整 Clip 渲染结果（[`RenderedClipCacheEntry`] / 张力变体 /
-//! 气声噪声 stem）以内容哈希为键落盘，使"重新打开工程"不再需要重新合成
-//! 未变更的片段。
+//! 把进程内的整 Clip 渲染结果（[`RenderedClipCacheEntry`] / 气声噪声 stem）
+//! 以内容哈希为键落盘，使"重新打开工程"不再需要重新合成未变更的片段。
+//!
+//! 注：张力变体（`DeprecatedTension`）已废弃 —— 张力迁入声码器后随
+//! `Rendered` 条目一起产出，不再需要独立类别；该判别值仅为兼容旧文件保留。
 //!
 //! # 三条铁律（改动本模块前请先读）
 //! 1. **音频回调不读盘**：磁盘回退只允许发生在渲染循环里（`commands/playback.rs`
@@ -33,7 +35,6 @@ use store::Store;
 
 use crate::synth_clip_cache::{
     BreathNoiseCacheEntry, BreathNoiseCacheKey, RenderedClipCacheEntry, RenderedClipCacheKey,
-    TensionRenderedClipCacheEntry, TensionRenderedClipCacheKey,
 };
 
 /// 缓存写入模式。
@@ -454,38 +455,6 @@ pub fn contains_rendered(hash: u64) -> bool {
         .is_file()
 }
 
-/// 读取 HiFiGAN tension 变体。
-pub fn load_tension(
-    key: &TensionRenderedClipCacheKey,
-    expected_sample_rate: u32,
-) -> Option<TensionRenderedClipCacheEntry> {
-    let rt = runtime_snapshot();
-    if !rt.enabled {
-        return None;
-    }
-    let loaded = Store::new(rt.base_dir.clone()).load(
-        EntryKind::Tension,
-        key.tension_hash,
-        expected_sample_rate,
-        rt.verify_checksum,
-    );
-    let Some(loaded) = loaded else {
-        note_miss();
-        return None;
-    };
-    if loaded.primary.len() != loaded.header.frames as usize * 2 {
-        note_miss();
-        return None;
-    }
-    note_hit();
-    Some(TensionRenderedClipCacheEntry {
-        pcm_stereo: Arc::new(loaded.primary),
-        frames: loaded.header.frames as u64,
-        sample_rate: loaded.header.sample_rate,
-        rendered_take_id: loaded.header.take_id,
-    })
-}
-
 /// 读取独立的气声噪声 stem。
 pub fn load_noise(
     key: &BreathNoiseCacheKey,
@@ -542,30 +511,6 @@ pub fn store_rendered(key: &RenderedClipCacheKey, entry: &RenderedClipCacheEntry
             take_id: entry.rendered_take_id.clone(),
             primary: entry.pcm_stereo.clone(),
             secondary: entry.breath_noise_stereo.clone(),
-            bytes: payload_bytes,
-        },
-        &rt,
-    );
-}
-
-/// 投递 HiFiGAN tension 变体。
-pub fn store_tension(key: &TensionRenderedClipCacheKey, entry: &TensionRenderedClipCacheEntry) {
-    let payload_bytes = entry.pcm_stereo.len() as u64 * 4;
-    let rt = runtime_snapshot();
-    if let Err(reason) = admit(&rt, entry.frames, entry.sample_rate, payload_bytes) {
-        note_skipped(reason);
-        return;
-    }
-    note_accepted();
-    dispatch(
-        writer::PendingEntry {
-            kind: EntryKind::Tension,
-            hash: key.tension_hash,
-            sample_rate: entry.sample_rate,
-            project_id: current_project_id(),
-            take_id: entry.rendered_take_id.clone(),
-            primary: entry.pcm_stereo.clone(),
-            secondary: None,
             bytes: payload_bytes,
         },
         &rt,
@@ -753,13 +698,14 @@ pub fn stats() -> CacheStats {
     let admission = admission_counters();
 
     let mut rendered = (0u64, 0u64);
-    let mut tension = (0u64, 0u64);
     let mut noise = (0u64, 0u64);
     for entry in &report.entries {
         let slot = match entry.kind {
             EntryKind::Rendered => &mut rendered,
-            EntryKind::Tension => &mut tension,
             EntryKind::Noise => &mut noise,
+            // 废弃的张力变体：旧文件仍占用磁盘（由 `clear_all` 回收），
+            // 但不计入统计面板的任何一类。
+            EntryKind::DeprecatedTension => continue,
         };
         slot.0 += 1;
         slot.1 += entry.bytes;
@@ -776,11 +722,6 @@ pub fn stats() -> CacheStats {
                 kind: EntryKind::Rendered.display_name(),
                 entries: rendered.0,
                 bytes: rendered.1,
-            },
-            KindStats {
-                kind: EntryKind::Tension.display_name(),
-                entries: tension.0,
-                bytes: tension.1,
             },
             KindStats {
                 kind: EntryKind::Noise.display_name(),

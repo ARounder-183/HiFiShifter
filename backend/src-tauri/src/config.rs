@@ -898,7 +898,7 @@ impl AutoBackupSettings {
 
 /// 渲染缓存设置（持久化到 app_config.json）
 ///
-/// 渲染缓存把整 Clip 的合成结果（含气声 stem / 张力变体）按内容哈希落盘，
+/// 渲染缓存把整 Clip 的合成结果（含气声 stem）按内容哈希落盘，
 /// 使"重新打开工程"不再重新合成未变更的片段。这里的每一项都对应管理面板上的
 /// 一个可调项；容量/年龄通过 `normalized()` 钳制，损坏的配置值不会让缓存失控。
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
