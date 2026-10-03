@@ -592,12 +592,6 @@ use super::*;
         assert!(ratio > 0.3 && ratio < 3.0, "energy ratio {ratio} out of range");
     }
 
-
-
-
-
-
-
     /// 低音目标 f0 的谐波数**不得**被封顶 —— 参考实现按 Nyquist 展开到数百个。
     ///
     /// 【为什么钉住】若把目标谐波数钳到拟合用的 80，`GlottalRd::gain_at` 会对
@@ -650,5 +644,5 @@ use super::*;
         assert!(y.iter().all(|v| v.is_finite()), "silence must not produce NaN");
         assert!(y.iter().all(|v| v.abs() < 1e-6), "silence in, silence out");
     }
-    }
+}
 
