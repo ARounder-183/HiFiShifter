@@ -79,7 +79,7 @@ import {
     SEPARATION_PARAM_ID,
     findBlockedEditParam,
     paramNeedingVisibilityOnGate,
-    isGatedBySeparation,
+    isEffectParamGated,
     isSeparationEnabled,
 } from "../../features/pitch/separationGate";
 import { useNonPassiveWheel } from "../../utils/useNonPassiveWheel";
@@ -2317,6 +2317,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         return isSeparationEnabled(processorStaticValues[SEPARATION_PARAM_ID], defaultValue);
     }, [processorStaticParams, processorStaticValues]);
 
+    // 所属轨道组的 Compose 开关。它与分离开关是**两道独立门禁**，但都决定
+    // 轨道级"合成"参数（共振峰/气声/张力）是否生效 —— Compose 关闭时必须
+    // 完全静默（需求：听到未经任何改动的原音频）。
+    // 取不到根轨时按"开启"处理：宁可不过度置灰，也不要误锁住用户。
+    const composeEnabled = rootTrack?.composeEnabled ?? true;
+
     // 开关刚被关闭时，若当前正在编辑被门禁的参数，把 `editParam` 移开。
     //
     // 【为什么必须回退而不是仅仅置灰】曲线编辑的唯一闸门是 `editParam`
@@ -2331,16 +2337,22 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     // 该 effect 是**收敛**的：回退到 `pitch` 后判据不再成立，不会反复 dispatch；
     // 眼睛置位也做了幂等判断，不会产生新的 state 引用。
     useEffect(() => {
-        const fallback = findBlockedEditParam(editParam, separationEnabled, "pitch");
-        if (!fallback) return;
-        const leaving = paramNeedingVisibilityOnGate(editParam, separationEnabled, "pitch");
+        // 两道门禁任一命中都要把 editParam 移开：Compose 关闭时效果参数同样
+        // 不可编辑，若不移开，画布上的绘制仍会落到它身上。
+        const blocked =
+            findBlockedEditParam(editParam, separationEnabled, "pitch") ??
+            findBlockedEditParam(editParam, composeEnabled, "pitch");
+        if (!blocked) return;
+        const leaving =
+            paramNeedingVisibilityOnGate(editParam, separationEnabled, "pitch") ??
+            paramNeedingVisibilityOnGate(editParam, composeEnabled, "pitch");
         if (leaving) {
             setSecondaryParamVisible((prev) =>
                 prev[leaving] ? prev : { ...prev, [leaving]: true },
             );
         }
-        dispatch(setEditParam(fallback as typeof editParam));
-    }, [editParam, separationEnabled, dispatch]);
+        dispatch(setEditParam(blocked as typeof editParam));
+    }, [editParam, separationEnabled, composeEnabled, dispatch]);
 
     // 收集轨道组内所有 trackId（root + 递归所有子轨道）
     const groupTrackIds = useMemo(() => {
@@ -7861,9 +7873,18 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             const paramActive = editParam === p.id;
                             const paramEyeVisible = secondaryParamVisible[p.id] ?? false;
 
-                            // 气声分离开关闭时，依赖分离的参数（气声音量/张力）置灰：
-                            // 不可选中，其曲线保持可见但不可编辑，且不参与合成。
-                            const paramGated = isGatedBySeparation(p.id, separationEnabled);
+                            // 效果参数置灰：Compose 关闭、或气声分离开关闭时都不可用。
+                            // 不可选中，曲线保持可见但不可编辑，且不参与合成
+                            // （后端在 `gate_hifigan_effect_curves` 同源剥离）。
+                            const paramGated = isEffectParamGated(
+                                p.id,
+                                separationEnabled,
+                                composeEnabled,
+                            );
+                            // 提示文案要指出**真正**的原因，否则用户会去开错开关。
+                            const gateTooltip = !composeEnabled
+                                ? t("pitch_requires_compose")
+                                : t("separation_required_tooltip");
 
                             // 气声分离开关已独立成工具栏上的按钮组（见下方
                             // processorStaticParams 渲染块）。这里不再把它融合进
@@ -7877,7 +7898,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     active={paramActive}
                                     onSelect={() => dispatch(setEditParam(p.id))}
                                     disabled={paramGated}
-                                    disabledTooltip={t("separation_required_tooltip")}
+                                    disabledTooltip={gateTooltip}
                                     eyeMode={paramActive ? "main" : paramEyeVisible ? "on" : "off"}
                                     onToggleEye={() => toggleSecondaryParam(p.id)}
                                     eyeTooltip={

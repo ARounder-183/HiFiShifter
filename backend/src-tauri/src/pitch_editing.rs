@@ -246,22 +246,54 @@ pub(crate) const HIFIGAN_SEPARATION_GATED_CURVES: [&str; 2] = ["breath_gain", "h
 /// # 返回
 /// 应当下发的曲线集合。返回值可能借用入参（未剥离时），
 /// 也可能借用内部克隆（`Cow` 语义由调用方的局部变量承载）。
-pub(crate) fn gate_separation_curves<'a>(
+/// Compose 关闭时必须剥离的轨道级 HiFiGAN 曲线。
+///
+/// 需求：**Compose 关闭 ⇒ 听到未经任何改动的原音频**。Compose 影响的是
+/// 音高、共振峰、气声、张力这四类"合成"参数；音高由既有判定处理
+/// （不下发 pitch_edit / 不触发合成），这里覆盖其余三条曲线。
+///
+/// # 刻意不包含音量与声相
+/// 音量/声相/动态是**混音级**参数，**刻意不受 Compose 限制** ——
+/// 未开 Compose 的原始音频轨道同样支持它们（见 `pitch/pitch_clip.rs` 中
+/// 关于动态（DYN）电平分析"刻意不检查 compose_enabled"的说明）。
+/// 把它们塞进这里会破坏该语义。
+pub(crate) const HIFIGAN_COMPOSE_GATED_CURVES: [&str; 3] =
+    ["breath_gain", "hifigan_tension", "formant_shift_cents"];
+
+/// 按 **Compose 开关**与**气声分离开关**的状态剥离曲线，返回下发给处理器的集合。
+///
+/// # 两道门禁
+/// 1. **Compose 关闭** ⇒ 剥离 [`HIFIGAN_COMPOSE_GATED_CURVES`]（共振峰/气声/张力）。
+///    这是"听到原音频"的**合成侧兜底**：即使处理器因其它原因（音高参考块、
+///    子轨共振峰偏移）仍需运行，也读不到这些曲线。
+/// 2. **气声分离开关关闭** ⇒ 剥离 [`HIFIGAN_SEPARATION_GATED_CURVES`]（气声/张力）。
+///    注意共振峰**不**依赖分离开关，故不在其中。
+///
+/// # 为什么两道门禁集中在一个函数里
+/// `ClipProcessContext` 全仓库只有一处构造，两道门禁都在此处落地，可一次覆盖
+/// 所有消费点（`apply_rd_tension` 读张力、`process_breath` 读气声、mel 提取读
+/// 共振峰），避免"每个消费点各判一次"造成的口径漂移。
+///
+/// # 性能
+/// 常态（Compose 开启且无需剥离）返回 [`std::borrow::Cow::Borrowed`]，**零克隆**。
+pub(crate) fn gate_hifigan_effect_curves<'a>(
     curves: &'a HashMap<String, Vec<f32>>,
     extra_params: &HashMap<String, f64>,
+    compose_enabled: bool,
 ) -> std::borrow::Cow<'a, HashMap<String, Vec<f32>>> {
-    let separation_on =
-        extra_param_enabled(extra_params, crate::renderer::HIFIGAN_SEPARATION_PARAM_ID);
-    if separation_on
-        || !HIFIGAN_SEPARATION_GATED_CURVES
-            .iter()
-            .any(|k| curves.contains_key(*k))
-    {
+    let gated: &[&str] = if !compose_enabled {
+        &HIFIGAN_COMPOSE_GATED_CURVES
+    } else if extra_param_enabled(extra_params, crate::renderer::HIFIGAN_SEPARATION_PARAM_ID) {
+        return std::borrow::Cow::Borrowed(curves);
+    } else {
+        &HIFIGAN_SEPARATION_GATED_CURVES
+    };
+    if !gated.iter().any(|k| curves.contains_key(*k)) {
         return std::borrow::Cow::Borrowed(curves);
     }
     let mut stripped = curves.clone();
-    for key in HIFIGAN_SEPARATION_GATED_CURVES {
-        stripped.remove(key);
+    for key in gated {
+        stripped.remove(*key);
     }
     std::borrow::Cow::Owned(stripped)
 }
@@ -473,6 +505,58 @@ pub(crate) fn hifigan_formant_shift_active_for_clip(
     )
 }
 
+/// 轨道级 HiFiGAN 效果（气声 / 张力 / 共振峰）的生效标志。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct HifiganEffectFlags {
+    breath: bool,
+    tension: bool,
+    formant: bool,
+}
+
+impl HifiganEffectFlags {
+    /// 是否有任一轨道级效果生效。
+    fn any(self) -> bool {
+        self.breath || self.tension || self.formant
+    }
+}
+
+/// 计算轨道级 HiFiGAN 效果的生效标志，**已应用 Compose 门禁**。
+///
+/// # 为什么必须集中在这一处
+/// 有三个判定点需要它：外部预拉伸决策（[`processor_should_handle_stretch`]）、
+/// 逐段渲染决策（`should_process_segment`）、整 clip 预渲染决策
+/// （`does_clip_need_processor_render`）。三者口径必须完全一致 —— 历史上它们
+/// 各写一份，漂移的后果是"外部不拉伸、内部也不拉伸"（音频被截断/补零，
+/// 或回退成源速率变调播放），或者"参数已置灰、用户却仍能听到它"。
+///
+/// # Compose 门禁（本函数的核心语义）
+/// Compose 关闭 ⇒ 一律 `false`。需求是"Compose 关闭时听到**未经任何改动的
+/// 原音频**"，因此气声/张力/共振峰既不能参与合成，也**不能触发处理器渲染**；
+/// 否则处理器照样运行，用户仍能听到张力等改动。
+///
+/// 曲线本身的剥离另见 [`gate_hifigan_effect_curves`]（合成侧兜底）：即使处理器
+/// 因其它原因（音高参考块、子轨共振峰偏移）仍要运行，也读不到这些曲线。
+///
+/// # 刻意不包含的项
+/// 子轨共振峰偏移（`active_child_formant_offset_config`）**不在此处**：那是
+/// 子轨自身的参数，与根轨 Compose 无关，由调用方按需单独叠加。
+fn hifigan_effect_flags(
+    algo: PitchEditAlgorithm,
+    track: &crate::state::Track,
+    entry: &crate::state::TrackParamsState,
+    clip: &crate::state::Clip,
+    clip_start_sec: f64,
+) -> HifiganEffectFlags {
+    if !matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx) || !track.compose_enabled {
+        return HifiganEffectFlags::default();
+    }
+    HifiganEffectFlags {
+        breath: track_requests_extra_processing(algo, entry, clip, clip_start_sec),
+        tension: hifigan_tension_active_for_clip(entry, clip, clip_start_sec),
+        formant: hifigan_formant_shift_active_for_clip(entry, clip, clip_start_sec),
+    }
+}
+
 /// 判定当前 clip 是否应由处理器内部消费 Mel Stretch。
 ///
 /// 调用方跳过外部拉伸前必须使用同一个判定；否则气声/张力/共振峰这类
@@ -494,11 +578,11 @@ pub(crate) fn processor_should_handle_stretch(
     if matches!(algo, PitchEditAlgorithm::Bypass) {
         return false;
     }
+    let fx = hifigan_effect_flags(algo, track, entry, clip, clip.start_sec.max(0.0));
+    let child_formant_offset =
+        active_child_formant_offset_config(timeline, &clip.track_id).is_some();
     let effect_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
-        && (track_requests_extra_processing(algo, entry, clip, clip.start_sec.max(0.0))
-            || hifigan_tension_active_for_clip(entry, clip, clip.start_sec.max(0.0))
-            || hifigan_formant_shift_active_for_clip(entry, clip, clip.start_sec.max(0.0))
-            || active_child_formant_offset_config(timeline, &clip.track_id).is_some());
+        && (fx.any() || child_formant_offset);
     let rate = (clip.playback_rate as f64).max(1e-6);
     crate::renderer::processor_handles_time_stretch(
         algo.into_kind(),
@@ -564,7 +648,7 @@ mod tests {
     use super::{
         active_child_formant_offset_config, build_clip_effective_formant_shift_curve,
         child_formant_offset_curve_key, common_pan_curve_for_clip, common_volume_curve_for_clip,
-        does_clip_need_processor_render, extra_curve_for_clip, gate_separation_curves,
+        does_clip_need_processor_render, extra_curve_for_clip, gate_hifigan_effect_curves,
         hifigan_formant_shift_active_for_clip, maybe_apply_pitch_edit_to_clip_segment,
         processor_should_handle_stretch,
     };
@@ -666,8 +750,13 @@ mod tests {
         timeline.resolve_root_track_id(&clip.track_id)
     }
 
+    /// 需求：**Compose 关闭 ⇒ 听到未经任何改动的原音频**。
+    ///
+    /// 因此即使气声开关为开、playback_rate ≠ 1，处理器也**不得**声明自己处理
+    /// 时间拉伸 —— 一旦声明，调用方就会跳过外部拉伸，转而由处理器重新合成
+    /// （用户于是仍能听到气声/张力等改动）。拉伸交由**外部**算法完成。
     #[test]
-    fn breath_only_effect_uses_mel_stretch_without_compose() {
+    fn compose_off_effects_do_not_claim_time_stretch() {
         crate::time_stretch::update_runtime_stretch_settings(
             crate::time_stretch::UserStretchAlgorithm::Signalsmith,
             true,
@@ -699,12 +788,16 @@ mod tests {
         clip.playback_rate = 0.5;
         clip.extra_params = Some(HashMap::from([("breath_enabled".to_string(), 1.0)]));
 
-        assert!(processor_should_handle_stretch(&timeline, &clip));
+        assert!(
+            !processor_should_handle_stretch(&timeline, &clip),
+            "Compose 关闭时处理器不得声明处理时间拉伸（否则会重新合成，效果被听到）"
+        );
     }
 
     fn breath_only_timeline() -> (TimelineState, Clip) {
-        // 构造"Compose 关闭 + 气声开启 + Mel Stretch + rate=0.5"的场景
-        //（8c911b54 试图修复、但只改了拉伸判定一侧的问题场景）。
+        // 构造"Compose 关闭 + 气声开启 + Mel Stretch + rate=0.5"的场景。
+        // 注意：新语义下这组设置**不应**触发任何处理器渲染或内部拉伸 ——
+        // 气声属于"合成"参数，Compose 关闭时必须完全静默。
         crate::time_stretch::update_runtime_stretch_settings(
             crate::time_stretch::UserStretchAlgorithm::Signalsmith,
             true,
@@ -738,40 +831,57 @@ mod tests {
         (timeline, clip)
     }
 
+    /// Compose 关闭时，轨道级效果**不得**触发预渲染。
+    ///
+    /// 两个判定（外部拉伸决策 / 整 clip 预渲染决策）必须同源：这里断言二者
+    /// 一致为 false。若预渲染放行而拉伸判定不放行，实时引擎会拿到一份
+    /// 处理器重新合成过的 PCM —— 等于 Compose 关了却仍听得到效果。
     #[test]
-    fn breath_only_effect_requires_processor_render_without_compose() {
-        // processor_should_handle_stretch 返回 true 时调用方会跳过外部拉伸；
-        // 预渲染判定必须同步放行，否则实时引擎永远拿不到 rendered_pcm，
-        // 回退为源速率 varispeed（变调）播放。
+    fn compose_off_effects_require_no_processor_render() {
         let (timeline, clip) = breath_only_timeline();
-        assert!(processor_should_handle_stretch(&timeline, &clip));
-        assert!(does_clip_need_processor_render(&timeline, &clip, 0.0));
+        assert!(
+            !processor_should_handle_stretch(&timeline, &clip),
+            "Compose 关闭 ⇒ 不得由效果声明内部拉伸"
+        );
+        assert!(
+            !does_clip_need_processor_render(&timeline, &clip, 0.0),
+            "Compose 关闭 ⇒ 不得由效果触发预渲染"
+        );
     }
 
+    /// Compose 关闭时，处理器**不得改写** PCM。
+    ///
+    /// 【契约变更说明】本测试此前断言"输出长度必须等于时间轴帧数"，因为当时
+    /// 效果会在 Compose 关闭时照样进入处理器并接管内部拉伸。新需求是
+    /// "Compose 关闭 ⇒ 未经任何改动的原音频"，于是拉伸责任回到**调用方**
+    /// （外部预拉伸，由 `processor_should_handle_stretch == false` 决定）。
+    /// 因此这里断言 PCM 逐样本不变 —— 调用方拿到的必须是原样数据。
+    /// 若处理器仍改写 PCM，用户就会听到被重新合成过的音频。
     #[test]
-    fn breath_only_compose_off_still_stretches_segment_to_timeline_length() {
-        // 回归：Compose 关闭 + 气声开启 + Mel Stretch 时，外部拉伸被跳过，
-        // maybe_apply 曾直接返回 Ok(false) 且不改写 PCM → 音频保持源速率
-        // （导出被截断/补零，实时 varispeed 变调）。修复后无论处理器是否
-        // 可用（后端不可用时走外部拉伸兜底），输出长度都必须等于时间轴
-        // 帧数 = 源帧数 / playback_rate。
+    fn compose_off_leaves_pcm_untouched() {
         let (timeline, clip) = breath_only_timeline();
 
         // 0.1s @ 44.1k 立体声（短输入让可能的 ONNX 推理保持快速）。
         let frames_in = 4_410usize;
-        let mut pcm = vec![0.25f32; frames_in * 2];
+        let original = vec![0.25f32; frames_in * 2];
+        let mut pcm = original.clone();
         let applied =
             maybe_apply_pitch_edit_to_clip_segment(&timeline, &clip, 0.0, 0.0, 44_100, &mut pcm)
                 .expect("maybe_apply must not error");
 
-        let expected_frames = frames_in * 2; // rate = 0.5 → 拉长一倍
+        assert!(
+            !applied,
+            "Compose 关闭 ⇒ 处理器不得被应用（applied 应为 false）"
+        );
         assert_eq!(
             pcm.len(),
-            expected_frames * 2,
-            "breath-only clip must end up at timeline length (applied={applied})"
+            original.len(),
+            "Compose 关闭 ⇒ PCM 长度不得被改写（拉伸由调用方负责）"
         );
-        // 拉伸后不得是静音
-        assert!(pcm.iter().any(|&v| v.abs() > 1e-4));
+        assert_eq!(
+            pcm, original,
+            "Compose 关闭 ⇒ PCM 必须逐样本保持原样，用户听到的是原音频"
+        );
     }
 
     #[test]
@@ -939,6 +1049,54 @@ mod tests {
         m
     }
 
+    /// **Compose 关闭 ⇒ 剥离全部轨道级 HiFiGAN 效果曲线。**
+    ///
+    /// 需求：Compose 关闭时听到的是**未经任何改动的原音频**，因此共振峰、
+    /// 气声、张力三条曲线都必须收不到 —— 这是"用户仍能听到张力改动"
+    /// 这一缺陷的合成侧断言。
+    #[test]
+    fn compose_off_strips_all_hifigan_effect_curves() {
+        let mut curves = HashMap::new();
+        curves.insert("breath_gain".to_string(), vec![0.5f32, 0.8]);
+        curves.insert("hifigan_tension".to_string(), vec![80.0f32, -40.0]);
+        curves.insert("formant_shift_cents".to_string(), vec![120.0f32]);
+
+        // 即使分离开关是**开**的，Compose 关闭也必须全部剥离。
+        let gated = gate_hifigan_effect_curves(&curves, &params_with_separation(true), false);
+
+        for key in ["breath_gain", "hifigan_tension", "formant_shift_cents"] {
+            assert!(
+                !gated.contains_key(key),
+                "Compose 关闭必须剥离 {key}，否则用户仍能听到该改动"
+            );
+        }
+    }
+
+    /// **Compose 关闭不得剥离音量 / 声相这类混音级参数。**
+    ///
+    /// 需求口径：Compose 只影响**音高、共振峰、气声、张力**这四类"合成"参数；
+    /// 音量与声相是**混音级**参数，未开 Compose 的原始音频轨道同样要支持
+    /// （项目里对动态(DYN)已有同样说明："刻意不检查 compose_enabled"）。
+    /// 若把它们一并剥离，关掉 Compose 就会连音量/声相一起失效。
+    #[test]
+    fn compose_off_keeps_mix_level_curves() {
+        let mut curves = HashMap::new();
+        curves.insert("hifigan_tension".to_string(), vec![80.0f32]);
+        curves.insert("volume".to_string(), vec![0.5f32, 1.5]);
+        curves.insert("pan".to_string(), vec![-1.0f32, 0.25]);
+        curves.insert("dyn".to_string(), vec![0.3f32]);
+
+        let gated = gate_hifigan_effect_curves(&curves, &HashMap::new(), false);
+
+        assert!(!gated.contains_key("hifigan_tension"), "合成参数应被剥离");
+        for key in ["volume", "pan", "dyn"] {
+            assert!(
+                gated.contains_key(key),
+                "混音级参数 {key} 不受 Compose 门禁，必须保留"
+            );
+        }
+    }
+
     /// 关闭开关必须剥掉 `breath_gain` 与 `hifigan_tension`。
     ///
     /// 这是需求「不参与合成」的**合成侧**核心断言：处理器收不到这两条曲线，
@@ -951,7 +1109,7 @@ mod tests {
         // 对照项：共振峰与分离无关，必须保留
         curves.insert("formant_shift_cents".to_string(), vec![120.0f32]);
 
-        let gated = gate_separation_curves(&curves, &params_with_separation(false));
+        let gated = gate_hifigan_effect_curves(&curves, &params_with_separation(false), true);
 
         assert!(
             !gated.contains_key("breath_gain"),
@@ -975,7 +1133,7 @@ mod tests {
         curves.insert("breath_gain".to_string(), vec![0.5f32]);
         curves.insert("hifigan_tension".to_string(), vec![80.0f32]);
 
-        let gated = gate_separation_curves(&curves, &params_with_separation(true));
+        let gated = gate_hifigan_effect_curves(&curves, &params_with_separation(true), true);
 
         assert_eq!(gated.get("breath_gain").map(|v| v.as_slice()), Some([0.5f32].as_slice()));
         assert_eq!(
@@ -993,7 +1151,7 @@ mod tests {
         let mut curves = HashMap::new();
         curves.insert("breath_gain".to_string(), vec![0.5f32]);
 
-        let gated = gate_separation_curves(&curves, &params_with_separation(false));
+        let gated = gate_hifigan_effect_curves(&curves, &params_with_separation(false), true);
 
         assert!(
             gated.get("breath_gain").is_none(),
@@ -1013,20 +1171,20 @@ mod tests {
         let mut curves = HashMap::new();
         curves.insert("breath_gain".to_string(), vec![0.5f32]);
         assert!(matches!(
-            gate_separation_curves(&curves, &params_with_separation(true)),
+            gate_hifigan_effect_curves(&curves, &params_with_separation(true), true),
             Cow::Borrowed(_)
         ));
 
         // 开关关闭但没有被门禁的键（无需克隆）
         let empty: HashMap<String, Vec<f32>> = HashMap::new();
         assert!(matches!(
-            gate_separation_curves(&empty, &params_with_separation(false)),
+            gate_hifigan_effect_curves(&empty, &params_with_separation(false), true),
             Cow::Borrowed(_)
         ));
 
         // 开关关闭且确有被门禁的键 ⇒ 此时才克隆
         assert!(matches!(
-            gate_separation_curves(&curves, &params_with_separation(false)),
+            gate_hifigan_effect_curves(&curves, &params_with_separation(false), true),
             Cow::Owned(_)
         ));
     }
@@ -1036,7 +1194,7 @@ mod tests {
     fn missing_switch_behaves_as_off() {
         let mut curves = HashMap::new();
         curves.insert("hifigan_tension".to_string(), vec![80.0f32]);
-        let gated = gate_separation_curves(&curves, &HashMap::new());
+        let gated = gate_hifigan_effect_curves(&curves, &HashMap::new(), true);
         assert!(
             !gated.contains_key("hifigan_tension"),
             "a missing switch key means off, so curves must be stripped"
@@ -1932,13 +2090,14 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         return Ok(false);
     }
 
-    let extra_processing = track_requests_extra_processing(algo, entry, clip, clip_start_sec);
-    let tension_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
-        && hifigan_tension_active_for_clip(entry, clip, clip_start_sec);
-    let formant_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
-        && hifigan_formant_shift_active_for_clip(entry, clip, clip_start_sec);
+    // 三处判定同源（见 [`hifigan_effect_flags`]），且**已应用 Compose 门禁**：
+    // Compose 关闭时这三个标志全为 false，因此下面的每一个"是否触发渲染"
+    // 判定都不会再因为张力/气声/共振峰而放行 —— 用户听到的就是原音频。
+    let fx = hifigan_effect_flags(algo, track, entry, clip, clip_start_sec);
+    let extra_processing = fx.breath;
+    let tension_processing = fx.tension;
+    let formant_processing = fx.formant;
 
-    // HiFiGAN 效果（气声/张力/共振峰）可在 Compose 关闭时独立触发渲染；
     // 若这类效果启用而 Mel Stretch 又被选中，外部预拉伸必须跳过，让
     // processor 使用真实 playback_rate 完成内部时间伸缩。
     let processor_effect_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
@@ -1947,10 +2106,10 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
             || formant_processing
             || has_child_formant_offset);
 
-    // Compose 关闭时，HiFiGAN 独立效果（气声/张力/共振峰）仍必须进入处理器：
-    // 调用方已按 processor_should_handle_stretch 跳过外部拉伸，若此处不放行，
-    // 会出现“外部不拉伸、内部也不运行”的错位 —— 音频以源速率被截断/补零
-    // （导出），或回退为 varispeed 变调播放（实时引擎）。
+    // Compose 关闭、且没有音高参考块、也没有子轨共振峰偏移时，不进入处理器。
+    // 此时调用方按 [`processor_should_handle_stretch`] 走**外部**预拉伸
+    // （该判定同样已应用 Compose 门禁），因此不存在"外部不拉伸、内部也不运行"
+    // 的错位 —— 两边口径由 [`hifigan_effect_flags`] 保证一致。
     if !track.compose_enabled && !entry.has_pitch_adjustment_active && !processor_effect_processing
     {
         return Ok(false);
@@ -2244,8 +2403,10 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
             // 避免"每个消费点各判一次"带来的漂移 —— 本项目已经出现过
             // "以为有单一实现、实际存在第 2 份"的教训。
             //
-            // 【性能】开关开启（常态）时返回借用、零克隆；详见 `gate_separation_curves`。
-            let gated_curves = gate_separation_curves(extra_curves_for_ctx, extra_params);
+            // 【性能】常态（Compose 开启且无需剥离）返回借用、零克隆；
+            // 详见 `gate_hifigan_effect_curves`。
+            let gated_curves =
+                gate_hifigan_effect_curves(extra_curves_for_ctx, extra_params, track.compose_enabled);
             let extra_curves_for_ctx: &std::collections::HashMap<String, Vec<f32>> = &gated_curves;
 
             // 若处理器自己处理时间拉伸（如 vslib 使用 Timing 控制点），传递实际 playback_rate；
@@ -2453,19 +2614,11 @@ pub fn does_clip_need_processor_render(
         return false;
     }
 
-    let extra_processing = track_requests_extra_processing(algo, entry, clip, clip_start_sec);
-    let tension_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
-        && hifigan_tension_active_for_clip(entry, clip, clip_start_sec);
-    let formant_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
-        && hifigan_formant_shift_active_for_clip(entry, clip, clip_start_sec);
-    // HiFiGAN 独立效果（气声/张力/共振峰）在 Compose 关闭时同样需要预渲染：
-    // processor_should_handle_stretch 会据此跳过外部拉伸，若此处不放行，
-    // 实时引擎永远拿不到 rendered_pcm，会回退为源速率 varispeed（变调）播放。
+    // 与 [`processor_should_handle_stretch`] / `should_process_segment` 同源，
+    // 且已应用 Compose 门禁（见 [`hifigan_effect_flags`]）。
+    let fx = hifigan_effect_flags(algo, track, entry, clip, clip_start_sec);
     let effect_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
-        && (extra_processing
-            || tension_processing
-            || formant_processing
-            || has_child_formant_offset);
+        && (fx.any() || has_child_formant_offset);
 
     // 当存在非静音的音高参考块时，即使 compose_enabled 为 false，
     // 也需要触发处理器预渲染，确保音高参考块的 MIDI 数据能应用到同组的音频块。
@@ -2507,13 +2660,13 @@ pub fn does_clip_need_processor_render(
     //       即使 pitch_edit_user_modified 为 false 也应触发渲染。
     debug_eprintln!("[pitch_edit] does_clip_need_processor_render: clip={} user_modified={} has_adj={} extra={} tension={} formant={} child_off={} child_formant={} stretch={}",
         clip.id, entry.pitch_edit_user_modified, entry.has_pitch_adjustment_active,
-        extra_processing, tension_processing, formant_processing, has_child_pitch_offset,
+        fx.breath, fx.tension, fx.formant, has_child_pitch_offset,
         has_child_formant_offset, needs_processor_stretch);
     if !entry.pitch_edit_user_modified
         && !entry.has_pitch_adjustment_active
-        && !extra_processing
-        && !tension_processing
-        && !formant_processing
+        && !fx.breath
+        && !fx.tension
+        && !fx.formant
         && !has_child_pitch_offset
         && !has_child_formant_offset
         && !needs_processor_stretch
@@ -2521,9 +2674,9 @@ pub fn does_clip_need_processor_render(
         return false;
     }
 
-    if extra_processing
-        || tension_processing
-        || formant_processing
+    if fx.breath
+        || fx.tension
+        || fx.formant
         || has_child_pitch_offset
         || has_child_formant_offset
         || needs_processor_stretch

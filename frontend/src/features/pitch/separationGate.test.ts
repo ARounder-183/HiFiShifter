@@ -14,6 +14,9 @@ import {
     SEPARATION_PARAM_ID,
     findBlockedEditParam,
     paramNeedingVisibilityOnGate,
+    isGatedByCompose,
+    isEffectParamGated,
+    COMPOSE_GATED_PARAMS,
     isGatedBySeparation,
     isSeparationEnabled,
 } from "./separationGate";
@@ -104,6 +107,44 @@ describe("separationGate", () => {
                     expect(needsVisibility).toBe(needsFallback);
                 }
             }
+        });
+    });
+
+
+    describe("Compose 门禁（只影响合成参数，不影响混音参数）", () => {
+        it("Compose 关闭时，共振峰/气声/张力都不可用", () => {
+            for (const id of ["formant_shift_cents", "breath_gain", "hifigan_tension"]) {
+                expect(isGatedByCompose(id, false)).toBe(true);
+            }
+        });
+
+        it("Compose 开启时全部可用", () => {
+            for (const id of COMPOSE_GATED_PARAMS) {
+                expect(isGatedByCompose(id, true)).toBe(false);
+            }
+        });
+
+        it("音量/声相/动态等混音级参数**不**受 Compose 门禁", () => {
+            // 需求口径：Compose 只影响音高、共振峰、气声、张力；
+            // 音量与声相是混音级参数，未开 Compose 也要生效。
+            for (const id of ["volume", "pan", "dyn", "pitch"]) {
+                expect(isGatedByCompose(id, false)).toBe(false);
+            }
+        });
+
+        it("统一门禁：Compose 与分离开关任一关闭都会命中", () => {
+            // Compose 关、分离开 ⇒ 命中（Compose 是更强的门禁）
+            expect(isEffectParamGated("hifigan_tension", true, false)).toBe(true);
+            // Compose 开、分离关 ⇒ 命中
+            expect(isEffectParamGated("hifigan_tension", false, true)).toBe(true);
+            // 两者都开 ⇒ 不命中
+            expect(isEffectParamGated("hifigan_tension", true, true)).toBe(false);
+        });
+
+        it("共振峰只受 Compose 影响、不受分离开关影响", () => {
+            // 共振峰走 mel 阶段，不依赖 HNSEP 分离。
+            expect(isEffectParamGated("formant_shift_cents", false, true)).toBe(false);
+            expect(isEffectParamGated("formant_shift_cents", true, false)).toBe(true);
         });
     });
 

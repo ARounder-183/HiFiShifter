@@ -119,3 +119,43 @@ export function paramNeedingVisibilityOnGate(
         ? null
         : editParam;
 }
+
+/**
+ * Compose 关闭时不可用的参数：**音高之外**的轨道级"合成"参数。
+ *
+ * 需求口径：Compose 只影响**音高、共振峰、气声、张力**这四类合成参数；
+ * 音量 / 声相 / 动态是**混音级**参数，刻意不受 Compose 限制，不在此列。
+ * 音高由 `pitch_requires_compose` 单独提示，故这里只列其余三项。
+ */
+export const COMPOSE_GATED_PARAMS: readonly string[] = [
+    "formant_shift_cents",
+    "breath_gain",
+    "hifigan_tension",
+];
+
+/**
+ * 该参数当前是否因 **Compose 关闭**而不可用（应置灰、不可选中、不参与合成）。
+ *
+ * @param paramId 参数 id
+ * @param composeEnabled 所属轨道组的 Compose 开关是否为开
+ */
+export function isGatedByCompose(paramId: string, composeEnabled: boolean): boolean {
+    return !composeEnabled && COMPOSE_GATED_PARAMS.includes(paramId);
+}
+
+/**
+ * 统一的效果参数门禁：Compose 关闭**或**气声分离开关闭时不可用。
+ *
+ * 后端在**同一处**（`gate_hifigan_effect_curves`）落地这两道门禁，
+ * 前端也必须同源判断，否则会出现"UI 可编辑、后端已剥离"或反之。
+ */
+export function isEffectParamGated(
+    paramId: string,
+    separationEnabled: boolean,
+    composeEnabled: boolean,
+): boolean {
+    return (
+        isGatedBySeparation(paramId, separationEnabled) ||
+        isGatedByCompose(paramId, composeEnabled)
+    );
+}
