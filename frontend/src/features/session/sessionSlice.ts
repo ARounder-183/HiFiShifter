@@ -535,8 +535,8 @@ export interface SessionState {
      * 【为什么放在这里而不是 fileBrowser 切片】与 `fileBrowserView` 同一条理由：
      * 它随 `app_config.json` 一起备份与迁移，保存路径也只有一条。
      *
-     * 【为什么"记住上次的选择"是必要的】没有子目录的目录直接按这些值执行、不弹窗
-     * （见 `shouldPromptFolderImport`）；记不住的话，用户每次拖入都要面对一次弹窗。
+     * 【为什么"记住上次的选择"是必要的】它是**对话框的预填**：目录导入一律弹窗
+     * （见 `FolderImportHost`），每次都从上次的选择起手，用户多数时候只需按回车。
      */
     folderImportOptions: FolderImportOptions;
     /**

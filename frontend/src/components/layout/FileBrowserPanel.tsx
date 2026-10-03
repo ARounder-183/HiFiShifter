@@ -1235,15 +1235,15 @@ export const FileBrowserPanel: React.FC = () => {
             importFolder: (entries) => {
                 const dirs = entries.filter((entry) => entry.isDir).map((entry) => entry.path);
                 if (dirs.length === 0) return;
-                // 右键入口一律弹对话框（`force`）：用户是**主动**选"导入文件夹"的，
-                // 这时候替他用记住的选项直接执行，等于把选择权收走。
+                // 右键入口是用户**显式**发起的：目录里没有媒体文件时也弹窗给出解释，
+                // 而不是静默什么都不做（`fromExplicitRequest` 的唯一作用）。
                 emitFolderImportRequest({
                     dirs,
                     looseFiles: [],
                     trackId: selectedTrackId,
                     startSec: playheadSec,
                     insertIndex: rootIndexAtDrop(tracks, selectedTrackId),
-                    force: true,
+                    fromExplicitRequest: true,
                 });
             },
             reveal: (paths) => {

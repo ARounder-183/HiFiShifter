@@ -27,12 +27,14 @@ export interface FolderImportRequestDetail {
      */
     insertIndex?: number | null;
     /**
-     * 强制弹选项对话框。
+     * 本次请求是用户**显式发起**的（右键菜单的「导入文件夹…」、右键拖入）。
      *
-     * 用于"用户明确要求选"的入口：右键菜单的「导入文件夹…」，以及按住修饰键拖入。
-     * 没有子目录、也没被截断时，其余入口会直接用记住的选项执行、不打扰用户。
+     * 【它现在唯一的作用：无媒体时的表现】目录导入一律弹选项对话框，因此这个标记
+     * 不再决定"弹不弹"。它只决定"这个文件夹里一个媒体文件都没有"时怎么办：
+     * 显式请求仍然弹窗（用「没有媒体文件」+ 禁用的「导入」按钮给出解释，比什么都
+     * 不发生更好），隐式拖入则直接返回，不建出一条空轨道。
      */
-    force?: boolean;
+    fromExplicitRequest?: boolean;
 }
 
 export function emitFolderImportRequest(detail: FolderImportRequestDetail): void {

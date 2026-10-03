@@ -139,20 +139,21 @@ export function buildFolderImportPlan(
 }
 
 /**
- * 这次目录导入要不要先弹选项对话框。
+ * 这次目录导入有没有**任何媒体文件**可导。
  *
- * 【为什么"没有子目录就不弹"】递归选项只在有子目录时才有意义；此时弹窗等于用一次
- * 点击换一个用户没得选的确认。但**截断必须弹** —— 那是"你要导入的东西比上限还多"，
- * 不告知就等于静默少导入。
+ * 【为什么判据必须随 `recursive` 走】递归关闭时子目录里的文件根本不会进
+ * `orderedFiles`，把它们算作"这个文件夹有媒体"会得出"能导入但导入后是空的"。
+ * 调用方按当前选项扫描后再构造计划，因此这里的 `totalFiles` 天然与 `recursive`
+ * 一致 —— 不需要再传一个开关进来。
  *
- * @param hasSubdirs 任一被拖入目录含子目录。
- * @param truncated 收集被总量上限截断。
- * @param force 调用方显式要求（右键菜单的"导入文件夹…"、按住修饰键拖入）。
+ * 【为什么只看 `totalFiles`】它就是本次真正会被导入的集合（已去重、已按子目录
+ * 优先排好，含散文件）。再数一遍 `roots` 里的文件等于复制一份计数，两处一旦
+ * 分叉就是"对话框说 3 个、实际导入 4 个"。
+ *
+ * 【为什么这么薄还要单独存在】它把"可导入 = 有媒体文件"这条规则**命名**了。
+ * 此前三个入口各自用 `scan.totalFiles` / `plan.orderedFiles.length` 表达同一件事，
+ * 于是"弹窗路径挡住了空目录、非弹窗路径没挡"这种分叉得以存在。
  */
-export function shouldPromptFolderImport(input: {
-    hasSubdirs: boolean;
-    truncated: boolean;
-    force?: boolean;
-}): boolean {
-    return Boolean(input.force) || input.truncated || input.hasSubdirs;
+export function hasImportableMedia(plan: FolderImportPlan): boolean {
+    return plan.totalFiles > 0;
 }

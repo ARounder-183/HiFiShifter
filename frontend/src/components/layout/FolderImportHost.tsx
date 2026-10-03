@@ -1,15 +1,22 @@
 /**
- * 「导入文件夹」的宿主：监听请求、扫描、决定要不要问、执行导入。
+ * 「导入文件夹」的宿主：监听请求、扫描、弹对话框、执行导入。
  *
  * 【为什么集中在一个全局挂载的组件里】三个入口（系统拖放 / 文件浏览器拖拽 /
- * 右键菜单）都可能发起目录导入，而它们分布在不同的组件树位置。把"扫描 → 决定 →
+ * 右键菜单）都可能发起目录导入，而它们分布在不同的组件树位置。把"扫描 → 弹窗 →
  * 对话框 → 导入"这一整条链放在这里，入口只需发一条请求事件：
  *   - 只有一份对话框状态，不会出现"两个面板各弹一个"；
  *   - 默认值、重新扫描的时机、记住选项的写入点都只有一处。
  *
- * 【为什么"没有子目录就不弹窗"】递归选项只在有子目录时才有意义，此时弹窗等于用一次
- * 点击换一个用户没得选的确认。但**截断必须弹** —— 那是"你要导入的东西比上限还多"，
- * 不告知就等于静默少导入。判断集中在 `shouldPromptFolderImport`，可单测。
+ * 【为什么目录导入一律弹窗（而多文件导入不弹）】多文件的选择只有"怎么排"一件事，
+ * 三个选项一句话说得完，用菜单点一下最快。目录导入多出两个**正交**的问题（要不要
+ * 下钻子目录、要不要为文件夹建轨道组），后者还只在「跨轨道添加」下有效 —— 这不是
+ * 菜单能表达的形状。文件多少不改变这个形状：即使只有一个文件，用户拖的是**一个
+ * 文件夹**，他期待的是"这个文件夹怎么进来"。
+ *
+ * 【为什么无媒体的文件夹要单独挡一道】用户拖入一个不含任何媒体文件的目录时，
+ * 弹窗没有意义（导入按钮必然是禁用的）。此时按入口来源区分：显式请求（右键菜单 /
+ * 右键拖入）照旧弹窗，用「没有媒体文件」这句解释代替静默；隐式拖入则直接返回 ——
+ * 否则会静默建出一条空轨道。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -23,7 +30,7 @@ import {
 } from "../../features/fileBrowser/folderImportEvents";
 import {
     buildFolderImportPlan,
-    shouldPromptFolderImport,
+    hasImportableMedia,
 } from "../../features/fileBrowser/folderImportPlan";
 import {
     normalizeFolderImportOptions,
@@ -117,13 +124,12 @@ export function FolderImportHost() {
                     // 扫描失败（IPC 异常）：什么都不做，而不是拿半截结果去导入。
                     return;
                 }
-                const prompt = shouldPromptFolderImport({
-                    hasSubdirs: result.groups.some((group) => group.hasSubdirs),
-                    truncated: result.truncated,
-                    force: detail.force,
-                });
-                if (!prompt) {
-                    runImport(detail, result, opts);
+                // 无媒体可导：显式请求仍然弹窗（让用户看见"没有媒体文件"这句解释，
+                // 比什么都不发生更好），隐式拖入直接返回 —— 否则会静默建出一条空轨道。
+                if (
+                    !hasImportableMedia(buildFolderImportPlan(result.groups, detail.looseFiles)) &&
+                    !detail.fromExplicitRequest
+                ) {
                     return;
                 }
                 setDraft(opts);
@@ -134,7 +140,7 @@ export function FolderImportHost() {
         };
         window.addEventListener(FOLDER_IMPORT_REQUEST_EVENT, onRequest);
         return () => window.removeEventListener(FOLDER_IMPORT_REQUEST_EVENT, onRequest);
-    }, [collect, runImport]);
+    }, [collect]);
 
     const plan = useMemo(
         () => buildFolderImportPlan(scan?.groups ?? [], request?.looseFiles ?? []),
@@ -145,7 +151,7 @@ export function FolderImportHost() {
         (patch: Partial<FolderImportOptions>) => {
             const next = normalizeFolderImportOptions({ ...draft, ...patch });
             setDraft(next);
-            // 记住这次的选择：没有子目录的目录下次直接按这些值执行、不再打扰。
+            // 记住这次的选择：它是**对话框的预填**，用户多数时候只需按回车。
             dispatch(setFolderImportOptions(patch));
             void dispatch(persistUiSettings());
             if (patch.recursive === undefined || !request) return;

@@ -566,7 +566,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                             trackId,
                             startSec: beat,
                             insertIndex: rootIndexAtDrop(sessionRef.current.tracks, trackId),
-                            force: isRightDrag,
+                            fromExplicitRequest: isRightDrag,
                         });
                         clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                         return;

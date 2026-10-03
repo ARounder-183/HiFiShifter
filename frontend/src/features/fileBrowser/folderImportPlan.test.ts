@@ -9,7 +9,7 @@
 import { describe, expect, test } from "vitest";
 
 import type { FolderMediaGroup } from "../../services/api/fileBrowser";
-import { buildFolderImportPlan, shouldPromptFolderImport } from "./folderImportPlan";
+import { buildFolderImportPlan, hasImportableMedia } from "./folderImportPlan";
 import {
     DEFAULT_FOLDER_IMPORT_OPTIONS,
     FOLDER_IMPORT_MODES,
@@ -149,23 +149,37 @@ describe("buildFolderImportPlan：目录树", () => {
     });
 });
 
-describe("shouldPromptFolderImport", () => {
-    test("没有子目录、没被截断 → 直接用记住的选项执行", () => {
-        expect(shouldPromptFolderImport({ hasSubdirs: false, truncated: false })).toBe(false);
+describe("hasImportableMedia", () => {
+    test("空扫描 / 只有空目录 → 没有可导入的媒体", () => {
+        expect(hasImportableMedia(buildFolderImportPlan([]))).toBe(false);
+        expect(
+            hasImportableMedia(buildFolderImportPlan([group("C:\\music\\Empty", [])])),
+        ).toBe(false);
     });
 
-    test("有子目录 → 弹（递归选项第一次有意义）", () => {
-        expect(shouldPromptFolderImport({ hasSubdirs: true, truncated: false })).toBe(true);
+    test("目录里有文件 → 有可导入的媒体", () => {
+        expect(
+            hasImportableMedia(
+                buildFolderImportPlan([group("C:\\music\\Takes", ["C:\\music\\Takes\\a.wav"])]),
+            ),
+        ).toBe(true);
     });
 
-    test("被截断 → 必弹（不告知就等于静默少导入）", () => {
-        expect(shouldPromptFolderImport({ hasSubdirs: false, truncated: true })).toBe(true);
+    test("只有散文件也算（散文件同样是可导入的媒体）", () => {
+        expect(hasImportableMedia(buildFolderImportPlan([], ["C:\\loose\\b.wav"]))).toBe(true);
     });
 
-    test("显式要求 → 必弹", () => {
-        expect(shouldPromptFolderImport({ hasSubdirs: false, truncated: false, force: true })).toBe(
-            true,
-        );
+    test("判据随扫描范围走：非递归扫描不含子目录文件时，就是没有媒体", () => {
+        // 非递归时后端不会把子目录里的文件放进 groups —— 计划里就没有它们，
+        // 因此"这个文件夹有媒体"不成立（否则会导入出一个空轨道）。
+        const nonRecursive = buildFolderImportPlan([group("C:\\music\\Takes", [], true)]);
+        expect(hasImportableMedia(nonRecursive)).toBe(false);
+        // 递归扫描后同一目录带回了子目录里的文件 → 有媒体。
+        const recursive = buildFolderImportPlan([
+            group("C:\\music\\Takes", [], true),
+            group("C:\\music\\Takes\\Sub", ["C:\\music\\Takes\\Sub\\inner.wav"]),
+        ]);
+        expect(hasImportableMedia(recursive)).toBe(true);
     });
 });
 
