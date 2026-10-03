@@ -43,6 +43,7 @@ import { setGutterSize } from "../../features/dock/dockSlice";
 import { shallowEqual } from "react-redux";
 import { isModifierActive } from "../../features/keybindings/keybindingsSlice";
 import { resolveClipDragCopyMode } from "./timeline/hooks/clipDragCopyMode";
+import { isClipSplittableAtSec, resolveSplitTargetsAtSec } from "./timeline/splitTargets";
 import { copyClipsFromDrag } from "./timeline/hooks/copyClipsFromDrag";
 import {
     createNewTrackForKernelDrop,
@@ -6167,10 +6168,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                   explicitOverlappingClipIds: contextMenu.overlappingClipIds,
                               });
 
-                              const currentPlayheadSec = sessionRef.current.playheadSec;
-                              const playheadInClip =
-                                  currentPlayheadSec >= ctxClip.startSec &&
-                                  currentPlayheadSec <= ctxClip.startSec + ctxClip.lengthSec;
+                              const currentPlayheadSec = Math.max(
+                                  0,
+                                  Number(sessionRef.current.playheadSec ?? 0) || 0,
+                              );
+                              // 用与执行端同一个开区间谓词：闭区间会让"播放头恰好
+                              // 落在 Clip 边缘"时菜单亮着、点下去却什么都不发生。
+                              const playheadInClip = isClipSplittableAtSec(
+                                  ctxClip,
+                                  currentPlayheadSec,
+                              );
 
                               return createPortal(
                                   <ClipContextMenu
@@ -6180,16 +6187,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                       selectedClips={selectedClips}
                                       overlappingClips={overlappingFadeClips}
                                       playheadInClip={playheadInClip}
-                                      canSplitSelected={selectedClips.some((c) => {
-                                          const splitSec = Math.max(
-                                              0,
-                                              Number(sessionRef.current.playheadSec ?? 0) || 0,
-                                          );
-                                          return (
-                                              splitSec >= c.startSec &&
-                                              splitSec <= c.startSec + c.lengthSec
-                                          );
-                                      })}
+                                      canSplitSelected={selectedClips.some((c) =>
+                                          isClipSplittableAtSec(c, currentPlayheadSec),
+                                      )}
                                       onClose={() => setContextMenu(null)}
                                       onDelete={(ids) => {
                                           setContextMenu(null);
@@ -6417,25 +6417,25 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                   x={trackAreaMenu.x}
                                   y={trackAreaMenu.y}
                                   canPaste={clipboardAvailable}
-                                  canSplit={(multiSelectedClipIds.length > 0
-                                      ? multiSelectedClipIds
-                                      : sessionRef.current.selectedClipId
-                                        ? [sessionRef.current.selectedClipId]
-                                        : []
-                                  ).some((id) => {
-                                      const clip = sessionRef.current.clips.find(
-                                          (c) => c.id === id,
-                                      );
-                                      if (!clip) return false;
-                                      const splitSec = Math.max(
-                                          0,
-                                          Number(sessionRef.current.playheadSec ?? 0) || 0,
-                                      );
-                                      return (
-                                          splitSec >= clip.startSec &&
-                                          splitSec <= clip.startSec + clip.lengthSec
-                                      );
-                                  })}
+                                  // 与 `splitSelectedAtPlayhead` 共用同一个解析：
+                                  // 有选区时看选区，**无选区**时看播放头处有没有
+                                  // 可分割的 Clip —— 否则这条菜单项会在"能切但
+                                  // 没选东西"时被误判为不可用。
+                                  canSplit={
+                                      resolveSplitTargetsAtSec({
+                                          clips: sessionRef.current.clips,
+                                          splitSec: Math.max(
+                                              0,
+                                              Number(sessionRef.current.playheadSec ?? 0) || 0,
+                                          ),
+                                          selectedIds:
+                                              multiSelectedClipIds.length > 0
+                                                  ? multiSelectedClipIds
+                                                  : sessionRef.current.selectedClipId
+                                                    ? [sessionRef.current.selectedClipId]
+                                                    : [],
+                                      }).ids.length > 0
+                                  }
                                   canCloseGaps={sessionRef.current.clips.some(
                                       (c) =>
                                           c.trackId === trackAreaMenu.trackId &&

@@ -45,6 +45,7 @@ import { computeAutoCrossfadeFromPayload } from "./autoCrossfade";
 import { useTimelineSelectionRect } from "../";
 import { getBulkEditableClipIds } from "./bulkClipEdit";
 import { getGroupClipIds } from "./useGroupExpansion";
+import { isClipSplittableAtSec, resolveSplitTargetsAtSec } from "../splitTargets";
 import { buildBulkClipStateUpdates } from "./bulkClipRemotePayloads";
 import { computeClipNormalizationGain } from "../../../../features/session/clipNormalization";
 import type { TimelineViewportAccess } from "./timelineViewportAccess";
@@ -594,7 +595,7 @@ export function useTimelineClipActions(
             const eligibleIds = Array.from(expandedIds).filter((id) => {
                 const c = sessionRef.current.clips.find((clip) => clip.id === id);
                 if (!c) return false;
-                return splitSec > c.startSec + 1e-6 && splitSec < c.startSec + c.lengthSec - 1e-6;
+                return isClipSplittableAtSec(c, splitSec);
             });
             if (eligibleIds.length > 0) {
                 void dispatch(splitClipsAtRemote({ clipIds: eligibleIds, splitSec }));
@@ -604,15 +605,32 @@ export function useTimelineClipActions(
         [dispatch, pxPerSec, ignoreGrouping, disabledGroupIds, sessionRef],
     );
 
+    /**
+     * 「在播放头处分割」。
+     *
+     * 操作数由 `resolveSplitTargetsAtSec` 统一解析：有选区时与既有行为
+     * 完全一致；**无选区**时分割播放头处的所有可分割 Clip —— 此前这里是
+     * 一个静默 no-op，用户按 `S` 或点菜单都没有任何反馈。
+     *
+     * 注意这里用的是**未吸附**的播放头位置：吸附发生在 `splitClipIdsAtPlayhead`
+     * 内部。目标解析与最终切割位置因此可能略有出入（吸附后某段不再可切），
+     * 但那由 `splitClipIdsAtPlayhead` 的 `eligibleIds` 兜底 —— 它本来就是
+     * "给定候选，挑出真正能切的"这一形状，过滤是幂等的。
+     */
     const splitSelectedAtPlayhead = React.useCallback(() => {
-        const selectedIds =
-            multiSelectedClipIdsRef.current.length > 0
-                ? [...multiSelectedClipIdsRef.current]
-                : sessionRef.current.selectedClipId
-                  ? [sessionRef.current.selectedClipId]
-                  : [];
-        if (selectedIds.length === 0) return;
-        splitClipIdsAtPlayhead(selectedIds);
+        const session = sessionRef.current;
+        const { ids } = resolveSplitTargetsAtSec({
+            clips: session.clips,
+            splitSec: Math.max(0, Number(session.playheadSec ?? 0) || 0),
+            selectedIds:
+                multiSelectedClipIdsRef.current.length > 0
+                    ? multiSelectedClipIdsRef.current
+                    : session.selectedClipId
+                      ? [session.selectedClipId]
+                      : [],
+        });
+        if (ids.length === 0) return;
+        splitClipIdsAtPlayhead(ids);
     }, [splitClipIdsAtPlayhead, sessionRef]);
 
     // ── recordLastClickPosition ──────────────────────────────
