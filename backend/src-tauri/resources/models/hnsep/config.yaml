@@ -1,4 +1,20 @@
-model: model.onnx
+# HNSEP 模型参数（随模型一起分发，供人工核对与未来解析使用）。
+#
+# ⚠ 当前 Rust 侧**不解析**本文件：`vocoder/hnsep_onnx.rs` 用编译期常量
+#   `HNSEP_N_FFT` / `HNSEP_HOP` / `HNSEP_MODEL_SR`，`vocoder/hnsep_dsp.rs` 的
+#   调用参数必须与它们逐字一致。改这里不会改变行为 —— 要改行为请改常量。
+#
+# 保留两种来源的命名习惯（`sr` / `sample_rate`，`hnsep.onnx` / `model.onnx`），
+# 使它在模型版本之间切换时始终是准确的自描述文档。
+model: hnsep.onnx
 sample_rate: 44100
+# 与 `sample_rate` 同值，供习惯 `sr` 命名的工具读取。
+sr: 44100
 n_fft: 2048
 hop_length: 512
+# 本模型是**频谱域（mask-only）**导出：输入/输出均为
+# `[1, 2, n_fft/2+1, frames]`，STFT/ISTFT 由 Rust 侧完成。
+# 遗留键：早期波形域模型才有，此处保留以免下游读取方因缺键报错。
+is_mono: true
+n_out: 32
+n_out_lstm: 128
