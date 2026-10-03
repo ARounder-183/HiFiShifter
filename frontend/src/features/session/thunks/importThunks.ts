@@ -7,6 +7,7 @@ import { checkpointHistory, applyTimelinePayload, type SessionState } from "../s
 import { addTrackRemote, setClipStateRemote } from "./timelineThunks";
 import { computeAutoCrossfadeFromPayload } from "../../../components/layout/timeline/hooks/autoCrossfade";
 import { computeClipNormalizationGain } from "../clipNormalization";
+import { trackNameForMedia } from "../mediaTrackName";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 import { appStatusProgressBus } from "../../../utils/appStatusProgressBus";
 
@@ -18,6 +19,70 @@ type RawTimelineClip = {
     fade_in_sec?: number;
     fade_out_sec?: number;
 };
+
+/** `addTrackRemote` 的返回形状（只取"解析新轨道 id"需要的字段）。 */
+interface AddedTrackResult {
+    tracks: Array<{ id: string }>;
+    selected_track_id?: string | null;
+}
+
+/** `createTrackForImport` 需要的派发能力（与既有 thunk 内部 dispatch 的用法一致）。 */
+type TrackDispatch = (action: ReturnType<typeof addTrackRemote>) => {
+    unwrap: () => Promise<AddedTrackResult>;
+};
+
+/**
+ * 从"调用前后的 track id 差集"里解析出真正新建的那条轨道的 id。
+ *
+ * 三级回落与各处既有写法一致：差集 → 后端选中的新轨道 → 列表末位。
+ */
+function resolveCreatedTrackId(
+    added: AddedTrackResult,
+    beforeIds: ReadonlySet<string>,
+): string | null {
+    return (
+        added.tracks.find((track) => !beforeIds.has(track.id))?.id ??
+        added.selected_track_id ??
+        added.tracks[added.tracks.length - 1]?.id ??
+        null
+    );
+}
+
+/**
+ * 为一次**媒体文件导入**新建一条根轨道。
+ *
+ * 【为什么命名在这里】需求：导入媒体文件需要新建轨道时，轨道名 = 落到这条轨道上的
+ * **第一个**媒体文件的主名（去扩展名）。把命名收进这个辅助函数，六处建轨点就
+ * 不可能各写各的（此前一律 `name: undefined`，落成后端的 "Track"）。
+ *
+ * 【为什么只服务导入】工程里其它建轨行为（Ctrl+T、时间轴「新建轨道」、轨道复制、
+ * clip 拖拽到空白处新建、粘贴、MIDI 导入）不经过这里，仍沿用后端的 "Track"。
+ *
+ * @param nameFromFile 落到这条轨道上的第一个媒体文件的路径或裸文件名；缺省时
+ *   沿用后端默认名（目前只有不需要命名的路径会这样调）。
+ * @returns 新轨道的 id；派发失败或拿不到 id 时为 `null`（由调用方决定拒绝还是跳过）。
+ */
+async function createTrackForImport(args: {
+    dispatch: TrackDispatch;
+    getState: () => unknown;
+    nameFromFile?: string | null;
+}): Promise<string | null> {
+    const { dispatch, getState, nameFromFile } = args;
+    const beforeIds = new Set(
+        (getState() as { session: SessionState }).session.tracks.map((track) => track.id),
+    );
+    try {
+        const added = await dispatch(
+            addTrackRemote({
+                name: nameFromFile ? trackNameForMedia(nameFromFile) : undefined,
+                parentTrackId: null,
+            }),
+        ).unwrap();
+        return resolveCreatedTrackId(added, beforeIds);
+    } catch {
+        return null;
+    }
+}
 
 async function syncAutoCrossfadeFromLatestTimeline(args: {
     dispatch: (action: unknown) => Promise<unknown> & { unwrap: () => Promise<unknown> };
@@ -188,24 +253,16 @@ export const importAudioAtPosition = createAsyncThunk(
         try {
             let targetTrackId: string | undefined;
             if (payload.trackId === null) {
-                const state = getState() as { session: SessionState };
-                const beforeIds = new Set(state.session.tracks.map((t) => t.id));
-                try {
-                    const added = await dispatch(
-                        addTrackRemote({ name: undefined, parentTrackId: null }),
-                    ).unwrap();
-                    const createdId =
-                        added.tracks.find((t) => !beforeIds.has(t.id))?.id ??
-                        added.selected_track_id ??
-                        added.tracks[added.tracks.length - 1]?.id ??
-                        null;
-                    if (!createdId) {
-                        return rejectWithValue("add_track_failed");
-                    }
-                    targetTrackId = createdId;
-                } catch (err) {
-                    return rejectWithValue(err instanceof Error ? err.message : "add_track_failed");
+                // "插入到新轨道"：新轨道以这个文件命名。
+                const createdId = await createTrackForImport({
+                    dispatch: dispatch as unknown as TrackDispatch,
+                    getState,
+                    nameFromFile: payload.audioPath,
+                });
+                if (!createdId) {
+                    return rejectWithValue("add_track_failed");
                 }
+                targetTrackId = createdId;
             } else {
                 targetTrackId = payload.trackId ?? undefined;
             }
@@ -326,16 +383,12 @@ export const importAudioFileAtPosition = createAsyncThunk(
         try {
             let targetTrackId: string | undefined;
             if (payload.trackId === null) {
-                const state = getState() as { session: SessionState };
-                const beforeIds = new Set(state.session.tracks.map((t) => t.id));
-                const added = await dispatch(
-                    addTrackRemote({ name: undefined, parentTrackId: null }),
-                ).unwrap();
-                const createdId =
-                    added.tracks.find((t) => !beforeIds.has(t.id))?.id ??
-                    added.selected_track_id ??
-                    added.tracks[added.tracks.length - 1]?.id ??
-                    null;
+                // "插入到新轨道"：新轨道以这个文件命名。
+                const createdId = await createTrackForImport({
+                    dispatch: dispatch as unknown as TrackDispatch,
+                    getState,
+                    nameFromFile: payload.file.name,
+                });
                 if (!createdId) {
                     return rejectWithValue("add_track_failed");
                 }
@@ -473,21 +526,16 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
                 let targetTrackId: string | undefined;
 
                 if (payload.trackId === null) {
-                    // Create a new track
-                    const state = getState() as { session: SessionState };
-                    const beforeIds = new Set(state.session.tracks.map((t) => t.id));
-                    try {
-                        const added = await dispatch(
-                            addTrackRemote({ name: undefined, parentTrackId: null }),
-                        ).unwrap();
-                        targetTrackId =
-                            added.tracks.find((t) => !beforeIds.has(t.id))?.id ??
-                            added.selected_track_id ??
-                            added.tracks[added.tracks.length - 1]?.id ??
-                            undefined;
-                    } catch {
+                    // 整批落在同一条新轨道上 → 以**这批的第一个**文件命名。
+                    const createdId = await createTrackForImport({
+                        dispatch: dispatch as unknown as TrackDispatch,
+                        getState,
+                        nameFromFile: audioPaths[0],
+                    });
+                    if (!createdId) {
                         return rejectWithValue("add_track_failed");
                     }
+                    targetTrackId = createdId;
                 } else {
                     targetTrackId = payload.trackId ?? undefined;
                 }
@@ -538,21 +586,15 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
                         // Use existing track
                         targetTrackId = rootTracks[trackIdx].id;
                     } else {
-                        // Need to create a new track
-                        const curState = getState() as { session: SessionState };
-                        const beforeTrackIds = new Set(curState.session.tracks.map((t) => t.id));
-                        try {
-                            const added = await dispatch(
-                                addTrackRemote({ name: undefined, parentTrackId: null }),
-                            ).unwrap();
-                            targetTrackId =
-                                added.tracks.find((t) => !beforeTrackIds.has(t.id))?.id ??
-                                added.selected_track_id ??
-                                added.tracks[added.tracks.length - 1]?.id ??
-                                undefined;
-                        } catch {
-                            continue;
-                        }
+                        // 需要新建轨道：across-tracks 下每条新轨道各自以**它承载的
+                        // 那个文件**命名（不是这批的第一个）—— 循环变量 `audioPath` 就是它。
+                        const createdId = await createTrackForImport({
+                            dispatch: dispatch as unknown as TrackDispatch,
+                            getState,
+                            nameFromFile: audioPath,
+                        });
+                        if (!createdId) continue;
+                        targetTrackId = createdId;
                     }
 
                     try {
@@ -627,13 +669,6 @@ export interface ImportFolderAtPositionPayload {
     insertIndex?: number | null;
 }
 
-/** 文件名（不含目录与扩展名）——用作"每个媒体文件一条子轨道"的轨道名。 */
-function fileStem(path: string): string {
-    const base = path.split(/[\\/]/).pop() ?? path;
-    const dot = base.lastIndexOf(".");
-    return dot > 0 ? base.slice(0, dot) : base;
-}
-
 /**
  * 目录导入进度条的出现阈值（文件数）。
  *
@@ -686,13 +721,13 @@ export const importFolderAtPosition = createAsyncThunk(
             // `foldersFirst` 默认一致（列表里看到的顺序就是导入后的顺序）。
             for (const child of node.children) walk(child, index);
             for (const file of node.files) {
-                specs.push({ name: fileStem(file), parentIndex: index, files: [file] });
+                specs.push({ name: trackNameForMedia(file), parentIndex: index, files: [file] });
             }
         };
         for (const root of roots) walk(root, null);
         // 散文件各建一条根轨道：与"每个目录一条根轨道"同构，不引入第三种规则。
         for (const file of looseFiles) {
-            specs.push({ name: fileStem(file), parentIndex: null, files: [file] });
+            specs.push({ name: trackNameForMedia(file), parentIndex: null, files: [file] });
         }
 
         // 没有任何可建的轨道（既无目录也无散文件）：没什么可做。
@@ -829,20 +864,16 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
                 let targetTrackId: string | undefined;
 
                 if (payload.trackId === null) {
-                    const state = getState() as { session: SessionState };
-                    const beforeIds = new Set(state.session.tracks.map((t) => t.id));
-                    try {
-                        const added = await dispatch(
-                            addTrackRemote({ name: undefined, parentTrackId: null }),
-                        ).unwrap();
-                        targetTrackId =
-                            added.tracks.find((t) => !beforeIds.has(t.id))?.id ??
-                            added.selected_track_id ??
-                            added.tracks[added.tracks.length - 1]?.id ??
-                            undefined;
-                    } catch {
+                    // 整批落在同一条新轨道上 → 以**这批的第一个**文件命名。
+                    const createdId = await createTrackForImport({
+                        dispatch: dispatch as unknown as TrackDispatch,
+                        getState,
+                        nameFromFile: files[0]?.name,
+                    });
+                    if (!createdId) {
                         return rejectWithValue("add_track_failed");
                     }
+                    targetTrackId = createdId;
                 } else {
                     targetTrackId = payload.trackId ?? undefined;
                 }
@@ -899,20 +930,14 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
                     if (trackIdx < rootTracks.length) {
                         targetTrackId = rootTracks[trackIdx].id;
                     } else {
-                        const curState = getState() as { session: SessionState };
-                        const beforeTrackIds = new Set(curState.session.tracks.map((t) => t.id));
-                        try {
-                            const added = await dispatch(
-                                addTrackRemote({ name: undefined, parentTrackId: null }),
-                            ).unwrap();
-                            targetTrackId =
-                                added.tracks.find((t) => !beforeTrackIds.has(t.id))?.id ??
-                                added.selected_track_id ??
-                                added.tracks[added.tracks.length - 1]?.id ??
-                                undefined;
-                        } catch {
-                            continue;
-                        }
+                        // 每条新轨道各自以**它承载的那个文件**命名（循环变量 `file`）。
+                        const createdId = await createTrackForImport({
+                            dispatch: dispatch as unknown as TrackDispatch,
+                            getState,
+                            nameFromFile: file.name,
+                        });
+                        if (!createdId) continue;
+                        targetTrackId = createdId;
                     }
 
                     const fileName = String(file.name ?? "dropped-audio");
