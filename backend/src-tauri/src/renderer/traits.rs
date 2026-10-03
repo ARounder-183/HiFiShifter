@@ -34,6 +34,13 @@ pub struct RenderContext<'a> {
     pub clip_midi: &'a [f32],
     /// 所属 Clip 的唯一标识，用于 per-segment 推理缓存。
     pub clip_id: &'a str,
+    /// 本轨道的静态参数（含 `breath_enabled` 等开关）。
+    ///
+    /// **必须参与推理缓存键**：`breath_enabled` 决定送进声码器的是原始音频
+    /// 还是 HNSEP 分离出的谐波 stem —— 二者波形完全不同，而曲线可以一模一样。
+    /// 若它不在键里，切换开关却未清缓存时会命中另一条路径的陈旧音频。
+    /// 详见 [`crate::synth_clip_cache::compute_param_hash`]。
+    pub extra_params: &'a HashMap<String, f64>,
 }
 
 // ─── 能力描述 ──────────────────────────────────────────────────────────────────

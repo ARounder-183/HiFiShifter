@@ -1402,6 +1402,18 @@ fn chunk_max_frames() -> usize {
     })
 }
 
+/// 把 mel 帧区间 `[mel_lo, mel_hi)` 换算成**绝对时间窗（秒）**。
+///
+/// `mel_frame * hop / model_sr` 是模型域的时间轴（见本文件构建 f0 处
+/// `start_sec + i * hop_sec`）。调用方再乘自己的输出采样率即可得到帧号，
+/// 从而避免把模型域样本数直接加到输出域帧号上（那会在非 44100 输出时错位）。
+fn chunk_time_span(start_sec: f64, hop_sec: f64, mel_lo: usize, mel_hi: usize) -> (f64, f64) {
+    (
+        start_sec + mel_lo as f64 * hop_sec,
+        start_sec + mel_hi as f64 * hop_sec,
+    )
+}
+
 // ─── 帧级分块推理优化──────────────────────────────────────
 
 /// 优化版长音频分块推理：预提取全段 mel 一次，按帧切片推理，按帧偏移顺序拼接。
@@ -1423,8 +1435,17 @@ fn chunk_max_frames() -> usize {
 /// 需要 crossfade 的实现可参考 [`infer_pitch_edit_chunked_mel_stretch`]
 /// （rate≠1 路径，用 sin/cos 等功率加权）。
 ///
-/// `chunk_cache_get(mel_start_frame, mel_end_frame)` → 命中时返回缓存的 mono PCM，
-/// `chunk_cache_put(mel_start_frame, mel_end_frame, waveform)` → 写入波形到缓存。
+/// `chunk_cache_get(mel_start, mel_end, chunk_start_sec, chunk_end_sec)` → 命中时返回缓存的 mono PCM，
+/// `chunk_cache_put(mel_start, mel_end, chunk_start_sec, chunk_end_sec, waveform)` → 写入波形到缓存。
+///
+/// # ⚠ 为什么必须把时间窗以**秒**传给回调（曾有真实 bug）
+/// mel 帧索引是**模型域**的（`hop`/`model_sr`，本工程为 512/44100），而调用方缓存的
+/// 键与曲线切片用的是**输出采样率域**的帧号。调用方若自行用 `mel_start * 512`
+/// 换算，就会把模型域的偏移加到输出域的起点上 —— 二者仅在 44100 输出时相等，
+/// 在 48000 等常见设备采样率下会错位 `sr/44100`（约 8%），导致"块尾部渲染了、
+/// 却不在自己的哈希窗口内"，编辑该处会命中陈旧块。
+/// 因此时间窗由本函数（唯一同时知道 `hop`、`model_sr`、`start_sec` 的地方）
+/// 算好并以秒给出，调用方只做 `秒 × 输出采样率`，杜绝单位混淆。
 /// 帧号相对于 `mono_pcm` 的起始（0-based mel frame index）。
 pub fn infer_pitch_edit_chunked_optimized(
     mono_pcm: &[f32],
@@ -1432,8 +1453,8 @@ pub fn infer_pitch_edit_chunked_optimized(
     start_sec: f64,
     midi_at_time: impl Fn(f64) -> f64 + Clone,
     formant_shift_at_time: impl Fn(f64) -> f32 + Clone,
-    chunk_cache_get: &dyn Fn(usize, usize) -> Option<Vec<f32>>,
-    chunk_cache_put: &dyn Fn(usize, usize, Vec<f32>),
+    chunk_cache_get: &dyn Fn(usize, usize, f64, f64) -> Option<Vec<f32>>,
+    chunk_cache_put: &dyn Fn(usize, usize, f64, f64, Vec<f32>),
 ) -> Result<Vec<f32>, String> {
     if mono_pcm.is_empty() {
         return Ok(vec![]);
@@ -1520,7 +1541,11 @@ pub fn infer_pitch_edit_chunked_optimized(
         let mut frame_off = 0usize;
         while frame_off < t {
             let chunk_end = (frame_off + chunk_max_frames()).min(t);
-            if let Some(cached) = chunk_cache_get(frame_off, chunk_end) {
+            // 本块的绝对时间窗（秒）。必须在此处算：只有这里同时知道
+            // `hop`、`model_sr`、`start_sec`；调用方只有输出采样率。
+            // 详见函数文档中"为什么必须把时间窗以秒传给回调"。
+            let (c0, c1) = chunk_time_span(start_sec, hop_sec, frame_off, chunk_end);
+            if let Some(cached) = chunk_cache_get(frame_off, chunk_end, c0, c1) {
                 cached_chunks.push((frame_off, cached));
             } else {
                 needs_inference.push(frame_off);
@@ -1574,7 +1599,8 @@ pub fn infer_pitch_edit_chunked_optimized(
             for (i, wf) in batch_results.into_iter().enumerate() {
                 let fi = needs_inference[i];
                 let chunk_end = (fi + chunk_max_frames()).min(t);
-                chunk_cache_put(fi, chunk_end, wf.clone());
+                let (c0, c1) = chunk_time_span(start_sec, hop_sec, fi, chunk_end);
+                chunk_cache_put(fi, chunk_end, c0, c1, wf.clone());
                 cached_chunks.push((fi, wf));
                 crate::renderer::progress::report_clip_progress(
                     (processed_before + i + 1) as f64 / total_chunks as f64,
@@ -3017,4 +3043,47 @@ mod tests {
             "chunk duration {secs:.2}s should stay in a sane range"
         );
     }
+
+    // ─── 分块时间窗的采样率域（曾因混淆而真实出错）──────────────────────
+
+    /// 块的时间窗必须经**秒**换算到输出采样率，而不是把模型域样本数直接
+    /// 当成输出域帧号。
+    ///
+    /// 【曾经的真实 bug】调用方用 `seg_start + mel_start * 512` 计算哈希窗口，
+    /// 其中 `seg_start` 是**输出采样率**的帧号，而 `mel_start * 512` 是
+    /// **模型采样率**（44100）的样本数。二者只在输出也是 44100 时相等；
+    /// 在 48000（Windows WASAPI 共享模式等常见默认）下窗口会错位约 8%，
+    /// 使每个块的尾部落在自己的哈希窗口之外 —— 编辑该处不会让渲染它的块失效，
+    /// 于是命中陈旧音频，正是"改一小段却听到旧声音"的成因。
+    #[test]
+    fn chunk_time_span_uses_model_domain_then_converts_through_seconds() {
+        let model_sr = 44_100.0f64;
+        let hop = 512usize;
+        let hop_sec = hop as f64 / model_sr;
+
+        // mel 帧 [512, 1024) 的绝对时间窗
+        let (lo, hi) = super::chunk_time_span(0.0, hop_sec, 512, 1024);
+        assert!((lo - 512.0 * hop_sec).abs() < 1e-12, "lo={lo}");
+        assert!((hi - 1024.0 * hop_sec).abs() < 1e-12, "hi={hi}");
+
+        // 48000 输出下，正确帧号 = 秒 × 输出采样率
+        let out_sr = 48_000.0f64;
+        let correct = (lo * out_sr) as u64;
+        assert_eq!(correct, (512.0 * hop_sec * out_sr) as u64);
+
+        // 错误做法（模型域样本数直接当输出域帧号）会得到显著不同的值
+        let wrong = (512 * hop) as u64;
+        assert_ne!(
+            correct, wrong,
+            "output-rate frame number must differ from the model-domain sample count"
+        );
+        // 偏差约 8%（48000/44100 - 1），即约一个块的尾部长度量级
+        let rel = (correct as f64 - wrong as f64).abs() / correct as f64;
+        assert!(rel > 0.05, "expected a large (>5%) discrepancy, got {rel}");
+
+        // start_sec 不为 0（片段不在时间轴原点）时同样成立
+        let (lo2, _) = super::chunk_time_span(3.0, hop_sec, 512, 1024);
+        assert!((lo2 - (3.0 + 512.0 * hop_sec)).abs() < 1e-12);
+    }
+
 }

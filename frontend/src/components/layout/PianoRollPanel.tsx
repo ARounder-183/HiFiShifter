@@ -78,6 +78,7 @@ import { isModifierActive, isNoneBinding } from "../../features/keybindings/keyb
 import {
     SEPARATION_PARAM_ID,
     findBlockedEditParam,
+    paramNeedingVisibilityOnGate,
     isGatedBySeparation,
     isSeparationEnabled,
 } from "../../features/pitch/separationGate";
@@ -2321,12 +2322,24 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     // 【为什么必须回退而不是仅仅置灰】曲线编辑的唯一闸门是 `editParam`
     // （画布绘制路径经 `usePianoRollInteractions` 读同一状态）。若不移开，
     // 用户仍能在画布上继续画该参数的曲线 —— 与"不可编辑"矛盾。
-    // 移开后曲线仍然**可见**（照常绘制），只是不再接受编辑。
     //
-    // 该 effect 是**收敛**的：回退到 `pitch` 后判据不再成立，不会反复 dispatch。
+    // 【为什么同时要把"眼睛"打开】曲线只在两种情况下被绘制：它是当前
+    // `editParam`，或它的 `secondaryParamVisible` 为真。而 `editParam` 马上
+    // 就要被移走，眼睛默认又是关的 —— 不补这一步，用户在编辑张力时关掉开关，
+    // 曲线会**直接消失**，与"置灰但保持可见、只是不可编辑"的要求相反。
+    //
+    // 该 effect 是**收敛**的：回退到 `pitch` 后判据不再成立，不会反复 dispatch；
+    // 眼睛置位也做了幂等判断，不会产生新的 state 引用。
     useEffect(() => {
         const fallback = findBlockedEditParam(editParam, separationEnabled, "pitch");
-        if (fallback) dispatch(setEditParam(fallback as typeof editParam));
+        if (!fallback) return;
+        const leaving = paramNeedingVisibilityOnGate(editParam, separationEnabled, "pitch");
+        if (leaving) {
+            setSecondaryParamVisible((prev) =>
+                prev[leaving] ? prev : { ...prev, [leaving]: true },
+            );
+        }
+        dispatch(setEditParam(fallback as typeof editParam));
     }, [editParam, separationEnabled, dispatch]);
 
     // 收集轨道组内所有 trackId（root + 递归所有子轨道）

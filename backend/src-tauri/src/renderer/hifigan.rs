@@ -29,6 +29,16 @@ pub struct ChunkCacheEntry {
 
 static CHUNK_CACHE: OnceLock<Mutex<HashMap<(String, usize), ChunkCacheEntry>>> = OnceLock::new();
 
+/// 曲线编辑对**本块之外**音频的影响半径（秒）。
+///
+/// 分块哈希窗口必须向外扩这么多，否则每次编辑都会在块边界残留旧音频：
+/// - mel 分析窗（`n_fft` 2048 @ hop 512）使一帧 mel 影响约 ±23ms 音频；
+/// - 张力在**波形域**做 STFT/ISTFT（`N_FFT` 2048、`HOP` 256）外加 20ms Rd 增益平滑，
+///   实测一个张力样本约影响 ±60~90ms 音频。
+///
+/// 取 0.1s 覆盖上述两者并留余量。只多算几个 f32，局部性不受影响。
+const CURVE_INFLUENCE_MARGIN_SEC: f64 = 0.1;
+
 pub fn global_chunk_cache_ref() -> &'static Mutex<HashMap<(String, usize), ChunkCacheEntry>> {
     CHUNK_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -172,9 +182,13 @@ impl HiFiGanRenderer {
         let seg_start_frame = (ctx.seg_start_sec * sr as f64).round().max(0.0) as u64;
         let seg_end_frame = (ctx.seg_end_sec * sr as f64).round().max(0.0) as u64;
         // 直接引用上下文里的 pitch_edit，不再 to_vec()
+        // `pitch_orig` 必须传 `clip_midi`：`midi_fn` 在 `pitch_edit` 无编辑处
+        // 回落到它，所以它**确实参与**声码器输入。此前传空切片，等于把源 F0
+        // 排除在推理缓存键之外 —— 重跑音高分析（`pitch_orig` 变、`pitch_edit`
+        // 因用户已编辑而保持不变）时会命中用旧 F0 渲染的块。
         let curves_snapshot = crate::pitch_editing::PitchCurvesSnapshot {
             frame_period_ms: fp,
-            pitch_orig: &[],
+            pitch_orig: ctx.clip_midi,
             pitch_edit,
         };
 
@@ -201,7 +215,7 @@ impl HiFiGanRenderer {
             self.id(),
             &curves_snapshot,
             extra_curves.clone(),
-            &std::collections::HashMap::new(),
+            ctx.extra_params,
         );
         let cache_key = crate::synth_clip_cache::SynthClipCacheKey {
             clip_id: ctx.clip_id.to_string(),
@@ -276,10 +290,35 @@ impl HiFiGanRenderer {
         };
 
         // ── 所有音频统一走分块优化路径（支持 per-chunk 缓存）─────────────
-        let model_hop: u64 = 512;
         let clip_id = ctx.clip_id.to_string();
 
         let seg_start = seg_start_frame;
+
+        // 分块哈希窗口：回调给出**模型域算好的绝对时间（秒）**，这里只做
+        // `秒 × 输出采样率`。**不要**再用 `mel_start * 512` 自行换算 ——
+        // 那会把模型域样本数加到输出域帧号上，二者仅在 44100 输出时相等，
+        // 在 48000 等常见设备采样率下错位约 8%，使块尾部落在自己的哈希窗口
+        // 之外，编辑该处反而命中陈旧块（详见声码器侧 `chunk_time_span` 文档）。
+        //
+        // 同时向外扩 `CURVE_INFLUENCE_MARGIN_SEC`：块内音频还受窗口外曲线影响。
+        let chunk_hash = |c0: f64, c1: f64| -> u64 {
+            let lo = (c0 - CURVE_INFLUENCE_MARGIN_SEC).max(0.0);
+            let hi = c1 + CURVE_INFLUENCE_MARGIN_SEC;
+            let start_frame = (lo * sr as f64) as u64;
+            // +1 覆盖 `sample_curve_at` 的线性插值右端点（i0 / i0+1）。
+            let end_frame = (hi * sr as f64).ceil() as u64 + 1;
+            crate::synth_clip_cache::compute_param_hash(
+                ctx.clip_id,
+                start_frame,
+                end_frame,
+                sr,
+                ctx.channel_index,
+                self.id(),
+                &curves_snapshot,
+                extra_curves.iter().map(|(k, v)| (*k, *v)),
+                ctx.extra_params,
+            )
+        };
         chunk_debug(&format!(
             "chunked_opt path: clip={} samples={} seg_start_frame={}",
             clip_id,
@@ -293,27 +332,15 @@ impl HiFiGanRenderer {
             ctx.seg_start_sec,
             midi_fn,
             formant_shift_fn,
-            &|mel_start: usize, mel_end: usize| -> Option<Vec<f32>> {
-                let chunk_start = seg_start + mel_start as u64 * model_hop;
-                let chunk_end = seg_start + mel_end as u64 * model_hop;
-                // 同站点 1：用参数哈希（**不含波形指纹**），张力曲线按本块区间切片。
+            &|mel_start: usize, mel_end: usize, c0: f64, c1: f64| -> Option<Vec<f32>> {
+                // 参数哈希（**不含波形指纹**），张力曲线按本块区间切片。
                 //
                 // 【为什么不再指纹化波形】波形指纹必须 bit-exact 才有意义，而
                 // Rd 张力对整段做 STFT/ISTFT，未编辑处的往返误差虽仅 2e-16，
                 // 却足以让**每个** chunk 的指纹都变化 ⇒ 改 1 秒也要整段重推理
                 // （已实测）。改为按"曲线在本块区间内的取值"判等后，只有与编辑
                 // 区间相交的块失效，未相交的块保持命中。
-                let hash = crate::synth_clip_cache::compute_param_hash(
-                    &clip_id,
-                    chunk_start,
-                    chunk_end,
-                    sr,
-                    ctx.channel_index,
-                    "nsf_hifigan_onnx",
-                    &curves_snapshot,
-                    extra_curves.iter().map(|(k, v)| (*k, *v)),
-                    &std::collections::HashMap::new(),
-                );
+                let hash = chunk_hash(c0, c1);
                 let cache_key = (clip_id.clone(), mel_start);
 
                 let mut cache = global_chunk_cache_ref()
@@ -340,27 +367,8 @@ impl HiFiGanRenderer {
                     }
                 }
             },
-            &|mel_start: usize, mel_end: usize, wf: Vec<f32>| {
-                let chunk_start = seg_start + mel_start as u64 * model_hop;
-                let chunk_end = seg_start + mel_end as u64 * model_hop;
-                // 同站点 1：用参数哈希（**不含波形指纹**），张力曲线按本块区间切片。
-                //
-                // 【为什么不再指纹化波形】波形指纹必须 bit-exact 才有意义，而
-                // Rd 张力对整段做 STFT/ISTFT，未编辑处的往返误差虽仅 2e-16，
-                // 却足以让**每个** chunk 的指纹都变化 ⇒ 改 1 秒也要整段重推理
-                // （已实测）。改为按"曲线在本块区间内的取值"判等后，只有与编辑
-                // 区间相交的块失效，未相交的块保持命中。
-                let hash = crate::synth_clip_cache::compute_param_hash(
-                    &clip_id,
-                    chunk_start,
-                    chunk_end,
-                    sr,
-                    ctx.channel_index,
-                    "nsf_hifigan_onnx",
-                    &curves_snapshot,
-                    extra_curves.iter().map(|(k, v)| (*k, *v)),
-                    &std::collections::HashMap::new(),
-                );
+            &|mel_start: usize, mel_end: usize, c0: f64, c1: f64, wf: Vec<f32>| {
+                let hash = chunk_hash(c0, c1);
                 let cache_key = (clip_id.clone(), mel_start);
 
                 chunk_debug(&format!(

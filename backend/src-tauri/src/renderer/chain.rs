@@ -23,7 +23,11 @@ pub(crate) const HIFIGAN_SEPARATION_PARAM_ID: &str = "breath_enabled";
 ///
 /// 与 `pitch_editing::hifigan_tension_active_for_clip`（容差 1e-3）同量级：
 /// 曲线整体接近 0 时视为未编辑，避免为此白跑一遍 HNSEP 分离与逐帧 Rd 拟合。
-const TENSION_ACTIVE_EPSILON: f32 = 1.0e-3;
+///
+/// `pub(crate)`：`state::TimelineState::migrate_legacy_breath_separation`
+/// 也用它判断"曲线是否偏离默认值"。两处必须同源 —— 各写一个阈值必然漂移，
+/// 而这里的漂移后果是"迁移无端打开开关、白跑一次 HNSEP"。
+pub(crate) const TENSION_ACTIVE_EPSILON: f32 = 1.0e-3;
 
 /// 仅 NSF-HiFiGAN 专有的参数；共通混音级参数（volume / pan / dyn）**不在此处**
 /// —— 它们由 `renderer::common_params` 统一提供，见 `renderer::all_param_descriptors`。
@@ -192,6 +196,7 @@ impl ProcessingStage for WorldVocoderStage {
             pitch_edit: cc.pitch_edit,
             clip_midi: cc.clip_midi,
             clip_id: cc.clip_id,
+            extra_params: &cc.extra_params,
         };
         crate::renderer::world::WorldRenderer.render(&render_ctx)
     }
@@ -381,6 +386,7 @@ impl ProcessingStage for HiFiGanStage {
             pitch_edit: cc.pitch_edit,
             clip_midi: cc.clip_midi,
             clip_id: cc.clip_id,
+            extra_params: &cc.extra_params,
         };
         let renderer = crate::renderer::hifigan::HiFiGanRenderer;
         if (cc.playback_rate - 1.0).abs() > 1.0e-6 {
@@ -478,6 +484,7 @@ impl HiFiGanStage {
                 pitch_edit: cc.pitch_edit,
                 clip_midi: cc.clip_midi,
                 clip_id: cc.clip_id,
+                extra_params: &cc.extra_params,
             };
             let renderer = crate::renderer::hifigan::HiFiGanRenderer;
             if (cc.playback_rate - 1.0).abs() > 1.0e-6 {

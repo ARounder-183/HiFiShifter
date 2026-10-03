@@ -25,6 +25,14 @@
 //! 模型的采样率/FFT 参数必须与 `hnsep_dsp` 的调用参数一致；
 //! 分离缓存的键**不含**任何曲线参数（分离只取决于源音频），
 //! 改动键的构成会让改参数时白跑一次推理，或更糟 —— 命中错源的 stem。
+//!
+//! ## 采样率契约（曾因违反而真实出错）
+//! [`infer_harmonic_noise_mono`] 的输入与两条 stem **必须都是调用方给的
+//! `sample_rate`**。模型只在 44100 上工作，所以中间要把输入重采样到 44100，
+//! 分离后**必须把 h 与 n 各自重采样回 `sample_rate`** —— 只做 truncate /
+//! zero-pad 是错的：48000 下内容会只占前 44100/48000 = 91.87%（时间压缩 8.1%），
+//! 尾部 8.1% 变成纯静音。
+//! 回归测试：`hnsep_dsp::e2e_hnsep::stems_are_resampled_back_to_the_output_rate`。
 
 use lru::LruCache;
 use ort::session::Session;
@@ -571,13 +579,37 @@ pub fn infer_harmonic_noise_mono(
         },
     )?;
 
-    // 噪声 = 原信号 − 谐波（与波形域模型的定义一致）
-    let mut noise: Vec<f32> = model_audio
+    // 噪声 = 原信号 − 谐波（在**模型采样率**下相减，与波形域模型的定义一致）。
+    // 必须在重采样回输出采样率**之前**做：此处 model_audio 与 harmonic 同域同长，
+    // 相减结果精确满足 `h + n == model_audio`。
+    let noise: Vec<f32> = model_audio
         .iter()
         .zip(harmonic.iter())
         .map(|(a, h)| a - h)
         .collect();
-    let mut harmonic = harmonic;
+
+    // ── 重采样回输出采样率 ────────────────────────────────────────────────
+    //
+    // 【为什么必须重采样回去，而不是直接截断/补零】上面把输入重采样到了模型原生
+    // 的 44100；分离得到的 stem 因此也是 **44100** 的。若只按输出长度 truncate /
+    // zero-pad，就等于把 44100 的波形当成输出采样率的波形使用：
+    // 48000 下内容只占前 44100/48000 = 91.87%，**时间被压缩 8.1%**、尾部 8.1%
+    // 变成纯静音；再叠加声码器自身的 48k→44.1k 重采样，谐波包络与 F0 时间轴
+    // 错位，听感即"跑调 / 整体不对"。模块头注释一直写着"…→ ISTFT → 重采样回"，
+    // 但代码里缺了这一步（已有回归测试 `stems_are_resampled_back_to_the_output_rate`）。
+    //
+    // 线性重采样是**线性**算子，h 与 n 同长、用同一插值网格，故
+    // `resample(h) + resample(n) == resample(h+n) == resample(model_audio)`，
+    // 即 `h + n == x` 在非原生采样率下**同样成立**（仅差浮点误差）。
+    let (harmonic, noise) = if sample_rate == HNSEP_MODEL_SR {
+        (harmonic, noise)
+    } else {
+        (
+            crate::mel_utils::linear_resample_mono(&harmonic, HNSEP_MODEL_SR, sample_rate),
+            crate::mel_utils::linear_resample_mono(&noise, HNSEP_MODEL_SR, sample_rate),
+        )
+    };
+    let (mut harmonic, mut noise) = (harmonic, noise);
 
     // Length normalization: ensure output matches input length exactly.
     // Resampling can produce ±1 sample drift; truncate or zero-pad as needed.

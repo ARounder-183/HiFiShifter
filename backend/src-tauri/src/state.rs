@@ -2905,14 +2905,37 @@ impl TimelineState {
     ///
     /// 开关**已开启**时不做任何事（保持用户既有选择）。
     /// 非有限值（NaN/Inf）不算偏离，与 `TENSION_ACTIVE_EPSILON` 的口径一致。
-    pub fn migrate_legacy_breath_separation(&mut self) {
+    ///
+    /// # 必须只跑一次（`project_file_version` 门控）
+    /// 本迁移是"把旧工程的开关打开"，而**不是**"保证开关是打开的"。
+    /// 二者差别在于：用户可以在打开旧工程后**手动关掉**开关 —— 那是合法且被
+    /// 设计支持的（关掉后曲线仍保留，只是不参与合成）。若每次打开工程都重跑，
+    /// 这个手动选择会在下次打开时被静默改回"开"，张力又出现、音频又变化。
+    ///
+    /// 因此仅在 `project_file_version < 6`（引入本开关语义的版本）时执行；
+    /// 工程一旦以 v6 保存，开关状态就完全由用户决定。
+    /// **不要**改用"开关键是否存在"判断：旧工程里用户把开关关掉时该键同样
+    /// 存在且为 0.0，而那恰是本迁移需要覆盖的情形。
+    pub fn migrate_legacy_breath_separation(&mut self, project_file_version: u32) {
         use crate::pitch_editing::extra_param_enabled;
 
+        // v6 起开关状态由用户全权决定，不再迁移（见上方 one-shot 说明）。
+        if project_file_version >= 6 {
+            return;
+        }
+
         /// 曲线是否偏离默认值（全区间）。非有限值不参与判定。
+        ///
+        /// 阈值用与其余"曲线是否生效"判定一致的 `TENSION_ACTIVE_EPSILON`（1e-3），
+        /// **不是** `f32::EPSILON`（1.19e-7）：后者会把肉眼不可见、且按全codebase
+        /// 口径都算"未编辑"的极小值也判为偏离，从而无端打开开关、触发一次
+        /// 昂贵的 HNSEP 渲染并改变音频。
         fn curve_edited(curve: Option<&Vec<f32>>, default_value: f32) -> bool {
             curve.is_some_and(|c| {
-                c.iter()
-                    .any(|v| v.is_finite() && (v - default_value).abs() > f32::EPSILON)
+                c.iter().any(|v| {
+                    v.is_finite()
+                        && (v - default_value).abs() > crate::renderer::chain::TENSION_ACTIVE_EPSILON
+                })
             })
         }
 
@@ -7546,7 +7569,7 @@ mod tests {
                 .insert("hifigan_tension".to_string(), vec![0.0, 80.0, 0.0]);
         }
 
-        tl.migrate_legacy_breath_separation();
+        tl.migrate_legacy_breath_separation(5);
 
         let on = tl
             .params_by_root_track
@@ -7569,7 +7592,7 @@ mod tests {
                 .insert("breath_gain".to_string(), vec![1.0, 0.5, 1.0]);
         }
 
-        tl.migrate_legacy_breath_separation();
+        tl.migrate_legacy_breath_separation(5);
 
         let on = tl
             .params_by_root_track
@@ -7597,7 +7620,7 @@ mod tests {
                 .insert("breath_gain".to_string(), vec![1.0, 1.0, 1.0]);
         }
 
-        tl.migrate_legacy_breath_separation();
+        tl.migrate_legacy_breath_separation(5);
 
         let on = tl
             .params_by_root_track
@@ -7615,7 +7638,7 @@ mod tests {
     fn migration_is_a_noop_without_curves() {
         let mut tl = TimelineState::default();
         let root = tl.tracks[0].id.clone();
-        tl.migrate_legacy_breath_separation();
+        tl.migrate_legacy_breath_separation(5);
         let on = tl
             .params_by_root_track
             .get(&root)
@@ -7636,8 +7659,9 @@ mod tests {
                 .insert("breath_enabled".to_string(), 1.0);
         }
 
-        tl.migrate_legacy_breath_separation();
-        tl.migrate_legacy_breath_separation(); // 幂等
+        tl.migrate_legacy_breath_separation(5);
+        tl.migrate_legacy_breath_separation(5); // 幂等
+
 
         assert_eq!(
             tl.params_by_root_track
@@ -7666,7 +7690,7 @@ mod tests {
             );
         }
 
-        tl.migrate_legacy_breath_separation();
+        tl.migrate_legacy_breath_separation(5);
 
         let on = tl
             .params_by_root_track
@@ -7689,7 +7713,7 @@ mod tests {
             );
         }
 
-        tl.migrate_legacy_breath_separation();
+        tl.migrate_legacy_breath_separation(5);
 
         let on = tl
             .params_by_root_track
@@ -7697,6 +7721,113 @@ mod tests {
             .map(|e| crate::pitch_editing::extra_param_enabled(&e.extra_params, "breath_enabled"))
             .unwrap_or(false);
         assert!(!on, "NaN/Inf must not count as a user edit");
+    }
+
+    /// v6 工程里用户手动**关掉**的开关，必须在再次打开工程时保持关闭。
+    ///
+    /// 【为什么单独钉住】迁移的本意是"打开旧工程的开关"，一旦它变成
+    /// "保证开关是打开的"，用户关掉开关的选择就会在每次打开工程时被静默
+    /// 撤销：张力重新出现、音频变化、还要白跑一次 HNSEP。曾因缺少版本门控
+    /// 而真实存在此 bug。
+    #[test]
+    fn v6_project_keeps_user_disabled_separation_switch() {
+        let mut tl = TimelineState::default();
+        let track = tl.tracks[0].id.clone();
+        // 非默认张力曲线（迁移的触发条件）
+        tl.params_by_root_track
+            .entry(track.clone())
+            .or_default()
+            .extra_curves
+            .insert("hifigan_tension".to_string(), vec![0.0, 0.0, 0.6, 0.0]);
+        // 用户显式关闭
+        tl.params_by_root_track
+            .get_mut(&track)
+            .unwrap()
+            .extra_params
+            .insert("breath_enabled".to_string(), 0.0);
+
+        // 以 v6 打开：不得改写
+        tl.migrate_legacy_breath_separation(6);
+        let v = tl
+            .params_by_root_track
+            .get(&track)
+            .and_then(|e| e.extra_params.get("breath_enabled"))
+            .copied();
+        assert_eq!(
+            v,
+            Some(0.0),
+            "v6 project must keep the user's explicit OFF choice"
+        );
+
+        // 反复打开也不得漂移
+        tl.migrate_legacy_breath_separation(6);
+        tl.migrate_legacy_breath_separation(6);
+        let v2 = tl
+            .params_by_root_track
+            .get(&track)
+            .and_then(|e| e.extra_params.get("breath_enabled"))
+            .copied();
+        assert_eq!(v2, Some(0.0), "reopening a v6 project must stay OFF");
+    }
+
+    /// 旧工程（< v6）仍要被迁移打开，且只在此后的版本里不再重复。
+    #[test]
+    fn legacy_project_is_migrated_once_then_respects_user() {
+        let mut tl = TimelineState::default();
+        let track = tl.tracks[0].id.clone();
+        tl.params_by_root_track
+            .entry(track.clone())
+            .or_default()
+            .extra_curves
+            .insert("hifigan_tension".to_string(), vec![0.0, 0.5, 0.0]);
+
+        // v5 打开 ⇒ 迁移置位
+        tl.migrate_legacy_breath_separation(5);
+        assert_eq!(
+            tl.params_by_root_track
+                .get(&track)
+                .and_then(|e| e.extra_params.get("breath_enabled"))
+                .copied(),
+            Some(1.0),
+            "legacy v5 project with edited tension must be migrated ON"
+        );
+
+        // 用户随后关掉并保存为 v6 ⇒ 再次打开不得改回
+        tl.params_by_root_track
+            .get_mut(&track)
+            .unwrap()
+            .extra_params
+            .insert("breath_enabled".to_string(), 0.0);
+        tl.migrate_legacy_breath_separation(6);
+        assert_eq!(
+            tl.params_by_root_track
+                .get(&track)
+                .and_then(|e| e.extra_params.get("breath_enabled"))
+                .copied(),
+            Some(0.0),
+            "after the one-shot migration, the user's choice must stick"
+        );
+    }
+
+    /// 阈值需与 `TENSION_ACTIVE_EPSILON`（1e-3）同源：肉眼不可见、按全 codebase
+    /// 口径都算"未编辑"的极小值**不得**触发迁移（否则白跑一次 HNSEP）。
+    #[test]
+    fn migration_ignores_sub_threshold_curve_noise() {
+        let mut tl = TimelineState::default();
+        let track = tl.tracks[0].id.clone();
+        tl.params_by_root_track
+            .entry(track.clone())
+            .or_default()
+            .extra_curves
+            .insert("hifigan_tension".to_string(), vec![0.0, 1.0e-6, 0.0]);
+        tl.migrate_legacy_breath_separation(5);
+        assert!(
+            tl.params_by_root_track
+                .get(&track)
+                .and_then(|e| e.extra_params.get("breath_enabled"))
+                .is_none(),
+            "a curve below TENSION_ACTIVE_EPSILON must not be treated as edited"
+        );
     }
 }
 

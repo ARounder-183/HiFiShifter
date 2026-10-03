@@ -98,3 +98,24 @@ export function findBlockedEditParam(
     // 返回 null 以避免无意义的 dispatch 循环。
     return editParam === fallback ? null : fallback;
 }
+
+/**
+ * 关闭开关触发 `editParam` 回退时，需要顺带把"眼睛"打开的参数。
+ *
+ * # 为什么需要它
+ * 曲线只在两种情况下被绘制：它是当前 `editParam`，或它的可见性标记为真。
+ * 回退会把被门禁的参数从 `editParam` 移走，而它的眼睛默认是关的 ——
+ * 若不补这一步，用户在编辑张力/气声音量时关掉开关，曲线会**直接消失**，
+ * 这与"置灰但保持可见、只是不可编辑"的要求相反。
+ *
+ * @returns 需要打开可见性的参数 id；无需回退时返回 `null`
+ */
+export function paramNeedingVisibilityOnGate(
+    editParam: string,
+    separationEnabled: boolean,
+    fallback: string,
+): string | null {
+    return findBlockedEditParam(editParam, separationEnabled, fallback) === null
+        ? null
+        : editParam;
+}

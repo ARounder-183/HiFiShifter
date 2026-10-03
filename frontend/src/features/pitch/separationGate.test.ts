@@ -13,6 +13,7 @@ import {
     SEPARATION_GATED_PARAMS,
     SEPARATION_PARAM_ID,
     findBlockedEditParam,
+    paramNeedingVisibilityOnGate,
     isGatedBySeparation,
     isSeparationEnabled,
 } from "./separationGate";
@@ -72,4 +73,38 @@ describe("separationGate", () => {
     it("开关 id 与后端常量一致", () => {
         expect(SEPARATION_PARAM_ID).toBe("breath_enabled");
     });
+
+    describe("paramNeedingVisibilityOnGate（关开关后曲线仍需可见）", () => {
+        it("回退发生时，被门禁的那个参数需要打开可见性", () => {
+            // 曲线只在"是 editParam"或"可见性为真"时才绘制；回退会把它从
+            // editParam 移走，所以必须同时打开它的可见性，否则曲线消失。
+            expect(paramNeedingVisibilityOnGate("hifigan_tension", false, "pitch")).toBe(
+                "hifigan_tension",
+            );
+            expect(paramNeedingVisibilityOnGate("breath_gain", false, "pitch")).toBe(
+                "breath_gain",
+            );
+        });
+
+        it("未发生回退时不需要改动可见性", () => {
+            expect(paramNeedingVisibilityOnGate("hifigan_tension", true, "pitch")).toBeNull();
+            expect(paramNeedingVisibilityOnGate("pitch", false, "pitch")).toBeNull();
+            expect(
+                paramNeedingVisibilityOnGate("formant_shift_cents", false, "pitch"),
+            ).toBeNull();
+        });
+
+        it("与回退判据同源：需要回退 ⇔ 需要恢复可见性", () => {
+            const params = ["pitch", "hifigan_tension", "breath_gain", "formant_shift_cents"];
+            for (const on of [true, false]) {
+                for (const id of params) {
+                    const needsFallback = findBlockedEditParam(id, on, "pitch") !== null;
+                    const needsVisibility =
+                        paramNeedingVisibilityOnGate(id, on, "pitch") !== null;
+                    expect(needsVisibility).toBe(needsFallback);
+                }
+            }
+        });
+    });
+
 });

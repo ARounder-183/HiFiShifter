@@ -269,6 +269,22 @@ where
     let start_idx = ((start_sec * 1000.0) / fp).floor().max(0.0) as usize;
     let end_idx = ((end_sec * 1000.0) / fp).ceil().max(0.0) as usize;
 
+    // `pitch_orig`（源 F0 / clip_midi）同样**按时间范围切片**哈希。
+    //
+    // 【为什么必须纳入】渲染时 `midi_fn` 在 `pitch_edit` 无编辑处回落到
+    // `clip_midi`，所以它参与声码器输入。而重跑音高分析会改 `pitch_orig`
+    // 却**保持** `pitch_edit` 不变（用户已编辑的曲线不被覆盖）—— 若不纳入，
+    // 该 clip 的推理块会以"参数未变"为由命中用旧 F0 渲染的音频。
+    // 切片而非整条，与 `pitch_edit` 同理：保证编辑局部性。
+    {
+        let orig = &curves.pitch_orig;
+        let lo = start_idx.min(orig.len());
+        let hi = end_idx.min(orig.len());
+        for &v in &orig[lo..hi] {
+            mix_bytes!(&v.to_bits().to_le_bytes());
+        }
+    }
+
     let edit = &curves.pitch_edit;
     let lo = start_idx.min(edit.len());
     let hi = end_idx.min(edit.len());
@@ -581,12 +597,16 @@ pub fn clear_pad_suppressed_clips() {
 /// OpenUtau hifisampler 的 `PitchAdjustableMelSpectrogram`（按 keyShift 伸缩
 /// FFT/窗长后用原始 mel 基投影）。同一曲线值产出不同 PCM，且值域扩到 ±1200，
 /// 必须整体失效。
+/// v7：修复 HNSEP 在非 44100 输出率下**没有把 stem 重采样回原采样率**的缺陷。
+/// 此前只做 truncate/zero-pad，48000 下谐波/噪声内容被时间压缩 8.1%、尾部 8.1%
+/// 为纯静音，听感"跑调 / 整体不对"。同一工程在 44100 设备上渲染正确、在 48000
+/// 设备上错误，因此必须整体失效，避免按设备采样率混用两套结果。
 /// v6：HiFiGAN 分块粒度从 4096 mel 帧（≈47.6s）改为 512 帧（≈5.9s）。
 /// 分块位置改变会改变输出波形 —— 实测不同块大小的差异是**纯相位/时移**性质
 /// （幅度谱余弦相似度 1.000000、逐块 RMS 比 1.002~1.008），音色与能量不变，
 /// 但 PCM 逐样本不同。若不失效，磁盘上的旧 PCM 会与新块粒度长期混用
 /// （同一工程新旧 clip 相位基准不一致）。
-pub const RENDER_PIPELINE_VERSION: u32 = 6;
+pub const RENDER_PIPELINE_VERSION: u32 = 7;
 
 /// [`compute_rendered_clip_hash`] 的输入集合。
 ///

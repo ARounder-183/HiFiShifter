@@ -566,9 +566,15 @@ mod e2e_hnsep {
 
             // 44.1 kHz 是模型原生采样率，走直通路径 ⇒ `h + n == x` 必须**精确**成立。
             //
-            // 非 44100 时该等式**本就不成立**，且非本次改动引入：输入先重采样到
-            // 44100，分离后 h 与 n **各自**再重采样回去 —— 线性重采样不可加，
-            // 故 resample(h) + resample(n) ≠ x。此时只断言输出规模合理。
+            // 非 44100 时该等式**不**成立，原因是**往返 44100 有损**：输入先重采样到
+            // 44100（丢掉 22050Hz 以上内容并引入插值误差），分离得到的 h、n 再各自
+            // 重采样回输出采样率，于是 `h + n == resample(resample(x)) ≈ x`，
+            // 与 x 的差异即往返带限误差。
+            //
+            // 【曾经的错误归因】此处原先写"线性重采样不可加"——**不对**。线性重采样
+            // 是线性算子，h 与 n 同长且共用插值网格，故
+            // `resample(h) + resample(n) == resample(h+n)` 严格成立；真正的差异来自
+            // 带限往返，而非不可加性。
             if rate == 44_100 {
                 assert!(
                     max_res < 1e-3,
@@ -585,5 +591,79 @@ mod e2e_hnsep {
             );
         }
     }
+
+    /// 非 44100 输出率下，stem 必须被**重采样回原采样率**。
+    ///
+    /// 【曾经的真实 bug】`infer_harmonic_noise_mono` 只把**输入**重采样到 44100
+    /// （模型原生率），分离后却只对 stem 做 truncate/zero-pad —— 没有重采样回去。
+    /// 后果（48000 输出实测）：
+    /// - 内容只占前 91.87%（= 44100/48000），**时间被压缩 8.1%**；
+    /// - 尾部 8.1% 是**纯零**（`tail5%_rms` 恰为 0），即每个 clip 末尾静音；
+    /// - 叠加上声码器自身的 48k→44.1k 重采样后，谐波包络与 F0 时间轴错位，
+    ///   听感即"跑调 / 整体不对"。
+    ///
+    /// 模块头注释当时**已经写着**"…→ ISTFT → 重采样回"，但代码里没有 ——
+    /// 典型的文档与实现不符。本测试钉住该契约。
+    #[test]
+    fn stems_are_resampled_back_to_the_output_rate() {
+        if !crate::hnsep_onnx::is_available() {
+            println!("SKIP: hnsep model unavailable");
+            return;
+        }
+        for rate in [44_100u32, 48_000, 32_000] {
+            let n = rate as usize * 2; // 2 s
+            let x: Vec<f32> = (0..n)
+                .map(|i| {
+                    let t = i as f64 / rate as f64;
+                    (0..=8)
+                        .map(|k| {
+                            (0.2 / (k as f64 + 1.0))
+                                * (2.0 * std::f64::consts::PI * 300.0 * k as f64 * t).sin()
+                        })
+                        .sum::<f64>() as f32
+                })
+                .collect();
+
+            let (h, noise) = crate::hnsep_onnx::infer_harmonic_noise_mono(
+                &format!("resample-back-{rate}"),
+                &x,
+                rate,
+                0,
+                None,
+            )
+            .expect("separation must succeed");
+
+            assert_eq!(h.len(), n, "rate={rate}: harmonic must match input length");
+            assert_eq!(noise.len(), n, "rate={rate}: noise must match input length");
+
+            // 分离后的内容必须覆盖**整段**，不得出现尾部零填充。
+            // 这是"是否重采样回原采样率"的直接判据：漏掉重采样时，
+            // 内容只到 44100/rate，其余为零。
+            let last_loud = h
+                .iter()
+                .rposition(|v| v.abs() > 1e-4)
+                .unwrap_or(0);
+            let coverage = last_loud as f64 / n as f64;
+            assert!(
+                coverage > 0.999,
+                "rate={rate}: stem content must span the whole clip, but it ends at \
+                 {:.2}% (missing resample back from 44100?)",
+                coverage * 100.0
+            );
+
+            // 尾部不得为零（零填充会让末尾整段静音）
+            let tail = (n as f64 * 0.97) as usize;
+            let tail_rms = (h[tail..].iter().map(|&a| (a as f64).powi(2)).sum::<f64>()
+                / (n - tail) as f64)
+                .sqrt();
+            let full_rms =
+                (h.iter().map(|&a| (a as f64).powi(2)).sum::<f64>() / n as f64).sqrt();
+            assert!(
+                tail_rms > full_rms * 0.05,
+                "rate={rate}: tail must not be silent (tail_rms={tail_rms:.3e}, full={full_rms:.6})"
+            );
+        }
+    }
+
 }
 
