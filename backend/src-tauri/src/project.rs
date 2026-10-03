@@ -223,6 +223,7 @@ pub fn load_project_file(bytes: &[u8]) -> Result<ProjectFile, String> {
     if let Ok(mut pf) = rmp_serde::from_slice::<ProjectFile>(bytes) {
         pf.timeline.normalize_clip_takes();
         pf.timeline.migrate_legacy_common_param_curves();
+        pf.timeline.migrate_legacy_breath_separation();
         pf.timeline.restore_derived_clip_fields();
         pf.timeline.sync_clip_takes_from_flat();
         return Ok(pf);
@@ -233,6 +234,7 @@ pub fn load_project_file(bytes: &[u8]) -> Result<ProjectFile, String> {
         .map(|mut pf: ProjectFile| {
             pf.timeline.normalize_clip_takes();
             pf.timeline.migrate_legacy_common_param_curves();
+            pf.timeline.migrate_legacy_breath_separation();
             pf.timeline.restore_derived_clip_fields();
             pf.timeline.sync_clip_takes_from_flat();
             pf
@@ -593,6 +595,8 @@ pub fn finalize_timeline_for_session(
     // 指纹 / 波形等被序列化省略的字段），并顺带完成旧 Fade 字段迁移。
     tl.normalize_clip_takes();
     tl.migrate_legacy_common_param_curves();
+    // 张力/气声曲线存在但开关未开 ⇒ 自动置位开关（否则会静默失去效果，见该函数说明）。
+    tl.migrate_legacy_breath_separation();
     // 归一化轨道顺序（Vec 顺序 == 显示顺序）与 Tempo Map（排序/钳制/补 0 点）。
     tl.normalize_track_vec();
     tl.normalize_tempo_map();
