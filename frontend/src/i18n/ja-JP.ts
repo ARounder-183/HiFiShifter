@@ -35,7 +35,6 @@ export const jaJP = {
     export_dialog_range_all: "全体",
     export_dialog_range_custom: "カスタム",
     export_dialog_range_custom_label: "開始 / 終了",
-    export_dialog_project_path: "出力ファイル",
     export_dialog_output_dir: "出力フォルダ",
     export_dialog_project_file_name: "出力ファイル名",
     export_dialog_browse: "参照",
@@ -52,7 +51,6 @@ export const jaJP = {
     export_dialog_select_all_subtracks: "子トラックをすべて選択",
     export_dialog_error_invalid_range:
         "時間範囲が不正です。終了時間は開始時間より大きくしてください。",
-    export_dialog_error_missing_project_path: "出力ファイルパスを選択してください。",
     export_dialog_error_missing_project_output_dir:
         "プロジェクト書き出しの出力フォルダを選択してください。",
     export_dialog_error_missing_project_file_name:
@@ -102,8 +100,6 @@ export const jaJP = {
     menu_clear_waveform_cache_confirm:
         "波形キャッシュをクリアしますか？次に必要になった時点ですべての波形を再生成します。",
     menu_exit: "終了",
-    shortcut_ctrl_o: "{modifier}+O",
-    shortcut_ctrl_e: "{modifier}+E",
     media_stream_select_title: "音声トラックを選択",
     media_stream_select_hint:
         "この動画には複数の音声トラックが含まれています。抽出してインポートするトラックを選択してください。",
@@ -125,7 +121,6 @@ export const jaJP = {
     menu_import_midi: "MIDI をインポート...",
     menu_import_external_project: "外部プロジェクトをインポート",
     menu_clone_selected_track: "選択トラックを複製",
-    menu_paste_selected_track: "選択トラックにペースト",
     menu_paste_new_tracks: "新しいトラックとしてペースト",
     menu_paste_vocalshifter_clipboard: "VocalShifter クリップボードをペースト",
     ctx_quick_export: "クイック書き出し",
@@ -142,7 +137,6 @@ export const jaJP = {
     quick_export_error_pick_directory_failed: "出力フォルダの選択に失敗しました。",
     reaper_import_skipped_header:
         "Reaper インポート時に以下のメディアファイルがスキップされました（非対応形式またはファイルが見つかりません）：",
-    menu_pick_output: "出力先を選択",
     common_language: "言語",
     stretch_project_override: "プロジェクトストレッチ上書き",
     stretch_global_default: "グローバルストレッチ既定",
@@ -177,12 +171,6 @@ export const jaJP = {
     theme_dark: "ダーク",
     theme_light: "ライト",
 
-    action_load_model: "モデルを読み込む",
-    action_analyze_audio: "オーディオを分析",
-    action_apply_pitch: "ピッチを適用",
-    action_synthesize: "合成",
-    action_export_wav: "WAV をエクスポート",
-    action_play_src: "原音を再生",
     action_play_out: "合成音を再生",
     action_pause: "一時停止",
     action_stop: "停止",
@@ -190,9 +178,6 @@ export const jaJP = {
     action_refresh: "更新",
     common_loading: "読み込み中...",
     common_rendering: "レンダリング中...",
-    pitch_analyzing: "ピッチを分析中...",
-    pitch_analyzing_preparing: "準備中...",
-    common_playhead: "再生ヘッド",
 
     panel_editor: "エディタ",
     panel_unavailable: "パネルを利用できません",
@@ -202,7 +187,6 @@ export const jaJP = {
     // ── 停靠窗体系统（Dockable forms）──────────────────────────
     dock_float_active: "このパネルをフロート",
     dock_float: "フロート",
-    dock_dock: "ドック",
     dock_detach_to_window: "独立ウィンドウで開く",
     dock_detach_unsupported: "このパネルはメインウィンドウ外に移動できません",
     dock_redock: "メイン領域にドック",
@@ -227,10 +211,7 @@ export const jaJP = {
     dock_side_bottom: "下端",
     dock_side_center: "タブとして",
     aria_resize_track_header: "トラックヘッダーの幅",
-    aria_resize_piano_axis: "鍵盤の幅",
-    aria_resize_panels: "パネルのサイズ",
     menu_layout: "レイアウト",
-    layout_restore: "レイアウトを復元",
     layout_reset: "レイアウトを初期化",
     layout_reset_confirm_title: "レイアウトを初期化しますか？",
     layout_reset_confirm_body:
@@ -434,7 +415,6 @@ export const jaJP = {
     notebook_setting_clip_insert_mode: "タイムラインのデータの挿入先",
     notebook_setting_clip_insert_selected: "選択中のトラック",
     notebook_setting_clip_insert_new_tracks: "新しいトラック",
-    notebook_setting_clip_insert_ask: "毎回確認する",
     notebook_setting_keep_clip: "使用後も一時保存ブロックを残す",
     notebook_setting_clip_preview: "一時保存ブロック内にプレビューを表示",
     notebook_export_md: "Markdown としてエクスポート",
@@ -448,44 +428,21 @@ export const jaJP = {
     reference_root_tracks_clear: "クリア",
     reference_root_tracks_empty: "他のトラックグループはありません",
     reference_root_tracks_short: "参照",
-    tool_mode: "ツールモード",
-    edit_param: "パラメータ編集",
-    common_draw: "描画",
     common_select: "選択",
-    vibrato_tool: "ビブラート",
     draw_tool: "描画ツール",
     vibrato_draw_tool: "直線/ビブラートツール",
     common_pitch: "ピッチ",
-    common_tension: "テンション",
-    common_breath: "ブレス",
-    beats_per_bar: "拍子",
     time_signature: "拍子記号",
     common_grid: "グリッド",
     add_clip: "+ クリップを追加",
-    delete_clip: "- クリップを削除",
-    model_dir: "モデルディレクトリ",
-    audio_path: "オーディオパス",
-    pitch_shift: "ピッチシフト",
-    output_path: "出力パス",
-    common_hints: "ヒント",
-    hint_drag_clip:
-        "タイムライン上のクリップをドラッグして開始位置を移動（通常はグリッドにスナップ；Shift を押しながらでフリー移動）",
-    hint_add_point: "パラメータパネルをダブルクリックしてポイントを追加",
-    hint_drag_point: "ポイントをドラッグしてカーブを編集",
-    hint_drop_audio: "メディアファイルをドロップしてインポート・分析",
-    hint_alt_drag:
-        "クリップをドラッグ中に Alt を押すと Slip-Edit（内部コンテンツを移動；スナップなし）",
 
-    timeline_title: "タイムライン",
     common_tracks: "トラック",
-    common_beat: "拍",
 
     track_add: "トラックを追加",
     track_remove_selected: "選択トラックを削除",
     track_remove_confirm:
         "このトラックを削除しますか？トラックとその上のすべてのクリップが削除されます。この操作は取り消せません。",
 
-    param_editor: "パラメータエディタ",
     param_editor_short: "パラメータ",
     pitch_requires_compose:
         "ルートトラックで Compose（C）を有効にしてピッチカーブを生成してください",
@@ -503,8 +460,6 @@ export const jaJP = {
     pitch_status_ready: "準備完了",
     pitch_status_no_edit: "未編集",
     pitch_status_unavailable: "利用不可",
-    pitch_label: "ピッチ（半音）",
-    tension_label: "テンション（0-1）",
     breath_separation_label: "ハーモニック分離",
     breath_gain_requires_separation: "「ハーモニック分離」をオンにするとブレス量を編集できます",
     hifigan_tension_requires_separation:
@@ -512,14 +467,11 @@ export const jaJP = {
     breath_gain_label: "ブレスゲイン",
     hifigan_tension_label: "テンション",
     formant_shift_label: "フォルマントシフト",
-    hifigan_volume_label: "ボリューム",
     volume_label: "ボリューム",
     dyn_label: "ダイナミクス",
     dyn_analysis_pending: "ダイナミクス基線を解析中...",
     pan_label: "パン",
-    vslib_volume_label: "ボリューム",
     vslib_synth_mode_label: "合成モード",
-    vslib_pan_label: "パン",
     vslib_breathiness_label: "ブレッシネス",
     vslib_synth_mode_mono: "モノ",
     vslib_synth_mode_mono_formant: "モノ（フォルマント）",
@@ -536,19 +488,7 @@ export const jaJP = {
     param_btn_formant: "FRM",
     param_btn_tension: "TEN",
     param_btn_breathiness: "BNS",
-    breath_state_on: "ブレスオン",
-    breath_state_off: "ブレスオフ",
-    points_help: "ダブルクリックで追加 · ドラッグで移動 · 右クリックで削除",
-    points_count: "ポイント数",
-    common_selected: "選択中",
 
-    status_last_result: "最後の API 結果",
-    status_device: "デバイス",
-    status_model: "モデル",
-    status_audio: "オーディオ",
-    status_synth: "合成",
-    status_playing: "再生中",
-    status_position: "再生位置",
     status_ready: "準備完了",
     status_failed: "失敗",
     status_import_audio_failed: "オーディオの読み込みに失敗しました",
@@ -636,14 +576,8 @@ export const jaJP = {
     unsaved_changes_exit_desc: "終了前に保存しますか？",
     unsaved_changes_discard: "保存しない",
 
-    menu_export_separated: "トラック別オーディオをエクスポート",
-
     status_error_prefix: "エラー",
     clipboard_error_empty: "クリップボードに貼り付けられる内容がありません",
-    status_target_original: "原音",
-    status_target_synthesized: "合成音",
-    status_target_none: "待機中",
-    dropped_audio_imported: "ドロップされたメディアをインポートしました",
     import_audio_failed: "メディアのインポートに失敗しました",
     status_project_version_confirmation: "プロジェクトファイルのバージョン確認",
 
@@ -682,9 +616,7 @@ export const jaJP = {
     enable_group: "グループ有効化",
     common_none: "なし",
     common_bpm: "BPM",
-    common_repeat: "リピート",
     common_compose: "コンポーズ",
-    status_ok: "OK",
     status_na: "—",
     clip_mute: "ミュート",
     clip_unmute: "ミュート解除",
@@ -766,7 +698,6 @@ export const jaJP = {
     clip_take_explode: "テイクを個別クリップに展開",
     clip_take_rename: "テイク名を変更",
     clip_take_active_mark: "●",
-    clip_take_add_hint: "その他のテイク管理は Reaper マルチテイクの取り込みとともに追加予定です",
     fade_in: "フェードイン",
     fade_out: "フェードアウト",
     show_secondary_param: "サブパラメータオーバーレイを表示",
@@ -775,8 +706,6 @@ export const jaJP = {
     secondary_overlay_tooltip_hidden: "サブパラメータオーバーレイ：非表示\nクリックで表示",
     breath_tooltip_on: "ハーモニック分離：オン\nクリックでオフ",
     breath_tooltip_off: "ハーモニック分離：オフ\nクリックでオン",
-    onnx_compile_required: "ONNX モデルが未コンパイルです。実行：cargo tauri dev --features onnx",
-    onnx_unavailable_label: "（利用不可）",
     common_solo: "ソロ",
     status_analyzing_pitch: "ピッチを分析中",
     status_analyzing_waveform: "波形を分析中",
@@ -840,7 +769,6 @@ export const jaJP = {
     silence_double_click_reset: "パラメータをダブルクリックでデフォルトに戻す",
     silence_applying: "適用中...",
     ctx_close_gaps: "隙間を閉じる",
-    ctx_close_gaps_disabled: "クリック位置以降にこのトラックにはクリップがありません",
     ctx_normalize: "ノーマライズ",
     ctx_edit_rate: "再生速度を編集...",
     ctx_reverse: "逆再生",
@@ -856,13 +784,10 @@ export const jaJP = {
     recapture_missing_media_title: "欠落メディアを再取得",
     recapture_missing_media_desc:
         "以下のメディアファイルが欠落しているか、内容が変更されています。各項目を無視するか、「変更済み」のファイルは元のパスから再読み込みし、「削除済み」のファイルは別のファイルに置き換えることができます。",
-    recapture_missing_media_modified_desc: "以下のメディアファイルは外部で変更されています。",
-    recapture_missing_media_deleted_desc: "以下のメディアファイルは移動または削除されています。",
     recapture_missing_media_reload: "再読み込み",
     recapture_missing_media_replace: "置き換え",
     recapture_missing_media_reload_all: "すべて再読み込み",
     recapture_missing_media_refresh: "更新",
-    recapture_missing_media_reset: "すべてリセット",
     recapture_missing_media_reset_all: "すべてリセット",
     recapture_missing_media_reset_item: "リセット",
     recapture_missing_media_ignore: "無視",
@@ -877,7 +802,6 @@ export const jaJP = {
     recapture_missing_media_item_failed: "処理に失敗",
     recapture_missing_media_summary:
         "無視 {ignored} · 再読み込み {reloaded} · 置き換え {replaced} · 合計 {total}",
-    recapture_missing_media_reload_dialog_title: "「{name}」の代替ファイルを選択",
     recapture_missing_media_replace_dialog_title: "「{name}」の代替ファイルを選択",
     recapture_missing_media_reloaded_path: "再読み込みパス：",
     recapture_missing_media_replaced_path: "置き換え後：",
@@ -913,12 +837,6 @@ export const jaJP = {
     save_version_conflict_save_as: "名前を付けて保存...",
     save_version_conflict_continue: "続行して保存",
 
-    fade_curve_linear: "リニア",
-    fade_curve_sine: "サイン",
-    fade_curve_exponential: "指数",
-    fade_curve_logarithmic: "対数",
-    fade_curve_scurve: "S カーブ",
-
     // REAPER 七プリセット フェード形状（順序は timeline/reaperFade.ts FADE_PRESETS に一致）。
     fade_shape_linear: "リニア",
     fade_shape_fast_start: "ファストスタート",
@@ -936,8 +854,6 @@ export const jaJP = {
     clip_pitch_drag_tooltip: "ピッチオフセット：{delta} ct",
     track_change_color: "トラックの色を変更",
     track_clone: "トラックを複製",
-    track_copy: "トラックをコピー",
-    track_cut: "トラックをカット",
     color_blue: "ブルー",
     color_purple: "パープル",
     color_green: "グリーン",
@@ -950,7 +866,6 @@ export const jaJP = {
 
     progress_est_remaining: "残り約 {time}",
     progress_cancel: "キャンセル",
-    pitch_analyzing_clips: "分析中{clipName}{clipCount} {percentage}%",
     algo_label: "アルゴリズム",
     algo_label_short: "アルゴ",
     algo_unavailable_suffix: "（利用不可）",
@@ -959,16 +874,11 @@ export const jaJP = {
     child_formant_mode: "フォルマント差",
     child_pitch_offset_cents_label: "子トラックのセント差",
     child_pitch_offset_degrees_label: "子トラックの度数差",
-    child_formant_offset_cents_label: "子トラックのフォルマント差",
     child_pitch_root_option: "ピッチ（トラックグループ）",
     child_pitch_cents_option: "セント差（現在の子トラック）",
     child_pitch_degrees_option: "度数差（現在の子トラック）",
     child_formant_root_option: "フォルマントシフト（トラックグループ）",
     child_formant_offset_option: "フォルマント差（現在の子トラック）",
-    child_pitch_offset_cents_short: "セント",
-    child_pitch_offset_degrees_short: "度数",
-    child_formant_offset_cents_short: "セント",
-    aria_loading: "読み込み中",
     export_dialog_sample_rate: "サンプリングレート",
     export_dialog_bit_depth: "ビット深度",
     export_dialog_error_invalid_sample_rate: "サンプリングレートが無効です。",
@@ -980,8 +890,6 @@ export const jaJP = {
     kb_dialog_desc: "ショートカットをクリックして再設定。Esc で取消。",
     kb_press_key: "キーを押してください...",
     kb_add_binding: "別のショートカットを追加",
-    kb_reset_default: "デフォルトに戻す",
-    kb_reset_all: "すべてデフォルトに戻す",
     kb_close: "閉じる",
     kb_conflict_msg: "このショートカットは以下のシーンで既存の操作と競合しています：",
     kb_conflict_override: "上書き",
@@ -1167,7 +1075,6 @@ export const jaJP = {
     midi_import_position_start: "プロジェクト先頭",
     midi_import_position_playhead: "再生ヘッド",
     midi_import_position_selection: "選択範囲",
-    midi_select_track: "トラックを選択",
     midi_select_all: "すべて選択",
     midi_deselect_all: "すべて解除",
     midi_multi_track_merge: "マルチトラック結合",
@@ -1176,7 +1083,6 @@ export const jaJP = {
     midi_track_range: "範囲：{min} – {max}",
     midi_no_tracks: "MIDI ファイルにノートを含むトラックが見つかりません",
     midi_importing: "インポート中...",
-    midi_import_success: "MIDI をインポートしました：{notes} ノート、{frames} フレーム",
     midi_import_failed: "MIDI のインポートに失敗しました",
     midi_file_not_found: "MIDI ファイルが見つかりません",
     midi_no_notes: "選択したトラックにノートがありません",
@@ -1201,8 +1107,6 @@ export const jaJP = {
 
     // MIDI clipboard errors
     midi_clipboard_read_failed: "クリップボードから MIDI を読み取れませんでした",
-    midi_clipboard_empty: "クリップボードに Standard MIDI File が見つかりません",
-    midi_clipboard_parse_failed: "クリップボードの MIDI データを解析できませんでした",
 
     // MIDI インポート対象選択
     midi_import_target: "インポート対象",
@@ -1230,7 +1134,6 @@ export const jaJP = {
     ripple_mode_off: "オフ",
     ripple_mode_track: "トラック単位",
     ripple_mode_all: "全トラック",
-    split_transition: "分割トランジション",
     split_transition_tooltip: "分割トランジション（右クリックで詳細設定）",
     split_transition_settings_title: "分割トランジション設定",
     split_transition_settings_desc:
@@ -1316,13 +1219,6 @@ export const jaJP = {
     grid_note_triplet: "三連符",
 
     // スナップ間隔用のグリッド音符名（コンテキストメニュー）
-    grid_snap_whole: "全音符",
-    grid_snap_half: "2分音符",
-    grid_snap_quarter: "4分音符",
-    grid_snap_8th: "8分音符",
-    grid_snap_16th: "16分音符",
-    grid_snap_32nd: "32分音符",
-    grid_snap_64th: "64分音符",
 
     // タイムラインの時間表示
     time_display: "時間表示",
@@ -1348,24 +1244,10 @@ export const jaJP = {
     copy_playhead_time: "再生ヘッド時間をコピー",
     sync_timeline_view: "タイムライン表示に同期",
     sync_timeline_view_tooltip: "パラメータエディタの水平位置とズームをタイムラインに同期します",
-    grid_snap_dotted_half: "付点2分音符",
-    grid_snap_dotted_quarter: "付点4分音符",
-    grid_snap_dotted_8th: "付点8分音符",
-    grid_snap_dotted_16th: "付点16分音符",
-    grid_snap_dotted_32nd: "付点32分音符",
-    grid_snap_dotted_64th: "付点64分音符",
-    grid_snap_triplet_half: "3連2分音符",
-    grid_snap_triplet_quarter: "3連4分音符",
-    grid_snap_triplet_8th: "3連8分音符",
-    grid_snap_triplet_16th: "3連16分音符",
-    grid_snap_triplet_32nd: "3連32分音符",
-    grid_snap_triplet_64th: "3連64分音符",
 
     // ツールモード
-    common_line: "直線",
 
     // ピッチスナップ設定
-    pitch_snap_settings_title: "ピッチスナップ設定",
     quantize_unit: "クオンタイズ単位",
     quantize_semitone: "半音",
     quantize_scale: "スケール",
@@ -1429,12 +1311,6 @@ export const jaJP = {
     // 修飾キーリネーム
     // Scale highlight setting
     scale_highlight: "スケール強調表示",
-    scale_highlight_always: "常に",
-    scale_highlight_only_when_snapping: "スナップ時のみ",
-    scale_highlight_off: "オフ",
-    kb_modifier_toggle_snap: "フリー移動（クリップドラッグ中に押す）",
-    hint_toggle_snap:
-        "クリップをドラッグ中に Shift を押すとフリー移動になります。通常はグリッドにスナップします",
 
     // ファイルブラウザ拡張
     fb_regex: "正規表現",
@@ -1503,8 +1379,6 @@ export const jaJP = {
     fb_new_folder_default: "新しいフォルダ",
     fb_rename_failed: "名前の変更に失敗しました",
     fb_create_folder_failed: "フォルダを作成できませんでした",
-    fb_name_invalid: "名前に使用できない文字が含まれています",
-    fb_name_exists: "同じ名前の項目が既に存在します",
     fb_delete_confirm_title: "項目を削除",
     fb_delete_confirm_message:
         "{count} 件をごみ箱に移動しますか？|{count} 件をごみ箱に移動しますか？",
@@ -1550,8 +1424,6 @@ export const jaJP = {
     search_settings_title: "検索とマッチング...",
     search_settings_desc:
         "拼音・ローマ字・韓国語初声のマッチング。ファイルブラウザー、クイック検索、キーボードショートカット、フォント一覧に適用されます。",
-    search_settings_hint:
-        "拼音・ローマ字・韓国語初声のマッチング設定です。オフにすると文字列のみの一致になります。",
 
     // 編集メニュー新規項目
     menu_deselect: "選択解除",
@@ -1569,26 +1441,13 @@ export const jaJP = {
     menu_convert_dyn_to_volume: "音量に変換",
 
     // セント移調ダイアログ
-    transpose_cents_title: "セント指定で移調",
-    transpose_cents_amount: "移調量",
-    transpose_cents_unit: "セント",
 
     // 度数移調ダイアログ
-    transpose_degrees_title: "度数指定で移調",
-    transpose_degrees_scale: "スケール",
     transpose_degrees_amount: "移調量",
-    transpose_degrees_unit: "度",
 
     // ピッチ設定ダイアログ
-    set_pitch_title: "ピッチを設定",
-    set_pitch_note: "音名",
-    set_pitch_octave: "オクターブ",
-    set_pitch_cents: "セント",
 
     // スムージングダイアログ
-    smooth_title: "スムージング",
-    smooth_strength: "スムーズ度",
-    average_strength: "平均度",
 
     // ビブラート追加ダイアログ
     vibrato_attack: "フェードイン",
@@ -1597,7 +1456,6 @@ export const jaJP = {
     vibrato_unit_cents: "セント",
 
     // クオンタイズダイアログ
-    quantize_title: "クオンタイズ",
 
     // 平均クオンタイズダイアログ
     mean_quantize_title: "平均クオンタイズ",
@@ -1632,23 +1490,10 @@ export const jaJP = {
 
     // ダイアログフィールドラベル
     dlg_midi_note: "MIDI ノート",
-    clip_type_midi: "音高リファレンスクリップ",
     clip_type_midi_prefix: "[音高リファレンス]",
-    dlg_strength: "スムーズ度",
     dlg_smoothness: "スムーズ度",
     dlg_average_strength: "平均度",
-    dlg_depth_cents: "振幅（セント）",
-    dlg_amplitude_cents: "振幅（セント）",
-    dlg_amplitude: "振幅",
-    dlg_rate_hz: "レート（Hz）",
-    dlg_note_name: "音名",
-    dlg_octave: "オクターブ",
     dlg_cents: "セント",
-    dlg_cents_offset: "セントオフセット",
-    dlg_period_ms: "周期（ms）",
-    dlg_attack_ms: "アタック（ms）",
-    dlg_release_ms: "リリース（ms）",
-    dlg_phase_deg: "位相（°）",
     dlg_value: "値",
 
     // 編集メニューのコピー/カット/ペースト
@@ -1660,14 +1505,12 @@ export const jaJP = {
     pitch_snap_settings: "ピッチスナップ設定",
 
     // キーバインドヒント
-    kb_hint_recording: "左クリックで「なし」に設定。右クリックでデフォルトに戻す。",
 
     // キーバインド None
     kb_none: "なし",
     // Multi-file import (merged)
     import_across_time: "時間をまたいで追加",
     import_dialog_title: "ファイルをインポート",
-    import_button: "インポート",
     import_across_tracks: "トラック間に追加",
     import_as_takes: "テイクとして追加",
     folder_import_title: "フォルダをインポート",
@@ -1698,25 +1541,14 @@ export const jaJP = {
     // 外観設定
     menu_appearance_settings: "外観設定...",
     appearance_title: "外観設定",
-    appearance_section_basic: "基本設定",
-    appearance_section_font: "フォント設定",
-    appearance_section_colors: "カスタムカラー",
-    appearance_tab_basic: "基本",
     appearance_tab_font: "フォント",
     appearance_tab_colors: "カラー",
     appearance_tab_theme: "テーマ",
     appearance_color_group_base: "背景・サーフェス",
     appearance_color_group_text: "テキスト",
     appearance_color_group_ui: "UI要素",
-    appearance_color_group_danger: "危険",
-    appearance_color_group_warning: "警告",
-    appearance_color_group_graph: "グラフ",
-    appearance_color_group_subtle: "微細レイヤー",
-    appearance_color_group_meter: "メーター",
-    appearance_color_group_scrollbar: "スクロールバー",
     appearance_mode: "テーマモード",
     appearance_accent: "アクセントカラー",
-    appearance_gray: "グレースケール",
     appearance_radius: "角丸スタイル",
     appearance_radius_none: "なし",
     appearance_radius_small: "小",
@@ -1735,13 +1567,11 @@ export const jaJP = {
     appearance_reset: "リセット",
     appearance_font_restore_default: "既定フォントに戻す",
     appearance_apply: "適用",
-    appearance_new_theme: "新規テーマ",
     appearance_import_theme: "インポート...",
     appearance_export_theme: "エクスポート",
     appearance_export_failed: "テーマファイルの書き出しに失敗しました。",
     appearance_import_failed:
         "有効なテーマファイルではありません（読み込めない可能性があります）。",
-    appearance_reset_colors: "カラーリセット",
     appearance_reset_all_colors: "すべてのカラーをリセット",
     appearance_reset_all_colors_confirm:
         "すべてのカラーをリセットしますか？カスタムカラーの上書きはすべて破棄されます。この操作は取り消せません。",
@@ -1750,15 +1580,8 @@ export const jaJP = {
         "保存済みテーマはまだありません。インポートするか、色を変更して「適用」すると現在の外観が保存されます。",
     appearance_theme_name: "テーマ名",
     appearance_custom_theme: "カスタムテーマ",
-    appearance_no_custom_colors:
-        "カスタムカラーの上書きはありません。「新規テーマ」をクリックして作成してください。",
-    appearance_quick_colors: "クイックカラー調整",
-    appearance_quick_colors_hint: "よく使うカラーをここで調整。全カラーの編集は「カラー」タブへ。",
-    appearance_theme_management: "テーマ管理",
+
     appearance_modified_count: "{count} 色を変更済み",
-    appearance_waveform_colors: "波形カラー",
-    appearance_waveform_fill: "波形フィル",
-    appearance_waveform_stroke: "波形ストローク",
     appearance_color_window: "ウィンドウ背景",
     appearance_color_base: "ベースカラー",
     appearance_color_panel: "パネルカラー",
@@ -1809,8 +1632,7 @@ export const jaJP = {
     menu_gpu_auto_select: "自動選択",
     menu_run_benchmark: "ベンチマークを実行...",
     menu_background_prerender: "バックグラウンド事前レンダリング",
-    menu_background_prerender_desc:
-        "編集後にすぐバックグラウンドでレンダリングを開始。再生時は既にレンダリングされた部分をすぐに使用できます。",
+
     options_auto_reload_modified_media: "変更されたメディアファイルを自動で再読み込み",
     options_loop_new_clips: "新しいクリップのループを有効にする",
 
@@ -1818,7 +1640,6 @@ export const jaJP = {
     menu_render_cache_manager: "レンダーキャッシュ管理...",
     menu_channel_import_settings: "取り込み時のチャンネル処理...",
     menu_pen_input_settings: "ポインターとペン入力...",
-    menu_clear_render_cache: "レンダーキャッシュを削除",
     render_cache_dialog_title: "レンダーキャッシュ管理",
     render_cache_dialog_desc:
         "合成済みのクリップはキャッシュフォルダーに保存され、プロジェクトを開き直すときに再利用されるため再レンダリングが不要になります。",
@@ -1835,21 +1656,12 @@ export const jaJP = {
     render_cache_export_reuse: "音声の書き出し時にレンダーキャッシュを再利用（再合成を省略）",
     render_cache_max_size: "使用量の上限",
     render_cache_max_size_hint: "0 = 無制限",
-    render_cache_unlimited: "無制限",
     render_cache_max_age: "未使用期間による削除",
     render_cache_max_age_hint: "0 = 期間による削除なし",
-    render_cache_never: "削除しない",
-    render_cache_days: "{n} 日",
     render_cache_days_unit: "日",
     render_cache_min_clip: "クリップ長の下限",
     render_cache_seconds_unit: "秒",
     render_cache_min_entry: "クリップサイズの下限",
-    render_cache_skip_disabled: "キャッシュ無効",
-    render_cache_skip_empty: "空のクリップ",
-    render_cache_skip_too_short: "長さの下限未満",
-    render_cache_skip_too_small: "サイズの下限未満",
-    render_cache_skip_too_large: "単体上限超過",
-    render_cache_skip_low_disk_space: "ディスク空き不足",
     render_cache_max_entry: "1 件の上限",
     render_cache_min_free_disk: "ディスクの空き確保",
     render_cache_write_mode: "書き込みのタイミング",
@@ -1922,7 +1734,6 @@ export const jaJP = {
     recording_settings_desc: "録音入力、出力パス、キャプチャ設定を構成します。",
     recording_device: "録音デバイス",
     recording_device_default: "システムデフォルト",
-    recording_system_sound: "システムサウンド（ループバック）",
     recording_refresh_devices: "更新",
     recording_sample_rate: "サンプルレート",
     recording_bit_depth: "ビット深度",
@@ -1932,14 +1743,12 @@ export const jaJP = {
     recording_input_gain: "入力ゲイン",
     recording_countdown: "カウントダウン",
     recording_countdown_unit: "秒",
-    recording_countdown_none: "なし",
     recording_monitor_enabled: "録音中に入力をモニター",
     recording_monitor_gain: "モニターゲイン",
     recording_auto_normalize: "取り込み後に自動ノーマライズ",
     recording_auto_stop_selection: "選択クリップの末尾で自動停止",
     recording_path_template: "出力パステンプレート",
     recording_save_settings: "設定を保存",
-    recording_toggle_title: "録音の開始/停止（右クリックで設定）",
     recording_tooltip_start: "録音を開始（右クリックでクイック設定）",
     recording_tooltip_stop: "録音を停止（右クリックでクイック設定）",
     recording_tooltip_cancel_countdown:
@@ -2005,7 +1814,6 @@ export const jaJP = {
 
     // ── 操作記録（元に戻す/やり直す履歴）──────────────────────────
     undo_history_title: "操作記録",
-    undo_history_close: "閉じる",
     undo_history_jump: "この状態へ移動",
     undo_history_current: "現在の状態",
     undo_history_count: "全 {count} 件（最大 100 件を保持）",
@@ -2151,8 +1959,7 @@ export const jaJP = {
     vibrato_io_newer_version: "このファイルは新しいバージョンのアプリで書き出されました。",
     vibrato_io_read_failed: "プリセットファイルを読み込めませんでした。",
     vibrato_io_empty: "ファイルにプリセットがありません。",
-    vibrato_io_truncated:
-        "あと {count} 件のプリセットしか収まりません。残りはスキップしました。|あと {count} 件のプリセットしか収まりません。残りはスキップしました。",
+
     vibrato_audition_stop: "試聴を停止",
     menu_vibrato_presets: "ビブラートプリセット管理...",
     vibrato_manager_new: "新規",

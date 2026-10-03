@@ -31,7 +31,6 @@ export const enUS = {
     recording_settings_desc: "Configure recording source, output path and capture options.",
     recording_device: "Input Device",
     recording_device_default: "System Default",
-    recording_system_sound: "System Sound (Loopback)",
     recording_refresh_devices: "Refresh",
     recording_sample_rate: "Sample Rate",
     recording_bit_depth: "Bit Depth",
@@ -41,14 +40,12 @@ export const enUS = {
     recording_input_gain: "Input Gain",
     recording_countdown: "Countdown",
     recording_countdown_unit: "sec",
-    recording_countdown_none: "None",
     recording_monitor_enabled: "Monitor input while recording",
     recording_monitor_gain: "Monitor Gain",
     recording_auto_normalize: "Auto-normalize after import",
     recording_auto_stop_selection: "Auto-stop at end of selected clips",
     recording_path_template: "Output Path Template",
     recording_save_settings: "Save Settings",
-    recording_toggle_title: "Start / Stop Recording (right-click for settings)",
     recording_tooltip_start: "Start Recording (right-click for quick settings)",
     recording_tooltip_stop: "Stop Recording (right-click for quick settings)",
     recording_tooltip_cancel_countdown:
@@ -111,7 +108,6 @@ export const enUS = {
 
     // ── Operation history (undo/redo) ──────────────────────────
     undo_history_title: "Operation History",
-    undo_history_close: "Close",
     undo_history_jump: "Jump to this state",
     undo_history_current: "Current state",
     undo_history_count: "{count} entries (up to 100 kept)",
@@ -173,7 +169,6 @@ export const enUS = {
     export_dialog_range_all: "All",
     export_dialog_range_custom: "Custom",
     export_dialog_range_custom_label: "Start / End",
-    export_dialog_project_path: "Output File",
     export_dialog_output_dir: "Output Folder",
     export_dialog_project_file_name: "Output File Name",
     export_dialog_sample_rate: "Sample Rate",
@@ -191,7 +186,6 @@ export const enUS = {
     export_dialog_select_none: "Select None",
     export_dialog_select_all_subtracks: "Select All Sub Tracks",
     export_dialog_error_invalid_range: "Invalid time range. End must be greater than start.",
-    export_dialog_error_missing_project_path: "Please choose an output file path.",
     export_dialog_error_missing_project_output_dir:
         "Please choose an output folder for project export.",
     export_dialog_error_missing_project_file_name:
@@ -243,8 +237,6 @@ export const enUS = {
     menu_clear_waveform_cache_confirm:
         "Clear the waveform cache? Every waveform is rebuilt the next time it is needed.",
     menu_exit: "Exit",
-    shortcut_ctrl_o: "{modifier}+O",
-    shortcut_ctrl_e: "{modifier}+E",
     media_stream_select_title: "Select Audio Stream",
     media_stream_select_hint:
         "This video contains multiple audio streams. Select one to extract and import.",
@@ -266,7 +258,6 @@ export const enUS = {
     menu_import_midi: "Import MIDI...",
     menu_import_external_project: "Import External Projects",
     menu_clone_selected_track: "Clone Selected Track",
-    menu_paste_selected_track: "Paste into Selected Track",
     menu_paste_new_tracks: "Paste as New Tracks",
     menu_paste_vocalshifter_clipboard: "Paste VocalShifter Clipboard",
     ctx_quick_export: "Quick Export",
@@ -284,7 +275,6 @@ export const enUS = {
     quick_export_error_pick_directory_failed: "Failed to choose output folder.",
     reaper_import_skipped_header:
         "Some media files were skipped during Reaper import (unsupported format or file not found):",
-    menu_pick_output: "Pick Output",
     stretch_project_override: "Project Stretch Override",
     stretch_global_default: "Global Stretch Default",
     stretch_algorithm: "Algorithm",
@@ -318,12 +308,6 @@ export const enUS = {
     theme_dark: "Dark",
     theme_light: "Light",
 
-    action_load_model: "Load Model",
-    action_analyze_audio: "Analyze Audio",
-    action_apply_pitch: "Apply Pitch",
-    action_synthesize: "Synthesize",
-    action_export_wav: "Export WAV",
-    action_play_src: "Play Src",
     action_play_out: "Play Out",
     action_pause: "Pause",
     action_stop: "Stop",
@@ -331,9 +315,6 @@ export const enUS = {
     action_refresh: "Refresh",
     common_loading: "Loading...",
     common_rendering: "Rendering...",
-    pitch_analyzing: "Analyzing pitch...",
-    pitch_analyzing_preparing: "Preparing...",
-    common_playhead: "Playhead",
 
     panel_editor: "Editor",
     panel_unavailable: "Panel unavailable",
@@ -343,7 +324,6 @@ export const enUS = {
     // ── 停靠窗体系统（Dockable forms）──────────────────────────
     dock_float_active: "Float this panel",
     dock_float: "Float",
-    dock_dock: "Dock",
     dock_detach_to_window: "Open in a separate window",
     dock_detach_unsupported: "This panel cannot leave the main window",
     dock_detach_blocked_by:
@@ -368,10 +348,7 @@ export const enUS = {
     dock_side_bottom: "bottom edge",
     dock_side_center: "as a tab",
     aria_resize_track_header: "Resize track header",
-    aria_resize_piano_axis: "Resize piano keys",
-    aria_resize_panels: "Resize panels",
     menu_layout: "Layout",
-    layout_restore: "Restore layout",
     layout_reset: "Reset layout",
     layout_reset_confirm_title: "Reset the layout?",
     layout_reset_confirm_body:
@@ -573,7 +550,6 @@ export const enUS = {
     notebook_setting_clip_insert_mode: "Insert timeline payloads into",
     notebook_setting_clip_insert_selected: "Selected track",
     notebook_setting_clip_insert_new_tracks: "New tracks",
-    notebook_setting_clip_insert_ask: "Ask every time",
     notebook_setting_keep_clip: "Keep staged block after use",
     notebook_setting_clip_preview: "Show preview inside staged blocks",
     notebook_export_md: "Export as Markdown",
@@ -587,43 +563,21 @@ export const enUS = {
     reference_root_tracks_clear: "Clear",
     reference_root_tracks_empty: "No other track groups",
     reference_root_tracks_short: "Ref Tracks",
-    tool_mode: "Tool Mode",
-    edit_param: "Edit Param",
-    common_draw: "Draw",
     common_select: "Select",
-    vibrato_tool: "Vibrato",
     draw_tool: "Draw Tool",
     vibrato_draw_tool: "Line/Vibrato Tool",
     common_pitch: "Pitch",
-    common_tension: "Tension",
-    common_breath: "Breath",
-    beats_per_bar: "Beats/Bar",
     time_signature: "Time Sig.",
     common_grid: "Grid",
     add_clip: "+ Add Audio Clip",
-    delete_clip: "- Delete Clip",
-    model_dir: "Model Dir",
-    audio_path: "Audio Path",
-    pitch_shift: "Pitch Shift",
-    output_path: "Output Path",
-    common_hints: "Hints",
-    hint_drag_clip:
-        "Drag clips on timeline to move start (snaps to grid; hold Shift for free movement)",
-    hint_add_point: "Double click in parameter panel to add points",
-    hint_drag_point: "Drag points to edit the curve",
-    hint_drop_audio: "Drop media file onto app to import and analyze",
-    hint_alt_drag: "Hold Alt while dragging a clip to Slip-Edit (move content internally; no snap)",
 
-    timeline_title: "Timeline",
     common_tracks: "Tracks",
-    common_beat: "beat",
 
     track_add: "Add Track",
     track_remove_selected: "Remove Selected Track",
     track_remove_confirm:
         "Remove this track? The track and all of its clips are deleted. This cannot be undone.",
 
-    param_editor: "Parameter Editor",
     param_editor_short: "Param Editor",
     pitch_requires_compose: "Enable Compose (C) on the root track to generate pitch curve",
     pitch_requires_algo: "Select a non-None pitch algorithm to enable pitch editing",
@@ -638,22 +592,17 @@ export const enUS = {
     pitch_status_ready: "Ready",
     pitch_status_no_edit: "No Edit",
     pitch_status_unavailable: "Unavailable",
-    pitch_label: "Pitch (semitones)",
-    tension_label: "Tension (0-1)",
     breath_separation_label: "Harmonic Separation",
     breath_gain_requires_separation: "Turn on Harmonic Separation to edit Breath Gain",
     hifigan_tension_requires_separation: "Turn on Harmonic Separation to edit Tension",
     breath_gain_label: "Breath Gain",
     hifigan_tension_label: "Tension",
     formant_shift_label: "Formant Shift",
-    hifigan_volume_label: "Volume",
     volume_label: "Volume",
     dyn_label: "Dynamics",
     dyn_analysis_pending: "Analyzing dynamics baseline...",
     pan_label: "Pan",
-    vslib_volume_label: "Volume",
     vslib_synth_mode_label: "Synth Mode",
-    vslib_pan_label: "Pan",
     vslib_breathiness_label: "Breathiness",
     vslib_synth_mode_mono: "Mono",
     vslib_synth_mode_mono_formant: "Mono (Formant)",
@@ -670,19 +619,7 @@ export const enUS = {
     param_btn_formant: "FRM",
     param_btn_tension: "TEN",
     param_btn_breathiness: "BNS",
-    breath_state_on: "Breath On",
-    breath_state_off: "Breath Off",
-    points_help: "Double click add · Drag move · Right click delete",
-    points_count: "Points",
-    common_selected: "Selected",
 
-    status_last_result: "Last API Result",
-    status_device: "Device",
-    status_model: "Model",
-    status_audio: "Audio",
-    status_synth: "Synth",
-    status_playing: "Playing",
-    status_position: "Position",
     status_ready: "Ready",
     status_failed: "Failed",
     status_import_audio_failed: "Import audio failed",
@@ -768,14 +705,8 @@ export const enUS = {
     unsaved_changes_exit_desc: "Save before closing the application?",
     unsaved_changes_discard: "Don't Save",
 
-    menu_export_separated: "Export Separated Tracks",
-
     status_error_prefix: "Error",
     clipboard_error_empty: "Nothing to paste from the clipboard.",
-    status_target_original: "Original",
-    status_target_synthesized: "Synthesized",
-    status_target_none: "Idle",
-    dropped_audio_imported: "Dropped media imported",
     import_audio_failed: "Import media failed",
     status_project_version_confirmation: "Project version confirmation required",
 
@@ -814,9 +745,7 @@ export const enUS = {
     enable_group: "Enable Group",
     common_none: "None",
     common_bpm: "BPM",
-    common_repeat: "Repeat",
     common_compose: "Compose",
-    status_ok: "OK",
     status_na: "—",
     clip_mute: "Mute",
     clip_unmute: "Unmute",
@@ -898,7 +827,6 @@ export const enUS = {
     clip_take_explode: "Explode Takes into Clips",
     clip_take_rename: "Rename Take",
     clip_take_active_mark: "●",
-    clip_take_add_hint: "More take management will be added with Reaper multi-take import",
     fade_in: "Fade In",
     fade_out: "Fade Out",
     show_secondary_param: "Show secondary parameter overlay",
@@ -907,8 +835,6 @@ export const enUS = {
     secondary_overlay_tooltip_hidden: "Secondary overlay: hidden\nClick to show",
     breath_tooltip_on: "Harmonic Separation: on\nClick to turn off",
     breath_tooltip_off: "Harmonic Separation: off\nClick to turn on",
-    onnx_compile_required: "ONNX model not compiled. Run: cargo tauri dev --features onnx",
-    onnx_unavailable_label: " (unavailable)",
     common_solo: "Solo",
     status_analyzing_pitch: "Analyzing pitch",
     status_analyzing_waveform: "Analyzing waveform",
@@ -972,7 +898,6 @@ export const enUS = {
     silence_double_click_reset: "Double-click a parameter to reset it to its default",
     silence_applying: "Applying...",
     ctx_close_gaps: "Close Gaps",
-    ctx_close_gaps_disabled: "No clips after the clicked position on this track",
     ctx_normalize: "Normalize",
     ctx_edit_rate: "Edit Playback Rate...",
     ctx_reverse: "Reverse",
@@ -988,14 +913,11 @@ export const enUS = {
     recapture_missing_media_title: "Recapture Missing Media",
     recapture_missing_media_desc:
         "The following media files are missing or their contents have changed. You can ignore each item, reload modified files from their original paths, or replace missing files with other files.",
-    recapture_missing_media_modified_desc:
-        "The following media files have been modified externally.",
-    recapture_missing_media_deleted_desc: "The following media files have been moved or deleted.",
+
     recapture_missing_media_reload: "Reload",
     recapture_missing_media_replace: "Replace",
     recapture_missing_media_reload_all: "Reload All",
     recapture_missing_media_refresh: "Refresh",
-    recapture_missing_media_reset: "Reset All",
     recapture_missing_media_reset_all: "Reset All",
     recapture_missing_media_reset_item: "Reset",
     recapture_missing_media_ignore: "Ignore",
@@ -1010,7 +932,6 @@ export const enUS = {
     recapture_missing_media_item_failed: "Failed",
     recapture_missing_media_summary:
         "Ignored {ignored} · Reloaded {reloaded} · Replaced {replaced} · Total {total}",
-    recapture_missing_media_reload_dialog_title: 'Choose a replacement for "{name}"',
     recapture_missing_media_replace_dialog_title: 'Choose a replacement for "{name}"',
     recapture_missing_media_reloaded_path: "Reloaded path:",
     recapture_missing_media_replaced_path: "Replaced with:",
@@ -1045,12 +966,6 @@ export const enUS = {
     save_version_conflict_save_as: "Save As...",
     save_version_conflict_continue: "Continue Saving",
 
-    fade_curve_linear: "Linear",
-    fade_curve_sine: "Sine",
-    fade_curve_exponential: "Exponential",
-    fade_curve_logarithmic: "Logarithmic",
-    fade_curve_scurve: "S-Curve",
-
     // REAPER 七预设淡变形状（顺序对齐 timeline/reaperFade.ts FADE_PRESETS）。
     fade_shape_linear: "Linear",
     fade_shape_fast_start: "Fast Start",
@@ -1068,8 +983,6 @@ export const enUS = {
     clip_pitch_drag_tooltip: "Pitch offset: {delta} ct",
     track_change_color: "Change track color",
     track_clone: "Clone Track",
-    track_copy: "Copy Track",
-    track_cut: "Cut Track",
     color_blue: "Blue",
     color_purple: "Purple",
     color_green: "Green",
@@ -1082,7 +995,6 @@ export const enUS = {
 
     progress_est_remaining: "Est. {time} remaining",
     progress_cancel: "Cancel",
-    pitch_analyzing_clips: "Analyzing{clipName}{clipCount} {percentage}%",
     algo_label: "Algo",
     algo_label_short: "Algo",
     algo_unavailable_suffix: " (unavailable)",
@@ -1091,24 +1003,17 @@ export const enUS = {
     child_formant_mode: "Formant",
     child_pitch_offset_cents_label: "Child Track Cents Offset",
     child_pitch_offset_degrees_label: "Child Track Degree Offset",
-    child_formant_offset_cents_label: "Child Track Formant Offset",
     child_pitch_root_option: "Pitch (Track Group)",
     child_pitch_cents_option: "Cents (Current Sub-track)",
     child_pitch_degrees_option: "Degrees (Current Sub-track)",
     child_formant_root_option: "Formant Shift (Track Group)",
     child_formant_offset_option: "Formant Offset (Current Sub-track)",
-    child_pitch_offset_cents_short: "cents",
-    child_pitch_offset_degrees_short: "degrees",
-    child_formant_offset_cents_short: "cents",
-    aria_loading: "Loading",
 
     // 快捷键管理
     kb_dialog_title: "Keyboard Shortcuts",
     kb_dialog_desc: "Click a shortcut to rebind. Press Escape to cancel.",
     kb_press_key: "Press key...",
     kb_add_binding: "Add another shortcut",
-    kb_reset_default: "Reset to default",
-    kb_reset_all: "Reset All",
     kb_close: "Close",
     kb_conflict_msg: "This shortcut conflicts with existing actions in the following contexts:",
     kb_conflict_override: "Override",
@@ -1290,7 +1195,6 @@ export const enUS = {
     midi_import_position_start: "Project Start",
     midi_import_position_playhead: "Playhead",
     midi_import_position_selection: "Selection",
-    midi_select_track: "Select Track",
     midi_select_all: "Select All",
     midi_deselect_all: "Deselect All",
     midi_multi_track_merge: "Multi-track Merge",
@@ -1299,7 +1203,6 @@ export const enUS = {
     midi_track_range: "Range: {min} – {max}",
     midi_no_tracks: "No tracks with notes found in MIDI file",
     midi_importing: "Importing...",
-    midi_import_success: "MIDI imported: {notes} notes, {frames} frames",
     midi_import_failed: "MIDI import failed",
     midi_file_not_found: "MIDI file not found",
     midi_no_notes: "No notes in selected track",
@@ -1324,8 +1227,6 @@ export const enUS = {
 
     // MIDI clipboard errors
     midi_clipboard_read_failed: "Failed to read MIDI from clipboard",
-    midi_clipboard_empty: "No Standard MIDI File found in clipboard",
-    midi_clipboard_parse_failed: "Failed to parse MIDI data from clipboard",
 
     // MIDI import target selector
     midi_import_target: "Import Target",
@@ -1353,7 +1254,6 @@ export const enUS = {
     ripple_mode_off: "Off",
     ripple_mode_track: "Per Track",
     ripple_mode_all: "All Tracks",
-    split_transition: "Split Transition",
     split_transition_tooltip: "Split Transition (right-click for settings)",
     split_transition_settings_title: "Split Transition Settings",
     split_transition_settings_desc:
@@ -1439,13 +1339,6 @@ export const enUS = {
     grid_note_triplet: "Triplet",
 
     // Grid note names for snap spacing (context menu)
-    grid_snap_whole: "Whole Note",
-    grid_snap_half: "Half Note",
-    grid_snap_quarter: "Quarter Note",
-    grid_snap_8th: "8th Note",
-    grid_snap_16th: "16th Note",
-    grid_snap_32nd: "32nd Note",
-    grid_snap_64th: "64th Note",
 
     // Timeline time display
     time_display: "Time Display",
@@ -1471,24 +1364,10 @@ export const enUS = {
     sync_timeline_view: "Sync Timeline View",
     sync_timeline_view_tooltip:
         "Sync the parameter editor's horizontal position and zoom with the timeline",
-    grid_snap_dotted_half: "Dotted Half Note",
-    grid_snap_dotted_quarter: "Dotted Quarter Note",
-    grid_snap_dotted_8th: "Dotted 8th Note",
-    grid_snap_dotted_16th: "Dotted 16th Note",
-    grid_snap_dotted_32nd: "Dotted 32nd Note",
-    grid_snap_dotted_64th: "Dotted 64th Note",
-    grid_snap_triplet_half: "Triplet Half Note",
-    grid_snap_triplet_quarter: "Triplet Quarter Note",
-    grid_snap_triplet_8th: "Triplet 8th Note",
-    grid_snap_triplet_16th: "Triplet 16th Note",
-    grid_snap_triplet_32nd: "Triplet 32nd Note",
-    grid_snap_triplet_64th: "Triplet 64th Note",
 
     // Tool modes
-    common_line: "Line",
 
     // Pitch snap settings
-    pitch_snap_settings_title: "Pitch Snap Settings",
     quantize_unit: "Quantize Unit",
     quantize_semitone: "Semitone",
     quantize_scale: "Scale",
@@ -1552,14 +1431,8 @@ export const enUS = {
 
     // Scale highlight setting
     scale_highlight: "Scale Highlight",
-    scale_highlight_always: "Always",
-    scale_highlight_only_when_snapping: "Only When Snapping",
-    scale_highlight_off: "Off",
 
     // Modifier key rename
-    kb_modifier_toggle_snap: "Free Movement (hold while dragging clip)",
-    hint_toggle_snap:
-        "Hold Shift while dragging a clip for free movement; otherwise clip dragging snaps to grid",
 
     // File browser enhancements
     fb_regex: "Regex",
@@ -1628,8 +1501,6 @@ export const enUS = {
     fb_new_folder_default: "New Folder",
     fb_rename_failed: "Rename failed",
     fb_create_folder_failed: "Could not create the folder",
-    fb_name_invalid: "The name contains characters that are not allowed",
-    fb_name_exists: "An item with this name already exists",
     fb_delete_confirm_title: "Delete Items",
     fb_delete_confirm_message:
         "Move {count} item to the recycle bin?|Move {count} items to the recycle bin?",
@@ -1675,8 +1546,6 @@ export const enUS = {
     search_settings_title: "Search and matching...",
     search_settings_desc:
         "Pinyin, romaji and Korean choseong matching. Applies to the file browser, quick search, keybindings and the font list.",
-    search_settings_hint:
-        "Toggles for pinyin, romaji and Korean choseong matching. Turned off, search only matches literal text.",
 
     // Edit menu new items
     menu_deselect: "Deselect",
@@ -1694,26 +1563,13 @@ export const enUS = {
     menu_convert_dyn_to_volume: "Convert to Volume",
 
     // Transpose by cents dialog
-    transpose_cents_title: "Transpose by Cents",
-    transpose_cents_amount: "Amount",
-    transpose_cents_unit: "cents",
 
     // Transpose by degrees dialog
-    transpose_degrees_title: "Transpose by Degrees",
-    transpose_degrees_scale: "Scale",
     transpose_degrees_amount: "Amount",
-    transpose_degrees_unit: "degrees",
 
     // Set pitch dialog
-    set_pitch_title: "Set Pitch",
-    set_pitch_note: "Note",
-    set_pitch_octave: "Octave",
-    set_pitch_cents: "cents",
 
     // Smooth dialog
-    smooth_title: "Smooth",
-    smooth_strength: "Smoothness",
-    average_strength: "Average Amount",
 
     // Add vibrato dialog
     vibrato_attack: "Fade in",
@@ -1722,7 +1578,6 @@ export const enUS = {
     vibrato_unit_cents: "cents",
 
     // Quantize dialog
-    quantize_title: "Quantize",
 
     // Mean quantize dialog
     mean_quantize_title: "Mean Quantize",
@@ -1756,23 +1611,10 @@ export const enUS = {
 
     // Dialog field labels
     dlg_midi_note: "MIDI Note",
-    clip_type_midi: "Pitch Reference Clip",
     clip_type_midi_prefix: "[Pitch Ref]",
-    dlg_strength: "Smoothness",
     dlg_smoothness: "Smoothness",
     dlg_average_strength: "Average Amount",
-    dlg_depth_cents: "Amplitude (cents)",
-    dlg_amplitude_cents: "Amplitude (cents)",
-    dlg_amplitude: "Amplitude",
-    dlg_rate_hz: "Rate (Hz)",
-    dlg_note_name: "Note Name",
-    dlg_octave: "Octave",
     dlg_cents: "Cents",
-    dlg_cents_offset: "Cents Offset",
-    dlg_period_ms: "Period (ms)",
-    dlg_attack_ms: "Attack (ms)",
-    dlg_release_ms: "Release (ms)",
-    dlg_phase_deg: "Phase (°)",
     dlg_value: "Value",
 
     // Copy / Cut / Paste in edit menu
@@ -1784,14 +1626,12 @@ export const enUS = {
     pitch_snap_settings: "Pitch Snap Settings",
 
     // Keybinding hint
-    kb_hint_recording: "Left-click a binding to set it to None. Right-click to reset to default.",
 
     // Keybinding None
     kb_none: "None",
     // Multi-file import (added during merge)
     import_across_time: "Add Across Time",
     import_dialog_title: "Import files",
-    import_button: "Import",
     import_across_tracks: "Add Across Tracks",
     import_as_takes: "Add as Takes",
     folder_import_title: "Import Folder",
@@ -1823,25 +1663,14 @@ export const enUS = {
     // Appearance settings
     menu_appearance_settings: "Appearance Settings...",
     appearance_title: "Appearance Settings",
-    appearance_section_basic: "Basic",
-    appearance_section_font: "Font",
-    appearance_section_colors: "Custom Colors",
-    appearance_tab_basic: "Basic",
     appearance_tab_font: "Font",
     appearance_tab_colors: "Colors",
     appearance_tab_theme: "Theme",
     appearance_color_group_base: "Background & Surface",
     appearance_color_group_text: "Text",
     appearance_color_group_ui: "UI Elements",
-    appearance_color_group_danger: "Danger",
-    appearance_color_group_warning: "Warning",
-    appearance_color_group_graph: "Graph",
-    appearance_color_group_subtle: "Subtle Layers",
-    appearance_color_group_meter: "Meters",
-    appearance_color_group_scrollbar: "Scrollbar",
     appearance_mode: "Mode",
     appearance_accent: "Accent",
-    appearance_gray: "Gray",
     appearance_radius: "Radius",
     appearance_radius_none: "None",
     appearance_radius_small: "Small",
@@ -1860,12 +1689,10 @@ export const enUS = {
     appearance_reset: "Reset",
     appearance_font_restore_default: "Restore Default Font",
     appearance_apply: "Apply",
-    appearance_new_theme: "New Theme",
     appearance_import_theme: "Import...",
     appearance_export_theme: "Export",
     appearance_export_failed: "Failed to export the theme file.",
     appearance_import_failed: "That file is not a valid theme (or could not be read).",
-    appearance_reset_colors: "Reset Colors",
     appearance_reset_all_colors: "Reset All Colors",
     appearance_reset_all_colors_confirm:
         "Reset all colors? Every custom color override is discarded. This cannot be undone.",
@@ -1874,15 +1701,8 @@ export const enUS = {
         "No saved themes yet. Import one, or apply modified colors to save the current look.",
     appearance_theme_name: "Theme Name",
     appearance_custom_theme: "Custom Theme",
-    appearance_no_custom_colors: 'No custom color overrides. Click "New Theme" to create one.',
-    appearance_quick_colors: "Quick Color Adjustments",
-    appearance_quick_colors_hint:
-        "Adjust frequently used colors here. For all color tokens, switch to the Colors tab.",
-    appearance_theme_management: "Theme Management",
+
     appearance_modified_count: "{count} color modified|{count} colors modified",
-    appearance_waveform_colors: "Waveform Colors",
-    appearance_waveform_fill: "Waveform Fill",
-    appearance_waveform_stroke: "Waveform Stroke",
     appearance_color_window: "Window Background",
     appearance_color_base: "Base Color",
     appearance_color_panel: "Panel Color",
@@ -1933,8 +1753,7 @@ export const enUS = {
     menu_gpu_auto_select: "Auto-select",
     menu_run_benchmark: "Run Benchmark...",
     menu_background_prerender: "Background Pre-render",
-    menu_background_prerender_desc:
-        "Immediately start pre-rendering after edits. Playback uses already-rendered content without waiting for full render.",
+
     options_auto_reload_modified_media: "Automatically reload modified media files",
     options_loop_new_clips: "Enable loop for new clips",
 
@@ -1942,7 +1761,6 @@ export const enUS = {
     menu_render_cache_manager: "Render Cache Manager...",
     menu_channel_import_settings: "Import Channel Handling...",
     menu_pen_input_settings: "Pointer & Pen Input...",
-    menu_clear_render_cache: "Clear Render Cache",
     render_cache_dialog_title: "Render Cache",
     render_cache_dialog_desc:
         "Rendered clips are stored in a cache folder and reused the next time you open the project, so they do not need to be rendered again.",
@@ -1958,21 +1776,12 @@ export const enUS = {
     render_cache_export_reuse: "Reuse the render cache when exporting audio (skips re-synthesis)",
     render_cache_max_size: "Size limit",
     render_cache_max_size_hint: "0 = unlimited",
-    render_cache_unlimited: "Unlimited",
     render_cache_max_age: "Prune unused after",
     render_cache_max_age_hint: "0 = never prune by age",
-    render_cache_never: "Never",
-    render_cache_days: "{n} days",
     render_cache_days_unit: "days",
     render_cache_min_clip: "Min clip length",
     render_cache_seconds_unit: "sec",
     render_cache_min_entry: "Min clip size",
-    render_cache_skip_disabled: "cache disabled",
-    render_cache_skip_empty: "empty",
-    render_cache_skip_too_short: "below duration floor",
-    render_cache_skip_too_small: "below size floor",
-    render_cache_skip_too_large: "above per-entry cap",
-    render_cache_skip_low_disk_space: "low disk space",
     render_cache_max_entry: "Max entry size",
     render_cache_min_free_disk: "Keep free disk",
     render_cache_write_mode: "Write timing",
@@ -2136,8 +1945,7 @@ export const enUS = {
     vibrato_io_newer_version: "This file was written by a newer version of the app.",
     vibrato_io_read_failed: "Could not read the preset file.",
     vibrato_io_empty: "The file contains no presets.",
-    vibrato_io_truncated:
-        "Room for {count} more preset only; the rest were skipped.|Room for {count} more presets only; the rest were skipped.",
+
     vibrato_audition_stop: "Stop audition",
     menu_vibrato_presets: "Vibrato Preset Manager...",
     vibrato_manager_new: "New",

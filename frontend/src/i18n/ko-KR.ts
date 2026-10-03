@@ -35,7 +35,6 @@ export const koKR = {
     export_dialog_range_all: "전체",
     export_dialog_range_custom: "사용자 지정",
     export_dialog_range_custom_label: "시작 / 끝",
-    export_dialog_project_path: "출력 파일",
     export_dialog_output_dir: "출력 폴더",
     export_dialog_project_file_name: "출력 파일 이름",
     export_dialog_browse: "찾아보기",
@@ -52,7 +51,6 @@ export const koKR = {
     export_dialog_select_all_subtracks: "하위 트랙 전체 선택",
     export_dialog_error_invalid_range:
         "시간 범위가 올바르지 않습니다. 종료 시간은 시작 시간보다 커야 합니다.",
-    export_dialog_error_missing_project_path: "출력 파일 경로를 선택하세요.",
     export_dialog_error_missing_project_output_dir: "프로젝트 내보내기 출력 폴더를 선택하세요.",
     export_dialog_error_missing_project_file_name: "프로젝트 내보내기 출력 파일 이름을 입력하세요.",
     export_dialog_error_missing_output_dir: "출력 폴더를 선택하세요.",
@@ -99,8 +97,6 @@ export const koKR = {
     menu_clear_waveform_cache_confirm:
         "파형 캐시를 지울까요? 다음에 필요할 때 모든 파형을 다시 생성합니다.",
     menu_exit: "종료",
-    shortcut_ctrl_o: "{modifier}+O",
-    shortcut_ctrl_e: "{modifier}+E",
     media_stream_select_title: "오디오 트랙 선택",
     media_stream_select_hint:
         "이 동영상에는 여러 오디오 트랙이 포함되어 있습니다. 추출하여 가져올 트랙을 선택하세요.",
@@ -121,7 +117,6 @@ export const koKR = {
     menu_import_midi: "MIDI 가져오기...",
     menu_import_external_project: "외부 프로젝트 가져오기",
     menu_clone_selected_track: "선택 트랙 복제",
-    menu_paste_selected_track: "선택한 트랙에 붙여넣기",
     menu_paste_new_tracks: "새 트랙으로 붙여넣기",
     menu_paste_vocalshifter_clipboard: "VocalShifter 클립보드 붙여넣기",
     ctx_quick_export: "빠른 내보내기",
@@ -138,25 +133,14 @@ export const koKR = {
     quick_export_error_pick_directory_failed: "출력 폴더를 선택하지 못했습니다.",
     menu_appearance_settings: "외관 설정...",
     appearance_title: "외관 설정",
-    appearance_section_basic: "기본",
-    appearance_section_font: "글꼴",
-    appearance_section_colors: "사용자 지정 색상",
-    appearance_tab_basic: "기본",
     appearance_tab_colors: "색상",
     appearance_tab_theme: "테마",
     appearance_tab_font: "글꼴",
     appearance_color_group_base: "배경 및 표면",
     appearance_color_group_text: "텍스트",
     appearance_color_group_ui: "UI 요소",
-    appearance_color_group_danger: "위험",
-    appearance_color_group_warning: "경고",
-    appearance_color_group_graph: "그래프",
-    appearance_color_group_subtle: "미세 레이어",
-    appearance_color_group_meter: "미터",
-    appearance_color_group_scrollbar: "스크롤바",
     appearance_mode: "테마 모드",
     appearance_accent: "강조색",
-    appearance_gray: "회색 계열",
     appearance_radius: "모서리 반경",
     appearance_radius_none: "없음",
     appearance_radius_small: "작게",
@@ -174,12 +158,10 @@ export const koKR = {
     appearance_reset: "초기화",
     appearance_font_restore_default: "기본 글꼴로 복원",
     appearance_apply: "적용",
-    appearance_new_theme: "새 테마",
     appearance_import_theme: "가져오기...",
     appearance_export_theme: "내보내기",
     appearance_export_failed: "테마 파일을 내보내지 못했습니다.",
     appearance_import_failed: "유효한 테마 파일이 아닙니다(읽을 수 없을 수도 있습니다).",
-    appearance_reset_colors: "색상 초기화",
     appearance_reset_all_colors: "모든 색상 초기화",
     appearance_reset_all_colors_confirm:
         "모든 색상을 초기화할까요? 모든 사용자 정의 색상 재정의가 삭제됩니다. 이 작업은 되돌릴 수 없습니다.",
@@ -188,14 +170,7 @@ export const koKR = {
         "저장된 테마가 아직 없습니다. 가져오거나 색상을 수정한 뒤 적용을 눌러 현재 모양을 저장하세요.",
     appearance_theme_name: "테마 이름",
     appearance_custom_theme: "사용자 정의 테마",
-    appearance_no_custom_colors: "사용자 정의 색상 오버라이드가 없습니다.",
-    appearance_quick_colors: "빠른 색상 조정",
-    appearance_quick_colors_hint: "자주 쓰는 색상을 여기서 조정합니다.",
-    appearance_theme_management: "테마 관리",
     appearance_modified_count: "{count}개 색상 수정됨",
-    appearance_waveform_colors: "파형 색상",
-    appearance_waveform_fill: "파형 채우기",
-    appearance_waveform_stroke: "파형 외곽선",
     appearance_color_window: "창 배경",
     appearance_color_base: "기본 색상",
     appearance_color_panel: "패널 색상",
@@ -230,7 +205,6 @@ export const koKR = {
     appearance_color_meter_well: "미터 웰",
     reaper_import_skipped_header:
         "Reaper 가져오기 중 다음 미디어 파일이 건너뛰어졌습니다 (지원하지 않는 형식 또는 파일을 찾을 수 없음):",
-    menu_pick_output: "출력 경로 선택",
     common_language: "언어",
     stretch_project_override: "프로젝트 스트레치 재정의",
     stretch_global_default: "전역 스트레치 기본값",
@@ -265,12 +239,6 @@ export const koKR = {
     theme_dark: "다크",
     theme_light: "라이트",
 
-    action_load_model: "모델 불러오기",
-    action_analyze_audio: "오디오 분석",
-    action_apply_pitch: "피치 적용",
-    action_synthesize: "합성",
-    action_export_wav: "WAV 내보내기",
-    action_play_src: "원본 재생",
     action_play_out: "합성음 재생",
     action_pause: "일시 정지",
     action_stop: "정지",
@@ -278,9 +246,6 @@ export const koKR = {
     action_refresh: "새로고침",
     common_loading: "로딩 중...",
     common_rendering: "렌더링 중...",
-    pitch_analyzing: "피치 분석 중...",
-    pitch_analyzing_preparing: "준비 중...",
-    common_playhead: "인디케이터",
 
     panel_editor: "에디터",
     panel_unavailable: "패널을 사용할 수 없음",
@@ -290,7 +255,6 @@ export const koKR = {
     // ── 停靠窗体系统（Dockable forms）──────────────────────────
     dock_float_active: "이 패널을 플로팅",
     dock_float: "플로팅",
-    dock_dock: "도킹",
     dock_detach_to_window: "별도 창에서 열기",
     dock_detach_unsupported: "이 패널은 메인 창 밖으로 이동할 수 없습니다",
     dock_redock: "메인 영역으로 도킹",
@@ -315,10 +279,7 @@ export const koKR = {
     dock_side_bottom: "아래쪽",
     dock_side_center: "탭으로",
     aria_resize_track_header: "트랙 헤더 너비",
-    aria_resize_piano_axis: "건반 너비",
-    aria_resize_panels: "패널 크기 조절",
     menu_layout: "레이아웃",
-    layout_restore: "레이아웃 복원",
     layout_reset: "레이아웃 초기화",
     layout_reset_confirm_title: "레이아웃을 초기화할까요?",
     layout_reset_confirm_body:
@@ -520,7 +481,6 @@ export const koKR = {
     notebook_setting_clip_insert_mode: "타임라인 데이터 삽입 위치",
     notebook_setting_clip_insert_selected: "선택한 트랙",
     notebook_setting_clip_insert_new_tracks: "새 트랙",
-    notebook_setting_clip_insert_ask: "매번 확인",
     notebook_setting_keep_clip: "사용 후 임시 저장 블록 유지",
     notebook_setting_clip_preview: "임시 저장 블록 안에 미리보기 표시",
     notebook_export_md: "Markdown으로 내보내기",
@@ -534,43 +494,21 @@ export const koKR = {
     reference_root_tracks_clear: "지우기",
     reference_root_tracks_empty: "다른 트랙 그룹이 없습니다",
     reference_root_tracks_short: "참조",
-    tool_mode: "도구 모드",
-    edit_param: "파라미터 편집",
-    common_draw: "그리기",
     common_select: "선택",
-    vibrato_tool: "비브라토",
     draw_tool: "그리기 도구",
     vibrato_draw_tool: "직선/비브라토 도구",
     common_pitch: "피치",
-    common_tension: "텐션",
-    common_breath: "브레스",
-    beats_per_bar: "박자",
     time_signature: "박자표",
     common_grid: "그리드",
     add_clip: "+ 클립 추가",
-    delete_clip: "- 클립 삭제",
-    model_dir: "모델 디렉토리",
-    audio_path: "오디오 경로",
-    pitch_shift: "피치 시프트",
-    output_path: "출력 경로",
-    common_hints: "힌트",
-    hint_drag_clip:
-        "타임라인의 클립을 드래그하여 시작 위치 이동 (기본은 스냅, Shift를 누르면 자유 이동)",
-    hint_add_point: "파라미터 패널을 더블 클릭하여 포인트 추가",
-    hint_drag_point: "포인트를 드래그하여 커브 편집",
-    hint_drop_audio: "미디어 파일을 드롭하여 가져오기 및 분석",
-    hint_alt_drag: "클립 드래그 중 Alt 키를 누르면 Slip-Edit (내부 콘텐츠 이동; 스냅 없음)",
 
-    timeline_title: "타임라인",
     common_tracks: "트랙",
-    common_beat: "박",
 
     track_add: "트랙 추가",
     track_remove_selected: "선택한 트랙 삭제",
     track_remove_confirm:
         "이 트랙을 삭제할까요? 트랙과 그 위의 모든 클립이 삭제됩니다. 이 작업은 되돌릴 수 없습니다.",
 
-    param_editor: "파라미터 에디터",
     param_editor_short: "파라미터",
     pitch_requires_compose: "루트 트랙에서 Compose(C)를 활성화하여 피치 커브를 생성하세요",
     pitch_requires_algo: "피치 편집을 활성화하려면 '없음' 이외의 피치 알고리즘을 선택하세요",
@@ -585,22 +523,17 @@ export const koKR = {
     pitch_status_ready: "준비됨",
     pitch_status_no_edit: "미편집",
     pitch_status_unavailable: "사용 불가",
-    pitch_label: "피치 (반음)",
-    tension_label: "텐션 (0-1)",
     breath_separation_label: "하모닉 분리",
     breath_gain_requires_separation: "「하모닉 분리」를 켜야 브레스 게인을 편집할 수 있습니다",
     hifigan_tension_requires_separation: "「하모닉 분리」를 켜야 텐션을 편집할 수 있습니다",
     breath_gain_label: "브레스 게인",
     hifigan_tension_label: "텐션",
     formant_shift_label: "포먼트 시프트",
-    hifigan_volume_label: "볼륨",
     volume_label: "볼륨",
     dyn_label: "다이내믹",
     dyn_analysis_pending: "다이내믹스 베이스라인 분석 중...",
     pan_label: "팬",
-    vslib_volume_label: "볼륨",
     vslib_synth_mode_label: "합성 모드",
-    vslib_pan_label: "팬",
     vslib_breathiness_label: "브레스",
     vslib_synth_mode_mono: "모노",
     vslib_synth_mode_mono_formant: "모노 (포먼트)",
@@ -617,19 +550,7 @@ export const koKR = {
     param_btn_formant: "FRM",
     param_btn_tension: "TEN",
     param_btn_breathiness: "BNS",
-    breath_state_on: "브레스 켜짐",
-    breath_state_off: "브레스 꺼짐",
-    points_help: "더블 클릭으로 추가 · 드래그로 이동 · 우클릭으로 삭제",
-    points_count: "포인트 수",
-    common_selected: "선택됨",
 
-    status_last_result: "마지막 API 결과",
-    status_device: "장치",
-    status_model: "모델",
-    status_audio: "오디오",
-    status_synth: "합성",
-    status_playing: "재생 중",
-    status_position: "재생 위치",
     status_ready: "준비됨",
     status_failed: "실패",
     status_import_audio_failed: "오디오 가져오기 실패",
@@ -715,14 +636,8 @@ export const koKR = {
     unsaved_changes_exit_desc: "종료하기 전에 저장하시겠습니까?",
     unsaved_changes_discard: "저장 안 함",
 
-    menu_export_separated: "트랙별 오디오 내보내기",
-
     status_error_prefix: "오류",
     clipboard_error_empty: "클립보드에 붙여넣을 내용이 없습니다",
-    status_target_original: "원본",
-    status_target_synthesized: "합성",
-    status_target_none: "대기 중",
-    dropped_audio_imported: "드롭된 미디어를 가져왔습니다",
     import_audio_failed: "미디어 가져오기에 실패했습니다",
     status_project_version_confirmation: "프로젝트 파일 버전 확인",
 
@@ -761,9 +676,7 @@ export const koKR = {
     enable_group: "그룹 활성화",
     common_none: "없음",
     common_bpm: "BPM",
-    common_repeat: "반복",
     common_compose: "컴포즈",
-    status_ok: "정상",
     status_na: "—",
     clip_mute: "음소거",
     clip_unmute: "음소거 해제",
@@ -845,7 +758,6 @@ export const koKR = {
     clip_take_explode: "테이크를 개별 클립으로 분리",
     clip_take_rename: "테이크 이름 바꾸기",
     clip_take_active_mark: "●",
-    clip_take_add_hint: "더 많은 테이크 관리 기능은 Reaper 멀티 테이크 가져오기와 함께 제공됩니다",
     fade_in: "페이드 인",
     fade_out: "페이드 아웃",
     show_secondary_param: "보조 파라미터 오버레이 표시",
@@ -854,9 +766,7 @@ export const koKR = {
     secondary_overlay_tooltip_hidden: "보조 파라미터 오버레이: 숨김\n클릭하여 표시",
     breath_tooltip_on: "하모닉 분리: 켜짐\n클릭하여 끄기",
     breath_tooltip_off: "하모닉 분리: 꺼짐\n클릭하여 켜기",
-    onnx_compile_required:
-        "ONNX 모델이 컴파일되지 않았습니다. 실행: cargo tauri dev --features onnx",
-    onnx_unavailable_label: " (사용 불가)",
+
     common_solo: "솔로",
     status_analyzing_pitch: "피치 분석 중",
     status_analyzing_waveform: "파형 분석 중",
@@ -920,7 +830,6 @@ export const koKR = {
     silence_double_click_reset: "파라미터를 더블클릭하면 기본값으로 재설정됩니다",
     silence_applying: "적용 중...",
     ctx_close_gaps: "간격 닫기",
-    ctx_close_gaps_disabled: "클릭한 위치 이후에 이 트랙에 클립이 없습니다",
     ctx_normalize: "노멀라이즈",
     ctx_edit_rate: "재생 속도 편집...",
     ctx_reverse: "역재생",
@@ -936,13 +845,10 @@ export const koKR = {
     recapture_missing_media_title: "누락 미디어 다시 가져오기",
     recapture_missing_media_desc:
         "다음 미디어 파일이 누락되었거나 내용이 변경되었습니다. 항목을 무시하거나, '수정됨' 파일은 원래 경로에서 다시 로드하고, '삭제됨' 파일은 다른 파일로 교체할 수 있습니다.",
-    recapture_missing_media_modified_desc: "다음 미디어 파일이 외부에서 수정되었습니다.",
-    recapture_missing_media_deleted_desc: "다음 미디어 파일이 이동 또는 삭제되었습니다.",
     recapture_missing_media_reload: "다시 로드",
     recapture_missing_media_replace: "교체",
     recapture_missing_media_reload_all: "모두 다시 로드",
     recapture_missing_media_refresh: "새로 고침",
-    recapture_missing_media_reset: "모두 초기화",
     recapture_missing_media_reset_all: "모두 초기화",
     recapture_missing_media_reset_item: "초기화",
     recapture_missing_media_ignore: "무시",
@@ -957,7 +863,6 @@ export const koKR = {
     recapture_missing_media_item_failed: "처리 실패",
     recapture_missing_media_summary:
         "무시 {ignored} · 다시 로드 {reloaded} · 교체 {replaced} · 전체 {total}",
-    recapture_missing_media_reload_dialog_title: '"{name}"의 대체 파일 선택',
     recapture_missing_media_replace_dialog_title: '"{name}"의 대체 파일 선택',
     recapture_missing_media_reloaded_path: "다시 로드 경로:",
     recapture_missing_media_replaced_path: "교체 경로:",
@@ -992,12 +897,6 @@ export const koKR = {
     save_version_conflict_save_as: "다른 이름으로 저장...",
     save_version_conflict_continue: "계속 저장",
 
-    fade_curve_linear: "직선",
-    fade_curve_sine: "사인",
-    fade_curve_exponential: "지수",
-    fade_curve_logarithmic: "로그",
-    fade_curve_scurve: "S 커브",
-
     // REAPER 일곱 프리셋 페이드 형태(순서는 timeline/reaperFade.ts FADE_PRESETS와 일치).
     fade_shape_linear: "직선",
     fade_shape_fast_start: "패스트 스타트",
@@ -1015,8 +914,6 @@ export const koKR = {
     clip_pitch_drag_tooltip: "피치 오프셋: {delta} ct",
     track_change_color: "트랙 색상 변경",
     track_clone: "트랙 복제",
-    track_copy: "트랙 복사",
-    track_cut: "트랙 잘라내기",
     color_blue: "파랑",
     color_purple: "보라",
     color_green: "초록",
@@ -1029,7 +926,6 @@ export const koKR = {
 
     progress_est_remaining: "약 {time} 남음",
     progress_cancel: "취소",
-    pitch_analyzing_clips: "분석 중{clipName}{clipCount} {percentage}%",
     algo_label: "알고리즘",
     algo_label_short: "알고",
     algo_unavailable_suffix: " (사용 불가)",
@@ -1038,16 +934,11 @@ export const koKR = {
     child_formant_mode: "포먼트 차",
     child_pitch_offset_cents_label: "자식 트랙 센트 차",
     child_pitch_offset_degrees_label: "자식 트랙 도수 차",
-    child_formant_offset_cents_label: "자식 트랙 포먼트 차",
     child_pitch_root_option: "피치 (트랙 그룹)",
     child_pitch_cents_option: "센트 차 (현재 서브트랙)",
     child_pitch_degrees_option: "도수 차 (현재 서브트랙)",
     child_formant_root_option: "포먼트 시프트 (트랙 그룹)",
     child_formant_offset_option: "포먼트 차 (현재 서브트랙)",
-    child_pitch_offset_cents_short: "센트",
-    child_pitch_offset_degrees_short: "도수",
-    child_formant_offset_cents_short: "센트",
-    aria_loading: "로딩 중",
     export_dialog_sample_rate: "샘플레이트",
     export_dialog_bit_depth: "비트 심도",
     export_dialog_error_invalid_sample_rate: "샘플레이트가 올바르지 않습니다.",
@@ -1059,8 +950,6 @@ export const koKR = {
     kb_dialog_desc: "단축키를 클릭하여 재설정. Esc 키로 취소.",
     kb_press_key: "키를 누르세요...",
     kb_add_binding: "다른 단축키 추가",
-    kb_reset_default: "기본값으로 복원",
-    kb_reset_all: "모두 기본값으로 복원",
     kb_close: "닫기",
     kb_conflict_msg: "이 단축키가 다음 시나리오의 기존 작업과 충돌합니다:",
     kb_conflict_override: "덮어쓰기",
@@ -1240,7 +1129,6 @@ export const koKR = {
     midi_import_position_start: "프로젝트 시작",
     midi_import_position_playhead: "재생 헤드",
     midi_import_position_selection: "선택 범위",
-    midi_select_track: "트랙 선택",
     midi_select_all: "전체 선택",
     midi_deselect_all: "전체 해제",
     midi_multi_track_merge: "멀티트랙 병합",
@@ -1249,7 +1137,6 @@ export const koKR = {
     midi_track_range: "범위: {min} – {max}",
     midi_no_tracks: "MIDI 파일에 노트가 있는 트랙이 없습니다",
     midi_importing: "가져오는 중...",
-    midi_import_success: "MIDI를 가져왔습니다: {notes}개 노트, {frames} 프레임",
     midi_import_failed: "MIDI 가져오기에 실패했습니다",
     midi_file_not_found: "MIDI 파일을 찾을 수 없습니다",
     midi_no_notes: "선택한 트랙에 노트가 없습니다",
@@ -1274,8 +1161,6 @@ export const koKR = {
 
     // MIDI clipboard errors
     midi_clipboard_read_failed: "클립보드에서 MIDI를 읽지 못했습니다",
-    midi_clipboard_empty: "클립보드에서 Standard MIDI File을 찾을 수 없습니다",
-    midi_clipboard_parse_failed: "클립보드의 MIDI 데이터를 해석하지 못했습니다",
 
     // MIDI 가져오기 대상 선택
     midi_import_target: "가져오기 대상",
@@ -1303,7 +1188,6 @@ export const koKR = {
     ripple_mode_off: "끄기",
     ripple_mode_track: "트랙 단위",
     ripple_mode_all: "전체 트랙",
-    split_transition: "분할 트랜지션",
     split_transition_tooltip: "분할 트랜지션 (우클릭하여 상세 설정)",
     split_transition_settings_title: "분할 트랜지션 설정",
     split_transition_settings_desc:
@@ -1388,13 +1272,6 @@ export const koKR = {
     grid_note_triplet: "셋잇단",
 
     // 스냅 간격용 그리드 음표 이름 (컨텍스트 메뉴)
-    grid_snap_whole: "온음표",
-    grid_snap_half: "2분음표",
-    grid_snap_quarter: "4분음표",
-    grid_snap_8th: "8분음표",
-    grid_snap_16th: "16분음표",
-    grid_snap_32nd: "32분음표",
-    grid_snap_64th: "64분음표",
 
     // 타임라인 시간 표시
     time_display: "시간 표시",
@@ -1420,24 +1297,10 @@ export const koKR = {
     copy_playhead_time: "재생 헤드 시간 복사",
     sync_timeline_view: "타임라인 뷰 동기화",
     sync_timeline_view_tooltip: "파라미터 에디터의 가로 위치와 확대/축소를 타임라인에 동기화합니다",
-    grid_snap_dotted_half: "점2분음표",
-    grid_snap_dotted_quarter: "점4분음표",
-    grid_snap_dotted_8th: "점8분음표",
-    grid_snap_dotted_16th: "점16분음표",
-    grid_snap_dotted_32nd: "점32분음표",
-    grid_snap_dotted_64th: "점64분음표",
-    grid_snap_triplet_half: "셋잇단 2분음표",
-    grid_snap_triplet_quarter: "셋잇단 4분음표",
-    grid_snap_triplet_8th: "셋잇단 8분음표",
-    grid_snap_triplet_16th: "셋잇단 16분음표",
-    grid_snap_triplet_32nd: "셋잇단 32분음표",
-    grid_snap_triplet_64th: "셋잇단 64분음표",
 
     // 도구 모드
-    common_line: "직선",
 
     // 피치 스냅 설정
-    pitch_snap_settings_title: "피치 스냅 설정",
     quantize_unit: "퀀타이즈 단위",
     quantize_semitone: "반음",
     quantize_scale: "스케일",
@@ -1501,14 +1364,8 @@ export const koKR = {
 
     // Scale highlight setting
     scale_highlight: "스케일 하이라이트",
-    scale_highlight_always: "항상",
-    scale_highlight_only_when_snapping: "스냅 시만",
-    scale_highlight_off: "끄기",
 
     // 수정 키 리네임
-    kb_modifier_toggle_snap: "자유 이동 (클립 드래그 중 누르기)",
-    hint_toggle_snap:
-        "클립을 드래그하는 동안 Shift를 누르면 자유 이동이 되고, 평소에는 그리드에 스냅됩니다",
 
     // 파일 브라우저 확장
     fb_regex: "정규식",
@@ -1577,8 +1434,6 @@ export const koKR = {
     fb_new_folder_default: "새 폴더",
     fb_rename_failed: "이름을 바꾸지 못했습니다",
     fb_create_folder_failed: "폴더를 만들지 못했습니다",
-    fb_name_invalid: "이름에 사용할 수 없는 문자가 있습니다",
-    fb_name_exists: "같은 이름의 항목이 이미 있습니다",
     fb_delete_confirm_title: "항목 삭제",
     fb_delete_confirm_message:
         "{count}개 항목을 휴지통으로 이동할까요?|{count}개 항목을 휴지통으로 이동할까요?",
@@ -1624,7 +1479,6 @@ export const koKR = {
     search_settings_title: "검색 및 일치...",
     search_settings_desc:
         "병음, 로마자, 한국어 초성 일치. 파일 탐색기, 빠른 검색, 단축키, 글꼴 목록에 적용됩니다.",
-    search_settings_hint: "병음, 로마자, 한국어 초성 일치 설정입니다. 끄면 문자열만 일치합니다.",
 
     // 편집 메뉴 새 항목
     menu_deselect: "선택 해제",
@@ -1642,26 +1496,13 @@ export const koKR = {
     menu_convert_dyn_to_volume: "볼륨으로 변환",
 
     // 센트 이조 다이얼로그
-    transpose_cents_title: "센트 단위로 조바꿈",
-    transpose_cents_amount: "조바꿈 정도",
-    transpose_cents_unit: "센트",
 
     // 도수 이조 다이얼로그
-    transpose_degrees_title: "도 단위로 조바꿈",
-    transpose_degrees_scale: "스케일",
     transpose_degrees_amount: "조바꿈 정도",
-    transpose_degrees_unit: "도",
 
     // 피치 설정 다이얼로그
-    set_pitch_title: "피치 설정",
-    set_pitch_note: "음이름",
-    set_pitch_octave: "옥타브",
-    set_pitch_cents: "센트",
 
     // 스무딩 다이얼로그
-    smooth_title: "스무딩",
-    smooth_strength: "스무딩 강도",
-    average_strength: "평균 강도",
 
     // 비브라토 추가 다이얼로그
     vibrato_attack: "페이드 인",
@@ -1670,7 +1511,6 @@ export const koKR = {
     vibrato_unit_cents: "센트",
 
     // 퀀타이즈 다이얼로그
-    quantize_title: "퀀타이즈",
 
     // 평균 퀀타이즈 다이얼로그
     mean_quantize_title: "평균 퀀타이즈",
@@ -1704,23 +1544,10 @@ export const koKR = {
 
     // 다이얼로그 필드 라벨
     dlg_midi_note: "MIDI 노트",
-    clip_type_midi: "음높이 참조 클립",
     clip_type_midi_prefix: "[음높이 참조]",
-    dlg_strength: "스무딩 강도",
     dlg_smoothness: "스무딩 강도",
     dlg_average_strength: "평균 강도",
-    dlg_depth_cents: "진폭 (센트)",
-    dlg_amplitude_cents: "진폭 (센트)",
-    dlg_amplitude: "진폭",
-    dlg_rate_hz: "속도 (Hz)",
-    dlg_note_name: "음이름",
-    dlg_octave: "옥타브",
     dlg_cents: "센트",
-    dlg_cents_offset: "센트 오프셋",
-    dlg_period_ms: "주기 (ms)",
-    dlg_attack_ms: "어택 (ms)",
-    dlg_release_ms: "릴리스 (ms)",
-    dlg_phase_deg: "위상 (°)",
     dlg_value: "값",
 
     // 편집 메뉴 복사/잘라내기/붙여넣기
@@ -1732,14 +1559,12 @@ export const koKR = {
     pitch_snap_settings: "피치 스냅 설정",
 
     // 키바인딩 힌트
-    kb_hint_recording: "좌클릭으로 '없음' 설정. 우클릭으로 기본값 복원.",
 
     // 키바인딩 None
     kb_none: "없음",
     // Multi-file import (merged)
     import_across_time: "시간을 가로질러 추가",
     import_dialog_title: "파일 가져오기",
-    import_button: "가져오기",
     import_across_tracks: "트랙 간 추가",
     import_as_takes: "테이크로 추가",
     folder_import_title: "폴더 가져오기",
@@ -1784,8 +1609,7 @@ export const koKR = {
     menu_gpu_auto_select: "자동 선택",
     menu_run_benchmark: "벤치마크 실행...",
     menu_background_prerender: "백그라운드 사전 렌더링",
-    menu_background_prerender_desc:
-        "편집 후 즉시 백그라운드에서 사전 렌더링을 시작합니다. 재생 시 이미 렌더링된 부분을 바로 사용할 수 있습니다.",
+
     options_auto_reload_modified_media: "수정된 미디어 파일 자동 다시 로드",
     options_loop_new_clips: "새 클립에 루프 사용",
 
@@ -1793,7 +1617,6 @@ export const koKR = {
     menu_render_cache_manager: "렌더 캐시 관리...",
     menu_channel_import_settings: "가져오기 채널 처리...",
     menu_pen_input_settings: "포인터 및 펜 입력...",
-    menu_clear_render_cache: "렌더 캐시 지우기",
     render_cache_dialog_title: "렌더 캐시 관리",
     render_cache_dialog_desc:
         "합성된 클립은 캐시 폴더에 저장되어 프로젝트를 다시 열 때 그대로 재사용되므로 다시 렌더링할 필요가 없습니다.",
@@ -1809,21 +1632,12 @@ export const koKR = {
     render_cache_export_reuse: "오디오 내보내기 시 렌더 캐시 재사용(재합성 생략)",
     render_cache_max_size: "사용량 상한",
     render_cache_max_size_hint: "0 = 제한 없음",
-    render_cache_unlimited: "제한 없음",
     render_cache_max_age: "미사용 기간 초과 시 정리",
     render_cache_max_age_hint: "0 = 기간 기반 정리 안 함",
-    render_cache_never: "정리 안 함",
-    render_cache_days: "{n}일",
     render_cache_days_unit: "일",
     render_cache_min_clip: "클립 길이 하한",
     render_cache_seconds_unit: "초",
     render_cache_min_entry: "클립 크기 하한",
-    render_cache_skip_disabled: "캐시 꺼짐",
-    render_cache_skip_empty: "빈 클립",
-    render_cache_skip_too_short: "길이 하한 미만",
-    render_cache_skip_too_small: "크기 하한 미만",
-    render_cache_skip_too_large: "단일 상한 초과",
-    render_cache_skip_low_disk_space: "디스크 공간 부족",
     render_cache_max_entry: "항목당 상한",
     render_cache_min_free_disk: "디스크 여유 확보",
     render_cache_write_mode: "쓰기 시점",
@@ -1896,7 +1710,6 @@ export const koKR = {
     recording_settings_desc: "녹음 입력원, 출력 경로 및 캡처 옵션을 구성합니다.",
     recording_device: "녹음 장치",
     recording_device_default: "시스템 기본값",
-    recording_system_sound: "시스템 사운드(루프백)",
     recording_refresh_devices: "새로 고침",
     recording_sample_rate: "샘플 레이트",
     recording_bit_depth: "비트 심도",
@@ -1906,14 +1719,12 @@ export const koKR = {
     recording_input_gain: "입력 게인",
     recording_countdown: "카운트다운",
     recording_countdown_unit: "초",
-    recording_countdown_none: "없음",
     recording_monitor_enabled: "녹음 중 입력 모니터링",
     recording_monitor_gain: "모니터 게인",
     recording_auto_normalize: "가져온 후 자동 정규화",
     recording_auto_stop_selection: "선택 클립 끝에서 자동 정지",
     recording_path_template: "출력 경로 템플릿",
     recording_save_settings: "설정 저장",
-    recording_toggle_title: "녹음 시작/중지(마우스 오른쪽 클릭으로 설정)",
     recording_tooltip_start: "녹음 시작(마우스 오른쪽 클릭으로 빠른 설정)",
     recording_tooltip_stop: "녹음 중지(마우스 오른쪽 클릭으로 빠른 설정)",
     recording_tooltip_cancel_countdown: "녹음 카운트다운 취소(마우스 오른쪽 클릭으로 빠른 설정)",
@@ -1976,7 +1787,6 @@ export const koKR = {
 
     // ── 작업 기록(실행 취소/다시 실행 이력) ─────────────────────
     undo_history_title: "작업 기록",
-    undo_history_close: "닫기",
     undo_history_jump: "이 상태로 이동",
     undo_history_current: "현재 상태",
     undo_history_count: "총 {count}개 (최대 100개 보관)",
@@ -2121,8 +1931,7 @@ export const koKR = {
     vibrato_io_newer_version: "이 파일은 더 새 버전의 앱에서 작성되었습니다.",
     vibrato_io_read_failed: "프리셋 파일을 읽을 수 없습니다.",
     vibrato_io_empty: "파일에 프리셋이 없습니다.",
-    vibrato_io_truncated:
-        "프리셋 {count}개만 더 수용할 수 있어 나머지는 건너뛰었습니다.|프리셋 {count}개만 더 수용할 수 있어 나머지는 건너뛰었습니다.",
+
     vibrato_audition_stop: "들어보기 중지",
     menu_vibrato_presets: "비브라토 프리셋 관리...",
     vibrato_manager_new: "새로 만들기",
