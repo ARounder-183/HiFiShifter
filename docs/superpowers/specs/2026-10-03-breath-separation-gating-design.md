@@ -1,5 +1,11 @@
 # 气声/张力对「气声分离」开关的依赖门禁
 
+> **修订记录（重要）**：初稿只做了「UI 置灰 + 禁止编辑」与决策侧判定，
+> **漏掉了需求 3 的合成侧落地**。经核对发现，真正施加张力的路径
+> （`renderer/chain.rs`）用的是**自己的一份**张力判定，并不经过共享实现；
+> 且 `breath_gain` 在分离路径内被**无条件**读取。因此「开关关闭 ⇒ 不参与合成」
+> 需要在**唯一构造点剥离曲线**才能真正成立。详见 §3.3 与 §4.3。
+
 ## 1. 背景与动机
 
 本次改动（`feature/hifisampler-param-parity`）把 HiFiShifter 的张力实现从
@@ -20,7 +26,9 @@
 
 1. `breath_enabled` 关闭时，**气声音量**与**张力**两个参数药丸**置灰、不可选中**。
 2. 它们的**曲线仍然可见**（用户能看到自己画过什么），但**无法编辑**。
-3. 它们**不参与合成**（关闭时彻底不生效）。
+3. 它们**不参与合成**：关闭时在渲染链里彻底不生效 —— 不是"画了但不听"，
+   而是**处理器根本收不到这两条曲线**。这一条是需求的核心，且**不能靠 UI
+   或决策侧判定实现**（见 §4.3）。
 4. 已有工程中「画了张力/气声但没开开关」的情况，**自动置位开关**以免丢失听感。
 
 ### 明确不做
@@ -50,19 +58,27 @@
 **没有**绕开 `editParam` 的独立曲线编辑入口 —— 因此「禁止编辑」只需保证
 `editParam` 不会停留在被禁用的参数上。
 
-### 3.3 张力活跃判定已有单一实现（改一处即全一致）
+### 3.3 张力活跃判定存在**两份**实现（初稿判断有误，已更正）
 
-`pitch_editing::hifigan_tension_active_for_clip` 有 4 个调用点，全部经由它：
+共享实现 `pitch_editing::hifigan_tension_active_for_clip` 有 4 个调用点：
 
-| 调用点 | 作用 |
-|---|---|
-| `audio/mixdown.rs:1057` | 导出混音 |
-| `pitch_editing.rs:416` | 是否由处理器内部承担时间拉伸 |
-| `pitch_editing.rs:1742` | 预渲染判定 |
-| `pitch_editing.rs:2244` | 预渲染判定（另一分支） |
+| 调用点 | 作用 | 属于 |
+|---|---|---|
+| `audio/mixdown.rs:1057` | 导出混音 | 决策侧 |
+| `pitch_editing.rs:416` | 是否由处理器内部承担时间拉伸 | 决策侧 |
+| `pitch_editing.rs:1742` | 预渲染判定 | 决策侧 |
+| `pitch_editing.rs:2244` | 预渲染判定（另一分支） | 决策侧 |
 
-在该函数内加入开关判据，四处**自动**一致，无需逐个修改 —— 这正是把门禁放在
-这里的理由（若分散到各调用点，必然漂移）。
+**但这 4 处都是"决策侧"** —— 决定是否预渲染、是否跳过外部拉伸、能否复用缓存。
+它们**都不负责真正施加张力**。
+
+真正施加张力的路径在 `renderer/chain.rs`，而它**自己算了一遍** `tension_active`
+（`chain.rs:316`，见 §4.3 泄漏路径 A），没有调用上面的共享实现。
+`apply_rd_tension` 的唯一调用点是 `chain.rs:440`。
+
+> **教训（写下来避免重犯）**：看到"某判定有 4 个调用点"就推断"改一处即全一致"
+> 是错的 —— 必须先确认**消费侧**（真正起作用的地方）是否也走同一函数。
+> 本例中消费侧另有一份实现，初稿因此漏掉了关键泄漏路径。
 
 ### 3.4 参数默认值（迁移判据用）
 
@@ -131,24 +147,85 @@ gatedBySeparation(paramId) =
    这也意味着回退是**收敛的**（不会反复 dispatch）：判据只看
    `editParam` 与开关状态，回退到 `pitch` 后判据不再成立。
 
-### 4.3 后端严格跟随
+### 4.3 后端严格跟随（★ 需求 3 的真正落点）
 
-1. **`hifigan_tension_active_for_clip` 加入开关判据**
+需求 3 是「**不参与合成**」。**仅加 UI 门禁与 `hifigan_tension_active_for_clip`
+的开关判定是不够的** —— 初稿在此处判断有误，实际核对后存在**两条泄漏路径**，
+必须一并堵住。
 
-   在该函数开头增加：开关关闭 ⇒ 直接返回 `false`。这样 §3.3 的四个调用点
-   一次性对齐，且与前端 UI 语义完全一致。
+#### 泄漏路径 A：`renderer/chain.rs` 的本地张力判定（第 2 份实现）
 
-2. **`renderer/chain.rs` 的分离门禁**
+`chain.rs:316` **自己算了一遍** `tension_active`（未调用 §3.3 的共享实现）：
 
-   现状 `needs_separation = tension_active || separation_switch_on`。
-   若张力活跃已含开关判定（上一步），则此式等价于 `separation_switch_on`；
-   保留显式写法并更新注释，因为「张力活跃」在别处（如 mixdown）仍是有意义的概念，
-   而分离路径的进入条件应读作"开关开启"。
+```rust
+let tension_active = tension_curve.is_some_and(|c| {
+    c.iter().any(|v| v.is_finite() && v.abs() > TENSION_ACTIVE_EPSILON)
+});
+let needs_separation = tension_active || separation_switch_on;   // ← 开关关闭也可能为 true
+...
+let tensioned_harmonic = Self::apply_rd_tension(&harmonic, cc, tension_curve);  // ← 无条件施加
+```
 
-3. **`breath_gain` 的生效条件**
+于是「开关关 + 张力曲线非默认」时 `needs_separation` 仍为 `true`，
+`process_breath` 被调用，张力**照常施加**。
 
-   非分离路径本就不读 `breath_gain`（噪声支不存在），故无需额外改动；
-   但要确认不存在"未分离却按 breath_gain 处理谐波"的旧逻辑残留（现状无）。
+> 修正之前的错误结论：初稿称"在 `hifigan_tension_active_for_clip` 加判据，
+> 四个调用点自动一致"。这只覆盖 `mixdown.rs` 与三个 `pitch_editing.rs` 调用点，
+> **不覆盖 `chain.rs` 这条真正施加张力的路径** —— 而它恰恰是关键路径。
+
+#### 泄漏路径 B：`breath_gain` 在分离路径内被无条件读取
+
+`process_breath` 内 `breath_curve` 直接读 `cc.extra_curves["breath_gain"]`
+（`chain.rs:489`），**不看开关**。只要因任何原因进入分离路径（含泄漏路径 A），
+用户画的 `breath_gain` 曲线就会被真实施加。
+
+（`snapshot.rs:640` 与 `mixdown.rs:1077` 的**预览/导出混音**侧已有开关 gate，
+但链内这条路径没有。）
+
+#### 落地方式：集中在唯一构造点剥离
+
+`ClipProcessContext` 全仓库**只有一处**构造（`pitch_editing.rs:2052`），
+这是理想的收口位置。开关关闭时，在此处把两个被门禁的曲线键**从下发的
+`extra_curves` 中剔除**：
+
+```
+if !extra_param_enabled(extra_params, "breath_enabled") {
+    // 需求 3：开关关闭时这两个参数不参与合成。
+    // 剥掉键而非传零值：曲线缺失是"未编辑"的既有语义（默认值 1.0 / 0.0），
+    // 传零值会让 breath_gain 变成"噪声全静音"，与"不参与合成"不同。
+    ctx_curves.remove("breath_gain");
+    ctx_curves.remove("hifigan_tension");
+}
+```
+
+**为什么在构造点剥离、而不是在每个消费点判断**：
+
+- `ClipProcessContext` 只有一处构造 ⇒ 一处改动同时覆盖
+  `apply_rd_tension`（张力）与 `process_breath` 的 `breath_gain` 混音，
+  以及未来任何新增的消费点；
+- 避免再次出现 §3.3 那种"以为有单一实现、实际有第 2 份"的漂移；
+- 语义清晰：**下发给处理器的就是"本次真正生效的参数"**。
+
+只有在 `extra_curves` 确需修改时才克隆（关闭开关是少数情况），
+开关开启时保持借用、零分配。
+
+#### 同时仍要做的两件事
+
+1. **`chain.rs` 消除第 2 份实现**：改为调用 §3.3 的共享判定
+   （或至少加入开关判据），使"张力是否活跃"全仓库单一来源。
+   这既修掉泄漏路径 A，也消除一个既有的重复实现隐患。
+2. **`needs_separation` 语义收紧**：剥离曲线后此式自然等价于
+   `separation_switch_on`，但要显式改写并更新注释 —— 让"进入分离路径"
+   读作"开关开启"，而不是依赖"张力恰好被剥离"这一间接结果。
+
+#### 与 `hifigan_tension_active_for_clip` 的关系
+
+该函数仍**需要**加入开关判据：它服务的是**决策侧**（是否预渲染、是否跳过外部
+拉伸、导出能否复用缓存）。若不改，开关关闭时 `mixdown.rs:1057` 会因
+`clip_tension_active == true` 而放弃缓存复用，做无谓的重渲染 —— 结果正确但白费。
+
+即：**决策侧**用 `hifigan_tension_active_for_clip`（§4.3 第 1 点），
+**合成侧**用构造点剥离（本节）。两者都需要，且判据同源。
 
 4. **迁移：`migrate_legacy_breath_separation`**
 
@@ -186,10 +263,15 @@ gatedBySeparation(paramId) =
    │        曲线数据本身不动
    │
    └─ 后端：extra_param_enabled("breath_enabled") == false
-            ├─ hifigan_tension_active_for_clip() → false
-            │     └─ 4 个调用点全部认为"无张力"（不预渲染、不导出张力）
-            └─ renderer::chain needs_separation → false
-                  └─ 不跑 HNSEP；张力曲线不参与合成
+            ├─ 【决策侧】hifigan_tension_active_for_clip() → false
+            │     └─ 4 个调用点认为"无张力"（不预渲染、不跳过拉伸、可复用缓存）
+            └─ 【合成侧】ClipProcessContext 构造点剥离 breath_gain / hifigan_tension
+                  ├─ chain.rs: 收不到张力曲线 → apply_rd_tension 原样返回谐波
+                  ├─ chain.rs: 收不到 breath_gain → 噪声按默认 1.0 混回
+                  └─ needs_separation → false → 不跑 HNSEP
+
+   两路都必须做：只做决策侧 → chain.rs 仍会施加张力（泄漏路径 A）；
+   只做合成侧 → 决策侧白跑重渲染（结果对但浪费）。
 
 用户重新开启开关
    └─ 曲线数据仍在 → 立即可编辑、立即生效（无需重建任何缓存）
@@ -221,6 +303,33 @@ gatedBySeparation(paramId) =
    - clip 级覆盖同样触发轨道置位
    - 非有限值曲线不触发置位
 4. `renderer::chain`：开关关闭时 `needs_separation == false`。
+5. **合成侧剥离（需求 3 的核心断言）**：
+   - 开关关闭 + `hifigan_tension` 曲线非默认 ⇒ 构造出的 `ClipProcessContext`
+     的 `extra_curves` **不含** `hifigan_tension`
+   - 开关关闭 + `breath_gain` 曲线非默认 ⇒ `extra_curves` **不含** `breath_gain`
+   - 开关**开启** ⇒ 两个键**原样保留**（不得误剥）
+   - 开关关闭 + 曲线存在 ⇒ `formant_shift_cents` **仍保留**（不受门禁）
+   - 剥离是"键缺失"而非"传零值"：`breath_gain` 缺失的既有语义是默认增益 1.0，
+     故断言应检查键不存在，而非值为 0
+6. **端到端（最重要的一条）**：证明开关关闭时张力确实没进合成。
+
+   对照必须是**同为开关关闭**下的两次渲染，二者应**逐样本一致**：
+
+   | | 开关 | 张力曲线 |
+   |---|---|---|
+   | 甲 | 关闭 | +80（明显非默认） |
+   | 乙 | 关闭 | 不存在 |
+
+   若甲 ≠ 乙，说明张力仍在起作用（即泄漏路径 A 未被堵住）。
+
+   > **一个容易写错的对照**（初稿在此处写错，记录下来）：不能拿
+   > "开关关闭 + 张力 +80" 去比 "开关**开启** + 曲线全 0"。后者会进入分离路径，
+   > 而 `breath_gain` 全 0 会命中 `gain_is_zero` 提前返回（丢弃噪声支），
+   > 与前者（非分离路径，噪声默认 1.0 混回）**本就不同** ——
+   > 那样断言失败反映的是路径差异，而非张力泄漏，属于无效对照。
+
+   同理，"开关关闭 + `breath_gain` 曲线非默认" 应与 "开关关闭 + 无 `breath_gain`
+   曲线" 逐样本一致。
 
 ### 前端
 
