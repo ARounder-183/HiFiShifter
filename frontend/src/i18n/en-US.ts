@@ -642,8 +642,6 @@ export const enUS = {
     tension_label: "Tension (0-1)",
     breath_mode_label: "Breath",
     breath_separation_label: "Harmonic Separation",
-    breath_separation_tooltip:
-        "Split the clip into harmonic and noise parts (HNSEP).\nAdds rendering cost: the first enable runs a separation pass over each clip, which can take a while.\nWhile off, HNSEP is skipped entirely and neither Breath Gain nor Tension has any effect.\nRequired by both: Breath Gain sets how much noise is mixed back, Tension reshapes only the harmonic part.",
     separation_required_tooltip:
         "Unavailable: turn on Harmonic Separation first. Breath Gain and Tension both depend on it.",
     breath_gain_label: "Breath Gain",

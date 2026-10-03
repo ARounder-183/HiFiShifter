@@ -589,8 +589,6 @@ export const koKR = {
     tension_label: "텐션 (0-1)",
     breath_mode_label: "브레스",
     breath_separation_label: "하모닉 분리",
-    breath_separation_tooltip:
-        "오디오 블록을 하모닉과 노이즈로 분리합니다(HNSEP).\n렌더링 비용이 추가됩니다: 처음 켤 때 각 블록을 분리하므로 시간이 걸릴 수 있습니다.\n끄면 HNSEP를 전혀 실행하지 않으며 브레스 게인과 텐션 모두 아무 효과가 없습니다.\n둘 다 이에 의존합니다: 브레스 게인은 노이즈 성분의 혼합량을, 텐션은 하모닉 성분만 조형합니다.",
     separation_required_tooltip:
         "사용할 수 없음: 먼저 「하모닉 분리」를 켜세요. 브레스 게인과 텐션 모두 이에 의존합니다.",
     breath_gain_label: "브레스 게인",
