@@ -513,4 +513,27 @@ Phase 4（参数通道）在 Phase 2 验收后另写计划。代价：交付被�
 代价：若不先改这条边就硬搬，`pitch_analysis` 会带着整条 `commands` 链进内核，
 而 `commands` 有 196 处 `tauri::` —— 内核"不认识 Tauri"这条不变量当场破产。
 
+**Dev 13: Ruling: 内核的 39 模块生产代码闭包已经**完全不含 Tauri**。**
+做法是两条出口：
+① `HostServices`（后台渲染开关/消费标志/请求渲染）改掉了
+`pitch_analysis -> commands::playback` 那条边；
+② 新增内核的**进程级事件出口** `hifishifter_kernel::events::events()`，
+把 `pitch_analysis/{dyn_analysis,schedule}.rs` 与 `pitch_clip.rs` 里 5 处
+`state.app_handle` + `tauri::Emitter` 换掉（`pitch_clip` 的 `app_handle` 参数
+随之从签名里消失，调用点改由出口自己判断"宿主是否在线"）。
+实测（仅生产代码，从 `mixdown` 出发、排除 `audio_engine`）：**39 模块，碰 `tauri::` 的 0 个**。
+代价：若继续把 `AppHandle` 当参数往下传，内核模块会永远拖着 `tauri::`，
+"插件不把 WebView2 带进 DAW 进程"这条不变量就没有成立的一天。
+
+**Dev 14: Ruling: 大搬迁只剩两处机械阻塞，且都不需要新的设计决定。**
+① `formant_cache.rs` / `pitch_clip.rs` / `synth_clip_cache.rs` 里
+`crate::audio_engine::byte_budget_cache::…` → 改成 `crate::byte_budget_cache::…`
+（该模块早已在内核，app 根补一个再导出即可）；
+② `pitch_clip.rs` 的 3 处 `crate::audio_engine::types::EngineCommand` →
+把 `EngineCommand`（含 `StretchKey`/`AudioKey`）搬进内核；它依赖的 `TimelineState`
+与 `MetronomeConfig` 本来就在那 39 个模块里，随大搬迁一起走。
+另外确认 `renderer/chain.rs` 那条 `audio_engine::mix::sample_automation_curve`
+引用**在 `#[cfg(test)]` 里**（该文件 724 行起），生产代码不受影响。
+代价：无 —— 这两处都是纯机械改写，做错会当场编译失败。
+
 
