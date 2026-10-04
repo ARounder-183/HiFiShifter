@@ -308,3 +308,79 @@ describe("手势几何 → 映射的整链", () => {
         expect(map.factorAt?.(at(24))).toBeCloseTo(1, 6);
     });
 });
+
+/**
+ * ★ 回归：窗口内**没有任何帧可取到目标电平**时，上界必须返回 `null`（不钳制），
+ * 而不是 `0`（= 钳到静音）。
+ *
+ * 症状：拖拽延伸 / Slip 时，新揭示的帧"有峰值、但基线未知"，于是窗口内所有帧都
+ * 被跳过；旧实现让 `ceiling` 保持在初值 `0`，几何层据此把整列的上下包络都钳成 0
+ * （`limit = 0 × gCeil`），该列画成中心线上的一条细线 —— 看起来就像"这里还没加载
+ * 出来"，并随指针以离散步长一帧帧地向前啃。用户报告为"波形一截一截地加载"。
+ */
+describe("可达电平上界：无数据 ≠ 上界为 0", () => {
+    /** 有真实基线、目标与基线逐位相同（= 全部"未画"）。 */
+    function undrawnSource(): LoudnessAutomationSource {
+        const baseline = Array.from({ length: 48 }, (_, f) => 0.3 + 0.2 * Math.abs(Math.sin(f * 0.3)));
+        return source({
+            volume: new Array<number>(48).fill(1),
+            dynTarget: [...baseline],
+            dynBaseline: baseline,
+        });
+    }
+
+    it("★ 整窗落在新揭示区（基线未知）⇒ null，不得钳到 0", () => {
+        const src = undrawnSource();
+        // 右边延伸：`[0,16)` → `[0,32)`，帧 ≥16 的基线在旧快照里不可见。
+        const warp = warpOf([geo("c1", 0, 0.16)], [geo("c1", 0, 0.32)]);
+        for (const useLut of [false, true]) {
+            const map = amplitudeMap(src, () => warp);
+            if (useLut) map.beginWindow?.(at(0), at(47));
+            const ceiling = map.levelCeilingOverWindow?.(at(20), at(24));
+            expect(ceiling, `useLut=${useLut}`).toBeNull();
+        }
+    });
+
+    it("Slip 同理：被搬出旧覆盖范围的整窗 ⇒ null", () => {
+        const src = undrawnSource();
+        // 源窗口右移 0.04 s（4 帧）：clip 占帧 [0,24)，映射 g(f) = f + 4，
+        // 于是帧 ≥20 的基线落在旧覆盖范围 [0,24) 之外。
+        const warp = warpOf(
+            [geo("c1", 0, 0.24, { sourceStartSec: 0, sourceEndSec: 0.24 })],
+            [geo("c1", 0, 0.24, { sourceStartSec: 0.04, sourceEndSec: 0.28 })],
+        );
+        for (const useLut of [false, true]) {
+            const map = amplitudeMap(src, () => warp);
+            if (useLut) map.beginWindow?.(at(0), at(47));
+            expect(map.levelCeilingOverWindow?.(at(21), at(23)), `useLut=${useLut}`).toBeNull();
+        }
+        // 对照组：同一 clip 内靠前的帧仍在旧覆盖范围内 ⇒ 照常有上界。
+        const map = amplitudeMap(src, () => warp);
+        map.beginWindow?.(at(0), at(47));
+        expect(map.levelCeilingOverWindow?.(at(8), at(12))).not.toBeNull();
+    });
+
+    it("窗口内仍有已知帧时照常给出上界（修复不能变成「永不钳制」）", () => {
+        const src = undrawnSource();
+        const warp = warpOf([geo("c1", 0, 0.16)], [geo("c1", 0, 0.32)]);
+        const map = amplitudeMap(src, () => warp);
+        map.beginWindow?.(at(0), at(47));
+        const ceiling = map.levelCeilingOverWindow?.(at(8), at(20));
+        expect(ceiling).not.toBeNull();
+        expect(ceiling as number).toBeGreaterThan(0);
+    });
+
+    it("用户把目标**画成 0**（真静音）时仍然钳到 0 —— 与「无数据」区分开", () => {
+        // 目标全为 0：一个取值 0 的真实贡献，仍然应当把该窗钳成静音。
+        const src = source({
+            volume: new Array<number>(48).fill(1),
+            dynTarget: new Array<number>(48).fill(0),
+            dynBaseline: new Array<number>(48).fill(0.5),
+        });
+        for (const useLut of [false, true]) {
+            const map = amplitudeMap(src, () => null);
+            if (useLut) map.beginWindow?.(at(0), at(47));
+            expect(map.levelCeilingOverWindow?.(at(8), at(12)), `useLut=${useLut}`).toBe(0);
+        }
+    });
+});

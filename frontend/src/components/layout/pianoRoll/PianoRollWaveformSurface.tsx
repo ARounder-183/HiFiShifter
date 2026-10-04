@@ -748,6 +748,11 @@ export function makeLoudnessAmplitudeMap(
      * `max(vol)`；无音量数据时 vol 恒 1。任一曲线样本非有限即返回 null
      * （不钳制，保持既有行为）。
      *
+     * 【窗口内无任何帧可取到目标电平 ⇒ 返回 null（不钳制）】"没有数据"与
+     * "上界为 0"是两件不同的事：后者会把整列包络钳成零高度（看起来像没渲染）。
+     * 拖拽延伸 / Slip 时新揭示的帧正是"有峰值、但基线未知"。注意这与用户把目标
+     * **画成 0**（真静音）不同 —— 那是一个取值 0 的贡献，仍然钳到 0。
+     *
      * 【实现】窗口内的整数帧是**有限且连续**的，故直接查 level 表取区间最大值
      * （逐帧枚举的语义原样保留在表里，见 buildLut）；查表未覆盖时回退逐帧枚举。
      */
@@ -774,18 +779,31 @@ export function makeLoudnessAmplitudeMap(
             const iLo = first - lutStartFrame;
             const iHi = last - lutStartFrame;
             if (iLo >= 0 && iHi < lutCount) {
-                let ceiling = 0;
+                let ceiling = Number.NEGATIVE_INFINITY;
+                let contributed = false;
                 for (let i = iLo; i <= iHi; i += 1) {
                     const kind = lutLevelKind[i];
                     if (kind === LUT_LEVEL_SKIP) continue;
                     if (kind === LUT_LEVEL_NONFINITE) return null;
                     const level = lutLevel[i] as number;
                     if (level > ceiling) ceiling = level;
+                    contributed = true;
                 }
-                return ceiling;
+                // 窗口内**没有任何帧贡献** ⇒ 不钳制（`null`），而不是"钳到 0"。
+                // 【为什么这是必须的】把"无数据"当成"上界 = 0"会让几何层把整列的
+                // 上下包络都钳成 0（`limit = 0 × gCeil`）⇒ 该列画成中心线上的一条
+                // 细线，看起来像"这里还没渲染出来"。拖拽延伸/Slip 时新揭示的帧正是
+                // "有峰值但取不到目标电平"，于是它们会以离散步长一截一截地变成平线
+                // ——用户报告的"波形一截一截地加载"。`LUT_LEVEL_SKIP` 的既有注释
+                //（"该帧跳过，但也不使整体失效"）说的就是这个语义。
+                //
+                // 【与"画静音"的区别】用户把目标画成 0（真静音）时，该帧**贡献**了
+                // 一个 0：`contributed` 为真、`ceiling = 0`，仍然钳到 0 —— 语义不变。
+                return contributed ? ceiling : null;
             }
         }
-        let ceiling = 0;
+        let ceiling = Number.NEGATIVE_INFINITY;
+        let contributed = false;
         // 与查表路径同一份取样实现（含几何映射），否则两条路径会在窗口边界附近
         // 给出不同的上界，钳制与否随缩放跳变。
         const w = readWarp?.() ?? null;
@@ -803,8 +821,10 @@ export function makeLoudnessAmplitudeMap(
             );
             if (!Number.isFinite(level)) return null;
             if (level > ceiling) ceiling = level;
+            contributed = true;
         }
-        return ceiling;
+        // 同上：全无贡献 ⇒ 不钳制（不是"钳到 0"）。
+        return contributed ? ceiling : null;
     };
 
     const map = ((value: number, gain: number, timeSec: number | null) => {
