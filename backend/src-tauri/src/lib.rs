@@ -412,6 +412,8 @@ pub fn run() {
             if let Some(sink) = app_events::event_sink() {
                 let _ = state.events.set(sink);
             }
+            // 内核找宿主的出口（后台渲染开关 / 请求）。必须在任何内核 worker 启动前装配。
+            let _ = app_events::install_host_callbacks();
 
             // 将 app_handle 传递给 audio engine worker，使其能向前端推送事件。
             state.audio_engine.set_app_handle(app.handle().clone());

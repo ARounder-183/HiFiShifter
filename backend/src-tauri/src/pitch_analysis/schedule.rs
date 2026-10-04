@@ -435,10 +435,11 @@ pub fn maybe_schedule_pitch_orig(state: &AppState, root_track_id: &str) -> bool 
                     // 不预渲染、播放时才按需渲染）。
                     // 与 handle_clip_pitch_ready 的分流一致：仅自动渲染启用时
                     // 消费并补触发；禁用时保留标志给播放中的等待路径。
-                    should_request_bg_render = crate::commands::playback::AUTO_BG_RENDER_ENABLED
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                        && crate::commands::playback::BG_RENDER_PITCH_PENDING
-                            .swap(false, std::sync::atomic::Ordering::AcqRel);
+                    // 走内核的宿主出口，而不是直接够 `commands::playback`：
+                    // 后者会把整条 `commands` 链（196 处 `tauri::`）拖进内核闭包。
+                    should_request_bg_render = hifishifter_kernel::host::host()
+                        .auto_background_render_enabled()
+                        && hifishifter_kernel::host::host().take_pitch_pending_flag();
                 } else {
                     // 部分命中：仅当曲线内容确实发生变化时才更新并通知前端。
                     // 否则跳过 emit，防止"fetch -> emit -> fetch"无限循环。
@@ -471,9 +472,8 @@ pub fn maybe_schedule_pitch_orig(state: &AppState, root_track_id: &str) -> bool 
     }
     // 锁释放后再补触发（同上：收敛后渲染键已稳定）。
     if should_request_bg_render {
-        if let Some(app) = state.app_handle.get() {
-            crate::commands::playback::request_background_render(app);
-        }
+        // 宿主是否在线由回调实现自己判断（未安装时静默降级）。
+        hifishifter_kernel::host::host().request_background_render();
     }
 
     false // 同步完成，不?pending
