@@ -145,6 +145,13 @@ pub struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
+        Self::with_audio_engine(AudioEngine::new())
+    }
+}
+
+impl AppState {
+    /// 共享字段装配：产品Default仍建立真实引擎，测试fixture显式注入无设备引擎。
+    fn with_audio_engine(audio_engine: AudioEngine) -> Self {
         Self {
             timeline: std::sync::Mutex::new(TimelineState::default()),
             timeline_version: std::sync::atomic::AtomicU64::new(0),
@@ -175,7 +182,7 @@ impl Default for AppState {
             pitch_inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
             pitch_analysis_progress: std::sync::RwLock::new(None),
 
-            audio_engine: AudioEngine::new(),
+            audio_engine,
             transport_lock: std::sync::Mutex::new(()),
             recording: std::sync::Mutex::new(None),
             recording_starting: std::sync::atomic::AtomicBool::new(false),
@@ -183,6 +190,12 @@ impl Default for AppState {
             pending_startup_project_path: Mutex::new(None),
         }
     }
+}
+
+/// 仅命令状态回归使用的显式fixture；没有ambient模式，也不影响其他Default调用。
+#[cfg(test)]
+pub(crate) fn command_test_state_without_audio_output() -> AppState {
+    AppState::with_audio_engine(crate::audio_engine::command_test_support::detached_engine())
 }
 
 impl AppState {
@@ -709,7 +722,7 @@ impl AppState {
     }
 
     /// 标记工程已修改，并在首次变脏时更新窗口标题（添加 * 号）。
-    fn mark_project_dirty_and_retitle(&self) {
+    pub(crate) fn mark_project_dirty_and_retitle(&self) {
         let (name, was_clean) = {
             let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
             let was_clean = !p.dirty;

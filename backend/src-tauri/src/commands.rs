@@ -89,6 +89,10 @@ mod onnx_status;
 pub(crate) mod param_selection_window;
 #[path = "commands/params.rs"]
 mod params;
+// 无GUI回归直接调用同一参数命令实现，避免伪造Tauri State或替换写入行为。
+#[cfg(test)]
+pub(crate) use params::{set_param_frames as write_param_frames_for_test, restore_param_frames as restore_param_frames_for_test,
+    set_static_param as set_static_param_for_test, stretch_track_linked_params as stretch_track_linked_params_for_test};
 #[path = "commands/pitch_cache.rs"]
 mod pitch_cache;
 #[path = "commands/pitch_progress.rs"]
@@ -1616,7 +1620,7 @@ pub fn set_param_frames(
     values: Vec<f32>,
     checkpoint: Option<bool>,
 ) -> serde_json::Value {
-    params::set_param_frames(state, track_id, param, start_frame, values, checkpoint)
+    params::set_param_frames(&state, track_id, param, start_frame, values, checkpoint)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1628,7 +1632,7 @@ pub fn restore_param_frames(
     frame_count: u32,
     checkpoint: Option<bool>,
 ) -> serde_json::Value {
-    params::restore_param_frames(state, track_id, param, start_frame, frame_count, checkpoint)
+    params::restore_param_frames(&state, track_id, param, start_frame, frame_count, checkpoint)
 }
 
 /// 互转选区段（`startFrame` 起共 `frameCount` 帧，与前端 FrameRange 同口径）。
@@ -1670,7 +1674,7 @@ pub fn set_static_param(
     value: f64,
     checkpoint: Option<bool>,
 ) -> serde_json::Value {
-    params::set_static_param(state, track_id, param, value, checkpoint)
+    params::set_static_param(&state, track_id, param, value, checkpoint)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1680,7 +1684,7 @@ pub fn stretch_track_linked_params(
     mappings: Vec<crate::state::StretchLinkedRangeSec>,
     checkpoint: Option<bool>,
 ) -> serde_json::Value {
-    params::stretch_track_linked_params(state, track_id, mappings, checkpoint)
+    params::stretch_track_linked_params(&state, track_id, mappings, checkpoint)
 }
 
 // ===================== synth =====================

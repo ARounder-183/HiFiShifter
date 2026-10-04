@@ -1,3 +1,4 @@
+//! 参数命令：checkpoint控制undo，成功写入仍须独立记录工程dirty。
 use crate::state::AppState;
 use tauri::State;
 
@@ -479,8 +480,8 @@ fn encode_param_frames_binary(orig: &[f32], edit: &[f32]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-pub(super) fn set_param_frames(
-    state: State<'_, AppState>,
+pub(crate) fn set_param_frames(
+    state: &AppState,
     track_id: String,
     param: String,
     start_frame: u32,
@@ -650,6 +651,9 @@ pub(super) fn set_param_frames(
         entry.pitch_edit_user_modified = true;
     }
 
+    // checkpoint只决定undo；分块尾段/异步平滑也须在timeline锁内重新标脏。
+    state.mark_project_dirty_and_retitle();
+
     // 写入动态后基线的组装前提可能刚成立（例如用户第一次画了 dyn），
     // 主动触发一次组装/调度，让用户画完就能听到正确的（而非 1.0 占位）结果。
     let dyn_touched = param == "dyn";
@@ -677,8 +681,8 @@ pub(super) fn set_param_frames(
     serde_json::json!({"ok": true})
 }
 
-pub(super) fn restore_param_frames(
-    state: State<'_, AppState>,
+pub(crate) fn restore_param_frames(
+    state: &AppState,
     track_id: String,
     param: String,
     start_frame: u32,
@@ -779,6 +783,8 @@ pub(super) fn restore_param_frames(
     // Ensure realtime playback reflects edits immediately.
     state.audio_engine.update_timeline(tl.clone());
 
+    // 非checkpoint恢复可能晚于ARA成功响应，不能沿用已清除的dirty。
+    state.mark_project_dirty_and_retitle();
     serde_json::json!({"ok": true})
 }
 
@@ -1167,8 +1173,8 @@ pub(super) fn get_static_param(
     }
 }
 
-pub(super) fn set_static_param(
-    state: State<'_, AppState>,
+pub(crate) fn set_static_param(
+    state: &AppState,
     track_id: String,
     param: String,
     value: f64,
@@ -1190,6 +1196,7 @@ pub(super) fn set_static_param(
     };
 
     entry.extra_params.insert(param, value);
+    state.mark_project_dirty_and_retitle();
     state.audio_engine.update_timeline(tl.clone());
 
     serde_json::json!({"ok": true})
@@ -1203,8 +1210,8 @@ pub(super) fn set_static_param(
 ///
 /// 默认不产生独立撤销检查点：曲线映射与剪辑几何变更合并为同一撤销步
 /// （与旧前端 set/restore(checkpoint=false) 的流程保持一致）。
-pub(super) fn stretch_track_linked_params(
-    state: State<'_, AppState>,
+pub(crate) fn stretch_track_linked_params(
+    state: &AppState,
     track_id: String,
     mappings: Vec<crate::state::StretchLinkedRangeSec>,
     checkpoint: Option<bool>,
@@ -1218,6 +1225,7 @@ pub(super) fn stretch_track_linked_params(
         return serde_json::json!({"ok": false});
     };
     tl.stretch_linked_params_in_root_range(&root, &mappings);
+    state.mark_project_dirty_and_retitle();
 
     // Ensure realtime playback reflects edits immediately.
     state.audio_engine.update_timeline(tl.clone());

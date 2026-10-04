@@ -2080,6 +2080,24 @@ fn clip_pitch_params_changed(old: &crate::state::Clip, new: &crate::state::Clip)
         || old.source_file_mtime != new.source_file_mtime
 }
 
+/// 命令状态回归的测试fixture，不启动CPAL/worker，不替换参数写入实现。
+#[cfg(test)]
+pub(crate) mod command_test_support {
+    use super::*;
+
+    pub(crate) fn detached_engine() -> AudioEngine {
+        let (tx, _receiver)=mpsc::channel();
+        AudioEngine {
+            tx, snapshot:Arc::new(ArcSwap::from_pointee(EngineSnapshot::empty(44100))),
+            is_playing:Arc::new(AtomicBool::new(false)), play_start_wait:Arc::new(AtomicBool::new(false)),
+            target:Arc::new(Mutex::new(None)),base_frames:Arc::new(AtomicU64::new(0)),
+            position_frames:Arc::new(AtomicU64::new(0)),duration_frames:Arc::new(AtomicU64::new(0)),
+            sample_rate:Arc::new(AtomicU32::new(44100)),worker_ready:Arc::new(AtomicBool::new(true)),
+            meter_shutdown:Arc::new(AtomicBool::new(true)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
