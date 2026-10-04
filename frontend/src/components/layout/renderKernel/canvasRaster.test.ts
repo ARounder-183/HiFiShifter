@@ -15,7 +15,7 @@
 
 import { test } from "vitest";
 
-import { clearCanvasPhysical, rasterize } from "./canvasRaster.js";
+import { clearCanvasPhysical, fitCssPxToDevicePx, rasterize } from "./canvasRaster.js";
 
 function assertEqual(actual: unknown, expected: unknown, label: string): void {
     if (actual !== expected) {
@@ -34,6 +34,35 @@ function fakeCanvas(): HTMLCanvasElement {
         height: 0,
         style: { width: "", height: "" },
     } as unknown as HTMLCanvasElement;
+}
+
+/**
+ * 假画布：`style.width` / `style.height` 是访问器，记录**写入次数**，并把写入值
+ * 规范化到 6 位有效数字 —— 复现 Chromium 对内联长度的序列化行为。
+ *
+ * 【为什么需要它】回读 `style.width` 与期望值比较时，这个规范化会让
+ * `physical / dpr`（分数 dpr 下是无限小数）永远"看起来变了"，导致每帧重写样式。
+ * 有了可计数的写入，该缺陷才可被单测捕获。
+ */
+function countingCanvas(): { canvas: HTMLCanvasElement; writes: () => number } {
+    const backing: Record<string, string> = { width: "", height: "" };
+    let count = 0;
+    const style = {} as CSSStyleDeclaration;
+    for (const key of ["width", "height"] as const) {
+        Object.defineProperty(style, key, {
+            configurable: true,
+            get: () => backing[key],
+            set: (value: string) => {
+                count += 1;
+                const num = Number.parseFloat(value);
+                backing[key] = Number.isFinite(num) ? `${Number(num.toPrecision(6))}px` : value;
+            },
+        });
+    }
+    return {
+        canvas: { width: 0, height: 0, style } as unknown as HTMLCanvasElement,
+        writes: () => count,
+    };
 }
 
 test("components/layout/timeline/runtime/canvasRaster.test.ts scripted checks", async () => {
@@ -235,5 +264,48 @@ test("components/layout/timeline/runtime/canvasRaster.test.ts scripted checks", 
             (c) => c[0] === "clearRect" && (c[3] === requestedCss || c[4] === requestedCss),
         );
         assertTrue(!cssClearActive, "must not clear by CSS dimensions (leaves the tail row dirty)");
+    }
+
+    // ── 7. CSS 尺寸回写必须幂等：分数 dpr 下不得每帧重写样式 ──────────
+    // 1001 × 1.5 = 1501.5 → 1502 物理像素；1502 / 1.5 = 1001.3333…（无限小数），
+    // 浏览器回读会规范化成 "1001.33px"。若拿回读值与期望值比较，容差再小也会
+    // 判定"变了"，于是每帧重写 `style.width` 并触发样式重算。
+    {
+        const { canvas, writes } = countingCanvas();
+        const first = rasterize(canvas, 1001, 100, 1.5);
+        assertEqual(writes(), 2, "first rasterize writes both edges exactly once");
+        assertTrue(
+            Math.abs(first.cssWidthPx * 1.5 - canvas.width) < 1e-9,
+            "written style still maps 1:1 onto the backing store",
+        );
+
+        // 重复光栅化（例如每帧 repaint）不得再写样式。
+        for (let i = 0; i < 5; i += 1) rasterize(canvas, 1001, 100, 1.5);
+        assertEqual(writes(), 2, "repeat rasterize must not rewrite the CSS size");
+
+        // 尺寸真变了才写，且**只写变化的那一条边**（高度未变 → 不写）。
+        rasterize(canvas, 1002, 100, 1.5);
+        assertEqual(writes(), 3, "a changed width writes once, unchanged height does not");
+    }
+
+    // ── 8. fitCssPxToDevicePx：吸附到整数物理像素，且与 rasterize 逐值一致 ──
+    {
+        for (const dpr of [1, 1.25, 1.5, 1.75, 2, 3]) {
+            for (const css of [1, 100, 333.4, 1000.5, 1001]) {
+                const snapped = fitCssPxToDevicePx(css, dpr);
+                assertTrue(
+                    Math.abs(snapped * dpr - Math.round(snapped * dpr)) < 1e-9,
+                    `snapped × dpr is a whole device pixel (css=${css}, dpr=${dpr})`,
+                );
+                assertTrue(
+                    Math.abs(snapped - rasterize(fakeCanvas(), css, 1, dpr).cssWidthPx) < 1e-9,
+                    `agrees with rasterize (css=${css}, dpr=${dpr})`,
+                );
+            }
+        }
+        // 非法 / 退化输入回退到至少 1 个物理像素对应的 CSS 尺寸。
+        assertEqual(fitCssPxToDevicePx(Number.NaN, 2), 1, "NaN css falls back");
+        assertEqual(fitCssPxToDevicePx(0, 2), 1, "zero css falls back");
+        assertTrue(Number.isFinite(fitCssPxToDevicePx(100, 0)), "dpr 0 falls back");
     }
 });

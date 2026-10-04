@@ -2862,10 +2862,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         const ro = new ResizeObserver(() => {
             // 【为什么用 clientWidth（整数）而不是 getBoundingClientRect（分数）】
             // 这个值同时是下方 sticky 包裹层的 CSS `width`（`style={{ width: viewSize.w }}`）
-            // 与各画布 `rasterize` 的 CSS 尺寸入参。两者必须**逐值相等**，否则包裹层
-            // 与画布会差出亚像素（画布被 `rasterize` 吸附到设备像素后尤其明显）。
-            // 用整数就天然一致；`Math.floor` 在此是恒等操作（clientWidth 已是整数），
-            // 保留只是为了显式表达"这里要的是整数 CSS 宽"。
+            // 与各画布 `rasterize` 的 CSS 尺寸入参。包裹层是 `overflow: hidden`，
+            // 画布被 `rasterize` 吸附到设备像素后最多比它宽 `0.5 / dpr` CSS px ——
+            // 这点亚像素差被裁掉、不产生滚动条；反过来若取分数宽度，包裹层与画布
+            // 会各自落在不同的亚像素相位上，投影锚点（left: 0）之外的边缘更容易露缝。
+            // 用整数是"最不易出错"的一侧；`Math.floor` 在此是恒等操作
+            //（clientWidth 已是整数），保留只为显式表达"这里要的是整数 CSS 宽"。
             const w = Math.max(1, Math.floor(el.clientWidth));
             const h = Math.max(1, Math.floor(el.clientHeight));
             viewSizeRef.current = { w, h };

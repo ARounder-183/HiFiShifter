@@ -50,8 +50,17 @@ export function subscribeDevicePixelRatio(onChange: (dpr: number) => void): () =
             onChange(readDevicePixelRatio());
             bind();
         };
-        mql.addEventListener("change", handleChange);
-        unbind = () => mql.removeEventListener("change", handleChange);
+        // 【必须兼容 addListener】旧 WebKit（Safari < 14 / 老 WebKitGTK）只有已废弃的
+        // `addListener`，没有 `addEventListener`。本 hook 用在波形面、时间轴内核、
+        // 参数编辑器与颤音画布上，直接调用 `addEventListener` 会抛 TypeError 并把
+        // 整个面板带崩 —— 而环境不支持新 API 时功能本身完全可用。
+        if (typeof mql.addEventListener === "function") {
+            mql.addEventListener("change", handleChange);
+            unbind = () => mql.removeEventListener("change", handleChange);
+        } else {
+            mql.addListener(handleChange);
+            unbind = () => mql.removeListener(handleChange);
+        }
     };
 
     bind();

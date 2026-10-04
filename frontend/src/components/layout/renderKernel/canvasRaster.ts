@@ -46,31 +46,42 @@
  */
 
 /**
- * 判定「CSS 尺寸是否需要重写」的容差（CSS px）。
+ * 上一次写入各画布的 CSS 尺寸（按元素身份，`WeakMap` 不阻止画布被回收）。
  *
- * 远小于 1 个物理像素（最小 dpr 下也有 1 px），因此不会漏掉任何有视觉意义的
- * 变化；同时吸收浏览器对 `style.width` 序列化时的精度截断，避免每帧重复写
- * 样式触发重算。用数值比较而非字符串比较正是为了这个。
+ * 【为什么必须记住写入值，而不是回读 `style.width` 比较】浏览器会把内联长度
+ * 规范化后**回读**（Chromium 序列化到 6 位有效数字）。`physical / dpr` 在
+ * dpr = 1.5 / 1.75 / 1.1 这类分数比下是无限小数：
+ * ```
+ * 写入 1502 / 1.5 = 1001.3333333333334
+ * 回读              "1001.33px"   → 差 0.0033
+ * ```
+ * 拿回读值与期望值比较，任何小于该截断误差的容差都会判定"变了"，于是**每帧
+ * 重写样式**（触发样式重算，正是本函数要避免的）。记录自己写入的值即可精确
+ * 判等，与浏览器的序列化行为无关。
  */
-const CSS_SIZE_EPSILON_PX = 1e-4;
+const lastWrittenCssSize = {
+    width: new WeakMap<HTMLCanvasElement, number>(),
+    height: new WeakMap<HTMLCanvasElement, number>(),
+};
 
-/** 单条边的「按数值比较、仅在变化时写入」。 */
+/** 单条边的「与上次写入值比较、仅在变化时写入」。 */
 function writeCssSizeIfChanged(
     canvas: HTMLCanvasElement,
     key: "width" | "height",
     valuePx: number,
 ): void {
-    const current = Number.parseFloat(canvas.style[key]);
-    if (Number.isFinite(current) && Math.abs(current - valuePx) < CSS_SIZE_EPSILON_PX) return;
+    const previous = lastWrittenCssSize[key].get(canvas);
+    if (previous !== undefined && previous === valuePx) return;
     canvas.style[key] = `${valuePx}px`;
+    lastWrittenCssSize[key].set(canvas, valuePx);
 }
 
 /**
  * 仅在数值确实变化时写回画布的 CSS 尺寸。
  *
- * 热路径上必须避免无谓写入：`style.width` 赋值会触发样式重算。字符串比较在
- * 浏览器把 `1000.6666666666666px` 规范化成别的写法时会失效（每帧都判定为
- * "变了"），故按数值比较。
+ * 热路径上必须避免无谓写入：`style.width` 赋值会触发样式重算。判等基准是**上一次
+ * 写入的值**（见 `lastWrittenCssSize`），不是回读的 `style.width` —— 后者已被
+ * 浏览器规范化，与之比较会在分数 dpr 下每帧都判定为"变了"。
  *
  * 导出供 GL 路径（`gl/glContext.ts`）复用，保证两条路径的写回策略完全一致。
  */
