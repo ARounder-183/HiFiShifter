@@ -54,6 +54,7 @@ import { isPrimaryModifierDown } from "../../../../../utils/platform";
 import { armRightDragContextMenuGuard } from "../../../../../utils/rightDragContextMenuGuard";
 import { getTimelineWheelAction, type ScrollbarZone } from "../../../wheelGesture";
 import { buildTimelineTicks, type TimelineTick } from "../../runtime/buildTimelineTicks";
+import { createTickAxis } from "../../runtime/tickAxis";
 import {
     createTimelineAxis,
     playheadLineLeftPx,
@@ -184,6 +185,20 @@ export interface TimelineKernelData {
     readonly primaryTimeUnit: BuildTicksArgs["primaryUnit"];
     readonly secondaryTimeUnit: BuildTicksArgs["secondaryUnit"];
     readonly minLabelSpacingPx: number;
+    /**
+     * 用户配置的最小弱网格线像素间距。
+     *
+     * 必须与 DOM 标尺同源：它参与 `resolveGridLineSpacing` 的预算，内核漏传时
+     * GL 网格会按默认值 8 取步长，与标尺的档位分叉（网格线与标尺刻度错位）。
+     */
+    readonly minGridSpacingPx: number;
+    /**
+     * Swing 强度（0-100），作用于弱网格线的奇数格。
+     *
+     * 同上：内核漏传时 GL 网格不 swing，而标尺刻度按 swing 后的位置排布 ——
+     * 两者在 swing > 0 时整体错开最多半步。
+     */
+    readonly swingPercent: number;
     readonly tempoMap: BuildTicksArgs["tempoMap"];
     /**
      * 单条轨道高度（CSS px）。
@@ -1776,6 +1791,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let builtGrid = "";
     let builtBpm = -1;
     let builtBeatsPerBar = -1;
+    // 刻度生成参数：变化必须触发场景重建，否则网格线会停留在旧档位
+    // （`minGridSpacingPx` 改预算、`swingPercent` 改线位置）。
+    let builtMinLabelSpacingPx = -1;
+    let builtMinGridSpacingPx = -1;
+    let builtSwingPercent = -1;
     let builtRowHeight = -1;
     /**
      * 诊断计数：**几何与视口不同源**的绘制帧数（`builtRowHeight !== view.rowHeight`）。
@@ -1896,6 +1916,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             builtGrid !== d.grid ||
             builtBpm !== d.bpm ||
             builtBeatsPerBar !== d.beatsPerBar ||
+            builtMinLabelSpacingPx !== d.minLabelSpacingPx ||
+            builtMinGridSpacingPx !== d.minGridSpacingPx ||
+            builtSwingPercent !== d.swingPercent ||
             builtSelectedClipId !== d.selectedClipId ||
             builtMultiSelectedRef !== d.multiSelectedClipIds
         );
@@ -1920,14 +1943,31 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         );
         const visibleTracks = d.tracks.slice(firstRow, Math.max(firstRow, lastRow));
 
+        // 取刻度用的轴：与 DOM 标尺（`useTimelineState` 的 `createTickAxis`）走
+        // **同一个入口**。此前这里直接用几何轴（`currentRenderAxis()`：未量化、
+        // 宽度不补量化步长），与标尺的 `viewportWidthPx` 不同 ⇒
+        // `resolveGridLineSpacing` 算出的预算不同 ⇒ 两者的 `stepBeats` 可能差一档，
+        // 表现为"网格线有、标尺数字没有"（或反之）。刻度位置本身与窗口无关
+        // （见 `buildTimelineTicks`），但**步长**依赖视口宽度，必须同源。
+        //
+        // 几何（clip / 波形 / 网格实例的窗口裁剪）仍用传入的 `axis` —— 那是每帧
+        // 绘制吸附后的原点，刻度轴只是"取刻度"用的投影。
+        const tickAxis = createTickAxis({
+            pxPerSec: view.pxPerSec,
+            scrollLeftPx: view.scrollLeft,
+            viewportWidthPx,
+            dpr: axis.dpr,
+        }).axis;
         const ticks: TimelineTick[] = buildTimelineTicks({
-            axis,
+            axis: tickAxis,
             bpm: d.bpm,
             beatsPerBar: d.beatsPerBar,
             grid: d.grid,
             primaryUnit: d.primaryTimeUnit,
             secondaryUnit: d.secondaryTimeUnit,
             minLabelSpacingPx: d.minLabelSpacingPx,
+            minGridSpacingPx: d.minGridSpacingPx,
+            swingPercent: d.swingPercent,
             tempoMap: d.tempoMap,
         });
 
@@ -2033,6 +2073,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         builtGrid = d.grid;
         builtBpm = d.bpm;
         builtBeatsPerBar = d.beatsPerBar;
+        builtMinLabelSpacingPx = d.minLabelSpacingPx;
+        builtMinGridSpacingPx = d.minGridSpacingPx;
+        builtSwingPercent = d.swingPercent;
         // 记**内核行高**而不是 React 镜像：判据（`shouldRebuildScene`）必须与几何
         // 构建所用行高同源，否则镜像滞后的那一帧会逃过重建（见该模块文件头）。
         builtRowHeight = view.rowHeight;

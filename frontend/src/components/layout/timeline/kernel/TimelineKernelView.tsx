@@ -370,6 +370,12 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const primaryTimeUnit = useAppSelector((state) => state.session.primaryTimeUnit);
     const secondaryTimeUnit = useAppSelector((state) => state.session.secondaryTimeUnit);
     const minLabelSpacingPx = useAppSelector((state) => state.session.rulerLabelSpacingPx);
+    // 网格密度 / Swing 与 DOM 标尺**同源**（`useTimelineState` 用同一对字段）。
+    // 内核此前漏传这两个值，GL 网格便按默认值取步长、且不做 swing 位移，与标尺
+    // 的刻度档位和位置分叉 —— 表现为"网格线与标尺刻度对不上"。
+    const timelineSnap = useAppSelector((state) => state.session.timelineSnap);
+    const minGridSpacingPx = timelineSnap.gridMinSpacingPx;
+    const swingPercent = timelineSnap.swingEnabled ? timelineSnap.swingPercent : 0;
     const tempoMap = useAppSelector((state) => state.session.tempoMap);
     const playheadZoomEnabled = useAppSelector((state) => state.session.playheadZoomEnabled);
     const selectedClipId = useAppSelector((state) => state.session.selectedClipId);
@@ -428,6 +434,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         primaryTimeUnit,
         secondaryTimeUnit,
         minLabelSpacingPx,
+        minGridSpacingPx,
+        swingPercent,
         tempoMap,
         rowHeight,
         playheadSec: getPlayheadSec(),
@@ -806,6 +814,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         primaryTimeUnit,
         secondaryTimeUnit,
         minLabelSpacingPx,
+        minGridSpacingPx,
+        swingPercent,
         tempoMap,
         mode,
         rowHeight,

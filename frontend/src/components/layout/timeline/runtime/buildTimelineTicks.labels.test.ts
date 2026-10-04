@@ -213,13 +213,26 @@ interface LabelGridCfg {
 function threeSegmentTempoMap(): TempoMap {
     return {
         points: [
-            { id: "p0", positionSec: 0, bpm: 120, timeSignature: { numerator: 4, denominator: 4 } },
-            { id: "p1", positionSec: 40, bpm: 96, timeSignature: { numerator: 4, denominator: 4 } },
+            {
+                id: "p0",
+                positionSec: 0,
+                bpm: 120,
+                timeSignature: { numerator: 4, denominator: 4 },
+                scale: null,
+            },
+            {
+                id: "p1",
+                positionSec: 40,
+                bpm: 96,
+                timeSignature: { numerator: 4, denominator: 4 },
+                scale: null,
+            },
             {
                 id: "p2",
                 positionSec: 90,
                 bpm: 150,
                 timeSignature: { numerator: 4, denominator: 4 },
+                scale: null,
             },
         ],
     };
