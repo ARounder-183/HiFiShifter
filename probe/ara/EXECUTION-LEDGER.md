@@ -536,4 +536,33 @@ Phase 4（参数通道）在 Phase 2 验收后另写计划。代价：交付被�
 引用**在 `#[cfg(test)]` 里**（该文件 724 行起），生产代码不受影响。
 代价：无 —— 这两处都是纯机械改写，做错会当场编译失败。
 
+**Dev 15: Ruling: 大搬迁已完成，内核含 41 个模块，插件 crate 只依赖内核。**
+做法与结果：
+- `state/model` + 其余 40 个模块整体搬进 `hifishifter-kernel`；app 侧用
+  `pub(crate) use hifishifter_kernel::…` 接回 crate 根，**调用点一个都没改**；
+- `EngineCommand` / `StretchKey` / `AudioKey` 搬进内核，`SetAppHandle` 删除
+  （worker 改为惰性从 `app_events::app_handle()` 取句柄）；
+- 内核的 `#[cfg(test)]` 对 app 的测试构建不可见，所以三处测试按"谁能同时看见两边"
+  重新安置：`project.rs` 的扫描集成测试与渲染一致性测试搬进 app
+  （`project_tests.rs` / `renderer_cross_checks.rs`），`streaming_pitch` 的分配计量
+  测试留在内核（内核自建 `alloc_probe`，`#[global_allocator]` 是按 crate 生效的）；
+- 原生构建全部跟模块走：WORLD、Signalsmith、SoundTouch、vslib 四段都搬进内核的
+  `build.rs`。三条都是**实测**出来的链接失败（LNK1181 / LNK2019）逼出来的，
+  不是预防性设计；
+- ONNX 模型路径的"开发树兜底"补了一条回看 app `resources/` 的分支 ——
+  否则内核自己的测试会因为"模型不在内核目录下"而失败。
+
+实测：内核 **501 passed / 0 failed / 1 ignored**；app lib **279 passed / 4 failed**
+（4 条仍是既有的 `/tmp` 路径环境性失败）；插件 **11 + 1 passed**（1 条是 A5 守卫）。
+集成测试 17 条全通过。**`cargo tree -p hifishifter-plugin` 里没有 tauri / wry /
+webview2-com / HiFiShifter，共 219 个包。**
+代价：无 —— 整个过程每一步都有测试计数兜底；唯一"看起来会通过"的陷阱
+（原生链接）在插件单独构建时就会暴露。
+
+**Dev 16: Ruling: A5 守卫必须用 `cargo tree`，不能用 `cargo metadata`。**
+第一版守卫读 `cargo metadata`，结果被自己的工具否定：metadata 列的是**整个
+workspace 的成员**，app 本体必然在里面。改成 `cargo tree -p hifishifter-plugin
+--edges normal --prefix none` 后按行首包名匹配。
+代价：若沿用 metadata，守卫要么永远失败、要么被迫放宽到形同虚设。
+
 
