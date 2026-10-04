@@ -2000,7 +2000,9 @@ name = "hifishifter-kernel"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "log",
  "lru",
+ "serde",
  "serde_json",
 ]
 
