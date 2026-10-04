@@ -1,3 +1,5 @@
+//! 离线时间线混音：文件入口保持独立，宿主入口仅消费显式授权的 PCM。
+
 use crate::encode::{create_encoder, ChannelMode, EncodeError, OutputSpec};
 use crate::state::{TimelineState, Track};
 use crate::time_stretch::{time_stretch_interleaved, StretchAlgorithm};
@@ -702,9 +704,223 @@ pub fn render_mixdown_to_file(
     }
 }
 
+/// 宿主授权的完整交错 PCM；源身份只用于映射，不作为文件路径打开。
+#[derive(Debug, Clone)]
+pub struct MixdownPcm {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub samples: Arc<Vec<f32>>,
+}
+
+/// 使用实际源文件渲染，保持独立 app 的解码与文件域缓存行为。
 pub fn render_mixdown_interleaved(
     timeline: &TimelineState,
     opts: MixdownOptions,
+) -> Result<(u32, u16, f64, Vec<f32>), String> {
+    render_mixdown_internal(timeline, opts, None)
+}
+
+/// 使用宿主 PCM 渲染；缺源、坏 PCM 或处理器失败均返回错误，不回退文件。
+pub fn render_mixdown_with_pcm(
+    timeline: &TimelineState,
+    opts: MixdownOptions,
+    sources: &HashMap<String, MixdownPcm>,
+) -> Result<(u32, u16, f64, Vec<f32>), String> {
+    render_mixdown_internal(timeline, opts, Some(sources))
+}
+
+/// 校验宿主音频边界，避免零声道除法、残帧与非有限样本进入原生 DSP。
+fn validate_host_pcm(source: &MixdownPcm) -> Result<(), String> {
+    if source.sample_rate == 0 || source.sample_rate > i32::MAX as u32 {
+        return Err("invalid host PCM sample rate".into());
+    }
+    if !(1..=2).contains(&source.channels) {
+        return Err("invalid host PCM channels".into());
+    }
+    let channels = source.channels as usize;
+    if source.samples.len() < channels * 2 || source.samples.len() % channels != 0 {
+        return Err("invalid host PCM length".into());
+    }
+    if source.samples.iter().any(|sample| !sample.is_finite()) {
+        return Err("invalid host PCM non-finite sample".into());
+    }
+    Ok(())
+}
+
+/// 哈希全部样本位模式及格式；同身份换源必须影响每层处理器缓存。
+fn host_pcm_hash(source: &MixdownPcm) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"host-pcm-v1");
+    hasher.update(&source.sample_rate.to_le_bytes());
+    hasher.update(&source.channels.to_le_bytes());
+    for sample in source.samples.iter() {
+        hasher.update(&sample.to_bits().to_le_bytes());
+    }
+    hasher.finalize()
+}
+
+/// 宿主 DSP 直接消费项目绝对时间曲线，绕过依赖源路径的文件分析缓存。
+#[allow(clippy::too_many_arguments)]
+fn apply_host_pitch_edit(
+    timeline: &TimelineState,
+    clip: &crate::state::Clip,
+    seg_start_sec: f64,
+    sample_rate: u32,
+    channels: u16,
+    source_hash: blake3::Hash,
+    pcm_stereo: &mut Vec<f32>,
+) -> Result<bool, String> {
+    let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
+        return Ok(false);
+    };
+    let Some(track) = timeline.tracks.iter().find(|track| track.id == root) else {
+        return Ok(false);
+    };
+    let Some(entry) = timeline.params_by_root_track.get(&root) else {
+        return Ok(false);
+    };
+    if (!track.compose_enabled && !entry.has_pitch_adjustment_active)
+        || matches!(
+            track.pitch_analysis_algo,
+            crate::state::PitchAnalysisAlgo::None
+        )
+        || !crate::pitch_editing::does_clip_need_processor_render(timeline, clip, clip.start_sec)
+    {
+        return Ok(false);
+    }
+
+    let fp = entry.frame_period_ms.max(0.1);
+    let frame_count = (clip.length_sec * 1000.0 / fp).ceil() as usize + 1;
+    let clip_midi: Vec<f32> = (0..frame_count)
+        .map(|i| {
+            sample_automation_curve_at_sec(
+                Some(&entry.pitch_orig),
+                clip.start_sec + i as f64 * fp / 1000.0,
+                fp,
+                0.0,
+            )
+        })
+        .collect();
+    let mut pitch_edit = entry.pitch_edit.clone();
+    // 复用现有子轨音高偏移算法；输出曲线仍在项目绝对时间域。
+    if let Some(offsets) = crate::pitch_editing::compute_clip_export_pitch_offsets(timeline, clip) {
+        let start = (clip.start_sec.max(0.0) * 1000.0 / fp).floor() as usize;
+        for (local, offset) in offsets.offsets.iter().enumerate() {
+            let absolute = start + local;
+            if let Some(target) = pitch_edit.get_mut(absolute).filter(|value| **value > 0.0) {
+                *target = entry.pitch_orig.get(absolute).copied().unwrap_or(0.0) + offset;
+            }
+        }
+    }
+    let segment_end_sec = seg_start_sec + pcm_stereo.len() as f64 / (2.0 * sample_rate as f64);
+    let has_pitch_change = entry.pitch_edit_user_modified || entry.has_pitch_adjustment_active;
+    if has_pitch_change && entry.pitch_orig.is_empty() && pitch_edit.iter().any(|v| *v > 0.0) {
+        return Err("missing host pitch analysis".into());
+    }
+    let extra_params = clip.extra_params.as_ref().unwrap_or(&entry.extra_params);
+    let mut extra_curves = clip
+        .extra_curves
+        .as_ref()
+        .unwrap_or(&entry.extra_curves)
+        .clone();
+    if let Some(curve) = crate::pitch_editing::build_clip_effective_formant_shift_curve(
+        timeline,
+        clip,
+        entry,
+        entry.pitch_edit.len().max(1),
+    ) {
+        extra_curves.insert("formant_shift_cents".into(), curve);
+    }
+    let extra_curves = crate::pitch_editing::gate_hifigan_effect_curves(
+        &extra_curves,
+        extra_params,
+        track.compose_enabled,
+    );
+    let pitch_changed = (0..pcm_stereo.len() / 2)
+        .step_by((sample_rate as usize / 1000).max(1))
+        .any(|i| {
+            let time = seg_start_sec + i as f64 / sample_rate as f64;
+            let edit = sample_automation_curve_at_sec(Some(&pitch_edit), time, fp, 0.0);
+            let orig = sample_automation_curve_at_sec(Some(&entry.pitch_orig), time, fp, 0.0);
+            edit > 0.0 && (edit - orig).abs() > 1e-3
+        });
+    let effects_active = extra_curves.iter().any(|(name, curve)| {
+        matches!(name.as_str(), "formant_shift_cents" | "hifigan_tension")
+            && curve.iter().any(|v| v.abs() > 1e-3)
+    }) || crate::pitch_editing::clip_breath_active(timeline, clip);
+    let handles_stretch = crate::pitch_editing::processor_should_handle_stretch(timeline, clip);
+    let rate = if handles_stretch {
+        clip.playback_rate as f64
+    } else {
+        1.0
+    };
+    if !pitch_changed && !effects_active && (rate - 1.0).abs() <= 1e-6 {
+        return Ok(false);
+    }
+    let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
+    let processor = crate::renderer::get_processor(kind);
+    if !crate::renderer::get_renderer(kind).is_available() || !processor.is_available() {
+        return Err("host pitch processor unavailable".into());
+    }
+
+    // 内部缓存有按 clip_id 索引且不含源波形的分支，必须隔离完整PCM及实际DSP输入。
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(source_hash.as_bytes());
+    for sample in pcm_stereo.iter() {
+        hasher.update(&sample.to_bits().to_le_bytes());
+    }
+    let hash = hasher.finalize();
+    let processor_id = format!("host-pcm:{}:{}", clip.id, hash.to_hex());
+    let fingerprint = u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap());
+    let fanout =
+        crate::channel_mode::effective_channels(channels, clip.take_channel_mode()) as usize;
+    let frames = pcm_stereo.len() / 2;
+    let out_frames = (frames as f64 / rate).round().max(2.0) as usize;
+    let mut outputs = Vec::with_capacity(fanout);
+    for channel in 0..fanout {
+        let mono: Vec<f32> = pcm_stereo
+            .iter()
+            .skip(channel)
+            .step_by(2)
+            .copied()
+            .collect();
+        let ctx = crate::renderer::ClipProcessContext {
+            mono_pcm: &mono,
+            channel_index: channel as u16,
+            sample_rate,
+            source_fingerprint: Some(fingerprint),
+            clip_start_sec: clip.start_sec,
+            seg_start_sec,
+            seg_end_sec: if handles_stretch {
+                seg_start_sec + out_frames as f64 / sample_rate as f64
+            } else {
+                segment_end_sec
+            },
+            frame_period_ms: fp,
+            pitch_edit: &pitch_edit,
+            clip_midi: &clip_midi,
+            playback_rate: rate,
+            out_frames,
+            clip_id: &processor_id,
+            extra_curves: &extra_curves,
+            extra_params,
+        };
+        let output = processor.process(&ctx)?;
+        if output.len() != out_frames || output.iter().any(|v| !v.is_finite()) {
+            return Err("invalid host pitch processor output".into());
+        }
+        outputs.push(output);
+    }
+    *pcm_stereo = (0..out_frames)
+        .flat_map(|i| [outputs[0][i], outputs[fanout.saturating_sub(1)][i]])
+        .collect();
+    Ok(true)
+}
+
+fn render_mixdown_internal(
+    timeline: &TimelineState,
+    opts: MixdownOptions,
+    sources: Option<&HashMap<String, MixdownPcm>>,
 ) -> Result<(u32, u16, f64, Vec<f32>), String> {
     if mixdown_cancelled(&opts) {
         return Err("export_cancelled".to_string());
@@ -750,6 +966,7 @@ pub fn render_mixdown_interleaved(
     // 音阶签名（渲染缓存键的一部分）：整趟导出只算一次（它遍历 Tempo Map），
     // 与 `collect_clips_needing_render` 的取法一致。
     let scale_signature = timeline.render_scale_signature();
+    let mut host_hashes = HashMap::new();
 
     for (clip_index, clip) in timeline.clips.iter().enumerate() {
         // 在迭代开头上报（= 前 `clip_index` 个已完成）。放在 `continue` 之前，
@@ -804,23 +1021,40 @@ pub fn render_mixdown_interleaved(
             1.0
         };
 
-        // Decode audio (WAV fast-path; otherwise Symphonia).
-        let (in_rate, in_channels, pcm) =
-            match crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path)) {
-                Ok(v) => v,
-                Err(e) => {
-                    if debug {
-                        log::error!(
-                            "mixdown: decode failed; clip_id={} track_id={} path={} err={}",
-                            clip.id,
-                            clip.track_id,
-                            source_path,
-                            e
-                        );
+        // 宿主身份绝不作为文件路径；仅独立文件入口允许解码失败后跳过片段。
+        let (in_rate, in_channels, pcm) = match sources {
+            Some(sources) => {
+                let source = sources
+                    .get(source_path)
+                    .ok_or_else(|| format!("missing host PCM: {source_path}"))?;
+                validate_host_pcm(source)?;
+                host_hashes
+                    .entry(source_path)
+                    .or_insert_with(|| host_pcm_hash(source));
+                (
+                    source.sample_rate,
+                    source.channels,
+                    Arc::clone(&source.samples),
+                )
+            }
+            None => {
+                match crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path)) {
+                    Ok((rate, channels, pcm)) => (rate, channels, Arc::new(pcm)),
+                    Err(e) => {
+                        if debug {
+                            log::error!(
+                                "mixdown: decode failed; clip_id={} track_id={} path={} err={}",
+                                clip.id,
+                                clip.track_id,
+                                source_path,
+                                e
+                            );
+                        }
+                        continue;
                     }
-                    continue;
                 }
-            };
+            }
+        };
 
         clips_decoded = clips_decoded.saturating_add(1);
 
@@ -954,7 +1188,20 @@ pub fn render_mixdown_interleaved(
         );
         let mut segment = segment;
 
-        if let Some(params) = clip.formant_morph.as_ref().filter(|params| params.enabled) {
+        if let Some(params) = clip
+            .formant_morph
+            .as_ref()
+            .filter(|params| params.enabled && sources.is_some())
+        {
+            segment = crate::formant_morph::apply_formant_morph_interleaved(
+                &segment, out_rate, 2, params,
+            )?;
+        }
+        if let Some(params) = clip
+            .formant_morph
+            .as_ref()
+            .filter(|params| params.enabled && sources.is_none())
+        {
             // Loop（循环源）键必须编码**实际消费的平铺区间**（锚点推进量 + 消费
             // 帧数）：平铺段内容随导出窗口 [start_sec, end_sec] 变化，若键固定取
             // [0, total_sec]，不同导出窗口会命中同一条目 —— 先渲染的一方把错误
@@ -1062,7 +1309,8 @@ pub fn render_mixdown_interleaved(
                 crate::pitch_editing::hifigan_tension_active_for_clip(entry, clip, clip_start_sec)
             })
             .unwrap_or(false);
-        let reuse_key = if export_render_cache_reuse_enabled()
+        let reuse_key = if sources.is_none()
+            && export_render_cache_reuse_enabled()
             && opts.apply_pitch_edit
             && !clip.loop_enabled
             && pre_silence_sec <= 1e-6
@@ -1124,18 +1372,33 @@ pub fn render_mixdown_interleaved(
             }
 
             if !used_cache {
-                let applied = crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
-                    timeline,
-                    clip,
-                    clip_start_sec,
-                    seg_start_sec,
-                    out_rate,
-                    &mut seg,
-                );
+                let applied = if sources.is_some() {
+                    apply_host_pitch_edit(
+                        timeline,
+                        clip,
+                        seg_start_sec,
+                        out_rate,
+                        in_channels,
+                        host_hashes[source_path],
+                        &mut seg,
+                    )
+                } else {
+                    crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
+                        timeline,
+                        clip,
+                        clip_start_sec,
+                        seg_start_sec,
+                        out_rate,
+                        &mut seg,
+                    )
+                };
                 match applied {
                     Ok(true) => rendered_ok = true,
                     Ok(false) => rendered_ok = true,
                     Err(e) => {
+                        if sources.is_some() {
+                            return Err(e);
+                        }
                         // 与既有行为一致：处理器失败不降级为"未处理的原始音频"，
                         // 只记录并继续（该 clip 不参与回填，见下）。
                         log::error!("[pitch_edit] clip_id={} ERROR: {e}", clip.id);
@@ -1521,6 +1784,309 @@ pub fn render_mixdown_interleaved(
 mod tests {
     use super::build_loop_tiled_segment;
     use super::*;
+
+    /// 宿主 PCM 注入的真实音频断言。
+    mod host_pcm {
+        use super::*;
+
+        fn timeline(identity: &str) -> TimelineState {
+            let mut tl = super::reuse_test_timeline(identity, "host-pcm-clip", false);
+            tl.project_sec = 0.5;
+            tl.tracks[0].pitch_analysis_algo = crate::state::PitchAnalysisAlgo::WorldDll;
+            tl.tracks[0].compose_enabled = true;
+            let entry = tl.params_by_root_track.get_mut(&tl.tracks[0].id).unwrap();
+            entry.pitch_orig = vec![69.0; 101];
+            entry.pitch_edit = vec![69.0; 101];
+            tl
+        }
+
+        fn opts(pitch: bool) -> MixdownOptions {
+            MixdownOptions {
+                sample_rate: 44_100,
+                start_sec: 0.0,
+                end_sec: None,
+                stretch: StretchAlgorithm::LinearResample,
+                apply_pitch_edit: pitch,
+                output: OutputSpec::default(),
+                quality_preset: QualityPreset::Export,
+                cancel_flag: None,
+                progress: None,
+                cache_stats: None,
+            }
+        }
+
+        fn sources(identity: &str, samples: Vec<f32>) -> HashMap<String, MixdownPcm> {
+            HashMap::from([(
+                identity.to_string(),
+                MixdownPcm {
+                    sample_rate: 44_100,
+                    channels: 2,
+                    samples: Arc::new(samples),
+                },
+            )])
+        }
+
+        fn tone(hz: f64) -> Vec<f32> {
+            (0..22_050)
+                .flat_map(|i| {
+                    let phase = 2.0 * std::f64::consts::PI * hz * i as f64 / 44_100.0;
+                    // Harvest 将纯正弦判为清音；有声测试源需包含实际谐波结构。
+                    let sample = (1..=16)
+                        .map(|harmonic| (phase * harmonic as f64).sin() * 0.2 / harmonic as f64)
+                        .sum::<f64>() as f32;
+                    [sample, sample * 0.6]
+                })
+                .collect()
+        }
+
+        #[test]
+        fn nonexistent_identity_renders_exact_host_samples() {
+            let tl = timeline("ara://source");
+            let src = sources("ara://source", [0.25, -0.125].repeat(22_050));
+            let (rate, channels, duration, mix) =
+                render_mixdown_with_pcm(&tl, opts(false), &src).unwrap();
+            assert_eq!((rate, channels, duration), (44_100, 2, 0.5));
+            assert!(
+                mix == [0.25, -0.125].repeat(22_050),
+                "逐样本必须来自注入PCM"
+            );
+        }
+
+        #[test]
+        fn missing_host_source_errors_instead_of_silence() {
+            let result =
+                render_mixdown_with_pcm(&timeline("ara://missing"), opts(false), &HashMap::new());
+            assert!(result.is_err(), "缺少宿主PCM必须失败");
+            let err = result.unwrap_err();
+            assert!(err.contains("missing host PCM"));
+        }
+
+        #[test]
+        fn same_identity_uses_each_new_pcm_and_never_file_clip_cache() {
+            let tl = timeline("ara://same");
+            let stats = Arc::new(MixdownCacheStats::default());
+            let mut options = opts(true);
+            options.cache_stats = Some(Arc::clone(&stats));
+            for value in [0.2, -0.3] {
+                let src = sources("ara://same", vec![value; 44_100]);
+                let (_, _, _, mix) = render_mixdown_with_pcm(&tl, options.clone(), &src).unwrap();
+                assert!(
+                    mix == vec![value; 44_100],
+                    "同identity的新PCM必须生效: {value}"
+                );
+            }
+            assert_eq!(stats.snapshot(), (0, 0));
+        }
+
+        #[test]
+        fn malformed_host_pcm_errors() {
+            for (rate, channels, samples) in [
+                (0, 2, vec![0.2; 4]),
+                (u32::MAX, 2, vec![0.2; 4]),
+                (44_100, 0, vec![0.2; 4]),
+                (44_100, 3, vec![0.2; 6]),
+                (44_100, 2, vec![]),
+                (44_100, 2, vec![0.2; 2]),
+                (44_100, 2, vec![0.2; 3]),
+                (44_100, 2, vec![0.2, f32::NAN, 0.2, 0.2]),
+                (44_100, 2, vec![0.2, f32::INFINITY, 0.2, 0.2]),
+            ] {
+                let src = HashMap::from([(
+                    "ara://bad".into(),
+                    MixdownPcm {
+                        sample_rate: rate,
+                        channels,
+                        samples: Arc::new(samples),
+                    },
+                )]);
+                assert!(
+                    render_mixdown_with_pcm(&timeline("ara://bad"), opts(false), &src).is_err(),
+                    "非法PCM不得被归一化或静音: {rate}/{channels}"
+                );
+            }
+        }
+
+        #[test]
+        fn world_pitch_changes_real_pcm_without_source_file() {
+            let mut tl = timeline("ara://world");
+            let src = sources("ara://world", tone(220.0));
+            tl.params_by_root_track
+                .get_mut(&tl.tracks[0].id)
+                .unwrap()
+                .pitch_orig
+                .fill(57.0);
+            let (_, _, _, dry) = render_mixdown_with_pcm(&tl, opts(false), &src).unwrap();
+            tl.params_by_root_track
+                .get_mut(&tl.tracks[0].id)
+                .unwrap()
+                .pitch_edit
+                .fill(69.0);
+            let (_, _, _, wet) = render_mixdown_with_pcm(&tl, opts(true), &src).unwrap();
+            let rms =
+                (wet.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / wet.len() as f64).sqrt();
+            let difference = wet
+                .iter()
+                .zip(&dry)
+                .map(|(a, b)| (*a as f64 - *b as f64).abs())
+                .sum::<f64>()
+                / wet.len() as f64;
+            eprintln!("WORLD host oracle: rms={rms:.6}, mean_abs_diff={difference:.6}");
+            assert!(rms > 0.02, "WORLD必须产生真实非静音音频");
+            assert!(difference > 0.03, "音高编辑必须改变输出");
+        }
+
+        #[test]
+        fn file_entry_keeps_real_file_authority_and_host_never_falls_back() {
+            let dir = std::env::temp_dir().join(format!("hfs_host_pcm_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("authority.wav");
+            let mut writer = hound::WavWriter::create(
+                &path,
+                hound::WavSpec {
+                    channels: 2,
+                    sample_rate: 44_100,
+                    bits_per_sample: 32,
+                    sample_format: hound::SampleFormat::Float,
+                },
+            )
+            .unwrap();
+            for sample in [0.15f32, -0.1].repeat(22_050) {
+                writer.write_sample(sample).unwrap();
+            }
+            writer.finalize().unwrap();
+            let identity = path.to_string_lossy().to_string();
+            let tl = timeline(&identity);
+            let (_, _, _, file_mix) = render_mixdown_interleaved(&tl, opts(false)).unwrap();
+            assert!(
+                file_mix == [0.15, -0.1].repeat(22_050),
+                "文件入口必须读取实际WAV"
+            );
+            let src = sources(&identity, [0.35, -0.2].repeat(22_050));
+            let (_, _, _, host_mix) = render_mixdown_with_pcm(&tl, opts(false), &src).unwrap();
+            assert!(
+                host_mix == [0.35, -0.2].repeat(22_050),
+                "宿主入口必须覆盖同identity的实际文件内容"
+            );
+            assert!(render_mixdown_with_pcm(&tl, opts(false), &HashMap::new()).is_err());
+        }
+
+        #[test]
+        fn pending_host_pitch_analysis_is_an_error_for_an_edit() {
+            let mut tl = timeline("ara://pending");
+            let entry = tl.params_by_root_track.get_mut(&tl.tracks[0].id).unwrap();
+            entry.pitch_orig.clear();
+            entry.pitch_edit.fill(81.0);
+            assert!(render_mixdown_with_pcm(
+                &tl,
+                opts(true),
+                &sources("ara://pending", tone(440.0))
+            )
+            .is_err());
+        }
+
+        #[test]
+        fn host_formant_processing_does_not_read_or_poison_file_domain() {
+            let mut tl = timeline("ara://formant");
+            let params = crate::state::ClipFormantMorph {
+                enabled: true,
+                target_f1_hz: 700.0,
+                target_f2_hz: 1500.0,
+                strength: 0.7,
+            };
+            tl.clips[0].formant_morph = Some(params.clone());
+            let key = crate::formant_cache::make_formant_cache_key(
+                &tl.clips[0].id,
+                Path::new("ara://formant"),
+                44_100,
+                0.0,
+                0.5,
+                false,
+                0,
+                true,
+                false,
+                &params,
+            );
+            crate::formant_cache::insert_formant_cache_entry(
+                key.clone(),
+                crate::formant_cache::FormantCacheEntry {
+                    pcm_stereo: Arc::new(vec![0.8; 44_100]),
+                    frames: 22_050,
+                    sample_rate: 44_100,
+                },
+            );
+            let (_, _, _, first) =
+                render_mixdown_with_pcm(&tl, opts(false), &sources("ara://formant", tone(440.0)))
+                    .unwrap();
+            let (_, _, _, second) =
+                render_mixdown_with_pcm(&tl, opts(false), &sources("ara://formant", tone(220.0)))
+                    .unwrap();
+            assert!(first.iter().any(|x| x.abs() > 0.01));
+            assert!(first != second, "宿主PCM变化必须绕过formant文件缓存");
+            let mut cache = crate::formant_cache::global_formant_cache().lock().unwrap();
+            assert!(
+                cache
+                    .get(&key)
+                    .unwrap()
+                    .pcm_stereo
+                    .iter()
+                    .all(|x| *x == 0.8),
+                "不得回填污染文件域formant缓存"
+            );
+        }
+
+        #[test]
+        fn mono_host_pcm_trims_resamples_and_duplicates_exact_samples() {
+            let mut tl = timeline("ara://mono-trim");
+            tl.clips[0].source_start_sec = 0.25;
+            let mut samples = vec![0.1; 11_025];
+            samples.extend(vec![0.25; 22_050]);
+            samples.extend(vec![-0.3; 11_025]);
+            let src = HashMap::from([(
+                "ara://mono-trim".into(),
+                MixdownPcm {
+                    sample_rate: 44_100,
+                    channels: 1,
+                    samples: Arc::new(samples),
+                },
+            )]);
+            let mut options = opts(false);
+            options.sample_rate = 48_000;
+            let (rate, channels, duration, mix) =
+                render_mixdown_with_pcm(&tl, options, &src).unwrap();
+            assert_eq!(
+                (rate, channels, duration, mix.len()),
+                (48_000, 2, 0.5, 48_000)
+            );
+            assert!(
+                mix.iter().all(|v| *v == 0.25),
+                "源域裁切后重采样与mono复制必须保留实际PCM"
+            );
+        }
+
+        #[test]
+        fn world_host_curves_use_absolute_project_time() {
+            let mut tl = timeline("ara://absolute");
+            tl.clips[0].start_sec = 1.0;
+            tl.project_sec = 1.5;
+            let entry = tl.params_by_root_track.get_mut(&tl.tracks[0].id).unwrap();
+            entry.pitch_orig = [vec![0.0; 200], vec![57.0; 101]].concat();
+            entry.pitch_edit = [vec![0.0; 200], vec![69.0; 101]].concat();
+            let src = sources("ara://absolute", tone(220.0));
+            let mut dry_options = opts(false);
+            dry_options.start_sec = 1.0;
+            let (_, _, _, dry) = render_mixdown_with_pcm(&tl, dry_options.clone(), &src).unwrap();
+            dry_options.apply_pitch_edit = true;
+            let (_, _, _, wet) = render_mixdown_with_pcm(&tl, dry_options, &src).unwrap();
+            let difference = wet
+                .iter()
+                .zip(&dry)
+                .map(|(a, b)| (a - b).abs() as f64)
+                .sum::<f64>()
+                / wet.len() as f64;
+            eprintln!("WORLD absolute-time oracle: mean_abs_diff={difference:.6}");
+            assert!(difference > 0.03, "只位于项目1.0s之后的曲线必须驱动宿主DSP");
+        }
+    }
 
     /// 端到端：真实立体声 WAV → decode → 窗口 → 重采样 → 声道条件化 → 混音。
     /// 锁定"切换 Take 声道模式必须改变导出渲染结果"——这是用户报告的
