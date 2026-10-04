@@ -5,6 +5,7 @@ pub(crate) mod connection;
 pub(crate) mod session;
 mod commands;
 mod events;
+pub(crate) mod resources;
 #[cfg(windows)]
 mod webview;
 pub(crate) use view::create_view_with_link;

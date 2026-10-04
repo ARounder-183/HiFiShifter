@@ -31,6 +31,14 @@ try {
         if (Test-Path -LiteralPath $araEmbeddedDllPath) { Copy-Item -LiteralPath $araEmbeddedDllPath -Destination (Join-Path $araEmbeddedModule $araEmbeddedDll) -Force }
     }
     Get-ChildItem -LiteralPath 'frontend\dist' | Copy-Item -Destination $araEmbeddedResources -Recurse -Force
+    # 原GUI分析管线需要FCPE，WORLD声码器不能替代它；模型沿用独立app权威副本。
+    $araEmbeddedModels = Join-Path $araEmbeddedBundle 'Contents\Resources\models'
+    New-Item -ItemType Directory -Force -Path $araEmbeddedModels | Out-Null
+    foreach ($araEmbeddedModel in @('fcpe','nsf_hifigan','hnsep')) {
+        $araEmbeddedModelSource = Join-Path $araEmbeddedRoot "backend\src-tauri\resources\models\$araEmbeddedModel"
+        if (!(Test-Path -LiteralPath $araEmbeddedModelSource)) {throw "Missing original model resources: $araEmbeddedModel"}
+        Copy-Item -LiteralPath $araEmbeddedModelSource -Destination $araEmbeddedModels -Recurse -Force
+    }
     & cl.exe /nologo /utf-8 /std:c++17 /LD /MT /EHsc /O2 'backend\hifishifter-plugin\native\module_loader.cpp' "/Fo:$araEmbeddedTemp\module_loader.obj" /link "/OUT:$araEmbeddedModule\HiFiShifter.vst3" "/IMPLIB:$araEmbeddedTemp\HiFiShifterLoader.lib"
     if ($LASTEXITCODE -ne 0) { throw 'native VST3 loader build failed' }
     Write-Output "Built isolated bundle: $araEmbeddedBundle (not installed; tests and REAPER acceptance pending)."

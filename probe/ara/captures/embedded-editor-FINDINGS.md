@@ -64,3 +64,11 @@ lib55、mapping13、依赖树1、native renderer5、exports1，共75，正常exi
 停止盲目输入，不用PowerShell UIA/猜窗口句柄绕过，也不以脚本参数提交冒充手绘。
 Lua原有save命令已把当前未编辑一次性工程正常保存为`.build-tmp/embedded-probe/embedded-editor.RPP`
 （5056 bytes，log project saved）。隔离REAPER46132仍运行，未强杀。
+
+## 后续源码修复与回归（2026-10-05）
+
+- 模型资源随规范bundle复制到 `Contents/Resources/models`；隔离REAPER日志确认FCPE DirectML会话创建并通过smoke test。
+- 插件会话现在按实例持有可取消、可join的分析worker，消费ClipPitchReady并重组原线；关闭FX不会取消其它实例，也不会留下跨会话游离线程。
+- 真实actor回归覆盖“先画pitch、分析完成后自动应用、无需GUI轮询”，独立自相关测得329.104Hz（MIDI64目标329.63Hz）。缺原线时自动应用保持pending并保留可保存曲线。
+- 新bundle已重建并用隔离RPP重开；原时间线、钢琴卷帘、WORLD算法和自动应用栏再次出现。
+- Computer Use对REAPER父窗口坐标drag返回WebView子窗口目标不匹配；未猜HWND、未用PowerShell UIA或Lua提交替代手绘，因此真实手绘、导出及重开PCM仍是open项。

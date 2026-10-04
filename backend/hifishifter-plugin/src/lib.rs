@@ -62,6 +62,7 @@ pub(crate) fn log_line(message: &str) {
 #[no_mangle]
 pub extern "system" fn GetPluginFactory() -> *mut c_void {
     diagnostics::init();
+    editor::resources::initialize_models();
     let _ = runtime::runtime();
     vst3::get_plugin_factory()
 }
@@ -73,6 +74,7 @@ pub extern "system" fn GetPluginFactory() -> *mut c_void {
 #[no_mangle]
 pub extern "system" fn InitDll() -> bool {
     diagnostics::init();
+    editor::resources::initialize_models();
     let _ = runtime::runtime();
     true
 }

@@ -656,6 +656,16 @@ pub fn schedule_clip_pitch_jobs(
     engine_tx: &mpsc::Sender<crate::engine_command::EngineCommand>,
     _out_rate: u32,
 ) {
+    // 独立app保持原游离worker行为；插件使用下方可取消且可join的同一实现。
+    drop(schedule_clip_pitch_jobs_scoped(tl, engine_tx, Arc::new(std::sync::atomic::AtomicBool::new(false))));
+}
+
+/// 宿主拥有分析worker寿命；会话取消不推进进程全局generation，不取消另一FX。
+pub fn schedule_clip_pitch_jobs_scoped(
+    tl: &TimelineState,
+    engine_tx: &mpsc::Sender<crate::engine_command::EngineCommand>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+) -> Vec<std::thread::JoinHandle<()>> {
     debug_eprintln!(
         "[pitch_clip] schedule_clip_pitch_jobs called, clips={}",
         tl.clips.len()
@@ -789,7 +799,7 @@ pub fn schedule_clip_pitch_jobs(
 
     if pending_jobs.is_empty() {
         debug_eprintln!("[pitch_clip] no pending jobs (all cached or inflight), nothing to do");
-        return;
+        return Vec::new();
     }
     debug_eprintln!("[pitch_clip] {} clip(s) need analysis", pending_jobs.len());
 
@@ -853,12 +863,14 @@ pub fn schedule_clip_pitch_jobs(
         .unwrap_or(2)
         .clamp(1, PITCH_ANALYSIS_WORKER_CAP);
     let job_queue = Arc::new(Mutex::new(std::collections::VecDeque::from(pending_jobs)));
+    let mut workers = Vec::new();
     for _ in 0..worker_count {
         let queue = Arc::clone(&job_queue);
         let tx = engine_tx.clone();
         let tl_shared = Arc::clone(&tl_shared);
 
-        std::thread::spawn(move || loop {
+        let cancelled = cancelled.clone();
+        workers.push(std::thread::spawn(move || loop {
             // 锁毒化沿用全库约定（into_inner 继续）：队列状态由 pop_front 的
             // 原子性保证，毒化不影响其中剩余 job 的有效性。
             let job = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
@@ -870,8 +882,9 @@ pub fn schedule_clip_pitch_jobs(
                 generation,
                 total,
                 frame_period_ms,
+                &cancelled,
             );
-        });
+        }));
     }
 
     /// 单个分析 job 的完整生命周期：跑分析 → 推进度 → 释放 inflight → 写缓存 → 通知引擎。
@@ -885,6 +898,7 @@ pub fn schedule_clip_pitch_jobs(
         generation: u64,
         total: u32,
         frame_period_ms: f64,
+        scope_cancelled: &std::sync::atomic::AtomicBool,
     ) {
         use crate::pitch_analysis::PitchOrigAnalysisProgressEvent;
 
@@ -897,7 +911,8 @@ pub fn schedule_clip_pitch_jobs(
 
         // 块间取消：工程一旦切换就尽早退出，否则旧素材还要占着分析期的工作集
         // 一直跑到结束（那正是内存峰值的来源）。
-        let cancelled = || current_pitch_generation() != generation;
+        let cancelled = || scope_cancelled.load(AtomicOrdering::Acquire) || current_pitch_generation() != generation;
+        if cancelled() {release_inflight(&job.inflight_key);return;}
         let analysis = analyze_clip_pitch_and_level_cancellable(
             &tl_shared,
             &job.clip,
@@ -908,7 +923,7 @@ pub fn schedule_clip_pitch_jobs(
 
         // 取消检查：分析期间工程可能已切换（或缓存已被清空）。此时结果属于
         // 旧工程 —— 既不该写进新工程的全局缓存，也不该再推进旧批次的进度。
-        if current_pitch_generation() != generation {
+        if cancelled() {
             log::warn!(
                 "[pitch_clip] thread: discarding result for clip '{}' (generation changed)",
                 job.clip.name
@@ -957,7 +972,7 @@ pub fn schedule_clip_pitch_jobs(
         // 写缓存前再确认一次代次：进度事件与缓存写入之间仍可能发生工程切换，
         // 而写入是不可回滚的 —— 一旦写进全局缓存，条目在新工程里既不可达
         // 也无人清理。
-        if current_pitch_generation() != generation {
+        if cancelled() {
             log::warn!(
                 "[pitch_clip] thread: skipping cache store for clip '{}' (generation changed)",
                 job.clip.name
@@ -1006,6 +1021,7 @@ pub fn schedule_clip_pitch_jobs(
             global_batch_state().reset(0);
         }
     }
+    workers
 }
 
 /// 分析单个 clip 的源音频，产出**音高曲线 + 逐帧电平**。

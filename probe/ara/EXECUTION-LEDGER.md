@@ -808,4 +808,8 @@ Task 26: Ruling: hostEvents多一层动态导入改变独立窗口初始事件�
 
 Task 26: Ruling: 75插件/58共享kernel回归与定向61前端通过，不等于宿主手绘/新全量通过 — 留真实手绘/导出/重开open，保存当前一次性RPP，不猜Sky句柄或用脚本替代GUI — 若混淆证据，会虚报用户最关心的自动使用链路。
 
+Task 26: Ruling: 插件首轮缺少模型登记和原分析调度，参数曲线虽接受但自动WORLD不能收敛 — bundle按模块相邻Resources登记原模型，插件会话持有可取消/join分析worker并消费ClipPitchReady；若沿用游离全局worker，关闭FX会泄漏或串实例。真实actor回归输出329.104Hz（目标329.63Hz），缺原线时保持pending；代价是关闭FX会等待当前分析安全退出。
+
+Task 26: Ruling: Computer Use对REAPER父窗口的坐标drag不能命中WebView子窗口 — 保留失败返回与截图证据，不猜HWND、不用PowerShell UIA或Lua代替用户手绘；若强行绕过会把脚本提交误报成真实GUI验收。
+
 

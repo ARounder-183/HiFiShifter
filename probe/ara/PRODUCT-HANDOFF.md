@@ -65,6 +65,8 @@ accessibility的FX对话框下明确存在原GUI菜单/时间线/参数编辑器
 FINDINGS见captures/embedded-editor-FINDINGS.md。源码额外快照回收与时间轴剪贴板轮询
 修正尚未部署、回归未运行；参数系统剪贴板/转写当前日志仍Unsupported。
 
+最新源码已补齐插件模型登记和实例级可取消分析worker；真实actor的自动WORLD回归在“先画曲线、分析完成后自动应用、无GUI轮询”路径测得329.104Hz（MIDI64目标329.63Hz），缺分析时保持pending。新bundle已重建并以隔离RPP重开，原GUI层级和FCPE DirectML日志存在。Computer Use对WebView子窗口drag返回目标窗口不匹配，未用脚本伪造手绘；真实手绘、导出、重开PCM仍未关闭。
+
 用户明确要求本轮先不做倒放，继续到原 GUI 正向全流程可用。此授权覆盖下方历史方向停止条件，
 不代表倒放已修复。当前规格/计划为 `2026-10-04-ara-gui-forward`。
 
