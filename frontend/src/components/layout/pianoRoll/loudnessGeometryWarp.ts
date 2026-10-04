@@ -104,6 +104,21 @@ export interface LoudnessGeometryWarp {
     baselineSegment(frameF: number): number;
     /** 该帧所属的曲线映射段（同上；pad 帧返回 {@link WARP_CURVE_PAD}）。 */
     curveSegment(frameF: number): number;
+    /**
+     * 该帧的映射是否**允许整数帧线性插值**（false ⇒ 必须逐值求值）。
+     *
+     * 【为什么需要】查表把每个整数帧的取值预先算好、查询时在相邻两帧之间线性插值。
+     * 这只在"映射把整数帧送到整数帧、且每帧恰好走一格"时与"在映射后的帧上直接取样"
+     * **逐值等价**（此时格内的快照折点恰好落在格端点上）。
+     *
+     * - 平移（旧长 == 新长）：映射是整数帧的刚性位移 ⇒ 等价；
+     * - 裁切 / 拉伸（旧长 ≠ 新长）：映射把快照的分段线性折点搬进了格内 ⇒ 线性插值
+     *   会在折点两侧"抄近路"，与逐值路径分叉。
+     *
+     * 因此后者整段回退逐值 —— 只影响被裁切 / 拉伸的那一个 clip 的区间，代价可控，
+     * 而"两条路径逐值等价"这条不变量得以保持。
+     */
+    interpolableAt(frameF: number): boolean;
 }
 
 /** 已归一化为帧的映射段（构造期算好，查询期零换算）。 */
@@ -118,6 +133,13 @@ interface PreparedSegment {
     /** 新侧的最大下标；长度为 1 时取 1.0（与后端同款兜底，避免除零）。 */
     readonly newMaxIdx: number;
     readonly gainScale: number;
+    /**
+     * 该段是否允许查表的整数帧线性插值（见 {@link LoudnessGeometryWarp.interpolableAt}）。
+     *
+     * 等价于"映射把整数帧送到整数帧且每帧走一格"：`oldMaxIdx == newMaxIdx`（刚性
+     * 平移）或 `oldMaxIdx == 0`（整段塌到一帧，格内没有折点）。
+     */
+    readonly interpolable: boolean;
     /**
      * 该段是否改变了**时域**（起点/长度）。
      *
@@ -218,14 +240,18 @@ export function createLoudnessGeometryWarp(args: {
         // （长度 1 时用 1.0，避免除零）。
         const oldCount = Math.max(1, oldEndF - oldStartF);
         const newCount = newEndF - newStartF;
+        const oldMaxIdx = oldCount - 1;
+        const newMaxIdx = newCount > 1 ? newCount - 1 : 1;
         segments.push({
             newStartF,
             newEndF,
             oldStartF,
             oldEndF,
-            oldMaxIdx: oldCount - 1,
-            newMaxIdx: newCount > 1 ? newCount - 1 : 1,
+            oldMaxIdx,
+            newMaxIdx,
             gainScale: mapping.gainScale,
+            // 整数帧 → 整数帧且每帧走一格（刚性平移），或整段塌到一帧（格内无折点）。
+            interpolable: oldMaxIdx === newMaxIdx || oldMaxIdx === 0,
             timeChanged: oldStartF !== newStartF || oldCount !== newCount,
         });
     }
@@ -289,6 +315,12 @@ export function createLoudnessGeometryWarp(args: {
                 return seg.timeChanged ? index : WARP_SEGMENT_IDENTITY;
             }
             return coveredByOldTimeRange(frameF) ? WARP_CURVE_PAD : WARP_SEGMENT_IDENTITY;
+        },
+        interpolableAt(frameF) {
+            const index = segmentAt(frameF);
+            // 不受任何映射影响的帧就是恒等映射 —— 恒等当然可插值。
+            if (index < 0) return true;
+            return (segments[index] as PreparedSegment).interpolable;
         },
     };
 }

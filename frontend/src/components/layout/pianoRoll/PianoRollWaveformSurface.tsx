@@ -25,6 +25,7 @@ import { createTimelineAxis } from "../renderKernel/timelineAxis.js";
 import type { ClipPeaksEntry } from "./useClipsPeaksForPianoRoll";
 import { dynContentFade, dynLevelTargetingGain } from "./paramRanges";
 import { pianoRollViewportBus } from "./pianoRollViewportBus";
+import { WARP_CURVE_PAD, type LoudnessGeometryWarp } from "./loudnessGeometryWarp";
 
 /**
  * 波形绘制所需的**响度自动化**数据（volume 曲线 + 动态目标/基线）。
@@ -56,6 +57,23 @@ export interface LoudnessLiveCurve {
     startFrame: number;
     stride: number;
     values: readonly number[];
+}
+
+/**
+ * 单帧的三条响度输入（`makeLoudnessAmplitudeMap` 的复用结果槽）。
+ *
+ * 独立成类型是因为它在几何重建的热路径上被逐帧写入：一次重建按窗口帧数调用数千次，
+ * 逐帧新建对象会把 GC 拖进渲染关键路径（见 `resolveFrame`）。
+ */
+interface FrameSamples {
+    /** 该帧的音量包络（曲线外 / pad 帧 = 1.0）。 */
+    vol: number;
+    /** 该帧的目标电平；`null` = 无动态数据（不施加增益）。 */
+    target: number | null;
+    /** 该帧的原声基线（已按几何映射换算）；`null` = 无基线数据。 */
+    base: number | null;
+    /** 该帧的无内容淡出系数。 */
+    fade: number;
 }
 
 /**
@@ -102,7 +120,7 @@ const LUT_LEVEL_NONFINITE = 2;
 /**
  * 查表时「该帧的取值来自哪一路数据」。
  *
- * 【为什么必须逐帧记录来源】`sampleLiveOrSnapshot` 的语义是**逐查询点**选路
+ * 【为什么必须逐帧记录来源】`resolveFrame` 的语义是**逐查询点**选路
  * （live 覆盖得到就用 live，否则用整工程快照）。查表以整数帧为网格，插值时
  * 两端点若来自不同路（live 窗口边界恰好落在这一格），就无法用单路数据线性
  * 插值表达 —— 此时按 `LUT_SRC_*` 判定为"不可插值"，交回逐值路径，从而保证
@@ -204,25 +222,26 @@ export function makeLoudnessAmplitudeMap(
         dyn: () => LoudnessLiveCurve | null;
     },
     revision: () => number,
+    /**
+     * 拖拽期间的**几何时域映射**（可选；见 `loudnessGeometryWarp`）。
+     *
+     * 【为什么必须由它来搬移基线】波形的乘数是 `volume(t) × dyn增益(t)`，而
+     * `dyn增益 = 目标电平 / 原声电平基线` —— 基线是 **clip 几何的函数**（clip 从
+     * 0s 移到 3s，同一段素材的基线就从帧 `[0,200)` 挪到 `[600,800)`）。时间轴拖拽
+     * 期间几何只在 Redux 里乐观更新，响度快照要等提交才重取，于是整个手势期间
+     * 「旧位置的基线 × 新位置的峰值」：响段乱跳、静段被压平或放大成满高平台。
+     * 本 provider 把快照曲线按几何映射重采样到新位置，消除这段错位。
+     *
+     * 【优先级】`live`（用户正在画的笔画）> 映射后的快照 > pad 值。live 覆盖按
+     * **原始帧**采样：它是"当前输入"，且与几何手势互斥（不可能同时发生），
+     * 不该被几何映射搬走。
+     *
+     * 【失效】映射的变化必须体现在 `revision()` 里 —— 查表（LUT）以
+     * `(快照引用, 修订号, 覆盖范围)` 为复用键，修订号不变则映射变了也不会重建。
+     */
+    warp?: () => LoudnessGeometryWarp | null,
 ): WaveformAmplitudeMap {
     if (!(source.framePeriodMs > 0)) return linearAmplitudeMap;
-
-    const sampleLiveOrSnapshot = (
-        liveCurve: LoudnessLiveCurve | null,
-        snapshotValues: readonly number[],
-        frameF: number,
-    ): number | null => {
-        if (liveCurve && liveCurve.values.length > 0) {
-            const sampled = sampleCurveLinear(
-                liveCurve.values,
-                liveCurve.startFrame,
-                liveCurve.stride,
-                frameF,
-            );
-            if (sampled !== null) return sampled;
-        }
-        return sampleCurveLinear(snapshotValues, source.startFrame, source.stride, frameF);
-    };
 
     const framePeriodMs = source.framePeriodMs;
     // 秒 → 帧的换算系数。热路径上秒→帧要转换 3.4 万次以上，用乘法替掉除法
@@ -232,6 +251,10 @@ export function makeLoudnessAmplitudeMap(
     //（字段声明为 `readonly number[]`），故可在闭包创建时捕获 —— 逐查询点读
     // `source.dynBaseline.length` 会在 3.4 万次调用里反复走属性链。
     const hasBaseline = source.dynBaseline.length > 0;
+    /** 拖拽期间的几何时域映射读取器（面板以 ref 提供：引用稳定、内容逐帧更新）。 */
+    const readWarp = warp;
+    /** `resolveFrame` 的复用结果槽（零分配，见其说明）。 */
+    const sampleScratch: FrameSamples = { vol: 1, target: null, base: null, fade: 0 };
 
     /**
      * 无内容判据用的**平滑原声**（滑窗均值，O(1) 查询）。
@@ -277,7 +300,118 @@ export function makeLoudnessAmplitudeMap(
         return count > 0 ? sum / count : 0;
     };
     /** 该帧的**无内容淡出系数**（判据用平滑原声，见上）。 */
-    const contentFadeAt = (frameF: number): number => dynContentFade(contentBaselineAt(frameF));
+    const contentFadeAt = (frameF: number, scale = 1): number =>
+        dynContentFade(contentBaselineAt(frameF) * scale);
+
+    /**
+     * 逐帧解析「音量 / 目标电平 / 原声基线 / 无内容淡出」，**两条路径唯一的取样实现**。
+     *
+     * 【为什么必须唯一】查表路径与逐值回退路径只要取样口径不同，波形就会在
+     * "查表命中"与"未命中"的列之间跳变（用户看到的是随机的高度差）。几何映射加入后
+     * 取样多了一层"帧要经映射换算"，更容易分叉，因此这里把四处取样收口成一份。
+     *
+     * 【零分配】结果写进调用方复用的 `sampleScratch`。一次几何重建会按窗口帧数调用
+     * 数千次，逐帧新建对象会把 GC 拖进渲染关键路径。
+     *
+     * @param w 本次取样使用的映射（由调用方在循环外解析一次，保证同一批帧口径一致）。
+     * @param frameF 查询帧（时间轴绝对帧）。
+     * @param liveVolume 已解析的 live 音量覆盖（循环外解析一次，见 buildLut 的说明）。
+     * @param liveDyn 已解析的 live 动态覆盖。
+     */
+    const resolveFrame = (
+        w: LoudnessGeometryWarp | null,
+        frameF: number,
+        liveVolume: LoudnessLiveCurve | null,
+        liveDyn: LoudnessLiveCurve | null,
+    ): FrameSamples => {
+        // 映射后的取样帧。`curveFrame` 同时承担"该帧是否已被恢复为 pad"的语义
+        //（搬走的旧范围 → volume 1.0、dyn 目标沿用原声）。
+        const curveFrame = w === null ? frameF : w.curveFrame(frameF);
+        const baseFrame = w === null ? frameF : w.baselineFrame(frameF);
+        const baseScale = w === null ? 1 : w.baselineScale(frameF);
+
+        // ① 音量：live 覆盖优先（按原始帧采样），否则取映射后的快照，pad 帧取 1.0。
+        let vol: number | null = curveFrame === WARP_CURVE_PAD ? 1.0 : null;
+        if (liveVolume !== null && liveVolume.values.length > 0) {
+            const sampled = sampleCurveLinear(
+                liveVolume.values,
+                liveVolume.startFrame,
+                liveVolume.stride,
+                frameF,
+            );
+            if (sampled !== null) vol = sampled;
+        }
+        if (vol === null) {
+            vol =
+                sampleCurveLinear(source.volume, source.startFrame, source.stride, curveFrame) ??
+                1.0;
+        }
+        sampleScratch.vol = vol;
+
+        // ② 动态：目标电平 / 原声基线。基线为空 = 分析未就绪 → 不施加增益。
+        let target: number | null = null;
+        let base: number | null = null;
+        let fade = 0;
+        if (hasBaseline) {
+            const rawBase = sampleCurveLinear(
+                source.dynBaseline,
+                source.startFrame,
+                source.stride,
+                baseFrame,
+            );
+            base = rawBase === null ? null : rawBase * baseScale;
+            fade = contentFadeAt(baseFrame, baseScale);
+
+            let liveTarget: number | null = null;
+            if (liveDyn !== null && liveDyn.values.length > 0) {
+                liveTarget = sampleCurveLinear(
+                    liveDyn.values,
+                    liveDyn.startFrame,
+                    liveDyn.stride,
+                    frameF,
+                );
+            }
+            if (liveTarget !== null) {
+                target = liveTarget;
+            } else if (curveFrame === WARP_CURVE_PAD) {
+                // pad = 哨兵「沿用原声」：目标取该帧基线，增益退化为
+                // `computeDynGain(原声, 原声)`（有内容处恰为 1），与后端同口径。
+                target = base;
+            } else {
+                const sampled = sampleCurveLinear(
+                    source.dynTarget,
+                    source.startFrame,
+                    source.stride,
+                    curveFrame,
+                );
+                // 「未画」帧的判定：快照上目标与基线**逐位相同** —— 后端出口把哨兵
+                // 物化成了那一帧的基线值，因此这是构造性的恒等，不是启发式。
+                //
+                // 【为什么必须在这里还原语义】「未画」= 沿用原声 = **增益 1**。若直接
+                // 用物化后的旧基线当目标，几何一变（clip 移动 / 增益变化）就会拿
+                // "旧位置的原声"去除"新位置的原声"，凭空造出一个后端不会做的增益：
+                // 把 clip 拖到静音区时波形被压平、拖到响区时被放大 —— 正是用户报告的
+                // 「拖拽中波形有很大问题」。
+                //
+                // 【无映射时是恒等变换】此时 `curveFrame === baseFrame`，且未画帧的
+                // `sampled` 恰等于该帧基线 ⇒ 替换结果与替换前逐值相同，稳态零影响。
+                const sameFrameBase = sampleCurveLinear(
+                    source.dynBaseline,
+                    source.startFrame,
+                    source.stride,
+                    curveFrame,
+                );
+                target =
+                    sampled !== null && sameFrameBase !== null && sameFrameBase === sampled
+                        ? base
+                        : sampled;
+            }
+        }
+        sampleScratch.target = target;
+        sampleScratch.base = base;
+        sampleScratch.fade = fade;
+        return sampleScratch;
+    };
 
     /**
      * 时刻 → 乘性因子（volume × dynGain）的**逐值实现**。
@@ -292,26 +426,12 @@ export function makeLoudnessAmplitudeMap(
      * @param frameF 帧位置（可为小数）。
      */
     const factorAtDirect = (frameF: number): number | null => {
-        // ① 音量包络：曲线外回退 1.0（与后端越界持有末值语义一致）。
-        const vol = sampleLiveOrSnapshot(live.volume(), source.volume, frameF) ?? 1.0;
-
-        // ② 动态增益 = 电平对齐（点采样原声）× 无内容淡出（**平滑**原声，见
-        //    `contentBaselineAt`）。基线为空 = 分析未就绪 → 不施加增益。
+        const s = resolveFrame(readWarp?.() ?? null, frameF, live.volume(), live.dyn());
         let dynGain = 1;
-        if (hasBaseline) {
-            const target = sampleLiveOrSnapshot(live.dyn(), source.dynTarget, frameF);
-            const base = sampleCurveLinear(
-                source.dynBaseline,
-                source.startFrame,
-                source.stride,
-                frameF,
-            );
-            if (target !== null && base !== null) {
-                dynGain = dynLevelTargetingGain(target, base) * contentFadeAt(frameF);
-            }
+        if (hasBaseline && s.target !== null && s.base !== null) {
+            dynGain = dynLevelTargetingGain(s.target, s.base) * s.fade;
         }
-
-        const factor = vol * dynGain;
+        const factor = s.vol * dynGain;
         return Number.isFinite(factor) ? factor : null;
     };
 
@@ -368,16 +488,24 @@ export function makeLoudnessAmplitudeMap(
      * 建表侧只做一遍。`(a ^ b) & 0b111111 === 0` 等价于三个 2 位字段逐对相等。
      */
     let lutCellOk = new Uint8Array(0);
-    /** 建表缓存键：快照引用 + 修订号 + 已覆盖的帧区间。 */
+    /**
+     * 建表缓存键：快照引用 + 修订号 + **几何映射身份** + 已覆盖的帧区间。
+     *
+     * 【为什么映射要按对象身份进键】拖拽期间几何逐帧变化，映射对象也随之逐帧更换
+     * （见 `PianoRollPanel` 的 `loudnessGeometryWarp`）。它既不改变 `source` 引用、
+     * 也不改变修订号，若只比较后两者，LUT 会被错误复用 —— 波形停在拖拽开始那一刻
+     * 的映射上。按身份比较既精确又零成本。
+     */
     let lutKeySnapshot: LoudnessAutomationSource | null = null;
     let lutKeyRevision = -1;
+    let lutKeyWarp: LoudnessGeometryWarp | null = null;
     let lutCoverStart = 0;
     let lutCoverEnd = -1;
 
     /**
      * 某通道在某**帧**上的取值来源。
      *
-     * 与 `sampleLiveOrSnapshot` 的分支条件同构（live 覆盖得到就用 live）：只做
+     * 与 `resolveFrame` 的分支条件同构（live 覆盖得到就用 live）：只做
      * 区间判定、不重复取样，故建表时每帧只取样一次。
      */
     const sourceAtFrame = (liveCurve: LoudnessLiveCurve | null, frameF: number): number => {
@@ -394,7 +522,7 @@ export function makeLoudnessAmplitudeMap(
      * @param fLo 起始帧（含）。
      * @param fHi 结束帧（含）。
      */
-    const buildLut = (fLo: number, fHi: number): void => {
+    const buildLut = (fLo: number, fHi: number, w: LoudnessGeometryWarp | null): void => {
         const count = fHi - fLo + 1;
         if (!(count > 0) || count > MAX_LUT_FRAMES) {
             // 窗口过大：整块退回逐值求值（行为不变，只是慢）。
@@ -415,27 +543,30 @@ export function makeLoudnessAmplitudeMap(
         // live 覆盖只解析一次：此前它在**每个查询点**都被重新解析（一次重建数万次）。
         const liveVolume = live.volume();
         const liveDyn = live.dyn();
-        const { startFrame, stride, volume, dynTarget, dynBaseline } = source;
+        // 几何映射由调用方（`beginWindow`）解析并传入：它同时是 LUT 复用键的一部分，
+        // 两处各解析一次就可能建出与键不一致的表。
+        const { startFrame, stride } = source;
         for (let f = fLo; f <= fHi; f += 1) {
             const i = f - fLo;
-            const vol = sampleLiveOrSnapshot(liveVolume, volume, f);
-            const volSrc = vol === null ? LUT_SRC_NONE : sourceAtFrame(liveVolume, f);
-            lutVol[i] = vol ?? 1.0;
+            const samples = resolveFrame(w, f, liveVolume, liveDyn);
+            const vol = samples.vol;
+            const volSrc = sourceAtFrame(liveVolume, f);
+            lutVol[i] = vol;
 
             let target: number | null = null;
             let targetSrc = LUT_SRC_NONE;
             let base: number | null = null;
             let baseSrc = LUT_SRC_NONE;
             if (hasBaseline) {
-                target = sampleLiveOrSnapshot(liveDyn, dynTarget, f);
+                target = samples.target;
                 targetSrc = target === null ? LUT_SRC_NONE : sourceAtFrame(liveDyn, f);
-                base = sampleCurveLinear(dynBaseline, startFrame, stride, f);
+                base = samples.base;
                 baseSrc = base === null ? LUT_SRC_NONE : LUT_SRC_SNAPSHOT;
             }
             lutTarget[i] = target ?? 0;
             lutBase[i] = base ?? 0;
             lutTag[i] = volSrc | (targetSrc << 2) | (baseSrc << 4);
-            lutContentFade[i] = contentFadeAt(f);
+            lutContentFade[i] = samples.fade;
 
             // level 表：复刻 levelCeilingOverWindow 逐帧枚举的三分支语义
             //（目标取不到 = 该帧跳过；乘积非有限 = 整体失效）。
@@ -443,12 +574,7 @@ export function makeLoudnessAmplitudeMap(
                 lutLevelKind[i] = LUT_LEVEL_SKIP;
                 lutLevel[i] = 0;
             } else {
-                const level = reachableLevel(
-                    target,
-                    vol ?? 1.0,
-                    base ?? Number.NaN,
-                    contentFadeAt(f),
-                );
+                const level = reachableLevel(target, vol, base ?? Number.NaN, samples.fade);
                 if (Number.isFinite(level)) {
                     lutLevelKind[i] = LUT_LEVEL_VALUE;
                     lutLevel[i] = level;
@@ -462,20 +588,46 @@ export function makeLoudnessAmplitudeMap(
         lutCount = count;
         lutCoverStart = fLo;
         lutCoverEnd = fHi;
-        // 无内容淡出的阶跃点：逐值路径 `contentBaselineAt` 把 frameF 就近取整到
-        // 采样帧（步长 stride），故同一格内淡出值最多切换一次。阈值由"取整跨越
-        // 半帧边界"的时刻解出：frame0 + frac 使 (frame0+frac-startFrame)/stride
-        // 命中 knot0 + 0.5。两端同属一个采样帧时恒用 i0（阈值 +∞）。
+        // 无内容淡出的阶跃点：逐值路径 `contentBaselineAt` 把采样帧就近取整（步长
+        // stride），故同一格内淡出最多切换一次。阶跃点由"查询帧经几何映射后恰好跨过
+        // 半帧边界"解出；映射在段内是仿射的，因此同一个式子对**有无映射都成立**
+        //（无映射时 ratio = 1、base0 = frame0，退化成 `(knot0+0.5)·stride − 偏移`）。
         const fadeStride = stride > 0 ? stride : 1;
         for (let i = 0; i + 1 < count; i += 1) {
-            lutCellOk[i] = ((lutTag[i] as number) ^ (lutTag[i + 1] as number)) & 0x3f ? 0 : 1;
             const frame0 = fLo + i;
-            const knot0 = Math.round((frame0 - startFrame) / fadeStride);
-            const knot1 = Math.round((frame0 + 1 - startFrame) / fadeStride);
-            lutFadeCross[i] =
-                knot1 > knot0
-                    ? (knot0 + 0.5) * fadeStride - (frame0 - startFrame)
-                    : Number.POSITIVE_INFINITY;
+            let cellOk = ((lutTag[i] as number) ^ (lutTag[i + 1] as number)) & 0x3f ? 0 : 1;
+
+            const base0 = w === null ? frame0 : w.baselineFrame(frame0);
+            const base1 = w === null ? frame0 + 1 : w.baselineFrame(frame0 + 1);
+            const knot0 = Math.round((base0 - startFrame) / fadeStride);
+            const knot1 = Math.round((base1 - startFrame) / fadeStride);
+            if (knot1 - knot0 === 1) {
+                const ratio = base1 - base0;
+                const cross =
+                    (startFrame + (knot0 + 0.5) * fadeStride - base0) / (ratio || 1);
+                lutFadeCross[i] =
+                    cross >= 0 && cross <= 1 ? cross : Number.POSITIVE_INFINITY;
+            } else {
+                // 一格内跨 0 次（两端同属一个采样帧）→ 用 i0 即可；跨 ≥2 次 →
+                // 一次阶跃表达不了，交回逐值路径。
+                lutFadeCross[i] = Number.POSITIVE_INFINITY;
+                if (knot1 - knot0 > 1 || knot1 - knot0 < -1) cellOk = 0;
+            }
+
+            if (w !== null) {
+                // 段边界两侧来自不同的仿射映射，线性插值会造出两条路径都不存在的
+                // 中间值。缩放比 ≠ 1 的段（裁切 / 拉伸）整段不可插值，理由见
+                // `LoudnessGeometryWarp.interpolableAt`。
+                if (
+                    w.baselineSegment(frame0) !== w.baselineSegment(frame0 + 1) ||
+                    w.curveSegment(frame0) !== w.curveSegment(frame0 + 1) ||
+                    !w.interpolableAt(frame0) ||
+                    !w.interpolableAt(frame0 + 1)
+                ) {
+                    cellOk = 0;
+                }
+            }
+            lutCellOk[i] = cellOk;
         }
         lutReady = true;
     };
@@ -546,10 +698,14 @@ export function makeLoudnessAmplitudeMap(
         const fLo = Math.max(0, Math.floor(lo * secToFrame) - 2);
         const fHi = Math.ceil(hi * secToFrame) + 2;
         const rev = revision();
+        // 几何映射在这里解析**一次**：它既决定建表用什么映射取样，也是复用键的
+        // 一部分（拖拽期间它逐帧换对象，见 `lutKeyWarp` 的说明）。
+        const w = readWarp?.() ?? null;
         if (
             lutReady &&
             lutKeySnapshot === source &&
             lutKeyRevision === rev &&
+            lutKeyWarp === w &&
             lutCoverStart <= fLo &&
             lutCoverEnd >= fHi
         ) {
@@ -557,7 +713,8 @@ export function makeLoudnessAmplitudeMap(
         }
         lutKeySnapshot = source;
         lutKeyRevision = rev;
-        buildLut(fLo, fHi);
+        lutKeyWarp = w;
+        buildLut(fLo, fHi, w);
     };
 
     /**
@@ -614,13 +771,21 @@ export function makeLoudnessAmplitudeMap(
             }
         }
         let ceiling = 0;
+        // 与查表路径同一份取样实现（含几何映射），否则两条路径会在窗口边界附近
+        // 给出不同的上界，钳制与否随缩放跳变。
+        const w = readWarp?.() ?? null;
+        const liveVolume = live.volume();
+        const liveDyn = live.dyn();
         for (let f = first; f <= last; f += 1) {
-            const vol = sampleLiveOrSnapshot(live.volume(), source.volume, f) ?? 1.0;
+            const samples = resolveFrame(w, f, liveVolume, liveDyn);
             // 目标电平（哨兵已在后端出口解析成原声基线）；`≤0` = 画静音。
-            const target = sampleLiveOrSnapshot(live.dyn(), source.dynTarget, f);
-            if (target === null) continue;
-            const base = sampleCurveLinear(source.dynBaseline, source.startFrame, source.stride, f);
-            const level = reachableLevel(target, vol, base ?? Number.NaN, contentFadeAt(f));
+            if (samples.target === null) continue;
+            const level = reachableLevel(
+                samples.target,
+                samples.vol,
+                samples.base ?? Number.NaN,
+                samples.fade,
+            );
             if (!Number.isFinite(level)) return null;
             if (level > ceiling) ceiling = level;
         }

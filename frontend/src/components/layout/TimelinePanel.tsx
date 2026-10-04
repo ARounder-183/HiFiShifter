@@ -131,6 +131,10 @@ import { computeTimelineRectSelection } from "./timeline/useTimelineSelectionRec
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 
 import { NEW_TRACK_SENTINEL } from "./timeline/constants";
+import {
+    beginClipGeometryPreview,
+    endClipGeometryPreview,
+} from "./timeline/clipGeometryPreviewBus";
 import { getBulkEditableClipIds } from "./timeline/hooks/bulkClipEdit";
 import { registerDragAbort } from "./timeline/gestureFocusGuard";
 import { getInsertBelowTargetIndex } from "./timeline/trackContextMenuPlacement";
@@ -1719,11 +1723,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const beginKernelGestureInteraction = React.useCallback((): void => {
         if (kernelGestureInteractionActiveRef.current) return;
         kernelGestureInteractionActiveRef.current = true;
+        // 记录**按下时**的全量 clip 几何，供参数编辑器把响度基线/曲线搬到正确位置
+        //（见 `clipGeometryPreviewBus`）。时序要求：必须早于本次手势的任何乐观写入
+        // —— 本函数在首个真实位移帧、且在任何预览派发之前调用，满足该要求。
+        beginClipGeometryPreview(sessionRef.current.clips);
         dispatch(beginInteraction());
-    }, [dispatch]);
+    }, [dispatch, sessionRef]);
     const endKernelGestureInteraction = React.useCallback((): void => {
         if (!kernelGestureInteractionActiveRef.current) return;
         kernelGestureInteractionActiveRef.current = false;
+        // 只宣告手势结束；映射本身由消费方保留到"提交之后取的快照"落地（否则
+        // 松手瞬间会退回旧位置的基线，表现为闪一下）。
+        endClipGeometryPreview();
         dispatch(endInteraction());
     }, [dispatch]);
 

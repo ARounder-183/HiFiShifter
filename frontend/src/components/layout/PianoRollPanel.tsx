@@ -208,6 +208,16 @@ import {
     type LiveOverrideReader,
 } from "./pianoRoll/liveLoudnessOverride";
 import { pianoRollViewportBus } from "./pianoRoll/pianoRollViewportBus";
+import {
+    createLoudnessGeometryWarp,
+    diffClipGeometryMappings,
+    type LoudnessGeometryWarp,
+} from "./pianoRoll/loudnessGeometryWarp";
+import {
+    getClipGeometryPreviewOrigin,
+    subscribeClipGeometryPreview,
+    type ClipGeometrySnapshot,
+} from "./timeline/clipGeometryPreviewBus";
 import { createRenderLoop, type RenderLoop } from "./renderKernel/renderLoop.js";
 import { buildTimelineTicks } from "./timeline/runtime/buildTimelineTicks.js";
 import { createTickAxis } from "./timeline/runtime/tickAxis.js";
@@ -4045,6 +4055,63 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const loudnessWaveformRevisionRef = useRef(0);
 
     /**
+     * 时间轴几何手势的「按下时几何」快照（见 `clipGeometryPreviewBus`）。
+     *
+     * 【为什么用 state 而不是 ref】手势起止是**离散**事件（每只手势各一次），
+     * 而它决定波形的乘数从哪儿来 —— 必须触发一次重渲染，让幅度映射挂上/撤下
+     * 几何映射。手势内部的逐帧变化不走 state（走 `loudnessWarpRef` + LUT 的
+     * 映射身份比较），否则整块面板会以指针频率重渲染。
+     */
+    const [clipGeometryPreviewOrigin, setClipGeometryPreviewOrigin] = useState<
+        readonly ClipGeometrySnapshot[] | null
+    >(() => getClipGeometryPreviewOrigin());
+
+    /**
+     * 手势结束后的「等权威快照追上」水位。
+     *
+     * 【为什么手势结束不立刻撤下映射】提交之后、权威快照回来之前，几何映射仍是
+     * 把基线搬到新位置的**唯一正确**来源（后端此刻正在算的正是同一件事）。立刻
+     * 撤下会让波形退回**旧位置的基线** —— 用户看到的就是"松手闪一下"。
+     * 因此与 `LiveEditOverride.committed` / `committedSettleSeqRef` 同一套约定：
+     * 只有「提交之后取的」快照（取数序号更大）落地才撤下。
+     *
+     * 【取消手势为什么同样安全】取消会把 Redux 几何还原成按下时的值，差分随之
+     * 退化为空 ⇒ 映射为 `null`，撤不撤在画面上没有区别。
+     */
+    const geometryPreviewSettleSeqRef = useRef<number | null>(null);
+
+    useEffect(() => {
+        setClipGeometryPreviewOrigin(getClipGeometryPreviewOrigin());
+        return subscribeClipGeometryPreview(() => {
+            const origin = getClipGeometryPreviewOrigin();
+            if (origin !== null) {
+                geometryPreviewSettleSeqRef.current = null;
+                setClipGeometryPreviewOrigin(origin);
+                return;
+            }
+            geometryPreviewSettleSeqRef.current = getLatestLoudnessFetchSeq();
+        });
+    }, [getLatestLoudnessFetchSeq]);
+
+    useEffect(() => {
+        if (geometryPreviewSettleSeqRef.current === null) return;
+        if (loudnessSnapshotFetchSeq > geometryPreviewSettleSeqRef.current) {
+            geometryPreviewSettleSeqRef.current = null;
+            setClipGeometryPreviewOrigin(null);
+        }
+    }, [loudnessSnapshotFetchSeq]);
+
+    /**
+     * 当前生效的几何映射（渲染期同步的 ref 镜像，见文件内既有的同款模式）。
+     *
+     * 幅度映射以 provider 惰性读取它，因此映射对象的**引用**保持不变（几何缓存与
+     * 组件 memo 不会因它而重建），而变化由查表键里的映射身份比较捕捉
+     * （见 `makeLoudnessAmplitudeMap` 的 `warp` 说明）。
+     */
+    const loudnessWarpRef = useRef<LoudnessGeometryWarp | null>(null);
+    const readLoudnessWarp = useCallback(() => loudnessWarpRef.current, []);
+
+    /**
      * 波形重绘的**帧内合并**调度（与曲线层同用 `renderKernel/renderLoop` 语义）。
      *
      * 【为什么需要】一次全量重建要重算两千余列 × 16 切片的包络并上传数百 KB
@@ -4136,8 +4203,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 dyn: () => readLiveOverrideFor("dyn"),
             },
             () => loudnessWaveformRevisionRef.current,
+            // 拖拽期间的几何映射：把基线/曲线搬到 clip 的当前位置，消除
+            // 「旧位置的基线 × 新位置的峰值」造成的整段错位（见该模块的文件头）。
+            readLoudnessWarp,
         );
-    }, [loudnessSnapshot, readLiveOverrideFor]);
+    }, [loudnessSnapshot, readLiveOverrideFor, readLoudnessWarp]);
 
     const refreshSecondaryNowRef = useRef(refreshSecondaryNow);
     useEffect(() => {
@@ -4318,6 +4388,32 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         () => s.clips.filter((c) => groupTrackIds.has(c.trackId)),
         [s.clips, groupTrackIds],
     );
+
+    /**
+     * 拖拽期间的响度时域映射：把「按下时的几何」与当前几何的差分，应用到基线 /
+     * 曲线（见 `loudnessGeometryWarp` 的文件头）。
+     *
+     * 【为什么只取本轨道组的 clip】原声基线是**按根轨道组**组装的；别的轨道组的
+     * clip 与本组基线无关，把它们的映射算进来会错误地搬移本组曲线。`trackClips`
+     * 已按 `groupTrackIds` 过滤，正好是基线的参与集合。
+     *
+     * 【为什么用 useMemo 而不是 ref】映射必须与当前几何同步重算 —— 拖拽的每一帧
+     * `s.clips` 都会换引用，这里随之产出新映射对象；消费侧以**对象身份**判定
+     * 是否需要重建查表（见 `makeLoudnessAmplitudeMap` 的 `warp` 说明）。
+     */
+    const loudnessGeometryWarp = useMemo(() => {
+        if (clipGeometryPreviewOrigin === null) return null;
+        const mappings = diffClipGeometryMappings(clipGeometryPreviewOrigin, trackClips);
+        if (mappings.length === 0) return null;
+        return createLoudnessGeometryWarp({
+            mappings,
+            lockParamLines: s.lockParamLinesEnabled,
+            framePeriodMs: loudnessFpMs,
+        });
+    }, [clipGeometryPreviewOrigin, trackClips, s.lockParamLinesEnabled, loudnessFpMs]);
+
+    // 渲染期同步镜像（本文件既有的取值新鲜度模式：读取方在绘制期惰性读取）。
+    loudnessWarpRef.current = loudnessGeometryWarp;
 
     /**
      * 参数编辑器的统一坐标投影（渲染期）。
