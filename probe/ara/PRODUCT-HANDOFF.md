@@ -1,8 +1,35 @@
 # ARA 产品开发当前交接
 
-中文工作记录，更新于 2026-10-04。此文件记录产品分支，历史探针仍见 HANDOFF.md。
+中文工作记录，更新于 2026-10-05。此文件记录产品分支，历史探针仍见 HANDOFF.md。
 
-## 最新状态：正向原 GUI 已连接，误冲突源码已修，等待安全部署与真实验收
+## 最新状态：一期核心真实验收通过，二期改为内嵌GUI与自动应用
+
+原GUI手绘音高提交r1/m2，REAPER真实输出四个窗口220.5Hz→393.75Hz，gap=0。
+正常关GUI、保存/关REAPER后无GUI重开，输出PCM maxdiff=0；恢复GUI连接r2/m3，
+用户确认曲线显示。证据见`captures/forward-gui-output.json`和同名三份WAV。
+首次重开126加载失败已定位flat模块依赖搜索受项目CWD影响，启动脚本改为进程局部PATH；
+失败WAV保留。完整规范bundle、同路径改源/seek/采样率声道边界尚未全部宿主复测。
+
+用户新目标是整个原GUI嵌入REAPER插件、不再另开app或手动提交，同时保留独立app。
+当前源码`IEditController::createView`仍返回null；一期成果不能证明二期已完成。
+二期规格/计划为`2026-10-05-ara-embedded-editor`，替代一期A5中“禁止任何WebView”的
+UI边界，仅允许插件原生WebView2，不引入Tauri app/事件循环/设备音频。下文旧状态保留
+历史排错意义，最新状态以本节为准。
+
+本轮起点只读进程检查无REAPER主进程/HiFiShifter，仍有两个reaper_host32辅助进程；
+未终止它们。所有变更仍仅在ara-plugin worktree，不push。用户要求集中最终测试，
+不逐小改动重跑验证；必要编译检查不冒称行为验收。
+
+二期当前源码检查点：plugin原生IPlugView/WebView2（createView不再null）、前端pluginHost
+命令与hostEvents事件适配、独立app原params完整实现迁入kernel/editor，AppState薄hook。
+native cargo check --tests exit0（含CSP/token/防同步重入和参数迁移），前端通信迁移
+tsc-b exit0，迁移后独立app cargo check exit0。最新模块pin增量未重新编译，新增测试未运行，不能宣称宿主
+已经显示或能用。WebView当前只接受ping/日志，实际编辑请求明确报session未绑定。
+下一步Task22：正确processor/controller连接、实例会话、宿主PCM分析/波形及原API分发；
+随后原App能力适配、自动应用与state保存、bundle部署、最后集中REAPER实测。
+前端入口是plugin.html，bundle必须带它（不是独立app的index.html）；暂未生成发行包。
+
+## 一期历史排错记录
 
 用户明确要求本轮先不做倒放，继续到原 GUI 正向全流程可用。此授权覆盖下方历史方向停止条件，
 不代表倒放已修复。当前规格/计划为 `2026-10-04-ara-gui-forward`。

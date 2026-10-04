@@ -121,7 +121,7 @@ const IID_IEDIT_CONTROLLER: [u32; 4] = [0xDCD7_BBE3, 0x7742_448D, 0xA874_AACC, 0
 /// 同时接受 GUID 布局与逐字大端布局：Windows 实测是前者，但换一种宿主构建方式
 /// 就可能变成后者。接受两种可以避免"因为字节序猜错而误判为 ABI 不兼容"，
 /// 对探针而言多接受的错误匹配没有实际风险。
-unsafe fn iid_matches(iid: *const u8, words: [u32; 4]) -> bool {
+pub(crate) unsafe fn iid_matches(iid: *const u8, words: [u32; 4]) -> bool {
     if iid.is_null() {
         return false;
     }
@@ -1082,13 +1082,13 @@ static AUDIO_VTBL: AudioProcessorVtbl = AudioProcessorVtbl {
 };
 
 // ---------------------------------------------------------------------------
-// 编辑器控制器对象（最小实现：无参数、无 GUI）
+// 编辑器控制器对象：内嵌原GUI的原生view入口，编辑会话关联另由connection提供。
 // ---------------------------------------------------------------------------
 
 /// `IEditController` 的 vtbl（`IPluginBase` 之后是 13 个控制器方法）。
 ///
-/// 探针只需要"存在一个控制器"，不需要参数与 GUI，因此除 `createView` 外的方法
-/// 都返回"未实现/空值"。REAPER 需要 `getControllerClassId` 指向一个真实类，
+/// 目前控制器参数尚未使用；createView返回真实原生视图。REAPER需要getControllerClassId
+/// 指向一个真实类，
 /// 否则会判定插入失败并卸载模块。
 #[repr(C)]
 pub struct EditControllerVtbl {
@@ -1280,11 +1280,13 @@ unsafe extern "system" fn edit_controller_set_component_handler(
 
 unsafe extern "system" fn edit_controller_create_view(
     _this: *mut c_void,
-    _name: *const c_char,
+    name: *const c_char,
 ) -> *mut c_void {
-    // 探针没有 GUI：返回空视图。REAPER 仍会完成 ARA 插入，只是没有插件窗口。
-    crate::log_line("IEditController::createView -> null (no GUI)");
-    std::ptr::null_mut()
+    if name.is_null() || unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes() != b"editor" {
+        return std::ptr::null_mut();
+    }
+    crate::log_line("IEditController::createView -> native editor");
+    crate::editor::create_view()
 }
 
 static EDIT_CONTROLLER_VTBL: EditControllerVtbl = EditControllerVtbl {

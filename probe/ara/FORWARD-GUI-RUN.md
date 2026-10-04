@@ -1,6 +1,6 @@
 # 正向 ARA 原 GUI 开发版运行说明
 
-这是本地先导工作流，不是已完成验收的发行包。仅 Windows x64、REAPER 7.81；
+这是本地先导工作流，核心GUI修音/重开已实测，尚不是完整发行包。仅 Windows x64、REAPER 7.81；
 每源最多30秒，44.1/48k、mono/stereo、普通/裁切片段。倒放不支持，stretch/content fades不承诺。
 独立 app 不变；插件不内嵌 WebView，原 GUI 作为独立客户端。
 
@@ -34,7 +34,7 @@ cd E:\code\HiFiShifter\.worktrees\ara-plugin
 
 宿主位置、裁切、源替换等几何在REAPER中操作，不属于GUI参数提交范围。
 发生真正版本Conflict时，当前本地曲线保留；不要在没有保留编辑前直接确认刷新替换。
-当前截图的授权开关误Conflict已修正源码（8eba3ae5），新增回归通过；运行中的旧二进制不会自动更新。
+授权开关误Conflict已修正（8eba3ae5），最新真实GUI提交r1/m2已接受并改变音高。
 为不关闭当前GUI，修正版app另构建到`backend/target/ara-fix-app/debug/HiFiShifter.exe`。
 启动脚本会在两份本worktree产物中选最新版本，并拒绝重复启动仍有编辑的GUI。
 
@@ -50,11 +50,14 @@ cd E:\code\HiFiShifter\.worktrees\ara-plugin
 ```
 
 验证器只适用于本轮220Hz周期合成夹具，拒绝把gain变化冒充pitch变化。当前真实普通/裁切/
-间隙基线maxdiff=5.96e-8；edited/reopened实际导出尚未完成。
+间隙基线maxdiff=5.96e-8；四窗220.5Hz→393.75Hz，关GUI重开后PCM maxdiff=0。
+WAV文件metadata不同、SHA256不同；保持的是PCM而非文件字节。
+启动入口设置进程局部PATH使打开RPP后的依赖加载不受CWD影响，不修改系统PATH。
+同路径改源、seek专项及更大边界矩阵仍待验收；二期内嵌GUI不由此文宣称完成。
 
 ## 开发版持久化兼容性
 
-正在修正临时轨道序号造成的恢复错配。新关联基于实际宿主modification/source身份，
+已修正临时轨道序号造成的恢复错配。新关联基于实际宿主modification/source身份，
 只能唯一匹配时恢复；共用/空/缺失身份必须明确拒绝，不能按轨道名称或新序号猜。
 旧开发版非空v1编辑state缺少持久身份，不能静默迁移；升级前保留当前GUI编辑。
 这不是正式版工程格式的兼容承诺。

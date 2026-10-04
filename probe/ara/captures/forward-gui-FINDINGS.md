@@ -1,6 +1,29 @@
-# 正向原 GUI 全流程：进行中的实测记录
+# 正向原 GUI 全流程：核心实测通过，边界仍待补齐
 
-2026-10-04；一次性隔离REAPER工程，非用户原工程。验收未完成。
+2026-10-05；一次性隔离REAPER工程，非用户原工程。以下旧记录保留排错过程，
+状态以本节最新证据为准；这不是完整发布验收。
+
+## 最新真实验收
+
+原GUI钢琴卷帘手绘音高后显式提交，显示r1/m2。独立音频oracle的四个窗口从
+220.5Hz变为393.75Hz，不是只改变gain；间隙最大值0。正常关闭GUI并保存一次性RPP，
+重开REAPER时不启动GUI，再导出；重开PCM与编辑后PCM逐样本完全一致，maxdiff=0。
+随后GUI连接恢复r2/m3，用户亲自确认曲线能显示。
+
+证据：`forward-gui-baseline-fresh.wav`、`forward-gui-edited.wav`、
+`forward-gui-reopened.wav`、`forward-gui-output.json`。普通/裁切基线maxdiff=
+5.960464477539063e-8，编辑后mean abs difference=0.09373518064088743。
+JSON记录各文件SHA256；WAV metadata不同，所以文件哈希不同，不宣称文件逐字节相同。
+
+首次重开曾报插件无法加载，不是GUI关闭导致编辑丢失。默认LoadLibrary在项目CWD报126；
+插件目录CWD、DLL_LOAD_DIR和进程级PATH三种方式都能加载。打开RPP会改变CWD，flat开发
+模块的SoundTouch/DirectML依赖不再可见。启动脚本只给当前启动进程/子进程添加隔离vst
+目录到PATH，没有修改系统PATH。保留`forward-gui-reopened-load-failure.wav`失败证据。
+修正后的完整音频验证器返回exit0；规范VST3 bundle及依赖部署仍是发行待办。
+
+未实测闭环：同路径更换源内容再重开、seek专项、完整44100/48000 mono/stereo及30秒
+边界矩阵。既有单测不代替这些真实宿主验收。二期内嵌GUI另立规格，不把独立客户端
+核心验收当作“整个应用已成为插件”。
 
 ## 已实测
 

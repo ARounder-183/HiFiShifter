@@ -60,7 +60,7 @@ export function useHistoryStateListener(): void {
 
         async function setup() {
             try {
-                const mod = await import("@tauri-apps/api/event");
+                const mod = await import("../services/hostEvents");
                 unlisten = await mod.listen<HistoryStatePayload>("history_state", (event) => {
                     if (disposed) return;
                     applyPayload(event.payload);

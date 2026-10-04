@@ -7,9 +7,8 @@
 //! - [`ara`]：ARA 文档模型 → `TimelineState` 的映射（探针 Task 3 的产品化版本）；
 //! - [`render`]：把 `TimelineState` 交给本体内核离线渲染的薄封装。
 //!
-//! 边界：这里**不**做设备 I/O，也**不**依赖 Tauri IPC。插件**只**依赖
-//! `hifishifter-kernel` —— 这是"插件不把 WebView2 / Tauri 带进 DAW 进程"真正成立的时刻，
-//! 由 `tests/no_tauri_in_dependency_tree.rs` 钉住。宿主回调替代 cpal 的职责是下一步的事。
+//! 边界：不做设备I/O，不依赖Tauri IPC/app runtime。二期增加原生WebView2内嵌原GUI，
+//! 不接管宿主消息循环；A5-v2禁止Tauri/wry/app/cpal，由依赖树守卫钉住。
 //!
 //! # 结构
 //!
@@ -29,6 +28,7 @@ mod audio_abi;
 mod ara_entry;
 mod state_channel;
 mod state_stream;
+mod editor;
 #[cfg(test)]
 mod test_host;
 #[cfg(test)]
@@ -80,5 +80,5 @@ pub extern "system" fn InitDll() -> bool {
 /// VST3 模块卸载入口。
 #[no_mangle]
 pub extern "system" fn ExitDll() -> bool {
-    true
+    editor::shutdown()
 }

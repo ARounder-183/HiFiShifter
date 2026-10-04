@@ -1635,13 +1635,8 @@ pub fn restore_param_frames(
     params::restore_param_frames(&state, track_id, param, start_frame, frame_count, checkpoint)
 }
 
-/// 互转选区段（`startFrame` 起共 `frameCount` 帧，与前端 FrameRange 同口径）。
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConvertRange {
-    pub start_frame: u32,
-    pub frame_count: u32,
-}
+/// 互转选区段由共享编辑内核定义，独立app命令形状保持不变。
+pub use hifishifter_kernel::editor::ConvertRange;
 
 /// 音量 ↔ 动态 曲线互转（后端单事务：基线补偿换算 + 源归位 + 单撤销点）。
 ///

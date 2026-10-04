@@ -1,11 +1,10 @@
-//! 架构不变量的守卫：**插件进程里不出现 Tauri / WebView2**（设计 §1 判据 A5）。
+//! 二期架构守卫：插件不引入Tauri/wry/app/cpal；允许原生WebView2内嵌原GUI。
 //!
 //! 【为什么用测试而不是人看】这条约束会随着后续搬迁被无意破坏
 //! （某个模块为了图方便去 `use backend_lib::…`），而症状要到 DAW 里才显形 ——
-//! 那时插件进程里已经塞进了一个 WebView 宿主。放在测试里，破坏的第一时间就报。
+//! 那时插件已经初始化了独立app事件循环或设备。二期原生WebView2是有意允许的例外。
 //!
-//! 手段是 `cargo tree`：只要插件的**依赖图**里没有 `tauri` / `wry` / `webview2-com` /
-//! app 本体（`HiFiShifter`），就说明它的依赖闭包是干净的内核。
+//! 手段是cargo tree：插件依赖图禁止tauri/wry/app本体/cpal，原生webview2-com不在禁表。
 //!
 //! 【为什么不用 `cargo metadata`】它列的是**整个 workspace 的成员**，不是某个包的
 //! 依赖图 —— app 本体必然出现在里面，判据会被自己的工具否定。实测踩过。
@@ -34,13 +33,13 @@ fn the_plugin_dependency_tree_contains_no_tauri_stack() {
 
     let text = String::from_utf8_lossy(&output.stdout);
     // 每行形如 `name v1.2.3`，所以按「行首的包名」匹配，避免误伤子串。
-    for banned in ["tauri", "wry", "webview2-com", "HiFiShifter"] {
+    for banned in ["tauri", "wry", "HiFiShifter", "cpal"] {
         let hit = text
             .lines()
             .any(|line| line.split_whitespace().next() == Some(banned));
         assert!(
             !hit,
-            "插件依赖树里出现了 `{banned}` —— 插件会把 DAW 进程污染成 WebView 宿主（判据 A5）"
+            "插件依赖树里出现了 `{banned}` —— 二期只能引入原生WebView2，不可引入app事件循环/设备（判据 A5-v2）"
         );
     }
 }

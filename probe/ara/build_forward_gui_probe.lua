@@ -73,7 +73,7 @@ local function loop()
     if request=='save' then
       reaper.Main_SaveProjectEx(0,scratch..sep..'forward-gui.RPP',0)
       log('project saved')
-    elseif request=='edited' or request=='reopened' or request=='source-changed' then render(request)
+    elseif request=='baseline-fresh' or request=='edited' or request=='reopened' or request=='source-changed' then render(request)
     else log('unknown command '..request) end
   end
   reaper.defer(loop)

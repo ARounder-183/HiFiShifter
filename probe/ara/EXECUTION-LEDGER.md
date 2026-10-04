@@ -766,4 +766,18 @@ controller最新验证plugin68/IPC4/kernel28/app18/params10/project21/frontend8�
 基线普通/裁切/gap最大差5.96e-8。GUI音高导出、保存重开、同路径源改变仍无最终证据，未关闭Task19。
 最后独立target嵌入dist GUI构建正常exit0，38.55秒，92661760 bytes；启动重复实例防护已实测拒绝。
 
+Task 19: Ruling: 原GUI手绘后真实导出四窗220.5Hz变393.75Hz，无GUI重开PCM maxdiff=0，用户确认恢复曲线 — 关闭一期核心修音/持久化验收，保留同路径改源及边界未决 — 若过度外推，会把未测声道/采样率/seek能力写成发布保证。
+
+Task 19: Ruling: 首次重开模块加载126来自项目CWD使flat开发DLL依赖不可见 — 启动脚本只设当前进程PATH并保留失败输出，规范bundle留发行任务 — 若只补本机系统PATH，部署缺陷会转嫁给用户且污染环境。
+
+Task 20: Ruling: 用户二期目标是REAPER内的原GUI和自动应用，原createView仍null且原事件依赖Tauri — 新增原生IPlugView/WebView2和宿主通信适配、共享编辑会话，不启动独立app；独立app入口保留 — 若复用外部窗口/手动提交当成二期，会偏离实际目标。
+
+Task 20: Ruling: 用户要求不要反复跑测试，等最后集中执行 — 保留回归用例但不逐函数跑红绿；完整功能后集中测试与REAPER验收，必要编译只用于排错 — 若错误，缺陷可能较晚暴露，因此不提前宣称未测功能完成。
+
+Task 21: Ruling: 宿主同步窗口消息可能重入view，HWND销毁后也可能被复用 — 自有child析构COM、异步callback仅捕获weak，attach/resize不持view锁，window token识别原窗口 — 若省略，会死锁、复活已关FX或误关闭另一实例。
+
+Task 21: Ruling: WebView2异步环境创建无cancel，weak失效不能阻止迟到COM回调进入DLL — 首次创建时只固定本模块到REAPER退出，窗口/浏览器/worker仍正常释放，明确不支持宿主运行中热更新 — 若只靠ExitDll返回false，宿主忽略返回值时会执行已卸载代码；代价是DLL映射保留到宿主退出。
+
+Task 22: Ruling: 原参数命令依赖AppState但仅需timeline/undo/dirty/发布四个边界 — 完整原函数体与互转测试机械迁入kernel/editor，经ParamHost薄适配保留独立app副作用，插件不复制简化曲线语义 — 若hook改变锁序或dirty记账，会丢最后一笔/破坏独立模式，留共享回归最终验证。
+
 

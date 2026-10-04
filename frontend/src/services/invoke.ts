@@ -1,10 +1,11 @@
-// 统一封装 Tauri / pywebview 调用
+// 统一封装原生插件 / Tauri / pywebview 调用；插件复用原命名参数映射。
 // - Tauri: window.__TAURI__.core.invoke / window.__TAURI__.invoke (named args)
 // - pywebview: window.pywebview.api[method] (positional args)
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { reportFrontendError } from "./frontendErrorLog";
+import { getPluginHost } from "./pluginHost";
 
 declare global {
     interface Window {
@@ -22,7 +23,7 @@ declare global {
 
 type PyWebviewApi = Record<string, (...args: any[]) => Promise<any>>;
 
-type InvokeMode = "tauri" | "pywebview";
+type InvokeMode = "plugin" | "tauri" | "pywebview";
 
 export class BackendInvokeError extends Error {
     public readonly mode: InvokeMode;
@@ -923,6 +924,19 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
 ]);
 
 export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> {
+    const plugin = getPluginHost();
+    if (plugin) {
+        const mapped = buildTauriArgs(method, args);
+        if (mapped && "__unwired" in mapped && args.length > 0) {
+            throw new Error(`Plugin backend: method not wired yet: ${method} (args: ${args.length})`);
+        }
+        const named = mapped && "__unwired" in mapped ? undefined : mapped;
+        try { return await plugin.invoke<T>(method, named); }
+        catch (cause) {
+            reportFrontendError(`Invoke failed: ${method}`, cause);
+            throw new BackendInvokeError({ mode: "plugin", method, args: named, cause });
+        }
+    }
     const tauriInvoke = getTauriInvoke();
     if (tauriInvoke) {
         const invokeArgs = buildTauriArgs(method, args);

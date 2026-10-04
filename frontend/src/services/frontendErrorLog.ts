@@ -8,9 +8,13 @@
  * 「上报失败 → 触发上报」的递归；pywebview 模式下没有 Tauri IPC，静默跳过。
  */
 
+import { getPluginHost } from "./pluginHost";
+
 const MAX_DETAIL_CHARS = 4000;
 
 function tauriInvokeRaw(cmd: string, args: Record<string, unknown>): unknown {
+    const plugin = getPluginHost();
+    if (plugin) return plugin.invoke(cmd, args);
     const tauri = window as unknown as {
         __TAURI__?: {
             core?: { invoke?: (cmd: string, args?: Record<string, unknown>) => unknown };

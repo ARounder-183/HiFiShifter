@@ -27,7 +27,7 @@ export function useClipPitchDataListener(): void {
 
         async function setup() {
             try {
-                const mod = await import("@tauri-apps/api/event");
+                const mod = await import("../services/hostEvents");
                 unlisten = await mod.listen<ClipPitchDataPayload>("clip_pitch_data", (event) => {
                     if (disposed) return;
                     const p = event.payload;

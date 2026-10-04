@@ -22,6 +22,9 @@ $env:HIFISHIFTER_ARA_INSTANCE_DIR = Join-Path $araGuiScratch 'instances'
 $env:HIFISHIFTER_ARA_LOG = Join-Path $PSScriptRoot 'captures\forward-gui-plugin.log'
 $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $araGuiScratch 'webview'
 $araGuiVst = Join-Path $PSScriptRoot 'vst3'
+# 一次性flat开发模块有SoundTouch/DirectML导入。打开RPP会改变CWD，依赖不能只靠CWD查找。
+# 只给当前启动进程及子进程设置搜索路径，不修改系统PATH；正式发行仍需规范bundle部署。
+$env:PATH = "$araGuiVst;$env:PATH"
 Copy-Item -LiteralPath (Join-Path $araGuiRoot 'backend\target\debug\hifishifter_plugin.dll') -Destination (Join-Path $araGuiVst 'HiFiShifter.vst3') -Force
 foreach ($araGuiDll in @('onnxruntime.dll','DirectML.dll','SoundTouchDLL.dll')) {
     $araGuiDllSource = Join-Path $araGuiRoot "backend\target\debug\$araGuiDll"

@@ -116,7 +116,7 @@ export function PitchAnalysisProvider({ children }: { children: ReactNode }) {
 
             // ② 注册事件监听
             try {
-                const mod = await import("@tauri-apps/api/event");
+                const mod = await import("../services/hostEvents");
 
                 // 后端所有事件 payload 均为 camelCase（serde rename_all = "camelCase"）
                 type StartedPayload = { rootTrackId?: string; key?: string };

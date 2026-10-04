@@ -15,7 +15,7 @@ export function useRecordingListener(): void {
 
         async function setup() {
             try {
-                const mod = await import("@tauri-apps/api/event");
+                const mod = await import("../services/hostEvents");
                 unlisten = await mod.listen<RecordingMeterPayload>("recording-meter", (event) => {
                     if (disposed) return;
                     const payload = event.payload;

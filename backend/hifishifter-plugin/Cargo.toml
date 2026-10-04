@@ -23,6 +23,13 @@ log = { version = "0.4", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+[target.'cfg(windows)'.dependencies]
+# 二期仅原生WebView2，没有Tauri/wry主循环；版本复用workspace现有缓存。
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com",
+    "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging"] }
+
 [lib]
 name = "hifishifter_plugin"
 # `cdylib` 才是 REAPER 加载的产物；`rlib` 让 crate 自己的测试能链接它。

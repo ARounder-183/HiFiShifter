@@ -20,7 +20,7 @@
  * - 不可序列化的动作**跳过广播**（只在本地生效）：宁可让另一侧短暂落后，也不能
  *   让桥抛错把派发路径打断。
  *
- * 特殊说明：快照与广播都走 Tauri 事件（`@tauri-apps/api/event`）。非 Tauri 环境
+ * 特殊说明：快照与广播走宿主事件适配。独立app仍使用Tauri事件，插件使用实例消息。
  * （单元测试、纯浏览器预览）下所有入口都退化为空操作。
  */
 
@@ -240,13 +240,13 @@ export function projectSnapshot(state: unknown): unknown {
     return { ...root, session: projectedSession };
 }
 
-/** 动态导入 Tauri 事件 API（非 Tauri 环境返回 null）。 */
+/** 动态导入宿主事件API；原独立窗口广播行为保持不变。 */
 async function loadEventApi(): Promise<{
     emit: (event: string, payload?: unknown) => Promise<void>;
     listen: (event: string, handler: (event: { payload: unknown }) => void) => Promise<() => void>;
 } | null> {
     try {
-        const mod = await import("@tauri-apps/api/event");
+        const mod = await import("../../services/hostEvents");
         return { emit: mod.emit, listen: mod.listen };
     } catch {
         return null;

@@ -630,7 +630,7 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
 
         let unlistenPromise: Promise<(() => void) | undefined> | null = null;
         try {
-            unlistenPromise = import("@tauri-apps/api/event")
+            unlistenPromise = import("../../services/hostEvents")
                 .then((mod) => mod.listen("appearance-applied", syncFromStorage))
                 .catch(() => undefined);
         } catch {
