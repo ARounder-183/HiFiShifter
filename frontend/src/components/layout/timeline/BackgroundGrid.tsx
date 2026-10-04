@@ -6,6 +6,7 @@ import { clearGridRedrawHandler, setGridRedrawHandler } from "./gridRedrawBridge
 import type { TimelineAxis } from "../renderKernel/timelineAxis";
 import type { TimelineTick } from "./runtime/buildTimelineTicks";
 import type { TimelineLayer } from "./runtime/timelineFrameCommitter";
+import { subscribeDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
 
 /**
  * Grid lines are drawn as SVG paths computed directly from beat positions.
@@ -266,14 +267,24 @@ export const BackgroundGrid: React.FC<{
              * 分数 DPR（Windows 125%/150% 缩放、浏览器缩放）下，1px CSS 线
              * 覆盖 1.25/1.5 物理像素，不同线落在不同亚像素相位上，取整后
              * 有的 1 物理像素、有的 2 物理像素 —— 这就是缩放时"粗细不一"。
-             * 先把 x 吸附到设备像素边界，再配以物理像素线宽，任何缩放下
-             * 每根弱线都恰好 1 物理像素、强线恰好 2 物理像素。
-             * （旧的 +0.5 半像素偏移是 dpr=1 时代与标尺 DOM 盒子对齐用的，
-             * 设备像素吸附后不再需要。）
+             *
+             * 【奇数与偶数物理像素宽的线，中心落点不同 —— 这是关键】
+             * SVG 的描边以给定 x 为中心、向两侧各展开半个线宽。要恰好覆盖整数列：
+             * - 宽 1 物理像素（弱线）：中心必须落在**半格**（k + 0.5）上，覆盖列 k；
+             * - 宽 2 物理像素（强线）：中心必须落在**整格**（k）上，覆盖列 k−1 与 k。
+             * 若两者都用整格吸附，弱线会横跨相邻两列、各覆盖一半 —— 开抗锯齿时
+             * 渲染成两条半亮的线（看起来更糊），开 `crispEdges` 时则由渲染器自行
+             * 取整，落点随机、相邻线粗细不一。这正是本组件此前残留的"网格线发虚"。
              */
             const dpr = window.devicePixelRatio || 1;
-            const deviceSnap = (cssX: number): number => Math.round(cssX * dpr) / dpr;
-            const buildUniformPath = (stepPx: number): string => {
+            /** 中心吸附到设备像素**边界**：供宽 2 物理像素的强线使用。 */
+            const deviceSnapBoundary = (cssX: number): number => Math.round(cssX * dpr) / dpr;
+            /** 中心吸附到设备像素**半格**：供宽 1 物理像素的弱线使用。 */
+            const deviceSnapHalf = (cssX: number): number => (Math.floor(cssX * dpr) + 0.5) / dpr;
+            const buildUniformPath = (
+                stepPx: number,
+                deviceSnap: (cssX: number) => number,
+            ): string => {
                 if (!Number.isFinite(stepPx) || stepPx <= 0) return "";
                 const firstIndex = Math.max(0, Math.floor((visibleStart + offset) / stepPx));
                 const lastIndex = Math.max(firstIndex, Math.ceil((visibleEnd + offset) / stepPx));
@@ -291,7 +302,10 @@ export const BackgroundGrid: React.FC<{
                 return parts.join("");
             };
 
-            const buildExplicitPath = (lineXs: number[] | null): string => {
+            const buildExplicitPath = (
+                lineXs: number[] | null,
+                deviceSnap: (cssX: number) => number,
+            ): string => {
                 if (!lineXs || lineXs.length === 0) return "";
                 const parts: string[] = [];
                 // 二分定位可见范围
@@ -319,20 +333,20 @@ export const BackgroundGrid: React.FC<{
                 return parts.join("");
             };
 
-            // 线宽用物理像素整数：配合 deviceSnap，任意缩放下相邻线粗细一致。
+            // 线宽用物理像素整数，并按奇偶选择对应的中心吸附（见上）。
             paths[0].setAttribute("stroke-width", String(1 / dpr));
             paths[1].setAttribute("stroke-width", String(2 / dpr));
             paths[0].setAttribute(
                 "d",
                 useExplicitLines
-                    ? buildExplicitPath(latest.weakLineXs)
-                    : buildUniformPath(latest.weakStepPx),
+                    ? buildExplicitPath(latest.weakLineXs, deviceSnapHalf)
+                    : buildUniformPath(latest.weakStepPx, deviceSnapHalf),
             );
             paths[1].setAttribute(
                 "d",
                 useExplicitLines
-                    ? buildExplicitPath(latest.strongLineXs)
-                    : buildUniformPath(latest.strongStepPx),
+                    ? buildExplicitPath(latest.strongLineXs, deviceSnapBoundary)
+                    : buildUniformPath(latest.strongStepPx, deviceSnapBoundary),
             );
         },
         [useExplicitLines],
@@ -355,13 +369,21 @@ export const BackgroundGrid: React.FC<{
 
     // 浏览器缩放 / 跨屏拖动会改变 devicePixelRatio：线宽按物理像素取整，
     // dpr 变化后必须重绘一次，否则旧的吸附相位会残留。
+    //
+    // 除 `window.resize` 外还必须订阅 `(resolution: N dppx)`：把窗口拖到另一台
+    // 缩放率不同的显示器上时，CSS 尺寸不变、`resize` 事件不保证触发，而吸附相位
+    // 已经失效 —— 没有这条订阅，网格会停留在旧 dpr 的线宽上。
     useEffect(() => {
         const onResize = () => {
             const vp = resolveDrawViewport();
             draw(vp.scrollLeftPx, vp.scrollTopPx);
         };
         window.addEventListener("resize", onResize);
-        return () => window.removeEventListener("resize", onResize);
+        const unsubscribeDpr = subscribeDevicePixelRatio(onResize);
+        return () => {
+            window.removeEventListener("resize", onResize);
+            unsubscribeDpr();
+        };
     }, [draw, resolveDrawViewport]);
 
     // 绘制必须在 paint 前同步完成（useLayoutEffect）：缩放时网格线的间距

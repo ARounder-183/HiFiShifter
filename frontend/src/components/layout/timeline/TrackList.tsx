@@ -15,6 +15,8 @@ import type { Keybinding } from "../../../features/keybindings/types";
 import type { MessageKey } from "../../../i18n/messages";
 import { useAppSelector } from "../../../app/hooks";
 import { useVisualPlayhead } from "../../../hooks/useVisualPlayhead";
+import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
+import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
 import { formatCursorTime } from "./timeFormat";
 import type { TimeFormatContext } from "./timeFormat";
 import { MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, TRACK_ADD_ROW_HEIGHT } from "./constants";
@@ -444,6 +446,8 @@ const TrackListInner: React.FC<TrackListProps> = ({
     bottomGutterHeightPx = 0,
 }) => {
     const listRef = useRef<HTMLDivElement | null>(null);
+    /** 当前 dpr：渲染期写出的物理像素细线用它，并在 dpr 变化时触发重渲染。 */
+    const dpr = useDevicePixelRatio();
     // 轨道头色条/取色预览需要和时间线画布同一套主题化轨道色。
     const { mode, fontFamily } = useAppTheme();
     const darkMode = mode === "dark";
@@ -1413,7 +1417,13 @@ const TrackListInner: React.FC<TrackListProps> = ({
                         className="absolute left-1 right-1 pointer-events-none z-50"
                         style={{ top: dragUi.indicatorY }}
                     >
-                        <div className="h-px bg-qt-highlight" />
+                        <div
+                            className="bg-qt-highlight"
+                            // 重排落点指示线：取整数个物理像素，任意缩放下粗细恒定
+                            // （`h-px` 是 1 CSS px，在 dpr=1.25/1.5 下会渲染成 1.25/1.5
+                            // 物理像素，边缘发虚）。
+                            style={{ height: wholeDevicePxLength(1, dpr) }}
+                        />
                     </div>
                 ) : null}
                 <div

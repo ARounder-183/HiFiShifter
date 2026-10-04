@@ -34,6 +34,7 @@ import {
     verticalHairlineGeometry,
     wholeDevicePxLength,
 } from "../../../utils/devicePixelLine.ts";
+import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
 import { playheadLineLeftViewportPx } from "../renderKernel/timelineAxis.ts";
 import { clampAxisPosition } from "../../appTooltipPosition";
 
@@ -571,6 +572,11 @@ const TimeRulerInner: React.FC<{
     subscribeViewport,
 }) => {
     const tAny = useMemo(() => t ?? ((key: string) => key), [t]);
+    /**
+     * 当前 dpr（React 形态）：供渲染期写出的**物理像素线宽**使用，并在 dpr 变化时
+     * 触发重渲染（`readDevicePixelRatio()` 只读一次不会重渲染，线宽会停在旧值）。
+     */
+    const dpr = useDevicePixelRatio();
     const useManualTransform = contentRef != null;
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; sec: number } | null>(null);
     /**
@@ -904,7 +910,9 @@ const TimeRulerInner: React.FC<{
                     className="absolute left-0 right-0 pointer-events-none"
                     style={{
                         top: RULER_BASE_HEIGHT_PX,
-                        height: 1,
+                        // 分隔线取整数个物理像素：1 CSS px 在 dpr=1.25/1.5 下是
+                        // 1.25/1.5 物理像素，边缘发虚且随位置忽粗忽细。
+                        height: wholeDevicePxLength(1, dpr),
                         backgroundColor: "var(--qt-border)",
                         opacity: 0.6,
                     }}

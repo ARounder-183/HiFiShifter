@@ -267,9 +267,9 @@ import { getParamEditorWheelAction } from "./pianoRoll/wheelGesture";
 import type { Keybinding } from "../../features/keybindings/types";
 import { pianoKeySound } from "../../utils/PianoKeySound";
 import { computeAutoFollowScrollLeft } from "../../utils/autoFollowScroll";
-import { readDevicePixelRatio } from "../../utils/devicePixelLine";
+import { readDevicePixelRatio, wholeDevicePxLength } from "../../utils/devicePixelLine";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
-import { subscribeDevicePixelRatio } from "../../hooks/useDevicePixelRatio";
+import { subscribeDevicePixelRatio, useDevicePixelRatio } from "../../hooks/useDevicePixelRatio";
 import {
     getVisibleSecondaryParamIds,
     toggleSecondaryParamVisibility,
@@ -2830,6 +2830,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
 
     const viewSizeRef = useRef({ w: 1, h: 1 });
     const [viewSize, setViewSize] = useState({ w: 1, h: 1 });
+    /**
+     * 当前 dpr（React 形态）：仅供**渲染期内联样式**里的物理像素线宽使用。
+     * 命令式绘制路径每帧现读 `readDevicePixelRatio()`，不经此值。
+     */
+    const devicePixelRatio = useDevicePixelRatio();
     const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = useState(false);
     // 参数编辑器的内容绘制在 sticky 视口层中，滚动范围由后面的 spacer 提供。
     // 两个子元素按垂直方向堆叠，因此 scrollWidth 取二者宽度最大值；
@@ -7738,7 +7743,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                         )}
                         <Box
                             style={{
-                                width: 1,
+                                // 竖分隔线：宽度取整数个物理像素，任意缩放下粗细恒定
+                                // （1 CSS px 在 dpr=1.25 下是 1.25 物理像素，边缘必发虚）。
+                                width: wholeDevicePxLength(1, devicePixelRatio),
                                 height: 18,
                                 background: "var(--gray-8)",
                                 marginInline: 4,

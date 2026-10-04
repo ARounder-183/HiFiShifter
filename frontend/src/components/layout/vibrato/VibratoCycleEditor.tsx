@@ -24,6 +24,8 @@ import type { Keybinding } from "../../../features/keybindings/types";
 import { advanceFineAxisDrag, createFineAxisDragState } from "../../../utils/fineAxisDrag";
 import type { FineAxisDragState } from "../../../utils/fineAxisDrag";
 import { readDevicePixelRatio } from "../../../utils/devicePixelLine";
+import { clearCanvasPhysical, rasterize } from "../renderKernel/canvasRaster";
+import { subscribeDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
 import { coalescedEventsOf, pointerKindOf } from "../../../utils/penInput";
 import type { ContactReadoutMode } from "../../../services/api/settings";
 import { AppButton, useRepeatPress } from "../../../ui";
@@ -319,19 +321,28 @@ export function VibratoCycleEditor({
         if (!canvas || !container) return;
 
         const draw = () => {
-            const width = container.clientWidth;
-            if (width <= 0) return;
+            const cssWidth = container.clientWidth;
+            if (cssWidth <= 0) return;
             const height = EDITOR_HEIGHT;
             const dpr = readDevicePixelRatio();
-            canvas.width = Math.round(width * dpr);
-            canvas.height = Math.round(height * dpr);
-            canvas.style.width = `${width}px`;
-            canvas.style.height = `${height}px`;
-
+            // 统一走 `rasterize` 契约：物理尺寸 = `round(css × dpr)`，CSS 尺寸回算为
+            // `physical / dpr`（布局盒与 backing store 严格 1:1，否则合成器重采样
+            // 会让整块编辑器发虚）。清屏必须按物理尺寸做，不能沿用
+            // `clearRect(0,0,cssW,cssH)`（round 向上取整时底部会残留 0~0.5 物理行）。
+            const target = rasterize(canvas, cssWidth, height, dpr);
             const ctx = canvas.getContext("2d");
             if (!ctx) return;
-            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-            ctx.clearRect(0, 0, width, height);
+            ctx.setTransform(target.dpr, 0, 0, target.dpr, 0, 0);
+            clearCanvasPhysical(ctx, target);
+
+            // 绘制坐标系 = 回算后的 CSS 尺寸（与画布样式逐值相等）。
+            const width = target.cssWidthPx;
+            /** 1 物理像素横线的中心 y：落在设备像素的半格上，线体恰好覆盖一整行。 */
+            const hairlineY = (cssY: number): number => (Math.round(cssY * dpr) + 0.5) / dpr;
+            /** 1 物理像素竖线的中心 x（同理）。 */
+            const hairlineX = (cssX: number): number => (Math.round(cssX * dpr) + 0.5) / dpr;
+            /** 1 物理像素的线宽（CSS 单位）。 */
+            const hairlineWidth = 1 / dpr;
 
             const accent = tokenColor("--qt-accent", "#6aa9ff");
             const muted = tokenColor("--qt-text-muted", "#8a8a8a");
@@ -343,21 +354,21 @@ export function VibratoCycleEditor({
 
             // 网格：中线 + 四分线（横），四分位置（纵）。
             ctx.strokeStyle = divider;
-            ctx.lineWidth = 1;
+            ctx.lineWidth = hairlineWidth;
             for (const frac of [0.25, 0.5, 0.75]) {
                 const y = height * frac;
                 ctx.globalAlpha = frac === 0.5 ? 0.9 : 0.4;
                 ctx.beginPath();
-                ctx.moveTo(0, y + 0.5);
-                ctx.lineTo(width, y + 0.5);
+                ctx.moveTo(0, hairlineY(y));
+                ctx.lineTo(width, hairlineY(y));
                 ctx.stroke();
             }
             ctx.globalAlpha = 0.4;
             for (const frac of [0.25, 0.5, 0.75]) {
                 const x = width * frac;
                 ctx.beginPath();
-                ctx.moveTo(x + 0.5, 0);
-                ctx.lineTo(x + 0.5, height);
+                ctx.moveTo(hairlineX(x), 0);
+                ctx.lineTo(hairlineX(x), height);
                 ctx.stroke();
             }
             ctx.globalAlpha = 1;
@@ -401,11 +412,11 @@ export function VibratoCycleEditor({
                 const x = ((bin + 0.5) / n) * width;
                 const value = table[bin] ?? 0;
                 ctx.strokeStyle = accent;
-                ctx.lineWidth = 1;
+                ctx.lineWidth = hairlineWidth;
                 ctx.globalAlpha = 0.75;
                 ctx.beginPath();
-                ctx.moveTo(x, 0);
-                ctx.lineTo(x, height);
+                ctx.moveTo(hairlineX(x), 0);
+                ctx.lineTo(hairlineX(x), height);
                 ctx.stroke();
                 // 当前值上的实心点：一眼看出"这一格被改到哪儿了"。
                 ctx.globalAlpha = 1;
@@ -419,7 +430,13 @@ export function VibratoCycleEditor({
         draw();
         const observer = new ResizeObserver(draw);
         observer.observe(container);
-        return () => observer.disconnect();
+        // dpr 变化同样要重画：画布物理尺寸与半像素吸附都依赖 dpr，而 ResizeObserver
+        // 观察的是 CSS 布局盒 —— 纯 dpr 变化（浏览器缩放 / 换显示器）不会触发它。
+        const unsubscribeDpr = subscribeDevicePixelRatio(draw);
+        return () => {
+            observer.disconnect();
+            unsubscribeDpr();
+        };
     }, [table, disabled, keyboardActive, keyboardBin]);
 
     const pointAt = (event: { clientX: number; clientY: number }) => {
@@ -592,8 +609,16 @@ export function VibratoCycleEditor({
         <div data-testid="vibrato-cycle-editor">
             <div
                 ref={containerRef}
-                className={`w-full ${transforming ? "cursor-move" : "cursor-crosshair"}`}
-                style={{ height: EDITOR_HEIGHT, touchAction: disabled ? undefined : "none" }}
+                className={`w-full overflow-hidden rounded ${transforming ? "cursor-move" : "cursor-crosshair"}`}
+                style={{
+                    height: EDITOR_HEIGHT,
+                    touchAction: disabled ? undefined : "none",
+                    // 边框用**内阴影**而不是 `border`：`border` 在 `box-sizing:
+                    // border-box` 下会吃掉 2px 内容宽，使画布的内容盒比绘制坐标系
+                    // 窄 2px —— 整幅图被水平压缩、命中位置也随之偏移。内阴影不占
+                    // 布局，画布内容盒因此与绘制坐标系严格一致。
+                    boxShadow: "inset 0 0 0 1px var(--qt-border)",
+                }}
                 onPointerDown={handlePointerDown}
                 onPointerMove={handlePointerMove}
                 onPointerUp={endGesture}
@@ -629,8 +654,7 @@ export function VibratoCycleEditor({
                         keyboardBaselineRef.current = null;
                         setKeyboardActive(false);
                     }}
-                    className="block w-full rounded border border-qt-border"
-                    style={{ height: EDITOR_HEIGHT }}
+                    className="block w-full h-full"
                 />
             </div>
             <Flex align="center" gap="2" mt="2" wrap="wrap">

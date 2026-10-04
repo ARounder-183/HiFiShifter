@@ -10,6 +10,8 @@ import {
     type SnapHighlightKind,
 } from "../../../utils/snapHighlight";
 import { NEW_TRACK_SENTINEL } from "./constants";
+import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
+import { verticalHairlineGeometry } from "../../../utils/devicePixelLine";
 
 /**
  * 吸附竖线高亮层（轨道视图）。
@@ -101,6 +103,11 @@ const SnapEntryGroup: React.FC<{
     // 光晕只适合暗底：浅色主题下吸附线/亮条用无光晕的纯色。
     const { mode: themeMode } = useAppTheme();
     const darkMode = themeMode === "dark";
+    /**
+     * 当前 dpr：吸附竖线/亮边的物理像素几何靠它，并在 dpr 变化时触发重渲染
+     * （必须在下方提前 return 之前调用）。
+     */
+    const dpr = useDevicePixelRatio();
     if (entry.markers.length === 0) return null;
 
     // ── 计算连线的纵向范围 ──
@@ -167,45 +174,54 @@ const SnapEntryGroup: React.FC<{
         <>
             {/* 主线：连接吸附对象与被吸附对象的吸附处 */}
             {rangeHeight > 0
-                ? lineXs.map((x, index) => (
-                      <div
-                          key={`line-${index}`}
-                          className="absolute"
-                          style={{
-                              left: x - 1,
-                              top: rangeTop,
-                              width: 2,
-                              height: rangeHeight,
-                              backgroundColor: color,
-                              opacity: darkMode ? 0.85 : 0.7,
-                              boxShadow: darkMode
-                                  ? `0 0 6px 1px color-mix(in oklab, ${color} 60%, transparent)`
-                                  : "none",
-                          }}
-                      />
-                  ))
+                ? lineXs.map((x, index) => {
+                      // 主线宽 2 CSS px 的意图：左缘吸附到设备像素、宽度取整数个
+                      // 物理像素（见 `verticalHairlineGeometry`），任意缩放下粗细恒定。
+                      const line = verticalHairlineGeometry(x, 2, dpr);
+                      return (
+                          <div
+                              key={`line-${index}`}
+                              className="absolute"
+                              style={{
+                                  left: line.left,
+                                  top: rangeTop,
+                                  width: line.width,
+                                  height: rangeHeight,
+                                  backgroundColor: color,
+                                  opacity: darkMode ? 0.85 : 0.7,
+                                  boxShadow: darkMode
+                                      ? `0 0 6px 1px color-mix(in oklab, ${color} 60%, transparent)`
+                                      : "none",
+                              }}
+                          />
+                      );
+                  })
                 : null}
             {/* 行内亮边：吸附处落在具体 Clip / 轨道行时的贴边高亮。
                 光晕只保留在深色主题（暗底上光晕可读）；浅色主题下去掉光晕、
                 用纯色细条，避免饱和色在浅底上糊成一片。 */}
-            {accents.map((accent) => (
-                <div
-                    key={accent.key}
-                    className="absolute rounded-[1px]"
-                    style={{
-                        left: accent.left - 1.5,
-                        top: accent.top,
-                        width: 3,
-                        height: accent.height,
-                        backgroundColor: darkMode
-                            ? `color-mix(in oklab, ${color} 70%, white 30%)`
-                            : color,
-                        boxShadow: darkMode
-                            ? `0 0 8px 2px color-mix(in oklab, ${color} 75%, transparent)`
-                            : "none",
-                    }}
-                />
-            ))}
+            {accents.map((accent) => {
+                // 行内亮边宽 3 CSS px 的意图：同上，左缘与宽度都落在设备像素上。
+                const edge = verticalHairlineGeometry(accent.left, 3, dpr);
+                return (
+                    <div
+                        key={accent.key}
+                        className="absolute rounded-[1px]"
+                        style={{
+                            left: edge.left,
+                            top: accent.top,
+                            width: edge.width,
+                            height: accent.height,
+                            backgroundColor: darkMode
+                                ? `color-mix(in oklab, ${color} 70%, white 30%)`
+                                : color,
+                            boxShadow: darkMode
+                                ? `0 0 8px 2px color-mix(in oklab, ${color} 75%, transparent)`
+                                : "none",
+                        }}
+                    />
+                );
+            })}
         </>
     );
 };
