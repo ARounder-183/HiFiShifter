@@ -43,9 +43,8 @@
    | 既有失败项 | **不要修**。4 个全部在 `audio_engine::snapshot::tests`，同一原因：测试硬编码 POSIX 路径 `/tmp/hifishifter-*.aiff`，在 Windows 上解析为 `E:\tmp\…`，而该目录不存在，于是 `std::fs::write` 报 `Os { code: 3, kind: NotFound }`。与探针无关，改动前后一致。 |
 
    > **开发分支 `codex/ara-plugin` 上的基线**（内核抽取开始后）：
-   > `backend/src-tauri` 的 lib 单测变成 **765 passed / 4 failed / 1 ignored**，
-   > 少掉的 7 个是随 `fade_curves` 模块一起搬到 `backend/hifishifter-kernel` 的单测；
-   > 那 7 个在新 crate 里 `cargo test` 全通过（`7 passed`）。
+   > `backend/src-tauri` 的 lib 单测当前是 **762 passed / 4 failed / 1 ignored**，
+   > `backend/hifishifter-kernel` 是 **10 passed**（`fade_curves` 7 + `byte_budget_cache` 3）。
    > 合计仍是 **772 passed / 4 failed / 1 ignored**（加集成测试 17 个通过）。
    > 后续每搬一个模块，都要按"app 侧减少、内核侧增加、合计不变"核对。
 

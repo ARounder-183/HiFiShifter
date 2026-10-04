@@ -21,4 +21,6 @@
 
 pub mod fade_curves;
 
+pub mod byte_budget_cache;
 pub mod events;
+pub mod util;

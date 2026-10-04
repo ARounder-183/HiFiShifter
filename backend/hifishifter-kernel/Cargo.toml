@@ -10,4 +10,5 @@ description = "HiFiShifter 的离线音频内核：不依赖 Tauri，也不依�
 [workspace]
 
 [dependencies]
+lru = "0.12"
 serde_json = "1"

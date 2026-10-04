@@ -1,4 +1,6 @@
-pub(crate) mod byte_budget_cache;
+// 已迁到 `hifishifter-kernel`。再导出，`crate::audio_engine::byte_budget_cache::…`
+// 与模块内 `super::byte_budget_cache::…` 的路径都保持不变。
+pub(crate) use hifishifter_kernel::byte_budget_cache;
 mod engine;
 mod io;
 // `pub(crate)`：`renderer::chain` 的一致性测试需要跨模块调用
@@ -8,7 +10,7 @@ pub(crate) mod metronome;
 mod resource_manager;
 pub(crate) mod snapshot;
 pub(crate) mod types;
-mod util;
+pub(crate) use hifishifter_kernel::util;
 
 pub use engine::AudioEngine;
 #[allow(unused_imports)]

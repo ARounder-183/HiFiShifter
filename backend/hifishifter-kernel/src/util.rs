@@ -1,5 +1,5 @@
 #[allow(dead_code)]
-pub(crate) fn beat_to_sec(beat: f64, bpm: f64) -> f64 {
+pub fn beat_to_sec(beat: f64, bpm: f64) -> f64 {
     let bpm = if bpm.is_finite() && bpm > 0.0 {
         bpm
     } else {
@@ -8,18 +8,18 @@ pub(crate) fn beat_to_sec(beat: f64, bpm: f64) -> f64 {
     beat * 60.0 / bpm
 }
 
-pub(crate) fn clamp11(x: f32) -> f32 {
+pub fn clamp11(x: f32) -> f32 {
     x.clamp(-1.0, 1.0)
 }
 
-pub(crate) fn quantize_i64(x: f64, scale: f64) -> i64 {
+pub fn quantize_i64(x: f64, scale: f64) -> i64 {
     if !x.is_finite() {
         return 0;
     }
     (x * scale).round() as i64
 }
 
-pub(crate) fn quantize_u32(x: f64, scale: f64) -> u32 {
+pub fn quantize_u32(x: f64, scale: f64) -> u32 {
     if !x.is_finite() {
         return 0;
     }
