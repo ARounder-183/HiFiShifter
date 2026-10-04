@@ -1,0 +1,16 @@
+{
+  "_probe": "HiFiShifter ARA probe dump",
+  "documentName": "testAudioFileChunkSaving",
+  "audioSources": [
+    {"persistentID": "audioSourceTestPersistentID 0", "name": "Updated Audio Source Name", "sampleRate": 44100, "sampleCount": 220500, "durationSeconds": 5, "channelCount": 1, "merits64BitSamples": true, "sampleAccessEnabled": true, "deactivatedForUndoHistory": false, "modificationCount": 1}
+  ],
+  "musicalContexts": [
+    {"name": "ARA Test Musical Context", "orderIndex": 0, "regionSequences": [{"name": "Track 1", "orderIndex": 0, "playbackRegionCount": 1}]}
+  ],
+  "audioModifications": [
+    {"persistentID": "audioModificationTestPersistentID 0", "name": "Test audio modification 0", "audioSourcePersistentID": "audioSourceTestPersistentID 0", "playbackRegionCount": 1}
+  ],
+  "playbackRegions": [
+    {"name": "Test playback region", "audioSourcePersistentID": "audioSourceTestPersistentID 0", "audioModificationPersistentID": "audioModificationTestPersistentID 0", "startInModificationTime": 0, "durationInModificationTime": 5, "startInPlaybackTime": 0, "durationInPlaybackTime": 5, "isTimestretchEnabled": false, "isTimeStretchReflectingTempo": false, "hasContentBasedFadeAtHead": false, "hasContentBasedFadeAtTail": false}
+  ]
+}

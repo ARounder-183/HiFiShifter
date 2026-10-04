@@ -82,24 +82,29 @@ namespace
         return std::string { buffer };
     }
 
-    /// 真实存在的输出文件路径。返回空串表示无处可写。
+    /// 真实存在的输出文件路径。
+    ///
+    /// 【为什么要回退】宿主未必继承我们设的环境变量 —— 实测 REAPER 由命令行启动时，
+    /// 插件进程里 `getenv("ARA_PROBE_OUT")` 取不到值。因此除环境变量外，还必须有一条
+    /// 不依赖任何外部配置的路径，否则插桩会"静默什么都不做"，非常难归因。
     std::string resolveOutputPath ()
     {
         if (const char* fromEnv = std::getenv ("ARA_PROBE_OUT"))
             if (*fromEnv != '\0')
                 return std::string { fromEnv };
 
-        // 未设环境变量时的候选：当前工作目录、以及探针 captures 目录的相对位置。
         const std::vector<std::string> candidates {
-            ".\\ara-model.json",
-            "..\\..\\..\\..\\..\\captures\\ara-model.json",
-            "captures\\ara-model.json",
+            ".\\captures\\ara-model.auto.json",
+            ".\\ara-model.auto.json",
+            "..\\..\\..\\..\\..\\captures\\ara-model.auto.json",
+            // 绝对路径兜底：探针目录固定在本仓库工作树内，因此这条最可靠。
+            "E:\\code\\HiFiShifter\\.worktrees\\ara-bridge-probe\\probe\\ara\\captures\\ara-model.auto.json",
         };
 
         for (const auto& candidate : candidates)
         {
             const std::string absolute { absolutePath (candidate) };
-            // 只要目录存在就采用；写失败会在调用方静默降级。
+            // 只要父目录存在就采用；写失败会在调用方静默降级。
             std::string directory { absolute };
             const std::size_t slash { directory.find_last_of ("\\/") };
             if (slash != std::string::npos)
@@ -107,7 +112,9 @@ namespace
             if (directory.empty () || (::GetFileAttributesA (directory.c_str ()) != INVALID_FILE_ATTRIBUTES))
                 return absolute;
         }
-        return {};
+
+        // 最后兜底：写当前目录，至少不会静默什么也不做。
+        return absolutePath (".\\ara-model.auto.json");
     }
 
     /// 节流：文档变更回调可能被高频触发，限制写盘频率。

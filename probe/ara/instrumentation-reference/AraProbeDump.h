@@ -33,7 +33,11 @@ namespace ARA
 //!       audioSources / musicalContexts(regionSequences) / audioModifications /
 //!       playbackRegions，拼成 JSON 后写盘。
 //! 作用：产出 Task 1 需要的"宿主到底给了什么"的一手证据。
-//! 特殊说明：本函数在文档变更回调（主线程）中调用，可能被高频触发；
-//!       实现内部做了节流，见 .cpp。失败只写日志，绝不抛异常影响宿主。
+//! 特殊说明：
+//!   - 输出路径解析顺序：环境变量 `ARA_PROBE_OUT` → 当前工作目录下的
+//!     `captures\ara-model.auto.json` → `ara-model.json`。**每次调用整体重写**。
+//!   - 本函数在文档变更回调（主线程）中调用，可能被高频触发；实现内部做了
+//!     400ms 节流。失败静默降级，绝不把异常抛回宿主。
+//!   - 探针代码是一次性产物，不属于任何产品代码路径。
 //! 参数：documentController —— 当前文档控制器；不得为 nullptr。
 void AraProbeDumpToFile (ARA::PlugIn::DocumentController* documentController) noexcept;
