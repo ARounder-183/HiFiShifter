@@ -10,11 +10,36 @@
  *    标签的可见性会随滚动位置改变（右边缘的标签永远不被隐藏，一进入切片内部就可能
  *    被隐藏）—— "标尺文字时有时无"。
  * 3. **绝不整片无标签**：任何缩放 × 网格组合下，视口内至少有一个标签。
+ *
+ * ────────────────────────────────────────────────────────────────────────────
+ * 下半部分（`标签栅格` 各 suite）是"缩放时某段之内刻度与文本消失"的回归。
+ *
+ * 【症状】滚轮水平缩放时，标尺自身的刻度线与文本会在**某个缩放值下、某一段之内**
+ * 消失，再放大/缩小或水平滚动一定距离后又回来。不是渲染丢失 —— `TimeRulerMarks`
+ * 只渲染 `showLabel` 的刻度，所以"刻度与文本一起消失"等价于"生成器在该处没给出
+ * 带标签的刻度"。
+ *
+ * 【三个可复现的离散化缺陷（均与 DPR 无关）】
+ * a. **密度兜底按生成范围计数**：生成范围 = 视口 + 两侧缓冲，比视口宽约 3.5 倍，
+ *    于是同一缩放下 `stepBeats` 会随滚动位置整档翻倍（实测 pxPerSec=40 时网格
+ *    间距在 scrollLeft 704→768 之间从 20px 跳到 40px），标签栅格随之跳档 —— 这是
+ *    "滚动一下又回来"的直接机制；
+ * b. **Tempo Map 段首死区**：段内 stride 用 `round(segStep / stepBeats)` 量化成
+ *    非 2 的幂，且跨段最小间距约束"拒绝候选却不推进"，段边界出现 290px / 785px
+ *    的空洞（标称间距的 2.40 倍）；
+ * c. **附点/三连音网格的双栅格**：标签按"拍整除"判定，标签步长与网格步长不整除
+ *    时标签整批落不到网格线上，实际间距被放大到 3.00 倍。
+ *
+ * 修复后：标签栅格取"网格步长的整数倍"（优先与音乐候选阶梯对齐，附点/三连音
+ * 网格回退到 2 的幂倍），判定按**索引**取模（精确、与 swing 平移无关），密度兜底
+ * 改为按**视口跨度**解析估算（与滚动位置无关）。
  */
 import { describe, expect, it } from "vitest";
 
-import { buildTimelineTicks } from "./buildTimelineTicks.js";
+import { buildTimelineTicks, TICK_WINDOW_STEP_PX } from "./buildTimelineTicks.js";
 import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
+import { selectRulerStep } from "../timeFormat.js";
+import { tempoMapSegments } from "../../../../utils/tempoMap.js";
 import type { TempoMap } from "../../../../utils/tempoMap.ts";
 
 function axisOf(pxPerSec: number, scrollLeftPx: number, viewportWidthPx = 1200) {
@@ -157,6 +182,326 @@ describe("标签版式", () => {
                     pxPerSec,
                     labeled: true,
                 });
+            }
+        }
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 标签栅格稳定性（"缩放时某段之内刻度与文本消失"的回归）
+// ════════════════════════════════════════════════════════════════════════════
+
+/** 缩放范围与 `constants.ts` 的 MIN_PX_PER_SEC / MAX_PX_PER_SEC 一致。 */
+const MIN_PPS = 4;
+const MAX_PPS = 8000;
+
+/** 标签让位阈值（与 `RULER_LABEL_HIDDEN_GAP_PX` 同值）：空洞判据的余量。 */
+const YIELD_PX = 26;
+
+interface LabelGridCfg {
+    bpm: number;
+    beatsPerBar: number;
+    grid: string;
+    minLabelSpacingPx: number;
+    minGridSpacingPx: number;
+    swingPercent: number;
+    viewportWidth: number;
+    tempoMap: TempoMap | null;
+}
+
+/** 三段式 Tempo Map：段边界与 BPM 变化都落在视口内。 */
+function threeSegmentTempoMap(): TempoMap {
+    return {
+        points: [
+            { id: "p0", positionSec: 0, bpm: 120, timeSignature: { numerator: 4, denominator: 4 } },
+            { id: "p1", positionSec: 40, bpm: 96, timeSignature: { numerator: 4, denominator: 4 } },
+            {
+                id: "p2",
+                positionSec: 90,
+                bpm: 150,
+                timeSignature: { numerator: 4, denominator: 4 },
+            },
+        ],
+    };
+}
+
+function labelGridCfg(patch: Partial<LabelGridCfg>): LabelGridCfg {
+    return {
+        bpm: 120,
+        beatsPerBar: 4,
+        grid: "1/4",
+        minLabelSpacingPx: 110,
+        minGridSpacingPx: 8,
+        swingPercent: 0,
+        viewportWidth: 1500,
+        tempoMap: null,
+        ...patch,
+    };
+}
+
+/** 复刻生产调用方式：量化锚点 + 宽度补一个量化步长（见 `createTickAxis`）。 */
+function labelGridTicks(cfg: LabelGridCfg, pxPerSec: number, scrollLeft: number) {
+    const anchor = Math.floor(scrollLeft / TICK_WINDOW_STEP_PX) * TICK_WINDOW_STEP_PX;
+    return buildTimelineTicks({
+        axis: createTimelineAxis({
+            pxPerSec,
+            scrollLeftPx: anchor,
+            viewportWidthPx: cfg.viewportWidth + TICK_WINDOW_STEP_PX,
+        }),
+        bpm: cfg.bpm,
+        beatsPerBar: cfg.beatsPerBar,
+        grid: cfg.grid,
+        primaryUnit: "barBeats",
+        secondaryUnit: "clock",
+        minLabelSpacingPx: cfg.minLabelSpacingPx,
+        minGridSpacingPx: cfg.minGridSpacingPx,
+        swingPercent: cfg.swingPercent,
+        tempoMap: cfg.tempoMap,
+    });
+}
+
+/** 视口内带标签刻度的内容坐标（升序）。 */
+function visibleLabelXs(cfg: LabelGridCfg, pxPerSec: number, scrollLeft: number): number[] {
+    const left = scrollLeft;
+    const right = scrollLeft + cfg.viewportWidth;
+    return labelGridTicks(cfg, pxPerSec, scrollLeft)
+        .filter((tick) => tick.showLabel && tick.contentPx >= left && tick.contentPx <= right)
+        .map((tick) => tick.contentPx)
+        .sort((a, b) => a - b);
+}
+
+function gapsOf(xs: number[]): number[] {
+    const gaps: number[] = [];
+    for (let i = 1; i < xs.length; i += 1) gaps.push(xs[i] - xs[i - 1]);
+    return gaps;
+}
+
+/**
+ * 该内容坐标所在段的"标称"标签间距 —— 由 `selectRulerStep` 独立算出的参考值，
+ * 与实现无关，用来判断实际间距是否被放大成空洞。
+ */
+function nominalSpacingPx(cfg: LabelGridCfg, pxPerSec: number, contentPx: number): number {
+    const pxPerBeat = (60 / cfg.bpm) * pxPerSec;
+    if (!cfg.tempoMap) {
+        return (
+            selectRulerStep({
+                pxPerBeat,
+                grid: cfg.grid,
+                beatsPerBar: cfg.beatsPerBar,
+                minLabelSpacingPx: cfg.minLabelSpacingPx,
+            }) * pxPerBeat
+        );
+    }
+    const sec = contentPx / pxPerSec;
+    const segments = tempoMapSegments(cfg.tempoMap, sec + 1);
+    let segment = segments[0];
+    for (const candidate of segments) {
+        if (sec >= candidate.startSec - 1e-9) segment = candidate;
+    }
+    const segPxPerBeat = (60 / Math.max(1, segment.point.bpm)) * pxPerSec;
+    return (
+        selectRulerStep({
+            pxPerBeat: segPxPerBeat,
+            grid: cfg.grid,
+            beatsPerBar: Math.max(1, segment.beatsPerBar),
+            minLabelSpacingPx: cfg.minLabelSpacingPx,
+        }) * segPxPerBeat
+    );
+}
+
+describe("标签栅格：视口内不得出现空洞", () => {
+    it("★ 缩放 × 滚动 × 网格 × 拍号 × swing × 间距设定 × Tempo Map", () => {
+        const configs: LabelGridCfg[] = [];
+        for (const grid of ["1/4", "1/8", "1/8d", "1/8t"]) {
+            for (const beatsPerBar of [3, 4]) {
+                for (const swingPercent of [0, 50]) {
+                    for (const minLabelSpacingPx of [40, 110, 320]) {
+                        for (const tempoMap of [null, threeSegmentTempoMap()]) {
+                            configs.push(
+                                labelGridCfg({
+                                    grid,
+                                    beatsPerBar,
+                                    swingPercent,
+                                    minLabelSpacingPx,
+                                    tempoMap,
+                                }),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let worst = { ratio: 0, detail: "" };
+        let checked = 0;
+        for (const cfg of configs) {
+            for (let i = 0; i < 32; i += 1) {
+                const pxPerSec = MIN_PPS * Math.pow(MAX_PPS / MIN_PPS, i / 31);
+                for (const scrollLeft of [0, 1234]) {
+                    const xs = visibleLabelXs(cfg, pxPerSec, scrollLeft);
+                    if (xs.length < 4) continue;
+                    const gaps = gapsOf(xs);
+                    const minGap = Math.min(...gaps);
+                    const maxGap = Math.max(...gaps);
+                    // 上限 = max(相邻最小间距, 标称间距) 的 2 倍 + 让位阈值。
+                    // 2 倍来自候选阶梯的固有粒度（相邻档位是 2 的幂）；让位阈值来自
+                    // "间距不足时左侧让位"这一条。旧实现在此判据下最坏 2.40 倍。
+                    const bound =
+                        Math.max(2 * minGap, 2 * nominalSpacingPx(cfg, pxPerSec, xs[0])) + YIELD_PX;
+                    const ratio = maxGap / bound;
+                    checked += 1;
+                    if (ratio > worst.ratio) {
+                        worst = {
+                            ratio,
+                            detail: `${JSON.stringify({
+                                grid: cfg.grid,
+                                beatsPerBar: cfg.beatsPerBar,
+                                swingPercent: cfg.swingPercent,
+                                minLabelSpacingPx: cfg.minLabelSpacingPx,
+                                tempoMap: cfg.tempoMap ? "map" : null,
+                            })} pxPerSec=${pxPerSec.toFixed(2)} scrollLeft=${scrollLeft} maxGap=${maxGap.toFixed(0)} minGap=${minGap.toFixed(0)} bound=${bound.toFixed(0)}`,
+                        };
+                    }
+                }
+            }
+        }
+        expect(checked).toBeGreaterThan(500);
+        expect(worst.ratio, `最坏空洞：${worst.detail}`).toBeLessThanOrEqual(1);
+    });
+});
+
+describe("标签栅格：位置不得随滚动变化", () => {
+    it("★ 同一缩放值下，固定内容窗口内的刻度与标签集合恒定", () => {
+        const cases: Array<[string, LabelGridCfg]> = [
+            ["均匀网格", labelGridCfg({})],
+            ["均匀网格 1/8d", labelGridCfg({ grid: "1/8d" })],
+            ["Tempo Map", labelGridCfg({ tempoMap: threeSegmentTempoMap() })],
+            ["Tempo Map 1/8", labelGridCfg({ grid: "1/8", tempoMap: threeSegmentTempoMap() })],
+        ];
+        for (const [name, cfg] of cases) {
+            let unstableTicks = 0;
+            let unstableLabels = 0;
+            for (let i = 0; i < 120; i += 1) {
+                const pxPerSec = MIN_PPS * Math.pow(MAX_PPS / MIN_PPS, i / 119);
+                const tickSignatures = new Set<string>();
+                const labelSignatures = new Set<string>();
+                // 四个锚点的生成范围都覆盖查询窗口 [0, 1200]，因此窗口内的刻度
+                // 必须逐位相同 —— 否则就是"滚动让刻度/标签忽有忽无"。
+                for (const anchor of [0, 256, 512, 768]) {
+                    const inWindow = labelGridTicks(cfg, pxPerSec, anchor).filter(
+                        (tick) => tick.contentPx >= 0 && tick.contentPx <= 1200,
+                    );
+                    tickSignatures.add(
+                        JSON.stringify(
+                            inWindow.map((tick) => Math.round(tick.contentPx * 100) / 100),
+                        ),
+                    );
+                    labelSignatures.add(
+                        JSON.stringify(
+                            inWindow
+                                .filter((tick) => tick.showLabel)
+                                .map((tick) => Math.round(tick.contentPx * 100) / 100),
+                        ),
+                    );
+                }
+                if (tickSignatures.size > 1) unstableTicks += 1;
+                if (labelSignatures.size > 1) unstableLabels += 1;
+            }
+            expect(unstableTicks, `${name}: ${unstableTicks}/120 个缩放值下刻度随滚动变化`).toBe(0);
+            expect(unstableLabels, `${name}: ${unstableLabels}/120 个缩放值下标签随滚动变化`).toBe(
+                0,
+            );
+        }
+    });
+});
+
+describe("标签栅格：附点 / 三连音网格必须均匀", () => {
+    it("★ 无 Tempo Map 时标签间距 max/min 恒为 1", () => {
+        for (const grid of ["1/8d", "1/8t", "1/4t", "1/16d"]) {
+            let worst = 0;
+            let detail = "";
+            for (let i = 0; i < 120; i += 1) {
+                const pxPerSec = MIN_PPS * Math.pow(MAX_PPS / MIN_PPS, i / 119);
+                const cfg = labelGridCfg({ grid });
+                const xs = visibleLabelXs(cfg, pxPerSec, 0);
+                if (xs.length < 4) continue;
+                const gaps = gapsOf(xs);
+                const ratio = Math.max(...gaps) / Math.min(...gaps);
+                if (ratio > worst) {
+                    worst = ratio;
+                    detail = `grid=${grid} pxPerSec=${pxPerSec.toFixed(2)} gaps=${[
+                        ...new Set(gaps.map((g) => g.toFixed(0))),
+                    ].join("/")}`;
+                }
+            }
+            // 旧实现：标签步长与网格步长不整除，标签只能落在两者公倍数的位置，
+            // 间距在 1× 与 2× 之间交替（实测最坏 3.00 倍）。
+            expect(worst, detail).toBeLessThanOrEqual(1.001);
+        }
+    });
+});
+
+describe("网格步长不得随滚动位置变化", () => {
+    it("★ 同一缩放值下，视口内的网格线间距恒定", () => {
+        for (const pxPerSec of [12, 25, 40, 120]) {
+            const spacings = new Set<string>();
+            for (let scrollLeft = 0; scrollLeft <= 20000; scrollLeft += 64) {
+                const cfg = labelGridCfg({});
+                const left = scrollLeft;
+                const right = scrollLeft + cfg.viewportWidth;
+                const xs = labelGridTicks(cfg, pxPerSec, scrollLeft)
+                    .filter((tick) => tick.contentPx >= left && tick.contentPx <= right)
+                    .map((tick) => tick.contentPx);
+                const gaps = gapsOf(xs);
+                if (gaps.length === 0) continue;
+                gaps.sort((a, b) => a - b);
+                spacings.add(gaps[Math.floor(gaps.length / 2)].toFixed(1));
+            }
+            // 旧实现：密度兜底按**生成范围**计数，滚动让缓冲变长时步长整档翻倍
+            // （pxPerSec=40 实测 20px ↔ 40px 两档）。
+            expect([...spacings], `pxPerSec=${pxPerSec} 出现多档网格间距`).toHaveLength(1);
+        }
+    });
+});
+
+describe("swing 打开时标签落在未被平移的线上", () => {
+    it("★ 带标签刻度的拍值必须是整数（否则文字会渲染成 1.2.300）", () => {
+        for (const grid of ["1/4", "1/8"]) {
+            for (const swingPercent of [25, 50, 100]) {
+                for (const pxPerSec of [20, 60, 200, 800]) {
+                    const cfg = labelGridCfg({ grid, swingPercent, minLabelSpacingPx: 110 });
+                    const labeled = labelGridTicks(cfg, pxPerSec, 0).filter(
+                        (tick) => tick.showLabel && tick.contentPx >= 0 && tick.contentPx <= 1500,
+                    );
+                    expect(labeled.length).toBeGreaterThan(0);
+                    for (const tick of labeled) {
+                        expect(
+                            Math.abs(tick.beat - Math.round(tick.beat)),
+                            `grid=${grid} swing=${swingPercent} pxPerSec=${pxPerSec} beat=${tick.beat}`,
+                        ).toBeLessThan(1e-6);
+                    }
+                }
+            }
+        }
+    });
+});
+
+describe("Tempo Map 变化点必须带标签", () => {
+    it("★ 每个位于视口内的变化点都有 showLabel 刻度", () => {
+        const tempoMap = threeSegmentTempoMap();
+        for (const pxPerSec of [8, 12.11, 20, 40, 90]) {
+            for (const scrollLeft of [0, 300, 800]) {
+                const cfg = labelGridCfg({ tempoMap });
+                const ticks = labelGridTicks(cfg, pxPerSec, scrollLeft);
+                for (const point of tempoMap.points) {
+                    const px = point.positionSec * pxPerSec;
+                    if (px < scrollLeft || px > scrollLeft + cfg.viewportWidth) continue;
+                    const hit = ticks.find((tick) => Math.abs(tick.contentPx - px) < 0.5);
+                    expect(hit, `变化点 ${point.positionSec}s 处没有刻度`).toBeDefined();
+                    expect(hit?.showLabel, `变化点 ${point.positionSec}s 处刻度没有标签`).toBe(
+                        true,
+                    );
+                }
             }
         }
     });

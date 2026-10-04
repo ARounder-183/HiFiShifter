@@ -24,12 +24,17 @@
 
 import type { GridSize } from "../../../../features/session/sessionTypes.ts";
 import type { TempoMap } from "../../../../utils/tempoMap.ts";
-import { buildTempoGridLines, secToBeat, tempoMapSegments } from "../../../../utils/tempoMap.ts";
+import {
+    buildTempoGridLines,
+    pointIndexAtSec,
+    secToBeat,
+    tempoMapSegments,
+} from "../../../../utils/tempoMap.ts";
 import type { TimeUnit, TimeUnitChoice } from "../timeFormat.ts";
 import {
     formatRulerTick,
     formatTempoRulerTick,
-    selectRulerStep,
+    rulerStepCandidates,
     type TimeFormatContext,
 } from "../timeFormat.ts";
 import { gridStepBeats } from "../grid.ts";
@@ -46,9 +51,18 @@ import { secToContentPx, type TimelineAxis } from "../../renderKernel/timelineAx
 const MAX_WEAK_GRID_LINES = 160;
 
 /**
- * 标尺隐藏标签的间距阈值（px）：相邻带标签刻度的间距低于它时，渲染层
- * （TimeRulerMarks）把左侧标签整体隐藏，保证右侧标签完整可见。
- * 步长选择与变化点标签的让位判定共用该值，避免两处阈值漂移。
+ * 标尺标签的让位阈值（px）：相邻带标签刻度的间距低于它时，左侧标签让位
+ * （渲染层不渲染，生成期也把它标记为 `showLabel: false`），保证右侧标签完整可见。
+ *
+ * 【为什么是"最小可读宽度"而不是用户设定的标签间距】让位的目的是**避免文字
+ * 重叠**，不是预留一整个标签位。旧实现把变化点的让位半径取成
+ * `max(minLabelSpacingPx, 26)`（默认 110px、可调到 320px），一个变化点就会清掉
+ * 左右共 2×320px 内的全部常规标签 —— 实测在 121px 标称间距下挖出 290px 的空洞
+ * （2.40 倍）、327px 下挖出 785px（2.40 倍）。用户看到的就是"某段之内的标尺
+ * 刻度线与文本消失"，且是否触发取决于缩放档位，于是放大/缩小或滚动又"回来"。
+ *
+ * 标签自身的宽度由 `TimelineTick.labelMaxWidth`（到下一个保留标签的间距 − 6）
+ * 单独保证，与本阈值各司其职。
  */
 export const RULER_LABEL_HIDDEN_GAP_PX = 26;
 
@@ -207,7 +221,7 @@ export function buildTimelineTicks(args: {
         strongStride = selectStrongGridBarMultiple(pxPerBeat * beatsPerBar, strongSpacing);
     }
 
-    // ── 2. 生成 + 密度兜底 ─────────────────────────────────────────
+    // ── 2. 生成 ────────────────────────────────────────────────────
     const buildLines = () =>
         buildTempoGridLines({
             startSec,
@@ -233,53 +247,100 @@ export function buildTimelineTicks(args: {
         });
     };
 
-    let lines = buildFilteredLines();
+    // ── 2b. 密度兜底（解析式，与滚动位置无关）─────────────────────
+    // 旧实现按**生成范围**里的实际条数加粗。生成范围 = 视口 + 两侧各
+    // `max(320, viewportWidthPx / 2)` 的缓冲，比视口宽约 3.5 倍；而预算
+    // `MAX_WEAK_GRID_LINES` 是按**视口**定的。于是同一缩放下，只要滚动位置让
+    // 缓冲"变长"（左端不再被 0 钳住），条数就越过阈值、`stepBeats` 整档翻倍 ——
+    // 实测 pxPerSec=40、视口 1500 时，网格步长在 scrollLeft 704→768 之间从
+    // 20px 跳到 40px。那正是"水平滚动一定距离后标尺刻度与文本又回来了"的根因：
+    // 步长跳档 ⇒ 标签栅格随之跳档。
+    //
+    // 现在按**视口跨度**解析估算条数：视口宽度与预算都不随滚动变化，于是
+    // `stepBeats` / `strongStride` 只依赖 (缩放, 网格设置, 视口宽, Tempo Map)。
+    // 无 Tempo Map 时这两条循环恒不触发（`selectUniformGridStepBeats` /
+    // `selectStrongGridBarMultiple` 已按视口宽度保证达标），保留它们只是把
+    // 不变量写死在代码里。
     const maxWeakLines = MAX_WEAK_GRID_LINES;
     const maxStrongLines = Math.max(1, Math.ceil(maxWeakLines / 3));
-    // 分段对齐会让按跨度估算的步长偏细，按实际条数逐步加粗直到达标。
+    const viewportSpanBeats = hasTempoMap
+        ? Math.max(
+              1e-9,
+              secToBeat(tempoMap, startSec + axis.viewportWidthPx / pxPerSec, bpm) -
+                  secToBeat(tempoMap, startSec, bpm),
+          )
+        : axis.viewportWidthPx / pxPerBeat;
     let guard = 0;
-    while (
-        guard < 64 &&
-        (lines.filter((line) => !line.isBar).length > maxWeakLines ||
-            lines.filter((line) => line.isBar).length > maxStrongLines)
-    ) {
+    while (guard < 64 && viewportSpanBeats / stepBeats > maxWeakLines) {
+        stepBeats *= 2;
         guard += 1;
-        if (lines.filter((line) => !line.isBar).length > maxWeakLines) {
-            stepBeats *= 2;
-        } else {
-            strongStride *= 2;
-        }
-        lines = buildFilteredLines();
     }
+    while (guard < 64 && viewportSpanBeats / (beatsPerBar * strongStride) > maxStrongLines) {
+        strongStride *= 2;
+        guard += 1;
+    }
+    const lines = buildFilteredLines();
 
-    // ── 3. 标签步长与格式化 ────────────────────────────────────────
-    // 纯函数：只依赖 pxPerBeat / grid / 拍号 / 最小间距。缩放是单调的，因此档位在
-    // 一次缩放手势里也单调变化，不会来回跳 —— 不需要额外的"记忆"。
-    const labelStepBeats = selectRulerStep({
-        pxPerBeat,
-        grid,
-        beatsPerBar,
-        minLabelSpacingPx: args.minLabelSpacingPx,
-    });
+    // ── 3. 标签栅格：网格步长的 2 的幂倍 ───────────────────────────
+    // 【为什么必须是 stepBeats 的整数倍】标尺刻度是网格刻度的**子集**（既有
+    // 不变量）。标签位置若落在没有网格线的拍位上，标尺会画出一条网格里没有的
+    // 竖线；而"按秒/拍整除判定"在附点、三连音网格下必然失配 —— 实测 1/8d 网格
+    // 的标签间距被放大到标称值的 3.00 倍（每三个标签位只有一个落得到网格线上）。
+    //
+    // 【为什么取 2 的幂倍】`stepBeats` 会因密度兜底整体翻倍（只乘 2），而集合
+    // `{stepBeats × 2^k}` 对翻倍是**不变的** —— 于是即便网格步长随 Tempo Map 的
+    // 密度估算变化，标签栅格也不会跟着跳档（"标签忽有忽无"）。
+    //
+    // 【Swing 时至少取 2】swing 把**奇数索引**的线整体平移最多半步，其秒位不再
+    // 对应整数拍；标签文字由秒位反推拍值，落在奇数索引上会渲染成 "1.2.300"。
+    // 强制偶数倍后标签只落在未被平移的线上，间距恰好等于 swing 下的实际间距
+    // （与旧实现的实际输出一致，但不再依赖"按秒判定恰好排除奇数线"这一巧合）。
+    const spacingPx = Math.max(24, Math.min(600, args.minLabelSpacingPx));
+    const swingOn = (args.swingPercent ?? 0) > 0;
+    const labelStrideFor = (pxPerBeatForSegment: number, beatsPerBarForSegment: number): number => {
+        const stepPx = stepBeats * Math.max(1e-9, pxPerBeatForSegment);
+        const minStride = swingOn ? 2 : 1;
+        // 候选 stride（以 stepBeats 为单位）：
+        // 1) 音乐候选阶梯中恰好是 stepBeats 整数倍的那些 —— 优先。它们与小节对齐
+        //    （3/4 拍下取 3 拍 / 6 拍，标签落在小节起点上，而不是 2 的幂给出的
+        //    "3.3" 这种非小节位置）；
+        // 2) stepBeats 的 2 的幂倍 —— 兜底。附点 / 三连音网格的音乐阶梯与网格
+        //    栅格不整除（1/8d 的候选是 1,2,4,8… 而网格步长是 0.75 的倍数），
+        //    此时必须靠它保证标签仍落在网格线上。
+        const strides: number[] = [];
+        for (const candidate of rulerStepCandidates(grid, beatsPerBarForSegment)) {
+            const ratio = candidate / stepBeats;
+            const rounded = Math.round(ratio);
+            if (rounded >= 1 && Math.abs(ratio - rounded) < 1e-9) strides.push(rounded);
+        }
+        for (let multiplier = 1; multiplier <= 1 << 16; multiplier *= 2) strides.push(multiplier);
+        strides.sort((a, b) => a - b);
+        for (const stride of strides) {
+            if (stride >= minStride && stride * stepPx >= spacingPx - 1e-9) return stride;
+        }
+        let stride = minStride;
+        while (stride * stepPx < spacingPx - 1e-9) stride *= 2;
+        return stride;
+    };
+    /** 本视口的标签栅格步长（以 `stepBeats` 为单位）。 */
+    const labelStride = labelStrideFor(pxPerBeat, beatsPerBar);
     const ctx: TimeFormatContext = { bpm, beatsPerBar, grid, tempoMap };
     const showSecondary = args.secondaryUnit !== "none" && args.secondaryUnit !== args.primaryUnit;
 
-    // ── 3b. Tempo Map 的标签位置：显式枚举，而非对线做整除判定 ─────
-    // Tempo Map 下网格线逐段局部对齐生成（段内第 k 条 = 段起点 +
-    // k*stepBeats*(60/段BPM)），段与段的秒间距随 BPM 变化，不存在任何全局常量
-    // 步长能整除这些秒位——这正是旧 buildRulerTicks 为 Tempo Map 单独按段生成
-    // 刻度的原因。
+    // ── 3b. Tempo Map 的逐段标签步长 ───────────────────────────────
+    // 段内一步的像素宽度随该段 BPM 变化：用全局 BPM 统一取 stride 会让快段
+    // （BPM 高 → 每拍像素少）的标签挤成一团。这里每段按自己的 segPxPerBeat 取
+    // "网格步长的 2 的幂倍"，与均匀路径同一套规则（见 §3）。
     //
-    // 这里按**与 buildTempoGridLines 完全相同的公式**（含同一顺序的浮点运算与
-    // swing 偏移）显式枚举出标签秒位，再用集合匹配决定哪条线带标签。相比"把线
-    // 的秒位 round 成索引再取模"，枚举法不会把一批不同的线折叠成同一个索引：
-    // 曾出现 3/4 拍段内 stepBeats=32、每条小节线的局部索引 3m/32 全部 round 成
-    // 0，于是相邻 1 秒（2px）的小节线整批被判为标签，标尺因间距小于 26px 隐藏
-    // 阈值而整片空白。
-    //
-    // 与均匀网格路径的对称点：均匀路径用严格整除（|v-round(v)|<1e-6）天然排除
-    // 不在标签栅格上的小节线；枚举法在这里起到同样的作用。
-    // 直接判空而非用 hasTempoMap 布尔量：后者无法让 TS 收窄 tempoMap 的类型。
+    // 【为什么不再显式枚举秒位再集合匹配】旧实现枚举 `段起点 + m*stepBeats*段秒每拍`
+    // 并用 `round(sec*1e6)` 建集合、匹配时容许 ±1e-6。它在两处不可靠：
+    // - stride 由 `round(segStep / stepBeats)` 得出，是**非 2 的幂**（实测 1/8d
+    //   网格下 16/0.75 → round 21），把"音乐候选阶梯"与"网格栅格"两个不同步长的
+    //   集合硬拼在一起，二者不整除时标签就落不到网格线上；
+    // - 跨段的最小间距约束用 `continue` 跳过候选却**不推进** `lastLabelPx`，
+    //   于是段首的空白被成倍放大（实测 121px 标称间距下挖出 291px 的空洞）。
+    // 现在标签判定改为按**索引**取模（索引与 stride 都是整数，判定精确，且
+    // swing 平移过的线不会被误判），间距交给 §5 的统一让位规则处理。
     const labelSegments =
         tempoMap && tempoMap.points.length > 0
             ? tempoMapSegments(
@@ -287,104 +348,44 @@ export function buildTimelineTicks(args: {
                   Math.max(endSec, tempoMap.points[tempoMap.points.length - 1].positionSec),
               )
             : [];
-
-    // 逐段计算标签 stride：段内一步的像素宽度随该段 BPM 变化，若用全局 fallback
-    // BPM 统一取 stride，快段（BPM 高 → 每拍像素少）的标签会挤成一团。这与旧
-    // buildRulerTicks 每段按自己的 segPxPerBeat 选 step 的做法一致。
-    // stride 只依赖 (tempoMap, pxPerSec, grid, minLabelSpacingPx)，与视口滚动
-    // 无关，因此标签相位在滚动时保持稳定。
-    const segmentLabelStrides = labelSegments.map((segment) => {
-        const segPxPerBeat = (60 / Math.max(1, segment.point.bpm)) * Math.max(0, pxPerSec);
-        const segStep = selectRulerStep({
-            pxPerBeat: segPxPerBeat,
-            grid,
-            beatsPerBar: Math.max(1, segment.beatsPerBar),
-            minLabelSpacingPx: args.minLabelSpacingPx,
-        });
-        return Math.max(1, Math.round(segStep / stepBeats));
-    });
-
-    const swingPercent = Math.max(0, Math.min(100, args.swingPercent ?? 0));
-    /** 标签秒位集合，键为 sec 四舍五入到 1e-6。 */
-    const labelSecKeys = new Set<number>();
-    if (hasTempoMap) {
-        // 跨段传递上一个已接受的标签位置。每段都在自己的起点重新锚定相位，
-        // 因此段 A 的末个标签与段 B 的首个标签（m=0）可能挨得极近——实测
-        // pps=8 处仅 16px，低于标尺 26px 的隐藏阈值，边界附近会成片空白。
-        let lastLabelPx: number | null = null;
-        for (let i = 0; i < labelSegments.length; i += 1) {
-            const segment = labelSegments[i];
-            const stride = segmentLabelStrides[i];
-            const segBpm = Math.max(1, segment.point.bpm);
-            const segSecPerBeat = 60 / segBpm;
-            const stepSec = stepBeats * segSecPerBeat;
-            if (!Number.isFinite(stepSec) || stepSec <= 1e-12) continue;
-            // 只枚举可见范围：段起点可能远在视口左侧，全段枚举会退化成 O(段长)。
-            const fromSec = Math.max(startSec, segment.startSec);
-            const toSec = Math.min(endSec, segment.endSec);
-            if (toSec < fromSec - 1e-9) continue;
-            const firstM = Math.max(0, Math.ceil((fromSec - segment.startSec) / stepSec - 1e-9));
-            const lastM = Math.floor((toSec - segment.startSec) / stepSec + 1e-9);
-            // 相位锚定到 stride 的整数倍（相对段起点），保证滚动/缩放不跳变。
-            const startM = Math.ceil(firstM / stride) * stride;
-            for (let m = startM; m <= lastM; m += stride) {
-                // 与 buildTempoGridLines 的 swingAt 同式同序，确保浮点结果一致。
-                const swing =
-                    swingPercent > 0 && m % 2 !== 0
-                        ? (swingPercent / 100) * 0.5 * stepBeats * segSecPerBeat
-                        : 0;
-                const sec = segment.startSec + m * stepBeats * segSecPerBeat + swing;
-                // add() 内部按 [startSec, endSec] 裁剪，这里同样只收范围内的值。
-                if (!Number.isFinite(sec) || sec < startSec - 1e-9 || sec > endSec + 1e-9) {
-                    continue;
-                }
-                // 最小间距约束：段边界处跳过与上一个标签挨太近的候选。段内间距
-                // 均匀，正常情况下不会触发；触发即说明该处标签会重叠。
-                const px = secToContentPx(axis, sec);
-                if (lastLabelPx !== null && px - lastLabelPx < args.minLabelSpacingPx) continue;
-                lastLabelPx = px;
-                labelSecKeys.add(Math.round(sec * 1e6) / 1e6);
-            }
-        }
-    }
-
-    /** 匹配标签秒位（±1 个量化单位，吸收浮点末位差异）。 */
-    const isTempoLabelPosition = (sec: number): boolean => {
-        const base = Math.round(sec * 1e6);
-        return (
-            labelSecKeys.has(base / 1e6) ||
-            labelSecKeys.has((base - 1) / 1e6) ||
-            labelSecKeys.has((base + 1) / 1e6)
-        );
-    };
+    const segmentLabelStrides = labelSegments.map((segment) =>
+        labelStrideFor(
+            (60 / Math.max(1, segment.point.bpm)) * Math.max(0, pxPerSec),
+            Math.max(1, segment.beatsPerBar),
+        ),
+    );
 
     // 弱线与小节线会落在同一秒（小节起点本身就是一条弱线位置），必须合并成
     // 单个刻度、小节样式优先。不去重的后果是标尺出现间距为 0 的相邻刻度，
     // 触发 labelHidden（间距 < 26px）把标签整片隐藏，只剩一堆裸竖线。
-    const merged = new Map<number, { sec: number; isBar: boolean }>();
+    //
+    // `index` 随合并保留（小节线落在弱线栅格上时携带等价弱线索引）：标签栅格
+    // 只认弱线索引，见 `TempoGridLine.index` 的说明。
+    const merged = new Map<number, { sec: number; isBar: boolean; index: number | undefined }>();
     for (const line of lines) {
         const key = Math.round(line.sec * 1e6) / 1e6;
         const existing = merged.get(key);
         if (existing) {
             existing.isBar = existing.isBar || line.isBar;
+            if (existing.index === undefined) existing.index = line.index;
             continue;
         }
-        merged.set(key, { sec: line.sec, isBar: line.isBar });
+        merged.set(key, { sec: line.sec, isBar: line.isBar, index: line.index });
     }
 
     const ticks: TimelineTick[] = [];
     for (const entry of merged.values()) {
         const beat = hasTempoMap ? secToBeat(tempoMap, entry.sec, bpm) : entry.sec / secPerBeat;
-        // 标签只落在标签步长的整数倍上。这里**不能**把小节起点无条件计入：
+        // 标签只落在标签栅格的整数倍上。这里**不能**把小节起点无条件计入：
         // 缩小时小节间距会小到放不下标签，标尺便会只剩一堆没有文字的竖线。
         // 小节通过 isBarStart 影响刻度样式（2px 强线 + 加粗文字），而不是额外
         // 增加刻度数量——与旧 buildRulerTicks 的语义一致。
-        //
-        // Tempo Map 下改按段内局部索引抽取（见 3b）。均匀网格下 beat 与 sec 线性
-        // 相关，保持原有的整数倍判定。
-        const onLabelStep = hasTempoMap
-            ? isTempoLabelPosition(entry.sec)
-            : Math.abs(beat / labelStepBeats - Math.round(beat / labelStepBeats)) < 1e-6;
+        const stride =
+            tempoMap && tempoMap.points.length > 0
+                ? segmentLabelStrides[pointIndexAtSec(tempoMap, entry.sec)]
+                : labelStride;
+        const onLabelStep =
+            entry.index !== undefined && stride !== undefined && entry.index % stride === 0;
         ticks.push({
             sec: entry.sec,
             beat,
@@ -409,88 +410,74 @@ export function buildTimelineTicks(args: {
     ticks.sort((a, b) => a.sec - b.sec);
 
     // ── 4. 变化点位置强制展示标尺值 ────────────────────────────────
-    // 变化点（Tempo Map 段起点）处天然存在刻度：buildTempoGridLines 在每个段
-    // 起点必画 k=0 弱线与 k=0 小节强线，因此它能否带标签只取决于 §3b 的标签
-    // 枚举。枚举按“段内 m*stepBeats、m % stride == 0”推进，并用跨段最小间距
-    // 约束拒绝候选：当变化点落在上一段末尾标签的 minLabelSpacingPx 之内时，
-    // m=0 被跳过、下一个标签落到段内数拍之后 —— 变化点处便既没有竖线也没有
-    // 文字（TimeRulerMarks 只渲染 showLabel 刻度）。用户看到变化点旗帜悬在
-    // 两个标尺值之间，读不出它的时间位置；缩放/点的位置不同，有无标签还会
-    // 随机变化，观感上更怪。
+    // 变化点（Tempo Map 段起点）是工程的时间地标，必须带标签：读不出它的位置时
+    // 用户只能看到旗帜悬在两个标尺值之间。这里只做"强制显示"。
     //
-    // 规则（变化点优先，常规标签让位）：
-    // - 每个位于生成范围内的变化点强制 showLabel（竖线由既有小节强线承担，
-    //   不新增刻度，背景网格的输出不受影响）；
-    // - 距变化点不足“一个标签位”（minLabelSpacingPx，至少 26px 隐藏阈值）的
-    //   常规标签让位隐藏，保证变化点标签的显示宽度 —— 让位后相邻标签间距
-    //   仍不小于隐藏阈值，与 §3b 的密度约束自洽；
-    // - 两个变化点自身贴得过近（< 26px，仅极端缩小或密集点时出现）时左侧
-    //   让位，与渲染层“间距不足时左标签隐藏”的约定一致。
+    // 【为什么不再顺手清场】旧实现在这里额外隐藏了距变化点
+    // `max(minLabelSpacingPx, 26)`（默认 110、可调到 320）以内的**所有**常规
+    // 标签，理由是"保证变化点标签的显示宽度"。但标签宽度已由 §5 算出的
+    // `labelMaxWidth`（到下一个保留标签的间距 − 6）保证，不需要清场；而清场半径
+    // 按**用户设定的标签间距**取，等于把一整个标签位整段挖掉 —— 实测在 121px
+    // 标称间距下挖出 290px 的空洞（2.40 倍）、在 327px 下挖出 785px（2.40 倍）。
+    // 那正是"某段之内的标尺刻度线与文本消失"的直接机制：是否触发取决于当前
+    // 缩放档位下常规标签与变化点的相对位置，于是放大/缩小或滚动一下又"回来"。
+    // 现在让位统一交给 §5（阈值 = 文字重叠宽度），且变化点标签优先保留。
+    const changePointKeys = new Set<number>();
     if (tempoMap && tempoMap.points.length > 0) {
-        const changePointKeys = new Set(
-            tempoMap.points.map((point) => Math.round(point.positionSec * 1e6)),
-        );
-        const isChangePoint = (sec: number): boolean => {
-            const key = Math.round(sec * 1e6);
-            return (
-                changePointKeys.has(key) ||
-                changePointKeys.has(key - 1) ||
-                changePointKeys.has(key + 1)
-            );
-        };
-        const changePointPx: number[] = [];
-        for (const tick of ticks) {
-            if (isChangePoint(tick.sec)) changePointPx.push(tick.contentPx);
-        }
-        if (changePointPx.length > 0) {
-            const reservePx = Math.max(args.minLabelSpacingPx, RULER_LABEL_HIDDEN_GAP_PX);
-            for (let i = 0; i < ticks.length; i += 1) {
-                const tick = ticks[i];
-                if (isChangePoint(tick.sec)) {
-                    if (!tick.showLabel) ticks[i] = { ...tick, showLabel: true };
-                    continue;
-                }
-                if (!tick.showLabel) continue;
-                const crowded = changePointPx.some(
-                    (cpPx) => Math.abs(tick.contentPx - cpPx) < reservePx,
-                );
-                if (crowded) ticks[i] = { ...tick, showLabel: false };
-            }
-            for (let i = 1; i < ticks.length; i += 1) {
-                const prev = ticks[i - 1];
-                const curr = ticks[i];
-                if (!prev.showLabel || !curr.showLabel) continue;
-                if (!isChangePoint(prev.sec) || !isChangePoint(curr.sec)) continue;
-                if (curr.contentPx - prev.contentPx < RULER_LABEL_HIDDEN_GAP_PX) {
-                    ticks[i - 1] = { ...prev, showLabel: false };
-                }
-            }
+        for (const point of tempoMap.points) {
+            changePointKeys.add(Math.round(point.positionSec * 1e6));
         }
     }
+    /** 该秒位是否就是（或落在量化误差内的）一个 Tempo Map 变化点。 */
+    const isChangePointSec = (sec: number): boolean => {
+        if (changePointKeys.size === 0) return false;
+        const key = Math.round(sec * 1e6);
+        return (
+            changePointKeys.has(key) || changePointKeys.has(key - 1) || changePointKeys.has(key + 1)
+        );
+    };
+    const forcedLabel = new Set<number>();
+    for (let i = 0; i < ticks.length; i += 1) {
+        if (!isChangePointSec(ticks[i].sec)) continue;
+        forcedLabel.add(i);
+        if (!ticks[i].showLabel) ticks[i] = { ...ticks[i], showLabel: true };
+    }
 
-    // ── 5. 标签版式：间距不足者让位 + 计算最大宽度 ──────────────────
+    // ── 5. 标签版式：重叠让位（收敛级联）+ 计算最大宽度 ─────────────
     // 这一步曾在渲染层（TimeRulerMarks）做，判据是"**可见切片**里相邻标签的间距"。
     // 切片边界随滚动移动 ⇒ 同一个标签的可见性会随滚动位置改变（右边缘的标签没有
     // "下一条"，因此永不被隐藏；它一进入切片内部就可能被隐藏）—— 这正是"标尺
     // 文字时有时无"的机制之一。间距只取决于刻度序列本身，必须一次算定。
     //
-    // 让位规则与渲染层原语义一致：间距小于隐藏阈值时**左侧让位**（保证右侧标签
-    // 完整），并沿序列继续与下一条比较（级联）。
+    // 让位规则：从左到右单趟推进，间距小于"文字重叠宽度"时**左侧让位**（保证右侧
+    // 标签完整），并与新的最近保留者**继续比较**（级联收敛）。旧实现只有一条
+    // `if`，一次只让掉一个：连续三条挨得近时，让掉一条后剩下两条仍小于阈值，
+    // 渲染层再各隐藏一次，最终两条都看不见。
+    //
+    // 变化点标签优先：间距不足时若左侧是变化点，改让**右侧**（本次候选）—— 否则
+    // §4 刚强制打开的变化点标签会被这里立刻关掉。
     const labeledIndexes: number[] = [];
     for (let i = 0; i < ticks.length; i += 1) if (ticks[i].showLabel) labeledIndexes.push(i);
-    // 让位：从左到右单趟推进，遇到间距不足就把**左侧**让掉（保证右侧完整），
-    // 并与新的"最近保留者"继续比较（级联收敛）。
     const surviving: number[] = [];
     for (const index of labeledIndexes) {
-        const previous = surviving[surviving.length - 1];
-        if (
-            previous !== undefined &&
-            ticks[index].contentPx - ticks[previous].contentPx < RULER_LABEL_HIDDEN_GAP_PX
-        ) {
+        let yielded = false;
+        for (;;) {
+            const previous = surviving[surviving.length - 1];
+            if (
+                previous === undefined ||
+                ticks[index].contentPx - ticks[previous].contentPx >= RULER_LABEL_HIDDEN_GAP_PX
+            ) {
+                break;
+            }
+            if (forcedLabel.has(previous) && !forcedLabel.has(index)) {
+                ticks[index] = { ...ticks[index], showLabel: false, labelMaxWidth: 0 };
+                yielded = true;
+                break;
+            }
             ticks[previous] = { ...ticks[previous], showLabel: false, labelMaxWidth: 0 };
             surviving.pop();
         }
-        surviving.push(index);
+        if (!yielded) surviving.push(index);
     }
     // 版式：宽度取到**下一条保留标签**的间距（减去留白）；最后一条不限宽。
     for (let k = 0; k < surviving.length; k += 1) {
