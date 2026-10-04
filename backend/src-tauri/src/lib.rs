@@ -283,6 +283,25 @@ pub mod __test_internals {
     }
 }
 
+/// HiFiShifter 离线内核的对外窗口。
+///
+/// 为什么需要它：ARA 插件（`hifishifter-plugin`）必须**复用**本 crate 已有的
+/// 混音 / 拉伸 / 编码内核，而不是另写一套；但 `lib.rs` 里的模块大多是私有的
+/// （形如 `#[path = "audio/mixdown.rs"] mod mixdown;`），外部 crate 看不到它们。
+///
+/// 这个模块**只做再导出**：不改变任何模块的可见性，也不改变任何行为。
+/// 列在这里的都是不依赖 Tauri、不依赖 cpal 音频设备的离线入口 —— 与设计文档
+/// §5.1「复用 backend_lib 内核（不依赖 Tauri / cpal）」是同一件事。
+///
+/// 边界：这里**不含**设备边界（`audio_engine` 的 cpal 流）与 IPC 包装
+/// （`commands`）；插件侧用宿主回调替代它们。
+pub mod kernel {
+    pub use crate::encode::OutputSpec;
+    pub use crate::mixdown::{render_mixdown_interleaved, MixdownOptions, QualityPreset};
+    pub use crate::state::{Clip, TimelineState, Track, TrackParamsState};
+    pub use crate::time_stretch::{time_stretch_interleaved, StretchAlgorithm};
+}
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tauri::Manager;
