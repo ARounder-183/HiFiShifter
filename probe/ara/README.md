@@ -47,13 +47,98 @@ cmake --build build-vs2022 --config Release --target ARATestPlugInVST3 `
 `C:\Program Files\Common Files\VST3`，即写到本工作区之外。保持构建自包含；
 需要让 REAPER 发现插件时，改为在 REAPER 里添加该构建目录为 VST 路径，或由人工安装。
 
+## 已应用插桩：ARA 模型图 dump
+
+`instrumentation-reference/` 是**权威副本**（可评审、可复现）；实际编译发生在
+git-ignored 的克隆里。要同步，按下面三步照抄。
+
+### 插桩做了什么
+
+在 `ARATestDocumentController` 的两个回调里各插一次调用，把整个 ARA 模型图写成 JSON：
+
+- `willNotifyModelUpdates()` —— 模型更新通知点
+- `didEndEditing()` —— 一次编辑会话结束，模型图最稳定的时刻
+
+产出字段：`audioSources`（persistentID / name / sampleRate / sampleCount /
+durationSeconds / channelCount / merits64BitSamples / sampleAccessEnabled）、
+`musicalContexts` + `regionSequences`、`audioModifications`（含所属 source）、
+`playbackRegions`（modification 时间与播放时间两个坐标系、`isTimestretchEnabled`、
+`isTimeStretchReflectingTempo`、`hasContentBasedFadeAtHead/Tail`）。
+
+实现内做了 400ms 节流（回调可能被高频触发），失败静默降级，绝不把异常抛回宿主。
+
+### 应用插桩
+
+**1. 复制两个文件**
+
+```powershell
+Copy-Item probe\ara\instrumentation-reference\AraProbeDump.* `
+          probe\ara\ARA_SDK\ARA_Examples\instrumentation\
+```
+
+**2. 打三处补丁**
+
+`probe/ara/ARA_SDK/ARA_Examples/TestPlugIn/ARATestDocumentController.cpp`：
+
+```cpp
+// (a) include —— 加在 #include "ExamplesCommon/Utilities/StdUniquePtrUtilities.h" 之后
+#include "AraProbeDump.h"
+
+// (b) willNotifyModelUpdates() 开头
+AraProbeDumpToFile (this);
+
+// (c) didEndEditing() 的 enableRendererModelGraphAccess (); 之后
+AraProbeDumpToFile (this);
+```
+
+`probe/ara/ARA_SDK/ARA_Examples/CMakeLists.txt`：
+
+```cmake
+# (d) add_library(ARATestPlugInCommon ...) 的源文件列表末尾追加
+    "${CMAKE_CURRENT_SOURCE_DIR}/instrumentation/AraProbeDump.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/instrumentation/AraProbeDump.cpp"
+
+# (e) 在 target_include_directories(ARATestPlugInCommon PUBLIC ...) 里追加
+    "${CMAKE_CURRENT_SOURCE_DIR}/instrumentation"
+
+# (f) 在 set_target_properties(ARATestPlugInCommon ...) 之后加 —— 必需，理由见下
+target_compile_options(ARATestPlugInCommon PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
+)
+```
+
+### 三个非显然的坑（都是实际踩出来的）
+
+1. **插桩文件必须位于 `ARA_Examples/` 之内**。SDK 的 `ara_group_target_files()`
+   假定所有源文件都在工程目录下；放到同级目录会让 CMake 配置直接失败
+   （报错是 "is not a prefix of file"，不指向真正原因）。
+2. **需要 `/utf-8`**。插桩文件是 UTF-8（含中文注释），而本机 MSVC 默认代码页是 936。
+   不加此开关时 MSVC 把 UTF-8 注释读成 CP936，报出与注释毫不相干的语法错误
+   （实测 `C2447: '{': missing function header`）。SDK 自身源码是纯 ASCII，
+   官方构建不会暴露此问题。
+3. **目标按 C++11 编译**：不能用 `std::filesystem`，也不能用 `ARAColor`（属 ARA 2.0
+   草案附加项，本编译配置下不可见）。故路径处理改用 Win32
+   `GetFullPathNameA` / `GetFileAttributesA`；颜色字段刻意省略（对渲染映射无关）。
+
+### 输出位置
+
+优先取环境变量 `ARA_PROBE_OUT`。未设时依次尝试 `.\\ara-model.json`、
+`..\\..\\..\\..\\..\\captures\\ara-model.json`、`captures\\ara-model.json`（取第一个其
+父目录存在的）。**推荐显式设环境变量**，避免猜路径。
+
+### 让 REAPER 找到插件
+
+插桩后的插件已复制到 `D:\VST\ARATestPlugIn.vst3\ARATestPlugIn.vst3` ——
+`D:\VST` 本就在 `REAPER.ini` 的 `vstpath64` 里，所以无需改配置，只需在 REAPER 里
+重新扫描 VST。
+
 ## 未完成：需要人手在 REAPER 里操作
 
-Task 1 的 Step 1 / 3 / 4 / 5 需要在 REAPER 图形界面里操作，并且要编辑 SDK 示例源码加 dump，
+Task 1 的 Step 1 / 3 / 4 / 5 需要在 REAPER 图形界面里操作，且要造不同形态的素材，
 因此无法由 agent 独立完成：
 
-- Step 1：用已装的 Melodyne 5 确认 ARA 在 REAPER 里确实生效。
-- Step 3：在 Test Plug-In 的文档控制器里加 dump，落盘 `captures/ara-model.json`。
+- Step 1：用已装的 Melodyne 5 确认 ARA 在 REAPER 里确实生效。**已完成并通过。**
+- Step 3：挂载插桩后的 Test Plug-In，落盘 `captures/ara-model.json`。
 - Step 4：造"不干净"的素材（同源多放、拉伸、倒放、淡化、非 44.1kHz 工程）重采一次。
 - Step 5：写 `captures/FINDINGS.md`，重点是**ARA 不提供但渲染需要的字段**清单。
 
