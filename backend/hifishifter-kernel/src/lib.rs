@@ -20,3 +20,5 @@
 //! `tauri::Emitter` 调用换成注入式的事件出口。
 
 pub mod fade_curves;
+
+pub mod events;

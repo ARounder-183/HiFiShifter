@@ -26,6 +26,9 @@ macro_rules! log_error_limited {
 #[cfg(test)]
 mod build_git;
 mod build_info;
+// app 层的事件出口：把 Tauri 的 `AppHandle` 包成内核认识的 `EventSink`，
+// 并给 app 层自己留一个 `AppHandle` 出口。内核模块不再直接引用 `tauri::`。
+mod app_events;
 pub mod logging;
 mod zip_util;
 
@@ -403,6 +406,12 @@ pub fn run() {
 
             // Expose app handle for background workers.
             let _ = state.app_handle.set(app.handle().clone());
+
+            // app 层自己的 AppHandle 出口（窗口/路径/state）+ 内核事件出口。
+            app_events::install(app.handle());
+            if let Some(sink) = app_events::event_sink() {
+                let _ = state.events.set(sink);
+            }
 
             // 将 app_handle 传递给 audio engine worker，使其能向前端推送事件。
             state.audio_engine.set_app_handle(app.handle().clone());

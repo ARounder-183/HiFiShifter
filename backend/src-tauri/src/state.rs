@@ -3068,6 +3068,10 @@ pub struct AppState {
     // Set in Tauri setup. Used for async notifications.
     pub app_handle: OnceLock<tauri::AppHandle>,
 
+    /// 内核事件出口。内核模块（含本文件里的后台任务）用它发进度事件，
+    /// 从而不必认识 Tauri；由 `app_events::install` 在 setup 时注入。
+    pub events: OnceLock<hifishifter_kernel::events::SharedEventSink>,
+
     // De-dup background pitch analysis jobs (keyed by rootTrackId + analysis key).
     pub pitch_inflight: std::sync::Mutex<std::collections::HashSet<String>>,
 
@@ -3134,6 +3138,7 @@ impl Default for AppState {
             cached_ui_settings: std::sync::RwLock::new(None),
 
             app_handle: OnceLock::new(),
+            events: OnceLock::new(),
             pitch_inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
             pitch_analysis_progress: std::sync::RwLock::new(None),
 
