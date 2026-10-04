@@ -64,6 +64,48 @@ cd ..\hifishifter-plugin; cargo test --jobs 1 --offline 2>&1 | Select-String 'te
 | `backend/hifishifter-plugin/src/ara/model.rs` | **新建**。`PluginModel` 实现 |
 | `.build-tmp/*.ps1` | 计数脚本与闭包重算脚本（gitignored） |
 
+## ⚠ 执行状态与修正后的顺序（2026-10-04）
+
+**Task 1、Task 2 已完成并验证**（提交 `51fea2a5`、`552a99ab`）。执行到 Task 3 时发现
+原顺序不成立，实测证据见 `probe/ara/kernel-closure-measured.md` 与设计文档 §4.2 / §4.9。
+
+### 已完成
+
+| # | 内容 | 提交 |
+| --- | --- | --- |
+| 1 | 三 crate 合并成一个 workspace；`[profile.*]` 搬到根（否则被静默忽略） | `51fea2a5` `bc735223` |
+| 2 | `state.rs` → `state/{mod,app,model}.rs`，纯搬运 | `552a99ab` |
+| 3a | 原生拉伸后端的构建搬进内核自己的 `build.rs` | `d026fd43` |
+| 3b | `soundtouch` / `sstretch` / `time_stretch` 搬进内核（app 762→752，内核 10→20） | `62659f5b` `b9c292db` |
+
+### 修正后的顺序（**取代下面 Task 3–7 的编号**）
+
+实测结论：从 `mixdown` 出发的内核集是 **39 个模块**（`time_stretch` 那三个搬走之后），
+**这个集合是闭合的** —— 唯一指向集合之外的引用只有 5 处，全部指向 `audio_engine`：
+
+| 引用 | 出现在 | 处置 |
+| --- | --- | --- |
+| `audio_engine::byte_budget_cache::…` | `formant_cache`、`pitch_clip`、`synth_clip_cache` | 机械改成 `crate::byte_budget_cache::…`（该模块已在内核） |
+| `audio_engine::types::EngineCommand` | `pitch_clip`（3 处） | 把 `EngineCommand` 搬进内核（原 Task 4） |
+| `audio_engine::mix::sample_automation_curve` | `renderer/chain.rs` | 搬 `mix.rs`（原 Task 6 的一部分） |
+
+**但 `audio_engine` 本身不是一个整体**，它要劈成两半：
+
+| 半边 | 内容 | 去向 |
+| --- | --- | --- |
+| 内核半边 | `mix.rs`、`metronome.rs`、`types.rs` 的数据类型、`io.rs`、`resource_manager.rs` | 搬进内核（作为 `kernel` 里的 `audio_engine` 子模块，保住模块内 `super::` 路径） |
+| 设备半边 | `engine.rs`（cpal 流）、`snapshot.rs`（读 `AppState`） | **留在 app**（设计 §4.4） |
+
+**还有一个必须先定的依赖面问题**：目标集里有约 10 个模块是 `feature` / `target_os` 门控的
+（`onnx`：`vocoder_ort_session`、`mel_utils`、`nsf_hifigan_onnx`、`hnsep_dsp`、`hnsep_onnx`、
+`fcpe_onnx` 及各自的 stub；`vslib`：`vslib`；`target_os`：`gpu_info`、`dml_adapters`）。
+把它们搬进内核，意味着**内核 crate 要自己声明这些 feature，并带上对应的重依赖**
+（`ort`、`ndarray`、`windows` / DirectML 等）。
+
+所以下一批的第一件事是**定内核 crate 的 feature 结构与依赖集**，然后才是大搬迁。
+这件事不能拖到最后 —— 它决定插件最终会带多大的二进制，也决定"插件不把 Tauri 带进 DAW
+进程"这条不变量的另一半（内核里到底有什么）长什么样。
+
 ---
 
 ## Phase 1 — 内核边界落地
