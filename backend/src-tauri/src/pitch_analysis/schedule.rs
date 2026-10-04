@@ -3,7 +3,6 @@
 // maybe_schedule_pitch_orig: 对外公开的调度入口。
 
 use crate::state::AppState;
-use tauri::Emitter;
 
 use super::analysis::build_pitch_job;
 use super::{build_root_pitch_key, PitchOrigUpdatedEvent};
@@ -461,14 +460,13 @@ pub fn maybe_schedule_pitch_orig(state: &AppState, root_track_id: &str) -> bool 
     }
     // lock 释放后再 emit，避免持锁时发事件
     if should_emit {
-        if let Some(app) = state.app_handle.get() {
-            let _ = app.emit(
-                "pitch_orig_updated",
-                PitchOrigUpdatedEvent {
-                    root_track_id: emit_root_track_id,
-                },
-            );
-        }
+        // 走内核的进程级事件出口（理由同 `dyn_analysis.rs`）。
+        hifishifter_kernel::events::events().emit(
+            "pitch_orig_updated",
+            PitchOrigUpdatedEvent {
+                root_track_id: emit_root_track_id,
+            },
+        );
     }
     // 锁释放后再补触发（同上：收敛后渲染键已稳定）。
     if should_request_bg_render {

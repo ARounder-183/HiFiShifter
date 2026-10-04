@@ -51,7 +51,6 @@
 //!   暴露给混音层，由 `commands::params` 暴露给前端画虚线基线。
 
 use crate::state::{AppState, TimelineState};
-use tauri::Emitter;
 
 /// `dyn_orig` 的安全上限（**纯防御性**，不表达值域语义）。
 ///
@@ -364,14 +363,14 @@ pub fn maybe_schedule_dyn_orig(state: &AppState, root_track_id: &str) -> bool {
     if let Some(snapshot_source) = snapshot_source {
         // 基线变了 → 让快照里的 dyn_orig 曲线同步换新（实时播放立刻用新基线）。
         state.audio_engine.update_timeline(snapshot_source);
-        if let Some(app) = state.app_handle.get() {
-            let _ = app.emit(
-                "dyn_orig_updated",
-                crate::pitch_analysis::PitchOrigUpdatedEvent {
-                    root_track_id: root_track_id.to_string(),
-                },
-            );
-        }
+        // 走内核的进程级事件出口，而不是 `state.app_handle` + `tauri::Emitter`：
+        // 后者是内核模块离不开 Tauri 的最后一处（设计 §4.3 第 1 类）。
+        hifishifter_kernel::events::events().emit(
+            "dyn_orig_updated",
+            crate::pitch_analysis::PitchOrigUpdatedEvent {
+                root_track_id: root_track_id.to_string(),
+            },
+        );
     }
 
     // 缓存未全部命中 → 提交后台分析（worker 侧持有 sender）。

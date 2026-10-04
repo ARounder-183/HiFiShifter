@@ -34,7 +34,12 @@ impl EventSink for TauriEventSink {
 /// 由 Tauri setup 调用一次，注册 `AppHandle` 与内核事件出口。
 pub fn install(handle: &AppHandle) {
     let _ = APP_HANDLE.set(handle.clone());
-    let _ = EVENT_SINK.set(Arc::new(TauriEventSink(handle.clone())));
+    let sink: SharedEventSink = Arc::new(TauriEventSink(handle.clone()));
+    let _ = EVENT_SINK.set(sink.clone());
+    // 内核侧另有一个进程级出口（`hifishifter_kernel::events::events()`）：
+    // 调到它的调用点散落在后台线程与逐 clip 分析线程里，把出口当参数传下去会
+    // 污染十几个签名 —— 而签名里带着 `tauri::AppHandle` 正是内核离不开 Tauri 的原因。
+    let _ = hifishifter_kernel::events::events().install(sink);
 }
 
 /// app 层自己的 `AppHandle` 出口（窗口 / 路径 / state）。

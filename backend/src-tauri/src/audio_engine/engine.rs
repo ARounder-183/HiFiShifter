@@ -806,12 +806,7 @@ impl AudioEngine {
                     // 由参数面板请求 dyn 参数时驱动（见 commands::params）。
                     EngineCommand::ScheduleDynLevelAnalysis => {
                         if let Some(tl) = state.last_timeline.clone() {
-                            schedule_clip_pitch_jobs(
-                                &tl,
-                                state.tx,
-                                state.app_handle.as_ref(),
-                                state.sr,
-                            );
+                            schedule_clip_pitch_jobs(&tl, state.tx, state.sr);
                         }
                     }
                     EngineCommand::SetAppHandle { handle } => {
@@ -1559,7 +1554,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                 }
             }
         }
-        schedule_clip_pitch_jobs(&tl, s.tx, s.app_handle.as_ref(), s.sr);
+        schedule_clip_pitch_jobs(&tl, s.tx, s.sr);
     }
 
     if !moved_clip_ids.is_empty() {

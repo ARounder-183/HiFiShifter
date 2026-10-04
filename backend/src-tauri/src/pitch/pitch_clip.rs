@@ -654,13 +654,11 @@ fn store_clip_pitch_cache(cached: CachedClipPitch) {
 pub fn schedule_clip_pitch_jobs(
     tl: &TimelineState,
     engine_tx: &mpsc::Sender<crate::audio_engine::types::EngineCommand>,
-    app_handle: Option<&tauri::AppHandle>,
     _out_rate: u32,
 ) {
     debug_eprintln!(
-        "[pitch_clip] schedule_clip_pitch_jobs called, clips={}, app_handle={}",
-        tl.clips.len(),
-        app_handle.is_some()
+        "[pitch_clip] schedule_clip_pitch_jobs called, clips={}",
+        tl.clips.len()
     );
 
     // 注意：这里**不再**因 FCPE 不可用而整体早退 —— 分析同时产出 DYN 所需的
@@ -668,7 +666,6 @@ pub fn schedule_clip_pitch_jobs(
     let fcpe_available = crate::fcpe_onnx::is_available();
 
     use crate::pitch_analysis::PitchOrigAnalysisProgressEvent;
-    use tauri::Emitter;
 
     // 收集需要计算的 clip 快照（避免持锁期间做耗时操作）
     let frame_period_ms = 5.0f64;
@@ -800,48 +797,43 @@ pub fn schedule_clip_pitch_jobs(
     let total = pending_jobs.len() as u32;
     global_batch_state().reset(total);
 
-    // 发送分析开始事件
-    if let Some(app) = app_handle {
-        let root_track_id = pending_jobs
-            .first()
-            .map(|j| j.root_track_id.clone())
-            .unwrap_or_default();
-        debug_eprintln!(
-            "[pitch_clip] emitting pitch_orig_analysis_started for root_track_id='{}'",
-            root_track_id
-        );
-        let r1 = app.emit(
-            "pitch_orig_analysis_started",
-            crate::pitch_analysis::PitchOrigAnalysisStartedEvent {
-                root_track_id: root_track_id.clone(),
-                key: String::new(),
-            },
-        );
-        log::warn!(
-            "[pitch_clip] pitch_orig_analysis_started emit result: {:?}",
-            r1
-        );
-        // 发送初始进度（0%，显示第一个 clip 名称）
-        let first_clip_name = pending_jobs.first().map(|j| j.clip.name.clone());
-        log::warn!(
-            "[pitch_clip] emitting initial progress 0/{}, first_clip={:?}",
-            total,
-            first_clip_name
-        );
-        let r2 = app.emit(
-            "pitch_orig_analysis_progress",
-            PitchOrigAnalysisProgressEvent {
-                root_track_id,
-                progress: 0.0,
-                current_clip_name: first_clip_name,
-                completed_clips: 0,
-                total_clips: total,
-            },
-        );
-        log::info!("[pitch_clip] initial progress emit result: {:?}", r2);
-    } else {
-        log::error!("[pitch_clip] WARNING: app_handle is None, cannot emit events!");
-    }
+    // 发送分析开始事件。
+    //
+    // 【为什么不再有 `if let Some(app)`】事件出口已改为内核的进程级出口
+    // （`hifishifter_kernel::events::events()`）；"宿主是否在线"由出口自己处理，
+    // 调用点不必再拿着 `tauri::AppHandle` 做判空 —— 那正是本模块离不开 Tauri 的原因。
+    let root_track_id = pending_jobs
+        .first()
+        .map(|j| j.root_track_id.clone())
+        .unwrap_or_default();
+    debug_eprintln!(
+        "[pitch_clip] emitting pitch_orig_analysis_started for root_track_id='{}'",
+        root_track_id
+    );
+    hifishifter_kernel::events::events().emit(
+        "pitch_orig_analysis_started",
+        crate::pitch_analysis::PitchOrigAnalysisStartedEvent {
+            root_track_id: root_track_id.clone(),
+            key: String::new(),
+        },
+    );
+    // 发送初始进度（0%，显示第一个 clip 名称）
+    let first_clip_name = pending_jobs.first().map(|j| j.clip.name.clone());
+    debug_eprintln!(
+        "[pitch_clip] emitting initial progress 0/{}, first_clip={:?}",
+        total,
+        first_clip_name
+    );
+    hifishifter_kernel::events::events().emit(
+        "pitch_orig_analysis_progress",
+        PitchOrigAnalysisProgressEvent {
+            root_track_id,
+            progress: 0.0,
+            current_clip_name: first_clip_name,
+            completed_clips: 0,
+            total_clips: total,
+        },
+    );
 
     // 所有 job 共享同一份 timeline 快照。逐 job `tl.clone()` 会为每个待分析 clip
     // 复制一次 `params_by_root_track` 的全部曲线（长工程下每条曲线可达 MB 级），
@@ -864,7 +856,6 @@ pub fn schedule_clip_pitch_jobs(
     for _ in 0..worker_count {
         let queue = Arc::clone(&job_queue);
         let tx = engine_tx.clone();
-        let app_handle_clone = app_handle.cloned();
         let tl_shared = Arc::clone(&tl_shared);
 
         std::thread::spawn(move || loop {
@@ -875,7 +866,6 @@ pub fn schedule_clip_pitch_jobs(
             run_pitch_analysis_job(
                 &job,
                 &tx,
-                app_handle_clone.as_ref(),
                 &tl_shared,
                 generation,
                 total,
@@ -884,19 +874,19 @@ pub fn schedule_clip_pitch_jobs(
         });
     }
 
-    /// 单个分析 job 的完整生命周期（从原 per-job 线程闭包原样搬来，仅 app_handle
-    /// 改为引用传参）：跑分析 → 推进度 → 释放 inflight → 写缓存 → 通知引擎。
+    /// 单个分析 job 的完整生命周期：跑分析 → 推进度 → 释放 inflight → 写缓存 → 通知引擎。
+    ///
+    /// 【进度事件不再需要 `AppHandle`】事件走内核的进程级出口，见本文件
+    /// `schedule_clip_pitch_jobs` 里的说明。
     fn run_pitch_analysis_job(
         job: &PendingJob,
         tx: &mpsc::Sender<crate::audio_engine::types::EngineCommand>,
-        app_handle: Option<&tauri::AppHandle>,
         tl_shared: &Arc<TimelineState>,
         generation: u64,
         total: u32,
         frame_period_ms: f64,
     ) {
         use crate::pitch_analysis::PitchOrigAnalysisProgressEvent;
-        use tauri::Emitter;
 
         // 通知进度：开始分析此 clip
         log::warn!(
@@ -944,32 +934,22 @@ pub fn schedule_clip_pitch_jobs(
             total
         );
 
-        // 发送进度事件
-        if let Some(app) = app_handle {
-            let progress = if total == 0 {
-                1.0
-            } else {
-                completed as f32 / total as f32
-            };
-            let r = app.emit(
-                "pitch_orig_analysis_progress",
-                PitchOrigAnalysisProgressEvent {
-                    root_track_id: job.root_track_id.clone(),
-                    progress: progress.clamp(0.0, 1.0),
-                    current_clip_name: None,
-                    completed_clips: completed,
-                    total_clips: total,
-                },
-            );
-            debug_eprintln!(
-                "[pitch_clip] thread: progress emit {}/{} result: {:?}",
-                completed,
-                total,
-                r
-            );
+        // 发送进度事件（走内核的进程级事件出口，理由同上）。
+        let progress = if total == 0 {
+            1.0
         } else {
-            log::warn!("[pitch_clip] thread: WARNING app_handle is None, cannot emit progress!");
-        }
+            completed as f32 / total as f32
+        };
+        hifishifter_kernel::events::events().emit(
+            "pitch_orig_analysis_progress",
+            PitchOrigAnalysisProgressEvent {
+                root_track_id: job.root_track_id.clone(),
+                progress: progress.clamp(0.0, 1.0),
+                current_clip_name: None,
+                completed_clips: completed,
+                total_clips: total,
+            },
+        );
 
         // 无论成功与否，先清除 inflight 标记
         release_inflight(&job.inflight_key);
