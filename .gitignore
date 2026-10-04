@@ -201,6 +201,10 @@ node_modules/
 .build-tmp/
 frontend/.esbuild-tmp/
 
+# SDD plan workspace for this branch (ledger/briefs; scratch, not source).
+# Committed here rather than on develop so the main working tree stays clean.
+.superpowers/
+
 # Temporary AppImage extraction directories (created by --appimage-extract)
 squashfs-root/
 
