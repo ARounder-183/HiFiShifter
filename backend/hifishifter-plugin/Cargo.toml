@@ -1,0 +1,23 @@
+[package]
+name = "hifishifter-plugin"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "HiFiShifter 的 ARA 插件侧适配层（复用本体离线内核）"
+
+# 独立 workspace：这一步刻意不改动 app 的构建入口。
+# `backend/src-tauri/Cargo.lock` 是受版本控制的文件，把它挪到 `backend/` 需要一个
+# 单独的决定；在决定之前，本 crate 自带 Cargo.lock，内容从 app 的 lock 复制而来。
+#
+# 【必须复制】否则 cargo 会自行解析出不同版本的 `windows-core`，`backend_lib` 作为
+# 依赖就会在 `webview2_accelerators.rs` 编译失败（trait 版本不匹配）。细节见
+# `probe/ara/captures/roundtrip/FINDINGS.md` §8。
+#
+# 后续应做的事：把 workspace 根提到 `backend/`，members = ["src-tauri", "hifishifter-plugin"]，
+# 于是两个 crate 共享一份 lock，这个副本即可删除。
+[workspace]
+
+[dependencies]
+backend_lib = { package = "HiFiShifter", path = "../src-tauri" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
