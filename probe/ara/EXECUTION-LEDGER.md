@@ -722,4 +722,34 @@ stretch/fades明确Unsupported。本批没有 pitch edit，A3未关闭。
 新spec/plan为2026-10-04-ara-gui-forward；保留原反向失败证据。既有30秒/双采样率与
 资源上限作为本轮已知限制；只减少重复review，不跳过真实宿主GUI与音高输出验收。
 
+**Task 17: Ruling: REAPER为一轨创建editor及逐片段playback处理器 — GUI只发现editor入口，文档共享曲线权威并分别预渲染所有renderer分配 — 若逐处理器独立编辑，用户只能改到一片或产生重复输出。**
+宿主日志实际assigned=0x6/0x1；原声基线导出成功。Task16真实WORLD PCM注入与Task18
+GUI客户端已本地提交。GUI默认开启宿主轨道WORLD分析，仅显式commit后改变DAW音频。
+
+**Task 17: Ruling: SDK禁用访问要求同步销毁reader但不等于销毁已采集副本 — 保留有界编辑PCM副本，源content/geometry/deactivate/destroy时失效，实时播放发布仍撤销 — 若保留未经版本失效的数据，会提交旧源；若全部删除，REAPER停播后GUI无法编辑。**
+依据锁定ARAInterface.h enableAudioSourceSamplesAccess注释。reader始终在scope返回前
+释放。复制缓存不延长reader/HostContentScope生命周期，不通过文件路径补读源。
+
+**Task 19: Ruling: 接完整内核后DLL新增vslib导入导致REAPER加载失败 — 插件关闭内核默认vslib，仅开onnx，独立app默认不变 — 若只在本机补闭源DLL，用户包仍加载失败且违反不分发vslib边界。**
+dumpbin最终imports无vslib/Tauri/WebView；隔离目录附SoundTouchDLL/DirectML。
+
+**Task 19: Ruling: 本机WebView2创建报0x800700AA且build版也无主窗口 — 隔离启动脚本设置WEBVIEW2_USER_DATA_FOLDER到worktree，窗口实测正常；不改产品跨平台启动逻辑 — 若误判为代码问题，会为单机profile故障改坏其他平台。**
+用户已确认其他Windows/mac正常；保留原profile，不终止其他应用。GUI build必须启用
+标准custom-protocol feature嵌入frontend/dist，实际exe为HiFiShifter.exe。
+
+**Task 18: Ruling: 新命令必须登记既有invoke参数映射 — 授权新增services/invoke.ts的ARA映射与聚焦回归 — 若绕过门面，GUI命令实参会与本地约定脱节。**
+
+**Task 19: Ruling: 大PCM单次写入真实命名管道超时，小消息通过不足以证明链路 — 16KiB分块读写并增加超过管道缓冲的真实回归 — 若错误，GUI仍在大快照下载时挂住。**
+新鲜重跑plugin60+IPC4全部通过，IPC全套0.08秒；基础checkpoint4800705，不表示集中审查已通过。
+
+**Task 19: Ruling: 用户手绘提交截图的Conflict由samples_access开关误推进model_revision触发 — 分离播放快照撤销与真实内容/几何版本，保留正确的过期提交拒绝 — 若误判，可能接受宿主已变更的旧编辑，须正反两向回归。**
+真实日志Snapshot后只有两次enable=false，没有新的begin_editing/region更新；clear_renderers却无条件revision++。
+用户后来自行操作成功Commit revision1/model8，尚无输出/持久化验收，不据此跳过修复。
+
+**Task 19: Ruling: 集中审查四项影响编辑正确性与保存恢复 — 一次修复wave连同假冲突，参数投影/局部归属/持久关联/compose门禁分别TDD — 若省略，可能无提示丢曲线或提交成功却原声输出。**
+持久身份选择真实宿主modification+source完整排序集合，只接受唯一精确关联，歧义/空关联显式拒绝；
+不按名称或ara-track-N猜。代价是成员身份改变的恢复需重新关联，先导能力比静默套用更保守。
+
+**Task 19: Ruling: 用户物理Escape停止Computer Use且GUI可能有未保存手绘曲线 — 本轮只读诊断与源码修复，不刷新/关闭/强杀现有GUI或REAPER — 若忽略，会覆盖用户当前编辑并违背停止请求。**
+
 
