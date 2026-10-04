@@ -591,8 +591,21 @@ pub struct TrackParamsState {
     pub dyn_orig: Vec<f32>,
 
     /// 原声电平基线的缓存键（= `build_root_dyn_key`），分析完成后写入。
+    ///
+    /// 【与 `dyn_orig_source_key` 的分工】本字段是**缓存有效性**标记：只有全量命中
+    /// 才写入，未写时下次调用会重新组装（见 `assemble_and_store`）。因此它**不能**
+    /// 用来回答"这份基线是哪份几何算出来的"——部分命中时它是空的，但基线数据是存在的。
     #[serde(skip)]
     pub dyn_orig_key: Option<String>,
+
+    /// 当前 `dyn_orig` **实际依据的几何**键（每次组装都写入，与是否全量命中无关）。
+    ///
+    /// 【为什么需要它】参数编辑器在拖拽期间把这份基线本地搬到新位置，需要知道
+    /// "什么时候该停"——判据是"后端返回的基线所依据的几何变了"（键变 ⇔ 几何变）。
+    /// 用取数序号猜会错拍：提交会先 `checkpointHistory` 递增 `paramsEpoch`（早于
+    /// 后端写入），而取数序号在**发出**时就推进，水位必然与"数据反映哪份几何"错位。
+    #[serde(skip)]
+    pub dyn_orig_source_key: Option<String>,
 
     /// 声码器专属静态参数（key = ParamDescriptor::id，值为枚举整数转 f64）。
     /// 例："synth_mode" = 1.0（SYNTHMODE_MF）。

@@ -429,6 +429,14 @@ export interface ParamFramesPayload {
      * 原声"物化成显式目标电平（基线重分析后不再跟随、响度漂移）。
      */
     edit_sentinel?: boolean[];
+    /**
+     * 本次 `orig`（DYN 原声基线）**所依据的 clip 几何**的溯源键（仅 dyn 返回）。
+     *
+     * 拖拽期间后端几何被冻结 ⇒ 这个键恒定，返回的基线一律对应"按下之前"的几何，
+     * 参数编辑器据此在本地把基线搬到新位置；提交写回后端后键必变 ⇒ 「键变了」就是
+     * 「这份基线已经反映新几何」的**事实**判据（详见 `LoudnessSnapshot.baselineKey`）。
+     */
+    dyn_orig_key?: string | null;
 }
 
 export interface PitchProgressPayload {

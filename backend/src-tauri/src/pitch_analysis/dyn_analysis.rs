@@ -326,6 +326,13 @@ fn assemble_and_store(tl: &mut TimelineState, root_track_id: &str) -> (bool, boo
         .map(|e| e.dyn_orig_key.as_deref() == Some(key.as_str()) && e.dyn_orig.len() == target)
         .unwrap_or(false);
     if up_to_date {
+        // 几何溯源键与缓存键同步补齐：它是"这份基线依据哪份几何"的唯一答案，
+        // 参数编辑器据此判断拖拽期间的本地映射何时该撤下（见该字段的说明）。
+        if let Some(entry) = tl.params_by_root_track.get_mut(root_track_id) {
+            if entry.dyn_orig_source_key.is_none() {
+                entry.dyn_orig_source_key = Some(key);
+            }
+        }
         return (false, true);
     }
 
@@ -335,6 +342,9 @@ fn assemble_and_store(tl: &mut TimelineState, root_track_id: &str) -> (bool, boo
     if let Some(entry) = tl.params_by_root_track.get_mut(root_track_id) {
         changed = entry.dyn_orig != curve;
         entry.dyn_orig = curve;
+        // 几何溯源键**每次组装都写入**：即使部分命中（`dyn_orig_key` 不写、下次
+        // 还要重组），这份基线依据的几何也必须是可回答的。
+        entry.dyn_orig_source_key = Some(key.clone());
         // 全部命中才记 key（与音高同一策略：部分命中时下一轮继续尝试组装）。
         entry.dyn_orig_key = all_cache_hit.then(|| key.clone());
     }
@@ -531,6 +541,45 @@ mod tests {
 
         // 无变化时稳定。
         assert_eq!(k3, build_root_dyn_key(&tl, "root"));
+    }
+
+    /// **四种几何手势都必须改变溯源键** —— 参数编辑器的「拖拽期间搬运基线、
+    /// 直到基线反映新几何为止」依赖这条性质（见 `ParamFramesPayload.dyn_orig_key`）。
+    ///
+    /// 任何一类手势漏掉都会让映射在提交后**永不撤下**（新基线被再搬一次 =
+    /// 加倍错位），也就是用户报告的"松手闪一下"。
+    #[test]
+    fn dyn_key_changes_for_every_clip_gesture() {
+        let mut tl = TimelineState::default();
+        tl.tracks = vec![make_track("root")];
+        tl.clips.push(make_clip("c1", 1.0, 2.0));
+        let baseline_key = build_root_dyn_key(&tl, "root");
+
+        // ① 移动：只有 start_sec 变。
+        tl.clips[0].start_sec = 3.0;
+        let moved_key = build_root_dyn_key(&tl, "root");
+        assert_ne!(baseline_key, moved_key, "移动必须改变溯源键");
+
+        // ② Slip：起点/长度/速率都不变，只有源窗口平移。
+        tl.clips[0].source_start_sec = 5.0;
+        tl.clips[0].source_end_sec = 7.0;
+        let slipped_key = build_root_dyn_key(&tl, "root");
+        assert_ne!(moved_key, slipped_key, "Slip 必须改变溯源键");
+
+        // ③ 拉伸：源窗口不动，长度与速率同时变（内容跨度为常量）。
+        tl.clips[0].length_sec = 4.0;
+        tl.clips[0].playback_rate = 0.5;
+        let stretched_key = build_root_dyn_key(&tl, "root");
+        assert_ne!(slipped_key, stretched_key, "拉伸必须改变溯源键");
+
+        // ④ 延伸/截短：速率不变，长度与源窗口终点一起变。
+        tl.clips[0].length_sec = 3.0;
+        tl.clips[0].source_end_sec = 6.0;
+        let trimmed_key = build_root_dyn_key(&tl, "root");
+        assert_ne!(stretched_key, trimmed_key, "延伸/截短必须改变溯源键");
+
+        // 无变化时稳定（拖拽期间后端几何被冻结 ⇒ 键必须恒定，映射才有意义）。
+        assert_eq!(trimmed_key, build_root_dyn_key(&tl, "root"));
     }
 
     /// 能量域融合的口径守护（文件头"电平的物理口径"的逐条断言）。

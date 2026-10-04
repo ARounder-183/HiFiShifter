@@ -60,6 +60,20 @@ export interface LoudnessSnapshot {
      * 等价。面板据此**不挂映射**，让未使用响度自动化的工程保持既有波形路径。
      */
     identity: boolean;
+    /**
+     * 这份基线**所依据的 clip 几何**的溯源键（后端 `build_root_dyn_key`）。
+     *
+     * 【为什么需要】拖拽期间 clip 几何只在前端乐观变化，后端几何被冻结，因此
+     * 这段时间返回的基线一律对应"按下之前"的几何 —— 面板要在本地把它搬到新位置。
+     * 而"什么时候停止搬运"不能用取数序号猜：提交会先 `checkpointHistory` 递增
+     * `paramsEpoch`（早于后端写入），序号水位必然错拍，于是映射提前撤下 = 闪一下。
+     * 用键则是一个**事实**：键变了 ⇔ 这份基线反映的几何变了。面板因此可以把
+     * 撤下与快照落地放在**同一个渲染**里（见 `PianoRollPanel` 的 warp memo）。
+     *
+     * `null` = 后端未提供（分析未全量命中）⇒ 面板退化为"任意新快照即撤下"，
+     * 该路径下基线数据本就不可用，撤早撤晚在画面上无差别。
+     */
+    baselineKey: string | null;
 }
 
 /**
@@ -111,6 +125,12 @@ export function snapshotFromPayloads(
         dynTarget,
         dynBaseline,
         identity: false,
+        // 溯源键与基线必须来自**同一次** dyn 取数：分叉会让"键已更新但基线没更新"
+        // 被误判为权威数据（波形会停在旧基线上直到下一次取数）。
+        baselineKey:
+            typeof dynPayload.dyn_orig_key === "string" && dynPayload.dyn_orig_key.length > 0
+                ? dynPayload.dyn_orig_key
+                : null,
     };
     next.identity = isIdentitySnapshot(next);
     return next;
