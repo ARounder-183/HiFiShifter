@@ -143,10 +143,20 @@ describe("拖拽期间基线跟随几何", () => {
             dynTarget: baseline.map((b) => b * 0.7),
             dynBaseline: baseline,
         });
-        const withWarpProvider = amplitudeMap(src, () => null);
-        const withoutProvider = amplitudeMap(src, () => null);
+        // 一侧挂映射 provider（恒返回 null），一侧完全不传 —— 稳态下必须逐值相同。
+        const withProvider = amplitudeMap(src, () => null);
+        const withoutProvider = makeLoudnessAmplitudeMap(
+            src,
+            { volume: () => null, dyn: () => null },
+            () => 0,
+        ) as unknown as WaveformAmplitudeFactors;
         for (let f = 0; f < 32; f += 1) {
-            expect(withWarpProvider.factorAt?.(at(f))).toBe(withoutProvider.factorAt?.(at(f)));
+            expect(withProvider.factorAt?.(at(f))).toBe(withoutProvider.factorAt?.(at(f)));
+        }
+        // 带查表也一样（映射恒为 null 时 LUT 的键与既有路径一致）。
+        withProvider.beginWindow?.(at(0), at(31));
+        for (let f = 0; f < 32; f += 1) {
+            expect(withProvider.factorAt?.(at(f))).toBe(withoutProvider.factorAt?.(at(f)));
         }
     });
 });

@@ -236,8 +236,9 @@ export function makeLoudnessAmplitudeMap(
      * **原始帧**采样：它是"当前输入"，且与几何手势互斥（不可能同时发生），
      * 不该被几何映射搬走。
      *
-     * 【失效】映射的变化必须体现在 `revision()` 里 —— 查表（LUT）以
-     * `(快照引用, 修订号, 覆盖范围)` 为复用键，修订号不变则映射变了也不会重建。
+     * 【失效】映射对象参与查表（LUT）的**复用键**（按身份比较，见 `lutKeyWarp`）：
+     * 拖拽期间它逐帧更换，因此查表随之重建。`revision()` 仍只负责 live 覆盖这类
+     * "引用不变、内容变了"的情形。
      */
     warp?: () => LoudnessGeometryWarp | null,
 ): WaveformAmplitudeMap {

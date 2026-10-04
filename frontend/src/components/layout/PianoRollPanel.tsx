@@ -4416,6 +4416,25 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     loudnessWarpRef.current = loudnessGeometryWarp;
 
     /**
+     * 映射变化 ⇒ 推进修订号并请求一次重绘。
+     *
+     * 【为什么不能只靠 rows 变化】拖拽期间 `rows` 确实每帧都换（几何跟着走），
+     * 但映射的变化源不止几何：手势结束、锁定参数线开关、以及"等权威快照追上"的
+     * 收尾，都可能在 `rows` 不变的情况下换掉映射。少了这一步，那些帧会停在旧映射
+     * 上（画面与数据不一致）。
+     *
+     * 修订号是必须的：几何缓存以 `(amplitudeMap 引用, 修订号)` 判定复用，映射换了
+     * 而修订号没换时，缓存会认为"几何没变"从而复用旧顶点。
+     */
+    const lastLoudnessWarpRef = useRef<LoudnessGeometryWarp | null>(null);
+    useEffect(() => {
+        if (lastLoudnessWarpRef.current === loudnessGeometryWarp) return;
+        lastLoudnessWarpRef.current = loudnessGeometryWarp;
+        loudnessWaveformRevisionRef.current += 1;
+        waveformRepaintLoopRef.current?.invalidate();
+    }, [loudnessGeometryWarp]);
+
+    /**
      * 参数编辑器的统一坐标投影（渲染期）。
      *
      * 用 React state 的 scrollLeft / pxPerSec 构造：本面板所有**渲染期**的时间↔
