@@ -2004,6 +2004,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hifishifter-plugin"
+version = "0.1.0"
+dependencies = [
+ "HiFiShifter",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hmac-sha256"
 version = "1.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
