@@ -1,0 +1,47 @@
+# HiFiShifter 后端 workspace。
+#
+# 【为什么需要它】插件 crate（`hifishifter-plugin`）依赖 app crate（`backend_lib`）里的内核。
+# 三个 crate 各自带一份 `Cargo.lock` 时，插件会自行解析出**不同版本**的 `windows-core`，
+# 于是 `backend_lib` 作为依赖编译失败（`webview2_accelerators.rs` 的 `cast()` 找不到 trait）——
+# 这是实测踩过的坑。合并成一份 lock 后，这个问题在结构上消失。
+#
+# 设计依据：docs/superpowers/specs/2026-10-04-ara-plugin-v1-design.md §4.1
+[workspace]
+resolver = "2"
+members = ["src-tauri", "hifishifter-kernel", "hifishifter-plugin"]
+
+# ── profile 必须在 workspace 根 ──────────────────────────────────────────────
+#
+# 【为什么搬到这里】cargo 对非根包的 `[profile.*]` 只发一条 warning 就**静默忽略**。
+# 这三段原本在 `src-tauri/Cargo.toml` 里，合并 workspace 后如果不搬过来，
+# release 构建会**丢掉 strip / opt-level / dist 的 fat LTO** —— 而症状只是
+# "产物变大变慢"，不会报错。合并时实测到了那条 warning，所以搬过来。
+#
+# 放在根上会让三种 profile 同时作用于 kernel 与 plugin，这是期望行为
+# （插件的 release 产物同样该 strip）。
+[profile.release]
+# Regular release builds: no LTO so local builds/scripts stay fast.
+codegen-units = 16
+strip = true
+opt-level = 3
+# 【不能用 panic = "abort"】代码库围绕 unwind 建了一整套 panic 遏制：音频回调的
+# catch_unwind（engine.rs）、后台渲染线程的恢复（playback.rs，否则 BG_RENDER_ACTIVE
+# 永久卡 true）、IPC 命令守卫（commands/common.rs）。abort 下这些守卫在 release
+# 构建里全部失效 —— 任意一处 panic 直接杀死整个进程（正是它们要阻止的故障）。
+# 代价只是二进制略大、运行时略慢（无表展开优化），换来遏制的实际生效。
+
+# Distribution builds: full-fat LTO for the best final-artifact
+# optimization. Used ONLY by the CI pipeline (`cargo tauri build
+# -- --profile dist`), never by local scripts.
+[profile.dist]
+inherits = "release"
+codegen-units = 1
+lto = "fat"
+
+# Fast iteration profile: opt-level=2 for ORT/GPU, no LTO, fast compile
+[profile.dev-opt]
+inherits = "dev"
+opt-level = 2
+lto = false
+codegen-units = 16
+strip = false

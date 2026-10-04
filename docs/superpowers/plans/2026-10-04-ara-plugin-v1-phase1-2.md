@@ -128,6 +128,16 @@ resolver = "2"
 members = ["src-tauri", "hifishifter-kernel", "hifishifter-plugin"]
 ```
 
+**然后必须把 `backend/src-tauri/Cargo.toml` 末尾的三段 `[profile.*]` 搬过来**
+（`[profile.release]` / `[profile.dist]` / `[profile.dev-opt]` 及其注释），
+并在 workspace 根上保留它们。
+
+> **这是执行时实测到的一个静默陷阱**：cargo 对**非根包**的 `[profile.*]` 只发一条
+> warning（`profiles for the non root package will be ignored`）就忽略。不搬的话，
+> release 构建会丢掉 `strip` / `opt-level = 3` / `dist` 的 fat LTO —— 而症状只是
+> "产物变大变慢"，不报错、不进测试。放在根上会让三种 profile 同时作用于
+> kernel 与 plugin，这是期望行为（插件的 release 产物同样该 strip）。
+
 - [ ] **Step 3: 摘掉两个新 crate 的独立 workspace 声明**
 
 在 `backend/hifishifter-kernel/Cargo.toml` 与 `backend/hifishifter-plugin/Cargo.toml` 中删除这一段（含它上面的注释）：
