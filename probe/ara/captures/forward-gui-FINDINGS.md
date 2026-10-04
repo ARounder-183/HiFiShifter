@@ -26,6 +26,12 @@ GUI r0/m4手绘后提交，显示`Conflict: host model changed; refresh`。
 
 ## 未完成
 
+独立输出验证器`verify_forward_gui_output.ps1`已增加：仅gain/未变/非有限/间隙漏音/重开变音
+均拒绝，真实音高变化接受；6条行为回归通过。实际24bit基线与float32源经独立RIFF解析比对，
+普通/裁切/间隙maxdiff=5.96046447753906e-8。频率oracle使用该周期夹具的独立自相关，
+不读取app音高分析值；仅适用于此次合成夹具，不冒称对任意人声通用的pitch验证器。
+尚无edited/reopened实际导出文件，所以此验证器测试通过不代表GUI修音或保存验收通过。
+
 集中审查：局部renderer整体替换共享编辑、unsupported本地修改被清dirty、临时轨道ID恢复、
 compose关闭时手绘pitch被跳过，四项均待定向修复。完整报告在本plan的SDD目录。
 
