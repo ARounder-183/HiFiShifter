@@ -9,6 +9,52 @@ use std::{
 };
 use tauri::Manager;
 
+/// 仅在 Windows 默认临时目录权限拒绝时回退，不修改目录或系统完整性标签。
+fn create_ara_temp_dir_with(
+    primary: &Path,
+    fallback: Option<&Path>,
+    create: impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<PathBuf, String> {
+    match create(primary) {
+        Ok(()) => Ok(primary.to_path_buf()),
+        Err(error) if cfg!(windows) && error.kind() == std::io::ErrorKind::PermissionDenied => {
+            let fallback = fallback.ok_or_else(|| {
+                format!(
+                    "create ARA temporary directory {}: {error}; LocalLow unavailable",
+                    primary.display()
+                )
+            })?;
+            create(fallback).map_err(|fallback_error| format!(
+                "create ARA LocalLow directory {} after temporary directory permission denied: {fallback_error}",
+                fallback.display()
+            ))?;
+            Ok(fallback.to_path_buf())
+        }
+        Err(error) => Err(format!(
+            "create ARA temporary directory {}: {error}",
+            primary.display()
+        )),
+    }
+}
+
+/// Low GUI 的私有 PCM 临时空间；显式 TEMP/TMP 可写时沿用原路径。
+fn create_ara_temp_dir() -> Result<PathBuf, String> {
+    let id = format!("hifishifter-ara-{}", uuid::Uuid::new_v4());
+    let primary = std::env::temp_dir().join(&id);
+    let fallback = if cfg!(windows) {
+        std::env::var_os("USERPROFILE").map(|profile| {
+            PathBuf::from(profile)
+                .join("AppData/LocalLow/HiFiShifter/ara")
+                .join(&id)
+        })
+    } else {
+        None
+    };
+    create_ara_temp_dir_with(&primary, fallback.as_deref(), |path| {
+        std::fs::create_dir_all(path)
+    })
+}
+
 /// 写入应用私有 WAV，先验证全部源，绝不将 persistentID 当路径打开。
 fn materialize_snapshot(
     mut timeline: TimelineState,
@@ -65,7 +111,8 @@ fn materialize_snapshot(
             }
         }
     }
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("prepare ARA PCM directory {}: {e}", dir.display()))?;
     let result = (|| {
         let mut paths = HashMap::new();
         let mut reverse = HashMap::new();
@@ -77,13 +124,16 @@ fn materialize_snapshot(
                 bits_per_sample: 32,
                 sample_format: hound::SampleFormat::Float,
             };
-            let mut wav = hound::WavWriter::create(&path, spec).map_err(|e| e.to_string())?;
+            let mut wav = hound::WavWriter::create(&path, spec)
+                .map_err(|e| format!("create ARA PCM WAV {}: {e}", path.display()))?;
             for frame in 0..pcm.planes[0].len() {
                 for plane in &pcm.planes {
-                    wav.write_sample(plane[frame]).map_err(|e| e.to_string())?;
+                    wav.write_sample(plane[frame])
+                        .map_err(|e| format!("write ARA PCM WAV: {e}"))?;
                 }
             }
-            wav.finalize().map_err(|e| e.to_string())?;
+            wav.finalize()
+                .map_err(|e| format!("finalize ARA PCM WAV: {e}"))?;
             let path = path.to_string_lossy().into_owned();
             paths.insert(pcm.persistent_id.clone(), path.clone());
             reverse.insert(path, pcm.persistent_id.clone());
@@ -237,13 +287,21 @@ pub(crate) fn import_snapshot(
             .instance
             .clone(),
     };
-    let response = hifishifter_ara_ipc::exchange(&instance, &Request::Snapshot)?;
+    let response = hifishifter_ara_ipc::exchange(&instance, &Request::Snapshot)
+        .map_err(|e| format!("ARA snapshot IPC: {e}"))?;
     check_response(&response)?;
     let timeline: TimelineState =
         serde_json::from_value(response.timeline.ok_or("missing ARA timeline")?)
-            .map_err(|e| e.to_string())?;
-    let dir = std::env::temp_dir().join(format!("hifishifter-ara-{}", uuid::Uuid::new_v4()));
-    let (mut timeline, reverse_paths) = materialize_snapshot(timeline, &response.sources, &dir)?;
+            .map_err(|e| format!("decode ARA snapshot timeline: {e}"))?;
+    let dir = create_ara_temp_dir()?;
+    let (mut timeline, reverse_paths) =
+        match materialize_snapshot(timeline, &response.sources, &dir) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(format!("materialize ARA snapshot PCM: {error}"));
+            }
+        };
     inner.owned_dirs.push(dir);
     timeline.playhead_sec = 0.0;
     timeline.selected_track_id = timeline.tracks.first().map(|track| track.id.clone());
@@ -341,6 +399,66 @@ pub(crate) fn disconnect(app: &tauri::AppHandle) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn denied_temp_creation_falls_back_to_real_private_directory() {
+        let root = std::env::temp_dir().join(format!("ara-low-temp-test-{}", uuid::Uuid::new_v4()));
+        let primary = root.join("denied-temp");
+        let fallback = root.join("local-low-private");
+        let chosen = create_ara_temp_dir_with(&primary, Some(&fallback), |path| {
+            if path == primary {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "controlled primary denial",
+                ))
+            } else {
+                std::fs::create_dir_all(path)
+            }
+        })
+        .unwrap();
+        std::fs::write(chosen.join("source.wav"), b"owned audio").unwrap();
+        assert_eq!(chosen, fallback);
+        assert!(!primary.exists());
+        assert_eq!(
+            std::fs::read(fallback.join("source.wav")).unwrap(),
+            b"owned audio"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn writable_temp_uses_original_root_and_never_creates_fallback() {
+        let root = std::env::temp_dir().join(format!("ara-low-temp-test-{}", uuid::Uuid::new_v4()));
+        let primary = root.join("normal-temp");
+        let fallback = root.join("unused-fallback");
+        let chosen = create_ara_temp_dir_with(&primary, Some(&fallback), |path| {
+            std::fs::create_dir_all(path)
+        })
+        .unwrap();
+        std::fs::write(chosen.join("source.wav"), b"temp audio").unwrap();
+        assert_eq!(chosen, primary);
+        assert!(!fallback.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn non_permission_failure_does_not_redirect_to_fallback() {
+        let root = std::env::temp_dir().join(format!("ara-low-temp-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let blocker = root.join("file-not-directory");
+        std::fs::write(&blocker, b"leave intact").unwrap();
+        let fallback = root.join("unused-fallback");
+        assert!(
+            create_ara_temp_dir_with(&blocker.join("child"), Some(&fallback), |path| {
+                std::fs::create_dir_all(path)
+            })
+            .is_err()
+        );
+        assert_eq!(std::fs::read(blocker).unwrap(), b"leave intact");
+        assert!(!fallback.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn fixture() -> TimelineState {
         serde_json::from_value(serde_json::json!({
