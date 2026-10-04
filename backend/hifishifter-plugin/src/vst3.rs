@@ -10,7 +10,7 @@
 //! `IPlugInEntryPoint`、`IPlugInEntryPoint2`）不在这里实现，而是转发给
 //! `ara2-bridge-companion` 的 C++ 适配器，避免重复实现引用计数语义。
 //!
-//! 一次性产物：不进入 `backend/`、`frontend/`。
+//! 产品外壳从一次性探针迁入；尚未完成的渲染/生命周期事项见 Phase 3a 计划。
 
 use ara2_bridge::companion::vst3::ffi::{
     ara2_vst3_interface_id, ara2_vst3_main_factory_category, Ara2Vst3InterfaceId,
@@ -945,11 +945,21 @@ unsafe extern "system" fn audio_release(this: *mut c_void) -> u32 {
 
 unsafe extern "system" fn audio_set_bus_arrangements(
     _this: *mut c_void,
-    _inputs: *mut u64,
-    _num_inputs: i32,
-    _outputs: *mut u64,
-    _num_outputs: i32,
+    inputs: *mut u64,
+    num_inputs: i32,
+    outputs: *mut u64,
+    num_outputs: i32,
 ) -> TResult {
+    if num_inputs != 1 || num_outputs != 1 {
+        return K_RESULT_FALSE;
+    }
+    if inputs.is_null() || outputs.is_null() {
+        return K_INVALID_ARGUMENT;
+    }
+    // SAFETY: 宿主按数量提供合法布局数组；本批只声明一进一出 stereo。
+    if unsafe { *inputs != 3 || *outputs != 3 } {
+        return K_RESULT_FALSE;
+    }
     K_RESULT_OK
 }
 
@@ -984,8 +994,21 @@ unsafe extern "system" fn audio_get_latency_samples(_this: *mut c_void) -> u32 {
 
 unsafe extern "system" fn audio_setup_processing(
     _this: *mut c_void,
-    _setup: *mut ProcessSetup,
+    setup: *mut ProcessSetup,
 ) -> TResult {
+    if setup.is_null() {
+        return K_INVALID_ARGUMENT;
+    }
+    // SAFETY: 宿主提供调用期间可读的 SDK setup 结构。
+    let setup = unsafe { &*setup };
+    if !setup.sample_rate.is_finite() || setup.sample_rate <= 0.0
+        || setup.max_samples_per_block <= 0 || !(0..=2).contains(&setup.process_mode)
+    {
+        return K_INVALID_ARGUMENT;
+    }
+    if setup.symbolic_sample_size != 0 {
+        return K_RESULT_FALSE;
+    }
     crate::log_line("IAudioProcessor::setupProcessing");
     K_RESULT_OK
 }
@@ -995,9 +1018,14 @@ unsafe extern "system" fn audio_set_processing(_this: *mut c_void, _state: i8) -
     K_RESULT_OK
 }
 
-unsafe extern "system" fn audio_process(_this: *mut c_void, _data: *mut c_void) -> TResult {
-    // ARA 模式下音频由 ARA 渲染器负责；探针此处不产生输出。
-    K_RESULT_OK
+/// 初始化宿主缓冲的安全边界；实际 PCM 快照输出在 Phase 3a Task 14 接入。
+unsafe extern "system" fn audio_process(_this: *mut c_void, data: *mut c_void) -> TResult {
+    // SAFETY: VST3 宿主按 SDK 布局提供回调数据，函数内部处理空指针与非法字段。
+    match unsafe { crate::audio_abi::clear_outputs(data.cast()) } {
+        Ok(()) => K_RESULT_OK,
+        Err(crate::audio_abi::BufferError::InvalidArgument) => K_INVALID_ARGUMENT,
+        Err(crate::audio_abi::BufferError::UnsupportedFormat) => K_RESULT_FALSE,
+    }
 }
 
 unsafe extern "system" fn audio_get_tail_samples(_this: *mut c_void) -> u32 {
@@ -1269,6 +1297,174 @@ pub fn new_main_factory_adapter() -> Option<Vst3MainFactoryAdapter> {
 }
 
 #[cfg(test)]
+mod audio_boundary_tests {
+    use super::*;
+    use crate::audio_abi::{AudioBusBuffers, ProcessData};
+
+    /// 用真实接口子对象调用 process，避免测试绕过产品 vtable。
+    fn run(data: *mut ProcessData) -> TResult {
+        let mut processor = Processor::create().unwrap();
+        // SAFETY: 本测试持有处理器与 SDK 同布局数据，调用期间缓冲存活。
+        unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), data.cast()) }
+    }
+
+    /// 空实现留下旧音频；写错块长则越界覆盖尾哨兵。
+    #[test]
+    fn process_clears_exactly_the_requested_frames() {
+        let mut left = [0.75_f32, 0.75, 123.0];
+        let mut right = [-0.5_f32, -0.5, 456.0];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut output = AudioBusBuffers {
+            num_channels: 2, silence_flags: 0, channel_buffers: planes.as_mut_ptr(),
+        };
+        let mut data = ProcessData {
+            num_samples: 2, num_outputs: 1, outputs: &raw mut output, ..Default::default()
+        };
+        assert_eq!(run(&raw mut data), K_RESULT_OK);
+        assert_eq!(left, [0.0, 0.0, 123.0]);
+        assert_eq!(right, [0.0, 0.0, 456.0]);
+        assert_eq!(output.silence_flags, 3);
+    }
+
+    /// 非法宿主数据不能被空实现伪报成功。
+    #[test]
+    fn process_rejects_invalid_counts_and_missing_bus_storage() {
+        assert_eq!(run(std::ptr::null_mut()), K_INVALID_ARGUMENT);
+        for data in [
+            ProcessData { num_samples: -1, ..Default::default() },
+            ProcessData { num_outputs: -1, ..Default::default() },
+            ProcessData { num_inputs: -1, ..Default::default() },
+            ProcessData { num_samples: 1, num_outputs: 1, ..Default::default() },
+            ProcessData { num_samples: 1, num_inputs: 1, ..Default::default() },
+        ] {
+            let mut data = data;
+            assert_eq!(run(&raw mut data), K_INVALID_ARGUMENT);
+        }
+    }
+
+    /// 零帧参数 flush 与无总线合法，不应解引用空地址。
+    #[test]
+    fn process_accepts_zero_frame_flush_and_no_output() {
+        let mut flush = ProcessData { num_outputs: 1, ..Default::default() };
+        assert_eq!(run(&raw mut flush), K_RESULT_OK);
+        let mut empty = ProcessData { num_samples: 32, ..Default::default() };
+        assert_eq!(run(&raw mut empty), K_RESULT_OK);
+    }
+
+    /// 64 位样本不支持时必须拒绝，不能按 f32 写出破坏的样本。
+    #[test]
+    fn process_rejects_sample64_without_writing() {
+        let mut samples = [0.25_f64, 0.5];
+        let mut planes = [samples.as_mut_ptr(), samples.as_mut_ptr()];
+        let mut output = AudioBusBuffers {
+            num_channels: 2, silence_flags: 0, channel_buffers: planes.as_mut_ptr().cast(),
+        };
+        let mut data = ProcessData {
+            symbolic_sample_size: 1, num_samples: 2, num_outputs: 1,
+            outputs: &raw mut output, ..Default::default()
+        };
+        assert_eq!(run(&raw mut data), K_RESULT_FALSE);
+        assert_eq!(samples, [0.25, 0.5]);
+    }
+
+    /// SDK 允许 inactive plane 为 null，但有通道时 plane 数组不能缺失。
+    #[test]
+    fn process_skips_inactive_planes_but_rejects_missing_arrays() {
+        let mut samples = [1.0_f32, 2.0];
+        let mut planes = [samples.as_mut_ptr(), std::ptr::null_mut()];
+        let mut output = AudioBusBuffers {
+            num_channels: 2, silence_flags: 0, channel_buffers: planes.as_mut_ptr(),
+        };
+        let mut data = ProcessData {
+            num_samples: 2, num_outputs: 1, outputs: &raw mut output, ..Default::default()
+        };
+        assert_eq!(run(&raw mut data), K_RESULT_OK);
+        assert_eq!(samples, [0.0, 0.0]);
+        assert_eq!(output.silence_flags, 3);
+        output.channel_buffers = std::ptr::null_mut();
+        data.outputs = &raw mut output;
+        assert_eq!(run(&raw mut data), K_INVALID_ARGUMENT);
+    }
+
+    /// 所有输入形状先校验，非法输入不能导致输出缓冲被部分写入。
+    #[test]
+    fn process_rejects_invalid_input_before_touching_output() {
+        let mut input_planes = [std::ptr::null_mut(), std::ptr::null_mut()];
+        for (channels, missing_array, expected) in [
+            (-1, false, K_INVALID_ARGUMENT),
+            (1, false, K_RESULT_FALSE),
+            (2, true, K_INVALID_ARGUMENT),
+            (2, false, K_RESULT_OK),
+            (0, true, K_RESULT_OK),
+        ] {
+            let mut left = [0.25_f32, 0.5];
+            let mut right = [0.75_f32, 1.0];
+            let mut output_planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+            let mut input = AudioBusBuffers {
+                num_channels: channels, silence_flags: 0,
+                channel_buffers: if missing_array { std::ptr::null_mut() } else { input_planes.as_mut_ptr() },
+            };
+            let mut output = AudioBusBuffers {
+                num_channels: 2, silence_flags: 0, channel_buffers: output_planes.as_mut_ptr(),
+            };
+            let mut data = ProcessData {
+                num_samples: 2, num_inputs: 1, num_outputs: 1,
+                inputs: &raw mut input, outputs: &raw mut output, ..Default::default()
+            };
+            assert_eq!(run(&raw mut data), expected);
+            if expected != K_RESULT_OK {
+                assert_eq!(left, [0.25, 0.5]);
+                assert_eq!(right, [0.75, 1.0]);
+                assert_eq!(output.silence_flags, 0);
+            } else {
+                assert_eq!(left, [0.0, 0.0]);
+                assert_eq!(right, [0.0, 0.0]);
+            }
+        }
+    }
+
+    /// 未实现多总线或非 stereo 时不能假装完成协商。
+    #[test]
+    fn bus_negotiation_rejects_unsupported_arrangements() {
+        let mut processor = Processor::create().unwrap();
+        let mut stereo = 3_u64;
+        let mut mono = 1_u64;
+        // SAFETY: 真实处理器和布局数组在协商期间存活。
+        unsafe {
+            let this = audio_ptr(&mut *processor);
+            assert_eq!(audio_set_bus_arrangements(this, &raw mut stereo, 1, &raw mut stereo, 1), K_RESULT_OK);
+            assert_eq!(audio_set_bus_arrangements(this, &raw mut mono, 1, &raw mut stereo, 1), K_RESULT_FALSE);
+            assert_eq!(audio_set_bus_arrangements(this, &raw mut stereo, 0, &raw mut stereo, 1), K_RESULT_FALSE);
+            assert_eq!(audio_set_bus_arrangements(this, std::ptr::null_mut(), 1, &raw mut stereo, 1), K_INVALID_ARGUMENT);
+        }
+    }
+
+    /// 非法 setup 不能让后续回调使用无效采样率或块尺寸。
+    #[test]
+    fn setup_rejects_invalid_rate_block_and_format() {
+        let mut processor = Processor::create().unwrap();
+        // SAFETY: 真实处理器和 setup POD 在调用期间存活。
+        unsafe {
+            let this = audio_ptr(&mut *processor);
+            assert_eq!(audio_setup_processing(this, std::ptr::null_mut()), K_INVALID_ARGUMENT);
+            for (rate, block, format, expected) in [
+                (44100.0, 512, 0, K_RESULT_OK),
+                (f64::NAN, 512, 0, K_INVALID_ARGUMENT),
+                (0.0, 512, 0, K_INVALID_ARGUMENT),
+                (44100.0, -1, 0, K_INVALID_ARGUMENT),
+                (44100.0, 512, 1, K_RESULT_FALSE),
+            ] {
+                let mut setup = ProcessSetup {
+                    process_mode: 0, symbolic_sample_size: format,
+                    max_samples_per_block: block, sample_rate: rate,
+                };
+                assert_eq!(audio_setup_processing(this, &raw mut setup), expected);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod realtime_tests {
     use super::*;
     use std::cell::Cell;
@@ -1290,22 +1486,34 @@ mod realtime_tests {
         fn flush(&self) {}
     }
 
-    /// setProcessing 可在音频线程运行，不能触发同步文件日志。
+    /// setProcessing 和 process 都可在音频线程运行，不能触发同步文件日志。
     #[test]
-    fn set_processing_does_not_enter_the_file_logger() {
+    fn realtime_callbacks_do_not_enter_the_file_logger() {
         static LOGGER: ObservingLogger = ObservingLogger;
         log::set_logger(&LOGGER).unwrap();
         log::set_max_level(log::LevelFilter::Info);
         let mut processor = Processor::create().expect("processor creation");
         // SAFETY: 取真实音频处理器子对象地址，而非组件基址。
         let this = unsafe { audio_ptr(&mut *processor) };
+        let mut left = [1.0_f32; 2];
+        let mut right = [1.0_f32; 2];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = crate::audio_abi::AudioBusBuffers {
+            num_channels: 2, silence_flags: 0, channel_buffers: planes.as_mut_ptr(),
+        };
+        let mut data = crate::audio_abi::ProcessData {
+            num_samples: 2, num_outputs: 1, outputs: &raw mut bus, ..Default::default()
+        };
         IN_REALTIME_CALLBACK.with(|flag| flag.set(true));
         // SAFETY: 处理器在两次状态回调期间存活。
         unsafe {
             assert_eq!(audio_set_processing(this, 1), K_RESULT_OK);
+            assert_eq!((AUDIO_VTBL.process)(this, (&raw mut data).cast()), K_RESULT_OK);
             assert_eq!(audio_set_processing(this, 0), K_RESULT_OK);
         }
         IN_REALTIME_CALLBACK.with(|flag| flag.set(false));
         assert_eq!(REALTIME_LOGS.with(Cell::get), 0);
+        assert_eq!(left, [0.0; 2]);
+        assert_eq!(right, [0.0; 2]);
     }
 }

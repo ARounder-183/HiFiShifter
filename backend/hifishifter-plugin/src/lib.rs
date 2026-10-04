@@ -25,6 +25,7 @@
 pub mod ara;
 pub mod render;
 mod diagnostics;
+mod audio_abi;
 mod runtime;
 mod vst3;
 

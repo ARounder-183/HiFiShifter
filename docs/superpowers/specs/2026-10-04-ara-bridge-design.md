@@ -94,9 +94,17 @@ ARA 的 `ARAAudioSource` 指向宿主托管的音频。一旦源的权威在 DAW
 - 插件**不得**再依赖 `decode_audio_f32_interleaved(Path::new(source_path))` 直接开文件，必须经 ARA 的内容读取接口获取 PCM。
 - **渲染缓存键必须纳入"源内容版本"**。现有键包含源文件身份与文件签名（`render_key.rs`、`GLOBAL_FILE_SIG_CACHE`）；在 DAW 里改源而不改路径是常规操作，若键不变就会静默复用过期缓存 —— 这是会静默出错的那类缺陷，必须在设计里封死。
 
-### 4.3 决策：渲染产物交回 ARA 模型
+### 4.3 决策：渲染 PCM 交回宿主音频处理接口
 
-用 `storeAudioSourceContent` 把渲染结果写回宿主的 ARA 模型，使 DAW 负责其保存与迁移。这与 `render_cache/` 已实现的"内容哈希键 + 落盘 + 重开免重算"同构，是 Melodyne 一类插件的通行做法。
+**2026-10-04 API 更正**：原文的 `storeAudioSourceContent` 在锁定的
+`ARA_API/ARAInterface.h` 中不存在，不能作为实现契约。源 PCM 经
+`ARAAudioAccessControllerInterface` 读取；渲染 PCM 经 VST3
+`IAudioProcessor::process` 的输出总线交给 DAW。ARA renderer 负责区域分配语义，
+不是另一个 PCM 输出函数。
+
+`storeObjectsToArchive` / `storeAudioSourceToAudioFileChunk` 保存插件私有状态，
+不保证宿主替插件保存全部渲染 PCM。重开免重合成仍是产品目标：由内容指纹缓存、
+工程 state 和缺失缓存恢复策略共同实现，Phase 4 必须验证，不能用虚构 API 代替。
 
 ### 4.4 决策：v1 不在插件内做参数编辑器
 
@@ -122,7 +130,7 @@ ARA 的 `ARAAudioSource` 指向宿主托管的音频。一旦源的权威在 DAW
 │  │ ARA 宿主适配层（新写）                                │  │
 │  │  · ARA 文档 → TimelineState 映射                      │  │
 │  │  · AudioSourceReader（经 ARA 读源 PCM）               │  │
-│  │  · storeAudioSourceContent（回写渲染产物）            │  │
+│  │  · renderer 区域分配与私有状态归档                   │  │
 │  └──────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │ 复用 backend_lib 内核（不依赖 Tauri / cpal）          │  │
@@ -153,14 +161,15 @@ ARA 的 `ARAAudioSource` 指向宿主托管的音频。一旦源的权威在 DAW
 | loop source | `loop_enabled` | 已对齐 REAPER Loop source |
 | region 淡化 | `fade_in_shape` / `fade_in_dir` | `fade_curves.rs` 为依据 REAPER 实测反推 |
 | 宿主 tempo map | 工程 Tempo Map | 已有实现 |
-| `storeAudioSourceContent` | `render_cache` | 内容哈希键 + 落盘 |
+| VST3 `process` 音频输出 / ARA 私有状态归档 | `render_cache` + 工程 state | PCM 输出与状态保存是两条接口 |
 
 ### 5.3 数据流（渲染）
 
 1. 宿主变更（切片/移动/走带）→ ARA 通知 → 适配层更新 `TimelineState`。
 2. 渲染请求 → `render_mixdown_interleaved` 或按 clip 的 `render_cache` 路径 → PCM。
-3. 若 ARA 要求 renderer 语义：经 `storeAudioSourceContent` 回写宿主模型。
-4. 播放回调 → 复用 `render_callback_f32`，快照来源改为"ARA 内容的读取器"而非本地文件解码器。
+3. ARA renderer 只处理宿主分配给自己的 region，不能让三个处理器重复渲染完整文档。
+4. VST3 `process` 读取预先准备的 PCM 快照并写输出；宿主 reader、文件 IO、推理与锁等待
+   都不得进入实时回调。后续复用内核时，快照来源必须是宿主 PCM 而非路径解码。
 
 ### 5.4 参数编辑通道（一等需求，非可选项）
 
@@ -191,7 +200,10 @@ ARA 的 `ARAAudioSource` 指向宿主托管的音频。一旦源的权威在 DAW
 | R4 | 渲染回调在 ARA 提前渲染窗口内总能给出音频 | 会出现可听见空洞 | 随 R2 |
 | R5 | 参数编辑通道的权威/并发语义可收敛 | §5.4 需重新设计 | 未知 |
 
-**R4 补充**：现有回调在缓存未命中时静音等待（`render_callback_f32` 的 `data.fill(0.0)` 分支与快照的"静音等待渲染"），在本体是正确的（传输层由自己控制），在 ARA 宿主里会表现为空洞。ARA renderer 角色提供提前渲染窗口，故大概率可解，但这是主要工程风险。
+**R4 补充（API 更正）**：现有回调的缓存 miss 静音等待会在宿主里表现为空洞。
+`RealtimeHeadTailAdapter` 只提供无分配的 head/tail 时长查询，不是预渲染调度器，
+也不承诺首块前的音频就绪窗口。必须自己实现后台准备与就绪发布，并实测冷启动、
+随机跳转、离线导出和人为 cache miss。若无法满足连续供音，按杀死判据重估方案。
 
 ## 7. 明确不承诺的事项
 

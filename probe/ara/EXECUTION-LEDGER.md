@@ -661,4 +661,19 @@ U1 只说明当前映射没有方向；宿主是否在插件输出之外处理�
 本次 `git diff --check` 无输出。日志显式 force-stage，截图/JSON 与脚本逐路径暂存；
 不包含 REAPER profile、DLL、SDK 检出或产品前端。不 push。
 
+**Task 12: Ruling: 锁定 SDK 没有 storeAudioSourceContent，head/tail adapter 也不调度预渲染 — 更正上位设计并拆出 Phase 3a，先验 process 输出/归属/倒放，再接内核 — 若继续旧假设，会实现不存在的 PCM 回写接口并把缓存空洞误当宿主兜底。**
+依据：`ARA_API/ARAInterface.h` 的 archive 接口和 `ivstaudioprocessor.h` 的 process 输出；
+`backend/third-party/ara2-bridge-plugin/src/realtime.rs` 只有 head/tail 查询。
+用户授权按建议持续分批执行，保持产品目标，纠正接口事实；不声称 A3/A4 已完成。
+
+**Task 12: Ruling: 空 process 不初始化输出且接受非法 setup/布局 — 以真实 vtable 的六条预期失败为 RED，补安全 f32 stereo 缓冲边界与原生 SDK 布局 oracle — 若继续空实现，旧样本可能混入输出，手写 ABI 错位会直到宿主里才崩溃。**
+原生 MSVC 实测 size/align：ProcessSetup 24/8，AudioBusBuffers 24/8，ProcessData 80/8，
+ProcessContext 112/8，Chord 4/2，FrameRate 8/4；全部字段 offsetof 与 Rust 一致。
+已确认 zero-frame flush 与 inactive null plane 合法。kSample64/非 stereo 明确拒绝。
+
+**Task 12: Ruling: 审查发现只校验输出形状会在非法输入时先写输出 — 新增输入 sentinel 回归，统一先校验两边再写，并扩展 process 日志守卫 — 若只看不崩溃，会把不支持的布局伪报成功。**
+新增回归先实测失败（negative input channel 返回 OK），修复后 13 lib 测试通过。
+复审无 Task 12 checkpoint 阻塞。实时无分配/无锁由代码审查确认，动态守卫仅覆盖日志，
+不能描述成做过动态 allocation 计数。当前输出仍为安全零，Task 14 才接 PCM。
+
 

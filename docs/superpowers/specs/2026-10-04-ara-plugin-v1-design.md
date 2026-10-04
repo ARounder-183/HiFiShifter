@@ -467,7 +467,7 @@ hifishifter-plugin/src/
 | `beginEditing` … `endEditing` | 累积模型变更；`endEditing` 时映射成 `TimelineState` 并置脏 |
 | `enableAudioSourceSamplesAccess(true)` | 登记该源可读；准备 `AudioSourceReader` |
 | `updateAudioSourceContent` | 该源 `content_version += 1`（D5） |
-| `process()` | 从快照取音频；未就绪时用 `RealtimeHeadTailAdapter` 的提前窗口 |
+| `process()` | 只读已发布 PCM 快照并写 VST3 输出；head/tail 查询不保证音频就绪，miss 计数延后报告 |
 | `getState/setState` | 序列化 / 反序列化参数曲线（D6） |
 | `enableAudioSourceSamplesAccess(false)` | 释放该源的 reader（F5：这是撤销语义） |
 | `terminate` | 释放 companion 绑定与 ARA 运行时（探针把适配器泄漏到进程结束，产品不可） |
@@ -481,12 +481,12 @@ hifishifter-plugin/src/
 | 假设 | 判定实验 | 失败意味着 |
 | --- | --- | --- |
 | R3：设备边界可替换（cpal 出、宿主回调进） | Phase 3 在 REAPER 里播放，音频从 `process()` 出而不是本地声卡 | 播放模型要重做 |
-| R4：渲染窗口内总能给出音频 | Phase 3 播放 30 秒含静音间隙的素材，逐帧检查输出的非零样本比例；人为让首块 miss 以触发等渲染分支 | 出现空洞 → 需要提前渲染调度或同步阻塞策略 |
+| R4：宿主回调能连续供音 | Phase 3 播放 30 秒含静音间隙的素材，逐帧与参考输出比对；冷启动、seek、离线导出及人为首块 miss 分别采集 | 出现非预期空洞 → 改后台准备/就绪发布；不可解则重估方案，不能在实时回调同步等待 |
 
 ### 6.2 未决项 U1 / U2 的收口实验（Phase 2）
 
-- **U2（拉伸）**：把插件的 `SemanticCapabilities` 声明为
-  `Timestretch | ReflectTempo | ContentFades`，在 REAPER 里对一个 region 做真实拉伸
+- **U2（拉伸）**：用 `FactoryCapabilities::with_playback_transformations` 声明
+  `TIMESTRETCH | REFLECT_TEMPO | CONTENT_FADES`，在 REAPER 里对一个 region 做真实拉伸
   （拖动 item 边缘改变长度），重采 ARA 模型，断言 `durationInModificationTime !=
   durationInPlaybackTime`。
 - **U1（倒放）**：在 REAPER 里对 item 执行 Reverse，重采模型，检查
@@ -522,6 +522,16 @@ hifishifter-plugin/src/
 **本次交付的计划文档只覆盖 Phase 1 + Phase 2**（见
 [plan](../plans/2026-10-04-ara-plugin-v1-phase1-2.md)）。Phase 3–5 的逐任务计划在
 Phase 2 验收后按本节表格展开 —— 这符合"每个计划独立产出可工作软件"的纪律。
+
+### 7.1 Phase 3 分批执行与 API 校正
+
+下一份可执行计划为 [Phase 3a](../plans/2026-10-04-ara-plugin-v1-phase3a.md)：
+先验 VST3 ABI、region 归属、宿主 PCM 输出和实际倒放。未通过前不接完整推理链。
+原上位设计的 PCM 回写 API 已在其 §4.3 校正：`process` 输出与 ARA 私有归档分离。
+`RealtimeHeadTailAdapter` 不是渲染调度器，U3 不能据此关闭。
+
+Phase 3b 再引入宿主 PCM 注入式内核渲染、内容指纹、修音差异及冷热缓存验证；
+其逐任务计划依赖 Phase 3a 宿主输出结论。Phase 4/5 仍按上表进行，未宣称完成。
 
 ---
 
