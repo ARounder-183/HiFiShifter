@@ -42,8 +42,6 @@ pub const K_NO_INTERFACE: TResult = 0x8000_4002u32 as i32;
 pub const K_INVALID_ARGUMENT: TResult = 0x8007_0057u32 as i32;
 /// `PClassInfo::kManyInstances`。
 const K_MANY_INSTANCES: i32 = 0x7FFF_FFFF;
-/// `Vst::kDistributable`。
-const K_DISTRIBUTABLE: u32 = 1;
 
 /// 处理器组件类 ID（探针自定，稳定即可）。
 const PROCESSOR_CID: Tuid = *b"HFSARAProbe.Prc1";
@@ -63,7 +61,7 @@ const COMPONENT_CONTROLLER_CLASS: &str = "Component Controller Class";
 /// 依据：REAPER 请求 `IPluginFactory2` 时传出的字节
 /// `50B607004BF20B4CA464EDB9F00B2ABB`，正是
 /// `{0007B650-F24B-4C0B-A464-EDB9F00B2ABB}` 的 GUID 布局。
-const fn uid_guid(words: [u32; 4]) -> Tuid {
+pub(crate) const fn uid_guid(words: [u32; 4]) -> Tuid {
     let [l1, l2, l3, l4] = words;
     [
         (l1 & 0xFF) as u8,
@@ -458,7 +456,8 @@ unsafe extern "system" fn factory_get_class_info2(
             info.cid = PROCESSOR_CID;
             copy_str(&mut info.category, AUDIO_MODULE_CLASS);
             copy_str(&mut info.name, crate::CLASS_NAME);
-            info.class_flags = K_DISTRIBUTABLE;
+            // 二期编辑会话在宿主本进程，不宣称跨进程processor/controller分布。
+            info.class_flags = 0;
             copy_str(&mut info.sub_categories, "Fx|OnlyARA");
             copy_str(&mut info.vendor, "HiFiShifter");
             copy_str(&mut info.version, crate::VERSION);
@@ -668,6 +667,9 @@ struct Processor {
     entry: Option<HostEntry>,
     extension_owner: Arc<ExtensionOwner>,
     active: AtomicI32,
+    connection_vtbl:*const crate::editor::connection::ConnectionVtbl,
+    connection:crate::editor::connection::ConnectionState,
+    route:crate::editor::routing::RouteLease,
 }
 
 impl Processor {
@@ -679,6 +681,7 @@ impl Processor {
             CompanionProcessorBinding::new([runtime.companion.clone()], CompanionRoles::all())
                 .ok()?;
         let extension_owner = Arc::new(ExtensionOwner::default());
+        let route=crate::editor::routing::RouteLease::new(&extension_owner);
         let entry = HostEntry::new(binding, crate::CLASS_NAME, extension_owner.clone()).ok()?;
         Some(Box::new(Processor {
             component_vtbl: &COMPONENT_VTBL,
@@ -687,6 +690,9 @@ impl Processor {
             entry: Some(entry),
             extension_owner,
             active: AtomicI32::new(0),
+            connection_vtbl:&PROCESSOR_CONNECTION_VTBL,
+            connection:Default::default(),
+            route,
         }))
     }
 }
@@ -721,6 +727,7 @@ unsafe fn processor_release(processor: *mut Processor) -> u32 {
     let remaining = previous - 1;
     if remaining == 0 {
         unsafe { (*processor).extension_owner.stop_channel(); }
+        unsafe { (*processor).extension_owner.stop_editor(); }
         // SAFETY: 引用计数归零，且没有其它持有者。
         unsafe { drop(Box::from_raw(processor)) };
     }
@@ -738,6 +745,10 @@ unsafe extern "system" fn component_query_interface(
     // SAFETY: obj 是宿主提供的输出槽。
     unsafe { *obj = std::ptr::null_mut() };
     let processor = this as *mut Processor;
+    if unsafe { crate::editor::connection::is_connection(iid) } {
+        unsafe { processor_add_ref(processor); *obj=std::ptr::addr_of_mut!((*processor).connection_vtbl).cast(); }
+        return K_RESULT_OK;
+    }
     // FUnknown / IPluginBase / IComponent 共用对象基址。
     if unsafe { iid_matches(iid, IID_FUNKNOWN) }
         || unsafe { iid_matches(iid, IID_IPLUGIN_BASE) }
@@ -805,14 +816,16 @@ unsafe extern "system" fn component_release(this: *mut c_void) -> u32 {
 }
 
 unsafe extern "system" fn component_initialize(
-    _this: *mut c_void,
-    _context: *mut c_void,
+    this: *mut c_void,
+    context: *mut c_void,
 ) -> TResult {
+    unsafe { (*(this as *mut Processor)).connection.initialize(context); }
     crate::log_line("IComponent::initialize");
     K_RESULT_OK
 }
 
-unsafe extern "system" fn component_terminate(_this: *mut c_void) -> TResult {
+unsafe extern "system" fn component_terminate(this: *mut c_void) -> TResult {
+    unsafe {let processor=&*(this as *mut Processor);processor.connection.close();processor.extension_owner.stop_editor();}
     crate::log_line("IComponent::terminate");
     K_RESULT_OK
 }
@@ -1015,8 +1028,9 @@ unsafe extern "system" fn audio_setup_processing(
     K_RESULT_OK
 }
 
-unsafe extern "system" fn audio_set_processing(_this: *mut c_void, _state: i8) -> TResult {
+unsafe extern "system" fn audio_set_processing(this: *mut c_void, state: i8) -> TResult {
     // SDK 允许从音频线程调用此函数；禁止触发同步文件日志。
+    if state==0 {if let Some(clock)=unsafe {&(*base_from_audio(this)).extension_owner}.clock.get() {clock.stopped();}}
     K_RESULT_OK
 }
 
@@ -1034,6 +1048,7 @@ unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) ->
             if data.process_context.is_null() { owner.snapshots[0].misses.fetch_add(1, Ordering::Relaxed); return K_RESULT_OK; }
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*data.process_context };
+            if let Some(clock)=owner.clock.get() {clock.update(context);}
             let publisher = match context.sample_rate {
                 44100.0 => &owner.snapshots[0], 48000.0 => &owner.snapshots[1], _ => return K_RESULT_FALSE,
             };
@@ -1119,6 +1134,9 @@ pub struct EditControllerVtbl {
 struct EditController {
     vtbl: *const EditControllerVtbl,
     refcount: AtomicI32,
+    connection_vtbl:*const crate::editor::connection::ConnectionVtbl,
+    connection:crate::editor::connection::ConnectionState,
+    editor_link:Arc<crate::editor::routing::EditorLink>,
 }
 
 impl EditController {
@@ -1126,6 +1144,9 @@ impl EditController {
         Self {
             vtbl: &EDIT_CONTROLLER_VTBL,
             refcount: AtomicI32::new(1),
+            connection_vtbl:&CONTROLLER_CONNECTION_VTBL,
+            connection:Default::default(),
+            editor_link:Arc::new(Default::default()),
         }
     }
 }
@@ -1140,6 +1161,11 @@ unsafe extern "system" fn edit_controller_query_interface(
     }
     // SAFETY: obj 是宿主提供的输出槽。
     unsafe { *obj = std::ptr::null_mut() };
+    if unsafe { crate::editor::connection::is_connection(iid) } {
+        let controller=this as *mut EditController;
+        unsafe { edit_controller_add_ref(this); *obj=std::ptr::addr_of_mut!((*controller).connection_vtbl).cast(); }
+        return K_RESULT_OK;
+    }
     if unsafe { iid_matches(iid, IID_FUNKNOWN) }
         || unsafe { iid_matches(iid, IID_IPLUGIN_BASE) }
         || unsafe { iid_matches(iid, IID_IEDIT_CONTROLLER) }
@@ -1177,14 +1203,16 @@ unsafe extern "system" fn edit_controller_release(this: *mut c_void) -> u32 {
 }
 
 unsafe extern "system" fn edit_controller_initialize(
-    _this: *mut c_void,
-    _context: *mut c_void,
+    this: *mut c_void,
+    context: *mut c_void,
 ) -> TResult {
+    unsafe { (*(this as *mut EditController)).connection.initialize(context); }
     crate::log_line("IEditController::initialize");
     K_RESULT_OK
 }
 
-unsafe extern "system" fn edit_controller_terminate(_this: *mut c_void) -> TResult {
+unsafe extern "system" fn edit_controller_terminate(this: *mut c_void) -> TResult {
+    unsafe { let controller=&*(this as *mut EditController); controller.editor_link.clear(); controller.connection.close(); }
     crate::log_line("IEditController::terminate");
     K_RESULT_OK
 }
@@ -1279,14 +1307,14 @@ unsafe extern "system" fn edit_controller_set_component_handler(
 }
 
 unsafe extern "system" fn edit_controller_create_view(
-    _this: *mut c_void,
+    this: *mut c_void,
     name: *const c_char,
 ) -> *mut c_void {
-    if name.is_null() || unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes() != b"editor" {
+    if this.is_null() || name.is_null() || unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes() != b"editor" {
         return std::ptr::null_mut();
     }
     crate::log_line("IEditController::createView -> native editor");
-    crate::editor::create_view()
+    crate::editor::create_view_with_link(unsafe { &*(this as *const EditController) }.editor_link.clone())
 }
 
 static EDIT_CONTROLLER_VTBL: EditControllerVtbl = EditControllerVtbl {
@@ -1308,6 +1336,76 @@ static EDIT_CONTROLLER_VTBL: EditControllerVtbl = EditControllerVtbl {
     set_param_normalized: edit_controller_set_param_normalized,
     set_component_handler: edit_controller_set_component_handler,
     create_view: edit_controller_create_view,
+};
+
+/// 从真实connection子对象回到对应拥有者，所有接口共享同一个COM引用计数。
+unsafe fn processor_from_connection(this:*mut c_void)->*mut Processor {
+    unsafe { this.cast::<u8>().sub(offset_of!(Processor,connection_vtbl)).cast() }
+}
+unsafe fn controller_from_connection(this:*mut c_void)->*mut EditController {
+    unsafe { this.cast::<u8>().sub(offset_of!(EditController,connection_vtbl)).cast() }
+}
+unsafe extern "system" fn pc_query(this:*mut c_void,iid:*const u8,out:*mut *mut c_void)->TResult {
+    unsafe { component_query_interface(processor_from_connection(this).cast(),iid,out) }
+}
+unsafe extern "system" fn pc_add(this:*mut c_void)->u32 { unsafe { processor_add_ref(processor_from_connection(this)) } }
+unsafe extern "system" fn pc_release(this:*mut c_void)->u32 { unsafe { processor_release(processor_from_connection(this)) } }
+unsafe extern "system" fn pc_connect(this:*mut c_void,other:*mut c_void)->TResult {
+    let processor=unsafe { &*processor_from_connection(this) };
+    let result=unsafe { processor.connection.connect(other) };
+    if result==K_RESULT_OK {
+        let sent=processor.connection.send(Some(processor.route.token()));
+        crate::log_line(&format!("processor connection route sent result={sent}"));
+    }
+    result
+}
+unsafe extern "system" fn pc_disconnect(this:*mut c_void,other:*mut c_void)->TResult {
+    unsafe { &*processor_from_connection(this) }.connection.disconnect(other)
+}
+unsafe extern "system" fn pc_notify(this:*mut c_void,message:*mut c_void)->TResult {
+    let processor=unsafe { &*processor_from_connection(this) };
+    match unsafe { crate::editor::connection::read(message) } {
+        Ok(crate::editor::connection::Message::RequestRoute)=>processor.connection.send(Some(processor.route.token())),
+        _=>K_RESULT_FALSE,
+    }
+}
+unsafe extern "system" fn cc_query(this:*mut c_void,iid:*const u8,out:*mut *mut c_void)->TResult {
+    unsafe { edit_controller_query_interface(controller_from_connection(this).cast(),iid,out) }
+}
+unsafe extern "system" fn cc_add(this:*mut c_void)->u32 { unsafe { edit_controller_add_ref(controller_from_connection(this).cast()) } }
+unsafe extern "system" fn cc_release(this:*mut c_void)->u32 { unsafe { edit_controller_release(controller_from_connection(this).cast()) } }
+unsafe extern "system" fn cc_connect(this:*mut c_void,other:*mut c_void)->TResult {
+    let controller=unsafe { &*controller_from_connection(this) };
+    let result=unsafe { controller.connection.connect(other) };
+    if result==K_RESULT_OK {
+        let sent=controller.connection.send(None);
+        crate::log_line(&format!("controller connection route requested result={sent}"));
+    }
+    result
+}
+unsafe extern "system" fn cc_disconnect(this:*mut c_void,other:*mut c_void)->TResult {
+    let controller=unsafe { &*controller_from_connection(this) };
+    let result=controller.connection.disconnect(other);
+    if result==K_RESULT_OK { controller.editor_link.clear(); }
+    result
+}
+unsafe extern "system" fn cc_notify(this:*mut c_void,message:*mut c_void)->TResult {
+    let controller=unsafe { &*controller_from_connection(this) };
+    match unsafe { crate::editor::connection::read(message) } {
+        Ok(crate::editor::connection::Message::Route {pid,token})=>match controller.editor_link.bind(pid,&token) {
+            Ok(())=>{ crate::log_line("controller editor route bound to actual processor"); K_RESULT_OK },
+            Err(error)=>{ crate::log_line(&format!("controller editor route rejected: {error}")); K_RESULT_FALSE },
+        },
+        _=>K_RESULT_FALSE,
+    }
+}
+static PROCESSOR_CONNECTION_VTBL:crate::editor::connection::ConnectionVtbl=crate::editor::connection::ConnectionVtbl {
+    base:crate::editor::connection::UnknownVtbl {query:pc_query,add:pc_add,release:pc_release},
+    connect:pc_connect,disconnect:pc_disconnect,notify:pc_notify,
+};
+static CONTROLLER_CONNECTION_VTBL:crate::editor::connection::ConnectionVtbl=crate::editor::connection::ConnectionVtbl {
+    base:crate::editor::connection::UnknownVtbl {query:cc_query,add:cc_add,release:cc_release},
+    connect:cc_connect,disconnect:cc_disconnect,notify:cc_notify,
 };
 
 /// 建立 ARA 主工厂适配器（`ARA::IMainFactory`）。

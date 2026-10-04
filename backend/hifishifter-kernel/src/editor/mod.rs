@@ -1,5 +1,9 @@
 //! 独立app与插件共享的原编辑命令；平台只适配undo、dirty与音频发布副作用。
 pub mod params;
+pub mod capabilities;
+pub mod history;
+pub mod waveform;
+pub mod host_pcm;
 use crate::state::{HistoryOp, TimelineState};
 use std::sync::Mutex;
 

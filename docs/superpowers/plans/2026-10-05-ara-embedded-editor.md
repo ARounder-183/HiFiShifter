@@ -171,3 +171,21 @@ AppState实现ParamHost，独立app仍走原设备/dirty/undo副作用，cargo c
 前端通信迁移tsc -b exit0；最新模块pin增量尚未重新编译，新增回归仍未执行。全功能测试按用户要求
 留最后。Task22实例路由/完整命令会话、Task23-26仍未完成。用户已选择本会话自主分批，
 无需重新选择执行方式。最终验收前不以某一小批绿测重定义整个二期为完成。
+
+本批Task22源实现：正式IConnectionPoint + 宿主IMessage/UTF16属性握手，PID/租约令牌
+定位对应processor，拒绝未知/过期/跨进程路线；class_flags不再宣称distributable。
+原waveform/mipmap、参数描述符、history checkpoint、授权PCM分析副本已共享，app仍
+用原入口薄适配。原生UI消息有界排给实例actor；响应与有界事件分邮箱，主线程timer
+回传COM，不在窗口回调推理。私有track/clip ID前缀分流内核异步事件。
+
+Task24首个源实现：150ms合并、最新submitted ticket阻止旧作业发布、参数接受立即写入
+组件权威；getState先flush已收到尾块，关闭FX不取消已排曲线写入；后台失败保留旧音频
+并发状态事件。实际宿主播放时钟由process原子发布，UI不运行cpal设备。
+编译检查：插件cargo check --tests与独立app cargo check均正常exit0；新增actor/路由
+回归只编译未运行。当前尚未构建部署和真实REAPER验收，不能勾完成Task22/24。
+
+下一批优先：Task23前端宿主能力/隐藏手动提交栏/自动应用状态，Task25规范bundle。
+随后补齐Task24压力/冲突/双实例/持久化回归并集中Task26。已识别待收敛：retired快照
+仍保留到owner释放，自动编辑下需确认/改进安全回收；actor渲染持doc transaction期间
+宿主UI模型回调可能等待；PCM私有分析文件的重复几何刷新与回收需资源边界审计。
+现阶段不宣称所有原GUI功能已接线，未支持的命令明确Err而不是伪报成功。

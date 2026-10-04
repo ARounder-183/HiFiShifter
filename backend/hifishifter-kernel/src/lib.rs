@@ -78,6 +78,7 @@ macro_rules! log_error_limited {
 // ── 时间线模型 ──────────────────────────────────────────────────────────────
 pub mod state;
 pub mod editor;
+pub mod hfspeaks_v2;
 
 // ── 曲线与参数 ──────────────────────────────────────────────────────────────
 pub mod fade_curves;

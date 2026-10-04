@@ -780,4 +780,14 @@ Task 21: Ruling: WebView2异步环境创建无cancel，weak失效不能阻止迟
 
 Task 22: Ruling: 原参数命令依赖AppState但仅需timeline/undo/dirty/发布四个边界 — 完整原函数体与互转测试机械迁入kernel/editor，经ParamHost薄适配保留独立app副作用，插件不复制简化曲线语义 — 若hook改变锁序或dirty记账，会丢最后一笔/破坏独立模式，留共享回归最终验证。
 
+Task 22: Ruling: SDK允许IConnectionPoint之间存在宿主代理 — 采用宿主IMessage及UTF16属性传本进程租约令牌，不传Rust裸Arc、不查全局最后实例；取消distributable声明 — 若只query私人接口，经过代理或不同组件顺序就会丢关联/串实例。
+
+Task 22: Ruling: 原分析/波形API仍以文件域工作，不能按宿主persistentID读取 — 从已授权PCM生成私有分析WAV并反向关联，原HfsPeaks/描述符/mix波形/history实现共享；GUI ID按实例前缀隔离异步事件 — 若复用宿主文件或全局root IDs，分析可能越权/过期或串另一个FX。
+
+Task 24: Ruling: 自动编辑不能让每笔推理阻塞UI，也不能等推理后才进入工程state — 32任务actor、150ms合并，先接受权威参数再发布快照，getState屏障处理已收到尾块；新submitted ticket撤销旧作业发布 — 若混为一个提交，保存/关FX可能漏最后一笔或慢作业覆盖新曲线。
+
+Task 24: Ruling: UI等待getState时worker若阻塞发响应会形成等待环 — 命令响应使用受native 32 pending上限约束的非阻塞邮箱，事件另设128有界邮箱，COM只由UI timer发送 — 若共享满队列并阻塞发送，保存或销毁可能死锁整个REAPER。
+
+Task 24: Ruling: 编译成功未证明Host消息实现/内嵌原GUI/长期自动快照预算 — 保持任务未完成，先适配前端与规范部署再集中真实验收，并审计retired回收及doc事务等待 — 若现在报告二期可用，会掩盖尚未跑过的核心宿主路径。
+
 

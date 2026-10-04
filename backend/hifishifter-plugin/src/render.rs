@@ -15,6 +15,7 @@ use hifishifter_kernel::time_stretch::StretchAlgorithm;
 pub(crate) mod ownership;
 pub(crate) mod extension;
 pub(crate) mod document;
+pub(crate) mod transport;
 pub(crate) mod source;
 pub(crate) mod snapshot;
 pub(crate) mod budget;

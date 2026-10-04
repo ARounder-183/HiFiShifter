@@ -2111,6 +2111,7 @@ name = "hifishifter-plugin"
 version = "0.1.0"
 dependencies = [
  "ara2-bridge",
+ "base64 0.22.1",
  "blake3",
  "hifishifter-ara-ipc",
  "hifishifter-kernel",

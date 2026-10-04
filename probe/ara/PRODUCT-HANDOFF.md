@@ -29,6 +29,19 @@ tsc-b exit0，迁移后独立app cargo check exit0。最新模块pin增量未重
 随后原App能力适配、自动应用与state保存、bundle部署、最后集中REAPER实测。
 前端入口是plugin.html，bundle必须带它（不是独立app的index.html）；暂未生成发行包。
 
+二期最新源进度覆盖上一段“仅ping”的旧检查点：已用标准IConnectionPoint/宿主IMessage
+建立真实processor路线，拒绝PID/过期令牌；原生窗口排队给实例EditorSession actor，
+原参数/原波形与能力描述符/共享history已接线。150ms自动渲染及状态事件、保存尾块屏障
+源码已写，已接受参数先入组件state，音频稍后发布；process仅额外原子写宿主时钟。
+native字段不保留Tauri app句柄、不运行设备。UI响应由窗口timer主线程回传COM。
+新增路由/真实actor-state编码/关UI尾块/无效track patch回归已编译，未执行（遵用户要求）。
+最新plugin cargo check --tests exit0（含模块pin、clock/event router、actor回归），
+独立app cargo check exit0（共享波形/PCM/history后，随后仅去掉新增unused导入/变量）。
+还没frontend能力适配、部署/REAPER内嵌真实操作与音频验收。不要让“编译成功”替代这些。
+未决重点：retired snapshot预算下长期自动编辑、安全回收；doc transaction持有期间的
+宿主UI等待；私有PCM文件生命周期。下一步先读二期plan末尾进度并执行Task23/25，
+最终集中测试与REAPER验收。当前未启动REAPER或用户app，未改用户工程。
+
 ## 一期历史排错记录
 
 用户明确要求本轮先不做倒放，继续到原 GUI 正向全流程可用。此授权覆盖下方历史方向停止条件，

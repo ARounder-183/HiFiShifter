@@ -27,6 +27,8 @@ pub(crate) struct ExtensionOwner {
     pub snapshots: [super::snapshot::SnapshotPublisher; 2],
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
     channel: Mutex<Option<hifishifter_ara_ipc::Server>>,
+    editor:std::sync::OnceLock<Result<Arc<crate::editor::session::EditorSession>,String>>,
+    pub(crate) clock:std::sync::OnceLock<Arc<super::transport::TransportClock>>,
 }
 
 #[cfg(test)]
@@ -366,6 +368,60 @@ mod bound_tests {
 }
 
 impl ExtensionOwner {
+    /// 原生GUI会话属于真实组件，关闭FX只移除窗口，不销毁参数权威或后台渲染。
+    pub(crate) fn editor_session(self:&Arc<Self>)->Result<Arc<crate::editor::session::EditorSession>,String> {
+        self.editor.get_or_init(||crate::editor::session::EditorSession::new(self)).clone()
+    }
+    /// 组件/文档终止时停止实例worker；不要在音频process调用。
+    pub(crate) fn stop_editor(&self) {
+        if let Some(Ok(editor))=self.editor.get() { editor.close(); }
+    }
+    /// 原生GUI轻量版本查询，不复制PCM，不按宿主ID读取文件。
+    pub(crate) fn editor_versions(&self)->Result<(u64,u64),String> {
+        let document=self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade).ok_or("document closed")?;
+        let revision=document.edits.lock().unwrap().revision;
+        Ok((revision,document.revision.load(Ordering::Acquire)))
+    }
+    /// 接受曲线立即进入组件state，音频可稍后应用；真正model/edit冲突仍拒绝。
+    pub(crate) fn accept_editor_edits(&self,base_edit:u64,base_model:u64,
+        client:&hifishifter_kernel::state::TimelineState)->Result<(u64,u64),String> {
+        let document=self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade).ok_or("document closed")?;
+        let _transaction=document.transaction.lock().unwrap();
+        let model=document.revision.load(Ordering::Acquire);
+        if model!=base_model { return Err("Conflict: host model changed; local curves preserved".into()); }
+        if !document.ready.load(Ordering::Acquire) { return Err("host model not ready".into()); }
+        let host=self.assigned_timeline(&document)?;
+        let mut edits=document.edits.lock().unwrap();
+        let mut candidate=edits.merge(&host,client,base_edit)?;
+        candidate.reconcile(&document.track_bindings.lock().unwrap())?;
+        *edits=candidate;
+        Ok((edits.revision,model))
+    }
+    /// 最新已接受state在非实时线程渲染；有更新的GUI写入排队时禁止旧作业发布。
+    pub(crate) fn apply_editor_edits(&self,base_edit:u64,base_model:u64,
+        current:impl Fn()->bool)->Result<(),String> {
+        let document=self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade).ok_or("document closed")?;
+        let _transaction=document.transaction.lock().unwrap();
+        if !document.ready.load(Ordering::Acquire) || document.revision.load(Ordering::Acquire)!=base_model {
+            return Err("Conflict: host model changed during automatic apply".into());
+        }
+        let edits=document.edits.lock().unwrap().clone();
+        if edits.revision!=base_edit { return Err("Conflict: edit revision changed".into()); }
+        let mut prepared=Vec::new();
+        for owner in document.renderer_owners() {
+            let snapshots=owner.render_edits(&document,&edits)?;
+            if !owner.snapshots.iter().zip(&snapshots).all(|(p,s)|p.has_capacity(s)) { return Err("retired snapshot budget exhausted; reopen instance".into()); }
+            prepared.push((owner,snapshots));
+        }
+        if !current() { return Err("automatic apply superseded".into()); }
+        for (owner,snapshots) in prepared {
+            for (publisher,snapshot) in owner.snapshots.iter().zip(snapshots) {
+                publisher.publish(snapshot).map_err(|e|format!("snapshot publish failed: {e:?}"))?;
+            }
+        }
+        crate::log_line(&format!("Embedded editor auto apply ready revision={base_edit} model={base_model}"));
+        Ok(())
+    }
     /// 组件释放/文档关闭前结束后台服务，避免DLL卸载后线程仍执行插件代码。
     pub fn stop_channel(&self) { let channel = self.channel.lock().unwrap().take(); drop(channel); }
 
@@ -383,6 +439,7 @@ impl ExtensionOwner {
 
     /// 保存前重新核对完整宿主图；歧义或中间编辑态不能伪装成可恢复的state。
     pub(crate) fn encode_state(&self) -> Result<Vec<u8>, String> {
+        if let Some(Ok(editor))=self.editor.get() {editor.flush()?;}
         let document = self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade);
         if let Some(document) = document {
             let _transaction = document.transaction.lock().unwrap();
@@ -572,6 +629,7 @@ impl ExtensionOwner {
         }
         document.attach(self, owned.1, companion)?;
         *self.document.lock().unwrap() = Some(Arc::downgrade(&document));
+        let _=self.clock.set(document.clock.clone());
         *current = Some(owned.0);
         self.role.store(
             if enabled.contains(ExtensionRoles::PLAYBACK_RENDERER) {
@@ -598,6 +656,7 @@ impl ExtensionOwner {
 
     /// 文档侧已撤销 lease；保留 binding 以供宿主最后几次合法移除/释放回调访问。
     pub fn document_closed(&self) {
+        self.stop_editor();
         self.stop_channel();
         self.assignments.lock().unwrap().clear();
         self.sequences.lock().unwrap().clear();

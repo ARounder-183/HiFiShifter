@@ -33,6 +33,7 @@ pub(crate) struct DocumentSession {
     pub transaction: Mutex<()>,
     pub edits: Arc<Mutex<crate::state_channel::EditState>>,
     pub id: DocumentId,
+    pub clock:Arc<super::transport::TransportClock>,
 }
 
 #[cfg(test)]

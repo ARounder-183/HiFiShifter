@@ -52,12 +52,18 @@ struct ViewState {
     native: Option<super::webview::NativeEditor>,
 }
 #[repr(C)]
-struct View { vtbl: *const ViewVtbl, refs: AtomicU32, state: Mutex<ViewState> }
+struct View { vtbl: *const ViewVtbl, refs: AtomicU32, state: Mutex<ViewState>,
+    link:std::sync::Arc<super::routing::EditorLink> }
 
 /// 返回一个具有宿主owning引用的IPlugView；实例路由由后续connection接线提供。
-pub(crate) fn create_view() -> *mut c_void {
+#[cfg(test)]
+fn create_view() -> *mut c_void {
+    create_view_with_link(std::sync::Arc::new(Default::default()))
+}
+/// 每个FX视图继承其真实controller connection，不做任何全局实例搜索。
+pub(crate) fn create_view_with_link(link:std::sync::Arc<super::routing::EditorLink>) -> *mut c_void {
     Box::into_raw(Box::new(View {
-        vtbl: &VTBL, refs: AtomicU32::new(1), state: Mutex::new(ViewState::default()),
+        vtbl: &VTBL, refs: AtomicU32::new(1), state: Mutex::new(ViewState::default()), link,
     })).cast()
 }
 
@@ -102,7 +108,7 @@ unsafe extern "system" fn attached(this: *mut c_void, parent: *mut c_void, kind:
                 (width,height,state.generation)
             };
             // CreateWindowEx会同步通知宿主父窗口，不能持有view锁。
-            let native=super::webview::NativeEditor::attach(parent,width,height);
+            let native=super::webview::NativeEditor::attach(parent,width,height,unsafe { view(this) }.link.clone());
             let mut state=unsafe { view(this) }.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.generation!=generation || !state.attaching {
                 drop(state); drop(native); return K_RESULT_FALSE;

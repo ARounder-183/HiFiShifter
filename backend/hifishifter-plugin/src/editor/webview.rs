@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc,mpsc};
+use std::sync::atomic::AtomicBool;
+use std::collections::HashSet;
 use webview2_com::Microsoft::Web::WebView2::Win32::*;
 use webview2_com::{AddScriptToExecuteOnDocumentCreatedCompletedHandler, CoTaskMemPWSTR,
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
@@ -30,6 +33,11 @@ struct BrowserState {
     view_id: String,
     controller: Option<ICoreWebView2Controller>,
     error_window: Option<HWND>,
+    link:std::sync::Arc<super::routing::EditorLink>,
+    sink:super::session::UiSink,
+    replies:mpsc::Receiver<serde_json::Value>,
+    events:mpsc::Receiver<serde_json::Value>,
+    pending:HashSet<u64>,
 }
 struct WindowData {
     state: Rc<RefCell<BrowserState>>,
@@ -41,10 +49,12 @@ impl Drop for WindowData {
         let controller = {
             let mut state = self.state.borrow_mut();
             state.closed = true;
+            state.sink.closed.store(true,Ordering::Release);
             state.controller.take()
         };
         // Close会同步回调；此时不持有RefCell borrow。
         if let Some(controller) = controller { let _ = unsafe { controller.Close() }; }
+        let _=unsafe {KillTimer(Some(self.state.borrow().hwnd),0x4853)};
         unsafe { CoUninitialize(); }
     }
 }
@@ -70,7 +80,8 @@ impl WindowKey {
 }
 impl NativeEditor {
     /// 同线程创建子窗口，异步浏览器由宿主消息循环完成，禁止嵌套消息泵。
-    pub(super) fn attach(parent: *mut c_void, width: i32, height: i32) -> Result<Self, String> {
+    pub(super) fn attach(parent: *mut c_void, width: i32, height: i32,
+        link:std::sync::Arc<super::routing::EditorLink>) -> Result<Self, String> {
         let parent = HWND(parent);
         if !unsafe { IsWindow(Some(parent)) }.as_bool() { return Err("parent is not a live HWND".into()); }
         let thread = unsafe { GetCurrentThreadId() };
@@ -83,8 +94,11 @@ impl NativeEditor {
         initialized.ok().map_err(|e| format!("WebView2 STA unavailable: {e}"))?;
         let token = NEXT_VIEW.fetch_add(1,Ordering::Relaxed) as usize;
         let view_id = format!("view-{}-{token}", std::process::id());
+        let (reply,replies)=mpsc::channel();
+        let (event_sender,events)=mpsc::sync_channel(128);
+        let sink=super::session::UiSink {view_id:view_id.clone(),reply,events:event_sender,closed:Arc::new(AtomicBool::new(false))};
         let state = Rc::new(RefCell::new(BrowserState { hwnd: HWND::default(), closed: false,
-            view_id, controller: None, error_window: None }));
+            view_id, controller: None, error_window: None, link,sink,replies,events,pending:HashSet::new() }));
         let transferred = Rc::new(Cell::new(false));
         let data = Box::into_raw(Box::new(WindowData { state: state.clone(), transferred: transferred.clone(), token }));
         let result = unsafe { CreateWindowExW(WINDOW_EX_STYLE::default(), w!("HiFiShifter.ARA.Editor"),
@@ -100,6 +114,7 @@ impl NativeEditor {
             }
         };
         let native = Self { key:WindowKey { hwnd: hwnd.0 as usize, thread, token } };
+        if unsafe {SetTimer(Some(hwnd),0x4853,20,None)}==0 {show_error(&state,"UI response timer unavailable");}
         if let Err(error) = begin_browser(&state) { show_error(&state, &error); }
         Ok(native)
     }
@@ -196,7 +211,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
         }
         let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowData;
         if !pointer.is_null() {
-            if message == WM_SIZE {
+            if message==WM_TIMER && wparam.0==0x4853 {
+                deliver(&(*pointer).state);
+                return LRESULT(0);
+            } else if message == WM_SIZE {
                 let controller = (*pointer).state.borrow().controller.clone();
                 if let Some(controller) = controller {
                     let mut bounds = RECT::default();
@@ -214,6 +232,30 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
         }
         DefWindowProcW(hwnd,message,wparam,lparam)
     })).unwrap_or(LRESULT(0))
+}
+
+/// worker只写JSON邮箱；COM响应仅在本窗口UI线程发送，且不持RefCell borrow。
+fn deliver(state:&Rc<RefCell<BrowserState>>) {
+    let (controller,mut replies,events)={
+        let mut state=state.borrow_mut();
+        if state.closed || state.controller.is_none() {return;}
+        let replies=state.replies.try_iter().take(32).collect::<Vec<_>>();
+        let events=state.events.try_iter().take(64).collect::<Vec<_>>();
+        for reply in &replies {if let Some(id)=reply["id"].as_u64() {state.pending.remove(&id);}}
+        (state.controller.clone(),replies,events)
+    };
+    let Some(controller)=controller else {return;};
+    let Ok(browser)=(unsafe {controller.CoreWebView2()}) else {return;};
+    replies.extend(events);
+    for response in replies {
+        let mut text=response.to_string();
+        if text.len()>8*1024*1024 {
+            text=serde_json::json!({"version":1,"viewId":response["viewId"],"id":response["id"],
+                "ok":false,"error":"native response budget exceeded"}).to_string();
+        }
+        let text=wide(&text);
+        if unsafe {browser.PostWebMessageAsJson(PCWSTR(text.as_ptr()))}.is_err() {break;}
+    }
 }
 
 fn show_error(state: &Rc<RefCell<BrowserState>>, error: &str) {
@@ -323,13 +365,26 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
         let Ok(request) = serde_json::from_str::<serde_json::Value>(&text) else { return Ok(()); };
         if request["version"] != 1 || request["viewId"] != view_id { return Ok(()); }
         let Some(id) = request["id"].as_u64().filter(|id| *id > 0 && *id <= 9_007_199_254_740_991) else { return Ok(()); };
-        // 接线中的明确拒绝，不返回伪造timeline/曲线来掩盖尚未实现的编辑会话。
+        // 普通命令只排队；UI回调不得分析、推理、读文件或等待worker。
         let result = match request["command"].as_str() {
-            Some("ping") => Ok(serde_json::json!({"ok":true,"mode":"plugin","view_id":view_id})),
+            Some("ping") => Ok(serde_json::json!({"ok":true,"mode":"plugin","view_id":view_id,
+                "connected":state.borrow().link.owner().is_ok()})),
             Some("log_frontend_error") => {
                 crate::log_line(&format!("Embedded frontend: {}",request["args"])); Ok(serde_json::Value::Null)
             }
-            _ => Err("Plugin editor command session is not connected yet"),
+            Some(command)=>{
+                let (link,sink,full)={let state=state.borrow();(state.link.clone(),state.sink.clone(),state.pending.len()>=32 || state.pending.contains(&id))};
+                let outcome=if full {Err("native pending request budget exceeded".into())} else {
+                    link.owner().and_then(|owner|owner.editor_session()?.enqueue(super::session::UiRequest {
+                        id,command:command.into(),args:request.get("args").cloned().unwrap_or_else(||serde_json::json!({})),sink,
+                    }))
+                };
+                match outcome {
+                    Ok(())=>{state.borrow_mut().pending.insert(id);return Ok(());},
+                    Err(error)=>Err(error),
+                }
+            },
+            None=>Err(String::from("native command missing")),
         };
         let response = match result {
             Ok(value) => serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":true,"value":value}),

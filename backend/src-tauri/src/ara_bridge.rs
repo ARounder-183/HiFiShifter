@@ -56,116 +56,12 @@ fn create_ara_temp_dir() -> Result<PathBuf, String> {
 }
 
 /// 写入应用私有 WAV，先验证全部源，绝不将 persistentID 当路径打开。
-fn materialize_snapshot(
-    mut timeline: TimelineState,
-    sources: &[HostPcm],
-    dir: &Path,
-) -> Result<(TimelineState, HashMap<String, String>), String> {
-    if !timeline.bpm.is_finite()
-        || timeline.bpm <= 0.0
-        || !timeline.project_sec.is_finite()
-        || timeline.project_sec < 0.0
-    {
-        return Err("invalid host timeline".into());
-    }
-    let mut pcm_by_id = HashMap::new();
-    for pcm in sources {
-        let frames = pcm.planes.first().map(Vec::len).unwrap_or(0);
-        if pcm.persistent_id.is_empty()
-            || !matches!(pcm.sample_rate, 44100 | 48000)
-            || !(1..=2).contains(&pcm.planes.len())
-            || frames == 0
-            || frames > pcm.sample_rate as usize * 30
-            || pcm
-                .planes
-                .iter()
-                .any(|plane| plane.len() != frames || plane.iter().any(|v| !v.is_finite()))
-            || pcm_by_id.insert(pcm.persistent_id.clone(), pcm).is_some()
-        {
-            return Err("invalid host PCM".into());
-        }
-    }
-    for clip in &mut timeline.clips {
-        clip.normalize_takes();
-        if !clip.start_sec.is_finite()
-            || !clip.length_sec.is_finite()
-            || clip.length_sec <= 0.0
-            || clip.takes.iter().any(|take| {
-                !take.source_start_sec.is_finite()
-                    || !take.source_end_sec.is_finite()
-                    || !take.playback_rate.is_finite()
-                    || take.playback_rate <= 0.0
-            })
-        {
-            return Err("invalid host clip geometry".into());
-        }
-        if clip.reversed || clip.takes.iter().any(|take| take.reversed) {
-            return Err("ARA reverse playback is unsupported".into());
-        }
-        for source in std::iter::once(&clip.source_path)
-            .chain(clip.takes.iter().map(|take| &take.source_path))
-        {
-            let id = source.as_ref().ok_or("missing host PCM reference")?;
-            if !pcm_by_id.contains_key(id) {
-                return Err(format!("missing host PCM: {id}"));
-            }
-        }
-    }
-    std::fs::create_dir_all(dir)
-        .map_err(|e| format!("prepare ARA PCM directory {}: {e}", dir.display()))?;
-    let result = (|| {
-        let mut paths = HashMap::new();
-        let mut reverse = HashMap::new();
-        for (index, pcm) in sources.iter().enumerate() {
-            let path = dir.join(format!("source-{index}.wav"));
-            let spec = hound::WavSpec {
-                channels: pcm.planes.len() as u16,
-                sample_rate: pcm.sample_rate,
-                bits_per_sample: 32,
-                sample_format: hound::SampleFormat::Float,
-            };
-            let mut wav = hound::WavWriter::create(&path, spec)
-                .map_err(|e| format!("create ARA PCM WAV {}: {e}", path.display()))?;
-            for frame in 0..pcm.planes[0].len() {
-                for plane in &pcm.planes {
-                    wav.write_sample(plane[frame])
-                        .map_err(|e| format!("write ARA PCM WAV: {e}"))?;
-                }
-            }
-            wav.finalize()
-                .map_err(|e| format!("finalize ARA PCM WAV: {e}"))?;
-            let path = path.to_string_lossy().into_owned();
-            paths.insert(pcm.persistent_id.clone(), path.clone());
-            reverse.insert(path, pcm.persistent_id.clone());
-        }
-        for clip in &mut timeline.clips {
-            clip.source_path = clip
-                .source_path
-                .as_ref()
-                .and_then(|id| paths.get(id).cloned());
-            clip.source_path_relative = None;
-            for take in &mut clip.takes {
-                let pcm = pcm_by_id[take.source_path.as_ref().ok_or("missing PCM")?];
-                take.source_path = Some(paths[&pcm.persistent_id].clone());
-                take.source_path_relative = None;
-                take.source_sample_rate = Some(pcm.sample_rate);
-                take.source_channels = Some(pcm.planes.len() as u16);
-                take.duration_frames = Some(pcm.planes[0].len() as u64);
-                take.duration_sec = Some(pcm.planes[0].len() as f64 / pcm.sample_rate as f64);
-                take.source_file_fingerprint = None;
-                take.source_file_mtime = None;
-                take.source_file_size = None;
-                take.waveform_preview = None;
-                take.pitch_range = None;
-            }
-            clip.normalize_takes();
-        }
-        Ok((timeline, reverse))
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(dir);
-    }
-    result
+fn materialize_snapshot(timeline:TimelineState,sources:&[HostPcm],dir:&Path)
+    ->Result<(TimelineState,HashMap<String,String>),String> {
+    let views:Vec<_>=sources.iter().map(|pcm|hifishifter_kernel::editor::host_pcm::PcmView {
+        persistent_id:&pcm.persistent_id,sample_rate:pcm.sample_rate,planes:&pcm.planes,
+    }).collect();
+    hifishifter_kernel::editor::host_pcm::materialize(timeline,&views,dir)
 }
 
 fn guard_replace(state: &AppState, force: bool) -> Result<(), String> {
