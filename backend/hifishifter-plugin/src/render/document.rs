@@ -27,6 +27,7 @@ pub(crate) struct DocumentSession {
     pub sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
     pub edit_sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
     pub timeline: Mutex<Option<hifishifter_kernel::state::TimelineState>>,
+    pub track_bindings: Mutex<crate::state_channel::TrackBindings>,
     pub revision: AtomicU64,
     pub ready: AtomicBool,
     pub transaction: Mutex<()>,
@@ -186,8 +187,18 @@ impl DocumentSession {
     /// 在旧内容可能被改变前立即撤销发布；不回收实时读者可能仍持有的旧快照。
     pub fn clear_renderers(&self) {
         let _transaction = self.transaction.lock().unwrap();
-        self.ready.store(false, Ordering::Release);
         self.revision.fetch_add(1, Ordering::AcqRel);
+        self.revoke_snapshots();
+    }
+
+    /// 授权开关只撤销播放许可，不改变宿主内容/布局的乐观并发版本。
+    pub fn revoke_renderers(&self) {
+        let _transaction = self.transaction.lock().unwrap();
+        self.revoke_snapshots();
+    }
+
+    fn revoke_snapshots(&self) {
+        self.ready.store(false, Ordering::Release);
         let owners = self
             .renderers
             .lock()

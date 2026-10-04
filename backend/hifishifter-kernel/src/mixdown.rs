@@ -779,12 +779,8 @@ fn apply_host_pitch_edit(
     let Some(entry) = timeline.params_by_root_track.get(&root) else {
         return Ok(false);
     };
-    if (!track.compose_enabled && !entry.has_pitch_adjustment_active)
-        || matches!(
-            track.pitch_analysis_algo,
-            crate::state::PitchAnalysisAlgo::None
-        )
-        || !crate::pitch_editing::does_clip_need_processor_render(timeline, clip, clip.start_sec)
+    // 手工曲线在compose关闭时仍有效；与原GUI共用唯一的渲染门禁。
+    if !crate::pitch_editing::does_clip_need_processor_render(timeline, clip, clip.start_sec)
     {
         return Ok(false);
     }
@@ -1933,6 +1929,26 @@ mod tests {
             eprintln!("WORLD host oracle: rms={rms:.6}, mean_abs_diff={difference:.6}");
             assert!(rms > 0.02, "WORLD必须产生真实非静音音频");
             assert!(difference > 0.03, "音高编辑必须改变输出");
+        }
+
+        /// compose关闭仍须遵循原GUI的手工修音语义，并实际改变WORLD输出。
+        #[test]
+        fn compose_off_manual_pitch_changes_real_host_pcm() {
+            let mut tl = timeline("ara://manual-world");
+            tl.tracks[0].compose_enabled = false;
+            let entry = tl.params_by_root_track.get_mut(&tl.tracks[0].id).unwrap();
+            entry.pitch_orig.fill(57.0);
+            entry.pitch_edit.fill(69.0);
+            entry.pitch_edit_user_modified = true;
+            let src = sources("ara://manual-world", tone(220.0));
+            assert!(crate::pitch_editing::does_clip_need_processor_render(&tl, &tl.clips[0], 0.0));
+            let (_, _, _, dry) = render_mixdown_with_pcm(&tl, opts(false), &src).unwrap();
+            let (_, _, _, wet) = render_mixdown_with_pcm(&tl, opts(true), &src).unwrap();
+            let rms = (wet.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / wet.len() as f64).sqrt();
+            let difference = wet.iter().zip(&dry).map(|(a,b)| (*a as f64 - *b as f64).abs()).sum::<f64>() / wet.len() as f64;
+            eprintln!("WORLD compose-off manual oracle: rms={rms:.6}, mean_abs_diff={difference:.6}");
+            assert!(rms > 0.02, "手工修音不能静音");
+            assert!(difference > 0.03, "compose关闭时手工音高仍须改变音频");
         }
 
         #[test]

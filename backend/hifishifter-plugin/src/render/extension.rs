@@ -53,6 +53,7 @@ mod bound_tests {
         })).unwrap();
         for clip in &mut timeline.clips { clip.normalize_takes(); }
         *document.timeline.lock().unwrap() = Some(timeline);
+        document.track_bindings.lock().unwrap().insert("track".into(), vec![("host-mod".into(),"ara://pcm".into())]);
         document.edit_sources.lock().unwrap().insert("ara://pcm".into(), Arc::new(SourcePcm { sample_rate:44100,
             planes:vec![vec![0.1,0.2,0.3,0.4]], version:0, _reservation:None }));
         let identity = Box::new(0_u8);
@@ -93,7 +94,7 @@ mod bound_tests {
         let model = crate::ara::model::ModelHandle::new();
         let document = model.session();
         let timeline: hifishifter_kernel::state::TimelineState = serde_json::from_value(serde_json::json!({
-            "tracks":[{"id":"track","name":"host","order":0}],"clips":[],"bpm":120,"project_sec":0
+            "tracks":[],"clips":[],"bpm":120,"project_sec":0
         })).unwrap();
         *document.timeline.lock().unwrap() = Some(timeline);
         document.ready.store(true, Ordering::Release);
@@ -101,8 +102,7 @@ mod bound_tests {
         owner.bind_to_document(document.clone(), ApiGeneration::V2Final, ExtensionRoles::all(), ExtensionRoles::EDITOR_RENDERER, None).unwrap();
         let snapshot = owner.handle_request(hifishifter_ara_ipc::Request::Snapshot);
         assert!(snapshot.ok, "{:?}", snapshot.error);
-        let mut client = snapshot.timeline.unwrap();
-        client["tracks"][0]["volume"] = serde_json::json!(0.5);
+        let client = snapshot.timeline.unwrap();
         let commit = hifishifter_ara_ipc::Request::Commit { base_revision: snapshot.revision, model_revision: snapshot.model_revision, timeline: client };
         let response = owner.handle_request(commit.clone());
         assert!(response.ok, "{:?}", response.error);
@@ -111,6 +111,53 @@ mod bound_tests {
         document.clear_renderers();
         assert!(!owner.handle_request(hifishifter_ara_ipc::Request::Snapshot).ok);
         drop(model);
+    }
+
+    /// 两个renderer先后提交局部视图，第二次刷新后不能抹掉第一轨PCM或持久曲线。
+    #[test]
+    fn two_renderer_commits_keep_both_curves_volumes_pcm_and_saved_state() {
+        use crate::render::source::SourcePcm;
+        use hifishifter_ara_ipc::Request;
+        let model=crate::ara::model::ModelHandle::new(); let document=model.session();
+        let mut timeline:hifishifter_kernel::state::TimelineState=serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"a","name":"A","order":0},{"id":"b","name":"B","order":1}],"bpm":120,"project_sec":1,
+            "clips":[{"id":"clip-a","track_id":"a","name":"A","start_sec":0,"length_sec":4.0/44100.0,
+                "takes":[{"id":"take-a","source_path":"ara://pcm","source_start_sec":0,"source_end_sec":4.0/44100.0}]},
+                {"id":"clip-b","track_id":"b","name":"B","start_sec":0,"length_sec":4.0/44100.0,
+                "takes":[{"id":"take-b","source_path":"ara://pcm","source_start_sec":0,"source_end_sec":4.0/44100.0}]}]
+        })).unwrap(); for clip in &mut timeline.clips { clip.normalize_takes(); }
+        *document.timeline.lock().unwrap()=Some(timeline);
+        document.edit_sources.lock().unwrap().insert("ara://pcm".into(),Arc::new(SourcePcm { sample_rate:44100,planes:vec![vec![0.1,0.2,0.3,0.4]],version:0,_reservation:None }));
+        let bindings=std::collections::BTreeMap::from([("a".into(),vec![("mod-a".into(),"ara://pcm".into())]),("b".into(),vec![("mod-b".into(),"ara://pcm".into())])]);
+        *document.track_bindings.lock().unwrap()=bindings.clone(); document.ready.store(true,Ordering::Release);
+        let identities=[Box::new(0_u8),Box::new(0_u8)]; let mut owners=Vec::new();
+        for (index,id) in ["clip-a","clip-b"].into_iter().enumerate() {
+            let key=(&*identities[index] as *const u8) as u64;
+            region_owners().lock().unwrap().register(key,document.id,index).unwrap();
+            document.clip_ids.lock().unwrap().insert(key,id.into());
+            document.regions.lock().unwrap().insert(key,crate::ara::AraPlaybackRegion { audio_source_persistent_id:"ara://pcm".into(),duration_in_modification_time:4.0/44100.0,duration_in_playback_time:4.0/44100.0,..Default::default() });
+            let owner=Arc::new(ExtensionOwner::default());
+            let raw=owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::EDITOR_RENDERER,None).unwrap();
+            // SAFETY: identities及native扩展都保留到owner/document销毁。
+            unsafe { let ext=&*raw; ((*ext.editorRendererInterface).addPlaybackRegion.unwrap())(ext.editorRendererRef,key as *mut _); }
+            owners.push(owner);
+        }
+        for (index,id) in ["a","b"].into_iter().enumerate() {
+            let snapshot=owners[index].handle_request(Request::Snapshot); assert!(snapshot.ok,"{:?}",snapshot.error);
+            assert_eq!(snapshot.revision,index as u64,"B先刷新最新共享revision");
+            let mut client=snapshot.timeline.unwrap(); client["tracks"][0]["volume"]=serde_json::json!(if index==0 {0.5} else {0.25});
+            client["params_by_root_track"]=serde_json::json!({id:{"frame_period_ms":5.0,"pitch_edit":[61.0+index as f32,63.0+index as f32]}});
+            let response=owners[index].handle_request(Request::Commit { base_revision:snapshot.revision,model_revision:snapshot.model_revision,timeline:client }); assert!(response.ok,"{:?}",response.error);
+        }
+        let bytes=owners[0].encode_state().unwrap(); let mut restored=crate::state_channel::EditState::default(); restored.restore(&bytes).unwrap(); restored.reconcile(&bindings).unwrap();
+        for (index,id) in ["a","b"].into_iter().enumerate() {
+            assert_eq!(restored.params[id].pitch_edit,[61.0+index as f32,63.0+index as f32]);
+            let output=owners[index].render_edits(&document,&restored).unwrap();
+            let factor=if index==0 {0.5} else {0.25};
+            for (actual,original) in output[0].left.iter().zip([0.1_f32,0.2,0.3,0.4]) { assert!((*actual-original*factor).abs()<1e-6); }
+            let current=owners[index].handle_request(Request::Snapshot); assert!(current.ok);
+            assert_eq!(current.timeline.unwrap()["tracks"][0]["volume"],serde_json::json!(factor));
+        }
     }
 
     /// 真实空文档绑定也必须收到销毁；不依赖 first region assignment 猜 document。
@@ -334,6 +381,18 @@ impl ExtensionOwner {
         if let Some(document) = document { for owner in document.renderer_owners() { owner.prepare(); } } else { self.prepare(); }
     }
 
+    /// 保存前重新核对完整宿主图；歧义或中间编辑态不能伪装成可恢复的state。
+    pub(crate) fn encode_state(&self) -> Result<Vec<u8>, String> {
+        let document = self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade);
+        if let Some(document) = document {
+            let _transaction = document.transaction.lock().unwrap();
+            if !document.ready.load(Ordering::Acquire) { return Err("host graph not ready; cannot save ARA edits".into()); }
+            let mut edits = document.edits.lock().unwrap();
+            edits.reconcile(&document.track_bindings.lock().unwrap())?;
+            edits.encode()
+        } else { self.edits.lock().unwrap().encode() }
+    }
+
     /// 接收非实时编辑请求；具体处理只在文档事务锁内进行。
     pub(crate) fn handle_request(&self, request: hifishifter_ara_ipc::Request) -> hifishifter_ara_ipc::Response {
         use hifishifter_ara_ipc::{Request, Response, HostPcm};
@@ -344,6 +403,7 @@ impl ExtensionOwner {
         let mut edits = document.edits.lock().unwrap();
         let outcome = (|| {
             if !document.ready.load(Ordering::Acquire) { return Err("host model not ready; refresh after editing".into()); }
+            edits.reconcile(&document.track_bindings.lock().unwrap())?;
             let mut timeline = self.assigned_timeline(&document)?;
             match request {
                 Request::Snapshot => {
@@ -358,9 +418,13 @@ impl ExtensionOwner {
                     Ok(Response { ok: true, timeline: Some(serde_json::to_value(&timeline).map_err(|e| e.to_string())?), sources, ..Default::default() })
                 }
                 Request::Commit { base_revision, model_revision: base_model, timeline: client } => {
-                    if base_model != model_revision { return Err("Conflict: host model changed; refresh".into()); }
+                    if base_model != model_revision {
+                        log::warn!("[ara] GUI commit conflict reason=host_model_changed base_model={base_model} current_model={model_revision} base_edit={base_revision} current_edit={}", edits.revision);
+                        return Err("Conflict: host model changed; refresh".into());
+                    }
                     let client = serde_json::from_value(client).map_err(|e| e.to_string())?;
-                    let candidate = edits.merge(&timeline, &client, base_revision)?;
+                    let mut candidate = edits.merge(&timeline, &client, base_revision)?;
+                    candidate.reconcile(&document.track_bindings.lock().unwrap())?;
                     let mut prepared = Vec::new();
                     for owner in document.renderer_owners() {
                         let snapshots = owner.render_edits(&document, &candidate)?;
@@ -395,7 +459,9 @@ impl ExtensionOwner {
             sample_rate, origin_sample: 0, left: vec![], right: vec![], _reservation: None,
         }).collect()); }
         let mut timeline = self.assigned_timeline(document)?;
-        edits.apply(&mut timeline);
+        let mut resolved = edits.clone();
+        resolved.reconcile(&document.track_bindings.lock().unwrap())?;
+        resolved.apply(&mut timeline);
         let geometry = document.regions.lock().unwrap();
         let regions = keys.iter().map(|key| geometry.get(key).cloned().ok_or("assigned region disappeared"))
             .collect::<Result<Vec<_>, _>>()?;
@@ -441,7 +507,8 @@ impl ExtensionOwner {
             .collect::<Result<BTreeSet<_>, _>>()?;
         let mut timeline = document.timeline.lock().unwrap().clone().ok_or("host timeline unavailable")?;
         timeline.clips.retain(|clip| ids.contains(&clip.id));
-        if !timeline.clips.is_empty() { timeline.tracks.retain(|track| timeline.clips.iter().any(|clip| clip.track_id == track.id)); }
+        // 零分配也只能看零轨道，不能意外把整张文档交给空renderer编辑。
+        timeline.tracks.retain(|track| timeline.clips.iter().any(|clip| clip.track_id == track.id));
         Ok(timeline)
     }
 

@@ -82,6 +82,8 @@ pub struct ModelHandle {
     timeline: Option<TimelineState>,
     /// 协商到的 ARA 版本。
     generation: Option<ApiGeneration>,
+    /// 源授权可能在宿主事务中回调；完整图收口前不能准备/关联恢复编辑。
+    editing: bool,
     /// region sequence 句柄 → 我们数组里的下标。
     sequence_index_by_handle: HashMap<HandleKey, usize>,
     /// source 句柄 → 数组下标。
@@ -111,6 +113,7 @@ impl Default for ModelHandle {
             document: AraDocument::default(),
             timeline: None,
             generation: None,
+            editing: false,
             sequence_index_by_handle: HashMap::new(),
             source_index_by_handle: HashMap::new(),
             modification_index_by_handle: HashMap::new(),
@@ -149,6 +152,8 @@ impl ModelHandle {
     /// 【为什么在 `end_editing` 调】ARA 约定：一次编辑的所有图变更都在
     /// `begin_editing` … `end_editing` 之间，收口点之后模型才是稳定的。
     fn remap_and_log(&mut self) {
+        let session=self.session.clone();
+        let transaction=session.transaction.lock().unwrap();
         {
             let mut regions = self.session.regions.lock().unwrap();
             regions.clear();
@@ -179,6 +184,20 @@ impl ModelHandle {
                     identities.insert(*key, clip.id.clone());
                 }
                 drop(identities);
+                // 身份仅由真实region→sequence边与宿主persistentID构建，不从名字/序号推断。
+                let mut bindings: crate::state_channel::TrackBindings = timeline.tracks.iter().map(|t| (t.id.clone(),vec![])).collect();
+                for region in &document.playback_regions {
+                    if let Some(index) = region.region_sequence_index {
+                        if let Some(track) = timeline.tracks.get(index) {
+                            bindings.get_mut(&track.id).unwrap().push((region.audio_modification_persistent_id.clone(), region.audio_source_persistent_id.clone()));
+                        }
+                    }
+                }
+                for members in bindings.values_mut() { members.sort(); members.dedup(); }
+                *self.session.track_bindings.lock().unwrap() = bindings.clone();
+                if let Err(error) = self.session.edits.lock().unwrap().reconcile(&bindings) {
+                    log::error!("[ara] edit identity unresolved: {error}");
+                }
                 log::info!("{}", crate::ara::summary_line(&document, &timeline));
                 log::info!("{}", crate::ara::clip_starts_line(&timeline));
                 *self.session.timeline.lock().unwrap() = Some(timeline.clone());
@@ -187,8 +206,11 @@ impl ModelHandle {
             Err(err) => {
                 // 映射失败必须显式记录：它是"DAW 里看到的时间线不对"这类问题的唯一线索。
                 log::error!("[ara] mapping failed: {err:?}");
+                self.session.ready.store(false, Ordering::Release);
+                return;
             }
         }
+        drop(transaction);
         self.session.prepare_renderers();
     }
 }
@@ -213,6 +235,7 @@ impl DocumentLifecycle for ModelHandle {
 
     /// 记录宿主编辑会话，区分宿主未通知与委托回调未处理。
     fn begin_editing(&mut self, _document: &mut Self::Document) -> Result<(), AraError> {
+        self.editing = true;
         self.session.clear_renderers();
         log::info!("[ara] begin_editing");
         Ok(())
@@ -223,6 +246,7 @@ impl DocumentLifecycle for ModelHandle {
         _document: &mut Self::Document,
         _host: &HostContentScope<'_, '_>,
     ) -> Result<(), AraError> {
+        self.editing = false;
         self.remap_and_log();
         Ok(())
     }
@@ -309,6 +333,7 @@ impl AudioSources for ModelHandle {
     /// undo history 中停用源时立即撤销准备好的 PCM；恢复后等待宿主重新授予访问。
     fn deactivate_audio_source(&mut self, state: &mut Self::AudioSource, deactivate: bool, host: &HostContentScope<'_, '_>) -> Result<(), AraError> {
         if deactivate {
+            self.session.clear_renderers();
             if let Some(source) = self.document.audio_sources.get(*state) { self.session.edit_sources.lock().unwrap().remove(&source.persistent_id); }
             if let Some(source) = self.document.audio_sources.get_mut(*state) { source.sample_access_enabled = false; }
             self.refresh_source_pcm(*state, host);
@@ -318,6 +343,7 @@ impl AudioSources for ModelHandle {
 
     /// 源销毁时撤销访问和快照，不能继续播已销毁源的缓存。
     fn destroy_audio_source(&mut self, state: Self::AudioSource, host: &HostContentScope<'_, '_>) {
+        self.session.clear_renderers();
         if let Some(source) = self.document.audio_sources.get(state) { self.session.edit_sources.lock().unwrap().remove(&source.persistent_id); }
         if let Some(source) = self.document.audio_sources.get_mut(state) { source.sample_access_enabled = false; }
         self.refresh_source_pcm(state, host);
@@ -364,6 +390,7 @@ impl AudioSources for ModelHandle {
         host: &HostContentScope<'_, '_>,
     ) -> Result<(), AraError> {
         // 内容变了 → 版本号前进。渲染缓存据此失效（设计 §4.5）。
+        self.session.clear_renderers();
         if let Some(source) = self.document.audio_sources.get(*state) { self.session.edit_sources.lock().unwrap().remove(&source.persistent_id); }
         self.source_content_version_bump(*state);
         self.refresh_source_pcm(*state, host);
@@ -405,9 +432,9 @@ impl AudioSources for ModelHandle {
 }
 
 impl ModelHandle {
-    /// 源变化与撤权先撤销旧快照，再只从当前授权 source scope 重新读取。
+    /// 授权刷新撤销旧快照；内容/几何回调另行推进模型版本，仅从授权scope读取。
     fn refresh_source_pcm(&mut self, index: usize, host: &HostContentScope<'_, '_>) {
-        self.session.clear_renderers();
+        self.session.revoke_renderers();
         let Some(source) = self.document.audio_sources.get(index) else { return; };
         self.session.sources.lock().unwrap().remove(&source.persistent_id);
         if source.sample_access_enabled {
@@ -425,7 +452,7 @@ impl ModelHandle {
                 Err(error) => log::warn!("[ara] host PCM unavailable: {error:?}"),
             }
         }
-        self.session.prepare_renderers();
+        if !self.editing { self.session.prepare_renderers(); }
     }
 
     /// 内容版本自增。
@@ -638,6 +665,54 @@ mod tests {
     use super::*;
     use ara2_bridge::core::{Registry, RegionSequenceKind};
 
+    fn identity_document(order: &[&str]) -> AraDocument {
+        let mut doc = crate::ara::ara_document_from_json(include_str!("../../../../probe/ara/captures/ara-model.reaper.json")).unwrap();
+        doc.musical_contexts[0].region_sequences.clear(); doc.playback_regions.clear(); doc.audio_modifications.clear();
+        for (index, name) in order.iter().enumerate() {
+            doc.musical_contexts[0].region_sequences.push(AraRegionSequence { name: Some(name.to_string()), order_index:index as i32, playback_region_count:1 });
+            let modification = format!("host-mod-{name}");
+            let source = doc.audio_sources[0].persistent_id.clone();
+            doc.audio_modifications.push(AraAudioModification { persistent_id: modification.clone(), audio_source_persistent_id: source.clone() });
+            doc.playback_regions.push(AraPlaybackRegion { audio_source_persistent_id:source, audio_modification_persistent_id:modification,
+                region_sequence_index:Some(index), duration_in_modification_time:0.5, duration_in_playback_time:0.5, ..Default::default() });
+        }
+        doc
+    }
+
+    /// 保存后新建图的序号不可决定旧编辑归属；共同source由真正modification身份区分。
+    #[test]
+    fn persisted_b_edits_follow_host_identity_after_deleting_a_and_reordering_creation() {
+        let mut model = ModelHandle::new(); model.document = identity_document(&["A", "B"]); model.remap_and_log();
+        let host = model.timeline().unwrap().clone(); let mut client = host.clone();
+        client.tracks[1].volume = 0.25;
+        client.params_by_root_track.insert("ara-track-1".into(), hifishifter_kernel::state::TrackParamsState {
+            frame_period_ms:5.0, pitch_edit:vec![62.0,64.0], ..Default::default() });
+        // 这里只保留已编辑B，模拟B renderer的局部视图。
+        client.tracks.remove(0); let mut view=host.clone(); view.tracks.remove(0);
+        *model.session.edits.lock().unwrap() = crate::state_channel::EditState::default().merge(&view,&client,0).unwrap();
+        // 同live图中删A区间，但B的会话slot不压缩。
+        model.destroyed_regions.insert(0); model.remap_and_log();
+        let bytes = model.session.edits.lock().unwrap().encode().unwrap();
+        for order in [vec!["B"], vec!["B","A"]] {
+            let mut reopened=ModelHandle::new(); reopened.document=identity_document(&order);
+            reopened.session.edits.lock().unwrap().restore(&bytes).unwrap(); reopened.remap_and_log();
+            let mut timeline=reopened.timeline().unwrap().clone(); reopened.session.edits.lock().unwrap().apply(&mut timeline);
+            assert_eq!(timeline.tracks[0].name,"B");
+            assert_eq!(timeline.tracks[0].volume,0.25,"B-first必须保留B音量而不依赖旧序号");
+            assert_eq!(timeline.params_by_root_track["ara-track-0"].pitch_edit,[62.0,64.0]);
+            if timeline.tracks.len()>1 { assert_eq!(timeline.tracks[1].volume,1.0,"不得串到A"); }
+            timeline.clips.retain(|clip| clip.track_id=="ara-track-0");
+            let pcm=std::collections::HashMap::from([(reopened.document.audio_sources[0].persistent_id.clone(), hifishifter_kernel::mixdown::MixdownPcm {
+                sample_rate:44100,channels:1,samples:Arc::new(vec![0.2;22050]) })]);
+            let options=hifishifter_kernel::mixdown::MixdownOptions { sample_rate:44100,start_sec:0.0,end_sec:Some(0.5),
+                stretch:hifishifter_kernel::time_stretch::StretchAlgorithm::LinearResample,apply_pitch_edit:false,
+                output:hifishifter_kernel::encode::OutputSpec::wav_32f(),quality_preset:hifishifter_kernel::mixdown::QualityPreset::Export,
+                cancel_flag:None,progress:None,cache_stats:None };
+            let (_,_,_,samples)=hifishifter_kernel::mixdown::render_mixdown_with_pcm(&timeline,options,&pcm).unwrap();
+            assert!(samples.iter().all(|sample| (*sample-0.05).abs()<1e-6),"重建后B输出保留0.25音量");
+        }
+    }
+
     /// move 到别的 sequence 时几何与成员表必须一起迁移，旧 editor 不能继续播放。
     #[test]
     fn region_sequence_update_moves_the_editor_membership() {
@@ -675,19 +750,81 @@ mod tests {
         // SAFETY: 仅作为不透明宿主源身份，存活到全部回调结束。
         let source = unsafe { HostAudioSourceRef::from_raw((&raw mut identity).cast()) }.unwrap();
         let mut slot=0;
+        let original_revision = model.session.revision.load(Ordering::Acquire);
         clients.with_audio_source_management(source, |scope| AudioSources::enable_audio_source_samples_access(&mut model, &mut slot, true, &scope)).unwrap();
+        assert_eq!(model.session.revision.load(Ordering::Acquire), original_revision, "授权不改变宿主模型版本");
         let id=model.document.audio_sources[0].persistent_id.clone();
         assert_eq!(model.session.sources.lock().unwrap()[&id].planes[0], [0.1,0.2,0.3,0.4]);
         fixture.planes[0]=vec![0.5,0.6,0.7,0.8];
-        model.source_content_version_bump(slot);
-        clients.with_audio_source_management(source, |scope| model.refresh_source_pcm(slot, &scope));
+        let before_content = model.session.revision.load(Ordering::Acquire);
+        clients.with_audio_source_management(source, |scope| AudioSources::update_audio_source_content(&mut model,&mut slot,None,ContentUpdateScopes::empty(),&scope)).unwrap();
+        assert!(model.session.revision.load(Ordering::Acquire)>before_content,"真实内容通知推进模型版本");
         assert_eq!(model.session.sources.lock().unwrap()[&id].planes[0], [0.5,0.6,0.7,0.8]);
         assert_eq!(model.session.sources.lock().unwrap()[&id].version,1);
+        let before_revoke = model.session.revision.load(Ordering::Acquire);
         clients.with_audio_source_management(source, |scope| AudioSources::enable_audio_source_samples_access(&mut model, &mut slot, false, &scope)).unwrap();
+        assert_eq!(model.session.revision.load(Ordering::Acquire), before_revoke, "撤权不使GUI快照冲突");
+        assert_eq!(fixture.created.load(Ordering::Acquire), fixture.destroyed.load(Ordering::Acquire), "reader同步释放");
         assert!(model.session.sources.lock().unwrap().is_empty());
         assert_eq!(model.session.edit_sources.lock().unwrap()[&id].planes[0], [0.5,0.6,0.7,0.8]);
         clients.with_audio_source_management(source, |scope| AudioSources::deactivate_audio_source(&mut model, &mut slot, true, &scope)).unwrap();
         assert!(model.session.edit_sources.lock().unwrap().is_empty());
+        assert!(model.session.revision.load(Ordering::Acquire) > before_revoke, "停用确实改变模型");
+    }
+
+    /// 同一GUI快照经历真实授权开关可提交；实际源几何/内容通知仍使旧提交失效。
+    #[test]
+    fn same_snapshot_commit_survives_access_toggle_but_not_real_source_changes() {
+        use ara2_bridge::plugin::{HostAudioSourceRef, HostClients, ExtensionRoles};
+        use hifishifter_ara_ipc::{Request, Response};
+        let mut model=ModelHandle::new(); model.document=identity_document(&["B"]);
+        model.document.audio_sources[0].sample_count=4;
+        model.document.playback_regions[0].duration_in_modification_time=4.0/44100.0;
+        model.document.playback_regions[0].duration_in_playback_time=4.0/44100.0;
+        let region=Box::new(0_u8); let key=(&*region as *const u8) as u64;
+        model.region_keys.push(key); region_owners().lock().unwrap().register(key,model.document_id,0).unwrap(); model.remap_and_log();
+        let mut fixture=crate::test_host::HostFixture::new(vec![vec![0.1,0.2,0.3,0.4]]); let host=fixture.instance();
+        // SAFETY: fixture与不透明源身份保留到所有scope/renderer被释放。
+        let clients=unsafe { HostClients::from_raw(&host,ApiGeneration::V2Final) }.unwrap();
+        let mut identity=0_u8; let source=unsafe { HostAudioSourceRef::from_raw((&raw mut identity).cast()) }.unwrap(); let mut slot=0;
+        clients.with_audio_source_management(source,|scope| AudioSources::enable_audio_source_samples_access(&mut model,&mut slot,true,&scope)).unwrap();
+        let owner=Arc::new(crate::render::extension::ExtensionOwner::default());
+        let raw=owner.bind_to_document(model.session.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::EDITOR_RENDERER,None).unwrap();
+        // SAFETY: native扩展及region身份都仍存活。
+        unsafe { let ext=&*raw; ((*ext.editorRendererInterface).addPlaybackRegion.unwrap())(ext.editorRendererRef,key as *mut _); }
+        let snapshot=owner.handle_request(Request::Snapshot); assert!(snapshot.ok,"{:?}",snapshot.error);
+        let request=|snapshot:Response| { let mut client=snapshot.timeline.unwrap(); client["tracks"][0]["volume"]=serde_json::json!(0.5);
+            Request::Commit { base_revision:snapshot.revision,model_revision:snapshot.model_revision,timeline:client } };
+        clients.with_audio_source_management(source,|scope| AudioSources::enable_audio_source_samples_access(&mut model,&mut slot,false,&scope)).unwrap();
+        let mut left=[9.0_f32;4]; let mut right=[9.0_f32;4]; let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
+        let mut bus=crate::audio_abi::AudioBusBuffers { num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr() };
+        assert!(!unsafe { owner.snapshots[0].copy_block(0,44100,&mut bus,4) },"撤权首先撤销实时旧快照");
+        assert_eq!(left,[0.0;4]);
+        assert_eq!(fixture.created.load(Ordering::Acquire),fixture.destroyed.load(Ordering::Acquire));
+        let committed=owner.handle_request(request(snapshot)); assert!(committed.ok,"{:?}",committed.error);
+        for change in 0..3 {
+            let old=owner.handle_request(Request::Snapshot); assert!(old.ok,"{:?}",old.error);
+            if change==0 {
+                let id=model.document.audio_sources[0].persistent_id.clone();
+                let properties=AudioSourceProperties::new(None,&id,4,44100.0,1,false.into()).unwrap();
+                clients.with_audio_source_management(source,|scope| AudioSources::update_audio_source(&mut model,&mut slot,properties,&scope)).unwrap();
+            } else if change==1 {
+                clients.with_audio_source_management(source,|scope| AudioSources::update_audio_source_content(&mut model,&mut slot,None,ContentUpdateScopes::empty(),&scope)).unwrap();
+            } else {
+                let mut registry=Registry::<RegionSequenceKind,()>::new(1); let handle=registry.insert(()).unwrap();
+                let properties=PlaybackRegionProperties::for_ara2(0,0.0,4.0/44100.0,1.0,4.0/44100.0,registry.model_ref(handle).unwrap(),None,None).unwrap();
+                PlaybackRegions::update_playback_region(&mut model,&mut 0,properties).unwrap(); model.remap_and_log();
+            }
+            let rejected=owner.handle_request(request(old)); assert!(!rejected.ok);
+            assert!(rejected.error.unwrap().contains("host model changed"));
+            clients.with_audio_source_management(source,|scope| AudioSources::enable_audio_source_samples_access(&mut model,&mut slot,true,&scope)).unwrap();
+        }
+        DocumentLifecycle::begin_editing(&mut model,&mut ()).unwrap();
+        clients.with_audio_source_management(source,|scope| AudioSources::enable_audio_source_samples_access(&mut model,&mut slot,false,&scope)).unwrap();
+        clients.with_audio_source_management(source,|scope| AudioSources::enable_audio_source_samples_access(&mut model,&mut slot,true,&scope)).unwrap();
+        assert!(!model.session.ready.load(Ordering::Acquire),"逐对象创建/授权中不能提前认为完整图ready");
+        clients.with_audio_source_management(source,|scope| DocumentLifecycle::end_editing(&mut model,&mut (),&scope)).unwrap();
+        assert!(model.session.ready.load(Ordering::Acquire));
     }
 
     /// 实际模型销毁回调必须撤销索引，slot 表测试不能替代这个接线检查。

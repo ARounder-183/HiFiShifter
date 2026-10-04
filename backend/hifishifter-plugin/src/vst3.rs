@@ -918,7 +918,7 @@ unsafe extern "system" fn component_get_state(
     if this.is_null() { return K_INVALID_ARGUMENT; }
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let owner = unsafe { &(*this.cast::<Processor>()).extension_owner };
-        let bytes = owner.edit_state().lock().unwrap().encode()?;
+        let bytes = owner.encode_state()?;
         unsafe { crate::state_stream::write_state(state, &bytes) }
     }));
     if matches!(outcome, Ok(Ok(()))) { K_RESULT_OK } else { K_RESULT_FALSE }
