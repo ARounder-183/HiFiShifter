@@ -50,11 +50,13 @@ E:/code/HiFiShifter/.worktrees/ara-bridge-probe f04e72e8 [feature/ara-bridge-pro
 | --- | --- |
 | [spec](docs/superpowers/specs/2026-10-04-ara-bridge-design.md) | 设计。**冲突时以它为准** |
 | [plan](docs/superpowers/plans/2026-10-04-ara-bridge-probe.md) | 三步探针，含杀死判据 |
-| [ledger](.superpowers/sdd/2026-10-04-ara-bridge-probe.md/progress.md) | **执行记录与全部 Ruling**。比本文件细 |
+| [EXECUTION-LEDGER.md](probe/ara/EXECUTION-LEDGER.md) | **执行记录与全部 15 条 Ruling**。比本文件细 |
 | [probe/ara/README.md](probe/ara/README.md) | SDK 构建配方 + 插桩补丁步骤 |
 | [probe/ara/captures/FINDINGS.md](probe/ara/captures/FINDINGS.md) | Task 1 产出：字段清单 + 丢失字段 |
 
-> `ledger` 在 `.superpowers/` 下（已 gitignore）。**它是过程记录，不要在切换时丢掉。**
+> **ledger 有两份**：`.superpowers/sdd/.../progress.md` 是 SDD 工作区里的**活文件**
+> （已 gitignore，不随 git 走）；`probe/ara/EXECUTION-LEDGER.md` 是进版本控制的
+> **冻结快照**。接手时读后者；若你继续用 SDD 流程，把新条目写进前者并同步。
 
 ---
 

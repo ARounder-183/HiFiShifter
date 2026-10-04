@@ -1,0 +1,261 @@
+# 执行 ledger（交接快照）
+
+> 这是切换 agent 时从 `.superpowers/sdd/2026-10-04-ara-bridge-probe.md/progress.md`
+> 复制过来的**冻结快照**。原文件是 SDD 工作区里的活文件、且被 gitignore；
+> 这份进版本控制，确保过程记录与其中的 Ruling 不随会话切换而丢失。
+>
+> **权威顺序**：spec > plan > 本文件。本文件记录的是"当时怎么判断的"，
+> 而不是"现在应该怎么做"。若与 spec 冲突，以 spec 为准。
+
+---
+# SDD ledger — plan: docs/superpowers/plans/2026-10-04-ara-bridge-probe.md
+
+Executor: inline (superpowers:executing-plans), agent session, Windows.
+Worktree: `E:\code\HiFiShifter\.worktrees\ara-bridge-probe`
+Branch: `feature/ara-bridge-probe`
+Base commit at start: `8b93e2ce`
+
+## Setup notes
+
+- **Spec read**: `docs/superpowers/specs/2026-10-04-ara-bridge-design.md`. Authority for rulings.
+- **Helper scripts unusable**: `sdd-workspace` / `task-brief` / `review-package` are bash
+  and this host's `bash` resolves to Git Bash 5.1 invoked as `sh`, where `set -o pipefail`
+  fails. Workspace, ledger and briefs are therefore created and maintained by hand with
+  identical layout. Cost if wrong: none to the deliverable; the scripts are convenience only.
+- **Workspace location ruling**: the helper puts the workspace at
+  `<repo-root>/.superpowers/sdd/<plan>/`, which would leave `git status` dirty (the repo has
+  no such entry, and a per-worktree `info/exclude` is not honoured — verified, it needs
+  `extensions.worktreeConfig` and that setting is shared across worktrees, so it does not
+  isolate). Ruling: ignore `.superpowers/` on **this branch only** instead of on `develop`
+  or adding a repo-wide scratch entry. Cost if wrong: one `.gitignore` line to relocate.
+
+## Environment prerequisites (plan section, verified)
+
+| Item | State |
+| --- | --- |
+| MSVC env bootstrap | `tools/msvc-env.ps1` present. Verified: without it `cl.exe` fails `D8050`; with it a direct `cl.exe` compile exits 0. |
+| `frontend/dist` | Built (23 files). `build.rs` will not re-run npm. |
+| `frontend/node_modules` | Installed (`--ignore-scripts`; esbuild postinstall spawn is sandbox-blocked). |
+| REAPER | 7.81 at `D:\Softwares\REAPER (x64)\reaper.exe`. `REAPER.ini` line 341 `ara=2` (ARA enabled). `vstpath64` includes `C:\Program Files\Common Files\VST3`. |
+| Melodyne | 5, VST3 at `C:\Program Files\Common Files\VST3\Celemony\Melodyne\Melodyne.vst3` |
+| MSVC / CMake | VS 2022 Community, VCTools 14.44.35207; CMake 4.4.0 |
+| `cargo test` baseline | **NOT OBTAINED** — see blocker below |
+
+### Known blocker: baseline tests cannot be run from this session
+
+`cargo test` fails in the native C/C++ build steps. Symptoms rotate across runs
+(`cl : D8050` / `MSB6003: Failed to create a temporary file` / `UnauthorizedAccessException`
+on `%TEMP%\MSBuild*`), and the failing crate rotates with cargo's retries. Ruled out:
+`TEMP`/`TMP` exist and are writable; `cl.exe` compiles standalone successfully; no stale
+MSBuild temp files. Two `%TEMP%\esbuild-*` dirs left by the earlier confined runs carried
+`DESKTOP-L3EU8NQ\CodexSandboxUsers` ACLs and were removed.
+
+Assessment: this session's sandbox interferes with cargo's grandchild compiler processes.
+Not a repo defect — the main tree's same test binary built at 02:08 today. Baseline must be
+taken by a human in a normal terminal (instructions are in the plan's environment section).
+
+**Ruling**: proceed with the plan's non-code / non-baseline steps while the baseline is
+outstanding, because Tasks 1 and 2 produce artifacts (a captured ARA model, an SDK
+build) whose correctness does not depend on the baseline. Task 3 does depend on it and
+will not be started until it exists. Cost if wrong: Task 3 blocked, no work wasted.
+
+## Pre-flight scan
+
+Plan task interfaces:
+
+| Row | Produces → Consumes | Finding |
+| --- | --- | --- |
+| 1 → 2 | `captures/ara-model.json` → "confirm the binding can express these fields" | OK. Task 2 only needs the field list. |
+| 1 → 3 | `captures/ara-model.json` → fixture for the mapping test | OK, and Task 3 already states `AraDocument` is a probe-local type, so the mapping does not depend on Task 2's binding being stable. This is what makes the risk ordering safe. |
+| 2 → 3 | binding path → (implicitly) the ability to run Task 3 at all | **Conflict, resolved by the plan itself**: Task 2's kill criterion already says do not start Task 3 without a working binding. No ruling needed. |
+
+Pre-flight: no unresolved shared-interface conflicts.
+
+## Progress
+
+### Task 1: 取得宿主侧 ARA 模型的真实样本 — IN PROGRESS
+
+Steps 2 (clone + build) **done**. Steps 1, 3, 4, 5 need REAPER GUI interaction or
+edits to SDK example code; status below.
+
+**Step 2 evidence (the SDK toolchain works):**
+
+- `probe/ara/ARA_SDK` cloned with all submodules (`ARA_API`, `ARA_Library`, `ARA_Examples`
+  and its 3 submodules).
+- VST3 companion SDK installed by the SDK's own script → `probe/ara/ARA_SDK/vst3sdk`,
+  pinned `v3.7.11_build_10`.
+- CMake configured: `cmake -B build-vs2022 -G "Visual Studio 17 2022" -A x64 -D ARA_SETUP_DEBUGGING=OFF`.
+- Built: `probe/ara/ARA_SDK/ARA_Examples/build-vs2022/bin/Release/ARATestPlugIn.vst3`,
+  284672 bytes, **ARA SDK version 2.3.0**.
+
+**Task 1: Ruling: build `-D ARA_SETUP_DEBUGGING=OFF`** — with it ON, the SDK's post-build step
+copies the plug-in into `$ENV{CommonProgramW6432}\VST3\` (`C:\Program Files\Common Files\VST3`),
+a write outside this worktree. Rule: keep the build self-contained and ask before installing
+system-wide. Consequence: REAPER must be pointed at the build output, or the user runs the
+install. Cost if wrong: one extra step for the user.
+
+**Task 1: Ruling: build recipe** — the MSBuild build failed repeatedly with
+`MSB6003 ... UnauthorizedAccessException ... MSBuildTemp\tmp*.rsp`. Investigated and ruled out:
+`%TEMP%\MSBuildTemp` exists, is writable from this shell, and carries benign ACLs (including the
+sandbox group, alongside `ARounder FullControl`); no `TEMP`/`TMP` misconfiguration.
+The combination that **succeeded**:
+
+1. MSVC env loaded from `vcvars64.bat` so `cl.exe` is on `PATH` (the same root cause as the
+   repo's own `D8050`, see `tools/msvc-env.ps1`), **and**
+2. `/m:1` (serial — parallel compilation appears to be what the sandbox interrupts), **and**
+3. `/p:TrackFileAccess=false` (MSBuild then skips the temp response file entirely).
+
+Cost if wrong: none — this is the recipe that produced the artifact.
+
+### Task 1: Step 1 and Step 3 — DONE
+
+**Step 1 (ARA is live in REAPER): PASSED.** Human check — Melodyne 5 on a track
+with audio shows that audio's content. This is the precondition for everything
+else; without it every inference about "what the host gives us" would rest on a
+false premise.
+
+**Step 3 (dump instrumentation): built and staged.** Hooks
+`willNotifyModelUpdates()` and `didEndEditing()`, serializing the full model
+graph. Verified by artifact size: plug-in rebuilt at **320000 bytes** (was
+284672), so the dump is linked in. Staged to
+`D:\VST\ARATestPlugIn.vst3\ARATestPlugIn.vst3` — `D:\VST` is already in
+`REAPER.ini`'s `vstpath64`, so no config change is needed, only a VST rescan.
+
+**Task 1: Ruling: instrumentation source files must live inside `ARA_Examples/`.**
+The SDK's `ara_group_target_files()` assumes every source is under the project
+directory. Placing them at `probe/ara/instrumentation/` made CMake configuration
+fail with "is not a prefix of file", which does not name the real constraint.
+Moved to `ARA_Examples/instrumentation/`; the authoritative, reviewable copy is
+committed at `probe/ara/instrumentation-reference/`. Cost if wrong: the
+instrumentation must be re-copied from the reference dir before rebuilding —
+documented in the README.
+
+**Task 1: Ruling: `/utf-8` is required on the instrumented target.**
+The instrumentation is UTF-8 with Chinese comments; this machine's MSVC defaults
+to code page 936, under which the compiler reported `C2447: '{': missing function
+header` — a syntax error with no relation to its cause. The SDK's own sources are
+pure ASCII, so the official build never exposes this. Cost if wrong: none; the
+flag is additive and the build is verified.
+
+**Task 1: Ruling: colour omitted, `std::filesystem` avoided.**
+The target compiles as C++11, so `std::filesystem` is unavailable, and `ARAColor`
+is an ARA 2.0 draft addendum not visible in this configuration. Colour is
+irrelevant to the render mapping, so the field is dropped rather than worked
+around. Cost if wrong: one field to add later if a host turns out to distinguish
+regions by colour.
+
+**Task 1: Ruling: tempo is NOT in the object model.**
+`ARA::PlugIn::MusicalContext` exposes only name/orderIndex/colour — there is no
+tempo or bar-signature member. Tempo (`kARAContentTypeTempoEntries`) and bars
+(`kARAContentTypeBarSignatures`) arrive through a *content reader*. The dump
+therefore records musical contexts and their region sequences, but not tempo
+points; adding those needs a content-reader call. Cost if wrong: Task 3 loses
+tempo-map comparison, which the plan does not require for the region mapping.
+
+### Task 1 remaining: Steps 4, 5 — need human
+
+Step 4 (awkward fixture: same source placed multiple times, stretched, reversed,
+faded, plus a non-44.1 kHz project) and Step 5 (`FINDINGS.md`, above all the list
+of fields ARA does not provide but rendering needs) require REAPER GUI work.
+
+### Task 1 Step 3 — DONE. Real REAPER ARA capture obtained.
+
+`probe/ara/captures/ara-model.reaper.json` (1447 bytes) is a real REAPER-produced ARA
+model, captured in a fully isolated instance (`-cfgfile` + own vstpath64 + own plugin
+copy). Findings that de-risk the spec:
+
+| ARA field | REAPER's actual value | Consequence for the mapping |
+| --- | --- | --- |
+| `audioSource.persistentID` | the **absolute file path** (`E:\...\tone44100.wav`) | This is the direct counterpart of `Clip.source_path` — the single most uncertain row of the spec's §5.2 table now has evidence. |
+| `audioSource.sampleAccessEnabled` | `true` | The plug-in can read source PCM. |
+| `merits64BitSamples` | `true` | REAPER prefers 64-bit sample access. |
+| `regionSequence.name` | `probe-44k` (the REAPER track name) | regionSequence ↔ track. |
+| `audioModification` | exists; persistentID equals the source's | modification ↔ Take is a real relationship, not an assumption. |
+| `startInPlaybackTime` / `durationInPlaybackTime` | `0` / `2` | Seconds as `double` — no sample↔second conversion needed for placement. |
+| `sampleRate` / `sampleCount` | `44100` / `88200` | Matches the 2 s fixture. |
+| `documentName` | `""` | REAPER sends no document name. |
+| `audioModification.name` | `null` | Unnamed when the host did not set one. |
+
+**Task 1: Ruling: live REAPER capture runs in an isolated instance only.**
+`-cfgfile` does NOT fork a second instance when REAPER is already running — REAPER is
+single-instance, so the script lands in the running one. That mistake wrote two probe
+tracks into `D:\音MAD\...\test\test.rpp` (confirmed by the user to be a scratch project,
+no loss). Rule now: kill all REAPER processes, launch with `-cfgfile` + an isolated
+`vstpath64`, and never send scripts to a running instance.
+Cost if wrong: contaminating a project the user cares about.
+
+**Task 1: Ruling: the plug-in's dump path must not rely on the environment.**
+`ARA_PROBE_OUT` is inherited by REAPER when launched from a shell but was `nil` in the
+earlier job-based launches, and the plug-in process cannot be assumed to see it either.
+Added a fallback chain ending in `.\captures\ara-model.auto.json` relative to the
+launch working directory, plus an absolute path into this worktree.
+Cost if wrong: a silent no-op instrumentation — which is exactly what cost several
+rounds here.
+
+### Task 1 Step 4 — PARTIAL: one clean region captured; the awkward fixture is next
+
+Captured: a single unstretched region on one track. **Not yet captured:** the same source
+placed multiple times, a stretched region, a reversed region, fades, and a non-44.1 kHz
+project. Those are the cases that expose the transformation flags.
+
+**Blocker found for the stretch case specifically:** the SDK reports at load time that
+this test plug-in "does not support time-stretching" and "does not support content-based
+fades", so REAPER may never set `kARAPlaybackTransformationTimestretch` for it. If that
+holds, the stretch flag can only be observed with a plug-in that advertises support —
+i.e. Melodyne, whose model this instrumentation cannot dump. Resolution options are
+recorded in the next ledger entry once tried.
+
+### Task 1 Step 4 — DONE. The awkward fixture produced four hard results.
+
+`probe/ara/captures/ara-model.awkward.json` (4272 bytes), from an isolated instance:
+4 regions of one source at 0/3/6/9 s on one track, one of them stretched to
+`D_PLAYRATE = 2.0`, one with 0.5 s fades, one reverse attempt, plus a 48 kHz source
+on a second track.
+
+**1. Duplicate placements collapse onto one source — verified.**
+One `audioSource` + one `audioModification` + **four** `playbackRegion`s, all sharing
+the same absolute-path persistentID. This is exactly the shape `Clip.source_path`
+needs: many clips, one source.
+
+**2. Time-stretch is expressed as a duration discrepancy, NOT a flag.**
+The stretched region reports `durationInModificationTime: 1` against a 2 s source,
+`durationInPlaybackTime: 1`. So `playback_rate` must be derived as
+`durationInModificationTime / durationInPlaybackTime`. This is lossless and it is
+precisely the spec §5.2 row "playback transformation ↔ playback_rate".
+
+**This also retires the blocker I recorded two entries ago.** The SDK's
+"plug-in does not support time-stretching" notice does not obstruct the mapping,
+because the stretch is not carried by
+`kARAPlaybackTransformationTimestretch` at all. My earlier worry was wrong.
+
+**3. Sample rate is per source and reported exactly.**
+`tone44100.wav` → 44100 / 88200 samples; `tone48000.wav` → 48000 / 96000 samples.
+Sources keep their own rate independent of the project, so the spec's "model domain
+is fixed at 44.1 kHz" concern does not cause misalignment on the ARA path.
+
+**4. Fades are a real gap.**
+The faded region reports `hasContentBasedFadeAtHead/Tail: false`, and
+`isTimestretchEnabled` is likewise false — because this plug-in declares at load
+time that it supports neither time-stretching nor content-based fades, so REAPER
+never offers them. Consequence: fade **shape and curvature**
+(`fade_in_shape` / `fade_in_dir`) are unobtainable via ARA for this plug-in and
+must be owned by HiFiShifter's own model. This is the first concrete entry for
+Step 5's missing-fields list.
+
+**Task 1: Ruling: the `sampleAccessEnabled: false` observation is left OPEN.**
+Both sources in the awkward run report `sampleAccessEnabled: false`, whereas the
+clean run reported `true`. The plug-in cannot analyse pitch without sample access,
+so this may matter. Most likely the dump fired before REAPER granted access; it
+could also be real. Not explained, not papered over — recorded as an open question
+to settle before Task 3 relies on reading source PCM.
+
+**Still FAILED**, at `fdk-aac-sys` (`cmake` crate → MSBuild `CL.exe` task,
+same `MSBuildTemp` temp-file denial). So the recipe is necessary but not sufficient here.
+
+**Ruling**: stop trying to obtain the baseline from this session. The ARA SDK build succeeded
+because that project's own CMakeLists controls `TrackFileAccess`; the `cmake` *crate* (used by
+`fdk-aac-sys` / `opusic-sys`) builds its project files itself and gives no such hook, so three
+of HiFiShifter's native deps remain unreachable from inside this sandbox. Baseline must come
+from a normal terminal. Cost if wrong: Task 3 stays blocked; nothing else is affected.
+
+
