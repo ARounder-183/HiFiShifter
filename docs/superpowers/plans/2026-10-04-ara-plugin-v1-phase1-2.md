@@ -326,6 +326,18 @@ git commit -m "refactor(ara): split state into a pure model and the runtime cont
 
 ### Task 3: 把 `state/model`、`time_stretch`、`metronome` 搬进内核
 
+> **执行记录（2026-10-04）：本任务的三个目标都不是"叶模块"，原步骤无法照做。**
+>
+> - `state/model` 引用 `project` / `models` / `midi_import` / `audio_utils` / `time_stretch`
+>   —— 必须先搬这些依赖；
+> - `time_stretch` 的 `sstretch` / `soundtouch` 后端是**由 app 的 `build.rs` 编译的原生代码**
+>   （Signalsmith 静态库 + SoundTouch DLL）—— `git mv` 会在 app 里假性通过、在插件里链接失败；
+> - `metronome` 依赖 `state`，只能跟它一起走。
+>
+> **处置**：本任务暂停，等设计文档 §4.9 的"原生依赖构建归属"决定下来之后再重写。
+> 直接后果是**顺序要反过来**：先做机械搬迁（原 Task 6），再搬 `state/model`。
+> 实测数据见设计文档 §4.2 与 `probe/ara/kernel-closure-measured.md`。
+
 **为什么是这三个**：它们是离 Tauri 最远的三块，且是 `EngineCommand` 的前置（命令里的 `UpdateTimeline(TimelineState)` 与 `UserStretchAlgorithm` / `MetronomeConfig` 来自这里）。
 
 **Files:**

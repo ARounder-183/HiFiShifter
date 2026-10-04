@@ -469,4 +469,31 @@ Phase 2 的产出是"插件在 REAPER 里加载并呈现真实时间线"。Phase
 Phase 4（参数通道）在 Phase 2 验收后另写计划。代价：交付被拉长成多轮，
 但每一轮都有可验收的实物，避免了"一个大计划写到一半发现前提不成立"。
 
+**Dev 9: Ruling: workspace 合并时，非根包的 `[profile.*]` 会被静默忽略，必须搬到根。**
+合并 `backend/` 成一个 workspace 后，cargo 对 `src-tauri/Cargo.toml` 里的
+`[profile.release]` / `[profile.dist]` / `[profile.dev-opt]` 只发一条 warning
+（`profiles for the non root package will be ignored`）就忽略 —— 也就是 release 构建会
+丢掉 `strip` / `opt-level = 3` / `dist` 的 fat LTO，而症状只是"产物变大变慢"，不报错。
+决定：把三段 profile 整体搬到 `backend/Cargo.toml`（同时作用于 kernel 与 plugin，是期望行为）。
+代价：若不搬，发布产物的优化与体积悄悄退化，且不会有人发现。
+
+**Dev 10: Ruling: `state/model` 不是叶模块，`time_stretch` 拖着原生构建 —— 原计划的
+搬迁顺序是反的。**
+实测（拆分 `state.rs` 之后重算闭包）：内核目标集是 **40 模块 / 2.15 MB**，
+只剩 `pitch_clip` / `pitch_analysis` 碰 `tauri::`（拆分前 43 模块 / 2.57 MB、5 个碰）。
+两处推翻计划假设：① `state/model` 引用 `project` / `models` / `midi_import` /
+`audio_utils` / `time_stretch`，必须先搬依赖 —— 机械搬迁要排在它**之前**；
+② `time_stretch` 的两个后端（`sstretch` 静态链接、`soundtouch` DLL）由 **app 的 `build.rs`**
+编译，`git mv` 会在 app 里假性通过、在插件里链接失败。
+决定：Task 3 暂停，等"原生依赖构建归属"（设计文档 §4.9）定了再重写顺序。
+代价：若照原顺序硬搬，会得到"app 能跑、插件链接失败"的假成功。
+
+**Dev 11: Ruling: 设计文档 §4.2 关于闭包缩小的预测被部分证伪，按实测改写。**
+原预测 `hfspeaks_v2` / `notebook_assets` / `temp_manager` / `recording` 会因拆分
+`state` 而离开闭包。实测：**只有 `recording` 离开了**，另外三个仍在内核闭包里
+（模型侧 `project` / `models` 也引用它们）。当时该说法已标注为推断并写明"以重算为准"，
+所以没有误施工。决定：结论按实测改写，并把实测清单固化成
+`probe/ara/kernel-closure-measured.md` 作为施工的唯一权威来源。
+代价：若无这份实测，施工会按 43 模块的旧清单走，多搬或少搬都无从察觉。
+
 

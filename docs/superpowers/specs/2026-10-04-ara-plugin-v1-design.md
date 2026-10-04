@@ -178,10 +178,22 @@ state.rs
 
 **拆完之后必须重算闭包**，因为只有那一次的模块集才是真内核。§4.2 的 43 是**拆之前**的数。
 
-**预测（明确标注为推断，未实测）**：拆开之后 `hfspeaks_v2` / `notebook_assets` /
-`temp_manager` / `recording` 会离开闭包（它们只被 `AppState` 引用）；
-`project`（因 `CustomScale`）、`models`、`midi_import`、`audio_utils` 大概率仍留在里面。
-**实际数字以重算为准，不得把这条预测当结论写进任何报告。**
+**实测（2026-10-04，拆分已落地后重算）**：
+
+| | 模块数 | 字节 | 碰 `tauri::` 的模块 |
+| --- | --- | --- | --- |
+| 拆分之前 | 43 | 2 568 908 | `state`、`pitch_clip`、`pitch_analysis`、`recording`、`audio_engine` |
+| 拆分之后（`state` 只剩 `model.rs`） | **40** | **2 149 796** | **`pitch_clip`、`pitch_analysis`** |
+
+**预测被部分证伪，据实记录**：当初推断 `hfspeaks_v2` / `notebook_assets` / `temp_manager` /
+`recording` 会离开闭包。实测 **`recording` 离开了，另外三个没有** —— 说明它们不只被
+`AppState` 引用，模型侧也引用了它们（`project` / `models` 这条链）。这条推断当时已标注
+为推断、并写明"以重算为准"，所以没有造成误施工，但结论必须按实测改写。
+
+**另一条实测（比上述更正更要紧）**：`state/model` **不是一个叶模块**，它引用
+`project`（`CustomScale`）、`models`、`midi_import`、`audio_utils`、`time_stretch`。
+所以"把 model 搬进内核"必须等这些依赖先搬 —— **机械搬迁（原计划的 Task 6）要排在
+搬 `state/model` 之前**，不能反过来。见 §4.9。
 
 **错了的代价**：若拆开后闭包仍然很大（例如 `TimelineState` 的方法真的依赖 `project`
 的复杂逻辑），则内核会比预期大，插件二进制更大、编译更慢；但架构方向不变，只是收益变小。
@@ -333,6 +345,43 @@ REAPER 要求编辑控制器）。
 - v1 单实例（一个实例 = 一条人声编辑轨）；
 - v1 插件内不做参数编辑器 UI（§4.4）；
 - `vslib` 的分发不承诺、Linux 出局、FL Studio 不支持（§3、§7）。
+
+### 4.9 D9：原生依赖的构建归属（**执行时发现，待评审确认**）
+
+计划里把 `time_stretch` / `metronome` / `state/model` 当成"叶模块，`git mv` 即可"。
+执行到这一步时发现两件事都不成立，其中一件是**结构性的**：
+
+**（1）`state/model` 不是叶模块。** 它引用 `project`（`CustomScale`）、`models`、
+`midi_import`、`audio_utils`、`time_stretch`。所以顺序必须是**先搬依赖，再搬 model** ——
+原计划的 Task 3 / Task 6 顺序是反的。
+
+**（2）`time_stretch` 拖着一批"由 build.rs 编译的原生代码"。** 它的两个后端：
+
+| 后端 | 形态 | 现状 |
+| --- | --- | --- |
+| `sstretch.rs` | **静态链接**的 Signalsmith Stretch + 一层 C 包装（`sstretch-c.cpp`） | 由 `backend/src-tauri/build.rs` 编译并用 `cargo:rustc-link-lib=static=signalsmith_stretch` 链接 |
+| `soundtouch.rs` | 运行时加载的 `SoundTouchDLL.dll`（LGPL 规避） | 由同一个 `build.rs` 用 CMake 构建 |
+
+这意味着：**把这两个模块 `git mv` 进内核，在 app 里"看起来"仍然能编译**（因为链接参数
+来自 app 的 build 脚本，最终二进制的链接不受影响）—— 但**插件单独构建内核时会链接失败**。
+这是"看起来成功、到 DAW 里才炸"的一类陷阱，必须在设计里封死。
+
+**决定（建议，待确认）**：**把这两个原生依赖的构建搬进 `hifishifter-kernel` 自己的
+`build.rs`**，并从 app 的 `build.rs` 里删掉对应段落。理由：
+
+1. 内核是"离线音频内核"，时间拉伸是它的一部分；原生依赖跟着它走才自洽。
+2. 插件与 app 都需要这两个后端 —— 放在内核里，两边都自动获得。
+3. 若改成"宿主注入后端函数"（像 `HostServices` 那样），插件**仍然**需要自己编译这两个
+   原生库，问题只是被挪了个位置，没有消失。
+
+**代价**：`backend/src-tauri/build.rs` 里 soundtouch（CMake）与 sstretch（C++ 包装）
+两段约 250 行要搬到内核的 build.rs，且两边的构建产物路径要重新对齐。这是一次
+**中等规模**的构建系统改动，失败的表现是链接错误，不会静默出错。
+
+**替代方案（若不想现在动构建系统）**：保留 `sstretch` / `soundtouch` / `time_stretch`
+在 app 层，只把 `UserStretchAlgorithm` / `StretchAlgorithm` 两个 **enum 与设置结构**
+搬进内核（`EngineCommand` 只需要它们）。代价是内核的 `time_stretch` 无法真正拉伸，
+渲染管线必须在 Task 6 再拆一次 —— 相当于把同一件事做两遍。
 
 ---
 
