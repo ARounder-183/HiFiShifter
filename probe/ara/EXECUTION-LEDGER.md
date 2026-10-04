@@ -258,4 +258,64 @@ because that project's own CMakeLists controls `TrackFileAccess`; the `cmake` *c
 of HiFiShifter's native deps remain unreachable from inside this sandbox. Baseline must come
 from a normal terminal. Cost if wrong: Task 3 stays blocked; nothing else is affected.
 
+---
+
+## Task 2 Step 3 — DONE. The Rust cdylib loads in REAPER as an ARA plug-in.
+
+Evidence: `probe/ara/rust-path/FINDINGS.md` §3, `probe/ara/captures/task2-{capture,plugin}.log`.
+REAPER inserted `VST3: HiFiShifter ARA Probe (HiFiShifter)`, queried
+`IPlugInEntryPoint`/`IPlugInEntryPoint2`, created the ARA document controller
+(`apiGeneration=V2Final`), bound it, and the plug-in logged
+`sources=1 modifications=1 regionSequences=1 playbackRegions=2` for one source placed twice.
+
+**Task 2: Ruling: path A (`ara2-bridge` + a self-written VST3 shell) is the selected path.**
+`ara2-bridge` 0.3.0 (with companion) supplies the ARA↔VST3 COM adapters
+(`ARA::IMainFactory`, `ARA::IPlugInEntryPoint2`) and the document-controller runtime; the only
+missing piece was the VST3 module shell (factory + component + processor + minimal controller),
+which is now written in Rust. Path B (hand-writing the whole ARA binding) is unnecessary.
+Cost if wrong: the shell is ~900 lines of one-off probe code that a real implementation would
+replace with a maintained VST3 binding once one exists.
+
+**Task 2: Ruling: VST3 IID bytes must use the GUID layout on Windows.** `INLINE_UID(l1,l2,l3,l4)`
+expands to `l1` little-endian, `l2` split into two little-endian u16s, `l3`/`l4` big-endian.
+Established empirically: REAPER's `IPluginFactory2` request emitted
+`50B607004BF20B4CA464EDB9F00B2ABB`, exactly the GUID layout of
+`{0007B650-F24B-4C0B-A464-EDB9F00B2ABB}`. My first implementation used little-endian per word;
+the symptom was not an error but "0 classes" (the cache kept only a bare timestamp), because the
+host's `countClasses` landed on the wrong vtable slot. Cost if wrong: silent misdetection that
+looks like an incompatibility rather than a bug.
+
+**Task 2: Ruling: `IPluginFactory` derives from `FUnknown`, not `IPluginBase`.** Inserting
+`initialize`/`terminate` slots between `release` and `getFactoryInfo` shifts the whole factory
+vtable by two, so `countClasses` reads `getFactoryInfo`'s return value. Cost if wrong: "0 classes".
+
+**Task 2: Ruling: REAPER requires an edit controller for an ARA plug-in.** With only
+`kVstAudioEffectClass` + `kARAMainFactoryClass` registered, REAPER completed initialize and the
+ARA bind, then asked for `IEditController`, called `getControllerClassId`, gave up, unloaded the
+module, and then called an ARA callback through the stale controller pointer — a real crash
+(`0xc0000005`, module `HiFiShifterARAProbe.vst3_unloaded`, offset resolving to
+`ara2_bridge_plugin::ffi::generated_callbacks::begin_editing`). Adding a minimal
+`kVstComponentControllerClass` (no parameters, no GUI, `createView` returns null) made the insert
+succeed and the crash disappear. Cost if wrong: the probe reports "REAPER refuses ARA without a
+controller", which would itself be a finding, but a real implementation must ship a controller
+anyway.
+
+**Task 2: Ruling: one companion binding per processor instance.** REAPER creates **three**
+`IAudioProcessor` instances for one track (roles `0x6` = editor renderer + editor view, and two
+`0x1` = playback renderer). The companion's binding is one-shot, so each instance needs its own
+`CompanionProcessorBinding` + `Vst3PluginEntryAdapter`; sharing one would make the second bind
+fail. Cost if wrong: only the first role would bind and ARA rendering would break.
+
+**Task 2: Ruling: `sampleAccessEnabled` is granted by the host, not withheld.**
+`enableAudioSourceSamplesAccess(source, enable=true)` is called after the ARA bind (log line
+`[0009]`), and `enable=false` later on deactivation (`[0014]`). So the `false` in Task 1's captures
+is a revoke, not a refusal; it is not evidence that "host-supplied source + local synthesis" is
+broken. The still-open part is only whether access is stable across repeated calls during
+playback. Cost if wrong: none to the path decision; it downgrades an open question to a narrower one.
+
+**Task 2: Ruling: the `cargo test` baseline is still outstanding, so Task 3 stays closed.**
+Nothing in Task 2 changed any file under `backend/` or `frontend/`, so the missing baseline does
+not affect Task 2's conclusions. Task 3 still needs the human-run baseline from a normal terminal.
+Cost if wrong: Task 3 remains blocked; no work is wasted.
+
 
