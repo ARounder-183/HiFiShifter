@@ -9,6 +9,20 @@
 [workspace]
 resolver = "2"
 members = ["src-tauri", "hifishifter-kernel", "hifishifter-plugin"]
+# 打补丁的第三方 crate 不进 workspace（它有自己的构建语义，也不该被
+# `cargo test --workspace` 拉进来）。
+exclude = ["third-party/ara2-bridge-core"]
+
+# ── 第三方补丁 ──────────────────────────────────────────────────────────────
+#
+# 【为什么打】`ara2-bridge-core` 0.3.0 的 `PlaybackRegionProperties` 只有
+# `transformation_flags()` 一个公开读访问器 —— 而区间的起点/长度/名字是
+# `ARA → TimelineState` 映射的全部输入。不补就拿不到，插件的模型只剩计数。
+#
+# 补丁是纯增量的（只加读访问器），细节与撤销步骤见
+# `third-party/ara2-bridge-core/PATCHED.md`。
+[patch.crates-io]
+ara2-bridge-core = { path = "third-party/ara2-bridge-core" }
 
 # ── profile 必须在 workspace 根 ──────────────────────────────────────────────
 #

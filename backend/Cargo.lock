@@ -151,6 +151,60 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "170433209e817da6aae2c51aa0dd443009a613425dd041ebfb2492d1c4c11a25"
 
 [[package]]
+name = "ara2-bridge"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d3730f199944c74cc0eda10b15659de6f2c824216829cc758765752495a6069"
+dependencies = [
+ "ara2-bridge-companion",
+ "ara2-bridge-core",
+ "ara2-bridge-plugin",
+ "ara2-bridge-sys",
+]
+
+[[package]]
+name = "ara2-bridge-companion"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521013bb178b09d0f8b55957cc72f4f546866238884446150c0758ce026c9bfc"
+dependencies = [
+ "ara2-bridge-core",
+ "ara2-bridge-sys",
+ "bitflags 2.11.0",
+ "cc",
+]
+
+[[package]]
+name = "ara2-bridge-core"
+version = "0.3.0"
+dependencies = [
+ "ara2-bridge-sys",
+ "base64 0.22.1",
+ "bitflags 2.11.0",
+ "crossbeam-queue",
+ "parking_lot",
+ "quick-xml 0.41.0",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ara2-bridge-plugin"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e26942bb040ab3ee138b6c7660849feb333fb29ba9a9400699d5d44d64b0befc"
+dependencies = [
+ "ara2-bridge-core",
+ "ara2-bridge-sys",
+ "bitflags 2.11.0",
+]
+
+[[package]]
+name = "ara2-bridge-sys"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cf9d3c135a26222784f66636c6e6e21ae02ca16a482f5305e5e2719ded32f11"
+
+[[package]]
 name = "arc-swap"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -906,6 +960,15 @@ name = "crossbeam-epoch"
 version = "0.9.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-queue"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03e8bd762f7479489c70ed6c768ddca99d7296857de437a68dcb2a94365b3fae"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -2037,7 +2100,9 @@ dependencies = [
 name = "hifishifter-plugin"
 version = "0.1.0"
 dependencies = [
+ "ara2-bridge",
  "hifishifter-kernel",
+ "log",
  "serde",
  "serde_json",
 ]

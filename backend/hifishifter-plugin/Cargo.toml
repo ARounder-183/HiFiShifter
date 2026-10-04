@@ -9,5 +9,18 @@ description = "HiFiShifter 的 ARA 插件侧适配层（复用本体离线内核
 
 [dependencies]
 hifishifter-kernel = { path = "../hifishifter-kernel" }
+# ARA2 ↔ VST3 的桥。`vst3` 特性提供 companion 适配器（主工厂 / 处理器入口）；
+# 默认特性 `plugin` 提供 `PluginModel` 那套语义 trait。
+#
+# 【build.rs 依赖】它要求环境变量 `ARA_VST3_SDK_DIR` 与 `ARA_SDK_DIR` 指向按
+# 它自己校验过的两个 SDK 检出（仓库 + commit + tree hash 三项匹配，tree 一脏即拒绝）。
+# 本仓库里它们在 `probe/ara/rust-path/.third-party/`，见 probe/ara/README.md。
+ara2-bridge = { version = "0.3.0", features = ["vst3"] }
+log = { version = "0.4", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[lib]
+name = "hifishifter_plugin"
+# `cdylib` 才是 REAPER 加载的产物；`rlib` 让 crate 自己的测试能链接它。
+crate-type = ["cdylib", "rlib"]

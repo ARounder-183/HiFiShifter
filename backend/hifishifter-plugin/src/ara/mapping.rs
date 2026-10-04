@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 /// ARA 文档（对应探针 Task 1 采集的 JSON 形状）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct AraDocument {
     /// 宿主给出的文档名。
     #[serde(default, rename = "documentName")]
@@ -88,7 +88,7 @@ pub struct AraRegionSequence {
 }
 
 /// 一个 `ARAAudioModification`（≈ Take）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct AraAudioModification {
     /// 稳定 id。
     #[serde(rename = "persistentID")]
@@ -99,7 +99,7 @@ pub struct AraAudioModification {
 }
 
 /// 一个 `ARAPlaybackRegion`（≈ Clip）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct AraPlaybackRegion {
     /// 区间名。
     #[serde(default)]
@@ -395,4 +395,24 @@ pub fn ara_document_to_timeline(doc: &AraDocument) -> Result<TimelineState, Mapp
         clip.normalize_takes();
     }
     Ok(timeline)
+}
+
+/// 一行可核对的摘要。
+///
+/// 【为什么把格式钉死】采集日志要能被 diff：判据 A1（"插件看到的数与工程实际一致"）
+/// 就是靠比对这一行得出的。字段顺序与拼写变了，历史日志就不可比。
+pub fn summary_line(document: &AraDocument, timeline: &TimelineState) -> String {
+    let region_sequences: usize = document
+        .musical_contexts
+        .iter()
+        .map(|context| context.region_sequences.len())
+        .sum();
+    format!(
+        "ara: sources={} modifications={} regionSequences={} playbackRegions={} clips={}",
+        document.audio_sources.len(),
+        document.audio_modifications.len(),
+        region_sequences,
+        document.playback_regions.len(),
+        timeline.clips.len(),
+    )
 }
