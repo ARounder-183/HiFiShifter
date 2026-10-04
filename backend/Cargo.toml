@@ -11,7 +11,7 @@ resolver = "2"
 members = ["src-tauri", "hifishifter-kernel", "hifishifter-plugin"]
 # 打补丁的第三方 crate 不进 workspace（它有自己的构建语义，也不该被
 # `cargo test --workspace` 拉进来）。
-exclude = ["third-party/ara2-bridge-core"]
+exclude = ["third-party/ara2-bridge-core", "third-party/ara2-bridge-plugin"]
 
 # ── 第三方补丁 ──────────────────────────────────────────────────────────────
 #
@@ -23,6 +23,7 @@ exclude = ["third-party/ara2-bridge-core"]
 # `third-party/ara2-bridge-core/PATCHED.md`。
 [patch.crates-io]
 ara2-bridge-core = { path = "third-party/ara2-bridge-core" }
+ara2-bridge-plugin = { path = "third-party/ara2-bridge-plugin" }
 
 # ── profile 必须在 workspace 根 ──────────────────────────────────────────────
 #

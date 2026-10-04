@@ -190,8 +190,6 @@ dependencies = [
 [[package]]
 name = "ara2-bridge-plugin"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e26942bb040ab3ee138b6c7660849feb333fb29ba9a9400699d5d44d64b0befc"
 dependencies = [
  "ara2-bridge-core",
  "ara2-bridge-sys",

@@ -312,17 +312,27 @@ impl ModelHandle {
 
 impl AudioModifications for ModelHandle {
     type AudioModification = usize;
+    /// 与 `AudioSources::AudioSource` 同一个 Rust 类型（本地补丁要求两个 trait 各自声明一次）。
+    type AudioSource = usize;
 
     fn create_audio_modification(
         &mut self,
         context: &CreateContext,
+        source: &Self::AudioSource,
         properties: AudioModificationProperties,
     ) -> Result<Self::AudioModification, AraError> {
         let persistent_id = properties.persistent_id().to_string();
+        // 这条边（modification → source）来自本地补丁的 trait 参数：上游把它丢了。
+        let audio_source_persistent_id = self
+            .document
+            .audio_sources
+            .get(*source)
+            .map(|s| s.persistent_id.clone())
+            .unwrap_or_default();
         let index = self.document.audio_modifications.len();
         self.document.audio_modifications.push(AraAudioModification {
             persistent_id,
-            audio_source_persistent_id: String::new(),
+            audio_source_persistent_id,
         });
         if let Some(handle) = context.object_handle() {
             self.modification_index_by_handle.insert(handle, index);
@@ -334,6 +344,7 @@ impl AudioModifications for ModelHandle {
         &mut self,
         _context: &CreateContext,
         source: &Self::AudioModification,
+        audio_source: &Self::AudioSource,
         properties: AudioModificationProperties,
     ) -> Result<Self::AudioModification, AraError> {
         // 克隆出的 modification 基于同一个 source —— 这正是"同一素材被复制成多份"
@@ -345,6 +356,12 @@ impl AudioModifications for ModelHandle {
             .cloned()
             .unwrap_or_default();
         cloned.persistent_id = properties.persistent_id().to_string();
+        cloned.audio_source_persistent_id = self
+            .document
+            .audio_sources
+            .get(*audio_source)
+            .map(|s| s.persistent_id.clone())
+            .unwrap_or_else(|| cloned.audio_source_persistent_id.clone());
         let index = self.document.audio_modifications.len();
         self.document.audio_modifications.push(cloned);
         Ok(index)
@@ -353,25 +370,33 @@ impl AudioModifications for ModelHandle {
 
 impl PlaybackRegions for ModelHandle {
     type PlaybackRegion = usize;
+    /// 与 `AudioModifications::AudioModification` 同一个类型（本地补丁）。
+    type AudioModification = usize;
+    /// 与 `RegionSequences::RegionSequence` 同一个类型（本地补丁）。
+    type RegionSequence = usize;
 
     fn create_playback_region(
         &mut self,
         _context: &CreateContext,
+        modification: &Self::AudioModification,
+        sequence: &Self::RegionSequence,
         properties: PlaybackRegionProperties,
     ) -> Result<Self::PlaybackRegion, AraError> {
-        // 【region → regionSequence 的归属只能推】高层 `PlaybackRegions` trait 只交出
-        // `(context, properties)`，**不含**宿主在 `createPlaybackRegion(modification, sequence)`
-        // 里给的那个 sequence 句柄；`CreateContext` 交出的又是 `RawHandle`（登记表身份），
-        // 而 `properties.region_sequence()` 给的是 `ModelRef`（ARA 对象指针）——
-        // 两者没有任何公开的换算。所以只能按 ModelRef 指针的**首次出现顺序**分配下标。
-        //
-        // 这个假设在"一个文档一条编辑轨"（v1 的单实例语义）下与真实归属一致，
-        // 但**多序列工程里没有验证过** —— 已记入 ledger，不当作已解决。
-        let sequence_index = properties.region_sequence().map(|reference| {
-            let key = reference.as_raw() as usize;
-            let next = self.sequence_index_by_model_ref.len();
-            *self.sequence_index_by_model_ref.entry(key).or_insert(next)
-        });
+        // 这两条边（region → modification / region → sequence）来自本地补丁的 trait 参数。
+        // 上游的委托层把它们**丢掉**了，而这正是建时间线缺的那两块拼图。
+        let sequence_index = Some(*sequence);
+        let modification_persistent_id = self
+            .document
+            .audio_modifications
+            .get(*modification)
+            .map(|m| m.persistent_id.clone())
+            .unwrap_or_default();
+        let source_persistent_id = self
+            .document
+            .audio_modifications
+            .get(*modification)
+            .map(|m| m.audio_source_persistent_id.clone())
+            .unwrap_or_default();
 
         let flags = properties.transformation_flags();
         // ARA 的内容淡化旗标（kARAPlaybackTransformationContentBasedFadeAtHead = 8，Tail = 4）。
@@ -379,28 +404,10 @@ impl PlaybackRegions for ModelHandle {
         let has_content_based_fade_at_head = (flags & 8) != 0;
         let has_content_based_fade_at_tail = (flags & 4) != 0;
         let index = self.document.playback_regions.len();
-        // 【region → source / modification 的边也拿不到】与 region → sequence 同理：
-        // 高层 trait 的 `create_playback_region(context, properties)` 不含这两条边，
-        // 而 properties 里也没有对应访问器。
-        //
-        // v1 的兜底：当文档里**只有一个** source / modification 时（"一个实例 = 一条
-        // 编辑轨"的常见形状），把所有 region 挂到它上面 —— 这种情况下它就是正确归属。
-        // 多源文档下这一步是**近似**，已记入 ledger，不当作已解决。
-        let single_source = (self.document.audio_sources.len() == 1)
-            .then(|| self.document.audio_sources[0].persistent_id.clone())
-            .unwrap_or_default();
-        let single_modification = (self.document.audio_modifications.len() == 1)
-            .then(|| self.document.audio_modifications[0].persistent_id.clone())
-            .unwrap_or_default();
-        if self.document.audio_sources.len() > 1 || self.document.audio_modifications.len() > 1 {
-            log::warn!(
-                "[ara] 多源文档：region→source 的边在本层拿不到，归属将退化为按名字匹配"
-            );
-        }
         self.document.playback_regions.push(AraPlaybackRegion {
             name: properties.name().map(str::to_owned),
-            audio_source_persistent_id: single_source,
-            audio_modification_persistent_id: single_modification,
+            audio_source_persistent_id: source_persistent_id,
+            audio_modification_persistent_id: modification_persistent_id,
             region_sequence_index: sequence_index,
             start_in_modification_time: properties.start_in_modification_time(),
             duration_in_modification_time: properties.duration_in_modification_time(),
