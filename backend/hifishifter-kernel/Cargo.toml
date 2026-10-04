@@ -8,3 +8,9 @@ description = "HiFiShifter 的离线音频内核：不依赖 Tauri，也不依�
 [dependencies]
 lru = "0.12"
 serde_json = "1"
+
+[build-dependencies]
+# 内核自带的原生依赖构建（Signalsmith Stretch 的 C 包装 + SoundTouchDLL）。
+# 见 `build.rs` 的文件头说明：这两段原先住在 app 的 build.rs 里，插件单独链接内核时
+# 会因为没有它们而链接失败。
+cc = "1.0"
