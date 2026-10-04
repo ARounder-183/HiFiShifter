@@ -356,7 +356,7 @@ Select-String -Path state\model.rs -Pattern 'tauri::'
 
 Expected: **无输出**。若有，说明该项属于 `app.rs`，移过去。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 cd E:\code\HiFiShifter\.worktrees\ara-plugin
@@ -1325,7 +1325,7 @@ git commit -m "feat(ara): accumulate the ARA document model through the plugin t
 - Consumes: Task 9 的累积器、`hifishifter_plugin::ara::ara_document_to_timeline`
 - Produces: 一条可核对的行 `ara: sources=N modifications=M regionSequences=K playbackRegions=P clips=C`
 
-- [ ] **Step 1: 在 `end_editing` 里做映射并打日志**
+- [x] **Step 1: 在 `end_editing` 里做映射并打日志**
 
 ```rust
 /// 宿主一次编辑结束：把累积的 ARA 模型映射成 `TimelineState` 并记录摘要。
@@ -1359,7 +1359,7 @@ fn end_editing(
 ara: sources=1 modifications=1 regionSequences=1 playbackRegions=2 clips=2
 ```
 
-- [ ] **Step 2: 写单元测试钉住摘要行格式**
+- [x] **Step 2: 写单元测试钉住摘要行格式**
 
 ```rust
 /// 摘要行的字段与顺序是运维契约（采集日志要能被 diff），不许随手改。
@@ -1376,7 +1376,7 @@ fn the_summary_line_has_a_stable_shape() {
 
 夹具是干净的 REAPER 单 region 采集；先跑一次取实际值，确认它符合该样本的语义再写死。
 
-- [ ] **Step 3: 构建并部署到隔离 VST 目录**
+- [x] **Step 3: 构建并部署到隔离 VST 目录**
 
 ```powershell
 cd E:\code\HiFiShifter\.worktrees\ara-plugin
@@ -1389,12 +1389,12 @@ cd backend\hifishifter-plugin
 cargo build --jobs 1 --offline
 
 cd E:\code\HiFiShifter\.worktrees\ara-plugin
-Copy-Item backend\hifishifter-plugin\target\debug\hifishifter_plugin.dll probe\ara\vst3\HiFiShifter.vst3 -Force
+Copy-Item backend\target\debug\hifishifter_plugin.dll probe\ara\vst3\HiFiShifter.vst3 -Force
 ```
 
 > `ARA_VST3_SDK_DIR` / `ARA_SDK_DIR` 指向的两个检出做过仓库 + commit + tree hash 三重校验，**tree 一脏就拒绝编译**。不要改动它们的内容，也不要重新克隆。若 `probe/ara/rust-path/.third-party/` 不存在（新 worktree），按 `probe/ara/README.md` 重建，**不要**换版本。
 
-- [ ] **Step 4: 在隔离实例里采集（铁律：先杀进程）**
+- [x] **Step 4: 在隔离实例里采集（铁律：先杀进程）**
 
 ```powershell
 $win = 'E:\code\HiFiShifter\.worktrees\ara-plugin'
@@ -1411,6 +1411,8 @@ vstpath64=$win\probe\ara\vst3
 "@ | Set-Content "$cfg\REAPER.ini" -Encoding ascii
 
 # 3) 启动（工作目录决定日志落点）
+$env:HIFISHIFTER_ARA_LOG = "$win\probe\ara\captures\task10-plugin.log"
+$env:HIFISHIFTER_ARA_MANUAL = '1'
 Start-Process -FilePath 'D:\Softwares\REAPER (x64)\reaper.exe' `
   -ArgumentList @('-cfgfile', "$cfg\REAPER.ini", '-new', "$win\probe\ara\build_task10_probe.lua") `
   -WorkingDirectory "$win\probe\ara"
@@ -1419,7 +1421,7 @@ Start-Sleep 40
 
 采集脚本按 `probe/ara/build_task2_probe.lua` 改：建一条轨、放**同一素材两次**、插入插件。之后手动在 REAPER 里把第二个 item 拖到别的位置，观察插件日志是否出现新的一行摘要（A2）。
 
-- [ ] **Step 5: 核对判据并把实测写进 FINDINGS**
+- [x] **Step 5: 核对判据并把实测写进 FINDINGS**
 
 - **A1**：日志里 `playbackRegions=2` 且 `clips=2`；
 - **A2**：拖动 item 后出现新摘要行，且截取到的 `start_sec` 随之变化。
@@ -1427,6 +1429,9 @@ Start-Sleep 40
 写入 `probe/ara/rust-path/FINDINGS.md` 的新一节，**原样保留日志行**，并明确标注哪些是实测、哪些是推断。
 
 - [ ] **Step 6: 提交**
+
+> 状态：A1 / A2 均有真实宿主证据，包括 UI 拖动和 Item 菜单切片。早期脚本结果
+> 不足以断言宿主没有通知；已补齐更新/销毁回调，见 `probe/ara/rust-path/FINDINGS.md` §8。
 
 ```powershell
 cd E:\code\HiFiShifter\.worktrees\ara-plugin
@@ -1449,22 +1454,25 @@ git commit -m "feat(ara): map the live ARA document and log the timeline summary
 - Consumes: Task 10 的采集流程
 - Produces: U1 / U2 的**实测**结论（成立 / 不成立 / 不成立时的退路）
 
-- [ ] **Step 1: 声明支持拉伸与基于内容的淡化**
+- [x] **Step 1: 声明支持拉伸与基于内容的淡化**
 
 ```rust
-// 不声明这三项时，REAPER 不会把拉伸/淡化写进 ARA 模型（探针实测：awkward 样本里
-// 5 个 region 全部 durMod == durPlay）。这是 U2 存在的直接原因。
-let mut caps = plugin.capabilities_mut();
-caps.set_supported_playback_transformation_flags(
-    PlaybackTransformationFlags::Timestretch
-        | PlaybackTransformationFlags::ReflectTempo
-        | PlaybackTransformationFlags::ContentFades,
-);
+// 锁定 0.3.0 的真实 API：在 FactoryBuilder 上声明宿主可交给插件的变换。
+.capabilities(
+    FactoryCapabilities::default().with_playback_transformations(
+        PlaybackTransformationFlags::TIMESTRETCH
+            | PlaybackTransformationFlags::REFLECT_TEMPO
+            | PlaybackTransformationFlags::CONTENT_FADES,
+    ),
+)
 ```
 
-具体 API 名以 `ara2-bridge-plugin-0.3.0/src/processing.rs` 的 `SemanticCapabilities` 为准 —— 对着源码抄，不要猜。
+修正：0.3.0 的真实声明入口是 `FactoryBuilder::capabilities` 与
+`FactoryCapabilities::with_playback_transformations`（builder.rs），实际位于 runtime.rs。
+原计划的 SemanticCapabilities setter 不存在于锁定 API，已替换。
+当前声明并不证明淡化输出正确；该项仍需 Phase 3 实现及波形验收。
 
-- [ ] **Step 2: 采集拉伸样本（U2）**
+- [x] **Step 2: 采集拉伸样本（U2）**
 
 在隔离实例里：放一个 2 秒素材，把 item 右边拖长到 4 秒（真实拉伸），采一份模型。判据：
 
@@ -1476,7 +1484,7 @@ durationInModificationTime != durationInPlaybackTime
 
 **若仍相等**：说明这条路径不通过 ARA 表达拉伸，需要重新评估"拉伸 = 时长差"公式的宿主级适用性 —— 记进 ledger，**不要**当作"已验证"。
 
-- [ ] **Step 3: 采集倒放样本（U1）**
+- [x] **Step 3: 采集倒放样本（U1）**
 
 对同一个 item 执行 Reverse，采一份模型，检查两件事：
 
@@ -1488,7 +1496,12 @@ durationInModificationTime != durationInPlaybackTime
 - 若 (2) 变化 → 宿主用**改源内容**表达倒放，插件读到的是已反向的源，**没问题**；
 - 若两者都不变 → ARA 层没有倒放的表达，**这是会导致渲染方向错误的缺陷**，必须写进 FINDINGS 并回报（退路是让本体侧用 `Clip.reversed` 表达，但那要求倒放信息能进到插件 —— 目前没有通道，属于设计缺口）。
 
-- [ ] **Step 4: 写结论并提交**
+- [x] **Step 4: 写结论并提交**
+
+> 状态：U2 PASS（实际场景为 2 秒源按 rate=2 压缩成 1 秒）；U1 是映射输入中的方向缺口。
+> 真正倒放由 action 41051 和 section reader 确认；源 PCM 已读取并与文件正向样本比较。
+> 原始日志为 `captures/task11-plugin.log`；JSON 由 `verify_task11_capture.ps1` 自动生成，
+> 明确为归一化记录而非全模型 dump。宿主是否在输出之外处理倒放纳入 Phase 3 先导验证。
 
 ```powershell
 cd E:\code\HiFiShifter\.worktrees\ara-plugin
@@ -1498,13 +1511,18 @@ git commit -m "probe(ara): close out the host-level stretch and reverse observat
 
 **Phase 2 完成判据**：A1 / A2 有实测证据；U1 / U2 各有"成立 / 不成立 / 不成立时的退路"三种明确结论之一，没有一项写成"待定"。
 
+**实际收尾（2026-10-04）**：Task 10 / 11 在同一本地批次提交，包含 region 更新/销毁
+回归与实时日志守卫。最新验证为插件 19 条通过、采集验证器 6 条通过、`git diff --check`
+通过；A1/A2 有宿主 UI 和日志证据。U1 的映射方向缺口保留，不等于产品支持倒放。
+源/修改/sequence 的完整更新销毁、稳定 clip 身份与扩展绑定释放仍需 Phase 3 补齐。
+
 ---
 
 ## 收尾
 
-- [ ] 把 Phase 1 / Phase 2 的实际结论回写[设计文档](../specs/2026-10-04-ara-plugin-v1-design.md)的 §2.1（未决项表）与 §7（阶段表）
-- [ ] 把每条 Ruling 追加进 [`EXECUTION-LEDGER.md`](../../../probe/ara/EXECUTION-LEDGER.md)，格式：`Task N: Ruling: <发现> — <决定与理由> — <错了的代价>`
-- [ ] 决定 `probe/ara/rust-path/` 的处置（保留为对照物，还是删除）—— 产品代码已不再依赖它，但它的 FINDINGS 仍是三条 ABI 硬事实的原始记录
+- [x] 把 Phase 1 / Phase 2 的实际结论回写[设计文档](../specs/2026-10-04-ara-plugin-v1-design.md)的 §2.1（未决项表）与 §7（阶段表）
+- [x] 把每条 Ruling 追加进 [`EXECUTION-LEDGER.md`](../../../probe/ara/EXECUTION-LEDGER.md)，格式：`Task N: Ruling: <发现> — <决定与理由> — <错了的代价>`
+- [x] 决定 `probe/ara/rust-path/` 的处置：保留为 ABI 对照物，产品代码不依赖它
 
 ## Review Focus
 

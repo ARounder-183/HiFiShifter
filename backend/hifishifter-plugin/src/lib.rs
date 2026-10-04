@@ -24,6 +24,7 @@
 
 pub mod ara;
 pub mod render;
+mod diagnostics;
 mod runtime;
 mod vst3;
 
@@ -52,6 +53,7 @@ pub(crate) fn log_line(message: &str) {
 /// 后面 VST3 侧查 `IPlugInEntryPoint` 时才有东西可给。
 #[no_mangle]
 pub extern "system" fn GetPluginFactory() -> *mut c_void {
+    diagnostics::init();
     let _ = runtime::runtime();
     vst3::get_plugin_factory()
 }
@@ -62,6 +64,7 @@ pub extern "system" fn GetPluginFactory() -> *mut c_void {
 /// `false` 会让 REAPER 直接跳过插件 —— 那就什么信息都拿不到了。探针期实测过这个取舍。
 #[no_mangle]
 pub extern "system" fn InitDll() -> bool {
+    diagnostics::init();
     let _ = runtime::runtime();
     true
 }

@@ -22,13 +22,8 @@ use ara2_bridge::plugin::{
     MusicalContexts, PlaybackRegions, RegionSequences,
 };
 use hifishifter_kernel::state::TimelineState;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-/// 句柄的可用作键的形式。
-///
-/// 【为什么转成 `usize`】`RawHandle` 是裸指针，而我们要把它当 `HashMap` 的键。
-/// 转成整数既规避了裸指针的 `Send`/`Sync` 问题，也让"同一个宿主对象对应同一把键"
-/// 这件事显式可见。
 /// 句柄的可用作键的形式。
 ///
 /// `RawHandle` 自带 `Copy + Eq + Hash`（字段私有但不影响做键），所以直接用它。
@@ -87,6 +82,8 @@ pub struct ModelHandle {
     modification_index_by_handle: HashMap<HandleKey, usize>,
     /// 逐源的宿主内容版本（下标与 `document.audio_sources` 对齐）。
     content_versions: Vec<u64>,
+    /// 已销毁的区间槽位；保留编号，避免其余宿主对象的状态下标变化。
+    destroyed_regions: HashSet<usize>,
     /// region sequence 的 ModelRef 指针 → 下标（按首次出现顺序分配）。
     ///
     /// 【为什么按指针】高层 trait 不交出 region → sequence 的那条边（见
@@ -105,6 +102,7 @@ impl Default for ModelHandle {
             source_index_by_handle: HashMap::new(),
             modification_index_by_handle: HashMap::new(),
             content_versions: Vec::new(),
+            destroyed_regions: HashSet::new(),
             sequence_index_by_model_ref: HashMap::new(),
         }
     }
@@ -136,9 +134,16 @@ impl ModelHandle {
     /// 【为什么在 `end_editing` 调】ARA 约定：一次编辑的所有图变更都在
     /// `begin_editing` … `end_editing` 之间，收口点之后模型才是稳定的。
     fn remap_and_log(&mut self) {
-        match crate::ara::mapping::ara_document_to_timeline(&self.document) {
+        let mut document = self.document.clone();
+        document.playback_regions = document.playback_regions.into_iter()
+            .enumerate()
+            .filter(|(index, _)| !self.destroyed_regions.contains(index))
+            .map(|(_, region)| region)
+            .collect();
+        match crate::ara::mapping::ara_document_to_timeline(&document) {
             Ok(timeline) => {
-                log::info!("{}", crate::ara::summary_line(&self.document, &timeline));
+                log::info!("{}", crate::ara::summary_line(&document, &timeline));
+                log::info!("{}", crate::ara::clip_starts_line(&timeline));
                 self.timeline = Some(timeline);
             }
             Err(err) => {
@@ -163,6 +168,12 @@ impl DocumentLifecycle for ModelHandle {
             "[ara] document controller created: apiGeneration={:?}",
             context.generation()
         );
+        Ok(())
+    }
+
+    /// 记录宿主编辑会话，区分宿主未通知与委托回调未处理。
+    fn begin_editing(&mut self, _document: &mut Self::Document) -> Result<(), AraError> {
+        log::info!("[ara] begin_editing");
         Ok(())
     }
 
@@ -279,12 +290,31 @@ impl AudioSources for ModelHandle {
         &mut self,
         state: &mut Self::AudioSource,
         enable: bool,
-        _host: &HostContentScope<'_, '_>,
+        host: &HostContentScope<'_, '_>,
     ) -> Result<(), AraError> {
         if let Some(source) = self.document.audio_sources.get_mut(*state) {
             source.sample_access_enabled = enable;
         }
         log::info!("[ara] audio_source samples_access enable={enable}");
+        if enable && std::env::var_os("HIFISHIFTER_ARA_PCM_PROBE").is_some() {
+            // 仅用于一次性宿主观测：比较原始源样本与 ARA 返回的源样本，判断倒放是否改源。
+            let result = (|| {
+                let source = self.document.audio_sources.get(*state)
+                    .ok_or(AraError::InvalidArgument("unknown source"))?;
+                let source_ref = host.current_audio_source()
+                    .ok_or(AraError::InvalidState("missing source scope"))?;
+                let channels = source.channel_count.max(1) as usize;
+                let mut reader = host.audio_reader::<f32>(source_ref, channels)?;
+                let mut samples = vec![vec![0.0_f32; 16]; channels];
+                let mut planes = samples.iter_mut().map(Vec::as_mut_slice).collect::<Vec<_>>();
+                reader.read(0, &mut planes)?;
+                log::info!("[ara] source PCM #{}: first16={:?}", state, samples[0]);
+                Ok::<(), AraError>(())
+            })();
+            if let Err(error) = result {
+                log::warn!("[ara] source PCM probe failed: {error:?}");
+            }
+        }
         Ok(())
     }
 }
@@ -300,6 +330,7 @@ impl ModelHandle {
             self.content_versions.resize(index + 1, 0);
         }
         self.content_versions[index] += 1;
+        log::info!("[ara] audio_source content_version #{}: {}", index, self.content_versions[index]);
     }
 }
 
@@ -406,7 +437,7 @@ impl PlaybackRegions for ModelHandle {
         let index = self.document.playback_regions.len();
         self.document.playback_regions.push(AraPlaybackRegion {
             name: properties.name().map(str::to_owned),
-            audio_source_persistent_id: source_persistent_id,
+            audio_source_persistent_id: source_persistent_id.clone(),
             audio_modification_persistent_id: modification_persistent_id,
             region_sequence_index: sequence_index,
             start_in_modification_time: properties.start_in_modification_time(),
@@ -418,6 +449,87 @@ impl PlaybackRegions for ModelHandle {
             has_content_based_fade_at_head,
             has_content_based_fade_at_tail,
         });
+        log::info!(
+            "[ara] playback_region #{}: source={} startMod={:.6} durationMod={:.6} startPlay={:.6} durationPlay={:.6} flags=0x{:X}",
+            index,
+            source_persistent_id,
+            properties.start_in_modification_time(),
+            properties.duration_in_modification_time(),
+            properties.start_in_playback_time(),
+            properties.duration_in_playback_time(),
+            flags as u32,
+        );
         Ok(index)
+    }
+
+    /// 宿主移动、裁切或拉伸已有 item 时，替换几何属性并保留所属源与修改。
+    fn update_playback_region(
+        &mut self,
+        state: &mut Self::PlaybackRegion,
+        properties: PlaybackRegionProperties,
+    ) -> Result<(), AraError> {
+        let region = self.document.playback_regions.get_mut(*state)
+            .ok_or(AraError::InvalidArgument("unknown playback region"))?;
+        let flags = properties.transformation_flags();
+        region.name = properties.name().map(str::to_owned);
+        region.start_in_modification_time = properties.start_in_modification_time();
+        region.duration_in_modification_time = properties.duration_in_modification_time();
+        region.start_in_playback_time = properties.start_in_playback_time();
+        region.duration_in_playback_time = properties.duration_in_playback_time();
+        region.is_timestretch_enabled = (flags & 1) != 0;
+        region.has_content_based_fade_at_head = (flags & 8) != 0;
+        region.has_content_based_fade_at_tail = (flags & 4) != 0;
+        log::info!("[ara] playback_region updated #{}: startPlay={:.6}", state, region.start_in_playback_time);
+        Ok(())
+    }
+
+    /// 标记已销毁区间，编辑结束时只映射存活的区域。
+    fn destroy_playback_region(&mut self, state: Self::PlaybackRegion) {
+        self.destroyed_regions.insert(state);
+        log::info!("[ara] playback_region destroyed #{}", state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ara2_bridge::core::{Registry, RegionSequenceKind};
+
+    /// 宿主移动与拉伸更新必须替换现存区间，不能新增重复 clip 或忽略更新。
+    #[test]
+    fn host_region_update_changes_the_mapped_clip() {
+        let mut model = ModelHandle::new();
+        model.document = crate::ara::ara_document_from_json(include_str!(
+            "../../../../probe/ara/captures/ara-model.reaper.json"
+        )).unwrap();
+        let mut index = 0;
+        let mut sequences = Registry::<RegionSequenceKind, ()>::new(1);
+        let handle = sequences.insert(()).unwrap();
+        let sequence = sequences.model_ref(handle).unwrap();
+        let properties = PlaybackRegionProperties::for_ara2(
+            1, 0.25, 1.5, 5.0, 3.0, sequence, Some("moved"), None,
+        ).unwrap();
+        PlaybackRegions::update_playback_region(&mut model, &mut index, properties).unwrap();
+        model.remap_and_log();
+        let timeline = model.timeline().unwrap();
+        assert_eq!(timeline.clips.len(), 1);
+        let clip = &timeline.clips[0];
+        assert_eq!(clip.start_sec, 5.0);
+        assert_eq!(clip.length_sec, 3.0);
+        assert_eq!(clip.source_start_sec, 0.25);
+        assert_eq!(clip.playback_rate, 0.5);
+        assert_eq!(clip.name, "moved");
+    }
+
+    /// 删除区域后摘要和时间线只能包含存活区域，避免切片或撤销留下幽灵 clip。
+    #[test]
+    fn destroying_a_region_removes_it_from_the_timeline() {
+        let mut model = ModelHandle::new();
+        model.document = crate::ara::ara_document_from_json(include_str!(
+            "../../../../probe/ara/captures/ara-model.reaper.json"
+        )).unwrap();
+        PlaybackRegions::destroy_playback_region(&mut model, 0);
+        model.remap_and_log();
+        assert!(model.timeline().unwrap().clips.is_empty());
     }
 }

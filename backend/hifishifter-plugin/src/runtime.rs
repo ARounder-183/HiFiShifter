@@ -8,7 +8,10 @@
 
 use ara2_bridge::companion::CompanionFactory;
 use ara2_bridge::core::AraError;
-use ara2_bridge::plugin::{Factory, FactoryBuilder, PluginBuilder, PluginEntry};
+use ara2_bridge::core::PlaybackTransformationFlags;
+use ara2_bridge::plugin::{
+    Factory, FactoryBuilder, FactoryCapabilities, PluginBuilder, PluginEntry,
+};
 use std::sync::OnceLock;
 
 /// 把 `Factory` 以只读方式跨线程共享的包装。
@@ -46,6 +49,15 @@ impl Runtime {
                 "HiFiShifter",
                 "https://example.invalid",
                 crate::VERSION,
+            )
+            // REAPER 只有在工厂声明这些能力后，才会把 item 拉伸与内容淡化写进
+            // playback region 的 transformation flags；映射层随后按两个时间坐标计算倍率。
+            .capabilities(
+                FactoryCapabilities::default().with_playback_transformations(
+                    PlaybackTransformationFlags::TIMESTRETCH
+                        | PlaybackTransformationFlags::REFLECT_TEMPO
+                        | PlaybackTransformationFlags::CONTENT_FADES,
+                ),
             )
             // 每个文档控制器拿到**自己的一份**模型：一份模型对应一份 ARA 文档。
             // 共享一份会让两份文档的累积互相污染（设计 §4.1：v1 是"一实例一编辑轨"）。

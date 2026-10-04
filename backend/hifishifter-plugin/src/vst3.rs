@@ -991,7 +991,7 @@ unsafe extern "system" fn audio_setup_processing(
 }
 
 unsafe extern "system" fn audio_set_processing(_this: *mut c_void, _state: i8) -> TResult {
-    crate::log_line("IAudioProcessor::setProcessing");
+    // SDK 允许从音频线程调用此函数；禁止触发同步文件日志。
     K_RESULT_OK
 }
 
@@ -1266,4 +1266,46 @@ static EDIT_CONTROLLER_VTBL: EditControllerVtbl = EditControllerVtbl {
 pub fn new_main_factory_adapter() -> Option<Vst3MainFactoryAdapter> {
     let runtime = crate::runtime::runtime()?;
     Vst3MainFactoryAdapter::new(crate::CLASS_NAME, runtime.companion.clone()).ok()
+}
+
+#[cfg(test)]
+mod realtime_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static IN_REALTIME_CALLBACK: Cell<bool> = const { Cell::new(false) };
+        static REALTIME_LOGS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    struct ObservingLogger;
+
+    impl log::Log for ObservingLogger {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool { true }
+        fn log(&self, _: &log::Record<'_>) {
+            if IN_REALTIME_CALLBACK.with(Cell::get) {
+                REALTIME_LOGS.with(|count| count.set(count.get() + 1));
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    /// setProcessing 可在音频线程运行，不能触发同步文件日志。
+    #[test]
+    fn set_processing_does_not_enter_the_file_logger() {
+        static LOGGER: ObservingLogger = ObservingLogger;
+        log::set_logger(&LOGGER).unwrap();
+        log::set_max_level(log::LevelFilter::Info);
+        let mut processor = Processor::create().expect("processor creation");
+        // SAFETY: 取真实音频处理器子对象地址，而非组件基址。
+        let this = unsafe { audio_ptr(&mut *processor) };
+        IN_REALTIME_CALLBACK.with(|flag| flag.set(true));
+        // SAFETY: 处理器在两次状态回调期间存活。
+        unsafe {
+            assert_eq!(audio_set_processing(this, 1), K_RESULT_OK);
+            assert_eq!(audio_set_processing(this, 0), K_RESULT_OK);
+        }
+        IN_REALTIME_CALLBACK.with(|flag| flag.set(false));
+        assert_eq!(REALTIME_LOGS.with(Cell::get), 0);
+    }
 }

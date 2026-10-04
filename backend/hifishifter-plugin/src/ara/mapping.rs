@@ -416,3 +416,13 @@ pub fn summary_line(document: &AraDocument, timeline: &TimelineState) -> String 
         timeline.clips.len(),
     )
 }
+
+/// 记录每个 clip 的播放起点，供宿主移动 item 后核对 ARA 更新。
+pub fn clip_starts_line(timeline: &TimelineState) -> String {
+    let starts = timeline
+        .clips
+        .iter()
+        .map(|clip| format!("{:.6}", clip.start_sec))
+        .collect::<Vec<_>>();
+    format!("ara: clipStartsSec=[{}]", starts.join(","))
+}

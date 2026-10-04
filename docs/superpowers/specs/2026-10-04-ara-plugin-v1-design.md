@@ -56,20 +56,23 @@
 | F6 | 一个 ARA 实例 = 一条轨道；REAPER 为一条轨道建 3 个 `IAudioProcessor` 实例，**每实例必须有自己的 companion 绑定** | 同上 |
 | F7 | 内核抽取的真实依赖闭包是 **43 模块 / 2.57 MB**，其中只有 5 个模块碰 `tauri::`（`state` 10 处、`pitch_clip` 4、`pitch_analysis` 2、`recording` 2、`audio_engine` 10） | 本次实测（见 §4.2） |
 
-### 2.1 仍未验证的四项（**不是已解决**）
+### 2.1 Phase 2 收口结果与仍未验证项
 
 | # | 未决项 | 为什么重要 | 收口阶段 |
 | --- | --- | --- | --- |
-| U1 | **ARA 没有反向位**。宿主如何表达倒放（改源内容 / region 属性）未在真实宿主里观测过 | 若是后者，倒放区域会渲染成正放 | Phase 2 实验 |
-| U2 | **宿主级拉伸观测缺一个**。awkward 样本实际不含拉伸（5 个 region 全部 `durMod == durPlay`） | 拉伸分支目前只在合成样本上验证过 | Phase 2 实验 |
+| U1 | **当前映射缺少方向**。官方 action 41051 实际倒放后，ARA 仍给同一源与正向 PCM，两个时长坐标与普通项相同，flags 没有反向位 | 插件直接按映射渲染会按正向读源；宿主是否在处理器外补偿尚未实测 | Phase 3 先导输出实验，未通过前不得宣称支持 |
+| U2 | **已实测成立：宿主级拉伸通过时长差表达**。声明 `TIMESTRETCH` 后，REAPER 给出 `durationMod=2.0`、`durationPlay=1.0` | 映射层按两个时间坐标计算倍率 | Phase 2 已收口 |
 | U3 | **R4：渲染窗口内能否稳定供音**。探针的 `process()` 是空实现 | 失败表现为可听见的空洞 | Phase 3 |
 | U4 | **源内容版本与缓存键**：宿主在插件未运行时改源内容、且几何字段不变时，是否会给缓存造成过期命中 | 静默复用过期渲染 | Phase 3 实验 |
+
+Task 11 的原始日志与退路见 [Task 2 FINDINGS](../../../probe/ara/rust-path/FINDINGS.md) §9。
 
 ### 2.2 一个必须记住的探针更正
 
 Task 1 的 ledger 里"拉伸 = 时长差，awkward 样本已证明"**证据不成立**：那份样本里
 5 个 region 全部 `durationInModificationTime == durationInPlaybackTime`，被读成拉伸的
-那一条只是**区间被裁短**。公式本身成立（合成样本已验证），但**宿主级观测仍缺**（U2）。
+那一条只是**区间被裁短**。公式本身成立；本批 Task 11 另取得真实
+`durationMod=2.0 durationPlay=1.0` 的宿主观测（U2），不能反过来用它修饰旧样本。
 
 ---
 
@@ -511,7 +514,7 @@ hifishifter-plugin/src/
 | 阶段 | 交付物 | 验收 | 杀死判据 |
 | --- | --- | --- | --- |
 | **Phase 1 内核边界落地** | 插件 crate 只依赖 `hifishifter-kernel`；workspace 合并 | A5 的静态部分（依赖树里无 `tauri`）；app+内核测试合计 `772 / 4 / 1` 不变 | 若拆完 `state` 后闭包仍含 `commands` / `audio_engine` 等非内核模块且无法在 2 天内切开 → 停下来重估"内核"的定义 |
-| **Phase 2 插件骨架产品化** | 插件被 REAPER 加载、绑定 ARA、打印真实 source/region 数；U1/U2 收口 | A1、A2 | 若高层 `PluginModel` 框架在 REAPER 下不可用，回退探针低层路径；两条都失败则停 |
+| **Phase 2 插件骨架产品化** | 插件被 REAPER 加载、绑定 ARA、打印真实 source/region 数；U1/U2 收口 | A1 / A2 实测通过；U2 通过，U1 为方向表达缺口 | 若高层 `PluginModel` 框架在 REAPER 下不可用，回退探针低层路径；两条都失败则停 |
 | **Phase 3 渲染闭环** | 播放听到修音结果；U3/U4 收口 | A3 | 若 R4 不可解（窗口内拿不到音频）→ 整个进程内方案重估，报告用户 |
 | **Phase 4 参数通道与持久化** | 本体改参数 → DAW 渲染变化；重开工程曲线还在 | A4 | 若乐观并发在真实使用中频繁冲突到不可用 → 降级为"某时刻只允许一个本体窗口" |
 | **Phase 5 打包与分发** | 可安装的插件包 + 用户说明（含"本体不在线时能听不能改"） | 干净机器上装 → 判据 A1–A4 | — |

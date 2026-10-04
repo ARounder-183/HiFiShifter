@@ -127,3 +127,75 @@ Copy-Item target\debug\hifishifter_ara_probe.dll "<worktree>\probe\ara\vst3\HiFi
 $env:HIFISHIFTER_ARA_PROBE_LOG = "<worktree>\probe\ara\captures\task2-plugin.log"
 reaper.exe -cfgfile "<worktree>\probe\ara\reaper-profile\REAPER.ini" -new "<worktree>\probe\ara\build_task2_probe.lua"
 ```
+
+---
+
+## 8. 产品插件 Phase 2 实测（2026-10-04）
+
+产品 DLL 的日志通过 HIFISHIFTER_ARA_LOG 写入隔离采集文件。它被复制为
+probe/ara/vst3/HiFiShifter.vst3 后，REAPER 7.81 在独立 profile 中加载成功：
+
+~~~
+stage2: TrackFX_AddByName("HiFiShifter") -> 0
+  fx name=VST3: HiFiShifter (HiFiShifter) ident=
+[INFO] hifishifter_plugin: [vst3] ARA bind: build extension (generation=V2Final, known=0x7, assigned=0x6)
+[INFO] hifishifter_plugin::ara::model: ara: sources=1 modifications=1 regionSequences=1 playbackRegions=2 clips=2
+[INFO] hifishifter_plugin::ara::model: ara: clipStartsSec=[0.000000,3.000000]
+stage3: A1 summary observed at check 4
+stage3: items=2 fx=1
+~~~
+
+这是真实加载与 ARA 绑定证据，A1 PASS。日志里同时能看到 REAPER 为同一轨创建
+多个处理器 role（assigned=0x6 与 assigned=0x1），说明进程级 companion
+工厂和每个处理器实例的绑定路径都走通。
+
+A2 PASS：真正的 UI 拖动与 Item 菜单切片均得到新的时间线。初始两项都被选中，
+第一次拖动将二者从 [0,3] 移到 [1,4]；再单选第二项拖动到 5 秒，然后在 5.5 秒切片。
+原始日志（与截图 `task10-ui-move.png`、`task10-ui-split.png`）：
+
+~~~
+[INFO] hifishifter_plugin::ara::model: [ara] playback_region updated #0: startPlay=1.000000
+[INFO] hifishifter_plugin::ara::model: [ara] playback_region updated #1: startPlay=4.000000
+[INFO] hifishifter_plugin::ara::model: ara: clipStartsSec=[1.000000,4.000000]
+[INFO] hifishifter_plugin::ara::model: [ara] playback_region updated #1: startPlay=5.000000
+[INFO] hifishifter_plugin::ara::model: ara: sources=1 modifications=1 regionSequences=1 playbackRegions=2 clips=2
+[INFO] hifishifter_plugin::ara::model: ara: clipStartsSec=[1.000000,5.000000]
+[INFO] hifishifter_plugin::ara::model: ara: sources=1 modifications=1 regionSequences=1 playbackRegions=3 clips=3
+[INFO] hifishifter_plugin::ara::model: ara: clipStartsSec=[1.000000,5.000000,5.500000]
+~~~
+
+更正本批早期判断：最初脚本直接改位置后没有新摘要，不足以证明宿主没有通知。
+产品委托确实缺少 `update_playback_region`（上游默认空实现），已用失败回归测试
+复现并补齐；同时增加销毁区域的过滤，避免撤销或删除留下幽灵 clip。Windows UI 能力
+通过 `node_repl + @oai/sky` 获得，浏览器接口不提供 Windows 窗口并不等于能力不可用。
+
+## 9. Task 11：拉伸与倒放
+
+产品工厂已声明 TIMESTRETCH | REFLECT_TEMPO | CONTENT_FADES。隔离实例的原始
+日志（captures/task11-plugin.log）包含：
+
+~~~
+stretch: playrate=2.0 length=1.0
+reverse action: 41051 Item properties: Toggle take reverse
+reverse verified: section=true reversed=true offset=0.0 length=2.0
+[INFO] hifishifter_plugin::ara::model: [ara] playback_region #0: source=...\tone44100.wav startMod=0.000000 durationMod=2.000000 startPlay=0.000000 durationPlay=2.000000 flags=0x1
+[INFO] hifishifter_plugin::ara::model: [ara] playback_region #1: source=...\tone44100.wav startMod=0.000000 durationMod=2.000000 startPlay=3.000000 durationPlay=1.000000 flags=0x1
+[INFO] hifishifter_plugin::ara::model: [ara] playback_region #2: source=...\tone44100.wav startMod=0.000000 durationMod=2.000000 startPlay=6.000000 durationPlay=2.000000 flags=0x1
+[INFO] hifishifter_plugin::ara::model: ara: clipStartsSec=[0.000000,3.000000,6.000000]
+transformations observed at check 1
+~~~
+
+U2 PASS：第二个 region 的 durationInModificationTime=2.0 与
+durationInPlaybackTime=1.0 不等，且 flags=0x1（ARA time-stretch）。
+
+U1 结论：当前 `ARA → TimelineState` 映射缺少方向。真正倒放的 take 仍与普通项
+共用一个 audioSource 与一个 modification；region 的两个时长坐标相同，flags 没有
+反向位。还实际通过 ARA reader 读取共享源首 16 个 PCM，与文件正向 PCM 的最大差
+为 `1.40624999978023e-8`。`verify_task11_capture.ps1` 从原始日志与 WAV 生成
+`task11-stretch-reverse.json`，包含官方倒放操作、宿主反向验证和 PCM 比对证据。
+
+更正：早期 `B_REVERSED` 不是文档列出的 take 属性，`pcall=true` 只表示未抛错，
+不能证明倒放。因此本结论只使用官方 action 41051 和 section reader 的实测。
+这些证据证明映射输入中没有方向，尚未测试宿主是否在插件处理器外部处理倒放。
+在 Phase 3 的真实输出实验前，不得把此观察推广成“所有 ARA 插件都无法倒放”。
+本体 `Clip.reversed` 只能作为可能的退路；没有可信宿主方向通道时，不能宣称已支持。

@@ -616,4 +616,49 @@ Phase 2 的 A1/A2 判据只能停留在"计数一致"。
 不可能变成可能** —— 之前拿到的模型只有计数，没有连线。
 代价：仓库里多两个 vendored crate（~630 KB）。上游补上后按 PATCHED.md 撤销即可。
 
+**Dev 19: Ruling: 产品 DLL 需要自己的可控日志出口，才能在 DAW 进程里核对 ARA 模型。**
+实测：REAPER 不提供插件 log 后端；加入 HIFISHIFTER_ARA_LOG 环境变量驱动的
+轻量 file logger 后，隔离实例原样记录了 ARA 绑定、对象数量与 clip 起点。
+决定：日志器只在插件 DLL 内启用，宿主已有 logger 时不覆盖，未设置路径时静默。
+代价：若删除，产品仍可能加载，但无法复核宿主回调与 A1/A2 现场证据。
+
+**Task 10: Ruling: A1 与真实 UI 移动、切片均有端到端证据 — 补齐更新/销毁回调，按存活区域映射 — 若仍只累积创建事件，会留下旧位置和幽灵 clip。**
+实测：隔离 REAPER 7.81 加载 HiFiShifter.vst3，同一素材两次摆放，日志原样出现
+'ara: sources=1 modifications=1 regionSequences=1 playbackRegions=2 clips=2'；
+TrackFX_AddByName 返回 0，ARA bind 走到 V2Final。用 ReaScript
+SetMediaItemPosition 的早期调用没有新摘要，不足以断定宿主未通知。产品委托缺少
+update_playback_region，上游默认空实现会丢弃属性更新；回归测试先失败（起点仍为 0，
+期望 5），实现后通过。真实 UI 拖动日志为 clipStartsSec=[1.000000,4.000000]，
+单选第二项再拖动为 [1.000000,5.000000]；切片后 playbackRegions=3 clips=3，
+起点为 [1.000000,5.000000,5.500000]。截图与原始日志已归档。
+
+**Task 11: Ruling: REAPER 拉伸通过时长差表达，实际反向 take 未在映射输入里带方向 — U2 通过；保留 U1 方向缺口并在 Phase 3 验真实输出 — 若默认补正向，会静默输出错误。**
+实测：工厂声明 TIMESTRETCH | REFLECT_TEMPO | CONTENT_FADES；三条 region 的
+原始日志中拉伸项为 durationMod=2.000000 durationPlay=1.000000 flags=0x1，
+倒放项仍与普通项相同的两个时长坐标、同一 source persistentID、flags=0x1。
+正式反向实验使用 action 41051，PCM_Source_GetSectionInfo 返回 reversed=true；
+早期未在文档中定义的 B_REVERSED setter 不能作为证据，已替换。
+还通过 ARA reader 读取共享源首 16 样本，与文件正向 PCM 最大差 1.40624999978023e-8。
+归一化 JSON 由 verify_task11_capture.ps1 自动生成，保留原始日志。
+U1 只说明当前映射没有方向；宿主是否在插件输出之外处理倒放仍需 Phase 3 输出实验。
+
+**Task 10: Ruling: 浏览器 CUA 不暴露 Windows 窗口，不能据此宣布 Computer Use 不可用 — 使用 skill 指定的 node_repl + @oai/sky 实测 — 若混用接口，会把可执行验证误判成人工阻塞。**
+验证时使用新隔离配置目录，并复制旧隔离配置的扫描缓存；REAPER 会自动添加系统 VST3
+目录，vstpath64 单独一项不是完整隔离扫描的保证。新 profile 的首次系统扫描曾卡在
+已有 Synthesizer V 插件激活窗口，已结束该扫描子进程；用户主配置与工程均未触碰。
+
+**Task 10: Ruling: 文件 logger 使旧 setProcessing 日志触发音频线程 I/O — 移除该调用并增加实时回调守卫 — 若保留，会在播放启停时阻塞音频线程。**
+独立审查对照锁定 SDK ivstaudioprocessor.h：setProcessing 可从 processing thread 调用。
+回归测试先捕获两次日志进入，移除后为 0；保留非实时生命周期诊断。logger 安装失败时
+也不再更改既有日志器的级别。
+
+**Task 11: Ruling: 验证器不能只判时长不同后硬编码 PASS — 校验身份、位置、2/1比例、stretch位、反向项与正向项的几何一致性 — 若缺检查，变异证据也会被写成可信结论。**
+六条回归实测通过：有效输入、错误时长、缺stretch位、反向几何变化、错误index、反向未生效。
+最新插件构建与测试：4 lib + 13 mapping + 1 A5 + 1 exports，全部通过。既有内核/app
+没有本批修改，未重复其全部测试，四条既有 Windows 路径失败仍不处理。
+
+**Task 11: Ruling: 最后一次指针及采集超时调整后必须重新验证 — 已重跑插件构建、19 条测试与 6 条采集回归并关闭隔离 REAPER，Task 10/11 一批本地提交 — 若沿用旧测试结果，最终提交可能包含未经验证的尾部改动。**
+本次 `git diff --check` 无输出。日志显式 force-stage，截图/JSON 与脚本逐路径暂存；
+不包含 REAPER profile、DLL、SDK 检出或产品前端。不 push。
+
 

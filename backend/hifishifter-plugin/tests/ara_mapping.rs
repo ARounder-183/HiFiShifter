@@ -7,7 +7,7 @@
 
 use hifishifter_plugin::ara::{
     ara_document_from_json, ara_document_to_timeline, has_observed_time_stretch,
-    source_sample_rates, AraDocument, LostField, LOST_FIELDS,
+    clip_starts_line, source_sample_rates, summary_line, AraDocument, LostField, LOST_FIELDS,
 };
 use hifishifter_plugin::render::render_timeline;
 use serde_json::json;
@@ -387,4 +387,23 @@ fn ara_mapped_timeline_renders_identically_to_a_hand_built_reference() {
         max_abs_diff < 1e-6,
         "逐样本最大绝对差 {max_abs_diff} 超过 1e-6"
     );
+}
+
+#[test]
+fn summary_line_has_a_stable_shape() {
+    let doc = load(CLEAN_FIXTURE);
+    let timeline = ara_document_to_timeline(&doc).expect("mapping must succeed");
+
+    assert_eq!(
+        summary_line(&doc, &timeline),
+        "ara: sources=1 modifications=1 regionSequences=1 playbackRegions=1 clips=1"
+    );
+}
+
+#[test]
+fn clip_starts_line_has_a_stable_shape() {
+    let doc = load(CLEAN_FIXTURE);
+    let timeline = ara_document_to_timeline(&doc).expect("mapping must succeed");
+
+    assert_eq!(clip_starts_line(&timeline), "ara: clipStartsSec=[0.000000]");
 }

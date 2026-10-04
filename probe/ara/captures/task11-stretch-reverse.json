@@ -1,0 +1,79 @@
+{
+  "provenance": "Parsed from task11-plugin.log and fixtures/tone44100.wav; not a full ARA graph dump",
+  "host": "REAPER 7.81",
+  "reverseAction": 41051,
+  "reverseVerifiedByHost": true,
+  "regions": [
+    {
+      "index": 0,
+      "audioSourcePersistentID": "E:\\code\\HiFiShifter\\.worktrees\\ara-plugin\\probe\\ara\\fixtures\\tone44100.wav",
+      "startInModificationTime": 0.0,
+      "durationInModificationTime": 2.0,
+      "startInPlaybackTime": 0.0,
+      "durationInPlaybackTime": 2.0,
+      "transformationFlags": 1
+    },
+    {
+      "index": 1,
+      "audioSourcePersistentID": "E:\\code\\HiFiShifter\\.worktrees\\ara-plugin\\probe\\ara\\fixtures\\tone44100.wav",
+      "startInModificationTime": 0.0,
+      "durationInModificationTime": 2.0,
+      "startInPlaybackTime": 3.0,
+      "durationInPlaybackTime": 1.0,
+      "transformationFlags": 1
+    },
+    {
+      "index": 2,
+      "audioSourcePersistentID": "E:\\code\\HiFiShifter\\.worktrees\\ara-plugin\\probe\\ara\\fixtures\\tone44100.wav",
+      "startInModificationTime": 0.0,
+      "durationInModificationTime": 2.0,
+      "startInPlaybackTime": 6.0,
+      "durationInPlaybackTime": 2.0,
+      "transformationFlags": 1
+    }
+  ],
+  "sourcePCM": {
+    "sampleRate": 44100,
+    "hostFirst16": [
+      0.0,
+      0.034423828,
+      0.06869507,
+      0.10269165,
+      0.1362915,
+      0.16937256,
+      0.20178223,
+      0.23339844,
+      0.26409912,
+      0.2937317,
+      0.3222351,
+      0.3494873,
+      0.3753357,
+      0.39974976,
+      0.4225464,
+      0.4437256
+    ],
+    "fileFirst16": [
+      0.0,
+      0.034423828125,
+      0.068695068359375,
+      0.102691650390625,
+      0.13629150390625,
+      0.16937255859375,
+      0.2017822265625,
+      0.2333984375,
+      0.26409912109375,
+      0.293731689453125,
+      0.322235107421875,
+      0.3494873046875,
+      0.375335693359375,
+      0.399749755859375,
+      0.42254638671875,
+      0.4437255859375
+    ],
+    "maxAbsoluteDifference": 1.4062499997802291E-08
+  },
+  "conclusions": {
+    "U2": "pass: duration ratio 2/1",
+    "U1": "unsupported by the observed ARA-to-TimelineState mapping: same source PCM, no region direction"
+  }
+}
