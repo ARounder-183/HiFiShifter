@@ -30,6 +30,7 @@
  * @see docs/superpowers/specs/2026-09-13-timeline-single-path-design.md
  */
 import React, { useMemo, Profiler } from "react";
+import { isPluginMode } from "../../services/hostCapabilities";
 import { Flex } from "@radix-ui/themes";
 import { AppDialog } from "../../ui/Dialog";
 import { AppContextMenu } from "../../ui/Menu";
@@ -5037,9 +5038,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [dispatch, endKernelGestureInteraction, sessionRef],
     );
 
-    /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
+    /** 内核交互回调集合；插件保留选择/查看/参数动作，不编辑宿主clip几何。 */
     const kernelInteractions = React.useMemo(
         () => ({
+            geometryReadOnly: isPluginMode(),
             onSeek: handleKernelSeek,
             onSeekTo: handleKernelSeekTo,
             onSelectClip: handleKernelSelectClip,
@@ -5086,8 +5088,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onBoxSelectPreview: handleKernelBoxSelectPreview,
             onBoxSelectCommit: handleKernelBoxSelectCommit,
             onBoxSelectToParamSelection: handleKernelBoxSelectToParamSelection,
-            onContextMenu: handleKernelContextMenu,
-            onFadeContextMenu: handleKernelFadeContextMenu,
+            onContextMenu: isPluginMode() ? undefined : handleKernelContextMenu,
+            onFadeContextMenu: isPluginMode() ? undefined : handleKernelFadeContextMenu,
             onFadeHover: handleKernelFadeHover,
             onClipHover: handleKernelClipHover,
             onActivateTake: handleKernelActivateTake,
@@ -5245,12 +5247,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
     const handleRemoveTrack = React.useCallback(
         (trackId: string) => {
+            if (isPluginMode()) return;
             dispatch(removeTrackRemote(trackId));
         },
         [dispatch],
     );
     const handleMoveTrack = React.useCallback(
         (payload: { trackId: string; targetIndex: number; parentTrackId: string | null }) => {
+            if (isPluginMode()) return;
             dispatch(
                 moveTrackRemote({
                     trackId: payload.trackId,
@@ -5321,10 +5325,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [dispatch, setTrackVolumeUi],
     );
     const handleAddTrack = React.useCallback(() => {
+        if (isPluginMode()) return;
         dispatch(addTrackRemote({}));
     }, [dispatch]);
     const handleTrackColorChange = React.useCallback(
         (trackId: string, color: string) => {
+            if (isPluginMode()) return;
             dispatch(
                 setTrackStateRemote({
                     trackId,
@@ -5347,6 +5353,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
     const handleTrackNameChange = React.useCallback(
         (trackId: string, name: string) => {
+            if (isPluginMode()) return;
             dispatch(setTrackName({ trackId, name }));
             dispatch(
                 setTrackStateRemote({
@@ -5638,6 +5645,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     };
 
     const handleTimelineDrop = (e: React.DragEvent<HTMLDivElement>) => {
+        if (isPluginMode()) { e.preventDefault(); return; }
         const dt = e.dataTransfer;
         const tauriPath = tauriDraggedPathRef.current;
         const lastTauriDropPath = tauriLastDropPathRef.current;

@@ -1,10 +1,10 @@
-//! 不可变播放快照；音频路径只读原子指针，退役快照预算内保留到 owner 释放。
+//! 不可变播放快照；实时读者仅进入原子读区，退役缓冲由非实时发布线程安全回收。
 
 use super::source::SourcePcm;
 use crate::ara::AraPlaybackRegion;
 use crate::audio_abi::AudioBusBuffers;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
@@ -138,6 +138,7 @@ pub(crate) fn mix_plain_regions(
 pub(crate) struct SnapshotPublisher {
     retained: Mutex<(Vec<Box<PlaybackSnapshot>>, usize)>,
     current: AtomicPtr<PlaybackSnapshot>,
+    readers:AtomicUsize,
     limit: usize,
     pub misses: AtomicU64,
 }
@@ -150,20 +151,21 @@ impl Default for SnapshotPublisher {
 impl SnapshotPublisher {
     /// 发布前在非实时线程预检，两个采样率必须都可容纳才替换编辑状态。
     pub fn has_capacity(&self, snapshot: &PlaybackSnapshot) -> bool {
-        self.retained.lock().unwrap().1.checked_add(snapshot.left.len() * 8).is_some_and(|n| n <= self.limit)
+        let mut retained=self.retained.lock().unwrap();self.reclaim(&mut retained);
+        retained.1.checked_add(snapshot.left.len() * 8).is_some_and(|n| n <= self.limit)
     }
     /// 预算包含所有退役快照，避免原子替换时在音频线程析构大缓冲。
     pub fn new(limit: usize) -> Self {
         Self {
             retained: Mutex::new((Vec::new(), 0)),
             current: AtomicPtr::new(std::ptr::null_mut()),
+            readers:AtomicUsize::new(0),
             limit,
             misses: AtomicU64::new(0),
         }
     }
     /// 非实时发布。
     pub fn publish(&self, mut snapshot: PlaybackSnapshot) -> Result<(), SnapshotError> {
-        self.clear();
         if snapshot.left.len() != snapshot.right.len() || snapshot.sample_rate == 0 {
             return Err(SnapshotError::InvalidGeometry);
         }
@@ -173,6 +175,7 @@ impl SnapshotPublisher {
             .checked_mul(8)
             .ok_or(SnapshotError::BudgetExceeded)?;
         let mut retained = self.retained.lock().unwrap();
+        self.reclaim(&mut retained);
         let total = retained
             .1
             .checked_add(bytes)
@@ -189,12 +192,29 @@ impl SnapshotPublisher {
         let pointer = &mut *snapshot as *mut PlaybackSnapshot;
         retained.0.push(snapshot);
         retained.1 = total;
-        self.current.store(pointer, Ordering::Release);
+        self.current.store(pointer, Ordering::SeqCst);
+        self.reclaim(&mut retained);
         Ok(())
     }
     /// 撤销只切换原子指针，不在音频线程释放存储。
     pub fn clear(&self) {
-        self.current.store(std::ptr::null_mut(), Ordering::Release);
+        self.current.store(std::ptr::null_mut(), Ordering::SeqCst);
+    }
+    /// 必须持发布锁且仅在非实时线程调用。SeqCst保证旧指针读者先登记；新的读者只能
+    /// 取得当前指针，故readers=0时可释放所有非current对象，不在音频线程析构大缓冲。
+    fn reclaim(&self,retained:&mut (Vec<Box<PlaybackSnapshot>>,usize)) {
+        let current=self.current.load(Ordering::SeqCst);
+        if self.readers.load(Ordering::SeqCst)!=0 {return;}
+        retained.0.retain(|snapshot|std::ptr::eq(&**snapshot,current));
+        retained.1=retained.0.iter().map(|snapshot|snapshot.left.len()*8).sum();
+    }
+    /// 分配下一批音频前回收已退役缓冲，避免全局预算已满时无法进入publish回收。
+    pub fn collect_retired(&self) {
+        let mut retained=self.retained.lock().unwrap();self.reclaim(&mut retained);
+    }
+    /// 实时guard只增减计数，不分配、不释放、不等待mutex。
+    fn enter(&self)->ReadSection<'_> {
+        self.readers.fetch_add(1,Ordering::SeqCst);ReadSection(&self.readers)
     }
     /// 按项目绝对 sample 时间读取，seek/loop 不使用累计 playhead。
     /// # Safety
@@ -209,8 +229,9 @@ impl SnapshotPublisher {
         if output.num_channels != 2 || output.channel_buffers.is_null() {
             return false;
         }
-        let pointer = self.current.load(Ordering::Acquire);
-        // SAFETY: retained 中每个 Box 在 owner 存活期间不移动、不回收，callback 保留 owner。
+        let _read=self.enter();
+        let pointer = self.current.load(Ordering::SeqCst);
+        // SAFETY: 进入SeqCst读区先于加载指针；非实时回收只有readers=0才释放退役Box。
         let snapshot = if pointer.is_null() {
             None
         } else {
@@ -252,6 +273,8 @@ impl SnapshotPublisher {
         snapshot.is_some()
     }
 }
+struct ReadSection<'a>(&'a AtomicUsize);
+impl Drop for ReadSection<'_> {fn drop(&mut self) {self.0.fetch_sub(1,Ordering::SeqCst);}}
 
 #[cfg(test)]
 mod tests {
@@ -391,7 +414,7 @@ mod tests {
         assert_eq!(publisher.retained.lock().unwrap().0.len(), 1);
     }
 
-    /// 退役快照也计入预算；发布失败不能保留旧的有效指针伪装成功。
+    /// 活跃读者期间退役快照必须保留；失败保留旧音频，不能将失败伪报成已应用。
     #[test]
     fn snapshot_budget_counts_retired_buffers() {
         let publisher = SnapshotPublisher::new(16);
@@ -403,10 +426,36 @@ mod tests {
             _reservation: None,
         };
         publisher.publish(snapshot()).unwrap();
+        let read=publisher.enter();
         assert_eq!(
             publisher.publish(snapshot()),
             Err(SnapshotError::BudgetExceeded)
         );
-        assert!(publisher.current.load(Ordering::Acquire).is_null());
+        assert!(!publisher.current.load(Ordering::SeqCst).is_null());
+        drop(read);
+    }
+    /// 连续自动编辑没有读者时只保留当前快照，不能因为累计历史永远耗尽预算。
+    #[test]
+    fn repeated_automatic_publication_reclaims_retired_buffers_off_audio_thread() {
+        let publisher=SnapshotPublisher::new(32);
+        for number in 0..1000 {
+            publisher.publish(PlaybackSnapshot {sample_rate:4,origin_sample:0,left:vec![number as f32;2],
+                right:vec![number as f32;2],_reservation:None}).unwrap();
+            assert_eq!(publisher.retained.lock().unwrap().0.len(),1);
+            assert_eq!(publisher.retained.lock().unwrap().1,16);
+        }
+    }
+    /// 一个读者横跨发布时旧快照保持，退出后下一次非实时预检安全回收。
+    #[test]
+    fn active_reader_delays_reclamation_until_next_non_realtime_boundary() {
+        let publisher=SnapshotPublisher::new(64);
+        let snapshot=||PlaybackSnapshot {sample_rate:4,origin_sample:0,left:vec![1.;2],right:vec![1.;2],_reservation:None};
+        publisher.publish(snapshot()).unwrap();
+        let read=publisher.enter();
+        publisher.publish(snapshot()).unwrap();
+        assert_eq!(publisher.retained.lock().unwrap().0.len(),2);
+        drop(read);
+        assert!(publisher.has_capacity(&snapshot()));
+        assert_eq!(publisher.retained.lock().unwrap().0.len(),1);
     }
 }

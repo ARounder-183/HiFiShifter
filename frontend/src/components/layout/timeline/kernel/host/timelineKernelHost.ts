@@ -527,6 +527,8 @@ export interface KernelDragModifiers {
 }
 
 export interface TimelineKernelInteractions {
+    /** 插件由宿主拥有几何，内核仍显示原clip并允许选择和参数手势。 */
+    readonly geometryReadOnly?: boolean;
     /**
      * 请求跳转播放头（点击或拖拽空白 / 标尺）。
      *
@@ -3844,6 +3846,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     function startPrimaryGesture(event: PointerEvent): void {
         const hit = hitAt(event.clientX, event.clientY);
+        if (hit.kind === "clip" && interactions?.geometryReadOnly) {
+            const intercepted=interactions.onClipPointerDownIntercept?.({clipId:hit.clip.id,
+                clientX:event.clientX,clientY:event.clientY,pointerId:event.pointerId,
+                modifiers:dragModifiersOf(event),container});
+            if (!intercepted) interactions.onSelectClip?.(hit.clip.id,event.ctrlKey || event.metaKey,event.shiftKey,event.clientX);
+            return;
+        }
         if (hit.kind === "clip") {
             // 面板可在此整体接管（例如 `Alt + Shift` 竖直拖 = 调音高，复用旧实现的
             // 状态机）。返回 true 时内核不启动任何自己的手势。

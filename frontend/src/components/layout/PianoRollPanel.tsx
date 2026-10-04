@@ -1,5 +1,6 @@
 // hs-interaction-exempt: 边缘平滑度裸 range（约 7429 行）与 attachEdgeSmoothnessWheel 原生滚轮监听、松开落盘逻辑耦合，按迁移范围刻意保留；本文件其余取值控件已走能力层原语。
 import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
+import { loadStandaloneWindowApi } from "../../services/hostWindow";
 import React, {
     type CSSProperties,
     useCallback,
@@ -1458,7 +1459,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         // （内部 this.listen），直接取方法引用会丢失绑定并静默失效。
         let disposed = false;
         let unlisten: null | (() => void) = null;
-        void import("@tauri-apps/api/window")
+        void loadStandaloneWindowApi()
             .then((mod) => mod.getCurrentWindow())
             .then((win) =>
                 win.onDragDropEvent((event: unknown) => {

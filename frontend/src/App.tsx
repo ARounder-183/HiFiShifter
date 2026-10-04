@@ -12,6 +12,9 @@ import { Flex, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
 import { AraConnectionPanel } from "./features/ara/AraConnectionPanel";
+import { PluginApplyPanel } from "./features/ara/PluginApplyPanel";
+import { isPluginMode, pluginAllowsAction } from "./services/hostCapabilities";
+import { loadStandaloneWindowApi } from "./services/hostWindow";
 import { TimelinePanel } from "./components/layout/TimelinePanel";
 import { PianoRollPanel } from "./components/layout/PianoRollPanel";
 import { useAppDispatch, useAppSelector } from "./app/hooks";
@@ -1633,7 +1636,7 @@ function AppInner() {
                     allowWindowCloseRef.current = true;
                 },
                 destroyWindow: async () => {
-                    const mod = await import("@tauri-apps/api/window");
+                    const mod = await loadStandaloneWindowApi();
                     const currentWindow = mod.getCurrentWindow();
                     await currentWindow.destroy();
                 },
@@ -1866,7 +1869,7 @@ function AppInner() {
         // loadUiSettings 不在这里发起：UI 设置的唯一一次加载由上方"加载 UI
         // 持久化设置"的 effect 持有（unwrap 后回填 MIDI 字段），否则启动会有
         // 两轮 get_ui_settings 往返（后端的 get_ui_settings 不是纯读）。
-        void dispatch(loadRecordingSettings());
+        if (!isPluginMode()) void dispatch(loadRecordingSettings());
         // 【必须显式 hydrate】thunk 只负责取回磁盘内容，把结果写进切片是这里的
         // 责任。漏掉这一步的后果不是"界面不好看"，而是**布局永远不落盘**：
         // `hydrated` 闸门始终为 false，持久化副作用永不触发（曾实际发生）。
@@ -1888,6 +1891,7 @@ function AppInner() {
         let cancelled = false;
 
         async function loadAutoBackupSettings() {
+            if (isPluginMode()) return;
             try {
                 const settings = await projectApi.getAutoBackupSettings();
                 if (cancelled || !settings) return;
@@ -1907,7 +1911,7 @@ function AppInner() {
     const autoBackgroundRender = useAppSelector((state) => state.session.autoBackgroundRender);
     const prevParamsEpochRef = useRef(paramsEpoch);
     useEffect(() => {
-        if (!autoBackgroundRender) return;
+        if (isPluginMode() || !autoBackgroundRender) return;
         // 跳过初始加载（prevParamsEpochRef 与当前 epoch 相同时跳过）
         if (prevParamsEpochRef.current === paramsEpoch) return;
         prevParamsEpochRef.current = paramsEpoch;
@@ -2031,7 +2035,7 @@ function AppInner() {
 
         async function setup() {
             try {
-                const mod = await import("@tauri-apps/api/window");
+                const mod = await loadStandaloneWindowApi();
                 const currentWindow = mod.getCurrentWindow();
                 unlisten = await currentWindow.onCloseRequested((event: CloseRequestedEvent) => {
                     if (allowWindowCloseRef.current) {
@@ -2062,6 +2066,7 @@ function AppInner() {
     // 检测已导入的媒体源文件是否被外部修改或删除。
     // 触发时机：窗口重新获得焦点，以及工程/导入内容刚替换完成时。
     const checkSourceFileChanges = useCallback(async () => {
+        if (isPluginMode()) return;
         if (
             sourceFileCheckBusyRef.current ||
             sourceFileChangeHandlingRef.current ||
@@ -2621,6 +2626,7 @@ function AppInner() {
     // 统一快捷键处理（通过 keybindings 模块管理，用户可自定义）
     const handleKeybindingAction = useCallback(
         (actionId: ActionId) => {
+            if (!pluginAllowsAction(actionId, getActiveSurface())) return false;
             // ── 编辑操作统一路由 ──
             // clip.* 与 pianoRoll.* 的同义绑定（Ctrl+C/X/V）归一为同一编辑 op
             // 后定向派发到唯一执行者 —— 事件名即契约：hifi:editOp 只属于
@@ -4181,12 +4187,14 @@ function AppInner() {
                 onLoopNewClipsChange={handleLoopNewClipsChange}
             />
             <ActionBar />
-            <AraConnectionPanel
+            {isPluginMode() ? <PluginApplyPanel
+                onTimelineChanged={async () => { await dispatch(fetchTimeline()).unwrap(); }}
+            /> : <AraConnectionPanel
                 dirty={projectDirty}
                 onTimelineChanged={async () => {
                     await dispatch(fetchTimeline()).unwrap();
                 }}
-            />
+            />}
 
             {/*
              * 工作区：全部可停靠窗体由布局树驱动。

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { isPluginMode, DAW_CONTROLLED_REASON } from "../../services/hostCapabilities";
 import { DropdownMenu, Flex } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -215,6 +216,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
     // Fetch DML adapters on mount for GPU device selector
     useEffect(() => {
+        if (isPluginMode()) return;
         import("../../services/api/core")
             .then(({ coreApi }) => coreApi.getDmlAdapters())
             .then((result) => {
@@ -531,7 +533,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
              */}
             {/* File Menu */}
             <DropdownMenu.Root>
-                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+                <DropdownMenu.Trigger disabled={isPluginMode()} title={isPluginMode() ? DAW_CONTROLLED_REASON : undefined} className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                     <span>{t("menu_file")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
@@ -759,7 +761,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
             {/* Track Menu */}
             <DropdownMenu.Root>
-                <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+                <DropdownMenu.Trigger disabled={isPluginMode()} title={isPluginMode() ? DAW_CONTROLLED_REASON : undefined} className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                     <span>{t("menu_track")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
@@ -1148,7 +1150,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                     {/* Inference Device */}
                     <DropdownMenu.Sub>
-                        <DropdownMenu.SubTrigger>
+                        <DropdownMenu.SubTrigger disabled={isPluginMode()}>
                             {`${t("menu_inference_device")}: ${
                                 s.ortEp === "auto"
                                     ? `${t("menu_inference_auto")}${gpuBackend ? ` (${gpuBackend})` : ""}`

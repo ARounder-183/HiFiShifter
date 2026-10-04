@@ -205,7 +205,8 @@ impl EditorSession {
     pub(super) fn state(&self)->Value {
         let generation=self.generation.load(Ordering::Acquire);let applied=self.applied.load(Ordering::Acquire);
         json!({"generation":generation,"applied_generation":applied,"pending":generation!=applied,
-            "error":self.error.lock().unwrap().clone(),"connected":!self.closed.load(Ordering::Acquire)})
+            "error":self.error.lock().unwrap().clone(),"connected":!self.closed.load(Ordering::Acquire),
+            "ready":self.loaded.lock().unwrap().initialized})
     }
     fn emit_state(&self) {self.emit("plugin_apply_state",self.state());}
 }

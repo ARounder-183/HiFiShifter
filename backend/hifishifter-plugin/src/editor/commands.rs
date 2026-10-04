@@ -85,8 +85,10 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
     match command {
         "get_ui_settings"=>return value(session.settings.lock().unwrap().clone()),
         "save_ui_settings"=>{
-            let settings:hifishifter_kernel::config::UiSettings=args(input["settings"].clone())?;
-            *session.settings.lock().unwrap()=settings.clone();return value(settings);
+            let mut current=session.settings.lock().unwrap();
+            let patched=hifishifter_kernel::editor::settings::merge(serde_json::to_value(&*current).map_err(|e|e.to_string())?,&input["settings"]);
+            let settings:hifishifter_kernel::config::UiSettings=args(patched)?;
+            *current=settings;return Ok(json!({"ok":true}));
         },
         "get_about_info"=>return Ok(json!({"ok":true,"name":"HiFiShifter","version":crate::VERSION,"host":"ARA plugin"})),
         "plugin_get_apply_state"=>return Ok(session.state()),

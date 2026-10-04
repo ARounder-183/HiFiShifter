@@ -189,3 +189,17 @@ Task24首个源实现：150ms合并、最新submitted ticket阻止旧作业发�
 仍保留到owner释放，自动编辑下需确认/改进安全回收；actor渲染持doc transaction期间
 宿主UI模型回调可能等待；PCM私有分析文件的重复几何刷新与回收需资源边界审计。
 现阶段不宣称所有原GUI功能已接线，未支持的命令明确Err而不是伪报成功。
+
+本批Task23/25：原GUI插件模式/自动状态栏、Tauri窗口前置拒绝、文件/录音/轨道几何
+入口保护、timeline kernel geometryReadOnly桥接已写；UiSettings补丁合并保持其它配置。
+frontend tsc/build通过，Rust引擎build通过，Win32薄入口utf8/engine_exit修正后编译通过。
+隔离REAPER46132真实加载规范bundle（项目CWD，无PATH添加），IConnectionPoint消息
+三组result0，FX对话框accessibility里出现原GUI/宿主轨道/WORLD/自动应用0/0，无外部app。
+baseline已导出；新FINDINGS与EMBEDDED-EDITOR-RUN记录事实，不能勾最终修音/恢复验收。
+
+Task24增加非实时退役快照回收，实时读区SeqCst计数保护指针生命周期，分配前回收，
+失败保留旧音频。最新cargo check --tests exit0，仅编译新增1000次/活跃读者回归，
+尚未运行/部署。当前REAPER加载的是回收改动前引擎，不可热替换。原始日志还暴露
+参数系统剪贴板/转写未接线，时间轴剪贴板轮询源码已按只读模式关闭（未部署）。
+评估/About窗口和Sky截图/主窗口bounds问题需当前状态重选，禁止保存前景Codex截图
+当GUI证据。下一批处理剩余原GUI参数动作/clipboard及最终自动pitch导出/重开。

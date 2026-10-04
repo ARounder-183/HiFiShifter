@@ -3,6 +3,7 @@ pub mod params;
 pub mod capabilities;
 pub mod history;
 pub mod waveform;
+pub mod settings;
 pub mod host_pcm;
 use crate::state::{HistoryOp, TimelineState};
 use std::sync::Mutex;

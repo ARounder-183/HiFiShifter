@@ -1,4 +1,6 @@
+// 原轨道列表；插件保留选择/混音/算法控制，轨道结构与命名由宿主拥有。
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { isPluginMode } from "../../../services/hostCapabilities";
 import { registerDragAbort } from "./gestureFocusGuard";
 import { formatEditNumber } from "./math";
 import { measureTextWidth } from "./runtime/timelineCanvasStyle";
@@ -1458,6 +1460,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                         onSelectTrack(track.id);
                                     }}
                                     onContextMenu={(e) => {
+                                        if (isPluginMode()) {e.preventDefault();return;}
                                         e.preventDefault();
                                         setTrackCtxMenu({
                                             x: e.clientX,
@@ -1871,6 +1874,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 }
                                                                 onDoubleClick={(e) => {
                                                                     e.stopPropagation();
+                                                                    if (isPluginMode()) return;
                                                                     setEditingTrackId(track.id);
                                                                     setEditingName(track.name);
                                                                     setTimeout(() => {
@@ -1938,7 +1942,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                         /* 默认 `opacity-0`：Tab 到它时必须显形，
                                                            否则焦点环画在一个透明元素上。 */
                                                         className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
-                                                        disabled={isLastRootTrack(track.id)}
+                                                        disabled={isPluginMode() || isLastRootTrack(track.id)}
                                                         onPointerDown={(e) => e.stopPropagation()}
                                                         onClick={(e) => {
                                                             e.stopPropagation();

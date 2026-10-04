@@ -133,6 +133,8 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
 
         case "ara_refresh":
             return { force: args[0] ?? false };
+        case "plugin_refresh":
+            return { force: args[0] ?? false };
 
         case "import_audio_item":
             return {
@@ -863,6 +865,7 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
  * 新增无参命令时在此登记；新增带参命令必须在 switch 中登记映射。
  */
 const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
+    "plugin_get_apply_state",
     "ara_list_instances",
     "ara_submit",
     "ara_disconnect",

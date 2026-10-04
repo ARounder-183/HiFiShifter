@@ -508,6 +508,7 @@ impl ExtensionOwner {
     /// 使用现有离线内核，不将宿主文件路径当成音频权威。
     pub(crate) fn render_edits(&self, document: &super::document::DocumentSession, edits: &crate::state_channel::EditState)
         -> Result<Vec<super::snapshot::PlaybackSnapshot>, String> {
+        for snapshot in &self.snapshots {snapshot.collect_retired();}
         use hifishifter_kernel::mixdown::{MixdownOptions, MixdownPcm, QualityPreset, render_mixdown_with_pcm};
         use super::snapshot::PlaybackSnapshot;
         if !document.ready.load(Ordering::Acquire) { return Err("host PCM/model not ready".into()); }
@@ -720,6 +721,7 @@ impl ExtensionOwner {
     /// 非实时准备两个支持的输出采样率，callback 不重采样、不等待。
     pub fn prepare(&self) {
         self.snapshots.iter().for_each(|snapshot| snapshot.clear());
+        self.snapshots.iter().for_each(|snapshot| snapshot.collect_retired());
         let Some(document) = self
             .document
             .lock()

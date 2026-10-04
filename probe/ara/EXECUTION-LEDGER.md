@@ -790,4 +790,14 @@ Task 24: Ruling: UI等待getState时worker若阻塞发响应会形成等待环 �
 
 Task 24: Ruling: 编译成功未证明Host消息实现/内嵌原GUI/长期自动快照预算 — 保持任务未完成，先适配前端与规范部署再集中真实验收，并审计retired回收及doc事务等待 — 若现在报告二期可用，会掩盖尚未跑过的核心宿主路径。
 
+Task 23: Ruling: 原GUI独立窗口/录音/文件路径不能直接进入插件 — 显式host mode保留原Dock与参数编辑，禁用宿主拥有的入口，不初始化Tauri window API，自动应用替代连接/提交栏 — 若忽略，会调用不存在的app运行时或让GUI几何与DAW分叉。
+
+Task 25: Ruling: eager SoundTouch/DirectML导入在InitDll之前就决定能否加载 — 加Win32薄入口，用邻接绝对Engine路径和DLL_LOAD_DIR，不依赖系统PATH/CWD — 若仅在Rust InitDll添加DLL目录，时机已太晚，用户重开仍126。
+
+Task 25: Ruling: MSVC默认CP936读UTF8中文注释造成续行/函数头语法错误，utf8后暴露CRT terminate同名 — 显式utf8/Cpp17与engine_exit命名，只重编薄入口 — 若归因架构不可行，会错误放弃可加载的原生路径。
+
+Task 24: Ruling: 自动应用会持续生成快照，保留到owner销毁会快速耗尽预算 — 新增实时原子读区、非实时无读者回收及分配前收集，失败保留旧音频；回归最终集中执行 — 若原子顺序证明错，会use-after-free，所以未测不能宣称已安全验收。
+
+Task 26: Ruling: 实际REAPER加载/消息绑定result0且FX内原GUI层级成立，无外部HiFiShifter进程 — 关闭内嵌显示/关联可行性疑问，继续自动pitch/持久化/资源验收，保留baseline和原日志 — 若把显示通过等同完整修音，会掩盖编辑输出仍未验证。
+
 

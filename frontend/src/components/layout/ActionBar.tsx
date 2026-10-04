@@ -1,5 +1,6 @@
 // hs-interaction-exempt: 主工具栏是紧凑 chrome（size 1、内联底色、BPM 有手势累加器），能力层原语是表单尺寸；本文件的滚轮与精细调整接线已完备（BPM/节拍器音量/三个下拉均有），故刻意保留。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isPluginMode, DAW_CONTROLLED_REASON } from "../../services/hostCapabilities";
 import { Flex, Select, TextField, Button, IconButton, Box } from "@radix-ui/themes";
 import {
     CheckIcon,
@@ -775,6 +776,7 @@ export function ActionBar() {
                 <span className="hs-type-muted">{t("common_bpm")}:</span>
                 <TextField.Root
                     ref={attachBpmWheel}
+                    disabled={isPluginMode()}
                     size="1"
                     value={bpmText}
                     data-tooltip={
@@ -1031,6 +1033,7 @@ export function ActionBar() {
                 <span className="hs-type-muted">{t("base_scale")}:</span>
                 <Select.Root
                     value={displayScaleSelectValue}
+                    disabled={isPluginMode()}
                     size="1"
                     onValueChange={(v) => {
                         if (v === "__custom_dialog__") {
@@ -1144,6 +1147,8 @@ export function ActionBar() {
                         dispatch(stopAudioPlayback({ restoreAnchor: true }));
                     }}
                     data-tooltip={t("action_stop")}
+                    disabled={isPluginMode()}
+                    title={isPluginMode() ? DAW_CONTROLLED_REASON : undefined}
                 >
                     <StopIcon />
                 </Button>
@@ -1158,6 +1163,8 @@ export function ActionBar() {
                         dispatch(playOriginal());
                     }}
                     data-tooltip={isPlaying ? tf("action_pause") : t("action_play_out")}
+                    disabled={isPluginMode()}
+                    title={isPluginMode() ? DAW_CONTROLLED_REASON : undefined}
                 >
                     {isPlaying ? <PauseIcon /> : <PlayIcon />}
                 </IconButton>
@@ -1169,7 +1176,7 @@ export function ActionBar() {
                         variant={recording.active ? "solid" : "soft"}
                         color="red"
                         data-tooltip={recordingTooltip}
-                        disabled={recording.busy && recording.countdownRemaining === 0}
+                        disabled={isPluginMode() || (recording.busy && recording.countdownRemaining === 0)}
                         onClick={() => {
                             if (recording.active) {
                                 void dispatch(stopRecordingFlow());
@@ -1181,6 +1188,7 @@ export function ActionBar() {
                         }}
                         onContextMenu={(event) => {
                             event.preventDefault();
+                            if (isPluginMode()) return;
                             setRecordingMenuPos({ x: event.clientX, y: event.clientY });
                             void dispatch(loadRecordingSettings());
                             // 每次打开菜单都强制重新枚举设备/应用，

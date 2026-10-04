@@ -44,6 +44,16 @@ native字段不保留Tauri app句柄、不运行设备。UI响应由窗口timer�
 
 ## 一期历史排错记录
 
+二期最新实测（覆盖上文“未部署”历史）：已构建规范bundle，薄Win32入口以绝对路径/
+DLL_LOAD_DIR加载同进程Rust engine，项目CWD启动且不加PATH。隔离REAPER PID46132已
+加载并ARA绑定，三组标准消息关联result0；createView返回真实native editor。REAPER
+accessibility的FX对话框下明确存在原GUI菜单/时间线/参数编辑器/WORLD和自动应用栏。
+没有HiFiShifter.exe。只取得显示/关联与未编辑baseline，不是自动修音/重开验收。
+当前REAPER一次性实例仍运行，有评估/About窗口；不要重建替换正在加载的bundle或强杀。
+新入口为build/start_embedded_editor.ps1，scratch `.build-tmp/embedded-probe`。
+FINDINGS见captures/embedded-editor-FINDINGS.md。源码额外快照回收与时间轴剪贴板轮询
+修正尚未部署、回归未运行；参数系统剪贴板/转写当前日志仍Unsupported。
+
 用户明确要求本轮先不做倒放，继续到原 GUI 正向全流程可用。此授权覆盖下方历史方向停止条件，
 不代表倒放已修复。当前规格/计划为 `2026-10-04-ara-gui-forward`。
 
