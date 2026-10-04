@@ -1,0 +1,15 @@
+# 本机 ARA 编辑通道；与 GUI/插件共享协议，不依赖 Tauri 或音频设备。
+[package]
+name = "hifishifter-ara-ipc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+log = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_IO", "Win32_System_Threading"] }

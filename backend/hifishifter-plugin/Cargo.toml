@@ -8,7 +8,10 @@ description = "HiFiShifter 的 ARA 插件侧适配层（复用本体离线内核
 # lock 由 `backend/` workspace 统一持有（见 backend/Cargo.toml 的说明）。
 
 [dependencies]
-hifishifter-kernel = { path = "../hifishifter-kernel" }
+# 插件包不分发闭源vslib；独立app的默认features不受影响。
+hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false, features = ["onnx"] }
+hifishifter-ara-ipc = { path = "../hifishifter-ara-ipc" }
+blake3 = "1"
 # ARA2 ↔ VST3 的桥。`vst3` 特性提供 companion 适配器（主工厂 / 处理器入口）；
 # 默认特性 `plugin` 提供 `PluginModel` 那套语义 trait。
 #

@@ -7,6 +7,15 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// 全PCM内容参与身份，重开时同路径不同音频不能命中旧缓存。
+fn pcm_fingerprint(pcm: &super::source::SourcePcm) -> String {
+    let mut hash = blake3::Hasher::new();
+    hash.update(&pcm.sample_rate.to_le_bytes());
+    hash.update(&(pcm.planes.len() as u64).to_le_bytes());
+    for plane in &pcm.planes { for sample in plane { hash.update(&sample.to_le_bytes()); } }
+    hash.finalize().to_hex().to_string()
+}
+
 /// 仅模型线程访问；音频线程将在 Task 14 消费已发布快照，不能锁此 owner。
 #[derive(Default)]
 pub(crate) struct ExtensionOwner {
@@ -16,6 +25,8 @@ pub(crate) struct ExtensionOwner {
     sequences: Mutex<HashMap<i32, Vec<u64>>>,
     role: AtomicI32,
     pub snapshots: [super::snapshot::SnapshotPublisher; 2],
+    pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
+    channel: Mutex<Option<hifishifter_ara_ipc::Server>>,
 }
 
 #[cfg(test)]
@@ -26,6 +37,81 @@ mod bound_tests {
     use ara2_bridge::companion::{CompanionFactory, CompanionProcessorBinding, CompanionRoles};
     use ara2_bridge::plugin::{FactoryBuilder, PluginBuilder};
     use ara2_bridge::sys::*;
+
+    #[test]
+    fn gui_commit_changes_assigned_pcm_and_persisted_state_restores_it() {
+        use crate::render::source::SourcePcm;
+        let model = crate::ara::model::ModelHandle::new();
+        let document = model.session();
+        let mut timeline: hifishifter_kernel::state::TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"track","name":"host","order":0}],
+            "clips":[{"id":"one","track_id":"track","name":"one","start_sec":0,"length_sec":4.0/44100.0,
+                "takes":[{"id":"take","name":"one","source_path":"ara://pcm","source_start_sec":0,"source_end_sec":4.0/44100.0}]},
+                {"id":"other","track_id":"track","name":"other","start_sec":1,"length_sec":4.0/44100.0,
+                "takes":[{"id":"take2","name":"other","source_path":"ara://pcm","source_start_sec":0,"source_end_sec":4.0/44100.0}]}],
+            "bpm":120,"project_sec":2
+        })).unwrap();
+        for clip in &mut timeline.clips { clip.normalize_takes(); }
+        *document.timeline.lock().unwrap() = Some(timeline);
+        document.edit_sources.lock().unwrap().insert("ara://pcm".into(), Arc::new(SourcePcm { sample_rate:44100,
+            planes:vec![vec![0.1,0.2,0.3,0.4]], version:0, _reservation:None }));
+        let identity = Box::new(0_u8);
+        let key = (&*identity as *const u8) as u64;
+        region_owners().lock().unwrap().register(key, document.id, 0).unwrap();
+        document.clip_ids.lock().unwrap().insert(key, "one".into());
+        document.regions.lock().unwrap().insert(key, crate::ara::AraPlaybackRegion {
+            audio_source_persistent_id:"ara://pcm".into(), duration_in_modification_time:4.0/44100.0,
+            duration_in_playback_time:4.0/44100.0, ..Default::default() });
+        document.ready.store(true, Ordering::Release);
+        let owner = Arc::new(ExtensionOwner::default());
+        let raw = owner.bind_to_document(document.clone(), ApiGeneration::V2Final, ExtensionRoles::all(), ExtensionRoles::EDITOR_RENDERER, None).unwrap();
+        unsafe { let ext = &*raw; ((*ext.editorRendererInterface).addPlaybackRegion.unwrap())(ext.editorRendererRef, key as *mut _); }
+        let snapshot = owner.handle_request(hifishifter_ara_ipc::Request::Snapshot);
+        assert!(snapshot.ok, "{:?}", snapshot.error);
+        let mut client = snapshot.timeline.unwrap();
+        assert_eq!(client["clips"].as_array().unwrap().len(), 1);
+        client["tracks"][0]["volume"] = serde_json::json!(0.5);
+        let response = owner.handle_request(hifishifter_ara_ipc::Request::Commit {
+            base_revision:snapshot.revision, model_revision:snapshot.model_revision, timeline:client });
+        assert!(response.ok, "{:?}", response.error);
+        let companion = Arc::new(ExtensionOwner::default());
+        companion.bind_to_document(document.clone(), ApiGeneration::V2Final, ExtensionRoles::all(), ExtensionRoles::EDITOR_RENDERER, None).unwrap();
+        assert_eq!(companion.edit_state().lock().unwrap().revision, response.revision);
+        assert_eq!(companion.edit_state().lock().unwrap().tracks[0].volume, 0.5);
+        let state = owner.edit_state().lock().unwrap().encode().unwrap();
+        let mut restored = crate::state_channel::EditState::default();
+        restored.restore(&state).unwrap();
+        let output = owner.render_edits(&document, &restored).unwrap();
+        assert_eq!(output[0].left.len(), 4);
+        for (actual, expected) in output[0].left.iter().zip([0.05_f32,0.1,0.15,0.2]) { assert!((*actual-expected).abs()<1e-6); }
+        assert!(restored.restore(b"bad state").is_err());
+        drop(model);
+    }
+
+    #[test]
+    fn gui_request_commits_parameters_and_rejects_stale_document_revision() {
+        let model = crate::ara::model::ModelHandle::new();
+        let document = model.session();
+        let timeline: hifishifter_kernel::state::TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"track","name":"host","order":0}],"clips":[],"bpm":120,"project_sec":0
+        })).unwrap();
+        *document.timeline.lock().unwrap() = Some(timeline);
+        document.ready.store(true, Ordering::Release);
+        let owner = Arc::new(ExtensionOwner::default());
+        owner.bind_to_document(document.clone(), ApiGeneration::V2Final, ExtensionRoles::all(), ExtensionRoles::EDITOR_RENDERER, None).unwrap();
+        let snapshot = owner.handle_request(hifishifter_ara_ipc::Request::Snapshot);
+        assert!(snapshot.ok, "{:?}", snapshot.error);
+        let mut client = snapshot.timeline.unwrap();
+        client["tracks"][0]["volume"] = serde_json::json!(0.5);
+        let commit = hifishifter_ara_ipc::Request::Commit { base_revision: snapshot.revision, model_revision: snapshot.model_revision, timeline: client };
+        let response = owner.handle_request(commit.clone());
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(response.revision, 1);
+        assert!(!owner.handle_request(commit).ok);
+        document.clear_renderers();
+        assert!(!owner.handle_request(hifishifter_ara_ipc::Request::Snapshot).ok);
+        drop(model);
+    }
 
     /// 真实空文档绑定也必须收到销毁；不依赖 first region assignment 猜 document。
     #[test]
@@ -233,6 +319,132 @@ mod bound_tests {
 }
 
 impl ExtensionOwner {
+    /// 组件释放/文档关闭前结束后台服务，避免DLL卸载后线程仍执行插件代码。
+    pub fn stop_channel(&self) { let channel = self.channel.lock().unwrap().take(); drop(channel); }
+
+    /// 未绑定时暂存组件state；绑定后所有处理器读取同一文档的参数权威。
+    pub fn edit_state(&self) -> Arc<Mutex<crate::state_channel::EditState>> {
+        self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade)
+            .map(|document| document.edits.clone()).unwrap_or_else(|| self.edits.clone())
+    }
+
+    /// 恢复/undo组件状态后刷新整张文档，各renderer保持原分配。
+    pub fn refresh_document(&self) {
+        let document = self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade);
+        if let Some(document) = document { for owner in document.renderer_owners() { owner.prepare(); } } else { self.prepare(); }
+    }
+
+    /// 接收非实时编辑请求；具体处理只在文档事务锁内进行。
+    pub(crate) fn handle_request(&self, request: hifishifter_ara_ipc::Request) -> hifishifter_ara_ipc::Response {
+        use hifishifter_ara_ipc::{Request, Response, HostPcm};
+        let document = self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade);
+        let Some(document) = document else { return Response { error: Some("document closed".into()), ..Default::default() }; };
+        let _transaction = document.transaction.lock().unwrap();
+        let model_revision = document.revision.load(Ordering::Acquire);
+        let mut edits = document.edits.lock().unwrap();
+        let outcome = (|| {
+            if !document.ready.load(Ordering::Acquire) { return Err("host model not ready; refresh after editing".into()); }
+            let mut timeline = self.assigned_timeline(&document)?;
+            match request {
+                Request::Snapshot => {
+                    edits.apply(&mut timeline);
+                    let available = document.edit_sources.lock().unwrap();
+                    let mut sources = Vec::new();
+                    for id in timeline.clips.iter().filter_map(|clip| clip.source_path.as_ref()).collect::<BTreeSet<_>>() {
+                        let pcm = available.get(id).ok_or_else(|| format!("host PCM unavailable: {id}"))?;
+                        sources.push(HostPcm { persistent_id: id.clone(), sample_rate: pcm.sample_rate,
+                            fingerprint: pcm_fingerprint(pcm), planes: pcm.planes.clone() });
+                    }
+                    Ok(Response { ok: true, timeline: Some(serde_json::to_value(&timeline).map_err(|e| e.to_string())?), sources, ..Default::default() })
+                }
+                Request::Commit { base_revision, model_revision: base_model, timeline: client } => {
+                    if base_model != model_revision { return Err("Conflict: host model changed; refresh".into()); }
+                    let client = serde_json::from_value(client).map_err(|e| e.to_string())?;
+                    let candidate = edits.merge(&timeline, &client, base_revision)?;
+                    let mut prepared = Vec::new();
+                    for owner in document.renderer_owners() {
+                        let snapshots = owner.render_edits(&document, &candidate)?;
+                        if !owner.snapshots.iter().zip(&snapshots).all(|(publisher, snapshot)| publisher.has_capacity(snapshot)) {
+                            return Err("retired snapshot budget exhausted; reopen the instance".into());
+                        }
+                        prepared.push((owner, snapshots));
+                    }
+                    for (owner, snapshots) in prepared {
+                        for (publisher, snapshot) in owner.snapshots.iter().zip(snapshots) { publisher.publish(snapshot).map_err(|e| format!("snapshot publish failed: {e:?}"))?; }
+                    }
+                    *edits = candidate;
+                    log::info!("[ara] GUI commit ready revision={} model={model_revision}", edits.revision);
+                    Ok(Response { ok: true, ..Default::default() })
+                }
+            }
+        })();
+        let mut response = outcome.unwrap_or_else(|error| Response { error: Some(error), ..Default::default() });
+        response.revision = edits.revision;
+        response.model_revision = model_revision;
+        response
+    }
+
+    /// 使用现有离线内核，不将宿主文件路径当成音频权威。
+    pub(crate) fn render_edits(&self, document: &super::document::DocumentSession, edits: &crate::state_channel::EditState)
+        -> Result<Vec<super::snapshot::PlaybackSnapshot>, String> {
+        use hifishifter_kernel::mixdown::{MixdownOptions, MixdownPcm, QualityPreset, render_mixdown_with_pcm};
+        use super::snapshot::PlaybackSnapshot;
+        if !document.ready.load(Ordering::Acquire) { return Err("host PCM/model not ready".into()); }
+        let keys = self.assigned_regions().map_err(|e| e.to_string())?;
+        if keys.is_empty() { return Ok([44100, 48000].into_iter().map(|sample_rate| PlaybackSnapshot {
+            sample_rate, origin_sample: 0, left: vec![], right: vec![], _reservation: None,
+        }).collect()); }
+        let mut timeline = self.assigned_timeline(document)?;
+        edits.apply(&mut timeline);
+        let geometry = document.regions.lock().unwrap();
+        let regions = keys.iter().map(|key| geometry.get(key).cloned().ok_or("assigned region disappeared"))
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(geometry);
+        let sources = document.edit_sources.lock().unwrap().clone();
+        // 先复用先导范围校验：时间拉伸/宿主内容淡化仍不能伪称支持。
+        let validation = super::snapshot::mix_plain_regions(&regions, &sources, 44100).map_err(|e| format!("unsupported host region: {e:?}"))?;
+        drop(validation);
+        let start = timeline.clips.iter().map(|c| c.start_sec).fold(f64::INFINITY, f64::min);
+        let end = timeline.clips.iter().map(|c| c.start_sec + c.length_sec).fold(0.0_f64, f64::max);
+        if start < 0.0 || !start.is_finite() || !end.is_finite() { return Err("unsupported host position".into()); }
+        let mut input = HashMap::new();
+        for id in timeline.clips.iter().filter_map(|clip| clip.source_path.as_ref()).collect::<BTreeSet<_>>() {
+            let pcm = sources.get(id).ok_or_else(|| format!("host PCM unavailable: {id}"))?;
+            let channels = pcm.planes.len();
+            let mut samples = Vec::with_capacity(pcm.planes[0].len() * channels);
+            for frame in 0..pcm.planes[0].len() { for plane in &pcm.planes { samples.push(plane[frame]); } }
+            input.insert(id.clone(), MixdownPcm { sample_rate: pcm.sample_rate, channels: channels as u16, samples: Arc::new(samples) });
+        }
+        let mut snapshots = Vec::new();
+        for sample_rate in [44100, 48000] {
+            let frames = ((end - start) * sample_rate as f64).round() as usize;
+            if frames > 64 * 1024 * 1024 / 8 { return Err("snapshot span exceeds 64MiB".into()); }
+            let reservation = super::budget::global_budget().reserve(frames * 8).ok_or("PCM memory budget exceeded")?;
+            let options = MixdownOptions { sample_rate, start_sec: start, end_sec: Some(end),
+                stretch: hifishifter_kernel::time_stretch::StretchAlgorithm::SoundTouchDll, apply_pitch_edit: true,
+                output: hifishifter_kernel::encode::OutputSpec::wav_32f(), quality_preset: QualityPreset::Export,
+                cancel_flag: None, progress: None, cache_stats: None };
+            let (_, channels, _, samples) = render_mixdown_with_pcm(&timeline, options, &input)?;
+            if channels != 2 || samples.len() != frames * 2 || samples.iter().any(|v| !v.is_finite()) { return Err("invalid kernel output".into()); }
+            snapshots.push(PlaybackSnapshot { sample_rate, origin_sample: (start * sample_rate as f64).round() as i64,
+                left: samples.iter().step_by(2).copied().collect(), right: samples.iter().skip(1).step_by(2).copied().collect(),
+                _reservation: Some(reservation) });
+        }
+        Ok(snapshots)
+    }
+
+    /// 从宿主时间线筛选实际分配的区域，而不是让每个处理器混整张文档。
+    fn assigned_timeline(&self, document: &super::document::DocumentSession) -> Result<hifishifter_kernel::state::TimelineState, String> {
+        let keys = self.assigned_regions().map_err(|e| e.to_string())?;
+        let identities = document.clip_ids.lock().unwrap();
+        let ids = keys.iter().map(|key| identities.get(key).cloned().ok_or("missing assigned clip identity"))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut timeline = document.timeline.lock().unwrap().clone().ok_or("host timeline unavailable")?;
+        timeline.clips.retain(|clip| ids.contains(&clip.id));
+        if !timeline.clips.is_empty() { timeline.tracks.retain(|track| timeline.clips.iter().any(|clip| clip.track_id == track.id)); }
+        Ok(timeline)
+    }
+
     /// 把租约关联到真实文档；关闭文档时由其同步撤销。
     pub fn bind_to_document(
         self: &Arc<Self>,
@@ -286,6 +498,11 @@ impl ExtensionOwner {
             generation, known, assigned, supported, observer,
         )?;
         let raw = owned.0.as_raw();
+        {
+            let local = self.edits.lock().unwrap();
+            let mut shared = document.edits.lock().unwrap();
+            if local.revision > shared.revision { *shared = local.clone(); }
+        }
         document.attach(self, owned.1, companion)?;
         *self.document.lock().unwrap() = Some(Arc::downgrade(&document));
         *current = Some(owned.0);
@@ -297,11 +514,24 @@ impl ExtensionOwner {
             },
             Ordering::Release,
         );
+        drop(current);
+        if enabled.contains(ExtensionRoles::EDITOR_RENDERER) {
+            let weak = Arc::downgrade(self);
+            match hifishifter_ara_ipc::Server::start("HiFiShifter / REAPER".into(), move |request| {
+                weak.upgrade().map(|owner| owner.handle_request(request)).unwrap_or_else(|| hifishifter_ara_ipc::Response {
+                    error: Some("plugin instance closed".into()), ..Default::default()
+                })
+            }) {
+                Ok(server) => { log::info!("[ara] GUI channel ready instance={}", server.record().instance_id); *self.channel.lock().unwrap() = Some(server); }
+                Err(error) => log::warn!("[ara] GUI channel unavailable: {error}"),
+            }
+        }
         Ok(raw)
     }
 
     /// 文档侧已撤销 lease；保留 binding 以供宿主最后几次合法移除/释放回调访问。
     pub fn document_closed(&self) {
+        self.stop_channel();
         self.assignments.lock().unwrap().clear();
         self.sequences.lock().unwrap().clear();
         self.document.lock().unwrap().take();
@@ -373,6 +603,15 @@ impl ExtensionOwner {
         else {
             return;
         };
+        let _transaction = document.transaction.lock().unwrap();
+        let edits = document.edits.lock().unwrap().clone();
+        if edits.revision > 0 {
+            match self.render_edits(&document, &edits) {
+                Ok(snapshots) => { for (publisher, snapshot) in self.snapshots.iter().zip(snapshots) { let _ = publisher.publish(snapshot); } }
+                Err(error) => log::warn!("[ara] edited snapshot unavailable: {error}"),
+            }
+            return;
+        }
         let Ok(keys) = self.assigned_regions() else {
             return;
         };

@@ -148,6 +148,10 @@ impl Default for SnapshotPublisher {
 }
 
 impl SnapshotPublisher {
+    /// 发布前在非实时线程预检，两个采样率必须都可容纳才替换编辑状态。
+    pub fn has_capacity(&self, snapshot: &PlaybackSnapshot) -> bool {
+        self.retained.lock().unwrap().1.checked_add(snapshot.left.len() * 8).is_some_and(|n| n <= self.limit)
+    }
     /// 预算包含所有退役快照，避免原子替换时在音频线程析构大缓冲。
     pub fn new(limit: usize) -> Self {
         Self {

@@ -165,9 +165,23 @@ impl ModelHandle {
             .map(|(_, region)| region)
             .collect();
         match crate::ara::mapping::ara_document_to_timeline(&document) {
-            Ok(timeline) => {
+            Ok(mut timeline) => {
+                for track in &mut timeline.tracks {
+                    track.compose_enabled = true;
+                    track.pitch_analysis_algo = hifishifter_kernel::state::PitchAnalysisAlgo::WorldDll;
+                }
+                // 宿主本会话slot不随删除压缩；避免活着的clip因旧region销毁换身份。
+                let keys = self.region_keys.iter().enumerate().filter(|(slot, _)| !self.destroyed_regions.contains(slot));
+                let mut identities = self.session.clip_ids.lock().unwrap();
+                identities.clear();
+                for (clip, (slot, key)) in timeline.clips.iter_mut().zip(keys) {
+                    clip.id = format!("ara-clip-{}", slot + 1);
+                    identities.insert(*key, clip.id.clone());
+                }
+                drop(identities);
                 log::info!("{}", crate::ara::summary_line(&document, &timeline));
                 log::info!("{}", crate::ara::clip_starts_line(&timeline));
+                *self.session.timeline.lock().unwrap() = Some(timeline.clone());
                 self.timeline = Some(timeline);
             }
             Err(err) => {
@@ -280,6 +294,7 @@ impl AudioSources for ModelHandle {
         let source = self.document.audio_sources.get_mut(*state).ok_or(AraError::InvalidArgument("unknown source"))?;
         self.session.clear_renderers();
         self.session.sources.lock().unwrap().remove(&source.persistent_id);
+        self.session.edit_sources.lock().unwrap().remove(&source.persistent_id);
         source.persistent_id = properties.persistent_id().to_string();
         source.name = properties.name().map(str::to_owned);
         source.sample_rate = properties.sample_rate();
@@ -294,6 +309,7 @@ impl AudioSources for ModelHandle {
     /// undo history 中停用源时立即撤销准备好的 PCM；恢复后等待宿主重新授予访问。
     fn deactivate_audio_source(&mut self, state: &mut Self::AudioSource, deactivate: bool, host: &HostContentScope<'_, '_>) -> Result<(), AraError> {
         if deactivate {
+            if let Some(source) = self.document.audio_sources.get(*state) { self.session.edit_sources.lock().unwrap().remove(&source.persistent_id); }
             if let Some(source) = self.document.audio_sources.get_mut(*state) { source.sample_access_enabled = false; }
             self.refresh_source_pcm(*state, host);
         }
@@ -302,6 +318,7 @@ impl AudioSources for ModelHandle {
 
     /// 源销毁时撤销访问和快照，不能继续播已销毁源的缓存。
     fn destroy_audio_source(&mut self, state: Self::AudioSource, host: &HostContentScope<'_, '_>) {
+        if let Some(source) = self.document.audio_sources.get(state) { self.session.edit_sources.lock().unwrap().remove(&source.persistent_id); }
         if let Some(source) = self.document.audio_sources.get_mut(state) { source.sample_access_enabled = false; }
         self.refresh_source_pcm(state, host);
     }
@@ -347,6 +364,7 @@ impl AudioSources for ModelHandle {
         host: &HostContentScope<'_, '_>,
     ) -> Result<(), AraError> {
         // 内容变了 → 版本号前进。渲染缓存据此失效（设计 §4.5）。
+        if let Some(source) = self.document.audio_sources.get(*state) { self.session.edit_sources.lock().unwrap().remove(&source.persistent_id); }
         self.source_content_version_bump(*state);
         self.refresh_source_pcm(*state, host);
         Ok(())
@@ -400,7 +418,9 @@ impl ModelHandle {
             match result {
                 Ok(pcm) => {
                     log::info!("[ara] host PCM ready source={index} frames={} version={}", source.sample_count, pcm.version);
-                    self.session.sources.lock().unwrap().insert(source.persistent_id.clone(), Arc::new(pcm));
+                    let pcm = Arc::new(pcm);
+                    self.session.edit_sources.lock().unwrap().insert(source.persistent_id.clone(), pcm.clone());
+                    self.session.sources.lock().unwrap().insert(source.persistent_id.clone(), pcm);
                 }
                 Err(error) => log::warn!("[ara] host PCM unavailable: {error:?}"),
             }
@@ -665,6 +685,9 @@ mod tests {
         assert_eq!(model.session.sources.lock().unwrap()[&id].version,1);
         clients.with_audio_source_management(source, |scope| AudioSources::enable_audio_source_samples_access(&mut model, &mut slot, false, &scope)).unwrap();
         assert!(model.session.sources.lock().unwrap().is_empty());
+        assert_eq!(model.session.edit_sources.lock().unwrap()[&id].planes[0], [0.5,0.6,0.7,0.8]);
+        clients.with_audio_source_management(source, |scope| AudioSources::deactivate_audio_source(&mut model, &mut slot, true, &scope)).unwrap();
+        assert!(model.session.edit_sources.lock().unwrap().is_empty());
     }
 
     /// 实际模型销毁回调必须撤销索引，slot 表测试不能替代这个接线检查。

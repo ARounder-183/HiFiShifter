@@ -6,7 +6,7 @@ use ara2_bridge::companion::CompanionControllerBinding;
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::ExtensionControllerLease;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 struct RendererLease {
@@ -23,7 +23,14 @@ pub(crate) struct DocumentSession {
     pub generation: Mutex<Option<ApiGeneration>>,
     pub sequence_regions: Mutex<HashMap<u64, HashSet<u64>>>,
     pub regions: Mutex<HashMap<u64, crate::ara::AraPlaybackRegion>>,
+    pub clip_ids: Mutex<HashMap<u64, String>>,
     pub sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
+    pub edit_sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
+    pub timeline: Mutex<Option<hifishifter_kernel::state::TimelineState>>,
+    pub revision: AtomicU64,
+    pub ready: AtomicBool,
+    pub transaction: Mutex<()>,
+    pub edits: Arc<Mutex<crate::state_channel::EditState>>,
     pub id: DocumentId,
 }
 
@@ -106,6 +113,7 @@ impl DocumentSession {
 
     /// 同步关闭文档；保持 renderer 的原生接口存储，但撤销模型操作许可。
     pub fn close(&self) {
+        self.ready.store(false, Ordering::Release);
         let leases = {
             let mut renderers = self.renderers.lock().unwrap();
             self.alive.store(false, Ordering::Release);
@@ -130,7 +138,10 @@ impl DocumentSession {
         }
         self.sequence_regions.lock().unwrap().clear();
         self.regions.lock().unwrap().clear();
+        self.clip_ids.lock().unwrap().clear();
+        self.timeline.lock().unwrap().take();
         self.sources.lock().unwrap().clear();
+        self.edit_sources.lock().unwrap().clear();
     }
 
     /// 控制器侧独立保留 lease，companion 先释放时 raw extension 存储仍须存活。
@@ -154,6 +165,7 @@ impl DocumentSession {
 
     /// 模型线程刷新所有仍存活 renderer，任何 source/geometry/访问变化都触发重新准备。
     pub fn prepare_renderers(&self) {
+        self.ready.store(true, Ordering::Release);
         let owners = self
             .renderers
             .lock()
@@ -166,8 +178,16 @@ impl DocumentSession {
         }
     }
 
+    /// 同一ARA文档的编辑权威共享，输出仍按各renderer分配隔离。
+    pub fn renderer_owners(&self) -> Vec<Arc<ExtensionOwner>> {
+        self.renderers.lock().unwrap().iter().filter_map(|lease| lease.owner.upgrade()).collect()
+    }
+
     /// 在旧内容可能被改变前立即撤销发布；不回收实时读者可能仍持有的旧快照。
     pub fn clear_renderers(&self) {
+        let _transaction = self.transaction.lock().unwrap();
+        self.ready.store(false, Ordering::Release);
+        self.revision.fetch_add(1, Ordering::AcqRel);
         let owners = self
             .renderers
             .lock()

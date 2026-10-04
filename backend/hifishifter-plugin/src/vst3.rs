@@ -720,6 +720,7 @@ unsafe fn processor_release(processor: *mut Processor) -> u32 {
     let previous = unsafe { (*processor).refcount.fetch_sub(1, Ordering::AcqRel) };
     let remaining = previous - 1;
     if remaining == 0 {
+        unsafe { (*processor).extension_owner.stop_channel(); }
         // SAFETY: 引用计数归零，且没有其它持有者。
         unsafe { drop(Box::from_raw(processor)) };
     }
@@ -896,17 +897,31 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
 }
 
 unsafe extern "system" fn component_set_state(
-    _this: *mut c_void,
-    _state: *mut c_void,
+    this: *mut c_void,
+    state: *mut c_void,
 ) -> TResult {
-    K_RESULT_OK
+    if this.is_null() { return K_INVALID_ARGUMENT; }
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let bytes = unsafe { crate::state_stream::read_state(state) }?;
+        let owner = unsafe { &(*this.cast::<Processor>()).extension_owner };
+        owner.edit_state().lock().unwrap().restore(&bytes)?;
+        owner.refresh_document();
+        Ok::<_, String>(())
+    }));
+    if matches!(outcome, Ok(Ok(()))) { K_RESULT_OK } else { K_RESULT_FALSE }
 }
 
 unsafe extern "system" fn component_get_state(
-    _this: *mut c_void,
-    _state: *mut c_void,
+    this: *mut c_void,
+    state: *mut c_void,
 ) -> TResult {
-    K_RESULT_OK
+    if this.is_null() { return K_INVALID_ARGUMENT; }
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let owner = unsafe { &(*this.cast::<Processor>()).extension_owner };
+        let bytes = owner.edit_state().lock().unwrap().encode()?;
+        unsafe { crate::state_stream::write_state(state, &bytes) }
+    }));
+    if matches!(outcome, Ok(Ok(()))) { K_RESULT_OK } else { K_RESULT_FALSE }
 }
 
 unsafe extern "system" fn audio_query_interface(
