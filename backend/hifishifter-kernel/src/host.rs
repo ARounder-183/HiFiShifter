@@ -16,12 +16,19 @@
 
 use std::sync::{Arc, OnceLock};
 
+use crate::engine_command::EngineCommand;
+
 /// 宿主必须能提供的回调。
 ///
 /// 【设计原则】这里的方法刻意**贴合调用点的语义**，而不是暴露宿主的内部结构。
 /// 例如 `take_pitch_pending_flag` 把"读并清零"合成一个方法 —— 因为那本来就是一次
 /// 原子操作，拆成 get + clear 会让两个消费者同时看到 `true`（补触发两次）。
 pub trait HostCallbacks: Send + Sync + 'static {
+    /// 把一条引擎命令投递给设备层。
+    ///
+    /// 插件侧可以丢弃它，或转成 ARA renderer 的请求 —— 实现方自己决定。
+    fn send_engine_command(&self, command: EngineCommand);
+
     /// 宿主的"自动后台预渲染"开关当前是否启用。
     fn auto_background_render_enabled(&self) -> bool;
 
@@ -61,6 +68,13 @@ impl HostServices {
     /// 宿主是否已装配。
     pub fn is_installed(&self) -> bool {
         self.inner.get().is_some()
+    }
+
+    /// 投递一条引擎命令；无宿主时什么都不做。
+    pub fn send_engine_command(&self, command: EngineCommand) {
+        if let Some(host) = self.inner.get() {
+            host.send_engine_command(command);
+        }
     }
 
     /// 自动后台预渲染是否启用；无宿主时按"未启用"处理（静默降级）。
@@ -113,9 +127,13 @@ mod tests {
         auto_enabled: AtomicBool,
         pitch_pending: AtomicBool,
         renders_requested: AtomicUsize,
+        commands_received: AtomicUsize,
     }
 
     impl HostCallbacks for RecordingHost {
+        fn send_engine_command(&self, _command: EngineCommand) {
+            self.commands_received.fetch_add(1, Ordering::Relaxed);
+        }
         fn auto_background_render_enabled(&self) -> bool {
             self.auto_enabled.load(Ordering::Relaxed)
         }
@@ -136,6 +154,7 @@ mod tests {
         assert!(!host.auto_background_render_enabled());
         assert!(!host.take_pitch_pending_flag());
         host.request_background_render();
+        host.send_engine_command(EngineCommand::Stop);
     }
 
     /// 装了宿主就必须原样转发。
@@ -150,8 +169,10 @@ mod tests {
         assert!(host.auto_background_render_enabled());
         assert!(host.take_pitch_pending_flag());
         host.request_background_render();
+        host.send_engine_command(EngineCommand::Stop);
 
         assert_eq!(recorder.renders_requested.load(Ordering::Relaxed), 1);
+        assert_eq!(recorder.commands_received.load(Ordering::Relaxed), 1);
     }
 
     /// 「消费标志」必须只成功一次：第二次读到的必须是 `false`。

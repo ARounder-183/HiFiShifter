@@ -40,6 +40,153 @@ fn main() {
 
     build_signalsmith_stretch();
     build_soundtouch();
+    build_vslib();
+    build_world_static();
+}
+
+/// 把 WORLD 声码器编译成静态库。
+///
+/// 从 `backend/src-tauri/build.rs` 原样搬来，只改了 `third_party` 的根路径。
+///
+/// 【为什么跟着内核走】`world_vocoder` / `streaming_world` / `renderer::world` 现在
+/// 都在内核里，而它们调用的是 WORLD 的 C++ 符号（`CheapTrick` / `D4C` / `Synthesis` 等）。
+/// 这些符号由本函数编译出的静态库提供；留在 app 的 build.rs 里，
+/// 内核的**测试二进制**与插件都会报 `LNK2019: unresolved external symbol`（实测）。
+fn build_world_static() {
+    let world_src_dir = format!("{}/world-static/World/src", THIRD_PARTY);
+    let world_src_path = Path::new(&world_src_dir);
+
+    if !world_src_path.exists() {
+        eprintln!("\n========================================");
+        eprintln!("ERROR: WORLD source code not found!");
+        eprintln!("========================================");
+        eprintln!("\nExpected location: {}", world_src_path.display());
+        eprintln!("\nTo fix this, run:");
+        eprintln!("  cd backend/src-tauri/third_party/world-static");
+        eprintln!("  git clone https://github.com/mmorise/World.git");
+        eprintln!("========================================\n");
+        panic!("WORLD sources missing. See error message above for instructions.");
+    }
+
+    let required_files = [
+        "cheaptrick.cpp",
+        "codec.cpp",
+        "common.cpp",
+        "d4c.cpp",
+        "dio.cpp",
+        "fft.cpp",
+        "harvest.cpp",
+        "matlabfunctions.cpp",
+        "stonemask.cpp",
+        "synthesis.cpp",
+        "synthesisrealtime.cpp",
+    ];
+
+    for file in &required_files {
+        let file_path = world_src_path.join(file);
+        if !file_path.exists() {
+            panic!(
+                "Required WORLD source file not found: {}",
+                file_path.display()
+            );
+        }
+    }
+
+    println!("cargo:rerun-if-changed={}", world_src_dir);
+
+    let mut world = cc::Build::new();
+    world
+        .cpp(true)
+        .include(&world_src_dir)
+        .files(required_files.iter().map(|f| format!("{}/{}", world_src_dir, f)));
+
+    // C++ 标准旗标按编译器家族分发（与 sstretch 构建同一模式）：
+    // MSVC 的 cl 不认识 GCC 风格的 `-std:c++11`，传入只会得到 D9002
+    // "ignoring unknown option" 警告并被忽略 —— cl 默认即 ≥C++14，
+    // 显式给 /std:c++14 行为不变、警告消失。
+    if world.get_compiler().is_like_msvc() {
+        world.flag("/std:c++14");
+        world.flag("/utf-8");
+    } else {
+        world.flag("-std=c++11");
+    }
+
+    world.compile("world");
+
+    println!("cargo:rustc-link-lib=static=world");
+}
+
+/// 链接 vslib（闭源、仅 Windows）的导入库，并把 DLL 放到目标目录。
+///
+/// 从 `backend/src-tauri/build.rs` 原样搬来，只改了 `third_party` 的根路径。
+///
+/// 【为什么跟着内核走】`vslib.rs` 现在在内核里（`renderer/vslib_processor.rs` 要用它），
+/// 而 `#[link(name = "vslib_x64")]` 是**链接期**依赖 —— 与 SoundTouch 同理：
+/// 留在 app 的 build.rs 里，插件单独链接内核时会报 `LNK1181: cannot open input file
+/// 'vslib_x64.lib'`（实测）。
+fn build_vslib() {
+    if !cfg!(feature = "vslib") {
+        return;
+    }
+
+    // Only link/copy for x86_64 Windows targets. Non-target platforms should
+    // not require third_party/vslib assets to exist.
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let target_lc = target.to_lowercase();
+    if !(target_lc.contains("windows") && target_lc.contains("x86_64")) {
+        println!(
+            "cargo:warning=[vslib] target '{}' not an x86_64 Windows target; skipping link/copy of vslib_x64",
+            target
+        );
+        return;
+    }
+
+    let lib_dir = Path::new(THIRD_PARTY).join("vslib");
+
+    if !lib_dir.exists() {
+        panic!(
+            "[vslib] third_party/vslib/ not found. \
+             Place vslib_x64.dll and vslib_x64.lib there."
+        );
+    }
+
+    // Resolve to an absolute path so rustc can find the import lib
+    let abs = lib_dir
+        .canonicalize()
+        .expect("[vslib] failed to canonicalize third_party/vslib path");
+
+    println!("cargo:rerun-if-changed={}/vslib_x64.lib", lib_dir.display());
+    println!("cargo:rerun-if-changed={}/vslib_x64.dll", lib_dir.display());
+
+    println!("cargo:rustc-link-search=native={}", abs.display());
+    println!("cargo:rustc-link-lib=dylib=vslib_x64");
+
+    // OUT_DIR = .../target/<profile>/build/<pkg>/out  →  4 levels up = target/<profile>/
+    if let Ok(out_dir) = std::env::var("OUT_DIR") {
+        let dll_src = lib_dir.join("vslib_x64.dll");
+        let target_dir = Path::new(&out_dir)
+            .ancestors()
+            .nth(3)
+            .expect("[vslib] unexpected OUT_DIR depth");
+        let dll_dst = target_dir.join("vslib_x64.dll");
+        if let Err(e) = std::fs::copy(&dll_src, &dll_dst) {
+            println!(
+                "cargo:warning=[vslib] could not copy DLL to {}: {}",
+                dll_dst.display(),
+                e
+            );
+        }
+        // Test executables live in target/<profile>/deps/, where the loader
+        // looks for DLLs; copy there as well or cargo test cannot start.
+        let deps_dir = target_dir.join("deps");
+        let _ = std::fs::create_dir_all(&deps_dir);
+        let dll_dst_deps = deps_dir.join("vslib_x64.dll");
+        if dll_dst_deps != dll_dst {
+            let _ = std::fs::copy(&dll_src, &dll_dst_deps);
+        }
+    } else {
+        println!("cargo:warning=[vslib] OUT_DIR not set; skipping DLL copy")
+    }
 }
 
 /// 编译 Signalsmith Stretch 的 C 包装并静态链接。

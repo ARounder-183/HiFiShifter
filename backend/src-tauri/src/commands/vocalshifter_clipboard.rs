@@ -528,7 +528,7 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
             .collect();
         drop(tl);
         for root_id in &midi_root_tracks {
-            pitch_analysis::maybe_schedule_pitch_orig(state, root_id);
+            pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, root_id);
         }
     }
 

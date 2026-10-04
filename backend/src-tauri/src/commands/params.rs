@@ -294,7 +294,7 @@ pub(super) fn get_param_frames(
     // Schedule pitch_orig analysis in background; return current cached curve immediately.
     let analysis_pending = if param == "pitch" {
         Some(crate::pitch_analysis::maybe_schedule_pitch_orig(
-            &state, &root,
+            &state.timeline, &root,
         ))
     } else {
         None
@@ -311,7 +311,7 @@ pub(super) fn get_param_frames(
             roots.insert(root.clone());
         }
         Some(crate::pitch_analysis::maybe_schedule_dyn_orig(
-            &state, &root,
+            &state.timeline, &root,
         ))
     } else {
         None
@@ -671,7 +671,7 @@ pub(super) fn set_param_frames(
     drop(tl);
 
     if dyn_touched {
-        let _ = crate::pitch_analysis::maybe_schedule_dyn_orig(&state, &root_for_dyn);
+        let _ = crate::pitch_analysis::maybe_schedule_dyn_orig(&state.timeline, &root_for_dyn);
     }
 
     serde_json::json!({"ok": true})
@@ -963,7 +963,7 @@ pub(super) fn convert_mix_param(
     };
 
     // 基线必须就绪（key 命中）。未命中则触发组装/调度后明确拒绝。
-    let analysis_pending = crate::pitch_analysis::maybe_schedule_dyn_orig(&state, &root);
+    let analysis_pending = crate::pitch_analysis::maybe_schedule_dyn_orig(&state.timeline, &root);
     if analysis_pending {
         return serde_json::json!({"ok": false, "reason": "analysis_pending"});
     }
@@ -1068,7 +1068,7 @@ pub(super) fn convert_mix_param(
     drop(tl);
     // dyn 曲线可能刚获得第一个非哨兵值（volume→dyn 方向），与 set_param_frames
     // 的既有约定一致：锁外补一次组装/调度（基线已就绪时它是 no-op）。
-    let _ = crate::pitch_analysis::maybe_schedule_dyn_orig(&state, &root_for_dyn);
+    let _ = crate::pitch_analysis::maybe_schedule_dyn_orig(&state.timeline, &root_for_dyn);
 
     serde_json::json!({
         "ok": true,

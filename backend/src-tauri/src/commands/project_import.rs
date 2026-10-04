@@ -223,7 +223,7 @@ pub(super) fn import_project(
         drop(tl);
 
         for root_id in &midi_root_tracks {
-            crate::pitch_analysis::maybe_schedule_pitch_orig(&state, root_id);
+            crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, root_id);
         }
         if let Some(handle) = state.app_handle.get() {
             // 被导入工程里 v4 及更早的 Take 没有任何判定档案（v5+ 的已在上面

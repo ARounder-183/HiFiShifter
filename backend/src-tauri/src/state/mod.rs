@@ -14,9 +14,10 @@
 //! 2. 切分：`AppState`、`RuntimeState`、`WaveformInflightGuard`、`SourceFileCheckItem`
 //!    及其 `impl`、以及依赖 `AppState` 的 3 条测试移进 `app.rs`；
 //!    其余（`Clip` / `Track` / `TimelineState` / `ClipTake` / 历史……）是 `model.rs`。
+//! 3. 模型已再迁到 `hifishifter-kernel`（它不认识 Tauri），这里只再导出，
+//!    所以 `crate::state::Clip` 这类路径在 app 侧**一个字都不用改**。
 
 mod app;
-mod model;
 
 pub use app::*;
-pub use model::*;
+pub use hifishifter_kernel::state::*;

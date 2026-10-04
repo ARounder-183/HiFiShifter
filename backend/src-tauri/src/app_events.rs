@@ -15,7 +15,7 @@
 use hifishifter_kernel::events::{EventSink, SharedEventSink};
 use hifishifter_kernel::host::{HostCallbacks, SharedHostCallbacks};
 use std::sync::{Arc, OnceLock};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// 进程级 `AppHandle`：由 Tauri setup 注册一次。
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
@@ -67,6 +67,14 @@ pub fn event_sink() -> Option<SharedEventSink> {
 struct AppHostCallbacks;
 
 impl HostCallbacks for AppHostCallbacks {
+    fn send_engine_command(&self, command: hifishifter_kernel::engine_command::EngineCommand) {
+        // 命令的终点是设备层，它挂在 `AppState` 上 —— 从进程级 `AppHandle` 取。
+        if let Some(handle) = app_handle() {
+            let state = handle.state::<crate::state::AppState>();
+            state.audio_engine.send(command);
+        }
+    }
+
     fn auto_background_render_enabled(&self) -> bool {
         crate::commands::playback::AUTO_BG_RENDER_ENABLED
             .load(std::sync::atomic::Ordering::Relaxed)

@@ -132,10 +132,13 @@ impl AudioEngine {
         Self::with_app_handle(None)
     }
 
-    /// 在 Tauri setup 完成后调用，将 app_handle 传递给 engine worker，
-    /// 使其能够向前端推送事件（如 `clip_pitch_data`）。
-    pub fn set_app_handle(&self, handle: tauri::AppHandle) {
-        let _ = self.tx.send(EngineCommand::SetAppHandle { handle });
+    /// 把一条引擎命令投递给 worker。
+    ///
+    /// 【为什么需要它】内核侧的宿主回调（`app_events::AppHostCallbacks`）拿不到
+    /// `AudioEngine` 的私有 channel，只能经由这个入口 —— 它取代了原来的
+    /// `set_app_handle`：句柄不再经命令通道传递（那条通道现在是纯数据的内核类型）。
+    pub fn send(&self, command: EngineCommand) {
+        let _ = self.tx.send(command);
     }
 
     fn with_app_handle(app_handle: Option<tauri::AppHandle>) -> Self {
@@ -728,6 +731,14 @@ impl AudioEngine {
             let mut stashed_cmd: Option<EngineCommand> = None;
 
             loop {
+                // 宿主句柄改为**惰性**获取：worker 可能早于 Tauri setup 启动
+                // （`AudioEngine::new()` 在 `AppState::default()` 里就跑起来了），
+                // 而句柄是 setup 时注册到 `app_events` 的进程级出口。
+                // 之前它靠 `EngineCommand::SetAppHandle` 送进来，而那条命令通道
+                // 现在是内核的纯数据类型，不能塞 `AppHandle`。
+                if app_handle_for_worker.is_none() {
+                    app_handle_for_worker = crate::app_events::app_handle().cloned();
+                }
                 let cmd = match stashed_cmd.take() {
                     Some(cmd) => cmd,
                     None => match rx.recv() {
@@ -808,12 +819,6 @@ impl AudioEngine {
                         if let Some(tl) = state.last_timeline.clone() {
                             schedule_clip_pitch_jobs(&tl, state.tx, state.sr);
                         }
-                    }
-                    EngineCommand::SetAppHandle { handle } => {
-                        if let Ok(mut app) = meter_app_handle.lock() {
-                            *app = Some(handle.clone());
-                        }
-                        app_handle_for_worker = Some(handle);
                     }
                     EngineCommand::AudioReady { key } => handle_audio_ready(&mut state, key),
                     EngineCommand::PlayFile {
@@ -1596,7 +1601,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
             {
                 if let Some(root) = tl.resolve_root_track_id(&clip.track_id) {
                     if emitted_roots.insert(root.clone()) {
-                        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+                        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
                     }
                 }
             }
@@ -1618,7 +1623,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         for clip in &tl.clips {
             if let Some(root) = tl.resolve_root_track_id(&clip.track_id) {
                 if guarded_roots.insert(root.clone()) {
-                    crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+                    crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
                 }
             }
         }
@@ -1658,7 +1663,7 @@ fn handle_stretch_ready(s: &mut EngineWorkerState, key: StretchKey) {
             }
             // 重新触发 pitch_orig 组装推送
             for rt in &root_track_ids {
-                crate::pitch_analysis::maybe_schedule_pitch_orig(&state, rt);
+                crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, rt);
             }
         }
     }
@@ -1697,7 +1702,7 @@ fn handle_clip_pitch_ready(s: &mut EngineWorkerState, clip_id: String) {
                 let root_track_id = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
                 if !root_track_id.is_empty() {
                     let state = app.state::<crate::state::AppState>();
-                    crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_track_id);
+                    crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root_track_id);
                     debug_eprintln!("[engine] maybe_schedule_pitch_orig called");
                 }
             }

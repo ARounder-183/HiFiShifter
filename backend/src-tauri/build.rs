@@ -5,8 +5,12 @@ fn main() {
     // Set HIFISHIFTER_SKIP_NATIVE_BUILD=1 to skip WORLD/Signalsmith/VSLIB builds
     let skip_native = std::env::var("HIFISHIFTER_SKIP_NATIVE_BUILD").unwrap_or_default();
     if skip_native != "1" {
-        build_world_static();
-        build_vslib();
+        // `build_world_static()` 已搬到 `backend/hifishifter-kernel/build.rs`：
+        // WORLD 的 Rust 封装在内核里，它需要那些 C++ 符号。留在 app 的 build.rs 里，
+        // 内核的测试二进制与插件都会报 LNK2019。
+        // `build_vslib()` 已搬到 `backend/hifishifter-kernel/build.rs`：
+        // `vslib.rs` 现在在内核里，`#[link(name = "vslib_x64")]` 是链接期依赖，
+        // 留在 app 的 build.rs 里会让插件单独链接内核时报 LNK1181。
         // `build_signalsmith_stretch()` 与 `build_soundtouch()` 已搬到
         // `backend/hifishifter-kernel/build.rs`：它们产出的原生库是**内核**的依赖
         // （`sstretch` / `soundtouch` 两个模块），而插件是另一个构建目标 ——
@@ -199,188 +203,7 @@ fn build_frontend() {
     }
 }
 
-/// Build WORLD vocoder as a static library using cc crate.
-///
-/// Since v2026.03, WORLD is statically linked at compile time instead of
-/// dynamically loaded via DLL. This approach provides:
-/// - Single self-contained binary (no external DLL dependencies)
-/// - Improved reliability (no runtime loading failures)
-/// - Simplified cross-platform builds
-/// - Faster startup (no DLL search overhead)
-///
-/// Source location: third_party/world-static/World/
-/// Build time: ~60-90s on first build, ~5-10s incremental
-///
-/// The WORLD library (https://github.com/mmorise/World) provides:
-/// - Dio/Harvest: F0 (pitch) analysis algorithms
-/// - CheapTrick: Spectral envelope estimation
-/// - D4C: Aperiodicity estimation
-/// - Synthesis: High-quality vocoder reconstruction
-fn build_world_static() {
-    use std::path::Path;
 
-    let world_src_dir = "third_party/world-static/World/src";
-    let world_src_path = Path::new(world_src_dir);
-
-    // Check if WORLD sources exist
-    if !world_src_path.exists() {
-        eprintln!("\n========================================");
-        eprintln!("ERROR: WORLD source code not found!");
-        eprintln!("========================================");
-        eprintln!("\nExpected location: {}", world_src_path.display());
-        eprintln!("\nTo fix this, run:");
-        eprintln!("  cd backend/src-tauri/third_party/world-static");
-        eprintln!("  git clone https://github.com/mmorise/World.git");
-        eprintln!("\nOr from project root:");
-        eprintln!("  git clone https://github.com/mmorise/World.git backend/src-tauri/third_party/world-static/World");
-        eprintln!("========================================\n");
-        panic!("WORLD sources missing. See error message above for instructions.");
-    }
-
-    // Verify all required source files exist
-    let required_files = [
-        "cheaptrick.cpp",
-        "codec.cpp",
-        "common.cpp",
-        "d4c.cpp",
-        "dio.cpp",
-        "fft.cpp",
-        "harvest.cpp",
-        "matlabfunctions.cpp",
-        "stonemask.cpp",
-        "synthesis.cpp",
-        "synthesisrealtime.cpp",
-    ];
-
-    for file in &required_files {
-        let file_path = world_src_path.join(file);
-        if !file_path.exists() {
-            panic!(
-                "Required WORLD source file not found: {}",
-                file_path.display()
-            );
-        }
-    }
-
-    println!("cargo:rerun-if-changed={}", world_src_dir);
-
-    // Compile WORLD as static library
-    let mut world = cc::Build::new();
-    world
-        .cpp(true)
-        .include(world_src_dir)
-        .file(format!("{}/cheaptrick.cpp", world_src_dir))
-        .file(format!("{}/codec.cpp", world_src_dir))
-        .file(format!("{}/common.cpp", world_src_dir))
-        .file(format!("{}/d4c.cpp", world_src_dir))
-        .file(format!("{}/dio.cpp", world_src_dir))
-        .file(format!("{}/fft.cpp", world_src_dir))
-        .file(format!("{}/harvest.cpp", world_src_dir))
-        .file(format!("{}/matlabfunctions.cpp", world_src_dir))
-        .file(format!("{}/stonemask.cpp", world_src_dir))
-        .file(format!("{}/synthesis.cpp", world_src_dir))
-        .file(format!("{}/synthesisrealtime.cpp", world_src_dir));
-
-    // C++ 标准旗标按编译器家族分发（与下方 sstretch 构建同一模式）：
-    // MSVC 的 cl 不认识 GCC 风格的 `-std:c++11`，传入只会得到 D9002
-    // "ignoring unknown option" 警告并被忽略 —— cl 默认即 ≥C++14，
-    // 显式给 /std:c++14 行为不变、警告消失。
-    if world.get_compiler().is_like_msvc() {
-        world.flag("/std:c++14");
-        world.flag("/utf-8");
-    } else {
-        world.flag("-std=c++11");
-    }
-
-    world.compile("world");
-
-    println!("cargo:rustc-link-lib=static=world");
-}
-
-/// Link against vslib_x64.dll via its import library.
-///
-/// The DLL and import lib live in third_party/vslib/:
-///   vslib_x64.dll  - needs to sit next to the final binary at runtime
-///   vslib_x64.lib  - import library linked at compile time
-///
-/// Enabled only when the `vslib` cargo feature is active.
-fn build_vslib() {
-    if !cfg!(feature = "vslib") {
-        return;
-    }
-
-    // Only link/copy for x86_64 Windows targets. Non-target platforms should
-    // not require third_party/vslib assets to exist.
-    let target = std::env::var("TARGET").unwrap_or_default();
-    let target_lc = target.to_lowercase();
-    if !(target_lc.contains("windows") && target_lc.contains("x86_64")) {
-        println!("cargo:warning=[vslib] target '{}' not an x86_64 Windows target; skipping link/copy of vslib_x64", target);
-        return;
-    }
-
-    let lib_dir = std::path::Path::new("third_party/vslib");
-
-    if !lib_dir.exists() {
-        panic!(
-            "[vslib] third_party/vslib/ not found. \
-             Place vslib_x64.dll and vslib_x64.lib there."
-        );
-    }
-
-    // Resolve to an absolute path so rustc can find the import lib
-    let abs = lib_dir
-        .canonicalize()
-        .expect("[vslib] failed to canonicalize third_party/vslib path");
-
-    println!("cargo:rerun-if-changed=third_party/vslib/vslib_x64.lib");
-    println!("cargo:rerun-if-changed=third_party/vslib/vslib_x64.dll");
-
-    println!("cargo:rustc-link-search=native={}", abs.display());
-    println!("cargo:rustc-link-lib=dylib=vslib_x64");
-
-    // OUT_DIR = .../target/<profile>/build/<pkg>/out  →  4 levels up = target/<profile>/
-    if let Ok(out_dir) = std::env::var("OUT_DIR") {
-        let dll_src = lib_dir.join("vslib_x64.dll");
-        let target_dir = std::path::Path::new(&out_dir)
-            .ancestors()
-            .nth(3)
-            .expect("[vslib] unexpected OUT_DIR depth");
-        let dll_dst = target_dir.join("vslib_x64.dll");
-        if let Err(e) = std::fs::copy(&dll_src, &dll_dst) {
-            println!(
-                "cargo:warning=[vslib] could not copy DLL to {}: {}",
-                dll_dst.display(),
-                e
-            );
-        } else {
-            println!(
-                "cargo:warning=[vslib] copied vslib_x64.dll to {}",
-                dll_dst.display()
-            );
-        }
-        // Test executables live in target/<profile>/deps/, where the loader
-        // looks for DLLs; copy there as well or cargo test cannot start.
-        let deps_dir = target_dir.join("deps");
-        let _ = std::fs::create_dir_all(&deps_dir);
-        let dll_dst_deps = deps_dir.join("vslib_x64.dll");
-        if dll_dst_deps != dll_dst {
-            if let Err(e) = std::fs::copy(&dll_src, &dll_dst_deps) {
-                println!(
-                    "cargo:warning=[vslib] could not copy DLL to {}: {}",
-                    dll_dst_deps.display(),
-                    e
-                );
-            } else {
-                println!(
-                    "cargo:warning=[vslib] copied vslib_x64.dll to {}",
-                    dll_dst_deps.display()
-                );
-            }
-        }
-    } else {
-        println!("cargo:warning=[vslib] OUT_DIR not set; skipping DLL copy")
-    }
-}
 
 /// Create a placeholder for vslib_x64.dll on non-x86_64 Windows targets
 /// so tauri_build resource validation passes.  On x86_64 with the vslib
