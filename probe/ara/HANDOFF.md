@@ -106,7 +106,16 @@ $env:ESBUILD_TMPDIR = "<worktree>\frontend\.esbuild-tmp"
 npm run build
 ```
 
-### 3.5 基线：仍未取得 ⚠️
+### 3.5 基线：已取得（2026-10-04）✅
+
+**结论先给**：`backend/src-tauri` 的 `cargo test --no-fail-fast` 跑通，合计
+**789 passed / 4 failed / 1 ignored**；4 个失败全部是 `audio_engine::snapshot::tests` 里
+硬编码 POSIX 路径 `/tmp/…`（Windows 上解析成 `E:\tmp\…`，该目录不存在）导致的**既有环境性失败，
+不要修**。完整数字与原因见 `EXECUTION-LEDGER.md` 的 "Baseline — OBTAINED" 一节，
+并已回填 `docs/superpowers/plans/2026-10-04-ara-bridge-probe.md` 的基线表。
+
+以下是**历史上的**受阻说明，保留以便理解为什么曾经拿不到 —— 当时是沙箱对 cargo 孙进程
+编译器的干扰，沙箱放开后同一配方一次跑通。
 
 `cargo test` 的基线**拿不到**。`fdk-aac-sys` / `opusic-sys` 经 `cmake` crate 调 MSBuild，
 撞上临时文件拒绝，而那条路径**没有** `TrackFileAccess` 之类的钩子可关。

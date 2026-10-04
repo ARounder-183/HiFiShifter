@@ -318,4 +318,38 @@ Nothing in Task 2 changed any file under `backend/` or `frontend/`, so the missi
 not affect Task 2's conclusions. Task 3 still needs the human-run baseline from a normal terminal.
 Cost if wrong: Task 3 remains blocked; no work is wasted.
 
+---
+
+## Baseline — OBTAINED. Blocker 1 is cleared.
+
+The sandbox that used to block the native build steps is gone, so the run completed in this
+session with the documented recipe (MSVC env, clean `TEMP`/`TMP` set *after* vcvars, `--jobs 1`).
+
+`cargo test --no-fail-fast` in `backend/src-tauri`:
+
+| Target | Result |
+| --- | --- |
+| `backend_lib` unittests | 777 run → **772 passed, 4 failed, 1 ignored** |
+| `main.rs` unittests | 0 tests |
+| `tests/loop_semantics.rs` | 10 passed |
+| `tests/track_duplicate.rs` | 5 passed |
+| `tests/smoke.rs` | 1 passed |
+| `tests/reaper_export_rates.rs` | 1 passed |
+| doc-tests | 0 tests |
+| **total** | **789 passed, 4 failed, 1 ignored** |
+
+**Task 3: Ruling: the 4 pre-existing failures are environmental and must not be fixed here.**
+All four are `audio_engine::snapshot::tests::{build_snapshot_attaches_volume_curve_to_rendered_and_raw_clips,
+build_snapshot_pads_from_previous_render_for_mid_playback_miss,
+build_snapshot_releases_pad_suppression_when_current_render_hits,
+build_snapshot_suppresses_pad_at_transport_arm}`. They share one cause: the tests write to the
+hardcoded POSIX path `/tmp/hifishifter-*.aiff`, which on Windows resolves to `E:\tmp\…`
+(`E:\tmp` does not exist), so `std::fs::write` returns `Os { code: 3, kind: NotFound }`.
+This is a Windows path assumption in the tests, not a product defect and not caused by the probe.
+Recorded as the baseline so any later change can be distinguished from "already broken".
+
+**Task 3: Ruling: Task 3's prerequisite is now satisfied.** The baseline is no longer empty, so
+edits to `backend/` can be evaluated against it. The probe is still acting on the plan's ordering:
+Task 3 is only started on the user's go-ahead.
+
 

@@ -39,8 +39,8 @@
 
    | 项目 | 基线值 |
    | --- | --- |
-   | `cargo test` | TBD（人工填入） |
-   | 既有失败项 | TBD（人工填入，注明"不要修"） |
+   | `cargo test` | **已取得（2026-10-04，`--no-fail-fast --jobs 1`）**：`backend_lib` 单测 777 个 → 772 passed / 4 failed / 1 ignored；`main.rs` 0 个；集成测试 17 个全通过（`loop_semantics` 10、`track_duplicate` 5、`smoke` 1、`reaper_export_rates` 1）；doc-tests 0 个。合计 **789 passed / 4 failed / 1 ignored**。 |
+   | 既有失败项 | **不要修**。4 个全部在 `audio_engine::snapshot::tests`，同一原因：测试硬编码 POSIX 路径 `/tmp/hifishifter-*.aiff`，在 Windows 上解析为 `E:\tmp\…`，而该目录不存在，于是 `std::fs::write` 报 `Os { code: 3, kind: NotFound }`。与探针无关，改动前后一致。 |
 
 **已知限制（记录在案，不影响本计划）**：在本会话的沙箱内，`cargo test` 的原生 C/C++ 构建步骤会被间歇性阻断（症状在 `D8050` / `MSB6003: Failed to create a temporary file` 之间游走，失败点随 cargo 重试而游走）。已排除：`TEMP` 有效且可写、`cl.exe` 单独调用成功、无陈旧 MSBuild 临时文件。判定为沙箱对 cargo 孙进程编译器的干扰，**非仓库问题** —— 主树同名测试二进制可正常构建。故基线须在普通终端取得。
 
