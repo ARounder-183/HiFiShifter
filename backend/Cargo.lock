@@ -16,6 +16,7 @@ dependencies = [
  "cpal",
  "encoding_rs",
  "hifishifter-ara-ipc",
+ "hifishifter-clipboard",
  "hifishifter-kernel",
  "hound",
  "id3",
@@ -2069,6 +2070,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hifishifter-clipboard"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "clipboard-win",
+ "log",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "wl-clipboard-rs",
+ "xcb",
+]
+
+[[package]]
 name = "hifishifter-kernel"
 version = "0.1.0"
 dependencies = [
@@ -2089,6 +2104,7 @@ dependencies = [
  "num-complex",
  "ort",
  "ort-tract",
+ "pinyin",
  "rayon",
  "rmp-serde",
  "rubato",
@@ -2101,7 +2117,9 @@ dependencies = [
  "symphonia-adapter-fdk-aac",
  "symphonia-adapter-libopus",
  "time",
+ "unicode-normalization",
  "uuid",
+ "wana_kana",
  "windows 0.58.0",
  "zip",
 ]
@@ -2114,6 +2132,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "hifishifter-ara-ipc",
+ "hifishifter-clipboard",
  "hifishifter-kernel",
  "log",
  "serde",

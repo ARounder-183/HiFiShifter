@@ -4,9 +4,20 @@ import { describe, expect, it } from "vitest";
 // 与 historyOpLabels.test.ts 的做法一致）。这样后端增删命令时本测试自动跟随，
 // 不需要手工维护一份副本。
 import backendLibSource from "../../../backend/src-tauri/src/lib.rs?raw";
+import pluginCommandSource from "../../../backend/hifishifter-plugin/src/editor/commands.rs?raw";
 import invokeSource from "./invoke.ts?raw";
 
 import { buildTauriArgs } from "./invoke";
+
+/** 原生插件没有Tauri handler list；检查真正actor match分发，不列手工例外白名单。 */
+function extractPluginHandlers(source: string): string[] {
+    const result = new Set<string>();
+    const pattern = /^\s*((?:"[a-z_0-9]+"\s*\|\s*)*"[a-z_0-9]+")\s*=>/gm;
+    for (const match of source.matchAll(pattern)) {
+        for (const literal of match[1].matchAll(/"([a-z_0-9]+)"/g)) result.add(literal[1]);
+    }
+    return [...result];
+}
 
 /**
  * IPC 布线穷举防回归测试。
@@ -110,6 +121,9 @@ describe("invoke wiring", () => {
         expect(extractSwitchCases(invokeSource)).toContain("set_clip_take_channel_mode");
         expect(extractNoArgCommands(invokeSource)).toContain("get_ui_settings");
         expect(extractBackendHandlers(backendLibSource)).toContain("save_ui_settings");
+        expect(extractPluginHandlers(pluginCommandSource).length).toBeGreaterThan(20);
+        expect(extractPluginHandlers(pluginCommandSource)).toContain("plugin_get_apply_state");
+        expect(extractPluginHandlers(pluginCommandSource)).toContain("plugin_refresh");
     });
 
     it("every frontend-referenced command exists in the backend handler list", () => {
@@ -127,7 +141,7 @@ describe("invoke wiring", () => {
             }
         }
 
-        const backend = new Set(extractBackendHandlers(backendLibSource));
+        const backend = new Set([...extractBackendHandlers(backendLibSource),...extractPluginHandlers(pluginCommandSource)]);
         const referenced = new Set<string>([
             ...invoked,
             ...extractSwitchCases(invokeSource),

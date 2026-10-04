@@ -35,6 +35,10 @@ rustfft = "6"
 num-complex = "0.4"
 aberth = "0.4"
 ndarray = { version = "0.16", optional = true }
+# 原GUI文字索引的纯转写/匹配，共享命令不引入Tauri或文件浏览器。
+pinyin = { version = "0.11", default-features = false, features = ["plain", "heteronym"] }
+wana_kana = { version = "5.0", default-features = false }
+unicode-normalization = "0.1"
 
 # 【为什么依赖表与 app 基本一致】这 40 个模块原本就是 app 的离线内核 —— 它们引用的
 # 全是纯算法/格式库（解码、重采样、FFT、ONNX 会话……），没有一个是宿主相关的。

@@ -800,4 +800,12 @@ Task 24: Ruling: 自动应用会持续生成快照，保留到owner销毁会快�
 
 Task 26: Ruling: 实际REAPER加载/消息绑定result0且FX内原GUI层级成立，无外部HiFiShifter进程 — 关闭内嵌显示/关联可行性疑问，继续自动pitch/持久化/资源验收，保留baseline和原日志 — 若把显示通过等同完整修音，会掩盖编辑输出仍未验证。
 
+Task 23: Ruling: 真实UI调用暴露clipboard/transliterate缺口 — 抽原native clipboard为无Tauri共享crate、原纯搜索整体迁kernel并保留app路径，真实读写参数格式与CJK转写 — 若用空结果掩盖缺命令，原编辑器复制粘贴/索引会悄悄失效。
+
+Task 26: Ruling: Unknown是工程前向兼容枚举，不是合法GUI算法 — 仅插件命令准入拒绝Unknown/vslib并保持patch先验证再修改，独立app反序列化不变 — 若只信Deserialize成功，错误字符串可静默改变轨道及undo状态。
+
+Task 26: Ruling: hostEvents多一层动态导入改变独立窗口初始事件时序，新增面板违反排版门 — 独立app直达原Tauri事件模块，插件才适配；采用原字号角色，布线门同时解析实际native actor — 若放宽门/改测试等更久，会掩盖standalone回归。
+
+Task 26: Ruling: 75插件/58共享kernel回归与定向61前端通过，不等于宿主手绘/新全量通过 — 留真实手绘/导出/重开open，保存当前一次性RPP，不猜Sky句柄或用脚本替代GUI — 若混淆证据，会虚报用户最关心的自动使用链路。
+
 

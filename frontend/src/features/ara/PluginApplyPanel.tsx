@@ -1,6 +1,6 @@
 // REAPER内原GUI的自动应用状态；没有实例选择、外部app或手动提交按钮。
 import { useEffect, useRef, useState } from "react";
-import { Button, Flex, Text } from "@radix-ui/themes";
+import { Button, Flex } from "@radix-ui/themes";
 import { invoke } from "../../services/invoke";
 import { listen } from "../../services/hostEvents";
 type ApplyState = { generation: number; applied_generation: number; pending: boolean;
@@ -48,16 +48,16 @@ export function PluginApplyPanel({ onTimelineChanged }: { onTimelineChanged: () 
     const error = failure || state?.error;
     return <div aria-label="ARA 自动应用" style={{ flexShrink: 0, borderBottom: "1px solid var(--gray-6)", padding: "5px 12px" }}>
         <Flex align="center" gap="2" wrap="wrap">
-            <Text size="1" weight="bold">HiFiShifter · REAPER / ARA</Text>
-            <Text size="1" role="status" color={error ? "red" : state?.pending ? "orange" : "green"}>
+            <span className="hs-type-label font-bold">HiFiShifter · REAPER / ARA</span>
+            <span className="hs-type-label" role="status" style={{color:error ? "var(--qt-danger-text)" : state?.pending ? "var(--qt-text)" : "var(--qt-text-muted)"}}>
                 {error ? `尚未应用：${error}` : !state?.ready ? "等待宿主音频" : state.pending ? "正在自动应用…" : "已应用"}
-            </Text>
-            {state && <Text size="1" color="gray">编辑 {state.generation} / 音频 {state.applied_generation}</Text>}
+            </span>
+            {state && <span className="hs-type-caption">编辑 {state.generation} / 音频 {state.applied_generation}</span>}
             <Button size="1" variant="soft" disabled={busy} onClick={() => void refresh()}>重新载入宿主</Button>
-            <Text size="1" color="gray">文件、片段位置及播放由 REAPER 控制 · 不支持倒放</Text>
+            <span className="hs-type-caption">文件、片段位置及播放由 REAPER 控制 · 不支持倒放</span>
         </Flex>
         {confirm && <Flex role="alertdialog" aria-label="重新载入宿主" align="center" gap="2" style={{ marginTop: 6 }}>
-            <Text size="1">当前仍有未应用编辑。重新载入会替换本地曲线，继续？</Text>
+            <span className="hs-type-label">当前仍有未应用编辑。重新载入会替换本地曲线，继续？</span>
             <Button size="1" color="red" onClick={() => void refresh(true)}>确认重新载入</Button>
             <Button size="1" variant="soft" onClick={() => setConfirm(false)}>取消</Button>
         </Flex>}

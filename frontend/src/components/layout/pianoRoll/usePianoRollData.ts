@@ -243,7 +243,7 @@ export function usePianoRollData(args: {
             if (!pitchEnabled) return;
             if (!rootTrackId) return;
             try {
-                const mod = await import("../../../services/hostEvents");
+                const mod = window.__HFS_PLUGIN_BOOTSTRAP__ ? await import("../../../services/hostEvents") : await import("@tauri-apps/api/event");
 
                 type PitchOrigUpdatedPayload = { rootTrackId?: string };
 
@@ -294,7 +294,7 @@ export function usePianoRollData(args: {
         async function setup() {
             if (!rootTrackId) return;
             try {
-                const mod = await import("../../../services/hostEvents");
+                const mod = window.__HFS_PLUGIN_BOOTSTRAP__ ? await import("../../../services/hostEvents") : await import("@tauri-apps/api/event");
                 type DynOrigUpdatedPayload = { rootTrackId?: string };
                 unlisten = await mod.listen<DynOrigUpdatedPayload>("dyn_orig_updated", (event) => {
                     if (disposed) return;

@@ -39,3 +39,28 @@ Box；发布失败保留旧音频。新增连续1000次/活跃读者回归未运
 
 下一步：保留当前一次性工程，继续完整原GUI参数动作接线，完成自动pitch导出、关闭FX/
 保存重开、独立app与资源矩阵的集中验收。当前没有技术不可实现证据，不关闭目标。
+
+## 本批接线与集中回归
+
+原生剪贴板已抽为`hifishifter-clipboard`共享crate，沿用原Windows/macOS/Linux自定义
+格式、争用重试与旧信封兼容；app路径是再导出，plugin实际读写参数JSON。文字转写/匹配
+整体迁到kernel/search，app原路径再导出，插件调用真正transliterate_batch，不回传假数据。
+这些源修改未热替换当前运行bundle。
+
+插件首轮55 lib测试54通过/1失败：算法枚举的serde(other)保留Unknown，typed deserialize
+成功不等于算法合法。插件边界拒绝Unknown/vslib（不改app的旧工程兼容）后完整重跑：
+lib55、mapping13、依赖树1、native renderer5、exports1，共75，正常exit0。
+包括actor真正getState尾块屏障、无效patch原子性、持续1000次快照回收和process零分配/
+零释放。它们不代替真实宿主音高/保存验收。
+
+共享kernel editor12、search39、HfsPeaks7均正常exit0。独立app cargo check exit0。
+前端先跑相关23通过；全量首次2698通过/12失败，涉及Radix Text/字号规则、独立窗口
+事件异步初始化及布线门只识别Tauri。修正为原排版角色、独立app保留原直达Tauri加载
+时序、插件分支才用hostEvents；布线门检查真实actor match而非手工例外。六个失败文件
+集中定向61通过，tsc-b通过；修正后的全量仍待最终一次复跑，不写“全前端绿”。
+
+当前桌面只读诊断为Default（不是锁屏）。Sky fresh observation能读FX及About对话框，
+但即使重置JS观察器，最新index1的Raise仍报`no cached secondary actions for reaper.exe`。
+停止盲目输入，不用PowerShell UIA/猜窗口句柄绕过，也不以脚本参数提交冒充手绘。
+Lua原有save命令已把当前未编辑一次性工程正常保存为`.build-tmp/embedded-probe/embedded-editor.RPP`
+（5056 bytes，log project saved）。隔离REAPER46132仍运行，未强杀。

@@ -44,6 +44,17 @@ native字段不保留Tauri app句柄、不运行设备。UI响应由窗口timer�
 
 ## 一期历史排错记录
 
+最新集中回归/接线：原系统剪贴板搬到共享hifishifter-clipboard，纯搜索转写到kernel/search；
+插件参数clipboard/transliterate真实实现，app原入口再导出。native算法Unknown的serde兼容
+值必须在命令边界拒绝，原失败用例已修。完整plugin75、kernel editor12/search39/peaks7
+正常exit0；独立app cargo check正常exit0。前端全量首次2698/12fail，定向修复六文件61
+正常通过，tsc通过；最新全量未重跑，不能报告全前端绿。SDK/main仍未改，没有push。
+当前仍未取得手绘自动pitch和重开PCM输出。Sky reset后对最新FX index1 Raise仍报无cache，
+screenshots有前景Codex不一致；只读InputDesktop为Default，不能说桌面锁了。
+已走原有一次性Lua save，RPP5056 bytes且log project saved；REAPER46132继续运行。
+源修改未部署旧窗口，不强杀/热替换；后续先处理可靠FX输入或正常关闭后升级，然后真正
+原参数编辑器绘制/自动应用/导出。不要把UI helper问题写成“ARA无法实现”。
+
 二期最新实测（覆盖上文“未部署”历史）：已构建规范bundle，薄Win32入口以绝对路径/
 DLL_LOAD_DIR加载同进程Rust engine，项目CWD启动且不加PATH。隔离REAPER PID46132已
 加载并ARA绑定，三组标准消息关联result0；createView返回真实native editor。REAPER

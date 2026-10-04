@@ -1,6 +1,6 @@
 // ARA 宿主会话面板：复用主窗口参数编辑器。
 import { useEffect, useState } from "react";
-import { Button, Flex, Text } from "@radix-ui/themes";
+import { Button, Flex } from "@radix-ui/themes";
 import { ReloadIcon, Link2Icon, UploadIcon, Cross2Icon } from "@radix-ui/react-icons";
 import { araApi, araError, type AraInstance, type AraResult } from "./araApi";
 
@@ -74,9 +74,9 @@ export function AraConnectionPanel({
             style={{ flexShrink: 0, borderBottom: "1px solid var(--gray-6)", padding: "5px 12px" }}
         >
             <Flex align="center" gap="2" wrap="wrap">
-                <Text size="1" weight="bold">
+                <span className="hs-type-label font-bold">
                     ARA / REAPER
-                </Text>
+                </span>
                 <select
                     aria-label="ARA 实例"
                     value={selected}
@@ -90,7 +90,7 @@ export function AraConnectionPanel({
                         color: "var(--gray-12)",
                         border: "1px solid var(--gray-7)",
                         borderRadius: 4,
-                        fontSize: 12,
+                        fontSize: "var(--qt-fs-xs)",
                     }}
                 >
                     {!instances.length && <option value="">未发现实例</option>}
@@ -160,13 +160,13 @@ export function AraConnectionPanel({
                     <Cross2Icon />
                     断开
                 </Button>
-                <Text size="1" color="gray">
+                <span className="hs-type-caption">
                     不支持倒放
-                </Text>
-                <Text size="1" color="gray" role="status">
+                </span>
+                <span className="hs-type-caption" role="status">
                     {busy ? "处理中..." : status}
                     {session && ` · r${session.revision} / m${session.model_revision}`}
-                </Text>
+                </span>
             </Flex>
             {replacement && (
                 <Flex
@@ -177,7 +177,7 @@ export function AraConnectionPanel({
                     aria-label="替换未保存工程"
                     style={{ marginTop: 6 }}
                 >
-                    <Text size="1">当前工程有未保存修改，替换为宿主快照？</Text>
+                    <span className="hs-type-label">当前工程有未保存修改，替换为宿主快照？</span>
                     <Button
                         size="1"
                         color="red"
@@ -197,14 +197,12 @@ export function AraConnectionPanel({
                 </Flex>
             )}
             {error && (
-                <Text
-                    size="1"
-                    color="red"
+                <span className="hs-type-label"
                     role="alert"
                     style={{ display: "block", overflowWrap: "anywhere", marginTop: 4 }}
                 >
                     {error}
-                </Text>
+                </span>
             )}
         </div>
     );

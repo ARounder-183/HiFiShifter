@@ -29,6 +29,7 @@ cc = "1.0"
 # 搬迁期间由 lib.rs 里的 `pub use` 把路径接回来。
 hifishifter-kernel = { path = "../hifishifter-kernel" }
 hifishifter-ara-ipc = { path = "../hifishifter-ara-ipc" }
+hifishifter-clipboard = { path = "../hifishifter-clipboard" }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }

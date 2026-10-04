@@ -135,6 +135,8 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             return { force: args[0] ?? false };
         case "plugin_refresh":
             return { force: args[0] ?? false };
+        case "emit_ui_event":
+            return {event:args[0],payload:args[1]};
 
         case "import_audio_item":
             return {

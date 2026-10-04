@@ -96,6 +96,34 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
         "set_ui_locale"=>return Ok(json!({"ok":true,"locale":input["locale"]})),
         "consume_startup_project_path"=>return Ok(Value::Null),
         "get_processor_params"=>return value(hifishifter_kernel::editor::capabilities::get_processor_params(input["algo"].as_str().ok_or("algo missing")?.into())),
+        "transliterate"=>{
+            let texts:Vec<String>=args(input["texts"].clone())?;
+            if texts.len()>5000 || texts.iter().map(String::len).sum::<usize>()>1024*1024 {return Err("text index budget exceeded".into());}
+            let options:hifishifter_kernel::search::SearchOptions=if input["options"].is_null() {Default::default()} else {args(input["options"].clone())?};
+            return value(hifishifter_kernel::search::transliterate_batch(&texts,&options));
+        },
+        "read_system_clipboard_object"=>{
+            return match hifishifter_clipboard::read_bytes()? {
+                Some(bytes)=>match String::from_utf8(bytes) {
+                    Ok(payload)=>Ok(json!({"ok":true,"available":true,"payload":payload})),
+                    Err(_)=>Ok(json!({"ok":true,"available":false})),
+                },
+                None=>Ok(json!({"ok":true,"available":false})),
+            };
+        },
+        "write_system_clipboard_object"=>{
+            let payload=input["payload"].as_str().ok_or("clipboard payload required")?;
+            if payload.len()>8*1024*1024 {return Err("parameter clipboard budget exceeded".into());}
+            let decoded:Value=args(serde_json::from_str(payload).map_err(|e|e.to_string())?)?;
+            if decoded["kind"]!="param" {return Err("timeline clipboard geometry is controlled by host".into());}
+            hifishifter_clipboard::write_bytes(payload.as_bytes(),input["textSummary"].as_str().unwrap_or("HiFiShifter parameter data copied."))?;
+            return Ok(json!({"ok":true}));
+        },
+        "clipboard_kind"=>{
+            let kind=hifishifter_clipboard::read_bytes()?.and_then(|bytes|serde_json::from_slice::<Value>(&bytes).ok())
+                .filter(|p|p["kind"]=="param").map(|_|"param");
+            return Ok(json!({"ok":true,"kind":kind}));
+        },
         "emit_ui_event"=>{let event=input["event"].as_str().ok_or("event missing")?;session.emit(event,input["payload"].clone());return Ok(Value::Null);},
         _=>{},
     }
@@ -171,6 +199,10 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
             let object=input.as_object().ok_or("track arguments required")?;
             for (key,value) in object {if !matches!(key.as_str(),"trackId"|"muted"|"solo"|"volume"|"composeEnabled"|"pitchAnalysisAlgo") && !value.is_null() {return Err(format!("track property controlled by host: {key}"));}}
             let patch:TrackPatch=args(input.clone())?;
+            // 工程反序列化为前向兼容保留Unknown；实时GUI命令不能把它当可执行算法。
+            if patch.pitch_analysis_algo.as_ref().is_some_and(|algo|matches!(algo,PitchAnalysisAlgo::Unknown|PitchAnalysisAlgo::VocalShifterVslib)) {
+                return Err("algorithm unavailable in plugin mode".into());
+            }
             let id=patch.track_id.as_str();track_exists(session,id)?;
             if patch.volume.is_some_and(|n|!n.is_finite() || !(0.0..=4.0).contains(&n)) {return Err("track volume out of range".into());}
             let mut timeline=session.timeline.lock().unwrap();

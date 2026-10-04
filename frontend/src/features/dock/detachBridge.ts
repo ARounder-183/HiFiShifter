@@ -248,7 +248,7 @@ async function loadEventApi(): Promise<{
     // 插件没有Tauri卫星窗口，不广播Redux动作到独立app事件总线。
     if (typeof window !== "undefined" && window.__HFS_PLUGIN_BOOTSTRAP__) return null;
     try {
-        const mod = await import("../../services/hostEvents");
+        const mod = await import("@tauri-apps/api/event");
         return { emit: mod.emit, listen: mod.listen };
     } catch {
         return null;

@@ -79,6 +79,7 @@ macro_rules! log_error_limited {
 pub mod state;
 pub mod editor;
 pub mod hfspeaks_v2;
+pub mod search;
 
 // ── 曲线与参数 ──────────────────────────────────────────────────────────────
 pub mod fade_curves;
