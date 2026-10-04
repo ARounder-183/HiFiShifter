@@ -565,4 +565,44 @@ workspace 的成员**，app 本体必然在里面。改成 `cargo tree -p hifish
 --edges normal --prefix none` 后按行首包名匹配。
 代价：若沿用 metadata，守卫要么永远失败、要么被迫放宽到形同虚设。
 
+---
+
+# Phase 2（插件骨架产品化）
+
+**Dev 17: Ruling: `ara2-bridge-plugin` 0.3.0 的高层 `PluginModel` **丢掉了整个模型图**，
+不能用来建时间线。**
+实测（对着锁定的 crate 源码逐项核对）：
+
+| 映射需要的输入 | 高层 trait 给不给 | 证据 |
+| --- | --- | --- |
+| audioSource 的 id/采样率/样本数/声道数 | **给** | `AudioSourceProperties` 有 getter |
+| audioModification 的 id | **给** | `AudioModificationProperties::persistent_id()` |
+| regionSequence 的名字/序号 | **给** | `RegionSequenceProperties` |
+| **playbackRegion 的起点/长度/名字** | **不给** | `PlaybackRegionProperties` 只有 `transformation_flags()` 一个公开读访问器（字段全私有） |
+| **audioModification → audioSource 的边** | **不给** | `AudioModifications::create_audio_modification(context, properties)` 没有 source 参数 |
+| **playbackRegion → audioModification 的边** | **不给** | `PlaybackRegions::create_playback_region(context, properties)` 没有 modification 参数 |
+| **playbackRegion → regionSequence 的边** | **不给** | 同上（框架内部的 `runtime.create_playback_region(modification, sequence, properties)` 两个参数都**没有往委托层传**） |
+
+即：这些边在框架**内部是有的**（`runtime.rs` 的节点上存着 `modification` / `sequence`），
+只是**没有出现在要实现的 trait 上**。探针之所以没撞上，是因为它只用高层接口**计数**，
+从不读边；而 Task 1 那份真实模型样本来自 C++ 插桩，不是这条链路。
+
+**处置（第一步已做）**：把 `ara2-bridge-core` 本地化并补上五个读访问器
+（`start/duration_in_{modification,playback}_time` 与 `name`），见
+`backend/third-party/ara2-bridge-core/PATCHED.md`。补丁**纯增量**，
+`[patch.crates-io]` 之后其余 ara2-bridge crate 行为不变。
+
+**仍未解决**：三条边拿不到。当前的兜底是"文档里只有一个 source / modification 时
+全部挂到它上面"（v1 单实例语义下通常正确），多源文档下是**近似**，已在
+`ara/model.rs` 里显式告警并注明。
+
+**下一步的两个选项**（推荐 a）：
+- **(a) 同样把 `ara2-bridge-plugin` 本地化，给三个 trait 方法补上边参数** ——
+  框架内部本来就有这些值，改动是"多传两个参数"，规模可控；
+- (b) 自己手写一层 ARA 文档控制器委托（直接对 `ara2-bridge-sys`）——
+  等于重写上游整个回调派发层，规模大得多。
+
+代价：若不做，插件的模型只有"一堆没有连线的对象"，无法建时间线 ——
+Phase 2 的 A1/A2 判据只能停留在"计数一致"。
+
 
