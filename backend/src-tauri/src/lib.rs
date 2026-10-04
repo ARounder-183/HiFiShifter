@@ -43,7 +43,9 @@ mod clip_rendering_state;
 pub(crate) mod commands;
 #[path = "audio/encode/mod.rs"]
 mod encode;
-mod fade_curves;
+// `fade_curves` 已迁到 `hifishifter-kernel`。这里再导出，app 侧 `crate::fade_curves::…`
+// 的路径保持不变 —— 这是内核搬迁的通用做法：搬文件，接路径，基线测试兜底。
+pub use hifishifter_kernel::fade_curves;
 mod formant_cache;
 #[path = "audio/formant_morph/mod.rs"]
 mod formant_morph;

@@ -1,0 +1,12 @@
+[package]
+name = "hifishifter-kernel"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "HiFiShifter 的离线音频内核：不依赖 Tauri，也不依赖音频设备"
+
+# 独立 workspace：内核是从 `backend/src-tauri` 里逐步搬出来的，搬迁期间两个 crate
+# 各自可独立构建。等搬完（或把 workspace 根提到 `backend/`）这一段即可删除。
+[workspace]
+
+[dependencies]
