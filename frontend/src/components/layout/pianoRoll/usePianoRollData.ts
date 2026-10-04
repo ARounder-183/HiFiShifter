@@ -989,6 +989,10 @@ export function usePianoRollData(args: {
                 }
                 setReferencePitchViews(nextReferenceViews);
             }
+        } catch {
+            // 传输层失败（invoke 拒绝）：保留旧数据静默降级，与 refreshVisible
+            // 的取数分支同一处理。本函数多为 fire-and-forget 调用，不接住会把
+            // 拒绝漏成 unhandledrejection。
         } finally {
             setIsRefreshing(false);
             endLoading();
@@ -1118,6 +1122,9 @@ export function usePianoRollData(args: {
                 setReferencePitchViews(nextReferenceViews);
             }
             invalidate();
+        } catch {
+            // 传输层失败：保留旧数据静默降级（与 refreshNow / refreshVisible 同一
+            // 处理；fire-and-forget 调用下不接住就是 unhandledrejection）。
         } finally {
             endLoading();
         }

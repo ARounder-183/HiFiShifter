@@ -7,23 +7,20 @@
  * - viewport 尺寸监测（ResizeObserver）
  * - syncScrollLeft → DOM 直通 + timelineViewportBus
  * - secFromClientX / trackIdFromClientY / rowTopForTrackId 坐标转换
- * - snapSec / isEditableTarget / isPointerOnNativeScrollbar 工具函数
- * - startPanPointer 中键平移
- * - setPlayheadFromClientX / startDeferredPlayheadSeek 播放头拖拽
+ * - snapSec / isEditableTarget 工具函数
+ * - setPlayheadFromClientX 播放头拖拽落点
  * - altPressed (stretch modifier) 键盘监听
  * - bars / contentWidth/Height 派生计算
  * - Mipmap 预加载
  */
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import { registerDragAbort } from "../gestureFocusGuard";
 import { useAppDispatch, useAppSelector } from "../../../../app/hooks";
 import { store, type RootState } from "../../../../app/store";
 import { shallowEqual } from "react-redux";
 import { timelineViewportBus } from "../../../../utils/timelineViewportBus";
 import { timelineViewportSync } from "../../../../utils/timelineViewportSync";
 import { IS_MAC, isPrimaryModifierDown } from "../../../../utils/platform";
-import { nativeScrollbarZoneAt } from "../../../../utils/nativeScrollbar";
 
 import { createTickAxis } from "../runtime/tickAxis.js";
 import { rulerLayerTranslatePx } from "../../renderKernel/timelineAxis.js";
@@ -168,13 +165,6 @@ export interface TimelineStateResult {
     pxPerSecRef: React.MutableRefObject<number>;
     viewportWidthRef: React.MutableRefObject<number>;
     rowHeightRef: React.MutableRefObject<number>;
-    panRef: React.MutableRefObject<{
-        pointerId: number | null;
-        startX: number;
-        startY: number;
-        scrollLeft: number;
-        scrollTop: number;
-    } | null>;
 
     // State values
     scrollLeft: number;
@@ -265,10 +255,6 @@ export interface TimelineStateResult {
     syncScrollLeft: (next: number) => void;
     /** 逐帧水平同步（内核每帧通知）：只做跨面板同步，不做 React 对齐。 */
     syncScrollLeftFrame: (next: number) => void;
-    /** 竖直轴同帧提交：更新 scrollTopPxRef 并同步广播视口总线。 */
-    syncScrollTop: (next: number) => void;
-    scrollTopPxRef: React.MutableRefObject<number>;
-    setScrollLeftAction: React.Dispatch<React.SetStateAction<number>>;
     secFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     trackIdFromClientY: (clientY: number) => string | null;
@@ -283,24 +269,12 @@ export interface TimelineStateResult {
     ) => SnapResult;
     snapTimeline: SnapTimelineFn;
     isEditableTarget: (target: EventTarget | null) => boolean;
-    isPointerOnNativeScrollbar: (
-        scroller: HTMLDivElement,
-        clientX: number,
-        clientY: number,
-    ) => boolean;
-    startPanPointer: (e: React.PointerEvent) => void;
     setPlayheadFromClientX: (
         clientX: number,
         bounds: DOMRect,
         xScroll: number,
         commit: boolean,
     ) => number;
-    startDeferredPlayheadSeek: (args: {
-        startClientX: number;
-        startClientY: number;
-        getBounds: () => DOMRect | null;
-        getScrollLeft: () => number;
-    }) => void;
 
     // Keyboard zoom pending ref (needed in useLayoutEffect)
     keyboardZoomPendingRef: React.MutableRefObject<{
@@ -465,57 +439,6 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     useEffect(() => {
         rowHeightRef.current = rowHeight;
     }, [rowHeight]);
-    // ── ResizeObserver → viewportWidth ────────────────────────
-    useEffect(() => {
-        const scroller = scrollRef.current;
-        if (!scroller) return;
-
-        const updateViewportWidth = () => {
-            const width = scroller.clientWidth || 0;
-            setViewportWidth(width);
-            // 视口宽度（含首次测量）必须立即同步到总线：总线初始窗口是
-            // 1px 占位，而波形面/画布按总线 axis 裁剪（sceneBuilder 对
-            // 窗口外的 clip 直接跳过、不发起取数）——fresh 应用在首次
-            // 滚动/缩放之前总线永远不会被 emit，波形因此无法加载显示。
-            // 此处把真实窗口提交给总线，波形在无任何用户操作时也能出现。
-            timelineViewportBus.emit(
-                scroller.scrollLeft,
-                pxPerSecRef.current,
-                width,
-                scroller.scrollTop,
-                rowHeightRef.current,
-            );
-        };
-
-        updateViewportWidth();
-        // 挂载/重挂载时对齐竖直基准（浏览器可能恢复了滚动位置），
-        // 保证 sticky 画布在首个滚动事件前就以正确偏移绘制。
-        if (Math.abs(scrollTopPxRef.current - scroller.scrollTop) > 1e-6) {
-            scrollTopPxRef.current = scroller.scrollTop;
-            timelineViewportBus.emit(
-                scroller.scrollLeft,
-                pxPerSecRef.current,
-                scroller.clientWidth || 0,
-                scroller.scrollTop,
-                rowHeightRef.current,
-            );
-        }
-
-        if (typeof ResizeObserver !== "undefined") {
-            const observer = new ResizeObserver(() => {
-                updateViewportWidth();
-            });
-            observer.observe(scroller);
-            return () => {
-                observer.disconnect();
-            };
-        }
-
-        window.addEventListener("resize", updateViewportWidth);
-        return () => {
-            window.removeEventListener("resize", updateViewportWidth);
-        };
-    }, []);
 
     // ── syncScrollLeft → DOM 直通 + bus ───────────────────────
     // 函数体只读 ref/bus，不依赖任何渲染期值：必须稳定引用，
@@ -635,67 +558,6 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         },
         [livePxPerSec],
     );
-
-    // ── syncScrollTop：竖直轴的同帧提交 ──────────────────────────
-    // sticky 画布层（clip 体 / 波形面）不随滚动容器原生移动，竖直滚动时
-    // 必须与 DOM 内容层在同一帧内拿到新 scrollTop。滚动事件在绘制前触发，
-    // 这里同步 emit，任何经 React state 的延迟都会造成画布与 Clip 分层。
-    const syncScrollTop = React.useCallback((next: number) => {
-        if (Math.abs(scrollTopPxRef.current - next) <= 1e-6) return;
-        scrollTopPxRef.current = next;
-        timelineViewportBus.emit(
-            scrollLeftRef.current,
-            pxPerSecRef.current,
-            viewportWidthRef.current,
-            next,
-            rowHeightRef.current,
-        );
-    }, []);
-
-    const setScrollLeftAction: React.Dispatch<React.SetStateAction<number>> = React.useCallback(
-        (action: React.SetStateAction<number>) => {
-            const next =
-                typeof action === "function"
-                    ? (action as (prev: number) => number)(scrollLeftRef.current)
-                    : action;
-            syncScrollLeft(next);
-        },
-        [syncScrollLeft],
-    );
-
-    // ── 视口自愈对账（每帧）─────────────────────────────────────
-    // 原生 scroller 是滚动/缩放视口的唯一事实源；sticky 画布层（Clip 体/波形）
-    // 经视口总线跟随同步出去的值。任何代码路径只要漏发或迟发了总线（写入被
-    // 浏览器钳制/量化/锚定修正、异常中断的缩放事务……），画布就会与原生 DOM
-    // 内容层错位，表现为 Clip 偏离其选中框。这里每帧以原生值对账一次，发现
-    // 失步立即重发总线——绝大多数帧只是两次数值比较，空闲时开销可忽略。
-    useEffect(() => {
-        let raf = 0;
-        const reconcile = () => {
-            raf = requestAnimationFrame(reconcile);
-            const scroller = scrollRef.current;
-            if (!scroller) return;
-            const snap = timelineViewportBus.getSnapshot();
-            const scrollLeft = scroller.scrollLeft;
-            const scrollTop = scroller.scrollTop;
-            const pxPerSec = pxPerSecRef.current;
-            const viewportWidth = scroller.clientWidth;
-            if (
-                Math.abs(snap.scrollLeft - scrollLeft) <= 0.25 &&
-                Math.abs(snap.scrollTopPx - scrollTop) <= 0.25 &&
-                Math.abs(snap.pxPerSec - pxPerSec) <= 1e-9 &&
-                // 窗口宽度也纳入对账：纯窗口 resize（无滚动/缩放）时总线
-                // 窗口若失配，波形面按旧窗口裁剪会少画/漏取数，必须自愈。
-                Math.abs(snap.viewportWidth - viewportWidth) <= 0.5
-            ) {
-                return;
-            }
-            scrollTopPxRef.current = scrollTop;
-            syncScrollLeft(scrollLeft);
-        };
-        raf = requestAnimationFrame(reconcile);
-        return () => cancelAnimationFrame(raf);
-    }, [syncScrollLeft]);
 
     // 同步开关（双向交互）：订阅共享视口，并把参数编辑器写入的值应用到轨道视图。
     useEffect(() => {
@@ -828,15 +690,6 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     // ── pxPerBeat / secPerBeat ───────────────────────────────
     const secPerBeat = 60 / Math.max(1, s.bpm);
     const pxPerBeat = pxPerSec * secPerBeat;
-
-    // ── pan ref ──────────────────────────────────────────────
-    const panRef = useRef<{
-        pointerId: number | null;
-        startX: number;
-        startY: number;
-        scrollLeft: number;
-        scrollTop: number;
-    } | null>(null);
 
     // ── trackVolumeUi ────────────────────────────────────────
     const [trackVolumeUi, setTrackVolumeUi] = useState<Record<string, number>>({});
@@ -1196,74 +1049,6 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         [beatFromClientX, dispatch, snapTimelineDetailed],
     );
 
-    const startDeferredPlayheadSeek = React.useCallback(
-        (args: {
-            startClientX: number;
-            startClientY: number;
-            getBounds: () => DOMRect | null;
-            getScrollLeft: () => number;
-        }) => {
-            const { startClientX, startClientY, getBounds, getScrollLeft } = args;
-            let moved = false;
-            let lastClientX = startClientX;
-            let lastSec = 0;
-
-            const updateAt = (clientX: number, commit: boolean) => {
-                const bounds = getBounds();
-                if (!bounds) return null;
-                const sec = setPlayheadFromClientX(clientX, bounds, getScrollLeft(), commit);
-                return sec;
-            };
-
-            const onMove = (ev: MouseEvent) => {
-                const dx = ev.clientX - startClientX;
-                const dy = ev.clientY - startClientY;
-                if (!moved && dx * dx + dy * dy >= 9) {
-                    moved = true;
-                }
-                if (!moved) return;
-                lastClientX = ev.clientX;
-                const sec = updateAt(ev.clientX, false);
-                if (sec != null) lastSec = sec;
-            };
-
-            // 失焦取消：切屏期间 mouseup 不送达本窗口。blur 时以最后一次
-            // 已知指针位置收尾（提交 seek + 清除吸附高亮），防止播放头
-            // 拖拽状态与高亮冻结。
-            const finish = () => {
-                unregisterAbort();
-                window.removeEventListener("mousemove", onMove, true);
-                window.removeEventListener("mouseup", onEnd, true);
-                window.removeEventListener("mouseleave", onEnd, true);
-
-                if (!moved) {
-                    updateAt(lastClientX, true);
-                    // 单击跳转不走高亮通道；兜底清理一次。
-                    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
-                    return;
-                }
-
-                const sec = updateAt(lastClientX, false);
-                const finalSec = sec == null ? lastSec : sec;
-                void dispatch(seekPlayhead(finalSec));
-                // 拖拽结束：最后一次 update 会发布高亮，必须在其后清除。
-                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
-            };
-
-            const onEnd = (ev: MouseEvent) => {
-                lastClientX = ev.clientX;
-                finish();
-            };
-
-            const unregisterAbort = registerDragAbort(finish);
-
-            window.addEventListener("mousemove", onMove, true);
-            window.addEventListener("mouseup", onEnd, true);
-            window.addEventListener("mouseleave", onEnd, true);
-        },
-        [dispatch, setPlayheadFromClientX],
-    );
-
     // ── isEditableTarget ─────────────────────────────────────
     function isEditableTarget(target: EventTarget | null): boolean {
         const el = target as HTMLElement | null;
@@ -1277,102 +1062,6 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             return true;
         }
         return false;
-    }
-
-    // ── isPointerOnNativeScrollbar ───────────────────────────
-    function isPointerOnNativeScrollbar(
-        scroller: HTMLDivElement,
-        clientX: number,
-        clientY: number,
-    ): boolean {
-        return nativeScrollbarZoneAt(scroller, clientX, clientY) != null;
-    }
-
-    // ── startPanPointer (中键平移) ───────────────────────────
-    function startPanPointer(e: React.PointerEvent) {
-        const scroller = scrollRef.current;
-        if (!scroller) return;
-        if (e.pointerType !== "mouse") return;
-        panRef.current = {
-            pointerId: e.pointerId,
-            startX: e.clientX,
-            startY: e.clientY,
-            scrollLeft: scroller.scrollLeft,
-            scrollTop: scroller.scrollTop,
-        };
-
-        const prevCursor = document.body.style.cursor;
-        const prevSelect = document.body.style.userSelect;
-        document.body.style.cursor = "grabbing";
-        document.body.style.userSelect = "none";
-
-        try {
-            (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-        } catch {
-            // ignore
-        }
-
-        function onMove(ev: PointerEvent) {
-            const pan = panRef.current;
-            const el = scrollRef.current;
-            if (!pan || !el) return;
-            if (pan.pointerId != null && ev.pointerId !== pan.pointerId) return;
-            el.scrollLeft = pan.scrollLeft - (ev.clientX - pan.startX);
-            el.scrollTop = pan.scrollTop - (ev.clientY - pan.startY);
-            syncScrollLeft(el.scrollLeft);
-            syncScrollTop(el.scrollTop);
-        }
-
-        function finish() {
-            const pan = panRef.current;
-            if (pan && pan.pointerId !== e.pointerId) {
-                // panRef 已被另一指针的平移覆盖：本手势只清理自身资源
-                // （监听器 + 失焦守卫 + 光标/选择态），不触碰当前 pan 状态。
-                unregisterAbort();
-                window.removeEventListener("pointermove", onMove);
-                window.removeEventListener("pointerup", end);
-                window.removeEventListener("pointercancel", end);
-                document.body.style.cursor = prevCursor;
-                document.body.style.userSelect = prevSelect;
-                return;
-            }
-            if (!pan) return;
-            panRef.current = null;
-            unregisterAbort(); // 收尾第一步注销失焦守卫（幂等防双触发）
-            document.body.style.cursor = prevCursor;
-            document.body.style.userSelect = prevSelect;
-            window.removeEventListener("pointermove", onMove);
-            window.removeEventListener("pointerup", end);
-            window.removeEventListener("pointercancel", end);
-        }
-
-        function end(ev: PointerEvent) {
-            const pan = panRef.current;
-            if (!pan) {
-                // panRef 已空：本手势的监听器仍需解绑（可能被 blur 兜底
-                // 或并发收尾抢先清空）。
-                window.removeEventListener("pointermove", onMove);
-                window.removeEventListener("pointerup", end);
-                window.removeEventListener("pointercancel", end);
-                return;
-            }
-            if (pan.pointerId != null && ev.pointerId !== pan.pointerId) {
-                // 非本平移指针的事件：若是本手势的指针已被覆盖，走 finish
-                // 的 abandoned 分支清理；否则（另一指针的杂散事件）忽略。
-                if (ev.pointerId === e.pointerId) finish();
-                return;
-            }
-            finish();
-        }
-
-        // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur 时
-        // 走与 end 相同的收尾 —— 关键：必须复位 body 的 grabbing 光标与
-        // userSelect，否则切回后鼠标呈"抓取"态且无法选中文本。
-        const unregisterAbort = registerDragAbort(finish);
-
-        window.addEventListener("pointermove", onMove);
-        window.addEventListener("pointerup", end);
-        window.addEventListener("pointercancel", end);
     }
 
     // ── viewport start/end ───────────────────────────────────
@@ -1398,7 +1087,6 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         pxPerSecRef,
         viewportWidthRef,
         rowHeightRef,
-        panRef,
 
         scrollLeft,
         pxPerSec,
@@ -1459,9 +1147,6 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         pendingDropDurationPathRef,
 
         syncScrollLeft,
-        syncScrollTop,
-        scrollTopPxRef,
-        setScrollLeftAction,
         setScrollLeftState,
         secFromClientX,
         beatFromClientX,
@@ -1472,10 +1157,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         snapTimelineDetailed,
         snapTimeline,
         isEditableTarget,
-        isPointerOnNativeScrollbar,
-        startPanPointer,
         setPlayheadFromClientX,
-        startDeferredPlayheadSeek,
 
         keyboardZoomPendingRef,
     };

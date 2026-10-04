@@ -5783,6 +5783,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * `finalizeActiveGesture` 跳过 seek 提交（见该参数说明）。
      */
     function onWindowBlur(): void {
+        // 中键平移也必须收尾：window 失焦后 pointerup 不会派发到本窗口，
+        // 悬挂的 panPointerId 会在重新聚焦后让"悬停移动"继续平移（没有按键
+        // 却在滚动），grabbing 光标 / 禁选中也会一直挂着 —— 与其他手势统一
+        // 走失焦收尾（endPan 自身有空值守卫，无平移时是空操作）。
+        endPan();
         finalizeActiveGesture(
             {
                 clientX: 0,

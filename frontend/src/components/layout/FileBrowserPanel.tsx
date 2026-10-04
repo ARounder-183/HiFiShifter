@@ -1454,14 +1454,37 @@ export const FileBrowserPanel: React.FC = () => {
          * 左键拖拽中按右键打断时，平台随后会派发 contextmenu；不吞掉的话，
          * "打断"就换来了一个菜单。命中一次即自卸（与 `useTimelineDragDrop`
          * 的 `suppressCtx` 同款）。
+         *
+         * 【必须有有效期】平台要么在右键松开后立刻派发 contextmenu、要么根本
+         * 不派发（如在窗口外松开）。监听器若只等下一次 contextmenu 自卸，
+         * 那次"不来"之后它会一直挂着，把用户之后**任意位置的下一次右键菜单**
+         * 吞掉。给它一个远大于平台派发延迟的短超时兜底自卸。注意不能用本
+         * effect 的 cleanup 兜底：打断收尾会让依赖变化、cleanup 先于平台
+         * 派发 contextmenu 跑，会吞不掉该吞的那一次。
          */
+        let activeSwallow: ((ev: Event) => void) | null = null;
+        let swallowExpiryTimer: number | null = null;
+        function removeSwallow() {
+            if (swallowExpiryTimer != null) {
+                window.clearTimeout(swallowExpiryTimer);
+                swallowExpiryTimer = null;
+            }
+            if (activeSwallow) {
+                window.removeEventListener("contextmenu", activeSwallow, true);
+                activeSwallow = null;
+            }
+        }
         function suppressNextContextMenu() {
+            if (activeSwallow) return;
             const swallow = (ev: Event) => {
                 ev.preventDefault();
                 ev.stopImmediatePropagation();
-                window.removeEventListener("contextmenu", swallow, true);
+                removeSwallow();
             };
+            activeSwallow = swallow;
             window.addEventListener("contextmenu", swallow, true);
+            // 与 useTimelineDragDrop 的 suppressCtx 同款超时兜底。
+            swallowExpiryTimer = window.setTimeout(removeSwallow, 1000);
         }
 
         function onInterruptPointerDown(e: PointerEvent) {

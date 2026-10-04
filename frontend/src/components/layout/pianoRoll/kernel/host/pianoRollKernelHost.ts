@@ -1724,6 +1724,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     let dragAxis: "x" | "y" | null = null;
     let dragStartPointer = 0;
     let dragStartScroll = 0;
+    // 发起拖拽的指针 id：window 级 move/up 会收到**所有**指针的事件，
+    // 拖拽途中落下的第二指针（掌压触摸等）不得驱动 / 终止本次拖拽。
+    let dragPointerId: number | null = null;
 
     /**
      * 造一个 thumb 拖拽的按下处理器。
@@ -1746,6 +1749,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             // 无需二次命中判定（与时间轴内核同一约定）。
             event.stopPropagation();
             dragAxis = axis;
+            dragPointerId = event.pointerId;
             dragStartPointer = axis === "x" ? event.clientX : event.clientY;
             dragStartScroll = axis === "x" ? scroll.get().scrollLeft : scroll.get().scrollTop;
             (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
@@ -1789,10 +1793,14 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
 
     const onThumbPointerMove = (event: PointerEvent): void => {
         if (dragAxis === null) return;
+        if (event.pointerId !== dragPointerId) return;
         applyThumbDrag((dragAxis === "x" ? event.clientX : event.clientY) - dragStartPointer);
     };
-    const onThumbPointerUp = (): void => {
+    const onThumbPointerUp = (event: PointerEvent): void => {
+        if (dragAxis === null) return;
+        if (event.pointerId !== dragPointerId) return;
         dragAxis = null;
+        dragPointerId = null;
     };
 
     registerListener(hScrollbarThumb, "pointerdown", makeThumbPointerDown("x") as EventListener);

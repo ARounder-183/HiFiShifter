@@ -379,8 +379,3 @@ export type ClipTemplate = Partial<Omit<ClipInfo, "id" | "color" | "groupId">> &
     waveformPreview?: WaveformPreview;
     linkedParams?: LinkedParamCurves;
 };
-export interface AutomationPoint {
-    id: string;
-    beat: number;
-    value: number;
-}

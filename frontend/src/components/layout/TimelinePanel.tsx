@@ -130,7 +130,7 @@ import { moveClipRemote, moveClipsRemote } from "../../features/session/thunks/t
 import { computeTimelineRectSelection } from "./timeline/useTimelineSelectionRect";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 
-import { NEW_TRACK_SENTINEL } from "./timeline/hooks/useClipDrag";
+import { NEW_TRACK_SENTINEL } from "./timeline/constants";
 import { getBulkEditableClipIds } from "./timeline/hooks/bulkClipEdit";
 import { registerDragAbort } from "./timeline/gestureFocusGuard";
 import { getInsertBelowTargetIndex } from "./timeline/trackContextMenuPlacement";
@@ -1086,7 +1086,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         lastClickedClientXRef,
         pxPerSec,
         pxPerBeat,
-        rowHeight,
         ignoreGrouping,
         disabledGroupIds,
         dispatch,

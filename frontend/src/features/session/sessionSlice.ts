@@ -7,7 +7,6 @@ import type {
     TrackSummaryResult,
 } from "../../types/api";
 import type {
-    AutomationPoint,
     ClipInfo,
     ClipFormantAnalysisState,
     ClipFormantMorph,
@@ -375,7 +374,6 @@ function normalizeTimelineSnapSettings(
 
 export type { FadeCurveType } from "./sessionTypes";
 export type {
-    AutomationPoint,
     ClipInfo,
     ClipTemplate,
     DrawToolMode,
@@ -679,8 +677,6 @@ export interface SessionState {
      *  参数线选区变化记 "param"，Clip 选中变化记 "clips"。两者并存时由它
      *  仲裁复制/剪切的归属。 */
     selectionContext: "param" | "clips" | null;
-    clipAutomation: Record<string, Record<string, AutomationPoint[]>>;
-    selectedPointId: string | null;
     clipPitchRanges: Record<string, { min: number; max: number }>;
 
     /**
@@ -893,31 +889,8 @@ function createId(prefix: string): string {
     return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function createDefaultAutomation() {
-    return {
-        pitch: [
-            { id: createId("pt_p"), beat: 0, value: 0 },
-            { id: createId("pt_p"), beat: 3, value: 1.5 },
-            { id: createId("pt_p"), beat: 7, value: -0.8 },
-            { id: createId("pt_p"), beat: 12, value: 0.3 },
-        ],
-        tension: [
-            { id: createId("pt_t"), beat: 0, value: 0.2 },
-            { id: createId("pt_t"), beat: 4, value: 0.72 },
-            { id: createId("pt_t"), beat: 8, value: 0.42 },
-            { id: createId("pt_t"), beat: 12, value: 0.6 },
-        ],
-    };
-}
-
 function basenameFromPath(path: string): string {
     return path.split(/[\\/]/).filter(Boolean).pop() ?? "Audio.wav";
-}
-
-function ensureClipAutomation(state: SessionState, clipId: string) {
-    if (!state.clipAutomation[clipId]) {
-        state.clipAutomation[clipId] = createDefaultAutomation();
-    }
 }
 
 function normalizeClipColor(color: string | undefined): ClipColor {
@@ -2085,11 +2058,6 @@ function applyTimelineState(
     }
 
     // availableClipIds 已在上方 formant 剪枝处构建（同一次剪枝共用），此处直接复用。
-    for (const clipId of Object.keys(state.clipAutomation)) {
-        if (!availableClipIds.has(clipId)) {
-            delete state.clipAutomation[clipId];
-        }
-    }
     // 清理已删除 clip 的音高曲线数据，避免 PianoRoll 残留已删除 clip 的 detectedPitchCurve
     for (const clipId of Object.keys(state.clipPitchCurves)) {
         if (!availableClipIds.has(clipId)) {
@@ -2105,9 +2073,7 @@ function applyTimelineState(
 
     const nextPitchRanges: Record<string, { min: number; max: number }> = {};
     for (const clip of timeline.clips) {
-        const clipId = clip.id;
-        nextPitchRanges[clipId] = clip.pitch_range ?? { min: -24, max: 24 };
-        ensureClipAutomation(state, clipId);
+        nextPitchRanges[clip.id] = clip.pitch_range ?? { min: -24, max: 24 };
     }
     state.clipPitchRanges = nextPitchRanges;
 
@@ -2120,14 +2086,12 @@ function upsertImportedClip(
     audioPath: string,
     meta?: {
         durationSec?: number;
-        waveform?: number[];
         pitchRange?: { min: number; max: number };
     },
 ) {
     const existing = state.clips.find((clip) => clip.sourcePath === audioPath);
     if (existing) {
         state.selectedClipId = existing.id;
-        ensureClipAutomation(state, existing.id);
         if (meta?.pitchRange) {
             state.clipPitchRanges[existing.id] = meta.pitchRange;
         }
@@ -2186,8 +2150,6 @@ function upsertImportedClip(
     });
     state.selectedClipId = newClipId;
     state.playheadSec = startSec;
-    state.selectedPointId = null;
-    ensureClipAutomation(state, newClipId);
     state.clipPitchRanges[newClipId] = meta?.pitchRange ?? {
         min: -24,
         max: 24,
@@ -2312,8 +2274,6 @@ const initialState: SessionState = {
     multiSelectionIntentional: false,
     paramSelectionActive: false,
     selectionContext: null,
-    clipAutomation: {},
-    selectedPointId: null,
     clipPitchRanges: {},
     clipPitchCurves: {},
     clipFormantStatus: {},
@@ -2650,7 +2610,6 @@ const sessionSlice = createSlice({
         },
         setEditParam(state, action: PayloadAction<EditParam>) {
             state.editParam = action.payload;
-            state.selectedPointId = null;
         },
         setBpm(state, action: PayloadAction<number>) {
             // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
@@ -3218,7 +3177,6 @@ const sessionSlice = createSlice({
         },
         setSelectedClip(state, action: PayloadAction<string | null>) {
             state.selectedClipId = action.payload;
-            state.selectedPointId = null;
             state.selectionContext = "clips";
             if (action.payload) {
                 const nextTrackId = resolveTrackIdForClipSelection({
@@ -3229,16 +3187,11 @@ const sessionSlice = createSlice({
                 if (nextTrackId !== state.selectedTrackId) {
                     state.selectedTrackId = nextTrackId;
                 }
-                ensureClipAutomation(state, action.payload);
             }
         },
         setSelectedClipPreservingTrack(state, action: PayloadAction<string | null>) {
             state.selectedClipId = action.payload;
-            state.selectedPointId = null;
             state.selectionContext = "clips";
-            if (action.payload) {
-                ensureClipAutomation(state, action.payload);
-            }
         },
         setMultiSelectedClipIds(state, action: PayloadAction<string[]>) {
             state.multiSelectedClipIds = action.payload;
@@ -3509,7 +3462,6 @@ const sessionSlice = createSlice({
             });
             state.selectedClipId = newClipId;
             state.selectedTrackId = action.payload.trackId;
-            ensureClipAutomation(state, newClipId);
             state.clipPitchRanges[newClipId] = { min: -24, max: 24 };
         },
         removeSelectedClip(state) {
@@ -3519,14 +3471,9 @@ const sessionSlice = createSlice({
             }
             markProjectDirty(state.project);
             state.clips = state.clips.filter((clip) => clip.id !== selectedId);
-            delete state.clipAutomation[selectedId];
             delete state.clipPitchRanges[selectedId];
             delete state.clipPitchCurves[selectedId];
-            state.selectedPointId = null;
             state.selectedClipId = state.clips[0]?.id ?? null;
-            if (state.selectedClipId) {
-                ensureClipAutomation(state, state.selectedClipId);
-            }
         },
         toggleTrackMute(state, action: PayloadAction<string>) {
             const track = state.tracks.find((entry) => entry.id === action.payload);
@@ -3548,72 +3495,7 @@ const sessionSlice = createSlice({
                 markProjectDirty(state.project);
             }
         },
-        addAutomationPoint(
-            state,
-            action: PayloadAction<{
-                param: EditParam;
-                beat: number;
-                value: number;
-            }>,
-        ) {
-            const clipId = state.selectedClipId;
-            if (!clipId) {
-                return;
-            }
-            markProjectDirty(state.project);
-            ensureClipAutomation(state, clipId);
-            // ensureClipAutomation 只播种 pitch/tension；其他 param（如
-            // vocoder 参数）直接索引会拿到 undefined 并在 push 时抛错。
-            const target = (state.clipAutomation[clipId][action.payload.param] ??= []);
-            target.push({
-                id: createId("pt"),
-                beat: Math.max(0, action.payload.beat),
-                value: action.payload.value,
-            });
-            target.sort((left, right) => left.beat - right.beat);
-        },
-        moveAutomationPoint(
-            state,
-            action: PayloadAction<{
-                param: EditParam;
-                pointId: string;
-                beat: number;
-                value: number;
-            }>,
-        ) {
-            const clipId = state.selectedClipId;
-            if (!clipId) {
-                return;
-            }
-            markProjectDirty(state.project);
-            ensureClipAutomation(state, clipId);
-            const target = (state.clipAutomation[clipId][action.payload.param] ??= []);
-            const point = target.find((entry) => entry.id === action.payload.pointId);
-            if (point) {
-                point.beat = Math.max(0, action.payload.beat);
-                point.value = action.payload.value;
-                target.sort((left, right) => left.beat - right.beat);
-            }
-        },
-        setSelectedPoint(state, action: PayloadAction<string | null>) {
-            state.selectedPointId = action.payload;
-        },
-        removeAutomationPoint(state, action: PayloadAction<{ param: EditParam; pointId: string }>) {
-            const clipId = state.selectedClipId;
-            if (!clipId) {
-                return;
-            }
-            markProjectDirty(state.project);
-            ensureClipAutomation(state, clipId);
-            const target = (state.clipAutomation[clipId][action.payload.param] ??= []);
-            state.clipAutomation[clipId][action.payload.param] = target.filter(
-                (entry) => entry.id !== action.payload.pointId,
-            );
-            if (state.selectedPointId === action.payload.pointId) {
-                state.selectedPointId = null;
-            }
-        },
-        /** 更新某个 clip 的音高曲线（来自后端 clip_pitch_data 事件�?*/
+        /** 更新某个 clip 的音高曲线（来自后端 clip_pitch_data 事件）*/
         setClipPitchData(
             state,
             action: PayloadAction<{
@@ -4067,7 +3949,6 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                     audio?: { path?: string; duration_sec?: number };
                     feature?: {
-                        waveform_preview?: number[];
                         pitch_range?: { min: number; max: number };
                     };
                     timeline?: TimelineState;
@@ -4079,7 +3960,6 @@ const sessionSlice = createSlice({
                     } else {
                         upsertImportedClip(state, payload.audio.path, {
                             durationSec: payload.audio.duration_sec,
-                            waveform: payload.feature?.waveform_preview,
                             pitchRange: payload.feature?.pitch_range,
                         });
                     }
@@ -4658,7 +4538,6 @@ const sessionSlice = createSlice({
                 // 未调用后端）——不得重置任何传输状态（等待标志 / 位置报告 /
                 // 纪元），否则会解除等待期的光标冻结并造成跳变。
                 if (payload.noop) {
-                    state.lastResult = action.payload;
                     return;
                 }
                 const ok = Boolean(payload.ok);
@@ -6181,6 +6060,12 @@ const sessionSlice = createSlice({
                 if (kept.length > 0) {
                     state.multiSelectedClipIds = kept;
                     state.selectedClipId = kept[0];
+                    // 动作驱动的选区（用户没表达"整组拖动"），必须与 split /
+                    // 导入的 fulfilled 分支一样清掉意图标记，否则拖 kept 中的
+                    // 一个 clip 会把整组一起拖走；同时把复制/剪切的路由仲裁
+                    // 切回 Clip 侧（见 selectionContext 的注释）。
+                    state.multiSelectionIntentional = false;
+                    state.selectionContext = "clips";
                 }
             })
 
@@ -6751,7 +6636,6 @@ const sessionSlice = createSlice({
             .addCase(selectClipRemote.pending, (state, action) => {
                 const { clipId, preserveTrackFocus } = parseSelectClipRemoteArg(action.meta.arg);
                 state.selectedClipId = clipId;
-                state.selectedPointId = null;
                 // 与 setSelectedClip 一致：点选 Clip 即把复制/剪切路由的上下文
                 // 仲裁切换到 Clip 侧，否则上一次参数选区遗留的 "param" 会让
                 // Ctrl+C/Ctrl+X 错误路由到参数编辑器。
@@ -6766,7 +6650,6 @@ const sessionSlice = createSlice({
                     if (nextTrackId !== state.selectedTrackId) {
                         state.selectedTrackId = nextTrackId;
                     }
-                    ensureClipAutomation(state, clipId);
                 }
             })
 
@@ -6780,10 +6663,6 @@ const sessionSlice = createSlice({
                 }
                 const currentSelectedTrackId = state.selectedTrackId;
                 state.selectedClipId = payload.selected_clip_id;
-                state.selectedPointId = null;
-                if (payload.selected_clip_id) {
-                    ensureClipAutomation(state, payload.selected_clip_id);
-                }
                 if (payload.__preserveTrackFocus) {
                     state.selectedTrackId = currentSelectedTrackId;
                 } else if (payload.selected_track_id !== undefined) {
@@ -7172,10 +7051,6 @@ export const {
     toggleTrackMute,
     toggleTrackSolo,
     setTrackVolume,
-    addAutomationPoint,
-    moveAutomationPoint,
-    setSelectedPoint,
-    removeAutomationPoint,
     setClipPitchData,
     setClipFormantStatus,
     setClipFormantAnalysis,

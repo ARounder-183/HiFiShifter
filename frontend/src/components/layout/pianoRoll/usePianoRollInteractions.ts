@@ -1600,6 +1600,9 @@ export function usePianoRollInteractions(args: {
         vibratoResetSlotsRef.current.clear();
         // 锚点属于本次手势：留着会让下一次起手在"还没动过指针"时先用旧位置闪一下。
         vibratoHudAnchorRef.current = null;
+        // 步进累加器同样属于本次手势：残留的不足一步的余量会带进下一次
+        // 滚轮手势，让第一档提前（或跳过）一步。
+        vibratoPinchRef.current = createPinchStepState();
         if (!onVibratoDragEnd) return;
         onVibratoDragEnd();
     }, [onVibratoDragEnd]);
@@ -2893,12 +2896,16 @@ export function usePianoRollInteractions(args: {
                 };
                 (e.currentTarget as HTMLCanvasElement).setPointerCapture(pid);
                 const onMove = (ev: globalThis.PointerEvent) => {
+                    // 掌侧误触防御（与同文件其余手势一致）：第二指针的 move 若
+                    // 先过 buttons 检查，touch 的 buttons 恒不满足 &4，会把
+                    // 进行中的平移整个终止掉；先校验 pointerId 直接忽略。
+                    if (ev.pointerId !== pid) return;
                     if ((ev.buttons & 4) !== 4) {
                         onUp();
                         return;
                     }
                     const pan = panRef.current;
-                    if (!pan || pan.pointerId !== pid) return;
+                    if (!pan) return;
                     const dx = ev.clientX - pan.startClientX;
                     const dy = ev.clientY - pan.startClientY;
                     scroller.scrollLeft = Math.max(0, pan.startScrollLeft - dx);
@@ -3030,6 +3037,10 @@ export function usePianoRollInteractions(args: {
                                 onUp();
                                 return;
                             }
+                            // 只接受本指针的 move：第二指针（掌压触摸等）的
+                            // buttons 恒为 1，不校验 pointerId 会驱动本次手势，
+                            // 松手还会把掌压驱动的曲线提交到后端。
+                            if (ev.pointerId !== e.pointerId) return;
                             const drag = morphDragRef.current;
                             const overlayNow = morphOverlayRef.current;
                             const pvNow = paramViewRef.current;
@@ -3753,6 +3764,12 @@ export function usePianoRollInteractions(args: {
                                 cancelAnimationFrame(previewRafId);
                                 previewRafId = null;
                             }
+                            // 提交前先同步消费挂起的游标：边界标量（stretchStartBound /
+                            // stretchEndBound）只在 runPreviewStep 里更新，若松手与越过
+                            // 死区的第一次 move 落在同一帧，取消 rAF 后标量仍是初始值，
+                            // buildDense 会原样复现输入数据还多打一个"毫无变化"的撤销点
+                            // （与自由绘制路径提交前先 flush 队列同一处理）。
+                            runPreviewStep();
                             queuedCursorFrame = null;
 
                             // 单击（未越过点击死区）：这次手势没有改动任何值 —— 丢弃
@@ -3848,6 +3865,9 @@ export function usePianoRollInteractions(args: {
                                     committed = true;
                                 } catch (err) {
                                     console.error("[pianoRoll] stretch-edge commit failed", err);
+                                    // IPC 失败必须撤下覆盖层，否则冻结的预览值会一直
+                                    // 盖在真实曲线上（与右拖 / 选区拖拽 / 形变同规）。
+                                    liveEditOverrideRef.current = null;
                                 } finally {
                                     if (liveEditActiveRef) {
                                         liveEditActiveRef.current = false;

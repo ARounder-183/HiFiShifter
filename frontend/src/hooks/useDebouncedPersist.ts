@@ -10,13 +10,10 @@
  * 防抖后，一次连续缩放手势只写一次。
  *
  * 【与其他模块的关系】
- * - **当前无使用者**。原使用者 `components/layout/timeline/TimelineScrollArea`
- *   （旧的时间线原生滚动容器）已随"渲染内核唯一路径"改造删除，其持久化
- *   `pxPerSec` / `rowHeight` 的职责由内核路径自行处理。本 hook 因此是**死代码**，
- *   保留待独立的死代码清理任务处理（见
- *   `docs/superpowers/plans/2026-09-13-timeline-single-path.md` 的「后续清理」一节）。
- * - 读取侧不受影响：`useTimelineState` 在初始化时读这两个键，防抖只推迟写入时机、
- *   不改变键名与取值语义——因此若将来需要恢复使用，本 hook 的语义仍然成立。
+ * - 使用者：`components/layout/TimelinePanel`（持久化 `pxPerSec` / `rowHeight`）。
+ *   曾随旧时间线滚动容器的删除一度成为死代码，内核化改造后由 TimelinePanel
+ *   恢复使用——读取侧（`useTimelineState` 初始化时读这两个键）语义不变：
+ *   防抖只推迟写入时机、不改变键名与取值。
  */
 
 import { useEffect, useRef } from "react";

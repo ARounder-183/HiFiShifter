@@ -4,7 +4,6 @@
  * 从 TimelinePanel.tsx 拆分而来，负责：
  * - multiSelectedClipIds 管理（Redux ↔ local ref）
  * - contextMenu / trackAreaMenu / importModeMenu / renamingClipId 状态
- * - selectionRect hook 桥接
  * - clipboard (copy / cut / paste)
  * - normalizeClips / replaceClipSources / splitClips / glueClips
  * - TrackLane 操作回调（ensureSelected, selectClip, toggleMuted, rename, gain ...）
@@ -42,7 +41,6 @@ import { webApi } from "../../../../services/webviewApi";
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
 import { snapTimelinePosition } from "../../../../utils/timelineSnapping";
 import { computeAutoCrossfadeFromPayload } from "./autoCrossfade";
-import { useTimelineSelectionRect } from "../";
 import { getBulkEditableClipIds } from "./bulkClipEdit";
 import { getGroupClipIds } from "./useGroupExpansion";
 import { isClipSplittableAtSec, resolveSplitTargetsWithSnap } from "../splitTargets";
@@ -68,7 +66,6 @@ export interface UseTimelineClipActionsArgs {
     lastClickedClientXRef: React.MutableRefObject<number | null>;
     pxPerSec: number;
     pxPerBeat: number;
-    rowHeight: number;
     ignoreGrouping: boolean;
     disabledGroupIds: string[];
 }
@@ -136,15 +133,6 @@ export interface UseTimelineClipActionsResult {
     >;
     renamingClipId: string | null;
     setRenamingClipId: React.Dispatch<React.SetStateAction<string | null>>;
-
-    // Selection rect
-    selectionRect: {
-        x1: number;
-        y1: number;
-        x2: number;
-        y2: number;
-    } | null;
-    onSelectionRectPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
 
     // Clipboard
     clipboardAvailable: boolean;
@@ -229,7 +217,6 @@ export function useTimelineClipActions(
         lastClickedClipIdRef,
         lastClickedClientXRef,
         pxPerSec,
-        rowHeight,
         dispatch,
         sameSourceConfirmResolverRef,
         setSameSourceConfirmOpen,
@@ -354,24 +341,6 @@ export function useTimelineClipActions(
         },
         [dispatch],
     );
-
-    // ── Selection rect ───────────────────────────────────────
-    const handleSelectionRectSingleSelect = React.useCallback(
-        (clipId: string) => {
-            void dispatch(selectClipRemote(clipId));
-        },
-        [dispatch],
-    );
-
-    const { selectionRect, onPointerDown: onSelectionRectPointerDown } = useTimelineSelectionRect({
-        scrollRef,
-        sessionRef,
-        pxPerSec,
-        rowHeight,
-        clearContextMenu,
-        setMultiSelectedClipIds,
-        onSingleSelect: handleSelectionRectSingleSelect,
-    });
 
     // ── Clipboard ────────────────────────────────────────────
     const [clipboardAvailable, setClipboardAvailable] = useState(false);
@@ -1176,9 +1145,6 @@ export function useTimelineClipActions(
         setImportModeMenu,
         renamingClipId,
         setRenamingClipId,
-
-        selectionRect,
-        onSelectionRectPointerDown,
 
         clipboardAvailable,
         copyClips,

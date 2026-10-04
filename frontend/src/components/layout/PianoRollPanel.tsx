@@ -1167,47 +1167,52 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const midiDialogSourceRef = useRef<"reaperClipboard" | "paramEditor">("paramEditor");
     // 启动时从设置加载
     useEffect(() => {
-        settingsApi.getUiSettings().then((s) => {
-            if (s?.midiImportPosition) {
-                setImportPosition(s.midiImportPosition);
-            }
-            if (s?.midiFillGaps != null) {
-                setFillGaps(s.midiFillGaps);
-            }
-            if (s?.midiImportBpmAsProject != null) {
-                setImportBpmAsProject(s.midiImportBpmAsProject);
-            }
-            if (s?.midiNoteBpmMode != null) {
-                setNoteBpmMode(s.midiNoteBpmMode);
-            }
-            if (s?.midiSpecifiedBpm != null) {
-                setSpecifiedBpm(s.midiSpecifiedBpm);
-            }
-            if (s?.midiMultiTrackMerge != null) {
-                setMultiTrackMerge(s.midiMultiTrackMerge);
-            }
-            if (s?.midiCloseLeadingGap != null) {
-                setCloseLeadingGap(s.midiCloseLeadingGap);
-            }
-            if (s?.midiImportAsTempoMap != null) {
-                setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
-            }
-            if (s?.midiImportTempoMapTempo != null) {
-                setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
-            }
-            if (s?.midiImportTempoMapTimeSignature != null) {
-                setImportTempoMapTimeSignature(Boolean(s.midiImportTempoMapTimeSignature));
-            }
-            if (s?.midiImportTempoMapKeySignature != null) {
-                setImportTempoMapKeySignature(Boolean(s.midiImportTempoMapKeySignature));
-            }
-            if (s?.midiImportTargetReaperClipboard != null) {
-                setImportTargetReaperClipboard(s.midiImportTargetReaperClipboard);
-            }
-            if (s?.midiImportTargetParamEditor != null) {
-                setImportTargetParamEditor(s.midiImportTargetParamEditor);
-            }
-        });
+        settingsApi
+            .getUiSettings()
+            .then((s) => {
+                if (s?.midiImportPosition) {
+                    setImportPosition(s.midiImportPosition);
+                }
+                if (s?.midiFillGaps != null) {
+                    setFillGaps(s.midiFillGaps);
+                }
+                if (s?.midiImportBpmAsProject != null) {
+                    setImportBpmAsProject(s.midiImportBpmAsProject);
+                }
+                if (s?.midiNoteBpmMode != null) {
+                    setNoteBpmMode(s.midiNoteBpmMode);
+                }
+                if (s?.midiSpecifiedBpm != null) {
+                    setSpecifiedBpm(s.midiSpecifiedBpm);
+                }
+                if (s?.midiMultiTrackMerge != null) {
+                    setMultiTrackMerge(s.midiMultiTrackMerge);
+                }
+                if (s?.midiCloseLeadingGap != null) {
+                    setCloseLeadingGap(s.midiCloseLeadingGap);
+                }
+                if (s?.midiImportAsTempoMap != null) {
+                    setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
+                }
+                if (s?.midiImportTempoMapTempo != null) {
+                    setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
+                }
+                if (s?.midiImportTempoMapTimeSignature != null) {
+                    setImportTempoMapTimeSignature(Boolean(s.midiImportTempoMapTimeSignature));
+                }
+                if (s?.midiImportTempoMapKeySignature != null) {
+                    setImportTempoMapKeySignature(Boolean(s.midiImportTempoMapKeySignature));
+                }
+                if (s?.midiImportTargetReaperClipboard != null) {
+                    setImportTargetReaperClipboard(s.midiImportTargetReaperClipboard);
+                }
+                if (s?.midiImportTargetParamEditor != null) {
+                    setImportTargetParamEditor(s.midiImportTargetParamEditor);
+                }
+            })
+            // 传输层失败（invoke 拒绝）按"保持出厂默认"降级：本 effect 是
+            // fire-and-forget，不接住会把拒绝漏成 unhandledrejection。
+            .catch(() => {});
     }, []);
     // 记录打开弹窗时的选区（拍数，多段），用于后续计算帧偏移。
     // 注意：MIDI 导入的「选区约束」只有单个时间窗接口，因此用包围区间
@@ -1773,25 +1778,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         // 偏移就永远停在旧布局测出的值（实测：两面板相差数百像素，且只在恰好发生
         // 一次尺寸变化时才自愈）。因此布局一变就重测。
     }, [syncOffsetApplicable, dockLayout]);
-
-    // BPM 变化时，按比例调 ?scrollLeft，保持视口中心点的秒数不 ?
-    // scrollLeft_new = scrollLeft_old × (bpm_old / bpm_new)
-    const prevBpmRef = useRef(s.bpm);
-    useEffect(() => {
-        const prevBpm = prevBpmRef.current;
-        prevBpmRef.current = s.bpm;
-        if (s.paramEditorSyncTimeline) return;
-        if (Math.abs(prevBpm - s.bpm) < 1e-9) return;
-        const ratio = prevBpm / Math.max(1e-6, s.bpm);
-        const newScrollLeft = scrollLeftRef.current * ratio;
-        // 先按绘制坐标把位置交给内核（它负责换算原生坐标并镜像回写），再同步面板
-        // state。宿主尚未创建（未挂载）时 `applyHorizontalScrollPosition` 是空操作，
-        // 仍同步 state，与迁移前无宿主时的收尾一致。
-        applyHorizontalScrollPosition(newScrollLeft);
-        scrollLeftRef.current = newScrollLeft;
-        lastScrollLeftRef.current = newScrollLeft;
-        setScrollLeft(newScrollLeft);
-    }, [s.bpm, s.paramEditorSyncTimeline]);
 
     useEffect(() => {
         const timer = setTimeout(() => {
@@ -6073,7 +6059,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                     derivedPasteSelection = pasteTargetSelectionFromClipboard({
                         clipboard: pasteClipboard,
                         // 锚点 = 播放光标所在帧（与粘贴的帧制口径一致）。
-                        anchorFrame: timeToFrame(s.playheadSec, fp),
+                        // 【调用时现读】播放头高频前进，`s` 是回调重建时的快照
+                        // （依赖数组刻意不含它，见下方 eslint-disable 注释），
+                        // 从闭包里取会把粘贴锚定到上一次渲染时的旧光标位置。
+                        anchorFrame: timeToFrame(store.getState().session.playheadSec, fp),
                     });
                     if (!derivedPasteSelection) {
                         pasteReaperClipboardFallback();
