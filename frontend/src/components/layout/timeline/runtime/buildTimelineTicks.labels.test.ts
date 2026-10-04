@@ -39,7 +39,7 @@ import { describe, expect, it } from "vitest";
 import { buildTimelineTicks, TICK_WINDOW_STEP_PX } from "./buildTimelineTicks.js";
 import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
 import { selectRulerStep } from "../timeFormat.js";
-import { tempoMapSegments } from "../../../../utils/tempoMap.js";
+import { barBeatAtSec, tempoMapSegments } from "../../../../utils/tempoMap.js";
 import type { TempoMap } from "../../../../utils/tempoMap.ts";
 
 function axisOf(pxPerSec: number, scrollLeftPx: number, viewportWidthPx = 1200) {
@@ -514,6 +514,130 @@ describe("Tempo Map 变化点必须带标签", () => {
                     expect(hit?.showLabel, `变化点 ${point.positionSec}s 处刻度没有标签`).toBe(
                         true,
                     );
+                }
+            }
+        }
+    });
+});
+
+/**
+ * 密集 Tempo Map：8 个变化点、间隔 7.3s，BPM 在 80..159 间反复变化。
+ *
+ * 【为什么必须用密集图】稀疏的三段图（0/40/90s）在多数缩放下，变化点间距本身就
+ * 大于 `minLabelSpacingPx`，"段首自动命中标签"与真实栅格恰好重合，看不出缺陷。
+ * 只有当变化点间距**明显小于**请求的标签间距时，两套栅格的拼接才刺眼 —— 这正是
+ * 用户报的"某段之内刻度与文本消失"。
+ */
+function denseTempoMap(): TempoMap {
+    const bpms = [80, 159, 96, 128, 80, 159, 96, 128];
+    return {
+        points: bpms.map((bpm, i) => ({
+            id: `d${i}`,
+            positionSec: i * 7.3,
+            bpm,
+            timeSignature: { numerator: 4, denominator: 4 },
+            scale: null,
+        })),
+    };
+}
+
+describe("Tempo Map 标签栅格必须跨段连续", () => {
+    /**
+     * 【要钉死的缺陷】`buildTempoGridLines` 曾把弱线索引按**段内**编号（每段从 0
+     * 开始），而标签判定是 `index % stride === 0`。于是**每个段起点的 index 恒为 0**，
+     * `0 % 任何 stride` 都成立 ⇒ 每个变化点无条件获得标签，完全忽略
+     * `minLabelSpacingPx`：变化点区（58px 间距）与尾段真实栅格（193px）首尾拼接，
+     * 表现为前半密集、后半突然稀疏、中间一段"没有刻度与文本"。
+     *
+     * 修复后索引全局单调（跨段累加），段起点不再自动命中，变化点标签由 §4 显式补充。
+     * 判据用"相邻标签间距 max / median"：两套栅格拼接时会远超 2；均匀栅格下接近 1。
+     */
+    it("★ 密集变化点下视口内标签间距 max/median ≤ 2.0", () => {
+        const tempoMap = denseTempoMap();
+        let worst = { ratio: 0, detail: "" };
+        let checked = 0;
+        for (let i = 0; i < 48; i += 1) {
+            const pxPerSec = MIN_PPS * Math.pow(MAX_PPS / MIN_PPS, i / 47);
+            for (const scrollLeft of [0, 700, 2600]) {
+                const cfg = labelGridCfg({ tempoMap });
+                const xs = visibleLabelXs(cfg, pxPerSec, scrollLeft);
+                if (xs.length < 4) continue;
+                const gaps = gapsOf(xs);
+                const sorted = [...gaps].sort((a, b) => a - b);
+                const median = sorted[Math.floor(sorted.length / 2)];
+                const ratio = Math.max(...gaps) / median;
+                checked += 1;
+                if (ratio > worst.ratio) {
+                    worst = {
+                        ratio,
+                        detail: `pxPerSec=${pxPerSec.toFixed(2)} scrollLeft=${scrollLeft} gaps=${[
+                            ...new Set(gaps.map((g) => g.toFixed(0))),
+                        ].join("/")}`,
+                    };
+                }
+            }
+        }
+        expect(checked).toBeGreaterThan(50);
+        // 修复前实测 4.1×（pps=6.5，两套栅格拼接）；修复后最坏 1.99×，恰为该图
+        // 相邻段 BPM 之比（159/80）—— 这是"标签锚定在拍栅格上"的固有上界：跨越
+        // 速度边界时，同一拍间距在两段里的像素宽度之比不可能小于 BPM 之比。
+        expect(worst.ratio, `Tempo Map 标签空洞：${worst.detail}`).toBeLessThanOrEqual(2.0);
+    });
+
+    /**
+     * 窄视口下视口内只有 3~5 个标签，`max/median` 的中位数不稳定（会误报），
+     * 因此上面那条只在宽视口下用。这里改用"最大间距 / 标称间距"（`selectRulerStep`
+     * 独立算出的参考值）作为"有没有空洞"的判据，对任意视口宽都成立。
+     */
+    it("★ 任意视口宽下，最大标签间距不超过标称间距的 2 倍", () => {
+        const tempoMap = denseTempoMap();
+        let worst = { ratio: 0, detail: "" };
+        for (const viewportWidth of [320, 700, 1500, 2560]) {
+            for (let i = 0; i < 48; i += 1) {
+                const pxPerSec = MIN_PPS * Math.pow(MAX_PPS / MIN_PPS, i / 47);
+                for (const scrollLeft of [0, 700, 2600]) {
+                    const cfg = labelGridCfg({ tempoMap, viewportWidth });
+                    const xs = visibleLabelXs(cfg, pxPerSec, scrollLeft);
+                    if (xs.length < 4) continue;
+                    const maxGap = Math.max(...gapsOf(xs));
+                    const nominal = nominalSpacingPx(cfg, pxPerSec, xs[0]);
+                    const ratio = maxGap / nominal;
+                    if (ratio > worst.ratio) {
+                        worst = {
+                            ratio,
+                            detail: `vw=${viewportWidth} pxPerSec=${pxPerSec.toFixed(2)} scrollLeft=${scrollLeft} maxGap=${maxGap.toFixed(0)} nominal=${nominal.toFixed(0)}`,
+                        };
+                    }
+                }
+            }
+        }
+        expect(worst.ratio, `空洞超过 2 倍标称间距：${worst.detail}`).toBeLessThanOrEqual(2.0);
+    });
+
+    /**
+     * 索引改为全局单调后，标签判定仍是 `index % stride === 0`。swing 会把段内
+     * **奇数**索引的线整体平移半步，其秒位不再对应整拍。若栅格相位让标签落回
+     * 这些线上，文字会被渲染成 "1.2.125"（拍内余量非 0）。这里把"Tempo Map + swing
+     * 下标签仍落在整拍上"钉死 —— 上面的 swing 用例只覆盖了无 Tempo Map 的路径。
+     *
+     * 判据用段内分解的拍内余量 `sub`，而不是全局拍：变化点本身可能落在非整拍
+     * （例如 7.3s 处的前段 BPM 为 80 ⇒ 全局拍 9.73），但它在其所在段内是整拍起点。
+     */
+    it("★ Tempo Map + swing 下标签仍落在整拍上（拍内余量为 0）", () => {
+        const tempoMap = denseTempoMap();
+        for (const swingPercent of [25, 50, 100]) {
+            for (const pxPerSec of [20, 60, 200, 800]) {
+                const cfg = labelGridCfg({ tempoMap, swingPercent, minLabelSpacingPx: 110 });
+                const labeled = labelGridTicks(cfg, pxPerSec, 0).filter(
+                    (tick) => tick.showLabel && tick.contentPx >= 0 && tick.contentPx <= 1500,
+                );
+                expect(labeled.length).toBeGreaterThan(0);
+                for (const tick of labeled) {
+                    const { sub } = barBeatAtSec(tempoMap, tick.sec, cfg.bpm, cfg.beatsPerBar);
+                    expect(
+                        Math.abs(sub),
+                        `swing=${swingPercent} pxPerSec=${pxPerSec} sec=${tick.sec} sub=${sub}`,
+                    ).toBeLessThan(1e-6);
                 }
             }
         }

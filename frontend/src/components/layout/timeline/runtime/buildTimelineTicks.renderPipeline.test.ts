@@ -23,6 +23,7 @@ import { createTickAxis } from "./tickAxis.js";
 import { TICK_WINDOW_LAG_PX, tickWindowBufferPx } from "./tickWindow.js";
 import { rulerLayerTranslatePx } from "../../renderKernel/timelineAxis.js";
 import { verticalHairlineGeometry } from "../../../../utils/devicePixelLine.js";
+import type { TempoMap } from "../../../../utils/tempoMap.ts";
 
 interface PipelineArgs {
     pxPerSec: number;
@@ -35,6 +36,26 @@ interface PipelineArgs {
     minLabelSpacingPx: number;
     grid: string;
     beatsPerBar: number;
+    /** 缺省为无 Tempo Map 的均匀网格。 */
+    tempoMap?: TempoMap | null;
+}
+
+/**
+ * 密集 Tempo Map：8 个变化点、间隔 7.3s，BPM 在 80..159 间反复变化。
+ * 与 `buildTimelineTicks.labels.test.ts` 的 `denseTempoMap` 同构（此处独立定义，
+ * 避免测试文件互相 import）。
+ */
+function denseTempoMap(): TempoMap {
+    const bpms = [80, 159, 96, 128, 80, 159, 96, 128];
+    return {
+        points: bpms.map((bpm, i) => ({
+            id: `d${i}`,
+            positionSec: i * 7.3,
+            bpm,
+            timeSignature: { numerator: 4, denominator: 4 },
+            scale: null,
+        })),
+    };
 }
 
 /**
@@ -63,7 +84,7 @@ function renderedLabelXs(args: PipelineArgs): number[] {
         minLabelSpacingPx: args.minLabelSpacingPx,
         minGridSpacingPx: 8,
         swingPercent: 0,
-        tempoMap: null,
+        tempoMap: args.tempoMap ?? null,
     });
 
     // ── 2. 切片（与 TimeRulerMarks 同一缓冲公式）──
@@ -85,12 +106,15 @@ function renderedLabelXs(args: PipelineArgs): number[] {
     const end = Math.min(labeled.length, lowerBound(rightPx) + 1);
 
     // ── 3+4. 几何 + 平移 ──
+    // `verticalHairlineGeometry` 返回的是**绝对**左缘（已含 `contentPx`），不能再加
+    // 一次 `contentPx` —— 早先的写法把坐标整体翻了一倍，只因所有间距同比放大才没
+    // 暴露；一旦标签栅格不均匀（Tempo Map），翻倍会把视口外的一半刻度算进来、把
+    // 中位数压小，误报出"空洞"。
     const translate = rulerLayerTranslatePx(args.trueScrollLeft, args.dpr);
     return labeled
         .slice(start, end)
         .map(
             (tick) =>
-                tick.contentPx +
                 verticalHairlineGeometry(tick.contentPx, tick.isBarStart ? 2 : 1, args.dpr).left -
                 translate,
         )
@@ -183,5 +207,55 @@ describe("渲染管线：滞后存在时标尺仍不得露白", () => {
                 );
             }
         }
+    });
+
+    /**
+     * Tempo Map 路径的屏幕坐标不变量。生成器内部的标签栅格已在
+     * `buildTimelineTicks.labels.test.ts` 钉死；这里补上"切片 → 设备像素几何 →
+     * 内容层平移"之后的**屏幕坐标**，确保变化点密集时屏幕上也看不到空洞
+     * （切片缓冲、设备像素吸附都不会把它重新暴露出来）。
+     */
+    it("★ Tempo Map（密集变化点）下屏幕坐标的标签间距无空洞", () => {
+        const tempoMap = denseTempoMap();
+        let worst = { ratio: 0, detail: "" };
+        let checked = 0;
+        for (const grid of ["1/4", "1/8"]) {
+            // 只在视口足够宽时用 max/median 判据：视口很窄时视口内只有 3~5 个标签，
+            // 中位数本身不稳定（会误报）。空洞本身与视口宽无关，另有 labels 用例
+            // 用 max/nominal 在全部视口宽下钉住。
+            for (const viewportWidth of [1500, 2560]) {
+                for (const dpr of [1, 2]) {
+                    for (let i = 0; i < 24; i += 1) {
+                        const pxPerSec = 4 * Math.pow(600 / 4, i / 23);
+                        for (const lag of [0, TICK_WINDOW_LAG_PX - 1]) {
+                            for (const trueScrollLeft of [0, 900]) {
+                                const xs = renderedLabelXs({
+                                    pxPerSec,
+                                    trueScrollLeft,
+                                    reactScrollLeft: Math.max(0, trueScrollLeft - lag),
+                                    viewportWidth,
+                                    dpr,
+                                    minLabelSpacingPx: 110,
+                                    grid,
+                                    beatsPerBar: 4,
+                                    tempoMap,
+                                });
+                                const ratio = maxHoleRatio(xs, viewportWidth);
+                                checked += 1;
+                                if (ratio > worst.ratio) {
+                                    worst = {
+                                        ratio,
+                                        detail: `${JSON.stringify({ grid, viewportWidth, dpr, pxPerSec: Number(pxPerSec.toFixed(2)), lag, trueScrollLeft })} maxHoleRatio=${ratio.toFixed(2)}`,
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        expect(checked).toBeGreaterThan(100);
+        // 上界 = 相邻段 BPM 之比（159/80 ≈ 1.99）—— 与生成器侧一致，实测最坏 1.99。
+        expect(worst.ratio, `Tempo Map 屏幕空洞：${worst.detail}`).toBeLessThanOrEqual(2.05);
     });
 });

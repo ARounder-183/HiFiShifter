@@ -313,7 +313,12 @@ export function buildTimelineTicks(args: {
         for (let multiplier = 1; multiplier <= 1 << 16; multiplier *= 2) strides.push(multiplier);
         strides.sort((a, b) => a - b);
         for (const stride of strides) {
-            if (stride >= minStride && stride * stepPx >= spacingPx - 1e-9) return stride;
+            if (stride < minStride || stride * stepPx < spacingPx - 1e-9) continue;
+            // swing 下必须取偶数：标签判定用全局索引取模（见 §3b），而 swing 把
+            // **奇数索引**的线整体平移半步。若 stride 为奇数，标签会落回被平移的
+            // 线上，文字被渲染成 "1.2.300"。取偶数后，标签恒落在未被平移的线上。
+            if (swingOn && stride % 2 !== 0) continue;
+            return stride;
         }
         let stride = minStride;
         while (stride * stepPx < spacingPx - 1e-9) stride *= 2;
@@ -336,8 +341,15 @@ export function buildTimelineTicks(args: {
     //   集合硬拼在一起，二者不整除时标签就落不到网格线上；
     // - 跨段的最小间距约束用 `continue` 跳过候选却**不推进** `lastLabelPx`，
     //   于是段首的空白被成倍放大（实测 121px 标称间距下挖出 291px 的空洞）。
-    // 现在标签判定改为按**索引**取模（索引与 stride 都是整数，判定精确，且
+    // 现在标签判定改为按**全局索引**取模（索引与 stride 都是整数，判定精确，且
     // swing 平移过的线不会被误判），间距交给 §5 的统一让位规则处理。
+    //
+    // 【为什么索引必须是全局的】旧实现让 `buildTempoGridLines` 按**段内**编号，
+    // 于是每个段起点的索引恒为 0，`0 % stride === 0` 对任何 stride 都成立 ——
+    // **每个变化点都无条件获得标签**，完全忽略 `minLabelSpacingPx`。变化点区因此
+    // 变成"变化点间距"的密集栅格，与尾段的真实栅格首尾拼接（实测 pps=8 时
+    // 58px / 193px，3.31×），用户看到的就是"某段之内的刻度与文本消失"。索引全局
+    // 单调后，段起点只在其恰好落在栅格上时才带标签；变化点标签由 §4 显式补充。
     const labelSegments =
         tempoMap && tempoMap.points.length > 0
             ? tempoMapSegments(
@@ -350,6 +362,12 @@ export function buildTimelineTicks(args: {
             (60 / Math.max(1, segment.point.bpm)) * Math.max(0, pxPerSec),
             Math.max(1, segment.beatsPerBar),
         ),
+    );
+    // 各段起点对应的**全局弱线索引**，作为该段标签栅格的相位基准。必须与
+    // `buildTempoGridLines` 的 `segWeakOffset` 用同一公式（同一 stepBeats 与 bpm
+    // 基准），否则相位对不上。
+    const segmentStartIndices = labelSegments.map((segment) =>
+        Math.round(secToBeat(tempoMap, segment.startSec, bpm) / stepBeats),
     );
 
     // 弱线与小节线会落在同一秒（小节起点本身就是一条弱线位置），必须合并成
@@ -377,12 +395,18 @@ export function buildTimelineTicks(args: {
         // 缩小时小节间距会小到放不下标签，标尺便会只剩一堆没有文字的竖线。
         // 小节通过 isBarStart 影响刻度样式（2px 强线 + 加粗文字），而不是额外
         // 增加刻度数量——与旧 buildRulerTicks 的语义一致。
-        const stride =
-            tempoMap && tempoMap.points.length > 0
-                ? segmentLabelStrides[pointIndexAtSec(tempoMap, entry.sec)]
-                : labelStride;
+        const segmentIndex =
+            tempoMap && tempoMap.points.length > 0 ? pointIndexAtSec(tempoMap, entry.sec) : -1;
+        const stride = segmentIndex >= 0 ? segmentLabelStrides[segmentIndex] : labelStride;
+        // 标签栅格：全局索引取模即可跨段连续（索引全局单调，见 `TempoGridLine.index`）。
+        // swing 打开时再整体偏移 `段起点索引 % 2`，把栅格对齐到段内**偶数**索引
+        // （未被 swing 平移）的线上 —— 与 §3b 强制偶数 stride 配合，标签拍值恒为整数。
+        const phase =
+            segmentIndex >= 0 && swingOn ? ((segmentStartIndices[segmentIndex] % 2) + 2) % 2 : 0;
         const onLabelStep =
-            entry.index !== undefined && stride !== undefined && entry.index % stride === 0;
+            entry.index !== undefined &&
+            stride !== undefined &&
+            (((entry.index - phase) % stride) + stride) % stride === 0;
         ticks.push({
             sec: entry.sec,
             beat,
@@ -408,7 +432,7 @@ export function buildTimelineTicks(args: {
 
     // ── 4. 变化点位置强制展示标尺值 ────────────────────────────────
     // 变化点（Tempo Map 段起点）是工程的时间地标，必须带标签：读不出它的位置时
-    // 用户只能看到旗帜悬在两个标尺值之间。这里只做"强制显示"。
+    // 用户只能看到旗帜悬在两个标尺值之间。
     //
     // 【为什么不再顺手清场】旧实现在这里额外隐藏了距变化点
     // `max(minLabelSpacingPx, 26)`（默认 110、可调到 320）以内的**所有**常规
@@ -416,28 +440,36 @@ export function buildTimelineTicks(args: {
     // `labelMaxWidth`（到下一个保留标签的间距 − 6）保证，不需要清场；而清场半径
     // 按**用户设定的标签间距**取，等于把一整个标签位整段挖掉 —— 实测在 121px
     // 标称间距下挖出 290px 的空洞（2.40 倍）、在 327px 下挖出 785px（2.40 倍）。
-    // 那正是"某段之内的标尺刻度线与文本消失"的直接机制：是否触发取决于当前
-    // 缩放档位下常规标签与变化点的相对位置，于是放大/缩小或滚动一下又"回来"。
-    // 现在让位统一交给 §5（阈值 = 文字重叠宽度），且变化点标签优先保留。
-    const changePointKeys = new Set<number>();
-    if (tempoMap && tempoMap.points.length > 0) {
-        for (const point of tempoMap.points) {
-            changePointKeys.add(Math.round(point.positionSec * 1e6));
-        }
-    }
-    /** 该秒位是否就是（或落在量化误差内的）一个 Tempo Map 变化点。 */
-    const isChangePointSec = (sec: number): boolean => {
-        if (changePointKeys.size === 0) return false;
-        const key = Math.round(sec * 1e6);
-        return (
-            changePointKeys.has(key) || changePointKeys.has(key - 1) || changePointKeys.has(key + 1)
-        );
-    };
+    //
+    // 【为什么强制标签也要限量】变化点可能比 `minLabelSpacingPx` 密得多（例如
+    // 每 7s 一个变化点 + 中等缩放）。若全部强制显示，变化点区就变成"变化点间距"
+    // 的密集栅格，与其余部分的均匀栅格首尾拼接 —— 正是"某段之内的刻度与文本消失"
+    // 的另一种形态（实测 pps=8 时 58px / 193px）。因此强制标签之间也满足
+    // `minLabelSpacingPx`：过密时只保留每隔约 `minLabelSpacingPx` 的那一个。
+    //
+    // 【为什么按整张地图选、而不是按已生成的刻度选】选择必须只依赖**绝对位置**，
+    // 否则生成范围（随滚动移动）会改变"哪一个是第一个"，强制标签的相位随滚动
+    // 跳变 —— 那正是要消除的闪烁。
     const forcedLabel = new Set<number>();
-    for (let i = 0; i < ticks.length; i += 1) {
-        if (!isChangePointSec(ticks[i].sec)) continue;
-        forcedLabel.add(i);
-        if (!ticks[i].showLabel) ticks[i] = { ...ticks[i], showLabel: true };
+    if (tempoMap && tempoMap.points.length > 0) {
+        const tickIndexByKey = new Map<number, number>();
+        for (let i = 0; i < ticks.length; i += 1) {
+            tickIndexByKey.set(Math.round(ticks[i].sec * 1e6), i);
+        }
+        let lastForcedPx: number | null = null;
+        for (const point of tempoMap.points) {
+            const px = secToContentPx(axis, point.positionSec);
+            if (lastForcedPx !== null && px - lastForcedPx < spacingPx - 1e-9) continue;
+            lastForcedPx = px;
+            const key = Math.round(point.positionSec * 1e6);
+            const index =
+                tickIndexByKey.get(key) ??
+                tickIndexByKey.get(key - 1) ??
+                tickIndexByKey.get(key + 1);
+            if (index === undefined) continue;
+            forcedLabel.add(index);
+            if (!ticks[index].showLabel) ticks[index] = { ...ticks[index], showLabel: true };
+        }
     }
 
     // ── 5. 标签版式：重叠让位（收敛级联）+ 计算最大宽度 ─────────────
