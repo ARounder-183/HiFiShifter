@@ -23,6 +23,8 @@ use ara2_bridge::plugin::{
 };
 use hifishifter_kernel::state::TimelineState;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use crate::render::ownership::{region_owners, DocumentId};
 
 /// 句柄的可用作键的形式。
 ///
@@ -68,6 +70,9 @@ pub struct RegionState {
 /// 每份模型对应一个文档。共享累积器会让两份文档互相污染 —— 而 v1 的单实例语义
 /// 本来就是"一个实例 = 一条编辑轨"，一份文档一份模型才是对的。
 pub struct ModelHandle {
+    /// 会话内唯一文档身份；宿主的 model-ref 键只在所属文档生命周期内有效。
+    document_id: DocumentId,
+    region_keys: Vec<u64>,
     /// 正在累积的 ARA 文档。
     document: AraDocument,
     /// 映射好的时间线（`end_editing` 之后可用）。
@@ -94,7 +99,10 @@ pub struct ModelHandle {
 
 impl Default for ModelHandle {
     fn default() -> Self {
+        static NEXT_DOCUMENT: AtomicU64 = AtomicU64::new(1);
         Self {
+            document_id: NEXT_DOCUMENT.fetch_add(1, Ordering::Relaxed),
+            region_keys: Vec::new(),
             document: AraDocument::default(),
             timeline: None,
             generation: None,
@@ -187,6 +195,8 @@ impl DocumentLifecycle for ModelHandle {
     }
 
     fn destroy_document(&mut self, _document: Self::Document) {
+        region_owners().lock().unwrap_or_else(|p| p.into_inner())
+            .remove_document(self.document_id);
         log::info!("[ara] document destroyed");
     }
 }
@@ -408,7 +418,7 @@ impl PlaybackRegions for ModelHandle {
 
     fn create_playback_region(
         &mut self,
-        _context: &CreateContext,
+        context: &CreateContext,
         modification: &Self::AudioModification,
         sequence: &Self::RegionSequence,
         properties: PlaybackRegionProperties,
@@ -435,6 +445,11 @@ impl PlaybackRegions for ModelHandle {
         let has_content_based_fade_at_head = (flags & 8) != 0;
         let has_content_based_fade_at_tail = (flags & 4) != 0;
         let index = self.document.playback_regions.len();
+        let key = context.realtime_key().ok_or(AraError::InvalidState("missing region key"))?;
+        region_owners().lock().unwrap_or_else(|p| p.into_inner())
+            .register(key, self.document_id, index)
+            .map_err(|_| AraError::InvalidState("region identity already owned or invalid"))?;
+        self.region_keys.push(key);
         self.document.playback_regions.push(AraPlaybackRegion {
             name: properties.name().map(str::to_owned),
             audio_source_persistent_id: source_persistent_id.clone(),
@@ -485,8 +500,19 @@ impl PlaybackRegions for ModelHandle {
 
     /// 标记已销毁区间，编辑结束时只映射存活的区域。
     fn destroy_playback_region(&mut self, state: Self::PlaybackRegion) {
+        if let Some(key) = self.region_keys.get(state) {
+            region_owners().lock().unwrap_or_else(|p| p.into_inner()).remove(*key);
+        }
         self.destroyed_regions.insert(state);
         log::info!("[ara] playback_region destroyed #{}", state);
+    }
+}
+
+impl Drop for ModelHandle {
+    fn drop(&mut self) {
+        // 初始化失败也可能直接释放模型而没有 destroy_document 回调。
+        region_owners().lock().unwrap_or_else(|p| p.into_inner())
+            .remove_document(self.document_id);
     }
 }
 
@@ -494,6 +520,35 @@ impl PlaybackRegions for ModelHandle {
 mod tests {
     use super::*;
     use ara2_bridge::core::{Registry, RegionSequenceKind};
+
+    /// 实际模型销毁回调必须撤销索引，slot 表测试不能替代这个接线检查。
+    #[test]
+    fn destroying_a_model_region_revokes_its_global_identity() {
+        let identity = Box::new(0_u8);
+        let key = (&*identity as *const u8) as u64;
+        let mut model = ModelHandle::new();
+        model.region_keys.push(key);
+        region_owners().lock().unwrap().register(key, model.document_id, 0).unwrap();
+        PlaybackRegions::destroy_playback_region(&mut model, 0);
+        assert!(region_owners().lock().unwrap().resolve(&[key]).is_err());
+    }
+
+    /// 旧文档 Drop 的兜底不能撤销已被新文档复用地址的身份。
+    #[test]
+    fn document_teardown_and_fallback_drop_do_not_revoke_another_document() {
+        let identity = Box::new(0_u8);
+        let key = (&*identity as *const u8) as u64;
+        let mut old = ModelHandle::new();
+        region_owners().lock().unwrap().register(key, old.document_id, 0).unwrap();
+        DocumentLifecycle::destroy_document(&mut old, ());
+        assert!(region_owners().lock().unwrap().resolve(&[key]).is_err());
+        let replacement = ModelHandle::new();
+        region_owners().lock().unwrap().register(key, replacement.document_id, 0).unwrap();
+        drop(old);
+        assert_eq!(region_owners().lock().unwrap().resolve(&[key]).unwrap(), (replacement.document_id, vec![0]));
+        drop(replacement);
+        assert!(region_owners().lock().unwrap().resolve(&[key]).is_err());
+    }
 
     /// 宿主移动与拉伸更新必须替换现存区间，不能新增重复 clip 或忽略更新。
     #[test]

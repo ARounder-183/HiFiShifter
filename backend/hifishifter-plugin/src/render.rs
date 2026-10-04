@@ -12,6 +12,9 @@ use hifishifter_kernel::mixdown::{render_mixdown_interleaved, MixdownOptions, Qu
 use hifishifter_kernel::state::TimelineState;
 use hifishifter_kernel::time_stretch::StretchAlgorithm;
 
+pub(crate) mod ownership;
+pub(crate) mod extension;
+
 /// 一段离线渲染产物。
 #[derive(Debug, Clone)]
 pub struct RenderedAudio {

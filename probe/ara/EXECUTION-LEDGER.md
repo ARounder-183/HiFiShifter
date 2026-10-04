@@ -676,4 +676,18 @@ ProcessContext 112/8，Chord 4/2，FrameRate 8/4；全部字段 offsetof 与 Rus
 复审无 Task 12 checkpoint 阻塞。实时无分配/无锁由代码审查确认，动态守卫仅覆盖日志，
 不能描述成做过动态 allocation 计数。当前输出仍为安全零，Task 14 才接 PCM。
 
+**Task 13: Ruling: 每个 renderer 的分配用 model-ref 地址键，不能用 slot 或整张文档代替 — 增加 RegionOwners 与模型线程分配观察器，拒绝未知/跨文档键 — 若错误复用全时间线，会让多个处理器重复输出或串文档。**
+三条所有权测试 RED/GREEN；两个真实扩展 FFI 通知测试 RED/GREEN；索引接线覆盖 region
+销毁、document 销毁及旧 Model Drop 不撤销新文档复用地址的回归。
+观察器在内部锁释放后通知，音频回调不访问表；editor sequence 仍未覆盖。
+
+**Task 13: Ruling: 实测工厂返回的 Processor 关闭后 refcount 仍为 1 — 成功 queryInterface 后消耗工厂的初始引用，并以 native entry 的 builder Arc 保留扩展 owner — 若只移除 Box::leak 而不校验 COM 生命周期，会留下泄漏或提前释放。**
+两条真实工厂测试先失败（remaining=1），修复后 remaining=0；宿主持有 entry COM 引用
+时 owner 保留，最终 native release 后 owner 消亡。当前测试的 entry 尚未绑定文档。
+
+**Task 13: Ruling: 手动销毁测试 lease 不等于产品文档销毁接线已完成 — 本地提交标为部分检查点，保留实际 controller lease 撤销/分配清空、bound teardown 与 editor sequence 三项未完成 — 若越过这道门接快照，可能在文档关闭后继续播放旧区域。**
+最新实际构建及测试：20 lib + 13 mapping + 1 A5 + 3 renderer FFI + 1 exports = 38 passed。
+采集验证器 6 passed；diff 检查通过，独立审查同样重跑 38 条无失败。
+本批新 DLL 未部署到 REAPER，不把单测声称为宿主卸载或 PCM 发声验证。
+
 

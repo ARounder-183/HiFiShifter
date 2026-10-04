@@ -121,7 +121,27 @@ git commit -m "feat(ara): validate the VST3 audio ABI and initialize host buffer
 
 ## Task 13: renderer 区域所有权与绑定释放
 
+### 当前部分检查点（Task 13 未完成）
+
+- [x] RegionOwners 的登记、分配解析、跨文档拒绝、销毁和地址复用隔离。
+- [x] region 模型回调接真实 `realtime_key()`，销毁回调与 Drop 撤销索引。
+- [x] vendored ARA 2 region add/remove 观察器，释放内部锁后通知；原 constructor 兼容。
+- [x] extension owner 由 native entry builder 的强引用保留；观察器 Weak 避免循环；移除 Box::leak。
+- [x] 修复 Processor 工厂初始 COM 引用，真实工厂/entry 引用两条回归 RED/GREEN。
+- [x] 本地部分检查点：38 条插件测试、6 条采集回归、diff 检查与独立审查通过。
+- [ ] 将实际 document controller 销毁接到 ExtensionControllerLease.destroy，并清空对应 owner 分配。
+- [ ] 完整绑定（非空 entry）实际 teardown 与观察器重入回归。
+- [ ] editor region-sequence assignment 通知、展开与验证（当前观察器只通知显式 region）。
+
+边界：目前产品 destroy_document 只撤销 RegionOwners。独立 FFI 测试销毁的是测试手动
+创建的 lease，不能拿它证明产品 controller-first teardown 已接线。native entry 测试
+使用尚未绑定文档的 entry，只证明 COM builder 捕获的 owner 生命周期。
+**剩余三项解决前不把 Task 13 全部勾选，也不接音频快照消费者。**
+
 **Files:** Modify vendored `extension/mod.rs` / PATCHED.md、`src/vst3.rs` / `src/ara/model.rs`；Create `src/render/ownership.rs`。
+
+实际新增 `src/render/extension.rs`（每 entry 的 RAII owner）与 `tests/renderer_assignments.rs`
+（真实扩展 FFI 测试）。model identity 索引只在模型线程锁；process 不消费它。
 
 **Interfaces:**
 - `type AssignmentObserver = Arc<dyn Fn(ExtensionRoles, &[usize]) + Send + Sync>`。

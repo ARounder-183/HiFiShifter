@@ -18,11 +18,13 @@ use ara2_bridge::companion::vst3::ffi::{
 };
 use ara2_bridge::companion::vst3::{Vst3MainFactoryAdapter, Vst3PluginEntryAdapter};
 use ara2_bridge::companion::{CompanionProcessorBinding, CompanionRoles};
-use ara2_bridge::plugin::{ExtensionBinding, ExtensionRoles};
+use ara2_bridge::plugin::ExtensionRoles;
 use ara2_bridge::core::ApiGeneration;
 use std::ffi::{c_char, c_void};
 use std::mem::offset_of;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
+use crate::render::extension::ExtensionOwner;
 
 /// VST3 `tresult`（HRESULT 风格）。
 pub type TResult = i32;
@@ -535,6 +537,10 @@ unsafe extern "system" fn factory_create_instance(
             // 宿主没有要任何我们实现的接口：按 VST3 约定销毁刚创建的对象。
             // SAFETY: 引用计数仍为 1，且未把指针交给宿主。
             unsafe { drop(Box::from_raw(base as *mut Processor)) };
+        } else {
+            // queryInterface 已交出一个宿主引用；工厂必须消耗自己的初始引用。
+            // SAFETY: 宿主 owning 引用仍保留对象，此处仅减少工厂的那一份。
+            unsafe { processor_release(base as *mut Processor) };
         }
         return result;
     }
@@ -661,6 +667,7 @@ struct Processor {
     refcount: AtomicI32,
     audio_vtbl: *const AudioProcessorVtbl,
     entry: Option<Vst3PluginEntryAdapter>,
+    extension_owner: Arc<ExtensionOwner>,
     active: AtomicI32,
 }
 
@@ -672,6 +679,8 @@ impl Processor {
         let binding =
             CompanionProcessorBinding::new([runtime.companion.clone()], CompanionRoles::all())
                 .ok()?;
+        let extension_owner = Arc::new(ExtensionOwner::default());
+        let builder_owner = extension_owner.clone();
         let extension_builder = move |known: CompanionRoles, assigned: CompanionRoles| {
             let generation = crate::runtime::runtime()
                 .and_then(|runtime| runtime.factory.entry().generation())
@@ -683,14 +692,7 @@ impl Processor {
             ));
             let known = ExtensionRoles::from_bits_truncate(known.bits());
             let assigned = ExtensionRoles::from_bits_truncate(assigned.bits());
-            let supported =
-                ExtensionRoles::PLAYBACK_RENDERER | ExtensionRoles::EDITOR_RENDERER;
-            let (binding, lease) =
-                ExtensionBinding::new(generation, known, assigned, supported)?;
-            let raw = binding.as_raw();
-            // 探针把扩展绑定泄漏到进程结束：宿主可能在任意时刻持有该实例指针。
-            Box::leak(Box::new((binding, lease)));
-            Ok(raw)
+            builder_owner.bind(generation, known, assigned)
         };
         let entry =
             Vst3PluginEntryAdapter::new(binding, crate::CLASS_NAME, extension_builder).ok()?;
@@ -699,6 +701,7 @@ impl Processor {
             refcount: AtomicI32::new(1),
             audio_vtbl: &AUDIO_VTBL,
             entry: Some(entry),
+            extension_owner,
             active: AtomicI32::new(0),
         }))
     }
@@ -1294,6 +1297,55 @@ static EDIT_CONTROLLER_VTBL: EditControllerVtbl = EditControllerVtbl {
 pub fn new_main_factory_adapter() -> Option<Vst3MainFactoryAdapter> {
     let runtime = crate::runtime::runtime()?;
     Vst3MainFactoryAdapter::new(crate::CLASS_NAME, runtime.companion.clone()).ok()
+}
+
+#[cfg(test)]
+mod lifetime_tests {
+    use super::*;
+    use ara2_bridge::companion::vst3::ffi::ara2_vst3_release;
+
+    /// 从真实工厂创建组件，返回其宿主 owning COM 引用。
+    fn create_component() -> *mut c_void {
+        let iid = uid_guid(IID_ICOMPONENT);
+        let mut component = std::ptr::null_mut();
+        // SAFETY: CID/IID 和输出槽均在同步工厂调用期间存活。
+        let result = unsafe {
+            factory_create_instance(std::ptr::null_mut(), PROCESSOR_CID.as_ptr().cast(), iid.as_ptr().cast(), &raw mut component)
+        };
+        assert_eq!(result, K_RESULT_OK);
+        component
+    }
+
+    /// 工厂不能遗留自己的初始引用，否则组件和扩展永远不会释放。
+    #[test]
+    fn host_component_release_drops_the_extension_owner() {
+        let component = create_component();
+        // SAFETY: component 是工厂返回的有效 Processor 基址。
+        let owner = unsafe { Arc::downgrade(&(*component.cast::<Processor>()).extension_owner) };
+        // SAFETY: 消耗唯一宿主组件引用，此后不再使用 component。
+        assert_eq!(unsafe { component_release(component) }, 0);
+        assert!(owner.upgrade().is_none());
+    }
+
+    /// native ARA entry 被宿主持有时，组件先释放也不能让 extension storage 悬空。
+    #[test]
+    fn host_entry_reference_keeps_the_extension_owner_alive() {
+        let component = create_component();
+        // SAFETY: 组件仍存活，query_interface 返回新 owning COM 引用。
+        let (owner, entry) = unsafe {
+            let processor = &*component.cast::<Processor>();
+            (Arc::downgrade(&processor.extension_owner), processor.entry.as_ref().unwrap()
+                .query_interface(Ara2Vst3InterfaceKind::PluginEntry2).unwrap())
+        };
+        // SAFETY: 消耗宿主组件引用，entry 仍被单独持有。
+        assert_eq!(unsafe { component_release(component) }, 0);
+        assert!(owner.upgrade().is_some());
+        let mut remaining = 0;
+        // SAFETY: 最后消耗 entry owning COM 引用，不再访问其指针。
+        assert_eq!(unsafe { ara2_vst3_release(entry, &raw mut remaining) }, ARA2_VST3_OK);
+        assert_eq!(remaining, 0);
+        assert!(owner.upgrade().is_none());
+    }
 }
 
 #[cfg(test)]

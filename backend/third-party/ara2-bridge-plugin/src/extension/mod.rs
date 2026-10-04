@@ -1,3 +1,4 @@
+//! ARA 扩展角色与共享生命周期；本地补丁将模型线程的 region 分配通知产品 renderer。
 //! ARA plug-in extension role resolution and shared-lifetime interface storage.
 
 mod editor;
@@ -55,6 +56,7 @@ pub(crate) struct ExtensionState {
     model_thread: ThreadId,
     selection: Mutex<Option<ExtensionViewSelection>>,
     hidden_sequences: Mutex<Vec<usize>>,
+    assignment_observer: Mutex<Option<Arc<dyn Fn(ExtensionRoles, &[usize]) + Send + Sync>>>,
 }
 
 /// Owned copy of one editor-view selection notification.
@@ -83,6 +85,19 @@ impl ExtensionViewSelection {
 }
 
 impl ExtensionState {
+    /// 模型线程复制当前角色的键，释放所有内部锁后通知，允许观察器重入只读查询。
+    fn notify_assignments(&self, role: ExtensionRoles) {
+        let observer = lock(&self.assignment_observer).clone();
+        if let Some(observer) = observer {
+            let mut keys = lock(&self.playback_regions).iter()
+                .filter(|(bits, _)| *bits == role.bits())
+                .map(|(_, key)| *key)
+                .collect::<Vec<_>>();
+            keys.sort_unstable();
+            observer(role, &keys);
+        }
+    }
+
     fn require_controller(&self) -> Result<(), AraError> {
         if std::thread::current().id() != self.model_thread {
             Err(AraError::InvalidState(
@@ -109,6 +124,7 @@ impl ExtensionState {
                 "playback region is already assigned to this role",
             ));
         }
+        self.notify_assignments(role);
         Ok(())
     }
 
@@ -119,6 +135,7 @@ impl ExtensionState {
                 "playback region is not assigned to this role",
             ));
         }
+        self.notify_assignments(role);
         Ok(())
     }
 }
@@ -144,6 +161,22 @@ pub struct ExtensionBinding {
 }
 
 impl ExtensionBinding {
+    /// 本地补丁：模型线程的 renderer 区域分配观察器，不可在音频线程读取分配 Mutex。
+    pub fn new_with_assignment_observer(
+        generation: ApiGeneration,
+        known: ExtensionRoles,
+        assigned: ExtensionRoles,
+        supported: ExtensionRoles,
+        observer: Arc<dyn Fn(ExtensionRoles, &[usize]) + Send + Sync>,
+    ) -> Result<(Self, ExtensionControllerLease), AraError> {
+        if generation < ApiGeneration::V2Draft {
+            return Err(AraError::Unsupported("assignment observer requires ARA 2"));
+        }
+        let (binding, lease) = Self::new(generation, known, assigned, supported)?;
+        *lock(&binding.allocation.state.assignment_observer) = Some(observer);
+        Ok((binding, lease))
+    }
+
     /// Resolves roles and creates stable legacy/ARA 2 extension interfaces.
     pub fn new(
         generation: ApiGeneration,
@@ -172,6 +205,7 @@ impl ExtensionBinding {
             model_thread: std::thread::current().id(),
             selection: Mutex::new(None),
             hidden_sequences: Mutex::new(Vec::new()),
+            assignment_observer: Mutex::new(None),
         });
         let state_pointer = Arc::as_ptr(&state).cast_mut();
         let legacy_interface = Arc::new(ARAPlugInExtensionInterface {

@@ -1,7 +1,7 @@
 # 本地补丁说明（HiFiShifter）
 
 这份源码是 `ara2-bridge-plugin` 0.3.0 的**逐字拷贝**，外加一处**把模型图的边找回
-委托层**的补丁。
+委托层**的补丁，以及 renderer 分配通知补丁。
 
 ## 补了什么
 
@@ -17,6 +17,19 @@
 并在 `PluginModel` 上用等式约束钉回"正主" trait 的同名类型（实现方仍只需给一套类型）。
 
 `runtime.rs` 里三处派发点改成把边一并传下去（那些值本来就在运行时的节点上）。
+
+## renderer 区域分配通知（Phase 3a）
+
+`ExtensionBinding::new_with_assignment_observer` 在 ARA 2 模型线程 add/remove playback
+region 后提供 `(role, sorted_model_ref_keys)`。观察器在所有内部锁释放后运行，允许
+重入只读查询；原 `new` 不安装观察器，行为保持。接口拒绝 ARA 1，旧 constructor
+仍保留原 ARA 1 行为。此观察器只通知显式 playback region，**不通知 editor 的
+region sequence 分配**，预览 sequence 支持必须单独展开，不能误当已支持。
+
+观察器不是音频线程接口；不能在 process 中复制、锁分配表或读宿主 PCM。
+身份来源为 `CreateContext::realtime_key()`（runtime 内 model-ref 地址），不是 RawHandle。
+集成回归在产品 crate `tests/renderer_assignments.rs`，经真实扩展 FFI 检查两个 renderer
+隔离、remove 以及 controller/companion 两种释放顺序。
 
 ## 为什么必须补
 
