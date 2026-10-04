@@ -35,8 +35,10 @@ impl EditState {
                 let Some(identity) = current.get(old) else { continue; };
                 (old.clone(), identity.clone())
             };
-            if identity.is_empty() || identity.iter().any(|pair| pair.0.is_empty() || pair.1.is_empty() || current.iter().any(|(id, other)| id != &new && other.contains(pair))) {
-                return Err("ARA edit identity is empty or shared across tracks; cannot persist uniquely".into());
+            // live归属已由宿主区域分配证明；复制轨道合法共享modification/source。
+            // restore仍要求候选集中恰好一个身份匹配，不能仅按旧轨道序号猜测。
+            if identity.is_empty() || identity.iter().any(|pair| pair.0.is_empty() || pair.1.is_empty()) {
+                return Err("ARA edit identity is empty; cannot persist uniquely".into());
             }
             if mapping.values().any(|(known, _)| known == &new) {
                 return Err("ARA saved edit identities are ambiguous; multiple records target one host track".into());

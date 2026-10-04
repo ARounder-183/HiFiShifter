@@ -1,9 +1,14 @@
 # 内嵌原GUI开发bundle构建；只在当前worktree生成，不安装到系统VST目录，不运行测试。
-param([switch]$SkipFrontend)
+param([switch]$SkipFrontend,
+    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$BundleDirectory='embedded-vst3')
 $ErrorActionPreference = 'Stop'
 $araEmbeddedRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-if (Get-Process reaper -ErrorAction SilentlyContinue) { throw 'Close REAPER normally before rebuilding the isolated bundle; this script never terminates user projects.' }
-$araEmbeddedBundle = Join-Path $araEmbeddedRoot '.build-tmp\embedded-vst3\HiFiShifter.vst3'
+$araEmbeddedOutput = Join-Path $araEmbeddedRoot ".build-tmp\$BundleDirectory"
+if ((Get-Process reaper -ErrorAction SilentlyContinue) -and
+    ($BundleDirectory -eq 'embedded-vst3' -or (Test-Path -LiteralPath $araEmbeddedOutput))) {
+    throw 'REAPER is running: only a new, non-existing bundle directory may be built; never replace a loaded bundle.'
+}
+$araEmbeddedBundle = Join-Path $araEmbeddedOutput 'HiFiShifter.vst3'
 $araEmbeddedModule = Join-Path $araEmbeddedBundle 'Contents\x86_64-win'
 $araEmbeddedResources = Join-Path $araEmbeddedBundle 'Contents\Resources\frontend'
 Push-Location $araEmbeddedRoot

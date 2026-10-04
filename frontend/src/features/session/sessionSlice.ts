@@ -4688,6 +4688,7 @@ const sessionSlice = createSlice({
                     base_sec?: number;
                     position_sec?: number;
                     duration_sec?: number;
+                    host_authoritative?: boolean;
                 };
                 if (!payload.ok) {
                     return;
@@ -4768,7 +4769,10 @@ const sessionSlice = createSlice({
                 const EPS_SEC = 0.0005;
 
                 let nextplayheadSec = state.playheadSec;
-                if (nextIsPlaying) {
+                if (payload.host_authoritative && !nextIsPlaying) {
+                    // DAW停播时的seek也有真实位置；独立app仍保留本地编辑游标。
+                    nextplayheadSec = Math.max(0, (payload.base_sec ?? 0) + nextPositionSec);
+                } else if (nextIsPlaying) {
                     const absSec = (payload.base_sec ?? 0) + nextPositionSec + latencySec;
                     nextplayheadSec = Math.max(0, absSec);
                 } else if (state.runtime.isPlaying) {

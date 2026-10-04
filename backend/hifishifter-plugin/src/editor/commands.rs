@@ -33,10 +33,10 @@ struct TrackPatch {track_id:String,volume:Option<f32>,muted:Option<bool>,solo:Op
 
 /// 构造原payload，包括真实本地dirty和历史深度，不伪造工程文件路径。
 pub(super) fn payload(session:&EditorSession,lite:bool)->Result<Value,String> {
-    let (position,playing)=session.transport();
+    let (position,_)=session.transport();
     let timeline=session.timeline.lock().unwrap();
     let mut payload=if lite {timeline.to_payload_lite()} else {timeline.to_payload()};
-    if playing {payload.playhead_sec=position.max(0.);}
+    payload.playhead_sec=position.max(0.);
     let (undo,redo)=history_depths_of(&session.history.lock().unwrap());
     payload.undo_depth=Some(undo);payload.redo_depth=Some(redo);
     let project=session.project.lock().unwrap().clone();
@@ -164,7 +164,7 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
             let (position,playing)=session.transport();
             let timeline=session.timeline.lock().unwrap();
             Ok(json!({"ok":true,"is_playing":playing,"waiting_for_render":false,"target":if playing {Some("synthesized")} else {None},
-                "base_sec":position,"position_sec":position,"duration_sec":timeline.project_sec}))
+                "base_sec":0.0,"position_sec":position,"duration_sec":timeline.project_sec,"host_authoritative":true}))
         },
         "get_pitch_analysis_progress"=>Ok(Value::Null),
         "get_track_summary"=>{

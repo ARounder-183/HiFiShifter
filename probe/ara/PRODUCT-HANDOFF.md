@@ -4,6 +4,8 @@
 
 ## 最新状态：一期核心真实验收通过，二期改为内嵌GUI与自动应用
 
+2026-10-05用户已真实试用内嵌GUI并确认基本可编辑；新反馈三项高优缺陷正在修复，不再将所有未验证行为归为Computer Use。当前新源码修停播process发声、绝对时间重复相加、同源复制轨道的组件state作用域和跨轨假Conflict。62插件lib回归与15前端光标回归正常exit0；新bundle在`.build-tmp/embedded-feedback-01/HiFiShifter.vst3`。用户仍在修改旧隔离REAPER，绝不关闭或热替换。下一批先待用户正常保存退出后部署高优修复，再实现标准ARA宿主播放控制（可选能力/主线程调用）和无待应用编辑时的宿主模型自动同步；真实验证未完成，不能标二期完成。
+
 原GUI手绘音高提交r1/m2，REAPER真实输出四个窗口220.5Hz→393.75Hz，gap=0。
 正常关GUI、保存/关REAPER后无GUI重开，输出PCM maxdiff=0；恢复GUI连接r2/m3，
 用户确认曲线显示。证据见`captures/forward-gui-output.json`和同名三份WAV。

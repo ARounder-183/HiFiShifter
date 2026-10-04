@@ -29,6 +29,7 @@ enum Job {Request(UiRequest),Barrier(mpsc::Sender<()>),Close}
 #[derive(Default)]
 struct Loaded {
     initialized:bool,edit:u64,model:u64,
+    projection:String,
     reverse_paths:HashMap<String,String>,
 }
 pub(crate) struct EditorSession {
@@ -158,16 +159,20 @@ impl EditorSession {
                     && timeline.tracks.iter().any(|t|t.id==*root && !matches!(t.pitch_analysis_algo,PitchAnalysisAlgo::None))
             }) {return Err("pitch analysis pending".into());}
         }
-        let (edit,model)={let loaded=self.loaded.lock().unwrap();(loaded.edit,loaded.model)};
+        let (edit,model,projection)={let loaded=self.loaded.lock().unwrap();(loaded.edit,loaded.model,loaded.projection.clone())};
         self.owner.upgrade().ok_or("processor closed")?.apply_editor_edits(edit,model,
+            &projection,
             ||!self.closed.load(Ordering::Acquire) && self.submitted.load(Ordering::Acquire)==ticket)
     }
     pub(super) fn ensure_loaded(&self,force:bool)->Result<(),String> {
         let owner=self.owner.upgrade().ok_or("processor closed")?;
         let versions=owner.editor_versions()?;
         {
-            let loaded=self.loaded.lock().unwrap();
+            let mut loaded=self.loaded.lock().unwrap();
             if loaded.initialized && (loaded.edit,loaded.model)==versions && !force {return Ok(());}
+            if loaded.initialized && loaded.model==versions.1 && !force && owner.editor_projection()?==loaded.projection {
+                loaded.edit=versions.0;return Ok(());
+            }
             if loaded.initialized && !force && self.generation.load(Ordering::Acquire)!=self.applied.load(Ordering::Acquire) {
                 return Err("Conflict: host changed; local curves preserved, reload explicitly".into());
             }
@@ -184,7 +189,8 @@ impl EditorSession {
         if timeline.selected_clip_id.is_none() {timeline.selected_clip_id=timeline.clips.first().map(|c|c.id.clone());}
         *self.timeline.lock().unwrap()=timeline;
         *self.history.lock().unwrap()=Default::default();
-        *self.loaded.lock().unwrap()=Loaded {initialized:true,edit:snapshot.revision,model:snapshot.model_revision,reverse_paths};
+        let projection=owner.editor_projection()?;
+        *self.loaded.lock().unwrap()=Loaded {initialized:true,edit:snapshot.revision,model:snapshot.model_revision,reverse_paths,projection};
         *self.error.lock().unwrap()=None;
         self.applied.store(self.generation.load(Ordering::Acquire),Ordering::Release);
         self.peaks.lock().unwrap().clear();
@@ -290,9 +296,9 @@ impl ParamHost for EditorSession {
     fn publish_timeline(&self,timeline:TimelineState) {
         let result=(|| {
             let timeline=self.native_timeline(timeline)?;
-            let (edit,model)={let loaded=self.loaded.lock().unwrap();(loaded.edit,loaded.model)};
-            let versions=self.owner.upgrade().ok_or("processor closed")?.accept_editor_edits(edit,model,&timeline)?;
-            let mut loaded=self.loaded.lock().unwrap();loaded.edit=versions.0;loaded.model=versions.1;
+            let (edit,model,projection)={let loaded=self.loaded.lock().unwrap();(loaded.edit,loaded.model,loaded.projection.clone())};
+            let versions=self.owner.upgrade().ok_or("processor closed")?.accept_editor_edits(edit,model,&timeline,&projection)?;
+            let mut loaded=self.loaded.lock().unwrap();loaded.edit=versions.0;loaded.model=versions.1;loaded.projection=versions.2;
             *self.error.lock().unwrap()=None;
             Ok::<_,String>(())
         })();
@@ -372,6 +378,21 @@ mod tests {
         assert_eq!(editor.generation.load(Ordering::Acquire),0);
         assert!(editor.check_source("C:/Users/user/private.wav").is_err());
         editor.close();
+    }
+    /// 原前端以base+position消费；停播seek也必须得到宿主绝对位置。
+    #[test]
+    fn host_cursor_is_absolute_once_and_tracks_stopped_seeks() {
+        let (_model,owner,_identity)=fixture();let editor=owner.editor_session().unwrap();
+        // 时钟投影与分析无关；标记夹具已加载，避免为四帧源启动异步ONNX预热。
+        editor.loaded.lock().unwrap().initialized=true;
+        owner.clock.get().unwrap().update(&crate::audio_abi::ProcessContext {
+            state:0,sample_rate:44100.,project_time_samples:88200,..Default::default()
+        });
+        let playback=super::super::commands::dispatch(&editor,"get_playback_state",json!({})).unwrap();
+        let timeline=super::super::commands::dispatch(&editor,"get_timeline_state",json!({})).unwrap();
+        editor.close();
+        assert_eq!(playback["base_sec"].as_f64().unwrap()+playback["position_sec"].as_f64().unwrap(),2.);
+        assert_eq!(timeline["playhead_sec"],2.);
     }
     /// 真actor的自动调度消费快速写入/undo/redo，不调用手工render函数冒充自动应用。
     #[test]

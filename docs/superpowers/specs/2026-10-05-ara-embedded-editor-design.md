@@ -109,3 +109,9 @@ CWD/系统PATH，launcher只能用于隔离采集，不能替代发行部署。�
 音高差异，关闭FX后供音，重开FX/RPP恢复、双实例不串、快速编辑最后一笔、undo/redo、
 真实宿主改源/几何失效、seek、44100/48000 mono/stereo与30秒矩阵；独立app导入回归。
 记录命令/退出码/日志/PCM/截图；未实测项保持open，禁止把源码实现或空窗口当完整通过。
+
+## 用户试用补充（2026-10-05）
+
+高优：宿主停播实时process必须静音，offline导出不受kPlaying门禁影响；原GUI位置采用一次绝对项目时间，停播seek同样跟随宿主。多轨道/复制插件合法共享ARA source/modification，持久化恢复范围由该组件实际assigned regions确定，不再把共享对象等同归属歧义。每组件只保存本范围参数，未限定范围的歧义恢复继续拒绝。另一轨编辑不能制造本轨假Conflict，同轨旧写入仍拒绝。
+
+后续中优：原GUI播放/暂停请求通过可选ARAPlaybackControllerInterface在宿主主线程执行；不启动独立设备、不用REAPER脚本或快捷键模拟控制。不支持的宿主保持明确disabled/unsupported。后续低优：稳定host model变更且没有待应用本地编辑时自动同步；存在真实冲突仍保留曲线，禁止静默丢最后一笔。

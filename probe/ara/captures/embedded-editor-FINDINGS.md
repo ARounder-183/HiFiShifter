@@ -73,3 +73,13 @@ Lua原有save命令已把当前未编辑一次性工程正常保存为`.build-tm
 - 新bundle已重建并用隔离RPP重开；原时间线、钢琴卷帘、WORLD算法和自动应用栏再次出现。
 - Computer Use对REAPER父窗口坐标drag返回WebView子窗口目标不匹配；未猜HWND、未用PowerShell UIA或Lua提交替代手绘，因此真实手绘、导出及重开PCM仍是open项。
 - 追加验证：WebView accessibility树可读到绘制工具，但对同一索引执行click仍返回“element is not available in cached app state”；secondary action没有Invoke。短暂实现的同进程输入代理会使所有插件IPC请求超时，已撤回，未进入bundle。
+
+## 用户试用反馈及高优先级修复（2026-10-05）
+
+用户真实操作确认“基本可以”，但报告停播光标落在clip内时持续重复音频、两边光标不一致、复制多轨道后无法使用。截图和实际日志显示第二轨plugin_refresh失败，文档为2个sequence/6个region但1个source，恢复报persistent identity ambiguous。这不是仅Computer Use的输入限制。
+
+本批源码修复：realtime停播清零（offline导出继续供音）；修正base/position重复相加，并允许前端在宿主停播seek时更新游标；单组件保存/恢复改为host-assignment限定范围，同源复制轨道可分别编辑；跨轨revision变化只在本实例投影变化时产生Conflict。
+
+验证：同源别名lib测试62 passed、exit0（含原实时零分配/释放、WORLD独立输出oracle、共享身份复制/恢复及双actor连续编辑）；前端新增停播seek与原playheadGuard共15 passed、exit0；frontend tsc/生产build和规范bundle build exit0。未重复全前端及app全套测试；既有警告保留。
+
+新bundle：`.build-tmp/embedded-feedback-01/HiFiShifter.vst3`，没有替换用户仍在运行的`.build-tmp/embedded-vst3`。真实REAPER三项回归还没验证，不能将源码测试写成宿主通过。播放/暂停控制REAPER（中优）和clip改动自动刷新（低优）仍待下一批；正常保存并退出REAPER后才能升级加载版本。

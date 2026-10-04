@@ -26,6 +26,7 @@ pub(crate) struct ExtensionOwner {
     role: AtomicI32,
     pub snapshots: [super::snapshot::SnapshotPublisher; 2],
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
+    pending_restore:Mutex<Option<crate::state_channel::EditState>>,
     channel: Mutex<Option<hifishifter_ara_ipc::Server>>,
     editor:std::sync::OnceLock<Result<Arc<crate::editor::session::EditorSession>,String>>,
     pub(crate) clock:std::sync::OnceLock<Arc<super::transport::TransportClock>>,
@@ -118,6 +119,14 @@ mod bound_tests {
     /// 两个renderer先后提交局部视图，第二次刷新后不能抹掉第一轨PCM或持久曲线。
     #[test]
     fn two_renderer_commits_keep_both_curves_volumes_pcm_and_saved_state() {
+        two_renderer_case(false);
+    }
+    /// REAPER复制轨道共享modification/source；状态与恢复仍必须限制在宿主实例分配内。
+    #[test]
+    fn copied_tracks_share_sources_but_keep_instance_state_isolated() {
+        two_renderer_case(true);
+    }
+    fn two_renderer_case(shared_identity:bool) {
         use crate::render::source::SourcePcm;
         use hifishifter_ara_ipc::Request;
         let model=crate::ara::model::ModelHandle::new(); let document=model.session();
@@ -130,7 +139,7 @@ mod bound_tests {
         })).unwrap(); for clip in &mut timeline.clips { clip.normalize_takes(); }
         *document.timeline.lock().unwrap()=Some(timeline);
         document.edit_sources.lock().unwrap().insert("ara://pcm".into(),Arc::new(SourcePcm { sample_rate:44100,planes:vec![vec![0.1,0.2,0.3,0.4]],version:0,_reservation:None }));
-        let bindings=std::collections::BTreeMap::from([("a".into(),vec![("mod-a".into(),"ara://pcm".into())]),("b".into(),vec![("mod-b".into(),"ara://pcm".into())])]);
+        let bindings=std::collections::BTreeMap::from([("a".into(),vec![("mod-a".into(),"ara://pcm".into())]),("b".into(),vec![(if shared_identity {"mod-a"} else {"mod-b"}.into(),"ara://pcm".into())])]);
         *document.track_bindings.lock().unwrap()=bindings.clone(); document.ready.store(true,Ordering::Release);
         let identities=[Box::new(0_u8),Box::new(0_u8)]; let mut owners=Vec::new();
         for (index,id) in ["clip-a","clip-b"].into_iter().enumerate() {
@@ -151,7 +160,12 @@ mod bound_tests {
             client["params_by_root_track"]=serde_json::json!({id:{"frame_period_ms":5.0,"pitch_edit":[61.0+index as f32,63.0+index as f32]}});
             let response=owners[index].handle_request(Request::Commit { base_revision:snapshot.revision,model_revision:snapshot.model_revision,timeline:client }); assert!(response.ok,"{:?}",response.error);
         }
-        let bytes=owners[0].encode_state().unwrap(); let mut restored=crate::state_channel::EditState::default(); restored.restore(&bytes).unwrap(); restored.reconcile(&bindings).unwrap();
+        for (index,id) in ["a","b"].into_iter().enumerate() {
+            let saved:serde_json::Value=serde_json::from_slice(&owners[index].encode_state().unwrap()).unwrap();
+            assert_eq!(saved["edits"]["params"].as_object().unwrap().len(),1,"单个组件不能保存整个ARA文档的其它轨道");
+            assert!(saved["edits"]["params"].get(id).is_some());
+        }
+        let mut restored=document.edits.lock().unwrap().clone();restored.reconcile(&bindings).unwrap();
         for (index,id) in ["a","b"].into_iter().enumerate() {
             assert_eq!(restored.params[id].pitch_edit,[61.0+index as f32,63.0+index as f32]);
             let output=owners[index].render_edits(&document,&restored).unwrap();
@@ -159,6 +173,44 @@ mod bound_tests {
             for (actual,original) in output[0].left.iter().zip([0.1_f32,0.2,0.3,0.4]) { assert!((*actual-original*factor).abs()<1e-6); }
             let current=owners[index].handle_request(Request::Snapshot); assert!(current.ok);
             assert_eq!(current.timeline.unwrap()["tracks"][0]["volume"],serde_json::json!(factor));
+        }
+        if shared_identity {
+            let original=owners[0].encode_state().unwrap();let second=owners[1].encode_state().unwrap();
+            // REAPER复制插件：同一源身份由另一实例的实际assignment限定到B，不能改写A。
+            owners[1].restore_state(&original).unwrap();
+            let a=owners[0].handle_request(Request::Snapshot);let b=owners[1].handle_request(Request::Snapshot);
+            assert!(a.ok && b.ok,"{:?} {:?}",a.error,b.error);
+            assert_eq!(a.timeline.unwrap()["tracks"][0]["volume"],0.5);
+            assert_eq!(b.timeline.unwrap()["tracks"][0]["volume"],0.5);
+            assert_eq!(document.edits.lock().unwrap().params["b"].pitch_edit,[61.,63.]);
+            owners[1].restore_state(&second).unwrap();
+            assert_eq!(document.edits.lock().unwrap().params["a"].pitch_edit,[61.,63.]);
+            assert_eq!(document.edits.lock().unwrap().params["b"].pitch_edit,[62.,64.]);
+            let editors:Vec<_>=owners.iter().map(|owner|owner.editor_session().unwrap()).collect();
+            let call=|editor:&Arc<crate::editor::session::EditorSession>,command:&str,args:serde_json::Value| {
+                let (reply,received)=std::sync::mpsc::channel();let (events,_)=std::sync::mpsc::sync_channel(128);
+                let sink=crate::editor::session::UiSink {view_id:"dual-actor".into(),reply,events,closed:Arc::new(std::sync::atomic::AtomicBool::new(false))};
+                editor.enqueue(crate::editor::session::UiRequest {id:1,command:command.into(),args,sink}).unwrap();
+                let response=received.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+                assert_eq!(response["ok"],true,"{response}");response["value"].clone()
+            };
+            for editor in &editors {call(editor,"get_timeline_state",serde_json::json!({}));}
+            // 同一次debounce窗口内两轨落笔；B的共享revision变化不能让A的最新作业Conflict。
+            for (index,editor) in editors.iter().enumerate() {
+                let timeline=call(editor,"get_timeline_state",serde_json::json!({}));
+                call(editor,"set_track_state",serde_json::json!({
+                    "trackId":timeline["tracks"][0]["id"],"volume":if index==0 {0.75} else {0.125}
+                }));
+            }
+            let deadline=std::time::Instant::now()+std::time::Duration::from_secs(5);
+            for editor in &editors {
+                loop {let state=call(editor,"plugin_get_apply_state",serde_json::json!({}));assert!(state["error"].is_null(),"{state}");
+                    if state["pending"]==false {break;}assert!(std::time::Instant::now()<deadline,"{state}");
+                    std::thread::sleep(std::time::Duration::from_millis(20));}
+                editor.close();
+            }
+            assert_eq!(document.edits.lock().unwrap().tracks.iter().find(|t|t.id=="a").unwrap().volume,0.75);
+            assert_eq!(document.edits.lock().unwrap().tracks.iter().find(|t|t.id=="b").unwrap().volume,0.125);
         }
     }
 
@@ -382,9 +434,20 @@ impl ExtensionOwner {
         let revision=document.edits.lock().unwrap().revision;
         Ok((revision,document.revision.load(Ordering::Acquire)))
     }
+    /// 乐观并发只比较本实例能编辑的投影；其它轨道修改不能制造本轨Conflict。
+    pub(crate) fn editor_projection(&self)->Result<String,String> {
+        let document=self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade).ok_or("document closed")?;
+        let _transaction=document.transaction.lock().unwrap();
+        let edits=document.edits.lock().unwrap();self.projection(&document,&edits)
+    }
+    fn projection(&self,document:&super::document::DocumentSession,edits:&crate::state_channel::EditState)->Result<String,String> {
+        let mut timeline=self.assigned_timeline(document)?;edits.apply(&mut timeline);
+        let bytes=serde_json::to_vec(&(timeline.params_by_root_track,timeline.tracks)).map_err(|e|e.to_string())?;
+        Ok(blake3::hash(&bytes).to_hex().to_string())
+    }
     /// 接受曲线立即进入组件state，音频可稍后应用；真正model/edit冲突仍拒绝。
     pub(crate) fn accept_editor_edits(&self,base_edit:u64,base_model:u64,
-        client:&hifishifter_kernel::state::TimelineState)->Result<(u64,u64),String> {
+        client:&hifishifter_kernel::state::TimelineState,previous:&str)->Result<(u64,u64,String),String> {
         let document=self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade).ok_or("document closed")?;
         let _transaction=document.transaction.lock().unwrap();
         let model=document.revision.load(Ordering::Acquire);
@@ -392,21 +455,22 @@ impl ExtensionOwner {
         if !document.ready.load(Ordering::Acquire) { return Err("host model not ready".into()); }
         let host=self.assigned_timeline(&document)?;
         let mut edits=document.edits.lock().unwrap();
-        let mut candidate=edits.merge(&host,client,base_edit)?;
+        if edits.revision!=base_edit && self.projection(&document,&edits)?!=previous {return Err("Conflict: this instance's curves changed".into());}
+        let mut candidate=edits.merge(&host,client,edits.revision)?;
         candidate.reconcile(&document.track_bindings.lock().unwrap())?;
         *edits=candidate;
-        Ok((edits.revision,model))
+        Ok((edits.revision,model,self.projection(&document,&edits)?))
     }
     /// 最新已接受state在非实时线程渲染；有更新的GUI写入排队时禁止旧作业发布。
     pub(crate) fn apply_editor_edits(&self,base_edit:u64,base_model:u64,
-        current:impl Fn()->bool)->Result<(),String> {
+        previous:&str,current:impl Fn()->bool)->Result<(),String> {
         let document=self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade).ok_or("document closed")?;
         let _transaction=document.transaction.lock().unwrap();
         if !document.ready.load(Ordering::Acquire) || document.revision.load(Ordering::Acquire)!=base_model {
             return Err("Conflict: host model changed during automatic apply".into());
         }
         let edits=document.edits.lock().unwrap().clone();
-        if edits.revision!=base_edit { return Err("Conflict: edit revision changed".into()); }
+        if edits.revision!=base_edit && self.projection(&document,&edits)?!=previous { return Err("Conflict: edit revision changed".into()); }
         let mut prepared=Vec::new();
         for owner in document.renderer_owners() {
             let snapshots=owner.render_edits(&document,&edits)?;
@@ -437,6 +501,33 @@ impl ExtensionOwner {
         if let Some(document) = document { for owner in document.renderer_owners() { owner.prepare(); } } else { self.prepare(); }
     }
 
+    /// setState只暂存本组件恢复；宿主明确分配区域且模型ready后再合入共享权威。
+    pub(crate) fn restore_state(&self,bytes:&[u8])->Result<(),String> {
+        if bytes.is_empty() {return Ok(());}
+        let mut restored=crate::state_channel::EditState::default();
+        restored.restore(bytes)?;
+        *self.pending_restore.lock().unwrap()=Some(restored);
+        self.refresh_document();
+        Ok(())
+    }
+    /// 调用方持文档transaction；恢复候选集由宿主区域分配收窄，不按名称/旧序号猜测。
+    fn merge_pending_restore(&self,document:&super::document::DocumentSession)->Result<(),String> {
+        let mut pending=self.pending_restore.lock().unwrap();
+        let Some(saved)=pending.as_ref() else {return Ok(());};
+        if !document.ready.load(Ordering::Acquire) {return Ok(());}
+        let host=self.assigned_timeline(document)?;
+        if host.tracks.is_empty() {return Ok(());}
+        let allowed:BTreeSet<_>=host.tracks.iter().map(|t|t.id.clone()).collect();
+        let bindings=document.track_bindings.lock().unwrap().iter().filter(|(id,_)|allowed.contains(*id))
+            .map(|(id,identity)|(id.clone(),identity.clone())).collect();
+        let mut restored=saved.clone();restored.reconcile(&bindings)?;
+        let mut client=host.clone();restored.apply(&mut client);
+        let mut edits=document.edits.lock().unwrap();
+        let mut merged=edits.merge(&host,&client,edits.revision)?;
+        merged.reconcile(&document.track_bindings.lock().unwrap())?;
+        *edits=merged;*pending=None;Ok(())
+    }
+
     /// 保存前重新核对完整宿主图；歧义或中间编辑态不能伪装成可恢复的state。
     pub(crate) fn encode_state(&self) -> Result<Vec<u8>, String> {
         if let Some(Ok(editor))=self.editor.get() {editor.flush()?;}
@@ -444,10 +535,15 @@ impl ExtensionOwner {
         if let Some(document) = document {
             let _transaction = document.transaction.lock().unwrap();
             if !document.ready.load(Ordering::Acquire) { return Err("host graph not ready; cannot save ARA edits".into()); }
+            self.merge_pending_restore(&document)?;
             let mut edits = document.edits.lock().unwrap();
             edits.reconcile(&document.track_bindings.lock().unwrap())?;
-            edits.encode()
-        } else { self.edits.lock().unwrap().encode() }
+            let host=self.assigned_timeline(&document)?;
+            let allowed:BTreeSet<_>=host.tracks.iter().map(|t|t.id.clone()).collect();
+            let mut local=edits.clone();
+            local.params.retain(|id,_|allowed.contains(id));local.tracks.retain(|t|allowed.contains(&t.id));
+            local.bindings.retain(|id,_|allowed.contains(id));local.encode()
+        } else { self.pending_restore.lock().unwrap().as_ref().unwrap_or(&self.edits.lock().unwrap()).encode() }
     }
 
     /// 接收非实时编辑请求；具体处理只在文档事务锁内进行。
@@ -456,6 +552,7 @@ impl ExtensionOwner {
         let document = self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade);
         let Some(document) = document else { return Response { error: Some("document closed".into()), ..Default::default() }; };
         let _transaction = document.transaction.lock().unwrap();
+        if let Err(error)=self.merge_pending_restore(&document) {return Response {error:Some(error),..Default::default()};}
         let model_revision = document.revision.load(Ordering::Acquire);
         let mut edits = document.edits.lock().unwrap();
         let outcome = (|| {
@@ -623,11 +720,6 @@ impl ExtensionOwner {
             generation, known, assigned, supported, observer,
         )?;
         let raw = owned.0.as_raw();
-        {
-            let local = self.edits.lock().unwrap();
-            let mut shared = document.edits.lock().unwrap();
-            if local.revision > shared.revision { *shared = local.clone(); }
-        }
         document.attach(self, owned.1, companion)?;
         *self.document.lock().unwrap() = Some(Arc::downgrade(&document));
         let _=self.clock.set(document.clock.clone());
@@ -732,6 +824,7 @@ impl ExtensionOwner {
             return;
         };
         let _transaction = document.transaction.lock().unwrap();
+        if let Err(error)=self.merge_pending_restore(&document) {log::warn!("[ara] instance state unresolved: {error}");return;}
         let edits = document.edits.lock().unwrap().clone();
         if edits.revision > 0 {
             match self.render_edits(&document, &edits) {

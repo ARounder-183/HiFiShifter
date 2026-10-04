@@ -203,3 +203,18 @@ Task24增加非实时退役快照回收，实时读区SeqCst计数保护指针�
 参数系统剪贴板/转写未接线，时间轴剪贴板轮询源码已按只读模式关闭（未部署）。
 评估/About窗口和Sky截图/主窗口bounds问题需当前状态重选，禁止保存前景Codex截图
 当GUI证据。下一批处理剩余原GUI参数动作/clipboard及最终自动pitch导出/重开。
+
+## Task 27: 用户试用反馈高优修复（2026-10-05）
+
+**Files:** `vst3.rs`停播门禁；`editor/{commands,session}.rs`绝对时钟投影；
+`render/extension.rs`组件持久化范围与实例乐观并发；`state_channel.rs`允许live共享对象；
+`sessionSlice.ts`与`sessionSlice.hostTransport.test.ts`区分宿主停播seek/独立app；bundle构建脚本允许全新输出目录。
+
+- [x] 停播实时process静音，offline模式仍按快照供音，覆盖重复相同帧与零分配边界。
+- [x] base_sec=0、position_sec=宿主绝对时间；停播seek的前端投影覆盖，原app停止轮询不覆盖本地游标。
+- [x] setState暂存到组件，按真实assigned regions限制恢复候选；getState仅保存实例轨道参数。复制同源轨道、恢复另一组件、双actor连续写入回归正常exit0。
+- [x] 本轨参数投影未变时跨轨revision允许合并/发布；同轨变化或host model变化仍拒绝旧作业。
+- [x] plugin lib62、前端光标相关15通过，frontend生产build/规范bundle build成功；产物仅在全新embedded-feedback-01目录。
+- [ ] 用户正常保存退出后升级加载版本，真实验证停播静音、正向游标同步、多轨道编辑及复制/重开；保留旧工程和曲线。
+- [ ] 中优宿主播放控制：使用可选ARAPlaybackControllerInterface，native主线程发送Start/Stop请求，成功请求后仍从process采样实际状态，不伪造已播放。
+- [ ] 低优自动同步：原GUI在模型版本改变且无本地pending时重新取host timeline；pending/身份冲突保留本地曲线并显示原因。

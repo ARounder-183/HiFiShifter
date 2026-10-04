@@ -917,8 +917,7 @@ unsafe extern "system" fn component_set_state(
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let bytes = unsafe { crate::state_stream::read_state(state) }?;
         let owner = unsafe { &(*this.cast::<Processor>()).extension_owner };
-        owner.edit_state().lock().unwrap().restore(&bytes)?;
-        owner.refresh_document();
+        owner.restore_state(&bytes)?;
         Ok::<_, String>(())
     }));
     if matches!(outcome, Ok(Ok(()))) { K_RESULT_OK } else { K_RESULT_FALSE }
@@ -1049,6 +1048,8 @@ unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) ->
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*data.process_context };
             if let Some(clock)=owner.clock.get() {clock.update(context);}
+            // REAPER停播也会process固定光标位置；只离线导出允许没有kPlaying的供音。
+            if data.process_mode!=2 && context.state & (1<<1)==0 {return K_RESULT_OK;}
             let publisher = match context.sample_rate {
                 44100.0 => &owner.snapshots[0], 48000.0 => &owner.snapshots[1], _ => return K_RESULT_FALSE,
             };
@@ -1478,7 +1479,7 @@ mod audio_boundary_tests {
         let mut left=[8.0_f32;3]; let mut right=[8.0_f32;3];
         let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
         let mut bus=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
-        let mut context=crate::audio_abi::ProcessContext {sample_rate:44100.0,project_time_samples:11,..Default::default()};
+        let mut context=crate::audio_abi::ProcessContext {state:1<<1,sample_rate:44100.0,project_time_samples:11,..Default::default()};
         let mut data=ProcessData {num_samples:2,num_outputs:1,outputs:&raw mut bus,process_context:&raw mut context,..Default::default()};
         crate::test_allocator::begin();
         // SAFETY: 实际 processor 音频子对象和完整 SDK 缓冲都在回调期间存活。
@@ -1495,6 +1496,26 @@ mod audio_boundary_tests {
         let mut processor = Processor::create().unwrap();
         // SAFETY: 本测试持有处理器与 SDK 同布局数据，调用期间缓冲存活。
         unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), data.cast()) }
+    }
+
+    /// 停播重复process同一帧必须静音；离线导出没有kPlaying也必须保留音频。
+    #[test]
+    fn idle_transport_is_silent_but_offline_export_still_reads_snapshot() {
+        let mut processor=Processor::create().unwrap();
+        processor.extension_owner.snapshots[0].publish(crate::render::snapshot::PlaybackSnapshot {
+            sample_rate:44100,origin_sample:0,left:vec![0.25;4],right:vec![0.5;4],_reservation:None,
+        }).unwrap();
+        let mut left=[9_f32;4];let mut right=[9_f32;4];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
+        let mut bus=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
+        let mut context=crate::audio_abi::ProcessContext {sample_rate:44100.,..Default::default()};
+        let mut data=ProcessData {num_samples:4,num_outputs:1,outputs:&raw mut bus,process_context:&raw mut context,..Default::default()};
+        for _ in 0..3 {
+            assert_eq!(unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())},K_RESULT_OK);
+            assert_eq!(left,[0.;4],"停播不能循环输出光标位置的快照块");assert_eq!(right,[0.;4]);
+        }
+        data.process_mode=2;
+        assert_eq!(unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())},K_RESULT_OK);
+        assert_eq!(left,[0.25;4]);assert_eq!(right,[0.5;4]);
     }
 
     /// 空实现留下旧音频；写错块长则越界覆盖尾哨兵。

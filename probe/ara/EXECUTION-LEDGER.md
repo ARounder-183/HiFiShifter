@@ -814,4 +814,14 @@ Task 26: Ruling: Computer Use对REAPER父窗口的坐标drag不能命中WebView�
 
 Task 26: Ruling: WebView accessibility树可读但控件click仍不能从REAPER父窗口执行，secondary action也没有Invoke；同进程输入代理实验进一步造成插件IPC超时 — 撤回代理，不牺牲已验证通信链路，保留该工具边界证据；若继续叠加代理会把真实插件故障误判成输入问题。
 
+Task 27: Ruling: 用户真实试用确认基本可编辑，并报告停播发声、游标不一致、多轨道不可用；日志实际出现共享身份歧义 — 不再将问题归为Computer Use，先修三个高优项，播放控制和自动载入留后续批次 — 若只相信先前单实例绿测，会漏掉宿主真实生命周期错误。
+
+Task 27: Ruling: realtime process未检查kPlaying，宿主停播仍会重复请求相同项目帧；base_sec与position_sec重复传同一绝对时间 — 停播实时回调只保留清零输出，offline模式继续供音；绝对时间只放position_sec，host_authoritative允许前端跟随停播seek — 若只用processing开关或忽略offline，会仍循环发声或令导出静音。
+
+Task 27: Ruling: REAPER复制轨道合法共享modification/source，旧setState把单组件恢复直接写进整张文档且每个getState保存所有轨道 — 组件先暂存恢复，按真实assigned regions限定候选集合后合入共享权威，每组件只保存自己轨道；live共享身份合法，未限定的restore歧义仍拒绝 — 若按名称/临时序号猜归属，会串轨或抹掉另一轨曲线。
+
+Task 27: Ruling: 各轨共同使用文档revision导致另一轨正常编辑触发本轨Conflict — 比较实例参数投影，只有本轨权威或宿主模型实际变化才拒绝旧写入/发布 — 若无条件忽略revision，会接受同轨旧GUI覆盖；共享与非共享身份回归均保留。
+
+Task 27: Ruling: 用户正在修改隔离REAPER工程，不能热覆盖模块；首轮冷查询测试预热线程不退出锁住默认测试exe — 不关闭用户REAPER，编译同源别名hifishifter_plugin-feedback-check.exe验证（62 passed、exit0），新bundle生成到全新embedded-feedback-01目录 — 若覆盖正在加载的DLL或只信测试摘要，会丢编辑/虚报通过。
+
 
