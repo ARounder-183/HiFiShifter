@@ -229,3 +229,9 @@ probe/ara/reaper-profile/
 # ARA probe: REAPER peak-cache files generated next to the fixtures
 probe/ara/fixtures/peaks/
 
+
+# ARA probe Task 2: Rust dependency build + locked SDK checkouts (large)
+probe/ara/rust-path/target/
+probe/ara/rust-path/.third-party/
+probe/ara/rust-path/.build-tmp/
+
