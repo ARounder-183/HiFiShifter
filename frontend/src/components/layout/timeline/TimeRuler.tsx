@@ -36,7 +36,7 @@ import {
 } from "../../../utils/devicePixelLine.ts";
 import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
 import { playheadLineLeftViewportPx } from "../renderKernel/timelineAxis.ts";
-import { tickWindowBufferPx } from "./runtime/tickWindow.js";
+import { tickWindowRangePx } from "./runtime/tickWindow.js";
 import { clampAxisPosition } from "../../appTooltipPosition";
 
 function unitLabelKey(unit: TimeUnit): string {
@@ -74,9 +74,11 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
         if (!Number.isFinite(viewportWidth) || viewportWidth == null || viewportWidth <= 0) {
             return labeled;
         }
-        // 与 `buildTimelineTicks` 的生成缓冲**共用同一公式**：两处一旦分叉，
-        // 切片就会比生成范围更宽，切出不存在的刻度区间（标尺露白）。
-        const bufferPx = tickWindowBufferPx(viewportWidth);
+        // 与 `buildTimelineTicks` 的生成窗口**共用同一入口**（`tickWindowRangePx`）：
+        // 两处一旦分叉，切片就会比生成窗口更窄，切掉**真实视口内**的刻度
+        // （标尺露白）。注意缓冲按**含步长补偿**的宽度算 —— 真实视口相对锚点最多
+        // 右移 `TICK_WINDOW_STEP_PX + TICK_WINDOW_LAG_PX`，缓冲必须吸收两者之和。
+        const { bufferPx } = tickWindowRangePx(viewportWidth);
         const leftPx = Math.max(0, scrollLeft - bufferPx);
         const rightPx = scrollLeft + viewportWidth + bufferPx;
         // 按内容坐标二分：坐标已由 axis 投影好，Tempo Map 下也无需再换算。

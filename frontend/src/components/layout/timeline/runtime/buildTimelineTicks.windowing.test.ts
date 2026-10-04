@@ -18,7 +18,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildTimelineTicks, TICK_WINDOW_STEP_PX } from "./buildTimelineTicks.js";
-import { TICK_WINDOW_LAG_PX, tickWindowBufferPx } from "./tickWindow.js";
+import { TICK_WINDOW_LAG_PX, tickWindowBufferPx, tickWindowRangePx } from "./tickWindow.js";
 import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
 
 /** 复刻 `useTimelineState` 里的取刻度方式。 */
@@ -119,7 +119,7 @@ describe("刻度窗口量化：始终覆盖真实视口", () => {
                         // 按窗口公式（与实现同一组常量）复算范围端点。
                         const anchor =
                             Math.floor(reactScrollLeft / TICK_WINDOW_STEP_PX) * TICK_WINDOW_STEP_PX;
-                        const bufferPx = tickWindowBufferPx(viewportWidth + TICK_WINDOW_STEP_PX);
+                        const bufferPx = tickWindowRangePx(viewportWidth).bufferPx;
                         const windowLeftPx = Math.max(0, anchor - bufferPx);
                         const windowRightPx =
                             anchor + viewportWidth + TICK_WINDOW_STEP_PX + bufferPx;
@@ -133,10 +133,14 @@ describe("刻度窗口量化：始终覆盖真实视口", () => {
         }
     });
 
-    it("提交步长与窗口滞后上界是同一个常量（不可各自取值）", () => {
-        // 内核（时间轴与参数编辑器）的提交步长直接引用本常量；缓冲下界必须严格
-        // 大于它，否则滞后最大时覆盖不成立。
-        expect(tickWindowBufferPx(0)).toBeGreaterThan(TICK_WINDOW_LAG_PX);
+    it("★ 窗口缓冲必须吸收「锚点量化 + 提交滞后」两者之和", () => {
+        // 真实视口相对锚点最多右移 `TICK_WINDOW_STEP_PX`（锚点量化）+
+        // `TICK_WINDOW_LAG_PX`（提交死区），二者是**两个独立**的偏移量。
+        // 缓冲下界若只覆盖后者（旧实现 `LAG + 64 = 320`），窄视口下切片就会把
+        // 视口内的刻度切掉 —— 标尺右端整段空白。此处把"缓冲 ≥ 两者之和"钉死。
+        expect(tickWindowBufferPx(0)).toBeGreaterThanOrEqual(
+            TICK_WINDOW_STEP_PX + TICK_WINDOW_LAG_PX,
+        );
         // 缓冲公式与 `TimeRulerMarks` 的切片缓冲同源：这里顺带锁住"视口越宽缓冲越大"。
         expect(tickWindowBufferPx(4000)).toBeGreaterThan(tickWindowBufferPx(1000));
     });

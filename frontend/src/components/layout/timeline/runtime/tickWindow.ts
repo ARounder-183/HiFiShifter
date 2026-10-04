@@ -43,19 +43,50 @@ export const TICK_WINDOW_STEP_PX = 256;
 export const TICK_WINDOW_LAG_PX = 256;
 
 /**
+ * 缓冲在"滞后 + 量化"之外额外留的余量（CSS px）。
+ *
+ * 用来吸收设备像素吸附（`rulerLayerTranslatePx` 的 `snapToDevicePx`，误差
+ * ≤ 0.5 CSS px）以及浮点误差，取值远大于二者之和。
+ */
+export const TICK_WINDOW_MARGIN_PX = 64;
+
+/**
  * 刻度窗口的单侧缓冲（CSS px）—— **生成与切片共用同一公式**。
  *
- * 此前 `buildTimelineTicks` 与 `TimeRulerMarks` 各自写死 `max(320, vw * 0.5)`，
- * 两处公式一旦分叉（例如只改一处），切片窗口就会比生成窗口更宽，切出**不存在**
- * 的刻度区间，同样表现为标尺露白。
+ * 【下界为什么必须覆盖 `STEP + LAG`】切片的右边界是 `anchor + vw + buffer`，
+ * 而真实视口右缘是 `anchor + 滞后 + vw`。滞后来自**两个独立**的偏移量：
+ * - `TICK_WINDOW_STEP_PX`：滚动位置被量化到锚点，锚点最多落后真值一个步长；
+ * - `TICK_WINDOW_LAG_PX`：内核向 React 的量化提交，React 侧位置再落后一个步长。
  *
- * 下界取 `TICK_WINDOW_LAG_PX + 64`：既要严格大于滞后上界（否则滞后最大时窗口
- * 盖不住视口），也留一点余量吸收设备像素吸附（`rulerLayerTranslatePx`）带来的
- * 亚像素误差。
+ * 两者叠加 ⇒ 滞后上界是 `STEP + LAG`。缓冲若只吸收其中一项（旧实现只取
+ * `LAG + 64`），窄视口下切片就会把**真实视口内**的刻度切掉 —— 用户看到的正是
+ * "某段之内的刻度与文本消失，滚动/缩放一下又回来"。`vw` 较大时 `width * 0.5`
+ * 会盖过下界，缺陷只在窄视口（`vw ≤ 640`）下显形。
  *
  * @param viewportWidthPx 视口宽度（CSS px）。非法值按 0 处理（退化为下界）。
  */
 export function tickWindowBufferPx(viewportWidthPx: number): number {
     const width = Number.isFinite(viewportWidthPx) && viewportWidthPx > 0 ? viewportWidthPx : 0;
-    return Math.max(TICK_WINDOW_LAG_PX + 64, width * 0.5);
+    return Math.max(TICK_WINDOW_STEP_PX + TICK_WINDOW_LAG_PX + TICK_WINDOW_MARGIN_PX, width * 0.5);
+}
+
+/**
+ * 刻度窗口的**完整区间参数** —— 生成与切片共用的唯一入口。
+ *
+ * 【为什么要同时给出"宽度补偿"与"缓冲"】取刻度用的视口宽是 `vw + STEP`
+ * （见 `createTickAxis`），而标尺切片只有真实 `vw`。两处若各自拼式子
+ * （`tickAxis.ts` 手写 `+ TICK_WINDOW_STEP_PX`、`TimeRulerMarks` 用真实 `vw`），
+ * 窗口必然分叉。收敛到本函数后，"生成窗口 ⊇ 切片窗口 ⊇ 真实视口"由构造保证。
+ *
+ * @param viewportWidthPx 真实视口宽度（CSS px）。
+ * @returns `windowWidthPx`：取刻度用的视口宽（含步长补偿），供 `createTickAxis`；
+ *   `bufferPx`：单侧缓冲，供生成与切片。
+ */
+export function tickWindowRangePx(viewportWidthPx: number): {
+    windowWidthPx: number;
+    bufferPx: number;
+} {
+    const width = Number.isFinite(viewportWidthPx) && viewportWidthPx > 0 ? viewportWidthPx : 0;
+    const windowWidthPx = width + TICK_WINDOW_STEP_PX;
+    return { windowWidthPx, bufferPx: tickWindowBufferPx(windowWidthPx) };
 }

@@ -20,7 +20,7 @@ import { describe, expect, it } from "vitest";
 
 import { buildTimelineTicks } from "./buildTimelineTicks.js";
 import { createTickAxis } from "./tickAxis.js";
-import { TICK_WINDOW_LAG_PX, tickWindowBufferPx } from "./tickWindow.js";
+import { TICK_WINDOW_LAG_PX, TICK_WINDOW_STEP_PX, tickWindowRangePx } from "./tickWindow.js";
 import { rulerLayerTranslatePx } from "../../renderKernel/timelineAxis.js";
 import { verticalHairlineGeometry } from "../../../../utils/devicePixelLine.js";
 import type { TempoMap } from "../../../../utils/tempoMap.ts";
@@ -87,9 +87,9 @@ function renderedLabelXs(args: PipelineArgs): number[] {
         tempoMap: args.tempoMap ?? null,
     });
 
-    // ── 2. 切片（与 TimeRulerMarks 同一缓冲公式）──
+    // ── 2. 切片（与 `TimeRulerMarks` 同一入口 `tickWindowRangePx`）──
     const labeled = ticks.filter((tick) => tick.showLabel);
-    const bufferPx = tickWindowBufferPx(args.viewportWidth);
+    const { bufferPx } = tickWindowRangePx(args.viewportWidth);
     const leftPx = Math.max(0, anchorPx - bufferPx);
     const rightPx = anchorPx + args.viewportWidth + bufferPx;
     const lowerBound = (target: number): number => {
@@ -130,6 +130,62 @@ function maxHoleRatio(xs: number[], viewportWidth: number): number {
     const median = sorted[Math.floor(sorted.length / 2)];
     if (!(median > 0)) return 0;
     return Math.max(...gaps) / median;
+}
+
+/**
+ * 端到端的**覆盖率**检查：真实视口内的带标签刻度是否全部穿过了切片边界。
+ *
+ * 【为什么必须有它】`maxHoleRatio` 只看相邻标签之间的间距（**内部量**），对
+ * "视口一端被切片切掉"（**边缘量**）完全不可见 —— 间距可以完美（1.99×）而视口
+ * 内标签数为 0。这正是本题前三轮的盲区：只测内部间距，因此对切片边界不足导致
+ * 的边缘空白结构性地失明。这里补上边缘量。
+ */
+function lostLabelCount(args: PipelineArgs): number {
+    const { axis, anchorPx } = createTickAxis({
+        pxPerSec: args.pxPerSec,
+        scrollLeftPx: args.reactScrollLeft,
+        viewportWidthPx: args.viewportWidth,
+        dpr: args.dpr,
+    });
+    const ticks = buildTimelineTicks({
+        axis,
+        bpm: 120,
+        beatsPerBar: args.beatsPerBar,
+        grid: args.grid,
+        primaryUnit: "barBeats",
+        secondaryUnit: "clock",
+        minLabelSpacingPx: args.minLabelSpacingPx,
+        minGridSpacingPx: 8,
+        swingPercent: 0,
+        tempoMap: args.tempoMap ?? null,
+    });
+    const labeled = ticks.filter((tick) => tick.showLabel);
+    const { bufferPx } = tickWindowRangePx(args.viewportWidth);
+    const leftPx = Math.max(0, anchorPx - bufferPx);
+    const rightPx = anchorPx + args.viewportWidth + bufferPx;
+    // 必须复刻 `TimeRulerMarks` 的二分切片（含两侧各一条的余量），不能只比较
+    // 边界值 —— 生产实现会多保留边界外的一条刻度，直接比边界会误判为"丢失"。
+    const lowerBound = (target: number): number => {
+        let lo = 0;
+        let hi = labeled.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (labeled[mid].contentPx < target) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    };
+    const start = Math.max(0, lowerBound(leftPx) - 1);
+    const end = Math.min(labeled.length, lowerBound(rightPx) + 1);
+    const kept = new Set(labeled.slice(start, end));
+    const lo = args.trueScrollLeft;
+    const hi = args.trueScrollLeft + args.viewportWidth;
+    let lost = 0;
+    for (const tick of labeled) {
+        if (tick.contentPx < lo || tick.contentPx > hi) continue;
+        if (!kept.has(tick)) lost += 1;
+    }
+    return lost;
 }
 
 describe("渲染管线：滞后存在时标尺仍不得露白", () => {
@@ -257,5 +313,42 @@ describe("渲染管线：滞后存在时标尺仍不得露白", () => {
         expect(checked).toBeGreaterThan(100);
         // 上界 = 相邻段 BPM 之比（159/80 ≈ 1.99）—— 与生成器侧一致，实测最坏 1.99。
         expect(worst.ratio, `Tempo Map 屏幕空洞：${worst.detail}`).toBeLessThanOrEqual(2.05);
+    });
+
+    /**
+     * 边缘量回归（本题真正的根因）。切片缓冲若小于"锚点量化 + 提交滞后"之和，
+     * 就会把**真实视口内**的刻度切掉 —— 视口一端出现空白段，滚动/缩放一下又
+     * 回来。`maxHoleRatio` 对它是盲的，因此单独用本条锁死。
+     */
+    it("★ 真实视口内的标签不得被切片切掉（边缘量）", () => {
+        let fails = 0;
+        let checks = 0;
+        let worst = "";
+        for (const viewportWidth of [320, 500, 640, 800, 1500]) {
+            for (let i = 0; i < 60; i += 1) {
+                const pxPerSec = 4 * Math.pow(600 / 4, i / 59);
+                for (const lag of [0, 255, TICK_WINDOW_STEP_PX + TICK_WINDOW_LAG_PX - 1]) {
+                    for (const trueScrollLeft of [0, 4200]) {
+                        const lost = lostLabelCount({
+                            pxPerSec,
+                            trueScrollLeft,
+                            reactScrollLeft: Math.max(0, trueScrollLeft - lag),
+                            viewportWidth,
+                            dpr: 1,
+                            minLabelSpacingPx: 110,
+                            grid: "1/4",
+                            beatsPerBar: 4,
+                        });
+                        checks += 1;
+                        if (lost > 0) {
+                            fails += 1;
+                            worst = `vw=${viewportWidth} pxPerSec=${pxPerSec.toFixed(1)} lag=${lag} lost=${lost}`;
+                        }
+                    }
+                }
+            }
+        }
+        expect(checks).toBeGreaterThan(500);
+        expect(fails, `切片切掉了视口内的标签：${worst}`).toBe(0);
     });
 });
