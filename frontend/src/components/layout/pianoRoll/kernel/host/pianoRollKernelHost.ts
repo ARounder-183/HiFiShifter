@@ -117,15 +117,21 @@ import {
     PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX,
 } from "../scroll/verticalValueScroll";
 import { resolveKeyboardScrollTarget } from "../../../renderKernel/keyboardScroll";
+import { TICK_WINDOW_LAG_PX } from "../../../timeline/runtime/tickWindow";
 import type { PianoRollKernelData, PianoRollGridSpec } from "./pianoRollKernelData";
 
 /**
  * 水平滚动向 React 量化提交的步长（CSS px）。
  *
- * 与时间轴内核取同一量级：标尺的**刻度范围**由 React 按当前视口计算，只写内容层
- * transform 会让刻度停留在初始视口。量化提交保证 React 不进滚动热路径。
+ * 标尺的**刻度范围**由 React 按当前视口计算，只写内容层 transform 会让刻度停留在
+ * 初始视口。量化提交保证 React 不进滚动热路径。
+ *
+ * 【与时间轴共用同一常量】本值同时是"刻度窗口必须吸收的滞后上界"：React 侧的
+ * scrollLeft 最多落后内核真值一个步长，而窗口缓冲（`tickWindow.tickWindowBufferPx`）
+ * 必须覆盖它。参数编辑器与时间轴消费同一份刻度源（`buildTimelineTicks`），因此
+ * 两处的提交步长不能各自取值 —— 各自写死时这个约束没有任何地方表达。
  */
-const SCROLL_COMMIT_STEP_PX = 256;
+const SCROLL_COMMIT_STEP_PX = TICK_WINDOW_LAG_PX;
 
 /**
  * 宿主需要跟随视口的 DOM（阶段 1：标尺内容层与背景网格）。

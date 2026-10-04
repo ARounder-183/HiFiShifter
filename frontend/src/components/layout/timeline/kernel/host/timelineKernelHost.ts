@@ -55,6 +55,7 @@ import { armRightDragContextMenuGuard } from "../../../../../utils/rightDragCont
 import { getTimelineWheelAction, type ScrollbarZone } from "../../../wheelGesture";
 import { buildTimelineTicks, type TimelineTick } from "../../runtime/buildTimelineTicks";
 import { createTickAxis } from "../../runtime/tickAxis";
+import { TICK_WINDOW_LAG_PX } from "../../runtime/tickWindow";
 import {
     createTimelineAxis,
     playheadLineLeftPx,
@@ -1312,9 +1313,15 @@ const VERTICAL_ZOOM_SETTLE_TIMEOUT_MS = 250;
  * 水平滚动向 React 量化提交的步长（CSS px）。
  *
  * 与旧实现的 `REACT_SCROLL_STEP_PX` 取同一量级：步长越小，标尺越跟手，但 React
- * 重渲染越频繁；256px 在"标尺刻度不会明显滞后"与"滚动帧不进 React"之间取平衡。
+ * 重渲染越频繁。
+ *
+ * 【为什么不再就地写死 256】这个值同时是"刻度窗口必须吸收的滞后上界"：React 侧
+ * 的 scrollLeft 最多落后内核真值一个步长，而标尺里"有哪些刻度"是按 React 的位置
+ * 生成的。因此步长必须 ≤ 刻度窗口的缓冲（见 `tickWindow.tickWindowBufferPx`）。
+ * 两处各自写死 256 时这个约束没有任何地方表达 —— 单独调大任一处都会让标尺在滚动
+ * 或缩放后露出没有刻度的空白段。现在二者引用同一个常量，约束成为结构性的。
  */
-const SCROLL_COMMIT_STEP_PX = 256;
+const SCROLL_COMMIT_STEP_PX = TICK_WINDOW_LAG_PX;
 
 /** 键盘单步滚动量（CSS px）。 */
 const KEYBOARD_STEP_PX = 60;

@@ -46,6 +46,7 @@ import {
     selectUniformGridStepBeats,
 } from "../gridLineSampling.ts";
 import { secToContentPx, type TimelineAxis } from "../../renderKernel/timelineAxis.js";
+import { tickWindowBufferPx } from "./tickWindow.js";
 
 /** 弱网格线的最大条数（与 gridLineSampling 的密度上限一致）。 */
 const MAX_WEAK_GRID_LINES = 160;
@@ -128,18 +129,12 @@ export interface TimelineTick {
  * @returns 升序刻度数组。
  */
 /**
- * 刻度窗口的量化步长（CSS 像素）。
+ * 刻度窗口的量化步长（CSS 像素）—— 定义与理由见 `tickWindow.ts`。
  *
- * `timelineTicks` 与 `TimeRulerMarks` 都按内容坐标自行做可见范围二分，并各
- * 自带缓冲，因此喂给它们一个**量化后**的滚动位置是安全的：锚点 ≤ 真实
- * scrollLeft < 锚点 + 步长，只要把取刻度用的视口宽加上一个步长，覆盖区间就
- * 必然包含真实视口。这样滚动期间刻度数组与标尺子树都不必每帧重算重渲染。
- *
- * 约束：步长必须小于下游 `TimeRulerMarks` 的缓冲
- * （`max(320, viewportWidth * 0.5)`），否则标尺窗口会漏刻度。
- * 该不变式由 `buildTimelineTicks.windowing.test.ts` 锁住。
+ * 此处**转出**而非就地定义：内核的提交步长、标尺的切片缓冲都与它是同一族
+ * 常量，必须能互相引用而不产生循环依赖（`tickAxis` 已从本模块导入它）。
  */
-export const TICK_WINDOW_STEP_PX = 256;
+export { TICK_WINDOW_STEP_PX } from "./tickWindow.js";
 
 export function buildTimelineTicks(args: {
     axis: TimelineAxis;
@@ -161,7 +156,9 @@ export function buildTimelineTicks(args: {
     const tempoMap = args.tempoMap ?? null;
     const hasTempoMap = Boolean(tempoMap && tempoMap.points.length > 0);
 
-    const bufferPx = Math.max(320, axis.viewportWidthPx * 0.5);
+    // 缓冲与 `TimeRulerMarks` 的切片共用同一公式（见 `tickWindow.ts`）：两处
+    // 一旦分叉，切片就会比生成范围更宽，切出不存在的区间 —— 表现为标尺露白。
+    const bufferPx = tickWindowBufferPx(axis.viewportWidthPx);
     const leftPx = Math.max(0, axis.scrollLeftPx - bufferPx);
     const rightPx = axis.scrollLeftPx + axis.viewportWidthPx + bufferPx;
     const startSec = Math.max(0, leftPx / pxPerSec);

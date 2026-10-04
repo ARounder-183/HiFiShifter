@@ -12,7 +12,7 @@
  */
 
 import { createTimelineAxis, type TimelineAxis } from "../../renderKernel/timelineAxis.js";
-import { TICK_WINDOW_STEP_PX } from "./buildTimelineTicks.js";
+import { TICK_WINDOW_STEP_PX } from "./tickWindow.js";
 
 /** 把真实滚动位置量化到刻度窗口锚点（负数同样成立：锚点 ≤ 真值 < 锚点 + 步长）。 */
 export function quantizeTickAnchor(scrollLeftPx: number): number {
@@ -44,6 +44,14 @@ export function createTickAxis(args: {
             pxPerSec: args.pxPerSec,
             scrollLeftPx: anchorPx,
             // 宽度补一个量化步长：锚点可以落后真值接近一个步长。
+            //
+            // 【为什么不必再补 `TICK_WINDOW_LAG_PX`】除了锚点量化，React 侧的
+            // scrollLeft 还落后内核真值最多一个"提交步长"（= TICK_WINDOW_LAG_PX）。
+            // 那段滞后由 `buildTimelineTicks` 的**两侧缓冲**吸收，而缓冲下界是
+            // `TICK_WINDOW_LAG_PX + 64`（见 `tickWindow.tickWindowBufferPx`），
+            // 恒大于滞后上界 —— 覆盖性由缓冲保证，与这里的宽度补偿无关。
+            // 该不变量由 `buildTimelineTicks.windowing.test.ts` 锁定；若日后有人
+            // 调大提交步长，那里会立刻失败。
             viewportWidthPx: viewportWidthPx + TICK_WINDOW_STEP_PX,
             dpr: args.dpr,
         }),

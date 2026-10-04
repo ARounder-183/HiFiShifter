@@ -36,6 +36,7 @@ import {
 } from "../../../utils/devicePixelLine.ts";
 import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
 import { playheadLineLeftViewportPx } from "../renderKernel/timelineAxis.ts";
+import { tickWindowBufferPx } from "./runtime/tickWindow.js";
 import { clampAxisPosition } from "../../appTooltipPosition";
 
 function unitLabelKey(unit: TimeUnit): string {
@@ -73,7 +74,9 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
         if (!Number.isFinite(viewportWidth) || viewportWidth == null || viewportWidth <= 0) {
             return labeled;
         }
-        const bufferPx = Math.max(320, viewportWidth * 0.5);
+        // 与 `buildTimelineTicks` 的生成缓冲**共用同一公式**：两处一旦分叉，
+        // 切片就会比生成范围更宽，切出不存在的刻度区间（标尺露白）。
+        const bufferPx = tickWindowBufferPx(viewportWidth);
         const leftPx = Math.max(0, scrollLeft - bufferPx);
         const rightPx = scrollLeft + viewportWidth + bufferPx;
         // 按内容坐标二分：坐标已由 axis 投影好，Tempo Map 下也无需再换算。
