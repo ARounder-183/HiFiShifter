@@ -80,6 +80,7 @@ import { hitOverlapControl } from "../interaction/overlapControls";
 import { hitInactiveTakeLane } from "../../takeLanes";
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
 import { shouldNotifySharedViewport } from "../../runtime/sharedViewportNotify";
+import { subscribeDevicePixelRatio } from "../../../../../hooks/useDevicePixelRatio";
 import { resolveTimelineMinPxPerSec } from "../../runtime/timelineZoomBounds";
 import {
     CLIP_BODY_PADDING_Y,
@@ -505,6 +506,19 @@ export interface TimelineKernelHostArgs {
      * （表现为标尺只显示得出前面一段刻度）。
      */
     readonly onViewportWidthChange?: (widthPx: number) => void;
+    /**
+     * 视口尺寸变化（宽或高，尺寸变化时一次）。
+     *
+     * 【为什么必须由内核统一发布，而不是各层各自量】内核 GL 画布、波形层、吸附
+     * 高亮层挂在同一个容器上。若各自用 `clientWidth` / `contentRect` /
+     * `getBoundingClientRect` 各量一次，同一个容器会得出不同的数（整数 vs 分数），
+     * 各层据此算出的物理尺寸可能相差一个设备像素，叠加后互相错位。此处量测一次并
+     * 广播，作为**唯一**来源。
+     *
+     * 与 `onViewportWidthChange` 并存：后者是标尺刻度窗口的既有契约（只关心宽度），
+     * 本回调面向需要完整尺寸的图层。
+     */
+    readonly onViewportSizeChange?: (widthPx: number, heightPx: number) => void;
     /**
      * 交互回调：内核只做**命中与手势**，编辑语义（Redux action / 后端 thunk）
      * 一律交回 React 侧，避免 runtime 直接依赖 store。
@@ -1507,6 +1521,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         onScrollLeftCommit,
         onScrollLeftFrame,
         onViewportWidthChange,
+        onViewportSizeChange,
         interactions,
     } = args;
 
@@ -1688,8 +1703,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     }
 
     // 尺寸镜像：由 ResizeObserver 维护，供滚动内核与光栅化读取（O(1)，不触发布局）。
-    let viewportWidthPx = Math.max(1, container.clientWidth);
-    let viewportHeightPx = Math.max(1, container.clientHeight);
+    //
+    // 【唯一量测来源】一律用 `getBoundingClientRect()`（分数，信息量最大），与下方
+    // ResizeObserver 的 `contentRect` 同口径。旧实现此处用 `clientWidth`（整数）、
+    // 回调用 `contentRect`（分数），同一个容器量出两个数：GL 画布与波形层据此算出的
+    // 物理尺寸可能相差一个设备像素，叠加后互相错位。
+    let viewportWidthPx = Math.max(1, container.getBoundingClientRect().width);
+    let viewportHeightPx = Math.max(1, container.getBoundingClientRect().height);
 
     const scroll = createScrollKernel({
         // 初始缩放取 React 侧恢复的持久化值（旧实现从 localStorage 恢复，
@@ -2256,6 +2276,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     const layerTransformWriter = createElementValueWriter<string>();
     /** 上一次绘制的视口（引用比较：`ScrollKernel.get()` 的引用在未变化时稳定）。 */
     let lastDrawnView: TimelineViewportState | null = null;
+    /**
+     * 上一次绘制使用的 dpr。
+     *
+     * 纯 dpr 变化（浏览器缩放 / 换显示器）不改变视口与几何，`viewChanged` 与
+     * `rebuilt` 都为假 —— 若只看这两者，GL 画布的 `resize` 会被整段跳过，
+     * backing store 停留在旧 dpr 上。把 dpr 纳入判据即可让下一帧重新光栅化。
+     */
+    let lastDrawnDpr = Number.NaN;
     /** 上一次绘制的播放头位置（秒），用于判断是否需要继续自驱动。 */
     let lastDrawnPlayheadSec = Number.NaN;
     /** 上一次通知 React 的可见行窗口（去重：同窗口不重复回调）。 */
@@ -2539,11 +2567,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
         const viewChanged = lastDrawnView !== view;
         lastDrawnView = view;
+        // dpr 参与 GL backing store 与网格吸附，变化时必须重新光栅化（见 lastDrawnDpr）。
+        const dpr = readDpr();
+        const dprChanged = dpr !== lastDrawnDpr;
+        lastDrawnDpr = dpr;
 
-        // GL 只在「视口变化」或「几何重建」时提交：播放头移动这类纯 DOM 更新
-        // 不需要重绘 canvas（播放中的每帧成本因此退化为几次样式写入）。
-        if (viewChanged || rebuilt) {
-            const target = glCanvas!.resize(viewportWidthPx, viewportHeightPx, readDpr());
+        // GL 只在「视口变化」「几何重建」或「dpr 变化」时提交：播放头移动这类纯
+        // DOM 更新不需要重绘 canvas（播放中的每帧成本因此退化为几次样式写入）。
+        if (viewChanged || rebuilt || dprChanged) {
+            const target = glCanvas!.resize(viewportWidthPx, viewportHeightPx, dpr);
             glCanvas!.clear();
             if (combinedCount > 0) {
                 if (sceneUploaded) {
@@ -5848,29 +5880,47 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     // ── 尺寸与 DPR 变化 ──────────────────────────────────────────────
     const resizeObserver = new ResizeObserver((entries) => {
         let widthChanged = false;
+        let sizeChanged = false;
         for (const entry of entries) {
             const nextWidth = Math.max(1, entry.contentRect.width);
-            if (nextWidth !== viewportWidthPx) widthChanged = true;
+            const nextHeight = Math.max(1, entry.contentRect.height);
+            if (nextWidth !== viewportWidthPx) {
+                widthChanged = true;
+                sizeChanged = true;
+            }
+            if (nextHeight !== viewportHeightPx) sizeChanged = true;
             viewportWidthPx = nextWidth;
-            viewportHeightPx = Math.max(1, entry.contentRect.height);
+            viewportHeightPx = nextHeight;
         }
         // 宽度变化会改变标尺的刻度窗口（React 侧按它算 ticks）。
         if (widthChanged) onViewportWidthChange?.(viewportWidthPx);
+        // 完整尺寸广播给各图层（波形 / 吸附高亮等），保证它们与 GL 层同尺寸。
+        if (sizeChanged) onViewportSizeChange?.(viewportWidthPx, viewportHeightPx);
         // 外部边界变化后必须重新钳制（见 ScrollKernel 的约束 1）。
         scroll.reclamp();
         sceneDirty = true;
         loop.invalidate();
     });
     resizeObserver.observe(container);
-    // 初始宽度回写：ResizeObserver 的首次回调是异步的，而标尺在首帧就需要正确的
-    // 刻度窗口（否则首屏标尺只画得出前一段）。
+    // 初始回写：ResizeObserver 的首次回调是异步的，而标尺在首帧就需要正确的刻度
+    // 窗口（否则首屏标尺只画得出前一段），各图层也需要首帧的尺寸。
     onViewportWidthChange?.(viewportWidthPx);
+    onViewportSizeChange?.(viewportWidthPx, viewportHeightPx);
 
     function onWindowResize(): void {
         sceneDirty = true;
         loop.invalidate();
     }
     window.addEventListener("resize", onWindowResize);
+
+    // DPR 变化（浏览器缩放 / 换显示器 / 改系统缩放）必须重绘并重新光栅化。
+    // `ResizeObserver` **不会**为此触发（它观察 CSS 布局盒，纯 dpr 变化不改 CSS
+    // 尺寸），而 GL 画布的物理尺寸、字形图集与网格吸附全部依赖 dpr。没有这条订阅，
+    // 换屏后画面会停留在旧 dpr 的 backing store 上直到下一次交互。
+    const unsubscribeDpr = subscribeDevicePixelRatio(() => {
+        sceneDirty = true;
+        loop.invalidate();
+    });
 
     // 首次标脏（尺寸与数据就绪后绘制第一帧）。
     loop.invalidate();
@@ -6092,6 +6142,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             window.removeEventListener("pointerup", endPan);
             window.removeEventListener("pointercancel", endPan);
             window.removeEventListener("resize", onWindowResize);
+            unsubscribeDpr();
             // 平移中途卸载：光标 / 选择态是写在 body 上的全局状态，必须复原。
             endPan();
             detailCanvas.remove();

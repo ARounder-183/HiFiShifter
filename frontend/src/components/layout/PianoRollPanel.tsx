@@ -269,6 +269,7 @@ import { pianoKeySound } from "../../utils/PianoKeySound";
 import { computeAutoFollowScrollLeft } from "../../utils/autoFollowScroll";
 import { readDevicePixelRatio } from "../../utils/devicePixelLine";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
+import { subscribeDevicePixelRatio } from "../../hooks/useDevicePixelRatio";
 import {
     getVisibleSecondaryParamIds,
     toggleSecondaryParamVisibility,
@@ -859,6 +860,17 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             drawRef.current();
         });
     }, []);
+
+    /**
+     * DPR 变化必须重绘主画布。
+     *
+     * `rasterize` 会按新 dpr 重设 backing store 与 CSS 尺寸，但**没有任何东西**
+     * 会在纯 dpr 变化时触发重绘：`ResizeObserver` 观察的是 CSS 布局盒（dpr 变了
+     * 尺寸也没变），而本组件的 `viewSize` 也保持不变。缺这条订阅时，换显示器或改
+     * 系统缩放后主画布会一直用旧 dpr 的光栅化结果（发虚），直到某次滚动才恢复。
+     * 标脏转交宿主，与 GL 层同帧刷新（见 `invalidate` 的说明）。
+     */
+    React.useEffect(() => subscribeDevicePixelRatio(() => invalidate()), [invalidate]);
 
     /**
      * 标尺播放头元素（竖线 / 倒三角）的挂载回调。
@@ -2843,6 +2855,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         const el = scrollerRef.current;
         if (!el) return;
         const ro = new ResizeObserver(() => {
+            // 【为什么用 clientWidth（整数）而不是 getBoundingClientRect（分数）】
+            // 这个值同时是下方 sticky 包裹层的 CSS `width`（`style={{ width: viewSize.w }}`）
+            // 与各画布 `rasterize` 的 CSS 尺寸入参。两者必须**逐值相等**，否则包裹层
+            // 与画布会差出亚像素（画布被 `rasterize` 吸附到设备像素后尤其明显）。
+            // 用整数就天然一致；`Math.floor` 在此是恒等操作（clientWidth 已是整数），
+            // 保留只是为了显式表达"这里要的是整数 CSS 宽"。
             const w = Math.max(1, Math.floor(el.clientWidth));
             const h = Math.max(1, Math.floor(el.clientHeight));
             viewSizeRef.current = { w, h };

@@ -46,6 +46,7 @@
  */
 
 import { readDevicePixelRatio } from "../../../../../utils/devicePixelLine";
+import { subscribeDevicePixelRatio } from "../../../../../hooks/useDevicePixelRatio";
 import { isStylusLike } from "../../../../../utils/penInput";
 import { invokeGridRedrawHandler } from "../../../timeline/gridRedrawBridge";
 import {
@@ -502,6 +503,15 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         teardown.push(() => observer.disconnect());
     }
 
+    // DPR 变化（浏览器缩放 / 换显示器）不会触发 ResizeObserver（它观察 CSS 布局盒，
+    // 纯 dpr 变化不改 CSS 尺寸），但 GL backing store、网格半像素取向与字形图集全部
+    // 依赖 dpr。这里只负责标脏：下一帧重新光栅化，并按 `glyphAtlasDpr` 重建字形图集。
+    teardown.push(
+        subscribeDevicePixelRatio(() => {
+            loop.invalidate();
+        }),
+    );
+
     // ── GL 场景层（阶段 2）──────────────────────────────────────────
     //
     // 【职责】把**静态**图层（网格等）画到独立画布上：几何按内容坐标构建并常驻
@@ -558,10 +568,17 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     // 因此共用 `glAxisHandle` 的上下文，program 独立。
     let glGlyphProgram: GlyphProgram | null = null;
     let glGlyphs: PianoRollGlyphs | null = null;
+    /**
+     * 建当前字形图集时使用的 dpr。
+     *
+     * 字形位图与物理像素一一对应（`glyphRasterizer` 的显式契约：dpr 变化后必须整体
+     * 重建，否则旧图集会被采样成模糊字形）。绘制路径每帧比对本值，变化时丢弃重建。
+     */
+    let glyphAtlasDpr = readDevicePixelRatio();
     if (glAxisHandle !== null) {
         try {
             glGlyphProgram = createGlyphProgram(glAxisHandle.gl);
-            glGlyphs = createPianoRollGlyphs({ dpr: readDevicePixelRatio() });
+            glGlyphs = createPianoRollGlyphs({ dpr: glyphAtlasDpr });
             if (glGlyphs === null) {
                 glGlyphProgram = null;
             }
@@ -1666,6 +1683,18 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
 
         // 键盘 / 数值轴 GL 层：与网格共用同一份 spec，但几何与画布独立。
         if (glAxisProgram !== null) {
+            // dpr 变化（浏览器缩放 / 换显示器）必须整体重建字形图集：字形位图与
+            // 物理像素一一对应，旧图集在新 dpr 下会被采样成模糊字形。图集换了，
+            // 文字四边形的度量也随之改变，故作废键盘签名强制重走重建分支。
+            const currentDpr = readDevicePixelRatio();
+            if (currentDpr !== glyphAtlasDpr) {
+                glyphAtlasDpr = currentDpr;
+                glGlyphs?.dispose();
+                glGlyphs = createPianoRollGlyphs({ dpr: currentDpr });
+                uploadedAtlasPages.clear();
+                glTextQuads = [];
+                lastKeyboardSignature = "";
+            }
             const spec = data().grid;
             const signature = keyboardSignature(spec);
             if (signature !== lastKeyboardSignature) {

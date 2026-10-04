@@ -23,6 +23,7 @@ import { withAxis } from "../components/layout/renderKernel/timelineAxis.ts";
 import { LAYER_ORDER } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
 import type { TimelineLayer } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
 import { fitCssPxToDevicePx } from "../components/layout/renderKernel/canvasRaster.ts";
+import { subscribeDevicePixelRatio } from "../hooks/useDevicePixelRatio";
 import {
     buildWaveformGeometry,
     readAmplitudeRevision,
@@ -134,14 +135,6 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
      */
     const geometryCacheRef = React.useRef<WaveformGeometryAnchor | null>(null);
     const [rendererKind, setRendererKind] = React.useState<"webgl2" | "canvas2d">("webgl2");
-    /**
-     * 当前 dpr 快照，**只**用于驱动下方 matchMedia 订阅的换绑。
-     *
-     * draw() 每帧直接读 `window.devicePixelRatio`（值永远新鲜），不经 state；
-     * 这里单独存一份是因为 `(resolution: N dppx)` 查询只在 dpr **离开** N 时
-     * 触发一次，必须用新 dpr 重新订阅才能收到下一次变化。
-     */
-    const [dpr, setDpr] = React.useState(() => window.devicePixelRatio || 1);
 
     // render 期写 ref 镜像（本仓库热路径既有模式；原出处 TimelineCanvasViewport 已随
     // 旧渲染路径删除，同一手法现仍见于 TimelineKernelView 等命令式绘制组件）。
@@ -163,31 +156,25 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
     /**
      * DPR 变化（浏览器缩放 / 显示器切换）必须触发一次重绘。
      *
-     * 【为什么需要】dpr 参与绘制结果的两处：包络列按设备像素网格枚举、dpr
+     * 【为什么需要】dpr 参与绘制结果的三处：包络列按设备像素网格枚举、dpr
      * 又是几何缓存键的一部分（`canReuseGeometry` 第 1 组），画布物理尺寸也
-     * 随 dpr 变化（`rasterize`）。但 dpr 变化不带来任何 props / 视口变化 ——
-     * 没有这条订阅，缩放/换屏后波形会停留在旧 dpr 的几何与画布尺寸上
-     * （发虚/糊边），直到下一次滚动或缩放才有机会重画。
+     * 随 dpr 变化（`rasterize`）。但 dpr 变化不带来任何 props / 视口变化，
+     * 且 **`ResizeObserver` 不会触发**（它观察 CSS 布局盒，纯 dpr 变化不改
+     * CSS 尺寸）—— 没有这条订阅，缩放/换屏后波形会停留在旧 dpr 的几何与
+     * 画布尺寸上（发虚/糊边），直到下一次滚动或缩放才有机会重画。
      *
-     * 【换绑模式】监听 `(resolution: N dppx)`（N = 订阅时的 dpr）：它只在
-     * dpr 离开 N 时触发；回调里作废几何缓存、请求重绘，并重读真实 dpr 写回
-     * state —— effect 依赖 [dpr] 随之重跑，用新 dpr 的 query 重新订阅。不换
-     * 绑的话旧 query 已永久失配，第二次缩放就会丢。
+     * `draw()` 每帧现读 `window.devicePixelRatio`，故回调里只需作废几何缓存
+     * 并请求重绘；换绑逻辑（`(resolution: N dppx)` 只在离开 N 时触发一次，
+     * 必须用新 dpr 重新订阅）由 `subscribeDevicePixelRatio` 统一承担。
      */
-    React.useEffect(() => {
-        const mql = window.matchMedia?.(`(resolution: ${dpr}dppx)`);
-        if (!mql) return;
-        const onChange = () => {
-            // dpr 参与几何缓存键、旧几何的列栅格按旧 dpr 枚举，必须作废后
-            // 全量重建（仅 invalidate 的 repaint 命不中重建路径的原因见
-            // canReuseGeometry 的锚点全等组）。
-            geometryCacheRef.current = null;
-            invalidate();
-            setDpr(window.devicePixelRatio || 1);
-        };
-        mql.addEventListener("change", onChange);
-        return () => mql.removeEventListener("change", onChange);
-    }, [dpr, invalidate]);
+    React.useEffect(
+        () =>
+            subscribeDevicePixelRatio(() => {
+                geometryCacheRef.current = null;
+                invalidate();
+            }),
+        [invalidate],
+    );
 
     /**
      * 绘制一帧波形。

@@ -488,6 +488,20 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         );
     }, []);
 
+    /**
+     * 视口尺寸由内核统一量测并广播，本组件不再自行 `clientWidth` 量测。
+     *
+     * 【为什么】内核、GL 画布、波形层、吸附高亮层挂在同一个容器上。旧实现两处
+     * 量测：内核用 `contentRect`（分数），本组件用 `clientWidth`（整数）——同一个
+     * 容器得出两个数，各层算出的物理尺寸可能相差一个设备像素，叠加后互相错位。
+     * 现在只有内核一处量测（`getBoundingClientRect`，与 `contentRect` 同口径）。
+     */
+    const handleViewportSizeChange = React.useCallback((width: number, height: number) => {
+        setViewportSize((prev) =>
+            prev.width === width && prev.height === height ? prev : { width, height },
+        );
+    }, []);
+
     // 回调镜像：宿主持有的是稳定函数，函数内部读取最新回调，避免重建宿主。
     const callbacksRef = React.useRef({
         onRowHeightChange,
@@ -498,6 +512,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         onScrollLeftCommit,
         onScrollLeftFrame,
         onViewportWidthChange,
+        onViewportSizeChange: handleViewportSizeChange,
         onUnavailable,
     });
     callbacksRef.current = {
@@ -509,6 +524,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         onScrollLeftCommit,
         onScrollLeftFrame,
         onViewportWidthChange,
+        onViewportSizeChange: handleViewportSizeChange,
         onUnavailable,
     };
 
@@ -621,18 +637,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         return map;
     }, [waveformTracks, clips]);
 
-    // 视口尺寸：波形画布与内核视口同尺寸（竖直由 axis.scrollTopPx 平移）。
-    React.useEffect(() => {
-        const container = containerRef.current;
-        if (!container) return;
-        const measure = () => {
-            setViewportSize({ width: container.clientWidth, height: container.clientHeight });
-        };
-        measure();
-        const observer = new ResizeObserver(measure);
-        observer.observe(container);
-        return () => observer.disconnect();
-    }, []);
+    // 视口尺寸由内核发布（见 handleViewportSizeChange）：波形画布与内核视口同尺寸
+    // （竖直由 axis.scrollTopPx 平移）。此处不再自行量测。
 
     // 挂载：创建宿主（GL 初始化失败时展示回退提示而不是崩溃）。
     React.useEffect(() => {
@@ -681,6 +687,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 onScrollLeftCommit: (px) => callbacksRef.current.onScrollLeftCommit?.(px),
                 onScrollLeftFrame: (px) => callbacksRef.current.onScrollLeftFrame?.(px),
                 onViewportWidthChange: (px) => callbacksRef.current.onViewportWidthChange?.(px),
+                onViewportSizeChange: (width, height) =>
+                    callbacksRef.current.onViewportSizeChange(width, height),
             });
         } catch (error) {
             // 内核没有 Canvas2D 等效绘制（GL 是唯一路径），本视图无法自行降级：
