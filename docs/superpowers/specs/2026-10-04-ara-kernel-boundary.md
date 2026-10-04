@@ -3,6 +3,13 @@
 > 写于 2026-10-04，分支 `codex/ara-plugin`。
 > 触发原因：内核抽取在"搬 `audio_engine`"这一步撞墙。这份文档记录**实测到的边界形状**
 > 与建议的切法，供继续抽取时照做。冲突时以 [ARA 设计文档](2026-10-04-ara-bridge-design.md) 为准。
+>
+> **2026-10-04 补充（实现设计 §4.2 修正了本文的一处判断）**：这份文档的 §1 与 §3
+> 是**拆分 `state.rs` 之前**测出来的，当时把 `project` / `notebook_assets` / `hfspeaks_v2` /
+> `temp_manager` / `media` / `recording` 都算进了内核闭包。它们其实是被 `AppState`
+> （运行时容器，不是模型）卷进来的。**正确顺序是：先拆 `state.rs` 成 model / app，
+> 再重算闭包** —— 只有那一次的模块集才是施工清单。
+> 施工顺序与验收口径见 [`../plans/2026-10-04-ara-plugin-v1-phase1-2.md`](../plans/2026-10-04-ara-plugin-v1-phase1-2.md)。
 
 ## 1. 撞到的问题
 

@@ -407,4 +407,66 @@ and reverse already belong to HiFiShifter's own model per the spec; the source-c
 is replaced by ARA's content-change notification. The one item to keep watching is reverse
 (see above). Cost if wrong: a reversed region would render forward; it is flagged, not hidden.
 
+---
+
+# 开发阶段（分支 `codex/ara-plugin`，2026-10-04）
+
+> 这一段是**实现设计**产生的 Ruling，不属于探针计划。方案见
+> `docs/superpowers/specs/2026-10-04-ara-plugin-v1-design.md`，
+> 计划见 `docs/superpowers/plans/2026-10-04-ara-plugin-v1-phase1-2.md`。
+
+**Dev 1: Ruling: 依赖闭包 ≠ 内核边界，而且必须**先拆 `state.rs` 再算闭包**。**
+实测：从 `mixdown` / `{mixdown, state}` 出发的闭包都是 **43 模块 / 2.57 MB**，其中
+`project` / `notebook_assets` / `hfspeaks_v2` / `temp_manager` / `media` / `recording`
+都不是内核 —— 它们被卷进来，是因为 `state.rs`（11826 行）把纯模型与运行时容器 `AppState`
+放在同一个模块里，而 `AppState` 引用这些。决定：先把 `state.rs` 拆成
+`model` / `app`（纯搬运，路径零改写），**拆完之后重算的闭包才是施工清单**。
+代价：若照拆分前的 43 模块施工，会白搬一批非内核模块并让插件二进制白白变大。
+
+**Dev 2: Ruling: 把 workspace 根提到 `backend/`，三个 crate 共用一份 `Cargo.lock`。**
+现状是三个各自带 `[workspace]` 的 crate，插件 crate 靠"记得复制 app 的 lock"避免
+`windows-core` 版本漂移（不复制就编译失败，已实测）。决定：合并成一个 workspace，
+让这个问题在结构上消失。代价：`target/` 从 `backend/src-tauri/target` 变为
+`backend/target`，本地要重建一次依赖；回退是 `git mv` 回来，可逆。
+
+**Dev 3: Ruling: 插件 crate 只依赖 `hifishifter-kernel`，并用测试钉住。**
+"不把 WebView2 / Tauri 带进 DAW 进程"必须用 `cargo metadata` 的依赖树断言来守，
+而不是靠代码评审记得。代价：若靠人评审，某次图省事的 `use backend_lib::…` 会到
+DAW 里才显形。
+
+**Dev 4: Ruling: 插件侧用 `ara2-bridge-plugin` 的 `PluginModel` 高层 trait，不手写回调委托。**
+探针用的是低层适配器 + 手工收集（`model.rs`，236 行）。实测发现同仓库的 `ara2-bridge`
+默认 feature `plugin` 已提供 `DocumentLifecycle` / `MusicalContexts` / `RegionSequences` /
+`AudioSources` / `AudioModifications` / `PlaybackRegions` 这些**语义化 trait**，
+以及 `PluginBuilder` / `RealtimeHeadTailAdapter` / `Persistence`。决定：产品实现这些 trait，
+只复用探针的 VST3 模块外壳。代价：若高层框架在 REAPER 下不可用，回退到探针已验证的
+低层路径 —— 那是一条**已知可行**的路，所以这是低风险决定。
+
+**Dev 5: Ruling: 参数编辑通道（产品设计 §5.4）收敛为"插件持权威 + VST3 state 持久化 +
+本体作客户端 + 单写者乐观并发"。**
+权威归插件的理由不是偏好：v1 的成功判据要求"工程重开后不需要重新合成"，而工程文件由宿主
+保存，所以曲线必须落在与工程同行的地方 —— 选 VST3 组件 state（不是 ARA 文档归档，
+后者在语义上属于模型对象图）。并发用 `revision` 乐观并发而不是"最后写者胜"，
+因为后者会**静默丢编辑**。代价：乐观并发在冲突时让用户重做一次，体验略差，但不会损坏数据。
+
+**Dev 6: Ruling: 源内容版本折进**既有的** `Clip.source_file_fingerprint`，`render_key.rs` 不改。**
+产品设计 §4.2 要求"源内容变更必须使渲染缓存键失效"。现有渲染键已含该字段且已有测试
+逐项钉住它必须影响哈希，所以只需在 ARA 映射时把"宿主内容版本 + 几何字段"折成该指纹，
+改动面从"给管线加一个新类型"缩小为"映射时多算一个指纹"。残余窗口（宿主在插件未运行期间
+改内容且版本号不递增、几何不变）**未验证**，列入 Phase 3 实验。代价：若窗口存在，
+会造成过期缓存被复用 —— 属于静默出错，所以宁可多失效。
+
+**Dev 7: Ruling: `EngineCommand` 进内核并删掉 `SetAppHandle`；`audio_engine` 整体留在 app 层。**
+`SetAppHandle { handle: tauri::AppHandle }` 是该枚举无法离开 app 层的唯一原因，
+而 worker 需要的句柄已由 `app_events::app_handle()` 提供（进程级出口，注册早于引擎启动）。
+边界必须写死：`audio_engine` 是 cpal 设备边界，**不搬**，所以 `engine.rs` / `snapshot.rs`
+里那 10 处 `tauri::` 与约 35 处 `emit` 不动 —— 否则搬迁会失控。代价：句柄改道有时序风险，
+用"手工启动 app 并播放一次"兜底。
+
+**Dev 8: Ruling: 实现计划只覆盖 Phase 1 + Phase 2。**
+理由是"每个计划必须独立产出可工作软件"：Phase 1 的产出是"插件 crate 只依赖内核"，
+Phase 2 的产出是"插件在 REAPER 里加载并呈现真实时间线"。Phase 3（渲染闭环，含 R4）与
+Phase 4（参数通道）在 Phase 2 验收后另写计划。代价：交付被拉长成多轮，
+但每一轮都有可验收的实物，避免了"一个大计划写到一半发现前提不成立"。
+
 
