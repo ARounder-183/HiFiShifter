@@ -196,6 +196,11 @@ node_modules/
 # Git worktrees for isolated feature work (see using-git-worktrees)
 .worktrees/
 
+# Local build scratch created while setting up a worktree (never source)
+.npm-cache/
+.build-tmp/
+frontend/.esbuild-tmp/
+
 # Temporary AppImage extraction directories (created by --appimage-extract)
 squashfs-root/
 
