@@ -352,4 +352,59 @@ Recorded as the baseline so any later change can be distinguished from "already 
 edits to `backend/` can be evaluated against it. The probe is still acting on the plan's ordering:
 Task 3 is only started on the user's go-ahead.
 
+---
+
+## Task 3 — DONE (field level). Evidence: `probe/ara/captures/roundtrip/FINDINGS.md`.
+
+11 tests in `probe/ara/mapping/` pass. The converter lands on the **real** `Clip` /
+`TimelineState`, not on a probe-local mirror.
+
+**Task 3: Ruling: consume the real types through the existing `__test_internals` hook.**
+`backend/src-tauri/src/lib.rs` keeps almost every module private (`mod state;`, `mod mixdown;`),
+so an external crate cannot see `TimelineState`. But there is already a
+`#[doc(hidden)] pub mod __test_internals` that re-exports `state::{Clip, TimelineState}`.
+Using it means the probe adds **no** `pub` to `backend/`, so the "don't touch backend/" rule holds
+and the mapping still targets the genuine product structs. Cost if wrong: none; the hook is
+`#[doc(hidden)]` and pre-existing.
+
+**Task 3: Ruling: the probe crate must seed its `Cargo.lock` from the backend's.** A fresh
+resolution pulls different `windows-core` versions and `backend_lib` then fails to compile as a
+dependency (`cast()` not found in `webview2_accelerators.rs`, trait from a different
+`windows-core`). This is a feature-unification difference between "built inside its own package"
+and "built as a dependency" — not a backend defect. Copy `backend/src-tauri/Cargo.lock` first.
+Cost if wrong: the probe cannot build against the product kernel at all.
+
+**Task 3: Ruling: Task 1's "time-stretch = duration difference, proven by the awkward fixture"
+does not hold — the fixture carries no stretch at all.** In the awkward capture every one of the
+five regions has `durationInModificationTime == durationInPlaybackTime` (including the region that
+was supposed to be stretched: 1 s of modification over 1 s of playback). Task 1 read the "1 s
+region against a 2 s source" as a stretch, but that is just a **trimmed region**; equal durations
+mean **no** stretch. The likely cause is that the ARATestPlugIn declared no time-stretch support,
+so REAPER never wrote a stretch into the ARA model. The formula itself still holds and is now
+verified on a synthetic document (durMod 2 / durPlay 1 → `playback_rate == 2.0`).
+Cost if wrong: a mapper written against that fixture would "pass" a stretch test that never
+exercised stretch. Follow-up: re-capture with the Task 2 plug-in advertising
+`Timestretch | ReflectTempo | ContentFades`; that is the only mapping branch still lacking a
+host-level observation.
+
+**Task 3: Ruling: ARA has no reverse bit.** Checked `ARAInterface.h`: the playback-transformation
+flags are only Timestretch, TimestretchReflectingTempo, ContentBasedFadeAtHead/Tail. So reversal
+cannot come from the region model; either the host reverses the source it feeds (fine) or the
+plugin cannot know (not fine). Recorded as an open, non-degradable-in-principle item rather than
+solved.
+
+**Task 3: Ruling: plan Step 6 (sample-level audio comparison) cannot be done as written.**
+`render_mixdown_interleaved` and `MixdownOptions` are not exposed through `__test_internals`, and
+adding `pub` to `backend/` is outside the probe's rules. Minimal fix, requiring approval because
+it edits `backend/`: add
+`pub use crate::audio::mixdown::{render_mixdown_interleaved, MixdownOptions};`
+to the existing `__test_internals` block. Until then the Task 3 conclusion covers **field-level
+losslessness only, not render-output equality** — R4 (renderer produces audio inside the ARA
+window) remains unverified. Cost if wrong: R2's audio half is asserted rather than measured.
+
+**Task 3: Ruling: the lost-field list contains nothing that blocks v1.** Fades, loop, item gain
+and reverse already belong to HiFiShifter's own model per the spec; the source-content fingerprint
+is replaced by ARA's content-change notification. The one item to keep watching is reverse
+(see above). Cost if wrong: a reversed region would render forward; it is flagged, not hidden.
+
 
