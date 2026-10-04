@@ -11,6 +11,7 @@ import {
 import { Flex, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
+import { AraConnectionPanel } from "./features/ara/AraConnectionPanel";
 import { TimelinePanel } from "./components/layout/TimelinePanel";
 import { PianoRollPanel } from "./components/layout/PianoRollPanel";
 import { useAppDispatch, useAppSelector } from "./app/hooks";
@@ -4180,6 +4181,12 @@ function AppInner() {
                 onLoopNewClipsChange={handleLoopNewClipsChange}
             />
             <ActionBar />
+            <AraConnectionPanel
+                dirty={projectDirty}
+                onTimelineChanged={async () => {
+                    await dispatch(fetchTimeline()).unwrap();
+                }}
+            />
 
             {/*
              * 工作区：全部可停靠窗体由布局树驱动。

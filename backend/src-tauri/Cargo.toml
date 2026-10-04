@@ -28,6 +28,7 @@ cc = "1.0"
 # 离线内核（不依赖 Tauri / cpal）。内核模块正逐步从本 crate 搬过去，
 # 搬迁期间由 lib.rs 里的 `pub use` 把路径接回来。
 hifishifter-kernel = { path = "../hifishifter-kernel" }
+hifishifter-ara-ipc = { path = "../hifishifter-ara-ipc" }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }

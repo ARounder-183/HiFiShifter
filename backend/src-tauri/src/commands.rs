@@ -5,6 +5,57 @@
 // - 具体实现按领域拆分在 `backend/src-tauri/src/commands/*.rs`，并通过本文件转发调用。
 // - 拆分模块中的函数请保持 `pub(super)` / `pub(crate)`，避免被当成公共 API 直接依赖。
 
+/// ARA 管道发现与交换均在阻塞池运行，避免阻塞 WebView 消息泵。
+#[tauri::command]
+pub async fn ara_list_instances() -> Result<Vec<serde_json::Value>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        hifishifter_ara_ipc::discover().map(|records| {
+            records.into_iter().map(|record| {
+                serde_json::json!({"instance_id": record.instance_id, "name": record.name, "pid": record.pid})
+            }).collect()
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn ara_connect(
+    app: tauri::AppHandle,
+    instance_id: String,
+    force: bool,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::ara_bridge::import_snapshot(&app, Some(instance_id), force)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn ara_refresh(
+    app: tauri::AppHandle,
+    force: bool,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::ara_bridge::import_snapshot(&app, None, force))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn ara_submit(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::ara_bridge::submit(&app))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn ara_disconnect(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::ara_bridge::disconnect(&app))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[path = "commands/cache.rs"]
 mod cache;
 #[path = "commands/channel_scan.rs"]

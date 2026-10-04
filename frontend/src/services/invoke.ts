@@ -127,6 +127,12 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "set_ui_locale":
             return { locale: args[0] };
 
+        case "ara_connect":
+            return { instanceId: args[0], force: args[1] ?? false };
+
+        case "ara_refresh":
+            return { force: args[0] ?? false };
+
         case "import_audio_item":
             return {
                 audioPath: args[0],
@@ -856,6 +862,9 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
  * 新增无参命令时在此登记；新增带参命令必须在 switch 中登记映射。
  */
 const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
+    "ara_list_instances",
+    "ara_submit",
+    "ara_disconnect",
     "cancel_background_render",
     "cancel_export_audio",
     "check_source_files_changed",

@@ -39,6 +39,7 @@ pub mod logging;
 mod zip_util;
 
 mod audio_engine;
+mod ara_bridge;
 pub(crate) mod commands;
 mod launch_args;
 mod recording;
@@ -274,6 +275,7 @@ pub fn run_vocoder_benchmark_cli() -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .manage(state::AppState::default())
+        .manage(ara_bridge::AraBridge::default())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // ── AppImage Mesa/EGL driver path ──────────────────────────
@@ -595,6 +597,11 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::ara_list_instances,
+            commands::ara_connect,
+            commands::ara_submit,
+            commands::ara_refresh,
+            commands::ara_disconnect,
             commands::ping,
             commands::get_about_info,
             commands::analyze_clip_formants,
