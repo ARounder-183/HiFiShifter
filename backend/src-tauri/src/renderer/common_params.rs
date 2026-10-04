@@ -340,6 +340,42 @@ pub(crate) struct AudioDynCurves {
     pub(crate) baseline: Vec<f32>,
 }
 
+/// 该帧的**显式**目标电平；`None` = 未画（哨兵 / 缺失 / 非有限）。
+///
+/// 这是 DYN 语义里唯一一处"什么算画过"的判定，其余两个入口都从它派生。
+#[inline]
+fn dyn_explicit_target(user_value: Option<f32>) -> Option<f32> {
+    user_value.filter(|v| v.is_finite() && *v >= 0.0)
+}
+
+/// 「该帧是否未画」——哨兵 / 缺失 / 非有限都算未画。
+///
+/// 用途：`get_param_frames(with_sentinel)` 的位图。位图与目标电平的解析**必须
+/// 同源**：写回路径（平滑 / 量化 / 平均 / 拖拽提交 / 复制粘贴）依赖"哪些帧未画"
+/// 把哨兵原样写回，判定一旦与解析分叉，未画帧就会被物化成显式目标电平。
+#[inline]
+pub(crate) fn dyn_frame_is_unset(user_value: Option<f32>) -> bool {
+    dyn_explicit_target(user_value).is_none()
+}
+
+/// 单帧 DYN 目标电平的**唯一解析规则**。
+///
+/// 画过的帧（有限且 ≥ 0）原样返回；未画的帧 ⇒ 沿用该帧的**原声电平**
+/// （= 增益 1；无内容处仍由 [`no_content_fade`] 淡出）。
+///
+/// 【为什么必须只有一份实现】同一条判定同时决定三件事：
+/// 1. `get_param_frames(dyn)` 的 `edit` 出口 —— 前端画出的曲线；
+/// 2. `get_dyn_baseline_window` 的 `target` 出口 —— 拖拽期间的预览窗口；
+/// 3. [`resolve_dyn_curves_for_audio`] 的逐帧增益 —— 实际听到的声音。
+///
+/// 三者一旦分叉，就会出现「波形演示与实际播放不一致」（本项目的头号禁忌：
+/// 前端 `paramRanges::computeDynGain` 与后端 `compute_dyn_gain` 的同构约定同理）。
+/// 任何一处需要改动判定，都必须改在本函数里。
+#[inline]
+pub(crate) fn dyn_resolved_target_at(user_value: Option<f32>, baseline: f32) -> f32 {
+    dyn_explicit_target(user_value).unwrap_or(baseline)
+}
+
 /// 把存储形态的 DYN 曲线/基线转成**音频路径形态**。
 ///
 /// @param dyn_curve 存储的 DYN 曲线（可含哨兵）。
@@ -363,12 +399,8 @@ pub(crate) fn resolve_dyn_curves_for_audio(
 
     let mut target = Vec::with_capacity(dyn_curve.len() + 1);
     for (i, &value) in dyn_curve.iter().enumerate() {
-        // 与显示出口同一判定：`!(is_finite && >= 0)` = 未画（哨兵 / 缺失 / 非法）。
-        if value.is_finite() && value >= 0.0 {
-            target.push(value);
-        } else {
-            target.push(denominator_at(i));
-        }
+        // 与显示出口同一判定（唯一实现见 `dyn_resolved_target_at`）。
+        target.push(dyn_resolved_target_at(Some(value), denominator_at(i)));
     }
     // 末帧留一格（见上文 2）。
     target.push(denominator_at(dyn_curve.len()));
@@ -420,6 +452,59 @@ mod tests {
         };
         assert_eq!(volume, (1.0, 0.0, 2.0));
         assert_eq!(dyn_kind, (1.0, 0.0, 1.0));
+    }
+
+    /// ★ 契约：DYN 目标电平的解析只有一份实现。
+    ///
+    /// 用 `dyn_resolved_target_at` 重建 `resolve_dyn_curves_for_audio` 的 `target`，
+    /// 守护「显示 == 播放」的前提（见该函数的说明）。
+    #[test]
+    fn dyn_target_resolution_is_single_sourced() {
+        // 覆盖四种帧：哨兵 / 显式目标 / 显式静音 / 非有限。
+        let user = [
+            DYN_FOLLOW_ORIG,
+            0.4,
+            0.0,
+            f32::NAN,
+            -0.7, // 负值 = 同一个哨兵语义
+        ];
+        let baseline = [0.5f32, 0.25, 0.0, 0.8, 1.0];
+        let audio = resolve_dyn_curves_for_audio(&user, Some(&baseline));
+        for i in 0..user.len() {
+            assert_eq!(
+                audio.target[i],
+                dyn_resolved_target_at(Some(user[i]), baseline[i]),
+                "frame {i} 的解析必须与音频路径逐值一致"
+            );
+        }
+        // 末帧留格：数组之外持有末值（与采样器一致）。
+        assert_eq!(audio.target[user.len()], *baseline.last().unwrap());
+
+        // 显式值原样返回，与基线无关（含"画静音"的 0）。
+        assert_eq!(dyn_resolved_target_at(Some(0.75), 0.2), 0.75);
+        assert_eq!(dyn_resolved_target_at(Some(0.0), 0.2), 0.0);
+        // 未画 ⇒ 沿用原声。
+        assert_eq!(dyn_resolved_target_at(None, 0.2), 0.2);
+        assert_eq!(dyn_resolved_target_at(Some(DYN_FOLLOW_ORIG), 0.2), 0.2);
+        assert_eq!(dyn_resolved_target_at(Some(f32::INFINITY), 0.2), 0.2);
+    }
+
+    /// 「未画」位图必须与目标电平解析同源：未画的帧必然解析成基线。
+    ///
+    /// 反命题不成立（用户可以把目标恰好画在基线上），因此只断言单向蕴含。
+    #[test]
+    fn unset_bitmap_agrees_with_resolution() {
+        let user = [DYN_FOLLOW_ORIG, 0.4, 0.0, f32::NAN, -0.7];
+        let baseline = 0.3f32;
+        for value in user {
+            let is_unset = dyn_frame_is_unset(Some(value));
+            let resolved = dyn_resolved_target_at(Some(value), baseline);
+            if is_unset {
+                assert_eq!(resolved, baseline, "未画帧必须沿用原声");
+            }
+        }
+        assert!(dyn_frame_is_unset(None));
+        assert!(!dyn_frame_is_unset(Some(0.0)), "画静音是显式目标，不是未画");
     }
 
     #[test]

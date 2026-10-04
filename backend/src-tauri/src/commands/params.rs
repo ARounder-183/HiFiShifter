@@ -394,19 +394,16 @@ pub(super) fn get_param_frames(
                     .filter(|v| v.is_finite() && *v > 0.0)
                     .unwrap_or(fallback);
                 let user = user_curve.and_then(|c| c.get(idx)).copied();
-                let is_unset = match user {
-                    Some(v) => !(v.is_finite() && v >= 0.0), // 哨兵 / 非有限
-                    None => true,                            // 曲线不存在或更短
-                };
+                // 「未画」位图与目标电平解析同源（唯一判定见
+                // `common_params::dyn_frame_is_unset`）：分叉会让写回路径把未画帧
+                // 物化成显式目标电平。
                 if want_sentinel {
-                    sentinels.push(is_unset);
+                    sentinels.push(crate::renderer::common_params::dyn_frame_is_unset(user));
                 }
-                let resolved = match user {
-                    Some(v) if v.is_finite() && v >= 0.0 => v,
-                    _ => baseline, // 哨兵 / 缺失 → 沿用原声
-                };
                 orig.push(baseline);
-                edit.push(resolved);
+                edit.push(crate::renderer::common_params::dyn_resolved_target_at(
+                    user, baseline,
+                ));
             }
             if want_sentinel {
                 edit_sentinel = Some(sentinels);
