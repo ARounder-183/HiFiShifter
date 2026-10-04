@@ -812,4 +812,6 @@ Task 26: Ruling: 插件首轮缺少模型登记和原分析调度，参数曲线
 
 Task 26: Ruling: Computer Use对REAPER父窗口的坐标drag不能命中WebView子窗口 — 保留失败返回与截图证据，不猜HWND、不用PowerShell UIA或Lua代替用户手绘；若强行绕过会把脚本提交误报成真实GUI验收。
 
+Task 26: Ruling: WebView accessibility树可读但控件click仍不能从REAPER父窗口执行，secondary action也没有Invoke；同进程输入代理实验进一步造成插件IPC超时 — 撤回代理，不牺牲已验证通信链路，保留该工具边界证据；若继续叠加代理会把真实插件故障误判成输入问题。
+
 

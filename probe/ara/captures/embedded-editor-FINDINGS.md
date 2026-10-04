@@ -72,3 +72,4 @@ Lua原有save命令已把当前未编辑一次性工程正常保存为`.build-tm
 - 真实actor回归覆盖“先画pitch、分析完成后自动应用、无需GUI轮询”，独立自相关测得329.104Hz（MIDI64目标329.63Hz）。缺原线时自动应用保持pending并保留可保存曲线。
 - 新bundle已重建并用隔离RPP重开；原时间线、钢琴卷帘、WORLD算法和自动应用栏再次出现。
 - Computer Use对REAPER父窗口坐标drag返回WebView子窗口目标不匹配；未猜HWND、未用PowerShell UIA或Lua提交替代手绘，因此真实手绘、导出及重开PCM仍是open项。
+- 追加验证：WebView accessibility树可读到绘制工具，但对同一索引执行click仍返回“element is not available in cached app state”；secondary action没有Invoke。短暂实现的同进程输入代理会使所有插件IPC请求超时，已撤回，未进入bundle。
