@@ -65,3 +65,39 @@ host PCM helper 曾在共用判定前以 compose=false 且 adjustment=false 返�
 ## 仍未验收
 
 controller负责重建部署、真实宿主音高导出差异、保存并重开工程后的曲线及输出；本任务未验收、未部署。不承诺倒放、stretch/fades、vslib插件。旧v1非空开发state需重新获取宿主图并人工重新提交，不能猜测迁移其轨道归属。
+
+## F2/R1 剩余 P1 的窄修复追加
+
+本次仅承接 `integration-re-review.md` 的 R1，不重新开展全功能wave；F1/F3/F4和授权版本边界没有改动。复审正确指出：前次 dirty 回归手动 bump_timeline_version，只覆盖 checkpoint 版本变化；真实 `commands/params.rs::set_param_frames(checkpoint=false)` 尾块/异步平滑不推进版本，也不会在成功清 dirty 后重新标脏。`restore_param_frames`、`set_static_param`、`stretch_track_linked_params` 的非checkpoint成功写入同源。
+
+修复：`submit` 直接从本次 `Request::Commit` 的实际 timeline JSON 保存受支持参数投影（全部持久曲线/静态参数、track ID/volume/muted/solo/compose_enabled/pitch_analysis_algo）。成功后在 timeline 锁内比较当前受支持投影与实际发送投影，再结合既有版本、未支持字段、project基线决定是否清 dirty。四个真实参数写入入口在同一 timeline 锁内标 dirty，因此响应前写入使投影不等、响应后尾块重新标脏。checkpoint继续只控制undo，不增加每块undo，不为了通过回归制造额外timeline版本。
+
+无GUI回归直接调用这四个命令的原实现：内部入参改为 `&AppState`，Tauri命令门面外部签名保持原样并借用转发；`cfg(test)`别名仅供测试，不替换参数写入行为。AppState字段装配提取为私有共享initializer；Default仍用真实 `AudioEngine::new`。显式 `cfg(test)` AppState fixture注入无worker/无设备的真实AudioEngine对象；没有global/TLS/ambient模式，没有产品worker生命周期改动。fixture选 `PitchAnalysisAlgo::None`，dirty契约不需要推理，避免无关FCPE预热。
+
+### 新 RED/GREEN 与实际调用路径
+
+每条 cargo 前置与上文一致（MSVC dot-source、工作树TEMP/TMP、锁定两SDK、offline/jobs1）。新增回归实际调用：
+
+- `commands.rs` 的测试别名→`commands/params.rs::set_param_frames`：首块 `Some(true)` 后捕获真实 Commit 载荷，再以 `Some(false)` 写尾块或平滑，成功响应后仍 dirty；另一用例在成功清dirty以后才写 false 尾块，必须重新标脏。
+- 对实际 `restore_param_frames`、`set_static_param`、`stretch_track_linked_params` 分别从 clean 状态执行 `Some(false)`，断言真实曲线恢复/静态值/关联映射确已写入，dirty=true，undo仍为0，version不变。
+- 所有 false 写入测试都断言真实 timeline_version 与写前相同、undo深度相同；没有手动 bump 模拟这些场景。既有正向用例仍验证当前参数等于实际提交时可清dirty；另覆盖所有被接受的track controls不同于实际载荷时不能清dirty。
+
+正常 RED 命令：
+
+`cargo test --manifest-path backend/Cargo.toml --target-dir backend/target/ara-fix-app -p HiFiShifter --features custom-protocol --lib --offline --jobs 1 ara_bridge::tests::noncheckpoint -- --nocapture --test-threads=1`
+
+在显式fixture与None算法保持不变的情况下，暂移除仅本P1的参数相等检查和4处markdirty，5条均失败在预期dirty断言：`成功后的false尾块必须重新标脏`、`IPC中的未发送尾块/平滑仍须确认刷新`、restore/static/linked真实false写入必须标脏；**0 passed/5 failed，正常退出1**。版本和undo未变化断言已先通过。随后恢复全部修复。
+
+最终 GREEN：
+
+- 同前置、同独立target，filter `ara_bridge::tests`：**18 passed/0 failed，正常退出0**，约0.02s；包括原12项、上述真实命令5项以及受支持track controls比较。
+- 同前置、同独立target，filter `commands::params::`：**10 passed/0 failed，正常退出0**，保留参数换算/值域/选区语义回归。
+- `git diff --check` 无输出。只验证本P1受影响边界，没有重跑不相关plugin/kernel/整工程大套件；产品GUI重建/部署仍交controller。
+
+### 测试运行历史与隔离
+
+最初真实命令5条获得正确失败摘要，修复后的17/18项获得成功摘要，但测试进程在摘要后仍未正常退出；仅中断本任务自己的cargo/测试进程，这些摘要没有当作完成证据。先前以私有引擎shutdown尝试隔离CPAL不充分。进一步阅读实际路径发现：fixture默认算法为NsfHifiganOnnx，`ensure_params_for_root→pitch_analysis::build_root_pitch_key→fcpe_onnx::is_available→ensure_background_prewarm` 会派ONNX预热线程。采用显式无设备fixture与None测试算法后取得上列正常退出1/0，未修改生产分析或引擎生命周期。
+
+一次隐藏Start-Process输出重定向未继承工作树TEMP/TMP，原临时目录4项PermissionDenied（14 passed/4 failed），不计为本P1回归或GREEN；没有更改ACL/OS，后续均恢复规范cargo前置。原用户GUI/REAPER及曲线未操作、未关闭、未部署，未启动子代理。
+
+本追加源码路径：`backend/src-tauri/src/ara_bridge.rs`、`commands.rs`、`commands/params.rs`、`state/app.rs`、`audio_engine/engine.rs`、`audio_engine/mod.rs`。后二者仅增加 `cfg(test)` 工厂/再导出，生产引擎构造及worker代码没有改动。追加源码本地提交：**`0b8f4dd4`**（`fix(ara): retain dirty state for unsent parameter writes`），只含上述六个路径。报告单独提交。控制任务的 `probe/ara/FORWARD-GUI-RUN.md`、`start_forward_gui.ps1` 现有修改予以保留，不纳入提交。
