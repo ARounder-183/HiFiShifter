@@ -36,6 +36,7 @@ import {
     type WaveformReuseQuery,
 } from "./geometryCache";
 import { buildWaveformScene, type WaveformSceneRow } from "./sceneBuilder";
+import { computeWaveformWindow } from "./waveformWindow";
 import {
     Canvas2dWaveformRenderer,
     WebGl2WaveformRenderer,
@@ -276,18 +277,10 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         }
 
         // ── 全量重建 ──────────────────────────────────────────────
-        // 余量只给水平方向（WebGL 路径无内存成本；Canvas2D 回退没有顶点缓冲，
-        // 平移仍要重放 path，加宽窗口只会白白多建几何，故余量取 0）。
-        const marginPx =
-            rendererKind === "webgl2"
-                ? Math.min(512, Math.max(128, Math.round(widthPx * 0.25)))
-                : 0;
-        const windowStartPx = scrollLeftPx - marginPx;
-        const windowEndPx = scrollLeftPx + widthPx + marginPx;
-        // 竖直窗口 = 行数据覆盖的内容范围（行 topPx 是内容绝对坐标、按轨道
-        // 顺序升序）。注意**不能**用 `heightPx` 推竖直窗口：它是画布高度，
-        // 与行数据的实际覆盖无关（上游的轨道窗口化自带 overscan，两者不必
-        // 相等），拿它当界会得到与几何覆盖无关的条件。
+        // 几何窗口与渲染原点由 `computeWaveformWindow` 统一计算。那里保证
+        // **原点是整数个物理像素** —— 否则渲染器对原点的吸附会留下小数残差，
+        // 整幅波形相对网格 / Clip 平移最多半个物理像素；水平余量随视口宽度变化，
+        // 于是拖动窗口宽度时波形会反复跳变（详见该模块的文件头推导）。
         let firstRowTopPx = Number.POSITIVE_INFINITY;
         // 几何的**真实覆盖底端**：几何只画各行波形带，覆盖到
         // 「行顶 + 带内偏移 + 带高」为止。此前用「(末行 top − 首行 top) ÷ 行数」
@@ -300,10 +293,17 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             const bandBottomPx = row.topPx + row.waveformTopPx + row.waveformHeightPx;
             if (bandBottomPx > geometryBottomPx) geometryBottomPx = bandBottomPx;
         }
-        const windowTopPx = Number.isFinite(firstRowTopPx) ? firstRowTopPx : scrollTopPx;
-        const windowBottomPx = Number.isFinite(geometryBottomPx)
-            ? geometryBottomPx
-            : scrollTopPx + heightPx;
+        const geometryWindow = computeWaveformWindow({
+            scrollLeftPx,
+            scrollTopPx,
+            widthPx,
+            heightPx,
+            dpr,
+            horizontalOverscan: rendererKind === "webgl2",
+            firstRowTopPx,
+            geometryBottomPx,
+        });
+        const { windowStartPx, windowEndPx, windowTopPx, windowBottomPx } = geometryWindow;
 
         const scene = buildWaveformScene({
             axis: withAxis(axis, {
@@ -368,8 +368,11 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             dpr,
         });
 
-        const originXPx = scrollLeftPx - windowStartPx;
-        const originYPx = scrollTopPx - windowTopPx;
+        // 渲染原点取自 `computeWaveformWindow`（= 视口左上角的窗口局部坐标）。
+        // 它恒为整数个物理像素，渲染器对它的吸附因此是恒等操作 —— 波形不会随
+        // 视口宽度变化而整体平移（详见该模块的文件头）。
+        const originXPx = geometryWindow.originXPx;
+        const originYPx = geometryWindow.originYPx;
         const commitCache = (renderer: WaveformSurfaceRenderer): void => {
             geometryCacheRef.current = {
                 pxPerSec,
