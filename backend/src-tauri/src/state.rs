@@ -2737,8 +2737,17 @@ impl TimelineState {
             if curve.len() < required_len {
                 curve.resize(required_len, *default_value);
             }
+            // `dyn` 的 `-1` 是「沿用原声」哨兵而非数值：通用线性重采样会在它与
+            // 真实目标电平之间插出一串负数 / 近 0 的中间值，被增益语义读成
+            // "压平到静音"（详见 `resample_dyn_curve` 的说明）。两条路径在
+            // "两端都是显式目标"时逐值相同，只在跨越哨兵处分叉。
+            let is_dyn = key == crate::renderer::common_params::DYN_PARAM_ID;
             for (slice, &(.., new_start, new_count)) in slices.iter().zip(frame_mappings.iter()) {
-                let values = Self::resample_curve(slice, new_count, false);
+                let values = if is_dyn {
+                    crate::renderer::common_params::resample_dyn_curve(slice, new_count)
+                } else {
+                    Self::resample_curve(slice, new_count, false)
+                };
                 for (offset, value) in values.into_iter().enumerate() {
                     curve[new_start.saturating_add(offset)] = value;
                 }
@@ -7661,6 +7670,127 @@ mod tests {
             !entry.extra_curves.contains_key("breath_gain"),
             "stretch mapping must not materialize curves for untouched params"
         );
+    }
+
+    /// ★ 回归：拉伸**不得把 `dyn` 的未画帧物化成显式目标电平**。
+    ///
+    /// 症状（用户报告）：拉伸拖拽期间波形正常，**松手后反而崩溃**。原因是提交时
+    /// `stretch_linked_params_in_root_range` 用通用线性重采样处理 `dyn`，在
+    /// 「沿用原声」哨兵（−1）与相邻真实目标之间插出一串中间值；落进 `(0, 目标)`
+    /// 的那些被增益语义当成显式目标 ⇒ 该段被压成静音。因为写的是持久状态，
+    /// 撤销前不会恢复。
+    #[test]
+    fn stretch_linked_params_keeps_dyn_sentinels_unset() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        tl.add_clip(
+            Some(track_id.clone()),
+            Some("DynStretch".into()),
+            Some(1.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".into()),
+        );
+        let root_track_id = tl.resolve_root_track_id(&track_id).unwrap();
+        tl.ensure_params_for_root(&root_track_id);
+
+        // 1~3s（帧 200..600）里只在 [300, 500) 画了 0.6，其余全未画。
+        const DRAWN: f32 = 0.6;
+        {
+            let entry = tl.params_by_root_track.get_mut(&root_track_id).unwrap();
+            let len = entry.pitch_edit.len();
+            let mut dyn_curve = vec![crate::renderer::common_params::DYN_FOLLOW_ORIG; len];
+            for value in &mut dyn_curve[300..500] {
+                *value = DRAWN;
+            }
+            entry.extra_curves.insert("dyn".to_string(), dyn_curve);
+        }
+
+        // 压缩一半：[1.0s, 3.0s) → [1.0s, 2.0s)。
+        tl.stretch_linked_params_in_root_range(
+            &root_track_id,
+            &[StretchLinkedRangeSec {
+                old_start_sec: 1.0,
+                old_length_sec: 2.0,
+                new_start_sec: 1.0,
+                new_length_sec: 1.0,
+            }],
+        );
+
+        let curve = tl
+            .params_by_root_track
+            .get(&root_track_id)
+            .unwrap()
+            .extra_curves
+            .get("dyn")
+            .expect("dyn curve must exist");
+        for (idx, &value) in curve.iter().enumerate() {
+            assert!(
+                value == crate::renderer::common_params::DYN_FOLLOW_ORIG
+                    || (value - DRAWN).abs() < 1e-4,
+                "frame {idx}: 拉伸把未画帧物化成了显式目标电平 {value} \
+                 （跨哨兵插值的中间值）—— 这正是「松手后响度崩溃」的根因"
+            );
+        }
+        // 已画的段落仍应被搬到新范围里（修复不能变成"整条曲线不动"）。
+        assert!(
+            curve[..400].iter().any(|&v| (v - DRAWN).abs() < 1e-4),
+            "已画段落必须仍然被重采样进新范围"
+        );
+    }
+
+    /// 拉伸**已画满**的 `dyn` 曲线时，走的是常规线性插值（与其它 extra 曲线同口径）。
+    ///
+    /// 与上一条互为回归守护：只做"不跨哨兵"而不做插值会让曲线变成阶梯。
+    #[test]
+    fn stretch_linked_params_interpolates_drawn_dyn_curve() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        tl.add_clip(
+            Some(track_id.clone()),
+            Some("DynRamp".into()),
+            Some(1.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".into()),
+        );
+        let root_track_id = tl.resolve_root_track_id(&track_id).unwrap();
+        tl.ensure_params_for_root(&root_track_id);
+
+        // 在 clip 范围 [200, 600) 上画一条 0.2 → 1.0 的斜坡，范围外平延。全部是显式值
+        //（无哨兵），从而"两端都是显式 ⇒ 仍然线性插值"这一条能被真正检验。
+        {
+            let entry = tl.params_by_root_track.get_mut(&root_track_id).unwrap();
+            let len = entry.pitch_edit.len();
+            let mut dyn_curve = vec![0.2f32; len];
+            for (i, value) in dyn_curve.iter_mut().enumerate() {
+                let t = ((i as f32) - 200.0) / 400.0;
+                *value = 0.2 + 0.8 * t.clamp(0.0, 1.0);
+            }
+            entry.extra_curves.insert("dyn".to_string(), dyn_curve);
+        }
+
+        tl.stretch_linked_params_in_root_range(
+            &root_track_id,
+            &[StretchLinkedRangeSec {
+                old_start_sec: 1.0,
+                old_length_sec: 2.0,
+                new_start_sec: 1.0,
+                new_length_sec: 1.0,
+            }],
+        );
+
+        let curve = tl
+            .params_by_root_track
+            .get(&root_track_id)
+            .unwrap()
+            .extra_curves
+            .get("dyn")
+            .unwrap();
+        // 单调不减（插值未制造折点），且首尾仍落在原斜坡上。
+        for pair in curve[200..400].windows(2) {
+            assert!(pair[1] + 1e-5 >= pair[0], "已画曲线必须保持单调");
+        }
+        assert!((curve[200] - 0.2).abs() < 0.02, "got {}", curve[200]);
+        assert!((curve[399] - 1.0).abs() < 0.03, "got {}", curve[399]);
     }
 
     /// 跨根轨道移动：曲线必须从旧 root 搬到新 root（旧 root 恢复默认）。
