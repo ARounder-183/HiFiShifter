@@ -56,7 +56,7 @@ pub(crate) struct ExtensionState {
     model_thread: ThreadId,
     selection: Mutex<Option<ExtensionViewSelection>>,
     hidden_sequences: Mutex<Vec<usize>>,
-    assignment_observer: Mutex<Option<Arc<dyn Fn(ExtensionRoles, &[usize]) + Send + Sync>>>,
+    assignment_observer: Mutex<Option<Arc<dyn Fn(ExtensionRoles, &[usize], &[usize]) + Send + Sync>>>,
 }
 
 /// Owned copy of one editor-view selection notification.
@@ -94,7 +94,11 @@ impl ExtensionState {
                 .map(|(_, key)| *key)
                 .collect::<Vec<_>>();
             keys.sort_unstable();
-            observer(role, &keys);
+            let mut sequences = if role == ExtensionRoles::EDITOR_RENDERER {
+                lock(&self.region_sequences).iter().copied().collect::<Vec<_>>()
+            } else { Vec::new() };
+            sequences.sort_unstable();
+            observer(role, &keys, &sequences);
         }
     }
 
@@ -173,6 +177,16 @@ impl ExtensionBinding {
             return Err(AraError::Unsupported("assignment observer requires ARA 2"));
         }
         let (binding, lease) = Self::new(generation, known, assigned, supported)?;
+        *lock(&binding.allocation.state.assignment_observer) = Some(Arc::new(move |role, keys, _| observer(role, keys)));
+        Ok((binding, lease))
+    }
+
+    /// 本地补丁：提供角色的显式 region 与 editor sequence 两套模型键，旧观察器保持兼容。
+    pub fn new_with_renderer_observer(
+        generation: ApiGeneration, known: ExtensionRoles, assigned: ExtensionRoles, supported: ExtensionRoles,
+        observer: Arc<dyn Fn(ExtensionRoles, &[usize], &[usize]) + Send + Sync>,
+    ) -> Result<(Self, ExtensionControllerLease), AraError> {
+        let (binding, lease) = Self::new_with_assignment_observer(generation, known, assigned, supported, Arc::new(|_, _| {}))?;
         *lock(&binding.allocation.state.assignment_observer) = Some(observer);
         Ok((binding, lease))
     }

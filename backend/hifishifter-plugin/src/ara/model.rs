@@ -25,6 +25,8 @@ use hifishifter_kernel::state::TimelineState;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::render::ownership::{region_owners, DocumentId};
+use crate::render::document::DocumentSession;
+use std::sync::Arc;
 
 /// 句柄的可用作键的形式。
 ///
@@ -72,6 +74,7 @@ pub struct RegionState {
 pub struct ModelHandle {
     /// 会话内唯一文档身份；宿主的 model-ref 键只在所属文档生命周期内有效。
     document_id: DocumentId,
+    session: Arc<DocumentSession>,
     region_keys: Vec<u64>,
     /// 正在累积的 ARA 文档。
     document: AraDocument,
@@ -100,8 +103,10 @@ pub struct ModelHandle {
 impl Default for ModelHandle {
     fn default() -> Self {
         static NEXT_DOCUMENT: AtomicU64 = AtomicU64::new(1);
+        let document_id = NEXT_DOCUMENT.fetch_add(1, Ordering::Relaxed);
         Self {
-            document_id: NEXT_DOCUMENT.fetch_add(1, Ordering::Relaxed),
+            document_id,
+            session: DocumentSession::new(document_id),
             region_keys: Vec::new(),
             document: AraDocument::default(),
             timeline: None,
@@ -117,6 +122,8 @@ impl Default for ModelHandle {
 }
 
 impl ModelHandle {
+    /// 借出本模型的文档生命周期，供工厂身份通知及 renderer 绑定使用。
+    pub(crate) fn session(&self) -> Arc<DocumentSession> { self.session.clone() }
     /// 新建一份空模型。
     pub fn new() -> Self {
         Self::default()
@@ -142,6 +149,15 @@ impl ModelHandle {
     /// 【为什么在 `end_editing` 调】ARA 约定：一次编辑的所有图变更都在
     /// `begin_editing` … `end_editing` 之间，收口点之后模型才是稳定的。
     fn remap_and_log(&mut self) {
+        {
+            let mut regions = self.session.regions.lock().unwrap();
+            regions.clear();
+            for (slot, region) in self.document.playback_regions.iter().enumerate() {
+                if !self.destroyed_regions.contains(&slot) {
+                    if let Some(key) = self.region_keys.get(slot) { regions.insert(*key, region.clone()); }
+                }
+            }
+        }
         let mut document = self.document.clone();
         document.playback_regions = document.playback_regions.into_iter()
             .enumerate()
@@ -159,6 +175,7 @@ impl ModelHandle {
                 log::error!("[ara] mapping failed: {err:?}");
             }
         }
+        self.session.prepare_renderers();
     }
 }
 
@@ -171,6 +188,7 @@ impl DocumentLifecycle for ModelHandle {
         properties: DocumentProperties,
     ) -> Result<Self::Document, AraError> {
         self.generation = Some(context.generation());
+        *self.session.generation.lock().unwrap() = self.generation;
         self.document.document_name = properties.name().unwrap_or("").to_string();
         log::info!(
             "[ara] document controller created: apiGeneration={:?}",
@@ -181,6 +199,7 @@ impl DocumentLifecycle for ModelHandle {
 
     /// 记录宿主编辑会话，区分宿主未通知与委托回调未处理。
     fn begin_editing(&mut self, _document: &mut Self::Document) -> Result<(), AraError> {
+        self.session.clear_renderers();
         log::info!("[ara] begin_editing");
         Ok(())
     }
@@ -195,6 +214,7 @@ impl DocumentLifecycle for ModelHandle {
     }
 
     fn destroy_document(&mut self, _document: Self::Document) {
+        self.session.close();
         region_owners().lock().unwrap_or_else(|p| p.into_inner())
             .remove_document(self.document_id);
         log::info!("[ara] document destroyed");
@@ -233,9 +253,9 @@ impl RegionSequences for ModelHandle {
                 region_sequences: Vec::new(),
             });
         }
+        let index = self.document.musical_contexts.iter().map(|context| context.region_sequences.len()).sum();
         let context_index = self.document.musical_contexts.len() - 1;
         let sequences = &mut self.document.musical_contexts[context_index].region_sequences;
-        let index = sequences.len();
         sequences.push(AraRegionSequence {
             name: properties.name().map(str::to_owned),
             order_index: properties.order_index(),
@@ -244,12 +264,47 @@ impl RegionSequences for ModelHandle {
         if let Some(handle) = context.object_handle() {
             self.sequence_index_by_handle.insert(handle, index);
         }
+        if let Some(key) = context.realtime_key() {
+            self.sequence_index_by_model_ref.insert(key as usize, index);
+            self.session.sequence_regions.lock().unwrap().insert(key, HashSet::new());
+        }
         Ok(index)
     }
 }
 
 impl AudioSources for ModelHandle {
     type AudioSource = usize;
+
+    /// 源几何变化必须撤销旧 PCM；不把新的采样率/长度继续与旧内容混用。
+    fn update_audio_source(&mut self, state: &mut Self::AudioSource, properties: AudioSourceProperties, host: &HostContentScope<'_, '_>) -> Result<(), AraError> {
+        let source = self.document.audio_sources.get_mut(*state).ok_or(AraError::InvalidArgument("unknown source"))?;
+        self.session.clear_renderers();
+        self.session.sources.lock().unwrap().remove(&source.persistent_id);
+        source.persistent_id = properties.persistent_id().to_string();
+        source.name = properties.name().map(str::to_owned);
+        source.sample_rate = properties.sample_rate();
+        source.sample_count = properties.sample_count();
+        source.channel_count = properties.channel_count();
+        source.duration_seconds = source.sample_count as f64 / source.sample_rate;
+        self.source_content_version_bump(*state);
+        self.refresh_source_pcm(*state, host);
+        Ok(())
+    }
+
+    /// undo history 中停用源时立即撤销准备好的 PCM；恢复后等待宿主重新授予访问。
+    fn deactivate_audio_source(&mut self, state: &mut Self::AudioSource, deactivate: bool, host: &HostContentScope<'_, '_>) -> Result<(), AraError> {
+        if deactivate {
+            if let Some(source) = self.document.audio_sources.get_mut(*state) { source.sample_access_enabled = false; }
+            self.refresh_source_pcm(*state, host);
+        }
+        Ok(())
+    }
+
+    /// 源销毁时撤销访问和快照，不能继续播已销毁源的缓存。
+    fn destroy_audio_source(&mut self, state: Self::AudioSource, host: &HostContentScope<'_, '_>) {
+        if let Some(source) = self.document.audio_sources.get_mut(state) { source.sample_access_enabled = false; }
+        self.refresh_source_pcm(state, host);
+    }
 
     fn create_audio_source(
         &mut self,
@@ -289,10 +344,11 @@ impl AudioSources for ModelHandle {
         state: &mut Self::AudioSource,
         _range: Option<ContentTimeRange>,
         _flags: ContentUpdateScopes,
-        _host: &HostContentScope<'_, '_>,
+        host: &HostContentScope<'_, '_>,
     ) -> Result<(), AraError> {
         // 内容变了 → 版本号前进。渲染缓存据此失效（设计 §4.5）。
         self.source_content_version_bump(*state);
+        self.refresh_source_pcm(*state, host);
         Ok(())
     }
 
@@ -306,6 +362,7 @@ impl AudioSources for ModelHandle {
             source.sample_access_enabled = enable;
         }
         log::info!("[ara] audio_source samples_access enable={enable}");
+        self.refresh_source_pcm(*state, host);
         if enable && std::env::var_os("HIFISHIFTER_ARA_PCM_PROBE").is_some() {
             // 仅用于一次性宿主观测：比较原始源样本与 ARA 返回的源样本，判断倒放是否改源。
             let result = (|| {
@@ -330,6 +387,27 @@ impl AudioSources for ModelHandle {
 }
 
 impl ModelHandle {
+    /// 源变化与撤权先撤销旧快照，再只从当前授权 source scope 重新读取。
+    fn refresh_source_pcm(&mut self, index: usize, host: &HostContentScope<'_, '_>) {
+        self.session.clear_renderers();
+        let Some(source) = self.document.audio_sources.get(index) else { return; };
+        self.session.sources.lock().unwrap().remove(&source.persistent_id);
+        if source.sample_access_enabled {
+            let result = usize::try_from(source.sample_count).ok()
+                .filter(|_| source.sample_rate == source.sample_rate.round())
+                .ok_or(AraError::InvalidArgument("unsupported sample geometry"))
+                .and_then(|frames| crate::render::source::read_source_pcm(host, frames, source.channel_count as usize, source.sample_rate as u32, self.source_content_version(index)));
+            match result {
+                Ok(pcm) => {
+                    log::info!("[ara] host PCM ready source={index} frames={} version={}", source.sample_count, pcm.version);
+                    self.session.sources.lock().unwrap().insert(source.persistent_id.clone(), Arc::new(pcm));
+                }
+                Err(error) => log::warn!("[ara] host PCM unavailable: {error:?}"),
+            }
+        }
+        self.session.prepare_renderers();
+    }
+
     /// 内容版本自增。
     fn source_content_version_bump(&mut self, index: usize) {
         // 【为什么单独存一个向量而不是写进 `AraAudioSource`】`AraAudioSource` 是探针期
@@ -450,6 +528,10 @@ impl PlaybackRegions for ModelHandle {
             .register(key, self.document_id, index)
             .map_err(|_| AraError::InvalidState("region identity already owned or invalid"))?;
         self.region_keys.push(key);
+        if let Some(sequence) = properties.region_sequence() {
+            self.session.sequence_regions.lock().unwrap().entry(sequence.as_raw() as usize as u64)
+                .or_default().insert(key);
+        }
         self.document.playback_regions.push(AraPlaybackRegion {
             name: properties.name().map(str::to_owned),
             audio_source_persistent_id: source_persistent_id.clone(),
@@ -483,6 +565,18 @@ impl PlaybackRegions for ModelHandle {
         state: &mut Self::PlaybackRegion,
         properties: PlaybackRegionProperties,
     ) -> Result<(), AraError> {
+        self.session.clear_renderers();
+        if let Some(sequence) = properties.region_sequence() {
+            let sequence_key = sequence.as_raw() as usize;
+            if let Some(index) = self.sequence_index_by_model_ref.get(&sequence_key).copied() {
+                if let Some(key) = self.region_keys.get(*state) {
+                    let mut members = self.session.sequence_regions.lock().unwrap();
+                    for regions in members.values_mut() { regions.remove(key); }
+                    members.entry(sequence_key as u64).or_default().insert(*key);
+                }
+                if let Some(region) = self.document.playback_regions.get_mut(*state) { region.region_sequence_index = Some(index); }
+            }
+        }
         let region = self.document.playback_regions.get_mut(*state)
             .ok_or(AraError::InvalidArgument("unknown playback region"))?;
         let flags = properties.transformation_flags();
@@ -500,8 +594,10 @@ impl PlaybackRegions for ModelHandle {
 
     /// 标记已销毁区间，编辑结束时只映射存活的区域。
     fn destroy_playback_region(&mut self, state: Self::PlaybackRegion) {
+        self.session.clear_renderers();
         if let Some(key) = self.region_keys.get(state) {
             region_owners().lock().unwrap_or_else(|p| p.into_inner()).remove(*key);
+            for regions in self.session.sequence_regions.lock().unwrap().values_mut() { regions.remove(key); }
         }
         self.destroyed_regions.insert(state);
         log::info!("[ara] playback_region destroyed #{}", state);
@@ -510,6 +606,7 @@ impl PlaybackRegions for ModelHandle {
 
 impl Drop for ModelHandle {
     fn drop(&mut self) {
+        self.session.close();
         // 初始化失败也可能直接释放模型而没有 destroy_document 回调。
         region_owners().lock().unwrap_or_else(|p| p.into_inner())
             .remove_document(self.document_id);
@@ -520,6 +617,55 @@ impl Drop for ModelHandle {
 mod tests {
     use super::*;
     use ara2_bridge::core::{Registry, RegionSequenceKind};
+
+    /// move 到别的 sequence 时几何与成员表必须一起迁移，旧 editor 不能继续播放。
+    #[test]
+    fn region_sequence_update_moves_the_editor_membership() {
+        let mut model=ModelHandle::new();
+        model.document=crate::ara::ara_document_from_json(include_str!("../../../../probe/ara/captures/ara-model.reaper.json")).unwrap();
+        let mut registry=Registry::<RegionSequenceKind,()>::new(2);
+        let old_handle=registry.insert(()).unwrap(); let new_handle=registry.insert(()).unwrap();
+        let old=registry.model_ref(old_handle).unwrap(); let new=registry.model_ref(new_handle).unwrap();
+        let old_key=old.as_raw() as usize as u64; let new_key=new.as_raw() as usize as u64;
+        let region=Box::new(0_u8); let region_key=(&*region as *const u8) as u64;
+        model.region_keys.push(region_key);
+        model.sequence_index_by_model_ref.insert(old_key as usize,0);
+        model.sequence_index_by_model_ref.insert(new_key as usize,1);
+        model.session.sequence_regions.lock().unwrap().insert(old_key,[region_key].into_iter().collect());
+        model.session.sequence_regions.lock().unwrap().insert(new_key,HashSet::new());
+        let properties=PlaybackRegionProperties::for_ara2(1,0.0,1.0,2.0,1.0,new,None,None).unwrap();
+        PlaybackRegions::update_playback_region(&mut model,&mut 0,properties).unwrap();
+        assert_eq!(model.document.playback_regions[0].region_sequence_index,Some(1));
+        assert!(model.session.sequence_regions.lock().unwrap()[&old_key].is_empty());
+        assert_eq!(model.session.sequence_regions.lock().unwrap()[&new_key],[region_key].into_iter().collect());
+    }
+
+    /// 实际授权/撤权回调必须更新源表，内容版本刷新后不能继续持旧 PCM。
+    #[test]
+    fn source_grant_version_change_and_revocation_refresh_only_host_pcm() {
+        use ara2_bridge::plugin::{HostAudioSourceRef, HostClients};
+        let mut model = ModelHandle::new();
+        model.document = crate::ara::ara_document_from_json(include_str!("../../../../probe/ara/captures/ara-model.reaper.json")).unwrap();
+        model.document.audio_sources[0].sample_count = 4;
+        let mut fixture = crate::test_host::HostFixture::new(vec![vec![0.1,0.2,0.3,0.4]]);
+        let host = fixture.instance();
+        // SAFETY: 稳定 fixture 保留到 clients 与模型授权 scope 释放。
+        let clients = unsafe { HostClients::from_raw(&host, ApiGeneration::V2Final) }.unwrap();
+        let mut identity = 0_u8;
+        // SAFETY: 仅作为不透明宿主源身份，存活到全部回调结束。
+        let source = unsafe { HostAudioSourceRef::from_raw((&raw mut identity).cast()) }.unwrap();
+        let mut slot=0;
+        clients.with_audio_source_management(source, |scope| AudioSources::enable_audio_source_samples_access(&mut model, &mut slot, true, &scope)).unwrap();
+        let id=model.document.audio_sources[0].persistent_id.clone();
+        assert_eq!(model.session.sources.lock().unwrap()[&id].planes[0], [0.1,0.2,0.3,0.4]);
+        fixture.planes[0]=vec![0.5,0.6,0.7,0.8];
+        model.source_content_version_bump(slot);
+        clients.with_audio_source_management(source, |scope| model.refresh_source_pcm(slot, &scope));
+        assert_eq!(model.session.sources.lock().unwrap()[&id].planes[0], [0.5,0.6,0.7,0.8]);
+        assert_eq!(model.session.sources.lock().unwrap()[&id].version,1);
+        clients.with_audio_source_management(source, |scope| AudioSources::enable_audio_source_samples_access(&mut model, &mut slot, false, &scope)).unwrap();
+        assert!(model.session.sources.lock().unwrap().is_empty());
+    }
 
     /// 实际模型销毁回调必须撤销索引，slot 表测试不能替代这个接线检查。
     #[test]

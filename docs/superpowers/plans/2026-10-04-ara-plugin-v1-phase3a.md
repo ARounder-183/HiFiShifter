@@ -12,6 +12,10 @@
 
 ## Global Constraints
 
+**2026-10-04 实测状态：方向阻塞，停止完整v1推进。** Task13生命周期与基本PCM输出已
+实现；Task15实际WAV正常/裁切PASS，但倒放FAIL（输出为正放）。当前源码仅有限检查点，
+不开始Phase3b/4/5。见 `probe/ara/captures/phase3a-FINDINGS.md`，不能把下面未测项勾成通过。
+
 - worktree `E:\code\HiFiShifter\.worktrees\ara-plugin`；分支 `codex/ara-plugin`，不动主工作区。
 - **绝不 push**；**绝不用 `git add -A`**；仅本地逐路径提交。
 - 中文文件头、关键函数中文 doc 注释；不改 app、frontend，不修四条既有 `/tmp` 失败。
@@ -129,14 +133,13 @@ git commit -m "feat(ara): validate the VST3 audio ABI and initialize host buffer
 - [x] extension owner 由 native entry builder 的强引用保留；观察器 Weak 避免循环；移除 Box::leak。
 - [x] 修复 Processor 工厂初始 COM 引用，真实工厂/entry 引用两条回归 RED/GREEN。
 - [x] 本地部分检查点：38 条插件测试、6 条采集回归、diff 检查与独立审查通过。
-- [ ] 将实际 document controller 销毁接到 ExtensionControllerLease.destroy，并清空对应 owner 分配。
-- [ ] 完整绑定（非空 entry）实际 teardown 与观察器重入回归。
-- [ ] editor region-sequence assignment 通知、展开与验证（当前观察器只通知显式 region）。
+- [x] 将实际 document controller 销毁接到 ExtensionControllerLease.destroy，并清空对应 owner 分配。
+- [x] 完整绑定（非空 entry）实际 teardown 与观察器重入回归。
+- [x] editor region-sequence assignment 通知、展开与验证；region移动sequence成员迁移回归已补。
 
-边界：目前产品 destroy_document 只撤销 RegionOwners。独立 FFI 测试销毁的是测试手动
-创建的 lease，不能拿它证明产品 controller-first teardown 已接线。native entry 测试
-使用尚未绑定文档的 entry，只证明 COM builder 捕获的 owner 生命周期。
-**剩余三项解决前不把 Task 13 全部勾选，也不接音频快照消费者。**
+该部分检查点的旧限制已补齐：真实工厂注册controllerRef，实际native entry绑定文档，
+产品destroy_document同步撤销lease并清空分配。controller与companion两侧分别持有storage。
+批量审查后按允许的基本范围接快照；产品剩余风险见实测FINDINGS。
 
 **Files:** Modify vendored `extension/mod.rs` / PATCHED.md、`src/vst3.rs` / `src/ara/model.rs`；Create `src/render/ownership.rs`。
 
@@ -269,6 +272,11 @@ raw log 被全局 `*.log` 忽略，使用 `git add -f` 仅本任务命名日志�
 追加每个决策的 Ruling。通过后才写 Phase 3b 逐任务计划，未通过则报告精确阻塞。
 
 ## 后续依赖与覆盖检查
+
+**本批停止位置**：Task14基本PCM输出、源授权/撤权、双声道重采样oracle、30秒拼接/seek
+单测与callback动态分配/释放守卫已完成；真正宿主seek/冷miss压力测试未做，U3/U4未关闭。
+Task15脚本/6条验证器回归与真实倒放采集已完成，但功能判据未通过。这里保留原任务
+复合checkbox未全勾，防止“实验做完”被误读成“方向/供音功能通过”。
 
 Phase 3b 必做：宿主 PCM 注入式 mixdown/vocoder（保持 app 默认路径）、稳定 clip 身份、
 source/sequence/modification 完整更新销毁、内容指纹缓存、真实修音 A3、冷启动/缓存 miss/

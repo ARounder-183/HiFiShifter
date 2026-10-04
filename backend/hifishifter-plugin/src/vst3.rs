@@ -16,10 +16,9 @@ use ara2_bridge::companion::vst3::ffi::{
     ara2_vst3_interface_id, ara2_vst3_main_factory_category, Ara2Vst3InterfaceId,
     Ara2Vst3InterfaceKind, ARA2_VST3_OK,
 };
-use ara2_bridge::companion::vst3::{Vst3MainFactoryAdapter, Vst3PluginEntryAdapter};
+use ara2_bridge::companion::vst3::Vst3MainFactoryAdapter;
+use crate::ara_entry::HostEntry;
 use ara2_bridge::companion::{CompanionProcessorBinding, CompanionRoles};
-use ara2_bridge::plugin::ExtensionRoles;
-use ara2_bridge::core::ApiGeneration;
 use std::ffi::{c_char, c_void};
 use std::mem::offset_of;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -666,7 +665,7 @@ struct Processor {
     component_vtbl: *const ComponentVtbl,
     refcount: AtomicI32,
     audio_vtbl: *const AudioProcessorVtbl,
-    entry: Option<Vst3PluginEntryAdapter>,
+    entry: Option<HostEntry>,
     extension_owner: Arc<ExtensionOwner>,
     active: AtomicI32,
 }
@@ -680,22 +679,7 @@ impl Processor {
             CompanionProcessorBinding::new([runtime.companion.clone()], CompanionRoles::all())
                 .ok()?;
         let extension_owner = Arc::new(ExtensionOwner::default());
-        let builder_owner = extension_owner.clone();
-        let extension_builder = move |known: CompanionRoles, assigned: CompanionRoles| {
-            let generation = crate::runtime::runtime()
-                .and_then(|runtime| runtime.factory.entry().generation())
-                .unwrap_or(ApiGeneration::V23Final);
-            crate::log_line(&format!(
-                "ARA bind: build extension (generation={generation:?}, known={:#x}, assigned={:#x})",
-                known.bits(),
-                assigned.bits()
-            ));
-            let known = ExtensionRoles::from_bits_truncate(known.bits());
-            let assigned = ExtensionRoles::from_bits_truncate(assigned.bits());
-            builder_owner.bind(generation, known, assigned)
-        };
-        let entry =
-            Vst3PluginEntryAdapter::new(binding, crate::CLASS_NAME, extension_builder).ok()?;
+        let entry = HostEntry::new(binding, crate::CLASS_NAME, extension_owner.clone()).ok()?;
         Some(Box::new(Processor {
             component_vtbl: &COMPONENT_VTBL,
             refcount: AtomicI32::new(1),
@@ -1009,7 +993,7 @@ unsafe extern "system" fn audio_setup_processing(
     {
         return K_INVALID_ARGUMENT;
     }
-    if setup.symbolic_sample_size != 0 {
+    if setup.symbolic_sample_size != 0 || ![44100.0, 48000.0].contains(&setup.sample_rate) {
         return K_RESULT_FALSE;
     }
     crate::log_line("IAudioProcessor::setupProcessing");
@@ -1022,10 +1006,26 @@ unsafe extern "system" fn audio_set_processing(_this: *mut c_void, _state: i8) -
 }
 
 /// 初始化宿主缓冲的安全边界；实际 PCM 快照输出在 Phase 3a Task 14 接入。
-unsafe extern "system" fn audio_process(_this: *mut c_void, data: *mut c_void) -> TResult {
+unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) -> TResult {
     // SAFETY: VST3 宿主按 SDK 布局提供回调数据，函数内部处理空指针与非法字段。
     match unsafe { crate::audio_abi::clear_outputs(data.cast()) } {
-        Ok(()) => K_RESULT_OK,
+        Ok(()) => {
+            if this.is_null() { return K_INVALID_ARGUMENT; }
+            // SAFETY: 宿主持有 Processor，clear_outputs 已验证数据及输出 buffers。
+            let data = unsafe { &mut *data.cast::<crate::audio_abi::ProcessData>() };
+            if data.num_samples == 0 || data.num_outputs == 0 { return K_RESULT_OK; }
+            // SAFETY: this 是存活的音频接口子对象。
+            let owner = unsafe { &(*base_from_audio(this)).extension_owner };
+            if data.process_context.is_null() { owner.snapshots[0].misses.fetch_add(1, Ordering::Relaxed); return K_RESULT_OK; }
+            // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
+            let context = unsafe { &*data.process_context };
+            let publisher = match context.sample_rate {
+                44100.0 => &owner.snapshots[0], 48000.0 => &owner.snapshots[1], _ => return K_RESULT_FALSE,
+            };
+            // SAFETY: 缓冲经 clear_outputs 校验，publisher 由 owner 保留。
+            unsafe { publisher.copy_block(context.project_time_samples, context.sample_rate as u32, &mut *data.outputs, data.num_samples as usize) };
+            K_RESULT_OK
+        },
         Err(crate::audio_abi::BufferError::InvalidArgument) => K_INVALID_ARGUMENT,
         Err(crate::audio_abi::BufferError::UnsupportedFormat) => K_RESULT_FALSE,
     }
@@ -1353,6 +1353,28 @@ mod audio_boundary_tests {
     use super::*;
     use crate::audio_abi::{AudioBusBuffers, ProcessData};
 
+    /// 真正 process 在有效快照下输出 PCM，且观察区间不分配或释放任何内存。
+    #[test]
+    fn process_outputs_the_snapshot_without_allocating_or_deallocating() {
+        let mut processor=Processor::create().unwrap();
+        processor.extension_owner.snapshots[0].publish(crate::render::snapshot::PlaybackSnapshot {
+            sample_rate:44100,origin_sample:10,left:vec![0.1,0.2],right:vec![0.3,0.4],_reservation:None,
+        }).unwrap();
+        let mut left=[8.0_f32;3]; let mut right=[8.0_f32;3];
+        let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
+        let mut bus=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
+        let mut context=crate::audio_abi::ProcessContext {sample_rate:44100.0,project_time_samples:11,..Default::default()};
+        let mut data=ProcessData {num_samples:2,num_outputs:1,outputs:&raw mut bus,process_context:&raw mut context,..Default::default()};
+        crate::test_allocator::begin();
+        // SAFETY: 实际 processor 音频子对象和完整 SDK 缓冲都在回调期间存活。
+        let result=unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())};
+        let allocations=crate::test_allocator::end();
+        assert_eq!(result,K_RESULT_OK);
+        assert_eq!(left,[0.2,0.0,8.0]); assert_eq!(right,[0.4,0.0,8.0]);
+        assert_eq!(bus.silence_flags,0);
+        assert_eq!(allocations,0);
+    }
+
     /// 用真实接口子对象调用 process，避免测试绕过产品 vtable。
     fn run(data: *mut ProcessData) -> TResult {
         let mut processor = Processor::create().unwrap();
@@ -1505,6 +1527,7 @@ mod audio_boundary_tests {
                 (0.0, 512, 0, K_INVALID_ARGUMENT),
                 (44100.0, -1, 0, K_INVALID_ARGUMENT),
                 (44100.0, 512, 1, K_RESULT_FALSE),
+                (96000.0, 512, 0, K_RESULT_FALSE),
             ] {
                 let mut setup = ProcessSetup {
                     process_mode: 0, symbolic_sample_size: format,

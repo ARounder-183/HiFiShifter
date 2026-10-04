@@ -259,9 +259,15 @@ pub struct PluginBuilder<P> {
     controller_capabilities: ControllerCapabilities,
     updates: UpdateEmitter,
     analysis_events: AnalysisEmitter,
+    controller_identity: Option<Arc<dyn Fn(usize) + Send + Sync>>,
 }
 
 impl<P> PluginBuilder<P> {
+    /// 本地补丁：工厂分配真实 controllerRef 后的模型线程通知。
+    pub fn controller_identity(mut self, observer: impl Fn(usize) + Send + Sync + 'static) -> Self {
+        self.controller_identity = Some(Arc::new(observer));
+        self
+    }
     /// Starts a plug-in definition with no optional tail capabilities.
     pub fn new(model: P) -> Self {
         Self {
@@ -270,6 +276,7 @@ impl<P> PluginBuilder<P> {
             controller_capabilities: ControllerCapabilities::default(),
             updates: UpdateEmitter::new(),
             analysis_events: AnalysisEmitter::new(),
+            controller_identity: None,
         }
     }
 
@@ -395,6 +402,7 @@ impl<P> PluginBuilder<P> {
             controller_capabilities: self.controller_capabilities,
             updates: self.updates,
             analysis_events: self.analysis_events,
+            controller_identity: self.controller_identity,
         })
     }
 }
@@ -406,6 +414,7 @@ pub struct Plugin<P> {
     pub(crate) controller_capabilities: ControllerCapabilities,
     pub(crate) updates: UpdateEmitter,
     pub(crate) analysis_events: AnalysisEmitter,
+    pub(crate) controller_identity: Option<Arc<dyn Fn(usize) + Send + Sync>>,
 }
 
 impl<P> Plugin<P> {

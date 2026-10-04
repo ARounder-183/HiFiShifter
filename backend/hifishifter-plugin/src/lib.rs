@@ -26,6 +26,11 @@ pub mod ara;
 pub mod render;
 mod diagnostics;
 mod audio_abi;
+mod ara_entry;
+#[cfg(test)]
+mod test_host;
+#[cfg(test)]
+mod test_allocator;
 mod runtime;
 mod vst3;
 

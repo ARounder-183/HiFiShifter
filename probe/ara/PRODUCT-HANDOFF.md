@@ -2,6 +2,24 @@
 
 中文工作记录，更新于 2026-10-04。此文件记录产品分支，历史探针仍见 HANDOFF.md。
 
+## 最新状态：完整 v1 被真实倒放输出阻塞
+
+Task13真实controller身份/销毁、editor sequence通知与展开已补齐。Task14已实现普通/
+裁切的host PCM -> VST3 process链路，绝不按persistentID读源文件。真实REAPER输出
+正常/裁切maxdiff=5.960464e-8、间隙0；官方倒放action/section已确认，最终输出仍为正向，
+反向oracle差0.5003815。遵照Task15停止条件，**不进入Phase3b/4/5，不宣称完整修音/GUI联动**。
+下一轮先读 `captures/phase3a-FINDINGS.md`，旧“下一步按顺序”部分仅作历史，不能跳过方向阻塞。
+
+用户要求减少review，本批只一次集中审查；两个P2（96k协商/sequence迁移）已补红绿回归。
+验证器6条正确/变异测试通过，真实倒放采集依旧应FAIL。源/快照共享512MiB硬预算，retired
+快照保留到owner释放；time stretch/fades先导明确拒绝。日志/源码/输出WAV/JSON/截图均保留。
+真实host PCM首轮缺ARA绑定是误将controllerRef当instance，已按锁定header/shim纠正，
+旧失败产物保留 `.build-tmp`。隔离REAPER已关闭。main workspace不改，SDK不改，不push。
+
+最终验证：构建成功，55条插件测试通过，两套验证器回归各6条通过，diff检查通过。
+真实输出验证仍exit 1（倒放输出为正向）；这不是完整Phase3a/v1通过。内核/app全套
+测试本批未重跑。后续必须先收敛方向契约，不能直接执行下方历史待办。
+
 ## 工作位置与授权
 
 - 仅 `E:\code\HiFiShifter\.worktrees\ara-plugin`，分支 `codex/ara-plugin`。

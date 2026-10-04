@@ -61,7 +61,11 @@ impl Runtime {
             )
             // 每个文档控制器拿到**自己的一份**模型：一份模型对应一份 ARA 文档。
             // 共享一份会让两份文档的累积互相污染（设计 §4.1：v1 是"一实例一编辑轨"）。
-            .document_controller(|| Ok(PluginBuilder::new(crate::ara::model::ModelHandle::new()).build()?))
+            .document_controller(|| {
+                let model = crate::ara::model::ModelHandle::new();
+                let session = model.session();
+                PluginBuilder::new(model).controller_identity(move |key| session.register(key)).build()
+            })
             .build()?;
         let factory: &'static Factory = Box::leak(Box::new(factory));
         // SAFETY: 工厂被泄漏到进程结束，`as_raw` 指向的 ARAFactory 与工厂同寿。

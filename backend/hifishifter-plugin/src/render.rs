@@ -14,6 +14,10 @@ use hifishifter_kernel::time_stretch::StretchAlgorithm;
 
 pub(crate) mod ownership;
 pub(crate) mod extension;
+pub(crate) mod document;
+pub(crate) mod source;
+pub(crate) mod snapshot;
+pub(crate) mod budget;
 
 /// 一段离线渲染产物。
 #[derive(Debug, Clone)]

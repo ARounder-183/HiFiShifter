@@ -690,4 +690,32 @@ ProcessContext 112/8，Chord 4/2，FrameRate 8/4；全部字段 offsetof 与 Rus
 采集验证器 6 passed；diff 检查通过，独立审查同样重跑 38 条无失败。
 本批新 DLL 未部署到 REAPER，不把单测声称为宿主卸载或 PCM 发声验证。
 
+**Task 13: Ruling: ARA 绑定必须关联真实 controllerRef，不能等第一次分配才猜文档 — 增加工厂身份通知、DocumentSession索引、控制器侧独立lease与原生shim上下文 — 若用最后文档/首region猜测，空文档和多文档关闭时会释放错误对象。**
+真实工厂空文档、native bound teardown、companion先释放、editor sequence与重入查询
+均有回归。两个 lease owner 独立，文档close撤销访问，entry最后COM引用保持interface storage。
+
+**Task 13: Ruling: 本次首次实现误将VST3 bind参数当instance，测试夹具也传错，实际REAPER不绑定 — 对照锁定ARAVST3.h与C++shim纠正为不透明controllerRef并重采 — 若只相信同源夹具，会在全绿测试下交付无ARA行为。**
+错误采集已移到.build-tmp保留；有效采集日志有bind document=...、3 region和4 renderer分配。
+本批未改SDK/registry内容。扩展API补丁均在vendored plugin并更新PATCHED.md。
+
+**Task 14: Ruling: 宿主PCM权威与实时无阻塞必须在输出侧落实 — scope内完整读取后准备44.1/48k快照，process只读原子指针，源更新/撤权先撤销发布 — 若按persistentID读文件或在callback推理，会复用错误源或阻塞DAW。**
+源PCM与所有退役快照共享512MiB硬预算；单次快照另限64MiB，超限拒绝。只支持普通/裁切；
+stretch/fades明确Unsupported。本批没有 pitch edit，A3未关闭。
+
+**Task 15: Ruling: 真倒放最终输出仍为正放 — 保留失败WAV/原始日志与反向metadata，按计划停止完整v1，不进入Phase3b/4/5 — 若假定宿主会补偿方向，用户会静默听到错误音频。**
+普通/裁切maxdiff=5.960464477539063e-8，间隙0；反向输出对反向oracle差0.5003815367817879，
+对正向oracle差5.960464477539063e-8。官方41051+section reversed=true。只针对本REAPER链路，
+不泛化所有ARA。验证器真实采集返回FAIL，6条变异回归通过不等于倒放功能通过。
+
+**Task 14: Ruling: 集中审查发现setup接受96k和region换sequence成员未迁移 — 两个回归先失败再修复，补PATCHED契约 — 若协商假成功或旧成员残留，会导致静音或editor输出错轨。**
+用户要求减少review，本批只做一次集中审查及针对发现的修复验证；没有逐任务重复审查。
+额外覆盖scope授权/撤权、采样率oracle、30秒块拼接seek与真实process分配/释放计数。
+
+**Task 15: Ruling: 最终源码验证通过不等于宿主倒放通过 — 构建成功、55条插件测试及两套各6条验证器回归通过，真实输出验证仍FAIL，提交有限检查点并停在方向阻塞 — 若把测试全绿当产品完成，会掩盖已知错误音频。**
+最终重跑：35 lib + 13 mapping + 1 A5 + 5 renderer FFI + 1 exports = 55 passed，
+0 failed；Phase3a验证器6 passed、Task11采集验证器6 passed，git diff --check通过。
+真实输出验证返回exit 1：Reverse output was forward, not reversed；输出/源SHA256与
+实测报告一致。关闭后复核无REAPER进程。未重复内核/app全套测试，不改变既有基线失败。
+按明确路径暂存源码与证据，只有两份本批命名日志force-stage；只本地提交，不push。
+
 

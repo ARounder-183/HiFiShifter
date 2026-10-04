@@ -4,6 +4,72 @@ use ara2_bridge::core::ApiGeneration;
 use ara2_bridge::plugin::{ExtensionBinding, ExtensionRoles};
 use std::sync::{Arc, Mutex};
 
+/// editor sequence 也是实际分配输入，新增/删除必须通知而非只有 region 通知。
+#[test]
+fn editor_sequences_notify_without_affecting_playback_roles() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let captured = events.clone();
+    let (binding, _lease) = ExtensionBinding::new_with_renderer_observer(
+        ApiGeneration::V2Final,
+        ExtensionRoles::all(),
+        ExtensionRoles::EDITOR_RENDERER,
+        ExtensionRoles::EDITOR_RENDERER,
+        Arc::new(move |role, regions, sequences| {
+            captured
+                .lock()
+                .unwrap()
+                .push((role.bits(), regions.to_vec(), sequences.to_vec()))
+        }),
+    )
+    .unwrap();
+    let mut identity = 0_u8;
+    let key = (&raw mut identity) as usize;
+    // SAFETY: 真实扩展接口及 sequence 不透明身份在全部回调期间存活。
+    unsafe {
+        let instance = &*binding.as_raw();
+        let api = &*instance.editorRendererInterface;
+        api.addRegionSequence.unwrap()(instance.editorRendererRef, key as *mut _);
+        api.removeRegionSequence.unwrap()(instance.editorRendererRef, key as *mut _);
+    }
+    assert_eq!(
+        *events.lock().unwrap(),
+        [(2, vec![], vec![key]), (2, vec![], vec![])]
+    );
+}
+
+/// 观察器重入查询不能卡住分配锁；锁若未释放，超时后报告明确失败。
+#[test]
+fn observer_runs_after_assignment_locks_are_released() {
+    let target = Arc::new(Mutex::new(None::<std::sync::Weak<ExtensionBinding>>));
+    let copied = target.clone();
+    let (binding, _lease) = ExtensionBinding::new_with_assignment_observer(
+        ApiGeneration::V2Final,
+        ExtensionRoles::all(),
+        ExtensionRoles::PLAYBACK_RENDERER,
+        ExtensionRoles::PLAYBACK_RENDERER,
+        Arc::new(move |_, _| {
+            let binding = copied.lock().unwrap().as_ref().unwrap().upgrade().unwrap();
+            let (send, receive) = std::sync::mpsc::channel();
+            let query = std::thread::spawn(move || {
+                send.send(binding.assignment_counts()).unwrap();
+            });
+            assert_eq!(
+                receive
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap(),
+                (1, 0)
+            );
+            query.join().unwrap();
+        }),
+    )
+    .unwrap();
+    let binding = Arc::new(binding);
+    *target.lock().unwrap() = Some(Arc::downgrade(&binding));
+    binding
+        .add_playback_region(ExtensionRoles::PLAYBACK_RENDERER, 123)
+        .unwrap();
+}
+
 /// 两个 playback renderer 的宿主分配必须分别通知，remove 后不能留下区域。
 #[test]
 fn native_assignments_notify_each_renderer_independently() {

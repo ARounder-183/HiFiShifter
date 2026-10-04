@@ -1,4 +1,4 @@
-//! Editor-renderer role callbacks.
+//! editor renderer 的区域与 sequence 分配；本地补丁在解除锁后同步通知观察器。
 
 use super::{with_state, ExtensionRoles};
 use ara2_bridge_sys::*;
@@ -38,11 +38,12 @@ pub(crate) unsafe extern "C" fn add_region_sequence(
                 && state.enabled.contains(ExtensionRoles::EDITOR_RENDERER)
                 && !sequence.is_null()
             {
-                state
+                let changed = state
                     .region_sequences
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .insert(sequence as usize);
+                if changed { state.notify_assignments(ExtensionRoles::EDITOR_RENDERER); }
             }
         })
     }
@@ -56,11 +57,12 @@ pub(crate) unsafe extern "C" fn remove_region_sequence(
     unsafe {
         with_state(reference.cast(), (), |state| {
             if state.require_controller().is_ok() {
-                state
+                let changed = state
                     .region_sequences
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(&(sequence as usize));
+                if changed { state.notify_assignments(ExtensionRoles::EDITOR_RENDERER); }
             }
         })
     }

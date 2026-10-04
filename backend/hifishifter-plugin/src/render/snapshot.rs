@@ -1,0 +1,408 @@
+//! 不可变播放快照；音频路径只读原子指针，退役快照预算内保留到 owner 释放。
+
+use super::source::SourcePcm;
+use crate::ara::AraPlaybackRegion;
+use crate::audio_abi::AudioBusBuffers;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+#[derive(Debug)]
+pub(crate) struct PlaybackSnapshot {
+    pub sample_rate: u32,
+    pub origin_sample: i64,
+    pub left: Vec<f32>,
+    pub right: Vec<f32>,
+    pub _reservation: Option<super::budget::Reservation>,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum SnapshotError {
+    InvalidGeometry,
+    MissingSource,
+    UnsupportedTransform,
+    BudgetExceeded,
+}
+
+/// 先导版只处理普通放置/裁切，不用变速重采样冒充保调拉伸。
+pub(crate) fn mix_plain_regions(
+    regions: &[AraPlaybackRegion],
+    sources: &HashMap<String, Arc<SourcePcm>>,
+    sample_rate: u32,
+) -> Result<PlaybackSnapshot, SnapshotError> {
+    if sample_rate == 0 {
+        return Err(SnapshotError::InvalidGeometry);
+    }
+    let mut origin = i64::MAX;
+    let mut end = i64::MIN;
+    for region in regions {
+        let geometry = [
+            region.start_in_modification_time,
+            region.duration_in_modification_time,
+            region.start_in_playback_time,
+            region.duration_in_playback_time,
+        ];
+        if geometry.iter().any(|value| !value.is_finite())
+            || region.start_in_modification_time < 0.0
+            || region.duration_in_modification_time <= 0.0
+            || region.duration_in_playback_time <= 0.0
+        {
+            return Err(SnapshotError::InvalidGeometry);
+        }
+        if (region.duration_in_modification_time - region.duration_in_playback_time).abs() > 1e-9
+            || region.has_content_based_fade_at_head
+            || region.has_content_based_fade_at_tail
+        {
+            return Err(SnapshotError::UnsupportedTransform);
+        }
+        let source = sources
+            .get(&region.audio_source_persistent_id)
+            .ok_or(SnapshotError::MissingSource)?;
+        if source.sample_rate == 0
+            || !(1..=2).contains(&source.planes.len())
+            || source.planes[0].is_empty()
+            || source
+                .planes
+                .iter()
+                .any(|plane| plane.len() != source.planes[0].len())
+            || region.start_in_modification_time + region.duration_in_modification_time
+                > source.planes[0].len() as f64 / source.sample_rate as f64 + 1e-9
+        {
+            return Err(SnapshotError::InvalidGeometry);
+        }
+        let start = region.start_in_playback_time * sample_rate as f64;
+        let stop =
+            (region.start_in_playback_time + region.duration_in_playback_time) * sample_rate as f64;
+        if start.abs() >= i64::MAX as f64 || stop.abs() >= i64::MAX as f64 {
+            return Err(SnapshotError::InvalidGeometry);
+        }
+        origin = origin.min(start.round() as i64);
+        end = end.max(stop.round() as i64);
+    }
+    if regions.is_empty() {
+        return Ok(PlaybackSnapshot {
+            sample_rate,
+            origin_sample: 0,
+            left: vec![],
+            right: vec![],
+            _reservation: None,
+        });
+    }
+    let frames = end
+        .checked_sub(origin)
+        .and_then(|span| usize::try_from(span).ok())
+        .ok_or(SnapshotError::BudgetExceeded)?;
+    if frames
+        .checked_mul(8)
+        .is_none_or(|bytes| bytes > 64 * 1024 * 1024)
+    {
+        return Err(SnapshotError::BudgetExceeded);
+    }
+    let reservation = super::budget::global_budget()
+        .reserve(frames * 8)
+        .ok_or(SnapshotError::BudgetExceeded)?;
+    let mut snapshot = PlaybackSnapshot {
+        sample_rate,
+        origin_sample: origin,
+        left: vec![0.0; frames],
+        right: vec![0.0; frames],
+        _reservation: Some(reservation),
+    };
+    for region in regions {
+        let source = &sources[&region.audio_source_persistent_id];
+        let begin = (region.start_in_playback_time * sample_rate as f64).round() as i64;
+        let finish = ((region.start_in_playback_time + region.duration_in_playback_time)
+            * sample_rate as f64)
+            .round() as i64;
+        for sample in begin..finish {
+            let position = (region.start_in_modification_time + sample as f64 / sample_rate as f64
+                - region.start_in_playback_time)
+                * source.sample_rate as f64;
+            let index = position.max(0.0).floor() as usize;
+            let fraction = (position - index as f64) as f32;
+            let output = (sample - origin) as usize;
+            for (channel, target) in [&mut snapshot.left, &mut snapshot.right]
+                .into_iter()
+                .enumerate()
+            {
+                let plane = &source.planes[channel.min(source.planes.len() - 1)];
+                let first = index.min(plane.len() - 1);
+                let second = (first + 1).min(plane.len() - 1);
+                target[output] += plane[first] + (plane[second] - plane[first]) * fraction;
+            }
+        }
+    }
+    Ok(snapshot)
+}
+
+pub(crate) struct SnapshotPublisher {
+    retained: Mutex<(Vec<Box<PlaybackSnapshot>>, usize)>,
+    current: AtomicPtr<PlaybackSnapshot>,
+    limit: usize,
+    pub misses: AtomicU64,
+}
+impl Default for SnapshotPublisher {
+    fn default() -> Self {
+        Self::new(512 * 1024 * 1024)
+    }
+}
+
+impl SnapshotPublisher {
+    /// 预算包含所有退役快照，避免原子替换时在音频线程析构大缓冲。
+    pub fn new(limit: usize) -> Self {
+        Self {
+            retained: Mutex::new((Vec::new(), 0)),
+            current: AtomicPtr::new(std::ptr::null_mut()),
+            limit,
+            misses: AtomicU64::new(0),
+        }
+    }
+    /// 非实时发布。
+    pub fn publish(&self, mut snapshot: PlaybackSnapshot) -> Result<(), SnapshotError> {
+        self.clear();
+        if snapshot.left.len() != snapshot.right.len() || snapshot.sample_rate == 0 {
+            return Err(SnapshotError::InvalidGeometry);
+        }
+        let bytes = snapshot
+            .left
+            .len()
+            .checked_mul(8)
+            .ok_or(SnapshotError::BudgetExceeded)?;
+        let mut retained = self.retained.lock().unwrap();
+        let total = retained
+            .1
+            .checked_add(bytes)
+            .filter(|total| *total <= self.limit)
+            .ok_or(SnapshotError::BudgetExceeded)?;
+        if snapshot._reservation.is_none() {
+            snapshot._reservation = Some(
+                super::budget::global_budget()
+                    .reserve(bytes)
+                    .ok_or(SnapshotError::BudgetExceeded)?,
+            );
+        }
+        let mut snapshot = Box::new(snapshot);
+        let pointer = &mut *snapshot as *mut PlaybackSnapshot;
+        retained.0.push(snapshot);
+        retained.1 = total;
+        self.current.store(pointer, Ordering::Release);
+        Ok(())
+    }
+    /// 撤销只切换原子指针，不在音频线程释放存储。
+    pub fn clear(&self) {
+        self.current.store(std::ptr::null_mut(), Ordering::Release);
+    }
+    /// 按项目绝对 sample 时间读取，seek/loop 不使用累计 playhead。
+    /// # Safety
+    /// output 为已校验 stereo f32 SDK 缓冲，非空 plane 至少含 frames 个样本。
+    pub unsafe fn copy_block(
+        &self,
+        sample: i64,
+        rate: u32,
+        output: &mut AudioBusBuffers,
+        frames: usize,
+    ) -> bool {
+        if output.num_channels != 2 || output.channel_buffers.is_null() {
+            return false;
+        }
+        let pointer = self.current.load(Ordering::Acquire);
+        // SAFETY: retained 中每个 Box 在 owner 存活期间不移动、不回收，callback 保留 owner。
+        let snapshot = if pointer.is_null() {
+            None
+        } else {
+            Some(unsafe { &*pointer }).filter(|snapshot| snapshot.sample_rate == rate)
+        };
+        if snapshot.is_none() {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+        }
+        let mut silence = 3_u64;
+        for channel in 0..2 {
+            // SAFETY: 调用方已验证 SDK stereo 数组，允许 inactive null plane。
+            let plane = unsafe { *output.channel_buffers.add(channel) };
+            if plane.is_null() {
+                continue;
+            }
+            for offset in 0..frames {
+                let value = snapshot
+                    .and_then(|snapshot| {
+                        let local = sample
+                            .checked_add(offset as i64)?
+                            .checked_sub(snapshot.origin_sample)?;
+                        let index = usize::try_from(local).ok()?;
+                        if channel == 0 {
+                            snapshot.left.get(index)
+                        } else {
+                            snapshot.right.get(index)
+                        }
+                        .copied()
+                    })
+                    .unwrap_or(0.0);
+                // SAFETY: 宿主提供至少 frames 样本的可写平面。
+                unsafe { plane.add(offset).write(value) };
+                if value != 0.0 {
+                    silence &= !(1 << channel);
+                }
+            }
+        }
+        output.silence_flags = silence;
+        snapshot.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn region() -> AraPlaybackRegion {
+        crate::ara::ara_document_from_json(include_str!(
+            "../../../../probe/ara/captures/ara-model.reaper.json"
+        ))
+        .unwrap()
+        .playback_regions
+        .remove(0)
+    }
+
+    /// 纯采样率转换与真正的时间拉伸区别开；后者必须明确拒绝。
+    #[test]
+    fn stereo_resampling_preserves_planes_and_rejects_time_stretch() {
+        let mut r = region();
+        r.start_in_modification_time = 0.0;
+        r.start_in_playback_time = 0.0;
+        r.duration_in_modification_time = 1.0;
+        r.duration_in_playback_time = 1.0;
+        let sources = [(
+            r.audio_source_persistent_id.clone(),
+            Arc::new(SourcePcm {
+                sample_rate: 2,
+                planes: vec![vec![0.0, 1.0], vec![1.0, 0.0]],
+                version: 0,
+                _reservation: None,
+            }),
+        )]
+        .into_iter()
+        .collect();
+        let snapshot = mix_plain_regions(&[r.clone()], &sources, 4).unwrap();
+        assert_eq!(snapshot.left, [0.0, 0.5, 1.0, 1.0]);
+        assert_eq!(snapshot.right, [1.0, 0.5, 0.0, 0.0]);
+        r.duration_in_playback_time = 0.5;
+        assert_eq!(
+            mix_plain_regions(&[r], &sources, 4).unwrap_err(),
+            SnapshotError::UnsupportedTransform
+        );
+    }
+
+    /// 拼接三十秒小块并跳回首块，必须等于一次读取的字面输入，不靠 cursor 累计。
+    #[test]
+    fn thirty_seconds_of_blocks_and_seek_match_the_source_snapshot() {
+        let frames = 44100 * 30;
+        let publisher = SnapshotPublisher::new(16 * 1024 * 1024);
+        let source = (0..frames)
+            .map(|index| (index % 1000) as f32 / 2000.0)
+            .collect::<Vec<_>>();
+        publisher
+            .publish(PlaybackSnapshot {
+                sample_rate: 44100,
+                origin_sample: 0,
+                left: source.clone(),
+                right: source.clone(),
+                _reservation: None,
+            })
+            .unwrap();
+        let mut left = [0.0_f32; 512];
+        let mut right = [0.0_f32; 512];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        for start in (0..frames).step_by(512) {
+            let count = (frames - start).min(512);
+            // SAFETY: 稳定 stereo 缓冲最多读取512帧。
+            assert!(unsafe { publisher.copy_block(start as i64, 44100, &mut bus, count) });
+            assert_eq!(&left[..count], &source[start..start + count]);
+            assert_eq!(&right[..count], &source[start..start + count]);
+        }
+        // SAFETY: seek 后同一缓冲仍合法。
+        assert!(unsafe { publisher.copy_block(0, 44100, &mut bus, 512) });
+        assert_eq!(left, source[..512]);
+    }
+    /// 手算源第 1 帧起两帧放到工程第 2 帧，验证裁切、位置和单声道复制。
+    #[test]
+    fn plain_clip_placement_matches_a_hand_computed_oracle() {
+        let mut r = region();
+        r.start_in_modification_time = 0.25;
+        r.duration_in_modification_time = 0.5;
+        r.start_in_playback_time = 0.5;
+        r.duration_in_playback_time = 0.5;
+        let sources = [(
+            r.audio_source_persistent_id.clone(),
+            Arc::new(SourcePcm {
+                sample_rate: 4,
+                planes: vec![vec![0.1, 0.2, 0.3, 0.4]],
+                version: 0,
+                _reservation: None,
+            }),
+        )]
+        .into_iter()
+        .collect();
+        let snapshot = mix_plain_regions(&[r], &sources, 4).unwrap();
+        assert_eq!(snapshot.origin_sample, 2);
+        assert_eq!(snapshot.left, [0.2, 0.3]);
+        assert_eq!(snapshot.right, [0.2, 0.3]);
+    }
+
+    /// 随机 seek、负时间、尾部补零与撤销必须精确；尾哨兵不得被覆盖。
+    #[test]
+    fn callback_seeks_zero_pads_and_revokes_without_releasing_storage() {
+        let publisher = SnapshotPublisher::new(1024);
+        publisher
+            .publish(PlaybackSnapshot {
+                sample_rate: 4,
+                origin_sample: 2,
+                left: vec![0.2, 0.3],
+                right: vec![0.4, 0.5],
+                _reservation: None,
+            })
+            .unwrap();
+        let mut left = [9.0_f32; 4];
+        let mut right = [9.0_f32; 4];
+        let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut bus = AudioBusBuffers {
+            num_channels: 2,
+            silence_flags: 0,
+            channel_buffers: planes.as_mut_ptr(),
+        };
+        // SAFETY: 每个 output plane 至少 3 帧，最后一帧作为哨兵。
+        assert!(unsafe { publisher.copy_block(3, 4, &mut bus, 3) });
+        assert_eq!(left, [0.3, 0.0, 0.0, 9.0]);
+        assert_eq!(right, [0.5, 0.0, 0.0, 9.0]);
+        // SAFETY: 缓冲仍然存活。
+        assert!(unsafe { publisher.copy_block(-1, 4, &mut bus, 3) });
+        assert_eq!(&left[..3], &[0.0, 0.0, 0.0]);
+        publisher.clear();
+        // SAFETY: 读取空快照应当零输出，不能继续消费旧音频。
+        assert!(!unsafe { publisher.copy_block(2, 4, &mut bus, 3) });
+        assert_eq!(&left[..3], &[0.0, 0.0, 0.0]);
+        assert_eq!(publisher.retained.lock().unwrap().0.len(), 1);
+    }
+
+    /// 退役快照也计入预算；发布失败不能保留旧的有效指针伪装成功。
+    #[test]
+    fn snapshot_budget_counts_retired_buffers() {
+        let publisher = SnapshotPublisher::new(16);
+        let snapshot = || PlaybackSnapshot {
+            sample_rate: 4,
+            origin_sample: 0,
+            left: vec![1.0, 2.0],
+            right: vec![3.0, 4.0],
+            _reservation: None,
+        };
+        publisher.publish(snapshot()).unwrap();
+        assert_eq!(
+            publisher.publish(snapshot()),
+            Err(SnapshotError::BudgetExceeded)
+        );
+        assert!(publisher.current.load(Ordering::Acquire).is_null());
+    }
+}

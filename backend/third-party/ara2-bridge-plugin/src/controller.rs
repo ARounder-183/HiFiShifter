@@ -1738,9 +1738,15 @@ impl<P: PluginModel + 'static> Plugin<P> {
             factory_analyzable_content,
             factory_playback_transformations,
         };
-        Ok(crate::ffi::callbacks::controller_instance(
+        let instance = crate::ffi::callbacks::controller_instance(
             Box::new(adapter),
             interface,
-        ))
+        );
+        if let Some(observer) = self.controller_identity {
+            // SAFETY: allocation 刚完成且尚未交宿主，复制 packed 身份字段不创建未对齐引用。
+            let key = unsafe { (*instance).documentControllerRef } as usize;
+            observer(key);
+        }
+        Ok(instance)
     }
 }
