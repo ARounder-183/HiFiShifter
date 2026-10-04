@@ -195,6 +195,25 @@ state.rs
 所以"把 model 搬进内核"必须等这些依赖先搬 —— **机械搬迁（原计划的 Task 6）要排在
 搬 `state/model` 之前**，不能反过来。见 §4.9。
 
+**第三条实测（2026-10-04 补，测量脚本本身有 bug，修好后推出的结论）**：
+测量脚本的正则漏掉了 `pub(crate) mod` 声明，导致闭包被低估。修正后，从 `mixdown` 出发的
+闭包含 **46 模块**（仅生产代码 44），多出来的 6 个（`commands` / `recording` / `search` /
+`system_clipboard` / `linux_clipboard` 及 `commands` 子模块）**全部由一条边拉进来**：
+
+```
+pitch_analysis/schedule.rs -> crate::commands::playback::request_background_render
+                           -> crate::commands::playback::AUTO_BG_RENDER_ENABLED / BG_RENDER_PITCH_PENDING
+```
+
+**这条边就是 §4.3 表里的第 2 类"向音频引擎投递命令"** —— 也就是 `HostServices` 的职责。
+把这**一条边**改掉（外加把 `project.rs` 里那几处 `#[cfg(test)]` 的
+`commands::channel_scan` 测试挪回 app），闭包就回到 **39 模块 + `state/model`**，
+与上面那张表的数字一致。
+
+**所以执行顺序是硬的：先 `EngineCommand` + `HostServices`，再大搬迁。** 反过来做，
+`pitch_analysis` 会把整条 `commands` 链（196 处 `tauri::`）带进内核，
+"内核不认识 Tauri"这条不变量当场破产。
+
 **错了的代价**：若拆开后闭包仍然很大（例如 `TimelineState` 的方法真的依赖 `project`
 的复杂逻辑），则内核会比预期大，插件二进制更大、编译更慢；但架构方向不变，只是收益变小。
 

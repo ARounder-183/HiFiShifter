@@ -38,6 +38,53 @@ world_vocoder
 
 ## 3. 两条实测结论（都推翻了原计划的假设）
 
+### 3.0 【更正】本文档第 1 节的两行数字来自一个有 bug 的脚本
+
+第 1 节里的脚本用正则 `^\s*(?:pub )?mod\s+` 匹配模块声明，**漏掉了 `pub(crate) mod`**。
+于是 `commands` / `channel_policy` / `channel_mode` / `channel_decision` / `stereo_detect`
+这些模块根本没进候选表，遍历时也就无法经它们继续扩散 —— **闭包被低估了**。
+
+修正后的实测（同样从 `mixdown` 出发、`state` 只算 `model.rs`、排除 `audio_engine`）：
+
+| 口径 | 模块数 | 碰 `tauri::` 的模块 |
+| --- | --- | --- |
+| 含测试代码 | **46** | `commands`、`recording`、`pitch_analysis`、`pitch_clip` |
+| 仅生产代码 | **44** | `commands`、`recording`、`pitch_analysis`、`pitch_clip` |
+
+多出来的 6 个是 `commands`、`recording`、`search`、`system_clipboard`、`linux_clipboard`
+以及 `commands` 的子模块 —— **全部是 app 层的东西**。
+
+### 3.0.1 那它们是怎么被拉进来的：**一条真实的边，正好是 HostServices 要修的那条**
+
+排除测试代码后，唯一的"生产代码越界"是：
+
+```
+pitch_analysis/schedule.rs:438  crate::commands::playback::AUTO_BG_RENDER_ENABLED
+pitch_analysis/schedule.rs:440  crate::commands::playback::BG_RENDER_PITCH_PENDING
+pitch_analysis/schedule.rs:475  crate::commands::playback::request_background_render(app)
+```
+
+`pitch_analysis` 是内核模块，它却直接伸手去够 app 层的后台渲染开关与请求函数。
+而 `commands` 一旦被拉进来，它自己的依赖（`recording` / `search` / `system_clipboard` /
+`linux_clipboard`）就跟着全进来了 —— 46 个模块里有 6 个是这么来的。
+
+**这条边正是设计文档 §4.3 那张表里的第 2 类："向音频引擎投递命令"。**
+`HostServices` 要吸收的就是它。
+
+**结论**：只要 `HostServices` 把这条边改掉（外加把 `project.rs` 的测试挪走，
+那些测试里也有 `crate::commands::channel_scan`），闭包就回到
+**39 个模块 + `state/model`**，也就是设计文档 §4.2 那个数。**原来的估计是对的，
+只是当时不知道"对"依赖于先做掉 HostServices。**
+
+所以执行顺序必须是：**先 `EngineCommand` + `HostServices`，再大搬迁。**
+反过来做会一路撞墙，而且撞的是同一面墙。
+
+### 3.0.2 另一处较小的越界
+
+`project.rs` 的 `#[cfg(test)]` 里有 `crate::commands::channel_scan::{collect_targets, plan}`
+（至少 5 处）。那是"通道扫描"的集成测试。搬 `project.rs` 时这些测试要么挪回 app,
+要么把 `channel_scan` 的纯函数部分也拉进内核 —— 二选一，在搬迁那一步决定。
+
 ### 3.1 设计文档 §4.2 的预测被部分证伪
 
 原预测：`hfspeaks_v2` / `notebook_assets` / `temp_manager` / `recording` 会离开闭包。

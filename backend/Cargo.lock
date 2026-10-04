@@ -1999,11 +1999,38 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 name = "hifishifter-kernel"
 version = "0.1.0"
 dependencies = [
+ "aberth",
+ "arc-swap",
+ "base64 0.22.1",
+ "blake3",
  "cc",
+ "chrono",
+ "encoding_rs",
+ "hound",
+ "id3",
+ "libloading 0.8.9",
  "log",
  "lru",
+ "midly",
+ "ndarray 0.16.1",
+ "num-complex",
+ "ort",
+ "ort-tract",
+ "rayon",
+ "rmp-serde",
+ "rubato",
+ "rustfft",
+ "rusty_flac",
+ "rusty_mp3",
  "serde",
  "serde_json",
+ "symphonia",
+ "symphonia-adapter-fdk-aac",
+ "symphonia-adapter-libopus",
+ "time",
+ "uuid",
+ "windows 0.58.0",
+ "zip",
 ]
 
 [[package]]

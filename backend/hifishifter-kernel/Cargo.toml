@@ -7,12 +7,92 @@ description = "HiFiShifter 的离线音频内核：不依赖 Tauri，也不依�
 
 [dependencies]
 lru = "0.12"
+log = { version = "0.4", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-log = { version = "0.4", features = ["std"] }
+rmp-serde = "1"
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+hound = "3"
+rubato = "0.15"
+arc-swap = "1.7"
+symphonia = { version = "0.6.1", features = ["all"] }
+symphonia-adapter-fdk-aac = "0.2.0"
+symphonia-adapter-libopus = "0.3.0"
+blake3 = "1"
+rayon = "1.7"
+encoding_rs = "0.8"
+midly = "0.5"
+zip = { version = "0.6", default-features = false, features = ["deflate", "time"] }
+# zip 的 time feature 使其依赖 time；此处直接引用以完成 SystemTime → zip::DateTime 转换
+time = { version = "0.3", default-features = false, features = ["std"] }
+libloading = "0.8"
+rusty_mp3 = "=0.7.0"
+rusty_flac = "=0.1.2"
+id3 = "1"
+rustfft = "6"
+num-complex = "0.4"
+aberth = "0.4"
+ndarray = { version = "0.16", optional = true }
+
+# 【为什么依赖表与 app 基本一致】这 40 个模块原本就是 app 的离线内核 —— 它们引用的
+# 全是纯算法/格式库（解码、重采样、FFT、ONNX 会话……），没有一个是宿主相关的。
+# 留在 app 侧的差异只有：tauri / tauri-plugin-opener / rfd / trash / cpal
+# （设备层）/ 剪贴板与 WebView2 相关 / 搜索转写库。
 
 [build-dependencies]
 # 内核自带的原生依赖构建（Signalsmith Stretch 的 C 包装 + SoundTouchDLL）。
 # 见 `build.rs` 的文件头说明：这两段原先住在 app 的 build.rs 里，插件单独链接内核时
 # 会因为没有它们而链接失败。
 cc = "1.0"
+
+[features]
+# 与 app 同名同义，默认值也一致：默认带 ONNX 声码器与 vslib。
+# app 侧通过 `hifishifter-kernel/onnx` 转发，见 backend/src-tauri/Cargo.toml。
+default = ["onnx", "vslib"]
+onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
+vslib = []
+
+# ── ONNX Runtime 的平台差异 ──────────────────────────────────────────────────
+# 与 app 的 Cargo.toml 逐字一致：两边各自声明同一份 spec，cargo 会做特性统一，
+# 结果与搬迁前相同。注释见 app 的 Cargo.toml（GPU 策略：Windows→DirectML 等）。
+
+# Windows — DirectML (DX12, stable)
+[target.'cfg(target_os = "windows")'.dependencies]
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "directml", "copy-dylibs"] }
+# DXGI adapter enumeration for DirectML device discovery (all GPU vendors)
+windows = { version = "0.58", features = [
+    "Win32_Graphics_Dxgi",
+    "Win32_Foundation",
+    "Win32_Devices_Properties",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_Security",
+    "implement",
+] }
+
+# Linux x86_64 — WebGPU (Dawn/Vulkan backend, prebuilt binaries available)
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "webgpu", "copy-dylibs"] }
+
+# Linux ARM64 — CPU only (no WebGPU prebuilt binary for aarch64)
+[target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dependencies]
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "copy-dylibs"] }
+
+# macOS Apple Silicon — CoreML (Apple Neural Engine) + WebGPU (Dawn/Metal)
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "coreml", "webgpu", "copy-dylibs"] }
+
+# macOS Intel — CPU only via ort-tract (no GPU acceleration available)
+[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "alternative-backend"] }
+ort-tract = { version = "0.4.0", optional = true }

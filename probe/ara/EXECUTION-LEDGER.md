@@ -496,4 +496,21 @@ Phase 4（参数通道）在 Phase 2 验收后另写计划。代价：交付被�
 `probe/ara/kernel-closure-measured.md` 作为施工的唯一权威来源。
 代价：若无这份实测，施工会按 43 模块的旧清单走，多搬或少搬都无从察觉。
 
+**Dev 12: Ruling: 闭包测量脚本有 bug，闭包被低估；修正后发现唯一的"生产代码越界"
+正是 HostServices 要修的那条边。**
+脚本的正则 `^\s*(?:pub )?mod\s+` 漏掉了 `pub(crate) mod`，于是 `commands` /
+`channel_policy` / `channel_mode` / `channel_decision` / `stereo_detect` 没进候选表，
+经它们扩散的依赖全部丢失。修正后：含测试 46 模块、仅生产代码 44 模块。
+多出来的 6 个（`commands` / `recording` / `search` / `system_clipboard` /
+`linux_clipboard` 及 `commands` 子模块）**全部由一条边拉进来**：
+`pitch_analysis/schedule.rs` 直接调用 `crate::commands::playback::request_background_render`
+与两个全局开关。
+**这条边就是设计 §4.3 表里第 2 类"向音频引擎投递命令"，也就是 `HostServices` 的职责。**
+决定：**执行顺序改为先做 `EngineCommand` + `HostServices`，再做模块大搬迁** ——
+反过来做会一路撞同一面墙。另记一处较小的越界：`project.rs` 的 `#[cfg(test)]` 里有
+`crate::commands::channel_scan` 的集成测试，搬迁那一步再决定挪回 app 还是把
+`channel_scan` 的纯函数拉进内核。
+代价：若不先改这条边就硬搬，`pitch_analysis` 会带着整条 `commands` 链进内核，
+而 `commands` 有 196 处 `tauri::` —— 内核"不认识 Tauri"这条不变量当场破产。
+
 
