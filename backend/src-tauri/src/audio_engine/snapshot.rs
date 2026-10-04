@@ -10,7 +10,7 @@ use super::io::{decode_resampled_stereo, get_resampled_stereo_cached, is_audio_p
 use super::types::{EngineClip, EngineSnapshot, ResampledStereo, StretchJob, StretchKey};
 use super::util::{quantize_i64, quantize_u32};
 
-pub(crate) fn compute_track_gains<'a>(tracks: &'a [Track]) -> HashMap<&'a str, (f32, bool, bool)> {
+pub(crate) fn compute_track_gains(tracks: &[Track]) -> HashMap<&str, (f32, bool, bool)> {
     let by_id: HashMap<&str, &Track> = tracks.iter().map(|t| (t.id.as_str(), t)).collect();
     let any_solo = tracks.iter().any(|t| t.solo);
 
@@ -304,7 +304,7 @@ pub(crate) fn build_snapshot(
             Some(v) => {
                 // ★ 运行时缓存有效性校验：对比 clip 记录的文件 mtime 与磁盘当前 mtime。
                 // 若不一致说明文件已被外部替换，缓存的解码数据已过时，需同步重新解码。
-                let cache_valid = clip.source_file_mtime.map_or(true, |expected_mtime| {
+                let cache_valid = clip.source_file_mtime.is_none_or(|expected_mtime| {
                     std::fs::metadata(path)
                         .ok()
                         .and_then(|m| m.modified().ok())
@@ -658,7 +658,7 @@ pub(crate) fn build_snapshot(
             dyn_orig_curve,
             dyn_curve_frame_period_ms,
         ) = processor_params
-            .and_then(|(_, _, frame_period_ms, _, entry, _, _)| {
+            .map(|(_, _, frame_period_ms, _, entry, _, _)| {
                 // 所有算法一律在 mix 阶段应用共通音量/声像/动态：合成输出里不含它们，
                 // 因此这里不存在任何「按算法跳过」的分支。
                 let volume_curve = crate::pitch_editing::common_volume_curve_for_clip(entry, clip)
@@ -689,7 +689,7 @@ pub(crate) fn build_snapshot(
                         }
                         None => (None, None),
                     };
-                Some((
+                (
                     volume_curve,
                     frame_period_ms,
                     pan_curve,
@@ -697,7 +697,7 @@ pub(crate) fn build_snapshot(
                     dyn_curve,
                     dyn_orig_curve,
                     frame_period_ms,
-                ))
+                )
             })
             .unwrap_or((None, 5.0, None, 5.0, None, None, 5.0));
 
@@ -777,9 +777,7 @@ pub(crate) fn build_snapshot(
                                 // 同一口径：Compose 开关与生效音阶都会改变渲染输出。
                                 compose_enabled: root_track_id
                                     .as_ref()
-                                    .and_then(|root| {
-                                        timeline.tracks.iter().find(|t| &t.id == root)
-                                    })
+                                    .and_then(|root| timeline.tracks.iter().find(|t| &t.id == root))
                                     .map(|t| t.compose_enabled)
                                     .unwrap_or(false),
                                 scale_signature: scale_signature.as_str(),
@@ -840,13 +838,11 @@ pub(crate) fn build_snapshot(
                         // （原地等待 + 自动恢复），绝不让用户先听到上一版参数的
                         // 结果再中途切换。抑制条目在本 clip 当前渲染命中时移除
                         //（见下方 else 分支），因此只覆盖"武装时未就绪"的窗口。
-                        let pad_suppressed =
-                            crate::synth_clip_cache::is_pad_suppressed(&clip.id);
+                        let pad_suppressed = crate::synth_clip_cache::is_pad_suppressed(&clip.id);
                         let mut fallback_pcm = None;
                         let mut fallback_breath = None;
                         if !pad_suppressed {
-                            let needs_breath = processor_params.map_or(
-                                false,
+                            let needs_breath = processor_params.is_some_and(
                                 |(_, _, _, renderer_id, entry, _, _)| {
                                     renderer_id == "nsf_hifigan_onnx"
                                         && crate::pitch_editing::extra_param_enabled(
@@ -860,11 +856,13 @@ pub(crate) fn build_snapshot(
                             // `get_latest_rendered_pcm` 返回的就是按当前张力渲染的
                             // 结果（或上一版，供过渡使用）。
                             if fallback_pcm.is_none() {
-                                if let Some((p, b)) = crate::synth_clip_cache::get_latest_rendered_pcm(
-                                    &clip.id,
-                                    clip.active_take_id.as_deref(),
-                                    Some(length_frames),
-                                ) {
+                                if let Some((p, b)) =
+                                    crate::synth_clip_cache::get_latest_rendered_pcm(
+                                        &clip.id,
+                                        clip.active_take_id.as_deref(),
+                                        Some(length_frames),
+                                    )
+                                {
                                     fallback_pcm = Some(p);
                                     fallback_breath = b;
                                 }
@@ -957,10 +955,11 @@ pub(crate) fn build_snapshot(
             reversed: if clip.loop_enabled {
                 clip.reversed
             } else {
-                formant_params
-                    .is_some()
-                    .then_some(false)
-                    .unwrap_or(clip.reversed)
+                if formant_params.is_some() {
+                    false
+                } else {
+                    clip.reversed
+                }
             },
             playback_rate: playback_rate_render,
             local_src_offset_frames,
@@ -1024,6 +1023,65 @@ pub(crate) fn build_snapshot(
         duration_frames,
         track_ids: Arc::new(track_ids),
         clips: Arc::new(clips_out),
+    }
+}
+
+pub(crate) fn build_snapshot_for_file(
+    path: &Path,
+    out_rate: u32,
+    offset_sec: f64,
+    cache: &Arc<Mutex<ByteBudgetCache<(PathBuf, u32), ResampledStereo>>>,
+) -> EngineSnapshot {
+    let src = match get_resampled_stereo_cached(path, out_rate, cache) {
+        Some(v) => v,
+        None => return EngineSnapshot::empty(out_rate),
+    };
+
+    let offset_frames = (offset_sec.max(0.0) * out_rate as f64).round().max(0.0) as u64;
+    let offset_frames = offset_frames.min(src.frames.saturating_sub(1) as u64);
+    let available_frames = src.frames.saturating_sub(offset_frames as usize);
+    let length_frames = available_frames.max(1) as u64;
+    let src_end_frame = offset_frames
+        .saturating_add(length_frames)
+        .min(src.frames as u64);
+
+    EngineSnapshot {
+        bpm: 120.0,
+        sample_rate: out_rate,
+        duration_frames: length_frames,
+        track_ids: Arc::new(vec!["__file_preview__".to_string()]),
+        clips: Arc::new(vec![EngineClip {
+            clip_id: "__file_preview__".to_string(),
+            track_id: "__file_preview__".to_string(),
+            start_frame: 0,
+            length_frames,
+            src,
+            src_start_frame: offset_frames,
+            src_end_frame,
+            reversed: false,
+            channel_mode: crate::channel_mode::TakeChannelMode::Normal,
+            playback_rate: 1.0,
+            local_src_offset_frames: 0,
+            repeat: false,
+            loop_anchor_frame: None,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
+            fade_in_lut: None,
+            fade_out_lut: None,
+            gain: 1.0,
+            rendered_pcm: None,
+            breath_noise_pcm: None,
+            breath_curve: None,
+            breath_curve_frame_period_ms: 5.0,
+            volume_curve: None,
+            volume_curve_frame_period_ms: 5.0,
+            pan_curve: None,
+            pan_curve_frame_period_ms: 5.0,
+            dyn_curve: None,
+            dyn_orig_curve: None,
+            dyn_curve_frame_period_ms: 5.0,
+            needs_synthesis: false,
+        }]),
     }
 }
 
@@ -1182,7 +1240,9 @@ mod tests {
             clip.name = "pad clip".to_string();
             clip.source_path = Some("/tmp/hifishifter-pad-test.aiff".to_string());
         }
-        let root = tl.resolve_root_track_id(&tl.clips[0].track_id).expect("root");
+        let root = tl
+            .resolve_root_track_id(&tl.clips[0].track_id)
+            .expect("root");
         tl.tracks
             .iter_mut()
             .find(|t| t.id == root)
@@ -1208,7 +1268,8 @@ mod tests {
             frames: pcm.len() / 2,
             pcm: Arc::new(pcm),
         };
-        let cache: Arc<Mutex<DecodeCache>> = Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
+        let cache: Arc<Mutex<DecodeCache>> =
+            Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
         cache
             .lock()
             .unwrap()
@@ -1228,13 +1289,16 @@ mod tests {
             sample_rate: 44_100,
             rendered_take_id: None,
         };
-        crate::synth_clip_cache::global_rendered_clip_cache().lock().unwrap().insert(
-            crate::synth_clip_cache::RenderedClipCacheKey {
-                clip_id: clip_id.to_string(),
-                param_hash,
-            },
-            entry,
-        );
+        crate::synth_clip_cache::global_rendered_clip_cache()
+            .lock()
+            .unwrap()
+            .insert(
+                crate::synth_clip_cache::RenderedClipCacheKey {
+                    clip_id: clip_id.to_string(),
+                    param_hash,
+                },
+                entry,
+            );
     }
 
     #[test]
@@ -1328,64 +1392,5 @@ mod tests {
             "current render landed: pad suppression must be released so later \
              mid-playback edits pad normally"
         );
-    }
-}
-
-pub(crate) fn build_snapshot_for_file(
-    path: &Path,
-    out_rate: u32,
-    offset_sec: f64,
-    cache: &Arc<Mutex<ByteBudgetCache<(PathBuf, u32), ResampledStereo>>>,
-) -> EngineSnapshot {
-    let src = match get_resampled_stereo_cached(path, out_rate, cache) {
-        Some(v) => v,
-        None => return EngineSnapshot::empty(out_rate),
-    };
-
-    let offset_frames = (offset_sec.max(0.0) * out_rate as f64).round().max(0.0) as u64;
-    let offset_frames = offset_frames.min(src.frames.saturating_sub(1) as u64);
-    let available_frames = src.frames.saturating_sub(offset_frames as usize);
-    let length_frames = available_frames.max(1) as u64;
-    let src_end_frame = offset_frames
-        .saturating_add(length_frames)
-        .min(src.frames as u64);
-
-    EngineSnapshot {
-        bpm: 120.0,
-        sample_rate: out_rate,
-        duration_frames: length_frames,
-        track_ids: Arc::new(vec!["__file_preview__".to_string()]),
-        clips: Arc::new(vec![EngineClip {
-            clip_id: "__file_preview__".to_string(),
-            track_id: "__file_preview__".to_string(),
-            start_frame: 0,
-            length_frames,
-            src,
-            src_start_frame: offset_frames,
-            src_end_frame,
-            reversed: false,
-            channel_mode: crate::channel_mode::TakeChannelMode::Normal,
-            playback_rate: 1.0,
-            local_src_offset_frames: 0,
-            repeat: false,
-            loop_anchor_frame: None,
-            fade_in_frames: 0,
-            fade_out_frames: 0,
-            fade_in_lut: None,
-            fade_out_lut: None,
-            gain: 1.0,
-            rendered_pcm: None,
-            breath_noise_pcm: None,
-            breath_curve: None,
-            breath_curve_frame_period_ms: 5.0,
-            volume_curve: None,
-            volume_curve_frame_period_ms: 5.0,
-            pan_curve: None,
-            pan_curve_frame_period_ms: 5.0,
-            dyn_curve: None,
-            dyn_orig_curve: None,
-            dyn_curve_frame_period_ms: 5.0,
-            needs_synthesis: false,
-        }]),
     }
 }

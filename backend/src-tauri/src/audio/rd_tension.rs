@@ -123,7 +123,8 @@ impl RdTension {
         }
 
         // ── 2. 平滑（未浊音帧由邻近浊音帧填充）────────────────────────────
-        let smooth_window = ((SMOOTH_SECONDS * sample_rate as f64 / HOP as f64).round() as usize).max(1);
+        let smooth_window =
+            ((SMOOTH_SECONDS * sample_rate as f64 / HOP as f64).round() as usize).max(1);
         let rd = GlottalRd::smooth(&rd, &voiced, smooth_window);
 
         // ── 3. 按张力重塑频谱 ────────────────────────────────────────────
@@ -183,12 +184,7 @@ impl RdTension {
     /// 「有效谐波不足 2 个」而跳过该帧。
     ///
     /// `bins` 为 STFT 单帧频谱（长度 `N_FFT/2 + 1`）。
-    pub fn harmonic_peaks(
-        bins: &[Complex<f64>],
-        f0: f64,
-        bin_hz: f64,
-        n: usize,
-    ) -> Vec<f64> {
+    pub fn harmonic_peaks(bins: &[Complex<f64>], f0: f64, bin_hz: f64, n: usize) -> Vec<f64> {
         if n == 0 || bins.len() < 3 || !(f0 > 0.0) || !(bin_hz > 0.0) {
             return Vec::new();
         }
@@ -383,7 +379,10 @@ mod tests {
                 let mut sum = 0.0;
                 for (k, &s) in shape.iter().enumerate() {
                     let hz = (k + 1) as f64 * f0;
-                    sum += 0.05 * s * GlottalRd::lip_gain(hz) * (2.0 * std::f64::consts::PI * hz * t).cos();
+                    sum += 0.05
+                        * s
+                        * GlottalRd::lip_gain(hz)
+                        * (2.0 * std::f64::consts::PI * hz * t).cos();
                 }
                 sum as f32
             })
@@ -406,7 +405,10 @@ mod tests {
             .zip(y.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
-        assert!(max_err < 1e-6, "zero tension must be identity, max err {max_err}");
+        assert!(
+            max_err < 1e-6,
+            "zero tension must be identity, max err {max_err}"
+        );
     }
 
     /// 空输入 / 零采样率必须安全返回。
@@ -484,7 +486,11 @@ mod tests {
         assert!(frames > 0);
         let bin_hz = sr as f64 / N_FFT as f64;
         let peaks = RdTension::harmonic_peaks(&spec[frames / 2], f0, bin_hz, 8);
-        assert!(peaks.len() >= 2, "expected several harmonics, got {}", peaks.len());
+        assert!(
+            peaks.len() >= 2,
+            "expected several harmonics, got {}",
+            peaks.len()
+        );
         // 第一谐波远强于后续（纯正弦）
         assert!(
             peaks[0] > peaks[2] * 5.0,
@@ -521,7 +527,10 @@ mod tests {
             .zip(y.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
-        assert!(max_err < 1e-6, "unvoiced input must pass through, err {max_err}");
+        assert!(
+            max_err < 1e-6,
+            "unvoiced input must pass through, err {max_err}"
+        );
     }
 
     /// 目标 f0 非法（0）时跳过该帧，不得产生 NaN/Inf。
@@ -558,8 +567,6 @@ mod tests {
         }
     }
 
-use super::*;
-
     /// 更接近真实人声的检验：多个谐波 + 逐次谐波衰减 + 轻微失谐，
     /// 验证拟合出的 Rd 落在合理区间、且张力方向正确、输出无 NaN。
     #[test]
@@ -587,9 +594,14 @@ use super::*;
         assert!(y.iter().all(|v| v.is_finite()), "output must be finite");
 
         // 输出不应静音，也不应爆音
-        let rms = |s: &[f32]| (s.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt();
+        let rms = |s: &[f32]| {
+            (s.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt()
+        };
         let ratio = rms(&y) / rms(&sig);
-        assert!(ratio > 0.3 && ratio < 3.0, "energy ratio {ratio} out of range");
+        assert!(
+            ratio > 0.3 && ratio < 3.0,
+            "energy ratio {ratio} out of range"
+        );
     }
 
     /// 低音目标 f0 的谐波数**不得**被封顶 —— 参考实现按 Nyquist 展开到数百个。
@@ -615,8 +627,9 @@ use super::*;
         let f0v = vec![f0; n / HOP + 2];
         let y = RdTension::apply(&sig, &f0v, sr, |_| 80.0, |_| f0);
         assert!(y.iter().all(|v| v.is_finite()));
-        let rms =
-            |s: &[f32]| (s.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt();
+        let rms = |s: &[f32]| {
+            (s.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt()
+        };
         let ratio = rms(&y) / rms(&sig);
         assert!(ratio > 0.2, "low-pitch output collapsed, ratio {ratio}");
     }
@@ -641,8 +654,10 @@ use super::*;
         let x = vec![0.0f32; 8192];
         let f0 = vec![220.0f64; 8192 / HOP + 2];
         let y = RdTension::apply(&x, &f0, sr, |_| 100.0, |_| 220.0);
-        assert!(y.iter().all(|v| v.is_finite()), "silence must not produce NaN");
+        assert!(
+            y.iter().all(|v| v.is_finite()),
+            "silence must not produce NaN"
+        );
         assert!(y.iter().all(|v| v.abs() < 1e-6), "silence in, silence out");
     }
 }
-

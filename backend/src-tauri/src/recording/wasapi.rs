@@ -589,10 +589,7 @@ unsafe fn run_app_capture_fallback(
     let client: IAudioClient = device
         .Activate(CLSCTX_ALL, None)
         .map_err(|e| format!("recording_error_wasapi_init:{e}"))?;
-    let (capture, event, output) = match init_capture_client(&client, sample_rate, channels) {
-        Ok(value) => value,
-        Err(err) => return Err(err),
-    };
+    let (capture, event, output) = init_capture_client(&client, sample_rate, channels)?;
     client
         .Start()
         .map_err(|e| format!("recording_error_play_input:{e}"))?;
@@ -810,7 +807,7 @@ pub fn enumerate_applications() -> Vec<AppAudioInfo> {
                 is_active,
             })
             .collect();
-        result.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        result.sort_by_key(|a| a.name.to_lowercase());
         result
     }
 }

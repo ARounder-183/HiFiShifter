@@ -905,7 +905,7 @@ fn collect_folder_group(dir: &Path, label: String, depth: usize, state: &mut Fol
 
     // 子目录按小写名排序：`read_dir` 的顺序由文件系统决定，不排序会让"哪些组先
     // 建轨道"随机器而变，导入结果不可复现。
-    subdirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    subdirs.sort_by_key(|a| a.0.to_lowercase());
 
     let has_subdirs = !subdirs.is_empty();
     state.groups.push(FolderMediaGroup {
@@ -1181,7 +1181,7 @@ mod tests {
             .find(|entry| entry.name == "主歌_vocal01.wav")
             .expect("命中");
         let info = entry.match_info.as_ref().expect("转写命中应带说明");
-        assert_eq!(info.kind, crate::search::MatchKind::Pinyin);
+        assert_eq!(info.kind, crate::search::matcher::MatchKind::Pinyin);
         assert_eq!(info.form, "zhuge");
     }
 

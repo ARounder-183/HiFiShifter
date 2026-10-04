@@ -22,9 +22,9 @@ pub(crate) mod world;
 pub(crate) mod vslib_processor;
 
 pub use chain::ProcessingStage;
+pub(crate) use chain::HIFIGAN_SEPARATION_PARAM_ID;
 #[allow(unused_imports)]
 pub use chain::{ProcessorChain, StageContext};
-pub(crate) use chain::HIFIGAN_SEPARATION_PARAM_ID;
 pub use traits::{ClipProcessContext, ClipProcessor, ParamDescriptor, ParamKind, Renderer};
 #[allow(unused_imports)]
 pub use traits::{ProcessorCapabilities, RenderContext, RendererCapabilities};

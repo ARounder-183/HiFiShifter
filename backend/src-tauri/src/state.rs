@@ -2522,9 +2522,8 @@ impl TimelineState {
             let lo_val = values[lo];
             let hi_val = values[hi];
             *slot = if pitch_zero_semantics {
-                if lo_val == 0.0 && hi_val == 0.0 {
-                    0.0
-                } else if lo_val == 0.0 {
+                if lo_val == 0.0 {
+                    // lo 无声 ⇒ 结果无声（与 hi 同时无声的分支合并：二者等价）。
                     0.0
                 } else if hi_val == 0.0 {
                     if frac < 0.5 {
@@ -3029,7 +3028,8 @@ impl TimelineState {
             curve.is_some_and(|c| {
                 c.iter().any(|v| {
                     v.is_finite()
-                        && (v - default_value).abs() > crate::renderer::chain::TENSION_ACTIVE_EPSILON
+                        && (v - default_value).abs()
+                            > crate::renderer::chain::TENSION_ACTIVE_EPSILON
                 })
             })
         }
@@ -3119,7 +3119,7 @@ pub struct AppState {
     pub waveform_inflight_cv: std::sync::Condvar,
 
     /// In-memory cache of clipboard MIDI bytes, keyed by GUID (first 8 bytes of blake3 hash as hex).
-    pub clipboard_midi_cache: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    pub clipboard_midi_cache: std::sync::Mutex<std::collections::VecDeque<(String, Vec<u8>)>>,
 
     /// 进程内 UI 设置缓存（`ripple_settings` / `split_transition_options`
     /// 在持有 timeline 锁的每个拖拽 tick 里读取；若每次都走磁盘读 +
@@ -3192,7 +3192,7 @@ impl Default for AppState {
 
             waveform_inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
             waveform_inflight_cv: std::sync::Condvar::new(),
-            clipboard_midi_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            clipboard_midi_cache: std::sync::Mutex::new(std::collections::VecDeque::new()),
             cached_ui_settings: std::sync::RwLock::new(None),
 
             app_handle: OnceLock::new(),
@@ -6666,8 +6666,16 @@ mod tests {
             .split_clip(&clip_id, 2.0)
             .expect("splitting inside the clip must succeed");
 
-        let left = tl.clips.iter().find(|c| c.id == clip_id).expect("left half");
-        let right = tl.clips.iter().find(|c| c.id == right_id).expect("right half");
+        let left = tl
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .expect("left half");
+        let right = tl
+            .clips
+            .iter()
+            .find(|c| c.id == right_id)
+            .expect("right half");
 
         // 音符一个字节都没动（这是"完全不影响音高线数据"的字面含义）。
         assert_eq!(left.midi_note_data.as_deref(), Some(original.as_slice()));
@@ -6765,7 +6773,7 @@ mod tests {
             .clone();
         assert!(orig_group.is_some());
 
-        tl.split_clips_at(&[c1.clone()], 1.0);
+        tl.split_clips_at(std::slice::from_ref(&c1), 1.0);
 
         // Left half (start_sec ≈ 0.0) keeps original group
         let left = tl
@@ -6804,7 +6812,7 @@ mod tests {
         // Split c1 at 1.0. c2 starts at 0.5 < 1.0 so stays in original (left) group.
         // Left group: left half of c1 + c2 = 2 members → survives.
         // Right group: right half of c1 only → 1 member → dissolved.
-        tl.split_clips_at(&[c1.clone()], 1.0);
+        tl.split_clips_at(std::slice::from_ref(&c1), 1.0);
 
         // Right half of c1 should have no group (dissolved)
         let right_half = tl
@@ -6859,7 +6867,7 @@ mod tests {
             .clone();
 
         // Split c1 at 1.0; c2 is at 2.5 > 1.0 so it goes to the right group
-        tl.split_clips_at(&[c1.clone()], 1.0);
+        tl.split_clips_at(std::slice::from_ref(&c1), 1.0);
 
         // c2 should have moved to the new right group
         let c2_after = tl.clips.iter().find(|c| c.id == c2).unwrap();
@@ -6891,7 +6899,7 @@ mod tests {
             .clone();
 
         // Split c2 at 4.0; c1 is at 0.0 < 4.0 so it stays in original group
-        tl.split_clips_at(&[c2.clone()], 4.0);
+        tl.split_clips_at(std::slice::from_ref(&c2), 4.0);
 
         let c1_after = tl.clips.iter().find(|c| c.id == c1).unwrap();
         assert_eq!(c1_after.group_id, orig_group);
@@ -6943,8 +6951,8 @@ mod tests {
 
         // Split one clip from each group（切割点必须落在对应 clip 范围内，
         // 否则 split 是无操作、不会产生右组 —— 见 split_clips_at 的 clamp 规则）
-        tl.split_clips_at(&[a1.clone()], 1.0);
-        tl.split_clips_at(&[b1.clone()], 6.0);
+        tl.split_clips_at(std::slice::from_ref(&a1), 1.0);
+        tl.split_clips_at(std::slice::from_ref(&b1), 6.0);
 
         // Each group should have at least 2 distinct group_ids after split (original + new)
         let mut groups: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -8012,7 +8020,10 @@ mod tests {
             .get(&root)
             .map(|e| crate::pitch_editing::extra_param_enabled(&e.extra_params, "breath_enabled"))
             .unwrap_or(false);
-        assert!(on, "a non-default tension curve must enable separation on migration");
+        assert!(
+            on,
+            "a non-default tension curve must enable separation on migration"
+        );
     }
 
     /// 气声曲线非默认 + 开关未开 ⇒ 同样置位。
@@ -8035,7 +8046,10 @@ mod tests {
             .get(&root)
             .map(|e| crate::pitch_editing::extra_param_enabled(&e.extra_params, "breath_enabled"))
             .unwrap_or(false);
-        assert!(on, "a non-default breath gain curve must enable separation on migration");
+        assert!(
+            on,
+            "a non-default breath gain curve must enable separation on migration"
+        );
     }
 
     /// 曲线**存在但全为默认值** ⇒ **不得**置位。
@@ -8090,14 +8104,11 @@ mod tests {
         let root = tl.tracks[0].id.clone();
         {
             let entry = tl.params_by_root_track.entry(root.clone()).or_default();
-            entry
-                .extra_params
-                .insert("breath_enabled".to_string(), 1.0);
+            entry.extra_params.insert("breath_enabled".to_string(), 1.0);
         }
 
         tl.migrate_legacy_breath_separation(5);
         tl.migrate_legacy_breath_separation(5); // 幂等
-
 
         assert_eq!(
             tl.params_by_root_track
@@ -8133,7 +8144,10 @@ mod tests {
             .get(&root)
             .map(|e| crate::pitch_editing::extra_param_enabled(&e.extra_params, "breath_enabled"))
             .unwrap_or(false);
-        assert!(on, "a clip-level non-default tension curve must enable separation");
+        assert!(
+            on,
+            "a clip-level non-default tension curve must enable separation"
+        );
     }
 
     /// 非有限值（NaN/Inf）不算"非默认" —— 否则损坏的数据会无端打开开关。
@@ -9165,7 +9179,7 @@ impl TimelineState {
     pub fn remove_track(&mut self, track_id: &str) {
         // 守卫：如果目标是根轨道且只剩最后一个根轨道，禁止删除。
         let target = self.tracks.iter().find(|t| t.id == track_id);
-        let is_root = target.map_or(false, |t| t.parent_id.is_none());
+        let is_root = target.is_some_and(|t| t.parent_id.is_none());
         if is_root {
             let root_count = self.tracks.iter().filter(|t| t.parent_id.is_none()).count();
             if root_count <= 1 {
@@ -9641,7 +9655,7 @@ impl TimelineState {
             if edited.contains(clip.id.as_str()) {
                 continue;
             }
-            if let Some(ref tracks) = affected_tracks {
+            if let Some(tracks) = affected_tracks {
                 if !tracks.contains(&clip.track_id) {
                     continue;
                 }
@@ -9777,7 +9791,7 @@ impl TimelineState {
             if fully_silent {
                 if delete_silent_clips {
                     outcome.removed_clip_ids.push(clip_id.clone());
-                    self.remove_clips(&[clip_id.clone()]);
+                    self.remove_clips(std::slice::from_ref(clip_id));
                 } else {
                     outcome.kept_clip_ids.push(clip_id.clone());
                 }
@@ -11018,12 +11032,10 @@ impl TimelineState {
         // so duplicates are in independent groups from the originals.
         {
             let mut group_remap: HashMap<String, String> = HashMap::new();
-            for gid_opt in &original_group_ids {
-                if let Some(ref gid) = gid_opt {
-                    group_remap
-                        .entry(gid.clone())
-                        .or_insert_with(|| Uuid::new_v4().to_string());
-                }
+            for gid in original_group_ids.iter().flatten() {
+                group_remap
+                    .entry(gid.clone())
+                    .or_insert_with(|| Uuid::new_v4().to_string());
             }
             if !group_remap.is_empty() {
                 for clip in &mut self.clips {
@@ -11324,12 +11336,12 @@ impl TimelineState {
                             for take in &mut left.takes {
                                 take.source_start_sec -= left_grow * combined(take.playback_rate);
                             }
-                            left.source_start_sec = left.source_start_sec - left_grow * left_rate;
+                            left.source_start_sec -= left_grow * left_rate;
                         } else {
                             for take in &mut left.takes {
                                 take.source_end_sec += left_grow * combined(take.playback_rate);
                             }
-                            left.source_end_sec = left.source_end_sec + left_grow * left_rate;
+                            left.source_end_sec += left_grow * left_rate;
                         }
                     }
                     // 源窗口写在 active 投影上，立即写回 Take 权威数据；
@@ -11420,7 +11432,7 @@ impl TimelineState {
                             take.source_end_sec += right_grow * r;
                             take.source_start_sec = take.source_end_sec - right.length_sec * r;
                         }
-                        right.source_end_sec = right.source_end_sec + right_grow * right_rate;
+                        right.source_end_sec += right_grow * right_rate;
                         right.source_start_sec =
                             right.source_end_sec - right.length_sec * right_rate;
                     } else {
@@ -11432,7 +11444,7 @@ impl TimelineState {
                             take.source_start_sec -= right_grow * r;
                             take.source_end_sec = take.source_start_sec + right.length_sec * r;
                         }
-                        right.source_start_sec = right.source_start_sec - right_grow * right_rate;
+                        right.source_start_sec -= right_grow * right_rate;
                         right.source_end_sec =
                             right.source_start_sec + right.length_sec * right_rate;
                     }
@@ -11911,9 +11923,7 @@ impl TimelineState {
             .iter()
             .filter_map(|clip_id| {
                 let clip = self.clips.iter().find(|c| c.id == *clip_id)?;
-                if clip.midi_note_data.is_none() {
-                    return None;
-                }
+                clip.midi_note_data.as_ref()?;
                 let root = self.resolve_root_track_id(&clip.track_id)?;
                 // 源域上下文（消费窗口 + Loop 回绕描述）与转换路径共用同一份
                 // 实现，保证两条写音符的路径落在同一个坐标系里。
@@ -12060,7 +12070,7 @@ impl TimelineState {
         let src_total = src_end - src_start;
 
         for note in midi_notes {
-            let note_value = note.note as f32;
+            let note_value = note.note;
 
             // Loop（循环源）：媒体时长锚点回绕放置（不能用窗口比较过滤可见性 ——
             // split 的环绕窗口 start > end 会把音符全部误判为越界）。
@@ -12173,7 +12183,7 @@ impl TimelineState {
                         out.push(MidiNoteEvent {
                             start_sec: s,
                             end_sec: e,
-                            ..note.clone()
+                            ..note
                         });
                     }
                 } else {
@@ -12184,7 +12194,7 @@ impl TimelineState {
                         out.push(MidiNoteEvent {
                             start_sec: s,
                             end_sec: e,
-                            ..note.clone()
+                            ..note
                         });
                     }
                 }
@@ -12310,7 +12320,7 @@ impl TimelineState {
                     channel: 0,
                 });
             }
-            filled_notes.push(note.clone());
+            filled_notes.push(*note);
             cursor = note.end_sec;
         }
 

@@ -256,14 +256,7 @@ pub fn set_runtime_dml_device_id(device_id: Option<i32>) {
 /// ★ 纪律：持有本锁期间**绝不允许**再去锁各模块的会话容器（容器锁的持有
 /// 时间必须保持在微秒级）。各模块流程：容器锁快速检查（随即释放）→ 本锁
 /// 内构建 + 烟测 → 容器锁写回。
-
-/// 有界地获取全局单飞锁（供各模块 `get_or_init_shared_session` 使用）。
 ///
-/// 无限等待是危险的：若持有者的构建/烟测挂起（驱动层），所有渲染线程都会
-/// 永久阻塞 —— 表现为渲染进度永久卡在 0%。超时后返回 Err，调用方的会话
-/// 加载失败 → 该 Clip 失败 → **渲染 pass 继续推进**（而不是整条链停摆），
-/// 下一次请求会重试。等待期间每 5s 打印一次警告，使日志能直接指出"卡在
-/// 会话构建锁上"。
 /// 会话构建租约：持有者票据（0 = 空闲）。票据高位为取得时刻（Unix 毫秒）。
 ///
 /// 为什么不是 `Mutex`：实测存在构建线程**永久卡死**的情形（ORT/DirectML 在
@@ -928,7 +921,7 @@ fn smoke_test_gpu_session(
         if *tensor_ty != ort::value::TensorElementType::Float32 {
             continue;
         }
-        if shape.iter().any(|&d| d == 0) {
+        if shape.contains(&0) {
             continue; // scalar or zero-dim - skip
         }
         // Replace dynamic dimensions (-1) with realistic test values:
@@ -1244,7 +1237,7 @@ fn create_dml_session(
     );
 
     // ── DirectML-specific config ────────────────────────────────────────
-    let mut builder = builder
+    let builder = builder
         .with_optimization_level(GraphOptimizationLevel::Disable)
         .map_err(|e| format!("set graph optimization level failed: {e}"))?
         .with_memory_pattern(false)
@@ -1550,10 +1543,7 @@ fn probe_directml_ep_available() -> bool {
     match Session::builder() {
         Ok(builder) => {
             let ep = ort::ep::DirectML::default().build();
-            match builder.with_execution_providers([ep]) {
-                Ok(_) => true,
-                Err(_) => false,
-            }
+            builder.with_execution_providers([ep]).is_ok()
         }
         Err(_) => false,
     }
@@ -1666,14 +1656,17 @@ mod tests {
     fn hnsep_probe_tensor_stays_small() {
         let bins = 1025usize; // n_fft/2 + 1
         let f = smoke_probe_frames(OrtSessionRole::Separator);
-        let bytes = 1 * 2 * bins * f * std::mem::size_of::<f32>();
+        // 形状 [1, 2, 1025, frames]（batch, channels, bins, frames）
+        let shape = [1usize, 2, bins, f];
+        let bytes = shape.iter().product::<usize>() * std::mem::size_of::<f32>();
         assert!(
             bytes <= 512 * 1024,
             "HNSEP smoke probe would allocate {} KB; keep it small",
             bytes / 1024
         );
         // 与旧值对比：若误用 4096 会是 32 MB
-        let wrong = 1 * 2 * bins * SMOKE_TEST_FRAMES * std::mem::size_of::<f32>();
+        let wrong_shape = [1usize, 2, bins, SMOKE_TEST_FRAMES];
+        let wrong = wrong_shape.iter().product::<usize>() * std::mem::size_of::<f32>();
         assert!(
             wrong > 16 * 1024 * 1024,
             "sanity: the naive 4096 would indeed be huge ({})",

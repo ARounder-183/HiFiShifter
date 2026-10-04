@@ -1277,7 +1277,7 @@ pub fn get_latest_rendered_pcm(
                 // 帧数必然一致。若帧数不同（clip 被移动/拉伸/换 Take），这条
                 // 旧渲染对应的是**另一个窗口**的内容 —— 垫上去就是把错误位置
                 // 的音频播给用户（表现为搬移后先响一下旧位置的声、再切换）。
-                && expected_frames.map_or(true, |want| v.frames == want)
+                && expected_frames.is_none_or(|want| v.frames == want)
         })
         .map(|(_, v)| v)?;
     Some((entry.pcm_stereo.clone(), entry.breath_noise_stereo.clone()))
@@ -1615,7 +1615,7 @@ mod tests {
                 0,
                 "nsf_hifigan_onnx",
                 &snapshot,
-                extra.into_iter(),
+                extra,
                 &std::collections::HashMap::new(),
             )
         };
@@ -1651,8 +1651,15 @@ mod tests {
         let h = || {
             let extra = vec![("hifigan_tension", curve.as_slice())];
             compute_param_hash(
-                "clip-x", 0, 44_100, 44_100, 0, "nsf_hifigan_onnx", &snapshot,
-                extra.into_iter(), &std::collections::HashMap::new(),
+                "clip-x",
+                0,
+                44_100,
+                44_100,
+                0,
+                "nsf_hifigan_onnx",
+                &snapshot,
+                extra,
+                &std::collections::HashMap::new(),
             )
         };
         assert_eq!(h(), h());
@@ -1669,8 +1676,15 @@ mod tests {
         let hash = |curve: &[f32]| {
             let extra = vec![("hifigan_tension", curve)];
             compute_param_hash(
-                "clip-x", 0, 44_100 * 10, 44_100, 0, "nsf_hifigan_onnx", &snapshot,
-                extra.into_iter(), &std::collections::HashMap::new(),
+                "clip-x",
+                0,
+                44_100 * 10,
+                44_100,
+                0,
+                "nsf_hifigan_onnx",
+                &snapshot,
+                extra,
+                &std::collections::HashMap::new(),
             )
         };
         // 远超区间末端的查询区间 + 极短曲线：不得 panic

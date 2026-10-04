@@ -352,13 +352,11 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
                                     }
                                 }
                                 // Data Entry LSB (CC 38)
-                                38 => {
-                                    if rpn_msb[ch as usize] == 0 && rpn_lsb[ch as usize] == 0 {
-                                        pending_bend_range_cents[ch as usize] = Some(val as f32);
-                                        let current_msb = channel_bend_range[ch as usize].trunc();
-                                        channel_bend_range[ch as usize] =
-                                            (current_msb + val as f32 / 100.0).max(0.0);
-                                    }
+                                38 if rpn_msb[ch as usize] == 0 && rpn_lsb[ch as usize] == 0 => {
+                                    pending_bend_range_cents[ch as usize] = Some(val as f32);
+                                    let current_msb = channel_bend_range[ch as usize].trunc();
+                                    channel_bend_range[ch as usize] =
+                                        (current_msb + val as f32 / 100.0).max(0.0);
                                 }
                                 _ => {}
                             }

@@ -1714,16 +1714,17 @@ fn process_item(
         };
         // 非活跃 take 的包络当前不进 ClipTake（v4 边界）：留痕避免静默
         // 丢用户数据（活跃 take 的包络已晋升为轨道曲线 / PITCHENV）。
-        let dropped_take_envs: usize = (active_take_idx != 0)
-            .then(|| item.default_take.envelopes.len())
-            .unwrap_or(0)
-            + item
-                .takes
-                .iter()
-                .enumerate()
-                .filter(|(idx, _)| *idx + 1 != active_take_idx)
-                .map(|(_, t)| t.envelopes.len())
-                .sum::<usize>();
+        let dropped_take_envs: usize = (if active_take_idx != 0 {
+            item.default_take.envelopes.len()
+        } else {
+            0
+        }) + item
+            .takes
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx + 1 != active_take_idx)
+            .map(|(_, t)| t.envelopes.len())
+            .sum::<usize>();
         if dropped_take_envs > 0 {
             log::warn!(
                 "reaper_import: item at {} drops {dropped_take_envs} envelope(s) on non-active take(s) (ClipTake has no envelope container yet)",
@@ -2322,8 +2323,8 @@ fn process_midi_item(
     let play_rate = raw_play_rate.abs().max(0.01);
 
     for note in &mut notes {
-        note.start_sec = note.start_sec - soffs;
-        note.end_sec = note.end_sec - soffs;
+        note.start_sec -= soffs;
+        note.end_sec -= soffs;
     }
 
     let item_length = clamp_import_length(item.length);
@@ -2780,7 +2781,7 @@ mod tests {
 
         // 首个标记段：速率 = Δ源/Δtake媒体 ≈ 2.01，源窗口覆盖标记锚点区间。
         let second = &clips[1];
-        let expected_rate = (3.902976163 - 2.05) / (2.971878688 - 2.05);
+        let expected_rate = (3.902_976_3 - 2.05) / (2.971_878_8 - 2.05);
         assert!((second.playback_rate - expected_rate).abs() < 1e-6);
         assert!(
             second.source_start_sec < 2.05 && second.source_end_sec > 3.902976163,
@@ -2790,7 +2791,7 @@ mod tests {
         // 中间段抽查：压缩段速率 < 1。
         let compressed = &clips[2];
         assert!(
-            (compressed.playback_rate - (6.240799448 - 3.902976163) / (8.142757375 - 2.971878688))
+            (compressed.playback_rate - (6.240_799_4 - 3.902_976_3) / (8.142_757 - 2.971_878_8))
                 .abs()
                 < 1e-6
         );
@@ -2907,7 +2908,7 @@ mod tests {
         let (clips, pitch, curves, _) = run_process_item(&item);
         assert!((clips[0].gain - 2.0).abs() < 1e-6, "ACT 0 → 钮生效");
         assert!(pitch.is_empty(), "ACT 0 → 无音高偏移");
-        assert!(curves.get("volume").is_none(), "ACT 0 → 无音量曲线");
+        assert!(!curves.contains_key("volume"), "ACT 0 → 无音量曲线");
     }
 
     #[test]

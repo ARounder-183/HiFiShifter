@@ -486,7 +486,7 @@ pub fn scan_sources_grouped_with_opts(
     }
 
     // ── 逐文件组判定：同组内相同区间只判一次（区间语义不变，纯去重）。 ──
-    for (_, (_, member_indices)) in groups.into_iter().enumerate() {
+    for (_, member_indices) in groups.into_iter() {
         // 组内成员的路径一致（分组键即路径）。
         let path = requests[member_indices[0]]
             .source_path

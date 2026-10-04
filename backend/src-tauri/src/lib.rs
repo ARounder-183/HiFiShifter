@@ -49,8 +49,6 @@ mod formant_cache;
 mod formant_morph;
 #[path = "audio/glottal_rd.rs"]
 mod glottal_rd;
-#[path = "audio/rd_tension.rs"]
-mod rd_tension;
 mod launch_args;
 mod media;
 #[path = "audio/mixdown.rs"]
@@ -62,6 +60,8 @@ mod pitch_clip;
 #[path = "pitch/pitch_config.rs"]
 mod pitch_config;
 mod pitch_editing;
+#[path = "audio/rd_tension.rs"]
+mod rd_tension;
 mod recording;
 mod render_cache;
 mod render_key;
@@ -799,7 +799,6 @@ pub fn run() {
             commands::get_playback_state,
             commands::start_background_render,
             commands::cancel_background_render,
-            commands::debug_realtime_render_stats,
             commands::get_pitch_analysis_progress,
             commands::open_log_folder,
             commands::pick_diagnostics_output_path,
@@ -814,8 +813,6 @@ pub fn run() {
             commands::run_vocoder_benchmark,
             commands::get_gpu_devices,
             commands::get_dml_adapters,
-            commands::clear_pitch_cache,
-            commands::get_pitch_cache_stats,
             commands::list_directory,
             commands::stat_paths,
             commands::collect_folder_media,

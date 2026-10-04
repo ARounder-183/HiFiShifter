@@ -141,7 +141,7 @@ fn import_finished_recording(
             clip.track_id == target_track_id
                 && clip.source_path.as_deref() == Some(finished.output_path.as_str())
         })
-        .last()
+        .next_back()
         .map(|clip| clip.id.clone());
 
     if settings.auto_normalize {

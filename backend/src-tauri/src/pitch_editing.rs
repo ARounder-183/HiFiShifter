@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 thread_local! {
-    static MONO_SCRATCH: RefCell<Vec<f32>> = RefCell::new(Vec::new());
+    static MONO_SCRATCH: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
 }
 
 fn pitch_edit_algo_from_env() -> Option<String> {
@@ -581,8 +581,8 @@ pub(crate) fn processor_should_handle_stretch(
     let fx = hifigan_effect_flags(algo, track, entry, clip, clip.start_sec.max(0.0));
     let child_formant_offset =
         active_child_formant_offset_config(timeline, &clip.track_id).is_some();
-    let effect_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
-        && (fx.any() || child_formant_offset);
+    let effect_processing =
+        matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx) && (fx.any() || child_formant_offset);
     let rate = (clip.playback_rate as f64).max(1e-6);
     crate::renderer::processor_handles_time_stretch(
         algo.into_kind(),
@@ -1138,7 +1138,10 @@ mod tests {
 
         let gated = gate_hifigan_effect_curves(&curves, &params_with_separation(true), true);
 
-        assert_eq!(gated.get("breath_gain").map(|v| v.as_slice()), Some([0.5f32].as_slice()));
+        assert_eq!(
+            gated.get("breath_gain").map(|v| v.as_slice()),
+            Some([0.5f32].as_slice())
+        );
         assert_eq!(
             gated.get("hifigan_tension").map(|v| v.as_slice()),
             Some([80.0f32].as_slice())
@@ -1313,15 +1316,11 @@ pub(crate) fn transpose_midi_by_scale_steps(
         for (idx, offset) in offsets.iter().enumerate() {
             let candidate_midi = (oct * 12 + *offset) as f64;
             let abs_degree = oct * degree_count + idx as i32;
-            if candidate_midi <= midi {
-                if lower.map(|(_, v)| candidate_midi > v).unwrap_or(true) {
-                    lower = Some((abs_degree, candidate_midi));
-                }
+            if candidate_midi <= midi && lower.map(|(_, v)| candidate_midi > v).unwrap_or(true) {
+                lower = Some((abs_degree, candidate_midi));
             }
-            if candidate_midi >= midi {
-                if upper.map(|(_, v)| candidate_midi < v).unwrap_or(true) {
-                    upper = Some((abs_degree, candidate_midi));
-                }
+            if candidate_midi >= midi && upper.map(|(_, v)| candidate_midi < v).unwrap_or(true) {
+                upper = Some((abs_degree, candidate_midi));
             }
         }
     }
@@ -1348,9 +1347,7 @@ fn active_child_pitch_offset_config<'a>(
         .tracks
         .iter()
         .find(|track| track.id == clip_track_id)?;
-    if track.parent_id.is_none() {
-        return None;
-    }
+    track.parent_id.as_ref()?;
 
     let root_track_id = timeline.resolve_root_track_id(clip_track_id)?;
     let entry = timeline.params_by_root_track.get(&root_track_id);
@@ -1461,9 +1458,7 @@ fn active_child_formant_offset_config<'a>(
         .tracks
         .iter()
         .find(|track| track.id == clip_track_id)?;
-    if track.parent_id.is_none() {
-        return None;
-    }
+    track.parent_id.as_ref()?;
 
     let root_track_id = timeline.resolve_root_track_id(clip_track_id)?;
     // 只有支持逐帧 formant_shift_cents 的声码器链路才消费子轨共振峰差。

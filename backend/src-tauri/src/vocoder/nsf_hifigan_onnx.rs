@@ -274,7 +274,7 @@ pub(crate) fn probe_load() -> Result<String, String> {
         if *tensor_ty != ort::value::TensorElementType::Float32 {
             continue;
         }
-        if shape.iter().any(|&d| d == 0) {
+        if shape.contains(&0) {
             continue;
         }
         let test_shape: Vec<usize> = shape
@@ -830,6 +830,16 @@ impl NsfHifiganOnnx {
         if cfg.sampling_rate == 0 || cfg.num_mels == 0 || cfg.hop_size == 0 || cfg.n_fft == 0 {
             return Err("invalid NSF-HiFiGAN config.json".to_string());
         }
+        // `win_size` 必须为正且不小于 `hop_size`：`mel_frame_count` 的帧数契约
+        // （`1 + (n - hop)/hop`）隐含 `win >= hop`，否则它与 `mel_from_audio_fast`
+        // 的实际帧数不一致，formant 曲线活跃时 `compute_shifted_mel` 会以
+        // "N key shifts for M frames" 失败。提前在加载期拒绝，报错更明确。
+        if cfg.win_size == 0 || cfg.win_size < cfg.hop_size {
+            return Err(format!(
+                "invalid NSF-HiFiGAN config.json: win_size ({}) must be >= hop_size ({})",
+                cfg.win_size, cfg.hop_size
+            ));
+        }
 
         // 获取（或初始化）全局共享 Session，消除每线程冷启动。
         let session = get_or_init_shared_session()?;
@@ -924,7 +934,7 @@ impl NsfHifiganOnnx {
             .mel_fb_matrix
             .dot(&mag_matrix)
             .into_iter()
-            .map(|v| dynamic_range_compression_ln(v))
+            .map(dynamic_range_compression_ln)
             .collect();
 
         Ok(mel)
@@ -1141,9 +1151,8 @@ fn compute_shifted_mel(
     let mut frame_nfft = Vec::with_capacity(n_frames);
     for &shift in shifts {
         let n_fft = shift_n_fft(shift, cfg.n_fft, cfg.win_size);
-        if !shift_plans.contains_key(&n_fft) {
-            let plan = ShiftPlan::new(shift, n_fft, cfg.win_size, hop)?;
-            shift_plans.insert(n_fft, plan);
+        if let std::collections::hash_map::Entry::Vacant(vacant) = shift_plans.entry(n_fft) {
+            vacant.insert(ShiftPlan::new(shift, n_fft, cfg.win_size, hop)?);
         }
         frame_nfft.push(n_fft);
     }
@@ -1199,7 +1208,7 @@ static PREWARM_STARTED: AtomicBool = AtomicBool::new(false);
 static LOGGED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
-    static TLS_SESSION: RefCell<Option<Result<NsfHifiganOnnx, String>>> = RefCell::new(None);
+    static TLS_SESSION: RefCell<Option<Result<NsfHifiganOnnx, String>>> = const { RefCell::new(None) };
 }
 
 /// 幂等地启动一次后台会话预热（**绝不阻塞**调用线程）。
@@ -2705,8 +2714,7 @@ mod tests {
 
         // 手写快速路径的等效实现（不依赖 ORT session）。
         let pad_left = ((cfg.win_size as isize - cfg.hop_size as isize) / 2).max(0) as usize;
-        let pad_right =
-            ((cfg.win_size as isize - cfg.hop_size as isize + 1) / 2).max(0) as usize;
+        let pad_right = ((cfg.win_size as isize - cfg.hop_size as isize + 1) / 2).max(0) as usize;
         let mut padded = Vec::with_capacity(pad_left + n + pad_right);
         for i in -(pad_left as isize)..0 {
             padded.push(audio[super::reflect_index(i, n)]);
@@ -2912,7 +2920,10 @@ mod tests {
                 (s + 12.0).abs() < 1e-4,
                 "-1200 cents must map to keyShift -12 (formant DOWN), got {s}"
             );
-            assert!(shift_n_fft(s, 2048, 2048) < 2048, "n_fft must shrink for -12");
+            assert!(
+                shift_n_fft(s, 2048, 2048) < 2048,
+                "n_fft must shrink for -12"
+            );
         }
     }
 
@@ -3090,5 +3101,4 @@ mod tests {
         let (lo2, _) = super::chunk_time_span(3.0, hop_sec, 512, 1024);
         assert!((lo2 - (3.0 + 512.0 * hop_sec)).abs() < 1e-12);
     }
-
 }

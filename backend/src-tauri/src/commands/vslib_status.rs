@@ -61,13 +61,12 @@ pub(super) fn get_vslib_status() -> VslibStatusPayload {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// 未开启 vslib feature 的构建（或非 Windows x86_64）必须报告不可用，
     /// 且给出原因 —— 前端据此把 vslib 从算法列表里过滤掉。
     #[test]
     #[cfg(not(all(feature = "vslib", target_os = "windows", target_arch = "x86_64")))]
     fn unavailable_without_vslib() {
+        use super::get_vslib_status;
         let status = get_vslib_status();
         assert!(!status.compiled);
         assert!(!status.available);

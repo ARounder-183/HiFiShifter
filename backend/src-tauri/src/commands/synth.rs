@@ -2124,7 +2124,7 @@ fn resolve_project_output_path(
 
         file_name = sanitize_file_name_segment(&file_name);
         if file_name.is_empty() {
-            file_name = format!("{project_name}");
+            file_name = project_name.to_string();
         }
         // 按所选格式替换 / 补全扩展名（wav/mp3/flac 原地替换，其余追加）。
         file_name = crate::encode::with_format_extension(&file_name, format);

@@ -41,7 +41,7 @@ pub(super) fn import_reaper_project(
 ) -> serde_json::Value {
     let path = Path::new(&rpp_path);
 
-    let result = match reaper_import::import_rpp(path) {
+    let mut result = match reaper_import::import_rpp(path) {
         Ok(r) => r,
         Err(_e) => {
             let mut payload = get_timeline_state_from_ref(state);
@@ -52,6 +52,12 @@ pub(super) fn import_reaper_project(
             return json;
         }
     };
+
+    // 逐 take 的指纹 / 头探测是磁盘 IO：在取 timeline 锁**之前**完成，
+    // 避免导入大工程时持锁做 O(takes) 次 IO、冻结其他命令与 UI 轮询。
+    for clip in &mut result.timeline.clips {
+        crate::state::TimelineState::populate_clip_file_metadata(clip);
+    }
 
     // 应用到 AppState —— 合并到现有工程（不替换）
     state.begin_undo_group(Some(
@@ -108,9 +114,8 @@ pub(super) fn import_reaper_project(
         // append_imported_tracks）。
         tl.append_imported_tracks(result.timeline.tracks);
 
-        // 合并 clips
-        for mut clip in result.timeline.clips {
-            crate::state::TimelineState::populate_clip_file_metadata(&mut clip);
+        // 合并 clips（文件元数据已在锁外补齐）
+        for clip in result.timeline.clips {
             tl.clips.push(clip);
         }
 

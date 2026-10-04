@@ -1411,14 +1411,12 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
 
     // ── 4. 检测音高相关变化（必须在 last_timeline 更新之前）──────────────────
     // Detect changes at both clip level AND track level (pitch_edit lives in params_by_root_track).
-    let track_pitch_edit_changed = s.last_timeline.as_ref().map_or(false, |old_tl| {
+    let track_pitch_edit_changed = s.last_timeline.as_ref().is_some_and(|old_tl| {
         tl.params_by_root_track.iter().any(|(root_id, new_params)| {
             old_tl
                 .params_by_root_track
                 .get(root_id)
-                .map_or(true, |old_params| {
-                    old_params.pitch_edit != new_params.pitch_edit
-                })
+                .is_none_or(|old_params| old_params.pitch_edit != new_params.pitch_edit)
         })
     });
 
@@ -1435,7 +1433,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         .iter()
         .filter_map(|clip| {
             old_clips_map.get(clip.id.as_str()).and_then(|old| {
-                if clip_pitch_params_changed(*old, clip) {
+                if clip_pitch_params_changed(old, clip) {
                     Some(clip.id.as_str()) // 优化：零拷贝
                 } else {
                     None
@@ -1446,11 +1444,11 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
 
     // 检测 track 级别的变化
     let has_last_timeline = s.last_timeline.is_some();
-    let track_pitch_settings_changed = s.last_timeline.as_ref().map_or(true, |old_tl| {
+    let track_pitch_settings_changed = s.last_timeline.as_ref().is_none_or(|old_tl| {
         tl.tracks.iter().any(|track| {
             old_tl.tracks.iter()
                 .find(|t| t.id == track.id)
-                .map_or(true, |old_track| {
+                .is_none_or(|old_track| {
                     let compose_changed = old_track.compose_enabled != track.compose_enabled;
                     let algo_changed = old_track.pitch_analysis_algo != track.pitch_analysis_algo;
                     if compose_changed || algo_changed {
@@ -1479,7 +1477,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         .iter()
         .filter(|c| c.midi_note_data.is_some())
         .filter(|c| {
-            old_clips_map.get(c.id.as_str()).map_or(true, |old| {
+            old_clips_map.get(c.id.as_str()).is_none_or(|old| {
                 (old.start_sec - c.start_sec).abs() > 1e-9
                     || (old.source_start_sec - c.source_start_sec).abs() > 1e-6
                     || (old.source_end_sec - c.source_end_sec).abs() > 1e-6
@@ -1919,7 +1917,7 @@ fn emit_clip_pitch_data_for_clip(
             if let Some(placement) =
                 crate::state::place_note_occurrence_in_loop(clip, note.start_sec, note.end_sec, fp)
             {
-                let note_value = note.note as f32;
+                let note_value = note.note;
                 let mut cycle_offset = 0usize;
                 while cycle_offset < clip_visible_frames {
                     let write_start = cycle_offset + placement.first_start_frame;
@@ -1962,7 +1960,7 @@ fn emit_clip_pitch_data_for_clip(
             }
             let note_start_frame = ((eff_start / pr_valid * 1000.0) / fp).round() as usize;
             let note_end_frame = ((eff_end / pr_valid * 1000.0) / fp).round() as usize;
-            let note_value = note.note as f32;
+            let note_value = note.note;
             // 非 Loop：单次写入（Loop 已在上方 placement 分支处理）。
             {
                 let write_end = note_end_frame.min(target_frames);

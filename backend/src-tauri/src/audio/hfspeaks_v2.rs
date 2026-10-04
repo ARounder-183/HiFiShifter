@@ -170,7 +170,7 @@ impl HfsPeakHeader {
 
 /// 单个 Mipmap 级别的头部信息 (16 bytes)
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct MipmapHeader {
     /// 除数因子：每个峰值代表的采样数
     pub division_factor: u32,
@@ -178,16 +178,6 @@ pub struct MipmapHeader {
     pub peak_count: u32,
     /// 数据在文件中的偏移量
     pub data_offset: u64,
-}
-
-impl Default for MipmapHeader {
-    fn default() -> Self {
-        Self {
-            division_factor: 0,
-            peak_count: 0,
-            data_offset: 0,
-        }
-    }
 }
 
 impl MipmapHeader {
@@ -838,7 +828,7 @@ fn compute_mipmap_peaks_hound<F: FnMut(f32)>(
         return Err("invalid wav spec".to_string());
     }
 
-    let channels = spec.channels as u16;
+    let channels = spec.channels;
     let total_frames = reader.duration() as u64;
     let sample_rate = spec.sample_rate;
 
@@ -884,7 +874,7 @@ fn compute_mipmap_peaks_hound<F: FnMut(f32)>(
                     frame_channel_extremes_i16(&buf, &mut frame_min, &mut frame_max);
                     calculator.process_frame(&frame_min, &frame_max, &mut output_callback);
                     frames_processed += 1;
-                    if frames_processed % progress_interval == 0 {
+                    if frames_processed.is_multiple_of(progress_interval) {
                         if let Some(cb) = progress_cb.as_mut() {
                             cb(frames_processed as f32 / total_frames.max(1) as f32);
                         }
@@ -904,7 +894,7 @@ fn compute_mipmap_peaks_hound<F: FnMut(f32)>(
                     frame_channel_extremes_i32(&buf, denom, &mut frame_min, &mut frame_max);
                     calculator.process_frame(&frame_min, &frame_max, &mut output_callback);
                     frames_processed += 1;
-                    if frames_processed % progress_interval == 0 {
+                    if frames_processed.is_multiple_of(progress_interval) {
                         if let Some(cb) = progress_cb.as_mut() {
                             cb(frames_processed as f32 / total_frames.max(1) as f32);
                         }
@@ -928,7 +918,7 @@ fn compute_mipmap_peaks_hound<F: FnMut(f32)>(
                     );
                     calculator.process_frame(&frame_min, &frame_max, &mut output_callback);
                     frames_processed += 1;
-                    if frames_processed % progress_interval == 0 {
+                    if frames_processed.is_multiple_of(progress_interval) {
                         if let Some(cb) = progress_cb.as_mut() {
                             cb(frames_processed as f32 / total_frames.max(1) as f32);
                         }
@@ -947,7 +937,7 @@ fn compute_mipmap_peaks_hound<F: FnMut(f32)>(
                     frame_channel_extremes_f32(&buf, &mut frame_min, &mut frame_max);
                     calculator.process_frame(&frame_min, &frame_max, &mut output_callback);
                     frames_processed += 1;
-                    if frames_processed % progress_interval == 0 {
+                    if frames_processed.is_multiple_of(progress_interval) {
                         if let Some(cb) = progress_cb.as_mut() {
                             cb(frames_processed as f32 / total_frames.max(1) as f32);
                         }
@@ -1034,7 +1024,7 @@ fn compute_mipmap_peaks_media<F: FnMut(f32)>(
                 }
                 calculator.process_frame(&frame_min, &frame_max, &mut output_callback);
                 frames_processed += 1;
-                if frames_processed % progress_interval == 0 {
+                if frames_processed.is_multiple_of(progress_interval) {
                     if let Some(cb) = progress_cb.as_mut() {
                         if total_frames > 0 {
                             cb(frames_processed as f32 / total_frames as f32);
@@ -1047,8 +1037,7 @@ fn compute_mipmap_peaks_media<F: FnMut(f32)>(
             }
             Ok(())
         },
-    )
-    .map_err(|e| e)?;
+    )?;
 
     calculator.flush(&mut output_callback);
 
@@ -1231,7 +1220,7 @@ impl HfsPeakFile {
 
         // 跳到目标数据位置
         let current_pos = HfsPeakHeader::SIZE + mipmap_count * MipmapHeader::SIZE;
-        let target_pos = target_mh.data_offset as u64;
+        let target_pos = target_mh.data_offset;
 
         if target_pos > current_pos as u64 {
             // 需要跳过前面级别的数据
@@ -1569,13 +1558,11 @@ mod waveform_tile_tests {
         let loaded = HfsPeakFile::load(&tmp).expect("load hsp");
         let _ = std::fs::remove_file(&tmp);
 
-        assert_eq!(
-            {
-                let c = loaded.header.channels;
-                c
-            },
-            2
-        );
+        // `header` 是 `#[repr(packed)]`：必须先把字段按值拷出再比较，
+        // 直接 `assert_eq!(loaded.header.channels, ..)` 会创建未对齐引用
+        // （E0793，UB）。
+        let channels = loaded.header.channels;
+        assert_eq!(channels, 2);
         assert_eq!(loaded.mipmap_data[0].channels, 2);
         assert_eq!(loaded.mipmap_data[0].len(), 2);
         assert_eq!(loaded.mipmap_data[0].channel_min(0), &[-1.0, -0.3][..]);
@@ -1651,13 +1638,10 @@ mod waveform_tile_tests {
         let file = compute_mipmap_peaks(&path).expect("compute peaks");
         let _ = std::fs::remove_file(&path);
 
-        assert_eq!(
-            {
-                let c = file.header.channels;
-                c
-            },
-            2
-        );
+        // `header` 是 `#[repr(packed)]`：必须先把字段按值拷出再比较，
+        // 直接 `assert_eq!(file.header.channels, ..)` 会创建未对齐引用（E0793，UB）。
+        let channels = file.header.channels;
+        assert_eq!(channels, 2);
         let l0 = &file.mipmap_data[0];
         assert_eq!(l0.channels, 2);
         // L 声道最大值应为正、R 声道最小值应为负。

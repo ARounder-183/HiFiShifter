@@ -142,6 +142,18 @@ fn import_audio_bytes_error(message: &str) -> crate::models::TimelineStatePayloa
     payload
 }
 
+/// 持久化的「导入媒体」目录（`<config_dir>/imported_media/`）。
+///
+/// 【为什么不用临时目录】拖放导入走 `import_audio_bytes`：浏览器只给字节流，
+/// 落盘后的文件就是该 clip 的**唯一**副本。`%TEMP%/hifishifter/` 在每次启动时
+/// 被清理，会让「导入 → 保存工程 → 重启」直接丢掉素材（源文件无从恢复）。
+/// 因此这里落到持久目录，启动清理不再触碰这些文件。
+fn persistent_import_dir(state: &AppState) -> Option<std::path::PathBuf> {
+    let dir = state.config_dir.get()?.join("imported_media");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
 pub(super) fn import_audio_bytes(
     state: State<'_, AppState>,
     file_name: String,
@@ -175,13 +187,15 @@ pub(super) fn import_audio_bytes(
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("bin");
-    let tmp_dir = ensure_temp_dir().ok();
-    let path = tmp_dir.unwrap_or_else(std::env::temp_dir).join(format!(
-        "{}_{}.{}",
-        "import",
-        Uuid::new_v4().simple(),
-        ext
-    ));
+    // 优先落持久目录：这里的文件是 clip 的唯一副本，不能放进启动即清理的临时目录。
+    // 仅当 config_dir 不可用（极端降级）时才退回临时目录。
+    let path = match persistent_import_dir(&state) {
+        Some(dir) => dir.join(format!("import_{}.{}", Uuid::new_v4().simple(), ext)),
+        None => ensure_temp_dir()
+            .ok()
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!("import_{}.{}", Uuid::new_v4().simple(), ext)),
+    };
 
     if let Err(e) = fs::write(&path, &bytes) {
         return import_audio_bytes_error(&format!(
@@ -836,7 +850,6 @@ pub(super) fn apply_clip_linked_params(
 }
 
 #[allow(clippy::too_many_arguments)]
-
 pub(super) fn set_clip_state(
     state: State<'_, AppState>,
     clip_id: String,

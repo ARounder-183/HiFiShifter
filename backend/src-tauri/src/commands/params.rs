@@ -61,9 +61,7 @@ fn resolve_child_pitch_offset_curve_default_value(
         .tracks
         .iter()
         .find(|track| track.id == spec.track_id)?;
-    if track.parent_id.is_none() {
-        return None;
-    }
+    track.parent_id.as_ref()?;
 
     match spec.mode {
         ChildPitchOffsetParamMode::Cents => Some(CHILD_PITCH_OFFSET_CENTS_DEFAULT),
@@ -534,9 +532,11 @@ pub(super) fn set_param_frames(
     };
 
     let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
-    let extra_curve_default = is_extra_curve
-        .then_some(param_reference_value)
-        .unwrap_or(0.0);
+    let extra_curve_default = if is_extra_curve {
+        param_reference_value
+    } else {
+        0.0
+    };
 
     let start = start_frame as usize;
     let mut written = 0usize;

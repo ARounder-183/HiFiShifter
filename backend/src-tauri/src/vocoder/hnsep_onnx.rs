@@ -321,12 +321,8 @@ pub fn probe_load() -> Result<String, String> {
     let window = crate::hnsep_dsp::periodic_hann(HNSEP_N_FFT);
     let bins = HNSEP_N_FFT / 2 + 1;
 
-    let harmonic = crate::hnsep_dsp::separate(
-        &audio,
-        HNSEP_N_FFT,
-        HNSEP_HOP,
-        &window,
-        |mask_input| {
+    let harmonic =
+        crate::hnsep_dsp::separate(&audio, HNSEP_N_FFT, HNSEP_HOP, &window, |mask_input| {
             let frames = mask_input.len() / 2 / bins;
             let tensor = Tensor::from_array((
                 [1usize, 2, bins, frames],
@@ -348,8 +344,7 @@ pub fn probe_load() -> Result<String, String> {
                 .try_extract_tensor::<f32>()
                 .map_err(|e| format!("hnsep mask extract failed: {e}"))?;
             Ok(mask.to_vec())
-        },
-    )?;
+        })?;
 
     if harmonic.len() != samples {
         return Err(format!(
@@ -544,10 +539,12 @@ pub fn infer_harmonic_noise_mono(
             // Verify length consistency before returning cached result.
             // If the cached audio differs in length from the request, treat as miss
             // (can happen when clip is trimmed/stretched after caching).
-            if entry.harmonic.len().max(entry.noise.len()) >= audio_len {
+            // 必须**完全一致**：`>=` 会让超长 stem 原样返回，混进更短的
+            // `input_pcm` 后产生超长渲染（miss 路径总是归一到 `audio_len`）。
+            if entry.harmonic.len() == audio_len && entry.noise.len() == audio_len {
                 return Ok((entry.harmonic.clone(), entry.noise.clone()));
             }
-            // Cached result too short → remove and re-infer below.
+            // 长度不符（过短或过长）→ 移除并重新推理。
             cache.pop(&cache_key);
         }
     }

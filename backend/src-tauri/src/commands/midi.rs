@@ -149,22 +149,7 @@ pub(super) fn read_midi_clipboard_to_memory(state: &AppState) -> serde_json::Val
     };
 
     // 存入内存缓存
-    {
-        let mut cache = state
-            .clipboard_midi_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        cache.insert(guid.clone(), midi_data);
-        // 限制缓存大小，防止无限增长
-        while cache.len() > 16 {
-            let oldest = cache.keys().next().cloned();
-            if let Some(k) = oldest {
-                cache.remove(&k);
-            } else {
-                break;
-            }
-        }
-    }
+    put_clipboard_midi(state, guid.clone(), midi_data);
 
     let tracks_with_notes: Vec<&MidiTrackInfo> = parse_result
         .tracks
@@ -196,6 +181,52 @@ pub(super) fn read_midi_clipboard_to_memory(state: &AppState) -> serde_json::Val
 /// 解析 MIDI 来源：可以是文件路径或剪贴板 GUID。
 ///
 /// 返回 `(MidiParseResult, Option<显示名称>)`。显示名称仅在文件来源时有值（文件 stem）。
+/// 剪贴板 MIDI 载荷的内存缓存上限（条）。
+const CLIPBOARD_MIDI_CACHE_MAX: usize = 16;
+
+/// 读取剪贴板 MIDI 载荷（不消费；导入命令完成后再 take 掉）。
+fn peek_clipboard_midi(state: &AppState, guid: &str) -> Option<Vec<u8>> {
+    let cache = state
+        .clipboard_midi_cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    cache
+        .iter()
+        .find(|(key, _)| key == guid)
+        .map(|(_, bytes)| bytes.clone())
+}
+
+/// 移除剪贴板 MIDI 载荷（导入完成后一次性消费）。
+fn take_clipboard_midi(state: &AppState, guid: &str) {
+    let mut cache = state
+        .clipboard_midi_cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(pos) = cache.iter().position(|(key, _)| key == guid) {
+        cache.remove(pos);
+    }
+}
+
+/// 存入剪贴板 MIDI 载荷，按**插入顺序**淘汰，最多保留
+/// `CLIPBOARD_MIDI_CACHE_MAX` 条。
+///
+/// 【为什么不能用 HashMap】曾经的实现用 `HashMap::keys().next()` 当"最旧"，
+/// 但那只是任意顺序：缓存溢出时可能把**刚插入**的条目自己挤掉，后续
+/// `import_midi_*` 立刻报 `midi_clipboard_guid_not_found`。
+fn put_clipboard_midi(state: &AppState, guid: String, bytes: Vec<u8>) {
+    let mut cache = state
+        .clipboard_midi_cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(pos) = cache.iter().position(|(key, _)| *key == guid) {
+        cache.remove(pos);
+    }
+    cache.push_back((guid, bytes));
+    while cache.len() > CLIPBOARD_MIDI_CACHE_MAX {
+        cache.pop_front();
+    }
+}
+
 fn resolve_midi_source(
     state: &AppState,
     midi_path: Option<&String>,
@@ -206,14 +237,9 @@ fn resolve_midi_source(
         if guid.is_empty() {
             return Err("invalid_guid".to_string());
         }
-        let cache = state
-            .clipboard_midi_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let bytes = cache
-            .get(guid)
+        let bytes = peek_clipboard_midi(state, guid)
             .ok_or_else(|| "midi_clipboard_guid_not_found".to_string())?;
-        let result = midi_import::parse_midi_bytes(bytes, fallback_bpm)?;
+        let result = midi_import::parse_midi_bytes(&bytes, fallback_bpm)?;
         Ok((result, None))
     } else if let Some(path) = midi_path {
         if path.is_empty() {
@@ -529,11 +555,7 @@ pub(super) fn import_midi_to_pitch(
 
     if let Some(ref guid) = clipboard_guid {
         if !guid.is_empty() {
-            let mut cache = state
-                .clipboard_midi_cache
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            cache.remove(guid);
+            take_clipboard_midi(state, guid);
         }
     }
 
@@ -573,11 +595,13 @@ pub(super) fn import_midi_as_clip(
         midi_path, clipboard_guid, track_indices, track_id, start_sec, fill_gaps, multi_track_merge, note_bpm_mode, specified_bpm, import_midi_bpm_as_project, close_leading_gap, import_midi_as_tempo_map, import_midi_tempo, import_midi_time_signature, import_midi_key_signature
     ));
 
-    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    let project_bpm = tl.bpm;
-    let (project_beats_per_bar, project_time_signature_denominator) = {
+    // 先短暂锁定读取 bpm / 拍号；MIDI 磁盘解析放在锁外 —— 本命令是同步命令
+    // （主线程），持锁解析会在阻塞主线程的同时冻结所有其他命令与 UI 轮询。
+    let (project_bpm, project_beats_per_bar, project_time_signature_denominator) = {
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        let bpm = tl.bpm;
         let p = state.project.lock().unwrap_or_else(|e| e.into_inner());
-        (p.beats_per_bar, p.time_signature_denominator)
+        (bpm, p.beats_per_bar, p.time_signature_denominator)
     };
 
     let (mut parse_result, source_stem) = match resolve_midi_source(
@@ -592,6 +616,8 @@ pub(super) fn import_midi_as_clip(
             return error_payload(&e);
         }
     };
+
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
     let file_stem = source_stem.unwrap_or_else(|| "MIDI".to_string());
 
@@ -1037,11 +1063,7 @@ pub(super) fn import_midi_as_clip(
 
         if let Some(ref guid) = clipboard_guid {
             if !guid.is_empty() {
-                let mut cache = state
-                    .clipboard_midi_cache
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                cache.remove(guid);
+                take_clipboard_midi(state, guid);
             }
         }
 
@@ -1072,8 +1094,12 @@ pub(super) fn replace_midi_clip_data(
         clip_id, midi_path, track_indices, fill_gaps, close_leading_gap
     ));
 
-    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    let project_bpm = tl.bpm;
+    // 先短暂锁定读取 bpm；MIDI 磁盘解析放在锁外（同 import_midi_to_pitch：
+    // 同步命令持锁解析会冻结主线程与其他所有命令）。
+    let project_bpm = {
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        tl.bpm
+    };
 
     let (mut parse_result, _source_stem) = match resolve_midi_source(
         state,
@@ -1087,6 +1113,8 @@ pub(super) fn replace_midi_clip_data(
             return error_payload(&e);
         }
     };
+
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
     let initial_bpm = parse_result.initial_bpm;
 
@@ -1238,11 +1266,7 @@ pub(super) fn replace_midi_clip_data(
 
     if let Some(ref guid) = clipboard_guid {
         if !guid.is_empty() {
-            let mut cache = state
-                .clipboard_midi_cache
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            cache.remove(guid);
+            take_clipboard_midi(state, guid);
         }
     }
 

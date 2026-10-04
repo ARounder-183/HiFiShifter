@@ -82,6 +82,12 @@ pub(super) fn import_vocalshifter_project(
         log::info!("[import_vocalshifter] channel policy folded {converted_takes} take(s) to mono");
     }
 
+    // 逐 take 的指纹 / 头探测是磁盘 IO：在取 timeline 锁**之前**完成，
+    // 避免导入时持锁做 O(takes) 次 IO、冻结其他命令与 UI 轮询。
+    for clip in &mut result.timeline.clips {
+        crate::state::TimelineState::populate_clip_file_metadata(clip);
+    }
+
     // 应用到 AppState —— 合并到现有工程（不替换）
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
@@ -103,9 +109,8 @@ pub(super) fn import_vocalshifter_project(
         // append_imported_tracks）。
         tl.append_imported_tracks(result.timeline.tracks);
 
-        // 合并 clips
-        for mut clip in result.timeline.clips {
-            crate::state::TimelineState::populate_clip_file_metadata(&mut clip);
+        // 合并 clips（文件元数据已在锁外补齐）
+        for clip in result.timeline.clips {
             tl.clips.push(clip);
         }
 

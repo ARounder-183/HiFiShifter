@@ -985,7 +985,8 @@ mod tests {
             },
         );
 
-        let fragment = build_clip_fragment(&tl, &[clip_id.clone()], "src".into()).unwrap();
+        let fragment =
+            build_clip_fragment(&tl, std::slice::from_ref(&clip_id), "src".into()).unwrap();
         // 单 clip（全子树选择）→ TRACK fragment：参数整体携带（无 linked）。
         let wholesale = fragment
             .timeline
@@ -1154,7 +1155,8 @@ mod tests {
             .unwrap()
             .id
             .clone();
-        let fragment = build_clip_fragment(&source, &[clip_id.clone()], "src".into()).unwrap();
+        let fragment =
+            build_clip_fragment(&source, std::slice::from_ref(&clip_id), "src".into()).unwrap();
         assert!(!fragment.linked_params_by_clip[&clip_id]
             .pitch_edit
             .is_empty());

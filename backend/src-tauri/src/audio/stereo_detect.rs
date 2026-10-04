@@ -862,6 +862,12 @@ fn aggregate_region_windows(
 /// 覆盖完整。
 const SEEK_PRIMING_SEC: f64 = 0.30;
 
+/// 落点是否可接受：允许偏差最多一个窗口长（请求起点 + `align_tolerance`）。
+/// 独立成纯函数以便测试钉住边界语义（恰好一个窗口长 ⇒ 接受；再多 ⇒ 作废）。
+fn seek_landing_within_tolerance(landed: u64, start: u64, align_tolerance: u64) -> bool {
+    landed <= start.saturating_add(align_tolerance)
+}
+
 /// 优先用 seek 采样判定；不适用时返回 `None` 交由调用方回落到顺序路径。
 ///
 /// # 为什么 seek 能同时更快、更准
@@ -926,7 +932,7 @@ fn analyze_container_regions_by_seek(
 
     for (index, (start, _len)) in plan.windows.iter().enumerate() {
         let landed = starts.get(index).copied().flatten()?;
-        if landed > start.saturating_add(align_tolerance) {
+        if !seek_landing_within_tolerance(landed, *start, align_tolerance) {
             return None;
         }
     }
@@ -1857,13 +1863,16 @@ mod tests {
         let start = 441_000u64;
         let align_tolerance = window_frames;
 
-        assert!(start + 1 <= start + align_tolerance, "窗口内落点必须接受");
         assert!(
-            start + align_tolerance <= start + align_tolerance,
+            seek_landing_within_tolerance(start + 1, start, align_tolerance),
+            "窗口内落点必须接受"
+        );
+        assert!(
+            seek_landing_within_tolerance(start + align_tolerance, start, align_tolerance),
             "恰好一个窗口长的偏差仍在容差边界内"
         );
         assert!(
-            start + align_tolerance + 1 > start + align_tolerance,
+            !seek_landing_within_tolerance(start + align_tolerance + 1, start, align_tolerance),
             "超过一个窗口长即视为错位 ⇒ 整条路径作废"
         );
     }

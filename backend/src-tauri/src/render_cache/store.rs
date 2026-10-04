@@ -245,7 +245,6 @@ impl Store {
                 let bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
                 let modified = file.metadata().ok().and_then(|m| m.modified().ok());
                 match File::open(&path)
-                    .map_err(io::Error::from)
                     .and_then(|f| format::read_header_only(&mut BufReader::new(f)))
                 {
                     Ok((_kind, sample_rate, _frames, _hash, project_id, _pipeline)) => {
@@ -306,10 +305,7 @@ impl Store {
     }
 
     /// 按谓词删除条目，返回 `(文件数, 字节数)`。
-    pub fn clear_matching(
-        &self,
-        mut predicate: impl FnMut(&ScannedEntry) -> bool,
-    ) -> (u64, u64) {
+    pub fn clear_matching(&self, mut predicate: impl FnMut(&ScannedEntry) -> bool) -> (u64, u64) {
         let report = self.scan();
         let mut files = 0u64;
         let mut bytes = 0u64;
@@ -471,7 +467,9 @@ mod tests {
         assert!(path.to_string_lossy().contains("ab"), "{path:?}");
         assert!(path.exists());
 
-        let loaded = store.load(EntryKind::Rendered, hash, 48_000, true).expect("load");
+        let loaded = store
+            .load(EntryKind::Rendered, hash, 48_000, true)
+            .expect("load");
         assert_eq!(loaded.primary, primary);
         assert_eq!(loaded.secondary.as_deref(), Some(secondary.as_slice()));
         assert_eq!(loaded.header.take_id.as_deref(), Some("take-a"));
@@ -484,7 +482,9 @@ mod tests {
         assert!(report.dropped_corrupt == 0 && report.dropped_tmp == 0);
 
         // 采样率错配 → miss（不会跨采样率误用）。
-        assert!(store.load(EntryKind::Rendered, hash, 44_100, true).is_none());
+        assert!(store
+            .load(EntryKind::Rendered, hash, 44_100, true)
+            .is_none());
         // 类别错配 → miss 并自愈删除。
         // （张力变体已废弃，改用 `Noise` 验证同一条自愈路径。）
         assert!(store.load(EntryKind::Noise, hash, 48_000, true).is_none());
@@ -506,7 +506,9 @@ mod tests {
         let path = store.path_for(EntryKind::Rendered, hash);
         fs::write(&path, b"garbage-not-hsrc").expect("corrupt");
 
-        assert!(store.load(EntryKind::Rendered, hash, 48_000, true).is_none());
+        assert!(store
+            .load(EntryKind::Rendered, hash, 48_000, true)
+            .is_none());
         assert!(!path.exists(), "corrupt entry must self-heal (removed)");
 
         let report = store.scan();

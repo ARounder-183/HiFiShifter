@@ -101,18 +101,16 @@ mod tests {
         // 无抖动的基准量化值。
         let mut quiet = DitherState::new(1);
         let base = quantize_sample(v, 16, NO_DITHER, &mut quiet);
-        let half = 1i64 << 15;
         for q in &expected {
             let diff = (*q as i64) - (base as i64);
             assert!(
-                diff >= -1 && diff <= 1,
+                (-1..=1).contains(&diff),
                 "TPDF 抖动偏移必须落在 ±1 LSB 内（得到 {diff}）"
             );
         }
         // 恒定输入下抖动应产生不止一个量化电平（去相关生效）。
         let unique: std::collections::HashSet<i32> = expected.into_iter().collect();
         assert!(unique.len() >= 2, "抖动应在量化台阶间产生变化");
-        let _ = half;
     }
 
     #[test]
