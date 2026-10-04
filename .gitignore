@@ -193,6 +193,9 @@ backend/src-tauri/resources/models/nsf_hifigan/pc_nsf_hifigan_coreml.onnx
 # this catches accidental npm install at project root)
 node_modules/
 
+# Git worktrees for isolated feature work (see using-git-worktrees)
+.worktrees/
+
 # Temporary AppImage extraction directories (created by --appimage-extract)
 squashfs-root/
 
