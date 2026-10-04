@@ -22,6 +22,7 @@ import type { TimelineAxis } from "../components/layout/renderKernel/timelineAxi
 import { withAxis } from "../components/layout/renderKernel/timelineAxis.ts";
 import { LAYER_ORDER } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
 import type { TimelineLayer } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
+import { fitCssPxToDevicePx } from "../components/layout/renderKernel/canvasRaster.ts";
 import {
     buildWaveformGeometry,
     readAmplitudeRevision,
@@ -228,13 +229,20 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         const source = props.viewportSource;
         const axis = source ? source.getAxis() : props.axis;
         const pxPerSec = axis.pxPerSec;
-        const widthPx = Math.max(1, Math.floor(axis.viewportWidthPx));
-        const heightPx = Math.max(1, Math.ceil(props.heightPx));
+        const dpr = window.devicePixelRatio || 1;
+        // 绘制坐标系尺寸 = 整数设备像素 / dpr（`fitCssPxToDevicePx`）。两个作用：
+        // 1. 与 `rasterize` 写回画布样式的值**完全一致**，几何坐标与画布内容
+        //    严格 1:1，也与同容器上的 GL 网格层严格同尺寸（不再差 1 物理像素）；
+        // 2. 吸附到设备像素后，容器宽度的亚像素抖动被吸收，几何缓存键稳定。
+        // 【为什么不能 floor / ceil】旧实现宽取 floor、高取 ceil，方向相反且都不是
+        // `round`：物理尺寸与 GL 层系统性错开，叠加后互相错位。取整只允许发生在
+        // 设备像素空间（由 `rasterize` 统一完成），此处不再做任何 CSS 空间取整。
+        const widthPx = fitCssPxToDevicePx(axis.viewportWidthPx, dpr);
+        const heightPx = fitCssPxToDevicePx(props.heightPx, dpr);
         const scrollLeftPx = axis.scrollLeftPx;
         // 竖直锚点：行坐标是内容绝对值，滚动容器竖直滚动时必须同步平移，
         // 否则波形与 DOM Clip 在竖直方向分层。
         const scrollTopPx = source ? axis.scrollTopPx : (props.viewportTopPx ?? 0);
-        const dpr = window.devicePixelRatio || 1;
 
         const cache = geometryCacheRef.current;
 
