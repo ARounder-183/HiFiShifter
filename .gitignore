@@ -205,6 +205,10 @@ frontend/.esbuild-tmp/
 # Committed here rather than on develop so the main working tree stays clean.
 .superpowers/
 
+# ARA probe: cloned third-party SDKs and their build output (~93 MB). Reproduce
+# with the commands in probe/ara/README.md; never commit them.
+probe/ara/ARA_SDK/
+
 # Temporary AppImage extraction directories (created by --appimage-extract)
 squashfs-root/
 
