@@ -605,4 +605,15 @@ workspace 的成员**，app 本体必然在里面。改成 `cargo tree -p hifish
 代价：若不做，插件的模型只有"一堆没有连线的对象"，无法建时间线 ——
 Phase 2 的 A1/A2 判据只能停留在"计数一致"。
 
+**Dev 18: Ruling: 选了 (a) —— 把 `ara2-bridge-plugin` 一并本地化，给三个 trait 方法补上边参数。**
+`AudioModifications::{create,clone}_audio_modification` 收 `source`，
+`PlaybackRegions::create_playback_region` 收 `modification` + `sequence`；
+`PluginModel` 上加等式约束把补出来的关联类型钉回"正主" trait 同名类型，
+所以实现方（我们的 `ModelHandle`）只需给一套类型。
+补丁纯增量，细节与撤销步骤见 `backend/third-party/ara2-bridge-plugin/PATCHED.md`。
+实测：插件 crate 编译通过，11 条映射测试 + A5 守卫 + 导出符号守卫全绿；
+内核 501 / app 279（4 条既有环境性失败）。**这一步让"插件能建出真实时间线"从
+不可能变成可能** —— 之前拿到的模型只有计数，没有连线。
+代价：仓库里多两个 vendored crate（~630 KB）。上游补上后按 PATCHED.md 撤销即可。
+
 
