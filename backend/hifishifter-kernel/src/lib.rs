@@ -23,4 +23,11 @@ pub mod fade_curves;
 
 pub mod byte_budget_cache;
 pub mod events;
+
+// 时间拉伸：`time_stretch` 是入口（用户可选的算法 + 设置），两个后端各自封装一层 FFI。
+// 它们的**原生构建**在内核自己的 `build.rs` 里（见该文件的文件头说明）。
+pub mod sstretch;
+pub mod soundtouch;
+pub mod time_stretch;
+
 pub mod util;

@@ -7,7 +7,9 @@ description = "HiFiShifter 的离线音频内核：不依赖 Tauri，也不依�
 
 [dependencies]
 lru = "0.12"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+log = { version = "0.4", features = ["std"] }
 
 [build-dependencies]
 # 内核自带的原生依赖构建（Signalsmith Stretch 的 C 包装 + SoundTouchDLL）。

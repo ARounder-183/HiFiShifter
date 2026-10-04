@@ -229,17 +229,17 @@ mod reaper_export;
 mod reaper_import;
 #[path = "import/reaper_parser.rs"]
 mod reaper_parser;
-#[path = "audio/soundtouch.rs"]
-mod soundtouch;
-#[path = "audio/sstretch.rs"]
-mod sstretch;
+// `soundtouch` / `sstretch` / `time_stretch` 已迁到 `hifishifter-kernel`。
+// 再导出，app 侧 `crate::time_stretch::…` 的路径保持不变。
+//
+// 【为什么这三个一起走】前两个是后者的原生后端（FFI），而它们的原生构建
+// 也已随之内核化 —— 否则插件单独链接内核时会链接失败。设计 §4.9。
+pub use hifishifter_kernel::{soundtouch, sstretch, time_stretch};
 mod state;
 #[path = "vocoder/streaming_world.rs"]
 mod streaming_world;
 mod system_clipboard;
 mod temp_manager;
-#[path = "audio/time_stretch.rs"]
-mod time_stretch;
 #[path = "import/vocalshifter_clipboard.rs"]
 mod vocalshifter_clipboard;
 #[path = "import/vocalshifter_import.rs"]
