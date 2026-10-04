@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { AppForm, AppSwitchRow } from "../../../ui/Field";
@@ -259,7 +260,9 @@ function ClipRateEditorFields({
         updateNewBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
     });
 
-    return (
+    // 挂到 `document.body`：弹出面留在布局盒里会被沿途任何一层
+    // `overflow: hidden` 裁掉（见 `src/index.css` 的 `.hs-menu--submenu`）。
+    return createPortal(
         <div
             ref={menuRef}
             role="menu"
@@ -441,7 +444,8 @@ function ClipRateEditorFields({
                     {tf("clip_rate_editor_apply")}
                 </button>
             </div>
-        </div>
+        </div>,
+        document.body,
     );
 }
 

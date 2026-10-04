@@ -6186,7 +6186,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                   currentPlayheadSec,
                               );
 
-                              return createPortal(
+                              // 菜单自己 portal 到 `document.body`（见 ClipContextMenu），
+                              // 这里不再套一层 —— 表面归组件所有。
+                              return (
                                   <ClipContextMenu
                                       x={contextMenu.x}
                                       y={contextMenu.y}
@@ -6412,8 +6414,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                               }),
                                           );
                                       }}
-                                  />,
-                                  document.body,
+                                  />
                               );
                           })()
                         : null}

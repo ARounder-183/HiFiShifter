@@ -13,7 +13,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { AppButton } from "./Button";
 import { AppField, AppForm, AppFormSection, AppSwitchRow } from "./Field";
-import { AppContextMenu, AppSubMenu, type AppMenuItemSpec } from "./Menu";
+import { AppAnchoredMenu, AppContextMenu, AppSubMenu, type AppMenuItemSpec } from "./Menu";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -506,4 +506,53 @@ test("AppContextMenu：任一项有图标时，所有项都预留图标列", asy
 test("AppContextMenu：没有图标时不占图标列", async () => {
     await render(<AppContextMenu x={10} y={10} items={ITEMS} onClose={() => {}} />);
     expect(container.querySelectorAll(".hs-menu__icon").length).toBe(0);
+});
+
+/*
+ * 锚定菜单必须挂在 `document.body` 下。
+ *
+ * 【为什么这条是硬要求】参数编辑器工具栏的三个下拉曾经完全打不开：菜单被排布在
+ * y 483–541，而它所在的布局盒只到 y 484 —— 可视高度 0px。DOM 在、坐标对、
+ * `getBoundingClientRect` 返回真值，只是一个像素都画不出来（沿途 9 层
+ * `overflow: hidden` 逐层裁掉）。挂在 body 下是唯一与祖先样式无关的形态。
+ */
+test("AppAnchoredMenu：即使挂载在会裁切内容的容器里，也渲染到 document.body", async () => {
+    const anchorRef = { current: null as HTMLDivElement | null };
+    const menuRef = { current: null as HTMLDivElement | null };
+
+    await render(
+        // 祖先带 `overflow: hidden`：留在里面的绝对定位元素会被裁掉。
+        <div style={{ overflow: "hidden" }}>
+            <div ref={anchorRef} data-testid="anchor" />
+            <AppAnchoredMenu open anchorRef={anchorRef} menuRef={menuRef}>
+                <button type="button" className="hs-menu__item">
+                    Alpha
+                </button>
+            </AppAnchoredMenu>
+        </div>,
+    );
+
+    const menu = menuRef.current;
+    expect(menu, "菜单没有挂上 ref").not.toBeNull();
+    // 关键断言：菜单的父节点是 body，不是那个 overflow:hidden 的容器。
+    expect(menu!.parentElement).toBe(document.body);
+    expect(menu!.classList.contains("hs-menu")).toBe(true);
+    // 表面标记：它必须是"已打开的菜单"（时间轴的关闭逻辑据此判断"点在菜单里面"）。
+    expect(menu!.getAttribute("data-hs-context-menu")).toBe("1");
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+});
+
+test("AppAnchoredMenu：open=false 时不渲染任何东西", async () => {
+    const anchorRef = { current: null as HTMLDivElement | null };
+    const menuRef = { current: null as HTMLDivElement | null };
+    await render(
+        <div>
+            <div ref={anchorRef} />
+            <AppAnchoredMenu open={false} anchorRef={anchorRef} menuRef={menuRef}>
+                <span>Alpha</span>
+            </AppAnchoredMenu>
+        </div>,
+    );
+    expect(menuRef.current).toBeNull();
+    expect(document.querySelector(".hs-menu")).toBeNull();
 });

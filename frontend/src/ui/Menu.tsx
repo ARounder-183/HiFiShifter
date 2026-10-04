@@ -33,6 +33,11 @@
  *     里面"，别处不得用它当"菜单开着"的判据（常驻元素带这个值会让判据永远为真）。
  *   - 无值：常驻的**锚点**容器（工具栏按钮的 `position: relative` 外壳），只表示
  *     "这里会长出菜单"。`AppTooltip` 的注释记录了为什么不能把两者混为一谈。
+ *
+ * 【菜单表面必须挂在 `document.body`】`AppContextMenu` 由调用方 portal，
+ * `AppAnchoredMenu` 自己 portal。留在触发它的布局盒里会被沿途任何一层
+ * `overflow: hidden` 裁掉 —— 实测参数编辑器工具栏下拉要穿过 9 层，可视高度 0px
+ * （详见 `src/index.css` 的 `.hs-menu--submenu`）。新增菜单表面时请沿用这条。
  */
 import {
     Fragment,
@@ -43,10 +48,12 @@ import {
     useRef,
     useState,
 } from "react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode, RefObject } from "react";
+import { createPortal } from "react-dom";
 import { CheckIcon } from "@radix-ui/react-icons";
 
 import { EDGE_GAP, clampAxisPosition } from "../components/appTooltipPosition";
+import { cx } from "./cx";
 import { ownsArrowKeys, useMenuKeyboard } from "./useMenuKeyboard";
 
 export interface AppMenuItemSpec {
@@ -527,9 +534,9 @@ export function AppSubMenu({ label, badge, disabled = false, children }: AppSubM
                     role="menu"
                     data-hs-context-menu="1"
                     // 子面板与主菜单**共用同一个表面**；定位由上面的 layout effect
-                    // 逐条覆盖（翻左 / 对齐 / 收宽），因此只借 `--anchored` 的
-                    // `position: absolute`，不借它的默认偏移。
-                    className="hs-menu hs-menu--anchored"
+                    // 逐条覆盖（翻左 / 对齐 / 收宽），因此只借 `--submenu` 的
+                    // `position: absolute`（它是唯一必须留在父壳里的面板）。
+                    className="hs-menu hs-menu--submenu"
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => e.stopPropagation()}
                 >
@@ -537,5 +544,91 @@ export function AppSubMenu({ label, badge, disabled = false, children }: AppSubM
                 </div>
             ) : null}
         </div>
+    );
+}
+
+/** 锚定菜单与触发元素之间的呼吸（与 `--qt-space-2` 同一个值）。 */
+const ANCHORED_MENU_GAP_PX = 4;
+
+export interface AppAnchoredMenuProps {
+    /** 触发元素：菜单在它**下方左对齐**展开。 */
+    anchorRef: RefObject<HTMLElement | null>;
+    /** 是否展开。`false` 时本组件返回 `null`，调用方不必自己判空。 */
+    open: boolean;
+    /**
+     * 菜单容器的 ref（**必填**）。
+     *
+     * 【为什么必填】它同时承担两件事：① 外部"点在菜单内部就不关闭"的判定
+     * （`ref.current.contains(target)`）；② 本组件按实测尺寸做视口夹紧。
+     * 菜单现在挂在 `document.body` 下，**不再是锚点的 DOM 后代** —— 拿锚点的 ref
+     * 去 `contains` 会永远为假，那会让"点菜单里的按钮反而把菜单关掉"。
+     */
+    menuRef: RefObject<HTMLDivElement | null>;
+    /** 追加类（布局用，如 `flex flex-col`）。外观类由壳提供，不要在这里重写。 */
+    className?: string;
+    /** 内联样式（如各面板自己算出的 `maxHeight`）。 */
+    style?: CSSProperties;
+    children: ReactNode;
+}
+
+/**
+ * 锚定在触发元素下方的菜单表面。
+ *
+ * 【与 `AppContextMenu` 的分工】那个锚在**指针**上（右键菜单），这个锚在**控件**
+ * 上（工具栏按钮下拉）。两者共用同一个壳与同一套条目样式，区别只有坐标从哪来。
+ *
+ * 【为什么必须 portal 到 `document.body`】菜单只要留在触发它的布局盒里，就会被
+ * 沿途任何一层 `overflow: hidden` 裁掉 —— 参数编辑器的工具按钮下拉要穿过 9 层，
+ * 实测可视高度 0px（详见 `src/index.css` 的 `.hs-menu--submenu` 说明）。挂到
+ * body 之后，布局盒里再加多少层裁切/滚动/变换都不影响它。
+ *
+ * 【坐标怎么来】一次 `useLayoutEffect` 同时做两件事：按锚点矩形取期望坐标，再按
+ * 菜单**实测尺寸**夹紧进视口（菜单宽度随内容变化，而锚点可能贴着视口右缘）。
+ * 它在浏览器绘制**之前**跑完，因此菜单首帧那一次临时坐标（`0,0`）用户看不到 ——
+ * 这也是不需要"先渲染、再夹紧"两趟状态机的原因。
+ * 竖直方向只夹紧、不翻转：菜单属于它所在的面板，翻到按钮上方只会盖住本面板自己
+ * 的工具栏（见 `menuPlacement.ts` 的同名说明）。
+ */
+export function AppAnchoredMenu({
+    anchorRef,
+    open,
+    menuRef,
+    className,
+    style,
+    children,
+}: AppAnchoredMenuProps) {
+    const [position, setPosition] = useState({ left: 0, top: 0 });
+
+    useLayoutEffect(() => {
+        if (!open) return;
+        const el = menuRef.current;
+        const anchor = anchorRef.current;
+        if (!el || !anchor) return;
+        const anchorRect = anchor.getBoundingClientRect();
+        const rect = el.getBoundingClientRect();
+        setPosition({
+            left: clampAxisPosition(anchorRect.left, rect.width, window.innerWidth, 0, EDGE_GAP),
+            top: clampAxisPosition(
+                anchorRect.bottom + ANCHORED_MENU_GAP_PX,
+                rect.height,
+                window.innerHeight,
+                0,
+                EDGE_GAP,
+            ),
+        });
+    }, [open, anchorRef, menuRef]);
+
+    if (!open) return null;
+
+    return createPortal(
+        <div
+            ref={menuRef}
+            data-hs-context-menu="1"
+            className={cx("hs-menu", className)}
+            style={{ left: position.left, top: position.top, ...style }}
+        >
+            {children}
+        </div>,
+        document.body,
     );
 }
