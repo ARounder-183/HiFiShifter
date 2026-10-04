@@ -34,7 +34,9 @@ cd E:\code\HiFiShifter\.worktrees\ara-plugin
 
 宿主位置、裁切、源替换等几何在REAPER中操作，不属于GUI参数提交范围。
 发生真正版本Conflict时，当前本地曲线保留；不要在没有保留编辑前直接确认刷新替换。
-当前截图的授权开关误Conflict已定位，修复中；运行中的旧二进制不会自动更新。
+当前截图的授权开关误Conflict已修正源码（8eba3ae5），新增回归通过；运行中的旧二进制不会自动更新。
+为不关闭当前GUI，修正版app另构建到`backend/target/ara-fix-app/debug/HiFiShifter.exe`。
+启动脚本会在两份本worktree产物中选最新版本，并拒绝重复启动仍有编辑的GUI。
 
 ## 验收边界
 

@@ -2,7 +2,7 @@
 
 中文工作记录，更新于 2026-10-04。此文件记录产品分支，历史探针仍见 HANDOFF.md。
 
-## 最新状态：正向原 GUI 已连接，提交假冲突与集成审查修复中
+## 最新状态：正向原 GUI 已连接，误冲突源码已修，等待安全部署与真实验收
 
 用户明确要求本轮先不做倒放，继续到原 GUI 正向全流程可用。此授权覆盖下方历史方向停止条件，
 不代表倒放已修复。当前规格/计划为 `2026-10-04-ara-gui-forward`。
@@ -10,7 +10,11 @@
 工作树仍是 `E:/code/HiFiShifter/.worktrees/ara-plugin`，`codex/ara-plugin`。
 Task16 PCM注入口提交 c836bd65；Task18 原GUI客户端及嵌入dist/Low临时目录修正为
 82942a25、49bda828、6da16345。Task17 plugin/IPC基础检查点为4800705。
-新鲜验证：plugin60与IPC4均通过；但集中审查四项正确性问题仍待修复，不能称链路完成。
+最新修复为8eba3ae5/0b8f4dd4，中文doc8c6cb394。controller新鲜验证plugin68/IPC4/
+kernel28/app ARA18/params10/project21/frontend8通过；前端生产构建也通过。
+四项集中审查已修，首轮窄复审仅F2的false-checkpoint并发dirty留P1，现已定向修正，
+最终窄复审F2/R1为ADDRESSED，无新问题。最终独立target GUI构建38.55秒正常exit0，
+产物92661760 bytes。真实导出/重开仍未完成，不能称完整链路验收通过。
 
 本机WebView2创建0x800700AA：隔离WEBVIEW2_USER_DATA_FOLDER后实际GUI正常显示；
 独立debug app需要custom-protocol feature。Low GUI到Medium REAPER的管道已仅在本应用
@@ -19,13 +23,15 @@ Task16 PCM注入口提交 c836bd65；Task18 原GUI客户端及嵌入dist/Low临�
 
 真实GUI已下载宿主PCM并显示两片段及原音高编辑器。用户截图记录手绘曲线提交时
 `Conflict: host model changed; refresh`；最新成功Snapshot之后仅有samples_access=false，
-而clear_renderers无条件revision++，已定位为访问开关与模型版本混淆。修复与四项审查问题
-共一次wave，见 `.superpowers/sdd/2026-10-04-ara-gui-forward/integration-fix-brief.md`。
+而clear_renderers无条件revision++，已定位为访问开关与模型版本混淆。已分离版本，
+实际授权回调/同快照提交/真实源改变拒绝均有回归。相关报告在本plan的SDD目录。
 随后用户自行操作产生真实`GUI commit ready revision=1 model=8`；这仅证明一次提交被接受，
 未作REAPER音频导出/重开比对，不能代替修音验收。
 
 用户用物理Escape停止了Computer Use。当前GUI/隔离REAPER仍运行且可能有用户未保存曲线，
-不得为重建/部署直接终止它们、刷新覆盖或发送脚本到已有实例。最终验收仍待继续。
+不得为重建/部署直接终止它们、刷新覆盖或发送脚本到已有实例。新GUI只在独立target构建，
+startup脚本在当前窗口还活着时明确拒绝部署启动。最终验收仍待继续。
+旧开发版非空v1 state没有稳定轨道身份，新v2明确拒绝猜测迁移；保留现有GUI编辑。
 
 ## 历史检查点：完整 v1 被真实倒放输出阻塞
 

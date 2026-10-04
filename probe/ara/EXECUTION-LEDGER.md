@@ -752,4 +752,18 @@ dumpbin最终imports无vslib/Tauri/WebView；隔离目录附SoundTouchDLL/Direct
 
 **Task 19: Ruling: 用户物理Escape停止Computer Use且GUI可能有未保存手绘曲线 — 本轮只读诊断与源码修复，不刷新/关闭/强杀现有GUI或REAPER — 若忽略，会覆盖用户当前编辑并违背停止请求。**
 
+**Task 19: Ruling: 首轮修复复审发现false-checkpoint尾块不推进版本，仍能把未发送曲线标为已保存 — 比较实际Commit支持参数，并让四个成功参数写入在timeline锁内独立标dirty，checkpoint只控制undo — 若只靠版本或手工bump回归，会漏掉真实分块/平滑并丢用户曲线。**
+源码0b8f4dd4；真实非checkpoint5条RED正常exit1，恢复后ARA18/params10正常exit0。
+controller独立重跑同样通过。首轮F1/F3/F4/授权误冲突及最终F2/R1均已复审通过，无新问题。
+
+**Task 19: Ruling: 真实参数命令测试摘要通过但进程不退出，误归因音频worker的尝试不足 — 明确不把摘要当通过，隔离仅测试的设备/推理外部边界，取得正常0/1退出 — 若扩大成产品生命周期修复，会改变其他机器已正常的行为且缺少依据。**
+实际fixture缺省Nsf触发ensure_params_for_root→build_root_pitch_key→FCPE后台预热。
+显式cfg(test) no-device AppState/None算法fixture保留真实参数命令与dirty逻辑；Default仍真实引擎。
+没有global/TLS模式，产品分析/播放生命周期未改；真实DSP另外用WORLD oracle验证。
+
+**Task 19: Ruling: 当前用户GUI仍占用旧产物，不能为了重建强制清理 — 新GUI在独立target构建，启动脚本选最新完整本地产物并拒绝重复实例 — 若误用旧exe，新投影保护不生效；若强杀，会丢正在编辑的曲线。**
+controller最新验证plugin68/IPC4/kernel28/app18/params10/project21/frontend8通过；
+基线普通/裁切/gap最大差5.96e-8。GUI音高导出、保存重开、同路径源改变仍无最终证据，未关闭Task19。
+最后独立target嵌入dist GUI构建正常exit0，38.55秒，92661760 bytes；启动重复实例防护已实测拒绝。
+
 

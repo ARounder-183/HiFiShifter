@@ -2,7 +2,19 @@
 param([switch]$Reopen, [switch]$NoGui)
 $ErrorActionPreference = 'Stop'
 $araGuiRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-if (!$NoGui -and !(Test-Path -LiteralPath (Join-Path $araGuiRoot 'backend\target\debug\HiFiShifter.exe'))) { throw 'Build the HiFiShifter app before launching REAPER.' }
+$araGuiBuilds = @(
+    (Join-Path $araGuiRoot 'backend\target\debug\HiFiShifter.exe'),
+    (Join-Path $araGuiRoot 'backend\target\ara-fix-app\debug\HiFiShifter.exe')
+)
+# 独立target允许保留用户旧窗口完成新构建；关闭后选最新已完成的本地GUI产物。
+$araGuiExe = $araGuiBuilds | Where-Object { Test-Path -LiteralPath $_ } | Get-Item |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (!$NoGui -and !$araGuiExe) { throw 'Build the HiFiShifter app before launching REAPER.' }
+if (!$NoGui) {
+    $araGuiRunning = Get-CimInstance Win32_Process -Filter "Name = 'HiFiShifter.exe'" |
+        Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($araGuiRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) }
+    if ($araGuiRunning) { throw 'This worktree GUI is running; preserve your edits and close it normally before switching builds.' }
+}
 if (Get-Process reaper -ErrorAction SilentlyContinue) { throw 'REAPER is running; close it normally before starting the isolated profile.' }
 $araGuiScratch = Join-Path $araGuiRoot '.build-tmp\gui-probe'
 New-Item -ItemType Directory -Force $araGuiScratch | Out-Null
@@ -21,6 +33,6 @@ $araGuiArgs += (Join-Path $PSScriptRoot 'build_forward_gui_probe.lua')
 # 本轮明确需要用户可见的交互窗口，其余后台构建仍使用Hidden。
 Start-Process -FilePath 'D:\Softwares\REAPER (x64)\reaper.exe' -WindowStyle Normal -ArgumentList $araGuiArgs -WorkingDirectory $araGuiVst
 if (!$NoGui) {
-    Start-Process -FilePath (Join-Path $araGuiRoot 'backend\target\debug\HiFiShifter.exe') -WindowStyle Normal -WorkingDirectory (Join-Path $araGuiRoot 'backend\target\debug') `
+    Start-Process -FilePath $araGuiExe.FullName -WindowStyle Normal -WorkingDirectory $araGuiExe.DirectoryName `
         -ArgumentList @("--log-file=$(Join-Path $PSScriptRoot 'captures\forward-gui-app.log')")
 }
