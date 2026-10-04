@@ -101,3 +101,5 @@ controller负责重建部署、真实宿主音高导出差异、保存并重开�
 一次隐藏Start-Process输出重定向未继承工作树TEMP/TMP，原临时目录4项PermissionDenied（14 passed/4 failed），不计为本P1回归或GREEN；没有更改ACL/OS，后续均恢复规范cargo前置。原用户GUI/REAPER及曲线未操作、未关闭、未部署，未启动子代理。
 
 本追加源码路径：`backend/src-tauri/src/ara_bridge.rs`、`commands.rs`、`commands/params.rs`、`state/app.rs`、`audio_engine/engine.rs`、`audio_engine/mod.rs`。后二者仅增加 `cfg(test)` 工厂/再导出，生产引擎构造及worker代码没有改动。追加源码本地提交：**`0b8f4dd4`**（`fix(ara): retain dirty state for unsent parameter writes`），只含上述六个路径。报告单独提交。控制任务的 `probe/ara/FORWARD-GUI-RUN.md`、`start_forward_gui.ps1` 现有修改予以保留，不纳入提交。
+
+报告追加提交 `89bab2fa`。完工前按用户硬约定补齐params.rs中文文件头及四个成功写入入口、detached_engine、with_audio_engine/显式AppState构造器的中文doc；最后补充仅注释和报告，不改变行为，diff check无输出。

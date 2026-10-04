@@ -2085,6 +2085,7 @@ fn clip_pitch_params_changed(old: &crate::state::Clip, new: &crate::state::Clip)
 pub(crate) mod command_test_support {
     use super::*;
 
+    /// 显式无设备fixture：保留真实引擎字段，仅把外部音频命令发送边界断开。
     pub(crate) fn detached_engine() -> AudioEngine {
         let (tx, _receiver)=mpsc::channel();
         AudioEngine {

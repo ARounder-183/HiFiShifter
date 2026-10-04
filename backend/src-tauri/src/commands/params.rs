@@ -480,6 +480,7 @@ fn encode_param_frames_binary(orig: &[f32], edit: &[f32]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+/// 写入参数帧：checkpoint只控制undo，成功尾块/平滑仍在timeline锁内标脏。
 pub(crate) fn set_param_frames(
     state: &AppState,
     track_id: String,
@@ -681,6 +682,7 @@ pub(crate) fn set_param_frames(
     serde_json::json!({"ok": true})
 }
 
+/// 恢复参数到原始或默认值：非checkpoint尾段也与提交清dirty保持锁内全序。
 pub(crate) fn restore_param_frames(
     state: &AppState,
     track_id: String,
@@ -1173,6 +1175,7 @@ pub(super) fn get_static_param(
     }
 }
 
+/// 写入轨道静态参数：合并undo不会取消本次成功写入的dirty记账。
 pub(crate) fn set_static_param(
     state: &AppState,
     track_id: String,
@@ -1210,6 +1213,7 @@ pub(crate) fn set_static_param(
 ///
 /// 默认不产生独立撤销检查点：曲线映射与剪辑几何变更合并为同一撤销步
 /// （与旧前端 set/restore(checkpoint=false) 的流程保持一致）。
+/// 独立checkpoint开关不影响成功映射后的dirty记账。
 pub(crate) fn stretch_track_linked_params(
     state: &AppState,
     track_id: String,
