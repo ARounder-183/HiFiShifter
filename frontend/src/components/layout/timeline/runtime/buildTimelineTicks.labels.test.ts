@@ -134,11 +134,27 @@ describe("标签版式", () => {
         expect(compared).toBeGreaterThan(5);
     });
 
-    it("带标签的刻度间距不小于隐藏阈值", () => {
+    it("★ 带标签的刻度间距在 [26px, 2 × 请求值] 之间（下界防重叠、上界防稀疏）", () => {
+        // 【为什么需要上界】只断言"间距 >= 26"会放过"标签整体很稀"：间距彼此接近
+        // 但都是请求值的 3~4 倍。而 `TimeRulerMarks` 只渲染 `showLabel` 的刻度，
+        // 间距过大的那一段**既没有刻度线也没有文本** —— 正是用户报告的"某段之内的
+        // 标尺刻度与文本消失"。上界取 2 × 请求值（标签栅格自身的固有粒度）。
+        const requested = 110;
+        const viewportWidth = 1200;
         for (const pxPerSec of [8, 40, 100, 400, 1600]) {
-            const labeled = ticksAt({ pxPerSec }).filter((tick) => tick.showLabel);
+            const inView = ticksAt({ pxPerSec, viewportWidthPx: viewportWidth }).filter(
+                (tick) => tick.contentPx >= 0 && tick.contentPx <= viewportWidth,
+            );
+            const labeled = inView.filter((tick) => tick.showLabel);
             for (let i = 1; i < labeled.length; i += 1) {
-                expect(labeled[i].contentPx - labeled[i - 1].contentPx).toBeGreaterThanOrEqual(26);
+                const gap = labeled[i].contentPx - labeled[i - 1].contentPx;
+                expect(gap, `pxPerSec=${pxPerSec} 下界`).toBeGreaterThanOrEqual(26);
+                // 网格足够密时才要求上界：网格本身只有三五条时没有刻度可补，属物理稀疏。
+                if (inView.length >= 8) {
+                    expect(gap, `pxPerSec=${pxPerSec} 上界`).toBeLessThanOrEqual(
+                        requested * 2 + 1e-6,
+                    );
+                }
             }
         }
     });

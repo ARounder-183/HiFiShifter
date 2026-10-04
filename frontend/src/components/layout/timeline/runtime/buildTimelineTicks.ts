@@ -67,6 +67,20 @@ const MAX_WEAK_GRID_LINES = 160;
  */
 export const RULER_LABEL_HIDDEN_GAP_PX = 26;
 
+/**
+ * 标签间距**上限**的倍数（相对 `minLabelSpacingPx`）—— 密度补充的触发阈值。
+ *
+ * 【为什么必须有上限】`labelStrideFor` 选的是满足 `stride * stepPx >= spacingPx`
+ * 的**最小** stride，而 stride 只能取 2 的幂 / 音乐候选阶梯，因此实际间距在
+ * `[spacingPx, 2 × spacingPx)` 之间漂移；Tempo Map 下各段 stride 独立选择，
+ * 段边界拼接后可达 4×。`TimeRulerMarks` 只渲染 `showLabel` 的刻度 ⇒ 间距过大
+ * 的那一段**既没有刻度线也没有文本**，正是"某段之内的标尺刻度与文本消失"。
+ *
+ * 【为什么取 2】2 恰好是栅格自身的固有粒度（相邻档位是 2 的幂）。取 2 意味着
+ * 补充只在栅格**确实**超出其固有粒度时才介入，正常档位不触发、不会平白加密。
+ */
+const LABEL_DENSITY_TARGET_MULT = 2;
+
 /** 一个刻度：网格线与标尺刻度的最小公共单位。 */
 export interface TimelineTick {
     /** 工程时间（秒）。 */
@@ -98,6 +112,18 @@ export interface TimelineTick {
     readonly primaryLabel: string;
     /** 副单位标签文本（未启用副单位时为 null）。 */
     readonly secondaryLabel: string | null;
+    /**
+     * 该刻度是否可作为**密度补充**（§5b）的候选（**内部字段**，渲染层不消费）。
+     *
+     * 两个条件缺一不可：
+     * - **落在弱线栅格上**（`index !== undefined`）。附点 / 三连音网格下，小节线
+     *   常常不落在弱线栅格上（例如 1/8d 的网格步长是 0.75 拍，而小节线每 4 拍），
+     *   把这种线当标签会往"均匀的弱线栅格"里插进一条完全不同步的线 —— 实测会把
+     *   附点网格刚修好的"间距均匀"重新打乱（退化成 3.00×）。
+     * - **不被 swing 平移**（swing 平移段内奇数弱线索引的线，其秒位不对应整数拍，
+     *   标签文字会渲染成 `1.2.300`）。
+     */
+    readonly densityEligible?: boolean;
 }
 
 /**
@@ -407,6 +433,16 @@ export function buildTimelineTicks(args: {
             entry.index !== undefined &&
             stride !== undefined &&
             (((entry.index - phase) % stride) + stride) % stride === 0;
+        // swing 平移的是**段内奇数**弱线索引的线（`buildTempoGridLines` 的
+        // `swingAt(segBpm, k)` 按段内 k 的奇偶判定）。段内索引 = 全局索引 − 段起点
+        // 索引；无 Tempo Map 时全局索引即段内索引。密度补充（§5b）据此排除这些线。
+        const localWeakIndex =
+            entry.index === undefined
+                ? undefined
+                : segmentIndex >= 0
+                  ? entry.index - segmentStartIndices[segmentIndex]
+                  : entry.index;
+        const swung = swingOn && localWeakIndex !== undefined && Math.abs(localWeakIndex % 2) === 1;
         ticks.push({
             sec: entry.sec,
             beat,
@@ -423,6 +459,7 @@ export function buildTimelineTicks(args: {
                     ? formatTempoRulerTick(args.secondaryUnit as TimeUnit, entry.sec, ctx)
                     : formatRulerTick(args.secondaryUnit as TimeUnit, beat, ctx)
                 : null,
+            densityEligible: entry.index !== undefined && !swung,
         });
     }
 
@@ -508,10 +545,86 @@ export function buildTimelineTicks(args: {
         }
         if (!yielded) surviving.push(index);
     }
+    // ── 5b. 密度补充：约束标签间距的**上限** ──────────────────────
+    // 【为什么必须有这一趟】§3~§5 全都是"隐藏"方向的操作：§3 选的是满足
+    // `>= spacingPx` 的**最小** stride（只能取 2 的幂 / 音乐候选阶梯，因此实际
+    // 间距可漂到 2×），§5 只剔除过密的（< 26px），§6 只在**全部**无标签时兜底。
+    // **没有任何一处约束"相邻标签是否离得太远"** —— 于是视口里可以出现 300~450px
+    // 没有标签的段（请求 110px），而标尺只渲染带标签的刻度 ⇒ 那一段既没有刻度线
+    // 也没有文本。实测最坏 2.73×（无 Tempo Map）/ 4.09×（密集 Tempo Map）。
+    //
+    // 【为什么从既有刻度里补、而不是改选级】选级必须取整数 stride 才能保证
+    // "标签落在网格线上"（既有不变量）；改小 stride 又会违反 `minLabelSpacingPx`。
+    // 正确做法是先按栅格选、再从**既有刻度**里补 —— 后者保证"标尺刻度 ⊆ 网格刻度"
+    // 结构上成立（绝不凭空造一条网格里没有的线）。
+    //
+    // 【为什么单趟左→右、按"每对相邻标签各自处理"】处理某一对 (a, b) 时只看 a、b
+    // 自身的绝对位置，与其它对、与生成窗口无关。若改成"每次挑最大间距"的全局贪心，
+    // 处理顺序会随生成窗口（随滚动移动）变化，同一刻度在不同窗口下可能得到不同的
+    // 标签 —— 那正是要消除的闪烁。
+    //
+    // 【为什么不会造出过密的标签 / 不会打乱栅格】候选必须同时满足：
+    // - `densityEligible`：落在**弱线栅格**上且未被 swing 平移（见该字段的说明）。
+    //   附点 / 三连音网格下的小节线不落在弱线栅格上，插进来会把"间距均匀"打乱。
+    // - 距两侧都 `>= RULER_LABEL_HIDDEN_GAP_PX`：不会触发 §5 的最小间距约束。
+    // 因此补充后无需再跑一趟让位。
+    const labelDensityTargetPx = spacingPx * LABEL_DENSITY_TARGET_MULT;
+    const denseSurviving = [...surviving].sort((a, b) => ticks[a].contentPx - ticks[b].contentPx);
+    const densityLabeled = new Set(denseSurviving);
+    const densityMinGapPx = RULER_LABEL_HIDDEN_GAP_PX;
+    let densityCursor = 1;
+    let densityInsertions = 0;
+    // 每次插入都占用一个此前未标注的刻度，故插入次数天然有界；上限再加一道保险。
+    const densityMaxInsertions = ticks.length + 1;
+    while (densityCursor < denseSurviving.length && densityInsertions <= densityMaxInsertions) {
+        const leftIndex = denseSurviving[densityCursor - 1];
+        const rightIndex = denseSurviving[densityCursor];
+        const leftPx = ticks[leftIndex].contentPx;
+        const rightPx2 = ticks[rightIndex].contentPx;
+        if (rightPx2 - leftPx <= labelDensityTargetPx + 1e-9) {
+            densityCursor += 1;
+            continue;
+        }
+        // 理想落点：自左标签起一个目标间距（左偏，确定性）。
+        const idealPx = Math.min(leftPx + labelDensityTargetPx, rightPx2 - densityMinGapPx);
+        let bestIndex = -1;
+        let bestScore = -Infinity;
+        for (let i = 0; i < ticks.length; i += 1) {
+            if (densityLabeled.has(i)) continue;
+            // 只从**弱线栅格**上、且未被 swing 平移的刻度里挑（见 `densityEligible`）。
+            if (ticks[i].densityEligible !== true) continue;
+            const x = ticks[i].contentPx;
+            if (x <= leftPx + densityMinGapPx - 1e-9) continue;
+            if (x >= rightPx2 - densityMinGapPx + 1e-9) continue;
+            // 优先级：小节起点 > 整数拍 > 其它；同级取最靠近理想落点的。
+            const priority =
+                (ticks[i].isBarStart ? 2 : 0) +
+                (Math.abs(ticks[i].beat - Math.round(ticks[i].beat)) < 1e-6 ? 1 : 0);
+            const score = priority * 1e6 - Math.abs(x - idealPx);
+            if (score > bestScore) {
+                bestScore = score;
+                bestIndex = i;
+            }
+        }
+        if (bestIndex < 0) {
+            // 这一对之间没有可补的刻度（网格本身就很稀）——属物理必然，跳过。
+            densityCursor += 1;
+            continue;
+        }
+        densityLabeled.add(bestIndex);
+        denseSurviving.splice(densityCursor, 0, bestIndex);
+        densityInsertions += 1;
+        // 不推进游标：继续检查 (左标签 → 新标签) 这一对是否仍超限。
+    }
+    for (const index of denseSurviving) {
+        if (!ticks[index].showLabel) ticks[index] = { ...ticks[index], showLabel: true };
+    }
+
     // 版式：宽度取到**下一条保留标签**的间距（减去留白）；最后一条不限宽。
-    for (let k = 0; k < surviving.length; k += 1) {
-        const index = surviving[k];
-        const nextIndex = surviving[k + 1];
+    // 必须在密度补充**之后**算，新增标签才拿得到正确宽度。
+    for (let k = 0; k < denseSurviving.length; k += 1) {
+        const index = denseSurviving[k];
+        const nextIndex = denseSurviving[k + 1];
         const maxWidth =
             nextIndex === undefined
                 ? null
@@ -537,7 +650,9 @@ export function buildTimelineTicks(args: {
             const last = restored[restored.length - 1];
             if (
                 last !== undefined &&
-                ticks[index].contentPx - ticks[last].contentPx < args.minLabelSpacingPx
+                // 与 §3 / §5b 同一口径：用**钳制后**的 `spacingPx`，而不是原始入参。
+                // 旧写法用 `args.minLabelSpacingPx`，用户设了极端值时两处间距不一致。
+                ticks[index].contentPx - ticks[last].contentPx < spacingPx
             ) {
                 continue;
             }
