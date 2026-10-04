@@ -2037,7 +2037,7 @@ dependencies = [
 name = "hifishifter-plugin"
 version = "0.1.0"
 dependencies = [
- "HiFiShifter",
+ "hifishifter-kernel",
  "serde",
  "serde_json",
 ]

@@ -2,7 +2,7 @@
 //!
 //! 前半部分是从探针 Task 3 搬过来的字段级无损/降级测试；后半部分是探针里**没能做**的
 //! Step 6：把映射出的 `TimelineState` 真的交给本体内核渲染，与"手工拼出来的同内容
-//! 时间线"逐样本比较。两者现在都能做，是因为 `backend_lib::kernel` 已经把
+//! 时间线"逐样本比较。两者现在都能做，是因为 `hifishifter_kernel` 已经把
 //! `render_mixdown_interleaved` 暴露出来了。
 
 use hifishifter_plugin::ara::{
@@ -269,7 +269,7 @@ fn lost_field_checklist_is_pinned() {
 
 /// 参考时间线：用 **扁平投影** 路径手工拼出同样的内容（`takes` 留空，
 /// 由 `normalize_takes()` 从投影生成 take），与 ARA 路径的"显式写 take"互为独立构造。
-fn reference_timeline(doc: &AraDocument) -> backend_lib::kernel::TimelineState {
+fn reference_timeline(doc: &AraDocument) -> hifishifter_kernel::state::TimelineState {
     let mut tracks = Vec::new();
     let mut track_ids = Vec::new();
     let mut declared = Vec::new();
@@ -336,7 +336,7 @@ fn reference_timeline(doc: &AraDocument) -> backend_lib::kernel::TimelineState {
         })
         .fold(0.0_f64, f64::max);
 
-    let mut timeline: backend_lib::kernel::TimelineState = serde_json::from_value(json!({
+    let mut timeline: hifishifter_kernel::state::TimelineState = serde_json::from_value(json!({
         "tracks": tracks,
         "clips": clips,
         "bpm": 120.0,

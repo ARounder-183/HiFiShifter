@@ -1,7 +1,7 @@
 //! ARA 文档模型 → `TimelineState` 映射。
 //!
 //! 这是探针 Task 3 验证过的映射的产品化版本：落点是本体真实的
-//! [`TimelineState`]（经 `backend_lib::kernel` 暴露），不是影子结构。
+//! [`TimelineState`]（经 `hifishifter_kernel` 暴露），不是影子结构。
 //!
 //! 与探针版本的唯一功能差别：`AraPlaybackRegion` 多了 `region_sequence_index`，
 //! 对应真实 ARA 里 `createPlaybackRegion` 自带的 sequence 参数。有它就按它归属，
@@ -11,7 +11,7 @@
 //! 已知丢失字段见 [`LOST_FIELDS`]：ARA 表达不到的输入一律**显式降级**，
 //! 不允许悄悄填默认值。
 
-use backend_lib::kernel::TimelineState;
+use hifishifter_kernel::state::TimelineState;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;

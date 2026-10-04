@@ -4,10 +4,13 @@
 //! 也不该各自决定用哪个拉伸算法。这里把"用本体内核渲染一段区间"收敛成一个入口，
 //! 供逐样本比对与后续 ARA renderer 复用。
 
-use backend_lib::kernel::{
-    render_mixdown_interleaved, MixdownOptions, OutputSpec, QualityPreset, StretchAlgorithm,
-    TimelineState,
-};
+// 【为什么路径是分模块的而不像 app 那样有一层扁平 re-export】app 的
+// `pub mod kernel` 是它给探针留的窗口；插件直接依赖内核 crate，按内核自己的
+// 模块结构取用更清楚 —— 也免得插件误以为内核只有一个扁平命名空间。
+use hifishifter_kernel::encode::OutputSpec;
+use hifishifter_kernel::mixdown::{render_mixdown_interleaved, MixdownOptions, QualityPreset};
+use hifishifter_kernel::state::TimelineState;
+use hifishifter_kernel::time_stretch::StretchAlgorithm;
 
 /// 一段离线渲染产物。
 #[derive(Debug, Clone)]
