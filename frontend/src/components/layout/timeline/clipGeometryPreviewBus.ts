@@ -18,9 +18,14 @@
  *
  * ## 本模块的职责（只有一件事）
  *
- * 在几何手势开始时发布一份**全量 clip 几何快照**，结束时清除。消费方
- * （`loudnessGeometryWarp`）用它和当前几何做差分，得出「旧范围 → 新范围」的时域映射，
+ * 在几何手势开始时发布一份**全量 clip 几何快照**，结束时宣告手势已完成。消费方
+ * （`loudnessGeometryWarp`）用它和当前几何做差分，得出**源坐标仿射映射**，
  * 从而在本地把基线/曲线搬到正确的位置 —— 不需要任何 IPC，也不需要等后端。
+ *
+ * 【为什么快照必须含源窗口与速率】Slip 只改 `sourceStartSec / sourceEndSec`
+ * （起点/长度/速率全不变），而拉伸改的是 `playbackRate`。只记 `start/length`
+ * 会让 Slip 被判定成"没有变化"、让延伸/截短被错当成拉伸 —— 见 `loudnessGeometryWarp`
+ * 文件头的推导。
  *
  * ## 为什么是"全量快照"而不是"参与集合"
  *
@@ -35,7 +40,7 @@
  * - 消费方：`PianoRollPanel` → `loudnessGeometryWarp`。
  */
 
-/** 手势开始时记录的单个 clip 几何（只含影响时域映射与基线电平的字段）。 */
+/** 手势开始时记录的单个 clip 几何（决定"哪段素材在哪个时刻被播放"的全部字段）。 */
 export interface ClipGeometrySnapshot {
     readonly clipId: string;
     /** 时间轴起点（秒）。 */
@@ -50,14 +55,32 @@ export interface ClipGeometrySnapshot {
      * 因此增益旋钮拖拽同样会让基线整段变化，必须能表达为映射的一部分。
      */
     readonly gain: number;
+    /**
+     * 源窗口（秒）。
+     *
+     * 【为什么必须有】Slip 只改这两个字段（`slipWindow.ts`），起点/长度/速率全不变。
+     * 上一版快照缺了它们，差分判定"没有变化"⇒ 映射为空 ⇒ Slip 期间波形仍是
+     * 「旧内容的基线 × 新内容的峰值」。延伸/截短同样靠它们才能被识别为"揭示"而非"缩放"。
+     */
+    readonly sourceStartSec: number;
+    readonly sourceEndSec: number;
+    /** 播放速率（`playbackRate`，含 take 倍率）。拉伸会改它 ⇒ 必须参与映射。 */
+    readonly playbackRate: number;
+    readonly reversed: boolean;
+    readonly loopEnabled: boolean;
 }
 
-/** 可从 clip 列表建立快照的最小字段集。 */
+/** 可从 clip 列表建立快照的最小字段集（Redux `ClipInfo` 天然满足）。 */
 export interface ClipGeometrySource {
     readonly id: string;
     readonly startSec: number;
     readonly lengthSec: number;
     readonly gain?: number | null;
+    readonly sourceStartSec?: number | null;
+    readonly sourceEndSec?: number | null;
+    readonly playbackRate?: number | null;
+    readonly reversed?: boolean;
+    readonly loopEnabled?: boolean;
 }
 
 let origin: readonly ClipGeometrySnapshot[] | null = null;
@@ -86,18 +109,23 @@ export function beginClipGeometryPreview(clips: readonly ClipGeometrySource[]): 
         startSec: Number(clip.startSec) || 0,
         lengthSec: Math.max(0, Number(clip.lengthSec) || 0),
         gain: Number.isFinite(clip.gain) ? Number(clip.gain) : 1,
+        sourceStartSec: Number(clip.sourceStartSec) || 0,
+        sourceEndSec: Number(clip.sourceEndSec) || 0,
+        playbackRate: Number(clip.playbackRate) || 1,
+        reversed: clip.reversed === true,
+        loopEnabled: clip.loopEnabled === true,
     }));
     notify();
 }
 
 /**
- * 手势结束：清除快照。
+ * 手势结束：宣告手势已完成（消费方进入"等权威快照追上"态）。
  *
  * 【为什么消费方**不**在这里立刻撤下映射】提交之后、权威快照回来之前，映射仍然是
  * 唯一正确的数据源（它把旧位置的基线搬到新位置，而这正是后端即将算出的结果）。
  * 立刻撤下会让波形在那一两帧里退回**旧位置的基线**——用户看到的就是"松手闪一下"。
- * 因此消费方把"撤下"绑定在**提交之后取的快照**上（与 `LiveEditOverride.committed`
- * 同一套约定），本函数只负责宣告手势已经结束。
+ * 撤下的判据是**后端返回的基线所依据的几何变了**（`LoudnessSnapshot.baselineKey`），
+ * 与快照落地落在同一次渲染里；本函数只负责宣告手势已经结束。
  */
 export function endClipGeometryPreview(): void {
     if (origin === null) return;

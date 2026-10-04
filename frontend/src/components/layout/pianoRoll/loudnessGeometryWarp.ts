@@ -12,48 +12,69 @@
  * 响段高度乱跳，静段被"无内容淡出"压平或被放大成满高平台。这就是用户报告的
  * 「拖拽过程中波形有很大问题，松手才恢复」。
  *
- * ## 本模块做什么
+ * ## 本模块的核心：**源坐标**，不是时间轴范围
  *
- * 把「按下时的几何 → 当前几何」的差分表达成一组**范围映射**
- * （`旧范围 → 新范围`，与后端 `TimelineState::stretch_linked_params_in_root_range`
- * 的 `frame_mappings` 同一形状），再据此把快照上的基线/曲线**按帧重采样**到新位置。
+ * 上一版把映射表达成「旧时间轴范围 → 新时间轴范围」的仿射重采样。它能表达移动与
+ * 拉伸，但表达不了 Slip（源窗口平移）与延伸/截短（内容揭示），而且它套用拉伸时用的是
+ * 后端 `resample_curve` 的 `(旧长−1)/(新长−1)` 口径，而不是**音频内容的消费**口径
+ * —— 二者仅在 Alt 拉伸下巧合一致。
  *
- * 三条语义全部**镜像后端**，因此拖拽期间的显示与松手后的权威结果一致：
+ * 后端的真相在 `pitch_clip::assemble_nonloop_pitch_from_window`：
  *
- * 1. **原声基线永远跟着几何走**（它就是几何推导出来的量）；
- * 2. **用户曲线（volume / dyn 目标）只在"锁定参数线"开启时才跟着走** ——
- *    与后端只在该开关打开时才调用 `stretch_linked_params_in_root_range` 一致；
- * 3. **旧范围中不被任何新范围覆盖的帧恢复为 pad 值** —— volume → 1.0，
- *    dyn 目标 → 哨兵（= 沿用原声，即增益 1）。与后端
- *    `uncovered_old_segments` + `automation_curve_pad_value` 同一口径。
+ * ```text
+ * src_f = win_start_frame_f + i · rate      // i = clip 内的时间线帧下标
+ * ```
  *
- * ## 重采样公式：逐字镜像后端
+ * 即 **某时间线帧播放哪段素材，只由「消费锚点、起点、速率」决定，与 clip 多长无关**。
+ * 记 `srcF(f) = anchorF + (f − startF) · rate`（帧域，可为负速率 = 倒放），要求同一段
+ * 素材在新旧几何下的时间线帧 `f` / `g`：
  *
- * 后端的 `resample_curve(values, target_len, false)` 用
- * `ratio = (old_len − 1) / (new_len − 1)` 做线性插值（长度 1 时用 1.0 兜底）。
- * 本模块用同一公式把「新帧」映射回「旧帧」，因此同一次拖拽在前端预览出的曲线与
- * 后端提交后的曲线**逐值同源**，松手不会跳变。
+ * ```text
+ * srcF_old(g) = srcF_new(f)
+ * ⟹ g(f) = startF_old + ( anchorF_new − anchorF_old + (f − startF_new)·rate_new ) / rate_old
+ * ```
+ *
+ * 这一个仿射公式**同时精确表达四种手势**，而且「延伸/截短 ⟹ 恒等」是被**推导出来的**：
+ *
+ * | 手势 | 几何变化 | 代入结果 |
+ * |---|---|---|
+ * | 移动 | 仅 `startF` 变 | `g(f) = f − Δ` 刚性平移 |
+ * | Slip | 仅 `anchorF` 变 | `g(f) = f + Δ/anchor` 刚性平移 |
+ * | 拉伸/缩短 | `rate` 变（源跨度不变） | 仿射缩放，全程有定义 |
+ * | 延伸/截短 | `anchorF` 与 `startF` 同步变 | **`g(f) ≡ f`** —— 内容位置根本没动 |
+ *
+ * 最后一行正是用户报告的「延伸/截短看起来像拉伸/缩短」的根因：旧模型把 `lengthSec`
+ * 的变化一律当作时间缩放，而物理真相是"露出/藏起"。
+ *
+ * ## 用户曲线走另一条口径（与后端提交路径一致）
+ *
+ * 后端只在 **移动**（`move_clips` 携带参数线）与 **拉伸**（`stretch_linked_params`）
+ * 时搬移用户画的曲线，**裁切 / Slip / 增益 / 淡化 / 吸附偏移一律不动**曲线。因此
+ * 曲线的映射按手势分类产出：移动 → 同一个平移仿射；拉伸 → `resample_curve` 的
+ * `(旧长−1)/(新长−1)`（逐字镜像后端）；其余 → 恒等。
  *
  * ## 近似边界（已知且可接受）
  *
- * 基线是**能量域融合**后的曲线（`sqrt(Σ(电平ᵢ×增益ᵢ)²)`），前端只有融合结果、没有
- * 逐 clip 分量，因此映射是对**整条曲线**做的。于是：
- *
- * - 单 clip 拖拽、整组同位移拖拽：**精确**（所有分量整体平移）；
- * - 裁切 / 拉伸：**精确**（仿射重采样，与后端同公式）；
- * - 增益旋钮：单 clip 精确；多 clip 重叠时按比例缩放融合值，是近似；
- * - 被拖走的 clip 与**未移动**的 clip 在新区间重叠：融合关系改变，映射无法表达，
- *   是近似（该处的波形高度可能略有偏差，松手后由权威快照纠正）。
- *
- * 这些都是**拖拽预览**的误差，且只出现在重叠区；相比修复前的"整段错位"，量级完全不同。
+ * - 基线是**能量域融合**（`sqrt(Σ(电平ᵢ×增益ᵢ)²)`）后的曲线，前端只有融合结果、
+ *   没有逐 clip 分量，因此映射是对**整条曲线**逐 clip 做的。单 clip 精确；多个 clip
+ *   在新区间重叠时无法分解，是近似（错峰处高度略有偏差，松手由权威快照纠正）。
+ * - **Loop 回绕**使消费函数带取模、不再是仿射：本模块按正放仿射近似，误差只出现在
+ *   回绕点落在 clip 内的那一段。移动/裁切对 Loop 也是**精确**的（映射恒等或平移）。
+ * - 淡化的变化只影响"该帧是否计入能量"的门限（后端 `fade_weight_at > 0`），不影响
+ *   电平位置；忽略。
  */
 
-/** 差分所需的最小 clip 几何。 */
+/** 构造映射所需的最小 clip 几何（Redux `ClipInfo` 天然满足）。 */
 export interface WarpClipGeometry {
     readonly id: string;
     readonly startSec: number;
     readonly lengthSec: number;
     readonly gain?: number | null;
+    readonly sourceStartSec?: number | null;
+    readonly sourceEndSec?: number | null;
+    readonly playbackRate?: number | null;
+    readonly reversed?: boolean;
+    readonly loopEnabled?: boolean;
 }
 
 /** 手势开始时的几何快照条目（与 `clipGeometryPreviewBus` 的快照同形）。 */
@@ -62,27 +83,90 @@ export interface WarpClipOrigin {
     readonly startSec: number;
     readonly lengthSec: number;
     readonly gain: number;
+    readonly sourceStartSec: number;
+    readonly sourceEndSec: number;
+    readonly playbackRate: number;
+    readonly reversed: boolean;
+    readonly loopEnabled: boolean;
 }
 
-/** 一次「旧范围 → 新范围」映射（与后端 `StretchLinkedRangeSec` 同形 + 增益比）。 */
-export interface LoudnessRangeMapping {
-    readonly oldStartSec: number;
-    readonly oldLengthSec: number;
-    readonly newStartSec: number;
-    readonly newLengthSec: number;
-    /**
-     * 该 clip 的增益比 `newGain / oldGain`（1 = 未变）。
-     *
-     * 基线含静态 clip 增益，因此增益旋钮拖拽也会让基线整段变化。单 clip 时
-     * 精确（基线 ∝ 增益）；重叠时按比例缩放融合值，属已知近似。
-     */
-    readonly gainScale: number;
-}
-
+/** 基线帧落在「旧几何下该 clip 不覆盖」的区间：基线未知（不施加动态增益）。 */
+export const WARP_BASELINE_UNKNOWN = -3;
 /** 曲线帧落在「旧范围但不在任何新范围内」时的返回值：该帧恢复为 pad 值。 */
 export const WARP_CURVE_PAD = -2;
 /** 该帧不受任何映射影响（恒等）。 */
 export const WARP_SEGMENT_IDENTITY = -1;
+
+/**
+ * 某个 clip 在某状态下的**内容消费参数**（本模块的原子概念）。
+ *
+ * 全部由后端同款公式导出（见 `map_clip_curve` / `clip_pitch_trim_window_sec` /
+ * `clip_playback_window_sec`），因此"前端预览"与"后端重算"用同一个坐标系。
+ */
+export interface ClipConsumption {
+    /** 时间线起点（帧）：`round(start_sec · 1000/fp)`。 */
+    readonly startF: number;
+    /** 时间线长度（帧）：`round(length_sec · 1000/fp)`。 */
+    readonly lenF: number;
+    /** 消费速率（源帧 / 时间线帧）；倒放为负。 */
+    readonly rate: number;
+    /** 消费锚点（源帧）：`T = startF` 时播放的源位置。 */
+    readonly anchorF: number;
+    readonly gain: number;
+    /**
+     * 映射是否**精确**（`false` = 该 clip 开了 Loop，回绕破坏仿射性；
+     * 仍按正放仿射近似，见文件头"近似边界"）。
+     */
+    readonly exact: boolean;
+}
+
+/**
+ * 单个 clip 的时域映射段（构造期算好，查询期零换算）。
+ *
+ * 基线映射在本段内恒为 `g(f) = offset + slope · f`。
+ */
+interface PreparedSegment {
+    /** 该 clip 在新几何下的可见帧范围 `[newStartF, newEndF)`。 */
+    readonly newStartF: number;
+    readonly newEndF: number;
+    /** 旧几何下该 clip 的可见帧范围（映射的有效域；越界 ⇒ 基线未知）。 */
+    readonly oldStartF: number;
+    readonly oldEndF: number;
+    readonly slope: number;
+    readonly offset: number;
+    /** 该 clip 的增益比 `newGain / oldGain`（1 = 未变）。 */
+    readonly gainScale: number;
+    /**
+     * 是否允许查表的整数帧线性插值。
+     *
+     * 等价于"映射把整数帧送到整数帧且每帧走一格"，即 `slope === 1`（刚性平移）。
+     * 平移 / 恒等（移动、Slip、延伸截短）满足；Alt 拉伸的仿射缩放不满足 ——
+     * 缩放会把快照的分段线性折点搬进格内，线性插值会在折点两侧"抄近路"。
+     */
+    readonly interpolable: boolean;
+    /** 用户曲线的映射策略（已在构造期按 `lockParamLines` 降级，见 `CurvePolicy`）。 */
+    readonly curve: CurvePolicy;
+}
+
+/**
+ * 用户曲线的映射策略。
+ *
+ * 【为什么不能一律用基线的那条仿射】后端只在移动与拉伸时搬移用户曲线，裁切 / Slip
+ * 一律不动。若不管手势一律搬，拖拽预览会凭空造出一个后端不会做的编辑 —— 松手后
+ * 曲线"跳回去"，正是用户报告的延伸/截短与 Slip 的异常。
+ */
+type CurvePolicy =
+    | { readonly kind: "none" }
+    /** 移动：与基线同一条平移仿射。 */
+    | { readonly kind: "move"; readonly slope: number; readonly offset: number }
+    /** 拉伸：`resample_curve` 的 `(旧长−1)/(新长−1)`（逐字镜像后端）。 */
+    | {
+          readonly kind: "resample";
+          readonly oldStartF: number;
+          readonly oldCount: number;
+          readonly newStartF: number;
+          readonly newCount: number;
+      };
 
 /**
  * 把基线/曲线采样到"现在的位置"的只读视图。
@@ -91,7 +175,13 @@ export const WARP_SEGMENT_IDENTITY = -1;
  * 调用（一次重建按窗口帧数 × 常数次），因此不接受闭包/对象分配。
  */
 export interface LoudnessGeometryWarp {
-    /** 该帧应采样的**基线**帧（绝对帧，可为小数）。 */
+    /**
+     * 该帧应采样的**基线**帧（绝对帧，可为小数）。
+     *
+     * 返回 {@link WARP_BASELINE_UNKNOWN} = 该帧播放的素材在旧几何下不可见
+     * （延伸/截短新露出的部分、Slip 带入的部分）—— 旧快照里没有它的电平，
+     * 调用方应按"无基线"处理（动态增益恒 1），不得拿别处的基线顶替。
+     */
     baselineFrame(frameF: number): number;
     /** 该帧基线的增益比（1 = 不变）。 */
     baselineScale(frameF: number): number;
@@ -109,55 +199,110 @@ export interface LoudnessGeometryWarp {
      *
      * 【为什么需要】查表把每个整数帧的取值预先算好、查询时在相邻两帧之间线性插值。
      * 这只在"映射把整数帧送到整数帧、且每帧恰好走一格"时与"在映射后的帧上直接取样"
-     * **逐值等价**（此时格内的快照折点恰好落在格端点上）。
-     *
-     * - 平移（旧长 == 新长）：映射是整数帧的刚性位移 ⇒ 等价；
-     * - 裁切 / 拉伸（旧长 ≠ 新长）：映射把快照的分段线性折点搬进了格内 ⇒ 线性插值
-     *   会在折点两侧"抄近路"，与逐值路径分叉。
-     *
-     * 因此后者整段回退逐值 —— 只影响被裁切 / 拉伸的那一个 clip 的区间，代价可控，
-     * 而"两条路径逐值等价"这条不变量得以保持。
+     * 逐值等价（此时格内的快照折点恰好落在格端点上）。平移与恒等满足；仿射缩放
+     * （Alt 拉伸）与曲线重采样（拉伸）不满足，整段回退逐值。
      */
     interpolableAt(frameF: number): boolean;
 }
 
-/** 已归一化为帧的映射段（构造期算好，查询期零换算）。 */
-interface PreparedSegment {
-    readonly newStartF: number;
-    readonly newEndF: number;
-    readonly oldStartF: number;
-    /** 旧范围的结束帧（不含）；用于判定"旧范围里但没被任何新范围覆盖"的帧。 */
-    readonly oldEndF: number;
-    /** 旧侧的最大下标（= oldCount − 1），对应后端 `resample_curve` 的 `old_max_idx`。 */
-    readonly oldMaxIdx: number;
-    /** 新侧的最大下标；长度为 1 时取 1.0（与后端同款兜底，避免除零）。 */
-    readonly newMaxIdx: number;
-    readonly gainScale: number;
-    /**
-     * 该段是否允许查表的整数帧线性插值（见 {@link LoudnessGeometryWarp.interpolableAt}）。
-     *
-     * 等价于"映射把整数帧送到整数帧且每帧走一格"：`oldMaxIdx == newMaxIdx`（刚性
-     * 平移）或 `oldMaxIdx == 0`（整段塌到一帧，格内没有折点）。
-     */
-    readonly interpolable: boolean;
-    /**
-     * 该段是否改变了**时域**（起点/长度）。
-     *
-     * 【为什么必须区分】只有时域变化才会让后端调用
-     * `stretch_linked_params_in_root_range` 去搬移用户曲线；纯增益变化只影响基线。
-     * 若不区分，增益旋钮拖拽会把 volume/dyn 曲线也一起"搬走"——凭空造出一个
-     * 后端不会做的编辑。
-     */
-    readonly timeChanged: boolean;
-}
-
-/** 浮点比较容差：秒级几何。 */
-const TIME_EPSILON_SEC = 1e-9;
 /** 浮点比较容差：线性增益。 */
 const GAIN_EPSILON = 1e-4;
+/** 浮点比较容差：消费速率。 */
+const RATE_EPSILON = 1e-6;
+/** 浮点比较容差：源帧锚点（帧域）。 */
+const ANCHOR_EPSILON_FRAMES = 1e-6;
+
+function finiteOr(value: number | null | undefined, fallback: number): number {
+    return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
 
 /**
- * 差分出「按下时几何 → 当前几何」的范围映射。
+ * 解析单个 clip 的消费参数（**纯函数**，本模块几何口径的唯一落点）。
+ *
+ * 与后端逐分支同构：
+ * - 非 Loop 正放：窗口起点 `source_start_sec`，速率 `+playback_rate`；
+ * - 非 Loop 倒放：消费窗口重定向为 `[se − len·rate, se]` 且输出整体翻转
+ *   （`clip_pitch_trim_window_sec`），故锚点在 `source_end_sec` 侧、速率为负；
+ * - Loop：回绕 ⇒ 非仿射（按正放仿射近似，`exact = false`）。
+ *
+ * @param fps 每秒钟的帧数（`1000 / framePeriodMs`）。
+ */
+export function resolveClipConsumption(
+    clip: WarpClipGeometry,
+    fps: number,
+): ClipConsumption | null {
+    if (!(fps > 0)) return null;
+    const startSec = Math.max(0, finiteOr(clip.startSec, 0));
+    const lengthSec = Math.max(0, finiteOr(clip.lengthSec, 0));
+    const rate = finiteOr(clip.playbackRate, 1);
+    if (!(rate > 0)) return null;
+
+    const startF = Math.round(startSec * fps);
+    const lenF = Math.round(lengthSec * fps);
+    const gain = finiteOr(clip.gain, 1);
+    const sourceStartSec = finiteOr(clip.sourceStartSec, 0);
+    const sourceEndSec = finiteOr(clip.sourceEndSec, sourceStartSec + lengthSec * rate);
+
+    if (clip.loopEnabled === true) {
+        // 回绕是取模，不是仿射。按正放仿射近似（移动/裁切下仍精确，因为映射是
+        // 恒等或平移；只有 Slip/拉伸在回绕点穿过 clip 时才有偏差）。
+        return {
+            startF,
+            lenF,
+            rate,
+            anchorF: sourceStartSec * fps,
+            gain,
+            exact: false,
+        };
+    }
+
+    if (clip.reversed === true) {
+        // 后端：win = [se − len·rate, se]，按升序消费后再整体翻转输出。
+        // 翻转后 clip 内第 j 帧对应升序第 (lenF−1−j) 帧 ⇒ srcF(j) = 锚点 − j·rate。
+        const winStartSec = sourceEndSec - lengthSec * rate;
+        return {
+            startF,
+            lenF,
+            rate: -rate,
+            anchorF: winStartSec * fps + (lenF - 1) * rate,
+            gain,
+            exact: true,
+        };
+    }
+
+    return {
+        startF,
+        lenF,
+        rate,
+        anchorF: sourceStartSec * fps,
+        gain,
+        exact: true,
+    };
+}
+
+function readConsumption(
+    clip: WarpClipGeometry,
+    fps: number,
+): ClipConsumption | null {
+    const startSec = Math.max(0, finiteOr(clip.startSec, 0));
+    const lengthSec = Math.max(0, finiteOr(clip.lengthSec, 0));
+    const rate = finiteOr(clip.playbackRate, 1);
+    if (!(rate > 0)) return null;
+    // 时长/速率都合法才继续；`resolveClipConsumption` 负责其余口径。
+    if (!Number.isFinite(startSec + lengthSec)) return null;
+    return resolveClipConsumption(clip, fps);
+}
+
+/** 曲线重采样的帧映射（逐字镜像后端 `resample_curve` 的下标公式）。 */
+function resampleFrame(policy: Extract<CurvePolicy, { kind: "resample" }>, frameF: number): number {
+    const newMaxIdx = policy.newCount > 1 ? policy.newCount - 1 : 1;
+    const oldMaxIdx = Math.max(1, policy.oldCount) - 1;
+    const ratio = oldMaxIdx / newMaxIdx;
+    return policy.oldStartF + (frameF - policy.newStartF) * ratio;
+}
+
+/**
+ * 差分「按下时几何 → 当前几何」，构造时域映射视图。
  *
  * 只对**两侧都存在**的 clip 产出映射：手势期间新增的 clip 没有旧位置可搬
  * （它的基线贡献是"从无到有"，映射表达不了），删除的 clip 同理。
@@ -165,94 +310,118 @@ const GAIN_EPSILON = 1e-4;
  * @param origin 手势开始时的全量几何快照。
  * @param clips 当前的 clip 几何（应已按参数编辑器所属**根轨道组**过滤 —— 别的
  *   轨道组的 clip 与本组基线无关，把它们的映射算进来会错误地搬移本组基线）。
- */
-export function diffClipGeometryMappings(
-    origin: readonly WarpClipOrigin[],
-    clips: readonly WarpClipGeometry[],
-): LoudnessRangeMapping[] {
-    if (origin.length === 0 || clips.length === 0) return [];
-    const originById = new Map<string, WarpClipOrigin>();
-    for (const entry of origin) originById.set(entry.clipId, entry);
-
-    const out: LoudnessRangeMapping[] = [];
-    for (const clip of clips) {
-        const before = originById.get(clip.id);
-        if (before === undefined) continue;
-
-        const oldStartSec = Number(before.startSec) || 0;
-        const oldLengthSec = Math.max(0, Number(before.lengthSec) || 0);
-        const newStartSec = Number(clip.startSec) || 0;
-        const newLengthSec = Math.max(0, Number(clip.lengthSec) || 0);
-
-        const oldGain = Number.isFinite(before.gain) ? before.gain : 1;
-        const newGain = Number.isFinite(clip.gain) ? Number(clip.gain) : 1;
-        const gainScale =
-            oldGain > 1e-6 && Math.abs(newGain - oldGain) > GAIN_EPSILON * oldGain
-                ? newGain / oldGain
-                : 1;
-
-        const timeChanged =
-            Math.abs(newStartSec - oldStartSec) > TIME_EPSILON_SEC ||
-            Math.abs(newLengthSec - oldLengthSec) > TIME_EPSILON_SEC;
-        if (!timeChanged && gainScale === 1) continue;
-
-        out.push({
-            oldStartSec,
-            oldLengthSec,
-            newStartSec,
-            newLengthSec,
-            gainScale,
-        });
-    }
-    return out;
-}
-
-/**
- * 构造时域映射视图。
- *
- * @param mappings 由 {@link diffClipGeometryMappings} 产出的范围映射。
- * @param lockParamLines 「锁定参数线」是否开启（决定用户曲线是否跟着走）。
  * @param framePeriodMs 帧周期（毫秒），用于秒↔帧换算。
+ * @param lockParamLines 「锁定参数线」是否开启（决定用户曲线是否跟着走）。
  * @returns 映射视图；没有任何有效映射时返回 `null`（调用方据此完全跳过该路径，
  *   与修复前逐像素一致）。
  */
 export function createLoudnessGeometryWarp(args: {
-    mappings: readonly LoudnessRangeMapping[];
-    lockParamLines: boolean;
+    origin: readonly (WarpClipOrigin | WarpClipGeometry)[];
+    clips: readonly WarpClipGeometry[];
     framePeriodMs: number;
+    lockParamLines: boolean;
 }): LoudnessGeometryWarp | null {
     const fp = args.framePeriodMs;
-    if (!(fp > 0) || args.mappings.length === 0) return null;
+    if (!(fp > 0)) return null;
+    const fps = 1000 / fp;
 
-    /** 秒 → 帧：与后端 `(sec * 1000.0 / fp).round()` 逐字一致（含负值钳零）。 */
-    const toFrame = (sec: number): number => Math.round((Math.max(0, sec) * 1000) / fp);
+    const originById = new Map<string, WarpClipGeometry>();
+    for (const entry of args.origin) {
+        const id = "clipId" in entry ? entry.clipId : entry.id;
+        originById.set(id, entry as WarpClipGeometry);
+    }
+    // 手势期间新增的 clip 没有旧位置可搬（其基线贡献"从无到有"，仿射表达不了）。
+    if (originById.size === 0) return null;
 
     const segments: PreparedSegment[] = [];
-    for (const mapping of args.mappings) {
-        const oldStartF = toFrame(mapping.oldStartSec);
-        const oldEndF = toFrame(mapping.oldStartSec + Math.max(0, mapping.oldLengthSec));
-        const newStartF = toFrame(mapping.newStartSec);
-        const newEndF = toFrame(mapping.newStartSec + Math.max(0, mapping.newLengthSec));
-        // 空的新范围覆盖不到任何帧，搬过去也没有意义。
-        if (newEndF <= newStartF) continue;
+    for (const clip of args.clips) {
+        const before = originById.get(clip.id);
+        if (before === undefined) continue;
+        const oldC = readConsumption(before, fps);
+        const newC = readConsumption(clip, fps);
+        if (oldC === null || newC === null) continue;
+        if (newC.lenF <= 0) continue;
 
-        // 与后端 `resample_curve` 同款的长度兜底：旧侧 `len − 1`，新侧 `len − 1`
-        // （长度 1 时用 1.0，避免除零）。
-        const oldCount = Math.max(1, oldEndF - oldStartF);
-        const newCount = newEndF - newStartF;
-        const oldMaxIdx = oldCount - 1;
-        const newMaxIdx = newCount > 1 ? newCount - 1 : 1;
+        const newStartF = newC.startF;
+        const newEndF = newC.startF + newC.lenF;
+        const oldStartF = oldC.startF;
+        const oldEndF = oldC.startF + oldC.lenF;
+
+        const gainScale =
+            Math.abs(oldC.gain) > 1e-6 && Math.abs(newC.gain - oldC.gain) > GAIN_EPSILON * Math.abs(oldC.gain)
+                ? newC.gain / oldC.gain
+                : 1;
+
+        // 基线仿射：g(f) = startF_old + (anchor'_new − anchor_old + (f − startF_new)·rate_new) / rate_old
+        const slope = newC.rate / oldC.rate;
+        const offset = oldC.startF + (newC.anchorF - oldC.anchorF) / oldC.rate - newStartF * slope;
+
+        const rateChanged = Math.abs(newC.rate - oldC.rate) > RATE_EPSILON * Math.max(1, Math.abs(oldC.rate));
+        const anchorChanged = Math.abs(newC.anchorF - oldC.anchorF) > ANCHOR_EPSILON_FRAMES;
+        const lenChanged = oldC.lenF !== newC.lenF;
+        const startChanged = oldC.startF !== newC.startF;
+
+        // 用户曲线策略：镜像后端"什么手势会搬参数线"。
+        //
+        // 【为什么移动要额外要求"起点真的动了"】增益旋钮、淡化、吸附偏移都**不改**
+        // 起点/长度/速率 —— 若把它们也归入"移动"，曲线会被凭空搬走，而后端对这些
+        // 编辑根本不调用 `move_clips`。判据必须落在"时间轴范围真的平移了"上。
+        let curve: CurvePolicy = { kind: "none" };
+        if (args.lockParamLines) {
+            if (rateChanged) {
+                // 拉伸：后端用 `resample_curve`，范围按**秒取整后**的下标计算
+                //（`stretch_linked_params_in_root_range` 对两端都取 round）。
+                const oldStartFForCurve = Math.round(
+                    Math.max(0, finiteOr(before.startSec, 0)) * fps,
+                );
+                const oldEndFForCurve = Math.round(
+                    (Math.max(0, finiteOr(before.startSec, 0)) +
+                        Math.max(0, finiteOr(before.lengthSec, 0))) *
+                        fps,
+                );
+                curve = {
+                    kind: "resample",
+                    oldStartF: oldStartFForCurve,
+                    oldCount: oldEndFForCurve - oldStartFForCurve,
+                    newStartF: Math.round(Math.max(0, finiteOr(clip.startSec, 0)) * fps),
+                    newCount:
+                        Math.round(
+                            (Math.max(0, finiteOr(clip.startSec, 0)) +
+                                Math.max(0, finiteOr(clip.lengthSec, 0))) *
+                                fps,
+                        ) - Math.round(Math.max(0, finiteOr(clip.startSec, 0)) * fps),
+                };
+            } else if (!anchorChanged && !lenChanged && startChanged) {
+                // 移动：后端 `move_clips` 携带参数线（纯平移）。
+                curve = { kind: "move", slope, offset };
+            }
+            // 其余（裁切 / Slip / 增益 / 淡化 / 吸附偏移）：后端**不动**用户曲线。
+        }
+
+        // 完全无变化的 clip 不产出段：段索引参与查表的"段变了 ⇒ 不可插值"判定，
+        // 凭空多出一段会让未受影响区域的列白白回退逐值（稳态也就此变慢）。
+        //
+        // 【为什么必须同时要求"范围也相同"】延伸/截短的基线映射虽然是**恒等**，
+        // 但它的覆盖范围变了 —— 新露出的帧必须由段来宣告"基线未知"。若按映射恒等
+        // 就跳过整段，那些帧会被当作"未覆盖"而退回恒等取样，等于拿旧快照在那一处
+        // 的残留值（通常是 0）当基线，波形会被"无内容淡出"压平。
+        const sameRange = oldC.startF === newC.startF && oldC.lenF === newC.lenF;
+        const identityMapping =
+            Math.abs(slope - 1) <= 1e-12 && Math.abs(offset) <= 1e-9;
+        if (identityMapping && sameRange && gainScale === 1 && curve.kind === "none") continue;
+
         segments.push({
             newStartF,
             newEndF,
             oldStartF,
             oldEndF,
-            oldMaxIdx,
-            newMaxIdx,
-            gainScale: mapping.gainScale,
-            // 整数帧 → 整数帧且每帧走一格（刚性平移），或整段塌到一帧（格内无折点）。
-            interpolable: oldMaxIdx === newMaxIdx || oldMaxIdx === 0,
-            timeChanged: oldStartF !== newStartF || oldCount !== newCount,
+            slope,
+            offset,
+            gainScale,
+            // 恒等（slope 1 + offset 0）与平移（slope 1）都可整数帧插值；
+            // 缩放会把折点搬进格内，必须逐值。
+            interpolable: Math.abs(slope - 1) <= 1e-9,
+            curve,
         });
     }
     if (segments.length === 0) return null;
@@ -271,56 +440,67 @@ export function createLoudnessGeometryWarp(args: {
         return WARP_SEGMENT_IDENTITY;
     };
 
-    /** 该帧是否落在某个**时域变化**段的旧范围内（= 被搬走、需恢复 pad）。 */
+    /** 该帧是否落在某个**会搬曲线**段的旧范围内（= 被搬走、需恢复 pad）。 */
     const coveredByOldTimeRange = (frameF: number): boolean => {
         for (let i = segments.length - 1; i >= 0; i -= 1) {
             const seg = segments[i] as PreparedSegment;
-            if (!seg.timeChanged) continue;
+            if (seg.curve.kind === "none") continue;
             if (frameF >= seg.oldStartF && frameF < seg.oldEndF) return true;
         }
         return false;
     };
 
-    /** 新帧 → 旧帧（段内仿射；恒等段直接返回原帧）。 */
-    const sourceFrameIn = (seg: PreparedSegment, frameF: number): number =>
-        seg.oldStartF + (frameF - seg.newStartF) * (seg.oldMaxIdx / seg.newMaxIdx);
+    /** 曲线段身份（用于查表的"段变了 ⇒ 不可插值"判定）。 */
+    const curveSegmentIndex = (seg: PreparedSegment): number =>
+        seg.curve.kind === "none" ? WARP_SEGMENT_IDENTITY : segments.indexOf(seg);
 
     return {
         baselineFrame(frameF) {
             const index = segmentAt(frameF);
             if (index < 0) return frameF;
-            return sourceFrameIn(segments[index] as PreparedSegment, frameF);
+            const seg = segments[index] as PreparedSegment;
+            const mapped = seg.offset + seg.slope * frameF;
+            // 映射后的位置落在旧 clip 之外 ⇒ 该帧播放的素材在旧几何下不可见，
+            // 旧快照里没有它的基线。必须显式宣告"未知"，不能拿别处的值顶替。
+            if (mapped < seg.oldStartF || mapped >= seg.oldEndF) return WARP_BASELINE_UNKNOWN;
+            return mapped;
         },
         baselineScale(frameF) {
             const index = segmentAt(frameF);
             if (index < 0) return 1;
-            return (segments[index] as PreparedSegment).gainScale;
+            const seg = segments[index] as PreparedSegment;
+            const mapped = seg.offset + seg.slope * frameF;
+            if (mapped < seg.oldStartF || mapped >= seg.oldEndF) return 1;
+            return seg.gainScale;
         },
         curveFrame(frameF) {
-            if (!args.lockParamLines) return frameF;
             const index = segmentAt(frameF);
             if (index >= 0) {
                 const seg = segments[index] as PreparedSegment;
-                // 纯增益变化不搬移用户曲线（后端也不会）。
-                return seg.timeChanged ? sourceFrameIn(seg, frameF) : frameF;
+                if (seg.curve.kind === "none") return frameF;
+                if (seg.curve.kind === "move") {
+                    return seg.curve.offset + seg.curve.slope * frameF;
+                }
+                return resampleFrame(seg.curve, frameF);
             }
+            // 旧范围里但没被任何新范围覆盖：该处曲线已被搬走 → 恢复 pad。
             return coveredByOldTimeRange(frameF) ? WARP_CURVE_PAD : frameF;
         },
         baselineSegment: segmentAt,
         curveSegment(frameF) {
-            if (!args.lockParamLines) return WARP_SEGMENT_IDENTITY;
             const index = segmentAt(frameF);
-            if (index >= 0) {
-                const seg = segments[index] as PreparedSegment;
-                return seg.timeChanged ? index : WARP_SEGMENT_IDENTITY;
-            }
+            if (index >= 0) return curveSegmentIndex(segments[index] as PreparedSegment);
             return coveredByOldTimeRange(frameF) ? WARP_CURVE_PAD : WARP_SEGMENT_IDENTITY;
         },
         interpolableAt(frameF) {
             const index = segmentAt(frameF);
             // 不受任何映射影响的帧就是恒等映射 —— 恒等当然可插值。
             if (index < 0) return true;
-            return (segments[index] as PreparedSegment).interpolable;
+            const seg = segments[index] as PreparedSegment;
+            // 曲线走重采样时，`lutContentFade` 之外的三个通道（vol/target/base）
+            // 里 target/vol 按重采样映射取样，折点同样会落进格内 ⇒ 一并回退逐值。
+            if (seg.curve.kind === "resample") return false;
+            return seg.interpolable;
         },
     };
 }

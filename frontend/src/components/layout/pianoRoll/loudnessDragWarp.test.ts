@@ -20,9 +20,8 @@ import { describe, expect, it } from "vitest";
 import { makeLoudnessAmplitudeMap, type LoudnessAutomationSource } from "./PianoRollWaveformSurface";
 import {
     createLoudnessGeometryWarp,
-    diffClipGeometryMappings,
-    type LoudnessRangeMapping,
     type LoudnessGeometryWarp,
+    type WarpClipGeometry,
 } from "./loudnessGeometryWarp";
 import type { WaveformAmplitudeFactors } from "../../../waveform/geometry";
 
@@ -58,11 +57,48 @@ function amplitudeMap(
     return map as unknown as WaveformAmplitudeFactors;
 }
 
+interface GeoOpts {
+    gain?: number;
+    sourceStartSec?: number;
+    sourceEndSec?: number;
+    playbackRate?: number;
+    reversed?: boolean;
+    loopEnabled?: boolean;
+}
+
+/** 一份 clip 几何（源窗口默认为 [0, 长度×速率)）。 */
+function geo(
+    id: string,
+    startSec: number,
+    lengthSec: number,
+    opts: GeoOpts = {},
+): WarpClipGeometry {
+    const rate = opts.playbackRate ?? 1;
+    const sourceStartSec = opts.sourceStartSec ?? 0;
+    return {
+        id,
+        startSec,
+        lengthSec,
+        gain: opts.gain ?? 1,
+        sourceStartSec,
+        sourceEndSec: opts.sourceEndSec ?? sourceStartSec + lengthSec * rate,
+        playbackRate: rate,
+        reversed: opts.reversed ?? false,
+        loopEnabled: opts.loopEnabled ?? false,
+    };
+}
+
 function warpOf(
-    mappings: readonly LoudnessRangeMapping[],
-    lockParamLines: boolean,
+    origin: readonly WarpClipGeometry[],
+    clips: readonly WarpClipGeometry[],
+    lockParamLines = false,
 ): LoudnessGeometryWarp | null {
-    return createLoudnessGeometryWarp({ mappings, lockParamLines, framePeriodMs: FP });
+    return createLoudnessGeometryWarp({
+        origin,
+        clips,
+        framePeriodMs: FP,
+        lockParamLines,
+    });
 }
 
 /** 帧号 → 秒。 */
@@ -85,22 +121,15 @@ describe("拖拽期间基线跟随几何", () => {
     it("★ 把 clip 拖进静音区后波形不再被压平（未画帧的目标跟随原声）", () => {
         const src = loudThenSilent();
         // clip 从帧 [0,16) 移到 [16,32)：查询帧 24 的素材原先在帧 8。
-        const mappings: LoudnessRangeMapping[] = [
-            {
-                oldStartSec: 0,
-                oldLengthSec: 0.16,
-                newStartSec: 0.16,
-                newLengthSec: 0.16,
-                gainScale: 1,
-            },
-        ];
+        const origin = [geo("c1", 0, 0.16)];
+        const moved = [geo("c1", 0.16, 0.16)];
 
         // 无映射（= 修复前的行为）：新位置的旧基线是静音 ⇒ 淡出把波形压成 0。
         const before = amplitudeMap(src, () => null);
         expect(before.factorAt?.(at(24))).toBe(0);
 
         // 有映射：基线跟着素材搬到帧 8（响段）⇒ 未画帧增益 1，波形保持原样。
-        const after = amplitudeMap(src, () => warpOf(mappings, false));
+        const after = amplitudeMap(src, () => warpOf(origin, moved));
         expect(after.factorAt?.(at(24))).toBeCloseTo(1, 6);
     });
 
@@ -115,15 +144,8 @@ describe("拖拽期间基线跟随几何", () => {
         });
         const delta = 12;
         const warp = warpOf(
-            [
-                {
-                    oldStartSec: at(0),
-                    oldLengthSec: 0.24,
-                    newStartSec: at(delta),
-                    newLengthSec: 0.24,
-                    gainScale: 1,
-                },
-            ],
+            [geo("c1", 0, 0.24)],
+            [geo("c1", at(delta), 0.24)],
             true,
         );
         const mapped = amplitudeMap(src, () => warp);
@@ -168,24 +190,18 @@ describe("用户曲线是否随几何搬移（镜像后端的锁定参数线开�
         dynTarget: [0.8, 0.8, 0.5, 0.5, 0.4, 0.4, 0.4, 0.4],
         dynBaseline: new Array<number>(8).fill(0.5),
     });
-    const mappings: LoudnessRangeMapping[] = [
-        {
-            oldStartSec: 0,
-            oldLengthSec: 0.02,
-            newStartSec: 0.04,
-            newLengthSec: 0.02,
-            gainScale: 1,
-        },
-    ];
+    // 帧 [0,2) → [4,6)：纯移动。
+    const origin = [geo("c1", 0, 0.02)];
+    const moved = [geo("c1", at(4), 0.02)];
 
     it("锁定参数线关闭：目标曲线留在绝对时间（后端不会搬移它）", () => {
-        const map = amplitudeMap(src, () => warpOf(mappings, false));
+        const map = amplitudeMap(src, () => warpOf(origin, moved, false));
         // 帧 4 的目标仍是 0.4（原位置的值），基线取帧 0 的 0.5 → 0.8。
         expect(map.factorAt?.(at(4))).toBeCloseTo(0.4 / 0.5, 6);
     });
 
     it("锁定参数线开启：目标曲线跟着 clip 搬移（与后端同一语义）", () => {
-        const map = amplitudeMap(src, () => warpOf(mappings, true));
+        const map = amplitudeMap(src, () => warpOf(origin, moved, true));
         // 帧 4 的目标来自帧 0 的 0.8，基线同样来自帧 0 的 0.5 → 1.6。
         expect(map.factorAt?.(at(4))).toBeCloseTo(0.8 / 0.5, 6);
     });
@@ -196,13 +212,30 @@ describe("用户曲线是否随几何搬移（镜像后端的锁定参数线开�
             dynTarget: [],
             dynBaseline: [],
         });
-        const map = amplitudeMap(volumeSrc, () => warpOf(mappings, true));
+        const map = amplitudeMap(volumeSrc, () => warpOf(origin, moved, true));
         // 新范围 [4,6)：音量取自帧 0..1（= 2）。
         expect(map.factorAt?.(at(4))).toBeCloseTo(2, 6);
         // 旧范围 [0,2) 未被新范围覆盖 → pad → 音量归 1。
         expect(map.factorAt?.(at(0))).toBeCloseTo(1, 6);
         // 既不在旧范围也不在新范围 → 恒等。
         expect(map.factorAt?.(at(6))).toBeCloseTo(1, 6);
+    });
+
+    it("★ Slip：曲线**不**跟着搬（后端对 Slip 不做参数线重映射）", () => {
+        // 单调目标曲线：曲线若被搬移，取值会明显不同（可判别）。
+        const slipSrc = source({
+            volume: new Array<number>(8).fill(1),
+            dynTarget: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+            dynBaseline: new Array<number>(8).fill(0.5),
+        });
+        // 同一时间轴区间，源窗口平移 0.01 s（1 帧）⇒ 内容整体提前 1 帧。
+        const base = [geo("c1", 0, 0.08, { sourceStartSec: 0, sourceEndSec: 0.08 })];
+        const slipped = [geo("c1", 0, 0.08, { sourceStartSec: 0.01, sourceEndSec: 0.09 })];
+        for (const lock of [false, true]) {
+            const map = amplitudeMap(slipSrc, () => warpOf(base, slipped, lock));
+            // 帧 4：基线来自帧 5（= 0.5，内容搬了）；目标仍是该帧画的值 0.6（曲线没搬）。
+            expect(map.factorAt?.(at(4))).toBeCloseTo(0.6 / 0.5, 6);
+        }
     });
 });
 
@@ -216,18 +249,7 @@ describe("增益变化（基线含静态 clip 增益）", () => {
             dynBaseline: baseline,
         });
         const map = amplitudeMap(src, () =>
-            warpOf(
-                [
-                    {
-                        oldStartSec: 0,
-                        oldLengthSec: 0.08,
-                        newStartSec: 0,
-                        newLengthSec: 0.08,
-                        gainScale: 2,
-                    },
-                ],
-                false,
-            ),
+            warpOf([geo("c1", 0, 0.08, { gain: 1 })], [geo("c1", 0, 0.08, { gain: 2 })]),
         );
         // 基线 ×2 → 1.0；未画帧的目标也取 1.0 ⇒ 增益 1（后端语义：未画 = 不改变）。
         expect(map.factorAt?.(at(2))).toBeCloseTo(1, 6);
@@ -240,26 +262,15 @@ describe("增益变化（基线含静态 clip 增益）", () => {
             dynBaseline: baseline,
         });
         const map = amplitudeMap(src, () =>
-            warpOf(
-                [
-                    {
-                        oldStartSec: 0,
-                        oldLengthSec: 0.08,
-                        newStartSec: 0,
-                        newLengthSec: 0.08,
-                        gainScale: 2,
-                    },
-                ],
-                false,
-            ),
+            warpOf([geo("c1", 0, 0.08, { gain: 1 })], [geo("c1", 0, 0.08, { gain: 2 })]),
         );
         // 目标 0.8（绝对） / 新基线 1.0 = 0.8。
         expect(map.factorAt?.(at(2))).toBeCloseTo(0.8, 6);
     });
 });
 
-describe("手势几何 → 差分 → 映射的整链", () => {
-    it("★ 从「按下时 / 当前」几何差分出的映射，能让波形保持形状", () => {
+describe("手势几何 → 映射的整链", () => {
+    it("★ 从「按下时 / 当前」几何构造出的映射，能让波形保持形状", () => {
         const loud = new Array<number>(16).fill(0.5);
         const silent = new Array<number>(32).fill(0.0001);
         const baseline = [...loud, ...silent];
@@ -269,15 +280,31 @@ describe("手势几何 → 差分 → 映射的整链", () => {
             dynBaseline: baseline,
         });
 
-        const origin = [{ clipId: "c1", startSec: 0, lengthSec: 0.16, gain: 1 }];
-        const moved = [{ id: "c1", startSec: 0.16, lengthSec: 0.16, gain: 1 }];
-        const mappings = diffClipGeometryMappings(origin, moved);
-        expect(mappings).toHaveLength(1);
-
-        const map = amplitudeMap(src, () => warpOf(mappings, false));
+        const warp = warpOf([geo("c1", 0, 0.16)], [geo("c1", 0.16, 0.16)]);
+        expect(warp).not.toBeNull();
+        const map = amplitudeMap(src, () => warp);
         expect(map.factorAt?.(at(24))).toBeCloseTo(1, 6);
         // 未受影响区域（新范围之外）保持恒等：那里没有素材被搬动。
         const plain = amplitudeMap(src, () => null);
         expect(map.factorAt?.(at(40))).toBe(plain.factorAt?.(at(40)));
+    });
+
+    it("★ 延伸：新露出的帧不再被旧快照的残留基线压平（宣告未知 ⇒ 不施加动态增益）", () => {
+        const loud = new Array<number>(16).fill(0.5);
+        const silent = new Array<number>(32).fill(0.0001);
+        const baseline = [...loud, ...silent];
+        const src = source({
+            volume: new Array<number>(48).fill(1),
+            dynTarget: [...baseline],
+            dynBaseline: baseline,
+        });
+        // 右边延伸：旧 [0,16) → 新 [0,32)。
+        const warp = warpOf([geo("c1", 0, 0.16)], [geo("c1", 0, 0.32)]);
+        const map = amplitudeMap(src, () => warp);
+        // 保留区（帧 8）恒等 ⇒ 未画帧增益 1。
+        expect(map.factorAt?.(at(8))).toBeCloseTo(1, 6);
+        // 新露出区（帧 24）：旧快照那里是静音；未知语义下按"无动态增益"处理 ⇒ 1，
+        // 而不是被"无内容淡出"压成 0。
+        expect(map.factorAt?.(at(24))).toBeCloseTo(1, 6);
     });
 });

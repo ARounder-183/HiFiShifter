@@ -202,7 +202,7 @@ import {
     supportsParamAxisUnit,
 } from "./pianoRoll/paramAxisUnits";
 import { framesToTime, midiToLabel, timeToFrame } from "./pianoRoll/utils";
-import { useLoudnessCurves } from "./pianoRoll/useLoudnessCurves";
+import { useLoudnessCurves, type LoudnessSnapshot } from "./pianoRoll/useLoudnessCurves";
 import {
     createLiveOverrideReader,
     type LiveOverrideReader,
@@ -210,7 +210,6 @@ import {
 import { pianoRollViewportBus } from "./pianoRoll/pianoRollViewportBus";
 import {
     createLoudnessGeometryWarp,
-    diffClipGeometryMappings,
     type LoudnessGeometryWarp,
 } from "./pianoRoll/loudnessGeometryWarp";
 import {
@@ -4067,39 +4066,43 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     >(() => getClipGeometryPreviewOrigin());
 
     /**
-     * 手势结束后的「等权威快照追上」水位。
+     * 收尾期的「基线溯源基准」：手势结束**之前**最后落地的那份快照的溯源键。
      *
-     * 【为什么手势结束不立刻撤下映射】提交之后、权威快照回来之前，几何映射仍是
-     * 把基线搬到新位置的**唯一正确**来源（后端此刻正在算的正是同一件事）。立刻
-     * 撤下会让波形退回**旧位置的基线** —— 用户看到的就是"松手闪一下"。
-     * 因此与 `LiveEditOverride.committed` / `committedSettleSeqRef` 同一套约定：
-     * 只有「提交之后取的」快照（取数序号更大）落地才撤下。
+     * 【为什么不能用取数序号】提交会先 `checkpointHistory()` 递增 `paramsEpoch`
+     * （早于后端写入），而取数序号在**发出**时（`useLoudnessCurves` 的
+     * `fetchReqIdRef`）就推进 —— 水位与"这份数据反映哪份几何"必然错拍，
+     * 于是映射时而提前撤下（闪一下）、时而过晚撤下（新基线被再搬一次）。
      *
-     * 【取消手势为什么同样安全】取消会把 Redux 几何还原成按下时的值，差分随之
-     * 退化为空 ⇒ 映射为 `null`，撤不撤在画面上没有区别。
+     * 溯源键是**事实**：拖拽期间后端几何被冻结 ⇒ 键恒定；提交写回后端后键必变。
+     * 于是"键变了"当且仅当"这份基线反映新几何"。判定在**渲染期**完成（见
+     * `warpSettled`），撤下与快照落地因此落在同一个 React 提交里，
+     * 结构上不存在"新快照 × 旧映射"或"旧快照 × 无映射"的中间帧。
      */
-    const geometryPreviewSettleSeqRef = useRef<number | null>(null);
+    const warpBasisKeyRef = useRef<string | null>(null);
+    /** 键不可用时的退化基准（快照对象身份），见 `warpSettled`。 */
+    const warpBasisSnapshotRef = useRef<LoudnessSnapshot | null>(null);
+    /** 手势是否已结束、正在等权威快照追上。 */
+    const warpSettlingRef = useRef(false);
 
     useEffect(() => {
         setClipGeometryPreviewOrigin(getClipGeometryPreviewOrigin());
+        warpSettlingRef.current = false;
         return subscribeClipGeometryPreview(() => {
             const origin = getClipGeometryPreviewOrigin();
             if (origin !== null) {
-                geometryPreviewSettleSeqRef.current = null;
+                warpSettlingRef.current = false;
                 setClipGeometryPreviewOrigin(origin);
                 return;
             }
-            geometryPreviewSettleSeqRef.current = getLatestLoudnessFetchSeq();
+            // 手势结束：**不在这里**撤下映射。提交之后、权威快照回来之前，映射仍是
+            // 把基线搬到新位置的唯一正确来源（后端此刻正在算的正是同一件事）。
+            // 撤下交给 `warpSettled`（渲染期判定，与快照落地同批）。
+            //
+            // 【取消手势为什么同样安全】取消会把 Redux 几何还原成按下时的值，
+            // 差分随之退化为空 ⇒ 映射为 `null`，撤不撤在画面上没有区别。
+            warpSettlingRef.current = true;
         });
-    }, [getLatestLoudnessFetchSeq]);
-
-    useEffect(() => {
-        if (geometryPreviewSettleSeqRef.current === null) return;
-        if (loudnessSnapshotFetchSeq > geometryPreviewSettleSeqRef.current) {
-            geometryPreviewSettleSeqRef.current = null;
-            setClipGeometryPreviewOrigin(null);
-        }
-    }, [loudnessSnapshotFetchSeq]);
+    }, []);
 
     /**
      * 当前生效的几何映射（渲染期同步的 ref 镜像，见文件内既有的同款模式）。
@@ -4390,47 +4393,93 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     );
 
     /**
-     * 拖拽期间的响度时域映射：把「按下时的几何」与当前几何的差分，应用到基线 /
+     * 拖拽期间的响度时域映射：把「快照所依据的几何」与当前几何的差分，应用到基线 /
      * 曲线（见 `loudnessGeometryWarp` 的文件头）。
      *
      * 【为什么只取本轨道组的 clip】原声基线是**按根轨道组**组装的；别的轨道组的
      * clip 与本组基线无关，把它们的映射算进来会错误地搬移本组曲线。`trackClips`
      * 已按 `groupTrackIds` 过滤，正好是基线的参与集合。
      *
-     * 【为什么用 useMemo 而不是 ref】映射必须与当前几何同步重算 —— 拖拽的每一帧
-     * `s.clips` 都会换引用，这里随之产出新映射对象；消费侧以**对象身份**判定
-     * 是否需要重建查表（见 `makeLoudnessAmplitudeMap` 的 `warp` 说明）。
+     * 【为什么在渲染期判定收尾】`warpSettled` 只依赖"当前快照的溯源键"这一个事实，
+     * 因此它翻转的那次渲染**就是**新快照生效的那次渲染：映射在同一次提交里变成
+     * `null`，`pianoRollAmplitudeMap` 也在同一次提交里换新 —— 不存在中间帧。
      */
-    const loudnessGeometryWarp = useMemo(() => {
-        if (clipGeometryPreviewOrigin === null) return null;
-        const mappings = diffClipGeometryMappings(clipGeometryPreviewOrigin, trackClips);
-        if (mappings.length === 0) return null;
-        return createLoudnessGeometryWarp({
-            mappings,
-            lockParamLines: s.lockParamLinesEnabled,
-            framePeriodMs: loudnessFpMs,
-        });
-    }, [clipGeometryPreviewOrigin, trackClips, s.lockParamLinesEnabled, loudnessFpMs]);
+    const loudnessSnapshotKey = loudnessSnapshot?.baselineKey ?? null;
+    // 非收尾期：基准跟随最新快照。拖拽期间后端几何被冻结，期间落地的快照同样是
+    // "按下之前"的几何，对它可以安全地继续套用映射（不 re-base 会让映射平白失效）。
+    if (!warpSettlingRef.current) {
+        warpBasisKeyRef.current = loudnessSnapshotKey;
+        warpBasisSnapshotRef.current = loudnessSnapshot;
+    }
+    /**
+     * 收尾是否已完成：手势结束**之后**才落地的一份快照带回了不同的溯源键
+     * （= 它反映的是新几何）。
+     *
+     * 键不可用（后端从未组装过基线）时退化为「快照换了对象即算追上」—— 该路径下
+     * 后端没有可比对的几何信息，且基线本身也多半为空（映射在画面上无作用）。
+     */
+    const warpSettled =
+        warpSettlingRef.current &&
+        (warpBasisKeyRef.current !== null && loudnessSnapshotKey !== null
+            ? loudnessSnapshotKey !== warpBasisKeyRef.current
+            : loudnessSnapshot !== warpBasisSnapshotRef.current);
 
+    const loudnessGeometryWarp = useMemo(() => {
+        if (clipGeometryPreviewOrigin === null || warpSettled) return null;
+        return createLoudnessGeometryWarp({
+            origin: clipGeometryPreviewOrigin,
+            clips: trackClips,
+            framePeriodMs: loudnessFpMs,
+            lockParamLines: s.lockParamLinesEnabled,
+        });
+    }, [
+        clipGeometryPreviewOrigin,
+        trackClips,
+        s.lockParamLinesEnabled,
+        loudnessFpMs,
+        // 快照对象本身**不是**依赖：映射只由"按下时几何 + 当前几何"决定，快照换了
+        // 对象而键没变（拖拽期间后端几何被冻结时的重取）不该让映射重算。
+        // 需要跟着快照变化的那一件事 —— 收尾判据 `warpSettled` —— 已在依赖里。
+        warpSettled,
+    ]);
+
+    // 收尾完成 ⇒ 可以安全丢掉基准几何：此时映射已是 `null`，且下一次手势会发布新的。
+    useEffect(() => {
+        if (!warpSettled || clipGeometryPreviewOrigin === null) return;
+        warpSettlingRef.current = false;
+        setClipGeometryPreviewOrigin(null);
+    }, [warpSettled, clipGeometryPreviewOrigin]);
+
+    /**
+     * 映射变化 ⇒ **渲染期**推进修订号。
+     *
+     * 【为什么必须在渲染期】映射引用在渲染期写入 `loudnessWarpRef`（读取方在绘制期
+     * 惰性读取），而修订号此前在被动 effect 里推进 —— 两者不同步：`WaveformSurface`
+     * 的 layout effect 会在同一次提交里同步全量重建，它读到的将是「新映射 / 旧修订号」，
+     * 几何缓存据此误判"可复用"从而画出上一帧的顶点。这里把修订号与引用一起在渲染期
+     * 更新，任何一次绘制看到的 `(amplitudeMap, revision)` 都与当前映射一致。
+     * 重绘**请求**仍交给下面的 effect（那只影响"什么时候画"，不影响"画得对不对"）。
+     */
+    const warpRevisionRef = useRef<LoudnessGeometryWarp | null>(null);
+    if (warpRevisionRef.current !== loudnessGeometryWarp) {
+        warpRevisionRef.current = loudnessGeometryWarp;
+        loudnessWaveformRevisionRef.current += 1;
+    }
     // 渲染期同步镜像（本文件既有的取值新鲜度模式：读取方在绘制期惰性读取）。
     loudnessWarpRef.current = loudnessGeometryWarp;
 
     /**
-     * 映射变化 ⇒ 推进修订号并请求一次重绘。
+     * 映射变化 ⇒ 请求一次重绘。
      *
      * 【为什么不能只靠 rows 变化】拖拽期间 `rows` 确实每帧都换（几何跟着走），
      * 但映射的变化源不止几何：手势结束、锁定参数线开关、以及"等权威快照追上"的
      * 收尾，都可能在 `rows` 不变的情况下换掉映射。少了这一步，那些帧会停在旧映射
      * 上（画面与数据不一致）。
-     *
-     * 修订号是必须的：几何缓存以 `(amplitudeMap 引用, 修订号)` 判定复用，映射换了
-     * 而修订号没换时，缓存会认为"几何没变"从而复用旧顶点。
      */
     const lastLoudnessWarpRef = useRef<LoudnessGeometryWarp | null>(null);
     useEffect(() => {
         if (lastLoudnessWarpRef.current === loudnessGeometryWarp) return;
         lastLoudnessWarpRef.current = loudnessGeometryWarp;
-        loudnessWaveformRevisionRef.current += 1;
         waveformRepaintLoopRef.current?.invalidate();
     }, [loudnessGeometryWarp]);
 

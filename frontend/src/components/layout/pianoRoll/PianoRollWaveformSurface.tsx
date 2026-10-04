@@ -25,7 +25,11 @@ import { createTimelineAxis } from "../renderKernel/timelineAxis.js";
 import type { ClipPeaksEntry } from "./useClipsPeaksForPianoRoll";
 import { dynContentFade, dynLevelTargetingGain } from "./paramRanges";
 import { pianoRollViewportBus } from "./pianoRollViewportBus";
-import { WARP_CURVE_PAD, type LoudnessGeometryWarp } from "./loudnessGeometryWarp";
+import {
+    WARP_BASELINE_UNKNOWN,
+    WARP_CURVE_PAD,
+    type LoudnessGeometryWarp,
+} from "./loudnessGeometryWarp";
 
 /**
  * 波形绘制所需的**响度自动化**数据（volume 曲线 + 动态目标/基线）。
@@ -330,6 +334,10 @@ export function makeLoudnessAmplitudeMap(
         const curveFrame = w === null ? frameF : w.curveFrame(frameF);
         const baseFrame = w === null ? frameF : w.baselineFrame(frameF);
         const baseScale = w === null ? 1 : w.baselineScale(frameF);
+        // 该帧播放的素材在旧几何下不可见（延伸/截短新露出的部分、Slip 带入的部分）
+        // —— 旧快照里没有它的电平。按"无基线"处理（动态增益恒 1、不施加内容淡出），
+        // 与"动态分析未就绪"同一表现；拿别处的基线顶替会凭空造出后端不会做的增益。
+        const baseUnknown = baseFrame === WARP_BASELINE_UNKNOWN;
 
         // ① 音量：live 覆盖优先（按原始帧采样），否则取映射后的快照，pad 帧取 1.0。
         let vol: number | null = curveFrame === WARP_CURVE_PAD ? 1.0 : null;
@@ -353,7 +361,7 @@ export function makeLoudnessAmplitudeMap(
         let target: number | null = null;
         let base: number | null = null;
         let fade = 0;
-        if (hasBaseline) {
+        if (hasBaseline && !baseUnknown) {
             const rawBase = sampleCurveLinear(
                 source.dynBaseline,
                 source.startFrame,
@@ -600,19 +608,25 @@ export function makeLoudnessAmplitudeMap(
 
             const base0 = w === null ? frame0 : w.baselineFrame(frame0);
             const base1 = w === null ? frame0 + 1 : w.baselineFrame(frame0 + 1);
-            const knot0 = Math.round((base0 - startFrame) / fadeStride);
-            const knot1 = Math.round((base1 - startFrame) / fadeStride);
-            if (knot1 - knot0 === 1) {
-                const ratio = base1 - base0;
-                const cross =
-                    (startFrame + (knot0 + 0.5) * fadeStride - base0) / (ratio || 1);
-                lutFadeCross[i] =
-                    cross >= 0 && cross <= 1 ? cross : Number.POSITIVE_INFINITY;
-            } else {
-                // 一格内跨 0 次（两端同属一个采样帧）→ 用 i0 即可；跨 ≥2 次 →
-                // 一次阶跃表达不了，交回逐值路径。
+            if (base0 === WARP_BASELINE_UNKNOWN || base1 === WARP_BASELINE_UNKNOWN) {
+                // 未知基线帧没有"原声电平"，淡出阶跃无从谈起。该格是否可线性插值
+                // 已由上面的 tag 比较决定：两端都未知 ⇒ 动态增益恒 1，插值精确。
                 lutFadeCross[i] = Number.POSITIVE_INFINITY;
-                if (knot1 - knot0 > 1 || knot1 - knot0 < -1) cellOk = 0;
+            } else {
+                const knot0 = Math.round((base0 - startFrame) / fadeStride);
+                const knot1 = Math.round((base1 - startFrame) / fadeStride);
+                if (knot1 - knot0 === 1) {
+                    const ratio = base1 - base0;
+                    const cross =
+                        (startFrame + (knot0 + 0.5) * fadeStride - base0) / (ratio || 1);
+                    lutFadeCross[i] =
+                        cross >= 0 && cross <= 1 ? cross : Number.POSITIVE_INFINITY;
+                } else {
+                    // 一格内跨 0 次（两端同属一个采样帧）→ 用 i0 即可；跨 ≥2 次 →
+                    // 一次阶跃表达不了，交回逐值路径。
+                    lutFadeCross[i] = Number.POSITIVE_INFINITY;
+                    if (knot1 - knot0 > 1 || knot1 - knot0 < -1) cellOk = 0;
+                }
             }
 
             if (w !== null) {

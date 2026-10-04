@@ -33,7 +33,7 @@ import { describe, expect, test } from "vitest";
 
 import { createLiveOverrideReader } from "./liveLoudnessOverride";
 import { makeLoudnessAmplitudeMap } from "./PianoRollWaveformSurface";
-import { createLoudnessGeometryWarp, type LoudnessGeometryWarp } from "./loudnessGeometryWarp";
+import { createLoudnessGeometryWarp, type LoudnessGeometryWarp, type WarpClipGeometry } from "./loudnessGeometryWarp";
 import type { WaveformAmplitudeFactors, WaveformAmplitudeMap } from "../../../waveform/geometry";
 
 const FRAME_MS = 5;
@@ -222,33 +222,61 @@ describe("查表路径与逐值路径逐值等价", () => {
         }
     });
 
+    /** 一份 clip 几何（源窗口默认 = [0, 长度×速率)，即"内容跨度守恒"）。 */
+    interface ClipSpec {
+        startSec: number;
+        lengthSec: number;
+        playbackRate?: number;
+        gain?: number;
+    }
+
+    function clipOf(spec: ClipSpec, id: string): WarpClipGeometry {
+        const rate = spec.playbackRate ?? 1;
+        return {
+            id,
+            startSec: spec.startSec,
+            lengthSec: spec.lengthSec,
+            gain: spec.gain ?? 1,
+            sourceStartSec: 0,
+            sourceEndSec: spec.lengthSec * rate,
+            playbackRate: rate,
+            reversed: false,
+            loopEnabled: false,
+        };
+    }
+
+    /** 由若干「旧几何 → 新几何」的 clip 对构造映射（时间按 FRAME_MS 帧栅格）。 */
+    function warpFrom(
+        pairs: ReadonlyArray<readonly [ClipSpec, ClipSpec]>,
+        lockParamLines: boolean,
+    ): LoudnessGeometryWarp | null {
+        return createLoudnessGeometryWarp({
+            origin: pairs.map(([old], i) => clipOf(old, `c${i}`)),
+            clips: pairs.map(([, next], i) => clipOf(next, `c${i}`)),
+            framePeriodMs: FRAME_MS,
+            lockParamLines,
+        });
+    }
+
     /**
-     * 拖拽期间的几何时域映射夹具：两段映射（一平移、一压缩）+ 一段"被搬走"的
-     * 空档，且带增益比 —— 覆盖映射的全部代码路径。
+     * 拖拽期间的几何时域映射夹具：一平移、一"压缩 + 增益"（速率 ×2、增益 ×1.25），
+     * 且平移段的旧范围部分未被覆盖（形成空档）—— 覆盖映射的全部代码路径。
+     *
+     * 帧 ↔ 秒：帧号 × FRAME_MS。故帧 100 = 0.5 s、帧 600 = 3.0 s。
      */
     function warpFixture(lockParamLines: boolean): LoudnessGeometryWarp | null {
-        return createLoudnessGeometryWarp({
-            mappings: [
-                // 平移：帧 100..400 → 帧 500..800（长度不变 ⇒ 纯平移）。
-                {
-                    oldStartSec: 0.5,
-                    oldLengthSec: 1.5,
-                    newStartSec: 2.5,
-                    newLengthSec: 1.5,
-                    gainScale: 1,
-                },
-                // 压缩 + 增益：帧 600..1000 → 帧 200..400。
-                {
-                    oldStartSec: 3.0,
-                    oldLengthSec: 2.0,
-                    newStartSec: 1.0,
-                    newLengthSec: 1.0,
-                    gainScale: 1.25,
-                },
+        return warpFrom(
+            [
+                // 平移：帧 100..400 → 帧 500..800（纯移动，源窗口不变）。
+                [{ startSec: 0.5, lengthSec: 1.5 }, { startSec: 2.5, lengthSec: 1.5 }],
+                // 压缩 + 增益：帧 600..1000 → 帧 200..400（速率 1→2，内容跨度守恒）。
+                [
+                    { startSec: 3.0, lengthSec: 2.0, gain: 1 },
+                    { startSec: 1.0, lengthSec: 1.0, playbackRate: 2, gain: 1.25 },
+                ],
             ],
             lockParamLines,
-            framePeriodMs: FRAME_MS,
-        });
+        );
     }
 
     /**
@@ -256,28 +284,18 @@ describe("查表路径与逐值路径逐值等价", () => {
      *（见 `interpolableAt`），因此可以用来断言"映射下查表仍真的被走了"。
      */
     function translationWarpFixture(lockParamLines: boolean): LoudnessGeometryWarp | null {
-        return createLoudnessGeometryWarp({
-            mappings: [
+        return warpFrom(
+            [
                 // 平移：帧 100..400 → 帧 500..800。
-                {
-                    oldStartSec: 0.5,
-                    oldLengthSec: 1.5,
-                    newStartSec: 2.5,
-                    newLengthSec: 1.5,
-                    gainScale: 1,
-                },
+                [{ startSec: 0.5, lengthSec: 1.5 }, { startSec: 2.5, lengthSec: 1.5 }],
                 // 纯增益（时域不变）：帧 600..800，增益 ×1.25。
-                {
-                    oldStartSec: 3.0,
-                    oldLengthSec: 1.0,
-                    newStartSec: 3.0,
-                    newLengthSec: 1.0,
-                    gainScale: 1.25,
-                },
+                [
+                    { startSec: 3.0, lengthSec: 1.0, gain: 1 },
+                    { startSec: 3.0, lengthSec: 1.0, gain: 1.25 },
+                ],
             ],
             lockParamLines,
-            framePeriodMs: FRAME_MS,
-        });
+        );
     }
 
     /** 映射生效时的查询时刻：覆盖两段的新/旧范围、段边界与空档。 */
@@ -371,20 +389,11 @@ describe("查表路径与逐值路径逐值等价", () => {
         map.factors.beginWindow?.(0, 5.5);
         const before = map.factors.factorAt(1.05) as number;
 
-        // 换一份映射（把"被搬走的空档"挪到别处），重建后取值必须随之改变。
-        warp = createLoudnessGeometryWarp({
-            mappings: [
-                {
-                    oldStartSec: 0.5,
-                    oldLengthSec: 1.5,
-                    newStartSec: 1.0,
-                    newLengthSec: 1.5,
-                    gainScale: 1,
-                },
-            ],
-            lockParamLines: false,
-            framePeriodMs: FRAME_MS,
-        });
+        // 换一份映射（把平移目标挪到别处），重建后取值必须随之改变。
+        warp = warpFrom(
+            [[{ startSec: 0.5, lengthSec: 1.5 }, { startSec: 1.0, lengthSec: 1.5 }]],
+            false,
+        );
         map.factors.beginWindow?.(0, 5.5);
         const after = map.factors.factorAt(1.05) as number;
         expect(after).not.toBeCloseTo(before, 6);

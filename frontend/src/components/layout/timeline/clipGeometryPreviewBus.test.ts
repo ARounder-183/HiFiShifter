@@ -29,16 +29,48 @@ describe("clipGeometryPreviewBus", () => {
         expect(getClipGeometryPreviewOrigin()).toBeNull();
     });
 
-    it("begin 发布按下时的几何快照", () => {
+    it("begin 发布按下时的几何快照（含源窗口 / 速率等消费字段）", () => {
         reset();
         beginClipGeometryPreview([
-            { id: "a", startSec: 1, lengthSec: 2, gain: 0.5 },
+            {
+                id: "a",
+                startSec: 1,
+                lengthSec: 2,
+                gain: 0.5,
+                sourceStartSec: 0.25,
+                sourceEndSec: 2.25,
+                playbackRate: 1.5,
+                reversed: true,
+                loopEnabled: true,
+            },
             { id: "b", startSec: 3, lengthSec: 4 },
         ]);
         expect(getClipGeometryPreviewOrigin()).toEqual([
-            { clipId: "a", startSec: 1, lengthSec: 2, gain: 0.5 },
-            // 缺省增益按 1（"不改变"），与后端基线口径一致。
-            { clipId: "b", startSec: 3, lengthSec: 4, gain: 1 },
+            {
+                clipId: "a",
+                startSec: 1,
+                lengthSec: 2,
+                gain: 0.5,
+                sourceStartSec: 0.25,
+                sourceEndSec: 2.25,
+                playbackRate: 1.5,
+                reversed: true,
+                loopEnabled: true,
+            },
+            // 缺省值按"无变化"：增益 1、源窗口 [0,0]、速率 1、正放、非 Loop。
+            // 源窗口缺省会退化成"零跨度"，但映射只依赖锚点位置，几何本身来自
+            // Redux 的真实值（这里的缺省只服务于测试与不完整调用方）。
+            {
+                clipId: "b",
+                startSec: 3,
+                lengthSec: 4,
+                gain: 1,
+                sourceStartSec: 0,
+                sourceEndSec: 0,
+                playbackRate: 1,
+                reversed: false,
+                loopEnabled: false,
+            },
         ]);
     });
 
@@ -59,7 +91,7 @@ describe("clipGeometryPreviewBus", () => {
         expect(listener).toHaveBeenCalledTimes(1);
         endClipGeometryPreview();
         expect(listener).toHaveBeenCalledTimes(2);
-        // 已经结束：再 end 是 no-op（避免消费方把"水位"重复记一遍）。
+        // 已经结束：再 end 是 no-op（避免消费方把"收尾状态"重复置一次）。
         endClipGeometryPreview();
         expect(listener).toHaveBeenCalledTimes(2);
         unsubscribe();
