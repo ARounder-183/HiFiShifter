@@ -156,3 +156,173 @@ describe("粗缩放：列窗口的桶数不得随亚桶相位变化", () => {
         expect(totals.size).toBe(1);
     });
 });
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * ★ 回归：**Loop 瓦片边界列**不得随亚桶相位收窄窗口。
+ *
+ * `sceneBuilder` 把 Loop clip 切成 1 个头瓦片 + N 个整周期瓦片，**每个瓦片是独立
+ * 段**、切片为 `[0, mediaDuration]`。于是每个瓦片的**首列与末列**都紧贴数据边界
+ *（末列的时间窗有一半越过媒体末尾）。旧实现把 `winLo / winHi` 各自钳进
+ * `[0, sampleCount−1]`，末列因此**桶数变少**，且随亚桶相位在 ⌊N⌋ / ⌈N⌉ 之间翻转
+ * ⇒ 满量程台阶、以指针频率闪烁。
+ *
+ * 非 Loop clip 只有 2 个这样的列（clip 左右缘，通常在视口外）；Loop clip 有
+ * 2 × 可见周期数个、成对嵌在波形内部 —— 这就是"抖动与循环节位置有关"。
+ *
+ * 本组用例钉住：窗口 origin 被钳进 `[0, sampleCount−span]`（宽度恒定），
+ * 而不是把两端各自钳到数据边界（宽度缩水）。
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+const LOOP_BUCKET_COUNT = 8;
+const LOOP_MEDIA_DURATION_SEC = 1;
+
+/**
+ * 全媒体切片（Loop 整周期瓦片）的 4 列场景。
+ *
+ * `x` 是瓦片相对列栅格的**亚列相位**（拖拽时连续变化；`x ∈ (0,1)` 时列集恒为
+ * `[1,4]` 共 4 列）。源时长 1s、8 桶 ⇒ 桶宽 0.125s ⇒ 每列覆盖 0.25s = 2 个桶。
+ */
+function makeLoopTilesScene(xs: readonly number[]): WaveformScene {
+    return {
+        segments: xs.map((x, index) => ({
+            clipId: `loop-${index}`,
+            sourcePath: "/tone.wav",
+            sourceSampleRate: LOOP_BUCKET_COUNT,
+            sourceStartSec: 0,
+            sourceEndSec: LOOP_MEDIA_DURATION_SEC,
+            clipStartSec: 0,
+            clipLocalStartSec: 0,
+            clipLocalEndSec: LOOP_MEDIA_DURATION_SEC,
+            clipTotalDurationSec: LOOP_MEDIA_DURATION_SEC,
+            screenRect: { x, y: 0, width: 4, height: 100 },
+            reversed: false,
+            gain: 1,
+            fadeInSec: 0,
+            fadeOutSec: 0,
+            fadeInShape: 0,
+            fadeInDir: 0,
+            fadeOutShape: 0,
+            fadeOutDir: 0,
+            alpha: 1,
+            channelMode: 0,
+            sourceChannels: 0,
+        })),
+        markers: [],
+    } as WaveformScene;
+}
+
+/** 单瓦片场景（Loop 的一个整周期瓦片）。 */
+function makeLoopTileScene(x: number): WaveformScene {
+    return makeLoopTilesScene([x]);
+}
+
+function loopPeaks(maxValues: readonly number[]) {
+    return {
+        min: new Float32Array(maxValues.map((v) => -v)),
+        max: new Float32Array(maxValues),
+        dataStartSec: 0,
+        dataDurationSec: LOOP_MEDIA_DURATION_SEC,
+    };
+}
+
+function buildLoopScene(scene: WaveformScene, maxValues: readonly number[]) {
+    let calls = 0;
+    const geometry = buildWaveformGeometry({
+        scene,
+        color: "#ffffff",
+        getPeaks: () => loopPeaks(maxValues) as never,
+        amplitudeMap: (value) => {
+            calls += 1;
+            return value;
+        },
+    });
+    return { calls, geometry };
+}
+
+function buildLoopTileAt(x: number, maxValues: readonly number[]) {
+    return buildLoopScene(makeLoopTileScene(x), maxValues);
+}
+
+/** 覆盖到的**设备列索引**（顶点 x 是 CSS 列中心，dpr=1 ⇒ 索引 = x − 0.5）。 */
+function coveredColumnIndexes(vertices: ArrayLike<number>): number[] {
+    const indexes = new Set<number>();
+    for (let v = 0; v < vertices.length; v += 6) {
+        indexes.add(Math.round((vertices[v] ?? 0) - 0.5));
+    }
+    return [...indexes].sort((a, b) => a - b);
+}
+
+/** 收集所有包络顶点的 y（顶点 6 个 float：x,y,r,g,b,a；每列两个顶点）。 */
+function collectVertexYs(vertices: ArrayLike<number>): number[] {
+    const ys: number[] = [];
+    for (let v = 0; v < vertices.length; v += 6) {
+        ys.push(vertices[v + 1] ?? 0);
+    }
+    return ys;
+}
+
+/** 只收集**某一列**（按 x 精确匹配）的顶点 y。 */
+function collectColumnYs(vertices: ArrayLike<number>, x: number): number[] {
+    const ys: number[] = [];
+    for (let v = 0; v < vertices.length; v += 6) {
+        if (Math.abs((vertices[v] ?? Number.NaN) - x) < 1e-6) {
+            ys.push(vertices[v + 1] ?? 0);
+        }
+    }
+    return ys;
+}
+
+describe("粗缩放：Loop 瓦片边界列不得随亚桶相位收窄窗口", () => {
+    const flat = new Array<number>(LOOP_BUCKET_COUNT).fill(0.5);
+
+    it("★ 扫过亚列相位，每列桶数恒定（旧实现末列在 2 / 1 之间翻转）", () => {
+        const totals = new Set<number>();
+        for (let step = 1; step <= 20; step += 1) {
+            totals.add(buildLoopTileAt(step / 21, flat).calls);
+        }
+        // 4 列 × 2 桶 × (min,max) = 16；唯一值 ⇒ 末列没有缩水。
+        expect([...totals]).toEqual([16]);
+    });
+
+    it("★ 边界列必须显示真实桶内容，不得引入伪静音", () => {
+        // 桶 6 是大值、桶 7 是小值：末列窗口应恰好覆盖 [6,7]（画到 0.9），
+        // 而不是被钳成只剩桶 7（只画到 0.2）或被补 0（画到中心线）。
+        // 只看**末列**（xCss = 4.5）—— 其它列本来就能看到桶 6，混在一起会掩盖问题。
+        const maxValues = [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.9, 0.2];
+        const { geometry } = buildLoopTileAt(0.5, maxValues);
+        const lastColumnYs = collectColumnYs(geometry.vertices, 4.5);
+        expect(lastColumnYs).toHaveLength(2);
+        // 中心 50、半高 50：0.9 ⇒ y = 50 − 45 = 5。
+        // Float32 顶点缓冲：容差按 1e-5。
+        expect(Math.min(...lastColumnYs)).toBeCloseTo(5, 5);
+        // 下沿来自 −0.9 ⇒ y = 50 + 45 = 95（同一窗口、配对正确）。
+        expect(Math.max(...lastColumnYs)).toBeCloseTo(95, 5);
+    });
+
+    it("对照：全桶同值时所有列等高（宽度恒定、无缩水、无补零）", () => {
+        const { geometry } = buildLoopTileAt(0.5, flat);
+        const ys = new Set(collectVertexYs(geometry.vertices));
+        // 0.5 ⇒ 上沿 25、下沿 75；只有这两个值 ⇒ 没有一列缩水或补零。
+        expect([...ys].sort((a, b) => a - b)).toEqual([25, 75]);
+    });
+
+    it("★ 相邻两个整周期瓦片（真实 Loop 拓扑）：扫过循环节，列覆盖与桶数恒定", () => {
+        // 瓦片按 `periodSec × pxPerSec` 精确相邻（sceneBuilder 的构造方式）：
+        // B 的起点 = A 的起点 + 宽度。循环节因此随拖拽连续扫过列边界。
+        const widths = new Set<number>();
+        const columnCounts = new Set<number>();
+        for (let step = 0; step <= 20; step += 1) {
+            const x = step / 20; // 0..1，循环节跨过一次列边界
+            const { calls, geometry } = buildLoopScene(
+                makeLoopTilesScene([x, x + 4]),
+                flat,
+            );
+            widths.add(calls);
+            columnCounts.add(coveredColumnIndexes(geometry.vertices).length);
+        }
+        // 8 列 × 2 桶 × (min,max) = 32，恒定。
+        expect([...widths]).toEqual([32]);
+        // 两瓦片首尾相接：恰好 8 列，无缝、无重叠（循环节移动不改变列数）。
+        expect([...columnCounts]).toEqual([8]);
+    });
+});

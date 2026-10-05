@@ -759,6 +759,20 @@ export function buildWaveformGeometry(args: {
                 // 桶数恒定 ⇒ 那个整桶翻转消失；窗口只随内容平移 ⇒ 高度变化只发生在
                 // 内容真正进出列的时刻（那是拖拽本来就应该看到的）。
                 //
+                // 【段边界为什么不能"把窗口钳进数据范围"】旧实现在这里把 winLo / winHi
+                // 各自钳进 `[0, sampleCount−1]`：靠近数据末尾时 `winHi` 被压回，
+                // **桶数本身变少**。Loop clip 被 `sceneBuilder` 切成 1 个头瓦片 + N 个
+                // 整周期瓦片、每个瓦片是独立段（切片 `[0, D]`），于是**每个瓦片的首列
+                // 与末列**都缩水 —— 非 Loop clip 只有 2 个这样的列（clip 左右缘，通常
+                // 在视口外），Loop clip 有 2 × 可见周期数个且成对嵌在波形内部。实测末列
+                // 桶数随亚桶相位在 2 / 1 之间翻转 ⇒ 满量程台阶、以指针频率闪烁
+                //（用户报告的"与循环节位置有关的抖动"）。
+                //
+                // 正确做法：窗口**不下移**（那只是把缩水挪到别处），而是把 origin
+                // `lo` 钳进 `[0, sampleCount − span]`。于是窗口始终恰好覆盖 `span` 个
+                // **真实**桶、宽度恒定，边界处只是停止滑动（等价于"最后一列显示末尾
+                // span 个桶"——那正是该列的内容），不引入任何伪静音。
+                //
                 // 【为什么不插值】曾试过在"两个相邻整数窗口"之间插值峰值与时刻：
                 // 它确实连续，但把**峰值的来源**与**时刻的来源**解耦了（峰值掺入了
                 // 邻桶、时刻却还在原桶），于是"大峰值 × 未衰减时刻的增益"会造出
@@ -773,13 +787,13 @@ export function buildWaveformGeometry(args: {
                 let winHi = indexEnd;
                 if (useStableWindow) {
                     const centerF = (sourceCenterSec - peaks.dataStartSec) / bucketSpanSec;
+                    // span 同时受 sampleCount 限制：极短段（桶数少于一个列的跨度）时
+                    // 退化为"整段"，仍是恒定桶数。
+                    const span = Math.min(coarseSpan, sampleCount);
                     const lo = Math.round(centerF - bucketsPerColumn / 2);
-                    winLo = Math.max(0, Math.min(Math.max(0, sampleCount - 1), lo));
-                    winHi = Math.max(
-                        winLo,
-                        Math.min(Math.max(0, sampleCount - 1), lo + coarseSpan - 1),
-                    );
-                    winCount = winHi - winLo + 1;
+                    winLo = Math.max(0, Math.min(sampleCount - span, lo));
+                    winCount = span;
+                    winHi = winLo + span - 1;
                 }
                 if (winCount < 1) continue;
 
