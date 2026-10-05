@@ -1,5 +1,9 @@
 # HiFiShifter App与ARA插件构建及功能同步
 
+最新状态（2026-10-05）：用户已确认release-delivery-02集中验收通过，当前分支改为
+`feature/ara-plugin`。交付记录见[ara-release-acceptance.md](ara-release-acceptance.md)。
+下文“待用户验收”属于历史构建批次状态；不因此重新运行测试或修改原构建manifest。
+
 插件的简短中文操作说明另见[hifishifter-vst-使用说明.md](hifishifter-vst-使用说明.md)。
 
 中文产品构建说明。当前产品宿主目标为Windows x64/REAPER；用户已将Linux/macOS插件

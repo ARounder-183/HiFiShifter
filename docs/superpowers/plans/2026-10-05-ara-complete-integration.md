@@ -1,5 +1,11 @@
 # ARA Complete Integration Implementation Plan
 
+**最新收尾（2026-10-05）：** 用户已两次确认release-delivery-02验收通过，并明确要求
+分支改名为feature/ara-plugin后推送origin。按用户新授权覆盖本计划旧“不push”约束，
+不强推、不改主develop、不推送ignored工程/构建产物、不再重复测试或新增review。
+交付与验收证据/残余资源边界见docs/ara-release-acceptance.md；后续open状态段保留历史，
+不把历史待办描述冒充本轮仍未获用户验收。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans。
 > 用户已指定本会话自主执行、不要逐步询问，测试按批末/最终集中；后续只在最终一次review。
 

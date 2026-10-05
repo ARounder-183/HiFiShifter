@@ -1002,4 +1002,8 @@ Task 45: Ruling: 既有隔离启动器只识别probe bundle目录，无法直接
 
 Task 41: Ruling: 用户确认旧REAPER已关闭，CIM实际无实例 — 直接以release-delivery-02打开release-user-02双轨副本，PID53116窗口响应、真实插件日志两路role1快照ready；不启动独立App、不跑测试、不改原工程/已加载DLL — 这只证明新包已加载供用户使用，不外推四BUG、全部变换/缓存及冷恢复已过；保留当前实例给用户操作，不擅自关闭。
 
+Task 41: Ruling: 用户实际使用新Release后明确“验收通过”，再次确认“我测试过了，ok” — 记录为用户集中GUI验收通过，整理交付/使用/构建文档，保留HNSEP整段资源与平台边界，不复跑测试或新增review — 若将用户确认写成代理逐项测量全部矩阵或改写原manifest会夸大证据；旧open段落作为历史保留。
+
+Task 45: Ruling: 用户明确要求当前分支改名feature/ara-plugin并推送远程 — 覆盖旧“绝不push”的本次限制，已将本worktree分支从codex/ara-plugin本地改名，origin目标ref检查为空；仅提交明确文档路径后正常push设置upstream — 若改主develop、强推现有远程或上传ignored用户工程/产物会扩大授权；不删旧远程分支、不自动建PR。
+
 
