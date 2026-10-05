@@ -415,6 +415,46 @@ export function makeLoudnessAmplitudeMap(
                         ? base
                         : sampled;
             }
+        } else if (hasBaseline) {
+            // ── 揭示帧：旧快照里没有这一帧的原声电平 ──────────────────────
+            // （延伸 / 截短新露出的部分、Slip 带入的部分。）
+            //
+            // 【为什么仍然能给出目标】用户画的动态曲线是**时间轴锚定**的，不是源锚定
+            // 的 —— 新几何下该帧的目标电平本来就知道（`curveFrame` 映射即可取到）。
+            // 缺的只有"原声电平"这一项。
+            //
+            // 【为什么必须给出目标，而不是像以前那样整帧留空】留空会让
+            // `levelCeilingOverWindow` 把该帧当作"无贡献"；当窗口内**全部**是揭示帧
+            // 时它返回 `null` = **完全放弃上界钳制**。粗档（L2）每列只剩 1 个桶、1 次
+            // 求值，于是**整列**都不钳制 ⇒ 揭示区画出后端不会有的幻峰，松手拿到权威
+            // 基线后才被压回去（"拖拽时略微不对、松手才恢复"）。
+            //
+            // 【为什么 `base` 仍然留 `null`】`base === null` 正是"基线未知 ⇒ 不施加
+            // 动态增益"的既有表达：`factorAtDirect` 与查表路径都以它作为门控，因此
+            // **乘数逐值不变**（增益恒 1）。而 `reachableLevel` 对非静音内容与基线
+            // 无关（`dynLevelTargetingGain(base, base) ≡ 1`），所以上界
+            // `目标 × 音量` 照样可算 —— 且**正是松手后权威基线给出的那个上界**。
+            // `fade := 1`（假设有内容）同理只参与上界，不参与乘数。
+            let liveTarget: number | null = null;
+            if (liveDyn !== null && liveDyn.values.length > 0) {
+                liveTarget = sampleCurveLinear(
+                    liveDyn.values,
+                    liveDyn.startFrame,
+                    liveDyn.stride,
+                    frameF,
+                );
+            }
+            target =
+                liveTarget !== null
+                    ? liveTarget
+                    : sampleCurveLinear(
+                          source.dynTarget,
+                          source.startFrame,
+                          source.stride,
+                          curveFrame,
+                      );
+            base = null;
+            fade = target === null ? 0 : 1;
         }
         sampleScratch.target = target;
         sampleScratch.base = base;

@@ -326,3 +326,99 @@ describe("粗缩放：Loop 瓦片边界列不得随亚桶相位收窄窗口", ()
         expect([...columnCounts]).toEqual([8]);
     });
 });
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 粗档档位（`coarseSpan`）不得因**数据边界钳制**而变化。
+ *
+ * `sceneBuilder` 会把瓦片的源窗口钳进 `[0, 媒体时长]`（`Math.max(0, …)` /
+ * `Math.min(D, …)`），而几何层用**段的** `sourceDurationSec` 推每列桶数：
+ *
+ *   bucketsPerColumn = sourceSecondsPerColumn / bucketSpanSec
+ *   sourceSecondsPerColumn = sourceDurationSec · 列宽 / 段宽
+ *
+ * 二者在"段声明的源跨度 > 实际可用数据跨度"时不再成比例（延伸 / Slip 把窗口
+ * 推过媒体首尾）。本组用例确认：此时档位仍然**恒定**（窗口 origin 的钳制吸收
+ * 了差异），因此不需要额外改动。
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** 数据只覆盖源 [0, 0.6)，而段声明 [0, 1)：模拟"窗口越过媒体末尾"。 */
+function makeClampedScene(sourceStartSec: number): WaveformScene {
+    return {
+        segments: [
+            {
+                clipId: "clamped",
+                sourcePath: "/tone.wav",
+                sourceSampleRate: 8,
+                sourceStartSec,
+                sourceEndSec: sourceStartSec + 1,
+                clipStartSec: 0,
+                clipLocalStartSec: 0,
+                clipLocalEndSec: 1,
+                clipTotalDurationSec: 1,
+                screenRect: { x: 0, y: 0, width: 4, height: 100 },
+                reversed: false,
+                gain: 1,
+                fadeInSec: 0,
+                fadeOutSec: 0,
+                fadeInShape: 0,
+                fadeInDir: 0,
+                fadeOutShape: 0,
+                fadeOutDir: 0,
+                alpha: 1,
+                channelMode: 0,
+                sourceChannels: 0,
+            },
+        ],
+        markers: [],
+    } as WaveformScene;
+}
+
+describe("粗档：窗口越过数据边界时档位恒定", () => {
+    /** 8 桶只覆盖源 [0, 0.6) ⇒ 桶宽 0.075s；段声明跨度 1s ⇒ 每列 0.25s ≈ 3.33 桶。 */
+    function clampedPeaks() {
+        const max = new Float32Array(8);
+        const min = new Float32Array(8);
+        for (let i = 0; i < 8; i += 1) {
+            max[i] = 0.2 + (0.7 * ((i * 5) % 8)) / 8;
+            min[i] = -max[i];
+        }
+        return { min, max, dataStartSec: 0, dataDurationSec: 0.6 };
+    }
+
+    it("★ 扫过亚桶相位（覆盖列集合不变），每列桶数恒定", () => {
+        const totals = new Set<number>();
+        for (let step = 0; step <= 20; step += 1) {
+            let calls = 0;
+            // 桶宽 0.075s ⇒ 扫 0.02s 是**亚桶**相位；覆盖到的列集合不变，
+            // 因此总调用数的任何变化都只可能来自"档位/桶数翻转"。
+            buildWaveformGeometry({
+                scene: makeClampedScene((step / 20) * 0.02),
+                color: "#ffffff",
+                getPeaks: () => clampedPeaks() as never,
+                amplitudeMap: (value) => {
+                    calls += 1;
+                    return value;
+                },
+            });
+            totals.add(calls);
+        }
+        // 粗档走**桶数恒定**窗口：3 个覆盖到的列各 4 桶（其余列整列越过数据被跳过）
+        // ⇒ 3 × 4 × 2 = 24，恒定 —— 档位不因数据边界钳制而跳变。
+        expect([...totals]).toEqual([24]);
+    });
+
+    it("完全越过数据的列不产生顶点（不画伪内容）", () => {
+        const geometry = buildWaveformGeometry({
+            scene: makeClampedScene(0),
+            color: "#ffffff",
+            getPeaks: () => clampedPeaks() as never,
+            amplitudeMap: (value) => value,
+        });
+        // 数据只到源 0.6s ⇒ 列 0/1/2 有内容，列 3（t≈0.875）整列越界 ⇒ 被跳过。
+        const columns = new Set<number>();
+        for (let v = 0; v < geometry.vertices.length; v += 6) {
+            columns.add(Math.round((geometry.vertices[v] ?? 0) - 0.5));
+        }
+        expect([...columns].sort((a, b) => a - b)).toEqual([0, 1, 2]);
+    });
+});

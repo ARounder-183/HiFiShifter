@@ -310,15 +310,24 @@ describe("手势几何 → 映射的整链", () => {
 });
 
 /**
- * ★ 回归：窗口内**没有任何帧可取到目标电平**时，上界必须返回 `null`（不钳制），
- * 而不是 `0`（= 钳到静音）。
+ * ★ 回归：窗口内**没有任何帧有已知基线**时，上界必须仍然给出一个**有限的正值**
+ *（= `目标电平 × 音量`），而不是 `0`（钳到静音）、也不该是 `null`（放弃钳制）。
  *
- * 症状：拖拽延伸 / Slip 时，新揭示的帧"有峰值、但基线未知"，于是窗口内所有帧都
- * 被跳过；旧实现让 `ceiling` 保持在初值 `0`，几何层据此把整列的上下包络都钳成 0
- * （`limit = 0 × gCeil`），该列画成中心线上的一条细线 —— 看起来就像"这里还没加载
- * 出来"，并随指针以离散步长一帧帧地向前啃。用户报告为"波形一截一截地加载"。
+ * 症状：拖拽延伸 / Slip 时，新揭示的帧"有峰值、但基线未知"。旧实现让这些帧整帧
+ * 跳过，窗口内全部跳过时 `ceiling` 返回 `null` = **完全放弃上界钳制** —— 粗档
+ * （L2）每列只剩 1 个桶、1 次求值，于是**整列**都不钳制，揭示区画出后端不会有的
+ * 幻峰，松手拿到权威基线后才被压回去（"拖拽时略微不对、松手才恢复"）。
+ *
+ * 【为什么 `目标 × 音量` 就是正确的上界】`reachableLevel` 对非静音内容与基线无关
+ *（`dynLevelTargetingGain(base, base) ≡ 1`），因此这个值**正是松手后权威基线给出的
+ * 那个上界**。而动态增益本身仍退化为 1（`base := target`），与修复前逐值相同 ——
+ * 本修复只补上界，不改乘数。
+ *
+ * 【与"无数据"的区别仍然保留】真正没有动态数据（`dynBaseline` 为空）时
+ * `hasBaseline` 为 false，上界依旧不钳制（见 `loudnessLutEquivalence.test.ts`
+ * 的「无动态基线时不钳制」）。
  */
-describe("可达电平上界：无数据 ≠ 上界为 0", () => {
+describe("可达电平上界：揭示帧给出目标电平上界，而不是放弃钳制", () => {
     /** 有真实基线、目标与基线逐位相同（= 全部"未画"）。 */
     function undrawnSource(): LoudnessAutomationSource {
         const baseline = Array.from({ length: 48 }, (_, f) => 0.3 + 0.2 * Math.abs(Math.sin(f * 0.3)));
@@ -329,7 +338,7 @@ describe("可达电平上界：无数据 ≠ 上界为 0", () => {
         });
     }
 
-    it("★ 整窗落在新揭示区（基线未知）⇒ null，不得钳到 0", () => {
+    it("★ 整窗落在新揭示区（基线未知）⇒ 上界 = 目标电平（有限、非 0、非 null）", () => {
         const src = undrawnSource();
         // 右边延伸：`[0,16)` → `[0,32)`，帧 ≥16 的基线在旧快照里不可见。
         const warp = warpOf([geo("c1", 0, 0.16)], [geo("c1", 0, 0.32)]);
@@ -337,11 +346,18 @@ describe("可达电平上界：无数据 ≠ 上界为 0", () => {
             const map = amplitudeMap(src, () => warp);
             if (useLut) map.beginWindow?.(at(0), at(47));
             const ceiling = map.levelCeilingOverWindow?.(at(20), at(24));
-            expect(ceiling, `useLut=${useLut}`).toBeNull();
+            expect(ceiling, `useLut=${useLut}`).not.toBeNull();
+            expect(ceiling as number).toBeGreaterThan(0);
+            // 音量恒 1 ⇒ 上界 = 窗口内最大的目标电平（目标与基线逐位相同）。
+            let expected = 0;
+            for (let f = 20; f <= 24; f += 1) {
+                expected = Math.max(expected, src.dynTarget[f] as number);
+            }
+            expect(ceiling as number, `useLut=${useLut}`).toBeCloseTo(expected, 9);
         }
     });
 
-    it("Slip 同理：被搬出旧覆盖范围的整窗 ⇒ null", () => {
+    it("Slip 同理：被搬出旧覆盖范围的整窗 ⇒ 上界 = 目标电平", () => {
         const src = undrawnSource();
         // 源窗口右移 0.04 s（4 帧）：clip 占帧 [0,24)，映射 g(f) = f + 4，
         // 于是帧 ≥20 的基线落在旧覆盖范围 [0,24) 之外。
@@ -352,12 +368,30 @@ describe("可达电平上界：无数据 ≠ 上界为 0", () => {
         for (const useLut of [false, true]) {
             const map = amplitudeMap(src, () => warp);
             if (useLut) map.beginWindow?.(at(0), at(47));
-            expect(map.levelCeilingOverWindow?.(at(21), at(23)), `useLut=${useLut}`).toBeNull();
+            const ceiling = map.levelCeilingOverWindow?.(at(21), at(23));
+            expect(ceiling, `useLut=${useLut}`).not.toBeNull();
+            expect(ceiling as number, `useLut=${useLut}`).toBeGreaterThan(0);
         }
         // 对照组：同一 clip 内靠前的帧仍在旧覆盖范围内 ⇒ 照常有上界。
         const map = amplitudeMap(src, () => warp);
         map.beginWindow?.(at(0), at(47));
         expect(map.levelCeilingOverWindow?.(at(8), at(12))).not.toBeNull();
+    });
+
+    it("★ 揭示区的上界与「松手后（无映射）」逐值一致", () => {
+        const src = undrawnSource();
+        const warp = warpOf([geo("c1", 0, 0.16)], [geo("c1", 0, 0.32)]);
+        const drag = amplitudeMap(src, () => warp);
+        drag.beginWindow?.(at(0), at(47));
+        const release = amplitudeMap(src, () => null);
+        release.beginWindow?.(at(0), at(47));
+        for (let f = 17; f <= 30; f += 1) {
+            // 揭示区在拖拽期与松手后给出同一个上界 ⇒ 该列的高度不会在松手瞬间跳变。
+            expect(drag.levelCeilingOverWindow?.(at(f), at(f + 2))).toBeCloseTo(
+                release.levelCeilingOverWindow?.(at(f), at(f + 2)) as number,
+                9,
+            );
+        }
     });
 
     it("窗口内仍有已知帧时照常给出上界（修复不能变成「永不钳制」）", () => {
