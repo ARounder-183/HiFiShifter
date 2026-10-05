@@ -620,6 +620,7 @@ export function makeLoudnessAmplitudeMap(
     return map;
 }
 
+/** 参数编辑器波形与时间线共用含宿主示意包络的场景，不另实现一套fade。 */
 function toSceneClip(entry: ClipPeaksEntry): WaveformSceneClip | null {
     if (!entry.sourcePath || entry.muted) return null;
     return {
@@ -637,6 +638,7 @@ function toSceneClip(entry: ClipPeaksEntry): WaveformSceneClip | null {
         gain: entry.gain,
         muted: false,
         fadeInSec: entry.fadeInSec,
+        hostFades: entry.hostFades,
         fadeOutSec: entry.fadeOutSec,
         autoFadeInSec: entry.autoFadeInSec,
         autoFadeOutSec: entry.autoFadeOutSec,

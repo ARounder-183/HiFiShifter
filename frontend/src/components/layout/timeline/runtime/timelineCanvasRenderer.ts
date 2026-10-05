@@ -32,8 +32,7 @@ import {
     CLIP_INSTANCE_FLOATS,
     type GlClipBodySink,
 } from "./timelineClipGlRenderer.js";
-import { fadeGainSigned } from "../reaperFade.js";
-import {hostFadeDisplay,hostFadeLabel} from "../hostFadeDisplay.js";
+import {hostFadeDisplay,visualFadeGain} from "../hostFadeDisplay.js";
 import { drawLoopMarkers } from "../../../../utils/loopRender.js";
 
 function drawFadeCurveStroke(
@@ -52,21 +51,12 @@ function drawFadeCurveStroke(
     const widthPx = Math.max(1, args.widthPx);
     const heightPx = Math.max(1, args.heightPx);
     const hostDisplay=hostFadeDisplay(args.hostFades,args.mode==="out");
-    if (hostDisplay==="host_defined"&&args.hostFades) {
-        // 只标出准确长度/原始轴；未经oracle校准不能用旧公式画一条貌似准确的曲线。
-        ctx.beginPath();const boundary=args.leftPx+(args.mode==="in"?widthPx:0);
-        ctx.moveTo(boundary,args.topPx);ctx.lineTo(boundary,args.topPx+heightPx);ctx.stroke();
-        if (widthPx>40&&heightPx>14) {ctx.save();ctx.beginPath();ctx.rect(args.leftPx,args.topPx,widthPx,heightPx);ctx.clip();
-            ctx.font="10px sans-serif";ctx.fillStyle="rgba(255,255,255,0.8)";
-            ctx.fillText(hostFadeLabel(args.hostFades,args.mode==="out"),args.leftPx+3,args.topPx+12);ctx.restore();}
-        return;
-    }
     if (hostDisplay==="linear") {
         ctx.beginPath();ctx.moveTo(args.leftPx,args.topPx+(args.mode==="in"?heightPx:0));
         ctx.lineTo(args.leftPx+widthPx,args.topPx+(args.mode==="in"?0:heightPx));ctx.stroke();return;
     }
     const shapeId = Math.trunc(Number.isFinite(args.shape) ? args.shape : 255);
-    if (shapeId === 0 && Math.abs(args.dir) < 1e-9) {
+    if (hostDisplay === "legacy" && shapeId === 0 && Math.abs(args.dir) < 1e-9) {
         // 直线快路径。淡入 = 增益沿 x 上升（左下→右上）；淡出相反。
         // y 轴向下：增益 1 → 屏幕上方（topPx）。
         ctx.beginPath();
@@ -88,7 +78,7 @@ function drawFadeCurveStroke(
     // 递归细分：弦中点到真实曲线的偏差超过 0.6px 就继续拆分，直到
     // 折线与真实曲线处处贴合。端点 t=0/1 始终包含（增益在两端被核心
     // 函数精确钳制），因此曲线必然精确落在左下/右上（或反向）边角上。
-    const gainAt = (t: number): number => fadeGainSigned(args.shape, args.dir, args.mode, t);
+    const gainAt = (t: number): number => visualFadeGain(args.hostFades,args.shape,args.dir,args.mode,t);
     const xAt = (t: number): number => args.leftPx + t * widthPx;
     const yAt = (t: number): number => args.topPx + heightPx * (1 - gainAt(t));
 

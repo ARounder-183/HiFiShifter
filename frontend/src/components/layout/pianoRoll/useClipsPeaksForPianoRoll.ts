@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ClipInfo } from "../../../features/session/sessionTypes";
+import type {HostFadeMetadata} from "../../../types/api";
 import { resolveSourceEndSec } from "../../../utils/loopRender";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 
@@ -66,6 +67,8 @@ export interface ClipPeaksEntry {
     gain: number;
     /** 淡入时长（秒） */
     fadeInSec: number;
+    /** 插件只读宿主淡化轴；仅供共享UI包络，不写入音频。 */
+    hostFades?: HostFadeMetadata;
     /** 淡出时长（秒） */
     fadeOutSec: number;
     /** 自动交叉淡化时长（秒）；>0 时有效淡化 = 自动值，否则用手动值。 */
@@ -211,6 +214,7 @@ export function useClipsPeaksForPianoRoll(args: {
                 playbackRate: pr,
                 gain: clip.gain ?? 1,
                 fadeInSec: clip.fadeInSec ?? 0,
+                hostFades: clip.hostFades,
                 fadeOutSec: clip.fadeOutSec ?? 0,
                 autoFadeInSec: clip.autoFadeInSec ?? 0,
                 autoFadeOutSec: clip.autoFadeOutSec ?? 0,

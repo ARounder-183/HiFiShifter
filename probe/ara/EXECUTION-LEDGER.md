@@ -990,4 +990,8 @@ Task 41: Ruling: plugin全量154过/2失败，四样本权限/gain夹具默认NN
 
 Task 45: Ruling: 本批查询生命周期与夹具修正后需要同源App/插件产物而非只报库测试 — All Debug regression-fixed-build-03 exit0，45文件SHA256全复核0差异，App保留vslib而plugin engine无其导入；不重复前端/kernel/App已过批次，manifest Verify/native仍false — 若把分段回归或新包摘要当完整Verify/原GUI四BUG验收，会夸大证据；Release、精确fade及集中native仍open，未安装或启动REAPER。
 
+Task 38: Ruling: 用户最新允许渐变使用HiFiShifter自己的曲线，不要求完整还原REAPER — 停止精确公式校准，新轴以本应用既有幂/S族示意包络显示，Canvas和两种波形面共用求值器，长度/auto与原始c/S自动同步，宿主仍单次应用声音 — 7文件27项/类型检查exit0，App/legacy原值保持；若不标示意或把UI包络烘焙进PCM会误导/双重淡化，native四BUG仍未验收，其余完整目标不降门。
+
+Task 41: Ruling: 用户改范围前的一次性校准实例45948仍存活但没有oracle产物，独立新profile自动追加公共VST3路径，正常关闭请求返回false — 不再执行校准/发脚本/强杀，未提交脚本移到ignored私有scratch保留，继续完成源码与不可覆盖的新包构建 — 若把无日志或零窗口句柄当进程已退出会违反单实例隔离；最终启动前必须实际确认退出，当前不据此停下其它可推进工作。
+
 

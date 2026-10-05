@@ -91,7 +91,7 @@ export function buildSingleFadeInfoText(args: {
     if (args.hostFades&&args.hostFades.curve_mode!=="legacy") {
         return [`${sideLabel}：${hostFadeLabel(args.hostFades,args.isOut)}`,
             `${length}：${formatFadeLengthTooltip(Math.max(0,args.lengthSec),args.formatCtx)}`,
-            "由 REAPER 控制（曲线形状未校准）"].join("\n");
+            "HiFiShifter 示意曲线；声音由 REAPER 控制"].join("\n");
     }
     const sign = args.dir >= 0 ? "+" : "";
     return [

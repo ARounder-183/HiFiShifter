@@ -1,4 +1,7 @@
+// 共享波形几何：UI包络与曲线描边同源；宿主示意fade不改变实际PCM。
 import { fadeGainIn, fadeGainOut } from "../components/layout/timeline/paths.ts";
+import {visualFadeGain} from "../components/layout/timeline/hostFadeDisplay.ts";
+import type {HostFadeMetadata} from "../types/api";
 import {
     INACTIVE_TAKE_COLOR_ALPHA,
     INACTIVE_TAKE_RGB_SCALE,
@@ -343,6 +346,7 @@ function sourceIndexClipTimeSec(
     return clipLocalStartSec + t * localSpanSec;
 }
 
+/** 波形视觉增益：宿主示意与描边同源，无宿主元数据仍走原App包络。 */
 function gainAtClipTime(
     clipTimeSec: number,
     totalDurationSec: number,
@@ -352,18 +356,17 @@ function gainAtClipTime(
     fadeInDir: number,
     fadeOutShape: number,
     fadeOutDir: number,
+    hostFades?: HostFadeMetadata,
 ): number {
     let gain = 1;
     if (fadeInSec > 0 && clipTimeSec < fadeInSec) {
-        gain *= fadeGainIn(fadeInShape, fadeInDir, clamp01(clipTimeSec / fadeInSec));
+        const t=clamp01(clipTimeSec/fadeInSec);
+        gain *= hostFades?visualFadeGain(hostFades,fadeInShape,fadeInDir,"in",t):fadeGainIn(fadeInShape,fadeInDir,t);
     }
     const fadeOutStart = totalDurationSec - fadeOutSec;
     if (fadeOutSec > 0 && clipTimeSec > fadeOutStart) {
-        gain *= fadeGainOut(
-            fadeOutShape,
-            fadeOutDir,
-            clamp01((clipTimeSec - fadeOutStart) / fadeOutSec),
-        );
+        const t=clamp01((clipTimeSec-fadeOutStart)/fadeOutSec);
+        gain *= hostFades?visualFadeGain(hostFades,fadeOutShape,fadeOutDir,"out",t):fadeGainOut(fadeOutShape,fadeOutDir,t);
     }
     return gain;
 }
@@ -631,6 +634,7 @@ export function buildWaveformGeometry(args: {
                 segment.fadeInDir,
                 segment.fadeOutShape,
                 segment.fadeOutDir,
+                segment.hostFades,
             );
 
         for (let bandIndex = 0; bandIndex < bandCount; bandIndex += 1) {

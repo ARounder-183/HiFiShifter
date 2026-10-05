@@ -1,5 +1,28 @@
 # 原GUI自动应用与播放头同步批次
 
+## 最新用户渐变裁定与实现（覆盖下方历史未校准门）
+
+2026-10-05用户允许渐变“走hifishifter自己的”，不要求完整还原宿主曲线。新轴保留
+原始c/S数值，`visualFadeGain`混合本应用已有幂曲率与S族，定义为HFS示意曲线，不
+把它冒称REAPER公式。零轴显示线性；未知版本用明确示意线。独立App/legacy轴仍用
+原`fadeGainSigned`逐值路径。音频责任不变，普通fade仅由REAPER应用一次。
+
+Canvas不再只画长度边界；元数据也经active/inactive take、时间线/参数编辑器波形
+投影进入同一个共享求值器，避免“线画一种、波形画另一种”。手动/auto有效长度原语义
+保留，真实宿主改动仍走已有独立UI revision，不丢pending编辑/不重复神经渲染。
+
+实测7文件27项通过/exit0，覆盖双轴有界单调/端点、两轴更新、App原值不变、实际
+Canvas不被旧linear快路径短路、普通/auto长度/take投影与波形几何响应。类型检查
+修正新夹具漏channelMode后exit0；原始输出`.build-tmp/hfs-fade-ui-01.log`。
+不是原生GUI验收；Release/完整最终Verify/宿主四BUG仍待最终门。
+
+用户改范围前启动过无插件精确校准的隔离REAPER45948；没有得到cases/WAV/RPP。
+进程仍在，MainWindowHandle=0、CloseMainWindow返回false，未强杀/未发送后续脚本。
+其新profile自动附加了公共VST3路径，当前未知停在扫描还是模态；不猜运行状态。
+已经停止校准并将两个未提交的一次性脚本移到ignored `.build-tmp/fade-axis-oracle-01`
+保留，不带进产品/下一轮执行。此隔离进程须正常关闭后才可开最终用户测试实例。
+用户原RPP摘要未变；没有改主develop、SDK或用户现有profile。
+
 中文记录，2026-10-05。一次性诊断记录，不替代最终REAPER验收。用户要求全部源码完成后
 统一启动隔离实例交其集中测试，本批未启动REAPER、未操作Computer Use。
 

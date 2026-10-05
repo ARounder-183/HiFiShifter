@@ -1,3 +1,4 @@
+// 原/插件共享take波形投影；宿主淡化元数据只影响UI，不能重复处理声音。
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 import type { WaveformSceneClip } from "../../../waveform/sceneBuilder";
 
@@ -68,6 +69,7 @@ export function clipToSceneClip(clip: ClipInfo): WaveformSceneClip | null {
     return sceneClipProjection(clip, clip.sourcePath);
 }
 
+/** active/inactive take共用clip淡化定义，原始宿主轴仅透传到UI场景。 */
 function sceneClipProjection(clip: ClipInfo, sourcePath: string): WaveformSceneClip {
     return {
         id: clip.id,
@@ -85,6 +87,7 @@ function sceneClipProjection(clip: ClipInfo, sourcePath: string): WaveformSceneC
         gain: clip.gain,
         muted: clip.muted,
         fadeInSec: clip.fadeInSec,
+        hostFades: clip.hostFades,
         fadeOutSec: clip.fadeOutSec,
         autoFadeInSec: clip.autoFadeInSec,
         autoFadeOutSec: clip.autoFadeOutSec,
