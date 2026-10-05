@@ -1318,7 +1318,10 @@ export const enUS = {
     snap_section_interactions: "Clip & Special Interactions",
     snap_clip_edges: "Snap clip start/end",
     snap_clip_snap_offset: "Snap clip snap offset (content start)",
-    clip_snap_offset: "Snap offset (drag to adjust)",
+    clip_snap_offset: "Snap offset",
+    clip_snap_offset_value: "Snap offset: {offset}\nPosition: {position}",
+    clip_snap_offset_value_drag:
+        "Snap offset: {offset} [{delta}]\nPosition: {position} [{delta}]",
     snap_across_tracks: "Snap clips across tracks",
     snap_track_distance: "Tracks away",
     snap_razor_edits: "Snap razor edits",

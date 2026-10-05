@@ -3455,6 +3455,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let lastClipHoverKey = "";
 
     /**
+     * "签名已过期"哨兵：与任何真实键、以及空串都不相等。
+     *
+     * 【为什么不用空串】空串是"指针不在任何 clip 上"的**合法**签名。手势结束后若把
+     * 签名置空，而指针恰好停在空白处（`clipKey` 也是空串），去重会认为"没变化"而
+     * 不再回调 —— 浮标清不掉。用一个不可能碰撞的哨兵，两种情形都能重发。
+     */
+    const CLIP_HOVER_STALE = "\u0000stale";
+
+    /**
      * 上一次 hover 命中的**指针签名**（坐标 + 按键 + 修饰键）。
      *
      * `pointermove` 在同一坐标可连续触发（部分平台在捕获/按键状态变化后补发），
@@ -4248,6 +4257,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 手势期间的移动不进悬停链；顺手清空指针签名，让手势结束后的第一次
             // 移动必然重算（手势已改变场景，旧签名对应的悬停结果是过期的）。
             lastHoverPointerKey = "";
+            // 内容签名同理失效：手势期间发布的浮标是**拖动变体**（增益 / 吸附偏移
+            // 带 `[增量]`），手势结束后必须重发一次悬停变体，否则增量会一直留在
+            // 气泡上。用哨兵而不是空串 —— 理由见 `CLIP_HOVER_STALE`。
+            lastClipHoverKey = CLIP_HOVER_STALE;
             return;
         }
         const pointerKey = `${event.clientX},${event.clientY},${event.buttons},${event.altKey},${event.ctrlKey},${event.metaKey},${event.shiftKey}`;

@@ -1198,7 +1198,10 @@ export const jaJP = {
     snap_section_interactions: "クリップと特殊要素の連携",
     snap_clip_edges: "クリップ先頭/末尾にスナップ",
     snap_clip_snap_offset: "クリップのスナップオフセットにスナップ",
-    clip_snap_offset: "スナップオフセット（ドラッグで調整）",
+    clip_snap_offset: "スナップオフセット",
+    clip_snap_offset_value: "スナップオフセット：{offset}\n位置：{position}",
+    clip_snap_offset_value_drag:
+        "スナップオフセット：{offset} [{delta}]\n位置：{position} [{delta}]",
     snap_across_tracks: "他トラックのクリップへスナップ",
     snap_track_distance: "離れたトラック数",
     snap_razor_edits: "レザー編集をスナップ",

@@ -63,8 +63,12 @@ import {
     buildSingleFadeInfoContent,
     publishFadeRichTooltip,
     type FadeLabelLookup,
-    type FadeLengthFormatContext,
 } from "./timeline/fadeTooltipText";
+import {
+    buildSnapOffsetInfoText,
+    type TimeValueFormatContext,
+    type TimeValueLabelLookup,
+} from "./timeline/timeValueText";
 import { effectiveFadeSec } from "./timeline/kernel/interaction/fadeTargets";
 import type { ClipHitRegion } from "./timeline/kernel/interaction/hitTest";
 import type { ClipHeaderControl } from "./timeline/kernel/interaction/clipHeaderControls";
@@ -462,7 +466,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const importTarget = midiDialogSource === "dragDrop" ? importTargetDragDrop : importTargetMenu;
     const onImportTargetChange =
         midiDialogSource === "dragDrop" ? onImportTargetDragDropChange : onImportTargetMenuChange;
-    const { t, tf } = useI18n();
+    const { t, tf, tVars } = useI18n();
     // 轨道头宽度是**布局状态**的一部分（用户调过的尺寸必须随布局持久化），
     // 取代了原先写死的 `w-64`。
     const trackHeaderWidthPx = useAppSelector(
@@ -892,16 +896,21 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [s.bpm, s.beats, s.grid, s.tempoMap],
     );
 
-    // 淡化长度 ToolTips 的相对时长上下文：主/副时间单位 + 工程计时参数。
-    const fadeLengthFormatCtx = React.useMemo<FadeLengthFormatContext>(
+    // 时间量 ToolTips 的格式化上下文：主/副时间单位 + 工程计时参数 + Tempo Map。
+    //
+    // 一个对象同时服务两种口径（见 `timeValueText` 文件头）：
+    // - **时长**（淡化长度、吸附偏移）走 `formatDurationText`，按定义忽略 `tempoMap`；
+    // - **时刻**（吸附偏移的绝对位置）走 `formatPositionText`，必须感知 Tempo Map。
+    const timeValueFormatCtx = React.useMemo<TimeValueFormatContext>(
         () => ({
             primaryTimeUnit: s.primaryTimeUnit,
             secondaryTimeUnit: s.secondaryTimeUnit,
             bpm: s.bpm,
             beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
             grid: s.grid,
+            tempoMap: s.tempoMap,
         }),
-        [s.primaryTimeUnit, s.secondaryTimeUnit, s.bpm, s.beats, s.grid],
+        [s.primaryTimeUnit, s.secondaryTimeUnit, s.bpm, s.beats, s.grid, s.tempoMap],
     );
 
     const projectScale = React.useMemo<ScaleLike | null>(
@@ -3200,12 +3209,37 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                   }).sec
                 : clampedAbs;
             if (!snapActive) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            const nextOffset = Math.min(Math.max(nextAbs - clipStart, 0), clipLen);
             dispatch(
                 setClipSnapOffset({
                     clipId: args.clipId,
-                    snapOffsetSec: Math.min(Math.max(nextAbs - clipStart, 0), clipLen),
+                    snapOffsetSec: nextOffset,
                 }),
             );
+            // 拖动中的实时浮标（与增益旋钮 `handleKernelGainDragPreview` 同构）：
+            // 两行都追加**本次拖拽的位移**。增量基准取按下时的偏移快照，不能用
+            // 逐帧改写的当前值（那会退化成"每帧归零"）。内容逐帧更新，浮标锚点
+            // 仍是内核容器，AppTooltip 自己跟随指针。
+            const anchor =
+                typeof document === "undefined"
+                    ? null
+                    : (document.querySelector(
+                          "[data-hs-fade-tooltip-anchor]",
+                      ) as HTMLElement | null);
+            if (anchor !== null) {
+                const baseOffset =
+                    kernelSnapOffsetBaseRef.current?.snapOffsetSec ?? nextOffset;
+                publishFadeRichTooltip(
+                    anchor,
+                    buildSnapOffsetInfoText({
+                        offsetSec: nextOffset,
+                        positionSec: clipStart + nextOffset,
+                        deltaSec: nextOffset - baseOffset,
+                        formatCtx: timeValueFormatCtx,
+                        t: tVars as TimeValueLabelLookup,
+                    }),
+                );
+            }
         },
         [
             beginKernelGestureInteraction,
@@ -3214,6 +3248,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             s.snapEnabled,
             sessionRef,
             snapTimelineDetailed,
+            tVars,
+            timeValueFormatCtx,
         ],
     );
 
@@ -3810,14 +3846,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     break;
                 default:
                     // SnapOffset 手柄没有 header 控件，用分区识别。
+                    //
+                    // 文案的三种形态（偏移为 0 只给标签 / 两行 / 拖拽带增量）由
+                    // `buildSnapOffsetInfoText` 一处判定，悬停这里只是"无位移"那一支。
+                    // 偏移是**时长**口径、位置是**时刻**口径（感知 Tempo Map），
+                    // 两者不可互换，见 `timeValueText` 文件头。
                     if (args.region === "snap-offset-handle") {
-                        text = t("clip_snap_offset");
+                        const offset = Math.max(0, Number(clip.snapOffsetSec) || 0);
+                        text = buildSnapOffsetInfoText({
+                            offsetSec: offset,
+                            positionSec: (Number(clip.startSec) || 0) + offset,
+                            deltaSec: null,
+                            formatCtx: timeValueFormatCtx,
+                            t: tVars as TimeValueLabelLookup,
+                        });
                     }
                     break;
             }
             publishFadeRichTooltip(anchor, text);
         },
-        [sessionRef, t],
+        [sessionRef, t, tVars, timeValueFormatCtx],
     );
 
     /** 内核淡变角预览：只改对应一侧的淡变长度（另一侧保持不变）。 */
@@ -4326,7 +4374,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     buildCrossfadeGripInfoContent({
                         earlier,
                         later,
-                        formatCtx: fadeLengthFormatCtx,
+                        formatCtx: timeValueFormatCtx,
                         t: t as unknown as FadeLabelLookup,
                     }),
                 );
@@ -4343,12 +4391,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 buildSingleFadeInfoContent({
                     isOut,
                     ...side,
-                    formatCtx: fadeLengthFormatCtx,
+                    formatCtx: timeValueFormatCtx,
                     t: t as unknown as FadeLabelLookup,
                 }),
             );
         },
-        [fadeLengthFormatCtx, sessionRef, t],
+        [timeValueFormatCtx, sessionRef, t],
     );
 
     /**
@@ -6823,7 +6871,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 ? multiSelectedClipIds.length
                                 : 1
                         }
-                        formatCtx={fadeLengthFormatCtx}
+                        formatCtx={timeValueFormatCtx}
                         onApply={(rate, adjustLength, durationSec) => {
                             if (rateEditorClipId != null) {
                                 commitTrackLaneRate(rateEditorClipId, {
