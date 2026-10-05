@@ -805,6 +805,16 @@ export interface TimelineKernelInteractions {
     readonly onDragPreview?: (args: {
         readonly clipId: string;
         readonly deltaSec: number;
+        /**
+         * **未钳制**的指针位移（秒，右为正）。
+         *
+         * 【为什么与 `deltaSec` 并存】`deltaSec` 是**位置**位移（下界 0：clip 不能
+         * 从负时间开始），移动手势用它。而 Slip 改的是 clip 内部的源窗口偏移，
+         * 其合法域是**任意符号、任意大小**（向左滑出媒体起点 = 前导静音）。用被钳的
+         * `deltaSec` 会让 Slip 单向卡死（`startSec = 0` 的 clip 完全无法向左滑）。
+         * 两个值都由内核一次算出，选哪个由面板按手势语义决定 —— 内核不解释修饰键。
+         */
+        readonly rawDeltaSec: number;
         readonly targetTrackId: string;
         /**
          * 修饰键快照。
@@ -3203,6 +3213,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               lengthSec: number;
               /** 最近一次派发的预览值（去重：同值不重复回调，避免空重建）。 */
               lastDeltaSec: number;
+              /**
+               * 最近一次派发的**未钳制**位移（见 `onDragPreview.rawDeltaSec`）。
+               *
+               * 【为什么去重必须同时看它】Slip 消费的是未钳制位移：clip 在
+               * `startSec = 0` 时向左拖，`deltaSec` 恒为 0 而 `rawDeltaSec` 持续变化。
+               * 只看 `deltaSec` 会把整段手势的预览全部去重掉 —— 现场表现就是
+               * "向左 slip 完全拖不动"。
+               */
+              lastRawDeltaSec: number;
               lastTargetTrackId: string;
           }
         | {
@@ -4516,6 +4535,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 originTrackId: gesture.originTrackId,
                 lengthSec: gesture.lengthSec,
                 lastDeltaSec: 0,
+                lastRawDeltaSec: 0,
                 lastTargetTrackId: gesture.originTrackId,
             };
             applyDragPreview(event);
@@ -4915,18 +4935,24 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             updateVerticalLockOverlay();
         }
         const effectiveDeltaSec = trackLock.locked ? 0 : delta.deltaSec;
+        // 未钳制位移与 `effectiveDeltaSec` 同步受竖直换轨锁定（语义一致：锁定期间
+        // 水平方向"没有发生移动"）。Slip 消费它，见 `onDragPreview.rawDeltaSec`。
+        const effectiveRawDeltaSec = trackLock.locked ? 0 : delta.rawDeltaSec;
 
         if (
             effectiveDeltaSec === gesture.lastDeltaSec &&
+            effectiveRawDeltaSec === gesture.lastRawDeltaSec &&
             targetTrackId === gesture.lastTargetTrackId
         ) {
             return;
         }
         gesture.lastDeltaSec = effectiveDeltaSec;
+        gesture.lastRawDeltaSec = effectiveRawDeltaSec;
         gesture.lastTargetTrackId = targetTrackId;
         interactions?.onDragPreview?.({
             clipId: gesture.clipId,
             deltaSec: effectiveDeltaSec,
+            rawDeltaSec: effectiveRawDeltaSec,
             targetTrackId,
             modifiers: dragModifiersOf(event),
         });

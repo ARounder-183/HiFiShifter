@@ -1815,6 +1815,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         (args: {
             clipId: string;
             deltaSec: number;
+            /** 未钳制的指针位移（秒）。Slip 用它 —— 见下方 `desiredTotal` 的说明。 */
+            rawDeltaSec: number;
             targetTrackId: string;
             modifiers: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean };
         }) => {
@@ -1928,7 +1930,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 // 把**累计位移**替换为吸附值，再以「目标累计 − 已应用累计」驱动增量
                 // （与旧实现 `useSlipDrag` 同一算法，只是位移正负号约定相反）。
                 const timelineSnap = sessionRef.current.timelineSnap;
-                let desiredTotal = args.deltaSec;
+                // 【为什么 Slip 用未钳制位移】`args.deltaSec` 是**位置**位移（内核按
+                // "clip 不能从负时间开始"钳到 ≥0）；而 Slip 改的是 clip 内部的源窗口
+                // 偏移，合法域是任意符号任意大小（向左滑出媒体起点 = 前导静音）。
+                // 用被钳的值会让 Slip 单向卡死：`startSec = 0` 的 clip 完全无法向左滑。
+                let desiredTotal = args.rawDeltaSec;
                 {
                     const anchor = origin.slipAnchor;
                     const snapActive = computeEffectiveSnap(

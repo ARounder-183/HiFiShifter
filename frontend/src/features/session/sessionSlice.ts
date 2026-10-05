@@ -1158,7 +1158,11 @@ function applyOptimisticClipState(
         clip.muted = Boolean(payload.muted);
     }
     if (payload.sourceStartSec !== undefined) {
-        clip.sourceStartSec = Number(payload.sourceStartSec) || 0;
+        // 与 sourceEndSec 同一口径：**不得钳制到 ≥0**（Slip 向左滑出媒体起点
+        // ⇒ 负起点 = 前导静音）。用 `Number.isFinite` 而非 `Number(x) || 0`：
+        // 后者虽保留负数，却会把 NaN 静默变成 0，与对侧不一致。
+        const value = Number(payload.sourceStartSec);
+        clip.sourceStartSec = Number.isFinite(value) ? value : clip.sourceStartSec;
     }
     if (payload.sourceEndSec !== undefined) {
         // 不得钳制到 ≥0：倒放 Clip 的消费窗口锚定 se，se<0（整窗在媒体
@@ -1315,7 +1319,9 @@ function applyOptimisticBulkClipState(
             clip.playbackRate = clamp(nextClipRate * previousTakeRate, 0.1, 10);
         }
         if (update.sourceStartSec !== undefined) {
-            clip.sourceStartSec = Number(update.sourceStartSec) || 0;
+            // 同 setClipSourceRange：不得钳制到 ≥0（Slip 负起点 = 前导静音）。
+            const value = Number(update.sourceStartSec);
+            clip.sourceStartSec = Number.isFinite(value) ? value : clip.sourceStartSec;
         }
         if (update.sourceEndSec !== undefined) {
             // 同 setClipSourceRange：不得钳制到 ≥0（倒放窗口合法含负值）。
@@ -3320,7 +3326,12 @@ const sessionSlice = createSlice({
             const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
             if (!clip) return;
             if (action.payload.sourceStartSec !== undefined) {
-                clip.sourceStartSec = Number(action.payload.sourceStartSec) || 0;
+                // 与 sourceEndSec 同一口径：**不得钳制到 ≥0**（Slip 向左滑出媒体
+                // 起点 ⇒ 负起点 = 前导静音，是既定合法状态；见下方注释）。这里用
+                // `Number.isFinite` 而不是 `Number(x) || 0`：后者虽然也保留负数
+                // （-3 是真值），但会把 NaN 静默变成 0，与对侧行为不一致。
+                const value = Number(action.payload.sourceStartSec);
+                clip.sourceStartSec = Number.isFinite(value) ? value : clip.sourceStartSec;
             }
             if (action.payload.sourceEndSec !== undefined) {
                 // 注意：**不得钳制到 ≥0**。倒放 Clip 的消费窗口锚定 se，

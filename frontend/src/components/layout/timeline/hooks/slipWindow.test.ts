@@ -173,4 +173,32 @@ describe("computeSlipWindow（方向约定 + 三条分支）", () => {
     it("非法位移返回 null（调用方跳过该帧）", () => {
         expect(computeSlipWindow(clip(), Number.NaN)).toBeNull();
     });
+
+    /**
+     * ★ 回归：Slip **双向无界**。
+     *
+     * 缺陷形态：内核把「clip 不能从负时间开始」的**位置**钳制连同**位移**一起传给了
+     * Slip，于是 `startSec = 0` 的 clip 完全无法向左滑（`deltaSec` 恒为 0）。
+     * 本函数一直是正确的 —— 这里把它钉死，防止有人"顺手"在此加钳。
+     *
+     * 负的源起点是**既定合法状态**：滑出媒体起点 ⇒ 前导静音，后端 `patch_clip_state`
+     * 明确允许（`clamp(-1e6, 1e6)` 且注释写明负值合法），音频/分析路径均按静音处理。
+     */
+    it("★ 向左滑出媒体起点得到负源窗口（前导静音），不受任何钳制", () => {
+        const next = computeSlipWindow(
+            clip({ sourceStartSec: 0, sourceEndSec: 4, lengthSec: 4, playbackRate: 1 }),
+            -10,
+        );
+        expect(next?.sourceStartSec).toBeCloseTo(-10, 9);
+        // 非 loop 正放：终点由 起点 + 长度×速率 派生 ⇒ 跨度保持不变。
+        expect(next?.sourceEndSec).toBeCloseTo(-6, 9);
+    });
+
+    it("★ 双向都无界（对称）：任意大位移都如实换算", () => {
+        const base = clip({ sourceStartSec: 0, sourceEndSec: 4, lengthSec: 4, playbackRate: 1 });
+        for (const delta of [-1e4, -37.5, -0.25, 0.25, 37.5, 1e4]) {
+            const next = computeSlipWindow(base, delta);
+            expect(next?.sourceStartSec, `delta=${delta}`).toBeCloseTo(delta, 6);
+        }
+    });
 });
