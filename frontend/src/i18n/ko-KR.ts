@@ -348,6 +348,7 @@ export const koKR = {
     notebook_toggle_toolbar: "서식 도구 모음 표시/숨기기",
     notebook_attachments: "첨부 파일",
     notebook_settings: "노트 설정",
+    notebook_settings_desc: "프로젝트 노트의 편집·이미지·클립보드 동작입니다.",
     notebook_seek_jump: "이동했습니다",
     notebook_clip_ref_none: "먼저 타임라인에서 클립을 선택하세요",
     notebook_project_info_item: "항목",

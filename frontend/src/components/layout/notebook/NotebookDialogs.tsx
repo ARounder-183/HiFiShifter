@@ -6,7 +6,6 @@
  * （撤销要能恢复），所以"清理"必须由用户显式触发。
  */
 
-import { Flex } from "@radix-ui/themes";
 import { useEffect, useMemo, useState } from "react";
 
 import type { NotebookAssetSummary } from "../../../features/notebook/notebookSlice";
@@ -17,7 +16,7 @@ import { ClipboardIcon, ImageIcon } from "@radix-ui/react-icons";
 
 import { AppButton } from "../../../ui";
 import { AppDialog } from "../../../ui/Dialog";
-import { AppField, AppForm, AppSwitchRow } from "../../../ui/Field";
+import { AppField, AppForm, AppFormSection, AppSwitchRow } from "../../../ui/Field";
 import { formatAssetRef } from "./assetRef";
 import { clipKindLabelKey } from "./hifiClipBlock";
 import { resolveImage } from "./notebookImageCache";
@@ -265,15 +264,34 @@ export function NotebookSettingsDialog({
             open
             onOpenChange={(open) => !open && onClose()}
             title={t("notebook_settings")}
+            description={tf("notebook_settings_desc")}
             size="md"
-            actions={[{ id: "close", label: t("close"), onClick: () => onClose() }]}
+            // 内容远高于视口：动作区需要一条分割线与长内容分开。
+            footerDivider
+            actions={[
+                {
+                    id: "close",
+                    label: t("close"),
+                    intent: "primary",
+                    onClick: () => onClose(),
+                },
+            ]}
         >
-            {/* 混排表单：字段与开关共用标签列，因此显式声明 aligned */}
+            {/*
+             * 混排表单：字段与开关共用标签列，因此显式声明 aligned（与
+             * `DockLayoutSettingsDialog` 同一形态）。
+             *
+             * 分组走 `AppFormSection`：此前这里是一份**就地手写**的 `Section`
+             * （`mb-1` + 11px/500 muted），而 `AppFormSection` 正是全应用设置
+             * 表单的分组原语 —— 于是一个仓库里出现了两种节标题，且在 12px 的
+             * 字段行之上挂了一个**更小**的标题（11px/500）。
+             */}
             <AppForm booleanRow="aligned">
-                <Section title={tf("notebook_settings_group_view")}>
+                <AppFormSection title={tf("notebook_settings_group_view")}>
                     <AppField label={tf("notebook_setting_default_mode")}>
                         <AppSelect
                             value={settings.defaultMode}
+                            ariaLabel={tf("notebook_setting_default_mode")}
                             onValueChange={(value) => onChange({ defaultMode: value })}
                             options={[
                                 { value: "rich", label: t("notebook_mode_rich") },
@@ -310,6 +328,7 @@ export function NotebookSettingsDialog({
                     <AppField label={tf("notebook_setting_font_size")}>
                         <AppSelect
                             value={String(settings.sourceFontSize)}
+                            ariaLabel={tf("notebook_setting_font_size")}
                             onValueChange={(value) => onChange({ sourceFontSize: Number(value) })}
                             options={[
                                 { value: "11", label: "11" },
@@ -323,6 +342,7 @@ export function NotebookSettingsDialog({
                     <AppField label={tf("notebook_setting_history_split")}>
                         <AppSelect
                             value={String(settings.historySplitIdleMs)}
+                            ariaLabel={tf("notebook_setting_history_split")}
                             onValueChange={(value) =>
                                 onChange({ historySplitIdleMs: Number(value) })
                             }
@@ -337,12 +357,13 @@ export function NotebookSettingsDialog({
                             ]}
                         />
                     </AppField>
-                </Section>
+                </AppFormSection>
 
-                <Section title={tf("notebook_settings_group_image")}>
+                <AppFormSection title={tf("notebook_settings_group_image")}>
                     <AppField label={tf("notebook_setting_image_max_dim")}>
                         <AppSelect
                             value={String(settings.imageMaxDimensionPx)}
+                            ariaLabel={tf("notebook_setting_image_max_dim")}
                             onValueChange={(value) =>
                                 onChange({ imageMaxDimensionPx: Number(value) })
                             }
@@ -361,6 +382,7 @@ export function NotebookSettingsDialog({
                     <AppField label={tf("notebook_setting_image_format")}>
                         <AppSelect
                             value={settings.imageFormat}
+                            ariaLabel={tf("notebook_setting_image_format")}
                             onValueChange={(value) => onChange({ imageFormat: value })}
                             options={[
                                 {
@@ -378,9 +400,9 @@ export function NotebookSettingsDialog({
                         checked={settings.allowRemoteImages}
                         onCheckedChange={(value) => onChange({ allowRemoteImages: value })}
                     />
-                </Section>
+                </AppFormSection>
 
-                <Section title={tf("notebook_settings_group_clipboard")}>
+                <AppFormSection title={tf("notebook_settings_group_clipboard")}>
                     <AppSwitchRow
                         label={tf("notebook_setting_smart_paste")}
                         checked={settings.smartPaste}
@@ -389,6 +411,7 @@ export function NotebookSettingsDialog({
                     <AppField label={tf("notebook_setting_html_paste")}>
                         <AppSelect
                             value={settings.htmlPasteMode}
+                            ariaLabel={tf("notebook_setting_html_paste")}
                             onValueChange={(value) => onChange({ htmlPasteMode: value })}
                             options={[
                                 { value: "markdown", label: "Markdown" },
@@ -400,6 +423,7 @@ export function NotebookSettingsDialog({
                     <AppField label={tf("notebook_setting_plain_paste")}>
                         <AppSelect
                             value={settings.plainPasteMode}
+                            ariaLabel={tf("notebook_setting_plain_paste")}
                             onValueChange={(value) => onChange({ plainPasteMode: value })}
                             options={[
                                 {
@@ -414,6 +438,7 @@ export function NotebookSettingsDialog({
                     <AppField label={tf("notebook_setting_copy_format")}>
                         <AppSelect
                             value={settings.copyFormat}
+                            ariaLabel={tf("notebook_setting_copy_format")}
                             onValueChange={(value) => onChange({ copyFormat: value })}
                             options={[
                                 {
@@ -429,6 +454,7 @@ export function NotebookSettingsDialog({
                     <AppField label={tf("notebook_setting_copy_plain")}>
                         <AppSelect
                             value={settings.copyPlainTextAs}
+                            ariaLabel={tf("notebook_setting_copy_plain")}
                             onValueChange={(value) => onChange({ copyPlainTextAs: value })}
                             options={[
                                 {
@@ -439,12 +465,13 @@ export function NotebookSettingsDialog({
                             ]}
                         />
                     </AppField>
-                </Section>
+                </AppFormSection>
 
-                <Section title={tf("notebook_settings_group_clip_block")}>
+                <AppFormSection title={tf("notebook_settings_group_clip_block")}>
                     <AppField label={tf("notebook_setting_clip_insert_mode")}>
                         <AppSelect
                             value={settings.clipInsertMode}
+                            ariaLabel={tf("notebook_setting_clip_insert_mode")}
                             onValueChange={(value) => onChange({ clipInsertMode: value })}
                             options={[
                                 {
@@ -468,10 +495,14 @@ export function NotebookSettingsDialog({
                         checked={settings.clipShowPreview}
                         onCheckedChange={(value) => onChange({ clipShowPreview: value })}
                     />
-                </Section>
+                </AppFormSection>
 
-                <Section title={tf("notebook_settings_group_export")}>
-                    <Flex gap="2" wrap="wrap">
+                <AppFormSection title={tf("notebook_settings_group_export")}>
+                    {/*
+                     * 两个导出按钮走 `AppField` 的控件列：此前它们直接贴左，
+                     * 与同一张表单里所有行的控件左缘（112px 之后）错位。
+                     */}
+                    <div className="flex items-center gap-2">
                         <AppButton
                             size="sm"
                             onClick={() => {
@@ -491,21 +522,15 @@ export function NotebookSettingsDialog({
                         >
                             {tf("notebook_export_html")}
                         </AppButton>
-                    </Flex>
-                </Section>
-
-                <span className="hs-type-caption">{exportNotice ?? ""}</span>
+                    </div>
+                    {exportNotice ? (
+                        // 反馈挂在按钮下方而不是表单末尾：此前它是表单最后一个
+                        // 子项，与导出按钮隔着一整个节间距，读不出因果关系。
+                        <span className="hs-type-caption">{exportNotice}</span>
+                    ) : null}
+                </AppFormSection>
             </AppForm>
         </AppDialog>
-    );
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-    return (
-        <div>
-            <div className="mb-1 text-qt-xs font-medium text-qt-text-muted">{title}</div>
-            {children}
-        </div>
     );
 }
 

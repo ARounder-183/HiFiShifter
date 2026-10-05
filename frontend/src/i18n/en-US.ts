@@ -417,6 +417,7 @@ export const enUS = {
     notebook_toggle_toolbar: "Toggle formatting toolbar",
     notebook_attachments: "Attachments",
     notebook_settings: "Notebook settings",
+    notebook_settings_desc: "Editing, images and clipboard behaviour for the project notes.",
     notebook_seek_jump: "Jumped to",
     notebook_clip_ref_none: "Select a clip in the timeline first",
     notebook_project_info_item: "Item",

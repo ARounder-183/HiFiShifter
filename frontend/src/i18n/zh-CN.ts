@@ -265,6 +265,7 @@ export const zhCN = {
     notebook_toggle_toolbar: "显示/隐藏格式工具栏",
     notebook_attachments: "附件",
     notebook_settings: "记事本设置",
+    notebook_settings_desc: "工程笔记的编辑、图片与剪贴板行为。",
     notebook_seek_jump: "已跳转到",
     notebook_clip_ref_none: "请先在时间轴中选中一个音频块",
     notebook_project_info_item: "项目",

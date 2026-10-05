@@ -281,6 +281,7 @@ export const jaJP = {
     notebook_toggle_toolbar: "書式ツールバーの表示/非表示",
     notebook_attachments: "添付ファイル",
     notebook_settings: "ノートの設定",
+    notebook_settings_desc: "プロジェクトノートの編集・画像・クリップボードの動作。",
     notebook_seek_jump: "ジャンプしました",
     notebook_clip_ref_none: "先にタイムラインでクリップを選択してください",
     notebook_project_info_item: "項目",

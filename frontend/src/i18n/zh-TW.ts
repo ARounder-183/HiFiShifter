@@ -266,6 +266,7 @@ export const zhTW = {
     notebook_toggle_toolbar: "顯示/隱藏格式工具列",
     notebook_attachments: "附件",
     notebook_settings: "記事本設定",
+    notebook_settings_desc: "工程筆記的編輯、圖片與剪貼簿行為。",
     notebook_seek_jump: "已跳轉到",
     notebook_clip_ref_none: "請先在時間軸中選取一個音訊塊",
     notebook_project_info_item: "項目",
