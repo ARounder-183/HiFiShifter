@@ -621,3 +621,67 @@ describe("★ resolveTrimSnapOffset：左缘保持偏移点的绝对位置", () 
         }
     });
 });
+
+describe("★ resolveTrimSnapOffset：偏移为 0 = 跟随 Clip 起点（未启用吸附偏移）", () => {
+    it("★ 拖左缘向左延伸 ⇒ 保持 0（不得凭空出现一个吸附点）", () => {
+        // 修复前：0 − (−1) = 1 ⇒ 手柄从起点滑进 Clip 内部。
+        expect(
+            resolveTrimSnapOffset({
+                edge: "left",
+                deltaSec: -1,
+                snapOffsetSec: 0,
+                newLengthSec: 5,
+            }),
+        ).toBe(0);
+    });
+
+    it("拖左缘向右缩短 ⇒ 保持 0", () => {
+        expect(
+            resolveTrimSnapOffset({
+                edge: "left",
+                deltaSec: 1,
+                snapOffsetSec: 0,
+                newLengthSec: 3,
+            }),
+        ).toBe(0);
+    });
+
+    it("拖右缘 ⇒ 保持 0", () => {
+        expect(
+            resolveTrimSnapOffset({
+                edge: "right",
+                deltaSec: 2,
+                snapOffsetSec: 0,
+                newLengthSec: 6,
+            }),
+        ).toBe(0);
+    });
+
+    it("★ 不变量：偏移为 0 时手柄始终贴在新起点（绝对位置随起点移动）", () => {
+        const startSec = 5;
+        for (const deltaSec of [-2, -0.5, 0.25, 1]) {
+            const offsetNew = resolveTrimSnapOffset({
+                edge: "left",
+                deltaSec,
+                snapOffsetSec: 0,
+                newLengthSec: 4 - deltaSec,
+            });
+            // 新起点 = startSec + δ；手柄绝对位置 = 新起点 + 0 = 新起点。
+            expect(startSec + deltaSec + offsetNew, `δ=${deltaSec}`).toBeCloseTo(
+                startSec + deltaSec,
+                9,
+            );
+        }
+    });
+
+    it("非 0 偏移仍然保持素材内的绝对位置（对照，特例不得扩大）", () => {
+        expect(
+            resolveTrimSnapOffset({
+                edge: "left",
+                deltaSec: -1,
+                snapOffsetSec: 2,
+                newLengthSec: 5,
+            }),
+        ).toBe(3);
+    });
+});

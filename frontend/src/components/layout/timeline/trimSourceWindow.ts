@@ -187,6 +187,13 @@ export function resolveTrimSourceWindow(
  *
  * 拖**右缘**起点不动 ⇒ 相对值不变（缩短到偏移以内时钳到新长度）。
  *
+ * ## 偏移为 0 是特例：跟随 Clip 起点
+ *
+ * `snapOffsetSec === 0` 对用户而言就是"**未启用吸附偏移**"（手柄贴在 Clip 起点、
+ * 与起点重合）。此时它必须**跟着起点走**，而不是钉在素材内的某一点 —— 否则向左
+ * 延伸左缘会让手柄凭空离开起点、落进 Clip 内部（`0 → |δ|`），用户会看到一个自己
+ * 从未设置过的吸附点。因此偏移为 0 时直接返回 0，不做 `−δ` 调整。
+ *
  * @returns 钳制到 `[0, newLengthSec]` 的新相对偏移。
  */
 export function resolveTrimSnapOffset(args: {
@@ -197,6 +204,8 @@ export function resolveTrimSnapOffset(args: {
     readonly newLengthSec: number;
 }): number {
     const offset = Number.isFinite(args.snapOffsetSec) ? Math.max(0, args.snapOffsetSec) : 0;
+    // 0 = 未启用吸附偏移 ⇒ 跟随 Clip 起点（见上方说明）。
+    if (!(offset > 1e-9)) return 0;
     const delta = Number.isFinite(args.deltaSec) ? args.deltaSec : 0;
     const next = args.edge === "left" ? offset - delta : offset;
     const maxLen = Number.isFinite(args.newLengthSec) ? Math.max(0, args.newLengthSec) : 0;
