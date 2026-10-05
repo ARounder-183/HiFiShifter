@@ -85,17 +85,17 @@ fn validate_bus(bus: &AudioBusBuffers) -> Result<(), BufferError> {
     Ok(())
 }
 
-/// 校验本批支持的总线并初始化输出；暂未接入 PCM renderer，零输出不代表供音通过。
+/// 先完整校验总线形状，不写输出，也不能破坏in-place的输入。
 ///
 /// # Safety
 /// 宿主须提供合法对齐的 SDK 结构、声明数量的总线/通道数组与至少 num_samples 帧的
 /// 可写非空 plane。inactive plane 可以为 null。指针只在当前回调使用，不保留。
-pub(crate) unsafe fn clear_outputs(data: *mut ProcessData) -> Result<(), BufferError> {
+pub(crate) unsafe fn validate(data: *mut ProcessData) -> Result<(), BufferError> {
     if data.is_null() {
         return Err(BufferError::InvalidArgument);
     }
     // SAFETY: 调用者提供当前回调独占的 SDK 结构。
-    let data = unsafe { &mut *data };
+    let data = unsafe { &*data };
     if data.num_samples < 0 || data.num_inputs < 0 || data.num_outputs < 0
         || !(0..=2).contains(&data.process_mode)
     {
@@ -121,8 +121,19 @@ pub(crate) unsafe fn clear_outputs(data: *mut ProcessData) -> Result<(), BufferE
         return Ok(());
     }
     // SAFETY: 已校验唯一输出总线非空，宿主提供完整结构。
-    let output = unsafe { &mut *data.outputs };
+    let output = unsafe { &*data.outputs };
     validate_bus(output)?;
+    Ok(())
+}
+
+/// 仅在完整校验后清输出；playback renderer失败/停播仍清零，纯editor不走此入口。
+/// # Safety
+/// 与validate相同，非空output plane必须有至少num_samples可写帧。
+pub(crate) unsafe fn clear_outputs(data:*mut ProcessData)->Result<(),BufferError> {
+    unsafe {validate(data)?;}
+    let data=unsafe {&*data};
+    if data.num_samples==0 || data.num_outputs==0 {return Ok(());}
+    let output=unsafe {&mut *data.outputs};
     if output.num_channels == 0 {
         output.silence_flags = 0;
         return Ok(());
@@ -135,6 +146,39 @@ pub(crate) unsafe fn clear_outputs(data: *mut ProcessData) -> Result<(), BufferE
         }
     }
     output.silence_flags = 3;
+    Ok(())
+}
+
+/// 纯editor renderer按SDK透传宿主信号；输入/输出bus或对应plane相同也不能先清零。
+/// # Safety
+/// 与validate相同，输入非空plane可读、输出可写num_samples帧；不保留任何宿主指针。
+pub(crate) unsafe fn pass_through(data:*mut ProcessData)->Result<(),BufferError> {
+    unsafe {validate(data)?;}
+    let data=unsafe {&*data};if data.num_samples==0 || data.num_outputs==0 {return Ok(());}
+    // 先按值复制header，允许inputs/outputs指向同一个AudioBusBuffers，不制造共享/可变引用别名。
+    let input=if data.num_inputs>0 {Some(unsafe {std::ptr::read(data.inputs)})} else {None};
+    let output=unsafe {&mut *data.outputs};
+    if output.num_channels==0 {output.silence_flags=0;return Ok(());}
+    let sources:[*mut f32;2]=std::array::from_fn(|channel| {
+        match &input {
+            Some(bus) if bus.num_channels==2 && bus.silence_flags & (1<<channel)==0=>unsafe {*bus.channel_buffers.add(channel)},
+            _=>std::ptr::null_mut(),
+        }
+    });
+    let targets=[unsafe {*output.channel_buffers},unsafe {*output.channel_buffers.add(1)}];
+    let bytes=data.num_samples as usize*std::mem::size_of::<f32>();
+    for source in sources {for target in targets {
+        if source.is_null()||target.is_null()||source==target {continue;}
+        let a=source as usize;let b=target as usize;
+        if a<b.saturating_add(bytes)&&b<a.saturating_add(bytes) {return Err(BufferError::UnsupportedFormat);}
+    }}
+    // 支持独立plane或整个plane的in-place/交换；部分偏移重叠明确拒绝且不写数据。
+    // 每帧先读两个源再写两个输出，兼容对应in-place与两个完整plane的交换别名。
+    for frame in 0..data.num_samples as usize {
+        let values=sources.map(|source|if source.is_null() {0.0} else {unsafe {*source.add(frame)}});
+        for channel in 0..2 {if !targets[channel].is_null() {unsafe {targets[channel].add(frame).write(values[channel]);}}}
+    }
+    output.silence_flags=(0..2).fold(0,|flags,channel|if sources[channel].is_null()||targets[channel].is_null() {flags|(1<<channel)} else {flags});
     Ok(())
 }
 

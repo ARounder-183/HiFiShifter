@@ -24,12 +24,13 @@ pub(crate) enum SnapshotError {
     BudgetExceeded,
 }
 
-/// 先导版只处理普通放置/裁切，不用变速重采样冒充保调拉伸。
-pub(crate) fn mix_plain_regions(
+/// 共享几何/授权PCM校验；允许拉伸只用于真正kernel渲染入口，plain混音仍拒绝变速。
+pub(crate) fn validate_regions(
     regions: &[AraPlaybackRegion],
     sources: &HashMap<String, Arc<SourcePcm>>,
     sample_rate: u32,
-) -> Result<PlaybackSnapshot, SnapshotError> {
+    allow_stretch:bool,
+) -> Result<(i64,usize), SnapshotError> {
     if sample_rate == 0 {
         return Err(SnapshotError::InvalidGeometry);
     }
@@ -49,7 +50,7 @@ pub(crate) fn mix_plain_regions(
         {
             return Err(SnapshotError::InvalidGeometry);
         }
-        if (region.duration_in_modification_time - region.duration_in_playback_time).abs() > 1e-9
+        if (!allow_stretch && (region.duration_in_modification_time - region.duration_in_playback_time).abs() > 1e-9)
             || region.has_content_based_fade_at_head
             || region.has_content_based_fade_at_tail
         {
@@ -80,13 +81,7 @@ pub(crate) fn mix_plain_regions(
         end = end.max(stop.round() as i64);
     }
     if regions.is_empty() {
-        return Ok(PlaybackSnapshot {
-            sample_rate,
-            origin_sample: 0,
-            left: vec![],
-            right: vec![],
-            _reservation: None,
-        });
+        return Ok((0,0));
     }
     let frames = end
         .checked_sub(origin)
@@ -98,6 +93,15 @@ pub(crate) fn mix_plain_regions(
     {
         return Err(SnapshotError::BudgetExceeded);
     }
+    Ok((origin,frames))
+}
+
+/// 普通/裁切的纯PCM混音不能用重采样冒充保调拉伸；后者由原kernel管线承担。
+pub(crate) fn mix_plain_regions(
+    regions:&[AraPlaybackRegion],sources:&HashMap<String,Arc<SourcePcm>>,sample_rate:u32,
+)->Result<PlaybackSnapshot,SnapshotError> {
+    let (origin,frames)=validate_regions(regions,sources,sample_rate,false)?;
+    if regions.is_empty() {return Ok(PlaybackSnapshot {sample_rate,origin_sample:0,left:vec![],right:vec![],_reservation:None});}
     let reservation = super::budget::global_budget()
         .reserve(frames * 8)
         .ok_or(SnapshotError::BudgetExceeded)?;

@@ -4,7 +4,7 @@ use super::ownership::{region_owners, RegionKey};
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::{ExtensionBinding, ExtensionRoles};
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// 全PCM内容参与身份，重开时同路径不同音频不能命中旧缓存。
@@ -24,6 +24,9 @@ pub(crate) struct ExtensionOwner {
     assignments: Mutex<HashMap<i32, Vec<RegionKey>>>,
     sequences: Mutex<HashMap<i32, Vec<u64>>>,
     role: AtomicI32,
+    roles:AtomicI32,
+    writer_id:AtomicU64,
+    reaper:Mutex<Option<Arc<crate::host::reaper::ReaperHost>>>,
     pub snapshots: [super::snapshot::SnapshotPublisher; 2],
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
     pending_restore:Mutex<Option<crate::state_channel::EditState>>,
@@ -95,7 +98,7 @@ mod bound_tests {
             "tracks":[],"clips":[],"bpm":120,"project_sec":0})).unwrap());
         document.ready.store(true,Ordering::Release);
         let owner=Arc::new(ExtensionOwner::default());
-        owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::EDITOR_RENDERER,None).unwrap();
+        owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::PLAYBACK_RENDERER|ExtensionRoles::EDITOR_RENDERER,None).unwrap();
         let held=document.transaction.lock().unwrap();let (sent,received)=std::sync::mpsc::channel();
         let requesting=owner.clone();let caller=std::thread::spawn(move ||{requesting.prepare();sent.send(()).unwrap();});
         let returned=received.recv_timeout(std::time::Duration::from_secs(3)).is_ok();
@@ -130,9 +133,9 @@ mod bound_tests {
             document.clip_ids.lock().unwrap().insert(key,clip.into());
             document.regions.lock().unwrap().insert(key,crate::ara::AraPlaybackRegion {audio_source_persistent_id:"source".into(),
                 duration_in_modification_time:4.0/44100.0,duration_in_playback_time:4.0/44100.0,..Default::default()});
-            let owner=Arc::new(ExtensionOwner::default());let raw=owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::EDITOR_RENDERER,None).unwrap();
+            let owner=Arc::new(ExtensionOwner::default());let raw=owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::PLAYBACK_RENDERER|ExtensionRoles::EDITOR_RENDERER,None).unwrap();
             // SAFETY: identities/raw extension保留到doc销毁；这是实际宿主assignment入口。
-            unsafe {let ext=&*raw;((*ext.editorRendererInterface).addPlaybackRegion.unwrap())(ext.editorRendererRef,key as *mut _);}
+            unsafe {let ext=&*raw;((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(ext.playbackRendererRef,key as *mut _);}
             let (release,gate)=std::sync::mpsc::channel();let (started,entered)=std::sync::mpsc::channel();
             owner.preparation.get().unwrap().as_ref().unwrap().request(Box::new(move |_|{
                 started.send(()).unwrap();gate.recv_timeout(std::time::Duration::from_secs(3)).unwrap();Ok(())
@@ -206,8 +209,8 @@ mod bound_tests {
             duration_in_playback_time:4.0/44100.0, ..Default::default() });
         document.ready.store(true, Ordering::Release);
         let owner = Arc::new(ExtensionOwner::default());
-        let raw = owner.bind_to_document(document.clone(), ApiGeneration::V2Final, ExtensionRoles::all(), ExtensionRoles::EDITOR_RENDERER, None).unwrap();
-        unsafe { let ext = &*raw; ((*ext.editorRendererInterface).addPlaybackRegion.unwrap())(ext.editorRendererRef, key as *mut _); }
+        let raw = owner.bind_to_document(document.clone(), ApiGeneration::V2Final, ExtensionRoles::all(), ExtensionRoles::PLAYBACK_RENDERER|ExtensionRoles::EDITOR_RENDERER, None).unwrap();
+        unsafe { let ext = &*raw; ((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(ext.playbackRendererRef, key as *mut _); }
         let snapshot = owner.handle_request(hifishifter_ara_ipc::Request::Snapshot);
         assert!(snapshot.ok, "{:?}", snapshot.error);
         let mut client = snapshot.timeline.unwrap();
@@ -286,9 +289,9 @@ mod bound_tests {
             document.clip_ids.lock().unwrap().insert(key,id.into());
             document.regions.lock().unwrap().insert(key,crate::ara::AraPlaybackRegion { audio_source_persistent_id:"ara://pcm".into(),duration_in_modification_time:4.0/44100.0,duration_in_playback_time:4.0/44100.0,..Default::default() });
             let owner=Arc::new(ExtensionOwner::default());
-            let raw=owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::EDITOR_RENDERER,None).unwrap();
+            let raw=owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::PLAYBACK_RENDERER|ExtensionRoles::EDITOR_RENDERER,None).unwrap();
             // SAFETY: identities及native扩展都保留到owner/document销毁。
-            unsafe { let ext=&*raw; ((*ext.editorRendererInterface).addPlaybackRegion.unwrap())(ext.editorRendererRef,key as *mut _); }
+            unsafe { let ext=&*raw; ((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(ext.playbackRendererRef,key as *mut _); }
             owners.push(owner);
         }
         for (index,id) in ["a","b"].into_iter().enumerate() {
@@ -558,12 +561,47 @@ mod bound_tests {
 }
 
 impl ExtensionOwner {
+    /// 初始化在宿主UI/model线程保存有引用的typed扩展，不在actor或process调用REAPER API。
+    /// # Safety
+    /// context须为宿主初始化期间活FUnknown。
+    pub(crate) unsafe fn bind_reaper_host(&self,context:*mut std::ffi::c_void) {
+        let host=unsafe {crate::host::reaper::ReaperHost::from_context(context)}.map(Arc::new);
+        crate::log_line(&format!("REAPER project transport available={}",host.is_some()));
+        let old=std::mem::replace(&mut *self.reaper.lock().unwrap(),host);drop(old);
+    }
+    /// 只由已验证的native view UI timer调用；释放内部锁后才调用可能重入的host函数。
+    pub(crate) fn refresh_reaper_transport(&self) {
+        let document={self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade)};
+        if !document.as_ref().is_some_and(|document|document.is_alive()) {return;}
+        let host={self.reaper.lock().unwrap().clone()};
+        if let Some(host)=host {if let Ok((position,playing))=host.sample() {
+            if let Some(clock)=self.clock.get() {clock.publish_host(position,playing);}
+        }}
+    }
+    /// realtime只读角色原子值；只有playback角色负责替换歌曲音频。
+    pub(crate) fn renders_playback(&self)->bool {self.role.load(Ordering::Acquire)==1}
+    /// editor-only必须透传；未绑定角色不在这里虚构为editor，保留原未绑定安全行为。
+    pub(crate) fn is_editor_only(&self)->bool {self.role.load(Ordering::Acquire)==2}
+    /// process只写有界原子诊断，JSON/日志全部由actor读取，暂不把候选计数当作根因。
+    pub(crate) fn observe_transport(&self,context:&crate::audio_abi::ProcessContext,mode:i32) {
+        if let Some(clock)=self.clock.get() {
+            clock.observe(context,self.writer_id.load(Ordering::Relaxed),self.roles.load(Ordering::Relaxed),mode);
+            if mode!=2 {clock.update(context);}
+        }
+    }
+    /// SDK允许从音频线程调用；记录来源但不做文件IO。
+    pub(crate) fn record_processing_stop(&self) {
+        if let Some(clock)=self.clock.get() {
+            clock.observe_stop(self.writer_id.load(Ordering::Relaxed),self.roles.load(Ordering::Relaxed));clock.stopped();
+        }
+    }
     /// 原生GUI会话属于真实组件，关闭FX只移除窗口，不销毁参数权威或后台渲染。
     pub(crate) fn editor_session(self:&Arc<Self>)->Result<Arc<crate::editor::session::EditorSession>,String> {
         self.editor.get_or_init(||crate::editor::session::EditorSession::new(self)).clone()
     }
     /// 组件/文档终止时停止实例worker；不要在音频process调用。
     pub(crate) fn stop_editor(&self) {
+        let host=self.reaper.lock().unwrap().take();drop(host);
         self.cancel_preparation();
         if let Some(Ok(editor))=self.editor.get() { editor.close(); }
         if let Some(Ok(worker))=self.preparation.get() {worker.close();}
@@ -574,6 +612,15 @@ impl ExtensionOwner {
     }
     /// 原GUI合并后台宿主准备状态，不能把冷恢复尚未准备完写成已应用。
     pub(crate) fn preparation_state(&self)->(bool,Option<String>) {
+        if self.is_editor_only() {
+            if let Some(document)=self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade) {
+                let states=document.renderer_owners().into_iter().filter(|owner|owner.renders_playback()).map(|owner|owner.local_preparation_state()).collect::<Vec<_>>();
+                return (states.iter().any(|state|state.0),states.into_iter().find_map(|state|state.1));
+            }
+        }
+        self.local_preparation_state()
+    }
+    fn local_preparation_state(&self)->(bool,Option<String>) {
         match self.preparation.get() {Some(Ok(worker))=>worker.state(),Some(Err(error))=>(false,Some(error.clone())),None=>(false,None)}
     }
     /// native主线程取得宿主给本ARA文档的可撤销播放租约；不寻找全局REAPER窗口。
@@ -625,7 +672,7 @@ impl ExtensionOwner {
             }
             let edits=document.edits.lock().unwrap().clone();
             if edits.revision!=base_edit && self.projection(&document,&edits)?!=previous {return Err("Conflict: edit revision changed".into());}
-            let inputs=document.renderer_owners().into_iter().map(|owner|{
+            let inputs=document.renderer_owners().into_iter().filter(|owner|owner.renders_playback()).map(|owner|{
                 let (keys,input)=owner.capture_render_input(&document,&edits,true)?;Ok((owner,keys,input))
             }).collect::<Result<Vec<_>,String>>()?;
             (edits.revision,document.render_epoch.load(Ordering::Acquire),inputs)
@@ -773,7 +820,7 @@ impl ExtensionOwner {
                 let mut candidate=edits.merge(&self.assigned_timeline(document)?,&client,base_edit)?;
                 candidate.reconcile(&document.track_bindings.lock().unwrap())?;
                 drop(edits);
-                let inputs=document.renderer_owners().into_iter().map(|owner| {
+                let inputs=document.renderer_owners().into_iter().filter(|owner|owner.renders_playback()).map(|owner| {
                     let (keys,input)=owner.capture_render_input(document,&candidate,true)?;Ok((owner,keys,input))
                 }).collect::<Result<Vec<_>,String>>()?;
                 (candidate,document.render_epoch.load(Ordering::Acquire),inputs)
@@ -817,10 +864,12 @@ impl ExtensionOwner {
         let regions = keys.iter().map(|key| geometry.get(key).cloned().ok_or("assigned region disappeared"))
             .collect::<Result<Vec<_>, _>>()?;
         drop(geometry);
-        let available=if edited {document.edit_sources.lock().unwrap()} else {document.sources.lock().unwrap()};
+        let stretch=regions.iter().any(|region|(region.duration_in_modification_time-region.duration_in_playback_time).abs()>1e-9);
+        let kernel_render=edited||stretch;
+        let available=if kernel_render {document.edit_sources.lock().unwrap()} else {document.sources.lock().unwrap()};
         let sources=regions.iter().map(|region|region.audio_source_persistent_id.clone()).collect::<BTreeSet<_>>()
             .into_iter().filter_map(|id|available.get(&id).map(|pcm|(id.clone(),pcm.clone()))).collect();
-        Ok((keys,super::input::RenderInput {timeline:edited.then_some(timeline),regions,sources}))
+        Ok((keys,super::input::RenderInput {timeline:kernel_render.then_some(timeline),regions,sources}))
     }
 
     /// 从宿主时间线筛选实际分配的区域，而不是让每个处理器混整张文档。
@@ -904,11 +953,16 @@ impl ExtensionOwner {
         document.attach(self, owned.1, companion)?;
         *self.document.lock().unwrap() = Some(Arc::downgrade(&document));
         let weak=Arc::downgrade(self);
-        let _=self.preparation.get_or_init(||super::preparation::PreparationQueue::new());
+        if enabled.contains(ExtensionRoles::PLAYBACK_RENDERER) {
+            let _=self.preparation.get_or_init(||super::preparation::PreparationQueue::new());
+        }
         // 只登记weak供宿主回调排队；后台计算不形成owner自循环。
         *self.prepare_owner.lock().unwrap()=Some(weak);
         let _=self.clock.set(document.clock.clone());
+        static NEXT_WRITER:AtomicU64=AtomicU64::new(1);
+        self.writer_id.store(NEXT_WRITER.fetch_add(1,Ordering::Relaxed),Ordering::Release);
         *current = Some(owned.0);
+        self.roles.store(enabled.bits(),Ordering::Release);
         self.role.store(
             if enabled.contains(ExtensionRoles::PLAYBACK_RENDERER) {
                 1
@@ -997,6 +1051,7 @@ impl ExtensionOwner {
 
     /// 宿主模型callback只撤销/排最新准备任务，不在主线程执行WORLD或PCM混音。
     pub fn prepare(&self) {
+        if !self.renders_playback() {return;}
         // 源/assignment撤销在文档事务内清理；此函数只排队，不能在事务外clear旧任务刚发布的音频。
         let weak=self.prepare_owner.lock().unwrap().clone();
         let Some(weak)=weak else {return;};

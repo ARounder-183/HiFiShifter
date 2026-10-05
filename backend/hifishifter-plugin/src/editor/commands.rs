@@ -93,6 +93,7 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
         "get_about_info"=>return Ok(json!({"ok":true,"name":"HiFiShifter","version":crate::VERSION,"host":"ARA plugin"})),
         "plugin_get_apply_state"=>return Ok(session.state()),
         "get_playback_state"=>{
+            session.report_transport_probe();
             // 宿主播放态不依赖曲线载入；Unsupported/Conflict也必须还能观察播放并暂停。
             let (position,playing)=session.transport();
             let duration=session.timeline.lock().unwrap().project_sec;

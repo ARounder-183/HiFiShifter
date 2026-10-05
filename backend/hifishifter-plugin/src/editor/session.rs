@@ -53,6 +53,8 @@ pub(crate) struct EditorSession {
     host_version:AtomicU64,
     pub(super) error:Mutex<Option<String>>,
     closed:AtomicBool,
+    transport_probe:bool,
+    transport_probe_next:Mutex<Instant>,
     pub(super) suppress_history:AtomicBool,
 }
 impl EditorSession {
@@ -71,7 +73,8 @@ impl EditorSession {
             analysis_cancel:Arc::new(AtomicBool::new(false)),analysis_workers:Mutex::new(Vec::new()),
             generation:AtomicU64::new(0),submitted:AtomicU64::new(0),applied:AtomicU64::new(0),
             host_version:AtomicU64::new(0),
-            error:Mutex::new(None),closed:AtomicBool::new(false),suppress_history:AtomicBool::new(false)});
+            error:Mutex::new(None),closed:AtomicBool::new(false),suppress_history:AtomicBool::new(false),
+            transport_probe:std::env::var_os("HIFISHIFTER_ARA_TRANSPORT_PROBE").is_some(),transport_probe_next:Mutex::new(Instant::now())});
         let weak=Arc::downgrade(&session);
         let worker=std::thread::Builder::new().name("hfs-embedded-editor".into()).spawn(move ||Self::run(weak,receiver))
             .map_err(|e|format!("create editor command worker: {e}"))?;
@@ -186,9 +189,9 @@ impl EditorSession {
         let mut timeline:TimelineState=serde_json::from_value(snapshot.timeline.ok_or("host timeline missing")?).map_err(|e|e.to_string())?;
         // 快照只序列化take权威；先重建扁平投影，再判断真实的倒放/组合倍率。
         for clip in &mut timeline.clips {clip.normalize_takes();}
-        // 数字BPM可同步，不代表当前先导支持宿主随BPM隐式拉伸；必须在GUI显式拒绝。
-        if timeline.clips.iter().any(|clip|clip.reversed || (clip.playback_rate as f64-1.).abs()>1e-6) {
-            let error="Unsupported ARA geometry: reverse/time stretch; keep item timebase as Time for BPM-only changes".to_owned();
+        // 正向倍率交给原kernel保调处理，不能再把全部拉伸挡在GUI外；倒放仍按用户范围拒绝。
+        if timeline.clips.iter().any(|clip|clip.reversed) {
+            let error="Unsupported ARA geometry: reverse is not supported".to_owned();
             *self.error.lock().unwrap()=Some(error.clone());return Err(error);
         }
         if timeline.target_param_frames(timeline.frame_period_ms())>1_000_000 {return Err("ARA editor parameter frame budget exceeded for project span".into());}
@@ -284,6 +287,15 @@ impl EditorSession {
         self.owner.upgrade().and_then(|o|o.clock.get().map(|clock|clock.read()))
             .unwrap_or_else(||(self.timeline.lock().unwrap().playhead_sec,false))
     }
+    /// 一次性时钟探针最多每秒写一条；只在命令actor线程调用，不在音频callback写文件。
+    pub(super) fn report_transport_probe(&self) {
+        if !self.transport_probe {return;}
+        let now=Instant::now();let mut next=self.transport_probe_next.lock().unwrap();
+        if now<*next {return;}*next=now+Duration::from_secs(1);drop(next);
+        if let Some(clock)=self.owner.upgrade().and_then(|owner|owner.clock.get().cloned()) {
+            log::info!("[ara] transport diagnostic {}",clock.diagnostics());
+        }
+    }
     fn rewrite_ids(&self,timeline:&mut TimelineState,to_ui:bool) {
         let id=|value:&str|if to_ui {format!("{}{value}",self.namespace)} else {value.strip_prefix(&self.namespace).unwrap_or(value).to_owned()};
         for track in &mut timeline.tracks {track.id=id(&track.id);track.parent_id=track.parent_id.as_deref().map(id);}
@@ -370,9 +382,9 @@ mod tests {
             duration_in_playback_time:4.0/44100.0,..Default::default()
         });
         let owner=Arc::new(ExtensionOwner::default());
-        let raw=owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::EDITOR_RENDERER,None).unwrap();
+        let raw=owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::PLAYBACK_RENDERER|ExtensionRoles::EDITOR_RENDERER,None).unwrap();
         // SAFETY: identity和扩展owner在所有测试调用期间存活。
-        unsafe {let ext=&*raw;((*ext.editorRendererInterface).addPlaybackRegion.unwrap())(ext.editorRendererRef,key as *mut _);}
+        unsafe {let ext=&*raw;((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(ext.playbackRendererRef,key as *mut _);}
         document.ready.store(true,Ordering::Release);
         (model,owner,identity)
     }
@@ -449,14 +461,14 @@ mod tests {
         }
         editor.close();
     }
-    /// 首次遇到不支持的宿主拉伸也必须显示原因，不能只永远显示等待音频。
+    /// 首次遇到用户明确暂不做的倒放必须显示原因，不能只永远显示等待音频。
     #[test]
     fn unsupported_first_load_surfaces_geometry_error() {
         let (model,owner,_identity)=fixture();
         let document=model.session();
         let mut timeline=document.timeline.lock().unwrap();
         let clip=&mut timeline.as_mut().unwrap().clips[0];
-        clip.playback_rate=1.25;clip.takes[0].playback_rate=1.25;drop(timeline);
+        clip.reversed=true;clip.takes[0].reversed=true;drop(timeline);
         let editor=owner.editor_session().unwrap();
         assert!(editor.ensure_loaded(false).unwrap_err().starts_with("Unsupported"));
         owner.clock.get().unwrap().update(&crate::audio_abi::ProcessContext {
@@ -469,6 +481,18 @@ mod tests {
         let state=editor.state();editor.close();
         assert!(state["error"].as_str().unwrap().starts_with("Unsupported"));
         assert_eq!(state["ready"],false);
+    }
+    /// 真实宿主正向倍率不再被GUI挡住；take的源窗口和项目时长保留各自坐标。
+    #[test]
+    fn forward_time_stretch_loads_the_real_host_geometry_in_original_gui_state() {
+        let (model,owner,_identity)=fixture();let document=model.session();
+        {let mut timeline=document.timeline.lock().unwrap();let clip=&mut timeline.as_mut().unwrap().clips[0];
+            clip.length_sec=8.0/44100.0;clip.takes[0].playback_rate=0.5;clip.normalize_takes();}
+        {let mut regions=document.regions.lock().unwrap();for region in regions.values_mut() {
+            region.duration_in_playback_time=8.0/44100.0;region.is_timestretch_enabled=true;}}
+        let editor=owner.editor_session().unwrap();editor.ensure_loaded(false).unwrap();
+        let timeline=editor.timeline.lock().unwrap();assert_eq!(timeline.clips[0].playback_rate,0.5);
+        assert_eq!(timeline.clips[0].length_sec,8.0/44100.0);drop(timeline);editor.close();
     }
     /// 真actor的自动调度消费快速写入/undo/redo，不调用手工render函数冒充自动应用。
     #[test]

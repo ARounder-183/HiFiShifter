@@ -1,5 +1,5 @@
 # 内嵌GUI隔离启动；绝不启动HiFiShifter.exe，不改系统PATH，也不向已有REAPER送脚本。
-param([switch]$Reopen,
+param([switch]$Reopen,[switch]$TransportProbe,
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$ScratchName='embedded-probe',
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$BundleDirectory='embedded-vst3')
 $ErrorActionPreference = 'Stop'
@@ -28,6 +28,8 @@ if (!(Test-Path -LiteralPath $araEmbedIni)) {
 $env:HIFISHIFTER_ARA_INSTANCE_DIR = Join-Path $araEmbedScratch 'instances'
 $env:HIFISHIFTER_ARA_LOG = Join-Path $PSScriptRoot 'captures\embedded-editor-plugin.log'
 $env:HIFISHIFTER_ARA_PROBE_DIR = $araEmbedScratch
+if ($TransportProbe) {$env:HIFISHIFTER_ARA_TRANSPORT_PROBE='1'}
+else {Remove-Item Env:HIFISHIFTER_ARA_TRANSPORT_PROBE -ErrorAction SilentlyContinue}
 # 旧save/edited命令不能在新实例启动时重新执行，更不能覆盖此前用户保存的工程。
 [IO.File]::WriteAllText((Join-Path $araEmbedScratch 'command.txt'),'',[Text.UTF8Encoding]::new($false))
 # 构建时绝对assets覆盖不能漏入验收，必须从实际模块bundle查找frontend。

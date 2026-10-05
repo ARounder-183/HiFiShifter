@@ -820,6 +820,7 @@ unsafe extern "system" fn component_initialize(
     context: *mut c_void,
 ) -> TResult {
     unsafe { (*(this as *mut Processor)).connection.initialize(context); }
+    unsafe {(*(this as *mut Processor)).extension_owner.bind_reaper_host(context);}
     crate::log_line("IComponent::initialize");
     K_RESULT_OK
 }
@@ -1029,25 +1030,36 @@ unsafe extern "system" fn audio_setup_processing(
 
 unsafe extern "system" fn audio_set_processing(this: *mut c_void, state: i8) -> TResult {
     // SDK 允许从音频线程调用此函数；禁止触发同步文件日志。
-    if state==0 {if let Some(clock)=unsafe {&(*base_from_audio(this)).extension_owner}.clock.get() {clock.stopped();}}
+    if this.is_null() {return K_INVALID_ARGUMENT;}
+    if state==0 {unsafe {&(*base_from_audio(this)).extension_owner}.record_processing_stop();}
     K_RESULT_OK
 }
 
 /// 初始化宿主缓冲的安全边界；实际 PCM 快照输出在 Phase 3a Task 14 接入。
 unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) -> TResult {
     // SAFETY: VST3 宿主按 SDK 布局提供回调数据，函数内部处理空指针与非法字段。
-    match unsafe { crate::audio_abi::clear_outputs(data.cast()) } {
+    if this.is_null() {return K_INVALID_ARGUMENT;}
+    match unsafe { crate::audio_abi::validate(data.cast()) } {
         Ok(()) => {
-            if this.is_null() { return K_INVALID_ARGUMENT; }
-            // SAFETY: 宿主持有 Processor，clear_outputs 已验证数据及输出 buffers。
+            // SAFETY: 宿主持有 Processor，validate已验证当前数据和音频总线。
             let data = unsafe { &mut *data.cast::<crate::audio_abi::ProcessData>() };
             if data.num_samples == 0 || data.num_outputs == 0 { return K_RESULT_OK; }
             // SAFETY: this 是存活的音频接口子对象。
             let owner = unsafe { &(*base_from_audio(this)).extension_owner };
+            if !data.process_context.is_null() {
+                owner.observe_transport(unsafe {&*data.process_context},data.process_mode);
+            }
+            if owner.is_editor_only() {
+                // 纯编辑角色不是歌曲播放renderer；保留宿主已经处理的fade/gain/前级FX，包括停播监听。
+                return match unsafe {crate::audio_abi::pass_through(data)} {
+                    Ok(())=>K_RESULT_OK,Err(crate::audio_abi::BufferError::InvalidArgument)=>K_INVALID_ARGUMENT,
+                    Err(crate::audio_abi::BufferError::UnsupportedFormat)=>K_RESULT_FALSE,
+                };
+            }
+            unsafe {crate::audio_abi::clear_outputs(data).expect("validated audio buffers");}
             if data.process_context.is_null() { owner.snapshots[0].misses.fetch_add(1, Ordering::Relaxed); return K_RESULT_OK; }
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*data.process_context };
-            if data.process_mode!=2 {if let Some(clock)=owner.clock.get() {clock.update(context);}}
             // REAPER停播也会process固定光标位置；只离线导出允许没有kPlaying的供音。
             if data.process_mode!=2 && context.state & (1<<1)==0 {return K_RESULT_OK;}
             let publisher = match context.sample_rate {
@@ -1468,6 +1480,51 @@ mod lifetime_tests {
 mod audio_boundary_tests {
     use super::*;
     use crate::audio_abi::{AudioBusBuffers, ProcessData};
+
+    /// SDK纯editor renderer透传宿主音频，不能把已含fade/gain的输入换成自己的旧快照。
+    #[test]
+    fn editor_only_renderer_preserves_host_fades_in_all_process_modes_without_allocations() {
+        let model=crate::ara::model::ModelHandle::new();let mut processor=Processor::create().unwrap();
+        processor.extension_owner.bind_to_document(model.session(),ara2_bridge::core::ApiGeneration::V2Final,
+            ara2_bridge::plugin::ExtensionRoles::all(),ara2_bridge::plugin::ExtensionRoles::EDITOR_RENDERER,None).unwrap();
+        processor.extension_owner.snapshots[0].publish(crate::render::snapshot::PlaybackSnapshot {
+            sample_rate:44100,origin_sample:0,left:vec![0.9;4],right:vec![0.9;4],_reservation:None}).unwrap();
+        for mode in [0,1,2] {
+            let mut source_left=[0.0,0.1,0.2,0.3];let mut source_right=[0.3,0.2,0.1,0.0];
+            let mut input_planes=[source_left.as_mut_ptr(),source_right.as_mut_ptr()];
+            let mut input=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:input_planes.as_mut_ptr()};
+            let mut left=[9.0;5];let mut right=[9.0;5];let mut output_planes=[left.as_mut_ptr(),right.as_mut_ptr()];
+            let mut output=AudioBusBuffers {num_channels:2,silence_flags:3,channel_buffers:output_planes.as_mut_ptr()};
+            // context可选/停播也必须透传；preview为空时不能凭播放门禁覆盖宿主输入。
+            let mut data=ProcessData {process_mode:mode,num_samples:4,num_inputs:1,num_outputs:1,
+                inputs:&raw mut input,outputs:&raw mut output,..Default::default()};
+            crate::test_allocator::begin();
+            let result=unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())};
+            let allocations=crate::test_allocator::end();assert_eq!(result,K_RESULT_OK);assert_eq!(allocations,0);
+            assert_eq!(left,[0.0,0.1,0.2,0.3,9.0]);assert_eq!(right,[0.3,0.2,0.1,0.0,9.0]);assert_eq!(output.silence_flags,0);
+        }
+    }
+
+    /// 相同bus/相同plane的in-place不能先清零；silent或inactive输入则明确补零。
+    #[test]
+    fn editor_only_passthrough_handles_in_place_silence_and_inactive_planes() {
+        let model=crate::ara::model::ModelHandle::new();let mut processor=Processor::create().unwrap();
+        processor.extension_owner.bind_to_document(model.session(),ara2_bridge::core::ApiGeneration::V2Final,
+            ara2_bridge::plugin::ExtensionRoles::all(),ara2_bridge::plugin::ExtensionRoles::EDITOR_RENDERER,None).unwrap();
+        let mut left=[0.05,0.1,123.0];let mut right=[0.2,0.3,456.0];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
+        let mut bus=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
+        let mut data=ProcessData {num_samples:2,num_inputs:1,num_outputs:1,inputs:&raw mut bus,outputs:&raw mut bus,..Default::default()};
+        assert_eq!(unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())},K_RESULT_OK);
+        assert_eq!(left,[0.05,0.1,123.0]);assert_eq!(right,[0.2,0.3,456.0]);
+        bus.silence_flags=1;planes[1]=std::ptr::null_mut();
+        let mut out_left=[9.0;3];let mut out_right=[9.0;3];let mut out_planes=[out_left.as_mut_ptr(),out_right.as_mut_ptr()];
+        let mut output=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:out_planes.as_mut_ptr()};data.inputs=&raw mut bus;data.outputs=&raw mut output;
+        assert_eq!(unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())},K_RESULT_OK);
+        assert_eq!(out_left,[0.0,0.0,9.0]);assert_eq!(out_right,[0.0,0.0,9.0]);assert_eq!(output.silence_flags,3);
+        bus.channel_buffers=std::ptr::null_mut();out_left=[7.0;3];data.inputs=&raw mut bus;
+        assert_eq!(unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())},K_INVALID_ARGUMENT);
+        assert_eq!(out_left,[7.0;3]);
+    }
 
     /// 真正 process 在有效快照下输出 PCM，且观察区间不分配或释放任何内存。
     #[test]

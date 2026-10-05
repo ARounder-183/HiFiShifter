@@ -28,9 +28,8 @@ impl RenderInput {
             return Ok([44100,48000].into_iter().map(|sample_rate|PlaybackSnapshot {
                 sample_rate,origin_sample:0,left:vec![],right:vec![],_reservation:None}).collect());
         }
-        // 保留原普通/裁切校验，不因移到worker而放宽stretch/content fades。
-        let validation=mix_plain_regions(&self.regions,&self.sources,44100).map_err(|e|format!("unsupported host region: {e:?}"))?;
-        drop(validation);
+        // 只放行原kernel负责的真实正向时间拉伸；普通PCM mixer不放行，content-based fades另有契约。
+        super::snapshot::validate_regions(&self.regions,&self.sources,44100,true).map_err(|e|format!("unsupported host region: {e:?}"))?;
         let start=timeline.clips.iter().map(|c|c.start_sec).fold(f64::INFINITY,f64::min);
         let end=timeline.clips.iter().map(|c|c.start_sec+c.length_sec).fold(0.0_f64,f64::max);
         if start<0.0 || !start.is_finite() || !end.is_finite() {return Err("unsupported host position".into());}
@@ -64,6 +63,33 @@ impl RenderInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 原kernel保调拉伸覆盖整段目标时间；不能只显示新长度却尾部静音或降八度重采样。
+    #[test]
+    fn linear_stretch_produces_full_length_audio_without_transposing_the_voice() {
+        let pcm=(0..22050).map(|n|(2.0*std::f64::consts::PI*220.0*n as f64/44100.0).sin() as f32*0.2).collect();
+        let source=Arc::new(SourcePcm {sample_rate:44100,planes:vec![pcm],version:0,_reservation:None});
+        let mut timeline:TimelineState=serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"a","name":"A","order":0}],"bpm":120,"project_sec":1,
+            "clips":[{"id":"ca","name":"A","track_id":"a","start_sec":0,"length_sec":1,
+                "takes":[{"id":"ta","name":"A","source_path":"source","source_start_sec":0,"source_end_sec":0.5,"playback_rate":0.5}]}]
+        })).unwrap();timeline.clips[0].normalize_takes();
+        let region=AraPlaybackRegion {audio_source_persistent_id:"source".into(),duration_in_modification_time:0.5,
+            duration_in_playback_time:1.0,is_timestretch_enabled:true,..Default::default()};
+        let input=RenderInput {timeline:Some(timeline),regions:vec![region],sources:HashMap::from([("source".into(),source)])};
+        let output=input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        assert_eq!(output[0].left.len(),44100);assert_eq!(output[1].left.len(),48000);
+        for start in [0.2,0.7] {
+            let begin=(start*44100.0) as usize;let count=3528;
+            let rms=(output[0].left[begin..begin+count].iter().map(|x|(*x as f64).powi(2)).sum::<f64>()/count as f64).sqrt();
+            assert!(rms>0.05,"拉伸后的后半段不能只补静音");
+            let mut scores=vec![0.0;442];
+            for lag in 147..441 {let mut xy=0.0;let mut xx=0.0;let mut yy=0.0;
+                for n in 0..count {let a=output[0].left[begin+n] as f64;let b=output[0].left[begin+n+lag] as f64;
+                    xy+=a*b;xx+=a*a;yy+=b*b;}scores[lag]=xy/(xx*yy).sqrt();}
+            let lag=(148..440).find(|&lag|scores[lag]>0.9&&scores[lag]>scores[lag-1]&&scores[lag]>=scores[lag+1]).unwrap();
+            let hz=44100.0/lag as f64;assert!((hz-220.0).abs()<2.0,"必须保调而不是普通重采样: {hz}");
+        }
+    }
     /// 源表替换不能改变已捕获的输入；取消必须拒绝计算，不靠旧模型裸引用。
     #[test]
     fn frozen_pcm_is_independent_of_replacement_and_cancel_is_respected() {

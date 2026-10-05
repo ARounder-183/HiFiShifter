@@ -227,7 +227,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
         let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowData;
         if !pointer.is_null() {
             if message==WM_TIMER && wparam.0==0x4853 {
-                deliver(&(*pointer).state);
+                // host getter可能重入并关闭窗口：先持Rc、释放RefCell借用，不再在调用后解引用WindowData。
+                let state=(*pointer).state.clone();let link=state.borrow().link.clone();
+                if let Ok(owner)=link.owner() {owner.refresh_reaper_transport();}
+                if !state.borrow().closed {deliver(&state);}
                 return LRESULT(0);
             } else if message == WM_SETFOCUS {
                 // 宿主Tab/onFocus进入自有HWND后，使用标准WebView2接口进入HTML控件。

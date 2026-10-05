@@ -97,6 +97,8 @@ fn controllers() -> &'static Mutex<HashMap<usize, Weak<DocumentSession>>> {
 }
 
 impl DocumentSession {
+    /// 宿主专属API调用前核对真实文档仍存活，销毁后的view不能沿旧project指针查询。
+    pub(crate) fn is_alive(&self)->bool {self.alive.load(Ordering::Acquire)}
     /// 会话与模型同寿，controller 地址在工厂 allocation 完成后登记。
     pub fn new(id: DocumentId) -> Arc<Self> {
         Arc::new(Self {

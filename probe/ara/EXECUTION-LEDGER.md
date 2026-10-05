@@ -876,4 +876,12 @@ Task 37: Ruling: SDK明确纯editor renderer必须透传输入，当前两角色
 
 Task 31: Ruling: review修正后的定向bound_tests11正常exit0，冷恢复双轨无GUI实际PCM/模型线程assignment序列化可证；总73未重复全跑，现preparation-01为修正前先导 — 只提交源码/准确记录验证范围，native最终包/性能仍open；不继续派review，按用户要求到最终集中一次 — 若把旧bundle加载日志当作最新源码通过，会漏掉修正未部署。
 
+Task 36: Ruling: editor-only按SDK透传，后台不再合成其歌曲快照，完整lib76 exit0；原生Playing首段82次回跳且主要mode1 — 保留真实诊断，不能排除所有prefetch，官方typed API在UI/model线程读所属project实际位置；getter/时钟回归通过不是宿主修复通过 — 若滤掉mode1或读当前活动project，会冻结游标或跨工程串时钟。
+
+Task 38: Ruling: 用户再次要求时间拉伸必须，原kernel已有保调管线而plugin在GUI/几何校验挡住 — 正向线性比率进入真实kernel，0.5秒220Hz→1秒保调/非静音及GUI倍率3回归通过，plain resampler仍拒绝拉伸；继续完成marker/tempo/坐标重投影，不缩小完整目标 — 若只显示长度或去掉错误但不验证音频，会截尾/移调/曲线错位。
+
+Task 36: Ruling: 用户物理Esc停止Computer Use，随后续目标并非明确重启界面授权 — 本轮继续源码，不重开CU；host-stretch-01构建exit0只记产物，最终native门保留 — 若自动抢回窗口，会违背用户中断并把未测源码当宿主已通过。
+
+Task 36: Ruling: host-stretch-01前端/Rust/native构建exit0，最后plugin lib80/0失败/exit0 — 归档源批并转工程工作区开发，保留真实新模块/拉伸/时钟验收open；之后只在最终review，不重跑旧前端全量 — 若仅以库测试/构建结束替代原GUI宿主验收，会过早关闭新四项目标。
+
 

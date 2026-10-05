@@ -4,6 +4,43 @@
 
 ## 当前权威摘要（Task30-31）
 
+## Task36/38最新源码（尚未完成最终宿主门）
+
+用户目标已扩展为原独立App、同工程多轨原GUI/独立输出、完整位置/拉伸/渐变、HiFiGAN缓存，
+最终总纲为ara-complete-integration设计/计划。时间拉伸用户再次明确“必须”；倒放暂不做。
+旧30秒/stretch/fades unsupported边界是先导，不作为整goal完成定义。
+
+纯editor角色已按SDK透传，实时/停播/离线、in-place/同bus、inactive/silence/非法输入/
+尾哨兵与零分配新回归通过。playback角色仍替换自己的区域；后台只准备playback实例，
+GUI汇总实际音频准备状态。首轮完整lib76正常exit0；测试fixture改为真正有playback职责的
+组合角色，不再用editor-only错误地证明歌曲供音。没有重复前端全量。
+
+原生隔离ROLE版引擎DB8A2F0CE406D5A61A3B722FB318B0E5A06490B92A4CCB52A89508AACA83C604真实加载，
+日志8819行后采集。原GUI Space实际Playing时，在没有手工seek的首个采样段累计82次
+回跳，realtime4不变、prefetch11832→12208、writer9070→9430。证据
+transport-prefetch-diagnostic.json；不能按主/子截图不同拍摄时刻推算精确偏差。
+不能排除所有prefetch，本机REAPER主要用此模式更新。官方SDK已核对到commit
+c0eafe87863b2bf69c5c822760f1b32a753b211b，parent(3)为所属project、GetPlayPositionEx
+是延迟补偿实际听到位置；现已typed适配并在活view UI timer发布独立原子元组，预取/
+其它clip停止不再覆盖这个UI权威。fake host真实QI/线程/引用回归1与transport3通过，
+不是实际REAPER调用成功/游标已修好。后续native门仍open。
+
+正向线性时长比已放行到原kernel，plain mixer继续拒绝“重采样冒充拉伸”，没有改原
+kernel算法/独立App语义。0.5秒220Hz源→1秒的实际内核输出44100/48000完整长度，前/
+后窗口有声、独立自相关约220Hz；GUI真实take倍率0.5/目标长度回归通过。stretch过滤
+3 passed/exit0。倒放仍明确拒绝，非线性marker/tempo映射、渐变完整数据与HiFiGAN缓存未完成。
+
+最新host-stretch-01规范release包含更新前端、REAPER getter与线性拉伸：tsc/Vite/
+Rust/native loader全部exit0，release2m01s，引擎SHA
+2F4FD9EC8B443DBA8A7225A740EB5506C2EC7071AEBBB2AC880438044D951C38。
+用户物理Esc停止Computer Use后不继续操作/重开窗口；该包未新宿主验收，没有热覆盖。
+原用户RPP仍4AD35908AA2D252D9171A9B6F423E4D9BFEE4DEDBE29861B7665B0FE485897A3。
+
+该源批最后完整plugin lib80/0失败正常exit0（10.65s），包含实际REAPER typed adapter的
+QI/所属project/暂停与停止/线程/引用平衡，以及host权威不受预取污染/后退seek、线性
+stretch真实PCM与GUI状态、原实时边界/Doc恢复回归。现有Rust/Vite及测试raw-pointer
+unused-assignment警告保留；不是四项目标或native最终矩阵通过。
+
 Task31最新源码：宿主prepare只排有界后台任务，原参数合成抽为冻结RenderInput，自动应用
 和外部提交在计算时不持document.transaction；发布核对model/edit/render_epoch/分配。
 首轮lib70、收尾render26均正常exit0。一次集中review指出冷恢复过期无重排/分配与发布

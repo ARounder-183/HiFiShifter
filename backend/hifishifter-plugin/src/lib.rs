@@ -40,6 +40,7 @@ use std::ffi::c_void;
 
 /// VST3 类名。**必须与 ARA 工厂的 plugInName 一致** —— ARA 的 VST3 配对规则要求如此。
 pub(crate) const CLASS_NAME: &str = "HiFiShifter";
+pub(crate) mod host;
 /// 版本号（展示用）。
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// ARA 工厂的持久 ID。
