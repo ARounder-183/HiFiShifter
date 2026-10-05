@@ -372,6 +372,10 @@ export function parseWaveformColor(value: string): [number, number, number, numb
  * 索引锚定（而非屏幕列锚定）意味着同一个峰值在任何缩放等级下都取到同一个
  * 增益值，这是缩放一致性的根基。极值（argmin/argmax）与它的时刻必须成对使用，
  * 见 {@link MAX_COLUMN_GAIN_SLICES} 的说明。
+ *
+ * @param frac 桶内的相对位置：`0.5` = 桶中心（极值配对用的「该峰值自己的时刻」），
+ *   `0` / `1` = 桶的左右边界（上界钳制的时间窗端点，见
+ *   `levelCeilingOverWindow` 的调用点）。
  */
 function sourceIndexClipTimeSec(
     index: number,
@@ -384,8 +388,9 @@ function sourceIndexClipTimeSec(
     sourceDurationSec: number,
     clipLocalStartSec: number,
     localSpanSec: number,
+    frac = 0.5,
 ): number {
-    const srcSec = dataStartSec + ((index + 0.5) / sampleCount) * dataDurationSec;
+    const srcSec = dataStartSec + ((index + frac) / sampleCount) * dataDurationSec;
     const t = clamp01(
         reversed
             ? (sourceEndSec - srcSec) / sourceDurationSec
@@ -653,7 +658,10 @@ export function buildWaveformGeometry(args: {
 
         // 桶索引 ↔ 时间轴绝对秒（「该峰值自己的时刻」），供极值配对使用。
         // 索引锚定 ⇒ 同一峰值在任何缩放等级下取到同一个增益（缩放一致性）。
-        const absSecAtIndex = (index: number): number =>
+        //
+        // `frac` 选择桶内位置：缺省 0.5 = 桶中心（极值配对），0 / 1 = 桶的左右边界
+        //（上界钳制的时间窗端点 —— 见下方切片循环里的说明）。
+        const absSecAtIndex = (index: number, frac = 0.5): number =>
             clipStartSec +
             sourceIndexClipTimeSec(
                 index,
@@ -666,6 +674,7 @@ export function buildWaveformGeometry(args: {
                 sourceDurationSec,
                 segment.clipLocalStartSec,
                 localSpanSec,
+                frac,
             );
 
         // 某**时间轴绝对秒**处的 clip 增益（clip 增益 × 淡变）。
@@ -820,9 +829,19 @@ export function buildWaveformGeometry(args: {
                             ? tMax
                             : absSecAtIndex(extremeScratch.argMin);
                     // 上界钳制需要的时间窗端点与索引同批求出（见 scratch 的说明）。
+                    //
+                    // 【为什么取桶的**边界**而不是桶中心】上界的定义是「该时间窗内
+                    // 可达电平的最大值」，而本切片的峰值来自 `[lo, hi]` 这些桶的
+                    // **整个时间跨度**。用桶中心当端点会让窗口比峰值来源窄一整圈：
+                    // 细档（每列 ≈19 桶）只差约 5%，看不出；**粗档 `coarseSpan = 1`
+                    // 时 `lo === hi`，窗口退化成一个点** —— 于是"桶峰"（宽桶）配
+                    // "单帧上界"（窄窗），既有 `桶峰 ≤ 窗内原声基线最大` 的论证失效，
+                    // 合法内容会被误钳（表现为粗档波形被压平，且随亚桶相位闪烁）。
+                    // 取边界后窗口恰好覆盖峰值来源，`MAX_COLUMN_GAIN_SLICES` 的
+                    // 「不把某处允许的高电平泄漏给邻近切片」仍然成立（仍是本切片的桶）。
                     if (levelCeiling !== undefined) {
-                        sliceTimeLoScratch[slice] = absSecAtIndex(lo);
-                        sliceTimeHiScratch[slice] = absSecAtIndex(hi);
+                        sliceTimeLoScratch[slice] = absSecAtIndex(lo, 0);
+                        sliceTimeHiScratch[slice] = absSecAtIndex(hi, 1);
                     }
                 }
 

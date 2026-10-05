@@ -422,3 +422,151 @@ describe("粗档：窗口越过数据边界时档位恒定", () => {
         expect([...columns].sort((a, b) => a - b)).toEqual([0, 1, 2]);
     });
 });
+
+/**
+ * ★ 回归：**粗档下上界钳制的时间窗不得退化成一个点**。
+ *
+ * ## 缺陷形态
+ *
+ * 上界的定义是「该时间窗内可达电平的最大值」，而切片的峰值来自其桶的**整个时间
+ * 跨度**。原实现把窗口端点取成桶**中心**（`absSecAtIndex` 的 0.5 偏移）：
+ *
+ * - 细档（每列 ≈19 桶）：窗口只比峰值来源窄半桶，约 5% 扰动，不可见；
+ * - **粗档 `coarseSpan = 1`：`lo === hi`，窗口宽度 = 0** —— "宽桶的峰"配"单帧的
+ *   上界"，`桶峰 ≤ 窗内原声基线最大` 这条不变量失效，**合法内容被误钳**。命中与否
+ *   取决于列中心落在哪个采样帧上，于是随亚桶相位闪烁（拖拽时可见）。
+ *
+ * 修复：窗口端点改用桶的**左右边界**（`frac = 0 / 1`），宽度恰好等于该切片的
+ * 桶跨度。本用例直接观测传给 `levelCeilingOverWindow` 的窗口宽度。
+ */
+describe("粗档：上界窗口必须覆盖峰值来源的桶跨度", () => {
+    /** 8 桶覆盖源 [0, 0.5) ⇒ 桶宽 0.0625s。 */
+    const BUCKET_SPAN = 0.5 / 8;
+
+    function flatPeaks() {
+        const max = new Float32Array(8);
+        const min = new Float32Array(8);
+        for (let i = 0; i < 8; i += 1) {
+            max[i] = 0.1 + (0.8 * i) / 8;
+            min[i] = -max[i];
+        }
+        return { min, max, dataStartSec: 0, dataDurationSec: 0.5 };
+    }
+
+    /**
+     * 段声明跨度 0.5s、画布 8 CSS px ⇒ 每列 0.0625s = **1 个桶**
+     * ⇒ `coarseSpan = 1`、`sliceCount = 1`（正是缺陷命中的档位）。
+     */
+    function makeScene(): WaveformScene {
+        return {
+            segments: [
+                {
+                    clipId: "clip",
+                    sourcePath: "/tone.wav",
+                    sourceSampleRate: 8,
+                    sourceStartSec: 0,
+                    sourceEndSec: 0.5,
+                    clipStartSec: 0,
+                    clipLocalStartSec: 0,
+                    clipLocalEndSec: 0.5,
+                    clipTotalDurationSec: 0.5,
+                    screenRect: { x: 0, y: 0, width: 8, height: 100 },
+                    reversed: false,
+                    gain: 1,
+                    fadeInSec: 0,
+                    fadeOutSec: 0,
+                    fadeInShape: 0,
+                    fadeInDir: 0,
+                    fadeOutShape: 0,
+                    fadeOutDir: 0,
+                    alpha: 1,
+                    channelMode: 0,
+                    sourceChannels: 0,
+                },
+            ],
+            markers: [],
+        } as WaveformScene;
+    }
+
+    it("★ coarseSpan = 1：每列的窗口宽度 = 该列的桶跨度（修复前恒为 0）", () => {
+        const windows: Array<[number, number]> = [];
+        const map = Object.assign(
+            (value: number, gain: number) => value * gain,
+            {
+                factorAt: () => 1,
+                levelCeilingOverWindow: (lo: number, hi: number) => {
+                    windows.push([lo, hi]);
+                    return null;
+                },
+            },
+        );
+        buildWaveformGeometry({
+            scene: makeScene(),
+            color: "#ffffff",
+            getPeaks: () => flatPeaks() as never,
+            amplitudeMap: map,
+        });
+        // 8 列 × 1 切片 = 8 次查询。
+        expect(windows.length).toBe(8);
+        for (const [lo, hi] of windows) {
+            expect(hi).toBeGreaterThan(lo);
+            expect(hi - lo).toBeCloseTo(BUCKET_SPAN, 9);
+        }
+    });
+
+    it("对照：细档（每列多桶）的窗口同样覆盖整段的桶跨度", () => {
+        // 画布 2 CSS px ⇒ 每列 0.25s = 4 桶 ⇒ coarseSpan = 4、sliceCount = 4。
+        const scene = makeScene();
+        const segment = scene.segments[0] as { screenRect: { width: number } };
+        segment.screenRect.width = 2;
+        const windows: Array<[number, number]> = [];
+        const map = Object.assign(
+            (value: number, gain: number) => value * gain,
+            {
+                factorAt: () => 1,
+                levelCeilingOverWindow: (lo: number, hi: number) => {
+                    windows.push([lo, hi]);
+                    return null;
+                },
+            },
+        );
+        buildWaveformGeometry({
+            scene,
+            color: "#ffffff",
+            getPeaks: () => flatPeaks() as never,
+            amplitudeMap: map,
+        });
+        expect(windows.length).toBe(2 * 4);
+        for (const [lo, hi] of windows) {
+            // 每切片恰好 1 个桶（4 桶 / 4 切片）⇒ 宽度仍是桶宽，不是列宽。
+            expect(hi - lo).toBeCloseTo(BUCKET_SPAN, 9);
+        }
+    });
+
+    /**
+     * 非有限因子只丢**它自己所在的切片**；粗档 `sliceCount = 1` 时即整列消失。
+     *
+     * 【为什么把它钉成用例】这是"算不出就不画"的**保守**选择（`geometry.ts` 的
+     * 切片循环在 `mappedSliceMax/Min` 非有限时 `continue`），不是缺陷：拿不出该
+     * 时刻的增益时，画一个凭空的包络比留空更糟。但它在粗档下会放大成"整列缺一格"，
+     * 因此把它显式记录下来 —— 将来若真要在粗档放宽（例如回退到 `raw × clipGain`），
+     * 必须是有意的改动，而不是顺带发生。
+     */
+    it("非有限因子丢该切片（粗档即整列）—— 保守行为，不画算不出的内容", () => {
+        const broken = buildWaveformGeometry({
+            scene: makeScene(),
+            color: "#ffffff",
+            getPeaks: () => flatPeaks() as never,
+            amplitudeMap: () => Number.NaN,
+        });
+        expect(broken.vertices.length).toBe(0);
+        // 对照：同样的场景换成有限映射 ⇒ 正常产出顶点（证明上面不是因为场景无效）。
+        const ok = buildWaveformGeometry({
+            scene: makeScene(),
+            color: "#ffffff",
+            getPeaks: () => flatPeaks() as never,
+            amplitudeMap: (value) => value,
+        });
+        expect(ok.vertices.length).toBeGreaterThan(0);
+    });
+});
