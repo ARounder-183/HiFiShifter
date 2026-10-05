@@ -355,6 +355,16 @@ impl EditorSession {
         }
         Ok(timeline)
     }
+    /// 选region后沿当前真实doc取只读投影，防止重叠区仍显示前一素材的曲线。
+    pub(super) fn select_source_projection(&self)->Result<(),String> {
+        if self.error.lock().unwrap().as_ref().is_some_and(|error|error.starts_with("Conflict")) {return Ok(());}
+        let document=self.document.upgrade().ok_or("document closed")?;
+        let current=self.native_timeline(self.timeline.lock().unwrap().clone())?;
+        let roots=document.selected_source_parameters(&current)?;
+        let mut timeline=self.timeline.lock().unwrap();
+        timeline.params_by_root_track.extend(roots.into_iter().map(|(root,params)|(format!("{}{root}",self.namespace),params)));
+        Ok(())
+    }
     pub(super) fn emit(&self,event:&str,payload:Value) {
         let document=self.document.upgrade();
         let views={let mut views=self.views.lock().unwrap();views.retain(|_,view|!view.sink.closed.load(Ordering::Acquire)
@@ -613,6 +623,39 @@ pub(crate) mod tests {
         document.close();
         assert!(revoked,"组件stop必须同步撤销自己的view");assert!(other_live,"另一组件view仍有租约");
         assert_eq!(output,[false,true],"组件stop必须撤销自己的输出，不能清除另一renderer");
+    }
+    /// 原actor选择重叠region只换其参数投影；不能生成编辑/history或覆盖另一素材。
+    #[test]
+    fn atlas_selection_commands_project_overlaps_without_audio_or_history_changes() {
+        let (model,owners,_ids)=workspace_fixture();let document=model.session();
+        let mut original=document.timeline.lock().unwrap().as_ref().unwrap().clone();
+        for (index,track) in original.tracks.iter().enumerate() {
+            original.params_by_root_track.insert(track.id.clone(),hifishifter_kernel::state::TrackParamsState {
+                frame_period_ms:5.,pitch_edit:vec![if index==0 {60.} else {67.};2],..Default::default()});
+        }
+        let identities=document.parameter_identities_locked(&original).unwrap();
+        let atlas=super::super::parameter_atlas::ParameterAtlas::default().capture(&original,&identities).unwrap();
+        let root=original.tracks[0].id.clone();let ca=original.clips[0].id.clone();let cb=original.clips[1].id.clone();
+        original.clips[1].track_id=root.clone();original.tracks.truncate(1);original.selected_clip_id=Some(ca.clone());
+        let atlas=atlas.follow_geometry(&original,&identities).unwrap();
+        original.params_by_root_track=atlas.project_roots(&original,&identities).unwrap();
+        *document.timeline.lock().unwrap()=Some(original.clone());
+        document.track_bindings.lock().unwrap().insert(root.clone(),vec![("modification".into(),"ara://source".into()),("modification-b".into(),"ara://source".into())]);
+        {let mut edits=document.edits.lock().unwrap();edits.params=original.params_by_root_track;edits.atlas=atlas;}
+        let editor=owners[0].editor_session().unwrap();
+        let (reply,rx)=mpsc::channel();let (events,_)=mpsc::sync_channel(128);
+        let sink=UiSink {view_id:"atlas-select".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        let loaded=call(&editor,&sink,&rx,1,"get_timeline_state",json!({}));
+        let root=loaded["tracks"][0]["id"].as_str().unwrap();let ca=format!("{}{ca}",editor.namespace);let cb=format!("{}{cb}",editor.namespace);
+        let before=(document.edits.lock().unwrap().revision,editor.generation.load(Ordering::Acquire));
+        call(&editor,&sink,&rx,2,"select_clip",json!({"clipId":cb}));
+        let b=editor.timeline.lock().unwrap().params_by_root_track[root].pitch_edit[0];
+        call(&editor,&sink,&rx,3,"select_clip",json!({"clipId":ca}));
+        let a=editor.timeline.lock().unwrap().params_by_root_track[root].pitch_edit[0];
+        let after=(document.edits.lock().unwrap().revision,editor.generation.load(Ordering::Acquire));
+        let history=editor.history.lock().unwrap().records.len();
+        document.close();
+        assert_eq!((a,b),(60.,67.));assert_eq!(before,after);assert_eq!(history,0);
     }
     #[test]
     fn workspace_components_share_the_original_actor_and_cross_track_history() {

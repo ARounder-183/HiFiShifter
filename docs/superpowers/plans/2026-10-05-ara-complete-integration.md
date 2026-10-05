@@ -15,6 +15,11 @@
 **最新用户范围：** 只做线性拉伸，删除非线性marker/坡度/段内tempo warp实现与最终门。
 整段倍率/tempo-timebase线性变化、参数迁移、保调PCM、持久化、fade等原其它要求保留。
 
+**最新推理范围：** HNSEP 整段处理是用户确认的预期行为，不实现/验收其分块；
+Task39 保留 HNSEP 参数、正确缓存和资源保护，Task40 的神经分块仅指 HiFiGAN。
+HiFiGAN 四个专有参数（breath_enabled、breath_gain、hifigan_tension、formant_shift_cents）
+以及共通参数按实际 descriptor/原管线验证；不能用 WORLD 结果代替真实模型证据。
+
 ## Global Constraints
 
 - 仅ara-plugin worktree/codex/ara-plugin；不push、不add-A、不改SDK/registry、不动主develop。
@@ -119,7 +124,8 @@ struct HostRenderCounters { source_hits:u64, intermediate_hits:u64, pcm_hits:u64
 
 - [ ] 原30秒限制不作为最终完成门；增加超过30秒/正常完整人声/多轨用例，记录预算拒绝
   的真实来源（源、工作缓冲、GPU、中间层、播放快照），不是简单把常量提高。
-- [ ] 有界source窗口/神经块准备与共享不可变chunk、源时间/参数对齐；在worker处理磁盘
+- [ ] 有界source窗口/HiFiGAN神经块及批量准备与共享不可变chunk、源时间/参数对齐；HNSEP
+  保留整段推理、核对其资源成本，不要求分块。在worker处理磁盘
   缓存/预热，实时seek读不到就明确pending/静音而非错误旧数据，最终就绪时输出精确。
 - [ ] Offline导出必须完整供音，不能以慢worker尚未就绪造成静音；全范围预备/可验证的
   非实时准备契约与实时读取分离。任何磁盘映射缺页都不能被当作“零IO实时缓存”。

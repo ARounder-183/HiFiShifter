@@ -158,12 +158,12 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
         "end_undo_group"=>{session.suppress_history.store(false,Ordering::Release);Ok(json!({"ok":true}))},
         "select_track"=>{
             let id=input["trackId"].as_str().ok_or("trackId missing")?;track_exists(session,id)?;
-            session.timeline.lock().unwrap().select_track(id);session.notify_timeline();payload(session,false)
+            session.timeline.lock().unwrap().select_track(id);session.select_source_projection()?;session.notify_timeline();payload(session,false)
         },
         "select_clip"=>{
             let id=input["clipId"].as_str().map(str::to_owned);
             if let Some(id)=&id {if !session.timeline.lock().unwrap().clips.iter().any(|c|&c.id==id) {return Err("unknown host clip".into());}}
-            session.timeline.lock().unwrap().select_clip(id);session.notify_timeline();payload(session,false)
+            session.timeline.lock().unwrap().select_clip(id);session.select_source_projection()?;session.notify_timeline();payload(session,false)
         },
         "set_transport"=>{
             if input["bpm"].is_number() {return Err("tempo is controlled by REAPER".into());}

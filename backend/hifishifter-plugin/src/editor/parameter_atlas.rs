@@ -111,7 +111,14 @@ impl ParameterAtlas {
         }Ok(roots)
     }
     /// 接受当前投影上的真实编辑；未改动的曲线继续保留原始源坐标basis。
+    pub fn capture_changes(&self,timeline:&TimelineState,identities:&BTreeMap<String,RegionIdentity>,previous_view:&BTreeMap<String,TrackParamsState>)->Result<Self,String> {
+        self.capture_inner(timeline,identities,Some(previous_view))
+    }
     pub fn capture(&self,timeline:&TimelineState,identities:&BTreeMap<String,RegionIdentity>)->Result<Self,String> {
+        self.capture_inner(timeline,identities,None)
+    }
+    /// 只把相对旧GUI投影的delta送回源authority；重叠选区外保留该region自己的值。
+    fn capture_inner(&self,timeline:&TimelineState,identities:&BTreeMap<String,RegionIdentity>,previous_view:Option<&BTreeMap<String,TrackParamsState>>)->Result<Self,String> {
         let mut candidate=self.clone();
         for clip in &timeline.clips {
             let identity=identities.get(&clip.id).ok_or("missing actual ARA parameter identity")?;
@@ -125,7 +132,22 @@ impl ParameterAtlas {
             for (key,values) in parameter_curves(params) {
                 if values.is_empty() {continue;}
                 let old=previous.and_then(|previous|previous.curves.get(&key));
-                let unchanged=old.is_some_and(|old|old.frame_ms==params.frame_period_ms&&old.project(&geometry,&key,params.frame_period_ms)
+                let view=previous_view.and_then(|view|view.get(&root)).filter(|view|view.frame_period_ms==params.frame_period_ms);
+                let old_view=view.and_then(|view|parameter_curves(view).into_iter().find(|(name,_)|*name==key).map(|(_,values)|values));
+                if let (Some(old),Some(old_view))=(old,old_view) {if values==old_view {curves.insert(key,old.clone());continue;}}
+                let adjusted=if let (Some(old),Some(old_view))=(old,old_view) {
+                    let mut region=old.project(&geometry,&key,params.frame_period_ms)?;
+                    let selected=timeline.selected_clip_id.as_ref().and_then(|id|timeline.clips.iter().find(|selected|selected.id==*id))
+                        .filter(|selected|timeline.resolve_root_track_id(&selected.track_id).as_deref()==Some(root.as_str())&&selected.id!=clip.id);
+                    for frame in begin..=end {
+                        let incoming=values.get(frame).copied().unwrap_or_else(||pad(&key));let prior=old_view.get(frame).copied().unwrap_or_else(||pad(&key));
+                        let time=frame as f64*params.frame_period_ms/1000.;
+                        let covered=selected.is_some_and(|selected|time>=selected.start_sec&&time<=selected.start_sec+selected.length_sec);
+                        if incoming!=prior&&!covered {region[frame]=incoming;}
+                    }Some(region)
+                } else {None};
+                let values=adjusted.as_deref().unwrap_or(values);
+                let unchanged=old.is_some_and(|old|old.project(&geometry,&key,params.frame_period_ms)
                     .is_ok_and(|projected|(begin..=end).all(|frame|projected[frame]==values.get(frame).copied().unwrap_or_else(||pad(&key)))));
                 let curve=if unchanged {old.unwrap().clone()} else {
                     if values.len()>1_000_000||values.iter().any(|v|!v.is_finite()||v.abs()>10000.) {return Err("invalid source parameter samples".into());}
@@ -240,6 +262,22 @@ mod tests {
             pitch_orig:vec![0.,0.,0.,0.,57.,57.,57.,57.,57.],pitch_edit:vec![0.,0.,0.,0.,60.,61.,62.,63.,64.],
             extra_curves:std::collections::HashMap::from([("volume".into(),vec![1.,1.,1.,1.,0.5,0.6,0.7,0.8,0.9])]),..Default::default()});
         timeline
+    }
+    /// 一个可见root数组不能把重叠的另一region当同一编辑；只修改可见delta对应的选区。
+    #[test]
+    fn overlapping_selection_edits_do_not_recapture_another_regions_visible_projection() {
+        let mut initial=edited();let mut other=initial.clips[0].clone();other.id="other".into();other.start_sec=3.;initial.clips.push(other);initial.project_sec=4.;
+        let params=initial.params_by_root_track.get_mut("a").unwrap();params.pitch_edit.resize(17,0.);params.pitch_orig.resize(17,0.);
+        params.pitch_edit[12..17].copy_from_slice(&[67.,68.,69.,70.,71.]);params.pitch_orig[12..17].fill(57.);
+        let mut ids=identities();ids.insert("other".into(),RegionIdentity {key:42,source:"source".into(),modification:"other-mod".into()});
+        let atlas=ParameterAtlas::default().capture(&initial,&ids).unwrap();
+        let mut overlap=initial.clone();overlap.clips[1].start_sec=1.;overlap.project_sec=2.;overlap.selected_clip_id=Some("clip".into());
+        let atlas=atlas.follow_geometry(&overlap,&ids).unwrap();let before=atlas.project_roots(&overlap,&ids).unwrap();overlap.params_by_root_track=before.clone();
+        let same=atlas.capture_changes(&overlap,&ids,&before).unwrap().project(&overlap,&ids).unwrap();
+        assert_eq!(&same["other"].pitch_edit[4..9],&[67.,68.,69.,70.,71.],"只换GUI投影不能改另一region");
+        overlap.params_by_root_track.get_mut("a").unwrap().pitch_edit[5]=72.;
+        let changed=atlas.capture_changes(&overlap,&ids,&before).unwrap().project(&overlap,&ids).unwrap();
+        assert_eq!(changed["clip"].pitch_edit[5],72.);assert_eq!(changed["other"].pitch_edit[5],68.);
     }
     #[test]
     fn source_curves_follow_movement_crop_and_forward_stretch_instead_of_old_project_frames() {

@@ -916,4 +916,8 @@ Task 38: Ruling: 源basis是新的持久化语义，旧v2只有绝对项目数�
 
 Task 38: Ruling: 批末128回归123通过/5失败，外部IPC clip扁平投影缺失、旧fixtures无modification边及JSON f64一ULP误判造成尾线截断 — 外部参数源basis只取宿主几何、fixture补真实边，不弱化验证；以8ε×max(1,绝对秒坐标)数值容差保留同布局整轨数组，定向5修复exit0 — 失败assert持Mutex使cleanup二次panic并0xc0000409，未当绿；若只改期望或当内存溢出忽略，会隐藏实际曲线保存损坏。
 
+Task 40: Ruling: 用户明确 HNSEP 不分块、HiFiGAN 分块即可 — 保留 HNSEP 整段处理，停止其分块研究；长源神经分块门限定 HiFiGAN，HNSEP 参数/缓存/资源保护仍执行 — 若将此误解为取消 HNSEP 验证，会留下错源缓存或失效参数；整段成本须诚实报告。
+
+Task 38: Ruling: 重叠region的整轨可见数组不能重新捕获给不可见素材，选择变化也不应推进编辑代次 — capture_changes只接相对当前选择投影的delta，select_clip/select_track从doc只读切换源投影；本批10定向回归在进程级CPU设置下正常exit0，不重复全量/不追加review — 若沿用整数组回捕会串曲线；这是源码actor/音频合同证据，仍非原生GUI验收，外部IPC旧提交路径另留残余。
+
 

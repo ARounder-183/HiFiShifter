@@ -138,6 +138,13 @@ impl DocumentSession {
     pub(crate) fn workspace_projection(&self)->Result<String,String> {
         let _transaction=self.transaction.lock().unwrap();self.workspace_projection_locked(&self.edits.lock().unwrap())
     }
+    /// 原GUI改变素材选择只换可见source投影；不修改参数authority、history或渲染generation。
+    pub(crate) fn selected_source_parameters(&self,selection:&hifishifter_kernel::state::TimelineState)
+        ->Result<std::collections::BTreeMap<String,hifishifter_kernel::state::TrackParamsState>,String> {
+        let _transaction=self.transaction.lock().unwrap();if !self.is_alive() {return Err("document closed".into());}
+        let host=self.workspace_timeline_locked()?;Self::validate_workspace_geometry(&host,selection)?;
+        let identities=self.parameter_identities_locked(&host)?;self.edits.lock().unwrap().atlas.project_roots(selection,&identities)
+    }
     /// 短事务同时冻结授权、参数、PCM和三个版本，分析副本的文件IO由actor随后执行。
     pub(crate) fn workspace_snapshot(&self)->Result<(hifishifter_ara_ipc::Response,u64,String),String> {
         let _transaction=self.transaction.lock().unwrap();
@@ -184,7 +191,10 @@ impl DocumentSession {
         if self.workspace_projection_locked(&edits)?!=previous || base_edit>edits.revision {return Err("Conflict: workspace scope or curves changed; local curves preserved".into());}
         Self::validate_workspace_geometry(&host,client)?;
         let mut candidate=edits.merge(&host,client,edits.revision)?;candidate.reconcile(&self.track_bindings.lock().unwrap())?;
-        candidate.atlas=edits.atlas.capture(client,&self.parameter_identities_locked(&host)?)?;
+        let identities=self.parameter_identities_locked(&host)?;let mut previous_view=edits.params.clone();
+        if !edits.atlas.is_empty() {let mut selected=host.clone();selected.selected_clip_id=client.selected_clip_id.clone();
+            previous_view.extend(edits.atlas.project_roots(&selected,&identities)?);}
+        candidate.atlas=edits.atlas.capture_changes(client,&identities,&previous_view)?;
         let projection=self.workspace_projection_locked(&candidate)?;*edits=candidate;
         Ok((edits.revision,model,projection))
     }
