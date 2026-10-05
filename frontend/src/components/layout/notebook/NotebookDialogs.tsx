@@ -281,12 +281,17 @@ export function NotebookSettingsDialog({
              * 混排表单：字段与开关共用标签列，因此显式声明 aligned（与
              * `DockLayoutSettingsDialog` 同一形态）。
              *
-             * 分组走 `AppFormSection`：此前这里是一份**就地手写**的 `Section`
-             * （`mb-1` + 11px/500 muted），而 `AppFormSection` 正是全应用设置
-             * 表单的分组原语 —— 于是一个仓库里出现了两种节标题，且在 12px 的
-             * 字段行之上挂了一个**更小**的标题（11px/500）。
+             * 分组走 `AppFormSection`（节标题 13px/600 + 留白分组），不用就地
+             * 手写的标题行 —— 那是全应用之外的第二种节标题，且 11px 会**小于**
+             * 它所统领的 12px 字段标签。
+             *
+             * 【标签列取 lg（132px）】本窗口最长的一条是「Markdown 输入快捷转换」
+             * （实测自然宽 131.9px），`md`（112px）装不下 —— 标签 `shrink-0`，
+             * 多出的 20px 会把那一行自己的开关往右顶，整列控件因此破口。132 正是
+             * 这一组设置迁移到原语之前自己用的档位（`Field.tsx` 里记的
+             * `SETTING_LABEL_STYLE = 132`），迁移时按默认 `md` 下发才丢的。
              */}
-            <AppForm booleanRow="aligned">
+            <AppForm booleanRow="aligned" labelWidth="lg">
                 <AppFormSection title={tf("notebook_settings_group_view")}>
                     <AppField label={tf("notebook_setting_default_mode")}>
                         <AppSelect
@@ -497,37 +502,45 @@ export function NotebookSettingsDialog({
                     />
                 </AppFormSection>
 
-                <AppFormSection title={tf("notebook_settings_group_export")}>
+                {/*
+                 * 两个导出按钮挂在节头的 `action` 槽位（分区级控件），而不是挤在
+                 * 正文里另起一行：这一节只有按钮、没有字段，正文若再画一行，
+                 * 它们要么贴左（与上面四节的控件列错位），要么为了对齐凭空缩进
+                 * 一个 112px —— 两种都不如放进槽位。与 `AppearanceSettingsPanel`
+                 * 的「已保存主题」节（导入/导出在节头）同一形态。
+                 */}
+                <AppFormSection
+                    title={tf("notebook_settings_group_export")}
+                    action={
+                        <div className="flex items-center gap-2">
+                            <AppButton
+                                size="sm"
+                                onClick={() => {
+                                    void runExport("md", markdown);
+                                }}
+                            >
+                                {tf("notebook_export_md")}
+                            </AppButton>
+                            <AppButton
+                                size="sm"
+                                onClick={() => {
+                                    void runExport(
+                                        "html",
+                                        buildExportHtml(markdown, projectName, getHtml?.() ?? null),
+                                    );
+                                }}
+                            >
+                                {tf("notebook_export_html")}
+                            </AppButton>
+                        </div>
+                    }
+                >
                     {/*
-                     * 两个导出按钮走 `AppField` 的控件列：此前它们直接贴左，
-                     * 与同一张表单里所有行的控件左缘（112px 之后）错位。
+                     * 导出反馈挂在本节正文（按钮正下方），而不是表单末尾：
+                     * 此前它是表单最后一个子项，与触发它的按钮隔着一整个节间距，
+                     * 读不出"这句话是刚才那次导出的结果"。
                      */}
-                    <div className="flex items-center gap-2">
-                        <AppButton
-                            size="sm"
-                            onClick={() => {
-                                void runExport("md", markdown);
-                            }}
-                        >
-                            {tf("notebook_export_md")}
-                        </AppButton>
-                        <AppButton
-                            size="sm"
-                            onClick={() => {
-                                void runExport(
-                                    "html",
-                                    buildExportHtml(markdown, projectName, getHtml?.() ?? null),
-                                );
-                            }}
-                        >
-                            {tf("notebook_export_html")}
-                        </AppButton>
-                    </div>
-                    {exportNotice ? (
-                        // 反馈挂在按钮下方而不是表单末尾：此前它是表单最后一个
-                        // 子项，与导出按钮隔着一整个节间距，读不出因果关系。
-                        <span className="hs-type-caption">{exportNotice}</span>
-                    ) : null}
+                    {exportNotice ? <span className="hs-type-caption">{exportNotice}</span> : null}
                 </AppFormSection>
             </AppForm>
         </AppDialog>
