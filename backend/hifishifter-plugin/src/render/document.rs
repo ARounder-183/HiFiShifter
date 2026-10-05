@@ -30,6 +30,7 @@ pub(crate) struct DocumentSession {
     pub track_bindings: Mutex<crate::state_channel::TrackBindings>,
     pub revision: AtomicU64,
     pub render_epoch:AtomicU64,
+    pub scope_revision:AtomicU64,
     pub ready: AtomicBool,
     pub transaction: Mutex<()>,
     pub edits: Arc<Mutex<crate::state_channel::EditState>>,
@@ -180,7 +181,7 @@ impl DocumentSession {
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|lease| lease.owner.upgrade())
+            .filter_map(|lease| lease.owner.upgrade()).filter(|owner|!owner.is_closed())
             .collect::<Vec<_>>();
         // 先统一恢复全部组件权威，再允许任何后台任务捕获共享revision。
         for owner in &owners {
@@ -193,7 +194,7 @@ impl DocumentSession {
 
     /// 同一ARA文档的编辑权威共享，输出仍按各renderer分配隔离。
     pub fn renderer_owners(&self) -> Vec<Arc<ExtensionOwner>> {
-        self.renderers.lock().unwrap().iter().filter_map(|lease| lease.owner.upgrade()).collect()
+        self.renderers.lock().unwrap().iter().filter_map(|lease| lease.owner.upgrade()).filter(|owner|!owner.is_closed()).collect()
     }
 
     /// 在旧内容可能被改变前立即撤销发布；不回收实时读者可能仍持有的旧快照。

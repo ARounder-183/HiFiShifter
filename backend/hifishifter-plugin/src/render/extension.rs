@@ -25,6 +25,7 @@ pub(crate) struct ExtensionOwner {
     sequences: Mutex<HashMap<i32, Vec<u64>>>,
     role: AtomicI32,
     roles:AtomicI32,
+    closed:std::sync::atomic::AtomicBool,
     writer_id:AtomicU64,
     reaper:Mutex<Option<Arc<crate::host::reaper::ReaperHost>>>,
     pub snapshots: [super::snapshot::SnapshotPublisher; 2],
@@ -561,6 +562,13 @@ mod bound_tests {
 }
 
 impl ExtensionOwner {
+    /// 组件终止独立于Arc尚存与否，旧native entry不能维持可编辑授权。
+    pub(crate) fn is_closed(&self)->bool {self.closed.load(Ordering::Acquire)}
+    pub(crate) fn editor_document(&self)->Result<Arc<super::document::DocumentSession>,String> {
+        if self.is_closed() {return Err("FX processor closed".into());}
+        self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade).filter(|document|document.is_alive())
+            .ok_or_else(||"document closed".into())
+    }
     /// 初始化在宿主UI/model线程保存有引用的typed扩展，不在actor或process调用REAPER API。
     /// # Safety
     /// context须为宿主初始化期间活FUnknown。
@@ -601,6 +609,11 @@ impl ExtensionOwner {
     }
     /// 组件/文档终止时停止实例worker；不要在音频process调用。
     pub(crate) fn stop_editor(&self) {
+        let document={self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade)};
+        if let Some(document)=document {
+            let _transaction=document.transaction.lock().unwrap();
+            if !self.closed.swap(true,Ordering::AcqRel) {document.scope_revision.fetch_add(1,Ordering::AcqRel);}
+        } else {self.closed.store(true,Ordering::Release);}
         let host=self.reaper.lock().unwrap().take();drop(host);
         self.cancel_preparation();
         if let Some(Ok(editor))=self.editor.get() { editor.close(); }
@@ -916,6 +929,11 @@ impl ExtensionOwner {
                             .resolve(&keys)
                             .is_ok_and(|(owner, _)| owner == document_id);
                     let count = keys.len();
+                    let next_keys=if valid {keys.clone()} else {Vec::new()};
+                    let next_sequences=sequences.iter().map(|key|*key as u64).collect::<Vec<_>>();
+                    let changed=owner.assignments.lock().unwrap().get(&role.bits())!=Some(&next_keys)
+                        || owner.sequences.lock().unwrap().get(&role.bits())!=Some(&next_sequences);
+                    if changed {document.scope_revision.fetch_add(1,Ordering::AcqRel);}
                     owner
                         .assignments
                         .lock()

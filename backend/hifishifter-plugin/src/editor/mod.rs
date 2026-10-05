@@ -3,6 +3,7 @@ mod view;
 pub(crate) mod routing;
 pub(crate) mod connection;
 pub(crate) mod session;
+pub(crate) mod workspace;
 mod commands;
 mod events;
 pub(crate) mod resources;

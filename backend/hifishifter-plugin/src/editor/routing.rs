@@ -38,7 +38,7 @@ impl EditorLink {
     /// 每次请求重新验证租约，杜绝组件已销毁但editor旧weak仍可升级的情况。
     pub fn owner(&self)->Result<Arc<ExtensionOwner>,String> {
         let token=self.token.lock().unwrap_or_else(|e|e.into_inner()).clone().ok_or("FX editor not connected to its processor yet")?;
-        routes().lock().unwrap_or_else(|e|e.into_inner()).get(&token).and_then(Weak::upgrade)
+        routes().lock().unwrap_or_else(|e|e.into_inner()).get(&token).and_then(Weak::upgrade).filter(|owner|!owner.is_closed())
             .ok_or_else(||"FX processor closed".into())
     }
 }

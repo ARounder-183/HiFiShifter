@@ -884,4 +884,8 @@ Task 36: Ruling: 用户物理Esc停止Computer Use，随后续目标并非明确
 
 Task 36: Ruling: host-stretch-01前端/Rust/native构建exit0，最后plugin lib80/0失败/exit0 — 归档源批并转工程工作区开发，保留真实新模块/拉伸/时钟验收open；之后只在最终review，不重跑旧前端全量 — 若仅以库测试/构建结束替代原GUI宿主验收，会过早关闭新四项目标。
 
+Task 32: Ruling: 文档workspace仅取活组件真实assignment并集，同名/同源轨道保留，空scope零轨；本批2个定向回归exit0 — 提交范围基础并推进共享actor，GUI尚未接入不宣称多轨已完成 — 若把只读投影当交付，会遗漏跨轨历史/组件保存与独立音频隔离。
+
+Task 33: Ruling: 用户坚持时间拉伸必须、倒放暂缓且最终一次review — 按完整集成spec继续，单implementer处理共享actor并在批末测试，不恢复此前Esc停止的Computer Use — 若用旧unsupported或本地绿测缩小门，会虚报完整拉伸/宿主GUI行为。
+
 
