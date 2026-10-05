@@ -13,6 +13,7 @@ pub(crate) struct RenderInput {
     pub timeline:Option<TimelineState>,
     pub regions:Vec<AraPlaybackRegion>,
     pub sources:HashMap<String,Arc<SourcePcm>>,
+    /// 有atlas时为region局部零点参数，不是GUI绝对项目帧。
     pub clip_parameters:BTreeMap<String,hifishifter_kernel::state::TrackParamsState>,
 }
 impl RenderInput {
@@ -62,8 +63,8 @@ impl RenderInput {
                 snapshots.push(PlaybackSnapshot {sample_rate,origin_sample:(start*sample_rate as f64).round() as i64,left,right,_reservation:Some(reservation)});
                 continue;
             }
-            let run=|view:&TimelineState| {
-                let options=MixdownOptions {sample_rate,start_sec:start,end_sec:Some(end),
+            let run=|view:&TimelineState,lo:f64,hi:f64| {
+                let options=MixdownOptions {sample_rate,start_sec:lo,end_sec:Some(hi),
                     stretch:hifishifter_kernel::time_stretch::StretchAlgorithm::SoundTouchDll,apply_pitch_edit:true,
                     output:hifishifter_kernel::encode::OutputSpec::wav_32f(),quality_preset:QualityPreset::Export,
                     cancel_flag:Some(cancel.clone()),progress:None,cache_stats:None};
@@ -73,20 +74,24 @@ impl RenderInput {
             // 所有track仍保留原全局solo/父链，不能因为拆region丢掉另一轨solo。
             let _working=super::budget::global_budget().reserve(frames*8).ok_or("parameter render working budget exceeded")?;
             let (channels,samples)=if self.clip_parameters.is_empty() {
-                let (_,channels,_,samples)=run(timeline)?;(channels,samples)
+                let (_,channels,_,samples)=run(timeline,start,end)?;(channels,samples)
             } else {
                 let mut mixed=vec![0_f32;frames*2];
                 for clip in &timeline.clips {
                     if cancel.load(Ordering::Acquire) {return Err("host preparation cancelled".into());}
-                    let _part_budget=super::budget::global_budget().reserve(frames*8).ok_or("parameter render working budget exceeded")?;
                     let mut view=timeline.clone();view.clips=vec![clip.clone()];
-                    if let Some(params)=self.clip_parameters.get(&clip.id) {
+                    let local=self.clip_parameters.get(&clip.id);
+                    let (lo,hi)=if let Some(params)=local {
                         let root=view.resolve_root_track_id(&clip.track_id).ok_or("unknown source parameter root")?;
                         view.params_by_root_track.insert(root,params.clone());
-                    }
-                    let (_,channels,_,part)=run(&view)?;
-                    if channels!=2||part.len()!=mixed.len() {return Err("invalid region parameter output".into());}
-                    for (sum,value) in mixed.iter_mut().zip(part) {*sum+=value;}
+                        view.clips[0].start_sec=0.;view.project_sec=clip.length_sec;(0.,clip.length_sec)
+                    } else {(start,end)};
+                    let part_frames=((hi-lo)*sample_rate as f64).round() as usize;
+                    let _part_budget=super::budget::global_budget().reserve(part_frames*8).ok_or("parameter render working budget exceeded")?;
+                    let (_,channels,_,part)=run(&view,lo,hi)?;
+                    if channels!=2||part.len()!=part_frames*2 {return Err("invalid region parameter output".into());}
+                    let offset=if local.is_some() {((clip.start_sec-start)*sample_rate as f64).round() as usize*2} else {0};
+                    for (sum,value) in mixed.iter_mut().skip(offset).zip(part) {*sum+=value;}
                 }(2,mixed)
             };
             if channels!=2 || samples.len()!=frames*2 || samples.iter().any(|v|!v.is_finite()) {return Err("invalid kernel output".into());}
@@ -118,16 +123,37 @@ mod tests {
         let pcm=(0..22050).map(|i| {let phase=2.*std::f64::consts::PI*220.*i as f64/44100.;
             (1..=12).map(|k|0.15/k as f64*(phase*k as f64).sin()).sum::<f64>() as f32}).collect();
         let region=AraPlaybackRegion {audio_source_persistent_id:"source".into(),duration_in_modification_time:seconds,duration_in_playback_time:seconds,..Default::default()};
-        let input=RenderInput {timeline:Some(timeline),regions:vec![region],sources:HashMap::from([("source".into(),
-            Arc::new(SourcePcm {sample_rate:44100,planes:vec![pcm],version:0,_reservation:None}))]),clip_parameters:BTreeMap::new()};
+        let parameters=timeline.params_by_root_track["track"].clone();
+        hifishifter_kernel::renderer::hifigan::clear_chunk_cache();
+        hifishifter_kernel::synth_clip_cache::global_synth_clip_cache().lock().unwrap().clear();
+        let mut input=RenderInput {timeline:Some(timeline),regions:vec![region],sources:HashMap::from([("source".into(),
+            Arc::new(SourcePcm {sample_rate:44100,planes:vec![pcm],version:0,_reservation:None}))]),clip_parameters:BTreeMap::from([("clip".into(),parameters)])};
         let before=hifishifter_kernel::hnsep_onnx::separation_cache_stats();let began=std::time::Instant::now();
+        let neural_before=hifishifter_kernel::nsf_hifigan_onnx::inference_runs();
         let output=input.render(Arc::new(AtomicBool::new(false))).unwrap();
         assert_eq!(output[0].left.len(),22050);assert_eq!(output[1].left.len(),24000);
         assert_eq!(output[1].left,hifishifter_kernel::mel_utils::linear_resample_mono(&output[0].left,44100,48000));
         assert_eq!(output[1].right,hifishifter_kernel::mel_utils::linear_resample_mono(&output[0].right,44100,48000));
         assert_eq!(hifishifter_kernel::hnsep_onnx::separation_cache_stats().1-before.1,1);
         assert!(output[0].left.iter().any(|v|v.abs()>0.01));
-        println!("PLUGIN_HIFIGAN_DUAL_RATE elapsed_ms={} HNSEP_runs=1 derived_48000_exact=true",began.elapsed().as_millis());
+        let cold_neural=hifishifter_kernel::nsf_hifigan_onnx::inference_runs();assert!(cold_neural>neural_before);
+        let cold_ms=began.elapsed().as_millis();
+        // 不同owner/region名和非网格项目摆放不得改变源曲线或重推理。
+        let moved_start=512.013;
+        {let timeline=input.timeline.as_mut().unwrap();timeline.clips[0].id="other-owner-clip".into();timeline.clips[0].start_sec=moved_start;
+            timeline.project_sec=moved_start+seconds;}
+        let params=input.clip_parameters.remove("clip").unwrap();input.clip_parameters.insert("other-owner-clip".into(),params);
+        input.regions[0].start_in_playback_time=moved_start;
+        let moved=input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        assert_eq!(moved[0].origin_sample,(moved_start*44100.).round() as i64);
+        assert_eq!(moved[0].left,output[0].left);assert_eq!(moved[1].left,output[1].left);
+        assert_eq!(hifishifter_kernel::nsf_hifigan_onnx::inference_runs(),cold_neural);
+        input.clip_parameters.get_mut("other-owner-clip").unwrap().pitch_edit.fill(64.);
+        let changed=input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        assert!(hifishifter_kernel::nsf_hifigan_onnx::inference_runs()>cold_neural,"真正目标F0改变必须使HiFiGAN失效");
+        assert_ne!(changed[0].left,moved[0].left);assert_eq!(hifishifter_kernel::hnsep_onnx::separation_cache_stats().1-before.1,1);
+        println!("PLUGIN_HIFIGAN_CONTENT cold_ms={cold_ms} neural_runs={} moved_extra_runs=0 moved_pcm_exact=true derived_48000_exact=true pitch_change_runs={} HNSEP_runs=1",
+            cold_neural-neural_before,hifishifter_kernel::nsf_hifigan_onnx::inference_runs()-cold_neural);
     }
     /// 相同root的两个重叠区域保留独立源参数，不能用GUI单一数组覆盖两者。
     #[test]

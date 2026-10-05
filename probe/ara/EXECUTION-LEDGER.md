@@ -926,4 +926,6 @@ Task 40: Ruling: HiFiGAN虽512帧分块，却整段收集未命中输入/输出�
 
 Task 39: Ruling: 插件先后44.1k/48k独立运行kernel会重复重推理 — 含HiFiGAN工作区仅合成44.1k，48k从就绪PCM派生并为交错源副本收费；真实RenderInput双输出798ms/HNSEP1次/派生逐样本一致，相关3回归exit0 — 若外推独立App所有采样率/跨owner缓存，会夸大局部改动；App完整回归、内容层和冷恢复仍待最终批。
 
+Task 39: Ruling: 项目网格参数与clip名字会让纯摆放改变音频/缓存，模型/config版本也未进入HiFiGAN内存键 — atlas直接投影region局部零点、逐region局部kernel合成后摆放；宿主DSP完整内容不带clip名，共享内容worker单飞可取消，HiFiGAN键接实际已加载模型/config完整摘要/EP/块大小；2新kernel合同、12插件回归和1真实模型诊断均exit0 — 实测移动到512.013秒/换region名PCM逐样本一致且新增HiFiGAN推理0，修改目标音高新增1/HNSEP仍1；若外推旧v2移动或磁盘冷复用仍会误报，后者尚未接入。
+
 

@@ -81,3 +81,19 @@ plugin `--lib -- real_model_hifigan_snapshots --ignored --test-threads=1 --nocap
 
 下一批：完成HiFiGAN内容/模型权威和移动复用，再落实长源宿主资源策略；不要重复本批
 已完成矩阵或重新研究HNSEP分块。最后才集中构建和用户恢复Computer Use后的native验收。
+
+## 后续内容/局部时间批（覆盖上述对应残余，不覆盖其它门）
+
+- atlas音频直接投影region局部零点，不再经GUI绝对项目网格再次插值；每region只渲染
+  自身时长后按宿主位置混入，完整全局solo/父链仍保留。非网格移动和线性倍长的
+  局部曲线字面oracle通过。
+- 宿主processor ID以完整源/DSP PCM为权威，不带clip名；相同内容并发worker单飞，
+  等待者可取消，Weak索引不永久保活任务。
+- HiFiGAN内存cache键加入已加载模型/config完整摘要、实际EP、pipeline版本和块大小；
+  TLS分析配置也与同一个已加载session绑定，不重新从可能已变的文件单独读配置。
+- 实际CPU插件输入诊断：冷784ms/HiFiGAN1次；换region名并移到512.013秒后44.1k/48k
+  PCM均逐样本一致，新增神经推理0；pitch60→64新增HiFiGAN1次，HNSEP总计仍1次。
+- model等长中间换内容/config变化、内容单飞/取消2项合同通过；插件12相关回归
+  （包含原WORLD双轨历史/无GUI恢复）、1 ignored和显式真实诊断1项均正常exit0。
+
+磁盘冷复用、完整宿主长源、旧v2首载后移动、资源峰值与最终native门仍open。

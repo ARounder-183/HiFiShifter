@@ -212,6 +212,7 @@ impl HiFiGanRenderer {
         // 用 clip_id + seg 范围 + pitch_edit 片段 计算 param_hash，
         // 实现离线渲染路径的推理结果复用。
         let sr = ctx.sample_rate;
+        let renderer_identity=format!("{}:{}",self.id(),crate::nsf_hifigan_onnx::cache_identity()?);
         let seg_start_frame = (ctx.seg_start_sec * sr as f64).round().max(0.0) as u64;
         let seg_end_frame = (ctx.seg_end_sec * sr as f64).round().max(0.0) as u64;
         // 直接引用上下文里的 pitch_edit，不再 to_vec()
@@ -245,7 +246,7 @@ impl HiFiGanRenderer {
             seg_end_frame,
             sr,
             ctx.channel_index,
-            self.id(),
+            &renderer_identity,
             &curves_snapshot,
             extra_curves.clone(),
             ctx.extra_params,
@@ -346,7 +347,7 @@ impl HiFiGanRenderer {
                 end_frame,
                 sr,
                 ctx.channel_index,
-                self.id(),
+                &renderer_identity,
                 &curves_snapshot,
                 extra_curves.iter().map(|(k, v)| (*k, *v)),
                 ctx.extra_params,

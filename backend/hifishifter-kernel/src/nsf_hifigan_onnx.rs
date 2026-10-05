@@ -10,10 +10,11 @@ use serde::Deserialize;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();
+static NEURAL_RUNS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 enum ModelRunError {
@@ -40,6 +41,7 @@ fn run_session_once(
             let mut session_guard = sess
                 .lock()
                 .map_err(|e| format!("ort session lock poisoned: {e}"))?;
+            NEURAL_RUNS.fetch_add(1,Ordering::Relaxed);
             let outputs = session_guard
                 .run(ort::inputs![mel_tensor, f0_tensor])
                 .map_err(|e| format!("ort run failed: {e}"))?;
@@ -654,7 +656,30 @@ fn linear_resample_mono_into(input: &[f32], in_rate: u32, out_rate: u32, out: &m
 
 /// 进程级全局共享的 ORT Session 容器。
 /// 使用 Mutex 允许我们在运行时修改 Session 以切换 EPs。
-static SHARED_SESSION: OnceLock<Mutex<Option<Arc<Mutex<Session>>>>> = OnceLock::new();
+struct SharedVocoder {
+    runtime:Arc<Mutex<Session>>,
+    cfg:NsfHifiganConfig,
+    identity:blake3::Hash,
+}
+static SHARED_SESSION: OnceLock<Mutex<Option<Arc<SharedVocoder>>>> = OnceLock::new();
+
+/// 流式哈希模型/config完整内容；只在worker建会话时运行，不靠路径/大小/首尾猜版本。
+fn digest_model_files(onnx:&Path,config:&Path)->Result<blake3::Hash,String> {
+    use std::io::Read;
+    let mut hash=blake3::Hasher::new();hash.update(b"hifigan-model-and-config-v1");
+    for path in [onnx,config] {
+        let mut file=std::fs::File::open(path).map_err(|e|format!("vocoder identity open failed: {e}"))?;
+        let length=file.metadata().map_err(|e|format!("vocoder identity metadata failed: {e}"))?.len();
+        hash.update(&length.to_le_bytes());let mut buffer=[0_u8;64*1024];
+        loop {let count=file.read(&mut buffer).map_err(|e|format!("vocoder identity read failed: {e}"))?;
+            if count==0 {break;}hash.update(&buffer[..count]);}
+    }Ok(hash.finalize())
+}
+
+/// 真实已加载model/config/EP的内容命名空间；调用方仅在离线worker进入处理器时读取。
+pub fn cache_identity()->Result<String,String> {Ok(get_or_init_shared_session()?.identity.to_hex().to_string())}
+/// 实际模型run次数（包含失败尝试，不含建会话烟测），用于非实时性能验收。
+pub fn inference_runs()->u64 {NEURAL_RUNS.load(Ordering::Relaxed)}
 
 /// 递增此 Epoch 可以促使所有 Thread Local 重新加载 ONNX 实例以同步 EP 切换。
 static SESSION_EPOCH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -695,7 +720,7 @@ pub fn drop_shared_session() {
 /// → 容器锁写回。构建前后比对 EP 设置代数：构建期间用户再次切换设备时
 /// 丢弃陈旧结果并按当前设置重建（最多重试 3 次）。D3D12/DML 的**创建**由
 /// `session_build_lock` 在构建器内部串行化，**烟测在创建锁之外**执行。
-fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
+fn get_or_init_shared_session() -> Result<Arc<SharedVocoder>, String> {
     let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
     // 快路径：已有会话直接克隆返回。
     if let Some(session) = mutex
@@ -732,8 +757,14 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     for _ in 0..3 {
         let generation_before = crate::vocoder_ort_session::ep_settings_generation();
         ensure_ort_init()?;
-        let (onnx_path, _cfg_path) = resolve_model_paths()?;
-        let session = build_session_with_ep(&onnx_path)?;
+        let (onnx_path,cfg_path) = resolve_model_paths()?;
+        let digest=digest_model_files(&onnx_path,&cfg_path)?;let cfg=read_config(&cfg_path)?;
+        let (session,ep)=crate::vocoder_ort_session::build_ort_session(&onnx_path,crate::vocoder_ort_session::OrtSessionRole::Vocoder)?;
+        if digest_model_files(&onnx_path,&cfg_path)?!=digest {return Err("vocoder model/config changed during session build".into());}
+        let mut identity=blake3::Hasher::new();identity.update(digest.as_bytes());identity.update(ep.as_bytes());
+        identity.update(&crate::synth_clip_cache::RENDER_PIPELINE_VERSION.to_le_bytes());
+        identity.update(&chunk_max_frames().to_le_bytes());
+        set_active_ep(&ep);
         if crate::vocoder_ort_session::ep_settings_generation() != generation_before {
             log::warn!("[nsf_hifigan] inference device changed during session build — rebuilding with the new EP");
             continue;
@@ -746,7 +777,7 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
         if let Some(existing) = guard.as_ref() {
             return Ok(existing.clone());
         }
-        let arc = Arc::new(Mutex::new(session));
+        let arc = Arc::new(SharedVocoder {runtime:Arc::new(Mutex::new(session)),cfg,identity:identity.finalize()});
         *guard = Some(arc.clone());
         return Ok(arc);
     }
@@ -840,15 +871,15 @@ fn session_batch_pinned_to_one(session: &Arc<Mutex<Session>>) -> bool {
 impl NsfHifiganOnnx {
     fn load() -> Result<Self, String> {
         let current_epoch = SESSION_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
-        let (_onnx_path, cfg_path) = resolve_model_paths()?;
-        let cfg = read_config(&cfg_path)?;
+        let shared=get_or_init_shared_session()?;
+        let cfg=shared.cfg.clone();
 
         if cfg.sampling_rate == 0 || cfg.num_mels == 0 || cfg.hop_size == 0 || cfg.n_fft == 0 {
             return Err("invalid NSF-HiFiGAN config.json".to_string());
         }
 
         // 获取（或初始化）全局共享 Session，消除每线程冷启动。
-        let session = get_or_init_shared_session()?;
+        let session = shared.runtime.clone();
 
         let mel_fb_matrix = mel_filterbank_slaney(
             cfg.sampling_rate,
@@ -1009,7 +1040,7 @@ impl NsfHifiganOnnx {
                 );
                 crate::vocoder_ort_session::disable_coreml("vocoder inference timed out");
                 reset_shared_session();
-                self.session = get_or_init_shared_session()?;
+                self.session = get_or_init_shared_session()?.runtime.clone();
 
                 match run_session_once(
                     &self.session,
@@ -1094,6 +1125,7 @@ impl NsfHifiganOnnx {
                 .session
                 .lock()
                 .map_err(|e| format!("ort session lock poisoned: {e}"))?;
+            NEURAL_RUNS.fetch_add(1,Ordering::Relaxed);
             let outputs = session_guard
                 .run(ort::inputs![mel_tensor, f0_tensor])
                 .map_err(|e| format!("ort batch run failed: {e}"))?;
@@ -2581,6 +2613,17 @@ mod tests {
         formant_shifts_for_frames, mel_frame_count, quantize_key_shift, shift_n_fft,
         KEY_SHIFT_QUANTUM_SEMITONES,
     };
+
+    #[test]
+    fn model_cache_digest_changes_for_equal_length_middle_bytes_and_configuration() {
+        let dir=std::env::temp_dir().join(format!("hfs-model-identity-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();let model=dir.join("model.onnx");let config=dir.join("config.json");
+        let mut bytes=vec![3_u8;1024];std::fs::write(&model,&bytes).unwrap();std::fs::write(&config,b"config-a").unwrap();
+        let before=super::digest_model_files(&model,&config).unwrap();bytes[512]=4;std::fs::write(&model,&bytes).unwrap();
+        let changed=super::digest_model_files(&model,&config).unwrap();assert_ne!(before,changed);
+        std::fs::write(&config,b"config-b").unwrap();assert_ne!(changed,super::digest_model_files(&model,&config).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// 字面序列验证长素材批数、混合命中、最后不足整块的样本及cache写回契约。
     #[test]

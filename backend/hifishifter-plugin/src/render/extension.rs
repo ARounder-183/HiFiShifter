@@ -1125,7 +1125,7 @@ impl ExtensionOwner {
         let stretch=regions.iter().any(|region|(region.duration_in_modification_time-region.duration_in_playback_time).abs()>1e-9);
         let kernel_render=edited||stretch;
         let clip_parameters=if resolved.atlas.is_empty() {Default::default()} else {
-            resolved.atlas.project(&timeline,&document.parameter_identities_locked(&timeline)?)?
+            resolved.atlas.project_local(&timeline,&document.parameter_identities_locked(&timeline)?)?
         };
         let available=if kernel_render {document.edit_sources.lock().unwrap()} else {document.sources.lock().unwrap()};
         let sources=regions.iter().map(|region|region.audio_source_persistent_id.clone()).collect::<BTreeSet<_>>()

@@ -6,7 +6,7 @@ use crate::time_stretch::{time_stretch_interleaved, StretchAlgorithm};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
 
 // ─── 导出格式与质量预设 ────────────────────────────────────────────────────────
@@ -759,6 +759,27 @@ fn host_pcm_hash(source: &MixdownPcm) -> blake3::Hash {
     hasher.finalize()
 }
 
+/// 同实际DSP源内容在多个ARA renderer并发到达时共用单飞；不串行整个工程或持文档锁。
+fn host_processor_flight(content:blake3::Hash)->Arc<Mutex<()>> {
+    static FLIGHTS:OnceLock<Mutex<HashMap<blake3::Hash,Weak<Mutex<()>>>>>=OnceLock::new();
+    let mut flights=FLIGHTS.get_or_init(Default::default).lock().unwrap_or_else(|e|e.into_inner());
+    flights.retain(|_,flight|flight.strong_count()>0);
+    if let Some(flight)=flights.get(&content).and_then(Weak::upgrade) {return flight;}
+    let flight=Arc::new(Mutex::new(()));flights.insert(content,Arc::downgrade(&flight));flight
+}
+/// 等待只发生在worker；取消最多等一个2ms轮次，不等另一个神经任务执行完。
+fn lock_host_processor_flight<'a>(flight:&'a Arc<Mutex<()>>,cancel:Option<&std::sync::atomic::AtomicBool>)
+    ->Result<std::sync::MutexGuard<'a,()>,String> {
+    loop {
+        if cancel.is_some_and(|cancel|cancel.load(Ordering::Acquire)) {return Err("export_cancelled".into());}
+        match flight.try_lock() {
+            Ok(guard)=>return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(_))=>return Err("host processor flight poisoned".into()),
+            Err(std::sync::TryLockError::WouldBlock)=>std::thread::sleep(std::time::Duration::from_millis(2)),
+        }
+    }
+}
+
 /// 宿主 DSP 直接消费项目绝对时间曲线，绕过依赖源路径的文件分析缓存。
 #[allow(clippy::too_many_arguments)]
 fn apply_host_pitch_edit(
@@ -769,6 +790,7 @@ fn apply_host_pitch_edit(
     channels: u16,
     source_hash: blake3::Hash,
     pcm_stereo: &mut Vec<f32>,
+    cancel:Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<bool, String> {
     let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
         return Ok(false);
@@ -866,7 +888,9 @@ fn apply_host_pitch_edit(
         hasher.update(&sample.to_bits().to_le_bytes());
     }
     let hash = hasher.finalize();
-    let processor_id = format!("host-pcm:{}:{}", clip.id, hash.to_hex());
+    let flight=host_processor_flight(hash);let _flight=lock_host_processor_flight(&flight,cancel)?;
+    // actual mono/stereo DSP内容已含裁切/源版本；不同宿主region的相同输入应共用处理器缓存。
+    let processor_id = format!("host-pcm:{}", hash.to_hex());
     let fingerprint = u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap());
     let fanout =
         crate::channel_mode::effective_channels(channels, clip.take_channel_mode()) as usize;
@@ -1377,6 +1401,7 @@ fn render_mixdown_internal(
                         in_channels,
                         host_hashes[source_path],
                         &mut seg,
+                        opts.cancel_flag.as_deref(),
                     )
                 } else {
                     crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
@@ -1784,6 +1809,17 @@ mod tests {
     /// 宿主 PCM 注入的真实音频断言。
     mod host_pcm {
         use super::*;
+
+        #[test]
+        fn host_content_flight_is_shared_only_while_live_and_waiting_is_cancelable() {
+            let hash=blake3::hash(b"host-flight-test");let a=host_processor_flight(hash);let b=host_processor_flight(hash);
+            assert!(Arc::ptr_eq(&a,&b));assert!(!Arc::ptr_eq(&a,&host_processor_flight(blake3::hash(b"other"))));
+            let held=a.lock().unwrap();let cancel=Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let waiting=cancel.clone();let job=std::thread::spawn(move ||lock_host_processor_flight(&b,Some(&waiting)).map(|_|()).unwrap_err());
+            cancel.store(true,Ordering::Release);assert_eq!(job.join().unwrap(),"export_cancelled");drop(held);
+            let weak=Arc::downgrade(&a);drop(a);assert!(weak.upgrade().is_none());
+            let current=host_processor_flight(hash);assert!(current.try_lock().is_ok());
+        }
 
         fn timeline(identity: &str) -> TimelineState {
             let mut tl = super::reuse_test_timeline(identity, "host-pcm-clip", false);

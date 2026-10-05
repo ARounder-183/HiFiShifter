@@ -165,11 +165,19 @@ impl ParameterAtlas {
     }
     /// 仅更新current几何，不把投影结果当新源数据；返回每个clip独立参数供worker冻结。
     pub fn project(&self,timeline:&TimelineState,identities:&BTreeMap<String,RegionIdentity>)->Result<BTreeMap<String,TrackParamsState>,String> {
+        self.project_in_domain(timeline,identities,false)
+    }
+    /// 音频直接投影到region局部零点，不经GUI项目网格再次插值；纯移动保持相同合成参数。
+    pub fn project_local(&self,timeline:&TimelineState,identities:&BTreeMap<String,RegionIdentity>)->Result<BTreeMap<String,TrackParamsState>,String> {
+        self.project_in_domain(timeline,identities,true)
+    }
+    fn project_in_domain(&self,timeline:&TimelineState,identities:&BTreeMap<String,RegionIdentity>,local:bool)->Result<BTreeMap<String,TrackParamsState>,String> {
         self.validate()?;let mut projected=BTreeMap::new();
         for clip in &timeline.clips {
             let identity=identities.get(&clip.id).ok_or("missing actual ARA parameter identity")?;
-            let root=timeline.resolve_root_track_id(&clip.track_id).ok_or("unknown parameter root")?;let geometry=geometry(clip)?;
+            let root=timeline.resolve_root_track_id(&clip.track_id).ok_or("unknown parameter root")?;let mut geometry=geometry(clip)?;
             let Some(record)=self.find(identity,&root,&geometry)? else {continue;};
+            if local {geometry.project_start=0.;}
             let mut params=record.template.clone();let frame_ms=params.frame_period_ms;
             for (key,curve) in &record.curves {set_curve(&mut params,key,curve.project(&geometry,key,frame_ms)?);}
             params.pitch_orig_key=None;params.dyn_orig_key=None;projected.insert(clip.id.clone(),params);
@@ -262,6 +270,16 @@ mod tests {
             pitch_orig:vec![0.,0.,0.,0.,57.,57.,57.,57.,57.],pitch_edit:vec![0.,0.,0.,0.,60.,61.,62.,63.,64.],
             extra_curves:std::collections::HashMap::from([("volume".into(),vec![1.,1.,1.,1.,0.5,0.6,0.7,0.8,0.9])]),..Default::default()});
         timeline
+    }
+    #[test]
+    fn audio_local_projection_is_identical_after_non_grid_movement_and_maps_stretch_once() {
+        let ids=identities();let atlas=ParameterAtlas::default().capture(&edited(),&ids).unwrap();
+        let original=atlas.project_local(&edited(),&ids).unwrap();
+        let moved=atlas.project_local(&host(512.013,1.,0.,1.),&ids).unwrap();
+        assert_eq!(original["clip"].pitch_edit,moved["clip"].pitch_edit);
+        assert_eq!(&moved["clip"].pitch_edit,&[60.,61.,62.,63.,64.]);
+        let stretched=atlas.project_local(&host(512.013,2.,0.,1.),&ids).unwrap();
+        assert_eq!(&stretched["clip"].pitch_edit,&[60.,60.5,61.,61.5,62.,62.5,63.,63.5,64.]);
     }
     /// 一个可见root数组不能把重叠的另一region当同一编辑；只修改可见delta对应的选区。
     #[test]
