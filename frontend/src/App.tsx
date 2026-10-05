@@ -49,7 +49,7 @@ import {
     saveProjectAsRemote,
     saveProjectToPathRemote,
     setTrackMeters,
-    setToolMode,
+    setToolModePersistent,
     setVslibAvailable,
     setPlaybackRenderingState,
     checkpointHistory,
@@ -2917,20 +2917,23 @@ function AppInner() {
                 case "mode.toggle": {
                     const cur = runtimeRef.current.toolMode;
                     if (cur === "select") {
-                        dispatch(setToolMode(runtimeRef.current.drawToolMode));
+                        void dispatch(setToolModePersistent(runtimeRef.current.drawToolMode));
                     } else {
-                        dispatch(setToolMode("select"));
+                        void dispatch(setToolModePersistent("select"));
                     }
                     break;
                 }
                 case "mode.selectTool":
-                    dispatch(setToolMode("select"));
+                    void dispatch(setToolModePersistent("select"));
                     break;
                 case "mode.drawTool":
-                    dispatch(setToolMode("draw"));
+                    void dispatch(setToolModePersistent("draw"));
                     break;
                 case "mode.lineTool":
-                    dispatch(setToolMode("vibrato"));
+                    void dispatch(setToolModePersistent("line"));
+                    break;
+                case "mode.vibratoTool":
+                    void dispatch(setToolModePersistent("vibrato"));
                     break;
                 case "quickSearch.open":
                     setQuickSearchOpen(true);
@@ -3025,12 +3028,12 @@ function AppInner() {
                     // 左键拖拽参数线期间按下同一键时，参数编辑器内的本地监听会
                     // 同步切换本次拖拽的方向 —— 触控板用户的「右键切换」替代。
                     const ss = store.getState().session;
-                    const currentDrawTool =
-                        ss.drawToolMode === "line" ? "vibrato" : ss.drawToolMode;
+                    // 直线与颤音共用同一份拖动方向（同一个"起点 → 终点"手势），
+                    // 因此两者都归到 `"vibrato"` 这一路。
                     const tool =
                         ss.toolMode === "select"
                             ? ("select" as const)
-                            : currentDrawTool === "draw"
+                            : ss.drawToolMode === "draw"
                               ? ("draw" as const)
                               : ("vibrato" as const);
                     dispatch(cycleDragDirection(tool));

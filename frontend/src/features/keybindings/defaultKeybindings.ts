@@ -10,7 +10,10 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "mode.toggle": [{ key: "tab" }],
     "mode.selectTool": [{ key: "f7" }],
     "mode.drawTool": [{ key: "f8" }],
+    // 直线与颤音是两种工具（直线 ≡ 颤音 + 直线预设），因此各占一个键；
+    // F7→F10 与工具栏右键菜单里的排列顺序一致。
     "mode.lineTool": [{ key: "f9" }],
+    "mode.vibratoTool": [{ key: "f10" }],
 
     // 播放 / 暂停：播放中暂停（光标留在当前位置），空闲时起播。
     "playback.toggle": [{ key: "space" }],
@@ -242,7 +245,8 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     "mode.toggle": { labelKey: "kb_mode_toggle", group: "mode" },
     "mode.selectTool": { labelKey: "kb_mode_select_tool", group: "mode" },
     "mode.drawTool": { labelKey: "kb_mode_draw_tool", group: "mode" },
-    "mode.lineTool": { labelKey: "kb_mode_vibrato_tool", group: "mode" },
+    "mode.lineTool": { labelKey: "kb_mode_line_tool", group: "mode" },
+    "mode.vibratoTool": { labelKey: "kb_mode_vibrato_tool", group: "mode" },
 
     "playback.toggle": { labelKey: "kb_playback_toggle", group: "playback" },
     "playback.stop": { labelKey: "kb_playback_stop", group: "playback" },
