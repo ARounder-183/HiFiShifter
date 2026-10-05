@@ -1923,6 +1923,7 @@ export const zhTW = {
     vibrato_manager_enable: "啟用",
     vibrato_manager_disable: "停用",
     vibrato_manager_disabled: "已停用",
+    vibrato_manager_in_use: "目前使用中",
     vibrato_manager_set_active: "設為目前使用",
     vibrato_manager_rename: "重新命名",
     vibrato_manager_row_menu: "預設操作",

@@ -1963,6 +1963,7 @@ export const koKR = {
     vibrato_manager_enable: "사용",
     vibrato_manager_disable: "사용 안 함",
     vibrato_manager_disabled: "사용 안 함",
+    vibrato_manager_in_use: "현재 사용 중",
     vibrato_manager_set_active: "현재 사용으로 설정",
     vibrato_manager_rename: "이름 바꾸기",
     vibrato_manager_row_menu: "프리셋 작업",

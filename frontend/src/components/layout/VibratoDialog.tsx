@@ -37,7 +37,13 @@
  */
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ShuffleIcon, EyeNoneIcon, EyeOpenIcon } from "@radix-ui/react-icons";
+import {
+    ShuffleIcon,
+    EyeNoneIcon,
+    EyeOpenIcon,
+    CheckCircledIcon,
+    CircleIcon,
+} from "@radix-ui/react-icons";
 import { Box, Flex, ScrollArea, TextField } from "@radix-ui/themes";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -458,6 +464,8 @@ export function VibratoDialog({
     }, []);
 
     const isBuiltin = Boolean(draft?.builtin);
+    /** 正在编辑的这条是否就是当前使用的（编辑器顶部的按钮据此显示状态）。 */
+    const draftIsActive = Boolean(draft) && session.activeVibratoPresetId === draft?.id;
     const previewSamples = useMemo(() => (draft ? buildVibratoPreview(draft) : null), [draft]);
 
     /**
@@ -915,8 +923,14 @@ export function VibratoDialog({
         patch({ cycle: { kind: "table", table } });
     }
 
-    /** 设为当前使用（拖拽 / 菜单都用它）。 */
+    /**
+     * 设为当前使用（列表行上的圆点、右键菜单、编辑器顶部按钮都用它）。
+     *
+     * 【已经是它就直接返回】列表行上的圆点是个可反复点的控件，重复点击不该产生
+     * 一次无谓的设置写入；同时这也让"当前使用中"那个按钮的禁用态与行为一致。
+     */
     function activatePreset(preset: VibratoPreset) {
+        if (session.activeVibratoPresetId === preset.id) return;
         dispatch(setActiveVibratoPreset(preset.id));
         void dispatch(persistUiSettings());
     }
@@ -1906,6 +1920,34 @@ export function VibratoDialog({
                         <Box className="min-h-0 flex flex-col" style={{ minWidth: 0, flex: 1 }}>
                             {draft && previewSamples ? (
                                 <Flex direction="column" gap="3" className="min-h-0 flex-1">
+                                    {/*
+                                     * 正在编辑哪一条 + 一键设为当前使用。
+                                     *
+                                     * 【为什么钉在滚动区之上】它要回答的正是"我现在
+                                     * 这条是不是当前用的"，调参数时滚下去就找不到答案了。
+                                     * 系统预设没有名字输入框，这一行也是它唯一的署名。
+                                     */}
+                                    <Flex align="center" gap="2" className="shrink-0">
+                                        <span
+                                            className="hs-type-label min-w-0 flex-1"
+                                            style={{
+                                                overflow: "hidden",
+                                                textOverflow: "ellipsis",
+                                                whiteSpace: "nowrap",
+                                            }}
+                                        >
+                                            {vibratoPresetLabel(draft, t)}
+                                        </span>
+                                        <AppButton
+                                            size="sm"
+                                            disabled={draftIsActive}
+                                            onClick={() => activatePreset(draft)}
+                                        >
+                                            {draftIsActive
+                                                ? t("vibrato_manager_in_use")
+                                                : t("vibrato_manager_set_active")}
+                                        </AppButton>
+                                    </Flex>
                                     <ScrollArea
                                         className="hs-scroll-area min-h-0 flex-1"
                                         scrollbars="vertical"
@@ -2493,6 +2535,25 @@ function PresetRow({
 
     return (
         <Flex align="center" gap="1" style={{ minWidth: 0, flex: 1 }}>
+            {/*
+             * 「设为当前使用」——每行一个单选圆点，兼作状态显示：实心即当前使用中。
+             *
+             * 【为什么必须是一个**看得见的控件**】这一行原来只有一个 `●`：它既不像
+             * 按钮，也没说明是什么状态，于是"怎么把某条设成当前使用的"只剩双击与右键
+             * 菜单两个藏起来的入口。圆点把状态与操作合成一处 —— 扫一眼知道用的是哪条，
+             * 点一下换过去。
+             *
+             * 【为什么放在行外】与右侧的眼睛按钮同一处理：`AppListRow` 是列表项，
+             * 里面再嵌按钮会让"点行 = 选中编辑"与"点按钮 = 设为使用"互相打架。
+             */}
+            <AppIconButton
+                size="sm"
+                active={active}
+                emphasis="accent"
+                icon={active ? <CheckCircledIcon /> : <CircleIcon />}
+                tooltip={active ? t("vibrato_manager_in_use") : t("vibrato_manager_set_active")}
+                onClick={onActivate}
+            />
             <Box style={{ minWidth: 0, flex: 1 }}>
                 <AppListRow
                     selected={selected}
@@ -2513,7 +2574,6 @@ function PresetRow({
                     {/* `flex: 1` 让这一行铺满列表行：重命名时输入框才有可用的宽度去
                         撑开，而不是反过来把行撑宽（见输入框上的 `size` 说明）。 */}
                     <Flex align="center" gap="2" style={{ minWidth: 0, flex: 1 }}>
-                        {active ? <span aria-hidden="true">●</span> : null}
                         <VibratoPresetGlyph preset={preset} width={40} height={14} />
                         {renaming ? (
                             <input

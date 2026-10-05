@@ -1993,6 +1993,7 @@ export const jaJP = {
     vibrato_manager_enable: "有効にする",
     vibrato_manager_disable: "無効にする",
     vibrato_manager_disabled: "無効",
+    vibrato_manager_in_use: "現在使用中",
     vibrato_manager_set_active: "現在使用する",
     vibrato_manager_rename: "名前を変更",
     vibrato_manager_row_menu: "プリセットの操作",

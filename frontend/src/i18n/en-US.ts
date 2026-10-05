@@ -1979,6 +1979,7 @@ export const enUS = {
     vibrato_manager_enable: "Enable",
     vibrato_manager_disable: "Disable",
     vibrato_manager_disabled: "disabled",
+    vibrato_manager_in_use: "Currently in use",
     vibrato_manager_set_active: "Use as current",
     vibrato_manager_rename: "Rename",
     vibrato_manager_row_menu: "Preset actions",

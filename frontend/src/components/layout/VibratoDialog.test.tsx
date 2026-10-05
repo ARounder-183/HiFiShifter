@@ -2079,3 +2079,57 @@ test("编辑系统预设后再切换预设：不会再多出一份副本", async
 
     expect(userPresets(store), "离开时不该再凭空多出一条").toHaveLength(1);
 });
+
+/*
+ * 「设为当前使用」必须是一个**看得见的控件**。
+ *
+ * 【为什么单独一条】这一行的入口原本只有双击与右键菜单 —— 两个都藏起来，用户得先
+ * 知道有这回事才找得到。现在每行有一个单选圆点（实心 = 当前使用中），编辑器顶部还有
+ * 一个写着字的按钮，两者都要能一键切换。
+ */
+test("设为当前使用：列表行的圆点与编辑器顶部的按钮都能一键切换", async () => {
+    const store = await mountDialog();
+    const activeId = () => store.getState().session.activeVibratoPresetId;
+    // 出厂默认的活动预设是「自然」。
+    expect(activeId()).toBe("builtin.natural");
+
+    // 圆点的 aria-label 随状态变（"使用中" / "可切换"），两种都要认。
+    const rowDot = (id: string) =>
+        document
+            .querySelector<HTMLElement>(`[data-preset-row="${id}"]`)
+            ?.querySelector<HTMLButtonElement>(
+                'button[aria-label="Use as current"], button[aria-label="Currently in use"]',
+            );
+    /** 编辑器顶部的那个按钮：它是编辑器列里唯一带这两个文案之一的按钮。 */
+    const editorButton = () =>
+        [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+            ["Use as current", "Currently in use"].includes(button.textContent?.trim() ?? ""),
+        );
+
+    // 当前那条的圆点是"使用中"（按下态），其余是"可切换"。
+    expect(rowDot("builtin.natural")?.getAttribute("aria-pressed")).toBe("true");
+    expect(rowDot("builtin.enka")?.getAttribute("aria-pressed")).toBeNull();
+    expect(rowDot("builtin.enka")?.getAttribute("aria-label")).toBe("Use as current");
+    expect(editorButton()?.textContent?.trim()).toBe("Currently in use");
+    expect(editorButton()?.disabled, "已经是当前使用，按钮应停用").toBe(true);
+
+    // 点另一行的圆点：不必先选中那一行，直接换过去。
+    await act(async () => {
+        rowDot("builtin.enka")!.click();
+    });
+    expect(activeId()).toBe("builtin.enka");
+    expect(rowDot("builtin.enka")?.getAttribute("aria-pressed")).toBe("true");
+    // 编辑器里编辑的仍是「自然」，它现在不再是当前使用的 —— 按钮回到可点状态。
+    expect(
+        document.querySelector<HTMLInputElement>('input[aria-label="Depth"]'),
+        "圆点只改当前使用，不该顺手换掉正在编辑的那条",
+    ).toBeTruthy();
+    expect(editorButton()?.textContent?.trim()).toBe("Use as current");
+
+    // 编辑器顶部的按钮：把正在编辑的这条设为当前使用。
+    await act(async () => {
+        editorButton()!.click();
+    });
+    expect(activeId()).toBe("builtin.natural");
+    expect(editorButton()?.textContent?.trim()).toBe("Currently in use");
+});

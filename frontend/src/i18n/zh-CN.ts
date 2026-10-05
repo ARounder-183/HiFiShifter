@@ -1920,6 +1920,7 @@ export const zhCN = {
     vibrato_manager_enable: "启用",
     vibrato_manager_disable: "停用",
     vibrato_manager_disabled: "已停用",
+    vibrato_manager_in_use: "当前使用中",
     vibrato_manager_set_active: "设为当前使用",
     vibrato_manager_rename: "重命名",
     vibrato_manager_row_menu: "预设操作",
