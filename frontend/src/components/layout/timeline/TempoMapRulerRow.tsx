@@ -1,6 +1,6 @@
 // hs-interaction-exempt: 标尺行内的内联控件（尺寸与行高耦合、随标尺滚动重建），已有正确的原生非被动滚轮接线；表单尺寸的原语不适用。
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { registerDragAbort } from "./gestureFocusGuard";
+import { registerDragAbort } from "../../../utils/gestureFocusGuard";
 import { Checkbox, Flex, Select, TextField } from "@radix-ui/themes";
 import { shallowEqual } from "react-redux";
 import type { GridSize, TimelineSnapSettings } from "../../../features/session/sessionTypes";

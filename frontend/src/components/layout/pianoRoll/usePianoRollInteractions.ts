@@ -5466,6 +5466,11 @@ export function usePianoRollInteractions(args: {
                     window.removeEventListener("contextmenu", onContextMenuDuringDraw, true);
                     window.removeEventListener("mousedown", onMouseDownDuringDraw, true);
                     clearActivePointerGestureEnd(onUp);
+                    // 与 `onUp` 同款收尾：HUD 气泡（深度 / 速率 / 预设）挂在面板状态上，
+                    // 只有 `onVibratoDragEnd` 会把它撤下。取消路径漏掉这一步，气泡会
+                    // 永久停在画面上 —— 取消本就"什么都没发生"，却留下一个读数框。
+                    //（`blur` 路径不受影响：它经 `activePointerGestureEnd` 走 `onUp`。）
+                    finishVibratoDrag();
                     liveEditOverrideRef.current = null;
                     if (liveEditActiveRef) liveEditActiveRef.current = false;
                     invalidate();

@@ -14,6 +14,7 @@
 import { useCallback, useRef, useState } from "react";
 
 import { shouldSuppressHoverSideEffects } from "../../utils/penInput";
+import { registerDragAbort } from "../../utils/gestureFocusGuard";
 
 export interface DockGutterProps {
     /** `col` = 竖直条（调宽度），`row` = 水平条（调高度）。 */
@@ -77,13 +78,19 @@ export function DockGutter({
             };
 
             const onMove = (moveEvent: PointerEvent) => apply(moveEvent.clientX, moveEvent.clientY);
+            // 失焦（Alt+Tab / 最小化）时 pointerup 不会送回本窗口：只挂
+            // pointerup/pointercancel 会让 `data-dragging` 与 `pointermove` 监听一起
+            // 留着，切回来后**不按键移动鼠标也会继续改尺寸**。
+            let unregisterAbort = () => {};
             const onUp = () => {
                 window.removeEventListener("pointermove", onMove);
                 window.removeEventListener("pointerup", onUp);
                 window.removeEventListener("pointercancel", onUp);
+                unregisterAbort();
                 setDragging(false);
                 onCommit(latestRef.current);
             };
+            unregisterAbort = registerDragAbort(onUp);
             window.addEventListener("pointermove", onMove);
             window.addEventListener("pointerup", onUp);
             window.addEventListener("pointercancel", onUp);

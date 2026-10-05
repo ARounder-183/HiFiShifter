@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- 文件同时导出组件与 Hook/常量（刷新边界按文件粒度接受） */
 import React from "react";
-import { registerDragAbort } from "../gestureFocusGuard";
+import { registerDragAbort } from "../../../../utils/gestureFocusGuard";
 import { VOWEL_GUIDE_LINES, VOWEL_POINTS } from "./vowelChartLayout";
 import { formantChartPointerDownShouldPreventDefault } from "./clipFormantInteractionGuards";
 

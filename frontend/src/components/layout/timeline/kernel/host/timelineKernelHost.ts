@@ -5549,7 +5549,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         return result;
     }
 
-    /** 指针离开轨道区：清掉自定义光标，交回默认值。 */
+    /** 指针离开轨道区：清掉自定义光标与所有悬停态。 */
     function onPointerLeave(): void {
         if (gesture.kind === "none" && panPointerId === null) container.style.cursor = "";
         // 指针离开轨道区：淡变浮标必须收起，否则它会因为没有后续 move 事件而
@@ -5557,6 +5557,19 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (lastFadeHoverKey !== "") {
             lastFadeHoverKey = "";
             interactions?.onFadeHover?.(null, 0, 0);
+        }
+        // **clip 悬停通道同理**：离开容器后不再有 pointermove，而悬停提示环与浮标
+        // 内容都只在"命中身份变化"时才更新 —— 不在这里收尾，环会一直亮在画面上
+        //（用户报告的那类"高亮没清掉"）。清掉去重键还能让**再次进入**同一个 clip
+        // 时重新发布一次，读数不会停在离开前的旧值上（淡变通道已是这个口径）。
+        if (lastClipHoverKey !== "") {
+            lastClipHoverKey = "";
+            interactions?.onClipHover?.(null);
+        }
+        if (hoveredClipId !== null) {
+            hoveredClipId = null;
+            sceneDirty = true;
+            loop.invalidate();
         }
     }
 

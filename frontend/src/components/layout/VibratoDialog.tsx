@@ -117,6 +117,7 @@ import { AppFileInput } from "../../ui/FileInput";
 import { useInputModifiers } from "../../ui/useInputModifiers";
 import { createAxisGainState2D, type AxisGainState2D } from "../../utils/axisGain";
 import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
+import { registerDragAbort } from "../../utils/gestureFocusGuard";
 import {
     type VibratoPreviewGestureInfo,
     type VibratoPreviewInputState,
@@ -1254,6 +1255,7 @@ export function VibratoDialog({
             presetDragPointerYRef.current = event.clientY;
             ensureAutoScroll();
         };
+        let unregisterAbort = () => {};
         const onUp = () => {
             const start = presetDragStartRef.current;
             presetDragStartRef.current = null;
@@ -1261,6 +1263,7 @@ export function VibratoDialog({
             presetDragRef.current = null;
             setPresetDrag(null);
             stopAutoScroll();
+            unregisterAbort();
             if (!start || !drag) return;
             const toIndex = reorderTargetIndex(drag.insertionIndex, drag.fromIndex);
             // 两组各自排序：系统预设的顺序以 id 列表持久化，用户预设直接排数组。
@@ -1271,10 +1274,15 @@ export function VibratoDialog({
             );
             void dispatch(persistUiSettings());
         };
+        // 失焦（Alt+Tab / 最小化）时 pointerup 不会送回本窗口：不接住它，
+        // `presetDrag` 的插入位置指示线会一直留在预设列表上，自动滚动 rAF 也会
+        // 空转不停（直到对话框关闭）。
+        unregisterAbort = registerDragAbort(onUp);
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", onUp);
         window.addEventListener("pointercancel", onUp);
         return () => {
+            unregisterAbort();
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onUp);
             window.removeEventListener("pointercancel", onUp);

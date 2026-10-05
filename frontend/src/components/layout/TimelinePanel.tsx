@@ -145,7 +145,7 @@ import {
     releaseLoudnessFetch,
 } from "./timeline/loudnessFetchGate";
 import { getBulkEditableClipIds } from "./timeline/hooks/bulkClipEdit";
-import { registerDragAbort } from "./timeline/gestureFocusGuard";
+import { registerDragAbort } from "../../utils/gestureFocusGuard";
 import { resolveTrimSourceWindow, resolveTrimSnapOffset } from "./timeline/trimSourceWindow";
 import { resolveClipContentDurationSec } from "../../utils/loopRender";
 import { getInsertBelowTargetIndex } from "./timeline/trackContextMenuPlacement";

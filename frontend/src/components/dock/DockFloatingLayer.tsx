@@ -15,6 +15,7 @@
 import { useCallback, useRef, useState, useSyncExternalStore } from "react";
 
 import { store } from "../../app/store";
+import { registerDragAbort } from "../../utils/gestureFocusGuard";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { EnterIcon, ExternalLinkIcon } from "@radix-ui/react-icons";
 
@@ -175,11 +176,18 @@ function DockFloatWindow({
                     dropSize,
                 });
                 // 拖拽结束由控制器统一收尾；这里只负责把"正在拖"的视觉状态收回来。
+                //
+                // 必须一并接住**窗口失焦**：Alt+Tab 切走时 pointerup 不会送回本窗口，
+                // 只挂 pointerup/pointercancel 会让 `data-dragging` 永久留在浮窗上
+                // （控制器侧另有失焦取消，见 `dockDragController`）。
+                let unregisterAbort = () => {};
                 const onUp = () => {
                     setDragging(false);
+                    unregisterAbort();
                     window.removeEventListener("pointerup", onUp);
                     window.removeEventListener("pointercancel", onUp);
                 };
+                unregisterAbort = registerDragAbort(onUp);
                 window.addEventListener("pointerup", onUp);
                 window.addEventListener("pointercancel", onUp);
             };
@@ -276,13 +284,18 @@ function DockFloatWindow({
             };
 
             const onMove = (moveEvent: PointerEvent) => apply(moveEvent.clientX, moveEvent.clientY);
+            // 失焦同样收尾（见标题栏拖拽处的说明）：否则 `data-dragging` 与
+            // `pointermove` 监听一起留着，切回来后**不按键移动鼠标也会继续改尺寸**。
+            let unregisterAbort = () => {};
             const onUp = () => {
                 window.removeEventListener("pointermove", onMove);
                 window.removeEventListener("pointerup", onUp);
                 window.removeEventListener("pointercancel", onUp);
+                unregisterAbort();
                 setDragging(false);
                 dispatch(setFloatGeometry({ formId: form.id, geometry: latest }));
             };
+            unregisterAbort = registerDragAbort(onUp);
             window.addEventListener("pointermove", onMove);
             window.addEventListener("pointerup", onUp);
             window.addEventListener("pointercancel", onUp);

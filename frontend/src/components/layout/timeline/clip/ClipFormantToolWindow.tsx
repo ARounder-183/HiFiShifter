@@ -12,7 +12,7 @@ import { timelineApi } from "../../../../services/api/timeline";
 import { useI18n } from "../../../../i18n/I18nProvider";
 import { VowelChart } from "./VowelChart";
 import { useClipFormantEditor } from "./useClipFormantEditor";
-import { registerDragAbort } from "../gestureFocusGuard";
+import { registerDragAbort } from "../../../../utils/gestureFocusGuard";
 import { shouldSuppressHoverSideEffects } from "../../../../utils/penInput";
 import {
     CLIP_FORMANT_ACTIVE_ATTR,

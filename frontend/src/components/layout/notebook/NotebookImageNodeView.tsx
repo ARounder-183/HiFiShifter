@@ -19,6 +19,7 @@ import { assetIdFromSrc, isAssetRef } from "./assetRef";
 import { NotebookContextMenu, type NotebookMenuItem } from "./NotebookContextMenu";
 import { AppConfirmDialog } from "../../../ui";
 import { resolveImage, subscribeAssetInvalidation } from "./notebookImageCache";
+import { registerDragAbort } from "../../../utils/gestureFocusGuard";
 import { dirName } from "./notebookPaths";
 
 const MIN_WIDTH = 48;
@@ -120,13 +121,19 @@ export function NotebookImageNodeView(props: NodeViewProps) {
                 latest = Math.max(MIN_WIDTH, Math.round(startWidth + delta));
                 setDragWidth(latest);
             };
+            let unregisterAbort = () => {};
             const onUp = () => {
                 window.removeEventListener("pointermove", onMove);
                 window.removeEventListener("pointerup", onUp);
                 window.removeEventListener("pointercancel", onUp);
+                unregisterAbort();
                 setDragWidth(null);
                 updateAttributes({ width: latest });
             };
+            // 失焦（Alt+Tab / 最小化）时 pointerup 不会送回本窗口 —— 与上面
+            // pointercancel 同一后果（监听与 `dragWidth` 一直挂着），只是触发源是
+            // 焦点而不是 OS 手势取消，因此同样要接住。
+            unregisterAbort = registerDragAbort(onUp);
             window.addEventListener("pointermove", onMove);
             window.addEventListener("pointerup", onUp);
             // 掌压拒绝、系统手势等会派发 pointercancel 而不是 pointerup：不接住
