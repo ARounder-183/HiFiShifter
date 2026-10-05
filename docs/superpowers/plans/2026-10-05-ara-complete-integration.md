@@ -22,6 +22,10 @@ HiFiGAN 四个专有参数（breath_enabled、breath_gain、hifigan_tension、fo
 
 ## 最新用户BUG与交付方式（2026-10-05）
 
+最新执行约束：用户反对反复测试消耗token，已停止Verify流水线；不再主动全量测试或
+新增review。仅构建的All Release release-delivery-02已exit0，App/插件同源产物完成，
+manifest Verify/native保持false。源码/构建不是实际GUI验收，完整目标仍未关闭。
+
 最新用户追加：“渐变不一定完全还原，走hifishifter自己的也可以”。渐变显示门改为
 真实宿主manual/auto长度及参数自动刷新，曲线/波形用HFS同源示意包络且明确标注；
 不再要求精确REAPER新轴公式，不改变普通fade由宿主应用一次的音频责任。其余最终门

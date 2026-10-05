@@ -994,4 +994,8 @@ Task 38: Ruling: 用户最新允许渐变使用HiFiShifter自己的曲线，不�
 
 Task 41: Ruling: 用户改范围前的一次性校准实例45948仍存活但没有oracle产物，独立新profile自动追加公共VST3路径，正常关闭请求返回false — 不再执行校准/发脚本/强杀，未提交脚本移到ignored私有scratch保留，继续完成源码与不可覆盖的新包构建 — 若把无日志或零窗口句柄当进程已退出会违反单实例隔离；最终启动前必须实际确认退出，当前不据此停下其它可推进工作。
 
+Task 41: Ruling: 用户明确反对反复测试消耗token — 停止release-final-01的Verify流水线6576及其编译子进程，不碰REAPER/旧49800；后续仅编译出包，不再主动全量回归或加review — 已完成前端2729/kernel587+585/App245/plugin156通过，剩余集成阶段未执行，不能把中断流水线称最终Verify成功；保留未完成产物/日志，不将其当交付。
+
+Task 45: Ruling: release-delivery-02只构建All Release已exit0，生成App/插件规范bundle与45文件manifest，sourceCommit=5ea3df47 — 交付同源新包与中文构建/使用文档，不再运行测试或追加review，不安装/不push — nativeAcceptance/verificationRequested仍false，不能凭编译完成宣布四BUG和全部GUI行为通过；45948仍在，最终新实例启动须先正常关闭旧隔离进程。
+
 
