@@ -135,6 +135,10 @@ import {
     beginClipGeometryPreview,
     endClipGeometryPreview,
 } from "./timeline/clipGeometryPreviewBus";
+import {
+    holdLoudnessFetch,
+    releaseLoudnessFetch,
+} from "./timeline/loudnessFetchGate";
 import { getBulkEditableClipIds } from "./timeline/hooks/bulkClipEdit";
 import { registerDragAbort } from "./timeline/gestureFocusGuard";
 import { getInsertBelowTargetIndex } from "./timeline/trackContextMenuPlacement";
@@ -3152,6 +3156,74 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [dispatch, endKernelGestureInteraction, sessionRef],
     );
 
+    /**
+     * 拉伸提交的公共收尾（单 clip 拉伸与组拉伸共用）。
+     *
+     * 【为什么必须共用】此前两条路径各写一遍，于是分叉：组路径在改写参数线后补了
+     * `bumpParamsEpoch()`，单路径漏了 —— 单 clip 拉伸松手后波形停在「新几何 × 旧曲线」
+     * 且只有再做一次别的操作才恢复（用户报告的现象）。收口到一处即从结构上杜绝再分叉。
+     *
+     * 【取数闸门】调用方在**落库派发之前** `holdLoudnessFetch()`（见
+     * `loudnessFetchGate`）：几何落库的 fulfilled handler 会 `applyTimelineState`
+     * 递增 paramsEpoch，触发一次「新几何 × 旧曲线」的中间态取数，必须压住。
+     * 本函数只负责改写曲线；闸门的**释放与补取数**由调用方的 `finally` 统一执行
+     * （保证持久化失败 / 改写抛错等任何路径都不会让闸门悬挂）。
+     */
+    const finishStretchWithParamLines = React.useCallback(
+        async (opts: {
+            /** 需要二次写回的速率（后端可能按自身计算覆盖速率，前端计算值才权威）。 */
+            rateWritebacks: ReadonlyArray<{ clipId: string; clipPlaybackRate: number }>;
+            /** 锁定参数线开启时改写曲线；`null` = 本次不搬曲线。 */
+            rewriteParamLines: (() => Promise<unknown>) | null;
+            xfadeClipIds: string[];
+            initialCrossfadeSides: ReturnType<typeof computeInitialCrossfadeSides>;
+            editSides: Record<string, { fadeIn: boolean; fadeOut: boolean }>;
+        }): Promise<void> => {
+            for (const writeback of opts.rateWritebacks) {
+                dispatch(setClipPlaybackRate(writeback));
+            }
+            if (opts.rewriteParamLines !== null) {
+                await opts.rewriteParamLines();
+            }
+            // 自动交叉淡化：按落库后的重叠关系写回自动 fade（开关关闭时只清理
+            // 「已脱离重叠」的自动值）。
+            const latest = sessionRef.current;
+            if (s.autoCrossfadeEnabled) {
+                await applyAutoCrossfade(latest, opts.xfadeClipIds, dispatch, {
+                    affectedSides: opts.initialCrossfadeSides,
+                    editSides: opts.editSides,
+                });
+            } else {
+                await applyDetachedAutoCrossfadeClears(
+                    latest,
+                    opts.xfadeClipIds,
+                    dispatch,
+                    opts.initialCrossfadeSides,
+                    opts.editSides,
+                );
+            }
+        },
+        [dispatch, sessionRef, s.autoCrossfadeEnabled],
+    );
+
+    /**
+     * 拉伸提交链的收尾：打开取数闸门并补一次**权威取数**，然后释放交互锁。
+     *
+     * 闸门只有在"本次确实要搬曲线"（`lockParamLinesEnabled`）时才合上，因此释放
+     * 也只在那种情形下执行；否则释放是无意义的多余取数。释放后立刻 `bumpParamsEpoch()`
+     * —— 这是唯一一次带「新几何 + 改写后曲线」的取数（见 `loudnessFetchGate`）。
+     */
+    const finishStretchCommitChain = React.useCallback(
+        (lockParamLines: boolean): void => {
+            if (lockParamLines) {
+                releaseLoudnessFetch();
+                dispatch(bumpParamsEpoch());
+            }
+            endKernelGestureInteraction();
+        },
+        [dispatch, endKernelGestureInteraction],
+    );
+
     const handleKernelTrimCommit = React.useCallback(
         (args: {
             clipId: string;
@@ -3245,79 +3317,79 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         endKernelGestureInteraction();
                         return;
                     }
+                    // 锁定参数线：本次是否要搬曲线（决定取数闸门是否需要合上）。
+                    const lockParamLines = sessionRef.current.lockParamLinesEnabled;
+                    // 闸门必须在落库派发**之前**合上（见 `loudnessFetchGate`）。
+                    if (lockParamLines) holdLoudnessFetch();
                     const groupPersist = dispatch(setClipsStateBulkRemote({ updates })).unwrap();
                     void (async () => {
                         try {
                             await groupPersist;
-                        } finally {
-                            // 速率二次写回：后端可能按自身计算覆盖速率，前端计算值
-                            // 才是权威（与旧实现 `reapplyRates` 同源，只回写非 1 的成员）。
-                            for (const update of updates) {
-                                if (update.clipPlaybackRate === 1) continue;
-                                dispatch(
-                                    setClipPlaybackRate({
+                            await finishStretchWithParamLines({
+                                // 速率二次写回：后端可能按自身计算覆盖速率，前端计算值
+                                // 才是权威（与旧实现 `reapplyRates` 同源，只回写非 1 的成员）。
+                                rateWritebacks: updates
+                                    .filter((update) => update.clipPlaybackRate !== 1)
+                                    .map((update) => ({
                                         clipId: update.clipId,
                                         clipPlaybackRate: update.clipPlaybackRate,
-                                    }),
-                                );
-                            }
-                            // 锁定参数线：按**根轨道**聚合成员的时域映射，一次请求
-                            // 完成该轨道的曲线映射（与旧实现同源）。
-                            if (sessionRef.current.lockParamLinesEnabled) {
-                                const mappingsByRootTrack = new Map<
-                                    string,
-                                    StretchRangeMapping[]
-                                >();
-                                for (const clipId of group.clipIds) {
-                                    const initial = group.initialById[clipId];
-                                    const now = sessionRef.current.clips.find(
-                                        (item) => item.id === clipId,
-                                    );
-                                    if (initial === undefined || now === undefined) continue;
-                                    const rootTrackId = resolveRootTrackId(
-                                        sessionRef.current.tracks,
-                                        now.trackId,
-                                    );
-                                    if (rootTrackId === null || rootTrackId === undefined) {
-                                        continue;
-                                    }
-                                    const mappings = mappingsByRootTrack.get(rootTrackId) ?? [];
-                                    mappings.push({
-                                        oldStartSec: initial.startSec,
-                                        oldLengthSec: initial.lengthSec,
-                                        newStartSec: now.startSec,
-                                        newLengthSec: now.lengthSec,
-                                    });
-                                    mappingsByRootTrack.set(rootTrackId, mappings);
-                                }
-                                await Promise.allSettled(
-                                    Array.from(mappingsByRootTrack, ([trackId, mappings]) =>
-                                        stretchTrackLinkedParams(trackId, mappings),
-                                    ),
-                                );
-                                dispatch(bumpParamsEpoch());
-                            }
-                            // 自动交叉淡化：按落库后的重叠关系写回自动 fade（开关
-                            // 关闭时只清理「已脱离重叠」的自动值）。
-                            const latest = sessionRef.current;
-                            if (s.autoCrossfadeEnabled) {
-                                await applyAutoCrossfade(latest, origin.xfadeClipIds, dispatch, {
-                                    affectedSides: origin.initialCrossfadeSides,
-                                    editSides: origin.editSides,
-                                });
-                            } else {
-                                await applyDetachedAutoCrossfadeClears(
-                                    latest,
-                                    origin.xfadeClipIds,
-                                    dispatch,
-                                    origin.initialCrossfadeSides,
-                                    origin.editSides,
-                                );
-                            }
+                                    })),
+                                // 按**根轨道**聚合成员的时域映射，一次请求完成该轨道的曲线映射
+                                //（与旧实现同源）。
+                                rewriteParamLines: lockParamLines
+                                    ? () => {
+                                          const mappingsByRootTrack = new Map<
+                                              string,
+                                              StretchRangeMapping[]
+                                          >();
+                                          for (const clipId of group.clipIds) {
+                                              const initial = group.initialById[clipId];
+                                              const now = sessionRef.current.clips.find(
+                                                  (item) => item.id === clipId,
+                                              );
+                                              if (initial === undefined || now === undefined) {
+                                                  continue;
+                                              }
+                                              const rootTrackId = resolveRootTrackId(
+                                                  sessionRef.current.tracks,
+                                                  now.trackId,
+                                              );
+                                              if (
+                                                  rootTrackId === null ||
+                                                  rootTrackId === undefined
+                                              ) {
+                                                  continue;
+                                              }
+                                              const mappings =
+                                                  mappingsByRootTrack.get(rootTrackId) ?? [];
+                                              mappings.push({
+                                                  oldStartSec: initial.startSec,
+                                                  oldLengthSec: initial.lengthSec,
+                                                  newStartSec: now.startSec,
+                                                  newLengthSec: now.lengthSec,
+                                              });
+                                              mappingsByRootTrack.set(rootTrackId, mappings);
+                                          }
+                                          return Promise.allSettled(
+                                              Array.from(
+                                                  mappingsByRootTrack,
+                                                  ([trackId, mappings]) =>
+                                                      stretchTrackLinkedParams(trackId, mappings),
+                                              ),
+                                          );
+                                      }
+                                    : null,
+                                xfadeClipIds: origin.xfadeClipIds,
+                                initialCrossfadeSides: origin.initialCrossfadeSides,
+                                editSides: origin.editSides,
+                            });
+                        } catch {
+                            // 失败不产生 unhandled rejection；交互锁与闸门仍需释放
+                            //（闸门由 finishStretchCommitChain 统一释放）。
+                        } finally {
+                            finishStretchCommitChain(lockParamLines);
                         }
-                    })()
-                        .catch(() => undefined)
-                        .finally(endKernelGestureInteraction);
+                    })();
                     return;
                 }
                 if (args.cancelled) {
@@ -3368,52 +3440,43 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         Number(clip?.snapOffsetSec ?? origin.baseSnapOffsetSec) || 0,
                     ),
                 };
+                // 锁定参数线：本次是否要搬曲线（决定取数闸门是否需要合上）。
+                const lockParamLines = sessionRef.current.lockParamLinesEnabled;
+                // 闸门必须在落库派发**之前**合上（见 `loudnessFetchGate`）。
+                if (lockParamLines) holdLoudnessFetch();
                 const persist = dispatch(setClipsStateBulkRemote({ updates: [next] })).unwrap();
                 void (async () => {
                     try {
                         await persist;
+                        await finishStretchWithParamLines({
+                            rateWritebacks: [
+                                {
+                                    clipId: origin.clipId,
+                                    clipPlaybackRate: next.clipPlaybackRate,
+                                },
+                            ],
+                            // 把该轨道的曲线从旧时间范围映射到新范围
+                            //（与旧实现同源，复用抽出的 `stretchLinkedParams`）。
+                            rewriteParamLines: lockParamLines
+                                ? () =>
+                                      stretchLinkedParams(
+                                          origin.trackId,
+                                          origin.startSec,
+                                          origin.lengthSec,
+                                          next.startSec,
+                                          next.lengthSec,
+                                      )
+                                : null,
+                            xfadeClipIds: origin.xfadeClipIds,
+                            initialCrossfadeSides: origin.initialCrossfadeSides,
+                            editSides: origin.editSides,
+                        });
+                    } catch {
+                        // 失败不产生 unhandled rejection；交互锁与闸门仍需释放。
                     } finally {
-                        // 速率二次写回：后端可能按自身计算覆盖速率，前端计算值才是
-                        // 权威（与旧实现 `reapplyRates` 同源）。
-                        dispatch(
-                            setClipPlaybackRate({
-                                clipId: origin.clipId,
-                                clipPlaybackRate: next.clipPlaybackRate,
-                            }),
-                        );
-                        // 锁定参数线：把该轨道的曲线从旧时间范围映射到新范围
-                        // （与旧实现同源，复用抽出的 `stretchLinkedParams`）。
-                        if (sessionRef.current.lockParamLinesEnabled) {
-                            await stretchLinkedParams(
-                                origin.trackId,
-                                origin.startSec,
-                                origin.lengthSec,
-                                next.startSec,
-                                next.lengthSec,
-                            );
-                        }
-                        // 自动交叉淡化：拉伸改变重叠 → 按落库后的关系写回自动 fade
-                        //（旧实现 `shouldApplyAutoCrossfade` 覆盖 stretch，开关关闭时
-                        // 只清理「已脱离重叠」的自动值）。
-                        const latest = sessionRef.current;
-                        if (s.autoCrossfadeEnabled) {
-                            await applyAutoCrossfade(latest, origin.xfadeClipIds, dispatch, {
-                                affectedSides: origin.initialCrossfadeSides,
-                                editSides: origin.editSides,
-                            });
-                        } else {
-                            await applyDetachedAutoCrossfadeClears(
-                                latest,
-                                origin.xfadeClipIds,
-                                dispatch,
-                                origin.initialCrossfadeSides,
-                                origin.editSides,
-                            );
-                        }
+                        finishStretchCommitChain(lockParamLines);
                     }
-                })()
-                    .catch(() => undefined)
-                    .finally(endKernelGestureInteraction);
+                })();
                 return;
             }
 
@@ -3496,7 +3559,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 .catch(() => undefined)
                 .finally(endKernelGestureInteraction);
         },
-        [dispatch, endKernelGestureInteraction, sessionRef, s.autoCrossfadeEnabled],
+        [
+            dispatch,
+            endKernelGestureInteraction,
+            finishStretchCommitChain,
+            finishStretchWithParamLines,
+            sessionRef,
+            s.autoCrossfadeEnabled,
+        ],
     );
 
     /** 内核淡变角：按下时的原始值（用于回滚）。 */
