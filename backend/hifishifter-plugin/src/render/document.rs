@@ -226,9 +226,9 @@ impl DocumentSession {
             if owner.is_closed() || owner.assigned_regions().map_err(|e|e.to_string())?!=*keys {return Err("automatic apply superseded".into());}
             if !owner.snapshots.iter().zip(snapshots).all(|(publisher,snapshot)|publisher.has_capacity(snapshot)) {return Err("retired snapshot budget exhausted; reopen instance".into());}
         }
-        for (owner,_,snapshots) in prepared {for (publisher,snapshot) in owner.snapshots.iter().zip(snapshots) {
+        for (owner,keys,snapshots) in prepared {for (publisher,snapshot) in owner.snapshots.iter().zip(snapshots) {
             publisher.publish(snapshot).map_err(|e|format!("snapshot publish failed: {e:?}"))?;
-        }}Ok(())
+        }owner.record_prepared(base_model,edit,epoch,scope,keys);}Ok(())
     }
     /// 宿主专属API调用前核对真实文档仍存活，销毁后的view不能沿旧project指针查询。
     pub(crate) fn is_alive(&self)->bool {self.alive.load(Ordering::Acquire)}

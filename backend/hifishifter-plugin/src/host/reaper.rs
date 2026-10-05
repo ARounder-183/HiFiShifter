@@ -57,7 +57,7 @@ struct GeometryApi {
 pub(crate) struct ReaperHost {
     _interface: Interface,
     thread: std::thread::ThreadId,
-    project: usize,
+    project: std::sync::atomic::AtomicUsize,
     transport: Option<Transport>,
     geometry: Option<GeometryApi>,
     validate: Option<Validate>,
@@ -90,16 +90,19 @@ impl ReaperHost {
             ((**context.cast::<*const UnknownVtbl>()).query)(context, iid.as_ptr(), &mut pointer)
         };
         if result != K_RESULT_OK || pointer.is_null() {
+            crate::log_line(&format!("[reaper-host] QI result={result} interface={}",!pointer.is_null()));
             return None;
         }
         let interface = Interface(pointer as usize);
+        crate::log_line("[reaper-host] QI succeeded");
         if !authorized() {
             return None;
         }
         let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
         let project = checked(&authorized, || unsafe { (table.parent)(pointer, 3) }).ok()?;
         if project.is_null() {
-            return None;
+            // 实测initialize尚未挂接project；保留拥有引用的接口，稍后只沿同一直接parent绑定。
+            crate::log_line("[reaper-host] initialization parent(project) pending; retaining host interface");
         }
         let api = |name: &std::ffi::CStr| {
             checked(&authorized, || unsafe {
@@ -170,11 +173,23 @@ impl ReaperHost {
         Some(Self {
             _interface: interface,
             thread: std::thread::current().id(),
-            project: project as usize,
+            project: std::sync::atomic::AtomicUsize::new(project as usize),
             transport,
             geometry,
             validate,
         })
+    }
+    /// 项目延迟挂接只从同一个接口的直接parent取得；拒绝null，不借API的“当前项目”语义。
+    /// 一旦绑定，不因用户切换活动tab而重新绑定；原线程与外部调用授权检查仍然执行。
+    fn project(&self,authorized:&impl Fn()->bool)->Result<*mut c_void,String> {
+        if std::thread::current().id()!=self.thread {return Err("REAPER project queried outside its model/UI thread".into());}
+        let known=self.project.load(std::sync::atomic::Ordering::Acquire);
+        if known!=0 {return Ok(known as *mut c_void);}
+        let pointer=self._interface.0 as *mut c_void;let table=unsafe {&**pointer.cast::<*const HostVtbl>()};
+        let project=checked(authorized,||unsafe {(table.parent)(pointer,3)})?;
+        if project.is_null() {return Err("REAPER direct parent project not attached yet".into());}
+        self.project.store(project as usize,std::sync::atomic::Ordering::Release);
+        crate::log_line("[reaper-host] direct project attached on model/UI thread");Ok(project)
     }
     /// 原UI线程读取延迟补偿的实际听到位置；暂停保持play位置，完全停止才读edit cursor。
     pub fn sample(&self, authorized: impl Fn() -> bool) -> Result<(f64, bool), String> {
@@ -185,7 +200,7 @@ impl ReaperHost {
             .transport
             .as_ref()
             .ok_or("REAPER transport API unavailable")?;
-        let project = self.project as *mut c_void;
+        let project = self.project(&authorized)?;
         let valid = || -> Result<(), String> {
             if let Some(validate) = self.validate {
                 if !checked(&authorized, || unsafe {
@@ -220,7 +235,7 @@ impl ReaperHost {
     pub(crate) fn geometry_revision(&self, authorized: impl Fn()->bool)->Result<i32,String> {
         if std::thread::current().id()!=self.thread {return Err("REAPER geometry queried outside its model/UI thread".into());}
         let api=self.geometry.as_ref().ok_or("REAPER geometry API unavailable")?;
-        let project=self.project as *mut c_void;
+        let project=self.project(&authorized)?;
         // SAFETY: typed API来自核对过的官方头；每次查询前后重新检查调用者许可。
         if !checked(&authorized,||unsafe {(api.validate)(project,project,c"ReaProject*".as_ptr())})? {
             return Err("invalid REAPER project/type ownership".into());
@@ -242,7 +257,7 @@ impl ReaperHost {
             .ok_or("REAPER geometry API unavailable")?;
         let pointer = self._interface.0 as *mut c_void;
         let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
-        let project = self.project as *mut c_void;
+        let project = self.project(&authorized)?;
         let valid = |object, kind: &std::ffi::CStr| -> Result<(), String> {
             if checked(&authorized, || unsafe {
                 (api.validate)(project, object, kind.as_ptr())

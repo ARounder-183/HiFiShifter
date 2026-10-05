@@ -936,4 +936,10 @@ Task 40: Ruling: 冷启不打开GUI立即离线导出全零，后台ready后同�
 
 Task 36: Ruling: 真实REAPER日志扩展available=false/position_authority=false，两次播放backwards计数265；网页click仍被Computer Use安全边界拒绝 — 保留宿主初始化分阶段诊断待办及GUI交互未测，明确游标/fade元数据门失败，不猜parent或绕过工具注入 — 若以typed fake ABI/可见两轨当全部可用，会漏掉真正高优时钟问题；隔离实例均正常退出，无强杀。
 
+Task 40: Ruling: 官方VST3头明确kOffline切换经过UI线程setupProcessing，后台就绪后导出才正确 — 只在离线setup等待worker并核对model/edit/epoch/scope/keys，两率完整发布后登记；offline缺快照/上下文明确失败，实时process/setProcessing仍无等待/IO/分配 — 8定向exit0；新7E37包真实冷启不打开GUI立即首导PCM maxdiff0/RMS0.08688376956，旧全零RED已关闭此夹具门；若外推全部长源/设备/算法仍会夸大。
+
+Task 36: Ruling: 实际QI成功但initialize parent(project)为null，旧代码把可用扩展整个丢弃 — 保留拥有引用的接口，稍后仅在原model/UI线程取同一直接parent(3)非空绑定，不随活动tab重绑、不以null猜当前项目；2新合同及旧初始化/几何/离线共21回归exit0 — 真实新时钟/geometry仍须新包验证，不能把源码绿测当游标已修。
+
+Task 41: Ruling: Computer Use报告用户输入，42280实例随后标题modified — 按技能停止自动键鼠，保留该实例与用户编辑；新延迟绑定包只在全新目录构建，既有7E37加载DLL不替换，不追加review — 若擅自关闭/重开或发送脚本，会再侵入用户资产；当前任务继续源码，不将这一暂时native边界当技术不可行。
+
 

@@ -153,6 +153,8 @@ impl Default for SnapshotPublisher {
 }
 
 impl SnapshotPublisher {
+    /// 只读原子指针，不解引用/持锁，用于离线setup在版本事务内核对两输出率。
+    pub fn is_ready(&self)->bool {!self.current.load(Ordering::SeqCst).is_null()}
     /// 发布前在非实时线程预检，两个采样率必须都可容纳才替换编辑状态。
     pub fn has_capacity(&self, snapshot: &PlaybackSnapshot) -> bool {
         let mut retained=self.retained.lock().unwrap();self.reclaim(&mut retained);

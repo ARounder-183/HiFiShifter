@@ -78,3 +78,41 @@ HiFiShifter参数，不修改clip几何，启动时验证工程绝对路径。
 
 下一批先修offline就绪契约与host扩展初始化，之后恢复正常长素材、fade与native
 HiFiGAN矩阵；不重跑本批已通过的旧WORLD链路，不把此局部结果当最终验收。
+
+## 离线就绪修复与初始化诊断（后续批）
+
+### 首次离线导出修复：已实测
+
+锁定VST3 SDK `ivstaudioprocessor.h`明确setupProcessing在UI线程/禁用状态调用，
+切换kOffline须经过该入口。只在该离线setup等待现有worker；process/setProcessing
+不等待、不查盘。发布记录包含model/edit/授权epoch/scope/真实keys，旧快照或空闲
+队列不能冒充最新就绪；缺快照/上下文的offline process返回失败而非成功静音。
+Condvar的worker和离线等待者有不同条件，request使用notify_all防止唤醒丢失。
+
+8项离线/实时/队列定向回归正常exit0（包含真实SDK子对象、参数版本变化后重新准备、
+超时/失败/关闭、实时零分配与纯editor透传）。初次编译只有测试audio_ptr遗漏unsafe，
+补齐后通过，未弱化行为断言。
+
+实测包`.build-tmp/embedded-offline-preflight-01/HiFiShifter.vst3`：release构建1m53s/exit0。
+引擎SHA256 `7E374701CEEF6D559CBDBB3F7213F0D0C1D9DA19FF184A691B188F5C9652681A`。
+新scratch`.build-tmp/embedded-offline-preflight-probe`，复制保存副本（初始RPP SHA256
+`EA5E7CD43A327777CB517269FB2DC5E63D621E79145DA334C4ABF7AFBA79B95F`）。
+进程42280，不打开GUI、不加人为延迟；脚本第一轮立即导出，实际setup日志含mode=2。
+首份`acceptance-cold-immediate.wav`整6秒/44.1k/stereo，PCM相对正确参考maxdiff=0、
+RMS=0.08688376956019962，264600帧。WAV SHA256
+`89DC1334BB3CDD8C9198A7C0B9E6E9C812D34A1A01DA33198A3AB8568A44B295`。
+这是同一旧v2/WORLD夹具上的真实RED→GREEN，不外推长源/HiFiGAN全部native通过。
+
+### 宿主扩展根因：已实测；延迟绑定修复：待native
+
+分阶段日志证明每次QI成功，但initialize的parent(project)为空。不是REAPER不支持
+扩展，也不是IID未找到；旧构造函数因此丢弃可用拥有引用。
+新构造保留该接口，第一次model/UI查询只从同一个直接parent(3)绑定非空project，
+绑定后不随活动tab换project，不用NULL参数的“当前工程”语义；线程/重入/活性及
+ValidatePtr2检查继续保留。2新增合同及旧几何/初始化/离线共21定向回归正常exit0。
+新包`embedded-host-parent-late-01`与7E37的当前运行包分开，尚未实测新游标/几何。
+
+Computer Use恢复截图时遇到一次monitor capture 0x80070057，重选返回窗口后恢复。
+随后工具报告用户正在输入，按技能停止自动键鼠，保留用户当前42280实例（标题已modified），
+不关闭、不热替换、不向当前实例发送新采集命令。其仍加载7E37离线修复包，不是延迟
+project修复包。原用户RPP SHA256仍为4AD35908…，没有push或修改主develop。

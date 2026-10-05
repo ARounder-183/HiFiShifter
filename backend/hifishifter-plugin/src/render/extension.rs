@@ -22,6 +22,8 @@ struct CachedHostGeometry {
     model:u64,scope:u64,change:Option<i32>,
     value:Result<crate::host::geometry::BoundHostGeometry,String>,
 }
+#[derive(Clone,PartialEq,Eq)]
+struct PreparedVersion {model:u64,edit:u64,epoch:u64,scope:u64,keys:Vec<u64>}
 
 /// 原生接口与只读元数据属于真实组件，缓存不跨其文档/分配/host变更复用。
 #[derive(Default)]
@@ -36,6 +38,7 @@ pub(crate) struct ExtensionOwner {
     writer_id:AtomicU64,
     reaper:Mutex<Option<Arc<crate::host::reaper::ReaperHost>>>,
     host_geometry:Mutex<Option<CachedHostGeometry>>,
+    prepared:Mutex<Option<PreparedVersion>>,
     pub snapshots: [super::snapshot::SnapshotPublisher; 2],
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
     pending_restore:Mutex<Option<crate::state_channel::EditState>>,
@@ -1065,7 +1068,7 @@ impl ExtensionOwner {
     fn commit_request(&self,document:&Arc<super::document::DocumentSession>,base_edit:u64,base_model:u64,
         client:serde_json::Value)->hifishifter_ara_ipc::Response {
         let outcome=(|| {
-            let (candidate,epoch,inputs)={
+            let (candidate,epoch,scope,inputs)={
                 let _transaction=document.transaction.lock().unwrap();self.merge_pending_restore(document)?;
                 if !document.ready.load(Ordering::Acquire) {return Err("host model not ready; refresh after editing".into());}
                 if document.revision.load(Ordering::Acquire)!=base_model {return Err("Conflict: host model changed; refresh".into());}
@@ -1079,7 +1082,7 @@ impl ExtensionOwner {
                 let inputs=document.renderer_owners().into_iter().filter(|owner|owner.renders_playback()).map(|owner| {
                     let (keys,input)=owner.capture_render_input(document,&candidate,true)?;Ok((owner,keys,input))
                 }).collect::<Result<Vec<_>,String>>()?;
-                (candidate,document.render_epoch.load(Ordering::Acquire),inputs)
+                (candidate,document.render_epoch.load(Ordering::Acquire),document.scope_revision.load(Ordering::Acquire),inputs)
             };
             let mut prepared=Vec::new();
             for (owner,keys,input) in inputs {
@@ -1092,13 +1095,14 @@ impl ExtensionOwner {
             }
             let mut edits=document.edits.lock().unwrap();
             if edits.revision!=base_edit {return Err("Conflict: edit revision changed during commit".into());}
-            if document.render_epoch.load(Ordering::Acquire)!=epoch {return Err("host audio access changed during commit; retry".into());}
+            if document.render_epoch.load(Ordering::Acquire)!=epoch||document.scope_revision.load(Ordering::Acquire)!=scope {return Err("host audio access/scope changed during commit; retry".into());}
             for (owner,keys,snapshots) in &prepared {
                 if owner.assigned_regions().map_err(|e|e.to_string())?!=*keys {return Err("Conflict: assigned regions changed during commit".into());}
                 if !owner.snapshots.iter().zip(snapshots).all(|(p,s)|p.has_capacity(s)) {return Err("retired snapshot budget exhausted; reopen instance".into());}
             }
-            for (owner,_,snapshots) in prepared {
+            for (owner,keys,snapshots) in prepared {
                 for (publisher,snapshot) in owner.snapshots.iter().zip(snapshots) {publisher.publish(snapshot).map_err(|e|format!("snapshot publish failed: {e:?}"))?;}
+                owner.record_prepared(base_model,candidate.revision,epoch,scope,keys);
             }
             *edits=candidate;log::info!("[ara] GUI commit ready revision={} model={base_model}",edits.revision);
             Ok::<(),String>(())
@@ -1329,6 +1333,30 @@ impl ExtensionOwner {
             None=>{},
         }
     }
+    /// 调用者持document事务；完整两输出率发布成功后才登记，不额外持有源或快照。
+    pub(crate) fn record_prepared(&self,model:u64,edit:u64,epoch:u64,scope:u64,keys:Vec<u64>) {
+        *self.prepared.lock().unwrap()=Some(PreparedVersion {model,edit,epoch,scope,keys});
+    }
+    /// 仅SDK规定UI线程的kOffline setup调用；不在事务锁内等待，不把旧快照当最新版本。
+    pub(crate) fn prepare_offline_until(&self,deadline:std::time::Instant)->Result<(),String> {
+        if !self.renders_playback() {return Ok(());}
+        let document=self.editor_document()?;
+        loop {
+            {
+                let _transaction=document.transaction.lock().unwrap();
+                if self.is_closed()||!document.is_alive() {return Err("offline renderer closed".into());}
+                if !document.ready.load(Ordering::Acquire) {return Err("offline host model/PCM not ready".into());}
+                let keys=self.assigned_regions().map_err(|e|e.to_string())?;
+                let version=PreparedVersion {model:document.revision.load(Ordering::Acquire),edit:document.edits.lock().unwrap().revision,
+                    epoch:document.render_epoch.load(Ordering::Acquire),scope:document.scope_revision.load(Ordering::Acquire),keys};
+                if self.prepared.lock().unwrap().as_ref()==Some(&version)&&self.snapshots.iter().all(|snapshot|snapshot.is_ready()) {return Ok(());}
+            }
+            if std::time::Instant::now()>=deadline {return Err("offline preparation timed out".into());}
+            let worker=self.preparation.get().ok_or("offline preparation worker missing")?.as_ref().map_err(Clone::clone)?;
+            if !worker.state().0 {self.prepare();}
+            worker.wait_idle_until(deadline)?;
+        }
+    }
     /// 后台冻结/计算/发布三阶段；撤销标记和全部版本在发布短事务内重新验证。
     fn prepare_job(&self,cancel:Arc<std::sync::atomic::AtomicBool>)->Result<(),String> {
         let Some(document) = self
@@ -1340,24 +1368,26 @@ impl ExtensionOwner {
         else {
             return Err("document closed".into());
         };
-        let (model,edit,epoch,keys,input)={
+        let (model,edit,epoch,scope,keys,input)={
             let _transaction=document.transaction.lock().unwrap();
             if !document.ready.load(Ordering::Acquire) {return Ok(());}
             let edits=document.edits.lock().unwrap().clone();
             let (keys,input)=self.capture_render_input(&document,&edits,edits.revision>0)?;
-            (document.revision.load(Ordering::Acquire),edits.revision,document.render_epoch.load(Ordering::Acquire),keys,input)
+            (document.revision.load(Ordering::Acquire),edits.revision,document.render_epoch.load(Ordering::Acquire),document.scope_revision.load(Ordering::Acquire),keys,input)
         };
         for publisher in &self.snapshots {publisher.collect_retired();}
         let snapshots=input.render(cancel.clone())?;
         let _transaction=document.transaction.lock().unwrap();
         if cancel.load(Ordering::Acquire) || !document.ready.load(Ordering::Acquire) {return Ok(());}
         if document.revision.load(Ordering::Acquire)!=model || document.edits.lock().unwrap().revision!=edit
-            || document.render_epoch.load(Ordering::Acquire)!=epoch || self.assigned_regions().map_err(|e|e.to_string())?!=keys {
+            || document.render_epoch.load(Ordering::Acquire)!=epoch||document.scope_revision.load(Ordering::Acquire)!=scope
+            || self.assigned_regions().map_err(|e|e.to_string())?!=keys {
             // 跨轨接受新参数不一定有新的model callback；丢弃后补排最新任务，不能永久留空且假idle。
             self.prepare();return Ok(());
         }
         if !self.snapshots.iter().zip(&snapshots).all(|(p,s)|p.has_capacity(s)) {return Err("retired snapshot budget exhausted".into());}
         for (publisher,snapshot) in self.snapshots.iter().zip(snapshots) {publisher.publish(snapshot).map_err(|e|format!("snapshot publish failed: {e:?}"))?;}
+        self.record_prepared(model,edit,epoch,scope,keys.clone());
         log::info!("[ara] background snapshot ready role={} revision={edit} model={model} regions={}",self.role.load(Ordering::Relaxed),keys.len());
         Ok(())
     }

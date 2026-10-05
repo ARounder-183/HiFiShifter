@@ -35,12 +35,23 @@ impl PreparationQueue {
         let mut mailbox=self.state.mailbox.lock().unwrap();
         if mailbox.closed {return Err("host preparation closed".into());}
         if let Some(cancel)=&mailbox.active {cancel.store(true,Ordering::Release);}
-        mailbox.pending=Some(job);self.state.wake.notify_one();Ok(())
+        // worker与离线UI等待者共享Condvar但等待条件不同，必须唤醒全部以免只唤醒UI却遗留pending。
+        mailbox.pending=Some(job);self.state.wake.notify_all();Ok(())
     }
     /// 状态查询只读小邮箱，不能把失败当作已经准备成功。
     pub fn state(&self)->(bool,Option<String>) {
         let mailbox=self.state.mailbox.lock().unwrap();
         (mailbox.pending.is_some()||mailbox.active.is_some(),mailbox.error.clone())
+    }
+    /// 仅VST3离线setup的UI线程使用；Condvar等待后台工作，process/setProcessing不得调用。
+    pub fn wait_idle_until(&self,deadline:std::time::Instant)->Result<(),String> {
+        let mut mailbox=self.state.mailbox.lock().unwrap();
+        loop {
+            if mailbox.closed {return Err("host preparation closed".into());}
+            if mailbox.pending.is_none()&&mailbox.active.is_none() {return mailbox.error.clone().map_or(Ok(()),Err);}
+            let remaining=deadline.checked_duration_since(std::time::Instant::now()).ok_or("offline preparation timed out")?;
+            let (next,_)=self.state.wake.wait_timeout(mailbox,remaining).unwrap();mailbox=next;
+        }
     }
     /// 源/模型撤销取消当前与待办，但不终止worker，下一次授权可再次排队。
     pub fn cancel(&self) {
@@ -63,6 +74,15 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+    #[test]
+    fn offline_wait_reports_timeout_failure_and_close_without_running_work_on_caller() {
+        let queue=PreparationQueue::new().unwrap();let (entered,ready)=mpsc::channel();let (release,gate)=mpsc::channel();
+        queue.request(Box::new(move |_| {entered.send(()).unwrap();gate.recv_timeout(Duration::from_secs(3)).unwrap();Err("fixture infer failed".into())})).unwrap();
+        ready.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(queue.wait_idle_until(std::time::Instant::now()+Duration::from_millis(10)).unwrap_err().contains("timed out"));
+        release.send(()).unwrap();assert_eq!(queue.wait_idle_until(std::time::Instant::now()+Duration::from_secs(3)).unwrap_err(),"fixture infer failed");
+        queue.close();assert!(queue.wait_idle_until(std::time::Instant::now()+Duration::from_secs(1)).unwrap_err().contains("closed"));
+    }
 
     /// 如果任务在调用者执行、队列不合并或不能取消旧任务，这个真实邮箱测试失败。
     #[test]

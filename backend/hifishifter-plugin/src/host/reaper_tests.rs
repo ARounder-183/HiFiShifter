@@ -18,6 +18,7 @@ pub(crate) struct Fixture {
     change_at: Cell<usize>,
     missing: Cell<Option<&'static str>>,
     no_take: Cell<bool>,
+    no_project:Cell<bool>,
     bad_type: Cell<Option<&'static str>>,
     values: RefCell<BTreeMap<&'static str, f64>>,
     markers: RefCell<Vec<(f64, f64, f64)>>,
@@ -41,6 +42,7 @@ impl Fixture {
             change_at: Cell::new(0),
             missing: Cell::new(None),
             no_take: Cell::new(false),
+            no_project:Cell::new(false),
             bad_type: Cell::new(None),
             values: RefCell::new(BTreeMap::from([
                 ("D_POSITION", 1.),
@@ -180,7 +182,7 @@ unsafe extern "system" fn parent(this: *mut c_void, selector: u32) -> *mut c_voi
     let f = unsafe { &*this.cast::<Fixture>() };
     f.record(format!("parent:{selector}"));
     match selector {
-        3 => f.project(),
+        3 if !f.no_project.get() => f.project(),
         2 if !f.no_take.get() => f.take(),
         _ => std::ptr::null_mut(),
     }
@@ -343,6 +345,23 @@ unsafe extern "C" fn slope(take: *mut c_void, index: i32) -> f64 {
     f.markers.borrow()[index as usize].2
 }
 
+#[test]
+fn initialization_without_project_retains_interface_and_binds_only_the_later_direct_parent() {
+    let f=Fixture::new();f.no_project.set(true);let client=f.client();assert_eq!(f.references(),2);
+    f.reset();assert!(client.sample(||f.valid.get()).unwrap_err().contains("not attached"));
+    assert_eq!(f.calls(),["parent:3"],"不能把null传给API而暗中使用当前活动project");
+    f.no_project.set(false);f.reset();assert_eq!(client.sample(||f.valid.get()).unwrap(),(2.5,true));
+    assert!(f.calls().contains(&"parent:3".into()));
+    f.reset();client.sample(||f.valid.get()).unwrap();assert!(!f.calls().contains(&"parent:3".into()),"绑定后不跟随活动tab重新选项目");
+    drop(client);assert_eq!(f.references(),1);
+}
+#[test]
+fn deferred_project_query_reentry_cannot_bind_or_call_the_next_api() {
+    let f=Fixture::new();f.no_project.set(true);let client=f.client();f.no_project.set(false);f.reset();f.revoke_at.set(1);
+    assert!(client.sample(||f.valid.get()).is_err());assert_eq!(f.calls(),["parent:3"]);
+    assert_eq!(client.project.load(Ordering::Acquire),0,"外部调用撤销许可后不保存刚返回的parent");
+    drop(client);assert_eq!(f.references(),1);
+}
 #[test]
 fn task38a_native_geometry_preserves_direct_identity_new_fades_and_outside_raw_markers() {
     let f = Fixture::new();

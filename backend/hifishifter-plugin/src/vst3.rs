@@ -1026,10 +1026,10 @@ unsafe extern "system" fn audio_get_latency_samples(_this: *mut c_void) -> u32 {
 }
 
 unsafe extern "system" fn audio_setup_processing(
-    _this: *mut c_void,
+    this: *mut c_void,
     setup: *mut ProcessSetup,
 ) -> TResult {
-    if setup.is_null() {
+    if this.is_null()||setup.is_null() {
         return K_INVALID_ARGUMENT;
     }
     // SAFETY: 宿主提供调用期间可读的 SDK setup 结构。
@@ -1042,7 +1042,14 @@ unsafe extern "system" fn audio_setup_processing(
     if setup.symbolic_sample_size != 0 || ![44100.0, 48000.0].contains(&setup.sample_rate) {
         return K_RESULT_FALSE;
     }
-    crate::log_line("IAudioProcessor::setupProcessing");
+    crate::log_line(&format!("IAudioProcessor::setupProcessing mode={} rate={}",setup.process_mode,setup.sample_rate));
+    if setup.process_mode==2 {
+        // SAFETY: this为存活音频接口；SDK明确setup在UI线程/禁用状态调用。
+        let owner=unsafe {&(*base_from_audio(this)).extension_owner};
+        if let Err(error)=owner.prepare_offline_until(std::time::Instant::now()+std::time::Duration::from_secs(180)) {
+            crate::log_line(&format!("Offline preparation failed: {error}"));return K_RESULT_FALSE;
+        }
+    }
     K_RESULT_OK
 }
 
@@ -1075,7 +1082,7 @@ unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) ->
                 };
             }
             unsafe {crate::audio_abi::clear_outputs(data).expect("validated audio buffers");}
-            if data.process_context.is_null() { owner.snapshots[0].misses.fetch_add(1, Ordering::Relaxed); return K_RESULT_OK; }
+            if data.process_context.is_null() { owner.snapshots[0].misses.fetch_add(1, Ordering::Relaxed); return if data.process_mode==2 {K_RESULT_FALSE} else {K_RESULT_OK}; }
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*data.process_context };
             // REAPER停播也会process固定光标位置；只离线导出允许没有kPlaying的供音。
@@ -1084,7 +1091,8 @@ unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) ->
                 44100.0 => &owner.snapshots[0], 48000.0 => &owner.snapshots[1], _ => return K_RESULT_FALSE,
             };
             // SAFETY: 缓冲经 clear_outputs 校验，publisher 由 owner 保留。
-            unsafe { publisher.copy_block(context.project_time_samples, context.sample_rate as u32, &mut *data.outputs, data.num_samples as usize) };
+            let ready=unsafe { publisher.copy_block(context.project_time_samples, context.sample_rate as u32, &mut *data.outputs, data.num_samples as usize) };
+            if data.process_mode==2&&!ready {return K_RESULT_FALSE;}
             K_RESULT_OK
         },
         Err(crate::audio_abi::BufferError::InvalidArgument) => K_INVALID_ARGUMENT,
@@ -1730,6 +1738,50 @@ mod audio_boundary_tests {
         assert_eq!(allocations,0);
     }
 
+    /// 真实SDK入口验证离线setup等完整后台发布；普通setup不受doc事务/worker阻塞。
+    #[test]
+    fn offline_setup_waits_for_current_snapshot_and_reprepares_after_edit_revision_changes() {
+        use std::sync::mpsc;
+        let (model,owners,_ids)=crate::editor::session::tests::workspace_fixture();let document=model.session();
+        let pcm=document.edit_sources.lock().unwrap()["ara://source"].clone();document.sources.lock().unwrap().insert("ara://source".into(),pcm);
+        let mut processor=Processor::create().unwrap();processor.extension_owner=owners[0].clone();
+        // SAFETY: Box保留稳定处理器地址到离线setup测试线程join。
+        let audio=unsafe {audio_ptr(&mut *processor)};let held=document.transaction.lock().unwrap();owners[0].prepare();
+        let mut normal=ProcessSetup {process_mode:0,symbolic_sample_size:0,max_samples_per_block:1024,sample_rate:44100.};
+        assert_eq!(unsafe {(AUDIO_VTBL.setup_processing)(audio,&raw mut normal)},K_RESULT_OK,"普通setup不能等待doc/推理");
+        let pointer=audio as usize;let (done,rx)=mpsc::channel();
+        let job=std::thread::spawn(move || {let mut setup=ProcessSetup {process_mode:2,symbolic_sample_size:0,max_samples_per_block:1024,sample_rate:44100.};
+            // SAFETY: 主测试保留稳定Box/接口/owner到join；此线程模拟SDK的非实时setup调用。
+            let result=unsafe {(AUDIO_VTBL.setup_processing)(pointer as *mut c_void,&raw mut setup)};done.send(result).unwrap();});
+        assert!(rx.recv_timeout(std::time::Duration::from_millis(20)).is_err(),"不能在后台未完成时成功返回");drop(held);
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap(),K_RESULT_OK);job.join().unwrap();
+        assert!(owners[0].snapshots.iter().all(|snapshot|snapshot.is_ready()));
+        {let _transaction=document.transaction.lock().unwrap();let mut edits=document.edits.lock().unwrap();edits.revision+=1;
+            let mut track=document.timeline.lock().unwrap().as_ref().unwrap().tracks[0].clone();track.volume=0.5;edits.tracks=vec![track];}
+        let mut setup=ProcessSetup {process_mode:2,symbolic_sample_size:0,max_samples_per_block:1024,sample_rate:44100.};
+        assert_eq!(unsafe {(AUDIO_VTBL.setup_processing)(audio,&raw mut setup)},K_RESULT_OK);
+        let mut left=[9_f32;5];let mut right=[9_f32;5];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
+        let mut bus=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
+        let mut context=crate::audio_abi::ProcessContext {sample_rate:44100.,..Default::default()};
+        let mut data=ProcessData {process_mode:2,num_samples:4,num_outputs:1,outputs:&raw mut bus,process_context:&raw mut context,..Default::default()};
+        assert_eq!(unsafe {(AUDIO_VTBL.process)(audio,(&raw mut data).cast())},K_RESULT_OK);
+        document.close();
+        for (actual,want) in left[..4].iter().zip([0.05,0.1,0.15,0.2]) {assert!((*actual-want).abs()<1e-6);}
+        assert_eq!(left,right);assert_eq!(left[4],9.);
+    }
+    /// 离线缺快照/上下文必须显式失败；实时仍安全静音，全部回调保持零分配。
+    #[test]
+    fn offline_missing_snapshot_is_failure_not_successful_silence() {
+        let mut processor=Processor::create().unwrap();let mut left=[9_f32;4];let mut right=[9_f32;4];
+        let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];let mut bus=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
+        let mut context=crate::audio_abi::ProcessContext {sample_rate:44100.,..Default::default()};
+        let mut data=ProcessData {process_mode:2,num_samples:4,num_outputs:1,outputs:&raw mut bus,process_context:&raw mut context,..Default::default()};
+        crate::test_allocator::begin();let missing=unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())};
+        data.process_context=std::ptr::null_mut();let no_context=unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())};
+        data.process_mode=0;let realtime=unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())};
+        let allocations=crate::test_allocator::end();assert_eq!((missing,no_context,realtime),(K_RESULT_FALSE,K_RESULT_FALSE,K_RESULT_OK));
+        assert_eq!(allocations,0);assert_eq!(left,[0.;4]);assert_eq!(right,[0.;4]);
+    }
     /// 用真实接口子对象调用 process，避免测试绕过产品 vtable。
     fn run(data: *mut ProcessData) -> TResult {
         let mut processor = Processor::create().unwrap();
