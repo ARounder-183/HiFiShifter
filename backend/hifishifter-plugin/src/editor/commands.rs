@@ -68,6 +68,7 @@ fn after_write(session:&EditorSession,result:Value)->Result<Value,String> {
     if result["ok"]==false {return Err(result["error"].as_str().unwrap_or("parameter operation rejected").into());}
     if let Some(error)=session.error.lock().unwrap().clone() {return Err(error);}
     session.emit("history_state",history_state(session));
+    session.notify_timeline();
     Ok(result)
 }
 fn peaks(session:&EditorSession,path:&str)->Result<std::sync::Arc<hifishifter_kernel::hfspeaks_v2::HfsPeakFile>,String> {
@@ -157,12 +158,12 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
         "end_undo_group"=>{session.suppress_history.store(false,Ordering::Release);Ok(json!({"ok":true}))},
         "select_track"=>{
             let id=input["trackId"].as_str().ok_or("trackId missing")?;track_exists(session,id)?;
-            session.timeline.lock().unwrap().select_track(id);payload(session,false)
+            session.timeline.lock().unwrap().select_track(id);session.notify_timeline();payload(session,false)
         },
         "select_clip"=>{
             let id=input["clipId"].as_str().map(str::to_owned);
             if let Some(id)=&id {if !session.timeline.lock().unwrap().clips.iter().any(|c|&c.id==id) {return Err("unknown host clip".into());}}
-            session.timeline.lock().unwrap().select_clip(id);payload(session,false)
+            session.timeline.lock().unwrap().select_clip(id);session.notify_timeline();payload(session,false)
         },
         "set_transport"=>{
             if input["bpm"].is_number() {return Err("tempo is controlled by REAPER".into());}
@@ -231,6 +232,7 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
             if let Some((next,_,selection))=history::jump(&mut recorded,&timeline,target,intent,None) {
                 *timeline=next;drop(recorded);session.mark_dirty();session.publish_timeline(timeline.clone());drop(timeline);
                 session.emit("history_state",history_state(session));
+                session.notify_timeline();
                 let mut payload=payload(session,false)?;
                 if let Some(selection)=selection {payload["param_selection_restore"]=json!(selection);}
                 if let Some(error)=session.error.lock().unwrap().clone() {return Err(error);}Ok(payload)

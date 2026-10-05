@@ -24,22 +24,34 @@ impl Drop for RouteLease {
     fn drop(&mut self) { routes().lock().unwrap_or_else(|e|e.into_inner()).remove(&self.token); }
 }
 #[derive(Default)]
-pub(crate) struct EditorLink { token:Mutex<Option<String>> }
+struct Binding {token:Option<String>,generation:u64}
+#[derive(Default)]
+pub(crate) struct EditorLink { binding:Mutex<Binding> }
 impl EditorLink {
     /// PID与令牌都匹配真实本地组件才绑定；宿主代理传递消息但不能替代归属证据。
     pub fn bind(&self,pid:i64,token:&str)->Result<(),String> {
         if pid!=std::process::id() as i64 || token.len()!=64 { return Err("editor route is not local".into()); }
         let owner=routes().lock().unwrap_or_else(|e|e.into_inner()).get(token).and_then(Weak::upgrade);
         if owner.is_none() { return Err("editor route expired or unknown".into()); }
-        *self.token.lock().unwrap_or_else(|e|e.into_inner())=Some(token.to_owned());
+        let mut binding=self.binding.lock().unwrap_or_else(|e|e.into_inner());
+        binding.generation=binding.generation.checked_add(1).ok_or("editor route generation exhausted")?;
+        binding.token=Some(token.to_owned());
         Ok(())
     }
-    pub fn clear(&self) { *self.token.lock().unwrap_or_else(|e|e.into_inner())=None; }
+    pub fn clear(&self) {let mut binding=self.binding.lock().unwrap_or_else(|e|e.into_inner());binding.token=None;binding.generation=binding.generation.saturating_add(1);}
     /// 每次请求重新验证租约，杜绝组件已销毁但editor旧weak仍可升级的情况。
     pub fn owner(&self)->Result<Arc<ExtensionOwner>,String> {
-        let token=self.token.lock().unwrap_or_else(|e|e.into_inner()).clone().ok_or("FX editor not connected to its processor yet")?;
+        let token=self.binding.lock().unwrap_or_else(|e|e.into_inner()).token.clone().ok_or("FX editor not connected to its processor yet")?;
         routes().lock().unwrap_or_else(|e|e.into_inner()).get(&token).and_then(Weak::upgrade).filter(|owner|!owner.is_closed())
             .ok_or_else(||"FX processor closed".into())
+    }
+    /// 排队和执行各核对一次真实文档与绑定代次；clear/rebind不能为旧请求借新的组件入口。
+    pub(super) fn authorize(&self,document:&Arc<crate::render::document::DocumentSession>)->Result<u64,String> {
+        let binding=self.binding.lock().unwrap_or_else(|e|e.into_inner());
+        let token=binding.token.as_ref().ok_or("FX editor not connected to its processor yet")?;
+        let owner=routes().lock().unwrap_or_else(|e|e.into_inner()).get(token).and_then(Weak::upgrade).ok_or("FX processor closed")?;
+        if !Arc::ptr_eq(&owner.editor_document()?,document) {return Err("editor route belongs to another document".into());}
+        Ok(binding.generation)
     }
 }
 #[cfg(test)]

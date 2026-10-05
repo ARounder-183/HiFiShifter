@@ -1,4 +1,4 @@
-//! 内核异步事件按实例私有ID/源路径分流；不把另一FX的音高分析通知广播给当前GUI。
+//! 内核异步事件按文档私有ID/源路径分流；同文档全部活view共享事件，不跨工程广播。
 use super::session::EditorSession;
 use std::sync::{Arc,Mutex,OnceLock,Weak};
 struct Router {sessions:Mutex<Vec<Weak<EditorSession>>>}

@@ -1,5 +1,5 @@
-//! 插件实例的原编辑命令actor：UI只排队，分析/文件/离线渲染均不在音频或UI回调执行。
-use crate::render::extension::ExtensionOwner;
+//! 真实ARA文档共享原编辑命令actor：UI只排队，分析/文件/离线渲染均不在音频或UI回调执行。
+use crate::render::document::DocumentSession;
 use hifishifter_kernel::editor::{history,host_pcm::{materialize,PcmView},ParamHost};
 use hifishifter_kernel::state::*;
 use serde_json::{json,Value};
@@ -24,16 +24,17 @@ impl UiSink {
         if !self.closed.load(Ordering::Acquire) { let _=self.events.try_send(value); }
     }
 }
-pub(crate) struct UiRequest {pub id:u64,pub command:String,pub args:Value,pub sink:UiSink}
-enum Job {Request(UiRequest),Barrier(mpsc::Sender<()>),Close}
+pub(crate) struct UiRequest {pub id:u64,pub command:String,pub args:Value,pub sink:UiSink,pub link:Option<Arc<super::routing::EditorLink>>}
+enum Job {Request(UiRequest,Option<u64>),Barrier(mpsc::Sender<()>),Close}
+struct RegisteredView {sink:UiSink,route:Option<(Arc<super::routing::EditorLink>,u64)>}
 #[derive(Default)]
 struct Loaded {
-    initialized:bool,edit:u64,model:u64,
+    initialized:bool,edit:u64,model:u64,scope:u64,
     projection:String,
     reverse_paths:HashMap<String,String>,
 }
 pub(crate) struct EditorSession {
-    owner:Weak<ExtensionOwner>,
+    document:Weak<DocumentSession>,
     pub(super) timeline:Mutex<TimelineState>,
     pub(super) history:Mutex<TimelineHistory>,
     pub(super) project:Mutex<ProjectState>,
@@ -46,7 +47,7 @@ pub(crate) struct EditorSession {
     analysis_sender:mpsc::Sender<hifishifter_kernel::engine_command::EngineCommand>,
     analysis_updates:Mutex<mpsc::Receiver<hifishifter_kernel::engine_command::EngineCommand>>,
     analysis_cancel:Arc<AtomicBool>,analysis_workers:Mutex<Vec<std::thread::JoinHandle<()>>>,
-    views:Mutex<HashMap<String,UiSink>>,
+    views:Mutex<HashMap<String,RegisteredView>>,
     pub(super) generation:AtomicU64,
     submitted:AtomicU64,
     pub(super) applied:AtomicU64,
@@ -58,14 +59,14 @@ pub(crate) struct EditorSession {
     pub(super) suppress_history:AtomicBool,
 }
 impl EditorSession {
-    /// 每个组件唯一actor；worker只在收到任务时升级weak，不形成Arc自循环。
-    pub fn new(owner:&Arc<ExtensionOwner>)->Result<Arc<Self>,String> {
+    /// 每个真实文档唯一actor；worker与会话均用weak，不形成document→actor→document循环。
+    pub(crate) fn new(document:&Arc<DocumentSession>)->Result<Arc<Self>,String> {
         super::resources::initialize_models();
         static NEXT:AtomicU64=AtomicU64::new(1);
         let namespace=format!("hfs-ui-{}-{}-",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed));
         let (queue,receiver)=mpsc::sync_channel(32);
         let (analysis_sender,analysis_updates)=mpsc::channel();
-        let session=Arc::new(Self {owner:Arc::downgrade(owner),timeline:Mutex::new(TimelineState::default()),
+        let session=Arc::new(Self {document:Arc::downgrade(document),timeline:Mutex::new(TimelineState::default()),
             history:Mutex::new(Default::default()),project:Mutex::new(ProjectState::default()),
             settings:Mutex::new(hifishifter_kernel::config::UiSettings::default()),loaded:Mutex::new(Default::default()),
             pcm_dir:std::env::temp_dir().join("hifishifter-plugin-pcm").join(&namespace),namespace,
@@ -82,12 +83,22 @@ impl EditorSession {
         super::events::register(&session);
         Ok(session)
     }
-    /// 有界32任务FIFO；已排队的曲线写入在关FX后仍接受，只有响应/事件取消。
+    /// 有界32任务FIFO；关view取消回信，真实组件入口撤销则拒绝排队请求执行。
     pub fn enqueue(&self,request:UiRequest)->Result<(),String> {
         if self.closed.load(Ordering::Acquire) {return Err("FX processor closed".into());}
-        if super::commands::mutates_audio(&request.command) {self.submitted.fetch_add(1,Ordering::AcqRel);}
-        self.views.lock().unwrap().insert(request.sink.view_id.clone(),request.sink.clone());
-        self.queue.try_send(Job::Request(request)).map_err(|e|format!("editor queue unavailable: {e}"))
+        let document=self.document.upgrade().ok_or("document closed")?;
+        let lease=request.link.as_ref().map(|link|link.authorize(&document)).transpose()?;
+        if request.sink.view_id.is_empty() || (request.link.is_some() && request.sink.closed.load(Ordering::Acquire)) {return Err("editor view closed or unknown".into());}
+        let mut views=self.views.lock().unwrap();
+        if self.closed.load(Ordering::Acquire) {return Err("editor session closed".into());}
+        if request.link.is_some() && views.get(&request.sink.view_id).is_some_and(|view|!Arc::ptr_eq(&view.sink.closed,&request.sink.closed)) {
+            return Err("editor view identity mismatch".into());}
+        let sink=request.sink.clone();let route=request.link.clone().zip(lease);
+        let mutates=super::commands::mutates_audio(&request.command);
+        // 与worker的检查共用views锁；只有成功入队才登记view和推进合并票据。
+        self.queue.try_send(Job::Request(request,lease)).map_err(|e|format!("editor queue unavailable: {e}"))?;
+        views.insert(sink.view_id.clone(),RegisteredView {sink,route});
+        if mutates {self.submitted.fetch_add(1,Ordering::AcqRel);}Ok(())
     }
     /// getState的非实时屏障：先排完已收到的尾块，不需要等音频快照才持久化曲线。
     pub fn flush(&self)->Result<(),String> {
@@ -98,13 +109,13 @@ impl EditorSession {
     }
     pub fn close(&self) {
         if self.closed.swap(true,Ordering::AcqRel) {return;}
+        {let mut views=self.views.lock().unwrap();for view in views.values() {view.sink.closed.store(true,Ordering::Release);}views.clear();}
         self.analysis_cancel.store(true,Ordering::Release);
         self.submitted.fetch_add(1,Ordering::AcqRel);
         let _=self.queue.send(Job::Close);
         let worker=self.worker.lock().unwrap().take();
         if let Some(worker)=worker {if worker.thread().id()!=std::thread::current().id() {let _=worker.join();}}
         for worker in self.analysis_workers.lock().unwrap().drain(..) {let _=worker.join();}
-        self.views.lock().unwrap().clear();
     }
     fn run(weak:Weak<Self>,receiver:mpsc::Receiver<Job>) {
         let mut deadline:Option<Instant>=None;
@@ -118,11 +129,19 @@ impl EditorSession {
             match receiver.recv_timeout(wait) {
                 Ok(Job::Close)=>break,
                 Ok(Job::Barrier(sender))=>{let _=sender.send(());},
-                Ok(Job::Request(request))=>{
+                Ok(Job::Request(request,lease))=>{
                     let Some(session)=weak.upgrade() else {break;};
                     if session.closed.load(Ordering::Acquire) {break;}
                     let before=session.generation.load(Ordering::Acquire);
-                    let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||super::commands::dispatch(&session,&request.command,request.args)))
+                    let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if let Some(link)=&request.link {
+                            let document=session.document.upgrade().ok_or("document closed")?;
+                            if Some(link.authorize(&document)?)!=lease {return Err("editor route changed while request queued".into());}
+                            let views=session.views.lock().unwrap();
+                            if !views.get(&request.sink.view_id).is_some_and(|view|Arc::ptr_eq(&view.sink.closed,&request.sink.closed)) {return Err("editor view closed or unknown".into());}
+                        }
+                        super::commands::dispatch(&session,&request.command,request.args)
+                    }))
                         .unwrap_or_else(|_|Err("editor command panicked".into()));
                     session.schedule_analysis();
                     if session.generation.load(Ordering::Acquire)!=before {deadline=Some(Instant::now()+Duration::from_millis(150));}
@@ -166,25 +185,25 @@ impl EditorSession {
             }) {return Err("pitch analysis pending".into());}
         }
         let (edit,model,projection)={let loaded=self.loaded.lock().unwrap();(loaded.edit,loaded.model,loaded.projection.clone())};
-        self.owner.upgrade().ok_or("processor closed")?.apply_editor_edits(edit,model,
+        self.document.upgrade().ok_or("document closed")?.apply_workspace_edits(edit,model,
             &projection,
             self.analysis_cancel.clone(),
             ||!self.closed.load(Ordering::Acquire) && self.submitted.load(Ordering::Acquire)==ticket)
     }
     pub(super) fn ensure_loaded(&self,force:bool)->Result<(),String> {
-        let owner=self.owner.upgrade().ok_or("processor closed")?;
-        let versions=owner.editor_versions()?;
+        let document=self.document.upgrade().ok_or("document closed")?;
+        let versions=document.editor_versions()?;
         {
             let mut loaded=self.loaded.lock().unwrap();
-            if loaded.initialized && (loaded.edit,loaded.model)==versions && !force {return Ok(());}
-            if loaded.initialized && loaded.model==versions.1 && !force && owner.editor_projection()?==loaded.projection {
+            if loaded.initialized && (loaded.edit,loaded.model,loaded.scope)==versions && !force {return Ok(());}
+            if loaded.initialized && loaded.model==versions.1 && loaded.scope==versions.2 && !force && document.workspace_projection()?==loaded.projection {
                 loaded.edit=versions.0;return Ok(());
             }
             if loaded.initialized && !force && self.generation.load(Ordering::Acquire)!=self.applied.load(Ordering::Acquire) {
                 return Err("Conflict: host changed; local curves preserved, reload explicitly".into());
             }
         }
-        let snapshot=owner.handle_request(hifishifter_ara_ipc::Request::Snapshot);
+        let (snapshot,scope,projection)=document.workspace_snapshot()?;
         if !snapshot.ok {return Err(snapshot.error.unwrap_or_else(||"host snapshot unavailable".into()));}
         let mut timeline:TimelineState=serde_json::from_value(snapshot.timeline.ok_or("host timeline missing")?).map_err(|e|e.to_string())?;
         // 快照只序列化take权威；先重建扁平投影，再判断真实的倒放/组合倍率。
@@ -203,8 +222,7 @@ impl EditorSession {
         if timeline.selected_clip_id.is_none() {timeline.selected_clip_id=timeline.clips.first().map(|c|c.id.clone());}
         *self.timeline.lock().unwrap()=timeline;
         *self.history.lock().unwrap()=Default::default();
-        let projection=owner.editor_projection()?;
-        *self.loaded.lock().unwrap()=Loaded {initialized:true,edit:snapshot.revision,model:snapshot.model_revision,reverse_paths,projection};
+        *self.loaded.lock().unwrap()=Loaded {initialized:true,edit:snapshot.revision,model:snapshot.model_revision,scope,reverse_paths,projection};
         *self.error.lock().unwrap()=None;
         self.applied.store(self.generation.load(Ordering::Acquire),Ordering::Release);
         self.peaks.lock().unwrap().clear();
@@ -215,10 +233,10 @@ impl EditorSession {
     }
     /// 稳定模型变化在后台自动读取；pending曲线遇到真实冲突保留，不静默强制重载。
     fn refresh_host(&self) {
-        let Some(owner)=self.owner.upgrade() else {return;};
-        let (initialized,edit,model)={let loaded=self.loaded.lock().unwrap();(loaded.initialized,loaded.edit,loaded.model)};
+        let Some(document)=self.document.upgrade() else {return;};
+        let (initialized,edit,model,scope)={let loaded=self.loaded.lock().unwrap();(loaded.initialized,loaded.edit,loaded.model,loaded.scope)};
         if !initialized {return;}
-        if owner.editor_versions().is_ok_and(|versions|versions!=(edit,model)) {
+        if document.editor_versions().is_ok_and(|versions|versions!=(edit,model,scope)) {
             if let Err(error)=self.ensure_loaded(false) {
                 if error.starts_with("Conflict") || error.starts_with("Unsupported") {
                     let changed={let mut current=self.error.lock().unwrap();let changed=current.as_deref()!=Some(error.as_str());*current=Some(error);changed};
@@ -226,7 +244,7 @@ impl EditorSession {
                 }
             }
         }
-        if let Some(tempo)=owner.clock.get().and_then(|clock|clock.tempo()) {
+        if let Some(tempo)=document.clock.tempo() {
             let changed={let mut timeline=self.timeline.lock().unwrap();let changed=(timeline.bpm-tempo).abs()>1e-6;timeline.bpm=tempo;changed};
             if changed {self.host_version.fetch_add(1,Ordering::AcqRel);self.emit("plugin_host_changed",json!({"version":self.host_version.load(Ordering::Acquire)}));}
         }
@@ -284,7 +302,7 @@ impl EditorSession {
     }
     /// GUI读取真实宿主时钟，不驱动独立设备；未收到process上下文时保留本地查看游标。
     pub(super) fn transport(&self)->(f64,bool) {
-        self.owner.upgrade().and_then(|o|o.clock.get().map(|clock|clock.read()))
+        self.document.upgrade().filter(|document|document.is_alive()).map(|document|document.clock.read())
             .unwrap_or_else(||(self.timeline.lock().unwrap().playhead_sec,false))
     }
     /// 一次性时钟探针最多每秒写一条；只在命令actor线程调用，不在音频callback写文件。
@@ -292,7 +310,7 @@ impl EditorSession {
         if !self.transport_probe {return;}
         let now=Instant::now();let mut next=self.transport_probe_next.lock().unwrap();
         if now<*next {return;}*next=now+Duration::from_secs(1);drop(next);
-        if let Some(clock)=self.owner.upgrade().and_then(|owner|owner.clock.get().cloned()) {
+        if let Some(clock)=self.document.upgrade().map(|document|document.clock.clone()) {
             log::info!("[ara] transport diagnostic {}",clock.diagnostics());
         }
     }
@@ -318,12 +336,21 @@ impl EditorSession {
         Ok(timeline)
     }
     pub(super) fn emit(&self,event:&str,payload:Value) {
-        let views={let mut views=self.views.lock().unwrap();views.retain(|_,sink|!sink.closed.load(Ordering::Acquire));views.values().cloned().collect::<Vec<_>>()};
+        let document=self.document.upgrade();
+        let views={let mut views=self.views.lock().unwrap();views.retain(|_,view|!view.sink.closed.load(Ordering::Acquire)
+            && view.route.as_ref().is_none_or(|(link,lease)|document.as_ref().is_some_and(|document|link.authorize(document).is_ok_and(|current|current==*lease))));
+            views.values().map(|view|view.sink.clone()).collect::<Vec<_>>()};
         for sink in views {sink.event(json!({"version":1,"viewId":sink.view_id,"event":event,"payload":payload}));}
+    }
+    /// 复用原GUI已订阅的刷新事件；共享选轨/曲线变化让所有视图重取同一个权威payload。
+    pub(super) fn notify_timeline(&self) {
+        self.host_version.fetch_add(1,Ordering::AcqRel);
+        self.emit("plugin_host_changed",json!({"version":self.host_version.load(Ordering::Acquire)}));
     }
     pub(super) fn state(&self)->Value {
         let generation=self.generation.load(Ordering::Acquire);let applied=self.applied.load(Ordering::Acquire);
-        let (host_pending,host_error)=self.owner.upgrade().map(|owner|owner.preparation_state()).unwrap_or((false,None));
+        let states=self.document.upgrade().map(|document|document.renderer_owners().into_iter().map(|owner|owner.preparation_state()).collect::<Vec<_>>()).unwrap_or_default();
+        let host_pending=states.iter().any(|state|state.0);let host_error=states.into_iter().find_map(|state|state.1);
         json!({"generation":generation,"applied_generation":applied,"pending":generation!=applied||host_pending,
             "host_version":self.host_version.load(Ordering::Acquire),
             "error":self.error.lock().unwrap().clone().or(host_error),"connected":!self.closed.load(Ordering::Acquire),
@@ -342,7 +369,7 @@ impl ParamHost for EditorSession {
         let result=(|| {
             let timeline=self.native_timeline(timeline)?;
             let (edit,model,projection)={let loaded=self.loaded.lock().unwrap();(loaded.edit,loaded.model,loaded.projection.clone())};
-            let versions=self.owner.upgrade().ok_or("processor closed")?.accept_editor_edits(edit,model,&timeline,&projection)?;
+            let versions=self.document.upgrade().ok_or("document closed")?.accept_workspace_edits(edit,model,&timeline,&projection)?;
             let mut loaded=self.loaded.lock().unwrap();loaded.edit=versions.0;loaded.model=versions.1;loaded.projection=versions.2;
             *self.error.lock().unwrap()=None;
             Ok::<_,String>(())
@@ -354,6 +381,7 @@ impl ParamHost for EditorSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::extension::ExtensionOwner;
     use crate::ara::model::ModelHandle;
     use crate::render::ownership::region_owners;
     use crate::render::source::SourcePcm;
@@ -389,9 +417,168 @@ mod tests {
         (model,owner,identity)
     }
     fn call(editor:&EditorSession,sink:&UiSink,receiver:&mpsc::Receiver<Value>,id:u64,command:&str,args:Value)->Value {
-        editor.enqueue(UiRequest {id,command:command.into(),args,sink:sink.clone()}).unwrap();
+        editor.enqueue(UiRequest {id,command:command.into(),args,sink:sink.clone(),link:None}).unwrap();
         let result=receiver.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(result["id"],id);assert_eq!(result["ok"],true,"{result}");result["value"].clone()
+    }
+    /// 两真实组件使用同源的不同区域，测试原actor而不是拼接UI快照。
+    fn workspace_fixture()->(ModelHandle,Vec<Arc<ExtensionOwner>>,Vec<Box<u8>>) {
+        let (model,a,first)=fixture();let document=model.session();
+        {let mut host=document.timeline.lock().unwrap();let host=host.as_mut().unwrap();
+            let mut track=host.tracks[0].clone();track.id="b".into();track.order=1;host.tracks.push(track);
+            let mut clip=host.clips[0].clone();clip.id="cb".into();clip.track_id="b".into();host.clips.push(clip);}
+        document.track_bindings.lock().unwrap().insert("b".into(),vec![("modification-b".into(),"ara://source".into())]);
+        let second=Box::new(0_u8);let key=(&*second as *const u8) as u64;
+        region_owners().lock().unwrap().register(key,document.id,1).unwrap();
+        document.clip_ids.lock().unwrap().insert(key,"cb".into());
+        let region=document.regions.lock().unwrap().values().next().unwrap().clone();document.regions.lock().unwrap().insert(key,region);
+        let b=Arc::new(ExtensionOwner::default());let raw=b.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::PLAYBACK_RENDERER|ExtensionRoles::EDITOR_RENDERER,None).unwrap();
+        // SAFETY: 模型、两owner和真实region身份由返回值保留。
+        unsafe {let ext=&*raw;((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(ext.playbackRendererRef,key as *mut _);}
+        (model,vec![a,b],vec![first,second])
+    }
+    #[test]
+    fn workspace_components_share_the_original_actor_and_cross_track_history() {
+        let (_model,owners,_ids)=workspace_fixture();let a=owners[0].editor_session().unwrap();let b=owners[1].editor_session().unwrap();
+        assert!(Arc::ptr_eq(&a,&b),"同文档必须只有一个actor/history权威");
+        let (_other,owner,_id)=fixture();assert!(!Arc::ptr_eq(&a,&owner.editor_session().unwrap()));
+        let (reply,rx)=mpsc::channel();let (events,event_rx)=mpsc::sync_channel(128);
+        let sa=UiSink {view_id:"workspace-a".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        let (reply,rb)=mpsc::channel();let (events,eb)=mpsc::sync_channel(128);
+        let sb=UiSink {view_id:"workspace-b".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        let leases=owners.iter().map(|owner|super::super::routing::RouteLease::new(owner)).collect::<Vec<_>>();
+        let links=leases.iter().map(|lease| {let link=Arc::new(super::super::routing::EditorLink::default());
+            link.bind(std::process::id() as i64,lease.token()).unwrap();link}).collect::<Vec<_>>();
+        let call=|editor:&EditorSession,sink:&UiSink,receiver:&mpsc::Receiver<Value>,id:u64,command:&str,args:Value| {
+            let link=links[usize::from(sink.view_id=="workspace-b")].clone();
+            editor.enqueue(UiRequest {id,command:command.into(),args,sink:sink.clone(),link:Some(link)}).unwrap();
+            let result=receiver.recv_timeout(Duration::from_secs(5)).unwrap();assert_eq!(result["id"],id);assert_eq!(result["ok"],true,"{result}");result["value"].clone()
+        };
+        let loaded=call(&a,&sa,&rx,1,"get_timeline_state",json!({}));assert_eq!(loaded["tracks"].as_array().unwrap().len(),2);
+        let ta=loaded["tracks"][0]["id"].as_str().unwrap();let tb=loaded["tracks"][1]["id"].as_str().unwrap();
+        call(&a,&sa,&rx,2,"set_param_frames",json!({"trackId":tb,"param":"pitch","startFrame":0,"values":[64.],"checkpoint":false}));
+        call(&a,&sa,&rx,3,"select_track",json!({"trackId":tb}));
+        call(&a,&sa,&rx,4,"set_param_frames",json!({"trackId":ta,"param":"pitch","startFrame":0,"values":[60.],"checkpoint":true}));
+        let second=call(&b,&sb,&rb,5,"get_timeline_state",json!({}));assert_eq!(second["selected_track_id"],tb);assert_eq!(second["undo_depth"],1);
+        event_rx.try_iter().for_each(drop);eb.try_iter().for_each(drop);
+        call(&b,&sb,&rb,6,"set_param_frames",json!({"trackId":tb,"param":"pitch","startFrame":0,"values":[67.],"checkpoint":true}));
+        assert!(event_rx.try_iter().any(|e|e["event"]=="plugin_host_changed"),"其它view需要收到原GUI时间线刷新事件");
+        assert!(eb.try_iter().any(|e|e["event"]=="plugin_host_changed"));
+        call(&a,&sa,&rx,7,"undo_timeline",json!({}));
+        assert_eq!(a.timeline.lock().unwrap().params_by_root_track[ta].pitch_edit[0],60.);
+        assert_eq!(a.timeline.lock().unwrap().params_by_root_track[tb].pitch_edit[0],64.);
+        call(&b,&sb,&rb,8,"redo_timeline",json!({}));assert_eq!(a.timeline.lock().unwrap().params_by_root_track[tb].pitch_edit[0],67.);
+        assert!(event_rx.try_iter().any(|e|e["event"]=="history_state"));assert!(eb.try_iter().any(|e|e["event"]=="history_state"));
+        owners[0].stop_editor();assert!(!a.closed.load(Ordering::Acquire),"关闭组件不能停止共享actor");
+        assert!(call(&b,&sb,&rb,9,"get_ui_settings",json!({})).is_object());
+        a.close();
+    }
+    #[test]
+    fn workspace_queued_requests_revalidate_original_routes_and_reject_unknown_views() {
+        use super::super::routing::{EditorLink,RouteLease};
+        let (model,owners,_ids)=workspace_fixture();let editor=owners[0].editor_session().unwrap();editor.ensure_loaded(false).unwrap();
+        let ra=RouteLease::new(&owners[0]);let rb=RouteLease::new(&owners[1]);
+        let link=Arc::new(EditorLink::default());link.bind(std::process::id() as i64,ra.token()).unwrap();
+        let (reply,receiver)=mpsc::channel();let (events,_)=mpsc::sync_channel(128);
+        let sink=UiSink {view_id:"workspace-route".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        // 真实命令在timeline锁上停住，随后命令一定排队；clear/bind不需持document事务。
+        let held=editor.timeline.lock().unwrap();
+        editor.enqueue(UiRequest {id:1,command:"get_timeline_state".into(),args:json!({}),sink:sink.clone(),link:Some(link.clone())}).unwrap();
+        let track=held.tracks[0].id.clone();
+        editor.enqueue(UiRequest {id:2,command:"set_param_frames".into(),args:json!({"trackId":track,"param":"pitch","startFrame":0,"values":[60.],"checkpoint":true}),sink:sink.clone(),link:Some(link.clone())}).unwrap();
+        link.clear();link.bind(std::process::id() as i64,rb.token()).unwrap();drop(held);
+        let mut results=vec![receiver.recv_timeout(Duration::from_secs(5)).unwrap(),receiver.recv_timeout(Duration::from_secs(5)).unwrap()];
+        results.sort_by_key(|r|r["id"].as_u64().unwrap());assert_eq!(results[1]["ok"],false,"排队入口不能重新绑定别的组件继续写入");
+        assert_eq!(model.session().edits.lock().unwrap().revision,0);
+        drop(rb);
+        assert!(editor.enqueue(UiRequest {id:3,command:"get_ui_settings".into(),args:json!({}),sink:sink.clone(),link:Some(link.clone())}).is_err(),"过期route拒绝入队");
+        let unknown=Arc::new(EditorLink::default());
+        assert!(editor.enqueue(UiRequest {id:4,command:"get_ui_settings".into(),args:json!({}),sink:sink.clone(),link:Some(unknown)}).is_err());
+        link.bind(std::process::id() as i64,ra.token()).unwrap();
+        editor.enqueue(UiRequest {id:5,command:"get_ui_settings".into(),args:json!({}),sink:sink.clone(),link:Some(link.clone())}).unwrap();
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(5)).unwrap()["ok"],true);
+        let (reply,_)=mpsc::channel();let (events,_)=mpsc::sync_channel(8);
+        let forged=UiSink {view_id:sink.view_id.clone(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        assert!(editor.enqueue(UiRequest {id:6,command:"get_ui_settings".into(),args:json!({}),sink:forged,link:Some(link.clone())}).is_err());
+        sink.closed.store(true,Ordering::Release);
+        assert!(editor.enqueue(UiRequest {id:7,command:"get_ui_settings".into(),args:json!({}),sink,link:Some(link)}).is_err());
+        editor.close();
+    }
+    #[test]
+    fn workspace_queued_origin_close_cannot_borrow_the_other_live_component() {
+        let (_model,owners,_ids)=workspace_fixture();let editor=owners[0].editor_session().unwrap();editor.ensure_loaded(false).unwrap();
+        let lease=super::super::routing::RouteLease::new(&owners[0]);let link=Arc::new(super::super::routing::EditorLink::default());
+        link.bind(std::process::id() as i64,lease.token()).unwrap();
+        let (reply,receiver)=mpsc::channel();let (events,event_rx)=mpsc::sync_channel(128);
+        let sink=UiSink {view_id:"workspace-origin-close".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        let held=editor.timeline.lock().unwrap();
+        editor.enqueue(UiRequest {id:1,command:"get_timeline_state".into(),args:json!({}),sink:sink.clone(),link:Some(link.clone())}).unwrap();
+        editor.enqueue(UiRequest {id:2,command:"get_ui_settings".into(),args:json!({}),sink:sink.clone(),link:Some(link)}).unwrap();
+        owners[0].stop_editor();drop(held);
+        let first=receiver.recv_timeout(Duration::from_secs(5)).unwrap();let second=receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(first["id"],1);assert_eq!(second["id"],2);assert_eq!(second["ok"],false);
+        assert_eq!(second["error"],"FX processor closed");assert!(!editor.closed.load(Ordering::Acquire));
+        assert!(Arc::ptr_eq(&editor,&owners[1].editor_session().unwrap()));
+        assert!(event_rx.try_iter().next().is_none(),"入口撤销后不能通过共享actor继续订阅事件");editor.close();
+    }
+    #[test]
+    fn workspace_document_close_joins_actor_revokes_views_and_releases_model_pcm() {
+        let (model,owners,_ids)=workspace_fixture();let document=model.session();let weak=Arc::downgrade(&document);
+        let editor=owners[0].editor_session().unwrap();let (reply,receiver)=mpsc::channel();let (events,_)=mpsc::sync_channel(128);
+        let sink=UiSink {view_id:"workspace-lifecycle".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        call(&editor,&sink,&receiver,1,"get_timeline_state",json!({}));
+        let started=Instant::now();document.close();
+        assert!(started.elapsed()<Duration::from_secs(3),"document close应join而不持事务等待actor");
+        assert!(editor.worker.lock().unwrap().is_none());assert!(editor.analysis_workers.lock().unwrap().is_empty());
+        assert!(document.timeline.lock().unwrap().is_none());assert!(document.edit_sources.lock().unwrap().is_empty());
+        assert!(sink.closed.load(Ordering::Acquire),"文档关闭撤销全部view回信/事件");
+        assert!(owners[1].editor_session().is_err());assert!(document.workspace_projection().is_err());
+        drop(document);drop(model);assert!(weak.upgrade().is_none(),"actor不能强持document");
+    }
+    #[test]
+    fn workspace_scope_and_geometry_checks_reject_partial_or_stale_transactions() {
+        let (model,owners,_ids)=workspace_fixture();let document=model.session();let host=document.workspace_timeline().unwrap();
+        let previous=document.workspace_projection().unwrap();let version=document.revision.load(Ordering::Acquire);
+        for changed in 0..5 {
+            let mut client=host.clone();match changed {
+                0=>{client.tracks.pop();},1=>client.tracks[1]=client.tracks[0].clone(),
+                2=>{client.clips.pop();},3=>client.clips[0].takes[0].source_path=Some("C:/private.wav".into()),
+                _=>client.clips[0].takes[0].playback_rate=2.,
+            }
+            assert!(document.accept_workspace_edits(0,version,&client,&previous).is_err());
+            assert_eq!(document.edits.lock().unwrap().revision,0,"拒绝前不能部分提交");
+        }
+        owners[0].stop_editor();assert_eq!(document.revision.load(Ordering::Acquire),version);
+        assert!(document.accept_workspace_edits(0,version,&host,&previous).unwrap_err().starts_with("Conflict"),"scope必须独立于model校验");
+        assert_eq!(document.edits.lock().unwrap().revision,0);
+    }
+    #[test]
+    fn workspace_accept_rejects_forged_geometry_before_changing_document_edits() {
+        let (model,_owners,_ids)=workspace_fixture();let document=model.session();
+        let projection=document.workspace_projection().unwrap();
+        let mut client=document.workspace_timeline().unwrap();
+        client.clips[0].start_sec=42.;
+        assert!(document.accept_workspace_edits(0,document.revision.load(Ordering::Acquire),&client,&projection).is_err(),"宿主几何必须拒绝而不是忽略");
+        assert_eq!(document.edits.lock().unwrap().revision,0);
+    }
+    #[test]
+    fn workspace_global_solo_keeps_each_renderer_output_independent() {
+        let (_model,owners,_ids)=workspace_fixture();let editor=owners[0].editor_session().unwrap();
+        let (reply,receiver)=mpsc::channel();let (events,_)=mpsc::sync_channel(128);
+        let sink=UiSink {view_id:"workspace-solo".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        let timeline=call(&editor,&sink,&receiver,1,"get_timeline_state",json!({}));
+        let track=timeline["tracks"][0]["id"].as_str().unwrap();
+        call(&editor,&sink,&receiver,2,"set_track_state",json!({"trackId":track,"solo":true,"volume":0.5}));
+        let deadline=Instant::now()+Duration::from_secs(5);
+        while editor.applied.load(Ordering::Acquire)<1 {assert!(Instant::now()<deadline,"{:?}",editor.error.lock().unwrap());std::thread::sleep(Duration::from_millis(5));}
+        let outputs=owners.iter().map(|owner| {
+            let mut left=[9.;4];let mut right=[9.;4];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
+            let mut bus=crate::audio_abi::AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
+            // SAFETY: 每个publisher仅写本次提供的两个四帧平面。
+            assert!(unsafe {owner.snapshots[0].copy_block(0,44100,&mut bus,4)});left
+        }).collect::<Vec<_>>();
+        assert_eq!(outputs[0],[0.05,0.1,0.15,0.2]);assert_eq!(outputs[1],[0.;4],"其它轨solo不能在本renderer投影后丢失");
+        editor.close();
     }
     #[test]
     fn actor_accepts_original_curve_and_save_flush_keeps_tail_after_ui_closed() {
@@ -404,7 +591,7 @@ mod tests {
         assert_ne!(timeline["clips"][0]["source_path"],"ara://source");
         call(&editor,&sink,&receiver,2,"set_param_frames",json!({"trackId":track,"param":"pitch","startFrame":0,"values":[60.0],"checkpoint":true}));
         sink.closed.store(true,Ordering::Release);
-        editor.enqueue(UiRequest {id:3,command:"set_param_frames".into(),args:json!({"trackId":track,"param":"pitch","startFrame":1,"values":[64.0],"checkpoint":false}),sink}).unwrap();
+        editor.enqueue(UiRequest {id:3,command:"set_param_frames".into(),args:json!({"trackId":track,"param":"pitch","startFrame":1,"values":[64.0],"checkpoint":false}),sink,link:None}).unwrap();
         let encoded=owner.encode_state().unwrap(); // 真getState路径会flush，不只测手工barrier。
         let saved:Value=serde_json::from_slice(&encoded).unwrap();
         assert_eq!(saved["version"],2);
@@ -525,7 +712,7 @@ mod tests {
         call(&editor,&sink,&receiver,5,"redo_timeline",json!({}));wait(4);
         for (actual,want) in output().0.into_iter().zip([0.05,0.1,0.15,0.2]) {assert!((actual-want).abs()<1e-6);}
         sink.closed.store(true,Ordering::Release);
-        editor.enqueue(UiRequest {id:6,command:"set_track_state".into(),args:json!({"trackId":track,"muted":true}),sink}).unwrap();
+        editor.enqueue(UiRequest {id:6,command:"set_track_state".into(),args:json!({"trackId":track,"muted":true}),sink,link:None}).unwrap();
         wait(5);assert_eq!(output().0,[0.;4],"关UI取消响应，不能取消已排参数或后台供音");
         editor.close();
     }

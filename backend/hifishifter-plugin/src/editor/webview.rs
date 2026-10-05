@@ -429,7 +429,7 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
                 let (link,sink,full)={let state=state.borrow();(state.link.clone(),state.sink.clone(),state.pending.len()>=32 || state.pending.contains(&id))};
                 let outcome=if full {Err("native pending request budget exceeded".into())} else {
                     link.owner().and_then(|owner|owner.editor_session()?.enqueue(super::session::UiRequest {
-                        id,command:command.into(),args:request.get("args").cloned().unwrap_or_else(||serde_json::json!({})),sink,
+                        id,command:command.into(),args:request.get("args").cloned().unwrap_or_else(||serde_json::json!({})),sink,link:Some(link.clone()),
                     }))
                 };
                 match outcome {
