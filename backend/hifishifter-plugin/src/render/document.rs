@@ -108,6 +108,10 @@ impl DocumentSession {
     pub(crate) fn flush_editor(&self)->Result<(),String> {
         if let Some(Ok(editor))=self.editor.get() {editor.flush()?;}Ok(())
     }
+    /// 组件撤销只关闭失效入口的view，不创建actor也不停止同文档其它入口。
+    pub(crate) fn revoke_editor_views(&self) {
+        if let Some(Ok(editor))=self.editor.get() {editor.revoke_closed_views();}
+    }
     /// edit/model/scope分开计数；assignment变更不能由相同model误判成未变。
     pub(crate) fn editor_versions(&self)->Result<(u64,u64,u64),String> {
         let _transaction=self.transaction.lock().unwrap();
@@ -261,6 +265,8 @@ impl DocumentSession {
         self.regions.lock().unwrap().clear();
         self.clip_ids.lock().unwrap().clear();
         self.timeline.lock().unwrap().take();
+        self.track_bindings.lock().unwrap().clear();
+        *self.edits.lock().unwrap()=Default::default();
         self.sources.lock().unwrap().clear();
         self.edit_sources.lock().unwrap().clear();
     }

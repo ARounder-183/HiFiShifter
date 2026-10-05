@@ -53,6 +53,58 @@ mod bound_tests {
         input.render(Arc::new(std::sync::atomic::AtomicBool::new(false)))
     }
 
+    /// 只读提取已提交REAPER旧归档的原始组件JSON，不调用当前encoder生成兼容证据。
+    fn task34_archived_v2_states()->Vec<Vec<u8>> {
+        use base64::Engine as _;
+        let mut chunks=Vec::new();let mut states=Vec::new();let mut inside=false;
+        for line in include_str!("../../../../probe/ara/captures/gui-keyboard-edited.RPP").lines().map(str::trim) {
+            if line.starts_with("<VST ") {inside=true;chunks.clear();continue;}
+            if !inside {continue;}
+            if line==">" {
+                let start=chunks.windows(b"{\"edits\":".len()).position(|bytes|bytes==b"{\"edits\":").unwrap();
+                let length=u32::from_le_bytes(chunks[start-4..start].try_into().unwrap()) as usize;
+                states.push(chunks[start..start+length].to_vec());inside=false;
+            } else {chunks.extend(base64::engine::general_purpose::STANDARD.decode(line).unwrap());}
+        }
+        assert_eq!(states.iter().map(Vec::len).collect::<Vec<_>>(),[481,22516]);states
+    }
+
+    /// 两条归档记录共享完全相同的旧source/modification身份，必须由真实assignment限定恢复目标。
+    #[test]
+    fn task34_archived_v2_bytes_rebind_only_inside_the_component_scope() {
+        let states=task34_archived_v2_states();
+        let (model,owners,_ids)=crate::editor::session::tests::workspace_fixture();let document=model.session();
+        let archived:serde_json::Value=serde_json::from_slice(&states[0]).unwrap();
+        let identity:Vec<(String,String)>=serde_json::from_value(archived["edits"]["bindings"]["ara-track-0"].clone()).unwrap();
+        *document.track_bindings.lock().unwrap()=std::collections::BTreeMap::from([("track".into(),identity.clone()),("b".into(),identity.clone())]);
+        // 与宿主冷重建一致：完整图ready前暂存全部组件原始bytes，随后统一合入权威。
+        document.ready.store(false,Ordering::Release);
+        for (owner,bytes) in owners.iter().zip(&states) {owner.restore_state(bytes).unwrap();}
+        document.prepare_renderers();
+        let accepted=document.edits.lock().unwrap().clone();
+        assert!(accepted.params.get("track").is_none(),"旧A无曲线，不能借旧轨序号取到B曲线");
+        assert_eq!(accepted.params["b"].pitch_edit.len(),800);assert_eq!(&accepted.params["b"].pitch_edit[200..212],&[64.;12]);
+        assert!(accepted.tracks.iter().all(|track|track.id=="track"||track.id=="b"));
+        for (index,id) in ["track","b"].into_iter().enumerate() {
+            let bytes=owners[index].encode_state().unwrap();let saved:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(saved["version"],2);assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(),1);
+            assert_eq!(saved["edits"]["tracks"][0]["id"],id);assert_eq!(saved["edits"]["bindings"].as_object().unwrap().len(),1);
+            assert_eq!(saved["edits"]["params"].as_object().unwrap().len(),index);
+        }
+        // 真正扩大同一组件assignment，使两个完全相同身份同时进入候选集，必须拒绝合入。
+        let key=(&*_ids[1] as *const u8) as u64;
+        let raw=owners[0].binding.lock().unwrap().as_ref().unwrap().as_raw();
+        unsafe {let ext=&*raw;((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(ext.playbackRendererRef,key as *mut _);}
+        let before=document.edits.lock().unwrap().revision;
+        owners[0].restore_state(&states[1]).unwrap();assert!(owners[0].encode_state().unwrap_err().contains("ambiguous"));
+        assert_eq!(document.edits.lock().unwrap().revision,before);assert_eq!(document.edits.lock().unwrap().params["b"].pitch_edit[200],64.);
+        // 缺少真实身份也不能按归档旧序号恢复；既有曲线留在权威中。
+        document.track_bindings.lock().unwrap().insert("track".into(),vec![("unknown-mod".into(),"ara://source".into())]);
+        document.track_bindings.lock().unwrap().insert("b".into(),vec![("unknown-b".into(),"ara://source".into())]);
+        assert!(owners[0].encode_state().unwrap_err().contains("identity"));
+        assert_eq!(document.edits.lock().unwrap().params["b"].pitch_edit[200],64.);document.close();
+    }
+
     /// 真实自动应用在计算前可接受另一组件/模型修改；旧作业不能覆盖新权威或已撤销输出。
     #[test]
     fn automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions() {
@@ -610,9 +662,16 @@ impl ExtensionOwner {
     pub(crate) fn stop_editor(&self) {
         let document={self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade)};
         if let Some(document)=document {
-            let _transaction=document.transaction.lock().unwrap();
-            if !self.closed.swap(true,Ordering::AcqRel) {document.scope_revision.fetch_add(1,Ordering::AcqRel);}
-        } else {self.closed.store(true,Ordering::Release);}
+            {let _transaction=document.transaction.lock().unwrap();
+                if !self.closed.swap(true,Ordering::AcqRel) {document.scope_revision.fetch_add(1,Ordering::AcqRel);}
+                self.snapshots.iter().for_each(|snapshot|snapshot.clear());
+            }
+            // 不持文档事务取得views锁，避免enqueue/worker授权反向等待。
+            document.revoke_editor_views();
+        } else {
+            self.closed.store(true,Ordering::Release);
+            self.snapshots.iter().for_each(|snapshot|snapshot.clear());
+        }
         let host=self.reaper.lock().unwrap().take();drop(host);
         self.cancel_preparation();
         if let Some(Ok(worker))=self.preparation.get() {worker.close();}

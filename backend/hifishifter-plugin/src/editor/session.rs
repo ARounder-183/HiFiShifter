@@ -107,6 +107,15 @@ impl EditorSession {
         self.queue.send(Job::Barrier(sender)).map_err(|e|e.to_string())?;
         receiver.recv_timeout(Duration::from_secs(30)).map_err(|e|format!("editor flush: {e}"))
     }
+    /// 在组件stop返回前撤销其回信/订阅；排队任务仍会独立核对原始route代次。
+    pub(crate) fn revoke_closed_views(&self) {
+        let document=self.document.upgrade();
+        self.views.lock().unwrap().retain(|_,view| {
+            let valid=view.route.as_ref().is_none_or(|(link,lease)|document.as_ref()
+                .is_some_and(|document|link.authorize(document).is_ok_and(|current|current==*lease)));
+            if !valid {view.sink.closed.store(true,Ordering::Release);}valid
+        });
+    }
     pub fn close(&self) {
         if self.closed.swap(true,Ordering::AcqRel) {return;}
         {let mut views=self.views.lock().unwrap();for view in views.values() {view.sink.closed.store(true,Ordering::Release);}views.clear();}
@@ -116,6 +125,11 @@ impl EditorSession {
         let worker=self.worker.lock().unwrap().take();
         if let Some(worker)=worker {if worker.thread().id()!=std::thread::current().id() {let _=worker.join();}}
         for worker in self.analysis_workers.lock().unwrap().drain(..) {let _=worker.join();}
+        // 旧view可继续持有已关闭actor的Arc；join之后释放分析投影/历史/波形缓存。
+        *self.timeline.lock().unwrap()=Default::default();
+        *self.history.lock().unwrap()=Default::default();
+        *self.loaded.lock().unwrap()=Default::default();
+        self.peaks.lock().unwrap().clear();
     }
     fn run(weak:Weak<Self>,receiver:mpsc::Receiver<Job>) {
         let mut deadline:Option<Instant>=None;
@@ -138,7 +152,13 @@ impl EditorSession {
                             let document=session.document.upgrade().ok_or("document closed")?;
                             if Some(link.authorize(&document)?)!=lease {return Err("editor route changed while request queued".into());}
                             let views=session.views.lock().unwrap();
-                            if !views.get(&request.sink.view_id).is_some_and(|view|Arc::ptr_eq(&view.sink.closed,&request.sink.closed)) {return Err("editor view closed or unknown".into());}
+                            // view关闭仅取消回信；已入队尾笔仍持enqueue验证的身份与route代次。
+                            // emit可能已移除closed view，但同名新view不能替代这次原始请求。
+                            match views.get(&request.sink.view_id) {
+                                Some(view) if !Arc::ptr_eq(&view.sink.closed,&request.sink.closed)=>return Err("editor view identity mismatch".into()),
+                                None if !request.sink.closed.load(Ordering::Acquire)=>return Err("editor view closed or unknown".into()),
+                                _=>{},
+                            }
                         }
                         super::commands::dispatch(&session,&request.command,request.args)
                     }))
@@ -379,7 +399,7 @@ impl ParamHost for EditorSession {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::render::extension::ExtensionOwner;
     use crate::ara::model::ModelHandle;
@@ -422,7 +442,7 @@ mod tests {
         assert_eq!(result["id"],id);assert_eq!(result["ok"],true,"{result}");result["value"].clone()
     }
     /// 两真实组件使用同源的不同区域，测试原actor而不是拼接UI快照。
-    fn workspace_fixture()->(ModelHandle,Vec<Arc<ExtensionOwner>>,Vec<Box<u8>>) {
+    pub(crate) fn workspace_fixture()->(ModelHandle,Vec<Arc<ExtensionOwner>>,Vec<Box<u8>>) {
         let (model,a,first)=fixture();let document=model.session();
         {let mut host=document.timeline.lock().unwrap();let host=host.as_mut().unwrap();
             let mut track=host.tracks[0].clone();track.id="b".into();track.order=1;host.tracks.push(track);
@@ -436,6 +456,163 @@ mod tests {
         // SAFETY: 模型、两owner和真实region身份由返回值保留。
         unsafe {let ext=&*raw;((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(ext.playbackRendererRef,key as *mut _);}
         (model,vec![a,b],vec![first,second])
+    }
+    /// 与已有WORLD oracle相同的谐波源，双轨同源但持久modification身份不同。
+    fn task34_world_fixture()->(ModelHandle,Vec<Arc<ExtensionOwner>>,Vec<Box<u8>>) {
+        let (model,owners,ids)=workspace_fixture();let document=model.session();
+        {let mut known=document.timeline.lock().unwrap();let timeline=known.as_mut().unwrap();timeline.project_sec=2.;
+            for track in &mut timeline.tracks {track.compose_enabled=true;track.pitch_analysis_algo=PitchAnalysisAlgo::WorldDll;}
+            for clip in &mut timeline.clips {clip.length_sec=2.;clip.takes[0].source_end_sec=2.;clip.normalize_takes();}}
+        for region in document.regions.lock().unwrap().values_mut() {region.duration_in_modification_time=2.;region.duration_in_playback_time=2.;}
+        let samples=(0..88200).map(|n| {let phase=2.*std::f64::consts::PI*220.*n as f64/44100.;
+            (1..=16).map(|harmonic|(phase*harmonic as f64).sin()*0.2/harmonic as f64).sum::<f64>() as f32}).collect();
+        let pcm=Arc::new(SourcePcm {sample_rate:44100,planes:vec![samples],version:0,_reservation:None});
+        document.edit_sources.lock().unwrap().insert("ara://source".into(),pcm.clone());
+        document.sources.lock().unwrap().insert("ara://source".into(),pcm);
+        (model,owners,ids)
+    }
+    /// 生产route尾块在view关闭后仍先入权威；render失败也能保存，共享undo保存后无GUI恢复供音。
+    #[test]
+    fn task34_tail_and_shared_undo_save_restore_both_world_tracks_without_gui() {
+        let (model,owners,_ids)=task34_world_fixture();let document=model.session();let editor=owners[0].editor_session().unwrap();
+        let leases=owners.iter().map(|owner|super::super::routing::RouteLease::new(owner)).collect::<Vec<_>>();
+        let links=leases.iter().map(|lease| {let link=Arc::new(super::super::routing::EditorLink::default());
+            link.bind(std::process::id() as i64,lease.token()).unwrap();link}).collect::<Vec<_>>();
+        let mut sinks=Vec::new();let mut receivers=Vec::new();
+        for index in 0..2 {let (reply,rx)=mpsc::channel();let (events,_)=mpsc::sync_channel(128);
+            sinks.push(UiSink {view_id:format!("task34-world-{index}"),reply,events,closed:Arc::new(AtomicBool::new(false))});receivers.push(rx);}
+        let request=|index:usize,id:u64,command:&str,args:Value| {
+            editor.enqueue(UiRequest {id,command:command.into(),args,sink:sinks[index].clone(),link:Some(links[index].clone())}).unwrap();
+            let response=receivers[index].recv_timeout(Duration::from_secs(10)).unwrap();assert_eq!(response["ok"],true,"{response}");response["value"].clone()
+        };
+        let timeline=request(0,1,"get_timeline_state",json!({}));let ta=timeline["tracks"][0]["id"].as_str().unwrap();let tb=timeline["tracks"][1]["id"].as_str().unwrap();
+        let deadline=Instant::now()+Duration::from_secs(15);
+        for track in [ta,tb] {loop {
+            let frames=request(0,2,"get_param_frames",json!({"trackId":track,"param":"pitch","startFrame":0,"frameCount":400,"binary":false}));
+            if frames["orig"].as_array().is_some_and(|orig|orig.iter().filter_map(Value::as_f64).any(|p|p>30.)) {break;}
+            assert!(Instant::now()<deadline,"WORLD原线未完成: {frames}");std::thread::sleep(Duration::from_millis(20));
+        }}
+        request(0,3,"set_param_frames",json!({"trackId":tb,"param":"pitch","startFrame":0,"values":vec![64.;400],"checkpoint":false}));
+        request(0,4,"set_param_frames",json!({"trackId":ta,"param":"pitch","startFrame":0,"values":vec![60.;400],"checkpoint":true}));
+        request(1,5,"set_param_frames",json!({"trackId":tb,"param":"pitch","startFrame":0,"values":vec![67.;400],"checkpoint":true}));
+        // 真实不支持的宿主fade使合成失败；权威的尾笔不能依赖快照发布成功。
+        for region in document.regions.lock().unwrap().values_mut() {region.has_content_based_fade_at_head=true;}
+        let held=editor.timeline.lock().unwrap();
+        editor.enqueue(UiRequest {id:6,command:"get_timeline_state".into(),args:json!({}),sink:sinks[1].clone(),link:Some(links[1].clone())}).unwrap();
+        editor.enqueue(UiRequest {id:7,command:"set_param_frames".into(),args:json!({"trackId":tb,"param":"pitch","startFrame":399,"values":[69.],"checkpoint":false}),sink:sinks[1].clone(),link:Some(links[1].clone())}).unwrap();
+        sinks[1].closed.store(true,Ordering::Release);drop(held);
+        let saved=[owners[0].encode_state().unwrap(),owners[1].encode_state().unwrap()];
+        assert!(editor.apply(editor.submitted.load(Ordering::Acquire)).is_err(),"真实不支持fade必须拒绝合成");
+        let b:Value=serde_json::from_slice(&saved[1]).unwrap();assert_eq!(b["edits"]["params"]["b"]["pitch_edit"][399],69.);
+        assert_eq!(editor.history.lock().unwrap().position,2,"尾笔不新增undo步");
+        assert!(editor.enqueue(UiRequest {id:8,command:"get_ui_settings".into(),args:json!({}),sink:sinks[1].clone(),link:Some(links[1].clone())}).is_err());
+        request(0,9,"undo_timeline",json!({}));
+        let undone=[owners[0].encode_state().unwrap(),owners[1].encode_state().unwrap()];
+        for (states,b_midi) in [(saved,67.),(undone,64.)] {
+            let (cold,cold_owners,_cold_ids)=task34_world_fixture();let cold_document=cold.session();
+            // 不创建editor_session，不轮询GUI命令，直接驱动原setState和真实publisher供音。
+            cold_document.ready.store(false,Ordering::Release);
+            for (owner,bytes) in cold_owners.iter().zip(&states) {owner.restore_state(bytes).unwrap();}
+            cold_document.prepare_renderers();let deadline=Instant::now()+Duration::from_secs(15);
+            for (index,owner) in cold_owners.iter().enumerate() {
+                while owner.preparation_state().0 {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
+                assert!(owner.preparation_state().1.is_none(),"{:?}",owner.preparation_state());
+                let mut left=vec![0.;8820];let mut right=vec![0.;8820];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
+                let mut bus=crate::audio_abi::AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
+                // SAFETY: 两个8820帧平面；oracle读取实际后台准备发布的PCM。
+                assert!(unsafe {owner.snapshots[0].copy_block(22050,44100,&mut bus,8820)});
+                assert!(left.iter().all(|sample|sample.is_finite()));assert_eq!(left,right);
+                let correlation=|lag:usize| {let mut xy=0.;let mut xx=0.;let mut yy=0.;
+                    for n in 0..left.len()-lag {let a=left[n] as f64;let b=left[n+lag] as f64;xy+=a*b;xx+=a*a;yy+=b*b;}xy/(xx*yy).sqrt().max(1e-20)};
+                let target=440.*2_f64.powf(((if index==0 {60.} else {b_midi})-69.)/12.);
+                let expected_lag=44100./target;let first=(expected_lag*0.8) as usize;let last=(expected_lag*1.2) as usize;
+                let lag=(first..=last).max_by(|a,b|correlation(*a).total_cmp(&correlation(*b))).unwrap();let hz=44100./lag as f64;
+                eprintln!("Task34 cold track={index} B_midi={b_midi} frequency={hz:.3}Hz target={target:.3}Hz");
+                assert!((hz-target).abs()<8.,"cold WORLD pitch mismatch {hz} vs {target}");
+                let local:Value=serde_json::from_slice(&owner.encode_state().unwrap()).unwrap();
+                assert_eq!(local["edits"]["tracks"].as_array().unwrap().len(),1);
+                assert_eq!(local["edits"]["params"].as_object().unwrap().len(),1);
+                assert_eq!(local["edits"]["params"][if index==0 {"track"} else {"b"}]["pitch_edit"][100],if index==0 {60.} else {b_midi});
+            }
+            cold_document.close();
+        }
+        // 模型变化必须拒绝旧actor投影，不能把曲线保存误报成音频已经同步。
+        document.clear_renderers();
+        editor.enqueue(UiRequest {id:10,command:"get_timeline_state".into(),args:json!({}),sink:sinks[0].clone(),link:Some(links[0].clone())}).unwrap();
+        let rejected=receivers[0].recv_timeout(Duration::from_secs(5)).unwrap();assert_eq!(rejected["ok"],false);
+        assert!(rejected["error"].as_str().unwrap().contains("local curves preserved"));
+        let local=editor.timeline.lock().unwrap();assert_eq!(local.params_by_root_track[ta].pitch_edit[100],60.);
+        assert_eq!(local.params_by_root_track[tb].pitch_edit[100],64.);drop(local);
+        assert_eq!(editor.state()["pending"],true);assert!(owners[0].encode_state().unwrap_err().contains("not ready"));
+        document.close();
+    }
+    /// 最后一个renderer入口撤销后，actor屏障/空范围应用/文档join都不等待不存在的renderer。
+    #[test]
+    fn task34_no_renderer_does_not_retry_or_fall_back_to_the_whole_document() {
+        let (model,owners,_ids)=workspace_fixture();let document=model.session();let editor=owners[0].editor_session().unwrap();
+        let (reply,rx)=mpsc::channel();let (events,_)=mpsc::sync_channel(128);
+        let sink=UiSink {view_id:"task34-no-renderer".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        let timeline=call(&editor,&sink,&rx,1,"get_timeline_state",json!({}));
+        call(&editor,&sink,&rx,2,"set_param_frames",json!({"trackId":timeline["tracks"][0]["id"],"param":"pitch","startFrame":0,"values":[60.],"checkpoint":true}));
+        for owner in &owners {owner.stop_editor();}
+        let projection=document.workspace_projection().unwrap();let workspace=document.workspace_timeline().unwrap();
+        assert!(workspace.tracks.is_empty());assert!(workspace.clips.is_empty());
+        let began=Instant::now();editor.flush().unwrap();
+        let edit=document.edits.lock().unwrap().revision;
+        document.apply_workspace_edits(edit,document.revision.load(Ordering::Acquire),&projection,Arc::new(AtomicBool::new(false)),||true).unwrap();
+        let deadline=Instant::now()+Duration::from_secs(3);
+        while editor.error.lock().unwrap().is_none() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
+        assert!(editor.error.lock().unwrap().as_ref().unwrap().contains("local curves preserved"));
+        assert_eq!(editor.state()["pending"],true,"失去全部renderer不能把保存曲线伪报成已渲染");
+        assert!(!editor.closed.load(Ordering::Acquire),"组件入口都撤销也不能误关文档actor");
+        document.close();assert!(began.elapsed()<Duration::from_secs(3));assert!(editor.worker.lock().unwrap().is_none());
+    }
+    /// 旧view仍持actor Arc时，文档close也必须在join之后释放分析投影/历史和持久权威缓存。
+    #[test]
+    fn task34_document_close_releases_state_even_when_the_closed_actor_is_retained() {
+        let (model,owners,_ids)=workspace_fixture();let document=model.session();let editor=owners[0].editor_session().unwrap();
+        let (reply,rx)=mpsc::channel();let (events,_)=mpsc::sync_channel(128);
+        let sink=UiSink {view_id:"task34-retained-actor".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        let timeline=call(&editor,&sink,&rx,1,"get_timeline_state",json!({}));
+        call(&editor,&sink,&rx,2,"set_param_frames",json!({"trackId":timeline["tracks"][0]["id"],"param":"pitch","startFrame":0,"values":[60.],"checkpoint":true}));
+        let authority=document.edits.clone();document.close();
+        assert!(editor.worker.lock().unwrap().is_none());assert!(editor.analysis_workers.lock().unwrap().is_empty());
+        assert!(editor.timeline.lock().unwrap().clips.is_empty(),"join后旧actor不得继续持有分析投影");
+        assert!(editor.history.lock().unwrap().records.is_empty());assert!(editor.peaks.lock().unwrap().is_empty());
+        assert!(!editor.loaded.lock().unwrap().initialized);assert!(document.track_bindings.lock().unwrap().is_empty());
+        assert!(authority.lock().unwrap().params.is_empty());assert!(authority.lock().unwrap().tracks.is_empty());
+    }
+    #[test]
+    fn task34_component_stop_revokes_its_views_and_output_before_returning() {
+        let (model,owners,_ids)=workspace_fixture();let document=model.session();
+        let editor=owners[0].editor_session().unwrap();
+        let leases=owners.iter().map(|owner|super::super::routing::RouteLease::new(owner)).collect::<Vec<_>>();
+        let mut sinks=Vec::new();let mut receivers=Vec::new();let mut links=Vec::new();
+        for (index,lease) in leases.iter().enumerate() {
+            let link=Arc::new(super::super::routing::EditorLink::default());link.bind(std::process::id() as i64,lease.token()).unwrap();
+            let (reply,rx)=mpsc::channel();let (events,_)=mpsc::sync_channel(8);
+            let sink=UiSink {view_id:format!("task34-stop-{index}"),reply,events,closed:Arc::new(AtomicBool::new(false))};
+            editor.enqueue(UiRequest {id:1,command:"get_ui_settings".into(),args:json!({}),sink:sink.clone(),link:Some(link.clone())}).unwrap();
+            assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap()["ok"],true);
+            owners[index].snapshots[0].publish(crate::render::snapshot::PlaybackSnapshot {
+                sample_rate:44100,origin_sample:0,left:vec![0.25;4],right:vec![0.5;4],_reservation:None}).unwrap();
+            sinks.push(sink);receivers.push(rx);links.push(link);
+        }
+        owners[0].stop_editor();
+        // 失败也先join文档worker，避免把RED断言变成线程退出问题。
+        let revoked=sinks[0].closed.load(Ordering::Acquire);let other_live=!sinks[1].closed.load(Ordering::Acquire);
+        let output=owners.iter().map(|owner| {
+            let mut left=[9.;4];let mut right=[9.;4];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
+            let mut bus=crate::audio_abi::AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
+            // SAFETY: 两个平面各四帧；观察真实发布输出是否已经撤销。
+            unsafe {owner.snapshots[0].copy_block(0,44100,&mut bus,4)}
+        }).collect::<Vec<_>>();
+        assert!(editor.enqueue(UiRequest {id:2,command:"get_ui_settings".into(),args:json!({}),sink:sinks[0].clone(),link:Some(links[0].clone())}).is_err());
+        editor.enqueue(UiRequest {id:3,command:"get_ui_settings".into(),args:json!({}),sink:sinks[1].clone(),link:Some(links[1].clone())}).unwrap();
+        assert_eq!(receivers[1].recv_timeout(Duration::from_secs(3)).unwrap()["ok"],true);
+        document.close();
+        assert!(revoked,"组件stop必须同步撤销自己的view");assert!(other_live,"另一组件view仍有租约");
+        assert_eq!(output,[false,true],"组件stop必须撤销自己的输出，不能清除另一renderer");
     }
     #[test]
     fn workspace_components_share_the_original_actor_and_cross_track_history() {
@@ -515,9 +692,9 @@ mod tests {
         editor.enqueue(UiRequest {id:1,command:"get_timeline_state".into(),args:json!({}),sink:sink.clone(),link:Some(link.clone())}).unwrap();
         editor.enqueue(UiRequest {id:2,command:"get_ui_settings".into(),args:json!({}),sink:sink.clone(),link:Some(link)}).unwrap();
         owners[0].stop_editor();drop(held);
-        let first=receiver.recv_timeout(Duration::from_secs(5)).unwrap();let second=receiver.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(first["id"],1);assert_eq!(second["id"],2);assert_eq!(second["ok"],false);
-        assert_eq!(second["error"],"FX processor closed");assert!(!editor.closed.load(Ordering::Acquire));
+        editor.flush().unwrap();
+        assert!(sink.closed.load(Ordering::Acquire),"组件关闭同步撤销旧view回信");
+        assert!(receiver.try_iter().next().is_none());assert!(!editor.closed.load(Ordering::Acquire));
         assert!(Arc::ptr_eq(&editor,&owners[1].editor_session().unwrap()));
         assert!(event_rx.try_iter().next().is_none(),"入口撤销后不能通过共享actor继续订阅事件");editor.close();
     }
