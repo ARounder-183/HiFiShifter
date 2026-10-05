@@ -902,4 +902,6 @@ Task 38: Ruling: 普通fade改变未必推进ARA model revision，强host interf
 
 Task 38: Ruling: kernel ClipStretchMarker已含秒/速度变化语义，原生marker单位/坡度还未实测 — 38a用独立HostStretchMarker raw字段保存，最终mapper拿到证据后显式转换，不伪造kernel参数 — 错了只需后续转换/接口调整；若提前套字段名，错误会扩散到渲染/缓存。
 
+Task 38: Ruling: 已确认秒域的源↔项目时间需要统一正逆映射，普通总倍率不能表达分段变化 — 新ara/time_map.rs提供仿射/分段与新项目时刻回旧曲线坐标，先4项真实RED再GREEN/exit0；不接未验证raw marker、不用该数学测试冒充音频/曲线持久化通过 — 若映射各处自行推倍率，会在裁切/拆分和局部拉伸时漂移；下一步必须接编辑权威与保存而非只留helper。
+
 
