@@ -1,6 +1,42 @@
-# 二期内嵌 GUI 首次宿主门：通过显示与关联，未完成修音验收
+# 二期内嵌 GUI 实测记录：键盘单轨链路通过，完整多轨工作区未完成
 
 中文实测记录，2026-10-05，隔离REAPER7.81，非用户工程。
+
+## 当前权威摘要（Task30-31）
+
+以下历史段落保留当时状态，不能把早期“尚未修音”当作当前状态，也不能把单轨通过
+当作全部完成。Task29原GUI键盘编辑/自动修音/关闭FX/冷重开已实测；本批新增第一轨60
+的真实GUI编辑/宿主独奏输出，4窗口220.5→260.94674556213016Hz，gap0，baseline布局
+maxdiff5.960464477539063e-8。WAV gui-dual-track1-60.wav，报告gui-dual-track1-output.json，
+fresh verifier exit0；未用脚本写音高、未启动独立HiFiShifter。
+
+第一轮REAPER进程后来不存在，文件hash表明本批编辑未保存，不推断其退出原因；确认
+进程缺失后重新启动同一隔离scratch，原GUI再次设60，save命令完成。RPP归档
+gui-dual-partial-60-and64.RPP，SHA256 DD1A87B5C591EBA71D5F12D385D57205FEE4BE87F396112E1B72E98F7D4096DD。
+第二轨仍是上一批64；本批没有第二轨67/撤销/重做/冷恢复证据。归档只是部分编辑工程，
+不能从“保存完成”推出重开PCM通过。
+
+REAPER3904保存后连续数次未响应，plugin_get_apply_state/get_playback_state各超时；随后
+Responding恢复True，CPU累计约248秒，**不是已证实死锁**。源码的宿主源授权回调会同步
+prepare_renderers→prepare→edited render_edits，并在计算期间持文档transaction，存在
+主线程/重复合成风险；无真实栈/profile时不将全部卡顿归因于此。工具报告窗口内检测到
+用户输入后停止继续发键鼠，不抢焦点/强杀/热覆盖。Release对照已在新目录构建exit0，尚未
+证明宿主耗时改善。原加载引擎hash仍6F066ADFD512C2722BCFC3AA44469AA76DD3A6D9A2B200D94F691F7D3CF424E8。
+
+用户明确希望多轨同窗口：已增加工程级共享原GUI设计/计划，底层renderer/state仍逐轨
+隔离，完整双轨验收转到新的Task35。当前还没有实现该工作区；鼠标笔画、pending冲突、
+资源矩阵与独立app真实导入编辑仍open。原用户RPP hash仍4AD35908AA2D252D9171A9B6F423E4D9BFEE4DEDBE29861B7665B0FE485897A3。
+
+Release命令 `build_embedded_editor.ps1 -SkipFrontend -Release -BundleDirectory embedded-release-probe`
+正常exit0，cargo optimized 6m00s。该脚本默认debug不变，MSVC后仍重设干净TEMP/TMP和两个
+SDK目录，未重建前端、未跑旧全套测试。bundle与backend/target/release引擎SHA一致：
+FA52774D93DC8F7226699AAE5991D8531B8F66B79D539368822CA43D6D424D78。
+thin模块SHA 8DB2C7B5EBD5BCF6B59177B025A158359E4393F55277B8FF541D3CDA20249891，dumpbin实际
+导出GetPluginFactory/InitDll/ExitDll；动态依赖DirectML.dll/SoundTouchDLL.dll在邻接目录。
+ort-sys当前构建output为static=onnxruntime，没有load-dynamic，不虚构缺少onnxruntime.dll。
+front插件入口/models存在；未真实加载release插件，不据exports外推REAPER性能通过。
+重复raw edited WAV的SHA与gui-dual-track1-60.wav相同，移至ignored
+.build-tmp/embedded-dual-edit-probe/raw-captures可恢复，未删除/未把profile主题加入Git。
 
 ## 实测
 

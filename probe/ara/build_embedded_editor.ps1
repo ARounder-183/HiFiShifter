@@ -1,5 +1,5 @@
 # 内嵌原GUI开发bundle构建；只在当前worktree生成，不安装到系统VST目录，不运行测试。
-param([switch]$SkipFrontend,
+param([switch]$SkipFrontend, [switch]$Release,
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$BundleDirectory='embedded-vst3')
 $ErrorActionPreference = 'Stop'
 $araEmbeddedRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
@@ -27,12 +27,15 @@ try {
     }
     if (!(Test-Path -LiteralPath 'frontend\dist\plugin.html')) { throw 'Build the plugin.html frontend entry first.' }
     # 不把app和plugin放在同一次cargo调用，避免默认vslib feature合并进插件。
-    & cargo build --manifest-path backend\Cargo.toml --offline --jobs 1 -p hifishifter-plugin
+    $araEmbeddedCargoArgs = @('build', '--manifest-path', 'backend\Cargo.toml', '--offline', '--jobs', '1', '-p', 'hifishifter-plugin')
+    $araEmbeddedProfile = if ($Release) { 'release' } else { 'debug' }
+    if ($Release) { $araEmbeddedCargoArgs += '--release' }
+    & cargo @araEmbeddedCargoArgs
     if ($LASTEXITCODE -ne 0) { throw 'plugin engine build failed' }
     New-Item -ItemType Directory -Force -Path $araEmbeddedModule,$araEmbeddedResources | Out-Null
-    Copy-Item -LiteralPath 'backend\target\debug\hifishifter_plugin.dll' -Destination (Join-Path $araEmbeddedModule 'HiFiShifterEngine.dll') -Force
+    Copy-Item -LiteralPath "backend\target\$araEmbeddedProfile\hifishifter_plugin.dll" -Destination (Join-Path $araEmbeddedModule 'HiFiShifterEngine.dll') -Force
     foreach ($araEmbeddedDll in @('onnxruntime.dll','DirectML.dll','SoundTouchDLL.dll')) {
-        $araEmbeddedDllPath = Join-Path $araEmbeddedRoot "backend\target\debug\$araEmbeddedDll"
+        $araEmbeddedDllPath = Join-Path $araEmbeddedRoot "backend\target\$araEmbeddedProfile\$araEmbeddedDll"
         if (Test-Path -LiteralPath $araEmbeddedDllPath) { Copy-Item -LiteralPath $araEmbeddedDllPath -Destination (Join-Path $araEmbeddedModule $araEmbeddedDll) -Force }
     }
     Get-ChildItem -LiteralPath 'frontend\dist' | Copy-Item -Destination $araEmbeddedResources -Recurse -Force
@@ -46,5 +49,5 @@ try {
     }
     & cl.exe /nologo /utf-8 /std:c++17 /LD /MT /EHsc /O2 'backend\hifishifter-plugin\native\module_loader.cpp' "/Fo:$araEmbeddedTemp\module_loader.obj" /link "/OUT:$araEmbeddedModule\HiFiShifter.vst3" "/IMPLIB:$araEmbeddedTemp\HiFiShifterLoader.lib"
     if ($LASTEXITCODE -ne 0) { throw 'native VST3 loader build failed' }
-    Write-Output "Built isolated bundle: $araEmbeddedBundle (not installed; tests and REAPER acceptance pending)."
+    Write-Output "Built isolated $araEmbeddedProfile bundle: $araEmbeddedBundle (not installed; tests and REAPER acceptance pending)."
 } finally { Pop-Location }

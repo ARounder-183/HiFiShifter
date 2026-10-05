@@ -52,3 +52,17 @@ GUI保留原DockRoot、时间线、参数编辑器；外部连接/手动提交�
 实测MIDI64输出四窗口220.5→329.104Hz、gap0；关闭FX与REAPER冷重开后PCM maxdiff0，
 证据gui-keyboard-output.json/同名前缀WAV与恢复截图。鼠标drag仍被本机工具的
 跨进程目标检查拒绝，不能当作真实笔画通过。完整资源矩阵/独立app实测仍见计划open项。
+
+## Release 对照与多轨工作区后续
+
+仅构建新的优化对照目录（默认构建仍debug）：
+
+```powershell
+.\probe\ara\build_embedded_editor.ps1 -SkipFrontend -Release -BundleDirectory embedded-release-probe
+```
+
+没有安装、没有热替换embedded-vst3；新bundle需正常退出宿主后在专用隔离profile验收，
+当前start脚本仍指向原embedded-vst3，不把此构建当作已经加载的版本。
+Task30第一轨60的部分证据见gui-dual-track1-output.json和gui-dual-partial-60-and64.RPP，
+第二轨尚未改67/撤销重做。源码线程耗时门与“任一FX内可编辑同工程多轨”的方案见
+新的ara-project-workspace-design.md/plan；该工作区还没实现，不是当前试用能力。

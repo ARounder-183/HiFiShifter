@@ -244,3 +244,34 @@ Task24增加非实时退役快照回收，实时读区SeqCst计数保护指针�
 - [x] 一次集中review发现单素材selectClipParamRange也需DOM焦点，已同样补齐；多参数编辑面板广播时最后一个抢焦点为Minor残余，未声称支持此组合验收。
 - [x] 最终源版本前端312文件/2718测试exit0，tsc/生产bundle build exit0；正常退出REAPER冷重开40653-byte测试RPP，第二轨GUI尚未打开时导出PCM maxdiff0，再打开原FX显示恢复曲线，截图gui-keyboard-restored-curves.jpg。
 - [ ] 真实鼠标手绘/双轨均编辑/资源矩阵和独立app实测仍open。新焦点版本先点击FX标题再drag、激活新截图后仅重试一次，仍被本机Computer Use跨进程检查拒绝；不使用代理或脚本替代笔画。
+
+## Task 30: 双轨分别编辑、撤销/重做与冷恢复（部分实测，后续转工程级 GUI）
+
+- [x] 新隔离副本embedded-dual-edit-probe，从已归档RPP复制，不覆盖上批/原用户工程。
+- [ ] 原GUI分别设第一轨MIDI60、第二轨MIDI67；逐轨宿主Solo导出，独立音高oracle证明不串轨。
+- [ ] 第二轨GUI撤销恢复先前MIDI64输出、重做恢复67；第一轨输出保持60。
+- [ ] 保存正常退出/冷重开，两轨分别导出与对应已编辑PCM一致；归档报告/截图/RPP并本地提交。
+
+第一轨原GUI设60并宿主Solo导出，四窗口260.94674556213016Hz、gap0，证据
+gui-dual-track1-output.json/WAV。第一次进程消失时RPP仍与旧归档相同，不能算保存恢复；
+确认没有REAPER进程后才重开，重新原GUI设60并保存。归档gui-dual-partial-60-and64.RPP，
+第二轨仍为旧64，未编辑67、未测撤销/重做/本批冷恢复。
+用户新增同窗口多轨需求后，不继续把旧每实例UI当终态；完整双轨验收转到
+2026-10-05-ara-project-workspace.md Task35，仍是必达门，不删除要求。
+
+## Task 31: 宿主主线程耗时与优化构建对照
+
+- [x] 实测隔离REAPER3904在保存完成后数次Responding=false，GUI查询超时；后来True。
+  不称死锁、不强杀；源码确认模型源授权回调同步调用edited render_edits并持文档transaction。
+- [x] 构建脚本增加Release可选项；默认debug和禁止覆盖加载中bundle的保护保留。
+- [x] 新目录embedded-release-probe构建exit0（optimized，6m00s），实际release引擎与
+  bundle副本SHA一致；thin入口3个exports齐全，DirectML/SoundTouch相邻、ORT静态链接。
+  frontend/models存在；未热替换旧模块，未宣称宿主加载/性能通过。
+- [ ] 真实记录授权切换/保存/冷开耗时，区分优化因素与锁/重复合成；没有profile/栈证据
+  时不宣称所有卡顿均由某条调用造成。使用已存在输入/日志，不猜宿主窗口或强行关用户窗口。
+- [ ] 模型callback仅撤销/登记版本/排准备；不可变render输入在事务内捕获，计算在事务外，
+  发布前核对模型/edit/分配版本。有界合并与关闭取消/join、保存曲线权威回归一起验证。
+  不以只换release构建代替线程边界修复。
+
+多轨后续设计/计划：2026-10-05-ara-project-workspace-design.md / ara-project-workspace.md。
+旧Task20-26历史进度段为当时记录；当前Task29-31与新的Task32-35是后续权威进度。
