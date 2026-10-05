@@ -5,6 +5,7 @@ param(
     [string]$ReopenedPath = '',
     [string]$SourcePath = "$PSScriptRoot\fixtures\forward-gui-voice.wav",
     [string]$ReportPath = "$PSScriptRoot\captures\forward-gui-output.json",
+    [ValidateRange(0,1)][double]$FirstClipStartSec = 0,
     [switch]$LibraryOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -73,11 +74,17 @@ public static class AraForwardGuiOutput {
     }
     // 先确认基线确实是同源普通/裁切布局，避免把旧文件或错位基线当本轮证据。
     public static double CheckBaseline(Wave source, Wave baseline) {
+        return CheckBaseline(source,baseline,0);
+    }
+    // 内嵌GUI的宿主移动验收把第一段移到1秒；按真实布局验证，不移动捕获PCM凑旧oracle。
+    public static double CheckBaseline(Wave source, Wave baseline, double firstClipStartSec) {
         Validate(baseline);
+        if(double.IsNaN(firstClipStartSec)||double.IsInfinity(firstClipStartSec)||firstClipStartSec<0||firstClipStartSec>1) throw new Exception("unsupported first clip placement");
+        int first=(int)Math.Round(firstClipStartSec*44100);
         if(source==null || source.Rate!=44100 || source.Channels!=1 || source.Samples.Length!=88200) throw new Exception("unexpected source fixture");
         double max=0;
         for(int frame=0;frame<44100*5;frame++) {
-            float expected=frame<88200 ? source.Samples[frame] : frame>=132300&&frame<176400 ? source.Samples[frame-132300+11025] : 0;
+            float expected=frame>=first&&frame<first+88200 ? source.Samples[frame-first] : frame>=132300&&frame<176400 ? source.Samples[frame-132300+11025] : 0;
             if(float.IsNaN(expected)||float.IsInfinity(expected)) throw new Exception("nonfinite source");
             for(int ch=0;ch<2;ch++) max=Math.Max(max,Math.Abs(baseline.Samples[frame*2+ch]-expected));
         }
@@ -86,12 +93,17 @@ public static class AraForwardGuiOutput {
     }
     // 将未变、仅gain、漏音或重开变化明确拒绝，而非单凭非零/不同哈希通过。
     public static Result Evaluate(Wave baseline, Wave edited, Wave reopened) {
+        return Evaluate(baseline,edited,reopened,0);
+    }
+    public static Result Evaluate(Wave baseline, Wave edited, Wave reopened, double firstClipStartSec) {
         Validate(baseline); Validate(edited); if(reopened!=null) Validate(reopened);
+        if(double.IsNaN(firstClipStartSec)||double.IsInfinity(firstClipStartSec)||firstClipStartSec<0||firstClipStartSec>1) throw new Exception("unsupported first clip placement");
+        int first=(int)Math.Round(firstClipStartSec*44100);
         var result=new Result { BaselineHz=new double[4], EditedHz=new double[4] };
         double power=0, difference=0; int count=0;
         for(int frame=0;frame<44100*5;frame++) for(int ch=0;ch<2;ch++) {
             int i=frame*2+ch; double value=edited.Samples[i];
-            bool active=frame<88200 || frame>=132300&&frame<176400;
+            bool active=frame>=first&&frame<first+88200 || frame>=132300&&frame<176400;
             if(active) { power+=value*value; difference+=Math.Abs(value-baseline.Samples[i]); count++; }
             else result.GapMax=Math.Max(result.GapMax,Math.Abs(value));
             if(reopened!=null) result.ReopenMaxDifference=Math.Max(result.ReopenMaxDifference,Math.Abs(value-reopened.Samples[i]));
@@ -102,7 +114,7 @@ public static class AraForwardGuiOutput {
         if(result.ReopenMaxDifference>1e-6) throw new Exception("reopened output does not preserve edit");
         double[] times={0.2,0.5,1.1,1.4};
         for(int n=0;n<times.Length;n++) {
-            result.BaselineHz[n]=Frequency(baseline,times[n]); result.EditedHz[n]=Frequency(edited,times[n]);
+            result.BaselineHz[n]=Frequency(baseline,times[n]+firstClipStartSec); result.EditedHz[n]=Frequency(edited,times[n]+firstClipStartSec);
             if(Math.Abs(12*Math.Log(result.EditedHz[n]/result.BaselineHz[n],2))>=0.5) result.PitchChangedWindows++;
         }
         if(result.PitchChangedWindows==0) throw new Exception("waveform differs but pitch unchanged; gain-only is not pitch acceptance");
@@ -113,12 +125,13 @@ public static class AraForwardGuiOutput {
 }
 if ($LibraryOnly) { return }
 $baseline = [AraForwardGuiOutput]::Read($BaselinePath)
-$baselineError = [AraForwardGuiOutput]::CheckBaseline([AraForwardGuiOutput]::Read($SourcePath), $baseline)
+$baselineError = [AraForwardGuiOutput]::CheckBaseline([AraForwardGuiOutput]::Read($SourcePath), $baseline, $FirstClipStartSec)
 $edited = [AraForwardGuiOutput]::Read($EditedPath)
 $reopened = if ($ReopenedPath) { [AraForwardGuiOutput]::Read($ReopenedPath) } else { $null }
-$result = [AraForwardGuiOutput]::Evaluate($baseline, $edited, $reopened)
+$result = [AraForwardGuiOutput]::Evaluate($baseline, $edited, $reopened, $FirstClipStartSec)
 $report = [ordered]@{
     baseline_plain_max_abs_difference = $baselineError
+    first_clip_start_sec = $FirstClipStartSec
     edited_rms = $result.EditedRms
     mean_absolute_difference = $result.MeanAbsoluteDifference
     gap_max_abs = $result.GapMax

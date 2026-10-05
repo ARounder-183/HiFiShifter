@@ -232,3 +232,15 @@ Task24增加非实时退役快照回收，实时读区SeqCst计数保护指针�
 - [ ] 本地pending曲线与宿主几何同时变化时的真实冲突确认，不能用无本地编辑的移动实测代替。
 - [x] 最终前端全量311 files/2715 tests通过，exit0，保留既有Canvas/act警告。
 - [x] 宿主Duplicate tracks后两个原GUI均能载入并显示已应用，真实共享源1/sequence2/region4；副本保存8356 bytes。双实例曲线/PCM仍未实测，模型过渡有两条unknown host track日志待定位。
+
+## Task 29: 首帧真实宿主态与标准键盘焦点
+
+- [x] 插件首帧不再创建独立app的track_main；独立app默认Main保留，收到真实fetchTimeline后正常选择实例轨道。新增回归旧版1失败/1通过，修复后相关19通过及tsc exit0。
+- [x] 重开双轨隔离副本，新日志从6165行后未出现unknown host track/identity unresolved/Invoke failed；不修改后端验证、不吞异常。
+- [x] 实测Tab在预设/Param/2in+out/UI间循环，无法进入HTML。补自有WS_TABSTOP、WM_SETFOCUS标准MoveFocus、IPlugView onFocus同线程租约转交；不改宿主父窗口、不代理按键。
+- [x] plugin lib66通过，新版bundle build exit0；真实Shift+Tab进入HTML，原Space请求Start/主动Pause，循环验收停在2.414秒，宿主与两GUI秒位置一致，循环仅用于测试后关闭。
+- [x] 素材范围转入参数选区时同步DOM焦点；原Ctrl+0对话框输入MIDI64并键盘激活确定，第二轨自动1/1、第一轨保持0/0，无外部app/手动提交。
+- [x] 第二轨独奏真实导出四个窗口220.5→329.104Hz，gap=0；关闭两个FX窗口后再导出PCM maxdiff=0。verify_forward_gui_output新增FirstClipStartSec=1保持原PCM/布局严格验证；6旧+3移动布局回归通过。
+- [x] 一次集中review发现单素材selectClipParamRange也需DOM焦点，已同样补齐；多参数编辑面板广播时最后一个抢焦点为Minor残余，未声称支持此组合验收。
+- [x] 最终源版本前端312文件/2718测试exit0，tsc/生产bundle build exit0；正常退出REAPER冷重开40653-byte测试RPP，第二轨GUI尚未打开时导出PCM maxdiff0，再打开原FX显示恢复曲线，截图gui-keyboard-restored-curves.jpg。
+- [ ] 真实鼠标手绘/双轨均编辑/资源矩阵和独立app实测仍open。新焦点版本先点击FX标题再drag、激活新截图后仅重试一次，仍被本机Computer Use跨进程检查拒绝；不使用代理或脚本替代笔画。

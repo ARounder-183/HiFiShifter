@@ -5822,6 +5822,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                           : selectionFromFrames(startBound, endBound - startBound);
                 setSelectionUi(selectionRef.current);
                 setActiveSurfaceExplicit("pianoRoll");
+                // 单素材切入参数选区与批量入口一致，也交付画布本地快捷键的DOM焦点。
+                scrollerRef.current?.focus({ preventScroll: true });
                 invalidate();
                 return;
             }
@@ -5865,6 +5867,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 selectionRef.current = next;
                 setSelectionUi(next);
                 setActiveSurfaceExplicit("pianoRoll");
+                // 素材范围已转入参数编辑，DOM焦点也须转交，否则本地移调快捷键收不到事件。
+                scrollerRef.current?.focus({ preventScroll: true });
                 invalidate();
                 return;
             }

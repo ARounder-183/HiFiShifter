@@ -842,4 +842,20 @@ Task 28: Ruling: 原GUI保持打开时，宿主BPM150→180及单素材起点0�
 
 Task 28: Ruling: 原生Duplicate tracks后共享源1/sequence2/region4，两个GUI载入已应用，模型过渡仍记两条unknown host track — 记录实测加载进展和残余日志，不宣称双轨曲线/PCM全验收；最终前端311文件/2715测试exit0 — 若仅凭窗口正常忽略过渡请求，会遗漏刷新时旧轨道请求的时序问题。
 
+Task 29: Ruling: 原GUI初始store含独立app的track_main，首个真实快照前就取参数，插件从未授权该轨道 — 插件lazy初始化空轨道/空选择，独立app保持默认Main；19定向回归/tsc exit0，双轨重开新日志无旧错误 — 若在后端忽略未知身份，会削弱跨实例隔离并隐藏虚构首帧。
+
+Task 29: Ruling: 实测Tab只循环宿主原生控件，自有编辑器无Tab停留且onFocus空实现 — 仅补自有窗口WS_TABSTOP、标准MoveFocus和受线程/token校验的焦点转交，不改父窗口、不重建输入代理 — 若只解决工具点击或吞宿主按键，真实键盘用户仍无法进入编辑器且可能损坏REAPER快捷键。
+
+Task 29: Ruling: GetNextDlgTabItem在零Tab stop时也返回首child，初版回归假通过 — 加真实HWND停留能力校验后旧源码正确失败，再测实际浏览器焦点；不把Windows首child回退当可操作证据 — 若只看返回句柄，测试会掩盖已实测的不可达性。
+
+Task 29: Ruling: 标准焦点修复后Shift+Tab实际进入HTML，原Space请求宿主Start及循环中的主动Pause，宿主和两GUI秒位置停在2.414 — 关闭键盘播放控制可行性疑问，仍区别于鼠标按钮点击；REAPER时间/tick格式不据截图强行等同 — 若把短素材自然结束当主动暂停，会形成假验收，故仅在隔离副本临时开循环后恢复Off。
+
+Task 29: Ruling: 逻辑pianoRoll表面已切换但DOM仍在顶栏，画布局部Ctrl+0/Ctrl+I收不到事件 — 素材范围转参数选区时聚焦自有scroller，批量与单素材入口一致；真实原对话框输入64、键盘激活确定后自动1/1 — 若改测试为直接IPC参数提交，会绕过用户需要的原GUI路径。
+
+Task 29: Ruling: 第二轨独奏输出四窗口220.5→329.104Hz、gap0，关闭全部FX窗口后输出PCM maxdiff0 — 归档真实GUI编辑/自动渲染/无UI供音证据，验证器显式接受第一段起点1秒且拒绝错误布局，不重排PCM — 若仅比较hash或波形变化，会把gain-only/错位基线误报为修音。
+
+Task 29: Ruling: 一次集中review确认native线程/token/重入边界，无其它Critical/Important，仅单素材焦点漏接 — 补齐同契约分支，不追加review轮次；多参数面板广播时最后监听器获焦点暂记Minor残余 — 若对未验组合泛化通过，会掩盖多面板交互时序问题。
+
+Task 29: Ruling: 正常退出REAPER冷重开测试RPP，第二轨GUI尚未打开时恢复供音PCM maxdiff0，之后原FX恢复MIDI64曲线 — 关闭键盘正向编辑/自动合成/保存重开这条实际链路疑问；最终前端312文件/2718测试和bundle exit0，鼠标/双轨均编辑/资源矩阵仍open — 若把新会话代次0/0当丢曲线，或把单条链路外推完整二期，都会误报状态。
+
 

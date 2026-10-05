@@ -1,4 +1,6 @@
+// 原编辑会话状态；独立app保留默认Main，插件首帧等待真实宿主时间线。
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
+import { isPluginMode } from "../../services/hostCapabilities";
 import type {
     HistoryRecordSummary,
     TimelineClip,
@@ -2538,7 +2540,10 @@ export {
 
 const sessionSlice = createSlice({
     name: "session",
-    initialState,
+    // bootstrap在创建store前由native注入；空宿主态不会触发虚构Main的参数请求。
+    initialState: () => isPluginMode()
+        ? { ...initialState, tracks: [], selectedTrackId: null }
+        : initialState,
     reducers: {
         /**
          * 标记连续交互开始（拖动/滑动等）。

@@ -169,7 +169,21 @@ unsafe extern "system" fn on_size(this: *mut c_void, rect: *mut ViewRect) -> TRe
         K_RESULT_OK
     })
 }
-unsafe extern "system" fn focus(_this: *mut c_void, _focused: u8) -> TResult { K_RESULT_OK }
+/// 宿主明确交付焦点时进入自有WebView，不主动改变宿主失焦后的焦点归属。
+unsafe extern "system" fn focus(this: *mut c_void, focused: u8) -> TResult {
+    if focused==0 {return K_RESULT_OK;}
+    boundary(|| {
+        #[cfg(windows)]
+        {
+            let native={let state=unsafe {view(this)}.state.lock().unwrap_or_else(|e|e.into_inner());
+                state.native.as_ref().map(super::webview::NativeEditor::window_key)};
+            if let Some(native)=native {if let Err(error)=native.focus() {
+                crate::log_line(&format!("IPlugView focus failed: {error}"));return K_RESULT_FALSE;
+            }}
+        }
+        K_RESULT_OK
+    })
+}
 #[repr(C)]
 struct UnknownVtbl {
     query: unsafe extern "system" fn(*mut c_void, *const u8, *mut *mut c_void) -> TResult,

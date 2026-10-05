@@ -42,3 +42,16 @@ $actualBaseline = [AraForwardGuiOutput]::Read("$PSScriptRoot\captures\forward-gu
 $actualSource = [AraForwardGuiOutput]::Read("$PSScriptRoot\fixtures\forward-gui-voice.wav")
 $baselineError = [AraForwardGuiOutput]::CheckBaseline($actualSource, $actualBaseline)
 "6 forward GUI validator cases plus real WAV source/crop/gap oracle passed; baseline max_abs=$baselineError"
+
+# 本轮真实GUI把第一段移到1秒；新增布局必须验证原PCM，不重排音频掩盖错位。
+$movedBaseline=[AraForwardGuiOutput]::Read("$PSScriptRoot\captures\gui-keyboard-baseline.wav")
+$movedEdited=[AraForwardGuiOutput]::Read("$PSScriptRoot\captures\gui-keyboard-edited.wav")
+$movedSource=[AraForwardGuiOutput]::Read("$PSScriptRoot\fixtures\embedded-editor-voice.wav")
+$movedError=[AraForwardGuiOutput]::CheckBaseline($movedSource,$movedBaseline,1)
+$movedResult=[AraForwardGuiOutput]::Evaluate($movedBaseline,$movedEdited,$movedEdited,1)
+if($movedError -gt 1e-6 -or $movedResult.PitchChangedWindows -ne 4 -or
+    ($movedResult.EditedHz | Where-Object { [Math]::Abs($_ - 329.63) -gt 1 }).Count -ne 0) {throw 'Moved real GUI pitch fixture was not recognized'}
+Assert-ForwardRejects { [AraForwardGuiOutput]::CheckBaseline($movedSource,$movedBaseline,0) } 'wrong first clip placement'
+$movedEdited.Samples[1000*2]=0.2
+Assert-ForwardRejects { [AraForwardGuiOutput]::Evaluate($movedBaseline,$movedEdited,$null,1) } 'nonzero leading gap after host move'
+'3 relocated real GUI fixture cases passed'

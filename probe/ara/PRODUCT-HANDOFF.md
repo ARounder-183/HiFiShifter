@@ -4,9 +4,13 @@
 
 ## 最新状态：一期核心真实验收通过，二期改为内嵌GUI与自动应用
 
+Task29当前：插件初始化空宿主态，不再请求虚构track_main；标准Win32/WebView2焦点进入原HTML，Space实测控制宿主播放/主动暂停，秒位置一致2.414。素材选区转参数画布补DOM焦点后，真实原Ctrl+0对话框输入MIDI64并确认，第二轨自动1/1、第一轨0/0。真实独奏导出四窗口220.5→329.104Hz、gap0；关闭两个FX窗口后PCM maxdiff0，正常退出REAPER冷重开40653-byte测试RPP后、第二轨GUI尚未打开时供音PCM同样maxdiff0，之后正常打开FX显示恢复曲线。无外部HiFiShifter进程、没有手工提交或脚本写pitch。最终前端312文件/2718测试及tsc/生产bundle exit0。证据captures/gui-keyboard-*与gui-host-*-keyboard.jpg；旧“无法网页操作”仅剩鼠标工具命中限制，不再代表所有GUI输入都无法验收。真实鼠标手绘、双轨均编辑及资源/独立app验收仍未闭合。
+
 本批最终前端全量311 files/2715 tests通过(exit0)。隔离副本已保存8356 bytes：BPM180、Time基准、两轨各两段POSITION1/3、PLAYRATE1；真实Duplicate tracks后两个GUI都显示已应用，截图copied-track-two-editors.jpg。模型过渡仍有两条get_param_frames unknown host track日志，未定位；双轨真实曲线与PCM验收仍open，不以显示通过代替编辑通过。
 
 复现入口：`.\probe\ara\start_embedded_editor.ps1 -Reopen -ScratchName embedded-transport-probe`，仅在REAPER正常退出后启动。默认embedded-probe仍是原用户测试工程，SHA256保持4AD35908AA2D252D9171A9B6F423E4D9BFEE4DEDBE29861B7665B0FE485897A3，不覆盖它。
+
+最终测试副本重新保存为40656 bytes，并归档`captures/gui-keyboard-edited.RPP`（含绝对开发路径，仅一次性证据）。原始重复导出4份WAV已按SHA一致性校验后移到`.build-tmp/embedded-transport-probe/raw-captures`，没有删除；可评审的命名WAV仍在captures。隔离REAPER已正常退出，未push。下一批继续未闭合验收，不标整个目标完成。
 
 Task28新增：标准ARA宿主播放租约/原ActionBar能力开放、模型自动同步、有效宿主tempo同步已实现；plugin lib65/租约1/前端18/tsc与build通过。真实UI在独立副本中将BPM120改150，HiFiShifter显示150；副本Time基准下PLAYRATE1保持，截图captures/bpm-sync-150.jpg。进一步在GUI不关闭时150→180立即同步；宿主单素材属性起点0→1秒后原时间线和参数区自动跟随，未点重载，日志clipStartsSec=[1,3]，见bpm-sync-live-180.jpg及host-geometry-auto-refresh.jpg。原工程hash未变。按钮真实点击虽先确认FX标题栏焦点，仍被Computer Use跨进程检查拒绝，键盘Tab未确认触发网页控件，不能标播放控制/全流程验收通过。最新构建回到embedded-vst3；自动同步有pending时仍保留冲突，完整Tempo Map/time stretch未支持。
 

@@ -103,3 +103,25 @@ Lua原有save命令已把当前未编辑一次性工程正常保存为`.build-tm
 原生Duplicate tracks复制测试轨道，日志sources=1/modifications=1/regionSequences=2/playbackRegions=4，两个原GUI均为已应用0/0且只显示各自两段，截图copied-track-two-editors.jpg。新采集段未出现旧identity ambiguous阻塞；模型变更过程中仍有两条get_param_frames unknown host track日志，尚未定位，不宣称双实例曲线/PCM全流程通过。副本正常保存8356 bytes，TEMPO180、两轨POSITION1/3和PLAYRATE1；原用户工程不变。
 
 最终一次前端全量：`npm test -- --reporter=dot`，311 files/2715 tests passed，exit0，28.79秒。既有Canvas/act环境警告仍在；通过不代表Windows原GUI手绘音频验收。没有重复运行内核/app全套。
+
+## Task29：真实原GUI键盘编辑与自动音高输出
+
+插件首帧错误来源为独立app默认track_main；lazy初始化在插件清空轨道/选择，独立app保留原默认。新双轨重开日志（6165行之后）未出现unknown host track/identity unresolved/Invoke failed。回归旧版1失败/1通过，新版相关19通过，tsc通过。
+
+真实Tab先只循环宿主工具栏，自有HWND增加WS_TABSTOP，WM_SETFOCUS使用标准WebView2 MoveFocus，IPlugView onFocus转交受UI线程/token校验的焦点，不改父窗口、不代理按键，COM/Win32调用前释放锁与借用。完整lib66 exit0；新HWND回归覆盖首个旧焦点null、跨线程及关闭后拒绝。真实Shift+Tab进入HTML，Tab执行原工具切换，Space发GUI Playback requested并令REAPER实际Playing。为避免短素材自然结束假装暂停，仅在副本临时开Repeat；GUI再次Space主动停在2.414秒，两GUI和宿主秒数一致并保持静止，之后恢复Repeat Off。播放中的多截图不是同时采集，不拿其时间差证明游标不一致。
+
+原GUI使用F7选择工具、Ctrl+A选本实例素材、Ctrl+Shift+A转参数选区。原逻辑只切logical surface，画布局部Ctrl+0收不到事件；补scroller DOM focus后真实“音高设置到...”对话框打开，输入MIDI64，Shift+Tab到原确定按钮并Enter激活。状态从编辑1/音频0自动到1/1；另一轨保持0/0。没有外部app，没有手工Submit，也没有用脚本/IPC代替曲线编辑。
+
+第二轨由宿主原生Solo独奏，隔离Lua仅负责DAW导出：gui-keyboard-baseline.wav与gui-keyboard-edited.wav，第一段实际起点1秒、第二裁切段3秒。独立验证baseline源/布局maxdiff=5.960464477539063e-8，4窗口220.5→329.1044776119403Hz，edited RMS0.122872205262133、平均差0.1530956955642657，gap0。报告gui-keyboard-output.json。验证器新增显式FirstClipStartSec参数/保留旧重载，不移动真实PCM来凑原布局；6旧+3移动布局回归exit0。
+
+正常关闭两个FX窗口而不卸载效果，确认无GUI后重新导出gui-keyboard-closed-editor.wav；PCM相对已编辑输出maxdiff0，报告gui-keyboard-closed-editor-output.json、截图gui-keyboard-closed-editors.jpg。WAV整体hash不同来自REAPER元数据，PCM未变。隔离RPP保存40645 bytes，完整REAPER重开输出/曲线恢复待本轮继续验证。
+
+最终正常退出REAPER、构建最终源版本（含review单素材焦点补齐）、冷重开40653-byte测试RPP。在第二轨编辑器未打开时导出gui-keyboard-reopened.wav，独立PCM比较maxdiff0，329.104Hz仍在。再从宿主原生FX按钮打开第二轨，原参数区恢复MIDI64曲线，截图gui-keyboard-restored-curves.jpg；会话代次重置0/0是新会话，不代表曲线被清空。Lua使用既有source-changed标签仅作这次导出命名，没有改源、更没有写参数；最终报告gui-keyboard-output.json的reopen_checked=true对应此次真正REAPER冷重开。
+
+最终前端全量`npm test -- --reporter=json --outputFile=<worktree>/.build-tmp/embedded-final-frontend-tests.json --silent`，312文件/2718测试/0失败/success=true、exit0；tsc及生产bundle build exit0。引擎SHA256 `6F066ADFD512C2722BCFC3AA44469AA76DD3A6D9A2B200D94F691F7D3CF424E8`。既有Canvas/Rust/Vite警告保留，未跑独立app全部测试。原用户RPP保持SHA256 `4AD35908AA2D252D9171A9B6F423E4D9BFEE4DEDBE29861B7665B0FE485897A3`。
+
+最终鼠标笔画再检查：先点击原FX标题，再在画布drag；工具仍报告point over msedgewebview2.exe Chrome Legacy Window/not target reaper.exe。激活/新截图仅重试一次，同样拒绝，未写入新笔画。不绕过工具检查、不增加输入代理；真实鼠标手绘仍open，但键盘原GUI编辑/自动合成/保存重开已经实测，二者不能混为同一结果。
+
+终态：正常保存/退出隔离REAPER，副本40656 bytes，归档gui-keyboard-edited.RPP（开发路径快照，不是可移植发行工程）。原始4份重复导出WAV校验与命名归档SHA一致后移到ignored `.build-tmp/embedded-transport-probe/raw-captures`，不删除；Git只stage明确命名证据。最终再执行当前同源测试exe，完整lib66/0失败/exit0。
+
+一次集中review仅Important为单素材selectClipParamRange也需同样DOM focus，已补齐；无其它Critical/Important。多参数面板广播时最后监听器获焦点记Minor残余。真实鼠标手绘/双轨均编辑/资源矩阵/独立app实测仍未关闭，不能把此键盘正向链路当二期全部验收。

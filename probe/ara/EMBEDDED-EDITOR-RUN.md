@@ -34,3 +34,21 @@ GUI保留原DockRoot、时间线、参数编辑器；外部连接/手动提交�
 
 已实测宿主加载、正确processor消息关联及FX内原GUI。剩余自动pitch输出、关闭FX供音、
 保存重开、双实例及资源/采样率/声道/seek回归见二期plan；不能把显示通过当全流程通过。
+
+## 最新可复现键盘 GUI 链路（Task29）
+
+最终bundle仍在embedded-vst3。正常退出REAPER后用隔离编辑副本启动：
+
+```powershell
+.\probe\ara\start_embedded_editor.ps1 -Reopen -ScratchName embedded-transport-probe
+```
+
+该副本是两轨同源测试工程，第二轨已独奏、MIDI64曲线已保存，BPM180/Time基准/倍率1。
+不要覆盖默认embedded-probe的原用户测试工程。先鼠标点击插件标题栏取得焦点；必要时
+从宿主预设框Shift+Tab进入HTML。原Space已实测请求REAPER播放/暂停。F7选工具、Ctrl+A
+选本实例素材、Ctrl+Shift+A转参数选区及DOM焦点，Ctrl+0打开原音高对话框，输入MIDI
+数值；Shift+Tab到确定、Enter激活。编辑后台自动应用，不再手动Submit。
+
+实测MIDI64输出四窗口220.5→329.104Hz、gap0；关闭FX与REAPER冷重开后PCM maxdiff0，
+证据gui-keyboard-output.json/同名前缀WAV与恢复截图。鼠标drag仍被本机工具的
+跨进程目标检查拒绝，不能当作真实笔画通过。完整资源矩阵/独立app实测仍见计划open项。

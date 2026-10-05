@@ -20,6 +20,7 @@ use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleE
 use windows::Win32::System::LibraryLoader::GET_MODULE_HANDLE_EX_FLAG_PIN;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus,SetFocus};
 
 const ORIGIN: &str = "https://hifishifter.invalid/";
 static NEXT_VIEW: AtomicU64 = AtomicU64::new(1);
@@ -70,6 +71,20 @@ impl WindowKey {
         unsafe { IsWindow(Some(hwnd)).as_bool() &&
             GetPropW(hwnd,w!("HiFiShifter.ARA.ViewToken")).0 as usize == self.token }
     }
+    /// 只在宿主UI线程把焦点交给自有编辑器；已在浏览器内时不重置DOM焦点。
+    pub(super) fn focus(self) -> Result<(),String> {
+        if unsafe {GetCurrentThreadId()} != self.thread || !self.valid() {
+            return Err("focus on stale window or off UI thread".into());
+        }
+        let hwnd=HWND(self.hwnd as *mut c_void);
+        let current=unsafe {GetFocus()};
+        if current==hwnd || unsafe {IsChild(hwnd,current)}.as_bool() {return Ok(());}
+        let result=unsafe {SetFocus(Some(hwnd))};
+        // 首次SetFocus的旧句柄可能为null，Win32包装返回Err但真实焦点已成功设置。
+        let focused=unsafe {GetFocus()};
+        if focused==hwnd || unsafe {IsChild(hwnd,focused)}.as_bool() {Ok(())}
+        else {result.map(|_|()).map_err(|e|e.to_string())}
+    }
     /// 可复制的窗口身份不持有COM资源，允许调用前释放view锁以防Win32同步重入。
     pub(super) fn resize(self, width: i32, height: i32) -> Result<(),String> {
         if unsafe { GetCurrentThreadId() } != self.thread || !self.valid() {
@@ -103,7 +118,7 @@ impl NativeEditor {
         let data = Box::into_raw(Box::new(WindowData { state: state.clone(), transferred: transferred.clone(), token }));
         let result = unsafe { CreateWindowExW(WINDOW_EX_STYLE::default(), w!("HiFiShifter.ARA.Editor"),
             w!("HiFiShifter plugin editor initializing…"),
-            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, 0,0,width,height,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, 0,0,width,height,
             Some(parent), None, Some(instance), Some(data.cast())) };
         let hwnd = match result {
             Ok(hwnd) => hwnd,
@@ -213,6 +228,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
         if !pointer.is_null() {
             if message==WM_TIMER && wparam.0==0x4853 {
                 deliver(&(*pointer).state);
+                return LRESULT(0);
+            } else if message == WM_SETFOCUS {
+                // 宿主Tab/onFocus进入自有HWND后，使用标准WebView2接口进入HTML控件。
+                // MoveFocus可能同步通知宿主；调用前释放BrowserState借用。
+                let controller=(*pointer).state.borrow().controller.clone();
+                if let Some(controller)=controller {let _=controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT);}
                 return LRESULT(0);
             } else if message == WM_SIZE {
                 let controller = (*pointer).state.borrow().controller.clone();
@@ -325,6 +346,8 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
     let hwnd = state.borrow().hwnd;
     let mut bounds = RECT::default();
     unsafe { GetClientRect(hwnd,&mut bounds)?; controller.SetBounds(bounds)?; controller.SetIsVisible(true)?; }
+    // 异步创建完成时仅延续宿主已交给本窗口的焦点，不能抢另一个FX/应用的焦点。
+    if unsafe {GetFocus()}==hwnd {unsafe {controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT)?;}}
     let browser = unsafe { controller.CoreWebView2()? };
     let mapping: ICoreWebView2_3 = browser.cast()?;
     let path = wide(&folder.to_string_lossy());
@@ -435,4 +458,35 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
         Ok(())
     }));
     unsafe { browser.AddScriptToExecuteOnDocumentCreated(PCWSTR(script.as_ptr()),&ready) }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+
+    /// 用真实自有HWND验证Tab边界，不凭源码是否包含某个style判断可达性。
+    #[test]
+    fn native_editor_is_a_tab_stop_in_its_host_parent() {
+        // SAFETY: 夹具父窗口仅在本线程创建/销毁，不操作任何用户或REAPER窗口。
+        let parent=unsafe {CreateWindowExW(WINDOW_EX_STYLE::default(),w!("STATIC"),w!("HiFiShifter focus fixture"),
+            WS_OVERLAPPEDWINDOW,0,0,1100,720,None,None,None,None)}.unwrap();
+        let native=NativeEditor::attach(parent.0,1100,720,Arc::new(Default::default())).unwrap();
+        let child=HWND(native.key.hwnd as *mut c_void);
+        // GetNextDlgTabItem在没有任何Tab stop时会回退到第一个child，单看句柄会假通过。
+        let tab_stop=unsafe {GetWindowLongPtrW(child,GWL_STYLE)} as u32 & WS_TABSTOP.0 != 0;
+        let key=native.key;
+        assert!(std::thread::spawn(move||key.focus().is_err()).join().unwrap(),"不能从非UI线程触碰宿主焦点");
+        let focus_result=key.focus();
+        let focused=unsafe {GetFocus()};
+        // SAFETY: 两个窗口均为本线程且存活；仅查询标准Windows对话框导航结果。
+        let target=unsafe {GetNextDlgTabItem(parent,None,false)}.ok();
+        drop(native);
+        assert!(key.focus().is_err(),"关闭后的窗口租约不能再夺取焦点");
+        // SAFETY: 清理测试创建的唯一父窗口，子窗口已由NativeEditor析构。
+        unsafe {DestroyWindow(parent)}.unwrap();
+        assert!(tab_stop,"真实编辑器HWND必须接受宿主Tab停留，不能依赖导航的首child回退");
+        assert!(focus_result.is_ok(),"首次无旧焦点时仍应成功: {focus_result:?}");
+        assert_eq!(focused,child,"宿主焦点请求必须进入自有窗口");
+        assert_eq!(target,Some(child),"宿主Tab顺序必须能到达真实编辑器子窗口");
+    }
 }
