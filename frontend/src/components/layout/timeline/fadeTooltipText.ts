@@ -21,6 +21,8 @@
  */
 import type { ReactNode } from "react";
 import { createElement } from "react";
+import type {HostFadeMetadata} from "../../../types/api";
+import {hostFadeLabel} from "./hostFadeDisplay";
 
 import { formatFadeLengthTooltip, type FadeLengthFormatContext } from "./timeFormat";
 import { FadeShapeIcon } from "./FadeShapeIcon";
@@ -80,11 +82,17 @@ export function buildSingleFadeInfoText(args: {
     lengthSec: number;
     formatCtx: FadeLengthFormatContext;
     t: FadeLabelLookup;
+    hostFades?:HostFadeMetadata;
 }): string {
     const sideLabel = args.isOut ? args.t("fade_out") : args.t("fade_in");
     const name = shapeName(args.shape, args.t);
     const curvature = args.t("common_curvature");
     const length = args.t("common_length");
+    if (args.hostFades&&args.hostFades.curve_mode!=="legacy") {
+        return [`${sideLabel}：${hostFadeLabel(args.hostFades,args.isOut)}`,
+            `${length}：${formatFadeLengthTooltip(Math.max(0,args.lengthSec),args.formatCtx)}`,
+            "由 REAPER 控制（曲线形状未校准）"].join("\n");
+    }
     const sign = args.dir >= 0 ? "+" : "";
     return [
         `${sideLabel}${args.t("fade_type_label")}：${name}`,
@@ -101,7 +109,11 @@ export function buildSingleFadeInfoContent(args: {
     lengthSec: number;
     formatCtx: FadeLengthFormatContext;
     t: FadeLabelLookup;
+    hostFades?:HostFadeMetadata;
 }): ReactNode {
+    if (args.hostFades&&args.hostFades.curve_mode!=="legacy") {
+        return buildSingleFadeInfoText(args).split("\n").map((row,key)=>createElement("div",{key},row));
+    }
     const sideLabel = args.isOut ? args.t("fade_out") : args.t("fade_in");
     const curvature = args.t("common_curvature");
     const length = args.t("common_length");
@@ -126,8 +138,8 @@ export function buildSingleFadeInfoContent(args: {
  * 淡入在后。
  */
 export function buildCrossfadeGripInfoContent(args: {
-    earlier: { shape: number; dir: number; lengthSec: number };
-    later: { shape: number; dir: number; lengthSec: number };
+    earlier: { shape: number; dir: number; lengthSec: number;hostFades?:HostFadeMetadata };
+    later: { shape: number; dir: number; lengthSec: number;hostFades?:HostFadeMetadata };
     formatCtx: FadeLengthFormatContext;
     t: FadeLabelLookup;
 }): ReactNode {
@@ -169,8 +181,8 @@ export function publishFadeRichTooltip(element: Element | null, content: ReactNo
  * 两块之间空一行分隔（纯文本版本）。
  */
 export function buildCrossfadeGripInfoText(args: {
-    earlier: { shape: number; dir: number; lengthSec: number };
-    later: { shape: number; dir: number; lengthSec: number };
+    earlier: { shape: number; dir: number; lengthSec: number;hostFades?:HostFadeMetadata };
+    later: { shape: number; dir: number; lengthSec: number;hostFades?:HostFadeMetadata };
     formatCtx: FadeLengthFormatContext;
     t: FadeLabelLookup;
 }): string {

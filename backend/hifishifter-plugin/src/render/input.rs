@@ -39,7 +39,24 @@ impl RenderInput {
         let source_bytes=timeline.clips.iter().filter_map(|clip|clip.source_path.as_ref()).collect::<BTreeSet<_>>().into_iter()
             .try_fold(0_usize,|total,id| {let pcm=self.sources.get(id).ok_or_else(||format!("host PCM unavailable: {id}"))?;
                 total.checked_add(pcm.planes.iter().map(|plane|plane.len()*4).sum::<usize>()).ok_or_else(||"host interleaved PCM size overflow".to_owned())})?;
-        let _source_working=super::budget::global_budget().reserve(source_bytes).ok_or("host interleaved PCM budget exceeded")?;
+        // 两率最终PCM、源转交错副本、当前混音/region临时输出一起预检，失败不先做重推理。
+        // 此策略保留512MiB全局硬上限，不把旧30秒/64MiB探针常量直接放宽为无界分配。
+        let frame_counts=[44100_u32,48000].map(|rate| {
+            let frames=((end-start)*rate as f64).round();
+            if !frames.is_finite()||frames<0.||frames>=usize::MAX as f64/8. {Err("snapshot size overflow".to_owned())}
+            else {Ok(frames as usize)}
+        }).into_iter().collect::<Result<Vec<_>,_>>()?;
+        let outputs=frame_counts.iter().try_fold(0_usize,|total,frames|total.checked_add(frames*8))
+            .ok_or("snapshot size overflow")?;
+        let working=frame_counts.iter().copied().max().unwrap_or(0).checked_mul(8)
+            .and_then(|bytes|bytes.checked_mul(if self.clip_parameters.is_empty() {1} else {2}))
+            .ok_or("render working size overflow")?;
+        let required=source_bytes.checked_add(outputs).and_then(|bytes|bytes.checked_add(working))
+            .ok_or("render memory size overflow")?;
+        let budget=super::budget::global_budget();
+        let mut batch=budget.reserve(required).ok_or_else(||format!("render PCM budget exceeded: required={required} used={} limit={}",budget.used(),budget.limit()))?;
+        let _source_working=batch.split_off(source_bytes).ok_or("invalid render budget partition")?;
+        let _working=batch.split_off(working).ok_or("invalid render budget partition")?;
         for id in timeline.clips.iter().filter_map(|clip|clip.source_path.as_ref()).collect::<BTreeSet<_>>() {
             let pcm=self.sources.get(id).ok_or_else(||format!("host PCM unavailable: {id}"))?;
             let channels=pcm.planes.len();let mut samples=Vec::with_capacity(pcm.planes[0].len()*channels);
@@ -48,11 +65,9 @@ impl RenderInput {
         }
         let mut snapshots=Vec::new();
         let model_rate_output=timeline.tracks.iter().any(|track|track.pitch_analysis_algo==hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx);
-        for sample_rate in [44100,48000] {
+        for (sample_rate,frames) in [44100,48000].into_iter().zip(frame_counts) {
             if cancel.load(Ordering::Acquire) {return Err("host preparation cancelled".into());}
-            let frames=((end-start)*sample_rate as f64).round() as usize;
-            if frames>64*1024*1024/8 {return Err("snapshot span exceeds 64MiB".into());}
-            let reservation=super::budget::global_budget().reserve(frames*8).ok_or("PCM memory budget exceeded")?;
+            let reservation=batch.split_off(frames*8).ok_or("invalid render budget partition")?;
             // HiFiGAN工作区只在模型原生44.1k合成一次，48k是便宜输出层，不重新跑HNSEP/神经网络。
             // 纯非HiFiGAN路径保持旧采样率契约；只消费已经就绪的不可变PCM，仍在worker线程。
             if model_rate_output&&sample_rate==48000 {
@@ -72,7 +87,6 @@ impl RenderInput {
             };
             // 项目数组只负责GUI；每个区域用自己的源参数跑原kernel，再按宿主位置累加。
             // 所有track仍保留原全局solo/父链，不能因为拆region丢掉另一轨solo。
-            let _working=super::budget::global_budget().reserve(frames*8).ok_or("parameter render working budget exceeded")?;
             let (channels,samples)=if self.clip_parameters.is_empty() {
                 let (_,channels,_,samples)=run(timeline,start,end)?;(channels,samples)
             } else {
@@ -87,7 +101,6 @@ impl RenderInput {
                         view.clips[0].start_sec=0.;view.project_sec=clip.length_sec;(0.,clip.length_sec)
                     } else {(start,end)};
                     let part_frames=((hi-lo)*sample_rate as f64).round() as usize;
-                    let _part_budget=super::budget::global_budget().reserve(part_frames*8).ok_or("parameter render working budget exceeded")?;
                     let (_,channels,_,part)=run(&view,lo,hi)?;
                     if channels!=2||part.len()!=part_frames*2 {return Err("invalid region parameter output".into());}
                     let offset=if local.is_some() {((clip.start_sec-start)*sample_rate as f64).round() as usize*2} else {0};
@@ -106,6 +119,53 @@ impl RenderInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 三分钟普通人声经过授权kernel/两率快照后全尾就绪；内存按固定全局预算预检。
+    #[test]
+    fn three_minute_host_clip_prepares_both_rates_and_the_last_block_within_budget() {
+        let frames=44100*180;let seconds=180.;let budget=super::super::budget::global_budget();let baseline=budget.used();
+        let source=Arc::new(SourcePcm {sample_rate:44100,planes:vec![vec![0.25;frames]],version:1,
+            _reservation:Some(budget.reserve(frames*4).unwrap())});
+        let mut timeline:TimelineState=serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"track","name":"Long voice","order":0,"pitch_analysis_algo":"none"}],"bpm":120,"project_sec":seconds,
+            "clips":[{"id":"clip","name":"Long voice","track_id":"track","start_sec":0,"length_sec":seconds,
+                "takes":[{"id":"take","source_path":"source","source_start_sec":0,"source_end_sec":seconds}]}]
+        })).unwrap();timeline.clips[0].normalize_takes();
+        let input=RenderInput {timeline:Some(timeline),regions:vec![AraPlaybackRegion {audio_source_persistent_id:"source".into(),
+            duration_in_modification_time:seconds,duration_in_playback_time:seconds,..Default::default()}],
+            sources:HashMap::from([("source".into(),source.clone())]),clip_parameters:BTreeMap::new()};
+        let snapshots=input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        for (snapshot,rate) in snapshots.iter().zip([44100,48000]) {
+            assert_eq!(snapshot.left.len(),rate*180);assert_eq!(snapshot.right.len(),rate*180);
+            assert!(snapshot.left.iter().all(|sample|(*sample-0.25).abs()<1e-6));
+        }
+        let accounted=budget.used()-baseline;assert_eq!(accounted,frames*4+(44100+48000)*180*8);
+        eprintln!("long-host seconds=180 source_bytes={} ready_bytes={} accounted_peak={} hard_limit={}",
+            frames*4,accounted-frames*4,budget.peak(),budget.limit());
+        let mut left=[0_f32;513];let mut right=[0_f32;513];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
+        let mut bus=crate::audio_abi::AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
+        let publisher=super::super::snapshot::SnapshotPublisher::default();let mut snapshots=snapshots;
+        publisher.publish(snapshots.pop().unwrap()).unwrap();
+        assert!(unsafe {publisher.copy_block((48000*180-511) as i64,48000,&mut bus,513)});
+        assert_eq!(&left[..511],&[0.25;511]);assert_eq!(&right[..511],&[0.25;511]);assert_eq!(&left[511..],&[0.;2]);
+        assert!(unsafe {publisher.copy_block(0,48000,&mut bus,513)});assert_eq!(left,[0.25;513]);
+        drop(publisher);drop(snapshots);drop(input);drop(source);assert_eq!(budget.used(),baseline);
+    }
+    /// 大跨度在任何合成前明确预算失败，不能为通过长源门扩大512MiB或静默补零。
+    #[test]
+    fn sparse_huge_span_is_rejected_before_any_large_render_allocation() {
+        let mut timeline:TimelineState=serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"track","name":"Sparse voice","order":0,"pitch_analysis_algo":"none"}],"bpm":120,"project_sec":3601,
+            "clips":[{"id":"a","name":"A","track_id":"track","start_sec":0,"length_sec":1,"takes":[{"id":"ta","source_path":"source","source_end_sec":1}]},
+                {"id":"b","name":"B","track_id":"track","start_sec":3600,"length_sec":1,"takes":[{"id":"tb","source_path":"source","source_end_sec":1}]}]
+        })).unwrap();for clip in &mut timeline.clips {clip.normalize_takes();}
+        let source=Arc::new(SourcePcm {sample_rate:44100,planes:vec![vec![0.25;44100]],version:1,_reservation:None});
+        let region=|start|AraPlaybackRegion {audio_source_persistent_id:"source".into(),start_in_playback_time:start,
+            duration_in_modification_time:1.,duration_in_playback_time:1.,..Default::default()};
+        let input=RenderInput {timeline:Some(timeline),regions:vec![region(0.),region(3600.)],sources:HashMap::from([("source".into(),source)]),clip_parameters:BTreeMap::new()};
+        let budget=super::super::budget::global_budget();let baseline=budget.used();
+        let error=input.render(Arc::new(AtomicBool::new(false))).unwrap_err();assert!(error.contains("BudgetExceeded"));
+        assert_eq!(budget.used(),baseline);
+    }
     /// 双输出率从同一HiFiGAN原生结果派生，整段HNSEP也只运行一次，不以WORLD外推。
     #[test]
     #[ignore = "真实CPU插件渲染输入诊断：显式运行"]

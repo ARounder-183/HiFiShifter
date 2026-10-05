@@ -4095,6 +4095,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 if (clip === undefined) return null;
                 return {
                     shape: (isOut ? clip.fadeOutShape : clip.fadeInShape) ?? 0,
+                    hostFades:clip.hostFades,
                     dir: (isOut ? clip.fadeOutDir : clip.fadeInDir) ?? 0,
                     lengthSec: effectiveFadeSec(
                         isOut ? clip.fadeOutSec : clip.fadeInSec,

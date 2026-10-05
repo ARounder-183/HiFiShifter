@@ -81,7 +81,7 @@ mod bound_tests {
         {let mut regions=document.regions.lock().unwrap();let region=regions.get_mut(&first).unwrap();region.start_in_playback_time=1.;region.duration_in_playback_time=4.;}
         let host=crate::host::reaper::ReaperFixture::new();unsafe {owners[0].bind_reaper_host(host.context());}owners[0].refresh_reaper_transport();
         let (response,_,_)=document.workspace_snapshot().unwrap();
-        assert_eq!(response.timeline.unwrap()["clips"][0]["fade_in_sec"],0.2);
+        assert_eq!(response.timeline.clips[0].fade_in_sec,0.2);
         let actor=owners[0].editor_session().unwrap();let (reply,rx)=std::sync::mpsc::channel();let (events,_)=std::sync::mpsc::sync_channel(128);
         let sink=crate::editor::session::UiSink {view_id:"fade-projection".into(),reply,events,closed:Arc::new(std::sync::atomic::AtomicBool::new(false))};
         let call=|command:&str| {actor.enqueue(crate::editor::session::UiRequest {id:1,command:command.into(),args:serde_json::json!({}),sink:sink.clone(),link:None}).unwrap();

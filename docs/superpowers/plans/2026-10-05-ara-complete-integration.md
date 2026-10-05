@@ -167,6 +167,15 @@ struct HostRenderCounters { source_hits:u64, intermediate_hits:u64, pcm_hits:u64
 
 ## 当前状态
 
+2026-10-05最新源码批：内嵌workspace共享SourcePcm Arc，取消源/分析的30秒门，
+两率PCM与准备临时域在固定512MiB额度内整批预检。单轨180秒GUI/两率完整尾部/seek
+合同通过，显式额度峰值265,248,000字节，不等于模型/GPU/RSS峰值。实际源ID不变换
+220→440Hz的原线自动失效/目标保留、无gen宿主移动自动准备也通过；私有内容路径保持
+mtime，坏WAV原子重建。详情probe/ara/SOURCE-AUTHORITY-FINDINGS.md。
+多轨长源新旧快照共存/稀疏区间、三分钟真实HiFiGAN宿主与资源峰值仍open，不勾Task40。
+单独kernel无vslib测试的历史测试import编译门已修，仅测试作用域；3定向exit0，不等于
+完整cargo test基线或独立App验收。REAPER未启动，最终统一构建/用户集中测仍待源码收尾。
+
 2026-10-05补充：Task38重叠GUI投影/选择在e15a0792，10定向exit0；Task39/40已实现
 HNSEP完整内容/model缓存与worker单飞、两类128MiB模型cache、HiFiGAN每批4块和
 原生率合成派生48k。真实CPU四项模型诊断与相关定向回归正常exit0，精确结果见

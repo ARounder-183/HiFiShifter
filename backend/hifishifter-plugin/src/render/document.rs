@@ -15,6 +15,14 @@ struct RendererLease {
     owner: Weak<ExtensionOwner>,
 }
 
+/// 内嵌GUI同进程冻结值；PCM沿授权Arc共享，不能经旧IPC/JSON复制完整长源。
+pub(crate) struct WorkspaceSnapshot {
+    pub timeline:hifishifter_kernel::state::TimelineState,
+    pub sources:Vec<(String,Arc<super::source::SourcePcm>)>,
+    pub revision:u64,
+    pub model_revision:u64,
+}
+
 #[derive(Default)]
 pub(crate) struct DocumentSession {
     controller: AtomicUsize,
@@ -148,7 +156,7 @@ impl DocumentSession {
         let identities=self.parameter_identities_locked(&host)?;self.edits.lock().unwrap().atlas.project_roots(selection,&identities)
     }
     /// 短事务同时冻结授权、参数、PCM和三个版本，分析副本的文件IO由actor随后执行。
-    pub(crate) fn workspace_snapshot(&self)->Result<(hifishifter_ara_ipc::Response,u64,String),String> {
+    pub(crate) fn workspace_snapshot(&self)->Result<(WorkspaceSnapshot,u64,String),String> {
         let _transaction=self.transaction.lock().unwrap();
         for owner in self.renderer_owners() {owner.merge_pending_restore(self)?;}
         let mut timeline=self.workspace_timeline_locked()?;let mut edits=self.edits.lock().unwrap();
@@ -159,15 +167,12 @@ impl DocumentSession {
             .filter_map(Option::as_ref).collect::<std::collections::BTreeSet<_>>();
         let sources=ids.into_iter().map(|id| {
             let pcm=available.get(id).ok_or_else(||format!("host PCM unavailable: {id}"))?;
-            Ok(hifishifter_ara_ipc::HostPcm {persistent_id:id.clone(),sample_rate:pcm.sample_rate,
-                fingerprint:super::extension::pcm_fingerprint(pcm),planes:pcm.planes.clone()})
+            Ok((id.clone(),pcm.clone()))
         }).collect::<Result<Vec<_>,String>>()?;
         let projection=self.workspace_projection_locked(&edits)?;
         self.project_ui_fades_locked(&mut timeline);
-        let mut ui_timeline=serde_json::to_value(timeline).map_err(|e|e.to_string())?;
-        self.decorate_host_fades_locked(&mut ui_timeline,"");
-        Ok((hifishifter_ara_ipc::Response {ok:true,timeline:Some(ui_timeline),sources,
-            revision:edits.revision,model_revision:self.revision.load(Ordering::Acquire),..Default::default()},self.scope_revision.load(Ordering::Acquire),projection))
+        Ok((WorkspaceSnapshot {timeline,sources,
+            revision:edits.revision,model_revision:self.revision.load(Ordering::Acquire)},self.scope_revision.load(Ordering::Acquire),projection))
     }
     /// 原分析副本可补媒体元信息，除此之外clip、take及轨道结构全部必须与宿主一致。
     fn validate_workspace_geometry(host:&hifishifter_kernel::state::TimelineState,client:&hifishifter_kernel::state::TimelineState)->Result<(),String> {

@@ -1,6 +1,6 @@
 //! 真实ARA文档共享原编辑命令actor：UI只排队，分析/文件/离线渲染均不在音频或UI回调执行。
 use crate::render::document::DocumentSession;
-use hifishifter_kernel::editor::{history,host_pcm::{materialize,PcmView},ParamHost};
+use hifishifter_kernel::editor::{history,host_pcm::{materialize_with_byte_limit,PcmView},ParamHost};
 use hifishifter_kernel::state::*;
 use serde_json::{json,Value};
 use std::collections::HashMap;
@@ -57,6 +57,7 @@ pub(crate) struct EditorSession {
     project_duration:AtomicU64,
     pub(super) error:Mutex<Option<String>>,
     render_error:Mutex<Option<String>>,
+    render_requested:AtomicBool,
     closed:AtomicBool,
     transport_probe:bool,
     transport_probe_next:Mutex<Instant>,
@@ -78,7 +79,7 @@ impl EditorSession {
             analysis_cancel:Arc::new(AtomicBool::new(false)),analysis_workers:Mutex::new(Vec::new()),
             generation:AtomicU64::new(0),submitted:AtomicU64::new(0),processed:AtomicU64::new(0),applied:AtomicU64::new(0),
             host_version:AtomicU64::new(0),ui_geometry_version:AtomicU64::new(0),project_duration:AtomicU64::new(0),
-            error:Mutex::new(None),render_error:Mutex::new(None),closed:AtomicBool::new(false),suppress_history:AtomicBool::new(false),
+            error:Mutex::new(None),render_error:Mutex::new(None),render_requested:AtomicBool::new(false),closed:AtomicBool::new(false),suppress_history:AtomicBool::new(false),
             transport_probe:std::env::var_os("HIFISHIFTER_ARA_TRANSPORT_PROBE").is_some(),transport_probe_next:Mutex::new(Instant::now())});
         let weak=Arc::downgrade(&session);
         let worker=std::thread::Builder::new().name("hfs-embedded-editor".into()).spawn(move ||Self::run(weak,receiver))
@@ -153,6 +154,9 @@ impl EditorSession {
                 session.refresh_host();
                 session.report_transport_probe();
                 if session.refresh_analysis() {deadline=Some(Instant::now()+Duration::from_millis(150));}
+                if deadline.is_none()&&session.render_requested.load(Ordering::Acquire)&&session.error.lock().unwrap().is_none() {
+                    deadline=Some(Instant::now()+Duration::from_millis(150));
+                }
                 // 到期应用先于下一条只读轮询；持续get_playback_state不能令合成饥饿。
                 if deadline.is_some_and(|d|d<=Instant::now()) {
                     let ticket=session.submitted.load(Ordering::Acquire);
@@ -162,7 +166,7 @@ impl EditorSession {
                         let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||session.apply(ticket)))
                             .unwrap_or_else(|_|Err("automatic render panicked".into()));
                         match result {
-                            Ok(())=>{session.applied.store(generation,Ordering::Release);*session.render_error.lock().unwrap()=None;},
+                            Ok(())=>{session.applied.store(generation,Ordering::Release);session.render_requested.store(false,Ordering::Release);*session.render_error.lock().unwrap()=None;},
                             Err(error) if error=="pitch analysis pending"||error=="automatic apply superseded"=>{deadline=Some(Instant::now()+Duration::from_millis(150));},
                             Err(error)=>{
                                 // 渲染失败与权限/模型冲突分离；模型/资源稍后就绪后自动重试，不等手工reload。
@@ -239,7 +243,12 @@ impl EditorSession {
     /// 投影撤销项目缓存键时，源分析可能早已全量命中；由actor组装，不等GUI读取/新通知。
     /// 只消费clip分析缓存，不做神经推理；尚未齐全仍pending，用户目标曲线保持。
     fn complete_cached_analysis(&self) {
-        let roots={let timeline=self.timeline.lock().unwrap();timeline.params_by_root_track.iter()
+        let roots={let mut timeline=self.timeline.lock().unwrap();
+            // 首次载入尚未get_param_frames时也必须有根状态，否则完成通知找不到接收原线的条目。
+            let active_roots=timeline.clips.iter().filter_map(|clip|timeline.resolve_root_track_id(&clip.track_id))
+                .collect::<std::collections::BTreeSet<_>>();
+            for root in active_roots {timeline.ensure_params_for_root(&root);}
+            timeline.params_by_root_track.iter()
             .filter(|(_,params)|params.pitch_orig_key.is_none()||params.dyn_orig_key.is_none())
             .map(|(root,_)|root.clone()).collect::<Vec<_>>()};
         if roots.is_empty() {return;}
@@ -259,7 +268,7 @@ impl EditorSession {
                 current.pitch_orig_key=next.pitch_orig_key.clone();current.has_pitch_adjustment_active=next.has_pitch_adjustment_active;changed=true;}
             if current.dyn_orig_key.is_none()&&next.dyn_orig_key.is_some() {current.dyn_orig=next.dyn_orig.clone();current.dyn_orig_key=next.dyn_orig_key.clone();changed=true;}
         }}
-        if changed {let updated=self.timeline.lock().unwrap().clone();self.publish_timeline(updated);}
+        if changed {let updated=self.timeline.lock().unwrap().clone();self.publish_timeline(updated);self.render_requested.store(true,Ordering::Release);}
     }
     pub(super) fn ensure_loaded(&self,force:bool)->Result<(),String> {
         let document=self.document.upgrade().ok_or("document closed")?;
@@ -275,9 +284,8 @@ impl EditorSession {
             }
         }
         let (snapshot,scope,projection)=document.workspace_snapshot()?;
-        if !snapshot.ok {return Err(snapshot.error.unwrap_or_else(||"host snapshot unavailable".into()));}
-        let mut timeline:TimelineState=serde_json::from_value(snapshot.timeline.ok_or("host timeline missing")?).map_err(|e|e.to_string())?;
-        // 快照只序列化take权威；先重建扁平投影，再判断真实的倒放/组合倍率。
+        let mut timeline=snapshot.timeline;
+        // 快照冻结take权威；先重建扁平投影，再判断真实的倒放/组合倍率。
         for clip in &mut timeline.clips {clip.normalize_takes();}
         // 正向倍率交给原kernel保调处理，不能再把全部拉伸挡在GUI外；倒放仍按用户范围拒绝。
         if timeline.clips.iter().any(|clip|clip.reversed) {
@@ -285,9 +293,12 @@ impl EditorSession {
             *self.error.lock().unwrap()=Some(error.clone());return Err(error);
         }
         if timeline.target_param_frames(timeline.frame_period_ms())>1_000_000 {return Err("ARA editor parameter frame budget exceeded for project span".into());}
-        let views:Vec<_>=snapshot.sources.iter().map(|pcm|PcmView {persistent_id:&pcm.persistent_id,sample_rate:pcm.sample_rate,planes:&pcm.planes}).collect();
-        let dir=self.pcm_dir.join(format!("m{}-e{}",snapshot.model_revision,snapshot.revision));
-        let (mut timeline,reverse_paths)=materialize(timeline,&views,&dir)?;
+        let views:Vec<_>=snapshot.sources.iter().map(|(id,pcm)|PcmView {persistent_id:id,sample_rate:pcm.sample_rate,planes:&pcm.planes}).collect();
+        // 内容hash决定私有分析路径；model/edit代次和项目位置不应制造新的F0缓存身份。
+        let dir=self.pcm_dir.join("sources");
+        let (mut timeline,reverse_paths)=materialize_with_byte_limit(timeline,&views,&dir,crate::render::budget::global_budget().limit())?;
+        // 旧状态或同URI换音频的原线不能假报就绪；已有完整clip cache由actor重新组装。
+        for params in timeline.params_by_root_track.values_mut() {params.pitch_orig_key=None;params.dyn_orig_key=None;}
         self.rewrite_ids(&mut timeline,true);
         if timeline.selected_track_id.is_none() {timeline.selected_track_id=timeline.tracks.first().map(|t|t.id.clone());}
         if timeline.selected_clip_id.is_none() {timeline.selected_clip_id=timeline.clips.first().map(|c|c.id.clone());}
@@ -301,7 +312,9 @@ impl EditorSession {
         self.peaks.lock().unwrap().clear();
         // snapshot返回后UI缓存可能再次更新，强制下一轮按短事务版本同步，不能吞掉该变化。
         self.ui_geometry_version.store(0,Ordering::Release);
+        self.complete_cached_analysis();
         self.schedule_analysis();
+        self.render_requested.store(true,Ordering::Release);
         self.host_version.fetch_add(1,Ordering::AcqRel);
         self.emit("plugin_host_changed",json!({"version":self.host_version.load(Ordering::Acquire)}));
         Ok(())
@@ -375,11 +388,8 @@ impl EditorSession {
         }
         if roots.is_empty() {return false;}
         self.complete_cached_analysis();
-        if self.generation.load(Ordering::Acquire)>0 {
-            let timeline=self.timeline.lock().unwrap().clone();
-            self.publish_timeline(timeline);return true;
-        }
-        false
+        // 保存冷恢复没有本地generation，原线完成仍须重应用，不能永久沿旧源F0快照。
+        true
     }
     /// GUI读取真实宿主时钟，不驱动独立设备；未收到process上下文时保留本地查看游标。
     pub(super) fn transport(&self)->(f64,bool) {
@@ -458,7 +468,8 @@ impl EditorSession {
         let generation=self.generation.load(Ordering::Acquire);let applied=self.applied.load(Ordering::Acquire);
         let states=self.document.upgrade().map(|document|document.renderer_owners().into_iter().map(|owner|owner.preparation_state()).collect::<Vec<_>>()).unwrap_or_default();
         let host_pending=states.iter().any(|state|state.0);let host_error=states.into_iter().find_map(|state|state.1);
-        json!({"generation":generation,"applied_generation":applied,"pending":generation!=applied||host_pending,
+        let analysis_pending=Self::requires_analysis(&self.timeline.lock().unwrap());
+        json!({"generation":generation,"applied_generation":applied,"pending":generation!=applied||host_pending||analysis_pending||self.render_requested.load(Ordering::Acquire),
             "host_version":self.host_version.load(Ordering::Acquire),
             "error":self.error.lock().unwrap().clone().or_else(||self.render_error.lock().unwrap().clone()).or(host_error),"connected":!self.closed.load(Ordering::Acquire),
             "ready":self.loaded.lock().unwrap().initialized})
@@ -1070,6 +1081,75 @@ pub(crate) mod tests {
         }
         let params=timeline.params_by_root_track.get_mut(&root).unwrap();params.extra_params.clear();params.extra_curves.clear();
         assert!(!EditorSession::requires_analysis(&timeline));editor.close();
+    }
+    /// 三分钟真实授权PCM同进程Arc冻结，原GUI流式分析副本不受旧30秒门禁或整源复制影响。
+    #[test]
+    fn long_host_source_loads_original_gui_through_shared_pcm_without_ipc_copy() {
+        let (model,owner,_identity)=fixture();let document=model.session();let seconds=180.;let frames=44100*180;
+        let budget=crate::render::budget::global_budget();let baseline=budget.used();
+        let pcm=Arc::new(SourcePcm {sample_rate:44100,planes:vec![vec![0.125;frames]],version:1,_reservation:Some(budget.reserve(frames*4).unwrap())});
+        document.sources.lock().unwrap().insert("ara://source".into(),pcm.clone());
+        document.edit_sources.lock().unwrap().insert("ara://source".into(),pcm.clone());
+        {let mut timeline=document.timeline.lock().unwrap();let timeline=timeline.as_mut().unwrap();timeline.project_sec=seconds;
+            for clip in &mut timeline.clips {clip.length_sec=seconds;clip.takes[0].source_end_sec=seconds;clip.normalize_takes();}}
+        for region in document.regions.lock().unwrap().values_mut() {region.duration_in_modification_time=seconds;region.duration_in_playback_time=seconds;}
+        let (snapshot,_,_)=document.workspace_snapshot().unwrap();assert!(Arc::ptr_eq(&snapshot.sources[0].1,&pcm));
+        assert_eq!(budget.used(),baseline+frames*4,"冻结不能复制一份整源PCM");drop(snapshot);
+        let editor=owner.editor_session().unwrap();editor.ensure_loaded(false).unwrap();
+        let timeline=editor.timeline.lock().unwrap();assert_eq!(timeline.clips[0].length_sec,seconds);
+        assert_eq!(timeline.clips[0].duration_frames,Some(frames as u64));
+        let path=timeline.clips[0].source_path.clone().unwrap();drop(timeline);
+        use std::io::{Seek,Read};let mut wav=std::fs::File::open(path).unwrap();
+        assert!(wav.metadata().unwrap().len()>=frames as u64*4);
+        wav.seek(std::io::SeekFrom::End(-4)).unwrap();let mut tail=[0_u8;4];wav.read_exact(&mut tail).unwrap();
+        assert_eq!(f32::from_le_bytes(tail),0.125);
+        document.close();drop(pcm);assert_eq!(budget.used(),baseline);
+    }
+    /// 无本地落笔的宿主移动也要重新准备；cache全命中不会发ClipPitchReady，不能静默遗漏。
+    #[test]
+    fn host_move_without_local_generation_reapplies_and_reuses_analysis_file() {
+        let (model,owner,_identity)=fixture();let document=model.session();let editor=owner.editor_session().unwrap();editor.ensure_loaded(false).unwrap();
+        let before_path=editor.timeline.lock().unwrap().clips[0].source_path.clone().unwrap();
+        let modified=std::fs::metadata(&before_path).unwrap().modified().unwrap();
+        {let _transaction=document.transaction.lock().unwrap();let mut timeline=document.timeline.lock().unwrap();
+            let timeline=timeline.as_mut().unwrap();timeline.clips[0].start_sec=1.;timeline.project_sec=2.;
+            for region in document.regions.lock().unwrap().values_mut() {region.start_in_playback_time=1.;}
+            document.revision.fetch_add(1,Ordering::AcqRel);document.render_epoch.fetch_add(1,Ordering::AcqRel);}
+        let mut left=[0_f32;4];let mut right=[0_f32;4];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
+        let mut bus=crate::audio_abi::AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
+        let began=Instant::now();loop {
+            unsafe {owner.snapshots[0].copy_block(44100,44100,&mut bus,4);}
+            if left==[0.1,0.2,0.3,0.4] {break;}
+            assert!(began.elapsed()<Duration::from_secs(5),"{:?}",editor.state());std::thread::sleep(Duration::from_millis(10));
+        }
+        let after_path=editor.timeline.lock().unwrap().clips[0].source_path.clone().unwrap();
+        assert_eq!(after_path,before_path);assert_eq!(std::fs::metadata(after_path).unwrap().modified().unwrap(),modified);
+        assert_eq!(editor.generation.load(Ordering::Acquire),0);document.close();
+    }
+    /// 同一ARA源ID换为不同PCM后，原线从57重建为69，保留目标60；不靠读取原线推动分析。
+    #[test]
+    fn same_host_source_identity_changed_pcm_invalidates_original_pitch_without_reload() {
+        let (model,owners,_ids)=task34_world_fixture();let document=model.session();let editor=owners[0].editor_session().unwrap();
+        let (reply,rx)=mpsc::channel();let (events,_)=mpsc::sync_channel(128);
+        let sink=UiSink {view_id:"same-uri-change".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        let loaded=call(&editor,&sink,&rx,1,"get_timeline_state",json!({}));let root=loaded["tracks"][0]["id"].as_str().unwrap();
+        let wait=|predicate:&dyn Fn()->bool| {let began=Instant::now();while !predicate() {
+            assert!(began.elapsed()<Duration::from_secs(25),"{:?}",editor.state());std::thread::sleep(Duration::from_millis(10));}};
+        wait(&||editor.timeline.lock().unwrap().params_by_root_track.get(root).is_some_and(|params|params.pitch_orig_key.is_some()));
+        let old_path=editor.timeline.lock().unwrap().clips[0].source_path.clone().unwrap();
+        assert!((editor.timeline.lock().unwrap().params_by_root_track[root].pitch_orig[100]-57.).abs()<1.);
+        call(&editor,&sink,&rx,2,"set_param_frames",json!({"trackId":root,"param":"pitch","startFrame":0,"values":vec![60.;400],"checkpoint":true}));
+        wait(&||editor.applied.load(Ordering::Acquire)>=1);
+        let samples=(0..88200).map(|n|{let phase=2.*std::f64::consts::PI*440.*n as f64/44100.;
+            (1..=16).map(|harmonic|(phase*harmonic as f64).sin()*0.2/harmonic as f64).sum::<f64>() as f32}).collect();
+        {let _transaction=document.transaction.lock().unwrap();let pcm=Arc::new(SourcePcm {sample_rate:44100,planes:vec![samples],version:1,_reservation:None});
+            document.edit_sources.lock().unwrap().insert("ara://source".into(),pcm.clone());document.sources.lock().unwrap().insert("ara://source".into(),pcm);
+            document.revision.fetch_add(1,Ordering::AcqRel);document.render_epoch.fetch_add(1,Ordering::AcqRel);}
+        wait(&|| {let timeline=editor.timeline.lock().unwrap();timeline.params_by_root_track.get(root)
+            .is_some_and(|params|params.pitch_orig_key.is_some()&&params.pitch_orig.get(100).is_some_and(|note|(*note-69.).abs()<1.))});
+        wait(&||document.edits.lock().unwrap().params.get("track").is_some_and(|params|params.pitch_orig.get(100).is_some_and(|note|(*note-69.).abs()<1.)));
+        let timeline=editor.timeline.lock().unwrap();assert_ne!(timeline.clips[0].source_path.as_deref(),Some(old_path.as_str()));
+        assert_eq!(timeline.params_by_root_track[root].pitch_edit[100],60.);drop(timeline);document.close();
     }
     /// 真actor的自动调度消费快速写入/undo/redo，不调用手工render函数冒充自动应用。
     #[test]

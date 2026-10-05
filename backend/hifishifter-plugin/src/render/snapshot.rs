@@ -89,7 +89,7 @@ pub(crate) fn validate_regions(
         .ok_or(SnapshotError::BudgetExceeded)?;
     if frames
         .checked_mul(8)
-        .is_none_or(|bytes| bytes > 64 * 1024 * 1024)
+        .is_none_or(|bytes| bytes > super::budget::global_budget().limit())
     {
         return Err(SnapshotError::BudgetExceeded);
     }

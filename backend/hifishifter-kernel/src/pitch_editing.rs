@@ -643,7 +643,7 @@ pub fn selected_pitch_edit_algorithm(timeline: &TimelineState) -> PitchEditAlgor
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "vslib")]
+    // 插件禁用vslib仍运行WORLD/HiFiGAN共通混音回归，测试依赖不能随vslib一起隐藏。
     use super::processor_bakes_common_mix_curves;
     use super::{
         active_child_formant_offset_config, build_clip_effective_formant_shift_curve,
@@ -652,7 +652,6 @@ mod tests {
         hifigan_formant_shift_active_for_clip, maybe_apply_pitch_edit_to_clip_segment,
         processor_should_handle_stretch,
     };
-    #[cfg(feature = "vslib")]
     use crate::state::SynthPipelineKind;
     use crate::state::{Clip, TimelineState, TrackParamsState};
     use std::collections::HashMap;

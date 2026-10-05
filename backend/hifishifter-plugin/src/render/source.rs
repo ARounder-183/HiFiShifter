@@ -21,20 +21,24 @@ pub(crate) fn read_source_pcm(
 ) -> Result<SourcePcm, AraError> {
     if ![44100, 48000].contains(&sample_rate)
         || !(1..=2).contains(&channels)
-        || frames > sample_rate as usize * 30
+        || frames==0||frames>i64::MAX as usize
     {
         return Err(AraError::Unsupported(
-            "probe supports <=30s 44100/48000Hz mono/stereo sources",
+            "ARA requires nonempty 44100/48000Hz mono/stereo sources",
         ));
     }
     let source = host
         .current_audio_source()
         .ok_or(AraError::InvalidState("missing source scope"))?;
+    let bytes=frames.checked_mul(channels).and_then(|n|n.checked_mul(4))
+        .ok_or(AraError::InvalidState("PCM memory size overflow"))?;
     let reservation = super::budget::global_budget()
-        .reserve(frames * channels * 4)
+        .reserve(bytes)
         .ok_or(AraError::InvalidState("PCM memory budget exceeded"))?;
     let mut reader = host.audio_reader::<f32>(source, channels)?;
-    let mut planes = vec![vec![0.0_f32; frames]; channels];
+    let mut planes = Vec::with_capacity(channels);
+    for _ in 0..channels {let mut plane=Vec::new();plane.try_reserve_exact(frames)
+        .map_err(|_|AraError::InvalidState("PCM allocation failed"))?;plane.resize(frames,0_f32);planes.push(plane);}
     for start in (0..frames).step_by(4096) {
         let end = (start + 4096).min(frames);
         let mut buffers = planes
@@ -60,6 +64,22 @@ mod tests {
     use ara2_bridge::core::ApiGeneration;
     use ara2_bridge::plugin::{HostAudioSourceRef, HostClients};
     use std::sync::atomic::Ordering;
+    /// 真ARA reader在4096帧窗口内读取45秒授权源，末块与预算释放都不依赖旧30秒常量。
+    #[test]
+    fn long_authorized_source_reads_the_tail_and_releases_its_budget() {
+        let frames=44100*45+17;let samples=(0..frames).map(|n|(n%17) as f32/32.).collect::<Vec<_>>();
+        let mut fixture=crate::test_host::HostFixture::new(vec![samples]);let host=fixture.instance();
+        let clients=unsafe {HostClients::from_raw(&host,ApiGeneration::V2Final)}.unwrap();let mut identity=0_u8;
+        let source=unsafe {HostAudioSourceRef::from_raw((&raw mut identity).cast())}.unwrap();
+        let baseline=super::super::budget::global_budget().used();
+        let pcm=clients.with_audio_source_management(source,|scope|read_source_pcm(&scope,frames,1,44100,3)).unwrap();
+        assert_eq!(pcm.planes[0],fixture.planes[0]);assert_eq!(pcm.planes[0].len(),frames);
+        assert!(super::super::budget::global_budget().used()>=baseline+frames*4);drop(pcm);
+        assert_eq!(super::super::budget::global_budget().used(),baseline);
+        assert_eq!(fixture.created.load(Ordering::Relaxed),1);assert_eq!(fixture.destroyed.load(Ordering::Relaxed),1);
+        assert!(clients.with_audio_source_management(source,|scope|read_source_pcm(&scope,usize::MAX/4,2,44100,4)).is_err());
+        assert_eq!(fixture.created.load(Ordering::Relaxed),1,"超预算应在打开host reader之前拒绝");
+    }
 
     /// 通过真实 bridge reader 读完整数据，并在 scope 返回前释放它。
     #[test]
