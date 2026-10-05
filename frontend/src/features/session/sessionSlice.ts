@@ -494,7 +494,7 @@ export interface SessionState {
     selectDragDirection: DragDirection;
     /** 参数编辑器（绘制工具）拖动方向限制 */
     drawDragDirection: DrawDragDirection;
-    /** 参数编辑器（直线/颤音工具）拖动方向限制 */
+    /** 参数编辑器（直线工具与颤音工具共用）拖动方向限制 */
     lineVibratoDragDirection: DrawDragDirection;
 
     /** 参数编辑器选区拖拽时的边缘平滑度（0-100%） */

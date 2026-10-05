@@ -414,13 +414,13 @@ export function usePianoRollInteractions(args: {
     vibratoAmplitudeAdjustKb: Keybinding;
     /** modifier.vibratoFrequencyAdjust 绑定 */
     vibratoFrequencyAdjustKb: Keybinding;
-    /** 直线/颤音拖拽时增大振幅 */
+    /** 颤音拖拽时增大振幅（直线工具同样可用） */
     vibratoDragAmplitudeIncreaseKb: Keybinding;
-    /** 直线/颤音拖拽时减小振幅 */
+    /** 颤音拖拽时减小振幅（直线工具同样可用） */
     vibratoDragAmplitudeDecreaseKb: Keybinding;
-    /** 直线/颤音拖拽时增大频率 */
+    /** 颤音拖拽时增大频率（直线工具同样可用） */
     vibratoDragFrequencyIncreaseKb: Keybinding;
-    /** 直线/颤音拖拽时减小频率 */
+    /** 颤音拖拽时减小频率（直线工具同样可用） */
     vibratoDragFrequencyDecreaseKb: Keybinding;
     /** 拖拽颤音时切换到上一个预设 */
     vibratoPresetPrevKb: Keybinding;
@@ -5308,7 +5308,7 @@ export function usePianoRollInteractions(args: {
                     e.currentTarget as HTMLCanvasElement,
                 );
 
-                // 直线 / 颤音是「起点 → 当前点」的端点式预览：每个事件都重算
+                // 直线 / 颤音工具是「起点 → 当前点」的端点式预览：每个事件都重算
                 // 全线 dense，O(线长)。pen 高采样率下逐事件执行 = 同帧多次
                 // 全线重建；与自由绘制分支同一 rAF 合帧模式（事件入队，一帧
                 // 一消费，getCoalescedEvents 展开同帧采样）。端点式预览只需
@@ -5769,7 +5769,7 @@ export function usePianoRollInteractions(args: {
                 };
 
                 /**
-                 * pointercancel 收尾：**回滚**而不是提交（与直线/颤音分支
+                 * pointercancel 收尾：**回滚**而不是提交（与直线 / 颤音工具分支
                  * 同一语义）。OS 主动取消意味着手势不可信，半截笔画不写后端。
                  */
                 const onCancel = () => {

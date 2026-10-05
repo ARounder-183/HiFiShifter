@@ -95,7 +95,7 @@ describe("系统预设表", () => {
         ).toBeDefined();
     });
 
-    test("直线预设深度为 0（直线/颤音工具共用一条代码路径）", () => {
+    test("直线预设深度为 0（直线工具就是「颤音工具 + 这个预设」）", () => {
         expect(systemVibratoPreset("straight").depthCents).toBe(0);
     });
 

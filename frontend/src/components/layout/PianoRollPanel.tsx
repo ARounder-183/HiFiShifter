@@ -243,6 +243,8 @@ import {
     resolveActiveVibratoPreset,
     resolveVibratoPresets,
     findVibratoPreset,
+    isStraightVibratoPresetId,
+    chooseVibratoPreset,
     systemVibratoPreset,
 } from "../../features/vibrato/vibratoPresetList";
 import { STRAIGHT_VIBRATO_PRESET_ID } from "../../features/vibrato/systemPresets";
@@ -7901,12 +7903,25 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                 type="button"
                                                 className="hs-menu__item"
                                                 onClick={() => {
-                                                    // 选预设 = 用颤音工具 + 这个预设。直线
-                                                    // 预设也照常列出：选中它等于切到直线工具
-                                                    // （两者是同一件事，见 `VibratoChoice`）。
-                                                    void dispatch(setToolModePersistent("vibrato"));
-                                                    dispatch(setActiveVibratoPreset(preset.id));
-                                                    void dispatch(persistUiSettings());
+                                                    // 选中「直线」预设 = 切到直线工具 ——
+                                                    // 两者是同一件事，由 `VibratoChoice`
+                                                    // 统一裁决，这里不另写判断。
+                                                    const choice = chooseVibratoPreset(preset.id);
+                                                    if (choice.tool === "line") {
+                                                        void dispatch(
+                                                            setToolModePersistent("line"),
+                                                        );
+                                                    } else {
+                                                        void dispatch(
+                                                            setToolModePersistent("vibrato"),
+                                                        );
+                                                        dispatch(
+                                                            setActiveVibratoPreset(
+                                                                choice.presetId,
+                                                            ),
+                                                        );
+                                                        void dispatch(persistUiSettings());
+                                                    }
                                                     setDrawToolMenuOpen(false);
                                                 }}
                                                 onPointerDown={(e) => e.stopPropagation()}
@@ -7922,7 +7937,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                     </span>
                                                 </span>
                                                 <span className="hs-menu__trail">
-                                                    {preset.id === activeVibratoPresetId ? (
+                                                    {(currentDrawTool === "line"
+                                                        ? isStraightVibratoPresetId(preset.id)
+                                                        : preset.id ===
+                                                          activeVibratoPresetId) ? (
                                                         <span className="hs-menu__check">
                                                             <CheckIcon />
                                                         </span>

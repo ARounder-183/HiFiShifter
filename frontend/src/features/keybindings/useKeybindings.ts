@@ -291,7 +291,8 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
                 }
             }
 
-            // 直线/颤音拖拽期间，命中振幅/频率方向键时，交给参数编辑器本地监听处理。
+            // 颤音拖拽期间（直线工具同路），命中振幅/频率方向键时，交给参数编辑器
+            // 本地监听处理。
             if (document.body.hasAttribute("data-piano-roll-vibrato-drag-active")) {
                 const fineAdjustKb = firstBinding(
                     keybindingsRef.current["modifier.paramFineAdjust"],

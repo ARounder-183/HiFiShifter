@@ -439,17 +439,33 @@ Hold the Multi-Range Select modifier (default `Ctrl`, `Command` on macOS; config
 
 ### 3. Draw Tool
 
-The Draw tool allows you to draw parameter curves.
+The Draw tool lets you draw parameter curves by hand. Default shortcut: `F8`.
 
 Left-drag to draw freely or horizontally, depending on the `Drag Direction` setting. While left-dragging, press the right button (or the `D` key) to quickly toggle drag direction.
 
 Right-drag resets the current curve.
 
-### 4. Line/Vibrato Tool
+**Right-click** the draw-type tool button in the parameter editor toolbar to switch between the three drawing tools: Draw, Line and Vibrato (the menu also lists each one's shortcut). The button itself shows the tool you are currently on, and left-clicking it activates that tool directly.
 
-Right-click the Draw tool button to switch to the Line/Vibrato tool. This tool allows you to draw straight lines or vibrato.
+The parameter editor has four tool gestures in all: Select (`F7`), Draw (`F8`), Line (`F9`) and Vibrato (`F10`). `Tab` toggles between Select and the draw-type tool you used last. **The tool you are on is remembered** and restored the next time you start the program.
+
+### 4. Line Tool
+
+The Line tool draws a straight line from the start point to the end point. Default shortcut: `F9`.
+
+It *is* the Vibrato tool plus the Straight preset — so every gesture described in the next section (the wheel for depth and rate, `,` / `.` and the mouse side buttons for presets, the two-key resets, the readout bubble) works on the Line tool too. The only difference is which preset a stroke starts from: the Line tool always starts from `Straight`, the Vibrato tool from the preset you selected.
 
 Left-drag to draw a straight line freely or horizontally, depending on the `Drag Direction` setting. While left-dragging, press the right button (or the `D` key) to quickly toggle drag direction.
+
+If you turn the depth up mid-drag the result is no longer a straight line — deliberately so: the Line tool starts from zero vibrato and lets the stroke itself decide how much vibrato it needs. The other way round, pressing both preset-switch keys while using the Vibrato tool (or cycling onto the `Straight` preset) switches you to the Line tool.
+
+Right-drag resets the current curve.
+
+### 5. Vibrato Tool
+
+The Vibrato tool superimposes a vibrato between the start and end points. Default shortcut: `F10`.
+
+Left-drag to draw vibrato freely or horizontally, depending on the `Drag Direction` setting. While left-dragging, press the right button (or the `D` key) to quickly toggle drag direction.
 
 While left-dragging, scroll the wheel to adjust the vibrato **depth**; hold `Alt` while scrolling to adjust the **rate**. Hold the `Param Fine Adjust` modifier (default `Ctrl`) to fine-tune while scrolling. During the drag a single readout bubble follows the pointer: **the parameter value on the first line** (what this stroke is landing on) and **the vibrato state underneath it** (current preset, depth and rate). They share one bubble rather than popping two, which used to leave the second covering the first. The whole bubble is governed by `Options → Show Parameter Popup`. Depth can go **negative**: a negative depth inverts the waveform (it starts by swinging down), and turning the wheel further down does not stick at 0.
 
@@ -468,11 +484,13 @@ You can switch vibrato presets mid-drag:
 
 A preset decides the waveform (sine, triangle, saw, square, trapezoid, trill, or a hand-drawn table), the envelope (fade in, swell, fade out), the rate ramp, the irregularity and how the wave is placed; depth and rate belong to the gesture itself. Depth and rate tweaks made during a drag never rewrite the preset and are not carried into the next drag — presets change only in the preset manager. **Switching presets, however, is persistent**: pressing a side button or `,` / `.` mid-drag really does change the preset you are using (it is remembered across restarts).
 
+When the cycle lands on the `Straight` preset it **switches to the Line tool** instead (the Line tool is the Vibrato tool plus that preset); cycling out of the Line tool switches back to the Vibrato tool and moves on to the neighbouring preset. Switching tools never touches the vibrato preset you have remembered — come back after drawing a line and your tone is still the one you picked.
+
 Depth and rate are inherited when you switch, **judged separately**: an adjusted depth is kept, an adjusted rate is kept, and whichever one you did not touch takes the new preset's own value — you changed the tone, so the value you never touched should follow the new preset.
 
 A few "both keys" gestures during a drag return things to a known state in one step:
 
-- **Press both preset-switch keys** (`,` and `.` by default), or **press both mouse side buttons**: resets the current preset to `Straight` (so you draw a straight line) and clears this gesture's recorded depth and rate adjustments.
+- **Press both preset-switch keys** (`,` and `.` by default), or **press both mouse side buttons**: switches to the Line tool (so you draw a straight line) and clears this gesture's recorded depth and rate adjustments.
 - **Press both amplitude keys** (`↑` and `↓` by default), or **press the middle mouse button while the wheel is in amplitude mode** (the frequency modifier `Alt` is not held): puts the depth back to the preset's own value and clears the recorded depth adjustment.
 - **Press both frequency keys** (`←` and `→` by default), or **press the middle mouse button while the wheel is in frequency mode** (`Alt` held): puts the rate back to the preset's own value and clears the recorded rate adjustment.
 
@@ -482,11 +500,9 @@ The drag rate is always measured in Hz, so a preset sounds the same speed howeve
 
 Right-drag resets the current curve.
 
-Press `Tab` to cycle through editing tools (Select / Draw-type tools).
+### 6. Vibrato Presets
 
-### 5. Vibrato Presets
-
-A vibrato preset is a reusable set of vibrato parameters. Open the manager from `Options → Vibrato Preset Manager...`, from the vibrato preset button in the parameter editor toolbar (**left-click** opens the quick-switch dropdown, **right-click** opens the manager directly), or from `Create vibrato preset from selection...` in the context menu. Among the built-in presets `Straight` sits first in the list and is the **default preset** — it is what this tool looks like with no vibrato at all, and drawing a straight line first and adding vibrato on top later is the common case.
+A vibrato preset is a reusable set of vibrato parameters. Open the manager from `Options → Vibrato Preset Manager...`, from **right-click → Vibrato preset** on the draw-type tool button in the parameter editor toolbar (a second-level menu listing every enabled preset, with `Open manager...` at the bottom), or from `Create vibrato preset from selection...` in the context menu. **The default preset is `Natural`** — switching to the Vibrato tool should give you an audible vibrato, and the "no vibrato at all" line is now the Line tool's job. `Straight` still sits first among the built-in presets, but it is **the Line tool's position in the preset sequence**: selecting it in the list switches to the Line tool.
 
 The **waveform preview** sits across the top of the manager and is deliberately outside every scroll region, so it stays visible while you edit the parameters below it and redraws as you change anything. Its vertical axis is a **fixed** ruler: opening the dialog or selecting a preset fits it once to that preset's amplitude (the wave usually fills about 60% of the box) and it does not move again while you edit. That way the wave's height *is* the depth — read it directly against the `+N / −N` tick labels — and turning the depth up visibly grows the wave instead of rescaling the whole picture (which only made it "shiver" and told you nothing). If you drag past the top of the ruler, press `Fit` on the preview card to re-fit it. The card's play button **auditions** the preset with a synthesized tone -- the same voice as the piano-roll keys, no vocoder involved: one click sounds immediately, a second click stops, and what you hear is exactly the drawn curve including the fade-in, the swell and the irregularity. Built-in presets can be auditioned too.
 
@@ -514,7 +530,7 @@ The preset list can be **reordered by dragging**: press a row and drag it up or 
 
 **Creating a vibrato preset from a selection**: once you have drawn a vibrato you like, select it and choose `Create vibrato preset from selection...` (or the same button in the apply dialog footer). The pitch movement itself is removed, the period is measured by autocorrelation, the remainder is folded into one averaged cycle to become the waveform, and the depth, fades and irregularity are measured, giving you a preset you can keep tuning. The folded waveform is low-passed (only the lowest few harmonics are kept), so the result is a **smooth** curve rather than one that carries the recording's observation noise and looks bumpy. It works on any parameter.
 
-### 6. Pitch Snap
+### 7. Pitch Snap
 
 When editing pitch parameters with any tool, Pitch Snap allows you to snap edits to semitones or scale degrees. Hold `Shift` to temporarily toggle snap.
 
@@ -538,7 +554,7 @@ Alternatively, use the `Cents Offset` and `Degree Offset` parameters on child tr
 
 This quickly creates harmonies by degree transposition. Similarly, switch to a child track's `Formant Offset` parameter to draw a per-frame formant-shift curve and create timbrally varied harmonies on algorithms that support `Formant Shift` (NSF-HiFiGAN / vslib).
 
-### 7. Pitch Reference Clip
+### 8. Pitch Reference Clip
 
 A Pitch Reference Clip on a track is a special type of audio clip that stores a pitch curve on the timeline.
 
@@ -571,7 +587,7 @@ Pitch Reference Clips have the following common uses:
 
 Select a Pitch Reference Clip and choose `Update Pitch` from the context menu to update the Pitch Reference Clip with the existing pitch parameters within its range.
 
-### 8. Other Features
+### 9. Other Features
 
 Additional convenient features of the parameter editor:
 
@@ -582,7 +598,7 @@ Additional convenient features of the parameter editor:
 - `Reference Track Group`: When the parameter is `Pitch`, lets you choose other tracks and display pitch curves from other track groups as references in the pitch editor.
 - `Import MIDI`: Allows you to select a MIDI file and import notes from one or more tracks as a pitch curve.
 
-### 9. Smoothing
+### 10. Smoothing
 
 After selecting a region with the Select tool, right-click and choose `Smooth…` (default shortcut `Ctrl + M`) to calm down a jittery parameter curve.
 

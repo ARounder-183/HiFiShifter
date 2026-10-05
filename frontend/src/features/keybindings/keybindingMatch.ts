@@ -143,7 +143,8 @@ export function matchesKeybindingAllowingFineModifier(
 /**
  * `matchesKeybindingAllowingFineModifier` 的列表版本：返回命中的绑定。
  *
- * 供"动作可绑多个键"的调用点使用（直线/颤音拖拽期间的振幅/频率键）。
+ * 供"动作可绑多个键"的调用点使用（颤音拖拽期间的振幅/频率键；直线工具
+ * 走同一条拖拽路径，因此同样可用）。
  */
 export function matchKeybindingAllowingFineModifier(
     e: KeyboardEvent,
