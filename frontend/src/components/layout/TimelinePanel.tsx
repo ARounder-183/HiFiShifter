@@ -141,6 +141,7 @@ import {
 } from "./timeline/loudnessFetchGate";
 import { getBulkEditableClipIds } from "./timeline/hooks/bulkClipEdit";
 import { registerDragAbort } from "./timeline/gestureFocusGuard";
+import { resolveTrimSourceWindow } from "./timeline/trimSourceWindow";
 import { getInsertBelowTargetIndex } from "./timeline/trackContextMenuPlacement";
 import { collectFadeContextClips } from "./timeline/clipFadeContext";
 import { emitExternalFileAction } from "../../features/session/projectOpenEvents";
@@ -2472,6 +2473,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         sourceStartSec: number;
         sourceEndSec: number;
         /**
+         * 锚 clip 是否倒放 / 是否 Loop。
+         *
+         * 【为什么必须记下】裁切的源窗口换算对倒放是**镜像**的（时间轴右端对应
+         * `sourceStartSec`）、对 Loop 则完全不该动源字段 —— 见 `trimSourceWindow`。
+         * 此前 origin 只记 `sourceStartSec / sourceEndSec`，换算处无从判断方向，
+         * 于是倒放 Clip 拖右缘改到了左端。
+         */
+        reversed: boolean;
+        loopEnabled: boolean;
+        /**
          * 本次边缘手势的模式。
          *
          * `Alt`（`modifier.clipStretch`）按住 = **拉伸**（改播放速率、内容不被裁掉），
@@ -2481,6 +2492,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         mode: "trim" | "stretch";
         /** 拉伸所需的按下时基准（裁切模式不使用）。 */
         basePlaybackRate: number;
+        /**
+         * 裁切源位移用的**组合**消费速率（`clipPlaybackRate × take.playbackRate`）。
+         *
+         * 【为什么不能复用 `basePlaybackRate`】后者是 **clip 级**倍率，Alt 拉伸会把它
+         * 写回 `setClipPlaybackRate`（必须是 clip 级）。而裁切的源位移必须按后端消费
+         * 数学的组合速率折算（`state.rs:121` 的 `span = length × clip.playback_rate`，
+         * 后端 `playback_rate` 即组合值）—— 用 clip 级倍率会在 take 速率 ≠ 1 时算错。
+         */
+        baseConsumeRate: number;
         baseFadeInSec: number;
         baseFadeOutSec: number;
         baseSnapOffsetSec: number;
@@ -2510,8 +2530,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 lengthSec: number;
                 sourceStartSec: number;
                 sourceEndSec: number;
-                /** 该 clip 的播放速率：源位移 = 时间轴位移 × 速率。 */
+                /**
+                 * 该 clip 的**组合**播放速率（`clipPlaybackRate × take.playbackRate`）：
+                 * 源位移 = 时间轴位移 × 速率。与后端消费数学（`state.rs:121` 的
+                 * `span = length × clip.playback_rate`）同一口径 —— 用 clip 级倍率会在
+                 * take 速率 ≠ 1 时算错源位移。
+                 */
                 playbackRate: number;
+                /** 倒放：时间轴左/右端与源字段的对应关系是镜像的（见 `trimSourceWindow`）。 */
+                reversed: boolean;
+                /** Loop：源字段是回绕锚点，裁切只改长度。 */
+                loopEnabled: boolean;
             }
         >;
         /**
@@ -2638,6 +2667,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         sourceStartSec: number;
                         sourceEndSec: number;
                         playbackRate: number;
+                        reversed: boolean;
+                        loopEnabled: boolean;
                     }
                 >();
                 for (const participant of participants) {
@@ -2650,7 +2681,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         lengthSec: Math.max(0, Number(item.lengthSec) || 0),
                         sourceStartSec: Number(item.sourceStartSec ?? 0) || 0,
                         sourceEndSec: Number(item.sourceEndSec ?? 0) || 0,
+                        // 组合速率（clip × take）：与后端消费数学同一口径。
                         playbackRate: Number(item.playbackRate ?? 1) || 1,
+                        reversed: item.reversed === true,
+                        loopEnabled: item.loopEnabled === true,
                     });
                 }
                 // 自动交叉淡化：受影响集合 = 参与者；可调整侧按拖拽的边缘决定。
@@ -2687,6 +2721,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     // Alt 按住 = 拉伸（与旧实现 `modifier.clipStretch` 同源）。
                     mode: stretchMode ? "stretch" : "trim",
                     basePlaybackRate: Number(clip.clipPlaybackRate ?? 1) || 1,
+                    baseConsumeRate: Number(clip.playbackRate ?? 1) || 1,
+                    reversed: clip.reversed === true,
+                    loopEnabled: clip.loopEnabled === true,
                     baseFadeInSec: Number(clip.fadeInSec) || 0,
                     baseFadeOutSec: Number(clip.fadeOutSec) || 0,
                     baseSnapOffsetSec: Math.max(0, Number(clip.snapOffsetSec) || 0),
@@ -2928,21 +2965,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             batch(() => {
                 dispatch(moveClipStart({ clipId: args.clipId, startSec: nextStart }));
                 dispatch(setClipLength({ clipId: args.clipId, lengthSec: nextLength }));
-                // 源位移 = 时间轴位移 × 该 clip 的播放速率（rate ≠ 1 时源域与时间轴
-                // 不同步；旧实现同样按 rate 折算）。
-                const anchorSourceDelta = deltaSec * origin.basePlaybackRate;
-                if (args.edge === "left") {
+                // 源窗口换算收口到 `resolveTrimSourceWindow`：它按 `reversed` 镜像方向
+                // （时间轴右端在倒放时对应 `sourceStartSec`），并对 Loop 返回 null
+                // （源字段是回绕锚点，裁切只改长度）。此前这里手写了"右缘动
+                // sourceEndSec"的分支且没有倒放/Loop 分支 —— 倒放 Clip 拖右缘改到
+                // 左端、拖左缘改到右端，固定的一侧整个颠倒。
+                const anchorWindow = resolveTrimSourceWindow({
+                    edge: args.edge,
+                    reversed: origin.reversed,
+                    loopEnabled: origin.loopEnabled,
+                    deltaSec,
+                    rate: origin.baseConsumeRate,
+                    sourceStartSec: origin.sourceStartSec,
+                    sourceEndSec: origin.sourceEndSec,
+                });
+                if (anchorWindow !== null) {
                     dispatch(
                         setClipSourceRange({
                             clipId: args.clipId,
-                            sourceStartSec: origin.sourceStartSec + anchorSourceDelta,
-                        }),
-                    );
-                } else {
-                    dispatch(
-                        setClipSourceRange({
-                            clipId: args.clipId,
-                            sourceEndSec: origin.sourceEndSec + anchorSourceDelta,
+                            sourceStartSec: anchorWindow.sourceStartSec,
+                            sourceEndSec: anchorWindow.sourceEndSec,
                         }),
                     );
                 }
@@ -2952,7 +2994,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     if (participant.clipId === args.clipId) continue;
                     const base = origin.baseById.get(participant.clipId);
                     if (base === undefined) continue;
-                    const sourceDelta = deltaSec * base.playbackRate;
                     if (args.edge === "left") {
                         dispatch(
                             moveClipStart({
@@ -2966,12 +3007,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 lengthSec: Math.max(0, base.lengthSec - deltaSec),
                             }),
                         );
-                        dispatch(
-                            setClipSourceRange({
-                                clipId: participant.clipId,
-                                sourceStartSec: base.sourceStartSec + sourceDelta,
-                            }),
-                        );
                     } else {
                         dispatch(
                             setClipLength({
@@ -2979,10 +3014,24 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 lengthSec: Math.max(0, base.lengthSec + deltaSec),
                             }),
                         );
+                    }
+                    // 每个参与者按**自己**的倒放 / Loop / 组合速率换算源窗口
+                    // （混合多选里正放与倒放可以同时存在）。
+                    const window = resolveTrimSourceWindow({
+                        edge: args.edge,
+                        reversed: base.reversed,
+                        loopEnabled: base.loopEnabled,
+                        deltaSec,
+                        rate: base.playbackRate,
+                        sourceStartSec: base.sourceStartSec,
+                        sourceEndSec: base.sourceEndSec,
+                    });
+                    if (window !== null) {
                         dispatch(
                             setClipSourceRange({
                                 clipId: participant.clipId,
-                                sourceEndSec: base.sourceEndSec + sourceDelta,
+                                sourceStartSec: window.sourceStartSec,
+                                sourceEndSec: window.sourceEndSec,
                             }),
                         );
                     }
