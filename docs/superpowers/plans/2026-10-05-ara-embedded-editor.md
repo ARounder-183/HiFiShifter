@@ -1,5 +1,8 @@
 # ARA Embedded Editor Implementation Plan
 
+最终范围更新：执行总纲为`2026-10-05-ara-complete-integration.md`，包含完整clip变换与
+HiFiGAN缓存。下面历史先导的30秒/不支持stretch/fades不再用于关闭整goal。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans. 用户已选本会话自主分批执行，不重复询问；测试集中最后，不逐步骤跑红绿/重复review。
 
 **Goal:** REAPER的FX窗口内使用完整原HiFiShifter编辑工作区并自动应用，保留独立app。

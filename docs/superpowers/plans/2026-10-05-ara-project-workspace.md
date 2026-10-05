@@ -1,5 +1,8 @@
 # ARA Project Workspace Implementation Plan
 
+最终范围已由用户扩展为四项，执行总纲改为`2026-10-05-ara-complete-integration.md`。
+本文件Task32-35继续作为具体工作区步骤；旧Task36-37调查/unsupported边界不是最终完成门。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans。
 > 用户已要求本会话自主分批、不要逐步询问；回归用例先写，测试集中批末，减少 review。
 

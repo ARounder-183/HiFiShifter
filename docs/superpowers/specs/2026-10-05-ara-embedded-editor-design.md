@@ -1,5 +1,8 @@
 # ARA 二期：REAPER 内嵌原 GUI 与自动应用设计
 
+范围更新：用户最新四项目标以`2026-10-05-ara-complete-integration-design.md`为最终标准。
+以下stretch/fades未支持与30秒边界是先导历史，不再作为整goal完成范围。
+
 中文设计，2026-10-05。用户授权按建议持续实施、不逐步询问，并要求测试集中到最后。
 工作树`E:/code/HiFiShifter/.worktrees/ara-plugin`，分支`codex/ara-plugin`。
 
