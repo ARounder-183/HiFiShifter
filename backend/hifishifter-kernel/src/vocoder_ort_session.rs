@@ -1407,6 +1407,13 @@ fn build_cpu_session_with_memory_reuse(onnx_path:&Path,role:OrtSessionRole,choic
         builder=builder.with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
             .map_err(|e|format!("disable separator CPU arena failed: {e}"))?;
     }
+    if matches!(role,OrtSessionRole::Separator) {
+        // 仅显式诊断启用；常规App/插件不生成ORT算子日志，路径由隔离探针提供。
+        if let Some(prefix)=std::env::var_os("HIFISHIFTER_HNSEP_ORT_PROFILE_PREFIX") {
+            builder=builder.with_profiling(std::path::PathBuf::from(prefix))
+                .map_err(|error|format!("enable separator operator profile failed: {error}"))?;
+        }
+    }
 
     let threads = cpu_intra_threads(role);
     builder = builder
@@ -1662,6 +1669,19 @@ mod tests {
         };
         let old=run(true);let new=run(false);assert_eq!(old.len(),new.len());
         assert!(old.iter().zip(&new).all(|(old,new)|old.to_bits()==new.to_bits()));
+    }
+    /// 10秒整段输入记录真实ORT算子形状/输出大小，用于定位长源峰值，不修改模型或切块。
+    #[test]
+    #[ignore="真实HNSEP算子资源profile：显式运行并提供隔离日志前缀"]
+    fn profile_full_separator_cpu_operators() {
+        assert!(std::env::var_os("HIFISHIFTER_HNSEP_ORT_PROFILE_PREFIX").is_some());
+        let model=std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src-tauri/resources/models/hnsep/hnsep.onnx");
+        let (mut session,_)=super::build_cpu_session_with_memory_reuse(&model,OrtSessionRole::Separator,"cpu-profile",false).unwrap();
+        let samples=(0..2*1025*864).map(|index|(index%257) as f32/256.-0.5).collect::<Vec<_>>();
+        let input=ort::value::Tensor::from_array(([1usize,2,1025,864],samples.into_boxed_slice())).unwrap();
+        let output=session.run(ort::inputs![input]).unwrap();let first=output.into_iter().next().unwrap().1;
+        assert!(first.try_extract_tensor::<f32>().unwrap().1.iter().all(|sample|sample.is_finite()));
+        let path=session.end_profiling().unwrap();println!("SEPARATOR_OPERATOR_PROFILE {path}");
     }
 
     /// 烟测探针的帧数必须按角色区分。

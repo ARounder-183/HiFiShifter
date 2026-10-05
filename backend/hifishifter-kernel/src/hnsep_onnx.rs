@@ -556,6 +556,8 @@ pub fn infer_harmonic_noise_mono(
         }
     }
 
+    // 成功cache命中无需再分配整段工作区；miss先核对系统资源，不等ORT把机器内存耗尽。
+    crate::hnsep_resources::preflight(audio_len,sample_rate)?;
     let model_audio = if sample_rate == HNSEP_MODEL_SR {
         audio_mono.to_vec()
     } else {

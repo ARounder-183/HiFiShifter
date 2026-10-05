@@ -167,6 +167,32 @@ struct HostRenderCounters { source_hits:u64, intermediate_hits:u64, pcm_hits:u64
 
 ## 当前状态
 
+## 新增最终交付Task45-47
+
+用户最新目标追加以下产物，不缩小五项目标或四BUG；当前一次性probe流程需要正式收敛。
+随后用户明确跨平台插件“本次不作要求”；Task47列为后续事项，不参与本轮完成审计。
+
+- [ ] Task45：正式统一构建入口与构建文档，覆盖共享frontend/kernel、独立App、插件
+  engine/原生loader/bundle、模型/运行DLL、debug/release、隔离启动、明确输出和错误。
+  不热替换、不push，复用既有锁定SDK检出，不用git add -A。
+- [ ] Task46：App/插件功能同步说明及可执行护栏，唯一共享DSP/业务/GUI源码、宿主能力
+  适配边界与修改位置、同批构建/测试矩阵；不能交付两份手工复制产品代码。
+- 后续Task47（本次不要求）：Linux/macOS可行性与实现矩阵。核对平台VST3模块入口/UID/SDK工具链，
+  评估原GUI嵌入和资源路径；区分共享内核/独立App可用、插件可编译、真实宿主可用。
+  未知/平台实测缺失明确保留，不凭Windows外推跨平台；独立App原跨平台代码仍须保留。
+
+## 当前状态（续）
+
+本批HNSEP算子profile确认末级97通道Concat占用随完整谱帧线性增长：10秒输出343MB，
+三分钟其输入+输出存活下界约12.3GB。新增整段资源预检，成功cache hit不受其限制，
+Windows物理/提交空间、Linux MemAvailable与失败信息合同通过；短真实模型/cache链
+仍通过。没有改变HNSEP分块范围或模型。峰值降到普通机器可用、macOS资源查询与GPU
+VRAM并未验证，不勾Task40。详细原始节点与保护边界见MULTITRACK-RESOURCE-FINDINGS。
+
+Task45-46新增tools/build-hifishifter.ps1与docs/ara-build-and-sync.md：同源frontend、
+App与插件分开的Cargo调用、全新交付名、MSVC后TEMP、锁定SDK、模型/DLL打包及可选
+集中Verify。语法/PlanOnly exit0，真实All构建尚未执行，不勾完整交付门。
+
 2026-10-05最新资源批：双轨180秒原actor修改其它轨、两率完整尾部通过，旧ready与
 新结果共存下显式额度峰值497,088,000字节，512MiB未增大。单region省mixed副本、
 逐bit相同平面归并、跨算法轨原生率隔离与准备队列历史错误修复已实现。

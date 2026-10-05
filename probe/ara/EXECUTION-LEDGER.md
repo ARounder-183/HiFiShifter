@@ -966,4 +966,12 @@ Task 42: Ruling: actor成功发布后闲置后台邮箱可能仍报旧失败，�
 
 Task 40: Ruling: 三分钟真实HiFiGAN多批/整段HNSEP功能与暖缓存正常exit0，但旧CPU会话结束驻留17.5GB/峰值18.3GB、提交23.2GB — 排查并关闭原生ORT Separator的arena/pattern，不切块HNSEP，其它模型和Intel macOS原策略保持；短真实mask旧新逐bit相同，三分钟新诊断exit0结束驻留1.3GB、峰值仍13.3GB — 若把功能通过或PCM额度331MB说成资源完成，会让普通机器OOM；后续还需产品级资源保护及峰值优化。停止检查前旧诊断已正常结束，未实际杀进程，未碰49800或REAPER。
 
+Task 45: Ruling: 用户新增最终产物为正式构建流/文档、App插件易同步、条件性Linux/macOS使用 — 纳入Task45-47验收，继续共享kernel与同一原GUI权威，并把Windows-only视图/模块与平台实测缺口明确列出，不替代五目标或四BUG — 若只交付probe命令或把内核跨平台当ARA GUI可用，会遗漏最新交付要求。
+
+Task 47: Ruling: 用户随后将Linux/macOS插件标为“本次不作要求” — 移入后续事项，本轮继续Windows完整产品/构建与同步交付，不开新的跨平台插件实现支线；独立App原跨平台功能边界保持 — 若继续为跨平台嵌入扩张本轮，会违背最新范围并延迟交付；不把未实现平台声称已支持。
+
+Task 40: Ruling: 10秒真实ORT profile末级Concat输出343,277,568字节，输入65+32通道与输出97通道同时存活，三分钟该下界约12.3GB — 推理前加入整段资源估计和Windows物理/提交空间、Linux MemAvailable保护，cache成功命中仍复用，低资源明确失败不忽略效果；3合同及短真实模型/cache链exit0 — 若用PCM额度或线程调小承诺消除大图下界会误导；估计不是自定义模型严格上界，低峰值完整图与GPU/macOS资源边界仍open，HNSEP不切块。
+
+Task 45: Ruling: 用户要求后续迭代新功能时App/插件可同步，现有业务/DSP与原GUI已有唯一共享源码但构建命令分散 — 新统一入口一次frontend、分开App/插件Cargo特性、原生loader/resources打包与全新目录，构建文档列共享修改点/宿主能力例外/同批Verify；语法与PlanOnly exit0 — 若将All构建合成一次Cargo调用会把vslib特性带入插件；真实All构建和native验收尚未通过，不报交付完成。
+
 
