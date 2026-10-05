@@ -43,6 +43,12 @@ impl PreparationQueue {
         let mailbox=self.state.mailbox.lock().unwrap();
         (mailbox.pending.is_some()||mailbox.active.is_some(),mailbox.error.clone())
     }
+    /// actor已核对代次并成功发布全部PCM时，空闲邮箱不能继续报告之前失败的错误。
+    /// 运行/待办中的任务仍保留自己的结果权威，不抢先清掉尚未完成的失败信息。
+    pub fn acknowledge_idle_success(&self) {
+        let mut mailbox=self.state.mailbox.lock().unwrap();
+        if mailbox.pending.is_none()&&mailbox.active.is_none() {mailbox.error=None;}
+    }
     /// 仅VST3离线setup的UI线程使用；Condvar等待后台工作，process/setProcessing不得调用。
     pub fn wait_idle_until(&self,deadline:std::time::Instant)->Result<(),String> {
         let mut mailbox=self.state.mailbox.lock().unwrap();
@@ -74,6 +80,18 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+    /// 成功外部发布可清空闲历史错误，但不能覆盖运行任务的失败或提前伪报idle。
+    #[test]
+    fn published_success_acknowledges_only_idle_mailbox_errors() {
+        let queue=PreparationQueue::new().unwrap();queue.request(Box::new(|_|Err("old render failed".into()))).unwrap();
+        let began=std::time::Instant::now();while queue.state().0 {assert!(began.elapsed()<Duration::from_secs(3));std::thread::yield_now();}
+        assert_eq!(queue.state().1.as_deref(),Some("old render failed"));queue.acknowledge_idle_success();assert_eq!(queue.state().1,None);
+        let (send,entered)=mpsc::channel();let (release,gate)=mpsc::channel();
+        queue.request(Box::new(move |_|{send.send(()).unwrap();gate.recv_timeout(Duration::from_secs(3)).unwrap();Err("active render failed".into())})).unwrap();
+        entered.recv_timeout(Duration::from_secs(3)).unwrap();queue.acknowledge_idle_success();assert!(queue.state().0);
+        release.send(()).unwrap();assert_eq!(queue.wait_idle_until(std::time::Instant::now()+Duration::from_secs(3)).unwrap_err(),"active render failed");
+        queue.acknowledge_idle_success();assert_eq!(queue.state().1,None);queue.close();
+    }
     #[test]
     fn offline_wait_reports_timeout_failure_and_close_without_running_work_on_caller() {
         let queue=PreparationQueue::new().unwrap();let (entered,ready)=mpsc::channel();let (release,gate)=mpsc::channel();

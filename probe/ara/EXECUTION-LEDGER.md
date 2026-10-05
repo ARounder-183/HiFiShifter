@@ -960,4 +960,10 @@ Task 39: Ruling: 私有分析目录带model/edit代次且每次重写mtime，布
 
 Task 41: Ruling: 单独kernel禁用vslib的测试编译发现6个缺失名字，导入错误地受vslib门控 — 仅修测试import，使WORLD/HiFiGAN共通混音护栏仍在无vslib配置可编译，3定向exit0；不启用闭源vslib、不更改产品DSP — 若把插件依赖lib能编译当kernel全部测试能运行，会在最终统一门再次漏掉配置错误；完整基线仍待最后一次统一回归。
 
+Task 40: Ruling: 双轨长素材原子更新因重复mono平面与单region额外全长mixed浪费预算 — worker逐bit归并相同声道并在每renderer准备后立即退额度，单region直用原kernel结果；实际双轨180秒修改第二轨两率不串且完整尾部，额度峰值497,088,000<536,870,912 — 若做downmix或在音频线程回收会改声音/破坏实时；首次预算断言补入1,152,000 atlas曲线字节后通过，不虚报模型资源门。
+
+Task 42: Ruling: actor成功发布后闲置后台邮箱可能仍报旧失败，同代重复准备也会争长源预算 — 只在已校验成功发布时清空闲历史error，运行任务不伪成功；PreparedVersion相同且两率已ready的后台任务复用 — 若无版本/快照就绪检查就清错误，会掩盖真实失败；mailbox运行失败/缓存正确与跨轨输出合同通过。
+
+Task 40: Ruling: 三分钟真实HiFiGAN多批/整段HNSEP功能与暖缓存正常exit0，但旧CPU会话结束驻留17.5GB/峰值18.3GB、提交23.2GB — 排查并关闭原生ORT Separator的arena/pattern，不切块HNSEP，其它模型和Intel macOS原策略保持；短真实mask旧新逐bit相同，三分钟新诊断exit0结束驻留1.3GB、峰值仍13.3GB — 若把功能通过或PCM额度331MB说成资源完成，会让普通机器OOM；后续还需产品级资源保护及峰值优化。停止检查前旧诊断已正常结束，未实际杀进程，未碰49800或REAPER。
+
 

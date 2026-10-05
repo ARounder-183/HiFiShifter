@@ -56,6 +56,12 @@ pub(crate) struct ParameterAtlas {
 }
 impl ParameterAtlas {
     pub fn is_empty(&self)->bool {self.regions.is_empty()}
+    /// 同一源曲线可由历史/区域共享，额度按reservation身份去重，而不是按序列化值重复计数。
+    pub fn accounted_curve_bytes(&self)->usize {
+        let mut seen=std::collections::BTreeSet::new();
+        self.regions.values().flat_map(|region|region.curves.values()).filter_map(|curve|curve.reservation.as_ref())
+            .filter(|reservation|seen.insert(Arc::as_ptr(reservation) as usize)).map(|reservation|reservation.bytes()).sum()
+    }
     /// 冷绑定布局完全相同时保留GUI原整轨数组（含无音频处编辑），音频仍用区域源basis。
     pub fn same_layout(&self,other:&Self)->bool {
         self.regions.len()==other.regions.len()&&self.regions.values().all(|old|other.regions.values().any(|new|

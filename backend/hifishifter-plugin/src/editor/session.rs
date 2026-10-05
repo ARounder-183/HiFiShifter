@@ -1105,6 +1105,52 @@ pub(crate) mod tests {
         assert_eq!(f32::from_le_bytes(tail),0.125);
         document.close();drop(pcm);assert_eq!(budget.used(),baseline);
     }
+    /// 双轨各三分钟保留旧就绪快照时，修改另一轨仍能原子更新；双侧输出不能相加/串轨。
+    #[test]
+    fn two_long_tracks_update_atomically_with_old_ready_audio_inside_pcm_budget() {
+        let (model,owners,ids)=workspace_fixture();let document=model.session();document.ready.store(false,Ordering::Release);
+        let budget=crate::render::budget::global_budget();let baseline=budget.used();let frames=44100*180;let seconds=180.;
+        let source=|value|Arc::new(SourcePcm {sample_rate:44100,planes:vec![vec![value;frames]],version:1,
+            _reservation:Some(budget.reserve(frames*4).unwrap())});let a=source(0.25);let b=source(0.5);
+        {let _transaction=document.transaction.lock().unwrap();
+            let mut timeline=document.timeline.lock().unwrap();let timeline=timeline.as_mut().unwrap();timeline.project_sec=seconds;
+            for (index,clip) in timeline.clips.iter_mut().enumerate() {clip.length_sec=seconds;
+                clip.takes[0].source_end_sec=seconds;clip.takes[0].source_path=Some(if index==0 {"ara://source"} else {"ara://source-b"}.into());clip.normalize_takes();}
+            for (index,id) in ids.iter().enumerate() {let key=(&**id as *const u8) as u64;
+                let mut regions=document.regions.lock().unwrap();let region=regions.get_mut(&key).unwrap();
+                region.duration_in_modification_time=seconds;region.duration_in_playback_time=seconds;
+                if index==1 {region.audio_source_persistent_id="ara://source-b".into();}}
+            document.track_bindings.lock().unwrap().insert("b".into(),vec![("modification-b".into(),"ara://source-b".into())]);
+            for sources in [&document.sources,&document.edit_sources] {let mut sources=sources.lock().unwrap();
+                sources.insert("ara://source".into(),a.clone());sources.insert("ara://source-b".into(),b.clone());}
+            document.revision.fetch_add(1,Ordering::AcqRel);document.render_epoch.fetch_add(1,Ordering::AcqRel);
+            document.ready.store(true,Ordering::Release);
+        }
+        let editor=owners[0].editor_session().unwrap();let (reply,rx)=mpsc::channel();let (events,_)=mpsc::sync_channel(128);
+        let sink=UiSink {view_id:"long-multitrack".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        let loaded=call(&editor,&sink,&rx,1,"get_timeline_state",json!({}));
+        let wait=|generation| {let began=Instant::now();loop {
+            let pending=editor.state()["pending"].as_bool().unwrap();
+            if !pending&&editor.applied.load(Ordering::Acquire)>=generation {break;}
+            assert!(began.elapsed()<Duration::from_secs(30),"{:?}",editor.state());std::thread::sleep(Duration::from_millis(10));
+        }};wait(0);
+        let check=|index:usize,rate:usize,value:f32| {let mut left=[9_f32;513];let mut right=[9_f32;513];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
+            let mut bus=crate::audio_abi::AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
+            // SAFETY: 两个513帧平面存活；逐轨读取尾部511帧，剩余2帧必须补零。
+            assert!(unsafe {owners[index].snapshots[usize::from(rate==48000)].copy_block((rate*180-511) as i64,rate as u32,&mut bus,513)});
+            assert_eq!(&left[..511],&[value;511]);assert_eq!(right,left);assert_eq!(&left[511..],&[0.;2]);
+        };
+        for rate in [44100,48000] {check(0,rate,0.25);check(1,rate,0.5);}
+        call(&editor,&sink,&rx,2,"set_track_state",json!({"trackId":loaded["tracks"][1]["id"],"volume":0.5}));wait(1);
+        for rate in [44100,48000] {check(0,rate,0.25);check(1,rate,0.25);}
+        for owner in &owners {for publisher in &owner.snapshots {publisher.collect_retired();}}
+        let ready_bytes=(44100+48000)*180*4*2;let curve_bytes=document.edits.lock().unwrap().atlas.accounted_curve_bytes();
+        assert_eq!(budget.used()-baseline,frames*4*2+ready_bytes+curve_bytes);
+        assert_eq!(editor.state()["error"],Value::Null);
+        eprintln!("two-long-tracks seconds=180 tracks=2 ready_bytes={ready_bytes} curve_bytes={curve_bytes} accounted_peak={} hard_limit={} automatic_other_track=true",budget.peak(),budget.limit());
+        document.close();drop(a);drop(b);for owner in &owners {for publisher in &owner.snapshots {publisher.collect_retired();}}
+        assert_eq!(budget.used(),baseline);
+    }
     /// 无本地落笔的宿主移动也要重新准备；cache全命中不会发ClipPitchReady，不能静默遗漏。
     #[test]
     fn host_move_without_local_generation_reapplies_and_reuses_analysis_file() {

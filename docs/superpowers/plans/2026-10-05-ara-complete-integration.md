@@ -167,6 +167,14 @@ struct HostRenderCounters { source_hits:u64, intermediate_hits:u64, pcm_hits:u64
 
 ## 当前状态
 
+2026-10-05最新资源批：双轨180秒原actor修改其它轨、两率完整尾部通过，旧ready与
+新结果共存下显式额度峰值497,088,000字节，512MiB未增大。单region省mixed副本、
+逐bit相同平面归并、跨算法轨原生率隔离与准备队列历史错误修复已实现。
+真实180秒HiFiGAN/HNSEP完整模型输入及暖缓存通过，但旧CPUarena峰值18.3GB。
+关Separator CPU arena/pattern后短mask逐bit一致，结束驻留降至1.3GB，瞬时峰值仍13.3GB。
+详见probe/ara/MULTITRACK-RESOURCE-FINDINGS.md；需要继续产品级NN资源预检/峰值优化，
+不勾Task40，不把显式PCM额度当系统RAM。HNSEP不分块；REAPER仍未启动。
+
 2026-10-05最新源码批：内嵌workspace共享SourcePcm Arc，取消源/分析的30秒门，
 两率PCM与准备临时域在固定512MiB额度内整批预检。单轨180秒GUI/两率完整尾部/seek
 合同通过，显式额度峰值265,248,000字节，不等于模型/GPU/RSS峰值。实际源ID不变换

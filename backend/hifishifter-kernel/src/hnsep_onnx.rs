@@ -180,7 +180,8 @@ fn build_session_with_ep(onnx_path: &Path) -> Result<SeparatorSession, String> {
     if model_digest(onnx_path)? != digest {return Err("hnsep model changed during session build".into());}
     let _ = SELECTED_EP.set(ep.clone());
     let mut identity = blake3::Hasher::new();
-    identity.update(b"hnsep-mask-stft-v2");identity.update(digest.as_bytes());identity.update(ep.as_bytes());
+    // 资源策略也进入版本，旧保留arena的会话产物不借新策略的冷缓存身份。
+    identity.update(b"hnsep-mask-stft-v3-cpu-transient-workspace");identity.update(digest.as_bytes());identity.update(ep.as_bytes());
     Ok(SeparatorSession {runtime:Mutex::new(session),identity:identity.finalize()})
 }
 

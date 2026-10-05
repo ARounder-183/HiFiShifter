@@ -225,7 +225,8 @@ impl DocumentSession {
         if !current() {return Err("automatic apply superseded".into());}
         let mut prepared=Vec::new();for (owner,keys,input) in inputs {
             for publisher in &owner.snapshots {publisher.collect_retired();}
-            prepared.push((owner,keys,input.render(cancel.clone())?));
+            let mut snapshots=input.render(cancel.clone())?;super::snapshot::compact_prepared(&mut snapshots)?;
+            prepared.push((owner,keys,snapshots));
         }
         let _transaction=self.transaction.lock().unwrap();
         if !self.is_alive() || !self.ready.load(Ordering::Acquire) || self.revision.load(Ordering::Acquire)!=base_model {

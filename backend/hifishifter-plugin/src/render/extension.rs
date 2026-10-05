@@ -1126,7 +1126,8 @@ impl ExtensionOwner {
             let mut prepared=Vec::new();
             for (owner,keys,input) in inputs {
                 for publisher in &owner.snapshots {publisher.collect_retired();}
-                prepared.push((owner,keys,input.render(Arc::new(std::sync::atomic::AtomicBool::new(false)))?));
+                let mut snapshots=input.render(Arc::new(std::sync::atomic::AtomicBool::new(false)))?;
+                super::snapshot::compact_prepared(&mut snapshots)?;prepared.push((owner,keys,snapshots));
             }
             let _transaction=document.transaction.lock().unwrap();
             if !document.ready.load(Ordering::Acquire) || document.revision.load(Ordering::Acquire)!=base_model {
@@ -1375,6 +1376,7 @@ impl ExtensionOwner {
     /// 调用者持document事务；完整两输出率发布成功后才登记，不额外持有源或快照。
     pub(crate) fn record_prepared(&self,model:u64,edit:u64,epoch:u64,scope:u64,keys:Vec<u64>) {
         *self.prepared.lock().unwrap()=Some(PreparedVersion {model,edit,epoch,scope,keys});
+        if let Some(Ok(queue))=self.preparation.get() {queue.acknowledge_idle_success();}
     }
     /// 仅SDK规定UI线程的kOffline setup调用；不在事务锁内等待，不把旧快照当最新版本。
     pub(crate) fn prepare_offline_until(&self,deadline:std::time::Instant)->Result<(),String> {
@@ -1412,10 +1414,14 @@ impl ExtensionOwner {
             if !document.ready.load(Ordering::Acquire) {return Ok(());}
             let edits=document.edits.lock().unwrap().clone();
             let (keys,input)=self.capture_render_input(&document,&edits,edits.revision>0)?;
+            // actor可能已发布本代两率结果；同版本重排队不应再争预算或留下伪失败状态。
+            let version=PreparedVersion {model:document.revision.load(Ordering::Acquire),edit:edits.revision,
+                epoch:document.render_epoch.load(Ordering::Acquire),scope:document.scope_revision.load(Ordering::Acquire),keys:keys.clone()};
+            if self.prepared.lock().unwrap().as_ref()==Some(&version)&&self.snapshots.iter().all(|snapshot|snapshot.is_ready()) {return Ok(());}
             (document.revision.load(Ordering::Acquire),edits.revision,document.render_epoch.load(Ordering::Acquire),document.scope_revision.load(Ordering::Acquire),keys,input)
         };
         for publisher in &self.snapshots {publisher.collect_retired();}
-        let snapshots=input.render(cancel.clone())?;
+        let mut snapshots=input.render(cancel.clone())?;super::snapshot::compact_prepared(&mut snapshots)?;
         let _transaction=document.transaction.lock().unwrap();
         if cancel.load(Ordering::Acquire) || !document.ready.load(Ordering::Acquire) {return Ok(());}
         if document.revision.load(Ordering::Acquire)!=model || document.edits.lock().unwrap().revision!=edit

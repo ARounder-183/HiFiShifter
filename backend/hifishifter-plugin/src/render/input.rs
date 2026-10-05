@@ -49,7 +49,7 @@ impl RenderInput {
         let outputs=frame_counts.iter().try_fold(0_usize,|total,frames|total.checked_add(frames*8))
             .ok_or("snapshot size overflow")?;
         let working=frame_counts.iter().copied().max().unwrap_or(0).checked_mul(8)
-            .and_then(|bytes|bytes.checked_mul(if self.clip_parameters.is_empty() {1} else {2}))
+            .and_then(|bytes|bytes.checked_mul(if self.clip_parameters.is_empty()||timeline.clips.len()==1 {1} else {2}))
             .ok_or("render working size overflow")?;
         let required=source_bytes.checked_add(outputs).and_then(|bytes|bytes.checked_add(working))
             .ok_or("render memory size overflow")?;
@@ -64,7 +64,8 @@ impl RenderInput {
             input.insert(id.clone(),MixdownPcm {sample_rate:pcm.sample_rate,channels:channels as u16,samples:Arc::new(samples)});
         }
         let mut snapshots=Vec::new();
-        let model_rate_output=timeline.tracks.iter().any(|track|track.pitch_analysis_algo==hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx);
+        let model_rate_output=timeline.clips.iter().filter_map(|clip|timeline.resolve_root_track_id(&clip.track_id))
+            .any(|root|timeline.tracks.iter().any(|track|track.id==root&&track.pitch_analysis_algo==hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx));
         for (sample_rate,frames) in [44100,48000].into_iter().zip(frame_counts) {
             if cancel.load(Ordering::Acquire) {return Err("host preparation cancelled".into());}
             let reservation=batch.split_off(frames*8).ok_or("invalid render budget partition")?;
@@ -89,6 +90,18 @@ impl RenderInput {
             // 所有track仍保留原全局solo/父链，不能因为拆region丢掉另一轨solo。
             let (channels,samples)=if self.clip_parameters.is_empty() {
                 let (_,channels,_,samples)=run(timeline,start,end)?;(channels,samples)
+            } else if timeline.clips.len()==1 {
+                // 单region直接保留原kernel结果，不另建全长mixed再从part复制一遍。
+                // 参数仍从局部零点投影，所有track保留全局solo/父链；只省去加到零缓冲的复制。
+                let clip=&timeline.clips[0];let mut view=timeline.clone();
+                let (lo,hi)=if let Some(params)=self.clip_parameters.get(&clip.id) {
+                    let root=view.resolve_root_track_id(&clip.track_id).ok_or("unknown source parameter root")?;
+                    view.params_by_root_track.insert(root,params.clone());view.clips[0].start_sec=0.;
+                    view.project_sec=clip.length_sec;(0.,clip.length_sec)
+                } else {(start,end)};
+                let (_,channels,_,mut samples)=run(&view,lo,hi)?;
+                // 保留旧累加语义的signed-zero位形，不改变已归档PCM的零样本身份。
+                for sample in &mut samples {*sample=0_f32+*sample;}(channels,samples)
             } else {
                 let mut mixed=vec![0_f32;frames*2];
                 for clip in &timeline.clips {
@@ -119,6 +132,79 @@ impl RenderInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 用已核对的windows crate typed API读取真实进程高水位，不用PCM额度冒充RSS。
+    #[cfg(windows)]
+    fn process_memory_profile()->(usize,usize,usize) {
+        use windows::Win32::System::{ProcessStatus::{K32GetProcessMemoryInfo,PROCESS_MEMORY_COUNTERS},Threading::GetCurrentProcess};
+        let bytes=std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        let mut counters=PROCESS_MEMORY_COUNTERS {cb:bytes,..Default::default()};
+        // SAFETY: 当前进程伪句柄有效；typed结构由本调用拥有，大小与官方绑定完全匹配。
+        assert!(unsafe {K32GetProcessMemoryInfo(GetCurrentProcess(),&mut counters,bytes)}.as_bool());
+        (counters.WorkingSetSize,counters.PeakWorkingSetSize,counters.PeakPagefileUsage)
+    }
+    /// 正常三分钟完整源的HiFiGAN分块及整段HNSEP诊断；只显式运行，不冒充REAPER GUI验收。
+    #[test]
+    #[ignore = "真实CPU三分钟HiFiGAN/HNSEP及进程内存诊断：显式运行"]
+    fn real_three_minute_hifigan_hnsep_prepares_complete_pcm_and_reuses_warm_cache() {
+        hifishifter_kernel::vocoder_ort_session::set_runtime_ep_override(Some("cpu".into()));
+        crate::editor::resources::initialize_models();hifishifter_kernel::hnsep_onnx::clear_separation_cache();
+        hifishifter_kernel::renderer::hifigan::clear_chunk_cache();
+        hifishifter_kernel::synth_clip_cache::global_synth_clip_cache().lock().unwrap().clear();
+        let seconds=180.;let frames=44100*180;let budget=super::super::budget::global_budget();let baseline=budget.used();
+        let reservation=budget.reserve(frames*4).unwrap();
+        let samples=(0..frames).map(|index|{let phase=2.*std::f64::consts::PI*220.*index as f64/44100.;
+            (1..=8).map(|harmonic|0.12/harmonic as f64*(phase*harmonic as f64).sin()).sum::<f64>() as f32}).collect();
+        let source=Arc::new(SourcePcm {sample_rate:44100,planes:vec![samples],version:1,_reservation:Some(reservation)});
+        let mut timeline:TimelineState=serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"track","name":"Long HifiGAN","order":0,"pitch_analysis_algo":"nsf_hifigan_onnx","compose_enabled":true}],
+            "bpm":120,"project_sec":seconds,"clips":[{"id":"clip","name":"Long HifiGAN","track_id":"track","start_sec":0,"length_sec":seconds,
+                "takes":[{"id":"take","source_path":"source","source_start_sec":0,"source_end_sec":seconds}]}]
+        })).unwrap();timeline.clips[0].normalize_takes();
+        let params=hifishifter_kernel::state::TrackParamsState {frame_period_ms:5.,pitch_orig:vec![57.;36001],pitch_edit:vec![60.;36001],
+            pitch_edit_user_modified:true,extra_params:HashMap::from([("breath_enabled".into(),1.)]),..Default::default()};
+        timeline.params_by_root_track.insert("track".into(),params.clone());
+        let input=RenderInput {timeline:Some(timeline),regions:vec![AraPlaybackRegion {audio_source_persistent_id:"source".into(),
+            duration_in_modification_time:seconds,duration_in_playback_time:seconds,..Default::default()}],
+            sources:HashMap::from([("source".into(),source.clone())]),clip_parameters:BTreeMap::from([("clip".into(),params)])};
+        let neural_before=hifishifter_kernel::nsf_hifigan_onnx::inference_runs();let separation_before=hifishifter_kernel::hnsep_onnx::separation_cache_stats().1;
+        let began=std::time::Instant::now();let mut cold=input.render(Arc::new(AtomicBool::new(false))).unwrap();let cold_ms=began.elapsed().as_millis();
+        let cold_neural=hifishifter_kernel::nsf_hifigan_onnx::inference_runs();let cold_separation=hifishifter_kernel::hnsep_onnx::separation_cache_stats().1;
+        assert!(cold_neural-neural_before>1,"三分钟必须实际走多个神经批次，不能只返回缓存元数据");
+        assert_eq!(cold_separation-separation_before,1,"HNSEP仍整段一次，不分块");
+        for (snapshot,rate) in cold.iter().zip([44100,48000]) {assert_eq!(snapshot.left.len(),rate*180);assert_eq!(snapshot.right.len(),rate*180);
+            assert!(snapshot.left.iter().all(|sample|sample.is_finite()));
+            for start in [0,rate*90,rate*179] {let rms=(snapshot.left[start..start+rate].iter().map(|sample|(*sample as f64).powi(2)).sum::<f64>()/rate as f64).sqrt();
+                assert!(rms>0.01,"源中部/末尾不能是静音占位，start={start} rms={rms}");}}
+        assert_eq!(cold[1].left,hifishifter_kernel::mel_utils::linear_resample_mono(&cold[0].left,44100,48000));
+        super::super::snapshot::compact_prepared(&mut cold).unwrap();
+        let began=std::time::Instant::now();let mut warm=input.render(Arc::new(AtomicBool::new(false))).unwrap();let warm_ms=began.elapsed().as_millis();
+        assert_eq!(hifishifter_kernel::nsf_hifigan_onnx::inference_runs(),cold_neural);assert_eq!(hifishifter_kernel::hnsep_onnx::separation_cache_stats().1,cold_separation);
+        super::super::snapshot::compact_prepared(&mut warm).unwrap();
+        for (cold,warm) in cold.iter().zip(&warm) {assert_eq!(cold.left,warm.left);assert_eq!(cold.right,warm.right);}
+        #[cfg(windows)] {let (working,peak,commit)=process_memory_profile();
+            eprintln!("LONG_HIFIGAN seconds=180 cold_ms={cold_ms} warm_ms={warm_ms} neural_runs={} HNSEP_runs=1 warm_extra_runs=0 accounted_peak={} working_set={working} peak_working_set={peak} peak_commit={commit}",cold_neural-neural_before,budget.peak());}
+        drop(cold);drop(warm);drop(input);drop(source);assert_eq!(budget.used(),baseline);
+    }
+    /// 另一轨采用HiFiGAN不能改变当前renderer的原生率路径；其solo仍应按全工程状态参与。
+    #[test]
+    fn unrelated_hifigan_track_does_not_change_this_renderers_rate_path() {
+        let seconds=0.05;let mut timeline:TimelineState=serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"track","name":"A","order":0,"pitch_analysis_algo":"none"}],"bpm":120,"project_sec":seconds,
+            "clips":[{"id":"clip","name":"A","track_id":"track","start_sec":0,"length_sec":seconds,
+                "takes":[{"id":"take","source_path":"source","source_start_sec":0,"source_end_sec":seconds}]}]
+        })).unwrap();timeline.clips[0].normalize_takes();
+        let source=Arc::new(SourcePcm {sample_rate:44100,planes:vec![(0..2205).map(|index|((index*113)%257) as f32/512.).collect()],version:0,_reservation:None});
+        let mut input=RenderInput {timeline:Some(timeline),regions:vec![AraPlaybackRegion {audio_source_persistent_id:"source".into(),
+            duration_in_modification_time:seconds,duration_in_playback_time:seconds,..Default::default()}],
+            sources:HashMap::from([("source".into(),source)]),clip_parameters:BTreeMap::new()};
+        let before=input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let mut other=input.timeline.as_ref().unwrap().tracks[0].clone();other.id="unrelated".into();other.order=1;
+        other.pitch_analysis_algo=hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx;
+        input.timeline.as_mut().unwrap().tracks.push(other);let after=input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        for (before,after) in before.iter().zip(&after) {assert_eq!(before.left,after.left);assert_eq!(before.right,after.right);}
+        input.timeline.as_mut().unwrap().tracks[1].solo=true;
+        let solo=input.render(Arc::new(AtomicBool::new(false))).unwrap();assert!(solo.iter().all(|snapshot|snapshot.left.iter().all(|value|*value==0.)));
+    }
     /// 三分钟普通人声经过授权kernel/两率快照后全尾就绪；内存按固定全局预算预检。
     #[test]
     fn three_minute_host_clip_prepares_both_rates_and_the_last_block_within_budget() {
