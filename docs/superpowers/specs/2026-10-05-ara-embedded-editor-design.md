@@ -115,3 +115,5 @@ CWD/系统PATH，launcher只能用于隔离采集，不能替代发行部署。�
 高优：宿主停播实时process必须静音，offline导出不受kPlaying门禁影响；原GUI位置采用一次绝对项目时间，停播seek同样跟随宿主。多轨道/复制插件合法共享ARA source/modification，持久化恢复范围由该组件实际assigned regions确定，不再把共享对象等同归属歧义。每组件只保存本范围参数，未限定范围的歧义恢复继续拒绝。另一轨编辑不能制造本轨假Conflict，同轨旧写入仍拒绝。
 
 后续中优：原GUI播放/暂停请求通过可选ARAPlaybackControllerInterface在宿主主线程执行；不启动独立设备、不用REAPER脚本或快捷键模拟控制。不支持的宿主保持明确disabled/unsupported。后续低优：稳定host model变更且没有待应用本地编辑时自动同步；存在真实冲突仍保留曲线，禁止静默丢最后一笔。
+
+BPM补充：VST3 ProcessContext的kTempoValid字段作为当前宿主BPM权威，无有效字段时保留最后值；actor只同步标量tempo，不宣称完整Tempo Map。REAPER项目Timebase为Beats(position,length,rate)时改BPM会同时变更clip倍率，这属于尚未支持的time stretch，不由BPM数字同步“修复”。纯BPM先导验证使用测试副本的Time时间基准，绝不替用户更改原项目默认值。

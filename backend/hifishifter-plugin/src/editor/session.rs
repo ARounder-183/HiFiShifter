@@ -50,6 +50,7 @@ pub(crate) struct EditorSession {
     pub(super) generation:AtomicU64,
     submitted:AtomicU64,
     pub(super) applied:AtomicU64,
+    host_version:AtomicU64,
     pub(super) error:Mutex<Option<String>>,
     closed:AtomicBool,
     pub(super) suppress_history:AtomicBool,
@@ -69,6 +70,7 @@ impl EditorSession {
             peaks:Mutex::new(HashMap::new()),queue,worker:Mutex::new(None),analysis_sender,analysis_updates:Mutex::new(analysis_updates),views:Mutex::new(HashMap::new()),
             analysis_cancel:Arc::new(AtomicBool::new(false)),analysis_workers:Mutex::new(Vec::new()),
             generation:AtomicU64::new(0),submitted:AtomicU64::new(0),applied:AtomicU64::new(0),
+            host_version:AtomicU64::new(0),
             error:Mutex::new(None),closed:AtomicBool::new(false),suppress_history:AtomicBool::new(false)});
         let weak=Arc::downgrade(&session);
         let worker=std::thread::Builder::new().name("hfs-embedded-editor".into()).spawn(move ||Self::run(weak,receiver))
@@ -106,6 +108,7 @@ impl EditorSession {
         loop {
             if let Some(session)=weak.upgrade() {
                 if session.closed.load(Ordering::Acquire) {break;}
+                session.refresh_host();
                 if session.refresh_analysis() {deadline=Some(Instant::now()+Duration::from_millis(150));}
             } else {break;}
             let wait=deadline.map(|d|d.saturating_duration_since(Instant::now())).unwrap_or(Duration::from_millis(100));
@@ -179,7 +182,14 @@ impl EditorSession {
         }
         let snapshot=owner.handle_request(hifishifter_ara_ipc::Request::Snapshot);
         if !snapshot.ok {return Err(snapshot.error.unwrap_or_else(||"host snapshot unavailable".into()));}
-        let timeline:TimelineState=serde_json::from_value(snapshot.timeline.ok_or("host timeline missing")?).map_err(|e|e.to_string())?;
+        let mut timeline:TimelineState=serde_json::from_value(snapshot.timeline.ok_or("host timeline missing")?).map_err(|e|e.to_string())?;
+        // 快照只序列化take权威；先重建扁平投影，再判断真实的倒放/组合倍率。
+        for clip in &mut timeline.clips {clip.normalize_takes();}
+        // 数字BPM可同步，不代表当前先导支持宿主随BPM隐式拉伸；必须在GUI显式拒绝。
+        if timeline.clips.iter().any(|clip|clip.reversed || (clip.playback_rate as f64-1.).abs()>1e-6) {
+            let error="Unsupported ARA geometry: reverse/time stretch; keep item timebase as Time for BPM-only changes".to_owned();
+            *self.error.lock().unwrap()=Some(error.clone());return Err(error);
+        }
         if timeline.target_param_frames(timeline.frame_period_ms())>1_000_000 {return Err("ARA editor parameter frame budget exceeded for project span".into());}
         let views:Vec<_>=snapshot.sources.iter().map(|pcm|PcmView {persistent_id:&pcm.persistent_id,sample_rate:pcm.sample_rate,planes:&pcm.planes}).collect();
         let dir=self.pcm_dir.join(format!("m{}-e{}",snapshot.model_revision,snapshot.revision));
@@ -195,7 +205,27 @@ impl EditorSession {
         self.applied.store(self.generation.load(Ordering::Acquire),Ordering::Release);
         self.peaks.lock().unwrap().clear();
         self.schedule_analysis();
+        self.host_version.fetch_add(1,Ordering::AcqRel);
+        self.emit("plugin_host_changed",json!({"version":self.host_version.load(Ordering::Acquire)}));
         Ok(())
+    }
+    /// 稳定模型变化在后台自动读取；pending曲线遇到真实冲突保留，不静默强制重载。
+    fn refresh_host(&self) {
+        let Some(owner)=self.owner.upgrade() else {return;};
+        let (initialized,edit,model)={let loaded=self.loaded.lock().unwrap();(loaded.initialized,loaded.edit,loaded.model)};
+        if !initialized {return;}
+        if owner.editor_versions().is_ok_and(|versions|versions!=(edit,model)) {
+            if let Err(error)=self.ensure_loaded(false) {
+                if error.starts_with("Conflict") || error.starts_with("Unsupported") {
+                    let changed={let mut current=self.error.lock().unwrap();let changed=current.as_deref()!=Some(error.as_str());*current=Some(error);changed};
+                    if changed {self.emit_state();}
+                }
+            }
+        }
+        if let Some(tempo)=owner.clock.get().and_then(|clock|clock.tempo()) {
+            let changed={let mut timeline=self.timeline.lock().unwrap();let changed=(timeline.bpm-tempo).abs()>1e-6;timeline.bpm=tempo;changed};
+            if changed {self.host_version.fetch_add(1,Ordering::AcqRel);self.emit("plugin_host_changed",json!({"version":self.host_version.load(Ordering::Acquire)}));}
+        }
     }
     /// 波形入口只接受本会话从宿主PCM生成的路径，不能让JS任意读取本机文件。
     pub(super) fn check_source(&self,path:&str)->Result<(),String> {
@@ -281,6 +311,7 @@ impl EditorSession {
     pub(super) fn state(&self)->Value {
         let generation=self.generation.load(Ordering::Acquire);let applied=self.applied.load(Ordering::Acquire);
         json!({"generation":generation,"applied_generation":applied,"pending":generation!=applied,
+            "host_version":self.host_version.load(Ordering::Acquire),
             "error":self.error.lock().unwrap().clone(),"connected":!self.closed.load(Ordering::Acquire),
             "ready":self.loaded.lock().unwrap().initialized})
     }
@@ -393,6 +424,49 @@ mod tests {
         editor.close();
         assert_eq!(playback["base_sec"].as_f64().unwrap()+playback["position_sec"].as_f64().unwrap(),2.);
         assert_eq!(timeline["playhead_sec"],2.);
+    }
+    /// 宿主tempo/geometry通知必须在无人点击重新载入时进入原GUI。
+    #[test]
+    fn host_changes_and_bpm_sync_automatically_without_reloading() {
+        let (model,owner,_identity)=fixture();let editor=owner.editor_session().unwrap();
+        let (reply,receiver)=mpsc::channel();let (events,_)=mpsc::sync_channel(128);
+        let sink=UiSink {view_id:"host-sync".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        call(&editor,&sink,&receiver,1,"get_timeline_state",json!({}));
+        owner.clock.get().unwrap().update(&crate::audio_abi::ProcessContext {
+            state:1<<10,sample_rate:44100.,tempo:150.,..Default::default()
+        });
+        let document=model.session();
+        document.timeline.lock().unwrap().as_mut().unwrap().clips[0].start_sec=2.;
+        document.revision.fetch_add(1,Ordering::AcqRel);
+        let deadline=Instant::now()+Duration::from_secs(5);
+        loop {
+            let synced=editor.timeline.lock().unwrap().clone();
+            if synced.clips[0].start_sec==2. && synced.bpm==150. {break;}
+            assert!(Instant::now()<deadline,"宿主改动没有自动同步: start={} bpm={}",synced.clips[0].start_sec,synced.bpm);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        editor.close();
+    }
+    /// 首次遇到不支持的宿主拉伸也必须显示原因，不能只永远显示等待音频。
+    #[test]
+    fn unsupported_first_load_surfaces_geometry_error() {
+        let (model,owner,_identity)=fixture();
+        let document=model.session();
+        let mut timeline=document.timeline.lock().unwrap();
+        let clip=&mut timeline.as_mut().unwrap().clips[0];
+        clip.playback_rate=1.25;clip.takes[0].playback_rate=1.25;drop(timeline);
+        let editor=owner.editor_session().unwrap();
+        assert!(editor.ensure_loaded(false).unwrap_err().starts_with("Unsupported"));
+        owner.clock.get().unwrap().update(&crate::audio_abi::ProcessContext {
+            state:1<<1,sample_rate:44100.,project_time_samples:44100,..Default::default()
+        });
+        let playing=super::super::commands::dispatch(&editor,"get_playback_state",json!({})).unwrap();
+        assert_eq!(playing["is_playing"],true);assert_eq!(playing["position_sec"],1.);
+        owner.clock.get().unwrap().stopped();
+        assert_eq!(super::super::commands::dispatch(&editor,"get_playback_state",json!({})).unwrap()["is_playing"],false);
+        let state=editor.state();editor.close();
+        assert!(state["error"].as_str().unwrap().starts_with("Unsupported"));
+        assert_eq!(state["ready"],false);
     }
     /// 真actor的自动调度消费快速写入/undo/redo，不调用手工render函数冒充自动应用。
     #[test]

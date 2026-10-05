@@ -2,7 +2,7 @@
 local sep=package.config:sub(1,1)
 local root=debug.getinfo(1,'S').source:sub(2):match('^(.*)'..sep..'[^'..sep..']*$')
 local repo=root..sep..'..'..sep..'..'
-local scratch=repo..sep..'.build-tmp'..sep..'embedded-probe'
+local scratch=os.getenv('HIFISHIFTER_ARA_PROBE_DIR') or (repo..sep..'.build-tmp'..sep..'embedded-probe')
 local captures=root..sep..'captures'
 local fixture=root..sep..'fixtures'..sep..'embedded-editor-voice.wav'
 local logfile=captures..sep..'embedded-editor-script.log'

@@ -260,9 +260,14 @@ pub struct PluginBuilder<P> {
     updates: UpdateEmitter,
     analysis_events: AnalysisEmitter,
     controller_identity: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    host_playback:Option<Arc<dyn Fn(Option<crate::PlaybackRequestHandle>) + Send + Sync>>,
 }
 
 impl<P> PluginBuilder<P> {
+    /// 本地补丁：只交付可撤销且线程受限的已验证宿主播放租约。
+    pub fn host_playback(mut self,observer:impl Fn(Option<crate::PlaybackRequestHandle>)+Send+Sync+'static)->Self {
+        self.host_playback=Some(Arc::new(observer));self
+    }
     /// 本地补丁：工厂分配真实 controllerRef 后的模型线程通知。
     pub fn controller_identity(mut self, observer: impl Fn(usize) + Send + Sync + 'static) -> Self {
         self.controller_identity = Some(Arc::new(observer));
@@ -277,6 +282,7 @@ impl<P> PluginBuilder<P> {
             updates: UpdateEmitter::new(),
             analysis_events: AnalysisEmitter::new(),
             controller_identity: None,
+            host_playback:None,
         }
     }
 
@@ -403,6 +409,7 @@ impl<P> PluginBuilder<P> {
             updates: self.updates,
             analysis_events: self.analysis_events,
             controller_identity: self.controller_identity,
+            host_playback:self.host_playback,
         })
     }
 }
@@ -415,6 +422,7 @@ pub struct Plugin<P> {
     pub(crate) updates: UpdateEmitter,
     pub(crate) analysis_events: AnalysisEmitter,
     pub(crate) controller_identity: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    pub(crate) host_playback:Option<Arc<dyn Fn(Option<crate::PlaybackRequestHandle>)+Send+Sync>>,
 }
 
 impl<P> Plugin<P> {

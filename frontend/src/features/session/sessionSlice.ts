@@ -4569,6 +4569,7 @@ const sessionSlice = createSlice({
                     clipId?: string | null;
                     anchorSec?: number;
                     noop?: boolean;
+                    host_request?: boolean;
                 };
                 // 已在播放时的重复"播放"触发：thunk 已完全 no-op（未 seek、
                 // 未调用后端）——不得重置任何传输状态（等待标志 / 位置报告 /
@@ -4578,8 +4579,11 @@ const sessionSlice = createSlice({
                     return;
                 }
                 const ok = Boolean(payload.ok);
-                state.runtime.isPlaying = ok;
-                state.runtime.playbackTarget = ok ? "original" : null;
+                // ARA的void请求只能确认已送达；实际播放态由宿主process时钟轮询确认。
+                if (!payload.host_request) {
+                    state.runtime.isPlaying = ok;
+                    state.runtime.playbackTarget = ok ? "original" : null;
+                }
                 // 新播放会话：清除上一场遗留的"起点等待"标志（引擎侧由
                 // set_playing 同步重置，此处保持两侧一致）。
                 state.runtime.playbackWaitingForRender = false;
@@ -4604,7 +4608,7 @@ const sessionSlice = createSlice({
                     // 短暂掐灭播放状态）。
                     state._transportEpoch = (Number(state._transportEpoch) || 0) + 1;
                 }
-                state.status = ok ? "Playing original" : "Play original failed";
+                state.status = payload.host_request ? "Playback requested" : ok ? "Playing original" : "Play original failed";
             })
             .addCase(playOriginal.rejected, setRejected)
 

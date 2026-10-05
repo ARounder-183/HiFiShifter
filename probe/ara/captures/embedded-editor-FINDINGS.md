@@ -83,3 +83,23 @@ Lua原有save命令已把当前未编辑一次性工程正常保存为`.build-tm
 验证：同源别名lib测试62 passed、exit0（含原实时零分配/释放、WORLD独立输出oracle、共享身份复制/恢复及双actor连续编辑）；前端新增停播seek与原playheadGuard共15 passed、exit0；frontend tsc/生产build和规范bundle build exit0。未重复全前端及app全套测试；既有警告保留。
 
 新bundle：`.build-tmp/embedded-feedback-01/HiFiShifter.vst3`，没有替换用户仍在运行的`.build-tmp/embedded-vst3`。真实REAPER三项回归还没验证，不能将源码测试写成宿主通过。播放/暂停控制REAPER（中优）和clip改动自动刷新（低优）仍待下一批；正常保存并退出REAPER后才能升级加载版本。
+
+## Task28：BPM实测及宿主控制接线（2026-10-05）
+
+本批已实现标准ARA宿主播放请求租约，原ActionBar播放/暂停/停止在宿主提供可选接口时开放；native主线程发送，actor/音频线程不调用。租约原线程、撤销和有限位置回归1 passed，plugin lib65 passed（新增首载Unsupported回归首轮失败，修复后65/65 exit0）。请求确认包只代表送达，不伪造宿主开始播放；前端相关18 passed，tsc/build成功。
+
+稳定host model变更且无pending时actor自动刷新，tempo从VST3 kTempoValid取得，GUI经版本事件/轮询同步；有真实冲突继续保留未应用曲线。不是完整Tempo Map/时间拉伸支持。
+
+真实UI验证使用`.build-tmp/embedded-transport-probe/embedded-editor.RPP`副本和独立profile，原`.build-tmp/embedded-probe/embedded-editor.RPP`始终SHA256 `4AD35908AA2D252D9171A9B6F423E4D9BFEE4DEDBE29861B7665B0FE485897A3`。副本在REAPER原生Project Settings由120改150，插件BPM显示150。默认Beats时间基准同时使媒体PLAYRATE1.25；回到120并仅在副本改Time基准后再次改150，媒体保持PLAYRATE1，插件仍显示150。截图`bpm-sync-150.jpg`可评审；保存副本5096 bytes，RPP含TEMPO150/PLAYRATE1。
+
+按用户提示先鼠标点插件标题栏，accessibility实际焦点进入VST3 FX；随后点网页播放按钮，仍被工具返回“point ... is over msedgewebview2.exe ... not target window reaper.exe”。激活/新截图后仅重试一次，同样拒绝。没有用脚本或隐藏入口伪造按钮验收，实际播放/暂停和GUI保持打开时自动重载仍未测。测试副本已保存并正常退出，原工程未改。
+
+启动脚本现清空旧command.txt，并支持独立ScratchName；否则上次残留save命令会在新实例重放而覆盖旧测试工程。此修正只作用一次性采集工具。
+
+最后一次集中审查发现：首次Unsupported必须存入可见状态；get_playback_state必须先于timeline加载门禁，否则失败几何下不能观察真实停播。两项已修并纳入回归。该回归进一步实测发现Snapshot序列化只保留take权威，扁平倍率反序列化为1，检查前必须normalize_takes；不放宽时间拉伸边界。完整lib65正常exit0，重建含最新前端和引擎的bundle exit0，既有Rust/Vite警告保留。
+
+新版隔离副本的连续UI验证：插件保持打开，原生Project Settings将150改180，BPM框自动变180、媒体仍x1，截图bpm-sync-live-180.jpg。原生Media Item Properties仅选第一段，将Item position从0:00.000改0:01.000，插件原时间线和参数区自动右移，未点击重新载入，日志clipStartsSec=[1.000000,3.000000]；截图host-geometry-auto-refresh.jpg。停播宿主光标位于1秒时GUI也显示0:1.000，未重复相加。没有本地pending编辑，不能据此宣称冲突交互通过。网页按钮/手绘/全流程PCM仍未验收。
+
+原生Duplicate tracks复制测试轨道，日志sources=1/modifications=1/regionSequences=2/playbackRegions=4，两个原GUI均为已应用0/0且只显示各自两段，截图copied-track-two-editors.jpg。新采集段未出现旧identity ambiguous阻塞；模型变更过程中仍有两条get_param_frames unknown host track日志，尚未定位，不宣称双实例曲线/PCM全流程通过。副本正常保存8356 bytes，TEMPO180、两轨POSITION1/3和PLAYRATE1；原用户工程不变。
+
+最终一次前端全量：`npm test -- --reporter=dot`，311 files/2715 tests passed，exit0，28.79秒。既有Canvas/act环境警告仍在；通过不代表Windows原GUI手绘音频验收。没有重复运行内核/app全套。

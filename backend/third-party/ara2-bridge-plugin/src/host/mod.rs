@@ -10,7 +10,7 @@ pub use archive::{ArchiveAccess, HostArchiveReader, HostArchiveWriter};
 pub use audio::{AudioAccess, HostAudioReader, SampleFormat};
 pub use content::{HostAudioSourceRef, HostContentReader, HostContentScope, HostMusicalContextRef};
 pub use model_update::ModelUpdateAccess;
-pub use playback::PlaybackAccess;
+pub use playback::{PlaybackAccess,PlaybackRequestHandle};
 
 use ara2_bridge_core::{ApiGeneration, AraError, SizedInput};
 use ara2_bridge_sys::ARADocumentControllerHostInstance;

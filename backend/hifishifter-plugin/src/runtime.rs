@@ -64,7 +64,9 @@ impl Runtime {
             .document_controller(|| {
                 let model = crate::ara::model::ModelHandle::new();
                 let session = model.session();
-                PluginBuilder::new(model).controller_identity(move |key| session.register(key)).build()
+                let playback=session.clone();
+                PluginBuilder::new(model).controller_identity(move |key| session.register(key))
+                    .host_playback(move |handle| {crate::log_line(&format!("ARA host playback control available={}",handle.is_some()));*playback.playback.lock().unwrap()=handle;}).build()
             })
             .build()?;
         let factory: &'static Factory = Box::leak(Box::new(factory));

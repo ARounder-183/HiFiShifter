@@ -428,6 +428,11 @@ impl ExtensionOwner {
     pub(crate) fn stop_editor(&self) {
         if let Some(Ok(editor))=self.editor.get() { editor.close(); }
     }
+    /// native主线程取得宿主给本ARA文档的可撤销播放租约；不寻找全局REAPER窗口。
+    pub(crate) fn host_playback(&self)->Option<ara2_bridge::plugin::PlaybackRequestHandle> {
+        self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade)
+            .and_then(|document|document.playback.lock().unwrap().clone())
+    }
     /// 原生GUI轻量版本查询，不复制PCM，不按宿主ID读取文件。
     pub(crate) fn editor_versions(&self)->Result<(u64,u64),String> {
         let document=self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade).ok_or("document closed")?;
@@ -661,6 +666,7 @@ impl ExtensionOwner {
         let ids = keys.iter().map(|key| identities.get(key).cloned().ok_or("missing assigned clip identity"))
             .collect::<Result<BTreeSet<_>, _>>()?;
         let mut timeline = document.timeline.lock().unwrap().clone().ok_or("host timeline unavailable")?;
+        if let Some(tempo)=document.clock.tempo() {timeline.bpm=tempo;}
         timeline.clips.retain(|clip| ids.contains(&clip.id));
         // 零分配也只能看零轨道，不能意外把整张文档交给空renderer编辑。
         timeline.tracks.retain(|track| timeline.clips.iter().any(|clip| clip.track_id == track.id));

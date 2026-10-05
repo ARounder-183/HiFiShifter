@@ -1,6 +1,6 @@
 // hs-interaction-exempt: 主工具栏是紧凑 chrome（size 1、内联底色、BPM 有手势累加器），能力层原语是表单尺寸；本文件的滚轮与精细调整接线已完备（BPM/节拍器音量/三个下拉均有），故刻意保留。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { isPluginMode, DAW_CONTROLLED_REASON } from "../../services/hostCapabilities";
+import { isPluginMode, canControlHostTransport } from "../../services/hostCapabilities";
 import { Flex, Select, TextField, Button, IconButton, Box } from "@radix-ui/themes";
 import {
     CheckIcon,
@@ -1147,8 +1147,8 @@ export function ActionBar() {
                         dispatch(stopAudioPlayback({ restoreAnchor: true }));
                     }}
                     data-tooltip={t("action_stop")}
-                    disabled={isPluginMode()}
-                    title={isPluginMode() ? DAW_CONTROLLED_REASON : undefined}
+                    disabled={isPluginMode() && !canControlHostTransport()}
+                    title={isPluginMode() ? "控制 REAPER 停止播放" : undefined}
                 >
                     <StopIcon />
                 </Button>
@@ -1163,8 +1163,8 @@ export function ActionBar() {
                         dispatch(playOriginal());
                     }}
                     data-tooltip={isPlaying ? tf("action_pause") : t("action_play_out")}
-                    disabled={isPluginMode()}
-                    title={isPluginMode() ? DAW_CONTROLLED_REASON : undefined}
+                    disabled={isPluginMode() && !canControlHostTransport()}
+                    title={isPluginMode() ? "控制 REAPER 播放/暂停" : undefined}
                 >
                     {isPlaying ? <PauseIcon /> : <PlayIcon />}
                 </IconButton>

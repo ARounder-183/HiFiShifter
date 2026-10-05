@@ -1047,7 +1047,7 @@ unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) ->
             if data.process_context.is_null() { owner.snapshots[0].misses.fetch_add(1, Ordering::Relaxed); return K_RESULT_OK; }
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*data.process_context };
-            if let Some(clock)=owner.clock.get() {clock.update(context);}
+            if data.process_mode!=2 {if let Some(clock)=owner.clock.get() {clock.update(context);}}
             // REAPER停播也会process固定光标位置；只离线导出允许没有kPlaying的供音。
             if data.process_mode!=2 && context.state & (1<<1)==0 {return K_RESULT_OK;}
             let publisher = match context.sample_rate {

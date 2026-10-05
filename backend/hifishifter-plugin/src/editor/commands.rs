@@ -92,6 +92,14 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
         },
         "get_about_info"=>return Ok(json!({"ok":true,"name":"HiFiShifter","version":crate::VERSION,"host":"ARA plugin"})),
         "plugin_get_apply_state"=>return Ok(session.state()),
+        "get_playback_state"=>{
+            // 宿主播放态不依赖曲线载入；Unsupported/Conflict也必须还能观察播放并暂停。
+            let (position,playing)=session.transport();
+            let duration=session.timeline.lock().unwrap().project_sec;
+            return Ok(json!({"ok":true,"is_playing":playing,"waiting_for_render":false,
+                "target":if playing {Some("synthesized")} else {None},"base_sec":0.0,
+                "position_sec":position,"duration_sec":duration,"host_authoritative":true}));
+        },
         "plugin_refresh"=>{session.ensure_loaded(input["force"].as_bool().unwrap_or(false))?;return payload(session,false);},
         "set_ui_locale"=>return Ok(json!({"ok":true,"locale":input["locale"]})),
         "consume_startup_project_path"=>return Ok(Value::Null),
@@ -159,12 +167,6 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
             if input["bpm"].is_number() {return Err("tempo is controlled by REAPER".into());}
             if let Some(position)=input["playheadSec"].as_f64() {if position.is_finite() {session.timeline.lock().unwrap().playhead_sec=position.max(0.);}}
             payload(session,true)
-        },
-        "get_playback_state"=>{
-            let (position,playing)=session.transport();
-            let timeline=session.timeline.lock().unwrap();
-            Ok(json!({"ok":true,"is_playing":playing,"waiting_for_render":false,"target":if playing {Some("synthesized")} else {None},
-                "base_sec":0.0,"position_sec":position,"duration_sec":timeline.project_sec,"host_authoritative":true}))
         },
         "get_pitch_analysis_progress"=>Ok(Value::Null),
         "get_track_summary"=>{

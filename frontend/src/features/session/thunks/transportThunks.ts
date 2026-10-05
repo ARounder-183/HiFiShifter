@@ -150,6 +150,7 @@ export type PlayOriginalResult = {
     clipId: string | null;
     anchorSec: number;
     noop?: boolean;
+    host_request?: boolean;
     playing?: string;
     start_sec?: number;
 };

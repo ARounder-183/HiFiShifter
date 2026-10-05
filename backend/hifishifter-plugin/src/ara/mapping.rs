@@ -224,7 +224,7 @@ pub fn ara_document_from_json(text: &str) -> Result<AraDocument, MappingError> {
     Ok(serde_json::from_str(text)?)
 }
 
-/// ARA 对象模型不给 tempo；v1 用本体默认 BPM。
+/// 先导映射尚未读取ARA Tempo Map；插件层再叠加有效VST3宿主tempo，初始用本体默认值。
 pub const fn default_bpm() -> f64 {
     120.0
 }

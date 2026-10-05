@@ -372,7 +372,34 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
             Some("log_frontend_error") => {
                 crate::log_line(&format!("Embedded frontend: {}",request["args"])); Ok(serde_json::Value::Null)
             }
+            Some(command @ ("play_original"|"play_synthesized"|"stop_audio"))=>{
+                // host callback可能同步重入；调用期间不持BrowserState/会话锁。
+                let link=state.borrow().link.clone();
+                (||->Result<serde_json::Value,String> {
+                    let owner=link.owner()?;
+                    let playback=owner.host_playback().ok_or("host does not provide ARA playback control")?;
+                    let position=owner.clock.get().map(|clock|clock.read().0).unwrap_or(0.);
+                    if command=="stop_audio" {playback.stop().map_err(|e|e.to_string())?;
+                        // ARA只有Stop请求；暂停后定位到实际停止点，Stop按钮的回锚由原thunk另发seek。
+                        playback.set_position(position).map_err(|e|e.to_string())?;
+                        Ok(serde_json::json!({"ok":true,"stopped_at_sec":position}))
+                    } else {playback.start().map_err(|e|e.to_string())?;
+                        Ok(serde_json::json!({"ok":true,"host_request":true,"anchorSec":position,"start_sec":position}))}
+                })()
+            },
             Some(command)=>{
+                if command=="set_transport" && request["args"]["playheadSec"].is_number() {
+                    let link=state.borrow().link.clone();
+                    let result=(||->Result<(),String> {
+                        let position=request["args"]["playheadSec"].as_f64().ok_or("invalid seek position")?;
+                        link.owner()?.host_playback().ok_or("host does not provide ARA playback control")?
+                            .set_position(position).map_err(|e|e.to_string())
+                    })();
+                    if let Err(error)=result {
+                        let text=wide(&serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":false,"error":error}).to_string());
+                        browser.PostWebMessageAsJson(PCWSTR(text.as_ptr()))?;return Ok(());
+                    }
+                }
                 let (link,sink,full)={let state=state.borrow();(state.link.clone(),state.sink.clone(),state.pending.len()>=32 || state.pending.contains(&id))};
                 let outcome=if full {Err("native pending request budget exceeded".into())} else {
                     link.owner().and_then(|owner|owner.editor_session()?.enqueue(super::session::UiRequest {
@@ -394,7 +421,8 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
         browser.PostWebMessageAsJson(PCWSTR(response.as_ptr()))?;
         Ok(())
     })),&mut token)?; }
-    let boot = serde_json::json!({"version":1,"viewId":state.borrow().view_id});
+    let transport_control=state.borrow().link.owner().is_ok_and(|owner|owner.host_playback().is_some());
+    let boot = serde_json::json!({"version":1,"viewId":state.borrow().view_id,"transportControl":transport_control});
     let script = wide(&format!("window.__HFS_PLUGIN_BOOTSTRAP__={boot};"));
     let weak = Rc::downgrade(state);
     let navigate = browser.clone();

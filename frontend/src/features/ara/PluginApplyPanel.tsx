@@ -4,6 +4,7 @@ import { Button, Flex } from "@radix-ui/themes";
 import { invoke } from "../../services/invoke";
 import { listen } from "../../services/hostEvents";
 type ApplyState = { generation: number; applied_generation: number; pending: boolean;
+    host_version?: number;
     connected: boolean; ready?: boolean; error: string | null };
 
 /** 显示真正后台状态；初始化等待只读重试，冲突刷新必须显式确认替换本地曲线。 */
@@ -17,6 +18,15 @@ export function PluginApplyPanel({ onTimelineChanged }: { onTimelineChanged: () 
     useEffect(() => {
         let disposed = false;
         let inFlight = false;
+        let lastHostVersion: number | undefined;
+        let timelineInFlight = false;
+        async function updateTimeline() {
+            if (disposed || timelineInFlight) return false;
+            timelineInFlight = true;
+            try {await timelineChanged.current();return true;} catch {return false; /* 保留版本，下一次轮询重试。 */ }
+            finally {timelineInFlight = false;}
+        }
+        const hostSubscription=listen("plugin_host_changed",()=>{void updateTimeline();});
         const subscription = listen<ApplyState>("plugin_apply_state", (event) => {
             if (!disposed) setState(event.payload);
         });
@@ -26,13 +36,15 @@ export function PluginApplyPanel({ onTimelineChanged }: { onTimelineChanged: () 
             try {
                 const current = await invoke<ApplyState>("plugin_get_apply_state");
                 if (!disposed) { setState(current); setFailure(""); }
-                if (!current.ready && !disposed) await timelineChanged.current().catch(() => undefined);
+                if (!current.ready || current.host_version !== lastHostVersion) {
+                    if (await updateTimeline()) lastHostVersion = current.host_version;
+                }
             } catch (error) { if (!disposed) setFailure(String(error)); }
             finally { inFlight = false; }
         }
         void poll();
         const timer = window.setInterval(() => void poll(), 1000);
-        return () => { disposed = true; clearInterval(timer); void subscription.then((off) => off()).catch(() => {}); };
+        return () => { disposed = true; clearInterval(timer); void subscription.then((off) => off()).catch(() => {});void hostSubscription.then(off=>off()).catch(()=>{}); };
     }, []);
     async function refresh(force = false) {
         if (state?.pending && !force) { setConfirm(true); return; }
@@ -54,7 +66,7 @@ export function PluginApplyPanel({ onTimelineChanged }: { onTimelineChanged: () 
             </span>
             {state && <span className="hs-type-caption">编辑 {state.generation} / 音频 {state.applied_generation}</span>}
             <Button size="1" variant="soft" disabled={busy} onClick={() => void refresh()}>重新载入宿主</Button>
-            <span className="hs-type-caption">文件、片段位置及播放由 REAPER 控制 · 不支持倒放</span>
+            <span className="hs-type-caption">文件、片段位置及播放由 REAPER 控制 · 不支持倒放/时间拉伸</span>
         </Flex>
         {confirm && <Flex role="alertdialog" aria-label="重新载入宿主" align="center" gap="2" style={{ marginTop: 6 }}>
             <span className="hs-type-label">当前仍有未应用编辑。重新载入会替换本地曲线，继续？</span>

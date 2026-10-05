@@ -218,3 +218,17 @@ Task24增加非实时退役快照回收，实时读区SeqCst计数保护指针�
 - [ ] 用户正常保存退出后升级加载版本，真实验证停播静音、正向游标同步、多轨道编辑及复制/重开；保留旧工程和曲线。
 - [ ] 中优宿主播放控制：使用可选ARAPlaybackControllerInterface，native主线程发送Start/Stop请求，成功请求后仍从process采样实际状态，不伪造已播放。
 - [ ] 低优自动同步：原GUI在模型版本改变且无本地pending时重新取host timeline；pending/身份冲突保留本地曲线并显示原因。
+
+## Task 28: 原GUI宿主播放请求、自动同步与BPM
+
+- [x] 从已验证HostClients交付可撤销PlaybackRequestHandle；模型线程之外/HostClients销毁后拒绝调用，回归1 passed。
+- [x] native WebMessageReceived调用标准ARA Start/Stop/SetPosition，原ActionBar按bootstrap真实可选能力开放；暂停请求后定位停止点，停止回锚继续原thunk。
+- [x] 请求送达不等于已播放，前端host_request确认包不置isPlaying=true，实际状态由process时钟确认；与原停止/seek回归共18 passed。
+- [x] actor稳定模型版本变化自动ensure_loaded；tempo有效字段同步，并向原GUI发plugin_host_changed/host_version，失败版本保留供轮询重试；pending冲突仍保留曲线。
+- [x] plugin lib65、宿主租约1、前端18、tsc/生产build验证；新版bundle位于embedded-vst3。最后新增回归首轮失败揭示take投影未重建，修复后65/65正常exit0。
+- [x] 真实Computer Use在测试副本原生Project Settings把120改150，插件打开后BPM=150；Time基准下媒体倍率维持1，截图captures/bpm-sync-150.jpg，保存RPP确认TEMPO150和PLAYRATE1。
+- [ ] 插件网页中真实点击播放/暂停、手绘与完整导出/重开：已先点标题栏并确认FX焦点，内容点击仍被本机工具跨进程检查拒绝，不能写成通过。
+- [x] GUI不关闭时BPM150→180自动同步；原生Media Item Properties将第一段起点0→1秒，原时间线/参数区自动刷新且日志clipStartsSec=[1,3]，未点重载。截图bpm-sync-live-180.jpg、host-geometry-auto-refresh.jpg。
+- [ ] 本地pending曲线与宿主几何同时变化时的真实冲突确认，不能用无本地编辑的移动实测代替。
+- [x] 最终前端全量311 files/2715 tests通过，exit0，保留既有Canvas/act警告。
+- [x] 宿主Duplicate tracks后两个原GUI均能载入并显示已应用，真实共享源1/sequence2/region4；副本保存8356 bytes。双实例曲线/PCM仍未实测，模型过渡有两条unknown host track日志待定位。

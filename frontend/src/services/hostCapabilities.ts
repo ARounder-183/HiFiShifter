@@ -6,11 +6,14 @@ export function hostMode(): HostMode {
         ? "plugin" : "standalone";
 }
 export function isPluginMode(): boolean { return hostMode() === "plugin"; }
+/** 仅宿主原生明确提供ARA播放请求能力时开放，不把插件模式等同支持播放控制。 */
+export function canControlHostTransport(): boolean {return isPluginMode() && window.__HFS_PLUGIN_BOOTSTRAP__?.transportControl===true;}
 export const DAW_CONTROLLED_REASON = "由 REAPER 控制；在宿主中操作文件、片段几何与播放";
 
 /** 原编辑工具与查看操作保留；不将DAW几何操作发到独立app命令路径。 */
 export function pluginAllowsAction(action: string, surface: string | null): boolean {
     if (!isPluginMode()) return true;
+    if (["playback.toggle","playback.stop"].includes(action)) return canControlHostTransport();
     if (action.startsWith("project.") || action.startsWith("transport.") || action.startsWith("recording.")
         || ["playback.toggle", "playback.stop", "playback.metronome"].includes(action)) return false;
     if (action.startsWith("track.") && !["track.selectUp", "track.selectDown", "track.toggleMute", "track.toggleSolo"].includes(action)) return false;

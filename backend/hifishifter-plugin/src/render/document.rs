@@ -34,6 +34,7 @@ pub(crate) struct DocumentSession {
     pub edits: Arc<Mutex<crate::state_channel::EditState>>,
     pub id: DocumentId,
     pub clock:Arc<super::transport::TransportClock>,
+    pub playback:Mutex<Option<ara2_bridge::plugin::PlaybackRequestHandle>>,
 }
 
 #[cfg(test)]
@@ -115,6 +116,7 @@ impl DocumentSession {
 
     /// 同步关闭文档；保持 renderer 的原生接口存储，但撤销模型操作许可。
     pub fn close(&self) {
+        self.playback.lock().unwrap().take();
         self.ready.store(false, Ordering::Release);
         let leases = {
             let mut renderers = self.renderers.lock().unwrap();

@@ -77,7 +77,7 @@ pub use ffi::{
 pub use host::{
     ArchiveAccess, AudioAccess, HostArchiveReader, HostArchiveWriter, HostAudioReader,
     HostAudioSourceRef, HostClients, HostContentReader, HostContentScope, HostMusicalContextRef,
-    ModelUpdateAccess, PlaybackAccess, SampleFormat,
+    ModelUpdateAccess, PlaybackAccess, PlaybackRequestHandle, SampleFormat,
 };
 pub use persistence::PersistenceAdapter;
 pub use processing::{AudioFileChunk, Plugin, PluginBuilder, SemanticCapabilities};

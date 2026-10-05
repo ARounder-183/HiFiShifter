@@ -824,4 +824,22 @@ Task 27: Ruling: 各轨共同使用文档revision导致另一轨正常编辑触�
 
 Task 27: Ruling: 用户正在修改隔离REAPER工程，不能热覆盖模块；首轮冷查询测试预热线程不退出锁住默认测试exe — 不关闭用户REAPER，编译同源别名hifishifter_plugin-feedback-check.exe验证（62 passed、exit0），新bundle生成到全新embedded-feedback-01目录 — 若覆盖正在加载的DLL或只信测试摘要，会丢编辑/虚报通过。
 
+Task 28: Ruling: 原映射BPM固定120，宿主tempo从未进入GUI — 读取有效ProcessContext tempo，actor版本通知同步原GUI，真实REAPER120→150后GUI=150 — 若外推完整Tempo Map或time stretch，会把数字同步误当音频时间变换支持。
+
+Task 28: Ruling: REAPER默认Beats时间基准改BPM会隐式将倍率变1.25 — 仅在独立副本用Time基准隔离验证，保留原工程默认值与time stretch未支持边界 — 若替用户改项目Timebase，会改变其全部素材节奏。
+
+Task 28: Ruling: ARA播放服务可选且回调受模型线程和文档生命周期约束 — 已验证HostClients产生可撤销请求租约，只在native UI发送标准请求；确认包不伪造实际播放，暂停后定位停止点 — 若在actor调用或只存裸ref，会越线程或在关闭后调用宿主悬空地址。
+
+Task 28: Ruling: 用户指明先点窗口；实测点标题栏后确已进入FX焦点，但网页按钮点击仍被本机工具拒绝 — 记录实际错误及BPM已实测/按钮未实测的区别，不重建输入代理 — 若忽略焦点证据或泛化为插件无法操作，会误诊本机工具限制。
+
+Task 28: Ruling: command.txt残留save可能在新采集实例重放 — 启动时清空控制文件、支持独立ScratchName，验证始终在工程副本 — 若保留残留命令，会覆盖用户此前的测试编辑。
+
+Task 28: Ruling: 集中审查发现首次Unsupported状态未显示，几何加载失败会连带阻断时钟查询 — 首载保存错误，get_playback_state提前分发，真实停播/暂停观察不依赖可编辑几何 — 若不修，GUI会永远等待音频或无法确认宿主已经停止。
+
+Task 28: Ruling: 新增首载拉伸回归首轮64通过/1失败，Snapshot只序列化take权威而扁平倍率反序列化默认1 — 检查前normalize_takes重建真实投影，完整65/65 exit0再构建新版bundle — 若仅改测试期望，真实Beats隐式拉伸会漏报为可编辑。
+
+Task 28: Ruling: 原GUI保持打开时，宿主BPM150→180及单素材起点0→1秒均自动跟随，无手工重载，日志clipStartsSec=[1,3] — 关闭无pending场景的连续同步疑问，保留pending冲突和网页按钮手绘验收open — 若外推所有冲突/Tempo Map/音频验收，仍会夸大证据范围。
+
+Task 28: Ruling: 原生Duplicate tracks后共享源1/sequence2/region4，两个GUI载入已应用，模型过渡仍记两条unknown host track — 记录实测加载进展和残余日志，不宣称双轨曲线/PCM全验收；最终前端311文件/2715测试exit0 — 若仅凭窗口正常忽略过渡请求，会遗漏刷新时旧轨道请求的时序问题。
+
 

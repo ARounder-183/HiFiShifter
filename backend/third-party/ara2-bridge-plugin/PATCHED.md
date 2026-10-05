@@ -57,3 +57,10 @@ entry 的 owning 引用保留 companion storage 至最终 release，支持两个
 - 上游修好后，删掉三个签名上的新参数与运行时派发点的新传参、
   删掉 `PluginModel` 上的等式约束、删掉本目录与 `backend/Cargo.toml` 的对应
   `[patch.crates-io]` 行即可。
+
+## 标准宿主播放请求租约
+
+新增PlaybackRequestHandle和PluginBuilder::host_playback：从原HostClients已验证的可选
+PlaybackAccess交付可存储租约，HostClients销毁后撤销，原模型线程之外拒绝调用。
+HiFiShifter只在WebMessageReceived主线程执行Start/Stop/SetPosition，不在actor/process调用，
+也不保留未经验证的ARA host裸指针。缺可选接口时GUI禁用播放控制。

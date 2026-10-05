@@ -4,6 +4,12 @@
 
 ## 最新状态：一期核心真实验收通过，二期改为内嵌GUI与自动应用
 
+本批最终前端全量311 files/2715 tests通过(exit0)。隔离副本已保存8356 bytes：BPM180、Time基准、两轨各两段POSITION1/3、PLAYRATE1；真实Duplicate tracks后两个GUI都显示已应用，截图copied-track-two-editors.jpg。模型过渡仍有两条get_param_frames unknown host track日志，未定位；双轨真实曲线与PCM验收仍open，不以显示通过代替编辑通过。
+
+复现入口：`.\probe\ara\start_embedded_editor.ps1 -Reopen -ScratchName embedded-transport-probe`，仅在REAPER正常退出后启动。默认embedded-probe仍是原用户测试工程，SHA256保持4AD35908AA2D252D9171A9B6F423E4D9BFEE4DEDBE29861B7665B0FE485897A3，不覆盖它。
+
+Task28新增：标准ARA宿主播放租约/原ActionBar能力开放、模型自动同步、有效宿主tempo同步已实现；plugin lib65/租约1/前端18/tsc与build通过。真实UI在独立副本中将BPM120改150，HiFiShifter显示150；副本Time基准下PLAYRATE1保持，截图captures/bpm-sync-150.jpg。进一步在GUI不关闭时150→180立即同步；宿主单素材属性起点0→1秒后原时间线和参数区自动跟随，未点重载，日志clipStartsSec=[1,3]，见bpm-sync-live-180.jpg及host-geometry-auto-refresh.jpg。原工程hash未变。按钮真实点击虽先确认FX标题栏焦点，仍被Computer Use跨进程检查拒绝，键盘Tab未确认触发网页控件，不能标播放控制/全流程验收通过。最新构建回到embedded-vst3；自动同步有pending时仍保留冲突，完整Tempo Map/time stretch未支持。
+
 2026-10-05用户已真实试用内嵌GUI并确认基本可编辑；新反馈三项高优缺陷正在修复，不再将所有未验证行为归为Computer Use。当前新源码修停播process发声、绝对时间重复相加、同源复制轨道的组件state作用域和跨轨假Conflict。62插件lib回归与15前端光标回归正常exit0；新bundle在`.build-tmp/embedded-feedback-01/HiFiShifter.vst3`。用户仍在修改旧隔离REAPER，绝不关闭或热替换。下一批先待用户正常保存退出后部署高优修复，再实现标准ARA宿主播放控制（可选能力/主线程调用）和无待应用编辑时的宿主模型自动同步；真实验证未完成，不能标二期完成。
 
 原GUI手绘音高提交r1/m2，REAPER真实输出四个窗口220.5Hz→393.75Hz，gap=0。

@@ -1705,6 +1705,7 @@ impl<P: PluginModel + 'static> Plugin<P> {
         }
         // SAFETY: forwarded caller contract; ARA host storage outlives the controller.
         let host = unsafe { HostClients::from_raw(host, generation) }?;
+        if let Some(observer)=self.host_playback {observer(host.playback().map(|client|client.request_handle()));}
         // SAFETY: forwarded caller contract for the ephemeral document properties.
         let properties = unsafe { DocumentProperties::copy_from_ffi(properties) }?;
         // Optional controller-tail capabilities were introduced with ARA 2 Final. A plug-in may
