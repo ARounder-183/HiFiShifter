@@ -21,6 +21,7 @@ import {
     persistUiSettings,
     seekPlayhead,
     setActiveVibratoPreset,
+    setToolModePersistent,
     setplayheadSec,
 } from "../../../features/session/sessionSlice";
 import { clamp, MAX_PX_PER_SEC, MIN_PX_PER_SEC } from "../timeline";
@@ -167,10 +168,11 @@ import {
     type VibratoDragWorking,
 } from "./vibratoDragAdjust";
 import {
-    cycleVibratoPresetId,
+    cycleVibratoChoice,
     findVibratoPreset,
+    vibratoCycleAnchorId,
+    type VibratoChoice,
 } from "../../../features/vibrato/vibratoPresetList";
-import { builtinVibratoPresetId } from "../../../features/vibrato/systemPresets";
 import { vibratoSeedForPreset } from "../../../features/vibrato/vibratoSeed";
 import { nextVibratoHudAnchor, vibratoHudState, type VibratoHudAnchor } from "./vibratoHudState";
 import type { VibratoPreset } from "../../../features/vibrato/vibratoTypes";
@@ -432,12 +434,13 @@ export function usePianoRollInteractions(args: {
      */
     vibratoPreset: VibratoPreset;
     /**
-     * 全量预设列表（系统 + 用户）。
+     * 「直线」预设 —— 直线工具的固定起手预设。
      *
-     * 用于按 id 定位"当前预设"（它可能已被停用，HUD 仍要显示它的名字与缩略图）
-     * 以及「重置到直线」定位直线预设。
+     * 直线工具就是"颤音工具 + 这个预设"（见 `STRAIGHT_VIBRATO_PRESET_ID`），
+     * 因此它必须始终可用：即使活动预设被停用或列表被改得面目全非，直线工具
+     * 也照画直线。由面板用 `systemVibratoPreset("straight")` 兜底解析后传入。
      */
-    vibratoPresetList: readonly VibratoPreset[];
+    straightVibratoPreset: VibratoPreset;
     /**
      * 拖拽中环绕切换时**实际参与**的列表（已剔除被停用的预设）。
      *
@@ -587,7 +590,7 @@ export function usePianoRollInteractions(args: {
         vibratoPresetPrevKb,
         vibratoPresetNextKb,
         vibratoPreset,
-        vibratoPresetList,
+        straightVibratoPreset,
         vibratoPresetCycleList,
         onVibratoDragStateChange,
         onVibratoDragEnd,
@@ -1526,27 +1529,70 @@ export function usePianoRollInteractions(args: {
     );
 
     /**
-     * 切换颤音预设：**持久化**（写活动预设 + 落盘）并同步本次手势的工作副本。
+     * 把本次手势切到直线工具：工具、工作副本与种子一起换。
      *
-     * 【语义】侧键 / `,` `.` 与工具栏、管理器是同一个动作 —— "我换了预设"。
+     * 【为什么不写活动预设】直线工具是**工具**，不是音色。顺手把用户记住的活动
+     * 预设改成直线预设，等于"我只是画条直线，你把我选的音色忘了" —— 下次切回
+     * 颤音工具时，他会发现自己挑的预设没了。工具与预设是两条独立的记忆。
+     */
+    const switchDragToLineTool = useCallback(
+        (clientX?: number, clientY?: number): boolean => {
+            const vib = vibratoStateRef.current;
+            if (!vib) return false;
+            void dispatch(setToolModePersistent("line"));
+            vib.working = createDragWorking(straightVibratoPreset, editParam, currentParamRange);
+            vib.seed = vibratoSeedForPreset(straightVibratoPreset);
+            repaintVibratoDragPreview(vib.shiftHeld);
+            reportVibratoDragState(clientX, clientY);
+            return true;
+        },
+        [
+            dispatch,
+            straightVibratoPreset,
+            editParam,
+            currentParamRange,
+            repaintVibratoDragPreview,
+            reportVibratoDragState,
+        ],
+    );
+
+    /**
+     * 应用一次预设选择：要么切到直线工具，要么切到"颤音工具 + 某个预设"。
+     *
+     * 【语义】侧键 / `,` `.` / 预设子菜单与管理器是同一个动作 —— "我换了预设"。
+     * 落在直线预设上时按 `VibratoChoice` 的规则变成"切到直线工具"（直线工具 ≡
+     * 颤音工具 + 直线预设），因此**不必**在各调用点各写一份判断。
+     *
      * 工作副本按 `switchDragPreset` 的规则更新：调过深度 / 速率就沿用本次手势的
      * 值（换音色不改幅度），没调过则取新预设自带的值。
      */
-    const switchVibratoPresetPersistently = useCallback(
-        (next: VibratoPreset, clientX?: number, clientY?: number): boolean => {
+    const applyVibratoChoice = useCallback(
+        (choice: VibratoChoice, clientX?: number, clientY?: number): boolean => {
             if (!vibratoStateRef.current) return false;
+            if (choice.tool === "line") return switchDragToLineTool(clientX, clientY);
+
+            const next = findVibratoPreset(vibratoPresetCycleList, choice.presetId);
+            if (!next) return false;
+            // 从直线工具轮转出去 = 换回颤音工具：工具与预设一起变，否则会停在
+            // "直线工具 + 一个颤音预设"这种既非此也非彼的状态上。
+            if (toolMode === "line") void dispatch(setToolModePersistent("vibrato"));
             dispatch(setActiveVibratoPreset(next.id));
             void dispatch(persistUiSettings());
             return switchVibratoDragPreset(next, clientX, clientY);
         },
-        [dispatch, switchVibratoDragPreset],
+        [
+            dispatch,
+            toolMode,
+            vibratoPresetCycleList,
+            switchDragToLineTool,
+            switchVibratoDragPreset,
+        ],
     );
 
     /**
-     * 双键重置：把本次手势的某个量（或整个预设）拉回已知状态。
+     * 双键重置：把本次手势的某个量（或整个工具）拉回已知状态。
      *
-     * - `straight`：把当前预设换成「直线」，并清掉两条调整记录 —— 直接画一条直线，
-     *   不必先切走再切回。与其它预设切换一样**持久化**（它换的就是活动预设）。
+     * - `line`：切到直线工具并清掉两条调整记录 —— 直接画一条直线，不必先切走再切回。
      * - `depth` / `rate`：撤销本次手势对该量的微调（回到预设自带值）并清掉记录，
      *   于是下一次切换预设时该量会取新预设自己的值。
      */
@@ -1555,26 +1601,10 @@ export function usePianoRollInteractions(args: {
             const vib = vibratoStateRef.current;
             if (!vib) return false;
 
-            if (intent === "straight") {
-                const straight = findVibratoPreset(
-                    vibratoPresetList,
-                    builtinVibratoPresetId("straight"),
-                );
-                if (straight) {
-                    dispatch(setActiveVibratoPreset(straight.id));
-                    void dispatch(persistUiSettings());
-                    vib.working = createDragWorking(straight, editParam, currentParamRange);
-                    vib.seed = vibratoSeedForPreset(straight);
-                } else {
-                    // 找不到直线预设（理论上不会）：至少把深度归零并清记录。
-                    vib.working = {
-                        ...vib.working,
-                        depthCents: 0,
-                        depthAdjusted: false,
-                        rateAdjusted: false,
-                    };
-                }
-            } else if (intent === "depth") {
+            if (intent === "line") {
+                return switchDragToLineTool(clientX, clientY);
+            }
+            if (intent === "depth") {
                 vib.working = resetVibratoDragDepth(vib.working, editParam, currentParamRange);
             } else {
                 vib.working = resetVibratoDragRate(vib.working);
@@ -1586,10 +1616,9 @@ export function usePianoRollInteractions(args: {
             return true;
         },
         [
-            dispatch,
-            vibratoPresetList,
             editParam,
             currentParamRange,
+            switchDragToLineTool,
             repaintVibratoDragPreview,
             reportVibratoDragState,
         ],
@@ -2413,13 +2442,14 @@ export function usePianoRollInteractions(args: {
             if (switchDirection) {
                 e.preventDefault();
                 e.stopPropagation();
-                const nextId = cycleVibratoPresetId(
-                    vibratoPresetCycleList,
-                    vibratoStateRef.current.working.preset.id,
-                    switchDirection,
-                );
-                const next = findVibratoPreset(vibratoPresetCycleList, nextId);
-                if (next) switchVibratoPresetPersistently(next);
+                // 起点按**工具**推导：直线工具在序列里占着直线预设的位置，
+                // 拿活动预设当起点会让"从直线工具轮转一步"跳到别处。
+                const anchorId = vibratoCycleAnchorId({
+                    lineTool: toolMode === "line",
+                    currentPresetId: vibratoStateRef.current.working.preset.id,
+                });
+                const choice = cycleVibratoChoice(vibratoPresetCycleList, anchorId, switchDirection);
+                if (choice) applyVibratoChoice(choice);
                 return;
             }
 
@@ -2469,7 +2499,8 @@ export function usePianoRollInteractions(args: {
     }, [
         applyVibratoDragAdjustment,
         applyVibratoReset,
-        switchVibratoPresetPersistently,
+        applyVibratoChoice,
+        toolMode,
         vibratoDragAmplitudeIncreaseKb,
         vibratoDragAmplitudeDecreaseKb,
         vibratoDragFrequencyIncreaseKb,
@@ -2847,7 +2878,10 @@ export function usePianoRollInteractions(args: {
                 e.button === 0 &&
                 !stylusDown &&
                 paramValuePopupEnabled &&
-                (toolMode === "select" || toolMode === "draw" || toolMode === "line")
+                // 只有选择与自由绘制弹这个气泡。直线 / 颤音工具另有一套合并气泡
+                // （参数值 + 预设 / 深度 / 速率，见 `reportVibratoDragState`），
+                // 两者同时冒出来会互相遮挡。
+                (toolMode === "select" || toolMode === "draw")
             ) {
                 const rawPreviewValue = pointerValue(e.clientY);
                 const downPreviewValue =
@@ -5200,8 +5234,12 @@ export function usePianoRollInteractions(args: {
             const snapToggleHeld = isSnapToggleModifierHeld(e.nativeEvent);
             const value = isDrawMode ? snapDrawValue(rawValue, snapToggleHeld, frame) : rawValue;
 
+            // 直线工具就是"颤音工具 + 直线预设"，两者走**同一条**拖拽与调参路径
+            // —— 差别只有起手预设。把它们合成一个谓词，是为了让这条等价关系由
+            // 结构保证，而不是靠两处分支各自记得同步。
             const isLineTool = toolMode === "line";
-            const isVibratoTool = toolMode === "vibrato";
+            const usesVibratoPath = isLineTool || toolMode === "vibrato";
+            const dragPreset = isLineTool ? straightVibratoPreset : vibratoPreset;
 
             strokeRef.current = {
                 mode,
@@ -5209,7 +5247,7 @@ export function usePianoRollInteractions(args: {
                 param: editParam,
                 points: [{ frame, value }],
             };
-            if (!isVibratoTool) {
+            if (!usesVibratoPath) {
                 vibratoStateRef.current = null;
                 setVibratoDragCaptureActive(false);
             }
@@ -5233,7 +5271,7 @@ export function usePianoRollInteractions(args: {
             // 与 move 路径同一约定：live 覆盖不进 React，波形需显式重绘。
             requestWaveformRepaint();
 
-            if (isLineTool || isVibratoTool) {
+            if (usesVibratoPath) {
                 // Line tool: draw a straight line from start to current pointer
                 const startFrame = frame;
                 const startValue = value;
@@ -5244,10 +5282,11 @@ export function usePianoRollInteractions(args: {
                     dragDirection === "x-only" ? "x-only" : "free";
                 const canCycleDragDirection = e.button === 0;
 
-                if (isVibratoTool) {
-                    // 起手自活动预设：深度 / 速率都是预设自带值 —— 预设切换
-                    // 已持久化，不存在"上一次的调整"要续。
-                    const working = createDragWorking(vibratoPreset, editParam, currentParamRange);
+                {
+                    // 起手自起手预设：颤音工具取活动预设，直线工具固定取直线预设。
+                    // 深度 / 速率都是预设自带值 —— 预设切换已持久化，不存在
+                    // "上一次的调整"要续。
+                    const working = createDragWorking(dragPreset, editParam, currentParamRange);
                     // 先记下锚点：用户可能一起手就滚轮 / 按方向键调参，那时还没有
                     // 任何 pointermove，气泡得有个位置可放。
                     vibratoHudAnchorRef.current = { clientX: e.clientX, clientY: e.clientY };
@@ -5309,43 +5348,32 @@ export function usePianoRollInteractions(args: {
                         if (mode === "restore") {
                             applyDenseToLiveEdit(pv2, minF, null, minF, maxF, mode);
                         } else {
-                            if (isVibratoTool) {
-                                const vib = vibratoStateRef.current;
-                                if (vib) {
-                                    vib.currentFrame = f2;
-                                    vib.currentValue = v2;
-                                    vib.shiftHeld = moveSnapToggleHeld;
-                                    const built = buildVibratoDense(
-                                        startFrame,
-                                        startValue,
-                                        f2,
-                                        v2,
-                                        vib.working,
-                                        moveSnapToggleHeld,
-                                        vib.seed,
-                                    );
-                                    applyDenseToLiveEdit(
-                                        pv2,
-                                        built.minF,
-                                        built.dense,
-                                        built.minF,
-                                        built.maxF,
-                                        mode,
-                                    );
-                                    reportVibratoDragState(adjusted.clientX, adjusted.clientY);
-                                }
-                            } else {
-                                const len = maxF - minF + 1;
-                                const dense = new Array<number>(len);
-                                const denom = f2 - startFrame;
-                                for (let f = minF; f <= maxF; f++) {
-                                    const t = denom === 0 ? 1 : (f - startFrame) / denom;
-                                    const raw = startValue + (v2 - startValue) * t;
-                                    dense[f - minF] = isDrawMode
-                                        ? snapDrawValue(raw, moveSnapToggleHeld, f)
-                                        : raw;
-                                }
-                                applyDenseToLiveEdit(pv2, minF, dense, minF, maxF, mode);
+                            // 只有颤音内核一条路径：直线工具喂的是直线预设（深度 0），
+                            // 内核输出的就是两端之间的那条直线 —— 与"另写一条插值"相比
+                            // 少了第二份会与内核漂移的实现。
+                            const vib = vibratoStateRef.current;
+                            if (vib) {
+                                vib.currentFrame = f2;
+                                vib.currentValue = v2;
+                                vib.shiftHeld = moveSnapToggleHeld;
+                                const built = buildVibratoDense(
+                                    startFrame,
+                                    startValue,
+                                    f2,
+                                    v2,
+                                    vib.working,
+                                    moveSnapToggleHeld,
+                                    vib.seed,
+                                );
+                                applyDenseToLiveEdit(
+                                    pv2,
+                                    built.minF,
+                                    built.dense,
+                                    built.minF,
+                                    built.maxF,
+                                    mode,
+                                );
+                                reportVibratoDragState(adjusted.clientX, adjusted.clientY);
                             }
                         }
                     }
@@ -5418,7 +5446,7 @@ export function usePianoRollInteractions(args: {
                         onPitchSnapGestureActiveChange?.(false);
                     }
                     void (async () => {
-                        if (isVibratoTool && vib && st.mode === "draw") {
+                        if (usesVibratoPath && vib && st.mode === "draw") {
                             const built = buildVibratoDense(
                                 vib.startFrame,
                                 vib.startValue,
@@ -5484,7 +5512,8 @@ export function usePianoRollInteractions(args: {
                     if (!canCycleDragDirection) return;
                     currentDragDir = currentDragDir === "free" ? "x-only" : "free";
                     if (onCycleDragDirection) {
-                        onCycleDragDirection(isVibratoTool ? "vibrato" : "draw");
+                        // 直线与颤音共用同一份拖动方向，因此两者都归到 `"vibrato"`。
+                        onCycleDragDirection(usesVibratoPath ? "vibrato" : "draw");
                     }
                 };
                 const onMouseDownDuringDraw = (ev: globalThis.MouseEvent) => {
@@ -5499,8 +5528,8 @@ export function usePianoRollInteractions(args: {
                     // 【为什么判 `buttons` 位掩码而不是 `button`】`button` 是
                     // 事件里"哪个键变了"（侧键是 3 / 4），此时左键仍在按住，因此
                     // 用位掩码确认"这次确实是拖拽中按下"（左键位 1 仍在）。
-                    if (isVibratoTool) {
-                        // 两个侧键**同时**按下 = 把当前预设重置到直线（并清掉两条
+                    if (usesVibratoPath) {
+                        // 两个侧键**同时**按下 = 切到直线工具（并清掉两条
                         // 调整记录）。`buttons` 里两位都在，说明两次按下有重叠。
                         const bothSideButtons =
                             (ev.buttons & SIDE_BUTTON_BACK_MASK) !== 0 &&
@@ -5511,20 +5540,23 @@ export function usePianoRollInteractions(args: {
                             ev.preventDefault();
                             ev.stopPropagation();
                             if (bothSideButtons) {
-                                applyVibratoReset("straight", ev.clientX, ev.clientY);
+                                applyVibratoReset("line", ev.clientX, ev.clientY);
                                 return;
                             }
                             // 走到这里 `direction` 必非 null（仅 bothSideButtons 分支
                             // 才可能两者皆空，而那已在上面返回）。
                             if (direction === null) return;
-                            const nextId = cycleVibratoPresetId(
+                            const choice = cycleVibratoChoice(
                                 vibratoPresetCycleList,
-                                vibratoStateRef.current?.working.preset.id ?? null,
+                                vibratoCycleAnchorId({
+                                    lineTool: toolMode === "line",
+                                    currentPresetId:
+                                        vibratoStateRef.current?.working.preset.id ?? null,
+                                }),
                                 direction,
                             );
-                            const next = findVibratoPreset(vibratoPresetCycleList, nextId);
-                            if (next) {
-                                switchVibratoPresetPersistently(next, ev.clientX, ev.clientY);
+                            if (choice) {
+                                applyVibratoChoice(choice, ev.clientX, ev.clientY);
                             }
                             return;
                         }
@@ -5797,6 +5829,7 @@ export function usePianoRollInteractions(args: {
             rootTrackId,
             editParam,
             toolMode,
+            straightVibratoPreset,
             scrollerRef,
             canvasRef,
             viewSizeRef,
@@ -5879,7 +5912,7 @@ export function usePianoRollInteractions(args: {
             // 深度按当前参数的满摆幅换算与钳制（`createDragWorking`），因此起手
             // 也依赖参数与它的量程。
             currentParamRange,
-            switchVibratoPresetPersistently,
+            applyVibratoChoice,
             applyVibratoReset,
             vibratoFrequencyAdjustKb,
             reportVibratoDragState,

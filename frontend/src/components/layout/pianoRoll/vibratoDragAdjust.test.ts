@@ -480,6 +480,45 @@ describe("resolveVibratoPresetSwitch", () => {
 });
 
 describe("buildDragVibratoCurve", () => {
+    /*
+     * 直线工具走的是**同一个**内核，只是喂进直线预设（深度 0）。这条断言把"两者
+     * 等价"钉在数值上：内核在直线预设下的输出必须逐帧等于两端之间的线性插值 ——
+     * 否则"直线工具 = 颤音工具 + 直线预设"就只是口号。
+     */
+    test("直线预设下的输出逐帧等于线性插值（直线工具与颤音工具同路）", () => {
+        const straight = sanitizeVibratoPreset({
+            id: "builtin.straight",
+            builtin: true,
+            depthCents: 0,
+            rateHz: 5.5,
+            attackMs: 0,
+            releaseMs: 0,
+            irregularity: 0,
+        });
+        const working = createDragWorking(straight, PITCH);
+        const startFrame = 7;
+        const endFrame = 63;
+        const startValue = 60.25;
+        const endValue = 61.75;
+        const built = buildDragVibratoCurve({
+            working,
+            startFrame,
+            startValue,
+            endFrame,
+            endValue,
+            param: PITCH,
+            framePeriodMs: 5,
+        });
+        expect(built.minF).toBe(startFrame);
+        expect(built.maxF).toBe(endFrame);
+        const denom = endFrame - startFrame;
+        built.dense.forEach((value, index) => {
+            const frame = built.minF + index;
+            const expected = startValue + ((endValue - startValue) * (frame - startFrame)) / denom;
+            expect(value).toBeCloseTo(expected, 10);
+        });
+    });
+
     test("工作副本的深度 / 速率覆盖预设自身的值", () => {
         const p = preset({ depthCents: 100, rateHz: 5, attackMs: 0, releaseMs: 0 });
         const working = {

@@ -37,7 +37,7 @@ import {
     setScaleHighlightMode,
     toggleLockParamLines,
     cycleDragDirection,
-    setToolMode,
+    setToolModePersistent,
     persistUiSettings,
     setActiveVibratoPreset,
     toggleParamAxisUnit,
@@ -243,7 +243,9 @@ import {
     resolveActiveVibratoPreset,
     resolveVibratoPresets,
     findVibratoPreset,
+    systemVibratoPreset,
 } from "../../features/vibrato/vibratoPresetList";
+import { STRAIGHT_VIBRATO_PRESET_ID } from "../../features/vibrato/systemPresets";
 import {
     depthForParam,
     depthUnitLabelKey,
@@ -305,7 +307,7 @@ import { settingsApi } from "../../services/api/settings";
 import { EditContextMenu } from "../editDialogs/EditContextMenu";
 import { resolveScrollableProjectSec } from "../../features/session/projectBoundary";
 import { parseCustomScaleToken } from "../../utils/scaleSelection";
-import { AppAnchoredMenu, AppIconButton, AppSelect } from "../../ui";
+import { AppAnchoredMenu, AppIconButton, AppSelect, AppSubMenu } from "../../ui";
 import {
     centerFromVerticalScrollTop,
     verticalScrollTopFromCenter,
@@ -1060,6 +1062,19 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         [resolvedVibratoPresets, activeVibratoPresetId],
     );
     /**
+     * 直线工具的固定起手预设。
+     *
+     * 从全量列表里找，**找不到就用出厂那份兜底**（`systemVibratoPreset` 自带构造）：
+     * 直线工具不依赖用户是否停用了直线预设 —— 停用只影响"怎么挑预设"，不该让
+     * 一个工具失去它唯一的工作方式。
+     */
+    const straightVibratoPreset = useMemo(
+        () =>
+            findVibratoPreset(resolvedVibratoPresets, STRAIGHT_VIBRATO_PRESET_ID) ??
+            systemVibratoPreset("straight"),
+        [resolvedVibratoPresets],
+    );
+    /**
      * 拖拽 HUD 的内容。`null` = 没在拖。
      *
      * 用一个本地 state 而不是 ref：HUD 要跟着切换预设 / 滚轮调参实时刷新。
@@ -1116,23 +1131,22 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         [],
     );
 
-    /** 工具栏的颤音预设下拉是否展开。 */
-    const [vibratoPresetMenuOpen, setVibratoPresetMenuOpen] = useState(false);
     /**
-     * 颤音预设下拉的最大高度。
+     * 工具菜单里「颤音预设」二级面板中**预设列表**的最大高度。
      *
-     * 按锚点在**本面板内**的位置算（见 `resolveMenuMaxHeight`）：面板可停靠在窗口
-     * 任意高度，菜单只在面板内向下铺开，既不会伸出面板、也不会向上翻转盖住工具栏。
+     * 预设列表从独立的下拉搬进子菜单后，高度仍需按锚点在**本面板内**的位置算
+     * （见 `resolveMenuMaxHeight`）：面板可停靠在窗口任意高度，按视口取上限会让
+     * 列表伸出面板之外。锚点用绘制类型工具按钮（预设入口就在它的菜单里）。
      */
-    const [vibratoPresetMenuMaxHeight, setVibratoPresetMenuMaxHeight] = useState(320);
-    /** 颤音预设下拉的**锚点**（触发按钮的外壳）。 */
-    const vibratoPresetMenuAnchorRef = useRef<HTMLDivElement | null>(null);
-    /** 颤音预设下拉的**面板**（挂在 `document.body` 下，见上面 draw 工具处的说明）。 */
-    const vibratoPresetPanelRef = useRef<HTMLDivElement | null>(null);
+    const [presetFlyoutMaxHeight, setPresetFlyoutMaxHeight] = useState(320);
     // 拖动方向循环切换键：拖拽进行中按下可即时切换本次拖拽方向（触控板替代右键）。
     const cycleDragDirectionKb = useAppSelector((state) =>
         selectKeybindings(state, "pianoRoll.cycleDragDirection"),
     );
+    // 工具菜单里三项各自的快捷键：把绑定显示在菜单上，用户不必去设置里查。
+    const drawToolKb = useAppSelector((state) => selectKeybindings(state, "mode.drawTool"));
+    const lineToolKb = useAppSelector((state) => selectKeybindings(state, "mode.lineTool"));
+    const vibratoToolKb = useAppSelector((state) => selectKeybindings(state, "mode.vibratoTool"));
     const mergedKeybindings = useAppSelector(selectMergedKeybindings);
     // 是否按住切换吸附的修饰键（临时切换吸附时用于高亮显示）
     const [snapToggleHeld, setSnapToggleHeld] = useState(false);
@@ -1333,15 +1347,23 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         [editParam, editParamAxisUnit],
     );
 
-    const currentDrawTool = s.drawToolMode === "line" ? "vibrato" : s.drawToolMode;
+    const currentDrawTool = s.drawToolMode;
     const drawToolButtonTitle =
-        currentDrawTool === "vibrato" ? tf("vibrato_draw_tool") : tf("draw_tool");
+        currentDrawTool === "vibrato"
+            ? // 颤音工具下把当前预设一并报出来：预设按钮已经并进右键菜单，
+                // 工具按钮的 tooltip 是"接下来会画出什么"的最后一块可扫读信息。
+              `${tf("vibrato_draw_tool")}: ${vibratoPresetLabel(activeVibratoPreset, tf)}`
+            : currentDrawTool === "line"
+              ? tf("line_draw_tool")
+              : tf("draw_tool");
     const activeDragDirection =
         s.toolMode === "select"
             ? s.selectDragDirection
             : currentDrawTool === "draw"
               ? s.drawDragDirection
               : s.lineVibratoDragDirection;
+    // 直线与颤音共用同一份拖动方向（`lineVibratoDragDirection`）—— 它们是同一个
+    // "起点 → 终点"手势，拆成两份只会让"在直线下调过、切到颤音又不算"成为新的困惑。
     const activeDragDirectionTool =
         s.toolMode === "select"
             ? ("select" as const)
@@ -1350,21 +1372,18 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
               : ("vibrato" as const);
 
     useEffect(() => {
-        if (!drawToolMenuOpen && !pitchSnapMenuOpen && !vibratoPresetMenuOpen) return;
+        if (!drawToolMenuOpen && !pitchSnapMenuOpen) return;
         const onPointerDown = (e: PointerEvent) => {
             const target = e.target as Node | null;
             if (drawToolMenuRef.current?.contains(target)) return;
             if (pitchSnapMenuRef.current?.contains(target)) return;
-            if (vibratoPresetPanelRef.current?.contains(target)) return;
             setDrawToolMenuOpen(false);
             setPitchSnapMenuOpen(false);
-            setVibratoPresetMenuOpen(false);
         };
         const onKeyDown = (e: KeyboardEvent) => {
             if (e.key === "Escape") {
                 setDrawToolMenuOpen(false);
                 setPitchSnapMenuOpen(false);
-                setVibratoPresetMenuOpen(false);
             }
         };
         window.addEventListener("pointerdown", onPointerDown, true);
@@ -1373,11 +1392,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             window.removeEventListener("pointerdown", onPointerDown, true);
             window.removeEventListener("keydown", onKeyDown, true);
         };
-    }, [drawToolMenuOpen, pitchSnapMenuOpen, vibratoPresetMenuOpen]);
+    }, [drawToolMenuOpen, pitchSnapMenuOpen]);
 
-    /** 量一次颤音预设下拉的最大高度（锚点 / 面板缺失时返回 null）。 */
-    const measureVibratoPresetMenuMaxHeight = useCallback((): number | null => {
-        const anchor = vibratoPresetMenuAnchorRef.current;
+    /** 量一次预设列表的最大高度（锚点 / 面板缺失时返回 null）。 */
+    const measurePresetFlyoutMaxHeight = useCallback((): number | null => {
+        const anchor = drawToolMenuAnchorRef.current;
         const container = paramEditorRef.current;
         if (!anchor || !container) return null;
         const anchorRect = anchor.getBoundingClientRect();
@@ -1389,21 +1408,15 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         });
     }, []);
 
-    /** 展开颤音预设下拉：先算好可用高度再展开，避免菜单伸出面板。 */
-    const openVibratoPresetMenu = useCallback(() => {
-        const maxHeight = measureVibratoPresetMenuMaxHeight();
-        if (maxHeight != null) setVibratoPresetMenuMaxHeight(maxHeight);
-        setVibratoPresetMenuOpen(true);
-    }, [measureVibratoPresetMenuMaxHeight]);
-
-    // 菜单开着时窗口缩放、或面板被拖动分隔条改变大小，都要重算高度。setState 放在
-    // 回调里（而不是 effect 体内同步调用），避免级联渲染。
+    // 工具菜单开着时窗口缩放、或面板被拖动分隔条改变大小，都要重算预设列表的
+    // 可用高度。setState 放在回调里（而不是 effect 体内同步调用），避免级联渲染。
     useEffect(() => {
-        if (!vibratoPresetMenuOpen) return;
+        if (!drawToolMenuOpen) return;
         const update = () => {
-            const maxHeight = measureVibratoPresetMenuMaxHeight();
-            if (maxHeight != null) setVibratoPresetMenuMaxHeight(maxHeight);
+            const maxHeight = measurePresetFlyoutMaxHeight();
+            if (maxHeight != null) setPresetFlyoutMaxHeight(maxHeight);
         };
+        update();
         window.addEventListener("resize", update);
         const observer = new ResizeObserver(update);
         if (paramEditorRef.current) observer.observe(paramEditorRef.current);
@@ -1411,7 +1424,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             window.removeEventListener("resize", update);
             observer.disconnect();
         };
-    }, [vibratoPresetMenuOpen, measureVibratoPresetMenuMaxHeight]);
+    }, [drawToolMenuOpen, measurePresetFlyoutMaxHeight]);
 
     /** 打开“导入到参数编辑器”的 MIDI 导入对话框（编辑器按钮 / 拖放到编辑器内共用）。
      *  midiPath 为 null 时由用户在文件选择器中挑选文件；非 null 时直接导入该文件。 */
@@ -5403,7 +5416,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         vibratoPresetPrevKb,
         vibratoPresetNextKb,
         vibratoPreset: activeVibratoPreset,
-        vibratoPresetList: resolvedVibratoPresets,
+        straightVibratoPreset,
         vibratoPresetCycleList: enabledVibratoPresetList,
         onVibratoDragStateChange: setVibratoDragHud,
         onVibratoDragEnd: useCallback(() => {
@@ -7532,6 +7545,29 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         </svg>
     );
 
+    /**
+     * 直线工具的图标：一条斜线。
+     *
+     * 与颤音工具的波形图区分开 —— 两者若共用图标，工具栏上就只剩 tooltip 能说明
+     * "现在按下去画的是直线还是颤音"，而 tooltip 需要悬停才看得见。
+     */
+    const lineToolIcon = (
+        <svg
+            width="15"
+            height="15"
+            viewBox="0 0 15 15"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+        >
+            <path
+                d="M2 12L13 3"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+            />
+        </svg>
+    );
+
     const pitchSnapSemitoneIcon = (
         <svg
             width="15"
@@ -7564,7 +7600,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         </svg>
     );
 
-    const currentDrawToolIcon = currentDrawTool === "vibrato" ? vibratoToolIcon : <Pencil1Icon />;
+    const currentDrawToolIcon =
+        currentDrawTool === "vibrato"
+            ? vibratoToolIcon
+            : currentDrawTool === "line"
+              ? lineToolIcon
+              : <Pencil1Icon />;
 
     // 统一刻度源：标尺刻度与背景网格线共用，与时间线侧同一实现，
     // 保证两个面板的网格/标尺位置严格同源于 axis 投影。
@@ -7700,7 +7741,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             emphasis="accent"
                             tooltip={t("common_select")}
                             tabIndex={-1}
-                            onClick={() => dispatch(setToolMode("select"))}
+                            onClick={() => void dispatch(setToolModePersistent("select"))}
                             icon={<CursorArrowIcon />}
                         />
                         {/* 锚点外壳：菜单本身挂到 `document.body`（见 AppAnchoredMenu），
@@ -7712,7 +7753,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 emphasis="accent"
                                 tooltip={drawToolButtonTitle}
                                 tabIndex={-1}
-                                onClick={() => dispatch(setToolMode(currentDrawTool))}
+                                onClick={() =>
+                                    void dispatch(setToolModePersistent(currentDrawTool))
+                                }
                                 onContextMenu={(e) => {
                                     e.preventDefault();
                                     setDrawToolMenuOpen(true);
@@ -7764,17 +7807,32 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 open={drawToolMenuOpen}
                                 anchorRef={drawToolMenuAnchorRef}
                                 menuRef={drawToolMenuRef}
+                                // 菜单里挂着 `AppSubMenu` 的绝对定位子面板：壳一旦
+                                // `overflow-y: auto` 就会把它裁掉（与 `ClipContextMenu`
+                                // 同一理由，见 `.hs-menu--submenu` 的说明）。子面板自己滚动。
+                                className="hs-menu--no-scroll"
                             >
+                                {/* 三种绘制工具并列。直线与颤音在这里是**平级**的两项
+                                    —— 它们在类型与实现上也是两个工具，只是共用一条
+                                    "起点 → 终点"的拖拽路径。 */}
                                 {[
                                     {
                                         mode: "draw" as const,
                                         label: tf("draw_tool"),
                                         icon: <Pencil1Icon />,
+                                        shortcut: drawToolKb,
+                                    },
+                                    {
+                                        mode: "line" as const,
+                                        label: tf("line_draw_tool"),
+                                        icon: lineToolIcon,
+                                        shortcut: lineToolKb,
                                     },
                                     {
                                         mode: "vibrato" as const,
                                         label: tf("vibrato_draw_tool"),
                                         icon: vibratoToolIcon,
+                                        shortcut: vibratoToolKb,
                                     },
                                 ].map((item) => {
                                     const active = currentDrawTool === item.mode;
@@ -7784,7 +7842,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             type="button"
                                             className="hs-menu__item"
                                             onClick={() => {
-                                                dispatch(setToolMode(item.mode));
+                                                void dispatch(setToolModePersistent(item.mode));
                                                 setDrawToolMenuOpen(false);
                                             }}
                                             onPointerDown={(e) => e.stopPropagation()}
@@ -7801,66 +7859,39 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                         <CheckIcon />
                                                     </span>
                                                 ) : null}
+                                                {isNoneBindingList(item.shortcut) ? null : (
+                                                    <span>
+                                                        {formatKeybindingList(item.shortcut, "")}
+                                                    </span>
+                                                )}
                                             </span>
                                         </button>
                                     );
                                 })}
-                            </AppAnchoredMenu>
-                        </Box>
 
-                        {/* 颤音预设选择器：紧贴颤音工具图标右侧 —— 同属"绘制工具"这一组，
-                            因此与它之间不放分隔线。样式按周围的图标按钮来做
-                            （15×15 波形图标 + tooltip），不再占一截文字宽度。 */}
-                        {activeDragDirectionTool === "vibrato" && (
-                            <Box ref={vibratoPresetMenuAnchorRef} data-hs-context-menu>
-                                <AppIconButton
-                                    active={vibratoPresetMenuOpen}
-                                    tooltip={`${tf("vibrato_toolbar_label")}: ${vibratoPresetLabel(activeVibratoPreset, tf)}`}
-                                    aria-haspopup="menu"
-                                    aria-expanded={vibratoPresetMenuOpen}
-                                    tabIndex={-1}
-                                    onClick={() =>
-                                        vibratoPresetMenuOpen
-                                            ? setVibratoPresetMenuOpen(false)
-                                            : openVibratoPresetMenu()
-                                    }
-                                    // 右键一步直达管理器：左键的下拉是"快速切换"，
-                                    // 右键的"进设置"与其它工具按钮的右键习惯一致，
-                                    // 不必先开下拉再点其中的「管理预设…」。
-                                    onContextMenu={(event) => {
-                                        event.preventDefault();
-                                        setVibratoPresetMenuOpen(false);
-                                        openVibratoDialog("manage");
-                                    }}
+                                <Box className="hs-menu__separator shrink-0" />
+
+                                {/* 颤音工具的二级菜单 = 预设列表 + 管理器入口。
+                                    它紧跟在「颤音工具」下面：预设属于这个工具，摆到别处
+                                    会让"换一个颤音"多出一个说不清归属的入口。
+
+                                    行上带活动预设的波形缩略图与名字 —— 预设按钮从工具栏
+                                    撤掉之后，"现在用的是哪个预设"就靠这一行扫读。 */}
+                                <AppSubMenu
+                                    label={tf("vibrato_toolbar_label")}
+                                    badge={vibratoPresetLabel(activeVibratoPreset, tf)}
                                     icon={
-                                        // 图标即**活动预设的波形缩略图**：切预设即换图，
-                                        // 看一眼工具栏就知道接下来画出来的会是什么。
                                         <VibratoPresetGlyph
                                             preset={activeVibratoPreset}
                                             width={15}
                                             height={15}
                                         />
                                     }
-                                />
-                                <AppAnchoredMenu
-                                    open={vibratoPresetMenuOpen}
-                                    anchorRef={vibratoPresetMenuAnchorRef}
-                                    menuRef={vibratoPresetPanelRef}
-                                    // 永远向下展开：参数编辑器是停靠窗口，上方没有
-                                    // 展示区，翻上去只会盖住自己的工具栏。
-                                    // `--no-scroll`：滚动由下面的 `ScrollArea`
-                                    // 负责（页脚要钉住），壳不接管。
-                                    //
-                                    // 高度**不用** `--qt-menu-max-h`（60vh）：参数
-                                    // 编辑器是停靠面板，可能只有 200px 高，按视口取
-                                    // 上限会让菜单伸出面板之外。这里按锚点在面板内的
-                                    // 位置算（`resolveMenuMaxHeight`）。
-                                    className="hs-menu--no-scroll flex flex-col"
-                                    style={{ maxHeight: vibratoPresetMenuMaxHeight }}
+                                    panelClassName="hs-menu--no-scroll flex flex-col"
                                 >
                                     <ScrollArea
                                         className="hs-scroll-area min-h-0"
-                                        style={{ flex: "1 1 auto" }}
+                                        style={{ flex: "1 1 auto", maxHeight: presetFlyoutMaxHeight }}
                                         scrollbars="vertical"
                                         type="auto"
                                     >
@@ -7870,9 +7901,13 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                 type="button"
                                                 className="hs-menu__item"
                                                 onClick={() => {
+                                                    // 选预设 = 用颤音工具 + 这个预设。直线
+                                                    // 预设也照常列出：选中它等于切到直线工具
+                                                    // （两者是同一件事，见 `VibratoChoice`）。
+                                                    void dispatch(setToolModePersistent("vibrato"));
                                                     dispatch(setActiveVibratoPreset(preset.id));
                                                     void dispatch(persistUiSettings());
-                                                    setVibratoPresetMenuOpen(false);
+                                                    setDrawToolMenuOpen(false);
                                                 }}
                                                 onPointerDown={(e) => e.stopPropagation()}
                                             >
@@ -7901,7 +7936,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                         type="button"
                                         className="hs-menu__item shrink-0"
                                         onClick={() => {
-                                            setVibratoPresetMenuOpen(false);
+                                            setDrawToolMenuOpen(false);
                                             openVibratoDialog("manage");
                                         }}
                                         onPointerDown={(e) => e.stopPropagation()}
@@ -7910,9 +7945,9 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             {tf("vibrato_manager_open")}
                                         </span>
                                     </button>
-                                </AppAnchoredMenu>
-                            </Box>
-                        )}
+                                </AppSubMenu>
+                            </AppAnchoredMenu>
+                        </Box>
                         <Box
                             style={{
                                 // 竖分隔线：宽度取整数个物理像素，任意缩放下粗细恒定

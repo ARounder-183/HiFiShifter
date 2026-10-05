@@ -416,7 +416,23 @@ export interface AppSubMenuProps {
     label: ReactNode;
     /** 触发项右侧的计数角标（如 Take 数量）。 */
     badge?: string;
+    /**
+     * 触发项左侧图标。
+     *
+     * 【为什么与 `AppContextMenu` 的 `icon` 同款】子菜单的触发项本身就是一级菜单
+     * 里的一行，图标列必须和它的兄弟行对齐 —— 否则"有子菜单的那一行"文字会往左
+     * 多出一个列宽（工具栏工具菜单里三种工具 + 预设入口并列，一眼就能看出错位）。
+     */
+    icon?: ReactNode;
     disabled?: boolean;
+    /**
+     * 子面板的追加类。
+     *
+     * 【为什么需要】壳默认 `max-height: var(--qt-menu-max-h)` + `overflow-y: auto`。
+     * 子面板里若要放**自带滚动**的内容（长列表 + 钉住的页脚），壳再滚一次就是
+     * 双滚动条；此时需要 `hs-menu--no-scroll` 让壳放手，由内容自己约束高度。
+     */
+    panelClassName?: string;
     /**
      * 子面板内容。
      *
@@ -438,7 +454,14 @@ export interface AppSubMenuProps {
  * 【导航】`useMenuKeyboard` 按 `closest('[role="menu"]')` 分层，因此外层菜单与
  * 子面板各按各的方向键走，互不串门。
  */
-export function AppSubMenu({ label, badge, disabled = false, children }: AppSubMenuProps) {
+export function AppSubMenu({
+    label,
+    badge,
+    icon,
+    disabled = false,
+    panelClassName,
+    children,
+}: AppSubMenuProps) {
     const [open, setOpen] = useState(false);
     const panelRef = useRef<HTMLDivElement>(null);
     // 子面板是**条件渲染**的：挂载瞬间 `panelRef.current` 还是 null。把 `open`
@@ -504,6 +527,7 @@ export function AppSubMenu({ label, badge, disabled = false, children }: AppSubM
                 aria-expanded={open}
             >
                 <span className="flex min-w-0 items-center gap-2">
+                    {icon ? <span className="hs-menu__icon">{icon}</span> : null}
                     <span className="hs-menu__label-text">{label}</span>
                     {badge ? (
                         <span className="text-qt-micro leading-none rounded bg-black/20 px-1 py-0.5 opacity-70">
@@ -511,22 +535,24 @@ export function AppSubMenu({ label, badge, disabled = false, children }: AppSubM
                         </span>
                     ) : null}
                 </span>
-                <svg
-                    width="12"
-                    height="12"
-                    viewBox="0 0 15 15"
-                    fill="none"
-                    aria-hidden="true"
-                    className="shrink-0 opacity-50"
-                >
-                    <path
-                        d="M6 3.5L10 7.5L6 11.5"
-                        stroke="currentColor"
-                        strokeWidth="1.2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                    />
-                </svg>
+                <span className="hs-menu__trail">
+                    <svg
+                        width="12"
+                        height="12"
+                        viewBox="0 0 15 15"
+                        fill="none"
+                        aria-hidden="true"
+                        className="shrink-0 opacity-50"
+                    >
+                        <path
+                            d="M6 3.5L10 7.5L6 11.5"
+                            stroke="currentColor"
+                            strokeWidth="1.2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        />
+                    </svg>
+                </span>
             </button>
             {open && !disabled ? (
                 <div
@@ -536,7 +562,7 @@ export function AppSubMenu({ label, badge, disabled = false, children }: AppSubM
                     // 子面板与主菜单**共用同一个表面**；定位由上面的 layout effect
                     // 逐条覆盖（翻左 / 对齐 / 收宽），因此只借 `--submenu` 的
                     // `position: absolute`（它是唯一必须留在父壳里的面板）。
-                    className="hs-menu hs-menu--submenu"
+                    className={cx("hs-menu hs-menu--submenu", panelClassName)}
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => e.stopPropagation()}
                 >

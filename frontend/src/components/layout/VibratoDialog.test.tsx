@@ -1494,17 +1494,18 @@ test("复制为自定义：按显示名预填编号，且不会叠成「2 2」",
     await act(async () => {
         duplicateButton()!.click();
     });
+    // 窗口打开时编辑的是**活动预设**，而出厂默认是「自然」。
     expect(store.getState().session.vibratoPresets.map((preset) => preset.name)).toEqual([
-        "Straight 2",
+        "Natural 2",
     ]);
 
-    // 第二次复制的是刚生成的 "Straight 2"：剥掉编号后应得到 "Straight 3"。
+    // 第二次复制的是刚生成的 "Natural 2"：剥掉编号后应得到 "Natural 3"。
     await act(async () => {
         duplicateButton()!.click();
     });
     expect(store.getState().session.vibratoPresets.map((preset) => preset.name)).toEqual([
-        "Straight 2",
-        "Straight 3",
+        "Natural 2",
+        "Natural 3",
     ]);
 });
 
@@ -1568,8 +1569,10 @@ test("偏斜滑块：参数式形状可调，进入手绘后禁用", async () =>
  * 直线预设的读数应为 "±0 分"，而不是被保底的 "±1"。
  */
 test("完全平直的预设读数显示 ±0", async () => {
-    // 默认活动预设就是「直线」（深度 0）。
-    await mountDialog();
+    // 出厂默认是「自然」（深度 30 分），所以要显式切到深度为 0 的「直线」预设。
+    await mountDialog((store) => {
+        store.dispatch(setActiveVibratoPreset("builtin.straight"));
+    });
     const text = document.body.textContent ?? "";
     expect(text).toContain("±0 cents");
     expect(text).not.toContain("±1 cents");
