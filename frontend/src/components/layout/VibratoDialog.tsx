@@ -264,7 +264,7 @@ export function VibratoDialog({
     applyTarget,
 }: Props) {
     const dispatch = useAppDispatch();
-    const { t, tVars, plural } = useI18n();
+    const { t, plural } = useI18n();
     // 只选取本组件实际消费的字段子集并以 shallowEqual 比较：播放期间 playheadSec
     // 每 ~33ms 变一次、session 对象引用随之失效，直接订阅 state.session 会让整个
     // 对话框（含预设列表 / 周期编辑器 / 预览画布）以 ≥30Hz 空转重渲。
@@ -310,6 +310,19 @@ export function VibratoDialog({
      * 同一种情况只尝试一次；用户腾出空位（条数变化）后自动重试。
      */
     const promoteAttemptRef = useRef<string | null>(null);
+    /**
+     * 刚创建的自定义预设 id：等它渲染进列表后把列表滚到最底部（见下面的 effect）。
+     *
+     * 【为什么要滚】新预设一律追加在用户段末尾（`upsertVibratoPreset` 对未知 id 是
+     * `push`），列表一长它就落在视野之外 —— 用户看不到自己刚做出来的东西。新建 /
+     * 复制为自定义 / 从选区提取 / 导入 / 编辑系统预设这五条路都要走一遍。
+     */
+    const pendingScrollPresetRef = useRef<string | null>(null);
+
+    /** 记下"这条刚做出来的预设，等它进列表后滚过去"（见上面的 ref）。 */
+    function markCreatedPresetForScroll(presetId: string) {
+        pendingScrollPresetRef.current = presetId;
+    }
     /**
      * 手绘周期编辑器的展开状态。
      *
@@ -929,6 +942,7 @@ export function VibratoDialog({
         persistPreset(copy);
         selectPreset(copy);
         activatePreset(copy);
+        markCreatedPresetForScroll(copy.id);
     }
 
     /**
@@ -992,14 +1006,26 @@ export function VibratoDialog({
         const copy = saveAsCustom(builtinEditPending);
         if (!copy) return;
         setDraft(copy);
-        // 明说一句：列表里新出现的那一行很容易被正在调参数的注意力漏掉。
-        setIoNotice({
-            text: tVars("vibrato_manager_promoted_copy", {
-                name: vibratoPresetLabel(copy, t),
-            }),
-            danger: false,
-        });
-    }, [builtinEditPending, resolved.user.length, saveAsCustom, t, tVars]);
+        markCreatedPresetForScroll(copy.id);
+    }, [builtinEditPending, resolved.user.length, saveAsCustom]);
+
+    /**
+     * 新预设落进列表后，把预设列表滚到最底部 —— 它就在那儿，滚过去用户才看得见。
+     *
+     * 【为什么单独一个 effect、而不是在创建处顺手滚】创建那一刻只是 dispatch，列表
+     * 还没重新渲染，`scrollHeight` 里还没有新行；等 `draft` 切到新预设上的这次提交，
+     * 行才真的在 DOM 里。滚的是 Radix 的滚动视口（`closest` 从用户段往上找），
+     * 不是列表容器本身。
+     */
+    useEffect(() => {
+        const id = pendingScrollPresetRef.current;
+        if (!id || draft?.id !== id) return;
+        pendingScrollPresetRef.current = null;
+        const viewport = userListRef.current?.closest<HTMLElement>(
+            "[data-radix-scroll-area-viewport]",
+        );
+        if (viewport) viewport.scrollTop = viewport.scrollHeight;
+    }, [draft]);
 
     /**
      * 「应用」：把当前草稿交给编辑管线，然后**关窗**。
@@ -1058,6 +1084,7 @@ export function VibratoDialog({
         setHandDraw(null);
         setDraft(extracted);
         fitPreviewAxis(extracted);
+        markCreatedPresetForScroll(extracted.id);
     }
 
     function handleDuplicate() {
@@ -1135,6 +1162,7 @@ export function VibratoDialog({
         if (last) {
             dispatch(setActiveVibratoPreset(last.id));
             setDraft(last);
+            markCreatedPresetForScroll(last.id);
         }
         void dispatch(persistUiSettings());
         setIoNotice({
@@ -1152,6 +1180,7 @@ export function VibratoDialog({
         });
         persistPreset(created);
         selectPreset(created);
+        markCreatedPresetForScroll(created.id);
     }
 
     function handleDelete() {

@@ -156,6 +156,28 @@ async function typeNumber(ariaLabel: string, value: number): Promise<void> {
     });
 }
 
+/** 桩出来的列表高度（jsdom 没有排版，`scrollHeight` 恒为 0，无从断言"滚到底"）。 */
+const SCROLL_HEIGHT = 4321;
+
+/**
+ * 让预设列表的滚动视口有一个可观测的高度，并把它交出来。
+ *
+ * 【为什么要桩】jsdom 不做排版，`scrollHeight` 永远是 0，"滚到底"就成了不可观测的
+ * 动作。从某一行的 `closest` 找到视口（对话框里不止一个 `ScrollArea`），而不是取
+ * 第一个 —— 编辑器那一列也有一个。
+ */
+function presetListViewport(): HTMLElement {
+    const row = document.querySelector('[data-preset-row="builtin.natural"]');
+    const viewport = row?.closest<HTMLElement>("[data-radix-scroll-area-viewport]");
+    expect(viewport, "预设列表应有滚动视口").toBeTruthy();
+    Object.defineProperty(viewport, "scrollHeight", {
+        value: SCROLL_HEIGHT,
+        configurable: true,
+    });
+    viewport!.scrollTop = 0;
+    return viewport!;
+}
+
 /** 库里当前的自定义预设（不含系统预设 —— 它们不在 store 里）。 */
 function userPresets(store: Awaited<ReturnType<typeof mountDialog>>) {
     return store.getState().session.vibratoPresets;
@@ -1975,6 +1997,7 @@ test("编辑系统预设：立刻生成自定义副本并跳过去，且不打�
     // 出厂默认的活动预设是「自然」，它是一条**系统**预设：库里本来什么都没有。
     expect(userPresets(store)).toHaveLength(0);
     expect(store.getState().session.activeVibratoPresetId).toBe("builtin.natural");
+    const viewport = presetListViewport();
 
     await typeNumber("Depth", 77);
 
@@ -1996,8 +2019,8 @@ test("编辑系统预设：立刻生成自定义副本并跳过去，且不打�
     // 活动预设不动：副本只是"让你看得见"，要不要用它由用户决定。
     expect(store.getState().session.activeVibratoPresetId).toBe("builtin.natural");
 
-    // 明说一句，免得新出现的那一行被正在调参数的注意力漏掉。
-    expect(document.body.textContent ?? "").toContain('Created custom preset "Natural 2"');
+    // 副本在列表末尾，要滚过去 —— 这是替代提示语的"看得见"。
+    expect(viewport.scrollTop, "新副本应滚入视野").toBe(SCROLL_HEIGHT);
 });
 
 /*
@@ -2019,6 +2042,21 @@ test("编辑系统预设：只在第一次生成副本，后续编辑落在同�
         document.querySelector<HTMLInputElement>('input[aria-label="Preset name"]')?.value,
         "编辑的仍是第一次生成的那份副本",
     ).toBe("Natural 2");
+});
+
+/*
+ * 凡是"新做出来的预设"，都要滚进视野 —— 它追加在列表末尾，列表一长就在视野之外。
+ */
+test("复制为自定义 / 新建：新预设都滚入视野", async () => {
+    await mountDialog();
+    const viewport = presetListViewport();
+
+    await clickButton("Duplicate as mine");
+    expect(viewport.scrollTop, "副本在列表末尾，应滚过去").toBe(SCROLL_HEIGHT);
+
+    viewport.scrollTop = 0;
+    await clickButton("New");
+    expect(viewport.scrollTop, "新建的预设同样在末尾").toBe(SCROLL_HEIGHT);
 });
 
 /*
