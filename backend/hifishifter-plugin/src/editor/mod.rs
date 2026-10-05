@@ -4,6 +4,7 @@ pub(crate) mod routing;
 pub(crate) mod connection;
 pub(crate) mod session;
 pub(crate) mod workspace;
+pub(crate) mod parameter_atlas;
 mod commands;
 mod events;
 pub(crate) mod resources;

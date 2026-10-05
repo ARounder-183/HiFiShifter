@@ -54,6 +54,23 @@ mod bound_tests {
     use ara2_bridge::plugin::{FactoryBuilder, PluginBuilder};
     use ara2_bridge::sys::*;
 
+    /// v3源basis按组件真实区域保存，冷恢复不能借另一轨道的atlas或沿旧session key。
+    #[test]
+    fn source_parameter_atlas_state_is_scoped_and_rebound_without_gui() {
+        let (model,owners,_ids)=crate::editor::session::tests::workspace_fixture();let document=model.session();
+        let mut client=document.workspace_timeline().unwrap();
+        for (root,note) in [("track",60.),("b",67.)] {client.params_by_root_track.insert(root.into(),hifishifter_kernel::state::TrackParamsState {
+            frame_period_ms:5.,pitch_edit_user_modified:true,pitch_orig:vec![57.,57.],pitch_edit:vec![note,note],..Default::default()});}
+        document.accept_workspace_edits(0,document.revision.load(Ordering::Acquire),&client,&document.workspace_projection().unwrap()).unwrap();
+        let saved=owners.iter().map(|owner|owner.encode_state().unwrap()).collect::<Vec<_>>();
+        let payloads=saved.iter().map(|bytes|serde_json::from_slice::<serde_json::Value>(bytes).unwrap()).collect::<Vec<_>>();document.close();
+        for payload in &payloads {assert_eq!(payload["version"],3);assert_eq!(payload["edits"]["atlas"]["regions"].as_object().unwrap().len(),1,"不能保存其它组件区域");}
+        let (cold,restored,_cold_ids)=crate::editor::session::tests::workspace_fixture();let cold_doc=cold.session();
+        for index in 0..2 {restored[index].restore_state(&saved[index]).unwrap();}
+        cold_doc.prepare_renderers();let atlas=cold_doc.edits.lock().unwrap().atlas.clone();cold_doc.close();
+        assert_eq!(atlas.regions.len(),2);assert!(atlas.regions.values().all(|record|record.identity.key!=0),"JSON旧key不得冒充新会话身份");
+    }
+
     /// 只打开editor-only入口时，也必须采集同文档隐藏playback owner的元数据。
     #[test]
     fn task38b_one_editor_refresh_collects_hidden_playback_metadata() {
@@ -393,7 +410,7 @@ mod bound_tests {
         region_owners().lock().unwrap().register(key, document.id, 0).unwrap();
         document.clip_ids.lock().unwrap().insert(key, "one".into());
         document.regions.lock().unwrap().insert(key, crate::ara::AraPlaybackRegion {
-            audio_source_persistent_id:"ara://pcm".into(), duration_in_modification_time:4.0/44100.0,
+            audio_source_persistent_id:"ara://pcm".into(),audio_modification_persistent_id:"host-mod".into(), duration_in_modification_time:4.0/44100.0,
             duration_in_playback_time:4.0/44100.0, ..Default::default() });
         document.ready.store(true, Ordering::Release);
         let owner = Arc::new(ExtensionOwner::default());
@@ -475,7 +492,9 @@ mod bound_tests {
             let key=(&*identities[index] as *const u8) as u64;
             region_owners().lock().unwrap().register(key,document.id,index).unwrap();
             document.clip_ids.lock().unwrap().insert(key,id.into());
-            document.regions.lock().unwrap().insert(key,crate::ara::AraPlaybackRegion { audio_source_persistent_id:"ara://pcm".into(),duration_in_modification_time:4.0/44100.0,duration_in_playback_time:4.0/44100.0,..Default::default() });
+            document.regions.lock().unwrap().insert(key,crate::ara::AraPlaybackRegion { audio_source_persistent_id:"ara://pcm".into(),
+                audio_modification_persistent_id:if index==0||shared_identity {"mod-a"} else {"mod-b"}.into(),
+                duration_in_modification_time:4.0/44100.0,duration_in_playback_time:4.0/44100.0,..Default::default() });
             let owner=Arc::new(ExtensionOwner::default());
             let raw=owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::PLAYBACK_RENDERER|ExtensionRoles::EDITOR_RENDERER,None).unwrap();
             // SAFETY: identities及native扩展都保留到owner/document销毁。
@@ -971,9 +990,17 @@ impl ExtensionOwner {
         let bindings=document.track_bindings.lock().unwrap().iter().filter(|(id,_)|allowed.contains(*id))
             .map(|(id,identity)|(id.clone(),identity.clone())).collect();
         let mut restored=saved.clone();restored.reconcile(&bindings)?;
+        let mut changed_geometry=false;
+        if !restored.atlas.is_empty() {
+            let rebound=restored.atlas.rebind(&host,&document.parameter_identities_locked(&host)?)?;
+            changed_geometry=!restored.atlas.same_layout(&rebound);restored.atlas=rebound;
+        }
         let mut client=host.clone();restored.apply(&mut client);
+        if changed_geometry {client.params_by_root_track.extend(restored.atlas.project_roots(&host,&document.parameter_identities_locked(&host)?)?);}
         let mut edits=document.edits.lock().unwrap();
         let mut merged=edits.merge(&host,&client,edits.revision)?;
+        let clip_ids=host.clips.iter().map(|clip|clip.id.clone()).collect::<BTreeSet<_>>();
+        merged.atlas.regions.retain(|id,_|!clip_ids.contains(id));merged.atlas.regions.extend(restored.atlas.regions);
         merged.reconcile(&document.track_bindings.lock().unwrap())?;
         *edits=merged;*pending=None;Ok(())
     }
@@ -992,6 +1019,7 @@ impl ExtensionOwner {
             let allowed:BTreeSet<_>=host.tracks.iter().map(|t|t.id.clone()).collect();
             let mut local=edits.clone();
             local.params.retain(|id,_|allowed.contains(id));local.tracks.retain(|t|allowed.contains(&t.id));
+            let clips=host.clips.iter().map(|clip|clip.id.clone()).collect::<BTreeSet<_>>();local.atlas.regions.retain(|id,_|clips.contains(id));
             local.bindings.retain(|id,_|allowed.contains(id));local.encode()
         } else { self.pending_restore.lock().unwrap().as_ref().unwrap_or(&self.edits.lock().unwrap()).encode() }
     }
@@ -1044,6 +1072,8 @@ impl ExtensionOwner {
                 let mut edits=document.edits.lock().unwrap();edits.reconcile(&document.track_bindings.lock().unwrap())?;
                 let client=serde_json::from_value(client).map_err(|e|e.to_string())?;
                 let mut candidate=edits.merge(&self.assigned_timeline(document)?,&client,base_edit)?;
+                let mut curve_timeline=self.assigned_timeline(document)?;candidate.apply(&mut curve_timeline);
+                candidate.atlas=edits.atlas.capture(&curve_timeline,&document.parameter_identities_locked(&curve_timeline)?)?;
                 candidate.reconcile(&document.track_bindings.lock().unwrap())?;
                 drop(edits);
                 let inputs=document.renderer_owners().into_iter().filter(|owner|owner.renders_playback()).map(|owner| {
@@ -1094,10 +1124,13 @@ impl ExtensionOwner {
         drop(geometry);
         let stretch=regions.iter().any(|region|(region.duration_in_modification_time-region.duration_in_playback_time).abs()>1e-9);
         let kernel_render=edited||stretch;
+        let clip_parameters=if resolved.atlas.is_empty() {Default::default()} else {
+            resolved.atlas.project(&timeline,&document.parameter_identities_locked(&timeline)?)?
+        };
         let available=if kernel_render {document.edit_sources.lock().unwrap()} else {document.sources.lock().unwrap()};
         let sources=regions.iter().map(|region|region.audio_source_persistent_id.clone()).collect::<BTreeSet<_>>()
             .into_iter().filter_map(|id|available.get(&id).map(|pcm|(id.clone(),pcm.clone()))).collect();
-        Ok((keys,super::input::RenderInput {timeline:kernel_render.then_some(timeline),regions,sources}))
+        Ok((keys,super::input::RenderInput {timeline:kernel_render.then_some(timeline),regions,sources,clip_parameters}))
     }
 
     /// 从宿主时间线筛选实际分配的区域，而不是让每个处理器混整张文档。

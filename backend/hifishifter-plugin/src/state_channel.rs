@@ -13,6 +13,8 @@ pub(crate) struct EditState {
     pub tracks: Vec<Track>,
     #[serde(default)]
     pub bindings: TrackBindings,
+    #[serde(default,skip_serializing_if="crate::editor::parameter_atlas::ParameterAtlas::is_empty")]
+    pub atlas:crate::editor::parameter_atlas::ParameterAtlas,
     /// 组件恢复时延迟到完整ARA图ready后再关联，禁止逐对象创建时误套新序号。
     #[serde(skip)]
     pub needs_rebind: bool,
@@ -50,6 +52,7 @@ impl EditState {
             let mut track=track.clone(); track.id=new.clone(); track
         })).collect();
         candidate.bindings = mapping.values().cloned().collect();
+        for record in candidate.atlas.regions.values_mut() {if let Some((root,_))=mapping.get(&record.root) {record.root=root.clone();}}
         candidate.needs_rebind = false;
         *self = candidate;
         Ok(())
@@ -105,18 +108,20 @@ impl EditState {
 
     /// 有版本且有界的组件state；旧空state保持默认编辑。
     pub fn encode(&self) -> Result<Vec<u8>, String> {
+        self.atlas.validate()?;
         for id in self.tracks.iter().map(|t| &t.id).chain(self.params.keys()) {
             if self.bindings.get(id).is_none_or(Vec::is_empty) { return Err("ARA edit identity missing; cannot save edits".into()); }
         }
-        serde_json::to_vec(&serde_json::json!({"version":2,"edits":self})).map_err(|e| e.to_string())
+        serde_json::to_vec(&serde_json::json!({"version":if self.atlas.is_empty() {2} else {3},"edits":self})).map_err(|e| e.to_string())
     }
     /// 恢复使乐观并发revision前进，防止旧GUI再次覆盖宿主undo/恢复。
     pub fn restore(&mut self, bytes: &[u8]) -> Result<(), String> {
         if bytes.is_empty() { return Ok(()); }
         if bytes.len() > hifishifter_ara_ipc::MAX_FRAME { return Err("state too large".into()); }
         let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-        if value["version"] != 1 && value["version"] != 2 { return Err("unsupported state version".into()); }
+        if value["version"] != 1 && value["version"] != 2 && value["version"] != 3 { return Err("unsupported state version".into()); }
         let mut restored: Self = serde_json::from_value(value["edits"].clone()).map_err(|e| e.to_string())?;
+        restored.atlas=restored.atlas.reserve_restored()?;
         if value["version"] == 1 && (!restored.params.is_empty() || !restored.tracks.is_empty()) {
             return Err("legacy ARA edits have no persistent identity; cannot restore by session track number".into());
         }

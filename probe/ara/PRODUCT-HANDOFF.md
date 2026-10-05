@@ -5,8 +5,9 @@
 ## 当前续接：四项目标仍未全部完成
 
 当前权威是`docs/superpowers/specs/2026-10-05-ara-complete-integration-design.md`及同名plan。
-下方单实例/旧unsupported/旧构建段落为历史，不覆盖新范围：时间拉伸必须（含非线性/
-tempo/timebase/曲线重投影），倒放暂缓；保留独立App，同工程共享多轨原GUI和逐轨输出，
+下方单实例/旧unsupported/旧构建段落为历史，不覆盖新范围：用户最新明确只做线性拉伸，
+固定倍率/tempo-timebase整段线性变化/曲线重投影必达，非线性markers/坡度/段内tempo warp
+不再是完成门；倒放暂缓。保留独立App，同工程共享多轨原GUI和逐轨输出，
 HiFiGAN缓存与正常长人声也在最终门中。后续仅最终一次review。
 
 `ffa8266a`完成有界异步准备/冷恢复与原子发布；`ddbb5a97`完成editor角色透传、typed
@@ -24,7 +25,12 @@ Task38a在6b8fb67c/b5572a4e完成typed直接take/逐getter重入授权、project
 工厂只广告线性TIMESTRETCH，REFLECT_TEMPO/CONTENT_FADES已撤回，不等于实现二者。
 fe731313有秒域正逆/分段映射基础，4回归exit0；随后单GUI入口驱动隐藏playback元数据，
 稳定project/model/scope缓存避免每tick读全marker，变化/关闭撤销回归共11/exit0。
-曲线源坐标权威与持久化尚未接线，raw marker单位/坡度尚未native验证；完整变换未完成。
+本批ParameterAtlas已接原接受事务/模型稳定投影/每clip独立kernel输入/v3限定范围保存恢复，
+源basis不因宿主移动/拉伸反复回写插值，原GUI仍用项目网格。6新回归RED→GREEN；批末
+128首轮123/5失败，修正后的失败5、后续8定向、旧归档v2各正常exit0，未重跑新全量。
+不含atlas仍v2；含basis为v3，新state不可给旧引擎读。raw marker保留诊断但本轮不实现非线性。
+重叠区域GUI编辑选择、跨不同算法轨移动、旧v2首载后移动、实际source内容换源/基线失效、
+拆分/冷恢复完整PCM与原GUI真机组合门仍需收尾；当前不能宣称完整线性支持交付。
 新源改动不包含在上述bundle里，不能混用证据，native多轨未验收。
 短actor filter曾摘要后退出挂住，完整lib正常exit；确切退出根因未知，未通过禁用模型或
 强杀冒充通过。自有测试PID/候选FCPE链和生命周期证据在Task33本地report，历史49800未碰。

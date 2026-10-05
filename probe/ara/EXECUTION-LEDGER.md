@@ -908,4 +908,12 @@ Task 38: Ruling: 6b8fb67c typed直接take/逐getter授权/普通fade版本检查
 
 Task 38: Ruling: 只采GUI入口的元数据无法覆盖无GUI隐藏playback实例，且逐UI tick全量读marker会带来新的UI重任务 — 单一入口驱动同真实文档playback采集，只入口发布clock；模型/scope与project counter相同则两次轻量检查后复用成功数据，fade/model改变完整刷新 — 3新回归先RED后GREEN，连同4映射/4旧安全回归共11/exit0；若counter合同或采集性能与真实宿主不同，native门必须补测，不外推成完整同步。
 
+Task 38: Ruling: 用户最新明确“不考虑非线性拉伸，只做线性拉伸” — spec/plan最终门改为固定倍率和tempo-timebase整段线性变化，非线性marker/坡度/段内warp不实现且明确不支持；其余四项目标不变 — 若错误排除线性曲线/音频/持久化验收会缩小用户真正要求；本裁定来自用户，不是为绿测自行降门。
+
+Task 38: Ruling: 项目整轨数组不能作为移动/拉伸后的曲线权威，重叠区域也不能共用单一音频参数 — 新ParameterAtlas以真实region/modification/source边存不可变源basis，接接受事务/模型稳定投影/每clip独立原kernel参数/限定范围恢复；源曲线Arc共享并计入512MiB、临时渲染缓冲收费 — 6个新用例先RED后GREEN，末次8定向/旧失败5/旧归档v2各正常exit0；若GUI投影再被误当源数据，会累积插值损失或覆盖重叠区域，最终门仍需补此交互。
+
+Task 38: Ruling: 源basis是新的持久化语义，旧v2只有绝对项目数组 — 有atlas的新保存采用v3、显式key不落盘且在组件实际范围重绑定，继续接受旧v2，不含atlas的旧数据仍编码v2 — 若版本号仍伪称旧语义，旧引擎会静默丢basis；代价是v3工程须用新插件打开，不覆盖用户旧RPP。
+
+Task 38: Ruling: 批末128回归123通过/5失败，外部IPC clip扁平投影缺失、旧fixtures无modification边及JSON f64一ULP误判造成尾线截断 — 外部参数源basis只取宿主几何、fixture补真实边，不弱化验证；以8ULP处理数值舍入保留同布局整轨数组，定向5修复exit0 — 失败assert持Mutex使cleanup二次panic并0xc0000409，未当绿；若只改期望或当内存溢出忽略，会隐藏实际曲线保存损坏。
+
 

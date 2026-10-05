@@ -195,6 +195,29 @@ impl ModelHandle {
                 }
                 for members in bindings.values_mut() { members.sort(); members.dedup(); }
                 *self.session.track_bindings.lock().unwrap() = bindings.clone();
+                {
+                    let mut edits=self.session.edits.lock().unwrap();
+                    if !edits.atlas.is_empty()&&!edits.needs_rebind {
+                        let projection=(|| {
+                            let identities=self.session.parameter_identities_locked(&timeline)?;
+                            let roots=edits.atlas.project_roots(&timeline,&identities)?;
+                            let followed=edits.atlas.follow_geometry(&timeline,&identities)?;
+                            Ok::<_,String>((roots,followed))
+                        })();
+                        match projection {
+                            Ok((roots,followed))=>{
+                                let previous_roots=edits.atlas.regions.values().map(|record|record.root.clone()).collect::<HashSet<_>>();
+                                edits.params.retain(|root,_|!previous_roots.contains(root));edits.params.extend(roots);edits.atlas=followed;
+                                edits.tracks.retain(|track|bindings.get(&track.id).is_some_and(|members|!members.is_empty()));
+                            },
+                            Err(error)=>{
+                                log::error!("[ara] source parameter projection conflict: {error}");
+                                *self.session.timeline.lock().unwrap()=Some(timeline.clone());self.timeline=Some(timeline);
+                                self.session.ready.store(false,Ordering::Release);return;
+                            }
+                        }
+                    }
+                }
                 if let Err(error) = self.session.edits.lock().unwrap().reconcile(&bindings) {
                     log::error!("[ara] edit identity unresolved: {error}");
                 }
@@ -662,6 +685,28 @@ impl Drop for ModelHandle {
 
 #[cfg(test)]
 mod tests {
+    /// 真实模型稳定收口必须重新投影编辑，不能只有数学helper通过而GUI/authority仍在旧位置。
+    #[test]
+    fn source_parameter_atlas_moves_and_stretches_in_real_document_transactions() {
+        use ara2_bridge::plugin::ExtensionRoles;
+        let mut model=ModelHandle::new();model.document=identity_document(&["A"]);
+        let identity=Box::new(0_u8);let key=(&*identity as *const u8) as u64;
+        model.region_keys.push(key);region_owners().lock().unwrap().register(key,model.document_id,0).unwrap();model.remap_and_log();
+        let document=model.session();let owner=Arc::new(crate::render::extension::ExtensionOwner::default());
+        let raw=owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::PLAYBACK_RENDERER,None).unwrap();
+        unsafe {let ext=&*raw;((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(ext.playbackRendererRef,key as *mut _);}
+        let host=document.workspace_timeline().unwrap();let mut client=host.clone();let root=client.tracks[0].id.clone();
+        client.params_by_root_track.insert(root.clone(),hifishifter_kernel::state::TrackParamsState {frame_period_ms:100.,pitch_edit_user_modified:true,
+            pitch_orig:vec![57.;6],pitch_edit:vec![60.,61.,62.,63.,64.,65.],..Default::default()});
+        let projection=document.workspace_projection().unwrap();document.accept_workspace_edits(0,document.revision.load(Ordering::Acquire),&client,&projection).unwrap();
+        assert!(!document.edits.lock().unwrap().atlas.is_empty());
+        model.document.playback_regions[0].start_in_playback_time=1.;model.document.playback_regions[0].duration_in_playback_time=1.;
+        model.document.playback_regions[0].is_timestretch_enabled=true;model.remap_and_log();
+        let pitch=document.edits.lock().unwrap().params[&root].pitch_edit.clone();document.close();
+        assert!(pitch.len()>=21,"authority仍停在旧项目数组: {pitch:?}");
+        assert_eq!(&pitch[10..21],&[60.,60.5,61.,61.5,62.,62.5,63.,63.5,64.,64.5,65.]);
+        assert_eq!(pitch[0],0.,"旧位置不能继续遗留编辑");
+    }
     use super::*;
     use ara2_bridge::core::{Registry, RegionSequenceKind};
 

@@ -5,7 +5,7 @@ use super::snapshot::{PlaybackSnapshot,mix_plain_regions};
 use crate::ara::AraPlaybackRegion;
 use hifishifter_kernel::state::TimelineState;
 use hifishifter_kernel::mixdown::{MixdownOptions,MixdownPcm,QualityPreset,render_mixdown_with_pcm};
-use std::collections::{HashMap,BTreeSet};
+use std::collections::{HashMap,BTreeSet,BTreeMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool,Ordering};
 
@@ -13,6 +13,7 @@ pub(crate) struct RenderInput {
     pub timeline:Option<TimelineState>,
     pub regions:Vec<AraPlaybackRegion>,
     pub sources:HashMap<String,Arc<SourcePcm>>,
+    pub clip_parameters:BTreeMap<String,hifishifter_kernel::state::TrackParamsState>,
 }
 impl RenderInput {
     /// 本函数只消费冻结值；调用前必须已释放文档transaction。新模型只能取消/拒绝发布。
@@ -46,11 +47,33 @@ impl RenderInput {
             let frames=((end-start)*sample_rate as f64).round() as usize;
             if frames>64*1024*1024/8 {return Err("snapshot span exceeds 64MiB".into());}
             let reservation=super::budget::global_budget().reserve(frames*8).ok_or("PCM memory budget exceeded")?;
-            let options=MixdownOptions {sample_rate,start_sec:start,end_sec:Some(end),
-                stretch:hifishifter_kernel::time_stretch::StretchAlgorithm::SoundTouchDll,apply_pitch_edit:true,
-                output:hifishifter_kernel::encode::OutputSpec::wav_32f(),quality_preset:QualityPreset::Export,
-                cancel_flag:Some(cancel.clone()),progress:None,cache_stats:None};
-            let (_,channels,_,samples)=render_mixdown_with_pcm(timeline,options,&input)?;
+            let run=|view:&TimelineState| {
+                let options=MixdownOptions {sample_rate,start_sec:start,end_sec:Some(end),
+                    stretch:hifishifter_kernel::time_stretch::StretchAlgorithm::SoundTouchDll,apply_pitch_edit:true,
+                    output:hifishifter_kernel::encode::OutputSpec::wav_32f(),quality_preset:QualityPreset::Export,
+                    cancel_flag:Some(cancel.clone()),progress:None,cache_stats:None};
+                render_mixdown_with_pcm(view,options,&input)
+            };
+            // 项目数组只负责GUI；每个区域用自己的源参数跑原kernel，再按宿主位置累加。
+            // 所有track仍保留原全局solo/父链，不能因为拆region丢掉另一轨solo。
+            let _working=super::budget::global_budget().reserve(frames*8).ok_or("parameter render working budget exceeded")?;
+            let (channels,samples)=if self.clip_parameters.is_empty() {
+                let (_,channels,_,samples)=run(timeline)?;(channels,samples)
+            } else {
+                let mut mixed=vec![0_f32;frames*2];
+                for clip in &timeline.clips {
+                    if cancel.load(Ordering::Acquire) {return Err("host preparation cancelled".into());}
+                    let _part_budget=super::budget::global_budget().reserve(frames*8).ok_or("parameter render working budget exceeded")?;
+                    let mut view=timeline.clone();view.clips=vec![clip.clone()];
+                    if let Some(params)=self.clip_parameters.get(&clip.id) {
+                        let root=view.resolve_root_track_id(&clip.track_id).ok_or("unknown source parameter root")?;
+                        view.params_by_root_track.insert(root,params.clone());
+                    }
+                    let (_,channels,_,part)=run(&view)?;
+                    if channels!=2||part.len()!=mixed.len() {return Err("invalid region parameter output".into());}
+                    for (sum,value) in mixed.iter_mut().zip(part) {*sum+=value;}
+                }(2,mixed)
+            };
             if channels!=2 || samples.len()!=frames*2 || samples.iter().any(|v|!v.is_finite()) {return Err("invalid kernel output".into());}
             snapshots.push(PlaybackSnapshot {sample_rate,origin_sample:(start*sample_rate as f64).round() as i64,
                 left:samples.iter().step_by(2).copied().collect(),right:samples.iter().skip(1).step_by(2).copied().collect(),
@@ -63,6 +86,24 @@ impl RenderInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 相同root的两个重叠区域保留独立源参数，不能用GUI单一数组覆盖两者。
+    #[test]
+    fn source_parameter_atlas_overlapping_regions_keep_independent_audio_gains() {
+        let seconds=4.0/44100.;let mut timeline:TimelineState=serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"track","name":"A","order":0}],"bpm":120,"project_sec":seconds,
+            "clips":[{"id":"a","name":"A","track_id":"track","start_sec":0,"length_sec":seconds,
+                "takes":[{"id":"ta","source_path":"source","source_start_sec":0,"source_end_sec":seconds}]},
+                {"id":"b","name":"B","track_id":"track","start_sec":0,"length_sec":seconds,
+                "takes":[{"id":"tb","source_path":"source","source_start_sec":0,"source_end_sec":seconds}]}]
+        })).unwrap();for clip in &mut timeline.clips {clip.normalize_takes();}
+        let region=AraPlaybackRegion {audio_source_persistent_id:"source".into(),duration_in_modification_time:seconds,duration_in_playback_time:seconds,..Default::default()};
+        let params=|gain|hifishifter_kernel::state::TrackParamsState {frame_period_ms:5.,extra_curves:HashMap::from([("volume".into(),vec![gain])]),..Default::default()};
+        let input=RenderInput {timeline:Some(timeline),regions:vec![region.clone(),region],sources:HashMap::from([("source".into(),
+            Arc::new(SourcePcm {sample_rate:44100,planes:vec![vec![0.1,0.2,0.3,0.4]],version:0,_reservation:None}))]),
+            clip_parameters:BTreeMap::from([("a".into(),params(0.5)),("b".into(),params(0.25))])};
+        let output=input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        for (actual,want) in output[0].left.iter().zip([0.075_f32,0.15,0.225,0.3]) {assert!((*actual-want).abs()<1e-6,"{actual} != {want}");}
+    }
     /// 原kernel保调拉伸覆盖整段目标时间；不能只显示新长度却尾部静音或降八度重采样。
     #[test]
     fn linear_stretch_produces_full_length_audio_without_transposing_the_voice() {
@@ -75,7 +116,7 @@ mod tests {
         })).unwrap();timeline.clips[0].normalize_takes();
         let region=AraPlaybackRegion {audio_source_persistent_id:"source".into(),duration_in_modification_time:0.5,
             duration_in_playback_time:1.0,is_timestretch_enabled:true,..Default::default()};
-        let input=RenderInput {timeline:Some(timeline),regions:vec![region],sources:HashMap::from([("source".into(),source)])};
+        let input=RenderInput {timeline:Some(timeline),regions:vec![region],sources:HashMap::from([("source".into(),source)]),clip_parameters:BTreeMap::new()};
         let output=input.render(Arc::new(AtomicBool::new(false))).unwrap();
         assert_eq!(output[0].left.len(),44100);assert_eq!(output[1].left.len(),48000);
         for start in [0.2,0.7] {
@@ -97,7 +138,7 @@ mod tests {
         let region=AraPlaybackRegion {audio_source_persistent_id:"fixture".into(),
             duration_in_modification_time:4.0/44100.0,duration_in_playback_time:4.0/44100.0,..Default::default()};
         let mut sources=HashMap::from([("fixture".into(),source)]);
-        let input=RenderInput {timeline:None,regions:vec![region],sources:sources.clone()};
+        let input=RenderInput {timeline:None,regions:vec![region],sources:sources.clone(),clip_parameters:BTreeMap::new()};
         sources.insert("fixture".into(),Arc::new(SourcePcm {sample_rate:44100,planes:vec![vec![0.9;4]],version:1,_reservation:None}));
         drop(sources);
         let cancel=Arc::new(AtomicBool::new(false));

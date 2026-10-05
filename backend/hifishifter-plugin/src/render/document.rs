@@ -99,6 +99,17 @@ fn controllers() -> &'static Mutex<HashMap<usize, Weak<DocumentSession>>> {
 }
 
 impl DocumentSession {
+    /// 调用方持document事务；仅从真实region边创建曲线身份，不从轨名/源路径推断。
+    pub(crate) fn parameter_identities_locked(&self,timeline:&hifishifter_kernel::state::TimelineState)
+        ->Result<std::collections::BTreeMap<String,crate::editor::parameter_atlas::RegionIdentity>,String> {
+        let ids=self.clip_ids.lock().unwrap();let regions=self.regions.lock().unwrap();
+        timeline.clips.iter().map(|clip| {
+            let (key,_)=ids.iter().find(|(_,id)|**id==clip.id).ok_or("missing actual region parameter edge")?;
+            let region=regions.get(key).ok_or("missing actual region parameter identity")?;
+            Ok((clip.id.clone(),crate::editor::parameter_atlas::RegionIdentity {key:*key,
+                source:region.audio_source_persistent_id.clone(),modification:region.audio_modification_persistent_id.clone()}))
+        }).collect()
+    }
     /// 文档惰性持有唯一原编辑actor；actor只弱引用文档，组件不持第二份history。
     pub(crate) fn editor_session(self:&Arc<Self>)->Result<Arc<crate::editor::session::EditorSession>,String> {
         let _transaction=self.transaction.lock().unwrap();
@@ -173,6 +184,7 @@ impl DocumentSession {
         if self.workspace_projection_locked(&edits)?!=previous || base_edit>edits.revision {return Err("Conflict: workspace scope or curves changed; local curves preserved".into());}
         Self::validate_workspace_geometry(&host,client)?;
         let mut candidate=edits.merge(&host,client,edits.revision)?;candidate.reconcile(&self.track_bindings.lock().unwrap())?;
+        candidate.atlas=edits.atlas.capture(client,&self.parameter_identities_locked(&host)?)?;
         let projection=self.workspace_projection_locked(&candidate)?;*edits=candidate;
         Ok((edits.revision,model,projection))
     }

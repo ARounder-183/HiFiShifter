@@ -426,7 +426,7 @@ pub(crate) mod tests {
         region_owners().lock().unwrap().register(key,document.id,0).unwrap();
         document.clip_ids.lock().unwrap().insert(key,"clip".into());
         document.regions.lock().unwrap().insert(key,crate::ara::AraPlaybackRegion {
-            audio_source_persistent_id:"ara://source".into(),duration_in_modification_time:4.0/44100.0,
+            audio_source_persistent_id:"ara://source".into(),audio_modification_persistent_id:"modification".into(),duration_in_modification_time:4.0/44100.0,
             duration_in_playback_time:4.0/44100.0,..Default::default()
         });
         let owner=Arc::new(ExtensionOwner::default());
@@ -451,7 +451,7 @@ pub(crate) mod tests {
         let second=Box::new(0_u8);let key=(&*second as *const u8) as u64;
         region_owners().lock().unwrap().register(key,document.id,1).unwrap();
         document.clip_ids.lock().unwrap().insert(key,"cb".into());
-        let region=document.regions.lock().unwrap().values().next().unwrap().clone();document.regions.lock().unwrap().insert(key,region);
+        let mut region=document.regions.lock().unwrap().values().next().unwrap().clone();region.audio_modification_persistent_id="modification-b".into();document.regions.lock().unwrap().insert(key,region);
         let b=Arc::new(ExtensionOwner::default());let raw=b.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::PLAYBACK_RENDERER|ExtensionRoles::EDITOR_RENDERER,None).unwrap();
         // SAFETY: 模型、两owner和真实region身份由返回值保留。
         unsafe {let ext=&*raw;((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(ext.playbackRendererRef,key as *mut _);}
@@ -771,7 +771,7 @@ pub(crate) mod tests {
         editor.enqueue(UiRequest {id:3,command:"set_param_frames".into(),args:json!({"trackId":track,"param":"pitch","startFrame":1,"values":[64.0],"checkpoint":false}),sink,link:None}).unwrap();
         let encoded=owner.encode_state().unwrap(); // 真getState路径会flush，不只测手工barrier。
         let saved:Value=serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(saved["version"],2);
+        assert_eq!(saved["version"],3,"新源basis使用v3，旧v2解码/范围回归另行保留");
         assert_eq!(&saved["edits"]["params"]["track"]["pitch_edit"].as_array().unwrap()[..2],&[json!(60.),json!(64.)]);
         assert_eq!(editor.history.lock().unwrap().position,1,"尾块不得增加undo步");
         editor.close();

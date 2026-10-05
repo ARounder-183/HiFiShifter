@@ -12,6 +12,9 @@
 
 **Spec:** `../specs/2026-10-05-ara-complete-integration-design.md`
 
+**最新用户范围：** 只做线性拉伸，删除非线性marker/坡度/段内tempo warp实现与最终门。
+整段倍率/tempo-timebase线性变化、参数迁移、保调PCM、持久化、fade等原其它要求保留。
+
 ## Global Constraints
 
 - 仅ara-plugin worktree/codex/ara-plugin；不push、不add-A、不改SDK/registry、不动主develop。
@@ -78,12 +81,12 @@ struct HostClipGeometry {
   当前插件所属track/item/take身份。未取得直接稳定绑定就保持缺口，不按位置/名字匹配。
 - [ ] 读取真实宿主geometry快照，区分普通fade（宿主负责音频，仅投影GUI）与协商的
   content-based fade（插件负责一次）；把字段投影到原Clip/take，不修改宿主原工程。
-- [ ] 字面映射/音频回归：source0..2秒映到项目1..5秒，rate0.5，裁切与markers分段映射
+- [ ] 字面映射/音频回归：source0..2秒映到项目1..5秒，rate0.5，裁切/拆分/固定倍率映射
   不漂移；手工/自动fade逐端长度、shape/dir、overlap只应用一次。真实ordinary fade
   导出对照有插件/无插件；不能只比较非零hash。
 - [ ] 稳定区域身份保存原编辑的局部/源坐标，移动/裁切/拆分/拉伸后重新投影到项目参数
   时间。旧v2状态兼容回归与pending冲突保留；没有对应曲线迁移前不能只删除Unsupported。
-- [ ] 逐项真实REAPER验证倍率、保调、tempo/timebase、非线性markers与fade；事实录入
+- [ ] 逐项真实REAPER验证倍率、保调、tempo/timebase整段倍率与fade；事实录入
   captures，无法通过标准ARA提供的项由明确REAPER适配完成，不宣称原生跨宿主全支持。
 
 ## Task39：内容权威的HiFiGAN分层缓存
@@ -127,7 +130,7 @@ struct HostRenderCounters { source_hits:u64, intermediate_hits:u64, pcm_hits:u64
 
 - [ ] 一次集中运行App/kernel/plugin/frontend及native ABI/依赖/IPC测试与实际构建。
 - [ ] 独立App真实原GUI导入编辑/播放保存；插件不启动它也能同窗口多轨完整编辑。
-- [ ] Host位置/裁切/拆分/线性和非线性拉伸/tempo相关映射/普通与自动fade、seek/loop、
+- [ ] Host位置/裁切/拆分/线性拉伸/tempo-timebase整段倍率/普通与自动fade、seek/loop、
   44100/48000 mono/stereo/长人声、多轨/跨工程隔离/持续编辑与冲突取消，GUI与最终PCM一致。
 - [ ] HiFiGAN冷/暖缓存计数与音频、关闭GUI供音、保存冷重开结果与缓存失效/损坏验证。
 - [ ] 全部证据逐项审计后仅一次最终review；修重要项只定向重测。精确路径stage、本地
