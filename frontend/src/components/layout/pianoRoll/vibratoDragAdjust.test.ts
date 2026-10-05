@@ -635,7 +635,7 @@ describe("双键重置：槽命中与配对", () => {
     test("配对意图：一对齐了才算，未齐返回 null", () => {
         expect(resolveVibratoPairReset(new Set())).toBeNull();
         expect(resolveVibratoPairReset(new Set(["presetPrev"]))).toBeNull();
-        expect(resolveVibratoPairReset(new Set(["presetPrev", "presetNext"]))).toBe("straight");
+        expect(resolveVibratoPairReset(new Set(["presetPrev", "presetNext"]))).toBe("line");
         expect(resolveVibratoPairReset(new Set(["amplitudeIncrease", "amplitudeDecrease"]))).toBe(
             "depth",
         );
@@ -660,7 +660,7 @@ describe("双键重置：槽命中与配对", () => {
             "frequencyIncrease",
             "frequencyDecrease",
         ]);
-        expect(resolveVibratoPairReset(all)).toBe("straight");
+        expect(resolveVibratoPairReset(all)).toBe("line");
         const ampAndFreq = new Set<
             "amplitudeIncrease" | "amplitudeDecrease" | "frequencyIncrease" | "frequencyDecrease"
         >(["amplitudeIncrease", "amplitudeDecrease", "frequencyIncrease", "frequencyDecrease"]);

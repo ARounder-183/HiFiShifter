@@ -185,8 +185,8 @@ const BUILTIN_SPECS: Record<BuiltinVibratoId, VibratoPresetInput> = {
         irregularity: 0,
         alignCycles: true,
     },
-    // 直线：深度 0。直线/颤音工具因此共用一条代码路径 ——
-    // 「直线」就是这个工具在零颤音时的样子。
+    // 直线：深度 0。直线工具就是"颤音工具 + 这个预设" ——
+    // 两者共用一条代码路径，见 `STRAIGHT_VIBRATO_PRESET_ID`。
     straight: {
         cycle: { ...SINE },
         depthCents: 0,
@@ -200,9 +200,10 @@ const BUILTIN_SPECS: Record<BuiltinVibratoId, VibratoPresetInput> = {
 /**
  * 出厂预设的默认顺序。
  *
- * 【为什么「直线」排首位】直线/颤音工具共用一条代码路径，「直线」就是这个工具在
- * 零颤音时的样子。把它放在列表最前，切到该工具后默认看到的就是最常用的那个
- * —— 先画直线、需要时再往上加颤音，比先落在一个颤音预设上更贴近实际用法。
+ * 【为什么「直线」仍排首位】它不是"最常用的音色"，而是**直线工具在预设序列里
+ * 的位置**（见 `STRAIGHT_VIBRATO_PRESET_ID` 与 `vibratoCycleAnchorId`）：轮转
+ * 落在它上面就等于切到直线工具。把它放在序列的一端，`直线 → 自然 → … → 合成`
+ * 这条链就同时是"从不颤到最颤"的连续过渡，双键重置也只需回到这一端。
  */
 export const BUILTIN_VIBRATO_ORDER: readonly BuiltinVibratoId[] = [
     "straight",
@@ -259,10 +260,19 @@ export const SYSTEM_VIBRATO_PRESETS: readonly VibratoPreset[] = Object.freeze(
 );
 
 /**
- * 默认活动预设 = 直线。
+ * 直线预设的 id。
  *
- * 【为什么是直线】直线/颤音工具共用一条代码路径，「直线」就是这个工具在零颤音
- * 时的样子 —— 新用户切到该工具后，默认画出的就是最常用的那条直线，需要颤音时再
- * 从列表里挑预设。它同时也是列表首项，默认值与"第一眼看到的"一致。
+ * 【它是什么】直线工具的"预设面" —— 直线工具 ≡ 颤音工具 + 这个预设。
+ * 轮转 / 子菜单里选中它，等于切到直线工具（`VibratoChoice`）；反过来，直线工具
+ * 在预设序列里的位置就是它的位置（`vibratoCycleAnchorId`）。
  */
-export const DEFAULT_ACTIVE_VIBRATO_PRESET_ID = builtinVibratoPresetId("straight");
+export const STRAIGHT_VIBRATO_PRESET_ID = builtinVibratoPresetId("straight");
+
+/**
+ * 默认活动预设 = 自然。
+ *
+ * 【为什么不再是直线】直线已经独立成工具了，活动预设只服务颤音工具 —— 而用户切到
+ * 颤音工具时想要的是"听得出来的颤音"，不是一条平直的线。直线留给直线工具，
+ * 这里给一个通用性最好的出厂音色。
+ */
+export const DEFAULT_ACTIVE_VIBRATO_PRESET_ID = builtinVibratoPresetId("natural");
