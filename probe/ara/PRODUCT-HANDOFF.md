@@ -13,8 +13,12 @@ HiFiGAN缓存与正常长人声也在最终门中。后续仅最终一次review�
 REAPER所属project时钟和正向线性保调路径，plugin lib80通过。新规范release bundle
 `.build-tmp/embedded-host-stretch-01/HiFiShifter.vst3`构建exit0，引擎SHA256
 `2F4FD9EC8B443DBA8A7225A740EB5506C2EC7071AEBBB2AC880438044D951C38`，尚未真实加载验收。
-`dfe8f4e`是Task32授权工作区基础（两真实scope回归exit0），**尚未接GUI**；Task33共享actor
-开发中。新源改动不包含在上述bundle里，不能混用证据。
+`dfe8f4e`是Task32授权工作区基础（两真实scope回归exit0）；`2cdf48ff`已接文档唯一原
+actor/跨轨history/真实queued租约授权/全局solo独立输出/基础doc关闭与共享flush。
+批末plugin lib89、相关frontend74、tsc与实际document apply定向回归均正常exit0；Task34
+详细v2保存/恢复开发中。新源改动不包含在上述bundle里，不能混用证据，native多轨未验收。
+短actor filter曾摘要后退出挂住，完整lib正常exit；确切退出根因未知，未通过禁用模型或
+强杀冒充通过。自有测试PID/候选FCPE链和生命周期证据在Task33本地report，历史49800未碰。
 
 完整marker/fade/tempo接口源码调查见`HOST-GEOMETRY-FINDINGS.md`；标准ARA缺普通fade/
 marker数组，REAPER直接take绑定尚未取得实测。原kernel stretch_markers目前只保存未消费，

@@ -890,4 +890,8 @@ Task 33: Ruling: 用户坚持时间拉伸必须、倒放暂缓且最终一次rev
 
 Task 38: Ruling: 官方锁定REAPER头提供parent take但未给ARA hostRef转换opcode；7.81淡化又新增DIR_NEW/DIR2_NEW，原kernel markers只持久化不渲染 — 以直接所属take+真实assignment建立绑定，先记录接口/契约缺口，不按名字/位置猜对应；后续将参数坐标与marker管线一起接入 — 若沿用旧字段或把时长比/字段保存当完整支持，会继续曲线漂移或错误fade/拉伸。
 
+Task 33: Ruling: 真实文档唯一原actor/跨轨history、scope指纹、queued路线代次与事件授权、global solo逐轨PCM在2cdf48ff；批末lib89/前端74/tsc及实际document apply回归exit0 — 继续Task34详细v2/冷恢复，保留native多轨GUI和完整拉伸门；只最后review，不部署旧bundle冒充新版 — 若仅以共享Arc或绿测结束，会漏逐组件保存、宿主窗口及音频链路。
+
+Task 33: Ruling: 短actor filter曾打印摘要后退出挂住，full89及无actor对照正常exit；无证据把FCPE预热确定为根因 — 保留本轮自有PID/输出调查，未改kernel禁模型、未用强杀当Green，显式doc.close三秒内join/释放/撤销通过；后续继续寿命门 — 若把摘要当退出码或随意禁预热，会掩盖本机退出异常或损坏真实分析功能。
+
 
