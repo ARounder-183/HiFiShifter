@@ -28,6 +28,7 @@ pub(crate) struct ExtensionOwner {
     closed:std::sync::atomic::AtomicBool,
     writer_id:AtomicU64,
     reaper:Mutex<Option<Arc<crate::host::reaper::ReaperHost>>>,
+    host_geometry:Mutex<Option<(u64,u64,Result<crate::host::geometry::BoundHostGeometry,String>)>>,
     pub snapshots: [super::snapshot::SnapshotPublisher; 2],
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
     pending_restore:Mutex<Option<crate::state_channel::EditState>>,
@@ -45,6 +46,76 @@ mod bound_tests {
     use ara2_bridge::companion::{CompanionFactory, CompanionProcessorBinding, CompanionRoles};
     use ara2_bridge::plugin::{FactoryBuilder, PluginBuilder};
     use ara2_bridge::sys::*;
+
+    /// 原生getter可同步调用真实doc.close/owner.stop/assignment回调，不能持任何内部锁。
+    #[test]
+    fn task38a_owner_gate_rechecks_document_close_owner_scope_and_model_after_transport_state() {
+        for change in ["document","owner","scope","model"] {
+            let (model,owners,_ids)=crate::editor::session::tests::workspace_fixture();let document=model.session();let owner=owners[0].clone();
+            let host=crate::host::reaper::ReaperFixture::new();
+            unsafe {owner.bind_reaper_host(host.context());}host.reset();
+            let weak=Arc::downgrade(&owner);let doc=document.clone();
+            *host.hook.borrow_mut()=Some(("state".into(),Box::new(move ||match change {
+                "document"=>doc.close(),"owner"=>weak.upgrade().unwrap().stop_editor(),
+                "scope"=>{doc.scope_revision.fetch_add(1,Ordering::AcqRel);},_=>{doc.revision.fetch_add(1,Ordering::AcqRel);},
+            })));
+            owner.refresh_reaper_transport();let calls=host.calls();let pose=document.clock.diagnostics()["reaper_position_authority"].clone();
+            document.close();assert_eq!(calls,["validate:ReaProject*","state"],"{change}: revoked batch must not continue any getter");assert_eq!(pose,false,"{change}: revoked result cannot publish");
+        }
+    }
+
+    /// 同一owner只有唯一真实region才有typed几何，位置相等不会建立额外身份关系。
+    #[test]
+    fn task38a_owner_geometry_requires_unique_actual_assignment_and_compatible_playback_window() {
+        let (model,owners,ids)=crate::editor::session::tests::workspace_fixture();let document=model.session();let owner=&owners[0];
+        let first=(&*ids[0] as *const u8) as u64;let second=(&*ids[1] as *const u8) as u64;
+        let host=crate::host::reaper::ReaperFixture::new();unsafe {owner.bind_reaper_host(host.context());}host.reset();
+        assert!(owner.reaper_geometry().unwrap_err().contains("incompatible"));
+        {let mut regions=document.regions.lock().unwrap();let region=regions.get_mut(&first).unwrap();region.start_in_playback_time=1.;region.duration_in_playback_time=4.;}
+        assert_eq!(owner.reaper_geometry().unwrap().region_key,first);
+        let raw=owner.binding.lock().unwrap().as_ref().unwrap().as_raw();
+        // playback仍只有first，但editor另一region也属于此owner，不能忽略它伪造唯一性。
+        unsafe {let ext=&*raw;((*ext.editorRendererInterface).addPlaybackRegion.unwrap())(ext.editorRendererRef,second as *mut _);}
+        host.reset();assert!(owner.reaper_geometry().unwrap_err().contains("exactly one"));assert!(host.calls().is_empty());
+        unsafe {let ext=&*raw;((*ext.editorRendererInterface).removePlaybackRegion.unwrap())(ext.editorRendererRef,second as *mut _);}
+        unsafe {let ext=&*raw;((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(ext.playbackRendererRef,second as *mut _);}
+        host.reset();assert!(owner.reaper_geometry().unwrap_err().contains("exactly one"));assert!(host.calls().is_empty());
+        unsafe {let ext=&*raw;for key in [first,second] {((*ext.playbackRendererInterface).removePlaybackRegion.unwrap())(ext.playbackRendererRef,key as *mut _);}}
+        host.reset();assert!(owner.reaper_geometry().unwrap_err().contains("exactly one"));assert!(host.calls().is_empty());document.close();
+    }
+
+    #[test]
+    fn task38a_owner_geometry_getter_reentry_discards_closed_or_changed_scope() {
+        for change in ["document","owner","scope","model"] {
+            let (model,owners,_ids)=crate::editor::session::tests::workspace_fixture();let document=model.session();let owner=owners[0].clone();
+            let host=crate::host::reaper::ReaperFixture::new();unsafe {owner.bind_reaper_host(host.context());}host.reset();
+            let weak=Arc::downgrade(&owner);let doc=document.clone();
+            *host.hook.borrow_mut()=Some(("D_LENGTH".into(),Box::new(move ||match change {
+                "document"=>doc.close(),"owner"=>weak.upgrade().unwrap().stop_editor(),
+                "scope"=>{doc.scope_revision.fetch_add(1,Ordering::AcqRel);},_=>{doc.revision.fetch_add(1,Ordering::AcqRel);},
+            })));
+            let result=owner.reaper_geometry();let calls=host.calls();document.close();
+            assert!(result.unwrap_err().contains("authorization revoked"));assert_eq!(calls.last().unwrap(),"D_LENGTH","{change}");
+        }
+    }
+
+    /// 可消费副本只含Rust数据；普通fade变化可在UI重新采集，代次变化/关闭不返回旧值。
+    #[test]
+    fn task38a_owner_cached_geometry_is_read_only_and_revocable_without_host_calls() {
+        let (model,owners,ids)=crate::editor::session::tests::workspace_fixture();let document=model.session();let owner=&owners[0];
+        let first=(&*ids[0] as *const u8) as u64;
+        {let mut regions=document.regions.lock().unwrap();let region=regions.get_mut(&first).unwrap();region.start_in_playback_time=1.;region.duration_in_playback_time=4.;}
+        let host=crate::host::reaper::ReaperFixture::new();unsafe {owner.bind_reaper_host(host.context());}
+        assert!(owner.host_geometry_metadata().is_err());owner.refresh_reaper_transport();host.reset();
+        let cached=owner.host_geometry_metadata().unwrap();assert_eq!(cached.region_key,first);
+        assert_eq!(cached.geometry.fade_in_sec,0.2);assert!(host.calls().is_empty());
+        std::thread::scope(|scope| {scope.spawn(|| {assert_eq!(owner.host_geometry_metadata().unwrap(),cached);assert!(owner.reaper_geometry().is_err());}).join().unwrap();});
+        assert!(host.calls().is_empty());let revision=document.revision.load(Ordering::Acquire);
+        host.set_value("D_FADEINLEN",0.75);owner.refresh_reaper_transport();
+        assert_eq!(document.revision.load(Ordering::Acquire),revision);assert_eq!(owner.host_geometry_metadata().unwrap().geometry.fade_in_sec,0.75);
+        document.scope_revision.fetch_add(1,Ordering::AcqRel);assert!(owner.host_geometry_metadata().is_err());
+        document.close();assert!(owner.host_geometry_metadata().is_err());assert!(owner.host_geometry.lock().unwrap().is_none());
+    }
 
     /// 测试专用同步驱动：冻结阶段持锁，真正内核计算阶段不借文档事务。
     fn render_test_edits(owner:&ExtensionOwner,document:&super::super::document::DocumentSession,edits:&crate::state_channel::EditState)
@@ -624,18 +695,84 @@ impl ExtensionOwner {
     /// # Safety
     /// context须为宿主初始化期间活FUnknown。
     pub(crate) unsafe fn bind_reaper_host(&self,context:*mut std::ffi::c_void) {
-        let host=unsafe {crate::host::reaper::ReaperHost::from_context(context)}.map(Arc::new);
-        crate::log_line(&format!("REAPER project transport available={}",host.is_some()));
+        let bound=self.document.lock().unwrap().is_some();
+        let stamp=if bound {match self.host_query_stamp() {Ok(stamp)=>Some(stamp),Err(_)=>return}} else {None};
+        let authorized=||!self.is_closed()&&match &stamp {Some(stamp)=>self.host_query_authorized(stamp),None=>self.document.lock().unwrap().is_none()};
+        let host=unsafe {crate::host::reaper::ReaperHost::from_context(context,authorized)}.map(Arc::new);
+        if !authorized() {return;}
+        crate::log_line(&format!("REAPER host extension available={}",host.is_some()));
         let old=std::mem::replace(&mut *self.reaper.lock().unwrap(),host);drop(old);
+    }
+    /// 短事务冻结真实owner/document/model/scope；整个host调用链都不持内部锁。
+    fn host_query_stamp(&self)->Result<(Arc<super::document::DocumentSession>,u64,u64,Vec<u64>),String> {
+        let document=self.editor_document()?;
+        let _transaction=document.transaction.lock().unwrap();
+        if self.is_closed()||!document.is_alive() {return Err("host query document/owner closed".into());}
+        let keys=self.host_assigned_regions(&document)?;
+        let model=document.revision.load(Ordering::Acquire);let scope=document.scope_revision.load(Ordering::Acquire);
+        drop(_transaction);Ok((document,model,scope,keys))
+    }
+    fn host_query_authorized(&self,stamp:&(Arc<super::document::DocumentSession>,u64,u64,Vec<u64>))->bool {
+        let (document,model,scope,keys)=stamp;
+        let _transaction=document.transaction.lock().unwrap();
+        !self.is_closed()&&document.is_alive()
+            && self.editor_document().is_ok_and(|current|Arc::ptr_eq(&current,document))
+            && document.revision.load(Ordering::Acquire)==*model&&document.scope_revision.load(Ordering::Acquire)==*scope
+            && self.host_assigned_regions(document).is_ok_and(|current|current==*keys)
+    }
+    /// 几何绑定必须覆盖owner的全部已分配角色，不能只拿playback子集隐藏editor歧义。
+    fn host_assigned_regions(&self,document:&super::document::DocumentSession)->Result<Vec<u64>,String> {
+        let mut keys=self.assignments.lock().unwrap().values().flatten().copied().collect::<BTreeSet<_>>();
+        let sequences=self.sequences.lock().unwrap().values().flatten().copied().collect::<BTreeSet<_>>();
+        let members=document.sequence_regions.lock().unwrap();
+        for sequence in sequences {keys.extend(members.get(&sequence).ok_or("unknown host assigned sequence")?.iter().copied());}
+        drop(members);let keys=keys.into_iter().collect::<Vec<_>>();
+        if !keys.is_empty()&&region_owners().lock().unwrap().resolve(&keys).map_err(|_|"invalid host assigned region")?.0!=document.id {
+            return Err("host assigned region belongs to another document".into());
+        }Ok(keys)
+    }
+    /// 仅UI/model线程读取；唯一assignment先成立，位置/长度仅用于绑定后相容核对。
+    pub(crate) fn reaper_geometry(&self)->Result<crate::host::geometry::BoundHostGeometry,String> {
+        let stamp=self.host_query_stamp()?;
+        let [region_key]=stamp.3.as_slice() else {return Err("REAPER geometry requires exactly one assigned ARA region".into());};
+        let region=stamp.0.regions.lock().unwrap().get(region_key).cloned().ok_or("assigned ARA region unavailable")?;
+        let host=self.reaper.lock().unwrap().clone().ok_or("REAPER host extension unavailable")?;
+        let geometry=host.geometry(||self.host_query_authorized(&stamp))?;
+        let compatible=|a:f64,b:f64|a.is_finite()&&b.is_finite()
+            &&(a-b).abs()<=1e-7+8.*f64::EPSILON*a.abs().max(b.abs());
+        if !compatible(geometry.start_sec,region.start_in_playback_time)||!compatible(geometry.duration_sec,region.duration_in_playback_time) {
+            return Err("direct take geometry incompatible with assigned ARA playback window".into());
+        }
+        if !self.host_query_authorized(&stamp) {return Err("host geometry authorization revoked".into());}
+        Ok(crate::host::geometry::BoundHostGeometry {region_key:*region_key,geometry})
+    }
+    /// actor/worker只可消费UI冻结的Rust值，不沿此访问器调用host；代次变化明确不可用。
+    pub(crate) fn host_geometry_metadata(&self)->Result<crate::host::geometry::BoundHostGeometry,String> {
+        let stamp=self.host_query_stamp()?;
+        let cached=self.host_geometry.lock().unwrap().clone().ok_or("REAPER geometry has not been sampled on model/UI thread")?;
+        if cached.0!=stamp.1||cached.1!=stamp.2||!self.host_query_authorized(&stamp) {
+            return Err("REAPER geometry metadata superseded".into());
+        }cached.2
     }
     /// 只由已验证的native view UI timer调用；释放内部锁后才调用可能重入的host函数。
     pub(crate) fn refresh_reaper_transport(&self) {
-        let document={self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade)};
-        if !document.as_ref().is_some_and(|document|document.is_alive()) {return;}
+        let Ok(stamp)=self.host_query_stamp() else {return;};
         let host={self.reaper.lock().unwrap().clone()};
-        if let Some(host)=host {if let Ok((position,playing))=host.sample() {
-            if let Some(clock)=self.clock.get() {clock.publish_host(position,playing);}
+        if let Some(host)=host {if let Ok((position,playing))=host.sample(||self.host_query_authorized(&stamp)) {
+            // getter可能重入关闭/改scope，发布与撤销共用最终短事务。
+            let _transaction=stamp.0.transaction.lock().unwrap();
+            if !self.is_closed()&&stamp.0.is_alive()&&stamp.0.revision.load(Ordering::Acquire)==stamp.1
+                &&stamp.0.scope_revision.load(Ordering::Acquire)==stamp.2 {
+                if let Some(clock)=self.clock.get() {clock.publish_host(position,playing);}
+            }
         }}
+        if !self.host_query_authorized(&stamp) {return;}
+        let geometry=self.reaper_geometry();
+        let _transaction=stamp.0.transaction.lock().unwrap();
+        if !self.is_closed()&&stamp.0.is_alive()&&stamp.0.revision.load(Ordering::Acquire)==stamp.1
+            &&stamp.0.scope_revision.load(Ordering::Acquire)==stamp.2 {
+            *self.host_geometry.lock().unwrap()=Some((stamp.1,stamp.2,geometry));
+        }
     }
     /// realtime只读角色原子值；只有playback角色负责替换歌曲音频。
     pub(crate) fn renders_playback(&self)->bool {self.role.load(Ordering::Acquire)==1}
@@ -673,6 +810,7 @@ impl ExtensionOwner {
             self.snapshots.iter().for_each(|snapshot|snapshot.clear());
         }
         let host=self.reaper.lock().unwrap().take();drop(host);
+        self.host_geometry.lock().unwrap().take();
         self.cancel_preparation();
         if let Some(Ok(worker))=self.preparation.get() {worker.close();}
     }

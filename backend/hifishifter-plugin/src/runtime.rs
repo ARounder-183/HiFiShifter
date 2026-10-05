@@ -50,13 +50,10 @@ impl Runtime {
                 "https://example.invalid",
                 crate::VERSION,
             )
-            // REAPER 只有在工厂声明这些能力后，才会把 item 拉伸与内容淡化写进
-            // playback region 的 transformation flags；映射层随后按两个时间坐标计算倍率。
+            // 仅线性保调已实现；tempo反映与content fade须通过完整音频门后再协商。
             .capabilities(
                 FactoryCapabilities::default().with_playback_transformations(
-                    PlaybackTransformationFlags::TIMESTRETCH
-                        | PlaybackTransformationFlags::REFLECT_TEMPO
-                        | PlaybackTransformationFlags::CONTENT_FADES,
+                    PlaybackTransformationFlags::TIMESTRETCH,
                 ),
             )
             // 每个文档控制器拿到**自己的一份**模型：一份模型对应一份 ARA 文档。
@@ -97,4 +94,16 @@ pub fn runtime() -> Option<&'static Runtime> {
             }
         })
         .as_ref()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// 宿主实际读取的native工厂不能把尚未实现的tempo/content fade协商给插件。
+    #[test]
+    fn task38a_native_factory_advertises_only_implemented_linear_timestretch() {
+        let runtime=Runtime::init().unwrap();
+        let raw=unsafe {&*runtime.factory.0.as_raw()};
+        assert_eq!(raw.supportedPlaybackTransformationFlags as u32,PlaybackTransformationFlags::TIMESTRETCH.bits());
+    }
 }
