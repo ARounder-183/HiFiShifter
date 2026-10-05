@@ -106,6 +106,9 @@ export const persistUiSettings = createAsyncThunk(
             drawDragDirection: s.drawDragDirection,
 
             lineVibratoDragDirection: s.lineVibratoDragDirection,
+            // 参数编辑器上次使用的工具（`select` / `draw` / `line` / `vibrato`）。
+            // 与拖动方向同属"本机记忆"，因此和它们写在一起。
+            paramEditorTool: s.toolMode,
             smoothnessPercent: s.edgeSmoothnessPercent,
             customScalePresets: s.customScalePresets,
             // `null` 在线上格式里表示"没设过"，因此转成 `undefined` 让字段整个
