@@ -894,4 +894,10 @@ Task 33: Ruling: 真实文档唯一原actor/跨轨history、scope指纹、queued
 
 Task 33: Ruling: 短actor filter曾打印摘要后退出挂住，full89及无actor对照正常exit；无证据把FCPE预热确定为根因 — 保留本轮自有PID/输出调查，未改kernel禁模型、未用强杀当Green，显式doc.close三秒内join/释放/撤销通过；后续继续寿命门 — 若把摘要当退出码或随意禁预热，会掩盖本机退出异常或损坏真实分析功能。
 
+Task 34: Ruling: 三个真实RED暴露组件终止未即时撤销输出/view、已排队关窗尾笔被丢、doc.close后旧actor Arc滞留分析缓存 — a5dfa654最小修正并保留route代次/同名view身份检查，12定向回归exit0；组件/文档关闭不混为一谈，v2形状不变 — 若直接忽略closed或清整个共享actor，会越权写入或把其它轨道编辑停掉。
+
+Task 34: Ruling: 旧归档原始v2 481/22516bytes、实际COM/Weak/IBStream、尾笔/undo范围保存和未开GUI后台publisher WORLD冷恢复已有源码证据 — A60≈260.947/B67≈390.265Hz，undo后A60不变/B64≈329.104Hz；继续完整宿主变换，不以这些fake host/source测试冒充REAPER原窗口/冷重开 — 若把库oracle当真实宿主验收，会漏host state/window时序及变换链。
+
+Task 38: Ruling: 普通fade改变未必推进ARA model revision，强host interface引用也不保活project/take — typed几何批次前后校验官方GetProjectStateChangeCount，并在各getter前后重查doc/owner/scope以容许重入；缺direct take保持不可用，撤回虚假REFLECT_TEMPO/CONTENT_FADES能力但保留线性TIMESTRETCH — 若只检查开始时活性或广告未实现能力，会有悬空查询或宿主停止自行淡化。
+
 

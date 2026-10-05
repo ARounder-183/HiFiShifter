@@ -147,7 +147,8 @@ impl EditorSession {
 
 Task32授权工作区基础已在dfe8f4e，真实同源/同名/范围撤销/空scope两用例exit0；尚未接GUI。
 Task33共享actor/history/事件接线在2cdf48ff，lib89/前端74/tsc及实际document apply定向
-回归exit0；Task34逐组件恢复正在实施，Task35真实验收待完成。
+回归exit0；Task34在a5dfa654完成12定向源码门（旧v2/实际stream/Weak/尾笔/undo/无GUI
+WORLD冷恢复），Task35真实验收待完成。新Task38a开始宿主几何/能力契约，完整变换仍open。
 原Task36 renderer透传/typed clock及线性stretch已在ddbb5a97，完整lib80通过；新bundle
 host-stretch-01构建成功但尚未真实验收。后续以完整集成Task38-41门为准，不缩小拉伸需求。
 用户Esc停止Computer Use，本批只源码。Task30双轨部分证据不等同统一工作区完成。

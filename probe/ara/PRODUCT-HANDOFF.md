@@ -16,7 +16,10 @@ REAPER所属project时钟和正向线性保调路径，plugin lib80通过。新�
 `dfe8f4e`是Task32授权工作区基础（两真实scope回归exit0）；`2cdf48ff`已接文档唯一原
 actor/跨轨history/真实queued租约授权/全局solo独立输出/基础doc关闭与共享flush。
 批末plugin lib89、相关frontend74、tsc与实际document apply定向回归均正常exit0；Task34
-详细v2保存/恢复开发中。新源改动不包含在上述bundle里，不能混用证据，native多轨未验收。
+在`a5dfa654`完成12定向源码门：旧RPP原v2 bytes、实际COM/Weak/stream、关窗尾笔及undo保存、
+未开GUI双轨WORLD后台publisher冷恢复（A60≈260.947/B67≈390.265，undo后B64≈329.104Hz）。
+本批修即时组件撤销、view移除后尾笔被丢、旧actor缓存滞留，v2形状未改。Task38a开始typed
+直接take几何与能力契约；完整变换仍未完成。新源改动不包含在上述bundle里，不能混用证据，native多轨未验收。
 短actor filter曾摘要后退出挂住，完整lib正常exit；确切退出根因未知，未通过禁用模型或
 强杀冒充通过。自有测试PID/候选FCPE链和生命周期证据在Task33本地report，历史49800未碰。
 
