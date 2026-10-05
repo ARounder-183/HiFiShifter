@@ -1000,4 +1000,6 @@ Task 45: Ruling: release-delivery-02只构建All Release已exit0，生成App/插
 
 Task 45: Ruling: 既有隔离启动器只识别probe bundle目录，无法直接消费统一交付路径；REAPER保存profile又会追加公共VST3路径 — 增加DeliveryName直连交付、私有日志，冷重开仅接受原bundle首路径加两个已观察公共路径；复制归档双轨到release-user-02，原RPP不改、不重建、不跑测试 — 若放宽到任意额外路径或复用旧DLL会验错版本；45948仍在，未启动新实例，真实GUI完成门仍待用户。
 
+Task 41: Ruling: 用户确认旧REAPER已关闭，CIM实际无实例 — 直接以release-delivery-02打开release-user-02双轨副本，PID53116窗口响应、真实插件日志两路role1快照ready；不启动独立App、不跑测试、不改原工程/已加载DLL — 这只证明新包已加载供用户使用，不外推四BUG、全部变换/缓存及冷恢复已过；保留当前实例给用户操作，不擅自关闭。
+
 
