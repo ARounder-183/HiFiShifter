@@ -1252,7 +1252,7 @@ thread_local! {
 
 /// 幂等地启动一次后台会话预热（**绝不阻塞**调用线程）。
 ///
-/// `is_available()` 与启动流程用它预热：会话构建 + 烟测可能耗时数秒
+/// App启动流程显式调用；`is_available()`只读结果，不启动预热。会话构建可能耗时数秒
 /// （DirectML 首次推理 1.5s+，CPU 仅数十毫秒），绝不能发生在 UI 线程 /
 /// 前端初始化命令 / 引擎 worker / 快照构建上 —— 实测 GPU 设备下启动会被
 /// 阻塞约 4 秒、期间前端无法交互。
@@ -1289,7 +1289,8 @@ fn confirmed_unavailable() -> Option<String> {
 ///（产出未处理音频）或跳过分离/分析，乐观是安全侧；真实失败会在首次实际
 /// 使用（load / 预热完成）时暴露并缓存为 false。
 pub fn is_available() -> bool {
-    ensure_background_prewarm();
+    // 可用性只读：快照/参数查询不应偷偷启动ORT线程。App已在登记模型后显式预热，
+    // 插件真实worker使用get_or_init路径加载；避免短查询结束时线程撞上进程/DLL退出。
     match confirmed_unavailable() {
         Some(e) => {
             let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
@@ -2613,6 +2614,18 @@ mod tests {
         formant_shifts_for_frames, mel_frame_count, quantize_key_shift, shift_n_fft,
         KEY_SHIFT_QUANTUM_SEMITONES,
     };
+
+    /// 只读能力轮询不能隐式启动模型线程；实际合成仍由TLS加载路径负责。
+    #[test]
+    fn availability_query_does_not_start_model_prewarm() {
+        let started = super::PREWARM_STARTED.load(std::sync::atomic::Ordering::Acquire);
+        let session_exists = super::SHARED_SESSION.get().is_some();
+        for _ in 0..1000 {
+            let _ = super::is_available();
+        }
+        assert_eq!(super::PREWARM_STARTED.load(std::sync::atomic::Ordering::Acquire), started);
+        assert_eq!(super::SHARED_SESSION.get().is_some(), session_exists);
+    }
 
     #[test]
     fn model_cache_digest_changes_for_equal_length_middle_bytes_and_configuration() {

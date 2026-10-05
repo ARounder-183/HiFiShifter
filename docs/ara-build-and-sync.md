@@ -57,6 +57,11 @@ bundle及三模型。后者45个文件摘要全部复核无差异；sourceFinger
 模型版本，nativeAcceptance与verificationRequested均false。导入DLL和frontend摘要
 核对通过。Release、完整Verify及真实用户验收未完成，不把Debug构建当最终验收。
 
+后续回归修正后的All Debug `regression-fixed-build-03`也已exit0，45文件摘要复核0差异，
+App保留vslib/插件无其导入。分段测试证据见`probe/ara/REGRESSION-FINDINGS.md`；本次
+不重复已过批次，manifest verificationRequested/nativeAcceptance仍false。完整最终
+Verify、Release及宿主验收未完成，不能将分段定向结果伪装成单次Verify通过。
+
 ## 功能同步：不复制两套产品实现
 
 | 功能 | 唯一权威源码 | 宿主适配 |

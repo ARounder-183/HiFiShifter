@@ -1657,9 +1657,12 @@ mod lifetime_tests {
             assert_eq!(unsafe {(COMPONENT_VTBL.get_state)(components[index],(&raw mut stream).cast())},K_RESULT_OK);
             let length=u32::from_le_bytes(stream.bytes[..4].try_into().unwrap()) as usize;assert_eq!(stream.bytes.len(),length+4);
             let saved:serde_json::Value=serde_json::from_slice(&stream.bytes[4..]).unwrap();
-            assert_eq!(saved["version"],2);assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(),1);
+            // source basis已随自动初始化进入v3；仍须证明IBStream仅保存当前组件范围。
+            assert_eq!(saved["version"],3);assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(),1);
             assert_eq!(saved["edits"]["tracks"][0]["id"],id);assert_eq!(saved["edits"]["tracks"][0]["volume"],if index==0 {0.5} else {0.25});
             assert_eq!(saved["edits"]["bindings"].as_object().unwrap().len(),1);
+            let regions=saved["edits"]["atlas"]["regions"].as_object().expect("v3 source basis");
+            assert_eq!(regions.len(),1);assert!(regions.values().all(|region|region["root"]==id));
             assert_eq!(unsafe {(COMPONENT_VTBL.set_state)(components[index],(&raw mut stream).cast())},K_RESULT_OK);
         }
         document.close();for component in components {assert_eq!(unsafe {component_release(component)},0);}

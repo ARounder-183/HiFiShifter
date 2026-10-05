@@ -984,4 +984,10 @@ Task 38: Ruling: 连续拆分的历史完整父与最近子父都被当活候选
 
 Task 38: Ruling: 可读取的SWS旧Bezier代码与Cockos AskJF 2014回复仅给视觉系数，另明确音频常用优化多项式；未找到7.81双轴精确式 — 保留新轴实际参数显示，不把旧近似套上去，精确shape仍列宿主oracle门 — 若把“看起来像”当完整fade同步会重复此前错误，且违反不猜API/公式的边界；未启动REAPER或中途叫用户测。
 
+Task 41: Ruling: Windows App集中回归241过/4失败来自写死Unix /tmp，改唯一系统TEMP后五个快照断言通过但原进程异常退出；三个模型能力查询会隐式启动ORT线程 — 改查询为只读，保留App显式预热和真实worker按需加载；快照5、轮询护栏3及真实短HiFiGAN/HNSEP均正常exit0，App完整245过 — 若只看test result ok或旁路真实模型会漏退出异常；旧原生故障符号栈未可靠取得，不声称已证明精确崩溃地址，REAPER未启动。
+
+Task 41: Ruling: plugin全量154过/2失败，四样本权限/gain夹具默认NN导致分析pending，实际state已因source basis升v3 — 夹具显式旁路而不放宽产品分析门，IBStream同时验证v3单region/root范围；最终bound22和state1定向exit0，mapping/assignment/exports/依赖及IPC共24项exit0 — 若把四样本旁路当神经修音或改数字而不校验scope会隐藏真实问题；修正过程一次误改相似夹具已撤回，末次完整Verify仍未成功，不假报全绿。
+
+Task 45: Ruling: 本批查询生命周期与夹具修正后需要同源App/插件产物而非只报库测试 — All Debug regression-fixed-build-03 exit0，45文件SHA256全复核0差异，App保留vslib而plugin engine无其导入；不重复前端/kernel/App已过批次，manifest Verify/native仍false — 若把分段回归或新包摘要当完整Verify/原GUI四BUG验收，会夸大证据；Release、精确fade及集中native仍open，未安装或启动REAPER。
+
 

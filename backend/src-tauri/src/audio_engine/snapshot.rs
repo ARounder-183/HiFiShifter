@@ -1,3 +1,4 @@
+//! 独立App的内存播放快照构建；测试夹具使用系统私有临时目录，保持跨平台。
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
@@ -1034,7 +1035,7 @@ mod tests {
     use crate::audio_engine::resource_manager::DecodeCache;
     use crate::audio_engine::types::{ResampledStereo, StretchKey};
     use crate::state::Clip;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -1059,7 +1060,12 @@ mod tests {
         assert_ne!(linear, soundtouch);
     }
 
-    fn timeline_with_volume_curve() -> crate::state::TimelineState {
+    /// 临时source只作缓存存在性夹具；每次唯一，不假定Unix /tmp或修改系统公共目录。
+    fn snapshot_test_source() -> PathBuf {
+        std::env::temp_dir().join(format!("hifishifter-snapshot-{}.aiff", uuid::Uuid::new_v4()))
+    }
+    /// 使用真实临时source路径构造音量曲线夹具，与解码cache保持同一身份。
+    fn timeline_with_volume_curve(source: &Path) -> crate::state::TimelineState {
         let mut tl = crate::state::TimelineState::default();
         let root = tl.tracks[0].id.clone();
         tl.tracks[0].pitch_analysis_algo = crate::state::PitchAnalysisAlgo::NsfHifiganOnnx;
@@ -1073,7 +1079,7 @@ mod tests {
             start_sec: 0.0,
             length_sec: 0.5,
             color: "#ffffff".to_string(),
-            source_path: Some("/tmp/hifishifter-volume-test.aiff".to_string()),
+            source_path: Some(source.to_string_lossy().into_owned()),
             source_path_relative: None,
             duration_sec: Some(0.5),
             duration_frames: Some(22_050),
@@ -1119,9 +1125,9 @@ mod tests {
 
     #[test]
     fn build_snapshot_attaches_volume_curve_to_rendered_and_raw_clips() {
-        let tl = timeline_with_volume_curve();
+        let path = snapshot_test_source();
+        let tl = timeline_with_volume_curve(&path);
         let out_rate = 44_100;
-        let path = PathBuf::from("/tmp/hifishifter-volume-test.aiff");
         let source_path = path.clone();
         std::fs::write(&source_path, b"stub").expect("create source stub");
 
@@ -1174,13 +1180,12 @@ mod tests {
     /// 与 timeline_with_volume_curve 相同的骨架，但轨道开启 Compose 且
     /// pitch_edit 曲线非零 + user_modified：clip 因此需要处理器渲染，
     /// 快照会查询整 Clip 渲染缓存（垫音 / 冻结判定的作用域）。
-    fn timeline_with_pending_render_clip() -> crate::state::TimelineState {
-        let mut tl = timeline_with_volume_curve();
+    fn timeline_with_pending_render_clip(source: &Path) -> crate::state::TimelineState {
+        let mut tl = timeline_with_volume_curve(source);
         {
             let clip = &mut tl.clips[0];
             clip.id = "clip-pad".to_string();
             clip.name = "pad clip".to_string();
-            clip.source_path = Some("/tmp/hifishifter-pad-test.aiff".to_string());
         }
         let root = tl.resolve_root_track_id(&tl.clips[0].track_id).expect("root");
         tl.tracks
@@ -1241,8 +1246,8 @@ mod tests {
     fn build_snapshot_pads_from_previous_render_for_mid_playback_miss() {
         let _guard = PAD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::synth_clip_cache::clear_pad_suppressed_clips();
-        let tl = timeline_with_pending_render_clip();
-        let path = PathBuf::from("/tmp/hifishifter-pad-test.aiff");
+        let path = snapshot_test_source();
+        let tl = timeline_with_pending_render_clip(&path);
         std::fs::write(&path, b"stub").expect("create source stub");
         let (cache, stretch_cache) = pad_test_caches(&path);
 
@@ -1272,8 +1277,8 @@ mod tests {
         // 未就绪时不得回退旧渲染垫音，必须诚实冻结（原地等待 + 自动恢复），
         // 绝不让用户先听到上一版参数的结果再中途切换。
         crate::synth_clip_cache::set_pad_suppressed_clips(["clip-pad".to_string()]);
-        let tl = timeline_with_pending_render_clip();
-        let path = PathBuf::from("/tmp/hifishifter-pad-test.aiff");
+        let path = snapshot_test_source();
+        let tl = timeline_with_pending_render_clip(&path);
         std::fs::write(&path, b"stub").expect("create source stub");
         let (cache, stretch_cache) = pad_test_caches(&path);
 
@@ -1298,8 +1303,8 @@ mod tests {
     fn build_snapshot_releases_pad_suppression_when_current_render_hits() {
         let _guard = PAD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::synth_clip_cache::set_pad_suppressed_clips(["clip-pad".to_string()]);
-        let tl = timeline_with_pending_render_clip();
-        let path = PathBuf::from("/tmp/hifishifter-pad-test.aiff");
+        let path = snapshot_test_source();
+        let tl = timeline_with_pending_render_clip(&path);
         std::fs::write(&path, b"stub").expect("create source stub");
         let (cache, stretch_cache) = pad_test_caches(&path);
 

@@ -297,7 +297,7 @@ static PREWARM_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// 幂等地启动一次后台会话预热（**绝不阻塞**调用线程）。
 ///
-/// `is_available()` 与启动流程用它预热：会话构建 + 烟测可能耗时数秒
+/// App启动流程显式调用；`is_available()`只读结果，不启动预热。会话构建可能耗时数秒
 /// （GPU EP 的首次推理尤其慢），绝不能发生在 UI 线程 / 前端初始化命令 /
 /// 引擎 worker / 快照构建上 —— 那会阻塞前端初始化与全部 IPC。
 pub fn ensure_background_prewarm() {
@@ -332,7 +332,7 @@ fn confirmed_unavailable() -> Option<String> {
 /// 尚未预热完成时返回 true（乐观）—— 调用方在 false 时会跳过处理器/分离/
 /// 分析路径，乐观是安全侧；真实失败会在首次实际使用或预热完成时暴露并缓存。
 pub fn is_available() -> bool {
-    ensure_background_prewarm();
+    // 可用性查询不改变后台任务生命周期；App显式预热、实际分离按需加载均保持。
     match confirmed_unavailable() {
         Some(e) => {
             if debug_enabled() && !LOGGED_UNAVAILABLE.swap(true, Ordering::Relaxed) {
@@ -668,6 +668,18 @@ pub fn infer_harmonic_noise_mono(
 #[cfg(test)]
 mod content_cache_tests {
     use super::*;
+
+    /// 查询分离能力不能在短快照调用结束后留下新建ORT会话的线程。
+    #[test]
+    fn availability_query_does_not_start_model_prewarm() {
+        let started = PREWARM_STARTED.load(Ordering::Acquire);
+        let session_exists = SHARED_SESSION.get().is_some();
+        for _ in 0..1000 {
+            let _ = is_available();
+        }
+        assert_eq!(PREWARM_STARTED.load(Ordering::Acquire), started);
+        assert_eq!(SHARED_SESSION.get().is_some(), session_exists);
+    }
     fn entry(samples:usize,value:f32)->HnsepCacheEntry {
         HnsepCacheEntry {harmonic:Arc::new(vec![value;samples]),noise:Arc::new(vec![0.;samples])}
     }

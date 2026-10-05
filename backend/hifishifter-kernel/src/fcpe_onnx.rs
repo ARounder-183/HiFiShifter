@@ -1,7 +1,5 @@
-// FCPE ONNX pitch detector.
-//
-// This module provides F0 extraction for pitch analysis, replacing WORLD
-// Harvest/DIO in clip-level pitch detection.
+//! FCPE ONNX音高检测：为片段分析提供F0，替代WORLD Harvest/DIO。
+//! 可用性查询只读；App生命周期显式预热，实际分析按需加载模型。
 
 use num_complex::Complex32;
 use ort::session::Session;
@@ -248,7 +246,7 @@ static PREWARM_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// 幂等地启动一次后台会话预热（**绝不阻塞**调用线程）。
 ///
-/// `is_available()` 与启动流程用它预热：会话构建 + 烟测可能耗时数秒
+/// App启动流程显式调用；`is_available()`只读结果，不启动预热。会话构建可能耗时数秒
 /// （GPU EP 的首次推理尤其慢），绝不能发生在 UI 线程 / 前端初始化命令 /
 /// 引擎 worker / 快照构建上 —— 那会阻塞前端初始化与全部 IPC。
 pub fn ensure_background_prewarm() {
@@ -283,7 +281,7 @@ fn confirmed_unavailable() -> Option<String> {
 /// 尚未预热完成时返回 true（乐观）—— 调用方在 false 时会跳过处理器/分离/
 /// 分析路径，乐观是安全侧；真实失败会在首次实际使用或预热完成时暴露并缓存。
 pub fn is_available() -> bool {
-    ensure_background_prewarm();
+    // 保持只读；预热由宿主生命周期显式启动，实际分析仍按需加载，不能因查询创建后台线程。
     match confirmed_unavailable() {
         Some(e) => {
             if debug_enabled() && !LOGGED_UNAVAILABLE.swap(true, Ordering::Relaxed) {
@@ -1026,6 +1024,18 @@ pub fn infer_f0_hz_f32(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 高频UI/快照查询不得创建ORT会话或异步预热线程。
+    #[test]
+    fn availability_query_does_not_start_model_prewarm() {
+        let started = PREWARM_STARTED.load(Ordering::Acquire);
+        let session_exists = SHARED_SESSION.get().is_some();
+        for _ in 0..1000 {
+            let _ = is_available();
+        }
+        assert_eq!(PREWARM_STARTED.load(Ordering::Acquire), started);
+        assert_eq!(SHARED_SESSION.get().is_some(), session_exists);
+    }
 
     /// 融合改造前 `build_mel_from_waveform` 的逐字复制：先把整张功率谱写进
     /// `n_freqs × n_frames` 矩阵，第二遍才逐 (mel 带, 帧) 乘滤波bank。

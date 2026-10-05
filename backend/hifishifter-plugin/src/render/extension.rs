@@ -538,8 +538,9 @@ mod bound_tests {
         use crate::render::source::SourcePcm;
         use hifishifter_ara_ipc::Request;
         let model=crate::ara::model::ModelHandle::new(); let document=model.session();
+        // 四样本只验证复制/权限/保存与逐轨gain，显式旁路；真实音高自动应用另有WORLD/模型oracle。
         let mut timeline:hifishifter_kernel::state::TimelineState=serde_json::from_value(serde_json::json!({
-            "tracks":[{"id":"a","name":"A","order":0},{"id":"b","name":"B","order":1}],"bpm":120,"project_sec":1,
+            "tracks":[{"id":"a","name":"A","order":0,"pitch_analysis_algo":"none"},{"id":"b","name":"B","order":1,"pitch_analysis_algo":"none"}],"bpm":120,"project_sec":1,
             "clips":[{"id":"clip-a","track_id":"a","name":"A","start_sec":0,"length_sec":4.0/44100.0,
                 "takes":[{"id":"take-a","source_path":"ara://pcm","source_start_sec":0,"source_end_sec":4.0/44100.0}]},
                 {"id":"clip-b","track_id":"b","name":"B","start_sec":0,"length_sec":4.0/44100.0,

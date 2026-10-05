@@ -185,6 +185,15 @@ struct HostRenderCounters { source_hits:u64, intermediate_hits:u64, pcm_hits:u64
 
 ## 当前状态（续）
 
+本批集中回归frontend2724、kernel App配置587/插件配置585、App245均通过且正常退出。
+Windows快照夹具不再写死/tmp，模型is_available改只读（App显式预热/实际按需加载保留），
+五个快照与三个能力轮询护栏、真实短HiFiGAN/HNSEP均exit0。plugin首次全量154过/2失败，
+四样本scope夹具显式旁路与v3 state断言修正后bound22/state1定向exit0；mapping/assignment/
+exports/依赖及IPC共24项通过。未再重跑最后完整plugin；完整Verify/native/Release仍open。
+同源All Debug regression-fixed-build-03已exit0，45文件摘要0差异；本次打包未再请求Verify，
+manifest Verify/native保持false。详见probe/ara/REGRESSION-FINDINGS.md；不为这批测试启动
+REAPER或中途叫用户验收。
+
 旧v2首次恢复现已在真实assigned区域限定的完整图ready后捕获source basis，不等用户
 再落笔。初载后移动+裁切+线性拉伸、局部音频投影、升级v3冷rebind合同与原真实归档v2
 隔离合同共2项exit0。v2首次加载前已改变但未保存的原几何无法回推，不猜basis。
