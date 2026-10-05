@@ -1372,17 +1372,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
               ? ("draw" as const)
               : ("vibrato" as const);
 
-    /**
-     * **当前生效**的预设 —— 预设入口那一行与它的列表都用它。
-     *
-     * 【为什么不是 `activeVibratoPreset`】直线工具固定在直线预设上，与活动预设无关。
-     * 若入口显示活动预设、列表却按"直线工具"给直线打钩，同一块 UI 里就会出现两个
-     * 互相矛盾的"当前预设"：入口写着「自然」、列表却勾着「直线」。两者取同一个值，
-     * 这种矛盾在结构上就不存在了。
-     */
-    const effectiveVibratoPreset =
-        currentDrawTool === "line" ? straightVibratoPreset : activeVibratoPreset;
-
     useEffect(() => {
         if (!drawToolMenuOpen && !pitchSnapMenuOpen) return;
         const onPointerDown = (e: PointerEvent) => {
@@ -7888,13 +7877,19 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     会让"换一个颤音"多出一个说不清归属的入口。
 
                                     行上带活动预设的波形缩略图与名字 —— 预设按钮从工具栏
-                                    撤掉之后，"现在用的是哪个预设"就靠这一行扫读。 */}
+                                    撤掉之后，"现在用的是哪个预设"就靠这一行扫读。
+
+                                    【它始终是颤音工具的活动预设，与当前工具无关】这个入口
+                                    回答的是"**颤音工具**用哪个预设"，那是颤音工具的属性，不是
+                                    "当前这一笔画什么"。直线工具固定从直线预设起手（见
+                                    `straightVibratoPreset`），那是它自己的事，不该改掉这里显示的
+                                    值 —— 用户切回颤音工具时，看到的必须还是他挑的那个。 */}
                                 <AppSubMenu
                                     label={tf("vibrato_toolbar_label")}
-                                    badge={vibratoPresetLabel(effectiveVibratoPreset, tf)}
+                                    badge={vibratoPresetLabel(activeVibratoPreset, tf)}
                                     icon={
                                         <VibratoPresetGlyph
-                                            preset={effectiveVibratoPreset}
+                                            preset={activeVibratoPreset}
                                             width={15}
                                             height={15}
                                         />
@@ -7947,8 +7942,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                     </span>
                                                 </span>
                                                 <span className="hs-menu__trail">
-                                                    {preset.id ===
-                                                    effectiveVibratoPreset.id ? (
+                                                    {preset.id === activeVibratoPresetId ? (
                                                         <span className="hs-menu__check">
                                                             <CheckIcon />
                                                         </span>
