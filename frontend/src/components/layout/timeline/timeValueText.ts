@@ -75,9 +75,6 @@ export function formatPositionText(sec: number, ctx: TimeValueFormatContext): st
     return joinUnits(main, formatCursorUnit(ctx.secondaryTimeUnit as TimeUnit, sec, ctx));
 }
 
-/** 小于此值（秒）的位移视为"没有移动"，不展示增量。 */
-const DELTA_EPSILON_SEC = 1e-6;
-
 /**
  * **带符号的时长**（位移量）→ `+{时长}` / `-{时长}`。
  *
@@ -91,6 +88,24 @@ export function formatSignedDurationText(
     const safe = Number.isFinite(deltaSec) ? deltaSec : 0;
     const sign = safe < 0 ? "-" : "+";
     return `${sign}${formatDurationText(Math.abs(safe), ctx)}`;
+}
+
+/**
+ * 同上，但**显示不出来的位移返回 null**（调用方据此完全省略增量段）。
+ *
+ * 判据是"格式化结果与 0 的文本相同"：低于当前单位的显示精度时（秒/时钟 1ms、
+ * 小节.拍 约 0.5ms）读数就是 `+0.000`，那只会让人以为功能坏了。这样阈值**随
+ * 主/副单位自动变化**，不需要另设一个与单位无关的魔数 —— 与曲率增量"四舍五入
+ * 到 0 就不展示"是同一取舍。
+ */
+export function formatSignedDurationTextOrNull(
+    deltaSec: number | null | undefined,
+    ctx: TimeValueFormatContext,
+): string | null {
+    if (deltaSec === null || deltaSec === undefined) return null;
+    if (!Number.isFinite(deltaSec)) return null;
+    const text = formatSignedDurationText(deltaSec, ctx);
+    return text === formatSignedDurationText(0, ctx) ? null : text;
 }
 
 /** 取值器：与 `useI18n().tVars` 同形（`{name}` 插值，全部出现处都替换）。 */
@@ -134,19 +149,13 @@ export function buildSnapOffsetInfoText(args: {
     t: TimeValueLabelLookup;
 }): string {
     const offsetSec = Math.max(0, Number.isFinite(args.offsetSec) ? args.offsetSec : 0);
-    const dragging =
-        args.deltaSec !== null &&
-        Number.isFinite(args.deltaSec) &&
-        Math.abs(args.deltaSec) > DELTA_EPSILON_SEC;
-    if (!dragging && !(offsetSec > 0)) return args.t("clip_snap_offset", {});
+    // 位移既是"是否在拖拽"的判据，也是要展示的增量文本 —— 只算一次。
+    const delta = formatSignedDurationTextOrNull(args.deltaSec, args.formatCtx);
+    if (delta === null && !(offsetSec > 0)) return args.t("clip_snap_offset", {});
     const offset = formatDurationText(offsetSec, args.formatCtx);
     const position = formatPositionText(args.positionSec, args.formatCtx);
-    if (!dragging) {
+    if (delta === null) {
         return args.t("clip_snap_offset_value", { offset, position });
     }
-    return args.t("clip_snap_offset_value_drag", {
-        offset,
-        position,
-        delta: formatSignedDurationText(args.deltaSec as number, args.formatCtx),
-    });
+    return args.t("clip_snap_offset_value_drag", { offset, position, delta });
 }

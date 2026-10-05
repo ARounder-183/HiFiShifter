@@ -16,7 +16,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { formatCursorUnit, formatFadeLengthTooltip } from "./timeFormat";
+import { formatCursorUnit } from "./timeFormat";
 import {
     buildSnapOffsetInfoText,
     formatDurationText,
@@ -107,14 +107,25 @@ describe("时长（零基点）与时刻（绝对）口径不同", () => {
         expect(shifted.split("\n")[1]).toBe("位置：4.2.000");
     });
 
-    it("时长格式化与淡化 ToolTip 的既有口径逐值一致（回归）", () => {
-        for (const secondary of ["none", "seconds", "barBeats"] as const) {
-            for (const sec of [0, 0.25, 0.5, 1.75, 3]) {
-                expect(
-                    formatDurationText(sec, ctx({ secondaryTimeUnit: secondary })),
-                    `sec=${sec} secondary=${secondary}`,
-                ).toBe(formatFadeLengthTooltip(sec, ctx({ secondaryTimeUnit: secondary })));
-            }
+    it("时长格式化与淡化 ToolTip 的既有口径逐值一致（黄金值回归）", () => {
+        // 这些字面量是改动前的实测输出（120 BPM / 4 拍一小节）—— 收口到本模块时
+        // 必须逐字不变。副单位存在时按 `{主} / {副}` 拼接。
+        const expected: Array<[number, string, string]> = [
+            // [秒, 仅主单位, 主 / 副（seconds）]
+            [0, "0.0.000", "0.0.000 / 0.000"],
+            [0.25, "0.0.500", "0.0.500 / 0.250"],
+            [0.5, "0.1.000", "0.1.000 / 0.500"],
+            [1.75, "0.3.500", "0.3.500 / 1.750"],
+            [3, "1.2.000", "1.2.000 / 3.000"],
+        ];
+        for (const [sec, primaryOnly, withSecondary] of expected) {
+            expect(formatDurationText(sec, ctx({ secondaryTimeUnit: "none" })), `sec=${sec}`).toBe(
+                primaryOnly,
+            );
+            expect(
+                formatDurationText(sec, ctx({ secondaryTimeUnit: "seconds" })),
+                `sec=${sec} +seconds`,
+            ).toBe(withSecondary);
         }
     });
 

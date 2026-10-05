@@ -25,10 +25,10 @@ import { parsePlaybackRateInput } from "./runtime/timelineCanvasStyle";
 import { formatEditNumber } from "./math";
 import {
     formatDurationUnit,
-    formatFadeLengthTooltip,
     parseDurationInput,
     type FadeLengthFormatContext,
 } from "./timeFormat";
+import { formatDurationText } from "./timeValueText";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 
 const FALLBACK_BEATS_PER_BAR = 4;
@@ -357,7 +357,7 @@ function ClipRateEditorFields({
                 <span className="text-qt-micro text-qt-text/60">
                     {tf("clip_rate_editor_duration")}
                     {": "}
-                    {formatFadeLengthTooltip(Number(clip.lengthSec) || 0, formatCtx)}
+                    {formatDurationText(Number(clip.lengthSec) || 0, formatCtx)}
                 </span>
                 <input
                     className={`w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border ${
@@ -401,7 +401,7 @@ function ClipRateEditorFields({
                     }}
                 />
                 <span className="text-qt-micro text-qt-text/60 tabular-nums">
-                    {formatFadeLengthTooltip(previewSec, formatCtx)}
+                    {formatDurationText(previewSec, formatCtx)}
                 </span>
             </label>
 
@@ -417,7 +417,7 @@ function ClipRateEditorFields({
             <div className="text-qt-micro text-qt-text/60">
                 {tf("clip_rate_editor_result")}
                 {": "}
-                {formatFadeLengthTooltip(previewSec, formatCtx)}
+                {formatDurationText(previewSec, formatCtx)}
                 {!autoLength && !durationChanged ? ` (${tf("clip_rate_editor_keep_length")})` : ""}
             </div>
 

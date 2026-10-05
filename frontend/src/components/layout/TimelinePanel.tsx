@@ -62,6 +62,7 @@ import {
     buildCrossfadeGripInfoContent,
     buildSingleFadeInfoContent,
     publishFadeRichTooltip,
+    type FadeInfoDelta,
     type FadeLabelLookup,
 } from "./timeline/fadeTooltipText";
 import {
@@ -423,6 +424,15 @@ interface TimelinePanelProps {
     importTempoMapKeySignature?: boolean;
     onImportTempoMapKeySignatureChange?: (v: boolean) => void;
 }
+
+/** 单侧淡变 Tooltip 的发布数据。`delta` 只在拖拽时给（悬停传 undefined）。 */
+type FadeSideInfo = {
+    isOut: boolean;
+    shape: number;
+    dir: number;
+    lengthSec: number;
+    delta?: FadeInfoDelta;
+};
 
 export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     midiClipDialogOpen,
@@ -3868,6 +3878,56 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [sessionRef, t, tVars, timeValueFormatCtx],
     );
 
+    /** 淡变富 Tooltip 的锚点（内核容器；AppTooltip 自己跟随指针）。 */
+    const fadeTooltipAnchor = React.useCallback(
+        (): HTMLElement | null =>
+            typeof document === "undefined"
+                ? null
+                : (document.querySelector("[data-hs-fade-tooltip-anchor]") as HTMLElement | null),
+        [],
+    );
+
+    /**
+     * 淡变 Tooltip 的**唯一发布点**（悬停与两种拖拽共用）。
+     *
+     * 悬停只给当前值；拖拽传入 `delta`（当前值 − 按下时的值）后，长度与曲率两行
+     * 各追加 `[±增量]`，并随指针**逐帧刷新** —— 富内容经事件总线直接更新气泡，
+     * 不依赖元素属性变化被观察到，因此拖拽中的读数实时跟着走。
+     */
+    const publishFadeSideInfo = React.useCallback(
+        (anchor: HTMLElement | null, side: FadeSideInfo) => {
+            publishFadeRichTooltip(
+                anchor,
+                buildSingleFadeInfoContent({
+                    ...side,
+                    formatCtx: timeValueFormatCtx,
+                    t: t as unknown as FadeLabelLookup,
+                }),
+            );
+        },
+        [t, timeValueFormatCtx],
+    );
+
+    /** 交叉点抓手（双列）的发布：两侧各自带自己的增量。 */
+    const publishFadeGripInfo = React.useCallback(
+        (
+            anchor: HTMLElement | null,
+            earlier: Omit<FadeSideInfo, "isOut">,
+            later: Omit<FadeSideInfo, "isOut">,
+        ) => {
+            publishFadeRichTooltip(
+                anchor,
+                buildCrossfadeGripInfoContent({
+                    earlier,
+                    later,
+                    formatCtx: timeValueFormatCtx,
+                    t: t as unknown as FadeLabelLookup,
+                }),
+            );
+        },
+        [t, timeValueFormatCtx],
+    );
+
     /** 内核淡变角预览：只改对应一侧的淡变长度（另一侧保持不变）。 */
     const handleKernelFadePreview = React.useCallback(
         (args: {
@@ -4004,6 +4064,20 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         ? setClipFades({ clipId: args.clipId, fadeInDir: nextDir })
                         : setClipFades({ clipId: args.clipId, fadeOutDir: nextDir }),
                 );
+                // 曲率拖拽的实时浮标：曲率行带 `[±增量]`，长度行只给当前值。
+                // 增量基准必须取**按下时**的 dir（`origin.baseById`）—— `baseDir`
+                // 上面那个变量是本帧从 Redux 读的"上一帧值"，用它会让增量逐帧归零。
+                const curveBase = origin.baseById.get(args.clipId);
+                const curveIsOut = args.side === "out";
+                publishFadeSideInfo(fadeTooltipAnchor(), {
+                    isOut: curveIsOut,
+                    shape,
+                    dir: nextDir,
+                    lengthSec: widthSec,
+                    delta: {
+                        dir: nextDir - ((curveIsOut ? curveBase?.fadeOutDir : curveBase?.fadeInDir) ?? 0),
+                    },
+                });
                 return;
             }
 
@@ -4040,6 +4114,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     );
                 }
             });
+            // 长度拖拽的实时浮标：长度行带 `[±位移]`，曲率行只给当前值。
+            //
+            // 【位移基准取"按下时用户看到的长度"】绘制端按「自动 > 0 时自动赢」取值，
+            // 因此按下前显示的可能是自动交叉淡化长度而非手动字段 —— 拿 `fadeInSec`
+            // 当基准会让"从自动值拖走"那一下报出与实际不符的巨大位移。
+            const lenBase = origin.baseById.get(args.clipId);
+            const lenAutoBase = origin.autoBaseById.get(args.clipId);
+            const lenIsOut = args.side === "out";
+            const nextLength = Math.min(Math.max(args.fadeSec, 0), lenBase?.lengthSec ?? 0);
+            const baseLength = effectiveFadeSec(
+                lenIsOut ? lenBase?.fadeOutSec : lenBase?.fadeInSec,
+                lenIsOut ? lenAutoBase?.autoFadeOutSec : lenAutoBase?.autoFadeInSec,
+            );
+            publishFadeSideInfo(fadeTooltipAnchor(), {
+                isOut: lenIsOut,
+                shape: (lenIsOut ? lenBase?.fadeOutShape : lenBase?.fadeInShape) ?? 0,
+                dir: (lenIsOut ? lenBase?.fadeOutDir : lenBase?.fadeInDir) ?? 0,
+                lengthSec: nextLength,
+                delta: { lengthSec: nextLength - baseLength },
+            });
         },
         [
             beginKernelGestureInteraction,
@@ -4050,6 +4144,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             pxPerSecRef,
             multiSelectedClipIds,
             sessionRef,
+            fadeTooltipAnchor,
+            publishFadeSideInfo,
         ],
     );
 
@@ -4336,12 +4432,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 partnerClipId?: string;
             } | null,
         ) => {
-            const anchor =
-                typeof document === "undefined"
-                    ? null
-                    : (document.querySelector(
-                          "[data-hs-fade-tooltip-anchor]",
-                      ) as HTMLElement | null);
+            const anchor = fadeTooltipAnchor();
             if (anchor === null) return;
             if (args === null) {
                 // 收起：content 传 null → Provider 移除该元素的内容（浮标消失）。
@@ -4396,7 +4487,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 }),
             );
         },
-        [timeValueFormatCtx, sessionRef, t],
+        [timeValueFormatCtx, sessionRef, t, fadeTooltipAnchor],
     );
 
     /**
@@ -4812,6 +4903,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 fadeOutSec: number;
                 autoFadeInSec: number;
                 autoFadeOutSec: number;
+                /**
+                 * 形状 / 曲率的按下时快照。
+                 *
+                 * 【为什么放进快照】抓手 Tooltip 在拖拽期要显示两侧的**当前值**与
+                 * **位移量**。当前曲率由求解器逐帧给出，但增量基准必须是**按下时**的
+                 * 值 —— `curveSides.*.baseDir` 被求解器逐帧覆写以保持求解连续，不能
+                 * 当基准；从 Redux 现读又会拿到上一帧的值（增量逐帧归零）。
+                 */
+                fadeInShape: number;
+                fadeOutShape: number;
+                fadeInDir: number;
+                fadeOutDir: number;
             }
         >;
     } | null>(null);
@@ -4871,6 +4974,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         fadeOutSec: number;
                         autoFadeInSec: number;
                         autoFadeOutSec: number;
+                        /** 形状 / 曲率的按下时快照：抓手 Tooltip 的"当前值"与"增量基准"都要它们。 */
+                        fadeInShape: number;
+                        fadeOutShape: number;
+                        fadeInDir: number;
+                        fadeOutDir: number;
                     }
                 >();
                 for (const clip of [earlier, later]) {
@@ -4883,6 +4991,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         fadeOutSec: Number(clip.fadeOutSec) || 0,
                         autoFadeInSec: Number(clip.autoFadeInSec) || 0,
                         autoFadeOutSec: Number(clip.autoFadeOutSec) || 0,
+                        fadeInShape: Number(clip.fadeInShape) || 0,
+                        fadeOutShape: Number(clip.fadeOutShape) || 0,
+                        fadeInDir: Number(clip.fadeInDir) || 0,
+                        fadeOutDir: Number(clip.fadeOutDir) || 0,
                     });
                 }
                 kernelCrossfadeOriginRef.current = {
@@ -5004,6 +5116,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     dispatch(setClipFades({ clipId: sides.a.clipId, fadeOutDir: dirA }));
                     dispatch(setClipFades({ clipId: sides.b.clipId, fadeInDir: dirB }));
                 });
+                // 曲率拖拽的实时浮标（双列）：曲率行各带 `[±增量]`，长度行只给当前值。
+                // 增量基准取按下时的 dir（`origin.baseById`）—— `sides.*.baseDir` 被
+                // 本分支逐帧覆写以保持求解连续，不能当基准。
+                const curveBaseA = origin.baseById.get(earlier.id);
+                const curveBaseB = origin.baseById.get(later.id);
+                publishFadeGripInfo(
+                    fadeTooltipAnchor(),
+                    {
+                        shape: curveBaseA?.fadeOutShape ?? 0,
+                        dir: dirA,
+                        lengthSec: origin.earlierFadeOutSec,
+                        delta: { dir: dirA - (curveBaseA?.fadeOutDir ?? 0) },
+                    },
+                    {
+                        shape: curveBaseB?.fadeInShape ?? 0,
+                        dir: dirB,
+                        lengthSec: origin.laterFadeInSec,
+                        delta: { dir: dirB - (curveBaseB?.fadeInDir ?? 0) },
+                    },
+                );
                 return;
             }
 
@@ -5143,6 +5275,34 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     }
                 }
             });
+            // 抓手拖拽的实时浮标（双列）：两侧各带自己的长度位移。
+            //
+            // 默认模式下重叠不变、两侧淡变长度**不动**（只移动 clip 边缘），此时位移
+            // 为 0 ⇒ 不出现方括号，读数仍随边缘移动实时刷新；反向模式按比例缩放，
+            // 两侧位移各不相同，因此各自从自己的按下时生效长度算起。
+            const gripBaseA = origin.baseById.get(earlier.id);
+            const gripBaseB = origin.baseById.get(later.id);
+            const fadeOf = (clipId: string) => result.fades.find((fade) => fade.clipId === clipId);
+            const fadeA = fadeOf(earlier.id);
+            const fadeB = fadeOf(later.id);
+            const lengthA =
+                fadeA?.fadeOutSec ?? fadeA?.autoFadeOutSec ?? origin.earlierFadeOutSec;
+            const lengthB = fadeB?.fadeInSec ?? fadeB?.autoFadeInSec ?? origin.laterFadeInSec;
+            publishFadeGripInfo(
+                fadeTooltipAnchor(),
+                {
+                    shape: gripBaseA?.fadeOutShape ?? 0,
+                    dir: gripBaseA?.fadeOutDir ?? 0,
+                    lengthSec: lengthA,
+                    delta: { lengthSec: lengthA - origin.earlierFadeOutSec },
+                },
+                {
+                    shape: gripBaseB?.fadeInShape ?? 0,
+                    dir: gripBaseB?.fadeInDir ?? 0,
+                    lengthSec: lengthB,
+                    delta: { lengthSec: lengthB - origin.laterFadeInSec },
+                },
+            );
         },
         // 吸附总开关是设置态，但交叉抓手预览在拖拽中实时读取它：若不进依赖，
         // 回调只在挂载时创建一次，之后切换吸附开关再拖抓手仍按挂载时的快照
@@ -5160,6 +5320,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             sessionRef,
             s.snapEnabled,
             snapTimelineDetailed,
+            fadeTooltipAnchor,
+            publishFadeGripInfo,
         ],
     );
 

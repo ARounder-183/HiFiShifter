@@ -5,8 +5,8 @@
  * —— 一切"可被视为在编辑淡入淡出包络"的悬停目标。双侧一致的信息结构：
  *
  *   {淡入|淡出}类型：{REAPER 曲线图标}
- *   长度：{主时间单位}[ / {副时间单位}]   ← 相对时长（零基点）
- *   曲率：{±0.00}
+ *   长度：{主时间单位}[ / {副时间单位}][ [±位移]]   ← 相对时长（零基点）
+ *   曲率：{±0.00}[ [±增量]]
  *
  * 两个版本：
  * - `buildSingleFadeInfoText` / `buildCrossfadeGripInfoText`：纯文本，
@@ -16,19 +16,39 @@
  *   经 `publishFadeRichTooltip` 注册到 AppTooltipProvider 的富内容表，
  *   元素自身带 `data-hs-rich-tooltip` 标记以便悬停命中。
  *
- * 长度格式化走 timeFormat.formatFadeLengthTooltip（相对时长，无工程原点
+ * **拖拽期间逐帧发布富内容版**（面板的 fade 预览回调）：传入 `delta` 后长度与曲率
+ * 两行各追加 `[±增量]`，读数随指针实时更新 —— 与吸附偏移 / 增益旋钮同一取舍。
+ *
+ * 长度格式化走 `timeValueText.formatDurationText`（相对时长，无工程原点
  * 偏移；主副单位来自时间轴显示设置）。
  */
 import type { ReactNode } from "react";
 import { createElement } from "react";
 
-import { formatFadeLengthTooltip, type FadeLengthFormatContext } from "./timeFormat";
+import { formatDurationText, formatSignedDurationTextOrNull } from "./timeValueText";
+import type { FadeLengthFormatContext } from "./timeFormat";
 import { FadeShapeIcon } from "./FadeShapeIcon";
 import { HS_TOOLTIP_CONTENT_EVENT } from "../../../components/AppTooltip";
 
 export type { FadeLengthFormatContext };
 
 export type FadeLabelLookup = (key: string) => string;
+
+/**
+ * 拖拽中的**增量**（每个字段都是"当前值 − 按下时的值"，带符号）。
+ *
+ * 缺省（`undefined`）= 悬停态，不展示任何增量。拖拽期间逐帧传入 ⇒ 内容随指针
+ * 实时更新（与吸附偏移 / 增益旋钮同一取舍：悬停只给当前值，拖拽才给位移）。
+ *
+ * 【为什么基准是"按下时的值"而不是"上一帧的值"】位移量描述的是**本次手势**移动了
+ * 多少；逐帧差分会在松手前不断归零，读不出总量。
+ */
+export interface FadeInfoDelta {
+    /** 长度增量（秒，带符号）。 */
+    readonly lengthSec?: number | null;
+    /** 曲率增量（带符号）。 */
+    readonly dir?: number | null;
+}
 
 /** 形状 id → i18n 键（与 ClipContextMenu 的 FADE_SHAPE_OPTIONS 同源）。 */
 export const SHAPE_LABEL_KEYS: Record<number, string> = {
@@ -46,6 +66,24 @@ function shapeName(shape: number, t: FadeLabelLookup): string {
     // 但对外呈现的名称与基础预设一致）。
     const normalized = Math.trunc(Number.isFinite(shape) ? shape : 0);
     return t(SHAPE_LABEL_KEYS[normalized] ?? "fade_shape_linear");
+}
+
+/**
+ * 曲率增量文本：`+0.20` / `-0.35`；落到显示精度之下（四舍五入为 0）时返回 null。
+ *
+ * 与曲率本身的显示共用两位小数精度，因此阈值就是"四舍五入到 0"——
+ * 显示 `[+0.00]` 只会让人以为功能坏了。
+ */
+function formatDirDelta(delta: number | null | undefined): string | null {
+    if (delta === null || delta === undefined || !Number.isFinite(delta)) return null;
+    const rounded = Math.round(delta * 100) / 100;
+    if (rounded === 0) return null;
+    return `${rounded > 0 ? "+" : ""}${rounded.toFixed(2)}`;
+}
+
+/** `值[ [±增量]]`：增量缺席时只给值（悬停态）。 */
+function withDelta(value: string, delta: string | null): string {
+    return delta === null ? value : `${value} [${delta}]`;
 }
 
 /** 信息行内联图标的统一尺寸（与上下文菜单图标一致）。 */
@@ -72,6 +110,8 @@ function fadeIconNode(shape: number, isOut: boolean): ReactNode {
 /**
  * 单侧淡变块（三行）。`isOut` 决定侧别文案与曲率的符号语义都沿用该侧
  * 存储值本身（dir 就是"该侧约定"），形状名直接按存储形状展示。
+ *
+ * `delta` 缺省 = 悬停（只给当前值）；拖拽时**长度与曲率两行各追加 `[±增量]`**。
  */
 export function buildSingleFadeInfoText(args: {
     isOut: boolean;
@@ -80,16 +120,16 @@ export function buildSingleFadeInfoText(args: {
     lengthSec: number;
     formatCtx: FadeLengthFormatContext;
     t: FadeLabelLookup;
+    delta?: FadeInfoDelta;
 }): string {
     const sideLabel = args.isOut ? args.t("fade_out") : args.t("fade_in");
     const name = shapeName(args.shape, args.t);
     const curvature = args.t("common_curvature");
     const length = args.t("common_length");
-    const sign = args.dir >= 0 ? "+" : "";
     return [
         `${sideLabel}${args.t("fade_type_label")}：${name}`,
-        `${length}：${formatFadeLengthTooltip(Math.max(0, args.lengthSec), args.formatCtx)}`,
-        `${curvature}：${sign}${args.dir.toFixed(2)}`,
+        `${length}：${lengthLine(args.lengthSec, args.formatCtx, args.delta)}`,
+        `${curvature}：${dirLine(args.dir, args.delta)}`,
     ].join("\n");
 }
 
@@ -101,15 +141,15 @@ export function buildSingleFadeInfoContent(args: {
     lengthSec: number;
     formatCtx: FadeLengthFormatContext;
     t: FadeLabelLookup;
+    delta?: FadeInfoDelta;
 }): ReactNode {
     const sideLabel = args.isOut ? args.t("fade_out") : args.t("fade_in");
     const curvature = args.t("common_curvature");
     const length = args.t("common_length");
-    const sign = args.dir >= 0 ? "+" : "";
     return [
         [`${sideLabel}${args.t("fade_type_label")}：`, fadeIconNode(args.shape, args.isOut)],
-        [`${length}：${formatFadeLengthTooltip(Math.max(0, args.lengthSec), args.formatCtx)}`],
-        [`${curvature}：${sign}${args.dir.toFixed(2)}`],
+        [`${length}：${lengthLine(args.lengthSec, args.formatCtx, args.delta)}`],
+        [`${curvature}：${dirLine(args.dir, args.delta)}`],
     ].map((row, index) =>
         createElement(
             "div",
@@ -121,13 +161,33 @@ export function buildSingleFadeInfoContent(args: {
     );
 }
 
+/** 长度行的值部分：`{主} / {副}[ [±位移]]`（零基点时长口径）。 */
+function lengthLine(
+    lengthSec: number,
+    formatCtx: FadeLengthFormatContext,
+    delta: FadeInfoDelta | undefined,
+): string {
+    return withDelta(
+        formatDurationText(Math.max(0, lengthSec), formatCtx),
+        formatSignedDurationTextOrNull(delta?.lengthSec, formatCtx),
+    );
+}
+
+/** 曲率行的值部分：`{±0.00}[ [±增量]]`。 */
+function dirLine(dir: number, delta: FadeInfoDelta | undefined): string {
+    const safe = Number.isFinite(dir) ? dir : 0;
+    return withDelta(`${safe >= 0 ? "+" : ""}${safe.toFixed(2)}`, formatDirDelta(delta?.dir));
+}
+
 /**
  * 交叉点抓手富内容：前一个 clip 的淡出在前、空一行、后一个 clip 的
  * 淡入在后。
+ *
+ * 两侧各自带自己的增量 —— 反向模式下两侧淡变按比例缩放，位移量并不相同。
  */
 export function buildCrossfadeGripInfoContent(args: {
-    earlier: { shape: number; dir: number; lengthSec: number };
-    later: { shape: number; dir: number; lengthSec: number };
+    earlier: { shape: number; dir: number; lengthSec: number; delta?: FadeInfoDelta };
+    later: { shape: number; dir: number; lengthSec: number; delta?: FadeInfoDelta };
     formatCtx: FadeLengthFormatContext;
     t: FadeLabelLookup;
 }): ReactNode {
@@ -169,8 +229,8 @@ export function publishFadeRichTooltip(element: Element | null, content: ReactNo
  * 两块之间空一行分隔（纯文本版本）。
  */
 export function buildCrossfadeGripInfoText(args: {
-    earlier: { shape: number; dir: number; lengthSec: number };
-    later: { shape: number; dir: number; lengthSec: number };
+    earlier: { shape: number; dir: number; lengthSec: number; delta?: FadeInfoDelta };
+    later: { shape: number; dir: number; lengthSec: number; delta?: FadeInfoDelta };
     formatCtx: FadeLengthFormatContext;
     t: FadeLabelLookup;
 }): string {

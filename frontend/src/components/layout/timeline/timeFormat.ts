@@ -545,25 +545,19 @@ export function parseDurationInput(
     return null;
 }
 
+/**
+ * **相对时长**（零基点）的格式化上下文：主/副单位 + 计时参数。
+ *
+ * 【为什么没有 `tempoMap`】时长按定义不做 Tempo Map 分段积分（见
+ * {@link formatDurationUnit}）。需要**绝对时刻**的场景请用 `TimeValueFormatContext`
+ * ——它在本接口之上补了 `tempoMap`，两者不可互换。
+ */
 export interface FadeLengthFormatContext {
     primaryTimeUnit: TimeUnit;
     secondaryTimeUnit: TimeUnitChoice;
     bpm: number;
     beatsPerBar: number;
     grid: string;
-}
-
-/**
- * 淡化长度 ToolTips 文本：`{主}/{副}`；副单位为"不使用"或与主单位相同时省略。
- * 主副单位通过 {@link formatDurationUnit} 分别按相对时长规则格式化。
- */
-export function formatFadeLengthTooltip(durationSec: number, ctx: FadeLengthFormatContext): string {
-    const main = formatDurationUnit(ctx.primaryTimeUnit, durationSec, ctx);
-    if (ctx.secondaryTimeUnit !== "none" && ctx.secondaryTimeUnit !== ctx.primaryTimeUnit) {
-        const secondary = formatDurationUnit(ctx.secondaryTimeUnit as TimeUnit, durationSec, ctx);
-        return `${main} / ${secondary}`;
-    }
-    return main;
 }
 
 /**
