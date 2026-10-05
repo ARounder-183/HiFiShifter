@@ -920,4 +920,10 @@ Task 40: Ruling: 用户明确 HNSEP 不分块、HiFiGAN 分块即可 — 保留 
 
 Task 38: Ruling: 重叠region的整轨可见数组不能重新捕获给不可见素材，选择变化也不应推进编辑代次 — capture_changes只接相对当前选择投影的delta，select_clip/select_track从doc只读切换源投影；本批10定向回归在进程级CPU设置下正常exit0，不重复全量/不追加review — 若沿用整数组回捕会串曲线；这是源码actor/音频合同证据，仍非原生GUI验收，外部IPC旧提交路径另留残余。
 
+Task 39: Ruling: HNSEP旧键只含clip/长度/64位源指纹，缓存仅按条数；真实并发请求也可能重复整段分离 — 改实际完整PCM+已加载模型/EP权威、128MiB字节LRU和worker单飞；真实CPU两owner1次推理、等长中间换源新增1次，气声/张力/共振峰下游修改复用stem — 若把源分离与目标参数合并键，会白跑分离；该缓存上限是kernel额外占用，不伪称已纳入plugin512MiB。
+
+Task 40: Ruling: HiFiGAN虽512帧分块，却整段收集未命中输入/输出，chunk HashMap无字节上限 — 限每批4块立即拼接、128MiB chunk LRU，pipeline版本8明确失效旧PCM；35秒48k真实CPU冷7935ms/暖1078ms、6块尾454帧/完整非静音/暖新增推理0 — 若称常量总内存或ARA长源已完成，会忽略完整mel/HNSEP激活与宿主30秒cap；资源与native门仍open。
+
+Task 39: Ruling: 插件先后44.1k/48k独立运行kernel会重复重推理 — 含HiFiGAN工作区仅合成44.1k，48k从就绪PCM派生并为交错源副本收费；真实RenderInput双输出798ms/HNSEP1次/派生逐样本一致，相关3回归exit0 — 若外推独立App所有采样率/跨owner缓存，会夸大局部改动；App完整回归、内容层和冷恢复仍待最终批。
+
 

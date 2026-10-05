@@ -35,6 +35,10 @@ impl RenderInput {
         let end=timeline.clips.iter().map(|c|c.start_sec+c.length_sec).fold(0.0_f64,f64::max);
         if start<0.0 || !start.is_finite() || !end.is_finite() {return Err("unsupported host position".into());}
         let mut input=HashMap::new();
+        let source_bytes=timeline.clips.iter().filter_map(|clip|clip.source_path.as_ref()).collect::<BTreeSet<_>>().into_iter()
+            .try_fold(0_usize,|total,id| {let pcm=self.sources.get(id).ok_or_else(||format!("host PCM unavailable: {id}"))?;
+                total.checked_add(pcm.planes.iter().map(|plane|plane.len()*4).sum::<usize>()).ok_or_else(||"host interleaved PCM size overflow".to_owned())})?;
+        let _source_working=super::budget::global_budget().reserve(source_bytes).ok_or("host interleaved PCM budget exceeded")?;
         for id in timeline.clips.iter().filter_map(|clip|clip.source_path.as_ref()).collect::<BTreeSet<_>>() {
             let pcm=self.sources.get(id).ok_or_else(||format!("host PCM unavailable: {id}"))?;
             let channels=pcm.planes.len();let mut samples=Vec::with_capacity(pcm.planes[0].len()*channels);
@@ -42,11 +46,22 @@ impl RenderInput {
             input.insert(id.clone(),MixdownPcm {sample_rate:pcm.sample_rate,channels:channels as u16,samples:Arc::new(samples)});
         }
         let mut snapshots=Vec::new();
+        let model_rate_output=timeline.tracks.iter().any(|track|track.pitch_analysis_algo==hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx);
         for sample_rate in [44100,48000] {
             if cancel.load(Ordering::Acquire) {return Err("host preparation cancelled".into());}
             let frames=((end-start)*sample_rate as f64).round() as usize;
             if frames>64*1024*1024/8 {return Err("snapshot span exceeds 64MiB".into());}
             let reservation=super::budget::global_budget().reserve(frames*8).ok_or("PCM memory budget exceeded")?;
+            // HiFiGAN工作区只在模型原生44.1k合成一次，48k是便宜输出层，不重新跑HNSEP/神经网络。
+            // 纯非HiFiGAN路径保持旧采样率契约；只消费已经就绪的不可变PCM，仍在worker线程。
+            if model_rate_output&&sample_rate==48000 {
+                let native:&PlaybackSnapshot=&snapshots[0];
+                let mut left=hifishifter_kernel::mel_utils::linear_resample_mono(&native.left,44100,48000);
+                let mut right=hifishifter_kernel::mel_utils::linear_resample_mono(&native.right,44100,48000);
+                left.resize(frames,0.);right.resize(frames,0.);
+                snapshots.push(PlaybackSnapshot {sample_rate,origin_sample:(start*sample_rate as f64).round() as i64,left,right,_reservation:Some(reservation)});
+                continue;
+            }
             let run=|view:&TimelineState| {
                 let options=MixdownOptions {sample_rate,start_sec:start,end_sec:Some(end),
                     stretch:hifishifter_kernel::time_stretch::StretchAlgorithm::SoundTouchDll,apply_pitch_edit:true,
@@ -86,6 +101,34 @@ impl RenderInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 双输出率从同一HiFiGAN原生结果派生，整段HNSEP也只运行一次，不以WORLD外推。
+    #[test]
+    #[ignore = "真实CPU插件渲染输入诊断：显式运行"]
+    fn real_model_hifigan_snapshots_share_one_native_rate_synthesis() {
+        hifishifter_kernel::vocoder_ort_session::set_runtime_ep_override(Some("cpu".into()));
+        hifishifter_kernel::hnsep_onnx::clear_separation_cache();
+        let seconds=0.5;let mut timeline:TimelineState=serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"track","name":"A","order":0,"pitch_analysis_algo":"nsf_hifigan_onnx","compose_enabled":true}],
+            "bpm":120,"project_sec":seconds,"clips":[{"id":"clip","name":"A","track_id":"track","start_sec":0,"length_sec":seconds,
+                "takes":[{"id":"take","source_path":"source","source_start_sec":0,"source_end_sec":seconds}]}]
+        })).unwrap();timeline.clips[0].normalize_takes();
+        timeline.params_by_root_track.insert("track".into(),hifishifter_kernel::state::TrackParamsState {
+            frame_period_ms:5.,pitch_orig:vec![57.;101],pitch_edit:vec![60.;101],pitch_edit_user_modified:true,
+            extra_params:HashMap::from([("breath_enabled".into(),1.)]),..Default::default()});
+        let pcm=(0..22050).map(|i| {let phase=2.*std::f64::consts::PI*220.*i as f64/44100.;
+            (1..=12).map(|k|0.15/k as f64*(phase*k as f64).sin()).sum::<f64>() as f32}).collect();
+        let region=AraPlaybackRegion {audio_source_persistent_id:"source".into(),duration_in_modification_time:seconds,duration_in_playback_time:seconds,..Default::default()};
+        let input=RenderInput {timeline:Some(timeline),regions:vec![region],sources:HashMap::from([("source".into(),
+            Arc::new(SourcePcm {sample_rate:44100,planes:vec![pcm],version:0,_reservation:None}))]),clip_parameters:BTreeMap::new()};
+        let before=hifishifter_kernel::hnsep_onnx::separation_cache_stats();let began=std::time::Instant::now();
+        let output=input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        assert_eq!(output[0].left.len(),22050);assert_eq!(output[1].left.len(),24000);
+        assert_eq!(output[1].left,hifishifter_kernel::mel_utils::linear_resample_mono(&output[0].left,44100,48000));
+        assert_eq!(output[1].right,hifishifter_kernel::mel_utils::linear_resample_mono(&output[0].right,44100,48000));
+        assert_eq!(hifishifter_kernel::hnsep_onnx::separation_cache_stats().1-before.1,1);
+        assert!(output[0].left.iter().any(|v|v.abs()>0.01));
+        println!("PLUGIN_HIFIGAN_DUAL_RATE elapsed_ms={} HNSEP_runs=1 derived_48000_exact=true",began.elapsed().as_millis());
+    }
     /// 相同root的两个重叠区域保留独立源参数，不能用GUI单一数组覆盖两者。
     #[test]
     fn source_parameter_atlas_overlapping_regions_keep_independent_audio_gains() {

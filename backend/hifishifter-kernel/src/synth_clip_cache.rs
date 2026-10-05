@@ -606,7 +606,8 @@ pub fn clear_pad_suppressed_clips() {
 /// （幅度谱余弦相似度 1.000000、逐块 RMS 比 1.002~1.008），音色与能量不变，
 /// 但 PCM 逐样本不同。若不失效，磁盘上的旧 PCM 会与新块粒度长期混用
 /// （同一工程新旧 clip 相位基准不一致）。
-pub const RENDER_PIPELINE_VERSION: u32 = 7;
+// HiFiGAN批量固定上限改变随机激励分配次序，旧磁盘PCM不得伪装为本版本结果。
+pub const RENDER_PIPELINE_VERSION: u32 = 8;
 
 /// [`compute_rendered_clip_hash`] 的输入集合。
 ///

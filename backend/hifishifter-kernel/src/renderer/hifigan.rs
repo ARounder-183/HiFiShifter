@@ -17,7 +17,6 @@
 use super::traits::{RenderContext, Renderer, RendererCapabilities};
 use super::utils::{clip_midi_at_time, edit_midi_at_time_or_none};
 use crate::state::SynthPipelineKind;
-use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 // ─── 分块缓存（独立于 SynthClipCache，靠 hash 比对自然失效）───────────────────
@@ -40,7 +39,31 @@ pub struct ChunkCacheEntry {
 /// 同一处契约的两个方向。
 type Key = (String, u16, usize);
 
-static CHUNK_CACHE: OnceLock<Mutex<HashMap<Key, ChunkCacheEntry>>> = OnceLock::new();
+const CHUNK_CACHE_BYTES:usize=128*1024*1024;
+pub struct ChunkCache {
+    entries:lru::LruCache<Key,ChunkCacheEntry>,
+    bytes:usize,max_bytes:usize,
+}
+impl ChunkCache {
+    fn new(max_bytes:usize)->Self {Self {entries:lru::LruCache::unbounded(),bytes:0,max_bytes}}
+    fn len(&self)->usize {self.entries.len()}
+    fn values(&self)->impl Iterator<Item=&ChunkCacheEntry> {self.entries.iter().map(|(_,entry)|entry)}
+    fn keys(&self)->impl Iterator<Item=&Key> {self.entries.iter().map(|(key,_)|key)}
+    fn get(&mut self,key:&Key)->Option<&ChunkCacheEntry> {self.entries.get(key)}
+    fn remove(&mut self,key:&Key) {if let Some(old)=self.entries.pop(key) {self.bytes-=old.waveform.len()*4;}}
+    /// 字节驱逐只释放缓存所有权；已取出的worker副本与当前就绪快照不受影响。
+    fn insert(&mut self,key:Key,entry:ChunkCacheEntry) {
+        let bytes=entry.waveform.len().saturating_mul(4);
+        if bytes>self.max_bytes||entry.waveform.is_empty() {return;}
+        self.remove(&key);
+        while self.bytes.saturating_add(bytes)>self.max_bytes {
+            let Some((_,old))=self.entries.pop_lru() else {break;};self.bytes-=old.waveform.len()*4;
+        }
+        self.entries.put(key,entry);self.bytes+=bytes;
+    }
+    fn clear(&mut self) {self.entries.clear();self.bytes=0;}
+}
+static CHUNK_CACHE: OnceLock<Mutex<ChunkCache>> = OnceLock::new();
 
 /// 曲线编辑对**本块之外**音频的影响半径（秒）。
 ///
@@ -52,16 +75,13 @@ static CHUNK_CACHE: OnceLock<Mutex<HashMap<Key, ChunkCacheEntry>>> = OnceLock::n
 /// 取 0.1s 覆盖上述两者并留余量。只多算几个 f32，局部性不受影响。
 const CURVE_INFLUENCE_MARGIN_SEC: f64 = 0.1;
 
-pub fn global_chunk_cache_ref() -> &'static Mutex<HashMap<Key, ChunkCacheEntry>> {
-    CHUNK_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+pub fn global_chunk_cache_ref() -> &'static Mutex<ChunkCache> {
+    CHUNK_CACHE.get_or_init(|| Mutex::new(ChunkCache::new(CHUNK_CACHE_BYTES)))
 }
 
 /// 清空整个 chunk 推理缓存。
 ///
-/// 缓存 key 只含 `(clip_id, 声道位, mel_start)`，**没有任何容量或字节上限** —— 一个
-/// 长 clip 可以产生数百个约 6 s 的波形 chunk（双声道真立体声再翻一倍）。按 clip
-/// 失效只在 clip 被编辑时发生，工程切换后旧 clip_id 不会再收到失效请求，条目因此
-/// 永久常驻。切换工程时必须整体清空。
+/// 缓存key含clip/声道/块起点，已由128MiB字节LRU约束；工程切换仍可主动清理。
 pub fn clear_chunk_cache() {
     if let Ok(mut cache) = global_chunk_cache_ref().lock() {
         let dropped = cache.len();
@@ -70,7 +90,6 @@ pub fn clear_chunk_cache() {
             .map(|e| (e.waveform.len() as u64).saturating_mul(std::mem::size_of::<f32>() as u64))
             .sum();
         cache.clear();
-        cache.shrink_to_fit();
         if dropped > 0 {
             log::warn!(
                 "[hifigan:cache] cleared {} chunk(s), ~{} bytes",
@@ -494,6 +513,21 @@ impl HiFiGanRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn chunk_cache_byte_lru_is_bounded_and_accounts_replacement_and_invalidation() {
+        let mut cache=ChunkCache::new(32);
+        let entry=|n,value|ChunkCacheEntry {param_hash:1,waveform:vec![value;n]};
+        cache.insert(("a".into(),0,0),entry(4,0.25));cache.insert(("a".into(),1,0),entry(4,0.5));
+        assert_eq!(cache.bytes,32);cache.get(&("a".into(),0,0));
+        cache.insert(("b".into(),0,0),entry(4,0.75));
+        assert!(cache.get(&("a".into(),1,0)).is_none());assert_eq!(cache.bytes,32);
+        cache.insert(("a".into(),0,0),entry(2,1.));assert_eq!(cache.bytes,24);
+        cache.insert(("long".into(),0,0),entry(9,1.));assert_eq!(cache.bytes,24);
+        cache.remove(&("a".into(),0,0));assert_eq!(cache.bytes,16);
+        cache.clear();assert_eq!(cache.bytes,0);assert_eq!(cache.len(),0);
+    }
 
     /// 一次 chunk 缓存的访问键。
     ///

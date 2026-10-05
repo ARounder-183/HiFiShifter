@@ -1,3 +1,5 @@
+//! 未启用ONNX时保留HNSEP接口契约，不把缺模型报告为成功。
+
 pub fn is_available() -> bool {
     false
 }
@@ -28,6 +30,9 @@ pub fn ensure_cache_capacity(_min_capacity: usize) {}
 
 /// 与 onnx 变体同名：take 切换等场景的缓存失效在 stub 下为 no-op。
 pub fn clear_separation_cache() {}
+
+/// 未编译模型时无推理/缓存占用。
+pub fn separation_cache_stats()->(u64,u64,usize) {(0,0,0)}
 
 /// 仅返回噪声 stem 的便捷封装；stub 下与完整分离一致地报错，
 /// 调用方（气声路径）已有降级处理。

@@ -144,6 +144,13 @@ struct HostRenderCounters { source_hits:u64, intermediate_hits:u64, pcm_hits:u64
 
 ## 当前状态
 
+2026-10-05补充：Task38重叠GUI投影/选择在e15a0792，10定向exit0；Task39/40已实现
+HNSEP完整内容/model缓存与worker单飞、两类128MiB模型cache、HiFiGAN每批4块和
+原生率合成派生48k。真实CPU四项模型诊断与相关定向回归正常exit0，精确结果见
+`probe/ara/NEURAL-CACHE-FINDINGS.md`。仅kernel35秒长源，不代表宿主30秒cap已开放；
+长源资源、HiFiGAN完整分层身份/移动命中/磁盘、native与独立App最终门仍open。
+下方状态段保留旧批次背景；非线性marker/tempo warp已由用户明确排除。
+
 新范围尚未全部完成。Task36 renderer透传/诊断/typed REAPER时钟与Task38线性保调基础
 已在ddbb5a97（lib80通过、host-stretch-01构建exit0，native尚未验收）；Task32在dfe8f4e
 有授权scope并集，两定向测试通过；Task33共享actor在2cdf48ff，lib89/相关前端74/tsc

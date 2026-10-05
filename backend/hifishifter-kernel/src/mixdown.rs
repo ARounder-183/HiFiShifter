@@ -1835,6 +1835,48 @@ mod tests {
                 .collect()
         }
 
+        /// 宿主PCM走真正HiFiGAN/HNSEP与原参数门禁；气声增益只混噪声，不重复分离。
+        #[test]
+        #[ignore = "真实CPU模型参数矩阵：显式运行，避免普通回归反复重推理"]
+        fn real_model_host_hifigan_parameters_preserve_hnsep_and_breath_gain_contracts() {
+            crate::vocoder_ort_session::set_runtime_ep_override(Some("cpu".into()));
+            crate::hnsep_onnx::clear_separation_cache();
+            let identity="ara://hifigan-parameter-matrix";let mut tl=timeline(identity);
+            tl.tracks[0].pitch_analysis_algo=crate::state::PitchAnalysisAlgo::NsfHifiganOnnx;
+            let root=tl.tracks[0].id.clone();
+            {let params=tl.params_by_root_track.get_mut(&root).unwrap();params.pitch_orig.fill(57.);
+                params.pitch_edit.fill(60.);params.pitch_edit_user_modified=true;}
+            let stereo=tone(220.).chunks_exact(2).flat_map(|pair|[pair[0],pair[0]]).collect();
+            let src=sources(identity,stereo);let run=|tl:&TimelineState|render_mixdown_with_pcm(tl,opts(true),&src).unwrap().3;
+            let began=std::time::Instant::now();let before=crate::hnsep_onnx::separation_cache_stats();
+            let plain=run(&tl);
+            {let p=tl.params_by_root_track.get_mut(&root).unwrap();p.extra_curves.insert("breath_gain".into(),vec![2.;101]);
+                p.extra_curves.insert("hifigan_tension".into(),vec![80.;101]);}
+            assert_eq!(plain,run(&tl),"开关关闭时气声/张力曲线必须被门禁剥离");
+            assert_eq!(crate::hnsep_onnx::separation_cache_stats().1,before.1);
+            {let p=tl.params_by_root_track.get_mut(&root).unwrap();p.extra_params.insert("breath_enabled".into(),1.);
+                p.extra_curves.clear();p.extra_curves.insert("breath_gain".into(),vec![0.;101]);}
+            let harmonic=run(&tl);let separated=crate::hnsep_onnx::separation_cache_stats();
+            assert_eq!(separated.1-before.1,1,"两个相同mono平面应共用一次整段分离");
+            tl.params_by_root_track.get_mut(&root).unwrap().extra_curves.insert("breath_gain".into(),vec![2.;101]);
+            let boosted=run(&tl);assert_eq!(crate::hnsep_onnx::separation_cache_stats().1,separated.1);
+            let mono=src[identity].samples.iter().step_by(2).copied().collect::<Vec<_>>();
+            let noise=crate::hnsep_onnx::infer_noise_mono("other-owner",&mono,44100,1,None).unwrap();
+            let max_error=boosted.chunks_exact(2).zip(harmonic.chunks_exact(2)).zip(noise.iter())
+                .map(|((wet,dry),noise)|(wet[0]-dry[0]-2.*noise).abs()).fold(0_f32,f32::max);
+            assert!(max_error<2e-5,"breath增益必须仅改变噪声混合: {max_error}");
+            let diff=|a:&[f32],b:&[f32]|a.iter().zip(b).map(|(a,b)|(a-b).abs()).sum::<f32>()/a.len() as f32;
+            {let p=tl.params_by_root_track.get_mut(&root).unwrap();p.extra_curves.insert("breath_gain".into(),vec![0.;101]);
+                p.extra_curves.insert("hifigan_tension".into(),vec![75.;101]);}
+            let tension=run(&tl);let tension_delta=diff(&harmonic,&tension);assert!(tension_delta>1e-4);
+            {let p=tl.params_by_root_track.get_mut(&root).unwrap();p.extra_curves.remove("hifigan_tension");
+                p.extra_curves.insert("formant_shift_cents".into(),vec![600.;101]);}
+            let formant=run(&tl);let formant_delta=diff(&harmonic,&formant);assert!(formant_delta>1e-4);
+            assert_eq!(crate::hnsep_onnx::separation_cache_stats().1,separated.1,"改张力/共振峰只改变下游合成，HNSEP源stem仍有效");
+            assert!(plain.iter().chain(&harmonic).chain(&boosted).chain(&tension).chain(&formant).all(|v|v.is_finite()));
+            println!("HIFIGAN_HOST_PARAMS elapsed_ms={} HNSEP_runs=1 breath_max_error={max_error:e} tension_mean_delta={tension_delta:e} formant_mean_delta={formant_delta:e}",began.elapsed().as_millis());
+        }
+
         #[test]
         fn nonexistent_identity_renders_exact_host_samples() {
             let tl = timeline("ara://source");

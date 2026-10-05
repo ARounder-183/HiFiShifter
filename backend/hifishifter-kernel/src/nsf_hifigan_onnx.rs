@@ -1,3 +1,5 @@
+//! NSF-HiFiGAN真实模型、mel分析与有界神经分块；HNSEP仍由独立模块整段处理。
+
 use ndarray::Array2;
 use num_complex::Complex32;
 use ort::session::Session;
@@ -1399,6 +1401,8 @@ pub fn env_overlap_sec() -> f64 {
 ///
 /// 可用 `HIFISHIFTER_ONNX_CHUNK_FRAMES` 覆盖。
 const CHUNK_MAX_FRAMES_DEFAULT: usize = 512;
+/// 神经批量有固定上限；整段mel仍一次计算，不能把它宣称为常量总内存。
+const CHUNK_BATCH_MAX: usize = 4;
 
 static CHUNK_MAX_FRAMES_OVERRIDE: OnceLock<usize> = OnceLock::new();
 
@@ -1425,6 +1429,44 @@ fn chunk_time_span(start_sec: f64, hop_sec: f64, mel_lo: usize, mel_hi: usize) -
         start_sec + mel_lo as f64 * hop_sec,
         start_sec + mel_hi as f64 * hop_sec,
     )
+}
+
+/// 固定数量的块查缓存/推理后立即拼入输出，不同时持有整段所有块的输入与输出副本。
+/// 缓存损坏按miss重算；新推理输出必须完整且有限，失败绝不写成功缓存。
+fn assemble_bounded_chunks(
+    frames:usize,hop:usize,chunk_frames:usize,batch_max:usize,
+    mut get:impl FnMut(usize,usize)->Option<Vec<f32>>,
+    mut infer:impl FnMut(&[(usize,usize)])->Result<Vec<Vec<f32>>,String>,
+    mut put:impl FnMut(usize,usize,Vec<f32>),
+) -> Result<Vec<f32>,String> {
+    if hop==0||chunk_frames==0||batch_max==0 {return Err("invalid HiFiGAN chunk geometry".into());}
+    let samples=frames.checked_mul(hop).ok_or("HiFiGAN output length overflow")?;
+    let mut out=vec![0_f32;samples];let mut offset=0;let mut completed=0;
+    let total=frames.div_ceil(chunk_frames);
+    while offset<frames {
+        let mut missing=Vec::with_capacity(batch_max);
+        for _ in 0..batch_max {
+            if offset>=frames {break;}
+            let end=offset.saturating_add(chunk_frames).min(frames);let expected=(end-offset)*hop;
+            if let Some(cached)=get(offset,end).filter(|wf|wf.len()==expected&&wf.iter().all(|v|v.is_finite())) {
+                out[offset*hop..end*hop].copy_from_slice(&cached);completed+=1;
+            } else {missing.push((offset,end));}
+            offset=end;
+        }
+        if !missing.is_empty() {
+            let outputs=infer(&missing)?;
+            if outputs.len()!=missing.len() {return Err("HiFiGAN batch output count mismatch".into());}
+            // 先验证整批再写cache，不发布同一失败批的半成品。
+            if outputs.iter().zip(&missing).any(|(wf,(start,end))|wf.len()!=(end-start)*hop||wf.iter().any(|v|!v.is_finite())) {
+                return Err("invalid HiFiGAN chunk output".into());
+            }
+            for ((start,end),wf) in missing.into_iter().zip(outputs) {
+                out[start*hop..end*hop].copy_from_slice(&wf);put(start,end,wf);completed+=1;
+            }
+        }
+        crate::renderer::progress::report_clip_progress(completed as f64/total.max(1) as f64);
+    }
+    Ok(out)
 }
 
 // ─── 帧级分块推理优化──────────────────────────────────────
@@ -1540,55 +1582,14 @@ pub fn infer_pitch_edit_chunked_optimized(
         // 3. 共振峰偏移已在步骤 1 的 mel 提取阶段生效（见 mel_from_audio_shifted），
         //    此处不再做 mel 域的二次插值。
 
-        // 4. 分块迭代 — 批量推理：收集所有未命中缓存的 chunk，一次 GPU 调用处理
+        // 4. 每批最多四块；保留既有mel网格/尾块长度，不跨不同长度补零改变模型语义。
         // 输出长度 = 重建内容真实长度（t×hop）。mel 提取的尾部窗损失使
         // t×hop < 输入长度；尾部对齐（含斜坡收尾）在步骤 5 统一完成，
         // 若此处直接按输入长度初始化并留零，会预先制造"内容↔零"缺口。
-        let total_samples = t.saturating_mul(hop).max(1);
-        let mut out = vec![0.0f32; total_samples];
-
-        // 4a. 分离已缓存和需要推理的 chunk
-        let mut cached_chunks: Vec<(usize, Vec<f32>)> = Vec::new();
-        let mut needs_inference: Vec<usize> = Vec::new();
-
-        let mut frame_off = 0usize;
-        while frame_off < t {
-            let chunk_end = (frame_off + chunk_max_frames()).min(t);
-            // 本块的绝对时间窗（秒）。必须在此处算：只有这里同时知道
-            // `hop`、`model_sr`、`start_sec`；调用方只有输出采样率。
-            // 详见函数文档中"为什么必须把时间窗以秒传给回调"。
-            let (c0, c1) = chunk_time_span(start_sec, hop_sec, frame_off, chunk_end);
-            if let Some(cached) = chunk_cache_get(frame_off, chunk_end, c0, c1) {
-                cached_chunks.push((frame_off, cached));
-            } else {
-                needs_inference.push(frame_off);
-            }
-            frame_off = chunk_end;
-        }
-
-        let total_chunks = t.div_ceil(chunk_max_frames());
-        let processed_before = cached_chunks.len();
-        debug_eprintln!(
-            "[nsf_hifigan] chunked_opt: t={} chunks={} cached={} infer={}",
-            t,
-            total_chunks,
-            cached_chunks.len(),
-            needs_inference.len()
-        );
-
-        // Report progress for cached chunks
-        if !cached_chunks.is_empty() {
-            crate::renderer::progress::report_clip_progress(
-                cached_chunks.len() as f64 / total_chunks as f64,
-            );
-        }
-
-        // 4b. 批量推理需要推理的 chunk
-        if !needs_inference.is_empty() {
-            let batch_items: Vec<(Vec<f32>, Vec<f32>, usize)> = needs_inference
-                .iter()
-                .map(|&fi| {
-                    let chunk_end = (fi + chunk_max_frames()).min(t);
+        let out=assemble_bounded_chunks(t,hop,chunk_max_frames(),CHUNK_BATCH_MAX,
+            |fi,end| {let (c0,c1)=chunk_time_span(start_sec,hop_sec,fi,end);chunk_cache_get(fi,end,c0,c1)},
+            |ranges| {
+                let batch_items:Vec<(Vec<f32>,Vec<f32>,usize)>=ranges.iter().map(|&(fi,chunk_end)| {
                     let chunk_t = chunk_end - fi;
                     let mut mel_seg = vec![0.0f32; sess.cfg.num_mels * chunk_t];
                     for m in 0..sess.cfg.num_mels {
@@ -1600,38 +1601,12 @@ pub fn infer_pitch_edit_chunked_optimized(
                     (mel_seg, f0_seg, chunk_t)
                 })
                 .collect();
-
-            let t_batch = std::time::Instant::now();
-            let batch_results = sess.run_model_batch(&batch_items)?;
-            debug_eprintln!(
-                "[nsf_hifigan] chunked_opt: batch_gpu={}ms for {} chunks",
-                t_batch.elapsed().as_millis(),
-                batch_results.len()
-            );
-
-            for (i, wf) in batch_results.into_iter().enumerate() {
-                let fi = needs_inference[i];
-                let chunk_end = (fi + chunk_max_frames()).min(t);
-                let (c0, c1) = chunk_time_span(start_sec, hop_sec, fi, chunk_end);
-                chunk_cache_put(fi, chunk_end, c0, c1, wf.clone());
-                cached_chunks.push((fi, wf));
-                crate::renderer::progress::report_clip_progress(
-                    (processed_before + i + 1) as f64 / total_chunks as f64,
-                );
-            }
-        }
-
-        // 4c. 按帧偏移排序并合并到输出
-        cached_chunks.sort_by_key(|&(fi, _)| fi);
-        for (fi, wf) in &cached_chunks {
-            let base_out = fi * hop;
-            for (i, &sample) in wf.iter().enumerate() {
-                let g = base_out + i;
-                if g < out.len() {
-                    out[g] = sample;
-                }
-            }
-        }
+                let began=std::time::Instant::now();let results=sess.run_model_batch(&batch_items)?;
+                debug_eprintln!("[nsf_hifigan] bounded_batch={}ms chunks={}",began.elapsed().as_millis(),results.len());
+                Ok(results)
+            },
+            |fi,end,wf| {let (c0,c1)=chunk_time_span(start_sec,hop_sec,fi,end);chunk_cache_put(fi,end,c0,c1,wf)},
+        )?;
 
         // 5. 重采样回原始采样率
         let mut out = if model_sr == sample_rate {
@@ -2606,6 +2581,68 @@ mod tests {
         formant_shifts_for_frames, mel_frame_count, quantize_key_shift, shift_n_fft,
         KEY_SHIFT_QUANTUM_SEMITONES,
     };
+
+    /// 字面序列验证长素材批数、混合命中、最后不足整块的样本及cache写回契约。
+    #[test]
+    fn bounded_chunks_cover_all_samples_and_never_collect_an_unbounded_batch() {
+        let calls=std::cell::RefCell::new(Vec::new());let saved=std::cell::RefCell::new(Vec::new());
+        let out=super::assemble_bounded_chunks(19,2,3,2,
+            |start,end|if start==6 {Some(vec![9.;(end-start)*2])} else {None},
+            |ranges| {calls.borrow_mut().push(ranges.to_vec());Ok(ranges.iter().map(|&(start,end)|vec![start as f32;(end-start)*2]).collect())},
+            |start,end,wf|saved.borrow_mut().push((start,end,wf.len())),
+        ).unwrap();
+        assert_eq!(calls.into_inner(),vec![vec![(0,3),(3,6)],vec![(9,12)],vec![(12,15),(15,18)],vec![(18,19)]]);
+        assert_eq!(out,vec![0.,0.,0.,0.,0.,0.,3.,3.,3.,3.,3.,3.,9.,9.,9.,9.,9.,9.,9.,9.,9.,9.,9.,9.,12.,12.,12.,12.,12.,12.,15.,15.,15.,15.,15.,15.,18.,18.]);
+        assert_eq!(saved.borrow().last(),Some(&(18,19,2)));
+    }
+    #[test]
+    fn bounded_chunks_rebuild_corrupt_cache_and_do_not_store_invalid_model_output() {
+        let writes=std::cell::Cell::new(0);
+        let err=super::assemble_bounded_chunks(6,2,3,2,|_,_|Some(vec![f32::NAN;6]),
+            |_|Ok(vec![vec![0.;6],vec![0.;5]]),|_,_,_|writes.set(writes.get()+1)).unwrap_err();
+        assert!(err.contains("invalid HiFiGAN chunk"));assert_eq!(writes.get(),0);
+        let out=super::assemble_bounded_chunks(1,2,3,2,|_,_|Some(vec![0.;1]),
+            |_|Ok(vec![vec![0.25,0.5]]),|_,_,_|writes.set(writes.get()+1)).unwrap();
+        assert_eq!(out,vec![0.25,0.5]);assert_eq!(writes.get(),1);
+    }
+    /// 真模型超过旧30秒限制，尾块/48k秒域/暖命中/接缝均验证，不将HNSEP切块。
+    #[test]
+    #[ignore = "真实CPU HiFiGAN长素材诊断：显式运行，不自动重复"]
+    fn real_model_long_chunks_and_warm_cache_cover_the_complete_clip() {
+        crate::vocoder_ort_session::set_runtime_ep_override(Some("cpu".into()));
+        let rate=48000u32;let seconds=35;let samples=seconds*rate as usize;
+        let input:Vec<f32>=(0..samples).map(|i| {
+            let phase=2.*std::f64::consts::PI*220.*i as f64/rate as f64;
+            (1..=12).map(|k|0.15/k as f64*(phase*k as f64).sin()).sum::<f64>() as f32
+        }).collect();
+        let cache=std::cell::RefCell::new(std::collections::BTreeMap::new());let writes=std::cell::RefCell::new(Vec::new());
+        let get=|start:usize,end:usize,_:f64,_:f64|cache.borrow().get(&(start,end)).cloned();
+        let put=|start,end,c0,c1,wf:Vec<f32>| {writes.borrow_mut().push((start,end,c0,c1));cache.borrow_mut().insert((start,end),wf);};
+        let began=std::time::Instant::now();
+        let cold=super::infer_pitch_edit_chunked_optimized(&input,rate,3.,|_|60.,|_|0.,&get,&put).unwrap();
+        let cold_ms=began.elapsed().as_millis();let chunks=writes.borrow().clone();let began=std::time::Instant::now();
+        let warm=super::infer_pitch_edit_chunked_optimized(&input,rate,3.,|_|60.,|_|0.,&get,&put).unwrap();
+        let warm_ms=began.elapsed().as_millis();assert_eq!(cold,warm);assert_eq!(writes.borrow().len(),chunks.len());
+        assert_eq!(cold.len(),samples);assert!(cold.iter().all(|v|v.is_finite()));assert!(chunks.len()>super::CHUNK_BATCH_MAX);
+        for (index,(start,end,c0,c1)) in chunks.iter().copied().enumerate() {
+            assert!(end-start<=super::chunk_max_frames());if index>0 {assert_eq!(start,chunks[index-1].1);}
+            assert!((c0-(3.+start as f64*512./44100.)).abs()<1e-10);assert!((c1-(3.+end as f64*512./44100.)).abs()<1e-10);
+        }
+        assert!(chunks.last().unwrap().1-chunks.last().unwrap().0<super::chunk_max_frames());
+        for second in 0..seconds {
+            let lo=second*rate as usize;let rms=(cold[lo..lo+rate as usize].iter().map(|&v|(v as f64).powi(2)).sum::<f64>()/rate as f64).sqrt();
+            assert!(rms>1e-4,"第{second}秒整段静音: {rms}");
+        }
+        let mut jumps=cold.windows(2).map(|v|(v[1]-v[0]).abs()).collect::<Vec<_>>();jumps.sort_by(f32::total_cmp);
+        let p99=jumps[jumps.len()*99/100];let mut boundary_max=0_f32;
+        for (_,_,_,c1) in chunks.iter().take(chunks.len()-1) {
+            let at=((c1-3.)*rate as f64).round() as usize;
+            boundary_max=boundary_max.max((cold[at]-cold[at-1]).abs());
+        }
+        assert!(boundary_max<p99*8.+1e-4,"异常接缝: max={boundary_max}, p99={p99}");
+        println!("HIFIGAN_LONG rate={rate} seconds={seconds} chunks={} batch_limit={} tail_frames={} cold_ms={cold_ms} warm_ms={warm_ms} warm_extra_runs=0 boundary_max={boundary_max:e} sample_jump_p99={p99:e}",
+            chunks.len(),super::CHUNK_BATCH_MAX,chunks.last().unwrap().1-chunks.last().unwrap().0);
+    }
 
     // ─── gender / 共振峰偏移（PitchAdjustableMelSpectrogram 移植）──────────────
 
