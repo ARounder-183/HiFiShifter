@@ -22,6 +22,8 @@ import {
     WARP_SEGMENT_IDENTITY,
     type WarpClipGeometry,
 } from "./loudnessGeometryWarp";
+import { makeLoudnessAmplitudeMap } from "./PianoRollWaveformSurface";
+import type { WaveformAmplitudeFactors } from "../../../waveform/geometry";
 
 /** 帧周期：与工程默认一致（5 ms）→ 每秒 200 帧。 */
 const FP = 5;
@@ -572,5 +574,280 @@ describe("Loop：锚点回绕与后端同向（含倒放）", () => {
             // 至少要有一批帧真的被对拍过（避免"全 UNKNOWN ⇒ 空循环"式的假绿）。
             expect(checked).toBeGreaterThan(50);
         }
+    });
+
+    it("回绕周期暴露为时间线帧数（源域周期 ÷ |rate|）", () => {
+        const fwd = resolveClipConsumption(
+            geo("c", 0, 1, { loopEnabled: true, mediaDurationSec: D }),
+            FPS,
+        )!;
+        expect(fwd.wrapFrames).toBeCloseTo(N, 9);
+        // rate 0.5：时间线走一帧只消费 0.5 源帧 ⇒ 时间线周期翻倍。
+        const slow = resolveClipConsumption(
+            geo("c", 0, 1, { loopEnabled: true, mediaDurationSec: D, playbackRate: 0.5 }),
+            FPS,
+        )!;
+        expect(slow.wrapFrames).toBeCloseTo(N / 0.5, 9);
+        // 倒放：周期取 |rate|，仍为正。
+        const rev = resolveClipConsumption(
+            geo("c", 0, 1, {
+                reversed: true,
+                sourceEndSec: 1,
+                loopEnabled: true,
+                mediaDurationSec: D,
+            }),
+            FPS,
+        )!;
+        expect(rev.wrapFrames).toBeCloseTo(N, 9);
+    });
+
+    it("非周期情形 wrapFrames 为 0（非 Loop / Loop 但媒体时长未知）", () => {
+        expect(resolveClipConsumption(geo("c", 0, 1), FPS)!.wrapFrames).toBe(0);
+        expect(
+            resolveClipConsumption(geo("c", 0, 1, { loopEnabled: true }), FPS)!.wrapFrames,
+        ).toBe(0);
+    });
+
+    it("★ 周期段不得做整数帧插值（折返跳变会让线性插值造出不存在的中间值）", () => {
+        // 3.1 → 0.15：锚点相位移动 0.05s（跨过媒体端点），段非恒等 ⇒ 一定建段。
+        const warp = warpOf(
+            [geo("c", 0, 1, { sourceStartSec: 3.1, loopEnabled: true, mediaDurationSec: D })],
+            [geo("c", 0, 1, { sourceStartSec: 0.15, loopEnabled: true, mediaDurationSec: D })],
+            true,
+        )!;
+        expect(warp).not.toBeNull();
+        for (let f = 0; f < 200; f += 7) {
+            expect(warp.interpolableAt(f)).toBe(false);
+        }
+    });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★ Loop 锚点跨过媒体端点：基线不得整段被判为「未知」
+//
+// ## 缺陷形态（用户报告："Slip 时动态参数干扰波形，且与 Loop 位置有关"）
+//
+// `computeSlipWindow` 把 `sourceStartSec` 取模进 `[0, D)`（`slipWindow.ts:150-151`），
+// 于是**逐帧连续**的 Slip 会在某一帧让它从 `3.98` 跳到 `0.03`。前端若直接相减，
+// 锚点差是 **−795 帧**，而真实相位差只有 **+5 帧** —— 偏出的整整一个周期会把
+// **每一帧**都送出旧范围，`baselineFrame` 对全部帧返回 `WARP_BASELINE_UNKNOWN`，
+// 动态增益整段退化为 1，松手拿到权威基线才恢复。
+//
+// 同理，`clip.lengthSec > D` 的 clip 跨多个周期，偏移累积也会让边缘帧越界。
+//
+// ## 本组用例钉住什么
+//
+// 用**独立**的后端同款组装（per-source-frame 电平 → 时间线）算出"松手后的权威基线"，
+// 与拖拽期的映射逐帧比对 —— 但**只统计旧几何确实消费过的源帧**：真正新揭示的素材
+// 前端原理上无法预测（反目标），不属于本缺陷。
+// ─────────────────────────────────────────────────────────────────────────────
+describe("Loop：锚点跨界时的基线映射（周期折返）", () => {
+    const D = 2;
+    const MEDIA_FRAMES = Math.round(D * FPS);
+    /** 覆盖最长的用例（5s clip ⇒ 1000 帧）并留出余量。 */
+    const TOTAL_FRAMES = 1400;
+
+    /** 源域"真实电平"曲线（后端 per-source-frame 分析结果的替身）。 */
+    function materialLevel(srcFrame: number): number {
+        const t = srcFrame / FPS;
+        return 0.2 + 0.15 * Math.sin(t * 5.5) + 0.05 * Math.sin(t * 41);
+    }
+
+    /** 时间线帧 → 源帧（后端同款：Loop 回绕 / 倒放翻转 / 窗口）；-1 = 静音。 */
+    function srcFrameAt(g: WarpClipGeometry, frameF: number): number {
+        const startF = Math.round(g.startSec * FPS);
+        const lenF = Math.round(g.lengthSec * FPS);
+        const i = frameF - startF;
+        if (i < 0 || i >= lenF) return -1;
+        const rate = g.playbackRate ?? 1;
+        if (g.loopEnabled === true) {
+            const consumed = Math.round(i * rate);
+            const idx =
+                g.reversed === true
+                    ? Math.round(Math.min(g.sourceEndSec ?? 0, D) * FPS) - 1 - consumed
+                    : Math.round((g.sourceStartSec ?? 0) * FPS) + consumed;
+            return ((idx % MEDIA_FRAMES) + MEDIA_FRAMES) % MEDIA_FRAMES;
+        }
+        const winStart =
+            g.reversed === true
+                ? (g.sourceEndSec ?? 0) - g.lengthSec * rate
+                : (g.sourceStartSec ?? 0);
+        const k = g.reversed === true ? lenF - 1 - i : i;
+        const srcF = Math.round(winStart * FPS + k * rate);
+        return srcF >= 0 && srcF < MEDIA_FRAMES ? srcF : -1;
+    }
+
+    /** 组装整工程原声基线（单 clip；后端 `assemble_dyn_orig_from_cache` 的替身）。 */
+    function assembleBaseline(g: WarpClipGeometry): number[] {
+        const out = new Array<number>(TOTAL_FRAMES).fill(0);
+        for (let f = 0; f < TOTAL_FRAMES; f += 1) {
+            const idx = srcFrameAt(g, f);
+            if (idx >= 0) out[f] = materialLevel(idx) * (g.gain ?? 1);
+        }
+        return out;
+    }
+
+    function coveredSourceFrames(g: WarpClipGeometry): Set<number> {
+        const out = new Set<number>();
+        const startF = Math.round(g.startSec * FPS);
+        const endF = startF + Math.round(g.lengthSec * FPS);
+        for (let f = startF; f < endF; f += 1) {
+            const idx = srcFrameAt(g, f);
+            if (idx >= 0) out.add(idx);
+        }
+        return out;
+    }
+
+    const VOL = new Array<number>(TOTAL_FRAMES).fill(1);
+    /** 用户画了恒定目标 ⇒ 动态增益真正参与显示（否则未画帧恒为 1，掩盖错误）。 */
+    const TARGET = new Array<number>(TOTAL_FRAMES).fill(0.6);
+
+    function amplitudeMap(baseline: number[], warp: unknown): WaveformAmplitudeFactors {
+        return makeLoudnessAmplitudeMap(
+            {
+                startFrame: 0,
+                stride: 1,
+                framePeriodMs: FP,
+                volume: VOL,
+                dynTarget: TARGET,
+                dynBaseline: baseline,
+            },
+            { volume: () => null, dyn: () => null },
+            () => 0,
+            (() => warp) as never,
+        ) as unknown as WaveformAmplitudeFactors;
+    }
+
+    /** 拖拽期 vs 松手后（只统计旧覆盖帧）。 */
+    function dragVsRelease(before: WarpClipGeometry, after: WarpClipGeometry) {
+        const warp = warpOf([before], [after], true);
+        const drag = amplitudeMap(assembleBaseline(before), warp);
+        const release = amplitudeMap(assembleBaseline(after), null);
+        const hi = ((TOTAL_FRAMES - 1) * FP) / 1000;
+        drag.beginWindow?.(0, hi);
+        release.beginWindow?.(0, hi);
+        const covered = coveredSourceFrames(before);
+        const startF = Math.round(after.startSec * FPS);
+        const endF = startF + Math.round(after.lengthSec * FPS);
+        let unknown = 0;
+        let unknownAmongCovered = 0;
+        let maxDiff = 0;
+        let checked = 0;
+        for (let f = startF; f < endF; f += 1) {
+            const isUnknown = warp !== null && warp.baselineFrame(f) === WARP_BASELINE_UNKNOWN;
+            if (isUnknown) unknown += 1;
+            const idx = srcFrameAt(after, f);
+            if (idx < 0 || !covered.has(idx)) continue;
+            checked += 1;
+            if (isUnknown) unknownAmongCovered += 1;
+            const a = drag.factorAt?.((f * FP) / 1000) ?? Number.NaN;
+            const b = release.factorAt?.((f * FP) / 1000) ?? Number.NaN;
+            const d = Math.abs(a - b);
+            if (d > maxDiff) maxDiff = d;
+        }
+        return { unknown, unknownAmongCovered, maxDiff, checked, frames: endF - startF };
+    }
+
+    /** Loop clip（默认起点 0、长度 1s、媒体时长 D）。 */
+    const loopClip = (o: GeoOpts & { lengthSec?: number } = {}): WarpClipGeometry =>
+        geo("c", 0, o.lengthSec ?? 1, { loopEnabled: true, mediaDurationSec: D, ...o });
+
+    it("★ 跨界 Slip（3.98→0.03）：不得整段判未知，且与松手后逐值一致", () => {
+        const r = dragVsRelease(
+            loopClip({ sourceStartSec: 3.98, sourceEndSec: 4.98 }),
+            loopClip({ sourceStartSec: 0.03, sourceEndSec: 1.03 }),
+        );
+        // 修复前：unknown = 200/200（整段）、maxDiff ≈ 468（DYN_MAX_GAIN 量级）。
+        expect(r.unknownAmongCovered).toBe(0);
+        expect(r.maxDiff).toBeLessThan(1e-6);
+        // 真的对拍过一批帧（避免"全被过滤 ⇒ 空循环"式假绿）。
+        expect(r.checked).toBeGreaterThan(150);
+    });
+
+    it("★ 逆方向跨界 Slip（0.03→3.98）：最小剩余取负号的那一支同样正确", () => {
+        const r = dragVsRelease(
+            loopClip({ sourceStartSec: 0.03, sourceEndSec: 1.03 }),
+            loopClip({ sourceStartSec: 3.98, sourceEndSec: 4.98 }),
+        );
+        expect(r.unknownAmongCovered).toBe(0);
+        expect(r.maxDiff).toBeLessThan(1e-6);
+        expect(r.checked).toBeGreaterThan(150);
+    });
+
+    it("★ clip 长于一个周期（5s > 2s）：Slip 后无任何未知帧", () => {
+        const r = dragVsRelease(
+            loopClip({ lengthSec: 5, sourceStartSec: 3.1, sourceEndSec: 8.1 }),
+            loopClip({ lengthSec: 5, sourceStartSec: 0.1, sourceEndSec: 5.1 }),
+        );
+        // 整段都在旧覆盖内（5s 覆盖了整整 2.5 个周期）⇒ 一个未知帧都不该有。
+        expect(r.unknown).toBe(0);
+        expect(r.maxDiff).toBeLessThan(1e-6);
+        expect(r.checked).toBeGreaterThan(900);
+    });
+
+    it("★ clip 长于一个周期：小幅 Slip 也不得让边缘帧越界", () => {
+        const r = dragVsRelease(
+            loopClip({ lengthSec: 5, sourceStartSec: 1, sourceEndSec: 6 }),
+            loopClip({ lengthSec: 5, sourceStartSec: 1.05, sourceEndSec: 6.05 }),
+        );
+        expect(r.unknown).toBe(0);
+        expect(r.maxDiff).toBeLessThan(1e-6);
+    });
+
+    it("★ 倒放 + Loop + 跨界 Slip（锚点在 min(se,D) 侧、方向为负）", () => {
+        const r = dragVsRelease(
+            loopClip({ reversed: true, sourceStartSec: 0, sourceEndSec: 0.03 }),
+            loopClip({ reversed: true, sourceStartSec: 0, sourceEndSec: 3.98 }),
+        );
+        expect(r.unknownAmongCovered).toBe(0);
+        expect(r.maxDiff).toBeLessThan(1e-6);
+        expect(r.checked).toBeGreaterThan(150);
+    });
+
+    it("★ Slip 整一个周期 ⇒ 内容逐帧不变（映射退化为恒等）", () => {
+        const before = loopClip({ sourceStartSec: 1.3, sourceEndSec: 2.3 });
+        const after = loopClip({ sourceStartSec: 3.3, sourceEndSec: 4.3 });
+        // 一个周期 = D = 2s；相位完全相同 ⇒ 没有需要搬移的东西。
+        expect(warpOf([before], [after], true)).toBeNull();
+        const r = dragVsRelease(before, after);
+        expect(r.unknown).toBe(0);
+        expect(r.maxDiff).toBeLessThan(1e-6);
+    });
+
+    it("对照组：非 Loop 的 move / slip / trim 逐值不变（修复不外溢）", () => {
+        const plain = (o: GeoOpts = {}) => geo("c", 0, 1, o);
+        const move = dragVsRelease(plain(), geo("c", 0.05, 1, {}));
+        expect(move.unknown).toBe(0);
+        expect(move.maxDiff).toBeLessThan(1e-6);
+        const slip = dragVsRelease(
+            plain(),
+            plain({ sourceStartSec: 0.05, sourceEndSec: 1.05 }),
+        );
+        expect(slip.maxDiff).toBeLessThan(1e-6);
+        const trim = dragVsRelease(plain(), geo("c", 0, 1.05, {}));
+        expect(trim.maxDiff).toBeLessThan(1e-6);
+    });
+
+    it("对照组：Loop 的 move / trim（锚点相位不变）逐值不变", () => {
+        const move = dragVsRelease(loopClip(), geo("c", 0.05, 1, {
+            loopEnabled: true,
+            mediaDurationSec: D,
+        }));
+        expect(move.unknown).toBe(0);
+        expect(move.maxDiff).toBeLessThan(1e-6);
+        const trim = dragVsRelease(
+            loopClip(),
+            geo("c", 0, 1.05, { loopEnabled: true, mediaDurationSec: D }),
+        );
+        expect(trim.maxDiff).toBeLessThan(1e-6);
+    });
+
+    it("退化：Loop 但媒体时长未知 ⇒ 与修复前一致（wrapFrames = 0）", () => {
+        const before = geo("c", 0, 1, { loopEnabled: true, sourceStartSec: 0.5 });
+        const after = geo("c", 0, 1, { loopEnabled: true, sourceStartSec: 0.9 });
+        expect(resolveClipConsumption(before, FPS)!.wrapFrames).toBe(0);
+        const warp = warpOf([before], [after], true)!;
+        // 无周期可折返：越界即未知（保持既有退化语义，不引入伪基线）。
+        expect(warp.interpolableAt(0)).toBe(true);
     });
 });

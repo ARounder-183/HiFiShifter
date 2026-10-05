@@ -61,8 +61,11 @@
  * - **Loop 回绕**：消费函数带 `floor_mod`，但仿射映射仍然**精确** —— 仿射解出的
  *   `g` 使 `srcOld(g)` 与 `srcNew(f)` 的**未回绕**源位置相等，而 `rem_euclid` 施加在
  *   同一个值上；基线是源位置的周期函数（周期 D），故取模后的等价解给出同一个基线值。
- *   前提是锚点与方向与后端一致（正放 `source_start`、倒放 `min(source_end, D)` 且方向
- *   为负，见 `resolveClipConsumption`）；**媒体时长 D 未知时**才退化为正放仿射近似。
+ *   前提有三条，缺一不可：锚点与方向与后端一致（正放 `source_start`、倒放
+ *   `min(source_end, D)` 且方向为负，见 `resolveClipConsumption`）；**锚点差按相位取**
+ *   （`mod n` 的最小剩余，否则跨过媒体端点时会偏出整整一个周期）；**映射值按周期折回**
+ *   旧范围（否则越界帧会被误判为"未知"）。后两条见 `createLoudnessGeometryWarp` 的
+ *   段构造与 `mapBaselineFrame`。**媒体时长 D 未知时**才退化为正放仿射近似。
  * - 淡化的变化只影响"该帧是否计入能量"的门限（后端 `fade_weight_at > 0`），不影响
  *   电平位置；忽略。
  */
@@ -138,8 +141,25 @@ export interface ClipConsumption {
     readonly anchorF: number;
     readonly gain: number;
     /**
-     * 映射是否**精确**（`false` = 该 clip 开了 Loop，回绕破坏仿射性；
-     * 仍按正放仿射近似，见文件头"近似边界"）。
+     * **回绕周期**（时间线帧数）：`> 0` = 该 clip 的基线是时间线帧的**周期函数**，
+     * 周期为本值；`0` = 非周期（非 Loop，或 Loop 但媒体时长 `D` 未知）。
+     *
+     * 【为什么是时间线帧而不是源帧】源域周期是 `n = round(D·fps)`，而时间线每走一帧
+     * 消费 `|rate|` 个源帧 ⇒ 时间线周期 = `n / |rate|`（见
+     * {@link resolveClipConsumption} 的 Loop 分支）。
+     *
+     * 【它解决什么】`floor_mod` 的消费只依赖锚点的**相位**：锚点差 `Δ` 与 `Δ ± n`
+     * 逐帧给出同一个源位置。同时，映射值偏离旧范围一个周期时，基线值**逐值不变**
+     * —— 于是"把映射折回主值区间"与"直接取"等价。没有这一项，锚点一旦跨过媒体
+     * 端点，整段基线会被误判为「未知」（见 {@link LoudnessGeometryWarp.baselineFrame}）。
+     */
+    readonly wrapFrames: number;
+    /**
+     * 映射是否**精确**（`false` = 该 clip 开了 Loop 但媒体时长 `D` 未知，只能按
+     * 正放仿射近似，见文件头"近似边界"）。
+     *
+     * 【与 `wrapFrames` 的关系】Loop 且 `D` 已知时映射**精确**（`exact: true`），
+     * 回绕由 `wrapFrames` 显式表达；两者不再互相蕴含。
      */
     readonly exact: boolean;
 }
@@ -147,7 +167,9 @@ export interface ClipConsumption {
 /**
  * 单个 clip 的时域映射段（构造期算好，查询期零换算）。
  *
- * 基线映射在本段内恒为 `g(f) = offset + slope · f`。
+ * 基线映射在本段内恒为 `g(f) = offset + slope · f`；`wrapFrames > 0` 时是
+ * **周期函数**：映射值先折回 `[oldStartF, oldStartF + wrapFrames)`（见
+ * {@link LoudnessGeometryWarp.baselineFrame}）。
  */
 interface PreparedSegment {
     /** 该 clip 在新几何下的可见帧范围 `[newStartF, newEndF)`。 */
@@ -161,11 +183,22 @@ interface PreparedSegment {
     /** 该 clip 的增益比 `newGain / oldGain`（1 = 未变）。 */
     readonly gainScale: number;
     /**
+     * 该段的回绕周期（时间线帧数）：`> 0` = 基线是帧的周期函数，映射值可折回
+     * 主值区间而不改变取值；`0` = 非周期（越界即未知）。
+     *
+     * 取**旧几何**的周期：`g` 是"旧几何下的帧坐标"，周期自然也是旧几何下的
+     * （`n / |rate_old|`，见 `ClipConsumption.wrapFrames`）。
+     */
+    readonly wrapFrames: number;
+    /**
      * 是否允许查表的整数帧线性插值。
      *
      * 等价于"映射把整数帧送到整数帧且每帧走一格"，即 `slope === 1`（刚性平移）。
      * 平移 / 恒等（移动、Slip、延伸截短）满足；Alt 拉伸的仿射缩放不满足 ——
      * 缩放会把快照的分段线性折点搬进格内，线性插值会在折点两侧"抄近路"。
+     *
+     * **周期段（`wrapFrames > 0`）一律为 false**：折返会让映射在段内出现跳变，
+     * 线性插值会跨过跳变造出两条路径都不存在的中间值。
      */
     readonly interpolable: boolean;
     /** 用户曲线的映射策略（已在构造期按 `lockParamLines` 降级，见 `CurvePolicy`）。 */
@@ -247,7 +280,9 @@ function finiteOr(value: number | null | undefined, fallback: number): number {
  * - 非 Loop 正放：窗口起点 `source_start_sec`，速率 `+playback_rate`；
  * - 非 Loop 倒放：消费窗口重定向为 `[se − len·rate, se]` 且输出整体翻转
  *   （`clip_pitch_trim_window_sec`），故锚点在 `source_end_sec` 侧、速率为负；
- * - Loop：回绕 ⇒ 非仿射（按正放仿射近似，`exact = false`）。
+ * - Loop：锚点回绕（`floor_mod`）。媒体时长 `D` 已知时映射**精确**
+ *   （`exact: true`，回绕由 `wrapFrames` 表达）；`D` 未知时退化为正放仿射
+ *   （`exact: false`、`wrapFrames: 0`）。
  *
  * @param fps 每秒钟的帧数（`1000 / framePeriodMs`）。
  */
@@ -286,8 +321,15 @@ export function resolveClipConsumption(
         // （仿射解出的 g 使 `srcOld(g)` 与 `srcNew(f)` 的未回绕值相等，回绕后自然
         // 相等），而基线是源位置的函数（周期 D）—— 因此 `k≠0` 的那些等价解与
         // `k=0` 给出同一个基线值。回绕不破坏仿射性；错的是锚点与方向。
+        //
+        // 【本分支只负责"锚点/方向"，回绕由消费方处理】这里返回的 `anchorF` 是**未
+        // 取模**的源帧锚点（与后端 `round(source_start·fps)` 同口径）；"锚点差取相位"
+        // 与"映射值折回"需要同时看到新旧两侧，故落在 `createLoudnessGeometryWarp` 里
+        // （`wrapFrames` 是本分支提供的唯一输入）。
         const mediaTotalSec = resolveClipContentDurationSec(clip) ?? 0;
         if (mediaTotalSec > 0) {
+            // 回绕周期：源域 `n = round(D·fps)`，时间线域除以 |rate|（见 wrapFrames）。
+            const wrapFrames = Math.round(mediaTotalSec * fps) / Math.abs(rate);
             if (clip.reversed === true) {
                 // 倒放锚点 = min(source_end, D)，且首帧消费 `anchor_r − 1`
                 //（后端下标从 `anchor_r − 1 − consumed` 起算）。
@@ -298,6 +340,7 @@ export function resolveClipConsumption(
                     rate: -rate,
                     anchorF: Math.round(anchorRSec * fps) - 1,
                     gain,
+                    wrapFrames,
                     exact: true,
                 };
             }
@@ -307,6 +350,7 @@ export function resolveClipConsumption(
                 rate,
                 anchorF: Math.round(sourceStartSec * fps),
                 gain,
+                wrapFrames,
                 exact: true,
             };
         }
@@ -317,6 +361,7 @@ export function resolveClipConsumption(
             rate,
             anchorF: sourceStartSec * fps,
             gain,
+            wrapFrames: 0,
             exact: false,
         };
     }
@@ -331,6 +376,7 @@ export function resolveClipConsumption(
             rate: -rate,
             anchorF: winStartSec * fps + (lenF - 1) * rate,
             gain,
+            wrapFrames: 0,
             exact: true,
         };
     }
@@ -341,6 +387,7 @@ export function resolveClipConsumption(
         rate,
         anchorF: sourceStartSec * fps,
         gain,
+        wrapFrames: 0,
         exact: true,
     };
 }
@@ -418,8 +465,29 @@ export function createLoudnessGeometryWarp(args: {
                 : 1;
 
         // 基线仿射：g(f) = startF_old + (anchor'_new − anchor_old + (f − startF_new)·rate_new) / rate_old
+        //
+        // ── Loop：锚点差必须按**相位**（mod 一个回绕周期）取 ────────────────────
+        // Loop 的消费是 `floor_mod(锚点 ± 已消费, D)`，只依赖锚点的**相位**：`Δ` 与
+        // `Δ ± n` 逐帧给出同一个源位置。而 `sourceStartSec` 是被 `computeSlipWindow`
+        // 取过模的存储值（`slipWindow.ts:150-151`），逐帧连续的 Slip 会在某一帧让它
+        // 从 `3.98` 跳到 `0.03` —— 直接相减得到 **−795 帧**，而真实相位差只有
+        // **+5 帧**。偏出的那一个周期会把**每一帧**都送出旧范围，整段基线被判为
+        // 「未知」（用户报告："Slip 时动态参数干扰波形，且与 Loop 位置有关"）。
+        //
+        // 取**绝对值最小的等价代表**（`(-n/2, n/2]`）：与"逐帧连续滑动"的直觉一致，
+        // 也让映射值尽量落在旧范围内（回绕只需救回边缘的那几帧）。
+        const periodic = oldC.wrapFrames > 0 && newC.wrapFrames > 0;
+        let anchorDeltaF = newC.anchorF - oldC.anchorF;
+        if (periodic) {
+            // 源域周期 `n`：由旧几何的 wrapFrames 还原（`wrapFrames = n / |rate_old|`）。
+            const n = Math.round(oldC.wrapFrames * Math.abs(oldC.rate));
+            if (n > 0) {
+                const r = ((anchorDeltaF % n) + n) % n;
+                anchorDeltaF = r > n / 2 ? r - n : r;
+            }
+        }
         const slope = newC.rate / oldC.rate;
-        const offset = oldC.startF + (newC.anchorF - oldC.anchorF) / oldC.rate - newStartF * slope;
+        const offset = oldC.startF + anchorDeltaF / oldC.rate - newStartF * slope;
 
         const rateChanged = Math.abs(newC.rate - oldC.rate) > RATE_EPSILON * Math.max(1, Math.abs(oldC.rate));
         const anchorChanged = Math.abs(newC.anchorF - oldC.anchorF) > ANCHOR_EPSILON_FRAMES;
@@ -483,9 +551,14 @@ export function createLoudnessGeometryWarp(args: {
             slope,
             offset,
             gainScale,
+            wrapFrames: periodic ? oldC.wrapFrames : 0,
             // 恒等（slope 1 + offset 0）与平移（slope 1）都可整数帧插值；
             // 缩放会把折点搬进格内，必须逐值。
-            interpolable: Math.abs(slope - 1) <= 1e-9,
+            //
+            // 【周期段为何也排除】回绕使映射在段内出现**折返跳变**（`g` 跨过
+            // `oldEndF` 后折回 `oldStartF`），跨过该跳变的线性插值会造出两条路径
+            // 都不存在的中间值 —— 与缩放把折点搬进格内是同一类错误。
+            interpolable: Math.abs(slope - 1) <= 1e-9 && !periodic,
             curve,
         });
     }
@@ -519,23 +592,45 @@ export function createLoudnessGeometryWarp(args: {
     const curveSegmentIndex = (seg: PreparedSegment): number =>
         seg.curve.kind === "none" ? WARP_SEGMENT_IDENTITY : segments.indexOf(seg);
 
+    /**
+     * 映射后的**基线取样帧**：落在旧范围外时，周期段先按回绕折回主值区间。
+     *
+     * 【为什么折回是**精确**的，而不是近似】Loop 的基线是**源位置的函数**，而源位置
+     * 以 `D` 为周期回绕 ⇒ 基线作为时间线帧的函数，周期正是 `seg.wrapFrames`。
+     * 映射值 `mapped` 与 `mapped ± k·wrapFrames` 对应的源位置**相差整数个周期**
+     *（`srcOld(g + wrapFrames) = srcOld(g) ± n`），`rem_euclid` 下逐值相同 ⇒
+     * 折回前后取到的基线值逐值相等。
+     *
+     * 【不折回的代价】锚点跨过媒体端点时（或 clip 长于一个周期、偏移累积到越界时）
+     * **整段**帧都会被判为"未知"，动态增益整段退化为 1 —— 用户看到的正是
+     * "Slip 时动态参数干扰波形、与 Loop 位置有关、松手才恢复"。
+     *
+     * 【折回后仍越界 ⇒ 真未知】旧 clip 覆盖的不足一个完整周期时，某些相位在旧几何下
+     * 确实从未被消费（Slip / 延伸带入的新素材），此时如实宣告未知。
+     */
+    const mapBaselineFrame = (seg: PreparedSegment, frameF: number): number => {
+        const mapped = seg.offset + seg.slope * frameF;
+        if (mapped >= seg.oldStartF && mapped < seg.oldEndF) return mapped;
+        if (!(seg.wrapFrames > 0)) return WARP_BASELINE_UNKNOWN;
+        const u = mapped - seg.oldStartF;
+        const folded = ((u % seg.wrapFrames) + seg.wrapFrames) % seg.wrapFrames;
+        return folded < seg.oldEndF - seg.oldStartF
+            ? seg.oldStartF + folded
+            : WARP_BASELINE_UNKNOWN;
+    };
+
     return {
         baselineFrame(frameF) {
             const index = segmentAt(frameF);
             if (index < 0) return frameF;
-            const seg = segments[index] as PreparedSegment;
-            const mapped = seg.offset + seg.slope * frameF;
-            // 映射后的位置落在旧 clip 之外 ⇒ 该帧播放的素材在旧几何下不可见，
-            // 旧快照里没有它的基线。必须显式宣告"未知"，不能拿别处的值顶替。
-            if (mapped < seg.oldStartF || mapped >= seg.oldEndF) return WARP_BASELINE_UNKNOWN;
-            return mapped;
+            return mapBaselineFrame(segments[index] as PreparedSegment, frameF);
         },
         baselineScale(frameF) {
             const index = segmentAt(frameF);
             if (index < 0) return 1;
             const seg = segments[index] as PreparedSegment;
-            const mapped = seg.offset + seg.slope * frameF;
-            if (mapped < seg.oldStartF || mapped >= seg.oldEndF) return 1;
+            // 折回与基线帧同口径：折回后的帧仍在旧覆盖内 ⇒ 增益比同样成立。
+            if (mapBaselineFrame(seg, frameF) === WARP_BASELINE_UNKNOWN) return 1;
             return seg.gainScale;
         },
         curveFrame(frameF) {
