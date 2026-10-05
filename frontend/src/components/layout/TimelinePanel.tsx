@@ -5341,6 +5341,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             const origin = kernelCrossfadeOriginRef.current;
             kernelCrossfadeOriginRef.current = null;
             if (origin === null) return;
+            // 手势结束：清掉吸附高亮。
+            //
+            // 【为什么必须显式清】预览通过 `snapTimelineDetailed({ highlight })` 发布
+            // 高亮，而**只有再次带 `highlight` 调用**才会清除它 —— 松手后不再有预览帧，
+            // 没人来清。其它吸附手势的收尾各自负责：clip 拖拽 / 裁切在提交里
+            // `clearSnapHighlights`，吸附偏移走 `endSnapGesture()` 的深度归零兜底；
+            // 交叉点抓手此前两者都没有，于是拖拽中亮起的吸附竖线**一直留在画面上**
+            //（用户报告："按住交叉淡化反向模式拖抓手，松手后高亮线不消失"）。
+            clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             if (args.cancelled) {
                 // 取消：两侧**全部字段**一起还原——预览改过源窗口与淡变（反向模式），
                 // 只还原起点 / 长度会让 Redux 停在半途、与后端分叉。
