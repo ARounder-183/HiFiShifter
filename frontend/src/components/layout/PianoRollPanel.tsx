@@ -243,7 +243,6 @@ import {
     resolveActiveVibratoPreset,
     resolveVibratoPresets,
     findVibratoPreset,
-    isStraightVibratoPresetId,
     chooseVibratoPreset,
     systemVibratoPreset,
 } from "../../features/vibrato/vibratoPresetList";
@@ -1372,6 +1371,17 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             : currentDrawTool === "draw"
               ? ("draw" as const)
               : ("vibrato" as const);
+
+    /**
+     * **当前生效**的预设 —— 预设入口那一行与它的列表都用它。
+     *
+     * 【为什么不是 `activeVibratoPreset`】直线工具固定在直线预设上，与活动预设无关。
+     * 若入口显示活动预设、列表却按"直线工具"给直线打钩，同一块 UI 里就会出现两个
+     * 互相矛盾的"当前预设"：入口写着「自然」、列表却勾着「直线」。两者取同一个值，
+     * 这种矛盾在结构上就不存在了。
+     */
+    const effectiveVibratoPreset =
+        currentDrawTool === "line" ? straightVibratoPreset : activeVibratoPreset;
 
     useEffect(() => {
         if (!drawToolMenuOpen && !pitchSnapMenuOpen) return;
@@ -7881,10 +7891,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     撤掉之后，"现在用的是哪个预设"就靠这一行扫读。 */}
                                 <AppSubMenu
                                     label={tf("vibrato_toolbar_label")}
-                                    badge={vibratoPresetLabel(activeVibratoPreset, tf)}
+                                    badge={vibratoPresetLabel(effectiveVibratoPreset, tf)}
                                     icon={
                                         <VibratoPresetGlyph
-                                            preset={activeVibratoPreset}
+                                            preset={effectiveVibratoPreset}
                                             width={15}
                                             height={15}
                                         />
@@ -7937,10 +7947,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                                     </span>
                                                 </span>
                                                 <span className="hs-menu__trail">
-                                                    {(currentDrawTool === "line"
-                                                        ? isStraightVibratoPresetId(preset.id)
-                                                        : preset.id ===
-                                                          activeVibratoPresetId) ? (
+                                                    {preset.id ===
+                                                    effectiveVibratoPreset.id ? (
                                                         <span className="hs-menu__check">
                                                             <CheckIcon />
                                                         </span>

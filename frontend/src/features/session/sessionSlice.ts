@@ -7104,13 +7104,19 @@ export const {
  * dispatch 点。逐个补一句 `persistUiSettings()`，等于埋 8 个"以后新增入口时忘了
  * 补"的坑；工具选择是低频动作（一次点击或一次按键），立即写一次盘的代价可以忽略。
  *
+ * 【已经在这个工具上时直接返回】这让"声明式地断言工具"变成免费操作：拖拽中的
+ * 预设轮转每次都要确保自己落在正确的工具上（见 `applyVibratoChoice`），若每次都
+ * 写一遍盘，一次轮转就会产生两次设置写入。跳过重复项之后，只有真的换了工具才落盘。
+ *
  * 【为什么里面要转型】`persistUiSettings` 自己是个 thunk，而 `createAsyncThunk`
  * 默认的 `dispatch` 只认 plain action —— 与 `importThunks` 的
  * `dispatch as unknown as TrackDispatch` 是同一手法。
  */
 export const setToolModePersistent = createAsyncThunk<ToolMode, ToolMode>(
     "session/setToolModePersistent",
-    (mode, { dispatch }) => {
+    (mode, { dispatch, getState }) => {
+        // 读的是**派发前**的状态：派发之后它必然等于 `mode`，那样判断永远为真。
+        if ((getState() as { session: SessionState }).session.toolMode === mode) return mode;
         dispatch(setToolMode(mode));
         (dispatch as unknown as (action: unknown) => void)(persistUiSettings());
         return mode;

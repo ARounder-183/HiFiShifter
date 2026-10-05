@@ -26,6 +26,7 @@ import {
 } from "../../../features/session/sessionSlice";
 import { clamp, MAX_PX_PER_SEC, MIN_PX_PER_SEC } from "../timeline";
 import type { LiveEditOverride } from "./useLiveParamEditing";
+import type { DrawToolMode } from "../../../features/session/sessionTypes";
 import type {
     ParamMorphOverlay,
     ParamName,
@@ -883,6 +884,16 @@ export function usePianoRollInteractions(args: {
         currentFrame: number;
         currentValue: number;
         mode: StrokeMode;
+        /**
+         * 本次手势当前所用的工具。
+         *
+         * 【为什么记在拖拽状态里，而不是读 `toolMode` 属性】拖拽期间工具会变：
+         * 轮转落在直线预设上会切到直线工具，再轮转回来又切回颤音工具。而
+         * 手势的键盘 / 侧键监听是在 `pointerdown` 时装上的，闭包捕获的是**那一刻**
+         * 的 `toolMode` —— 用它做判断，第二次切换就会读到过期值，出现"画的是颤音、
+         * 工具却停在直线"这种既非此也非彼的状态。手势自己记，就不会过期。
+         */
+        tool: DrawToolMode;
         /** 拖拽工作副本：预设 + 本次拖拽的深度 / 速率覆盖。 */
         working: VibratoDragWorking;
         shiftHeld: boolean;
@@ -1539,6 +1550,9 @@ export function usePianoRollInteractions(args: {
         (clientX?: number, clientY?: number): boolean => {
             const vib = vibratoStateRef.current;
             if (!vib) return false;
+            // 无条件断言：手势画的是什么，工具就必须是什么。重复断言由
+            // `setToolModePersistent` 判重后跳过写盘，因此这里是免费的。
+            vib.tool = "line";
             void dispatch(setToolModePersistent("line"));
             vib.working = createDragWorking(straightVibratoPreset, editParam, currentParamRange);
             vib.seed = vibratoSeedForPreset(straightVibratoPreset);
@@ -1568,25 +1582,26 @@ export function usePianoRollInteractions(args: {
      */
     const applyVibratoChoice = useCallback(
         (choice: VibratoChoice, clientX?: number, clientY?: number): boolean => {
-            if (!vibratoStateRef.current) return false;
+            const vib = vibratoStateRef.current;
+            if (!vib) return false;
             if (choice.tool === "line") return switchDragToLineTool(clientX, clientY);
 
             const next = findVibratoPreset(vibratoPresetCycleList, choice.presetId);
             if (!next) return false;
             // 从直线工具轮转出去 = 换回颤音工具：工具与预设一起变，否则会停在
             // "直线工具 + 一个颤音预设"这种既非此也非彼的状态上。
-            if (toolMode === "line") void dispatch(setToolModePersistent("vibrato"));
+            //
+            // 【为什么是断言而不是"仅当需要时切换"】手势的按键监听是 pointerdown
+            // 时装上的，闭包里的 `toolMode` 属性停留在那一刻 —— 拿它做判断，从直线
+            // 工具切回颤音预设时就会漏掉回切，出现"画的是颤音、工具却停在直线"。
+            // 干脆每次都断言，重复的那次由 `setToolModePersistent` 判重跳过。
+            vib.tool = "vibrato";
+            void dispatch(setToolModePersistent("vibrato"));
             dispatch(setActiveVibratoPreset(next.id));
             void dispatch(persistUiSettings());
             return switchVibratoDragPreset(next, clientX, clientY);
         },
-        [
-            dispatch,
-            toolMode,
-            vibratoPresetCycleList,
-            switchDragToLineTool,
-            switchVibratoDragPreset,
-        ],
+        [dispatch, vibratoPresetCycleList, switchDragToLineTool, switchVibratoDragPreset],
     );
 
     /**
@@ -2445,7 +2460,7 @@ export function usePianoRollInteractions(args: {
                 // 起点按**工具**推导：直线工具在序列里占着直线预设的位置，
                 // 拿活动预设当起点会让"从直线工具轮转一步"跳到别处。
                 const anchorId = vibratoCycleAnchorId({
-                    lineTool: toolMode === "line",
+                    lineTool: vibratoStateRef.current.tool === "line",
                     currentPresetId: vibratoStateRef.current.working.preset.id,
                 });
                 const choice = cycleVibratoChoice(vibratoPresetCycleList, anchorId, switchDirection);
@@ -5297,6 +5312,9 @@ export function usePianoRollInteractions(args: {
                         currentFrame: startFrame,
                         currentValue: startValue,
                         mode,
+                        // 手势从起手时的工具开始；此后由本手势自己的切换改写
+                        // （见 `VibratoDragState.tool` 的说明）。
+                        tool: isLineTool ? "line" : "vibrato",
                         working,
                         shiftHeld: snapToggleHeld,
                         seed: vibratoSeedForPreset(working.preset),
@@ -5549,7 +5567,7 @@ export function usePianoRollInteractions(args: {
                             const choice = cycleVibratoChoice(
                                 vibratoPresetCycleList,
                                 vibratoCycleAnchorId({
-                                    lineTool: toolMode === "line",
+                                    lineTool: vibratoStateRef.current?.tool === "line",
                                     currentPresetId:
                                         vibratoStateRef.current?.working.preset.id ?? null,
                                 }),
