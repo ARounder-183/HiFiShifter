@@ -69,6 +69,16 @@ export interface TimelineSnapContext {
     extraCandidates?: readonly SnapCandidate[];
     /** 工程采样率；snapToProjectSampleRate 时使用，默认 48000。 */
     projectSampleRate?: number;
+    /**
+     * 只允许吸附到该区间内的候选（秒，顺序无关）。
+     *
+     * 【为什么需要】被吸附对象本身可能有**活动范围**。典型是 Clip 的吸附偏移
+     * 手柄：它必须留在 Clip 内部（`[clipStart, clipStart + clipLen]`）。若不过滤，
+     * 最近的候选可能落在 Clip 之外 —— 吸附会把"落点"算到外面，调用方再把它钳回
+     * 边界，于是**高亮线画在 Clip 外、手柄却停在边界**，看起来像"范围外也生效"。
+     * 过滤掉范围外候选后，命中即落点，高亮与实际位置一致。
+     */
+    candidateRangeSec?: { readonly lo: number; readonly hi: number };
 }
 
 export interface SnapResult {
@@ -566,7 +576,7 @@ export function snapTimelinePosition(ctx: TimelineSnapContext, rawSec: number): 
         return { sec: safeRaw, candidate: null, distancePx: 0, snapped: false };
     }
 
-    const candidates: SnapCandidate[] = [];
+    let candidates: SnapCandidate[] = [];
 
     // 轨道过滤后的可见 clip 一次算好，选择族与 Clip 边缘族共用（两族候选顺序
     // 都来自同一个 `ctx.clips` 过滤结果，合并后与各自独立过滤逐项一致）。
@@ -577,7 +587,7 @@ export function snapTimelinePosition(ctx: TimelineSnapContext, rawSec: number): 
         (ctx.object === "clip" && settings.snapClipsToGrid) ||
         (ctx.object === "selection" && settings.snapSelectionToGrid) ||
         (ctx.object === "cursor" && settings.snapCursorToGrid);
-    const gridCandidates = wantsGrid ? collectGridCandidates(ctx, safeRaw) : [];
+    let gridCandidates = wantsGrid ? collectGridCandidates(ctx, safeRaw) : [];
     candidates.push(...gridCandidates);
 
     // ── 选择 / 标记 / 光标 ──
@@ -617,6 +627,17 @@ export function snapTimelinePosition(ctx: TimelineSnapContext, rawSec: number): 
                 swingPercent: 0,
             }) + offset;
         candidates.push({ sec: clampSec(snapped), kind: "grid", priority: 15 });
+    }
+
+    // ── 候选范围过滤（在"激进模式"与距离判定之前统一生效）──
+    // 见 `candidateRangeSec` 的说明：范围外的候选不参与吸附，保证"命中即落点"。
+    if (ctx.candidateRangeSec !== undefined) {
+        const lo = Math.min(ctx.candidateRangeSec.lo, ctx.candidateRangeSec.hi) - 1e-9;
+        const hi = Math.max(ctx.candidateRangeSec.lo, ctx.candidateRangeSec.hi) + 1e-9;
+        const inRange = (candidate: SnapCandidate): boolean =>
+            candidate.sec >= lo && candidate.sec <= hi;
+        candidates = candidates.filter(inRange);
+        gridCandidates = gridCandidates.filter(inRange);
     }
 
     if (candidates.length === 0) {

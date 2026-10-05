@@ -141,7 +141,7 @@ import {
 } from "./timeline/loudnessFetchGate";
 import { getBulkEditableClipIds } from "./timeline/hooks/bulkClipEdit";
 import { registerDragAbort } from "./timeline/gestureFocusGuard";
-import { resolveTrimSourceWindow } from "./timeline/trimSourceWindow";
+import { resolveTrimSourceWindow, resolveTrimSnapOffset } from "./timeline/trimSourceWindow";
 import { resolveClipContentDurationSec } from "../../utils/loopRender";
 import { getInsertBelowTargetIndex } from "./timeline/trackContextMenuPlacement";
 import { collectFadeContextClips } from "./timeline/clipFadeContext";
@@ -2549,6 +2549,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 loopEnabled: boolean;
                 /** Loop 回绕周期 D（秒）；0 = 未知（见 `trimSourceWindow`）。 */
                 mediaDurationSec: number;
+                /** 按下时的吸附偏移（秒）：左缘拖拽要保持它的**绝对位置**不变。 */
+                snapOffsetSec: number;
             }
         >;
         /**
@@ -2678,6 +2680,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         reversed: boolean;
                         loopEnabled: boolean;
                         mediaDurationSec: number;
+                        snapOffsetSec: number;
                     }
                 >();
                 for (const participant of participants) {
@@ -2695,6 +2698,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         reversed: item.reversed === true,
                         loopEnabled: item.loopEnabled === true,
                         mediaDurationSec: resolveClipContentDurationSec(item) ?? 0,
+                        snapOffsetSec: Math.max(0, Number(item.snapOffsetSec) || 0),
                     });
                 }
                 // 自动交叉淡化：受影响集合 = 参与者；可调整侧按拖拽的边缘决定。
@@ -3000,6 +3004,21 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         }),
                     );
                 }
+                // 吸附偏移：它的语义是"素材内的一个点"（手柄绝对位置 =
+                // clipStart + offset），因此拖**左缘**改变 clipStart 时必须反向调整
+                // 相对值，该点才会留在同一处素材上。此前裁切完全不动它，于是它作为
+                // "相对起点的偏移"被保留、手柄跟着起点平移到了另一段素材。
+                dispatch(
+                    setClipSnapOffset({
+                        clipId: args.clipId,
+                        snapOffsetSec: resolveTrimSnapOffset({
+                            edge: args.edge,
+                            deltaSec,
+                            snapOffsetSec: origin.baseSnapOffsetSec,
+                            newLengthSec: nextLength,
+                        }),
+                    }),
+                );
                 // 多选批量：其余参与者按**锚点位移**（deltaSec）逐 clip 换算——与旧实现
                 // `useEditDrag` 同源（以锚点的实际位移为基准，不是各自重新吸附）。
                 for (const participant of origin.participants) {
@@ -3048,6 +3067,21 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             }),
                         );
                     }
+                    // 吸附偏移同锚点：按各自的按下时偏移保持"素材内的点"不动。
+                    dispatch(
+                        setClipSnapOffset({
+                            clipId: participant.clipId,
+                            snapOffsetSec: resolveTrimSnapOffset({
+                                edge: args.edge,
+                                deltaSec,
+                                snapOffsetSec: base.snapOffsetSec,
+                                newLengthSec:
+                                    args.edge === "left"
+                                        ? Math.max(0, base.lengthSec - deltaSec)
+                                        : Math.max(0, base.lengthSec + deltaSec),
+                            }),
+                        }),
+                    );
                 }
             });
             // 波纹（自动跟进）实时预览：以编辑区域**右缘净位移**为准驱动跟随集，
@@ -3136,22 +3170,35 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 dispatch(checkpointHistory());
                 beginSnapGesture();
             }
+            // 手柄必须留在 Clip 内：**先把查询位置钳进** [clipStart, clipStart+clipLen]，
+            // 再把吸附候选限制在同一区间（`candidateRangeSec`）。
+            // 【为什么两件都要做】只钳位置不滤候选 ⇒ 最近的候选可能落在 Clip 外，
+            // 吸附把落点算到外面、调用方再钳回边界 —— 高亮线画在 Clip 外而手柄停在
+            // 边界，看起来像"范围外也产生吸附"（用户报告的现象）。
             const rawAbs = clipStart + args.rawOffsetSec;
+            const clampedAbs = Math.min(Math.max(rawAbs, clipStart), clipStart + clipLen);
             // 免吸附修饰键（默认 Shift）临时取反吸附总开关（与旧实现同一函数）。
             const snapActive = computeEffectiveSnap(
                 s.snapEnabled,
                 isModifierActive(noSnapKb, args.modifiers),
             );
             const nextAbs = snapActive
-                ? snapTimelineDetailed(rawAbs, "clip", {
-                      originSec: clipStart + (Number(clip.snapOffsetSec) || 0),
+                ? snapTimelineDetailed(clampedAbs, "clip", {
+                      // 拖动起点：必须用**按下时**的偏移（`kernelSnapOffsetBaseRef`），
+                      // 不能用被本手势逐帧改写的 `clip.snapOffsetSec` —— 后者会让
+                      // "相对网格吸附"每帧以自己上一步的落点为基准，逐步漂移。
+                      originSec:
+                          clipStart +
+                          (kernelSnapOffsetBaseRef.current?.snapOffsetSec ??
+                              (Number(clip.snapOffsetSec) || 0)),
                       anchorTrackId: clip.trackId,
                       excludeClipIds: new Set([args.clipId]),
+                      candidateRangeSec: { lo: clipStart, hi: clipStart + clipLen },
                       highlight: {
                           sources: [{ trackId: clip.trackId, clipId: args.clipId }],
                       },
                   }).sec
-                : rawAbs;
+                : clampedAbs;
             if (!snapActive) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             dispatch(
                 setClipSnapOffset({
@@ -3556,6 +3603,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 sourceEndSec: base.sourceEndSec,
                             }),
                         );
+                        // 吸附偏移也要还原：预览的左缘分支会按"素材内的点不动"
+                        // 改写它（见 `resolveTrimSnapOffset`），漏还原会让 Redux
+                        // 停在半途值、与后端分叉。
+                        dispatch(
+                            setClipSnapOffset({
+                                clipId,
+                                snapOffsetSec: base.snapOffsetSec,
+                            }),
+                        );
                     }
                 });
                 // 自动交叉淡化也要回到按下时的重叠关系（按已还原的几何重算即可）。
@@ -3587,6 +3643,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         // 源区间，这里取 Redux 当前值即可。
                         sourceStartSec: clip.sourceStartSec,
                         sourceEndSec: clip.sourceEndSec,
+                        // 吸附偏移同样必须提交：左缘裁切会按"素材内的点不动"改写它，
+                        // 漏提交会让权威快照把预览值回滚成按下前的相对偏移。
+                        snapOffsetSec: Math.max(0, Number(clip.snapOffsetSec) || 0),
                     },
                 ];
             });

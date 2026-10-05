@@ -167,3 +167,38 @@ export function resolveTrimSourceWindow(
         ? { sourceStartSec: wrap(sourceStartSec + sourceDelta), sourceEndSec }
         : { sourceStartSec, sourceEndSec: wrap(sourceEndSec + sourceDelta) };
 }
+
+/**
+ * 裁切时**吸附偏移**的新相对值。
+ *
+ * 吸附偏移的语义是"素材内的一个点"：手柄的绝对时间线位置 = `clipStart + offset`。
+ * 因此拖**左缘**改变 `clipStart` 时必须反向调整相对值，该点才会留在同一处素材上：
+ *
+ * ```text
+ * offset_new = offset_old − δ        （δ = 时间轴起点位移）
+ * ```
+ *
+ * 这同时满足两种等价说法 —— 手柄的**绝对时间线位置**不变，且它在**素材内**的位置
+ * 不变（正放与倒放都成立：倒放的源窗口端点按 `−δ·rate` 移动，相对值同样按 `−δ` 抵消）。
+ *
+ * 【修复前】裁切完全不动 `snapOffsetSec`，于是它作为"相对 clip 起点的偏移"被保留，
+ * 手柄跟着 clip 起点一起平移 —— 换了一段素材。用户报告为"应当保持素材内绝对位置
+ * 不变，实际保持的是相对偏移不变"。
+ *
+ * 拖**右缘**起点不动 ⇒ 相对值不变（缩短到偏移以内时钳到新长度）。
+ *
+ * @returns 钳制到 `[0, newLengthSec]` 的新相对偏移。
+ */
+export function resolveTrimSnapOffset(args: {
+    readonly edge: TrimEdge;
+    readonly deltaSec: number;
+    readonly snapOffsetSec: number;
+    /** 拖拽后的新 clip 长度（秒），用于钳制。 */
+    readonly newLengthSec: number;
+}): number {
+    const offset = Number.isFinite(args.snapOffsetSec) ? Math.max(0, args.snapOffsetSec) : 0;
+    const delta = Number.isFinite(args.deltaSec) ? args.deltaSec : 0;
+    const next = args.edge === "left" ? offset - delta : offset;
+    const maxLen = Number.isFinite(args.newLengthSec) ? Math.max(0, args.newLengthSec) : 0;
+    return Math.min(Math.max(next, 0), maxLen);
+}

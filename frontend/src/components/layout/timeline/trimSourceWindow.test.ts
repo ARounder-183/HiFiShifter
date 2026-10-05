@@ -22,7 +22,7 @@ import { describe, expect, it } from "vitest";
 
 import { buildWaveformScene, type WaveformSceneClip } from "../../../waveform/sceneBuilder.ts";
 import { createTimelineAxis } from "../renderKernel/timelineAxis.ts";
-import { resolveTrimSourceWindow } from "./trimSourceWindow";
+import { resolveTrimSnapOffset, resolveTrimSourceWindow } from "./trimSourceWindow";
 
 /**
  * 时间轴某一端播放的源位置（后端 `clip_playback_window_sec` 的镜像）。
@@ -528,4 +528,96 @@ describe("★ 契约：被拖边缘的对侧在**渲染结果**上保持不变",
             }
         }
     }
+});
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * ★ 裁切与**吸附偏移**：拖左缘必须保持偏移点在**素材内**的位置不变。
+ *
+ * 吸附偏移的语义是"素材内的一个点"（手柄绝对位置 = `clipStart + offset`）。
+ * 修复前裁切完全不动 `snapOffsetSec`，于是它作为"相对起点的偏移"被保留 ——
+ * 手柄跟着 clip 起点一起平移到另一段素材上。
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+describe("★ resolveTrimSnapOffset：左缘保持偏移点的绝对位置", () => {
+    it("拖左缘（缩短）⇒ 相对偏移按 −δ 调整", () => {
+        expect(
+            resolveTrimSnapOffset({ edge: "left", deltaSec: 1, snapOffsetSec: 2, newLengthSec: 3 }),
+        ).toBe(1);
+    });
+
+    it("拖左缘（向左延伸，δ<0）⇒ 相对偏移按 −δ 增大", () => {
+        expect(
+            resolveTrimSnapOffset({
+                edge: "left",
+                deltaSec: -1,
+                snapOffsetSec: 2,
+                newLengthSec: 5,
+            }),
+        ).toBe(3);
+    });
+
+    it("拖右缘 ⇒ 起点不动，相对偏移不变", () => {
+        expect(
+            resolveTrimSnapOffset({ edge: "right", deltaSec: 1, snapOffsetSec: 2, newLengthSec: 5 }),
+        ).toBe(2);
+    });
+
+    it("拖右缘缩短到偏移以内 ⇒ 钳到新长度", () => {
+        expect(
+            resolveTrimSnapOffset({
+                edge: "right",
+                deltaSec: -3,
+                snapOffsetSec: 4,
+                newLengthSec: 1,
+            }),
+        ).toBe(1);
+    });
+
+    it("拖左缘缩短到偏移以外 ⇒ 钳到 0", () => {
+        expect(
+            resolveTrimSnapOffset({ edge: "left", deltaSec: 3, snapOffsetSec: 1, newLengthSec: 1 }),
+        ).toBe(0);
+    });
+
+    it("★ 不变量：手柄的**绝对时间线位置**逐值不变（左缘，多个位移）", () => {
+        const startSec = 5;
+        const offsetOld = 2;
+        for (const deltaSec of [-2, -0.5, 0.25, 1, 1.5]) {
+            const newLengthSec = 4 - deltaSec;
+            const offsetNew = resolveTrimSnapOffset({
+                edge: "left",
+                deltaSec,
+                snapOffsetSec: offsetOld,
+                newLengthSec,
+            });
+            // 新起点 = startSec + δ；手柄绝对位置必须仍为 startSec + offsetOld。
+            expect(startSec + deltaSec + offsetNew, `δ=${deltaSec}`).toBeCloseTo(
+                startSec + offsetOld,
+                9,
+            );
+        }
+    });
+
+    it("★ 不变量：偏移点在**素材内**的位置不变（正放 / 倒放）", () => {
+        // 正放：素材位置 = sourceStart + offset·rate，左缘裁切使 sourceStart += δ·rate。
+        // 倒放：素材位置 = sourceEnd − offset·rate，左缘裁切使 sourceEnd −= δ·rate。
+        const rate = 2;
+        const offsetOld = 1.5;
+        const sourceStartSec = 3;
+        const sourceEndSec = 11;
+        const materialOldFwd = sourceStartSec + offsetOld * rate;
+        const materialOldRev = sourceEndSec - offsetOld * rate;
+        for (const deltaSec of [-1, -0.25, 0.5, 1.25]) {
+            const offsetNew = resolveTrimSnapOffset({
+                edge: "left",
+                deltaSec,
+                snapOffsetSec: offsetOld,
+                newLengthSec: 4 - deltaSec,
+            });
+            const materialNewFwd = sourceStartSec + deltaSec * rate + offsetNew * rate;
+            const materialNewRev = sourceEndSec - deltaSec * rate - offsetNew * rate;
+            expect(materialNewFwd, `fwd δ=${deltaSec}`).toBeCloseTo(materialOldFwd, 9);
+            expect(materialNewRev, `rev δ=${deltaSec}`).toBeCloseTo(materialOldRev, 9);
+        }
+    });
 });
