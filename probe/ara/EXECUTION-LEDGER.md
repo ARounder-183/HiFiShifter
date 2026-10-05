@@ -930,4 +930,10 @@ Task 39: Ruling: 项目网格参数与clip名字会让纯摆放改变音频/缓�
 
 Task 39: Ruling: 宿主PCM仍被file-only整clip磁盘门禁排除，不能直接删除门禁 — 新隔离ARA mono合成内容cache，完整PCM/模型/有效参数键、96-byte有界头/完整payload摘要、64MiB条目/2GiB配额、唯一临时文件原子替换，只在worker读写且取消后不写；新进程574ms命中/HiFiGAN与HNSEP合成run均0/PCM摘要一致，故意损坏后拒绝并重建，3格式/键/配额合同exit0 — 若外推REAPER保存冷重开或长素材512MiB方案会夸大证据；App文件缓存/用户工程未动，缓存管理GUI和长源峰值仍待收尾。
 
+Task 41: Ruling: 用户明确恢复Computer Use，先确认无REAPER后构建新release bundle A42E55C2…/exit0并在隔离副本启动 — 实测一个原GUI两轨、旧v2第二轨WORLD输出与归档PCM相同/关GUI输出maxdiff0，原RPP hash不变；不追加review、不把旧bundle或库测试冒充本轮native — 若外推双轨新编辑/HiFiGAN参数，会夸大仅旧曲线恢复的证据。
+
+Task 40: Ruling: 冷启不打开GUI立即离线导出全零，后台ready后同实例/同参数定向再导出maxdiff0 — 把offline后台准备竞态列为必须修复，保存恢复本身仍有效；不将第一次静音当成功或归为用户没开App，不在实时process加等待/IO — 若只等一会再导出并宣称通过，正常用户仍可得到静音成品；先补真正offline就绪契约。
+
+Task 36: Ruling: 真实REAPER日志扩展available=false/position_authority=false，两次播放backwards计数265；网页click仍被Computer Use安全边界拒绝 — 保留宿主初始化分阶段诊断待办及GUI交互未测，明确游标/fade元数据门失败，不猜parent或绕过工具注入 — 若以typed fake ABI/可见两轨当全部可用，会漏掉真正高优时钟问题；隔离实例均正常退出，无强杀。
+
 
