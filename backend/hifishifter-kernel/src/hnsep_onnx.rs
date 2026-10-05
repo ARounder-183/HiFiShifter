@@ -181,7 +181,6 @@ fn build_session_with_ep(onnx_path: &Path) -> Result<SeparatorSession, String> {
     let _ = SELECTED_EP.set(ep.clone());
     let mut identity = blake3::Hasher::new();
     identity.update(b"hnsep-mask-stft-v2");identity.update(digest.as_bytes());identity.update(ep.as_bytes());
-    identity.update(&crate::vocoder_ort_session::ep_settings_generation().to_le_bytes());
     Ok(SeparatorSession {runtime:Mutex::new(session),identity:identity.finalize()})
 }
 
@@ -190,6 +189,9 @@ fn build_session_with_ep(onnx_path: &Path) -> Result<SeparatorSession, String> {
 pub fn selected_ep_name() -> Option<&'static str> {
     SELECTED_EP.get().map(|s| s.as_str())
 }
+
+/// 持久内容缓存绑定实际已加载模型/EP，不把用户切换设备的历史次数当模型身份。
+pub fn cache_identity()->Result<String,String> {Ok(get_or_init_shared_session()?.identity.to_hex().to_string())}
 
 fn get_or_init_shared_session() -> Result<Arc<SeparatorSession>, String> {
     let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));

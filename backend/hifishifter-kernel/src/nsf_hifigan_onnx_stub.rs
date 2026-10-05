@@ -1,3 +1,5 @@
+//! 未编译ONNX时保持HiFiGAN接口，不伪造可用模型、推理或缓存身份。
+
 #[allow(dead_code)]
 pub fn probe_load() {
     // ONNX feature disabled.

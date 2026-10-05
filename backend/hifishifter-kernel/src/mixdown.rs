@@ -925,9 +925,20 @@ fn apply_host_pitch_edit(
             extra_curves: &extra_curves,
             extra_params,
         };
-        let output = processor.process(&ctx)?;
+        let persistent=if kind==crate::state::SynthPipelineKind::NsfHifiganOnnx {
+            let vocoder=crate::nsf_hifigan_onnx::cache_identity()?;
+            let separator=if crate::pitch_editing::extra_param_enabled(extra_params,"breath_enabled") {
+                Some(crate::hnsep_onnx::cache_identity()?)} else {None};
+            Some(crate::host_pcm_cache::key(&ctx,&vocoder,separator.as_deref()))
+        } else {None};
+        let cached=persistent.and_then(|key|crate::host_pcm_cache::load(key,sample_rate,out_frames));
+        let hit=cached.is_some();
+        let output = if let Some(cached)=cached {cached} else {processor.process(&ctx)?};
         if output.len() != out_frames || output.iter().any(|v| !v.is_finite()) {
             return Err("invalid host pitch processor output".into());
+        }
+        if !hit&&!cancel.is_some_and(|cancel|cancel.load(Ordering::Acquire)) {
+            if let Some(key)=persistent {crate::host_pcm_cache::store(key,sample_rate,&output);}
         }
         outputs.push(output);
     }
@@ -1819,6 +1830,45 @@ mod tests {
             cancel.store(true,Ordering::Release);assert_eq!(job.join().unwrap(),"export_cancelled");drop(held);
             let weak=Arc::downgrade(&a);drop(a);assert!(weak.upgrade().is_none());
             let current=host_processor_flight(hash);assert!(current.try_lock().is_ok());
+        }
+
+        /// 真正子进程没有RAM缓存；只读持久结果应零重推理，损坏后在worker重建正确PCM。
+        #[test]
+        #[ignore = "真实CPU磁盘冷恢复诊断：显式运行，父子进程均无UI"]
+        fn real_model_host_cache_cold_process_and_corruption() {
+            crate::vocoder_ort_session::set_runtime_ep_override(Some("cpu".into()));
+            let child=std::env::var("HIFISHIFTER_ARA_CACHE_TEST_PHASE").ok().as_deref()==Some("warm");
+            let previous_cache_dir=std::env::var_os("HIFISHIFTER_ARA_CACHE_DIR");
+            let dir=if child {std::path::PathBuf::from(std::env::var_os("HIFISHIFTER_ARA_CACHE_DIR").unwrap())}
+                else {std::env::temp_dir().join(format!("hfs-ara-cold-{}",uuid::Uuid::new_v4()))};
+            std::env::set_var("HIFISHIFTER_ARA_CACHE_DIR",&dir);
+            let identity="ara://persistent-test";let mut tl=timeline(identity);tl.tracks[0].pitch_analysis_algo=crate::state::PitchAnalysisAlgo::NsfHifiganOnnx;
+            let root=tl.tracks[0].id.clone();let p=tl.params_by_root_track.get_mut(&root).unwrap();p.pitch_orig.fill(57.);p.pitch_edit.fill(60.);
+            p.pitch_edit_user_modified=true;p.extra_params.insert("breath_enabled".into(),1.);
+            let samples=tone(220.).chunks_exact(2).map(|pair|pair[0]).collect();
+            let src=HashMap::from([(identity.into(),MixdownPcm {sample_rate:44100,channels:1,samples:Arc::new(samples)})]);
+            let render=||render_mixdown_with_pcm(&tl,opts(true),&src).unwrap().3;
+            let hash=|pcm:&[f32]| {let mut hash=blake3::Hasher::new();for sample in pcm {hash.update(&sample.to_bits().to_le_bytes());}hash.finalize().to_hex().to_string()};
+            let before=crate::nsf_hifigan_onnx::inference_runs();let separation=crate::hnsep_onnx::separation_cache_stats().1;let began=Instant::now();
+            let first=render();let pcm_hash=hash(&first);
+            if child {
+                assert_eq!(crate::nsf_hifigan_onnx::inference_runs(),before);assert_eq!(crate::hnsep_onnx::separation_cache_stats().1,separation);
+                assert_eq!(pcm_hash,std::env::var("HIFISHIFTER_ARA_EXPECT_PCM").unwrap());assert_eq!(crate::host_pcm_cache::stats().0,1);
+                println!("ARA_DISK_COLD_PROCESS hit=1 neural_runs=0 HNSEP_runs=0 pcm_exact=true elapsed_ms={}",began.elapsed().as_millis());return;
+            }
+            assert!(crate::nsf_hifigan_onnx::inference_runs()>before);assert!(crate::hnsep_onnx::separation_cache_stats().1>separation);
+            assert_eq!(crate::host_pcm_cache::stats().1,1);
+            let child=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","mixdown::tests::host_pcm::real_model_host_cache_cold_process_and_corruption","--ignored","--test-threads=1","--nocapture"])
+                .env("HIFISHIFTER_ARA_CACHE_TEST_PHASE","warm").env("HIFISHIFTER_ARA_EXPECT_PCM",&pcm_hash).status().unwrap();assert!(child.success());
+            let path=std::fs::read_dir(&dir).unwrap().map(|entry|entry.unwrap().path()).find(|path|path.extension().is_some_and(|ext|ext=="hfsara")).unwrap();
+            let mut bytes=std::fs::read(&path).unwrap();bytes[110]^=1;std::fs::write(&path,bytes).unwrap();
+            assert_eq!(hash(&render()),pcm_hash,"损坏磁盘必须miss重建，不能发布坏PCM");
+            assert_eq!(crate::host_pcm_cache::stats().1,2);
+            std::fs::remove_dir_all(&dir).unwrap();
+            if let Some(previous)=previous_cache_dir {std::env::set_var("HIFISHIFTER_ARA_CACHE_DIR",previous);}
+            else {std::env::remove_var("HIFISHIFTER_ARA_CACHE_DIR");}
+            println!("ARA_DISK_PARENT corrupt_rebuilt=true stores=2 elapsed_ms={}",began.elapsed().as_millis());
         }
 
         fn timeline(identity: &str) -> TimelineState {

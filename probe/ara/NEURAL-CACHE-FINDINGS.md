@@ -97,3 +97,29 @@ plugin `--lib -- real_model_hifigan_snapshots --ignored --test-threads=1 --nocap
   （包含原WORLD双轨历史/无GUI恢复）、1 ignored和显式真实诊断1项均正常exit0。
 
 磁盘冷复用、完整宿主长源、旧v2首载后移动、资源峰值与最终native门仍open。
+
+## 后续ARA磁盘内容缓存批
+
+宿主HiFiGAN processor输出（mono，已混气声/张力，尚未项目摆放/普通宿主fade/轨道混音）
+使用独立 `ara-content-v1` 命名空间；不放开旧file-only门禁，不共用其旧结果形态。
+默认在系统用户cache目录的HiFiShifter子目录，`HIFISHIFTER_ARA_CACHE_DIR`可指定位置；
+本批所有诊断显式用worktree临时目录，未在系统用户cache写入测试数据。
+
+- 键是完整BLAKE3：实际mono PCM/已加载HiFiGAN与所需HNSEP模型身份/有效F0、自动化、
+  静态参数、倍率/输出几何/算法版本。调用者名和粗源指纹不决定身份；共通volume/pan/dyn
+  在下游混音应用，不令合成PCM cache失效。字段计数/长度明确，编码无分隔歧义。
+- 自有96-byte头固定校验完整键/版本/rate/精确样本数/文件长度；全payload BLAKE3、
+  非有限值和额外尾数据也检查，分块读写，不申请第二份整段byte数组。
+- 单条最大64MiB、命名空间磁盘配额2GiB；write使用唯一临时路径后rename，失败/损坏
+  当miss，清理仅准确内容键文件与一小时前自有临时文件，不递归删目录，不碰其它名称。
+- 宿主worker在写入前检查cancel；实时process仍只读不可变ready快照，不查盘/等待锁。
+- HNSEP持久身份不再含设备切换的历史次数，只含实际加载的模型/算法/EP；同配置新
+  进程可命中，同时真实换模型/后端仍隔离。
+
+实测新增：独立真实CPU子进程，**没有RAM缓存**，磁盘hit=1、HiFiGAN合成run=0、
+HNSEP合成run=0、最终stereo PCM摘要与父进程完全一致，574ms（含两模型建会话/烟测）。
+父进程故意改缓存payload一位，拒绝坏数据并重建正确结果，累计stores=2、总1461ms。
+不是REAPER工程/GUI冷重开；模型烟测不计入合成run，不能声称冷启没有任何网络执行。
+
+3项键/格式/容量合同exit0；此前内容单飞合同同批exit0；显式冷进程父/子诊断均exit0。
+完整host长源/旧v2移动/同路径换源后的F0基线刷新/统一内存峰值/缓存管理GUI/native仍open。

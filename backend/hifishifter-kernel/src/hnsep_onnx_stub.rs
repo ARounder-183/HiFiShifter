@@ -34,6 +34,9 @@ pub fn clear_separation_cache() {}
 /// 未编译模型时无推理/缓存占用。
 pub fn separation_cache_stats()->(u64,u64,usize) {(0,0,0)}
 
+/// 未编译模型时不能签发合成缓存身份。
+pub fn cache_identity()->Result<String,String> {Err("onnx feature disabled".into())}
+
 /// 仅返回噪声 stem 的便捷封装；stub 下与完整分离一致地报错，
 /// 调用方（气声路径）已有降级处理。
 pub fn infer_noise_mono(

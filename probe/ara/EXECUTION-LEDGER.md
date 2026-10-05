@@ -928,4 +928,6 @@ Task 39: Ruling: 插件先后44.1k/48k独立运行kernel会重复重推理 — �
 
 Task 39: Ruling: 项目网格参数与clip名字会让纯摆放改变音频/缓存，模型/config版本也未进入HiFiGAN内存键 — atlas直接投影region局部零点、逐region局部kernel合成后摆放；宿主DSP完整内容不带clip名，共享内容worker单飞可取消，HiFiGAN键接实际已加载模型/config完整摘要/EP/块大小；2新kernel合同、12插件回归和1真实模型诊断均exit0 — 实测移动到512.013秒/换region名PCM逐样本一致且新增HiFiGAN推理0，修改目标音高新增1/HNSEP仍1；若外推旧v2移动或磁盘冷复用仍会误报，后者尚未接入。
 
+Task 39: Ruling: 宿主PCM仍被file-only整clip磁盘门禁排除，不能直接删除门禁 — 新隔离ARA mono合成内容cache，完整PCM/模型/有效参数键、96-byte有界头/完整payload摘要、64MiB条目/2GiB配额、唯一临时文件原子替换，只在worker读写且取消后不写；新进程574ms命中/HiFiGAN与HNSEP合成run均0/PCM摘要一致，故意损坏后拒绝并重建，3格式/键/配额合同exit0 — 若外推REAPER保存冷重开或长素材512MiB方案会夸大证据；App文件缓存/用户工程未动，缓存管理GUI和长源峰值仍待收尾。
+
 
