@@ -1,3 +1,12 @@
+// ARA宿主UI载荷可附只读淡化轴；独立App不生成这些字段，音频仍由宿主淡化。
+export interface HostFadeMetadata {
+    curve_mode: "reaper_new" | "legacy" | "unknown";
+    in_curvature: number;
+    out_curvature: number;
+    in_s: number;
+    out_s: number;
+}
+
 export type ApiResult<T> =
     | ({ ok: true } & T)
     | {
@@ -100,6 +109,7 @@ export interface TimelineClip {
     /** 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0；旧工程缺失时补齐为 0。 */
     snap_offset_sec?: number;
     fade_in_sec?: number;
+    host_fades?: HostFadeMetadata;
     fade_out_sec?: number;
     /** REAPER 浮点形状 id（整数 0..6 七预设；小数变体透传保存）。 */
     fade_in_shape?: number;

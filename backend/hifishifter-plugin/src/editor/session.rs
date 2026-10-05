@@ -50,9 +50,13 @@ pub(crate) struct EditorSession {
     views:Mutex<HashMap<String,RegisteredView>>,
     pub(super) generation:AtomicU64,
     submitted:AtomicU64,
+    processed:AtomicU64,
     pub(super) applied:AtomicU64,
     host_version:AtomicU64,
+    ui_geometry_version:AtomicU64,
+    project_duration:AtomicU64,
     pub(super) error:Mutex<Option<String>>,
+    render_error:Mutex<Option<String>>,
     closed:AtomicBool,
     transport_probe:bool,
     transport_probe_next:Mutex<Instant>,
@@ -72,9 +76,9 @@ impl EditorSession {
             pcm_dir:std::env::temp_dir().join("hifishifter-plugin-pcm").join(&namespace),namespace,
             peaks:Mutex::new(HashMap::new()),queue,worker:Mutex::new(None),analysis_sender,analysis_updates:Mutex::new(analysis_updates),views:Mutex::new(HashMap::new()),
             analysis_cancel:Arc::new(AtomicBool::new(false)),analysis_workers:Mutex::new(Vec::new()),
-            generation:AtomicU64::new(0),submitted:AtomicU64::new(0),applied:AtomicU64::new(0),
-            host_version:AtomicU64::new(0),
-            error:Mutex::new(None),closed:AtomicBool::new(false),suppress_history:AtomicBool::new(false),
+            generation:AtomicU64::new(0),submitted:AtomicU64::new(0),processed:AtomicU64::new(0),applied:AtomicU64::new(0),
+            host_version:AtomicU64::new(0),ui_geometry_version:AtomicU64::new(0),project_duration:AtomicU64::new(0),
+            error:Mutex::new(None),render_error:Mutex::new(None),closed:AtomicBool::new(false),suppress_history:AtomicBool::new(false),
             transport_probe:std::env::var_os("HIFISHIFTER_ARA_TRANSPORT_PROBE").is_some(),transport_probe_next:Mutex::new(Instant::now())});
         let weak=Arc::downgrade(&session);
         let worker=std::thread::Builder::new().name("hfs-embedded-editor".into()).spawn(move ||Self::run(weak,receiver))
@@ -94,6 +98,16 @@ impl EditorSession {
         if request.link.is_some() && views.get(&request.sink.view_id).is_some_and(|view|!Arc::ptr_eq(&view.sink.closed,&request.sink.closed)) {
             return Err("editor view identity mismatch".into());}
         let sink=request.sink.clone();let route=request.link.clone().zip(lease);
+        // 播放观察不排到神经合成后面。这里只读原子缓存，不执行actor命令/host API/IO。
+        // 原始view身份及同文档route授权仍与普通队列入口一致。
+        if request.command=="get_playback_state" {
+            if !document.is_alive() {return Err("document closed".into());}
+            let value=self.playback_state();
+            if let Some(link)=&request.link {if Some(link.authorize(&document)?)!=lease {return Err("editor route changed".into());}}
+            views.insert(sink.view_id.clone(),RegisteredView {sink:sink.clone(),route});
+            sink.response(json!({"version":1,"viewId":sink.view_id,"id":request.id,"ok":true,"value":value}));
+            return Ok(());
+        }
         let mutates=super::commands::mutates_audio(&request.command);
         // 与worker的检查共用views锁；只有成功入队才登记view和推进合并票据。
         self.queue.try_send(Job::Request(request,lease)).map_err(|e|format!("editor queue unavailable: {e}"))?;
@@ -137,7 +151,27 @@ impl EditorSession {
             if let Some(session)=weak.upgrade() {
                 if session.closed.load(Ordering::Acquire) {break;}
                 session.refresh_host();
+                session.report_transport_probe();
                 if session.refresh_analysis() {deadline=Some(Instant::now()+Duration::from_millis(150));}
+                // 到期应用先于下一条只读轮询；持续get_playback_state不能令合成饥饿。
+                if deadline.is_some_and(|d|d<=Instant::now()) {
+                    let ticket=session.submitted.load(Ordering::Acquire);
+                    if session.processed.load(Ordering::Acquire)!=ticket {deadline=Some(Instant::now()+Duration::from_millis(1));}
+                    else {
+                        deadline=None;let generation=session.generation.load(Ordering::Acquire);
+                        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||session.apply(ticket)))
+                            .unwrap_or_else(|_|Err("automatic render panicked".into()));
+                        match result {
+                            Ok(())=>{session.applied.store(generation,Ordering::Release);*session.render_error.lock().unwrap()=None;},
+                            Err(error) if error=="pitch analysis pending"||error=="automatic apply superseded"=>{deadline=Some(Instant::now()+Duration::from_millis(150));},
+                            Err(error)=>{
+                                // 渲染失败与权限/模型冲突分离；模型/资源稍后就绪后自动重试，不等手工reload。
+                                *session.render_error.lock().unwrap()=Some(error);
+                                if session.error.lock().unwrap().is_none() {deadline=Some(Instant::now()+Duration::from_secs(1));}
+                            },
+                        }session.emit_state();
+                    }
+                }
             } else {break;}
             let wait=deadline.map(|d|d.saturating_duration_since(Instant::now())).unwrap_or(Duration::from_millis(100));
             match receiver.recv_timeout(wait) {
@@ -147,6 +181,7 @@ impl EditorSession {
                     let Some(session)=weak.upgrade() else {break;};
                     if session.closed.load(Ordering::Acquire) {break;}
                     let before=session.generation.load(Ordering::Acquire);
+                    let mutates=super::commands::mutates_audio(&request.command);
                     let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         if let Some(link)=&request.link {
                             let document=session.document.upgrade().ok_or("document closed")?;
@@ -163,6 +198,7 @@ impl EditorSession {
                         super::commands::dispatch(&session,&request.command,request.args)
                     }))
                         .unwrap_or_else(|_|Err("editor command panicked".into()));
+                    if mutates {session.processed.fetch_add(1,Ordering::AcqRel);}
                     session.schedule_analysis();
                     if session.generation.load(Ordering::Acquire)!=before {deadline=Some(Instant::now()+Duration::from_millis(150));}
                     let response=match result {
@@ -174,41 +210,56 @@ impl EditorSession {
                 },
                 Err(mpsc::RecvTimeoutError::Disconnected)=>break,
                 Err(mpsc::RecvTimeoutError::Timeout)=>{
-                    let Some(session)=weak.upgrade() else {break;};
-                    if session.closed.load(Ordering::Acquire) {break;}
-                    if deadline.is_some_and(|d|d<=Instant::now()) {
-                        deadline=None;
-                        let ticket=session.submitted.load(Ordering::Acquire);
-                        let generation=session.generation.load(Ordering::Acquire);
-                        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||session.apply(ticket)))
-                            .unwrap_or_else(|_|Err("automatic render panicked".into()));
-                        match result {
-                            Ok(())=>{session.applied.store(generation,Ordering::Release);*session.error.lock().unwrap()=None;},
-                            Err(error) if error=="pitch analysis pending"=>{deadline=Some(Instant::now()+Duration::from_millis(150));},
-                            Err(error) if error=="automatic apply superseded"=>{deadline=Some(Instant::now()+Duration::from_millis(150));},
-                            Err(error)=>{*session.error.lock().unwrap()=Some(error);},
-                        }
-                        session.emit_state();
-                    }
+                    // 回到顶部统一调度，不要求命令队列出现空闲间隙。
                 },
             }
         }
     }
     fn apply(&self,ticket:u64)->Result<(),String> {
         if let Some(error)=self.error.lock().unwrap().clone() {return Err(error);}
+        self.complete_cached_analysis();
+        if let Some(error)=self.error.lock().unwrap().clone() {return Err(error);}
         // 全零占位原线并非已完成的清音分析；收敛前保留旧快照及dirty代次。
-        {
-            let timeline=self.timeline.lock().unwrap();
-            if timeline.params_by_root_track.iter().any(|(root,params)| {
-                params.pitch_edit_user_modified && params.pitch_edit.iter().any(|p|*p>0.) && params.pitch_orig_key.is_none()
-                    && timeline.tracks.iter().any(|t|t.id==*root && !matches!(t.pitch_analysis_algo,PitchAnalysisAlgo::None))
-            }) {return Err("pitch analysis pending".into());}
-        }
+        if Self::requires_analysis(&self.timeline.lock().unwrap()) {return Err("pitch analysis pending".into());}
         let (edit,model,projection)={let loaded=self.loaded.lock().unwrap();(loaded.edit,loaded.model,loaded.projection.clone())};
         self.document.upgrade().ok_or("document closed")?.apply_workspace_edits(edit,model,
             &projection,
             self.analysis_cancel.clone(),
             ||!self.closed.load(Ordering::Acquire) && self.submitted.load(Ordering::Acquire)==ticket)
+    }
+    /// 音高和气声等处理器效果都依赖完成的原线；纯混音/禁用算法不受此门禁阻塞。
+    fn requires_analysis(timeline:&TimelineState)->bool {
+        timeline.params_by_root_track.iter().any(|(root,params)| {
+            params.pitch_orig_key.is_none()&&timeline.clips.iter().any(|clip|
+                timeline.resolve_root_track_id(&clip.track_id).as_deref()==Some(root.as_str())
+                &&hifishifter_kernel::pitch_editing::does_clip_need_processor_render(timeline,clip,clip.start_sec))
+                &&timeline.tracks.iter().any(|t|t.id==*root&&!matches!(t.pitch_analysis_algo,PitchAnalysisAlgo::None))
+        })
+    }
+    /// 投影撤销项目缓存键时，源分析可能早已全量命中；由actor组装，不等GUI读取/新通知。
+    /// 只消费clip分析缓存，不做神经推理；尚未齐全仍pending，用户目标曲线保持。
+    fn complete_cached_analysis(&self) {
+        let roots={let timeline=self.timeline.lock().unwrap();timeline.params_by_root_track.iter()
+            .filter(|(_,params)|params.pitch_orig_key.is_none()||params.dyn_orig_key.is_none())
+            .map(|(root,_)|root.clone()).collect::<Vec<_>>()};
+        if roots.is_empty() {return;}
+        let analysis=Mutex::new(self.analysis_timeline());
+        {let mut timeline=analysis.lock().unwrap();if let Some(selected)=timeline.selected_clip_id.clone() {
+            if let Some(index)=timeline.clips.iter().position(|clip|clip.id==selected) {let clip=timeline.clips.remove(index);timeline.clips.push(clip);}
+        }}
+        for root in &roots {
+            hifishifter_kernel::pitch_analysis::maybe_schedule_pitch_orig(&analysis,root);
+            hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(&analysis,root);
+        }
+        let params=analysis.into_inner().unwrap().params_by_root_track;let mut changed=false;
+        {let mut timeline=self.timeline.lock().unwrap();for root in roots {
+            let Some(next)=params.get(&root) else {continue;};let Some(current)=timeline.params_by_root_track.get_mut(&root) else {continue;};
+            if current.pitch_orig_key.is_none()&&next.pitch_orig_key.is_some() {current.pitch_orig=next.pitch_orig.clone();
+                if !current.pitch_edit_user_modified {current.pitch_edit=next.pitch_edit.clone();}
+                current.pitch_orig_key=next.pitch_orig_key.clone();current.has_pitch_adjustment_active=next.has_pitch_adjustment_active;changed=true;}
+            if current.dyn_orig_key.is_none()&&next.dyn_orig_key.is_some() {current.dyn_orig=next.dyn_orig.clone();current.dyn_orig_key=next.dyn_orig_key.clone();changed=true;}
+        }}
+        if changed {let updated=self.timeline.lock().unwrap().clone();self.publish_timeline(updated);}
     }
     pub(super) fn ensure_loaded(&self,force:bool)->Result<(),String> {
         let document=self.document.upgrade().ok_or("document closed")?;
@@ -240,12 +291,16 @@ impl EditorSession {
         self.rewrite_ids(&mut timeline,true);
         if timeline.selected_track_id.is_none() {timeline.selected_track_id=timeline.tracks.first().map(|t|t.id.clone());}
         if timeline.selected_clip_id.is_none() {timeline.selected_clip_id=timeline.clips.first().map(|c|c.id.clone());}
+        self.project_duration.store(timeline.project_sec.to_bits(),Ordering::Release);
         *self.timeline.lock().unwrap()=timeline;
         *self.history.lock().unwrap()=Default::default();
         *self.loaded.lock().unwrap()=Loaded {initialized:true,edit:snapshot.revision,model:snapshot.model_revision,scope,reverse_paths,projection};
         *self.error.lock().unwrap()=None;
+        *self.render_error.lock().unwrap()=None;
         self.applied.store(self.generation.load(Ordering::Acquire),Ordering::Release);
         self.peaks.lock().unwrap().clear();
+        // snapshot返回后UI缓存可能再次更新，强制下一轮按短事务版本同步，不能吞掉该变化。
+        self.ui_geometry_version.store(0,Ordering::Release);
         self.schedule_analysis();
         self.host_version.fetch_add(1,Ordering::AcqRel);
         self.emit("plugin_host_changed",json!({"version":self.host_version.load(Ordering::Acquire)}));
@@ -256,6 +311,18 @@ impl EditorSession {
         let Some(document)=self.document.upgrade() else {return;};
         let (initialized,edit,model,scope)={let loaded=self.loaded.lock().unwrap();(loaded.initialized,loaded.edit,loaded.model,loaded.scope)};
         if !initialized {return;}
+        // 普通fade独立刷新UI，不强制reload丢掉pending编辑，不推进音频generation。
+        if document.ui_geometry_revision.load(Ordering::Acquire)!=self.ui_geometry_version.load(Ordering::Acquire) {
+            if let Ok((version,host))=document.ui_fade_projection() {
+                let mut timeline=self.timeline.lock().unwrap();
+                for clip in &mut timeline.clips {if let Some(original)=host.clips.iter().find(|original|format!("{}{}",self.namespace,original.id)==clip.id) {
+                    clip.fade_in_sec=original.fade_in_sec;clip.fade_out_sec=original.fade_out_sec;
+                    clip.auto_fade_in_sec=original.auto_fade_in_sec;clip.auto_fade_out_sec=original.auto_fade_out_sec;
+                    clip.fade_in_shape=original.fade_in_shape;clip.fade_out_shape=original.fade_out_shape;
+                    clip.fade_in_dir=original.fade_in_dir;clip.fade_out_dir=original.fade_out_dir;
+                }}drop(timeline);self.ui_geometry_version.store(version,Ordering::Release);self.notify_timeline();
+            }
+        }
         if document.editor_versions().is_ok_and(|versions|versions!=(edit,model,scope)) {
             if let Err(error)=self.ensure_loaded(false) {
                 if error.starts_with("Conflict") || error.starts_with("Unsupported") {
@@ -307,13 +374,7 @@ impl EditorSession {
             for root in &roots {if let Some(params)=timeline.params_by_root_track.get_mut(root) {params.pitch_orig_key=None;params.dyn_orig_key=None;}}
         }
         if roots.is_empty() {return false;}
-        let analysis=Mutex::new(self.analysis_timeline());
-        for root in &roots {
-            hifishifter_kernel::pitch_analysis::maybe_schedule_pitch_orig(&analysis,root);
-            hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(&analysis,root);
-        }
-        let params=analysis.into_inner().unwrap().params_by_root_track;
-        self.timeline.lock().unwrap().params_by_root_track=params;
+        self.complete_cached_analysis();
         if self.generation.load(Ordering::Acquire)>0 {
             let timeline=self.timeline.lock().unwrap().clone();
             self.publish_timeline(timeline);return true;
@@ -324,6 +385,19 @@ impl EditorSession {
     pub(super) fn transport(&self)->(f64,bool) {
         self.document.upgrade().filter(|document|document.is_alive()).map(|document|document.clock.read())
             .unwrap_or_else(||(self.timeline.lock().unwrap().playhead_sec,false))
+    }
+    /// 新淡化轴只装饰发给原GUI的JSON，不进入算法状态、撤销历史或音频缓存键。
+    pub(super) fn decorate_host_fades(&self,payload:&mut Value) {
+        if let Some(document)=self.document.upgrade() {document.decorate_host_fades(payload,&self.namespace);}
+    }
+    /// 只读宿主原子时钟；重合成阻塞actor时UI仍取得新鲜播放态，不借编辑timeline锁。
+    pub(super) fn playback_state(&self)->Value {
+        let (position,playing)=self.document.upgrade().filter(|document|document.is_alive())
+            .map(|document|document.clock.read()).unwrap_or((0.,false));
+        json!({"ok":true,"is_playing":playing,"waiting_for_render":false,
+            "target":if playing {Some("synthesized")} else {None},"base_sec":0.,
+            "position_sec":position,"duration_sec":f64::from_bits(self.project_duration.load(Ordering::Acquire)),
+            "host_authoritative":true})
     }
     /// 一次性时钟探针最多每秒写一条；只在命令actor线程调用，不在音频callback写文件。
     pub(super) fn report_transport_probe(&self) {
@@ -347,6 +421,9 @@ impl EditorSession {
         self.rewrite_ids(&mut timeline,false);
         let loaded=self.loaded.lock().unwrap();
         for clip in &mut timeline.clips {
+            // 原GUI普通宿主fade仅装饰，参数提交还原到ARA内核域，避免二次淡化。
+            clip.fade_in_sec=0.;clip.fade_out_sec=0.;clip.auto_fade_in_sec=0.;clip.auto_fade_out_sec=0.;
+            clip.fade_in_shape=0.;clip.fade_out_shape=0.;clip.fade_in_dir=0.;clip.fade_out_dir=0.;
             for path in std::iter::once(&mut clip.source_path).chain(clip.takes.iter_mut().map(|t|&mut t.source_path)) {
                 let local=path.as_ref().ok_or("clip analysis source missing")?;
                 *path=Some(loaded.reverse_paths.get(local).ok_or("unknown analysis path")?.clone());
@@ -383,7 +460,7 @@ impl EditorSession {
         let host_pending=states.iter().any(|state|state.0);let host_error=states.into_iter().find_map(|state|state.1);
         json!({"generation":generation,"applied_generation":applied,"pending":generation!=applied||host_pending,
             "host_version":self.host_version.load(Ordering::Acquire),
-            "error":self.error.lock().unwrap().clone().or(host_error),"connected":!self.closed.load(Ordering::Acquire),
+            "error":self.error.lock().unwrap().clone().or_else(||self.render_error.lock().unwrap().clone()).or(host_error),"connected":!self.closed.load(Ordering::Acquire),
             "ready":self.loaded.lock().unwrap().initialized})
     }
     fn emit_state(&self) {self.emit("plugin_apply_state",self.state());}
@@ -900,6 +977,99 @@ pub(crate) mod tests {
         let editor=owner.editor_session().unwrap();editor.ensure_loaded(false).unwrap();
         let timeline=editor.timeline.lock().unwrap();assert_eq!(timeline.clips[0].playback_rate,0.5);
         assert_eq!(timeline.clips[0].length_sec,8.0/44100.0);drop(timeline);editor.close();
+    }
+    /// 两根的源分析已缓存后切回另一素材，再改隐藏根；不调用reload或原线getter推动应用。
+    #[test]
+    fn cached_other_track_pitch_applies_after_selection_without_reload_or_parameter_polling() {
+        let (model,owners,_ids)=task34_world_fixture();let document=model.session();let editor=owners[0].editor_session().unwrap();
+        let (reply,rx)=mpsc::channel();let (events,_)=mpsc::sync_channel(128);
+        let sink=UiSink {view_id:"cached-other-track".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        let loaded=call(&editor,&sink,&rx,1,"get_timeline_state",json!({}));
+        let roots=loaded["tracks"].as_array().unwrap().iter().map(|track|track["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let ca=loaded["clips"][0]["id"].as_str().unwrap();
+        let began=Instant::now();loop {
+            for root in &roots {call(&editor,&sink,&rx,2,"get_param_frames",json!({"trackId":root,"param":"pitch","startFrame":0,"frameCount":400,"binary":false}));}
+            if roots.iter().all(|root|editor.timeline.lock().unwrap().params_by_root_track[root].pitch_orig_key.is_some()) {break;}
+            assert!(began.elapsed()<Duration::from_secs(20));std::thread::sleep(Duration::from_millis(10));
+        }
+        let wait=|target| {let began=Instant::now();while editor.applied.load(Ordering::Acquire)<target {
+            assert!(began.elapsed()<Duration::from_secs(10),"{:?}",editor.error.lock().unwrap());std::thread::sleep(Duration::from_millis(10));}};
+        call(&editor,&sink,&rx,3,"set_param_frames",json!({"trackId":roots[1],"param":"pitch","startFrame":0,"values":vec![64.;400],"checkpoint":true}));wait(1);
+        call(&editor,&sink,&rx,4,"select_clip",json!({"clipId":ca}));
+        call(&editor,&sink,&rx,5,"set_param_frames",json!({"trackId":roots[1],"param":"pitch","startFrame":0,"values":vec![67.;400],"checkpoint":true}));wait(2);
+        let restored=owners[1].encode_state().unwrap();let accepted=document.edits.lock().unwrap().params["b"].pitch_edit[100];
+        document.close();assert_eq!(accepted,67.);assert!(!restored.is_empty());
+    }
+    /// GUI保持连续只读请求时，150ms到期的自动应用仍应先行，不能等FIFO空闲才渲染。
+    #[test]
+    fn automatic_apply_is_not_starved_by_continuous_read_only_requests() {
+        let (model,owner,_identity)=fixture();let document=model.session();let editor=owner.editor_session().unwrap();
+        let (reply,rx)=mpsc::channel();let (events,_)=mpsc::sync_channel(128);
+        let sink=UiSink {view_id:"read-flood".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        let loaded=call(&editor,&sink,&rx,1,"get_timeline_state",json!({}));
+        call(&editor,&sink,&rx,2,"set_track_state",json!({"trackId":loaded["tracks"][0]["id"],"volume":0.5}));
+        let running=Arc::new(AtomicBool::new(true));let flag=running.clone();let client=editor.clone();let view=sink.clone();
+        let poller=std::thread::spawn(move|| {while flag.load(Ordering::Acquire) {
+            let _=client.enqueue(UiRequest {id:99,command:"get_ui_settings".into(),args:json!({}),sink:view.clone(),link:None});
+            std::thread::yield_now();
+        }});
+        let began=Instant::now();while editor.applied.load(Ordering::Acquire)<1&&began.elapsed()<Duration::from_secs(5) {
+            rx.try_iter().for_each(drop);std::thread::sleep(Duration::from_millis(5));
+        }
+        let applied=editor.applied.load(Ordering::Acquire);running.store(false,Ordering::Release);poller.join().unwrap();document.close();
+        assert!(applied>=1,"不断只读轮询不能饿死已经到期的应用");
+    }
+    /// 实际合成尚占actor时，播放态查询不得等待编辑timeline锁；参数权威仍走原队列。
+    #[test]
+    fn playback_observation_does_not_wait_for_actor_timeline_or_render() {
+        let (model,owner,_identity)=fixture();let document=model.session();let editor=owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();document.clock.publish_host(3.125,true);
+        let (reply,rx)=mpsc::channel();let (events,_)=mpsc::sync_channel(4);
+        let sink=UiSink {view_id:"fast-transport".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        let held=editor.timeline.lock().unwrap();
+        editor.enqueue(UiRequest {id:1,command:"get_playback_state".into(),args:json!({}),sink:sink.clone(),link:None}).unwrap();
+        let response=rx.recv_timeout(Duration::from_millis(200)).unwrap();drop(held);
+        assert_eq!(response["value"]["position_sec"],3.125);assert_eq!(response["value"]["is_playing"],true);
+        document.close();assert!(editor.enqueue(UiRequest {id:2,command:"get_playback_state".into(),args:json!({}),sink,link:None}).is_err());
+    }
+    /// 暂时渲染失败只影响就绪状态；宿主恢复后自动重试，不能要求用户手工reload。
+    #[test]
+    fn automatic_apply_recovers_from_render_failure_without_reload() {
+        let (model,owner,_identity)=fixture();let document=model.session();let editor=owner.editor_session().unwrap();
+        let (reply,rx)=mpsc::channel();let (events,_)=mpsc::sync_channel(128);
+        let sink=UiSink {view_id:"render-retry".into(),reply,events,closed:Arc::new(AtomicBool::new(false))};
+        let loaded=call(&editor,&sink,&rx,1,"get_timeline_state",json!({}));
+        for region in document.regions.lock().unwrap().values_mut() {region.has_content_based_fade_at_head=true;}
+        call(&editor,&sink,&rx,2,"set_track_state",json!({"trackId":loaded["tracks"][0]["id"],"volume":0.5}));
+        let began=Instant::now();while editor.render_error.lock().unwrap().is_none() {
+            assert!(began.elapsed()<Duration::from_secs(5));std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(editor.error.lock().unwrap().is_none());assert_eq!(editor.applied.load(Ordering::Acquire),0);
+        for region in document.regions.lock().unwrap().values_mut() {region.has_content_based_fade_at_head=false;}
+        let began=Instant::now();while editor.applied.load(Ordering::Acquire)<1 {
+            assert!(began.elapsed()<Duration::from_secs(5),"{:?}",editor.state());std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(editor.render_error.lock().unwrap().is_none());document.close();
+    }
+    /// 没有手绘pitch的HiFiGAN气声/张力/共振峰也要等原线；None与纯混音仍能立即应用。
+    #[test]
+    fn effect_only_analysis_gate_does_not_block_none_or_plain_mix() {
+        let (_model,owner,_identity)=fixture();let editor=owner.editor_session().unwrap();editor.ensure_loaded(false).unwrap();
+        let mut timeline=editor.timeline.lock().unwrap().clone();let root=timeline.tracks[0].id.clone();
+        timeline.ensure_params_for_root(&root);timeline.tracks[0].pitch_analysis_algo=PitchAnalysisAlgo::NsfHifiganOnnx;
+        timeline.tracks[0].compose_enabled=true;
+        for effect in ["breath_enabled","hifigan_tension","formant_shift_cents"] {
+            let params=timeline.params_by_root_track.get_mut(&root).unwrap();params.extra_params.clear();params.extra_curves.clear();
+            if effect=="breath_enabled" {params.extra_params.insert(effect.into(),1.);}
+            else {params.extra_curves.insert(effect.into(),vec![100.;200]);
+                if effect=="hifigan_tension" {params.extra_params.insert("breath_enabled".into(),1.);}}
+            params.pitch_orig_key=None;assert!(!params.pitch_edit_user_modified);
+            assert!(EditorSession::requires_analysis(&timeline),"{effect}缺原线不能先发布未处理PCM");
+            timeline.tracks[0].pitch_analysis_algo=PitchAnalysisAlgo::None;
+            assert!(!EditorSession::requires_analysis(&timeline));timeline.tracks[0].pitch_analysis_algo=PitchAnalysisAlgo::NsfHifiganOnnx;
+        }
+        let params=timeline.params_by_root_track.get_mut(&root).unwrap();params.extra_params.clear();params.extra_curves.clear();
+        assert!(!EditorSession::requires_analysis(&timeline));editor.close();
     }
     /// 真actor的自动调度消费快速写入/undo/redo，不调用手工render函数冒充自动应用。
     #[test]

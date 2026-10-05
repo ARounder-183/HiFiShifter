@@ -37,6 +37,7 @@ type Value = unsafe extern "C" fn(*mut c_void, *const c_char) -> f64;
 type Guid = unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_char, bool) -> bool;
 type Marker = unsafe extern "C" fn(*mut c_void, i32, *mut f64, *mut f64) -> i32;
 type Slope = unsafe extern "C" fn(*mut c_void, i32) -> f64;
+type AppVersion = unsafe extern "C" fn() -> *const c_char;
 struct Transport {
     position: Position,
     cursor: Position,
@@ -61,6 +62,7 @@ pub(crate) struct ReaperHost {
     transport: Option<Transport>,
     geometry: Option<GeometryApi>,
     validate: Option<Validate>,
+    fade_axes_new: Option<bool>,
 }
 /// 每次外部调用前后重检；Arc/FUnknown引用不保活project/item/take。
 fn checked<T>(authorized: &impl Fn() -> bool, call: impl FnOnce() -> T) -> Result<T, String> {
@@ -132,6 +134,11 @@ impl ReaperHost {
                 state,
             });
         let validate = lookup!(c"ValidatePtr2", Validate);
+        // 官方GetAppVersion返回静态版本字符串，只有已知版本才选择新/旧淡化轴。
+        let version=lookup!(c"GetAppVersion",AppVersion);
+        let fade_axes_new=version.and_then(|getter|checked(&authorized,||unsafe {getter()}).ok())
+            .filter(|value|!value.is_null()).and_then(|value|unsafe {std::ffi::CStr::from_ptr(value)}.to_str().ok())
+            .and_then(new_fade_axes);
         let item = lookup!(c"GetMediaItemTake_Item", TakeItem);
         let item_value = lookup!(c"GetMediaItemInfo_Value", Value);
         let take_value = lookup!(c"GetMediaItemTakeInfo_Value", Value);
@@ -177,6 +184,7 @@ impl ReaperHost {
             transport,
             geometry,
             validate,
+            fade_axes_new,
         })
     }
     /// 项目延迟挂接只从同一个接口的直接parent取得；拒绝null，不借API的“当前项目”语义。
@@ -441,6 +449,7 @@ impl ReaperHost {
             fade_out_dir_new,
             fade_in_dir2_new,
             fade_out_dir2_new,
+            fade_axes_new:self.fade_axes_new,
             auto_fade_in_sec,
             auto_fade_out_sec,
         })
@@ -448,6 +457,14 @@ impl ReaperHost {
 }
 /// 元数据独立有界；不扩大PCM预算，也不根据item窗口删掉合法窗口外marker。
 const MAX_MARKERS: i32 = 16_384;
+
+/// 比较官方版本的整数分量（7.100不能按浮点误判为7.10）。
+fn new_fade_axes(version:&str)->Option<bool> {
+    let numeric=version.split('/').next()?;let (major,minor)=numeric.split_once('.')?;
+    let major=major.parse::<u32>().ok()?;
+    let minor=minor.chars().take_while(char::is_ascii_digit).collect::<String>().parse::<u32>().ok()?;
+    Some((major,minor)>=(7,81))
+}
 
 #[cfg(test)]
 #[path = "reaper_tests.rs"]
@@ -459,6 +476,13 @@ pub(crate) use geometry_tests::Fixture as ReaperFixture;
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+    /// 新旧版本边界与未知字符串明确区分，未来minor不能误按小数比较。
+    #[test]
+    fn fade_axis_version_boundary_does_not_guess_unknown_versions() {
+        assert_eq!(new_fade_axes("7.80/x64"),Some(false));assert_eq!(new_fade_axes("7.81/x64"),Some(true));
+        assert_eq!(new_fade_axes("7.100+dev1005/x64"),Some(true));assert_eq!(new_fade_axes("8.0"),Some(true));
+        assert_eq!(new_fade_axes("unknown"),None);
+    }
     struct Project {
         position: f64,
         cursor: f64,

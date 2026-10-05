@@ -20,6 +20,29 @@ Task39 保留 HNSEP 参数、正确缓存和资源保护，Task40 的神经分�
 HiFiGAN 四个专有参数（breath_enabled、breath_gain、hifigan_tension、formant_shift_cents）
 以及共通参数按实际 descriptor/原管线验证；不能用 WORLD 结果代替真实模型证据。
 
+## 最新用户BUG与交付方式（2026-10-05）
+
+以下四项新增必达，不缩小前述五项目标：
+
+- [ ] 非当前轨道的曲线编辑自动生效，不需要手动重新载入宿主。
+- [ ] 宿主手动/自动fade在原GUI显示正确；普通fade音频仍只由宿主应用一次。
+- [ ] 气声开关/音高等参数连续编辑自动生效，不依赖手工重载或GUI读取原线。
+- [ ] 原GUI播放头与所属REAPER项目实际播放位置同步，不被prefetch/其它renderer回跳。
+
+用户明确“先一次性都做完，再叫我测”。停止Computer Use逐项试操作；完成源码/统一
+批末回归/构建后再自动启动隔离REAPER，交用户集中测试。不在中途请求验收，不热
+替换任何仍加载的DLL，不强杀/覆盖用户项目，最终仍只一次集中review。
+
+当前actor发现两条可解释自动应用卡住的源码路径：source投影清项目原线key后，
+完整clip分析cache命中不会重发ClipPitchReady；apply又把key为None当永远pending。
+另一个是apply只在recv_timeout超时执行，连续只读轮询可使到期任务饥饿。现正在修
+actor主动组装所有缺key根的已有cache、循环顶部执行到期任务，并等已入队写入处理完
+才取最新票据。2026-10-05本批actor首轮28/29，修正新增张力夹具的分离开关后定向及
+host合同14项exit0；前端28项/tsc exit0。另修渲染错误自动恢复、播放查询不排到合成后面、
+宿主位置不加请求RTT及100ms插值上限。细节见probe/ara/EDITOR-SYNC-FINDINGS.md。
+仍无本批native结论，不勾四BUG门。fade新轴只显示真实长度/原始轴；任意新曲线精确
+绘制尚缺oracle，不把旧shape公式或数值显示当完整曲线已同步。
+
 ## Global Constraints
 
 - 仅ara-plugin worktree/codex/ara-plugin；不push、不add-A、不改SDK/registry、不动主develop。

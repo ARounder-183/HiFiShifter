@@ -49,7 +49,7 @@ pub(super) fn payload(session:&EditorSession,lite:bool)->Result<Value,String> {
         stretch_algorithm_override:project.stretch_algorithm_override,hifigan_mel_stretch_override:project.hifigan_mel_stretch_override,
         save_undo_history:project.save_undo_history,
     });
-    value(payload)
+    drop(timeline);let mut result=value(payload)?;session.decorate_host_fades(&mut result);Ok(result)
 }
 fn history_state(session:&EditorSession)->Value {
     let history=session.history.lock().unwrap();let (undo,redo)=history_depths_of(&history);
@@ -94,13 +94,8 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
         "get_about_info"=>return Ok(json!({"ok":true,"name":"HiFiShifter","version":crate::VERSION,"host":"ARA plugin"})),
         "plugin_get_apply_state"=>return Ok(session.state()),
         "get_playback_state"=>{
-            session.report_transport_probe();
             // 宿主播放态不依赖曲线载入；Unsupported/Conflict也必须还能观察播放并暂停。
-            let (position,playing)=session.transport();
-            let duration=session.timeline.lock().unwrap().project_sec;
-            return Ok(json!({"ok":true,"is_playing":playing,"waiting_for_render":false,
-                "target":if playing {Some("synthesized")} else {None},"base_sec":0.0,
-                "position_sec":position,"duration_sec":duration,"host_authoritative":true}));
+            return Ok(session.playback_state());
         },
         "plugin_refresh"=>{session.ensure_loaded(input["force"].as_bool().unwrap_or(false))?;return payload(session,false);},
         "set_ui_locale"=>return Ok(json!({"ok":true,"locale":input["locale"]})),

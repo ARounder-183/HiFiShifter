@@ -197,6 +197,7 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
     let p = match name {
         "GetPlayPositionEx" | "GetCursorPositionEx" => position as *const (),
         "GetPlayStateEx" => state as *const (),
+        "GetAppVersion" => version as *const (),
         "ValidatePtr2" => validate as *const (),
         "GetMediaItemTake_Item" => item as *const (),
         "GetMediaItemInfo_Value" => item_value as *const (),
@@ -211,6 +212,8 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
     };
     p as *mut c_void
 }
+/// 夹具显式采用目标REAPER7.81的新轴，不用缺省字段猜宿主版本。
+unsafe extern "C" fn version()->*const c_char {c"7.81/x64".as_ptr()}
 unsafe extern "system" fn extended(
     _: *mut c_void,
     _: u32,

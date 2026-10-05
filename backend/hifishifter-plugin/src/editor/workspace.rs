@@ -8,6 +8,42 @@ use std::sync::atomic::Ordering;
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub(crate) struct WorkspaceScope {pub regions:BTreeSet<u64>}
 impl DocumentSession {
+    /// UI专用原始曲率不写进kernel状态或参数权威；普通fade最终声音仍由宿主负责。
+    pub(crate) fn decorate_host_fades_locked(&self,payload:&mut serde_json::Value,namespace:&str) {
+        let identities=self.clip_ids.lock().unwrap().clone();
+        let Some(clips)=payload["clips"].as_array_mut() else {return;};
+        for owner in self.renderer_owners() {
+            let Some(bound)=owner.host_geometry_metadata_locked(self) else {continue;};
+            let Some(id)=identities.get(&bound.region_key) else {continue;};let ui_id=format!("{namespace}{id}");
+            let Some(clip)=clips.iter_mut().find(|clip|clip["id"]==ui_id) else {continue;};let g=bound.geometry;
+            clip["host_fades"]=serde_json::json!({"curve_mode":match g.fade_axes_new {Some(true)=>"reaper_new",Some(false)=>"legacy",None=>"unknown"},
+                "in_curvature":g.fade_in_dir_new,"out_curvature":g.fade_out_dir_new,
+                "in_s":g.fade_in_dir2_new,"out_s":g.fade_out_dir2_new});
+        }
+    }
+    /// 无宿主getter的短事务装饰；调用者不得仍持编辑timeline锁。
+    pub(crate) fn decorate_host_fades(&self,payload:&mut serde_json::Value,namespace:&str) {
+        let _transaction=self.transaction.lock().unwrap();if self.is_alive() {self.decorate_host_fades_locked(payload,namespace);}
+    }
+    /// 普通手动/自动fade仅投影到原GUI，内核继续消费未烘焙fade的ARA时间线。
+    /// 只沿已核对的唯一真实region key，不按轨名/位置猜关联。
+    pub(crate) fn project_ui_fades_locked(&self,timeline:&mut TimelineState) {
+        let identities=self.clip_ids.lock().unwrap().clone();
+        for owner in self.renderer_owners() {
+            let Some(bound)=owner.host_geometry_metadata_locked(self) else {continue;};
+            let Some(id)=identities.get(&bound.region_key) else {continue;};
+            let Some(clip)=timeline.clips.iter_mut().find(|clip|&clip.id==id) else {continue;};let geometry=bound.geometry;
+            clip.fade_in_sec=geometry.fade_in_sec;clip.fade_out_sec=geometry.fade_out_sec;
+            clip.auto_fade_in_sec=geometry.auto_fade_in_sec;clip.auto_fade_out_sec=geometry.auto_fade_out_sec;
+            clip.fade_in_shape=geometry.fade_in_shape;clip.fade_out_shape=geometry.fade_out_shape;
+            clip.fade_in_dir=geometry.fade_in_dir;clip.fade_out_dir=geometry.fade_out_dir;
+        }
+    }
+    /// 无PCM复制或host getter，pending曲线也可独立更新可见宿主fade。
+    pub(crate) fn ui_fade_projection(&self)->Result<(u64,TimelineState),String> {
+        let _transaction=self.transaction.lock().unwrap();let mut timeline=self.workspace_timeline_locked()?;
+        self.project_ui_fades_locked(&mut timeline);Ok((self.ui_geometry_revision.load(Ordering::Acquire),timeline))
+    }
     /// 非实时短事务读取完整授权scope；零分配只能返回零区域，不能等同全文档。
     pub(crate) fn workspace_scope(&self)->Result<WorkspaceScope,String> {
         let _transaction=self.transaction.lock().unwrap();self.workspace_scope_locked()

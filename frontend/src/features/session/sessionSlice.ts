@@ -1851,6 +1851,7 @@ function applyTimelineState(
             // SnapOffset（吸附偏移）：旧工程缺失时自动补齐为 0。
             snapOffsetSec: Math.max(0, Number(clip.snap_offset_sec ?? 0) || 0),
             fadeInSec: Math.max(0, Number(clip.fade_in_sec ?? 0)),
+            hostFades: clip.host_fades,
             fadeOutSec: Math.max(0, Number(clip.fade_out_sec ?? 0)),
             // 后端未提供形状字段时（极旧开发版载荷），与新建默认一致取快起。
             fadeInShape: Number.isFinite(Number(clip.fade_in_shape))
@@ -4770,7 +4771,8 @@ const sessionSlice = createSlice({
                 const sampledNowMs = performance.now();
                 const dispatchedAtMs = arg?.dispatchedAtMs;
                 const latencySec =
-                    nextIsPlaying && typeof dispatchedAtMs === "number"
+                    // 宿主值在回复时读取；排队等待合成不是采样年龄，不能把整段RTT加到DAW位置。
+                    nextIsPlaying && !payload.host_authoritative && typeof dispatchedAtMs === "number"
                         ? Math.max(0, (sampledNowMs - dispatchedAtMs) / 1000)
                         : 0;
 

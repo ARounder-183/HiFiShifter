@@ -33,6 +33,7 @@ import {
     type GlClipBodySink,
 } from "./timelineClipGlRenderer.js";
 import { fadeGainSigned } from "../reaperFade.js";
+import {hostFadeDisplay,hostFadeLabel} from "../hostFadeDisplay.js";
 import { drawLoopMarkers } from "../../../../utils/loopRender.js";
 
 function drawFadeCurveStroke(
@@ -45,10 +46,25 @@ function drawFadeCurveStroke(
         shape: number;
         dir: number;
         mode: "in" | "out";
+        hostFades?: import("../../../../types/api").HostFadeMetadata;
     },
 ): void {
     const widthPx = Math.max(1, args.widthPx);
     const heightPx = Math.max(1, args.heightPx);
+    const hostDisplay=hostFadeDisplay(args.hostFades,args.mode==="out");
+    if (hostDisplay==="host_defined"&&args.hostFades) {
+        // 只标出准确长度/原始轴；未经oracle校准不能用旧公式画一条貌似准确的曲线。
+        ctx.beginPath();const boundary=args.leftPx+(args.mode==="in"?widthPx:0);
+        ctx.moveTo(boundary,args.topPx);ctx.lineTo(boundary,args.topPx+heightPx);ctx.stroke();
+        if (widthPx>40&&heightPx>14) {ctx.save();ctx.beginPath();ctx.rect(args.leftPx,args.topPx,widthPx,heightPx);ctx.clip();
+            ctx.font="10px sans-serif";ctx.fillStyle="rgba(255,255,255,0.8)";
+            ctx.fillText(hostFadeLabel(args.hostFades,args.mode==="out"),args.leftPx+3,args.topPx+12);ctx.restore();}
+        return;
+    }
+    if (hostDisplay==="linear") {
+        ctx.beginPath();ctx.moveTo(args.leftPx,args.topPx+(args.mode==="in"?heightPx:0));
+        ctx.lineTo(args.leftPx+widthPx,args.topPx+(args.mode==="in"?0:heightPx));ctx.stroke();return;
+    }
     const shapeId = Math.trunc(Number.isFinite(args.shape) ? args.shape : 255);
     if (shapeId === 0 && Math.abs(args.dir) < 1e-9) {
         // 直线快路径。淡入 = 增益沿 x 上升（左下→右上）；淡出相反。
@@ -175,6 +191,7 @@ export function drawTimelineCanvas(
             heightPx: number;
             headerHeightPx: number;
             fadeInPx: number;
+            hostFades?: import("../../../../types/api").HostFadeMetadata;
             fadeOutPx: number;
             fadeInShape: number;
             fadeOutShape: number;
@@ -831,6 +848,7 @@ export function drawTimelineCanvas(
                 shape: clip.fadeInShape,
                 dir: clip.fadeInDir,
                 mode: "in",
+                hostFades:clip.hostFades,
             });
         }
         if (clip.fadeOutPx > 0) {
@@ -850,6 +868,7 @@ export function drawTimelineCanvas(
                 shape: clip.fadeOutShape,
                 dir: clip.fadeOutDir,
                 mode: "out",
+                hostFades:clip.hostFades,
             });
         }
 

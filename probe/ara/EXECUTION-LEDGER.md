@@ -942,4 +942,14 @@ Task 36: Ruling: 实际QI成功但initialize parent(project)为null，旧代码�
 
 Task 41: Ruling: Computer Use报告用户输入，42280实例随后标题modified — 按技能停止自动键鼠，保留该实例与用户编辑；新延迟绑定包只在全新目录构建，既有7E37加载DLL不替换，不追加review — 若擅自关闭/重开或发送脚本，会再侵入用户资产；当前任务继续源码，不将这一暂时native边界当技术不可行。
 
+Task 42: Ruling: 用户确认已关闭REAPER，并要求四BUG集中修完后再由其一次验收，Computer Use逐项操作太慢 — 停止自动UI操作，新增四BUG为完整目标的必达项，源码/回归/构建集中收尾后才启动隔离实例交用户测 — 若中途反复叫用户验证，会违背新批次要求；五项目标和HNSEP不分块边界不变。
+
+Task 42: Ruling: actor仅在队列超时执行应用，source投影清orig key而clip cache命中不重发完成通知 — 当前源码把到期调度放到循环顶部、核对已处理写入票据，并由actor组装缺key根的已有分析cache，不依赖GUI轮询原线；本批尚未验证，不标修复完成 — 若只去掉pending门或将非空数组当分析完成，会在早落笔/清音/换源时发布错误参数。
+
+Task 42: Ruling: 自动render失败旧路径被合并为authority error，后续apply无法恢复；气声等只改效果也需要原线 — 分离render_error并自动重试，复用原processor需求门禁与完整缓存组装，Conflict仍保留曲线；actor首轮28/29，修正张力夹具漏开分离开关后该项及host合同14项exit0 — 若把所有错误清掉或先发布raw，会静默绕过冲突/遗漏气声；尚无本批native结论。
+
+Task 36: Ruling: 前端将宿主位置加上完整RTT，合成排队越久越前漂；actor重合成也阻塞播放轮询 — 同route/view准入后原子快查播放态，取消宿主RTT外推并将插件视觉补帧限制100ms，真后退seek/loop仍接受；前端28项与tsc exit0，backend持timeline锁快查合同通过 — 若用最大时间或忽略全部后退掩盖跳动会破坏seek/loop；最终实机播放头仍待用户集中测。
+
+Task 38: Ruling: 官方7.81新曲率有c/S双轴，旧shape/dir已非当前形状权威 — 用独立UI版本投影真实长度/auto长度和原始新轴，GetAppVersion选择语义；参数提交清普通fade避免二次烘焙；新非零轴只显示范围/数值不画猜测曲线 — 若称完整fade形状已支持会误导；任意新轴精确曲线oracle仍open，本批不启动REAPER或中途叫用户验收。
+
 

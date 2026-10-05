@@ -31,6 +31,8 @@ pub(crate) struct DocumentSession {
     pub revision: AtomicU64,
     pub render_epoch:AtomicU64,
     pub scope_revision:AtomicU64,
+    /// 纯GUI宿主装饰版本，不改变编辑曲线或神经合成代次。
+    pub ui_geometry_revision:AtomicU64,
     pub ready: AtomicBool,
     pub transaction: Mutex<()>,
     pub edits: Arc<Mutex<crate::state_channel::EditState>>,
@@ -161,7 +163,10 @@ impl DocumentSession {
                 fingerprint:super::extension::pcm_fingerprint(pcm),planes:pcm.planes.clone()})
         }).collect::<Result<Vec<_>,String>>()?;
         let projection=self.workspace_projection_locked(&edits)?;
-        Ok((hifishifter_ara_ipc::Response {ok:true,timeline:Some(serde_json::to_value(timeline).map_err(|e|e.to_string())?),sources,
+        self.project_ui_fades_locked(&mut timeline);
+        let mut ui_timeline=serde_json::to_value(timeline).map_err(|e|e.to_string())?;
+        self.decorate_host_fades_locked(&mut ui_timeline,"");
+        Ok((hifishifter_ara_ipc::Response {ok:true,timeline:Some(ui_timeline),sources,
             revision:edits.revision,model_revision:self.revision.load(Ordering::Acquire),..Default::default()},self.scope_revision.load(Ordering::Acquire),projection))
     }
     /// 原分析副本可补媒体元信息，除此之外clip、take及轨道结构全部必须与宿主一致。

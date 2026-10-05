@@ -74,6 +74,33 @@ mod bound_tests {
         assert_eq!(atlas.regions.len(),2);assert!(atlas.regions.values().all(|record|record.identity.key!=0),"JSON旧key不得冒充新会话身份");
     }
 
+    /// 有宿主fade缓存后，快照/活actor装饰自动变化；不推进音频generation，不再烘焙普通fade。
+    #[test]
+    fn host_fades_project_into_gui_and_refresh_without_reloading_or_baking_audio() {
+        let (model,owners,ids)=crate::editor::session::tests::workspace_fixture();let document=model.session();let first=(&*ids[0] as *const u8) as u64;
+        {let mut regions=document.regions.lock().unwrap();let region=regions.get_mut(&first).unwrap();region.start_in_playback_time=1.;region.duration_in_playback_time=4.;}
+        let host=crate::host::reaper::ReaperFixture::new();unsafe {owners[0].bind_reaper_host(host.context());}owners[0].refresh_reaper_transport();
+        let (response,_,_)=document.workspace_snapshot().unwrap();
+        assert_eq!(response.timeline.unwrap()["clips"][0]["fade_in_sec"],0.2);
+        let actor=owners[0].editor_session().unwrap();let (reply,rx)=std::sync::mpsc::channel();let (events,_)=std::sync::mpsc::sync_channel(128);
+        let sink=crate::editor::session::UiSink {view_id:"fade-projection".into(),reply,events,closed:Arc::new(std::sync::atomic::AtomicBool::new(false))};
+        let call=|command:&str| {actor.enqueue(crate::editor::session::UiRequest {id:1,command:command.into(),args:serde_json::json!({}),sink:sink.clone(),link:None}).unwrap();
+            let response:serde_json::Value=rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();assert_eq!(response["ok"],true,"{response}");response["value"].clone()};
+        let initial=call("get_timeline_state");
+        assert_eq!(initial["clips"][0]["host_fades"]["curve_mode"],"reaper_new");
+        assert_eq!(initial["clips"][0]["host_fades"]["in_curvature"],-0.2);
+        assert_eq!(initial["clips"][0]["host_fades"]["in_s"],-0.3);
+        let generation=call("plugin_get_apply_state")["generation"].clone();
+        host.set_value("D_FADEINLEN",0.75);owners[0].refresh_reaper_transport();
+        host.set_value("D_FADEINDIR2_NEW",0.65);owners[0].refresh_reaper_transport();
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(3);loop {
+            let timeline=call("get_timeline_state");let updated=(timeline["clips"][0]["fade_in_sec"].as_f64().unwrap()-0.75).abs()<1e-8;
+            if updated {assert_eq!(timeline["clips"][0]["host_fades"]["in_s"],0.65);break;}assert!(std::time::Instant::now()<deadline);std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let (keys,input)={let _transaction=document.transaction.lock().unwrap();owners[0].capture_render_input(&document,&document.edits.lock().unwrap(),true).unwrap()};
+        let canonical=input.timeline.unwrap().clips[0].fade_in_sec;let after=call("plugin_get_apply_state")["generation"].clone();document.close();
+        assert_eq!(after,generation);assert_eq!(keys,vec![first]);assert_eq!(canonical,0.);
+    }
     /// 只打开editor-only入口时，也必须采集同文档隐藏playback owner的元数据。
     #[test]
     fn task38b_one_editor_refresh_collects_hidden_playback_metadata() {
@@ -842,6 +869,15 @@ impl ExtensionOwner {
             return Err("REAPER geometry metadata superseded".into());
         }cached.value
     }
+    /// 调用者已持所属doc事务，只消费已授权Rust缓存，不嵌套加锁或调用宿主。
+    pub(crate) fn host_geometry_metadata_locked(&self,document:&super::document::DocumentSession)
+        ->Option<crate::host::geometry::BoundHostGeometry> {
+        if self.is_closed()||!document.is_alive()||!self.editor_document().is_ok_and(|current|std::ptr::eq(Arc::as_ptr(&current),document)) {return None;}
+        let cached=self.host_geometry.lock().unwrap().clone()?;
+        if cached.model!=document.revision.load(Ordering::Acquire)||cached.scope!=document.scope_revision.load(Ordering::Acquire) {return None;}
+        let keys=self.host_assigned_regions(document).ok()?;let value=cached.value.ok()?;
+        if keys.as_slice()!=[value.region_key] {return None;}Some(value)
+    }
     /// 只由已验证的native view UI timer调用；释放内部锁后才调用可能重入的host函数。
     pub(crate) fn refresh_reaper_transport(&self) {
         let Ok(stamp)=self.host_query_stamp() else {return;};
@@ -885,7 +921,10 @@ impl ExtensionOwner {
         let _transaction=stamp.0.transaction.lock().unwrap();
         if !self.is_closed()&&stamp.0.is_alive()&&stamp.0.revision.load(Ordering::Acquire)==stamp.1
             &&stamp.0.scope_revision.load(Ordering::Acquire)==stamp.2 {
-            *self.host_geometry.lock().unwrap()=Some(CachedHostGeometry {model:stamp.1,scope:stamp.2,change:after,value:geometry});
+            let mut cached=self.host_geometry.lock().unwrap();
+            let changed=cached.as_ref().is_none_or(|old|old.model!=stamp.1||old.scope!=stamp.2||old.value!=geometry);
+            *cached=Some(CachedHostGeometry {model:stamp.1,scope:stamp.2,change:after,value:geometry});drop(cached);
+            if changed {stamp.0.ui_geometry_revision.fetch_add(1,Ordering::AcqRel);}
         }
     }
     /// realtime只读角色原子值；只有playback角色负责替换歌曲音频。

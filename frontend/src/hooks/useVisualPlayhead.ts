@@ -1,4 +1,12 @@
+// 原GUI视觉播放头：插件插值有界，独立App保留原来的连续外推语义。
 import { useEffect, useRef, type MutableRefObject } from "react";
+import { isPluginMode } from "../services/hostCapabilities";
+
+/** 宿主采样短暂缺失时只填最多100ms，不让GUI在合成/宿主暂停期间自行前漂数秒。 */
+export function projectVisualPlayhead(positionSec:number,elapsedSec:number,hostControlled:boolean):number {
+    const elapsed=Number.isFinite(elapsedSec)?Math.max(0,elapsedSec):0;
+    return positionSec+(hostControlled?Math.min(0.1,elapsed):elapsed);
+}
 
 /**
  * 播放轮询采样仍被视为"新鲜"的最大年龄（秒）。
@@ -40,6 +48,7 @@ export function useVisualPlayhead({
     });
     const advancingRef = useRef(isTransportAdvancing);
     const onFrameRef = useRef(onFrame);
+    const hostControlled = isPluginMode();
 
     useEffect(() => {
         advancingRef.current = isTransportAdvancing;
@@ -63,7 +72,7 @@ export function useVisualPlayhead({
             // 因此 React 提交延迟与后续 RAF 帧的插值都不会引入滞后或回跳
             // （采样值本身已含 reducer 侧的往返时延外推，见
             // sessionSlice syncPlaybackState.fulfilled）。
-            const extrapolatedSec = syncedPlayheadSec + ageSec;
+            const extrapolatedSec = projectVisualPlayhead(syncedPlayheadSec,ageSec,hostControlled);
             syncAnchorRef.current = {
                 playheadSec: extrapolatedSec,
                 timestampMs: now,
@@ -79,7 +88,7 @@ export function useVisualPlayhead({
             visualPlayheadSecRef.current = syncedPlayheadSec;
             onFrameRef.current?.(syncedPlayheadSec);
         }
-    }, [syncedPlayheadSec, syncedAtMs]);
+    }, [syncedPlayheadSec, syncedAtMs, hostControlled]);
 
     useEffect(() => {
         if (!isTransportAdvancing) return;
@@ -111,10 +120,7 @@ export function useVisualPlayhead({
 
         const tick = (timestampMs: number) => {
             const elapsedSec = (timestampMs - syncAnchorRef.current.timestampMs) / 1000;
-            const nextPlayheadSec = Math.max(
-                syncAnchorRef.current.playheadSec,
-                syncAnchorRef.current.playheadSec + elapsedSec,
-            );
+            const nextPlayheadSec = projectVisualPlayhead(syncAnchorRef.current.playheadSec,elapsedSec,hostControlled);
             visualPlayheadSecRef.current = nextPlayheadSec;
             onFrameRef.current?.(nextPlayheadSec);
             rafId = requestAnimationFrame(tick);
@@ -122,7 +128,7 @@ export function useVisualPlayhead({
 
         rafId = requestAnimationFrame(tick);
         return () => cancelAnimationFrame(rafId);
-    }, [isTransportAdvancing]);
+    }, [isTransportAdvancing,hostControlled]);
 
     return visualPlayheadSecRef;
 }

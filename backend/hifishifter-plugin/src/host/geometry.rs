@@ -32,6 +32,8 @@ pub(crate) struct HostClipGeometry {
     pub fade_out_dir_new: f64,
     pub fade_in_dir2_new: f64,
     pub fade_out_dir2_new: f64,
+    /// 官方版本决定轴语义；版本无法读取时不把旧shape假报成7.81曲线。
+    pub fade_axes_new: Option<bool>,
     pub auto_fade_in_sec: f64,
     pub auto_fade_out_sec: f64,
 }
