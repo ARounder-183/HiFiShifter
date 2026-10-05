@@ -142,6 +142,7 @@ import {
 import { getBulkEditableClipIds } from "./timeline/hooks/bulkClipEdit";
 import { registerDragAbort } from "./timeline/gestureFocusGuard";
 import { resolveTrimSourceWindow } from "./timeline/trimSourceWindow";
+import { resolveClipContentDurationSec } from "../../utils/loopRender";
 import { getInsertBelowTargetIndex } from "./timeline/trackContextMenuPlacement";
 import { collectFadeContextClips } from "./timeline/clipFadeContext";
 import { emitExternalFileAction } from "../../features/session/projectOpenEvents";
@@ -2501,6 +2502,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
          * 后端 `playback_rate` 即组合值）—— 用 clip 级倍率会在 take 速率 ≠ 1 时算错。
          */
         baseConsumeRate: number;
+        /**
+         * Loop 回绕周期 D（秒）；`0` = 未知。仅用于把 Loop 的相位锚点环绕到
+         * `[0, D)`（见 `trimSourceWindow`）。
+         */
+        mediaDurationSec: number;
         baseFadeInSec: number;
         baseFadeOutSec: number;
         baseSnapOffsetSec: number;
@@ -2539,8 +2545,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 playbackRate: number;
                 /** 倒放：时间轴左/右端与源字段的对应关系是镜像的（见 `trimSourceWindow`）。 */
                 reversed: boolean;
-                /** Loop：源字段是回绕锚点，裁切只改长度。 */
+                /** Loop：源字段是回绕锚点；右缘只改长度、左缘改锚点（见 `trimSourceWindow`）。 */
                 loopEnabled: boolean;
+                /** Loop 回绕周期 D（秒）；0 = 未知（见 `trimSourceWindow`）。 */
+                mediaDurationSec: number;
             }
         >;
         /**
@@ -2669,6 +2677,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         playbackRate: number;
                         reversed: boolean;
                         loopEnabled: boolean;
+                        mediaDurationSec: number;
                     }
                 >();
                 for (const participant of participants) {
@@ -2685,6 +2694,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         playbackRate: Number(item.playbackRate ?? 1) || 1,
                         reversed: item.reversed === true,
                         loopEnabled: item.loopEnabled === true,
+                        mediaDurationSec: resolveClipContentDurationSec(item) ?? 0,
                     });
                 }
                 // 自动交叉淡化：受影响集合 = 参与者；可调整侧按拖拽的边缘决定。
@@ -2724,6 +2734,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     baseConsumeRate: Number(clip.playbackRate ?? 1) || 1,
                     reversed: clip.reversed === true,
                     loopEnabled: clip.loopEnabled === true,
+                    mediaDurationSec: resolveClipContentDurationSec(clip) ?? 0,
                     baseFadeInSec: Number(clip.fadeInSec) || 0,
                     baseFadeOutSec: Number(clip.fadeOutSec) || 0,
                     baseSnapOffsetSec: Math.max(0, Number(clip.snapOffsetSec) || 0),
@@ -2974,6 +2985,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     edge: args.edge,
                     reversed: origin.reversed,
                     loopEnabled: origin.loopEnabled,
+                    mediaDurationSec: origin.mediaDurationSec,
                     deltaSec,
                     rate: origin.baseConsumeRate,
                     sourceStartSec: origin.sourceStartSec,
@@ -3021,6 +3033,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         edge: args.edge,
                         reversed: base.reversed,
                         loopEnabled: base.loopEnabled,
+                        mediaDurationSec: base.mediaDurationSec,
                         deltaSec,
                         rate: base.playbackRate,
                         sourceStartSec: base.sourceStartSec,

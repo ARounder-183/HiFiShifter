@@ -20,6 +20,8 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { buildWaveformScene, type WaveformSceneClip } from "../../../waveform/sceneBuilder.ts";
+import { createTimelineAxis } from "../renderKernel/timelineAxis.ts";
 import { resolveTrimSourceWindow } from "./trimSourceWindow";
 
 /**
@@ -57,6 +59,7 @@ function resolve(args: Case) {
         edge: args.edge,
         reversed: args.reversed,
         loopEnabled: false,
+        mediaDurationSec: 0,
         deltaSec: args.deltaSec,
         rate: args.rate,
         sourceStartSec: args.sourceStartSec,
@@ -184,38 +187,162 @@ describe("★ resolveTrimSourceWindow：固定端不变（倒放）", () => {
     });
 });
 
-describe("resolveTrimSourceWindow：Loop / 非法输入", () => {
-    it("Loop ⇒ null（源字段是回绕锚点，裁切只改长度）", () => {
-        expect(
-            resolveTrimSourceWindow({
-                edge: "right",
-                reversed: false,
-                loopEnabled: true,
-                deltaSec: 1,
-                rate: 1,
-                sourceStartSec: 0.5,
-                sourceEndSec: 4,
-            }),
-        ).toBeNull();
-        expect(
-            resolveTrimSourceWindow({
-                edge: "left",
-                reversed: true,
-                loopEnabled: true,
-                deltaSec: -1,
-                rate: 2,
-                sourceStartSec: 0.5,
-                sourceEndSec: 4,
-            }),
-        ).toBeNull();
+describe("★ resolveTrimSourceWindow：Loop（两条边不对称）", () => {
+    /** Loop 的**右**端内容：`锚点 ∓ 长度×速率` 再取模。 */
+    function loopRightSource(args: {
+        reversed: boolean;
+        sourceStartSec: number;
+        sourceEndSec: number;
+        lengthSec: number;
+        rate: number;
+        mediaDurationSec: number;
+    }): number {
+        const mod = (v: number, d: number): number => ((v % d) + d) % d;
+        const span = args.lengthSec * args.rate;
+        return args.reversed
+            ? mod(args.sourceEndSec - span, args.mediaDurationSec)
+            : mod(args.sourceStartSec + span, args.mediaDurationSec);
+    }
+
+    it("右缘 ⇒ null（相位锚点不动，左端内容因此固定）", () => {
+        for (const reversed of [false, true]) {
+            expect(
+                resolveTrimSourceWindow({
+                    edge: "right",
+                    reversed,
+                    loopEnabled: true,
+                    mediaDurationSec: 8,
+                    deltaSec: 1,
+                    rate: 1,
+                    sourceStartSec: 0.5,
+                    sourceEndSec: 4,
+                }),
+            ).toBeNull();
+        }
     });
 
+    it("★ 左缘必须改锚点（否则右端内容会随长度跑掉）", () => {
+        const out = resolveTrimSourceWindow({
+            edge: "left",
+            reversed: true,
+            loopEnabled: true,
+            mediaDurationSec: 8,
+            deltaSec: 1,
+            rate: 1,
+            sourceStartSec: 0,
+            sourceEndSec: 8,
+        });
+        expect(out).not.toBeNull();
+        // 倒放：左缘对应 sourceEnd，位移取反 ⇒ 8 − 1 = 7。
+        expect(out?.sourceEndSec).toBe(7);
+        expect(out?.sourceStartSec).toBe(0);
+    });
+
+    it("★ Loop 左缘拖拽：右端内容逐值不变（正放 / 倒放 / 两个方向）", () => {
+        const D = 8;
+        for (const reversed of [false, true]) {
+            for (const deltaSec of [-1.5, -0.5, 0.5, 1.5]) {
+                for (const rate of [1, 2]) {
+                    const base = {
+                        reversed,
+                        loopEnabled: true,
+                        mediaDurationSec: D,
+                        sourceStartSec: 0,
+                        sourceEndSec: D,
+                        lengthSec: 4,
+                        rate,
+                    };
+                    const before = loopRightSource(base);
+                    const out = resolveTrimSourceWindow({
+                        edge: "left",
+                        reversed,
+                        loopEnabled: true,
+                        mediaDurationSec: D,
+                        deltaSec,
+                        rate,
+                        sourceStartSec: base.sourceStartSec,
+                        sourceEndSec: base.sourceEndSec,
+                    })!;
+                    const after = loopRightSource({
+                        ...base,
+                        sourceStartSec: out.sourceStartSec,
+                        sourceEndSec: out.sourceEndSec,
+                        lengthSec: 4 - deltaSec,
+                    });
+                    expect(after, `reversed=${reversed} δ=${deltaSec} r=${rate}`).toBeCloseTo(
+                        before,
+                        9,
+                    );
+                }
+            }
+        }
+    });
+
+    it("★ Loop 左缘：锚点取模环绕到 [0, D)（防多次拖拽无界漂移）", () => {
+        const out = resolveTrimSourceWindow({
+            edge: "left",
+            reversed: true,
+            loopEnabled: true,
+            mediaDurationSec: 8,
+            deltaSec: -3, // 向左延伸 3s ⇒ 倒放锚点 +3 → 11 → 环绕成 3
+            rate: 1,
+            sourceStartSec: 0,
+            sourceEndSec: 8,
+        })!;
+        expect(out.sourceEndSec).toBe(3);
+    });
+
+    it("★ Loop 左缘：正放动 sourceStart、倒放动 sourceEnd（镜像）", () => {
+        const fwd = resolveTrimSourceWindow({
+            edge: "left",
+            reversed: false,
+            loopEnabled: true,
+            mediaDurationSec: 8,
+            deltaSec: 1,
+            rate: 1,
+            sourceStartSec: 2,
+            sourceEndSec: 6,
+        })!;
+        expect(fwd.sourceStartSec).toBe(3);
+        expect(fwd.sourceEndSec).toBe(6);
+
+        const rev = resolveTrimSourceWindow({
+            edge: "left",
+            reversed: true,
+            loopEnabled: true,
+            mediaDurationSec: 8,
+            deltaSec: 1,
+            rate: 1,
+            sourceStartSec: 2,
+            sourceEndSec: 6,
+        })!;
+        expect(rev.sourceStartSec).toBe(2);
+        expect(rev.sourceEndSec).toBe(5);
+    });
+
+    it("Loop 但媒体时长未知：仍改锚点，只是不环绕", () => {
+        const out = resolveTrimSourceWindow({
+            edge: "left",
+            reversed: true,
+            loopEnabled: true,
+            mediaDurationSec: 0,
+            deltaSec: -3,
+            rate: 1,
+            sourceStartSec: 0,
+            sourceEndSec: 8,
+        })!;
+        expect(out.sourceEndSec).toBe(11);
+    });
+});
+
+describe("resolveTrimSourceWindow：非法输入", () => {
     it("deltaSec 非有限 ⇒ null（调用方跳过该帧）", () => {
         expect(
             resolveTrimSourceWindow({
                 edge: "right",
                 reversed: false,
                 loopEnabled: false,
+                mediaDurationSec: 0,
                 deltaSec: Number.NaN,
                 rate: 1,
                 sourceStartSec: 0,
@@ -229,6 +356,7 @@ describe("resolveTrimSourceWindow：Loop / 非法输入", () => {
             edge: "right",
             reversed: false,
             loopEnabled: false,
+            mediaDurationSec: 0,
             deltaSec: 2,
             rate: Number.NaN,
             sourceStartSec: 0,
@@ -300,4 +428,104 @@ describe("resolveTrimSourceWindow：消费窗口层面的方向不变式", () =>
             }
         }
     });
+});
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * ★ 契约：裁切换算必须让**生产渲染路径**的固定端保持不变。
+ *
+ * 上面的用例比对的是本模块自建的消费窗口模型；这一组直接调用波形场景构建器
+ * （`buildWaveformScene`，与时间轴绘制同一条路径），读取被拖边缘**对侧**实际
+ * 渲染出的源位置。它是本缺陷唯一能真正抓住的层次 —— 模型的等价写法不止一种，
+ * 渲染结果只有一种。
+ *
+ * 【曾经漏掉的】Loop clip 的**左缘**：把 Loop 一律当作"只改长度"会让左缘拖拽
+ * 完全不写锚点，右端内容随长度跑掉（实测 4 → 5）。
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+function renderedEdgeSourceSec(c: WaveformSceneClip, side: "left" | "right"): number {
+    const scene = buildWaveformScene({
+        axis: createTimelineAxis({ pxPerSec: 100, scrollLeftPx: 0, viewportWidthPx: 2000 }),
+        widthPx: 2000,
+        rows: [{ topPx: 0, waveformTopPx: 0, waveformHeightPx: 60, clips: [c] }],
+    });
+    const segments = scene.segments;
+    const seg = side === "left" ? segments[0] : segments[segments.length - 1];
+    if (seg === undefined) throw new Error("no segment");
+    // 段的投影方向随倒放镜像：正放「左端 → sourceStart / 右端 → sourceEnd」，
+    // 倒放反之（`sourceRangeForLocal`）。
+    const reversed = c.reversed === true;
+    const isLeftProjectedToStart = reversed ? side === "right" : side === "left";
+    return isLeftProjectedToStart ? seg.sourceStartSec : seg.sourceEndSec;
+}
+
+function trimFixture(over: Partial<WaveformSceneClip>): WaveformSceneClip {
+    return {
+        id: "c",
+        sourcePath: "/audio.wav",
+        startSec: 0,
+        lengthSec: 4,
+        sourceStartSec: 0,
+        sourceEndSec: 8,
+        durationSec: 8,
+        sourceSampleRate: 44100,
+        playbackRate: 1,
+        reversed: false,
+        loopEnabled: false,
+        gain: 1,
+        muted: false,
+        fadeInSec: 0,
+        fadeOutSec: 0,
+        fadeInShape: 0,
+        fadeInDir: 0,
+        fadeOutShape: 0,
+        fadeOutDir: 0,
+        ...over,
+    };
+}
+
+describe("★ 契约：被拖边缘的对侧在**渲染结果**上保持不变", () => {
+    const cases: [string, Partial<WaveformSceneClip>][] = [
+        ["正放非 Loop", { reversed: false, loopEnabled: false, sourceStartSec: 2, sourceEndSec: 6 }],
+        ["倒放非 Loop", { reversed: true, loopEnabled: false, sourceStartSec: 2, sourceEndSec: 6 }],
+        ["正放 Loop", { reversed: false, loopEnabled: true, sourceStartSec: 0, sourceEndSec: 8 }],
+        ["倒放 Loop", { reversed: true, loopEnabled: true, sourceStartSec: 0, sourceEndSec: 8 }],
+    ];
+
+    for (const [name, over] of cases) {
+        for (const edge of ["left", "right"] as const) {
+            for (const deltaSec of [-1.5, -0.5, 0.5, 1.5]) {
+                it(`${name} · 拖${edge === "left" ? "左" : "右"}缘 δ=${deltaSec} ⇒ 对侧不变`, () => {
+                    const base = trimFixture(over);
+                    const fixedSide = edge === "right" ? "left" : "right";
+                    const before = renderedEdgeSourceSec(base, fixedSide);
+
+                    const out = resolveTrimSourceWindow({
+                        edge,
+                        reversed: base.reversed === true,
+                        loopEnabled: base.loopEnabled === true,
+                        mediaDurationSec: base.durationSec ?? 0,
+                        deltaSec,
+                        rate: base.playbackRate ?? 1,
+                        sourceStartSec: base.sourceStartSec ?? 0,
+                        sourceEndSec: base.sourceEndSec ?? 0,
+                    });
+                    const after = renderedEdgeSourceSec(
+                        trimFixture({
+                            ...over,
+                            startSec: edge === "left" ? deltaSec : 0,
+                            lengthSec: edge === "left" ? 4 - deltaSec : 4 + deltaSec,
+                            ...(out === null
+                                ? {}
+                                : {
+                                      sourceStartSec: out.sourceStartSec,
+                                      sourceEndSec: out.sourceEndSec,
+                                  }),
+                        }),
+                        fixedSide,
+                    );
+                    expect(after).toBeCloseTo(before, 6);
+                });
+            }
+        }
+    }
 });

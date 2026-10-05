@@ -56,10 +56,20 @@
  *
  * ## Loop
  *
- * Loop clip 的 `sourceStartSec / sourceEndSec` 是**回绕锚点相位**（周期 D 见
- * `state.rs:296-307`），不是消费窗口：裁切只应改**长度**，动锚点会让整段内容错相。
- * 因此 Loop 返回 `null`，调用方跳过源窗口写入（与 `crossfadeGripWindow.ts:150-156`
- * 和 `state.rs:238-241` 的规范化跳过 Loop 一致）。
+ * Loop clip 的 `sourceStartSec / sourceEndSec` 是**回绕相位锚点**（周期 D 见
+ * `state.rs:296-307`），不是消费窗口，两条边因此不对称：
+ *
+ * - **右缘**：只改长度。相位锚点决定"时间轴**左端**播放媒体的哪个位置"，动它会把
+ *   左端一起带走（违反"左端固定"）。多出的长度由回绕内容填充。
+ * - **左缘**：必须改锚点 —— 左端内容本就该随拖拽移动，而右端由"锚点 + 长度"
+ *   共同决定，按 `δ·rate` 反向调整锚点即可保持右端不变（与非 Loop 同一条公式）。
+ *   锚点取模环绕到 `[0, D)` 保持规范（消费端本就按 `floor_mod` 解释，环绕只是防止
+ *   多次拖拽后数值无界漂移）。
+ *
+ * 【曾经的缺陷】把 Loop 一律当作"只改长度"（右缘的规则）会让**左缘拖拽完全不写
+ * 锚点** ⇒ 右端内容跟着长度变化跑掉（实测：拖左缘 1s 后右端源位置 4 → 5）。
+ * 旧实现 `useEditDrag` 对此有显式分支（`loop && limitedDelta < 0` 的环绕锚点回退、
+ * `loop && reversed` 的锚点推进），内核迁移时丢失。
  *
  * ## 为什么必须收口到一处
  *
@@ -95,6 +105,13 @@ export interface TrimSourceWindowArgs {
      * 【为什么不能传 clip 级倍率】Take 速率 ≠ 1 时源位移会被算错（正放倒放都错）。
      */
     readonly rate: number;
+    /**
+     * Loop 的回绕周期 D（秒）；`0` = 未知。
+     *
+     * 仅用于把 Loop 的相位锚点取模环绕到 `[0, D)`（防多次拖拽后数值无界漂移）。
+     * 非 Loop 不使用。
+     */
+    readonly mediaDurationSec: number;
     readonly sourceStartSec: number;
     readonly sourceEndSec: number;
 }
@@ -112,14 +129,12 @@ function sanitizeRate(rate: number): number {
 /**
  * 把边缘拖拽位移换算为新的源窗口。
  *
- * @returns 新的 `{sourceStartSec, sourceEndSec}`；**Loop 或输入非法时返回 `null`**
- *   （调用方只改 `lengthSec`，跳过源窗口写入）。
+ * @returns 新的 `{sourceStartSec, sourceEndSec}`；**Loop 的右缘或输入非法时返回
+ *   `null`**（调用方只改 `lengthSec`，跳过源窗口写入）。
  */
 export function resolveTrimSourceWindow(
     args: TrimSourceWindowArgs,
 ): TrimSourceWindow | null {
-    // Loop：源字段是回绕锚点相位，裁切只改长度。
-    if (args.loopEnabled) return null;
     if (!Number.isFinite(args.deltaSec)) return null;
 
     const rate = sanitizeRate(args.rate);
@@ -129,16 +144,26 @@ export function resolveTrimSourceWindow(
     const sourceStartSec = Number.isFinite(args.sourceStartSec) ? args.sourceStartSec : 0;
     const sourceEndSec = Number.isFinite(args.sourceEndSec) ? args.sourceEndSec : 0;
 
+    // Loop 的**右缘**：相位锚点决定时间轴左端播放位置，右缘移动只应改长度。
+    // （非 Loop 的右缘相反：必须移动"右缘对应的源端点"才能固定左端。）
+    if (args.loopEnabled && args.edge === "right") return null;
+
+    // Loop 的锚点取模环绕到 [0, D)，保持字段规范、防止多次拖拽后无界漂移。
+    const wrap = (value: number): number =>
+        args.loopEnabled && args.mediaDurationSec > 1e-9
+            ? ((value % args.mediaDurationSec) + args.mediaDurationSec) % args.mediaDurationSec
+            : value;
+
     // 被改的字段 = **被拖的那条时间轴边缘**所对应的源字段：
     //   正放：左缘 ↔ sourceStart、右缘 ↔ sourceEnd
     //   倒放：左缘 ↔ sourceEnd、右缘 ↔ sourceStart（镜像）
     // 另一端保持逐值不变（这正是"固定的是另一边"）。
     if (args.edge === "left") {
         return args.reversed
-            ? { sourceStartSec, sourceEndSec: sourceEndSec + sourceDelta }
-            : { sourceStartSec: sourceStartSec + sourceDelta, sourceEndSec };
+            ? { sourceStartSec, sourceEndSec: wrap(sourceEndSec + sourceDelta) }
+            : { sourceStartSec: wrap(sourceStartSec + sourceDelta), sourceEndSec };
     }
     return args.reversed
-        ? { sourceStartSec: sourceStartSec + sourceDelta, sourceEndSec }
-        : { sourceStartSec, sourceEndSec: sourceEndSec + sourceDelta };
+        ? { sourceStartSec: wrap(sourceStartSec + sourceDelta), sourceEndSec }
+        : { sourceStartSec, sourceEndSec: wrap(sourceEndSec + sourceDelta) };
 }
