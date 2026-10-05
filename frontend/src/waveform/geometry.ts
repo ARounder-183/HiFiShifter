@@ -951,12 +951,27 @@ export function buildWaveformGeometry(args: {
         const x = (Math.round(marker.xPx * dpr) + 0.5) / dpr;
         const firstRowDevice = Math.round(marker.yPx * dpr);
         const steps = Math.max(2, Math.round((size * dpr) / columnDeviceWidth));
+        // 标记是固定半宽的实心 ▽，贴着 Clip 边缘时会有一半探出本体之外。逐行把
+        // 横向范围**裁到 Clip 本体**，超出的部分被边缘切断 —— 而不是悬空画在
+        // Clip 外面。边界缺失（测试桩 / 旧调用方）时退化为不裁。
+        const hasBounds =
+            Number.isFinite(marker.clipLeftPx) && Number.isFinite(marker.clipRightPx);
+        const boundsLo = hasBounds
+            ? Math.min(marker.clipLeftPx, marker.clipRightPx)
+            : Number.NEGATIVE_INFINITY;
+        const boundsHi = hasBounds
+            ? Math.max(marker.clipLeftPx, marker.clipRightPx)
+            : Number.POSITIVE_INFINITY;
         for (let i = 0; i < steps; i += 1) {
             const hw = halfWidth * (1 - i / steps);
             if (hw < 0.5 / dpr) break;
             const y = (firstRowDevice + i * columnDeviceWidth + 0.5) / dpr;
-            push(x - hw, y, markerRed, markerGreen, markerBlue, alpha);
-            push(x + hw, y, markerRed, markerGreen, markerBlue, alpha);
+            const xLo = Math.max(x - hw, boundsLo);
+            const xHi = Math.min(x + hw, boundsHi);
+            // 该行完全落在 Clip 之外 ⇒ 不产生退化线段。
+            if (!(xHi > xLo)) continue;
+            push(xLo, y, markerRed, markerGreen, markerBlue, alpha);
+            push(xHi, y, markerRed, markerGreen, markerBlue, alpha);
         }
     }
 

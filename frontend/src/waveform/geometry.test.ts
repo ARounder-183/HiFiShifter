@@ -412,6 +412,9 @@ test("waveform/geometry.test.ts scripted checks", async () => {
                     yPx: 20,
                     heightPx: 100,
                     kind: "loop",
+                    // 边界给得足够宽 ⇒ 不裁任何扫描行（本用例只验压暗）。
+                    clipLeftPx: -1000,
+                    clipRightPx: 1000,
                     inactive: true,
                 },
             ],
