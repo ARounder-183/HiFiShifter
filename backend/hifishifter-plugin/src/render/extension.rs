@@ -56,6 +56,38 @@ mod bound_tests {
     use ara2_bridge::companion::{CompanionFactory, CompanionProcessorBinding, CompanionRoles};
     use ara2_bridge::plugin::{FactoryBuilder, PluginBuilder};
     use ara2_bridge::sys::*;
+    /// v2首次真实恢复就建立源basis；后续移动/裁切/线性拉伸无需用户再落笔才迁移。
+    #[test]
+    fn legacy_v2_first_restore_promotes_source_basis_before_host_transform() {
+        let (model,owners,ids)=crate::editor::session::tests::workspace_fixture();let document=model.session();
+        let key=(&*ids[0] as *const u8) as u64;
+        {let _transaction=document.transaction.lock().unwrap();let mut timeline=document.timeline.lock().unwrap();
+            let timeline=timeline.as_mut().unwrap();timeline.project_sec=2.;let clip=&mut timeline.clips[0];
+            clip.start_sec=1.;clip.length_sec=1.;clip.takes[0].source_end_sec=1.;clip.normalize_takes();
+            let mut regions=document.regions.lock().unwrap();let region=regions.get_mut(&key).unwrap();
+            region.start_in_playback_time=1.;region.duration_in_modification_time=1.;region.duration_in_playback_time=1.;}
+        let host=owners[0].assigned_timeline(&document).unwrap();let mut client=host.clone();
+        let mut edit=vec![0_f32;22];for (frame,value) in edit.iter_mut().enumerate().take(21).skip(10) {*value=60.+(frame-10) as f32;}
+        let params=hifishifter_kernel::state::TrackParamsState {frame_period_ms:100.,pitch_orig:vec![57.;22],
+            pitch_edit:edit,pitch_edit_user_modified:true,..Default::default()};client.params_by_root_track.insert("track".into(),params);
+        let mut legacy=crate::state_channel::EditState::default().merge(&host,&client,0).unwrap();
+        legacy.reconcile(&std::collections::BTreeMap::from([("track".into(),vec![("modification".into(),"ara://source".into())])])).unwrap();
+        let bytes=legacy.encode().unwrap();assert_eq!(serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["version"],2);
+        document.ready.store(false,Ordering::Release);owners[0].restore_state(&bytes).unwrap();document.prepare_renderers();
+        let saved=owners[0].encode_state().unwrap();assert_eq!(serde_json::from_slice::<serde_json::Value>(&saved).unwrap()["version"],3);
+        let atlas=document.edits.lock().unwrap().atlas.clone();assert_eq!(atlas.regions.len(),1);
+        let identities={let _transaction=document.transaction.lock().unwrap();document.parameter_identities_locked(&host).unwrap()};
+        let unchanged=atlas.project_roots(&host,&identities).unwrap();assert_eq!(&unchanged["track"].pitch_edit[10..21],&(60..=70).map(|note|note as f32).collect::<Vec<_>>());
+        let mut moved=host.clone();let clip=&mut moved.clips[0];clip.start_sec=3.;clip.length_sec=2.;
+        clip.takes[0].source_start_sec=0.25;clip.takes[0].source_end_sec=0.75;clip.takes[0].playback_rate=0.25;clip.normalize_takes();moved.project_sec=5.;
+        let followed=atlas.follow_geometry(&moved,&identities).unwrap();let roots=followed.project_roots(&moved,&identities).unwrap();
+        assert_eq!(roots["track"].pitch_edit[10],0.);assert_eq!(roots["track"].pitch_edit[30],62.5);
+        assert_eq!(roots["track"].pitch_edit[40],65.);assert_eq!(roots["track"].pitch_edit[50],67.5);
+        let local=followed.project_local(&moved,&identities).unwrap();assert_eq!(local[&host.clips[0].id].pitch_edit[0],62.5);
+        let mut cold=crate::state_channel::EditState::default();cold.restore(&saved).unwrap();
+        let rebound=cold.atlas.rebind(&moved,&identities).unwrap();assert_eq!(rebound.project_local(&moved,&identities).unwrap()[&host.clips[0].id].pitch_edit,local[&host.clips[0].id].pitch_edit);
+        document.close();
+    }
 
     /// v3源basis按组件真实区域保存，冷恢复不能借另一轨道的atlas或沿旧session key。
     #[test]
@@ -270,7 +302,7 @@ mod bound_tests {
         assert!(accepted.tracks.iter().all(|track|track.id=="track"||track.id=="b"));
         for (index,id) in ["track","b"].into_iter().enumerate() {
             let bytes=owners[index].encode_state().unwrap();let saved:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(saved["version"],2);assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(),1);
+            assert_eq!(saved["version"],if index==0 {2} else {3});assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(),1);
             assert_eq!(saved["edits"]["tracks"][0]["id"],id);assert_eq!(saved["edits"]["bindings"].as_object().unwrap().len(),1);
             assert_eq!(saved["edits"]["params"].as_object().unwrap().len(),index);
         }
@@ -1039,6 +1071,12 @@ impl ExtensionOwner {
         }
         let mut client=host.clone();restored.apply(&mut client);
         if changed_geometry {client.params_by_root_track.extend(restored.atlas.project_roots(&host,&document.parameter_identities_locked(&host)?)?);}
+        else if restored.atlas.is_empty()&&!restored.params.is_empty() {
+            // 旧v2只有项目帧：在首次真实绑定的宿主布局建立source basis，随后移动/拉伸沿此迁移。
+            // 不猜旧会话key/名字，也不能回推旧状态未保存的、首次加载前已改变的布局。
+            restored.atlas=crate::editor::parameter_atlas::ParameterAtlas::default()
+                .capture(&client,&document.parameter_identities_locked(&host)?)?;
+        }
         let mut edits=document.edits.lock().unwrap();
         let mut merged=edits.merge(&host,&client,edits.revision)?;
         let clip_ids=host.clips.iter().map(|clip|clip.id.clone()).collect::<BTreeSet<_>>();

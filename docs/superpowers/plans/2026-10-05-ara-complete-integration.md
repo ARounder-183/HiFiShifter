@@ -185,6 +185,11 @@ struct HostRenderCounters { source_hits:u64, intermediate_hits:u64, pcm_hits:u64
 
 ## 当前状态（续）
 
+旧v2首次恢复现已在真实assigned区域限定的完整图ready后捕获source basis，不等用户
+再落笔。初载后移动+裁切+线性拉伸、局部音频投影、升级v3冷rebind合同与原真实归档v2
+隔离合同共2项exit0。v2首次加载前已改变但未保存的原几何无法回推，不猜basis。
+详见SOURCE-AUTHORITY-FINDINGS.md；不外推为完整native迁移/拆分矩阵已通过。
+
 本批HNSEP算子profile确认末级97通道Concat占用随完整谱帧线性增长：10秒输出343MB，
 三分钟其输入+输出存活下界约12.3GB。新增整段资源预检，成功cache hit不受其限制，
 Windows物理/提交空间、Linux MemAvailable与失败信息合同通过；短真实模型/cache链

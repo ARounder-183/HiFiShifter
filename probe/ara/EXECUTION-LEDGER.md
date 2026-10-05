@@ -978,4 +978,6 @@ Task 45: Ruling: 真All构建暴露MSVC环境脚本$name覆盖带校验的Name�
 
 Task 45: Ruling: 用户再追加单独简短中文VST使用说明，并明确同步要求面向后续新功能迭代 — 新增docs/hifishifter-vst-使用说明.md，按当前实际UI/轨道FX接入方式写安装、多轨、焦点、自动应用、保存与限制；开发/构建同步文档独立保留 — 若把长篇开发文档当使用说明或将未校准fade/未实机四BUG写成已过，会误导用户；最终验收后还需更新能力结论。
 
+Task 38: Ruling: 旧v2恢复的atlas为空，初载后直接宿主移动未有source basis，必须新落笔才迁移 — 首次完整图ready、唯一组件assignment内恢复时直接捕获源basis，保存升v3；移动+源裁切+线性拉伸与冷rebind及原归档隔离2合同exit0 — 若把旧绝对帧继续用于变换会使音高漂移；v2首次加载前未保存的旧几何无法回推，不猜位置/名字，完整native迁移/拆分门仍open。
+
 
