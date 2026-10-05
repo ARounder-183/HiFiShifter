@@ -888,4 +888,6 @@ Task 32: Ruling: 文档workspace仅取活组件真实assignment并集，同名/�
 
 Task 33: Ruling: 用户坚持时间拉伸必须、倒放暂缓且最终一次review — 按完整集成spec继续，单implementer处理共享actor并在批末测试，不恢复此前Esc停止的Computer Use — 若用旧unsupported或本地绿测缩小门，会虚报完整拉伸/宿主GUI行为。
 
+Task 38: Ruling: 官方锁定REAPER头提供parent take但未给ARA hostRef转换opcode；7.81淡化又新增DIR_NEW/DIR2_NEW，原kernel markers只持久化不渲染 — 以直接所属take+真实assignment建立绑定，先记录接口/契约缺口，不按名字/位置猜对应；后续将参数坐标与marker管线一起接入 — 若沿用旧字段或把时长比/字段保存当完整支持，会继续曲线漂移或错误fade/拉伸。
+
 

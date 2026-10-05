@@ -2,6 +2,28 @@
 
 中文工作记录，更新于 2026-10-05。此文件记录产品分支，历史探针仍见 HANDOFF.md。
 
+## 当前续接：四项目标仍未全部完成
+
+当前权威是`docs/superpowers/specs/2026-10-05-ara-complete-integration-design.md`及同名plan。
+下方单实例/旧unsupported/旧构建段落为历史，不覆盖新范围：时间拉伸必须（含非线性/
+tempo/timebase/曲线重投影），倒放暂缓；保留独立App，同工程共享多轨原GUI和逐轨输出，
+HiFiGAN缓存与正常长人声也在最终门中。后续仅最终一次review。
+
+`ffa8266a`完成有界异步准备/冷恢复与原子发布；`ddbb5a97`完成editor角色透传、typed
+REAPER所属project时钟和正向线性保调路径，plugin lib80通过。新规范release bundle
+`.build-tmp/embedded-host-stretch-01/HiFiShifter.vst3`构建exit0，引擎SHA256
+`2F4FD9EC8B443DBA8A7225A740EB5506C2EC7071AEBBB2AC880438044D951C38`，尚未真实加载验收。
+`dfe8f4e`是Task32授权工作区基础（两真实scope回归exit0），**尚未接GUI**；Task33共享actor
+开发中。新源改动不包含在上述bundle里，不能混用证据。
+
+完整marker/fade/tempo接口源码调查见`HOST-GEOMETRY-FINDINGS.md`；标准ARA缺普通fade/
+marker数组，REAPER直接take绑定尚未取得实测。原kernel stretch_markers目前只保存未消费，
+轨级曲线缺源坐标锚点；runtime广告REFLECT_TEMPO/CONTENT_FADES超出实现，需修正能力
+契约或实现后才广告。完整拉伸/共享GUI/缓存/长源/独立App/native最终门全部仍open。
+
+用户此前物理Esc停止Computer Use，本次只继续源码，不自动恢复CU，不启动/关闭用户应用。
+不强杀、不热替换，不覆盖已有用户/测试工程；全程只ara-plugin worktree，本地提交不push。
+
 ## 最新状态：一期核心真实验收通过，二期改为内嵌GUI与自动应用
 
 Task29当前：插件初始化空宿主态，不再请求虚构track_main；标准Win32/WebView2焦点进入原HTML，Space实测控制宿主播放/主动暂停，秒位置一致2.414。素材选区转参数画布补DOM焦点后，真实原Ctrl+0对话框输入MIDI64并确认，第二轨自动1/1、第一轨0/0。真实独奏导出四窗口220.5→329.104Hz、gap0；关闭两个FX窗口后PCM maxdiff0，正常退出REAPER冷重开40653-byte测试RPP后、第二轨GUI尚未打开时供音PCM同样maxdiff0，之后正常打开FX显示恢复曲线。无外部HiFiShifter进程、没有手工提交或脚本写pitch。最终前端312文件/2718测试及tsc/生产bundle exit0。证据captures/gui-keyboard-*与gui-host-*-keyboard.jpg；旧“无法网页操作”仅剩鼠标工具命中限制，不再代表所有GUI输入都无法验收。真实鼠标手绘、双轨均编辑及资源/独立app验收仍未闭合。

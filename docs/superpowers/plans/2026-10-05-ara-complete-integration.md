@@ -135,5 +135,9 @@ struct HostRenderCounters { source_hits:u64, intermediate_hits:u64, pcm_hits:u64
 
 ## 当前状态
 
-新范围已明确，尚未全部实现。Task36透传/诊断是下一步源改动；共享工作区仍未实现，
-完整geometry/HiFiGAN缓存/长源/native最终门均open。旧探针结论不能被用来勾这些门。
+新范围尚未全部完成。Task36 renderer透传/诊断/typed REAPER时钟与Task38线性保调基础
+已在ddbb5a97（lib80通过、host-stretch-01构建exit0，native尚未验收）；Task32在dfe8f4e
+有授权scope并集，两定向测试通过，但GUI未接。Task33共享actor开发中，随后Task34。
+完整geometry/曲线重投影/marker与tempo/HiFiGAN缓存/长源/native最终门仍open。
+接口事实见probe/ara/HOST-GEOMETRY-FINDINGS.md。只源码，不自动恢复Esc停止的CU；
+最终一次review。旧探针、线性音频测试、构建成功均不能用来勾完整宿主门。
