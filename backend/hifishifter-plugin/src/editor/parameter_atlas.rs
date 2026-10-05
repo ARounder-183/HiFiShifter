@@ -48,8 +48,11 @@ mod arc_values {
 #[derive(Clone,Debug,Serialize,Deserialize)]
 pub(crate) struct RegionParameters {
     pub identity:RegionIdentity,pub root:String,pub current:RegionGeometry,
+    /// 历史父范围保留供恢复，但不能与最近活图的真正父候选一起制造嵌套拆分歧义。
+    #[serde(default="default_live")] live:bool,
     template:TrackParamsState,curves:BTreeMap<String,SourceCurve>,
 }
+fn default_live()->bool {true}
 #[derive(Clone,Default,Debug,Serialize,Deserialize)]
 pub(crate) struct ParameterAtlas {
     pub regions:BTreeMap<String,RegionParameters>,
@@ -77,11 +80,12 @@ impl ParameterAtlas {
     /// 只换活图投影与真实key，源basis保持；拆分同modification的新region可继承唯一父范围。
     pub fn follow_geometry(&self,timeline:&TimelineState,identities:&BTreeMap<String,RegionIdentity>)->Result<Self,String> {
         let mut followed=self.clone();
+        for record in followed.regions.values_mut() {record.live=false;}
         for clip in &timeline.clips {
             let identity=identities.get(&clip.id).ok_or("missing actual ARA parameter identity")?;
             let root=timeline.resolve_root_track_id(&clip.track_id).ok_or("unknown parameter root")?;let geometry=geometry(clip)?;
             if let Some(previous)=self.find(identity,&root,&geometry)? {
-                let mut record=previous.clone();record.identity=identity.clone();record.root=root;record.current=geometry;followed.regions.insert(clip.id.clone(),record);
+                let mut record=previous.clone();record.identity=identity.clone();record.root=root;record.current=geometry;record.live=true;followed.regions.insert(clip.id.clone(),record);
             }
         }followed.validate()?;Ok(followed)
     }
@@ -96,7 +100,7 @@ impl ParameterAtlas {
                 near(geometry.source_start,record.current.source_start)&&near(geometry.source_duration,record.current.source_duration))).collect()};
             let [clip]=matches.as_slice() else {return Err("ARA source parameter identity missing or ambiguous in assigned scope".into());};
             if bound.regions.contains_key(&clip.id) {return Err("ARA source parameter records collapse into one region".into());}
-            let mut record=record.clone();record.identity=identities[&clip.id].clone();record.current=geometry(clip)?;bound.regions.insert(clip.id.clone(),record);
+            let mut record=record.clone();record.identity=identities[&clip.id].clone();record.current=geometry(clip)?;record.live=true;bound.regions.insert(clip.id.clone(),record);
         }bound.validate()?;Ok(bound)
     }
     /// GUI仍用原track网格：显示投影可选重叠区，音频始终保留每region自己的参数。
@@ -165,7 +169,7 @@ impl ParameterAtlas {
                 };curves.insert(key,curve);
             }
             let mut template=params.clone();clear_curves(&mut template);
-            candidate.regions.insert(clip.id.clone(),RegionParameters {identity:identity.clone(),root,current:geometry,template,curves});
+            candidate.regions.insert(clip.id.clone(),RegionParameters {identity:identity.clone(),root,current:geometry,live:true,template,curves});
         }
         candidate.validate()?;Ok(candidate)
     }
@@ -192,10 +196,12 @@ impl ParameterAtlas {
     /// 原region key优先；拆分新key只能沿同modification/source与同root的唯一父源范围继承。
     fn find(&self,identity:&RegionIdentity,root:&str,geometry:&RegionGeometry)->Result<Option<&RegionParameters>,String> {
         let related=self.regions.values().filter(|record|record.identity.source==identity.source&&record.identity.modification==identity.modification);
-        if identity.key!=0 {if let Some(record)=related.clone().find(|record|record.identity.key==identity.key) {return Ok(Some(record));}}
+        if identity.key!=0 {if let Some(record)=related.clone().find(|record|record.live&&record.identity.key==identity.key) {return Ok(Some(record));}}
         let candidates=related.filter(|record|record.identity.key!=0&&record.root==root
             &&geometry.source_start<record.current.source_start+record.current.source_duration
             &&geometry.source_start+geometry.source_duration>record.current.source_start).collect::<Vec<_>>();
+        let live=candidates.iter().copied().filter(|record|record.live).collect::<Vec<_>>();
+        let candidates=if live.is_empty() {candidates} else {live};
         match candidates.as_slice() {[]=>Ok(None),[record]=>Ok(Some(*record)),_=>Err("Conflict: ambiguous source parameter ancestry".into())}
     }
     /// 当前先保持原安全数量边界；source basis可序列化，但反序列化后也必须复验。
@@ -261,6 +267,28 @@ impl SourceCurve {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 连续拆分只沿最近活图的唯一父范围，保留历史父记录但不让它阻塞第二次拆分。
+    #[test]
+    fn nested_splits_follow_live_ancestry_without_losing_history_or_guessing_overlaps() {
+        let original=edited();let atlas=ParameterAtlas::default().capture(&original,&identities()).unwrap();
+        let mut first=host(1.,0.5,0.,0.5);first.clips[0].id="left".into();
+        let mut right=host(1.5,0.5,0.5,0.5).clips.remove(0);right.id="right".into();first.clips.push(right);first.project_sec=2.;
+        let ids=BTreeMap::from([("left".into(),RegionIdentity {key:42,source:"source".into(),modification:"mod".into()}),
+            ("right".into(),RegionIdentity {key:43,source:"source".into(),modification:"mod".into()})]);
+        let followed=atlas.follow_geometry(&first,&ids).unwrap();assert_eq!(followed.regions.len(),3);
+        assert!(!followed.regions["clip"].live);assert!(followed.regions["left"].live);
+        let mut next=host(1.,0.25,0.,0.25);next.clips[0].id="quarter-a".into();
+        let mut second=host(1.25,0.25,0.25,0.25).clips.remove(0);second.id="quarter-b".into();next.clips.push(second);next.clips.push(first.clips[1].clone());next.project_sec=2.;
+        let mut next_ids=ids.clone();next_ids.remove("left");
+        next_ids.insert("quarter-a".into(),RegionIdentity {key:44,source:"source".into(),modification:"mod".into()});
+        next_ids.insert("quarter-b".into(),RegionIdentity {key:45,source:"source".into(),modification:"mod".into()});
+        let nested=followed.follow_geometry(&next,&next_ids).unwrap();let local=nested.project_local(&next,&next_ids).unwrap();
+        assert_eq!(local["quarter-a"].pitch_edit,&[60.,61.]);assert_eq!(local["quarter-b"].pitch_edit,&[61.,62.]);
+        assert_eq!(local["right"].pitch_edit,&[62.,63.,64.]);assert!(!nested.regions["left"].live);
+        // 两条真正活且重叠的不同编辑仍有歧义，不能选最小范围/最后写入来掩盖。
+        let mut ambiguous=followed.clone();ambiguous.regions.get_mut("clip").unwrap().live=true;
+        assert!(ambiguous.follow_geometry(&next,&next_ids).unwrap_err().contains("ambiguous"));
+    }
     fn host(start:f64,duration:f64,source_start:f64,source_duration:f64)->TimelineState {
         let mut timeline:TimelineState=serde_json::from_value(serde_json::json!({
             "tracks":[{"id":"a","name":"A","order":0}],"bpm":120,"project_sec":start+duration,

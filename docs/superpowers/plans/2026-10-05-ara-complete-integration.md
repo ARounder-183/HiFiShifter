@@ -189,6 +189,10 @@ struct HostRenderCounters { source_hits:u64, intermediate_hits:u64, pcm_hits:u64
 再落笔。初载后移动+裁切+线性拉伸、局部音频投影、升级v3冷rebind合同与原真实归档v2
 隔离合同共2项exit0。v2首次加载前已改变但未保存的原几何无法回推，不猜basis。
 详见SOURCE-AUTHORITY-FINDINGS.md；不外推为完整native迁移/拆分矩阵已通过。
+连续拆分的历史完整父范围与最近活子父范围现已通过live标记区分，保留历史且不选择
+最小范围猜父；嵌套拆分、真活重叠歧义及原atlas/v2共7合同exit0，native仍open。
+渐变资料核对：SWS旧GetMediaItemFadeBezParms/AskJF明确是旧视觉Bezier近似，不是
+7.81双轴精确音频函数；未把它接到新曲线冒充完成。网络公式仍缺，需后续统一宿主oracle。
 
 本批HNSEP算子profile确认末级97通道Concat占用随完整谱帧线性增长：10秒输出343MB，
 三分钟其输入+输出存活下界约12.3GB。新增整段资源预检，成功cache hit不受其限制，
