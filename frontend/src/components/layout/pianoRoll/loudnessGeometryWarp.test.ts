@@ -34,6 +34,8 @@ interface GeoOpts {
     playbackRate?: number;
     reversed?: boolean;
     loopEnabled?: boolean;
+    /** 媒体总时长（Loop 回绕周期 D）。给了它才走"锚点回绕"路径。 */
+    mediaDurationSec?: number;
 }
 
 /** 构造一份 clip 几何（默认正放、非 Loop、源窗口 = [0, 长度×速率)）。 */
@@ -55,7 +57,45 @@ function geo(
         playbackRate: rate,
         reversed: opts.reversed ?? false,
         loopEnabled: opts.loopEnabled ?? false,
+        ...(opts.mediaDurationSec === undefined
+            ? {}
+            : { sourcePath: "/media.wav", durationSec: opts.mediaDurationSec }),
     };
+}
+
+/**
+ * 后端 Loop 消费的**逐帧参考实现**。
+ *
+ * 同一公式出现在三处且必须逐帧一致：`pitch_clip::trim_and_resample_midi` 的 loop
+ * 分支、`pitch_analysis/schedule.rs`、`audio/mixdown.rs` 的 `floor_mod` 锚点回绕：
+ *
+ *   正放 idx(i) = rem_euclid(round(source_start·fps) + round(i·rate), n)
+ *   倒放 idx(i) = rem_euclid(round(min(source_end, D)·fps) − 1 − round(i·rate), n)
+ *
+ * `i = frame − round(start·fps)`（clip 内时间线帧下标）、`n = round(D·fps)`。
+ * 返回**未回绕**的源位置（帧域）：对拍时对两边施加同一取模即可。
+ */
+function backendLoopSourcePos(
+    g: WarpClipGeometry,
+    frameF: number,
+    fps: number,
+    mediaDurationSec: number,
+): number {
+    const startF = Math.round(g.startSec * fps);
+    const rate = g.playbackRate ?? 1;
+    const i = frameF - startF;
+    if (g.reversed === true) {
+        const anchorR = Math.round(Math.min(g.sourceEndSec ?? 0, mediaDurationSec) * fps) - 1;
+        return anchorR - i * rate;
+    }
+    const anchorF = Math.round((g.sourceStartSec ?? 0) * fps);
+    return anchorF + i * rate;
+}
+
+/** 两个源位置在周期 `period` 下的最小环形距离（帧）。 */
+function circularDistance(a: number, b: number, period: number): number {
+    const raw = (((a - b) % period) + period) % period;
+    return Math.min(raw, period - raw);
 }
 
 function warpOf(
@@ -92,7 +132,7 @@ describe("resolveClipConsumption", () => {
         expect(c.exact).toBe(true);
     });
 
-    it("Loop：回绕非仿射，标记为不精确（仍给出正放仿射近似）", () => {
+    it("Loop + 媒体时长未知：无法表达回绕，退化为正放仿射", () => {
         const c = resolveClipConsumption(
             geo("c", 1, 2, { sourceStartSec: 0.5, loopEnabled: true }),
             FPS,
@@ -401,5 +441,136 @@ describe("边界与退化", () => {
         // 纯平移：新帧 k 对应旧帧 k−200。
         expect(warp.baselineFrame(200)).toBe(0);
         expect(warp.baselineFrame(399)).toBe(199);
+    });
+});
+
+/**
+ * ★ Loop 的锚点回绕必须与后端**同向**，倒放尤其。
+ *
+ * 后端三处（`pitch_clip::trim_and_resample_midi` 的 loop 分支、`schedule.rs`、
+ * `mixdown.rs` 的 `floor_mod`）逐帧同一公式：
+ *
+ *   正放 idx(i) = rem_euclid(round(source_start·fps) + round(i·rate), n)
+ *   倒放 idx(i) = rem_euclid(round(min(source_end, D)·fps) − 1 − round(i·rate), n)
+ *
+ * 修复前这里一律返回"正放仿射"（锚点 `source_start`、速率 `+rate`），**忽略
+ * `reversed`**。于是倒放 + Loop 的 clip 在**锚点会变**的手势（Slip / 裁切）下，
+ * 基线被搬到**相反方向**，松手后才被权威快照纠正。
+ */
+describe("Loop：锚点回绕与后端同向（含倒放）", () => {
+    /** 媒体 3s ⇒ 回绕周期 600 帧。 */
+    const D = 3;
+    const N = Math.round(D * FPS);
+
+    it("正放：锚点 = round(source_start·fps)，速率为正", () => {
+        const c = resolveClipConsumption(
+            geo("c", 0, 1, { sourceStartSec: 0.5, loopEnabled: true, mediaDurationSec: D }),
+            FPS,
+        )!;
+        expect(c.exact).toBe(true);
+        expect(c.rate).toBe(1);
+        expect(c.anchorF).toBe(Math.round(0.5 * FPS));
+    });
+
+    it("★ 倒放：锚点在 min(source_end, D) 侧、速率为负", () => {
+        const c = resolveClipConsumption(
+            geo("c", 0, 1, {
+                sourceStartSec: 0.5,
+                sourceEndSec: 2,
+                reversed: true,
+                loopEnabled: true,
+                mediaDurationSec: D,
+            }),
+            FPS,
+        )!;
+        expect(c.exact).toBe(true);
+        // 倒放消费 s(i) = anchor_r − 1 − i·rate（后端首帧消费 anchor_r − 1）。
+        expect(c.rate).toBe(-1);
+        expect(c.anchorF).toBe(Math.round(2 * FPS) - 1);
+    });
+
+    it("★ 倒放 + source_end 越过媒体末端：锚点被 min(source_end, D) 钳到 D", () => {
+        const c = resolveClipConsumption(
+            geo("c", 0, 1, {
+                sourceStartSec: 0.5,
+                sourceEndSec: D + 1,
+                reversed: true,
+                loopEnabled: true,
+                mediaDurationSec: D,
+            }),
+            FPS,
+        )!;
+        expect(c.anchorF).toBe(Math.round(D * FPS) - 1);
+    });
+
+    it("★ 倒放 + Loop 的 Slip：基线按后端同向平移（修复前方向相反）", () => {
+        const originGeo = geo("c1", 0, 1, {
+            sourceStartSec: 0.5,
+            sourceEndSec: 2,
+            reversed: true,
+            loopEnabled: true,
+            mediaDurationSec: D,
+        });
+        const slipped = geo("c1", 0, 1, {
+            sourceStartSec: 0.7,
+            sourceEndSec: 2.2,
+            reversed: true,
+            loopEnabled: true,
+            mediaDurationSec: D,
+        });
+        const warp = warpOf([originGeo], [slipped])!;
+        // Δanchor_r = (2.2 − 2.0)·fps = 40 帧，rate_old = −1 ⇒ g(f) = f − 40。
+        // （修复前 rate_old = +1 且锚点在 source_start 侧 ⇒ g(f) = f + 40，方向相反。）
+        for (let f = 40; f < 200; f += 1) {
+            expect(warp.baselineFrame(f)).toBe(f - 40);
+        }
+    });
+
+    it("★ 与后端 floor_mod 参考实现对拍（倒放 Slip / 倒放 Alt 拉伸 / 正放 Slip）", () => {
+        const loopReversed = {
+            reversed: true,
+            loopEnabled: true,
+            mediaDurationSec: D,
+        } as const;
+        const cases: [WarpClipGeometry, WarpClipGeometry][] = [
+            // 倒放 + Loop + Slip（锚点变化）。
+            [
+                geo("r", 0, 1, { sourceStartSec: 0.5, sourceEndSec: 2, ...loopReversed }),
+                geo("r", 0, 1, { sourceStartSec: 0.7, sourceEndSec: 2.2, ...loopReversed }),
+            ],
+            // 倒放 + Loop + Alt 拉伸（速率变化）。
+            [
+                geo("r", 0, 1, { sourceStartSec: 0.5, sourceEndSec: 2, ...loopReversed }),
+                geo("r", 0, 2, {
+                    sourceStartSec: 0.5,
+                    sourceEndSec: 2,
+                    playbackRate: 0.5,
+                    ...loopReversed,
+                }),
+            ],
+            // 正放 + Loop + Slip（锚点在 source_start 侧）。
+            [
+                geo("f", 0, 1, { sourceStartSec: 0.5, loopEnabled: true, mediaDurationSec: D }),
+                geo("f", 0, 1, { sourceStartSec: 0.9, loopEnabled: true, mediaDurationSec: D }),
+            ],
+        ];
+        for (const [before, after] of cases) {
+            const warp = warpOf([before], [after])!;
+            expect(warp).not.toBeNull();
+            const startF = Math.round(after.startSec * FPS);
+            const endF = startF + Math.round(after.lengthSec * FPS);
+            let checked = 0;
+            for (let f = startF; f < endF; f += 1) {
+                const g = warp.baselineFrame(f);
+                if (g === WARP_BASELINE_UNKNOWN) continue;
+                // 仿射解出的 g 使**未回绕**源位置相等；取模对两边施加同一映射。
+                const expected = backendLoopSourcePos(after, f, FPS, D);
+                const got = backendLoopSourcePos(before, g, FPS, D);
+                expect(circularDistance(expected, got, N)).toBeLessThan(1e-6);
+                checked += 1;
+            }
+            // 至少要有一批帧真的被对拍过（避免"全 UNKNOWN ⇒ 空循环"式的假绿）。
+            expect(checked).toBeGreaterThan(50);
+        }
     });
 });

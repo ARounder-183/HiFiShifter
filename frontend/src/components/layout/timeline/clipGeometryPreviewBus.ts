@@ -68,6 +68,20 @@ export interface ClipGeometrySnapshot {
     readonly playbackRate: number;
     readonly reversed: boolean;
     readonly loopEnabled: boolean;
+    /**
+     * 媒体元数据：Loop 回绕周期 `D` 的唯一来源。
+     *
+     * 【为什么在几何快照里】Loop 的消费是 `floor_mod(锚点 ∓ 已消费, D)`，倒放的锚点
+     * 是 `min(source_end, D)` —— **没有 D 就表达不了回绕**，映射只能退化为正放仿射。
+     * 取值链与后端 `clip_source_media_duration_sec` 一致（见
+     * `resolveClipContentDurationSec`）。D 是媒体属性，手势期间不变，但"按下时"与
+     * "现在"两侧都要能解析，故随快照一起记下。
+     */
+    readonly durationSec: number | null;
+    readonly durationFrames: number | null;
+    readonly sourceSampleRate: number | null;
+    readonly sourcePath: string | null;
+    readonly midiNoteData: ReadonlyArray<{ endSec: number }> | null;
 }
 
 /** 可从 clip 列表建立快照的最小字段集（Redux `ClipInfo` 天然满足）。 */
@@ -81,6 +95,11 @@ export interface ClipGeometrySource {
     readonly playbackRate?: number | null;
     readonly reversed?: boolean;
     readonly loopEnabled?: boolean;
+    readonly durationSec?: number | null;
+    readonly durationFrames?: number | null;
+    readonly sourceSampleRate?: number | null;
+    readonly sourcePath?: string | null;
+    readonly midiNoteData?: ReadonlyArray<{ endSec: number }> | null;
 }
 
 let origin: readonly ClipGeometrySnapshot[] | null = null;
@@ -114,6 +133,16 @@ export function beginClipGeometryPreview(clips: readonly ClipGeometrySource[]): 
         playbackRate: Number(clip.playbackRate) || 1,
         reversed: clip.reversed === true,
         loopEnabled: clip.loopEnabled === true,
+        // Loop 回绕周期 D 的取值链（与后端一致）。数字净化交给消费方
+        // `resolveClipContentDurationSec`（它按 `durationFrames/sourceSampleRate`
+        // → `durationSec` → 音符最大结束时间依次取值）。
+        durationSec: Number.isFinite(clip.durationSec) ? Number(clip.durationSec) : null,
+        durationFrames: Number.isFinite(clip.durationFrames) ? Number(clip.durationFrames) : null,
+        sourceSampleRate: Number.isFinite(clip.sourceSampleRate)
+            ? Number(clip.sourceSampleRate)
+            : null,
+        sourcePath: typeof clip.sourcePath === "string" ? clip.sourcePath : null,
+        midiNoteData: clip.midiNoteData ?? null,
     }));
     notify();
 }

@@ -58,11 +58,16 @@
  * - 基线是**能量域融合**（`sqrt(Σ(电平ᵢ×增益ᵢ)²)`）后的曲线，前端只有融合结果、
  *   没有逐 clip 分量，因此映射是对**整条曲线**逐 clip 做的。单 clip 精确；多个 clip
  *   在新区间重叠时无法分解，是近似（错峰处高度略有偏差，松手由权威快照纠正）。
- * - **Loop 回绕**使消费函数带取模、不再是仿射：本模块按正放仿射近似，误差只出现在
- *   回绕点落在 clip 内的那一段。移动/裁切对 Loop 也是**精确**的（映射恒等或平移）。
+ * - **Loop 回绕**：消费函数带 `floor_mod`，但仿射映射仍然**精确** —— 仿射解出的
+ *   `g` 使 `srcOld(g)` 与 `srcNew(f)` 的**未回绕**源位置相等，而 `rem_euclid` 施加在
+ *   同一个值上；基线是源位置的周期函数（周期 D），故取模后的等价解给出同一个基线值。
+ *   前提是锚点与方向与后端一致（正放 `source_start`、倒放 `min(source_end, D)` 且方向
+ *   为负，见 `resolveClipConsumption`）；**媒体时长 D 未知时**才退化为正放仿射近似。
  * - 淡化的变化只影响"该帧是否计入能量"的门限（后端 `fade_weight_at > 0`），不影响
  *   电平位置；忽略。
  */
+
+import { resolveClipContentDurationSec } from "../../../utils/loopRender";
 
 /** 构造映射所需的最小 clip 几何（Redux `ClipInfo` 天然满足）。 */
 export interface WarpClipGeometry {
@@ -75,6 +80,19 @@ export interface WarpClipGeometry {
     readonly playbackRate?: number | null;
     readonly reversed?: boolean;
     readonly loopEnabled?: boolean;
+    /**
+     * 媒体元数据：Loop 回绕周期 `D` 的唯一来源（与后端
+     * `clip_source_media_duration_sec` 同一取值链，见 `resolveClipContentDurationSec`）。
+     *
+     * 【为什么必须有】Loop 的消费是 `floor_mod(锚点 ∓ 已消费, D)`：**没有 D 就无法
+     * 表达回绕**，倒放的锚点更是 `min(source_end, D)`。缺这些字段时只能退化为
+     * 正放仿射（见 `resolveClipConsumption` 的 Loop 分支）。
+     */
+    readonly durationSec?: number | null;
+    readonly durationFrames?: number | null;
+    readonly sourceSampleRate?: number | null;
+    readonly sourcePath?: string | null;
+    readonly midiNoteData?: ReadonlyArray<{ endSec: number }> | null;
 }
 
 /** 手势开始时的几何快照条目（与 `clipGeometryPreviewBus` 的快照同形）。 */
@@ -88,6 +106,12 @@ export interface WarpClipOrigin {
     readonly playbackRate: number;
     readonly reversed: boolean;
     readonly loopEnabled: boolean;
+    /** 媒体元数据（Loop 回绕周期 D）—— 见 {@link WarpClipGeometry}。 */
+    readonly durationSec?: number | null;
+    readonly durationFrames?: number | null;
+    readonly sourceSampleRate?: number | null;
+    readonly sourcePath?: string | null;
+    readonly midiNoteData?: ReadonlyArray<{ endSec: number }> | null;
 }
 
 /** 基线帧落在「旧几何下该 clip 不覆盖」的区间：基线未知（不施加动态增益）。 */
@@ -244,8 +268,49 @@ export function resolveClipConsumption(
     const sourceEndSec = finiteOr(clip.sourceEndSec, sourceStartSec + lengthSec * rate);
 
     if (clip.loopEnabled === true) {
-        // 回绕是取模，不是仿射。按正放仿射近似（移动/裁切下仍精确，因为映射是
-        // 恒等或平移；只有 Slip/拉伸在回绕点穿过 clip 时才有偏差）。
+        // 后端 Loop 消费：**锚点回绕**，逐帧与音频渲染（`mixdown.rs` 的
+        // `floor_mod(anchor ± f, D)`）、音高组装（`schedule.rs`）与曲线映射
+        // （`pitch_clip::trim_and_resample_midi` 的 loop 分支）三处一致：
+        //
+        //   正放 idx(i) = floor_mod(round(source_start·fps) + round(i·rate), n)
+        //   倒放 idx(i) = floor_mod(round(min(source_end, D)·fps) − 1 − round(i·rate), n)
+        //
+        // 其中 `i = f − startF`（clip 内时间线帧下标）、`n = round(D·fps)`。
+        //
+        // 【本轮修的是什么】此前这里一律返回"正放仿射"（锚点 `source_start`、
+        // 速率 `+rate`），**完全忽略 `reversed`**。于是**倒放 + Loop** 的 clip 在
+        // 拖拽期间基线被搬到错误相位（锚点在 source_start 侧、方向反了），松手后
+        // 才被权威快照纠正 —— 正是"拖拽时略微有问题、松开鼠标才恢复正常"。
+        //
+        // 【为什么仿射仍然成立】`rem_euclid` 对两边施加在**同一个未回绕源位置**上
+        // （仿射解出的 g 使 `srcOld(g)` 与 `srcNew(f)` 的未回绕值相等，回绕后自然
+        // 相等），而基线是源位置的函数（周期 D）—— 因此 `k≠0` 的那些等价解与
+        // `k=0` 给出同一个基线值。回绕不破坏仿射性；错的是锚点与方向。
+        const mediaTotalSec = resolveClipContentDurationSec(clip) ?? 0;
+        if (mediaTotalSec > 0) {
+            if (clip.reversed === true) {
+                // 倒放锚点 = min(source_end, D)，且首帧消费 `anchor_r − 1`
+                //（后端下标从 `anchor_r − 1 − consumed` 起算）。
+                const anchorRSec = Math.min(sourceEndSec, mediaTotalSec);
+                return {
+                    startF,
+                    lenF,
+                    rate: -rate,
+                    anchorF: Math.round(anchorRSec * fps) - 1,
+                    gain,
+                    exact: true,
+                };
+            }
+            return {
+                startF,
+                lenF,
+                rate,
+                anchorF: Math.round(sourceStartSec * fps),
+                gain,
+                exact: true,
+            };
+        }
+        // 媒体时长未知：无法表达回绕，退化为正放仿射（与修复前的行为一致）。
         return {
             startF,
             lenF,

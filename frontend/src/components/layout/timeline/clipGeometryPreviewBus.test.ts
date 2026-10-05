@@ -42,6 +42,11 @@ describe("clipGeometryPreviewBus", () => {
                 playbackRate: 1.5,
                 reversed: true,
                 loopEnabled: true,
+                durationSec: 4,
+                durationFrames: 192000,
+                sourceSampleRate: 48000,
+                sourcePath: "/media/a.wav",
+                midiNoteData: [{ endSec: 3.5 }],
             },
             { id: "b", startSec: 3, lengthSec: 4 },
         ]);
@@ -56,6 +61,11 @@ describe("clipGeometryPreviewBus", () => {
                 playbackRate: 1.5,
                 reversed: true,
                 loopEnabled: true,
+                durationSec: 4,
+                durationFrames: 192000,
+                sourceSampleRate: 48000,
+                sourcePath: "/media/a.wav",
+                midiNoteData: [{ endSec: 3.5 }],
             },
             // 缺省值按"无变化"：增益 1、源窗口 [0,0]、速率 1、正放、非 Loop。
             // 源窗口缺省会退化成"零跨度"，但映射只依赖锚点位置，几何本身来自
@@ -70,8 +80,37 @@ describe("clipGeometryPreviewBus", () => {
                 playbackRate: 1,
                 reversed: false,
                 loopEnabled: false,
+                durationSec: null,
+                durationFrames: null,
+                sourceSampleRate: null,
+                sourcePath: null,
+                midiNoteData: null,
             },
         ]);
+    });
+
+    it("★ 快照必须带上 Loop 回绕周期 D 的取值链（缺了会让倒放 + Loop 静默退化）", () => {
+        reset();
+        beginClipGeometryPreview([
+            {
+                id: "loop",
+                startSec: 0,
+                lengthSec: 2,
+                durationSec: 3,
+                durationFrames: 132300,
+                sourceSampleRate: 44100,
+                sourcePath: "/media/loop.wav",
+                reversed: true,
+                loopEnabled: true,
+            },
+        ]);
+        const entry = getClipGeometryPreviewOrigin()?.[0];
+        // 消费方（`resolveClipContentDurationSec`）按 durationFrames/sourceSampleRate
+        // 优先取值 —— 两者都必须原样送达，否则回绕周期会退化为 durationSec 的舍入值。
+        expect(entry?.durationFrames).toBe(132300);
+        expect(entry?.sourceSampleRate).toBe(44100);
+        expect(entry?.durationSec).toBe(3);
+        expect(entry?.sourcePath).toBe("/media/loop.wav");
     });
 
     it("★ 快照是拷贝：手势中的乐观写入不会污染它（否则差分成恒等）", () => {
