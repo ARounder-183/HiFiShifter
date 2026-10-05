@@ -1962,3 +1962,82 @@ test("音高全未检测时说明原因，而不是画一条直线", async () =>
         "No pitch to apply vibrato to in this range.",
     );
 });
+
+/*
+ * 编辑系统预设 = 立刻生成一份自定义副本。
+ *
+ * 【旧行为的问题】副本原本是"离开这条预设"时才生成的：用户改完系统预设 A、点向 B
+ * 的那一刻库里才多出一条 C，而他的注意力全在 B 上 —— C 成了"不经意间添加的预设"。
+ * 现在的契约是第一次编辑就生成并选中，用户当场看见它出现。
+ */
+test("编辑系统预设：立刻生成自定义副本并跳过去，且不打断这次编辑", async () => {
+    const store = await mountDialog();
+    // 出厂默认的活动预设是「自然」，它是一条**系统**预设：库里本来什么都没有。
+    expect(userPresets(store)).toHaveLength(0);
+    expect(store.getState().session.activeVibratoPresetId).toBe("builtin.natural");
+
+    await typeNumber("Depth", 77);
+
+    const created = userPresets(store);
+    expect(created, "改一下系统预设就该多出一份副本").toHaveLength(1);
+    expect(created[0].builtin, "副本必须是自定义预设").toBeFalsy();
+    expect(created[0].name, "名字按显示名预填").toBe("Natural 2");
+    expect(created[0].depthCents, "这次改动落在副本上").toBe(77);
+
+    // 草稿切到了副本上：名字输入框出现（系统预设没有它），值就是副本名；
+    // 而**编辑内容原样保留** —— 这就是"不打断当前编辑"。
+    const nameInput = document.querySelector<HTMLInputElement>('input[aria-label="Preset name"]');
+    expect(nameInput?.value).toBe("Natural 2");
+    expect(
+        document.querySelector<HTMLInputElement>('input[aria-label="Depth"]')?.value,
+        "切换副本不该把用户刚改的值弹回去",
+    ).toBe("77");
+
+    // 活动预设不动：副本只是"让你看得见"，要不要用它由用户决定。
+    expect(store.getState().session.activeVibratoPresetId).toBe("builtin.natural");
+
+    // 明说一句，免得新出现的那一行被正在调参数的注意力漏掉。
+    expect(document.body.textContent ?? "").toContain('Created custom preset "Natural 2"');
+});
+
+/*
+ * 继续编辑不会一路生成副本 —— 副本只该在"从系统预设跨到自定义"那一次产生。
+ */
+test("编辑系统预设：只在第一次生成副本，后续编辑落在同一份上", async () => {
+    const store = await mountDialog();
+
+    await typeNumber("Depth", 77);
+    await typeNumber("Depth", 88);
+
+    expect(userPresets(store), "第二次编辑不该再生成一份").toHaveLength(1);
+    // 后续编辑仍停在草稿上（照常由「保存」/ 离开这条预设落盘），
+    // 但草稿已经是那份副本了 —— 输入框读到的就是新值。
+    expect(
+        document.querySelector<HTMLInputElement>('input[aria-label="Depth"]')?.value,
+    ).toBe("88");
+    expect(
+        document.querySelector<HTMLInputElement>('input[aria-label="Preset name"]')?.value,
+        "编辑的仍是第一次生成的那份副本",
+    ).toBe("Natural 2");
+});
+
+/*
+ * 副本产生之后，再切换到别的预设不会再多出东西 —— 这正是旧行为里"不经意间多出
+ * 预设"的那一步。
+ */
+test("编辑系统预设后再切换预设：不会再多出一份副本", async () => {
+    const store = await mountDialog();
+
+    await typeNumber("Depth", 77);
+    expect(userPresets(store)).toHaveLength(1);
+
+    // 切到列表里的另一条预设（系统预设行按 id 找）。
+    const row = document.querySelector<HTMLElement>('[data-preset-row="builtin.enka"]');
+    expect(row, "系统预设行应已渲染").toBeTruthy();
+    const option = row!.querySelector<HTMLElement>('[role="option"]');
+    await act(async () => {
+        option!.click();
+    });
+
+    expect(userPresets(store), "离开时不该再凭空多出一条").toHaveLength(1);
+});

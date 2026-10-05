@@ -264,7 +264,7 @@ export function VibratoDialog({
     applyTarget,
 }: Props) {
     const dispatch = useAppDispatch();
-    const { t, plural } = useI18n();
+    const { t, tVars, plural } = useI18n();
     // 只选取本组件实际消费的字段子集并以 shallowEqual 比较：播放期间 playheadSec
     // 每 ~33ms 变一次、session 对象引用随之失效，直接订阅 state.session 会让整个
     // 对话框（含预设列表 / 周期编辑器 / 预览画布）以 ≥30Hz 空转重渲。
@@ -302,6 +302,14 @@ export function VibratoDialog({
         null;
     /** 编辑中的草稿。`null` 表示库里一条预设都没有（`resolved.all` 为空）。 */
     const [draft, setDraft] = useState<VibratoPreset | null>(seedPreset);
+    /**
+     * 已经为哪一份系统预设草稿尝试过"立刻另存为副本"。
+     *
+     * 【为什么需要】已达预设上限时副本造不出来，草稿会一直停在"系统预设 + 有改动"
+     * 上；每次编辑都提示一遍就成了噪声。记下"草稿 id + 当时的用户预设条数"，
+     * 同一种情况只尝试一次；用户腾出空位（条数变化）后自动重试。
+     */
+    const promoteAttemptRef = useRef<string | null>(null);
     /**
      * 手绘周期编辑器的展开状态。
      *
@@ -762,10 +770,13 @@ export function VibratoDialog({
         );
     }
 
-    function persistPreset(preset: VibratoPreset) {
-        dispatch(upsertVibratoPreset(preset));
-        void dispatch(persistUiSettings());
-    }
+    const persistPreset = useCallback(
+        (preset: VibratoPreset) => {
+            dispatch(upsertVibratoPreset(preset));
+            void dispatch(persistUiSettings());
+        },
+        [dispatch],
+    );
 
     /**
      * 草稿相对"它该等于什么"是否有未保存的改动。
@@ -805,31 +816,37 @@ export function VibratoDialog({
      * @returns 已达上限（`MAX_VIBRATO_PRESETS`）时返回 `null`，由调用方给出提示 ——
      *          静默失败会让用户以为"保存没反应"。
      */
-    function duplicateAsCustom(source: VibratoPreset): VibratoPreset | null {
-        if (resolved.user.length >= MAX_VIBRATO_PRESETS) return null;
-        return duplicateVibratoPreset(
-            source,
-            nextDuplicatePresetName(
-                vibratoPresetLabel(source, t) || t("vibrato_manager_new"),
-                resolved.all.map((preset) => vibratoPresetLabel(preset, t)),
-            ),
-        );
-    }
+    const duplicateAsCustom = useCallback(
+        (source: VibratoPreset): VibratoPreset | null => {
+            if (resolved.user.length >= MAX_VIBRATO_PRESETS) return null;
+            return duplicateVibratoPreset(
+                source,
+                nextDuplicatePresetName(
+                    vibratoPresetLabel(source, t) || t("vibrato_manager_new"),
+                    resolved.all.map((preset) => vibratoPresetLabel(preset, t)),
+                ),
+            );
+        },
+        [resolved, t],
+    );
 
     /**
      * 把一条预设**入库为自定义副本**，返回那份副本（已达上限时返回 `null` 并给出提示）。
      *
      * 出厂预设永远不能被覆盖（要可复原），所以"存成自己的"这件事只有这一条路。
      */
-    function saveAsCustom(source: VibratoPreset): VibratoPreset | null {
-        const copy = duplicateAsCustom(sanitizeVibratoPreset(source));
-        if (!copy) {
-            setIoNotice({ text: t("vibrato_manager_at_cap"), danger: true });
-            return null;
-        }
-        persistPreset(copy);
-        return copy;
-    }
+    const saveAsCustom = useCallback(
+        (source: VibratoPreset): VibratoPreset | null => {
+            const copy = duplicateAsCustom(sanitizeVibratoPreset(source));
+            if (!copy) {
+                setIoNotice({ text: t("vibrato_manager_at_cap"), danger: true });
+                return null;
+            }
+            persistPreset(copy);
+            return copy;
+        },
+        [duplicateAsCustom, persistPreset, t],
+    );
 
     /**
      * 把草稿的**未保存改动**落盘，返回落盘后的那条预设（没有改动时返回 `null`）。
@@ -846,7 +863,12 @@ export function VibratoDialog({
      */
     function commitDraft(): VibratoPreset | null {
         if (!draft || !draftHasUnsavedChanges()) return null;
-        if (isBuiltin) return saveAsCustom(draft);
+        if (isBuiltin) {
+            // 应用窗口里草稿只服务这一次套用：切换预设不该顺手在库里留下一条用户
+            // 没打算要的副本 —— 那正是管理窗口这次要修掉的旧毛病。管理窗口里系统
+            // 预设的改动早在第一次编辑时就变成副本了，走不到这里。
+            return applyTarget ? null : saveAsCustom(draft);
+        }
         const normalized = sanitizeVibratoPreset(draft);
         persistPreset(normalized);
         return normalized;
@@ -933,6 +955,51 @@ export function VibratoDialog({
         // 保存是"这段波形定稿了"的时机：顺势把纵轴重新拟合回六成上下。
         fitPreviewAxis(saved);
     }
+
+    /**
+     * 待办的"编辑系统预设 → 立刻另存为副本"。
+     *
+     * 【为什么算在渲染里、做在 effect 里】造副本是纯计算（草稿 + 现有名字），入库才是
+     * 副作用。编辑入口（捏合、手绘）会在同一帧里连续改草稿，若在编辑回调里顺手入库，
+     * 一次捏合就会生成一串副本；effect 每次提交只跑一次，dispatch 也不在渲染中，
+     * 天然安全。
+     */
+    const builtinEditPending =
+        // 应用窗口除外：那里的草稿只服务"这一次套用"，编辑它不该在库里留下东西
+        // （「应用」不写库是那个窗口的契约，见文件头）。
+        !applyTarget && draft && draft.builtin && draftHasUnsavedChanges() ? draft : null;
+
+    /**
+     * 对系统预设的**任意编辑**：立刻在列表里生成一份自定义副本，并把草稿切过去。
+     *
+     * 【旧行为的问题】副本原本是在"离开这条预设"（切到别的预设 / 删除 / 导入）时才
+     * 生成的。用户改完系统预设 A、点向 B 的那一刻库里才多出一条 C —— 他的注意力全在
+     * B 上，C 于是成了"不经意间添加的预设"。改成第一次编辑就生成并选中，用户当场看见
+     * 它出现。
+     *
+     * 【为什么不打断编辑】副本的内容就是"系统预设 + 这次改动"，草稿换的只是 id 与
+     * 名字；拖动 / 输入依赖的是草稿的**内容**，因此手势、光标位置与纵轴标尺都不动
+     * （刻意不调 `fitPreviewAxis`：编辑期间标尺本就该保持不动）。
+     *
+     * 【为什么不设为当前使用】激活预设会改掉颤音工具下一笔画什么，那是用户自己的
+     * 决定（双击 / 右键「设为当前使用」）；这里只负责让副本可见。
+     */
+    useEffect(() => {
+        if (!builtinEditPending) return;
+        const attemptKey = `${builtinEditPending.id}:${resolved.user.length}`;
+        if (promoteAttemptRef.current === attemptKey) return;
+        promoteAttemptRef.current = attemptKey;
+        const copy = saveAsCustom(builtinEditPending);
+        if (!copy) return;
+        setDraft(copy);
+        // 明说一句：列表里新出现的那一行很容易被正在调参数的注意力漏掉。
+        setIoNotice({
+            text: tVars("vibrato_manager_promoted_copy", {
+                name: vibratoPresetLabel(copy, t),
+            }),
+            danger: false,
+        });
+    }, [builtinEditPending, resolved.user.length, saveAsCustom, t, tVars]);
 
     /**
      * 「应用」：把当前草稿交给编辑管线，然后**关窗**。

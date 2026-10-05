@@ -1923,6 +1923,7 @@ export const zhCN = {
     vibrato_manager_set_active: "设为当前使用",
     vibrato_manager_rename: "重命名",
     vibrato_manager_row_menu: "预设操作",
+    vibrato_manager_promoted_copy: "已为你的修改创建自定义预设「{name}」",
     vibrato_manager_at_cap: "已达到预设数量上限",
     vibrato_manager_move_up: "上移",
     vibrato_manager_move_down: "下移",

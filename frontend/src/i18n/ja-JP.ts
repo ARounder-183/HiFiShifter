@@ -1996,6 +1996,8 @@ export const jaJP = {
     vibrato_manager_set_active: "現在使用する",
     vibrato_manager_rename: "名前を変更",
     vibrato_manager_row_menu: "プリセットの操作",
+    vibrato_manager_promoted_copy:
+        "編集内容をカスタムプリセット「{name}」として作成しました",
     vibrato_manager_at_cap: "プリセットの上限に達しました",
     vibrato_manager_move_up: "上へ",
     vibrato_manager_move_down: "下へ",

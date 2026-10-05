@@ -1966,6 +1966,8 @@ export const koKR = {
     vibrato_manager_set_active: "현재 사용으로 설정",
     vibrato_manager_rename: "이름 바꾸기",
     vibrato_manager_row_menu: "프리셋 작업",
+    vibrato_manager_promoted_copy:
+        "편집 내용을 사용자 프리셋 '{name}'(으)로 만들었습니다",
     vibrato_manager_at_cap: "프리셋 한도에 도달했습니다",
     vibrato_manager_move_up: "위로",
     vibrato_manager_move_down: "아래로",

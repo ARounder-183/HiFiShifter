@@ -1982,6 +1982,8 @@ export const enUS = {
     vibrato_manager_set_active: "Use as current",
     vibrato_manager_rename: "Rename",
     vibrato_manager_row_menu: "Preset actions",
+    vibrato_manager_promoted_copy:
+        'Created custom preset "{name}" for your edits',
     vibrato_manager_at_cap: "Preset limit reached",
     vibrato_manager_move_up: "Move up",
     vibrato_manager_move_down: "Move down",
