@@ -914,6 +914,6 @@ Task 38: Ruling: 项目整轨数组不能作为移动/拉伸后的曲线权威�
 
 Task 38: Ruling: 源basis是新的持久化语义，旧v2只有绝对项目数组 — 有atlas的新保存采用v3、显式key不落盘且在组件实际范围重绑定，继续接受旧v2，不含atlas的旧数据仍编码v2 — 若版本号仍伪称旧语义，旧引擎会静默丢basis；代价是v3工程须用新插件打开，不覆盖用户旧RPP。
 
-Task 38: Ruling: 批末128回归123通过/5失败，外部IPC clip扁平投影缺失、旧fixtures无modification边及JSON f64一ULP误判造成尾线截断 — 外部参数源basis只取宿主几何、fixture补真实边，不弱化验证；以8ULP处理数值舍入保留同布局整轨数组，定向5修复exit0 — 失败assert持Mutex使cleanup二次panic并0xc0000409，未当绿；若只改期望或当内存溢出忽略，会隐藏实际曲线保存损坏。
+Task 38: Ruling: 批末128回归123通过/5失败，外部IPC clip扁平投影缺失、旧fixtures无modification边及JSON f64一ULP误判造成尾线截断 — 外部参数源basis只取宿主几何、fixture补真实边，不弱化验证；以8ε×max(1,绝对秒坐标)数值容差保留同布局整轨数组，定向5修复exit0 — 失败assert持Mutex使cleanup二次panic并0xc0000409，未当绿；若只改期望或当内存溢出忽略，会隐藏实际曲线保存损坏。
 
 
