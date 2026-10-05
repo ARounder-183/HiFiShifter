@@ -1,5 +1,7 @@
 # HiFiShifter App与ARA插件构建及功能同步
 
+插件的简短中文操作说明另见[hifishifter-vst-使用说明.md](hifishifter-vst-使用说明.md)。
+
 中文产品构建说明。当前产品宿主目标为Windows x64/REAPER；用户已将Linux/macOS插件
 移出本次要求。独立App的既有跨平台代码保留，不宣称其它平台插件已可用。
 

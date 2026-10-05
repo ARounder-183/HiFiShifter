@@ -175,6 +175,8 @@ struct HostRenderCounters { source_hits:u64, intermediate_hits:u64, pcm_hits:u64
 - [ ] Task45：正式统一构建入口与构建文档，覆盖共享frontend/kernel、独立App、插件
   engine/原生loader/bundle、模型/运行DLL、debug/release、隔离启动、明确输出和错误。
   不热替换、不push，复用既有锁定SDK检出，不用git add -A。
+  用户最新追加单独简短中文VST使用说明，不作多语言；初稿位于docs/hifishifter-vst-使用说明.md，
+  最后集中验收后更新真实能力/限制，不把当前未校准项写成支持完成。
 - [ ] Task46：App/插件功能同步说明及可执行护栏，唯一共享DSP/业务/GUI源码、宿主能力
   适配边界与修改位置、同批构建/测试矩阵；不能交付两份手工复制产品代码。
 - 后续Task47（本次不要求）：Linux/macOS可行性与实现矩阵。核对平台VST3模块入口/UID/SDK工具链，

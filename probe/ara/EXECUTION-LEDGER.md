@@ -976,4 +976,6 @@ Task 45: Ruling: 用户要求后续迭代新功能时App/插件可同步，现�
 
 Task 45: Ruling: 真All构建暴露MSVC环境脚本$name覆盖带校验的Name参数；随后manifest的false未写成PowerShell $false — 内部参数改BuildName保留别名，补manifest表达式检查；All Debug产物及45文件摘要验证exit0，记录源码/model指纹与nativeAcceptance=false，目录不覆盖 — 若只跑PlanOnly/语法就称构建流可用会漏实际变量作用域/执行语义；Release、集中Verify与用户GUI验收仍未完成。
 
+Task 45: Ruling: 用户再追加单独简短中文VST使用说明，并明确同步要求面向后续新功能迭代 — 新增docs/hifishifter-vst-使用说明.md，按当前实际UI/轨道FX接入方式写安装、多轨、焦点、自动应用、保存与限制；开发/构建同步文档独立保留 — 若把长篇开发文档当使用说明或将未校准fade/未实机四BUG写成已过，会误导用户；最终验收后还需更新能力结论。
+
 
