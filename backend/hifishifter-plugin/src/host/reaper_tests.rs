@@ -12,6 +12,7 @@ pub(crate) struct Fixture {
     take_token: u8,
     item_token: u8,
     pub valid: Cell<bool>,
+    connection_host: Cell<bool>,
     calls: RefCell<Vec<String>>,
     revoke_at: Cell<usize>,
     change_at: Cell<usize>,
@@ -34,6 +35,7 @@ impl Fixture {
             take_token: 1,
             item_token: 2,
             valid: Cell::new(true),
+            connection_host: Cell::new(false),
             calls: RefCell::new(Vec::new()),
             revoke_at: Cell::new(0),
             change_at: Cell::new(0),
@@ -97,6 +99,12 @@ impl Fixture {
     pub fn calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
     }
+    pub fn references(&self) -> u32 {
+        self.refs.load(Ordering::Acquire)
+    }
+    pub fn enable_connection_host(&self) {
+        self.connection_host.set(true);
+    }
     pub fn set_value(&self, name: &'static str, value: f64) {
         self.values.borrow_mut().insert(name, value);
         self.change.set(self.change.get().wrapping_add(1));
@@ -138,10 +146,14 @@ fn fixture() -> &'static Fixture {
 unsafe extern "system" fn query(this: *mut c_void, iid: *const u8, out: *mut *mut c_void) -> i32 {
     let f = unsafe { &*this.cast::<Fixture>() };
     f.record("QI");
-    assert_eq!(
-        unsafe { std::slice::from_raw_parts(iid, 16) },
-        uid_guid(IID)
-    );
+    let requested = unsafe { std::slice::from_raw_parts(iid, 16) };
+    let host_iid = uid_guid([0x58E595CC, 0xDB2D4969, 0x8B6AAF8C, 0x36A664E5]);
+    if requested != uid_guid(IID) && !(f.connection_host.get() && requested == host_iid) {
+        unsafe {
+            *out = std::ptr::null_mut();
+        }
+        return crate::vst3::K_NO_INTERFACE;
+    }
     unsafe {
         *out = this;
         add(this);

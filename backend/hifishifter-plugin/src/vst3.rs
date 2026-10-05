@@ -819,8 +819,26 @@ unsafe extern "system" fn component_initialize(
     this: *mut c_void,
     context: *mut c_void,
 ) -> TResult {
+    // QI/GetApi可重入释放宿主组件引用；短引用只保活本次调用的插件存储，不保活project/take。
+    struct CallReference(*mut c_void);
+    impl Drop for CallReference {
+        fn drop(&mut self) {unsafe {component_release(self.0);}}
+    }
+    unsafe {component_add_ref(this);}
+    let _call_reference=CallReference(this);
+    let owner=unsafe {(*this.cast::<Processor>()).extension_owner.clone()};
+    if owner.is_closed() {return K_RESULT_FALSE;}
     unsafe { (*(this as *mut Processor)).connection.initialize(context); }
-    unsafe {(*(this as *mut Processor)).extension_owner.bind_reaper_host(context);}
+    if owner.is_closed() {
+        // QI可能先重入close再返回新引用；拒绝初始化时不能把该引用留在closed connection。
+        unsafe {(*this.cast::<Processor>()).connection.close();}
+        return K_RESULT_FALSE;
+    }
+    unsafe {owner.bind_reaper_host(context);}
+    if owner.is_closed() {
+        unsafe {(*this.cast::<Processor>()).connection.close();}
+        return K_RESULT_FALSE;
+    }
     crate::log_line("IComponent::initialize");
     K_RESULT_OK
 }
@@ -1431,6 +1449,7 @@ pub fn new_main_factory_adapter() -> Option<Vst3MainFactoryAdapter> {
 mod lifetime_tests {
     use super::*;
     use ara2_bridge::companion::vst3::ffi::ara2_vst3_release;
+    use std::sync::atomic::AtomicU32;
 
     /// 从真实工厂创建组件，返回其宿主 owning COM 引用。
     fn create_component() -> *mut c_void {
@@ -1442,6 +1461,72 @@ mod lifetime_tests {
         };
         assert_eq!(result, K_RESULT_OK);
         component
+    }
+
+    /// 安全RED：只观察原生refcount，不在尚未保活的实现中重入最终release触发悬空。
+    #[test]
+    fn task38a_initialize_owns_a_short_component_reference_before_querying_host() {
+        let component=create_component();let host=crate::host::reaper::ReaperFixture::new();
+        let observed=Arc::new(AtomicI32::new(0));let count=observed.clone();let raw=component as usize;
+        *host.hook.borrow_mut()=Some(("api:GetPlayPositionEx".into(),Box::new(move || {
+            count.store(unsafe {(*((raw as *mut c_void).cast::<Processor>())).refcount.load(Ordering::Acquire)},Ordering::Release);
+        })));
+        let result=unsafe {component_initialize(component,host.context())};
+        let count=observed.load(Ordering::Acquire);assert_eq!(unsafe {component_release(component)},0);
+        assert_eq!(result,K_RESULT_OK);assert_eq!(count,2,"宿主owning引用之外，本次初始化应独立保活插件存储");
+    }
+
+    /// terminate撤销授权与最终release不同；初始化不得把closed组件伪报成成功或重装host引用。
+    #[test]
+    fn task38a_initialize_reentrant_terminate_is_rejected_and_does_not_reinstall_host() {
+        for terminate in [true,false] {
+        let component=create_component();let host=crate::host::reaper::ReaperFixture::new();let raw=component as usize;
+        let owner=unsafe {Arc::downgrade(&(*component.cast::<Processor>()).extension_owner)};
+        *host.hook.borrow_mut()=Some(("api:GetPlayPositionEx".into(),Box::new(move || {
+            if terminate {unsafe {component_terminate(raw as *mut c_void);}} else {owner.upgrade().unwrap().stop_editor();}
+        })));
+        let result=unsafe {component_initialize(component,host.context())};
+        let closed=unsafe {(*component.cast::<Processor>()).extension_owner.is_closed()};
+        let references=host.references();let calls=host.calls();assert_eq!(unsafe {component_release(component)},0);
+        assert_eq!(result,K_RESULT_FALSE);assert!(closed);assert_eq!(references,1);
+        assert_eq!(calls.last().unwrap(),"api:GetPlayPositionEx");
+        }
+    }
+
+    /// 完成保活后才执行真正的重入最终release；调用结束不能泄漏该短引用。
+    #[test]
+    fn task38a_initialize_survives_reentrant_final_release_and_drops_its_short_reference() {
+        let component=create_component();let host=crate::host::reaper::ReaperFixture::new();let raw=component as usize;
+        let weak=unsafe {Arc::downgrade(&(*component.cast::<Processor>()).extension_owner)};let during=weak.clone();
+        let remaining=Arc::new(AtomicU32::new(99));let observed=remaining.clone();
+        let alive=Arc::new(std::sync::atomic::AtomicBool::new(false));let observed_alive=alive.clone();
+        *host.hook.borrow_mut()=Some(("api:GetPlayPositionEx".into(),Box::new(move || {
+            let count=unsafe {component_release(raw as *mut c_void)};
+            observed.store(count,Ordering::Release);observed_alive.store(during.upgrade().is_some(),Ordering::Release);
+        })));
+        assert_eq!(unsafe {component_initialize(component,host.context())},K_RESULT_OK);
+        assert_eq!(remaining.load(Ordering::Acquire),1);assert!(alive.load(Ordering::Acquire));
+        assert!(weak.upgrade().is_none());assert_eq!(host.references(),1);
+    }
+
+    #[test]
+    fn task38a_initialize_of_a_closed_component_does_not_call_host() {
+        let component=create_component();let host=crate::host::reaper::ReaperFixture::new();
+        unsafe {component_terminate(component);}host.reset();
+        let result=unsafe {component_initialize(component,host.context())};
+        let calls=host.calls();assert_eq!(unsafe {component_release(component)},0);
+        assert_eq!(result,K_RESULT_FALSE);assert!(calls.is_empty());assert_eq!(host.references(),1);
+    }
+
+    /// IHostApplication QI itself可重入terminate；失败初始化不能留下后来才存入的host owning引用。
+    #[test]
+    fn task38a_initialize_reentry_during_host_application_qi_releases_the_returned_host_reference() {
+        let component=create_component();let host=crate::host::reaper::ReaperFixture::new();host.enable_connection_host();
+        let raw=component as usize;
+        *host.hook.borrow_mut()=Some(("QI".into(),Box::new(move || {unsafe {component_terminate(raw as *mut c_void);}})));
+        let result=unsafe {component_initialize(component,host.context())};let refs=host.references();let calls=host.calls();
+        assert_eq!(unsafe {component_release(component)},0);assert_eq!(result,K_RESULT_FALSE);
+        assert_eq!(refs,1,"关闭回调之后QI成功返回的引用也必须立即回收");assert_eq!(calls,["QI"]);
     }
 
     /// 工厂不能遗留自己的初始引用，否则组件和扩展永远不会释放。
