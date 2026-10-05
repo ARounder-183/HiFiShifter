@@ -530,7 +530,7 @@ export function AppSubMenu({
                     {icon ? <span className="hs-menu__icon">{icon}</span> : null}
                     <span className="hs-menu__label-text">{label}</span>
                     {badge ? (
-                        <span className="text-qt-micro leading-none rounded bg-black/20 px-1 py-0.5 opacity-70">
+                        <span className="text-qt-micro leading-none rounded bg-black/20 px-1 py-0.5 opacity-70 max-w-[9rem] truncate">
                             {badge}
                         </span>
                     ) : null}
