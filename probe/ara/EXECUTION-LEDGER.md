@@ -900,4 +900,6 @@ Task 34: Ruling: 旧归档原始v2 481/22516bytes、实际COM/Weak/IBStream、�
 
 Task 38: Ruling: 普通fade改变未必推进ARA model revision，强host interface引用也不保活project/take — typed几何批次前后校验官方GetProjectStateChangeCount，并在各getter前后重查doc/owner/scope以容许重入；缺direct take保持不可用，撤回虚假REFLECT_TEMPO/CONTENT_FADES能力但保留线性TIMESTRETCH — 若只检查开始时活性或广告未实现能力，会有悬空查询或宿主停止自行淡化。
 
+Task 38: Ruling: kernel ClipStretchMarker已含秒/速度变化语义，原生marker单位/坡度还未实测 — 38a用独立HostStretchMarker raw字段保存，最终mapper拿到证据后显式转换，不伪造kernel参数 — 错了只需后续转换/接口调整；若提前套字段名，错误会扩散到渲染/缓存。
+
 
