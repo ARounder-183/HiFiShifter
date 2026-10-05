@@ -191,7 +191,11 @@ VRAM并未验证，不勾Task40。详细原始节点与保护边界见MULTITRACK
 
 Task45-46新增tools/build-hifishifter.ps1与docs/ara-build-and-sync.md：同源frontend、
 App与插件分开的Cargo调用、全新交付名、MSVC后TEMP、锁定SDK、模型/DLL打包及可选
-集中Verify。语法/PlanOnly exit0，真实All构建尚未执行，不勾完整交付门。
+集中Verify。语法/PlanOnly exit0，不勾完整交付门。
+随后真实All Debug paired-build-01 exit0；构建入口修复MSVC dot-source变量$name与
+校验参数碰撞，使用BuildName内部变量保留-Name别名。带完整source/model摘要及45文件
+manifest的paired-build-manifest-02 exit0，摘要全复核0差异；App有vslib、插件无vslib
+导入，frontend一致。仅构建，不启动REAPER/不运行GUI；Release/Verify/native仍open。
 
 2026-10-05最新资源批：双轨180秒原actor修改其它轨、两率完整尾部通过，旧ready与
 新结果共存下显式额度峰值497,088,000字节，512MiB未增大。单region省mixed副本、

@@ -25,6 +25,10 @@ MSVC C++/Windows SDK，以及已经校验过的ARA/VST3 SDK克隆与原模型资
 安装依赖、下载/编辑SDK。Cargo采用offline/jobs1；SDK的repo/commit/tree校验由桥接
 build.rs执行。MSVC加载后重新设置私有TEMP/TMP，避免c1xx.dll的两个已知环境坑。
 
+运行环境还需WebView2 Runtime及Microsoft VC++ x64运行库。当前ORT静态链接在引擎/
+App里；实测dumpbin导入包括DirectML.dll与SoundTouchDLL.dll，App另有vslib_x64.dll，
+插件无vslib导入。不存在onnxruntime.dll并不自动表示缺运行时，依照实际链接方式判断。
+
 预检和开发构建：
 
 ```powershell
@@ -37,13 +41,19 @@ build.rs执行。MSVC加载后重新设置私有TEMP/TMP，避免c1xx.dll的两�
 `HiFiShifter.vst3/Contents/x86_64-win/HiFiShifter.vst3`（loader）、HiFiShifterEngine.dll、
 运行DLL和`Contents/Resources/frontend`/`models`。Name必须全新，不能覆盖已存在交付。
 插件不含vslib。现阶段是便携目录/bundle，不是签名安装器。
+新构建完成时生成build-manifest.json，记录源码commit/源码与模型摘要、每个产物的
+SHA256、配置与是否执行源码Verify；nativeAcceptance始终false，不伪报宿主验收。
+若构建期间源码或模型变动，流程失败并要求新Name，保留已有产物供诊断，不当作交付。
 
 `-Verify`在构建前集中运行frontend、kernel两种feature配置及所选App/插件回归。
 真实模型长源诊断是显式ignored测试，不因普通绿测自动声称通过；REAPER GUI/播放/
 保存冷重开/宿主几何验收仍另做一次集中验收。
 
-**当前状态：** 入口源码已加入，PowerShell语法和PlanOnly实测exit0，预检不创建交付
-目录。真实All构建、最终打包和用户验收尚未完成。本文件不是构建成功报告。
+**当前状态：** PowerShell语法/PlanOnly实测exit0，预检不创建交付目录；真实All Debug
+构建paired-build-01、带manifest的paired-build-manifest-02均exit0，包含App、插件规范
+bundle及三模型。后者45个文件摘要全部复核无差异；sourceFingerprint记录实际源码/
+模型版本，nativeAcceptance与verificationRequested均false。导入DLL和frontend摘要
+核对通过。Release、完整Verify及真实用户验收未完成，不把Debug构建当最终验收。
 
 ## 功能同步：不复制两套产品实现
 

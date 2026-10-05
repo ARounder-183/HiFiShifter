@@ -3,15 +3,15 @@
 param(
     [ValidateSet('All','App','Plugin')][string]$Target='All',
     [ValidateSet('Debug','Release')][string]$Configuration='Release',
-    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$Name,
+    [Alias('Name')][ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$BuildName,
     [switch]$PlanOnly,
     [switch]$Verify
 )
 $ErrorActionPreference='Stop'
 $buildTaskRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-if (!$Name) {$Name='hfs-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[Guid]::NewGuid().ToString('N').Substring(0,8)}
-$buildTaskDelivery=Join-Path $buildTaskRoot ".build-tmp\deliveries\$Name"
-$buildTaskBundleName="$Name-vst3"
+if (!$BuildName) {$BuildName='hfs-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[Guid]::NewGuid().ToString('N').Substring(0,8)}
+$buildTaskDelivery=Join-Path $buildTaskRoot ".build-tmp\deliveries\$BuildName"
+$buildTaskBundleName="$BuildName-vst3"
 if ($buildTaskBundleName.Length -gt 64) {throw 'Name is too long for the isolated plugin bundle (maximum 59 characters).'}
 if (Test-Path -LiteralPath $buildTaskDelivery) {throw "Delivery already exists; choose a fresh Name: $buildTaskDelivery"}
 $buildTaskIncludesApp=$Target -in @('All','App')
@@ -35,8 +35,29 @@ Write-Output "Plan: frontend once -> $Target ($Configuration), separate App/plug
 if ($PlanOnly) {return}
 if (!(Get-Command cargo -ErrorAction SilentlyContinue) -or !(Get-Command npm -ErrorAction SilentlyContinue)) {throw 'cargo and npm are required.'}
 
+# 中文：跟踪及未跟踪源码都参与构建身份；模型虽被git忽略仍是实际产品输入。
+function Get-BuildSourceFingerprint {
+    $buildFingerprintPaths=@(& git ls-files --cached --others --exclude-standard -- backend frontend tools)
+    if ($LASTEXITCODE -ne 0) {throw 'Cannot enumerate product source files.'}
+    $buildFingerprintPaths+=@(Get-ChildItem -LiteralPath (Join-Path $buildTaskRoot 'backend\src-tauri\resources\models') -Recurse -File |
+        ForEach-Object {$_.FullName.Substring($buildTaskRoot.Length+1)})
+    $buildFingerprintRows=@($buildFingerprintPaths | Sort-Object -Unique | ForEach-Object {
+        $buildFingerprintPath=Join-Path $buildTaskRoot $_
+        if (Test-Path -LiteralPath $buildFingerprintPath -PathType Leaf) {"$_ $((Get-FileHash -LiteralPath $buildFingerprintPath -Algorithm SHA256).Hash)"}
+    })
+    $buildFingerprintHasher=[Security.Cryptography.SHA256]::Create()
+    try {return ([BitConverter]::ToString($buildFingerprintHasher.ComputeHash([Text.Encoding]::UTF8.GetBytes(($buildFingerprintRows -join "`n"))))).Replace('-','')}
+    finally {$buildFingerprintHasher.Dispose()}
+}
+
 Push-Location $buildTaskRoot
 try {
+    # 记录调用起点，构建中工作树若被修改则失败；交付不能声称对应某个不存在的源码快照。
+    $buildTaskCommit=& git rev-parse HEAD
+    if ($LASTEXITCODE -ne 0) {throw 'Cannot resolve source commit.'}
+    $buildTaskState=& git status --porcelain
+    if ($LASTEXITCODE -ne 0) {throw 'Cannot inspect working changes.'}
+    $buildTaskFingerprint=Get-BuildSourceFingerprint
     . .\tools\msvc-env.ps1
     # vcvars会重设TEMP/TMP，必须在其返回后设置新的工作树私有目录。
     $buildTaskTemp=Join-Path $buildTaskRoot ('.build-tmp\product-build-'+[Guid]::NewGuid().ToString('N'))
@@ -99,5 +120,26 @@ try {
             !$buildTaskPluginTarget.StartsWith($buildTaskAllowedPrefix,[StringComparison]::OrdinalIgnoreCase)) {throw 'Plugin move escaped the intended build workspace.'}
         Move-Item -LiteralPath $buildTaskPluginSource -Destination $buildTaskPluginTarget
     }
+    if ($Verify -and $buildTaskIncludesPlugin) {
+        # 原生导出测试明确读取debug cdylib，即使交付是release也构建其独立测试前置。
+        & cargo build --manifest-path backend\Cargo.toml --offline --jobs 1 -p hifishifter-plugin
+        if ($LASTEXITCODE -ne 0) {throw 'Plugin ABI regression prerequisite build failed.'}
+        foreach ($buildTaskContract in @('ara_mapping','renderer_assignments','vst3_exports','no_tauri_in_dependency_tree')) {
+            & cargo test --manifest-path backend\Cargo.toml --offline --jobs 1 -p hifishifter-plugin --test $buildTaskContract -- --test-threads=1
+            if ($LASTEXITCODE -ne 0) {throw "Plugin integration contract failed: $buildTaskContract"}
+        }
+    }
+    $buildTaskAfterCommit=& git rev-parse HEAD
+    if ($buildTaskAfterCommit -ne $buildTaskCommit -or (Get-BuildSourceFingerprint) -ne $buildTaskFingerprint) {
+        throw 'Product source/model changed while building; output is incomplete evidence, rebuild using a fresh Name.'
+    }
+    $buildTaskFiles=@(Get-ChildItem -LiteralPath $buildTaskDelivery -Recurse -File | ForEach-Object {
+        [ordered]@{path=$_.FullName.Substring($buildTaskDelivery.Length+1);bytes=$_.Length;
+            sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash}
+    })
+    $buildTaskManifest=[ordered]@{schema=1;sourceCommit=$buildTaskCommit;sourceFingerprint=$buildTaskFingerprint;workingTreeModified=[bool]$buildTaskState;
+        target=$Target;configuration=$Configuration;verificationRequested=[bool]$Verify;nativeAcceptance=$false;
+        createdUtc=[DateTime]::UtcNow.ToString('o');files=$buildTaskFiles}
+    [IO.File]::WriteAllText((Join-Path $buildTaskDelivery 'build-manifest.json'),($buildTaskManifest|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
     Write-Output "Built: $buildTaskDelivery. No installation, REAPER launch or native acceptance was performed."
 } finally {Pop-Location}

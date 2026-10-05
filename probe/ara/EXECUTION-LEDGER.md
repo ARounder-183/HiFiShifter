@@ -974,4 +974,6 @@ Task 40: Ruling: 10秒真实ORT profile末级Concat输出343,277,568字节，输
 
 Task 45: Ruling: 用户要求后续迭代新功能时App/插件可同步，现有业务/DSP与原GUI已有唯一共享源码但构建命令分散 — 新统一入口一次frontend、分开App/插件Cargo特性、原生loader/resources打包与全新目录，构建文档列共享修改点/宿主能力例外/同批Verify；语法与PlanOnly exit0 — 若将All构建合成一次Cargo调用会把vslib特性带入插件；真实All构建和native验收尚未通过，不报交付完成。
 
+Task 45: Ruling: 真All构建暴露MSVC环境脚本$name覆盖带校验的Name参数；随后manifest的false未写成PowerShell $false — 内部参数改BuildName保留别名，补manifest表达式检查；All Debug产物及45文件摘要验证exit0，记录源码/model指纹与nativeAcceptance=false，目录不覆盖 — 若只跑PlanOnly/语法就称构建流可用会漏实际变量作用域/执行语义；Release、集中Verify与用户GUI验收仍未完成。
+
 
