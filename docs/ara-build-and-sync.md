@@ -93,6 +93,17 @@ Verify、Release及宿主验收未完成，不能将分段定向结果伪装成�
 的vstpath64，而不是立即装入系统公共目录。不要只复制内层单文件，它依赖engine、
 frontend、模型和运行DLL。不要使用-nonewinst往已有REAPER送脚本，已有项目是用户资产。
 
+从统一交付目录打开准备好的隔离工程副本：
+
+```powershell
+.\probe\ara\start_embedded_editor.ps1 -DeliveryName release-delivery-02 -ScratchName release-user-02 -Reopen
+```
+
+该入口仅在所有REAPER已退出后启动；`-Reopen`要求scratch中已有`embedded-editor.RPP`
+副本，不覆盖原工程。使用既有隔离扫描缓存避免新profile重复扫描第三方插件；REAPER
+可能自动附加公共VST3目录，不把新profile声称为完全独占的扫描路径。该模式的plugin.log
+放在scratch中，不改旧采集日志。不运行测试，不自动渲染或提交曲线。
+
 构建流不会push、stage文件或保存用户RPP。插件验收需要无独立App、双轨原GUI编辑/
 播放控制/音频不串/关闭GUI供音/保存冷重开及普通/自动fade、线性拉伸与BPM同步。
 独立App验收则按原导入/编辑/播放/保存路径执行，不能以插件通过代替。

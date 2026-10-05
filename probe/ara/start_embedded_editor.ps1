@@ -1,11 +1,13 @@
 # 内嵌GUI隔离启动；绝不启动HiFiShifter.exe，不改系统PATH，也不向已有REAPER送脚本。
 param([switch]$Reopen,[switch]$TransportProbe,
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$ScratchName='embedded-probe',
-    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$BundleDirectory='embedded-vst3')
+    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$BundleDirectory='embedded-vst3',
+    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$DeliveryName)
 $ErrorActionPreference = 'Stop'
 $araEmbedRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 if (Get-Process reaper -ErrorAction SilentlyContinue) { throw 'REAPER is running; preserve the project and close normally before this isolated launch.' }
-$araEmbedVst = Join-Path $araEmbedRoot ".build-tmp\$BundleDirectory"
+$araEmbedVst = if ($DeliveryName) {Join-Path $araEmbedRoot ".build-tmp\deliveries\$DeliveryName"}
+    else {Join-Path $araEmbedRoot ".build-tmp\$BundleDirectory"}
 $araEmbedBundle = Join-Path $araEmbedVst 'HiFiShifter.vst3\Contents\x86_64-win\HiFiShifter.vst3'
 if (!(Test-Path -LiteralPath $araEmbedBundle)) { throw 'Build the embedded bundle first.' }
 $araEmbedScratch = Join-Path $araEmbedRoot ".build-tmp\$ScratchName"
@@ -23,10 +25,18 @@ if (!(Test-Path -LiteralPath $araEmbedIni)) {
 } else {
     # 不静默复用指向旧模块的profile；用新scratch验新bundle，不改用户已有配置。
     $araEmbedConfiguredVst = Get-Content -LiteralPath $araEmbedIni | Where-Object { $_ -match '^vstpath64=' } | Select-Object -First 1
-    if ($araEmbedConfiguredVst -ne "vstpath64=$araEmbedVst") {throw 'Existing profile targets a different bundle; use a new ScratchName.'}
+    # REAPER首次保存会追加这两个公共VST3路径；不将正常冷重开误判为切换了bundle。
+    $araEmbedEntries=if ($araEmbedConfiguredVst) {@($araEmbedConfiguredVst.Substring('vstpath64='.Length).Split(';') | Where-Object {$_})} else {@()}
+    $araEmbedCommon=@('%COMMONPROGRAMFILES%\VST3','%LOCALAPPDATA%\Programs\Common\VST3')
+    $araEmbedCommon+=@($araEmbedCommon | ForEach-Object {[Environment]::ExpandEnvironmentVariables($_)})
+    if (!$araEmbedEntries.Count -or $araEmbedEntries[0] -ne $araEmbedVst -or
+        @($araEmbedEntries | Select-Object -Skip 1 | Where-Object {$_ -notin $araEmbedCommon}).Count) {
+        throw 'Existing profile targets a different bundle; use a new ScratchName.'
+    }
 }
 $env:HIFISHIFTER_ARA_INSTANCE_DIR = Join-Path $araEmbedScratch 'instances'
-$env:HIFISHIFTER_ARA_LOG = Join-Path $PSScriptRoot 'captures\embedded-editor-plugin.log'
+$env:HIFISHIFTER_ARA_LOG = if ($DeliveryName) {Join-Path $araEmbedScratch 'plugin.log'}
+    else {Join-Path $PSScriptRoot 'captures\embedded-editor-plugin.log'}
 $env:HIFISHIFTER_ARA_PROBE_DIR = $araEmbedScratch
 if ($TransportProbe) {$env:HIFISHIFTER_ARA_TRANSPORT_PROBE='1'}
 else {Remove-Item Env:HIFISHIFTER_ARA_TRANSPORT_PROBE -ErrorAction SilentlyContinue}
