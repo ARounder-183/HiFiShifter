@@ -18,15 +18,21 @@ actor/跨轨history/真实queued租约授权/全局solo独立输出/基础doc关
 批末plugin lib89、相关frontend74、tsc与实际document apply定向回归均正常exit0；Task34
 在`a5dfa654`完成12定向源码门：旧RPP原v2 bytes、实际COM/Weak/stream、关窗尾笔及undo保存、
 未开GUI双轨WORLD后台publisher冷恢复（A60≈260.947/B67≈390.265，undo后B64≈329.104Hz）。
-本批修即时组件撤销、view移除后尾笔被丢、旧actor缓存滞留，v2形状未改。Task38a开始typed
-直接take几何与能力契约；完整变换仍未完成。新源改动不包含在上述bundle里，不能混用证据，native多轨未验收。
+本批修即时组件撤销、view移除后尾笔被丢、旧actor缓存滞留，v2形状未改。
+Task38a在6b8fb67c/b5572a4e完成typed直接take/逐getter重入授权、project counter稳定检查、
+独立transport/geometry API及短COM初始化保活/终止失败清理（19新定向+6旧相关exit0）。
+工厂只广告线性TIMESTRETCH，REFLECT_TEMPO/CONTENT_FADES已撤回，不等于实现二者。
+fe731313有秒域正逆/分段映射基础，4回归exit0；随后单GUI入口驱动隐藏playback元数据，
+稳定project/model/scope缓存避免每tick读全marker，变化/关闭撤销回归共11/exit0。
+曲线源坐标权威与持久化尚未接线，raw marker单位/坡度尚未native验证；完整变换未完成。
+新源改动不包含在上述bundle里，不能混用证据，native多轨未验收。
 短actor filter曾摘要后退出挂住，完整lib正常exit；确切退出根因未知，未通过禁用模型或
 强杀冒充通过。自有测试PID/候选FCPE链和生命周期证据在Task33本地report，历史49800未碰。
 
 完整marker/fade/tempo接口源码调查见`HOST-GEOMETRY-FINDINGS.md`；标准ARA缺普通fade/
 marker数组，REAPER直接take绑定尚未取得实测。原kernel stretch_markers目前只保存未消费，
-轨级曲线缺源坐标锚点；runtime广告REFLECT_TEMPO/CONTENT_FADES超出实现，需修正能力
-契约或实现后才广告。完整拉伸/共享GUI/缓存/长源/独立App/native最终门全部仍open。
+轨级曲线缺源坐标锚点；当前runtime仅广告TIMESTRETCH，旧已构建bundle仍是历史版本。
+完整拉伸/共享GUI/HiFiGAN缓存/长源/独立App/native最终门全部仍open；元数据缓存不是神经缓存。
 
 用户此前物理Esc停止Computer Use，本次只继续源码，不自动恢复CU，不启动/关闭用户应用。
 不强杀、不热替换，不覆盖已有用户/测试工程；全程只ara-plugin worktree，本地提交不push。

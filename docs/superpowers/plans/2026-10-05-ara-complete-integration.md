@@ -139,8 +139,9 @@ struct HostRenderCounters { source_hits:u64, intermediate_hits:u64, pcm_hits:u64
 已在ddbb5a97（lib80通过、host-stretch-01构建exit0，native尚未验收）；Task32在dfe8f4e
 有授权scope并集，两定向测试通过；Task33共享actor在2cdf48ff，lib89/相关前端74/tsc
 及document apply定向回归exit0；Task34在a5dfa654有12定向源码门，旧v2/真实stream/Weak/
-尾笔/undo/无GUIWORLD双轨冷恢复通过，native多轨尚未验收。Task38a typed几何/能力契约
-正在实施，完整marker/tempo/曲线迁移未完成。
+尾笔/undo/无GUIWORLD双轨冷恢复通过，native多轨尚未验收。Task38a在6b8fb67c/b5572a4e
+有typed几何/能力/初始化重入合同（19新+6旧相关exit0）；Task38b有秒域映射与单GUI驱动
+隐藏实例元数据/稳定版本缓存（11相关exit0），完整marker/tempo/曲线源权威与持久化未完成。
 完整geometry/曲线重投影/marker与tempo/HiFiGAN缓存/长源/native最终门仍open。
 接口事实见probe/ara/HOST-GEOMETRY-FINDINGS.md。只源码，不自动恢复Esc停止的CU；
 最终一次review。旧探针、线性音频测试、构建成功均不能用来勾完整宿主门。

@@ -904,4 +904,8 @@ Task 38: Ruling: kernel ClipStretchMarker已含秒/速度变化语义，原生ma
 
 Task 38: Ruling: 已确认秒域的源↔项目时间需要统一正逆映射，普通总倍率不能表达分段变化 — 新ara/time_map.rs提供仿射/分段与新项目时刻回旧曲线坐标，先4项真实RED再GREEN/exit0；不接未验证raw marker、不用该数学测试冒充音频/曲线持久化通过 — 若映射各处自行推倍率，会在裁切/拆分和局部拉伸时漂移；下一步必须接编辑权威与保存而非只留helper。
 
+Task 38: Ruling: 6b8fb67c typed直接take/逐getter授权/普通fade版本检查和诚实TIMESTRETCH广告、b5572a4e短COM初始化引用与重入终止清理已提交；19新定向/6相关旧回归自然exit0 — 源安全门通过，实际REAPER QI/parent/marker单位未验证，完整Task38不关闭 — 若以fake ABI合同当native证据，会在错误take绑定上开发整个变换链。
+
+Task 38: Ruling: 只采GUI入口的元数据无法覆盖无GUI隐藏playback实例，且逐UI tick全量读marker会带来新的UI重任务 — 单一入口驱动同真实文档playback采集，只入口发布clock；模型/scope与project counter相同则两次轻量检查后复用成功数据，fade/model改变完整刷新 — 3新回归先RED后GREEN，连同4映射/4旧安全回归共11/exit0；若counter合同或采集性能与真实宿主不同，native门必须补测，不外推成完整同步。
+
 

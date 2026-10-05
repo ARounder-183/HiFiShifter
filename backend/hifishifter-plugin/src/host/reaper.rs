@@ -216,6 +216,17 @@ impl ReaperHost {
         Ok((position, state & 1 != 0))
     }
 
+    /// UI缓存只读变更token；负数/回绕合法，不假定单调，也不把counter当作take租约。
+    pub(crate) fn geometry_revision(&self, authorized: impl Fn()->bool)->Result<i32,String> {
+        if std::thread::current().id()!=self.thread {return Err("REAPER geometry queried outside its model/UI thread".into());}
+        let api=self.geometry.as_ref().ok_or("REAPER geometry API unavailable")?;
+        let project=self.project as *mut c_void;
+        // SAFETY: typed API来自核对过的官方头；每次查询前后重新检查调用者许可。
+        if !checked(&authorized,||unsafe {(api.validate)(project,project,c"ReaProject*".as_ptr())})? {
+            return Err("invalid REAPER project/type ownership".into());
+        }
+        checked(&authorized,||unsafe {(api.change)(project)})
+    }
     /// 只接受直接parent(2) take；唯一ARA绑定由调用方冻结并在每个getter前后重检。
     pub fn geometry(
         &self,

@@ -16,7 +16,14 @@ pub(super) fn pcm_fingerprint(pcm: &super::source::SourcePcm) -> String {
     hash.finalize().to_hex().to_string()
 }
 
-/// 仅模型线程访问；音频线程将在 Task 14 消费已发布快照，不能锁此 owner。
+/// 只读元数据供非实时读者消费；UI/model采集，音频线程不访问此缓存或锁owner。
+#[derive(Clone)]
+struct CachedHostGeometry {
+    model:u64,scope:u64,change:Option<i32>,
+    value:Result<crate::host::geometry::BoundHostGeometry,String>,
+}
+
+/// 原生接口与只读元数据属于真实组件，缓存不跨其文档/分配/host变更复用。
 #[derive(Default)]
 pub(crate) struct ExtensionOwner {
     binding: Mutex<Option<ExtensionBinding>>,
@@ -28,7 +35,7 @@ pub(crate) struct ExtensionOwner {
     closed:std::sync::atomic::AtomicBool,
     writer_id:AtomicU64,
     reaper:Mutex<Option<Arc<crate::host::reaper::ReaperHost>>>,
-    host_geometry:Mutex<Option<(u64,u64,Result<crate::host::geometry::BoundHostGeometry,String>)>>,
+    host_geometry:Mutex<Option<CachedHostGeometry>>,
     pub snapshots: [super::snapshot::SnapshotPublisher; 2],
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
     pending_restore:Mutex<Option<crate::state_channel::EditState>>,
@@ -46,6 +53,64 @@ mod bound_tests {
     use ara2_bridge::companion::{CompanionFactory, CompanionProcessorBinding, CompanionRoles};
     use ara2_bridge::plugin::{FactoryBuilder, PluginBuilder};
     use ara2_bridge::sys::*;
+
+    /// 只打开editor-only入口时，也必须采集同文档隐藏playback owner的元数据。
+    #[test]
+    fn task38b_one_editor_refresh_collects_hidden_playback_metadata() {
+        let (model,owners,ids)=crate::editor::session::tests::workspace_fixture();
+        let document=model.session();let first=(&*ids[0] as *const u8) as u64;
+        {let mut regions=document.regions.lock().unwrap();let region=regions.get_mut(&first).unwrap();
+            region.start_in_playback_time=1.0;region.duration_in_playback_time=4.0;}
+        let editor=Arc::new(ExtensionOwner::default());
+        let raw=editor.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::EDITOR_RENDERER,None).unwrap();
+        // SAFETY: fixture保留真实region、document及extension；editor入口没有自己的take。
+        unsafe {let ext=&*raw;for key in [&*ids[0] as *const u8,&*ids[1] as *const u8] {
+            ((*ext.editorRendererInterface).addPlaybackRegion.unwrap())(ext.editorRendererRef,key.cast_mut().cast());
+        }}
+        let host=crate::host::reaper::ReaperFixture::new();
+        unsafe {owners[0].bind_reaper_host(host.context());}
+        host.reset();editor.refresh_reaper_transport();
+        let metadata=owners[0].host_geometry_metadata();
+        let entry_metadata=editor.host_geometry_metadata();
+        document.close();
+        let metadata=metadata.expect("单一editor入口必须让隐藏playback的只读数据就绪");
+        assert_eq!(metadata.region_key,first);assert_eq!(metadata.geometry.fade_in_sec,0.2);
+        assert!(entry_metadata.is_err(),"多区域editor不能冒充唯一take绑定");
+    }
+
+    /// 隐藏getter重入关闭唯一GUI入口后，不能借另一活owner继续该入口的采集批次。
+    #[test]
+    fn task38b_hidden_getter_revokes_closed_editor_batch_before_next_renderer() {
+        let (model,owners,ids)=crate::editor::session::tests::workspace_fixture();let document=model.session();
+        let editor=Arc::new(ExtensionOwner::default());
+        let raw=editor.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::EDITOR_RENDERER,None).unwrap();
+        unsafe {let ext=&*raw;((*ext.editorRendererInterface).addPlaybackRegion.unwrap())(ext.editorRendererRef,(&*ids[0] as *const u8).cast_mut().cast());}
+        let host=crate::host::reaper::ReaperFixture::new();unsafe {owners[0].bind_reaper_host(host.context());}
+        host.reset();let weak=Arc::downgrade(&editor);
+        *host.hook.borrow_mut()=Some(("D_LENGTH".into(),Box::new(move||weak.upgrade().unwrap().stop_editor())));
+        editor.refresh_reaper_transport();let calls=host.calls();
+        let sampled_next=owners[1].host_geometry.lock().unwrap().is_some();
+        let sampled_first=owners[0].host_geometry.lock().unwrap().is_some();document.close();
+        assert_eq!(calls.last().map(String::as_str),Some("D_LENGTH"));
+        assert!(!sampled_first,"撤销后的第一份数据不能发布");
+        assert!(!sampled_next,"入口关闭后不能继续读取另一活renderer");
+    }
+
+    /// 稳定工程只检查版本，不在每个UI tick重复读取整组markers；fade改变仍刷新。
+    #[test]
+    fn task38b_stable_geometry_skips_raw_fields_but_fade_change_and_model_refresh_do_not() {
+        let (model,owners,ids)=crate::editor::session::tests::workspace_fixture();let document=model.session();let owner=&owners[0];
+        let first=(&*ids[0] as *const u8) as u64;
+        {let mut regions=document.regions.lock().unwrap();let region=regions.get_mut(&first).unwrap();region.start_in_playback_time=1.;region.duration_in_playback_time=4.;}
+        let host=crate::host::reaper::ReaperFixture::new();unsafe {owner.bind_reaper_host(host.context());}
+        owner.refresh_reaper_transport();let first_metadata=owner.host_geometry_metadata().unwrap();
+        host.reset();owner.refresh_reaper_transport();let same=owner.host_geometry_metadata().unwrap();let stable_calls=host.calls();
+        host.set_value("D_FADEINLEN",0.75);host.reset();owner.refresh_reaper_transport();let changed=owner.host_geometry_metadata().unwrap();
+        let changed_calls=host.calls();host.reset();document.revision.fetch_add(1,Ordering::AcqRel);owner.refresh_reaper_transport();let model_calls=host.calls();document.close();
+        assert_eq!(same,first_metadata);assert!(!stable_calls.iter().any(|name|name=="count"||name=="D_FADEINLEN"),"稳定UI tick不能重读全量几何: {stable_calls:?}");
+        assert_eq!(changed.geometry.fade_in_sec,0.75);assert!(changed_calls.iter().any(|name|name=="D_FADEINLEN"));
+        assert!(model_calls.iter().any(|name|name=="D_FADEINLEN"),"相同project counter但新ARA model仍须重新核对绑定");
+    }
 
     /// 原生getter可同步调用真实doc.close/owner.stop/assignment回调，不能持任何内部锁。
     #[test]
@@ -702,6 +767,7 @@ impl ExtensionOwner {
         if !authorized() {return;}
         crate::log_line(&format!("REAPER host extension available={}",host.is_some()));
         let old=std::mem::replace(&mut *self.reaper.lock().unwrap(),host);drop(old);
+        self.host_geometry.lock().unwrap().take();
     }
     /// 短事务冻结真实owner/document/model/scope；整个host调用链都不持内部锁。
     fn host_query_stamp(&self)->Result<(Arc<super::document::DocumentSession>,u64,u64,Vec<u64>),String> {
@@ -750,9 +816,9 @@ impl ExtensionOwner {
     pub(crate) fn host_geometry_metadata(&self)->Result<crate::host::geometry::BoundHostGeometry,String> {
         let stamp=self.host_query_stamp()?;
         let cached=self.host_geometry.lock().unwrap().clone().ok_or("REAPER geometry has not been sampled on model/UI thread")?;
-        if cached.0!=stamp.1||cached.1!=stamp.2||!self.host_query_authorized(&stamp) {
+        if cached.model!=stamp.1||cached.scope!=stamp.2||!self.host_query_authorized(&stamp) {
             return Err("REAPER geometry metadata superseded".into());
-        }cached.2
+        }cached.value
     }
     /// 只由已验证的native view UI timer调用；释放内部锁后才调用可能重入的host函数。
     pub(crate) fn refresh_reaper_transport(&self) {
@@ -767,11 +833,37 @@ impl ExtensionOwner {
             }
         }}
         if !self.host_query_authorized(&stamp) {return;}
-        let geometry=self.reaper_geometry();
+        self.refresh_reaper_geometry();
+        // editor-only通常没有所属take；一个工程GUI必须驱动真正隐藏playback实例的只读采集。
+        // renderer_owners仅返回本真实文档的活租约，不扫描全局实例，也不借名称/位置找take。
+        for owner in stamp.0.renderer_owners() {
+            if !self.host_query_authorized(&stamp) {break;}
+            if owner.renders_playback()&&!std::ptr::eq(self,Arc::as_ptr(&owner)) {owner.refresh_reaper_geometry();}
+        }
+    }
+    /// 元数据单独采集，不让每个隐藏实例重复写工程clock；宿主调用始终不持内部锁。
+    fn refresh_reaper_geometry(&self) {
+        let Ok(stamp)=self.host_query_stamp() else {return;};
+        let host={self.reaper.lock().unwrap().clone()};
+        let authorized=||self.host_query_authorized(&stamp);
+        let before=host.as_ref().and_then(|host|host.geometry_revision(authorized).ok());
+        if !authorized() {return;}
+        let unchanged=before.is_some()&&self.host_geometry.lock().unwrap().as_ref().is_some_and(|cached|
+            cached.model==stamp.1&&cached.scope==stamp.2&&cached.change==before&&cached.value.is_ok());
+        if unchanged {
+            let after=host.as_ref().and_then(|host|host.geometry_revision(authorized).ok());
+            if before==after&&authorized() {return;}
+        }
+        if !authorized() {return;}
+        let mut geometry=self.reaper_geometry();
+        let after=host.as_ref().and_then(|host|host.geometry_revision(authorized).ok());
+        if geometry.is_ok()&&(before.is_none()||before!=after) {
+            geometry=Err("REAPER project changed during cached geometry refresh".into());
+        }
         let _transaction=stamp.0.transaction.lock().unwrap();
         if !self.is_closed()&&stamp.0.is_alive()&&stamp.0.revision.load(Ordering::Acquire)==stamp.1
             &&stamp.0.scope_revision.load(Ordering::Acquire)==stamp.2 {
-            *self.host_geometry.lock().unwrap()=Some((stamp.1,stamp.2,geometry));
+            *self.host_geometry.lock().unwrap()=Some(CachedHostGeometry {model:stamp.1,scope:stamp.2,change:after,value:geometry});
         }
     }
     /// realtime只读角色原子值；只有playback角色负责替换歌曲音频。
