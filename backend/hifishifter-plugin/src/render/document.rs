@@ -29,6 +29,7 @@ pub(crate) struct DocumentSession {
     pub timeline: Mutex<Option<hifishifter_kernel::state::TimelineState>>,
     pub track_bindings: Mutex<crate::state_channel::TrackBindings>,
     pub revision: AtomicU64,
+    pub render_epoch:AtomicU64,
     pub ready: AtomicBool,
     pub transaction: Mutex<()>,
     pub edits: Arc<Mutex<crate::state_channel::EditState>>,
@@ -116,6 +117,7 @@ impl DocumentSession {
 
     /// 同步关闭文档；保持 renderer 的原生接口存储，但撤销模型操作许可。
     pub fn close(&self) {
+        self.render_epoch.fetch_add(1,Ordering::AcqRel);
         self.playback.lock().unwrap().take();
         self.ready.store(false, Ordering::Release);
         let leases = {
@@ -169,6 +171,7 @@ impl DocumentSession {
 
     /// 模型线程刷新所有仍存活 renderer，任何 source/geometry/访问变化都触发重新准备。
     pub fn prepare_renderers(&self) {
+        let _transaction=self.transaction.lock().unwrap();
         self.ready.store(true, Ordering::Release);
         let owners = self
             .renderers
@@ -177,6 +180,10 @@ impl DocumentSession {
             .iter()
             .filter_map(|lease| lease.owner.upgrade())
             .collect::<Vec<_>>();
+        // 先统一恢复全部组件权威，再允许任何后台任务捕获共享revision。
+        for owner in &owners {
+            if let Err(error)=owner.merge_pending_restore(self) {log::warn!("[ara] instance state unresolved: {error}");}
+        }
         for owner in owners {
             owner.prepare();
         }
@@ -201,6 +208,7 @@ impl DocumentSession {
     }
 
     fn revoke_snapshots(&self) {
+        self.render_epoch.fetch_add(1,Ordering::AcqRel);
         self.ready.store(false, Ordering::Release);
         let owners = self
             .renderers
@@ -210,6 +218,7 @@ impl DocumentSession {
             .filter_map(|lease| lease.owner.upgrade())
             .collect::<Vec<_>>();
         for owner in owners {
+            owner.cancel_preparation();
             owner.snapshots.iter().for_each(|snapshot| snapshot.clear());
         }
     }

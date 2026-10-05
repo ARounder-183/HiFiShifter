@@ -29,6 +29,8 @@ pub(crate) struct ExtensionOwner {
     pending_restore:Mutex<Option<crate::state_channel::EditState>>,
     channel: Mutex<Option<hifishifter_ara_ipc::Server>>,
     editor:std::sync::OnceLock<Result<Arc<crate::editor::session::EditorSession>,String>>,
+    preparation:std::sync::OnceLock<Result<super::preparation::PreparationQueue,String>>,
+    prepare_owner:Mutex<Option<std::sync::Weak<ExtensionOwner>>>,
     pub(crate) clock:std::sync::OnceLock<Arc<super::transport::TransportClock>>,
 }
 
@@ -40,6 +42,142 @@ mod bound_tests {
     use ara2_bridge::companion::{CompanionFactory, CompanionProcessorBinding, CompanionRoles};
     use ara2_bridge::plugin::{FactoryBuilder, PluginBuilder};
     use ara2_bridge::sys::*;
+
+    /// 测试专用同步驱动：冻结阶段持锁，真正内核计算阶段不借文档事务。
+    fn render_test_edits(owner:&ExtensionOwner,document:&super::super::document::DocumentSession,edits:&crate::state_channel::EditState)
+        ->Result<Vec<super::super::snapshot::PlaybackSnapshot>,String> {
+        let input={let _transaction=document.transaction.lock().unwrap();owner.capture_render_input(document,edits,true)?.1};
+        input.render(Arc::new(std::sync::atomic::AtomicBool::new(false)))
+    }
+
+    /// 真实自动应用在计算前可接受另一组件/模型修改；旧作业不能覆盖新权威或已撤销输出。
+    #[test]
+    fn automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions() {
+        for model_changed in [true,false] {
+            let model=crate::ara::model::ModelHandle::new();let document=model.session();
+            *document.timeline.lock().unwrap()=Some(serde_json::from_value(serde_json::json!({
+                "tracks":[],"clips":[],"bpm":120,"project_sec":0})).unwrap());
+            document.ready.store(true,Ordering::Release);
+            let owner=Arc::new(ExtensionOwner::default());
+            owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::EDITOR_RENDERER,None).unwrap();
+            owner.snapshots[0].publish(super::super::snapshot::PlaybackSnapshot {
+                sample_rate:44100,origin_sample:0,left:vec![0.25;4],right:vec![0.5;4],_reservation:None}).unwrap();
+            let projection=owner.editor_projection().unwrap();let calls=std::sync::atomic::AtomicUsize::new(0);
+            let result=owner.apply_editor_edits(0,document.revision.load(Ordering::Acquire),&projection,
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),|| {
+                    if calls.fetch_add(1,Ordering::AcqRel)==0 {
+                        assert!(document.transaction.try_lock().is_ok(),"冻结后必须先释放事务才能计算");
+                        if model_changed {document.clear_renderers();} else {
+                            let timeline=document.timeline.lock().unwrap().clone().unwrap();
+                            owner.accept_editor_edits(0,document.revision.load(Ordering::Acquire),&timeline,&projection).unwrap();
+                        }
+                    }
+                    true
+                });
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains(if model_changed {"host model changed"} else {"superseded"}));
+            assert_eq!(document.edits.lock().unwrap().revision,if model_changed {0} else {1});
+            let mut left=[9.0;4];let mut right=[9.0;4];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
+            let mut bus=crate::audio_abi::AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
+            // SAFETY: 两个平面都是四帧；只检查真实publisher，不能由计算出的expected镜像掩盖覆盖。
+            let available=unsafe {owner.snapshots[0].copy_block(0,44100,&mut bus,4)};
+            assert_eq!(available,!model_changed);
+            assert_eq!(left,if model_changed {[0.0;4]} else {[0.25;4]});
+            drop(model);
+        }
+    }
+
+    /// 即使其它线程暂持模型事务，真实prepare callback也必须返回，并在后台最终发布。
+    #[test]
+    fn prepare_callback_does_not_wait_for_a_model_transaction() {
+        let model=crate::ara::model::ModelHandle::new();let document=model.session();
+        *document.timeline.lock().unwrap()=Some(serde_json::from_value(serde_json::json!({
+            "tracks":[],"clips":[],"bpm":120,"project_sec":0})).unwrap());
+        document.ready.store(true,Ordering::Release);
+        let owner=Arc::new(ExtensionOwner::default());
+        owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::EDITOR_RENDERER,None).unwrap();
+        let held=document.transaction.lock().unwrap();let (sent,received)=std::sync::mpsc::channel();
+        let requesting=owner.clone();let caller=std::thread::spawn(move ||{requesting.prepare();sent.send(()).unwrap();});
+        let returned=received.recv_timeout(std::time::Duration::from_secs(3)).is_ok();
+        drop(held);caller.join().unwrap();assert!(returned,"宿主prepare不得等待文档事务/合成");
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(3);
+        while owner.preparation_state().0 {assert!(std::time::Instant::now()<deadline);std::thread::yield_now();}
+        assert!(owner.preparation_state().1.is_none());
+        let mut left=[9.0;4];let mut right=[9.0;4];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
+        let mut bus=crate::audio_abi::AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
+        // SAFETY: 四帧平面存活；验证worker真的发布空分配快照，不接受“只是忽略prepare”。
+        assert!(unsafe {owner.snapshots[0].copy_block(0,44100,&mut bus,4)});assert_eq!(left,[0.0;4]);
+        drop(model);
+    }
+
+    /// 冷恢复在运行任务被阻塞时也要先合入全部组件状态，不能由各worker逐轨推进revision。
+    #[test]
+    fn cold_restores_are_merged_document_wide_before_background_jobs_start() {
+        let model=crate::ara::model::ModelHandle::new();let document=model.session();
+        let mut timeline:hifishifter_kernel::state::TimelineState=serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"a","name":"A","order":0},{"id":"b","name":"B","order":1}],"bpm":120,"project_sec":1,
+            "clips":[{"id":"ca","name":"A","track_id":"a","start_sec":0,"length_sec":4.0/44100.0,"takes":[{"id":"ta","name":"A","source_path":"source","source_start_sec":0,"source_end_sec":4.0/44100.0}]},
+                {"id":"cb","name":"B","track_id":"b","start_sec":0,"length_sec":4.0/44100.0,"takes":[{"id":"tb","name":"B","source_path":"source","source_start_sec":0,"source_end_sec":4.0/44100.0}]}]
+        })).unwrap();for clip in &mut timeline.clips {clip.normalize_takes();}
+        *document.timeline.lock().unwrap()=Some(timeline);
+        let pcm=Arc::new(super::super::source::SourcePcm {sample_rate:44100,planes:vec![vec![0.1,0.2,0.3,0.4]],version:0,_reservation:None});
+        document.edit_sources.lock().unwrap().insert("source".into(),pcm.clone());document.sources.lock().unwrap().insert("source".into(),pcm);
+        *document.track_bindings.lock().unwrap()=std::collections::BTreeMap::from([
+            ("a".into(),vec![("ma".into(),"source".into())]),("b".into(),vec![("mb".into(),"source".into())])]);
+        let identities=[Box::new(0_u8),Box::new(0_u8)];let mut owners=Vec::new();let mut gates=Vec::new();
+        for (index,clip) in ["ca","cb"].into_iter().enumerate() {
+            let key=(&*identities[index] as *const u8) as u64;region_owners().lock().unwrap().register(key,document.id,index).unwrap();
+            document.clip_ids.lock().unwrap().insert(key,clip.into());
+            document.regions.lock().unwrap().insert(key,crate::ara::AraPlaybackRegion {audio_source_persistent_id:"source".into(),
+                duration_in_modification_time:4.0/44100.0,duration_in_playback_time:4.0/44100.0,..Default::default()});
+            let owner=Arc::new(ExtensionOwner::default());let raw=owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::EDITOR_RENDERER,None).unwrap();
+            // SAFETY: identities/raw extension保留到doc销毁；这是实际宿主assignment入口。
+            unsafe {let ext=&*raw;((*ext.editorRendererInterface).addPlaybackRegion.unwrap())(ext.editorRendererRef,key as *mut _);}
+            let (release,gate)=std::sync::mpsc::channel();let (started,entered)=std::sync::mpsc::channel();
+            owner.preparation.get().unwrap().as_ref().unwrap().request(Box::new(move |_|{
+                started.send(()).unwrap();gate.recv_timeout(std::time::Duration::from_secs(3)).unwrap();Ok(())
+            })).unwrap();entered.recv_timeout(std::time::Duration::from_secs(3)).unwrap();gates.push(release);
+            let host=owner.assigned_timeline(&document).unwrap();let mut client=host.clone();client.tracks[0].volume=if index==0 {0.5} else {0.25};
+            let mut saved=crate::state_channel::EditState::default().merge(&host,&client,0).unwrap();
+            let id=if index==0 {"a"} else {"b"};saved.reconcile(&std::collections::BTreeMap::from([(id.into(),document.track_bindings.lock().unwrap()[id].clone())])).unwrap();
+            owner.restore_state(&saved.encode().unwrap()).unwrap();owners.push(owner);
+        }
+        document.prepare_renderers();let accepted=document.edits.lock().unwrap().clone();
+        // 先释放测试屏障再断言，旧实现失败也不能把真实worker留在无限等待里。
+        for gate in gates {gate.send(()).unwrap();}
+        assert_eq!(accepted.tracks.iter().find(|t|t.id=="a").map(|t|t.volume),Some(0.5));
+        assert_eq!(accepted.tracks.iter().find(|t|t.id=="b").map(|t|t.volume),Some(0.25));
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(3);
+        for (index,owner) in owners.iter().enumerate() {
+            while owner.preparation_state().0 {assert!(std::time::Instant::now()<deadline);std::thread::yield_now();}
+            assert!(owner.preparation_state().1.is_none());let mut left=[9.0;4];let mut right=[9.0;4];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
+            let mut bus=crate::audio_abi::AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
+            // SAFETY: 两个四帧平面；保证无GUI冷恢复确实供音，而非只合入了state。
+            assert!(unsafe {owner.snapshots[0].copy_block(0,44100,&mut bus,4)});
+            for (actual,expected) in left.iter().zip(if index==0 {[0.05,0.1,0.15,0.2]} else {[0.025,0.05,0.075,0.1]}) {assert!((*actual-expected).abs()<1e-6);}
+        }
+        drop(model);
+    }
+
+    /// 实际assignment observer必须与发布使用同一事务；不能校验后移除、再发布旧区域。
+    #[test]
+    fn native_assignment_observer_serializes_with_snapshot_publication_transaction() {
+        let model=crate::ara::model::ModelHandle::new();let document=model.session();
+        let owner=Arc::new(ExtensionOwner::default());let raw=owner.bind_to_document(document.clone(),ApiGeneration::V2Final,ExtensionRoles::all(),ExtensionRoles::EDITOR_RENDERER,None).unwrap();
+        let identity=Box::new(0_u8);let key=(&*identity as *const u8) as u64;region_owners().lock().unwrap().register(key,document.id,0).unwrap();
+        let (ready,entered)=std::sync::mpsc::channel();let (release,released)=std::sync::mpsc::channel();
+        let blocking=document.clone();let holder=std::thread::spawn(move || {
+            let _held=blocking.transaction.lock().unwrap();ready.send(()).unwrap();
+            let _=released.recv_timeout(std::time::Duration::from_millis(300));
+        });
+        entered.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+        let began=std::time::Instant::now();
+        // SAFETY: 在绑定时的真实model线程驱动API；其它线程只持Rust事务，不能绕过桥接线程检查。
+        unsafe {let ext=&*raw;((*ext.editorRendererInterface).addPlaybackRegion.unwrap())(ext.editorRendererRef,key as *mut _);}
+        let elapsed=began.elapsed();let _=release.send(());holder.join().unwrap();
+        assert!(elapsed>=std::time::Duration::from_millis(150),"assignment不得绕开发布的文档事务");
+        assert_eq!(owner.assignments.lock().unwrap()[&2],[key]);drop(model);
+    }
 
     #[test]
     fn gui_commit_changes_assigned_pcm_and_persisted_state_restores_it() {
@@ -85,7 +223,7 @@ mod bound_tests {
         let state = owner.edit_state().lock().unwrap().encode().unwrap();
         let mut restored = crate::state_channel::EditState::default();
         restored.restore(&state).unwrap();
-        let output = owner.render_edits(&document, &restored).unwrap();
+        let output = render_test_edits(&owner,&document,&restored).unwrap();
         assert_eq!(output[0].left.len(), 4);
         for (actual, expected) in output[0].left.iter().zip([0.05_f32,0.1,0.15,0.2]) { assert!((*actual-expected).abs()<1e-6); }
         assert!(restored.restore(b"bad state").is_err());
@@ -168,7 +306,7 @@ mod bound_tests {
         let mut restored=document.edits.lock().unwrap().clone();restored.reconcile(&bindings).unwrap();
         for (index,id) in ["a","b"].into_iter().enumerate() {
             assert_eq!(restored.params[id].pitch_edit,[61.0+index as f32,63.0+index as f32]);
-            let output=owners[index].render_edits(&document,&restored).unwrap();
+            let output=render_test_edits(&owners[index],&document,&restored).unwrap();
             let factor=if index==0 {0.5} else {0.25};
             for (actual,original) in output[0].left.iter().zip([0.1_f32,0.2,0.3,0.4]) { assert!((*actual-original*factor).abs()<1e-6); }
             let current=owners[index].handle_request(Request::Snapshot); assert!(current.ok);
@@ -426,7 +564,17 @@ impl ExtensionOwner {
     }
     /// 组件/文档终止时停止实例worker；不要在音频process调用。
     pub(crate) fn stop_editor(&self) {
+        self.cancel_preparation();
         if let Some(Ok(editor))=self.editor.get() { editor.close(); }
+        if let Some(Ok(worker))=self.preparation.get() {worker.close();}
+    }
+    /// 模型撤销时立即取消待准备作业；保持worker可供后续重新授权使用。
+    pub(crate) fn cancel_preparation(&self) {
+        if let Some(Ok(worker))=self.preparation.get() {worker.cancel();}
+    }
+    /// 原GUI合并后台宿主准备状态，不能把冷恢复尚未准备完写成已应用。
+    pub(crate) fn preparation_state(&self)->(bool,Option<String>) {
+        match self.preparation.get() {Some(Ok(worker))=>worker.state(),Some(Err(error))=>(false,Some(error.clone())),None=>(false,None)}
     }
     /// native主线程取得宿主给本ARA文档的可撤销播放租约；不寻找全局REAPER窗口。
     pub(crate) fn host_playback(&self)->Option<ara2_bridge::plugin::PlaybackRequestHandle> {
@@ -466,24 +614,40 @@ impl ExtensionOwner {
         *edits=candidate;
         Ok((edits.revision,model,self.projection(&document,&edits)?))
     }
-    /// 最新已接受state在非实时线程渲染；有更新的GUI写入排队时禁止旧作业发布。
+    /// 短事务捕获/核对，计算不持文档锁；后台新曲线/源变化不能被旧音频覆盖。
     pub(crate) fn apply_editor_edits(&self,base_edit:u64,base_model:u64,
-        previous:&str,current:impl Fn()->bool)->Result<(),String> {
+        previous:&str,cancel:Arc<std::sync::atomic::AtomicBool>,current:impl Fn()->bool)->Result<(),String> {
         let document=self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade).ok_or("document closed")?;
+        let (edit,epoch,inputs)={
+            let _transaction=document.transaction.lock().unwrap();
+            if !document.ready.load(Ordering::Acquire) || document.revision.load(Ordering::Acquire)!=base_model {
+                return Err("Conflict: host model changed during automatic apply".into());
+            }
+            let edits=document.edits.lock().unwrap().clone();
+            if edits.revision!=base_edit && self.projection(&document,&edits)?!=previous {return Err("Conflict: edit revision changed".into());}
+            let inputs=document.renderer_owners().into_iter().map(|owner|{
+                let (keys,input)=owner.capture_render_input(&document,&edits,true)?;Ok((owner,keys,input))
+            }).collect::<Result<Vec<_>,String>>()?;
+            (edits.revision,document.render_epoch.load(Ordering::Acquire),inputs)
+        };
+        if !current() {return Err("automatic apply superseded".into());}
+        let mut prepared=Vec::new();
+        for (owner,keys,input) in inputs {
+            for publisher in &owner.snapshots {publisher.collect_retired();}
+            prepared.push((owner,keys,input.render(cancel.clone())?));
+        }
         let _transaction=document.transaction.lock().unwrap();
         if !document.ready.load(Ordering::Acquire) || document.revision.load(Ordering::Acquire)!=base_model {
             return Err("Conflict: host model changed during automatic apply".into());
         }
-        let edits=document.edits.lock().unwrap().clone();
-        if edits.revision!=base_edit && self.projection(&document,&edits)?!=previous { return Err("Conflict: edit revision changed".into()); }
-        let mut prepared=Vec::new();
-        for owner in document.renderer_owners() {
-            let snapshots=owner.render_edits(&document,&edits)?;
-            if !owner.snapshots.iter().zip(&snapshots).all(|(p,s)|p.has_capacity(s)) { return Err("retired snapshot budget exhausted; reopen instance".into()); }
-            prepared.push((owner,snapshots));
+        if !current() || document.edits.lock().unwrap().revision!=edit || document.render_epoch.load(Ordering::Acquire)!=epoch {
+            return Err("automatic apply superseded".into());
         }
-        if !current() { return Err("automatic apply superseded".into()); }
-        for (owner,snapshots) in prepared {
+        for (owner,keys,snapshots) in &prepared {
+            if owner.assigned_regions().map_err(|e|e.to_string())?!=*keys {return Err("automatic apply superseded".into());}
+            if !owner.snapshots.iter().zip(snapshots).all(|(p,s)|p.has_capacity(s)) {return Err("retired snapshot budget exhausted; reopen instance".into());}
+        }
+        for (owner,_,snapshots) in prepared {
             for (publisher,snapshot) in owner.snapshots.iter().zip(snapshots) {
                 publisher.publish(snapshot).map_err(|e|format!("snapshot publish failed: {e:?}"))?;
             }
@@ -503,7 +667,15 @@ impl ExtensionOwner {
     /// 恢复/undo组件状态后刷新整张文档，各renderer保持原分配。
     pub fn refresh_document(&self) {
         let document = self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade);
-        if let Some(document) = document { for owner in document.renderer_owners() { owner.prepare(); } } else { self.prepare(); }
+        if let Some(document) = document {
+            {let _transaction=document.transaction.lock().unwrap();
+                let owners=document.renderer_owners();
+                for owner in &owners {
+                    if let Err(error)=owner.merge_pending_restore(&document) {log::warn!("[ara] instance state unresolved: {error}");}
+                }
+                for owner in owners {owner.prepare();}
+            }
+        }
     }
 
     /// setState只暂存本组件恢复；宿主明确分配区域且模型ready后再合入共享权威。
@@ -516,7 +688,7 @@ impl ExtensionOwner {
         Ok(())
     }
     /// 调用方持文档transaction；恢复候选集由宿主区域分配收窄，不按名称/旧序号猜测。
-    fn merge_pending_restore(&self,document:&super::document::DocumentSession)->Result<(),String> {
+    pub(super) fn merge_pending_restore(&self,document:&super::document::DocumentSession)->Result<(),String> {
         let mut pending=self.pending_restore.lock().unwrap();
         let Some(saved)=pending.as_ref() else {return Ok(());};
         if !document.ready.load(Ordering::Acquire) {return Ok(());}
@@ -551,11 +723,14 @@ impl ExtensionOwner {
         } else { self.pending_restore.lock().unwrap().as_ref().unwrap_or(&self.edits.lock().unwrap()).encode() }
     }
 
-    /// 接收非实时编辑请求；具体处理只在文档事务锁内进行。
+    /// 参数/快照在短事务内校验；外部提交合成同样不能持锁阻塞宿主模型回调。
     pub(crate) fn handle_request(&self, request: hifishifter_ara_ipc::Request) -> hifishifter_ara_ipc::Response {
         use hifishifter_ara_ipc::{Request, Response, HostPcm};
         let document = self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade);
         let Some(document) = document else { return Response { error: Some("document closed".into()), ..Default::default() }; };
+        if let Request::Commit {base_revision,model_revision,timeline}=request {
+            return self.commit_request(&document,base_revision,model_revision,timeline);
+        }
         let _transaction = document.transaction.lock().unwrap();
         if let Err(error)=self.merge_pending_restore(&document) {return Response {error:Some(error),..Default::default()};}
         let model_revision = document.revision.load(Ordering::Acquire);
@@ -576,29 +751,7 @@ impl ExtensionOwner {
                     }
                     Ok(Response { ok: true, timeline: Some(serde_json::to_value(&timeline).map_err(|e| e.to_string())?), sources, ..Default::default() })
                 }
-                Request::Commit { base_revision, model_revision: base_model, timeline: client } => {
-                    if base_model != model_revision {
-                        log::warn!("[ara] GUI commit conflict reason=host_model_changed base_model={base_model} current_model={model_revision} base_edit={base_revision} current_edit={}", edits.revision);
-                        return Err("Conflict: host model changed; refresh".into());
-                    }
-                    let client = serde_json::from_value(client).map_err(|e| e.to_string())?;
-                    let mut candidate = edits.merge(&timeline, &client, base_revision)?;
-                    candidate.reconcile(&document.track_bindings.lock().unwrap())?;
-                    let mut prepared = Vec::new();
-                    for owner in document.renderer_owners() {
-                        let snapshots = owner.render_edits(&document, &candidate)?;
-                        if !owner.snapshots.iter().zip(&snapshots).all(|(publisher, snapshot)| publisher.has_capacity(snapshot)) {
-                            return Err("retired snapshot budget exhausted; reopen the instance".into());
-                        }
-                        prepared.push((owner, snapshots));
-                    }
-                    for (owner, snapshots) in prepared {
-                        for (publisher, snapshot) in owner.snapshots.iter().zip(snapshots) { publisher.publish(snapshot).map_err(|e| format!("snapshot publish failed: {e:?}"))?; }
-                    }
-                    *edits = candidate;
-                    log::info!("[ara] GUI commit ready revision={} model={model_revision}", edits.revision);
-                    Ok(Response { ok: true, ..Default::default() })
-                }
+                Request::Commit {..}=>unreachable!("commit dispatched before snapshot transaction"),
             }
         })();
         let mut response = outcome.unwrap_or_else(|error| Response { error: Some(error), ..Default::default() });
@@ -607,17 +760,55 @@ impl ExtensionOwner {
         response
     }
 
-    /// 使用现有离线内核，不将宿主文件路径当成音频权威。
-    pub(crate) fn render_edits(&self, document: &super::document::DocumentSession, edits: &crate::state_channel::EditState)
-        -> Result<Vec<super::snapshot::PlaybackSnapshot>, String> {
-        for snapshot in &self.snapshots {snapshot.collect_retired();}
-        use hifishifter_kernel::mixdown::{MixdownOptions, MixdownPcm, QualityPreset, render_mixdown_with_pcm};
-        use super::snapshot::PlaybackSnapshot;
-        if !document.ready.load(Ordering::Acquire) { return Err("host PCM/model not ready".into()); }
-        let keys = self.assigned_regions().map_err(|e| e.to_string())?;
-        if keys.is_empty() { return Ok([44100, 48000].into_iter().map(|sample_rate| PlaybackSnapshot {
-            sample_rate, origin_sample: 0, left: vec![], right: vec![], _reservation: None,
-        }).collect()); }
+    /// 一期外部客户端保持同步结果契约，但捕获/计算/提交分开，失败不改变参数权威。
+    fn commit_request(&self,document:&Arc<super::document::DocumentSession>,base_edit:u64,base_model:u64,
+        client:serde_json::Value)->hifishifter_ara_ipc::Response {
+        let outcome=(|| {
+            let (candidate,epoch,inputs)={
+                let _transaction=document.transaction.lock().unwrap();self.merge_pending_restore(document)?;
+                if !document.ready.load(Ordering::Acquire) {return Err("host model not ready; refresh after editing".into());}
+                if document.revision.load(Ordering::Acquire)!=base_model {return Err("Conflict: host model changed; refresh".into());}
+                let mut edits=document.edits.lock().unwrap();edits.reconcile(&document.track_bindings.lock().unwrap())?;
+                let client=serde_json::from_value(client).map_err(|e|e.to_string())?;
+                let mut candidate=edits.merge(&self.assigned_timeline(document)?,&client,base_edit)?;
+                candidate.reconcile(&document.track_bindings.lock().unwrap())?;
+                drop(edits);
+                let inputs=document.renderer_owners().into_iter().map(|owner| {
+                    let (keys,input)=owner.capture_render_input(document,&candidate,true)?;Ok((owner,keys,input))
+                }).collect::<Result<Vec<_>,String>>()?;
+                (candidate,document.render_epoch.load(Ordering::Acquire),inputs)
+            };
+            let mut prepared=Vec::new();
+            for (owner,keys,input) in inputs {
+                for publisher in &owner.snapshots {publisher.collect_retired();}
+                prepared.push((owner,keys,input.render(Arc::new(std::sync::atomic::AtomicBool::new(false)))?));
+            }
+            let _transaction=document.transaction.lock().unwrap();
+            if !document.ready.load(Ordering::Acquire) || document.revision.load(Ordering::Acquire)!=base_model {
+                return Err("Conflict: host model changed during commit".into());
+            }
+            let mut edits=document.edits.lock().unwrap();
+            if edits.revision!=base_edit {return Err("Conflict: edit revision changed during commit".into());}
+            if document.render_epoch.load(Ordering::Acquire)!=epoch {return Err("host audio access changed during commit; retry".into());}
+            for (owner,keys,snapshots) in &prepared {
+                if owner.assigned_regions().map_err(|e|e.to_string())?!=*keys {return Err("Conflict: assigned regions changed during commit".into());}
+                if !owner.snapshots.iter().zip(snapshots).all(|(p,s)|p.has_capacity(s)) {return Err("retired snapshot budget exhausted; reopen instance".into());}
+            }
+            for (owner,_,snapshots) in prepared {
+                for (publisher,snapshot) in owner.snapshots.iter().zip(snapshots) {publisher.publish(snapshot).map_err(|e|format!("snapshot publish failed: {e:?}"))?;}
+            }
+            *edits=candidate;log::info!("[ara] GUI commit ready revision={} model={base_model}",edits.revision);
+            Ok::<(),String>(())
+        })();
+        hifishifter_ara_ipc::Response {ok:outcome.is_ok(),error:outcome.err(),revision:document.edits.lock().unwrap().revision,
+            model_revision:document.revision.load(Ordering::Acquire),..Default::default()}
+    }
+
+    /// 调用方在短事务内冻结几何/参数/PCM，只复制本renderer授权源，不执行合成。
+    fn capture_render_input(&self,document:&super::document::DocumentSession,edits:&crate::state_channel::EditState,edited:bool)
+        ->Result<(Vec<u64>,super::input::RenderInput),String> {
+        if !document.ready.load(Ordering::Acquire) {return Err("host PCM/model not ready".into());}
+        let keys=self.assigned_regions().map_err(|e|e.to_string())?;
         let mut timeline = self.assigned_timeline(document)?;
         let mut resolved = edits.clone();
         resolved.reconcile(&document.track_bindings.lock().unwrap())?;
@@ -626,37 +817,10 @@ impl ExtensionOwner {
         let regions = keys.iter().map(|key| geometry.get(key).cloned().ok_or("assigned region disappeared"))
             .collect::<Result<Vec<_>, _>>()?;
         drop(geometry);
-        let sources = document.edit_sources.lock().unwrap().clone();
-        // 先复用先导范围校验：时间拉伸/宿主内容淡化仍不能伪称支持。
-        let validation = super::snapshot::mix_plain_regions(&regions, &sources, 44100).map_err(|e| format!("unsupported host region: {e:?}"))?;
-        drop(validation);
-        let start = timeline.clips.iter().map(|c| c.start_sec).fold(f64::INFINITY, f64::min);
-        let end = timeline.clips.iter().map(|c| c.start_sec + c.length_sec).fold(0.0_f64, f64::max);
-        if start < 0.0 || !start.is_finite() || !end.is_finite() { return Err("unsupported host position".into()); }
-        let mut input = HashMap::new();
-        for id in timeline.clips.iter().filter_map(|clip| clip.source_path.as_ref()).collect::<BTreeSet<_>>() {
-            let pcm = sources.get(id).ok_or_else(|| format!("host PCM unavailable: {id}"))?;
-            let channels = pcm.planes.len();
-            let mut samples = Vec::with_capacity(pcm.planes[0].len() * channels);
-            for frame in 0..pcm.planes[0].len() { for plane in &pcm.planes { samples.push(plane[frame]); } }
-            input.insert(id.clone(), MixdownPcm { sample_rate: pcm.sample_rate, channels: channels as u16, samples: Arc::new(samples) });
-        }
-        let mut snapshots = Vec::new();
-        for sample_rate in [44100, 48000] {
-            let frames = ((end - start) * sample_rate as f64).round() as usize;
-            if frames > 64 * 1024 * 1024 / 8 { return Err("snapshot span exceeds 64MiB".into()); }
-            let reservation = super::budget::global_budget().reserve(frames * 8).ok_or("PCM memory budget exceeded")?;
-            let options = MixdownOptions { sample_rate, start_sec: start, end_sec: Some(end),
-                stretch: hifishifter_kernel::time_stretch::StretchAlgorithm::SoundTouchDll, apply_pitch_edit: true,
-                output: hifishifter_kernel::encode::OutputSpec::wav_32f(), quality_preset: QualityPreset::Export,
-                cancel_flag: None, progress: None, cache_stats: None };
-            let (_, channels, _, samples) = render_mixdown_with_pcm(&timeline, options, &input)?;
-            if channels != 2 || samples.len() != frames * 2 || samples.iter().any(|v| !v.is_finite()) { return Err("invalid kernel output".into()); }
-            snapshots.push(PlaybackSnapshot { sample_rate, origin_sample: (start * sample_rate as f64).round() as i64,
-                left: samples.iter().step_by(2).copied().collect(), right: samples.iter().skip(1).step_by(2).copied().collect(),
-                _reservation: Some(reservation) });
-        }
-        Ok(snapshots)
+        let available=if edited {document.edit_sources.lock().unwrap()} else {document.sources.lock().unwrap()};
+        let sources=regions.iter().map(|region|region.audio_source_persistent_id.clone()).collect::<BTreeSet<_>>()
+            .into_iter().filter_map(|id|available.get(&id).map(|pcm|(id.clone(),pcm.clone()))).collect();
+        Ok((keys,super::input::RenderInput {timeline:edited.then_some(timeline),regions,sources}))
     }
 
     /// 从宿主时间线筛选实际分配的区域，而不是让每个处理器混整张文档。
@@ -691,6 +855,10 @@ impl ExtensionOwner {
         let observer = Arc::new(
             move |role: ExtensionRoles, keys: &[usize], sequences: &[usize]| {
                 if let Some(owner) = owner.upgrade() {
+                    let document=owner.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade);
+                    let Some(document)=document else {return;};
+                    // assignment写入、撤销和最终发布必须共用此短事务，消除check→publish竞态。
+                    let _transaction=document.transaction.lock().unwrap();
                     let keys = keys.iter().map(|key| *key as RegionKey).collect::<Vec<_>>();
                     let valid = keys.is_empty()
                         || region_owners()
@@ -716,7 +884,14 @@ impl ExtensionOwner {
                     } else {
                         log::warn!("[ara] rejected unknown or cross-document renderer assignment");
                     }
-                    owner.prepare();
+                    owner.cancel_preparation();
+                    owner.snapshots.iter().for_each(|snapshot|snapshot.clear());
+                    let owners=document.renderer_owners();
+                    for renderer in &owners {
+                        if let Err(error)=renderer.merge_pending_restore(&document) {log::warn!("[ara] instance state unresolved: {error}");}
+                    }
+                    // 某轨首次获得分配可能恢复其state并推进共享revision；其它轨也需要最新任务。
+                    for renderer in owners {renderer.prepare();}
                 }
             },
         );
@@ -728,6 +903,10 @@ impl ExtensionOwner {
         let raw = owned.0.as_raw();
         document.attach(self, owned.1, companion)?;
         *self.document.lock().unwrap() = Some(Arc::downgrade(&document));
+        let weak=Arc::downgrade(self);
+        let _=self.preparation.get_or_init(||super::preparation::PreparationQueue::new());
+        // 只登记weak供宿主回调排队；后台计算不形成owner自循环。
+        *self.prepare_owner.lock().unwrap()=Some(weak);
         let _=self.clock.set(document.clock.clone());
         *current = Some(owned.0);
         self.role.store(
@@ -816,10 +995,21 @@ impl ExtensionOwner {
         Ok(keys)
     }
 
-    /// 非实时准备两个支持的输出采样率，callback 不重采样、不等待。
+    /// 宿主模型callback只撤销/排最新准备任务，不在主线程执行WORLD或PCM混音。
     pub fn prepare(&self) {
-        self.snapshots.iter().for_each(|snapshot| snapshot.clear());
-        self.snapshots.iter().for_each(|snapshot| snapshot.collect_retired());
+        // 源/assignment撤销在文档事务内清理；此函数只排队，不能在事务外clear旧任务刚发布的音频。
+        let weak=self.prepare_owner.lock().unwrap().clone();
+        let Some(weak)=weak else {return;};
+        match self.preparation.get() {
+            Some(Ok(worker))=>if let Err(error)=worker.request(Box::new(move |cancel|{
+                weak.upgrade().ok_or("renderer closed".to_owned())?.prepare_job(cancel)
+            })) {log::warn!("[ara] preparation unavailable: {error}");},
+            Some(Err(error))=>log::warn!("[ara] preparation unavailable: {error}"),
+            None=>{},
+        }
+    }
+    /// 后台冻结/计算/发布三阶段；撤销标记和全部版本在发布短事务内重新验证。
+    fn prepare_job(&self,cancel:Arc<std::sync::atomic::AtomicBool>)->Result<(),String> {
         let Some(document) = self
             .document
             .lock()
@@ -827,45 +1017,27 @@ impl ExtensionOwner {
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
         else {
-            return;
+            return Err("document closed".into());
         };
-        let _transaction = document.transaction.lock().unwrap();
-        if let Err(error)=self.merge_pending_restore(&document) {log::warn!("[ara] instance state unresolved: {error}");return;}
-        let edits = document.edits.lock().unwrap().clone();
-        if edits.revision > 0 {
-            match self.render_edits(&document, &edits) {
-                Ok(snapshots) => { for (publisher, snapshot) in self.snapshots.iter().zip(snapshots) { let _ = publisher.publish(snapshot); } }
-                Err(error) => log::warn!("[ara] edited snapshot unavailable: {error}"),
-            }
-            return;
-        }
-        let Ok(keys) = self.assigned_regions() else {
-            return;
+        let (model,edit,epoch,keys,input)={
+            let _transaction=document.transaction.lock().unwrap();
+            if !document.ready.load(Ordering::Acquire) {return Ok(());}
+            let edits=document.edits.lock().unwrap().clone();
+            let (keys,input)=self.capture_render_input(&document,&edits,edits.revision>0)?;
+            (document.revision.load(Ordering::Acquire),edits.revision,document.render_epoch.load(Ordering::Acquire),keys,input)
         };
-        if keys.is_empty() {
-            return;
+        for publisher in &self.snapshots {publisher.collect_retired();}
+        let snapshots=input.render(cancel.clone())?;
+        let _transaction=document.transaction.lock().unwrap();
+        if cancel.load(Ordering::Acquire) || !document.ready.load(Ordering::Acquire) {return Ok(());}
+        if document.revision.load(Ordering::Acquire)!=model || document.edits.lock().unwrap().revision!=edit
+            || document.render_epoch.load(Ordering::Acquire)!=epoch || self.assigned_regions().map_err(|e|e.to_string())?!=keys {
+            // 跨轨接受新参数不一定有新的model callback；丢弃后补排最新任务，不能永久留空且假idle。
+            self.prepare();return Ok(());
         }
-        let geometry = document.regions.lock().unwrap();
-        let Some(regions) = keys
-            .iter()
-            .map(|key| geometry.get(key).cloned())
-            .collect::<Option<Vec<_>>>()
-        else {
-            return;
-        };
-        drop(geometry);
-        let sources = document.sources.lock().unwrap().clone();
-        for (publisher, rate) in self.snapshots.iter().zip([44100, 48000]) {
-            match super::snapshot::mix_plain_regions(&regions, &sources, rate)
-                .and_then(|snapshot| publisher.publish(snapshot))
-            {
-                Ok(()) => log::info!(
-                    "[ara] snapshot ready role={} rate={rate} regions={}",
-                    self.role.load(Ordering::Relaxed),
-                    keys.len()
-                ),
-                Err(error) => log::warn!("[ara] snapshot unavailable: {error:?}"),
-            }
-        }
+        if !self.snapshots.iter().zip(&snapshots).all(|(p,s)|p.has_capacity(s)) {return Err("retired snapshot budget exhausted".into());}
+        for (publisher,snapshot) in self.snapshots.iter().zip(snapshots) {publisher.publish(snapshot).map_err(|e|format!("snapshot publish failed: {e:?}"))?;}
+        log::info!("[ara] background snapshot ready role={} revision={edit} model={model} regions={}",self.role.load(Ordering::Relaxed),keys.len());
+        Ok(())
     }
 }

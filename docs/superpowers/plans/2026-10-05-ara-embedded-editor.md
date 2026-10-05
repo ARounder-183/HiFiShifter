@@ -273,5 +273,16 @@ gui-dual-track1-output.json/WAV。第一次进程消失时RPP仍与旧归档相�
   发布前核对模型/edit/分配版本。有界合并与关闭取消/join、保存曲线权威回归一起验证。
   不以只换release构建代替线程边界修复。
 
+本批源码已实现每renderer最多一个运行/一个最新待办的后台邮箱、冻结授权PCM输入、
+事务外计算，自动应用/一期外部提交在发布短事务核对model/edit/render_epoch/assignment。
+首轮lib70 exit0，收尾render26 exit0；一次审查发现两竞态，补齐全部恢复先合并、
+assignment写入/撤销和发布共用事务、过期准备补排。修正后定向bound_tests11 exit0，
+当前总用例73，未重新全跑全部73；新增冷恢复/原生observer测试首轮含坏fixture/错误线程
+驱动，修正为完整name字段与真实模型线程后通过，不把那轮失败写成产品回归通过。
+preparation-01 release构建exit0/1m51s是review修正前版本，只用于隔离先导，不作为最终包。
+用户正在操作期间未发键鼠/强关；后续原生性能和最终修正源码bundle验收仍open。
+用户新要求“只在最后review”，后续按此执行；播放头/renderer职责/渐变拉伸核实列入
+新plan Task36-37，不能从本批后台准备源码通过推出这些已解决。
+
 多轨后续设计/计划：2026-10-05-ara-project-workspace-design.md / ara-project-workspace.md。
 旧Task20-26历史进度段为当时记录；当前Task29-31与新的Task32-35是后续权威进度。

@@ -21,6 +21,7 @@
 - 中文源头/关键 doc；MSVC后重设TEMP/TMP，cargo offline/jobs1；只在测试副本采集。
 - 先完成旧 plan Task31 的主线程重复合成调查及修正门，不把 release 构建成功当性能通过。
 - 原 Task26 未达门仍 open；Task30 的双轨 GUI 验收移到本计划 Task35，不花额外轮次验旧窗口交互。
+- 用户最新要求：后续不再逐任务dispatch review，全部源实现/集中验收结束时做一次最终review。
 
 ## Task32：文档工作区授权投影
 
@@ -97,7 +98,7 @@ impl EditorSession {
   文档关闭/迟到请求、两文档关闭一方不影响另一方；用真实lease和Weak计数验证，不只查字符串。
 - [ ] **Step4:** 回归保存期间最新尾块、共享undo后保存、重开尚未开GUI时恢复PCM；
   期望每轨独立频率且对应PCM不变，模型冲突拒绝/保存曲线不伪报成功。
-- [ ] **Step5:** 单次集中审查共享寿命/锁顺序/线程边界，修重要项后只定向重测。
+- [ ] **Step5:** 将共享寿命/锁顺序/线程边界检查并入Task35最后一次review，不再为本任务单开review。
 
 ## Task35：一个原 GUI 双轨实用验收及原二期余项
 
@@ -114,7 +115,30 @@ impl EditorSession {
 - [ ] **Step4:** 实测宿主seek/改源/几何及pending冲突，44100/48000 mono/stereo与30秒边界；
   保留原scope之外unsupported，不把BPM数字同步当完整TempoMap/隐式stretch通过。
 - [ ] **Step5:** 独立app真实导入/原GUI编辑验收，最终一次完整源码门；汇总当前计划与原Task26
-  每项证据。只有用户所需原GUI完整链路及全部明确门都有实测后关闭goal；缺项仍open。
+  每项证据，随后一次最终review。只有用户所需原GUI完整链路及全部明确门都有实测后关闭goal；缺项仍open。
+
+## Task36：实际播放头跳动与renderer职责（用户新增反馈）
+
+- [ ] 原生采集实际播放时各renderer的process_mode、project time、playing/system-time有效位，
+  用有界原子诊断供非实时线程读出，禁止process文件日志。当前多实例共享clock且prefetch也
+  update、任一实例setProcessing(false)会stopped，是源码事实，不等于已经实测根因。
+- [ ] 结合锁定ARAInterface.h的角色约定修正：仅playback renderer替换输入；纯editor renderer
+  透传宿主输入，仅有实际预听信号时添加，不让它再次覆盖宿主已做的fade/region gain。
+  当前audio_process对两种角色都读取快照替换输入，与SDK约定不符；音频影响需原生导出确认。
+- [ ] 确定真实播放时钟权威，覆盖多个预取/实时来源、其它实例停处理、seek/loop/停播定位；
+  不用单调max策略吞掉真正的后退跳转。统一GUI不能直接照搬“任何renderer最后一次写入”。
+- [ ] 同一宿主播放段原GUI游标连续与停播seek验收，及零分配/释放/无实时IO回归。
+
+## Task37：渐变与拉伸同步分层核实
+
+- [ ] 若用户指普通片段两端淡入淡出，先验证宿主最终导出保留fade（Task36 editor透传）；
+  区分“最终音频被抹掉”与“GUI未画宿主fade”两类缺口，不把content-based fades标志当作
+  普通fade长度/形状。锁定ARAPlaybackRegionProperties没有普通fade曲线字段。
+- [ ] 本轮仍不伪称支持content-based fades。若需GUI显示普通fade而标准ARA没有提供其数据，
+  明确评估REAPER专属扩展路线，不用读用户RPP或脚本状态冒充ARA源权威。
+- [ ] 拉伸时长比已被映射到take.playback_rate，但当前GUI与快照验证主动拒绝；新增线性
+  保调拉伸必须补声音/曲线时间映射/裁切与持久化验证后再开放，不能仅删除Unsupported guard。
+  完整TempoMap/非线性warp/倒放不在这个核实项中自动宣布支持。
 
 ## 当前状态
 

@@ -4,6 +4,26 @@
 
 ## 当前权威摘要（Task30-31）
 
+Task31最新源码：宿主prepare只排有界后台任务，原参数合成抽为冻结RenderInput，自动应用
+和外部提交在计算时不持document.transaction；发布核对model/edit/render_epoch/分配。
+首轮lib70、收尾render26均正常exit0。一次集中review指出冷恢复过期无重排/分配与发布
+竞态，已补统一恢复、事务序列化和过期重排。最新定向bound_tests11通过/exit0；
+总用例73没有重复全跑，尚未做最终native性能/最终review。新冷恢复测试实际验证两轨
+供音，无GUI；原生assignment测试必须在绑定模型线程驱动，不能在另一线程触发桥接
+线程拒绝后误判为序列化失败。用户要求之后只在最终做一次review。
+
+隔离preparation-01是修正review竞态前的release构建，exit0/1m51s，引擎SHA
+55BC4BEEA7DD64E30DE6173F2ABE75A126C6A642A084458CA031832D810CAA09。
+用新的BundleDirectory参数和fresh embedded-preparation-probe启动，日志8362行后出现
+background snapshot ready和原GUI分析；不代表最终修正源码音频通过。未向已有实例
+发送脚本，未把默认embedded-vst3热覆盖，未抢用户正在操作的窗口。
+
+用户新增播放头跳动/渐变/拉伸反馈：源码共享clock多writer/prefetch更新是候选，不是
+根因实测。锁定ARA SDK明确纯editor renderer必须透传，现audio_process两角色皆替换
+输入，职责错误需修；是否实际覆盖REAPER fade需导出确认。时长比已映射但GUI/快照
+仍主动拒绝stretch；普通fade形状不在ARAPlaybackRegionProperties字段中，不能把
+content-based fade标志冒充普通fade数据。详见新plan Task36-37；这些项仍未完成。
+
 以下历史段落保留当时状态，不能把早期“尚未修音”当作当前状态，也不能把单轨通过
 当作全部完成。Task29原GUI键盘编辑/自动修音/关闭FX/冷重开已实测；本批新增第一轨60
 的真实GUI编辑/宿主独奏输出，4窗口220.5→260.94674556213016Hz，gap0，baseline布局

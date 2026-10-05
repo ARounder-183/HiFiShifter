@@ -868,4 +868,12 @@ Task 32: Ruling: 用户希望同一原GUI显示多轨，现EditorSession确实�
 
 Task 31: Ruling: release构建6m00s/exit0，bundle引擎与实际release源SHA一致、thin三exports齐全、邻接依赖存在；原加载模块hash未变 — 归档构建事实和独立产物，不宣称宿主优化验收或主线程风险已修 — 若仅看build绿灯就关闭耗时门，会把未测的用户卡顿留在正式使用链路。
 
+Task 31: Ruling: 当前批后台准备首轮lib70与收尾render26通过，但一次集中审查发现冷恢复单轨过期无重排和assignment校验/发布竞态 — 统一先合并全部恢复，分配写入/撤销与发布共用短事务，补真实无GUI冷恢复和native observer回归；用户随后要求只在最后review，后续不再逐任务派review — 若只相信绿测，可能冷启静音或重新播已移除区域。
+
+Task 36: Ruling: 用户报告播放头跳动，源码多个renderer写共享clock、prefetch仍更新、任一实例停处理会改共享playing — 先采集实际时钟来源与mode，不把候选当实测根因；采用工程多轨GUI并保留逐轨输出，时钟也必须收敛明确权威 — 若只让GUI取最后写入或取最大时间，会继续抖动或破坏seek/loop。
+
+Task 37: Ruling: SDK明确纯editor renderer必须透传输入，当前两角色都快照替换；普通fade曲线不是content-based fade标志，拉伸比例已映射但主动拒绝 — 先核实editor透传/宿主最终fade，再分别评估GUI fade数据与线性拉伸开放，不只移除拒绝逻辑 — 若把这些都叫自动同步完成，会漏音频覆盖和参数时间映射错误。
+
+Task 31: Ruling: review修正后的定向bound_tests11正常exit0，冷恢复双轨无GUI实际PCM/模型线程assignment序列化可证；总73未重复全跑，现preparation-01为修正前先导 — 只提交源码/准确记录验证范围，native最终包/性能仍open；不继续派review，按用户要求到最终集中一次 — 若把旧bundle加载日志当作最新源码通过，会漏掉修正未部署。
+
 

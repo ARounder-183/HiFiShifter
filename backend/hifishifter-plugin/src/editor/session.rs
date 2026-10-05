@@ -165,6 +165,7 @@ impl EditorSession {
         let (edit,model,projection)={let loaded=self.loaded.lock().unwrap();(loaded.edit,loaded.model,loaded.projection.clone())};
         self.owner.upgrade().ok_or("processor closed")?.apply_editor_edits(edit,model,
             &projection,
+            self.analysis_cancel.clone(),
             ||!self.closed.load(Ordering::Acquire) && self.submitted.load(Ordering::Acquire)==ticket)
     }
     pub(super) fn ensure_loaded(&self,force:bool)->Result<(),String> {
@@ -310,9 +311,10 @@ impl EditorSession {
     }
     pub(super) fn state(&self)->Value {
         let generation=self.generation.load(Ordering::Acquire);let applied=self.applied.load(Ordering::Acquire);
-        json!({"generation":generation,"applied_generation":applied,"pending":generation!=applied,
+        let (host_pending,host_error)=self.owner.upgrade().map(|owner|owner.preparation_state()).unwrap_or((false,None));
+        json!({"generation":generation,"applied_generation":applied,"pending":generation!=applied||host_pending,
             "host_version":self.host_version.load(Ordering::Acquire),
-            "error":self.error.lock().unwrap().clone(),"connected":!self.closed.load(Ordering::Acquire),
+            "error":self.error.lock().unwrap().clone().or(host_error),"connected":!self.closed.load(Ordering::Acquire),
             "ready":self.loaded.lock().unwrap().initialized})
     }
     fn emit_state(&self) {self.emit("plugin_apply_state",self.state());}

@@ -19,6 +19,8 @@ pub(crate) mod transport;
 pub(crate) mod source;
 pub(crate) mod snapshot;
 pub(crate) mod budget;
+pub(crate) mod input;
+pub(crate) mod preparation;
 
 /// 一段离线渲染产物。
 #[derive(Debug, Clone)]

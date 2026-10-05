@@ -1,10 +1,11 @@
 # 内嵌GUI隔离启动；绝不启动HiFiShifter.exe，不改系统PATH，也不向已有REAPER送脚本。
 param([switch]$Reopen,
-    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$ScratchName='embedded-probe')
+    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$ScratchName='embedded-probe',
+    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')][string]$BundleDirectory='embedded-vst3')
 $ErrorActionPreference = 'Stop'
 $araEmbedRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 if (Get-Process reaper -ErrorAction SilentlyContinue) { throw 'REAPER is running; preserve the project and close normally before this isolated launch.' }
-$araEmbedVst = Join-Path $araEmbedRoot '.build-tmp\embedded-vst3'
+$araEmbedVst = Join-Path $araEmbedRoot ".build-tmp\$BundleDirectory"
 $araEmbedBundle = Join-Path $araEmbedVst 'HiFiShifter.vst3\Contents\x86_64-win\HiFiShifter.vst3'
 if (!(Test-Path -LiteralPath $araEmbedBundle)) { throw 'Build the embedded bundle first.' }
 $araEmbedScratch = Join-Path $araEmbedRoot ".build-tmp\$ScratchName"
@@ -19,6 +20,10 @@ if (!(Test-Path -LiteralPath $araEmbedIni)) {
     }
     $araEmbedText = "[REAPER]`r`nvstpath64=$araEmbedVst`r`nrenderclosewhendone=4`r`nvstfullstate=49989`r`n"
     [IO.File]::WriteAllText($araEmbedIni,$araEmbedText,[Text.UTF8Encoding]::new($false))
+} else {
+    # 不静默复用指向旧模块的profile；用新scratch验新bundle，不改用户已有配置。
+    $araEmbedConfiguredVst = Get-Content -LiteralPath $araEmbedIni | Where-Object { $_ -match '^vstpath64=' } | Select-Object -First 1
+    if ($araEmbedConfiguredVst -ne "vstpath64=$araEmbedVst") {throw 'Existing profile targets a different bundle; use a new ScratchName.'}
 }
 $env:HIFISHIFTER_ARA_INSTANCE_DIR = Join-Path $araEmbedScratch 'instances'
 $env:HIFISHIFTER_ARA_LOG = Join-Path $PSScriptRoot 'captures\embedded-editor-plugin.log'
