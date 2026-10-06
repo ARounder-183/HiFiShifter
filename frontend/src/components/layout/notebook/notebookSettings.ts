@@ -86,6 +86,16 @@ export const DEFAULT_NOTEBOOK_SETTINGS: ResolvedNotebookSettings = {
 export const NOTEBOOK_PANEL_MIN_WIDTH = 260;
 export const NOTEBOOK_PANEL_MAX_WIDTH = 760;
 
+/**
+ * 编辑区字号的上下界。
+ *
+ * 【为什么导出】字号有**三条**写入路径：设置对话框的输入框、Ctrl/⌘+滚轮手势、
+ * 以及下面的归一化。三处各写一份 9/24 的话，改一处就会让"滚轮能到的值"与
+ * "存得下的值"分叉 —— 表现是滚到某档后设置里显示的是另一个数。
+ */
+export const NOTEBOOK_FONT_SIZE_MIN = 9;
+export const NOTEBOOK_FONT_SIZE_MAX = 24;
+
 function pickEnum<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
     return typeof value === "string" && (allowed as readonly string[]).includes(value)
         ? (value as T)
@@ -125,7 +135,12 @@ export function normalizeNotebookSettings(
         markdownShortcuts: bool(raw.markdownShortcuts, d.markdownShortcuts),
         slashCommands: bool(raw.slashCommands, d.slashCommands),
         sourceWordWrap: bool(raw.sourceWordWrap, d.sourceWordWrap),
-        sourceFontSize: clampNumber(raw.sourceFontSize, 9, 24, d.sourceFontSize),
+        sourceFontSize: clampNumber(
+            raw.sourceFontSize,
+            NOTEBOOK_FONT_SIZE_MIN,
+            NOTEBOOK_FONT_SIZE_MAX,
+            d.sourceFontSize,
+        ),
         spellCheck: bool(raw.spellCheck, d.spellCheck),
         // 0 是合法值（= 不缩放），因此下界是 0。
         imageMaxDimensionPx: clampNumber(raw.imageMaxDimensionPx, 0, 16384, d.imageMaxDimensionPx),

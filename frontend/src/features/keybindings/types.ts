@@ -118,6 +118,7 @@ export type ActionId =
     | "modifier.paramFineAdjust" // 精细调整（按住）
     | "modifier.vibratoAmplitudeAdjust" // 颤音绘制时滚轮调振幅
     | "modifier.vibratoFrequencyAdjust" // 颤音绘制时滚轮调频率
+    | "modifier.notebookFontZoom" // 记事本编辑区字号缩放（按住 + 面板内滚轮）
     // 快速搜索
     | "quickSearch.open" // 打开快速搜索弹窗
     | "quickSearch.navigate.up" // 快速搜索：向上切换候选项
@@ -190,6 +191,8 @@ export type ModifierConflictScene =
     | "wheel.pianoKeys"
     // 悬停在原生滚动条上的滚轮（时间轴 / 参数编辑器等所有自定义滚轮面）
     | "wheel.scrollbar"
+    // 记事本面板滚轮（Ctrl/⌘ + 滚轮 = 编辑区字号缩放）
+    | "wheel.notebook"
     // 全局微调：滑杆 / 数值输入框 / 轨道头等部件
     | "global.fine";
 

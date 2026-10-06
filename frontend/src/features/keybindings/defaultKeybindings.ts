@@ -228,6 +228,10 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "modifier.paramFineAdjust": [{ key: "control", modifierOnly: true, ctrl: true }],
     "modifier.vibratoAmplitudeAdjust": [{ key: "__none__", modifierOnly: true }],
     "modifier.vibratoFrequencyAdjust": [{ key: "alt", modifierOnly: true, alt: true }],
+    // 记事本编辑区字号：按住主修饰键 + 面板内滚轮 = 缩放。默认主修饰键，
+    // macOS 上由 ctrl 字段自动映射为 ⌘（见 platform.ts）—— 与浏览器/设计工具的
+    // ⌘+滚轮缩放同源，而不是 macOS 上留给系统辅助功能的 Ctrl+滚轮。
+    "modifier.notebookFontZoom": [{ key: "control", modifierOnly: true, ctrl: true }],
 
     // 快速搜索
     "quickSearch.open": [{ key: "f", ctrl: true }],
@@ -611,6 +615,12 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         conflictScenes: ["roll.vibratoWheel"],
     },
     // ── 修饰键 · 滚轮导航 ─────────────────────────────────────
+    "modifier.notebookFontZoom": {
+        labelKey: "kb_modifier_notebook_font_zoom",
+        group: "modWheel",
+        modifierOperationType: "wheel",
+        conflictScenes: ["wheel.notebook"],
+    },
     "modifier.horizontalZoom": {
         labelKey: "kb_modifier_horizontal_zoom",
         group: "modWheel",

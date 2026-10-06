@@ -22,6 +22,7 @@ import { clipKindLabelKey } from "./hifiClipBlock";
 import { resolveImage } from "./notebookImageCache";
 import { formatBytes, notebookErrorKey } from "./notebookInsert";
 import type { ResolvedNotebookSettings } from "./notebookSettings";
+import { NOTEBOOK_FONT_SIZE_MAX, NOTEBOOK_FONT_SIZE_MIN } from "./notebookSettings";
 
 // ─── 附件管理器 ──────────────────────────────────────────────────────────────
 
@@ -343,8 +344,8 @@ export function NotebookSettingsDialog({
                         <AppNumberField
                             value={settings.sourceFontSize}
                             unit="pixels"
-                            min={9}
-                            max={24}
+                            min={NOTEBOOK_FONT_SIZE_MIN}
+                            max={NOTEBOOK_FONT_SIZE_MAX}
                             suffix="px"
                             ariaLabel={tf("notebook_setting_font_size")}
                             onCommit={(value) => onChange({ sourceFontSize: value })}

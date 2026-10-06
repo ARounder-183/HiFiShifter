@@ -1007,6 +1007,7 @@ export const zhCN = {
     kb_modifier_fade_shape_cycle: "循环切换淡化形状（点击淡化包络线时按住）",
     kb_modifier_horizontal_zoom: "画布水平缩放（时间轴 / 钢琴卷帘 / 琴键区滚轮）",
     kb_modifier_pr_vzoom: "画布竖直缩放（时间轴 / 钢琴卷帘滚轮）",
+    kb_modifier_notebook_font_zoom: "记事本编辑区字号缩放（记事本内滚轮）",
     kb_modifier_param_morph: "参数形变（按住并在选区内拖动曲线锚点）",
     kb_modifier_param_stretch: "拉伸参数选区（拖动选区边缘时按住）",
     kb_modifier_clip_range_to_param_selection: "音频块范围加入参数选区（按住右键单击音频块）",

@@ -1038,6 +1038,7 @@ export const jaJP = {
     kb_modifier_horizontal_zoom:
         "キャンバス水平ズーム（タイムライン / ピアノロール / 鍵盤ホイール）",
     kb_modifier_pr_vzoom: "キャンバス垂直ズーム（タイムライン / ピアノロールホイール）",
+    kb_modifier_notebook_font_zoom: "ノート編集領域の文字サイズズーム（ノート内ホイール）",
     kb_modifier_param_morph: "パラメータ形状変形（押しながら選択範囲内のアンカーをドラッグ）",
     kb_modifier_param_stretch: "選択範囲のストレッチ（選択範囲端をドラッグ中に押す）",
     kb_modifier_clip_range_to_param_selection:

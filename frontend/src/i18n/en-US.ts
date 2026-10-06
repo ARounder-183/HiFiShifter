@@ -1161,6 +1161,7 @@ export const enUS = {
     kb_modifier_horizontal_zoom:
         "Canvas Horizontal Zoom (timeline / piano roll / piano keys wheel)",
     kb_modifier_pr_vzoom: "Canvas Vertical Zoom (timeline / piano roll wheel)",
+    kb_modifier_notebook_font_zoom: "Notebook Editor Font Zoom (wheel inside the notebook)",
     kb_modifier_param_morph: "Param Morph (hold and drag curve anchors inside selection)",
     kb_modifier_param_stretch: "Stretch Param Selection (hold while dragging a selection edge)",
     kb_modifier_clip_range_to_param_selection:

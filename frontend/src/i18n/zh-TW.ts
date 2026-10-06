@@ -1008,6 +1008,7 @@ export const zhTW = {
     kb_modifier_fade_shape_cycle: "循環切換淡化形狀（點擊淡化包絡線時按住）",
     kb_modifier_horizontal_zoom: "畫布水平縮放（時間軸 / 鋼琴捲簾 / 琴鍵區滾輪）",
     kb_modifier_pr_vzoom: "畫布垂直縮放（時間軸 / 鋼琴捲簾滾輪）",
+    kb_modifier_notebook_font_zoom: "記事本編輯區字級縮放（記事本內滾輪）",
     kb_modifier_param_morph: "參數形變（按住並在選取區內拖動曲線錨點）",
     kb_modifier_param_stretch: "拉伸參數選取區（拖動選取區邊緣時按住）",
     kb_modifier_clip_range_to_param_selection: "音訊塊範圍加入參數選取區（按住右鍵單擊音訊塊）",

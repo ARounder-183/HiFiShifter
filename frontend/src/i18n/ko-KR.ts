@@ -1095,6 +1095,7 @@ export const koKR = {
     kb_modifier_fade_shape_cycle: "페이드 형태 순환 (페이드 엔벨로프 클릭 중 누르기)",
     kb_modifier_horizontal_zoom: "캔버스 수평 줌 (타임라인 / 피아노 롤 / 피아노 키 휠)",
     kb_modifier_pr_vzoom: "캔버스 수직 줌 (타임라인 / 피아노 롤 휠)",
+    kb_modifier_notebook_font_zoom: "노트 편집 영역 글자 크기 줌 (노트 내 휠)",
     kb_modifier_param_morph: "파라미터 형태 변형 (누른 채 선택 영역 내 앵커 드래그)",
     kb_modifier_param_stretch: "파라미터 선택 영역 스트레치 (선택 영역 가장자리 드래그 중 누르기)",
     kb_modifier_clip_range_to_param_selection:

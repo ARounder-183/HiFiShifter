@@ -17,12 +17,14 @@
 import { EditorContent } from "@tiptap/react";
 import { CardStackIcon, ChevronDownIcon, ChevronRightIcon, GearIcon } from "@radix-ui/react-icons";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { WheelEvent as ReactWheelEvent } from "react";
 
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
 import {
     setNotebookAssetIndex,
     setNotebookMode,
     setNotebookSettings,
+    patchNotebookSettings,
     type NotebookMode,
 } from "../../../features/notebook/notebookSlice";
 import {
@@ -33,7 +35,19 @@ import {
 } from "../../../features/session/sessionSlice";
 import { selectClipRemote } from "../../../features/session/thunks/timelineThunks";
 import { seekPlayhead } from "../../../features/session/thunks/transportThunks";
+import {
+    isModifierActive,
+    isNoneBinding,
+    selectKeybinding,
+} from "../../../features/keybindings/keybindingsSlice";
 import { AppFileInput } from "../../../ui/FileInput";
+import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
+import { useDebouncedCallback } from "../../../utils/useDebouncedCallback";
+import { readWheelPixels } from "../timeline/kernel/input/normalizeWheel";
+import {
+    createWheelZoomAccumulator,
+    resolveWheelZoomStep,
+} from "../timeline/kernel/input/wheelZoomIntent";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { PanelToolbar, PanelToolbarButton, PanelToolbarTextButton } from "../shared/PanelToolbar";
 import { notebookApi } from "../../../services/api/notebook";
@@ -59,6 +73,7 @@ import {
 } from "./notebookInsert";
 import { dirName } from "./notebookPaths";
 import { normalizeNotebookSettings } from "./notebookSettings";
+import { nextFontSizeForZoomStep, NOTEBOOK_ZOOM_LINE_HEIGHT_PX } from "./notebookFontZoom";
 import { referencedAssetIds } from "./assetRef";
 import { buildClipLink, buildSeekLink, formatTimecode, parseInternalLink } from "./timecode";
 import { useNotebookEditor } from "./useNotebookEditor";
@@ -532,6 +547,80 @@ export function NotebookPanel() {
         return () => element.removeEventListener("keydown", handler, true);
     }, []);
 
+    /*
+     * Ctrl/⌘ + 滚轮 = 编辑区字号缩放。
+     *
+     * 【修饰键走键位绑定，不写死 ctrlKey】判定用 `isModifierActive`（与时间轴 /
+     * 参数编辑器的滚轮修饰键同一套），它内部按平台取主修饰键：Windows / Linux 是
+     * Ctrl，macOS 是 ⌘（见 `utils/platform.ts`）。这正是"macOS 风格"的落点 ——
+     * macOS 上 Ctrl+滚轮是系统级缩放/辅助功能手势，属于应用不该抢的键。
+     *
+     * 【方向判定复用内核的那一套，不自己看 deltaY 符号】`resolveWheelZoomStep`
+     * 用"主轴 + 死区累积"：`deltaY === 0` 的纯横向手势不会被判成缩小，precision
+     * touchpad 的小幅变号增量也累积不到死区（否则表现为剧烈抖动）。增量先经
+     * `readWheelPixels` 归一化 —— Firefox 的 `deltaMode = 1`（行）不换算的话，
+     * 一格只有几个像素，永远跨不过死区。
+     *
+     * 【监听挂在面板根节点】面板的滚轮语义只属于记事本自己（富文本区、源码
+     * textarea、状态栏都在这个根节点内），因此"焦点在记事本窗口内"就等于"滚轮
+     * 落在这个节点上"。设置对话框是 portal 到 body 的，不在其内 —— 框里滚轮
+     * 仍归输入框的精细调整，不会连带缩放字号。
+     */
+    const fontZoomKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.notebookFontZoom"),
+    );
+    const fontZoomAccumulatorRef = useRef(createWheelZoomAccumulator());
+
+    /*
+     * 落盘去抖：Redux 立即更新（廉价、界面即时响应），IPC 在停止滚动后下发一次。
+     * 逐格 `saveUiSettings` 会把一次滑动变成几十次 IPC —— 与吸附设置对后端同步
+     * 的处理一致。卸载时补发，因此"滚完就关窗"不会丢。
+     */
+    const persistNotebookSettings = useDebouncedCallback((next: typeof settings) => {
+        void settingsApi.saveUiSettings({ notebook: next }).catch(() => {});
+    }, 400);
+
+    const onFontZoomWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
+        if (isNoneBinding(fontZoomKb) || !isModifierActive(fontZoomKb, event)) return;
+        /*
+         * 命中手势后每一格都要拦，包括死区里那些不产生缩放的：不拦的话 WebView
+         * 会自己缩放整个应用 —— 滚到字号上限后继续滚，界面整体变大而设置里的数
+         * 没变。
+         */
+        event.preventDefault();
+        const pixels = readWheelPixels(event, {
+            lineHeightPx: NOTEBOOK_ZOOM_LINE_HEIGHT_PX,
+            pageHeightPx: Math.max(1, containerRef.current?.clientHeight ?? 0),
+        });
+        const step = resolveWheelZoomStep({
+            accumulator: fontZoomAccumulatorRef.current,
+            deltaX: pixels.x,
+            deltaY: pixels.y,
+        });
+        fontZoomAccumulatorRef.current = step.accumulator;
+
+        const next = nextFontSizeForZoomStep(settings.sourceFontSize, step.direction);
+        if (next === null) return;
+        dispatch(patchNotebookSettings({ sourceFontSize: next }));
+        persistNotebookSettings.call({ ...settings, sourceFontSize: next });
+    };
+
+    const attachFontZoomWheel = useNonPassiveWheel<HTMLDivElement>(onFontZoomWheel);
+
+    /*
+     * 面板根节点要同时被两处使用：`containerRef`（拖放、查找的容器查询）与
+     * `useNonPassiveWheel` 的回调 ref。回调 ref 里转发给两者 —— 与本仓库
+     * 既有的"回调 ref 写 ref.current"写法一致（见 `PianoRollPanel` 的
+     * `attachRulerPlayheadLine`）。
+     */
+    const attachContainer = useCallback(
+        (element: HTMLDivElement | null) => {
+            containerRef.current = element;
+            attachFontZoomWheel(element);
+        },
+        [attachFontZoomWheel],
+    );
+
     // 保存前收尾：工程保存会把当前正文一并带上，但待写内容也要落盘，
     // 否则"刚打完字就保存"会出现后端与工程文件不一致。源码视图的待写值
     // 走自己的定时器，同样在这里冲刷。
@@ -568,7 +657,7 @@ export function NotebookPanel() {
 
     return (
         <div
-            ref={containerRef}
+            ref={attachContainer}
             className="flex h-full min-h-0 flex-col bg-qt-window"
             data-drop-active={dropActive ? "true" : "false"}
             // 字号同时作用于富文本与源码视图：两种视图的字号不一致会让模式
