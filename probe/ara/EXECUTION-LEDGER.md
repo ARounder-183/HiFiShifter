@@ -1010,4 +1010,14 @@ Task 48: Ruling: 多短clip故障在空母轨加插件后搬子轨素材时触�
 
 Task 48: Ruling: 修复版两个定向ID边界用例exit0、实际118-item副本及200个中文双声道短素材均完成空母轨搬移/保存/正常退出 — 生成many-clips-fix-01 Release，仅插件构建，不跑全量/新增review、不覆盖D:\VST，不自动push；用户原工程/音频只读 — 无新空ID拒绝或同PID崩溃，足以覆盖此次报告；不外推任意未知不合规宿主输入，诊断原始资料及用户副本仅留ignored目录。
 
+Task 49: Ruling: 用户报告参数Ctrl+V不如右键粘贴；绘制模式/换轨会命中clip.paste别名，旧插件门禁在识别参数剪贴板前拒绝，原IPlugView兜底仅转Z且keydown/keyup共用无效外层HWND消息 — 共享剪贴板先按内容/选区路由，再仅准入参数事件通道；原生C/X/V/Z/Y按SDK字符/修饰键转本view消息，由原GUI快捷键监听消费，按下/松开分开且保留repeat/输入框守卫 — 若放开别名而不校验最终通道会误改宿主几何；前端3文件22项和原生键编码1项通过，尚未在真实REAPER证明本机按键行为，不将代码合同称实机验收，短辅音不处理。
+
+Task 49: Ruling: 用户明确要求默认渐变显示弯曲且只改显示 — 新轴默认/未知宿主渐变改四分之一正弦示意，Canvas和波形继续共用visualFadeGain；已配置非零轴保持现有曲线，独立App/旧轴不变，宿主c/S、长度和PCM不改 — 若改默认音频参数或内核fade公式会改变声音；端点/单调/中点非线性及宿主元数据不变的定向合同通过，保持“示意曲线”提示。
+
+Task 49: Ruling: 新Release keyboard-fade-fix-01已构建exit0，隔离实例39096加载原GUI显示曲线；代理尚未完成按键输入时用户直接确认“ok的，我测过了”，实例随后正常消失且文档/组件析构日志完整 — 记录为用户实测验收通过，停止重复测试；不把用户确认改写成代理逐项键盘测量 — 若继续反复验收违背用户省测试要求，若捏造代理按键证据会夸大结果。
+
+Task 49: Ruling: 用户要求以后每次打包后安装到D:\VST — 覆盖旧不安装限制，仅在REAPER退出后同步整个HiFiShifter.vst3，旧版备份到ignored工作树目录，不改其它插件或自动push；写入PRODUCT-HANDOFF保证续接 — 若运行时覆盖DLL会造成混版/崩溃，若备份留在VST扫描路径会造成重复插件身份。
+
+Task 49: Ruling: 安装前实际无REAPER，目标/源均非reparse point — 完整新包已替换D:\VST\HiFiShifter.vst3，35文件数量及SHA256逐项一致，旧版移动到.build-tmp/vst-install-backups/keyboard-fade-fix-01-35b3f4f3 — 未删除旧版、未修改其它VST，未push；备份可恢复，不把只构建成功当安装成功。
+
 

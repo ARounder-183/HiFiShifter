@@ -24,6 +24,26 @@ type Pending = {
     timer: ReturnType<typeof setTimeout>;
 };
 
+/** 宿主IPlugView兜底按键继续经过原GUI监听器，保留输入框、模态及自定义键位的规则。 */
+function forwardPluginKeyboard(payload: unknown): void {
+    if (!payload || typeof payload !== "object" || typeof document === "undefined") return;
+    const key = payload as Record<string, unknown>;
+    if ((key.type !== "keydown" && key.type !== "keyup") || typeof key.key !== "string"
+        || !["c", "x", "v", "z", "y"].includes(key.key) || key.ctrlKey !== true) return;
+    const target = document.activeElement ?? document.body;
+    target.dispatchEvent(new KeyboardEvent(key.type, {
+        key: key.key,
+        code: `Key${key.key.toUpperCase()}`,
+        ctrlKey: true,
+        shiftKey: key.shiftKey === true,
+        altKey: key.altKey === true,
+        metaKey: key.metaKey === true,
+        repeat: key.repeat === true,
+        bubbles: true,
+        cancelable: true,
+    }));
+}
+
 /** 用宿主注入的view身份关联有界请求；只能绑定原生WebView消息口。 */
 export function createPluginHost(port: WebViewMessagePort, boot: PluginBootstrap): PluginHostBridge {
     if (boot.version !== 1 || !boot.viewId || boot.viewId.length > 128) {
@@ -38,6 +58,10 @@ export function createPluginHost(port: WebViewMessagePort, boot: PluginBootstrap
         if (closed || !event.data || typeof event.data !== "object") return;
         const data = event.data as Record<string, unknown>;
         if (data.version !== 1 || data.viewId !== boot.viewId) return;
+        if (data.event === "plugin_keyboard") {
+            forwardPluginKeyboard(data.payload);
+            return;
+        }
         if (typeof data.event === "string") {
             const notification = { event: data.event, id: eventId++, payload: data.payload };
             for (const handler of Array.from(listeners.get(data.event) ?? [])) {

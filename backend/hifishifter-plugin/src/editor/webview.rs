@@ -39,6 +39,7 @@ struct BrowserState {
     replies:mpsc::Receiver<serde_json::Value>,
     events:mpsc::Receiver<serde_json::Value>,
     pending:HashSet<u64>,
+    forwarded_keys:HashSet<char>,
 }
 struct WindowData {
     state: Rc<RefCell<BrowserState>>,
@@ -92,21 +93,24 @@ impl WindowKey {
         }
         unsafe { MoveWindow(HWND(self.hwnd as *mut c_void),0,0,width,height,true) }.map_err(|e| e.to_string())
     }
-    /// Host key callback fallback for chords that REAPER consumes before WebView2.
-    pub(super) fn forward_key(self, virtual_key: u16, undo: bool) -> bool {
+    /// 只向真实活WebView交付共享编辑键；不向外层HWND伪造无效Win32键盘消息。
+    pub(super) fn forward_edit_key(self, key:char, mods:i16, down:bool) -> bool {
         if unsafe { GetCurrentThreadId() } != self.thread || !self.valid() { return false; }
         let hwnd = HWND(self.hwnd as *mut c_void);
-        unsafe {
-            if undo {
-                let _ = PostMessageW(Some(hwnd), WM_KEYDOWN, WPARAM(0x11), LPARAM(0));
-                let _ = PostMessageW(Some(hwnd), WM_KEYDOWN, WPARAM(virtual_key as usize), LPARAM(0));
-                let _ = PostMessageW(Some(hwnd), WM_KEYUP, WPARAM(virtual_key as usize), LPARAM(0));
-                let _ = PostMessageW(Some(hwnd), WM_KEYUP, WPARAM(0x11), LPARAM(0));
-            } else {
-                let _ = PostMessageW(Some(hwnd), WM_KEYUP, WPARAM(virtual_key as usize), LPARAM(0));
-            }
-        }
-        true
+        let pointer=unsafe {GetWindowLongPtrW(hwnd,GWLP_USERDATA)} as *const WindowData;
+        if pointer.is_null() {return false;}
+        let state=unsafe {(*pointer).state.clone()};
+        let (controller,view_id)={let state=state.borrow();
+            if state.closed {return false;}(state.controller.clone(),state.view_id.clone())};
+        let Some(controller)=controller else {return false;};
+        let Ok(browser)=(unsafe {controller.CoreWebView2()}) else {return false;};
+        let repeat={let mut state=state.borrow_mut();
+            if !down && !state.forwarded_keys.contains(&key) {return false;}
+            if down {!state.forwarded_keys.insert(key)} else {state.forwarded_keys.remove(&key);false}};
+        let message=wide(&serde_json::json!({"version":1,"viewId":view_id,"event":"plugin_keyboard",
+            "payload":{"type":if down {"keydown"} else {"keyup"},"key":key.to_string(),
+                "ctrlKey":true,"shiftKey":mods&1!=0,"altKey":mods&2!=0,"metaKey":mods&8!=0,"repeat":repeat}}).to_string());
+        unsafe {browser.PostWebMessageAsJson(PCWSTR(message.as_ptr()))}.is_ok()
     }
 }
 impl NativeEditor {
@@ -129,7 +133,7 @@ impl NativeEditor {
         let (event_sender,events)=mpsc::sync_channel(128);
         let sink=super::session::UiSink {view_id:view_id.clone(),reply,events:event_sender,closed:Arc::new(AtomicBool::new(false))};
         let state = Rc::new(RefCell::new(BrowserState { hwnd: HWND::default(), closed: false,
-            view_id, controller: None, error_window: None, link,sink,replies,events,pending:HashSet::new() }));
+            view_id, controller: None, error_window: None, link,sink,replies,events,pending:HashSet::new(),forwarded_keys:HashSet::new() }));
         let transferred = Rc::new(Cell::new(false));
         let data = Box::into_raw(Box::new(WindowData { state: state.clone(), transferred: transferred.clone(), token }));
         let result = unsafe { CreateWindowExW(WINDOW_EX_STYLE::default(), w!("HiFiShifter.ARA.Editor"),

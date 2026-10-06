@@ -17,10 +17,18 @@ export function pluginAllowsAction(action: string, surface: string | null): bool
     if (action.startsWith("project.") || action.startsWith("transport.") || action.startsWith("recording.")
         || ["playback.toggle", "playback.stop", "playback.metronome"].includes(action)) return false;
     if (action.startsWith("track.") && !["track.selectUp", "track.selectDown", "track.toggleMute", "track.toggleSolo"].includes(action)) return false;
+    // 共享剪贴板键的别名不决定目标；换轨后clip.paste也可能粘贴参数线。
+    // 必须先解析内容/选区，再按实际事件通道拒绝宿主几何操作。
+    if (["clip.copy", "clip.cut", "clip.paste"].includes(action)) return true;
     if (action.startsWith("clip.") && surface !== "pianoRoll") return false;
     if (action.startsWith("edit.") && surface !== "pianoRoll") {
         return ["edit.undo", "edit.redo", "edit.selectAll", "edit.deselect", "edit.addClipsToParamSelection",
             "edit.removeClipsFromParamSelection"].includes(action);
     }
     return true;
+}
+
+/** 插件共享编辑快捷键只允许发给参数面板；不向宿主轨道派发几何写操作。 */
+export function pluginAllowsEditChannel(channel: string | null): channel is string {
+    return channel !== null && (!isPluginMode() || channel === "hifi:editOp");
 }

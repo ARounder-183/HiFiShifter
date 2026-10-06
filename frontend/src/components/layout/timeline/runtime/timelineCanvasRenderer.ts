@@ -51,10 +51,6 @@ function drawFadeCurveStroke(
     const widthPx = Math.max(1, args.widthPx);
     const heightPx = Math.max(1, args.heightPx);
     const hostDisplay=hostFadeDisplay(args.hostFades,args.mode==="out");
-    if (hostDisplay==="linear") {
-        ctx.beginPath();ctx.moveTo(args.leftPx,args.topPx+(args.mode==="in"?heightPx:0));
-        ctx.lineTo(args.leftPx+widthPx,args.topPx+(args.mode==="in"?0:heightPx));ctx.stroke();return;
-    }
     const shapeId = Math.trunc(Number.isFinite(args.shape) ? args.shape : 255);
     if (hostDisplay === "legacy" && shapeId === 0 && Math.abs(args.dir) < 1e-9) {
         // 直线快路径。淡入 = 增益沿 x 上升（左下→右上）；淡出相反。

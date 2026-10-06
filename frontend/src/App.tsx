@@ -13,7 +13,7 @@ import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
 import { AraConnectionPanel } from "./features/ara/AraConnectionPanel";
 import { PluginApplyPanel } from "./features/ara/PluginApplyPanel";
-import { isPluginMode, pluginAllowsAction } from "./services/hostCapabilities";
+import { isPluginMode, pluginAllowsAction, pluginAllowsEditChannel } from "./services/hostCapabilities";
 import { loadStandaloneWindowApi } from "./services/hostWindow";
 import { TimelinePanel } from "./components/layout/TimelinePanel";
 import { PianoRollPanel } from "./components/layout/PianoRollPanel";
@@ -2653,7 +2653,7 @@ function AppInner() {
                     const pasteKb = selectMergedKeybindings(store.getState())["clip.paste"];
                     if (pasteKb) {
                         beginHoldRepeat(pasteKb, () => {
-                            if (channel === "hifi:timelineEditOp") {
+                            if (channel === "hifi:timelineEditOp" && pluginAllowsEditChannel(channel)) {
                                 window.dispatchEvent(
                                     new CustomEvent(channel, { detail: { op: "paste" } }),
                                 );
@@ -2668,7 +2668,7 @@ function AppInner() {
                             // 探测失败不阻塞粘贴。
                         }
                         channel = resolvePasteRoute(kind, getActiveSurface());
-                        if (channel) {
+                        if (pluginAllowsEditChannel(channel)) {
                             window.dispatchEvent(
                                 new CustomEvent(channel, { detail: { op: "paste" } }),
                             );
@@ -2689,7 +2689,7 @@ function AppInner() {
                         paramSelectionActive: session.paramSelectionActive,
                         selectionContext: session.selectionContext,
                     });
-                    if (channel) {
+                    if (pluginAllowsEditChannel(channel)) {
                         window.dispatchEvent(new CustomEvent(channel, { detail: { op: editOp } }));
                     }
                     return;
@@ -2712,7 +2712,7 @@ function AppInner() {
                     editOp,
                     store.getState().session.toolMode,
                 );
-                if (channel) {
+                if (pluginAllowsEditChannel(channel)) {
                     window.dispatchEvent(new CustomEvent(channel, { detail: { op: editOp } }));
                 }
                 return;

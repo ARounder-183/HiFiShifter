@@ -139,23 +139,35 @@ unsafe extern "system" fn removed(this: *mut c_void) -> TResult {
     })
 }
 unsafe extern "system" fn wheel(_this: *mut c_void, _distance: f32) -> TResult { K_RESULT_FALSE }
-unsafe extern "system" fn key(this: *mut c_void, key: u16, _code: i16, mods: i16) -> TResult {
+/// 按锁定SDK的kCommandKey/ASCII虚拟键约定识别共享编辑键，不消费宿主其它快捷键。
+fn edit_key(key:u16,code:i16,mods:i16)->Option<char> {
+    if mods&4==0 || mods&2!=0 {return None;}
+    let character=if key==0 && code>=128 {code as u16-128+0x30}
+        else if (1..=26).contains(&key) {key+b'a' as u16-1} else {key};
+    let character=char::from_u32(character as u32)?.to_ascii_lowercase();
+    matches!(character,'c'|'x'|'v'|'z'|'y').then_some(character)
+}
+/// 宿主交付的编辑按键走实例内消息，交给原GUI的焦点、用户键位与撤销/粘贴路径。
+unsafe fn forward_edit_key(this:*mut c_void,key:u16,code:i16,mods:i16,down:bool)->TResult {
     boundary(|| {
-        // REAPER may consume Ctrl+Z before WebView2 sees it and call IPlugView's
-        // key callback instead. Re-inject only the undo chord into this view;
-        // all other keys retain the host's normal routing.
         #[cfg(windows)]
-        if (key == b'z' as u16 || key == b'Z' as u16) && (mods as u16 & (1 << 2)) != 0 {
+        if let Some(character)=edit_key(key,code,if down {mods} else {mods|4}) {
             let native = {
                 let state = unsafe { view(this) }.state.lock().unwrap_or_else(|e| e.into_inner());
                 state.native.as_ref().map(super::webview::NativeEditor::window_key)
             };
             if let Some(native) = native {
-                if native.forward_key(0x5a, true) { return K_RESULT_OK; }
+                if native.forward_edit_key(character,mods,down) { return K_RESULT_OK; }
             }
         }
         K_RESULT_FALSE
     })
+}
+unsafe extern "system" fn key_down(this:*mut c_void,key:u16,code:i16,mods:i16)->TResult {
+    unsafe {forward_edit_key(this,key,code,mods,true)}
+}
+unsafe extern "system" fn key_up(this:*mut c_void,key:u16,code:i16,mods:i16)->TResult {
+    unsafe {forward_edit_key(this,key,code,mods,false)}
 }
 unsafe extern "system" fn get_size(this: *mut c_void, rect: *mut ViewRect) -> TResult {
     if rect.is_null() { return K_INVALID_ARGUMENT; }
@@ -243,11 +255,22 @@ impl Drop for View {
     }
 }
 static VTBL: ViewVtbl = ViewVtbl { query, add_ref, release, platform, attached, removed, wheel,
-    key_down: key, key_up: key, get_size, on_size, focus, set_frame, can_resize, constrain };
+    key_down, key_up, get_size, on_size, focus, set_frame, can_resize, constrain };
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// REAPER交付Unicode/控制字符/SDK虚拟键时，同一Ctrl+V得到同一参数粘贴入口。
+    #[test]
+    fn host_edit_keys_follow_sdk_modifiers_and_character_encodings() {
+        for key in [b'v' as u16,b'V' as u16,22] {assert_eq!(edit_key(key,0,4),Some('v'));}
+        assert_eq!(edit_key(0,166,4),Some('v'));
+        assert_eq!(edit_key(b'z' as u16,0,5),Some('z'));
+        assert_eq!(edit_key(b'y' as u16,0,4),Some('y'));
+        assert_eq!(edit_key(b'v' as u16,0,0),None);
+        assert_eq!(edit_key(b'v' as u16,0,6),None);
+        assert_eq!(edit_key(32,0,4),None);
+    }
     #[test]
     fn actual_view_vtable_has_safe_size_and_lifetime_contracts() {
         let ptr = create_view();

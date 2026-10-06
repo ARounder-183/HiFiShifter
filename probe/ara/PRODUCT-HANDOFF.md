@@ -2,6 +2,15 @@
 
 中文工作记录，更新于 2026-10-05。此文件记录产品分支，历史探针仍见 HANDOFF.md。
 
+## 2026-10-06 用户最新部署要求（覆盖下文历史“不安装”约束）
+
+以后每次插件打包完成，都把整个 `HiFiShifter.vst3` 同步到 `D:\VST\HiFiShifter.vst3`。
+先确认 REAPER 已退出；运行时不热替换，保留新包待正常退出后安装。替换前将旧版备份
+到此 worktree 的 ignored `.build-tmp/vst-install-backups/`，不动 `D:\VST` 的其它插件，
+不自动 push。2026-10-06 用户已确认 Ctrl+V/默认弯曲渐变这一批“ok的，我测过了”；
+交付为 `.build-tmp/deliveries/keyboard-fade-fix-01/HiFiShifter.vst3`。渐变只改显示，
+短辅音静音问题仍按用户要求暂不处理。
+
 ## 当前续接：四项目标仍未全部完成
 
 当前权威是`docs/superpowers/specs/2026-10-05-ara-complete-integration-design.md`及同名plan。
