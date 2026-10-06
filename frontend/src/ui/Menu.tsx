@@ -82,6 +82,16 @@ export interface AppMenuItemSpec {
      * 收编自 ActionBar 录音菜单的手写分组行 —— 平面菜单也常有分段需求。
      */
     heading?: boolean;
+    /**
+     * 子菜单项。**给了它，这一项就变成"展开子菜单"的触发项**：
+     * `onSelect` 不再被调用，`shortcut` / `danger` / `checked` 对触发项也没有意义
+     * （它们属于子项）。子项是同样的 `AppMenuItemSpec`，因此可以任意嵌套。
+     *
+     * 【什么时候该用它】当一组项**同质且可枚举**时（"行 ▸ 上方 / 下方"、
+     * "格式 ▸ 加粗 / 倾斜 / …"）。反过来，**右键点开就想直接点的那些**不要塞进
+     * 子菜单 —— 多一次悬停就是多一次成本，`heading` 平铺反而是对的。
+     */
+    items?: AppMenuItemSpec[];
 }
 
 export interface AppContextMenuProps {
@@ -214,7 +224,6 @@ export function AppContextMenu({
             ),
         [items],
     );
-
     /**
      * 是否有任一项带图标 —— 决定是否给**所有**项预留图标列。
      *
@@ -247,6 +256,25 @@ export function AppContextMenu({
             ready: true,
         });
     }, [x, y, items.length]);
+
+    /**
+     * 本层是否有子菜单 —— 决定壳能不能裁切内容。
+     *
+     * 【为什么这是硬约束，不是样式偏好】子面板必须留在父壳**内部**（它要靠百分比
+     * 相对触发项定位），而壳默认 `max-height` + `overflow-y: auto` 会**把它裁掉**：
+     * `overflow-y: auto` 会把 `overflow-x` 一并变成 `auto`，于是伸出壳右边的子面板
+     * 被裁到只剩贴着壳右缘的那几像素。实测（表格菜单 + 「行」子菜单）：壳右缘
+     * 1332px、子面板左缘 1327px —— **可见宽度 5px**，子面板中心点上命中的是它背后
+     * 的面板工具栏，也就是**子菜单完全看不见**。
+     *
+     * 【为什么之前没被发现】`getBoundingClientRect()` 给的是**布局几何**，与裁切
+     * 无关：它照样报出 1327..1517 的完整矩形。只量几何的检查会给出假绿灯，
+     * 必须用 `elementFromPoint` 判"那里真的是不是子面板"（见浏览器验证脚本）。
+     *
+     * `hs-menu--no-scroll` 正是为此存在的（`max-height: none; overflow: visible`），
+     * 仓库里所有带子菜单的手写菜单都挂着它。
+     */
+    const hasSubmenu = useMemo(() => items.some((item) => (item.items?.length ?? 0) > 0), [items]);
 
     const step = useCallback(
         (delta: 1 | -1) => {
@@ -333,6 +361,25 @@ export function AppContextMenu({
             if (index < 0) return;
             const item = items[index];
             if (!item || item.disabled) return;
+            /*
+             * 子菜单触发项：**不关闭菜单**，改为把它展开。
+             *
+             * 触发项的展开状态住在 `AppSubMenu` 内部，父层够不着，所以这里找到它的
+             * 按钮并点一下（等同鼠标点击）。不能像普通项那样走 `onSelect` +
+             * `onClose` —— 那会让回车变成"整张菜单关掉"。
+             *
+             * 必须显式 `.click()`，不能指望原生 Enter：本层的键盘高亮是
+             * `activeIndex`（`data-active`），**焦点并不在触发项上**，没有按钮去
+             * 产生默认的 click。
+             */
+            if (item.items?.length) {
+                event.preventDefault();
+                const trigger = Array.from(
+                    ref.current?.querySelectorAll<HTMLElement>("[data-menu-key]") ?? [],
+                ).find((element) => element.dataset.menuKey === item.key);
+                trigger?.click();
+                return;
+            }
             event.preventDefault();
             item.onSelect?.();
             onClose();
@@ -340,6 +387,62 @@ export function AppContextMenu({
         document.addEventListener("keydown", onKeyActivate);
         return () => document.removeEventListener("keydown", onKeyActivate);
     }, [activeIndex, items, onClose]);
+
+    /**
+     * 渲染一层条目（递归：带 `items` 的项长成子菜单）。
+     *
+     * 【为什么抽成函数而不是内联】子菜单的子项与顶层项必须**逐字一致** —— 分隔线、
+     * 禁用态、图标列、悬停高亮都一样，否则两层会出现"顶层有分隔线、子层没有"这类
+     * 细微分裂。递归也让嵌套层数不再受代码结构限制。
+     *
+     * `activeIndex` 只对**本层**有意义：子菜单的高亮走 DOM 焦点（`useMenuKeyboard`），
+     * 因此递归时传 -1，让子项不吃父层的高亮。
+     */
+    const renderEntries = (
+        entries: AppMenuItemSpec[],
+        layerActiveIndex: number,
+        reserveIcon: boolean,
+    ): ReactNode =>
+        entries.map((item, index) => (
+            <Fragment key={item.key}>
+                {/*
+                  分组分隔线是**独立元素**，不是首项自己的上边框 —— 加在项上会
+                  让分隔处那一行比别的行高一截（见 `hs-menu__separator` 的说明）。
+                */}
+                {item.separatorBefore ? (
+                    <div className="hs-menu__separator" role="separator" />
+                ) : null}
+                {item.items?.length ? (
+                    <AppSubMenu
+                        label={item.label}
+                        icon={item.icon}
+                        itemKey={item.key}
+                        disabled={item.disabled}
+                        active={index === layerActiveIndex}
+                        reserveIcon={reserveIcon}
+                        // 嵌套子菜单时，子面板自己也不能裁切（同一条约束，逐层适用）。
+                        panelClassName={
+                            item.items.some((sub) => (sub.items?.length ?? 0) > 0)
+                                ? "hs-menu--no-scroll"
+                                : undefined
+                        }
+                    >
+                        {renderEntries(item.items, -1, reserveIcon)}
+                    </AppSubMenu>
+                ) : (
+                    <AppContextMenuItem
+                        item={item}
+                        active={index === layerActiveIndex}
+                        reserveIcon={reserveIcon}
+                        onHover={() => setActiveIndex(item.disabled ? -1 : index)}
+                        onSelect={() => {
+                            item.onSelect?.();
+                            onClose();
+                        }}
+                    />
+                )}
+            </Fragment>
+        ));
 
     return (
         <div
@@ -350,7 +453,8 @@ export function AppContextMenu({
             data-hs-floating-menu={floating ? "1" : undefined}
             // 只有需要收焦点时才可聚焦（`tabIndex=-1` 不进 Tab 序列，仅可编程聚焦）。
             tabIndex={autoFocus ? -1 : undefined}
-            className="hs-menu"
+            // 有子菜单就不能裁切（见 `hasSubmenu` 的说明）。
+            className={cx("hs-menu", hasSubmenu && "hs-menu--no-scroll")}
             style={{
                 left: position.left,
                 top: position.top,
@@ -365,29 +469,7 @@ export function AppContextMenu({
             onContextMenu={(event) => event.preventDefault()}
         >
             {header ? <div className="hs-menu__header">{header}</div> : null}
-            {items.map((item, index) => (
-                <Fragment key={item.key}>
-                    {/*
-                      分组分隔线是**独立元素**，不是首项自己的上边框 —— 加在项上会
-                      让分隔处那一行比别的行高一截（见 `hs-menu__separator` 的说明）。
-                    */}
-                    {item.separatorBefore ? (
-                        <div className="hs-menu__separator" role="separator" />
-                    ) : null}
-                    <AppContextMenuItem
-                        item={item}
-                        active={index === activeIndex}
-                        // 只要有一项带图标就为**所有**项预留图标列，否则同一张菜单
-                        // 里"有图标的项"与"没图标的项"文字左缘不齐。
-                        reserveIcon={reserveIconColumn}
-                        onHover={() => setActiveIndex(item.disabled ? -1 : index)}
-                        onSelect={() => {
-                            item.onSelect?.();
-                            onClose();
-                        }}
-                    />
-                </Fragment>
-            ))}
+            {renderEntries(items, activeIndex, reserveIconColumn)}
         </div>
     );
 }
@@ -462,7 +544,32 @@ export interface AppSubMenuProps {
      * 多出一个列宽（工具栏工具菜单里三种工具 + 预设入口并列，一眼就能看出错位）。
      */
     icon?: ReactNode;
+    /**
+     * 该项在**本层**的 key，渲染成 `data-menu-key`。
+     *
+     * 【为什么需要】`AppContextMenu` 的键盘高亮是 `activeIndex`（`data-active`），
+     * 它**不移动 DOM 焦点**（与 `useMenuKeyboard` 相反）。于是按 Enter 时焦点还在
+     * 菜单外壳上，没有一个"已获得焦点的按钮"去产生原生 click —— 回车对子菜单
+     * 触发项会**毫无反应**。父层靠这个属性把触发项找出来，显式 `.click()`。
+     */
+    itemKey?: string;
     disabled?: boolean;
+    /**
+     * 键盘高亮态（`data-active`）。
+     *
+     * 【为什么由外面传】`AppContextMenu` 用 `activeIndex` 表示"当前高亮项"（鼠标
+     * 悬停与方向键共用），而本组件原本只服务手写菜单 —— 那些菜单用**焦点**表示
+     * 高亮。两者混用时，若不把父层的下标传进来，方向键走到子菜单触发项上会
+     * **一点反馈都没有**：`activeIndex` 变了，但触发项没有 `data-active`。
+     */
+    active?: boolean;
+    /**
+     * 即使没有图标也占住图标列（与 `AppContextMenuItem` 的同名参数一致）。
+     *
+     * 同一层里只要有一项带图标，整层的文字左缘就要对齐；触发项若不自占位，
+     * 它会比兄弟行少一个列宽。
+     */
+    reserveIcon?: boolean;
     /**
      * 子面板的追加类。
      *
@@ -476,7 +583,8 @@ export interface AppSubMenuProps {
      *
      * 【为什么是 children 而不是 items】子面板里经常要放 `AppContextMenu` 装不下的
      * 东西 —— 带尾随按钮的行、滑杆、内联输入框。这与本文件顶部"手写菜单存在
-     * 的理由"是同一条。
+     * 的理由"是同一条。（`AppContextMenu` 的 `items` API 另有 `items` 字段做嵌套，
+     * 走的是本组件。）
      */
     children: ReactNode;
 }
@@ -496,7 +604,10 @@ export function AppSubMenu({
     label,
     badge,
     icon,
+    itemKey,
     disabled = false,
+    active = false,
+    reserveIcon = false,
     panelClassName,
     children,
 }: AppSubMenuProps) {
@@ -556,6 +667,10 @@ export function AppSubMenu({
                 role="menuitem"
                 className="hs-menu__item"
                 disabled={disabled}
+                data-menu-key={itemKey}
+                // 父层的键盘高亮（`activeIndex`）与鼠标悬停走同一条 CSS 规则，
+                // 因此这里只要如实标出"当前高亮的是这一项"。
+                data-active={active && !disabled ? "1" : undefined}
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                     e.stopPropagation();
@@ -565,7 +680,11 @@ export function AppSubMenu({
                 aria-expanded={open}
             >
                 <span className="flex min-w-0 items-center gap-2">
-                    {icon ? <span className="hs-menu__icon">{icon}</span> : null}
+                    {icon ? (
+                        <span className="hs-menu__icon">{icon}</span>
+                    ) : reserveIcon ? (
+                        <span className="hs-menu__icon" aria-hidden />
+                    ) : null}
                     <span className="hs-menu__label-text">{label}</span>
                     {badge ? (
                         <span className="text-qt-micro leading-none rounded bg-black/20 px-1 py-0.5 opacity-70 max-w-[9rem] truncate">

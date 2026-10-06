@@ -108,9 +108,10 @@ test("图片菜单含通用复制组（并入 builder 后新增的能力）", as
     const { items } = await openImageMenu();
     const text = items.join("\n");
     expect(text).toContain("Cut");
-    expect(text).toContain("Copy as Markdown");
-    expect(text).toContain("Copy as plain text");
     expect(text).toContain("Select All");
+    // "复制为…" 现在是子菜单：变体在展开后才出现（顶层只留一个触发项）。
+    expect(text).toContain("Copy as");
+    expect(text).not.toContain("Copy as Markdown");
 });
 
 test("图片菜单不含只对文本有意义的项", async () => {

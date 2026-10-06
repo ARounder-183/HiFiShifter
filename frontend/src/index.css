@@ -930,9 +930,14 @@ textarea {
     cursor: pointer;
 }
 
-/* 悬停与键盘高亮**同色**：鼠标划过去与方向键走过去必须是同一种反馈，
-   否则键盘用户看到的是另一套界面。 */
+/* 悬停、键盘高亮、焦点**同色**：鼠标划过去、方向键走过去、焦点落上去，必须是
+   同一种反馈，否则键盘用户看到的是另一套界面。
+
+   `:focus` 这一条是给**子菜单**用的：`AppSubMenu` 的子面板由 `useMenuKeyboard`
+   导航，而它用真实 DOM 焦点表示"当前项"（外层 `AppContextMenu` 用的是
+   `data-active`）。少了这条，子菜单里按方向键会**焦点在动、界面毫无反应**。 */
 .hs-menu__item:hover:not(:disabled):not([aria-disabled="true"]),
+.hs-menu__item:focus,
 .hs-menu__item[data-active="1"] {
     background: var(--qt-menu-item-hover);
 }

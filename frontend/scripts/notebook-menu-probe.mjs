@@ -200,8 +200,142 @@ return {
 `,
         },
     ],
+    /** 诊断：子菜单触发项是否带上了 data-menu-key（键盘展开要靠它定位）。 */
+    attr: [
+        ...SETUP,
+        ...probe("td p", 6, 8),
+        {
+            type: "eval",
+            js: `
+const menu = document.querySelector('[role="menu"]');
+return {
+    keys: Array.from(menu.querySelectorAll('[data-menu-key]')).map((e) => e.dataset.menuKey),
+    items: menu.querySelectorAll('.hs-menu__item').length,
+};
+`,
+        },
+    ],
     /** 正文普通段落（不在任何特殊节点上）。 */
     text: [...SETUP, ...probe("p", 30, 8)],
+    /**
+     * 纯键盘走通子菜单：Home 到「行」→ Enter 展开 → ArrowDown 在子面板里移动。
+     *
+     * 【为什么必须在真浏览器里验】jsdom **不实现**"按钮获得焦点时按 Enter 会派发
+     * click"这条默认行为，所以"回车展开子菜单"在单测里根本测不出来 —— 而它依赖的
+     * 恰恰就是那个原生 click（`AppContextMenu` 对触发项刻意不拦截 Enter，见那里的
+     * 注释）。子面板内部的导航同理：它走 DOM 焦点，也要真浏览器才成立。
+     */
+    keyboardSubmenu: [
+        ...SETUP,
+        {
+            type: "eval",
+            js: `
+window.__keyLog = [];
+document.addEventListener('keydown', (e) => {
+    window.__keyLog.push({ key: e.key, prevented: e.defaultPrevented });
+});
+return 'hooked';
+`,
+        },
+        // 对照组：菜单还没打开时先敲一下，确认键盘事件确实能到达页面。
+        { type: "key", key: "ArrowDown" },
+        { type: "wait", ms: 150 },
+        { type: "eval", js: "return { controlLog: window.__keyLog.slice() };" },
+        ...probe("td p", 6, 8),
+        { type: "key", key: "Home" },
+        { type: "wait", ms: 150 },
+        { type: "eval", js: "return { afterOpen: window.__keyLog.slice() };" },
+        { type: "key", key: "Enter" },
+        { type: "wait", ms: 250 },
+        {
+            type: "eval",
+            js: `
+const sub = document.querySelector('.hs-menu--submenu');
+return { openedByEnter: !!sub, panels: document.querySelectorAll('[role="menu"]').length, log: window.__keyLog.slice() };
+`,
+        },
+        // 子面板里的方向键：走 DOM 焦点，且高亮必须**看得见**（`:focus` 那条 CSS）。
+        { type: "key", key: "ArrowDown" },
+        { type: "wait", ms: 150 },
+        {
+            type: "eval",
+            js: `
+const sub = document.querySelector('.hs-menu--submenu');
+const focused = document.activeElement;
+return {
+    focusedInSub: !!(sub && focused && sub.contains(focused)),
+    focusedText: focused ? (focused.textContent || '').trim() : null,
+    focusedBackground: focused ? getComputedStyle(focused).backgroundColor : null,
+};
+`,
+        },
+    ],
+    /**
+     * 表格落点 + 展开「行」子菜单。
+     *
+     * 读回三层信息：顶层项数（层级改造后应显著变短）、子面板是否存在且是**独立**
+     * 的菜单表面、以及两者的几何（子面板必须落在外层右侧且不出视口）。
+     */
+    submenu: [
+        ...SETUP,
+        ...probe("td p", 6, 8),
+        {
+            type: "eval",
+            js: `
+const outer = document.querySelector('[role="menu"]');
+// 属于本层的项：子菜单触发项被包在自己的 div 里，:scope > .hs-menu__item
+// 数不到它们，所以按 closest([role=menu]) 判归属（与 useMenuKeyboard 同口径）。
+const topLevel = (menu) =>
+    Array.from(menu.querySelectorAll('.hs-menu__item')).filter(
+        (b) => b.closest('[role="menu"]') === menu,
+    ).length;
+const trigger = Array.from(outer.querySelectorAll('.hs-menu__item'))
+    .find((b) => (b.textContent || '').trim() === '行');
+if (!trigger) return { found: false, topLevel: topLevel(outer) };
+// 悬停展开（真实用户的主要路径）。
+trigger.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+trigger.parentElement.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+return {
+    found: true,
+    topLevel: topLevel(outer),
+    triggerRect: (() => { const r = trigger.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }; })(),
+};
+`,
+        },
+        { type: "wait", ms: 250 },
+        {
+            type: "eval",
+            js: `
+const outer = document.querySelector('[role="menu"]');
+const panels = Array.from(document.querySelectorAll('[role="menu"]'));
+const sub = document.querySelector('.hs-menu--submenu');
+if (!sub) return { opened: false, panels: panels.length };
+const r = sub.getBoundingClientRect();
+const outerRect = outer.getBoundingClientRect();
+/*
+ * 【必须用 elementFromPoint，不能只看矩形】子面板被父壳的 overflow 裁掉时，
+ * getBoundingClientRect 照样报出完整矩形（那是**布局几何**，与裁切无关）——
+ * 曾经因此放过了"子菜单只露出 5px、实际完全看不见"的缺陷。这里改判"子面板
+ * 中心点上真的是不是子面板"。
+ */
+const midX = Math.round(r.left + r.width / 2);
+const midY = Math.round(r.top + r.height / 2);
+const hit = document.elementFromPoint(midX, midY);
+return {
+    opened: true,
+    panels: panels.length,
+    subItems: Array.from(sub.querySelectorAll('.hs-menu__item')).map((b) => (b.textContent || '').trim()),
+    subRightOfOuter: r.left >= outerRect.left,
+    insideViewport: r.right <= window.innerWidth && r.bottom <= window.innerHeight,
+    // 真正可见：中心点上命中的元素必须属于子面板。
+    actuallyVisible: !!(hit && hit.closest('.hs-menu--submenu')),
+    hitText: hit ? (hit.textContent || '').trim().slice(0, 20) : null,
+    outerOverflowY: getComputedStyle(outer).overflowY,
+    box: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+};
+`,
+        },
+    ],
     /**
      * 菜单打开时按方向键：菜单高亮与编辑器光标是否**同时**动。
      *

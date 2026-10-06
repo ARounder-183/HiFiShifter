@@ -234,11 +234,6 @@ function makeItem(
     };
 }
 
-/** 分组标题行。 */
-function headingItem(key: string, label: string): AppMenuItemSpec {
-    return { key, label, heading: true };
-}
-
 /**
  * 解析标记：丢掉空项、合并相邻分隔线、剥掉首尾分隔线。
  *
@@ -268,7 +263,7 @@ export function assemble(entries: MenuEntry[]): AppMenuItemSpec[] {
  */
 export function buildNotebookContextMenu(ctx: NotebookMenuContext): AppMenuItemSpec[] {
     if (ctx.surface === "source") return buildSourceMenu(ctx);
-    return buildEditorMenu(ctx);
+    return assemble(buildEditorMenu(ctx));
 }
 
 /**
@@ -294,7 +289,7 @@ function buildSourceMenu(ctx: NotebookMenuContext): AppMenuItemSpec[] {
     ]);
 }
 
-function buildEditorMenu(ctx: NotebookMenuContext): AppMenuItemSpec[] {
+function buildEditorMenu(ctx: NotebookMenuContext): MenuEntry[] {
     const { flags, target } = ctx.context;
     const t = ctx.translate;
     const editable = flags.editable;
@@ -302,6 +297,8 @@ function buildEditorMenu(ctx: NotebookMenuContext): AppMenuItemSpec[] {
     /** 空选区时剪切/复制不可用，并说明原因（而不是静默无反应）。 */
     const selectionReason = flags.selectionEmpty ? t("notebook_ctx_need_selection") : undefined;
     const inList = target.kind === "list";
+    /** 暂存块自带一条 `notebook_clip_copy_markdown`（同为 "Copy as Markdown"）。 */
+    const suppressCopyVariants = target.kind === "clip";
 
     const entries: MenuEntry[] = [...targetGroup(ctx), SEPARATOR];
 
@@ -321,6 +318,9 @@ function buildEditorMenu(ctx: NotebookMenuContext): AppMenuItemSpec[] {
     }
 
     // ── 剪贴板 ────────────────────────────────────────────────────────────
+    //
+    // 剪切 / 复制 / 粘贴留在**顶层**：它们是这张菜单里最常点的三条，藏进子菜单
+    // 等于每次多一次悬停。"为…"变体才是子菜单的料 —— 同质、可枚举、用得少。
     if (editable) {
         entries.push(
             makeItem(ctx, "cut", "menu_cut", {
@@ -335,23 +335,23 @@ function buildEditorMenu(ctx: NotebookMenuContext): AppMenuItemSpec[] {
             disabledReason: selectionReason,
         }),
     );
-    // 暂存块自带一条 `notebook_clip_copy_markdown`（同为 "Copy as Markdown"）。
-    // 同一张菜单里两条一模一样的标签，用户分不清哪条作用于选区、哪条作用于
-    // 整个块 —— 所以落在暂存块上时不发通用那一条。
-    if (target.kind !== "clip") {
+    if (!compactScope && !suppressCopyVariants) {
+        // 同一张菜单里出现两条一模一样的 "Copy as Markdown"（一条作用于选区、
+        // 一条作用于整个块），用户分不清 —— 落在暂存块上时不发通用那条。
         entries.push(
-            makeItem(ctx, "copyMarkdown", "notebook_ctx_copy_markdown", {
-                disabledReason: selectionReason,
-            }),
-            makeItem(ctx, "copyPlain", "notebook_ctx_copy_plain", {
-                disabledReason: selectionReason,
-            }),
+            submenu(ctx, "copy-as", "notebook_ctx_copy_as", [
+                makeItem(ctx, "copyMarkdown", "notebook_ctx_copy_markdown", {
+                    disabledReason: selectionReason,
+                }),
+                makeItem(ctx, "copyPlain", "notebook_ctx_copy_plain", {
+                    disabledReason: selectionReason,
+                }),
+            ]),
         );
     }
 
     if (editable) {
         entries.push(
-            SEPARATOR,
             makeItem(ctx, "paste", "menu_paste", { shortcut: NOTEBOOK_MENU_SHORTCUTS.paste }),
         );
         // 三档"粘贴为…"是**单次覆盖**：它们顶掉设置里的 `plainPasteMode` /
@@ -359,10 +359,12 @@ function buildEditorMenu(ctx: NotebookMenuContext): AppMenuItemSpec[] {
         // 不该顺手改掉他所有的粘贴行为。
         if (!compactScope) {
             entries.push(
-                makeItem(ctx, "pastePlain", "notebook_ctx_paste_plain"),
-                makeItem(ctx, "pasteMarkdown", "notebook_ctx_paste_markdown"),
-                makeItem(ctx, "pasteImage", "notebook_ctx_paste_image"),
-                makeItem(ctx, "stageClipboard", "notebook_toolbar_stage_clipboard"),
+                submenu(ctx, "paste-as", "notebook_ctx_paste_as", [
+                    makeItem(ctx, "pastePlain", "notebook_ctx_paste_plain"),
+                    makeItem(ctx, "pasteMarkdown", "notebook_ctx_paste_markdown"),
+                    SEPARATOR,
+                    makeItem(ctx, "pasteImage", "notebook_ctx_paste_image"),
+                ]),
             );
         }
     }
@@ -375,70 +377,82 @@ function buildEditorMenu(ctx: NotebookMenuContext): AppMenuItemSpec[] {
     );
 
     // ── 格式 / 段落 / 插入（仅富文本可编辑 + full 档） ──────────────────────
+    //
+    // 这三组是"同质且可枚举"的典型：加粗/倾斜/删除线/行内代码、四种块类型、
+    // 七种插入物。平铺时它们合起来占二十多行，把整张菜单撑到接近满屏高度；
+    // 收进子菜单后顶层只剩三行，而每一项离用户仍只有一次悬停。
     if (editable && !compactScope) {
-        const formatItems = [
-            makeItem(ctx, "bold", "notebook_ctx_bold", {
-                shortcut: NOTEBOOK_MENU_SHORTCUTS.bold,
-                checked: flags.isBold,
-            }),
-            makeItem(ctx, "italic", "notebook_ctx_italic", {
-                shortcut: NOTEBOOK_MENU_SHORTCUTS.italic,
-                checked: flags.isItalic,
-            }),
-            makeItem(ctx, "strike", "notebook_ctx_strike", {
-                shortcut: NOTEBOOK_MENU_SHORTCUTS.strike,
-                checked: flags.isStrike,
-            }),
-            makeItem(ctx, "code", "notebook_ctx_inline_code", {
-                shortcut: NOTEBOOK_MENU_SHORTCUTS.code,
-                checked: flags.isCode,
-            }),
-            SEPARATOR,
-            makeItem(ctx, "clearFormatting", "notebook_ctx_clear_formatting", {
-                disabledReason: flags.hasMarks ? undefined : t("notebook_ctx_no_formatting"),
-            }),
-        ];
-        pushGroup(entries, "__group-format", t("notebook_ctx_group_format"), formatItems);
+        entries.push(
+            submenu(ctx, "format", "notebook_ctx_group_format", [
+                makeItem(ctx, "bold", "notebook_ctx_bold", {
+                    shortcut: NOTEBOOK_MENU_SHORTCUTS.bold,
+                    checked: flags.isBold,
+                }),
+                makeItem(ctx, "italic", "notebook_ctx_italic", {
+                    shortcut: NOTEBOOK_MENU_SHORTCUTS.italic,
+                    checked: flags.isItalic,
+                }),
+                makeItem(ctx, "strike", "notebook_ctx_strike", {
+                    shortcut: NOTEBOOK_MENU_SHORTCUTS.strike,
+                    checked: flags.isStrike,
+                }),
+                makeItem(ctx, "code", "notebook_ctx_inline_code", {
+                    shortcut: NOTEBOOK_MENU_SHORTCUTS.code,
+                    checked: flags.isCode,
+                }),
+                SEPARATOR,
+                makeItem(ctx, "clearFormatting", "notebook_ctx_clear_formatting", {
+                    disabledReason: flags.hasMarks ? undefined : t("notebook_ctx_no_formatting"),
+                }),
+            ]),
+        );
 
-        // 缩进 / 凸排只在**不在列表落点**时进这一组：列表落点已经在最上面
-        // 给过它们了，同一张菜单里出现两条同名项既冗余、又会让 React 的
-        // `key` 撞车（两条都叫 `indent`）。
-        const blockItems = [
-            makeItem(ctx, "heading1", "notebook_toolbar_heading1", {
-                checked: flags.headingLevel === 1,
-            }),
-            makeItem(ctx, "heading2", "notebook_toolbar_heading2", {
-                checked: flags.headingLevel === 2,
-            }),
-            makeItem(ctx, "heading3", "notebook_toolbar_heading3", {
-                checked: flags.headingLevel === 3,
-            }),
-            makeItem(ctx, "paragraph", "notebook_toolbar_paragraph", {
-                checked: flags.headingLevel === null,
-            }),
-            ...(inList
-                ? []
-                : [
-                      SEPARATOR,
-                      makeItem(ctx, "indent", "notebook_ctx_indent", {
-                          disabledReason: flags.canIndent
-                              ? undefined
-                              : t("notebook_ctx_cannot_indent"),
-                      }),
-                      makeItem(ctx, "outdent", "notebook_ctx_outdent"),
-                  ]),
-        ];
-        pushGroup(entries, "__group-block", t("notebook_ctx_group_block"), blockItems);
+        entries.push(
+            submenu(ctx, "block", "notebook_ctx_group_block", [
+                makeItem(ctx, "heading1", "notebook_toolbar_heading1", {
+                    checked: flags.headingLevel === 1,
+                }),
+                makeItem(ctx, "heading2", "notebook_toolbar_heading2", {
+                    checked: flags.headingLevel === 2,
+                }),
+                makeItem(ctx, "heading3", "notebook_toolbar_heading3", {
+                    checked: flags.headingLevel === 3,
+                }),
+                makeItem(ctx, "paragraph", "notebook_toolbar_paragraph", {
+                    checked: flags.headingLevel === null,
+                }),
+                // 缩进 / 凸排只在**不在列表落点**时进这一组：列表落点已经在最上面
+                // 给过它们了，同一张菜单里出现两条同名项既冗余、又会让 React 的
+                // `key` 撞车（两条都叫 `indent`）。
+                ...(inList
+                    ? []
+                    : [
+                          SEPARATOR,
+                          makeItem(ctx, "indent", "notebook_ctx_indent", {
+                              disabledReason: flags.canIndent
+                                  ? undefined
+                                  : t("notebook_ctx_cannot_indent"),
+                          }),
+                          makeItem(ctx, "outdent", "notebook_ctx_outdent"),
+                      ]),
+            ]),
+        );
 
-        pushGroup(entries, "__group-insert", t("notebook_ctx_group_insert"), [
-            makeItem(ctx, "insertImage", "notebook_toolbar_image"),
-            makeItem(ctx, "insertTable", "notebook_toolbar_table"),
-            makeItem(ctx, "insertRule", "notebook_toolbar_rule"),
-            SEPARATOR,
-            makeItem(ctx, "insertTimecode", "notebook_toolbar_timecode"),
-            makeItem(ctx, "insertClipReference", "notebook_toolbar_clip_ref"),
-            makeItem(ctx, "insertProjectInfo", "notebook_toolbar_project_info"),
-        ]);
+        entries.push(
+            submenu(ctx, "insert", "notebook_ctx_group_insert", [
+                makeItem(ctx, "insertImage", "notebook_toolbar_image"),
+                makeItem(ctx, "insertTable", "notebook_toolbar_table"),
+                makeItem(ctx, "insertRule", "notebook_toolbar_rule"),
+                SEPARATOR,
+                makeItem(ctx, "insertTimecode", "notebook_toolbar_timecode"),
+                makeItem(ctx, "insertClipReference", "notebook_toolbar_clip_ref"),
+                makeItem(ctx, "insertProjectInfo", "notebook_toolbar_project_info"),
+                // "把剪贴板里的载荷暂存成一块"是**插入**行为，不是粘贴的变体 ——
+                // 放在这里与其它插入物同组，语义才对得上。
+                SEPARATOR,
+                makeItem(ctx, "stageClipboard", "notebook_toolbar_stage_clipboard"),
+            ]),
+        );
     }
 
     entries.push(
@@ -446,19 +460,24 @@ function buildEditorMenu(ctx: NotebookMenuContext): AppMenuItemSpec[] {
         makeItem(ctx, "find", "notebook_ctx_find", { shortcut: NOTEBOOK_MENU_SHORTCUTS.find }),
     );
 
-    return assemble(entries);
+    return entries;
 }
 
-/** 追加一个分组；整组都是空项时连标题一起省掉（不留一个孤零零的小标题）。 */
-function pushGroup(
-    entries: MenuEntry[],
-    headingKey: string,
-    headingLabel: string,
-    items: MenuEntry[],
-): void {
-    const resolved = assemble(items);
-    if (resolved.length === 0) return;
-    entries.push(SEPARATOR, headingItem(headingKey, headingLabel), ...items);
+/**
+ * 造一个子菜单项。
+ *
+ * 子项全空时返回 null —— 与 `assemble` 丢掉空项同一约定：一个点开才发现是空的
+ * 触发项，比没有这一项更糟。
+ */
+function submenu(
+    ctx: NotebookMenuContext,
+    key: string,
+    labelKey: MessageKey,
+    children: MenuEntry[],
+): MenuEntry {
+    const resolved = assemble(children);
+    if (resolved.length === 0) return null;
+    return { key, label: ctx.translate(labelKey), items: resolved };
 }
 
 /**
@@ -490,19 +509,31 @@ function targetGroup(ctx: NotebookMenuContext): MenuEntry[] {
             // 只读预览里表格不可编辑，整组省掉（不是置灰 —— 置灰六项会让人
             // 以为是暂时的）。
             if (!editable) return [];
+            /*
+             * 行 / 列各自成组，而不是把八项平铺。
+             *
+             * 平铺时这一组自己就占十一行（八项 + 三条分隔线），叠在通用部分上
+             * 让整张菜单接近满屏高 —— 而"在上方插入行"与"删除当前行"本来是
+             * 同一根轴上的操作，用户找的是**行**还是**列**，不是一个动词。
+             * 按轴分组后顶层只剩五行，找"删除列"也不必先扫过四个插入项。
+             */
             return [
-                makeItem(ctx, "tableRowAbove", "notebook_ctx_table_row_above"),
-                makeItem(ctx, "tableRowBelow", "notebook_ctx_table_row_below"),
-                SEPARATOR,
-                makeItem(ctx, "tableColLeft", "notebook_ctx_table_col_left"),
-                makeItem(ctx, "tableColRight", "notebook_ctx_table_col_right"),
-                SEPARATOR,
+                submenu(ctx, "table-rows", "notebook_ctx_table_rows", [
+                    makeItem(ctx, "tableRowAbove", "notebook_ctx_table_row_above"),
+                    makeItem(ctx, "tableRowBelow", "notebook_ctx_table_row_below"),
+                    SEPARATOR,
+                    makeItem(ctx, "tableDeleteRow", "notebook_ctx_table_delete_row"),
+                ]),
+                submenu(ctx, "table-cols", "notebook_ctx_table_cols", [
+                    makeItem(ctx, "tableColLeft", "notebook_ctx_table_col_left"),
+                    makeItem(ctx, "tableColRight", "notebook_ctx_table_col_right"),
+                    SEPARATOR,
+                    makeItem(ctx, "tableDeleteCol", "notebook_ctx_table_delete_col"),
+                ]),
                 makeItem(ctx, "tableToggleHeader", "notebook_ctx_table_header_row", {
                     checked: target.inHeaderRow,
                 }),
                 SEPARATOR,
-                makeItem(ctx, "tableDeleteRow", "notebook_ctx_table_delete_row"),
-                makeItem(ctx, "tableDeleteCol", "notebook_ctx_table_delete_col"),
                 makeItem(ctx, "tableDelete", "notebook_ctx_table_delete", { danger: true }),
             ];
 
