@@ -341,6 +341,7 @@ fn deliver(state:&Rc<RefCell<BrowserState>>) {
                 if allowed&&host.editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink:state.sink.clone(),link:Some(state.link.clone())}).is_ok() {return false;}
             }
             if waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("item was created in REAPER but its ARA audio is not ready; use host Undo if canceling");}
+            if !waiting&&host.imported.is_some() {reply["value"]["imported_clip_id"]=serde_json::json!(imported);}
         }
         let done_history=state.history_requests.remove(&id);let view_id=state.view_id.clone();
         let document=state.host_replies.remove(&id).and_then(|host|host.document.upgrade());state.pending.remove(&id);drop(state);
@@ -480,9 +481,23 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
         args.WebMessageAsJson(&mut json)?;
         let text = CoTaskMemPWSTR::from(json).to_string();
         if text.len() > 1024*1024 { return Ok(()); }
-        let Ok(request) = serde_json::from_str::<serde_json::Value>(&text) else { return Ok(()); };
+        let Ok(mut request) = serde_json::from_str::<serde_json::Value>(&text) else { return Ok(()); };
         if request["version"] != 1 || request["viewId"] != view_id { return Ok(()); }
         let Some(id) = request["id"].as_u64().filter(|id| *id > 0 && *id <= 9_007_199_254_740_991) else { return Ok(()); };
+        // DOM File不经base64复制音频；路径仅从WebView2提供的真实File对象读取。
+        if request["command"]=="import_native_audio_file" {
+            let path=(||->Result<String,String>{
+                if request.get("args").is_some_and(|value|!value.is_object()&&!value.is_null()) {return Err("native File args must be an object".into());}
+                let extra:ICoreWebView2WebMessageReceivedEventArgs2=args.cast().map_err(|_|"native File bridge unavailable")?;
+                let objects=extra.AdditionalObjects().map_err(|e|e.to_string())?;let mut count=0;objects.Count(&mut count).map_err(|e|e.to_string())?;
+                if count!=1 {return Err("exactly one native File is required".into());}
+                let file:ICoreWebView2File=objects.GetValueAtIndex(0).map_err(|e|e.to_string())?.cast().map_err(|_|"additional object is not a disk File")?;
+                let mut path=PWSTR::null();file.Path(&mut path).map_err(|e|e.to_string())?;
+                let path=CoTaskMemPWSTR::from(path).to_string();if !std::path::Path::new(&path).is_absolute() {return Err("dragged File has no native disk path; use File menu import".into());}Ok(path)
+            })();
+            match path {Ok(path)=>{request["command"]=serde_json::json!("import_audio_item");request["args"]["audioPath"]=serde_json::json!(path);},
+                Err(error)=>{let reply=wide(&serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":false,"error":error}).to_string());browser.PostWebMessageAsJson(PCWSTR(reply.as_ptr()))?;return Ok(());}}
+        }
         // 普通命令只排队；UI回调不得分析、推理、读文件或等待worker。
         let result = match request["command"].as_str() {
             Some("ping") => Ok(serde_json::json!({"ok":true,"mode":"plugin","view_id":view_id,
@@ -494,9 +509,9 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
                 let link=state.borrow().link.clone();( ||->Result<serde_json::Value,String>{
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
                     let host=owner.project_history_host().filter(|host|host.can_import_audio()).ok_or("host audio import is unavailable")?;
-                    let path=host.pick_audio(&||link.authorize(&document).is_ok_and(|current|current==lease))?;
-                    Ok(if command=="open_audio_dialog_multi" {serde_json::json!({"ok":true,"canceled":path.is_none(),"paths":path.into_iter().collect::<Vec<_>>()})}
-                        else {serde_json::json!({"ok":true,"canceled":path.is_none(),"path":path})})
+                    let paths=host.pick_audio_paths(command=="open_audio_dialog_multi",&||link.authorize(&document).is_ok_and(|current|current==lease))?;
+                    Ok(if command=="open_audio_dialog_multi" {serde_json::json!({"ok":true,"canceled":paths.is_empty(),"paths":paths})}
+                        else {serde_json::json!({"ok":true,"canceled":paths.is_empty(),"path":paths.first()})})
                 })()
             },
             Some("import_audio_item")=>{
@@ -508,11 +523,17 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
                     if input["mediaAudioStreamIndex"].as_u64().is_some_and(|index|index!=0) {return Err("specific container audio stream import is not supported yet".into());}
                     let track=input["trackId"].as_str().map(|id|editor.host_track_id(id)).transpose()?;
                     let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);
-                    let target=owner.audio_import_target(track.as_deref(),&allowed)?;
                     let host=owner.project_history_host().ok_or("import project history missing")?;
+                    let new_track=input["trackId"].is_null()&&input.as_object().is_some_and(|object|object.contains_key("trackId"));
+                    let existing=if new_track {None} else {Some(owner.audio_import_target(track.as_deref(),&allowed)?)};
                     state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
                     document.host_undo.begin_request(&view_id,id,true,true,&host,&allowed)?;
-                    let result=target.import_audio(path,input["startSec"].as_f64().unwrap_or_else(||owner.clock.get().map(|clock|clock.read().0).unwrap_or(0.)),&allowed);
+                    let result=(||->Result<String,String>{
+                        let mut created=if new_track {Some(host.create_audio_track(std::path::Path::new(path).file_stem().and_then(|name|name.to_str()).unwrap_or("Imported audio"),&allowed)?)} else {None};
+                        let target=existing.as_ref().or_else(||created.as_ref().map(|track|&track.target)).ok_or("import target missing")?;
+                        let id=target.import_audio(path,input["startSec"].as_f64().unwrap_or_else(||owner.clock.get().map(|clock|clock.read().0).unwrap_or(0.)),&allowed)?;
+                        if let Some(track)=&mut created {track.commit();}Ok(id)
+                    })();
                     document.host_undo.finish_request(&view_id,id);let imported=result?;
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:Some(imported)})

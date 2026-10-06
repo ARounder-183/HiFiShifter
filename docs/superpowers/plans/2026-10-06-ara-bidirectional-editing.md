@@ -42,6 +42,14 @@ Undo/Redo/位置跳转先经actor FIFO屏障；块收尾/getState期间只暂缓
 实际绑定ARA region。UTF-8/源所有权与take创建失败清理2项合同通过，能力门4项通过。
 新建轨导入、原生DOM File拖入/多文件流程还未接；不降格为只支持单文件关闭Batch C。
 
+后续本批已补上述链路：现代GetUserFileName(mode=2)多选，WebView2额外File对象读取
+磁盘Path、不发送base64音频；原GUI across-time/across-tracks流程串行等宿主确切新clip。
+新轨通过所属project的InsertTrackInProject创建，以创建前后唯一GUID差集识别，不借活动
+project或按位置猜；TrackFX_AddByName强制HFS第一个FX。失败只在空轨且仍仅有自己FX
+GUID时回滚；已加入其它用户内容则保留真实Undo。4项host_media、4项File/插件多导入及
+旧App导入命名4项、tsc通过。取消导入不带旧快照回灌；多Take导入本批未实现，明确报错。
+尚无真实REAPER/冷重开/跨工程结果，Batch C验收仍不勾。
+
 ## Batch D：渐变
 
 - [ ] 先在隔离工程验证content-fades委托后宿主不重复fade、item长度仍保留。
@@ -59,4 +67,5 @@ Undo/Redo/位置跳转先经actor FIFO屏障；块收尾/getState期间只暂缓
 当前：目标已建立，官方mute/相关setter签名已核对；Batch A两项定向合同exit0，
 覆盖有效mute/solo覆盖、另一region隔离、实际process实时/离线静音与解除后的原PCM，
 零分配和尾哨兵。未声称真实REAPER/关闭GUI门通过；Batch B已接基础写链路与共享撤销，
-Batch C已接文件菜单单文件主链路，B-E整体尚未完成。下一批补拖入/新轨与渐变委托门。
+Batch C已接文件菜单/拖入/多文件/新轨主链路，B-E整体尚未完成。下一批推进渐变委托门，
+集中验证实际宿主回流与关闭GUI的mute，不把typed fixture当实机完成。

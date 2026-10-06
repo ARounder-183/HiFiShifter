@@ -8,6 +8,7 @@ use std::ffi::{c_char, c_void};
 pub(crate) use write::{HostClipTarget,HostUndoBlock};
 #[path="reaper_media.rs"]mod media;
 pub(crate) use media::HostTrackTarget;
+pub(crate) use media::CreatedTrack;
 
 const IID: [u32; 4] = [0x79655E36, 0x77EE4267, 0xA573FEF7, 0x4912C27C];
 #[repr(C)]
@@ -68,6 +69,7 @@ pub(crate) struct ReaperHost {
     write:Option<write::WriteApi>,
     history:Option<write::HistoryApi>,
     media:Option<media::MediaApi>,
+    extended_media:Option<media::ExtendedMedia>,
     validate: Option<Validate>,
     fade_axes_new: Option<bool>,
 }
@@ -155,6 +157,13 @@ impl ReaperHost {
         let marker = lookup!(c"GetTakeStretchMarker", Marker);
         let slope = lookup!(c"GetTakeStretchMarkerSlope", Slope);
         let change = lookup!(c"GetProjectStateChangeCount", PlayState);
+        let tracks=match (lookup!(c"InsertTrackInProject",media::InsertTrack),lookup!(c"CountTracks",media::CountTracks),lookup!(c"GetTrack",media::GetTrack),
+            lookup!(c"TrackFX_AddByName",media::AddFx),lookup!(c"DeleteTrack",media::DeleteTrack),lookup!(c"CountTrackMediaItems",media::TrackCount),
+            lookup!(c"TrackFX_GetCount",media::TrackCount),lookup!(c"TrackFX_GetFXGUID",media::FxGuid)) {
+            (Some(insert),Some(count),Some(get),Some(add_fx),Some(delete),Some(item_count),Some(fx_count),Some(fx_guid))=>
+                Some(media::NewTrackApi {insert,count,get,add_fx,delete,item_count,fx_count,fx_guid}),_=>None,
+        };
+        let extended_media=Some(media::ExtendedMedia {picker:lookup!(c"GetUserFileName",media::MultiPicker),tracks});
         let media=match (lookup!(c"PCM_Source_CreateFromFileEx",media::CreateSource),lookup!(c"PCM_Source_Destroy",media::DestroySource),
             lookup!(c"GetMediaSourceLength",media::SourceLength),lookup!(c"AddMediaItemToTrack",media::CreateItem),lookup!(c"AddTakeToMediaItem",media::CreateTake),
             lookup!(c"GetSetMediaItemTakeInfo",media::TakeInfo),lookup!(c"DeleteTrackMediaItem",media::DeleteItem),
@@ -215,6 +224,7 @@ impl ReaperHost {
             write,
             history,
             media,
+            extended_media,
             validate,
             fade_axes_new,
         })

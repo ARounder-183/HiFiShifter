@@ -30,7 +30,7 @@
  * @see docs/superpowers/specs/2026-09-13-timeline-single-path-design.md
  */
 import React, { useMemo, Profiler } from "react";
-import { isPluginMode, isHostGeometryReadOnly } from "../../services/hostCapabilities";
+import { isPluginMode, isHostGeometryReadOnly, canImportHostAudio } from "../../services/hostCapabilities";
 import { Flex } from "@radix-ui/themes";
 import { AppDialog } from "../../ui/Dialog";
 import { AppContextMenu } from "../../ui/Menu";
@@ -89,6 +89,7 @@ import {
     setClipMuted,
     importAudioAtPosition,
     importAudioFileAtPosition,
+    importMultipleAudioFilesAtPosition,
     importMidiAsClip,
     replaceMidiClipDataRemote,
     importMultipleAudioAtPosition,
@@ -5646,7 +5647,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     };
 
     const handleTimelineDrop = (e: React.DragEvent<HTMLDivElement>) => {
-        if (isPluginMode()) { e.preventDefault(); return; }
+        if (isPluginMode()&&!canImportHostAudio()) { e.preventDefault(); return; }
         const dt = e.dataTransfer;
         const tauriPath = tauriDraggedPathRef.current;
         const lastTauriDropPath = tauriLastDropPathRef.current;
@@ -5729,6 +5730,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         }
 
         const fallbackFile = dt.files?.[0] ?? null;
+        if(isPluginMode()&&dt.files?.length>1) {
+            const files=Array.from(dt.files).filter(isAcceptedDropFile);
+            if(files.length) void dispatch(importMultipleAudioFilesAtPosition({files,mode:"across-time",trackId,startSec:beat}));
+            return;
+        }
         // 无本地路径的兜底分支同样必须过准入判据：此前它**完全不做校验**就把任何
         // `File` 按音频导入（后端内容嗅探会放行，于是无关文件也变成 Clip）。
         if (fallbackFile && isAcceptedDropFile(fallbackFile)) {

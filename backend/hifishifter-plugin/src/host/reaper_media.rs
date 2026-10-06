@@ -11,9 +11,19 @@ pub(super) type CreateTake=unsafe extern "C" fn(*mut c_void)->*mut c_void;
 pub(super) type TakeInfo=unsafe extern "C" fn(*mut c_void,*const c_char,*mut c_void)->*mut c_void;
 pub(super) type DeleteItem=unsafe extern "C" fn(*mut c_void,*mut c_void)->bool;
 pub(super) type FilePicker=unsafe extern "C" fn(*mut c_char,*const c_char,*const c_char)->bool;
+pub(super) type MultiPicker=unsafe extern "C" fn(i32,*const c_char,*const c_char,*const c_char,*mut c_char,i32)->bool;
+pub(super) type InsertTrack=unsafe extern "C" fn(*mut c_void,i32,i32);
+pub(super) type CountTracks=unsafe extern "C" fn(*mut c_void)->i32;
+pub(super) type GetTrack=unsafe extern "C" fn(*mut c_void,i32)->*mut c_void;
+pub(super) type AddFx=unsafe extern "C" fn(*mut c_void,*const c_char,bool,i32)->i32;
+pub(super) type DeleteTrack=unsafe extern "C" fn(*mut c_void);
+pub(super) type TrackCount=unsafe extern "C" fn(*mut c_void)->i32;
+pub(super) type FxGuid=unsafe extern "C" fn(*mut c_void,i32)->*const u8;
+pub(super) struct NewTrackApi {pub insert:InsertTrack,pub count:CountTracks,pub get:GetTrack,pub add_fx:AddFx,pub delete:DeleteTrack,pub item_count:TrackCount,pub fx_count:TrackCount,pub fx_guid:FxGuid}
 pub(super) struct MediaApi {pub create_source:CreateSource,pub destroy_source:DestroySource,pub length:SourceLength,
     pub create_item:CreateItem,pub create_take:CreateTake,pub take_info:TakeInfo,pub delete_item:DeleteItem,
     pub track_guid:Guid,pub picker:FilePicker}
+pub(super) struct ExtendedMedia {pub picker:Option<MultiPicker>,pub tracks:Option<NewTrackApi>}
 
 /// 目标轨道由直接parent或已绑定item的真实parent证明，不接受JS地址或活动工程编号。
 #[derive(Clone)]
@@ -23,6 +33,24 @@ struct OwnedSource {pointer:*mut c_void,destroy:DestroySource}
 impl Drop for OwnedSource {fn drop(&mut self) {if !self.pointer.is_null() {unsafe {(self.destroy)(self.pointer)};}}}
 /// 只回滚自己新建且GUID仍相同的item；地址重用或项目销毁时不误删用户数据。
 struct CreatedItem {target:HostTrackTarget,item:usize,guid:String,committed:bool}
+/// 失败时只有仍为空且仅含自己新增FX的轨道才回滚，不能删除重入添加的用户内容。
+pub(crate) struct CreatedTrack {pub target:HostTrackTarget,fx:Option<[u8;16]>,committed:bool}
+impl CreatedTrack {pub(crate) fn commit(&mut self) {self.committed=true;}}
+impl Drop for CreatedTrack {
+    fn drop(&mut self) {
+        if self.committed||self.target.verify(&||true).is_err() {return;}
+        let Some(api)=self.target.host.extended_media.as_ref().and_then(|m|m.tracks.as_ref()) else {return;};
+        let track=self.target.track as *mut c_void;
+        if unsafe {(api.item_count)(track)}!=0 {return;}
+        let count=unsafe {(api.fx_count)(track)};
+        let expected=if let Some(guid)=self.fx {count==1&&fx_guid(api,track,0).is_some_and(|current|current==guid)} else {count==0};
+        if expected {unsafe {(api.delete)(track)};}
+    }
+}
+fn fx_guid(api:&NewTrackApi,track:*mut c_void,index:i32)->Option<[u8;16]> {
+    let pointer=unsafe {(api.fx_guid)(track,index)};if pointer.is_null() {return None;}
+    let mut value=[0_u8;16];unsafe {std::ptr::copy_nonoverlapping(pointer,value.as_mut_ptr(),16)};Some(value)
+}
 impl CreatedItem {
     fn verify(&self,authorized:&impl Fn()->bool)->Result<(),String> {
         self.target.verify(authorized)?;let api=self.target.host.geometry.as_ref().unwrap();
@@ -54,6 +82,48 @@ fn read_guid(getter:Guid,object:*mut c_void,authorized:&impl Fn()->bool)->Result
 
 impl ReaperHost {
     pub(crate) fn can_import_audio(&self)->bool {self.media.is_some()&&self.has_project_history()}
+    pub(crate) fn can_create_audio_track(&self)->bool {self.can_import_audio()&&self.extended_media.as_ref().is_some_and(|m|m.tracks.is_some())}
+    /// 现代宿主选择器支持多选，返回完整UTF-8路径列表；旧宿主仍回退单文件。
+    pub(crate) fn pick_audio_paths(&self,multiple:bool,authorized:&impl Fn()->bool)->Result<Vec<String>,String> {
+        self.project(authorized)?;
+        if let Some(picker)=self.extended_media.as_ref().and_then(|m|m.picker) {
+            let mut bytes=vec![0_u8;65536];
+            if !checked(authorized,||unsafe {picker(if multiple {2} else {1},c"Import audio into HiFiShifter".as_ptr(),c".wav".as_ptr(),
+                c"Audio files|*.wav;*.flac;*.mp3;*.aiff;*.aif;*.ogg;*.opus;*.m4a|All files|*.*".as_ptr(),bytes.as_mut_ptr().cast(),bytes.len() as i32)})? {return Ok(Vec::new());}
+            let end=bytes.iter().position(|b|*b==0).ok_or("host picker path budget exceeded")?;
+            let text=std::str::from_utf8(&bytes[..end]).map_err(|_|"host picker path is not UTF-8")?;
+            let paths=text.split('|').filter(|path|!path.is_empty()).map(str::to_owned).collect::<Vec<_>>();
+            if paths.len()>512||paths.iter().any(|path|!std::path::Path::new(path).is_absolute()) {return Err("host picker returned invalid path batch".into());}return Ok(paths);
+        }
+        Ok(self.pick_audio(authorized)?.into_iter().collect())
+    }
+    /// 新轨身份取所属project创建前后的唯一GUID差集；重入额外增删时失败，不按位置猜新轨。
+    pub(crate) fn create_audio_track(self:&Arc<Self>,name:&str,authorized:&impl Fn()->bool)->Result<CreatedTrack,String> {
+        if !self.can_create_audio_track() {return Err("REAPER new-track import API unavailable".into());}
+        let api=self.extended_media.as_ref().unwrap().tracks.as_ref().unwrap();let project=self.project(authorized)?;
+        let enumerate=||->Result<Vec<(String,usize)>,String>{
+            let token=self.geometry_revision(authorized)?;let count=checked(authorized,||unsafe {(api.count)(project)})?;
+            if !(0..=10000).contains(&count) {return Err("host track count budget exceeded".into());}
+            let mut result=Vec::new();for index in 0..count {
+                let track=checked(authorized,||unsafe {(api.get)(project,index)})?;
+                if track.is_null() {return Err("host track enumeration changed".into());}
+                let target=self.track_target(project as usize,track as usize,authorized)?;result.push((target.guid,target.track));
+            }
+            if token!=self.geometry_revision(authorized)? {return Err("host tracks changed during enumeration".into());}Ok(result)
+        };
+        let before=enumerate()?;checked(authorized,||unsafe {(api.insert)(project,before.len() as i32,0)})?;let after=enumerate()?;
+        let old=before.iter().map(|(guid,_)|guid).collect::<std::collections::HashSet<_>>();
+        let added=after.iter().filter(|(guid,_)|!old.contains(guid)).collect::<Vec<_>>();
+        if after.len()!=before.len()+1||added.len()!=1||before.iter().any(|(guid,_)|!after.iter().any(|(known,_)|known==guid)) {return Err("new track creation reentered; undo the host operation to cancel".into());}
+        let target=self.track_target(project as usize,added[0].1,authorized)?;let mut created=CreatedTrack {target,fx:None,committed:false};
+        let mut name=CString::new(name).map_err(|_|"track name contains NUL")?.into_bytes_with_nul();
+        created.target.verify(authorized)?;
+        if !checked(authorized,||unsafe {(self.media.as_ref().unwrap().track_guid)(created.target.track as *mut c_void,c"P_NAME".as_ptr(),name.as_mut_ptr().cast(),true)})? {return Err("host track naming failed".into());}
+        let index=checked(authorized,||unsafe {(api.add_fx)(created.target.track as *mut c_void,c"VST3:HiFiShifter".as_ptr(),false,-1000)})?;
+        if index!=0 {return Err("new audio track could not attach HiFiShifter as first FX".into());}
+        created.fx=fx_guid(api,created.target.track as *mut c_void,index);if created.fx.is_none() {return Err("new HiFiShifter FX identity unavailable".into());}
+        created.target.verify(authorized)?;Ok(created)
+    }
     /// 原生文件选择器仅打开媒体文件；取消不创建item或Undo块，UTF-8路径不经过ANSI转换。
     pub(crate) fn pick_audio(&self,authorized:&impl Fn()->bool)->Result<Option<String>,String> {
         self.project(authorized)?;let media=self.media.as_ref().ok_or("REAPER media API unavailable")?;

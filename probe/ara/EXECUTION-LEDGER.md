@@ -1032,4 +1032,6 @@ Task 52: Ruling: 几何进宿主Undo而参数仍在actor历史，会导致混合
 
 Task 53: Ruling: 官方明确C/C++的P_SOURCE应通过GetSetMediaItemTakeInfo转移所有权，并在替换后由调用方销毁旧源 — 新typed媒体创建只用直接parent/已绑定region的轨道，未附着源RAII释放、新建item按GUID/track验证回滚，源附着发生即撤销调用者释放责任；菜单/Ctrl+O走原GUI，创建item GUID等待真实ARA回流，不用路径/位置匹配 — UTF-8与失败所有权2合同/能力门4项/tsc通过；新建轨、多文件/原生File拖入仍open，未打包/安装，不把宿主已建item而HFS未就绪当已导入。
 
+Task 54: Ruling: 单文件chooser与base64 DOM兜底无法满足多短clip/文件拖入，InsertTrackInProject返回void也不能把某个当前位置当新轨身份证明 — 接现代多选API、WebView2 AdditionalObjects/File.Path、单clip精确创建GUID回流确认；新轨用所属project稳定GUID差集识别并首位插入HFS，仅空轨/自己FX身份未变才清理失败 — host_media4项、原生File/插件多文件4项、旧App命名4项/tsc通过，尚未真实REAPER验证；将不支持的多Take明确报错，不复制源码/音频冒充ARA，不降最终目标，未打包/安装或push。
+
 

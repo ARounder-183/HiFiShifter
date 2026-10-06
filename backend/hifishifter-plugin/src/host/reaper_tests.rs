@@ -16,6 +16,7 @@ pub(crate) struct Fixture {
     writer_enabled:Cell<bool>,
     undo_records:RefCell<Vec<std::ffi::CString>>,undo_position:Cell<i32>,
     media_enabled:Cell<bool>,media_sources:RefCell<Vec<Box<u8>>>,take_source:Cell<usize>,fail_media_take:Cell<bool>,media_path:RefCell<String>,
+    extra_tracks:RefCell<Vec<Box<u8>>>,new_fx:RefCell<std::collections::HashSet<usize>>,fx_guid_bytes:[u8;16],picker_paths:RefCell<Vec<String>>,
     pub valid: Cell<bool>,
     connection_host: Cell<bool>,
     calls: RefCell<Vec<String>>,
@@ -43,6 +44,7 @@ impl Fixture {
             track_token:3,writer_enabled:Cell::new(false),
             undo_records:RefCell::new(vec![std::ffi::CString::new("Initial state").unwrap()]),undo_position:Cell::new(0),
             media_enabled:Cell::new(false),media_sources:RefCell::new(Vec::new()),take_source:Cell::new(0),fail_media_take:Cell::new(false),media_path:RefCell::new(String::new()),
+            extra_tracks:RefCell::new(Vec::new()),new_fx:RefCell::new(Default::default()),fx_guid_bytes:[4;16],picker_paths:RefCell::new(Vec::new()),
             valid: Cell::new(true),
             connection_host: Cell::new(false),
             calls: RefCell::new(Vec::new()),
@@ -246,6 +248,15 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
         "DeleteTrackMediaItem" if f.media_enabled.get()=>media_delete as *const (),
         "GetSetMediaTrackInfo_String" if f.media_enabled.get()=>media_track_guid as *const (),
         "GetUserFileNameForRead" if f.media_enabled.get()=>media_picker as *const (),
+        "GetUserFileName" if f.media_enabled.get()=>multi_picker as *const (),
+        "InsertTrackInProject" if f.media_enabled.get()=>insert_track as *const (),
+        "CountTracks" if f.media_enabled.get()=>count_tracks as *const (),
+        "GetTrack" if f.media_enabled.get()=>get_track as *const (),
+        "TrackFX_AddByName" if f.media_enabled.get()=>add_fx as *const (),
+        "DeleteTrack" if f.media_enabled.get()=>delete_track as *const (),
+        "CountTrackMediaItems" if f.media_enabled.get()=>count_track_items as *const (),
+        "TrackFX_GetCount" if f.media_enabled.get()=>fx_count as *const (),
+        "TrackFX_GetFXGUID" if f.media_enabled.get()=>fx_guid as *const (),
         _ => std::ptr::null(),
     };
     p as *mut c_void
@@ -316,7 +327,7 @@ unsafe extern "C" fn validate(
         "ReaProject*" => object == f.project(),
         "MediaItem_Take*" => object == f.take(),
         "MediaItem*" => object == f.item(),
-        "MediaTrack*"=>object==f.track(),
+        "MediaTrack*"=>object==f.track()||f.extra_tracks.borrow().iter().any(|track|(&**track as *const u8) as usize==object as usize),
         _ => false,
     }
 }
@@ -378,8 +389,43 @@ unsafe extern "C" fn media_take(item:*mut c_void)->*mut c_void {let f=fixture();
 unsafe extern "C" fn media_info(take:*mut c_void,name:*const c_char,new:*mut c_void)->*mut c_void {let f=fixture();assert_eq!(take,f.take());assert_eq!(unsafe {CStr::from_ptr(name)},c"P_SOURCE");
     if new.is_null() {f.record("media-source-read");f.take_source.get() as *mut c_void} else {f.record("media-source-attach");f.take_source.replace(new as usize) as *mut c_void}}
 unsafe extern "C" fn media_delete(track:*mut c_void,item:*mut c_void)->bool {let f=fixture();assert_eq!(track,f.track());assert_eq!(item,f.item());f.record("media-item-delete");let source=f.take_source.replace(0);if source!=0 {unsafe {media_destroy(source as *mut c_void)};}true}
-unsafe extern "C" fn media_track_guid(track:*mut c_void,name:*const c_char,buffer:*mut c_char,set:bool)->bool {let f=fixture();assert_eq!(track,f.track());assert!(!set);assert_eq!(unsafe {CStr::from_ptr(name)},c"GUID");f.record("track-guid");let guid=c"{33333333-3333-3333-3333-333333333333}";unsafe {std::ptr::copy_nonoverlapping(guid.as_ptr(),buffer,guid.to_bytes_with_nul().len());}true}
+unsafe extern "C" fn media_track_guid(track:*mut c_void,name:*const c_char,buffer:*mut c_char,set:bool)->bool {
+    let f=fixture();if set {assert_eq!(unsafe {CStr::from_ptr(name)},c"P_NAME");f.record("track-name");return true;}
+    assert_eq!(unsafe {CStr::from_ptr(name)},c"GUID");f.record("track-guid");
+    let guid=if track==f.track() {std::ffi::CString::new("{33333333-3333-3333-3333-333333333333}").unwrap()} else {
+        let tracks=f.extra_tracks.borrow();let index=tracks.iter().position(|t|(&**t as *const u8) as usize==track as usize).unwrap();
+        std::ffi::CString::new(format!("{{44444444-4444-4444-4444-{:012}}}",index+1)).unwrap()
+    };unsafe {std::ptr::copy_nonoverlapping(guid.as_ptr(),buffer,guid.to_bytes_with_nul().len());}true
+}
 unsafe extern "C" fn media_picker(_path:*mut c_char,_title:*const c_char,_ext:*const c_char)->bool {fixture().record("media-picker");false}
+unsafe extern "C" fn multi_picker(mode:i32,_caption:*const c_char,_initial:*const c_char,_extensions:*const c_char,buffer:*mut c_char,size:i32)->bool {
+    let f=fixture();assert!((1..=2).contains(&mode));f.record("media-multi-picker");let paths=f.picker_paths.borrow();if paths.is_empty() {return false;}
+    let value=std::ffi::CString::new(paths.join("|")).unwrap();assert!(value.to_bytes_with_nul().len()<size as usize);
+    unsafe {std::ptr::copy_nonoverlapping(value.as_ptr(),buffer,value.to_bytes_with_nul().len());}true
+}
+unsafe extern "C" fn count_tracks(project:*mut c_void)->i32 {let f=fixture();assert_eq!(project,f.project());f.record("count-tracks");1+f.extra_tracks.borrow().len() as i32}
+unsafe extern "C" fn get_track(project:*mut c_void,index:i32)->*mut c_void {let f=fixture();assert_eq!(project,f.project());f.record(format!("get-track:{index}"));if index==0 {f.track()} else {f.extra_tracks.borrow().get(index as usize-1).map_or(std::ptr::null_mut(),|track|(&**track as *const u8 as *mut u8).cast())}}
+unsafe extern "C" fn insert_track(project:*mut c_void,index:i32,flags:i32) {let f=fixture();assert_eq!(project,f.project());assert_eq!(index,1+f.extra_tracks.borrow().len() as i32);assert_eq!(flags,0);f.record("insert-track");f.extra_tracks.borrow_mut().push(Box::new(9));f.change.set(f.change.get().wrapping_add(1));}
+unsafe extern "C" fn add_fx(track:*mut c_void,name:*const c_char,record:bool,index:i32)->i32 {let f=fixture();assert_eq!(unsafe {CStr::from_ptr(name)},c"VST3:HiFiShifter");assert!(!record);assert_eq!(index,-1000);f.record("add-hfs-first-fx");f.new_fx.borrow_mut().insert(track as usize);0}
+unsafe extern "C" fn delete_track(track:*mut c_void) {let f=fixture();f.record("delete-created-track");let mut tracks=f.extra_tracks.borrow_mut();let index=tracks.iter().position(|t|(&**t as *const u8) as usize==track as usize).unwrap();tracks.remove(index);f.new_fx.borrow_mut().remove(&(track as usize));f.change.set(f.change.get().wrapping_add(1));}
+unsafe extern "C" fn count_track_items(_track:*mut c_void)->i32 {0}
+unsafe extern "C" fn fx_count(track:*mut c_void)->i32 {i32::from(fixture().new_fx.borrow().contains(&(track as usize)))}
+unsafe extern "C" fn fx_guid(track:*mut c_void,index:i32)->*const u8 {let f=fixture();assert_eq!(index,0);if f.new_fx.borrow().contains(&(track as usize)) {f.fx_guid_bytes.as_ptr()} else {std::ptr::null()}}
+
+#[test]
+fn host_media_new_track_uses_project_guid_difference_and_first_plugin_and_rolls_back_empty_failure() {
+    let f=Fixture::new();f.enable_media();let host=std::sync::Arc::new(f.client());
+    {let _track=host.create_audio_track("元音",&||true).unwrap();assert_eq!(f.extra_tracks.borrow().len(),1);assert!(f.calls().contains(&"add-hfs-first-fx".into()));}
+    assert!(f.extra_tracks.borrow().is_empty());assert!(f.calls().contains(&"delete-created-track".into()));
+    let mut track=host.create_audio_track("保留",&||true).unwrap();track.commit();drop(track);assert_eq!(f.extra_tracks.borrow().len(),1);
+}
+#[test]
+fn host_media_multi_picker_preserves_complete_unicode_paths_and_cancel_is_empty() {
+    let f=Fixture::new();f.enable_media();let host=std::sync::Arc::new(f.client());
+    assert!(host.pick_audio_paths(true,&||true).unwrap().is_empty());
+    let paths=vec![r"E:\声音\第一段.wav".to_owned(),r"E:\声音\第二段.wav".to_owned()];*f.picker_paths.borrow_mut()=paths.clone();
+    assert_eq!(host.pick_audio_paths(true,&||true).unwrap(),paths);
+}
 
 /// 真实typed媒体对象所有权合同；不是假造ARA PCM或实际REAPER导入验收。
 #[test]

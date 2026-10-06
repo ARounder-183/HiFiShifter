@@ -3,12 +3,13 @@ export type HostEvent<T> = { event: string; id: number; payload: T };
 export type PluginBootstrap = { version: 1; viewId: string; transportControl?: boolean; clipEditing?: boolean; audioImport?: boolean };
 export interface WebViewMessagePort {
     postMessage(message: unknown): void;
+    postMessageWithAdditionalObjects?(message: unknown, objects: File[]): void;
     addEventListener(name: "message", listener: (event: { data: unknown }) => void): void;
     removeEventListener(name: "message", listener: (event: { data: unknown }) => void): void;
 }
 export interface PluginHostBridge {
     readonly kind: "plugin";
-    invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
+    invoke<T>(command: string, args?: Record<string, unknown>, files?: File[]): Promise<T>;
     listen<T>(event: string, listener: (event: HostEvent<T>) => void): Promise<() => void>;
     dispose(): void;
 }
@@ -81,11 +82,14 @@ export function createPluginHost(port: WebViewMessagePort, boot: PluginBootstrap
     port.addEventListener("message", receive);
     return {
         kind: "plugin",
-        invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+        invoke<T>(command: string, args?: Record<string, unknown>, files?: File[]): Promise<T> {
             if (closed) return Promise.reject(new Error("Plugin editor closed"));
             if (pending.size >= 128) return Promise.reject(new Error("Too many pending plugin requests"));
             if (!command || command.length > 128 || !Number.isSafeInteger(nextId)) {
                 return Promise.reject(new Error("Invalid plugin command or exhausted request identity"));
+            }
+            if (files && (!port.postMessageWithAdditionalObjects || command!=="import_native_audio_file" || files.length!==1)) {
+                return Promise.reject(new Error("Native File import unavailable; use File menu import"));
             }
             const id = nextId++;
             return new Promise<T>((resolve, reject) => {
@@ -94,7 +98,10 @@ export function createPluginHost(port: WebViewMessagePort, boot: PluginBootstrap
                     reject(new Error(`Plugin command timed out: ${command}`));
                 }, 30_000);
                 pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
-                try { port.postMessage({ version: 1, viewId: boot.viewId, id, command, args }); }
+                try {
+                    const message={ version: 1, viewId: boot.viewId, id, command, args };
+                    if(files) port.postMessageWithAdditionalObjects!(message,files);else port.postMessage(message);
+                }
                 catch (error) {
                     clearTimeout(timer);
                     pending.delete(id);
