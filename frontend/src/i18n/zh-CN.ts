@@ -377,7 +377,7 @@ export const zhCN = {
     notebook_setting_spellcheck: "拼写检查",
     notebook_setting_font_size: "编辑区字号",
     notebook_setting_history_split: "撤销步分节",
-    notebook_setting_history_split_off: "保持合并（默认）",
+    notebook_setting_history_split_off: "保持合并",
     notebook_setting_image_max_dim: "图片长边上限",
     notebook_setting_image_max_dim_original: "原始尺寸",
     notebook_setting_image_format: "图片格式",

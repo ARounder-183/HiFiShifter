@@ -14,7 +14,7 @@ import { notebookApi } from "../../../services/api/notebook";
 import { AppSelect } from "../../../ui";
 import { ClipboardIcon, ImageIcon } from "@radix-ui/react-icons";
 
-import { AppButton } from "../../../ui";
+import { AppButton, AppNumberField } from "../../../ui";
 import { AppDialog } from "../../../ui/Dialog";
 import { AppField, AppForm, AppFormSection, AppSwitchRow } from "../../../ui/Field";
 import { formatAssetRef } from "./assetRef";
@@ -330,58 +330,58 @@ export function NotebookSettingsDialog({
                         checked={settings.spellCheck}
                         onCheckedChange={(value) => onChange({ spellCheck: value })}
                     />
+                    {/*
+                     * 字号、撤销分节、图片长边都是**连续量**，因此是输入框而不是
+                     * 下拉：下拉只能给出几个预设档位（字号原本 11/12/13/15/17），
+                     * 用户想要 14 就得改配置文件。上下界与 `notebookSettings.ts`
+                     * 的归一化一致，所以"输入框里看到的"就是"存下去的"。
+                     *
+                     * 只接 `onCommit`（失焦 / Enter 提交），不接 `onChange`：这几个
+                     * 值没有实时预览的消费者，逐字符写 Redux + 落盘是白费。
+                     */}
                     <AppField label={tf("notebook_setting_font_size")}>
-                        <AppSelect
-                            value={String(settings.sourceFontSize)}
+                        <AppNumberField
+                            value={settings.sourceFontSize}
+                            unit="pixels"
+                            min={9}
+                            max={24}
+                            suffix="px"
                             ariaLabel={tf("notebook_setting_font_size")}
-                            onValueChange={(value) => onChange({ sourceFontSize: Number(value) })}
-                            options={[
-                                { value: "11", label: "11" },
-                                { value: "12", label: "12" },
-                                { value: "13", label: "13" },
-                                { value: "15", label: "15" },
-                                { value: "17", label: "17" },
-                            ]}
+                            onCommit={(value) => onChange({ sourceFontSize: value })}
                         />
                     </AppField>
-                    <AppField label={tf("notebook_setting_history_split")}>
-                        <AppSelect
-                            value={String(settings.historySplitIdleMs)}
+                    <AppField
+                        label={tf("notebook_setting_history_split")}
+                        // 0 是**语义值**（不做空闲分节），不是"未设置"：必须写在
+                        // 提示里，否则用户看到 0 会以为是坏了。
+                        hint={`0 = ${tf("notebook_setting_history_split_off")}`}
+                    >
+                        <AppNumberField
+                            value={settings.historySplitIdleMs}
+                            unit="milliseconds"
+                            min={0}
+                            max={600000}
+                            suffix="ms"
                             ariaLabel={tf("notebook_setting_history_split")}
-                            onValueChange={(value) =>
-                                onChange({ historySplitIdleMs: Number(value) })
-                            }
-                            options={[
-                                {
-                                    value: "0",
-                                    label: tf("notebook_setting_history_split_off"),
-                                },
-                                { value: "2000", label: "2s" },
-                                { value: "5000", label: "5s" },
-                                { value: "15000", label: "15s" },
-                            ]}
+                            onCommit={(value) => onChange({ historySplitIdleMs: value })}
                         />
                     </AppField>
                 </AppFormSection>
 
                 <AppFormSection title={tf("notebook_settings_group_image")}>
-                    <AppField label={tf("notebook_setting_image_max_dim")}>
-                        <AppSelect
-                            value={String(settings.imageMaxDimensionPx)}
+                    <AppField
+                        label={tf("notebook_setting_image_max_dim")}
+                        // 同上：0 = 不缩放，保留原图尺寸。
+                        hint={`0 = ${tf("notebook_setting_image_max_dim_original")}`}
+                    >
+                        <AppNumberField
+                            value={settings.imageMaxDimensionPx}
+                            unit="pixels"
+                            min={0}
+                            max={16384}
+                            suffix="px"
                             ariaLabel={tf("notebook_setting_image_max_dim")}
-                            onValueChange={(value) =>
-                                onChange({ imageMaxDimensionPx: Number(value) })
-                            }
-                            options={[
-                                {
-                                    value: "0",
-                                    label: tf("notebook_setting_image_max_dim_original"),
-                                },
-                                { value: "1280", label: "1280" },
-                                { value: "2048", label: "2048" },
-                                { value: "2560", label: "2560" },
-                                { value: "3840", label: "3840" },
-                            ]}
+                            onCommit={(value) => onChange({ imageMaxDimensionPx: value })}
                         />
                     </AppField>
                     <AppField label={tf("notebook_setting_image_format")}>

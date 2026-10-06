@@ -398,7 +398,7 @@ export const jaJP = {
     notebook_setting_spellcheck: "スペルチェック",
     notebook_setting_font_size: "エディタの文字サイズ",
     notebook_setting_history_split: "元に戻すステップの分割",
-    notebook_setting_history_split_off: "結合を維持（既定）",
+    notebook_setting_history_split_off: "結合を維持",
     notebook_setting_image_max_dim: "画像の最大辺",
     notebook_setting_image_max_dim_original: "元のサイズ",
     notebook_setting_image_format: "画像形式",
@@ -1047,8 +1047,7 @@ export const jaJP = {
     kb_modifier_param_fine_adjust:
         "微調整（押しながら：スライダー / 入力欄ホイール / ゲインドラッグ / ビブラートホイール）",
     kb_modifier_vibrato_amplitude_adjust: "ビブラート振幅調整（ビブラートドラッグ中ホイール）",
-    kb_modifier_vibrato_frequency_adjust:
-        "ビブラート周波数調整（ビブラートドラッグ中ホイール）",
+    kb_modifier_vibrato_frequency_adjust: "ビブラート周波数調整（ビブラートドラッグ中ホイール）",
     kb_modifier_piano_keys_scroll_v: "鍵盤エリア垂直スクロール（ホイール）",
     kb_modifier_piano_keys_zoom_v: "鍵盤エリア垂直ズーム（ホイール）",
     kb_group_mode: "モードとツール",
