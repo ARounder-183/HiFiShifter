@@ -1,7 +1,7 @@
 // 插件共享粘贴按最终目标授权：换轨不禁参数粘贴，但仍禁止宿主片段写操作。
 // @vitest-environment jsdom
 import {afterEach,expect,test} from "vitest";
-import {pluginAllowsAction,pluginAllowsEditChannel} from "./hostCapabilities";
+import {pluginAllowsAction,pluginAllowsEditChannel,isHostGeometryReadOnly,canEditHostClips} from "./hostCapabilities";
 import {resolveActionByFocus,resolvePasteRoute} from "../features/keybindings/focusRouting";
 import {DEFAULT_KEYBINDINGS} from "../features/keybindings/defaultKeybindings";
 
@@ -26,4 +26,12 @@ test("standalone clipboard routes stay allowed; unrelated plugin geometry shortc
     expect(pluginAllowsAction("clip.delete","timeline")).toBe(false);
     expect(pluginAllowsAction("track.add","pianoRoll")).toBe(false);
     expect(pluginAllowsEditChannel("hifi:timelineEditOp")).toBe(false);
+});
+
+test("geometry editing requires explicit native write capability and standalone stays editable",()=>{
+    expect(isHostGeometryReadOnly()).toBe(false);
+    window.__HFS_PLUGIN_BOOTSTRAP__={version:1,viewId:"host-geometry"};
+    expect(isHostGeometryReadOnly()).toBe(true);expect(canEditHostClips()).toBe(false);
+    window.__HFS_PLUGIN_BOOTSTRAP__.clipEditing=true;
+    expect(isHostGeometryReadOnly()).toBe(false);expect(canEditHostClips()).toBe(true);
 });

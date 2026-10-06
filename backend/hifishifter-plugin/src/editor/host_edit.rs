@@ -1,0 +1,156 @@
+//! 原GUI几何命令的纯规划与真实宿主写入；不修改actor私有timeline冒充REAPER成功。
+use super::session::EditorSession;
+use crate::render::extension::ExtensionOwner;
+use crate::host::reaper::HostClipTarget;
+use hifishifter_kernel::state::{Clip,ClipStatePatch,TimelineState};
+use serde_json::Value;
+use std::sync::Arc;
+
+pub(super) struct ClipEdit {pub native_id:String,pub source_track:String,pub destination_track:String,pub before:Clip,pub after:Clip,pub patch:ClipStatePatch}
+pub(super) struct HostEditPlan {pub edits:Vec<ClipEdit>}
+
+/// 只拦截已实现的宿主命令；未知命令仍走原actor的明确错误路径。
+pub(super) fn is_clip_edit(command:&str)->bool {
+    matches!(command,"move_clip"|"move_clips"|"set_clip_state"|"set_clips_state_bulk")
+}
+
+/// 未知非空字段必须失败，不能用户改shape却被当成成功的长度修改。
+fn patch(input:&Value)->Result<ClipStatePatch,String> {
+    let object=input.as_object().ok_or("clip patch must be an object")?;
+    for (key,value) in object {
+        if value.is_null() {continue;}
+        if !matches!(key.as_str(),"clipId"|"checkpoint"|"startSec"|"lengthSec"|"sourceStartSec"|"sourceEndSec"|"playbackRate"|"clipPlaybackRate"|"muted"|"snapOffsetSec"|"fadeInSec"|"fadeOutSec"|"autoFadeInSec"|"autoFadeOutSec"|"reversed"|"loopEnabled"|"channelMode") {
+            return Err(format!("host clip property is not yet writable: {key}"));
+        }
+        if !matches!(key.as_str(),"clipId"|"checkpoint"|"muted"|"reversed"|"loopEnabled") {
+            let number=value.as_f64().filter(|v|v.is_finite()).ok_or("finite numeric clip edit required")?;
+            if number<0. || number>1_000_000. {return Err("clip edit outside supported finite range".into());}
+            if matches!(key.as_str(),"lengthSec"|"playbackRate"|"clipPlaybackRate")&&number<=0. {return Err("positive clip length/rate required".into());}
+            if key=="channelMode"&&(number.fract()!=0.||number>4.) {return Err("invalid host channel mode".into());}
+        }
+    }
+    let patch:ClipStatePatch=serde_json::from_value(input.clone()).map_err(|e|e.to_string())?;
+    if patch.reversed==Some(true)||patch.loop_enabled==Some(true) {return Err("reverse/loop source editing is not supported".into());}
+    Ok(patch)
+}
+
+impl EditorSession {
+    /// UI只短暂读取当前clip身份/几何；源参数大数组不复制，不在这里materialize或分析。
+    pub(super) fn plan_host_edit(&self,command:&str,input:&Value)->Result<HostEditPlan,String> {
+        let requests=match command {
+            "move_clip"|"set_clip_state"=>vec![input.clone()],
+            "move_clips"=>input["moves"].as_array().ok_or("move list missing")?.clone(),
+            "set_clips_state_bulk"=>input["updates"].as_array().ok_or("patch list missing")?.clone(),
+            _=>return Err("unknown host clip command".into()),
+        };
+        if requests.is_empty()||requests.len()>512 {return Err("host edit batch must contain 1..512 clips".into());}
+        let timeline=self.timeline.lock().unwrap();let mut seen=std::collections::HashSet::new();let mut edits=Vec::new();
+        for request in requests {
+            let id=request["clipId"].as_str().ok_or("clipId missing")?;
+            if !seen.insert(id.to_owned()) {return Err("duplicate clip in host edit batch".into());}
+            let before=timeline.clips.iter().find(|clip|clip.id==id).cloned().ok_or("unknown editor clip")?;
+            let destination=request["trackId"].as_str().unwrap_or(&before.track_id);
+            if !timeline.tracks.iter().any(|track|track.id==destination) {return Err("unknown target host track".into());}
+            let mut changes=request.clone();changes.as_object_mut().ok_or("clip request missing")?.remove("trackId");
+            changes.as_object_mut().unwrap().remove("moveLinkedParams");
+            let patch=patch(&changes)?;
+            // 复用原Clip级乘数/Take有效倍率和裁切语义，而不是把clipPlaybackRate当take速率。
+            let mut view=TimelineState {clips:vec![before.clone()],..Default::default()};
+            view.patch_clip_state(id,patch.clone());let mut after=view.clips.remove(0);
+            if let Some(end)=patch.source_end_sec {if patch.length_sec.is_none() {
+                after.length_sec=(end-after.source_start_sec)/(after.playback_rate as f64);
+                if after.length_sec<=0. {return Err("source trim window must have positive length".into());}
+            }}
+            let native_id=id.strip_prefix(&self.namespace).ok_or("clip belongs to another editor session")?.to_owned();
+            let destination_track=destination.strip_prefix(&self.namespace).ok_or("target track belongs to another editor session")?.to_owned();
+            let source_track=before.track_id.strip_prefix(&self.namespace).ok_or("source track belongs to another editor session")?.to_owned();
+            edits.push(ClipEdit {native_id,source_track,destination_track,before,after,patch});
+        }Ok(HostEditPlan {edits})
+    }
+}
+
+/// 先冻结并验证整批对象，再开始Undo和setter；任一预检失败都不写入任何宿主item。
+pub(super) fn execute(owner:&Arc<ExtensionOwner>,plan:HostEditPlan,authorized:impl Fn()->bool)->Result<(),String> {
+    let document=owner.editor_document()?;
+    let mut targets:Vec<(ClipEdit,HostClipTarget,Option<HostClipTarget>)>=Vec::new();
+    for edit in plan.edits {
+        if !authorized() {return Err("host editor lease revoked".into());}
+        let target=owner.host_edit_target(&edit.native_id)?;
+        if !target.geometry.markers.is_empty()&&(edit.patch.length_sec.is_some()||edit.patch.source_start_sec.is_some()
+            ||edit.patch.source_end_sec.is_some()||edit.patch.playback_rate.is_some()||edit.patch.clip_playback_rate.is_some()) {
+            return Err("nonlinear host stretch-marker editing is not supported".into());
+        }
+        if (target.geometry.start_sec-edit.before.start_sec).abs()>1e-6 || (target.geometry.duration_sec-edit.before.length_sec).abs()>1e-6 {
+            return Err("host clip changed before GUI commit; refresh required".into());
+        }
+        let destination=if edit.source_track==edit.destination_track {None} else {
+            let clip={let timeline=document.timeline.lock().unwrap();timeline.as_ref().ok_or("host timeline unavailable")?.clips.iter()
+                .find(|clip|clip.track_id==edit.destination_track).map(|clip|clip.id.clone()).ok_or("target track has no directly bound ARA item")?};
+            Some(owner.host_edit_target(&clip)?)
+        };
+        if targets.first().is_some_and(|(_,first,_)|!first.same_project(&target)) {return Err("host batch spans multiple projects".into());}
+        if destination.as_ref().is_some_and(|dest|!target.same_project(dest)) {return Err("target track belongs to another project".into());}
+        targets.push((edit,target,destination));
+    }
+    let undo=targets[0].1.begin_undo(&authorized)?;
+    let result:Result<(),String>=(|| {
+        for (edit,target,destination) in &targets {
+            let before=&edit.before;let after=&edit.after;
+            // 写速率时明确保调；普通移动/裁切不擅自改变用户B_PPITCH。
+            if (before.playback_rate-after.playback_rate).abs()>1e-6 {
+                target.set_take(c"B_PPITCH",1.,&authorized)?;
+                target.set_take(c"D_PLAYRATE",after.playback_rate as f64,&authorized)?;
+            }
+            if (before.source_start_sec-after.source_start_sec).abs()>1e-9 {target.set_take(c"D_STARTOFFS",after.source_start_sec,&authorized)?;}
+            if (before.start_sec-after.start_sec).abs()>1e-9 {target.set_item(c"D_POSITION",after.start_sec,&authorized)?;}
+            if (before.length_sec-after.length_sec).abs()>1e-9 {target.set_item(c"D_LENGTH",after.length_sec,&authorized)?;}
+            if let Some(value)=edit.patch.muted {target.set_item(c"B_MUTE",if value {1.} else {0.},&authorized)?;}
+            if edit.patch.loop_enabled==Some(false) {target.set_item(c"B_LOOPSRC",0.,&authorized)?;}
+            if let Some(value)=edit.patch.channel_mode {
+                if !(0..=4).contains(&value) {return Err("invalid host channel mode".into());}
+                target.set_take(c"I_CHANMODE",value as f64,&authorized)?;
+            }
+            if let Some(value)=edit.patch.snap_offset_sec {target.set_item(c"D_SNAPOFFSET",value,&authorized)?;}
+            for (value,name) in [(edit.patch.fade_in_sec,c"D_FADEINLEN"),(edit.patch.fade_out_sec,c"D_FADEOUTLEN"),
+                (edit.patch.auto_fade_in_sec,c"D_FADEINLEN_AUTO"),(edit.patch.auto_fade_out_sec,c"D_FADEOUTLEN_AUTO")] {
+                if let Some(value)=value {target.set_item(name,value,&authorized)?;}
+            }
+            if let Some(destination)=destination {target.move_to(destination,&authorized)?;}
+            target.update(&authorized)?;
+        }Ok(())
+    })();drop(undo);result.map_err(|error|format!("host clip edit failed (Undo block retained): {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    /// 规划复用原Clip×Take倍率，且未开始宿主写之前整批拒绝非法/未知字段。
+    #[test]
+    fn host_edit_planning_preserves_effective_rate_and_rejects_unknown_batch_fields() {
+        let (_model,owner,_id)=super::super::session::tests::fixture();let editor=owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();let clip=editor.timeline.lock().unwrap().clips[0].clone();
+        let plan=editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"lengthSec":1.,"clipPlaybackRate":2.})).unwrap();
+        assert_eq!(plan.edits[0].after.playback_rate,2.);assert_eq!(plan.edits[0].after.length_sec,1.);
+        assert!(editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"reversed":true})).is_err());
+        assert!(editor.plan_host_edit("set_clips_state_bulk",&json!({"updates":[{"clipId":clip.id,"startSec":1.},{"clipId":"other","lengthSec":-1.}]})).is_err());
+        assert!(editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"fadeInShape":5.})).is_err());
+        assert_eq!(editor.timeline.lock().unwrap().clips[0].start_sec,clip.start_sec,"纯规划不得修改actor私有几何");editor.close();
+    }
+    /// 使用生产clip路由、官方typed getter/setter与Undo块；没有把私有timeline赋值当同步。
+    #[test]
+    fn host_edit_writes_directly_bound_item_under_one_project_undo_block() {
+        let (model,owner,_id)=super::super::session::tests::fixture();let document=model.session();
+        let host=crate::host::reaper::ReaperFixture::new();host.enable_writer();host.clear_markers();
+        host.set_value("D_POSITION",0.);host.set_value("D_LENGTH",4./44100.);host.set_value("D_PLAYRATE",1.);
+        unsafe {owner.bind_reaper_host(host.context());}owner.refresh_reaper_transport();
+        let editor=owner.editor_session().unwrap();editor.ensure_loaded(false).unwrap();let clip=editor.timeline.lock().unwrap().clips[0].clone();
+        let plan=editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"startSec":3.,"lengthSec":8./44100.,"clipPlaybackRate":0.5})).unwrap();
+        host.reset();execute(&owner,plan,||document.is_alive()).unwrap();let calls=host.calls();
+        assert_eq!(calls.iter().filter(|name|name.as_str()=="undo-begin").count(),1);
+        assert_eq!(calls.iter().filter(|name|name.as_str()=="undo-end").count(),1);
+        assert!(calls.contains(&"write-item:D_POSITION".into()));assert!(calls.contains(&"write-take:D_PLAYRATE".into()));
+        let geometry=owner.reaper_geometry().unwrap_err();assert!(geometry.contains("incompatible"),"未模拟ARA回流，不能伪造已同步模型");
+        assert_eq!(editor.timeline.lock().unwrap().clips[0].start_sec,0.);document.close();
+    }
+}

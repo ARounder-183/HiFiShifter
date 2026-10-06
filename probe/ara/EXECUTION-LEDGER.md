@@ -1024,4 +1024,8 @@ Task 50: Ruling: 用户要求设目标并实现双向导入/片段编辑/线性�
 
 Task 50: Ruling: 官方锁定REAPER头区分B_MUTE（solo覆盖后的有效状态）与B_MUTE_ACTUAL（原始开关） — 读取有效B_MUTE，GUI投影按单region身份；每renderer原子门控实时/离线输出，模型/assignment/离线setup补采样且外部API前释放document锁，不清修音参数或跑神经推理 — 两项定向合同exit0含实际VST3 process零分配/尾哨兵/解除后原PCM与另一region隔离；关闭GUI时宿主是否通知mute变化仍待实际验收，不将夹具当宿主行为证明，本批未打包或替换安装版本。
 
+Task 51: Ruling: 原native命令口只排参数actor，Clip几何被能力门挡住；官方setter必须在所属UI线程调用且会同步重入ARA — 新纯HostEditPlan复用Clip×Take倍率，批次预检后经真实assigned region/直接take/GUID解析对象，main UI typed setter+所属project Undo块，外部调用不持document/view锁，租约撤销/GUID重用停止后续写 — 五项定向host_edit/3前端能力/tsc通过，未实际REAPER验收；中途失败保留真实Undo块并明确错误，不伪造原子回滚。跨轨需已绑定目标item，shape/gain/name尚未接，空轨导入和统一Undo仍open。
+
+Task 51: Ruling: setter完成不代表ARA模型/PCM已回流，立即返回私有timeline会产生双权威或假成功 — native保存原document/route租约与Promise，只在过渡错误时重试actor读取、不重复setter，写API明确存在才bootstrap开放原拖拽/裁切 — 若反复重发setter会重复移动/产生Undo噪声，若租约重绑后沿新工程重取会误回其它工程；本批未打包/安装、不新增review，下一步统一Undo和导入/渐变。
+
 

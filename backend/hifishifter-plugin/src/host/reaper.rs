@@ -4,6 +4,8 @@
 use crate::editor::connection::UnknownVtbl;
 use crate::vst3::{uid_guid, K_RESULT_OK};
 use std::ffi::{c_char, c_void};
+#[path="reaper_write.rs"]mod write;
+pub(crate) use write::{HostClipTarget,HostUndoBlock};
 
 const IID: [u32; 4] = [0x79655E36, 0x77EE4267, 0xA573FEF7, 0x4912C27C];
 #[repr(C)]
@@ -61,6 +63,7 @@ pub(crate) struct ReaperHost {
     project: std::sync::atomic::AtomicUsize,
     transport: Option<Transport>,
     geometry: Option<GeometryApi>,
+    write:Option<write::WriteApi>,
     validate: Option<Validate>,
     fade_axes_new: Option<bool>,
 }
@@ -148,6 +151,15 @@ impl ReaperHost {
         let marker = lookup!(c"GetTakeStretchMarker", Marker);
         let slope = lookup!(c"GetTakeStretchMarkerSlope", Slope);
         let change = lookup!(c"GetProjectStateChangeCount", PlayState);
+        let write=match (
+            lookup!(c"SetMediaItemInfo_Value",write::SetValue),lookup!(c"SetMediaItemTakeInfo_Value",write::SetValue),
+            lookup!(c"GetMediaItem_Track",write::Track),lookup!(c"MoveMediaItemToTrack",write::Move),
+            lookup!(c"Undo_BeginBlock2",write::Begin),lookup!(c"Undo_EndBlock2",write::End),
+            lookup!(c"UpdateItemInProject",write::Update),lookup!(c"UpdateArrange",write::Arrange)) {
+            (Some(set_item),Some(set_take),Some(item_track),Some(move_item),Some(begin),Some(end),Some(update),Some(arrange))=>
+                Some(write::WriteApi {set_item,set_take,item_track,move_item,begin,end,update,arrange}),
+            _=>None,
+        };
         let geometry = match (
             validate, item, item_value, take_value, item_guid, take_guid, count, marker, slope,
             change,
@@ -183,6 +195,7 @@ impl ReaperHost {
             project: std::sync::atomic::AtomicUsize::new(project as usize),
             transport,
             geometry,
+            write,
             validate,
             fade_axes_new,
         })

@@ -40,7 +40,10 @@ struct BrowserState {
     events:mpsc::Receiver<serde_json::Value>,
     pending:HashSet<u64>,
     forwarded_keys:HashSet<char>,
+    host_replies:std::collections::HashMap<u64,HostReply>,
 }
+/// 宿主写完后只重试读取ARA回流，不重复setter；保存最初的document/route租约。
+struct HostReply {editor:Arc<super::session::EditorSession>,document:std::sync::Weak<crate::render::document::DocumentSession>,lease:u64,until:std::time::Instant}
 struct WindowData {
     state: Rc<RefCell<BrowserState>>,
     transferred: Rc<Cell<bool>>,
@@ -133,7 +136,7 @@ impl NativeEditor {
         let (event_sender,events)=mpsc::sync_channel(128);
         let sink=super::session::UiSink {view_id:view_id.clone(),reply,events:event_sender,closed:Arc::new(AtomicBool::new(false))};
         let state = Rc::new(RefCell::new(BrowserState { hwnd: HWND::default(), closed: false,
-            view_id, controller: None, error_window: None, link,sink,replies,events,pending:HashSet::new(),forwarded_keys:HashSet::new() }));
+            view_id, controller: None, error_window: None, link,sink,replies,events,pending:HashSet::new(),forwarded_keys:HashSet::new(),host_replies:std::collections::HashMap::new() }));
         let transferred = Rc::new(Cell::new(false));
         let data = Box::into_raw(Box::new(WindowData { state: state.clone(), transferred: transferred.clone(), token }));
         let result = unsafe { CreateWindowExW(WINDOW_EX_STYLE::default(), w!("HiFiShifter.ARA.Editor"),
@@ -281,15 +284,28 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
 /// worker只写JSON邮箱；COM响应仅在本窗口UI线程发送，且不持RefCell borrow。
 fn deliver(state:&Rc<RefCell<BrowserState>>) {
     let (controller,mut replies,events)={
-        let mut state=state.borrow_mut();
+        let state=state.borrow();
         if state.closed || state.controller.is_none() {return;}
         let replies=state.replies.try_iter().take(32).collect::<Vec<_>>();
         let events=state.events.try_iter().take(64).collect::<Vec<_>>();
-        for reply in &replies {if let Some(id)=reply["id"].as_u64() {state.pending.remove(&id);}}
         (state.controller.clone(),replies,events)
     };
     let Some(controller)=controller else {return;};
     let Ok(browser)=(unsafe {controller.CoreWebView2()}) else {return;};
+    // 在宿主模型/PCM尚未ready的过渡期，保留原Promise。只排actor读取，不在UI做文件/推理。
+    replies.retain_mut(|reply| {
+        let Some(id)=reply["id"].as_u64() else {return true;};
+        let mut state=state.borrow_mut();
+        if let Some(host)=state.host_replies.get(&id) {
+            let error=reply["error"].as_str().unwrap_or("");
+            if reply["ok"]==false&&std::time::Instant::now()<host.until
+                &&(error.starts_with("Conflict: host")||error.contains("host PCM unavailable")||error.contains("host model not ready")) {
+                let allowed=host.document.upgrade().is_some_and(|doc|state.link.authorize(&doc).is_ok_and(|lease|lease==host.lease));
+                if allowed&&host.editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink:state.sink.clone(),link:Some(state.link.clone())}).is_ok() {return false;}
+            }
+        }
+        state.host_replies.remove(&id);state.pending.remove(&id);true
+    });
     replies.extend(events);
     for response in replies {
         let mut text=response.to_string();
@@ -433,6 +449,22 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
                         Ok(serde_json::json!({"ok":true,"host_request":true,"anchorSec":position,"start_sec":position}))}
                 })()
             },
+            Some(command) if super::host_edit::is_clip_edit(command)=>{
+                let (link,sink,full)={let state=state.borrow();(state.link.clone(),state.sink.clone(),state.pending.len()>=32||state.pending.contains(&id))};
+                let outcome=(||->Result<HostReply,String> {
+                    if full {return Err("native host edit request budget exceeded".into());}
+                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                    let editor=owner.editor_session()?;let input=request.get("args").cloned().unwrap_or_else(||serde_json::json!({}));
+                    let plan=editor.plan_host_edit(command,&input)?;
+                    super::host_edit::execute(&owner,plan,||link.authorize(&document).is_ok_and(|current|current==lease))?;
+                    editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
+                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30)})
+                })();
+                match outcome {
+                    Ok(reply)=>{let mut state=state.borrow_mut();state.pending.insert(id);state.host_replies.insert(id,reply);return Ok(());},
+                    Err(error)=>Err(error),
+                }
+            },
             Some(command)=>{
                 if command=="set_transport" && request["args"]["playheadSec"].is_number() {
                     let link=state.borrow().link.clone();
@@ -468,7 +500,8 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
         Ok(())
     })),&mut token)?; }
     let transport_control=state.borrow().link.owner().is_ok_and(|owner|owner.host_playback().is_some());
-    let boot = serde_json::json!({"version":1,"viewId":state.borrow().view_id,"transportControl":transport_control});
+    let clip_editing=state.borrow().link.owner().is_ok_and(|owner|owner.host_clip_editing_available());
+    let boot = serde_json::json!({"version":1,"viewId":state.borrow().view_id,"transportControl":transport_control,"clipEditing":clip_editing});
     let script = wide(&format!("window.__HFS_PLUGIN_BOOTSTRAP__={boot};"));
     let weak = Rc::downgrade(state);
     let navigate = browser.clone();

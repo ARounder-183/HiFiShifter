@@ -2,6 +2,7 @@
 use super::*;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::ffi::CStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 thread_local! {static ACTIVE:Cell<usize>=const {Cell::new(0)};}
@@ -11,6 +12,8 @@ pub(crate) struct Fixture {
     refs: AtomicU32,
     take_token: u8,
     item_token: u8,
+    track_token:u8,
+    writer_enabled:Cell<bool>,
     pub valid: Cell<bool>,
     connection_host: Cell<bool>,
     calls: RefCell<Vec<String>>,
@@ -35,6 +38,7 @@ impl Fixture {
             refs: AtomicU32::new(1),
             take_token: 1,
             item_token: 2,
+            track_token:3,writer_enabled:Cell::new(false),
             valid: Cell::new(true),
             connection_host: Cell::new(false),
             calls: RefCell::new(Vec::new()),
@@ -91,6 +95,9 @@ impl Fixture {
     fn item(&self) -> *mut c_void {
         (&self.item_token as *const u8 as *mut u8).cast()
     }
+    fn track(&self)->*mut c_void {(&self.track_token as *const u8 as *mut u8).cast()}
+    pub fn enable_writer(&self) {self.writer_enabled.set(true);}
+    pub fn clear_markers(&self) {self.markers.borrow_mut().clear();}
     pub fn client(&self) -> ReaperHost {
         unsafe { ReaperHost::from_context(self.context(), || self.valid.get()) }.unwrap()
     }
@@ -210,6 +217,14 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
         "GetTakeStretchMarker" => marker as *const (),
         "GetTakeStretchMarkerSlope" => slope as *const (),
         "GetProjectStateChangeCount" => change as *const (),
+        "SetMediaItemInfo_Value" if f.writer_enabled.get()=>set_item as *const (),
+        "SetMediaItemTakeInfo_Value" if f.writer_enabled.get()=>set_take as *const (),
+        "GetMediaItem_Track" if f.writer_enabled.get()=>item_track as *const (),
+        "MoveMediaItemToTrack" if f.writer_enabled.get()=>move_item as *const (),
+        "Undo_BeginBlock2" if f.writer_enabled.get()=>undo_begin as *const (),
+        "Undo_EndBlock2" if f.writer_enabled.get()=>undo_end as *const (),
+        "UpdateItemInProject" if f.writer_enabled.get()=>update_item as *const (),
+        "UpdateArrange" if f.writer_enabled.get()=>update_arrange as *const (),
         _ => std::ptr::null(),
     };
     p as *mut c_void
@@ -280,6 +295,7 @@ unsafe extern "C" fn validate(
         "ReaProject*" => object == f.project(),
         "MediaItem_Take*" => object == f.take(),
         "MediaItem*" => object == f.item(),
+        "MediaTrack*"=>object==f.track(),
         _ => false,
     }
 }
@@ -301,6 +317,47 @@ unsafe extern "C" fn item_value(object: *mut c_void, name: *const c_char) -> f64
 }
 unsafe extern "C" fn take_value(object: *mut c_void, name: *const c_char) -> f64 {
     value(object, name, true)
+}
+/// 真实typed setter边界夹具：记录宿主写入，不通过插件timeline偷偷模拟成功。
+unsafe extern "C" fn set_item(object:*mut c_void,name:*const c_char,value:f64)->bool {
+    let f=fixture();assert_eq!(object,f.item());
+    let name=unsafe {CStr::from_ptr(name)}.to_str().unwrap();f.record(format!("write-item:{name}"));
+    let mut values=f.values.borrow_mut();let key=values.keys().find(|key|**key==name).copied();
+    if let Some(key)=key {values.insert(key,value);}f.change.set(f.change.get().wrapping_add(1));true
+}
+unsafe extern "C" fn set_take(object:*mut c_void,name:*const c_char,value:f64)->bool {
+    let f=fixture();assert_eq!(object,f.take());
+    let name=unsafe {CStr::from_ptr(name)}.to_str().unwrap();f.record(format!("write-take:{name}"));
+    let mut values=f.values.borrow_mut();let key=values.keys().find(|key|**key==name).copied();
+    if let Some(key)=key {values.insert(key,value);}f.change.set(f.change.get().wrapping_add(1));true
+}
+unsafe extern "C" fn item_track(item:*mut c_void)->*mut c_void {let f=fixture();assert_eq!(item,f.item());f.record("item-track");f.track()}
+unsafe extern "C" fn move_item(item:*mut c_void,track:*mut c_void)->bool {let f=fixture();assert_eq!(item,f.item());assert_eq!(track,f.track());f.record("move-item");true}
+unsafe extern "C" fn undo_begin(project:*mut c_void) {let f=fixture();assert_eq!(project,f.project());f.record("undo-begin");}
+unsafe extern "C" fn undo_end(project:*mut c_void,_label:*const c_char,flags:i32) {let f=fixture();assert_eq!(project,f.project());assert_eq!(flags,-1);f.record("undo-end");}
+unsafe extern "C" fn update_item(item:*mut c_void) {let f=fixture();assert_eq!(item,f.item());f.record("update-item");}
+unsafe extern "C" fn update_arrange() {fixture().record("update-arrange");}
+
+/// 已捕获地址被宿主重用后，GUID核对失败必须发生在任何setter之前。
+#[test]
+fn host_edit_reused_item_identity_never_reaches_setter() {
+    let fixture=Fixture::new();fixture.enable_writer();let client=std::sync::Arc::new(fixture.client());
+    let target=client.clip_target(||true).unwrap();fixture.reset();fixture.bad_guid.set(true);
+    assert!(target.set_item(c"D_POSITION",3.,&||true).unwrap_err().contains("identity"));
+    assert!(!fixture.calls().iter().any(|name|name.starts_with("write-")));
+}
+
+/// 第一笔写入可触发关闭/路由撤销；后续setter停止，Undo块仍在原project收尾。
+#[test]
+fn host_edit_reentry_revokes_later_writes_and_finishes_undo() {
+    let fixture=Fixture::new();fixture.enable_writer();let client=std::sync::Arc::new(fixture.client());
+    let live=std::rc::Rc::new(Cell::new(true));let target=client.clip_target(||live.get()).unwrap();
+    let block=target.begin_undo(&||live.get()).unwrap();fixture.reset();let flag=live.clone();
+    *fixture.hook.borrow_mut()=Some(("write-item:D_POSITION".into(),Box::new(move||flag.set(false))));
+    assert!(target.set_item(c"D_POSITION",3.,&||live.get()).is_err());
+    assert!(target.set_take(c"D_PLAYRATE",2.,&||live.get()).is_err());drop(block);
+    let calls=fixture.calls();assert_eq!(calls.iter().filter(|name|name.starts_with("write-")).count(),1);
+    assert!(calls.contains(&"undo-end".into()));assert!(!calls.contains(&"write-take:D_PLAYRATE".into()));
 }
 fn guid(
     object: *mut c_void,

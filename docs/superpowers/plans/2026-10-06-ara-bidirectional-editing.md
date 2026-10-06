@@ -12,10 +12,17 @@
 
 ## Batch B：双向命令与几何
 
-- [ ] 锁定官方setter/Undo/UI刷新函数签名，写能力不等同只读能力。
+- [x] 锁定官方setter/Undo/UI刷新函数签名，写能力不等同只读能力。
 - [ ] native主线程宿主命令调度、请求租约、重入安全和有界拖动合并。
 - [ ] 在原GUI移动/跨已接入轨道移动、裁切、长度/正向线性倍率修改。
 - [ ] ARA回流更新原timeline/source参数投影；失败回滚/撤销重做协调。
+
+2026-10-06本批：已接typed write能力与真实region→take→item目标、原GUI命令纯规划、
+原Clip×Take倍率复用和批次预检、主线程setter/所属project Undo块、native回流读取重试。
+bootstrap明确写能力才开放原Kernel拖拽/裁切。五项host_edit定向合同exit0（含旧按键1项），
+frontend能力门3项和tsc通过；尚未验证真实REAPER回流。shape/gain/name等未接字段明确拒绝，
+不假成功；跨轨写需要目标轨已有真实region，空轨导入将在Batch C补齐。
+连续操作Undo组与参数Undo统一、回流时旧参数历史保留仍待实现，不能勾完整Batch B。
 
 ## Batch C：导入
 
@@ -39,4 +46,4 @@
 
 当前：目标已建立，官方mute/相关setter签名已核对；Batch A两项定向合同exit0，
 覆盖有效mute/solo覆盖、另一region隔离、实际process实时/离线静音与解除后的原PCM，
-零分配和尾哨兵。未声称真实REAPER/关闭GUI门通过；Batch B-E尚未完成。
+零分配和尾哨兵。未声称真实REAPER/关闭GUI门通过；Batch B已接基础写链路，B-E整体尚未完成。

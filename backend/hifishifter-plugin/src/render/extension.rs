@@ -987,6 +987,27 @@ impl ExtensionOwner {
     pub(crate) fn editor_session(self:&Arc<Self>)->Result<Arc<crate::editor::session::EditorSession>,String> {
         self.editor_document()?.editor_session()
     }
+    /// GUI能力标记只回答是否有官方写API；实际每个clip仍须唯一真实take绑定。
+    pub(crate) fn host_clip_editing_available(&self)->bool {
+        self.editor_document().is_ok_and(|document|document.renderer_owners().iter().any(|owner|
+            owner.reaper.lock().unwrap().as_ref().is_some_and(|host|host.can_edit_clips())))
+    }
+    /// 同文档实际renderer唯一region边解析写对象，不能按名字/位置/源路径查item。
+    pub(crate) fn host_edit_target(&self,clip_id:&str)->Result<crate::host::reaper::HostClipTarget,String> {
+        let document=self.editor_document()?;
+        let key={let ids=document.clip_ids.lock().unwrap();ids.iter().find(|(_,id)|id.as_str()==clip_id).map(|(key,_)|*key).ok_or("unknown ARA clip identity")?};
+        let mut target=None;
+        for owner in document.renderer_owners() {
+            if !owner.renders_playback()||!owner.assigned_regions().is_ok_and(|keys|keys.as_slice()==[key]) {continue;}
+            let stamp=owner.host_query_stamp()?;let bound=owner.reaper_geometry()?;
+            if bound.region_key!=key {return Err("host region binding changed".into());}
+            let host=owner.reaper.lock().unwrap().clone().ok_or("REAPER host interface missing")?;
+            let next=host.clip_target(||owner.host_query_authorized(&stamp))?;
+            if target.is_some() {return Err("multiple host writers for one ARA clip".into());}
+            target=Some(next);
+        }
+        target.ok_or_else(||"clip has no unique directly bound REAPER take".into())
+    }
     /// 组件/文档终止时停止实例worker；不要在音频process调用。
     pub(crate) fn stop_editor(&self) {
         let document={self.document.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade)};

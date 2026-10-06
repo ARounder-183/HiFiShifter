@@ -30,7 +30,7 @@
  * @see docs/superpowers/specs/2026-09-13-timeline-single-path-design.md
  */
 import React, { useMemo, Profiler } from "react";
-import { isPluginMode } from "../../services/hostCapabilities";
+import { isPluginMode, isHostGeometryReadOnly } from "../../services/hostCapabilities";
 import { Flex } from "@radix-ui/themes";
 import { AppDialog } from "../../ui/Dialog";
 import { AppContextMenu } from "../../ui/Menu";
@@ -5042,7 +5042,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     /** 内核交互回调集合；插件保留选择/查看/参数动作，不编辑宿主clip几何。 */
     const kernelInteractions = React.useMemo(
         () => ({
-            geometryReadOnly: isPluginMode(),
+            geometryReadOnly: isHostGeometryReadOnly(),
             onSeek: handleKernelSeek,
             onSeekTo: handleKernelSeekTo,
             onSelectClip: handleKernelSelectClip,

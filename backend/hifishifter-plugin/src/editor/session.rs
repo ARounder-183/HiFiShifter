@@ -524,7 +524,7 @@ pub(crate) mod tests {
     use ara2_bridge::plugin::ExtensionRoles;
 
     /// 只替代真实DAW的建图/授权边界；使用真正owner、native扩展、actor与state编码。
-    fn fixture()->(ModelHandle,Arc<ExtensionOwner>,Box<u8>) {
+    pub(crate) fn fixture()->(ModelHandle,Arc<ExtensionOwner>,Box<u8>) {
         let model=ModelHandle::new();let document=model.session();
         let mut timeline:TimelineState=serde_json::from_value(json!({
             "tracks":[{"id":"track","name":"host","order":0,"pitch_analysis_algo":"none"}],

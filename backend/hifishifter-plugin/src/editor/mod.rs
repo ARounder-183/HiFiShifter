@@ -6,6 +6,7 @@ pub(crate) mod session;
 pub(crate) mod workspace;
 pub(crate) mod parameter_atlas;
 mod commands;
+mod host_edit;
 mod events;
 pub(crate) mod resources;
 #[cfg(windows)]
