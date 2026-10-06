@@ -120,14 +120,41 @@ export function isPlainInputTarget(target: EventTarget | null): boolean {
 /**
  * 在编辑器的 copy/cut 事件上补写 Markdown flavor。
  *
- * 必须挂在编辑器 DOM 上、且在 ProseMirror 自己的监听之后执行：ProseMirror
- * 会写 `text/html` 与 `text/plain`，这里只做补充与裁剪。
+ * 【分工】ProseMirror 自己会写 `text/html` 与 `text/plain`；这里挂在编辑器 DOM 上、
+ * 在它**之后**执行，只做补充（`text/markdown`）与裁剪（按 `copyFormat` 决定留哪些）。
+ * 必须排在它之后，否则我们写的东西会被它覆盖掉。
+ *
+ * 【剪切为什么要提前算】`cut` 与 `copy` 有一个致命差别：**ProseMirror 的 cut 处理器
+ * 在同一次事件里就把选区删掉了**（它 dispatch 一条删除事务），而本写出器跑在冒泡
+ * 阶段 —— 那时 `state.selection` 已经塌缩，`selectionMarkdown` 只能返回空串。实测
+ * （全选后 Ctrl+X）：捕获阶段 `collapsed:false`，冒泡阶段 `collapsed:true`，
+ * 写出去的 `text/plain` 长度为 0。
+ *
+ * 后果不是"少一个 flavor"，而是**剪贴板里只剩下 `text/html`**（空串的 `text/plain`
+ * 会被浏览器直接丢掉）。于是：
+ *   - `Ctrl+V` 仍然能用（它从 `text/html` 还原）；
+ *   - **右键菜单的粘贴用不了** —— 它只能 `navigator.clipboard.readText()`，读到空串，
+ *     于是"用快捷键剪切、用菜单粘贴"这条混搭路径什么都粘不出来。
+ *
+ * 修法：在**捕获阶段**（同一元素上，先于冒泡阶段执行，且此时 ProseMirror 还没动手、
+ * 选区完好）把 flavor 快照下来，冒泡阶段直接套用。
  */
 export function installClipboardFlavorWriter(
     element: HTMLElement,
     getSettings: () => { copyFormat: string; copyPlainTextAs: string },
     getEditor: () => Editor | null,
 ): () => void {
+    /** 本次剪切在选区被删之前算好的 flavor（见上方说明）。 */
+    let cutFlavors: ClipboardFlavors | null = null;
+
+    const snapshotForCut = (event: ClipboardEvent) => {
+        if (event.type !== "cut") return;
+        if (isPlainInputTarget(event.target)) return;
+        const editor = getEditor();
+        if (!editor) return;
+        cutFlavors = computeClipboardFlavors(editor, getSettings());
+    };
+
     const handler = (event: ClipboardEvent) => {
         // NodeView 里的输入框（alt 编辑等）冒泡到编辑器 DOM：它们的复制必须
         // 走原生行为，重写 flavor 会把输入框草稿当成正文 Markdown 写上剪贴板。
@@ -135,14 +162,30 @@ export function installClipboardFlavorWriter(
         const editor = getEditor();
         const data = event.clipboardData;
         if (!editor || !data) return;
-        const flavors = computeClipboardFlavors(editor, getSettings());
+        /*
+         * 剪切用捕获阶段的快照（那时选区还在）；复制照常现算（选区没被动过）。
+         *
+         * 快照**在这里无条件消费掉**：万一这次剪切的冒泡处理器提前 return（例如
+         * `data` 为空），留着它就会被**下一次复制**误用 —— 那会拿上一次剪切的内容
+         * 去覆盖新的选区。
+         */
+        const stashed = cutFlavors;
+        cutFlavors = null;
+        const flavors =
+            event.type === "cut" && stashed
+                ? stashed
+                : computeClipboardFlavors(editor, getSettings());
         if (!flavors.keepHtml) data.setData("text/html", "");
         if (flavors.markdown) data.setData("text/markdown", flavors.markdown);
         data.setData("text/plain", flavors.plainText);
     };
+
+    // 捕获阶段只服务 `cut`（`copy` 不需要，冒泡阶段选区仍完好）。
+    element.addEventListener("cut", snapshotForCut, true);
     element.addEventListener("copy", handler);
     element.addEventListener("cut", handler);
     return () => {
+        element.removeEventListener("cut", snapshotForCut, true);
         element.removeEventListener("copy", handler);
         element.removeEventListener("cut", handler);
     };

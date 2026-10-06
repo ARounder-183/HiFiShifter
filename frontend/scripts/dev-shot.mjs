@@ -35,6 +35,15 @@ const page = await browser.newPage({
     viewport: { width: vw, height: vh },
     deviceScaleFactor: 2,
 });
+/*
+ * 剪贴板权限：Chromium 下 `navigator.clipboard.readText()` 需要显式授予
+ * `clipboard-read`，否则一律 reject —— 于是"从菜单粘贴"永远读不到内容，任何走
+ * 系统剪贴板的验证都只能拿到假阴性。授予它对渲染类用例没有副作用。
+ */
+await page
+    .context()
+    .grantPermissions(["clipboard-read", "clipboard-write"])
+    .catch(() => {});
 if (kernelFlag !== undefined) {
     await page.addInitScript((value) => {
         window.localStorage.setItem("hifishifter.timelineKernel", value);
