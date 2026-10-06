@@ -368,6 +368,7 @@ impl ReaperHost {
         let take_pitch = tv(c"D_PITCH")?;
         let item_timebase = integer(iv(c"C_BEATATTACHMODE")?)?;
         let auto_stretch = boolean(iv(c"C_AUTOSTRETCH")?)?;
+        let muted = boolean(iv(c"B_MUTE")?)?;
         let length = |name| -> Result<f64, String> {
             let v = iv(name)?;
             if v < 0. {
@@ -438,6 +439,7 @@ impl ReaperHost {
             take_pitch,
             item_timebase,
             auto_stretch,
+            muted,
             markers,
             fade_in_sec,
             fade_out_sec,

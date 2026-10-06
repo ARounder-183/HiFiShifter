@@ -343,8 +343,9 @@ impl DocumentSession {
         for owner in &owners {
             if let Err(error)=owner.merge_pending_restore(self) {log::warn!("[ara] instance state unresolved: {error}");}
         }
+        drop(_transaction);
         for owner in owners {
-            owner.prepare();
+            owner.refresh_reaper_state_for_model();owner.prepare();
         }
     }
 

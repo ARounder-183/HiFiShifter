@@ -38,6 +38,8 @@ pub(crate) struct ExtensionOwner {
     writer_id:AtomicU64,
     reaper:Mutex<Option<Arc<crate::host::reaper::ReaperHost>>>,
     host_geometry:Mutex<Option<CachedHostGeometry>>,
+    /// 每个真实单region播放实例的有效mute；process仅读原子，不查询宿主或清修音参数。
+    host_item_muted:std::sync::atomic::AtomicBool,
     prepared:Mutex<Option<PreparedVersion>>,
     pub snapshots: [super::snapshot::SnapshotPublisher; 2],
     pub(crate) edits: Arc<Mutex<crate::state_channel::EditState>>,
@@ -933,6 +935,7 @@ impl ExtensionOwner {
         }
     }
     /// 元数据单独采集，不让每个隐藏实例重复写工程clock；宿主调用始终不持内部锁。
+    pub(crate) fn refresh_reaper_state_for_model(&self) {self.refresh_reaper_geometry();}
     fn refresh_reaper_geometry(&self) {
         let Ok(stamp)=self.host_query_stamp() else {return;};
         let host={self.reaper.lock().unwrap().clone()};
@@ -956,12 +959,15 @@ impl ExtensionOwner {
             &&stamp.0.scope_revision.load(Ordering::Acquire)==stamp.2 {
             let mut cached=self.host_geometry.lock().unwrap();
             let changed=cached.as_ref().is_none_or(|old|old.model!=stamp.1||old.scope!=stamp.2||old.value!=geometry);
+            self.host_item_muted.store(geometry.as_ref().is_ok_and(|bound|bound.geometry.muted),Ordering::Release);
             *cached=Some(CachedHostGeometry {model:stamp.1,scope:stamp.2,change:after,value:geometry});drop(cached);
             if changed {stamp.0.ui_geometry_revision.fetch_add(1,Ordering::AcqRel);}
         }
     }
     /// realtime只读角色原子值；只有playback角色负责替换歌曲音频。
     pub(crate) fn renders_playback(&self)->bool {self.role.load(Ordering::Acquire)==1}
+    /// 最终输出前的有效item静音门；与编辑器内轨道mute不同，不从输入是否全零猜静音。
+    pub(crate) fn host_item_muted(&self)->bool {self.host_item_muted.load(Ordering::Acquire)}
     /// editor-only必须透传；未绑定角色不在这里虚构为editor，保留原未绑定安全行为。
     pub(crate) fn is_editor_only(&self)->bool {self.role.load(Ordering::Acquire)==2}
     /// process只写有界原子诊断，JSON/日志全部由actor读取，暂不把候选计数当作根因。
@@ -1289,7 +1295,8 @@ impl ExtensionOwner {
                         if let Err(error)=renderer.merge_pending_restore(&document) {log::warn!("[ara] instance state unresolved: {error}");}
                     }
                     // 某轨首次获得分配可能恢复其state并推进共享revision；其它轨也需要最新任务。
-                    for renderer in owners {renderer.prepare();}
+                    drop(_transaction);
+                    for renderer in owners {renderer.refresh_reaper_geometry();renderer.prepare();}
                 }
             },
         );
@@ -1420,6 +1427,8 @@ impl ExtensionOwner {
     /// 仅SDK规定UI线程的kOffline setup调用；不在事务锁内等待，不把旧快照当最新版本。
     pub(crate) fn prepare_offline_until(&self,deadline:std::time::Instant)->Result<(),String> {
         if !self.renders_playback() {return Ok(());}
+        // SDK离线setup在UI线程；无GUI时也刷新真实item状态，不能依赖WebView timer。
+        self.refresh_reaper_geometry();
         let document=self.editor_document()?;
         loop {
             {

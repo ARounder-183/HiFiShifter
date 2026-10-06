@@ -1082,6 +1082,7 @@ unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) ->
                 };
             }
             unsafe {crate::audio_abi::clear_outputs(data).expect("validated audio buffers");}
+            if owner.host_item_muted() {return K_RESULT_OK;}
             if data.process_context.is_null() { owner.snapshots[0].misses.fetch_add(1, Ordering::Relaxed); return if data.process_mode==2 {K_RESULT_FALSE} else {K_RESULT_OK}; }
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*data.process_context };
@@ -1810,6 +1811,37 @@ mod audio_boundary_tests {
         data.process_mode=2;
         assert_eq!(unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())},K_RESULT_OK);
         assert_eq!(left,[0.25;4]);assert_eq!(right,[0.5;4]);
+    }
+
+    /// 宿主有效item mute即时门控真正VST3输出；同文档另一region不被静音，解除后复用原快照。
+    #[test]
+    fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference() {
+        let (model,owners,_ids)=crate::editor::session::tests::workspace_fixture();let document=model.session();
+        let host=crate::host::reaper::ReaperFixture::new();host.set_value("D_POSITION",0.);
+        host.set_value("D_LENGTH",4./44100.);host.set_value("B_MUTE",1.);
+        unsafe {owners[0].bind_reaper_host(host.context());}owners[0].refresh_reaper_transport();
+        let workspace=document.workspace_timeline().unwrap();
+        assert!(workspace.clips[0].muted);assert!(!workspace.clips[1].muted);
+        assert!(!owners[1].host_item_muted(),"静音只能影响直接绑定region");
+        let mut processor=Processor::create().unwrap();processor.extension_owner=owners[0].clone();
+        owners[0].snapshots[0].publish(crate::render::snapshot::PlaybackSnapshot {
+            sample_rate:44100,origin_sample:0,left:vec![0.25;4],right:vec![0.5;4],_reservation:None,
+        }).unwrap();
+        let mut left=[9_f32;5];let mut right=[9_f32;5];let mut planes=[left.as_mut_ptr(),right.as_mut_ptr()];
+        let mut bus=AudioBusBuffers {num_channels:2,silence_flags:0,channel_buffers:planes.as_mut_ptr()};
+        let mut context=crate::audio_abi::ProcessContext {state:1<<1,sample_rate:44100.,..Default::default()};
+        let mut data=ProcessData {num_samples:4,num_outputs:1,outputs:&raw mut bus,process_context:&raw mut context,..Default::default()};
+        for mode in [0,2] {
+            data.process_mode=mode;crate::test_allocator::begin();
+            let result=unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())};
+            let allocations=crate::test_allocator::end();
+            assert_eq!(result,K_RESULT_OK);assert_eq!(allocations,0);assert_eq!(&left[..4],&[0.;4]);
+            assert_eq!(&right[..4],&[0.;4]);assert_eq!((left[4],right[4]),(9.,9.));assert_eq!(bus.silence_flags,3);
+        }
+        host.set_value("B_MUTE",0.);host.set_value("B_MUTE_ACTUAL",1.);owners[0].refresh_reaper_transport();
+        assert!(!document.workspace_timeline().unwrap().clips[0].muted,"solo覆盖后的解除不丢原始mute");
+        assert_eq!(unsafe {(AUDIO_VTBL.process)(audio_ptr(&mut *processor),(&raw mut data).cast())},K_RESULT_OK);
+        assert_eq!(&left[..4],&[0.25;4]);assert_eq!(&right[..4],&[0.5;4]);document.close();
     }
 
     /// 空实现留下旧音频；写错块长则越界覆盖尾哨兵。

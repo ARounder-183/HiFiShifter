@@ -1020,4 +1020,8 @@ Task 49: Ruling: 用户要求以后每次打包后安装到D:\VST — 覆盖旧�
 
 Task 49: Ruling: 安装前实际无REAPER，目标/源均非reparse point — 完整新包已替换D:\VST\HiFiShifter.vst3，35文件数量及SHA256逐项一致，旧版移动到.build-tmp/vst-install-backups/keyboard-fade-fix-01-35b3f4f3 — 未删除旧版、未修改其它VST，未push；备份可恢复，不把只构建成功当安装成功。
 
+Task 50: Ruling: 用户要求设目标并实现双向导入/片段编辑/线性拉伸/渐变与clip mute，又指定自定义渐变声音归HFS、REAPER只保留长度/默认方式 — 已建立活跃完整目标与2026-10-06新spec/五批计划，覆盖旧只读与只显示限制，不拓展倒放/非线性/短辅音，最终同源Release部署D:\VST — 若继续沿旧普通fade归宿主的约定会偏离用户目标；渐变委托必须先实测，不用零长度/反算未知包络伪成功。
+
+Task 50: Ruling: 官方锁定REAPER头区分B_MUTE（solo覆盖后的有效状态）与B_MUTE_ACTUAL（原始开关） — 读取有效B_MUTE，GUI投影按单region身份；每renderer原子门控实时/离线输出，模型/assignment/离线setup补采样且外部API前释放document锁，不清修音参数或跑神经推理 — 两项定向合同exit0含实际VST3 process零分配/尾哨兵/解除后原PCM与另一region隔离；关闭GUI时宿主是否通知mute变化仍待实际验收，不将夹具当宿主行为证明，本批未打包或替换安装版本。
+
 

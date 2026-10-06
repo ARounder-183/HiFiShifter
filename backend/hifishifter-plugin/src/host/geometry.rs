@@ -21,6 +21,8 @@ pub(crate) struct HostClipGeometry {
     pub take_pitch: f64,
     pub item_timebase: i32,
     pub auto_stretch: bool,
+    /// 宿主B_MUTE包含item solo覆盖；用于有效播放状态，不等同原始mute开关。
+    pub muted: bool,
     pub markers: Vec<HostStretchMarker>,
     pub fade_in_sec: f64,
     pub fade_out_sec: f64,

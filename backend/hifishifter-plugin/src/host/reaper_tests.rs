@@ -54,6 +54,8 @@ impl Fixture {
                 ("D_PITCH", 3.),
                 ("C_BEATATTACHMODE", 1.),
                 ("C_AUTOSTRETCH", 1.),
+                ("B_MUTE", 0.),
+                ("B_MUTE_ACTUAL", 0.),
                 ("D_FADEINLEN", 0.2),
                 ("D_FADEOUTLEN", 0.3),
                 ("D_FADEINLEN_AUTO", 0.4),
@@ -214,6 +216,17 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
 }
 /// 夹具显式采用目标REAPER7.81的新轴，不用缺省字段猜宿主版本。
 unsafe extern "C" fn version()->*const c_char {c"7.81/x64".as_ptr()}
+
+/// B_MUTE才是item solo覆盖后的有效静音；原始mute仍开时solo也可让该clip播放。
+#[test]
+fn effective_item_mute_uses_host_solo_override_not_raw_mute() {
+    let fixture=Fixture::new();let client=fixture.client();
+    assert!(!fixture.geometry(&client).unwrap().muted);
+    fixture.set_value("B_MUTE",1.);fixture.set_value("B_MUTE_ACTUAL",1.);
+    assert!(fixture.geometry(&client).unwrap().muted);
+    fixture.set_value("B_MUTE",0.);
+    assert!(!fixture.geometry(&client).unwrap().muted,"item solo覆盖必须与宿主有效状态一致");
+}
 unsafe extern "system" fn extended(
     _: *mut c_void,
     _: u32,

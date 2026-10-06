@@ -11,6 +11,14 @@
 交付为 `.build-tmp/deliveries/keyboard-fade-fix-01/HiFiShifter.vst3`。渐变只改显示，
 短辅音静音问题仍按用户要求暂不处理。
 
+## 2026-10-06 新活跃目标：双向片段编辑与实际HFS渐变
+
+用户要求在HFS导入/编辑/线性拉伸/渐变clip并同步REAPER，确认REAPER item mute应
+同步；进一步指定REAPER只保留fade长度和默认方式，自定义渐变形状与声音由HFS负责。
+新权威为docs/superpowers/specs/2026-10-06-ara-bidirectional-editing-design.md及同名
+plans下ara-bidirectional-editing.md。旧几何只读/渐变只显示不再是目标边界；先验证
+ARA渐变委托以避免双重淡化，不清零宿主fade长度或反算未知包络冒充实现。
+
 ## 当前续接：四项目标仍未全部完成
 
 当前权威是`docs/superpowers/specs/2026-10-05-ara-complete-integration-design.md`及同名plan。

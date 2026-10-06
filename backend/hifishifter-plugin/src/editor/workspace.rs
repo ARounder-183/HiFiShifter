@@ -39,6 +39,15 @@ impl DocumentSession {
             clip.fade_in_dir=geometry.fade_in_dir;clip.fade_out_dir=geometry.fade_out_dir;
         }
     }
+    /// 有效item静音按同文档唯一region身份投影；不把它存成HFS自己的可写轨道状态。
+    pub(crate) fn project_host_mutes_locked(&self,timeline:&mut TimelineState) {
+        let identities=self.clip_ids.lock().unwrap();
+        for owner in self.renderer_owners() {
+            let Some(bound)=owner.host_geometry_metadata_locked(self) else {continue;};
+            let Some(id)=identities.get(&bound.region_key) else {continue;};
+            if let Some(clip)=timeline.clips.iter_mut().find(|clip|&clip.id==id) {clip.muted=bound.geometry.muted;}
+        }
+    }
     /// 无PCM复制或host getter，pending曲线也可独立更新可见宿主fade。
     pub(crate) fn ui_fade_projection(&self)->Result<(u64,TimelineState),String> {
         let _transaction=self.transaction.lock().unwrap();let mut timeline=self.workspace_timeline_locked()?;
@@ -72,6 +81,7 @@ impl DocumentSession {
             .collect::<Result<BTreeSet<_>,_>>()?;drop(identities);
         let mut timeline=self.timeline.lock().unwrap().clone().ok_or("host timeline unavailable")?;
         timeline.clips.retain(|clip|clips.contains(&clip.id));
+        self.project_host_mutes_locked(&mut timeline);
         let mut tracks=timeline.clips.iter().map(|clip|clip.track_id.clone()).collect::<BTreeSet<_>>();
         // 原GUI分组根需要保留，父链只沿实际宿主图，未知/循环不能创建虚构轨道。
         for id in tracks.clone() {
