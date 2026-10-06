@@ -32,10 +32,41 @@ function fakeClipboardEvent(
     target: EventTarget,
     clipboardData: unknown,
 ): ClipboardEvent {
-    const event = new Event(type, { bubbles: true });
+    const event = new Event(type, { bubbles: true, cancelable: true });
     Object.defineProperty(event, "target", { value: target });
     Object.defineProperty(event, "clipboardData", { value: clipboardData });
     return event as unknown as ClipboardEvent;
+}
+
+/**
+ * `DataTransfer` 的最小替身。
+ *
+ * 【为什么不能只给 `setData`】ProseMirror 的 `copy`/`cut` 处理器会在同一个事件里跑，
+ * 它开头就调 `data.clearData()` —— 少了这个方法，处理器抛 `TypeError`，而那个异常
+ * 发生在事件派发里、**不会被本用例的断言捕获**，只会变成 vitest 的 "Unhandled
+ * Errors"（测试照样显示 passed，除非你去看 Errors 那一行）。
+ */
+function fakeDataTransfer(): {
+    setData: (type: string, value: string) => void;
+    getData: (type: string) => string;
+    clearData: () => void;
+    readonly types: string[];
+    readonly files: File[];
+} {
+    const store = new Map<string, string>();
+    return {
+        setData: (type, value) => {
+            store.set(type, value);
+        },
+        getData: (type) => store.get(type) ?? "",
+        clearData: () => {
+            store.clear();
+        },
+        get types() {
+            return [...store.keys()];
+        },
+        files: [],
+    };
 }
 
 /** 只够 `computeClipboardFlavors` 走"空选区"路径的最小 editor 形状。 */
@@ -112,9 +143,11 @@ test("components/layout/notebook/notebookClipboard.test.ts scripted checks", () 
  * 都粘不出来。浏览器实测：修复前剪贴板类型只有 `["text/html"]`，修复后是
  * `["text/plain","text/html"]`。
  *
- * 【怎么在 jsdom 里复现这个时序】真正删选区的是 ProseMirror，这里用一个注册得
- * **更早**的冒泡监听代替它（同一元素上，先注册的先跑）：于是顺序与浏览器一致 ——
- * 写出器的捕获监听 → 删选区 → 写出器的冒泡监听。
+ * 【怎么在 jsdom 里复现这个时序】不自己模拟删除 —— ProseMirror 自己的 `copy`/`cut`
+ * 处理器就挂在同一个 DOM 上，派发合成事件时它会**真的跑**：先写 `text/html` 与
+ * `text/plain`，**然后 dispatch 一条删除事务**。让它真跑，顺序就与浏览器一致
+ * （写出器的捕获监听 → PM 写盘并删选区 → 写出器的冒泡监听），也就不存在
+ * "模拟行为与真实行为漂移、测试却仍然绿"的风险。
  */
 test("剪切时 text/plain 取自选区被删之前（否则为空串）", async () => {
     const { Editor } = await import("@tiptap/core");
@@ -123,32 +156,32 @@ test("剪切时 text/plain 取自选区被删之前（否则为空串）", async
     const editor = new Editor({
         element: document.createElement("div"),
         extensions: buildNotebookExtensions({ markdownShortcuts: true, slashCommands: false }),
-        content: "一段文字",
+        // 正文要能区分 Markdown 与纯文本，否则"我们改写过它"这件事看不出来。
+        content: "普通**加粗**文字",
     });
     const container = editor.view.dom;
     document.body.append(container);
-    // 模拟 ProseMirror：在冒泡阶段删掉选区（比写出器的冒泡监听更早注册）。
-    container.addEventListener("cut", () => editor.commands.deleteSelection());
 
-    const written: Record<string, string> = {};
     const remove = installClipboardFlavorWriter(
         container,
         () => ({ copyFormat: "markdown+html", copyPlainTextAs: "markdown" }),
         () => editor,
     );
 
-    editor.commands.setTextSelection({ from: 1, to: 3 }); // 选中前两个字
+    editor.commands.setTextSelection({ from: 1, to: editor.state.doc.content.size - 1 });
+
+    // 替身必须实现 `clearData` —— PM 的处理器会调它（只实现 setData 会抛）。
+    const data = fakeDataTransfer();
     const target = container.querySelector("p") ?? container;
     // 派发在**后代**上：容器的捕获监听先于它的冒泡监听，与浏览器一致。
-    target.dispatchEvent(
-        fakeClipboardEvent("cut", target, {
-            setData: (type: string, value: string) => {
-                written[type] = value;
-            },
-        }),
-    );
+    target.dispatchEvent(fakeClipboardEvent("cut", target, data));
 
-    assertEqual(written["text/plain"], "一段", "剪切写出的 text/plain 必须是 Markdown，而不是空串");
+    assertEqual(
+        data.getData("text/plain"),
+        "普通**加粗**文字",
+        "剪切写出的 text/plain 必须是 Markdown（PM 自己写的是纯文本「普通加粗文字」，被我们改写）",
+    );
+    assertEqual(editor.state.doc.textContent, "", "ProseMirror 的 cut 处理器应已删掉选区");
 
     remove();
     editor.destroy();
