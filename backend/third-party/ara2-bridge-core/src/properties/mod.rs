@@ -1,4 +1,4 @@
-//! Owned aligned mirrors and pinned outbound guards for ARA property records.
+//! ARA属性的拥有型副本及稳定FFI出参；宿主音频对象ID单独兼容REAPER UTF-8，输出ID仍严格ASCII。
 
 mod document;
 mod model;
@@ -88,6 +88,16 @@ pub(crate) unsafe fn copy_required_id(pointer: *const c_char) -> Result<CString,
     // foreign-string validator rejects null and unterminated pointers.
     let value = unsafe { ForeignStr::copy_persistent_id(pointer, MAX_PROPERTY_STRING_BYTES)? };
     persistent_id(value.as_str())
+}
+
+/// REAPER对含中文素材会给出UTF-8对象ID，虽偏离SDK七位ASCII要求，也须保留原始身份。
+/// 仅用于宿主AudioSource/AudioModification输入；不放宽插件Factory/Archive ID构造校验。
+/// # Safety
+/// 调用方保证NUL终止的宿主字符串在调用期间可读；长度上限/UTF-8/null检查仍由ForeignStr执行。
+pub(crate) unsafe fn copy_host_object_id(pointer: *const c_char) -> Result<CString, AraError> {
+    let value=unsafe {ForeignStr::copy_display(pointer,MAX_PROPERTY_STRING_BYTES)?};
+    if value.as_str().is_empty() {return Err(AraError::InvalidArgument("host object persistent ID must be nonempty"));}
+    CString::new(value.as_str()).map_err(|_|AraError::InvalidArgument("host object persistent ID contains NUL"))
 }
 
 pub(crate) unsafe fn zeroed_raw<T>() -> T {

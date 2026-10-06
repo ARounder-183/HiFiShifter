@@ -1,7 +1,7 @@
-//! Owned model-object properties and stable backing allocations.
+//! 拥有型模型属性与稳定存储；仅宿主音频对象输入兼容UTF-8 ID，保留标准输出校验。
 
 use super::{
-    copy_optional_display, copy_required_id, display_string, persistent_id, write_raw, zeroed_raw,
+    copy_optional_display, copy_host_object_id, display_string, persistent_id, write_raw, zeroed_raw,
     FfiProperties,
 };
 use crate::{ApiGeneration, AraBool, AraError, ForeignSlice, ModelRef, SizedInput};
@@ -405,7 +405,7 @@ impl AudioSourceProperties {
         // SAFETY: the caller contract covers the nested ephemeral display string.
         let name = unsafe { copy_optional_display(name)? };
         // SAFETY: the caller contract covers the nested ephemeral persistent ID.
-        let persistent_id = unsafe { copy_required_id(id)? };
+        let persistent_id = unsafe { copy_host_object_id(id)? };
         Ok(Self {
             name,
             persistent_id,
@@ -425,7 +425,7 @@ impl AudioSourceProperties {
     }
     /// Returns the persistent ID.
     pub fn persistent_id(&self) -> &str {
-        self.persistent_id.to_str().expect("validated ASCII")
+        self.persistent_id.to_str().expect("validated UTF-8")
     }
     /// Returns the per-channel sample count.
     pub const fn sample_count(&self) -> ARASampleCount {
@@ -565,7 +565,7 @@ impl AudioModificationProperties {
         // SAFETY: the outer contract covers the nested display string.
         let name = unsafe { copy_optional_display(name)? };
         // SAFETY: the outer contract covers the nested persistent ID.
-        let persistent_id = unsafe { copy_required_id(id)? };
+        let persistent_id = unsafe { copy_host_object_id(id)? };
         Ok(Self {
             name,
             persistent_id,
@@ -579,7 +579,7 @@ impl AudioModificationProperties {
     }
     /// Returns the persistent ID.
     pub fn persistent_id(&self) -> &str {
-        self.persistent_id.to_str().expect("validated ASCII")
+        self.persistent_id.to_str().expect("validated UTF-8")
     }
     /// Builds a pinned raw record.
     pub fn as_ffi(&self) -> Pin<Box<FfiProperties<'_, ARAAudioModificationProperties>>> {

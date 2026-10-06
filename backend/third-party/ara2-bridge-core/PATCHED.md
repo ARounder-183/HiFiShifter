@@ -29,5 +29,15 @@
 
 ## 为什么不改成"自己写一层 ARA 文档控制器"
 
+## REAPER中文宿主对象ID兼容（2026-10-06）
+
+SDK规定ARAPersistentID为七位ASCII，但REAPER实际对含中文素材路径传入UTF-8音频对象ID。
+严格拒绝会使createAudioSource返回null，REAPER随后在源列表流程空指针崩溃。
+仅AudioSourceProperties/AudioModificationProperties的FFI输入改用有界、非空、有效UTF-8
+复制，原始字节不归一化、不转换、不制造新身份。插件自己生成的ID及其它ASCII校验不变。
+定向边界回归见hifishifter-plugin/tests/host_persistent_ids.rs；宿主复现记录在probe/ara。
+
+## 原方案取舍（续）
+
 那等于重写上游的整个回调委托层（`generated_callbacks` 那些表），规模远大于五行 getter。
 只有当上游在**别的**地方也不可用时，才值得走那条路。

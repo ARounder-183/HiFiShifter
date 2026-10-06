@@ -1,4 +1,4 @@
-//! Owned document-controller allocation joining safe runtime state to generated callbacks.
+//! 拥有文档控制器及安全运行时；对象创建失败必须留下原因，不能只向宿主返回无诊断的空引用。
 
 use crate::ffi::generated_callbacks::ControllerDelegate;
 use crate::{
@@ -522,23 +522,25 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
         properties: *const ARAAudioSourceProperties,
     ) -> ARAAudioSourceRef {
         if host_ref.is_null() {
+            log::error!("ARA createAudioSource rejected: null host reference");
             return null_mut();
         }
         // SAFETY: the ARA callback contract supplies complete ephemeral properties and nested data.
-        let Ok(properties) =
-            (unsafe { ara2_bridge_core::AudioSourceProperties::copy_from_ffi(properties) })
-        else {
-            return null_mut();
+        let properties = match unsafe { ara2_bridge_core::AudioSourceProperties::copy_from_ffi(properties) } {
+            Ok(properties)=>properties,
+            Err(error)=>{log::error!("ARA createAudioSource property rejection: {error:?}");return null_mut();}
         };
         // SAFETY: the non-null callback identity remains live for the controller lifetime.
         let Ok(scoped_host_ref) = (unsafe { HostAudioSourceRef::from_raw(host_ref) }) else {
             return null_mut();
         };
         if !self.content_readers.is_empty() {
+            log::error!("ARA createAudioSource rejected: {} content readers still live",self.content_readers.len());
             return null_mut();
         }
         let host = &self.host;
         let Some(runtime) = self.runtime.as_mut() else {
+            log::error!("ARA createAudioSource rejected: document runtime closed");
             return null_mut();
         };
         let result: Result<(RawHandle, ARAAudioSourceRef), AraError> = host
@@ -548,8 +550,9 @@ impl<P: PluginModel> ControllerDelegate for ControllerAdapter<P> {
                 let reference = edit.audio_source_ref(handle)?;
                 Ok((handle.into_raw(), reference.as_raw().cast()))
             });
-        let Ok((handle, reference)) = result else {
-            return null_mut();
+        let (handle, reference)=match result {
+            Ok(value)=>value,
+            Err(error)=>{log::error!("ARA createAudioSource callback failure: {error:?}");return null_mut();}
         };
         self.audio_source_hosts.insert(handle, host_ref);
         reference

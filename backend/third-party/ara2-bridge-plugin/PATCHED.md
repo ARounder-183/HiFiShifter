@@ -64,3 +64,8 @@ entry 的 owning 引用保留 companion storage 至最终 release，支持两个
 PlaybackAccess交付可存储租约，HostClients销毁后撤销，原模型线程之外拒绝调用。
 HiFiShifter只在WebMessageReceived主线程执行Start/Stop/SetPosition，不在actor/process调用，
 也不保留未经验证的ARA host裸指针。缺可选接口时GUI禁用播放控制。
+
+## 源创建拒绝日志（2026-10-06）
+
+createAudioSource的属性、编辑状态和reader租约拒绝会进入现有log记录，避免向REAPER
+返回null前没有任何原因可查。日志不改回调ABI、不绕过许可/有效性校验，也不记录ID内容。

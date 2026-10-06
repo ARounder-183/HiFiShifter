@@ -1006,4 +1006,8 @@ Task 41: Ruling: 用户实际使用新Release后明确“验收通过”，再�
 
 Task 45: Ruling: 用户明确要求当前分支改名feature/ara-plugin并推送远程 — 覆盖旧“绝不push”的本次限制，已将本worktree分支从codex/ara-plugin本地改名，origin目标ref检查为空；仅提交明确文档路径后正常push设置upstream — 若改主develop、强推现有远程或上传ignored用户工程/产物会扩大授权；不删旧远程分支、不自动建PR。
 
+Task 48: Ruling: 多短clip故障在空母轨加插件后搬子轨素材时触发；100个英文路径源正常，实际118-item副本的createAudioSource因中文UTF-8 persistent ID被ASCII校验拒绝，宿主随后空指针崩溃 — 仅兼容宿主音频源/修改对象输入的有效UTF-8并保留原字节，自身输出ID仍ASCII，非法/空ID防线保留，增加拒绝日志 — SDK标准本为ASCII，不能错误宣称上游规范允许UTF-8；这是REAPER输入兼容，若改身份或伪造source会损坏保存/源对应，不用clip数量限制掩盖。
+
+Task 48: Ruling: 修复版两个定向ID边界用例exit0、实际118-item副本及200个中文双声道短素材均完成空母轨搬移/保存/正常退出 — 生成many-clips-fix-01 Release，仅插件构建，不跑全量/新增review、不覆盖D:\VST，不自动push；用户原工程/音频只读 — 无新空ID拒绝或同PID崩溃，足以覆盖此次报告；不外推任意未知不合规宿主输入，诊断原始资料及用户副本仅留ignored目录。
+
 
