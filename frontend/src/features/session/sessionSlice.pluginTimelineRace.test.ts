@@ -5,6 +5,8 @@ import { afterEach, expect, test, vi } from "vitest";
 import reducer, { beginInteraction, endInteraction, fetchTimeline } from "./sessionSlice";
 import { moveClipRemote, setClipsStateBulkRemote } from "./thunks/timelineThunks";
 import { webApi } from "../../services/webviewApi";
+import { seekPlayhead, syncPlaybackState } from "./thunks/transportThunks";
+import { importAudioFileAtPosition } from "./thunks/importThunks";
 import type { TimelineResult } from "../../types/api";
 
 const move = { clipId: "host-clip", startSec: 5, trackId: "host-track", moveLinkedParams: true };
@@ -22,6 +24,30 @@ function initial() {
     return reducer(undefined, fetchTimeline.fulfilled(timeline(0), "initial", undefined));
 }
 afterEach(() => { delete window.__HFS_PLUGIN_BOOTSTRAP__; vi.restoreAllMocks(); });
+
+test("plugin seek ignores old-position polls during request and old polls after acknowledgement", () => {
+    let state = { ...initial(), playheadSec: 5 };
+    state = reducer(state, seekPlayhead.pending("seek-b", 5));
+    const epoch = state._transportEpoch;
+    const oldPoll = { ok: true as const, is_playing: false, target: null, base_sec: 0, position_sec: 1, playhead_sec: 1, duration_sec: 10 };
+    state = reducer(state, syncPlaybackState.fulfilled(oldPoll, "poll", { epoch, dispatchedAtMs: 0 }));
+    expect(state.playheadSec).toBe(5);
+    state = reducer(state, seekPlayhead.fulfilled({ok:true,playhead_sec:1}, "seek-b", 5));
+    expect(state.playheadSec).toBe(5);
+    state = reducer(state, syncPlaybackState.fulfilled(oldPoll, "poll-late", { epoch, dispatchedAtMs: 0 }));
+    expect(state.playheadSec).toBe(5);
+    expect(state._pluginSeekRequestId).toBeNull();
+});
+
+test("import acknowledgement cannot be removed by a read started before import", () => {
+    let state = initial();state = reducer(state, fetchTimeline.pending("before-import", undefined));
+    const args={file:new File(["fixture"],"voice.wav"),trackId:"host-track",startSec:5};
+    state = reducer(state, importAudioFileAtPosition.pending("import", args));
+    const imported=timeline(0);imported.clips.push({...imported.clips[0],id:"imported",start_sec:5});
+    state = reducer(state, importAudioFileAtPosition.fulfilled({ok:true,imported,newClipIds:["imported"],playheadSec:undefined},"import",args));
+    state = reducer(state, fetchTimeline.fulfilled(timeline(0),"before-import",undefined));
+    expect(state.clips.some(clip=>clip.id==="imported")).toBe(true);
+});
 
 test("old refresh is discarded during drag and after the B commit releases its lock", () => {
     let state = initial();

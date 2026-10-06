@@ -966,6 +966,42 @@ impl ExtensionOwner {
             if !self.host_query_authorized(&stamp) {break;}
             if owner.renders_playback()&&!std::ptr::eq(self,Arc::as_ptr(&owner)) {owner.refresh_reaper_geometry();}
         }
+        self.refresh_ui_inventory();
+    }
+    /// GUI清单按项目change/model/scope代次刷新，不每20ms枚举所有item，也不借活动工程。
+    pub(crate) fn refresh_ui_inventory(&self) {
+        let Ok(stamp)=self.host_query_stamp() else {return;};
+        let Some(host)=self.reaper.lock().unwrap().clone() else {return;};
+        let allowed=||self.host_query_authorized(&stamp);
+        let Ok(change)=host.geometry_revision(&allowed) else {return;};
+        let token=(change,stamp.1,stamp.2);
+        if self.host_query_authorized(&stamp)&&*stamp.0.ui_inventory_stamp.lock().unwrap()==Some(token) {return;}
+        let mut tracks=std::collections::BTreeMap::new();let mut seen=std::collections::BTreeSet::new();
+        for owner in stamp.0.renderer_owners() {
+            if !allowed() {return;}
+            let Some(host)=owner.reaper.lock().unwrap().clone() else {continue;};
+            let own_allowed=||allowed()&&!owner.is_closed()&&owner.editor_document().is_ok_and(|doc|Arc::ptr_eq(&doc,&stamp.0));
+            let Ok(parent)=host.direct_track_target(&own_allowed) else {continue;};
+            if !seen.insert(parent.inventory_guid().to_owned()) {continue;}
+            let Ok(mut track)=host.ui_track(&own_allowed) else {continue;};
+            let ids=stamp.0.clip_ids.lock().unwrap();let timeline=stamp.0.timeline.lock().unwrap();
+            for candidate in stamp.0.renderer_owners() {
+                if let Some(bound)=candidate.host_geometry_metadata_locked(&stamp.0) {
+                    if track.items.iter().any(|item|item.geometry.item_id==bound.geometry.item_id) {
+                        if let Some(id)=ids.get(&bound.region_key) {if let Some(clip)=timeline.as_ref().and_then(|t|t.clips.iter().find(|c|&c.id==id)) {track.id=clip.track_id.clone();break;}}
+                    }
+                }
+            }
+            drop(timeline);drop(ids);
+            if track.id.starts_with("host-track-") {if let Some(old)=stamp.0.ui_tracks.lock().unwrap().get(&track.guid) {track.id=old.id.clone();}}
+            tracks.insert(track.guid.clone(),track);
+        }
+        if !allowed()||host.geometry_revision(&allowed).ok()!=Some(change) {return;}
+        let _transaction=stamp.0.transaction.lock().unwrap();
+        if self.is_closed()||!stamp.0.is_alive()||stamp.0.revision.load(Ordering::Acquire)!=stamp.1||stamp.0.scope_revision.load(Ordering::Acquire)!=stamp.2 {return;}
+        stamp.0.ui_known_tracks.lock().unwrap().extend(tracks.values().map(|track|track.id.clone()));
+        *stamp.0.ui_tracks.lock().unwrap()=tracks;*stamp.0.ui_inventory_stamp.lock().unwrap()=Some(token);
+        stamp.0.ui_geometry_revision.fetch_add(1,Ordering::AcqRel);
     }
     /// 元数据单独采集，不让每个隐藏实例重复写工程clock；宿主调用始终不持内部锁。
     pub(crate) fn refresh_reaper_state_for_model(&self) {self.refresh_reaper_geometry();}
@@ -1000,6 +1036,7 @@ impl ExtensionOwner {
                 if prepare_fades {stamp.0.render_epoch.fetch_add(1,Ordering::AcqRel);}
             }
             self.host_item_muted.store(geometry.as_ref().is_ok_and(|bound|bound.geometry.muted),Ordering::Release);
+            if let Ok(bound)=&geometry {stamp.0.region_items.lock().unwrap().insert(bound.region_key,bound.geometry.item_id.clone());}
             *cached=Some(CachedHostGeometry {model:stamp.1,scope:stamp.2,change:after,value:geometry});drop(cached);
             if changed {stamp.0.ui_geometry_revision.fetch_add(1,Ordering::AcqRel);}
         }
@@ -1042,6 +1079,7 @@ impl ExtensionOwner {
     }
     /// 明确指定轨道须已有真实assigned item；空轨未指定时仅允许本FX的直接parent轨道。
     pub(crate) fn audio_import_target(&self,track:Option<&str>,authorized:&impl Fn()->bool)->Result<crate::host::reaper::HostTrackTarget,String> {
+        if let Some(id)=track {let document=self.editor_document()?;let target={document.ui_tracks.lock().unwrap().values().find(|t|t.id==id).map(|t|t.target.clone())};if let Some(target)=target {return Ok(target);}}
         if let Some(track)=track {
             let document=self.editor_document()?;
             let clips={let timeline=document.timeline.lock().unwrap();timeline.as_ref().ok_or("host timeline unavailable")?.clips.iter()
@@ -1054,7 +1092,12 @@ impl ExtensionOwner {
     }
     /// 同文档实际renderer唯一region边解析写对象，不能按名字/位置/源路径查item。
     pub(crate) fn host_edit_target(&self,clip_id:&str)->Result<crate::host::reaper::HostClipTarget,String> {
+        self.refresh_ui_inventory();
         let document=self.editor_document()?;
+        if let Some(item)=clip_id.strip_prefix("ara-item-") {
+            let target=document.ui_tracks.lock().unwrap().values().flat_map(|track|&track.items).find(|entry|entry.geometry.item_id==item).map(|entry|entry.target.clone());
+            if let Some(target)=target {return target.current(&||!self.is_closed()&&document.is_alive()&&self.editor_document().is_ok_and(|doc|Arc::ptr_eq(&doc,&document)));}
+        }
         let key={let ids=document.clip_ids.lock().unwrap();ids.iter().find(|(_,id)|id.as_str()==clip_id).map(|(key,_)|*key).ok_or("unknown ARA clip identity")?};
         let mut target=None;
         for owner in document.renderer_owners() {

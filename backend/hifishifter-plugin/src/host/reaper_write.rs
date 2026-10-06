@@ -27,6 +27,16 @@ pub(crate) struct HostClipTarget {
     host:Arc<ReaperHost>,project:usize,item:usize,take:usize,track:usize,
     pub geometry:HostClipGeometry,
 }
+/// 只由已验证parent轨道枚举器构建；当前take/item GUID与项目归属再次核对。
+pub(super) fn inventory_target(host:Arc<ReaperHost>,project:usize,track:usize,item:usize,take:usize,geometry:HostClipGeometry,authorized:&impl Fn()->bool)->Result<HostClipTarget,String> {
+    let target=HostClipTarget {host,project,track,item,take,geometry};target.verify(authorized)?;Ok(target)
+}
+impl HostClipTarget {
+    /// 冻结UI对象不保活item，写入前按GUID查验并重新读取当前几何。
+    pub(crate) fn current(&self,authorized:&impl Fn()->bool)->Result<Self,String> {
+        self.verify(authorized)?;let mut result=self.clone();result.geometry=self.host.geometry_for_take(self.take as *mut c_void,authorized)?;Ok(result)
+    }
+}
 
 /// 一个真实宿主Undo块；关闭视图/错误也收尾。析构不在错误线程调用宿主API。
 pub(crate) struct HostUndoBlock {host:Arc<ReaperHost>,project:usize}

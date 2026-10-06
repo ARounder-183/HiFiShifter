@@ -204,6 +204,20 @@ impl ModelHandle {
                 }
                 for members in bindings.values_mut() { members.sort(); members.dedup(); }
                 *self.session.track_bindings.lock().unwrap() = bindings.clone();
+                // getter可能重入ARA：先发布真实基础图、释放事务，再采集稳定item GUID。
+                *self.session.timeline.lock().unwrap()=Some(timeline.clone());
+                drop(transaction);
+                for owner in self.session.renderer_owners() {owner.refresh_reaper_state_for_model();}
+                for owner in self.session.renderer_owners() {owner.refresh_ui_inventory();}
+                let transaction=session.transaction.lock().unwrap();
+                {
+                    let items=self.session.region_items.lock().unwrap();let mut ids=self.session.clip_ids.lock().unwrap();
+                    for clip in &mut timeline.clips {
+                        if let Some((key,_))=ids.iter().find(|(_,id)|**id==clip.id) {
+                            if let Some(item)=items.get(key) {let key=*key;clip.id=format!("ara-item-{item}");ids.insert(key,clip.id.clone());}
+                        }
+                    }
+                }
                 {
                     let mut edits=self.session.edits.lock().unwrap();
                     if !edits.atlas.is_empty()&&!edits.needs_rebind {
@@ -215,9 +229,9 @@ impl ModelHandle {
                         })();
                         match projection {
                             Ok((roots,followed))=>{
-                                let previous_roots=edits.atlas.regions.values().map(|record|record.root.clone()).collect::<HashSet<_>>();
-                                edits.params.retain(|root,_|!previous_roots.contains(root));edits.params.extend(roots);edits.atlas=followed;
-                                edits.tracks.retain(|track|bindings.get(&track.id).is_some_and(|members|!members.is_empty()));
+                                // 无活动region的轨道可能只是mute；保留其曲线，不能当删除清空。
+                                edits.params.extend(roots);edits.atlas=followed;
+                                edits.tracks.retain(|track|bindings.contains_key(&track.id));
                             },
                             Err(error)=>{
                                 log::error!("[ara] source parameter projection conflict: {error}");
@@ -234,6 +248,7 @@ impl ModelHandle {
                 log::info!("{}", crate::ara::clip_starts_line(&timeline));
                 *self.session.timeline.lock().unwrap() = Some(timeline.clone());
                 self.timeline = Some(timeline);
+                drop(transaction);
             }
             Err(err) => {
                 // 映射失败必须显式记录：它是"DAW 里看到的时间线不对"这类问题的唯一线索。
@@ -242,7 +257,6 @@ impl ModelHandle {
                 return;
             }
         }
-        drop(transaction);
         self.session.prepare_renderers();
     }
 }

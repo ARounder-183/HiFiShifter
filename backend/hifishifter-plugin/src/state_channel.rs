@@ -46,6 +46,12 @@ impl EditState {
             } else {
                 // live轨道已由真实sequence边明确关联，不因轨内成员增删而丢掉编辑。
                 let Some(identity) = current.get(old) else { continue; };
+                // mute/空轨不是身份丢失；live序列仍明确，保留此前持久成员供解除/保存。
+                // 冷恢复分支仍拒绝空或歧义身份，不能用旧轨道序号猜归属。
+                if identity.is_empty() {
+                    mapping.insert(old.clone(),(old.clone(),self.bindings.get(old).cloned().unwrap_or_default()));
+                    continue;
+                }
                 (old.clone(), identity.clone())
             };
             // live归属已由宿主区域分配证明；复制轨道合法共享modification/source。
@@ -174,6 +180,17 @@ mod tests {
         client.params_by_root_track.clear();
         client.tracks[0].id = "foreign".into();
         assert!(EditState::default().merge(&host(), &client, 0).is_err());
+    }
+    /// live空轨/mute只暂停区域，不丢曲线或持久成员；冷恢复空身份仍拒绝。
+    #[test]
+    fn ui_inventory_live_empty_members_keep_parameters_and_previous_persistent_identity() {
+        let mut client=host();client.params_by_root_track.insert("track".into(),TrackParamsState {frame_period_ms:5.,pitch_edit:vec![61.,63.],..Default::default()});
+        let mut state=EditState::default().merge(&host(),&client,0).unwrap();
+        let members=vec![("mod".into(),"source".into())];state.reconcile(&BTreeMap::from([("track".into(),members.clone())])).unwrap();
+        state.reconcile(&BTreeMap::from([("track".into(),vec![])])).unwrap();
+        assert_eq!(state.params["track"].pitch_edit,[61.,63.]);assert_eq!(state.bindings["track"],members);
+        let mut restored=EditState::default();restored.restore(&state.encode().unwrap()).unwrap();
+        assert!(restored.reconcile(&BTreeMap::from([("track".into(),vec![])])).is_err());
     }
 
     #[test]

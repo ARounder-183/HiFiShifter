@@ -1060,4 +1060,12 @@ Task 58: Ruling: 完成审计确认35安装文件零差异、已提交源码与�
 
 Task 58: Ruling: 最终验收启动器对已有单路径cfg的if输出解包为string，Entries[0]成首字符E而误拒绝真实相同bundle — 仅将probe启动器路径列表外层数组化，保留全部路径限制；实际11212已加载临时双轨副本、原GUI双轨/已应用，供用户集中验收，不再自动交互 — 用户原工程不改，安装版不热替换；原生Close提示缓存索引失败仅报告由用户处理，未重复操作，未把已打开当验收通过。
 
+Task 59: Ruling: 用户实测mute时ARA区域被撤销/销毁，旧GUI播放scope过滤掉clip与空轨；重新创建又有同源参数祖先歧义 — typed parent轨道独立清单/GUID、按版本去重、GUI显示与DSP分开，参数身份加入可选真实item GUID跨区域重建，live空成员保留编辑而冷恢复空/歧义仍拒绝；兜底250ms — UI清单/身份/空成员3项、工作区9项通过，01实机显示两灰mute clip和空第三轨，但暴露空身份与显示几何提交错误，后续已修；不能把显示成功当全流程通过。
+
+Task 59: Ruling: 目录选择/浏览在插件没有接口，begin_undo_group错误依赖PCM，外部drop未明确开放 — 接FOS_PICKFOLDERS/FORCEFILESYSTEM/PATHMUSTEXIST真实目录picker、规范路径只读授权列表/搜索/元信息，错误可见，Controller4 external drop与真实File路径桥；undo group不依赖音频就绪 — 目录授权1项/生产类型检查通过，未开放任意删除/重命名或读源PCM；用户随后用Esc停止CU，停止该轮输入，真实目录/拖入仍未验收，不伪报完成。
+
+Task 60: Ruling: 用户续报mute波形消失、导入GUI需重开、seek ABAB — 保留已授权生成的GUI波形路径/媒体元信息并按item/take清理，不参与音频分析/renderer；导入前后废弃旧读取，保住已确认clip的自动crossfade结果，创建后刷新宿主清单通知；seek在途/结束废弃旧采样，native seek立即采样、不用旧echo拉回 — mute波形1项、前端竞态6项/tsc通过；从未获样本的冷启静音源不能重读原文件猜波形，真实鼠标/目录/导入全部矩阵仍不假报已过。
+
+Task 60: Ruling: 最终同源waveform-import-seek-fix-01 Release正常构建，部署前实际无REAPER — 完整包安装D:\VST，35文件SHA256逐项校验并保留旧包备份，仅本地提交不push；主体继续共享frontend/kernel，App/插件仅外壳和宿主接口分开 — 不将定向测试/安装当完整GUI验收；系统拒绝在旧未完成目标上新建第二目标，按新spec继续真实任务，不为换目标虚报complete。
+
 

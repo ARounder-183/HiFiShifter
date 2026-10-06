@@ -8,6 +8,39 @@ use std::sync::atomic::Ordering;
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub(crate) struct WorkspaceScope {pub regions:BTreeSet<u64>}
 impl DocumentSession {
+    /// UI可显示宿主尚未分配给ARA的静音item；这些占位不进入任何renderer或源PCM读取。
+    pub(crate) fn present_host_inventory(&self,timeline:&mut TimelineState,namespace:&str) {
+        let prefix=|id:&str|format!("{namespace}{id}");
+        let tracks=self.ui_tracks.lock().unwrap();if tracks.is_empty() {return;}
+        timeline.tracks.retain(|track|track.id!="track_main");
+        let mut present=std::collections::BTreeSet::new();let mut owned=std::collections::BTreeSet::new();
+        for host in tracks.values() {
+            let track_id=prefix(&host.id);owned.insert(track_id.clone());
+            if let Some(track)=timeline.tracks.iter_mut().find(|t|t.id==track_id) {track.name=host.name.clone();track.order=host.order;}
+            else {let track=serde_json::from_value(serde_json::json!({"id":track_id,"name":host.name,"order":host.order,"compose_enabled":true})).unwrap();timeline.tracks.push(track);}
+            for item in &host.items {
+                let g=&item.geometry;let id=prefix(&format!("ara-item-{}",g.item_id));present.insert(id.clone());
+                if !timeline.clips.iter().any(|clip|clip.id==id) {
+                    let mut clip:hifishifter_kernel::state::Clip=serde_json::from_value(serde_json::json!({"id":id,"track_id":track_id,"name":item.name,
+                        "start_sec":g.start_sec,"length_sec":g.duration_sec,"takes":[{"id":prefix(&g.take_id),"source_start_sec":g.source_start_sec,
+                        "source_end_sec":g.source_start_sec+g.duration_sec*g.playback_rate,"playback_rate":g.playback_rate}]})).unwrap();
+                    clip.normalize_takes();timeline.clips.push(clip);
+                }
+                let clip=timeline.clips.iter_mut().find(|clip|clip.id==id).unwrap();
+                clip.track_id=track_id.clone();clip.name=item.name.clone();clip.muted=g.muted;clip.start_sec=g.start_sec;clip.length_sec=g.duration_sec;
+                clip.snap_offset_sec=g.snap_offset_sec;clip.fade_in_sec=g.fade_in_sec;clip.fade_out_sec=g.fade_out_sec;
+                clip.auto_fade_in_sec=g.auto_fade_in_sec;clip.auto_fade_out_sec=g.auto_fade_out_sec;
+                clip.fade_in_shape=g.fade_in_shape;clip.fade_out_shape=g.fade_out_shape;clip.fade_in_dir=g.fade_in_dir;clip.fade_out_dir=g.fade_out_dir;
+                timeline.project_sec=timeline.project_sec.max(g.start_sec+g.duration_sec);
+            }
+        }
+        timeline.clips.retain(|clip|!clip.id.starts_with(&prefix("ara-item-"))||present.contains(&clip.id));
+        timeline.clips.retain(|clip|!owned.contains(&clip.track_id)||!clip.id.starts_with(&prefix("ara-clip-")));
+        let known=self.ui_known_tracks.lock().unwrap();
+        timeline.tracks.retain(|track|!known.iter().any(|id|prefix(id)==track.id)||owned.contains(&track.id));
+        timeline.tracks.sort_by_key(|track|track.order);
+        if timeline.selected_track_id.is_none() {timeline.selected_track_id=timeline.tracks.first().map(|track|track.id.clone());}
+    }
     /// 组件保存/恢复仅操作其实际assigned clips的item GUID，防止另一个轨道的形状串入。
     pub(crate) fn fade_items_locked(&self,clips:&std::collections::BTreeSet<String>)->std::collections::BTreeSet<String> {
         let identities=self.clip_ids.lock().unwrap();
@@ -30,6 +63,12 @@ impl DocumentSession {
     pub(crate) fn decorate_host_fades_locked(&self,payload:&mut serde_json::Value,namespace:&str,fades:&std::collections::BTreeMap<String,crate::fade::FadeStyle>) {
         let identities=self.clip_ids.lock().unwrap().clone();
         let Some(clips)=payload["clips"].as_array_mut() else {return;};
+        for track in self.ui_tracks.lock().unwrap().values() {for item in &track.items {
+            if let Some(clip)=clips.iter_mut().find(|clip|clip["id"]==format!("{namespace}ara-item-{}",item.geometry.item_id)) {
+                let g=&item.geometry;clip["host_fades"]=serde_json::json!({"curve_mode":match g.fade_axes_new {Some(true)=>"reaper_new",Some(false)=>"legacy",None=>"unknown"},
+                    "in_curvature":g.fade_in_dir_new,"out_curvature":g.fade_out_dir_new,"in_s":g.fade_in_dir2_new,"out_s":g.fade_out_dir2_new});
+            }
+        }}
         for owner in self.renderer_owners() {
             let Some(bound)=owner.host_geometry_metadata_locked(self) else {continue;};
             let Some(id)=identities.get(&bound.region_key) else {continue;};let ui_id=format!("{namespace}{id}");
@@ -119,7 +158,6 @@ impl DocumentSession {
         let _transaction=self.transaction.lock().unwrap();self.workspace_timeline_locked()
     }
     pub(crate) fn workspace_timeline_locked(&self)->Result<TimelineState,String> {
-        if !self.ready.load(Ordering::Acquire) {return Err("host model not ready".into());}
         let scope=self.workspace_scope_locked()?;
         let identities=self.clip_ids.lock().unwrap();
         let clips=scope.regions.iter().map(|key|identities.get(key).cloned().ok_or("workspace clip identity missing"))
@@ -128,6 +166,7 @@ impl DocumentSession {
         timeline.clips.retain(|clip|clips.contains(&clip.id));
         self.project_host_mutes_locked(&mut timeline);
         let mut tracks=timeline.clips.iter().map(|clip|clip.track_id.clone()).collect::<BTreeSet<_>>();
+        for track in self.ui_tracks.lock().unwrap().values() {if timeline.tracks.iter().any(|t|t.id==track.id) {tracks.insert(track.id.clone());}}
         // 原GUI分组根需要保留，父链只沿实际宿主图，未知/循环不能创建虚构轨道。
         for id in tracks.clone() {
             let mut current=id;let mut visited=BTreeSet::new();

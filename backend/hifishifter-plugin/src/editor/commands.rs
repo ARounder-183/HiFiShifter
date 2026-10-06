@@ -84,6 +84,9 @@ fn peaks(session:&EditorSession,path:&str)->Result<std::sync::Arc<hifishifter_ke
 /// 仅actor线程调用。宿主PCM不可用/未知命令/平台能力缺失均明确报错。
 pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<Value,String> {
     match command {
+        "list_directory"|"stat_paths"|"get_audio_file_info"|"search_files_recursive"=>return session.browser_command(command,&input),
+        "begin_undo_group"=>{session.suppress_history.store(true,Ordering::Release);return Ok(json!({"ok":true}));},
+        "end_undo_group"=>{session.suppress_history.store(false,Ordering::Release);return Ok(json!({"ok":true}));},
         "get_ui_settings"=>return value(session.settings.lock().unwrap().clone()),
         "save_ui_settings"=>{
             let mut current=session.settings.lock().unwrap();
@@ -133,7 +136,15 @@ pub(super) fn dispatch(session:&EditorSession,command:&str,input:Value)->Result<
         "emit_ui_event"=>{let event=input["event"].as_str().ok_or("event missing")?;session.emit(event,input["payload"].clone());return Ok(Value::Null);},
         _=>{},
     }
-    session.ensure_loaded(false)?;
+    if let Err(error)=session.ensure_loaded(false) {
+        if matches!(command,"get_timeline_state"|"get_timeline_state_lite") {
+            if let Some(document)=session.document.upgrade() {if !document.ui_tracks.lock().unwrap().is_empty() {
+                {let mut timeline=session.timeline.lock().unwrap();document.present_host_inventory(&mut timeline,&session.namespace);}
+                return payload(session,command=="get_timeline_state_lite");
+            }}
+        }
+        return Err(error);
+    }
     match command {
         "get_timeline_state"=>payload(session,false),
         "get_timeline_state_lite"=>payload(session,true),

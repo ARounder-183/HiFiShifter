@@ -874,6 +874,8 @@ export interface SessionState {
      * `_latestHistoryOpRequestId` / seekPlayhead 的乱序防护同理。
      */
     _transportEpoch: number;
+    /** 插件seek写入未结束时不接纳同代但仍在旧位置的宿主轮询。 */
+    _pluginSeekRequestId: string | null;
 
     /**
      * 最近一次 stop/pause 命令**开始瞬间**的真实播放状态（由
@@ -2369,6 +2371,7 @@ const initialState: SessionState = {
     _paramSelectionRestoreSeq: 0,
     _latestEditRequestId: null,
     _transportEpoch: 0,
+    _pluginSeekRequestId: null,
     _stopInterruptedPlayback: false,
 };
 
@@ -2614,6 +2617,7 @@ const sessionSlice = createSlice({
         },
         /** 供录音等后端直接导入时间轴的命令同步完整快照。 */
         applyTimelinePayload(state, action: PayloadAction<TimelineState>) {
+            if (isPluginMode()) state._pluginTimelineEpoch += 1;
             // 后端直接导入的权威快照（如录音导入）：采纳其后端播放头。
             applyTimelineState(state, action.payload, { force: true, adoptPlayhead: true });
         },
@@ -4737,6 +4741,7 @@ const sessionSlice = createSlice({
                 if (arg && typeof arg.epoch === "number" && arg.epoch !== state._transportEpoch) {
                     return;
                 }
+                if (isPluginMode() && state._pluginSeekRequestId !== null) return;
 
                 const nextIsPlaying = Boolean(payload.is_playing);
                 const nextTarget = payload.target ?? null;
@@ -6651,13 +6656,23 @@ const sessionSlice = createSlice({
                 }
             })
 
-            .addCase(seekPlayhead.pending, (state) => {
+            .addCase(seekPlayhead.pending, (state, action) => {
                 // seek 交接播放头所有权：seek 之前派发的在途播放轮询采样的是
                 // seek 前的引擎位置，其迟到响应会把光标拽回旧位置（先跳回再
                 // 被 seek 后的轮询拉回 —— 播放中点击标尺/拖拽时的可见跳变）。
                 state._transportEpoch = (Number(state._transportEpoch) || 0) + 1;
+                if (isPluginMode()) state._pluginSeekRequestId = action.meta.requestId;
+            })
+            .addCase(seekPlayhead.rejected, (state, action) => {
+                if (isPluginMode() && state._pluginSeekRequestId === action.meta.requestId) {
+                    state._pluginSeekRequestId = null; state._transportEpoch += 1;
+                }
             })
             .addCase(seekPlayhead.fulfilled, (state, action) => {
+                if (isPluginMode()) {
+                    if (state._pluginSeekRequestId !== action.meta.requestId) return;
+                    state._pluginSeekRequestId = null; state._transportEpoch += 1;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                     playhead_sec?: number;
@@ -6677,7 +6692,7 @@ const sessionSlice = createSlice({
                 const EPS = 0.001;
                 if (
                     Math.abs(state.playheadSec - requestedSec) <= EPS &&
-                    Math.abs(backendSec - requestedSec) > EPS
+                    Math.abs(backendSec - requestedSec) > EPS && !isPluginMode()
                 ) {
                     // 后端对位置做了修正（如 clamp），采纳后端值
                     state.playheadSec = Math.max(0, backendSec);
@@ -6827,6 +6842,7 @@ const sessionSlice = createSlice({
         // 宿主写入开始/结束都废弃旧刷新，覆盖键盘编辑（没有拖动锁）的同类竞态。
         builder
             .addMatcher(isAnyOf(moveClipRemote.pending, moveClipsRemote.pending,
+                importAudioAtPosition.pending, importAudioFileAtPosition.pending,
                 setClipStateRemote.pending, setClipsStateBulkRemote.pending,
                 undoRemote.pending, redoRemote.pending, setHistoryPositionRemote.pending), (state, action) => {
                 if (!isPluginMode()) return;
@@ -6834,6 +6850,8 @@ const sessionSlice = createSlice({
                 state._pluginClipEditRequests[action.meta.requestId] = true;
             })
             .addMatcher(isAnyOf(moveClipRemote.fulfilled, moveClipRemote.rejected,
+                importAudioAtPosition.fulfilled, importAudioAtPosition.rejected,
+                importAudioFileAtPosition.fulfilled, importAudioFileAtPosition.rejected,
                 moveClipsRemote.fulfilled, moveClipsRemote.rejected,
                 setClipStateRemote.fulfilled, setClipStateRemote.rejected,
                 setClipsStateBulkRemote.fulfilled, setClipsStateBulkRemote.rejected,

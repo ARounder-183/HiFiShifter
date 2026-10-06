@@ -34,13 +34,16 @@ struct Loaded {
     reverse_paths:HashMap<String,String>,
 }
 pub(crate) struct EditorSession {
-    document:Weak<DocumentSession>,
+    pub(super) document:Weak<DocumentSession>,
     pub(super) timeline:Mutex<TimelineState>,
     pub(super) history:Mutex<TimelineHistory>,
     pub(super) project:Mutex<ProjectState>,
     pub(super) settings:Mutex<hifishifter_kernel::config::UiSettings>,
     loaded:Mutex<Loaded>,
     pub(super) namespace:String,
+    pub(super) browser_roots:Mutex<Vec<PathBuf>>,
+    // 只保留已获ARA授权后生成的GUI媒体元信息/路径，不保留或复用实时播放PCM。
+    display_waveforms:Mutex<HashMap<String,(String,hifishifter_kernel::state::Clip)>>,
     pcm_dir:PathBuf,
     pub(super) peaks:Mutex<HashMap<String,Arc<hifishifter_kernel::hfspeaks_v2::HfsPeakFile>>>,
     queue:mpsc::SyncSender<Job>,worker:Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -80,7 +83,7 @@ impl EditorSession {
         let session=Arc::new(Self {document:Arc::downgrade(document),timeline:Mutex::new(TimelineState::default()),
             history:Mutex::new(Default::default()),project:Mutex::new(ProjectState::default()),
             settings:Mutex::new(hifishifter_kernel::config::UiSettings::default()),loaded:Mutex::new(Default::default()),
-            pcm_dir:std::env::temp_dir().join("hifishifter-plugin-pcm").join(&namespace),namespace,
+            pcm_dir:std::env::temp_dir().join("hifishifter-plugin-pcm").join(&namespace),namespace,browser_roots:Mutex::new(Vec::new()),display_waveforms:Mutex::new(HashMap::new()),
             peaks:Mutex::new(HashMap::new()),queue,worker:Mutex::new(None),analysis_sender,analysis_updates:Mutex::new(analysis_updates),views:Mutex::new(HashMap::new()),
             analysis_cancel:Arc::new(AtomicBool::new(false)),analysis_workers:Mutex::new(Vec::new()),
             generation:AtomicU64::new(0),submitted:AtomicU64::new(0),processed:AtomicU64::new(0),applied:AtomicU64::new(0),
@@ -304,7 +307,7 @@ impl EditorSession {
         }
         // generation 未应用不等于宿主冲突：workspace_snapshot 会把本地曲线
         // 叠加到最新宿主几何上。只有 ARA 还没有重新交付输入时才暂缓重载。
-        if !force && !document.ready.load(Ordering::Acquire) {
+        if !force && !document.ready.load(Ordering::Acquire)&&!document.workspace_timeline()?.clips.is_empty() {
             return Err("Conflict: host changed; local curves preserved, host is not ready".into());
         }
         let (snapshot,scope,projection)=document.workspace_snapshot()?;
@@ -324,6 +327,9 @@ impl EditorSession {
         // 旧状态或同URI换音频的原线不能假报就绪；已有完整clip cache由actor重新组装。
         for params in timeline.params_by_root_track.values_mut() {params.pitch_orig_key=None;params.dyn_orig_key=None;}
         self.rewrite_ids(&mut timeline,true);
+        self.retain_display_waveforms(&mut timeline,false);
+        document.present_host_inventory(&mut timeline,&self.namespace);
+        self.retain_display_waveforms(&mut timeline,true);
         if timeline.selected_track_id.is_none() {timeline.selected_track_id=timeline.tracks.first().map(|t|t.id.clone());}
         if timeline.selected_clip_id.is_none() {timeline.selected_clip_id=timeline.clips.first().map(|c|c.id.clone());}
         self.project_duration.store(timeline.project_sec.to_bits(),Ordering::Release);
@@ -350,6 +356,7 @@ impl EditorSession {
         if !initialized {return;}
         // 普通fade独立刷新UI，不强制reload丢掉pending编辑，不推进音频generation。
         if document.ui_geometry_revision.load(Ordering::Acquire)!=self.ui_geometry_version.load(Ordering::Acquire) {
+            {let mut timeline=self.timeline.lock().unwrap();self.retain_display_waveforms(&mut timeline,false);document.present_host_inventory(&mut timeline,&self.namespace);self.retain_display_waveforms(&mut timeline,true);}
             if let Ok((version,host))=document.ui_fade_projection() {
                 let mut timeline=self.timeline.lock().unwrap();
                 for clip in &mut timeline.clips {if let Some(original)=host.clips.iter().find(|original|format!("{}{}",self.namespace,original.id)==clip.id) {
@@ -377,11 +384,33 @@ impl EditorSession {
     }
     /// 波形入口只接受本会话从宿主PCM生成的路径，不能让JS任意读取本机文件。
     pub(super) fn check_source(&self,path:&str)->Result<(),String> {
-        if self.loaded.lock().unwrap().reverse_paths.contains_key(path) {Ok(())} else {Err("source is not authorized by this ARA session".into())}
+        if self.loaded.lock().unwrap().reverse_paths.contains_key(path)
+            ||self.display_waveforms.lock().unwrap().values().any(|(_,clip)|clip.source_path.as_deref()==Some(path)) {Ok(())} else {Err("source is not authorized by this ARA session".into())}
+    }
+    /// mute只撤销播放分配，不撤销已经生成的显示波形；take更换/真实删除不沿旧缓存猜。
+    fn retain_display_waveforms(&self,timeline:&mut TimelineState,restore:bool) {
+        let Some(document)=self.document.upgrade() else {return;};
+        let tracks=document.ui_tracks.lock().unwrap();let mut cache=self.display_waveforms.lock().unwrap();
+        let actual=tracks.values().flat_map(|track|&track.items).map(|item|
+            (format!("{}ara-item-{}",self.namespace,item.geometry.item_id),item.geometry.take_id.clone())).collect::<HashMap<_,_>>();
+        cache.retain(|id,(take,_)|actual.get(id)==Some(take));
+        for clip in &mut timeline.clips {
+            let Some(take)=actual.get(&clip.id) else {continue;};
+            if !restore&&clip.source_path.is_some() {cache.insert(clip.id.clone(),(take.clone(),clip.clone()));}
+            if restore&&clip.muted&&clip.source_path.is_none() {
+                if let Some((_,old))=cache.get(&clip.id) {
+                    clip.source_path=old.source_path.clone();clip.duration_sec=old.duration_sec;clip.duration_frames=old.duration_frames;
+                    clip.source_sample_rate=old.source_sample_rate;clip.source_channels=old.source_channels;clip.waveform_preview=old.waveform_preview.clone();
+                    for current in &mut clip.takes {current.source_path=old.source_path.clone();current.duration_sec=old.duration_sec;
+                        current.duration_frames=old.duration_frames;current.source_sample_rate=old.source_sample_rate;current.source_channels=old.source_channels;current.waveform_preview=old.waveform_preview.clone();}
+                }
+            }
+        }
     }
     /// 手绘pitch在compose关闭时仍需原线；只在分析快照中打开门禁，不改宿主轨道。
     fn analysis_timeline(&self)->TimelineState {
         let mut timeline=self.timeline.lock().unwrap().clone();
+        if let Some(document)=self.document.upgrade() {let ids=document.clip_ids.lock().unwrap();timeline.clips.retain(|clip|ids.values().any(|id|format!("{}{id}",self.namespace)==clip.id));}
         for track in &mut timeline.tracks {
             if timeline.params_by_root_track.get(&track.id).is_some_and(|p|p.pitch_edit_user_modified) {track.compose_enabled=true;}
         }
@@ -455,6 +484,22 @@ impl EditorSession {
     /// 只将已授权私有分析路径还原到ARA身份，未知路径明确失败。
     fn native_timeline(&self,mut timeline:TimelineState)->Result<TimelineState,String> {
         self.rewrite_ids(&mut timeline,false);
+        if let Some(document)=self.document.upgrade() {if !document.ui_tracks.lock().unwrap().is_empty() {
+            // GUI占位、名字/排序及可见总时长不进入音频权威；只取参数/轨道可编辑值。
+            let mut host=document.workspace_timeline()?;
+            for track in &mut host.tracks {if let Some(client)=timeline.tracks.iter().find(|t|t.id==track.id) {
+                track.volume=client.volume;track.muted=client.muted;track.solo=client.solo;track.compose_enabled=client.compose_enabled;track.pitch_analysis_algo=client.pitch_analysis_algo.clone();
+            }}
+            host.params_by_root_track=timeline.params_by_root_track.into_iter().filter(|(id,_)|host.tracks.iter().any(|t|&t.id==id)).collect();
+            host.selected_track_id=timeline.selected_track_id.filter(|id|host.tracks.iter().any(|t|&t.id==id));
+            host.selected_clip_id=timeline.selected_clip_id.filter(|id|host.clips.iter().any(|clip|&clip.id==id));
+            return Ok(host);
+        }}
+        // 宿主显示占位没有ARA音频授权，只提交真实活动图，不能把占位送入分析/合成。
+        if let Some(document)=self.document.upgrade() {
+            let ids=document.clip_ids.lock().unwrap();timeline.clips.retain(|clip|ids.values().any(|id|id==&clip.id));drop(ids);
+            let host=document.timeline.lock().unwrap();if let Some(host)=host.as_ref() {timeline.tracks.retain(|t|host.tracks.iter().any(|h|h.id==t.id));timeline.params_by_root_track.retain(|id,_|host.tracks.iter().any(|t|&t.id==id));}
+        }
         let loaded=self.loaded.lock().unwrap();
         for clip in &mut timeline.clips {
             // 原GUI普通宿主fade仅装饰，参数提交还原到ARA内核域，避免二次淡化。
@@ -1002,6 +1047,23 @@ pub(crate) mod tests {
         let state=editor.state();editor.close();
         assert!(state["error"].as_str().unwrap().starts_with("Unsupported"));
         assert_eq!(state["ready"],false);
+    }
+    /// 已授权生成的波形在mute显示占位期间保留；take更换后不错误沿用旧图。
+    #[test]
+    fn muted_display_keeps_authorized_waveform_without_reentering_audio_assignment() {
+        let (model,owner,_)=fixture();let document=model.session();let editor=owner.editor_session().unwrap();editor.ensure_loaded(false).unwrap();
+        let host=crate::host::reaper::ReaperFixture::new();host.enable_writer();host.enable_media();host.clear_markers();host.inventory_enabled.set(true);
+        let host_api=Arc::new(host.client());let mut track=host_api.ui_track(&||true).unwrap();
+        let mut audio=editor.timeline.lock().unwrap().clips[0].clone();let path=audio.source_path.clone().unwrap();
+        audio.id=format!("{}ara-item-{}",editor.namespace,track.items[0].geometry.item_id);audio.track_id=format!("{}{}",editor.namespace,track.id);
+        document.ui_tracks.lock().unwrap().insert(track.guid.clone(),track.clone());
+        let mut visible=TimelineState::default();visible.tracks.clear();visible.clips=vec![audio];editor.retain_display_waveforms(&mut visible,false);
+        track.items[0].geometry.muted=true;document.ui_tracks.lock().unwrap().insert(track.guid.clone(),track.clone());
+        visible.clips.clear();document.present_host_inventory(&mut visible,&editor.namespace);editor.retain_display_waveforms(&mut visible,true);
+        assert!(visible.clips[0].muted);assert_eq!(visible.clips[0].source_path.as_ref(),Some(&path));assert!(editor.check_source(&path).is_ok());
+        track.items[0].geometry.take_id="different-take".into();document.ui_tracks.lock().unwrap().insert(track.guid.clone(),track);
+        visible.clips.clear();document.present_host_inventory(&mut visible,&editor.namespace);editor.retain_display_waveforms(&mut visible,true);
+        assert!(visible.clips[0].source_path.is_none());document.close();
     }
     /// 真实宿主正向倍率不再被GUI挡住；take的源窗口和项目时长保留各自坐标。
     #[test]

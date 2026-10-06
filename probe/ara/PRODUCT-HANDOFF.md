@@ -1,5 +1,27 @@
 # ARA 产品开发当前交接
 
+## 2026-10-06 当前最终源码与安装包（覆盖下方历史状态）
+
+本批合并静音clip/空轨独立GUI清单、GUID参数归属、250ms兜底同步、live空轨曲线
+保留、真实目录选择/只读浏览和原生File拖入；另修mute已有显示波形丢失、导入旧
+读取覆盖新clip及seek ABAB。新spec/plan为2026-10-06-ara-ui-file-import-fixes.md。
+波形缓存仅GUI：按item/take保留已授权生成的元信息/私有路径，不送入DSP/分析；
+take更换/删除失效，冷启从未供源的静音clip仍不能直接读原文件造波形。
+
+最终包`.build-tmp/deliveries/waveform-import-seek-fix-01/HiFiShifter.vst3`构建exit0，
+sourceFingerprint=`EB999C760AE56224187B654FA82F111141FADA9F95B2C3C1903CF316CEC334FD`。
+当前实际无REAPER后已安装D:\VST\HiFiShifter.vst3，35文件SHA256一致；旧包备份于
+`.build-tmp/vst-install-backups/waveform-import-seek-fix-01-5a7bb330`。
+本批目录授权1项、GUI清单/身份/空成员3项、工作区9项、mute显示波形1项、前端乱序6项
+及tsc通过，不运行新全量/review。01中间包实机见两段灰色mute clip/空第三轨，同时
+发现两项额外错误后修正。完整GUI仍未验收，manifest nativeAcceptance=false。
+此前CU被物理Esc中断，停止该轮输入；不将源码检查或安装当交互验收通过。
+
+用户询问以后维护App/插件：主体同源frontend与hifishifter-kernel，两种宿主外壳及
+文件/设备/走带接口分别适配；本批改动均plugin能力分支或plugin crate，独立App保留。
+普通共享新功能通常只改一份，但必须检查插件能力限制，不能承诺所有App功能自动开放。
+用户要求设新目标，create_goal因旧未完成目标被拒绝；未为重建目标伪报旧goal complete。
+
 中文工作记录，更新于 2026-10-05。此文件记录产品分支，历史探针仍见 HANDOFF.md。
 
 ## 2026-10-06 用户最新部署要求（覆盖下文历史“不安装”约束）

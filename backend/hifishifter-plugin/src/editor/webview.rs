@@ -447,6 +447,8 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
     // 异步创建完成时仅延续宿主已交给本窗口的焦点，不能抢另一个FX/应用的焦点。
     if unsafe {GetFocus()}==hwnd {unsafe {controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT)?;}}
     let browser = unsafe { controller.CoreWebView2()? };
+    // 真实文件拖入由WebView2原生OLE接收，再通过AdditionalObjects/File.Path交给宿主。
+    if let Ok(external)=controller.cast::<ICoreWebView2Controller4>() {unsafe {external.SetAllowExternalDrop(true)?;}}
     let mapping: ICoreWebView2_3 = browser.cast()?;
     let path = wide(&folder.to_string_lossy());
     unsafe { mapping.SetVirtualHostNameToFolderMapping(w!("hifishifter.invalid"),PCWSTR(path.as_ptr()),
@@ -516,6 +518,17 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
                         else {serde_json::json!({"ok":true,"canceled":paths.is_empty(),"path":paths.first()})})
                 })()
             },
+            Some("pick_directory")=>{
+                let (link,hwnd)={let state=state.borrow();(state.link.clone(),state.hwnd)};
+                (||->Result<serde_json::Value,String>{
+                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                    let editor=owner.editor_session()?;
+                    let path=super::browser_files::pick_directory(hwnd)?;
+                    if link.authorize(&document)?!=lease {return Err("folder picker editor lease changed".into());}
+                    match path {Some(path)=>Ok(serde_json::json!({"ok":true,"path":editor.grant_browser_directory(&path)?})),
+                        None=>Ok(serde_json::json!({"ok":true,"canceled":true}))}
+                })()
+            },
             Some("import_audio_item")=>{
                 let (link,sink,full)={let state=state.borrow();(state.link.clone(),state.sink.clone(),state.pending.len()>=32||state.pending.contains(&id))};
                 let outcome=(||->Result<HostReply,String>{
@@ -537,6 +550,7 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
                         if let Some(track)=&mut created {track.commit();}Ok(id)
                     })();
                     document.host_undo.finish_request(&view_id,id);let imported=result?;
+                    owner.refresh_reaper_transport();editor.notify_timeline();
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
                     Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:Some(imported),geometry:None})
                 })();
@@ -605,8 +619,11 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
                     let link=state.borrow().link.clone();
                     let result=(||->Result<(),String> {
                         let position=request["args"]["playheadSec"].as_f64().ok_or("invalid seek position")?;
-                        link.owner()?.host_playback().ok_or("host does not provide ARA playback control")?
-                            .set_position(position).map_err(|e|e.to_string())
+                        let owner=link.owner()?;
+                        owner.host_playback().ok_or("host does not provide ARA playback control")?
+                            .set_position(position).map_err(|e|e.to_string())?;
+                        // seek回执前同步真实宿主光标，避免继续发布上次UI tick的旧位置。
+                        owner.refresh_reaper_transport();Ok(())
                     })();
                     if let Err(error)=result {
                         let text=wide(&serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":false,"error":error}).to_string());

@@ -14,6 +14,7 @@ pub(crate) struct Fixture {
     item_token: u8,
     track_token:u8,
     writer_enabled:Cell<bool>,
+    pub inventory_enabled:Cell<bool>,pub inventory_empty:Cell<bool>,
     undo_records:RefCell<Vec<std::ffi::CString>>,undo_position:Cell<i32>,
     media_enabled:Cell<bool>,media_sources:RefCell<Vec<Box<u8>>>,take_source:Cell<usize>,fail_media_take:Cell<bool>,media_path:RefCell<String>,
     extra_tracks:RefCell<Vec<Box<u8>>>,new_fx:RefCell<std::collections::HashSet<usize>>,fx_guid_bytes:[u8;16],picker_paths:RefCell<Vec<String>>,
@@ -42,6 +43,7 @@ impl Fixture {
             take_token: 1,
             item_token: 2,
             track_token:3,writer_enabled:Cell::new(false),
+            inventory_enabled:Cell::new(false),inventory_empty:Cell::new(false),
             undo_records:RefCell::new(vec![std::ffi::CString::new("Initial state").unwrap()]),undo_position:Cell::new(0),
             media_enabled:Cell::new(false),media_sources:RefCell::new(Vec::new()),take_source:Cell::new(0),fail_media_take:Cell::new(false),media_path:RefCell::new(String::new()),
             extra_tracks:RefCell::new(Vec::new()),new_fx:RefCell::new(Default::default()),fx_guid_bytes:[4;16],picker_paths:RefCell::new(Vec::new()),
@@ -249,6 +251,10 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
         "GetSetMediaItemTakeInfo" if f.media_enabled.get()=>media_info as *const (),
         "DeleteTrackMediaItem" if f.media_enabled.get()=>media_delete as *const (),
         "GetSetMediaTrackInfo_String" if f.media_enabled.get()=>media_track_guid as *const (),
+        "GetTrackMediaItem" if f.inventory_enabled.get()=>inventory_item as *const (),
+        "GetActiveTake" if f.inventory_enabled.get()=>inventory_take as *const (),
+        "GetTakeName" if f.inventory_enabled.get()=>inventory_name as *const (),
+        "GetMediaTrackInfo_Value" if f.inventory_enabled.get()=>inventory_track_value as *const (),
         "GetUserFileNameForRead" if f.media_enabled.get()=>media_picker as *const (),
         "GetUserFileName" if f.media_enabled.get()=>multi_picker as *const (),
         "InsertTrackInProject" if f.media_enabled.get()=>insert_track as *const (),
@@ -394,6 +400,7 @@ unsafe extern "C" fn media_info(take:*mut c_void,name:*const c_char,new:*mut c_v
 unsafe extern "C" fn media_delete(track:*mut c_void,item:*mut c_void)->bool {let f=fixture();assert_eq!(track,f.track());assert_eq!(item,f.item());f.record("media-item-delete");let source=f.take_source.replace(0);if source!=0 {unsafe {media_destroy(source as *mut c_void)};}true}
 unsafe extern "C" fn media_track_guid(track:*mut c_void,name:*const c_char,buffer:*mut c_char,set:bool)->bool {
     let f=fixture();if set {assert_eq!(unsafe {CStr::from_ptr(name)},c"P_NAME");f.record("track-name");return true;}
+    if unsafe {CStr::from_ptr(name)}==c"P_NAME" {let text=c"Inventory track";unsafe {std::ptr::copy_nonoverlapping(text.as_ptr(),buffer,text.to_bytes_with_nul().len());}return true;}
     assert_eq!(unsafe {CStr::from_ptr(name)},c"GUID");f.record("track-guid");
     let guid=if track==f.track() {std::ffi::CString::new("{33333333-3333-3333-3333-333333333333}").unwrap()} else {
         let tracks=f.extra_tracks.borrow();let index=tracks.iter().position(|t|(&**t as *const u8) as usize==track as usize).unwrap();
@@ -411,7 +418,11 @@ unsafe extern "C" fn get_track(project:*mut c_void,index:i32)->*mut c_void {let 
 unsafe extern "C" fn insert_track(project:*mut c_void,index:i32,flags:i32) {let f=fixture();assert_eq!(project,f.project());assert_eq!(index,1+f.extra_tracks.borrow().len() as i32);assert_eq!(flags,0);f.record("insert-track");f.extra_tracks.borrow_mut().push(Box::new(9));f.change.set(f.change.get().wrapping_add(1));}
 unsafe extern "C" fn add_fx(track:*mut c_void,name:*const c_char,record:bool,index:i32)->i32 {let f=fixture();assert_eq!(unsafe {CStr::from_ptr(name)},c"VST3:HiFiShifter");assert!(!record);assert_eq!(index,-1000);f.record("add-hfs-first-fx");f.new_fx.borrow_mut().insert(track as usize);0}
 unsafe extern "C" fn delete_track(track:*mut c_void) {let f=fixture();f.record("delete-created-track");let mut tracks=f.extra_tracks.borrow_mut();let index=tracks.iter().position(|t|(&**t as *const u8) as usize==track as usize).unwrap();tracks.remove(index);f.new_fx.borrow_mut().remove(&(track as usize));f.change.set(f.change.get().wrapping_add(1));}
-unsafe extern "C" fn count_track_items(_track:*mut c_void)->i32 {0}
+unsafe extern "C" fn count_track_items(_track:*mut c_void)->i32 {let f=fixture();i32::from(f.inventory_enabled.get()&&!f.inventory_empty.get())}
+unsafe extern "C" fn inventory_item(track:*mut c_void,index:i32)->*mut c_void {let f=fixture();assert_eq!(track,f.track());assert_eq!(index,0);f.item()}
+unsafe extern "C" fn inventory_take(item:*mut c_void)->*mut c_void {let f=fixture();assert_eq!(item,f.item());f.take()}
+unsafe extern "C" fn inventory_name(_take:*mut c_void)->*const c_char {c"short voice".as_ptr()}
+unsafe extern "C" fn inventory_track_value(track:*mut c_void,_name:*const c_char)->f64 {assert_eq!(track,fixture().track());1.}
 unsafe extern "C" fn fx_count(track:*mut c_void)->i32 {i32::from(fixture().new_fx.borrow().contains(&(track as usize)))}
 unsafe extern "C" fn fx_guid(track:*mut c_void,index:i32)->*const u8 {let f=fixture();assert_eq!(index,0);if f.new_fx.borrow().contains(&(track as usize)) {f.fx_guid_bytes.as_ptr()} else {std::ptr::null()}}
 

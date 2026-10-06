@@ -10,6 +10,8 @@ use std::sync::Arc;
 #[derive(Clone,Debug,Serialize,Deserialize,PartialEq)]
 pub(crate) struct RegionIdentity {
     #[serde(skip)] pub key:u64,
+    /// REAPER实际item GUID跨mute撤销/区域重建保持；旧归档没有此字段仍可读。
+    #[serde(default,skip_serializing_if="Option::is_none")] pub item:Option<String>,
     pub source:String,
     pub modification:String,
 }
@@ -68,7 +70,8 @@ impl ParameterAtlas {
     /// 冷绑定布局完全相同时保留GUI原整轨数组（含无音频处编辑），音频仍用区域源basis。
     pub fn same_layout(&self,other:&Self)->bool {
         self.regions.len()==other.regions.len()&&self.regions.values().all(|old|other.regions.values().any(|new|
-            old.identity.source==new.identity.source&&old.identity.modification==new.identity.modification&&old.root==new.root&&old.current.equivalent(&new.current)))
+            old.identity.source==new.identity.source&&old.identity.modification==new.identity.modification
+                &&(old.identity.item.is_none()||old.identity.item==new.identity.item)&&old.root==new.root&&old.current.equivalent(&new.current)))
     }
     /// 有界state解码后为源曲线重新登记共享512MiB预算；clone共享Arc收费，不按renderer重复收费。
     pub fn reserve_restored(mut self)->Result<Self,String> {
@@ -92,9 +95,10 @@ impl ParameterAtlas {
     /// 冷恢复只在本组件真实范围内绑定；重复持久身份且源窗口相同仍拒绝，不能按旧key猜。
     pub fn rebind(&self,timeline:&TimelineState,identities:&BTreeMap<String,RegionIdentity>)->Result<Self,String> {
         let mut bound=Self::default();
-        for record in self.regions.values() {
+        for record in self.regions.values().filter(|record|record.live) {
             let candidates=timeline.clips.iter().filter(|clip|identities.get(&clip.id).is_some_and(|id|
-                id.source==record.identity.source&&id.modification==record.identity.modification)
+                id.source==record.identity.source&&id.modification==record.identity.modification
+                    &&(record.identity.item.is_none()||id.item==record.identity.item))
                 &&timeline.resolve_root_track_id(&clip.track_id).as_deref()==Some(record.root.as_str())).collect::<Vec<_>>();
             let matches=if candidates.len()==1 {candidates} else {candidates.into_iter().filter(|clip|geometry(clip).is_ok_and(|geometry|
                 near(geometry.source_start,record.current.source_start)&&near(geometry.source_duration,record.current.source_duration))).collect()};
@@ -196,6 +200,11 @@ impl ParameterAtlas {
     /// 原region key优先；拆分新key只能沿同modification/source与同root的唯一父源范围继承。
     fn find(&self,identity:&RegionIdentity,root:&str,geometry:&RegionGeometry)->Result<Option<&RegionParameters>,String> {
         let related=self.regions.values().filter(|record|record.identity.source==identity.source&&record.identity.modification==identity.modification);
+        if let Some(item)=&identity.item {
+            let matches=related.clone().filter(|record|record.identity.item.as_ref()==Some(item)).collect::<Vec<_>>();
+            if let Some(record)=matches.iter().copied().find(|record|record.live) {return Ok(Some(record));}
+            if let Some(record)=matches.first() {return Ok(Some(record));}
+        }
         if identity.key!=0 {if let Some(record)=related.clone().find(|record|record.live&&record.identity.key==identity.key) {return Ok(Some(record));}}
         let candidates=related.filter(|record|record.identity.key!=0&&record.root==root
             &&geometry.source_start<record.current.source_start+record.current.source_duration
@@ -273,15 +282,15 @@ mod tests {
         let original=edited();let atlas=ParameterAtlas::default().capture(&original,&identities()).unwrap();
         let mut first=host(1.,0.5,0.,0.5);first.clips[0].id="left".into();
         let mut right=host(1.5,0.5,0.5,0.5).clips.remove(0);right.id="right".into();first.clips.push(right);first.project_sec=2.;
-        let ids=BTreeMap::from([("left".into(),RegionIdentity {key:42,source:"source".into(),modification:"mod".into()}),
-            ("right".into(),RegionIdentity {key:43,source:"source".into(),modification:"mod".into()})]);
+        let ids=BTreeMap::from([("left".into(),RegionIdentity {key:42,item:None,source:"source".into(),modification:"mod".into()}),
+            ("right".into(),RegionIdentity {key:43,item:None,source:"source".into(),modification:"mod".into()})]);
         let followed=atlas.follow_geometry(&first,&ids).unwrap();assert_eq!(followed.regions.len(),3);
         assert!(!followed.regions["clip"].live);assert!(followed.regions["left"].live);
         let mut next=host(1.,0.25,0.,0.25);next.clips[0].id="quarter-a".into();
         let mut second=host(1.25,0.25,0.25,0.25).clips.remove(0);second.id="quarter-b".into();next.clips.push(second);next.clips.push(first.clips[1].clone());next.project_sec=2.;
         let mut next_ids=ids.clone();next_ids.remove("left");
-        next_ids.insert("quarter-a".into(),RegionIdentity {key:44,source:"source".into(),modification:"mod".into()});
-        next_ids.insert("quarter-b".into(),RegionIdentity {key:45,source:"source".into(),modification:"mod".into()});
+        next_ids.insert("quarter-a".into(),RegionIdentity {key:44,item:None,source:"source".into(),modification:"mod".into()});
+        next_ids.insert("quarter-b".into(),RegionIdentity {key:45,item:None,source:"source".into(),modification:"mod".into()});
         let nested=followed.follow_geometry(&next,&next_ids).unwrap();let local=nested.project_local(&next,&next_ids).unwrap();
         assert_eq!(local["quarter-a"].pitch_edit,&[60.,61.]);assert_eq!(local["quarter-b"].pitch_edit,&[61.,62.]);
         assert_eq!(local["right"].pitch_edit,&[62.,63.,64.]);assert!(!nested.regions["left"].live);
@@ -297,7 +306,22 @@ mod tests {
                     "source_end_sec":source_start+source_duration,"playback_rate":source_duration/duration}]}]
         })).unwrap();timeline.clips[0].normalize_takes();timeline
     }
-    fn identities()->BTreeMap<String,RegionIdentity> {BTreeMap::from([("clip".into(),RegionIdentity {key:41,source:"source".into(),modification:"mod".into()})])}
+    fn identities()->BTreeMap<String,RegionIdentity> {BTreeMap::from([("clip".into(),RegionIdentity {key:41,item:None,source:"source".into(),modification:"mod".into()})])}
+    /// 同源同窗口的多个item重建ARA key后仍按真实GUID归属，不走歧义源祖先猜测。
+    #[test]
+    fn ui_inventory_item_identity_survives_mute_region_recreation_with_same_source_windows() {
+        let mut initial=edited();let mut other=initial.clips[0].clone();other.id="other".into();other.start_sec=3.;initial.clips.push(other);initial.project_sec=4.;
+        let params=initial.params_by_root_track.get_mut("a").unwrap();params.pitch_edit.resize(17,0.);params.pitch_orig.resize(17,0.);
+        params.pitch_edit[12..17].fill(70.);params.pitch_orig[12..17].fill(57.);
+        let mut ids=identities();ids.get_mut("clip").unwrap().item=Some("item-a".into());
+        ids.insert("other".into(),RegionIdentity {key:42,item:Some("item-b".into()),source:"source".into(),modification:"mod".into()});
+        let atlas=ParameterAtlas::default().capture(&initial,&ids).unwrap();
+        ids.get_mut("clip").unwrap().key=141;ids.get_mut("other").unwrap().key=142;
+        let followed=atlas.follow_geometry(&initial,&ids).unwrap();let projected=followed.project_local(&initial,&ids).unwrap();
+        assert_eq!(projected["clip"].pitch_edit[0],60.);assert_eq!(projected["other"].pitch_edit[0],70.);
+        let bytes=serde_json::to_vec(&followed).unwrap();let restored:ParameterAtlas=serde_json::from_slice(&bytes).unwrap();
+        assert!(restored.rebind(&initial,&ids).is_ok());
+    }
     fn edited()->TimelineState {
         let mut timeline=host(1.,1.,0.,1.);
         timeline.params_by_root_track.insert("a".into(),TrackParamsState {frame_period_ms:250.,pitch_edit_user_modified:true,
@@ -321,7 +345,7 @@ mod tests {
         let mut initial=edited();let mut other=initial.clips[0].clone();other.id="other".into();other.start_sec=3.;initial.clips.push(other);initial.project_sec=4.;
         let params=initial.params_by_root_track.get_mut("a").unwrap();params.pitch_edit.resize(17,0.);params.pitch_orig.resize(17,0.);
         params.pitch_edit[12..17].copy_from_slice(&[67.,68.,69.,70.,71.]);params.pitch_orig[12..17].fill(57.);
-        let mut ids=identities();ids.insert("other".into(),RegionIdentity {key:42,source:"source".into(),modification:"other-mod".into()});
+        let mut ids=identities();ids.insert("other".into(),RegionIdentity {key:42,item:None,source:"source".into(),modification:"other-mod".into()});
         let atlas=ParameterAtlas::default().capture(&initial,&ids).unwrap();
         let mut overlap=initial.clone();overlap.clips[1].start_sec=1.;overlap.project_sec=2.;overlap.selected_clip_id=Some("clip".into());
         let atlas=atlas.follow_geometry(&overlap,&ids).unwrap();let before=atlas.project_roots(&overlap,&ids).unwrap();overlap.params_by_root_track=before.clone();

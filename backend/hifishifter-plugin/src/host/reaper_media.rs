@@ -148,6 +148,8 @@ impl ReaperHost {
     }
 }
 impl HostTrackTarget {
+    /// parent轨道的GUID用于GUI去重，不用名称或轨道序号猜对象。
+    pub(crate) fn inventory_guid(&self)->&str {&self.guid}
     fn verify(&self,authorized:&impl Fn()->bool)->Result<(),String> {
         if std::thread::current().id()!=self.host.thread {return Err("host audio import off UI thread".into());}
         let api=self.host.geometry.as_ref().ok_or("host geometry API missing")?;

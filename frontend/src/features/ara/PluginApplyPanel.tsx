@@ -43,7 +43,7 @@ export function PluginApplyPanel({ onTimelineChanged }: { onTimelineChanged: () 
             finally { inFlight = false; }
         }
         void poll();
-        const timer = window.setInterval(() => void poll(), 1000);
+        const timer = window.setInterval(() => void poll(), 250);
         return () => { disposed = true; clearInterval(timer); void subscription.then((off) => off()).catch(() => {});void hostSubscription.then(off=>off()).catch(()=>{}); };
     }, []);
     async function refresh(force = false) {

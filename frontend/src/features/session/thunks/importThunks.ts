@@ -134,6 +134,8 @@ async function syncAutoCrossfadeFromLatestTimeline(args: {
 
     const latestTimeline = await webApi.getTimelineState();
     const allClips = (latestTimeline as { clips?: RawTimelineClip[] }).clips ?? [];
+    // 插件导入回执已确认新item；不能用更早的读快照把它从GUI再次删掉。
+    if (isPluginMode() && newClipIds.some(id => !allClips.some(clip => clip.id === id))) return null;
     const fadeUpdates = computeAutoCrossfadeFromPayload(allClips, newClipIds);
     if (fadeUpdates.length > 0) {
         const fadePromises = fadeUpdates.map((u) =>
@@ -150,7 +152,9 @@ async function syncAutoCrossfadeFromLatestTimeline(args: {
         // 淡化更新完成后再重新拉取：上面这份 latestTimeline 是淡化前的
         // 快照，若直接返回，fulfilled reducer 会把刚应用的自动淡化从
         // UI 上回滚掉（后端仍保留，前后端就此分叉）。
-        return await webApi.getTimelineState();
+        const refreshed = await webApi.getTimelineState();
+        return isPluginMode() && newClipIds.some(id => !refreshed.clips.some(clip => clip.id === id))
+            ? latestTimeline : refreshed;
     }
     return latestTimeline;
 }
@@ -398,7 +402,7 @@ export const importAudioAtPosition = createAsyncThunk(
                 ok: true,
                 imported: importedResult,
                 newClipIds,
-                playheadSec: typeof payload.startSec === "number" ? payload.startSec : undefined,
+                playheadSec: !isPluginMode() && typeof payload.startSec === "number" ? payload.startSec : undefined,
             };
         } finally {
             void webApi.endUndoGroup();
@@ -479,7 +483,7 @@ export const importAudioFileAtPosition = createAsyncThunk(
                 ok: true,
                 imported: importedResult,
                 newClipIds,
-                playheadSec: typeof payload.startSec === "number" ? payload.startSec : undefined,
+                playheadSec: !isPluginMode() && typeof payload.startSec === "number" ? payload.startSec : undefined,
             };
         } catch (err) {
             return rejectWithValue(

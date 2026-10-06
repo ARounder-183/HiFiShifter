@@ -9,6 +9,8 @@ pub(crate) use write::{HostClipTarget,HostUndoBlock};
 #[path="reaper_media.rs"]mod media;
 pub(crate) use media::HostTrackTarget;
 pub(crate) use media::CreatedTrack;
+#[path="ui_inventory.rs"]mod ui_inventory;
+pub(crate) use ui_inventory::{UiTrack,UiItem};
 
 const IID: [u32; 4] = [0x79655E36, 0x77EE4267, 0xA573FEF7, 0x4912C27C];
 #[repr(C)]
@@ -297,6 +299,14 @@ impl ReaperHost {
         &self,
         authorized: impl Fn() -> bool,
     ) -> Result<super::geometry::HostClipGeometry, String> {
+        if std::thread::current().id()!=self.thread {return Err("REAPER geometry queried outside its model/UI thread".into());}
+        let pointer=self._interface.0 as *mut c_void;
+        let table=unsafe {&**pointer.cast::<*const HostVtbl>()};
+        let take=checked(&authorized,||unsafe {(table.parent)(pointer,2)})?;
+        self.geometry_for_take(take,authorized)
+    }
+    /// UI显示清单中的take必须由真实parent轨道枚举取得，不能由JS传地址。
+    fn geometry_for_take(&self,take:*mut c_void,authorized:impl Fn()->bool)->Result<super::geometry::HostClipGeometry,String> {
         use super::geometry::{HostClipGeometry, HostStretchMarker};
         if std::thread::current().id() != self.thread {
             return Err("REAPER geometry queried outside its model/UI thread".into());
@@ -305,8 +315,6 @@ impl ReaperHost {
             .geometry
             .as_ref()
             .ok_or("REAPER geometry API unavailable")?;
-        let pointer = self._interface.0 as *mut c_void;
-        let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
         let project = self.project(&authorized)?;
         let valid = |object, kind: &std::ffi::CStr| -> Result<(), String> {
             if checked(&authorized, || unsafe {
@@ -319,7 +327,6 @@ impl ReaperHost {
         };
         valid(project, c"ReaProject*")?;
         let before = checked(&authorized, || unsafe { (api.change)(project) })?;
-        let take = checked(&authorized, || unsafe { (table.parent)(pointer, 2) })?;
         if take.is_null() {
             return Err("REAPER direct parent take unavailable".into());
         }

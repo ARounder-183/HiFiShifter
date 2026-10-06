@@ -32,6 +32,10 @@ pub(crate) struct DocumentSession {
     pub sequence_regions: Mutex<HashMap<u64, HashSet<u64>>>,
     pub regions: Mutex<HashMap<u64, crate::ara::AraPlaybackRegion>>,
     pub clip_ids: Mutex<HashMap<u64, String>>,
+    pub region_items:Mutex<HashMap<u64,String>>,
+    pub ui_tracks:Mutex<std::collections::BTreeMap<String,crate::host::reaper::UiTrack>>,
+    pub ui_known_tracks:Mutex<HashSet<String>>,
+    pub ui_inventory_stamp:Mutex<Option<(i32,u64,u64)>>,
     pub sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
     pub edit_sources: Mutex<HashMap<String, Arc<super::source::SourcePcm>>>,
     pub timeline: Mutex<Option<hifishifter_kernel::state::TimelineState>>,
@@ -118,6 +122,7 @@ impl DocumentSession {
             let (key,_)=ids.iter().find(|(_,id)|**id==clip.id).ok_or("missing actual region parameter edge")?;
             let region=regions.get(key).ok_or("missing actual region parameter identity")?;
             Ok((clip.id.clone(),crate::editor::parameter_atlas::RegionIdentity {key:*key,
+                item:self.region_items.lock().unwrap().get(key).cloned(),
                 source:region.audio_source_persistent_id.clone(),modification:region.audio_modification_persistent_id.clone()}))
         }).collect()
     }
@@ -304,6 +309,7 @@ impl DocumentSession {
         self.sequence_regions.lock().unwrap().clear();
         self.regions.lock().unwrap().clear();
         self.clip_ids.lock().unwrap().clear();
+        self.region_items.lock().unwrap().clear();self.ui_tracks.lock().unwrap().clear();self.ui_known_tracks.lock().unwrap().clear();*self.ui_inventory_stamp.lock().unwrap()=None;
         self.timeline.lock().unwrap().take();
         self.track_bindings.lock().unwrap().clear();
         *self.edits.lock().unwrap()=Default::default();
