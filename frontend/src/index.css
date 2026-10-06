@@ -930,14 +930,20 @@ textarea {
     cursor: pointer;
 }
 
-/* 悬停、键盘高亮、焦点**同色**：鼠标划过去、方向键走过去、焦点落上去，必须是
-   同一种反馈，否则键盘用户看到的是另一套界面。
+/* 悬停、键盘高亮、键盘焦点**同色**：鼠标划过去、方向键走过去、键盘焦点落上去，
+   必须是同一种反馈，否则键盘用户看到的是另一套界面。
 
-   `:focus` 这一条是给**子菜单**用的：`AppSubMenu` 的子面板由 `useMenuKeyboard`
-   导航，而它用真实 DOM 焦点表示"当前项"（外层 `AppContextMenu` 用的是
-   `data-active`）。少了这条，子菜单里按方向键会**焦点在动、界面毫无反应**。 */
+   `:focus-visible`（而不是 `:focus`）这一条是给**子菜单**用的：`AppSubMenu` 的子
+   面板由 `useMenuKeyboard` 导航，而它用真实 DOM 焦点表示"当前项"（外层
+   `AppContextMenu` 用的是 `data-active`）。少了它，子菜单里按方向键会
+   **焦点在动、界面毫无反应**。
+
+   必须是 `:focus-visible` 而不是 `:focus`：鼠标点击也会让按钮获得 `:focus`，
+   而它**不会自己消失** —— 点过的触发项从此一直亮着，指针再划到别的项上就是
+   两条同时高亮（实测：点「格式」后划进它的子菜单，「格式」与子项一起亮）。
+   `:focus-visible` 只在键盘交互导致的焦点上生效，鼠标点击不匹配。 */
 .hs-menu__item:hover:not(:disabled):not([aria-disabled="true"]),
-.hs-menu__item:focus,
+.hs-menu__item:focus-visible,
 .hs-menu__item[data-active="1"] {
     background: var(--qt-menu-item-hover);
 }

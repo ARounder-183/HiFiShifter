@@ -420,6 +420,11 @@ export function AppContextMenu({
                         disabled={item.disabled}
                         active={index === layerActiveIndex}
                         reserveIcon={reserveIcon}
+                        // 触发项与子面板都要把"指针在哪"汇报给本层 —— 否则本层的高亮
+                        // 会停在最后一个被划过的普通项上（见 `onHoverChange`）。
+                        onHoverChange={(onTrigger) =>
+                            setActiveIndex(onTrigger && !item.disabled ? index : -1)
+                        }
                         // 嵌套子菜单时，子面板自己也不能裁切（同一条约束，逐层适用）。
                         panelClassName={
                             item.items.some((sub) => (sub.items?.length ?? 0) > 0)
@@ -553,6 +558,19 @@ export interface AppSubMenuProps {
      * 触发项会**毫无反应**。父层靠这个属性把触发项找出来，显式 `.click()`。
      */
     itemKey?: string;
+    /**
+     * 指针在**本层哪一处**：触发项上（`true`）还是子面板里（`false`）。
+     *
+     * 【为什么必须有】`AppContextMenu` 的"当前项"（`activeIndex`）跟着鼠标走 ——
+     * 这样"划过去再按回车"激活的才是划到的那一条。但触发项此前**从不汇报悬停**，
+     * 于是 `activeIndex` 停在上一个被划过的普通项上：指针移到触发项、或进了子面板
+     * 之后，那条普通项仍然带着 `data-active` 亮着，与指针底下那一条**同时高亮**。
+     * 实测（正文菜单）：划过「全选」再划过「格式」，两条同时亮；继续进「格式」的
+     * 子面板，还是那两条同时亮。
+     *
+     * 传 `false` 表示"指针已不在触发项上"，父层据此清掉自己的高亮。
+     */
+    onHoverChange?: (onTrigger: boolean) => void;
     disabled?: boolean;
     /**
      * 键盘高亮态（`data-active`）。
@@ -605,6 +623,7 @@ export function AppSubMenu({
     badge,
     icon,
     itemKey,
+    onHoverChange,
     disabled = false,
     active = false,
     reserveIcon = false,
@@ -658,6 +677,9 @@ export function AppSubMenu({
         <div
             className="relative"
             onMouseEnter={() => {
+                // 指针在触发项上 —— 父层的"当前项"也要跟过来，否则它会留在
+                // **上一个**被划过的普通项上，与这里同时高亮（见 onHoverChange）。
+                onHoverChange?.(true);
                 if (!disabled) setOpen(true);
             }}
             onMouseLeave={() => setOpen(false)}
@@ -722,6 +744,11 @@ export function AppSubMenu({
                     className={cx("hs-menu hs-menu--submenu", panelClassName)}
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => e.stopPropagation()}
+                    // 指针进了子面板：父层那个触发项**不该再亮着** —— 亮着的应该是
+                    // 指针底下这一条。回到触发项上时（`mouseleave` 落在包装盒内）
+                    // 再交还给它。
+                    onMouseEnter={() => onHoverChange?.(false)}
+                    onMouseLeave={() => onHoverChange?.(true)}
                 >
                     {children}
                 </div>

@@ -363,3 +363,48 @@ test("不含子菜单时不加 no-scroll（长菜单仍要能自己滚）", asyn
     await mount(SAMPLE);
     expect(surface()?.className).not.toContain("hs-menu--no-scroll");
 });
+
+/*
+ * 悬停时**只能有一条**高亮。
+ *
+ * 【要钉死什么】本层的"当前项"（`data-active`）跟着鼠标走 —— 这样"划过去再按
+ * 回车"激活的才是划到的那一条。但二级触发项此前从不汇报悬停，于是 `activeIndex`
+ * 停在上一个被划过的普通项上，两条同时亮。浏览器实测（正文菜单）：
+ *   划过「全选」→ 划过「格式」        ⇒ 全选 与 格式 **同时**亮
+ *   接着把指针移进「格式」的子面板     ⇒ 全选 与 子项 **同时**亮
+ * 这正是用户报的两种现象。修复靠 `AppSubMenu.onHoverChange`：指针在触发项上时
+ * 汇报 `true`，进入子面板时汇报 `false`。
+ */
+function hover(element: Element): void {
+    // React 的 onMouseEnter 由 mouseover/mouseout 合成，因此派发 mouseover 即可。
+    element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: null }));
+}
+
+/** 当前被高亮（`data-active`）的项文案。 */
+function highlighted(): string[] {
+    return Array.from(document.querySelectorAll('[data-active="1"]')).map((el) =>
+        (el.textContent ?? "").trim(),
+    );
+}
+
+test("划过普通项再划过二级触发项：高亮跟过去，不留上一条", async () => {
+    await mount(WITH_SUBMENU);
+
+    await act(async () => hover(itemByText("Copy")));
+    expect(highlighted()).toEqual(["Copy"]);
+
+    await act(async () => hover(itemByText("Format")));
+    expect(highlighted(), "本层高亮停在上一条普通项上").toEqual(["Format"]);
+});
+
+test("指针进入子面板后，本层不再高亮触发项", async () => {
+    await mount(WITH_SUBMENU);
+
+    await act(async () => hover(itemByText("Format")));
+    expect(highlighted()).toEqual(["Format"]);
+
+    const panel = document.querySelector(".hs-menu--submenu");
+    expect(panel, "子面板没有展开").not.toBeNull();
+    await act(async () => hover(panel!));
+    expect(highlighted(), "指针在子面板里，触发项不该还亮着").toEqual([]);
+});
