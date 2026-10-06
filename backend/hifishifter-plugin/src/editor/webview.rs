@@ -50,7 +50,7 @@ struct BrowserState {
 #[derive(Clone,Copy)]
 enum HistoryJump {Undo,Redo,Position(i32)}
 /// 宿主写完后只重试读取ARA回流，不重复setter；保存最初的document/route租约。
-struct HostReply {editor:Arc<super::session::EditorSession>,document:std::sync::Weak<crate::render::document::DocumentSession>,lease:u64,until:std::time::Instant,jump:Option<HistoryJump>,imported:Option<String>}
+struct HostReply {editor:Arc<super::session::EditorSession>,document:std::sync::Weak<crate::render::document::DocumentSession>,lease:u64,until:std::time::Instant,jump:Option<HistoryJump>,imported:Option<String>,geometry:Option<super::host_edit::HostEditReceipt>}
 struct WindowData {
     state: Rc<RefCell<BrowserState>>,
     transferred: Rc<Cell<bool>>,
@@ -336,11 +336,13 @@ fn deliver(state:&Rc<RefCell<BrowserState>>) {
             let error=reply["error"].as_str().unwrap_or("");
             let imported=host.imported.as_ref().and_then(|item|host.document.upgrade().and_then(|doc|doc.clip_for_host_item(item))).map(|clip|host.editor.ui_clip_id(&clip));
             let waiting=host.imported.is_some()&&(imported.is_none()||!reply["value"]["clips"].as_array().is_some_and(|clips|clips.iter().any(|clip|Some(clip["id"].as_str().unwrap_or(""))==imported.as_deref())));
-            if (waiting||reply["ok"]==false&&(error.starts_with("Conflict: host")||error.contains("host PCM unavailable")||error.contains("host model not ready")))&&std::time::Instant::now()<host.until {
+            let geometry_waiting=reply["ok"]==true&&host.geometry.as_ref().is_some_and(|geometry|!geometry.matches(&reply["value"]));
+            if (waiting||geometry_waiting||reply["ok"]==false&&(error.starts_with("Conflict: host")||error.contains("host PCM unavailable")||error.contains("host model not ready")))&&std::time::Instant::now()<host.until {
                 let allowed=host.document.upgrade().is_some_and(|doc|state.link.authorize(&doc).is_ok_and(|lease|lease==host.lease));
                 if allowed&&host.editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink:state.sink.clone(),link:Some(state.link.clone())}).is_ok() {return false;}
             }
             if waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("item was created in REAPER but its ARA audio is not ready; use host Undo if canceling");}
+            if geometry_waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("clip was edited in REAPER but its ARA geometry has not caught up; host Undo remains available");}
             if !waiting&&host.imported.is_some() {reply["value"]["imported_clip_id"]=serde_json::json!(imported);}
         }
         let done_history=state.history_requests.remove(&id);let view_id=state.view_id.clone();
@@ -536,7 +538,7 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
                     })();
                     document.host_undo.finish_request(&view_id,id);let imported=result?;
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
-                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:Some(imported)})
+                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:Some(imported),geometry:None})
                 })();
                 match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.pending.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
@@ -562,6 +564,7 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
                     let editor=owner.editor_session()?;let input=request.get("args").cloned().unwrap_or_else(||serde_json::json!({}));
                     let plan=editor.plan_host_edit(command,&input)?;
+                    let geometry=Some(plan.receipt(&editor.namespace));
                     state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
                     let host=owner.project_history_host().ok_or("host project history missing")?;
                     let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);
@@ -569,7 +572,7 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
                     let outcome=super::host_edit::execute_managed(&owner,plan,&allowed,true);
                     document.host_undo.finish_request(&view_id,id);outcome?;
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
-                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:None})
+                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:None,geometry})
                 })();
                 match outcome {
                     Ok(reply)=>{let mut state=state.borrow_mut();state.pending.insert(id);state.host_replies.insert(id,reply);return Ok(());},
@@ -593,7 +596,7 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
                     if let Err(error)=editor.enqueue(super::session::UiRequest {id,command:"plugin_history_barrier".into(),args:serde_json::json!({}),sink,link:Some(link.clone())}) {
                         document.host_undo.finish_history(&view_id,id);return Err(error);
                     }
-                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:Some(jump),imported:None})
+                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:Some(jump),imported:None,geometry:None})
                 })();
                 match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.pending.insert(id);state.history_requests.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },

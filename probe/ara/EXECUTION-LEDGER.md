@@ -1036,4 +1036,18 @@ Task 54: Ruling: 单文件chooser与base64 DOM兜底无法满足多短clip/文�
 
 Task 55: Ruling: 普通fade的旧GUI示意不满足用户新的“实际声音归HFS”，直接烘焙会与宿主重复；ARA头允许宿主按CONTENT_FADES逐边委托 — 接原kernel逐端包络、默认HFS快起曲线、shape/dir私有GUID状态v4/旧状态兼容、scope保存恢复清理、host轴默认化，head/tail=0实时快照和工厂能力，长度变化重新准备输出epoch但不改神经输入 — kernel PCM/Undo/v4/未委托tail与factory2项、前端6项/tsc通过；尚未实际REAPER委托/单次包络oracle，不把能力或fake当宿主支持，拆分/拷贝形状继承仍待实测与实现。
 
+Task 55: Ruling: bidirectional-fades-01 Release构建exit0后隔离REAPER45016给区域flags0x1，未委托content fades；真实恒定PCM半渐变比0.74995470而非HFS0.73204285，单HFS音频oracle失败 — 保持未委托路径不双重烘焙，记录责任门未过，继续正式接口/精确默认输出补偿调查，不停缩目标；整个默认in区间拟合2t-t²误差1.49e-7是可用证据但不是补偿已完成 — 若仅凭能力/fixture报通过会违背用户声音要求，若对未知包络反算会丢边界/重叠信号；已正常关闭此测试实例，未改用户工程。
+
+Task 56: Ruling: 用户明确允许渐变声音回REAPER但要求HFS宽度同时生效 — 采用未委托宿主单次包络，停止补偿调查；更新spec/plan，插件shape/curvature关闭而宽度写口和弯曲示意保留，独立App不变 — 若继续硬推旧声音要求会违背最新范围；若只关闭形状却不验证长度setter/回流仍不能称同步完成。
+
+Task 56: Ruling: fetchTimeline强制覆盖交互锁，native几何回执只等可读而不等目标几何，存在A→B→A→B窗口 — 插件交互/几何/历史请求开始结束废弃旧读取，丢弃不消费host版本；native按确切clip等待位置/长度/源起点/倍率/轨道/指定fade宽度，不重发setter — 若全停宿主同步会丢外部编辑，若超时伪成功会留下双权威；失败释放前端guard，真实宿主验收尚待执行。
+
+Task 56: Ruling: 前端乱序/独立App初始化7项、native host_edit7项正常exit0，旧可读几何和宽度setter均有定向护栏 — 不复跑全量；02包已实机加载两轨原GUI及PCMready，但CU先点击插件标题、激活恢复各一次后仍以msedgewebview2子窗口拒绝鼠标 — 记录为加载通过、拖动未验收，不能把源码合同说成鼠标实测；临时工程存为ignored acceptance.RPP，未碰用户工程。
+
+Task 56: Ruling: 实机get_history_state报host undo entry budget exceeded，旧循环把非null空描述当存在直到10000 — 改用锁定官方Undo_GetNumEntries精确范围和历史跳转边界，fixture模拟空串越界而非null，原history3项exit0；当前新Release构建中 — 若继续把fixture旧null结束当宿主契约，会关闭GUI撤销能力并每tick扫描10000项；需确认7.81真实API/加载不再报错，未假报原GUIUndo完成。
+
+Task 56: Ruling: 最终03 Release正常构建，冷重开24760实际count_api=true，原GUI恢复两轨/PCMready且无历史枚举错误；宿主淡出0.25→0.75秒后HFS自动显示2.25–3秒宽度、第二clip仍0.25 — 确认7.81新Undo API存在及REAPER→HFS宽度回流；manifest nativeAcceptance仍false，不因加载成功勾全部矩阵 — HFS→REAPER鼠标操作被工具拦截，完整双向/Undo/导入/拉伸冷恢复未测，不能虚报全完成。
+
+Task 56: Ruling: 24760正常退出后实际无REAPER，部署路径及source/target非reparse、源manifest匹配 — 完整03包安装D:\VST\HiFiShifter.vst3，35文件数量与SHA256逐项一致；旧版移动到ignored .build-tmp/vst-install-backups/bidirectional-sync-fix-03-01513c3a，仅本地提交，不push — 若运行时替换/只复制loader会混版，旧包保留可恢复；安装不是反向鼠标验收完成，目标仍活跃。
+
 

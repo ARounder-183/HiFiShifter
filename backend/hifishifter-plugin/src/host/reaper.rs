@@ -173,9 +173,9 @@ impl ReaperHost {
         };
         let history=match (lookup!(c"Undo_DoUndo2",write::UndoAction),lookup!(c"Undo_DoRedo2",write::UndoAction),
             lookup!(c"Undo_CanUndo2",write::UndoLabel),lookup!(c"Undo_CanRedo2",write::UndoLabel),
-            lookup!(c"Undo_GetCurEntry",write::UndoAction),lookup!(c"Undo_GetEntryDesc",write::UndoEntry)) {
-            (Some(undo),Some(redo),Some(can_undo),Some(can_redo),Some(current),Some(entry))=>
-                Some(write::HistoryApi {undo,redo,can_undo,can_redo,current,entry}),_=>None,
+            lookup!(c"Undo_GetCurEntry",write::UndoAction),lookup!(c"Undo_GetNumEntries",write::UndoAction),lookup!(c"Undo_GetEntryDesc",write::UndoEntry)) {
+            (Some(undo),Some(redo),Some(can_undo),Some(can_redo),Some(current),Some(count),Some(entry))=>
+                Some(write::HistoryApi {undo,redo,can_undo,can_redo,current,count,entry}),_=>None,
         };
         let write=match (
             lookup!(c"SetMediaItemInfo_Value",write::SetValue),lookup!(c"SetMediaItemTakeInfo_Value",write::SetValue),

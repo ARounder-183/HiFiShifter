@@ -11,7 +11,23 @@
 交付为 `.build-tmp/deliveries/keyboard-fade-fix-01/HiFiShifter.vst3`。渐变只改显示，
 短辅音静音问题仍按用户要求暂不处理。
 
-## 2026-10-06 新活跃目标：双向片段编辑与实际HFS渐变
+## 2026-10-06 最新修正：移动闪回与渐变fallback
+
+用户报告HFS移动A→B会闪回A再回B，随后允许渐变声音走REAPER，但HFS渐变区宽度
+必须同时写入REAPER。覆盖下方旧“实际HFS渐变”的声音归属要求，停止包络补偿研究。
+当前修复为前端交互/写请求读取代次守卫、原生确切clip几何回流完成门；宽度patch
+带未改shape时去除冗余字段。插件自定义形状/曲率暂关闭，弯曲示意与独立App保持。
+最终同源Release仍安装D:\VST，真实验证与源码合同分开记录，不自动push。
+
+本批最终包为`.build-tmp/deliveries/bidirectional-sync-fix-03/HiFiShifter.vst3`，Release构建
+exit0，sourceFingerprint=`5BEC84084B0FDB4BEBBDD0C2B9B07A65D0A49B3F140FB794F8C03299BB4FDB23`。
+已在REAPER正常退出后安装D:\VST\HiFiShifter.vst3，35文件数量与manifest SHA256全部
+一致。旧包可恢复于`.build-tmp/vst-install-backups/bidirectional-sync-fix-03-01513c3a`。
+实机03冷加载/count API/REAPER→HFS淡出0.25→0.75自动同步通过；nativeAcceptance仍false，
+鼠标移动及反向宽度被CU的WebView2子进程保护拦截（已按指示点标题/激活/刷新重试一次）。
+完整矩阵仍待用户集中验收，不再反复自动跑测试。详情BIDIRECTIONAL-SYNC-FINDINGS.md。
+
+## 2026-10-06 新活跃目标：双向片段编辑与实际HFS渐变（历史声音要求）
 
 用户要求在HFS导入/编辑/线性拉伸/渐变clip并同步REAPER，确认REAPER item mute应
 同步；进一步指定REAPER只保留fade长度和默认方式，自定义渐变形状与声音由HFS负责。

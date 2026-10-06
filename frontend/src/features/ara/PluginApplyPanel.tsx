@@ -66,7 +66,7 @@ export function PluginApplyPanel({ onTimelineChanged }: { onTimelineChanged: () 
             </span>
             {state && <span className="hs-type-caption">编辑 {state.generation} / 音频 {state.applied_generation}</span>}
             <Button size="1" variant="soft" disabled={busy} onClick={() => void refresh()}>重新载入宿主</Button>
-            <span className="hs-type-caption">文件、片段几何及播放由 REAPER 控制 · 倒放暂不支持</span>
+            <span className="hs-type-caption">片段编辑与渐变宽度同步 REAPER · 渐变声音由 REAPER 处理 · 倒放暂不支持</span>
         </Flex>
         {confirm && <Flex role="alertdialog" aria-label="重新载入宿主" align="center" gap="2" style={{ marginTop: 6 }}>
             <span className="hs-type-label">当前仍有未应用编辑。重新载入会替换本地曲线，继续？</span>

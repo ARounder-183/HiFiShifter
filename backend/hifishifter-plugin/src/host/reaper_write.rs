@@ -14,7 +14,7 @@ pub(super) type Arrange=unsafe extern "C" fn();
 pub(super) type UndoAction=unsafe extern "C" fn(*mut c_void)->i32;
 pub(super) type UndoLabel=unsafe extern "C" fn(*mut c_void)->*const c_char;
 pub(super) type UndoEntry=unsafe extern "C" fn(*mut c_void,i32)->*const c_char;
-pub(super) struct HistoryApi {pub undo:UndoAction,pub redo:UndoAction,pub can_undo:UndoLabel,pub can_redo:UndoLabel,pub current:UndoAction,pub entry:UndoEntry}
+pub(super) struct HistoryApi {pub undo:UndoAction,pub redo:UndoAction,pub can_undo:UndoLabel,pub can_redo:UndoLabel,pub current:UndoAction,pub count:UndoAction,pub entry:UndoEntry}
 
 pub(super) struct WriteApi {
     pub set_item:SetValue,pub set_take:SetValue,pub item_track:Track,pub move_item:Move,
@@ -63,11 +63,13 @@ impl ReaperHost {
             if value.len()>8192 {return Err("host undo label budget exceeded".into());}Ok(Some(value.to_owned()))
         };
         let position=checked(authorized,||unsafe {(history.current)(project)})?;
+        let count=checked(authorized,||unsafe {(history.count)(project)})?;
+        if !(0..=10000).contains(&count) {return Err("host undo entry budget exceeded".into());}
         let mut records=Vec::new();
-        for index in 0..=10000 {
+        // 宿主越界描述可能返回非空指针的空字符串，不能靠null枚举结束。
+        for index in 0..count {
             let pointer=checked(authorized,||unsafe {(history.entry)(project,index)})?;
-            let Some(label)=read(pointer)? else {break;};
-            if index==10000 {return Err("host undo entry budget exceeded".into());}
+            let label=read(pointer)?.ok_or("host undo changed while reading")?;
             records.push(serde_json::json!({"label":label,"atMs":0}));
         }
         let position=if position<0&&records.is_empty() {0} else {usize::try_from(position).map_err(|_|"invalid host undo index")?};
@@ -95,7 +97,7 @@ impl ReaperHost {
     pub(crate) fn history_jump_to(&self,target:i32,authorized:&impl Fn()->bool)->Result<(),String> {
         if !(0..10000).contains(&target) {return Err("host history position out of range".into());}
         let project=self.project(authorized)?;let history=self.history.as_ref().ok_or("REAPER history unavailable")?;
-        if checked(authorized,||unsafe {(history.entry)(project,target)})?.is_null() {return Err("host history position does not exist".into());}
+        if target>=checked(authorized,||unsafe {(history.count)(project)})? {return Err("host history position does not exist".into());}
         for _ in 0..10000 {
             let current=self.history_token(authorized)?.1;if current==target {return Ok(());}
             if !self.history_jump(current<target,authorized)? {return Err("host history jump stopped before target".into());}

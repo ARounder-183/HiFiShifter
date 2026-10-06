@@ -1,5 +1,5 @@
 // 原编辑会话状态；独立app保留默认Main，插件首帧等待真实宿主时间线。
-import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
+import { createSlice, isAnyOf, type PayloadAction } from "@reduxjs/toolkit";
 import { isPluginMode } from "../../services/hostCapabilities";
 import type {
     HistoryRecordSummary,
@@ -811,6 +811,10 @@ export interface SessionState {
      * 避免后端返回的过期快照覆盖前端乐观更新导致的闪烁。
      */
     _interactionLockCount: number;
+    /** 插件自动刷新只接纳同一交互代次的响应，不能覆盖在途宿主写入。 */
+    _pluginTimelineEpoch: number;
+    _pluginTimelineFetchEpochs: Record<string, number>;
+    _pluginClipEditRequests: Record<string, boolean>;
 
     /**
      * 最近一次 undo/redo 请求的 requestId。快速连续撤销/重做会产生多个
@@ -2354,6 +2358,9 @@ const initialState: SessionState = {
     reaperSkippedFilesDialog: null,
     saveVersionConflictDialog: null,
     _interactionLockCount: 0,
+    _pluginTimelineEpoch: 0,
+    _pluginTimelineFetchEpochs: {},
+    _pluginClipEditRequests: {},
     _latestHistoryOpRequestId: null,
     historyUndoDepth: 0,
     historyRedoDepth: 0,
@@ -2552,12 +2559,14 @@ const sessionSlice = createSlice({
          */
         beginInteraction(state) {
             state._interactionLockCount = Math.max(0, state._interactionLockCount) + 1;
+            if (isPluginMode()) state._pluginTimelineEpoch += 1;
         },
         /**
          * 标记连续交互结束。计数器归零后恢复正常的后端状态同步。
          */
         endInteraction(state) {
             state._interactionLockCount = Math.max(0, state._interactionLockCount - 1);
+            if (isPluginMode()) state._pluginTimelineEpoch += 1;
         },
         /** 乐观更新轨道名称（立即反映到 UI，不等后端响应） */
         setTrackName(state, action: PayloadAction<{ trackId: string; name: string }>) {
@@ -4853,7 +4862,18 @@ const sessionSlice = createSlice({
                 }
             })
 
+            .addCase(fetchTimeline.pending, (state, action) => {
+                if (isPluginMode()) state._pluginTimelineFetchEpochs[action.meta.requestId] = state._pluginTimelineEpoch;
+            })
+            .addCase(fetchTimeline.rejected, (state, action) => {
+                delete state._pluginTimelineFetchEpochs[action.meta.requestId];
+            })
             .addCase(fetchTimeline.fulfilled, (state, action) => {
+                const epoch = state._pluginTimelineFetchEpochs[action.meta.requestId];
+                delete state._pluginTimelineFetchEpochs[action.meta.requestId];
+                if (isPluginMode() && (state._interactionLockCount > 0
+                    || Object.keys(state._pluginClipEditRequests).length > 0
+                    || (epoch !== undefined && epoch !== state._pluginTimelineEpoch))) return;
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -4865,7 +4885,7 @@ const sessionSlice = createSlice({
                     preserveProjectNotes: false,
                     // 启动同步采纳后端播放头；播放中的回滚式重取（如 Tempo Map
                     // 提交失败）保留本地播放头，避免跳回旧的起始位置。
-                    adoptPlayhead: !state.runtime.isPlaying,
+                    adoptPlayhead: !isPluginMode() && !state.runtime.isPlaying,
                 });
             })
 
@@ -6804,6 +6824,25 @@ const sessionSlice = createSlice({
         const settleImport = (state: SessionState) => {
             state.importInFlight = Math.max(0, state.importInFlight - 1);
         };
+        // 宿主写入开始/结束都废弃旧刷新，覆盖键盘编辑（没有拖动锁）的同类竞态。
+        builder
+            .addMatcher(isAnyOf(moveClipRemote.pending, moveClipsRemote.pending,
+                setClipStateRemote.pending, setClipsStateBulkRemote.pending,
+                undoRemote.pending, redoRemote.pending, setHistoryPositionRemote.pending), (state, action) => {
+                if (!isPluginMode()) return;
+                state._pluginTimelineEpoch += 1;
+                state._pluginClipEditRequests[action.meta.requestId] = true;
+            })
+            .addMatcher(isAnyOf(moveClipRemote.fulfilled, moveClipRemote.rejected,
+                moveClipsRemote.fulfilled, moveClipsRemote.rejected,
+                setClipStateRemote.fulfilled, setClipStateRemote.rejected,
+                setClipsStateBulkRemote.fulfilled, setClipsStateBulkRemote.rejected,
+                undoRemote.fulfilled, undoRemote.rejected, redoRemote.fulfilled, redoRemote.rejected,
+                setHistoryPositionRemote.fulfilled, setHistoryPositionRemote.rejected), (state, action) => {
+                if (!isPluginMode()) return;
+                delete state._pluginClipEditRequests[action.meta.requestId];
+                state._pluginTimelineEpoch += 1;
+            });
         builder
             .addMatcher(
                 (action: { type?: string }) => isAudioImportStep(action, "pending"),

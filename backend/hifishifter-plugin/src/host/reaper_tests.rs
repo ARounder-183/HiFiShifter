@@ -238,6 +238,7 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
         "Undo_CanUndo2" if f.writer_enabled.get()=>can_undo as *const (),
         "Undo_CanRedo2" if f.writer_enabled.get()=>can_redo as *const (),
         "Undo_GetCurEntry" if f.writer_enabled.get()=>undo_current as *const (),
+        "Undo_GetNumEntries" if f.writer_enabled.get()=>undo_count as *const (),
         "Undo_GetEntryDesc" if f.writer_enabled.get()=>undo_entry as *const (),
         "PCM_Source_CreateFromFileEx" if f.media_enabled.get()=>media_source as *const (),
         "PCM_Source_Destroy" if f.media_enabled.get()=>media_destroy as *const (),
@@ -372,9 +373,10 @@ unsafe extern "C" fn undo_end(project:*mut c_void,label:*const c_char,flags:i32)
     records.push(unsafe {CStr::from_ptr(label)}.to_owned());f.undo_position.set(records.len() as i32-1);f.change.set(f.change.get().wrapping_add(1));
 }
 unsafe extern "C" fn undo_current(project:*mut c_void)->i32 {let f=fixture();assert_eq!(project,f.project());f.record("undo-current");f.undo_position.get()}
-unsafe extern "C" fn undo_entry(project:*mut c_void,index:i32)->*const c_char {let f=fixture();assert_eq!(project,f.project());f.record(format!("undo-entry:{index}"));if index<0 {return std::ptr::null();}f.undo_records.borrow().get(index as usize).map_or(std::ptr::null(),|s|s.as_ptr())}
+unsafe extern "C" fn undo_count(project:*mut c_void)->i32 {let f=fixture();assert_eq!(project,f.project());f.undo_records.borrow().len() as i32}
+unsafe extern "C" fn undo_entry(project:*mut c_void,index:i32)->*const c_char {let f=fixture();assert_eq!(project,f.project());f.record(format!("undo-entry:{index}"));if index<0 {return c"".as_ptr();}f.undo_records.borrow().get(index as usize).map_or(c"".as_ptr(),|s|s.as_ptr())}
 unsafe extern "C" fn can_undo(project:*mut c_void)->*const c_char {let f=fixture();assert_eq!(project,f.project());if f.undo_position.get()>0 {unsafe {undo_entry(project,f.undo_position.get())}} else {std::ptr::null()}}
-unsafe extern "C" fn can_redo(project:*mut c_void)->*const c_char {let f=fixture();assert_eq!(project,f.project());unsafe {undo_entry(project,f.undo_position.get()+1)}}
+unsafe extern "C" fn can_redo(project:*mut c_void)->*const c_char {let f=fixture();assert_eq!(project,f.project());if f.undo_position.get()+1<f.undo_records.borrow().len() as i32 {unsafe {undo_entry(project,f.undo_position.get()+1)}} else {std::ptr::null()}}
 unsafe extern "C" fn do_undo(project:*mut c_void)->i32 {let f=fixture();assert_eq!(project,f.project());f.record("undo-action");if f.undo_position.get()>0 {f.undo_position.set(f.undo_position.get()-1);f.change.set(f.change.get().wrapping_add(1));1} else {0}}
 unsafe extern "C" fn do_redo(project:*mut c_void)->i32 {let f=fixture();assert_eq!(project,f.project());f.record("redo-action");if f.undo_position.get()+1<f.undo_records.borrow().len() as i32 {f.undo_position.set(f.undo_position.get()+1);f.change.set(f.change.get().wrapping_add(1));1} else {0}}
 unsafe extern "C" fn media_source(path:*const c_char,force:bool)->*mut c_void {

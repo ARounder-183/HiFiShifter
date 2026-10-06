@@ -9,6 +9,38 @@ use std::sync::Arc;
 pub(crate) struct ClipEdit {pub native_id:String,pub source_track:String,pub destination_track:String,pub before:Clip,pub after:Clip,pub patch:ClipStatePatch}
 pub(crate) struct HostEditPlan {pub edits:Vec<ClipEdit>}
 
+/// 宿主setter完成后只等待本次确切clip的几何回流，不把旧的可读timeline当成功。
+#[derive(Debug)]
+pub(crate) struct HostEditReceipt {clips:Vec<(String,Vec<(&'static str,Value)>)>}
+impl HostEditPlan {
+    /// 冻结本次确切clip及预期宿主几何，单独的fade宽度也必须进入完成门。
+    pub(crate) fn receipt(&self,namespace:&str)->HostEditReceipt {
+        HostEditReceipt {clips:self.edits.iter().map(|edit| {
+            let after=&edit.after;let mut fields=vec![("start_sec",serde_json::json!(after.start_sec)),
+                ("length_sec",serde_json::json!(after.length_sec)),("source_start_sec",serde_json::json!(after.source_start_sec)),
+                ("playback_rate",serde_json::json!(after.playback_rate)),
+                ("track_id",serde_json::json!(format!("{namespace}{}",edit.destination_track)))];
+            for (value,key) in [(edit.patch.fade_in_sec,"fade_in_sec"),(edit.patch.fade_out_sec,"fade_out_sec"),
+                (edit.patch.auto_fade_in_sec,"auto_fade_in_sec"),(edit.patch.auto_fade_out_sec,"auto_fade_out_sec"),
+                (edit.patch.snap_offset_sec,"snap_offset_sec")] {
+                if let Some(value)=value {fields.push((key,serde_json::json!(value)));}
+            }
+            (edit.before.id.clone(),fields)
+        }).collect()}
+    }
+}
+impl HostEditReceipt {
+    /// 仅验证回流快照，不从GUI乐观状态或路径/位置猜clip身份。
+    pub(crate) fn matches(&self,payload:&Value)->bool {
+        let Some(clips)=payload["clips"].as_array() else {return false;};
+        self.clips.iter().all(|(id,fields)|clips.iter().find(|clip|clip["id"]==*id).is_some_and(|clip|
+            fields.iter().all(|(key,value)|match (clip[*key].as_f64(),value.as_f64()) {
+                (Some(actual),Some(expected))=>(actual-expected).abs()<=1e-6,
+                _=>clip[*key]==*value,
+            })))
+    }
+}
+
 /// 只拦截已实现的宿主命令；未知命令仍走原actor的明确错误路径。
 pub(super) fn is_clip_edit(command:&str)->bool {
     matches!(command,"move_clip"|"move_clips"|"set_clip_state"|"set_clips_state_bulk")
@@ -55,7 +87,12 @@ impl EditorSession {
             if !timeline.tracks.iter().any(|track|track.id==destination) {return Err("unknown target host track".into());}
             let mut changes=request.clone();changes.as_object_mut().ok_or("clip request missing")?.remove("trackId");
             changes.as_object_mut().unwrap().remove("moveLinkedParams");
-            let patch=patch(&changes)?;
+            let mut patch=patch(&changes)?;
+            // 整体宽度/交叉点patch会带未改的shape；不能把它误判为自定义渐变请求。
+            if patch.fade_in_shape==Some(before.fade_in_shape) {patch.fade_in_shape=None;}
+            if patch.fade_out_shape==Some(before.fade_out_shape) {patch.fade_out_shape=None;}
+            if patch.fade_in_dir==Some(before.fade_in_dir) {patch.fade_in_dir=None;}
+            if patch.fade_out_dir==Some(before.fade_out_dir) {patch.fade_out_dir=None;}
             // 复用原Clip级乘数/Take有效倍率和裁切语义，而不是把clipPlaybackRate当take速率。
             let mut view=TimelineState {clips:vec![before.clone()],..Default::default()};
             view.patch_clip_state(id,patch.clone());let mut after=view.clips.remove(0);
@@ -183,5 +220,36 @@ mod tests {
         assert!(calls.contains(&"write-item:D_POSITION".into()));assert!(calls.contains(&"write-take:D_PLAYRATE".into()));
         let geometry=owner.reaper_geometry().unwrap_err();assert!(geometry.contains("incompatible"),"未模拟ARA回流，不能伪造已同步模型");
         assert_eq!(editor.timeline.lock().unwrap().clips[0].start_sec,0.);document.close();
+    }
+    /// 旧快照仍ok也不能结束移动；长度/倍率/淡变宽度均须准确回流，且缺失clip不可成功。
+    #[test]
+    fn host_edit_receipt_rejects_readable_old_geometry_and_waits_for_widths() {
+        let (_model,owner,_id)=super::super::session::tests::fixture();let editor=owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();let clip=editor.timeline.lock().unwrap().clips[0].clone();
+        let plan=editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"startSec":3.,"fadeInSec":0.2})).unwrap();
+        let receipt=plan.receipt(&editor.namespace);
+        let mut payload=super::super::commands::payload(&editor,false).unwrap();assert!(!receipt.matches(&payload));
+        payload["clips"][0]["start_sec"]=json!(3.);assert!(!receipt.matches(&payload));
+        payload["clips"][0]["fade_in_sec"]=json!(0.2);assert!(receipt.matches(&payload),"{receipt:?} vs {payload}");
+        payload["clips"][0]["id"]=json!("other");assert!(!receipt.matches(&payload));editor.close();
+    }
+    /// 宽度patch冗余带着原shape不要求委托；实际改shape仍保持明确的责任门。
+    #[test]
+    fn host_edit_fade_width_writes_reaper_without_delegation_or_redundant_shape() {
+        let (model,owner,_id)=super::super::session::tests::fixture();let document=model.session();
+        let host=crate::host::reaper::ReaperFixture::new();host.enable_writer();host.clear_markers();
+        host.set_value("D_POSITION",0.);host.set_value("D_LENGTH",4./44100.);host.set_value("D_PLAYRATE",1.);
+        unsafe {owner.bind_reaper_host(host.context());}owner.refresh_reaper_transport();
+        let editor=owner.editor_session().unwrap();editor.ensure_loaded(false).unwrap();let clip=editor.timeline.lock().unwrap().clips[0].clone();
+        let plan=editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"fadeInSec":0.00002,"fadeOutSec":0.00003,
+            "autoFadeInSec":0.,"autoFadeOutSec":0.,"fadeInShape":clip.fade_in_shape,"fadeOutShape":clip.fade_out_shape,
+            "fadeInDir":clip.fade_in_dir,"fadeOutDir":clip.fade_out_dir})).unwrap();
+        assert!(plan.edits[0].patch.fade_in_shape.is_none());host.reset();execute(&owner,plan,||document.is_alive()).unwrap();
+        let calls=host.calls();for field in ["D_FADEINLEN","D_FADEOUTLEN","D_FADEINLEN_AUTO","D_FADEOUTLEN_AUTO"] {
+            assert!(calls.contains(&format!("write-item:{field}")));
+        }
+        assert!(!calls.iter().any(|call|call.starts_with("write-item:D_FADEINDIR")||call.starts_with("write-item:C_FADE")));
+        let plan=editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"fadeInShape":(clip.fade_in_shape+1.)%7.})).unwrap();
+        assert!(execute(&owner,plan,||document.is_alive()).unwrap_err().contains("not delegated"));document.close();
     }
 }
