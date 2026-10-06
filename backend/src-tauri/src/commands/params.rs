@@ -214,6 +214,7 @@ pub(super) fn get_param_frames(
                     pitch_edit_user_modified: None,
                     pitch_edit_backend_available: None,
                     edit_sentinel: None,
+                    dyn_orig_key: None,
                 }
             }
         };
@@ -286,6 +287,7 @@ pub(super) fn get_param_frames(
             pitch_edit_user_modified,
             pitch_edit_backend_available,
             edit_sentinel: None,
+            dyn_orig_key: None,
         };
     }
 
@@ -394,19 +396,16 @@ pub(super) fn get_param_frames(
                     .filter(|v| v.is_finite() && *v > 0.0)
                     .unwrap_or(fallback);
                 let user = user_curve.and_then(|c| c.get(idx)).copied();
-                let is_unset = match user {
-                    Some(v) => !(v.is_finite() && v >= 0.0), // 哨兵 / 非有限
-                    None => true,                            // 曲线不存在或更短
-                };
+                // 「未画」位图与目标电平解析同源（唯一判定见
+                // `common_params::dyn_frame_is_unset`）：分叉会让写回路径把未画帧
+                // 物化成显式目标电平。
                 if want_sentinel {
-                    sentinels.push(is_unset);
+                    sentinels.push(crate::renderer::common_params::dyn_frame_is_unset(user));
                 }
-                let resolved = match user {
-                    Some(v) if v.is_finite() && v >= 0.0 => v,
-                    _ => baseline, // 哨兵 / 缺失 → 沿用原声
-                };
                 orig.push(baseline);
-                edit.push(resolved);
+                edit.push(crate::renderer::common_params::dyn_resolved_target_at(
+                    user, baseline,
+                ));
             }
             if want_sentinel {
                 edit_sentinel = Some(sentinels);
@@ -445,7 +444,16 @@ pub(super) fn get_param_frames(
         pitch_edit_user_modified,
         pitch_edit_backend_available,
         edit_sentinel,
-        // 前端画 DYN 波形需要参考电平（把线性峰值换算成同样的倍率域）。
+        // 溯源键：dyn 之外恒 None（别的参数的 orig 不是几何推导出来的）。
+        // 用 `dyn_orig_source_key`（每次组装都写）而不是 `dyn_orig_key`（只在全量
+        // 命中时写）—— 后者在部分命中时为空，而那份基线的几何同样是可回答的。
+        // `entry` 是 dyn 分支里 maybe_schedule_dyn_orig 之后重新克隆的副本，
+        // 因此这里的 key 与上面读出的 `dyn_orig` 是同一次组装的产物。
+        dyn_orig_key: if param == "dyn" {
+            entry.dyn_orig_source_key.clone()
+        } else {
+            None
+        },
     }
 }
 /// 将 orig/edit 两组 f32 曲线编码为 Base64 二进制。

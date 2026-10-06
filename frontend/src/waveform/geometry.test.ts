@@ -412,6 +412,9 @@ test("waveform/geometry.test.ts scripted checks", async () => {
                     yPx: 20,
                     heightPx: 100,
                     kind: "loop",
+                    // 边界给得足够宽 ⇒ 不裁任何扫描行（本用例只验压暗）。
+                    clipLeftPx: -1000,
+                    clipRightPx: 1000,
                     inactive: true,
                 },
             ],
@@ -620,6 +623,9 @@ test("volume-scaled envelope is zoom-stable (no phantom peaks at coarse zoom)", 
             color: "#ffffff",
             getPeaks: () => peaks,
             amplitudeMap: volumeDipMap,
+            // 每次构建各用一个 sink：返回值**借用** sink 缓冲，共用兜底槽时后一次
+            // 构建会覆写前一次的顶点（本用例要同时持有粗 / 细两份结果做对比）。
+            sink: { buffer: new Float32Array(0) },
         });
 
     // 高度 100、中心 50、半高 50：可听峰值 0.1 → 包络顶 = 50 − 0.1×50 = 45。
@@ -998,16 +1004,18 @@ test("device-grid columns widen the sample window per column (dpr-aware)", async
             return value;
         },
     });
-    // dpr=1.25、W=1 → 5 个设备列。列窗口（±半列 = ±0.1s）与 4 桶的覆盖关系：
-    // 列 0 → 桶 0；列 1 → 桶 0..1；列 2 → 桶 1..2；列 3 → 桶 2..3；列 4 → 桶 3
-    // → 共 1+2+2+2+1 = 8 个切片，min/max 各一次 = 16 次调用。
-    if (seen.length !== 16) {
-        throw new Error(`expected 16 samples, received ${seen.length}`);
+    // dpr=1.25、W=1 → 5 个设备列；每列覆盖 0.8 个桶 ⇒ 落进粗档
+    //（见 COARSE_WINDOW_MAX_SPAN）。粗档改用**桶数恒定**的窗口（锚定列中心）：
+    // 桶数不再随亚桶相位在 ⌊N⌋/⌊N⌋+1 之间翻转（那正是"缩到很小后拖拽时波形抖动"
+    // 的根因），而极值仍与**它自己所在桶的时刻**严格配对（不配对会造出幻峰）。
+    // → 5 列 × min/max 各一次 = 10 次调用。
+    if (seen.length !== 10) {
+        throw new Error(`expected 10 samples, received ${seen.length}`);
     }
-    // 每切片时刻 = 其覆盖桶的中心（源锚定）：桶 k 中心 = (k+0.5)/4 s。
-    // 注意列中心 t（0.1/0.3/0.5/...）与此**不同** —— 旧实现按列中心采样增益，
-    // 峰值高度会随缩放扫动；现在锚定到峰值桶自身。
-    const expectedSliceTimes = [0.125, 0.125, 0.375, 0.375, 0.625, 0.625, 0.875, 0.875];
+    // 每列时刻 = 该列窗口内峰值所在桶的中心；桶 k 中心 = (k+0.5)/4 s。
+    // 注意它仍与列中心 t（0.1/0.3/0.5/…）**不同** —— 旧实现按列中心采样增益，
+    // 峰值高度会随缩放扫动；现在锚定到峰值自身。
+    const expectedSliceTimes = [0.125, 0.375, 0.625, 0.625, 0.875];
     let cursor = 0;
     for (let slice = 0; slice < expectedSliceTimes.length; slice += 1) {
         const minTime = seen[cursor]?.[0];

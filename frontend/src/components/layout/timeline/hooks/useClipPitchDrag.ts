@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { registerDragAbort } from "../gestureFocusGuard";
+import { registerDragAbort } from "../../../../utils/gestureFocusGuard";
 import type { AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
 import { bumpParamsEpoch } from "../../../../features/session/sessionSlice";

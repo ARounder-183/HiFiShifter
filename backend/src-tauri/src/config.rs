@@ -553,6 +553,12 @@ pub struct UiSettings {
     pub draw_drag_direction: String,
     #[serde(default = "default_draw_drag_direction")]
     pub line_vibrato_drag_direction: String,
+    /// 参数编辑器上次使用的工具（`select` / `draw` / `line` / `vibrato`）。
+    ///
+    /// `None` = 从未设置过（旧配置没有这一项），由前端回落出厂默认（绘制工具）。
+    /// 与拖动方向同属"本机记忆"，因此不需要配置迁移。
+    #[serde(default)]
+    pub param_editor_tool: Option<String>,
     #[serde(default, alias = "edgeSmoothnessPercent")]
     pub smoothness_percent: u32,
     #[serde(default = "default_scale_highlight_mode")]
@@ -1673,6 +1679,7 @@ impl Default for UiSettings {
             select_drag_direction: default_drag_direction(),
             draw_drag_direction: default_draw_drag_direction(),
             line_vibrato_drag_direction: default_draw_drag_direction(),
+            param_editor_tool: None,
             smoothness_percent: 0,
             scale_highlight_mode: default_scale_highlight_mode(),
             custom_scale_presets: Vec::new(),

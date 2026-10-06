@@ -10,7 +10,10 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "mode.toggle": [{ key: "tab" }],
     "mode.selectTool": [{ key: "f7" }],
     "mode.drawTool": [{ key: "f8" }],
+    // 直线与颤音是两种工具（直线 ≡ 颤音 + 直线预设），因此各占一个键；
+    // F7→F10 与工具栏右键菜单里的排列顺序一致。
     "mode.lineTool": [{ key: "f9" }],
+    "mode.vibratoTool": [{ key: "f10" }],
 
     // 播放 / 暂停：播放中暂停（光标留在当前位置），空闲时起播。
     "playback.toggle": [{ key: "space" }],
@@ -225,6 +228,10 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "modifier.paramFineAdjust": [{ key: "control", modifierOnly: true, ctrl: true }],
     "modifier.vibratoAmplitudeAdjust": [{ key: "__none__", modifierOnly: true }],
     "modifier.vibratoFrequencyAdjust": [{ key: "alt", modifierOnly: true, alt: true }],
+    // 记事本编辑区字号：按住主修饰键 + 面板内滚轮 = 缩放。默认主修饰键，
+    // macOS 上由 ctrl 字段自动映射为 ⌘（见 platform.ts）—— 与浏览器/设计工具的
+    // ⌘+滚轮缩放同源，而不是 macOS 上留给系统辅助功能的 Ctrl+滚轮。
+    "modifier.notebookFontZoom": [{ key: "control", modifierOnly: true, ctrl: true }],
 
     // 快速搜索
     "quickSearch.open": [{ key: "f", ctrl: true }],
@@ -242,7 +249,8 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     "mode.toggle": { labelKey: "kb_mode_toggle", group: "mode" },
     "mode.selectTool": { labelKey: "kb_mode_select_tool", group: "mode" },
     "mode.drawTool": { labelKey: "kb_mode_draw_tool", group: "mode" },
-    "mode.lineTool": { labelKey: "kb_mode_vibrato_tool", group: "mode" },
+    "mode.lineTool": { labelKey: "kb_mode_line_tool", group: "mode" },
+    "mode.vibratoTool": { labelKey: "kb_mode_vibrato_tool", group: "mode" },
 
     "playback.toggle": { labelKey: "kb_playback_toggle", group: "playback" },
     "playback.stop": { labelKey: "kb_playback_stop", group: "playback" },
@@ -607,6 +615,12 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         conflictScenes: ["roll.vibratoWheel"],
     },
     // ── 修饰键 · 滚轮导航 ─────────────────────────────────────
+    "modifier.notebookFontZoom": {
+        labelKey: "kb_modifier_notebook_font_zoom",
+        group: "modWheel",
+        modifierOperationType: "wheel",
+        conflictScenes: ["wheel.notebook"],
+    },
     "modifier.horizontalZoom": {
         labelKey: "kb_modifier_horizontal_zoom",
         group: "modWheel",

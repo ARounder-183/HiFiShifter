@@ -156,6 +156,28 @@ async function typeNumber(ariaLabel: string, value: number): Promise<void> {
     });
 }
 
+/** 桩出来的列表高度（jsdom 没有排版，`scrollHeight` 恒为 0，无从断言"滚到底"）。 */
+const SCROLL_HEIGHT = 4321;
+
+/**
+ * 让预设列表的滚动视口有一个可观测的高度，并把它交出来。
+ *
+ * 【为什么要桩】jsdom 不做排版，`scrollHeight` 永远是 0，"滚到底"就成了不可观测的
+ * 动作。从某一行的 `closest` 找到视口（对话框里不止一个 `ScrollArea`），而不是取
+ * 第一个 —— 编辑器那一列也有一个。
+ */
+function presetListViewport(): HTMLElement {
+    const row = document.querySelector('[data-preset-row="builtin.natural"]');
+    const viewport = row?.closest<HTMLElement>("[data-radix-scroll-area-viewport]");
+    expect(viewport, "预设列表应有滚动视口").toBeTruthy();
+    Object.defineProperty(viewport, "scrollHeight", {
+        value: SCROLL_HEIGHT,
+        configurable: true,
+    });
+    viewport!.scrollTop = 0;
+    return viewport!;
+}
+
 /** 库里当前的自定义预设（不含系统预设 —— 它们不在 store 里）。 */
 function userPresets(store: Awaited<ReturnType<typeof mountDialog>>) {
     return store.getState().session.vibratoPresets;
@@ -1494,17 +1516,18 @@ test("复制为自定义：按显示名预填编号，且不会叠成「2 2」",
     await act(async () => {
         duplicateButton()!.click();
     });
+    // 窗口打开时编辑的是**活动预设**，而出厂默认是「自然」。
     expect(store.getState().session.vibratoPresets.map((preset) => preset.name)).toEqual([
-        "Straight 2",
+        "Natural 2",
     ]);
 
-    // 第二次复制的是刚生成的 "Straight 2"：剥掉编号后应得到 "Straight 3"。
+    // 第二次复制的是刚生成的 "Natural 2"：剥掉编号后应得到 "Natural 3"。
     await act(async () => {
         duplicateButton()!.click();
     });
     expect(store.getState().session.vibratoPresets.map((preset) => preset.name)).toEqual([
-        "Straight 2",
-        "Straight 3",
+        "Natural 2",
+        "Natural 3",
     ]);
 });
 
@@ -1568,8 +1591,10 @@ test("偏斜滑块：参数式形状可调，进入手绘后禁用", async () =>
  * 直线预设的读数应为 "±0 分"，而不是被保底的 "±1"。
  */
 test("完全平直的预设读数显示 ±0", async () => {
-    // 默认活动预设就是「直线」（深度 0）。
-    await mountDialog();
+    // 出厂默认是「自然」（深度 30 分），所以要显式切到深度为 0 的「直线」预设。
+    await mountDialog((store) => {
+        store.dispatch(setActiveVibratoPreset("builtin.straight"));
+    });
     const text = document.body.textContent ?? "";
     expect(text).toContain("±0 cents");
     expect(text).not.toContain("±1 cents");
@@ -1958,4 +1983,153 @@ test("音高全未检测时说明原因，而不是画一条直线", async () =>
     expect(document.body.textContent ?? "").toContain(
         "No pitch to apply vibrato to in this range.",
     );
+});
+
+/*
+ * 编辑系统预设 = 立刻生成一份自定义副本。
+ *
+ * 【旧行为的问题】副本原本是"离开这条预设"时才生成的：用户改完系统预设 A、点向 B
+ * 的那一刻库里才多出一条 C，而他的注意力全在 B 上 —— C 成了"不经意间添加的预设"。
+ * 现在的契约是第一次编辑就生成并选中，用户当场看见它出现。
+ */
+test("编辑系统预设：立刻生成自定义副本并跳过去，且不打断这次编辑", async () => {
+    const store = await mountDialog();
+    // 出厂默认的活动预设是「自然」，它是一条**系统**预设：库里本来什么都没有。
+    expect(userPresets(store)).toHaveLength(0);
+    expect(store.getState().session.activeVibratoPresetId).toBe("builtin.natural");
+    const viewport = presetListViewport();
+
+    await typeNumber("Depth", 77);
+
+    const created = userPresets(store);
+    expect(created, "改一下系统预设就该多出一份副本").toHaveLength(1);
+    expect(created[0].builtin, "副本必须是自定义预设").toBeFalsy();
+    expect(created[0].name, "名字按显示名预填").toBe("Natural 2");
+    expect(created[0].depthCents, "这次改动落在副本上").toBe(77);
+
+    // 草稿切到了副本上：名字输入框出现（系统预设没有它），值就是副本名；
+    // 而**编辑内容原样保留** —— 这就是"不打断当前编辑"。
+    const nameInput = document.querySelector<HTMLInputElement>('input[aria-label="Preset name"]');
+    expect(nameInput?.value).toBe("Natural 2");
+    expect(
+        document.querySelector<HTMLInputElement>('input[aria-label="Depth"]')?.value,
+        "切换副本不该把用户刚改的值弹回去",
+    ).toBe("77");
+
+    // 活动预设不动：副本只是"让你看得见"，要不要用它由用户决定。
+    expect(store.getState().session.activeVibratoPresetId).toBe("builtin.natural");
+
+    // 副本在列表末尾，要滚过去 —— 这是替代提示语的"看得见"。
+    expect(viewport.scrollTop, "新副本应滚入视野").toBe(SCROLL_HEIGHT);
+});
+
+/*
+ * 继续编辑不会一路生成副本 —— 副本只该在"从系统预设跨到自定义"那一次产生。
+ */
+test("编辑系统预设：只在第一次生成副本，后续编辑落在同一份上", async () => {
+    const store = await mountDialog();
+
+    await typeNumber("Depth", 77);
+    await typeNumber("Depth", 88);
+
+    expect(userPresets(store), "第二次编辑不该再生成一份").toHaveLength(1);
+    // 后续编辑仍停在草稿上（照常由「保存」/ 离开这条预设落盘），
+    // 但草稿已经是那份副本了 —— 输入框读到的就是新值。
+    expect(
+        document.querySelector<HTMLInputElement>('input[aria-label="Depth"]')?.value,
+    ).toBe("88");
+    expect(
+        document.querySelector<HTMLInputElement>('input[aria-label="Preset name"]')?.value,
+        "编辑的仍是第一次生成的那份副本",
+    ).toBe("Natural 2");
+});
+
+/*
+ * 凡是"新做出来的预设"，都要滚进视野 —— 它追加在列表末尾，列表一长就在视野之外。
+ */
+test("复制为自定义 / 新建：新预设都滚入视野", async () => {
+    await mountDialog();
+    const viewport = presetListViewport();
+
+    await clickButton("Duplicate as mine");
+    expect(viewport.scrollTop, "副本在列表末尾，应滚过去").toBe(SCROLL_HEIGHT);
+
+    viewport.scrollTop = 0;
+    await clickButton("New");
+    expect(viewport.scrollTop, "新建的预设同样在末尾").toBe(SCROLL_HEIGHT);
+});
+
+/*
+ * 副本产生之后，再切换到别的预设不会再多出东西 —— 这正是旧行为里"不经意间多出
+ * 预设"的那一步。
+ */
+test("编辑系统预设后再切换预设：不会再多出一份副本", async () => {
+    const store = await mountDialog();
+
+    await typeNumber("Depth", 77);
+    expect(userPresets(store)).toHaveLength(1);
+
+    // 切到列表里的另一条预设（系统预设行按 id 找）。
+    const row = document.querySelector<HTMLElement>('[data-preset-row="builtin.enka"]');
+    expect(row, "系统预设行应已渲染").toBeTruthy();
+    const option = row!.querySelector<HTMLElement>('[role="option"]');
+    await act(async () => {
+        option!.click();
+    });
+
+    expect(userPresets(store), "离开时不该再凭空多出一条").toHaveLength(1);
+});
+
+/*
+ * 「设为当前使用」必须是一个**看得见的控件**。
+ *
+ * 【为什么单独一条】这一行的入口原本只有双击与右键菜单 —— 两个都藏起来，用户得先
+ * 知道有这回事才找得到。现在每行有一个单选圆点（实心 = 当前使用中），编辑器顶部还有
+ * 一个写着字的按钮，两者都要能一键切换。
+ */
+test("设为当前使用：列表行的圆点与编辑器顶部的按钮都能一键切换", async () => {
+    const store = await mountDialog();
+    const activeId = () => store.getState().session.activeVibratoPresetId;
+    // 出厂默认的活动预设是「自然」。
+    expect(activeId()).toBe("builtin.natural");
+
+    // 圆点的 aria-label 随状态变（"使用中" / "可切换"），两种都要认。
+    const rowDot = (id: string) =>
+        document
+            .querySelector<HTMLElement>(`[data-preset-row="${id}"]`)
+            ?.querySelector<HTMLButtonElement>(
+                'button[aria-label="Use as current"], button[aria-label="Currently in use"]',
+            );
+    /** 编辑器顶部的那个按钮：它是编辑器列里唯一带这两个文案之一的按钮。 */
+    const editorButton = () =>
+        [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+            ["Use as current", "Currently in use"].includes(button.textContent?.trim() ?? ""),
+        );
+
+    // 当前那条的圆点是"使用中"（按下态），其余是"可切换"。
+    expect(rowDot("builtin.natural")?.getAttribute("aria-pressed")).toBe("true");
+    expect(rowDot("builtin.enka")?.getAttribute("aria-pressed")).toBeNull();
+    expect(rowDot("builtin.enka")?.getAttribute("aria-label")).toBe("Use as current");
+    expect(editorButton()?.textContent?.trim()).toBe("Currently in use");
+    expect(editorButton()?.disabled, "已经是当前使用，按钮应停用").toBe(true);
+
+    // 点另一行的圆点：不必先选中那一行，直接换过去。
+    await act(async () => {
+        rowDot("builtin.enka")!.click();
+    });
+    expect(activeId()).toBe("builtin.enka");
+    expect(rowDot("builtin.enka")?.getAttribute("aria-pressed")).toBe("true");
+    // 编辑器里编辑的仍是「自然」，它现在不再是当前使用的 —— 按钮回到可点状态。
+    expect(
+        document.querySelector<HTMLInputElement>('input[aria-label="Depth"]'),
+        "圆点只改当前使用，不该顺手换掉正在编辑的那条",
+    ).toBeTruthy();
+    expect(editorButton()?.textContent?.trim()).toBe("Use as current");
+
+    // 编辑器顶部的按钮：把正在编辑的这条设为当前使用。
+    await act(async () => {
+        editorButton()!.click();
+    });
+    expect(activeId()).toBe("builtin.natural");
+    expect(editorButton()?.textContent?.trim()).toBe("Currently in use");
 });

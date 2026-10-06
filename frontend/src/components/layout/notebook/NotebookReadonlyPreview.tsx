@@ -7,22 +7,48 @@
  */
 
 import { EditorContent, useEditor } from "@tiptap/react";
-import { useEffect, useMemo, useRef } from "react";
+import type { Editor } from "@tiptap/core";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 
+import {
+    prepareNotebookContext,
+    type NotebookMenuFlags,
+    type NotebookMenuTarget,
+} from "./notebookContextTarget";
 import { buildNotebookExtensions } from "./notebookExtensions";
 
 /** 只读预览内容同步的去抖窗口（毫秒）。 */
 const PREVIEW_SYNC_DEBOUNCE_MS = 250;
 
+/** 右键落点解析的结果（由预览栏自己算，因为编辑器是它自己的）。 */
+export interface NotebookPreviewContextRequest {
+    x: number;
+    y: number;
+    target: NotebookMenuTarget;
+    flags: NotebookMenuFlags;
+    editor: Editor;
+}
+
 export interface NotebookReadonlyPreviewProps {
     markdown: string;
     /** 与左栏联动的滚动同步（比例同步）。 */
     scrollSyncSource?: HTMLElement | null;
+    /**
+     * 右键菜单。
+     *
+     * 【为什么把落点解析放在这里】本组件有**自己的**编辑器实例（同一套扩展、
+     * `editable: false`）。落点几何与开关都得问它要 —— 拿左栏那份去解析会得到
+     * 错位的落点，而且它的 `editable: true` 会让菜单错误地给出编辑项。
+     * 菜单**内容**仍由面板统一决定（规则只有一份）。
+     */
+    onContextMenu?: (request: NotebookPreviewContextRequest) => void;
 }
 
 export function NotebookReadonlyPreview({
     markdown,
     scrollSyncSource,
+    onContextMenu,
 }: NotebookReadonlyPreviewProps) {
     const extensions = useMemo(
         () =>
@@ -79,10 +105,29 @@ export function NotebookReadonlyPreview({
         return () => source.removeEventListener("scroll", onSourceScroll);
     }, [scrollSyncSource]);
 
+    const handleContextMenu = useCallback(
+        (event: ReactMouseEvent) => {
+            if (!onContextMenu || !editor || editor.isDestroyed) return;
+            event.preventDefault();
+            // 只读编辑器：落点不会移动任何光标（`applyContextSelection` 在只读下
+            // 也只是改选区，而只读下改选区是允许的 —— 用户正是在选他要复制的东西）。
+            const { target, flags } = prepareNotebookContext(editor, event.clientX, event.clientY);
+            onContextMenu({
+                x: event.clientX,
+                y: event.clientY,
+                target,
+                flags,
+                editor,
+            });
+        },
+        [editor, onContextMenu],
+    );
+
     return (
         <div
             ref={containerRef}
             className="hs-scroll-gutter-flush h-full min-w-0 flex-1 overflow-auto border-l border-qt-border bg-qt-base px-3 py-3"
+            onContextMenu={handleContextMenu}
         >
             <EditorContent editor={editor} />
         </div>

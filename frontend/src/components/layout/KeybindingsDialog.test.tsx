@@ -355,3 +355,51 @@ describe("布局稳定性：录入态不移动已有元素", () => {
         }
     });
 });
+
+/**
+ * 追加槽位在**每一行**都占位 —— 搜索把常规快捷键与修饰键手势混排时，
+ * chip 列必须仍然对齐。
+ *
+ * 【回归背景】修饰键手势不能绑多个键，因此它那一行不画追加按钮；此前连槽位
+ * 也一起省掉，于是它的 chip 比其他行往右多出「按钮 + 间距」那一段，混排时
+ * 参差不齐。现在槽位无条件渲染，按钮画不画由能力决定。
+ */
+describe("追加槽位：每行占位，按钮可选", () => {
+    it("每一行都恰好有一个追加槽位", () => {
+        const { cleanup } = renderDialog();
+        try {
+            const rows = document.body.querySelectorAll("[data-hs-kb-row]");
+            expect(rows.length).toBeGreaterThan(0);
+            for (const row of rows) {
+                expect(row.querySelectorAll("[data-hs-kb-add-slot]")).toHaveLength(1);
+            }
+        } finally {
+            cleanup();
+        }
+    });
+
+    it("修饰键手势行有槽位但没有按钮；常规行两者都有", () => {
+        const { cleanup } = renderDialog();
+        try {
+            const modifierRows = Array.from(
+                document.body.querySelectorAll<HTMLElement>('[data-hs-kb-row="modClip"]'),
+            );
+            expect(modifierRows.length).toBeGreaterThan(0);
+            for (const row of modifierRows) {
+                expect(row.querySelector("[data-hs-kb-add-slot]")).not.toBeNull();
+                expect(row.querySelector("[data-hs-kb-add]")).toBeNull();
+            }
+
+            const regularRows = Array.from(
+                document.body.querySelectorAll<HTMLElement>('[data-hs-kb-row="edit"]'),
+            );
+            expect(regularRows.length).toBeGreaterThan(0);
+            for (const row of regularRows) {
+                expect(row.querySelector("[data-hs-kb-add-slot]")).not.toBeNull();
+                expect(row.querySelector("[data-hs-kb-add]")).not.toBeNull();
+            }
+        } finally {
+            cleanup();
+        }
+    });
+});

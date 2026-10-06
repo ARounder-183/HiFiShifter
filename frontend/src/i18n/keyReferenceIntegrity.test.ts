@@ -175,7 +175,17 @@ describe("键引用完整性", () => {
      * 示范键，不剥离会误报 8 处、逼人加无意义的豁免。
      */
     test("调用的字面量键必须在参考目录里", () => {
-        const callRe = /\b(?:t|tf|tAny)\("([a-zA-Z0-9_]+)"\)/g;
+        /*
+         * 两族写法都要守：
+         * - `t("key")` / `tf("key")` / `tAny("key")` —— 单参调用，闭合括号必须紧跟；
+         * - `tVars("key", { … })` / `plural("key", n)` / `shortcut("key")`，以及
+         *   **取值器形态** `lookup.t("key", { … })` —— 带插值变量的调用。`tVars`
+         *   正是为了取代手写 `.replace("{name}", …)` 而存在的，用它的地方同样会
+         *   "查不到就显示键名"。它们的第二个参数是对象/数字，因此这里只要求
+         *   **引号闭合**，不要求紧跟 `)`。
+         */
+        const callRe =
+            /\b(?:t|tf|tAny)\("([a-zA-Z0-9_]+)"\)|\b(?:tVars|plural|shortcut|t)\("([a-zA-Z0-9_]+)"/g;
         const stripCommentLines = (source: string): string =>
             source
                 .split("\n")
@@ -189,8 +199,9 @@ describe("键引用完整性", () => {
             if (file.startsWith(join("src", "i18n"))) continue;
             const source = stripCommentLines(readFileSync(file, "utf8"));
             for (const match of source.matchAll(callRe)) {
+                const key = match[1] ?? match[2];
                 scanned += 1;
-                if (!CATALOG_KEYS.has(match[1])) offenders.push(`  ${file}: ${match[1]}`);
+                if (!CATALOG_KEYS.has(key)) offenders.push(`  ${file}: ${key}`);
             }
         }
 

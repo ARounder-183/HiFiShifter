@@ -19,7 +19,7 @@ import React, { useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
-import { registerDragAbort } from "./gestureFocusGuard";
+import { registerDragAbort } from "../../../utils/gestureFocusGuard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
 import {

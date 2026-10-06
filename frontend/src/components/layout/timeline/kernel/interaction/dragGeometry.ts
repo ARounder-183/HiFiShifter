@@ -59,6 +59,14 @@ export interface DragDeltaResult {
     readonly startSec: number;
     /** 实际生效的时间位移（秒）。 */
     readonly deltaSec: number;
+    /**
+     * **未钳制**的指针位移（秒，右为正）。
+     *
+     * 与 `deltaSec` 的差别只在 `startSec + rawDeltaSec < 0` 时：`deltaSec` 被下界
+     * 钳住而本字段不会。Slip 这类"位移即语义"的手势必须用它（见
+     * {@link resolveDragDeltaSec}）。
+     */
+    readonly rawDeltaSec: number;
 }
 
 /**
@@ -87,11 +95,31 @@ export interface DragDeltaResult {
  * @returns 新起始时间与实际生效位移。
  */
 export function resolveDragDelta(args: DragDeltaArgs): DragDeltaResult {
-    const pxPerSec = Number.isFinite(args.pxPerSec) && args.pxPerSec > 0 ? args.pxPerSec : 0;
-    const rawDelta = pxPerSec > 0 ? args.deltaContentXPx / pxPerSec : 0;
+    const rawDelta = resolveDragDeltaSec(args);
     const baseStart = Number.isFinite(args.startSec) ? args.startSec : 0;
     const startSec = Math.max(0, baseStart + rawDelta);
-    return { startSec, deltaSec: startSec - baseStart };
+    return { startSec, deltaSec: startSec - baseStart, rawDeltaSec: rawDelta };
+}
+
+/**
+ * 把内容坐标位移换算为**纯位移**（秒，右为正）—— **不施加任何钳制**。
+ *
+ * 【为什么必须与 `resolveDragDelta` 分开】后者的下界钳制是**位置**语义（clip 不能
+ * 从负时间开始），它同时把返回值里的 `deltaSec` 也钳住了（`deltaSec = startSec −
+ * baseStart`）。但 Slip 手势消费的不是位置而是**位移**：`computeSlipWindow` 要的是
+ * "源窗口平移多少秒"，其合法域是**任意符号、任意大小**（向左滑出媒体起点 =
+ * 前导静音，向右滑出末端 = 尾部静音，二者对称无界）。
+ *
+ * 复用被钳的 `deltaSec` 会让 Slip 单向卡死：clip 在 `startSec = 5` 时向左最多滑
+ * 5 秒，在 `startSec = 0` 时**完全无法向左滑**；而向右因为早已没有上界，是不受限的
+ * ——现场表现正是"Slip 只能往一个方向拖"。
+ *
+ * @param args 换算参数（`startSec` 不参与本函数）。
+ * @returns 未钳制的位移（秒）；`pxPerSec` 非法时退化为 0（不产生 NaN）。
+ */
+export function resolveDragDeltaSec(args: DragDeltaArgs): number {
+    const pxPerSec = Number.isFinite(args.pxPerSec) && args.pxPerSec > 0 ? args.pxPerSec : 0;
+    return pxPerSec > 0 ? args.deltaContentXPx / pxPerSec : 0;
 }
 
 /** trim 的边。 */

@@ -198,3 +198,27 @@ describe("菜单样式模型不能空转", () => {
         expect(unadopted, "以下菜单类没有任何消费者 —— 抽象层在空转，删掉或接上：").toEqual([]);
     });
 });
+
+/*
+ * 菜单项高亮的"键盘焦点"那一档必须是 `:focus-visible`，不能是 `:focus`。
+ *
+ * 【为什么要钉这一条】`:focus` 对**鼠标点击**也成立，而它不会自己消失：点过的
+ * 那一项从此一直亮着，指针再划到别的项上就是**两条同时高亮**（实测：点「格式」
+ * 打开子菜单后再把指针划进子面板，「格式」与子项一起亮；划过「全选」再划过
+ * 一个二级触发项，也是两条）。`:focus-visible` 只在键盘交互导致的焦点上生效，
+ * 鼠标点击不匹配 —— 而子面板的键盘导航正是靠它才看得见。
+ *
+ * 注意 `:focus-visible` 本身包含 `:focus` 子串，所以要按逗号切分后**整段**比较。
+ */
+test("菜单项高亮的键盘焦点用 :focus-visible 而不是 :focus", () => {
+    const blocks = cssBlocks(readFileSync(TOKEN_CSS, "utf8"));
+    const block = blocks.find(
+        (entry) =>
+            entry.body.includes("--qt-menu-item-hover") &&
+            entry.selector.includes(".hs-menu__item"),
+    );
+    expect(block, "找不到菜单项的高亮规则").toBeDefined();
+    const parts = block!.selector.split(",").map((part) => part.trim());
+    expect(parts).toContain(".hs-menu__item:focus-visible");
+    expect(parts).not.toContain(".hs-menu__item:focus");
+});

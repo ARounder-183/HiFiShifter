@@ -1641,6 +1641,33 @@ export const FileBrowserPanel: React.FC = () => {
         };
     }, [dragState !== null]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    /*
+     * 卸载即收尾。
+     *
+     * 【为什么单开一个空依赖 effect】上面的拖拽 effect 以 `dragState !== null` 为
+     * 依赖 —— 拖拽**开始**时它也会重跑一次清理，若在清理里补发 `cancel` 会立刻把
+     * 刚开始的拖拽取消掉。空依赖的清理只在**真正卸载**时执行，语义精确。
+     *
+     * 【不补发会怎样】面板一旦卸载，pointerup / pointercancel / blur 都不再派发，
+     * 而监听 `hifi-file-drag` 的**时间轴仍然挂载** —— 它手里的落点预览与吸附竖线
+     * 会永久留在画面上（正是"高亮没清掉"那一类）。
+     */
+    useEffect(
+        () => () => {
+            const ds = dragStateRef.current;
+            if (!ds?.active) return;
+            window.dispatchEvent(
+                new CustomEvent("hifi-file-drag", {
+                    detail: buildFileDragFinishDetail(ds, "cancel", ds.startX, ds.startY),
+                }),
+            );
+            // 全局拖拽态存在 store 里（不在本组件），卸载后仍需复位，否则文件
+            // 浏览器再次挂载时行会以"正在拖拽"的样式出现。
+            setFileBrowserDragActive(false);
+        },
+        [],
+    );
+
     // 列表真正渲染出条目时，容器才承担 listbox 语义（加载/错误/空态不是列表）。
     const showEntries =
         !fb.loading &&

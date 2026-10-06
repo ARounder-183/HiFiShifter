@@ -37,7 +37,13 @@
  */
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ShuffleIcon, EyeNoneIcon, EyeOpenIcon } from "@radix-ui/react-icons";
+import {
+    ShuffleIcon,
+    EyeNoneIcon,
+    EyeOpenIcon,
+    CheckCircledIcon,
+    CircleIcon,
+} from "@radix-ui/react-icons";
 import { Box, Flex, ScrollArea, TextField } from "@radix-ui/themes";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -117,6 +123,7 @@ import { AppFileInput } from "../../ui/FileInput";
 import { useInputModifiers } from "../../ui/useInputModifiers";
 import { createAxisGainState2D, type AxisGainState2D } from "../../utils/axisGain";
 import { VibratoPresetGlyph } from "./vibrato/VibratoPresetGlyph";
+import { registerDragAbort } from "../../utils/gestureFocusGuard";
 import {
     type VibratoPreviewGestureInfo,
     type VibratoPreviewInputState,
@@ -302,6 +309,27 @@ export function VibratoDialog({
     /** 编辑中的草稿。`null` 表示库里一条预设都没有（`resolved.all` 为空）。 */
     const [draft, setDraft] = useState<VibratoPreset | null>(seedPreset);
     /**
+     * 已经为哪一份系统预设草稿尝试过"立刻另存为副本"。
+     *
+     * 【为什么需要】已达预设上限时副本造不出来，草稿会一直停在"系统预设 + 有改动"
+     * 上；每次编辑都提示一遍就成了噪声。记下"草稿 id + 当时的用户预设条数"，
+     * 同一种情况只尝试一次；用户腾出空位（条数变化）后自动重试。
+     */
+    const promoteAttemptRef = useRef<string | null>(null);
+    /**
+     * 刚创建的自定义预设 id：等它渲染进列表后把列表滚到最底部（见下面的 effect）。
+     *
+     * 【为什么要滚】新预设一律追加在用户段末尾（`upsertVibratoPreset` 对未知 id 是
+     * `push`），列表一长它就落在视野之外 —— 用户看不到自己刚做出来的东西。新建 /
+     * 复制为自定义 / 从选区提取 / 导入 / 编辑系统预设这五条路都要走一遍。
+     */
+    const pendingScrollPresetRef = useRef<string | null>(null);
+
+    /** 记下"这条刚做出来的预设，等它进列表后滚过去"（见上面的 ref）。 */
+    function markCreatedPresetForScroll(presetId: string) {
+        pendingScrollPresetRef.current = presetId;
+    }
+    /**
      * 手绘周期编辑器的展开状态。
      *
      * `baseline` = 进入手绘前的周期来源，「复位」回到它（采样成表后停留在编辑器里）。
@@ -436,6 +464,8 @@ export function VibratoDialog({
     }, []);
 
     const isBuiltin = Boolean(draft?.builtin);
+    /** 正在编辑的这条是否就是当前使用的（编辑器顶部的按钮据此显示状态）。 */
+    const draftIsActive = Boolean(draft) && session.activeVibratoPresetId === draft?.id;
     const previewSamples = useMemo(() => (draft ? buildVibratoPreview(draft) : null), [draft]);
 
     /**
@@ -761,10 +791,13 @@ export function VibratoDialog({
         );
     }
 
-    function persistPreset(preset: VibratoPreset) {
-        dispatch(upsertVibratoPreset(preset));
-        void dispatch(persistUiSettings());
-    }
+    const persistPreset = useCallback(
+        (preset: VibratoPreset) => {
+            dispatch(upsertVibratoPreset(preset));
+            void dispatch(persistUiSettings());
+        },
+        [dispatch],
+    );
 
     /**
      * 草稿相对"它该等于什么"是否有未保存的改动。
@@ -804,31 +837,37 @@ export function VibratoDialog({
      * @returns 已达上限（`MAX_VIBRATO_PRESETS`）时返回 `null`，由调用方给出提示 ——
      *          静默失败会让用户以为"保存没反应"。
      */
-    function duplicateAsCustom(source: VibratoPreset): VibratoPreset | null {
-        if (resolved.user.length >= MAX_VIBRATO_PRESETS) return null;
-        return duplicateVibratoPreset(
-            source,
-            nextDuplicatePresetName(
-                vibratoPresetLabel(source, t) || t("vibrato_manager_new"),
-                resolved.all.map((preset) => vibratoPresetLabel(preset, t)),
-            ),
-        );
-    }
+    const duplicateAsCustom = useCallback(
+        (source: VibratoPreset): VibratoPreset | null => {
+            if (resolved.user.length >= MAX_VIBRATO_PRESETS) return null;
+            return duplicateVibratoPreset(
+                source,
+                nextDuplicatePresetName(
+                    vibratoPresetLabel(source, t) || t("vibrato_manager_new"),
+                    resolved.all.map((preset) => vibratoPresetLabel(preset, t)),
+                ),
+            );
+        },
+        [resolved, t],
+    );
 
     /**
      * 把一条预设**入库为自定义副本**，返回那份副本（已达上限时返回 `null` 并给出提示）。
      *
      * 出厂预设永远不能被覆盖（要可复原），所以"存成自己的"这件事只有这一条路。
      */
-    function saveAsCustom(source: VibratoPreset): VibratoPreset | null {
-        const copy = duplicateAsCustom(sanitizeVibratoPreset(source));
-        if (!copy) {
-            setIoNotice({ text: t("vibrato_manager_at_cap"), danger: true });
-            return null;
-        }
-        persistPreset(copy);
-        return copy;
-    }
+    const saveAsCustom = useCallback(
+        (source: VibratoPreset): VibratoPreset | null => {
+            const copy = duplicateAsCustom(sanitizeVibratoPreset(source));
+            if (!copy) {
+                setIoNotice({ text: t("vibrato_manager_at_cap"), danger: true });
+                return null;
+            }
+            persistPreset(copy);
+            return copy;
+        },
+        [duplicateAsCustom, persistPreset, t],
+    );
 
     /**
      * 把草稿的**未保存改动**落盘，返回落盘后的那条预设（没有改动时返回 `null`）。
@@ -845,7 +884,12 @@ export function VibratoDialog({
      */
     function commitDraft(): VibratoPreset | null {
         if (!draft || !draftHasUnsavedChanges()) return null;
-        if (isBuiltin) return saveAsCustom(draft);
+        if (isBuiltin) {
+            // 应用窗口里草稿只服务这一次套用：切换预设不该顺手在库里留下一条用户
+            // 没打算要的副本 —— 那正是管理窗口这次要修掉的旧毛病。管理窗口里系统
+            // 预设的改动早在第一次编辑时就变成副本了，走不到这里。
+            return applyTarget ? null : saveAsCustom(draft);
+        }
         const normalized = sanitizeVibratoPreset(draft);
         persistPreset(normalized);
         return normalized;
@@ -879,8 +923,14 @@ export function VibratoDialog({
         patch({ cycle: { kind: "table", table } });
     }
 
-    /** 设为当前使用（拖拽 / 菜单都用它）。 */
+    /**
+     * 设为当前使用（列表行上的圆点、右键菜单、编辑器顶部按钮都用它）。
+     *
+     * 【已经是它就直接返回】列表行上的圆点是个可反复点的控件，重复点击不该产生
+     * 一次无谓的设置写入；同时这也让"当前使用中"那个按钮的禁用态与行为一致。
+     */
     function activatePreset(preset: VibratoPreset) {
+        if (session.activeVibratoPresetId === preset.id) return;
         dispatch(setActiveVibratoPreset(preset.id));
         void dispatch(persistUiSettings());
     }
@@ -906,6 +956,7 @@ export function VibratoDialog({
         persistPreset(copy);
         selectPreset(copy);
         activatePreset(copy);
+        markCreatedPresetForScroll(copy.id);
     }
 
     /**
@@ -932,6 +983,63 @@ export function VibratoDialog({
         // 保存是"这段波形定稿了"的时机：顺势把纵轴重新拟合回六成上下。
         fitPreviewAxis(saved);
     }
+
+    /**
+     * 待办的"编辑系统预设 → 立刻另存为副本"。
+     *
+     * 【为什么算在渲染里、做在 effect 里】造副本是纯计算（草稿 + 现有名字），入库才是
+     * 副作用。编辑入口（捏合、手绘）会在同一帧里连续改草稿，若在编辑回调里顺手入库，
+     * 一次捏合就会生成一串副本；effect 每次提交只跑一次，dispatch 也不在渲染中，
+     * 天然安全。
+     */
+    const builtinEditPending =
+        // 应用窗口除外：那里的草稿只服务"这一次套用"，编辑它不该在库里留下东西
+        // （「应用」不写库是那个窗口的契约，见文件头）。
+        !applyTarget && draft && draft.builtin && draftHasUnsavedChanges() ? draft : null;
+
+    /**
+     * 对系统预设的**任意编辑**：立刻在列表里生成一份自定义副本，并把草稿切过去。
+     *
+     * 【旧行为的问题】副本原本是在"离开这条预设"（切到别的预设 / 删除 / 导入）时才
+     * 生成的。用户改完系统预设 A、点向 B 的那一刻库里才多出一条 C —— 他的注意力全在
+     * B 上，C 于是成了"不经意间添加的预设"。改成第一次编辑就生成并选中，用户当场看见
+     * 它出现。
+     *
+     * 【为什么不打断编辑】副本的内容就是"系统预设 + 这次改动"，草稿换的只是 id 与
+     * 名字；拖动 / 输入依赖的是草稿的**内容**，因此手势、光标位置与纵轴标尺都不动
+     * （刻意不调 `fitPreviewAxis`：编辑期间标尺本就该保持不动）。
+     *
+     * 【为什么不设为当前使用】激活预设会改掉颤音工具下一笔画什么，那是用户自己的
+     * 决定（双击 / 右键「设为当前使用」）；这里只负责让副本可见。
+     */
+    useEffect(() => {
+        if (!builtinEditPending) return;
+        const attemptKey = `${builtinEditPending.id}:${resolved.user.length}`;
+        if (promoteAttemptRef.current === attemptKey) return;
+        promoteAttemptRef.current = attemptKey;
+        const copy = saveAsCustom(builtinEditPending);
+        if (!copy) return;
+        setDraft(copy);
+        markCreatedPresetForScroll(copy.id);
+    }, [builtinEditPending, resolved.user.length, saveAsCustom]);
+
+    /**
+     * 新预设落进列表后，把预设列表滚到最底部 —— 它就在那儿，滚过去用户才看得见。
+     *
+     * 【为什么单独一个 effect、而不是在创建处顺手滚】创建那一刻只是 dispatch，列表
+     * 还没重新渲染，`scrollHeight` 里还没有新行；等 `draft` 切到新预设上的这次提交，
+     * 行才真的在 DOM 里。滚的是 Radix 的滚动视口（`closest` 从用户段往上找），
+     * 不是列表容器本身。
+     */
+    useEffect(() => {
+        const id = pendingScrollPresetRef.current;
+        if (!id || draft?.id !== id) return;
+        pendingScrollPresetRef.current = null;
+        const viewport = userListRef.current?.closest<HTMLElement>(
+            "[data-radix-scroll-area-viewport]",
+        );
+        if (viewport) viewport.scrollTop = viewport.scrollHeight;
+    }, [draft]);
 
     /**
      * 「应用」：把当前草稿交给编辑管线，然后**关窗**。
@@ -990,6 +1098,7 @@ export function VibratoDialog({
         setHandDraw(null);
         setDraft(extracted);
         fitPreviewAxis(extracted);
+        markCreatedPresetForScroll(extracted.id);
     }
 
     function handleDuplicate() {
@@ -1067,6 +1176,7 @@ export function VibratoDialog({
         if (last) {
             dispatch(setActiveVibratoPreset(last.id));
             setDraft(last);
+            markCreatedPresetForScroll(last.id);
         }
         void dispatch(persistUiSettings());
         setIoNotice({
@@ -1084,6 +1194,7 @@ export function VibratoDialog({
         });
         persistPreset(created);
         selectPreset(created);
+        markCreatedPresetForScroll(created.id);
     }
 
     function handleDelete() {
@@ -1254,6 +1365,7 @@ export function VibratoDialog({
             presetDragPointerYRef.current = event.clientY;
             ensureAutoScroll();
         };
+        let unregisterAbort = () => {};
         const onUp = () => {
             const start = presetDragStartRef.current;
             presetDragStartRef.current = null;
@@ -1261,6 +1373,7 @@ export function VibratoDialog({
             presetDragRef.current = null;
             setPresetDrag(null);
             stopAutoScroll();
+            unregisterAbort();
             if (!start || !drag) return;
             const toIndex = reorderTargetIndex(drag.insertionIndex, drag.fromIndex);
             // 两组各自排序：系统预设的顺序以 id 列表持久化，用户预设直接排数组。
@@ -1271,10 +1384,15 @@ export function VibratoDialog({
             );
             void dispatch(persistUiSettings());
         };
+        // 失焦（Alt+Tab / 最小化）时 pointerup 不会送回本窗口：不接住它，
+        // `presetDrag` 的插入位置指示线会一直留在预设列表上，自动滚动 rAF 也会
+        // 空转不停（直到对话框关闭）。
+        unregisterAbort = registerDragAbort(onUp);
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", onUp);
         window.addEventListener("pointercancel", onUp);
         return () => {
+            unregisterAbort();
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onUp);
             window.removeEventListener("pointercancel", onUp);
@@ -1802,6 +1920,34 @@ export function VibratoDialog({
                         <Box className="min-h-0 flex flex-col" style={{ minWidth: 0, flex: 1 }}>
                             {draft && previewSamples ? (
                                 <Flex direction="column" gap="3" className="min-h-0 flex-1">
+                                    {/*
+                                     * 正在编辑哪一条 + 一键设为当前使用。
+                                     *
+                                     * 【为什么钉在滚动区之上】它要回答的正是"我现在
+                                     * 这条是不是当前用的"，调参数时滚下去就找不到答案了。
+                                     * 系统预设没有名字输入框，这一行也是它唯一的署名。
+                                     */}
+                                    <Flex align="center" gap="2" className="shrink-0">
+                                        <span
+                                            className="hs-type-label min-w-0 flex-1"
+                                            style={{
+                                                overflow: "hidden",
+                                                textOverflow: "ellipsis",
+                                                whiteSpace: "nowrap",
+                                            }}
+                                        >
+                                            {vibratoPresetLabel(draft, t)}
+                                        </span>
+                                        <AppButton
+                                            size="sm"
+                                            disabled={draftIsActive}
+                                            onClick={() => activatePreset(draft)}
+                                        >
+                                            {draftIsActive
+                                                ? t("vibrato_manager_in_use")
+                                                : t("vibrato_manager_set_active")}
+                                        </AppButton>
+                                    </Flex>
                                     <ScrollArea
                                         className="hs-scroll-area min-h-0 flex-1"
                                         scrollbars="vertical"
@@ -2389,6 +2535,25 @@ function PresetRow({
 
     return (
         <Flex align="center" gap="1" style={{ minWidth: 0, flex: 1 }}>
+            {/*
+             * 「设为当前使用」——每行一个单选圆点，兼作状态显示：实心即当前使用中。
+             *
+             * 【为什么必须是一个**看得见的控件**】这一行原来只有一个 `●`：它既不像
+             * 按钮，也没说明是什么状态，于是"怎么把某条设成当前使用的"只剩双击与右键
+             * 菜单两个藏起来的入口。圆点把状态与操作合成一处 —— 扫一眼知道用的是哪条，
+             * 点一下换过去。
+             *
+             * 【为什么放在行外】与右侧的眼睛按钮同一处理：`AppListRow` 是列表项，
+             * 里面再嵌按钮会让"点行 = 选中编辑"与"点按钮 = 设为使用"互相打架。
+             */}
+            <AppIconButton
+                size="sm"
+                active={active}
+                emphasis="accent"
+                icon={active ? <CheckCircledIcon /> : <CircleIcon />}
+                tooltip={active ? t("vibrato_manager_in_use") : t("vibrato_manager_set_active")}
+                onClick={onActivate}
+            />
             <Box style={{ minWidth: 0, flex: 1 }}>
                 <AppListRow
                     selected={selected}
@@ -2409,7 +2574,6 @@ function PresetRow({
                     {/* `flex: 1` 让这一行铺满列表行：重命名时输入框才有可用的宽度去
                         撑开，而不是反过来把行撑宽（见输入框上的 `size` 说明）。 */}
                     <Flex align="center" gap="2" style={{ minWidth: 0, flex: 1 }}>
-                        {active ? <span aria-hidden="true">●</span> : null}
                         <VibratoPresetGlyph preset={preset} width={40} height={14} />
                         {renaming ? (
                             <input

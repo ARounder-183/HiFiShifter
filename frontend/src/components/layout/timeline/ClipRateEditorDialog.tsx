@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useMenuKeyboard } from "../../../ui/useMenuKeyboard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { AppForm, AppSwitchRow } from "../../../ui/Field";
@@ -24,10 +25,10 @@ import { parsePlaybackRateInput } from "./runtime/timelineCanvasStyle";
 import { formatEditNumber } from "./math";
 import {
     formatDurationUnit,
-    formatFadeLengthTooltip,
     parseDurationInput,
     type FadeLengthFormatContext,
 } from "./timeFormat";
+import { formatDurationText } from "./timeValueText";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 
 const FALLBACK_BEATS_PER_BAR = 4;
@@ -259,7 +260,9 @@ function ClipRateEditorFields({
         updateNewBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
     });
 
-    return (
+    // 挂到 `document.body`：弹出面留在布局盒里会被沿途任何一层
+    // `overflow: hidden` 裁掉（见 `src/index.css` 的 `.hs-menu--submenu`）。
+    return createPortal(
         <div
             ref={menuRef}
             role="menu"
@@ -354,7 +357,7 @@ function ClipRateEditorFields({
                 <span className="text-qt-micro text-qt-text/60">
                     {tf("clip_rate_editor_duration")}
                     {": "}
-                    {formatFadeLengthTooltip(Number(clip.lengthSec) || 0, formatCtx)}
+                    {formatDurationText(Number(clip.lengthSec) || 0, formatCtx)}
                 </span>
                 <input
                     className={`w-full text-qt-xs rounded px-2 py-1 outline-none bg-black/20 border ${
@@ -398,7 +401,7 @@ function ClipRateEditorFields({
                     }}
                 />
                 <span className="text-qt-micro text-qt-text/60 tabular-nums">
-                    {formatFadeLengthTooltip(previewSec, formatCtx)}
+                    {formatDurationText(previewSec, formatCtx)}
                 </span>
             </label>
 
@@ -414,7 +417,7 @@ function ClipRateEditorFields({
             <div className="text-qt-micro text-qt-text/60">
                 {tf("clip_rate_editor_result")}
                 {": "}
-                {formatFadeLengthTooltip(previewSec, formatCtx)}
+                {formatDurationText(previewSec, formatCtx)}
                 {!autoLength && !durationChanged ? ` (${tf("clip_rate_editor_keep_length")})` : ""}
             </div>
 
@@ -441,7 +444,8 @@ function ClipRateEditorFields({
                     {tf("clip_rate_editor_apply")}
                 </button>
             </div>
-        </div>
+        </div>,
+        document.body,
     );
 }
 

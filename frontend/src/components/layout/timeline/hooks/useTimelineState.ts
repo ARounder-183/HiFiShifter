@@ -85,6 +85,14 @@ export interface SnapTimelineOpts {
     /** 拖拽锚 Clip 的吸附偏移（秒）：与 moveLengthSec 搭配使用。 */
     moveSnapOffsetSec?: number;
     /**
+     * 只允许吸附到该区间内的候选（秒，顺序无关）。
+     *
+     * 【为什么需要】被吸附对象可能有**活动范围**：Clip 的吸附偏移手柄必须留在
+     * Clip 内部，范围外的候选会让高亮线画在 Clip 外、而手柄被钳回边界 ——
+     * 看起来像"范围外也产生吸附"。见 `TimelineSnapContext.candidateRangeSec`。
+     */
+    candidateRangeSec?: { readonly lo: number; readonly hi: number };
+    /**
      * 吸附竖线高亮管理：
      * - 字段存在（含 null）→ 本次调用负责高亮：命中吸附则发布目标+被吸附
      *   对象的高亮条目，未命中/未吸附则清除该组；
@@ -967,6 +975,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
                 anchorTrackId: opts?.anchorTrackId ?? session.selectedTrackId,
                 excludeClipIds: opts?.excludeClipIds,
                 extraCandidates: opts?.extraCandidates,
+                candidateRangeSec: opts?.candidateRangeSec,
             };
             // 多源吸附：拖拽移动 Clip 时前缘/后缘/自身吸附偏移点同时作为
             // 被吸附对象。

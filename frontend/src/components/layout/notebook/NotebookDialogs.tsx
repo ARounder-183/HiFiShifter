@@ -6,7 +6,6 @@
  * （撤销要能恢复），所以"清理"必须由用户显式触发。
  */
 
-import { Flex } from "@radix-ui/themes";
 import { useEffect, useMemo, useState } from "react";
 
 import type { NotebookAssetSummary } from "../../../features/notebook/notebookSlice";
@@ -15,14 +14,15 @@ import { notebookApi } from "../../../services/api/notebook";
 import { AppSelect } from "../../../ui";
 import { ClipboardIcon, ImageIcon } from "@radix-ui/react-icons";
 
-import { AppButton } from "../../../ui";
+import { AppButton, AppNumberField } from "../../../ui";
 import { AppDialog } from "../../../ui/Dialog";
-import { AppField, AppForm, AppSwitchRow } from "../../../ui/Field";
+import { AppField, AppForm, AppFormSection, AppSwitchRow } from "../../../ui/Field";
 import { formatAssetRef } from "./assetRef";
 import { clipKindLabelKey } from "./hifiClipBlock";
 import { resolveImage } from "./notebookImageCache";
 import { formatBytes, notebookErrorKey } from "./notebookInsert";
 import type { ResolvedNotebookSettings } from "./notebookSettings";
+import { NOTEBOOK_FONT_SIZE_MAX, NOTEBOOK_FONT_SIZE_MIN } from "./notebookSettings";
 
 // ─── 附件管理器 ──────────────────────────────────────────────────────────────
 
@@ -265,15 +265,39 @@ export function NotebookSettingsDialog({
             open
             onOpenChange={(open) => !open && onClose()}
             title={t("notebook_settings")}
+            description={tf("notebook_settings_desc")}
             size="md"
-            actions={[{ id: "close", label: t("close"), onClick: () => onClose() }]}
+            // 内容远高于视口：动作区需要一条分割线与长内容分开。
+            footerDivider
+            actions={[
+                {
+                    id: "close",
+                    label: t("close"),
+                    intent: "primary",
+                    onClick: () => onClose(),
+                },
+            ]}
         >
-            {/* 混排表单：字段与开关共用标签列，因此显式声明 aligned */}
-            <AppForm booleanRow="aligned">
-                <Section title={tf("notebook_settings_group_view")}>
+            {/*
+             * 混排表单：字段与开关共用标签列，因此显式声明 aligned（与
+             * `DockLayoutSettingsDialog` 同一形态）。
+             *
+             * 分组走 `AppFormSection`（节标题 13px/600 + 留白分组），不用就地
+             * 手写的标题行 —— 那是全应用之外的第二种节标题，且 11px 会**小于**
+             * 它所统领的 12px 字段标签。
+             *
+             * 【标签列取 lg（132px）】本窗口最长的一条是「Markdown 输入快捷转换」
+             * （实测自然宽 131.9px），`md`（112px）装不下 —— 标签 `shrink-0`，
+             * 多出的 20px 会把那一行自己的开关往右顶，整列控件因此破口。132 正是
+             * 这一组设置迁移到原语之前自己用的档位（`Field.tsx` 里记的
+             * `SETTING_LABEL_STYLE = 132`），迁移时按默认 `md` 下发才丢的。
+             */}
+            <AppForm booleanRow="aligned" labelWidth="lg">
+                <AppFormSection title={tf("notebook_settings_group_view")}>
                     <AppField label={tf("notebook_setting_default_mode")}>
                         <AppSelect
                             value={settings.defaultMode}
+                            ariaLabel={tf("notebook_setting_default_mode")}
                             onValueChange={(value) => onChange({ defaultMode: value })}
                             options={[
                                 { value: "rich", label: t("notebook_mode_rich") },
@@ -307,60 +331,93 @@ export function NotebookSettingsDialog({
                         checked={settings.spellCheck}
                         onCheckedChange={(value) => onChange({ spellCheck: value })}
                     />
+                    {/*
+                     * 右键菜单的详略。
+                     *
+                     * 一个下拉而不是三个开关："菜单要多全"是一根轴，拆成
+                     * `enabled` / `showFormatting` / `showInsert` 能表达 8 种组合，
+                     * 其中至少 3 种没有意义（关了总开关，另外两个仍在生效）。
+                     * `off` 这一档是必需的退路：应用**全局禁用**了 WebView 原生
+                     * 右键菜单，接管右键就得让用户能还回去。
+                     */}
+                    <AppField label={tf("notebook_setting_context_menu")}>
+                        <AppSelect
+                            value={settings.contextMenu}
+                            ariaLabel={tf("notebook_setting_context_menu")}
+                            onValueChange={(value) => onChange({ contextMenu: value })}
+                            options={[
+                                {
+                                    value: "full",
+                                    label: t("notebook_setting_context_menu_full"),
+                                },
+                                {
+                                    value: "compact",
+                                    label: t("notebook_setting_context_menu_compact"),
+                                },
+                                { value: "off", label: t("notebook_setting_context_menu_off") },
+                            ]}
+                        />
+                    </AppField>
+                    {/*
+                     * 字号、撤销分节、图片长边都是**连续量**，因此是输入框而不是
+                     * 下拉：下拉只能给出几个预设档位（字号原本 11/12/13/15/17），
+                     * 用户想要 14 就得改配置文件。上下界与 `notebookSettings.ts`
+                     * 的归一化一致，所以"输入框里看到的"就是"存下去的"。
+                     *
+                     * 只接 `onCommit`（失焦 / Enter 提交），不接 `onChange`：这几个
+                     * 值没有实时预览的消费者，逐字符写 Redux + 落盘是白费。
+                     */}
                     <AppField label={tf("notebook_setting_font_size")}>
-                        <AppSelect
-                            value={String(settings.sourceFontSize)}
-                            onValueChange={(value) => onChange({ sourceFontSize: Number(value) })}
-                            options={[
-                                { value: "11", label: "11" },
-                                { value: "12", label: "12" },
-                                { value: "13", label: "13" },
-                                { value: "15", label: "15" },
-                                { value: "17", label: "17" },
-                            ]}
+                        <AppNumberField
+                            value={settings.sourceFontSize}
+                            unit="pixels"
+                            min={NOTEBOOK_FONT_SIZE_MIN}
+                            max={NOTEBOOK_FONT_SIZE_MAX}
+                            suffix="px"
+                            ariaLabel={tf("notebook_setting_font_size")}
+                            onCommit={(value) => onChange({ sourceFontSize: value })}
                         />
                     </AppField>
-                    <AppField label={tf("notebook_setting_history_split")}>
-                        <AppSelect
-                            value={String(settings.historySplitIdleMs)}
-                            onValueChange={(value) =>
-                                onChange({ historySplitIdleMs: Number(value) })
-                            }
-                            options={[
-                                {
-                                    value: "0",
-                                    label: tf("notebook_setting_history_split_off"),
-                                },
-                                { value: "2000", label: "2s" },
-                                { value: "5000", label: "5s" },
-                                { value: "15000", label: "15s" },
-                            ]}
+                    <AppField
+                        label={tf("notebook_setting_history_split")}
+                        // 0 是**语义值**（不做空闲分节），不是"未设置"：必须写在
+                        // 提示里，否则用户看到 0 会以为是坏了。
+                        hint={`0 = ${tf("notebook_setting_history_split_off")}`}
+                    >
+                        <AppNumberField
+                            value={settings.historySplitIdleMs}
+                            // 以秒计量的等待时长：滚一格 1s（按住精细调整键 100ms）。
+                            unit="idleMilliseconds"
+                            min={0}
+                            max={600000}
+                            suffix="ms"
+                            ariaLabel={tf("notebook_setting_history_split")}
+                            onCommit={(value) => onChange({ historySplitIdleMs: value })}
                         />
                     </AppField>
-                </Section>
+                </AppFormSection>
 
-                <Section title={tf("notebook_settings_group_image")}>
-                    <AppField label={tf("notebook_setting_image_max_dim")}>
-                        <AppSelect
-                            value={String(settings.imageMaxDimensionPx)}
-                            onValueChange={(value) =>
-                                onChange({ imageMaxDimensionPx: Number(value) })
-                            }
-                            options={[
-                                {
-                                    value: "0",
-                                    label: tf("notebook_setting_image_max_dim_original"),
-                                },
-                                { value: "1280", label: "1280" },
-                                { value: "2048", label: "2048" },
-                                { value: "2560", label: "2560" },
-                                { value: "3840", label: "3840" },
-                            ]}
+                <AppFormSection title={tf("notebook_settings_group_image")}>
+                    <AppField
+                        label={tf("notebook_setting_image_max_dim")}
+                        // 同上：0 = 不缩放，保留原图尺寸。
+                        hint={`0 = ${tf("notebook_setting_image_max_dim_original")}`}
+                    >
+                        <AppNumberField
+                            value={settings.imageMaxDimensionPx}
+                            // 图片尺寸量级：滚一格 128px（按住精细调整键 8px）。
+                            unit="imagePixels"
+                            min={0}
+                            max={16384}
+                            suffix="px"
+                            ariaLabel={tf("notebook_setting_image_max_dim")}
+                            onCommit={(value) => onChange({ imageMaxDimensionPx: value })}
                         />
                     </AppField>
                     <AppField label={tf("notebook_setting_image_format")}>
                         <AppSelect
                             value={settings.imageFormat}
+                            ariaLabel={tf("notebook_setting_image_format")}
                             onValueChange={(value) => onChange({ imageFormat: value })}
                             options={[
                                 {
@@ -378,9 +435,9 @@ export function NotebookSettingsDialog({
                         checked={settings.allowRemoteImages}
                         onCheckedChange={(value) => onChange({ allowRemoteImages: value })}
                     />
-                </Section>
+                </AppFormSection>
 
-                <Section title={tf("notebook_settings_group_clipboard")}>
+                <AppFormSection title={tf("notebook_settings_group_clipboard")}>
                     <AppSwitchRow
                         label={tf("notebook_setting_smart_paste")}
                         checked={settings.smartPaste}
@@ -389,6 +446,7 @@ export function NotebookSettingsDialog({
                     <AppField label={tf("notebook_setting_html_paste")}>
                         <AppSelect
                             value={settings.htmlPasteMode}
+                            ariaLabel={tf("notebook_setting_html_paste")}
                             onValueChange={(value) => onChange({ htmlPasteMode: value })}
                             options={[
                                 { value: "markdown", label: "Markdown" },
@@ -400,6 +458,7 @@ export function NotebookSettingsDialog({
                     <AppField label={tf("notebook_setting_plain_paste")}>
                         <AppSelect
                             value={settings.plainPasteMode}
+                            ariaLabel={tf("notebook_setting_plain_paste")}
                             onValueChange={(value) => onChange({ plainPasteMode: value })}
                             options={[
                                 {
@@ -414,6 +473,7 @@ export function NotebookSettingsDialog({
                     <AppField label={tf("notebook_setting_copy_format")}>
                         <AppSelect
                             value={settings.copyFormat}
+                            ariaLabel={tf("notebook_setting_copy_format")}
                             onValueChange={(value) => onChange({ copyFormat: value })}
                             options={[
                                 {
@@ -429,6 +489,7 @@ export function NotebookSettingsDialog({
                     <AppField label={tf("notebook_setting_copy_plain")}>
                         <AppSelect
                             value={settings.copyPlainTextAs}
+                            ariaLabel={tf("notebook_setting_copy_plain")}
                             onValueChange={(value) => onChange({ copyPlainTextAs: value })}
                             options={[
                                 {
@@ -439,12 +500,13 @@ export function NotebookSettingsDialog({
                             ]}
                         />
                     </AppField>
-                </Section>
+                </AppFormSection>
 
-                <Section title={tf("notebook_settings_group_clip_block")}>
+                <AppFormSection title={tf("notebook_settings_group_clip_block")}>
                     <AppField label={tf("notebook_setting_clip_insert_mode")}>
                         <AppSelect
                             value={settings.clipInsertMode}
+                            ariaLabel={tf("notebook_setting_clip_insert_mode")}
                             onValueChange={(value) => onChange({ clipInsertMode: value })}
                             options={[
                                 {
@@ -468,44 +530,50 @@ export function NotebookSettingsDialog({
                         checked={settings.clipShowPreview}
                         onCheckedChange={(value) => onChange({ clipShowPreview: value })}
                     />
-                </Section>
+                </AppFormSection>
 
-                <Section title={tf("notebook_settings_group_export")}>
-                    <Flex gap="2" wrap="wrap">
-                        <AppButton
-                            size="sm"
-                            onClick={() => {
-                                void runExport("md", markdown);
-                            }}
-                        >
-                            {tf("notebook_export_md")}
-                        </AppButton>
-                        <AppButton
-                            size="sm"
-                            onClick={() => {
-                                void runExport(
-                                    "html",
-                                    buildExportHtml(markdown, projectName, getHtml?.() ?? null),
-                                );
-                            }}
-                        >
-                            {tf("notebook_export_html")}
-                        </AppButton>
-                    </Flex>
-                </Section>
-
-                <span className="hs-type-caption">{exportNotice ?? ""}</span>
+                {/*
+                 * 两个导出按钮挂在节头的 `action` 槽位（分区级控件），而不是挤在
+                 * 正文里另起一行：这一节只有按钮、没有字段，正文若再画一行，
+                 * 它们要么贴左（与上面四节的控件列错位），要么为了对齐凭空缩进
+                 * 一个 112px —— 两种都不如放进槽位。与 `AppearanceSettingsPanel`
+                 * 的「已保存主题」节（导入/导出在节头）同一形态。
+                 */}
+                <AppFormSection
+                    title={tf("notebook_settings_group_export")}
+                    action={
+                        <div className="flex items-center gap-2">
+                            <AppButton
+                                size="sm"
+                                onClick={() => {
+                                    void runExport("md", markdown);
+                                }}
+                            >
+                                {tf("notebook_export_md")}
+                            </AppButton>
+                            <AppButton
+                                size="sm"
+                                onClick={() => {
+                                    void runExport(
+                                        "html",
+                                        buildExportHtml(markdown, projectName, getHtml?.() ?? null),
+                                    );
+                                }}
+                            >
+                                {tf("notebook_export_html")}
+                            </AppButton>
+                        </div>
+                    }
+                >
+                    {/*
+                     * 导出反馈挂在本节正文（按钮正下方），而不是表单末尾：
+                     * 此前它是表单最后一个子项，与触发它的按钮隔着一整个节间距，
+                     * 读不出"这句话是刚才那次导出的结果"。
+                     */}
+                    {exportNotice ? <span className="hs-type-caption">{exportNotice}</span> : null}
+                </AppFormSection>
             </AppForm>
         </AppDialog>
-    );
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-    return (
-        <div>
-            <div className="mb-1 text-qt-xs font-medium text-qt-text-muted">{title}</div>
-            {children}
-        </div>
     );
 }
 

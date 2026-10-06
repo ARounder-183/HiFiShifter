@@ -37,7 +37,7 @@ import {
     setScaleHighlightMode,
     toggleLockParamLines,
     cycleDragDirection,
-    setToolMode,
+    setToolModePersistent,
     persistUiSettings,
     setActiveVibratoPreset,
     toggleParamAxisUnit,
@@ -202,12 +202,21 @@ import {
     supportsParamAxisUnit,
 } from "./pianoRoll/paramAxisUnits";
 import { framesToTime, midiToLabel, timeToFrame } from "./pianoRoll/utils";
-import { useLoudnessCurves } from "./pianoRoll/useLoudnessCurves";
+import { useLoudnessCurves, type LoudnessSnapshot } from "./pianoRoll/useLoudnessCurves";
 import {
     createLiveOverrideReader,
     type LiveOverrideReader,
 } from "./pianoRoll/liveLoudnessOverride";
 import { pianoRollViewportBus } from "./pianoRoll/pianoRollViewportBus";
+import {
+    createLoudnessGeometryWarp,
+    type LoudnessGeometryWarp,
+} from "./pianoRoll/loudnessGeometryWarp";
+import {
+    getClipGeometryPreviewOrigin,
+    subscribeClipGeometryPreview,
+    type ClipGeometrySnapshot,
+} from "./timeline/clipGeometryPreviewBus";
 import { createRenderLoop, type RenderLoop } from "./renderKernel/renderLoop.js";
 import { buildTimelineTicks } from "./timeline/runtime/buildTimelineTicks.js";
 import { createTickAxis } from "./timeline/runtime/tickAxis.js";
@@ -234,7 +243,10 @@ import {
     resolveActiveVibratoPreset,
     resolveVibratoPresets,
     findVibratoPreset,
+    chooseVibratoPreset,
+    systemVibratoPreset,
 } from "../../features/vibrato/vibratoPresetList";
+import { STRAIGHT_VIBRATO_PRESET_ID } from "../../features/vibrato/systemPresets";
 import {
     depthForParam,
     depthUnitLabelKey,
@@ -296,7 +308,7 @@ import { settingsApi } from "../../services/api/settings";
 import { EditContextMenu } from "../editDialogs/EditContextMenu";
 import { resolveScrollableProjectSec } from "../../features/session/projectBoundary";
 import { parseCustomScaleToken } from "../../utils/scaleSelection";
-import { AppIconButton, AppSelect } from "../../ui";
+import { AppAnchoredMenu, AppIconButton, AppSelect, AppSubMenu } from "../../ui";
 import {
     centerFromVerticalScrollTop,
     verticalScrollTopFromCenter,
@@ -1051,6 +1063,19 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         [resolvedVibratoPresets, activeVibratoPresetId],
     );
     /**
+     * 直线工具的固定起手预设。
+     *
+     * 从全量列表里找，**找不到就用出厂那份兜底**（`systemVibratoPreset` 自带构造）：
+     * 直线工具不依赖用户是否停用了直线预设 —— 停用只影响"怎么挑预设"，不该让
+     * 一个工具失去它唯一的工作方式。
+     */
+    const straightVibratoPreset = useMemo(
+        () =>
+            findVibratoPreset(resolvedVibratoPresets, STRAIGHT_VIBRATO_PRESET_ID) ??
+            systemVibratoPreset("straight"),
+        [resolvedVibratoPresets],
+    );
+    /**
      * 拖拽 HUD 的内容。`null` = 没在拖。
      *
      * 用一个本地 state 而不是 ref：HUD 要跟着切换预设 / 滚轮调参实时刷新。
@@ -1107,20 +1132,22 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         [],
     );
 
-    /** 工具栏的颤音预设下拉是否展开。 */
-    const [vibratoPresetMenuOpen, setVibratoPresetMenuOpen] = useState(false);
     /**
-     * 颤音预设下拉的最大高度。
+     * 工具菜单里「颤音预设」二级面板中**预设列表**的最大高度。
      *
-     * 按锚点在**本面板内**的位置算（见 `resolveMenuMaxHeight`）：面板可停靠在窗口
-     * 任意高度，菜单只在面板内向下铺开，既不会伸出面板、也不会向上翻转盖住工具栏。
+     * 预设列表从独立的下拉搬进子菜单后，高度仍需按锚点在**本面板内**的位置算
+     * （见 `resolveMenuMaxHeight`）：面板可停靠在窗口任意高度，按视口取上限会让
+     * 列表伸出面板之外。锚点用绘制类型工具按钮（预设入口就在它的菜单里）。
      */
-    const [vibratoPresetMenuMaxHeight, setVibratoPresetMenuMaxHeight] = useState(320);
-    const vibratoPresetMenuRef = useRef<HTMLDivElement | null>(null);
+    const [presetFlyoutMaxHeight, setPresetFlyoutMaxHeight] = useState(320);
     // 拖动方向循环切换键：拖拽进行中按下可即时切换本次拖拽方向（触控板替代右键）。
     const cycleDragDirectionKb = useAppSelector((state) =>
         selectKeybindings(state, "pianoRoll.cycleDragDirection"),
     );
+    // 工具菜单里三项各自的快捷键：把绑定显示在菜单上，用户不必去设置里查。
+    const drawToolKb = useAppSelector((state) => selectKeybindings(state, "mode.drawTool"));
+    const lineToolKb = useAppSelector((state) => selectKeybindings(state, "mode.lineTool"));
+    const vibratoToolKb = useAppSelector((state) => selectKeybindings(state, "mode.vibratoTool"));
     const mergedKeybindings = useAppSelector(selectMergedKeybindings);
     // 是否按住切换吸附的修饰键（临时切换吸附时用于高亮显示）
     const [snapToggleHeld, setSnapToggleHeld] = useState(false);
@@ -1234,8 +1261,17 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     // 右键编辑菜单状态
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
     const [drawToolMenuOpen, setDrawToolMenuOpen] = useState(false);
+    /**
+     * 工具栏下拉的**锚点**与**面板** ref 必须分开。
+     *
+     * 【为什么】面板经 `AppAnchoredMenu` 挂到 `document.body` 下，不再是锚点的
+     * DOM 后代 —— 用锚点的 ref 做 `contains` 判定会永远为假，于是"点菜单里的项"
+     * 会被当成"点了外面"，菜单在选中前就被关掉。
+     */
+    const drawToolMenuAnchorRef = useRef<HTMLDivElement | null>(null);
     const drawToolMenuRef = useRef<HTMLDivElement | null>(null);
     const [pitchSnapMenuOpen, setPitchSnapMenuOpen] = useState(false);
+    const pitchSnapMenuAnchorRef = useRef<HTMLDivElement | null>(null);
     const pitchSnapMenuRef = useRef<HTMLDivElement | null>(null);
     const [paramValuePreview, setParamValuePreview] = useState<{
         clientX: number;
@@ -1312,15 +1348,23 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         [editParam, editParamAxisUnit],
     );
 
-    const currentDrawTool = s.drawToolMode === "line" ? "vibrato" : s.drawToolMode;
+    const currentDrawTool = s.drawToolMode;
     const drawToolButtonTitle =
-        currentDrawTool === "vibrato" ? tf("vibrato_draw_tool") : tf("draw_tool");
+        currentDrawTool === "vibrato"
+            ? // 颤音工具下把当前预设一并报出来：预设按钮已经并进右键菜单，
+                // 工具按钮的 tooltip 是"接下来会画出什么"的最后一块可扫读信息。
+              `${tf("vibrato_draw_tool")}: ${vibratoPresetLabel(activeVibratoPreset, tf)}`
+            : currentDrawTool === "line"
+              ? tf("line_draw_tool")
+              : tf("draw_tool");
     const activeDragDirection =
         s.toolMode === "select"
             ? s.selectDragDirection
             : currentDrawTool === "draw"
               ? s.drawDragDirection
               : s.lineVibratoDragDirection;
+    // 直线与颤音共用同一份拖动方向（`lineVibratoDragDirection`）—— 它们是同一个
+    // "起点 → 终点"手势，拆成两份只会让"在直线下调过、切到颤音又不算"成为新的困惑。
     const activeDragDirectionTool =
         s.toolMode === "select"
             ? ("select" as const)
@@ -1329,21 +1373,18 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
               : ("vibrato" as const);
 
     useEffect(() => {
-        if (!drawToolMenuOpen && !pitchSnapMenuOpen && !vibratoPresetMenuOpen) return;
+        if (!drawToolMenuOpen && !pitchSnapMenuOpen) return;
         const onPointerDown = (e: PointerEvent) => {
             const target = e.target as Node | null;
             if (drawToolMenuRef.current?.contains(target)) return;
             if (pitchSnapMenuRef.current?.contains(target)) return;
-            if (vibratoPresetMenuRef.current?.contains(target)) return;
             setDrawToolMenuOpen(false);
             setPitchSnapMenuOpen(false);
-            setVibratoPresetMenuOpen(false);
         };
         const onKeyDown = (e: KeyboardEvent) => {
             if (e.key === "Escape") {
                 setDrawToolMenuOpen(false);
                 setPitchSnapMenuOpen(false);
-                setVibratoPresetMenuOpen(false);
             }
         };
         window.addEventListener("pointerdown", onPointerDown, true);
@@ -1352,11 +1393,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             window.removeEventListener("pointerdown", onPointerDown, true);
             window.removeEventListener("keydown", onKeyDown, true);
         };
-    }, [drawToolMenuOpen, pitchSnapMenuOpen, vibratoPresetMenuOpen]);
+    }, [drawToolMenuOpen, pitchSnapMenuOpen]);
 
-    /** 量一次颤音预设下拉的最大高度（锚点 / 面板缺失时返回 null）。 */
-    const measureVibratoPresetMenuMaxHeight = useCallback((): number | null => {
-        const anchor = vibratoPresetMenuRef.current;
+    /** 量一次预设列表的最大高度（锚点 / 面板缺失时返回 null）。 */
+    const measurePresetFlyoutMaxHeight = useCallback((): number | null => {
+        const anchor = drawToolMenuAnchorRef.current;
         const container = paramEditorRef.current;
         if (!anchor || !container) return null;
         const anchorRect = anchor.getBoundingClientRect();
@@ -1368,21 +1409,15 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         });
     }, []);
 
-    /** 展开颤音预设下拉：先算好可用高度再展开，避免菜单伸出面板。 */
-    const openVibratoPresetMenu = useCallback(() => {
-        const maxHeight = measureVibratoPresetMenuMaxHeight();
-        if (maxHeight != null) setVibratoPresetMenuMaxHeight(maxHeight);
-        setVibratoPresetMenuOpen(true);
-    }, [measureVibratoPresetMenuMaxHeight]);
-
-    // 菜单开着时窗口缩放、或面板被拖动分隔条改变大小，都要重算高度。setState 放在
-    // 回调里（而不是 effect 体内同步调用），避免级联渲染。
+    // 工具菜单开着时窗口缩放、或面板被拖动分隔条改变大小，都要重算预设列表的
+    // 可用高度。setState 放在回调里（而不是 effect 体内同步调用），避免级联渲染。
     useEffect(() => {
-        if (!vibratoPresetMenuOpen) return;
+        if (!drawToolMenuOpen) return;
         const update = () => {
-            const maxHeight = measureVibratoPresetMenuMaxHeight();
-            if (maxHeight != null) setVibratoPresetMenuMaxHeight(maxHeight);
+            const maxHeight = measurePresetFlyoutMaxHeight();
+            if (maxHeight != null) setPresetFlyoutMaxHeight(maxHeight);
         };
+        update();
         window.addEventListener("resize", update);
         const observer = new ResizeObserver(update);
         if (paramEditorRef.current) observer.observe(paramEditorRef.current);
@@ -1390,7 +1425,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             window.removeEventListener("resize", update);
             observer.disconnect();
         };
-    }, [vibratoPresetMenuOpen, measureVibratoPresetMenuMaxHeight]);
+    }, [drawToolMenuOpen, measurePresetFlyoutMaxHeight]);
 
     /** 打开“导入到参数编辑器”的 MIDI 导入对话框（编辑器按钮 / 拖放到编辑器内共用）。
      *  midiPath 为 null 时由用户在文件选择器中挑选文件；非 null 时直接导入该文件。 */
@@ -4033,6 +4068,67 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const loudnessWaveformRevisionRef = useRef(0);
 
     /**
+     * 时间轴几何手势的「按下时几何」快照（见 `clipGeometryPreviewBus`）。
+     *
+     * 【为什么用 state 而不是 ref】手势起止是**离散**事件（每只手势各一次），
+     * 而它决定波形的乘数从哪儿来 —— 必须触发一次重渲染，让幅度映射挂上/撤下
+     * 几何映射。手势内部的逐帧变化不走 state（走 `loudnessWarpRef` + LUT 的
+     * 映射身份比较），否则整块面板会以指针频率重渲染。
+     */
+    const [clipGeometryPreviewOrigin, setClipGeometryPreviewOrigin] = useState<
+        readonly ClipGeometrySnapshot[] | null
+    >(() => getClipGeometryPreviewOrigin());
+
+    /**
+     * 收尾期的「基线溯源基准」：手势结束**之前**最后落地的那份快照的溯源键。
+     *
+     * 【为什么不能用取数序号】提交会先 `checkpointHistory()` 递增 `paramsEpoch`
+     * （早于后端写入），而取数序号在**发出**时（`useLoudnessCurves` 的
+     * `fetchReqIdRef`）就推进 —— 水位与"这份数据反映哪份几何"必然错拍，
+     * 于是映射时而提前撤下（闪一下）、时而过晚撤下（新基线被再搬一次）。
+     *
+     * 溯源键是**事实**：拖拽期间后端几何被冻结 ⇒ 键恒定；提交写回后端后键必变。
+     * 于是"键变了"当且仅当"这份基线反映新几何"。判定在**渲染期**完成（见
+     * `warpSettled`），撤下与快照落地因此落在同一个 React 提交里，
+     * 结构上不存在"新快照 × 旧映射"或"旧快照 × 无映射"的中间帧。
+     */
+    const warpBasisKeyRef = useRef<string | null>(null);
+    /** 键不可用时的退化基准（快照对象身份），见 `warpSettled`。 */
+    const warpBasisSnapshotRef = useRef<LoudnessSnapshot | null>(null);
+    /** 手势是否已结束、正在等权威快照追上。 */
+    const warpSettlingRef = useRef(false);
+
+    useEffect(() => {
+        setClipGeometryPreviewOrigin(getClipGeometryPreviewOrigin());
+        warpSettlingRef.current = false;
+        return subscribeClipGeometryPreview(() => {
+            const origin = getClipGeometryPreviewOrigin();
+            if (origin !== null) {
+                warpSettlingRef.current = false;
+                setClipGeometryPreviewOrigin(origin);
+                return;
+            }
+            // 手势结束：**不在这里**撤下映射。提交之后、权威快照回来之前，映射仍是
+            // 把基线搬到新位置的唯一正确来源（后端此刻正在算的正是同一件事）。
+            // 撤下交给 `warpSettled`（渲染期判定，与快照落地同批）。
+            //
+            // 【取消手势为什么同样安全】取消会把 Redux 几何还原成按下时的值，
+            // 差分随之退化为空 ⇒ 映射为 `null`，撤不撤在画面上没有区别。
+            warpSettlingRef.current = true;
+        });
+    }, []);
+
+    /**
+     * 当前生效的几何映射（渲染期同步的 ref 镜像，见文件内既有的同款模式）。
+     *
+     * 幅度映射以 provider 惰性读取它，因此映射对象的**引用**保持不变（几何缓存与
+     * 组件 memo 不会因它而重建），而变化由查表键里的映射身份比较捕捉
+     * （见 `makeLoudnessAmplitudeMap` 的 `warp` 说明）。
+     */
+    const loudnessWarpRef = useRef<LoudnessGeometryWarp | null>(null);
+    const readLoudnessWarp = useCallback(() => loudnessWarpRef.current, []);
+
+    /**
      * 波形重绘的**帧内合并**调度（与曲线层同用 `renderKernel/renderLoop` 语义）。
      *
      * 【为什么需要】一次全量重建要重算两千余列 × 16 切片的包络并上传数百 KB
@@ -4124,8 +4220,11 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 dyn: () => readLiveOverrideFor("dyn"),
             },
             () => loudnessWaveformRevisionRef.current,
+            // 拖拽期间的几何映射：把基线/曲线搬到 clip 的当前位置，消除
+            // 「旧位置的基线 × 新位置的峰值」造成的整段错位（见该模块的文件头）。
+            readLoudnessWarp,
         );
-    }, [loudnessSnapshot, readLiveOverrideFor]);
+    }, [loudnessSnapshot, readLiveOverrideFor, readLoudnessWarp]);
 
     const refreshSecondaryNowRef = useRef(refreshSecondaryNow);
     useEffect(() => {
@@ -4306,6 +4405,97 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         () => s.clips.filter((c) => groupTrackIds.has(c.trackId)),
         [s.clips, groupTrackIds],
     );
+
+    /**
+     * 拖拽期间的响度时域映射：把「快照所依据的几何」与当前几何的差分，应用到基线 /
+     * 曲线（见 `loudnessGeometryWarp` 的文件头）。
+     *
+     * 【为什么只取本轨道组的 clip】原声基线是**按根轨道组**组装的；别的轨道组的
+     * clip 与本组基线无关，把它们的映射算进来会错误地搬移本组曲线。`trackClips`
+     * 已按 `groupTrackIds` 过滤，正好是基线的参与集合。
+     *
+     * 【为什么在渲染期判定收尾】`warpSettled` 只依赖"当前快照的溯源键"这一个事实，
+     * 因此它翻转的那次渲染**就是**新快照生效的那次渲染：映射在同一次提交里变成
+     * `null`，`pianoRollAmplitudeMap` 也在同一次提交里换新 —— 不存在中间帧。
+     */
+    const loudnessSnapshotKey = loudnessSnapshot?.baselineKey ?? null;
+    // 非收尾期：基准跟随最新快照。拖拽期间后端几何被冻结，期间落地的快照同样是
+    // "按下之前"的几何，对它可以安全地继续套用映射（不 re-base 会让映射平白失效）。
+    if (!warpSettlingRef.current) {
+        warpBasisKeyRef.current = loudnessSnapshotKey;
+        warpBasisSnapshotRef.current = loudnessSnapshot;
+    }
+    /**
+     * 收尾是否已完成：手势结束**之后**才落地的一份快照带回了不同的溯源键
+     * （= 它反映的是新几何）。
+     *
+     * 键不可用（后端从未组装过基线）时退化为「快照换了对象即算追上」—— 该路径下
+     * 后端没有可比对的几何信息，且基线本身也多半为空（映射在画面上无作用）。
+     */
+    const warpSettled =
+        warpSettlingRef.current &&
+        (warpBasisKeyRef.current !== null && loudnessSnapshotKey !== null
+            ? loudnessSnapshotKey !== warpBasisKeyRef.current
+            : loudnessSnapshot !== warpBasisSnapshotRef.current);
+
+    const loudnessGeometryWarp = useMemo(() => {
+        if (clipGeometryPreviewOrigin === null || warpSettled) return null;
+        return createLoudnessGeometryWarp({
+            origin: clipGeometryPreviewOrigin,
+            clips: trackClips,
+            framePeriodMs: loudnessFpMs,
+            lockParamLines: s.lockParamLinesEnabled,
+        });
+    }, [
+        clipGeometryPreviewOrigin,
+        trackClips,
+        s.lockParamLinesEnabled,
+        loudnessFpMs,
+        // 快照对象本身**不是**依赖：映射只由"按下时几何 + 当前几何"决定，快照换了
+        // 对象而键没变（拖拽期间后端几何被冻结时的重取）不该让映射重算。
+        // 需要跟着快照变化的那一件事 —— 收尾判据 `warpSettled` —— 已在依赖里。
+        warpSettled,
+    ]);
+
+    // 收尾完成 ⇒ 可以安全丢掉基准几何：此时映射已是 `null`，且下一次手势会发布新的。
+    useEffect(() => {
+        if (!warpSettled || clipGeometryPreviewOrigin === null) return;
+        warpSettlingRef.current = false;
+        setClipGeometryPreviewOrigin(null);
+    }, [warpSettled, clipGeometryPreviewOrigin]);
+
+    /**
+     * 映射变化 ⇒ **渲染期**推进修订号。
+     *
+     * 【为什么必须在渲染期】映射引用在渲染期写入 `loudnessWarpRef`（读取方在绘制期
+     * 惰性读取），而修订号此前在被动 effect 里推进 —— 两者不同步：`WaveformSurface`
+     * 的 layout effect 会在同一次提交里同步全量重建，它读到的将是「新映射 / 旧修订号」，
+     * 几何缓存据此误判"可复用"从而画出上一帧的顶点。这里把修订号与引用一起在渲染期
+     * 更新，任何一次绘制看到的 `(amplitudeMap, revision)` 都与当前映射一致。
+     * 重绘**请求**仍交给下面的 effect（那只影响"什么时候画"，不影响"画得对不对"）。
+     */
+    const warpRevisionRef = useRef<LoudnessGeometryWarp | null>(null);
+    if (warpRevisionRef.current !== loudnessGeometryWarp) {
+        warpRevisionRef.current = loudnessGeometryWarp;
+        loudnessWaveformRevisionRef.current += 1;
+    }
+    // 渲染期同步镜像（本文件既有的取值新鲜度模式：读取方在绘制期惰性读取）。
+    loudnessWarpRef.current = loudnessGeometryWarp;
+
+    /**
+     * 映射变化 ⇒ 请求一次重绘。
+     *
+     * 【为什么不能只靠 rows 变化】拖拽期间 `rows` 确实每帧都换（几何跟着走），
+     * 但映射的变化源不止几何：手势结束、锁定参数线开关、以及"等权威快照追上"的
+     * 收尾，都可能在 `rows` 不变的情况下换掉映射。少了这一步，那些帧会停在旧映射
+     * 上（画面与数据不一致）。
+     */
+    const lastLoudnessWarpRef = useRef<LoudnessGeometryWarp | null>(null);
+    useEffect(() => {
+        if (lastLoudnessWarpRef.current === loudnessGeometryWarp) return;
+        lastLoudnessWarpRef.current = loudnessGeometryWarp;
+        waveformRepaintLoopRef.current?.invalidate();
+    }, [loudnessGeometryWarp]);
 
     /**
      * 参数编辑器的统一坐标投影（渲染期）。
@@ -5227,7 +5417,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         vibratoPresetPrevKb,
         vibratoPresetNextKb,
         vibratoPreset: activeVibratoPreset,
-        vibratoPresetList: resolvedVibratoPresets,
+        straightVibratoPreset,
         vibratoPresetCycleList: enabledVibratoPresetList,
         onVibratoDragStateChange: setVibratoDragHud,
         onVibratoDragEnd: useCallback(() => {
@@ -7356,6 +7546,29 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         </svg>
     );
 
+    /**
+     * 直线工具的图标：一条斜线。
+     *
+     * 与颤音工具的波形图区分开 —— 两者若共用图标，工具栏上就只剩 tooltip 能说明
+     * "现在按下去画的是直线还是颤音"，而 tooltip 需要悬停才看得见。
+     */
+    const lineToolIcon = (
+        <svg
+            width="15"
+            height="15"
+            viewBox="0 0 15 15"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+        >
+            <path
+                d="M2 12L13 3"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+            />
+        </svg>
+    );
+
     const pitchSnapSemitoneIcon = (
         <svg
             width="15"
@@ -7388,7 +7601,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         </svg>
     );
 
-    const currentDrawToolIcon = currentDrawTool === "vibrato" ? vibratoToolIcon : <Pencil1Icon />;
+    const currentDrawToolIcon =
+        currentDrawTool === "vibrato"
+            ? vibratoToolIcon
+            : currentDrawTool === "line"
+              ? lineToolIcon
+              : <Pencil1Icon />;
 
     // 统一刻度源：标尺刻度与背景网格线共用，与时间线侧同一实现，
     // 保证两个面板的网格/标尺位置严格同源于 axis 投影。
@@ -7524,17 +7742,21 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             emphasis="accent"
                             tooltip={t("common_select")}
                             tabIndex={-1}
-                            onClick={() => dispatch(setToolMode("select"))}
+                            onClick={() => void dispatch(setToolModePersistent("select"))}
                             icon={<CursorArrowIcon />}
                         />
-                        <Box style={{ position: "relative" }} data-hs-context-menu>
+                        {/* 锚点外壳：菜单本身挂到 `document.body`（见 AppAnchoredMenu），
+                            这里只负责提供"菜单该贴在哪"的矩形。 */}
+                        <Box ref={drawToolMenuAnchorRef} data-hs-context-menu>
                             <AppIconButton
                                 active={s.toolModeGroup === "draw"}
                                 // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
                                 emphasis="accent"
                                 tooltip={drawToolButtonTitle}
                                 tabIndex={-1}
-                                onClick={() => dispatch(setToolMode(currentDrawTool))}
+                                onClick={() =>
+                                    void dispatch(setToolModePersistent(currentDrawTool))
+                                }
                                 onContextMenu={(e) => {
                                     e.preventDefault();
                                     setDrawToolMenuOpen(true);
@@ -7582,167 +7804,170 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 }
                             />
 
-                            {drawToolMenuOpen && (
-                                <Box
-                                    ref={drawToolMenuRef}
-                                    data-hs-context-menu="1"
-                                    // 锚定在触发按钮下方的下拉：与右键菜单共用同一个
-                                    // 表面与条目样式，只有定位方式不同。
-                                    className="hs-menu hs-menu--anchored"
-                                >
-                                    {[
-                                        {
-                                            mode: "draw" as const,
-                                            label: tf("draw_tool"),
-                                            icon: <Pencil1Icon />,
-                                        },
-                                        {
-                                            mode: "vibrato" as const,
-                                            label: tf("vibrato_draw_tool"),
-                                            icon: vibratoToolIcon,
-                                        },
-                                    ].map((item) => {
-                                        const active = currentDrawTool === item.mode;
-                                        return (
-                                            <button
-                                                key={item.mode}
-                                                type="button"
-                                                className="hs-menu__item"
-                                                onClick={() => {
-                                                    dispatch(setToolMode(item.mode));
-                                                    setDrawToolMenuOpen(false);
-                                                }}
-                                                onPointerDown={(e) => e.stopPropagation()}
-                                            >
-                                                <span className="flex min-w-0 items-center gap-2">
-                                                    <Box className="hs-menu__icon">{item.icon}</Box>
-                                                    <span className="hs-menu__label-text">
-                                                        {item.label}
-                                                    </span>
-                                                </span>
-                                                <span className="hs-menu__trail">
-                                                    {active ? (
-                                                        <span className="hs-menu__check">
-                                                            <CheckIcon />
-                                                        </span>
-                                                    ) : null}
-                                                </span>
-                                            </button>
-                                        );
-                                    })}
-                                </Box>
-                            )}
-                        </Box>
-
-                        {/* 颤音预设选择器：紧贴颤音工具图标右侧 —— 同属"绘制工具"这一组，
-                            因此与它之间不放分隔线。样式按周围的图标按钮来做
-                            （15×15 波形图标 + tooltip），不再占一截文字宽度。 */}
-                        {activeDragDirectionTool === "vibrato" && (
-                            <Box
-                                ref={vibratoPresetMenuRef}
-                                style={{ position: "relative" }}
-                                data-hs-context-menu
+                            <AppAnchoredMenu
+                                open={drawToolMenuOpen}
+                                anchorRef={drawToolMenuAnchorRef}
+                                menuRef={drawToolMenuRef}
+                                // 菜单里挂着 `AppSubMenu` 的绝对定位子面板：壳一旦
+                                // `overflow-y: auto` 就会把它裁掉（与 `ClipContextMenu`
+                                // 同一理由，见 `.hs-menu--submenu` 的说明）。子面板自己滚动。
+                                className="hs-menu--no-scroll"
                             >
-                                <AppIconButton
-                                    active={vibratoPresetMenuOpen}
-                                    tooltip={`${tf("vibrato_toolbar_label")}: ${vibratoPresetLabel(activeVibratoPreset, tf)}`}
-                                    aria-haspopup="menu"
-                                    aria-expanded={vibratoPresetMenuOpen}
-                                    tabIndex={-1}
-                                    onClick={() =>
-                                        vibratoPresetMenuOpen
-                                            ? setVibratoPresetMenuOpen(false)
-                                            : openVibratoPresetMenu()
-                                    }
-                                    // 右键一步直达管理器：左键的下拉是"快速切换"，
-                                    // 右键的"进设置"与其它工具按钮的右键习惯一致，
-                                    // 不必先开下拉再点其中的「管理预设…」。
-                                    onContextMenu={(event) => {
-                                        event.preventDefault();
-                                        setVibratoPresetMenuOpen(false);
-                                        openVibratoDialog("manage");
-                                    }}
+                                {/* 三种绘制工具并列。直线与颤音在这里是**平级**的两项
+                                    —— 它们在类型与实现上也是两个工具，只是共用一条
+                                    "起点 → 终点"的拖拽路径。 */}
+                                {[
+                                    {
+                                        mode: "draw" as const,
+                                        label: tf("draw_tool"),
+                                        icon: <Pencil1Icon />,
+                                        shortcut: drawToolKb,
+                                    },
+                                    {
+                                        mode: "line" as const,
+                                        label: tf("line_draw_tool"),
+                                        icon: lineToolIcon,
+                                        shortcut: lineToolKb,
+                                    },
+                                    {
+                                        mode: "vibrato" as const,
+                                        label: tf("vibrato_draw_tool"),
+                                        icon: vibratoToolIcon,
+                                        shortcut: vibratoToolKb,
+                                    },
+                                ].map((item) => {
+                                    const active = currentDrawTool === item.mode;
+                                    return (
+                                        <button
+                                            key={item.mode}
+                                            type="button"
+                                            className="hs-menu__item"
+                                            onClick={() => {
+                                                void dispatch(setToolModePersistent(item.mode));
+                                                setDrawToolMenuOpen(false);
+                                            }}
+                                            onPointerDown={(e) => e.stopPropagation()}
+                                        >
+                                            <span className="flex min-w-0 items-center gap-2">
+                                                <Box className="hs-menu__icon">{item.icon}</Box>
+                                                <span className="hs-menu__label-text">
+                                                    {item.label}
+                                                </span>
+                                            </span>
+                                            <span className="hs-menu__trail">
+                                                {active ? (
+                                                    <span className="hs-menu__check">
+                                                        <CheckIcon />
+                                                    </span>
+                                                ) : null}
+                                                {isNoneBindingList(item.shortcut) ? null : (
+                                                    <span>
+                                                        {formatKeybindingList(item.shortcut, "")}
+                                                    </span>
+                                                )}
+                                            </span>
+                                        </button>
+                                    );
+                                })}
+
+                                <Box className="hs-menu__separator shrink-0" />
+
+                                {/* 颤音工具的二级菜单 = 预设列表 + 管理器入口。
+                                    它紧跟在「颤音工具」下面：预设属于这个工具，摆到别处
+                                    会让"换一个颤音"多出一个说不清归属的入口。
+
+                                    行上带活动预设的波形缩略图与名字 —— 预设按钮从工具栏
+                                    撤掉之后，"现在用的是哪个预设"就靠这一行扫读。
+
+                                    【它始终是颤音工具的活动预设，与当前工具无关】这个入口
+                                    回答的是"**颤音工具**用哪个预设"，那是颤音工具的属性，不是
+                                    "当前这一笔画什么"。直线工具固定从直线预设起手（见
+                                    `straightVibratoPreset`），那是它自己的事，不该改掉这里显示的
+                                    值 —— 用户切回颤音工具时，看到的必须还是他挑的那个。 */}
+                                <AppSubMenu
+                                    label={tf("vibrato_toolbar_label")}
+                                    badge={vibratoPresetLabel(activeVibratoPreset, tf)}
                                     icon={
-                                        // 图标即**活动预设的波形缩略图**：切预设即换图，
-                                        // 看一眼工具栏就知道接下来画出来的会是什么。
                                         <VibratoPresetGlyph
                                             preset={activeVibratoPreset}
                                             width={15}
                                             height={15}
                                         />
                                     }
-                                />
-                                {vibratoPresetMenuOpen && (
-                                    <Box
-                                        data-hs-context-menu="1"
-                                        // 永远向下展开：参数编辑器是停靠窗口，上方没有
-                                        // 展示区，翻上去只会盖住自己的工具栏。
-                                        // `--no-scroll`：滚动由下面的 `ScrollArea`
-                                        // 负责（页脚要钉住），壳不接管。
-                                        //
-                                        // 高度**不用** `--qt-menu-max-h`（60vh）：参数
-                                        // 编辑器是停靠面板，可能只有 200px 高，按视口取
-                                        // 上限会让菜单伸出面板之外。这里按锚点在面板内的
-                                        // 位置算（`resolveMenuMaxHeight`）。
-                                        className="hs-menu hs-menu--anchored hs-menu--no-scroll flex flex-col"
-                                        style={{ maxHeight: vibratoPresetMenuMaxHeight }}
+                                    panelClassName="hs-menu--no-scroll flex flex-col"
+                                >
+                                    <ScrollArea
+                                        className="hs-scroll-area min-h-0"
+                                        style={{ flex: "1 1 auto", maxHeight: presetFlyoutMaxHeight }}
+                                        scrollbars="vertical"
+                                        type="auto"
                                     >
-                                        <ScrollArea
-                                            className="hs-scroll-area min-h-0"
-                                            style={{ flex: "1 1 auto" }}
-                                            scrollbars="vertical"
-                                            type="auto"
-                                        >
-                                            {enabledVibratoPresetList.map((preset) => (
-                                                <button
-                                                    key={preset.id}
-                                                    type="button"
-                                                    className="hs-menu__item"
-                                                    onClick={() => {
-                                                        dispatch(setActiveVibratoPreset(preset.id));
+                                        {enabledVibratoPresetList.map((preset) => (
+                                            <button
+                                                key={preset.id}
+                                                type="button"
+                                                className="hs-menu__item"
+                                                onClick={() => {
+                                                    // 选中「直线」预设 = 切到直线工具 ——
+                                                    // 两者是同一件事，由 `VibratoChoice`
+                                                    // 统一裁决，这里不另写判断。
+                                                    const choice = chooseVibratoPreset(preset.id);
+                                                    if (choice.tool === "line") {
+                                                        void dispatch(
+                                                            setToolModePersistent("line"),
+                                                        );
+                                                    } else {
+                                                        void dispatch(
+                                                            setToolModePersistent("vibrato"),
+                                                        );
+                                                        dispatch(
+                                                            setActiveVibratoPreset(
+                                                                choice.presetId,
+                                                            ),
+                                                        );
                                                         void dispatch(persistUiSettings());
-                                                        setVibratoPresetMenuOpen(false);
-                                                    }}
-                                                    onPointerDown={(e) => e.stopPropagation()}
-                                                >
-                                                    <span className="flex min-w-0 items-center gap-2">
-                                                        <VibratoPresetGlyph
-                                                            preset={preset}
-                                                            width={26}
-                                                            height={10}
-                                                        />
-                                                        <span className="hs-menu__label-text">
-                                                            {vibratoPresetLabel(preset, tf)}
+                                                    }
+                                                    setDrawToolMenuOpen(false);
+                                                }}
+                                                onPointerDown={(e) => e.stopPropagation()}
+                                            >
+                                                <span className="flex min-w-0 items-center gap-2">
+                                                    <VibratoPresetGlyph
+                                                        preset={preset}
+                                                        width={26}
+                                                        height={10}
+                                                    />
+                                                    <span className="hs-menu__label-text">
+                                                        {vibratoPresetLabel(preset, tf)}
+                                                    </span>
+                                                </span>
+                                                <span className="hs-menu__trail">
+                                                    {preset.id === activeVibratoPresetId ? (
+                                                        <span className="hs-menu__check">
+                                                            <CheckIcon />
                                                         </span>
-                                                    </span>
-                                                    <span className="hs-menu__trail">
-                                                        {preset.id === activeVibratoPresetId ? (
-                                                            <span className="hs-menu__check">
-                                                                <CheckIcon />
-                                                            </span>
-                                                        ) : null}
-                                                    </span>
-                                                </button>
-                                            ))}
-                                        </ScrollArea>
-                                        <Box className="hs-menu__separator shrink-0" />
-                                        <button
-                                            type="button"
-                                            className="hs-menu__item shrink-0"
-                                            onClick={() => {
-                                                setVibratoPresetMenuOpen(false);
-                                                openVibratoDialog("manage");
-                                            }}
-                                            onPointerDown={(e) => e.stopPropagation()}
-                                        >
-                                            <span className="hs-menu__label-text">
-                                                {tf("vibrato_manager_open")}
-                                            </span>
-                                        </button>
-                                    </Box>
-                                )}
-                            </Box>
-                        )}
+                                                    ) : null}
+                                                </span>
+                                            </button>
+                                        ))}
+                                    </ScrollArea>
+                                    <Box className="hs-menu__separator shrink-0" />
+                                    <button
+                                        type="button"
+                                        className="hs-menu__item shrink-0"
+                                        onClick={() => {
+                                            setDrawToolMenuOpen(false);
+                                            openVibratoDialog("manage");
+                                        }}
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                    >
+                                        <span className="hs-menu__label-text">
+                                            {tf("vibrato_manager_open")}
+                                        </span>
+                                    </button>
+                                </AppSubMenu>
+                            </AppAnchoredMenu>
+                        </Box>
                         <Box
                             style={{
                                 // 竖分隔线：宽度取整数个物理像素，任意缩放下粗细恒定
@@ -7820,7 +8045,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             }
                         />
 
-                        <Box style={{ position: "relative" }} data-hs-context-menu>
+                        {/* 锚点外壳：菜单本身挂到 `document.body`（见 AppAnchoredMenu）。 */}
+                        <Box ref={pitchSnapMenuAnchorRef} data-hs-context-menu>
                             <AppIconButton
                                 active={effectivePitchSnapVisual}
                                 // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
@@ -7914,86 +8140,80 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                 }
                             />
 
-                            {pitchSnapMenuOpen && (
-                                <Box
-                                    ref={pitchSnapMenuRef}
-                                    data-hs-context-menu="1"
-                                    className="hs-menu hs-menu--anchored"
+                            <AppAnchoredMenu
+                                open={pitchSnapMenuOpen}
+                                anchorRef={pitchSnapMenuAnchorRef}
+                                menuRef={pitchSnapMenuRef}
+                            >
+                                <button
+                                    type="button"
+                                    className="hs-menu__item"
+                                    onClick={() => {
+                                        dispatch(setPitchSnapUnit("semitone"));
+                                        if (!s.pitchSnapEnabled) {
+                                            dispatch(togglePitchSnap());
+                                        }
+                                        void dispatch(persistUiSettings());
+                                        setPitchSnapMenuOpen(false);
+                                    }}
+                                    onPointerDown={(e) => e.stopPropagation()}
                                 >
-                                    <button
-                                        type="button"
-                                        className="hs-menu__item"
-                                        onClick={() => {
-                                            dispatch(setPitchSnapUnit("semitone"));
-                                            if (!s.pitchSnapEnabled) {
-                                                dispatch(togglePitchSnap());
-                                            }
-                                            void dispatch(persistUiSettings());
-                                            setPitchSnapMenuOpen(false);
-                                        }}
-                                        onPointerDown={(e) => e.stopPropagation()}
-                                    >
-                                        <span className="flex min-w-0 items-center gap-2">
-                                            <Box className="hs-menu__icon">
-                                                {pitchSnapSemitoneIcon}
-                                            </Box>
-                                            <span className="hs-menu__label-text">
-                                                {tf("pitch_snap_menu_semitone")}
-                                            </span>
-                                        </span>
-                                        <span className="hs-menu__trail">
-                                            {s.pitchSnapUnit === "semitone" ? (
-                                                <span className="hs-menu__check">
-                                                    <CheckIcon />
-                                                </span>
-                                            ) : null}
-                                        </span>
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className="hs-menu__item"
-                                        onClick={() => {
-                                            dispatch(setPitchSnapUnit("scale"));
-                                            if (!s.pitchSnapEnabled) {
-                                                dispatch(togglePitchSnap());
-                                            }
-                                            void dispatch(persistUiSettings());
-                                            setPitchSnapMenuOpen(false);
-                                        }}
-                                        onPointerDown={(e) => e.stopPropagation()}
-                                    >
-                                        <span className="flex min-w-0 items-center gap-2">
-                                            <Box className="hs-menu__icon">
-                                                {pitchSnapScaleIcon}
-                                            </Box>
-                                            <span className="hs-menu__label-text">
-                                                {tf("pitch_snap_menu_scale")}
-                                            </span>
-                                        </span>
-                                        <span className="hs-menu__trail">
-                                            {s.pitchSnapUnit === "scale" ? (
-                                                <span className="hs-menu__check">
-                                                    <CheckIcon />
-                                                </span>
-                                            ) : null}
-                                        </span>
-                                    </button>
-                                    <div className="hs-menu__separator" role="separator" />
-                                    <button
-                                        type="button"
-                                        className="hs-menu__item"
-                                        onClick={() => {
-                                            setPitchSnapMenuOpen(false);
-                                            setPitchSnapOpen(true);
-                                        }}
-                                        onPointerDown={(e) => e.stopPropagation()}
-                                    >
+                                    <span className="flex min-w-0 items-center gap-2">
+                                        <Box className="hs-menu__icon">{pitchSnapSemitoneIcon}</Box>
                                         <span className="hs-menu__label-text">
-                                            {tf("pitch_snap_settings_action")}
+                                            {tf("pitch_snap_menu_semitone")}
                                         </span>
-                                    </button>
-                                </Box>
-                            )}
+                                    </span>
+                                    <span className="hs-menu__trail">
+                                        {s.pitchSnapUnit === "semitone" ? (
+                                            <span className="hs-menu__check">
+                                                <CheckIcon />
+                                            </span>
+                                        ) : null}
+                                    </span>
+                                </button>
+                                <button
+                                    type="button"
+                                    className="hs-menu__item"
+                                    onClick={() => {
+                                        dispatch(setPitchSnapUnit("scale"));
+                                        if (!s.pitchSnapEnabled) {
+                                            dispatch(togglePitchSnap());
+                                        }
+                                        void dispatch(persistUiSettings());
+                                        setPitchSnapMenuOpen(false);
+                                    }}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                    <span className="flex min-w-0 items-center gap-2">
+                                        <Box className="hs-menu__icon">{pitchSnapScaleIcon}</Box>
+                                        <span className="hs-menu__label-text">
+                                            {tf("pitch_snap_menu_scale")}
+                                        </span>
+                                    </span>
+                                    <span className="hs-menu__trail">
+                                        {s.pitchSnapUnit === "scale" ? (
+                                            <span className="hs-menu__check">
+                                                <CheckIcon />
+                                            </span>
+                                        ) : null}
+                                    </span>
+                                </button>
+                                <div className="hs-menu__separator" role="separator" />
+                                <button
+                                    type="button"
+                                    className="hs-menu__item"
+                                    onClick={() => {
+                                        setPitchSnapMenuOpen(false);
+                                        setPitchSnapOpen(true);
+                                    }}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                    <span className="hs-menu__label-text">
+                                        {tf("pitch_snap_settings_action")}
+                                    </span>
+                                </button>
+                            </AppAnchoredMenu>
                         </Box>
                         <AppIconButton
                             active={s.scaleHighlightMode === "always"}

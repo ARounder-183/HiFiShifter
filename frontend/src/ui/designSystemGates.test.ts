@@ -1065,3 +1065,74 @@ describe("上下文菜单共用同一个样式模型", () => {
         ).toEqual([]);
     });
 });
+
+/*
+ * 菜单表面必须挂在文档流之外（G4）。
+ *
+ * 【它防的是什么】参数编辑器工具栏的三个下拉曾经完全打不开：菜单被排布在
+ * y 483–541，而它所在的布局盒只到 y 484 —— **可视高度 0px**。原因是菜单用了
+ * 相对触发元素的 `position: absolute`，于是被沿途 9 层 `overflow: hidden`
+ * （面板工具栏 → 停靠 slot/tabset/pane/split/root → 应用外壳 → body）逐层裁掉。
+ * 这类 bug 在代码里看不出任何异常：DOM 在、坐标对、`getBoundingClientRect`
+ * 返回真值，只是**一个像素都画不出来**。
+ *
+ * 【判据】菜单壳要么挂到 `document.body`（portal），要么是 `position: fixed`
+ * 且没有任何祖先给它建立包含块 —— 后者不可静态判定，且离被裁只差一个
+ * `transform`。因此本门禁要求**拥有菜单壳的文件必须 portal 它**：这是唯一
+ * 与祖先样式无关、可以一眼判定的形态。
+ */
+describe("菜单表面必须挂在文档流之外", () => {
+    /** 菜单壳类名：`hs-menu` 后面不接 `__`（元素）或 `--`（变体）。 */
+    const SHELL_LITERAL = /hs-menu(?!__|--)/;
+
+    test("拥有菜单壳的文件必须把它 portal 到 body", () => {
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.tsx$/)) {
+            const source = readFileSync(file, "utf8");
+            const kept = stripCommentsAndStrings(source, true);
+            const literals = [...kept.matchAll(/"([^"\n]*)"|`([^`]*)`/g)].map(
+                (m) => m[1] ?? m[2] ?? "",
+            );
+            if (!literals.some((literal) => SHELL_LITERAL.test(literal))) continue;
+            if (!/createPortal\s*\(/.test(source)) offenders.push(file);
+        }
+        expect(
+            offenders,
+            "以下文件自己渲染了菜单壳（`hs-menu`），却没有 `createPortal` —— " +
+                "菜单留在布局盒里会被沿途任何一层 `overflow: hidden` 裁掉（实测可视高度 0px）。" +
+                "请 portal 到 `document.body`，或改用 `AppContextMenu` / `AppAnchoredMenu`（它们自带 portal）",
+        ).toEqual([]);
+    });
+
+    test("菜单壳不得使用文档流内的定位", () => {
+        /*
+         * 两条独立的走法，各自都能把菜单钉回布局盒里：
+         *   - 在类名里写 `absolute` / `top-[calc(`（直接回到 in-flow）；
+         *   - 用 `hs-menu--submenu` —— 那个变体是**父菜单内部的子面板**专用的
+         *     （它必须相对触发项做百分比定位，因此留在父壳里），拿它做工具栏
+         *     下拉就是这次 bug 的原样复现。
+         */
+        const offenders: string[] = [];
+        for (const file of sourceFiles(/\.tsx$/)) {
+            const source = readFileSync(file, "utf8");
+            const kept = stripCommentsAndStrings(source, true);
+            for (const literal of kept.matchAll(/"([^"\n]*)"|`([^`]*)`/g)) {
+                const value = literal[1] ?? literal[2] ?? "";
+                if (!SHELL_LITERAL.test(value)) continue;
+                if (/\babsolute\b|top-\[calc\(/.test(value)) {
+                    offenders.push(`${file}: 「${value.trim()}」`);
+                }
+            }
+            // 子面板变体只允许出现在原语内部（src/ui 不在扫描范围里）。
+            // 用剥离注释后的源码：说明性注释里提到这个类名不算使用。
+            if (stripCommentsAndStrings(source).includes("hs-menu--submenu")) {
+                offenders.push(`${file}: 使用了 hs-menu--submenu`);
+            }
+        }
+        expect(
+            offenders,
+            "菜单壳必须相对视口定位（`position: fixed`，坐标由调用方算好下发）。" +
+                "`hs-menu--submenu` 是父菜单内部的子面板专用变体，不要在工具栏下拉上使用",
+        ).toEqual([]);
+    });
+});

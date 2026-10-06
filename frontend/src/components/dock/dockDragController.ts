@@ -62,6 +62,7 @@ import { collectSubtreeRootIds, synthesizePanelDefinition } from "../../features
 import { findZoneInLayout, isPanelForm } from "../../features/dock/dockTree";
 import type { DockDropZone, DockRect } from "../../features/dock/dockTypes";
 import { isPrimaryModifierDown } from "../../utils/platform";
+import { registerDragAbort } from "../../utils/gestureFocusGuard";
 
 /** 启动拖拽的位移阈值（像素）：低于它视为点击，避免"点标签就抖出幽灵"。 */
 const DRAG_THRESHOLD_PX = 6;
@@ -120,6 +121,14 @@ interface DragSession {
 }
 
 let session: DragSession | null = null;
+
+/**
+ * 本次拖拽在「失焦收尾」注册表里的注销函数（见 `attach` 的说明）。
+ *
+ * 与 `session` 同生命周期：`attach` 注册、`detach` 注销 —— 两者成对出现，
+ * 因此不存在"拖拽结束后仍会被失焦回调命中"的窗口。
+ */
+let dragAbortUnregister: (() => void) | null = null;
 
 /** 拖拽开始时抓取的 Zone 矩形；窗口尺寸变化时刷新。 */
 let zoneRects: DockZoneRect[] = [];
@@ -829,6 +838,15 @@ function attach(): void {
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("keyup", onKeyUp, true);
     window.addEventListener("resize", onWindowResize);
+    // 窗口失焦（Alt+Tab / 最小化）时在窗口外松手不会送回 pointerup：不在这里
+    // 收尾，`dockDragStore` 会一直非空 ⇒ 浮窗幽灵、落点提示与
+    // `body[data-dock-dragging]` 全部冻在画面上；且 `onPointerMove` 不看
+    // `event.buttons`，切回来后**单纯移动鼠标就会继续拖**。
+    //
+    // 走 `cancelDockDrag`（而非 `onPointerUp`）：失焦期间用户并没有松手，
+    // "就当我没拖过"才是可预期的语义 —— 与 Escape / pointercancel 同一口径，
+    // 也避免切走时顺手把面板停靠到某个位置。
+    dragAbortUnregister = registerDragAbort(cancelDockDrag);
 }
 
 function detach(): void {
@@ -838,6 +856,8 @@ function detach(): void {
     window.removeEventListener("keydown", onKeyDown, true);
     window.removeEventListener("keyup", onKeyUp, true);
     window.removeEventListener("resize", onWindowResize);
+    dragAbortUnregister?.();
+    dragAbortUnregister = null;
 }
 
 /**

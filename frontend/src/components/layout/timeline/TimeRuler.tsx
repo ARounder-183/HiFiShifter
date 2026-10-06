@@ -7,6 +7,7 @@ import { screenXToWorldSec } from "./runtime/timelineWorld.js";
 import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat.js";
 import { TIME_UNITS, TIME_UNIT_CHOICES, formatCursorTime } from "./timeFormat.js";
+import { formatPositionText } from "./timeValueText";
 import type { GridSize } from "../../../features/session/sessionTypes.ts";
 import type { ScaleLike } from "../../../utils/musicalScales.ts";
 import { SCALE_LABELS } from "../../../utils/musicalScales.ts";
@@ -697,10 +698,12 @@ const TimeRulerInner: React.FC<{
         const leftSec = Math.max(0, scrollLeft / Math.max(1e-9, pxPerSec));
         const idx = pointIndexAtSec(tempoMap, leftSec);
         const point = tempoMap.points[idx];
-        const cursor = formatCursorTime(primaryUnit, secondaryUnit, point.positionSec, timeContext);
-        const positionLine = cursor.secondaryLabel
-            ? `${cursor.primaryLabel} / ${cursor.secondaryLabel}`
-            : cursor.primaryLabel;
+        // 绝对时刻口径（感知 Tempo Map），与变化点提示 / 播放头同一格式化器。
+        const positionLine = formatPositionText(point.positionSec, {
+            ...timeContext,
+            primaryTimeUnit: primaryUnit,
+            secondaryTimeUnit: secondaryUnit,
+        });
         const sig = effectiveTimeSignatureAt(tempoMap, idx);
         const effScale = effectiveScaleAtSec(
             tempoMap,

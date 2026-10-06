@@ -33,6 +33,7 @@ import { describe, expect, test } from "vitest";
 
 import { createLiveOverrideReader } from "./liveLoudnessOverride";
 import { makeLoudnessAmplitudeMap } from "./PianoRollWaveformSurface";
+import { createLoudnessGeometryWarp, type LoudnessGeometryWarp, type WarpClipGeometry } from "./loudnessGeometryWarp";
 import type { WaveformAmplitudeFactors, WaveformAmplitudeMap } from "../../../waveform/geometry";
 
 const FRAME_MS = 5;
@@ -79,6 +80,8 @@ function makeInstrumentedMap(args: {
     liveEdit: number[] | null;
     /** 快照步长（默认 1；>1 时曲线数组按该步长解释绝对帧）。 */
     stride?: number;
+    /** 拖拽期间的几何时域映射（缺省 = 无映射）。 */
+    warp?: () => LoudnessGeometryWarp | null;
 }): { factors: WaveformAmplitudeFactors; calls: () => number } {
     const stride = args.stride ?? 1;
     const reader = createLiveOverrideReader();
@@ -110,6 +113,7 @@ function makeInstrumentedMap(args: {
             },
         },
         () => 0,
+        args.warp,
     );
     return {
         factors: map as unknown as WaveformAmplitudeFactors,
@@ -216,6 +220,183 @@ describe("查表路径与逐值路径逐值等价", () => {
                 directMap.factors.levelCeilingOverWindow?.(a, b),
             );
         }
+    });
+
+    /** 一份 clip 几何（源窗口默认 = [0, 长度×速率)，即"内容跨度守恒"）。 */
+    interface ClipSpec {
+        startSec: number;
+        lengthSec: number;
+        playbackRate?: number;
+        gain?: number;
+    }
+
+    function clipOf(spec: ClipSpec, id: string): WarpClipGeometry {
+        const rate = spec.playbackRate ?? 1;
+        return {
+            id,
+            startSec: spec.startSec,
+            lengthSec: spec.lengthSec,
+            gain: spec.gain ?? 1,
+            sourceStartSec: 0,
+            sourceEndSec: spec.lengthSec * rate,
+            playbackRate: rate,
+            reversed: false,
+            loopEnabled: false,
+        };
+    }
+
+    /** 由若干「旧几何 → 新几何」的 clip 对构造映射（时间按 FRAME_MS 帧栅格）。 */
+    function warpFrom(
+        pairs: ReadonlyArray<readonly [ClipSpec, ClipSpec]>,
+        lockParamLines: boolean,
+    ): LoudnessGeometryWarp | null {
+        return createLoudnessGeometryWarp({
+            origin: pairs.map(([old], i) => clipOf(old, `c${i}`)),
+            clips: pairs.map(([, next], i) => clipOf(next, `c${i}`)),
+            framePeriodMs: FRAME_MS,
+            lockParamLines,
+        });
+    }
+
+    /**
+     * 拖拽期间的几何时域映射夹具：一平移、一"压缩 + 增益"（速率 ×2、增益 ×1.25），
+     * 且平移段的旧范围部分未被覆盖（形成空档）—— 覆盖映射的全部代码路径。
+     *
+     * 帧 ↔ 秒：帧号 × FRAME_MS。故帧 100 = 0.5 s、帧 600 = 3.0 s。
+     */
+    function warpFixture(lockParamLines: boolean): LoudnessGeometryWarp | null {
+        return warpFrom(
+            [
+                // 平移：帧 100..400 → 帧 500..800（纯移动，源窗口不变）。
+                [{ startSec: 0.5, lengthSec: 1.5 }, { startSec: 2.5, lengthSec: 1.5 }],
+                // 压缩 + 增益：帧 600..1000 → 帧 200..400（速率 1→2，内容跨度守恒）。
+                [
+                    { startSec: 3.0, lengthSec: 2.0, gain: 1 },
+                    { startSec: 1.0, lengthSec: 1.0, playbackRate: 2, gain: 1.25 },
+                ],
+            ],
+            lockParamLines,
+        );
+    }
+
+    /**
+     * 只含**刚性平移**与**纯增益**的映射 —— 这两种都能保留查表的整数帧线性插值
+     *（见 `interpolableAt`），因此可以用来断言"映射下查表仍真的被走了"。
+     */
+    function translationWarpFixture(lockParamLines: boolean): LoudnessGeometryWarp | null {
+        return warpFrom(
+            [
+                // 平移：帧 100..400 → 帧 500..800。
+                [{ startSec: 0.5, lengthSec: 1.5 }, { startSec: 2.5, lengthSec: 1.5 }],
+                // 纯增益（时域不变）：帧 600..800，增益 ×1.25。
+                [
+                    { startSec: 3.0, lengthSec: 1.0, gain: 1 },
+                    { startSec: 3.0, lengthSec: 1.0, gain: 1.25 },
+                ],
+            ],
+            lockParamLines,
+        );
+    }
+
+    /** 映射生效时的查询时刻：覆盖两段的新/旧范围、段边界与空档。 */
+    function warpQueryTimes(): number[] {
+        const out: number[] = [];
+        for (let f = 80; f <= 1010; f += 0.53) out.push((f * FRAME_MS) / 1000);
+        // 段边界逐格细扫（含正好落在边界帧上）—— 不可插值的格都在这里。
+        for (const edge of [100, 200, 400, 500, 600, 800, 1000]) {
+            for (let f = edge - 2; f <= edge + 2; f += 0.25) {
+                out.push((f * FRAME_MS) / 1000);
+            }
+        }
+        out.push(0, -1, 5.0, 5.5, 6.0);
+        return out;
+    }
+
+    test("★ 几何映射（含裁切 / 拉伸的仿射重采样）下查表与逐值仍逐值等价", () => {
+        for (const lockParamLines of [false, true]) {
+            const snapshot = makeCurves();
+            const lutMap = makeInstrumentedMap({
+                snapshot,
+                liveEdit: null,
+                warp: () => warpFixture(lockParamLines),
+            });
+            const directMap = makeInstrumentedMap({
+                snapshot,
+                liveEdit: null,
+                warp: () => warpFixture(lockParamLines),
+            });
+            const times = warpQueryTimes();
+            lutMap.factors.beginWindow?.(0, 5.5);
+
+            for (const t of times) {
+                expect(
+                    lutMap.factors.factorAt(t),
+                    `lock=${lockParamLines} t=${t}`,
+                ).toBeCloseTo(directMap.factors.factorAt(t) as number, 12);
+            }
+            for (const [a, b] of ceilingWindows()) {
+                expect(
+                    lutMap.factors.levelCeilingOverWindow?.(a, b),
+                    `lock=${lockParamLines} window=[${a},${b}]`,
+                ).toBeCloseTo(directMap.factors.levelCeilingOverWindow?.(a, b) as number, 12);
+            }
+        }
+    });
+
+    test("★ 刚性平移下查表仍真的被走了（只有段边界附近回退）", () => {
+        // 移动是最常见的拖拽手势，必须仍然走查表 —— 否则等于把拖拽期间的单帧成本
+        // 抬回"逐值求值"的量级（见 factorAt 的说明）。
+        const snapshot = makeCurves();
+        const lutMap = makeInstrumentedMap({
+            snapshot,
+            liveEdit: null,
+            warp: () => translationWarpFixture(false),
+        });
+        const directMap = makeInstrumentedMap({
+            snapshot,
+            liveEdit: null,
+            warp: () => translationWarpFixture(false),
+        });
+        const times = warpQueryTimes();
+        lutMap.factors.beginWindow?.(0, 5.5);
+        const lutCallsAfterBuild = lutMap.calls();
+        const directCallsBefore = directMap.calls();
+
+        for (const t of times) {
+            expect(lutMap.factors.factorAt(t)).toBeCloseTo(
+                directMap.factors.factorAt(t) as number,
+                12,
+            );
+        }
+
+        const lutDelta = lutMap.calls() - lutCallsAfterBuild;
+        const directDelta = directMap.calls() - directCallsBefore;
+        expect(times.length).toBeGreaterThan(1500);
+        expect(lutDelta).toBeLessThan(200);
+        expect(lutDelta * 5).toBeLessThan(directDelta);
+    });
+
+    test("★ 映射对象更换必须让查表重建（同一快照、同一修订号）", () => {
+        // 拖拽期间几何逐帧变化、映射对象随之逐帧更换，而快照引用与修订号都不变。
+        // 查表若只看后两者，就会一直复用拖拽第一帧的表 —— 波形停在那一刻。
+        const snapshot = makeCurves();
+        let warp = warpFixture(false);
+        const map = makeInstrumentedMap({
+            snapshot,
+            liveEdit: null,
+            warp: () => warp,
+        });
+        map.factors.beginWindow?.(0, 5.5);
+        const before = map.factors.factorAt(1.05) as number;
+
+        // 换一份映射（把平移目标挪到别处），重建后取值必须随之改变。
+        warp = warpFrom(
+            [[{ startSec: 0.5, lengthSec: 1.5 }, { startSec: 1.0, lengthSec: 1.5 }]],
+            false,
+        );
+        map.factors.beginWindow?.(0, 5.5);
+        const after = map.factors.factorAt(1.05) as number;
+        expect(after).not.toBeCloseTo(before, 6);
     });
 
     test("★ 快照降采样（stride > 1）下同样全等 —— 淡出按就近采样帧阶跃", () => {

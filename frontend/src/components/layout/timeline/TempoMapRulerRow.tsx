@@ -1,6 +1,6 @@
 // hs-interaction-exempt: 标尺行内的内联控件（尺寸与行高耦合、随标尺滚动重建），已有正确的原生非被动滚轮接线；表单尺寸的原语不适用。
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { registerDragAbort } from "./gestureFocusGuard";
+import { registerDragAbort } from "../../../utils/gestureFocusGuard";
 import { Checkbox, Flex, Select, TextField } from "@radix-ui/themes";
 import { shallowEqual } from "react-redux";
 import type { GridSize, TimelineSnapSettings } from "../../../features/session/sessionTypes";
@@ -35,7 +35,7 @@ import {
 } from "../../../utils/tempoMap";
 import type { TempoMap, TempoPoint, TempoMapScaleData } from "../../../utils/tempoMap";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat";
-import { formatCursorTime } from "./timeFormat";
+import { formatPositionText, type TimeValueFormatContext } from "./timeValueText";
 import {
     snapTimelinePosition,
     computeEffectiveSnap,
@@ -1634,6 +1634,17 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     );
 
     /**
+     * 时刻格式化上下文：主/副单位 + 计时参数（含 Tempo Map）。
+     *
+     * 变化点位置是**绝对时刻**，因此走 `formatPositionText`（感知 Tempo Map），
+     * 而不是时长口径 —— 两者不可互换，见 `timeValueText` 文件头的口径表。
+     */
+    const positionFormatCtx = useMemo<TimeValueFormatContext>(
+        () => ({ ...timeContext, primaryTimeUnit: primaryUnit, secondaryTimeUnit: secondaryUnit }),
+        [timeContext, primaryUnit, secondaryUnit],
+    );
+
+    /**
      * 变化点旗帜的自定义悬浮提示（项目统一 ToolTip 样式，data-tooltip + AppTooltip）：
      * 位置按用户主/副时间单位显示；拍号/音阶为“跟随”时展示实际生效值。
      */
@@ -1641,15 +1652,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         (pointIndex: number): string => {
             if (!tempoMap) return "";
             const point = tempoMap.points[pointIndex];
-            const cursor = formatCursorTime(
-                primaryUnit,
-                secondaryUnit,
-                point.positionSec,
-                timeContext,
-            );
-            const positionLine = cursor.secondaryLabel
-                ? `${cursor.primaryLabel} / ${cursor.secondaryLabel}`
-                : cursor.primaryLabel;
+            const positionLine = formatPositionText(point.positionSec, positionFormatCtx);
             const sig = effectiveTimeSignatureAt(tempoMap, pointIndex);
             const effScale = effectiveScaleAtSec(
                 tempoMap,
@@ -1664,7 +1667,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 `${t("tempo_map_tooltip_scale")}${effScaleLabel}`,
             ].join("\n");
         },
-        [tempoMap, primaryUnit, secondaryUnit, timeContext, projectScale, projectScaleName, t],
+        [tempoMap, positionFormatCtx, projectScale, projectScaleName, t],
     );
 
     /**
@@ -1679,15 +1682,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             if (!tempoMap) return null;
             const point = tempoMap.points[pointIndex];
             if (!point) return null;
-            const cursor = formatCursorTime(
-                primaryUnit,
-                secondaryUnit,
-                point.positionSec,
-                timeContext,
-            );
-            const positionLine = cursor.secondaryLabel
-                ? `${cursor.primaryLabel} / ${cursor.secondaryLabel}`
-                : cursor.primaryLabel;
+            const positionLine = formatPositionText(point.positionSec, positionFormatCtx);
             const sig = effectiveTimeSignatureAt(tempoMap, pointIndex);
             const effScale = effectiveScaleAtSec(
                 tempoMap,
@@ -1712,7 +1707,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 </div>
             );
         },
-        [tempoMap, primaryUnit, secondaryUnit, timeContext, projectScale, projectScaleName, t],
+        [tempoMap, positionFormatCtx, projectScale, projectScaleName, t],
     );
 
     /**

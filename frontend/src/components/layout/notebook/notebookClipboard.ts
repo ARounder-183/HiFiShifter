@@ -28,6 +28,7 @@ import {
     translateInsert,
     type InsertContext,
 } from "./notebookInsert";
+import type { ResolvedNotebookSettings } from "./notebookSettings";
 import {
     HIFI_CLIP_FENCE_LANG,
     defaultClipTitle,
@@ -119,14 +120,41 @@ export function isPlainInputTarget(target: EventTarget | null): boolean {
 /**
  * 在编辑器的 copy/cut 事件上补写 Markdown flavor。
  *
- * 必须挂在编辑器 DOM 上、且在 ProseMirror 自己的监听之后执行：ProseMirror
- * 会写 `text/html` 与 `text/plain`，这里只做补充与裁剪。
+ * 【分工】ProseMirror 自己会写 `text/html` 与 `text/plain`；这里挂在编辑器 DOM 上、
+ * 在它**之后**执行，只做补充（`text/markdown`）与裁剪（按 `copyFormat` 决定留哪些）。
+ * 必须排在它之后，否则我们写的东西会被它覆盖掉。
+ *
+ * 【剪切为什么要提前算】`cut` 与 `copy` 有一个致命差别：**ProseMirror 的 cut 处理器
+ * 在同一次事件里就把选区删掉了**（它 dispatch 一条删除事务），而本写出器跑在冒泡
+ * 阶段 —— 那时 `state.selection` 已经塌缩，`selectionMarkdown` 只能返回空串。实测
+ * （全选后 Ctrl+X）：捕获阶段 `collapsed:false`，冒泡阶段 `collapsed:true`，
+ * 写出去的 `text/plain` 长度为 0。
+ *
+ * 后果不是"少一个 flavor"，而是**剪贴板里只剩下 `text/html`**（空串的 `text/plain`
+ * 会被浏览器直接丢掉）。于是：
+ *   - `Ctrl+V` 仍然能用（它从 `text/html` 还原）；
+ *   - **右键菜单的粘贴用不了** —— 它只能 `navigator.clipboard.readText()`，读到空串，
+ *     于是"用快捷键剪切、用菜单粘贴"这条混搭路径什么都粘不出来。
+ *
+ * 修法：在**捕获阶段**（同一元素上，先于冒泡阶段执行，且此时 ProseMirror 还没动手、
+ * 选区完好）把 flavor 快照下来，冒泡阶段直接套用。
  */
 export function installClipboardFlavorWriter(
     element: HTMLElement,
     getSettings: () => { copyFormat: string; copyPlainTextAs: string },
     getEditor: () => Editor | null,
 ): () => void {
+    /** 本次剪切在选区被删之前算好的 flavor（见上方说明）。 */
+    let cutFlavors: ClipboardFlavors | null = null;
+
+    const snapshotForCut = (event: ClipboardEvent) => {
+        if (event.type !== "cut") return;
+        if (isPlainInputTarget(event.target)) return;
+        const editor = getEditor();
+        if (!editor) return;
+        cutFlavors = computeClipboardFlavors(editor, getSettings());
+    };
+
     const handler = (event: ClipboardEvent) => {
         // NodeView 里的输入框（alt 编辑等）冒泡到编辑器 DOM：它们的复制必须
         // 走原生行为，重写 flavor 会把输入框草稿当成正文 Markdown 写上剪贴板。
@@ -134,14 +162,30 @@ export function installClipboardFlavorWriter(
         const editor = getEditor();
         const data = event.clipboardData;
         if (!editor || !data) return;
-        const flavors = computeClipboardFlavors(editor, getSettings());
+        /*
+         * 剪切用捕获阶段的快照（那时选区还在）；复制照常现算（选区没被动过）。
+         *
+         * 快照**在这里无条件消费掉**：万一这次剪切的冒泡处理器提前 return（例如
+         * `data` 为空），留着它就会被**下一次复制**误用 —— 那会拿上一次剪切的内容
+         * 去覆盖新的选区。
+         */
+        const stashed = cutFlavors;
+        cutFlavors = null;
+        const flavors =
+            event.type === "cut" && stashed
+                ? stashed
+                : computeClipboardFlavors(editor, getSettings());
         if (!flavors.keepHtml) data.setData("text/html", "");
         if (flavors.markdown) data.setData("text/markdown", flavors.markdown);
         data.setData("text/plain", flavors.plainText);
     };
+
+    // 捕获阶段只服务 `cut`（`copy` 不需要，冒泡阶段选区仍完好）。
+    element.addEventListener("cut", snapshotForCut, true);
     element.addEventListener("copy", handler);
     element.addEventListener("cut", handler);
     return () => {
+        element.removeEventListener("cut", snapshotForCut, true);
         element.removeEventListener("copy", handler);
         element.removeEventListener("cut", handler);
     };
@@ -154,87 +198,155 @@ export interface PasteContext extends InsertContext {
 }
 
 /**
- * 处理一次粘贴。返回 `true` 表示已经接管（调用方需阻止默认行为）。
+ * 一次粘贴的**载荷**（与事件解耦）。
+ *
+ * 【为什么要从 `ClipboardEvent` 里拆出来】右键菜单的"粘贴为纯文本 / 粘贴为
+ * Markdown"拿不到真实事件：浏览器不允许脚本在用户手势之外读剪贴板，只能
+ * `navigator.clipboard.readText()` 拿到文本。若把分流逻辑留在"吃事件"的函数里，
+ * 菜单就得把整条优先级链抄第二遍 —— 而"HiFiShifter 载荷优先于它的摘要文本"
+ * 这类顺序一旦分叉，用户会看到同一次粘贴在两个入口下结果不同。
+ *
+ * 拆开之后：事件路径（Ctrl+V）与菜单路径共用 `applyNotebookPastePayload`，
+ * 差异只剩"载荷从哪来"。
+ */
+export interface NotebookPastePayload {
+    /** 剪贴板里的图片文件（有则优先插图片）。 */
+    files: File[];
+    html: string;
+    text: string;
+}
+
+/**
+ * 单次粘贴的模式覆盖。
+ *
+ * 菜单的"粘贴为纯文本 / 粘贴为 Markdown"就是靠它把 `plainPasteMode` 顶掉一次，
+ * 而**不改设置**：用户想这一次别解析 Markdown，不该顺手改掉他所有的粘贴行为。
+ */
+export interface NotebookPasteOverrides {
+    plainPasteMode?: ResolvedNotebookSettings["plainPasteMode"];
+    htmlPasteMode?: ResolvedNotebookSettings["htmlPasteMode"];
+    smartPaste?: boolean;
+}
+
+/** 从一次真实的 `paste` 事件里取载荷。 */
+export function clipboardEventPayload(event: ClipboardEvent): NotebookPastePayload {
+    const data = event.clipboardData;
+    return {
+        files: Array.from(data?.files ?? []).filter((file) => file.type.startsWith("image/")),
+        html: data?.getData("text/html") ?? "",
+        text: data?.getData("text/plain") ?? "",
+    };
+}
+
+/**
+ * 把一份载荷按既定优先级插进文档。返回"是否真的插入了内容"。
  *
  * 判定顺序即优先级：
- * 1. 剪贴板里有图片文件 → 插图片（这是"粘贴截图/图片文件"的主路径）；
- * 2. 剪贴板里是 HiFiShifter 载荷 → 插暂存块（**优先于**它的摘要文本，
- *    否则用户粘贴 clip 只会得到一句 "HiFiShifter: 3 clip(s) copied"）；
- * 3. 有 HTML → 消毒 + 转 Markdown；
+ * 1. 图片文件 → 插图片（这是"粘贴截图/图片文件"的主路径）；
+ * 2. HiFiShifter 载荷 → 插暂存块（**优先于**它的摘要文本，否则用户粘贴 clip
+ *    只会得到一句 "HiFiShifter: 3 clip(s) copied"）；
+ * 3. 有 HTML → 消毒 + 转 Markdown（或按 `htmlPasteMode` 原样富文本）；
  * 4. 有纯文本 → 按 `plainPasteMode` 决定当不当 Markdown；
- * 5. 只有位图（截图工具）→ 走后端读 CF_DIB 的兜底路径。
+ * 5. 什么都没有 → 走后端读 CF_DIB 的兜底路径（截图工具只放位图）。
  *
- * 全部为异步：`handlePaste` 必须同步返回 true 才能压住默认插入，因此这里
- * 先同步判定"要不要接管"，具体插入在 promise 里完成。
+ * 【为什么是 async 而 `handleNotebookPaste` 是 sync】`paste` 事件必须在处理器
+ * 同步返回时就被 `preventDefault` 掉，否则默认插入已经发生。因此事件路径只
+ * 做"要不要接管"的同步判定，插入本身在这里异步完成 —— 菜单路径没有这个约束，
+ * 直接 await 即可。
+ */
+export async function applyNotebookPastePayload(
+    ctx: InsertContext,
+    payload: NotebookPastePayload,
+    overrides?: NotebookPasteOverrides,
+): Promise<boolean> {
+    const settings: ResolvedNotebookSettings = overrides
+        ? {
+              ...ctx.settings,
+              ...(overrides.plainPasteMode !== undefined
+                  ? { plainPasteMode: overrides.plainPasteMode }
+                  : {}),
+              ...(overrides.htmlPasteMode !== undefined
+                  ? { htmlPasteMode: overrides.htmlPasteMode }
+                  : {}),
+              ...(overrides.smartPaste !== undefined ? { smartPaste: overrides.smartPaste } : {}),
+          }
+        : ctx.settings;
+    const scoped: InsertContext = { ...ctx, settings };
+
+    if (payload.files.length > 0) {
+        for (const file of payload.files) {
+            await insertImageFromBlob(scoped, file, file.name || "pasted.png");
+        }
+        return true;
+    }
+
+    const hasAnyPayload = Boolean(payload.html) || Boolean(payload.text);
+
+    const staged = await stageClipboardPayload();
+    if (staged.ok && staged.body) {
+        scoped.editor.chain().focus().insertContent(blockNodeFromBody(staged.body)).run();
+        scoped.onAssetsChanged?.();
+        scoped.notify?.(translateInsert(scoped, "notebook_clipboard_staged"));
+        return true;
+    }
+
+    if (payload.html && settings.smartPaste && settings.htmlPasteMode === "markdown") {
+        // `maxImageBytes` 同样约束粘贴内容里的内嵌 data URI（见 htmlToMarkdown）。
+        const markdown = htmlToMarkdown(payload.html, {
+            maxDataImageBytes: settings.maxImageBytes,
+        });
+        if (markdown) {
+            scoped.editor.chain().focus().insertContent(markdown).run();
+            return true;
+        }
+    }
+    if (payload.html && settings.smartPaste && settings.htmlPasteMode === "html") {
+        // 原样富文本：交给 ProseMirror 自己的 HTML 解析（更保真，但不是
+        // 规范 Markdown —— 由用户显式选择这一档）。
+        scoped.editor.chain().focus().insertContent(payload.html).run();
+        return true;
+    }
+
+    if (payload.text) {
+        const asMarkdown =
+            settings.smartPaste &&
+            (settings.plainPasteMode === "markdown" ||
+                (settings.plainPasteMode === "auto" && looksLikeMarkdown(payload.text)));
+        scoped.editor
+            .chain()
+            .focus()
+            .insertContent(asMarkdown ? payload.text : escapeMarkdownText(payload.text))
+            .run();
+        return true;
+    }
+
+    if (!hasAnyPayload) {
+        // 截图工具只放位图的情形。
+        const inserted = await insertImageFromClipboardBitmap(scoped);
+        if (!inserted.ok) {
+            scoped.notify?.(translateInsert(scoped, "notebook_paste_nothing"), "error");
+            return false;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * 处理一次粘贴事件。返回 `true` 表示已经接管（调用方需阻止默认行为）。
+ *
+ * 只负责三件同步的事：源码视图与面板内输入框放行、取载荷、判定"要不要接管"。
+ * 真正的插入交给 `applyNotebookPastePayload`（与菜单路径同一份实现）。
  */
 export function handleNotebookPaste(ctx: PasteContext, event: ClipboardEvent): boolean {
     if (ctx.sourceMode) return false;
     // 查找条等面板内输入框的粘贴必须走原生行为。本函数由调用方在**捕获阶段**
     // 监听（先于输入框自己的处理），这里不放行就没有任何后续 handler 能补救。
     if (isPlainInputTarget(event.target)) return false;
-    const data = event.clipboardData;
-    if (!data) return false;
+    if (!event.clipboardData) return false;
 
-    const files = Array.from(data.files ?? []).filter((file) => file.type.startsWith("image/"));
-    const html = data.getData("text/html");
-    const text = data.getData("text/plain");
-
-    if (files.length > 0) {
-        void (async () => {
-            for (const file of files) {
-                await insertImageFromBlob(ctx, file, file.name || "pasted.png");
-            }
-        })();
-        return true;
-    }
-
-    const hasAnyPayload = Boolean(html) || Boolean(text);
-    void (async () => {
-        const staged = await stageClipboardPayload();
-        if (staged.ok && staged.body) {
-            ctx.editor.chain().focus().insertContent(blockNodeFromBody(staged.body)).run();
-            ctx.onAssetsChanged?.();
-            ctx.notify?.(translateInsert(ctx, "notebook_clipboard_staged"));
-            return;
-        }
-
-        if (html && ctx.settings.smartPaste && ctx.settings.htmlPasteMode === "markdown") {
-            // `maxImageBytes` 同样约束粘贴内容里的内嵌 data URI（见 htmlToMarkdown）。
-            const markdown = htmlToMarkdown(html, {
-                maxDataImageBytes: ctx.settings.maxImageBytes,
-            });
-            if (markdown) {
-                ctx.editor.chain().focus().insertContent(markdown).run();
-                return;
-            }
-        }
-        if (html && ctx.settings.smartPaste && ctx.settings.htmlPasteMode === "html") {
-            // 原样富文本：交给 ProseMirror 自己的 HTML 解析（更保真，但不是
-            // 规范 Markdown —— 由用户显式选择这一档）。
-            ctx.editor.chain().focus().insertContent(html).run();
-            return;
-        }
-
-        if (text) {
-            const asMarkdown =
-                ctx.settings.smartPaste &&
-                (ctx.settings.plainPasteMode === "markdown" ||
-                    (ctx.settings.plainPasteMode === "auto" && looksLikeMarkdown(text)));
-            ctx.editor
-                .chain()
-                .focus()
-                .insertContent(asMarkdown ? text : escapeMarkdownText(text))
-                .run();
-            return;
-        }
-
-        if (!hasAnyPayload) {
-            // 截图工具只放位图的情形。
-            const inserted = await insertImageFromClipboardBitmap(ctx);
-            if (!inserted.ok) ctx.notify?.(translateInsert(ctx, "notebook_paste_nothing"), "error");
-        }
-    })();
-
+    void applyNotebookPastePayload(ctx, clipboardEventPayload(event));
     return true;
 }
 

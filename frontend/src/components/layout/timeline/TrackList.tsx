@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { registerDragAbort } from "./gestureFocusGuard";
+import { registerDragAbort } from "../../../utils/gestureFocusGuard";
 import { formatEditNumber } from "./math";
 import { measureTextWidth } from "./runtime/timelineCanvasStyle";
 import { Flex, Box, IconButton } from "@radix-ui/themes";

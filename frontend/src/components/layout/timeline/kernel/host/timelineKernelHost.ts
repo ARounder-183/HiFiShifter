@@ -821,6 +821,16 @@ export interface TimelineKernelInteractions {
     readonly onDragPreview?: (args: {
         readonly clipId: string;
         readonly deltaSec: number;
+        /**
+         * **未钳制**的指针位移（秒，右为正）。
+         *
+         * 【为什么与 `deltaSec` 并存】`deltaSec` 是**位置**位移（下界 0：clip 不能
+         * 从负时间开始），移动手势用它。而 Slip 改的是 clip 内部的源窗口偏移，
+         * 其合法域是**任意符号、任意大小**（向左滑出媒体起点 = 前导静音）。用被钳的
+         * `deltaSec` 会让 Slip 单向卡死（`startSec = 0` 的 clip 完全无法向左滑）。
+         * 两个值都由内核一次算出，选哪个由面板按手势语义决定 —— 内核不解释修饰键。
+         */
+        readonly rawDeltaSec: number;
         readonly targetTrackId: string;
         /**
          * 修饰键快照。
@@ -3253,6 +3263,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               lengthSec: number;
               /** 最近一次派发的预览值（去重：同值不重复回调，避免空重建）。 */
               lastDeltaSec: number;
+              /**
+               * 最近一次派发的**未钳制**位移（见 `onDragPreview.rawDeltaSec`）。
+               *
+               * 【为什么去重必须同时看它】Slip 消费的是未钳制位移：clip 在
+               * `startSec = 0` 时向左拖，`deltaSec` 恒为 0 而 `rawDeltaSec` 持续变化。
+               * 只看 `deltaSec` 会把整段手势的预览全部去重掉 —— 现场表现就是
+               * "向左 slip 完全拖不动"。
+               */
+              lastRawDeltaSec: number;
               lastTargetTrackId: string;
           }
         | {
@@ -3484,6 +3503,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * 反之亦然。
      */
     let lastClipHoverKey = "";
+
+    /**
+     * "签名已过期"哨兵：与任何真实键、以及空串都不相等。
+     *
+     * 【为什么不用空串】空串是"指针不在任何 clip 上"（`lastClipHoverKey`）/
+     * "无淡变浮标"（`lastFadeHoverKey`）的**合法**签名。手势结束后若把签名置空，
+     * 而指针恰好停在空白处（算出来的键也是空串），去重会认为"没变化"而不再回调
+     * —— 浮标清不掉。用一个不可能碰撞的哨兵，两种情形都能重发。
+     */
+    const HOVER_KEY_STALE = "\u0000stale";
 
     /**
      * 上一次 hover 命中的**指针签名**（坐标 + 按键 + 修饰键）。
@@ -4278,7 +4307,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (gesture.kind !== "none" || panPointerId !== null) {
             // 手势期间的移动不进悬停链；顺手清空指针签名，让手势结束后的第一次
             // 移动必然重算（手势已改变场景，旧签名对应的悬停结果是过期的）。
+            // 内容签名同理失效：手势期间发布的浮标是**拖动变体**（增益 / 吸附偏移 /
+            // 淡变带 `[增量]`），手势结束后必须重发一次悬停变体，否则增量会一直留在
+            // 气泡上。**两条通道都要失效**：淡变分支只在键变化时才发布，若不失效它
+            // 会先被"清淡变以外浮标"清空、又因键相同而不再重发 —— 表现为"松手后淡变
+            // ToolTip 直接消失"。用哨兵而不是空串 —— 理由见 `HOVER_KEY_STALE`。
             lastHoverPointerKey = "";
+            lastClipHoverKey = HOVER_KEY_STALE;
+            lastFadeHoverKey = HOVER_KEY_STALE;
             return;
         }
         const pointerKey = `${event.clientX},${event.clientY},${event.buttons},${event.altKey},${event.ctrlKey},${event.metaKey},${event.shiftKey}`;
@@ -4566,6 +4602,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 originTrackId: gesture.originTrackId,
                 lengthSec: gesture.lengthSec,
                 lastDeltaSec: 0,
+                lastRawDeltaSec: 0,
                 lastTargetTrackId: gesture.originTrackId,
             };
             applyDragPreview(event);
@@ -4965,18 +5002,24 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             updateVerticalLockOverlay();
         }
         const effectiveDeltaSec = trackLock.locked ? 0 : delta.deltaSec;
+        // 未钳制位移与 `effectiveDeltaSec` 同步受竖直换轨锁定（语义一致：锁定期间
+        // 水平方向"没有发生移动"）。Slip 消费它，见 `onDragPreview.rawDeltaSec`。
+        const effectiveRawDeltaSec = trackLock.locked ? 0 : delta.rawDeltaSec;
 
         if (
             effectiveDeltaSec === gesture.lastDeltaSec &&
+            effectiveRawDeltaSec === gesture.lastRawDeltaSec &&
             targetTrackId === gesture.lastTargetTrackId
         ) {
             return;
         }
         gesture.lastDeltaSec = effectiveDeltaSec;
+        gesture.lastRawDeltaSec = effectiveRawDeltaSec;
         gesture.lastTargetTrackId = targetTrackId;
         interactions?.onDragPreview?.({
             clipId: gesture.clipId,
             deltaSec: effectiveDeltaSec,
+            rawDeltaSec: effectiveRawDeltaSec,
             targetTrackId,
             modifiers: dragModifiersOf(event),
         });
@@ -5556,7 +5599,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         return result;
     }
 
-    /** 指针离开轨道区：清掉自定义光标，交回默认值。 */
+    /** 指针离开轨道区：清掉自定义光标与所有悬停态。 */
     function onPointerLeave(): void {
         if (gesture.kind === "none" && panPointerId === null) container.style.cursor = "";
         // 指针离开轨道区：淡变浮标必须收起，否则它会因为没有后续 move 事件而
@@ -5564,6 +5607,19 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (lastFadeHoverKey !== "") {
             lastFadeHoverKey = "";
             interactions?.onFadeHover?.(null, 0, 0);
+        }
+        // **clip 悬停通道同理**：离开容器后不再有 pointermove，而悬停提示环与浮标
+        // 内容都只在"命中身份变化"时才更新 —— 不在这里收尾，环会一直亮在画面上
+        //（用户报告的那类"高亮没清掉"）。清掉去重键还能让**再次进入**同一个 clip
+        // 时重新发布一次，读数不会停在离开前的旧值上（淡变通道已是这个口径）。
+        if (lastClipHoverKey !== "") {
+            lastClipHoverKey = "";
+            interactions?.onClipHover?.(null);
+        }
+        if (hoveredClipId !== null) {
+            hoveredClipId = null;
+            sceneDirty = true;
+            loop.invalidate();
         }
     }
 

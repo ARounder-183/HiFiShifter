@@ -5,13 +5,18 @@
  * 在拖拽途中把焦点切走（Alt+Tab 到桌面 / 其他程序、最小化等）并在**窗口外**
  * 松开鼠标时，WebView2（Chromium）通常不会把 pointerup/pointercancel 派发
  * 回本窗口 → end() 永不执行 → 切回后拖拽状态卡死（dragRef 悬置、交互锁与
- * 后端 undo group 泄漏、吸附高亮与 body 光标冻结）。
+ * 后端 undo group 泄漏、吸附高亮 / 悬停环 / 拖拽浮层与 body 光标冻结）。
  *
  * 本模块提供一个惰性挂载的全局 blur/visibilitychange 监听：每个手势在
  * 开始时把自己的事件无关收尾 `finish()` 注册进来（registerDragAbort），
  * 失焦时统一调用（幂等、逐个异常隔离）。触发后各手势的 finish() 走的是与
  * pointerup/pointercancel 完全相同的收尾路径（提交当前值、关闭 undo
  * group、归还交互锁、清理监听器），因此撤销栈不会被冻结。
+ *
+ * 【为什么放在 `utils/`】它是**通用**机制：时间线内核、标尺、轨道头、钢琴卷帘、
+ * 停靠系统（标签/浮动窗/分隔条）与笔记本节点都各有"按下后在 window 上挂
+ * pointermove"的手势，全都要接这一层。放在共享目录下，各子系统引用它不必跨进
+ * 别的子系统的目录。
  *
  * 先例：钢琴卷帘 usePianoRollInteractions（activePointerGestureEndRef +
  * window blur / visibilitychange 收尾）。

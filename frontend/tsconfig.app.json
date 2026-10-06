@@ -25,8 +25,16 @@
         "noUncheckedSideEffectImports": true,
 
         /* 扩展入口别名（与 vite.config.ts 的 resolve.alias 保持一致）。
-           应用内部代码不用别名；这是给第三方扩展作者的稳定导入根。 */
-        "baseUrl": ".",
+           应用内部代码不用别名；这是给第三方扩展作者的稳定导入根。
+
+           【为什么这里没有 `baseUrl`】它曾是 `paths` 的前置条件，如今已**弃用**：
+           TypeScript 6 起报错，7.0 将移除。从 TypeScript 5.0 起 `paths` 可以独立
+           使用，映射按**本配置文件所在目录**解析 —— 与原先 `"baseUrl": "."` 的语义
+           完全一致，因此删掉它不改变任何解析结果（实测：删前删后
+           `import ... from "@hs/sdk"` 都能解析）。
+
+           遇到"选项 baseUrl 已弃用"时**不要**用 `ignoreDeprecations` 压掉它：
+           那是把迁移推迟到 7.0，而这个选项在这里本来就是多余的。 */
         "paths": {
             "@hs/sdk": ["./src/sdk/index.ts"],
             "@hs/ui": ["./src/ui/index.ts"]

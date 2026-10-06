@@ -36,6 +36,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { paramsApi } from "../../../services/api";
 import type { ParamFramesPayload } from "../../../types/api";
+import { isLoudnessFetchHeld } from "../timeline/loudnessFetchGate";
 import { isDynParam, VOLUME_PARAM_ID } from "./paramRanges";
 
 /** 快照全工程点数上限：40k 点 ≈ 单曲线 160KB（binary 解码后），超出按 stride 降采样。 */
@@ -60,6 +61,20 @@ export interface LoudnessSnapshot {
      * 等价。面板据此**不挂映射**，让未使用响度自动化的工程保持既有波形路径。
      */
     identity: boolean;
+    /**
+     * 这份基线**所依据的 clip 几何**的溯源键（后端 `build_root_dyn_key`）。
+     *
+     * 【为什么需要】拖拽期间 clip 几何只在前端乐观变化，后端几何被冻结，因此
+     * 这段时间返回的基线一律对应"按下之前"的几何 —— 面板要在本地把它搬到新位置。
+     * 而"什么时候停止搬运"不能用取数序号猜：提交会先 `checkpointHistory` 递增
+     * `paramsEpoch`（早于后端写入），序号水位必然错拍，于是映射提前撤下 = 闪一下。
+     * 用键则是一个**事实**：键变了 ⇔ 这份基线反映的几何变了。面板因此可以把
+     * 撤下与快照落地放在**同一个渲染**里（见 `PianoRollPanel` 的 warp memo）。
+     *
+     * `null` = 后端未提供（分析未全量命中）⇒ 面板退化为"任意新快照即撤下"，
+     * 该路径下基线数据本就不可用，撤早撤晚在画面上无差别。
+     */
+    baselineKey: string | null;
 }
 
 /**
@@ -111,6 +126,12 @@ export function snapshotFromPayloads(
         dynTarget,
         dynBaseline,
         identity: false,
+        // 溯源键与基线必须来自**同一次** dyn 取数：分叉会让"键已更新但基线没更新"
+        // 被误判为权威数据（波形会停在旧基线上直到下一次取数）。
+        baselineKey:
+            typeof dynPayload.dyn_orig_key === "string" && dynPayload.dyn_orig_key.length > 0
+                ? dynPayload.dyn_orig_key
+                : null,
     };
     next.identity = isIdentitySnapshot(next);
     return next;
@@ -200,6 +221,11 @@ export function useLoudnessCurves(args: {
      * 【为什么"发起"照常、"落地"推迟】`committedSettleSeqRef` 依赖"已发出的最大取数
      * 序号"单调递增（判定"这份快照是不是提交之后取的"）。推迟**发起**会让水位错位，
      * 把已修好的"松手闪回旧波形"重新引回来。序号在发起时推进，因此只推迟落地是安全的。
+     *
+     * 【提交期闸门为什么是"丢弃"而不是"推迟"】闸门合上期间落地的快照是
+     * 「新几何的基线 × 旧范围的用户曲线」这一自相矛盾组合（见 `loudnessFetchGate`）。
+     * 它没有任何保留价值 —— 权威取数在闸门打开后必然重新发出。推迟落地反而会在
+     * 释放时把这份陈旧数据放出来。故这里直接丢弃。
      */
     const land = useCallback(
         (landing: {
@@ -207,6 +233,7 @@ export function useLoudnessCurves(args: {
             fetchSeq: number;
             analysisPending: boolean;
         }) => {
+            if (isLoudnessFetchHeld()) return;
             if (liveEditActiveRef?.current) {
                 pendingLandingRef.current = landing;
                 return;
@@ -218,6 +245,12 @@ export function useLoudnessCurves(args: {
 
     /** 面板在 pointer-up 调用：落地笔画期间被推迟的那一份（若有）。 */
     const flushPending = useCallback(() => {
+        // 提交期闸门优先：此刻在飞的那份同样可能是「新几何 × 旧曲线」，一并丢弃
+        //（见 `land` 的说明）。它会在闸门打开后的权威取数里被覆盖。
+        if (isLoudnessFetchHeld()) {
+            pendingLandingRef.current = null;
+            return;
+        }
         const pending = pendingLandingRef.current;
         if (pending === null) return;
         pendingLandingRef.current = null;
@@ -300,6 +333,10 @@ export function useLoudnessCurves(args: {
             setAnalysisPending(false);
             return;
         }
+        // 提交期闸门：拉伸提交期间落库会递增 paramsEpoch 触发一次「新几何 × 旧曲线」
+        // 的中间态取数（见 `loudnessFetchGate`）。这次不发 —— 改写完成后调用方会
+        // 打开闸门并再 bump 一次 epoch，届时本 effect 重跑、发出唯一一次权威取数。
+        if (isLoudnessFetchHeld()) return;
         scheduleFetch();
 
         // 输入变化时 effect 会重跑；已挂载的取消标记由请求序号守卫兜底

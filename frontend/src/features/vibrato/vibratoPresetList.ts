@@ -8,6 +8,7 @@
 
 import {
     DEFAULT_ACTIVE_VIBRATO_PRESET_ID,
+    STRAIGHT_VIBRATO_PRESET_ID,
     SYSTEM_VIBRATO_PRESETS,
     builtinVibratoPresetId,
     type BuiltinVibratoId,
@@ -161,6 +162,62 @@ export function cycleVibratoPresetId(
     const from = index >= 0 ? index : 0;
     const next = (from + delta + all.length) % all.length;
     return all[next].id;
+}
+
+/**
+ * 一次"选预设"的结果。
+ *
+ * 【为什么不是 id】直线不再是普通预设，而是与颤音并列的**工具**：选中「直线」
+ * 预设的语义是切到直线工具，而不是把活动预设改成一条平线。把这个映射收进类型，
+ * 调用方（键盘轮转、侧键、预设子菜单）就无法各自解释错。
+ */
+export type VibratoChoice = { tool: "line" } | { tool: "vibrato"; presetId: string };
+
+/** 唯一的「切到直线工具」结果，供调用方复用（避免每处新建对象）。 */
+export const VIBRATO_LINE_CHOICE: VibratoChoice = { tool: "line" };
+
+/** 是否为直线预设的 id（缺省 / 非字符串一律视为否）。 */
+export function isStraightVibratoPresetId(id: string | null | undefined): boolean {
+    return typeof id === "string" && id === STRAIGHT_VIBRATO_PRESET_ID;
+}
+
+/**
+ * 轮转一格，并把结果翻译成"切工具"还是"切预设"。
+ *
+ * 【环绕规则没有第二套】内部仍走 {@link cycleVibratoPresetId}，只是在落点上做
+ * 一次映射 —— 直线预设占着序列里的一格，落在它上面就等于切到直线工具。
+ *
+ * 列表为空返回 `null`。
+ */
+export function cycleVibratoChoice(
+    all: readonly VibratoPreset[],
+    anchorId: string | null | undefined,
+    delta: 1 | -1,
+): VibratoChoice | null {
+    const nextId = cycleVibratoPresetId(all, anchorId, delta);
+    if (nextId === null) return null;
+    return chooseVibratoPreset(nextId);
+}
+
+/** 直接选中某个预设 id：直线预设 → 直线工具，其余 → 颤音工具 + 该预设。 */
+export function chooseVibratoPreset(presetId: string | null | undefined): VibratoChoice {
+    if (isStraightVibratoPresetId(presetId)) return VIBRATO_LINE_CHOICE;
+    return { tool: "vibrato", presetId: String(presetId) };
+}
+
+/**
+ * 轮转的起点 id。
+ *
+ * 【直线工具为什么不读活动预设】直线工具不是"用某个预设的颤音工具"，它固定在直线
+ * 预设上（见 `STRAIGHT_VIBRATO_PRESET_ID`）。若拿活动预设当起点，用户从直线工具
+ * 轮转一步会跳到活动预设的**下一个**而不是直线预设的下一个 —— 换了工具却不换
+ * 位置，与"直线工具就是直线预设"这条规则自相矛盾。
+ */
+export function vibratoCycleAnchorId(args: {
+    lineTool: boolean;
+    currentPresetId: string | null | undefined;
+}): string | null {
+    return args.lineTool ? STRAIGHT_VIBRATO_PRESET_ID : (args.currentPresetId ?? null);
 }
 
 /**

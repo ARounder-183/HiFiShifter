@@ -1,4 +1,4 @@
-import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
+import { createSlice, createAsyncThunk, type PayloadAction } from "@reduxjs/toolkit";
 import type {
     HistoryRecordSummary,
     TimelineClip,
@@ -28,6 +28,7 @@ import type {
     ToolModeGroup,
     TrackInfo,
 } from "./sessionTypes";
+import { TOOL_MODES } from "./sessionTypes";
 import { normalizeSplitTransitionCurve } from "./sessionTypes";
 import { SILENCE_DETECT_DEFAULTS } from "./sessionTypes";
 import {
@@ -49,6 +50,9 @@ import {
 } from "../fileBrowser/folderImportOptions";
 import { modEuclid, resolveLoopMediaDurationSec } from "../../utils/loopRender";
 import { normalizeChannelMode } from "../../utils/channelMode";
+// 工具切换的落盘收口（`setToolModePersistent`）需要它。与下面的 re-export 同源；
+// runtimeThunks 对本切片只有 type-only 依赖，因此不构成运行时循环。
+import { persistUiSettings } from "./thunks/runtimeThunks";
 
 import {
     addClipOnTrack,
@@ -490,7 +494,7 @@ export interface SessionState {
     selectDragDirection: DragDirection;
     /** 参数编辑器（绘制工具）拖动方向限制 */
     drawDragDirection: DrawDragDirection;
-    /** 参数编辑器（直线/颤音工具）拖动方向限制 */
+    /** 参数编辑器（直线工具与颤音工具共用）拖动方向限制 */
     lineVibratoDragDirection: DrawDragDirection;
 
     /** 参数编辑器选区拖拽时的边缘平滑度（0-100%） */
@@ -1158,7 +1162,11 @@ function applyOptimisticClipState(
         clip.muted = Boolean(payload.muted);
     }
     if (payload.sourceStartSec !== undefined) {
-        clip.sourceStartSec = Number(payload.sourceStartSec) || 0;
+        // 与 sourceEndSec 同一口径：**不得钳制到 ≥0**（Slip 向左滑出媒体起点
+        // ⇒ 负起点 = 前导静音）。用 `Number.isFinite` 而非 `Number(x) || 0`：
+        // 后者虽保留负数，却会把 NaN 静默变成 0，与对侧不一致。
+        const value = Number(payload.sourceStartSec);
+        clip.sourceStartSec = Number.isFinite(value) ? value : clip.sourceStartSec;
     }
     if (payload.sourceEndSec !== undefined) {
         // 不得钳制到 ≥0：倒放 Clip 的消费窗口锚定 se，se<0（整窗在媒体
@@ -1315,7 +1323,9 @@ function applyOptimisticBulkClipState(
             clip.playbackRate = clamp(nextClipRate * previousTakeRate, 0.1, 10);
         }
         if (update.sourceStartSec !== undefined) {
-            clip.sourceStartSec = Number(update.sourceStartSec) || 0;
+            // 同 setClipSourceRange：不得钳制到 ≥0（Slip 负起点 = 前导静音）。
+            const value = Number(update.sourceStartSec);
+            clip.sourceStartSec = Number.isFinite(value) ? value : clip.sourceStartSec;
         }
         if (update.sourceEndSec !== undefined) {
             // 同 setClipSourceRange：不得钳制到 ≥0（倒放窗口合法含负值）。
@@ -2527,6 +2537,24 @@ export {
     importMultipleAudioFilesAtPosition,
 } from "./thunks/importThunks";
 
+/**
+ * 把一次工具选择写进状态。
+ *
+ * 【为什么抽成函数】`setToolMode`（用户切换）与 `loadUiSettings.fulfilled`
+ * （启动恢复）必须落到**同一组**字段上：`toolMode` 是当前工具，`toolModeGroup`
+ * 与 `drawToolMode` 是它的派生视图（"这一组里选的是哪个绘制工具"供 `Tab` 回跳）。
+ * 两处各写一遍，迟早会有一处漏掉 `drawToolMode`，表现为"按 Tab 回不到刚才那个工具"。
+ */
+function applyToolMode(state: SessionState, mode: ToolMode): void {
+    state.toolMode = mode;
+    if (mode === "select") {
+        state.toolModeGroup = "select";
+    } else {
+        state.toolModeGroup = "draw";
+        state.drawToolMode = mode;
+    }
+}
+
 const sessionSlice = createSlice({
     name: "session",
     initialState,
@@ -2600,13 +2628,7 @@ const sessionSlice = createSlice({
             // 工具切换是纯视图状态：不修改工程内容。
             // 不入 undo 历史（否则 Ctrl+Z 会先回退一次"不存在的内容变更"），
             // 也不标记 project.dirty（否则仅切工具就会触发"未保存"退出确认）。
-            state.toolMode = action.payload;
-            if (action.payload === "select") {
-                state.toolModeGroup = "select";
-            } else {
-                state.toolModeGroup = "draw";
-                state.drawToolMode = action.payload;
-            }
+            applyToolMode(state, action.payload);
         },
         setEditParam(state, action: PayloadAction<EditParam>) {
             state.editParam = action.payload;
@@ -3320,7 +3342,12 @@ const sessionSlice = createSlice({
             const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
             if (!clip) return;
             if (action.payload.sourceStartSec !== undefined) {
-                clip.sourceStartSec = Number(action.payload.sourceStartSec) || 0;
+                // 与 sourceEndSec 同一口径：**不得钳制到 ≥0**（Slip 向左滑出媒体
+                // 起点 ⇒ 负起点 = 前导静音，是既定合法状态；见下方注释）。这里用
+                // `Number.isFinite` 而不是 `Number(x) || 0`：后者虽然也保留负数
+                // （-3 是真值），但会把 NaN 静默变成 0，与对侧行为不一致。
+                const value = Number(action.payload.sourceStartSec);
+                clip.sourceStartSec = Number.isFinite(value) ? value : clip.sourceStartSec;
             }
             if (action.payload.sourceEndSec !== undefined) {
                 // 注意：**不得钳制到 ≥0**。倒放 Clip 的消费窗口锚定 se，
@@ -3916,6 +3943,15 @@ const sessionSlice = createSlice({
                     state.builtinVibratoPresetOrder = s.builtinVibratoPresetOrder.filter(
                         (id: unknown): id is string => typeof id === "string" && id.length > 0,
                     );
+                }
+                // 上次使用的工具：只认已知取值（手改配置里的野值一律忽略，回落默认）。
+                // 放在最后：`applyToolMode` 会一并派生 `toolModeGroup` / `drawToolMode`，
+                // 后面不该再有分支去改这三个字段。
+                if (
+                    typeof s.paramEditorTool === "string" &&
+                    (TOOL_MODES as readonly string[]).includes(s.paramEditorTool)
+                ) {
+                    applyToolMode(state, s.paramEditorTool as ToolMode);
                 }
             })
 
@@ -7060,5 +7096,31 @@ export const {
     removeClipPitchData,
     bumpParamsEpoch,
 } = sessionSlice.actions;
+
+/**
+ * 切换参数编辑器工具并落盘。
+ *
+ * 【为什么要一个专门的入口】`setToolMode` 在 App 与参数编辑器面板里共有 8 个
+ * dispatch 点。逐个补一句 `persistUiSettings()`，等于埋 8 个"以后新增入口时忘了
+ * 补"的坑；工具选择是低频动作（一次点击或一次按键），立即写一次盘的代价可以忽略。
+ *
+ * 【已经在这个工具上时直接返回】这让"声明式地断言工具"变成免费操作：拖拽中的
+ * 预设轮转每次都要确保自己落在正确的工具上（见 `applyVibratoChoice`），若每次都
+ * 写一遍盘，一次轮转就会产生两次设置写入。跳过重复项之后，只有真的换了工具才落盘。
+ *
+ * 【为什么里面要转型】`persistUiSettings` 自己是个 thunk，而 `createAsyncThunk`
+ * 默认的 `dispatch` 只认 plain action —— 与 `importThunks` 的
+ * `dispatch as unknown as TrackDispatch` 是同一手法。
+ */
+export const setToolModePersistent = createAsyncThunk<ToolMode, ToolMode>(
+    "session/setToolModePersistent",
+    (mode, { dispatch, getState }) => {
+        // 读的是**派发前**的状态：派发之后它必然等于 `mode`，那样判断永远为真。
+        if ((getState() as { session: SessionState }).session.toolMode === mode) return mode;
+        dispatch(setToolMode(mode));
+        (dispatch as unknown as (action: unknown) => void)(persistUiSettings());
+        return mode;
+    },
+);
 
 export default sessionSlice.reducer;

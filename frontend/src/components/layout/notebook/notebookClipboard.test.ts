@@ -98,3 +98,59 @@ test("components/layout/notebook/notebookClipboard.test.ts scripted checks", () 
     assertEqual(escapeMarkdownText("普通文字"), "普通文字", "plain text untouched");
     assertEqual(escapeMarkdownText("  1. 缩进"), "  1\\. 缩进", "indented ordered marker escaped");
 });
+
+/*
+ * 剪切：flavor 必须取自**选区被删之前**。
+ *
+ * 【要钉死什么】ProseMirror 的 `cut` 处理器在**同一次事件里**就把选区删掉了
+ * （它 dispatch 一条删除事务），而 flavor 写出器跑在冒泡阶段 —— 那时
+ * `state.selection` 已经塌缩，`selectionMarkdown` 只能返回空串，于是写出去的
+ * `text/plain` 是**空串**（浏览器会把它整个丢掉，剪贴板里只剩下 `text/html`）。
+ *
+ * 后果是一条混搭路径静默失效：`Ctrl+V` 还能从 html 还原，而**右键菜单的粘贴只能
+ * `navigator.clipboard.readText()`** —— 读到空串，"用快捷键剪切、用菜单粘贴"什么
+ * 都粘不出来。浏览器实测：修复前剪贴板类型只有 `["text/html"]`，修复后是
+ * `["text/plain","text/html"]`。
+ *
+ * 【怎么在 jsdom 里复现这个时序】真正删选区的是 ProseMirror，这里用一个注册得
+ * **更早**的冒泡监听代替它（同一元素上，先注册的先跑）：于是顺序与浏览器一致 ——
+ * 写出器的捕获监听 → 删选区 → 写出器的冒泡监听。
+ */
+test("剪切时 text/plain 取自选区被删之前（否则为空串）", async () => {
+    const { Editor } = await import("@tiptap/core");
+    const { buildNotebookExtensions } = await import("./notebookExtensions.ts");
+
+    const editor = new Editor({
+        element: document.createElement("div"),
+        extensions: buildNotebookExtensions({ markdownShortcuts: true, slashCommands: false }),
+        content: "一段文字",
+    });
+    const container = editor.view.dom;
+    document.body.append(container);
+    // 模拟 ProseMirror：在冒泡阶段删掉选区（比写出器的冒泡监听更早注册）。
+    container.addEventListener("cut", () => editor.commands.deleteSelection());
+
+    const written: Record<string, string> = {};
+    const remove = installClipboardFlavorWriter(
+        container,
+        () => ({ copyFormat: "markdown+html", copyPlainTextAs: "markdown" }),
+        () => editor,
+    );
+
+    editor.commands.setTextSelection({ from: 1, to: 3 }); // 选中前两个字
+    const target = container.querySelector("p") ?? container;
+    // 派发在**后代**上：容器的捕获监听先于它的冒泡监听，与浏览器一致。
+    target.dispatchEvent(
+        fakeClipboardEvent("cut", target, {
+            setData: (type: string, value: string) => {
+                written[type] = value;
+            },
+        }),
+    );
+
+    assertEqual(written["text/plain"], "一段", "剪切写出的 text/plain 必须是 Markdown，而不是空串");
+
+    remove();
+    editor.destroy();
+    container.remove();
+});

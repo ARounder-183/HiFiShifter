@@ -23,7 +23,7 @@
  * - `+` 的**位置常驻**（非修饰键动作永远占这一格），只在不能追加时禁用。
  * 于是进入 / 离开录入态、追加 / 删除槽位都不会移动任何已有元素。
  */
-import { Button, Flex, IconButton } from "@radix-ui/themes";
+import { Box, Button, Flex, IconButton } from "@radix-ui/themes";
 import { PlusIcon } from "@radix-ui/react-icons";
 
 import { AppStatusChip } from "../../../ui";
@@ -40,6 +40,15 @@ import { GESTURE_BADGES } from "./keybindingRowShared";
  * 以省略号收尾，完整文本在 `title` 里。
  */
 const CHIP_WIDTH_PX = 132;
+
+/**
+ * 追加槽位的边长（px），与 Radix `size="1"` 的 IconButton 一致。
+ *
+ * **这个值定义的是"槽位"，不是"按钮"**：槽位在每一行都存在（见下方 `Box` 的
+ * 说明），按钮只是可能不画。对齐因此由槽位保证，不依赖按钮的渲染与否 ——
+ * 也不依赖 Radix 内部的实际尺寸（万一它变了，所有行一起变，仍然齐）。
+ */
+const ADD_SLOT_PX = 24;
 
 export interface KeybindingsActionRowProps {
     /** 本地化后的操作名。由调用方解析，本组件不接触 i18n。 */
@@ -103,12 +112,6 @@ export function KeybindingsActionRow({
     const isRecording = recordingSlot !== null;
     const recordPrompt = isModifierOnly ? pressModifierLabel : pressKeyLabel;
     const atBindingLimit = bindings.length >= MAX_BINDINGS_PER_ACTION;
-
-    /*
-     * 追加按钮的槽位：非修饰键动作**永远**占这一格（哪怕按钮此刻不可用），
-     * 这样"进入录入态 / 到达上限"都不会让右边的 chip 群整体位移。
-     */
-    const showAddSlot = !isModifierOnly;
 
     // 追加槽位时该槽位还没有值，但仍要渲染出来 —— 否则用户点了 `+` 之后
     // 界面上没有任何变化，只能靠猜"现在该按键了"。
@@ -187,20 +190,42 @@ export function KeybindingsActionRow({
                         </Button>
                     );
                 })}
-                {showAddSlot && (
-                    <IconButton
-                        size="1"
-                        variant="ghost"
-                        color="gray"
-                        aria-label={addBindingLabel}
-                        data-hs-kb-add={label}
-                        /* 录入中或已达上限时禁用，但**位置常驻**（见 showAddSlot）。 */
-                        disabled={isRecording || atBindingLimit}
-                        onClick={onAddBinding}
-                    >
-                        <PlusIcon />
-                    </IconButton>
-                )}
+                {/*
+                 * 追加**槽位**：每一行都占这一格，与"这一行有没有按钮"无关。
+                 *
+                 * 【为什么连修饰键行也要占位】整行是 `justify="between"`，右侧
+                 * 那组贴着行右缘。修饰键手势不能绑多个键（按下哪一个算触发无法
+                 * 解释），因此它那一行**没有**追加按钮 —— 若连槽位也一起省掉，
+                 * 它的 chip 就会比其他行往右多出「按钮 + 间距」那一段，搜索把两类
+                 * 动作混排时 chip 列参差不齐。占位之后对齐由槽位保证，与按钮画不画
+                 * 无关。
+                 *
+                 * 槽位留空而不是放一个永久禁用的按钮：永远不可能被启用的控件是
+                 * 噪声（用户会去猜"怎样才能点它"）。
+                 */}
+                <Box
+                    data-hs-kb-add-slot={label}
+                    style={{
+                        width: ADD_SLOT_PX,
+                        height: ADD_SLOT_PX,
+                        flex: "0 0 auto",
+                    }}
+                >
+                    {!isModifierOnly && (
+                        <IconButton
+                            size="1"
+                            variant="ghost"
+                            color="gray"
+                            aria-label={addBindingLabel}
+                            data-hs-kb-add={label}
+                            /* 录入中或已达上限时禁用，但位置常驻。 */
+                            disabled={isRecording || atBindingLimit}
+                            onClick={onAddBinding}
+                        >
+                            <PlusIcon />
+                        </IconButton>
+                    )}
+                </Box>
             </Flex>
         </Flex>
     );

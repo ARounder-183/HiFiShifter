@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { FadeShapeIcon } from "./FadeShapeIcon";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 
@@ -380,7 +381,11 @@ export const ClipContextMenu: React.FC<{
         return () => window.removeEventListener("keydown", onKey);
     }, [onClose]);
 
-    return (
+    // 菜单挂到 `document.body`：弹出面留在布局盒里会被沿途任何一层
+    // `overflow: hidden` 裁掉（见 `src/index.css` 的 `.hs-menu--submenu`）。
+    // 由组件自己 portal（而不是让调用方 portal）—— 表面归组件所有，这样
+    // "菜单表面必须挂到 body"这条不变量对每个菜单都成立、也能被门禁检查。
+    return createPortal(
         <div
             ref={menuRef}
             role="menu"
@@ -1016,6 +1021,7 @@ export const ClipContextMenu: React.FC<{
                         </>
                     );
                 })()}
-        </div>
+        </div>,
+        document.body,
     );
 };
