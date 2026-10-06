@@ -9,6 +9,8 @@
 
 import type { Editor } from "@tiptap/core";
 
+import { normalizeLinkHref } from "./notebookLinkUrl";
+
 /**
  * 把 `href` 应用到当前选区。
  *
@@ -23,12 +25,16 @@ import type { Editor } from "@tiptap/core";
  * 只能自己再打一遍文字。常见编辑器（Docs / Notion / VS Code）在这里都是把地址
  * 本身插成链接文字，本函数照此处理。
  *
+ * 【为什么先归一化】`www.bilibili.com` 这种缺协议的地址若原样存进标记，会被
+ * 当作相对地址按应用 origin 解析（点开跳到 `tauri.localhost/www.bilibili.com`），
+ * 导出成 HTML 后同样坏掉。见 `notebookLinkUrl.ts`。
+ *
  * 【地址白名单】`setLink` 会拒绝 `javascript:` 之类的协议（见 Link 扩展的
  * `isAllowedUri`）。第 3 种情形会先插入文字，所以**先探一次** `can()`：
  * 否则非法地址会留下一段没有链接的裸文字，而用户以为链接建好了。
  */
 export function applyNotebookLink(editor: Editor, href: string): void {
-    const next = href.trim();
+    const next = normalizeLinkHref(href);
     if (!next) {
         clearNotebookLink(editor);
         return;

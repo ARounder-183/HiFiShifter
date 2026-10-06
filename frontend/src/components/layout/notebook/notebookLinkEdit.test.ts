@@ -98,6 +98,51 @@ test("components/layout/notebook/notebookLinkEdit.test.ts scripted checks", () =
         editor.destroy();
     }
 
+    // ── 缺协议的地址：补成绝对地址，否则会被当成相对地址 ─────────────
+    {
+        const editor = makeEditor("站");
+        collapseToEnd(editor);
+        applyNotebookLink(editor, "www.bilibili.com");
+        assertEqual(
+            documentMarkdown(editor),
+            "站[https://www.bilibili.com](https://www.bilibili.com)",
+            "a bare host is stored absolute, not relative to the app origin",
+        );
+        editor.destroy();
+    }
+
+    // ── 手写的相对链接（不经插入入口）：渲染时补协议，源码不动 ────────
+    {
+        const editor = makeEditor("[x](www.bilibili.com)");
+        const anchor = new DOMParser()
+            .parseFromString(editor.getHTML(), "text/html")
+            .querySelector("a");
+        assertEqual(
+            anchor?.getAttribute("href"),
+            "https://www.bilibili.com",
+            "hand-written relative href renders absolute",
+        );
+        assertEqual(
+            documentMarkdown(editor),
+            "[x](www.bilibili.com)",
+            "the author's markdown source is not rewritten",
+        );
+        editor.destroy();
+    }
+
+    // ── 内部链接（hifi://）不受归一化影响 ───────────────────────────
+    {
+        const editor = makeEditor("跳");
+        collapseToEnd(editor);
+        applyNotebookLink(editor, "hifi://seek/12.5");
+        assertEqual(
+            documentMarkdown(editor),
+            "跳[hifi://seek/12.5](hifi://seek/12.5)",
+            "internal links keep their own protocol",
+        );
+        editor.destroy();
+    }
+
     // ── 空地址：只摘链接标记，文字留下（unlink 而不是 delete） ───────
     {
         const editor = makeEditor("看看这里");
