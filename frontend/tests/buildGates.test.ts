@@ -40,7 +40,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { expect, test } from "vitest";
 
 /** `tsc -b` 冷启动在 CI 上可能要几十秒，给足余量。 */
@@ -134,19 +134,49 @@ test("扩展别名在 tsconfig 与 vite 两侧指向同一批文件", async () =
     }
 });
 
+/** `package.json` 的 scripts。 */
+function readScripts(): Record<string, string> {
+    const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as {
+        scripts?: Record<string, string>;
+    };
+    return pkg.scripts ?? {};
+}
+
 test(
     "类型检查通过（npm run typecheck）",
     () => {
-        // `shell: true` 是跨平台必需的：Windows 上 npm 是 npm.cmd，不经 shell 起不来。
-        const result = spawnSync("npm", ["run", "--silent", "typecheck"], {
+        const script = readScripts().typecheck;
+        if (!script) throw new Error("package.json 里没有 typecheck 脚本");
+
+        /*
+         * 直接跑脚本正文，**不经过 `npm run`**。
+         *
+         * 【为什么不嵌套 npm】`npm run` 会把 npm 自己的配置以 `npm_config_*` 导出给
+         * 子进程，子 npm 再把这些环境变量**重新读入**；若父子 npm 版本不同（例如
+         * 父 12 认得 `global-ignore-file`、子 11 不认得），子 npm 就会冒一句
+         * `Unknown env config "global-ignore-file"`。npm 自己在源码里也承认这条
+         * 往返是刻意留的兼容口子（"erroring here would break npm-invoked-npm"），
+         * 而 npm 13 打算把它变成错误。仓库脚本没有任何理由嵌套 npm。
+         *
+         * 【单一事实源怎么保住的】命令正文仍从 `package.json` 的 `typecheck` 读，
+         * 因此改了脚本这条门禁自动跟着改；下面还有一条断言钉住 `build` 用的是同一段。
+         */
+        const binDir = join(process.cwd(), "node_modules", ".bin");
+        const result = spawnSync(script, {
             // 与其它门禁一致：相对路径基于 vitest 的 cwd（frontend/）。
             cwd: process.cwd(),
+            // `shell: true` 是跨平台必需的：脚本正文里是 `tsc`，Windows 上那是 tsc.cmd。
             shell: true,
             encoding: "utf8",
+            // 脚本正文里的 `tsc` 由 npm 提供 PATH 才能找到，这里自己补上。
+            env: {
+                ...process.env,
+                PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
+            },
         });
 
         if (result.error) {
-            throw new Error(`无法启动 npm run typecheck：${result.error.message}`);
+            throw new Error(`无法启动类型检查：${result.error.message}`);
         }
         if (result.status === 0) return;
 
@@ -167,3 +197,19 @@ test(
     },
     TYPECHECK_TIMEOUT_MS,
 );
+
+/*
+ * `build` 的类型检查必须与 `typecheck` 是**同一段命令**，且不得嵌套 npm。
+ *
+ * 【为什么值得一条门禁】`build` 里内联这段命令是为了不与 `typecheck` 各写一份而
+ * 漂移，而"两份字符串一致"这件事本身只能靠断言守住（npm 没有 include 机制，
+ * 想复用就得 `npm run`，而那正是上面要避开的嵌套）。
+ */
+test("build 复用 typecheck 的命令，且不再嵌套 npm", () => {
+    const scripts = readScripts();
+    expect(scripts.typecheck, "缺少 typecheck 脚本").toBeTruthy();
+    expect(scripts.build, "build 没有复用 typecheck 的命令").toContain(`${scripts.typecheck} && `);
+    // `npm run` 会把 npm 配置以 `npm_config_*` 导出给子 npm，旧版子 npm 会对新键
+    // 报 "Unknown env config" —— 仓库脚本不该制造这种父子 npm。
+    expect(scripts.build, "build 又嵌套了 npm").not.toMatch(/\bnpm run\b/);
+});

@@ -6,7 +6,7 @@
     "scripts": {
         "dev": "vite",
         "typecheck": "tsc -b && tsc -p tsconfig.sdk.json --noEmit",
-        "build": "npm run typecheck && vite build",
+        "build": "tsc -b && tsc -p tsconfig.sdk.json --noEmit && vite build",
         "test": "vitest run",
         "bench": "vitest bench",
         "lint": "eslint .",
