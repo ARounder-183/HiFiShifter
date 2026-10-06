@@ -502,7 +502,11 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             // ★ 立即广播视口变化 → sticky 画布层同步重绘（绕过 React）
             timelineViewportBus.emit(
                 next,
-                pxPerSecRef.current,
+                // 与位置**同源**：取内核真值（旧 DOM 分支回退到 ref）。若用
+                // `pxPerSecRef.current`，渲染期尚未提交的新缩放会与帧里报来的位置配成
+                // "新位置 + 旧缩放"这一对自相矛盾的视口，GL 网格按旧缩放绘制、与按
+                // 新缩放排版的标尺错位。
+                livePxPerSec(),
                 viewportWidthRef.current,
                 scrollTopPxRef.current,
                 rowHeightRef.current,
@@ -514,6 +518,12 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             if (scrollStateRafRef.current == null) {
                 scrollStateRafRef.current = requestAnimationFrame(() => {
                     scrollStateRafRef.current = null;
+                    // 【不要拿"缩放进行中"的旧位置覆盖 React】内核与 React 的 pxPerSec
+                    // 不一致 ⇒ 一次缩放正在落地：此刻 `scrollLeftRef` 仍是**旧视口**的
+                    // 位置，用它 `setScrollLeft` 会把 React 打回旧位置，制造
+                    // "新缩放 + 旧位置"的错配（标尺某段既没有刻度线也没有文本）。
+                    // 缩放的落地路径会自己把**成对**的视口提交给 React。
+                    if (Math.abs(livePxPerSec() - pxPerSecRef.current) > 1e-9) return;
                     const next = scrollLeftRef.current;
                     if (
                         Math.abs(next - reactCommittedScrollLeftRef.current) < REACT_SCROLL_STEP_PX
@@ -549,7 +559,8 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             scrollLeftRef.current = next;
             timelineViewportBus.emit(
                 next,
-                pxPerSecRef.current,
+                // 同上：与位置同源（内核真值）。
+                livePxPerSec(),
                 viewportWidthRef.current,
                 scrollTopPxRef.current,
                 rowHeightRef.current,
@@ -584,24 +595,27 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             // state/layoutEffect 的延迟都会让时间轴比参数编辑器慢一帧以上。
             if (kernelHostRef.current !== null) {
                 // 内核模式：没有原生 scroller 可写，视口真值在 ScrollKernel。
-                // 一次原子提交（缩放 + 横向位置），用**目标** pxPerSec 算上限；
-                // applying 标志抑制回灌，避免两个面板形成反馈环。
-                timelineSyncApplyingRef.current = true;
-                const applied = viewportAccess.setZoomAndScroll(store.pxPerSec, store.scrollLeft);
-                // 同上：视口（可能含缩放）刚改完，立刻同任务提交一帧，避免
-                // "标尺文本已是新缩放、网格还是旧缩放"的那一帧。
-                kernelHostRef.current?.paintNow();
-                syncScrollLeft(applied.scrollLeft);
-                // 【缩放必须同时回写 React】标尺刻度、左侧轨道头与其它 React 派生量都
-                // 由 React 的 `pxPerSec` 布局；只写内核会让**轨道区按新缩放、标尺仍按
-                // 旧缩放**——两个面板因此看起来"网格没对齐、标尺也没对齐"。
                 //
-                // 上面那句"纯滚动"的注释只对 pxPerSec 未变的情形成立：那时标尺的
-                // 内容布局没变，只有平移量变了（由内核每帧写 transform），确实不必
-                // 走 React。缩放变了则必须走（与下方旧 DOM 分支的 `setPxPerSec` 同源）。
-                if (Math.abs(applied.pxPerSec - pxPerSecRef.current) > 1e-9) {
-                    setPxPerSec(applied.pxPerSec);
-                }
+                // 【为什么不在这里直接改内核】内核视口是"屏幕位置"的真值（标尺内容层
+                // 的 transform 与 GL 都按它画），而"有哪些刻度"由 React 的
+                // `(pxPerSec, scrollLeft)` 生成（见本文件的 `tickAxis`）。若这里直接
+                // `setZoomAndScroll`，就会有一帧是"内核已是新视口、React 还是旧
+                // `(pxPerSec, scrollLeft)`"——刻度窗口按**新缩放**换算**旧像素位置**，
+                // 锚点对应的时间完全错位，标尺某段既没有刻度线也没有文本。缩小
+                // （zoom out）时 React 的 scrollLeft 偏大 ⇒ 窗口偏右 ⇒ **视口左半段
+                // 露白**，与用户截图完全一致；缩放连续进行时每帧都错 ⇒ 持续闪烁。
+                //
+                // 因此把视口**成对**交给 React，再由下面的 layout effect 在同一帧内
+                // 把同一对视口原子应用到内核并立即重绘 —— 与滚轮缩放
+                // （`handleKernelZoomRequest` + `TimelinePanel` 的 layout effect）
+                // 完全同构。applying 标志抑制回灌，避免两个面板形成反馈环。
+                timelineSyncApplyingRef.current = true;
+                pendingTimelineSyncViewportRef.current = {
+                    scrollLeft: store.scrollLeft,
+                    pxPerSec: store.pxPerSec,
+                };
+                setPxPerSec(store.pxPerSec);
+                setScrollLeft(store.scrollLeft);
                 timelineSyncApplyingRef.current = false;
                 return;
             }
@@ -661,10 +675,28 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     useLayoutEffect(() => {
         const pending = pendingTimelineSyncViewportRef.current;
         if (!pending || !s.paramEditorSyncTimeline) return;
-        // 内核模式：apply() 已用 setZoomAndScroll 一次原子提交，不存在「等 React
-        // state 落地后再写 scroller」的两段式需求——直接清掉待处理项。
+        // 内核模式：等 React 真正拿到这一对 `(pxPerSec, scrollLeft)` 之后，在**同一帧**
+        // 内把同一对视口写给内核并立即重绘。此刻 DOM（标尺刻度）已按这一对值排好，
+        // 两层落在同一个投影上，不存在"新缩放 + 旧位置"的那一帧（见同步分支的说明）。
         if (kernelHostRef.current !== null) {
+            if (Math.abs(pxPerSec - pending.pxPerSec) > 1e-9) return;
+            if (Math.abs(scrollLeft - pending.scrollLeft) > 0.5) return;
             pendingTimelineSyncViewportRef.current = null;
+            const host = kernelHostRef.current;
+            timelineSyncApplyingRef.current = true;
+            const applied = viewportAccess.setZoomAndScroll(pending.pxPerSec, pending.scrollLeft);
+            host.paintNow();
+            syncScrollLeft(applied.scrollLeft);
+            timelineSyncApplyingRef.current = false;
+            // 内核可能把请求钳到自己的上下限（两个面板的视口宽不同 ⇒ 最小缩放可能
+            // 不同）。把**生效值**回灌 React，避免 React 停在请求值而与内核分叉 ——
+            // 分叉会让刻度窗口按错误缩放换算（正是本文件要消除的那类错配）。
+            if (Math.abs(applied.pxPerSec - pending.pxPerSec) > 1e-9) {
+                setPxPerSec(applied.pxPerSec);
+            }
+            if (Math.abs(applied.scrollLeft - pending.scrollLeft) > 0.5) {
+                setScrollLeft(applied.scrollLeft);
+            }
             return;
         }
         if (Math.abs(pxPerSec - pending.pxPerSec) > 1e-9) return;
@@ -678,7 +710,14 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         const applied = applyNativeScrollLeft(scroller, pending.scrollLeft);
         syncScrollLeft(applied);
         timelineSyncApplyingRef.current = false;
-    }, [pxPerSec, scrollLeft, s.paramEditorSyncTimeline, syncScrollLeft, kernelHostRef]);
+    }, [
+        pxPerSec,
+        scrollLeft,
+        s.paramEditorSyncTimeline,
+        syncScrollLeft,
+        kernelHostRef,
+        viewportAccess,
+    ]);
 
     // ── keyboard zoom layout effect ──────────────────────────
     useLayoutEffect(() => {

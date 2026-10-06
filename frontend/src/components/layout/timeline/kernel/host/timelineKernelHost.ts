@@ -56,6 +56,7 @@ import { getTimelineWheelAction, type ScrollbarZone } from "../../../wheelGestur
 import { buildTimelineTicks, type TimelineTick } from "../../runtime/buildTimelineTicks";
 import { createTickAxis } from "../../runtime/tickAxis";
 import { TICK_WINDOW_LAG_PX } from "../../runtime/tickWindow";
+import { shouldCommitViewport } from "../../runtime/viewportCommit";
 import {
     createTimelineAxis,
     playheadLineLeftPx,
@@ -492,8 +493,14 @@ export interface TimelineKernelHostArgs {
      *
      * 特殊说明：**它只负责 React 侧的对齐，不能承载"推给参数编辑器"这类逐帧
      * 同步**——256px 的死区会让对方滞后一跳一跳（见 `onScrollLeftFrame`）。
+     *
+     * 【为什么把 `pxPerSec` 一起给出】标尺的刻度窗口是 React 侧
+     * `(pxPerSec, scrollLeft)` 的函数，而屏幕位置由内核视口决定。若只提交位置，
+     * 任何"内核已换缩放、React 还不知道"的路径都会让窗口按**新缩放**换算**旧像素
+     * 位置**——锚点对应的时间错位，标尺某段既没有刻度线也没有文本。把缩放纳入同一
+     * 提交后，"内核换了缩放 ⇒ React 在同一帧收到成对视口"成为结构性保证。
      */
-    readonly onScrollLeftCommit?: (scrollLeftPx: number) => void;
+    readonly onScrollLeftCommit?: (scrollLeftPx: number, pxPerSec: number) => void;
     /**
      * 水平滚动位置的**逐帧**通知（每个绘制帧一次，无死区）。
      *
@@ -2351,6 +2358,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let lastVisibleRowCount = -1;
     /** 上一次量化提交给 React 的水平滚动位置（NaN = 从未提交）。 */
     let lastCommittedScrollLeft = Number.NaN;
+    let lastCommittedPxPerSec = Number.NaN;
     /** 上一次逐帧通知的水平滚动位置（NaN = 从未通知）；用于去重，避免空转。 */
     let lastFrameScrollLeft = Number.NaN;
     /**
@@ -2683,10 +2691,24 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
         // 水平滚动量化提交：标尺的**刻度范围**由 React 按 scrollLeft 计算，
         // 只写内容层 transform 会让刻度停留在初始视口（滚动后刻度消失）。
+        //
+        // 【缩放变化也要提交】刻度窗口是 React 侧 `(pxPerSec, scrollLeft)` 的函数，
+        // 而屏幕位置由内核视口决定。若只提交位置，"内核已换缩放、React 还不知道"
+        // 的路径就会让窗口按新缩放换算旧像素位置（锚点对应的时间错位，标尺某段失去
+        // 刻度与文本）。把 pxPerSec 纳入同一判据后，任何改缩放的路径都会在同一帧把
+        // **成对**的视口交给 React —— 不变量由内核保证，不依赖各调用方自觉。
+        // 相对容差：pxPerSec 是比例量（与 scrollKernel 的 zoomEquals 同一口径）。
         if (onScrollLeftCommit !== undefined) {
-            if (shouldWrite(view.scrollLeft, lastCommittedScrollLeft, SCROLL_COMMIT_STEP_PX)) {
+            if (
+                shouldCommitViewport(
+                    { scrollLeftPx: view.scrollLeft, pxPerSec: view.pxPerSec },
+                    { scrollLeftPx: lastCommittedScrollLeft, pxPerSec: lastCommittedPxPerSec },
+                    SCROLL_COMMIT_STEP_PX,
+                )
+            ) {
                 lastCommittedScrollLeft = view.scrollLeft;
-                onScrollLeftCommit(view.scrollLeft);
+                lastCommittedPxPerSec = view.pxPerSec;
+                onScrollLeftCommit(view.scrollLeft, view.pxPerSec);
             }
         }
 

@@ -140,10 +140,7 @@ import {
     beginClipGeometryPreview,
     endClipGeometryPreview,
 } from "./timeline/clipGeometryPreviewBus";
-import {
-    holdLoudnessFetch,
-    releaseLoudnessFetch,
-} from "./timeline/loudnessFetchGate";
+import { holdLoudnessFetch, releaseLoudnessFetch } from "./timeline/loudnessFetchGate";
 import { getBulkEditableClipIds } from "./timeline/hooks/bulkClipEdit";
 import { registerDragAbort } from "../../utils/gestureFocusGuard";
 import { resolveTrimSourceWindow, resolveTrimSnapOffset } from "./timeline/trimSourceWindow";
@@ -762,10 +759,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 参数编辑器不跟随」。
      */
     const handleKernelScrollLeftCommit = React.useCallback(
-        (next: number) => {
+        (next: number, nextPxPerSec: number) => {
             syncScrollLeft(next);
+            if (Math.abs(nextPxPerSec - pxPerSec) > 1e-9) {
+                // 【缩放变化时位置必须**同批**进 React】标尺刻度窗口是 React 侧
+                // `(pxPerSec, scrollLeft)` 的函数（见 useTimelineState 的 `tickAxis`），
+                // 只改其中一项就会有一帧按**新缩放**换算**旧像素位置**——锚点对应的
+                // 时间错位，标尺某段既没有刻度线也没有文本。纯滚动仍走
+                // `syncScrollLeft` 的量化路径，保住"滚动帧不进 React"。
+                setPxPerSec(nextPxPerSec);
+                setScrollLeftState(next);
+            }
         },
-        [syncScrollLeft],
+        [syncScrollLeft, pxPerSec, setPxPerSec, setScrollLeftState],
     );
 
     /**
@@ -3237,8 +3243,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                           "[data-hs-fade-tooltip-anchor]",
                       ) as HTMLElement | null);
             if (anchor !== null) {
-                const baseOffset =
-                    kernelSnapOffsetBaseRef.current?.snapOffsetSec ?? nextOffset;
+                const baseOffset = kernelSnapOffsetBaseRef.current?.snapOffsetSec ?? nextOffset;
                 publishFadeRichTooltip(
                     anchor,
                     buildSnapOffsetInfoText({
@@ -4075,7 +4080,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     dir: nextDir,
                     lengthSec: widthSec,
                     delta: {
-                        dir: nextDir - ((curveIsOut ? curveBase?.fadeOutDir : curveBase?.fadeInDir) ?? 0),
+                        dir:
+                            nextDir -
+                            ((curveIsOut ? curveBase?.fadeOutDir : curveBase?.fadeInDir) ?? 0),
                     },
                 });
                 return;
@@ -5285,8 +5292,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             const fadeOf = (clipId: string) => result.fades.find((fade) => fade.clipId === clipId);
             const fadeA = fadeOf(earlier.id);
             const fadeB = fadeOf(later.id);
-            const lengthA =
-                fadeA?.fadeOutSec ?? fadeA?.autoFadeOutSec ?? origin.earlierFadeOutSec;
+            const lengthA = fadeA?.fadeOutSec ?? fadeA?.autoFadeOutSec ?? origin.earlierFadeOutSec;
             const lengthB = fadeB?.fadeInSec ?? fadeB?.autoFadeInSec ?? origin.laterFadeInSec;
             publishFadeGripInfo(
                 fadeTooltipAnchor(),

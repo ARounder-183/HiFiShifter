@@ -65,12 +65,14 @@ export interface TimelineKernelViewProps {
      */
     readonly onZoomRequest?: (next: { pxPerSec: number; scrollLeft: number }) => void;
     /**
-     * 水平滚动位置的量化提交（每 256px 一次）。
+     * 水平滚动位置的量化提交（每 256px 一次，**缩放变化时必定提交**）。
      *
-     * 标尺的**刻度范围**由 React 按 `scrollLeft` 计算（`timelineTicks`），内核只写
-     * 标尺内容层的 transform 会让刻度停留在初始视口——滚动后刻度消失。
+     * 标尺的**刻度范围**由 React 按 `(pxPerSec, scrollLeft)` 计算（`timelineTicks`），
+     * 内核只写标尺内容层的 transform 会让刻度停留在初始视口——滚动后刻度消失。
+     * 缩放也必须随同提交：只给位置会让刻度窗口按新缩放换算旧像素位置（见宿主
+     * 同名 option 的说明）。
      */
-    readonly onScrollLeftCommit?: (scrollLeftPx: number) => void;
+    readonly onScrollLeftCommit?: (scrollLeftPx: number, pxPerSec: number) => void;
     /**
      * 水平滚动位置的逐帧通知（跨面板同步用）。
      *
@@ -692,7 +694,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 onVisibleRowsChange: (firstRow, rowCount) =>
                     callbacksRef.current.onVisibleRowsChange(firstRow, rowCount),
                 interactions: stableInteractions,
-                onScrollLeftCommit: (px) => callbacksRef.current.onScrollLeftCommit?.(px),
+                onScrollLeftCommit: (px, pxPerSec) =>
+                    callbacksRef.current.onScrollLeftCommit?.(px, pxPerSec),
                 onScrollLeftFrame: (px) => callbacksRef.current.onScrollLeftFrame?.(px),
                 onViewportWidthChange: (px) => callbacksRef.current.onViewportWidthChange?.(px),
                 onViewportSizeChange: (width, height) =>
