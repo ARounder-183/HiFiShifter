@@ -359,7 +359,8 @@ export function NotebookSettingsDialog({
                     >
                         <AppNumberField
                             value={settings.historySplitIdleMs}
-                            unit="milliseconds"
+                            // 以秒计量的等待时长：滚一格 1s（按住精细调整键 100ms）。
+                            unit="idleMilliseconds"
                             min={0}
                             max={600000}
                             suffix="ms"
@@ -377,7 +378,8 @@ export function NotebookSettingsDialog({
                     >
                         <AppNumberField
                             value={settings.imageMaxDimensionPx}
-                            unit="pixels"
+                            // 图片尺寸量级：滚一格 128px（按住精细调整键 8px）。
+                            unit="imagePixels"
                             min={0}
                             max={16384}
                             suffix="px"
