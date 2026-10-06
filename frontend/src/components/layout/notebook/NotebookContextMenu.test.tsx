@@ -408,3 +408,41 @@ test("指针进入子面板后，本层不再高亮触发项", async () => {
     await act(async () => hover(panel!));
     expect(highlighted(), "指针在子面板里，触发项不该还亮着").toEqual([]);
 });
+
+/*
+ * 悬停子菜单项**不得按序号点亮外层**。
+ *
+ * 【要钉死什么】`activeIndex` 是外层的状态，而递归渲染时每一层都有自己的 `index`。
+ * 子面板的项若也拿自己的下标去汇报悬停，就会**写进外层**：鼠标停在子菜单第 1 项，
+ * 外层第 1 项跟着亮；停在第 3 项，外层第 3 项亮 —— 两层高亮的**序号一一对应**。
+ * 这正是用户报的现象（子菜单「加粗」亮时外层「撤销」也亮，第 3 项「删除线」亮时
+ * 外层「剪切」也亮）。
+ *
+ * 子面板本来就不需要这个回调：它用 `useMenuKeyboard` 的 DOM 焦点导航，悬停高亮
+ * 由 CSS `:hover` 负责，没有 `data-active` 这回事。
+ */
+test("悬停子菜单项不会点亮外层的同序号项", async () => {
+    await mount(WITH_SUBMENU); // 外层：Copy(0) / Format(1, 含 Bold/Italic) / Find(2)
+
+    await act(async () => hover(itemByText("Format")));
+    const panel = document.querySelector(".hs-menu--submenu");
+    expect(panel, "子面板没有展开").not.toBeNull();
+
+    const subItems = Array.from(panel!.querySelectorAll<HTMLElement>(".hs-menu__item"));
+    expect(subItems.length).toBeGreaterThan(0);
+
+    // 子项下标 0 → 修复前会把外层下标 0（Copy）点亮。
+    await act(async () => hover(subItems[0]));
+    expect(highlighted(), "子项的下标写进了外层").toEqual([]);
+});
+
+test("悬停子菜单项时，只有它自己亮（靠 CSS :hover）", async () => {
+    await mount(WITH_SUBMENU);
+    await act(async () => hover(itemByText("Format")));
+    const panel = document.querySelector(".hs-menu--submenu")!;
+
+    await act(async () => hover(panel.querySelectorAll(".hs-menu__item")[1]));
+    // 外层的"当前项"仍然为空，而子项自己由 `:hover` 上色 —— 这条在浏览器里验证
+    // （jsdom 不套用样式表，量不出背景色），单测这一侧只钉住"没越界写入"。
+    expect(highlighted()).toEqual([]);
+});

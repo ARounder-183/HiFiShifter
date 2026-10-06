@@ -402,6 +402,19 @@ export function AppContextMenu({
         entries: AppMenuItemSpec[],
         layerActiveIndex: number,
         reserveIcon: boolean,
+        /**
+         * 本层是否**拥有** `activeIndex`：顶层传写入函数，子面板传 `null`。
+         *
+         * 【为什么必须区分】`activeIndex` 是**外层**的状态，而递归渲染时每一层都会
+         * 生成自己的 `index`。若子面板也用它汇报悬停，子项的下标就写进了外层：
+         * 实测鼠标停在子菜单第 1 项，外层第 1 项（撤销）跟着亮；停在第 3 项
+         * （删除线），外层第 3 项（剪切）亮 —— **两层的高亮序号一一对应**，正是
+         * 这个越界写入。
+         *
+         * 子面板本来也不需要它：它由 `useMenuKeyboard` 用真实 DOM 焦点导航，
+         * 悬停高亮由 CSS `:hover` 负责，没有 `data-active` 这回事。
+         */
+        onHoverItem: ((index: number) => void) | null,
     ): ReactNode =>
         entries.map((item, index) => (
             <Fragment key={item.key}>
@@ -422,8 +435,11 @@ export function AppContextMenu({
                         reserveIcon={reserveIcon}
                         // 触发项与子面板都要把"指针在哪"汇报给本层 —— 否则本层的高亮
                         // 会停在最后一个被划过的普通项上（见 `onHoverChange`）。
-                        onHoverChange={(onTrigger) =>
-                            setActiveIndex(onTrigger && !item.disabled ? index : -1)
+                        onHoverChange={
+                            onHoverItem
+                                ? (onTrigger) =>
+                                      onHoverItem(onTrigger && !item.disabled ? index : -1)
+                                : undefined
                         }
                         // 嵌套子菜单时，子面板自己也不能裁切（同一条约束，逐层适用）。
                         panelClassName={
@@ -432,14 +448,16 @@ export function AppContextMenu({
                                 : undefined
                         }
                     >
-                        {renderEntries(item.items, -1, reserveIcon)}
+                        {renderEntries(item.items, -1, reserveIcon, null)}
                     </AppSubMenu>
                 ) : (
                     <AppContextMenuItem
                         item={item}
                         active={index === layerActiveIndex}
                         reserveIcon={reserveIcon}
-                        onHover={() => setActiveIndex(item.disabled ? -1 : index)}
+                        onHover={
+                            onHoverItem ? () => onHoverItem(item.disabled ? -1 : index) : undefined
+                        }
                         onSelect={() => {
                             item.onSelect?.();
                             onClose();
@@ -474,7 +492,7 @@ export function AppContextMenu({
             onContextMenu={(event) => event.preventDefault()}
         >
             {header ? <div className="hs-menu__header">{header}</div> : null}
-            {renderEntries(items, activeIndex, reserveIconColumn)}
+            {renderEntries(items, activeIndex, reserveIconColumn, setActiveIndex)}
         </div>
     );
 }
@@ -489,7 +507,12 @@ function AppContextMenuItem({
     item: AppMenuItemSpec;
     active: boolean;
     reserveIcon: boolean;
-    onHover: () => void;
+    /**
+     * 悬停回调。**只有拥有 `activeIndex` 的那一层会传** —— 子面板的项不传，
+     * 因为它的下标不能写进外层（见 `renderEntries` 的 `onHoverItem`）。
+     * 悬停高亮本身由 CSS `:hover` 负责，与这个回调无关。
+     */
+    onHover?: () => void;
     onSelect: () => void;
 }) {
     if (item.heading) {
