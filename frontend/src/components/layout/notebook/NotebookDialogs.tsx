@@ -332,6 +332,33 @@ export function NotebookSettingsDialog({
                         onCheckedChange={(value) => onChange({ spellCheck: value })}
                     />
                     {/*
+                     * 右键菜单的详略。
+                     *
+                     * 一个下拉而不是三个开关："菜单要多全"是一根轴，拆成
+                     * `enabled` / `showFormatting` / `showInsert` 能表达 8 种组合，
+                     * 其中至少 3 种没有意义（关了总开关，另外两个仍在生效）。
+                     * `off` 这一档是必需的退路：应用**全局禁用**了 WebView 原生
+                     * 右键菜单，接管右键就得让用户能还回去。
+                     */}
+                    <AppField label={tf("notebook_setting_context_menu")}>
+                        <AppSelect
+                            value={settings.contextMenu}
+                            ariaLabel={tf("notebook_setting_context_menu")}
+                            onValueChange={(value) => onChange({ contextMenu: value })}
+                            options={[
+                                {
+                                    value: "full",
+                                    label: t("notebook_setting_context_menu_full"),
+                                },
+                                {
+                                    value: "compact",
+                                    label: t("notebook_setting_context_menu_compact"),
+                                },
+                                { value: "off", label: t("notebook_setting_context_menu_off") },
+                            ]}
+                        />
+                    </AppField>
+                    {/*
                      * 字号、撤销分节、图片长边都是**连续量**，因此是输入框而不是
                      * 下拉：下拉只能给出几个预设档位（字号原本 11/12/13/15/17），
                      * 用户想要 14 就得改配置文件。上下界与 `notebookSettings.ts`

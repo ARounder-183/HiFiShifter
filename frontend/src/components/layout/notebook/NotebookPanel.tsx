@@ -42,6 +42,7 @@ import {
     selectKeybinding,
 } from "../../../features/keybindings/keybindingsSlice";
 import { AppFileInput } from "../../../ui/FileInput";
+import type { AppMenuItemSpec } from "../../../ui";
 import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import { useDebouncedCallback } from "../../../utils/useDebouncedCallback";
 import { readWheelPixels } from "../timeline/kernel/input/normalizeWheel";
@@ -55,31 +56,56 @@ import { notebookApi } from "../../../services/api/notebook";
 import { settingsApi } from "../../../services/api/settings";
 import { webApi } from "../../../services/webviewApi";
 import { NotebookAttachmentsDialog, NotebookSettingsDialog } from "./NotebookDialogs";
+import { NotebookContextMenu } from "./NotebookContextMenu";
 import { NotebookFindBar } from "./NotebookFindBar";
 import { NotebookLinkEditor } from "./NotebookLinkEditor";
-import { applyNotebookLink, currentLinkHref } from "./notebookLinkEdit";
+import { applyNotebookLink, clearNotebookLink, currentLinkHref } from "./notebookLinkEdit";
+import { normalizeLinkHref } from "./notebookLinkUrl";
 import { NotebookReadonlyPreview } from "./NotebookReadonlyPreview";
+import type { NotebookPreviewContextRequest } from "./NotebookReadonlyPreview";
 import { NotebookStatusBar } from "./NotebookStatusBar";
 import { NotebookToolbar } from "./NotebookToolbar";
 import {
+    applyNotebookPastePayload,
     handleNotebookPaste,
     installClipboardFlavorWriter,
     isPlainInputTarget,
     stageClipboardPayload,
+    type NotebookPasteOverrides,
 } from "./notebookClipboard";
+import { writeNotebookSelection, type NotebookCopyFlavorOverride } from "./notebookClipboardWrite";
+import {
+    prepareNotebookContext,
+    prepareNotebookContextAtCaret,
+    type NotebookMenuTarget,
+} from "./notebookContextTarget";
+import {
+    buildNotebookContextMenu,
+    type NotebookMenuActions,
+    type NotebookMenuDisabled,
+} from "./notebookMenu";
 import { clearImageCache } from "./notebookImageCache";
 import {
     insertImageFromBlob,
+    insertImageFromClipboardBitmap,
     insertImageFromPath,
     insertMarkdown,
+    insertTable,
     type InsertContext,
 } from "./notebookInsert";
 import { dirName } from "./notebookPaths";
 import { normalizeNotebookSettings } from "./notebookSettings";
 import { nextFontSizeForZoomStep, NOTEBOOK_ZOOM_LINE_HEIGHT_PX } from "./notebookFontZoom";
 import { referencedAssetIds } from "./assetRef";
-import { buildClipLink, buildSeekLink, formatTimecode, parseInternalLink } from "./timecode";
-import { useNotebookEditor } from "./useNotebookEditor";
+import {
+    buildClipLink,
+    buildSeekLink,
+    formatTimecode,
+    parseInternalLink,
+    type NotebookInternalLink,
+} from "./timecode";
+import { runNotebookRedo, runNotebookUndo, useNotebookEditor } from "./useNotebookEditor";
+import { copyTextToClipboard } from "../../../utils/copyText";
 import "./notebook.css";
 
 export function NotebookPanel() {
@@ -103,6 +129,18 @@ export function NotebookPanel() {
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [notice, setNotice] = useState<string | null>(null);
     const [dropActive, setDropActive] = useState(false);
+    /**
+     * 右键菜单：坐标 + **已算好的**菜单项。
+     *
+     * 项在打开那一刻一次性算完（快照），不在渲染期重算 —— 菜单是弹出表面，
+     * 外部 pointerdown 即关闭，生命周期内编辑器不会再变。这样也免去了给菜单挂
+     * `editor.on("transaction")` 订阅。
+     */
+    const [menu, setMenu] = useState<{
+        x: number;
+        y: number;
+        items: AppMenuItemSpec[];
+    } | null>(null);
 
     const projectDir = useMemo(() => (projectPath ? dirName(projectPath) : null), [projectPath]);
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -330,17 +368,13 @@ export function NotebookPanel() {
         return () => element.removeEventListener("paste", handler, true);
     }, [editor, mode, notify, projectDir, refreshAssets, settings, t]);
 
-    // ── 内部链接点击（跳播放头 / 引用 Clip）────────────────────────
-    useEffect(() => {
-        const element = containerRef.current;
-        if (!element) return;
-        const handler = (event: MouseEvent) => {
-            const anchor = (event.target as HTMLElement | null)?.closest?.("a[href]");
-            if (!anchor) return;
-            const link = parseInternalLink(anchor.getAttribute("href") ?? "");
-            if (!link) return;
-            event.preventDefault();
-            event.stopPropagation();
+    // ── 内部链接（跳播放头 / 引用 Clip）────────────────────────────
+    //
+    // 抽成回调是因为它有**两个**入口：正文里的点击拦截（下面那个 effect）与
+    // 右键菜单的「打开链接」。两处若各写一遍，"跳播放头时要不要顺带提示"
+    // 这类细节必然分叉。
+    const runInternalLink = useCallback(
+        (link: NotebookInternalLink) => {
             if (link.type === "seek") {
                 dispatch(setplayheadSec(link.seconds));
                 void dispatch(seekPlayhead(link.seconds));
@@ -353,10 +387,25 @@ export function NotebookPanel() {
                 void dispatch(seekPlayhead(clip.startSec));
             }
             void dispatch(selectClipRemote(link.clipId));
+        },
+        [clips, dispatch, notify, t],
+    );
+
+    useEffect(() => {
+        const element = containerRef.current;
+        if (!element) return;
+        const handler = (event: MouseEvent) => {
+            const anchor = (event.target as HTMLElement | null)?.closest?.("a[href]");
+            if (!anchor) return;
+            const link = parseInternalLink(anchor.getAttribute("href") ?? "");
+            if (!link) return;
+            event.preventDefault();
+            event.stopPropagation();
+            runInternalLink(link);
         };
         element.addEventListener("click", handler, true);
         return () => element.removeEventListener("click", handler, true);
-    }, [clips, dispatch, notify, t]);
+    }, [runInternalLink]);
 
     /**
      * 窗口级拖放的落点判定与插入，放进 ref 供注册一次的监听调用。
@@ -569,6 +618,398 @@ export function NotebookPanel() {
         [insertContext],
     );
 
+    // ── 右键菜单 ───────────────────────────────────────────────────
+    //
+    // 结构：`openXxxMenu` 负责"落点 + 开关快照 → 菜单项"，`buildMenuActions`
+    // 负责"这个落点能做什么"。内容规则全在 `notebookMenu.ts`（纯函数、可单测），
+    // 这里只做接线。
+    const copySelection = useCallback(
+        async (instance: Editor | null, cut: boolean, override?: NotebookCopyFlavorOverride) => {
+            if (!instance || instance.isDestroyed) return;
+            const written = await writeNotebookSelection(instance, settings, override);
+            if (!written) {
+                // 写不进去就**不要删**：剪切失败还照删，等于把用户的内容吃掉。
+                notify(t("notebook_ctx_copy_failed"));
+                return;
+            }
+            if (cut) instance.chain().focus().deleteSelection().run();
+        },
+        [notify, settings, t],
+    );
+
+    /**
+     * 从系统剪贴板粘贴。
+     *
+     * 【为什么只读文本】浏览器不允许脚本在用户手势之外读剪贴板，能拿到的只有
+     * `readText()`；`text/html` 与图片读不到。图片另有一条路（"从剪贴板粘贴图片"
+     * 走后端读 CF_DIB），因此这里把空文本原样交给同一条优先级链 —— 万一剪贴板
+     * 里其实是一张位图，位图兜底仍会命中。
+     */
+    const pasteFromClipboard = useCallback(
+        async (overrides?: NotebookPasteOverrides) => {
+            if (!insertContext) return;
+            let text = "";
+            try {
+                text = await navigator.clipboard.readText();
+            } catch {
+                // 读不到（无权限 / 非安全上下文）不在这里报错：交给下面的统一
+                // 载荷链去决定（它可能命中位图，也可能给出"没有可粘贴的内容"）。
+                text = "";
+            }
+            await applyNotebookPastePayload(
+                insertContext,
+                { files: [], html: "", text },
+                overrides,
+            );
+        },
+        [insertContext],
+    );
+
+    /**
+     * 按落点组装动作。
+     *
+     * 【为什么要显式传编辑器实例】分栏预览栏有**自己的**编辑器实例（同一套扩展、
+     * `editable: false`）。复制必须作用于用户实际右键的那一份 —— 用主编辑器去
+     * 复制，拿到的是左栏的选区，不是他选中的东西。其余动作（粘贴 / 插入 /
+     * 链接编辑）只在 `editable` 时才会被发出，而预览栏的 `editable` 是 false，
+     * 因此那些绑定到主编辑器的动作不会在预览栏出现。
+     *
+     * 图片与暂存块走各自的 NodeView（它们 `stopPropagation`，面板收不到事件），
+     * 因此这里的 `target` 实际只会是 text / empty / link / table / list。
+     * 仍然按完整联合类型处理，免得将来放开 NodeView 时漏掉分支。
+     */
+    const buildMenuActions = useCallback(
+        (
+            target: NotebookMenuTarget,
+            instance: Editor | null,
+        ): { actions: NotebookMenuActions; disabled: NotebookMenuDisabled } => {
+            if (!instance || instance.isDestroyed || !insertContext) {
+                return { actions: {}, disabled: {} };
+            }
+            const chain = () => instance.chain().focus();
+            const itemType = target.kind === "list" ? target.itemType : "listItem";
+            const actions: NotebookMenuActions = {
+                undo: () => runNotebookUndo(instance, bridge),
+                redo: () => runNotebookRedo(instance, bridge),
+                cut: () => void copySelection(instance, true),
+                copy: () => void copySelection(instance, false),
+                copyMarkdown: () => void copySelection(instance, false, "markdown"),
+                copyPlain: () => void copySelection(instance, false, "text"),
+                paste: () => void pasteFromClipboard(),
+                pastePlain: () => void pasteFromClipboard({ plainPasteMode: "text" }),
+                pasteMarkdown: () => void pasteFromClipboard({ plainPasteMode: "markdown" }),
+                pasteImage: () => void insertImageFromClipboardBitmap(insertContext),
+                stageClipboard: () => handlers.stageClipboard(),
+                selectAll: () => {
+                    chain().selectAll().run();
+                },
+                bold: () => {
+                    chain().toggleBold().run();
+                },
+                italic: () => {
+                    chain().toggleItalic().run();
+                },
+                strike: () => {
+                    chain().toggleStrike().run();
+                },
+                code: () => {
+                    chain().toggleCode().run();
+                },
+                clearFormatting: () => {
+                    chain().unsetAllMarks().run();
+                },
+                heading1: () => {
+                    chain().toggleHeading({ level: 1 }).run();
+                },
+                heading2: () => {
+                    chain().toggleHeading({ level: 2 }).run();
+                },
+                heading3: () => {
+                    chain().toggleHeading({ level: 3 }).run();
+                },
+                paragraph: () => {
+                    chain().setParagraph().run();
+                },
+                indent: () => {
+                    chain().sinkListItem(itemType).run();
+                },
+                outdent: () => {
+                    chain().liftListItem(itemType).run();
+                },
+                tableRowAbove: () => {
+                    chain().addRowBefore().run();
+                },
+                tableRowBelow: () => {
+                    chain().addRowAfter().run();
+                },
+                tableColLeft: () => {
+                    chain().addColumnBefore().run();
+                },
+                tableColRight: () => {
+                    chain().addColumnAfter().run();
+                },
+                tableDeleteRow: () => {
+                    chain().deleteRow().run();
+                },
+                tableDeleteCol: () => {
+                    chain().deleteColumn().run();
+                },
+                tableDelete: () => {
+                    chain().deleteTable().run();
+                },
+                tableToggleHeader: () => {
+                    chain().toggleHeaderRow().run();
+                },
+                insertImage: () => handlers.insertImage(),
+                insertTable: () => insertTable(instance),
+                insertRule: () => {
+                    chain().setHorizontalRule().run();
+                },
+                insertTimecode: () => handlers.insertTimecode(),
+                insertClipReference: () => handlers.insertClipReference(),
+                insertProjectInfo: () => handlers.insertProjectInfo(),
+                find: () => setFindOpen(true),
+            };
+
+            if (target.kind === "link") {
+                const href = target.href;
+                actions.linkOpen = () => {
+                    const internal = parseInternalLink(href);
+                    if (internal) {
+                        runInternalLink(internal);
+                        return;
+                    }
+                    if (!/^https?:/i.test(href)) return;
+                    void (async () => {
+                        try {
+                            const { openUrl } = await import("@tauri-apps/plugin-opener");
+                            await openUrl(href);
+                        } catch {
+                            // 非 Tauri 环境（浏览器调试）没有 opener：退回到
+                            // 复制地址，至少让用户能自己粘进浏览器。
+                            await copyTextToClipboard(href);
+                        }
+                    })();
+                };
+                // 复制的是**归一化后**的地址：与正文里渲染出来的 href 一致。
+                // 直接复制存储值会把 `www.bilibili.com` 这种缺协议的写法给出去。
+                actions.linkCopy = () => void copyTextToClipboard(normalizeLinkHref(href));
+                actions.linkEdit = () => openLinkEditor();
+                actions.linkRemove = () => {
+                    const current = editorRef.current;
+                    if (current && !current.isDestroyed) clearNotebookLink(current);
+                };
+            }
+
+            const disabled: NotebookMenuDisabled = {};
+            // 没有选中音频块时，"插入 Clip 引用"点了只会弹一句提示；菜单里直接
+            // 置灰并说明原因更省事（tooltip 就是为"为什么点不了"准备的）。
+            const hasClip =
+                selectedClipId !== null && clips.some((entry) => entry.id === selectedClipId);
+            if (!hasClip) disabled.insertClipReference = t("notebook_clip_ref_none");
+
+            return { actions, disabled };
+        },
+        [
+            bridge,
+            clips,
+            copySelection,
+            handlers,
+            insertContext,
+            openLinkEditor,
+            pasteFromClipboard,
+            runInternalLink,
+            selectedClipId,
+            t,
+        ],
+    );
+
+    /** 富文本：落点由编辑器几何解析，并可能移动光标。 */
+    const openEditorMenu = useCallback(
+        (x: number, y: number) => {
+            if (settings.contextMenu === "off") return;
+            const instance = editorRef.current;
+            if (!instance || instance.isDestroyed) return;
+            const { target, flags } = prepareNotebookContext(instance, x, y);
+            const { actions, disabled } = buildMenuActions(target, instance);
+            setMenu({
+                x,
+                y,
+                items: buildNotebookContextMenu({
+                    surface: "rich",
+                    scope: settings.contextMenu === "compact" ? "compact" : "full",
+                    context: { target, flags },
+                    translate: t,
+                    actions,
+                    disabled,
+                }),
+            });
+        },
+        [buildMenuActions, settings.contextMenu, t],
+    );
+
+    /**
+     * 富文本的**键盘**入口：锚在光标处，落点直接用光标位置。
+     *
+     * 不做"坐标 → 位置"的反查（`prepareNotebookContextAtCaret` 的注释解释了为什么：
+     * 文档末尾的坐标反查回来会命中最后一块，实测在表格结尾的笔记上给出表格菜单）。
+     */
+    const openEditorMenuAtCaret = useCallback(() => {
+        if (settings.contextMenu === "off") return;
+        const instance = editorRef.current;
+        if (!instance || instance.isDestroyed) return;
+        const coords = instance.view.coordsAtPos(instance.state.selection.from);
+        const prepared = prepareNotebookContextAtCaret(instance, {
+            x: coords.left,
+            y: coords.bottom,
+        });
+        const { actions, disabled } = buildMenuActions(prepared.context.target, instance);
+        setMenu({
+            x: prepared.x,
+            y: prepared.y,
+            items: buildNotebookContextMenu({
+                surface: "rich",
+                scope: settings.contextMenu === "compact" ? "compact" : "full",
+                context: prepared.context,
+                translate: t,
+                actions,
+                disabled,
+            }),
+        });
+    }, [buildMenuActions, settings.contextMenu, t]);
+
+    /**
+     * 分栏只读预览：落点由**预览栏自己**的编辑器解析。
+     *
+     * 预览栏是另一个编辑器实例，几何与开关都得问它要 —— 拿主编辑器的坐标去
+     * 解析会得到错位的落点，而它的 `editable: true` 会让菜单错误地给出编辑项。
+     * 因此由预览栏解析好再传上来（`onContextMenu` 的载荷）。
+     */
+    const openPreviewMenu = useCallback(
+        (payload: NotebookPreviewContextRequest) => {
+            if (settings.contextMenu === "off") return;
+            const { actions, disabled } = buildMenuActions(payload.target, payload.editor);
+            setMenu({
+                x: payload.x,
+                y: payload.y,
+                items: buildNotebookContextMenu({
+                    surface: "preview",
+                    scope: settings.contextMenu === "compact" ? "compact" : "full",
+                    context: { target: payload.target, flags: payload.flags },
+                    translate: t,
+                    actions,
+                    disabled,
+                }),
+            });
+        },
+        [buildMenuActions, settings.contextMenu, t],
+    );
+
+    /**
+     * 源码视图：`<textarea>` 没有 schema，只有"有没有选中"。
+     *
+     * 撤销 / 剪切 / 复制走 `document.execCommand`（textarea 的原生路径，与
+     * Ctrl+Z / Ctrl+X 今天的行为完全一致）；粘贴因为浏览器不允许脚本读剪贴板，
+     * 只能 `readText()` + `insertText` —— 后者会派发 `input` 事件，因此 React 的
+     * onChange 照常触发，Redux 与原生撤销栈都不会被绕过。
+     */
+    const openSourceMenu = useCallback(
+        (x: number, y: number) => {
+            if (settings.contextMenu === "off") return;
+            const textarea = sourceTextareaRef.current;
+            const runNative = (command: "undo" | "redo" | "cut" | "copy") => {
+                const element = sourceTextareaRef.current;
+                if (!element) return;
+                element.focus();
+                document.execCommand(command);
+            };
+            const actions: NotebookMenuActions = {
+                undo: () => runNative("undo"),
+                redo: () => runNative("redo"),
+                cut: () => runNative("cut"),
+                copy: () => runNative("copy"),
+                paste: () => {
+                    const element = sourceTextareaRef.current;
+                    if (!element) return;
+                    element.focus();
+                    void (async () => {
+                        try {
+                            const text = await navigator.clipboard.readText();
+                            if (!text) return;
+                            document.execCommand("insertText", false, text);
+                        } catch {
+                            notify(t("notebook_paste_nothing"));
+                        }
+                    })();
+                },
+                selectAll: () => {
+                    textarea?.focus();
+                    textarea?.select();
+                },
+                find: () => setFindOpen(true),
+            };
+            const context = {
+                target: { kind: "empty" } as const,
+                flags: {
+                    selectionEmpty: !textarea || textarea.selectionStart === textarea.selectionEnd,
+                    editable: true,
+                    canUndo: true,
+                    canRedo: true,
+                    isBold: false,
+                    isItalic: false,
+                    isStrike: false,
+                    isCode: false,
+                    hasMarks: false,
+                    headingLevel: null,
+                    canIndent: false,
+                },
+            };
+            setMenu({
+                x,
+                y,
+                items: buildNotebookContextMenu({
+                    surface: "source",
+                    scope: settings.contextMenu === "compact" ? "compact" : "full",
+                    context,
+                    translate: t,
+                    actions,
+                }),
+            });
+        },
+        [notify, settings.contextMenu, t],
+    );
+
+    /**
+     * 键盘入口：`ContextMenu` 键 / `Shift+F10` 在光标处开菜单。
+     *
+     * `App.tsx` 全局屏蔽了这两个键的**默认行为**（原生菜单），但不阻止传播 ——
+     * 因此这里还能收到。不给它做快捷键注册表项：它只在"焦点在记事本编辑器里"
+     * 时成立，是表面局部行为，与 Ctrl+F 的处理方式一致。
+     */
+    useEffect(() => {
+        const element = containerRef.current;
+        if (!element) return;
+        const handler = (event: KeyboardEvent) => {
+            if (event.key !== "ContextMenu" && !(event.key === "F10" && event.shiftKey)) return;
+            const target = event.target as HTMLElement | null;
+            if (!target?.closest?.(".hs-notebook-rich, .hs-notebook-source")) return;
+            if (settings.contextMenu === "off") return;
+            event.preventDefault();
+            event.stopPropagation();
+
+            if (target.closest(".hs-notebook-source")) {
+                const rect = sourceTextareaRef.current?.getBoundingClientRect();
+                openSourceMenu(rect ? rect.left + 24 : 0, rect ? rect.top + 24 : 0);
+                return;
+            }
+            openEditorMenuAtCaret();
+        };
+        element.addEventListener("keydown", handler);
+        return () => element.removeEventListener("keydown", handler);
+    }, [openEditorMenuAtCaret, openSourceMenu, settings.contextMenu]);
+
+    const closeMenu = useCallback(() => setMenu(null), []);
+
     // ── 模式切换 / 关闭：收尾并分节 ────────────────────────────────
     const changeMode = useCallback(
         (next: NotebookMode) => {
@@ -579,12 +1020,15 @@ export function NotebookPanel() {
             // 链接浮层编辑的是富文本的 mark，源码视图下没有意义：切走即收起，
             // 免得切回来时它凭空又出现（还带着上一次的草稿）。
             closeLinkEditor();
+            // 菜单里的项是**切模式前**算出来的快照（例如源码视图的"粘贴"、
+            // 富文本的"加粗"）：留着它，用户切完模式还能点到作用于旧表面的项。
+            closeMenu();
             dispatch(setNotebookMode(next));
             void settingsApi
                 .saveUiSettings({ notebook: { ...settings, defaultMode: next } })
                 .catch(() => {});
         },
-        [closeLinkEditor, dispatch, flushSourcePersist, mode, seal, settings],
+        [closeLinkEditor, closeMenu, dispatch, flushSourcePersist, mode, seal, settings],
     );
 
     /**
@@ -829,6 +1273,10 @@ export function NotebookPanel() {
                             scheduleSourcePersist(value);
                         }}
                         onBlur={flushSourcePersist}
+                        onContextMenu={(event) => {
+                            event.preventDefault();
+                            openSourceMenu(event.clientX, event.clientY);
+                        }}
                     />
                 ) : null}
 
@@ -840,7 +1288,17 @@ export function NotebookPanel() {
                         className="hs-scroll-gutter min-w-0 flex-1 overflow-auto bg-qt-base"
                     >
                         {editor ? (
-                            <EditorContent editor={editor} className="hs-notebook-rich" />
+                            <EditorContent
+                                editor={editor}
+                                className="hs-notebook-rich"
+                                // 挂在编辑器元素上（而不是外层滚动容器）：图片与
+                                // 暂存块卡片会 `stopPropagation`，因此落在这两类
+                                // 节点上的右键由各自的 NodeView 处理，不会双重弹窗。
+                                onContextMenu={(event) => {
+                                    event.preventDefault();
+                                    openEditorMenu(event.clientX, event.clientY);
+                                }}
+                            />
                         ) : null}
                     </div>
                 ) : null}
@@ -849,6 +1307,7 @@ export function NotebookPanel() {
                     <NotebookReadonlyPreview
                         markdown={markdown}
                         scrollSyncSource={richScrollRef.current}
+                        onContextMenu={openPreviewMenu}
                     />
                 ) : null}
 
@@ -875,6 +1334,19 @@ export function NotebookPanel() {
                 dirty={dirty}
                 notice={notice}
             />
+
+            {/* 菜单挂在 `document.body`（见 NotebookContextMenu），因此放在
+                JSX 的哪一层都不影响定位 —— 这里放在面板根部只是为了"面板关掉
+                菜单就跟着没"。 */}
+            {menu ? (
+                <NotebookContextMenu
+                    x={menu.x}
+                    y={menu.y}
+                    items={menu.items}
+                    ariaLabel={t("notebook_ctx_aria")}
+                    onClose={closeMenu}
+                />
+            ) : null}
 
             <AppFileInput
                 inputRef={fileInputRef}

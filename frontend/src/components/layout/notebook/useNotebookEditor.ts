@@ -55,6 +55,25 @@ export interface NotebookLinkBridge {
     open: () => void;
 }
 
+/**
+ * 撤销一步：先编辑器内历史，耗尽再回落应用级。
+ *
+ * 【为什么抽成导出函数】这条"先细后粗"的规则此前只写在键盘快捷键的闭包里，
+ * 于是**只有键盘能用**。右键菜单的"撤销"需要同一条规则，若在菜单里再抄一份，
+ * 两份迟早会漂移（例如某天给应用级撤销加上"先 seal 再撤"的前置动作，只会改到
+ * 其中一处）。这里把它变成唯一实现，键盘扩展与菜单都调它。
+ */
+export function runNotebookUndo(editor: Editor, bridge: NotebookEditorBridge): void {
+    if (editor.commands.undo()) return;
+    bridge.undo();
+}
+
+/** 重做一步。语义与 `runNotebookUndo` 对称（同样"先细后粗"）。 */
+export function runNotebookRedo(editor: Editor, bridge: NotebookEditorBridge): void {
+    if (editor.commands.redo()) return;
+    bridge.redo();
+}
+
 /** Ctrl+Z 的"先细后粗"桥接扩展。 */
 function createUndoBridge(bridge: NotebookEditorBridge) {
     return Extension.create({
@@ -62,18 +81,15 @@ function createUndoBridge(bridge: NotebookEditorBridge) {
         addKeyboardShortcuts() {
             return {
                 "Mod-z": () => {
-                    if (this.editor.commands.undo()) return true;
-                    bridge.undo();
+                    runNotebookUndo(this.editor, bridge);
                     return true;
                 },
                 "Mod-Shift-z": () => {
-                    if (this.editor.commands.redo()) return true;
-                    bridge.redo();
+                    runNotebookRedo(this.editor, bridge);
                     return true;
                 },
                 "Mod-y": () => {
-                    if (this.editor.commands.redo()) return true;
-                    bridge.redo();
+                    runNotebookRedo(this.editor, bridge);
                     return true;
                 },
             };
@@ -260,7 +276,22 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
                     }, idleDelay);
                 }
             },
-            onBlur: () => {
+            onBlur: ({ event }) => {
+                /*
+                 * 焦点进了**我们自己刚打开的菜单**时不算"离开编辑器"。
+                 *
+                 * 【为什么看 `relatedTarget` 而不是 `document.activeElement`】
+                 * 焦点切换的事件顺序是"旧元素 blur → 新元素 focus"，在 blur 处理器
+                 * 里 `document.activeElement` 可能还停在旧元素上，判据会漏。而
+                 * `relatedTarget` 就是即将获得焦点的那个元素，确定。
+                 *
+                 * 【为什么必须跳过】菜单（`AppContextMenu` 的 `autoFocus`）要收焦点
+                 * 才能用方向键导航。若不跳过，每次右键都会走一遍收尾：把待写内容立刻
+                 * 落盘并**关掉后端的撤销合并窗口** —— 用户只是右键复制一段文字，回到
+                 * 编辑器继续打字，撤销步却已经被切成两段。
+                 */
+                const next = event.relatedTarget as HTMLElement | null;
+                if (next?.closest?.('[data-hs-context-menu="1"]')) return;
                 // 失焦即收尾：把待写内容落盘并关掉合并窗口，这样用户切去时间轴
                 // 操作后，撤销不会再和"刚才那一段笔记"合并成同一步。
                 seal();

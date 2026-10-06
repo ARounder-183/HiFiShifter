@@ -6,7 +6,9 @@
  * 2. **缺失占位**：附件被删或文件被移走时显示明确占位，而不是一个破图标；
  * 3. **拖拽改宽**：拖右侧把手改宽度，只在松手时提交一次事务（拖动过程中
  *    用本地状态预览，避免每个 pointermove 都写进撤销历史）；
- * 4. **右键菜单**：复制 / 另存为 / 在文件管理器中显示 / 还原宽度 / 删除。
+ * 4. **右键菜单**：图片专属动作（复制 / 另存为 / 还原宽度 / 替代文本 / 移除）
+ *    **加上通用的复制组** —— 后者与正文菜单同源（`notebookMenu.ts`），因此
+ *    "右键图片能复制为 Markdown"这件事不需要在这里再实现一遍。
  */
 
 import { NodeViewWrapper, type NodeViewProps } from "@tiptap/react";
@@ -16,8 +18,10 @@ import { useAppSelector } from "../../../app/hooks";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { notebookApi } from "../../../services/api/notebook";
 import { assetIdFromSrc, isAssetRef } from "./assetRef";
-import { NotebookContextMenu, type NotebookMenuItem } from "./NotebookContextMenu";
+import { NotebookContextMenu } from "./NotebookContextMenu";
 import { AppConfirmDialog } from "../../../ui";
+import { writeNotebookSelection } from "./notebookClipboardWrite";
+import { buildNotebookContextMenu, type NotebookMenuActions } from "./notebookMenu";
 import { resolveImage, subscribeAssetInvalidation } from "./notebookImageCache";
 import { registerDragAbort } from "../../../utils/gestureFocusGuard";
 import { dirName } from "./notebookPaths";
@@ -25,8 +29,9 @@ import { dirName } from "./notebookPaths";
 const MIN_WIDTH = 48;
 
 export function NotebookImageNodeView(props: NodeViewProps) {
-    const { node, updateAttributes, deleteNode, selected } = props;
+    const { node, updateAttributes, deleteNode, selected, editor, getPos } = props;
     const { t } = useI18n();
+    const settings = useAppSelector((state) => state.notebook.settings);
     const projectPath = useAppSelector((state) => state.session.project.path);
     const allowRemoteImages = useAppSelector((state) => state.notebook.settings.allowRemoteImages);
     const src = String(node.attrs.src ?? "");
@@ -155,50 +160,100 @@ export function NotebookImageNodeView(props: NodeViewProps) {
     const loadFailed = failedSrc !== null && failedSrc === current.url;
     const showMissing = current.missing || loadFailed;
 
-    const menuItems: NotebookMenuItem[] = useMemo(() => {
-        const items: NotebookMenuItem[] = [];
-        items.push({
-            key: "copy-image",
-            label: t("notebook_image_copy"),
-            disabled: !current.url || loadFailed,
-            onSelect: () => {
+    /**
+     * 右键落点先把这个节点选中。
+     *
+     * 【为什么必须】菜单里的"复制 / 剪切"作用于**当前选区**。不选中的话，
+     * ProseMirror 的选区还停在别处（甚至是空的），用户右键一张图再点"复制"，
+     * 复制到的是上一次的选区 —— 静默复制了错的东西。`setNodeSelection` 让它
+     * 成为一个真正的 NodeSelection，同时卡片也会亮起选中态（附带的好处：
+     * "菜单要操作的是这一张"变得可见）。
+     */
+    const selectSelf = useCallback(() => {
+        // `getPos()` 的返回类型是 `number | undefined`：节点已被删除时它是 undefined，
+        // 而 `setNodeSelection` 只接受数字。必须先挡住，否则不是"选择失败"而是抛错。
+        const pos = getPos();
+        if (typeof pos !== "number") return;
+        try {
+            editor.commands.setNodeSelection(pos);
+        } catch {
+            // 位置已失效（节点刚被删）：菜单仍可打开，只是复制会拿到空选区。
+        }
+    }, [editor, getPos]);
+
+    const menuItems = useMemo(() => {
+        // 关掉右键菜单时连 `⋯` 之外的路也不走：与正文菜单同一档设置。
+        if (settings.contextMenu === "off") return [];
+        const imageMissingReason = t("notebook_image_missing");
+        const actions: NotebookMenuActions = {
+            // ── 图片专属 ──────────────────────────────────────────────
+            imageCopy: () => {
                 void copyImageToClipboard(current.url);
             },
-        });
-        if (isAsset && assetId) {
-            items.push({
-                key: "save-as",
-                label: t("notebook_image_save_as"),
-                onSelect: () => {
-                    void notebookApi.saveAssetAs(assetId).catch(() => {});
-                },
-            });
-        }
-        items.push({
-            key: "width-reset",
-            label: t("notebook_image_width_reset"),
-            separatorBefore: true,
-            disabled: width === null,
-            onSelect: () => commitWidth(null),
-        });
-        items.push({
-            key: "alt",
-            label: t("notebook_image_edit_alt"),
-            onSelect: () => {
+            imageWidthReset: () => commitWidth(null),
+            imageEditAlt: () => {
                 setAltDraft(String(node.attrs.alt ?? ""));
                 setEditingAlt(true);
             },
-        });
-        items.push({
-            key: "remove",
-            label: t("notebook_image_remove"),
-            danger: true,
-            separatorBefore: true,
             // 不立即删除：先置位，由常驻的确认框在菜单卸载后询问。
-            onSelect: () => setRemoveConfirmOpen(true),
+            imageRemove: () => setRemoveConfirmOpen(true),
+            // ── 通用复制组（与正文菜单同源） ──────────────────────────
+            cut: () => {
+                void (async () => {
+                    const ok = await writeNotebookSelection(editor, settings);
+                    if (ok) editor.chain().focus().deleteSelection().run();
+                })();
+            },
+            copy: () => void writeNotebookSelection(editor, settings),
+            copyMarkdown: () => void writeNotebookSelection(editor, settings, "markdown"),
+            copyPlain: () => void writeNotebookSelection(editor, settings, "text"),
+            selectAll: () => {
+                editor.chain().focus().selectAll().run();
+            },
+        };
+        if (isAsset && assetId) {
+            actions.imageSaveAs = () => {
+                void notebookApi.saveAssetAs(assetId).catch(() => {});
+            };
+        }
+        const disabled: Partial<Record<keyof NotebookMenuActions, string>> = {};
+        if (!current.url || loadFailed) disabled.imageCopy = imageMissingReason;
+        if (width === null) disabled.imageWidthReset = t("notebook_image_width_reset");
+        return buildNotebookContextMenu({
+            surface: "rich",
+            scope: settings.contextMenu === "compact" ? "compact" : "full",
+            context: {
+                target: { kind: "image" },
+                flags: {
+                    selectionEmpty: false,
+                    editable: editor.isEditable,
+                    canUndo: false,
+                    canRedo: false,
+                    isBold: false,
+                    isItalic: false,
+                    isStrike: false,
+                    isCode: false,
+                    hasMarks: false,
+                    headingLevel: null,
+                    canIndent: false,
+                },
+            },
+            translate: t,
+            actions,
+            disabled,
         });
-        return items;
-    }, [assetId, commitWidth, current.url, isAsset, loadFailed, node.attrs.alt, t, width]);
+    }, [
+        assetId,
+        commitWidth,
+        current.url,
+        editor,
+        isAsset,
+        loadFailed,
+        node.attrs.alt,
+        settings,
+        t,
+        width,
+    ]);
 
     const displayWidth = dragWidth ?? width ?? null;
 
@@ -220,7 +275,9 @@ export function NotebookImageNodeView(props: NodeViewProps) {
                     onError={() => setFailedSrc(current.url)}
                     onContextMenu={(event) => {
                         event.preventDefault();
+                        // 不让事件冒到正文的右键处理器：否则会同时弹出两张菜单。
                         event.stopPropagation();
+                        selectSelf();
                         setMenu({ x: event.clientX, y: event.clientY });
                     }}
                     onDoubleClick={() => {
@@ -288,6 +345,7 @@ export function NotebookImageNodeView(props: NodeViewProps) {
                     x={menu.x}
                     y={menu.y}
                     items={menuItems}
+                    ariaLabel={t("notebook_ctx_aria")}
                     onClose={() => setMenu(null)}
                 />
             ) : null}

@@ -115,6 +115,20 @@ export interface AppContextMenuProps {
      * 因此凡是挂在时间轴/剪辑上的菜单都要显式打开它；普通面板菜单不需要。
      */
     floating?: boolean;
+    /**
+     * 打开时把键盘焦点收到菜单上。
+     *
+     * 【为什么需要】方向键导航有一道守卫：`ownsArrowKeys(document.activeElement)`
+     * 为真时让路（那是为**菜单里**的内联输入框 / 滑杆准备的）。但守卫看的是"当前
+     * 焦点元素"，不区分它在不在菜单里 —— 于是当触发菜单的表面本身是可编辑元素
+     * （记事本的 contenteditable）时，焦点仍在编辑器上，方向键被判给编辑器，菜单
+     * 高亮**一格都不动**：键盘用户按 `ContextMenu` 键打开菜单后无法选择任何一项。
+     *
+     * 【为什么是可选】大多数菜单的触发面不是可编辑元素（时间轴、文件列表、停靠
+     * 标签），焦点本来就不在会吞方向键的元素上，加这一手只会平白改掉焦点归属。
+     * 默认关闭，由"触发面可编辑"的调用方显式打开。
+     */
+    autoFocus?: boolean;
 }
 
 /**
@@ -143,6 +157,7 @@ export function AppContextMenu({
     ariaLabel,
     header,
     floating = false,
+    autoFocus = false,
 }: AppContextMenuProps) {
     const ref = useRef<HTMLDivElement | null>(null);
     const [position, setPosition] = useState<{ left: number; top: number; ready: boolean }>({
@@ -170,6 +185,25 @@ export function AppContextMenu({
             if (opener?.isConnected) opener.focus();
         };
     }, []);
+
+    /*
+     * 焦点收到菜单上（可选）。
+     *
+     * 【顺序要紧】必须排在上面那个"记住触发者"的 effect **之后**：它先记下当前
+     * 焦点（编辑器），这里才把焦点搬走；关闭时它再把焦点还回去。反过来写就会把
+     * 菜单自己记成触发者，关闭后焦点落在已卸载的节点上、直接掉回 `<body>`。
+     *
+     * 【为什么延后一个宏任务】同步 `focus()` 会被浏览器**回滚**：右键那一刻的
+     * 焦点变化发生在 `contextmenu` 手势内，手势收尾时浏览器把焦点还给了被点的
+     * 表面（实测：effect 里同步聚焦后 250ms 再查，焦点仍在 contenteditable 上，
+     * 于是方向键又被它吃掉；改成下一宏任务后焦点稳稳停在菜单上）。这与"自动聚焦
+     * 要用 setTimeout 0 躲开浏览器自己的焦点处理"是同一类问题。
+     */
+    useEffect(() => {
+        if (!autoFocus) return;
+        const timer = window.setTimeout(() => ref.current?.focus(), 0);
+        return () => window.clearTimeout(timer);
+    }, [autoFocus]);
 
     /** 可被键盘选中的项下标（禁用项与标题行不参与）。 */
     const selectableIndexes = useMemo(
@@ -314,12 +348,16 @@ export function AppContextMenu({
             aria-label={ariaLabel}
             data-hs-context-menu="1"
             data-hs-floating-menu={floating ? "1" : undefined}
+            // 只有需要收焦点时才可聚焦（`tabIndex=-1` 不进 Tab 序列，仅可编程聚焦）。
+            tabIndex={autoFocus ? -1 : undefined}
             className="hs-menu"
             style={{
                 left: position.left,
                 top: position.top,
                 minWidth,
                 visibility: position.ready ? undefined : "hidden",
+                // 聚焦到菜单上时不该出现焦点圈：它是弹出表面，不是可交互控件本身。
+                outline: autoFocus ? "none" : undefined,
             }}
             // 阻止冒泡到 document 的 pointerdown 关闭逻辑：面板自身的容器
             // 通常也监听 pointerdown 来清除选择，菜单内点击不应触发它。

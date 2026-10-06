@@ -28,6 +28,7 @@ import {
     translateInsert,
     type InsertContext,
 } from "./notebookInsert";
+import type { ResolvedNotebookSettings } from "./notebookSettings";
 import {
     HIFI_CLIP_FENCE_LANG,
     defaultClipTitle,
@@ -154,87 +155,155 @@ export interface PasteContext extends InsertContext {
 }
 
 /**
- * 处理一次粘贴。返回 `true` 表示已经接管（调用方需阻止默认行为）。
+ * 一次粘贴的**载荷**（与事件解耦）。
+ *
+ * 【为什么要从 `ClipboardEvent` 里拆出来】右键菜单的"粘贴为纯文本 / 粘贴为
+ * Markdown"拿不到真实事件：浏览器不允许脚本在用户手势之外读剪贴板，只能
+ * `navigator.clipboard.readText()` 拿到文本。若把分流逻辑留在"吃事件"的函数里，
+ * 菜单就得把整条优先级链抄第二遍 —— 而"HiFiShifter 载荷优先于它的摘要文本"
+ * 这类顺序一旦分叉，用户会看到同一次粘贴在两个入口下结果不同。
+ *
+ * 拆开之后：事件路径（Ctrl+V）与菜单路径共用 `applyNotebookPastePayload`，
+ * 差异只剩"载荷从哪来"。
+ */
+export interface NotebookPastePayload {
+    /** 剪贴板里的图片文件（有则优先插图片）。 */
+    files: File[];
+    html: string;
+    text: string;
+}
+
+/**
+ * 单次粘贴的模式覆盖。
+ *
+ * 菜单的"粘贴为纯文本 / 粘贴为 Markdown"就是靠它把 `plainPasteMode` 顶掉一次，
+ * 而**不改设置**：用户想这一次别解析 Markdown，不该顺手改掉他所有的粘贴行为。
+ */
+export interface NotebookPasteOverrides {
+    plainPasteMode?: ResolvedNotebookSettings["plainPasteMode"];
+    htmlPasteMode?: ResolvedNotebookSettings["htmlPasteMode"];
+    smartPaste?: boolean;
+}
+
+/** 从一次真实的 `paste` 事件里取载荷。 */
+export function clipboardEventPayload(event: ClipboardEvent): NotebookPastePayload {
+    const data = event.clipboardData;
+    return {
+        files: Array.from(data?.files ?? []).filter((file) => file.type.startsWith("image/")),
+        html: data?.getData("text/html") ?? "",
+        text: data?.getData("text/plain") ?? "",
+    };
+}
+
+/**
+ * 把一份载荷按既定优先级插进文档。返回"是否真的插入了内容"。
  *
  * 判定顺序即优先级：
- * 1. 剪贴板里有图片文件 → 插图片（这是"粘贴截图/图片文件"的主路径）；
- * 2. 剪贴板里是 HiFiShifter 载荷 → 插暂存块（**优先于**它的摘要文本，
- *    否则用户粘贴 clip 只会得到一句 "HiFiShifter: 3 clip(s) copied"）；
- * 3. 有 HTML → 消毒 + 转 Markdown；
+ * 1. 图片文件 → 插图片（这是"粘贴截图/图片文件"的主路径）；
+ * 2. HiFiShifter 载荷 → 插暂存块（**优先于**它的摘要文本，否则用户粘贴 clip
+ *    只会得到一句 "HiFiShifter: 3 clip(s) copied"）；
+ * 3. 有 HTML → 消毒 + 转 Markdown（或按 `htmlPasteMode` 原样富文本）；
  * 4. 有纯文本 → 按 `plainPasteMode` 决定当不当 Markdown；
- * 5. 只有位图（截图工具）→ 走后端读 CF_DIB 的兜底路径。
+ * 5. 什么都没有 → 走后端读 CF_DIB 的兜底路径（截图工具只放位图）。
  *
- * 全部为异步：`handlePaste` 必须同步返回 true 才能压住默认插入，因此这里
- * 先同步判定"要不要接管"，具体插入在 promise 里完成。
+ * 【为什么是 async 而 `handleNotebookPaste` 是 sync】`paste` 事件必须在处理器
+ * 同步返回时就被 `preventDefault` 掉，否则默认插入已经发生。因此事件路径只
+ * 做"要不要接管"的同步判定，插入本身在这里异步完成 —— 菜单路径没有这个约束，
+ * 直接 await 即可。
+ */
+export async function applyNotebookPastePayload(
+    ctx: InsertContext,
+    payload: NotebookPastePayload,
+    overrides?: NotebookPasteOverrides,
+): Promise<boolean> {
+    const settings: ResolvedNotebookSettings = overrides
+        ? {
+              ...ctx.settings,
+              ...(overrides.plainPasteMode !== undefined
+                  ? { plainPasteMode: overrides.plainPasteMode }
+                  : {}),
+              ...(overrides.htmlPasteMode !== undefined
+                  ? { htmlPasteMode: overrides.htmlPasteMode }
+                  : {}),
+              ...(overrides.smartPaste !== undefined ? { smartPaste: overrides.smartPaste } : {}),
+          }
+        : ctx.settings;
+    const scoped: InsertContext = { ...ctx, settings };
+
+    if (payload.files.length > 0) {
+        for (const file of payload.files) {
+            await insertImageFromBlob(scoped, file, file.name || "pasted.png");
+        }
+        return true;
+    }
+
+    const hasAnyPayload = Boolean(payload.html) || Boolean(payload.text);
+
+    const staged = await stageClipboardPayload();
+    if (staged.ok && staged.body) {
+        scoped.editor.chain().focus().insertContent(blockNodeFromBody(staged.body)).run();
+        scoped.onAssetsChanged?.();
+        scoped.notify?.(translateInsert(scoped, "notebook_clipboard_staged"));
+        return true;
+    }
+
+    if (payload.html && settings.smartPaste && settings.htmlPasteMode === "markdown") {
+        // `maxImageBytes` 同样约束粘贴内容里的内嵌 data URI（见 htmlToMarkdown）。
+        const markdown = htmlToMarkdown(payload.html, {
+            maxDataImageBytes: settings.maxImageBytes,
+        });
+        if (markdown) {
+            scoped.editor.chain().focus().insertContent(markdown).run();
+            return true;
+        }
+    }
+    if (payload.html && settings.smartPaste && settings.htmlPasteMode === "html") {
+        // 原样富文本：交给 ProseMirror 自己的 HTML 解析（更保真，但不是
+        // 规范 Markdown —— 由用户显式选择这一档）。
+        scoped.editor.chain().focus().insertContent(payload.html).run();
+        return true;
+    }
+
+    if (payload.text) {
+        const asMarkdown =
+            settings.smartPaste &&
+            (settings.plainPasteMode === "markdown" ||
+                (settings.plainPasteMode === "auto" && looksLikeMarkdown(payload.text)));
+        scoped.editor
+            .chain()
+            .focus()
+            .insertContent(asMarkdown ? payload.text : escapeMarkdownText(payload.text))
+            .run();
+        return true;
+    }
+
+    if (!hasAnyPayload) {
+        // 截图工具只放位图的情形。
+        const inserted = await insertImageFromClipboardBitmap(scoped);
+        if (!inserted.ok) {
+            scoped.notify?.(translateInsert(scoped, "notebook_paste_nothing"), "error");
+            return false;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * 处理一次粘贴事件。返回 `true` 表示已经接管（调用方需阻止默认行为）。
+ *
+ * 只负责三件同步的事：源码视图与面板内输入框放行、取载荷、判定"要不要接管"。
+ * 真正的插入交给 `applyNotebookPastePayload`（与菜单路径同一份实现）。
  */
 export function handleNotebookPaste(ctx: PasteContext, event: ClipboardEvent): boolean {
     if (ctx.sourceMode) return false;
     // 查找条等面板内输入框的粘贴必须走原生行为。本函数由调用方在**捕获阶段**
     // 监听（先于输入框自己的处理），这里不放行就没有任何后续 handler 能补救。
     if (isPlainInputTarget(event.target)) return false;
-    const data = event.clipboardData;
-    if (!data) return false;
+    if (!event.clipboardData) return false;
 
-    const files = Array.from(data.files ?? []).filter((file) => file.type.startsWith("image/"));
-    const html = data.getData("text/html");
-    const text = data.getData("text/plain");
-
-    if (files.length > 0) {
-        void (async () => {
-            for (const file of files) {
-                await insertImageFromBlob(ctx, file, file.name || "pasted.png");
-            }
-        })();
-        return true;
-    }
-
-    const hasAnyPayload = Boolean(html) || Boolean(text);
-    void (async () => {
-        const staged = await stageClipboardPayload();
-        if (staged.ok && staged.body) {
-            ctx.editor.chain().focus().insertContent(blockNodeFromBody(staged.body)).run();
-            ctx.onAssetsChanged?.();
-            ctx.notify?.(translateInsert(ctx, "notebook_clipboard_staged"));
-            return;
-        }
-
-        if (html && ctx.settings.smartPaste && ctx.settings.htmlPasteMode === "markdown") {
-            // `maxImageBytes` 同样约束粘贴内容里的内嵌 data URI（见 htmlToMarkdown）。
-            const markdown = htmlToMarkdown(html, {
-                maxDataImageBytes: ctx.settings.maxImageBytes,
-            });
-            if (markdown) {
-                ctx.editor.chain().focus().insertContent(markdown).run();
-                return;
-            }
-        }
-        if (html && ctx.settings.smartPaste && ctx.settings.htmlPasteMode === "html") {
-            // 原样富文本：交给 ProseMirror 自己的 HTML 解析（更保真，但不是
-            // 规范 Markdown —— 由用户显式选择这一档）。
-            ctx.editor.chain().focus().insertContent(html).run();
-            return;
-        }
-
-        if (text) {
-            const asMarkdown =
-                ctx.settings.smartPaste &&
-                (ctx.settings.plainPasteMode === "markdown" ||
-                    (ctx.settings.plainPasteMode === "auto" && looksLikeMarkdown(text)));
-            ctx.editor
-                .chain()
-                .focus()
-                .insertContent(asMarkdown ? text : escapeMarkdownText(text))
-                .run();
-            return;
-        }
-
-        if (!hasAnyPayload) {
-            // 截图工具只放位图的情形。
-            const inserted = await insertImageFromClipboardBitmap(ctx);
-            if (!inserted.ok) ctx.notify?.(translateInsert(ctx, "notebook_paste_nothing"), "error");
-        }
-    })();
-
+    void applyNotebookPastePayload(ctx, clipboardEventPayload(event));
     return true;
 }
 

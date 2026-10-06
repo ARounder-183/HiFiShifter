@@ -54,6 +54,18 @@ export interface NotebookSettings {
     autosaveDebounceMs?: number;
     /** 编辑停顿多久后另起一个撤销步（0 = 沿用后端的结构性合并）。 */
     historySplitIdleMs?: number;
+    /**
+     * 右键菜单详略。
+     *
+     * 【为什么是一个枚举而不是三个布尔】"菜单要多全"本质上是一根轴。若拆成
+     * `enabled` / `showFormatting` / `showInsert` 三个开关，能表达 8 种组合，
+     * 其中至少 3 种没有意义（关了 `enabled`，另外两个仍在生效）；而枚举只有
+     * 三个状态，每个都说得清。
+     *
+     * `off` 的存在理由：本应用**全局禁用**了 WebView 的原生右键菜单，接管
+     * 右键就必须给得出退路 —— 而右键在 DAW 里常与拖拽手势相邻。
+     */
+    contextMenu?: "full" | "compact" | "off";
 }
 
 export type ResolvedNotebookSettings = Required<NotebookSettings>;
@@ -81,6 +93,7 @@ export const DEFAULT_NOTEBOOK_SETTINGS: ResolvedNotebookSettings = {
     clipShowPreview: true,
     autosaveDebounceMs: 400,
     historySplitIdleMs: 0,
+    contextMenu: "full",
 };
 
 export const NOTEBOOK_PANEL_MIN_WIDTH = 260;
@@ -186,5 +199,6 @@ export function normalizeNotebookSettings(
         clipShowPreview: bool(raw.clipShowPreview, d.clipShowPreview),
         autosaveDebounceMs: clampNumber(raw.autosaveDebounceMs, 0, 5000, d.autosaveDebounceMs),
         historySplitIdleMs: clampNumber(raw.historySplitIdleMs, 0, 600000, d.historySplitIdleMs),
+        contextMenu: pickEnum(raw.contextMenu, ["full", "compact", "off"] as const, d.contextMenu),
     };
 }
