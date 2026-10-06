@@ -38,3 +38,29 @@ Release03冷重开PID24760实测`Undo_GetNumEntries`存在（Lua APIExists=true�
 与PCMready恢复，日志无原先的get_history_state/entry budget错误。宿主将第一clip淡出
 从0.25改0.75秒，HFS自动显示2.25至3秒的淡出区，无手工重载；第二clip仍0.25秒。
 这是REAPER→HFS长度/图形回流证据，不能替代尚未做成的HFS鼠标反向操作。
+
+## 续批：吸附偏移与关闭GUI的有效静音
+
+补齐D_SNAPOFFSET的typed读取、UI初载/独立元数据更新和响应投影；之前仅写入而
+回执仍看到默认0，非零吸附偏移会一直等回流。官方只说明秒域，不额外拒绝宿主已有
+负偏移使整个几何失效；GUI沿自己的绘制范围约定。裁切/倍率写入前同时检查旧源起点
+与倍率，拒绝起点/时长相同但源窗口已被宿主改动的旧请求，不创建Undo或部分写入。
+本批host_edit9项exit0；保留负偏移后的单项回流护栏exit0，不重跑全量。
+
+Release `bidirectional-completion-02`构建exit0；隔离REAPER PID33144冷载临时工程副本，
+关闭全部FX GUI，TrackFX_GetOpen每次导出均为0。仅输出第二轨，在4秒/44.1kHz/双声道
+24-bit导出中依次检查有效mute、solo覆盖与解除：
+
+| 状态 | 宿主有效/原始mute | PCM结果 |
+| --- | --- | --- |
+| 未静音 | 0/0 | peak=0.2678630352 |
+| 静音 | 1/1 | peak=0，全部采样为0 |
+| solo覆盖原始mute | 0/1 | 与未静音最大差=0 |
+| 解除静音 | 0/0 | 与未静音最大差=0 |
+
+每份176400帧。结果证明本次关闭GUI后的真实离线输出，不外推成实时声音、UI静音标志
+及完整双向矩阵全已验收。日志有关闭初始化中的WebView产生E_ABORT取消消息，四次
+音频均成功；没有据此声称GUI无错误门通过。原始脚本/RPP/WAV/日志/分析器仅留在
+ignored `.build-tmp/bidirectional-mute-oracle/`；实例自行保存临时副本并正常退出，未改
+用户工程。新包已部署D:\VST，35文件摘要一致；旧包可恢复于
+`.build-tmp/vst-install-backups/bidirectional-completion-02-0468ed66`。

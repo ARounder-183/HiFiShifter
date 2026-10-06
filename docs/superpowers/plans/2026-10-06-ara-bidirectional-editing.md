@@ -10,6 +10,11 @@
 - [ ] 初次绑定、宿主回调、GUI关闭、解除mute与item solo覆盖保持正确。
 - [ ] 原生字段/实例隔离/输出定向合同及实际REAPER检查。
 
+续批实测：Release bidirectional-completion-02在隔离33144中关闭全部FX GUI，四次
+44.1kHz双声道4秒离线导出，未静音peak0.267863、静音全部采样0、solo覆盖原始mute及
+解除后与基线逐样本一致。实际有效B_MUTE遵守solo覆盖。暂不勾完整A：实时输出、
+UI静音显示与完整多实例门不因四份离线文件通过而被假称完成。
+
 ## Batch B：双向命令与几何
 
 - [x] 锁定官方setter/Undo/UI刷新函数签名，写能力不等同只读能力。
@@ -86,6 +91,10 @@ tsc通过。仍需真实REAPER是否委托、默认fade单次音频oracle，暂�
 记录源码护栏与真实加载/count API/REAPER→HFS宽度回流。完整Batch E仍不勾：
 先点插件标题、激活刷新重试一次后CU仍拒绝WebView2子窗口内鼠标，反向拖动未测。
 不继续重复自动验收，也不把原GUI可显示或定向测试当导入/线性拉伸/Undo完整验收。
+
+续批completion-02已构建并安装，35文件摘要一致，已备份03。补齐吸附偏移回流与
+源窗口/倍率旧请求预检；关闭GUI的离线mute/solo覆盖/解除已取得真实PCM证据。
+原GUI双向操作与混合历史完整门仍待集中实测；不靠脚本替代用户拖拽/导入交互。
 
 当前：目标已建立，官方mute/相关setter签名已核对；Batch A两项定向合同exit0，
 覆盖有效mute/solo覆盖、另一region隔离、实际process实时/离线静音与解除后的原PCM，

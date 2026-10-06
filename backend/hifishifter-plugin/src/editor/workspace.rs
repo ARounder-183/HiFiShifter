@@ -34,6 +34,7 @@ impl DocumentSession {
             let Some(bound)=owner.host_geometry_metadata_locked(self) else {continue;};
             let Some(id)=identities.get(&bound.region_key) else {continue;};let ui_id=format!("{namespace}{id}");
             let Some(clip)=clips.iter_mut().find(|clip|clip["id"]==ui_id) else {continue;};let g=bound.geometry;
+            clip["snap_offset_sec"]=serde_json::json!(g.snap_offset_sec);
             let delegated=self.regions.lock().unwrap().get(&bound.region_key).is_some_and(|region|region.has_content_based_fade_at_head||region.has_content_based_fade_at_tail);
             if delegated {
                 let style=fades.get(&g.item_id).cloned().unwrap_or_default();
@@ -50,7 +51,7 @@ impl DocumentSession {
     pub(crate) fn decorate_host_fades(&self,payload:&mut serde_json::Value,namespace:&str) {
         let _transaction=self.transaction.lock().unwrap();if self.is_alive() {self.decorate_host_fades_locked(payload,namespace,&self.edits.lock().unwrap().fades);}
     }
-    /// 普通手动/自动fade仅投影到原GUI，内核继续消费未烘焙fade的ARA时间线。
+    /// 普通手动/自动fade和吸附偏移投影到原GUI，内核继续消费未烘焙fade的ARA时间线。
     /// 只沿已核对的唯一真实region key，不按轨名/位置猜关联。
     pub(crate) fn project_ui_fades_locked(&self,timeline:&mut TimelineState,fades:&std::collections::BTreeMap<String,crate::fade::FadeStyle>) {
         let identities=self.clip_ids.lock().unwrap().clone();
@@ -58,6 +59,7 @@ impl DocumentSession {
             let Some(bound)=owner.host_geometry_metadata_locked(self) else {continue;};
             let Some(id)=identities.get(&bound.region_key) else {continue;};
             let Some(clip)=timeline.clips.iter_mut().find(|clip|&clip.id==id) else {continue;};let geometry=bound.geometry;
+            clip.snap_offset_sec=geometry.snap_offset_sec;
             clip.fade_in_sec=geometry.fade_in_sec;clip.fade_out_sec=geometry.fade_out_sec;
             clip.auto_fade_in_sec=geometry.auto_fade_in_sec;clip.auto_fade_out_sec=geometry.auto_fade_out_sec;
             clip.fade_in_shape=geometry.fade_in_shape;clip.fade_out_shape=geometry.fade_out_shape;

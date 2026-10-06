@@ -1050,4 +1050,10 @@ Task 56: Ruling: 最终03 Release正常构建，冷重开24760实际count_api=tr
 
 Task 56: Ruling: 24760正常退出后实际无REAPER，部署路径及source/target非reparse、源manifest匹配 — 完整03包安装D:\VST\HiFiShifter.vst3，35文件数量与SHA256逐项一致；旧版移动到ignored .build-tmp/vst-install-backups/bidirectional-sync-fix-03-01513c3a，仅本地提交，不push — 若运行时替换/只复制loader会混版，旧包保留可恢复；安装不是反向鼠标验收完成，目标仍活跃。
 
+Task 57: Ruling: 吸附偏移已有setter与回执却没有typed读取/GUI投影，非零请求永远等默认0；裁切预检仅比起点/时长 — 补D_SNAPOFFSET读取/初载/元数据更新/回包，并在裁切倍率请求前核对源起点及有效倍率；保留宿主已有负偏移，不根据SDK未声明的范围使几何失效 — host_edit9项及负偏移单项exit0，旧源窗口拒绝发生在Undo/写入之前；若放过旧源请求会静默覆盖宿主裁切，若仅改回执不补读会假成功。
+
+Task 57: Ruling: completion-02隔离33144关闭全部FX GUI（每次GetOpen=0），实际有效/原始mute依次0/0、1/1、0/1、0/0 — 四份4秒44.1kHz双声道24-bitPCM：基线peak0.267863、静音peak0、solo覆盖及解除最大差0；闭合本次离线有效mute输出，不重复全量或鼠标重试 — 实时/UI/完整双向矩阵仍缺证据；关闭WebView初始化有E_ABORT取消日志，不把音频成功当GUI无错误，原始资料仅在ignored oracle目录。
+
+Task 57: Ruling: oracle已完成并正常自行退出，当前无REAPER；最终completion-02 Release源码指纹702D3AF85DE2EF42950C78BB7AFF148779BFB1603E811E5F584D377ED9E5701D — 安装D:\VST完整35文件逐项SHA256一致，旧03包备份.build-tmp/vst-install-backups/bidirectional-completion-02-0468ed66，仅本地提交 — 若覆盖运行DLL会混版；保留nativeAcceptance=false及完整目标active，GUI剩余门未测，不标全部完成。
+
 

@@ -27,6 +27,15 @@ exit0，sourceFingerprint=`5BEC84084B0FDB4BEBBDD0C2B9B07A65D0A49B3F140FB794F8C03
 鼠标移动及反向宽度被CU的WebView2子进程保护拦截（已按指示点标题/激活/刷新重试一次）。
 完整矩阵仍待用户集中验收，不再反复自动跑测试。详情BIDIRECTIONAL-SYNC-FINDINGS.md。
 
+续批最新安装为`.build-tmp/deliveries/bidirectional-completion-02/HiFiShifter.vst3`，补齐
+非零吸附偏移回流与裁切源窗口/倍率旧请求预检；35文件SHA256一致，上一包备份于
+`.build-tmp/vst-install-backups/bidirectional-completion-02-0468ed66`。原生host_edit9项及
+负偏移保留后的单项护栏通过。真实隔离33144关闭全部GUI后的未静音/静音/solo覆盖/
+解除四份PCM通过，静音全0，后两份与基线逐样本一致；实例已正常退出。
+这仅闭合离线有效item mute输出门，不声称实时/UI/完整双向GUI验收。最终仍需一次
+原GUI导入→移动/裁切→线性拉伸→渐变宽度→混合Undo/Redo→保存冷重开验证，不重复
+自动全量测试或鼠标工具重试。manifest nativeAcceptance仍false，目标保持active。
+
 ## 2026-10-06 新活跃目标：双向片段编辑与实际HFS渐变（历史声音要求）
 
 用户要求在HFS导入/编辑/线性拉伸/渐变clip并同步REAPER，确认REAPER item mute应

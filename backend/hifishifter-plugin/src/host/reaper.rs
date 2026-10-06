@@ -386,6 +386,7 @@ impl ReaperHost {
         let tv = |name| value(take, api.take_value, name);
         let start_sec = iv(c"D_POSITION")?;
         let duration_sec = iv(c"D_LENGTH")?;
+        let snap_offset_sec = iv(c"D_SNAPOFFSET")?;
         let source_start_sec = tv(c"D_STARTOFFS")?;
         let playback_rate = tv(c"D_PLAYRATE")?;
         if duration_sec <= 0. || playback_rate <= 0. {
@@ -475,6 +476,7 @@ impl ReaperHost {
             start_sec,
             source_start_sec,
             duration_sec,
+            snap_offset_sec,
             playback_rate,
             preserve_pitch,
             channel_mode,

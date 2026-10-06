@@ -15,6 +15,8 @@ pub(crate) struct HostClipGeometry {
     pub start_sec: f64,
     pub source_start_sec: f64,
     pub duration_sec: f64,
+    /// item秒域吸附偏移，仅用于原GUI几何回流，不参与源PCM和音频渲染。
+    pub snap_offset_sec: f64,
     pub playback_rate: f64,
     pub preserve_pitch: bool,
     pub channel_mode: i32,

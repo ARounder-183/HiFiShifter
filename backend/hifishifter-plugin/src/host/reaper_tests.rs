@@ -57,6 +57,7 @@ impl Fixture {
             values: RefCell::new(BTreeMap::from([
                 ("D_POSITION", 1.),
                 ("D_LENGTH", 4.),
+                ("D_SNAPOFFSET", 0.),
                 ("D_STARTOFFS", 0.),
                 ("D_PLAYRATE", 0.5),
                 ("B_PPITCH", 1.),

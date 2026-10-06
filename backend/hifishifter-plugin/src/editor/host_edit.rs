@@ -126,6 +126,12 @@ pub(super) fn execute_managed(owner:&Arc<ExtensionOwner>,plan:HostEditPlan,autho
         if (target.geometry.start_sec-edit.before.start_sec).abs()>1e-6 || (target.geometry.duration_sec-edit.before.length_sec).abs()>1e-6 {
             return Err("host clip changed before GUI commit; refresh required".into());
         }
+        if (edit.patch.source_start_sec.is_some()||edit.patch.source_end_sec.is_some()||edit.patch.length_sec.is_some()
+            ||edit.patch.playback_rate.is_some()||edit.patch.clip_playback_rate.is_some())
+            && ((target.geometry.source_start_sec-edit.before.source_start_sec).abs()>1e-6
+                ||(target.geometry.playback_rate-edit.before.playback_rate as f64).abs()>1e-6) {
+            return Err("host source window/rate changed before GUI commit; refresh required".into());
+        }
         let destination=if edit.source_track==edit.destination_track {None} else {
             let clip={let timeline=document.timeline.lock().unwrap();timeline.as_ref().ok_or("host timeline unavailable")?.clips.iter()
                 .find(|clip|clip.track_id==edit.destination_track).map(|clip|clip.id.clone()).ok_or("target track has no directly bound ARA item")?};
@@ -251,5 +257,37 @@ mod tests {
         assert!(!calls.iter().any(|call|call.starts_with("write-item:D_FADEINDIR")||call.starts_with("write-item:C_FADE")));
         let plan=editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"fadeInShape":(clip.fade_in_shape+1.)%7.})).unwrap();
         assert!(execute(&owner,plan,||document.is_alive()).unwrap_err().contains("not delegated"));document.close();
+    }
+    /// 吸附偏移经真实typed setter和UI元数据回流，不能写完后永远等默认零值。
+    #[test]
+    fn host_edit_snap_offset_receipt_uses_current_host_metadata() {
+        let (model,owner,_id)=super::super::session::tests::fixture();let document=model.session();
+        let host=crate::host::reaper::ReaperFixture::new();host.enable_writer();host.clear_markers();
+        host.set_value("D_POSITION",0.);host.set_value("D_LENGTH",4./44100.);host.set_value("D_PLAYRATE",1.);
+        unsafe {owner.bind_reaper_host(host.context());}owner.refresh_reaper_transport();
+        let editor=owner.editor_session().unwrap();editor.ensure_loaded(false).unwrap();let clip=editor.timeline.lock().unwrap().clips[0].clone();
+        let plan=editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"snapOffsetSec":2./44100.})).unwrap();
+        let receipt=plan.receipt(&editor.namespace);
+        assert!(!receipt.matches(&super::super::commands::payload(&editor,false).unwrap()));
+        execute(&owner,plan,||document.is_alive()).unwrap();owner.refresh_reaper_transport();
+        assert_eq!(owner.host_geometry_metadata().unwrap().geometry.snap_offset_sec,2./44100.);
+        let payload=super::super::commands::payload(&editor,false).unwrap();assert!(receipt.matches(&payload));
+        // 官方只说明秒域，不因用户已有负偏移使整个host几何失效；GUI自行按原约定绘制。
+        host.set_value("D_SNAPOFFSET",-1./44100.);owner.refresh_reaper_transport();
+        assert_eq!(owner.host_geometry_metadata().unwrap().geometry.snap_offset_sec,-1./44100.);
+        document.close();
+    }
+    /// 起点/时长未变但宿主已经改源窗口时，裁切预检必须在Undo/写API之前拒绝。
+    #[test]
+    fn host_edit_source_trim_rejects_stale_source_offset_before_any_write() {
+        let (model,owner,_id)=super::super::session::tests::fixture();let document=model.session();
+        let host=crate::host::reaper::ReaperFixture::new();host.enable_writer();host.clear_markers();
+        host.set_value("D_POSITION",0.);host.set_value("D_LENGTH",4./44100.);host.set_value("D_PLAYRATE",1.);
+        unsafe {owner.bind_reaper_host(host.context());}owner.refresh_reaper_transport();
+        let editor=owner.editor_session().unwrap();editor.ensure_loaded(false).unwrap();let clip=editor.timeline.lock().unwrap().clips[0].clone();
+        let plan=editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"sourceStartSec":1./44100.})).unwrap();
+        host.set_value("D_STARTOFFS",2./44100.);host.reset();
+        assert!(execute(&owner,plan,||document.is_alive()).unwrap_err().contains("source window/rate changed"));
+        assert!(!host.calls().iter().any(|call|call=="undo-begin"||call.starts_with("write-")));document.close();
     }
 }

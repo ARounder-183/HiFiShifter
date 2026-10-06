@@ -354,6 +354,7 @@ impl EditorSession {
                 let mut timeline=self.timeline.lock().unwrap();
                 for clip in &mut timeline.clips {if let Some(original)=host.clips.iter().find(|original|format!("{}{}",self.namespace,original.id)==clip.id) {
                     clip.muted=original.muted;
+                    clip.snap_offset_sec=original.snap_offset_sec;
                     clip.fade_in_sec=original.fade_in_sec;clip.fade_out_sec=original.fade_out_sec;
                     clip.auto_fade_in_sec=original.auto_fade_in_sec;clip.auto_fade_out_sec=original.auto_fade_out_sec;
                     clip.fade_in_shape=original.fade_in_shape;clip.fade_out_shape=original.fade_out_shape;
