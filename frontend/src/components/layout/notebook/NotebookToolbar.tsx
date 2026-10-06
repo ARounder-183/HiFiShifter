@@ -16,7 +16,7 @@
  */
 
 import type { Editor } from "@tiptap/core";
-import { useEffect, useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import {
     CheckboxIcon,
     ClipboardIcon,
@@ -38,35 +38,26 @@ export interface NotebookToolbarProps {
     handlers: ToolbarInsertHandlers;
     /** 是否启用 `/` 斜杠菜单。 */
     slashCommands: boolean;
+    /**
+     * 打开链接地址浮层。
+     *
+     * 浮层本身由面板渲染，不在这里 —— 工具栏可被收起，而 Ctrl/⌘+K 不该跟着
+     * 失效（见 `NotebookLinkEditor` 的文件头）。
+     */
+    onEditLink: () => void;
+    /** 链接浮层是否正开着（决定按钮的激活态）。 */
+    linkEditorOpen: boolean;
 }
 
-export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToolbarProps) {
+export function NotebookToolbar({
+    editor,
+    handlers,
+    slashCommands,
+    onEditLink,
+    linkEditorOpen,
+}: NotebookToolbarProps) {
     const { t, shortcut } = useI18n();
     const slash = useNotebookSlashMenu(editor, slashCommands, handlers);
-    /** 链接编辑浮层的草稿；null = 收起。替代 window.prompt：Tauri/WKWebView 下脚本对话框静默返回 null（见 ClipContextMenu 同款理由）。 */
-    const [linkDraft, setLinkDraft] = useState<string | null>(null);
-
-    // 选区变化即收起浮层：浮层编辑的是"当前选区"的链接，选区一旦移走，
-    // 再确认就会把链接贴到错误的位置上。
-    useEffect(() => {
-        if (linkDraft === null) return;
-        const close = () => setLinkDraft(null);
-        editor.on("selectionUpdate", close);
-        return () => {
-            editor.off("selectionUpdate", close);
-        };
-    }, [editor, linkDraft]);
-
-    /** 应用（Enter / OK）：与原 window.prompt 版本同一套命令链。 */
-    const applyLink = () => {
-        const href = (linkDraft ?? "").trim();
-        setLinkDraft(null);
-        if (!href) {
-            editor.chain().focus().extendMarkRange("link").unsetLink().run();
-            return;
-        }
-        editor.chain().focus().extendMarkRange("link").setLink({ href }).run();
-    };
 
     return (
         <div className="hs-notebook-toolbar">
@@ -170,8 +161,8 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
                 <ToolbarButton
                     label={<Link2Icon />}
                     tooltip={shortcut("notebook_toolbar_link")}
-                    active={editor.isActive("link") || linkDraft !== null}
-                    onClick={() => setLinkDraft(String(editor.getAttributes("link").href ?? ""))}
+                    active={editor.isActive("link") || linkEditorOpen}
+                    onClick={onEditLink}
                 />
                 <ToolbarButton
                     label={<ImageIcon />}
@@ -214,49 +205,6 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
                     onClick={handlers.insertProjectInfo}
                 />
             </div>
-
-            {linkDraft !== null ? (
-                <div className="hs-notebook-link-popover">
-                    {/* 键盘可用：Enter 应用、Escape 取消；stopPropagation 挡掉
-                        编辑器快捷键（输入框内不应触发 Ctrl+B 之类）。 */}
-                    <input
-                        autoFocus
-                        value={linkDraft}
-                        placeholder={t("notebook_link_prompt")}
-                        aria-label={t("notebook_link_prompt")}
-                        onChange={(event) => setLinkDraft(event.target.value)}
-                        onKeyDown={(event) => {
-                            event.stopPropagation();
-                            if (event.key === "Enter") {
-                                event.preventDefault();
-                                applyLink();
-                            } else if (event.key === "Escape") {
-                                setLinkDraft(null);
-                            }
-                        }}
-                    />
-                    <button
-                        type="button"
-                        className="hs-notebook-toolbar-btn"
-                        data-tooltip={t("ok")}
-                        aria-label={t("ok")}
-                        onPointerDown={(event) => event.preventDefault()}
-                        onClick={applyLink}
-                    >
-                        ✓
-                    </button>
-                    <button
-                        type="button"
-                        className="hs-notebook-toolbar-btn"
-                        data-tooltip={t("cancel")}
-                        aria-label={t("cancel")}
-                        onPointerDown={(event) => event.preventDefault()}
-                        onClick={() => setLinkDraft(null)}
-                    >
-                        ✕
-                    </button>
-                </div>
-            ) : null}
 
             {slash.menu ? (
                 <div

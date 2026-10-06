@@ -15,6 +15,7 @@
  */
 
 import { EditorContent } from "@tiptap/react";
+import type { Editor } from "@tiptap/core";
 import { CardStackIcon, ChevronDownIcon, ChevronRightIcon, GearIcon } from "@radix-ui/react-icons";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WheelEvent as ReactWheelEvent } from "react";
@@ -55,6 +56,8 @@ import { settingsApi } from "../../../services/api/settings";
 import { webApi } from "../../../services/webviewApi";
 import { NotebookAttachmentsDialog, NotebookSettingsDialog } from "./NotebookDialogs";
 import { NotebookFindBar } from "./NotebookFindBar";
+import { NotebookLinkEditor } from "./NotebookLinkEditor";
+import { applyNotebookLink, currentLinkHref } from "./notebookLinkEdit";
 import { NotebookReadonlyPreview } from "./NotebookReadonlyPreview";
 import { NotebookStatusBar } from "./NotebookStatusBar";
 import { NotebookToolbar } from "./NotebookToolbar";
@@ -210,6 +213,43 @@ export function NotebookPanel() {
         [dispatch],
     );
 
+    /*
+     * 链接编辑浮层。
+     *
+     * 【状态为什么在面板而不在工具栏】工具栏是可收起的（`showToolbar` 设置），
+     * 而 Ctrl/⌘+K 这个入口不该跟着消失。浮层因此由面板渲染、定位在编辑区上沿
+     * （见 `NotebookLinkEditor`）—— 工具栏可见时它落在工具栏下方，收起时落在
+     * 正文上沿。
+     *
+     * `editorRef` 的存在只为打破"回调要用 editor、editor 又来自用到回调的 hook"
+     * 这个循环：快捷键经 ref 取最新实例（编辑器本身由 `useNotebookEditor` 持有，
+     * 这里只是镜像）。
+     */
+    const editorRef = useRef<Editor | null>(null);
+    const [linkDraft, setLinkDraft] = useState<string | null>(null);
+
+    /** 打开浮层（工具栏按钮 / Ctrl+⌘+K）。初值取当前选区已有的链接地址。 */
+    const openLinkEditor = useCallback(() => {
+        const instance = editorRef.current;
+        if (!instance || instance.isDestroyed) return;
+        setLinkDraft(currentLinkHref(instance));
+    }, []);
+
+    /*
+     * 链接浮层的入口对象。**身份必须稳定**（`openLinkEditor` 的依赖为空，
+     * 因此这里也稳定）：它进 `useEditor` 的扩展依赖，一变编辑器就整体重建。
+     */
+    const linkBridge = useMemo(() => ({ open: openLinkEditor }), [openLinkEditor]);
+
+    const closeLinkEditor = useCallback(() => setLinkDraft(null), []);
+
+    const applyLinkDraft = useCallback(() => {
+        const instance = editorRef.current;
+        setLinkDraft(null);
+        if (!instance || instance.isDestroyed) return;
+        applyNotebookLink(instance, linkDraft ?? "");
+    }, [linkDraft]);
+
     const { editor, flush, seal } = useNotebookEditor({
         markdown,
         settings,
@@ -217,7 +257,23 @@ export function NotebookPanel() {
         onMarkdownChange,
         persist,
         onIdleSplit: () => void notebookApi.sealNotesHistory().catch(() => {}),
+        linkBridge,
     });
+
+    useEffect(() => {
+        editorRef.current = editor;
+    }, [editor]);
+
+    // 选区变化即收起浮层：浮层编辑的是"当前选区"的链接，选区一旦移走，
+    // 再确认就会把链接贴到错误的位置上。
+    useEffect(() => {
+        if (linkDraft === null || !editor || editor.isDestroyed) return;
+        const close = () => setLinkDraft(null);
+        editor.on("selectionUpdate", close);
+        return () => {
+            editor.off("selectionUpdate", close);
+        };
+    }, [editor, linkDraft]);
 
     const insertContext = useMemo<InsertContext | null>(
         () =>
@@ -520,12 +576,15 @@ export function NotebookPanel() {
             seal();
             // 源码视图的待写内容也要在切模式前落盘（seal 只收编辑器那一侧）。
             flushSourcePersist();
+            // 链接浮层编辑的是富文本的 mark，源码视图下没有意义：切走即收起，
+            // 免得切回来时它凭空又出现（还带着上一次的草稿）。
+            closeLinkEditor();
             dispatch(setNotebookMode(next));
             void settingsApi
                 .saveUiSettings({ notebook: { ...settings, defaultMode: next } })
                 .catch(() => {});
         },
-        [dispatch, flushSourcePersist, mode, seal, settings],
+        [closeLinkEditor, dispatch, flushSourcePersist, mode, seal, settings],
     );
 
     /**
@@ -745,6 +804,8 @@ export function NotebookPanel() {
                     editor={editor}
                     handlers={handlers}
                     slashCommands={settings.slashCommands}
+                    onEditLink={openLinkEditor}
+                    linkEditorOpen={linkDraft !== null}
                 />
             ) : null}
 
@@ -788,6 +849,16 @@ export function NotebookPanel() {
                     <NotebookReadonlyPreview
                         markdown={markdown}
                         scrollSyncSource={richScrollRef.current}
+                    />
+                ) : null}
+
+                {/* 源码视图没有链接标记，浮层只在富文本 / 分栏下有意义。 */}
+                {linkDraft !== null && mode !== "source" ? (
+                    <NotebookLinkEditor
+                        value={linkDraft}
+                        onChange={setLinkDraft}
+                        onApply={applyLinkDraft}
+                        onCancel={closeLinkEditor}
                     />
                 ) : null}
 

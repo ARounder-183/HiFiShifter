@@ -486,7 +486,7 @@
 /* ── 工具栏 ──────────────────────────────────────────────────────────── */
 
 .hs-notebook-toolbar {
-    position: relative; /* 链接浮层的定位基准 */
+    position: relative;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
@@ -565,10 +565,12 @@
 }
 
 /* 链接编辑浮层：替代 window.prompt（Tauri/WKWebView 下脚本对话框不可用），
-   锚在工具栏正下方，与 slash 菜单同一套浮层观感。 */
+   锚在**编辑区容器**上沿（容器本身是 relative）。
+   不锚工具栏：工具栏可被收起，而 Ctrl/⌘+K 这个入口不该跟着消失。工具栏可见时
+   本浮层正好落在它下方，与从前观感一致。 */
 .hs-notebook-link-popover {
     position: absolute;
-    top: calc(100% + 4px);
+    top: 6px;
     left: 6px;
     z-index: 890;
     display: flex;

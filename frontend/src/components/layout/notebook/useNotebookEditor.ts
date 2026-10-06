@@ -43,6 +43,18 @@ export interface NotebookEditorBridge {
     redo: () => void;
 }
 
+/**
+ * 链接浮层的入口（Ctrl/⌘+K）。
+ *
+ * 与 `NotebookEditorBridge` 同一约定：**对象身份必须稳定**（调用方用 `useMemo`
+ * 包一层），否则 `useEditor` 的依赖会变、整个编辑器被重建（ProseMirror 历史
+ * 清零）。
+ */
+export interface NotebookLinkBridge {
+    /** 打开链接地址编辑浮层。 */
+    open: () => void;
+}
+
 /** Ctrl+Z 的"先细后粗"桥接扩展。 */
 function createUndoBridge(bridge: NotebookEditorBridge) {
     return Extension.create({
@@ -69,6 +81,34 @@ function createUndoBridge(bridge: NotebookEditorBridge) {
     });
 }
 
+/**
+ * Ctrl/⌘+K 打开链接编辑浮层。
+ *
+ * 【为什么是编辑器快捷键而不是面板上的 keydown 监听】
+ *   1. `Mod-` 由 ProseMirror 的 keymap 按平台展开（macOS 是 ⌘、其余是 Ctrl），
+ *      与加粗 / 斜体这些内建快捷键同一套，不必自己判平台；
+ *   2. 它只在**编辑器持有焦点时**触发 —— 面板上的监听会连"焦点在查找框 / 链接
+ *      输入框里"的 Ctrl+K 一起吃掉（原生监听先于 React 合成事件，输入框里的
+ *      `stopPropagation` 拦不住它）。
+ *
+ * 【为什么不与加粗共用 `addKeyboardShortcuts` 的位置】加粗 / 斜体来自
+ * StarterKit，链接是记事本自己接的动作；这里给它单独一个扩展，避免再去 extend
+ * StarterKit。
+ */
+function createLinkShortcut(bridge: NotebookLinkBridge) {
+    return Extension.create({
+        name: "notebookLinkShortcut",
+        addKeyboardShortcuts() {
+            return {
+                "Mod-k": () => {
+                    bridge.open();
+                    return true;
+                },
+            };
+        },
+    });
+}
+
 export interface UseNotebookEditorArgs {
     /** 正文（Markdown）。 */
     markdown: string;
@@ -80,6 +120,8 @@ export interface UseNotebookEditorArgs {
     persist: (markdown: string) => void;
     /** 编辑停顿到阈值时另起撤销步。 */
     onIdleSplit: () => void;
+    /** 链接浮层入口（Ctrl/⌘+K）。 */
+    linkBridge: NotebookLinkBridge;
 }
 
 export interface UseNotebookEditorResult {
@@ -91,7 +133,7 @@ export interface UseNotebookEditorResult {
 }
 
 export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEditorResult {
-    const { markdown, settings, bridge, onMarkdownChange, persist, onIdleSplit } = args;
+    const { markdown, settings, bridge, onMarkdownChange, persist, onIdleSplit, linkBridge } = args;
 
     // 回调与设置在 ref 里取最新值：编辑器实例不应因为回调身份变化而重建。
     // 赋值必须放在 effect 里（而非渲染期）—— 渲染期写 ref 会破坏并发渲染的
@@ -130,6 +172,14 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
 
     const undoBridge = useMemo(() => createUndoBridge(bridge), [bridge]);
 
+    /*
+     * 链接快捷键扩展。回调经 `bridge` 对象转发（而不是在这里读 ref）：
+     * React Compiler 的引用规则会拒绝"渲染期把读 ref 的闭包传给函数"，而
+     * `bridge` 的身份由调用方用 `useMemo` 固定，因此这个扩展只建一次 ——
+     * 与上面 `createUndoBridge` 同一套。
+     */
+    const linkShortcut = useMemo(() => createLinkShortcut(linkBridge), [linkBridge]);
+
     const clearTimers = useCallback(() => {
         if (debounceTimerRef.current !== null) {
             window.clearTimeout(debounceTimerRef.current);
@@ -160,7 +210,7 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
 
     const editor = useEditor(
         {
-            extensions: [...extensions, undoBridge],
+            extensions: [...extensions, undoBridge, linkShortcut],
             content: markdown,
             editable: true,
             editorProps: {
@@ -221,7 +271,7 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
         // 都销毁并新建一个编辑器（ProseMirror 历史清零、StrictMode 下还会
         // 多泄漏一个实例），而源码视图里的改动已由下面的"外来更新"effect
         // 通过 `setContent` 同步回来。
-        [extensions, undoBridge],
+        [extensions, undoBridge, linkShortcut],
     );
 
     /**
