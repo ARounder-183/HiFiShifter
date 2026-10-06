@@ -378,3 +378,76 @@ test("DOM 焦点滞留在列表里、但活动表面是时间轴时，按键仍�
     press(row, "s");
     expect(fired).toEqual(["clip.split"]);
 });
+
+/*
+ * 激活键（Enter / Space）与弹出表面的归属。
+ *
+ * 【为什么必须有】与方向键那几条同源，但坏得更彻底：方向键至少有
+ * `COMPOSITE_WIDGET_KEYS` 让路，**Enter 没有** —— 而裸 Enter 全局绑的是
+ * `playback.stop`。于是"菜单开着按回车"的结果是**菜单项纹丝不动、播放却停了**：
+ * 分发器在 window 捕获阶段命中并 `preventDefault` + `stopPropagation`，
+ * `AppContextMenu` 的激活处理器看到 `defaultPrevented` 就让路。
+ *
+ * 这也是"测试全绿但功能不可用"的又一例：菜单的激活逻辑在 jsdom 单测里是对的
+ * （那里没有全局分发器），只有真机实测才暴露。浏览器实测确认过：修复前回车既
+ * 不展开子菜单也不激活菜单项，修复后两者都正常。
+ */
+test("弹出表面打开时，Enter 归它自己，不被全局绑定吞掉", async () => {
+    await mount();
+    const menu = document.createElement("div");
+    menu.setAttribute("role", "menu");
+    const item = document.createElement("button");
+    item.setAttribute("role", "menuitem");
+    item.tabIndex = 0;
+    menu.append(item);
+    document.body.append(menu);
+    mounted.push(async () => {
+        menu.remove();
+    });
+    // 刻意不把焦点放进菜单：右键点开时焦点仍在被点的元素上。
+    document.body.focus();
+
+    const result = press(document.body, "Enter");
+
+    // playback.stop 不得触发……
+    expect(fired).toEqual([]);
+    // ……而且事件必须保持"未被消费"，否则菜单自己的激活处理器收不到。
+    expect(result.defaultPrevented).toBe(false);
+});
+
+test("Space 与 Enter 同等对待（菜单的另一个激活键）", async () => {
+    await mount();
+    const menu = document.createElement("div");
+    menu.setAttribute("role", "menu");
+    document.body.append(menu);
+    mounted.push(async () => {
+        menu.remove();
+    });
+
+    expect(press(document.body, " ").defaultPrevented).toBe(false);
+});
+
+test("没有弹出表面时，Enter 仍然走全局绑定", async () => {
+    // 对照组：让路只在"弹出表面开着"时发生，否则裸 Enter 的停止播放就废了。
+    await mount();
+
+    press(document.body, "Enter");
+
+    expect(fired).toEqual(["playback.stop"]);
+});
+
+test("关闭但**仍挂载**的菜单不得屏蔽 Enter", async () => {
+    // 与方向键那条同构的回归守卫：把"存在"当"打开"会永久屏蔽全局 Enter。
+    await mount();
+    const menu = document.createElement("div");
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("data-state", "closed");
+    document.body.append(menu);
+    mounted.push(async () => {
+        menu.remove();
+    });
+
+    press(document.body, "Enter");
+
+    expect(fired).toEqual(["playback.stop"]);
+});

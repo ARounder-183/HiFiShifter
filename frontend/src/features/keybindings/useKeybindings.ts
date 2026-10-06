@@ -267,6 +267,28 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
             }
 
             /*
+             * 弹出表面打开时，**激活键**（Enter / Space）也归那一层。
+             *
+             * 【为什么单列一条，不并进 `COMPOSITE_WIDGET_KEYS`】那一组键对**所有**
+             * 复合控件让路（标签条 / 单选组 / 滑杆…），语义是"控件自己处理方向键"；
+             * 而 Enter/Space 对常驻控件是浏览器原生的按钮激活，全局绑定不该替它让路。
+             * 只有**弹出表面**才需要独占激活键 —— 它是模态的：用户此刻只能在它里面选。
+             *
+             * 【少了这条会怎样】裸 Enter 全局绑的是 `playback.stop`。菜单开着按回车，
+             * 全局绑定先命中并 `preventDefault`，`AppContextMenu` 的激活处理器见到
+             * `defaultPrevented` 就让路 —— 表现是**菜单项纹丝不动，播放却停了**。
+             * 键盘用户因此根本无法用回车选中任何菜单项（含子菜单的触发项）。
+             * 手写菜单（`ClipContextMenu` 等）同理：它们的项靠原生按钮激活，而原生
+             * 激活正是 keydown 的默认行为，会被同一个 `preventDefault` 一并挡掉。
+             *
+             * 【为什么不会误伤】`POPUP_SURFACE_SELECTOR` 只认 `role="menu"` /
+             * `menubar` / `listbox`：Radix 的 Select 与 DropdownMenu 自己处理 Enter；
+             * 文件列表用的是 `data-hs-typeahead`（不在其中）；快速搜索有自己的
+             * keydown 分支 —— 三者都不受影响。
+             */
+            if (hasOpenPopupSurface() && (key === "enter" || key === "space")) return;
+
+            /*
              * 输入式快速跳转：标记了 `data-hs-typeahead` 的列表拥有**它自己实现了的**
              * 那些键（见 `TYPEAHEAD_OWNER_SELECTOR` / `isOwnedByTypeAhead`）。
              *
