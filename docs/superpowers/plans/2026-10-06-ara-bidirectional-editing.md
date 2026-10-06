@@ -57,6 +57,13 @@ GUID时回滚；已加入其它用户内容则保留真实Undo。4项host_media�
 - [ ] HFS原kernel实际处理自定义渐变，UI/波形/播放与导出一致，缓存层避免重跑神经。
 - [ ] 自定义fade按真实region持久化；移动/裁切/拆分/冷重开和两端auto交叉渐变。
 
+当前源码已接HFS自有shape/dir、item GUID组件v4状态（兼容读v2/v3），长度仍投影/写回
+REAPER，shape写入HFS状态并把宿主轴留默认。实际委托flags逐端决定是否由kernel烘焙，
+不将能力广告当已收到委托；source合成缓存不含fade，长度变化推进便宜输出epoch。
+Factory广告CONTENT_FADES并接零延伸head/tail实时快照。新增实际kernel PCM形状差异/
+未委托tail不重复烘焙/v4保存恢复与撤销清除合同，加factory1共2项exit0；UI求值6项与
+tsc通过。仍需真实REAPER是否委托、默认fade单次音频oracle，暂不勾本批完成。
+
 ## Batch E：集中验收与交付
 
 - [ ] 实际GUI执行导入→编辑→线性拉伸→自定义渐变→播放/导出→撤销/重做→保存冷重开。

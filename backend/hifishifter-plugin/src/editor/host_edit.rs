@@ -6,8 +6,8 @@ use hifishifter_kernel::state::{Clip,ClipStatePatch,TimelineState};
 use serde_json::Value;
 use std::sync::Arc;
 
-pub(super) struct ClipEdit {pub native_id:String,pub source_track:String,pub destination_track:String,pub before:Clip,pub after:Clip,pub patch:ClipStatePatch}
-pub(super) struct HostEditPlan {pub edits:Vec<ClipEdit>}
+pub(crate) struct ClipEdit {pub native_id:String,pub source_track:String,pub destination_track:String,pub before:Clip,pub after:Clip,pub patch:ClipStatePatch}
+pub(crate) struct HostEditPlan {pub edits:Vec<ClipEdit>}
 
 /// 只拦截已实现的宿主命令；未知命令仍走原actor的明确错误路径。
 pub(super) fn is_clip_edit(command:&str)->bool {
@@ -19,12 +19,14 @@ fn patch(input:&Value)->Result<ClipStatePatch,String> {
     let object=input.as_object().ok_or("clip patch must be an object")?;
     for (key,value) in object {
         if value.is_null() {continue;}
-        if !matches!(key.as_str(),"clipId"|"checkpoint"|"startSec"|"lengthSec"|"sourceStartSec"|"sourceEndSec"|"playbackRate"|"clipPlaybackRate"|"muted"|"snapOffsetSec"|"fadeInSec"|"fadeOutSec"|"autoFadeInSec"|"autoFadeOutSec"|"reversed"|"loopEnabled"|"channelMode") {
+        if !matches!(key.as_str(),"clipId"|"checkpoint"|"startSec"|"lengthSec"|"sourceStartSec"|"sourceEndSec"|"playbackRate"|"clipPlaybackRate"|"muted"|"snapOffsetSec"|"fadeInSec"|"fadeOutSec"|"autoFadeInSec"|"autoFadeOutSec"|"fadeInShape"|"fadeOutShape"|"fadeInDir"|"fadeOutDir"|"reversed"|"loopEnabled"|"channelMode") {
             return Err(format!("host clip property is not yet writable: {key}"));
         }
         if !matches!(key.as_str(),"clipId"|"checkpoint"|"muted"|"reversed"|"loopEnabled") {
             let number=value.as_f64().filter(|v|v.is_finite()).ok_or("finite numeric clip edit required")?;
-            if number<0. || number>1_000_000. {return Err("clip edit outside supported finite range".into());}
+            if matches!(key.as_str(),"fadeInDir"|"fadeOutDir") {if !(-1.0..=1.0).contains(&number) {return Err("fade curvature outside -1..1".into());}}
+            else if number<0. || number>1_000_000. {return Err("clip edit outside supported finite range".into());}
+            if matches!(key.as_str(),"fadeInShape"|"fadeOutShape")&&number>=7. {return Err("unknown fade shape".into());}
             if matches!(key.as_str(),"lengthSec"|"playbackRate"|"clipPlaybackRate")&&number<=0. {return Err("positive clip length/rate required".into());}
             if key=="channelMode"&&(number.fract()!=0.||number>4.) {return Err("invalid host channel mode".into());}
         }
@@ -36,7 +38,7 @@ fn patch(input:&Value)->Result<ClipStatePatch,String> {
 
 impl EditorSession {
     /// UI只短暂读取当前clip身份/几何；源参数大数组不复制，不在这里materialize或分析。
-    pub(super) fn plan_host_edit(&self,command:&str,input:&Value)->Result<HostEditPlan,String> {
+    pub(crate) fn plan_host_edit(&self,command:&str,input:&Value)->Result<HostEditPlan,String> {
         let requests=match command {
             "move_clip"|"set_clip_state"=>vec![input.clone()],
             "move_clips"=>input["moves"].as_array().ok_or("move list missing")?.clone(),
@@ -70,12 +72,13 @@ impl EditorSession {
 }
 
 /// 先冻结并验证整批对象，再开始Undo和setter；任一预检失败都不写入任何宿主item。
-pub(super) fn execute(owner:&Arc<ExtensionOwner>,plan:HostEditPlan,authorized:impl Fn()->bool)->Result<(),String> {
+pub(crate) fn execute(owner:&Arc<ExtensionOwner>,plan:HostEditPlan,authorized:impl Fn()->bool)->Result<(),String> {
     execute_managed(owner,plan,authorized,false)
 }
 pub(super) fn execute_managed(owner:&Arc<ExtensionOwner>,plan:HostEditPlan,authorized:impl Fn()->bool,managed:bool)->Result<(),String> {
     let document=owner.editor_document()?;
     let mut targets:Vec<(ClipEdit,HostClipTarget,Option<HostClipTarget>)>=Vec::new();
+    let mut styles=std::collections::BTreeMap::new();
     for edit in plan.edits {
         if !authorized() {return Err("host editor lease revoked".into());}
         let target=owner.host_edit_target(&edit.native_id)?;
@@ -93,6 +96,16 @@ pub(super) fn execute_managed(owner:&Arc<ExtensionOwner>,plan:HostEditPlan,autho
         };
         if targets.first().is_some_and(|(_,first,_)|!first.same_project(&target)) {return Err("host batch spans multiple projects".into());}
         if destination.as_ref().is_some_and(|dest|!target.same_project(dest)) {return Err("target track belongs to another project".into());}
+        if edit.patch.fade_in_shape.is_some()||edit.patch.fade_out_shape.is_some()||edit.patch.fade_in_dir.is_some()||edit.patch.fade_out_dir.is_some() {
+            let key={let ids=document.clip_ids.lock().unwrap();ids.iter().find(|(_,id)|id.as_str()==edit.native_id).map(|(key,_)|*key).ok_or("fade region identity missing")?};
+            if !document.regions.lock().unwrap().get(&key).is_some_and(|region|region.has_content_based_fade_at_head||region.has_content_based_fade_at_tail) {return Err("REAPER has not delegated this clip's fades to HiFiShifter".into());}
+            let mut style=document.edits.lock().unwrap().fades.get(&target.geometry.item_id).cloned().unwrap_or_default();
+            if let Some(value)=edit.patch.fade_in_shape {style.in_shape=value;}
+            if let Some(value)=edit.patch.fade_out_shape {style.out_shape=value;}
+            if let Some(value)=edit.patch.fade_in_dir {style.in_dir=value;}
+            if let Some(value)=edit.patch.fade_out_dir {style.out_dir=value;}
+            style.validate()?;styles.insert(target.geometry.item_id.clone(),style);
+        }
         targets.push((edit,target,destination));
     }
     let undo=if managed {None} else {Some(targets[0].1.begin_undo(&authorized)?)};
@@ -119,9 +132,24 @@ pub(super) fn execute_managed(owner:&Arc<ExtensionOwner>,plan:HostEditPlan,autho
                 if let Some(value)=value {target.set_item(name,value,&authorized)?;}
             }
             if let Some(destination)=destination {target.move_to(destination,&authorized)?;}
+            if styles.contains_key(&target.geometry.item_id) {
+                // REAPER只留默认样式；自定义shape/dir进入HFS状态，而不是宿主c/S轴。
+                match target.geometry.fade_axes_new {
+                    Some(true)=>for (name,value) in [(c"D_FADEINDIR_NEW",target.geometry.fade_in_dir_new),(c"D_FADEOUTDIR_NEW",target.geometry.fade_out_dir_new),
+                        (c"D_FADEINDIR2_NEW",target.geometry.fade_in_dir2_new),(c"D_FADEOUTDIR2_NEW",target.geometry.fade_out_dir2_new)] {if value!=0. {target.set_item(name,0.,&authorized)?;}},
+                    Some(false)=>for (name,value) in [(c"C_FADEINSHAPE",target.geometry.fade_in_shape),(c"C_FADEOUTSHAPE",target.geometry.fade_out_shape),
+                        (c"D_FADEINDIR",target.geometry.fade_in_dir),(c"D_FADEOUTDIR",target.geometry.fade_out_dir)] {if value!=0. {target.set_item(name,0.,&authorized)?;}},
+                    None=>return Err("host fade version unavailable; cannot normalize default style".into()),
+                }
+            }
             target.update(&authorized)?;
         }Ok(())
-    })();drop(undo);result.map_err(|error|format!("host clip edit failed (Undo block retained): {error}"))
+    })();
+    if result.is_ok()&&!styles.is_empty() {
+        {let _transaction=document.transaction.lock().unwrap();let mut edits=document.edits.lock().unwrap();edits.fades.extend(styles);edits.revision=edits.revision.checked_add(1).ok_or("edit revision exhausted")?;}
+        for owner in document.renderer_owners() {owner.prepare();}
+    }
+    drop(undo);result.map_err(|error|format!("host clip edit failed (Undo block retained): {error}"))
 }
 
 #[cfg(test)]
@@ -137,7 +165,7 @@ mod tests {
         assert_eq!(plan.edits[0].after.playback_rate,2.);assert_eq!(plan.edits[0].after.length_sec,1.);
         assert!(editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"reversed":true})).is_err());
         assert!(editor.plan_host_edit("set_clips_state_bulk",&json!({"updates":[{"clipId":clip.id,"startSec":1.},{"clipId":"other","lengthSec":-1.}]})).is_err());
-        assert!(editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"fadeInShape":5.})).is_err());
+        assert!(editor.plan_host_edit("set_clip_state",&json!({"clipId":clip.id,"fadeInShape":99.})).is_err());
         assert_eq!(editor.timeline.lock().unwrap().clips[0].start_sec,clip.start_sec,"纯规划不得修改actor私有几何");editor.close();
     }
     /// 使用生产clip路由、官方typed getter/setter与Undo块；没有把私有timeline赋值当同步。

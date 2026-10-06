@@ -54,6 +54,11 @@ pub(crate) fn validate_regions(
     sample_rate: u32,
     allow_stretch:bool,
 ) -> Result<(i64,usize), SnapshotError> {
+    validate_regions_with_fades(regions,sources,sample_rate,allow_stretch,false)
+}
+/// 原kernel已实现委托的包络；plain路径仍必须拒绝content fade，不暗中重复宿主处理。
+pub(crate) fn validate_regions_with_fades(regions:&[AraPlaybackRegion],sources:&HashMap<String,Arc<SourcePcm>>,
+    sample_rate:u32,allow_stretch:bool,allow_fades:bool)->Result<(i64,usize),SnapshotError> {
     if sample_rate == 0 {
         return Err(SnapshotError::InvalidGeometry);
     }
@@ -74,8 +79,7 @@ pub(crate) fn validate_regions(
             return Err(SnapshotError::InvalidGeometry);
         }
         if (!allow_stretch && (region.duration_in_modification_time - region.duration_in_playback_time).abs() > 1e-9)
-            || region.has_content_based_fade_at_head
-            || region.has_content_based_fade_at_tail
+            || !allow_fades&&(region.has_content_based_fade_at_head||region.has_content_based_fade_at_tail)
         {
             return Err(SnapshotError::UnsupportedTransform);
         }

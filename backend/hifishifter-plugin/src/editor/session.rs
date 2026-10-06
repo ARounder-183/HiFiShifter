@@ -292,7 +292,7 @@ impl EditorSession {
         }}
         if changed {let updated=self.timeline.lock().unwrap().clone();self.publish_timeline(updated);self.render_requested.store(true,Ordering::Release);}
     }
-    pub(super) fn ensure_loaded(&self,force:bool)->Result<(),String> {
+    pub(crate) fn ensure_loaded(&self,force:bool)->Result<(),String> {
         let document=self.document.upgrade().ok_or("document closed")?;
         let versions=document.editor_versions()?;
         {

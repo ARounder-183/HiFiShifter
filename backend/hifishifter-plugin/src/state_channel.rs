@@ -15,12 +15,23 @@ pub(crate) struct EditState {
     pub bindings: TrackBindings,
     #[serde(default,skip_serializing_if="crate::editor::parameter_atlas::ParameterAtlas::is_empty")]
     pub atlas:crate::editor::parameter_atlas::ParameterAtlas,
+    /// REAPER稳定item GUID对应的HFS自有形状；不写回宿主shape/c/S字段。
+    #[serde(default,skip_serializing_if="BTreeMap::is_empty")]
+    pub fades:BTreeMap<String,crate::fade::FadeStyle>,
     /// 组件恢复时延迟到完整ARA图ready后再关联，禁止逐对象创建时误套新序号。
     #[serde(skip)]
     pub needs_rebind: bool,
 }
 
 impl EditState {
+    /// 形状记录有界且只允许固定GUID键，冷重开不能按会话clip序号关联。
+    fn validate_fades(&self)->Result<(),String> {
+        if self.fades.len()>10000 {return Err("fade state budget exceeded".into());}
+        for (key,style) in &self.fades {
+            if key.len()!=38||!key.starts_with('{')||!key.ends_with('}') {return Err("invalid fade item identity".into());}
+            style.validate()?;
+        }Ok(())
+    }
     /// live图已明确归属时刷新成员；restore只接受唯一完整身份集合，失败保留原state。
     pub fn reconcile(&mut self, current: &TrackBindings) -> Result<(), String> {
         let mut candidate = self.clone();
@@ -109,18 +120,20 @@ impl EditState {
     /// 有版本且有界的组件state；旧空state保持默认编辑。
     pub fn encode(&self) -> Result<Vec<u8>, String> {
         self.atlas.validate()?;
+        self.validate_fades()?;
         for id in self.tracks.iter().map(|t| &t.id).chain(self.params.keys()) {
             if self.bindings.get(id).is_none_or(Vec::is_empty) { return Err("ARA edit identity missing; cannot save edits".into()); }
         }
-        serde_json::to_vec(&serde_json::json!({"version":if self.atlas.is_empty() {2} else {3},"edits":self})).map_err(|e| e.to_string())
+        serde_json::to_vec(&serde_json::json!({"version":if !self.fades.is_empty() {4} else if self.atlas.is_empty() {2} else {3},"edits":self})).map_err(|e| e.to_string())
     }
     /// 恢复使乐观并发revision前进，防止旧GUI再次覆盖宿主undo/恢复。
     pub fn restore(&mut self, bytes: &[u8]) -> Result<(), String> {
         if bytes.is_empty() { return Ok(()); }
         if bytes.len() > hifishifter_ara_ipc::MAX_FRAME { return Err("state too large".into()); }
         let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-        if value["version"] != 1 && value["version"] != 2 && value["version"] != 3 { return Err("unsupported state version".into()); }
+        if value["version"] != 1 && value["version"] != 2 && value["version"] != 3 && value["version"] != 4 { return Err("unsupported state version".into()); }
         let mut restored: Self = serde_json::from_value(value["edits"].clone()).map_err(|e| e.to_string())?;
+        restored.validate_fades()?;
         restored.atlas=restored.atlas.reserve_restored()?;
         if value["version"] == 1 && (!restored.params.is_empty() || !restored.tracks.is_empty()) {
             return Err("legacy ARA edits have no persistent identity; cannot restore by session track number".into());

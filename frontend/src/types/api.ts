@@ -1,6 +1,6 @@
 // ARA宿主UI载荷可附只读淡化轴；独立App不生成这些字段，音频仍由宿主淡化。
 export interface HostFadeMetadata {
-    curve_mode: "reaper_new" | "legacy" | "unknown";
+    curve_mode: "reaper_new" | "legacy" | "unknown" | "hifishifter";
     in_curvature: number;
     out_curvature: number;
     in_s: number;

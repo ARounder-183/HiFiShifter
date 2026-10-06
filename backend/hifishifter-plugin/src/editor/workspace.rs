@@ -8,6 +8,14 @@ use std::sync::atomic::Ordering;
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub(crate) struct WorkspaceScope {pub regions:BTreeSet<u64>}
 impl DocumentSession {
+    /// 组件保存/恢复仅操作其实际assigned clips的item GUID，防止另一个轨道的形状串入。
+    pub(crate) fn fade_items_locked(&self,clips:&std::collections::BTreeSet<String>)->std::collections::BTreeSet<String> {
+        let identities=self.clip_ids.lock().unwrap();
+        self.renderer_owners().iter().filter_map(|owner| {
+            let bound=owner.host_geometry_metadata_locked(self)?;
+            identities.get(&bound.region_key).filter(|id|clips.contains(*id)).map(|_|bound.geometry.item_id)
+        }).collect()
+    }
     /// 创建item返回的GUID只用于等待它自己的真实ARA区域，不用文件名/位置匹配新clip。
     pub(crate) fn clip_for_host_item(&self,item:&str)->Option<String> {
         let _transaction=self.transaction.lock().unwrap();
@@ -19,13 +27,20 @@ impl DocumentSession {
         }None
     }
     /// UI专用原始曲率不写进kernel状态或参数权威；普通fade最终声音仍由宿主负责。
-    pub(crate) fn decorate_host_fades_locked(&self,payload:&mut serde_json::Value,namespace:&str) {
+    pub(crate) fn decorate_host_fades_locked(&self,payload:&mut serde_json::Value,namespace:&str,fades:&std::collections::BTreeMap<String,crate::fade::FadeStyle>) {
         let identities=self.clip_ids.lock().unwrap().clone();
         let Some(clips)=payload["clips"].as_array_mut() else {return;};
         for owner in self.renderer_owners() {
             let Some(bound)=owner.host_geometry_metadata_locked(self) else {continue;};
             let Some(id)=identities.get(&bound.region_key) else {continue;};let ui_id=format!("{namespace}{id}");
             let Some(clip)=clips.iter_mut().find(|clip|clip["id"]==ui_id) else {continue;};let g=bound.geometry;
+            let delegated=self.regions.lock().unwrap().get(&bound.region_key).is_some_and(|region|region.has_content_based_fade_at_head||region.has_content_based_fade_at_tail);
+            if delegated {
+                let style=fades.get(&g.item_id).cloned().unwrap_or_default();
+                clip["fade_in_shape"]=serde_json::json!(style.in_shape);clip["fade_out_shape"]=serde_json::json!(style.out_shape);
+                clip["fade_in_dir"]=serde_json::json!(style.in_dir);clip["fade_out_dir"]=serde_json::json!(style.out_dir);
+                clip["host_fades"]=serde_json::json!({"curve_mode":"hifishifter","in_curvature":style.in_dir,"out_curvature":style.out_dir,"in_s":0.,"out_s":0.});continue;
+            }
             clip["host_fades"]=serde_json::json!({"curve_mode":match g.fade_axes_new {Some(true)=>"reaper_new",Some(false)=>"legacy",None=>"unknown"},
                 "in_curvature":g.fade_in_dir_new,"out_curvature":g.fade_out_dir_new,
                 "in_s":g.fade_in_dir2_new,"out_s":g.fade_out_dir2_new});
@@ -33,11 +48,11 @@ impl DocumentSession {
     }
     /// 无宿主getter的短事务装饰；调用者不得仍持编辑timeline锁。
     pub(crate) fn decorate_host_fades(&self,payload:&mut serde_json::Value,namespace:&str) {
-        let _transaction=self.transaction.lock().unwrap();if self.is_alive() {self.decorate_host_fades_locked(payload,namespace);}
+        let _transaction=self.transaction.lock().unwrap();if self.is_alive() {self.decorate_host_fades_locked(payload,namespace,&self.edits.lock().unwrap().fades);}
     }
     /// 普通手动/自动fade仅投影到原GUI，内核继续消费未烘焙fade的ARA时间线。
     /// 只沿已核对的唯一真实region key，不按轨名/位置猜关联。
-    pub(crate) fn project_ui_fades_locked(&self,timeline:&mut TimelineState) {
+    pub(crate) fn project_ui_fades_locked(&self,timeline:&mut TimelineState,fades:&std::collections::BTreeMap<String,crate::fade::FadeStyle>) {
         let identities=self.clip_ids.lock().unwrap().clone();
         for owner in self.renderer_owners() {
             let Some(bound)=owner.host_geometry_metadata_locked(self) else {continue;};
@@ -47,7 +62,25 @@ impl DocumentSession {
             clip.auto_fade_in_sec=geometry.auto_fade_in_sec;clip.auto_fade_out_sec=geometry.auto_fade_out_sec;
             clip.fade_in_shape=geometry.fade_in_shape;clip.fade_out_shape=geometry.fade_out_shape;
             clip.fade_in_dir=geometry.fade_in_dir;clip.fade_out_dir=geometry.fade_out_dir;
+            if self.regions.lock().unwrap().get(&bound.region_key).is_some_and(|region|region.has_content_based_fade_at_head||region.has_content_based_fade_at_tail) {
+                let style=fades.get(&geometry.item_id).cloned().unwrap_or_default();
+                clip.fade_in_shape=style.in_shape;clip.fade_out_shape=style.out_shape;clip.fade_in_dir=style.in_dir;clip.fade_out_dir=style.out_dir;
+            }
         }
+    }
+    /// 只把宿主明确委托的一端写进原kernel；另一端仍归宿主，不能凭能力广告重复烘焙。
+    pub(crate) fn project_audio_fades_locked(&self,timeline:&mut TimelineState,edits:&crate::state_channel::EditState)->Result<(),String> {
+        let identities=self.clip_ids.lock().unwrap().clone();let regions=self.regions.lock().unwrap().clone();
+        for clip in &mut timeline.clips {
+            let key=identities.iter().find(|(_,id)|id.as_str()==clip.id).map(|(key,_)|*key).ok_or("missing fade region edge")?;
+            let region=regions.get(&key).ok_or("missing fade region")?;
+            if !region.has_content_based_fade_at_head&&!region.has_content_based_fade_at_tail {continue;}
+            let geometry=self.renderer_owners().iter().find_map(|owner|owner.host_geometry_metadata_locked(self).filter(|bound|bound.region_key==key))
+                .ok_or("delegated fade host geometry pending")?.geometry;
+            let style=edits.fades.get(&geometry.item_id).cloned().unwrap_or_default();
+            if region.has_content_based_fade_at_head {clip.fade_in_sec=geometry.fade_in_sec;clip.auto_fade_in_sec=geometry.auto_fade_in_sec;clip.fade_in_shape=style.in_shape;clip.fade_in_dir=style.in_dir;}
+            if region.has_content_based_fade_at_tail {clip.fade_out_sec=geometry.fade_out_sec;clip.auto_fade_out_sec=geometry.auto_fade_out_sec;clip.fade_out_shape=style.out_shape;clip.fade_out_dir=style.out_dir;}
+        }Ok(())
     }
     /// 有效item静音按同文档唯一region身份投影；不把它存成HFS自己的可写轨道状态。
     pub(crate) fn project_host_mutes_locked(&self,timeline:&mut TimelineState) {
@@ -61,7 +94,7 @@ impl DocumentSession {
     /// 无PCM复制或host getter，pending曲线也可独立更新可见宿主fade。
     pub(crate) fn ui_fade_projection(&self)->Result<(u64,TimelineState),String> {
         let _transaction=self.transaction.lock().unwrap();let mut timeline=self.workspace_timeline_locked()?;
-        self.project_ui_fades_locked(&mut timeline);Ok((self.ui_geometry_revision.load(Ordering::Acquire),timeline))
+        self.project_ui_fades_locked(&mut timeline,&self.edits.lock().unwrap().fades);Ok((self.ui_geometry_revision.load(Ordering::Acquire),timeline))
     }
     /// 非实时短事务读取完整授权scope；零分配只能返回零区域，不能等同全文档。
     pub(crate) fn workspace_scope(&self)->Result<WorkspaceScope,String> {

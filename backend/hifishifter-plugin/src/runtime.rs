@@ -50,19 +50,20 @@ impl Runtime {
                 "https://example.invalid",
                 crate::VERSION,
             )
-            // 仅线性保调已实现；tempo反映与content fade须通过完整音频门后再协商。
+            // 原kernel处理委托的边界包络，head/tail无额外延伸；tempo-reflecting仍不广告。
             .capabilities(
                 FactoryCapabilities::default().with_playback_transformations(
-                    PlaybackTransformationFlags::TIMESTRETCH,
+                    PlaybackTransformationFlags::TIMESTRETCH|PlaybackTransformationFlags::CONTENT_FADES,
                 ),
             )
             // 每个文档控制器拿到**自己的一份**模型：一份模型对应一份 ARA 文档。
             // 共享一份会让两份文档的累积互相污染（设计 §4.1：v1 是"一实例一编辑轨"）。
             .document_controller(|| {
                 let model = crate::ara::model::ModelHandle::new();
+                let head_tail=model.head_tail();
                 let session = model.session();
                 let playback=session.clone();
-                PluginBuilder::new(model).controller_identity(move |key| session.register(key))
+                PluginBuilder::new(model).realtime_head_tail(head_tail).controller_identity(move |key| session.register(key))
                     .host_playback(move |handle| {crate::log_line(&format!("ARA host playback control available={}",handle.is_some()));*playback.playback.lock().unwrap()=handle;}).build()
             })
             .build()?;
@@ -99,11 +100,11 @@ pub fn runtime() -> Option<&'static Runtime> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// 宿主实际读取的native工厂不能把尚未实现的tempo/content fade协商给插件。
+    /// 原生工厂仅广告线性拉伸与本应用的委托渐变，不广告未实现的tempo-reflecting。
     #[test]
-    fn task38a_native_factory_advertises_only_implemented_linear_timestretch() {
+    fn native_factory_advertises_linear_stretch_and_owned_fades_without_tempo_reflection() {
         let runtime=Runtime::init().unwrap();
         let raw=unsafe {&*runtime.factory.0.as_raw()};
-        assert_eq!(raw.supportedPlaybackTransformationFlags as u32,PlaybackTransformationFlags::TIMESTRETCH.bits());
+        assert_eq!(raw.supportedPlaybackTransformationFlags as u32,(PlaybackTransformationFlags::TIMESTRETCH|PlaybackTransformationFlags::CONTENT_FADES).bits());
     }
 }

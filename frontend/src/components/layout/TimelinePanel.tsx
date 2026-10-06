@@ -5091,7 +5091,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onBoxSelectCommit: handleKernelBoxSelectCommit,
             onBoxSelectToParamSelection: handleKernelBoxSelectToParamSelection,
             onContextMenu: isPluginMode() ? undefined : handleKernelContextMenu,
-            onFadeContextMenu: isPluginMode() ? undefined : handleKernelFadeContextMenu,
+            onFadeContextMenu: isHostGeometryReadOnly() ? undefined : handleKernelFadeContextMenu,
             onFadeHover: handleKernelFadeHover,
             onClipHover: handleKernelClipHover,
             onActivateTake: handleKernelActivateTake,

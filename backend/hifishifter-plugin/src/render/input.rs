@@ -34,7 +34,7 @@ impl RenderInput {
                 sample_rate,origin_sample:0,left:vec![],right:vec![],_reservation:None}).collect());
         }
         // 只放行原kernel负责的真实正向时间拉伸；普通PCM mixer不放行，content-based fades另有契约。
-        super::snapshot::validate_regions(&self.regions,&self.sources,44100,true).map_err(|e|format!("unsupported host region: {e:?}"))?;
+        super::snapshot::validate_regions_with_fades(&self.regions,&self.sources,44100,true,true).map_err(|e|format!("unsupported host region: {e:?}"))?;
         let start=timeline.clips.iter().map(|c|c.start_sec).fold(f64::INFINITY,f64::min);
         let end=timeline.clips.iter().map(|c|c.start_sec+c.length_sec).fold(0.0_f64,f64::max);
         if start<0.0 || !start.is_finite() || !end.is_finite() {return Err("unsupported host position".into());}

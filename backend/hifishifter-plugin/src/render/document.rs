@@ -142,7 +142,7 @@ impl DocumentSession {
     }
     fn workspace_projection_locked(&self,edits:&crate::state_channel::EditState)->Result<String,String> {
         let mut timeline=self.workspace_timeline_locked()?;edits.apply(&mut timeline);
-        let bytes=serde_json::to_vec(&(timeline.params_by_root_track,timeline.tracks)).map_err(|e|e.to_string())?;
+        let bytes=serde_json::to_vec(&(timeline.params_by_root_track,timeline.tracks,&edits.fades)).map_err(|e|e.to_string())?;
         Ok(format!("{}:{}",self.scope_revision.load(Ordering::Acquire),blake3::hash(&bytes).to_hex()))
     }
     /// scope版本参与投影指纹；区域退出后即便edit/model没动也不能接受旧工作区。
@@ -171,7 +171,7 @@ impl DocumentSession {
             Ok((id.clone(),pcm.clone()))
         }).collect::<Result<Vec<_>,String>>()?;
         let projection=self.workspace_projection_locked(&edits)?;
-        self.project_ui_fades_locked(&mut timeline);
+        self.project_ui_fades_locked(&mut timeline,&edits.fades);
         Ok((WorkspaceSnapshot {timeline,sources,
             revision:edits.revision,model_revision:self.revision.load(Ordering::Acquire)},self.scope_revision.load(Ordering::Acquire),projection))
     }

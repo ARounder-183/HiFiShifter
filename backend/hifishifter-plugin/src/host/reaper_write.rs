@@ -159,7 +159,7 @@ impl HostClipTarget {
     /// 仅明确白名单的数值字段可写；重入撤销租约后停止后续setter。
     pub(crate) fn set_item(&self,name:&CStr,value:f64,authorized:&impl Fn()->bool)->Result<(),String> {
         self.verify(authorized)?;
-        if !matches!(name.to_bytes(),b"D_POSITION"|b"D_LENGTH"|b"B_MUTE"|b"B_LOOPSRC"|b"D_SNAPOFFSET"|b"D_FADEINLEN"|b"D_FADEOUTLEN"|b"D_FADEINLEN_AUTO"|b"D_FADEOUTLEN_AUTO") {return Err("unsupported host item field".into());}
+        if !matches!(name.to_bytes(),b"D_POSITION"|b"D_LENGTH"|b"B_MUTE"|b"B_LOOPSRC"|b"D_SNAPOFFSET"|b"D_FADEINLEN"|b"D_FADEOUTLEN"|b"D_FADEINLEN_AUTO"|b"D_FADEOUTLEN_AUTO"|b"C_FADEINSHAPE"|b"C_FADEOUTSHAPE"|b"D_FADEINDIR"|b"D_FADEOUTDIR"|b"D_FADEINDIR_NEW"|b"D_FADEOUTDIR_NEW"|b"D_FADEINDIR2_NEW"|b"D_FADEOUTDIR2_NEW") {return Err("unsupported host item field".into());}
         if !value.is_finite() {return Err("nonfinite host item edit".into());}
         if !checked(authorized,||unsafe {(self.api().1.set_item)(self.item as *mut c_void,name.as_ptr(),value)})? {
             return Err(format!("REAPER rejected item field {}",name.to_string_lossy()));

@@ -76,6 +76,7 @@ pub struct ModelHandle {
     document_id: DocumentId,
     session: Arc<DocumentSession>,
     region_keys: Vec<u64>,
+    head_tail:Arc<ara2_bridge::plugin::RealtimeHeadTailAdapter>,
     /// 正在累积的 ARA 文档。
     document: AraDocument,
     /// 映射好的时间线（`end_editing` 之后可用）。
@@ -110,6 +111,7 @@ impl Default for ModelHandle {
             document_id,
             session: DocumentSession::new(document_id),
             region_keys: Vec::new(),
+            head_tail:Arc::new(ara2_bridge::plugin::RealtimeHeadTailAdapter::new(8192).expect("constant head/tail capacity")),
             document: AraDocument::default(),
             timeline: None,
             generation: None,
@@ -125,6 +127,13 @@ impl Default for ModelHandle {
 }
 
 impl ModelHandle {
+    pub(crate) fn head_tail(&self)->Arc<ara2_bridge::plugin::RealtimeHeadTailAdapter> {self.head_tail.clone()}
+    /// 本应用渐变位于clip边界内，没有额外head/tail；查询使用SDK的零分配快照接口。
+    fn publish_head_tail(&self)->Result<(),AraError> {
+        let entries=self.region_keys.iter().enumerate().filter(|(index,_)|!self.destroyed_regions.contains(index))
+            .map(|(_,key)|ara2_bridge::core::HeadTailEntry::new(*key,0.,0.)).collect::<Result<Vec<_>,_>>()?;
+        self.head_tail.install(entries)
+    }
     /// 借出本模型的文档生命周期，供工厂身份通知及 renderer 绑定使用。
     pub(crate) fn session(&self) -> Arc<DocumentSession> { self.session.clone() }
     /// 新建一份空模型。
@@ -598,6 +607,7 @@ impl PlaybackRegions for ModelHandle {
             .register(key, self.document_id, index)
             .map_err(|_| AraError::InvalidState("region identity already owned or invalid"))?;
         self.region_keys.push(key);
+        self.publish_head_tail()?;
         if let Some(sequence) = properties.region_sequence() {
             self.session.sequence_regions.lock().unwrap().entry(sequence.as_raw() as usize as u64)
                 .or_default().insert(key);
@@ -670,6 +680,7 @@ impl PlaybackRegions for ModelHandle {
             for regions in self.session.sequence_regions.lock().unwrap().values_mut() { regions.remove(key); }
         }
         self.destroyed_regions.insert(state);
+        if let Err(error)=self.publish_head_tail() {log::error!("head/tail snapshot failed: {error}");}
         log::info!("[ara] playback_region destroyed #{}", state);
     }
 }

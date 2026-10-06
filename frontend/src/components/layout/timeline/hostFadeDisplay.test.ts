@@ -5,6 +5,13 @@ import {fadeGainSigned} from "./reaperFade";
 import type {HostFadeMetadata} from "../../../types/api";
 
 const metadata:HostFadeMetadata={curve_mode:"reaper_new",in_curvature:-0.2,out_curvature:0,in_s:0.65,out_s:0};
+test("HFS-owned envelope displays the same shape/curvature family used by audio, not host c/S",()=>{
+    const owned={...metadata,curve_mode:"hifishifter" as const};
+    for(const mode of ["in","out"] as const) for(const t of [0,0.15,0.5,0.85,1]) {
+        expect(visualFadeGain(owned,5,0.3,mode,t)).toBe(fadeGainSigned(5,0.3,mode,t));
+    }
+    expect(visualFadeGain(owned,1,0,"in",0.5)).not.toBe(visualFadeGain(owned,5,0,"in",0.5));
+});
 test("new axes preserve both values and use an explicit HFS visual style",()=>{
     expect(hostFadeDisplay(metadata,false)).toBe("hifishifter");
     expect(hostFadeLabel(metadata,false)).toBe("REAPER c=-0.20 S=0.65");

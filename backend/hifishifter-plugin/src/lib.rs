@@ -27,6 +27,7 @@ mod diagnostics;
 mod audio_abi;
 mod ara_entry;
 mod state_channel;
+mod fade;
 mod state_stream;
 mod editor;
 #[cfg(test)]

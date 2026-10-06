@@ -20,7 +20,7 @@ function defaultHostFadeGain(mode:"in"|"out",progress:number):number {
 
 /** UI求值器供曲线描边与波形共用；只画图，不把宿主fade烘焙到插件PCM。 */
 export function visualFadeGain(metadata:HostFadeMetadata|undefined,shape:number,dir:number,mode:"in"|"out",t:number):number {
-    if (!metadata||metadata.curve_mode==="legacy") return fadeGainSigned(shape,dir,mode,t);
+    if (!metadata||metadata.curve_mode==="legacy"||metadata.curve_mode==="hifishifter") return fadeGainSigned(shape,dir,mode,t);
     const progress=Number.isFinite(t)?Math.min(1,Math.max(0,t)):0;
     if (metadata.curve_mode!=="reaper_new") return defaultHostFadeGain(mode,progress);
     const curvature=visualAxis(mode==="out"?metadata.out_curvature:metadata.in_curvature);
@@ -35,6 +35,7 @@ export function visualFadeGain(metadata:HostFadeMetadata|undefined,shape:number,
 
 /** 直接报告宿主两个原始轴；问号表示版本语义不可用，不沿用过时shape名称。 */
 export function hostFadeLabel(metadata:HostFadeMetadata,isOut:boolean):string {
+    if (metadata.curve_mode==="hifishifter") return "HiFiShifter";
     if (metadata.curve_mode==="unknown") return "REAPER ?";
     const curvature=isOut?metadata.out_curvature:metadata.in_curvature;
     const s=isOut?metadata.out_s:metadata.in_s;

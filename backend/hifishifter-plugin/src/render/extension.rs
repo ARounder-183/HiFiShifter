@@ -53,6 +53,39 @@ pub(crate) struct ExtensionOwner {
 #[cfg(test)]
 mod bound_tests {
     use super::*;
+    /// 实际原kernel PCM必须随HFS形状变化；只委托head时不能又烘焙宿主tail。
+    #[test]
+    fn owned_fade_shape_changes_kernel_pcm_and_state_roundtrip_and_undo_clears_it() {
+        use hifishifter_kernel::editor::ParamHost;
+        let (model,owners,ids)=crate::editor::session::tests::workspace_fixture();let document=model.session();
+        let key=(&*ids[0] as *const u8) as u64;
+        {let mut timeline=document.timeline.lock().unwrap();let clip=&mut timeline.as_mut().unwrap().clips[0];
+            clip.start_sec=1.;clip.length_sec=1.;clip.takes[0].source_end_sec=1.;clip.normalize_takes();}
+        {let mut regions=document.regions.lock().unwrap();let region=regions.get_mut(&key).unwrap();
+            region.start_in_playback_time=1.;region.duration_in_playback_time=1.;region.duration_in_modification_time=1.;region.has_content_based_fade_at_head=true;}
+        let pcm=Arc::new(super::super::source::SourcePcm {sample_rate:44100,planes:vec![vec![0.5;44100]],version:0,_reservation:None});
+        document.edit_sources.lock().unwrap().insert("ara://source".into(),pcm.clone());document.sources.lock().unwrap().insert("ara://source".into(),pcm);
+        let host=crate::host::reaper::ReaperFixture::new();host.enable_writer();host.clear_markers();
+        for (name,value) in [("D_LENGTH",1.),("D_PLAYRATE",1.),("D_FADEINLEN",0.25),("D_FADEINLEN_AUTO",0.),("D_FADEOUTLEN",0.25),("D_FADEOUTLEN_AUTO",0.)] {host.set_value(name,value);}
+        unsafe {owners[0].bind_reaper_host(host.context());}owners[0].refresh_reaper_transport();
+        let editor=owners[0].editor_session().unwrap();editor.ensure_loaded(false).unwrap();let before=owners[0].encode_state().unwrap();
+        let render=|| {
+            let input={let _transaction=document.transaction.lock().unwrap();owners[0].capture_render_input(&document,&document.edits.lock().unwrap(),true).unwrap().1};
+            assert_eq!(input.timeline.as_ref().unwrap().clips[0].fade_out_sec,0.,"未委托tail仍归宿主，不能重复淡化");
+            input.render(Arc::new(std::sync::atomic::AtomicBool::new(false))).unwrap()
+        };
+        let original=render();let index=5512;
+        assert!((original[0].left[index] as f64-0.5*0.5_f64.powf(0.45)).abs()<0.001);
+        let clip=editor.timeline().lock().unwrap().clips[0].id.clone();
+        let plan=editor.plan_host_edit("set_clip_state",&serde_json::json!({"clipId":clip,"fadeInShape":5.,"fadeInDir":0.})).unwrap();
+        crate::editor::host_edit::execute(&owners[0],plan,||document.is_alive()).unwrap();
+        let updated=render();assert!((updated[0].left[index] as f64-0.25).abs()<0.001);
+        assert!((updated[0].left[index]-original[0].left[index]).abs()>0.1);
+        let saved=owners[0].encode_state().unwrap();let value:serde_json::Value=serde_json::from_slice(&saved).unwrap();assert_eq!(value["version"],4);
+        assert_eq!(value["edits"]["fades"].as_object().unwrap().len(),1);
+        owners[0].restore_state(&before).unwrap();assert!(document.edits.lock().unwrap().fades.is_empty(),"恢复旧无形状状态必须撤销HFS形状，不保留未来编辑");
+        owners[0].restore_state(&saved).unwrap();assert_eq!(document.edits.lock().unwrap().fades.values().next().unwrap().in_shape,5.);document.close();
+    }
     use crate::ara_entry::HostEntry;
     use ara2_bridge::companion::vst3::ffi::{ara2_vst3_plugin_entry_bind, ARA2_VST3_OK};
     use ara2_bridge::companion::{CompanionFactory, CompanionProcessorBinding, CompanionRoles};
@@ -955,14 +988,22 @@ impl ExtensionOwner {
             geometry=Err("REAPER project changed during cached geometry refresh".into());
         }
         let _transaction=stamp.0.transaction.lock().unwrap();
+        let mut prepare_fades=false;
         if !self.is_closed()&&stamp.0.is_alive()&&stamp.0.revision.load(Ordering::Acquire)==stamp.1
             &&stamp.0.scope_revision.load(Ordering::Acquire)==stamp.2 {
             let mut cached=self.host_geometry.lock().unwrap();
             let changed=cached.as_ref().is_none_or(|old|old.model!=stamp.1||old.scope!=stamp.2||old.value!=geometry);
+            let delegated=stamp.3.iter().any(|key|stamp.0.regions.lock().unwrap().get(key).is_some_and(|region|region.has_content_based_fade_at_head||region.has_content_based_fade_at_tail));
+            if delegated&&changed&&geometry.is_ok() {
+                let lengths=|value:&crate::host::geometry::BoundHostGeometry|[value.geometry.fade_in_sec,value.geometry.fade_out_sec,value.geometry.auto_fade_in_sec,value.geometry.auto_fade_out_sec];
+                prepare_fades=cached.as_ref().and_then(|old|old.value.as_ref().ok()).is_none_or(|old|lengths(old)!=lengths(geometry.as_ref().unwrap()));
+                if prepare_fades {stamp.0.render_epoch.fetch_add(1,Ordering::AcqRel);}
+            }
             self.host_item_muted.store(geometry.as_ref().is_ok_and(|bound|bound.geometry.muted),Ordering::Release);
             *cached=Some(CachedHostGeometry {model:stamp.1,scope:stamp.2,change:after,value:geometry});drop(cached);
             if changed {stamp.0.ui_geometry_revision.fetch_add(1,Ordering::AcqRel);}
         }
+        drop(_transaction);if prepare_fades {self.prepare();}
     }
     /// realtime只读角色原子值；只有playback角色负责替换歌曲音频。
     pub(crate) fn renders_playback(&self)->bool {self.role.load(Ordering::Acquire)==1}
@@ -1128,6 +1169,10 @@ impl ExtensionOwner {
         let mut merged=edits.merge(&host,&client,edits.revision)?;
         let clip_ids=host.clips.iter().map(|clip|clip.id.clone()).collect::<BTreeSet<_>>();
         merged.atlas.regions.retain(|id,_|!clip_ids.contains(id));merged.atlas.regions.extend(restored.atlas.regions);
+        let items=document.fade_items_locked(&clip_ids);
+        if !merged.fades.is_empty()&&items.is_empty()&&!clip_ids.is_empty() {return Err("fade ownership metadata pending for restore".into());}
+        merged.fades.retain(|item,_|!items.contains(item));
+        merged.fades.extend(restored.fades);
         merged.reconcile(&document.track_bindings.lock().unwrap())?;
         *edits=merged;*pending=None;Ok(())
     }
@@ -1147,6 +1192,9 @@ impl ExtensionOwner {
             let mut local=edits.clone();
             local.params.retain(|id,_|allowed.contains(id));local.tracks.retain(|t|allowed.contains(&t.id));
             let clips=host.clips.iter().map(|clip|clip.id.clone()).collect::<BTreeSet<_>>();local.atlas.regions.retain(|id,_|clips.contains(id));
+            if !local.fades.is_empty() {let items=document.fade_items_locked(&clips);
+                if items.is_empty()&&!clips.is_empty() {return Err("fade ownership metadata pending for save".into());}
+                local.fades.retain(|item,_|items.contains(item));}
             local.bindings.retain(|id,_|allowed.contains(id));local.encode()
         } else { self.pending_restore.lock().unwrap().as_ref().unwrap_or(&self.edits.lock().unwrap()).encode() }
     }
@@ -1252,7 +1300,9 @@ impl ExtensionOwner {
             .collect::<Result<Vec<_>, _>>()?;
         drop(geometry);
         let stretch=regions.iter().any(|region|(region.duration_in_modification_time-region.duration_in_playback_time).abs()>1e-9);
-        let kernel_render=edited||stretch;
+        let owned_fade=regions.iter().any(|region|region.has_content_based_fade_at_head||region.has_content_based_fade_at_tail);
+        if owned_fade {document.project_audio_fades_locked(&mut timeline,&resolved)?;}
+        let kernel_render=edited||stretch||owned_fade;
         let clip_parameters=if resolved.atlas.is_empty() {Default::default()} else {
             resolved.atlas.project_local(&timeline,&document.parameter_identities_locked(&timeline)?)?
         };

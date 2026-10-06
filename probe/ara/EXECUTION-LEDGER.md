@@ -1034,4 +1034,6 @@ Task 53: Ruling: 官方明确C/C++的P_SOURCE应通过GetSetMediaItemTakeInfo转
 
 Task 54: Ruling: 单文件chooser与base64 DOM兜底无法满足多短clip/文件拖入，InsertTrackInProject返回void也不能把某个当前位置当新轨身份证明 — 接现代多选API、WebView2 AdditionalObjects/File.Path、单clip精确创建GUID回流确认；新轨用所属project稳定GUID差集识别并首位插入HFS，仅空轨/自己FX身份未变才清理失败 — host_media4项、原生File/插件多文件4项、旧App命名4项/tsc通过，尚未真实REAPER验证；将不支持的多Take明确报错，不复制源码/音频冒充ARA，不降最终目标，未打包/安装或push。
 
+Task 55: Ruling: 普通fade的旧GUI示意不满足用户新的“实际声音归HFS”，直接烘焙会与宿主重复；ARA头允许宿主按CONTENT_FADES逐边委托 — 接原kernel逐端包络、默认HFS快起曲线、shape/dir私有GUID状态v4/旧状态兼容、scope保存恢复清理、host轴默认化，head/tail=0实时快照和工厂能力，长度变化重新准备输出epoch但不改神经输入 — kernel PCM/Undo/v4/未委托tail与factory2项、前端6项/tsc通过；尚未实际REAPER委托/单次包络oracle，不把能力或fake当宿主支持，拆分/拷贝形状继承仍待实测与实现。
+
 

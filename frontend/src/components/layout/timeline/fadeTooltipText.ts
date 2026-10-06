@@ -88,7 +88,7 @@ export function buildSingleFadeInfoText(args: {
     const name = shapeName(args.shape, args.t);
     const curvature = args.t("common_curvature");
     const length = args.t("common_length");
-    if (args.hostFades&&args.hostFades.curve_mode!=="legacy") {
+    if (args.hostFades&&args.hostFades.curve_mode!=="legacy"&&args.hostFades.curve_mode!=="hifishifter") {
         return [`${sideLabel}：${hostFadeLabel(args.hostFades,args.isOut)}`,
             `${length}：${formatFadeLengthTooltip(Math.max(0,args.lengthSec),args.formatCtx)}`,
             "HiFiShifter 示意曲线；声音由 REAPER 控制"].join("\n");
@@ -111,7 +111,7 @@ export function buildSingleFadeInfoContent(args: {
     t: FadeLabelLookup;
     hostFades?:HostFadeMetadata;
 }): ReactNode {
-    if (args.hostFades&&args.hostFades.curve_mode!=="legacy") {
+    if (args.hostFades&&args.hostFades.curve_mode!=="legacy"&&args.hostFades.curve_mode!=="hifishifter") {
         return buildSingleFadeInfoText(args).split("\n").map((row,key)=>createElement("div",{key},row));
     }
     const sideLabel = args.isOut ? args.t("fade_out") : args.t("fade_in");
