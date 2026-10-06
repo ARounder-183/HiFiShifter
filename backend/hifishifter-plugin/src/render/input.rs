@@ -19,6 +19,9 @@ pub(crate) struct RenderInput {
 impl RenderInput {
     /// 本函数只消费冻结值；调用前必须已释放文档transaction。新模型只能取消/拒绝发布。
     pub fn render(&self,cancel:Arc<AtomicBool>)->Result<Vec<PlaybackSnapshot>,String> {
+        self.render_with_progress(cancel,None)
+    }
+    pub fn render_with_progress(&self,cancel:Arc<AtomicBool>,progress:Option<hifishifter_kernel::mixdown::ProgressCallback>)->Result<Vec<PlaybackSnapshot>,String> {
         if cancel.load(Ordering::Acquire) {return Err("host preparation cancelled".into());}
         let Some(timeline)=&self.timeline else {
             return [44100,48000].into_iter().map(|rate| {
@@ -83,7 +86,7 @@ impl RenderInput {
                 let options=MixdownOptions {sample_rate,start_sec:lo,end_sec:Some(hi),
                     stretch:hifishifter_kernel::time_stretch::StretchAlgorithm::SoundTouchDll,apply_pitch_edit:true,
                     output:hifishifter_kernel::encode::OutputSpec::wav_32f(),quality_preset:QualityPreset::Export,
-                    cancel_flag:Some(cancel.clone()),progress:None,cache_stats:None};
+                    cancel_flag:Some(cancel.clone()),progress:progress.clone(),cache_stats:None};
                 render_mixdown_with_pcm(view,options,&input)
             };
             // 项目数组只负责GUI；每个区域用自己的源参数跑原kernel，再按宿主位置累加。

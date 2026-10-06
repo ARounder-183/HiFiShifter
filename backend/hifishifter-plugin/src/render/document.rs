@@ -211,6 +211,11 @@ impl DocumentSession {
     /// 合成只在短事务外计算；最终再次核对文档、scope、assignment与编辑代次。
     pub(crate) fn apply_workspace_edits(&self,base_edit:u64,base_model:u64,previous:&str,
         cancel:Arc<AtomicBool>,current:impl Fn()->bool)->Result<(),String> {
+        self.apply_workspace_edits_with_progress(base_edit,base_model,previous,cancel,current,None)
+    }
+    pub(crate) fn apply_workspace_edits_with_progress(&self,base_edit:u64,base_model:u64,previous:&str,
+        cancel:Arc<AtomicBool>,current:impl Fn()->bool,
+        progress:Option<hifishifter_kernel::mixdown::ProgressCallback>)->Result<(),String> {
         let (edit,epoch,scope,inputs)={
             let _transaction=self.transaction.lock().unwrap();
             if !self.is_alive() || !self.ready.load(Ordering::Acquire) || self.revision.load(Ordering::Acquire)!=base_model {
@@ -225,7 +230,7 @@ impl DocumentSession {
         if !current() {return Err("automatic apply superseded".into());}
         let mut prepared=Vec::new();for (owner,keys,input) in inputs {
             for publisher in &owner.snapshots {publisher.collect_retired();}
-            let mut snapshots=input.render(cancel.clone())?;super::snapshot::compact_prepared(&mut snapshots)?;
+            let mut snapshots=input.render_with_progress(cancel.clone(),progress.clone())?;super::snapshot::compact_prepared(&mut snapshots)?;
             prepared.push((owner,keys,snapshots));
         }
         let _transaction=self.transaction.lock().unwrap();

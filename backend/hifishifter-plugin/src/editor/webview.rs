@@ -92,6 +92,22 @@ impl WindowKey {
         }
         unsafe { MoveWindow(HWND(self.hwnd as *mut c_void),0,0,width,height,true) }.map_err(|e| e.to_string())
     }
+    /// Host key callback fallback for chords that REAPER consumes before WebView2.
+    pub(super) fn forward_key(self, virtual_key: u16, undo: bool) -> bool {
+        if unsafe { GetCurrentThreadId() } != self.thread || !self.valid() { return false; }
+        let hwnd = HWND(self.hwnd as *mut c_void);
+        unsafe {
+            if undo {
+                let _ = PostMessageW(Some(hwnd), WM_KEYDOWN, WPARAM(0x11), LPARAM(0));
+                let _ = PostMessageW(Some(hwnd), WM_KEYDOWN, WPARAM(virtual_key as usize), LPARAM(0));
+                let _ = PostMessageW(Some(hwnd), WM_KEYUP, WPARAM(virtual_key as usize), LPARAM(0));
+                let _ = PostMessageW(Some(hwnd), WM_KEYUP, WPARAM(0x11), LPARAM(0));
+            } else {
+                let _ = PostMessageW(Some(hwnd), WM_KEYUP, WPARAM(virtual_key as usize), LPARAM(0));
+            }
+        }
+        true
+    }
 }
 impl NativeEditor {
     /// 同线程创建子窗口，异步浏览器由宿主消息循环完成，禁止嵌套消息泵。

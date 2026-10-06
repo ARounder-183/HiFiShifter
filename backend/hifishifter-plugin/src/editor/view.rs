@@ -139,7 +139,24 @@ unsafe extern "system" fn removed(this: *mut c_void) -> TResult {
     })
 }
 unsafe extern "system" fn wheel(_this: *mut c_void, _distance: f32) -> TResult { K_RESULT_FALSE }
-unsafe extern "system" fn key(_this: *mut c_void, _key: u16, _code: i16, _mods: i16) -> TResult { K_RESULT_FALSE }
+unsafe extern "system" fn key(this: *mut c_void, key: u16, _code: i16, mods: i16) -> TResult {
+    boundary(|| {
+        // REAPER may consume Ctrl+Z before WebView2 sees it and call IPlugView's
+        // key callback instead. Re-inject only the undo chord into this view;
+        // all other keys retain the host's normal routing.
+        #[cfg(windows)]
+        if (key == b'z' as u16 || key == b'Z' as u16) && (mods as u16 & (1 << 2)) != 0 {
+            let native = {
+                let state = unsafe { view(this) }.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.native.as_ref().map(super::webview::NativeEditor::window_key)
+            };
+            if let Some(native) = native {
+                if native.forward_key(0x5a, true) { return K_RESULT_OK; }
+            }
+        }
+        K_RESULT_FALSE
+    })
+}
 unsafe extern "system" fn get_size(this: *mut c_void, rect: *mut ViewRect) -> TResult {
     if rect.is_null() { return K_INVALID_ARGUMENT; }
     boundary(|| {

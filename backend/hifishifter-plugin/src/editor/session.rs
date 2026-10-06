@@ -163,8 +163,20 @@ impl EditorSession {
                     if session.processed.load(Ordering::Acquire)!=ticket {deadline=Some(Instant::now()+Duration::from_millis(1));}
                     else {
                         deadline=None;let generation=session.generation.load(Ordering::Acquire);
-                        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||session.apply(ticket)))
+                        session.emit("playback_rendering_state",json!({"active":true,"progress":0.0,"target":"background"}));
+                        let progress_session=session.clone();
+                        let progress_last=Arc::new(AtomicU64::new(0));
+                        let progress_last_for_callback=progress_last.clone();
+                        let progress=hifishifter_kernel::mixdown::ProgressCallback::new(move |value| {
+                            let value=value.clamp(0.0,1.0);
+                            let previous=f64::from_bits(progress_last_for_callback.load(Ordering::Acquire));
+                            if value+1e-6 < previous {return;}
+                            progress_last_for_callback.store(value.to_bits(),Ordering::Release);
+                            progress_session.emit("playback_rendering_state",json!({"active":true,"progress":value,"target":"background"}));
+                        });
+                        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||session.apply(ticket,Some(progress))))
                             .unwrap_or_else(|_|Err("automatic render panicked".into()));
+                        session.emit("playback_rendering_state",json!({"active":false,"progress":if result.is_ok(){Some(1.0)}else{None::<f64>},"target":"background"}));
                         match result {
                             Ok(())=>{session.applied.store(generation,Ordering::Release);session.render_requested.store(false,Ordering::Release);*session.render_error.lock().unwrap()=None;},
                             Err(error) if error=="pitch analysis pending"||error=="automatic apply superseded"=>{deadline=Some(Instant::now()+Duration::from_millis(150));},
@@ -219,17 +231,19 @@ impl EditorSession {
             }
         }
     }
-    fn apply(&self,ticket:u64)->Result<(),String> {
+    fn apply(&self,ticket:u64,progress:Option<hifishifter_kernel::mixdown::ProgressCallback>)->Result<(),String> {
         if let Some(error)=self.error.lock().unwrap().clone() {return Err(error);}
         self.complete_cached_analysis();
         if let Some(error)=self.error.lock().unwrap().clone() {return Err(error);}
         // 全零占位原线并非已完成的清音分析；收敛前保留旧快照及dirty代次。
         if Self::requires_analysis(&self.timeline.lock().unwrap()) {return Err("pitch analysis pending".into());}
         let (edit,model,projection)={let loaded=self.loaded.lock().unwrap();(loaded.edit,loaded.model,loaded.projection.clone())};
-        self.document.upgrade().ok_or("document closed")?.apply_workspace_edits(edit,model,
+        let document=self.document.upgrade().ok_or("document closed")?;
+        document.apply_workspace_edits_with_progress(edit,model,
             &projection,
             self.analysis_cancel.clone(),
-            ||!self.closed.load(Ordering::Acquire) && self.submitted.load(Ordering::Acquire)==ticket)
+            ||!self.closed.load(Ordering::Acquire) && self.submitted.load(Ordering::Acquire)==ticket,
+            progress)
     }
     /// 音高和气声等处理器效果都依赖完成的原线；纯混音/禁用算法不受此门禁阻塞。
     fn requires_analysis(timeline:&TimelineState)->bool {
@@ -279,9 +293,11 @@ impl EditorSession {
             if loaded.initialized && loaded.model==versions.1 && loaded.scope==versions.2 && !force && document.workspace_projection()?==loaded.projection {
                 loaded.edit=versions.0;return Ok(());
             }
-            if loaded.initialized && !force && self.generation.load(Ordering::Acquire)!=self.applied.load(Ordering::Acquire) {
-                return Err("Conflict: host changed; local curves preserved, reload explicitly".into());
-            }
+        }
+        // generation 未应用不等于宿主冲突：workspace_snapshot 会把本地曲线
+        // 叠加到最新宿主几何上。只有 ARA 还没有重新交付输入时才暂缓重载。
+        if !force && !document.ready.load(Ordering::Acquire) {
+            return Err("Conflict: host changed; local curves preserved, host is not ready".into());
         }
         let (snapshot,scope,projection)=document.workspace_snapshot()?;
         let mut timeline=snapshot.timeline;
@@ -600,7 +616,7 @@ pub(crate) mod tests {
         editor.enqueue(UiRequest {id:7,command:"set_param_frames".into(),args:json!({"trackId":tb,"param":"pitch","startFrame":399,"values":[69.],"checkpoint":false}),sink:sinks[1].clone(),link:Some(links[1].clone())}).unwrap();
         sinks[1].closed.store(true,Ordering::Release);drop(held);
         let saved=[owners[0].encode_state().unwrap(),owners[1].encode_state().unwrap()];
-        assert!(editor.apply(editor.submitted.load(Ordering::Acquire)).is_err(),"真实不支持fade必须拒绝合成");
+        assert!(editor.apply(editor.submitted.load(Ordering::Acquire),None).is_err(),"真实不支持fade必须拒绝合成");
         let b:Value=serde_json::from_slice(&saved[1]).unwrap();assert_eq!(b["edits"]["params"]["b"]["pitch_edit"][399],69.);
         assert_eq!(editor.history.lock().unwrap().position,2,"尾笔不新增undo步");
         assert!(editor.enqueue(UiRequest {id:8,command:"get_ui_settings".into(),args:json!({}),sink:sinks[1].clone(),link:Some(links[1].clone())}).is_err());
@@ -1322,7 +1338,7 @@ pub(crate) mod tests {
             params.pitch_orig_key=None;
             editor.publish_timeline(timeline.clone());
         }
-        let outcome=editor.apply(0);
+        let outcome=editor.apply(0,None);
         assert!(outcome.is_err(),"未分析的全零原线不能渲染原声并假报成功");
         assert!(outcome.unwrap_err().contains("analysis"));
         let bytes=owner.encode_state().unwrap();
