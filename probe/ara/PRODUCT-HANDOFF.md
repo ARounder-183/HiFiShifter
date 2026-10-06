@@ -36,6 +36,13 @@ exit0，sourceFingerprint=`5BEC84084B0FDB4BEBBDD0C2B9B07A65D0A49B3F140FB794F8C03
 原GUI导入→移动/裁切→线性拉伸→渐变宽度→混合Undo/Redo→保存冷重开验证，不重复
 自动全量测试或鼠标工具重试。manifest nativeAcceptance仍false，目标保持active。
 
+最终审计见BIDIRECTIONAL-COMPLETION-AUDIT.md：同一GUI交互工具阻塞已连续三轮，
+现无可替代完整原GUI验收的安全自动化路径，将目标标blocked而非complete，等用户
+一次集中验收结果。已开临时双轨工程user-final-bidirectional/embedded-editor.RPP，
+PID11212，包与安装版逐文件相同，原GUI显示双轨/已应用；保留实例，不继续发脚本。
+REAPER更新提示可能需用户先关闭。启动器单路径检查原会把string[0]当首字符，
+已修为外层数组并实际启动成功；只改probe工具，不改产品包或再次打包。
+
 ## 2026-10-06 新活跃目标：双向片段编辑与实际HFS渐变（历史声音要求）
 
 用户要求在HFS导入/编辑/线性拉伸/渐变clip并同步REAPER，确认REAPER item mute应

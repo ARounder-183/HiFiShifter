@@ -26,7 +26,8 @@ if (!(Test-Path -LiteralPath $araEmbedIni)) {
     # 不静默复用指向旧模块的profile；用新scratch验新bundle，不改用户已有配置。
     $araEmbedConfiguredVst = Get-Content -LiteralPath $araEmbedIni | Where-Object { $_ -match '^vstpath64=' } | Select-Object -First 1
     # REAPER首次保存会追加这两个公共VST3路径；不将正常冷重开误判为切换了bundle。
-    $araEmbedEntries=if ($araEmbedConfiguredVst) {@($araEmbedConfiguredVst.Substring('vstpath64='.Length).Split(';') | Where-Object {$_})} else {@()}
+    # 单路径也必须保持数组；if输出解包成string时[0]会变成首字符，误报不同bundle。
+    $araEmbedEntries=@(if ($araEmbedConfiguredVst) {$araEmbedConfiguredVst.Substring('vstpath64='.Length).Split(';') | Where-Object {$_}})
     $araEmbedCommon=@('%COMMONPROGRAMFILES%\VST3','%LOCALAPPDATA%\Programs\Common\VST3')
     $araEmbedCommon+=@($araEmbedCommon | ForEach-Object {[Environment]::ExpandEnvironmentVariables($_)})
     if (!$araEmbedEntries.Count -or $araEmbedEntries[0] -ne $araEmbedVst -or

@@ -1056,4 +1056,8 @@ Task 57: Ruling: completion-02隔离33144关闭全部FX GUI（每次GetOpen=0）
 
 Task 57: Ruling: oracle已完成并正常自行退出，当前无REAPER；最终completion-02 Release源码指纹702D3AF85DE2EF42950C78BB7AFF148779BFB1603E811E5F584D377ED9E5701D — 安装D:\VST完整35文件逐项SHA256一致，旧03包备份.build-tmp/vst-install-backups/bidirectional-completion-02-0468ed66，仅本地提交 — 若覆盖运行DLL会混版；保留nativeAcceptance=false及完整目标active，GUI剩余门未测，不标全部完成。
 
+Task 58: Ruling: 完成审计确认35安装文件零差异、已提交源码与四份闭GUI音频证据，但原GUI双向/混合历史完整矩阵仍无证；同一WebView2目标拒绝已连续三轮 — 不重复测试/打包或绕过工具保护，记录逐要求审计并把目标设blocked，等待用户一次集中验收/失败步骤 — 若把夹具或显示成功当全流程完成会虚报；这是自动验收能力阻塞，不是ARA技术不可实现，最新渐变fallback许可不撤回。
+
+Task 58: Ruling: 最终验收启动器对已有单路径cfg的if输出解包为string，Entries[0]成首字符E而误拒绝真实相同bundle — 仅将probe启动器路径列表外层数组化，保留全部路径限制；实际11212已加载临时双轨副本、原GUI双轨/已应用，供用户集中验收，不再自动交互 — 用户原工程不改，安装版不热替换；原生Close提示缓存索引失败仅报告由用户处理，未重复操作，未把已打开当验收通过。
+
 
