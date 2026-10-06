@@ -39,10 +39,100 @@
  * 应用自身的约定，留在原地；只有需要 node 能力的仓库级门禁才住在这里。
  */
 import { spawnSync } from "node:child_process";
-import { test } from "vitest";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { expect, test } from "vitest";
 
 /** `tsc -b` 冷启动在 CI 上可能要几十秒，给足余量。 */
 const TYPECHECK_TIMEOUT_MS = 300_000;
+
+/**
+ * 读 `tsconfig.app.json` 的 compilerOptions。
+ *
+ * 【为什么用 TypeScript 自己的读取器】本仓的 tsconfig 带注释（JSONC），
+ * `JSON.parse` 直接抛错；而"剥注释再解析"会连字符串里的 `//` 一起剥掉。
+ * `ts.readConfigFile` 就是编译器自己用的那一套，注释、尾逗号都按 TS 的规则处理。
+ */
+async function readAppCompilerOptions(): Promise<Record<string, unknown>> {
+    const ts = (await import("typescript")).default;
+    const configPath = join(process.cwd(), "tsconfig.app.json");
+    const parsed = ts.readConfigFile(configPath, ts.sys.readFile);
+    if (parsed.error) {
+        throw new Error(ts.flattenDiagnosticMessageText(parsed.error.messageText, "\n"));
+    }
+    return (parsed.config?.compilerOptions ?? {}) as Record<string, unknown>;
+}
+
+/**
+ * TypeScript 6 起报错、7.0 移除的编译选项。
+ *
+ * 【为什么要盯着它们】弃用只在**装了新 TS 的环境**里报错：本仓的 `typescript`
+ * 是 5.9，`npm run build` 一切正常，而编辑器里更新过的 TS 会直接标红 ——
+ * 于是"构建通过、IDE 报错"。把清单钉在门禁里，升级时一次就看清全部要改的地方。
+ * 处置方式见 `tsconfig.app.json` 里 `baseUrl` 那段注释：**迁移，不要 `ignoreDeprecations`**。
+ */
+const OPTIONS_REMOVED_IN_TS7 = [
+    "baseUrl",
+    "charset",
+    "importsNotUsedAsValues",
+    "keyofStringsOnly",
+    "noImplicitUseStrict",
+    "noStrictGenericChecks",
+    "out",
+    "preserveValueImports",
+    "suppressExcessPropertyErrors",
+    "suppressImplicitAnyIndexErrors",
+];
+
+test("tsconfig 不带 TypeScript 7.0 将移除的选项", async () => {
+    const options = await readAppCompilerOptions();
+    const present = OPTIONS_REMOVED_IN_TS7.filter((name) => name in options);
+    expect(
+        present.length === 0
+            ? []
+            : [
+                  `以下选项已弃用（TS 6 报错、7.0 移除），请迁移而不是用 ignoreDeprecations：`,
+                  ...present.map((name) => `  ${name}`),
+              ].join("\n"),
+    ).toEqual([]);
+});
+
+/*
+ * 扩展入口别名：tsconfig 的 `paths` 与 vite 的 `resolve.alias` 必须指向同一批文件。
+ *
+ * 【为什么值得一道门禁】这两处的一致此前只写在 `tsconfig.app.json` 的注释里，
+ * 没有任何东西守着；而**别名没有任何源码消费者**（应用内部代码不用它，只有第三方
+ * 扩展作者会用），所以指错文件也不会有人报错 —— 直到某个扩展作者导入失败。
+ *
+ * 顺带守住这次修复的方向：`paths` 必须还在（删掉 `baseUrl` 是对的，删掉 `paths`
+ * 不是），下面的双向比对会立刻发现少了一边。
+ */
+test("扩展别名在 tsconfig 与 vite 两侧指向同一批文件", async () => {
+    const options = await readAppCompilerOptions();
+    const paths = (options.paths ?? {}) as Record<string, string[]>;
+    const fromTsconfig: Record<string, string> = {};
+    for (const [key, targets] of Object.entries(paths)) {
+        fromTsconfig[key] = targets[0].replace(/^\.\//, "");
+    }
+
+    // vite.config.ts 是 TS 源码，这里按文本取出 `"@hs/x": resolve(__dirname, "…")`。
+    // 解析 TS 文件要引入编译 API，而这条门禁要守的只是"两侧列出同一批键与路径"。
+    const viteSource = readFileSync(join(process.cwd(), "vite.config.ts"), "utf8");
+    const fromVite: Record<string, string> = {};
+    for (const match of viteSource.matchAll(
+        /"(@hs\/[^"]+)":\s*resolve\(__dirname,\s*"([^"]+)"\)/g,
+    )) {
+        fromVite[match[1]] = match[2];
+    }
+
+    expect(fromVite).toEqual(fromTsconfig);
+    expect(Object.keys(fromTsconfig).length, "别名不该为空").toBeGreaterThan(0);
+
+    // 两侧指向的文件必须真的存在 —— 别名没有消费者，写错了没人会发现。
+    for (const target of Object.values(fromTsconfig)) {
+        expect(existsSync(join(process.cwd(), target)), `${target} 不存在`).toBe(true);
+    }
+});
 
 test(
     "类型检查通过（npm run typecheck）",
