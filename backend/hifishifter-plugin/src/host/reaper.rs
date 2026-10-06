@@ -6,6 +6,8 @@ use crate::vst3::{uid_guid, K_RESULT_OK};
 use std::ffi::{c_char, c_void};
 #[path="reaper_write.rs"]mod write;
 pub(crate) use write::{HostClipTarget,HostUndoBlock};
+#[path="reaper_media.rs"]mod media;
+pub(crate) use media::HostTrackTarget;
 
 const IID: [u32; 4] = [0x79655E36, 0x77EE4267, 0xA573FEF7, 0x4912C27C];
 #[repr(C)]
@@ -64,6 +66,8 @@ pub(crate) struct ReaperHost {
     transport: Option<Transport>,
     geometry: Option<GeometryApi>,
     write:Option<write::WriteApi>,
+    history:Option<write::HistoryApi>,
+    media:Option<media::MediaApi>,
     validate: Option<Validate>,
     fade_axes_new: Option<bool>,
 }
@@ -151,6 +155,19 @@ impl ReaperHost {
         let marker = lookup!(c"GetTakeStretchMarker", Marker);
         let slope = lookup!(c"GetTakeStretchMarkerSlope", Slope);
         let change = lookup!(c"GetProjectStateChangeCount", PlayState);
+        let media=match (lookup!(c"PCM_Source_CreateFromFileEx",media::CreateSource),lookup!(c"PCM_Source_Destroy",media::DestroySource),
+            lookup!(c"GetMediaSourceLength",media::SourceLength),lookup!(c"AddMediaItemToTrack",media::CreateItem),lookup!(c"AddTakeToMediaItem",media::CreateTake),
+            lookup!(c"GetSetMediaItemTakeInfo",media::TakeInfo),lookup!(c"DeleteTrackMediaItem",media::DeleteItem),
+            lookup!(c"GetSetMediaTrackInfo_String",Guid),lookup!(c"GetUserFileNameForRead",media::FilePicker)) {
+            (Some(create_source),Some(destroy_source),Some(length),Some(create_item),Some(create_take),Some(take_info),Some(delete_item),Some(track_guid),Some(picker))=>
+                Some(media::MediaApi {create_source,destroy_source,length,create_item,create_take,take_info,delete_item,track_guid,picker}),_=>None,
+        };
+        let history=match (lookup!(c"Undo_DoUndo2",write::UndoAction),lookup!(c"Undo_DoRedo2",write::UndoAction),
+            lookup!(c"Undo_CanUndo2",write::UndoLabel),lookup!(c"Undo_CanRedo2",write::UndoLabel),
+            lookup!(c"Undo_GetCurEntry",write::UndoAction),lookup!(c"Undo_GetEntryDesc",write::UndoEntry)) {
+            (Some(undo),Some(redo),Some(can_undo),Some(can_redo),Some(current),Some(entry))=>
+                Some(write::HistoryApi {undo,redo,can_undo,can_redo,current,entry}),_=>None,
+        };
         let write=match (
             lookup!(c"SetMediaItemInfo_Value",write::SetValue),lookup!(c"SetMediaItemTakeInfo_Value",write::SetValue),
             lookup!(c"GetMediaItem_Track",write::Track),lookup!(c"MoveMediaItemToTrack",write::Move),
@@ -196,6 +213,8 @@ impl ReaperHost {
             transport,
             geometry,
             write,
+            history,
+            media,
             validate,
             fade_axes_new,
         })

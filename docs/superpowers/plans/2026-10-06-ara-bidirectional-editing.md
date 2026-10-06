@@ -24,11 +24,23 @@ frontend能力门3项和tsc通过；尚未验证真实REAPER回流。shape/gain/
 不假成功；跨轨写需要目标轨已有真实region，空轨导入将在Batch C补齐。
 连续操作Undo组与参数Undo统一、回流时旧参数历史保留仍待实现，不能勾完整Batch B。
 
+后续本批：参数/几何接文档共享REAPER Undo，主线程历史API枚举真实条目及深度，
+Undo/Redo/位置跳转先经actor FIFO屏障；块收尾/getState期间只暂缓自动合成，不阻塞
+参数命令和flush。历史状态按host token缓存，不每20ms广播；关窗时在途native writer
+必须结束后才收尾，不提前关闭其Undo块。3项定向host_history及tsc通过，真实宿主
+组件setState回流/混合操作仍待集中验收，不把fake条目跳转当真实参数恢复。
+
 ## Batch C：导入
 
 - [ ] 原GUI文件选择/拖入和显式目标已接入轨道。
 - [ ] 官方item/take/source创建与准确资源所有权；新ARA图ready才显示已导入。
 - [ ] Unicode文件名、失败清理与宿主Undo，多clip导入不污染其它项目。
+
+当前已接文件菜单/Ctrl+O单文件导入：typed宿主创建source/item/take，P_SOURCE按SDK
+约定转移所有权，失败只回滚新建且GUID未变化的item；创建GUID作为ARA回流完成门，
+未收到对应clip不返回“已导入”。空轨未指定目标沿本FX直接parent(1)，已有目标轨必须
+实际绑定ARA region。UTF-8/源所有权与take创建失败清理2项合同通过，能力门4项通过。
+新建轨导入、原生DOM File拖入/多文件流程还未接；不降格为只支持单文件关闭Batch C。
 
 ## Batch D：渐变
 
@@ -46,4 +58,5 @@ frontend能力门3项和tsc通过；尚未验证真实REAPER回流。shape/gain/
 
 当前：目标已建立，官方mute/相关setter签名已核对；Batch A两项定向合同exit0，
 覆盖有效mute/solo覆盖、另一region隔离、实际process实时/离线静音与解除后的原PCM，
-零分配和尾哨兵。未声称真实REAPER/关闭GUI门通过；Batch B已接基础写链路，B-E整体尚未完成。
+零分配和尾哨兵。未声称真实REAPER/关闭GUI门通过；Batch B已接基础写链路与共享撤销，
+Batch C已接文件菜单单文件主链路，B-E整体尚未完成。下一批补拖入/新轨与渐变委托门。

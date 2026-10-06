@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { isPluginMode, DAW_CONTROLLED_REASON } from "../../services/hostCapabilities";
+import { isPluginMode, canImportHostAudio, DAW_CONTROLLED_REASON } from "../../services/hostCapabilities";
 import { DropdownMenu, Flex } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -532,7 +532,18 @@ export const MenuBar: React.FC<MenuBarProps> = ({
              * Use Trigger as the actual button element to avoid nesting <button>.
              */}
             {/* File Menu */}
-            <DropdownMenu.Root>
+            {isPluginMode() ? <DropdownMenu.Root>
+                <DropdownMenu.Trigger disabled={!canImportHostAudio()} title={!canImportHostAudio() ? DAW_CONTROLLED_REASON : undefined} className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
+                    <span>{t("menu_file")}</span>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Content variant="soft" color="gray">
+                    <DropdownMenu.Item onSelect={()=>void handleImportAudioFromMenu()}>{t("menu_import_media")}
+                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">{shortcutLabel("project.importMedia")}</div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+                    <DropdownMenu.Item disabled>{t("menu_save_project")} · REAPER</DropdownMenu.Item>
+                </DropdownMenu.Content>
+            </DropdownMenu.Root> : <DropdownMenu.Root>
                 <DropdownMenu.Trigger disabled={isPluginMode()} title={isPluginMode() ? DAW_CONTROLLED_REASON : undefined} className="shrink-0 rounded px-2 py-1 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white">
                     <span>{t("menu_file")}</span>
                 </DropdownMenu.Trigger>
@@ -661,7 +672,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {t("menu_exit")}
                     </DropdownMenu.Item>
                 </DropdownMenu.Content>
-            </DropdownMenu.Root>
+            </DropdownMenu.Root>}
 
             {/* Edit Menu */}
             <DropdownMenu.Root>

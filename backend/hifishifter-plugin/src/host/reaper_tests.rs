@@ -14,6 +14,8 @@ pub(crate) struct Fixture {
     item_token: u8,
     track_token:u8,
     writer_enabled:Cell<bool>,
+    undo_records:RefCell<Vec<std::ffi::CString>>,undo_position:Cell<i32>,
+    media_enabled:Cell<bool>,media_sources:RefCell<Vec<Box<u8>>>,take_source:Cell<usize>,fail_media_take:Cell<bool>,media_path:RefCell<String>,
     pub valid: Cell<bool>,
     connection_host: Cell<bool>,
     calls: RefCell<Vec<String>>,
@@ -39,6 +41,8 @@ impl Fixture {
             take_token: 1,
             item_token: 2,
             track_token:3,writer_enabled:Cell::new(false),
+            undo_records:RefCell::new(vec![std::ffi::CString::new("Initial state").unwrap()]),undo_position:Cell::new(0),
+            media_enabled:Cell::new(false),media_sources:RefCell::new(Vec::new()),take_source:Cell::new(0),fail_media_take:Cell::new(false),media_path:RefCell::new(String::new()),
             valid: Cell::new(true),
             connection_host: Cell::new(false),
             calls: RefCell::new(Vec::new()),
@@ -97,6 +101,7 @@ impl Fixture {
     }
     fn track(&self)->*mut c_void {(&self.track_token as *const u8 as *mut u8).cast()}
     pub fn enable_writer(&self) {self.writer_enabled.set(true);}
+    pub fn enable_media(&self) {self.enable_writer();self.media_enabled.set(true);}
     pub fn clear_markers(&self) {self.markers.borrow_mut().clear();}
     pub fn client(&self) -> ReaperHost {
         unsafe { ReaperHost::from_context(self.context(), || self.valid.get()) }.unwrap()
@@ -193,6 +198,7 @@ unsafe extern "system" fn parent(this: *mut c_void, selector: u32) -> *mut c_voi
     match selector {
         3 if !f.no_project.get() => f.project(),
         2 if !f.no_take.get() => f.take(),
+        1 if f.media_enabled.get()=>f.track(),
         _ => std::ptr::null_mut(),
     }
 }
@@ -225,6 +231,21 @@ unsafe extern "system" fn api(_: *mut c_void, name: *const c_char) -> *mut c_voi
         "Undo_EndBlock2" if f.writer_enabled.get()=>undo_end as *const (),
         "UpdateItemInProject" if f.writer_enabled.get()=>update_item as *const (),
         "UpdateArrange" if f.writer_enabled.get()=>update_arrange as *const (),
+        "Undo_DoUndo2" if f.writer_enabled.get()=>do_undo as *const (),
+        "Undo_DoRedo2" if f.writer_enabled.get()=>do_redo as *const (),
+        "Undo_CanUndo2" if f.writer_enabled.get()=>can_undo as *const (),
+        "Undo_CanRedo2" if f.writer_enabled.get()=>can_redo as *const (),
+        "Undo_GetCurEntry" if f.writer_enabled.get()=>undo_current as *const (),
+        "Undo_GetEntryDesc" if f.writer_enabled.get()=>undo_entry as *const (),
+        "PCM_Source_CreateFromFileEx" if f.media_enabled.get()=>media_source as *const (),
+        "PCM_Source_Destroy" if f.media_enabled.get()=>media_destroy as *const (),
+        "GetMediaSourceLength" if f.media_enabled.get()=>media_length as *const (),
+        "AddMediaItemToTrack" if f.media_enabled.get()=>media_item as *const (),
+        "AddTakeToMediaItem" if f.media_enabled.get()=>media_take as *const (),
+        "GetSetMediaItemTakeInfo" if f.media_enabled.get()=>media_info as *const (),
+        "DeleteTrackMediaItem" if f.media_enabled.get()=>media_delete as *const (),
+        "GetSetMediaTrackInfo_String" if f.media_enabled.get()=>media_track_guid as *const (),
+        "GetUserFileNameForRead" if f.media_enabled.get()=>media_picker as *const (),
         _ => std::ptr::null(),
     };
     p as *mut c_void
@@ -334,7 +355,49 @@ unsafe extern "C" fn set_take(object:*mut c_void,name:*const c_char,value:f64)->
 unsafe extern "C" fn item_track(item:*mut c_void)->*mut c_void {let f=fixture();assert_eq!(item,f.item());f.record("item-track");f.track()}
 unsafe extern "C" fn move_item(item:*mut c_void,track:*mut c_void)->bool {let f=fixture();assert_eq!(item,f.item());assert_eq!(track,f.track());f.record("move-item");true}
 unsafe extern "C" fn undo_begin(project:*mut c_void) {let f=fixture();assert_eq!(project,f.project());f.record("undo-begin");}
-unsafe extern "C" fn undo_end(project:*mut c_void,_label:*const c_char,flags:i32) {let f=fixture();assert_eq!(project,f.project());assert_eq!(flags,-1);f.record("undo-end");}
+unsafe extern "C" fn undo_end(project:*mut c_void,label:*const c_char,flags:i32) {
+    let f=fixture();assert_eq!(project,f.project());assert_eq!(flags,-1);f.record("undo-end");
+    let mut records=f.undo_records.borrow_mut();records.truncate(f.undo_position.get() as usize+1);
+    records.push(unsafe {CStr::from_ptr(label)}.to_owned());f.undo_position.set(records.len() as i32-1);f.change.set(f.change.get().wrapping_add(1));
+}
+unsafe extern "C" fn undo_current(project:*mut c_void)->i32 {let f=fixture();assert_eq!(project,f.project());f.record("undo-current");f.undo_position.get()}
+unsafe extern "C" fn undo_entry(project:*mut c_void,index:i32)->*const c_char {let f=fixture();assert_eq!(project,f.project());f.record(format!("undo-entry:{index}"));if index<0 {return std::ptr::null();}f.undo_records.borrow().get(index as usize).map_or(std::ptr::null(),|s|s.as_ptr())}
+unsafe extern "C" fn can_undo(project:*mut c_void)->*const c_char {let f=fixture();assert_eq!(project,f.project());if f.undo_position.get()>0 {unsafe {undo_entry(project,f.undo_position.get())}} else {std::ptr::null()}}
+unsafe extern "C" fn can_redo(project:*mut c_void)->*const c_char {let f=fixture();assert_eq!(project,f.project());unsafe {undo_entry(project,f.undo_position.get()+1)}}
+unsafe extern "C" fn do_undo(project:*mut c_void)->i32 {let f=fixture();assert_eq!(project,f.project());f.record("undo-action");if f.undo_position.get()>0 {f.undo_position.set(f.undo_position.get()-1);f.change.set(f.change.get().wrapping_add(1));1} else {0}}
+unsafe extern "C" fn do_redo(project:*mut c_void)->i32 {let f=fixture();assert_eq!(project,f.project());f.record("redo-action");if f.undo_position.get()+1<f.undo_records.borrow().len() as i32 {f.undo_position.set(f.undo_position.get()+1);f.change.set(f.change.get().wrapping_add(1));1} else {0}}
+unsafe extern "C" fn media_source(path:*const c_char,force:bool)->*mut c_void {
+    let f=fixture();assert!(force);f.record("media-source-create");*f.media_path.borrow_mut()=unsafe {CStr::from_ptr(path)}.to_str().unwrap().into();
+    let mut source=Box::new(7_u8);let pointer=(&mut *source as *mut u8).cast();f.media_sources.borrow_mut().push(source);pointer
+}
+unsafe extern "C" fn media_destroy(pointer:*mut c_void) {let f=fixture();f.record("media-source-destroy");let mut sources=f.media_sources.borrow_mut();
+    let index=sources.iter().position(|source|(&**source as *const u8) as usize==pointer as usize).expect("source must be owned and destroyed once");sources.remove(index);}
+unsafe extern "C" fn media_length(_source:*mut c_void,qn:*mut bool)->f64 {fixture().record("media-length");unsafe {*qn=false};2.}
+unsafe extern "C" fn media_item(track:*mut c_void)->*mut c_void {let f=fixture();assert_eq!(track,f.track());f.record("media-item-create");f.item()}
+unsafe extern "C" fn media_take(item:*mut c_void)->*mut c_void {let f=fixture();assert_eq!(item,f.item());f.record("media-take-create");if f.fail_media_take.get() {std::ptr::null_mut()} else {f.take()}}
+unsafe extern "C" fn media_info(take:*mut c_void,name:*const c_char,new:*mut c_void)->*mut c_void {let f=fixture();assert_eq!(take,f.take());assert_eq!(unsafe {CStr::from_ptr(name)},c"P_SOURCE");
+    if new.is_null() {f.record("media-source-read");f.take_source.get() as *mut c_void} else {f.record("media-source-attach");f.take_source.replace(new as usize) as *mut c_void}}
+unsafe extern "C" fn media_delete(track:*mut c_void,item:*mut c_void)->bool {let f=fixture();assert_eq!(track,f.track());assert_eq!(item,f.item());f.record("media-item-delete");let source=f.take_source.replace(0);if source!=0 {unsafe {media_destroy(source as *mut c_void)};}true}
+unsafe extern "C" fn media_track_guid(track:*mut c_void,name:*const c_char,buffer:*mut c_char,set:bool)->bool {let f=fixture();assert_eq!(track,f.track());assert!(!set);assert_eq!(unsafe {CStr::from_ptr(name)},c"GUID");f.record("track-guid");let guid=c"{33333333-3333-3333-3333-333333333333}";unsafe {std::ptr::copy_nonoverlapping(guid.as_ptr(),buffer,guid.to_bytes_with_nul().len());}true}
+unsafe extern "C" fn media_picker(_path:*mut c_char,_title:*const c_char,_ext:*const c_char)->bool {fixture().record("media-picker");false}
+
+/// 真实typed媒体对象所有权合同；不是假造ARA PCM或实际REAPER导入验收。
+#[test]
+fn host_media_import_preserves_utf8_and_transfers_source_ownership() {
+    let f=Fixture::new();f.enable_media();let host=std::sync::Arc::new(f.client());let target=host.direct_track_target(&||true).unwrap();
+    let path=r"E:\素材\辅音和元音.wav";let guid=target.import_audio(path,3.,&||true).unwrap();
+    assert_eq!(guid,"{11111111-1111-1111-1111-111111111111}");assert_eq!(f.media_path.borrow().as_str(),path);
+    assert_eq!(f.values.borrow()["D_POSITION"],3.);assert_eq!(f.values.borrow()["D_LENGTH"],2.);
+    assert_eq!(f.media_sources.borrow().len(),1);assert!(!f.calls().contains(&"media-source-destroy".into()));
+    unsafe {media_delete(f.track(),f.item())};assert!(f.media_sources.borrow().is_empty());
+}
+#[test]
+fn host_media_import_failure_removes_only_created_item_and_frees_unattached_source() {
+    let f=Fixture::new();f.enable_media();f.fail_media_take.set(true);let host=std::sync::Arc::new(f.client());let target=host.direct_track_target(&||true).unwrap();
+    assert!(target.import_audio(r"E:\clip.wav",0.,&||true).unwrap_err().contains("take creation"));
+    assert!(f.calls().contains(&"media-item-delete".into()));assert_eq!(f.calls().iter().filter(|s|s.as_str()=="media-source-destroy").count(),1);
+    assert!(f.media_sources.borrow().is_empty());
+}
 unsafe extern "C" fn update_item(item:*mut c_void) {let f=fixture();assert_eq!(item,f.item());f.record("update-item");}
 unsafe extern "C" fn update_arrange() {fixture().record("update-arrange");}
 

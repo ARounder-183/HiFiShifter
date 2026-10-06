@@ -64,6 +64,12 @@ pub(crate) struct EditorSession {
     pub(super) suppress_history:AtomicBool,
 }
 impl EditorSession {
+    /// 导入目标只接受当前原GUI已授权轨道；未指定时由native直接parent决定空轨首次导入。
+    pub(super) fn host_track_id(&self,id:&str)->Result<String,String> {
+        if !self.timeline.lock().unwrap().tracks.iter().any(|track|track.id==id) {return Err("unknown editor import track".into());}
+        id.strip_prefix(&self.namespace).map(str::to_owned).ok_or_else(||"import track belongs to another editor".into())
+    }
+    pub(super) fn ui_clip_id(&self,native:&str)->String {format!("{}{native}",self.namespace)}
     /// 每个真实文档唯一actor；worker与会话均用weak，不形成document→actor→document循环。
     pub(crate) fn new(document:&Arc<DocumentSession>)->Result<Arc<Self>,String> {
         super::resources::initialize_models();
@@ -160,7 +166,9 @@ impl EditorSession {
                 // 到期应用先于下一条只读轮询；持续get_playback_state不能令合成饥饿。
                 if deadline.is_some_and(|d|d<=Instant::now()) {
                     let ticket=session.submitted.load(Ordering::Acquire);
-                    if session.processed.load(Ordering::Acquire)!=ticket {deadline=Some(Instant::now()+Duration::from_millis(1));}
+                    if session.document.upgrade().is_some_and(|doc|doc.host_undo.pending.load(Ordering::Acquire)) {
+                        deadline=Some(Instant::now()+Duration::from_millis(50));
+                    } else if session.processed.load(Ordering::Acquire)!=ticket {deadline=Some(Instant::now()+Duration::from_millis(1));}
                     else {
                         deadline=None;let generation=session.generation.load(Ordering::Acquire);
                         session.emit("playback_rendering_state",json!({"active":true,"progress":0.0,"target":"background"}));

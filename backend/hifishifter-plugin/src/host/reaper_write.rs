@@ -11,6 +11,10 @@ pub(super) type Begin=unsafe extern "C" fn(*mut c_void);
 pub(super) type End=unsafe extern "C" fn(*mut c_void,*const c_char,i32);
 pub(super) type Update=unsafe extern "C" fn(*mut c_void);
 pub(super) type Arrange=unsafe extern "C" fn();
+pub(super) type UndoAction=unsafe extern "C" fn(*mut c_void)->i32;
+pub(super) type UndoLabel=unsafe extern "C" fn(*mut c_void)->*const c_char;
+pub(super) type UndoEntry=unsafe extern "C" fn(*mut c_void,i32)->*const c_char;
+pub(super) struct HistoryApi {pub undo:UndoAction,pub redo:UndoAction,pub can_undo:UndoLabel,pub can_redo:UndoLabel,pub current:UndoAction,pub entry:UndoEntry}
 
 pub(super) struct WriteApi {
     pub set_item:SetValue,pub set_take:SetValue,pub item_track:Track,pub move_item:Move,
@@ -32,7 +36,7 @@ impl Drop for HostUndoBlock {
         let Some(api)=&self.host.geometry else {return;};let Some(write)=&self.host.write else {return;};
         let project=self.project as *mut c_void;
         if unsafe {(api.validate)(project,project,c"ReaProject*".as_ptr())} {
-            unsafe {(write.end)(project,c"HiFiShifter clip edit".as_ptr(),-1);}
+            unsafe {(write.end)(project,c"HiFiShifter edit".as_ptr(),-1);}
         }
     }
 }
@@ -40,6 +44,63 @@ impl Drop for HostUndoBlock {
 impl ReaperHost {
     /// 可选写能力与只读几何独立；缺setter时GUI保持只读，不调用未查到的函数。
     pub(crate) fn can_edit_clips(&self)->bool {self.write.is_some()&&self.geometry.is_some()}
+    pub(crate) fn has_project_history(&self)->bool {self.history.is_some()&&self.can_edit_clips()}
+    /// 参数和几何共用所属project历史；没有item时也能为首次导入/参数编辑开启Undo。
+    pub(crate) fn begin_project_undo(self:&Arc<Self>,authorized:&impl Fn()->bool)->Result<HostUndoBlock,String> {
+        if !self.has_project_history() {return Err("REAPER project history API unavailable".into());}
+        let project=self.project(authorized)?;
+        if !checked(authorized,||unsafe {(self.geometry.as_ref().unwrap().validate)(project,project,c"ReaProject*".as_ptr())})? {return Err("invalid undo project".into());}
+        let block=HostUndoBlock {host:self.clone(),project:project as usize};
+        checked(authorized,||unsafe {(self.write.as_ref().unwrap().begin)(project)})?;Ok(block)
+    }
+    /// 官方Undo枚举提供真实深度和行，而不是用本地参数history冒充宿主历史。
+    pub(crate) fn project_history(&self,authorized:&impl Fn()->bool)->Result<serde_json::Value,String> {
+        let token=self.history_token(authorized)?;
+        let project=self.project(authorized)?;let history=self.history.as_ref().ok_or("REAPER history unavailable")?;
+        let read=|pointer:*const c_char|->Result<Option<String>,String> {
+            if pointer.is_null() {return Ok(None);}
+            let value=unsafe {CStr::from_ptr(pointer)}.to_str().map_err(|_|"host undo label is not UTF-8")?;
+            if value.len()>8192 {return Err("host undo label budget exceeded".into());}Ok(Some(value.to_owned()))
+        };
+        let position=checked(authorized,||unsafe {(history.current)(project)})?;
+        let mut records=Vec::new();
+        for index in 0..=10000 {
+            let pointer=checked(authorized,||unsafe {(history.entry)(project,index)})?;
+            let Some(label)=read(pointer)? else {break;};
+            if index==10000 {return Err("host undo entry budget exceeded".into());}
+            records.push(serde_json::json!({"label":label,"atMs":0}));
+        }
+        let position=if position<0&&records.is_empty() {0} else {usize::try_from(position).map_err(|_|"invalid host undo index")?};
+        if !records.is_empty()&&position>=records.len() {return Err("host undo changed while reading".into());}
+        if token!=self.history_token(authorized)? {return Err("host undo changed while reading".into());}
+        Ok(serde_json::json!({"ok":true,"backend":"reaper","position":position,"undoDepth":position,
+            "redoDepth":records.len().saturating_sub(position+1),"records":records}))
+    }
+    /// 轻量历史缓存键；UI timer不反复枚举整份Undo记录或广播相同状态。
+    pub(crate) fn history_token(&self,authorized:&impl Fn()->bool)->Result<(i32,i32),String> {
+        let change=self.geometry_revision(authorized)?;let project=self.project(authorized)?;
+        let history=self.history.as_ref().ok_or("REAPER history unavailable")?;
+        Ok((change,checked(authorized,||unsafe {(history.current)(project)})?))
+    }
+    /// 必须先收尾本应用的Undo块；Undo回流继续由真实ARA模型/组件setState接收。
+    pub(crate) fn history_jump(&self,redo:bool,authorized:&impl Fn()->bool)->Result<bool,String> {
+        self.history_token(authorized)?;
+        let project=self.project(authorized)?;let history=self.history.as_ref().ok_or("REAPER history unavailable")?;
+        let can=checked(authorized,||unsafe {if redo {(history.can_redo)(project)} else {(history.can_undo)(project)}})?;
+        if can.is_null() {return Ok(false);}
+        let done=checked(authorized,||unsafe {if redo {(history.redo)(project)} else {(history.undo)(project)}})?;
+        Ok(done!=0)
+    }
+    /// 原操作记录窗口的跳转也使用真实project索引，不回放旧私有几何快照。
+    pub(crate) fn history_jump_to(&self,target:i32,authorized:&impl Fn()->bool)->Result<(),String> {
+        if !(0..10000).contains(&target) {return Err("host history position out of range".into());}
+        let project=self.project(authorized)?;let history=self.history.as_ref().ok_or("REAPER history unavailable")?;
+        if checked(authorized,||unsafe {(history.entry)(project,target)})?.is_null() {return Err("host history position does not exist".into());}
+        for _ in 0..10000 {
+            let current=self.history_token(authorized)?.1;if current==target {return Ok(());}
+            if !self.history_jump(current<target,authorized)? {return Err("host history jump stopped before target".into());}
+        }Err("host history jump budget exceeded".into())
+    }
     /// 冻结唯一直接take身份；调用方先验证该host对应真实assigned region。
     pub(crate) fn clip_target(self:&Arc<Self>,authorized:impl Fn()->bool)->Result<HostClipTarget,String> {
         if !self.can_edit_clips() {return Err("REAPER clip write API unavailable".into());}
@@ -59,6 +120,9 @@ impl HostClipTarget {
     /// 同批所有对象须来自同一project，不以“当前活动项目”或相同轨名推断。
     pub(crate) fn same_project(&self,other:&Self)->bool {self.project==other.project}
     pub(crate) fn track_key(&self)->usize {self.track}
+    pub(crate) fn import_target(&self,authorized:&impl Fn()->bool)->Result<super::HostTrackTarget,String> {
+        self.verify(authorized)?;self.host.track_target(self.project,self.track,authorized)
+    }
     fn api(&self)->(&super::GeometryApi,&WriteApi) {(self.host.geometry.as_ref().unwrap(),self.host.write.as_ref().unwrap())}
     fn valid(&self,pointer:usize,kind:&CStr,authorized:&impl Fn()->bool)->Result<(),String> {
         if pointer==0 {return Err("missing host edit object".into());}

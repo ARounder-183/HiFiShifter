@@ -15,6 +15,7 @@ import { computeClipNormalizationGain } from "../clipNormalization";
 import { trackNameForMedia } from "../mediaTrackName";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 import { appStatusProgressBus } from "../../../utils/appStatusProgressBus";
+import {isPluginMode} from "../../../services/hostCapabilities";
 
 type RawTimelineClip = {
     id?: string;
@@ -257,7 +258,10 @@ export const importAudioAtPosition = createAsyncThunk(
         await webApi.beginUndoGroup("import_media");
         try {
             let targetTrackId: string | undefined;
-            if (payload.trackId === null) {
+            if (isPluginMode() && payload.trackId===null && (getState() as {session:SessionState}).session.tracks.length>0) {
+                return rejectWithValue("Select an attached REAPER track for import; new-track import is not ready yet");
+            }
+            if (payload.trackId === null && !isPluginMode()) {
                 // "插入到新轨道"：新轨道以这个文件命名。
                 const createdId = await createTrackForImport({
                     dispatch: dispatch as unknown as TrackDispatch,

@@ -8,6 +8,16 @@ use std::sync::atomic::Ordering;
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub(crate) struct WorkspaceScope {pub regions:BTreeSet<u64>}
 impl DocumentSession {
+    /// 创建item返回的GUID只用于等待它自己的真实ARA区域，不用文件名/位置匹配新clip。
+    pub(crate) fn clip_for_host_item(&self,item:&str)->Option<String> {
+        let _transaction=self.transaction.lock().unwrap();
+        if !self.is_alive() {return None;}
+        let identities=self.clip_ids.lock().unwrap();
+        for owner in self.renderer_owners() {
+            let Some(bound)=owner.host_geometry_metadata_locked(self) else {continue;};
+            if bound.geometry.item_id==item {return identities.get(&bound.region_key).cloned();}
+        }None
+    }
     /// UI专用原始曲率不写进kernel状态或参数权威；普通fade最终声音仍由宿主负责。
     pub(crate) fn decorate_host_fades_locked(&self,payload:&mut serde_json::Value,namespace:&str) {
         let identities=self.clip_ids.lock().unwrap().clone();

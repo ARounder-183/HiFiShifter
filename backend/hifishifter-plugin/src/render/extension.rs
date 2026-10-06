@@ -990,7 +990,26 @@ impl ExtensionOwner {
     /// GUI能力标记只回答是否有官方写API；实际每个clip仍须唯一真实take绑定。
     pub(crate) fn host_clip_editing_available(&self)->bool {
         self.editor_document().is_ok_and(|document|document.renderer_owners().iter().any(|owner|
-            owner.reaper.lock().unwrap().as_ref().is_some_and(|host|host.can_edit_clips())))
+            owner.reaper.lock().unwrap().as_ref().is_some_and(|host|host.has_project_history())))
+    }
+    /// 只返回同文档活入口的拥有引用接口；其project()仍钉在初始化时的真实所属工程。
+    pub(crate) fn project_history_host(&self)->Option<Arc<crate::host::reaper::ReaperHost>> {
+        let document=self.editor_document().ok()?;
+        if let Some(host)=self.reaper.lock().unwrap().as_ref().filter(|host|host.has_project_history()).cloned() {return Some(host);}
+        document.renderer_owners().iter().find_map(|owner|owner.reaper.lock().unwrap().as_ref()
+            .filter(|host|host.has_project_history()).cloned())
+    }
+    /// 明确指定轨道须已有真实assigned item；空轨未指定时仅允许本FX的直接parent轨道。
+    pub(crate) fn audio_import_target(&self,track:Option<&str>,authorized:&impl Fn()->bool)->Result<crate::host::reaper::HostTrackTarget,String> {
+        if let Some(track)=track {
+            let document=self.editor_document()?;
+            let clips={let timeline=document.timeline.lock().unwrap();timeline.as_ref().ok_or("host timeline unavailable")?.clips.iter()
+                .filter(|clip|clip.track_id==track).map(|clip|clip.id.clone()).collect::<Vec<_>>()};
+            for clip in clips {if let Ok(target)=self.host_edit_target(&clip) {return target.import_target(authorized);}}
+            return Err("import track has no directly bound host region".into());
+        }
+        let host=self.reaper.lock().unwrap().clone().ok_or("primary REAPER host interface missing")?;
+        host.direct_track_target(authorized)
     }
     /// 同文档实际renderer唯一region边解析写对象，不能按名字/位置/源路径查item。
     pub(crate) fn host_edit_target(&self,clip_id:&str)->Result<crate::host::reaper::HostClipTarget,String> {

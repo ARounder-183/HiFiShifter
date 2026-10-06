@@ -1,6 +1,6 @@
 // 原GUI的原生插件通信：不伪造Tauri，不让命令/事件串到其它FX实例。
 export type HostEvent<T> = { event: string; id: number; payload: T };
-export type PluginBootstrap = { version: 1; viewId: string; transportControl?: boolean; clipEditing?: boolean };
+export type PluginBootstrap = { version: 1; viewId: string; transportControl?: boolean; clipEditing?: boolean; audioImport?: boolean };
 export interface WebViewMessagePort {
     postMessage(message: unknown): void;
     addEventListener(name: "message", listener: (event: { data: unknown }) => void): void;

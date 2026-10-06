@@ -1028,4 +1028,8 @@ Task 51: Ruling: 原native命令口只排参数actor，Clip几何被能力门挡
 
 Task 51: Ruling: setter完成不代表ARA模型/PCM已回流，立即返回私有timeline会产生双权威或假成功 — native保存原document/route租约与Promise，只在过渡错误时重试actor读取、不重复setter，写API明确存在才bootstrap开放原拖拽/裁切 — 若反复重发setter会重复移动/产生Undo噪声，若租约重绑后沿新工程重取会误回其它工程；本批未打包/安装、不新增review，下一步统一Undo和导入/渐变。
 
+Task 52: Ruling: 几何进宿主Undo而参数仍在actor历史，会导致混合Ctrl+Z顺序错误，宿主EndBlock/getState又可能排在神经合成后 — 新文档级HostUndo共享组/请求/历史屏障，参数与几何都入真实REAPER Undo；收尾时仅暂停自动apply，FIFO参数与flush继续，Ui主线程查询真实历史条目/深度并按token缓存，关闭view保持在途native写到结束再收块 — host_history3合同正常exit0含分块单块、零内部锁外部调用、关窗与actor可flush；尚未实测REAPER setState参数冷恢复，不能靠fake history指针移位宣称完成。
+
+Task 53: Ruling: 官方明确C/C++的P_SOURCE应通过GetSetMediaItemTakeInfo转移所有权，并在替换后由调用方销毁旧源 — 新typed媒体创建只用直接parent/已绑定region的轨道，未附着源RAII释放、新建item按GUID/track验证回滚，源附着发生即撤销调用者释放责任；菜单/Ctrl+O走原GUI，创建item GUID等待真实ARA回流，不用路径/位置匹配 — UTF-8与失败所有权2合同/能力门4项/tsc通过；新建轨、多文件/原生File拖入仍open，未打包/安装，不把宿主已建item而HFS未就绪当已导入。
+
 

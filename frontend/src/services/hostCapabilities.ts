@@ -12,12 +12,15 @@ export function canControlHostTransport(): boolean {return isPluginMode() && win
 export function canEditHostClips(): boolean {return isPluginMode() && window.__HFS_PLUGIN_BOOTSTRAP__?.clipEditing===true;}
 /** 独立App保留原几何编辑；旧插件或其它宿主缺写接口时保持只读。 */
 export function isHostGeometryReadOnly(): boolean {return isPluginMode()&&!canEditHostClips();}
+/** 文件菜单只开放明确具备宿主媒体创建能力的音频导入，不放开项目文件/设备命令。 */
+export function canImportHostAudio():boolean {return isPluginMode()&&window.__HFS_PLUGIN_BOOTSTRAP__?.audioImport===true;}
 export const DAW_CONTROLLED_REASON = "由 REAPER 控制；在宿主中操作文件、片段几何与播放";
 
 /** 原编辑工具与查看操作保留；不将DAW几何操作发到独立app命令路径。 */
 export function pluginAllowsAction(action: string, surface: string | null): boolean {
     if (!isPluginMode()) return true;
     if (["playback.toggle","playback.stop"].includes(action)) return canControlHostTransport();
+    if (action==="project.importMedia") return canImportHostAudio();
     if (action.startsWith("project.") || action.startsWith("transport.") || action.startsWith("recording.")
         || ["playback.toggle", "playback.stop", "playback.metronome"].includes(action)) return false;
     if (action.startsWith("track.") && !["track.selectUp", "track.selectDown", "track.toggleMute", "track.toggleSolo"].includes(action)) return false;

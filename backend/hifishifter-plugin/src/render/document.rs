@@ -47,6 +47,7 @@ pub(crate) struct DocumentSession {
     pub id: DocumentId,
     pub clock:Arc<super::transport::TransportClock>,
     pub playback:Mutex<Option<ara2_bridge::plugin::PlaybackRequestHandle>>,
+    pub host_undo:crate::host::undo::HostUndo,
     editor:OnceLock<Result<Arc<crate::editor::session::EditorSession>,String>>,
 }
 
@@ -273,6 +274,7 @@ impl DocumentSession {
             self.scope_revision.fetch_add(1,Ordering::AcqRel);
         }
         // 不持transaction join：actor可能正在收尾短事务；先停止全部编辑/分析再清宿主图。
+        self.host_undo.close();
         if let Some(Ok(editor))=self.editor.get() {editor.close();}
         self.render_epoch.fetch_add(1,Ordering::AcqRel);
         self.playback.lock().unwrap().take();

@@ -41,9 +41,16 @@ struct BrowserState {
     pending:HashSet<u64>,
     forwarded_keys:HashSet<char>,
     host_replies:std::collections::HashMap<u64,HostReply>,
+    undo_requests:std::collections::HashMap<u64,std::sync::Weak<crate::render::document::DocumentSession>>,
+    undo_document:Option<std::sync::Weak<crate::render::document::DocumentSession>>,
+    history_requests:HashSet<u64>,
+    history_cache:Option<((usize,i32,i32),serde_json::Value)>,
+    last_history:Option<serde_json::Value>,
 }
+#[derive(Clone,Copy)]
+enum HistoryJump {Undo,Redo,Position(i32)}
 /// 宿主写完后只重试读取ARA回流，不重复setter；保存最初的document/route租约。
-struct HostReply {editor:Arc<super::session::EditorSession>,document:std::sync::Weak<crate::render::document::DocumentSession>,lease:u64,until:std::time::Instant}
+struct HostReply {editor:Arc<super::session::EditorSession>,document:std::sync::Weak<crate::render::document::DocumentSession>,lease:u64,until:std::time::Instant,jump:Option<HistoryJump>,imported:Option<String>}
 struct WindowData {
     state: Rc<RefCell<BrowserState>>,
     transferred: Rc<Cell<bool>>,
@@ -51,12 +58,16 @@ struct WindowData {
 }
 impl Drop for WindowData {
     fn drop(&mut self) {
+        let (documents,view_id)={let state=self.state.borrow();
+            let documents=state.undo_document.iter().cloned().chain(state.undo_requests.values().cloned())
+                .chain(state.host_replies.values().map(|reply|reply.document.clone())).collect::<Vec<_>>();(documents,state.view_id.clone())};
         let controller = {
             let mut state = self.state.borrow_mut();
             state.closed = true;
             state.sink.closed.store(true,Ordering::Release);
             state.controller.take()
         };
+        for document in documents.into_iter().filter_map(|doc|doc.upgrade()) {document.host_undo.release_view(&view_id);}
         // Close会同步回调；此时不持有RefCell borrow。
         if let Some(controller) = controller { let _ = unsafe { controller.Close() }; }
         let _=unsafe {KillTimer(Some(self.state.borrow().hwnd),0x4853)};
@@ -136,7 +147,7 @@ impl NativeEditor {
         let (event_sender,events)=mpsc::sync_channel(128);
         let sink=super::session::UiSink {view_id:view_id.clone(),reply,events:event_sender,closed:Arc::new(AtomicBool::new(false))};
         let state = Rc::new(RefCell::new(BrowserState { hwnd: HWND::default(), closed: false,
-            view_id, controller: None, error_window: None, link,sink,replies,events,pending:HashSet::new(),forwarded_keys:HashSet::new(),host_replies:std::collections::HashMap::new() }));
+            view_id, controller: None, error_window: None, link,sink,replies,events,pending:HashSet::new(),forwarded_keys:HashSet::new(),host_replies:std::collections::HashMap::new(),undo_requests:std::collections::HashMap::new(),undo_document:None,history_requests:HashSet::new(),history_cache:None,last_history:None }));
         let transferred = Rc::new(Cell::new(false));
         let data = Box::into_raw(Box::new(WindowData { state: state.clone(), transferred: transferred.clone(), token }));
         let result = unsafe { CreateWindowExW(WINDOW_EX_STYLE::default(), w!("HiFiShifter.ARA.Editor"),
@@ -283,6 +294,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
 
 /// worker只写JSON邮箱；COM响应仅在本窗口UI线程发送，且不持RefCell borrow。
 fn deliver(state:&Rc<RefCell<BrowserState>>) {
+    let link=state.borrow().link.clone();
+    if let Ok(owner)=link.owner() {if let Ok(document)=owner.editor_document() {document.host_undo.tick();}}
     let (controller,mut replies,events)={
         let state=state.borrow();
         if state.closed || state.controller.is_none() {return;}
@@ -295,18 +308,61 @@ fn deliver(state:&Rc<RefCell<BrowserState>>) {
     // 在宿主模型/PCM尚未ready的过渡期，保留原Promise。只排actor读取，不在UI做文件/推理。
     replies.retain_mut(|reply| {
         let Some(id)=reply["id"].as_u64() else {return true;};
+        let finished_undo={let mut state=state.borrow_mut();state.undo_requests.remove(&id)};
+        if let Some(doc)=finished_undo.and_then(|doc|doc.upgrade()) {doc.host_undo.finish_request(&state.borrow().view_id,id);}
+        // Undo/Redo的actor屏障到达后才调用宿主；该外部调用期间不持BrowserState借用。
+        let jump={let state=state.borrow();state.host_replies.get(&id).and_then(|host|host.jump)
+            .map(|redo|(redo,state.host_replies[&id].document.clone(),state.host_replies[&id].lease,state.host_replies[&id].editor.clone(),state.sink.clone()))};
+        if let Some((jump,weak,lease,editor,sink))=jump {
+            let result=(||->Result<bool,String>{
+                let document=weak.upgrade().ok_or("undo document closed")?;
+                if state.borrow().host_replies.get(&id).is_some_and(|host|std::time::Instant::now()>=host.until) {return Err("host history request timed out".into());}
+                let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);
+                if !allowed() {return Err("undo editor lease changed".into());}
+                if !document.host_undo.finish_for_history() {
+                    editor.enqueue(super::session::UiRequest {id,command:"plugin_history_barrier".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
+                    return Ok(false);
+                }
+                let host=link.owner()?.project_history_host().ok_or("host history unavailable")?;
+                match jump {HistoryJump::Undo=>{host.history_jump(false,&allowed)?;},HistoryJump::Redo=>{host.history_jump(true,&allowed)?;},HistoryJump::Position(index)=>{host.history_jump_to(index,&allowed)?;}}
+                state.borrow_mut().host_replies.get_mut(&id).unwrap().jump=None;
+                editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
+                Ok(false)
+            })();
+            match result {Ok(false)=>return false,Ok(true)=>{},Err(error)=>{reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!(error);}}
+        }
         let mut state=state.borrow_mut();
         if let Some(host)=state.host_replies.get(&id) {
             let error=reply["error"].as_str().unwrap_or("");
-            if reply["ok"]==false&&std::time::Instant::now()<host.until
-                &&(error.starts_with("Conflict: host")||error.contains("host PCM unavailable")||error.contains("host model not ready")) {
+            let imported=host.imported.as_ref().and_then(|item|host.document.upgrade().and_then(|doc|doc.clip_for_host_item(item))).map(|clip|host.editor.ui_clip_id(&clip));
+            let waiting=host.imported.is_some()&&(imported.is_none()||!reply["value"]["clips"].as_array().is_some_and(|clips|clips.iter().any(|clip|Some(clip["id"].as_str().unwrap_or(""))==imported.as_deref())));
+            if (waiting||reply["ok"]==false&&(error.starts_with("Conflict: host")||error.contains("host PCM unavailable")||error.contains("host model not ready")))&&std::time::Instant::now()<host.until {
                 let allowed=host.document.upgrade().is_some_and(|doc|state.link.authorize(&doc).is_ok_and(|lease|lease==host.lease));
                 if allowed&&host.editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink:state.sink.clone(),link:Some(state.link.clone())}).is_ok() {return false;}
             }
+            if waiting {reply["ok"]=serde_json::json!(false);reply["error"]=serde_json::json!("item was created in REAPER but its ARA audio is not ready; use host Undo if canceling");}
         }
-        state.host_replies.remove(&id);state.pending.remove(&id);true
+        let done_history=state.history_requests.remove(&id);let view_id=state.view_id.clone();
+        let document=state.host_replies.remove(&id).and_then(|host|host.document.upgrade());state.pending.remove(&id);drop(state);
+        if done_history {if let Some(document)=document {document.host_undo.finish_history(&view_id,id);}}
+        true
     });
     replies.extend(events);
+    let history=link.owner().ok().and_then(|owner| {
+        let document=owner.editor_document().ok()?;let lease=link.authorize(&document).ok()?;
+        let host=owner.project_history_host()?;let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);
+        let token=host.history_token(&allowed).ok()?;let key=(Arc::as_ptr(&host) as usize,token.0,token.1);
+        if let Some((_,cached))=state.borrow().history_cache.as_ref().filter(|(known,_)|*known==key) {return Some(cached.clone());}
+        let value=host.project_history(&allowed).ok()?;state.borrow_mut().history_cache=Some((key,value.clone()));Some(value)
+    });
+    if let Some(history)=&history {
+        for response in &mut replies {
+            if response["event"]=="history_state" {response["payload"]=history.clone();}
+            if response["value"]["clips"].is_array() {response["value"]["undo_depth"]=history["undoDepth"].clone();response["value"]["redo_depth"]=history["redoDepth"].clone();}
+        }
+        let changed=state.borrow().last_history.as_ref()!=Some(history);
+        if changed {state.borrow_mut().last_history=Some(history.clone());replies.push(serde_json::json!({"version":1,"viewId":state.borrow().view_id,"event":"history_state","payload":history}));}
+    }
     for response in replies {
         let mut text=response.to_string();
         if text.len()>8*1024*1024 {
@@ -434,6 +490,35 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
             Some("log_frontend_error") => {
                 crate::log_line(&format!("Embedded frontend: {}",request["args"])); Ok(serde_json::Value::Null)
             }
+            Some(command @ ("open_audio_dialog"|"open_audio_dialog_multi"))=>{
+                let link=state.borrow().link.clone();( ||->Result<serde_json::Value,String>{
+                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                    let host=owner.project_history_host().filter(|host|host.can_import_audio()).ok_or("host audio import is unavailable")?;
+                    let path=host.pick_audio(&||link.authorize(&document).is_ok_and(|current|current==lease))?;
+                    Ok(if command=="open_audio_dialog_multi" {serde_json::json!({"ok":true,"canceled":path.is_none(),"paths":path.into_iter().collect::<Vec<_>>()})}
+                        else {serde_json::json!({"ok":true,"canceled":path.is_none(),"path":path})})
+                })()
+            },
+            Some("import_audio_item")=>{
+                let (link,sink,full)={let state=state.borrow();(state.link.clone(),state.sink.clone(),state.pending.len()>=32||state.pending.contains(&id))};
+                let outcome=(||->Result<HostReply,String>{
+                    if full {return Err("native import request budget exceeded".into());}
+                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;let editor=owner.editor_session()?;
+                    let input=&request["args"];let path=input["audioPath"].as_str().ok_or("audio path missing")?;
+                    if input["mediaAudioStreamIndex"].as_u64().is_some_and(|index|index!=0) {return Err("specific container audio stream import is not supported yet".into());}
+                    let track=input["trackId"].as_str().map(|id|editor.host_track_id(id)).transpose()?;
+                    let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);
+                    let target=owner.audio_import_target(track.as_deref(),&allowed)?;
+                    let host=owner.project_history_host().ok_or("import project history missing")?;
+                    state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
+                    document.host_undo.begin_request(&view_id,id,true,true,&host,&allowed)?;
+                    let result=target.import_audio(path,input["startSec"].as_f64().unwrap_or_else(||owner.clock.get().map(|clock|clock.read().0).unwrap_or(0.)),&allowed);
+                    document.host_undo.finish_request(&view_id,id);let imported=result?;
+                    editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
+                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:Some(imported)})
+                })();
+                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.pending.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
+            },
             Some(command @ ("play_original"|"play_synthesized"|"stop_audio"))=>{
                 // host callback可能同步重入；调用期间不持BrowserState/会话锁。
                 let link=state.borrow().link.clone();
@@ -456,14 +541,40 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
                     let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
                     let editor=owner.editor_session()?;let input=request.get("args").cloned().unwrap_or_else(||serde_json::json!({}));
                     let plan=editor.plan_host_edit(command,&input)?;
-                    super::host_edit::execute(&owner,plan,||link.authorize(&document).is_ok_and(|current|current==lease))?;
+                    state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
+                    let host=owner.project_history_host().ok_or("host project history missing")?;
+                    let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);
+                    document.host_undo.begin_request(&view_id,id,true,true,&host,&allowed)?;
+                    let outcome=super::host_edit::execute_managed(&owner,plan,&allowed,true);
+                    document.host_undo.finish_request(&view_id,id);outcome?;
                     editor.enqueue(super::session::UiRequest {id,command:"get_timeline_state".into(),args:serde_json::json!({}),sink,link:Some(link.clone())})?;
-                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30)})
+                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:None,imported:None})
                 })();
                 match outcome {
                     Ok(reply)=>{let mut state=state.borrow_mut();state.pending.insert(id);state.host_replies.insert(id,reply);return Ok(());},
                     Err(error)=>Err(error),
                 }
+            },
+            Some("get_history_state") if state.borrow().link.owner().is_ok_and(|owner|owner.project_history_host().is_some())=>{
+                let link=state.borrow().link.clone();( ||->Result<serde_json::Value,String>{
+                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;
+                    owner.project_history_host().ok_or("host history missing")?.project_history(&||link.authorize(&document).is_ok_and(|current|current==lease))
+                })()
+            },
+            Some(command @ ("undo_timeline"|"redo_timeline"|"set_history_position")) if state.borrow().link.owner().is_ok_and(|owner|owner.project_history_host().is_some())=>{
+                let (link,sink)={let state=state.borrow();(state.link.clone(),state.sink.clone())};
+                let outcome=(||->Result<HostReply,String>{
+                    if state.borrow().pending.len()>=32||state.borrow().pending.contains(&id) {return Err("native history request budget exceeded".into());}
+                    let owner=link.owner()?;let document=owner.editor_document()?;let lease=link.authorize(&document)?;let editor=owner.editor_session()?;
+                    let jump=match command {"undo_timeline"=>HistoryJump::Undo,"redo_timeline"=>HistoryJump::Redo,_=>HistoryJump::Position(request["args"]["position"].as_i64().filter(|v|(0..10000).contains(v)).ok_or("invalid host history position")? as i32)};
+                    state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
+                    document.host_undo.begin_history(&view_id,id)?;
+                    if let Err(error)=editor.enqueue(super::session::UiRequest {id,command:"plugin_history_barrier".into(),args:serde_json::json!({}),sink,link:Some(link.clone())}) {
+                        document.host_undo.finish_history(&view_id,id);return Err(error);
+                    }
+                    Ok(HostReply {editor,document:Arc::downgrade(&document),lease,until:std::time::Instant::now()+std::time::Duration::from_secs(30),jump:Some(jump),imported:None})
+                })();
+                match outcome {Ok(reply)=>{let mut state=state.borrow_mut();state.pending.insert(id);state.history_requests.insert(id);state.host_replies.insert(id,reply);return Ok(());},Err(error)=>Err(error)}
             },
             Some(command)=>{
                 if command=="set_transport" && request["args"]["playheadSec"].is_number() {
@@ -479,14 +590,36 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
                     }
                 }
                 let (link,sink,full)={let state=state.borrow();(state.link.clone(),state.sink.clone(),state.pending.len()>=32 || state.pending.contains(&id))};
+                let history_context=link.owner().ok().and_then(|owner|{
+                    let document=owner.editor_document().ok()?;let host=owner.project_history_host()?;
+                    let lease=link.authorize(&document).ok()?;Some((document,host,lease))
+                });
+                let mut undo_started=false;
+                if let Some((document,host,lease))=&history_context {
+                    state.borrow_mut().undo_document=Some(Arc::downgrade(document));
+                    if command=="begin_undo_group" {document.host_undo.begin_group(&view_id);}
+                    if command=="end_undo_group" {document.host_undo.end_group(&view_id);}
+                    if super::commands::mutates_audio(command) {
+                        let checkpoint=request["args"]["checkpoint"].as_bool().unwrap_or(true);
+                        match document.host_undo.begin_request(&view_id,id,checkpoint,false,host,&||link.authorize(document).is_ok_and(|current|current==*lease)) {
+                            Ok(())=>undo_started=true,
+                            Err(error)=>{let text=wide(&serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":false,"error":error}).to_string());browser.PostWebMessageAsJson(PCWSTR(text.as_ptr()))?;return Ok(());},
+                        }
+                    }
+                }
                 let outcome=if full {Err("native pending request budget exceeded".into())} else {
                     link.owner().and_then(|owner|owner.editor_session()?.enqueue(super::session::UiRequest {
                         id,command:command.into(),args:request.get("args").cloned().unwrap_or_else(||serde_json::json!({})),sink,link:Some(link.clone()),
                     }))
                 };
                 match outcome {
-                    Ok(())=>{state.borrow_mut().pending.insert(id);return Ok(());},
-                    Err(error)=>Err(error),
+                    Ok(())=>{let mut state=state.borrow_mut();state.pending.insert(id);if undo_started {if let Some((document,_,_))=&history_context {state.undo_requests.insert(id,Arc::downgrade(document));}}return Ok(());},
+                    Err(error)=>{
+                        if let Some((document,_,_))=&history_context {
+                            if undo_started {document.host_undo.finish_request(&view_id,id);}
+                            if command=="begin_undo_group" {document.host_undo.end_group(&view_id);}
+                        }Err(error)
+                    },
                 }
             },
             None=>Err(String::from("native command missing")),
@@ -501,7 +634,8 @@ fn configure_browser(state: &Rc<RefCell<BrowserState>>, controller: &ICoreWebVie
     })),&mut token)?; }
     let transport_control=state.borrow().link.owner().is_ok_and(|owner|owner.host_playback().is_some());
     let clip_editing=state.borrow().link.owner().is_ok_and(|owner|owner.host_clip_editing_available());
-    let boot = serde_json::json!({"version":1,"viewId":state.borrow().view_id,"transportControl":transport_control,"clipEditing":clip_editing});
+    let audio_import=state.borrow().link.owner().is_ok_and(|owner|owner.project_history_host().is_some_and(|host|host.can_import_audio()));
+    let boot = serde_json::json!({"version":1,"viewId":state.borrow().view_id,"transportControl":transport_control,"clipEditing":clip_editing,"audioImport":audio_import});
     let script = wide(&format!("window.__HFS_PLUGIN_BOOTSTRAP__={boot};"));
     let weak = Rc::downgrade(state);
     let navigate = browser.clone();

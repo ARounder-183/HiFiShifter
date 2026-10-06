@@ -71,6 +71,9 @@ impl EditorSession {
 
 /// 先冻结并验证整批对象，再开始Undo和setter；任一预检失败都不写入任何宿主item。
 pub(super) fn execute(owner:&Arc<ExtensionOwner>,plan:HostEditPlan,authorized:impl Fn()->bool)->Result<(),String> {
+    execute_managed(owner,plan,authorized,false)
+}
+pub(super) fn execute_managed(owner:&Arc<ExtensionOwner>,plan:HostEditPlan,authorized:impl Fn()->bool,managed:bool)->Result<(),String> {
     let document=owner.editor_document()?;
     let mut targets:Vec<(ClipEdit,HostClipTarget,Option<HostClipTarget>)>=Vec::new();
     for edit in plan.edits {
@@ -92,7 +95,7 @@ pub(super) fn execute(owner:&Arc<ExtensionOwner>,plan:HostEditPlan,authorized:im
         if destination.as_ref().is_some_and(|dest|!target.same_project(dest)) {return Err("target track belongs to another project".into());}
         targets.push((edit,target,destination));
     }
-    let undo=targets[0].1.begin_undo(&authorized)?;
+    let undo=if managed {None} else {Some(targets[0].1.begin_undo(&authorized)?)};
     let result:Result<(),String>=(|| {
         for (edit,target,destination) in &targets {
             let before=&edit.before;let after=&edit.after;
