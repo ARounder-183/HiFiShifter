@@ -20,10 +20,14 @@ App/插件交付，不混入插件或 App 专用运行库。说明见 docs/VST3-
 
 本地前端全量 365 文件/3260 项通过，插件全量 208 passed/2 ignored，lint 无错误。
 本地 SDK 从空目录下载/身份校验及 ZIP/NSIS 生成、摘要和目录结构已验证。
-GitHub 首次 frontend 失败为旧 state.rs 源码扫描路径，已改为共享 kernel model 并
-复跑通过。云端插件测试又失败，正在通过新增日志/公开错误摘要定位；当前 run：
-https://github.com/ARounder-183/HiFiShifter/actions/runs/37574960116 。
-Actions 定义已经启用，云端首次完整成功尚未确认，不能写成 CI 已全部通过。
+干净 checkout 暴露的旧 state.rs 测试路径、Rust action 默认 -D warnings、外置未提交
+撤销回归源码已修正；分组回归现在位于插件 crate 的 commands_tests.rs。
+GitHub 首次完整成功已确认，源码 ed1bdd92，run：
+https://github.com/ARounder-183/HiFiShifter/actions/runs/37576171760 。
+前端、插件测试、Release、ZIP/NSIS 打包及上传全部 success，artifact
+HiFiShifter-windows-x86_64-vst3（id 11463257884，335650274 bytes，未过期）。
+机器记录在 `.build-tmp/retired-ara-plugin/github-actions-success.json`。
+此结果确认云端构建/打包流程，不扩大为额外的 REAPER GUI 验收证据。
 
 ## 最新目标：延迟／插件私有参数分组／App与插件共用折叠
 

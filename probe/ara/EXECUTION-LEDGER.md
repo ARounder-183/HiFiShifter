@@ -1188,4 +1188,6 @@ Task 82: Ruling: waveform-layout-develop-05 统一 App/插件 Release 构建成�
 
 Task 83: Ruling: 用户确认继续并授权合并 develop、增加 GitHub Actions VST3 打包、主工作区可修改且工作树可移除 — 当前源码与私有父子轨/复制波形/折叠修复进入提交；全量插件 208 passed/2 ignored，修复失去全部 renderer 时保留曲线的真实生命周期缺口，另两旧断言分别按 assignment 预缓存与 live 空轨保留身份契约更新；前端全量3260通过，lint无错误 — ZIP和NSIS setup.exe已用真实Release包生成，SDK按锁定SHA从空目录下载并校验通过，快速打包支持App/Plugin/All及SkipBuild/NoZip/Installer；后续合并推送及工作树移除另记实际结果。
 
+Task 84: Ruling: feature/ara-plugin 以 e834ef54 合并并推送 develop，当前回到主工作区；最新统一交付、05包与VST安装备份及11个诊断文件保留在主工作区后移除 ara-plugin 工作树，原 .dsh-plugin-inspect 不动 — 快速脚本App/Plugin/All及ZIP/NSIS已实际验证，dist含两种插件包/SHA256和同批App ZIP；云端干净checkout的3处问题（旧源码路径、action默认警告升级、外置测试缺文件）已修正，ed1bdd92 对应 run37576171760 前端/插件测试/Release/打包/上传全部success，artifact11463257884有效 — CI成功是源码构建和交付证据，不冒充新的宿主GUI验收，机器证据 github-actions-success.json。
+
 
